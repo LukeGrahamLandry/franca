@@ -19,13 +19,13 @@ use crate::pool::{Ident, StringPool};
 use crate::scope::ResolveScope;
 use crate::{assert, emit_bc::emit_bc, err, ice, log_err, make_toplevel, signed_truncate, Stats, MEM, STATS};
 use std::fmt::{Debug, Write};
+use std::fs;
 use std::mem::{self};
 use std::ops::{FromResidual, Try};
 use std::path::PathBuf;
 use std::ptr::{addr_of, null, slice_from_raw_parts, slice_from_raw_parts_mut};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
-use std::{fs, io};
 
 use crate::export_ffi::BigResult::*;
 
@@ -392,48 +392,6 @@ unsafe extern "C" fn get_function_name<'p>(c: &mut Compile<'_, 'p>, f: FuncId) -
     c.program[f].name
 }
 
-// TODO: use the right int types
-// TODO: parse header files for signatures, but that doesn't help when you want to call it at comptime so need the address.
-pub const LIBC: &[(&str, *const u8)] = &[
-    ("fn temp_start_raw_terminal(fd: Fd) Unit", start_raw as *const u8),
-    ("fn temp_end_raw_terminal(fd: Fd) Unit", end_raw as *const u8),
-];
-
-// Based on man termios and
-// https://stackoverflow.com/questions/421860/capture-characters-from-standard-input-without-waiting-for-enter-to-be-pressed
-pub extern "C" fn start_raw(fd: i32) {
-    use libc::*;
-    unsafe {
-        let mut term: termios = mem::zeroed();
-        tcgetattr(fd, &mut term);
-        term.c_lflag &= !(ICANON | ECHO); // dont read in lines | dont show what you're typing
-        term.c_cc[VMIN] = 0; // its ok for a read to return nothing
-        term.c_cc[VTIME] = 0; // dont wait at all
-        tcsetattr(fd, TCSANOW, &term);
-    }
-}
-
-pub extern "C" fn end_raw(fd: i32) {
-    use libc::*;
-    unsafe {
-        let mut term: termios = mem::zeroed();
-        tcgetattr(fd, &mut term);
-        term.c_lflag |= ICANON | ECHO;
-        tcsetattr(fd, TCSADRAIN, &term);
-    }
-}
-// tcgetattr(0, &mut term);
-// term.c_lflag |= ICANON | ECHO;
-// tcsetattr(0, TCSADRAIN, &term);
-
-// thank you rust very cool. TODO: non-macos
-#[cfg(target_os = "macos")]
-extern "C" {
-    // These functions are in crt_externs.h.
-    fn _NSGetArgc() -> *mut libc::c_int;
-    fn _NSGetArgv() -> *mut *mut *mut libc::c_char;
-}
-
 // TODO: do this myself
 // x86 doesn't need this and x86_64-unknown-linux-musl doesn't give me a fake one to link against
 #[cfg(target_arch = "aarch64")]
@@ -591,15 +549,6 @@ pub static STDLIB_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
 pub fn get_include_std(name: &str) -> Option<String> {
     let msg = "//! IMPORTANT: don't try to save #comptime_addr('ASLR junk'), it won't go well. \n";
     match name {
-        "libc" => {
-            let mut out = String::new();
-            writeln!(out, "{}", msg).unwrap();
-
-            for (sig, ptr) in LIBC {
-                writeln!(out, "#comptime_addr({}) #dyn_link #c_call {sig};", *ptr as usize).unwrap();
-            }
-            Some(out)
-        }
         "compiler" => {
             let mut out = String::new();
             writeln!(out, "{}", include_str!("../compiler/driver_api.fr")).unwrap();

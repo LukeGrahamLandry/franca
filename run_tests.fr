@@ -49,13 +49,12 @@ fn driver(vtable: *ImportVTable) Unit #export = {
 
 fn run_jit(vtable: *ImportVTable, kind: Backend) Unit = {
     comp := {vtable.init_compiler}(kind);
-    c: CompCtx = (data = comp, vtable = vtable);  // TODO: can't inline the arg without an extra @as, because it thinks you're passing named args. 
+    // TODO: (before fn with) can't inline the arg without an extra @as, because it thinks you're passing named args. 
+    c := vtable.with(comp);
     load_lang_tests(c);
     run_sequential(c) {c, tests|
         for(tests) {fid|
-            {c.vtable.compile_func}(c.data, fid, .Jit).unwrap();
-            ptr := {c.vtable.get_jitted_ptr}(c.data, fid).unwrap();
-            {c.vtable.make_jitted_exec}(c.data);
+            ptr := c.get_jitted(fid);
             f := assume_types_fn(Arg = Unit, Ret = Unit, ptr = ptr);
             f();
         };
@@ -66,7 +65,7 @@ fn run_jit(vtable: *ImportVTable, kind: Backend) Unit = {
 fn run_llvm(vtable: *ImportVTable) Unit = {
     println("=== Llvm Aot ===");
     comp := {vtable.init_compiler}(.Aarch64);
-    c: CompCtx = (data = comp, vtable = vtable);
+    c := vtable.with(comp);
     load_lang_tests(c);
     run_sequential(c) {c, tests|
         ir_text := emit_llvm(c, temp(), tests, .TestRunnerMain);
@@ -103,8 +102,7 @@ fn run_sequential(c: CompCtx, const inner_run: @Fn(c: CompCtx, fns: Slice(FuncId
     };
     start := timestamp();
     
-    sym_test := {c.vtable.intern_string}(c.data, "test");
-    tests := {c.vtable.get_fns_with_tag}(c.data, sym_test);
+    tests := c.get_tagged("test");
     
     chunk_size :: 10;
     failing: List(FuncId) = list(temp());
@@ -177,8 +175,8 @@ fn load_lang_tests(comp: CompCtx) Unit = {
 }
 
 fn run_tests(vtable: *ImportVTable, comp: Compiler) i64 = {
-    sym_test := {vtable.intern_string}(comp, "test");
-    tests := {vtable.get_fns_with_tag}(comp, sym_test);
+    c := vtable.with(comp);
+    tests := c.get_tagged("test");
     
     prev_filename := "";
     for(tests) {fid|
@@ -195,9 +193,7 @@ fn run_tests(vtable: *ImportVTable, comp: Compiler) i64 = {
         
         name := {vtable.get_string}(comp, {vtable.get_function_name}(comp, fid));
         @print("%, ", name);
-        res := {vtable.compile_func}(comp, fid, .Jit).unwrap();
-        ptr := {vtable.get_jitted_ptr}(comp, fid).unwrap();
-        {vtable.make_jitted_exec}(comp);
+        ptr := c.get_jitted(fid);
         f := assume_types_fn(Arg = Unit, Ret = Unit, ptr = ptr);
         f();
     };
@@ -260,9 +256,7 @@ fn jit_from_source(vtable: *ImportVTable, src: Str, function_name: Str) rawptr #
     comp := vtable.new_with_src(src, TARGET);
     name := {vtable.intern_string}(comp, function_name);
     fid := {vtable.find_unique_func}(comp, name).unwrap();
-    {vtable.compile_func}(comp, fid, .Jit).unwrap();
-    ptr := {vtable.get_jitted_ptr}(comp, fid).unwrap();
-    {vtable.make_jitted_exec}(comp);
+    ptr := vtable.with(comp).get_jitted(fid);
     ptr
 }
 

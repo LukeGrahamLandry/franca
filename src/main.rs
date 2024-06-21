@@ -6,7 +6,7 @@ use franca::{
     ast::{garbage_loc, FuncId, Program, ScopeId, TargetArch},
     bc::{to_values, Values},
     compiler::{Compile, ExecStyle, Res},
-    export_ffi::{end_raw, get_include_std, start_raw, ImportVTable, IMPORT_VTABLE},
+    export_ffi::{get_include_std, ImportVTable, IMPORT_VTABLE},
     find_std_lib,
     lex::Lexer,
     log_err, make_toplevel,
@@ -24,7 +24,7 @@ use std::{
     os::fd::FromRawFd,
     panic::{set_hook, take_hook},
     path::PathBuf,
-    process::{exit, Command},
+    process::exit,
     str::pattern::Pattern,
     thread::sleep_until,
     time::{Duration, Instant},
@@ -73,7 +73,6 @@ fn main() {
 
     let mut no_fork = false;
     let mut stats = false;
-    let mut do_60fps_ = false;
     let mut path = None;
     let mut args = env::args();
 
@@ -90,14 +89,13 @@ fn main() {
 
     while let Some(name) = args.next() {
         if name == "--" {
-            panic!("dont put double dash to seperate args");
+            break;
         }
 
         if let Some(name) = name.strip_prefix("--") {
             match name {
                 "no-fork" => no_fork = true,
                 "stats" => stats = true,
-                "60fps" => do_60fps_ = true,
                 "anon-names" => unsafe { ANON_BODY_AS_NAME = true },
                 #[cfg(feature = "cranelift")]
                 "cranelift" => arch = TargetArch::Cranelift,
@@ -149,10 +147,6 @@ fn main() {
     }
     if no_fork {
         panic!("--no-fork is no longer built in to the compiler");
-    }
-    if do_60fps_ {
-        do_60fps(arch);
-        return;
     }
 
     if let Some(name) = path {
@@ -432,106 +426,4 @@ fn set_colour(r: u8, g: u8, b: u8) {
 
 fn unset_colour() {
     print!("\x1B[0m");
-}
-
-fn do_60fps(arch: TargetArch) {
-    let name = "examples/mandelbrot.fr";
-    let src = fs::read_to_string(name).unwrap();
-    let mut src_parts = src.split("// @InsertConfig");
-    let src1 = src_parts.next().unwrap().to_string();
-    let src2 = src_parts.next().unwrap().to_string();
-
-    println!("\x1B[?1049h");
-    start_raw(0);
-    let base = MEM.get();
-
-    let start = timestamp();
-    let mut frames = 0;
-    let mut x = -1.5f32;
-    let mut y = -1.0f32;
-    loop {
-        let frame_end = Instant::now().checked_add(Duration::from_millis(18)).unwrap();
-        let mut src = String::with_capacity(src1.len() + src2.len() + 100);
-        // TODO: cant do float calls in constants now without libffi
-        src.push_str(&src1);
-        if x >= 0.0 {
-            src.push_str(&format!("x_start = {x:.2};"));
-        } else {
-            src.push_str(&format!("x_start = 0.0.sub({:.2});", x.abs()));
-        }
-        if y >= 0.0 {
-            src.push_str(&format!("y_start = {y:.2};"));
-        } else {
-            src.push_str(&format!("y_start = 0.0.sub({:.2});", y.abs()));
-        }
-        src.push_str(&src2);
-
-        let pool = Box::leak(Box::<StringPool>::default());
-        let mut program = Program::new(pool, arch);
-        let mut comp = Compile::new(pool, &mut program);
-
-        let file = comp
-            .parsing
-            .codemap
-            .add_file(name.to_string(), format!("#include_std(\"core.fr\");\n{src}"));
-        let lex = Lexer::new(file.clone(), comp.program.pool, file.span);
-        let parsed = Parser::parse_stmts(&mut comp.parsing, lex, comp.pool).unwrap();
-
-        let mut global = make_toplevel(comp.pool, garbage_loc(), parsed);
-        ResolveScope::run(&mut global, &mut comp, ScopeId::from_index(0)).unwrap();
-        comp.compile_top_level(global).unwrap();
-        let f = comp.program.find_unique_func(comp.pool.intern("main")).unwrap();
-        comp.compile(f, ExecStyle::Jit).unwrap();
-
-        println!("\x1B[2J");
-        run_one(&mut comp, f);
-
-        frames += 1;
-        sleep_until(frame_end);
-        if let Some(c) = get_input() {
-            match c as char {
-                'q' => break,
-                'a' => x += 0.1,
-                'd' => x -= 0.1,
-                's' => y -= 0.1,
-                'w' => y += 0.1,
-                _ => {}
-            }
-        }
-
-        // let mut temp = memmap2::MmapOptions::new().len(0).map_anon().unwrap().make_exec().unwrap();
-        // comp.aarch64.make_exec(); // if we were using cranelift backend, it might be write the first time.
-        // mem::swap(comp.aarch64.map_exec.as_mut().unwrap(), &mut temp);
-        // TODO: unmap constant data in pool.rs
-
-        // TODO
-        // #[cfg(feature = "cranelift")]
-        // {
-        //     unsafe {
-        //         comp.cranelift.module.free_memory();
-        //     }
-        // }
-
-        mem::forget(comp);
-        mem::forget(program);
-        // Reset the arena
-        MEM.set(base);
-
-        todo!();
-    }
-    let end = timestamp();
-    let s = end - start;
-    end_raw(0);
-    println!("\x1B[?1049l");
-    println!("{frames} frames in {:.0} ms: {:.0}fps", s * 1000.0, frames as f64 / s);
-
-    fn get_input() -> Option<u8> {
-        let mut c = 0;
-        let len = unsafe { libc::read(0, &mut c as *mut u8 as *mut libc::c_void, 1) };
-        if len > 0 {
-            Some(c)
-        } else {
-            None
-        }
-    }
 }

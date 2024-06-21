@@ -210,8 +210,11 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         // The code expects arguments on the virtual stack (the first thing it does might be save them to variables but that's not my problem).
 
         let sig = self.body.signeture;
-        debug_assert!(sig.arg_slots <= 8, "c_call only supports 8 arguments. TODO: pass on stack");
         let mut int_count = sig.arg_slots as u32 - sig.arg_float_mask.count_ones();
+        debug_assert!(
+            int_count <= 8 && sig.arg_float_mask.count_ones() <= 8,
+            "c_call only supports 8 arguments. TODO: pass on stack"
+        );
         let slots = if sig.first_arg_is_indirect_return {
             self.state.stack.push(Val::Increment { reg: 8, offset_bytes: 0 });
             int_count -= 1;
@@ -949,10 +952,6 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
     // Note: comp_ctx doesn't push the ctx here, bc needs to do that. this it just does the call with an extra argument.
     /// <arg:n> -> <ret:m>
     fn dyn_c_call(&mut self, sig: PrimSig, do_call: impl FnOnce(&mut Self)) {
-        assert!(sig.arg_slots <= 8, "indirect c_call only supports 8 arguments. TODO: pass on stack");
-        // TODO: this isn't the normal c abi
-        // assert!(ret.size_slots <= 8, "indirect c_call only supports 8 returns. TODO: pass on stack");
-
         let slots = if sig.first_arg_is_indirect_return {
             sig.arg_slots - 1
         } else {
@@ -976,6 +975,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
 
         let float_count = sig.ret_float_mask.count_ones();
         let int_count = sig.ret_slots as u32 - float_count;
+        debug_assert!(int_count <= 8 && float_count <= 8, "TODO: pass extra arguments on stack.");
 
         if let BigOption::Some(fst) = sig.ret1 {
             if let BigOption::Some(snd) = sig.ret2 {

@@ -379,6 +379,9 @@ pub mod c {
     }
 
     #[cfg(target_arch = "x86_64")]
+    compile_error!("i dont do by value structs correctly for comptime ffi (which you need for macros) and i dont want to deal with it. ");
+
+    #[cfg(target_arch = "x86_64")]
     extern "C" fn arg8ret_struct(fnptr: usize, first_of_eight_args: *mut i64) -> i64 {
         unsafe { arg8ret1(fnptr, first_of_eight_args) }
     }

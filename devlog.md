@@ -1,3 +1,21 @@
+## debug x86 (Jun 20)
+
+fucking wikipedia lied to be.
+system v x86 cc does NOT replace large arguments with a pointer (which sounded reasonable cause thats what arm does),
+it just copies them onto the stack. oh an also does it right to left apparently.
+this one knows the truth https://www.uclibc.org/docs/psABI-x86_64.pdf  
+and godbolt agrees.
+
+i think when farm_game x86 was working before its because i was still using flat calls for macros specifically, and sokol always passes large args by pointer.
+cause i can still compile on arm, produce llvm, and then cross compile that for x86 and it works
+(other than warning about overriding the module target triple because i hardcode it in the ir but activity monitor says the exe is Intel so its fine).
+
+thats much more of a pain in the ass to deal with cause i have to know the size of the things behind the pointer.
+i was so confidently like hey i dont need libffi it doesn't do much for me but maybe arm is just simple.
+aaaaa i dont want to do itititititititi. fuck.
+
+i also have to start giving llvm byval attributes on args so i can do x86 ffi.
+
 ## (Jun 19)
 
 - have an overload set for changing how constants get baked so don't need a special case `__save_cstr_t`

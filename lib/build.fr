@@ -1,16 +1,24 @@
+
+LinkTime :: @enum(i64) (Static, Dynamic);
+
 // TODO: hack
 CLANG_PATH :: "/opt/homebrew/opt/llvm/bin/clang";
 
-clang_hack_ignore_warning_args :: @array(
-    "-Wno-int-to-void-pointer-cast",
-    "-Wno-void-pointer-to-int-cast",
-    "-Wno-return-type", // TODO: this one would be helpful! but need to emit _Noreturn for functions returning Never
-    "-Wno-incompatible-library-redeclaration",
-    "-Wno-int-conversion",
-    "-Wno-pointer-sign",
-    "-Wno-return-type", // TODO: this one would be helpful! but need to emit _Noreturn for functions returning Never
-    "-Wno-incompatible-function-pointer-types", // TODO: this ones probably often helpful, should fix it in the generated code. also UB san complains.
-);
+fn with(vtable: *ImportVTable, comp: Compiler) CompCtx = 
+    (data = comp, vtable = vtable);
+
+fn get_tagged(comp: CompCtx, tag: Str) Slice(FuncId) = {
+    tag := {comp.vtable.intern_string}(comp.data, tag);
+    {comp.vtable.get_fns_with_tag}(comp.data, tag)
+}
+
+// TODO: no unwrap! return error. but then llvm backend has to be able to deal with tagged unions correctly. 
+fn get_jitted(c: CompCtx, f: FuncId) rawptr = {
+    res := {c.vtable.compile_func}(c.data, f, .Jit).unwrap();
+    ptr := {c.vtable.get_jitted_ptr}(c.data, f).unwrap();
+    {c.vtable.make_jitted_exec}(c.data);
+    ptr
+}
 
 fn new_with_src(vtable: *ImportVTable, src: Str, arch: Backend) Compiler = {
     comp := {vtable.init_compiler}(arch);
@@ -163,3 +171,36 @@ fn render_callgraph(comp: CompCtx, entry_points: Slice(FuncId), out_a: Alloc) Li
     };
     out
 }
+
+// TODO auto fucking matic
+fn display(self: Arch, out: *List(u8)) Unit = {
+    s: Str = @switch(self) {
+        @case(.Aarch64) => "aarch64";
+        @case(.X86_64) => "x86_64";
+    };
+    out.push_all(s);
+}
+
+fn display(self: Os, out: *List(u8)) Unit = {
+    s: Str = @switch(self) {
+        @case(.Macos) => "macos";
+        @case(.Linux) => "linux";
+        @case(.Windows) => "windows";
+    };
+    out.push_all(s);
+}
+
+fn save_path_for_lib(env: Ty(Arch, Os), linking: LinkTime, lib_name: Str) Str = {
+    ext := @switch(linking) {
+        @case(.Static) => "o";
+        @case(.Dynamic) => "dylib";
+    };
+    (@format("target/franca/%-%/%.%", env._0, env._1, lib_name, ext) temp()).items()
+}
+
+#redirect(Ty(i64, i64), bool) fn eq(a: Os, b: Os) bool;
+#redirect(Ty(i64, i64), bool) fn eq(a: LinkTime, b: LinkTime) bool;
+
+// TODO: not this!
+#redirect(Ty(i64, i64), bool) fn eq(a: Arch, b: Arch) bool;
+#redirect(Ty(i64, i64), bool) fn ne(a: Arch, b: Arch) bool;

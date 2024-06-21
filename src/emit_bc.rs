@@ -10,7 +10,7 @@
 
 use codemap::Span;
 use std::ops::Deref;
-use std::ptr::{null, slice_from_raw_parts};
+use std::ptr::slice_from_raw_parts;
 
 use crate::ast::{CallConv, Expr, FatExpr, FnFlag, FnType, FuncId, FuncImpl, LabelId, Program, Stmt, TypeId, TypeInfo};
 use crate::ast::{FatStmt, Flag, Pattern, Var, VarType};
@@ -538,7 +538,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         );
 
         debug_assert!(
-            self.slot_count(expr.ty) <= 8 || result_location != PushStack,
+            self.slot_count(expr.ty) <= 16 || result_location != PushStack,
             "{} {}",
             expr.log(self.program.pool),
             self.program.log_type(expr.ty)

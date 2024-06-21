@@ -233,8 +233,13 @@ fn main() Unit = {
     sapp_run(desc&);
 }
 
-fn driver(vtable: *ImportVTable) Unit #export = {
-    arch_os := {vtable.comptime_arch}(); // TODO: pattern match multiple returns. 
+SOKOL_MACOS_LINK_ARGS :: @array("-framework", "Metal", "-framework", "MetalKit", "-framework", "Cocoa", "-framework", "QuartzCore");
+
+fn build_sokol_cached(env: Ty(Arch, Os), linking: LinkTime) Result(Str, Unit) = {
+    path := save_path_for_lib(env, linking, "sokol");
+    return :: @return;
+    if(path.file_exists(), => return((Ok = path)));
+    
     SOKOL_C :: """
         #include "sokol_app.h"
         #include "sokol_gfx.h"
@@ -244,6 +249,56 @@ fn driver(vtable: *ImportVTable) Unit #export = {
         #include "util/sokol_gl.h"
         #include "util/sokol_shape.h"
     """;
+    c_file := open_temp_file();
+    c_file.fd&.write(SOKOL_C);
+    
+    args: List(Str) = list(10, temp());
+    
+    args&.push_all(("-Ivendor/sokol", "-DSOKOL_IMPL", "-DSOKOL_NO_ENTRY")!slice);
+    if env._1.eq(.Macos) {|
+        // macos_args must go first to treat source as objective c!
+        if not(eq(linking, .Static)) {|
+            a := SOKOL_MACOS_LINK_ARGS;
+            args&.push_all(a&.slice());
+        };
+        args&.push_all(("-DSOKOL_METAL", "-x", "objective-c")!slice);
+    } {|
+        panic("TODO: sokol build flags on not macos");
+    };
+    args&.push(c_file&.s_name());
+    
+    @switch(linking) {
+        @case(.Static) => args&.push("-c");
+        @case(.Dynamic) => args&.push_all(("-DSOKOL_DLL", "-dynamiclib")!slice);
+    };
+    args&.push_all(("-o", path)!slice);
+    
+    // Since we save it, might as well take the extra hundred years to make it go fast. 
+    args&.push("-O2");
+    
+    // TODO
+    //if(is_x86) {|
+    //    // cross compile for rosetta. 
+    //    args&.push_all(("-target", "x86_64-apple-darwin")!slice);
+    //};
+    
+    @println("building sokol: %", args.items());
+    success := run_cmd_blocking(CLANG_PATH, args.items());
+    if(not(success), => return(.Err));
+    c_file.remove();
+    
+    (Ok = path)
+}
+
+::display_slice(Str);
+    
+fn driver(vtable: *ImportVTable) Unit #export = {
+    args := cli_args();
+    for(args){ arg |
+        @println("- %", arg);
+    };
+    
+    arch_os := {vtable.comptime_arch}(); // TODO: pattern match multiple returns. 
     // TODO: this whole thing where you have to write your program inside out is really annoying. 
     //       I want the user program to be in charge and call into the compiler as a library. 
     UserData :: @struct(
@@ -270,35 +325,12 @@ fn driver(vtable: *ImportVTable) Unit #export = {
         .None
     };
 
-    dylib_path := if(is_x86, => "target/sokol-x86_64.dylib", => "target/sokol-aarch64.dylib");
+    dylib_path := build_sokol_cached(arch_os, .Dynamic);  // TODO: should be able to unwrap in the same expression like you can later but it hasn't been instantated yet. 
+    dylib_path := dylib_path.unwrap(); 
+
     dylib_path_c := dylib_path.maybe_borrow_cstr(temp());
     sokol := dlopen(dylib_path_c, DlFlag.Lazy);
-    macos_args := ("-DSOKOL_METAL", "-x", "objective-c", "-framework", "Metal", "-framework", "MetalKit", "-framework", "Cocoa", "-framework", "QuartzCore")!slice;
-    common_args := ("-Ivendor/sokol", "-DSOKOL_IMPL", "-DSOKOL_NO_ENTRY")!slice;
-    if(sokol.lib.is_null()){|
-        c_file := open_temp_file();
-        c_file.fd&.write(SOKOL_C);
-        
-        // TODO: don't hardcode platform. 
-        // build it!
-        // macos_args must go first to treat source as objective c!
-        dyn_args := ("-DSOKOL_DLL", "-dynamiclib", "-o", dylib_path)!slice;
-        args := macos_args.clone(temp());
-        args&.push_all(common_args);
-        args&.push_all(dyn_args);
-        args&.push(c_file&.s_name());
-        args&.push("-O2");
-        if(is_x86) {|
-            // cross compile for rosetta. 
-            args&.push_all(("-target", "x86_64-apple-darwin")!slice);
-        };
-        ::display_slice(Str);
-        @println("building sokol dylib for comptime: %", args.items());
-        run_cmd_blocking(CLANG_PATH, args.items());
-        sokol = dlopen(dylib_path_c, DlFlag.Lazy);
-        assert(sokol.lib.is_null().not(), "failed to open sokol for comptime");
-        c_file.remove();
-    };
+    assert(sokol.lib.is_null().not(), "failed to open sokol for comptime");
     @println("Opened %", dylib_path);
     
     my_vtable: ExportVTable = (
@@ -323,8 +355,10 @@ fn driver(vtable: *ImportVTable) Unit #export = {
     ptr := {vtable.get_jitted_ptr}(comp, main_f).unwrap();
     {vtable.make_jitted_exec}(comp);
     f := assume_types_fn(Arg = Unit, Ret = Unit, ptr = ptr);
-    f();
+    //f();
     //print_stacktrace_on_panic();
+    
+    obj_path := build_sokol_cached(arch_os, .Static).unwrap();
     
     ir_text := emit_llvm((data = comp, vtable = vtable), temp(), (main_f)!slice, .ExportWithNames);
     out := open_temp_file();
@@ -332,25 +366,14 @@ fn driver(vtable: *ImportVTable) Unit #export = {
         out.fd&.write(bucket);
     };
     @println("Write llvm ir to %", out&.s_name());
-
-    c_file := open_temp_file();
-    c_file.fd&.write(SOKOL_C);
-    // TODO: compile static sokol once and just link against it. 
-    //       currently if i comment out the whole main and just print hello world, it saves 0.050 / 1.000 seconds 
-    //       vs  0.238 without linking sokol, which is still slow as fuck.
-    //       so the whole time is it compiling sokol from scratch. 
-    //       tho just jit hello world like that is still 0.079, which... isn't fast.
-    //       the hello world example is 0.028 so i guess its 40 ms to compile this meta program? no down to 0.060 if you don't emit llvm ir (which involes recompiling bytecode). 
-    args := macos_args.clone(temp());
-    args&.push_all(common_args);
-    args&.push(c_file&.s_name());
-    args&.push_all(("-x", "ir", out&.s_name(), "-o", "farm.out")!slice);    
+    a := SOKOL_MACOS_LINK_ARGS;
+    args := a&.slice().clone(temp());
+    args&.push_all((obj_path, "-x", "ir", out&.s_name(), "-o", "farm.out")!slice);    
     //args&.push("-O2");
     @println("building aot exe: %", args.items());
     success := run_cmd_blocking(CLANG_PATH, args.items());
     assert(success, "clang failed");
     
-    c_file.remove(); // TODO: defer
     out.remove(); // TODO: defer
     
 }
