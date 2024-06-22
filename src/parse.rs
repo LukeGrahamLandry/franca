@@ -1133,15 +1133,6 @@ impl<'a, 'p> Parser<'a, 'p> {
                     old_arg.expr = Expr::Tuple(vec![mem::take(old_arg), callback]);
                 }
             }
-        } else if let Expr::FieldAccess(first, name) = &mut call.expr {
-            // This is simpler than the version in expr_call because we already know the arg we're pushing is just a closure (not a tuple)
-            debug_assert!(matches!(callback.expr, Expr::Closure(_)));
-            self.start_subexpr();
-            self.start_subexpr();
-            self.start_subexpr();
-            let f = self.expr(Expr::GetNamed(*name));
-            let arg = self.expr(Expr::Tuple(vec![mem::take(first), callback]));
-            *call = self.expr(Expr::Call(Box::new(f), Box::new(arg)));
         } else {
             self.start_subexpr();
             // It might just be a function access. like 'while {| _ } {| _ }' should be valid.

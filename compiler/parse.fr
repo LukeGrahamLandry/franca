@@ -27,14 +27,14 @@ ParseTask :: @tagged(
 );
 Parser :: @struct(lex: Lexer, tasks: *List(ParseTask), alloc: Alloc, last: Token);
 ParseErr :: @struct(span: Span, msg: Str);
-Prec :: (@struct(prec: PrecLevel, allow_trailing: bool = true))!rec;
+Prec :: @struct(prec: PrecLevel, allow_trailing: bool = true);
 Prec_None: Prec : (prec = .None);
-fn reset(p: Prec) Prec = 
-    (prec = .None, allow_trailing = p.allow_trailing);
+fn reset(p: Prec) Prec = p.with(.None);
+fn with(p: Prec, next: PrecLevel) Prec = 
+    (prec = next, allow_trailing = p.allow_trailing);
 
 PrecLevel :: @enum(i64) (
     None,
-    Trailing,
     Equality,
     Comparison,
     AddSub,
@@ -150,6 +150,7 @@ fn after_expr_stmt_prefix(self: *Parser, e: FatExpr) Result(FatStmt, ParseErr) =
     (Ok = stmt)
 }
 
+// todo bang
 fn can_start_quick_expr(t: TokenType) bool = {
     @match(t) {
         (fn Symbol(_) => true);
@@ -207,8 +208,7 @@ fn parse_prefix(self: *Parser, prec: Prec) ParseRes = {
             };
             loc := self.last.span;
             self.pop();
-            a := prec.allow_trailing; // TODO: shadow!
-            rhs := @try(self.parse_expr(@as(Prec) (prec = .Neg, allow_trailing = a))) return;
+            rhs := @try(self.parse_expr(prec.with(.Neg))) return;
             f := self.box(self.get_named(f, loc));
             arg := self.box(rhs);
             call := self.expr((Call = (f = f, arg = arg)), loc);
@@ -233,8 +233,7 @@ fn parse_prefix(self: *Parser, prec: Prec) ParseRes = {
         });
         (fn DoubleColon() => {
             self.pop();
-            a := prec.allow_trailing; // TODO: shadow
-            e := self.bang(.const_eval, @try(self.parse_expr(@as(Prec) (prec = .Neg, allow_trailing = a))) return, self.last.span);
+            e := self.bang(.const_eval, @try(self.parse_expr(prec.with(.Neg))) return, self.last.span);
             return (Ok = e);
         });
         (fn Amp() => {
@@ -357,17 +356,16 @@ fn parse_infix(self: *Parser, prev: FatExpr, prec: Prec) ParseRes = {
             return(self.parse_infix(e, prec)); // TODO: tail
         });
         (fn LeftSquiggle() => {
-            //if(prec.allow_trailing.not(), => return(Ok = prev));
+            if(prec.allow_trailing.not(), => return(Ok = prev));
             self.pop();
             fn_def := @try(self.fn_def_signeture(self.last.span, false)) return;
             @try(self.eat(@symbol Pipe, "trailing lambda")) return;
             
             body := @try(self.parse_block_until_squiggle()) return;
             func := self.make_func(fn_def, body, loc);
-            e := self.expr((Closure = self.box(func)), loc);
-            todo();
-            //e := self.push_arg(prev, e); // TODO!
-            return(self.parse_infix(e, prec)); // TODO: tail
+            callback := self.expr((Closure = self.box(func)), loc);
+            self.push_arg(prev&, callback);
+            return(self.parse_infix(prev, prec)); // TODO: tail
         });
         (fn DoubleSquare() => {
             self.pop();
@@ -429,13 +427,12 @@ fn parse_bin_op(self: *Parser, op: Operator, prev: FatExpr, prec: Prec) ParseRes
     if(prec.prec.lt(next._0)) {|
         self.pop();
         loc := self.last.span;
-        a := prec.allow_trailing; // TODO: shadow
-        rhs := @try(self.parse_expr(@as(Prec) (prec = next._0, allow_trailing = a))) return;
+        rhs := @try(self.parse_expr(prec.with(next._0))) return;
         f := self.box(self.get_named(next._1, loc));
         arg := self.box(self.pair(prev, rhs, loc));
         call := self.expr((Call = (f = f, arg = arg)), loc);
-        a := prec.allow_trailing; // TODO: shadow
-        return(self.parse_infix(call, (prec = next._0, allow_trailing = a))); // TODO: tail
+        // TODO: make sure this should be old prec, not also next._0
+        return(self.parse_infix(call, prec)); // TODO: tail
     }{|
         return(Ok = prev);  
     };
@@ -479,6 +476,38 @@ fn expr_call(self: *Parser, f: FatExpr, arg: FatExpr) FatExpr = {
         };
     };
     unreachable()
+}
+
+fn push_arg(self: *Parser, call: *FatExpr, callback: FatExpr) void = {
+    // TODO: let else would be nice.
+    @match(call.expr&) {
+        (fn Call(f) => {
+            @match(f.arg.expr&) {
+                // TODO: have it work with named arguments. Need to support mixing named and positional.
+                (fn Tuple(parts) => {
+                    // this goes away when we're fully self hosted. 
+                    p := parts[].assume_owned(self.alloc);
+                    p&.push(callback);
+                    parts[] = p.rs();
+                });
+                // Parser flattened empty tuples.
+                (fn Value(v) => {
+                    if v.bytes.is_unit() {|
+                        f.arg[] = callback;
+                    }{|  
+                        f.arg[] = self.pair(f.arg[], callback, call.loc);
+                    };
+                });
+                @default => {
+                    f.arg = self.box(self.pair(f.arg[], callback, call.loc));
+                };
+            };
+        });
+        @default => {
+            // It might just be a function access. like 'while {| _ } {| _ }' should be valid.
+            call[] = self.expr((Call = (f = self.box(call[]), arg = self.box(callback))), call.loc);
+        };
+    };
 }
 
 fn make_func(self: *Parser, def: FnDef, body: FatExpr, loc: Span) Func = {
@@ -777,14 +806,11 @@ fn raw_unit(self: *Parser, loc: Span) FatExpr = {
     e
 }
 
-fn get_named(self: *Parser, name: Flag, loc: Span) FatExpr = {
-    
-    self.expr((GetNamed = name.ident()), loc)
-}
+fn get_named(self: *Parser, name: Flag, loc: Span) FatExpr = 
+    self.expr((GetNamed = name.ident()), loc);
 
-fn bang(self: *Parser, name: Flag, arg: FatExpr, loc: Span) FatExpr = {
-    self.expr((SuffixMacro = (name = name.ident(), arg = self.box(arg))), loc)
-}
+fn bang(self: *Parser, name: Flag, arg: FatExpr, loc: Span) FatExpr = 
+    self.expr((SuffixMacro = (name = name.ident(), arg = self.box(arg))), loc);
 
 fn bin_named_macro(self: *Parser, name: Flag, arg: FatExpr, target: FatExpr, loc: Span) FatExpr = {
     handler := self.box(self.get_named(name, loc));
@@ -890,7 +916,9 @@ fn peek(self: *Parser) TokenType = {
         "@a b;",
         "@(a(d))(b) c;",
         "a(f, g) { (b: c) d| e };",
+        "a(b(c)) {| d };",
         "a b(c) {| d };",
+        "a(b(c) {| d });",
     )!slice;
     for (src) {src|
         span := codemap&.add_file("name", src);
