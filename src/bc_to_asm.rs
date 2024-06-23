@@ -251,7 +251,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         }
 
         let mut slots = self.next_slot.0; //self.compile.ready[self.f].as_ref().unwrap().stack_slots * 8;
-        assert!(slots < 4096, "not enough bits to refer to all slots");
+        assert!(slots < 4096, "not enough bits to refer to all slots {}", slots);
         if slots % 16 != 0 {
             slots += 16 - (slots % 16); // play by the rules
         }

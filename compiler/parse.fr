@@ -17,17 +17,23 @@
 // - move this version of @try to lib. 
 // - get rid of backpassing syntax. i never use it anyway. 
 
+// TODO
+// - leading annotations
+// - include_std
+// - @return 
+// - let/var/const if i want to match what i used to do. 
+//
+
 // TODO: :SLOW im doing so many silly copies and also need to actually enforce tailcalls on llvm (right now i might be preventing them with ccc even on internal functions!).  -- Jun 21
 
 ParseTask :: @tagged(
     Pending: @struct(src: Str, span: Span),
-    Expr: FatExpr,
-    Stmt: FatStmt,
-    Err: ParseErr, 
+    Expr: Result(FatExpr, ParseErr),
 );
-Parser :: @struct(lex: Lexer, tasks: *List(ParseTask), alloc: Alloc, last: Token);
+Parser :: @struct(pool: *StringPool, lex: Lexer, tasks: *List(ParseTask), alloc: Alloc, last: Token);
 ParseErr :: @struct(span: Span, msg: Str);
 Prec :: @struct(prec: PrecLevel, allow_trailing: bool = true);
+
 Prec_None: Prec : (prec = .None);
 fn reset(p: Prec) Prec = p.with(.None);
 fn with(p: Prec, next: PrecLevel) Prec = 
@@ -44,8 +50,27 @@ PrecLevel :: @enum(i64) (
 );
 ParseRes :: Result(FatExpr, ParseErr);
 
-fn parse_expr(self: *Parser, id: i64) ParseRes = {
-    todo();
+fn finish_pending(self: *Parser, id: WaitingParse) ParseRes = {
+    return :: @return;
+    @match(self.tasks[id.id]&) {
+        (fn Pending(src_span) => {
+            self.lex = init(self.pool, src_span.span, src_span.src);
+            e := self.parse_expr();
+            // TODO: clone! :FUCKED
+            // TODO: save less often!
+            self.tasks[id.id] = (Expr = e);
+            return(e);
+        });
+        (fn Expr(e) => { 
+            // TODO: clone! :FUCKED
+            return(e[]);
+        });
+    };
+}
+
+fn push_parse(self: *Parser, src: Str, span: Span) WaitingParse = {
+    self.tasks.push((Pending = (src = src, span = span)));
+    (id = self.tasks.len.sub(1))
 }
 
 fn parse_stmt(self: *Parser) Result(FatStmt, ParseErr) = {
@@ -53,43 +78,12 @@ fn parse_stmt(self: *Parser) Result(FatStmt, ParseErr) = {
     loc := self.last.span;
     @match(self.peek()) {
         (fn Fn() => {
-            panic("TODO: fn stmt");
+            self.pop();
+            func := @try(self.parse_func(true)) return;
+            return(Ok = self.stmt((DeclFunc = self.box(func)), loc));
         });
         (fn Symbol(name) => {
-            self.pop();
-            @match(self.peek()) {
-                (fn DoubleColon() => {
-                    self.pop();
-                    loc := self.last.span;
-                    e := @try(self.parse_expr(Prec_None)) return;
-                    s: Stmt = (DeclNamed = (kind = .Const, value = e, ty = (Infer = unit), name = name));
-                    return(Ok = self.stmt(s, loc));
-                });
-                (fn Colon() => {
-                    self.pop();
-                    ::if(LazyType);
-                    ty: LazyType = if (self.next_is_equals(), => (Infer = unit)) {|
-                        self.pop();
-                        e := @try(self.parse_expr(Prec_None)) return;
-                        (PendingEval = e)
-                    };
-                    kind := @match(self.pop()) {
-                        (fn Equals() => VarType.Var);
-                        (fn Colon() => VarType.Const);
-                        @default => @report_error("expected = or : after declaration of variable %", self.lex.pool.get(name)) (return, self.last.span);
-                    };
-                    loc := self.last.span;
-                    value := @try(self.parse_expr(Prec_None)) return;
-                    s: Stmt = (DeclNamed = (kind = kind, value = value, ty = ty, name = name)); // TODO: the rust thing where you don't have to say the name if the expr is a var read that matches.
-                    return(Ok = self.stmt(s, loc));
-                });
-                @default => {
-                    e := @try(self.ident_expr_and_maybe_trailing(name, Prec_None, loc)) return;
-                    return(self.after_expr_stmt_prefix(e));
-                };
-            };
-            
-            panic("TODO: symbol stmt");
+            return(self.parse_decl_or_start_expr(name));
         });
         (fn Semicolon() => {
             self.pop();
@@ -106,6 +100,42 @@ fn parse_stmt(self: *Parser) Result(FatStmt, ParseErr) = {
     Result(FatStmt, ParseErr).unreachable_hack()
 }
 
+fn parse_decl_or_start_expr(self: *Parser, name: Symbol) Result(FatStmt, ParseErr) = {
+    self.pop();
+    loc := self.last.span;
+    return :: @return;
+    @match(self.peek()) {
+        (fn DoubleColon() => {
+            self.pop();
+            loc := self.last.span;
+            e := @try(self.parse_expr(Prec_None)) return;
+            s: Stmt = (DeclNamed = (kind = .Const, value = e, ty = (Infer = unit), name = name));
+            return(Ok = self.stmt(s, loc));
+        });
+        (fn Colon() => {
+            self.pop();
+            ::if(LazyType);
+            ty: LazyType = if (self.next_is_equals(), => (Infer = unit)) {|
+                e := @try(self.parse_expr(Prec_None)) return;
+                (PendingEval = e)
+            };
+            kind := @match(self.pop()) {
+                (fn Equals() => VarType.Var);
+                (fn Colon() => VarType.Const);
+                @default => @report_error("expected = or : after declaration of variable %", self.pool.get(name)) (return, self.last.span);
+            };
+            loc := self.last.span;
+            value := @try(self.parse_expr(Prec_None)) return;
+            s: Stmt = (DeclNamed = (kind = kind, value = value, ty = ty, name = name)); // TODO: the rust thing where you don't have to say the name if the expr is a var read that matches.
+            return(Ok = self.stmt(s, loc));
+        });
+        @default => {
+            e := @try(self.ident_expr_and_maybe_trailing(name, Prec_None, loc)) return;
+            return(self.after_expr_stmt_prefix(e));
+        };
+    };
+    Result(FatStmt, ParseErr).unreachable_hack()
+}
 fn next_is_equals(self: *Parser) bool = {
     t := self.peek();
     eq(t&!tag[], tag_value(TokenType, @symbol Equals))
@@ -144,13 +174,13 @@ fn after_expr_stmt_prefix(self: *Parser, e: FatExpr) Result(FatStmt, ParseErr) =
     @match(self.peek()) {
         (fn Semicolon() => ());
         (fn RightSquiggle(_) => ());
+        (fn Eof() => ());
         @default => @report_error("';' (discard) or '}' (return) after expr stmt %", "") (return, self.last.span);
     };
     
     (Ok = stmt)
 }
 
-// todo bang
 fn can_start_quick_expr(t: TokenType) bool = {
     @match(t) {
         (fn Symbol(_) => true);
@@ -158,6 +188,10 @@ fn can_start_quick_expr(t: TokenType) bool = {
         (fn Quoted(_) => true);
         (fn Number(_) => true);
         (fn BinaryNum(_) => true);
+        (fn Op(op) bool => @switch(op){
+            @case(Operator.Bang) => true;
+            @default fn(_: Operator) => false;
+        });
         @default => false;
     }
 }
@@ -200,19 +234,15 @@ fn parse_prefix(self: *Parser, prec: Prec) ParseRes = {
             f := @switch(op) {
                 @case(.Minus) => Flag.neg;
                 @case(.Bang) => Flag.not;
+                @case(.Star) => Flag.operator_star_prefix;
                 // TODO: don't require the arg or have better error message. -- Jun 18
                 @default fn(_: Operator) Flag => {
                     @report_error("expected begin expression found non-prefix operator %", "") (return, self.last.span);
                     Flag.unreachable_hack()
                 };
             };
-            loc := self.last.span;
             self.pop();
-            rhs := @try(self.parse_expr(prec.with(.Neg))) return;
-            f := self.box(self.get_named(f, loc));
-            arg := self.box(rhs);
-            call := self.expr((Call = (f = f, arg = arg)), loc);
-            return(self.parse_infix(call, prec));
+            return(self.named_call(prec, f));
         });
         (fn LeftSquiggle() => {
             self.pop();
@@ -229,7 +259,7 @@ fn parse_prefix(self: *Parser, prec: Prec) ParseRes = {
             return(self.parse_at(prec));
         });
         (fn FatRightArrow() => {
-            todo();
+            return(self.quick_lambda());
         });
         (fn DoubleColon() => {
             self.pop();
@@ -240,10 +270,12 @@ fn parse_prefix(self: *Parser, prec: Prec) ParseRes = {
             @report_error("'&' is not a prefix operator. if you meant to take the address of a variable, use it as a suffix.%", "") (return, self.last.span);
         });
         (fn Question() => {
-            todo();
+            self.pop();
+            return(self.named_call(prec, Flag.operator_question_prefix));
         });
         (fn Fn() => {
-            todo();
+            self.pop();
+            return(self.func_expr());
         });
         (fn SingleQuote() => {
             self.pop();
@@ -258,7 +290,8 @@ fn parse_prefix(self: *Parser, prec: Prec) ParseRes = {
             return(Ok = e);
         });
         (fn BinaryNum(n) => {
-            todo();
+            self.pop();
+            return(Ok = self.bin_num(n));
         });
         (fn Dot() => {
             self.pop();
@@ -282,10 +315,88 @@ fn parse_prefix(self: *Parser, prec: Prec) ParseRes = {
             return(self.ident_expr_and_maybe_trailing(name, prec, loc));
         });
         @default => {
-            @report_error("Expected begin expression %", 1) (return, self.last.span);
+            self.pop();
+            @report_error("Expected begin expression %", "") (return, self.last.span);
         };
     };
     ParseRes.unreachable_hack()
+}
+
+fn quick_lambda(self: *Parser) ParseRes = {
+    return :: @return;
+    self.pop();
+    loc := self.last.span;
+    body := @try(self.parse_expr(Prec_None)) return;
+    // FnDef :: @struct(name: ?Symbol, arg: Pattern, ret: LazyType, tags: List(Annotation));
+    fn_def: FnDef = (name = .None, arg = (bindings = empty(), loc = loc), ret = (Infer = ()), tags = list(self.alloc));
+    func := self.make_func(fn_def, (Some = body), loc);
+    (Ok = self.expr((Closure = self.box(func)), loc))
+}
+
+fn func_expr(self: *Parser) ParseRes = {
+    return :: @return;
+    func := @try(self.parse_func(false)) return;
+    (Ok = self.expr((Closure = self.box(func)), func.loc))
+}
+
+fn parse_func(self: *Parser, allow_empty: bool) Result(Func, ParseErr) = {
+    return :: @return;
+    loc := self.last.span;
+    fn_def := @try(self.fn_def_signeture(loc, true)) return;
+    
+    may_capture := @match(self.pop()) {
+        (fn Equals() => false);
+        (fn FatRightArrow() => true);
+        (fn Semicolon() bool => {
+            if not(allow_empty) {|
+                @report_error("Function expression requires body %", "") (return, self.last.span);
+            };
+            return(Ok = self.make_func(fn_def, .None, loc))
+        });
+        @default => @report_error("expected '=' or '=>' or ';' after function decl %", "") (return, self.last.span);
+    };
+    
+    if not(may_capture) {|
+        @match(self.peek()) {
+            (fn LeftSquiggle() => {
+                src_span := self.lex&.skip_to_closing_squigle();
+                //self.last = self.lex&.peek()[];
+                self.pop(); // TODO: why do i need this? -- Jun 22
+                id := self.push_parse(src_span._0, src_span._1);
+                body := self.expr((GetParsed = id), loc);
+                return((Ok = self.make_func(fn_def, (Some = body), loc)));
+            });
+            @default => ();
+        };
+    };
+    
+    body := @try(self.parse_expr(Prec_None)) return;
+    // TODO: set flags based on may_capture
+    (Ok = self.make_func(fn_def, (Some = body), loc))
+}
+
+// TODO: this is dumb. just admit there are more ast nodes? but then you have to deal with it everywhere. 
+fn bin_num(self: *Parser, b: BinNum) FatExpr = {
+    loc := self.last.span;
+    v := self.expr((Value = (
+        bytes = (Small = (b.value.bitcast(), 8)),
+        coerced = false,
+    )), loc);
+    v.ty = i64; // this is hardcoded. 
+    bits := self.expr((Value = (
+        bytes = (Small = (b.bit_count.zext(), 8)),
+        coerced = false,
+    )), loc);
+    bits.ty = i64;
+    self.bang(.from_bit_literal, self.pair(bits, v, loc), loc)
+}
+
+fn named_call(self: *Parser, prec: Prec, name: Flag) ParseRes = {
+    return :: @return;
+    loc := self.last.span;
+    arg := self.box(@try(self.parse_expr(prec.with(.Neg))) return);
+    f := self.box(self.get_named(name, loc));
+    (Ok = self.expr((Call = (f = f, arg = arg)), loc))
 }
 
 fn parse_at(self: *Parser, prec: Prec) ParseRes = {
@@ -338,44 +449,37 @@ fn parse_at(self: *Parser, prec: Prec) ParseRes = {
 fn parse_infix(self: *Parser, prev: FatExpr, prec: Prec) ParseRes = {
     return :: @return;
     loc := self.last.span;
-    @match(self.peek()) {
-        (fn Op(op) => {
+    parsed: ParseRes = @match(self.peek()) {
+        (fn Op(op) ParseRes => {
             return(self.parse_bin_op(op, prev, prec));
+            ParseRes.unreachable_hack()
         });
         (fn LeftParen() => {
             // We're an infix, so this is a call, not a free-standing tuple/struct. 
             self.pop();
             arg := @try(self.parse_tuple()) return;
             call := self.expr_call(prev, arg);
-            return(self.parse_infix(call, prec)); // TODO: tail
+            self.parse_infix(call, prec.with(.Suffix))
         });
         (fn Dot() => {
             self.pop();
             name := @try(self.pop_name("e.<NAME>")) return;
             e := self.expr((FieldAccess = (container = self.box(prev), name = name)), loc);
-            return(self.parse_infix(e, prec)); // TODO: tail
+            self.parse_infix(e, prec.with(.Suffix))
         });
         (fn LeftSquiggle() => {
             if(prec.allow_trailing.not(), => return(Ok = prev));
-            self.pop();
-            fn_def := @try(self.fn_def_signeture(self.last.span, false)) return;
-            @try(self.eat(@symbol Pipe, "trailing lambda")) return;
-            
-            body := @try(self.parse_block_until_squiggle()) return;
-            func := self.make_func(fn_def, body, loc);
-            callback := self.expr((Closure = self.box(func)), loc);
-            self.push_arg(prev&, callback);
-            return(self.parse_infix(prev, prec)); // TODO: tail
+            self.parse_squiggle(prev, prec)
         });
         (fn DoubleSquare() => {
             self.pop();
             e := self.bang(.deref, prev, self.last.span);
-            return(self.parse_infix(e, prec)); // TODO: tail
+            self.parse_infix(e, prec.with(.Suffix))
         });
         (fn Amp() => {
             self.pop();
             e := self.bang(.addr, prev, self.last.span);
-            return(self.parse_infix(e, prec)); // TODO: tail
+            self.parse_infix(e, prec.with(.Suffix))
         });
         (fn LeftSquare() => {
             loc := self.last.span;
@@ -392,13 +496,31 @@ fn parse_infix(self: *Parser, prev: FatExpr, prec: Prec) ParseRes = {
             };
             
             e := self.bin_named_macro(Flag.operator_index, prev, index, loc);
-            return(self.parse_infix(e, prec)); // TODO: tail
+            self.parse_infix(e, prec.with(.Suffix))
         });
         @default fn()void => return(Ok = prev);
     };
-    ParseRes.unreachable_hack()
+    prev = @try(parsed) return;
+    // You can chain a bunch of the same level. 
+    self.parse_infix(prev, prec) // TODO: tail
 }
 
+fn parse_squiggle(self: *Parser, prev: FatExpr, prec: Prec) ParseRes = {
+    return :: @return;
+    self.pop();
+    loc := self.last.span;
+    fn_def := @try(self.fn_def_signeture(loc, false)) return;
+    @try(self.eat(@symbol Pipe, "trailing lambda")) return;
+    
+    body := @try(self.parse_block_until_squiggle()) return;
+    func := self.make_func(fn_def, (Some = body), loc);
+    callback := self.expr((Closure = self.box(func)), loc);
+    self.push_arg(prev&, callback);
+    // TODO: do i want allow extra after this??
+    self.parse_infix(prev, prec.with(.Suffix))
+}
+
+// TODO: this seems to use the wrong loc
 fn parse_bin_op(self: *Parser, op: Operator, prev: FatExpr, prec: Prec) ParseRes = {
     return :: @return;
     // TODO: destructuring: `prec, name := @switch ...`
@@ -415,8 +537,12 @@ fn parse_bin_op(self: *Parser, op: Operator, prev: FatExpr, prec: Prec) ParseRes
         @case(.EqEq) => (PrecLevel.Equality, Flag.eq);
         @case(.Bang) => {
             self.pop();
-            // next token should be symbol. make SuffixMacro. return(parse_infix())
-            todo()
+            loc := self.last.span;
+            // no <not> bit op. its e!name...
+            name := @try(self.pop_name("macro name after '!'")) return;
+            e := self.expr((SuffixMacro = (name = name, arg = self.box(prev))), loc);
+            return(self.parse_infix(e, prec)); // TODO: tail
+            unreachable()
         };
         @default fn(_: Operator) => {
             // update assignment operator. hopefully we're in a statement and that will handle it.
@@ -431,7 +557,6 @@ fn parse_bin_op(self: *Parser, op: Operator, prev: FatExpr, prec: Prec) ParseRes
         f := self.box(self.get_named(next._1, loc));
         arg := self.box(self.pair(prev, rhs, loc));
         call := self.expr((Call = (f = f, arg = arg)), loc);
-        // TODO: make sure this should be old prec, not also next._0
         return(self.parse_infix(call, prec)); // TODO: tail
     }{|
         return(Ok = prev);  
@@ -510,8 +635,10 @@ fn push_arg(self: *Parser, call: *FatExpr, callback: FatExpr) void = {
     };
 }
 
-fn make_func(self: *Parser, def: FnDef, body: FatExpr, loc: Span) Func = {
+:: ?FatExpr;
+fn make_func(self: *Parser, def: FnDef, body: ?FatExpr, loc: Span) Func = {
     // TODO: derive fn default with allocator
+    ::if_opt(FatExpr, FuncImpl);
     f: Func = (
         annotations = def.tags.rs(),
         capture_vars = empty(),
@@ -524,7 +651,7 @@ fn make_func(self: *Parser, def: FnDef, body: FatExpr, loc: Span) Func = {
         cc = .None,
         return_var = .None,
         scope = .None,
-        body = (Normal = body),
+        body = if(body, fn(body) => (Normal = body), => (Empty = ())),
         arg = def.arg,
         ret = def.ret,
         // TODO: use the body text based on compiler flag. also should an option use file+line? 
@@ -623,6 +750,7 @@ fn switch_to_parsing_named(self: *Parser, parts: List(FatExpr), ty: LazyType, lo
     
     self.maybe(@symbol Comma);
     @try(self.parse_pattern(bindings&)) return;
+    @try(self.eat(@symbol RightParen, "')' to end argument list")) return;
     return(Ok = self.expr((StructLiteralP = (bindings = bindings.rs(), loc = loc)), loc))
 };
 
@@ -637,12 +765,12 @@ fn parse_args(self: *Parser) Result(Pattern, ParseErr) = {
 fn parse_pattern(self: *Parser, out: *List(Binding)) Result(void, ParseErr) = {
     return :: @return;
     loop {|
+        // TODO: no comma allowed here
         // TODO: destructuring
         // TODO: shouldnt have to put the type annotations everywhere. 
         T :: Ty(Symbol, VarType);
         name_kind: T = @match(self.peek()) {
             (fn RightParen() T => {
-                self.pop();
                 return(.Ok)
             });
             (fn Const() T => {
@@ -662,7 +790,7 @@ fn parse_pattern(self: *Parser, out: *List(Binding)) Result(void, ParseErr) = {
         };
         
         ::if(LazyType);
-        ty: LazyType = if (self.maybe(@symbol Colon)) {|
+        ty: LazyType = if self.maybe(@symbol Colon) {|
             e := @try(self.parse_expr(Prec_None)) return;
             (PendingEval = e)
         } {|
@@ -670,7 +798,7 @@ fn parse_pattern(self: *Parser, out: *List(Binding)) Result(void, ParseErr) = {
         };
         
         ::if(?FatExpr);
-        default: ?FatExpr = if (self.maybe(@symbol Equals)) {|
+        default: ?FatExpr = if self.maybe(@symbol Equals) {|
             e := @try(self.parse_expr(Prec_None)) return;
             (Some = e)
         } {|
@@ -678,6 +806,9 @@ fn parse_pattern(self: *Parser, out: *List(Binding)) Result(void, ParseErr) = {
         };
         b: Binding = (name = (Ident = name_kind._0), ty = ty, default = default, kind = name_kind._1);
         out.push(b);
+        if not(self.maybe(@symbol Comma)) {|
+            return(.Ok);
+        };
     };
     unreachable()
 }
@@ -722,6 +853,7 @@ fn fn_def_signeture(self: *Parser, loc: Span, allow_name: bool) Result(FnDef, Pa
     ::if(Pattern);
     arg: Pattern = if self.maybe(@symbol LeftParen) {|
         a := @try(self.parse_args()) return;
+        @try(self.eat(@symbol RightParen, "')' to end argument list")) return;
         // parse_args eats the ')'
         a
     } {|
@@ -755,7 +887,11 @@ fn parse_block_until_squiggle(self: *Parser) ParseRes = {
     stmts: List(FatStmt) = list(self.alloc);
     
     while(=> not(self.maybe(@symbol RightSquiggle))) {|
-        stmts&.push(@try(self.parse_stmt()) return);
+        if self.maybe(@symbol Eof) {|
+            @report_error("unexpected end of file %", "") (return, self.last.span);
+        };
+        s := @try(self.parse_stmt()) return;
+        stmts&.push(s);
     };
     
     // TODO: :dont_store_noop
@@ -764,7 +900,11 @@ fn parse_block_until_squiggle(self: *Parser) ParseRes = {
         @match(stmt.stmt) {
             (fn Eval(e) FatExpr => e);
             (fn Noop() => self.raw_unit(self.last.span));
-            @default => panic("ICE: block always ends in expr or noop because of semicolon");
+            @default => {
+                // block might end with a func decl with no semicolon.
+                stmts&.push(stmt);
+                self.raw_unit(self.last.span)
+            };
         }
     }{|
         self.raw_unit(self.last.span)
@@ -775,8 +915,15 @@ fn parse_block_until_squiggle(self: *Parser) ParseRes = {
 }
 
 fn parse_annotations(self: *Parser) Result(List(Annotation), ParseErr) = {
-    // TODO
+    return :: @return;
     tags: List(Annotation) = list(self.alloc);
+    while(=> self.maybe(@symbol Hash)) {|
+        name := @try(self.pop_name("ident after '#'")) return;
+        arg: ?FatExpr = if self.maybe(@symbol LeftParen) {|
+            (Some = @try(self.parse_tuple()) return)
+        } {| .None };
+        tags&.push((name = name, args = arg));
+    };
     (Ok = tags)
 }
 
@@ -851,7 +998,7 @@ fn peek(self: *Parser) TokenType = {
     token.type
 }
 
-#macro fn report_error(fmt_args: FatExpr, ret_loc: FatExpr) FatExpr = {
+fn report_error(fmt_args: FatExpr, ret_loc: FatExpr) FatExpr #macro = {
     assert_eq(ret_loc.expr&!tag[], tag_value(Expr, @symbol Tuple));
     args := FatExpr.slice_from_tuple(ret_loc.expr.Tuple);
     result := '{
@@ -865,13 +1012,13 @@ fn peek(self: *Parser) TokenType = {
 
 // TODO: you need from_residual so you can have it work when different ok types but the same error type. 
 // TOOD: this doesn't even have to be a macro cause i have non-local returns... if i had better polymorphism. 
-#macro fn try(maybe: FatExpr, ret: FatExpr) FatExpr = '{
+fn try(maybe: FatExpr, ret: FatExpr) FatExpr #macro= '{
     m := @[maybe];
     if(m&.is_err(), => @[ret](Err = m.unwrap_err()));
     m.unwrap()
 }';
 
-#test fn parser_doesnt_crash() = {
+fn parser_doesnt_crash() #test = {
     pool: StringPool = init(temp());
     enumerate (::get_enum_names(Flag)) {i, name|
         pool&.insert_owned(name[]);
@@ -916,14 +1063,42 @@ fn peek(self: *Parser) TokenType = {
         "@a b;",
         "@(a(d))(b) c;",
         "a(f, g) { (b: c) d| e };",
-        "a(b(c)) {| d };",
-        "a b(c) {| d };",
+        "a(!b(c)) {| d };",
+        "a !b(c) {| d };",
         "a(b(c) {| d });",
+        "a() + b() * c();",
+        "a() * b() + c();",
+        "?a(b) + c;",
+        "a.b;",
+        "*T;",
+        "a&!tag[] + b;",
+        "0xABC + 0b10101;",
+        "(fn hello(a: b) c => d);",
+        "fn hi(a: b) c #d #e(f);",
+        "a(=> b);",
     )!slice;
-    for (src) {src|
+    
+    // TODO: if you make the stack slice too large it segfaults.. sometimes ?? in rust debug mode it just miscompiles ?SA?EQ@?QW#F>FKLQW? :FUCKED -- Jun 22
+    src := src.clone(temp());
+    
+    src&.push_all((
+        "{ fn a() b = { c }; d };",
+        "a :: @struct(a: @struct(e: f), c: d);",
+        "a :: @struct(b: B, c: C, d: D);",
+        "for parts {e| a };",
+    )!slice);
+    
+    s := temp().read_to_string("parse.fr");
+    s&.insert(0, "{".ascii());
+    s&.push_all("\n};");
+    src&.push(s.items());
+    
+    failed := false;
+    for src {src|
         span := codemap&.add_file("name", src);
         tasks: List(ParseTask) = list(temp());
-        ctx: Parser = (lex = init(pool&, span, src), tasks = tasks&, alloc = temp(), last = Token.zeroed());
+        lex: Lexer = init(pool&, span, src); // TODO: shadow
+        ctx: Parser = (pool = pool&, lex = lex, tasks = tasks&, alloc = temp(), last = Token.zeroed());
         tasks&.push((Pending = (src = src, span = span)));
         res := ctx&.parse_stmt();
         @match(res) {
@@ -933,14 +1108,21 @@ fn peek(self: *Parser) TokenType = {
                 print(out.items());
                 println(codemap&.source_slice(t.loc));
                 next_token := ctx.lex&.pop(); // TODO: i think this should just be peek once i consume semicolons? 
-                assert(next_token.type&!tag[].eq(tag_value(TokenType, @symbol Eof)), "parser did not consume all input.");
+                if next_token.type&!tag[].eq(tag_value(TokenType, @symbol Eof)).not() {|
+                    failed = true;
+                    println("parser did not consume all input.");
+                };
             });
-            (fn Err(e) void => @println("err! % at:\n%", e.msg, codemap&.source_slice(e.span)));
+            (fn Err(e) void => {
+                //place: Span = (low = e.span.low.sub(10), high = e.span.high.add(10));
+                place := e.span;
+                @println("err! % at:\n%", e.msg, codemap&.source_slice(place));
+                failed = true;
+            });
         };
     };
+    assert(not(failed), "parse failed");
 }
 
 fn int(self: PrecLevel) i64 = @as(i64) self;
 ::Ord(PrecLevel);
-
-#redirect(Ty(i64, i64), bool) fn eq(a: Operator, b: Operator) bool;

@@ -1,8 +1,8 @@
 //! TODO: utf8
-//! TODO: skip_to_closing_squiggle. 
 
 Token :: @struct(type: TokenType, span: Span);
 A :: Symbol;
+BinNum :: @struct(bit_count: u8, value: u64);
 TokenType :: @tagged(
     Number: i64,
     Symbol: Symbol,
@@ -11,7 +11,7 @@ TokenType :: @tagged(
     Op: Operator, 
     Error: LexErr, Eof,
     // Bit count means leading zeros are observable.
-    BinaryNum: @struct(bit_count: u8, value: u64),
+    BinaryNum: BinNum,
     LeftSquiggle, RightSquiggle, LeftParen, RightParen, LeftSquare, RightSquare,
     Dot, At, Comma, Colon, Semicolon, DoubleSquare, Hash, FatRightArrow, LeftArrow, DoubleColon, SingleQuote,
     Amp, Question, Pipe, Equals, 
@@ -19,6 +19,8 @@ TokenType :: @tagged(
 );
 
 Operator :: @enum(i64) (Plus, Minus, Star, Slash, Less, Greater, Bang, PlusEq, MinusEq, StarEq, SlashEq, LessEq, GreaterEq, BangEq, EqEq);
+#redirect(Ty(i64, i64), bool) fn eq(a: Operator, b: Operator) bool;
+
 LexErr :: @tagged(
     Unexpected: i64,
     UnterminatedStr,
@@ -68,7 +70,20 @@ fn pop(self: *Lexer) *Token = {
         @case("<".ascii()) => self.pair("=".ascii(), (Op = .Less), (Op = .LessEq));
         @case(">".ascii()) => self.pair("=".ascii(), (Op = .Greater), (Op = .GreaterEq));
         @case("!".ascii()) => self.pair("=".ascii(), (Op = .Bang), (Op = .BangEq));
-        @case("=".ascii()) => self.pair("=".ascii(), .Equals, (Op = .EqEq));
+        @case("=".ascii()) => {
+            found := @switch(self.peek_c(1)) {
+                @case("=".ascii()) => {
+                    self.current += 1;
+                    @as(TokenType) (Op = .EqEq)
+                };
+                @case(">".ascii()) => {
+                    self.current += 1;
+                    TokenType.FatRightArrow
+                };
+                @default fn(_: u8) => TokenType.Equals;
+            };
+            self.one(found)
+        };
         @case("@".ascii()) => self.one(.At);
         @case("&".ascii()) => self.one(.Amp);
         @case("#".ascii()) => self.one(.Hash);
@@ -93,8 +108,46 @@ fn pop(self: *Lexer) *Token = {
     self.token&
 }
 
-fn lex_string(self: *Lexer) void = {
-    err :: @return;
+fn skip_to_closing_squigle(self: *Lexer) Ty(Str, Span) = {
+    start := self.start;
+    self.current += 1;
+    depth := 1;
+    (=> {
+        break :: @return;
+        while (=> depth.gt(0)) {|
+            if self.eat_white_space_hit_end() {|
+                break();
+            };
+            // TODO: skip #! ...... \n but it only matters if you had unnested stuff there which you shouldn't -- Apr 28
+            @switch(self.peek_c()) {
+                @case("\"".ascii()) => {
+                    self.skip_string();
+                };
+                @case("{".ascii()) => {
+                    depth += 1;
+                    self.current += 1;
+                };
+                @case("}".ascii()) => {
+                    depth -= 1;
+                    self.current += 1;
+                };
+                @default fn(_: u8) => {
+                    self.current += 1;
+                };
+            };
+        };
+    })();
+    text := self.src.slice(start, self.current);
+    span := self.root.subspan(start.trunc(), self.current.trunc());
+    self.start = self.current;
+    self.peek();
+    (text, span)
+}
+
+fn skip_string(self: *Lexer) Ty(Str, bool, bool) = {
+    ret :: @return;
+    err :: fn() Never => ret("FAILED TO LEX STRING YOU SHOULD NEVER SEE THIS ICE", false, false);
+    
     is_multiline := self.peek_c(1).eq("\"".ascii()).and(=> self.peek_c(2).eq("\"".ascii()));
     escapes := false;
     text := if is_multiline {|
@@ -136,8 +189,17 @@ fn lex_string(self: *Lexer) void = {
         self.current += 1;
         self.src.slice(self.start.add(1), self.current.sub(1))
     };
-    
-    self.put_token((Quoted = (s = self.pool.insert_owned(text), escapes = escapes)));
+
+    (text, escapes, true)
+}
+
+
+fn lex_string(self: *Lexer) void = {
+    // TODO: destructuring 
+    text_escapes_success := self.skip_string();
+    if text_escapes_success._2 {|
+        self.put_token((Quoted = (s = self.pool.insert_owned(text_escapes_success._0), escapes = text_escapes_success._1)));
+    };
 }
 
 fn lex_num(self: *Lexer) void = {

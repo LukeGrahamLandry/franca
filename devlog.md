@@ -1,10 +1,13 @@
-## the parser grind (Jum 21)
+## the parser grind (Jun 21/22)
 
 - stmt var decl
 - tuples, struct literals
 - calls, dot calls
 - assign, update-assign
 - macro, quote, unquote
+- trailing lambda
+- prefix type ops, bang macros, bit literals
+- fn exprs and stmts
 
 ## debug x86 (Jun 20)
 
