@@ -5,7 +5,8 @@ use crate::{
     err,
     export_ffi::BigOption,
     extend_options, impl_index, impl_index_imm,
-    pool::{Ident, StringPool},
+    pool::Ident,
+    self_hosted::SelfHosted,
     unwrap, BitSet, Map, STATS,
 };
 use codemap::Span;
@@ -845,7 +846,7 @@ pub enum LazyType<'p> {
 
 #[repr(C)]
 pub struct Program<'p> {
-    pub pool: &'p StringPool<'p>,
+    pub pool: &'p mut SelfHosted<'p>,
     pub types: Vec<TypeInfo<'p>>,
     // twice as much memory but it's so much faster. TODO: can i just store hashes?
     pub type_lookup: Map<TypeInfo<'p>, TypeId>,
@@ -940,7 +941,8 @@ pub struct IntTypeInfo {
 }
 
 impl<'p> Program<'p> {
-    pub fn new(pool: &'p StringPool<'p>, comptime_arch: TargetArch) -> Self {
+    pub fn new(comptime_arch: TargetArch) -> Self {
+        let pool = Box::leak(Box::new(SelfHosted::default()));
         let mut program = Self {
             primitives: Default::default(),
             fat_expr_type: None,

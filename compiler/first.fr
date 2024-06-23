@@ -45,30 +45,42 @@ fn driver(vtable: *ImportVTable) void #export = {
     };
     println(tests.len);
     
-    // TODO: this needs to work!
-    ir_text := emit_llvm((data = comp, vtable = vtable), temp(), tests, .TestRunnerMain);
+    
+    ir_text := emit_llvm(c, temp(), tests, .TestRunnerMain);
+    test_exe := "target/tests.exe";
+    build_llvm(ir_text, ("-o", test_exe)!slice);
+    success := run_cmd_blocking(test_exe, empty());
+    assert(success, "tests failed");
+    
+    
+    tests := c.get_tagged("compiler");
+    
+    
+    ir_text := emit_llvm(c, temp(), tests, .ExportWithNames);
+    test_exe := "target/tests.exe";
+    build_llvm(ir_text, ("-o", "target/libfranca.o", "-c")!slice);
+    success := run_cmd_blocking("/usr/bin/ar", ("rc", "target/libfranca.a", "target/libfranca.o")!slice);
+    assert(success, "link failed");
+    
+    
+    save_exports_as_dylib(vtable);
+}
+
+// TODO: return result
+fn build_llvm(ir: BucketArray(u8), args: Slice(Str)) void = {
     out := open_temp_file();
-    for(ir_text&){bucket|
+    for(ir&){bucket|
         out.fd&.write(bucket);
     };
     @println("Write llvm ir to %", out&.s_name());   
-    args: List(Str) = list(temp());
-    //args&.push("-dynamiclib");
-    args&.push("-o");
-    //args&.push("target/libfranca.dylib");
-    args&.push("target/a.out");
-    args&.push("-O2");
-    
-    // don't check the file extension of source files that follow. 
-    args&.push("-x"); 
+    args: List(Str) = args.clone(temp());
+    args&.push("-x"); // don't check the file extension of source files that follow. 
     args&.push("ir"); 
     args&.push(out&.s_name());
     @println("%", args.items());
     success := run_cmd_blocking(CLANG_PATH, args.items());
     assert(success, "ICE: generated invalid llvm ir");
     out.remove();
-
-    save_exports_as_dylib(vtable);
 }
 
 fn save_exports_as_dylib(vtable: *ImportVTable) void = {
@@ -89,7 +101,7 @@ fn save_exports_as_dylib(vtable: *ImportVTable) void = {
     args: List(Str) = list(temp());
     args&.push("-dynamiclib");
     args&.push("-o");
-    args&.push("target/libfranca.dylib");
+    args&.push("target/build_compiler.dylib");
     //args&.push("-Os");
     
     // don't check the file extension of source files that follow. 

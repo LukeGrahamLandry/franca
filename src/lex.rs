@@ -6,12 +6,11 @@ use crate::ast::Flag;
 use crate::ast::VarType;
 use crate::lex::TokenType::*;
 use crate::pool::{Ident, StringPool};
-use codemap::{File, Span};
+use codemap::Span;
 use std::collections::VecDeque;
 use std::iter::Peekable;
 use std::ops::Deref;
 use std::str::Chars;
-use std::sync::Arc;
 
 // TODO: why tf is Range not copy
 #[derive(Debug, Clone)]
@@ -78,8 +77,8 @@ pub enum LexErr {
 
 pub struct Lexer<'a, 'p> {
     pool: &'p StringPool<'p>,
-    root: Span,
-    pub src: Arc<File>,
+    src: *const str,
+    pub root: Span,
     start: usize,
     current: usize,
     chars: Peekable<Chars<'a>>,
@@ -88,12 +87,11 @@ pub struct Lexer<'a, 'p> {
 }
 
 impl<'a, 'p> Lexer<'a, 'p> {
-    pub fn new(src: Arc<File>, pool: &'p StringPool<'p>, root: Span) -> Self {
+    pub fn new(code: &str, pool: &'p StringPool<'p>, root: Span) -> Self {
         // Safety: its in an arc which is dropped at the same time as the iterator.
-        let code = src.source_slice(root);
-        let hack = unsafe { &*(code as *const str) };
+        let hack = unsafe { &*(code.to_owned().leak() as *const str) };
+        // println!("{code}\n====");
         Self {
-            src,
             start: 0,
             current: 0,
             peeked: VecDeque::with_capacity(10),
@@ -101,6 +99,7 @@ impl<'a, 'p> Lexer<'a, 'p> {
             root,
             pool,
             hack: None,
+            src: hack,
         }
     }
 
@@ -259,7 +258,7 @@ impl<'a, 'p> Lexer<'a, 'p> {
     // TODO: support escape characters
     fn lex_quoted(&mut self) -> Token<'p> {
         if let Some(((start, end), escapes)) = self.skip_quoted() {
-            let text = &self.src.source_slice(self.root)[start..end];
+            let text = &(unsafe { &*self.src })[start..end];
             // TODO: probably dont want to always hash string constants like this.
             self.token(
                 Quoted {
@@ -335,7 +334,7 @@ impl<'a, 'p> Lexer<'a, 'p> {
     }
 
     fn end_num(&mut self, is_float: bool) -> Token<'p> {
-        let text = &self.src.source_slice(self.root)[self.start..self.current];
+        let text = &(unsafe { &*self.src })[self.start..self.current];
         if is_float {
             let n = match text.parse::<f64>() {
                 Ok(n) => n,
@@ -359,7 +358,8 @@ impl<'a, 'p> Lexer<'a, 'p> {
             self.pop();
             c = self.peek_c();
         }
-        let ty = match &self.src.source_slice(self.root)[self.start..self.current] {
+
+        let ty = match &(unsafe { &*self.src })[self.start..self.current] {
             "fn" => Fn,
             "let" => Qualifier(VarType::Let),
             "var" => Qualifier(VarType::Var),

@@ -1,5 +1,4 @@
 use codemap::Span;
-use codemap_diagnostic::{Diagnostic, Emitter, Level, SpanLabel, SpanStyle};
 
 use crate::ast::{
     garbage_loc, Expr, FatExpr, FnFlag, FuncId, FuncImpl, LazyType, OverloadOption, OverloadSet, OverloadSetId, Pattern, TypeId, TypeInfo, Var,
@@ -52,7 +51,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 Some(id)
             }
             &mut Expr::GetNamed(i) => {
-                err!("GetNamed func: {}", self.pool.get(i));
+                err!("GetNamed func: {}", self.program.pool.get(i));
             }
             _ => None,
         })
@@ -82,11 +81,11 @@ impl<'a, 'p> Compile<'a, 'p> {
                 self.pop_state(state);
                 Ok(id)
             } else {
-                err!("Expected function for {} but found {:?}", name.log(self.pool), value);
+                err!("Expected function for {} but found {:?}", name.log(self.program.pool), value);
             }
         } else {
             // TODO: use self.program.vars[name.1].loc to show the declaration site.
-            err!("Missing constant {} (forgot to make a Fn(A, R) 'const'?)", name.log(self.pool))
+            err!("Missing constant {} (forgot to make a Fn(A, R) 'const'?)", name.log(self.program.pool))
         }
     }
 
@@ -110,7 +109,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
 
         if overloads.ready.is_empty() {
-            err!("No overload found for {i:?}: {}. try adding a type hint", self.pool.get(name));
+            err!("No overload found for {i:?}: {}. try adding a type hint", self.program.pool.get(name));
         }
 
         let original = overloads.clone();
@@ -148,7 +147,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     let log_goal = |s: &mut Self| {
                         format!(
                             "for fn {}({arg_ty:?}={}) {}={:?};",
-                            s.pool.get(name),
+                            s.program.pool.get(name),
                             s.program.log_type(arg_ty),
                             requested_ret.map(|ret| format!("{ret:?}")).unwrap_or_default(),
                             requested_ret.map(|t| s.program.log_type(t)).unwrap_or_else(|| "??".to_string())
@@ -171,11 +170,15 @@ impl<'a, 'p> Compile<'a, 'p> {
                             self.program.log_type(f.arg),
                             f.ret.map(|ret| format!("{ret:?}")).unwrap_or(String::new()),
                             f.ret.map(|ret| self.program.log_type(ret)).unwrap_or(String::new()),
-                            self.program[f.func].annotations.iter().map(|a| self.pool.get(a.name)).collect::<Vec<_>>()
+                            self.program[f.func]
+                                .annotations
+                                .iter()
+                                .map(|a| self.program.pool.get(a.name))
+                                .collect::<Vec<_>>()
                         )
                         .unwrap();
                         if yes {
-                            // outln!(ShowErr, "   {}", self.program[f.func].log(self.pool));
+                            // outln!(ShowErr, "   {}", self.program[f.func].log(self.program.pool));
                         }
                     }
                     for f in original.pending {
@@ -183,7 +186,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             msg,
                             "- pending/failed {:?} {:?} uninit={}",
                             f,
-                            self.program[f].arg.log(self.pool),
+                            self.program[f].arg.log(self.program.pool),
                             !self.program[f].get_flag(FnFlag::NotEvilUninit)
                         )
                         .unwrap()
@@ -196,12 +199,12 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
                 Ok(None) => {
                     self.last_loc = Some(arg.loc);
-                    err!("AmbiguousCall. Unknown type for argument {}", arg.log(self.pool))
+                    err!("AmbiguousCall. Unknown type for argument {}", arg.log(self.program.pool))
                 }
                 Err(e) => err!(
                     "AmbiguousCall. Unknown type for argument {}. {}",
-                    arg.log(self.pool),
-                    e.reason.log(self.program, self.pool)
+                    arg.log(self.program.pool),
+                    e.reason.log(self.program, self.program.pool)
                 ),
             }
         } else {
@@ -224,12 +227,12 @@ impl<'a, 'p> Compile<'a, 'p> {
                     }
                     Ok(None) => {
                         self.last_loc = Some(arg.loc);
-                        err!("AmbiguousCall. Unknown type for argument {}", arg.log(self.pool))
+                        err!("AmbiguousCall. Unknown type for argument {}", arg.log(self.program.pool))
                     }
                     Err(e) => err!(
                         "AmbiguousCall. Unknown type for argument {}. {}",
-                        arg.log(self.pool),
-                        e.reason.log(self.program, self.pool)
+                        arg.log(self.program.pool),
+                        e.reason.log(self.program, self.program.pool)
                     ),
                 }
             }
@@ -338,7 +341,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             assert!(
                 opt.ret == output.ret,
                 "overload missmatch for {}. unreachable? {:?} {:?} {:?} {:?}",
-                self.pool.get(self.program[i].name),
+                self.program.pool.get(self.program[i].name),
                 opt.ret,
                 output.ret,
                 opt.ret.map(|t| self.program.log_type(t)),
@@ -351,7 +354,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
             match &self.program[f].body {
                 FuncImpl::Redirect(_) => {} // TODO: i'd rather not get here a billion times
-                FuncImpl::Empty | FuncImpl::Normal(_) => err!("hmmm {}", self.program[f].body.log(self.pool)),
+                FuncImpl::Empty | FuncImpl::Normal(_) => err!("hmmm {}", self.program[f].body.log(self.program.pool)),
                 FuncImpl::Merged(parts) => {
                     merged.extend(parts.iter().cloned());
                 }
@@ -376,7 +379,9 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         // i dare you to make this not an ass copy-paste.
         match &self.program[output.func].body {
-            FuncImpl::Redirect(_) | FuncImpl::Empty | FuncImpl::Normal(_) => err!("ambigous overload {}", self.program[output.func].log(self.pool)),
+            FuncImpl::Redirect(_) | FuncImpl::Empty | FuncImpl::Normal(_) => {
+                err!("ambigous overload {}", self.program[output.func].log(self.program.pool))
+            }
             FuncImpl::Merged(parts) => {
                 merged.extend(parts.iter().cloned());
             }
@@ -409,7 +414,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let index = unwrap!(
                     pattern.bindings.iter().position(|p| p.name() == Some(name)),
                     "missing named argument {}",
-                    self.pool.get(name)
+                    self.program.pool.get(name)
                 );
                 let value = pattern.bindings.remove(index);
                 assert!(matches!(value.ty, LazyType::Infer), "use '=' not ':' for named arg");
@@ -451,23 +456,24 @@ impl<'a, 'p> Compile<'a, 'p> {
 }
 
 pub fn where_the_fuck_am_i(comp: &Compile, loc: Span) {
-    if loc == garbage_loc() {
-        println!("called where_the_fuck_am_i on garbage_loc");
-        return;
-    }
-    let diagnostic = Diagnostic {
-        level: Level::Note,
-        message: String::from("you are here"),
-        code: None,
-        spans: vec![SpanLabel {
-            span: loc,
-            label: None,
-            style: SpanStyle::Primary,
-        }],
-    };
-    let mut out = vec![];
-    let mut emitter = Emitter::vec(&mut out, Some(&comp.parsing.codemap));
-    emitter.emit(&[diagnostic]);
-    drop(emitter);
-    println!("{}", String::from_utf8(out).unwrap())
+    // if loc == garbage_loc() {
+    //     println!("called where_the_fuck_am_i on garbage_loc");
+    //     return;
+    // }
+    // let diagnostic = Diagnostic {
+    //     level: Level::Note,
+    //     message: String::from("you are here"),
+    //     code: None,
+    //     spans: vec![SpanLabel {
+    //         span: loc,
+    //         label: None,
+    //         style: SpanStyle::Primary,
+    //     }],
+    // };
+    // let mut out = vec![];
+    // let mut emitter = Emitter::vec(&mut out, Some(&comp.parsing.codemap));
+    // emitter.emit(&[diagnostic]);
+    // drop(emitter);
+    // println!("{}", String::from_utf8(out).unwrap())
+    todo!()
 }

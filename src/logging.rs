@@ -116,6 +116,7 @@ pub use unwrap;
 use crate::ast::{FatStmt, FnFlag, FuncImpl, Pattern};
 use crate::export_ffi::BigOption;
 use crate::pool::Ident;
+use crate::self_hosted::SelfHosted;
 use crate::{
     ast::{Expr, FatExpr, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo, Var},
     compiler::{CErr, CompileError, DebugState},
@@ -125,7 +126,7 @@ use crate::{bc::*, STATS};
 
 /// It felt like a good idea to be able to compare identifiers super fast but now its forever a pain to look at them while debugging.
 pub trait PoolLog<'p> {
-    fn log(&self, pool: &StringPool<'p>) -> String;
+    fn log(&self, pool: &SelfHosted<'p>) -> String;
 }
 
 use crate::ast::safe_rec;
@@ -251,13 +252,13 @@ impl<'p> Program<'p> {
 }
 
 impl<'p> PoolLog<'p> for Stmt<'p> {
-    fn log(&self, pool: &StringPool<'p>) -> String {
+    fn log(&self, pool: &SelfHosted<'p>) -> String {
         self.logd(pool, 0)
     }
 }
 
 impl<'p> PoolLog<'p> for LazyType<'p> {
-    fn log(&self, pool: &StringPool<'p>) -> String {
+    fn log(&self, pool: &SelfHosted<'p>) -> String {
         match self {
             LazyType::EvilUnit => "EVIL_UNINIT !!!".into(),
             LazyType::Infer => "Infer".into(),
@@ -268,7 +269,7 @@ impl<'p> PoolLog<'p> for LazyType<'p> {
     }
 }
 impl<'p> PoolLog<'p> for Pattern<'p> {
-    fn log(&self, pool: &StringPool<'p>) -> String {
+    fn log(&self, pool: &SelfHosted<'p>) -> String {
         // TODO: copy-paste. expr::StructLiteralP should
         let body: String = self
             .bindings
@@ -280,13 +281,13 @@ impl<'p> PoolLog<'p> for Pattern<'p> {
 }
 
 impl<'p> PoolLog<'p> for Expr<'p> {
-    fn log(&self, pool: &StringPool<'p>) -> String {
+    fn log(&self, pool: &SelfHosted<'p>) -> String {
         self.logd(pool, 0)
     }
 }
 
 impl<'p> Expr<'p> {
-    fn logd(&self, pool: &StringPool<'p>, depth: usize) -> String {
+    fn logd(&self, pool: &SelfHosted<'p>, depth: usize) -> String {
         unsafe { STATS.expr_fmt += 1 };
         match self {
             Expr::Call(func, arg) => {
@@ -366,7 +367,7 @@ impl<'p> Expr<'p> {
 }
 
 impl<'p> Stmt<'p> {
-    pub(crate) fn logd(&self, pool: &StringPool<'p>, depth: usize) -> String {
+    pub(crate) fn logd(&self, pool: &SelfHosted<'p>, depth: usize) -> String {
         let s = match self {
             Stmt::DeclNamed { name, ty, value, kind } => format!("{kind:?} {}: {} = {};", pool.get(*name), ty.log(pool), value.logd(pool, depth)),
             Stmt::DeclVar { name, ty, value, .. } => format!("{:?} {}: {} = {};", name.kind, name.log(pool), ty.log(pool), value.logd(pool, depth)),
@@ -393,13 +394,13 @@ impl<'p> Stmt<'p> {
 }
 
 impl<'p> PoolLog<'p> for FatExpr<'p> {
-    fn log(&self, pool: &StringPool<'p>) -> String {
+    fn log(&self, pool: &SelfHosted<'p>) -> String {
         self.expr.log(pool)
     }
 }
 
 impl<'p> PoolLog<'p> for Var<'p> {
-    fn log(&self, pool: &StringPool<'p>) -> String {
+    fn log(&self, pool: &SelfHosted<'p>) -> String {
         use crate::ast::VarType;
         let kind = match self.kind {
             VarType::Let => "L",
@@ -411,7 +412,7 @@ impl<'p> PoolLog<'p> for Var<'p> {
 }
 
 impl<'p> PoolLog<'p> for Func<'p> {
-    fn log(&self, pool: &StringPool<'p>) -> String {
+    fn log(&self, pool: &SelfHosted<'p>) -> String {
         if !self.get_flag(FnFlag::NotEvilUninit) {
             return "[UNINIT (wip/dropped)]".to_string();
         }
@@ -484,7 +485,7 @@ impl<'p> Debug for CompileError<'p> {
 }
 
 impl<'p> DebugState<'p> {
-    pub fn log(&self, pool: &StringPool<'p>, _: &Program<'p>) -> String {
+    pub fn log(&self, pool: &SelfHosted<'p>, _: &Program<'p>) -> String {
         match self {
             DebugState::Msg(s) => s.clone(),
             DebugState::Compile(f, i) => format!("| Compile    | {:?} {}", *f, pool.get(*i)),
@@ -503,7 +504,7 @@ impl<'p> DebugState<'p> {
 }
 
 impl<'p> CErr<'p> {
-    pub fn log(&self, program: &Program<'p>, pool: &StringPool<'p>) -> String {
+    pub fn log(&self, program: &Program<'p>, pool: &SelfHosted<'p>) -> String {
         match self {
             &CErr::UndeclaredIdent(i) => format!("Undeclared Ident: {i:?} = {}", pool.get(i)),
             &CErr::TypeCheck(found, expected, msg) => format!(
@@ -645,7 +646,7 @@ impl<'p> Program<'p> {
 }
 
 impl<'p> FatStmt<'p> {
-    pub fn log_annotations(&self, pool: &StringPool<'p>) -> String {
+    pub fn log_annotations(&self, pool: &SelfHosted<'p>) -> String {
         self.annotations.iter().map(|a| pool.get(a.name)).collect()
     }
 }
@@ -657,7 +658,7 @@ impl Debug for FuncId {
 }
 
 impl<'p> PoolLog<'p> for FuncImpl<'p> {
-    fn log(&self, pool: &StringPool<'p>) -> String {
+    fn log(&self, pool: &SelfHosted<'p>) -> String {
         match self {
             FuncImpl::Normal(e) => e.log(pool),
             FuncImpl::DynamicImport(_) => todo!(),

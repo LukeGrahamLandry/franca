@@ -10,26 +10,25 @@ use crate::bc::Values;
 use crate::compiler::{CErr, CompileError, Res};
 use crate::export_ffi::BigResult::*;
 use crate::export_ffi::{get_include_std, BigOption};
+use crate::self_hosted::SelfHosted;
 use crate::STATS;
 use crate::{
     ast::{Annotation, Expr, FatExpr, FatStmt, Func, LazyType, Pattern, Stmt},
     lex::{Lexer, Token, TokenType},
-    logging::PoolLog,
     pool::{Ident, StringPool},
 };
 use TokenType::*;
 
 pub struct Parser<'a, 'p> {
-    pool: &'p StringPool<'p>,
     lexer: Lexer<'a, 'p>,
     spans: Vec<Span>,
-    ctx: &'a mut ParseTasks<'p>,
+    ctx: &'a mut SelfHosted<'p>,
 }
 
 #[derive(Debug, Clone)]
 pub enum ParseFile<'p> {
-    PendingStmts(Arc<File>, Span),
-    PendingExpr(Arc<File>, Span),
+    PendingStmts(Span),
+    PendingExpr(Span),
     ParsedStmts(Vec<FatStmt<'p>>),
     ParsedExpr(FatExpr<'p>),
     Err(Box<CompileError<'p>>),
@@ -41,7 +40,7 @@ pub enum ParseFile<'p> {
 pub struct ParseTasks<'p> {
     pub pool: &'p StringPool<'p>,
     pub codemap: CodeMap,
-    tasks: Vec<ParseFile<'p>>,
+    pub tasks: Vec<ParseFile<'p>>,
     already_loaded: HashSet<Ident<'p>>,
 }
 
@@ -60,73 +59,20 @@ impl<'p> ParseTasks<'p> {
         }
     }
 
-    pub fn wait_for_stmts(&mut self, name: usize) -> Res<'p, Vec<FatStmt<'p>>> {
-        match &mut self.tasks[name] {
-            ParseFile::PendingStmts(file, span) => {
-                let lex = Lexer::new(file.clone(), self.pool, *span);
-                let res = Parser::parse_stmts(self, lex, self.pool);
-                match res {
-                    Ok(stmts) => {
-                        unsafe { STATS.parser_did += 1 };
-                        // println!("{:?}\n=====", stmts.iter().map(|v| v.log(self.pool)).collect::<Vec<_>>());
-                        self.tasks[name] = ParseFile::Wip; // stmts are single use it seems.
-                        Ok(stmts)
-                    }
-                    Err(e) => {
-                        self.tasks[name] = ParseFile::Err(e.clone());
-                        Err(e)
-                    }
-                }
-            }
-            ParseFile::ParsedStmts(_) => unreachable!(),
-            ParseFile::Err(e) => Err(e.clone()),
-            _ => todo!(),
-        }
-    }
-
-    pub fn wait_for_expr(&mut self, name: usize) -> Res<'p, FatExpr<'p>> {
-        match &mut self.tasks[name] {
-            ParseFile::PendingExpr(file, span) => {
-                let lex = Lexer::new(file.clone(), self.pool, *span);
-                let res = Parser::parse_expr_outer(self, lex, self.pool);
-                match res {
-                    Ok(stmts) => {
-                        unsafe { STATS.parser_did += 1 };
-                        // println!("{}\n=====", stmts.log(self.pool));
-                        self.tasks[name] = ParseFile::ParsedExpr(stmts.clone());
-                        Ok(stmts)
-                    }
-                    Err(e) => {
-                        self.tasks[name] = ParseFile::Err(e.clone());
-                        Err(e)
-                    }
-                }
-            }
-            ParseFile::ParsedExpr(v) => Ok(v.clone()),
-            ParseFile::Err(e) => Err(e.clone()),
-            _ => todo!(),
-        }
-    }
-
-    pub fn add_task(&mut self, is_expr: bool, file: Arc<File>, span: Span) -> usize {
+    pub fn add_task(&mut self, is_expr: bool, span: Span) -> usize {
         unsafe { STATS.parser_queue += 1 };
         if is_expr {
-            self.tasks.push(ParseFile::PendingExpr(file, span));
+            self.tasks.push(ParseFile::PendingExpr(span));
         } else {
-            self.tasks.push(ParseFile::PendingStmts(file, span));
+            self.tasks.push(ParseFile::PendingStmts(span));
         }
         self.tasks.len() - 1
     }
 }
 
 impl<'a, 'p> Parser<'a, 'p> {
-    pub fn parse_stmts(ctx: &'a mut ParseTasks<'p>, lexer: Lexer<'a, 'p>, pool: &'p StringPool<'p>) -> Res<'p, Vec<FatStmt<'p>>> {
-        let mut p = Parser {
-            pool,
-            lexer,
-            spans: vec![],
-            ctx,
-        };
+    pub fn parse_stmts(ctx: &'a mut SelfHosted<'p>, lexer: Lexer<'a, 'p>) -> Res<'p, Vec<FatStmt<'p>>> {
+        let mut p = Parser { lexer, spans: vec![], ctx };
 
         p.start_subexpr();
         let mut stmts: Vec<FatStmt<'p>> = vec![];
@@ -139,13 +85,8 @@ impl<'a, 'p> Parser<'a, 'p> {
         Ok(stmts)
     }
 
-    pub fn parse_expr_outer(ctx: &'a mut ParseTasks<'p>, lexer: Lexer<'a, 'p>, pool: &'p StringPool<'p>) -> Res<'p, FatExpr<'p>> {
-        let mut p = Parser {
-            pool,
-            lexer,
-            spans: vec![],
-            ctx,
-        };
+    pub fn parse_expr_outer(ctx: &'a mut SelfHosted<'p>, lexer: Lexer<'a, 'p>) -> Res<'p, FatExpr<'p>> {
+        let mut p = Parser { lexer, spans: vec![], ctx };
 
         p.start_subexpr();
         let expr = p.parse_expr(true)?;
@@ -221,13 +162,7 @@ impl<'a, 'p> Parser<'a, 'p> {
     }
 
     fn anon_fn_name(&self, expr: &FatExpr<'p>) -> Ident<'p> {
-        if unsafe { ANON_BODY_AS_NAME } {
-            let mut name = expr.log(self.pool);
-            name.truncate(35);
-            self.pool.intern(&name)
-        } else {
-            Flag::Anon.ident()
-        }
+        Flag::Anon.ident()
     }
 
     fn parse_expr_inner(&mut self, allow_trailing: bool) -> Res<'p, FatExpr<'p>> {
@@ -250,7 +185,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                 let body = if !capturing && self.peek() == LeftSquiggle {
                     self.start_subexpr();
                     let span = self.lexer.skip_to_closing_squigle();
-                    let i = self.ctx.add_task(true, self.lexer.src.clone(), span);
+                    let i = self.ctx.parser.add_task(true, span);
                     let e = Expr::GetParsed(i);
                     self.expr(e)
                 } else {
@@ -639,7 +574,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                 if self.peek() == LeftSquiggle {
                     self.start_subexpr();
                     let span = self.lexer.skip_to_closing_squigle();
-                    let i = self.ctx.add_task(true, self.lexer.src.clone(), span);
+                    let i = self.ctx.parser.add_task(true, span);
                     let e = Expr::GetParsed(i);
                     Some(self.expr(e))
                 } else {
@@ -678,14 +613,13 @@ impl<'a, 'p> Parser<'a, 'p> {
                     self.pop();
                     self.eat(RightParen)?;
                     self.eat(Semicolon)?;
-                    if self.ctx.already_loaded.insert(name) {
-                        let name = self.pool.get(name);
+                    if self.ctx.parser.already_loaded.insert(name) {
+                        let name = self.ctx.get(name);
                         let Some(src) = get_include_std(name) else {
                             return Err(self.expected("known path for #include_std"));
                         };
-                        let file = self.ctx.codemap.add_file(name.to_string(), src);
-                        let s = file.span;
-                        Stmt::ExpandParsedStmts(self.ctx.add_task(false, file, s))
+                        let file = self.ctx.add_file(name.to_string(), src);
+                        Stmt::ExpandParsedStmts(self.ctx.parser.add_task(false, file))
                     } else {
                         // don't load the same file twice.
                         Stmt::Noop

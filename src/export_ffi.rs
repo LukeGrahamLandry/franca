@@ -1,6 +1,6 @@
 #![allow(improper_ctypes_definitions)]
 
-use codemap::{File, Span};
+use codemap::Span;
 use libc::c_void;
 
 use crate::ast::{
@@ -20,12 +20,12 @@ use crate::scope::ResolveScope;
 use crate::{assert, emit_bc::emit_bc, err, ice, log_err, make_toplevel, signed_truncate, Stats, MEM, STATS};
 use std::fmt::{Debug, Write};
 use std::fs;
-use std::mem::{self};
+use std::mem::{self, transmute};
 use std::ops::{FromResidual, Try};
 use std::path::PathBuf;
 use std::ptr::{addr_of, null, slice_from_raw_parts, slice_from_raw_parts_mut};
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use crate::export_ffi::BigResult::*;
 
@@ -198,8 +198,8 @@ pub struct ImportVTable {
     get_jitted_ptr: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, f: FuncId) -> BigCErr<'p, *const u8>,
     get_function: for<'p> unsafe extern "C" fn(c: &mut Compile<'p, '_>, f: FuncId) -> *const Func<'p>,
     lookup_filename: unsafe extern "C" fn(c: &mut Compile, span: *const Span) -> *const str,
-    add_file: unsafe extern "C" fn(c: &mut Compile, name: &str, content: &str) -> Arc<File>,
-    parse_stmts: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, f: Arc<File>) -> BigCErr<'p, *const [FatStmt<'p>]>,
+    add_file: unsafe extern "C" fn(c: &mut Compile, name: &str, content: &str) -> Span, // TODO: idk if this calling convention works
+    parse_stmts: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, f: *const Span) -> BigCErr<'p, *const [FatStmt<'p>]>,
     make_and_resolve_and_compile_top_level: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, body: *const [FatStmt<'p>]) -> BigCErr<'p, ()>,
     make_jitted_exec: unsafe extern "C" fn(c: &mut Compile),
     give_vtable: unsafe extern "C" fn(c: &mut Compile, vtable: *const ExportVTable, userdata: *mut ()),
@@ -293,10 +293,10 @@ unsafe extern "C" fn comptime_arch() -> (i64, i64) {
     (arch, os)
 }
 unsafe extern "C" fn franca_intern_string<'p>(c: &mut Compile<'_, 'p>, s: *const str) -> Ident<'p> {
-    c.pool.intern(&*s)
+    c.program.pool.intern(&*s)
 }
 unsafe extern "C" fn franca_get_string<'p>(c: &mut Compile<'_, 'p>, s: Ident<'p>) -> *const str {
-    c.pool.get(s) as *const str
+    c.program.pool.get(s) as *const str
 }
 unsafe extern "C" fn franca_get_stats() -> *const Stats {
     addr_of!(STATS)
@@ -310,8 +310,8 @@ unsafe extern "C" fn franca_init_compiler(comptime_arch: TargetArch) -> *const C
     }
 
     let pool = Box::leak(Box::new(StringPool::default()));
-    let program = Box::leak(Box::new(Program::new(pool, comptime_arch)));
-    let compiler = Box::leak(Box::new(Compile::new(pool, program)));
+    let program = Box::leak(Box::new(Program::new(comptime_arch)));
+    let compiler = Box::leak(Box::new(Compile::new(program)));
     compiler as *const Compile
 }
 unsafe extern "C" fn franca_find_unique_fn<'p>(c: &mut Compile<'_, 'p>, name: Ident<'p>) -> BigOption<FuncId> {
@@ -352,20 +352,21 @@ unsafe extern "C" fn franca_get_function<'p>(c: &mut Compile<'p, '_>, f: FuncId)
 }
 
 unsafe extern "C" fn lookup_filename(c: &mut Compile, span: *const Span) -> *const str {
-    c.parsing.codemap.look_up_span(*span).file.name().to_string().leak() as *const str
+    c.program.pool.lookup_filename(*span) as *const str
 }
 
-unsafe extern "C" fn add_file(c: &mut Compile, name: &str, content: &str) -> Arc<File> {
-    c.parsing.codemap.add_file(name.to_string(), content.to_string())
+unsafe extern "C" fn add_file(c: &mut Compile, name: &str, content: &str) -> Span {
+    c.program.pool.add_file(name.to_string(), content.to_string())
 }
 
-unsafe extern "C" fn parse_stmts<'p>(comp: &mut Compile<'_, 'p>, file: Arc<File>) -> BigCErr<'p, *const [FatStmt<'p>]> {
+unsafe extern "C" fn parse_stmts<'p>(comp: &mut Compile<'_, 'p>, file: *const Span) -> BigCErr<'p, *const [FatStmt<'p>]> {
     assert_eq!(mem::size_of::<BigCErr<'p, *const [FatStmt<'p>]>>(), 24);
-    let lex = Lexer::new(file.clone(), comp.program.pool, file.span);
-    mem::forget(file); // the franca code that called us doesn't know it has to clone the Arc.
-    let stmts = match Parser::parse_stmts(&mut comp.parsing, lex, comp.pool) {
+    let code = comp.program.pool.source_slice(unsafe { *file });
+    let lex = Lexer::new(code, comp.program.pool.pool, unsafe { *file });
+    let stmts = match Parser::parse_stmts(comp.program.pool, lex) {
         Ok(s) => s,
         Err(e) => {
+            println!("{e:?}");
             return Err(e);
         }
     };
@@ -374,7 +375,7 @@ unsafe extern "C" fn parse_stmts<'p>(comp: &mut Compile<'_, 'p>, file: Arc<File>
 
 unsafe extern "C" fn make_and_resolve_and_compile_top_level<'p>(c: &mut Compile<'_, 'p>, body: *const [FatStmt<'p>]) -> BigCErr<'p, ()> {
     let body = (*body).to_vec();
-    let mut global = make_toplevel(c.pool, garbage_loc(), body);
+    let mut global = make_toplevel(c.program.pool, garbage_loc(), body);
     ResolveScope::run(&mut global, c, ScopeId::from_index(0))?;
     c.compile_top_level(global)?;
     Ok(())
@@ -622,7 +623,7 @@ extern "C-unwind" fn tag_value<'p>(comp: &mut Compile<'_, 'p>, enum_ty: TypeId, 
         ))
     });
     let index = cases.iter().position(|f| f.0 == name);
-    let index = hope(|| Ok(unwrap!(index, "bad case name id={} {}", name.0, comp.pool.get(name))));
+    let index = hope(|| Ok(unwrap!(index, "bad case name id={} {}", name.0, comp.program.pool.get(name))));
     index as i64
 }
 
@@ -688,28 +689,14 @@ extern "C-unwind" fn fn_ptr_type(program: &mut &mut Program, arg: TypeId, ret: T
 }
 
 // Note: currently StringPool guarentees that they're all null terminated but I don't want to promise that to the language so wrap in this function.
-extern "C-unwind" fn symbol_to_cstr(program: &mut &mut Program, symbol: i64) -> *const u8 {
-    let symbol = symbol as u32;
-    hope(|| {
-        let symbol = program
-            .pool
-            .upcast(symbol) // TODO: return an error instead.
-            .unwrap_or_else(|| program.pool.intern(&format!("invalid symbol {symbol}")));
-        let s = program.pool.get_c_str(symbol);
-        Ok(s)
-    })
+extern "C-unwind" fn symbol_to_cstr<'p>(program: &mut &mut Program<'p>, symbol: i64) -> *const u8 {
+    let symbol: Ident<'p> = unsafe { transmute(symbol as u32) };
+    program.pool.get_c_str(symbol)
 }
 
 extern "C-unwind" fn symbol_to_str<'p>(program: &mut &mut Program<'p>, symbol: i64) -> &'p str {
-    let symbol = symbol as u32;
-    hope(|| {
-        let symbol = program
-            .pool
-            .upcast(symbol) // TODO: return an error instead.
-            .unwrap_or_else(|| program.pool.intern(&format!("invalid symbol {symbol}")));
-        let s = program.pool.get(symbol);
-        Ok(s)
-    })
+    let symbol: Ident<'p> = unsafe { transmute(symbol as u32) };
+    program.pool.get(symbol)
 }
 
 /// This must be kept in sync with the definition in unwind.fr!

@@ -41,7 +41,6 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             return Err(e);
         }
         debug_assert_eq!(r.scope, scope, "ICE: unmatched scopes");
-        r.compiler.pool.use_constants(|c| c.adjust_writable());
         Ok(r.captures)
     }
 
@@ -163,12 +162,12 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         if !func.get_flag(FnFlag::AllowRtCapture) {
             // TODO: show the captured var use site and declaration site.
             self.last_loc = func.loc;
-            let n = self.compiler.pool.get(func.name);
+            let n = self.compiler.program.pool.get(func.name);
             assert!(
                 func.capture_vars.is_empty(),
                 "Must use '=>' for closure '{}' with captures: {:?}",
                 n,
-                func.capture_vars.iter().map(|v| v.log(self.compiler.pool)).collect::<Vec<_>>()
+                func.capture_vars.iter().map(|v| v.log(self.compiler.program.pool)).collect::<Vec<_>>()
             );
         }
 
@@ -276,7 +275,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         self.last_loc = loc;
         match expr.deref_mut() {
             Expr::GetParsed(index) => {
-                *expr = self.compiler.parsing.wait_for_expr(*index)?;
+                *expr = self.compiler.program.pool.wait_for_expr(*index)?;
                 debug_assert!(!matches!(expr.expr, Expr::GetParsed(_)));
                 self.resolve_expr(expr)?;
             }
@@ -324,7 +323,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                 } else {
                     // println!(
                     //     "{} undeclared in s:{} b:{}. nextvar: {}",
-                    //     self.compiler.pool.get(*name),
+                    //     self.compiler.program.pool.get(*name),
                     //     self.scope.as_index(),
                     //     self.block,
                     //     self.compiler.program.next_var
@@ -363,7 +362,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             for stmt in mem::take(body) {
                 if let Stmt::ExpandParsedStmts(name) = stmt.stmt {
                     dirty = true;
-                    for s in self.compiler.parsing.wait_for_stmts(name)? {
+                    for s in self.compiler.program.pool.wait_for_stmts(name)? {
                         new_body.push(s);
                     }
                 } else {
@@ -417,7 +416,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         s = self.compiler[s].parent;
 
         loop {
-            // println!("- look {} in s{} b{}", self.compiler.pool.get(*name), s.as_index(), block);
+            // println!("- look {} in s{} b{}", self.compiler.program.pool.get(*name), s.as_index(), block);
             let scope = &self.compiler[s];
             let found = find(self.compiler, s, block);
             if let Some(v) = found {
@@ -450,7 +449,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         if wip.iter().any(shadow_const) {
             err!(
                 "Cannot shadow constant in the same scope: {}",
-                wip.iter().find(|v| shadow_const(v)).unwrap().log(self.compiler.pool)
+                wip.iter().find(|v| shadow_const(v)).unwrap().log(self.compiler.program.pool)
             )
         }
 
@@ -465,10 +464,10 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             let empty = (FatExpr::synthetic(Expr::Poison, loc), LazyType::Infer);
             self.compiler[s].constants.insert(var, empty); // sad. two lookups per constant. but doing it different on each branch looks verbose.
         }
-        // println!("= decl {} in s{} b{}", self.compiler.pool.get(*name), s.as_index(), self.block);
+        // println!("= decl {} in s{} b{}", self.compiler.program.pool.get(*name), s.as_index(), self.block);
         self.compiler[s].vars[self.block].vars.push(var); // includes constants!
         self.compiler.program.next_var += 1;
-        // println!("{} declared in {}", var.log(self.compiler.pool), var.2.as_index());
+        // println!("{} declared in {}", var.log(self.compiler.program.pool), var.2.as_index());
         Ok(var)
     }
 

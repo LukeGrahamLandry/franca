@@ -110,11 +110,10 @@ use std::ptr::null_mut;
 use ast::garbage_loc;
 use bc::Values;
 use codemap::{CodeMap, Span};
-use codemap_diagnostic::{ColorConfig, Diagnostic, Emitter, Level, SpanLabel, SpanStyle};
-use compiler::CErr;
+use codemap_diagnostic::{ColorConfig, Diagnostic, Emitter};
 use export_ffi::BigOption;
 use export_ffi::STDLIB_PATH;
-use pool::StringPool;
+use self_hosted::SelfHosted;
 
 macro_rules! mut_replace {
     ($value:expr, $f:expr) => {{
@@ -146,6 +145,7 @@ pub mod overloading;
 pub mod parse;
 pub mod pool;
 pub mod scope;
+pub mod self_hosted;
 
 use crate::{
     ast::{Expr, FatExpr, FatStmt, Func, TypeId},
@@ -310,23 +310,8 @@ pub fn log_err<'p>(interp: &Compile<'_, 'p>, e: CompileError<'p>) {
     println!("{}", e.trace);
 
     println!("Internal: {}", e.internal_loc.unwrap());
-    if let CErr::Diagnostic(diagnostic) = &e.reason {
-        emit_diagnostic(&interp.parsing.codemap, diagnostic);
-    } else if let Some(loc) = e.loc {
-        let diagnostic = vec![Diagnostic {
-            level: Level::Error,
-            message: e.reason.log(interp.program, interp.pool),
-            code: None,
-            spans: vec![SpanLabel {
-                span: loc,
-                label: None,
-                style: SpanStyle::Primary,
-            }],
-        }];
-        emit_diagnostic(&interp.parsing.codemap, &diagnostic);
-    } else {
-        println!("{}", e.reason.log(interp.program, interp.pool));
-    }
+    let message = e.reason.log(interp.program, interp.program.pool);
+    interp.program.pool.print_diagnostic(e);
 }
 
 fn emit_diagnostic(codemap: &CodeMap, diagnostic: &[Diagnostic]) {
@@ -342,7 +327,7 @@ fn emit_diagnostic(codemap: &CodeMap, diagnostic: &[Diagnostic]) {
     }
 }
 
-pub fn make_toplevel<'p>(pool: &StringPool<'p>, user_span: Span, stmts: Vec<FatStmt<'p>>) -> Func<'p> {
+pub fn make_toplevel<'p>(pool: &SelfHosted<'p>, user_span: Span, stmts: Vec<FatStmt<'p>>) -> Func<'p> {
     let name = pool.intern("@toplevel@");
     let body = Some(FatExpr::synthetic(
         Expr::Block {

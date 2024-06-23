@@ -159,15 +159,15 @@ fn main() {
         //     src += &a;
         // }
 
-        let mut program = Program::new(pool, arch);
-        let mut comp = Compile::new(pool, &mut program);
+        let mut program = Program::new(arch);
+        let mut comp = Compile::new(&mut program);
 
         load_all_toplevel(&mut comp, &[(name, src)]).unwrap_or_else(|e| {
             log_err(&comp, *e);
             exit(1);
         });
 
-        if let Some(f) = comp.program.find_unique_func(comp.pool.intern("driver")) {
+        if let Some(f) = comp.program.find_unique_func(comp.program.pool.intern("driver")) {
             let val = to_values(comp.program, &IMPORT_VTABLE as *const ImportVTable as i64).unwrap();
             if let franca::export_ffi::BigResult::Err(e) = comp.compile(f, ExecStyle::Jit) {
                 log_err(&comp, *e);
@@ -186,7 +186,7 @@ fn main() {
         }
 
         if comp.tests.is_empty() {
-            let f = comp.program.find_unique_func(comp.pool.intern("main")).expect("fn main");
+            let f = comp.program.find_unique_func(comp.program.pool.intern("main")).expect("fn main");
             let result = comp.compile(f, ExecStyle::Jit);
             if let franca::export_ffi::BigResult::Err(e) = result {
                 log_err(&comp, *e);
@@ -206,14 +206,12 @@ fn main() {
             exit(1);
         }
         forked_swallow_passes(arch);
-        check_broken(arch);
     }
 }
 
 fn forked_swallow_passes(arch: TargetArch) {
-    let pool = Box::leak(Box::<StringPool>::default());
-    let mut program = Program::new(pool, arch);
-    let mut comp = Compile::new(pool, &mut program);
+    let mut program = Program::new(arch);
+    let mut comp = Compile::new(&mut program);
 
     let files = collect_test_files();
     load_all_toplevel(&mut comp, &files).unwrap_or_else(|e| {
@@ -237,7 +235,7 @@ fn forked_swallow_passes(arch: TargetArch) {
                 .iter()
                 .map(|fid| {
                     let name = comp.program[*fid].name;
-                    comp.pool.get(name)
+                    comp.program.pool.get(name)
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
@@ -252,15 +250,14 @@ fn forked_swallow_passes(arch: TargetArch) {
     }
 
     for f in failing {
-        let file = comp.parsing.codemap.look_up_span(comp.program[f].loc).file.name().to_string();
-        let fname = comp.pool.get(comp.program[f].name);
+        let fname = comp.program.pool.get(comp.program[f].name);
         let (success, out, err) = fork_and_catch(|| run_one(&mut comp, f));
 
         if !success {
             failed += 1;
             println!();
             set_colour(255, 0, 0);
-            print!("[FAILED] {} {} ", file.to_uppercase(), fname);
+            print!("[FAILED] {} ", fname);
             unset_colour();
             println!("{out}");
             println!("{err}");
@@ -276,7 +273,7 @@ fn forked_swallow_passes(arch: TargetArch) {
             if size != expect {
                 println!(
                     "{:?}: {}: fr={} vs rs={}",
-                    comp.program.inferred_type_names[ty.as_index()].map(|n| comp.pool.get(n)),
+                    comp.program.inferred_type_names[ty.as_index()].map(|n| comp.program.pool.get(n)),
                     comp.program.log_type(ty),
                     expect,
                     size
@@ -288,37 +285,6 @@ fn forked_swallow_passes(arch: TargetArch) {
         println!("FAILED {}/{} tests.", failed, total);
     }
     unset_colour();
-}
-
-fn check_broken(arch: TargetArch) {
-    let pool = Box::leak(Box::<StringPool>::default());
-    let mut program = Program::new(pool, arch);
-    let mut comp = Compile::new(pool, &mut program);
-
-    let files = collect_test_files();
-    load_all_toplevel(&mut comp, &files).unwrap_or_else(|e| {
-        log_err(&comp, *e);
-        exit(1);
-    });
-
-    set_colour(255, 0, 0);
-    print!("[KNOWN BUGS] ");
-    unset_colour();
-    let tests = comp.tests_broken.clone();
-    for f in tests {
-        let fname = comp.pool.get(comp.program[f].name);
-        let (success, _, _) = fork_and_catch(|| {
-            run_one(&mut comp, f);
-        });
-        if success {
-            set_colour(255, 0, 255);
-        } else {
-            set_colour(255, 255, 0);
-        }
-        print!("{fname}, ");
-        unset_colour();
-    }
-    println!();
 }
 
 fn collect_test_files() -> Vec<(String, String)> {
@@ -346,15 +312,12 @@ fn collect_test_files() -> Vec<(String, String)> {
 fn load_all_toplevel<'p>(comp: &mut Compile<'_, 'p>, files: &[(String, String)]) -> Res<'p, ()> {
     let mut parsed = vec![];
     for (name, src) in files {
-        let file = comp
-            .parsing
-            .codemap
-            .add_file(name.to_string(), format!("#include_std(\"core.fr\");\n{src}"));
-        let lex = Lexer::new(file.clone(), comp.program.pool, file.span);
-        parsed.extend(Parser::parse_stmts(&mut comp.parsing, lex, comp.pool)?);
+        let span = comp.program.pool.add_file(name.to_string(), format!("#include_std(\"core.fr\");\n{src}"));
+        let id = comp.program.pool.parser.add_task(false, span);
+        parsed.extend(comp.program.pool.wait_for_stmts(id)?);
     }
 
-    let mut global = make_toplevel(comp.pool, garbage_loc(), parsed);
+    let mut global = make_toplevel(comp.program.pool, garbage_loc(), parsed);
     ResolveScope::run(&mut global, comp, ScopeId::from_index(0))?;
     comp.compile_top_level(global)?;
     franca::export_ffi::BigResult::Ok(())

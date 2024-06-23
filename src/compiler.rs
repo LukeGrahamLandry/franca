@@ -28,11 +28,11 @@ use crate::export_ffi::{struct_macro, tagged_macro, type_macro, BigOption, BigRe
 use crate::ffi::InterpSend;
 use crate::logging::PoolLog;
 use crate::overloading::where_the_fuck_am_i;
-use crate::parse::{ParseTasks, ANON_BODY_AS_NAME};
+use crate::parse::ANON_BODY_AS_NAME;
 use crate::scope::ResolveScope;
 use crate::{
     ast::{Expr, FatExpr, FnType, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo},
-    pool::{Ident, StringPool},
+    pool::Ident,
 };
 use crate::{bc::*, extend_options, ffi, impl_index, unwrap2, Map, STACK_MIN, STATS};
 
@@ -64,7 +64,6 @@ pub type Res<'p, T> = BigResult<T, Box<CompileError<'p>>>;
 #[repr(C)]
 pub struct Compile<'a, 'p> {
     pub program: &'a mut Program<'p>, // SAFETY: this must be the first field (repr(C))
-    pub pool: &'p StringPool<'p>,
     // Since there's a kinda confusing recursive structure for interpreting a program, it feels useful to keep track of where you are.
     pub debug_trace: Vec<DebugState<'p>>,
     pub anon_fn_counter: usize,
@@ -75,7 +74,6 @@ pub struct Compile<'a, 'p> {
     pub tests_broken: Vec<FuncId>,
     pub aarch64: Jitted,
     pub scopes: Vec<Scope<'p>>,
-    pub parsing: ParseTasks<'p>,
     pub next_label: usize,
     pub wip_stack: Vec<(Option<FuncId>, ExecStyle)>,
     #[cfg(feature = "cranelift")]
@@ -125,15 +123,13 @@ pub enum DebugState<'p> {
 pub static mut EXPECT_ERR_DEPTH: AtomicIsize = AtomicIsize::new(0);
 
 impl<'a, 'p> Compile<'a, 'p> {
-    pub fn new(pool: &'p StringPool<'p>, program: &'a mut Program<'p>) -> Self {
-        let parsing = ParseTasks::new(pool);
+    pub fn new(program: &'a mut Program<'p>) -> Self {
         let mut c = Self {
             driver_vtable: (Default::default(), ptr::null_mut()),
             export: vec![],
             pending_redirects: vec![],
             make_slice_t: None,
             wip_stack: vec![],
-            pool,
             debug_trace: vec![],
             anon_fn_counter: 0,
             currently_inlining: vec![],
@@ -144,7 +140,6 @@ impl<'a, 'p> Compile<'a, 'p> {
 
             tests: vec![],
             scopes: vec![],
-            parsing,
             tests_broken: vec![],
             next_label: 0,
 
@@ -179,9 +174,9 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let (_, value) = unwrap!(
                     field,
                     "contextual field not found {} for {ty:?}: {}\nexpected: {:?}",
-                    self.pool.get(name),
+                    self.program.pool.get(name),
                     self.program.log_type(ty),
-                    fields.iter().map(|f| self.pool.get(f.0)).collect::<Vec<_>>()
+                    fields.iter().map(|f| self.program.pool.get(f.0)).collect::<Vec<_>>()
                 );
                 expr.set(value.clone(), ty);
                 Ok(ty)
@@ -192,15 +187,15 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let (_, field) = unwrap!(
                     field,
                     "contextual field not found {} for {ty:?}: {}\nexpected: {:?}",
-                    self.pool.get(name),
+                    self.program.pool.get(name),
                     self.program.log_type(ty),
-                    cases.iter().map(|f| self.pool.get(f.0)).collect::<Vec<_>>()
+                    cases.iter().map(|f| self.program.pool.get(f.0)).collect::<Vec<_>>()
                 );
                 let field = self.program.raw_type(*field); // just incase its a named ffi thing.
                 assert!(
                     field.is_unit(),
                     "contextual field {} of tagged union must be unit found {}",
-                    self.pool.get(name),
+                    self.program.pool.get(name),
                     self.program.log_type(field)
                 );
 
@@ -225,13 +220,13 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let field = unwrap!(
                     field,
                     "{} is not a field of struct {ty:?}: {}\nexpected: {:?}",
-                    self.pool.get(name),
+                    self.program.pool.get(name),
                     self.program.log_type(ty),
-                    fields.iter().map(|f| self.pool.get(f.name)).collect::<Vec<_>>()
+                    fields.iter().map(|f| self.program.pool.get(f.name)).collect::<Vec<_>>()
                 );
                 assert_eq!(field.kind, VarType::Const, 
                     "Field {} is not constant on struct {ty:?} {:?}. \nDid you mean to access a field on an instance of the type instead of the type itself?",
-                    self.pool.get(name),
+                    self.program.pool.get(name),
                     self.program.log_type(ty)
                 );
                 let value = unwrap2!(field.default.clone(), "unreachable. constant fields have value");
@@ -312,7 +307,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         // writeln!(out, "{}", Location::caller()).unwrap();  // Always called from the same place now so this is useless
 
         for (i, s) in self.debug_trace.iter().enumerate() {
-            writeln!(out, "{i} {};", s.log(self.pool, self.program)).unwrap();
+            writeln!(out, "{i} {};", s.log(self.program.pool, self.program)).unwrap();
         }
         writeln!(out, "=============").unwrap();
         out
@@ -524,14 +519,14 @@ impl<'a, 'p> Compile<'a, 'p> {
             debug_assert!(
                 self.aarch64.get_fn(*c).is_some(),
                 "missing callee {}",
-                self.pool.get(self.program[*c].name)
+                self.program.pool.get(self.program[*c].name)
             )
         }
         for c in &self.program[f].mutual_callees {
             debug_assert!(
                 self.aarch64.get_fn(*c).is_some(),
                 "missing callee {}",
-                self.pool.get(self.program[*c].name)
+                self.program.pool.get(self.program[*c].name)
             )
         }
 
@@ -554,7 +549,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.flush_callees(f)?;
         self.last_loc = loc;
         // cranelift puts stuff here too and so does comptime_addr
-        let addr = unwrap!(self.aarch64.get_fn(f), "not compiled {f:?} {}", self.pool.get(self.program[f].name));
+        let addr = unwrap!(self.aarch64.get_fn(f), "not compiled {f:?} {}", self.program.pool.get(self.program[f].name));
 
         let cc = self.program[f].cc.unwrap();
 
@@ -563,7 +558,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         debugln_call!(
             "Call {f:?} {} {};      callees={:?}",
-            self.pool.get(self.program[f].name),
+            self.program.pool.get(self.program[f].name),
             addr as usize,
             self.program[f].callees
         );
@@ -577,10 +572,10 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         let result = self.tag_err(result);
         if let Ok(result) = &result {
-            assert_eq!(result.bytes().len(), expected_ret_bytes as usize, "{}\n{}", self.program.log_type(ty.ret), self.program[f].body.log(self.pool));
+            assert_eq!(result.bytes().len(), expected_ret_bytes as usize, "{}\n{}", self.program.log_type(ty.ret), self.program[f].body.log(self.program.pool));
             self.pop_state(state2);
         }
-        // println!("Done {f:?} {}", self.pool.get(self.program[f].name),);
+        // println!("Done {f:?} {}", self.program.pool.get(self.program[f].name),);
         result
     }
 
@@ -732,7 +727,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             let s = CString::from_vec_with_nul(s).unwrap();
 
             let libc = unsafe { libc::dlopen(s.as_ptr(), libc::RTLD_LAZY) };
-            let s = self.pool.get_c_str(self.program[f].name);
+            let s = self.program.pool.get_c_str(self.program[f].name);
             let addr = unsafe { libc::dlsym(libc, s as *const i8) };
             if addr.is_null() {
                 // TODO: warn? have different #import that means we expect not at comptime?
@@ -749,7 +744,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             let lib_name = if let Some(lib_name) = lib_name.args.as_ref() {
                 self.eval_str(&mut lib_name.clone())?
             } else {
-                self.pool.intern("")
+                self.program.pool.intern("")
             };
 
             let name = self.program[f].name;
@@ -884,8 +879,8 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         // println!(
         //     "{wip:?}={} calls {f:?}={}",
-        //     self.pool.get(self.program[wip].name),
-        //     self.pool.get(self.program[f].name)
+        //     self.program.pool.get(self.program[wip].name),
+        //     self.program.pool.get(self.program[f].name)
         // )
         let wip = self.wip_stack.last().unwrap().0;
         if let Some(wip) = wip {
@@ -898,7 +893,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
         //else {
         //     add_unique(&mut self.aarch64.pending_indirect, f); // HACK
-        //                                                        // println!("not adding callee currently_compiling {f:?} {}", self.pool.get(self.program[f].name));
+        //                                                        // println!("not adding callee currently_compiling {f:?} {}", self.program.pool.get(self.program[f].name));
         // }
     }
 
@@ -919,7 +914,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let func = &self.program.funcs[f.as_index()];
         // TODO: if let this? its for return_var
         let BigOption::Some(ret_ty) = func.finished_ret else {
-            err!("Unknown ret type for {f:?} {}", self.pool.get(self.program[f].name))
+            err!("Unknown ret type for {f:?} {}", self.program.pool.get(self.program[f].name))
         };
         let hint = func.finished_ret;
         let label_ty = self.program.intern_type(TypeInfo::Label(ret_ty));
@@ -984,7 +979,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         if may_have_early_return {
             let mut mapping = Map::<Var, Var>::default();
             mapping.insert(old_ret_var, new_ret_var);
-            // println!("renumber ret: {} to {}", old_ret_var.log(self.pool), new_ret_var.log(self.pool));
+            // println!("renumber ret: {} to {}", old_ret_var.log(self.program.pool), new_ret_var.log(self.program.pool));
             self.program.next_var = expr_out.renumber_vars(self.program.next_var, &mut mapping, self); // Note: not renumbering on the function. didn't need to clone it.
             let value = to_values(self.program, ret_label)?;
             self.save_const(new_ret_var, Expr::Value { value, coerced: true }, label_ty, loc)?;
@@ -1007,7 +1002,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         // I don't want to renumber, so make sure to do the clone before resolving.
         // TODO: reslove captured constants anyway so dont haveto do the chain lookup redundantly on each speciailization. -- Apr 24
         debug_assert!(self.program[o_f].get_flag(ResolvedBody) && self.program[o_f].get_flag(ResolvedSign));
-        // println!("bind {}", arg_name.log(self.pool));
+        // println!("bind {}", arg_name.log(self.program.pool));
         let mut arg_x = self.program[o_f].arg.clone();
         let arg_ty = self.get_type_for_arg(&mut arg_x, arg_name)?;
         self.program[o_f].arg = arg_x;
@@ -1067,7 +1062,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 Name::None => {}
             }
         }
-        ice!("missing argument {}", arg_name.log(self.pool))
+        ice!("missing argument {}", arg_name.log(self.program.pool))
     }
 
     fn compile_stmt(&mut self, stmt: &mut FatStmt<'p>) -> Res<'p, ()> {
@@ -1088,7 +1083,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             Stmt::Set { .. } => self.set_deref(stmt)?,
             Stmt::DeclNamed { .. } => {
-                ice!("Scope resolution failed {}", stmt.log(self.pool))
+                ice!("Scope resolution failed {}", stmt.log(self.program.pool))
             }
             Stmt::Noop => {}
             Stmt::DeclFunc(_) => unreachable!("DeclFunc gets hoisted"),
@@ -1129,7 +1124,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
 
                 let Expr::Tuple(exprs) = &mut value.expr else {
-                    err!("TODO: more interesting pattern matching\n {}", value.log(self.pool))
+                    err!("TODO: more interesting pattern matching\n {}", value.log(self.program.pool))
                 };
                 assert_eq!(arguments.len(), exprs.len(), "TODO: non-trivial pattern");
 
@@ -1285,7 +1280,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             let state = DebugState::ResolveConstant(name);
             self.push_state(&state);
             let (mut val, mut ty) = mem::take(self[name.scope].constants.get_mut(&name).unwrap());
-            // println!("- {} {} {}", name.log(self.pool), ty.log(self.pool), val.log(self.pool));
+            // println!("- {} {} {}", name.log(self.program.pool), ty.log(self.program.pool), val.log(self.program.pool));
             self[name.scope].constants.get_mut(&name).unwrap().1 = LazyType::Infer;
             self.infer_types_progress(&mut ty)?;
             self.decl_const(name, &mut ty, &mut val)?;
@@ -1363,7 +1358,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         debug_assert!(res.is_valid());
         if !expr.ty.is_unknown() {
             self.last_loc = Some(expr.loc);
-            // let msg = format!("sanity ICE {} {res:?}", expr.log(self.pool)).leak();
+            // let msg = format!("sanity ICE {} {res:?}", expr.log(self.program.pool)).leak();
 
             self.type_check_arg(expr.ty, res, "sanity ICE post_expr")?;
         }
@@ -1380,7 +1375,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             //       -- Apr 19
             // let msg = format!(
             //     "sanity ICE {} {} vs {}",
-            //     expr.log(self.pool),
+            //     expr.log(self.program.pool),
             //     self.program.log_type(res),
             //     self.program.log_type(requested)
             // )
@@ -1460,7 +1455,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
 
                 self.last_loc = Some(f.loc);
-                ice!("tried to call non-function {:?}", f.log(self.pool))
+                ice!("tried to call non-function {:?}", f.log(self.program.pool))
             }
             Expr::Block {
                 body,
@@ -1531,10 +1526,10 @@ impl<'a, 'p> Compile<'a, 'p> {
                 } else {
                     let var = *var;
                     where_the_fuck_am_i(self, expr.loc);
-                    ice!("Missing resolved variable {}", var.log(self.pool),)
+                    ice!("Missing resolved variable {}", var.log(self.program.pool),)
                 }
             }
-            Expr::GetNamed(name) => err!("Undeclared Ident {}", self.pool.get(*name)), //err!(CErr::UndeclaredIdent(*name)),
+            Expr::GetNamed(name) => err!("Undeclared Ident {}", self.program.pool.get(*name)), //err!(CErr::UndeclaredIdent(*name)),
             Expr::Value { value, coerced } => {
                 debug_assert!(!prev_ty.is_unknown(), "Value expr must have type");
                 if let Some(req) = requested {
@@ -1691,12 +1686,12 @@ impl<'a, 'p> Compile<'a, 'p> {
                         expr.ty = requested.unwrap();
                         return Ok(requested.unwrap());
                     }
-                    Flag::Unquote | Flag::Placeholder => ice!("Unhandled macro {}", self.pool.get(*macro_name)),
+                    Flag::Unquote | Flag::Placeholder => ice!("Unhandled macro {}", self.program.pool.get(*macro_name)),
                     Flag::Builtin => {
                         let Some(name) = arg.as_ident() else {
                             err!("@builtin requires argument",);
                         };
-                        let (value, ty) = unwrap!(self.builtin_constant(name), "unknown @builtin: {:?}", self.pool.get(name));
+                        let (value, ty) = unwrap!(self.builtin_constant(name), "unknown @builtin: {:?}", self.program.pool.get(name));
                         expr.set(value, ty);
                         return Ok(ty);
                     }
@@ -1713,9 +1708,9 @@ impl<'a, 'p> Compile<'a, 'p> {
                     Flag::As => {
                         // TODO: constants?
                         let Expr::Tuple(parts) = &mut arg.expr else {
-                            err!("bad !as: {}", arg.log(self.pool))
+                            err!("bad !as: {}", arg.log(self.program.pool))
                         };
-                        assert!(parts.len() == 2, "bad !as: {}", arg.log(self.pool));
+                        assert!(parts.len() == 2, "bad !as: {}", arg.log(self.program.pool));
                         *expr = self.as_cast_macro(mem::take(&mut parts[0]), mem::take(&mut parts[1]))?;
                         return Ok(expr.ty);
                     }
@@ -1742,7 +1737,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         };
                         debug_assert!(var.kind == VarType::Const);
                         let Some((val, ty)) = self.find_const(var)? else {
-                            err!("missing constant {}", var.log(self.pool))
+                            err!("missing constant {}", var.log(self.program.pool))
                         };
                         expr.set(val.clone(), ty);
                         return Ok(ty);
@@ -1766,7 +1761,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             // err!("Raw struct literal. Maybe you meant to call 'init'?",),
             &mut Expr::String(i) => {
                 expr.done = true;
-                let bytes = self.pool.get(i);
+                let bytes = self.program.pool.get(i);
                 self.set_literal(expr, (bytes.as_ptr() as *mut i64, bytes.len() as i64))?;
                 let byte = u8::get_or_create_type(self.program);
                 expr.ty = self.create_slice_type(byte, expr.loc)?;
@@ -1794,7 +1789,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let os = self.program[os_id].ready.iter().filter(|o| (o.ret.is_none()) || o.ret.unwrap() == want);
                 let mut os2 = os.clone().filter(|o| o.arg == arg_ty);
 
-                debugln_call!("invoke macro: @{}({}) {}", self.pool.get(name), arg.log(self.pool), target.log(self.pool));
+                debugln_call!("invoke macro: @{}({}) {}", self.program.pool.get(name), arg.log(self.program.pool), target.log(self.program.pool));
                 // If they did '@m(e)' instead of '@m(e) s', prefer a handler that only expects one argument.
                 // TODO: should probably distinguish '@m(e) unit' just incase
                 let (f, args) = if target.is_raw_unit() {
@@ -1803,14 +1798,14 @@ impl<'a, 'p> Compile<'a, 'p> {
                     let f = unwrap!(
                         os1.next(),
                         "Missing macro overload {} (Expr) -> Expr. maybe you forgot a target expr on the invocation of {}",
-                        self.pool.get(name),
-                        handler.log(self.pool)
+                        self.program.pool.get(name),
+                        handler.log(self.program.pool)
                     );
                     assert!(os1.next().is_none(), "ambigous macro overload");
                     let f = f.func;
                     (f, vec![Box::into_raw(Box::new(arg)) as i64])
                 } else {
-                    let f = unwrap!(os2.next(), "missing macro overload {}", self.pool.get(name),).func;
+                    let f = unwrap!(os2.next(), "missing macro overload {}", self.program.pool.get(name),).func;
                     assert!(os2.next().is_none(), "ambigous macro overload");
                     (f, vec![Box::into_raw(Box::new(arg)) as i64, Box::into_raw(Box::new(target)) as i64])
                 };
@@ -1823,7 +1818,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 self.update_cc(f)?;
                 self.flush_callees(f)?;
                 self.flush_cpu_instruction_cache();
-                let ptr = unwrap!(self.aarch64.get_fn(f), "ICE: fn not compiled: {f:?} {}", self.pool.get(self.program[f].name));
+                let ptr = unwrap!(self.aarch64.get_fn(f), "ICE: fn not compiled: {f:?} {}", self.program.pool.get(self.program[f].name));
                 let comp_ctx = matches!(self.program[f].cc.unwrap(), CallConv::CCallRegCt);
                 let f_ty = self.program[f].finished_ty().unwrap();
                 let values = ffi::c::call(self, ptr as usize, f_ty, args, comp_ctx)?;
@@ -1833,7 +1828,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 if expr.done {
                     assert!(!expr.ty.is_unknown());
                 }
-                debugln_call!("macro result: {}", expr.log(self.pool));
+                debugln_call!("macro result: {}", expr.log(self.program.pool));
                 // Now evaluate whatever the macro gave us.
                 return self.compile_expr(expr, requested);
             }
@@ -1892,10 +1887,10 @@ impl<'a, 'p> Compile<'a, 'p> {
         // This is kinda weird. base case because compile_place_expr turns anything into <ptr>[],
         // but the only thing you can do for a var is <var>!addr, so you get stuck in a loop nesting !addr.  -- May 12
         if let Expr::GetVar(var) = arg.deref_mut().deref_mut() {
-            let value_ty = *unwrap!(self[var.scope].rt_types.get(var), "Missing var {} (in !addr)", var.log(self.pool));
+            let value_ty = *unwrap!(self[var.scope].rt_types.get(var), "Missing var {} (in !addr)", var.log(self.program.pool));
             // TODO: this shouldn't allow let either but i changed how variable refs work for :SmallTypes
             if var.kind == VarType::Const {
-                err!("Can only take address of vars not {:?} {}.", var.kind, var.log(self.pool))
+                err!("Can only take address of vars not {:?} {}.", var.kind, var.log(self.program.pool))
             }
             let ptr_ty = self.program.ptr_type(value_ty);
             return Ok(ptr_ty);
@@ -2055,7 +2050,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             } else {
                                 return Ok(None);
                             }
-                        } // _ => err!("took address of r-value {}", arg.log(self.pool)),
+                        } // _ => err!("took address of r-value {}", arg.log(self.program.pool)),
                     },
                     Flag::Deref => {
                         let ptr_ty = self.type_of(arg)?;
@@ -2123,7 +2118,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 } else {
                     self[var.scope].rt_types.get(var).cloned()
                 };
-                unwrap!(ty, "type check missing var {:?} (circular dependency:?)", var.log(self.pool))
+                unwrap!(ty, "type check missing var {:?} (circular dependency:?)", var.log(self.program.pool))
                 //TODO: else return Ok(None)?
             }
             Expr::String(_) => {
@@ -2149,7 +2144,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     pub fn builtin_constant(&mut self, name: Ident<'p>) -> Option<(Values, TypeId)> {
-        let name = self.pool.get(name);
+        let name = self.program.pool.get(name);
 
         match name {
             "true" => Some((Values::many(vec![1]), TypeId::bool())),
@@ -2190,7 +2185,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         Some(match name {
             "Symbol" => ffi_type!(Ident),
             _ => {
-                let name = self.pool.intern(name);
+                let name = self.program.pool.intern(name);
                 self.program.find_ffi_type(name)?
             }
         })
@@ -2266,13 +2261,13 @@ impl<'a, 'p> Compile<'a, 'p> {
     // Ok(None) means return type needs to be infered
     #[track_caller]
     pub(crate) fn infer_types(&mut self, func: FuncId) -> Res<'p, Option<FnType>> {
-        // println!("{} {}", self.pool.get(self.program[func].name), Location::caller());
+        // println!("{} {}", self.program.pool.get(self.program[func].name), Location::caller());
         self.ensure_resolved_sign(func)?;
         let f = &self.program[func];
         // TODO: bad things are going on. it changes behavior if this is a debug_assert.
         //       oh fuck its because of the type_of where you can backtrack if you couldn't infer.
         //       so making it work in debug with debug_assert is probably the better outcome.
-        assert!(f.get_flag(NotEvilUninit), "{}", self.pool.get(f.name));
+        assert!(f.get_flag(NotEvilUninit), "{}", self.program.pool.get(f.name));
         if let (BigOption::Some(arg), BigOption::Some(ret)) = (f.finished_arg, f.finished_ret) {
             return Ok(Some(FnType {
                 arg,
@@ -2340,7 +2335,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     return Ok(Some(value));
                 } else {
                     // TODO: -- Apr 24 I think this is always the problem. but what changed??
-                    println!("comptime eval const not ready {}", var.log(self.pool));
+                    println!("comptime eval const not ready {}", var.log(self.program.pool));
                 }
                 // fallthrough
             }
@@ -2434,7 +2429,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         // fallthrough
                     }
                     // fallthrough
-                    // println!("{}", f.log(self.pool));
+                    // println!("{}", f.log(self.program.pool));
                 }
 
                 // fallthrough
@@ -2442,7 +2437,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             // TODO: @enum field access
             _ => {} // fallthrough
         }
-        // println!("{}\n\n\n", e.log(self.pool));
+        // println!("{}\n\n\n", e.log(self.program.pool));
         Ok(None)
     }
 
@@ -2450,10 +2445,10 @@ impl<'a, 'p> Compile<'a, 'p> {
         debug_assert!(!(e.as_suffix_macro(Flag::Slice).is_some() || e.as_suffix_macro(Flag::Addr).is_some()));
         unsafe { STATS.make_lit_fn += 1 };
         let name = if unsafe { ANON_BODY_AS_NAME } {
-            let mut name = e.deref().log(self.pool);
+            let mut name = e.deref().log(self.program.pool);
             name.truncate(100);
             let name = format!("$eval_{}${}$", self.anon_fn_counter, name);
-            self.pool.intern(&name)
+            self.program.pool.intern(&name)
         } else {
             Flag::Anon.ident()
         };
@@ -2491,7 +2486,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             self.program[func_id].body = FuncImpl::Normal(stolen_body);
         }
 
-        // println!("{}", self.program[func_id].body.log(self.pool));
+        // println!("{}", self.program[func_id].body.log(self.program.pool));
 
         // TODO: HACK kinda because it might need to be compiled in the function context to notice that its really a constant so this gets double checked which is sad -- May 1
         //       also maybe undo this opt if can't find the asm bug cause its a simpler test case.
@@ -2640,7 +2635,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let scope = func.scope.unwrap();
         let id = self.program.add_func(func);
         self[scope].funcs.push(id);
-        // println!("{:?} {}", id, self.pool.get(self.program[id].name));
+        // println!("{:?} {}", id, self.program.pool.get(self.program[id].name));
         Ok(id)
     }
 
@@ -2761,7 +2756,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             self.type_check_arg(true_arg, unit, sig)?;
             (self.emit_call_on_unit(if_true, &mut parts[1], requested)?, true)
         } else if parts[1].ty.is_unknown() {
-            ice!("if second arg must be func not {}", parts[1].log(self.pool));
+            ice!("if second arg must be func not {}", parts[1].log(self.program.pool));
         } else {
             (parts[1].ty, false)
         };
@@ -2893,7 +2888,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             .map(|binding| {
                 let name = unwrap!(binding.name.ident(), "field name");
                 if binding.kind == VarType::Const {
-                    assert!(binding.default.is_some(), "constant field {} must have a value.", self.pool.get(name));
+                    assert!(binding.default.is_some(), "constant field {} must have a value.", self.program.pool.get(name));
                 }
                 let ty = unwrap!(binding.ty.ty(), "field type not inferred");
                 let default = if let BigOption::Some(expr) = binding.default.clone() {
@@ -2931,7 +2926,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     // takes any of (<ptr_expr>[] OR <var> OR <ptr>.<field>) and turns it into (<ptr_expr>[])
     #[track_caller]
     fn compile_place_expr(&mut self, place: &mut FatExpr<'p>, requested: Option<TypeId>, want_deref: bool) -> Res<'p, ()> {
-        // println!("in: {}", place.log(self.pool));
+        // println!("in: {}", place.log(self.program.pool));
         let loc = place.loc;
         match place.deref_mut().deref_mut() {
             Expr::GetVar(var) => {
@@ -2940,7 +2935,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 //       emit_bc still checks tho.
                 // assert_eq!(var.kind, VarType::Var, "Only 'var' can be addressed (not let/const).");
                 let val_ty = self[var.scope].rt_types.get(var);
-                let val_ty = *unwrap!(val_ty, "var must be declared: {}", var.log(self.pool));
+                let val_ty = *unwrap!(val_ty, "var must be declared: {}", var.log(self.program.pool));
                 let ptr_ty = self.program.ptr_type(val_ty);
 
                 *place = FatExpr::synthetic_ty(Expr::SuffixMacro(Flag::Addr.ident(), Box::new(mem::take(place))), loc, ptr_ty);
@@ -3005,7 +3000,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         // Don't set done because you want to go around the main compile_expr another time so special load/store overloads get processed.
                         // place.done = true;
                     }
-                    _ => err!("other place expr: {}!{}", arg.log(self.pool), self.pool.get(*macro_name)),
+                    _ => err!("other place expr: {}!{}", arg.log(self.program.pool), self.program.pool.get(*macro_name)),
                 }
             }
             &mut Expr::GetNamed(n) => err!(CErr::UndeclaredIdent(n)),
@@ -3015,9 +3010,9 @@ impl<'a, 'p> Compile<'a, 'p> {
                 self.compile_expr(place, requested)?;
                 self.compile_place_expr(place, requested, want_deref)?;
             }
-            _ => ice!("TODO: other `place=e;` {}", place.log(self.pool)),
+            _ => ice!("TODO: other `place=e;` {}", place.log(self.program.pool)),
         }
-        // println!("out: {}", place.log(self.pool));
+        // println!("out: {}", place.log(self.program.pool));
         Ok(())
     }
 
@@ -3071,7 +3066,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         return Ok((f.byte_offset, f.ty));
                     }
                 }
-                err!("unknown name {} on {:?}", self.pool.get(name), self.program.log_type(container_ty));
+                err!("unknown name {} on {:?}", self.program.pool.get(name), self.program.log_type(container_ty));
             }
             TypeInfo::Tagged { cases, .. } => {
                 for (f_name, f_ty) in cases.iter() {
@@ -3081,7 +3076,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
                 err!(
                     "unknown name {} on {:?}. \n{cases:?}",
-                    self.pool.get(name),
+                    self.program.pool.get(name),
                     self.program.log_type(container_ty)
                 );
             }
@@ -3201,8 +3196,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                     len,
                     "TODO: non-trivial pattern matching\n{:?} <= {:?} for call to {:?}",
                     self.program[original_f].arg,
-                    arg_expr.log(self.pool),
-                    self.pool.get(self.program[original_f].name)
+                    arg_expr.log(self.program.pool),
+                    self.program.pool.get(self.program[original_f].name)
                 );
                 Ok(())
             };
@@ -3483,7 +3478,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         assert!(
             self.program[f].has_tag(Flag::C) || self.program[f].has_tag(Flag::C_Call) || self.program[f].has_tag(Flag::One_Ret_Pic),
             "inline asm msut specify calling convention. but just: {:?}",
-            self.program[f].annotations.iter().map(|a| self.pool.get(a.name)).collect::<Vec<_>>()
+            self.program[f].annotations.iter().map(|a| self.program.pool.get(a.name)).collect::<Vec<_>>()
         );
         if self.program[f].has_tag(Flag::Aarch64) {
             // TODO: :PushConstFnCtx
@@ -3549,7 +3544,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let std::result::Result::Ok(s) = std::str::from_utf8(ir) else {
             err!("wanted utf8 ",)
         };
-        Ok(self.pool.intern(s))
+        Ok(self.program.pool.intern(s))
     }
 
     fn construct_struct(&mut self, requested: Option<TypeId>, pattern: &mut Pattern<'p>) -> Res<'p, TypeId> {
@@ -3570,7 +3565,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     for (name, value) in names.iter().zip(&mut values) {
                         // TODO: could guess that they did them in order if i cared about not looping twice.
                         let Some(field) = fields.iter().find(|f| f.name == *name) else {
-                            err!("Tried to assign unknown field {}", self.pool.get(*name));
+                            err!("Tried to assign unknown field {}", self.program.pool.get(*name));
                         };
                         let value = self.compile_expr(value, Some(field.ty))?;
                         self.last_loc = Some(loc);
@@ -3584,7 +3579,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                                 continue;
                             }
                             let BigOption::Some(value) = field.default.clone() else {
-                                err!("Missing required field {}", self.pool.get(field.name));
+                                err!("Missing required field {}", self.program.pool.get(field.name));
                             };
 
                             let expr = FatExpr::synthetic_ty(Expr::Value { value, coerced: true }, pattern.loc, field.ty);
@@ -3616,8 +3611,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                     let i = cases.iter().position(|f| f.0 == names[0]).unwrap_or_else(|| {
                         panic!(
                             "no field {} exists, expected {:?}",
-                            self.pool.get(names[0]),
-                            cases.iter().map(|n| self.pool.get(n.0)).collect::<Vec<_>>()
+                            self.program.pool.get(names[0]),
+                            cases.iter().map(|n| self.program.pool.get(n.0)).collect::<Vec<_>>()
                         )
                     });
                     let type_hint = cases[i].1;
@@ -3652,7 +3647,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             VarType::Const => self.decl_const(name, ty, value)?,
             VarType::Let | VarType::Var => {
                 if kind == VarType::Let && value.expr.as_suffix_macro(Flag::Uninitialized).is_some() {
-                    let name = self.pool.get(name.name);
+                    let name = self.program.pool.get(name.name);
                     err!("let bindings cannot be reassigned so '{name}' cannot be !uninitialized",)
                 }
                 let value = self.compile_expr(value, ty.ty())?;
@@ -3682,7 +3677,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     fn decl_const(&mut self, name: Var<'p>, ty: &mut LazyType<'p>, value: &mut FatExpr<'p>) -> Res<'p, ()> {
         // TODO: doing the check here every time is sad.
         if value.expr.as_suffix_macro(Flag::Uninitialized).is_some() {
-            let name = self.pool.get(name.name);
+            let name = self.program.pool.get(name.name);
             err!("const bindings cannot be reassigned so '{name}' cannot be '()!uninitialized'",)
         }
 
@@ -3773,18 +3768,17 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     #[track_caller]
     fn save_const(&mut self, name: Var<'p>, val_expr: Expr<'p>, final_ty: TypeId, loc: Span) -> Res<'p, ()> {
-        let pool = self.pool; // me when im referential transparency maxing
         if let Some((val, ty)) = self[name.scope].constants.get_mut(&name) {
             if matches!(ty, LazyType::Finished(_)) {
                 ice!(
-                    "tried to re-save constant {}. \nOLD: {}\nNEW: {}",
-                    name.log(pool),
-                    val.log(pool),
-                    val_expr.log(self.pool)
+                    "tried to re-save constant {}.", //  \nOLD: {}\nNEW: {} // FUCK
+                    name.log(self.program.pool),
+                    // val.log(self.program.pool),
+                    // val_expr.log(self.program.pool)
                 );
             }
             if !matches!(val.expr, Expr::Poison) {
-                ice!("tried to stomp constant {}", name.log(self.pool));
+                ice!("tried to stomp constant {}", name.log(self.program.pool));
             }
             val.expr = val_expr;
             val.ty = final_ty;
@@ -3861,7 +3855,7 @@ impl<'z, 'a, 'p> WalkAst<'p> for Unquote<'z, 'a, 'p> {
             let expr_ty = self.compiler.program.fat_expr_type.expect("used unquote ast while bootstrapping");
             // self.compiler
             //     .compile_expr(self.arg, Some(expr_ty))
-            //     .unwrap_or_else(|e| panic!("Expected comple ast but \n{e:?}\n{:?}", arg.log(self.compiler.pool))); // TODO
+            //     .unwrap_or_else(|e| panic!("Expected comple ast but \n{e:?}\n{:?}", arg.log(self.compiler.program.pool))); // TODO
             let loc = arg.loc;
             let placeholder = self.compiler.as_literal(self.placeholders.len() as i64, loc).unwrap();
             let mut placeholder = FatExpr::synthetic(Expr::SuffixMacro(Flag::Placeholder.ident(), Box::new(placeholder)), loc);
