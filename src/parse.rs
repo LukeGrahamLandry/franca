@@ -661,63 +661,10 @@ impl<'a, 'p> Parser<'a, 'p> {
         let stmt = match self.peek() {
             // Require name, optional body.
             Fn => self.fn_stmt()?,
-            Qualifier(kind) => {
-                self.pop();
-                let binding = self.parse_type_binding(false)?;
-                // TODO: allow multiple bindings
-                let (name, ty) = match binding.name {
-                    Name::Ident(i) => (i, binding.ty),
-                    Name::Var(_) => unreachable!(),
-                    Name::None => panic!("var decl needs name. {:?}", binding.ty),
-                };
-
-                let s = match self.peek() {
-                    Equals => {
-                        self.eat(Equals)?;
-                        let value = self.parse_expr(true)?;
-                        // interestinly, its fine without requiring this semicolon. it was like that for a while and there was only one place it was missing.
-                        self.eat(Semicolon)?;
-                        Stmt::DeclNamed { name, ty, value, kind }
-                    }
-                    Semicolon => {
-                        // I think this is better but then I can't use @import the current way.
-                        return Err(
-                            self.error_next("binding requires a value (use unsafe '()!uninitilized' if thats what you really want)".to_string())
-                        );
-                    }
-                    LeftArrow => {
-                        self.eat(LeftArrow)?;
-                        let mut call = self.parse_expr(true)?;
-                        self.start_subexpr();
-                        let mut arg = Pattern::empty(*self.spans.last().unwrap());
-                        arg.bindings.push(Binding {
-                            name: Name::Ident(name),
-                            ty,
-                            default: BigOption::None,
-                            kind,
-                        });
-                        self.eat(Semicolon)?;
-
-                        self.start_subexpr();
-                        let callback = self.parse_block_until_squiggle()?;
-                        // Note: we leave the closing squiggle because the outer code is expecting to be inside a block.
-                        let name = self.anon_fn_name(&callback);
-                        let callback = Func::new(name, arg, LazyType::Infer, Some(callback), *self.spans.last().unwrap(), true);
-                        let callback = self.expr(Expr::Closure(Box::new(callback)));
-
-                        self.push_arg(&mut call, callback)?;
-                        Stmt::Eval(call)
-                    }
-                    _ => return Err(self.expected("';' or '<-' or '=' after declaration.")),
-                };
-
-                s
-            }
             Semicolon => {
                 self.eat(Semicolon)?;
                 Stmt::Noop
             }
-
             Hash => {
                 self.eat(Hash)?;
                 let name = self.ident()?;

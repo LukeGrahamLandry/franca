@@ -15,7 +15,7 @@ fn basic(_canary: i64) i64 = {
 
 {   };  // empty block treated as expression 
 assert_eq(1, 1);  // assert_eq exists
-const fff = fn(u: void) i64 = 15;
+fff :: fn(u: void) i64 = 15;
 assert_eq(15, fff(unit));  // closure in a variable. 
 
 assert_eq(1, /* hello */ 1);
@@ -25,7 +25,7 @@ assert_eq(1, /* hello */ 1);
 assert_eq(25, (fn(u: void) i64 = { 25 })(unit));  // closure called inline
 assert_eq(35, (fn() i64 = { 35 })());  // no arguments (not even void).
 assert_eq(unit, (fn() void = { unit })()); // return unit
-assert_eq(unit, (fn() void = { let x = 0; })());  // implicit trailing `unit`
+assert_eq(unit, (fn() void = { x := 0; })());  // implicit trailing `unit`
 
 /// Binary Literals (useful for low level binary formats) ///
 // TODO: regression zext for wierd ints
@@ -38,14 +38,14 @@ assert_eq(@as(i64) 0xFF.zext(), 255);
 
 /// simple_variables ///
 
-assert_eq(5, (fn(n: i64) i64 = { let x = 10; n })(5));
-assert_eq(10, (fn(n: i64) i64 = { let x = 10; x })(5));
-assert_eq(25, (fn(n: i64) i64 = { let x = n; x })(25));
-assert_eq(50, (fn(n: i64) i64 = { var x = n; x = 50; x })(5));
-assert_eq(16, (fn(n: i64) i64 = { var x = n; x = add(1, add(add(x, x), n)); x })(5));
-assert_eq(10, (fn(n: i64) i64 = { let x = 10; let y = x; y })(5));
+assert_eq(5, (fn(n: i64) i64 = { x := 10; n })(5));
+assert_eq(10, (fn(n: i64) i64 = { x := 10; x })(5));
+assert_eq(25, (fn(n: i64) i64 = { x := n; x })(25));
+assert_eq(50, (fn(n: i64) i64 = { x := n; x = 50; x })(5));
+assert_eq(16, (fn(n: i64) i64 = { x := n; x = add(1, add(add(x, x), n)); x })(5));
+assert_eq(10, (fn(n: i64) i64 = { x := 10; y := x; y })(5));
 
-let one: i64 = 1;  // variables can have type annotations 
+one: i64 = 1;  // variables can have type annotations 
 assert_eq(one, 1);
 
 /// simple if /// 
@@ -54,29 +54,18 @@ assert_eq(5, (fn(n: i64) i64 = {
     (eq(n, 1), fn() i64 = { 5 }, fn() i64 = { 10 })!if
 })(1));
 
-let five = (true, fn() i64 = 5, fn() i64 = 10)!if;
+five := (true, fn() i64 = 5, fn() i64 = 10)!if;
 assert_eq(5, five);
 // asser t_eq(5, (true, fn() i64 = 5, fn() i64 = 5)!if);  // TODO: doesnt parse right somehow?
 
 // infer types
-let five = (true, => 5, => 10)!if;
+five := (true, => 5, => 10)!if;
 assert_eq(5, five);
 
 /// call_in_type_annotation ///
 
 fn get_int(u: void) Type = { i64 }
 assert_eq(15, (fn(n: get_int(unit)) get_int(unit) = { add(add(n, n), n) }) (5));
-
-/*  // TODO: track for asm
-#does_nothing(but, parser, doesnt, choke)
-#runtime fn rt() i64 = { 
-    let c = is_comptime(); 
-    asser t_eq(c, false);
-    1
-};
-
-let a = rt();
-*/
 
 assert_eq(5, mod(15, 10));
 assert_eq(2, mod(32, 3));
@@ -108,8 +97,8 @@ assert_eq(1, mul(neg(1), neg(1)));
 /// Pointers ///
 ////////////////
 
-var v = 10;
-let ptr = v&;  // Get the adddress of v's stack slot
+v := 10;
+ptr := v&;  // Get the adddress of v's stack slot
 assert_eq(10, ptr[]);
 v = 5;
 assert_eq(5, ptr[]);  // writes though var observed by ptr
@@ -120,41 +109,41 @@ assert_eq(15, ptr[]);
 // TODO: fn default() T; fn undefined() T; and fn zeroed() T; instead of allowing implicitly uninitialized variables.
 
 // It is legal to take pointer to uninitilized memory, as long as you write before you read. 
-var bad: i64 = ()!uninitialized;
-let bad_ptr = bad&;
+bad: i64 = ()!uninitialized;
+bad_ptr := bad&;
 bad_ptr[] = 1;  // initialize the memory
 assert_eq(bad_ptr[], 1);  // now we can read it
 assert_eq(bad, 1);
 
 // You can pass functions pointers to your own stack. 
 fn increment(ptr_arg: Ptr(i64)) = {
-    let old = ptr_arg[];
+    old := ptr_arg[];
     ptr_arg[] = add(old, 1);
 }
 
-var m = 3;
+m := 3;
 increment(m&);
 assert_eq(m, 4);
 
 // The interpreter can catch some basic mistakes. 
 fn mistake(i: i64) Ptr(i64) = {
-    var my_value = add(i, i);
+    my_value := add(i, i);
     my_value&  // oops, call frame went away
 }
-var very_bad_ptr = mistake(1);  // it is illegal to dereference this pointer
+very_bad_ptr := mistake(1);  // it is illegal to dereference this pointer
 
 // You can take the address of function arguments. 
 // TODO: want to pass by const reference if big so be careful about mutating (or disallow). 
 
-fn twice(var arg: i64) i64 = {
-    let arg_ptr = arg&;
+fn twice(arg: i64) i64 = {
+    arg_ptr := arg&;
     mul(arg_ptr[], 2)
 }
-let three = 3;
+three := 3;
 assert_eq(6, twice(three));
 
-var a = 10;
-var aa: Ptr(i64) = a&;
+a := 10;
+aa: Ptr(i64) = a&;
 aa[] = 15;
 assert_eq(a, 15);
 
@@ -164,12 +153,12 @@ assert_eq(a, 15);
 /// Lexical Scope ///
 /////////////////////
 
-let x = 5;
+x := 5;
 assert_eq(x, 5);
 {  // Variables declared in a block shadow old ones
-    let x = 10;
+    x := 10;
     {
-        let x = 15;
+        x := 15;
         assert_eq(x, 15);
     };
     assert_eq(x, 10);
@@ -178,13 +167,13 @@ assert_eq(x, 5);
 
 // Same in functions. 
 
-let aaaa = 20;
-const ttt = fn(n: i64) i64 = {
-    let aaaa = 25;
+aaaa := 20;
+ttt :: fn(n: i64) i64 = {
+    aaaa := 25;
     assert_eq(aaaa, 25);
     
     assert_eq(n, 35);
-    let n = 30;  // You can shadow arguments, but now you can't get it back. 
+    n := 30;  // You can shadow arguments, but now you can't get it back. 
     assert_eq(n, 30);
     n
 };
@@ -192,9 +181,9 @@ assert_eq(30, ttt(35));
 assert_eq(aaaa, 20);
 
 // infact, you can shadow anything
-let shadow = 40;
+shadow := 40;
 assert_eq(shadow, 40);
-let shadow = 45;  // but the old one's gone forever. 
+shadow := 45;  // but the old one's gone forever. 
 assert_eq(shadow, 45);
 
 ////////////////
@@ -203,26 +192,26 @@ assert_eq(shadow, 45);
 
 #inline fn test_call_1(n: i64) i64 = {
     //print(1);
-    let important_value = add(n, 1);
+    important_value := add(n, 1);
     mul(important_value, 2)
 }
 
 #noinline fn test_call_2(n: i64) i64 = {
     //print(2);
-    let important_value = add(n, 1);
+    important_value := add(n, 1);
     mul(important_value, 2)
 }
 
-let important_value = 42;
+important_value := 42;
 assert_eq(test_call_1(2), 6);
 assert_eq(important_value, 42);  // Inlining doesn't stomp variables
 assert_eq(test_call_2(2), 6);
 assert_eq(important_value, 42);  // Trivial
 
 
-var x = 10;
+x := 10;
 assert_eq(@type x, i64);
-let xa = x&;
+xa := x&;
 assert_eq(@type xa, Ptr(i64));
 
 // I'm not sure I like this. 
@@ -233,11 +222,11 @@ assert_eq(@type xa, Ptr(i64));
 // so a chain isnt actually copying everything out of the pointers on to the stack to compute an offset. 
 // TODO: this should be a compile error. no side effects in macros that dont want them. 
 fn do_side_effect(to: Ptr(i64)) bool = {
-    let the = 1234;
+    the := 1234;
     to[] = the;
     true
 }
-var my_secret_value = 5;
+my_secret_value := 5;
 assert_eq(my_secret_value, 5);
 assert_eq(@type do_side_effect(my_secret_value&), bool);
 assert_eq(my_secret_value, 5);
@@ -257,9 +246,9 @@ assert_eq(my_secret_value, 1234);
 // @assert_compile_error { fn abab(n: i64) this_too() = { n } abab(1) };
 
 // TODO: specify the reson for the error so its not accidently passing. 
-@assert_compile_error { let bad = ()!uninitialized; };  // Uninit vars require type annotation. 
+@assert_compile_error { bad := ()!uninitialized; };  // Uninit vars require type annotation. 
 
-const my_int = i64;
+my_int :: i64;
 fn hi(my_int: bool) = ();  // this shadows but its fine.
 hi(false);
 
@@ -268,16 +257,16 @@ hi(false);
 fn thing(one: i64, two: i64) i64 = add(one, two);
 assert_eq(thing(1, 2), 3);
 assert_eq(thing((1, 2)), 3);
-let aaaa = (1, 2);
+aaaa := (1, 2);
 // TODO: this sort of destructuring no longer works after airity overloading -- May 28
 // assert_eq(thing(aaaa), 3);
-let three = (fn(one: i64, two: i64) i64 = add(one, two))(aaaa);
+three := (fn(one: i64, two: i64) i64 = add(one, two))(aaaa);
 assert_eq(three, 3);
 assert_eq((fn(one: i64, two: i64) i64 = add(one, two))(aaaa), 3);
 
 
 // While
-var a = 0;
+a := 0;
 while(fn() bool => { lt(a, 3) }, => { a = add(a, 1); });
 assert_eq(a, 3);
 
@@ -298,7 +287,7 @@ fn twice2(n: i64) i64 = mul(n, 2);
 assert_eq(6, 3.twice2());
 
 fn adds(a: i64, b: i64, c: i64) i64 = a.add(add(b, c));
-let n = 1;
+n := 1;
 assert_eq(6, n.adds(2, 3));
 
 /////
@@ -306,10 +295,10 @@ assert_eq(6, n.adds(2, 3));
 // If the condition wasn't const known, these would be compile errors.
 // Exhaustiveness of checking is more like Zig than like Rust. 
 
-let _: void = (true, => (), => 123)!if;
+_: void = (true, => (), => 123)!if;
 (false, => "hello".add(5), => ())!if;
 (true, => (), => this_var_does_not_exist)!if;
-const compute_true = 1.gt(0);  // Currently you must explicitly declare more complex expressions const. 
+compute_true :: 1.gt(0);  // Currently you must explicitly declare more complex expressions const. 
 (compute_true, => (), => no_compile_this_branch_pls)!if;
 
 // Ifs stay constant if body is constant
@@ -318,24 +307,24 @@ const compute_true = 1.gt(0);  // Currently you must explicitly declare more com
 //     fn() void => no_compile_me2, =>())!if;
 
 fn ret_1() i64 = 1;
-let v = (true, ret_1, no_compile_me)!if; // TODO: make this work without the type binding
+v := (true, ret_1, no_compile_me)!if; // TODO: make this work without the type binding
 assert_eq(1, v);
 
 /* // TODO: c backend chokes on this. 
 // fn call in a branch works when not const cond. 
-let t = true;
-let v = (t, ret_1, => 123)!if;
+t := true;
+v := (t, ret_1, => 123)!if;
 assert_eq(1, v);
 */
 
 //////
 /// Functions called in const context are just normal functions, 
 /// thier arguments can be mutable in the body. They're not just inlined as const bindings. 
-fn weird_add(var a: i64, b: i64) i64 = {
+fn weird_add(a: i64, b: i64) i64 = {
     a = a.add(b);
     a
 }
-const nn = weird_add(1, 2);
+nn :: weird_add(1, 2);
 assert_eq(nn, 3);
 
 //////////////
@@ -349,33 +338,30 @@ assert_eq(false, 123.eq(456));
 
 assert_eq(void, void);
 assert_eq(:: Ty(i64, bool), :: Ty(i64, bool));
-const IB: Type = Ty(i64, bool);
+IB: Type : Ty(i64, bool);
 assert_eq(:: Ty(i64, bool), IB);
-const I_B: (Type, Type) = (i64, bool);
-const IB_B: (Type, Type) = (Ty(i64, bool), bool);
+I_B: (Type, Type) : (i64, bool);
+IB_B: (Type, Type) : (Ty(i64, bool), bool);
 // TODO: these are odd, it should probably allow flatten like this? im not sure what makes most sense. 
 //       currently flattening handled inconsistantly which is much worse than either choice
-@assert_compile_error { let I_B_B: Ty(Type, Type, Type) = (i64, (bool, bool)); };
-@assert_compile_error { let I_B_B2: Ty(Type, Type, Type) = ((i64, bool), bool); };
+@assert_compile_error { I_B_B: Ty(Type, Type, Type) = (i64, (bool, bool)); };
+@assert_compile_error { I_B_B2: Ty(Type, Type, Type) = ((i64, bool), bool); };
 
 // TODO: auto compress tuple type?
 // TODO: can't even assert_compile_error these because it hits debug size check. 
-// const IB_B2: (Type, Type) = ((i64, bool), bool); 
-// const I_BB: (Type, Type) = (i64, (bool, bool));
+// IB_B2: (Type, Type) : ((i64, bool), bool); 
+// I_BB: (Type, Type) : (i64, (bool, bool));
 
 //////
 /// Basic type checking. 
-@assert_compile_error { let a: i64 = "Hello"; };
+@assert_compile_error { a: i64 = "Hello"; };
 
 // TODO: this is correctly an error but can't be caught anymore since '@as' moved to flat_call which doesn't have a graceful error handling story.  -- Apr 21
-// @assert_compile_error { let a: i64 = @as(Str) 1; };  
+// @assert_compile_error { a: i64 = @as(Str) 1; };  
 
 /// There's an eq for types, not just special compiler assert_eq
 assert_eq(true, eq(void, void));
 assert_eq(false, eq(void, i64));
-
-/// Since 'let' can't be reassigned, it doesn't make sense for it to be uninit. 
-@assert_compile_error { let thing: i64 = ()!uninitialized; };
 
 fn this_doesnt_get_called() = {
     so it doesn't have to parse...
@@ -387,7 +373,7 @@ fn this_doesnt_get_called() = {
     // TODO: just one slash should be allowed but its seen as the start of an invalid comment currently. -- Apr 26
 }
 
-const NOT_REFERECED = add("this wont", 1, "compile");  // but it does have to parse, parser only skips over whole function bodies. 
+NOT_REFERECED :: add("this wont", 1, "compile");  // but it does have to parse, parser only skips over whole function bodies. 
 
 😀 := 123;
 💩 := 456;
