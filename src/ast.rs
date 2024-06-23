@@ -1332,12 +1332,23 @@ impl<'p> Program<'p> {
             _ => None,
         }
     }
+
+    // TODO: return prims?
     pub(crate) fn flat_tuple_types(&self, ty: TypeId) -> Vec<TypeId> {
         match &self[ty] {
             TypeInfo::Struct { fields, .. } => fields.iter().flat_map(|f| self.flat_tuple_types(f.ty)).collect(),
             &TypeInfo::Enum { raw: ty, .. } | &TypeInfo::Named(ty, _) => self.flat_tuple_types(ty),
             // TODO: this is sketchy
-            TypeInfo::Tagged { .. } => vec![TypeId::i64(); self.slot_count(ty) as usize],
+            TypeInfo::Tagged { cases } => {
+                let mut varients: Vec<_> = cases.iter().map(|(_, t)| self.flat_tuple_types(*t)).filter(|t| !t.is_empty()).collect();
+                if varients.len() == 1 {
+                    varients[0].insert(0, TypeId::i64());
+                    debug_assert_eq!(self.slot_count(ty) as usize, varients[0].len());
+                    return varients.into_iter().next().unwrap();
+                }
+                // TODO: hack
+                vec![TypeId::i64(); self.slot_count(ty) as usize]
+            }
             &TypeInfo::Array { inner, len } => {
                 let types = self.flat_tuple_types(inner);
                 let mut out = vec![];
@@ -1346,6 +1357,7 @@ impl<'p> Program<'p> {
                 }
                 out
             }
+            TypeInfo::Unit => vec![],
             _ty => vec![ty],
         }
     }

@@ -1,3 +1,14 @@
+problem with running parser on llvm is pool returns ?u32.
+currently i say thats {i64, i64} but it tries to create one from {i64, i32} which doesn't typecheck.
+cause i return small enums by tuple not bytes.
+need more complicated resolution of which prims to use based on the varients.
+easy cases are when the same or all but one are unit or all ints or all floats but then need to upcast sizes.
+only matters when theres one or zero cause otherwise you pass by reference.
+mixed ints/floats make sense that you can't do cause it probably wants to pass in registers and then you cant know which are real without checking the tag which is hard to think about.
+rustc just uses `[i8 x _]` in that case which i have to match anyway for now since i need to call between the languages.
+mainly just a hack solution that's good enough for ?u32 (which is an easy case), would be fine for now.
+when i get more serious have abi tests that compare to rust's repr(c), but thats a little dumb until i stop forcing i64 for the tag.
+
 ## the parser grind (Jun 21/22)
 
 - stmt var decl

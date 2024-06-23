@@ -1171,9 +1171,22 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                             ty: Prim::I64,
                         });
                         self.compile_expr(result, values[0], result_location, false)?;
+
+                        // TODO: this is a dumb hack to make the padding have the right prim types for backends that care. :SLOW -- Jun 23
+                        //       This fixes test_option/option_small_payload_n/parse on llvm.
+                        let mut types = self.program.flat_tuple_types(raw_container_ty);
+                        types.remove(0);
+                        for _ in 0..self.program.slot_count(values[0].ty) {
+                            types.remove(0);
+                        }
+                        let expected_pad = size - (payload_size + 1);
+                        debug_assert_eq!(types.len(), expected_pad as usize);
+                        // now types is just padding
+
                         // If this is a smaller varient, pad out the slot.
-                        for _ in (payload_size + 1)..size {
-                            result.push(Bc::PushConstant { value: 0, ty: Prim::I64 });
+                        for p in types {
+                            let ty = unwrap!(self.program.prim(p), "not prim");
+                            result.push(Bc::PushConstant { value: 0, ty });
                         }
                     }
                     ResAddr => {
