@@ -1,16 +1,16 @@
 use std::{mem, ops::DerefMut};
 
-use codemap::Span;
+use crate::self_hosted::Span;
 
 use crate::{
     assert,
     ast::{Binding, Expr, FatExpr, FatStmt, Flag, FnFlag, Func, FuncImpl, LazyType, Name, ScopeId, Stmt, Var, VarType},
     compiler::{BlockScope, Compile, Res},
     err,
-    export_ffi::BigOption,
+    export_ffi::{get_include_std, BigOption},
     ice,
     logging::PoolLog,
-    pool::Ident,
+    self_hosted::Ident,
     STATS,
 };
 
@@ -297,10 +297,17 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                 self.push_scope(None);
 
                 for stmt in body.iter_mut() {
-                    if matches!(stmt.stmt, Stmt::ExpandParsedStmts(_)) {
-                        self.slow_body(body)?;
-                        break;
+                    if stmt.annotations.len() == 1 {
+                        // println!("{:?} {:?}", stmt.annotations[0].name, Flag::Include_Std.ident());
+                        if stmt.annotations[0].name == Flag::Include_Std.ident() {
+                            self.slow_body(body)?;
+                            break;
+                        }
                     }
+                    // if matches!(stmt.stmt, Stmt::ExpandParsedStmts(_)) {
+                    //     self.slow_body(body)?;
+                    //     break;
+                    // }
                     self.scan_const_decls(stmt)?;
                 }
                 for stmt in body.iter_mut() {
@@ -360,14 +367,28 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         while dirty {
             dirty = false;
             for stmt in mem::take(body) {
-                if let Stmt::ExpandParsedStmts(name) = stmt.stmt {
-                    dirty = true;
-                    for s in self.compiler.program.pool.wait_for_stmts(name)? {
-                        new_body.push(s);
+                if stmt.annotations.len() == 1 {
+                    if stmt.annotations[0].name == Flag::Include_Std.ident() {
+                        let Expr::String(name) = stmt.annotations[0].args.as_ref().unwrap().expr else {
+                            err!("expected string for #include_std",)
+                        };
+                        if self.compiler.already_loaded.insert(name) {
+                            let name = self.compiler.program.pool.get(name);
+                            // println!("{name}");
+                            let Some(src) = get_include_std(name) else {
+                                err!("known path for #include_std",);
+                            };
+                            let file = self.compiler.program.pool.add_file(name.to_string(), src.to_string());
+                            dirty = true;
+                            let name = self.compiler.program.pool.add_task(false, file);
+                            for s in self.compiler.program.pool.wait_for_stmts(name)? {
+                                new_body.push(s);
+                            }
+                        }
+                        continue;
                     }
-                } else {
-                    new_body.push(stmt);
                 }
+                new_body.push(stmt);
             }
             *body = mem::take(&mut new_body);
         }
@@ -464,6 +485,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             let empty = (FatExpr::synthetic(Expr::Poison, loc), LazyType::Infer);
             self.compiler[s].constants.insert(var, empty); // sad. two lookups per constant. but doing it different on each branch looks verbose.
         }
+        // println!("{}", var.log(self.compiler.program.pool));
         // println!("= decl {} in s{} b{}", self.compiler.program.pool.get(*name), s.as_index(), self.block);
         self.compiler[s].vars[self.block].vars.push(var); // includes constants!
         self.compiler.program.next_var += 1;

@@ -23,7 +23,6 @@
 //
 
 // TODO: unfinished
-// - include_std
 // - @return 
 // - make const a contextual keyword? 
 //
@@ -68,6 +67,28 @@ fn finish_pending(self: *Parser, id: WaitingParse) ParseRes #compiler = {
         (fn Expr(e) ParseRes => { 
             // TODO: clone! :FUCKED
             e[]
+        });
+    }
+}
+
+fn finish_pending_stmts(self: *Parser, id: WaitingParse) Result(RsVec(FatStmt), ParseErr) #compiler = {
+    T :: Result(RsVec(FatStmt), ParseErr);
+    return :: @return;
+    @match(self.tasks[id.id]&) {
+        (fn Pending(src_span) T => {
+            self.lex = init(self.pool, src_span.span, src_span.src);
+            e := self.parse_block_until_squiggle(true);
+            // TODO: clone! :FUCKED
+            // TODO: save less often!
+            self.tasks[id.id] = (Expr = e);
+            self.finish_pending_stmts(id) // TODO: im lazy
+        });
+        (fn Expr(e) T => { 
+            // TODO: clone! :FUCKED
+            @match(e) {
+                (fn Ok(e) T => (Ok = e.expr.Block.body));
+                (fn Err(e) T => (Err = e[]));
+            }
         });
     }
 }
@@ -167,10 +188,10 @@ fn after_expr_stmt_prefix(self: *Parser, e: FatExpr) Result(FatStmt, ParseErr) =
         });
         (fn Op(op) => {
             f := @switch(op) {
-                @case(.MinusEq) => Flag.Operator_Minus_Equal;
-                @case(.PlusEq) => Flag.Operator_Plus_Equal;
-                @case(.StarEq) => Flag.Operator_Star_Equal;
-                @case(.SlashEq) => Flag.Operator_Slash_Equal;
+                @case(.MinusEq) => Flag.operator_minus_equal;
+                @case(.PlusEq) => Flag.operator_plus_equal;
+                @case(.StarEq) => Flag.operator_star_equal;
+                @case(.SlashEq) => Flag.operator_slash_equal;
                 @default fn(_: Operator) => @report_error("non-update-assingment operator after expression statement. this should be unreachable? %", "") (return, self.last.span);
             };
             self.pop();
@@ -201,7 +222,9 @@ fn can_start_quick_expr(t: TokenType) bool = {
         (fn Number(_) => true);
         (fn BinaryNum(_) => true);
         (fn Op(op) bool => @switch(op){
-            @case(Operator.Bang) => true;
+            // TODO: you want this to be true so you can do 'if !whatever' but then it breaks 'Type!builtin'. -- Jun 23
+            //       just prefer the quick expr one. bring back "expected trailing lambda after quick expres"
+            @case(Operator.Bang) => false;
             @default fn(_: Operator) => false;
         });
         @default => false;
@@ -258,7 +281,7 @@ fn parse_prefix(self: *Parser, prec: Prec) ParseRes = {
         });
         (fn LeftSquiggle() => {
             self.pop();
-            return(self.parse_block_until_squiggle());
+            return(self.parse_block_until_squiggle(false));
         });
         (fn LeftParen() => {
             // we're a prefix, so this is NOT a call. 
@@ -301,6 +324,13 @@ fn parse_prefix(self: *Parser, prec: Prec) ParseRes = {
             self.pop();
             return(Ok = e);
         });
+        (fn Float(n) => {
+            n: i64 = n.bitcast();
+            e := self.expr((Value = (bytes = (Small = (n, 8)), coerced = false)), loc);
+            e.ty = f64;
+            self.pop();
+            return(Ok = e);
+        });
         (fn BinaryNum(n) => {
             self.pop();
             return(Ok = self.bin_num(n));
@@ -316,7 +346,7 @@ fn parse_prefix(self: *Parser, prec: Prec) ParseRes = {
         (fn Quoted(s) => {
             e := self.expr((String = s.s), loc);
             if s.escapes {|
-                f := self.box(self.get_named(.__String_Escapes, loc));
+                f := self.box(self.get_named(.__string_escapes, loc));
                 e = self.expr((Call = (f = f, arg = self.box(e))), loc);
             };
             self.pop();
@@ -341,7 +371,7 @@ fn quick_lambda(self: *Parser) ParseRes = {
     body := @try(self.parse_expr(Prec_None)) return;
     // FnDef :: @struct(name: ?Symbol, arg: Pattern, ret: LazyType, tags: List(Annotation));
     fn_def: FnDef = (name = .None, arg = (bindings = empty(), loc = loc), ret = (Infer = ()), tags = list(self.alloc));
-    func := self.make_func(fn_def, (Some = body), loc);
+    func := self.make_func(fn_def, (Some = body), loc, true);
     (Ok = self.expr((Closure = self.box(func)), loc))
 }
 
@@ -363,7 +393,7 @@ fn parse_func(self: *Parser, allow_empty: bool) Result(Func, ParseErr) = {
             if not(allow_empty) {|
                 @report_error("Function expression requires body %", "") (return, self.last.span);
             };
-            return(Ok = self.make_func(fn_def, .None, loc))
+            return(Ok = self.make_func(fn_def, .None, loc, false))
         });
         @default => @report_error("expected '=' or '=>' or ';' after function decl %", "") (return, self.last.span);
     };
@@ -376,15 +406,14 @@ fn parse_func(self: *Parser, allow_empty: bool) Result(Func, ParseErr) = {
                 self.pop(); // TODO: why do i need this? -- Jun 22
                 id := self.push_parse(src_span._0, src_span._1);
                 body := self.expr((GetParsed = id), loc);
-                return((Ok = self.make_func(fn_def, (Some = body), loc)));
+                return((Ok = self.make_func(fn_def, (Some = body), loc, may_capture)));
             });
             @default => ();
         };
     };
     
     body := @try(self.parse_expr(Prec_None)) return;
-    // TODO: set flags based on may_capture
-    (Ok = self.make_func(fn_def, (Some = body), loc))
+    (Ok = self.make_func(fn_def, (Some = body), loc, may_capture))
 }
 
 // TODO: this is dumb. just admit there are more ast nodes? but then you have to deal with it everywhere. 
@@ -451,6 +480,7 @@ fn parse_at(self: *Parser, prec: Prec) ParseRes = {
         (fn Comma() => self.raw_unit(loc));
         (fn RightParen() => self.raw_unit(loc));
         (fn RightSquiggle() => self.raw_unit(loc));
+        (fn RightSquare() => self.raw_unit(loc));
         (fn Dot() => self.raw_unit(loc));
         (fn Equals() => self.raw_unit(loc));
         @default => @try(self.parse_expr(prec.reset())) return;
@@ -524,8 +554,8 @@ fn parse_squiggle(self: *Parser, prev: FatExpr, prec: Prec) ParseRes = {
     fn_def := @try(self.fn_def_signeture(loc, false)) return;
     @try(self.eat(@symbol Pipe, "trailing lambda")) return;
     
-    body := @try(self.parse_block_until_squiggle()) return;
-    func := self.make_func(fn_def, (Some = body), loc);
+    body := @try(self.parse_block_until_squiggle(false)) return;
+    func := self.make_func(fn_def, (Some = body), loc, true);
     callback := self.expr((Closure = self.box(func)), loc);
     self.push_arg(prev&, callback);
     // TODO: do i want allow extra after this??
@@ -648,7 +678,7 @@ fn push_arg(self: *Parser, call: *FatExpr, callback: FatExpr) void = {
 }
 
 :: ?FatExpr;
-fn make_func(self: *Parser, def: FnDef, body: ?FatExpr, loc: Span) Func = {
+fn make_func(self: *Parser, def: FnDef, body: ?FatExpr, loc: Span, may_capture: bool) Func = {
     // TODO: derive fn default with allocator
     ::if_opt(FatExpr, FuncImpl);
     f: Func = (
@@ -670,7 +700,17 @@ fn make_func(self: *Parser, def: FnDef, body: ?FatExpr, loc: Span) Func = {
         name = def.name.or(=> Flag.Anon.ident()),
         loc = loc,
     );
+    
+    f&.set_flag(.NotEvilUninit);
+    if(may_capture, => f&.set_flag(.AllowRtCapture));
+    
     f
+}
+
+fn set_flag(self: *Func, flag: FnFlag) void = {
+    mask := 1.shift_left(@as(i64) flag);
+    new := (@as(i64) self.flags.zext()).bit_or(mask);
+    self.flags = new.trunc();
 }
 
 fn is_unit(self: Values) bool = {
@@ -766,11 +806,24 @@ fn switch_to_parsing_named(self: *Parser, parts: List(FatExpr), ty: LazyType, lo
     return(Ok = self.expr((StructLiteralP = (bindings = bindings.rs(), loc = loc)), loc))
 };
 
+fn if_empty_add_unit(self: *List(Binding)) void = {
+    if self.len.eq(0) {|
+        b: Binding = (
+            name = .None,
+            ty = (Finished = void),
+            default = .None,
+            kind = .Let,
+        );
+        self.push(b);
+    }
+}
+    
 fn parse_args(self: *Parser) Result(Pattern, ParseErr) = {
     return :: @return;
     loc := self.last.span;
     bindings: List(Binding) = list(self.alloc);
     @try(self.parse_pattern(bindings&)) return;
+    bindings&.if_empty_add_unit();
     (Ok = (bindings = bindings.rs(), loc = loc))
 }
 
@@ -803,8 +856,14 @@ fn parse_pattern(self: *Parser, out: *List(Binding)) Result(void, ParseErr) = {
         
         ::if(LazyType);
         ty: LazyType = if self.maybe(@symbol Colon) {|
-            e := @try(self.parse_expr(Prec_None)) return;
-            (PendingEval = e)
+            // deal with := 
+            @match(self.peek()) {
+                (fn Equals() LazyType => (Infer = unit));
+                @default fn() LazyType => {
+                    e := @try(self.parse_expr(Prec_None)) return;
+                    (PendingEval = e)
+                };
+            }
         } {|
             (Infer = unit)
         };
@@ -866,7 +925,6 @@ fn fn_def_signeture(self: *Parser, loc: Span, allow_name: bool) Result(FnDef, Pa
     arg: Pattern = if self.maybe(@symbol LeftParen) {|
         a := @try(self.parse_args()) return;
         @try(self.eat(@symbol RightParen, "')' to end argument list")) return;
-        // parse_args eats the ')'
         a
     } {|
         no_paren = true;
@@ -893,12 +951,12 @@ fn fn_def_signeture(self: *Parser, loc: Span, allow_name: bool) Result(FnDef, Pa
 }
 
 // Consumes '}'
-fn parse_block_until_squiggle(self: *Parser) ParseRes = {
+fn parse_block_until_squiggle(self: *Parser, allow_eof: bool) ParseRes = {
     return :: @return;
     loc := self.last.span;
     stmts: List(FatStmt) = list(self.alloc);
     
-    while(=> not(self.maybe(@symbol RightSquiggle))) {|
+    while(=> not(self.maybe(@symbol RightSquiggle)).and(not(allow_eof).or(=> not(self.maybe(@symbol Eof)))) ) {|
         if self.maybe(@symbol Eof) {|
             @report_error("unexpected end of file %", "") (return, self.last.span);
         };
@@ -1016,6 +1074,7 @@ fn report_error(fmt_args: FatExpr, ret_loc: FatExpr) FatExpr #macro = {
     args := FatExpr.slice_from_tuple(ret_loc.expr.Tuple);
     result := '{
         lst := @format(@[fmt_args]) temp();
+        println(lst.items());
         res: ParseErr = (span = @[args[1]], msg = lst.items());
         @[args[0]](Err = res);
         unreachable()
@@ -1033,9 +1092,6 @@ fn try(maybe: FatExpr, ret: FatExpr) FatExpr #macro= '{
 
 fn parser_doesnt_crash() #test = {
     pool: StringPool = init(temp());
-    enumerate (::get_enum_names(Flag)) {i, name|
-        pool&.insert_owned(name[]);
-    };
     
     codemap: CodeMap = init(temp());
     src := (
@@ -1099,13 +1155,25 @@ fn parser_doesnt_crash() #test = {
         "a :: @struct(a: @struct(e: f), c: d);",
         "a :: @struct(b: B, c: C, d: D);",
         "for parts {e| a };",
-        "#macro fn a() b = c;"
+        "#macro fn a() b = c;",
+        "1.2;",
+        "fn neg(a: f64) f64 = sub(0.0, a);",
+        "fn hello(const a: T) b;",
+        "TermConstants :: @struct(_parsehack: void, const ICANON := 256, const ECHO := 8);",
+        "@[@literal(as)];",
+        "'@(@[@literal(as)])(@[@literal(T)]) @[expr]';",
+        "Type :: Type!builtin;", 
     )!slice);
     
-    s := temp().read_to_string("parse.fr");
-    s&.insert(0, "{".ascii());
-    s&.push_all("\n};");
-    src&.push(s.items());
+    //s := temp().read_to_string("parse.fr");
+    //s&.insert(0, "{".ascii());
+    //s&.push_all("\n};");
+    //src&.push(s.items());
+    
+    //s := temp().read_to_string("../lib/math.fr");
+    //s&.insert(0, "{".ascii());
+    //s&.push_all("\n};");
+    //src&.push(s.items());
     
     failed := false;
     for src {src|

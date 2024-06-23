@@ -107,10 +107,8 @@ use std::env;
 use std::path::PathBuf;
 use std::ptr::null_mut;
 
-use ast::garbage_loc;
+use crate::self_hosted::Span;
 use bc::Values;
-use codemap::{CodeMap, Span};
-use codemap_diagnostic::{ColorConfig, Diagnostic, Emitter};
 use export_ffi::BigOption;
 use export_ffi::STDLIB_PATH;
 use self_hosted::SelfHosted;
@@ -139,10 +137,13 @@ pub mod cranelift;
 pub mod emit_bc;
 pub mod export_ffi;
 pub mod ffi;
+#[cfg(not(feature = "self_hosted"))]
 pub mod lex;
 pub mod logging;
 pub mod overloading;
+#[cfg(not(feature = "self_hosted"))]
 pub mod parse;
+#[cfg(not(feature = "self_hosted"))]
 pub mod pool;
 pub mod scope;
 pub mod self_hosted;
@@ -312,19 +313,6 @@ pub fn log_err<'p>(interp: &Compile<'_, 'p>, e: CompileError<'p>) {
     println!("Internal: {}", e.internal_loc.unwrap());
     let message = e.reason.log(interp.program, interp.program.pool);
     interp.program.pool.print_diagnostic(e);
-}
-
-fn emit_diagnostic(codemap: &CodeMap, diagnostic: &[Diagnostic]) {
-    let mut nope = false;
-    for d in diagnostic {
-        println!("{}", d.message);
-        nope |= d.spans.iter().any(|s| s.span == garbage_loc());
-    }
-
-    if !nope {
-        let mut emitter = Emitter::stderr(ColorConfig::Auto, Some(codemap));
-        emitter.emit(diagnostic);
-    }
 }
 
 pub fn make_toplevel<'p>(pool: &SelfHosted<'p>, user_span: Span, stmts: Vec<FatStmt<'p>>) -> Func<'p> {

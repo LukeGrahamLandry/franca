@@ -7,11 +7,7 @@ use franca::{
     bc::{to_values, Values},
     compiler::{Compile, ExecStyle, Res},
     export_ffi::{get_include_std, ImportVTable, IMPORT_VTABLE},
-    find_std_lib,
-    lex::Lexer,
-    log_err, make_toplevel,
-    parse::{Parser, ANON_BODY_AS_NAME},
-    pool::StringPool,
+    find_std_lib, log_err, make_toplevel,
     scope::ResolveScope,
     timestamp, MEM, MMAP_ARENA_START, STACK_START, STATS,
 };
@@ -94,7 +90,7 @@ fn main() {
             match name {
                 "no-fork" => no_fork = true,
                 "stats" => stats = true,
-                "anon-names" => unsafe { ANON_BODY_AS_NAME = true },
+                // "anon-names" => unsafe { ANON_BODY_AS_NAME = true },
                 #[cfg(feature = "cranelift")]
                 "cranelift" => arch = TargetArch::Cranelift,
                 #[cfg(not(feature = "cranelift"))]
@@ -148,7 +144,6 @@ fn main() {
     }
 
     if let Some(name) = path {
-        let pool = Box::leak(Box::<StringPool>::default());
         let path = PathBuf::from(format!("tests/{name}.fr"));
         let src = match fs::read_to_string(path) {
             Ok(src) => src,
@@ -313,8 +308,14 @@ fn load_all_toplevel<'p>(comp: &mut Compile<'_, 'p>, files: &[(String, String)])
     let mut parsed = vec![];
     for (name, src) in files {
         let span = comp.program.pool.add_file(name.to_string(), format!("#include_std(\"core.fr\");\n{src}"));
-        let id = comp.program.pool.parser.add_task(false, span);
-        parsed.extend(comp.program.pool.wait_for_stmts(id)?);
+
+        let id = comp.program.pool.add_task(false, span);
+        let s = comp.program.pool.wait_for_stmts(id)?;
+        for s in &s {
+            use franca::logging::PoolLog;
+            // println!("{}", s.log(comp.program.pool));
+        }
+        parsed.extend(s);
     }
 
     let mut global = make_toplevel(comp.program.pool, garbage_loc(), parsed);

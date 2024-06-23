@@ -10,12 +10,12 @@ use crate::bc::Values;
 use crate::compiler::{CErr, CompileError, Res};
 use crate::export_ffi::BigResult::*;
 use crate::export_ffi::{get_include_std, BigOption};
-use crate::self_hosted::SelfHosted;
+use crate::self_hosted::{Ident, SelfHosted};
 use crate::STATS;
 use crate::{
     ast::{Annotation, Expr, FatExpr, FatStmt, Func, LazyType, Pattern, Stmt},
     lex::{Lexer, Token, TokenType},
-    pool::{Ident, StringPool},
+    pool::StringPool,
 };
 use TokenType::*;
 
@@ -41,7 +41,6 @@ pub struct ParseTasks<'p> {
     pub pool: &'p StringPool<'p>,
     pub codemap: CodeMap,
     pub tasks: Vec<ParseFile<'p>>,
-    already_loaded: HashSet<Ident<'p>>,
 }
 
 unsafe impl<'p> Sync for ParseTasks<'p> {}
@@ -55,7 +54,6 @@ impl<'p> ParseTasks<'p> {
             pool,
             codemap: CodeMap::new(),
             tasks: Default::default(),
-            already_loaded: Default::default(),
         }
     }
 
@@ -185,7 +183,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                 let body = if !capturing && self.peek() == LeftSquiggle {
                     self.start_subexpr();
                     let span = self.lexer.skip_to_closing_squigle();
-                    let i = self.ctx.parser.add_task(true, span);
+                    let i = self.ctx.add_task(true, span);
                     let e = Expr::GetParsed(i);
                     self.expr(e)
                 } else {
@@ -541,12 +539,13 @@ impl<'a, 'p> Parser<'a, 'p> {
     fn parse_stmt(&mut self) -> Res<'p, FatStmt<'p>> {
         let stmt = self.parse_stmt_inner()?;
         // TODO: if you're sad that this check is slow... fix the ambiguity problem...
-        if !stmt.annotations.is_empty() && !matches!(stmt.stmt, Stmt::DeclFunc(_)) {
-            // TODO: error in wrong place.
-            return Err(self.error_next(
-                "TODO: unknown stmt annotation would be ignored. for now you can wrap the expression in brackets to invoke the macro as an expression".to_string(),
-            ));
-        }
+        // TODO: bring this back and just allow include_std
+        // if !stmt.annotations.is_empty() && !matches!(stmt.stmt, Stmt::DeclFunc(_)) {
+        //     // TODO: error in wrong place.
+        //     return Err(self.error_next(
+        //         "TODO: unknown stmt annotation would be ignored. for now you can wrap the expression in brackets to invoke the macro as an expression".to_string(),
+        //     ));
+        // }
         Ok(stmt)
     }
 
@@ -574,7 +573,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                 if self.peek() == LeftSquiggle {
                     self.start_subexpr();
                     let span = self.lexer.skip_to_closing_squigle();
-                    let i = self.ctx.parser.add_task(true, span);
+                    let i = self.ctx.add_task(true, span);
                     let e = Expr::GetParsed(i);
                     Some(self.expr(e))
                 } else {
@@ -601,32 +600,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                 Stmt::Noop
             }
             Hash => {
-                self.eat(Hash)?;
-                let name = self.ident()?;
-
-                if name == Flag::Include_Std.ident() {
-                    self.eat(LeftParen)?;
-                    let TokenType::Quoted { s: name, escapes } = self.peek() else {
-                        return Err(self.expected("quoted path"));
-                    };
-                    assert!(!escapes, "TODO: string escapes in include");
-                    self.pop();
-                    self.eat(RightParen)?;
-                    self.eat(Semicolon)?;
-                    if self.ctx.parser.already_loaded.insert(name) {
-                        let name = self.ctx.get(name);
-                        let Some(src) = get_include_std(name) else {
-                            return Err(self.expected("known path for #include_std"));
-                        };
-                        let file = self.ctx.add_file(name.to_string(), src);
-                        Stmt::ExpandParsedStmts(self.ctx.parser.add_task(false, file))
-                    } else {
-                        // don't load the same file twice.
-                        Stmt::Noop
-                    }
-                } else {
-                    return Err(self.error_next("reserved for stmt directives".to_string()));
-                }
+                return Err(self.error_next("reserved for stmt directives".to_string()));
             }
             Symbol(name) => match self.lexer.nth(1).kind {
                 // TODO: it would be nicer here if DoubleColon was two tokens but i use it for const eval operator as well.
@@ -718,12 +692,6 @@ impl<'a, 'p> Parser<'a, 'p> {
     fn parse_annotations(&mut self) -> Res<'p, Vec<Annotation<'p>>> {
         let mut annotations = vec![];
         while let Hash = self.peek() {
-            if let Symbol(name) = self.lexer.nth(1).kind {
-                // HACK
-                if name == Flag::Include_Std.ident() {
-                    break;
-                }
-            }
             self.eat(Hash)?;
             let name = self.ident()?;
             let args = if LeftParen == self.peek() {

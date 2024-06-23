@@ -1,6 +1,6 @@
 #![allow(improper_ctypes_definitions)]
 
-use codemap::Span;
+use crate::self_hosted::Span;
 use libc::c_void;
 
 use crate::ast::{
@@ -11,12 +11,10 @@ use crate::bc::{to_values, BakedEntry, BakedVar, BakedVarId, FnBody, PrimSig, Va
 use crate::compiler::{Compile, CompileError, ExecStyle, Res, Unquote, EXPECT_ERR_DEPTH};
 use crate::emit_bc::{emit_relocatable_constant_body, prim_sig};
 use crate::ffi::InterpSend;
-use crate::lex::Lexer;
 use crate::logging::{unwrap, PoolLog};
 use crate::overloading::where_the_fuck_am_i;
-use crate::parse::Parser;
-use crate::pool::{Ident, StringPool};
 use crate::scope::ResolveScope;
+use crate::self_hosted::Ident;
 use crate::{assert, emit_bc::emit_bc, err, ice, log_err, make_toplevel, signed_truncate, Stats, MEM, STATS};
 use std::fmt::{Debug, Write};
 use std::fs;
@@ -309,7 +307,6 @@ unsafe extern "C" fn franca_init_compiler(comptime_arch: TargetArch) -> *const C
         panic!("cranelift is not supported by this build of the compiler"); // TODO: return error instead.
     }
 
-    let pool = Box::leak(Box::new(StringPool::default()));
     let program = Box::leak(Box::new(Program::new(comptime_arch)));
     let compiler = Box::leak(Box::new(Compile::new(program)));
     compiler as *const Compile
@@ -360,10 +357,9 @@ unsafe extern "C" fn add_file(c: &mut Compile, name: &str, content: &str) -> Spa
 }
 
 unsafe extern "C" fn parse_stmts<'p>(comp: &mut Compile<'_, 'p>, file: *const Span) -> BigCErr<'p, *const [FatStmt<'p>]> {
-    assert_eq!(mem::size_of::<BigCErr<'p, *const [FatStmt<'p>]>>(), 24);
-    let code = comp.program.pool.source_slice(unsafe { *file });
-    let lex = Lexer::new(code, comp.program.pool.pool, unsafe { *file });
-    let stmts = match Parser::parse_stmts(comp.program.pool, lex) {
+    let id = comp.program.pool.add_task(false, unsafe { *file });
+    let res = comp.program.pool.wait_for_stmts(id);
+    let stmts = match res {
         Ok(s) => s,
         Err(e) => {
             println!("{e:?}");
@@ -1044,7 +1040,7 @@ extern "C-unwind" fn bits_macro<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatE
             assert!(shift >= 0, "expected 32 bits. TODO: other sizes.");
             if let Some((_, v)) = compile.bit_literal(&int) {
                 // Not signed_truncate-ing here because shift_or_slice does it.
-                assert!(v < 1 << ty.bit_count);
+                assert!(v < 1 << ty.bit_count, "{v} {}", ty.bit_count);
                 int = compile.as_literal(v, loc)?;
             }
             int = FatExpr::synthetic_ty(Expr::Cast(Box::new(mem::take(&mut int))), loc, TypeId::i64());

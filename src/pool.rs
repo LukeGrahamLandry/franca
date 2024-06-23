@@ -3,29 +3,9 @@ use std::{cell::SyncUnsafeCell, fmt::Debug, hash::Hash, io::Write, marker::Phant
 use crate::{
     ast::{Flag, TypeId},
     ffi::InterpSend,
+    self_hosted::Ident,
     Map, MY_CONST_DATA,
 };
-
-#[derive(Copy, Clone, Eq, PartialEq, Hash)]
-pub struct Ident<'pool>(pub u32, pub PhantomData<&'pool str>);
-
-impl Flag {
-    pub const fn ident<'p>(self) -> Ident<'p> {
-        Ident(self as u32, PhantomData)
-    }
-}
-
-impl<'p> Ident<'p> {
-    pub fn null() -> Ident<'p> {
-        Ident(0, PhantomData)
-    }
-}
-
-impl Debug for Ident<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "S{}", self.0)
-    }
-}
 
 /// A raw pointer that uses the reference's Hash/PartialEq implementations.
 struct Ptr<T: ?Sized>(*const T);
@@ -246,26 +226,3 @@ impl<T: ?Sized> Clone for Ptr<T> {
 }
 
 impl<T: ?Sized> Copy for Ptr<T> {}
-
-impl<'p> InterpSend<'p> for Ident<'p> {
-    fn get_type_key() -> u128 {
-        // i dare you to change the generic to Self
-        unsafe { std::mem::transmute(std::any::TypeId::of::<Ident>()) }
-    }
-
-    fn create_type(_: &mut crate::ast::Program) -> crate::ast::TypeId {
-        TypeId::ident
-    }
-
-    fn get_or_create_type(_: &mut crate::ast::Program) -> crate::ast::TypeId {
-        TypeId::ident
-    }
-
-    fn get_type(_: &crate::ast::Program) -> crate::ast::TypeId {
-        TypeId::ident
-    }
-
-    fn name() -> String {
-        "Symbol".to_string()
-    }
-}

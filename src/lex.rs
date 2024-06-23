@@ -5,8 +5,9 @@
 use crate::ast::Flag;
 use crate::ast::VarType;
 use crate::lex::TokenType::*;
-use crate::pool::{Ident, StringPool};
-use codemap::Span;
+use crate::pool::StringPool;
+use crate::self_hosted::Ident;
+use crate::self_hosted::Span;
 use std::collections::VecDeque;
 use std::iter::Peekable;
 use std::ops::Deref;

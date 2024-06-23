@@ -115,12 +115,11 @@ pub use unwrap;
 
 use crate::ast::{FatStmt, FnFlag, FuncImpl, Pattern};
 use crate::export_ffi::BigOption;
-use crate::pool::Ident;
+use crate::self_hosted::Ident;
 use crate::self_hosted::SelfHosted;
 use crate::{
     ast::{Expr, FatExpr, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo, Var},
     compiler::{CErr, CompileError, DebugState},
-    pool::StringPool,
 };
 use crate::{bc::*, STATS};
 

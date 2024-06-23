@@ -4,9 +4,10 @@
 
 #![allow(clippy::wrong_self_convention)]
 
-use codemap::Span;
+use crate::self_hosted::Span;
 use codemap_diagnostic::Diagnostic;
 use core::slice;
+use std::collections::HashSet;
 use std::ffi::CString;
 use std::fmt::Write;
 use std::hash::Hash;
@@ -28,11 +29,10 @@ use crate::export_ffi::{struct_macro, tagged_macro, type_macro, BigOption, BigRe
 use crate::ffi::InterpSend;
 use crate::logging::PoolLog;
 use crate::overloading::where_the_fuck_am_i;
-use crate::parse::ANON_BODY_AS_NAME;
 use crate::scope::ResolveScope;
 use crate::{
     ast::{Expr, FatExpr, FnType, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo},
-    pool::Ident,
+    self_hosted::Ident,
 };
 use crate::{bc::*, extend_options, ffi, impl_index, unwrap2, Map, STACK_MIN, STATS};
 
@@ -82,6 +82,8 @@ pub struct Compile<'a, 'p> {
     pending_redirects: Vec<(FuncId, FuncId)>,
     pub export: Vec<FuncId>,
     pub driver_vtable: (Box<ExportVTable>, *mut ()),
+    
+    pub already_loaded: HashSet<Ident<'p>>,
 }
 #[repr(C)]
 #[derive(Debug, Clone)]
@@ -95,6 +97,7 @@ pub struct Scope<'p> {
     pub name: Ident<'p>,
     pub block_in_parent: usize,
 }
+
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct BlockScope<'p> {
@@ -125,6 +128,8 @@ pub static mut EXPECT_ERR_DEPTH: AtomicIsize = AtomicIsize::new(0);
 impl<'a, 'p> Compile<'a, 'p> {
     pub fn new(program: &'a mut Program<'p>) -> Self {
         let mut c = Self {
+        
+            already_loaded: Default::default(),
             driver_vtable: (Default::default(), ptr::null_mut()),
             export: vec![],
             pending_redirects: vec![],
@@ -600,6 +605,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         res.map_err(|mut err| {
             err.trace = self.log_trace();
             err.loc = err.loc.or(self.last_loc);
+            println!("{}", err.reason.log(self.program, self.program.pool));
             err
         })
     }
@@ -1498,6 +1504,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 ty
             }
             Expr::GetVar(var) => {
+                // TODO: dont do the extra lookup if we know its const
                 if let Some(ty) = self[var.scope].rt_types.get(var).cloned() {
                     // Reading a variable. Convert it to `var&[]` so compiling it checks for smaller loads (u8, etc).
                     expr.ty = ty;
@@ -1524,6 +1531,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     expr.done = true;
                     expr.ty
                 } else {
+                    println!("{:?}", self[var.scope].rt_types);
                     let var = *var;
                     where_the_fuck_am_i(self, expr.loc);
                     ice!("Missing resolved variable {}", var.log(self.program.pool),)
@@ -2444,14 +2452,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     fn make_lit_function(&mut self, e: FatExpr<'p>, ret_ty: TypeId) -> Res<'p, FuncId> {
         debug_assert!(!(e.as_suffix_macro(Flag::Slice).is_some() || e.as_suffix_macro(Flag::Addr).is_some()));
         unsafe { STATS.make_lit_fn += 1 };
-        let name = if unsafe { ANON_BODY_AS_NAME } {
-            let mut name = e.deref().log(self.program.pool);
-            name.truncate(100);
-            let name = format!("$eval_{}${}$", self.anon_fn_counter, name);
-            self.program.pool.intern(&name)
-        } else {
-            Flag::Anon.ident()
-        };
+        let name = Flag::Anon.ident();
         let (arg, ret) = Func::known_args(TypeId::unit, ret_ty, e.loc);
         let mut fake_func = Func::new(name, arg, ret, Some(e.clone()), e.loc, false);
         fake_func.set_flag(ResolvedBody, true);

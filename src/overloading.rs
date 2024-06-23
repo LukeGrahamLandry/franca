@@ -1,4 +1,4 @@
-use codemap::Span;
+use crate::self_hosted::Span;
 
 use crate::ast::{
     garbage_loc, Expr, FatExpr, FnFlag, FuncId, FuncImpl, LazyType, OverloadOption, OverloadSet, OverloadSetId, Pattern, TypeId, TypeInfo, Var,
@@ -96,6 +96,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let arity = self.program.arity(arg);
         self.compute_new_overloads(i, Some(arity))?;
         let mut overloads = self.program[i].clone(); // Sad
+                                                     // println!("{overloads:?} want {arity}");
         overloads.ready.retain(|o| o.arity == arity);
         if let Expr::StructLiteralP(pattern) = &mut arg.expr {
             self.prune_overloads_by_named_args(&mut overloads, pattern)?;
@@ -475,5 +476,7 @@ pub fn where_the_fuck_am_i(comp: &Compile, loc: Span) {
     // emitter.emit(&[diagnostic]);
     // drop(emitter);
     // println!("{}", String::from_utf8(out).unwrap())
-    todo!()
+    // todo!()
+    let s = comp.program.pool.source_slice(loc);
+    println!("where the fuck am i:\n {}", s)
 }

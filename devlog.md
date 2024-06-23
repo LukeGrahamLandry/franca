@@ -9,6 +9,16 @@ rustc just uses `[i8 x _]` in that case which i have to match anyway for now sin
 mainly just a hack solution that's good enough for ?u32 (which is an easy case), would be fine for now.
 when i get more serious have abi tests that compare to rust's repr(c), but thats a little dumb until i stop forcing i64 for the tag.
 
+- i think calling convention for span is messed up, for now hack returning as tuple of i64 on rust side
+- have to use non-null pointer for empty vec.
+- hard to move include_std handling to scope.rs because parser isn't used anymore. eventually want to move it to driver.
+- forgot to add flags to pool in init was just doing on parser test
+- forgot to lex float.
+- args needs to not just read expr for type after : to handle :=
+- capitialisation of flags enum so the values match the rust one
+- off by one for binary literals
+- if_empty_add_unit so overload arity didnt match (first thing it hit was fn ret).
+
 ## the parser grind (Jun 21/22)
 
 - stmt var decl

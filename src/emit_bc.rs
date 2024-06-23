@@ -8,7 +8,7 @@
 
 #![allow(clippy::wrong_self_convention)]
 
-use codemap::Span;
+use crate::self_hosted::Span;
 use std::ops::Deref;
 use std::ptr::slice_from_raw_parts;
 

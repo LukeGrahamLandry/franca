@@ -6,7 +6,7 @@ use std::ptr::{slice_from_raw_parts, slice_from_raw_parts_mut};
 
 use crate::ast::{Program, TypeInfo, Var};
 use crate::emit_bc::ResultLoc;
-use crate::pool::Ident;
+use crate::self_hosted::Ident;
 use crate::{assert_eq, BitSet};
 use crate::{
     ast::{FuncId, TypeId},

@@ -4,12 +4,18 @@
 StringPool :: @struct(
     lookup: HashMap(Str, Symbol),
     values: List(Str),
+    null_terminated: BitSet,
 );
 
 fn init(alloc: Alloc) StringPool = {
     lookup: HashMap(Str, Symbol) = init(alloc);
     l: List(Str) = list(alloc);
-    self: StringPool = (lookup = lookup, values = l);
+    self: StringPool = (lookup = lookup, values = l, null_terminated = empty());
+    
+    enumerate (::get_enum_names(Flag)) {i, name|
+        self&.insert_owned(name[]);
+    };
+    
     self
 }
 
@@ -17,6 +23,22 @@ fn init(alloc: Alloc) StringPool = {
 fn get(self: *StringPool, i: Symbol) Str #compiler = 
     self[].values[i.id().zext()];
 
+fn get_c_str(self: *StringPool, i: Symbol) CStr #compiler = {
+    index: i64 = i.id().zext();
+    s := self.get(i);
+    ::if(CStr);
+    if self.null_terminated&.get(index) {|
+        (ptr = s.ptr)
+    } {|
+        self.null_terminated&.set(index, self.values.gpa);
+        owned := s.clone(self.values.gpa);
+        owned&.push(0);
+        self.values[index] = owned.items(); // TODO: free on drop()
+        (ptr = owned.maybe_uninit.ptr)
+    }
+}
+
+    
 // SAFETY: 's' must not be deallocated during the lifetime of 'self' 
 fn insert_owned(self: *StringPool, s: Str) Symbol #compiler = {
     // TODO: better closure type inference

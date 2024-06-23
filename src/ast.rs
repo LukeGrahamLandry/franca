@@ -1,15 +1,15 @@
 //! High level representation of a Franca program. Macros operate on these types.
+use crate::self_hosted::Span;
 use crate::{
     bc::{Baked, BakedEntry, Prim, Values},
     compiler::{CErr, Compile, Res},
     err,
     export_ffi::BigOption,
     extend_options, impl_index, impl_index_imm,
-    pool::Ident,
+    self_hosted::Ident,
     self_hosted::SelfHosted,
     unwrap, BitSet, Map, STATS,
 };
-use codemap::Span;
 use std::{
     cell::RefCell,
     collections::HashMap,

@@ -18,6 +18,7 @@ TokenType :: @tagged(
     Dot, At, Comma, Colon, Semicolon, DoubleSquare, Hash, FatRightArrow, LeftArrow, DoubleColon, SingleQuote,
     Amp, Question, Pipe, Equals, 
     Fn, Const,
+    Float: f64,
 );
 
 Operator :: @enum(i64) (Plus, Minus, Star, Slash, Less, Greater, Bang, PlusEq, MinusEq, StarEq, SlashEq, LessEq, GreaterEq, BangEq, EqEq);
@@ -99,6 +100,7 @@ fn pop(self: *Lexer) *Token = {
             @switch(self.peek_c(1)) {
                 @case("x".ascii()) => self.lex_hex();
                 @case("b".ascii()) => self.lex_bin();
+                @case(".".ascii()) => self.lex_num();
                 @inclusive("0".ascii(), "9".ascii()) => self.error(.DenyLeadingZero);
                 @default fn(c: u8) => self.one((Number = 0));
             };
@@ -205,6 +207,23 @@ fn lex_string(self: *Lexer) void = {
 }
 
 fn lex_num(self: *Lexer) void = {
+    whole := self.lex_int();
+    if self.peek_c().eq(".".ascii()).and(=> self.peek_c(1).is_ascii_digit()) {|
+        // Actually, that's a float.
+        self.current += 1;
+        start := self.current;
+        fraction := self.lex_int();
+        end := self.current;
+        digits := end.sub(start);
+        n := whole.float().add(fraction.float().div(digits.float().mul(10.0)));
+        self.put_token((Float = n));
+    } {|
+        self.put_token((Number = whole));
+    
+    };
+}
+
+fn lex_int(self: *Lexer) i64 = {
     total := 0;
     dowhile {|
         total *= 10;
@@ -212,7 +231,7 @@ fn lex_num(self: *Lexer) void = {
         self.current += 1;
         self.peek_c().is_ascii_digit()
     };
-    self.put_token((Number = total));
+    total
 }
 
 fn lex_hex(self: *Lexer) void = {
@@ -237,6 +256,7 @@ fn lex_hex(self: *Lexer) void = {
         self.current += 1;
         self.peek_c().is_hex_digit()
     };
+    assert_eq(bits, self.current.sub(self.start).sub(2).mul(4)); // debug
     self.put_token((BinaryNum = (bit_count = bits.trunc(), value = total)));
 }
 
@@ -281,6 +301,8 @@ fn lex_bin(self: *Lexer) void = {
             @default() fn(_: u8) => false;
         }
     };
+    bits -= 1;
+    assert_eq(bits, self.current.sub(self.start).sub(2)); // debug
     self.put_token((BinaryNum = (bit_count = bits.trunc(), value = total)));
 }
 
@@ -380,6 +402,7 @@ fn eat_white_space_hit_end(self: *Lexer) bool = {
 
 fn error(self: *Lexer, reason: LexErr) void = self.one((Error = reason));
 fn put_token(self: *Lexer, type: TokenType) void = {
+    //println(self.src.slice(self.start, self.current));
     self.current = self.current.min(self.src.len);
     self.token = (type = type, span = self.root.subspan(self.start.trunc(), self.current.trunc()));
 }
