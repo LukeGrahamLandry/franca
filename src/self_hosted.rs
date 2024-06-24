@@ -120,7 +120,7 @@ impl<'p> SelfHosted<'p> {
         unsafe {
             // println!("add task {span:?}");
             let src = source_slice(self.codemap, span.low, span.high);
-            push_parse(self.parser, unsafe { &*src }, span.low, span.high)
+            push_parse(self.parser, &*src, span.low, span.high)
         }
     }
 

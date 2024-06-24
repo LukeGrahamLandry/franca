@@ -1539,7 +1539,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     ice!("Missing resolved variable {}", var.log(self.program.pool),)
                 }
             }
-            Expr::GetNamed(name) => err!("Undeclared Ident {}", self.program.pool.get(*name)), //err!(CErr::UndeclaredIdent(*name)),
+            Expr::GetNamed(name) => err!("Undeclared Ident {} {name:?}", self.program.pool.get(*name)), //err!(CErr::UndeclaredIdent(*name)),
             Expr::Value { value, coerced } => {
                 debug_assert!(!prev_ty.is_unknown(), "Value expr must have type");
                 if let Some(req) = requested {

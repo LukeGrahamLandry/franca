@@ -11,7 +11,6 @@
 // - equivilent of matches!(e, .A | .B | .C) more terse than @switch
 //   @or(A, B, C) could work if you don't need to capture any payload. 
 // - auto coerce payload to enum when branches aren't ambigous? maybe? thats a bit creepy. doing it for unit when you just forget to return something would be bad. 
-// - needing to 'return :: @return' every time is annoying. maybe it shouldn't rebind for anon functions and add @break for that. 
 // - really need to fix unreachable_hack
 // - default function arguments because 'self.parse_expr(Prec.None)' and symmetry with structs. 
 // - its probably a bad thing that im choosing when to factor out functions based on "not enough bits to refer to all slots",
@@ -21,10 +20,8 @@
 // - same problem i had in rust. its really annoying that you have to pass the pool to print things because it makes debugging that way more clunky.
 //   could have an implicit context system? crippling that you can't just derive print normal things. 
 //
-
-// TODO: unfinished
-// - @return 
 // - make const a contextual keyword? 
+// - local_return and return implciitly rebinding is a bit confusing
 //
 
 // TODO: :SLOW im doing so many silly copies and also need to actually enforce tailcalls on llvm (right now i might be preventing them with ccc even on internal functions!).  -- Jun 21
@@ -54,7 +51,6 @@ PrecLevel :: @enum(i64) (
 ParseRes :: Result(FatExpr, ParseErr);
 
 fn finish_pending(self: *Parser, id: WaitingParse) ParseRes #compiler = {
-    return :: @return;
     @match(self.tasks[id.id]&) {
         (fn Pending(src_span) ParseRes => {
             self.lex = init(self.pool, src_span.span, src_span.src);
@@ -73,7 +69,6 @@ fn finish_pending(self: *Parser, id: WaitingParse) ParseRes #compiler = {
 
 fn finish_pending_stmts(self: *Parser, id: WaitingParse) Result(RsVec(FatStmt), ParseErr) #compiler = {
     T :: Result(RsVec(FatStmt), ParseErr);
-    return :: @return;
     @match(self.tasks[id.id]&) {
         (fn Pending(src_span) T => {
             self.lex = init(self.pool, src_span.span, src_span.src);
@@ -102,7 +97,6 @@ fn push_parse(self: *Parser, src: Str, span: Span) WaitingParse #compiler = {
 }
 
 fn parse_stmt(self: *Parser) Result(FatStmt, ParseErr) = {
-    return :: @return;
     tags := @try(self.parse_annotations()) return;
     stmt := @try(self.parse_stmt_inner()) return;
     stmt.annotations = tags.rs();
@@ -110,7 +104,6 @@ fn parse_stmt(self: *Parser) Result(FatStmt, ParseErr) = {
 }
 
 fn parse_stmt_inner(self: *Parser) Result(FatStmt, ParseErr) = {
-    return :: @return;
     loc := self.last.span;
     @match(self.peek()) {
         (fn Fn() => {
@@ -139,7 +132,6 @@ fn parse_stmt_inner(self: *Parser) Result(FatStmt, ParseErr) = {
 fn parse_decl_or_start_expr(self: *Parser, name: Symbol) Result(FatStmt, ParseErr) = {
     self.pop();
     loc := self.last.span;
-    return :: @return;
     @match(self.peek()) {
         (fn DoubleColon() => {
             self.pop();
@@ -178,7 +170,6 @@ fn next_is_equals(self: *Parser) bool = {
 }
 
 fn after_expr_stmt_prefix(self: *Parser, e: FatExpr) Result(FatStmt, ParseErr) = {
-    return :: @return;
     loc  := e.loc;
     // TOOD: allow_trailing?
     e    := @try(self.parse_infix(e, Prec_None)) return;
@@ -235,7 +226,6 @@ fn can_start_quick_expr(t: TokenType) bool = {
 }
 
 fn ident_expr_and_maybe_trailing(self: *Parser, name: Symbol, prec: Prec, loc: Span) ParseRes = {
-    return :: @return;
     e := self.expr((GetNamed = name), loc);
     
     // TODO: .and(allow_trailing)
@@ -256,7 +246,6 @@ fn ident_expr_and_maybe_trailing(self: *Parser, name: Symbol, prec: Prec, loc: S
 
 // TODO: non-existant field name for @tagged is a panic because its in a mut_replace. 
 fn parse_expr(self: *Parser, prec: Prec) ParseRes = {
-    return :: @return;
     self.lex&.peek();
     // TODO: can't access field on rvalue. 
     // TODO: you can't return a pair at comptime if its not a pair of ints. (u32, u32) gives back 16 bytes from ffi::c and then compiler::jit crashes on it for being the wrong size. 
@@ -265,7 +254,6 @@ fn parse_expr(self: *Parser, prec: Prec) ParseRes = {
 }
 
 fn parse_prefix(self: *Parser, prec: Prec) ParseRes = {
-    return :: @return;
     loc := self.last.span;
     @match(self.peek()) {
         (fn Op(op) => {
@@ -368,7 +356,6 @@ fn parse_prefix(self: *Parser, prec: Prec) ParseRes = {
 }
 
 fn quick_lambda(self: *Parser) ParseRes = {
-    return :: @return;
     self.pop();
     loc := self.last.span;
     body := @try(self.parse_expr(Prec_None)) return;
@@ -379,13 +366,11 @@ fn quick_lambda(self: *Parser) ParseRes = {
 }
 
 fn func_expr(self: *Parser) ParseRes = {
-    return :: @return;
     func := @try(self.parse_func(false)) return;
     (Ok = self.expr((Closure = self.box(func)), func.loc))
 }
 
 fn parse_func(self: *Parser, allow_empty: bool) Result(Func, ParseErr) = {
-    return :: @return;
     loc := self.last.span;
     fn_def := @try(self.fn_def_signeture(loc, true)) return;
     
@@ -436,7 +421,6 @@ fn bin_num(self: *Parser, b: BinNum) FatExpr = {
 }
 
 fn named_call(self: *Parser, prec: Prec, name: Flag) ParseRes = {
-    return :: @return;
     loc := self.last.span;
     arg := self.box(@try(self.parse_expr(prec.with(.Neg))) return);
     f := self.box(self.get_named(name, loc));
@@ -444,7 +428,6 @@ fn named_call(self: *Parser, prec: Prec, name: Flag) ParseRes = {
 }
 
 fn parse_at(self: *Parser, prec: Prec) ParseRes = {
-    return :: @return;
     loc := self.last.span;
     
     handler := @match(self.peek()) {
@@ -498,7 +481,6 @@ fn parse_at(self: *Parser, prec: Prec) ParseRes = {
 }
 
 fn parse_infix(self: *Parser, prev: FatExpr, prec: Prec) ParseRes = {
-    return :: @return;
     loc := self.last.span;
     parsed: ParseRes = @match(self.peek()) {
         (fn Op(op) ParseRes => {
@@ -557,7 +539,6 @@ fn parse_infix(self: *Parser, prev: FatExpr, prec: Prec) ParseRes = {
 }
 
 fn parse_squiggle(self: *Parser, prev: FatExpr, prec: Prec) ParseRes = {
-    return :: @return;
     self.pop();
     loc := self.last.span;
     fn_def := @try(self.fn_def_signeture(loc, false)) return;
@@ -573,7 +554,6 @@ fn parse_squiggle(self: *Parser, prev: FatExpr, prec: Prec) ParseRes = {
 
 // TODO: this seems to use the wrong loc
 fn parse_bin_op(self: *Parser, op: Operator, prev: FatExpr, prec: Prec) ParseRes = {
-    return :: @return;
     // TODO: destructuring: `prec, name := @switch ...`
     next := @switch(op) {
         @case(.Plus) => (PrecLevel.AddSub, Flag.add);
@@ -616,7 +596,6 @@ fn parse_bin_op(self: *Parser, op: Operator, prev: FatExpr, prec: Prec) ParseRes
 }
 
 fn expr_call(self: *Parser, f: FatExpr, arg: FatExpr) FatExpr = {
-    return :: @return;
     // TODO: let else would be nice.
     @match(f.expr) {
         (fn FieldAccess(ff) => {
@@ -733,7 +712,6 @@ fn is_unit(self: Values) bool = {
 // So you don't have to know if you're in a struct literal or if a function call uses named arguments ahead of time. 
 // TODO: allow 'const' at the beginning to quickly switch to named args cause you must be in a struct definition. 
 fn parse_tuple(self: *Parser) ParseRes = {
-    return :: @return;
     loc := self.last.span;
     if self.maybe(@symbol RightParen) {|
         return(Ok = self.raw_unit(loc));
@@ -741,7 +719,7 @@ fn parse_tuple(self: *Parser) ParseRes = {
     parts: List(FatExpr) = list(self.alloc);
     
     (=> {
-        break :: @return;
+        break :: local_return;
         loop {|
             parts&.push(@try(self.parse_expr(Prec_None)) return);
             @match(self.peek()) {
@@ -783,7 +761,6 @@ fn parse_tuple(self: *Parser) ParseRes = {
 // TODO: allow 'name :: value' in @struct. :SYNTAX
 
 fn switch_to_parsing_named(self: *Parser, parts: List(FatExpr), ty: LazyType, loc: Span) ParseRes = {
-    return :: @return;
     // Decided the last thing was actually a name for a named argument
     // TODO: let else
     ident_expr := parts&.pop().unwrap();
@@ -828,7 +805,6 @@ fn if_empty_add_unit(self: *List(Binding)) void = {
 }
     
 fn parse_args(self: *Parser) Result(Pattern, ParseErr) = {
-    return :: @return;
     loc := self.last.span;
     bindings: List(Binding) = list(self.alloc);
     @try(self.parse_pattern(bindings&)) return;
@@ -837,7 +813,6 @@ fn parse_args(self: *Parser) Result(Pattern, ParseErr) = {
 }
 
 fn parse_pattern(self: *Parser, out: *List(Binding)) Result(void, ParseErr) = {
-    return :: @return;
     loop {|
         // TODO: no comma allowed here
         // TODO: destructuring
@@ -894,7 +869,6 @@ fn parse_pattern(self: *Parser, out: *List(Binding)) Result(void, ParseErr) = {
 }
 
 fn pop_name(self: *Parser, msg: Str) Result(Symbol, ParseErr) = {
-    return :: @return;
     n := @match(self.peek()) {
         (fn Symbol(name) Symbol => {
             self.pop();
@@ -907,7 +881,6 @@ fn pop_name(self: *Parser, msg: Str) Result(Symbol, ParseErr) = {
 
 FnDef :: @struct(name: ?Symbol, arg: Pattern, ret: LazyType, tags: List(Annotation));
 fn fn_def_signeture(self: *Parser, loc: Span, allow_name: bool) Result(FnDef, ParseErr) = {
-    return :: @return;
     ::if(?Symbol);
     name: ?Symbol = if(not(allow_name), => (None = unit)) {|
         @match(self.peek()) {
@@ -961,7 +934,6 @@ fn fn_def_signeture(self: *Parser, loc: Span, allow_name: bool) Result(FnDef, Pa
 
 // Consumes '}'
 fn parse_block_until_squiggle(self: *Parser, allow_eof: bool) ParseRes = {
-    return :: @return;
     loc := self.last.span;
     stmts: List(FatStmt) = list(self.alloc);
     
@@ -1002,7 +974,6 @@ fn parse_block_until_squiggle(self: *Parser, allow_eof: bool) ParseRes = {
 
 ::if(?FatExpr);
 fn parse_annotations(self: *Parser) Result(List(Annotation), ParseErr) = {
-    return :: @return;
     tags: List(Annotation) = list(self.alloc);
     while(=> self.maybe(@symbol Hash)) {|
         name := @try(self.pop_name("ident after '#'")) return;
@@ -1016,7 +987,6 @@ fn parse_annotations(self: *Parser) Result(List(Annotation), ParseErr) = {
 
 // TODO: be able to eq on tagged
 fn maybe(self: *Parser, const type: Symbol) bool = {
-    return :: @return;
     t := self.peek();
     v :: tag_value(TokenType, type);
     yes := t&!tag[].eq(v);
@@ -1025,7 +995,6 @@ fn maybe(self: *Parser, const type: Symbol) bool = {
 }
 
 fn eat(self: *Parser, const type: Symbol, msg: Str) Result(void, ParseErr) = {
-    return :: @return;
     t := self.peek();
     if not(self.maybe(type)) {|
         s :: type.str();

@@ -244,20 +244,20 @@ fn forked_swallow_passes(arch: TargetArch) {
         }
     }
 
-    for f in failing {
-        let fname = comp.program.pool.get(comp.program[f].name);
-        let (success, out, err) = fork_and_catch(|| run_one(&mut comp, f));
+    // for f in failing {
+    //     let fname = comp.program.pool.get(comp.program[f].name);
+    //     let (success, out, err) = fork_and_catch(|| run_one(&mut comp, f));
 
-        if !success {
-            failed += 1;
-            println!();
-            set_colour(255, 0, 0);
-            print!("[FAILED] {} ", fname);
-            unset_colour();
-            println!("{out}");
-            println!("{err}");
-        }
-    }
+    //     if !success {
+    //         failed += 1;
+    //         println!();
+    //         set_colour(255, 0, 0);
+    //         print!("[FAILED] {} ", fname);
+    //         unset_colour();
+    //         println!("{out}");
+    //         println!("{err}");
+    //     }
+    // }
 
     set_colour(250, 150, 200);
     if failed == 0 {

@@ -143,8 +143,15 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         }
         self.push_scope(None);
         func.set_flag(FnFlag::ResolvedBody, true);
+        if matches!(func.body, FuncImpl::Normal(_)) {
+            if func.get_flag(FnFlag::AllowRtCapture) {
+                func.return_var = BigOption::Some(self.decl_var(&Flag::Local_Return.ident(), VarType::Const, func.loc)?);
+            } else {
+                func.return_var = BigOption::Some(self.decl_var(&Flag::Return.ident(), VarType::Const, func.loc)?);
+            }
+            // func.return_var = BigOption::Some(self.decl_var(&Flag::__Return.ident(), VarType::Const, func.loc)?);
+        }
         if let FuncImpl::Normal(body) = &mut func.body {
-            func.return_var = BigOption::Some(self.decl_var(&Flag::__Return.ident(), VarType::Const, body.loc)?);
             self.resolve_expr(body)?;
         }
         self.pop_block();

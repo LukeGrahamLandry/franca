@@ -1730,6 +1730,7 @@ pub enum Flag {
     Tagged,
     Enum,
     Bake_Relocatable_Value,
+    Local_Return,
     _Reserved_Count_,
 }
 
@@ -1764,7 +1765,9 @@ flag_subset!(Flag, Flag::_Reserved_Null_, Flag::_Reserved_Count_);
 macro_rules! tagged_index {
     ($name:ty, $magic_offset:expr, $backing:ty) => {
         impl $name {
-            pub const MASK: $backing = if cfg!(debug_assertions) { (1 << $magic_offset) } else { 0 };
+            // TODO: you want to turn this off in release because then you have smaller immediates to put in asm but the new self hosted parser hardcodes whatever numbers it was compiled with -- Jun 24
+            // pub const MASK: $backing = if cfg!(debug_assertions) { (1 << $magic_offset) } else { 0 };
+            pub const MASK: $backing = (1 << $magic_offset);
 
             #[track_caller]
             pub fn as_index(self) -> usize {

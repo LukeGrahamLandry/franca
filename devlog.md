@@ -31,6 +31,13 @@ which i now use for top level stmts so wasn't getting it for injecting include c
 - fixed lex float
 - oh one problem with release mode is the debug typeid bit but i hardcode them in the self hosted parser based on whatever it was compiled with.
 
+removed magic `@return` and now return rebinds every `=` function and `local_return` rebinds on capturing functions.
+which is still a bit confusing but probably better.
+but i achived that without using the old parser, so thats a good sign that its at least somewhat safe to remove.
+it was definitly more fiddly than it would have been before self hosting.
+some confusion about needing to rebuild an extra time because driver_api (which you need to change to add shared Flag value),
+is built into the rust exe. so should make that just a normal part of the compiler.
+
 ## the parser grind (Jun 21/22)
 
 - stmt var decl
