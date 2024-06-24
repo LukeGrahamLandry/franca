@@ -160,7 +160,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let value = to_values(self.program, expect)?;
         let f = self.as_literal(unwrap!(self.make_slice_t, "slice type not ready!"), loc)?;
         // f.ty = ty; // TODO: it doesn't compile the function if the type here is FuncId?
-        let a = FatExpr::synthetic_ty(Expr::Value { value, coerced: true }, loc, TypeId::ty);
+        let a = FatExpr::synthetic_ty(Expr::Value { value, coerced: false }, loc, TypeId::ty);
         let s_ty = FatExpr::synthetic(Expr::Call(Box::new(f), Box::new(a)), loc);
         self.immediate_eval_expr_known(s_ty)
     }
@@ -275,7 +275,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let Some((value, ty)) = self.builtin_constant(name) else {
             panic!("unknown @builtin: {:?}", self.program.pool.get(name))
         } ;
-        FatExpr::synthetic_ty(Expr::Value { value, coerced: true }, arg.loc, ty)
+        FatExpr::synthetic_ty(Expr::Value { value, coerced: false }, arg.loc, ty)
     }
 
     // :bake_relocatable_value
@@ -998,7 +998,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             // println!("renumber ret: {} to {}", old_ret_var.log(self.program.pool), new_ret_var.log(self.program.pool));
             self.program.next_var = expr_out.renumber_vars(self.program.next_var, &mut mapping, self); // Note: not renumbering on the function. didn't need to clone it.
             let value = to_values(self.program, ret_label)?;
-            self.save_const(new_ret_var, Expr::Value { value, coerced: true }, label_ty, loc)?;
+            self.save_const(new_ret_var, Expr::Value { value, coerced: false }, label_ty, loc)?;
         }
         
         let res = self.compile_expr(expr_out, hint.into())?;
@@ -1349,7 +1349,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     #[track_caller]
     pub fn func_expr(&mut self, id: FuncId) -> (Expr<'p>, TypeId) {
         if self.program[id].finished_ret.is_some() {
-            (Expr::Value { value: (id.as_raw()).into(), coerced: true }, self.program.func_type(id))
+            (Expr::Value { value: (id.as_raw()).into(), coerced: false }, self.program.func_type(id))
         } else {
             (Expr::WipFunc(id), FuncId::get_or_create_type(self.program))
         }
@@ -1541,6 +1541,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             *coerced = true;
                             if let Some(replacement) = self.coerce_constant(value, ty, req, expr.loc)? {
                                 *expr = replacement;
+                                return self.compile_expr(expr, requested);
                             }
                             expr.ty = req;
                         }
@@ -1563,10 +1564,12 @@ impl<'a, 'p> Compile<'a, 'p> {
                         *coerced = true;
                         if let Some(replacement) = self.coerce_constant(value, prev_ty, req, loc)? {
                             *expr = replacement;
-                        }
+                            return self.compile_expr(expr, requested);
+                        } 
                         expr.ty = req;
-                    }
+                    } 
                 }
+                
                 expr.done = true;
                 expr.ty
             }
@@ -1605,7 +1608,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             let arg = FatExpr::synthetic(Expr::SuffixMacro(Flag::Slice.ident(), arg), loc);
                             let f = self.program.find_unique_func(Flag::Unquote_Macro_Apply_Placeholders.ident()).unwrap(); // TODO
                             let _ = self.infer_types(f)?.unwrap();
-                            let f = FatExpr::synthetic_ty(Expr::Value { value: (f.as_raw()).into(), coerced: true }, loc, self.program.func_type(f));
+                            let f = FatExpr::synthetic_ty(Expr::Value { value: (f.as_raw()).into(), coerced: false }, loc, self.program.func_type(f));
                             *expr = FatExpr::synthetic_ty(Expr::Call(Box::new(f), Box::new(arg)), loc, ty);
                             self.compile_expr(expr, requested)?
                         }
@@ -2110,11 +2113,11 @@ impl<'a, 'p> Compile<'a, 'p> {
                             assert!(ty.len() == 2);
                             let rest_ty = ty[1];
                             let parts = vec![
-                                FatExpr::synthetic_ty(Expr::Value { value: ty_val, coerced: true }, arg.loc, TypeId::ty),
+                                FatExpr::synthetic_ty(Expr::Value { value: ty_val, coerced: false }, arg.loc, TypeId::ty),
                                 FatExpr::synthetic_ty(
                                     Expr::Value {
                                         value: Values::many(reader.bytes[reader.i..].to_vec()), 
-                                        coerced: true
+                                        coerced: false
                                     },
                                     arg.loc,
                                     rest_ty,
@@ -2165,7 +2168,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let ty = T::get_or_create_type(self.program);
         self.program.finish_layout_deep(ty)?;
         let value = to_values(self.program, t)?;
-        let mut e = FatExpr::synthetic_ty(Expr::Value { value, coerced: true }, loc, ty);
+        let mut e = FatExpr::synthetic_ty(Expr::Value { value, coerced: false }, loc, ty);
         e.done = true;
         Ok(e)
     }
@@ -2520,6 +2523,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         res
     }
     
+    // TODO: :coerce_for_const_arg
     // TODO: you can never do this to a constant directly in case its aliased once i have const ptrs. 
     fn coerce_constant(&mut self, value: &mut Values, current: TypeId, requested: TypeId, loc: Span) -> Res<'p, Option<FatExpr<'p>>> {
         if current == requested {
@@ -2639,16 +2643,49 @@ impl<'a, 'p> Compile<'a, 'p> {
                     }
                 }
             }
-            (TypeInfo::Fn(_), TypeInfo::FnPtr { .. }) => {
-                // TODO: pull up typechecking logic?
-                let e = FatExpr::synthetic_ty(Expr::Value { value: value.clone(), coerced: true }, loc, current);
-                let e = FatExpr::synthetic(Expr::SuffixMacro(Flag::Fn_Ptr.ident(), Box::new(e)), loc);
-                return Ok(Some(e));
+            (c, TypeInfo::FnPtr { ty, .. }) => {
+                if let TypeInfo::Fn(_) = c {
+                    // TODO: pull up typechecking logic?
+                    let e = FatExpr::synthetic_ty(Expr::Value { value: value.clone(), coerced: true }, loc, current);
+                    let e = FatExpr::synthetic(Expr::SuffixMacro(Flag::Fn_Ptr.ident(), Box::new(e)), loc);
+                    return Ok(Some(e));
+                } else if TypeId::overload_set == current {
+                    let ty = *ty;
+                    let val = resolve_os(self, value, ty)?;
+                    let ty = self.program.intern_type(TypeInfo::Fn(ty));
+                    let e = FatExpr::synthetic_ty(Expr::Value { value: val, coerced: true }, loc, ty);
+                    let e = FatExpr::synthetic(Expr::SuffixMacro(Flag::Fn_Ptr.ident(), Box::new(e)), loc);
+                    return Ok(Some(e));
+                }
+            }
+            (c, TypeInfo::Fn(ty)) => {
+                if TypeId::overload_set == current {
+                    *value = resolve_os(self, value, *ty)?;
+                    return Ok(None);
+                }
             }
             _ => {}
         }
         
-        // println!("err: Tried to coerce {} to {}", self.program.log_type(current), self.program.log_type(requested));
+        fn resolve_os<'p>(s: &mut Compile<'_, 'p>, value: &mut Values, ty: FnType) -> Res<'p, Values> {
+            let os: OverloadSetId = from_values(s.program, value.clone())?; 
+            s.compute_new_overloads(os, Some(ty.arity))?;
+            // TODO: just filter the iterator.
+            let mut overloads = s.program[os].clone(); // sad
+        
+            overloads
+                .ready
+                .retain(|f| f.arg == ty.arg && (f.ret.is_none() || f.ret.unwrap() == ty.ret));
+            // TODO: You can't just filter here anymore because what if its a Split FuncRef.
+            let found = match overloads.ready.len() {
+                0 => panic!("Missing overload",),
+                1 => overloads.ready[0].func,
+                _ => panic!("Ambigous overload \n{:?}", overloads.ready),
+            };
+            to_values(s.program, found)
+        }
+        
+        println!("err: Tried to coerce {} to {}", self.program.log_type(current), self.program.log_type(requested));
         err!(CErr::TypeCheck(current, requested, "coerce_constant"))
     }
 
@@ -3196,7 +3233,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     expr: Expr::Value { value, .. }, ty: prev_ty, ..
                 }) = &self.program[fid].body {
                     // self.type_check_arg(*prev_ty, res, "inline const expr fn")?;
-                    expr.expr = Expr::Value { value: value.clone(), coerced: true };
+                    expr.expr = Expr::Value { value: value.clone(), coerced: false };
                     expr.ty = *prev_ty;
                     return Ok(*prev_ty);
                 }
@@ -3238,7 +3275,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     let mut reader = ReadBytes { bytes: value.bytes(), i: 0 };
                     for ty in ty {
                         let taken = chop_prefix(self.program, ty, &mut reader)?;
-                        parts.push(FatExpr::synthetic_ty(Expr::Value { value: taken, coerced: true }, arg_expr.loc, ty))
+                        parts.push(FatExpr::synthetic_ty(Expr::Value { value: taken, coerced: false }, arg_expr.loc, ty))
                     }
                     assert_eq!(reader.bytes.len(), reader.i, "TODO: nontrivial pattern matching");
                     arg_expr.expr = Expr::Tuple(parts);
@@ -3607,7 +3644,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                                 err!("Missing required field {}", self.program.pool.get(field.name));
                             };
 
-                            let expr = FatExpr::synthetic_ty(Expr::Value { value, coerced: true }, pattern.loc, field.ty);
+                            let expr = FatExpr::synthetic_ty(Expr::Value { value, coerced: false }, pattern.loc, field.ty);
                             // TODO: HACK. emit_bc expects them in order
                             pattern.bindings.insert(
                                 i,
@@ -3820,7 +3857,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     #[track_caller]
     fn save_const_values(&mut self, name: Var<'p>, value: Values, final_ty: TypeId, loc: Span) -> Res<'p, ()> {
-        self.save_const(name, Expr::Value { value, coerced: true }, final_ty, loc)
+        self.save_const(name, Expr::Value { value, coerced: false }, final_ty, loc)
     }
 
     pub fn bit_literal(&self, expr: &FatExpr<'p>) -> Option<(IntTypeInfo, i64)> {

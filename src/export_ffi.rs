@@ -481,10 +481,6 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     ("#macro #outputs(Type) fn type(e: FatExpr) FatExpr;", type_macro as *const u8),
     ("#macro #outputs(u32) fn BITS(parts: FatExpr) FatExpr;", bits_macro as *const u8),
     ("fn __get_comptime_dispatch_ptr() **i64", get_dispatch_ptr as *const u8),
-    (
-        "#macro fn resolve(function_type: FatExpr, overload_set_id: FatExpr) FatExpr;",
-        resolve_os as *const u8,
-    ),
     ("#macro fn as(T: FatExpr, e: FatExpr) FatExpr;", as_macro as *const u8),
     ("#macro fn Fn(Arg: FatExpr, Ret: FatExpr) FatExpr;", fn_type_macro as *const u8),
     ("#macro fn FnPtr(Arg: FatExpr, Ret: FatExpr) FatExpr;", fn_ptr_type_macro as *const u8),
@@ -891,7 +887,7 @@ extern "C-unwind" fn literal_ast<'p>(compile: &Compile<'_, 'p>, ty: TypeId, ptr:
     let value = Values::many(value.to_vec());
     // TODO: zero_padding
     let loc = compile.last_loc.unwrap_or_else(garbage_loc); // TODO: caller should pass it in?
-    FatExpr::synthetic_ty(Expr::Value { value, coerced: true }, loc, ty)
+    FatExpr::synthetic_ty(Expr::Value { value, coerced: false }, loc, ty)
 }
 
 extern "C-unwind" fn type_check_arg(compile: &Compile, found: TypeId, expected: TypeId) -> bool {
@@ -1097,31 +1093,6 @@ extern "C-unwind" fn shift_or_slice(compiler: &mut Compile, ptr: *const i64, len
 
 extern "C-unwind" fn get_dispatch_ptr(comp: &mut Compile) -> *mut i64 {
     comp.aarch64.get_dispatch() as usize as *mut i64
-}
-extern "C-unwind" fn resolve_os<'p>(comp: &mut Compile<'_, 'p>, f_ty: FatExpr<'p>, os: FatExpr<'p>) -> FatExpr<'p> {
-    let loc = os.loc;
-    let ty: TypeId = hope(|| comp.immediate_eval_expr_known(f_ty));
-    let os: OverloadSetId = hope(|| comp.immediate_eval_expr_known(os));
-    let f_ty = comp.program.fn_ty(ty).expect("@resolve arg should be function type.");
-
-    hope(|| comp.compute_new_overloads(os, None));
-    // TODO: just filter the iterator.
-    let mut overloads = comp.program[os].clone(); // sad
-
-    overloads
-        .ready
-        .retain(|f| f.arg == f_ty.arg && (f.ret.is_none() || f.ret.unwrap() == f_ty.ret));
-    // TODO: You can't just filter here anymore because what if its a Split FuncRef.
-    let found = match overloads.ready.len() {
-        0 => panic!("Missing overload",),
-        1 => overloads.ready[0].func,
-        _ => panic!("Ambigous overload \n{:?}", overloads.ready),
-    };
-    let val = to_values(comp.program, found).unwrap();
-    // It might have been a function pointer type. this lets you do `thing.field = (@resolve(@type thing.field) overloadset)!fnptr`
-    let ty = comp.program.intern_type(TypeInfo::Fn(f_ty));
-    return_from_ffi(comp);
-    FatExpr::synthetic_ty(Expr::Value { value: val, coerced: true }, loc, ty)
 }
 
 extern "C-unwind" fn make_fn_type<'p>(compile: &mut Compile<'_, 'p>, arg: &mut FatExpr<'p>, ret: FatExpr<'p>) -> Res<'p, FnType> {

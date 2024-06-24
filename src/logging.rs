@@ -490,7 +490,8 @@ impl<'p> Program<'p> {
             }
             (_, &TypeInfo::Fn(_)) => {
                 if found == TypeId::overload_set {
-                    format!("{indent} use @resolve to convert from a function to an overload set. ")
+                    // :coerce_for_const_arg
+                    format!("{indent} you can implicitly convert from a function to an overload set only if its constant. \n(currently you might have to introduce an extra :: name binding, this will be fixed eventually.) ")
                 } else {
                     format!("{indent} bad conversion")
                 }

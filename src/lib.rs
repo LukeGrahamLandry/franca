@@ -316,7 +316,7 @@ pub fn make_toplevel<'p>(pool: &SelfHosted<'p>, user_span: Span, stmts: Vec<FatS
             result: Box::new(FatExpr::synthetic_ty(
                 Expr::Value {
                     value: Values::unit(),
-                    coerced: true,
+                    coerced: false,
                 },
                 user_span,
                 TypeId::unit,
