@@ -118,14 +118,15 @@ impl<'p> SelfHosted<'p> {
 
     pub fn add_task(&mut self, is_expr: bool, span: Span) -> usize {
         unsafe {
-            println!("add task {span:?}");
+            // println!("add task {span:?}");
             let src = source_slice(self.codemap, span.low, span.high);
             push_parse(self.parser, unsafe { &*src }, span.low, span.high)
         }
     }
 
     pub fn lookup_filename(&self, span: Span) -> &'p str {
-        todo!()
+        // TODO
+        "unknownfiletodo"
     }
 
     pub(crate) fn print_diagnostic(&self, e: crate::compiler::CompileError<'p>) {

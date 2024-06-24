@@ -1,3 +1,5 @@
+## self hosting feature flag (Jun 23/24)
+
 problem with running parser on llvm is pool returns ?u32.
 currently i say thats {i64, i64} but it tries to create one from {i64, i32} which doesn't typecheck.
 cause i return small enums by tuple not bytes.
@@ -18,6 +20,16 @@ when i get more serious have abi tests that compare to rust's repr(c), but thats
 - capitialisation of flags enum so the values match the rust one
 - off by one for binary literals
 - if_empty_add_unit so overload arity didnt match (first thing it hit was fn ret).
+- horrible special case @return -> `__return`
+
+that seems to make it work on first??!!! fucking great success.
+not tests tho? `Undeclared Ident assert_eq`.
+its printing `=== Aarch64 Jit ===` so its getting into the driver.
+wanst adding back the stmt if it had annotations but ended with semicolon when parsing block
+which i now use for top level stmts so wasn't getting it for injecting include core.
+
+- fixed lex float
+- oh one problem with release mode is the debug typeid bit but i hardcode them in the self hosted parser based on whatever it was compiled with.
 
 ## the parser grind (Jun 21/22)
 

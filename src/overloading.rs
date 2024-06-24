@@ -355,7 +355,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
             match &self.program[f].body {
                 FuncImpl::Redirect(_) => {} // TODO: i'd rather not get here a billion times
-                FuncImpl::Empty | FuncImpl::Normal(_) => err!("hmmm {}", self.program[f].body.log(self.program.pool)),
+                FuncImpl::Empty | FuncImpl::Normal(_) => err!("hmmm. conflicting overloads? {}", self.program[f].body.log(self.program.pool)),
                 FuncImpl::Merged(parts) => {
                     merged.extend(parts.iter().cloned());
                 }

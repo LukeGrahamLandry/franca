@@ -1173,6 +1173,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     fn decl_func(&mut self, mut func: Func<'p>) -> Res<'p, (Option<FuncId>, Option<OverloadSetId>)> {
+        // println!("{}", self.program.pool.get(func.name));
         // TODO: cross compiling.
         #[cfg(not(target_arch = "aarch64"))]
         if func.has_tag(Flag::Aarch64) {
@@ -1345,6 +1346,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     pub fn compile_expr(&mut self, expr: &mut FatExpr<'p>, requested: Option<TypeId>) -> Res<'p, TypeId> {
+        // println!("{}", expr.log(self.program.pool));
         let marker = 0;
         unsafe {
             STACK_MIN = STACK_MIN.min(&marker as *const i32 as usize);

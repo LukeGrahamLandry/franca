@@ -78,6 +78,9 @@ fn finish_pending_stmts(self: *Parser, id: WaitingParse) Result(RsVec(FatStmt), 
         (fn Pending(src_span) T => {
             self.lex = init(self.pool, src_span.span, src_span.src);
             e := self.parse_block_until_squiggle(true);
+            
+            
+            
             // TODO: clone! :FUCKED
             // TODO: save less often!
             self.tasks[id.id] = (Expr = e);
@@ -460,6 +463,12 @@ fn parse_at(self: *Parser, prec: Prec) ParseRes = {
         });
         (fn Symbol(name) FatExpr => {
             self.pop();
+            // TODO: HACK. if i want this to parse differently, admit its a different thing. 
+            //       kinda ties into getting rid of !macros.
+            if name.eq(Flag.return.ident()) {|
+                return(Ok = self.expr((GetNamed = Flag.__return.ident()), self.last.span));
+            };
+            
             self.expr((GetNamed = name), self.last.span)
         });
         @default fn() FatExpr => {
@@ -969,7 +978,14 @@ fn parse_block_until_squiggle(self: *Parser, allow_eof: bool) ParseRes = {
     result: FatExpr = if(stmts&.pop()) {stmt|
         @match(stmt.stmt) {
             (fn Eval(e) FatExpr => e);
-            (fn Noop() => self.raw_unit(self.last.span));
+            (fn Noop() => {
+                // It might be #include_std
+                if stmt.annotations.len.ne(0) {|
+                    stmts&.push(stmt);
+                };
+                self.raw_unit(self.last.span)
+            
+            });
             @default => {
                 // block might end with a func decl with no semicolon.
                 stmts&.push(stmt);
