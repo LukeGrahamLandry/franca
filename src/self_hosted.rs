@@ -4,7 +4,7 @@ use std::{
 };
 
 use crate::{
-    ast::{FatExpr, FatStmt, Flag, TypeId},
+    ast::{FatExpr, FatStmt, Flag, Func, LazyType, Pattern, TypeId},
     compiler::{CErr, Res},
     err,
     ffi::InterpSend,
@@ -13,7 +13,7 @@ use crate::{
 use crate::export_ffi::BigResult::*;
 
 pub struct SelfHosted<'p> {
-    pool: *mut (),
+    pub pool: *mut (),
     codemap: *mut (),
     parser: *mut (),
     a: PhantomData<&'p u8>,
@@ -47,6 +47,11 @@ extern "C" {
     fn add_file(s: *mut (), name: &str, content: &str) -> (i64, i64); // Span
     fn source_slice(s: *mut (), span_low: u32, span_high: u32) -> *const str;
     fn push_parse(s: *mut (), src: &str, span_low: u32, span_high: u32) -> usize;
+    pub(crate) fn log_stmt(pool: *mut (), s: &FatStmt) -> *const str;
+    pub(crate) fn log_expr(pool: *mut (), s: &FatExpr) -> *const str;
+    pub(crate) fn log_pattern(pool: *mut (), s: &Pattern) -> *const str;
+    pub(crate) fn log_func(pool: *mut (), s: &Func) -> *const str;
+    pub(crate) fn log_lazy_type(pool: *mut (), s: &LazyType) -> *const str;
 }
 
 impl<'p> SelfHosted<'p> {

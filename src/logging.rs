@@ -115,8 +115,8 @@ pub use unwrap;
 
 use crate::ast::{FatStmt, FnFlag, FuncImpl, Pattern};
 use crate::export_ffi::BigOption;
-use crate::self_hosted::Ident;
-use crate::self_hosted::SelfHosted;
+use crate::self_hosted::{log_expr, log_func, log_lazy_type, log_stmt, SelfHosted};
+use crate::self_hosted::{log_pattern, Ident};
 use crate::{
     ast::{Expr, FatExpr, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo, Var},
     compiler::{CErr, CompileError, DebugState},
@@ -250,151 +250,26 @@ impl<'p> Program<'p> {
     }
 }
 
-impl<'p> PoolLog<'p> for Stmt<'p> {
-    fn log(&self, pool: &SelfHosted<'p>) -> String {
-        self.logd(pool, 0)
-    }
-}
-
 impl<'p> PoolLog<'p> for LazyType<'p> {
     fn log(&self, pool: &SelfHosted<'p>) -> String {
-        match self {
-            LazyType::EvilUnit => "EVIL_UNINIT !!!".into(),
-            LazyType::Infer => "Infer".into(),
-            LazyType::PendingEval(e) => e.log(pool),
-            LazyType::Finished(ty) => format!("{:?}", ty),
-            LazyType::Different(parts) => parts.iter().map(|p| p.log(pool)).collect(),
-        }
+        unsafe { (*log_lazy_type(pool.pool, self)).to_string() }
     }
 }
 impl<'p> PoolLog<'p> for Pattern<'p> {
     fn log(&self, pool: &SelfHosted<'p>) -> String {
-        // TODO: copy-paste. expr::StructLiteralP should
-        let body: String = self
-            .bindings
-            .iter()
-            .map(|b| format!("{}: ({}), ", b.name().map_or("_", |n| pool.get(n)), b.lazy().log(pool)))
-            .collect();
-        format!("({body})")
-    }
-}
-
-impl<'p> PoolLog<'p> for Expr<'p> {
-    fn log(&self, pool: &SelfHosted<'p>) -> String {
-        self.logd(pool, 0)
-    }
-}
-
-impl<'p> Expr<'p> {
-    fn logd(&self, pool: &SelfHosted<'p>, depth: usize) -> String {
-        unsafe { STATS.expr_fmt += 1 };
-        match self {
-            Expr::Call(func, arg) => {
-                format!("{}({})", func.logd(pool, depth), arg.logd(pool, depth))
-            }
-            &Expr::GetNamed(i) => pool.get(i).to_string(),
-            &Expr::String(i) => format!("\"{}\"", pool.get(i)),
-            Expr::Block { body, result, .. } => {
-                let es: Vec<_> = body
-                    .iter()
-                    .filter(|s| !matches!(s.stmt, Stmt::Noop) || !s.annotations.is_empty())
-                    .filter(|s| {
-                        // HACK to skip the useless args added by !if and !while.
-                        if let Stmt::DeclVarPattern { binding, value } = &s.stmt {
-                            if binding.bindings.len() == 1 && value.is_raw_unit() {
-                                return false;
-                            }
-                        }
-                        true
-                    })
-                    .map(|e| {
-                        let s = e.logd(pool, depth + 1);
-                        let a: String = e
-                            .annotations
-                            .iter()
-                            .map(|a| format!("#{}({})", pool.get(a.name), a.args.as_ref().map(|f| f.log(pool)).unwrap_or_default()))
-                            .collect();
-                        format!("{a} {s}")
-                    })
-                    .collect();
-                let es = es.join(";\n");
-                format!(
-                    "{{\n{}\n{}{}\n{}}}",
-                    es,
-                    "    ".repeat(depth + 1),
-                    result.logd(pool, depth + 1),
-                    "    ".repeat(depth)
-                )
-            }
-            Expr::Tuple(args) => {
-                let args: Vec<_> = args.iter().map(|e| e.logd(pool, depth)).collect();
-                let args: String = args.join(", ");
-                format!("[{}]", args)
-            }
-            Expr::Value { value, .. } => format!("{:?}", value.bytes()),
-            Expr::GetVar(v) => v.log(pool),
-            Expr::Closure(f) => format!("closure(fn {:?})", pool.get(f.name)),
-            Expr::SuffixMacro(i, e) => format!("{}!{}", e.logd(pool, depth), pool.get(*i)),
-            Expr::StructLiteralP(pattern) => {
-                let body: String = pattern
-                    .bindings
-                    .iter()
-                    .map(|b| {
-                        format!(
-                            "{}: ({}) = {}, ",
-                            b.name().map_or("_", |n| pool.get(n)),
-                            b.lazy().log(pool),
-                            b.default.as_ref().map(|e| e.log(pool)).unwrap_or_else(|| String::from("---"))
-                        )
-                    })
-                    .collect();
-
-                format!(".{{ {body} }}")
-            }
-            Expr::FieldAccess(container, name) => {
-                format!("{}.{}", container.logd(pool, depth), pool.get(*name))
-            }
-            Expr::PrefixMacro { handler, arg, target } => {
-                format!("[@{}({}) {}]", handler.logd(pool, depth), arg.logd(pool, depth), target.logd(pool, depth))
-            }
-
-            Expr::PtrOffset { ptr, bytes, name } => format!("{}.{}~{bytes}", ptr.logd(pool, depth), pool.get(*name)),
-            Expr::Cast(inner) => format!("@@cast({})", inner.logd(pool, depth)),
-            _ => format!("{:?}", self),
-        }
-    }
-}
-
-impl<'p> Stmt<'p> {
-    pub(crate) fn logd(&self, pool: &SelfHosted<'p>, depth: usize) -> String {
-        let s = match self {
-            Stmt::DeclNamed { name, ty, value, kind } => format!("{kind:?} {}: {} = {};", pool.get(*name), ty.log(pool), value.logd(pool, depth)),
-            Stmt::DeclVar { name, ty, value, .. } => format!("{:?} {}: {} = {};", name.kind, name.log(pool), ty.log(pool), value.logd(pool, depth)),
-            Stmt::Eval(e) => e.logd(pool, depth),
-            Stmt::DeclFunc(func) => format!("declare(fn {})", pool.get(func.name)),
-            Stmt::Noop => "".to_owned(),
-            Stmt::Set { place, value } => {
-                format!("{} = {};", place.logd(pool, depth), value.logd(pool, depth))
-            }
-            Stmt::DeclVarPattern { binding, value } => {
-                let body: String = binding
-                    .bindings
-                    .iter()
-                    .map(|b| format!("{}: ({}), ", b.var().map_or("_".to_string(), |n| n.log(pool)), b.lazy().log(pool)))
-                    .collect();
-
-                format!("({body}) = {};", value.logd(pool, depth))
-            }
-            _ => format!("{:?}", self),
-        };
-
-        format!("{}{s}", "    ".repeat(depth))
+        unsafe { (*log_pattern(pool.pool, self)).to_string() }
     }
 }
 
 impl<'p> PoolLog<'p> for FatExpr<'p> {
     fn log(&self, pool: &SelfHosted<'p>) -> String {
-        self.expr.log(pool)
+        unsafe { (*log_expr(pool.pool, self)).to_string() }
+    }
+}
+
+impl<'p> PoolLog<'p> for FatStmt<'p> {
+    fn log(&self, pool: &SelfHosted<'p>) -> String {
+        unsafe { (*log_stmt(pool.pool, self)).to_string() }
     }
 }
 
@@ -412,26 +287,7 @@ impl<'p> PoolLog<'p> for Var<'p> {
 
 impl<'p> PoolLog<'p> for Func<'p> {
     fn log(&self, pool: &SelfHosted<'p>) -> String {
-        if !self.get_flag(FnFlag::NotEvilUninit) {
-            return "[UNINIT (wip/dropped)]".to_string();
-        }
-        format!(
-            "[fn {} {:?} {} = \n \nBODY: \n{}\nEND\nARG: {}\n A:{:?}]\n{}\n",
-            pool.get(self.name),
-            self.name,
-            self.ret.log(pool),
-            self.body.log(pool),
-            self.arg.log(pool), // TODO: better formatting.
-            self.annotations.iter().map(|i| pool.get(i.name)),
-            if self.capture_vars.is_empty() {
-                String::from("Raw function, no captures.")
-            } else {
-                format!(
-                    "Closure capturing: {:?}.",
-                    self.capture_vars.iter().map(|v| v.log(pool)).collect::<Vec<_>>()
-                )
-            },
-        )
+        unsafe { (*log_func(pool.pool, self)).to_string() }
     }
 }
 

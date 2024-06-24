@@ -53,7 +53,6 @@ pub enum CErr<'p> {
     TypeError(&'static str, Values),
     TypeCheck(TypeId, TypeId, &'static str),
     AmbiguousCall,
-    Diagnostic(Vec<Diagnostic>),
     NeedsTypeHint(&'static str),
     Fatal(String),
 }

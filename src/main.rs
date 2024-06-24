@@ -7,7 +7,9 @@ use franca::{
     bc::{to_values, Values},
     compiler::{Compile, ExecStyle, Res},
     export_ffi::{get_include_std, ImportVTable, IMPORT_VTABLE},
-    find_std_lib, log_err, make_toplevel,
+    find_std_lib, log_err,
+    logging::PoolLog,
+    make_toplevel,
     scope::ResolveScope,
     timestamp, MEM, MMAP_ARENA_START, STACK_START, STATS,
 };
@@ -163,6 +165,7 @@ fn main() {
         });
 
         if let Some(f) = comp.program.find_unique_func(comp.program.pool.intern("driver")) {
+            println!("{}", comp.program[f].log(comp.program.pool));
             let val = to_values(comp.program, &IMPORT_VTABLE as *const ImportVTable as i64).unwrap();
             if let franca::export_ffi::BigResult::Err(e) = comp.compile(f, ExecStyle::Jit) {
                 log_err(&comp, *e);
