@@ -165,7 +165,6 @@ fn main() {
         });
 
         if let Some(f) = comp.program.find_unique_func(comp.program.pool.intern("driver")) {
-            println!("{}", comp.program[f].log(comp.program.pool));
             let val = to_values(comp.program, &IMPORT_VTABLE as *const ImportVTable as i64).unwrap();
             if let franca::export_ffi::BigResult::Err(e) = comp.compile(f, ExecStyle::Jit) {
                 log_err(&comp, *e);

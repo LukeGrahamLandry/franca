@@ -39,6 +39,17 @@ some confusion about needing to rebuild an extra time because driver_api (which 
 is built into the rust exe. so should make that just a normal part of the compiler? hard to think about.
 I guess you want included like now but the self hosted compiler build against the new driver_api, not its own compile time copy.
 
+Added coerce_constant for fn->fn_ptr. A bit of a hack because you want to insert !fn_ptr instead of just mutating the value,
+because you want to delay needing to create the assembly of the function. using an expression defers it and lets the backend do the fix-up.
+
+I'm doing this to eventually get rid of !macros so its easier to parse 'if !cond' but also
+its pretty dumb to not implicitly cast a constant function to a function pointer.
+It's not ambigous and it does the type check.
+Similarly, most other uses of ! are left over from when my type system wasn't expressive enough and i needed lots of hooks into the compiler.
+The few that are actually magic (!if, !slice) I can make into @macros now that i have better bootstrapping system for them.
+Those are really thier own ast nodes, so perhaps I should treat them as such.
+`if` you always call through the function so its chill.
+
 ## the parser grind (Jun 21/22)
 
 - stmt var decl
@@ -1559,7 +1570,7 @@ fn log(self: Loggable, important: bool) Str =
 
 fn upcast(self: Ptr(i64)) Loggable = {
   const log: Fn((Ty(VoidPtr, bool), Str)) = log;  // Somewhere to hang the type annotation to resolve the overload.
-  (dataptr: self, vtable: log!fn_ptr)
+  (dataptr: self, vtable: log)
 }
 
 var hello = "Hi";

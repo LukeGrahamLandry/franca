@@ -209,7 +209,6 @@ pub const INCLUDE_STD: &[(&str, &str)] = &[
     include_std!("codegen/aarch64/unwind"),
     include_std!("codegen/bf/instructions"),
     include_std!("codegen/llvm/basic"),
-    include_std!("codegen/wasm/basic"),
     include_std!("codegen/wasm/instructions"),
 ];
 */

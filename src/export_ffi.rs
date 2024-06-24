@@ -500,6 +500,8 @@ pub const COMPILER: &[(&str, *const u8)] = &[
         dyn_bake_relocatable_value as *const u8,
     ),
     ("fn get_meta(t: Type) TypeMeta", get_meta as *const u8),
+    // TODO: this should be a function, but then that needs a different bootstrapping path.
+    ("#macro fn builtin(t: FatExpr) FatExpr", Compile::get_builtin_macro as *const u8),
 ];
 
 extern "C-unwind" fn dyn_bake_relocatable_value(comp: &mut Compile, bytes: &[u8], ty: TypeId) -> *const [BakedEntry] {

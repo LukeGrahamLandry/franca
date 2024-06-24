@@ -69,7 +69,7 @@ do_init :: fn(userdata: rawptr) void = {
     desc := SgDesc.zeroed();
     desc.environment = sglue_environment();
     // TODO: single argument version of @resolve that uses inferred result type. 
-    logger := (@resolve(@type desc.logger.func) slog_func)!fn_ptr;
+    logger :: (@resolve(@type desc.logger.func) slog_func);
     desc.logger.func = logger;
     sg_setup(desc&);
     
@@ -223,12 +223,12 @@ fn main() void = {
     println("Hello World");
     state := State.zeroed();
     desc := SappDesc.zeroed();
-    desc.init_userdata_cb = do_init!fn_ptr;
-    desc.frame_userdata_cb = do_render!fn_ptr;
-    desc.event_userdata_cb = do_event!fn_ptr;
+    desc.init_userdata_cb = do_init;
+    desc.frame_userdata_cb = do_render;
+    desc.event_userdata_cb = do_event;
     desc.user_data = State.raw_from_ptr(state&);
     // TODO: I can't decide if this would be creepy as an auto cast.
-    desc.logger.func = (@resolve(@type desc.logger.func) slog_func)!fn_ptr;
+    desc.logger.func = (@resolve(@type desc.logger.func) slog_func);
     desc.window_title = "Arstotzkan Farmer 4".maybe_borrow_cstr(temp());
     sapp_run(desc&);
 }
@@ -253,14 +253,14 @@ fn build_sokol_cached(env: Ty(Arch, Os), linking: LinkTime) Result(Str, void) = 
     
     args: List(Str) = list(10, temp());
     
-    args&.push_all(("-Ivendor/sokol", "-DSOKOL_IMPL", "-DSOKOL_NO_ENTRY")!slice);
+    args&.push_all(@slice ("-Ivendor/sokol", "-DSOKOL_IMPL", "-DSOKOL_NO_ENTRY"));
     if env._1.eq(.Macos) {|
         // macos_args must go first to treat source as objective c!
         if not(eq(linking, .Static)) {|
             a := SOKOL_MACOS_LINK_ARGS;
             args&.push_all(a&.slice());
         };
-        args&.push_all(("-DSOKOL_METAL", "-x", "objective-c")!slice);
+        args&.push_all(@slice ("-DSOKOL_METAL", "-x", "objective-c"));
     } {|
         panic("TODO: sokol build flags on not macos");
     };
@@ -268,9 +268,9 @@ fn build_sokol_cached(env: Ty(Arch, Os), linking: LinkTime) Result(Str, void) = 
     
     @switch(linking) {
         @case(.Static) => args&.push("-c");
-        @case(.Dynamic) => args&.push_all(("-DSOKOL_DLL", "-dynamiclib")!slice);
+        @case(.Dynamic) => args&.push_all(@slice ("-DSOKOL_DLL", "-dynamiclib"));
     };
-    args&.push_all(("-o", path)!slice);
+    args&.push_all(@slice ("-o", path));
     
     // Since we save it, might as well take the extra hundred years to make it go fast. 
     args&.push("-O2");
@@ -278,7 +278,7 @@ fn build_sokol_cached(env: Ty(Arch, Os), linking: LinkTime) Result(Str, void) = 
     // TODO
     //if(is_x86) {|
     //    // cross compile for rosetta. 
-    //    args&.push_all(("-target", "x86_64-apple-darwin")!slice);
+    //    args&.push_all(@slice ("-target", "x86_64-apple-darwin"));
     //};
     
     @println("building sokol: %", args.items());
@@ -333,7 +333,7 @@ fn driver(vtable: *ImportVTable) void #export = {
     @println("Opened %", dylib_path);
     
     my_vtable: ExportVTable = (
-        resolve_comptime_import = (Some = resolve_comptime_import!fn_ptr),
+        resolve_comptime_import = (Some = resolve_comptime_import),
     );
     data: UserData = (vtable = vtable, sokol = sokol);
     
@@ -359,7 +359,7 @@ fn driver(vtable: *ImportVTable) void #export = {
     
     obj_path := build_sokol_cached(arch_os, .Static).unwrap();
     
-    ir_text := emit_llvm((data = comp, vtable = vtable), temp(), (main_f)!slice, .ExportWithNames);
+    ir_text := emit_llvm((data = comp, vtable = vtable), temp(), @slice (main_f), .ExportWithNames);
     out := open_temp_file();
     for(ir_text&){bucket|
         out.fd&.write(bucket);
@@ -367,7 +367,7 @@ fn driver(vtable: *ImportVTable) void #export = {
     @println("Write llvm ir to %", out&.s_name());
     a := SOKOL_MACOS_LINK_ARGS;
     args := a&.slice().clone(temp());
-    args&.push_all((obj_path, "-x", "ir", out&.s_name(), "-o", "farm.out")!slice);    
+    args&.push_all(@slice (obj_path, "-x", "ir", out&.s_name(), "-o", "farm.out"));    
     //args&.push("-O2");
     @println("building aot exe: %", args.items());
     success := run_cmd_blocking(CLANG_PATH, args.items());

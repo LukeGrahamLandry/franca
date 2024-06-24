@@ -242,7 +242,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     fn builtin_prefix_macro(&mut self, handler: &mut FatExpr<'p>, arg: &mut FatExpr<'p>, target: &mut FatExpr<'p>) -> Res<'p, FatExpr<'p>> {
         let Expr::GetVar(name) = handler.expr else {
-            err!("macro invocations must be GetVar while bootstrapping",)
+            err!("macro invocations must be GetVar while bootstrapping. not: ({})", handler.log(self.program.pool))
         };
         let name = Flag::try_from(name.name)?;
         match name {
@@ -262,8 +262,20 @@ impl<'a, 'p> Compile<'a, 'p> {
                 assert!(!target.is_raw_unit(), "@enum type must be specified while bootstrapping.");
                 return self.enum_constant_macro(mem::take(arg), mem::take(target));
             }
+            Flag::Builtin => {
+                assert!(target.is_raw_unit());
+               return Ok(self.get_builtin_macro(mem::take(arg)));
+            }
             _ => err!("unknown macro invocation {:?} while bootstrapping", name),
         }
+    }
+    
+    pub extern "C" fn get_builtin_macro(&mut self, arg: FatExpr<'p>) -> FatExpr<'p> {
+        let Some(name) = arg.as_ident() else { panic!("@builtin requires argument",) };
+        let Some((value, ty)) = self.builtin_constant(name) else {
+            panic!("unknown @builtin: {:?}", self.program.pool.get(name))
+        } ;
+        FatExpr::synthetic_ty(Expr::Value { value, coerced: true }, arg.loc, ty)
     }
 
     // :bake_relocatable_value
@@ -1413,6 +1425,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     //       and just use the slow linear types for debugging.
     fn compile_expr_inner(&mut self, expr: &mut FatExpr<'p>, requested: Option<TypeId>) -> Res<'p, TypeId> {
         self.last_loc = Some(expr.loc);
+        let loc = expr.loc;
         let prev_ty = expr.ty;
         Ok(match expr.deref_mut() {
             Expr::Cast(inner) => {
@@ -1519,16 +1532,19 @@ impl<'a, 'p> Compile<'a, 'p> {
                     self.compile_expr(expr, requested)?
                 } else if let Some((value, ty)) = self.find_const(*var)? {
                     expr.set(value.clone(), ty);
+                    expr.done = true;
                     if let Some(req) = requested {
                         if ty != req {
                             let Expr::Value { value, coerced } = &mut expr.expr else{ unreachable!() };
                             assert!(!*coerced, "const mismatch. {} vs {} but already coerced", self.program.log_type(expr.ty), self.program.log_type(req));
-                            self.coerce_constant(value, ty, req)?;
+                            
                             *coerced = true;
+                            if let Some(replacement) = self.coerce_constant(value, ty, req, expr.loc)? {
+                                *expr = replacement;
+                            }
                             expr.ty = req;
                         }
                     }
-                    expr.done = true;
                     expr.ty
                 } else {
                     println!("{:?}", self[var.scope].rt_types);
@@ -1543,8 +1559,11 @@ impl<'a, 'p> Compile<'a, 'p> {
                 if let Some(req) = requested {
                     if prev_ty != req {
                         assert!(!*coerced, "const mismatch. {} vs {} but already coerced", self.program.log_type(expr.ty), self.program.log_type(req));
-                        self.coerce_constant(value, prev_ty, req)?;
+                        
                         *coerced = true;
+                        if let Some(replacement) = self.coerce_constant(value, prev_ty, req, loc)? {
+                            *expr = replacement;
+                        }
                         expr.ty = req;
                     }
                 }
@@ -2172,7 +2191,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             "Never" => return Some(TypeId::never),
             "rawptr" => return Some(TypeId::voidptr),
             "OverloadSet" => return Some(TypeId::overload_set),
-            "ScopedBlock" => return Some(TypeId::scope),
             "LabelId" => return Some(TypeId::label),
             "ScopeId" => return Some(TypeId::scope),
             "FuncId" => return Some(TypeId::func),
@@ -2503,9 +2521,9 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
     
     // TODO: you can never do this to a constant directly in case its aliased once i have const ptrs. 
-    fn coerce_constant(&mut self, value: &mut Values, current: TypeId, requested: TypeId) -> Res<'p, ()> {
+    fn coerce_constant(&mut self, value: &mut Values, current: TypeId, requested: TypeId, loc: Span) -> Res<'p, Option<FatExpr<'p>>> {
         if current == requested {
-            return Ok(());
+            return Ok(None);
         }
         
         fn int_value(value: &Values, int: IntTypeInfo) -> Res<'static, i128> {
@@ -2585,7 +2603,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let v = int_value(value, *have)?; // TODO: sign
                 if v <= max && v >= min {
                     // adjust_int_length(value, *requested);
-                    return Ok(())
+                    return Ok(None)
                 }
             }
             (TypeInfo::Int(have), TypeInfo::F32) => {
@@ -2594,7 +2612,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let i = int_value(value, *have)?;
                 if i <= max && i >= min {
                     *value = to_values(self.program, i as f32)?;
-                    return Ok(());
+                    return Ok(None);
                 }
             }
             (TypeInfo::Int(have), TypeInfo::F64) => {
@@ -2603,7 +2621,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let i = int_value(value, *have)?;
                 if i <= max && i >= min {
                     *value = to_values(self.program, i as f64)?;
-                    return Ok(());
+                    return Ok(None);
                 }
             }
             // TODO: require that its in the float range too
@@ -2617,9 +2635,15 @@ impl<'a, 'p> Compile<'a, 'p> {
                         *value = to_values(self.program, v as i64)?; // TODO: rightn umer of bits
                         adjust_int_length(value, r);
                         
-                        return Ok(());
+                        return Ok(None);
                     }
                 }
+            }
+            (TypeInfo::Fn(_), TypeInfo::FnPtr { .. }) => {
+                // TODO: pull up typechecking logic?
+                let e = FatExpr::synthetic_ty(Expr::Value { value: value.clone(), coerced: true }, loc, current);
+                let e = FatExpr::synthetic(Expr::SuffixMacro(Flag::Fn_Ptr.ident(), Box::new(e)), loc);
+                return Ok(Some(e));
             }
             _ => {}
         }
