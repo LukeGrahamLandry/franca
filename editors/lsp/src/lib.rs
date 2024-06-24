@@ -1,4 +1,3 @@
-use codemap::{CodeMap, File};
 use franca::find_std_lib;
 use lsp_server::{Connection, ExtractError, Message, Notification, Request, RequestId, Response};
 use lsp_types::notification::{DidChangeTextDocument, DidOpenTextDocument};
@@ -127,31 +126,22 @@ fn main_loop<'p>(connection: Connection, params: serde_json::Value, pool: &'p St
 }
 
 struct Lsp<'p> {
-    codemap: CodeMap,
-    files: HashMap<Url, Arc<File>>,
+    files: HashMap<Url, String>,
     pool: &'p StringPool<'p>,
 }
 
 impl<'p> Lsp<'p> {
     fn new(pool: &'p StringPool<'p>) -> Self {
-        Lsp {
-            files: HashMap::new(),
-            pool,
-            codemap: CodeMap::new(),
-        }
+        Lsp { files: HashMap::new(), pool }
     }
 
     fn did_open(&mut self, params: DidOpenTextDocumentParams) {
-        let file = self.codemap.add_file(params.text_document.uri.clone().into(), params.text_document.text);
-        self.files.insert(params.text_document.uri, file);
+        self.files.insert(params.text_document.uri, params.text_document.text);
     }
 
     fn did_change(&mut self, params: DidChangeTextDocumentParams) {
-        let file = self.codemap.add_file(
-            params.text_document.uri.clone().into(),
-            params.content_changes.last().unwrap().text.clone(),
-        );
-        self.files.insert(params.text_document.uri, file);
+        self.files
+            .insert(params.text_document.uri, params.content_changes.last().unwrap().text.clone());
     }
 
     fn semantic_tokens(&mut self, params: SemanticTokensParams) -> Option<SemanticTokensResult> {

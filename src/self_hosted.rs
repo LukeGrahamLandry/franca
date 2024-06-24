@@ -3,8 +3,6 @@ use std::{
     mem::{transmute, ManuallyDrop},
 };
 
-use codemap::CodeMap;
-
 use crate::{
     ast::{FatExpr, FatStmt, Flag, TypeId},
     compiler::{CErr, Res},
@@ -12,16 +10,8 @@ use crate::{
     ffi::InterpSend,
 };
 
-#[cfg(not(feature = "self_hosted"))]
-use crate::{
-    lex::Lexer,
-    parse::{ParseFile, ParseTasks, Parser},
-    pool::StringPool,
-};
-
 use crate::export_ffi::BigResult::*;
 
-#[cfg(feature = "self_hosted")]
 pub struct SelfHosted<'p> {
     pool: *mut (),
     codemap: *mut (),
@@ -29,7 +19,6 @@ pub struct SelfHosted<'p> {
     a: PhantomData<&'p u8>,
 }
 
-#[cfg(feature = "self_hosted")]
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct Span {
@@ -37,10 +26,6 @@ pub struct Span {
     high: u32,
 }
 
-#[cfg(not(feature = "self_hosted"))]
-pub use codemap::Span;
-
-#[cfg(feature = "self_hosted")]
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
 pub struct ParseErr<'p> {
@@ -50,7 +35,6 @@ pub struct ParseErr<'p> {
 
 use crate::export_ffi::BigResult;
 
-#[cfg(feature = "self_hosted")]
 #[allow(improper_ctypes)]
 #[link(name = "franca")]
 extern "C" {
@@ -65,7 +49,6 @@ extern "C" {
     fn push_parse(s: *mut (), src: &str, span_low: u32, span_high: u32) -> usize;
 }
 
-#[cfg(feature = "self_hosted")]
 impl<'p> SelfHosted<'p> {
     pub fn intern(&self, s: &str) -> Ident<'p> {
         let s = s.as_bytes().to_vec();
@@ -135,131 +118,9 @@ impl<'p> SelfHosted<'p> {
     }
 }
 
-#[cfg(feature = "self_hosted")]
 impl<'p> Default for SelfHosted<'p> {
     fn default() -> Self {
         unsafe { init_self_hosted() }
-    }
-}
-
-#[cfg(not(feature = "self_hosted"))]
-pub struct SelfHosted<'p> {
-    pool: &'p StringPool<'p>,
-    codemap: CodeMap,
-    pub parser: ParseTasks<'p>,
-}
-
-#[cfg(not(feature = "self_hosted"))]
-impl<'p> SelfHosted<'p> {
-    pub fn intern(&self, s: &str) -> Ident<'p> {
-        self.pool.intern(s)
-    }
-
-    pub fn get(&self, s: Ident<'p>) -> &'p str {
-        self.pool.get(s)
-    }
-
-    pub fn get_c_str(&self, s: Ident<'p>) -> *const u8 {
-        self.pool.get_c_str(s)
-    }
-
-    pub fn wait_for_expr(&mut self, id: usize) -> Res<'p, FatExpr<'p>> {
-        match &mut self.parser.tasks[id] {
-            &mut ParseFile::PendingExpr(span) => {
-                let code = self.source_slice(span);
-                let lex = Lexer::new(code, self.pool, span);
-                let res = Parser::parse_expr_outer(self, lex);
-                match res {
-                    Ok(stmts) => {
-                        // println!("{:?}\n=====", stmts.iter().map(|v| v.log(self.pool)).collect::<Vec<_>>());
-                        self.parser.tasks[id] = ParseFile::ParsedExpr(stmts.clone());
-                        Ok(stmts)
-                    }
-                    Err(e) => {
-                        self.parser.tasks[id] = ParseFile::Err(e.clone());
-                        Err(e)
-                    }
-                }
-            }
-            ParseFile::ParsedStmts(_) => unreachable!(),
-            ParseFile::Err(e) => Err(e.clone()),
-            ParseFile::ParsedExpr(v) => Ok(v.clone()),
-            e => todo!("{e:?}'"),
-        }
-    }
-
-    pub fn wait_for_stmts(&mut self, id: usize) -> Res<'p, Vec<FatStmt<'p>>> {
-        match &mut self.parser.tasks[id] {
-            &mut ParseFile::PendingStmts(span) => {
-                let code = self.source_slice(span);
-                let lex = Lexer::new(code, self.pool, span);
-                let res = Parser::parse_stmts(self, lex);
-                match res {
-                    Ok(stmts) => {
-                        // println!("{:?}\n=====", stmts.iter().map(|v| v.log(self.pool)).collect::<Vec<_>>());
-                        self.parser.tasks[id] = ParseFile::Wip; // stmts are single use it seems.
-                        Ok(stmts)
-                    }
-                    Err(e) => {
-                        self.parser.tasks[id] = ParseFile::Err(e.clone());
-                        Err(e)
-                    }
-                }
-            }
-            ParseFile::PendingExpr(_) => unreachable!(),
-            ParseFile::Err(e) => Err(e.clone()),
-            _ => todo!(),
-        }
-    }
-
-    pub fn add_file(&mut self, name: String, source: String) -> Span {
-        self.codemap.add_file(name, source).span
-    }
-
-    pub fn source_slice(&self, span: Span) -> &'p str {
-        unsafe { transmute(self.codemap.find_file(span.high()).source_slice(span)) }
-    }
-
-    pub fn lookup_filename(&mut self, span: Span) -> &'p str {
-        unsafe { transmute(self.codemap.find_file(span.high()).name()) }
-    }
-
-    pub(crate) fn print_diagnostic(&self, e: crate::compiler::CompileError<'p>) {
-        // TODO
-        println!("{e:?}");
-        // if let CErr::Diagnostic(diagnostic) = &e.reason {
-        //     emit_diagnostic(&self.codemap, diagnostic);
-        // } else if let Some(loc) = e.loc {
-        //     let diagnostic = vec![Diagnostic {
-        //         level: Level::Error,
-        //         message: e.reason.log(self.program, self.pool),
-        //         code: None,
-        //         spans: vec![SpanLabel {
-        //             span: loc,
-        //             label: None,
-        //             style: SpanStyle::Primary,
-        //         }],
-        //     }];
-        //     emit_diagnostic(&self.codemap, &diagnostic);
-        // } else {
-        //     println!("{}", e.reason.log(self.program, interp.pool));
-        // }
-    }
-
-    pub fn add_task(&mut self, is_expr: bool, span: Span) -> usize {
-        self.parser.add_task(is_expr, span)
-    }
-}
-
-#[cfg(not(feature = "self_hosted"))]
-impl<'p> Default for SelfHosted<'p> {
-    fn default() -> Self {
-        let pool = Box::leak(Box::default());
-        Self {
-            pool,
-            codemap: CodeMap::new(),
-            parser: ParseTasks::new(pool),
-        }
     }
 }
 

@@ -36,7 +36,8 @@ which is still a bit confusing but probably better.
 but i achived that without using the old parser, so thats a good sign that its at least somewhat safe to remove.
 it was definitly more fiddly than it would have been before self hosting.
 some confusion about needing to rebuild an extra time because driver_api (which you need to change to add shared Flag value),
-is built into the rust exe. so should make that just a normal part of the compiler.
+is built into the rust exe. so should make that just a normal part of the compiler? hard to think about.
+I guess you want included like now but the self hosted compiler build against the new driver_api, not its own compile time copy.
 
 ## the parser grind (Jun 21/22)
 

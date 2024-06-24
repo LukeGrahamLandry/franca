@@ -137,14 +137,8 @@ pub mod cranelift;
 pub mod emit_bc;
 pub mod export_ffi;
 pub mod ffi;
-#[cfg(not(feature = "self_hosted"))]
-pub mod lex;
 pub mod logging;
 pub mod overloading;
-#[cfg(not(feature = "self_hosted"))]
-pub mod parse;
-#[cfg(not(feature = "self_hosted"))]
-pub mod pool;
 pub mod scope;
 pub mod self_hosted;
 

@@ -5,7 +5,6 @@
 #![allow(clippy::wrong_self_convention)]
 
 use crate::self_hosted::Span;
-use codemap_diagnostic::Diagnostic;
 use core::slice;
 use std::collections::HashSet;
 use std::ffi::CString;
