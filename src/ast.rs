@@ -846,7 +846,7 @@ pub enum LazyType<'p> {
 
 #[repr(C)]
 pub struct Program<'p> {
-    pub pool: &'p mut SelfHosted<'p>,
+    pub pool: &'p mut SelfHosted<'p>, // repr c matters so this is first must match franca side
     pub types: Vec<TypeInfo<'p>>,
     // twice as much memory but it's so much faster. TODO: can i just store hashes?
     pub type_lookup: Map<TypeInfo<'p>, TypeId>,

@@ -210,6 +210,8 @@ pub struct ImportVTable {
     get_baked: extern "C" fn(compile: &Compile, id: BakedVarId) -> BakedVar,
     debug_log_bc: for<'p> extern "C" fn(c: &Compile<'_, 'p>, body: &FnBody<'p>),
     prim_sig: for<'p> extern "C" fn(c: &Compile<'_, 'p>, f_ty: FnType, cc: CallConv) -> Res<'p, PrimSig<'p>>,
+    get_compiler_builtins_source: extern "C" fn() -> &'static str,
+    get_cranelift_builtins_source: extern "C" fn() -> &'static str,
 }
 
 #[repr(C)]
@@ -245,6 +247,8 @@ pub static IMPORT_VTABLE: ImportVTable = ImportVTable {
     get_baked,
     debug_log_bc,
     prim_sig: franca_prim_sig,
+    get_compiler_builtins_source,
+    get_cranelift_builtins_source,
 };
 
 extern "C" fn franca_prim_sig<'p>(c: &Compile<'_, 'p>, f_ty: FnType, cc: CallConv) -> Res<'p, PrimSig<'p>> {
@@ -541,58 +545,25 @@ extern "C-unwind" fn get_size_of(compiler: &mut Compile, ty: TypeId) -> i64 {
 
 pub static STDLIB_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
 
-pub fn get_include_std(name: &str) -> Option<String> {
-    let msg = "//! IMPORTANT: don't try to save #comptime_addr('ASLR junk'), it won't go well. \n";
-    match name {
-        "compiler" => {
-            let mut out = String::new();
-            writeln!(out, "{}", include_str!("../compiler/driver_api.fr")).unwrap();
-            writeln!(out, "{}", msg).unwrap();
-            for (sig, ptr) in COMPILER {
-                writeln!(out, "#comptime_addr({}) #ct #c_call {sig};", *ptr as usize).unwrap();
-            }
-            Some(out)
-        }
-        #[cfg(feature = "cranelift")]
-        "codegen_cranelift_intrinsics" => {
-            let mut out = String::new();
-            writeln!(out, "{}", msg).unwrap();
-            for (sig, ptr) in crate::cranelift::BUILTINS {
-                writeln!(out, "#cranelift_emit({}) #c_call {sig};", *ptr as usize).unwrap();
-            }
-            Some(out)
-        }
-        #[cfg(not(feature = "cranelift"))]
-        "codegen_cranelift_intrinsics" => Some(String::new()),
-        _ => {
-            // if let Some((_, src)) = INCLUDE_STD.iter().find(|(check, _)| name == *check) {
-            //     return Some(src.to_string());
-            // }
+const MSG: &str = "//! IMPORTANT: don't try to save #comptime_addr('ASLR junk'), it won't go well. \n";
 
-            let path = STDLIB_PATH.lock();
-            let path = path.as_ref().unwrap().as_ref();
-            if let Some(path) = path {
-                let path = path.join(name);
-                if let std::result::Result::Ok(src) = fs::read_to_string(&path) {
-                    return Some(src);
-                }
-
-                // TODO: have a different macro for this (cwd)
-                if let std::result::Result::Ok(src) = fs::read_to_string(name) {
-                    return Some(src);
-                }
-
-                println!("Missing path {path:?}");
-            } else {
-                // TODO: have a different macro for this (cwd)
-                if let std::result::Result::Ok(src) = fs::read_to_string(name) {
-                    return Some(src);
-                }
-                println!("STDLIB_PATH not set.");
-            }
-            None
-        }
+extern "C" fn get_compiler_builtins_source() -> &'static str {
+    let mut out = String::new();
+    writeln!(out, "{}", include_str!("../compiler/driver_api.fr")).unwrap();
+    writeln!(out, "{}", MSG).unwrap();
+    for (sig, ptr) in COMPILER {
+        writeln!(out, "#comptime_addr({}) #ct #c_call {sig};", *ptr as usize).unwrap();
     }
+    out.leak() // TODO
+}
+
+extern "C" fn get_cranelift_builtins_source() -> &'static str {
+    let mut out = String::new();
+    writeln!(out, "{}", MSG).unwrap();
+    for (sig, ptr) in crate::cranelift::BUILTINS {
+        writeln!(out, "#cranelift_emit({}) #c_call {sig};", *ptr as usize).unwrap();
+    }
+    out.leak() // TODO
 }
 
 // TODO: can do some nicer reporting here? maybe this goes away once i can actually do error handling in my language.

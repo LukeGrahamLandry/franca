@@ -7,6 +7,7 @@
 #![feature(naked_functions)]
 #![feature(const_trait_impl)]
 #![feature(try_trait_v2)]
+#![feature(str_from_raw_parts)]
 // bro if you can tell you could compile it more efficiently why don't you just compile it more efficiently
 #![allow(clippy::format_collect)]
 extern crate core;

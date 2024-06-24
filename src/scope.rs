@@ -1,13 +1,13 @@
 use std::{mem, ops::DerefMut};
 
-use crate::self_hosted::Span;
+use crate::self_hosted::{get_include_std, Span};
 
 use crate::{
     assert,
     ast::{Binding, Expr, FatExpr, FatStmt, Flag, FnFlag, Func, FuncImpl, LazyType, Name, ScopeId, Stmt, Var, VarType},
     compiler::{BlockScope, Compile, Res},
     err,
-    export_ffi::{get_include_std, BigOption},
+    export_ffi::BigOption,
     ice,
     logging::PoolLog,
     self_hosted::Ident,
@@ -374,27 +374,26 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         while dirty {
             dirty = false;
             for stmt in mem::take(body) {
-                if stmt.annotations.len() == 1 {
-                    if stmt.annotations[0].name == Flag::Include_Std.ident() {
-                        let Expr::String(name) = stmt.annotations[0].args.as_ref().unwrap().expr else {
-                            err!("expected string for #include_std",)
+                if stmt.annotations.len() == 1 && stmt.annotations[0].name == Flag::Include_Std.ident() {
+                    let Expr::String(name) = stmt.annotations[0].args.as_ref().unwrap().expr else {
+                        err!("expected string for #include_std",)
+                    };
+                    if self.compiler.already_loaded.insert(name) {
+                        // TODO: let the other side get if it needs to.
+                        let name = self.compiler.program.pool.get(name);
+
+                        let file = unsafe { get_include_std(self.compiler as *mut Compile, name) };
+                        let BigOption::Some(file) = file else {
+                            err!("unknown path for #include_std {name}",);
                         };
-                        if self.compiler.already_loaded.insert(name) {
-                            let name = self.compiler.program.pool.get(name);
-                            // println!("{name}");
-                            let Some(src) = get_include_std(name) else {
-                                err!("known path for #include_std",);
-                            };
-                            let file = self.compiler.program.pool.add_file(name.to_string(), src.to_string());
-                            dirty = true;
-                            let name = self.compiler.program.pool.add_task(false, file);
-                            for s in self.compiler.program.pool.wait_for_stmts(name)? {
-                                new_body.push(s);
-                            }
+                        dirty = true;
+                        for s in self.compiler.program.pool.wait_for_stmts(file)? {
+                            new_body.push(s);
                         }
-                        continue;
                     }
+                    continue;
                 }
+
                 new_body.push(stmt);
             }
             *body = mem::take(&mut new_body);

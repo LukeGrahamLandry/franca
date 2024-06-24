@@ -12,7 +12,7 @@ use std::fmt::Write;
 use std::hash::Hash;
 use std::mem::{self, transmute};
 use std::ops::DerefMut;
-use std::ptr;
+use std::ptr::{self, addr_of};
 use std::sync::atomic::AtomicIsize;
 use std::{ops::Deref, panic::Location};
 
@@ -24,7 +24,7 @@ use crate::ast::{
 
 use crate::bc_to_asm::{emit_aarch64, Jitted};
 use crate::emit_bc::emit_bc;
-use crate::export_ffi::{struct_macro, tagged_macro, type_macro, BigOption, BigResult, ExportVTable};
+use crate::export_ffi::{struct_macro, tagged_macro, type_macro, BigOption, BigResult, ExportVTable, ImportVTable, IMPORT_VTABLE};
 use crate::ffi::InterpSend;
 use crate::logging::PoolLog;
 use crate::overloading::where_the_fuck_am_i;
@@ -62,6 +62,7 @@ pub type Res<'p, T> = BigResult<T, Box<CompileError<'p>>>;
 #[repr(C)]
 pub struct Compile<'a, 'p> {
     pub program: &'a mut Program<'p>, // SAFETY: this must be the first field (repr(C))
+    temp_vtable: *const ImportVTable,
     // Since there's a kinda confusing recursive structure for interpreting a program, it feels useful to keep track of where you are.
     pub debug_trace: Vec<DebugState<'p>>,
     pub anon_fn_counter: usize,
@@ -126,7 +127,7 @@ pub static mut EXPECT_ERR_DEPTH: AtomicIsize = AtomicIsize::new(0);
 impl<'a, 'p> Compile<'a, 'p> {
     pub fn new(program: &'a mut Program<'p>) -> Self {
         let mut c = Self {
-        
+            temp_vtable: addr_of!(IMPORT_VTABLE),
             already_loaded: Default::default(),
             driver_vtable: (Default::default(), ptr::null_mut()),
             export: vec![],

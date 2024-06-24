@@ -19,6 +19,153 @@ SelfHosted :: @struct(
     parser: *Parser,
 );
 
+// TODO: eventually this side should be filling out the vtable. 
+//       especially since some of it just calls back into me (pool + parse). 
+
+fn self_hosted_main(vtable: *ImportVTable) void #compiler = {
+    args := cli_args();
+    if args.len <= 1 {|
+        panic("Expected cli argument: a path to a franca file."); // or driver shared library
+    };
+    // TODO: allow loading driver function from shared library 
+    
+    my_vtable := vtable[];
+    my_vtable.add_file = my_add_file;
+    run_franca_file(my_vtable&, args[1].str());
+    exit(0);
+}
+
+fn my_add_file(c: Compiler, name: Str, content: Str) Span = {
+    self := (*SelfHosted).ptr_from_raw(c.pointer_to_pointer_to_selfhosted);
+    self.codemap.add_file(name, content)
+}
+
+// TODO: find it
+STDLIB_PATH :: "/Users/luke/Documents/mods/infered/lib";
+
+fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
+    source: List(u8) = "#include_std(\"core.fr\"); ".clone(libc_allocator);  // TODO: column number on error on first line will be wrong but i dont care. 
+    source&.read_and_push(path);  // TODO: error handling
+    
+    comp := {vtable.init_compiler}(.Aarch64); // TODO: comptime get the current arch
+    c := vtable.with(comp);
+    file := {c.vtable.add_file}(c.data, path, source.items());
+    stmts := @try({c.vtable.parse_stmts}(c.data, file&)) return;
+    @try({c.vtable.make_and_resolve_and_compile_top_level}(c.data, stmts)) return;
+
+    // TODO: overloading
+    fn get_unique_named(c: CompCtx, name: Str) ?FuncId = {
+        f := {c.vtable.intern_string}(c.data, name);
+        {c.vtable.find_unique_func}(c.data, f)
+    }
+    
+    if c.get_unique_named("driver") {f|
+        callee := c.get_jitted(f);
+        callee := assume_types_fn(Arg = *ImportVTable, Ret = void, ptr = callee);
+        callee(vtable);
+        exit(0)
+    };
+    
+    if c.get_unique_named("main") {f|
+        callee := c.get_jitted(f);
+        callee := assume_types_fn(Arg = void, Ret = void, ptr = callee);
+        callee();
+        exit(0)
+    };
+    
+    // TODO: run tests
+    
+    .Ok
+}
+
+// TODO: the vtable ones leak every time!
+// TODO: this should be a driver program export instead
+fn get_include_std(c: *@struct(franca: **SelfHosted, vtable: *ImportVTable), name: Str) ?WaitingParse #compiler = {
+    //@println("TODO: tried to import %", name);
+    src := if name == "compiler" {() Str |
+        {c.vtable.get_compiler_builtins_source}()
+    }{|
+        if name == "codegen_cranelift_intrinsics" {|
+            {c.vtable.get_cranelift_builtins_source}()
+        } {|
+            check := @format("%/%", STDLIB_PATH, name) temp();
+            // TODO: do this as one operation (error handling on read)
+            if file_exists(check.items()) {|
+                //@println("read %", check.items());
+                // TODO: use right alloc
+                libc_allocator.read_to_string(check.items()).items()
+            } {|
+                if file_exists(name) {|
+                    //@println("read %", name);
+                    // TODO: use right alloc
+                    libc_allocator.read_to_string(name).items()
+                } {|
+                    return(.None);
+                    "unreahcable"
+                }
+            }
+        }
+    };
+    
+    file := c.franca.codemap.add_file(name, src);
+    id := push_parse(c.franca.parser, src, file);
+    //println("ok");
+    (Some = id)
+}
+
+fn find_std_lib() bool = {
+    fn check(mut p: PathBuf) -> bool {
+        p.push("lib");
+        p.push("franca_stdlib_1.fr");
+        if p.exists() {
+            p.pop();
+            let mut path = STDLIB_PATH.lock().unwrap();
+            *path = Some(p);
+            return true;
+        }
+        false
+    }
+
+    // if a project wants to supply its own version, that should take priority.
+    if let Ok(mut p) = env::current_dir() {
+        if check(p.clone()) {
+            return true;
+        }
+        p.push("franca");
+        if check(p.clone()) {
+            return true;
+        }
+        p.pop();
+        p.push("vendor/franca");
+        if check(p.clone()) {
+            return true;
+        }
+    }
+
+    if let Ok(mut p) = env::current_exe() {
+        p.pop();
+        p.push("franca");
+        if check(p.clone()) {
+            return true;
+        }
+        // exe might be in franca/target/release/franca or franca/target/debug/deps/compiler-21be1aa281dbe5d6, so go up
+        for _ in 0..5 {
+            p.pop();
+            if check(p.clone()) {
+                return true;
+            }
+        }
+    }
+
+    let p = PathBuf::from("/Users/luke/Documents/mods/infered");
+    if check(p) {
+        return true;
+    }
+
+    false
+}
+
+
 // TODO: pass requested type through generic args so this isn't so clunky. -- Jun 23
 fn init_self_hosted() SelfHosted #compiler = {
     a := libc_allocator;

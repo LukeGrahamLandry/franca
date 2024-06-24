@@ -5,8 +5,9 @@ use std::{
 
 use crate::{
     ast::{FatExpr, FatStmt, Flag, Func, LazyType, Pattern, TypeId},
-    compiler::{CErr, Res},
+    compiler::{CErr, Compile, Res},
     err,
+    export_ffi::{BigOption, ImportVTable},
     ffi::InterpSend,
 };
 
@@ -22,8 +23,8 @@ pub struct SelfHosted<'p> {
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct Span {
-    low: u32,
-    high: u32,
+    pub(crate) low: u32,
+    pub(crate) high: u32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -52,6 +53,8 @@ extern "C" {
     pub(crate) fn log_pattern(pool: *mut (), s: &Pattern) -> *const str;
     pub(crate) fn log_func(pool: *mut (), s: &Func) -> *const str;
     pub(crate) fn log_lazy_type(pool: *mut (), s: &LazyType) -> *const str;
+    pub fn self_hosted_main(vtable: *const ImportVTable);
+    pub(crate) fn get_include_std(arg: *mut Compile, name: &str) -> BigOption<usize>; // TODO: calling convention!!
 }
 
 impl<'p> SelfHosted<'p> {

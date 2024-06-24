@@ -4,13 +4,45 @@ TARGET: Backend : .Aarch64;
 #include_std("compiler/backend/walk_bc.fr");
 
 fn driver(vtable: *ImportVTable) void #export = {
-    println("=== Aarch64 Jit ===");
-    run_jit(vtable, .Aarch64);
-    println("=== Cranelift Jit ===");
-    run_jit(vtable, .Cranelift);
-    __temp_alloc.reset_retaining_capacity();
-    // TODO: see if it breaks if you run new ones in thier own namespaces in the same compiler instance as ^ 
+    c := cli_args();
+    start := false;
+    did := 0;
+    for c {s: CStr|
+        s : Str = s.str();
+        continue :: local_return;
+        if not(start) {|
+            if(!(s == "--"), => { continue(); });
+            start = true;
+        };
+        did += 1;
+        @switch(s) {
+            @case("--") => ();
+            @case("arm") => {
+                println("=== Aarch64 Jit ===");
+                run_jit(vtable, .Aarch64);
+            };
+            @case("cl") => {
+                println("=== Cranelift Jit ===");
+                run_jit(vtable, .Cranelift);
+            };
+            @case("llvm") => run_llvm(vtable);
+            @case("examples") => run_examples(vtable);
+            @default fn(_: Str)=> {
+                @println("Unknown argument '%'", s);
+                println(HELP);
+            };
+        };
+    };
     
+    if(did <= 1, => println(HELP));
+    HELP :: "start with \"-- \" to seperate from compiler args, then any of [arm, cl, llvm, examples]";
+
+    // TODO: do this in the loop
+    //__temp_alloc.reset_retaining_capacity();
+    // TODO: see if it breaks if you run new ones in thier own namespaces in the same compiler instance as ^ 
+}
+
+fn run_examples(vtable: *ImportVTable) void = {
     fork_run_main(vtable, "examples/bf.fr");
     fork_run_main(vtable, "examples/hello.fr");
     
@@ -45,8 +77,6 @@ fn driver(vtable: *ImportVTable) void #export = {
     set_colour(250, 150, 200);
     println("ALL EXAMPLES PASSED!");
     unset_colour();
-    
-    run_llvm(vtable);
 }
 
 fn run_jit(vtable: *ImportVTable, kind: Backend) void = {
