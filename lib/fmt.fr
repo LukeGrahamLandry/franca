@@ -35,15 +35,18 @@ fn display(self: Str, writer: *List(u8)) void = writer.write(self);
 #macro 
 fn fmt(arg: AstExpr) AstExpr = {
     arg := compile_ast(arg);
-    arg.ty = UnknownType;  // need to compile so @println can use a macro that expands to a tuple but dont want to remember the type since it will change when our macro gets expanded. -- Apr 25
     args := AstExpr.slice_from_tuple(arg.expr.Tuple);
     // TODO: assert no side effects or use variable so it doesn't run many times. 
   
     writer := compile_ast(args[0]);
-    assert(args.len().gt(1), "don't use @fmt with no '%' placeholders, just use a string"); // TOOD: i think it segfaults before you get here -- Jun 12 oh tag check
-    params := args.rest(2);  // TODO: fix bounds check when this is one long?
+    format_into(writer, args.rest(1), arg.loc)
+}
+
+fn format_into(writer: FatExpr, args: Slice(FatExpr), loc: Span) FatExpr = {
+    assert(args.len != 0, "don't use @fmt with no '%' placeholders, just use a string"); // TOOD: i think it segfaults before you get here -- Jun 12 oh tag check
+    params := args.rest(1);  // TODO: fix bounds check when this is one long?
     
-    fmt_string := const_eval_string(args[1]);
+    fmt_string := const_eval_string(args[0]);
     parts := fmt_string.split("%", temp());
     parts := parts&.items();
     parts.len().eq(params.len().add(1)).assert("Fmt specifier count mismatch");
@@ -64,8 +67,8 @@ fn fmt(arg: AstExpr) AstExpr = {
         emit(compile_ast(@literal s[]));
     };
     actions := actions&.items();
-    arg.expr.Tuple = AstExpr.tuple_from_slice(actions);
-    arg
+    // need to compile so @println can use a macro that expands to a tuple but dont want to remember the type since it will change when our macro gets expanded. -- Apr 25
+    (expr = (Tuple = AstExpr.tuple_from_slice(actions)), loc = loc, ty = UnknownType, done = false)
 }
 
 #macro 

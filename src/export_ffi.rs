@@ -1,6 +1,6 @@
 #![allow(improper_ctypes_definitions)]
 
-use crate::self_hosted::Span;
+use crate::self_hosted::{emit_llvm, Span};
 use libc::c_void;
 
 use crate::ast::{
@@ -212,6 +212,7 @@ pub struct ImportVTable {
     prim_sig: for<'p> extern "C" fn(c: &Compile<'_, 'p>, f_ty: FnType, cc: CallConv) -> Res<'p, PrimSig<'p>>,
     get_compiler_builtins_source: extern "C" fn() -> &'static str,
     get_cranelift_builtins_source: extern "C" fn() -> &'static str,
+    emit_llvm: unsafe extern "C" fn(),
 }
 
 #[repr(C)]
@@ -249,6 +250,7 @@ pub static IMPORT_VTABLE: ImportVTable = ImportVTable {
     prim_sig: franca_prim_sig,
     get_compiler_builtins_source,
     get_cranelift_builtins_source,
+    emit_llvm,
 };
 
 extern "C" fn franca_prim_sig<'p>(c: &Compile<'_, 'p>, f_ty: FnType, cc: CallConv) -> Res<'p, PrimSig<'p>> {
@@ -496,7 +498,7 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     ("fn bake_value(v: BakedVar) BakedVarId", bake_value as *const u8),
     ("fn __save_bake_os(os: OverloadSet) void", save_bake_os as *const u8),
     (
-        "fn dyn_bake_relocatable_value(raw_bytes: Slice(u8), ty: Type) Slice(BakedEntry)",
+        "fn dyn_bake_relocatable_value(raw_bytes: Slice(u8), ty: Type, force_default_handling: bool) Slice(BakedEntry)",
         dyn_bake_relocatable_value as *const u8,
     ),
     ("fn get_meta(t: Type) TypeMeta", get_meta as *const u8),
@@ -504,10 +506,18 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     ("#macro fn builtin(t: FatExpr) FatExpr", Compile::get_builtin_macro as *const u8),
 ];
 
-extern "C-unwind" fn dyn_bake_relocatable_value(comp: &mut Compile, bytes: &[u8], ty: TypeId) -> *const [BakedEntry] {
+extern "C-unwind" fn dyn_bake_relocatable_value(comp: &mut Compile, bytes: &[u8], ty: TypeId, force_default_handling: bool) -> *const [BakedEntry] {
     debug_assert_eq!(comp.program.get_info(ty).stride_bytes as usize, bytes.len());
     let mut out = vec![];
-    emit_relocatable_constant_body(ty, &Values::from_bytes(bytes), comp.program, &comp.aarch64.dispatch, &mut out).unwrap();
+    emit_relocatable_constant_body(
+        ty,
+        &Values::from_bytes(bytes),
+        comp.program,
+        &comp.aarch64.dispatch,
+        &mut out,
+        force_default_handling,
+    )
+    .unwrap();
     out.leak() as *const [BakedEntry]
 }
 
@@ -560,6 +570,7 @@ extern "C" fn get_compiler_builtins_source() -> &'static str {
 extern "C" fn get_cranelift_builtins_source() -> &'static str {
     let mut out = String::new();
     writeln!(out, "{}", MSG).unwrap();
+    #[cfg(feature = "cranelift")]
     for (sig, ptr) in crate::cranelift::BUILTINS {
         writeln!(out, "#cranelift_emit({}) #c_call {sig};", *ptr as usize).unwrap();
     }

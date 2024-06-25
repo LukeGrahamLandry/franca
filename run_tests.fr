@@ -1,8 +1,5 @@
 TARGET: Backend : .Aarch64;
 
-#include_std("compiler/backend/llvm.fr");
-#include_std("compiler/backend/walk_bc.fr");
-
 fn driver(vtable: *ImportVTable) void #export = {
     c := cli_args();
     start := false;
@@ -100,7 +97,7 @@ fn run_llvm(vtable: *ImportVTable) void = {
     c := vtable.with(comp);
     load_lang_tests(c);
     run_sequential(c) {c, tests|
-        ir_text := emit_llvm(c, temp(), tests, .TestRunnerMain);
+        ir_text := {c.vtable.emit_llvm}(c, temp(), tests, .TestRunnerMain);
         out := open_temp_file();
         for(ir_text&){bucket|
             out.fd&.write(bucket);
@@ -123,14 +120,21 @@ fn run_llvm(vtable: *ImportVTable) void = {
     };
 }
 
+NO_FORK :: false;
+
 fn run_sequential(c: CompCtx, const inner_run: @Fn(c: CompCtx, fns: Slice(FuncId)) void) void = {
     run :: fn(ff: Slice(FuncId)) bool => {
-        s__ := fork_and_catch(temp(), => inner_run(c, ff));
-        if ff.len.eq(1).and(not(s__._0)) {|
-            println(s__._1.items());
-            println(s__._2.items());
-        };
-        s__._0
+        if NO_FORK {|
+            inner_run(c, ff);
+            true
+        }{|
+            s__ := fork_and_catch(temp(), => inner_run(c, ff));
+            if ff.len.eq(1).and(not(s__._0)) {|
+                println(s__._1.items());
+                println(s__._2.items());
+            };
+            s__._0
+        }
     };
     start := timestamp();
     
@@ -292,12 +296,4 @@ fn jit_from_source(vtable: *ImportVTable, src: Str, function_name: Str) rawptr #
     fid := {vtable.find_unique_func}(comp, name).unwrap();
     ptr := vtable.with(comp).get_jitted(fid);
     ptr
-}
-
-fn set_colour(r: i64, g: i64, b: i64) void = {
-    @print("\x1B[38;2;%;%;%m", r, g, b);
-}
-
-fn unset_colour() void = {
-    print("\x1B[0m");
 }

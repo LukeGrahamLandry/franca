@@ -756,7 +756,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 if result.when == ExecStyle::Aot && (self.program.get_info(expr.ty).contains_pointers || want_emit_by_memcpy) {
                     if result_location == PushStack || !want_emit_by_memcpy {
                         let mut out = vec![];
-                        emit_relocatable_constant_body(expr.ty, value, self.program, &self.asm.dispatch, &mut out)?;
+                        emit_relocatable_constant_body(expr.ty, value, self.program, &self.asm.dispatch, &mut out, false)?;
                         for part in out {
                             match part {
                                 // TODO: now you can't have non-i64 in top level constant struct -- Jun 18
@@ -1248,7 +1248,7 @@ fn emit_relocatable_constant<'p>(ty: TypeId, value: &Values, program: &Program<'
     }
 
     let mut out = vec![];
-    emit_relocatable_constant_body(ty, value, program, dispatch, &mut out)?;
+    emit_relocatable_constant_body(ty, value, program, dispatch, &mut out, false)?;
     Ok(program.baked.make(BakedVar::VoidPtrArray(out), jit_ptr, ty))
 }
 
@@ -1260,14 +1260,17 @@ pub fn emit_relocatable_constant_body<'p>(
     program: &Program<'p>,
     dispatch: &[*const u8],
     out: &mut Vec<BakedEntry>,
+    force_default_handling: bool,
 ) -> Res<'p, ()> {
     // :bake_relocatable_value
-    if let Some(&f) = program.custom_bake_constant.get(&ty) {
-        unsafe {
-            let values = f(value.bytes().as_ptr() as *const ());
-            out.extend(&*values);
+    if !force_default_handling {
+        if let Some(&f) = program.custom_bake_constant.get(&ty) {
+            unsafe {
+                let values = f(value.bytes().as_ptr() as *const ());
+                out.extend(&*values);
+            }
+            return Ok(());
         }
-        return Ok(());
     }
 
     let raw = program.raw_type(ty);
@@ -1318,7 +1321,7 @@ pub fn emit_relocatable_constant_body<'p>(
                 let info = program.get_info(f.ty);
                 assert_eq!(info.stride_bytes % 8, 0, "TODO");
                 let v = value.bytes()[f.byte_offset..f.byte_offset + info.stride_bytes as usize].to_vec();
-                emit_relocatable_constant_body(f.ty, &Values::many(v), program, dispatch, out)?;
+                emit_relocatable_constant_body(f.ty, &Values::many(v), program, dispatch, out, false)?;
             }
             Ok(())
         }

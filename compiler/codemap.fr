@@ -27,11 +27,12 @@ fn add_file(self: *CodeMap, name: Str, content: Str) Span #compiler = {
 }
 
 fn find_single_file(self: *CodeMap, span: Span) *File = {
-    assert(span.high.ge(span.low), "invalid span");
-    assert(span.high.le(self.total_len), "span is not in codemap");
+    @assert_ge(span.high, span.low, "invalid span");
+    @assert_le(span.high, self.total_len, "span is not in codemap");
     skipped: u32 = 0;
     each(self.files){file|
         end := skipped.add(@as(u32) file.content.len.trunc());
+        //@println("low:% high:% skipped:% end:%", span.low, span.high, skipped, end);
         if(span.low.ge(skipped)){|
             if(span.high.le(end)) {|
                 return(file);
@@ -54,10 +55,38 @@ fn source_slice(self: *CodeMap, span: Span) Str #compiler = {
 
 // indexes are relative to the start of self. 
 fn subspan(self: Span, start: u32, end: u32) Span = {
-    assert((@as(i64) end.zext()).le(self.len()), "OOB>");
-    assert(start.le(end), "invalid range");
+    @assert_le(@as(i64) end.zext(), self.len(), "OOB");
+    @assert_le(start, end, "invalid range");
     (low = self.low.add(start), high = self.low.add(end))
 }
+
+CodeLine :: @struct(filename: Str, line: i64, col: i64, line_text: Span);
+fn get_whole_line(self: *CodeMap, span: Span) CodeLine = {
+    file := self.find_single_file(span);
+    line := 1; // zero indexed is unintuative for error messages
+    col  := 0;
+    file_start: i64 = file.start.zext();
+    file_end := file_start + file.content.len;
+    line_start := file_start;
+    
+    range(file_start, min(file_end, @as(i64) span.low.zext())) {i|
+        col += 1;
+        if file.content[i - file_start] == "\n".ascii() {|
+            line_start = i + 1; // dont include the new line
+            line += 1;
+            col = 0;
+        };
+    };
+    
+    index: i64 = span.low.zext();
+    while(=> index.lt(file_end).and(=> file.content[index - file_start] != "\n".ascii())) {|
+        index += 1;
+    };
+    
+    line_text: Span = (low = line_start.trunc(), high = index.trunc());
+    (filename = file.name, line = line, col = col, line_text = line_text)
+}
+
 
 // recall: it is an error to call source_slice on one that spans multiple files. 
 fn merge(a: Span, b: Span) Span = (

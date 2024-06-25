@@ -24,6 +24,8 @@
 // - local_return and return implciitly rebinding is a bit confusing
 //
 
+// TODO: everywhere i @report_error(_)(_ self.last.span) after just peek not pop will have the error in the wrong place. -- Jun 25
+
 // TODO: :SLOW im doing so many silly copies and also need to actually enforce tailcalls on llvm (right now i might be preventing them with ccc even on internal functions!).  -- Jun 21
 
 ParseTask :: @tagged(
@@ -104,10 +106,10 @@ fn parse_stmt(self: *Parser) Result(FatStmt, ParseErr) = {
 }
 
 fn parse_stmt_inner(self: *Parser) Result(FatStmt, ParseErr) = {
-    loc := self.last.span;
     @match(self.peek()) {
         (fn Fn() => {
             self.pop();
+            loc := self.last.span;
             func := @try(self.parse_func(true)) return;
             return(Ok = self.stmt((DeclFunc = self.box(func)), loc));
         });
@@ -116,6 +118,7 @@ fn parse_stmt_inner(self: *Parser) Result(FatStmt, ParseErr) = {
         });
         (fn Semicolon() => {
             self.pop();
+            loc := self.last.span;
             // TODO: dont do this. why waste space storing these?
             //       but i use them for distingushing when to return trailing expression. 
             //       :dont_store_noop
@@ -254,7 +257,6 @@ fn parse_expr(self: *Parser, prec: Prec) ParseRes = {
 }
 
 fn parse_prefix(self: *Parser, prec: Prec) ParseRes = {
-    loc := self.last.span;
     @match(self.peek()) {
         (fn Op(op) => {
             f := @switch(op) {
@@ -305,21 +307,24 @@ fn parse_prefix(self: *Parser, prec: Prec) ParseRes = {
         });
         (fn SingleQuote() => {
             self.pop();
+            loc := self.last.span;
             e := @try(self.parse_expr(Prec_None)) return;
             @try(self.eat(@symbol SingleQuote, "end quoted expression")) return;
             return(Ok = self.bang(.quote, e, loc));
         });
         (fn Number(n) => {
+            self.pop();
+            loc := self.last.span;
             e := self.expr((Value = (bytes = (Small = (n, 8)), coerced = false)), loc);
             e.ty = i64;
-            self.pop();
             return(Ok = e);
         });
         (fn Float(n) => {
+            self.pop();
+            loc := self.last.span;
             n: i64 = n.bitcast();
             e := self.expr((Value = (bytes = (Small = (n, 8)), coerced = false)), loc);
             e.ty = f64;
-            self.pop();
             return(Ok = e);
         });
         (fn BinaryNum(n) => {
@@ -335,20 +340,23 @@ fn parse_prefix(self: *Parser, prec: Prec) ParseRes = {
         });
         // TODO: its a waste to intern these since you want to deduplicate before putting in an aot exe anyway since they might be computed. 
         (fn Quoted(s) => {
+            self.pop();
+            loc := self.last.span;
             e := self.expr((String = s.s), loc);
             if s.escapes {|
                 f := self.box(self.get_named(.__string_escapes, loc));
                 e = self.expr((Call = (f = f, arg = self.box(e))), loc);
             };
-            self.pop();
             return(Ok = e);
         });
         (fn Symbol(name) => {
             self.pop();
+            loc := self.last.span;
             return(self.ident_expr_and_maybe_trailing(name, prec, loc));
         });
         @default => {
             self.pop();
+            loc := self.last.span;
             @report_error("Expected begin expression %", "") (return, self.last.span);
         };
     };
@@ -429,10 +437,10 @@ fn named_call(self: *Parser, prec: Prec, name: Flag) ParseRes = {
 
 fn parse_at(self: *Parser, prec: Prec) ParseRes = {
     loc := self.last.span;
-    
     handler := @match(self.peek()) {
         (fn LeftSquare() FatExpr => {
             self.pop();
+            loc = self.last.span;
             e := @try(self.parse_expr(Prec_None)) return;
             @try(self.eat(@symbol RightSquare, "close unquote")) return;
             return(Ok = self.bang(.unquote, e, self.last.span));
@@ -440,15 +448,18 @@ fn parse_at(self: *Parser, prec: Prec) ParseRes = {
         });
         (fn LeftParen() FatExpr => {
             self.pop();
+            loc = self.last.span;
             handler := @try(self.parse_expr(prec.reset())) return;
             @try(self.eat(@symbol RightParen, "close macro expression")) return;
             handler
         });
         (fn Symbol(name) FatExpr => {
             self.pop();
+            loc = self.last.span;
             self.expr((GetNamed = name), self.last.span)
         });
         @default fn() FatExpr => {
+            self.pop(); // TODO: have lex.next:span
             @report_error("@ must be followed by @[ast_expr] or @(macro_expr) or @macro_name %", "") (return, self.last.span);
             FatExpr.unreachable_hack()
         };
@@ -1049,7 +1060,7 @@ fn peek(self: *Parser) TokenType = {
 }
 
 fn report_error(fmt_args: FatExpr, ret_loc: FatExpr) FatExpr #macro = {
-    assert_eq(ret_loc.expr&!tag[], tag_value(Expr, @symbol Tuple));
+    @assert_eq(ret_loc.expr&!tag[], tag_value(Expr, @symbol Tuple));
     args := FatExpr.slice_from_tuple(ret_loc.expr.Tuple);
     result := '{
         lst := @format(@[fmt_args]) temp();
@@ -1140,7 +1151,7 @@ fn parser_doesnt_crash() #test = {
         "fn hello(const a: T) b;",
         "TermConstants :: @struct(_parsehack: void, const ICANON := 256, const ECHO := 8);",
         "@[@literal(as)];",
-        "'@(@[@literal(as)])(@[@literal(T)]) @[expr]';",
+        "'@(@[@literal(as)])\n(@[@literal(T)]) @[expr]';",
         "Type :: @builtin Type;", 
     ));
     
@@ -1166,13 +1177,16 @@ fn parser_doesnt_crash() #test = {
             (fn Ok(t) => {
                 out: List(u8) = list(temp());
                 t&.log(pool&, out&, 0);
-                println(codemap&.source_slice(t.loc));
+                token := codemap&.source_slice(t.loc);
+                println(token);
                 println(out.items());
                 next_token := ctx.lex&.pop(); // TODO: i think this should just be peek once i consume semicolons? 
                 if next_token.type&!tag[].eq(tag_value(TokenType, @symbol Eof)).not() {|
                     failed = true;
                     println("parser did not consume all input.");
                 };
+                line := codemap&.get_whole_line(t.loc);
+                //@println("line: % |%|", line.line, codemap&.source_slice(line.line_text));
             });
             (fn Err(e) void => {
                 //place: Span = (low = e.span.low.sub(10), high = e.span.high.add(10));

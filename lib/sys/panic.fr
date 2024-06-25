@@ -84,6 +84,7 @@ fn __get_assertions_passed() i64 = ASSERTIONS_PASSED[];
 
 // This gets propagated so it doesn't have to compile all the formatting stuff if its false which makes the tiny tests compile faster. 
 VERBOSE_ASSERT :: true; 
+ASSERT_SHOW_SOURCE :: true;
 COUNT_ASSERT   :: true; 
 
 // TODO: maybe call this expect_eq to distinguish from a normal assert_eq that isn;t limmited to one call per lexical occurance in a test. 
@@ -111,6 +112,68 @@ fn assert_eq(const T: Type) void = {
 ::assert_eq(f64);
 ::assert_eq(Str);
 
+// @assert(true);
+// @assert(true, "info %", 123);
+fn assert(arg: FatExpr) FatExpr #macro = {
+    arg := compile_ast(arg);
+    arg_err :: "@assert expected '(cond, fmt_string, args)'";
+    assert(!(arg.ty == bool), "TODO: single arg assert"); // TODO: auto overload ne
+    assert(arg.expr&!tag[] == tag_value(Expr, @symbol Tuple), arg_err);
+    parts := arg.expr.Tuple.items();
+    assert(parts.len >= 2, arg_err);
+    assert(parts[1].ty == Str, arg_err);
+    
+    if parts.len == 2 {|
+        'assert(@[parts[0]], @[parts[1]])'
+    } {|
+        cond := parts[0];
+        'if(!@[cond]){|
+            out: List(u8) = list(temp());
+            out&.push_all("Assertion Failed: ");
+            @[format_into('out&', parts.rest(1), arg.loc)];
+            panic(out.items());
+        }'
+    }
+}
+
+fn assert_eq(arg: FatExpr) FatExpr #macro = assert_cond(eq, "==", arg);
+fn assert_ne(arg: FatExpr) FatExpr #macro = assert_cond(ne, "!=", arg);
+fn assert_le(arg: FatExpr) FatExpr #macro = assert_cond(le, "<=", arg);
+fn assert_ge(arg: FatExpr) FatExpr #macro = assert_cond(ge, ">=", arg);
+
+fn assert_cond(const overload_set: OverloadSet, op: Str, arg: FatExpr) FatExpr = {
+    assert(arg.expr&!tag[] == tag_value(Expr, @symbol Tuple), "@assert___ expected multiple args");
+    parts := arg.expr.Tuple.items();
+    '{
+        lhs := @[parts[0]];
+        rhs := @[parts[1]];
+        // TODO: pass #cold to the backend or out-line the function or something
+        // TODO: maually outline assertion_failed when not ASSERT_SHOW_SOURCE because its so easy and happens so much? 
+        if not(@[@literal overload_set](lhs, rhs)) { #cold |
+            out: List(u8) = list(temp());
+            out&.push_all("Assertion Failed. ");
+            
+            @[if(parts.len == 3, => '{
+                out&.push_all(@[parts[2]]);
+            }', => '()')];
+            @[if(parts.len > 3, => {
+                format_into('out&', parts.rest(2), arg.loc)
+            }, => '()')];
+            
+            // TODO: you can't '@h(a)' because it starts parsing a trailing expr after and theres no closing '
+            @[if(VERBOSE_ASSERT, => '{
+                @fmt(out&, "\n   Expected (% % %). ", lhs, @[@literal op], rhs);
+            }', => '()')];
+            @[if(ASSERT_SHOW_SOURCE, => '{
+                @fmt(out&, "\n   LHS: %\n   RHS: %\n ", "TODO: render", "TODO: render");
+            }', => '()')];
+            
+            panic(out.items());
+        };
+    }'
+}
+
+// TODO: not true anymore
 // TODO: this cant just be a no-op because I count that my tests trigger all their assertions.
 /// Stupid question, but I guess it's wierd if I don't let you ask.
 fn assert_eq(_: void, __: void) void = assert_eq(0, 0);

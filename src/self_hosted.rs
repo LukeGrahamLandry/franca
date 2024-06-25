@@ -17,6 +17,7 @@ pub struct SelfHosted<'p> {
     pub pool: *mut (),
     codemap: *mut (),
     parser: *mut (),
+    _arena: *mut (),
     a: PhantomData<&'p u8>,
 }
 
@@ -55,6 +56,8 @@ extern "C" {
     pub(crate) fn log_lazy_type(pool: *mut (), s: &LazyType) -> *const str;
     pub fn self_hosted_main(vtable: *const ImportVTable);
     pub(crate) fn get_include_std(arg: *mut Compile, name: &str) -> BigOption<usize>; // TODO: calling convention!!
+    pub(crate) fn emit_llvm();
+    fn show_error_line(codemap: *mut (), span_low: u32, span_high: u32);
 }
 
 impl<'p> SelfHosted<'p> {
@@ -84,13 +87,15 @@ impl<'p> SelfHosted<'p> {
     }
 
     pub fn wait_for_stmts(&self, id: usize) -> Res<'p, Vec<FatStmt<'p>>> {
-        // TODO: HACK because the franca side doesn't know how to clone.
-        //       wrong allocator! this only works because i just leak all the memory! -- Jun 23
-        let e = ManuallyDrop::new(unsafe { finish_pending_stmts(self.parser, id) });
-        let e = ManuallyDrop::into_inner(e.clone());
+        let e = unsafe { finish_pending_stmts(self.parser, id) };
         match e {
             Ok(t) => Ok(t),
-            Err(t) => err!("{:?}", t),
+            Err(t) => {
+                unsafe {
+                    show_error_line(self.codemap, t.span.low, t.span.high);
+                }
+                err!("{:?}", t)
+            }
         }
     }
     pub fn add_file(&self, name: String, content: String) -> Span {
@@ -107,7 +112,7 @@ impl<'p> SelfHosted<'p> {
         unsafe { &*source_slice(self.codemap, span.low, span.high) }
     }
 
-    pub fn add_task(&mut self, is_expr: bool, span: Span) -> usize {
+    pub fn add_task(&mut self, _: bool, span: Span) -> usize {
         unsafe {
             // println!("add task {span:?}");
             let src = source_slice(self.codemap, span.low, span.high);
@@ -121,6 +126,11 @@ impl<'p> SelfHosted<'p> {
     }
 
     pub(crate) fn print_diagnostic(&self, e: crate::compiler::CompileError<'p>) {
+        unsafe {
+            if let Some(loc) = e.loc {
+                show_error_line(self.codemap, loc.low, loc.high);
+            }
+        }
         // TODO
         println!("{e:?}");
     }

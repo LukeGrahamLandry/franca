@@ -17,6 +17,7 @@ SelfHosted :: @struct(
     pool: *StringPool,
     codemap: *CodeMap,
     parser: *Parser,
+    ast_alloc: *ArenaAlloc,
 );
 
 // TODO: eventually this side should be filling out the vtable. 
@@ -165,10 +166,11 @@ fn find_std_lib() bool = {
     false
 }
 
-
 // TODO: pass requested type through generic args so this isn't so clunky. -- Jun 23
 fn init_self_hosted() SelfHosted #compiler = {
-    a := libc_allocator;
+    a: ArenaAlloc = init(page_allocator, 1.shift_left(20));
+    arena := a&.borrow().boxed(ArenaAlloc, a);
+    a := arena.borrow();
     pool: StringPool = init(a);
     pool := a.boxed(StringPool, pool);
     codemap: CodeMap = init(a);
@@ -179,7 +181,17 @@ fn init_self_hosted() SelfHosted #compiler = {
         pool = pool,
         codemap = codemap,
         parser = a.boxed(Parser, parser),
+        ast_alloc = arena,
     )
+}
+
+// TODO: pass requested type through generic args so this isn't so clunky. -- Jun 23
+fn show_error_line(self: *CodeMap, span: Span) void #compiler = {
+    line := self.get_whole_line(span);
+    set_colour(250, 0, 0);
+    @println("> Error on line %, col % in file %", line.line, line.col, line.filename);
+    unset_colour();
+    println(self.source_slice(line.line_text));
 }
 
 boxed :: fn(a: Alloc, const T: Type, t: T) *T #generic = {

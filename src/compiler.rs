@@ -1565,10 +1565,11 @@ impl<'a, 'p> Compile<'a, 'p> {
                         *coerced = true;
                         if let Some(replacement) = self.coerce_constant(value, prev_ty, req, loc)? {
                             *expr = replacement;
+                            // TODO: instead of making you call compile_expr, have coerce_constant do it (because it can just do the right branch, which is always !fn_ptr currently)
                             return self.compile_expr(expr, requested);
-                        } 
+                        }
                         expr.ty = req;
-                    } 
+                    }
                 }
                 
                 expr.done = true;
@@ -2686,7 +2687,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             to_values(s.program, found)
         }
         
-        println!("err: Tried to coerce {} to {}", self.program.log_type(current), self.program.log_type(requested));
+        // println!("err: Tried to coerce {} to {}", self.program.log_type(current), self.program.log_type(requested));
         err!(CErr::TypeCheck(current, requested, "coerce_constant"))
     }
 
