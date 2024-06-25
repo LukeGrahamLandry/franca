@@ -9,8 +9,10 @@
 //! I'm sure they solve a hard problem and solve it well/fast/whatever, but its clearly a more complicated problem than the one I have. 
 
 RuntimeContext :: @struct(
-    stack_trace: StackTraceNode,
-    debug_info: GlobalDebugInfo,
+    //stack_trace: StackTraceNode,
+    stack_trace: List(u32), // func indices
+    aot: i64, // TODO: emit bool const field
+    //debug_info: GlobalDebugInfo,
     // This allows macros to invisibly call into the compiler. It will always be null at runtime.
     // comptime_compiler_ctx: rawptr,
     // temporary_allocator: Alloc,
@@ -20,17 +22,49 @@ RuntimeContext :: @struct(
     // is_panicking: bool = false,
 );
 
-StackTraceNode :: (@struct(prev: ?*StackTraceNode, location: Location)!rec;
+StackTraceNode :: (@struct(prev: ?*StackTraceNode, location: FuncId))!rec;
 Location :: @struct(index: u32);
 
-fn source_location() Location #macro;
+// TODO: doesn't work on llvm cause you can't have a constant list. 
+RUNTIME_STACK_TRACE :: false;
+:: {
+    if(RUNTIME_STACK_TRACE){|
+        ctx := get_context();
+        ctx.aot = 0;
+        ctx.stack_trace = list(100, libc_allocator);
+        // TODO: this is still a super dumb version of this. really i want manual linked list on the stack frames, not seperatly allocated thing! -- Jun 25 
+        runtime_push_call :: fn(f: u32) void = {
+            ctx := get_context();
+            ctx.stack_trace&.push(f);
+        };
+        runtime_pop_call :: fn() void = {
+            ctx := get_context();
+            ctx.stack_trace&.pop();
+        };
+        
+        // force them to be compiled
+        // this ensures anything called in thier body WONT have tracing calls injected (just like #no_trace)
+        runtime_push_call(0);
+        runtime_pop_call();
+        
+        __save_function_header(runtime_push_call, runtime_pop_call);
+    };
+};
 
-_context :: @static(ImplicitContext);
-fn get_context() *ImplicitContext #no_inline = _context;
-
-fn caller_location() Location = {
-    todo()
+// TODO: this makes me sad
+fn aot_init_runtime_context() void #no_trace = {
+    ctx := get_context();
+    if(ctx.aot != 0, => { return(); });
+    ctx.aot = 1;
+    ctx.stack_trace = list(100, libc_allocator);
 }
+
+_context :: @static(RuntimeContext);
+fn get_context() *RuntimeContext #no_inline #no_trace  = _context;
+
+//fn caller_location() Location = {
+//    todo()
+//}
 
 ColdSymbol :: @struct(id: u32);
 LocationData :: @struct(

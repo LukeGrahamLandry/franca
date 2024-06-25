@@ -687,6 +687,7 @@ pub enum FnFlag {
     CalleesAsmDone,
     Generic,
     UnsafeNoopCast,
+    NoStackTrace,
 }
 
 impl<'p> Func<'p> {
@@ -870,6 +871,7 @@ pub struct Program<'p> {
     pub bake_os: Option<OverloadSetId>,
     pub primitives: RefCell<HashMap<(TypeId, u16, bool, bool), Vec<Prim>>>,
     pub custom_bake_constant: HashMap<TypeId, unsafe extern "C" fn(*const ()) -> *const [BakedEntry]>,
+    pub inject_function_header: Option<(FuncId, FuncId)>,
 }
 
 impl_index_imm!(Program<'p>, TypeId, TypeInfo<'p>, types);
@@ -945,6 +947,7 @@ impl<'p> Program<'p> {
         let pool = Box::leak(Box::new(SelfHosted::default()));
         let mut program = Self {
             primitives: Default::default(),
+            inject_function_header: None,
             fat_expr_type: None,
             ffi_sizes: Default::default(),
             baked: Default::default(),
@@ -1731,6 +1734,7 @@ pub enum Flag {
     Enum,
     Bake_Relocatable_Value,
     Local_Return,
+    No_Trace,
     _Reserved_Count_,
 }
 

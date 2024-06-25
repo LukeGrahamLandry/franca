@@ -4,7 +4,7 @@
 
 #![allow(clippy::wrong_self_convention)]
 
-use crate::self_hosted::Span;
+use crate::self_hosted::{show_error_line, Span};
 use core::slice;
 use std::collections::HashSet;
 use std::ffi::CString;
@@ -653,6 +653,10 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.currently_compiling.retain(|check| *check != f);
         Ok(())
     }
+    
+    pub extern "C" fn save_function_header(&mut self, push: FuncId, pop: FuncId) {
+        self.program.inject_function_header = Some((push, pop));
+    }
 
     // Don't pass constants in because the function declaration must have closed over anything it needs.
     pub fn ensure_compiled_force(&mut self, f: FuncId, when: ExecStyle) -> Res<'p, ()> {
@@ -670,7 +674,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         let before = self.debug_trace.len();
         let state = DebugState::EnsureCompiled(f, self.program[f].name, when);
         self.push_state(&state);
-
         self.infer_types(f)?;
         self.emit_body(f)?;
         self.pop_state(state);
@@ -2666,6 +2669,11 @@ impl<'a, 'p> Compile<'a, 'p> {
                     return Ok(None);
                 }
             }
+            (TypeInfo::Fn(_), w) => {
+                if TypeId::func == requested {
+                    return Ok(None);
+                }
+            }
             _ => {}
         }
         
@@ -2691,12 +2699,15 @@ impl<'a, 'p> Compile<'a, 'p> {
         err!(CErr::TypeCheck(current, requested, "coerce_constant"))
     }
 
-    pub(crate) fn add_func(&mut self, func: Func<'p>) -> Res<'p, FuncId> {
+    pub(crate) fn add_func(&mut self, mut func: Func<'p>) -> Res<'p, FuncId> {
         // TODO: make this less trash. it fixes generics where it thinks a cpatured argument is var cause its arg but its actually in consts because generic.
         for capture in &func.capture_vars {
             assert!(capture.kind != VarType::Const);
         }
         let scope = func.scope.unwrap();
+        if func.has_tag(Flag::No_Trace) {
+            func.set_flag(FnFlag::NoStackTrace, true);
+        }
         let id = self.program.add_func(func);
         self[scope].funcs.push(id);
         // println!("{:?} {}", id, self.program.pool.get(self.program[id].name));
@@ -3227,7 +3238,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             // TODO: cope with emit_runtime_call baking const args, needs to change the arg expr
             let ty = self.program.func_type(fid);
             f_expr.set((fid.as_raw()).into(), ty);
-            arg_expr.done = true; // this saves a lot of the recursing.
+            
             
             // this fixes functions with all const args the reduce to just a value emitting useless calls to like get the number 65 or whatever if you do ascii("A"). 
             if !deny_inline && arg_expr.is_raw_unit() && !self.program.get_info(res).contains_pointers {
@@ -3237,9 +3248,13 @@ impl<'a, 'p> Compile<'a, 'p> {
                     // self.type_check_arg(*prev_ty, res, "inline const expr fn")?;
                     expr.expr = Expr::Value { value: value.clone(), coerced: false };
                     expr.ty = *prev_ty;
+                    expr.done = true;
+                    
                     return Ok(*prev_ty);
                 }
             }
+            // if you have to remove this, do it for arg_expr at least. 
+            expr.done = true;
             
             Ok(res)
         }

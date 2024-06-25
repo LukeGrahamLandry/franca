@@ -361,16 +361,58 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
         result.current_block = entry_block;
 
-        // TODO: indirect return tail
-        self.compile_expr(result, body, result_location, !result.signeture.first_arg_is_indirect_return)?;
+        let do_stacktrace = self.program.inject_function_header.is_some() && !func.get_flag(FnFlag::NoStackTrace);
+        // eventually this will be exposed as a language feature, but for now its just used for stack traces.
+        let has_defers = do_stacktrace;
 
-        if result.blocks[return_block.0 as usize].incoming_jumps > 0 {
+        if do_stacktrace {
+            let (push, _) = self.program.inject_function_header.unwrap();
+            result.push(Bc::PushConstant {
+                value: f.as_index() as i64,
+                ty: Prim::I32,
+            });
+            let sig = prim_sig(
+                self.program,
+                FnType {
+                    arg: TypeId::func,
+                    ret: TypeId::unit,
+                    arity: 1,
+                },
+                CallConv::CCallReg,
+            )?;
+            result.push(Bc::CallDirect { sig, f: push, tail: false });
+        }
+
+        // TODO: indirect return tail
+        self.compile_expr(
+            result,
+            body,
+            result_location,
+            !result.signeture.first_arg_is_indirect_return && !has_defers,
+        )?;
+
+        if result.blocks[return_block.0 as usize].incoming_jumps > 0 || has_defers {
             result.push(Bc::Goto {
                 ip: return_block,
                 slots: result.signeture.ret_slots,
             });
             result.blocks[return_block.0 as usize].incoming_jumps += 1;
             result.current_block = return_block;
+            if do_stacktrace {
+                let (_, pop) = self.program.inject_function_header.unwrap();
+                let sig = prim_sig(
+                    self.program,
+                    FnType {
+                        arg: TypeId::unit,
+                        ret: TypeId::unit,
+                        arity: 1,
+                    },
+                    CallConv::CCallReg,
+                )?;
+                // TODO: this just totally kills tail calls which is sad. tho really, since it returns nothing, it should always tailcall out of itself. -- Jun 25
+                // we're in the return block
+                result.push(Bc::CallDirect { sig, f: pop, tail: false });
+            }
         } else {
             result.push_to(return_block, Bc::NoCompile);
         }

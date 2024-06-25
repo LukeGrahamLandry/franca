@@ -15,7 +15,7 @@ use crate::export_ffi::BigResult::*;
 
 pub struct SelfHosted<'p> {
     pub pool: *mut (),
-    codemap: *mut (),
+    pub codemap: *mut (),
     parser: *mut (),
     _arena: *mut (),
     a: PhantomData<&'p u8>,
@@ -57,7 +57,7 @@ extern "C" {
     pub fn self_hosted_main(vtable: *const ImportVTable);
     pub(crate) fn get_include_std(arg: *mut Compile, name: &str) -> BigOption<usize>; // TODO: calling convention!!
     pub(crate) fn emit_llvm();
-    fn show_error_line(codemap: *mut (), span_low: u32, span_high: u32);
+    pub fn show_error_line(codemap: *mut (), span_low: u32, span_high: u32);
 }
 
 impl<'p> SelfHosted<'p> {
