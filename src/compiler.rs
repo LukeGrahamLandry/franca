@@ -33,7 +33,7 @@ use crate::{
     ast::{Expr, FatExpr, FnType, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo},
     self_hosted::Ident,
 };
-use crate::{bc::*, extend_options, ffi, impl_index, unwrap2, Map, STACK_MIN, STATS};
+use crate::{bc::*, extend_options, ffi, unwrap2, Map, STACK_MIN, STATS};
 
 use crate::{assert, assert_eq, err, ice, unwrap};
 use BigResult::*;
@@ -72,7 +72,6 @@ pub struct Compile<'a, 'p> {
     pub tests: Vec<FuncId>,
     pub tests_broken: Vec<FuncId>,
     pub aarch64: Jitted,
-    pub scopes: Vec<Scope<'p>>,
     pub next_label: usize,
     pub wip_stack: Vec<(Option<FuncId>, ExecStyle)>,
     #[cfg(feature = "cranelift")]
@@ -103,7 +102,6 @@ pub struct BlockScope<'p> {
     pub parent: usize,
 }
 
-impl_index!(Compile<'_, 'p>, ScopeId, Scope<'p>, scopes);
 #[repr(C, i64)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DebugState<'p> {
@@ -142,14 +140,13 @@ impl<'a, 'p> Compile<'a, 'p> {
             aarch64: Jitted::new(1 << 26), // Its just virtual memory right? I really don't want to ever run out of space and need to change the address.
 
             tests: vec![],
-            scopes: vec![],
             tests_broken: vec![],
             next_label: 0,
 
             #[cfg(feature = "cranelift")]
             cranelift: crate::cranelift::JittedCl::default(),
         };
-        c.new_scope(ScopeId::from_index(0), Flag::TopLevel.ident(), 0);
+        c.program.pool.new_scope(ScopeId::from_index(0), Flag::TopLevel.ident(), 0);
         // TODO: HACK: for emit_relocatable_constant
         let ty = <(i64, i64)>::get_or_create_type(c.program);
         c.program.finish_layout(ty).unwrap();
@@ -328,19 +325,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         out
     }
 
-    pub fn new_scope(&mut self, parent: ScopeId, name: Ident<'p>, block_in_parent: usize) -> ScopeId {
-        let depth = if self.scopes.is_empty() { 0 } else { self[parent].depth + 1 }; // HACK
-        self.scopes.push(Scope {
-            parent,
-            constants: Default::default(),
-            vars: Default::default(),
-            depth,
-            name,
-            block_in_parent,
-            rt_types: Default::default(),
-        });
-        ScopeId::from_index(self.scopes.len() - 1)
-    }
 
     #[track_caller]
     pub(crate) fn push_state(&mut self, s: &DebugState<'p>) {
@@ -626,7 +610,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         for stmt in body.iter_mut() {
             if let Stmt::DeclVar { name, ty, value } = &mut stmt.stmt {
                 if name.kind == VarType::Const {
-                    self[name.scope].constants.insert(*name, (mem::take(value), mem::take(ty)));
+                    self.program.pool.put_constant(*name, mem::take(value), mem::take(ty));
                     stmt.stmt = Stmt::Noop;
                 }
             }
@@ -809,7 +793,8 @@ impl<'a, 'p> Compile<'a, 'p> {
             debug_assert!(kind != VarType::Const, "Tried to emit before binding const args.");
             if let Some(name) = name {
                 debug_assert!(kind == name.kind);
-                let prev = self[name.scope].rt_types.insert(name, ty);
+                let prev = self.program.pool.get_var_type(name); // TODO: dumb double lookup
+                self.program.pool.put_var_type(name, ty);
                 assert!(prev.is_none(), "overwrite arg?");
             }
         }
@@ -1260,7 +1245,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     pub fn find_const(&mut self, name: Var<'p>) -> Res<'p, Option<(Values, TypeId)>> {
-        if let Some(s) = self[name.scope].constants.get(&name) {
+        if let BigOption::Some(s) = self.program.pool.get_constant(name) {
             if let Some(known) = s.1.ty() {
                 if let Expr::Value { value, .. } = &s.0.expr {
                     let ty = s.0.ty;
@@ -1277,9 +1262,9 @@ impl<'a, 'p> Compile<'a, 'p> {
 
             let state = DebugState::ResolveConstant(name);
             self.push_state(&state);
-            let (mut val, mut ty) = mem::take(self[name.scope].constants.get_mut(&name).unwrap());
+            let (mut val, mut ty) = mem::take(self.program.pool.get_constant(name).unwrap());
             // println!("- {} {} {}", name.log(self.program.pool), ty.log(self.program.pool), val.log(self.program.pool));
-            self[name.scope].constants.get_mut(&name).unwrap().1 = LazyType::Infer;
+            self.program.pool.get_constant(name).unwrap().1 = LazyType::Infer;
             self.infer_types_progress(&mut ty)?;
             self.decl_const(name, &mut ty, &mut val)?;
             self.pop_state(state);
@@ -1499,7 +1484,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             Expr::GetVar(var) => {
                 // TODO: dont do the extra lookup if we know its const
-                if let Some(ty) = self[var.scope].rt_types.get(var).cloned() {
+                if let BigOption::Some(ty) = self.program.pool.get_var_type(*var) {
                     // Reading a variable. Convert it to `var&[]` so compiling it checks for smaller loads (u8, etc).
                     expr.ty = ty;
                     expr.done = true; // don't recurse on the var expr again.
@@ -1529,7 +1514,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                     }
                     expr.ty
                 } else {
-                    println!("{:?}", self[var.scope].rt_types);
                     let var = *var;
                     where_the_fuck_am_i(self, expr.loc);
                     ice!("Missing resolved variable {}", var.log(self.program.pool),)
@@ -1744,10 +1728,10 @@ impl<'a, 'p> Compile<'a, 'p> {
                     }
                     if container == TypeId::scope {
                         let s: ScopeId = from_values(self.program, val.clone())?;
-                        let Some(&var) = self[s].constants.keys().find(|v| v.name == *name) else {
+                        let BigOption::Some(var) = self.program.pool.find_in_scope(s, *name) else {
                             err!(CErr::UndeclaredIdent(*name))
                         };
-                        debug_assert!(var.kind == VarType::Const);
+                        assert!(var.kind == VarType::Const);
                         let Some((val, ty)) = self.find_const(var)? else {
                             err!("missing constant {}", var.log(self.program.pool))
                         };
@@ -1899,7 +1883,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         // This is kinda weird. base case because compile_place_expr turns anything into <ptr>[],
         // but the only thing you can do for a var is <var>!addr, so you get stuck in a loop nesting !addr.  -- May 12
         if let Expr::GetVar(var) = arg.deref_mut().deref_mut() {
-            let value_ty = *unwrap!(self[var.scope].rt_types.get(var), "Missing var {} (in !addr)", var.log(self.program.pool));
+            let value_ty = unwrap2!(self.program.pool.get_var_type(*var), "Missing var {} (in !addr)", var.log(self.program.pool));
             // TODO: this shouldn't allow let either but i changed how variable refs work for :SmallTypes
             if var.kind == VarType::Const {
                 err!("Can only take address of vars not {:?} {}.", var.kind, var.log(self.program.pool))
@@ -1964,8 +1948,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                                 return Ok(Some(f_ty.ret));
                             }
                         }
-                    } else if let Some(ty) = self[i.scope].rt_types.get(i) {
-                        if let TypeInfo::FnPtr { ty: f_ty, .. } = self.program[*ty] {
+                    } else if let BigOption::Some(ty) = self.program.pool.get_var_type(*i) {
+                        if let TypeInfo::FnPtr { ty: f_ty, .. } = self.program[ty] {
                             return Ok(Some(f_ty.ret));
                         }
                     }
@@ -2050,7 +2034,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     // TODO: make `let` deeply immutable so only const addr
                     Flag::Addr => match arg.deref_mut().deref_mut() {
                         Expr::GetVar(var) => {
-                            let value_ty = *self[var.scope].rt_types.get(var).expect("Missing resolved var (TODO: addr of const?)");
+                            let value_ty = unwrap2!(self.program.pool.get_var_type(*var), "Missing resolved var (TODO: addr of const?)");
                             self.program.intern_type(TypeInfo::Ptr(value_ty))
                         }
                         &mut Expr::GetNamed(i) => {
@@ -2128,7 +2112,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let ty = if var.kind == VarType::Const {
                     self.find_const_type(*var)?
                 } else {
-                    self[var.scope].rt_types.get(var).cloned()
+                    self.program.pool.get_var_type(*var).into()
                 };
                 unwrap!(ty, "type check missing var {:?} (circular dependency:?)", var.log(self.program.pool))
                 //TODO: else return Ok(None)?
@@ -2985,8 +2969,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // Note: we no longer do this check here because auto deref creates a temperatoy illegal state that gest removed by deref_one.
                 //       emit_bc still checks tho.
                 // assert_eq!(var.kind, VarType::Var, "Only 'var' can be addressed (not let/const).");
-                let val_ty = self[var.scope].rt_types.get(var);
-                let val_ty = *unwrap!(val_ty, "var must be declared: {}", var.log(self.program.pool));
+                let val_ty = self.program.pool.get_var_type(*var);
+                let val_ty = unwrap2!(val_ty, "var must be declared: {}", var.log(self.program.pool));
                 let ptr_ty = self.program.ptr_type(val_ty);
 
                 *place = FatExpr::synthetic_ty(Expr::SuffixMacro(Flag::Addr.ident(), Box::new(mem::take(place))), loc, ptr_ty);
@@ -3400,32 +3384,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 //     !matches!(body.expr, Expr::Block { .. }),
                 //     "Block should be GetParsed because body is not resolved yet. "
                 // );
-
-                let old_scope = &self[new_func.scope.unwrap()];
-                let id = self.new_scope(old_scope.parent, old_scope.name, old_scope.block_in_parent);
-                let old_scope = &self[new_func.scope.unwrap()];
-                let old_constants = old_scope.constants.clone();
-                // TODO: just take the part you need. rn this copys more and more every time! -- May 29
-                //       i think this is still true -- Jun 3
-                let old_vars = old_scope.vars.clone();
-                // can't use the copy directly because need to rehash
-                for (k, v) in old_constants {
-                    if let Some(new) = mapping.get(&k) {
-                        self[id].constants.insert(*new, v);
-                    }
-                }
-
-                for mut block in old_vars {
-                    block.vars.retain_mut(|k| {
-                        if let Some(new) = mapping.get(k) {
-                            *k = *new;
-                            true
-                        } else {
-                            false
-                        }
-                    });
-                    self[id].vars.push(block);
-                }
+                let id = self.program.pool.dup_scope(new_func.scope.unwrap(), mapping);
                 new_func.scope = BigOption::Some(id);
             }
         }
@@ -3719,7 +3678,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // TODO: this is so emit_ir which can't mutate program can find it.
                 self.program.intern_type(TypeInfo::Ptr(final_ty));
 
-                let prev = self[name.scope].rt_types.insert(name, final_ty);
+                let prev = self.program.pool.get_var_type(name); // TODO: dumb double lookup when hashmap always gives you the old one
+                self.program.pool.put_var_type(name, final_ty);
                 assert!(prev.is_none() || prev.unwrap() == final_ty);
                 // TODO: should always be none?? but its not a constant and seems to always be the same so its probablby not a super huge deal? -- Apr 23
                 //       maybe its just cause im not zeroing the stmt and end up compiling multiple times. -- Apr 25
@@ -3822,7 +3782,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     #[track_caller]
     fn save_const(&mut self, name: Var<'p>, val_expr: Expr<'p>, final_ty: TypeId, loc: Span) -> Res<'p, ()> {
-        if let Some((val, ty)) = self[name.scope].constants.get_mut(&name) {
+        if let BigOption::Some((val, ty)) = self.program.pool.get_constant(name) {
             if matches!(ty, LazyType::Finished(_)) {
                 ice!(
                     "tried to re-save constant {}.", //  \nOLD: {}\nNEW: {} // FUCK
@@ -3841,8 +3801,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             // I think this just means we renumbered for a specialization.
             let mut e = FatExpr::synthetic_ty(val_expr, loc, final_ty);
             e.done = true;
-            let val = (e, LazyType::Finished(final_ty));
-            self[name.scope].constants.insert(name, val);
+            self.program.pool.put_constant(name, e, LazyType::Finished(final_ty));
         }
         Ok(())
     }

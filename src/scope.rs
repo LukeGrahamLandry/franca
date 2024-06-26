@@ -1,5 +1,6 @@
 use std::{mem, ops::DerefMut};
 
+use crate::compiler::Scope;
 use crate::self_hosted::{get_include_std, Span};
 
 use crate::{
@@ -9,7 +10,6 @@ use crate::{
     err,
     export_ffi::BigOption,
     ice,
-    logging::PoolLog,
     self_hosted::Ident,
     STATS,
 };
@@ -403,8 +403,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
     }
 
     fn find_var(&mut self, name: &Ident<'p>) -> Option<Var<'p>> {
-        let find = |comp: &Compile<'_, 'p>, s: ScopeId, mut block: usize| {
-            let scope = &comp[s];
+        let find = |scope: &Scope<'p>, mut block: usize| {
             if scope.vars.is_empty() {
                 debug_assert_eq!(block, 0);
                 return None;
@@ -434,16 +433,20 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         let mut s = self.scope;
         let mut block = self.block;
         // Check the current functions scopes.
-        if let Some(v) = find(self.compiler, s, block) {
+        let scopes = &self.compiler.program.pool.scopes.as_ref().unwrap().scopes;
+        let scope = &scopes[s.as_index()];
+        if let Some(v) = find(scope, block) {
             return Some(v);
         }
-        block = self.compiler[s].block_in_parent;
-        s = self.compiler[s].parent;
+        block = scope.block_in_parent;
+        s = scope.parent;
 
         loop {
             // println!("- look {} in s{} b{}", self.compiler.program.pool.get(*name), s.as_index(), block);
-            let scope = &self.compiler[s];
-            let found = find(self.compiler, s, block);
+
+            let scopes = &self.compiler.program.pool.scopes.as_ref().unwrap().scopes;
+            let scope = &scopes[s.as_index()];
+            let found = find(scope, block);
             if let Some(v) = found {
                 // TODO: the depth thing is a bit confusing. it was a bit less jaring before when it was just local on the resolver.
                 //       brifly needed -1 because scope 0 is now a marker and always empty i guess, but now thats done in push_scope instead.
@@ -468,14 +471,14 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         // Note: you can't shadow a let with a const either but that already works because consts are done first.
         // TODO: when this was a hashmap ident->(_,_) of justs constants this was faster, but its a tiny difference in release mode so its probably fine for now.
         //       this makes it easier to think about having functions be the unit of resolving instead of blocks but still allowing shadowing consts in inner blocks.
-        let wip = &self.compiler[s].vars[self.block].vars;
+
+        let scopes = &mut self.compiler.program.pool.scopes.as_mut().unwrap().scopes;
+        let scope = &mut scopes[s.as_index()];
+        let wip = &scope.vars[self.block].vars;
         // 1.6M
         let shadow_const = |v: &Var<'_>| v.name == *name && v.kind == VarType::Const;
         if wip.iter().any(shadow_const) {
-            err!(
-                "Cannot shadow constant in the same scope: {}",
-                wip.iter().find(|v| shadow_const(v)).unwrap().log(self.compiler.program.pool)
-            )
+            err!("Cannot shadow constant in the same scope: {}", self.compiler.program.pool.get(*name));
         }
 
         let var = Var {
@@ -487,40 +490,49 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         };
         if kind == VarType::Const {
             let empty = (FatExpr::synthetic(Expr::Poison, loc), LazyType::Infer);
-            self.compiler[s].constants.insert(var, empty); // sad. two lookups per constant. but doing it different on each branch looks verbose.
+            scope.constants.insert(var, empty); // sad. two lookups per constant. but doing it different on each branch looks verbose.
         }
         // println!("{}", var.log(self.compiler.program.pool));
         // println!("= decl {} in s{} b{}", self.compiler.program.pool.get(*name), s.as_index(), self.block);
-        self.compiler[s].vars[self.block].vars.push(var); // includes constants!
+        scope.vars[self.block].vars.push(var); // includes constants!
         self.compiler.program.next_var += 1;
         // println!("{} declared in {}", var.log(self.compiler.program.pool), var.2.as_index());
         Ok(var)
     }
 
     fn push_scope(&mut self, name: Option<Ident<'p>>) {
-        if let Some(name) = name {
-            self.scope = self.compiler.new_scope(self.scope, name, self.block);
-            debug_assert!(self.compiler[self.scope].vars.is_empty());
-            self.compiler[self.scope].vars.push(BlockScope { vars: vec![], parent: 0 });
+        let scope = if let Some(name) = name {
+            self.scope = self.compiler.program.pool.new_scope(self.scope, name, self.block);
+            let scopes = &mut self.compiler.program.pool.scopes.as_mut().unwrap().scopes;
+            let scope = &mut scopes[self.scope.as_index()];
+            scope.vars.push(BlockScope { vars: vec![], parent: 0 });
+            scope
         } else {
-            debug_assert!(!self.compiler[self.scope].vars.is_empty());
-            self.compiler[self.scope].vars.push(BlockScope {
+            let scopes = &mut self.compiler.program.pool.scopes.as_mut().unwrap().scopes;
+            let scope = &mut scopes[self.scope.as_index()];
+            debug_assert!(!scope.vars.is_empty());
+            scope.vars.push(BlockScope {
                 vars: vec![],
                 parent: self.block,
             });
-        }
-        self.block = self.compiler[self.scope].vars.len() - 1;
+            scope
+        };
+        self.block = scope.vars.len() - 1;
     }
 
     fn pop_scope(&mut self) {
         let s = self.scope;
-        self.scope = self.compiler[s].parent;
-        self.block = self.compiler[s].block_in_parent;
+        let scopes = &mut self.compiler.program.pool.scopes.as_mut().unwrap().scopes;
+        let scope = &mut scopes[s.as_index()];
+        self.scope = scope.parent;
+        self.block = scope.block_in_parent;
     }
 
     fn pop_block(&mut self) {
         let s = self.scope;
-        let locals = &self.compiler[s].vars[self.block];
+        let scopes = &mut self.compiler.program.pool.scopes.as_mut().unwrap().scopes;
+        let scope = &mut scopes[s.as_index()];
+        let locals = &scope.vars[self.block];
         self.block = locals.parent;
     }
 

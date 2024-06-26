@@ -17,7 +17,6 @@ use crate::scope::ResolveScope;
 use crate::self_hosted::Ident;
 use crate::{assert, emit_bc::emit_bc, err, ice, log_err, make_toplevel, signed_truncate, Stats, STATS};
 use std::fmt::{Debug, Write};
-use std::fs;
 use std::mem::{self, transmute};
 use std::ops::{FromResidual, Try};
 use std::path::PathBuf;

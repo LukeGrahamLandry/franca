@@ -1,11 +1,12 @@
 use std::{marker::PhantomData, mem::ManuallyDrop};
 
 use crate::{
-    ast::{FatExpr, FatStmt, Flag, Func, LazyType, Pattern, TypeId},
-    compiler::{Compile, Res},
+    ast::{FatExpr, FatStmt, Flag, Func, LazyType, Pattern, ScopeId, TypeId, Var},
+    compiler::{Compile, Res, Scope},
     err,
     export_ffi::{BigOption, ImportVTable},
     ffi::InterpSend,
+    Map,
 };
 
 use crate::export_ffi::BigResult::*;
@@ -15,7 +16,12 @@ pub struct SelfHosted<'p> {
     pub codemap: *mut (),
     parser: *mut (),
     _arena: *mut (),
+    pub scopes: Option<Box<Scopes<'p>>>, // small option because its a nullable pointer currently. TEMP
     a: PhantomData<&'p u8>,
+}
+
+pub struct Scopes<'p> {
+    pub scopes: Vec<Scope<'p>>,
 }
 
 #[repr(C)]
@@ -126,11 +132,91 @@ impl<'p> SelfHosted<'p> {
         // TODO
         println!("{e:?}");
     }
+
+    pub(crate) fn put_constant(&mut self, name: crate::ast::Var<'p>, value: FatExpr<'p>, ty: LazyType<'p>) {
+        let scopes = self.scopes.as_mut().unwrap();
+        scopes.scopes[name.scope.as_index()].constants.insert(name, (value, ty));
+    }
+
+    pub fn new_scope(&mut self, parent: ScopeId, name: Ident<'p>, block_in_parent: usize) -> ScopeId {
+        let scopes = self.scopes.as_mut().unwrap();
+        let depth = if scopes.scopes.is_empty() {
+            0
+        } else {
+            scopes.scopes[parent.as_index()].depth + 1
+        }; // HACK
+        scopes.scopes.push(Scope {
+            parent,
+            constants: Default::default(),
+            vars: Default::default(),
+            depth,
+            name,
+            block_in_parent,
+            rt_types: Default::default(),
+        });
+        ScopeId::from_index(scopes.scopes.len() - 1)
+    }
+
+    pub(crate) fn dup_scope(&mut self, prev: ScopeId, mapping: Map<Var<'p>, Var<'p>>) -> ScopeId {
+        let scopes = self.scopes.as_mut().unwrap();
+        let old_scope = &scopes.scopes[prev.as_index()];
+        let p = old_scope.parent;
+        let bp = old_scope.block_in_parent;
+        let n = old_scope.name;
+        let id = self.new_scope(p, n, bp);
+        let scopes = self.scopes.as_mut().unwrap();
+        let old_scope = &scopes.scopes[prev.as_index()];
+        let old_constants = old_scope.constants.clone();
+        // TODO: just take the part you need. rn this copys more and more every time! -- May 29
+        //       i think this is still true -- Jun 3
+        let old_vars = old_scope.vars.clone();
+        // can't use the copy directly because need to rehash
+        for (k, v) in old_constants {
+            if let Some(new) = mapping.get(&k) {
+                scopes.scopes[id.as_index()].constants.insert(*new, v);
+            }
+        }
+
+        for mut block in old_vars {
+            block.vars.retain_mut(|k| {
+                if let Some(new) = mapping.get(k) {
+                    *k = *new;
+                    true
+                } else {
+                    false
+                }
+            });
+            scopes.scopes[id.as_index()].vars.push(block);
+        }
+        id
+    }
+
+    pub fn get_var_type(&self, v: Var) -> BigOption<TypeId> {
+        let scopes = self.scopes.as_ref().unwrap();
+        scopes.scopes[v.scope.as_index()].rt_types.get(&v).copied().into()
+    }
+
+    pub(crate) fn put_var_type(&mut self, name: Var<'p>, ty: TypeId) {
+        let scopes = self.scopes.as_mut().unwrap();
+        scopes.scopes[name.scope.as_index()].rt_types.insert(name, ty);
+    }
+
+    pub(crate) fn get_constant(&mut self, name: Var<'p>) -> BigOption<&mut (FatExpr<'p>, LazyType<'p>)> {
+        let scopes = self.scopes.as_mut().unwrap();
+        scopes.scopes[name.scope.as_index()].constants.get_mut(&name).into()
+    }
+
+    pub(crate) fn find_in_scope(&self, s: ScopeId, name: Ident<'p>) -> BigOption<Var<'p>> {
+        let scopes = self.scopes.as_ref().unwrap();
+        scopes.scopes[s.as_index()].constants.keys().find(|v| v.name == name).copied().into()
+    }
 }
 
 impl<'p> Default for SelfHosted<'p> {
     fn default() -> Self {
-        unsafe { init_self_hosted() }
+        let mut temp = unsafe { init_self_hosted() };
+        temp.scopes = Some(Box::new(Scopes { scopes: vec![] }));
+        temp
     }
 }
 

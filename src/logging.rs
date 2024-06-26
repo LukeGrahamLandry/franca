@@ -113,15 +113,15 @@ macro_rules! unwrap2 {
 
 pub use unwrap;
 
-use crate::ast::{FatStmt, FnFlag, FuncImpl, Pattern};
+use crate::ast::{FatStmt, FuncImpl, Pattern};
+use crate::bc::*;
 use crate::export_ffi::BigOption;
 use crate::self_hosted::{log_expr, log_func, log_lazy_type, log_stmt, SelfHosted};
 use crate::self_hosted::{log_pattern, Ident};
 use crate::{
-    ast::{Expr, FatExpr, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo, Var},
+    ast::{FatExpr, Func, FuncId, LazyType, Program, TypeId, TypeInfo, Var},
     compiler::{CErr, CompileError, DebugState},
 };
-use crate::{bc::*, STATS};
 
 /// It felt like a good idea to be able to compare identifiers super fast but now its forever a pain to look at them while debugging.
 pub trait PoolLog<'p> {
