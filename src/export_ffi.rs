@@ -213,6 +213,8 @@ pub struct ImportVTable {
     get_compiler_builtins_source: extern "C" fn() -> &'static str,
     get_cranelift_builtins_source: extern "C" fn() -> &'static str,
     emit_llvm: unsafe extern "C" fn(),
+    number_of_functions: unsafe extern "C" fn(c: &mut &mut Program) -> i64,
+    bake_var: extern "C" fn(compile: &mut Compile, v: BakedVar) -> BakedVarId,
 }
 
 #[repr(C)]
@@ -251,7 +253,13 @@ pub static IMPORT_VTABLE: ImportVTable = ImportVTable {
     get_compiler_builtins_source,
     get_cranelift_builtins_source,
     emit_llvm,
+    number_of_functions,
+    bake_var,
 };
+
+extern "C" fn bake_var(c: &mut Compile, val: BakedVar) -> BakedVarId {
+    c.program.baked.make(val, null(), TypeId::unknown)
+}
 
 extern "C" fn franca_prim_sig<'p>(c: &Compile<'_, 'p>, f_ty: FnType, cc: CallConv) -> Res<'p, PrimSig<'p>> {
     prim_sig(c.program, f_ty, cc)
@@ -720,7 +728,7 @@ extern "C-unwind" fn log_ast<'p>(p: &mut Compile<'_, 'p>, a: FatExpr<'p>) {
     where_the_fuck_am_i(p, a.loc);
 }
 
-extern "C-unwind" fn number_of_functions(program: &mut &mut Program) -> i64 {
+extern "C" fn number_of_functions(program: &mut &mut Program) -> i64 {
     program.funcs.len() as i64
 }
 

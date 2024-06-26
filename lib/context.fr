@@ -9,29 +9,16 @@
 //! I'm sure they solve a hard problem and solve it well/fast/whatever, but its clearly a more complicated problem than the one I have. 
 
 RuntimeContext :: @struct(
-    //stack_trace: StackTraceNode,
     stack_trace: List(u32), // func indices
-    aot: i64, // TODO: emit bool const field
-    //debug_info: GlobalDebugInfo,
-    // This allows macros to invisibly call into the compiler. It will always be null at runtime.
-    // comptime_compiler_ctx: rawptr,
-    // temporary_allocator: Alloc,
-    // reset_temporary_allocator: @FnPtr() void,
-    // thread_id: i64,
-    // panic_hook: @FnPtr(msg: Str) Never,
-    // is_panicking: bool = false,
 );
 
-StackTraceNode :: (@struct(prev: ?*StackTraceNode, location: FuncId))!rec;
-Location :: @struct(index: u32);
-
 // TODO: doesn't work on llvm cause you can't have a constant list. 
-RUNTIME_STACK_TRACE :: false;
+RUNTIME_STACK_TRACE :: true;
 :: {
     if(RUNTIME_STACK_TRACE){|
         ctx := get_context();
-        ctx.aot = 0;
         ctx.stack_trace = list(100, libc_allocator);
+        //ctx.function_names = list(1000, libc_allocator);
         // TODO: this is still a super dumb version of this. really i want manual linked list on the stack frames, not seperatly allocated thing! -- Jun 25 
         runtime_push_call :: fn(f: u32) void = {
             ctx := get_context();
@@ -51,33 +38,27 @@ RUNTIME_STACK_TRACE :: false;
     };
 };
 
-// TODO: this makes me sad
-fn aot_init_runtime_context() void #no_trace = {
-    ctx := get_context();
-    if(ctx.aot != 0, => { return(); });
-    ctx.aot = 1;
-    ctx.stack_trace = list(100, libc_allocator);
-}
-
 _context :: @static(RuntimeContext);
 fn get_context() *RuntimeContext #no_inline #no_trace  = _context;
 
-//fn caller_location() Location = {
-//    todo()
-//}
+// TODO: its really funny that this is not in fact a compile time known constant! HACK 
+//       footgun that if you ':: is_aot()' it will compile but give missleading answer.  -- Jun 26
+fn is_aot() bool = {
+    ComptimeMarker :: @struct(aot: rawptr);
+    marker :: @static(ComptimeMarker);
+    :: { marker[] = (aot = 1.rawptr_from_int()); };
+    fn bake_relocatable_value(self: *ComptimeMarker) Slice(BakedEntry) = 
+        @slice(@as(BakedEntry) (Num = 0)) ast_alloc();
+    
+    marker[].aot.is_null()   // TODO: why do i need [] ????  
+}
 
-ColdSymbol :: @struct(id: u32);
-LocationData :: @struct(
-    line: u32, 
-    col: u16, 
-    file_index: u16, 
-    enclosing_function: ColdSymbol, 
-    code: ColdSymbol
-);
+fn get_debug_name(i: u32) CStr = {
+    names := franca_aot_get_debug_function_names();
+    names: Slice(CStr) = slice(names._0, names._1[]);
+    names[i.zext()]
+}
 
-GlobalDebugInfo :: @struct(
-    locations: List(LocationData), // [Location]
-    spans: List(Span),             // [Location]
-    files: List(ColdSymbol),       // [file_index]
-    cold_symbols: List(CStr),      // [ColdSymbol]
-);
+fn franca_aot_get_debug_function_names() Ty(*CStr, *i64) #llvm #c_call = """
+    ret { ptr, ptr } { ptr @debug_names, ptr @debug_names_len }
+"""!asm;

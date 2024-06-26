@@ -704,7 +704,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         } else {
             assert!(self.program[f].finished_ty().is_some(), "fn without body needs type annotations.");
 
-            special = true;
         }
 
         if let Some(types) = self.program[f].get_tag_mut(Flag::Redirect).cloned() {
@@ -727,6 +726,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             debug_assert_ne!(f, found[0].func);
             self.program[f].body = FuncImpl::Redirect(found[0].func);
             self.program[f].cc = self.program[found[0].func].cc;
+            special = true;
         }
 
         if let Some(tag) = self.program[f].get_tag(Flag::Comptime_Addr) {
@@ -761,6 +761,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         // TODO: use this for libc as well.
         if let Some(lib_name) = self.program[f].get_tag(Flag::Import) {
+            let no_lib = lib_name.args.is_none();
             let lib_name = if let Some(lib_name) = lib_name.args.as_ref() {
                 self.eval_str(&mut lib_name.clone())?
             } else {

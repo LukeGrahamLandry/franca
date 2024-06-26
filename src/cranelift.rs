@@ -624,7 +624,7 @@ pub const BUILTINS: &[(&str, CfEmit)] = &[
     ("fn ge(a: f64, b: f64) bool;", fcmp!(GreaterThanOrEqual)),
     ("fn bit_or(a: i64, b: i64) i64;", inst!(bor)),
     ("fn bit_and(a: i64, b: i64) i64;", inst!(band)),
-    ("fn shift_left(a: i64, b: i64) i64;", inst!(ishl)),
+    ("fn shift_left(value: i64, shift_amount: i64) i64;", inst!(ishl)),
     ("fn offset(a: rawptr, bytes: i64) rawptr;", inst!(iadd)),
     ("fn bit_not(a: i64) i64;", |builder: &mut FunctionBuilder, v: &[Value]| {
         builder.ins().bnot(v[0])

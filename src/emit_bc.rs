@@ -37,6 +37,13 @@ pub extern "C" fn emit_bc<'p>(compile: &mut Compile<'_, 'p>, f: FuncId, when: Ex
         compile.check_for_new_aot_bake_overloads()?;
     }
 
+    // TODO: HACK. you want to make sure anything called inside the stack tracing functions doesn't try to trace themselves,
+    //      this happens naturally by just not inserting them when not compiled yet, but you might
+    //      emit_bc again later for aot. this just remembers if tracing was ready the first time we saw the function.  -- Jun 26
+    if compile.program.inject_function_header.is_none() {
+        compile.program[f].set_flag(FnFlag::NoStackTrace, true);
+    }
+
     let mut emit = EmitBc::new(compile.program, &compile.aarch64);
 
     let body = emit.compile_inner(f, when)?;
@@ -1358,7 +1365,7 @@ pub fn emit_relocatable_constant_body<'p>(
             Ok(())
         }
         TypeInfo::Struct { fields, .. } => {
-            // If its not a slice, just do all the fields.
+            // Just do all the fields.
             for f in fields {
                 let info = program.get_info(f.ty);
                 assert_eq!(info.stride_bytes % 8, 0, "TODO");

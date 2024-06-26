@@ -126,9 +126,41 @@ fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId), entry: ProgramEntr
         };
     };
     
-    // TODO: if alloc != temp { temp.reset(mark ? no but that wouldn't catch if they derived a new one from temp
+    gen.backend&.emit_debug_info(gen.funcs_done&);
     
+    // TODO: if alloc != temp { temp.reset(mark ? no but that wouldn't catch if they derived a new one from temp
     gen.backend.out
+}
+
+fn emit_debug_info(self: *EmitLlvm, funcs_done: *BitSet) void = {
+    // TODO: I really don't like this but you need to make sure this constant gets created at the very end which bake_value can't do. 
+    // TODO: only do this if RUNTIME_STACK_TRACE
+    // TODO: use funcs_done to only include the ones that are actually callable. 
+    
+    f_count := {self.comp.vtable.number_of_functions}(self.comp.data);
+    constants: List(BakedVarId) = list(f_count, temp());
+    range(0, f_count) { i|
+        fid := (@as(u32) i.trunc()).funcid_from_index();
+        func := {self.comp.vtable.get_function}(self.comp.data, fid);
+        real_name := {self.comp.vtable.get_string}(self.comp.data, func.name);
+        real_name := real_name.clone(ast_alloc());
+        
+        v: BakedVar = (Bytes = real_name.rs());
+        id := {self.comp.vtable.bake_var}(self.comp.data, v);
+        constants&.push(id);
+        self.emit_constant(self.comp, id);
+    };
+    
+    @fmt(self.out&.current(), """
+        @debug_names_len = private global i64 %
+        @debug_names = private global [% x ptr] [
+    """, f_count, f_count);
+    
+    for constants {id|
+        @fmt(self.out&.current(), "ptr @g%,", id.id);
+    };
+    self.pop_trailing_comma();
+    self.out&.current().push_all("]\n");
 }
 
 // TODO: copy-paste from DynamicImport but reversed so its a pain. 
@@ -177,12 +209,12 @@ fn emit_constant(self: *EmitLlvm, comp: CompCtx, id: BakedVarId) void = {
         });
         (fn Bytes(bytes) => {
             // TODO: emit string as characters if they're in a sane range. 
-            @fmt(self.out&.current(), "@g% = private global [% x i8] [", index, bytes.len);
+            @fmt(self.out&.current(), "@g% = private global [% x i8] [", index, bytes.len + 1);
             for(bytes[].items()) {b|
                 @fmt(self.out&.current(), " i8 %,", @as(i64) b.zext());
             };
-            self.pop_trailing_comma();
-            self.out&.push_all("]\n");
+            // self.pop_trailing_comma(); // add back when remove below
+            self.out&.push_all("i8 0]\n"); // TODO: hack cause im to lazy to ask for debug names as cstr
         });
         (fn VoidPtrArray(parts) => {
             @fmt(self.out&.current(), "@g% = private global [% x ptr] [", index, parts.len);
