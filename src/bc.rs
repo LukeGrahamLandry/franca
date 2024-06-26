@@ -62,6 +62,7 @@ pub struct PrimSig<'p> {
     pub return_value_bytes: u16,
     pub first_arg_is_indirect_return: bool,
     pub no_return: bool,
+    pub arg_int_count: u8,
 }
 
 #[repr(i64)]
@@ -79,6 +80,13 @@ pub enum Prim {
 impl Prim {
     pub(crate) fn is_float(self) -> bool {
         matches!(self, Prim::F64 | Prim::F32)
+    }
+    pub(crate) fn int_count(self) -> i64 {
+        if self.is_float() {
+            0
+        } else {
+            1
+        }
     }
 }
 

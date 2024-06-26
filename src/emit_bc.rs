@@ -620,7 +620,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     let mut f_id = unwrap!(f.as_const(), "tried to call non-const fn").unwrap_func_id();
                     let func = &self.program[f_id];
                     assert!(!func.get_flag(FnFlag::Generic));
-                    assert!(func.capture_vars.is_empty());
+                    assert!(!func.get_flag(FnFlag::MayHaveAquiredCaptures));
                     assert!(
                         func.cc != BigOption::Some(CallConv::Inline),
                         "tried to call inlined {}",
@@ -1489,6 +1489,7 @@ pub fn prim_sig<'p>(program: &Program<'p>, f_ty: FnType, cc: CallConv) -> Res<'p
         return_value_bytes: ret.stride_bytes,
         ret1: BigOption::None,
         ret2: BigOption::None,
+        arg_int_count: 0,
     };
 
     match ret.size_slots {
@@ -1575,6 +1576,8 @@ pub fn prim_sig<'p>(program: &Program<'p>, f_ty: FnType, cc: CallConv) -> Res<'p
             program.log_type(f_ty.ret),
         );
     }
+
+    sig.arg_int_count = sig.args.iter().filter(|p| !p.is_float()).count() as u8;
 
     Ok(sig)
 }

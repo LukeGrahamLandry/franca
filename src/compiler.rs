@@ -92,7 +92,6 @@ pub struct Scope<'p> {
     pub rt_types: Map<Var<'p>, TypeId>,
     pub vars: Vec<BlockScope<'p>>,
     pub depth: usize,
-    pub funcs: Vec<FuncId>,
     pub name: Ident<'p>,
     pub block_in_parent: usize,
 }
@@ -336,7 +335,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             constants: Default::default(),
             vars: Default::default(),
             depth,
-            funcs: vec![],
             name,
             block_in_parent,
             rt_types: Default::default(),
@@ -669,7 +667,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.wip_stack.push(wip);
         debug_assert!(func.get_flag(NotEvilUninit));
         self.ensure_resolved_body(f)?;
-        assert!(self.program[f].capture_vars.is_empty(), "closures need to be specialized");
+        assert!(!self.program[f].get_flag(MayHaveAquiredCaptures), "closures need to be specialized");
         assert!(!self.program[f].any_const_args(), "{:?}", self.program[f].log(self.program.pool));
         let before = self.debug_trace.len();
         let state = DebugState::EnsureCompiled(f, self.program[f].name, when);
@@ -882,7 +880,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         // TODO: some huristic based on how many times called and how big the body is.
         // TODO: pre-intern all these constants so its not a hash lookup everytime
         let force_inline = func.cc == BigOption::Some(CallConv::Inline);
-        assert!(func.capture_vars.is_empty());
+        assert!(!func.get_flag(MayHaveAquiredCaptures));
         assert!(!force_inline);
         assert!(!func.any_const_args());
         self.add_callee(f);
@@ -946,14 +944,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         let func = &self.program.funcs[f.as_index()];
 
         assert!(!func.any_const_args());
-        for capture in &func.capture_vars {
-            assert!(capture.kind != VarType::Const);
-            // :ChainedCaptures // TODO
-            // now whatever function we're inlining _into_ needs to capture this variable.
-            // I think this always happens for things declared in a macro becuase it doesn't recalculate the capture chain, but it works out in the end somehow.
-            // but when it happens for a normal variable its a problem?
-        }
-
         let pattern = func.arg.clone();
 
         // TODO: can I mem::take func.body? I guess not because you're allowed to call multiple times, but that's sad for the common case of !if/!while.
@@ -1035,23 +1025,10 @@ impl<'a, 'p> Compile<'a, 'p> {
                 "functions with constant lambda arguments are always inlined"
             );
             let arg_func = arg_value.unwrap_func_id();
-            // TODO: support fns nested in tuples.
-            let arg_func_obj = &self.program[arg_func];
-            for capture in &arg_func_obj.capture_vars {
-                debug_assert!(capture.kind != VarType::Const);
-            }
-            let mut i = 0;
-            while let Some(&v) = self.program[arg_func].capture_vars.get(i) {
-                // its fine if same this is there multiple times but this makes it less messy to debug logs.
-                add_unique(&mut self.program[o_f].capture_vars, v);
-                i += 1;
-            }
-
             // :ChainedCaptures
             // TODO: HACK: captures aren't tracked properly.
-
+            self.program[o_f].set_flag(FnFlag::MayHaveAquiredCaptures, true);
             self.program[o_f].set_cc(CallConv::Inline)?; // just this is enough to fix chained_captures
-
             self.program[arg_func].set_cc(CallConv::Inline)?; // but this is needed too for others (perhaps just when there's a longer chain than that simple example).
         }
         self.save_const_values(arg_name, arg_value, arg_ty, loc)?;
@@ -2708,17 +2685,10 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     pub(crate) fn add_func(&mut self, mut func: Func<'p>) -> Res<'p, FuncId> {
-        // TODO: make this less trash. it fixes generics where it thinks a cpatured argument is var cause its arg but its actually in consts because generic.
-        for capture in &func.capture_vars {
-            assert!(capture.kind != VarType::Const);
-        }
-        let scope = func.scope.unwrap();
         if func.has_tag(Flag::No_Trace) {
             func.set_flag(FnFlag::NoStackTrace, true);
         }
         let id = self.program.add_func(func);
-        self[scope].funcs.push(id);
-        // println!("{:?} {}", id, self.program.pool.get(self.program[id].name));
         Ok(id)
     }
 
@@ -2727,9 +2697,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let Expr::Closure(func) = expr.deref_mut() else { ice!("want closure") };
 
         // TODO: use :ClosureRequestType
-        let scope = func.scope.unwrap();
         let f = self.add_func(mem::take(func))?;
-        self[scope].funcs.push(f);
         self.ensure_resolved_sign(f)?;
 
         // If the closure doesn't have type annotations but our caller asked for something specific,
@@ -3202,7 +3170,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let force_inline = func.cc == BigOption::Some(CallConv::Inline);
         let deny_inline = func.has_tag(Flag::NoInline);
         assert!(!(force_inline && deny_inline), "{fid:?} is both @inline and @noinline");
-        let will_inline = force_inline || func.get_flag(AllowRtCapture) || !func.capture_vars.is_empty();
+        let will_inline = force_inline || func.get_flag(AllowRtCapture) || func.get_flag(MayHaveAquiredCaptures);
         assert!(!(will_inline && deny_inline), "{fid:?} has captures but is @noinline");
 
         if func.get_flag(FnFlag::UnsafeNoopCast) {
@@ -3221,7 +3189,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         if will_inline {
             // If we're just inlining for #inline, compile first so some work on the ast is only done once.
             // note: compile() checks if its ::Inline before actually generating asm so it doesn't waste its time.
-            if !func.get_flag(AllowRtCapture) && func.capture_vars.is_empty() {
+            // if its a '=>' function, we can't compile it out of context, and same if it has a const arg of a '=>' function. 
+            if !func.get_flag(AllowRtCapture) && !func.get_flag(MayHaveAquiredCaptures) {
                 self.compile(fid, self.exec_style())?;
             }
 
@@ -3460,9 +3429,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 new_func.scope = BigOption::Some(id);
             }
         }
-        let scope = new_func.scope.unwrap();
         let new_fid = self.program.add_func(new_func);
-        self[scope].funcs.push(new_fid);
         self.ensure_resolved_sign(new_fid)?;
         self.ensure_resolved_body(new_fid)?;
 

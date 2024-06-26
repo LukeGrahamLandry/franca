@@ -210,7 +210,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         // The code expects arguments on the virtual stack (the first thing it does might be save them to variables but that's not my problem).
 
         let sig = self.body.signeture;
-        let int_count = sig.args.iter().filter(|p| !p.is_float()).count(); // TODO: slow
+        let int_count = sig.arg_int_count;
 
         let slots = if sig.first_arg_is_indirect_return {
             self.state.stack.push(Val::Increment { reg: 8, offset_bytes: 0 });
@@ -275,12 +275,9 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         if args_not_vstacked {
             self.state.free_reg.clear();
             debug_assert_eq!(slots as usize, block.arg_prims.len());
-            let int_count = block.arg_prims.iter().filter(|p| !p.is_float()).count(); // TODO: slow
-            if slots > 0 {
-                self.ccall_reg_to_stack(block.arg_prims);
-            }
+            let int_count = self.ccall_reg_to_stack(block.arg_prims);
             for i in int_count..8 {
-                self.drop_reg(i as i64);
+                self.drop_reg(i);
             }
         }
         debug_assert!(self.state.stack.len() >= slots as usize);
@@ -666,7 +663,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         self.state.stack.truncate(self.state.stack.len() - types.len());
     }
 
-    fn ccall_reg_to_stack(&mut self, types: &[Prim]) {
+    fn ccall_reg_to_stack(&mut self, types: &[Prim]) -> i64 {
         let mut next_float = 0;
         let mut next_int = 0;
         for (i, ty) in types.iter().enumerate() {
@@ -684,6 +681,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             *(if f { &mut next_float } else { &mut next_int }) += 1;
             self.state.stack.push(v);
         }
+        next_int
     }
 
     fn emit_store(&mut self, addr: Val, value: Val, ty: Prim) {
@@ -965,22 +963,20 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         }
         do_call(self);
 
-        let int_count = [sig.ret1.unwrap_or(Prim::F32), sig.ret2.unwrap_or(Prim::F32)]
-            .iter()
-            .filter(|p| !p.is_float())
-            .count(); // TODO: dumb
-
-        if let BigOption::Some(fst) = sig.ret1 {
+        let int_count = if let BigOption::Some(fst) = sig.ret1 {
             if let BigOption::Some(snd) = sig.ret2 {
                 self.ccall_reg_to_stack(&[fst, snd]);
+                fst.int_count() + snd.int_count()
             } else {
                 self.ccall_reg_to_stack(&[fst]);
-                debug_assert_eq!(int_count == 0, fst.is_float());
+                fst.int_count()
             }
-        }
+        } else {
+            0
+        };
 
         for i in int_count..8 {
-            add_unique(&mut self.state.free_reg, i as i64); // now the extras are usable again.
+            add_unique(&mut self.state.free_reg, i); // now the extras are usable again.
         }
     }
 

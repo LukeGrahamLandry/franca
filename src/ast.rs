@@ -343,11 +343,6 @@ impl<'a, 'p, 'aa> WalkAst<'p> for RenumberVars<'a, 'p, 'aa> {
                 self.decl(name);
             }
         }
-        for name in &mut func.capture_vars {
-            if let Some(new) = self.mapping.get(name) {
-                *name = *new;
-            }
-        }
         if let BigOption::Some(name) = &mut func.return_var {
             if let Some(new) = self.mapping.get(name) {
                 *name = *new;
@@ -647,7 +642,7 @@ pub struct FatStmt<'p> {
 #[derive(Clone, Debug)]
 pub struct Func<'p> {
     pub annotations: Vec<Annotation<'p>>,
-    pub capture_vars: Vec<Var<'p>>,
+    pub capture_vars: [usize; 3], // TODO: remove
     pub callees: Vec<FuncId>,
     pub mutual_callees: Vec<FuncId>,
     pub var_name: BigOption<Var<'p>>, // TODO: having both this and .name is redundant
@@ -678,6 +673,7 @@ pub enum FnFlag {
     Generic,
     UnsafeNoopCast,
     NoStackTrace,
+    MayHaveAquiredCaptures,
 }
 
 impl<'p> Func<'p> {
@@ -1546,7 +1542,7 @@ impl<'p> Default for Func<'p> {
                 loc: garbage_loc(),
             },
             ret: LazyType::Infer,
-            capture_vars: vec![],
+            capture_vars: [0, 0, 0],
             loc: garbage_loc(),
             finished_arg: BigOption::None,
             finished_ret: BigOption::None,

@@ -158,24 +158,22 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         debug_assert_eq!(self.scope, func.scope.unwrap());
         self.pop_block();
         self.pop_scope();
+
         let capures = mem::take(&mut self.captures);
-        // Now check which things we captured from *our* parent.
-        for c in capures {
-            self.find_var(&c.name); // This adds it back to self.captures if needed
-            debug_assert!(c.kind != VarType::Const);
-            func.capture_vars.push(c);
-        }
 
         if !func.get_flag(FnFlag::AllowRtCapture) {
             // TODO: show the captured var use site and declaration site.
             self.last_loc = func.loc;
             let n = self.compiler.program.pool.get(func.name);
-            assert!(
-                func.capture_vars.is_empty(),
-                "Must use '=>' for closure '{}' with captures: {:?}",
-                n,
-                func.capture_vars.iter().map(|v| v.log(self.compiler.program.pool)).collect::<Vec<_>>()
-            );
+            // TODO: add a test that this error is reported
+            assert!(capures.is_empty(), "Must use '=>' for closure '{}' with captures", n,);
+        } else {
+            // TODO: this is only needed for the error reporting above but involves a slow iteration (in find_var). Track which scope you're capturing from the first time we get the var so don't have to look it up again? -- Jun 26
+            // Now check which things we captured from *our* parent.
+            for c in capures {
+                self.find_var(&c.name); // This adds it back to self.captures if needed
+                debug_assert!(c.kind != VarType::Const);
+            }
         }
 
         Ok(())
