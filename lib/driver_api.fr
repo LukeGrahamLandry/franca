@@ -1,13 +1,3 @@
-// THIS FILE IS BAKED INTO THE COMPILER'S EXECUTABLE, IT DOESN'T HOT-LOAD LIKE STUFF IN THE LIB FOLDER DOES!
-//
-// Note: this needs to be in the compiler and injected into the program, not just part of the standard library,
-// because it's important that it match the interface the compiler is actually exposing to the driver program. 
-// The utilities that use this interface can be part of the library because they're really just normal user code. 
-//
-// TOOD: readme: the line is blurry but the idea is anything that needs to be precompiled to bootstrap is in compiler/ and the rest is in lib/
-
-// TODO: rename this exports.fr
-
 Compiler :: *@struct(pointer_to_pointer_to_selfhosted: rawptr, vtable: rawptr);
 CompCtx :: @struct(data: Compiler, vtable: *ImportVTable);
 fn CRes(const T: Type) Type = Result(T, rawptr);
@@ -28,32 +18,28 @@ ExportVTable :: @struct(
     resolve_comptime_import: ?@FnPtr(userdata: rawptr, c: Compiler, f: FuncId, lib_name: Symbol, fn_name: Symbol) ?rawptr = .None,
 );
 
-// TODO: HACK they don't agree on layout! 
-//       now they do agree but it can't find the type??
-FatStmtHack :: @struct(opaque: Array(u8, 232));
-
 ImportVTable :: (@struct(
     intern_string: @FnPtr(c: Compiler, s: Str) Symbol,
     get_string: @FnPtr(c: Compiler, s: Symbol) Str,
-    _get_stats: usize, // TODO: remove
+    _a: usize, // TODO: remove
     init_compiler: @FnPtr(comptime_arch: Backend) Compiler,
     find_unique_func: @FnPtr(c: Compiler, name: Symbol) ?FuncId,
     // TODO: i want the meta program to be tracking these instead. 
     get_fns_with_tag: @FnPtr(c: Compiler, tag: Symbol) Slice(FuncId),
     // TODO: you can't just give it the slice from get_exports/tests because that will alias the vec that might grow, but the idea is this will go away soon anyway. 
-    _not_implemented_emit_c: @FnPtr(c: Compiler, fns: Slice(FuncId), add_test_runner: bool) CRes(Str),
+    _b: usize,
     compile_func: @FnPtr(c: Compiler, f: FuncId, when: ExecStyle) CRes(void),
     get_jitted_ptr: @FnPtr(c: Compiler, f: FuncId) CRes(rawptr),
     get_function: @FnPtr(c: Compiler, f: FuncId) *Func,
-    lookup_filename: @FnPtr(c: Compiler, span: *Span) Str, // span is a pointer because the calling convention doesn't match otherwise????
+    _d: usize,
     add_file: @FnPtr(c: Compiler, name: Str, content: Str) Span, 
-    parse_stmts: @FnPtr(c: Compiler, f: *Span) CRes(Slice(FatStmtHack)),
-    make_and_resolve_and_compile_top_level: @FnPtr(c: Compiler, body: Slice(FatStmtHack)) CRes(void),
+    parse_stmts: @FnPtr(c: Compiler, f: *Span) CRes(Slice(FatStmt)),
+    make_and_resolve_and_compile_top_level: @FnPtr(c: Compiler, body: Slice(FatStmt)) CRes(void),
     make_jitted_exec: @FnPtr(c: Compiler) void,
     give_vtable: @FnPtr(c: Compiler, vtable: *ExportVTable, userdata: rawptr) void,
     get_function_name: @FnPtr(c: Compiler, f: FuncId) Symbol, // TODO: remove now that you can just access the field. 
     comptime_arch: @FnPtr() Ty(Arch, Os),
-    _get_mem_mark: usize, // TODO: remove
+    _c: usize, // TODO: remove
     emit_bc: @FnPtr(c: Compiler, f: FuncId, when: ExecStyle) CRes(FnBody),
     get_type_meta: @FnPtr(c: Compiler, ty: Type) TypeMeta,
     debug_log_baked_constant: @FnPtr(c: Compiler, id: BakedVarId) void,
@@ -78,8 +64,7 @@ ProgramEntry2 :: @enum(i64) (
 
 // TODO: depending on layout is jail. Vec isn't repr(C)
 // TODO: make totally sure which cap/len order.
-fn rs(); 
-fn assume_owned();
+
 fn RsVec(const T: Type) Type = {
     Self :: @struct(cap: i64, ptr: *T, len: i64);
     fn items(self: Self) Slice(T) = (ptr = self.ptr, len = self.len);
@@ -322,8 +307,6 @@ Stats :: @struct(
 
 fn ast_alloc() Alloc = libc_allocator;
 
-:: __compiler_save_fatexpr_type(FatExpr);
-
 ///////////////
 /// Backend ///
 ///////////////
@@ -539,25 +522,3 @@ Flag :: @enum(
     neg,
     not,
 );
-
-fn to_index(f: FuncId) u32 = {
-    i := ptr_cast_unchecked(From = FuncId, To = u32, ptr = f&)[];
-    magic_offset :: 30;  // must match ast.rs
-    mask: u32 : 1.shift_left(magic_offset).bit_not().trunc();
-    i.bit_and(mask)
-}
-
-fn funcid_from_index(f: u32) FuncId = {
-    magic_offset :: 30;  // must match ast.rs
-    mask: u32 : 1.shift_left(magic_offset).trunc();
-    f := f.bit_or(mask)
-    ptr_cast_unchecked(From = u32, To = FuncId, ptr = f&)[]
-}
-
-    
-#fold fn int(s: Symbol) i64 = {
-    i := ptr_cast_unchecked(From = Symbol, To = u32, ptr = s&)[];
-    i.zext()
-}
-
-#redirect(Ty(i64, i64), bool) fn eq(a: Prim, b: Prim) bool;

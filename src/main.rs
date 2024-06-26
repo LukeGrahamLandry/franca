@@ -2,30 +2,10 @@
 #![feature(pattern)]
 #![feature(thread_sleep_until)]
 
-use franca::{
-    ast::{garbage_loc, FuncId, Program, ScopeId, TargetArch},
-    bc::{to_values, Values},
-    compiler::{Compile, ExecStyle, Res},
-    export_ffi::{ImportVTable, IMPORT_VTABLE},
-    find_std_lib, log_err,
-    logging::PoolLog,
-    make_toplevel,
-    scope::ResolveScope,
-    self_hosted::self_hosted_main,
-    timestamp, MEM, MMAP_ARENA_START, STACK_START, STATS,
-};
+use franca::{export_ffi::IMPORT_VTABLE, self_hosted::self_hosted_main, MEM, MMAP_ARENA_START, STACK_START};
 use std::{
-    env,
-    ffi::CString,
-    fs::{self, File},
-    io::Read,
-    mem::transmute,
-    os::fd::FromRawFd,
     panic::{set_hook, take_hook},
-    path::PathBuf,
-    process::exit,
     ptr::addr_of,
-    str::pattern::Pattern,
 };
 
 // TODO: Instead of cli args, what if the arg was a string of code to run so 'franca "start_lsp()"' would concat that on some compiler_cli.txt and run it.

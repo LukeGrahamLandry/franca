@@ -1,11 +1,8 @@
-use std::{
-    marker::PhantomData,
-    mem::{transmute, ManuallyDrop},
-};
+use std::{marker::PhantomData, mem::ManuallyDrop};
 
 use crate::{
     ast::{FatExpr, FatStmt, Flag, Func, LazyType, Pattern, TypeId},
-    compiler::{CErr, Compile, Res},
+    compiler::{Compile, Res},
     err,
     export_ffi::{BigOption, ImportVTable},
     ffi::InterpSend,
@@ -118,11 +115,6 @@ impl<'p> SelfHosted<'p> {
             let src = source_slice(self.codemap, span.low, span.high);
             push_parse(self.parser, &*src, span.low, span.high)
         }
-    }
-
-    pub fn lookup_filename(&self, span: Span) -> &'p str {
-        // TODO
-        "unknownfiletodo"
     }
 
     pub(crate) fn print_diagnostic(&self, e: crate::compiler::CompileError<'p>) {

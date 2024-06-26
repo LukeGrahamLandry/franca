@@ -1,8 +1,7 @@
 use crate::self_hosted::Span;
 
 use crate::ast::{
-    garbage_loc, Expr, FatExpr, FnFlag, FuncId, FuncImpl, LazyType, OverloadOption, OverloadSet, OverloadSetId, Pattern, TypeId, TypeInfo, Var,
-    VarType,
+    Expr, FatExpr, FnFlag, FuncId, FuncImpl, LazyType, OverloadOption, OverloadSet, OverloadSetId, Pattern, TypeId, TypeInfo, Var, VarType,
 };
 use crate::bc::from_values;
 use crate::compiler::{Compile, DebugState, ExecStyle, Res};

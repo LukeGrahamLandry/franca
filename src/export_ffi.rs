@@ -7,7 +7,7 @@ use crate::ast::{
     garbage_loc, CallConv, Expr, FatExpr, FatStmt, Flag, FnFlag, FnType, Func, FuncId, IntTypeInfo, LazyType, OverloadSetId, Pattern, Program,
     ScopeId, TargetArch, TypeId, TypeInfo, TypeMeta, WalkAst,
 };
-use crate::bc::{to_values, BakedEntry, BakedVar, BakedVarId, FnBody, PrimSig, Values};
+use crate::bc::{BakedEntry, BakedVar, BakedVarId, FnBody, PrimSig, Values};
 use crate::compiler::{Compile, CompileError, ExecStyle, Res, Unquote, EXPECT_ERR_DEPTH};
 use crate::emit_bc::{emit_relocatable_constant_body, prim_sig};
 use crate::ffi::InterpSend;
@@ -15,7 +15,7 @@ use crate::logging::{unwrap, PoolLog};
 use crate::overloading::where_the_fuck_am_i;
 use crate::scope::ResolveScope;
 use crate::self_hosted::Ident;
-use crate::{assert, emit_bc::emit_bc, err, ice, log_err, make_toplevel, signed_truncate, Stats, MEM, STATS};
+use crate::{assert, emit_bc::emit_bc, err, ice, log_err, make_toplevel, signed_truncate, Stats, STATS};
 use std::fmt::{Debug, Write};
 use std::fs;
 use std::mem::{self, transmute};
@@ -185,17 +185,17 @@ impl<T, E> FromResidual for BigResult<T, E> {
 pub struct ImportVTable {
     intern_string: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, s: *const str) -> Ident<'p>,
     get_string: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, s: Ident<'p>) -> *const str,
-    get_stats: unsafe extern "C" fn() -> *const Stats,
+    _a: usize,
     init_compiler: unsafe extern "C" fn(comptime_arch: TargetArch) -> *const Compile<'static, 'static>,
     find_unqiue_func: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, name: Ident<'p>) -> BigOption<FuncId>,
     // TODO: i want the meta program to be tracking these instead.
     get_fns_with_tag: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, tag: Ident<'p>) -> *const [FuncId],
     // TODO: you can't just give it the slice from get_exports/tests because that will alias the vec that might grow, but the idea is this will go away soon anyway.
-    emit_c: i64, // todo: remove
+    _b: i64, // todo: remove
     compile_func: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, f: FuncId, when: ExecStyle) -> BigCErr<'p, ()>,
     get_jitted_ptr: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, f: FuncId) -> BigCErr<'p, *const u8>,
     get_function: for<'p> unsafe extern "C" fn(c: &mut Compile<'p, '_>, f: FuncId) -> *const Func<'p>,
-    lookup_filename: unsafe extern "C" fn(c: &mut Compile, span: *const Span) -> *const str,
+    _d: usize,
     add_file: unsafe extern "C" fn(c: &mut Compile, name: &str, content: &str) -> Span, // TODO: idk if this calling convention works
     parse_stmts: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, f: *const Span) -> BigCErr<'p, *const [FatStmt<'p>]>,
     make_and_resolve_and_compile_top_level: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, body: *const [FatStmt<'p>]) -> BigCErr<'p, ()>,
@@ -203,7 +203,7 @@ pub struct ImportVTable {
     give_vtable: unsafe extern "C" fn(c: &mut Compile, vtable: *const ExportVTable, userdata: *mut ()),
     get_function_name: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, f: FuncId) -> Ident<'p>,
     comptime_arch: unsafe extern "C" fn() -> (i64, i64),
-    get_mem_mark: unsafe extern "C" fn() -> usize,
+    _c: usize,
     emit_bc: for<'p> extern "C" fn(compile: &mut Compile<'_, 'p>, f: FuncId, when: ExecStyle) -> Res<'p, FnBody<'p>>,
     get_type_meta: extern "C" fn(compile: &Compile, ty: TypeId) -> TypeMeta,
     debug_log_baked_constant: extern "C" fn(compile: &Compile, id: BakedVarId),
@@ -227,15 +227,15 @@ pub struct ExportVTable {
 pub static IMPORT_VTABLE: ImportVTable = ImportVTable {
     intern_string: franca_intern_string,
     get_string: franca_get_string,
-    get_stats: franca_get_stats,
+    _a: 0,
     init_compiler: franca_init_compiler,
     find_unqiue_func: franca_find_unique_fn,
     get_fns_with_tag,
-    emit_c: 0,
+    _b: 0,
     compile_func: franca_compile_func,
     get_jitted_ptr,
     get_function: franca_get_function,
-    lookup_filename,
+    _d: 0,
     add_file,
     parse_stmts,
     make_and_resolve_and_compile_top_level,
@@ -243,7 +243,7 @@ pub static IMPORT_VTABLE: ImportVTable = ImportVTable {
     give_vtable,
     get_function_name,
     comptime_arch,
-    get_mem_mark,
+    _c: 0,
     emit_bc,
     get_type_meta,
     debug_log_baked_constant,
@@ -279,10 +279,6 @@ extern "C" fn debug_log_baked_constant(compile: &Compile, id: BakedVarId) {
 
 extern "C" fn get_type_meta(compile: &Compile, ty: TypeId) -> TypeMeta {
     compile.program.get_info(ty)
-}
-
-unsafe extern "C" fn get_mem_mark() -> usize {
-    MEM.get() as usize
 }
 
 unsafe extern "C" fn comptime_arch() -> (i64, i64) {
@@ -360,10 +356,6 @@ unsafe extern "C" fn get_jitted_ptr<'p>(c: &mut Compile<'_, 'p>, f: FuncId) -> B
 #[no_mangle]
 unsafe extern "C" fn franca_get_function<'p>(c: &mut Compile<'p, '_>, f: FuncId) -> *const Func<'p> {
     &c.program[f] as *const Func
-}
-
-unsafe extern "C" fn lookup_filename(c: &mut Compile, span: *const Span) -> *const str {
-    c.program.pool.lookup_filename(*span) as *const str
 }
 
 unsafe extern "C" fn add_file(c: &mut Compile, name: &str, content: &str) -> Span {
@@ -571,7 +563,7 @@ const MSG: &str = "//! IMPORTANT: don't try to save #comptime_addr('ASLR junk'),
 
 extern "C" fn get_compiler_builtins_source() -> &'static str {
     let mut out = String::new();
-    writeln!(out, "{}", include_str!("../compiler/driver_api.fr")).unwrap();
+    // writeln!(out, "{}", include_str!("../compiler/driver_api.fr")).unwrap();
     writeln!(out, "{}", MSG).unwrap();
     for (sig, ptr) in COMPILER {
         writeln!(out, "#comptime_addr({}) #ct #c_call {sig};", *ptr as usize).unwrap();

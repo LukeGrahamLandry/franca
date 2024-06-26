@@ -504,23 +504,13 @@ impl<'p> Binding<'p> {
             Name::None => None,
         }
     }
-    pub(crate) fn var(&self) -> Option<Var<'p>> {
-        match self.name {
-            Name::Ident(_) => None,
-            Name::Var(n) => Some(n),
-            Name::None => None,
-        }
-    }
+
     pub(crate) fn lazy(&self) -> &LazyType<'p> {
         &self.ty
     }
 }
 
 impl<'p> Pattern<'p> {
-    pub(crate) fn empty(loc: Span) -> Self {
-        Self { loc, bindings: vec![] }
-    }
-
     #[track_caller]
     pub(crate) fn flatten(&self) -> Vec<(Option<Var<'p>>, TypeId, VarType)> {
         self.bindings

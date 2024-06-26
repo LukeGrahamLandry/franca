@@ -670,7 +670,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         debug_assert!(func.get_flag(NotEvilUninit));
         self.ensure_resolved_body(f)?;
         assert!(self.program[f].capture_vars.is_empty(), "closures need to be specialized");
-        assert!(!self.program[f].any_const_args());
+        assert!(!self.program[f].any_const_args(), "{:?}", self.program[f].log(self.program.pool));
         let before = self.debug_trace.len();
         let state = DebugState::EnsureCompiled(f, self.program[f].name, when);
         self.push_state(&state);
@@ -761,7 +761,6 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         // TODO: use this for libc as well.
         if let Some(lib_name) = self.program[f].get_tag(Flag::Import) {
-            let no_lib = lib_name.args.is_none();
             let lib_name = if let Some(lib_name) = lib_name.args.as_ref() {
                 self.eval_str(&mut lib_name.clone())?
             } else {
@@ -2505,7 +2504,15 @@ impl<'a, 'p> Compile<'a, 'p> {
         let func_id = self.make_lit_function(e, ret_ty)?;
         if let FuncImpl::Normal(body) = &mut self.program[func_id].body {
             let mut stolen_body = mem::take(body);
-            self.compile_expr(&mut stolen_body, Some(ret_ty)).unwrap();
+            if let Err(e) = self.compile_expr(&mut stolen_body, Some(ret_ty)) {
+                unsafe {
+                    let loc = e.loc.or(self.last_loc);
+                    if let Some(loc) = loc {
+                        show_error_line(self.program.pool.codemap, loc.low, loc.high);
+                    }
+                }
+                panic!("{e:?}")
+            }
             if let Some(values) = self.check_quick_eval(&mut stolen_body, ret_ty)? {
                 self.discard(func_id);
                 assert!(self.wip_stack.pop().unwrap().0.is_none());
@@ -2664,13 +2671,13 @@ impl<'a, 'p> Compile<'a, 'p> {
                     return Ok(Some(e));
                 }
             }
-            (c, TypeInfo::Fn(ty)) => {
+            (_, TypeInfo::Fn(ty)) => {
                 if TypeId::overload_set == current {
                     *value = resolve_os(self, value, *ty)?;
                     return Ok(None);
                 }
             }
-            (TypeInfo::Fn(_), w) => {
+            (TypeInfo::Fn(_), _) => {
                 if TypeId::func == requested {
                     return Ok(None);
                 }
