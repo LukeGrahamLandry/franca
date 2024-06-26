@@ -210,20 +210,16 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         // The code expects arguments on the virtual stack (the first thing it does might be save them to variables but that's not my problem).
 
         let sig = self.body.signeture;
-        let mut int_count = sig.arg_slots as u32 - sig.arg_float_mask.count_ones();
-        debug_assert!(
-            int_count <= 8 && sig.arg_float_mask.count_ones() <= 8,
-            "c_call only supports 8 arguments. TODO: pass on stack"
-        );
+        let int_count = sig.args.iter().filter(|p| !p.is_float()).count(); // TODO: slow
+
         let slots = if sig.first_arg_is_indirect_return {
             self.state.stack.push(Val::Increment { reg: 8, offset_bytes: 0 });
-            int_count -= 1;
             sig.arg_slots - 1
         } else {
             sig.arg_slots
         };
 
-        debug_assert_eq!(int_count as usize, sig.args.iter().filter(|p| !p.is_float()).count());
+        // TODO: assert int_count <= 8 && float_count <= 8 or impl pass on stack.
         self.ccall_reg_to_stack(sig.args);
 
         debug_assert_eq!(slots as usize, sig.args.len());
@@ -273,15 +269,13 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         let block = &self.body.blocks[b];
 
         let slots = block.arg_slots;
-        let mask = block.arg_float_mask;
         self.clock = block.clock;
         // debug_assert_eq!(block.height, 0);
         // TODO: handle normal args here as well.
         if args_not_vstacked {
             self.state.free_reg.clear();
             debug_assert_eq!(slots as usize, block.arg_prims.len());
-            let int_count = slots as u32 - mask.count_ones();
-            debug_assert_eq!(int_count as usize, block.arg_prims.iter().filter(|p| !p.is_float()).count());
+            let int_count = block.arg_prims.iter().filter(|p| !p.is_float()).count(); // TODO: slow
             if slots > 0 {
                 self.ccall_reg_to_stack(block.arg_prims);
             }
@@ -300,7 +294,6 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             // debug_assert!(!is_done);
             let block = &self.body.blocks[b];
             let inst = block.insts[i];
-            let mask = block.arg_float_mask;
             is_done = self.emit_inst(b, inst, i)?;
             debugln!("{b}:{i} {inst:?} => {:?} | free: {:?}", self.state.stack, self.state.free_reg);
         }
@@ -387,8 +380,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             }
             Bc::JumpIf { true_ip, false_ip, slots } => {
                 let cond = self.pop_to_reg();
-                let mask = self.body.blocks[true_ip.0 as usize].arg_float_mask;
-                debug_assert_eq!(slots, 0); // self.stack_to_ccall_reg(slots, mask);
+                debug_assert_eq!(slots, 0); // emit_bc doesn't do this
                 self.spill_abi_stompable();
                 self.asm.push(brk(0));
 
@@ -973,9 +965,10 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         }
         do_call(self);
 
-        let float_count = sig.ret_float_mask.count_ones();
-        let int_count = sig.ret_slots as u32 - float_count;
-        debug_assert!(int_count <= 8 && float_count <= 8, "TODO: pass extra arguments on stack.");
+        let int_count = [sig.ret1.unwrap_or(Prim::F32), sig.ret2.unwrap_or(Prim::F32)]
+            .iter()
+            .filter(|p| !p.is_float())
+            .count(); // TODO: dumb
 
         if let BigOption::Some(fst) = sig.ret1 {
             if let BigOption::Some(snd) = sig.ret2 {

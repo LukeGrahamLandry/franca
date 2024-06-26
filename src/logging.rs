@@ -534,26 +534,3 @@ impl<'p> PoolLog<'p> for FuncImpl<'p> {
 fn sane_int_size(bits: i64) -> bool {
     matches!(bits, 8 | 16 | 32 | 64 | 128)
 }
-
-impl<'p> Debug for PrimSig<'p> {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        let render = |f: &mut Formatter, slots: u16, float_mask: u32| -> fmt::Result {
-            write!(f, "(")?;
-            for i in 0..slots as usize {
-                write!(f, "{},", if is_float(i, slots, float_mask) { "f64" } else { "i64" })?
-            }
-            write!(f, ")")
-        };
-
-        render(f, self.arg_slots, self.arg_float_mask)?;
-        write!(f, " -> ")?;
-        render(f, self.ret_slots, self.ret_float_mask)?;
-        if self.first_arg_is_indirect_return {
-            write!(f, "#indirect")?;
-        }
-        if self.no_return {
-            write!(f, "#never")?;
-        }
-        Ok(())
-    }
-}

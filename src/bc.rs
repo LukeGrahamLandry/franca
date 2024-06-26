@@ -52,13 +52,11 @@ pub enum Bc<'p> {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub struct PrimSig<'p> {
     pub args: &'p [Prim],
     pub ret1: BigOption<Prim>,
     pub ret2: BigOption<Prim>,
-    pub arg_float_mask: u32,
-    pub ret_float_mask: u32,
     pub arg_slots: u16,
     pub ret_slots: u16,
     pub return_value_bytes: u16,
@@ -89,7 +87,6 @@ impl Prim {
 pub struct BasicBlock<'p> {
     pub insts: Vec<Bc<'p>>,
     pub arg_prims: &'p [Prim], // TODO: not ffi safe!
-    pub arg_float_mask: u32,
     pub incoming_jumps: u16,
     pub arg_slots: u16,
     pub clock: u16,

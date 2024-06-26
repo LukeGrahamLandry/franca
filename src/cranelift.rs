@@ -93,7 +93,6 @@ pub(crate) fn emit_cl_intrinsic<'p, M: Module>(program: &mut Program<'p>, cl: &m
             sig: body.signeture,
         }],
         arg_slots: arg.size_slots,
-        arg_float_mask: arg.float_mask,
         incoming_jumps: 0,
         clock: 0,
         height: 0,

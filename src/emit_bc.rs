@@ -347,7 +347,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             return Ok(());
         };
 
-        let entry_block = result.push_block(result.signeture.arg_slots, result.signeture.arg_float_mask, &[]);
+        let entry_block = result.push_block(result.signeture.arg_slots, &[]);
         let entry_block_sig = self.bind_args(result, &func.arg)?;
         result.blocks[entry_block.0 as usize].arg_prims = entry_block_sig;
         // We represent the indirect return argument as the left-most thing on the stack,
@@ -364,7 +364,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         } else {
             self.get_primatives(ret)
         };
-        let return_block = result.push_block(result.signeture.ret_slots, result.signeture.ret_float_mask, prims);
+        let return_block = result.push_block(result.signeture.ret_slots, prims);
 
         result.current_block = entry_block;
 
@@ -699,7 +699,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 if let BigOption::Some(ret_var) = ret_label {
                     let entry_block = result.current_block;
                     let return_block = match result_location {
-                        PushStack => result.push_block(out.size_slots, out.float_mask, self.get_primatives(expr.ty)),
+                        PushStack => result.push_block(out.size_slots, self.get_primatives(expr.ty)),
                         ResAddr => result.push_block_empty(),
                         Discard => result.push_block_empty(),
                     };
@@ -1088,13 +1088,12 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         let end_false_block = result.current_block;
 
         let block_slots = if result_location == PushStack { out.size_slots } else { 0 };
-        let block_floats = if result_location == PushStack { out.float_mask } else { 0 };
         let prims = if result_location == PushStack {
             self.get_primatives(if_true.ty)
         } else {
             &[]
         };
-        let ip = result.push_block(block_slots, block_floats, prims);
+        let ip = result.push_block(block_slots, prims);
         result.push_to(branch_block, Bc::JumpIf { true_ip, false_ip, slots: 0 });
         result.push_to(end_true_block, Bc::Goto { ip, slots: block_slots });
         // TODO: hack
@@ -1410,7 +1409,6 @@ impl<'p> FnBody<'p> {
             arg_prims: &[],
             insts: vec![],
             arg_slots: 0,
-            arg_float_mask: 0,
             incoming_jumps: 0,
             clock: self.clock,
             height: 0,
@@ -1420,12 +1418,11 @@ impl<'p> FnBody<'p> {
         b
     }
 
-    fn push_block(&mut self, arg_slots: u16, arg_float_mask: u32, arg_prims: &'p [Prim]) -> BbId {
+    fn push_block(&mut self, arg_slots: u16, arg_prims: &'p [Prim]) -> BbId {
         self.blocks.push(BasicBlock {
             arg_prims,
             insts: vec![],
             arg_slots,
-            arg_float_mask,
             incoming_jumps: 0,
             clock: self.clock,
             height: arg_slots,
@@ -1486,9 +1483,7 @@ pub fn prim_sig<'p>(program: &Program<'p>, f_ty: FnType, cc: CallConv) -> Res<'p
     let mut sig = PrimSig {
         args: &[],
         arg_slots: arg.size_slots,
-        arg_float_mask: arg.float_mask,
         ret_slots: ret.size_slots,
-        ret_float_mask: ret.float_mask,
         first_arg_is_indirect_return: has_indirect_ret,
         no_return: f_ty.ret.is_never(),
         return_value_bytes: ret.stride_bytes,
@@ -1507,7 +1502,6 @@ pub fn prim_sig<'p>(program: &Program<'p>, f_ty: FnType, cc: CallConv) -> Res<'p
         _ => {
             sig.arg_slots += 1;
             sig.ret_slots = 0;
-            sig.ret_float_mask = 0;
         }
     }
 
@@ -1544,10 +1538,6 @@ pub fn prim_sig<'p>(program: &Program<'p>, f_ty: FnType, cc: CallConv) -> Res<'p
                     if info.pass_by_ref {
                         sig.arg_slots -= info.size_slots;
                         sig.arg_slots += 1;
-                        debug_assert!(
-                            sig.arg_float_mask == 0,
-                            "TODO: shift float mask correctly to account for passing by reference"
-                        );
                         args.push(Prim::P64);
                     } else {
                         for p in program.as_primatives(ty) {
