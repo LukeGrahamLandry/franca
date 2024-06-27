@@ -295,7 +295,13 @@ impl<'p> FnBody<'p> {
     pub fn log(&self, program: &Program<'p>) -> String {
         let mut f = String::new();
 
-        writeln!(f, "=== Bytecode for {} ===", program.pool.get(self.name));
+        writeln!(
+            f,
+            "=== Bytecode for {}: {} -> {} ===",
+            program.pool.get(self.name),
+            program.log_type(program[self.func].finished_arg.unwrap()),
+            program.log_type(program[self.func].finished_ret.unwrap())
+        );
         for (b, insts) in self.blocks.iter().enumerate() {
             if insts.insts.len() == 1 && insts.insts[0] == Bc::NoCompile && insts.incoming_jumps == 0 {
                 continue;

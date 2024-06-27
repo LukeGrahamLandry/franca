@@ -339,9 +339,10 @@ impl<'a, 'p> WalkAst<'p> for RenumberVars<'a, 'p> {
         if let BigOption::Some(name) = &mut func.var_name {
             if let Some(new) = self.mapping.get(name) {
                 *name = *new;
-            } else {
-                self.decl(name);
             }
+            // TODO: maybe you sometimes want `else { self.decl(name); }`
+            //       but most of the time you're just adding to an overload set.
+            //       really the func should track which case it is so we can be sure to do the right thing  -- Jun 27
         }
         if let BigOption::Some(name) = &mut func.return_var {
             if let Some(new) = self.mapping.get(name) {
@@ -1181,6 +1182,14 @@ impl<'p> Program<'p> {
                 }
                 return None;
             }
+            TypeInfo::Tagged { ref cases } => {
+                for (_, payload) in cases {
+                    if !payload.is_unit() {
+                        return None;
+                    }
+                }
+                return Some(Prim::I64);
+            }
             _ => return None,
         })
     }
@@ -1556,15 +1565,6 @@ pub fn garbage_loc() -> Span {
     unsafe { mem::zeroed() }
 }
 
-// TODO: replace with new walk
-
-impl<'p, M: FnMut(&mut Expr<'p>)> WalkAst<'p> for M {
-    fn pre_walk_expr(&mut self, expr: &mut FatExpr<'p>) -> bool {
-        self(&mut expr.expr);
-        true
-    }
-}
-
 #[allow(non_upper_case_globals)]
 impl TypeId {
     pub(crate) fn is_unit(&self) -> bool {
@@ -1794,9 +1794,18 @@ macro_rules! tagged_index {
 // Make sure these tag numbers are all different!
 tagged_index!(TypeId, 31, u32);
 tagged_index!(FuncId, 30, u32); // must match driver_api.fr
-tagged_index!(ScopeId, 29, u32);
 tagged_index!(OverloadSetId, 28, u32);
 tagged_index!(LabelId, 27, u32);
+
+impl ScopeId {
+    pub(crate) fn as_index(self) -> usize {
+        self.0 as usize
+    }
+
+    pub(crate) fn from_index(value: usize) -> Self {
+        Self(value as u32)
+    }
+}
 
 #[repr(transparent)]
 #[derive(Copy, Clone, PartialEq, Hash, Eq, Default)]

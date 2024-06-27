@@ -975,6 +975,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             let mut mapping = Map::<Var, Var>::default();
             mapping.insert(old_ret_var, new_ret_var);
             // println!("renumber ret: {} to {}", old_ret_var.log(self.program.pool), new_ret_var.log(self.program.pool));
+            // :push_type_when_create_new_var // TODO
             expr_out.renumber_vars(&mut mapping, self); // Note: not renumbering on the function. didn't need to clone it.
             let value = to_values(self.program, ret_label)?;
             self.save_const(new_ret_var, Expr::Value { value, coerced: false }, label_ty, loc)?;
@@ -3356,15 +3357,13 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         let needs_renumber = self.program[original_f].get_flag(AllowRtCapture) || self.program[original_f].get_flag(Generic);
         if needs_renumber {
+            // :push_type_when_create_new_var // TODO
             let mut mapping = Default::default();
             let mut renumber = RenumberVars {
                 vars: self.program.next_var,
                 mapping: &mut mapping,
             };
-            renumber.pattern(&mut new_func.arg);
-            renumber.ty(&mut new_func.ret);
-            let FuncImpl::Normal(body) = &mut new_func.body else { unreachable!() };
-            renumber.expr(body);
+            renumber.func(&mut new_func);
             self.program.next_var = renumber.vars;
             if self.program[original_f].get_flag(Generic) && !self.program[original_f].get_flag(ResolvedBody) {
                 // the sign has already been resolved so we need to renumber before binding arguments.

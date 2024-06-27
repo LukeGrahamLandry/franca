@@ -14,9 +14,7 @@
 // - really need to fix unreachable_hack
 // - default function arguments because 'self.parse_expr(Prec.None)' and symmetry with structs. 
 // - its probably a bad thing that im choosing when to factor out functions based on "not enough bits to refer to all slots",
-//   obviously a crippling compiler bug (my asm backend only) but perhaps implies a style problem on my part. 
-// - move this version of @try to lib. 
-// - get rid of backpassing syntax. i never use it anyway. 
+//   obviously a crippling compiler bug (my asm backend only) but perhaps implies a style problem on my part.
 // - same problem i had in rust. its really annoying that you have to pass the pool to print things because it makes debugging that way more clunky.
 //   could have an implicit context system? crippling that you can't just derive print normal things. 
 //
@@ -33,7 +31,6 @@ ParseTask :: @tagged(
     Expr: Result(FatExpr, ParseErr),
 );
 Parser :: @struct(pool: *StringPool, lex: Lexer, tasks: *List(ParseTask), alloc: Alloc, last: Token);
-ParseErr :: @struct(span: Span, msg: Str);
 Prec :: @struct(prec: PrecLevel, allow_trailing: bool = true);
 
 Prec_None: Prec : (prec = .None);
@@ -553,6 +550,23 @@ fn parse_squiggle(self: *Parser, prev: FatExpr, prec: Prec) ParseRes = {
     func := self.make_func(fn_def, (Some = body), loc, true);
     callback := self.expr((Closure = self.box(func)), loc);
     self.push_arg(prev&, callback);
+    
+    @match(self.peek()) {
+        (fn Symbol(name) => {
+            // TODO: actually use this as a named argument! rework the call into a StructLiteralP as needed. 
+            //       currently i just ignore and assume you got the name right. 
+            self.pop();
+            @match(self.peek()) {
+                (fn LeftSquiggle() => ());
+                @default => {
+                    self.pop();
+                    @report_error("Expected trailing lambda after named arg '%'", self.pool.get(name)) (return, self.last.span);
+                };
+            };
+        });
+        @default => ();
+    };
+    
     // TODO: do i want allow extra after this??
     self.parse_infix(prev, prec.with(.Suffix))
 }
@@ -594,7 +608,7 @@ fn parse_bin_op(self: *Parser, op: Operator, prev: FatExpr, prec: Prec) ParseRes
         arg := self.box(self.pair(prev, rhs, loc));
         call := self.expr((Call = (f = f, arg = arg)), loc);
         return(self.parse_infix(call, prec)); // TODO: tail
-    }{|
+    } else {|
         return(Ok = prev);  
     };
     ParseRes.unreachable_hack()
@@ -698,12 +712,6 @@ fn make_func(self: *Parser, def: FnDef, body: ?FatExpr, loc: Span, may_capture: 
     if(may_capture, => f&.set_flag(.AllowRtCapture));
     
     f
-}
-
-fn set_flag(self: *Func, flag: FnFlag) void = {
-    mask := 1.shift_left(@as(i64) flag);
-    new := (@as(i64) self.flags.zext()).bit_or(mask);
-    self.flags = new.trunc();
 }
 
 fn is_unit(self: Values) bool = {
@@ -817,7 +825,7 @@ fn parse_args(self: *Parser) Result(Pattern, ParseErr) = {
     (Ok = (bindings = bindings.rs(), loc = loc))
 }
 
-fn parse_pattern(self: *Parser, out: *List(Binding)) Result(void, ParseErr) = {
+fn parse_pattern(self: *Parser, out: *List(Binding)) PRes = {
     loop {|
         // TODO: no comma allowed here
         // TODO: destructuring
@@ -999,7 +1007,7 @@ fn maybe(self: *Parser, const type: Symbol) bool = {
     yes
 }
 
-fn eat(self: *Parser, const type: Symbol, msg: Str) Result(void, ParseErr) = {
+fn eat(self: *Parser, const type: Symbol, msg: Str) PRes = {
     t := self.peek();
     if not(self.maybe(type)) {|
         s :: type.str();
@@ -1170,8 +1178,10 @@ fn parser_doesnt_crash() #test = {
                 out: List(u8) = list(temp());
                 t&.log(pool&, out&, 0);
                 token := codemap&.source_slice(t.loc);
-                println(token);
-                println(out.items());
+                if VERBOSE_TEST_LOGGING {|
+                    println(token);
+                    println(out.items());
+                };
                 next_token := ctx.lex&.pop(); // TODO: i think this should just be peek once i consume semicolons? 
                 if next_token.type&!tag[].eq(tag_value(TokenType, @symbol Eof)).not() {|
                     failed = true;

@@ -1,10 +1,10 @@
-use std::{marker::PhantomData, mem::ManuallyDrop};
+use std::{marker::PhantomData, mem::ManuallyDrop, ptr::addr_of};
 
 use crate::{
     ast::{FatExpr, FatStmt, Flag, Func, LazyType, Pattern, ScopeId, TypeId, Var},
     compiler::{Compile, Res, Scope},
     err,
-    export_ffi::{BigOption, ImportVTable},
+    export_ffi::{BigOption, ImportVTable, IMPORT_VTABLE},
     ffi::InterpSend,
     Map,
 };
@@ -17,6 +17,7 @@ pub struct SelfHosted<'p> {
     parser: *mut (),
     _arena: *mut (),
     pub scopes: Option<Box<Scopes<'p>>>, // small option because its a nullable pointer currently. TEMP
+    vtable: *const ImportVTable,
     a: PhantomData<&'p u8>,
 }
 
@@ -216,6 +217,7 @@ impl<'p> Default for SelfHosted<'p> {
     fn default() -> Self {
         let mut temp = unsafe { init_self_hosted() };
         temp.scopes = Some(Box::new(Scopes { scopes: vec![] }));
+        temp.vtable = addr_of!(IMPORT_VTABLE);
         temp
     }
 }

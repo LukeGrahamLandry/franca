@@ -68,15 +68,16 @@ fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId), entry: ProgramEntr
         @fmt(gen.backend.out&.current(), ";F%: %\n", index, real_name);
         
         if(body.blocks.len.eq(0)){|
-            success := gen.backend&.emit_special(comp, func.body&, func, body&); 
+            success := gen.backend&.emit_special(func.body&, func, body&); 
             if (not(success)){|
                 // TODO: pass in the arch
-                success = gen.backend&.emit_special_asm(comp, func.body&, func, body&, Arch.Aarch64); 
+                success = gen.backend&.emit_special_asm(func.body&, func, body&, Arch.Aarch64); 
             };
             if (not(success)){|
-                {comp.vtable.debug_log_bc}(comp.data, body&);
+                // TODO: should assert but debug_tag_corruption is confused. -- Jun 27
+                println("!!!! failed to emit speciai function");
             };
-            //assert(success, "failed to emit speciai function"); // TODO
+            //assert(success, "failed to emit speciai function");
             continue();
         };
         gen.body = body&;
@@ -234,12 +235,19 @@ fn emit_constant(self: *EmitLlvm, comp: CompCtx, id: BakedVarId) void = {
     }
 }
 
-fn emit_special(self: *EmitLlvm, comp: CompCtx, body: *FuncImpl, func: *Func, bc: *FnBody) bool = {
+fn emit_special(self: *EmitLlvm, body: *FuncImpl, func: *Func, bc: *FnBody) bool = {
+    comp := self.comp;
     @match(body) {
         (fn Normal(_) => { panic("ICE: empty body but expr"); });
+        (fn Redirect(f) => {
+            // TODO: assert that 'f' is flagged for being emitted?
+            //       currently just trusting that emit_bc replaced all actual uses. 
+            //       could also just have the front end check if body is redirect before adding to callees list. -- Jun 27
+            return(true);
+        });
         (fn Merged(parts) => { 
             each(parts[].items()) {check: *FuncImpl| 
-                if(self.emit_special(comp, check, func, bc), => return(true));
+                if(self.emit_special(check, func, bc), => return(true));
             };
         });
         (fn DynamicImport(name) => { 
@@ -308,11 +316,12 @@ fn forward_declare(self: *EmitLlvm, sig: PrimSig, private: bool, name: Str) void
     self.out&.push_all(";\n");
 }
 
-fn emit_special_asm(self: *EmitLlvm, comp: CompCtx, body: *FuncImpl, func: *Func, bc: *FnBody, arch: Arch) bool = {
+fn emit_special_asm(self: *EmitLlvm, body: *FuncImpl, func: *Func, bc: *FnBody, arch: Arch) bool = {
+    comp := self.comp;
     @match(body) {
         (fn Merged(parts) => { 
             each(parts[].items()) {check: *FuncImpl| 
-                if(self.emit_special_asm(comp, check, func, bc, arch), => return(true));
+                if(self.emit_special_asm(check, func, bc, arch), => return(true));
             };
         });
         (fn JittedAarch64(code) => { 

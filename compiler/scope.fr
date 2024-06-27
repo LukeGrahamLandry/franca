@@ -1,150 +1,212 @@
-use std::{mem, ops::DerefMut};
+Scopes :: @struct(
+    scopes: List(Scope),
+    // Indexed by var id.
+    // Invarient: all but last bucket are full. Never push_all since that might allocate a non full bucket and then indexes will be wrong. 
+    // :push_type_when_create_new_var when i start creating new vars elsewhere, need to remember to push a none here! didn't have to in the old version because it was a hashmap.
+    // now its hard to forget cause i use that len instead of self.next_var too.
+    types: BucketArray(?Type),
+);
 
-use crate::compiler::Scope;
-use crate::self_hosted::{get_include_std, Span};
+Scope :: @struct(
+    parent: ScopeId,
+    constants: HashMap(Var, Ty(FatExpr, LazyType)),
+    vars: List(BlockScope),
+    depth: i64,
+    name: Symbol,
+    block_in_parent: i64,
+);
 
-use crate::{
-    assert,
-    ast::{Binding, Expr, FatExpr, FatStmt, Flag, FnFlag, Func, FuncImpl, LazyType, Name, ScopeId, Stmt, Var, VarType},
-    compiler::{BlockScope, Compile, Res},
-    err,
-    export_ffi::BigOption,
-    ice,
-    self_hosted::Ident,
-    STATS,
-};
+BlockScope :: @struct(
+    vars: List(Var),
+    parent: i64,
+);
 
-use crate::export_ffi::BigResult::*;
-pub struct ResolveScope<'z, 'a, 'p> {
-    captures: Vec<Var<'p>>,
-    compiler: &'z mut Compile<'a, 'p>,
-    last_loc: Span,
-    scope: ScopeId,
-    block: usize,
+fn put_constant(self: *Scopes, name: Var, value: FatExpr, ty: LazyType) void #compiler = 
+    self[name.scope].constants.insert(name, (value, ty));
+
+fn get_var_type(self: *Scopes, v: Var) ?Type #compiler = 
+    self.types&.nested_index()[v.id.zext()][];
+
+fn put_var_type(self: *Scopes, v: Var, ty: Type) bool #compiler {
+    slot := self.types&.nested_index()[v.id.zext()];
+    is_new := slot.is_none();
+    slot[] = (Some = ty);
+    is_new
 }
 
-impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
-    fn new(compiler: &'z mut Compile<'a, 'p>, scope: ScopeId, last_loc: Span) -> Self {
-        ResolveScope {
-            captures: Default::default(),
-            compiler,
-            last_loc,
-            scope,
-            block: 0,
+// Safety: pointer is invalidated by creating new constants!
+fn get_constant(self: *Self, name: Var) ?*Ty(FatExpr, LazyType) #compiler = 
+    self[name.scope].constants.get_ptr(name);
+
+fn find_constant_in_scope(self: *Scopes, s: ScopeId, name: Symbol) ?Var #compiler = {
+    vars := self[s].constants&;
+    for_keys vars { k |
+        if(k.name == name, => return(Some = k));
+    };
+    .None
+}
+
+// :push_type_when_create_new_var
+fn dup_scope(self: *ResolveScope, prev: ScopeId, mapping: Map<Var, Var>) ScopeId = {
+    let scopes = self.scopes.as_mut().unwrap();
+    let old_scope = &scopes.scopes[prev.as_index()];
+    let p = old_scope.parent;
+    let bp = old_scope.block_in_parent;
+    let n = old_scope.name;
+    let id = self.new_scope(p, n, bp);
+    let scopes = self.scopes.as_mut().unwrap();
+    let old_scope = &scopes.scopes[prev.as_index()];
+    let old_constants = old_scope.constants.clone();
+    // TODO: just take the part you need. rn this copys more and more every time! -- May 29
+    //       i think this is still true -- Jun 3
+    let old_vars = old_scope.vars.clone();
+    // can't use the copy directly because need to rehash
+    for (k, v) in old_constants {
+        if let Some(new) = mapping.get(&k) {
+            scopes.scopes[id.as_index()].constants.insert(*new, v);
         }
     }
 
-    pub fn run(func: &mut Func<'p>, compiler: &'z mut Compile<'a, 'p>, scope: ScopeId) -> Res<'p, Vec<Var<'p>>> {
-        let mut r = ResolveScope::new(compiler, scope, func.loc);
-        if let Err(mut e) = r.resolve_func(func) {
-            e.loc = e.loc.or(Some(r.last_loc));
-            return Err(e);
-        }
-        debug_assert_eq!(r.scope, scope, "ICE: unmatched scopes");
-        Ok(r.captures)
+    for mut block in old_vars {
+        block.vars.retain_mut(|k| {
+            if let Some(new) = mapping.get(k) {
+                *k = *new;
+                true
+            } else {
+                false
+            }
+        });
+        scopes.scopes[id.as_index()].vars.push(block);
+    }
+    id
+}
+
+/// Resolver Interface. Called lazily by the compiler when it first works on a new function. /// 
+
+fn run(func: *Func, compiler: *SelfHosted, scope: ScopeId) PRes #compiler = {
+    r: ResolveScope = new(compiler, scope, func.loc);
+    r.resolve_func(func)
+}
+
+fn resolve_sign(func: *Func, compiler: *SelfHosted) PRes #compiler = {
+    r: ResolveScopes = new(compiler, func.scope.unwrap(), func.loc);
+    r.resolve_func_args(func)
+}
+
+fn resolve_body(func: *Func, compiler: *SelfHosted) PRes #compiler = {
+    r: ResolveScopes = new(compiler, func.scope.unwrap(), func.loc);
+    r.resolve_func_body(func)
+}
+
+/// Implementation /// 
+
+fn hash(i: *Var) i64 = (@as(i64) i.id.zext())&.hash();
+fn eq(a: Var, b: Var) bool = a.id == b.id;
+
+fn index(self: *Scopes, i: ScopeId) *Scope = {
+    index := ptr_cast_unchecked(ScopeId, u32, i&)[]; // TODO: expose id like normal struct
+    self.scopes&[index.zext()]&
+}
+fn scope_from_index(i: u32) ScopeId #unsafe_noop_cast = unreachable(); // TODO: expose id like normal struct
+
+fn new_scope(self: *Scopes, parent: ScopeId, name: Symbol, block_in_parent: i64) ScopeId = {
+    depth := if(self.scopes.is_empty(), => 0, => scopes[parent].depth + 1);
+    s: Scope = (
+        parent,
+        constants: Default::default(),
+        vars: Default::default(),
+        depth,
+        name,
+        block_in_parent,
+    );
+    self.scopes&.push(s);
+    scope_from_index(self.scopes.len - 1)
+}
+
+ResolveScope :: @struct(
+    captures: List(Var),
+    compiler: *SelfHosted,
+    scope: ScopeId,
+    block: i64,
+);
+
+fn new(compiler: *SelfHosted, scope: ScopeId, last_loc: Span) ResolveScope = (
+    captures = list(temp()),
+    compiler = compiler,
+    scope = scope,
+    block = 0,
+);
+
+fn resolve_func(self: *ResolveScope, func: *Func) PRes = {
+    if(func.get_flag(.ResolvedBody).and(func.get_flag(.ResolvedSign))), => Return(.Ok)); 
+
+    // TODO: need to remember to update from this if we get one from the user (like they added it in a macro)?
+    if func.has_tag(Flag::Generic) {
+        func.set_flag(.Generic);
+        func.annotations.retain(|a| a.name != Flag::Generic.ident());
+    }
+    if func.has_tag(Flag::Unsafe_Noop_Cast) {
+        func.set_flag(.UnsafeNoopCast, true);
+        func.annotations.retain(|a| a.name != Flag::Unsafe_Noop_Cast.ident());
     }
 
-    #[track_caller]
-    pub fn resolve_sign(func: &mut Func<'p>, compiler: &'z mut Compile<'a, 'p>) -> Res<'p, ()> {
-        let scope = func.scope.unwrap();
-        let mut r = ResolveScope::new(compiler, scope, func.loc);
-        r.resolve_func_args(func)?;
-        debug_assert_eq!(r.scope, scope);
-        Ok(())
+    let (s, b) = (self.scope, self.block);
+
+    self.push_scope(Some(func.name));
+    func.scope = BigOption::Some(self.scope);
+
+    if func.get_flag(.AllowRtCapture) {
+        self.resolve_func_args(func)?;
+        self.resolve_func_body(func)?;
+        debug_assert_eq!(s, self.scope);
+        debug_assert_eq!(b, self.block);
+    } else {
+        self.pop_scope();
+        debug_assert_ne!(self.scope, func.scope.unwrap());
     }
 
-    pub fn resolve_body(func: &mut Func<'p>, compiler: &'z mut Compile<'a, 'p>) -> Res<'p, ()> {
-        let scope = func.scope.unwrap();
-        let mut r = ResolveScope::new(compiler, scope, func.loc);
-        r.resolve_func_body(func)?;
-        Ok(())
-    }
+    Ok(())
+}
 
-    fn resolve_func(&mut self, func: &mut Func<'p>) -> Res<'p, ()> {
-        if func.get_flag(FnFlag::ResolvedBody) && func.get_flag(FnFlag::ResolvedSign) {
-            return Ok(());
-        }
+fn resolve_func_args(self: *ResolveScope, func: *Func) PRes = {
+    if(func.get_flag(.ResolvedSign), => return(.Ok));
+    
+    self.scope = func.scope.unwrap();
+    self.block = 0;
+    generic := func.get_flag(.Generic); // ret is allowed to depend on previous args.
+    func.set_flag(.ResolvedSign);
 
-        // TODO: need to remember to update from this if we get one from the user (like they added it in a macro)?
-        if func.has_tag(Flag::Generic) {
-            func.set_flag(FnFlag::Generic, true);
-            func.annotations.retain(|a| a.name != Flag::Generic.ident());
-        }
-        if func.has_tag(Flag::Unsafe_Noop_Cast) {
-            func.set_flag(FnFlag::UnsafeNoopCast, true);
-            func.annotations.retain(|a| a.name != Flag::Unsafe_Noop_Cast.ident());
-        }
+    if generic {|
+        each func.arg.bindings.items() { b |
+            @try(self.declare_binding(b, func.loc)) return;
+        };
+    };
+    each func.arg.bindings.items() { b |
+        @try(self.resolve_binding(b)) return;
+    };
+    self.walk_ty(func.ret&);
+    self.pop_block();
+    // TODO: allow block exprs with consts in arg types but for now i dont use it and this is easier to think about. -- Apr 24
+    .Ok
+}
 
-        let (s, b) = (self.scope, self.block);
-
-        self.push_scope(Some(func.name));
-        func.scope = BigOption::Some(self.scope);
-
-        if func.get_flag(FnFlag::AllowRtCapture) {
-            self.resolve_func_args(func)?;
-            self.resolve_func_body(func)?;
-            debug_assert_eq!(s, self.scope);
-            debug_assert_eq!(b, self.block);
-        } else {
-            self.pop_scope();
-            debug_assert_ne!(self.scope, func.scope.unwrap());
-        }
-
-        Ok(())
-    }
-
-    fn resolve_func_args(&mut self, func: &mut Func<'p>) -> Res<'p, ()> {
-        if func.get_flag(FnFlag::ResolvedSign) {
-            return Ok(());
-        }
+    fn resolve_func_body(self: *ResolveScope, func: *Func) PRes = {
+        if(func.get_flag(.ResolvedBody), => return(.Ok));
         self.scope = func.scope.unwrap();
-        self.block = 0;
-        debug_assert_eq!(self.scope, func.scope.unwrap());
-        let generic = func.get_flag(FnFlag::Generic); // ret is allowed to depend on previous args.
+        generic := func.get_flag(.Generic); // args and ret are allowed to depend on previous args.
 
-        func.set_flag(FnFlag::ResolvedSign, true);
+        self.push_scope(.None);
 
-        if generic {
-            for b in &mut func.arg.bindings {
-                self.declare_binding(b, func.loc)?;
-            }
-            for b in &mut func.arg.bindings {
-                self.resolve_binding(b)?;
-            }
-            self.walk_ty(&mut func.ret);
-        } else {
-            for b in &mut func.arg.bindings {
-                self.resolve_binding(b)?;
-            }
-            self.walk_ty(&mut func.ret);
-        }
-        self.pop_block();
-        // TODO: allow block exprs with consts in arg types but for now i dont use it and this is easier to think about. -- Apr 24
-        debug_assert_eq!(self.scope, func.scope.unwrap());
-        debug_assert_eq!(self.block, 0);
-        Ok(())
-    }
-
-    fn resolve_func_body(&mut self, func: &mut Func<'p>) -> Res<'p, ()> {
-        if func.get_flag(FnFlag::ResolvedBody) {
-            return Ok(());
-        }
-        unsafe { STATS.fn_body_resolve += 1 };
-        self.scope = func.scope.unwrap();
-        let generic = func.get_flag(FnFlag::Generic); // args and ret are allowed to depend on previous args.
-
-        self.push_scope(None);
-
-        if generic {
-        } else {
-            for b in &mut func.arg.bindings {
-                self.declare_binding(b, func.loc)?;
-            }
-        }
-        self.push_scope(None);
-        func.set_flag(FnFlag::ResolvedBody, true);
+        if generic {|
+        } else {|
+            each func.arg.bindings.items() { b |
+                @try(self.declare_binding(b, func.loc)) return;
+            };
+        };
+        self.push_scope(.None);
+        func.set_flag(.ResolvedBody);
         if matches!(func.body, FuncImpl::Normal(_)) {
-            if func.get_flag(FnFlag::AllowRtCapture) {
+            if func.get_flag(.AllowRtCapture) {
                 func.return_var = BigOption::Some(self.decl_var(&Flag::Local_Return.ident(), VarType::Const, func.loc)?);
             } else {
                 func.return_var = BigOption::Some(self.decl_var(&Flag::Return.ident(), VarType::Const, func.loc)?);
@@ -155,32 +217,31 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             self.resolve_expr(body)?;
         }
         self.pop_block();
-        debug_assert_eq!(self.scope, func.scope.unwrap());
         self.pop_block();
         self.pop_scope();
 
-        let capures = mem::take(&mut self.captures);
+        // Remember this is in temp allocator! 
+        capures := self.captures;
 
-        if !func.get_flag(FnFlag::AllowRtCapture) {
-            // TODO: show the captured var use site and declaration site.
-            self.last_loc = func.loc;
-            let n = self.compiler.program.pool.get(func.name);
-            // TODO: add a test that this error is reported
-            assert!(capures.is_empty(), "Must use '=>' for closure '{}' with captures", n,);
-        } else {
-            // TODO: this is only needed for the error reporting above but involves a slow iteration (in find_var). Track which scope you're capturing from the first time we get the var so don't have to look it up again? -- Jun 26
+        if func.get_flag(.AllowRtCapture) {|
+            // TODO: this is only needed for the error reporting below but involves a slow iteration (in find_var). Track which scope you're capturing from the first time we get the var so don't have to look it up again? -- Jun 26
             // Now check which things we captured from *our* parent.
             for c in capures {
                 self.find_var(&c.name); // This adds it back to self.captures if needed
                 debug_assert!(c.kind != VarType::Const);
             }
-        }
+        } else {|
+            // TODO: show the captured var use site and declaration site.
+            // TODO: add a test that this error is reported
+            assert!(capures.is_empty(), "Must use '=>' for closure '{}' with captures", self.compiler.pool.get(func.name));
+        };
+        self.captures.clear();
 
-        Ok(())
+        .Ok
     }
 
-    fn scan_const_decls(&mut self, stmt: &mut FatStmt<'p>) -> Res<'p, ()> {
-        let loc = stmt.loc;
+    fn scan_const_decls(self: *ResolveScope, stmt: *FatStmt) PRes = {
+        loc := stmt.loc;
         match stmt.deref_mut() {
             Stmt::DeclNamed { name, ty, value, kind } => {
                 // kinda hack. just makes it easier to read logs when you do 'name :: fn() ...'
@@ -203,7 +264,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             }
             Stmt::DeclFunc(func) => {
                 // Functions don't shadow, they just add to an overload group.
-                // TOOD: @pub vs @private
+                // TOOD: @vs @private
                 if let Some(v) = self.find_var(&func.name) {
                     assert!(v.kind == VarType::Const);
                     func.var_name = BigOption::Some(v);
@@ -220,7 +281,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         Ok(())
     }
 
-    fn resolve_stmt(&mut self, stmt: &mut FatStmt<'p>) -> Res<'p, ()> {
+    fn resolve_stmt(self: *ResolveScope, stmt: *FatStmt) PRes = {
         let loc = stmt.loc;
         self.last_loc = loc;
         for a in &mut stmt.annotations {
@@ -275,7 +336,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
     }
 
     // TODO: this could use walk_whatever()
-    fn resolve_expr(&mut self, expr: &mut FatExpr<'p>) -> Res<'p, ()> {
+    fn resolve_expr(self: *ResolveScope, expr: *FatExpr) PRes = {
         let loc = expr.loc;
         self.last_loc = loc;
         match expr.deref_mut() {
@@ -351,9 +412,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                 self.push_scope(None);
                 for b in &mut p.bindings {
                     self.resolve_binding(b)?;
-                    // (uncommenting) this is what makes you get the weird field shadowing, i think you never want thing.
-                    // i was thinking const feilds should be allowed in later ones, but its just kinda confusing. -- Jun 27
-                    // self.declare_binding(b, loc)?;
+                    self.declare_binding(b, loc)?;
                 }
                 self.pop_block();
             }
@@ -368,7 +427,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
 
     // most blocks aren't using #include_std.
     // doing it this way means you scan_const_decls twice anything in a block before a #include_std, but that doesn't matter.
-    fn slow_body(&mut self, body: &mut Vec<FatStmt<'p>>) -> Res<'p, ()> {
+    fn slow_body(self: *ResolveScope, body: *Vec<FatStmt>) PRes = {
         let mut new_body = Vec::with_capacity(body.len());
         let mut dirty = true;
         while dirty {
@@ -403,9 +462,13 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         }
         Ok(())
     }
+    
+//! This (find_var/decl_var) is done in a dumb and slow way with a bunch of linear scans through all the variables in a scope,
+//! but its only really a problem at the top level where i import everything in the universe,
+//! and i dont have enough code written in this language to convincingly benchmark it.
 
-    fn find_var(&mut self, name: &Ident<'p>) -> Option<Var<'p>> {
-        let find = |scope: &Scope<'p>, mut block: usize| {
+    fn find_var(self: *ResolveScope, name: &Symbol) -> Option<Var> {
+        let find = |scope: &Scope, mut block: usize| {
             if scope.vars.is_empty() {
                 debug_assert_eq!(block, 0);
                 return None;
@@ -467,49 +530,41 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         }
     }
 
-    fn decl_var(&mut self, name: &Ident<'p>, kind: VarType, loc: Span) -> Res<'p, Var<'p>> {
-        self.last_loc = loc;
-        let s = self.scope;
+    fn decl_var(self: *ResolveScope, name: Symbol, kind: VarType, loc: Span) Result(Var, ParseErr) = {
+        s := self.scope;
         // Note: you can't shadow a let with a const either but that already works because consts are done first.
         // TODO: when this was a hashmap ident->(_,_) of justs constants this was faster, but its a tiny difference in release mode so its probably fine for now.
         //       this makes it easier to think about having functions be the unit of resolving instead of blocks but still allowing shadowing consts in inner blocks.
 
-        let scopes = &mut self.compiler.program.pool.scopes.as_mut().unwrap().scopes;
-        let scope = &mut scopes[s.as_index()];
-        let wip = &scope.vars[self.block].vars;
-        // 1.6M
-        let shadow_const = |v: &Var<'_>| v.name == *name && v.kind == VarType::Const;
-        if wip.iter().any(shadow_const) {
-            err!("Cannot shadow constant in the same scope: {}", self.compiler.program.pool.get(*name));
-        }
-
-        let var = Var {
-            name: *name,
-            id: self.compiler.program.next_var,
-            scope: s,
-            block: self.block as u16,
-            kind,
+        scopes := self.compiler.program.scopes&;
+        scope := scopes[s]&;
+        
+        for scope.vars[self.block].vars& { v|
+            if and(v.name == name, v.kind == .Const) {|
+                err!("Cannot shadow constant in the same scope: {}", self.compiler.program.pool.get(*name));
+            };
         };
-        self.compiler.program.next_var += 1;
-        if kind == VarType::Const {
-            let empty = (FatExpr::synthetic(Expr::Poison, loc), LazyType::Infer);
+        
+        var: Var = (name = name, id = scopes.types.len, block = self.block.trunc(), kind = kind);
+        if kind == .Const {|
+            empty: Ty(FatExpr, LazyType) = ((expr = .Poison, ty = UnknownType, loc = loc, done = false), .Infer);
             scope.constants.insert(var, empty); // sad. two lookups per constant. but doing it different on each branch looks verbose.
-        }
-        // println!("{}", var.log(self.compiler.program.pool));
-        // println!("= decl {} in s{} b{}", self.compiler.program.pool.get(*name), s.as_index(), self.block);
+        };
+        
         scope.vars[self.block].vars.push(var); // includes constants!
+        scopes.types&.push(.None);
         Ok(var)
     }
 
-    fn push_scope(&mut self, name: Option<Ident<'p>>) {
+    fn push_scope(self: *ResolveScope, name: Option<Symbol>) {
         let scope = if let Some(name) = name {
             self.scope = self.compiler.program.pool.new_scope(self.scope, name, self.block);
-            let scopes = &mut self.compiler.program.pool.scopes.as_mut().unwrap().scopes;
+            let scopes = self: *ResolveScope.compiler.program.pool.scopes.as_mut().unwrap().scopes;
             let scope = &mut scopes[self.scope.as_index()];
             scope.vars.push(BlockScope { vars: vec![], parent: 0 });
             scope
         } else {
-            let scopes = &mut self.compiler.program.pool.scopes.as_mut().unwrap().scopes;
+            let scopes = self: *ResolveScope.compiler.program.pool.scopes.as_mut().unwrap().scopes;
             let scope = &mut scopes[self.scope.as_index()];
             debug_assert!(!scope.vars.is_empty());
             scope.vars.push(BlockScope {
@@ -521,31 +576,26 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         self.block = scope.vars.len() - 1;
     }
 
-    fn pop_scope(&mut self) {
-        let s = self.scope;
-        let scopes = &mut self.compiler.program.pool.scopes.as_mut().unwrap().scopes;
-        let scope = &mut scopes[s.as_index()];
-        self.scope = scope.parent;
-        self.block = scope.block_in_parent;
-    }
+fn pop_scope(self: *ResolveScope) {
+    scope := self.compiler.scopes[self.scope]&;
+    self.scope = scope.parent;
+    self.block = scope.block_in_parent;
+}
 
-    fn pop_block(&mut self) {
-        let s = self.scope;
-        let scopes = &mut self.compiler.program.pool.scopes.as_mut().unwrap().scopes;
-        let scope = &mut scopes[s.as_index()];
-        let locals = &scope.vars[self.block];
-        self.block = locals.parent;
-    }
+fn pop_block(self: *ResolveScope) void = {
+    scope := self.compiler.scopes[self.scope]&;
+    self.block = scope.vars[self.block].parent;
+}
 
-    fn resolve_binding(&mut self, binding: &mut Binding<'p>) -> Res<'p, ()> {
-        self.walk_ty(&mut binding.ty);
-        if let BigOption::Some(expr) = &mut binding.default {
-            self.resolve_expr(expr)?;
-        }
-        Ok(())
-    }
+fn resolve_binding(self: *ResolveScope, binding: *Binding) PRes = {
+    @try(self.walk_ty(binding.ty&)) return;
+    if binding.default& { expr |
+        @try(self.resolve_expr(expr)) return;
+    };
+    .Ok
+}
 
-    fn declare_binding(&mut self, binding: &mut Binding<'p>, loc: Span) -> Res<'p, ()> {
+    fn declare_binding(self: *ResolveScope, binding: *Binding, loc: Span) PRes = {
         match binding.name {
             Name::Ident(name) => {
                 let var = self.decl_var(&name, binding.kind, loc)?;
@@ -562,13 +612,15 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         Ok(())
     }
 
-    fn walk_ty(&mut self, ty: &mut LazyType<'p>) {
-        match ty {
-            LazyType::EvilUnit => panic!(),
-            LazyType::Infer => {}
-            LazyType::PendingEval(e) => self.resolve_expr(e).unwrap(), // TODO: have WalkAst return errs.
-            LazyType::Finished(_) => {}
-            LazyType::Different(parts) => parts.iter_mut().for_each(|t| self.walk_ty(t)),
-        }
-    }
-}
+fn walk_ty(self: *ResolveScope, ty: *LazyType) PRes = @match(ty) {
+    (fn EvilUnit() => panic("evil uninit walk_ty"));
+    (fn Infer() => .Ok);
+    (fn PendingEval(e) => self.resolve_expr(e));
+    (fn Finished(_) => .Ok);
+    (fn Different(parts) => {
+        each parts.items() { p |
+            @try(self.walk_ty(p)) return;
+        };
+        .Ok
+    });
+};

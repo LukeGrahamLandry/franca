@@ -139,7 +139,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 match slots {
                     0 => {}
                     1 => {
-                        let ty = self.program.prim(ty).unwrap();
+                        let ty = unwrap!(self.program.prim(ty), "expected prim but found {}", self.program.log_type(ty));
                         pushed += 1;
                         if let Some(args) = &mut prim_args {
                             args.push(ty);

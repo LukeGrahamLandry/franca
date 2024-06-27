@@ -1,0 +1,200 @@
+fn walk_expr();
+fn handle_expr();
+fn handle_stmt();
+fn handle_type();
+fn handle_func();
+fn handle_pattern();
+
+DoMore :: @enum(i64) (Break, Continue);
+#redirect(Ty(i64, i64), bool) fn eq(a: DoMore, b: DoMore) bool;
+
+/*
+WalkAst :: @trait {
+    fn handle_expr(self: *State, expr: *FatExpr) Result(DoMore, Error);
+    fn handle_stmt(self: *State, expr: *FatStmt) Result(DoMore, Error);
+    fn handle_type(self: *State, expr: *LazyType) Result(DoMore, Error);
+    fn handle_func(self: *State, func: *Func) Result(DoMore, Error);
+    fn handle_pattern(self: *State, func: *Pattern) Result(DoMore, Error);
+};
+*/
+
+fn WalkAst(const State: Type, const Error: Type) void = {
+    Ret :: Result(void, Error);
+    
+    fn walk_expr(self: *State, expr: *FatExpr) Ret = {
+        if ((@try(self.handle_expr(expr)) return) == .Break) {|
+            return(.Ok);
+        };
+        
+        @match(expr.expr&) {
+            (fn Call(f) => { 
+                @try(self.walk_expr(f.f)) return;
+                @try(self.walk_expr(f.arg)) return;
+            });
+            (fn PrefixMacro(f) => {
+                @try(self.walk_expr(f.handler)) return;
+                @try(self.walk_expr(f.arg)) return;
+                @try(self.walk_expr(f.target)) return;
+            });
+            (fn Block(f) => {
+                each f.body.items() { stmt |
+                    @try(self.walk_stmt(stmt)) return;
+                };
+                @try(self.walk_expr(f.result)) return;
+            });
+            (fn Tuple(values) => {
+                each values.items() { value |
+                    @try(self.walk_expr(value)) return;
+                };
+            });
+            // TODO: :FUCKED crippling miscompilation if you do this as exprs that => return/panic,
+            //       it decides the whole after the match is unreachable? 
+            //       its an inserted trap because of Bc::Unreachable       -- Jun 27
+            (fn PtrOffset(f) => {
+                return(self.walk_expr(f.ptr));
+            });
+            (fn Closure(func) => {
+                return(self.walk_func(func[]));
+            });
+            (fn StructLiteralP(p) => {
+                return(self.walk_pattern(p));
+            });
+            (fn SuffixMacro(f) => {
+                return(self.walk_expr(f.arg));
+            });
+            (fn FieldAccess(f) => {
+                return(self.walk_expr(f.container));
+            });
+            (fn Cast(f) => {
+                return(self.walk_expr(f[]));
+            });
+            (fn AddToOverloadSet(_) => {
+                panic("Unreachable: walk AddToOverloadSet");
+            });
+            (fn WipFunc(_)          => {
+                panic("Unreachable: walk WipFunc");
+            });
+            (fn Poison()            => {
+                panic("ICE: walk Poison");
+            });
+            (fn Value(_)     => ());
+            (fn GetNamed(_)  => ());
+            (fn GetVar(_)    => ());
+            (fn String(_)    => ());
+            (fn GetParsed(_) => ());
+        };
+        .Ok
+    }
+    
+    fn walk_stmt(self: *State, stmt: *FatStmt) Ret = {
+        if ((@try(self.handle_stmt(stmt)) return) == .Break) {|
+            return(.Ok);
+        };
+        
+        @match(stmt.stmt&) {
+            (fn DeclNamed(f) => {
+                @try(self.walk_type(f.ty&))    return;
+                @try(self.walk_expr(f.value&)) return;
+            });
+            (fn DeclVar(f) => {
+                @try(self.walk_type(f.ty&))    return;
+                @try(self.walk_expr(f.value&)) return;
+            });
+            (fn Set(f) => {
+                @try(self.walk_expr(f.place&)) return;
+                @try(self.walk_expr(f.value&)) return;
+            });
+            (fn DeclVarPattern(f) => {
+                @try(self.walk_pattern(f.binding&)) return;
+                @try(self.walk_expr(f.value&)) return;
+            });
+            (fn DeclFunc(f) void => return(self.walk_func(f[])));
+            (fn Eval(e)     void => return(self.walk_expr(e)));
+            (fn ExpandParsedStmts(_) void => unreachable()); // TODO: remove this ast node. 
+            (fn Noop() => ());
+        };
+        
+        .Ok
+    }
+    
+    fn walk_type(self: *State, type: *LazyType) Ret = {
+        if ((@try(self.handle_type(type)) return) == .Break) {|
+            return(.Ok);
+        };
+        
+        @match(type) {
+            (fn PendingEval(e) Ret => self.walk_expr(e));
+            (fn Different(parts) Ret => {
+                each parts.items() { p |
+                    @try(self.walk_type(p)) return;
+                };
+                .Ok
+            });
+            @default fn() Ret => .Ok;
+        }
+    }
+    
+    fn walk_func(self: *State, func: *Func) Ret = {
+        if ((@try(self.handle_func(func)) return) == .Break) {|
+            return(.Ok);
+        };
+        
+        @try(self.walk_pattern(func.arg&)) return;
+        @try(self.walk_type(func.ret&)) return;
+        @match(func.body&) {
+            (fn Normal(e) => {
+                @try(self.walk_expr(e)) return;
+            });
+            @default => (); // TODO: many
+        };
+        
+        .Ok
+    }
+    
+    fn walk_pattern(self: *State, p: *Pattern) Ret = {
+        if ((@try(self.handle_pattern(p)) return) == .Break) {|
+            return(.Ok);
+        };
+        
+        each p.bindings.items() { (b) void |
+            @try(self.walk_type(b.ty&)) return;
+            if b.default& { e |
+                @try(self.walk_expr(e)) return;
+            };
+        };
+        .Ok
+    }
+}
+
+#test fn reach_walk_ast() = {
+    Counter :: @struct(names: i64);
+    
+    fn handle_stmt(self: *Counter, expr: *FatStmt) Result(DoMore, void) = (Ok = .Continue);
+    fn handle_type(self: *Counter, expr: *LazyType) Result(DoMore, void) = (Ok = .Continue);
+    fn handle_func(self: *Counter, func: *Func) Result(DoMore, void) = (Ok = .Continue);
+    fn handle_pattern(self: *Counter, func: *Pattern) Result(DoMore, void) = (Ok = .Continue);
+    fn handle_expr(self: *Counter, expr: *FatExpr) Result(DoMore, void) = {
+        @match(expr.expr&) {
+            (fn GetNamed(f) => { self.names += 1; });
+            @default => ();
+        };
+        (Ok = .Continue)
+    }
+    
+    :: WalkAst(Counter, void);
+    
+    // TOOD: can't use a quote literal becaue it can't deal with constants. (if you fix that, also do GetVar above because it will bind 'add' in the example). -- Jun 27
+    fn parse_one(src: Str) FatExpr = {
+        pool: StringPool = init(temp());
+        codemap: CodeMap = init(temp());
+        span := codemap&.add_file("name", src);
+        tasks: List(ParseTask) = list(temp());
+        ctx: Parser = (pool = pool&, lex = init(pool&, span, src), tasks = tasks&, alloc = temp(), last = Token.zeroed());
+        ctx&.parse_expr(Prec_None).unwrap()
+    }
+    
+    example := "(b(c, d + e), h)".parse_one();
+    c: Counter = (names = 0);
+    c&.walk_expr(example&);
+    assert_eq(c.names, 6);  // 'add' is also one because we didn't resolve. 
+}

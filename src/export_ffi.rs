@@ -841,6 +841,7 @@ extern "C-unwind" fn unquote_macro_apply_placeholders<'p>(compile: &mut Compile<
         walk.expr(&mut template);
         let placeholders = walk.placeholders;
         assert!(placeholders.iter().all(|a| a.is_none()), "didnt use all arguments");
+        // :push_type_when_create_new_var // TODO
         template.renumber_vars(&mut Default::default(), compile);
 
         Ok(template)
