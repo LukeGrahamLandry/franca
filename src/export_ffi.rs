@@ -1,6 +1,7 @@
 #![allow(improper_ctypes_definitions)]
 
 use crate::self_hosted::{emit_llvm, Span};
+use crate::unwrap2;
 use libc::c_void;
 
 use crate::ast::{
@@ -15,7 +16,7 @@ use crate::logging::{unwrap, PoolLog};
 use crate::overloading::where_the_fuck_am_i;
 use crate::scope::ResolveScope;
 use crate::self_hosted::Ident;
-use crate::{assert, emit_bc::emit_bc, err, ice, log_err, make_toplevel, signed_truncate, Stats, STATS};
+use crate::{assert, emit_bc::emit_bc, err, ice, log_err, make_toplevel, signed_truncate};
 use std::fmt::{Debug, Write};
 use std::mem::{self, transmute};
 use std::ops::{FromResidual, Try};
@@ -214,6 +215,7 @@ pub struct ImportVTable {
     emit_llvm: unsafe extern "C" fn(),
     number_of_functions: unsafe extern "C" fn(c: &mut &mut Program) -> i64,
     bake_var: extern "C" fn(compile: &mut Compile, v: BakedVar) -> BakedVarId,
+    franca_prim_sig2: for<'p> extern "C" fn(c: &Compile<'_, 'p>, func: &Func<'p>) -> Res<'p, PrimSig<'p>>,
 }
 
 #[repr(C)]
@@ -254,7 +256,14 @@ pub static IMPORT_VTABLE: ImportVTable = ImportVTable {
     emit_llvm,
     number_of_functions,
     bake_var,
+    franca_prim_sig2,
 };
+
+extern "C" fn franca_prim_sig2<'p>(c: &Compile<'_, 'p>, func: &Func<'p>) -> Res<'p, PrimSig<'p>> {
+    let Some(ty) = func.finished_ty() else { err!("fn ty not ready",) };
+    let cc = unwrap2!(func.cc, "cc not ready");
+    prim_sig(c.program, ty, cc)
+}
 
 extern "C" fn bake_var(c: &mut Compile, val: BakedVar) -> BakedVarId {
     c.program.baked.make(val, null(), TypeId::unknown)
@@ -305,9 +314,7 @@ unsafe extern "C" fn franca_intern_string<'p>(c: &mut Compile<'_, 'p>, s: *const
 unsafe extern "C" fn franca_get_string<'p>(c: &mut Compile<'_, 'p>, s: Ident<'p>) -> *const str {
     c.program.pool.get(s) as *const str
 }
-unsafe extern "C" fn franca_get_stats() -> *const Stats {
-    addr_of!(STATS)
-}
+
 unsafe extern "C" fn franca_init_compiler(comptime_arch: TargetArch) -> *const Compile<'static, 'static> {
     if cfg!(not(target_arch = "aarch64")) && comptime_arch == TargetArch::Aarch64 {
         panic!("aarch64 jit is not supported on this architecture"); // TODO: return error instead.
@@ -834,7 +841,7 @@ extern "C-unwind" fn unquote_macro_apply_placeholders<'p>(compile: &mut Compile<
         walk.expr(&mut template);
         let placeholders = walk.placeholders;
         assert!(placeholders.iter().all(|a| a.is_none()), "didnt use all arguments");
-        compile.program.next_var = template.renumber_vars(compile.program.next_var, &mut Default::default(), compile);
+        template.renumber_vars(&mut Default::default(), compile);
 
         Ok(template)
     }; // topdpdwkp[aspefiwfe]e

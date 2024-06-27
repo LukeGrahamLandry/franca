@@ -7,7 +7,10 @@
 - have an overload set that types can add to when they have special constant emit rules instead of the current hardcoded thing.
 - bake_relocatable_value overloads are not compiled lazily. all are done when compiling for AOT even if the type isn't needed.
 - test that struct padding is zeroed before emitting comptime data and before being used as a key to cache const args instantiations.
-- bake_relocatable_value for List, Alloc, Fd. Also make Slice not compiler builtin.
+- bake_relocatable_value for List, Alloc, Fd.
+- deduplicate constants (strings especially), its just annoying cause i don't have const pointers.
+  can do it by address at least, cause if it was a string literal in the pool, will be the same.
+- fix temp alloc
 
 ## regressions
 
@@ -16,35 +19,15 @@
 
 ## Deeply annoying
 
-- no narrowing overloads with partial argument typecheck.
-- can't output an exe, only jit
 - no way to say trait bounds on generics (it just tries to compile like c++ templates). at least have fn require_overload(Ident, Type, Type);
 - need to explicitly instantiate generics
-- test runner glue code is done in rust instead of fancy metaprogram
 - sometimes it can't show the codemap. should never use garbage_loc.
-- can't import a file as a namespace.
 - can't write a macro that expands to statements
 - errors don't show multiple locations (like conflicting overloads should show the problem)
 
 // TODO: fix new constant shadowing old constant of same name. or at least give error -- Apr 22
 
 ## Feature Ideas
-
-// TODO: provide this in export_ffi
-
-a : Fn(Unit, Unit) : thing3;
-b := a;
-
-// TODO: have enum macro do auto ordinals and auto raw type. maybe rename the other enum to @tagged, the rust naming is kinda silly.
-IrFormat :: @enum(i64) (
-Ast = 0,
-BcBytes = 1,
-BcText = 2,
-ArmHex = 3,
-ArmText = 4, // requires 'llvm-mc' CLI installed.
-);
-
-fn render_func_body(f: FuncId, out: \*List$u8, ir: IrFormat) Unit;
 
 - loops piss me off, why isn't it just expressed as tail recursion.
 - https://llvm.org/docs/CoverageMappingFormat.html https://llvm.org/docs/LangRef.html#llvm-instrprof-increment-intrinsic
@@ -105,7 +88,6 @@ fn render_func_body(f: FuncId, out: \*List$u8, ir: IrFormat) Unit;
 - https://github.com/arun11299/How-not-to-async-rs/tree/main
 - something that tried randomly deleting statements in your files to warn you if tests still passed would be cool.
 - let macros access requested type (of thier call site, not just infered of thier args) or provide an infered a type before processing.
-- split up different types of casts. @as is weird. Don't do the implicit voidptr cast based on result location.
 - should expose untagged unions because you might need them for ffi.
   tho really that can be done with a blob of bytes and casting through a void pointer.
   so would be cooler to add more powerful custom types and do unions as a library.
@@ -114,18 +96,12 @@ fn render_func_body(f: FuncId, out: \*List$u8, ir: IrFormat) Unit;
   - feels sad if my asm backend doesn't know it can do int ne in one instruction,
     but for comptime, its probably not worth an opt pass that tries to fix conditionals.
 - comptime code should be able to just compile a string which means
-- 'Fn(Arg, Ret)' is trash because you have problem with tuples being flattened so its hard to say multiple args.
-  - 'fn(arg: Arg) Ret' would be consistant with declaration.
-  - maybe '@fn(arg: Arg) Ret' for function type is less ambigous? but then need to allow keyword as name. maybe @func instead?
-  - maybe its dumb to use macro for something so basic. if thats the only solution to weird tuples,
-    you'll be tempted to define those wrappers for any function that takes a type, which is lots of them.
-    really I should just be more consistant with flattening.
 - I like multi-argument functions just taking tuples so you can refer to function types generically.
   but that means if tuple type is written as tuple of types, you can't have a function that takes multiple types as arguments in a row
   because it doesn't know where to split them if you flatten too soon. when fn f(X: Type, Y: Type) then f((a, b), c) vs f(a, (b, c))
-- decide if operator overloading should call functions named `operator_plus` or just the normal name directly like `add`
   // Needs to be builtin because Type has a special load function which needs to evaluate \*Type to typecheck.
   // fn operator_star_prefix(T: Type) Type = Ptr(T);
+- https://btmc.substack.com/p/tracing-garbage-collection-for-arenas
 
 ## UB
 

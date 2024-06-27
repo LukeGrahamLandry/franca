@@ -11,34 +11,32 @@
 - lazy analysis, functions/constants that are statically unreachable may contain invalid code (like zig)
 - nonlocal returns from inline lambdas (like kotlin/ruby)
 - manual memory management with explicit allocators (like zig)
-- use c abi functions/structs with no overhead
+- no seperate build system. write a program that builds your program (like jai)
+- custom jit for quick debug builds, optional llvm backend for optimised release builds (like zig/jai)
+- use c abi functions/structs with no overhead (like everything)
 - ships with [sokol](https://github.com/floooh/sokol) bindings so its not a research exercise if you just want to put a triangle on the screen.
 
 ## Backends
 
 - aarch64 machine code.
   - i put the bytes in memory, i mark it executable, and i jump there. no assembler, no linker, no problems.
-  - tested rust targets: aarch64-apple-darwin
 - cranelift
-  - tested rust targets: aarch64-apple-darwin, x86_64-apple-darwin, x86_64-unknown-linux-musl
+- llvm
 
 ## Progress
 
-- `src` contains the frontend and the jit used for comptime execution.
-- The programs in `tests`, `lib`, and `examples` actually work with the existing jit compiler.
+- `src`: the sema stuff and the jit used for comptime execution.
+- `compiler`: the self hosted parser and llvm backend.
+- `lib`: the standard library.
+- See `tests`, and `examples` for smaller programs.
 
 ## Future Goals
 
-- No seperate build config, everything done with comptime execution (like jai).
-  The compiler will have one command line argument.
-  It is the job of the source code to contain exactly the information required to compile the program.
-  You should be able to download the compiler, point at a file, and produce a program.
 - macros that derive implimentations of common operations on your types (like rust).
-- the goal is to pull as much as possible out of the compiler and into the library. but I do like being able to build from source easily without a complicated bootstrapping problem.
 - parse declarations from other languages and generate ffi bindings.
 - checked mode with less undefined behaviour.
-- llvm backend for optimised release builds
 - i want to produce an executable such that every byte in the file is there because i personally put it there.
+- support x86-64
 
 ## Tradeoffs
 
@@ -51,6 +49,6 @@ there must be proportional terrible things or I'm probably just lying.
 - I don't care about fallibile memory allocation
 - It's a little heavy on the punctuation.
 - I believe I've never touched a big endian computer so I don't care.
-- (TEMP?) there are no arithmetic operators, if you want to add, just call the function add.
 - (TEMP) completely incomprehensible error messages.
 - (TEMP) no caching. every time you run a program, you recompile the standard library for comptime. (...but its so fast it doesn't matter yet).
+- (TEMP) the compiler only runs on aarch64. (the llvm backend can cross compile to other targets tho)

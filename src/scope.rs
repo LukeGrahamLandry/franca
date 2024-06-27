@@ -30,7 +30,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             compiler,
             last_loc,
             scope,
-            block: 0, // TODO: new block for each specialization so they can't read eachother's arguments
+            block: 0,
         }
     }
 
@@ -488,6 +488,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             block: self.block as u16,
             kind,
         };
+        self.compiler.program.next_var += 1;
         if kind == VarType::Const {
             let empty = (FatExpr::synthetic(Expr::Poison, loc), LazyType::Infer);
             scope.constants.insert(var, empty); // sad. two lookups per constant. but doing it different on each branch looks verbose.
@@ -495,8 +496,6 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         // println!("{}", var.log(self.compiler.program.pool));
         // println!("= decl {} in s{} b{}", self.compiler.program.pool.get(*name), s.as_index(), self.block);
         scope.vars[self.block].vars.push(var); // includes constants!
-        self.compiler.program.next_var += 1;
-        // println!("{} declared in {}", var.log(self.compiler.program.pool), var.2.as_index());
         Ok(var)
     }
 

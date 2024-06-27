@@ -123,7 +123,7 @@ pub static mut EXPECT_ERR_DEPTH: AtomicIsize = AtomicIsize::new(0);
 
 impl<'a, 'p> Compile<'a, 'p> {
     pub fn new(program: &'a mut Program<'p>) -> Self {
-        let mut c = Self {
+        let c = Self {
             temp_vtable: addr_of!(IMPORT_VTABLE),
             already_loaded: Default::default(),
             driver_vtable: (Default::default(), ptr::null_mut()),
@@ -975,7 +975,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             let mut mapping = Map::<Var, Var>::default();
             mapping.insert(old_ret_var, new_ret_var);
             // println!("renumber ret: {} to {}", old_ret_var.log(self.program.pool), new_ret_var.log(self.program.pool));
-            self.program.next_var = expr_out.renumber_vars(self.program.next_var, &mut mapping, self); // Note: not renumbering on the function. didn't need to clone it.
+            expr_out.renumber_vars(&mut mapping, self); // Note: not renumbering on the function. didn't need to clone it.
             let value = to_values(self.program, ret_label)?;
             self.save_const(new_ret_var, Expr::Value { value, coerced: false }, label_ty, loc)?;
         }
@@ -3360,12 +3360,12 @@ impl<'a, 'p> Compile<'a, 'p> {
             let mut renumber = RenumberVars {
                 vars: self.program.next_var,
                 mapping: &mut mapping,
-                _compile: self,
             };
             renumber.pattern(&mut new_func.arg);
             renumber.ty(&mut new_func.ret);
             let FuncImpl::Normal(body) = &mut new_func.body else { unreachable!() };
             renumber.expr(body);
+            self.program.next_var = renumber.vars;
             if self.program[original_f].get_flag(Generic) && !self.program[original_f].get_flag(ResolvedBody) {
                 // the sign has already been resolved so we need to renumber before binding arguments.
                 // however, the body hasn't been resolved yet, so we can't just renumber in place.

@@ -134,7 +134,7 @@ pub struct Annotation<'p> {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Hash, Eq, PartialEq, Debug)]
+#[derive(Copy, Clone, Eq, Debug)]
 pub struct Var<'p> {
     pub kind: VarType,
     pub name: Ident<'p>,
@@ -143,17 +143,18 @@ pub struct Var<'p> {
     pub block: u16,
 }
 
-// impl<'p> PartialEq for Var<'p> {
-//     fn eq(&self, other: &Self) -> bool {
-//         self.id == other.id
-//     }
-// }
-// TODO: this should work??? implies the above only works by luck so im afraid until i understand
-// impl<'p> Hash for Var<'p> {
-//     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-//         state.write_u32(self.id);
-//     }
-// }
+impl<'p> PartialEq for Var<'p> {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl<'p> Hash for Var<'p> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        state.write_u32(self.id);
+    }
+}
+
 // TODO: should really get an arena going because boxes make me sad.
 #[repr(C, i64)]
 #[derive(Clone, Debug)]
@@ -328,13 +329,12 @@ pub trait WalkAst<'p> {
 }
 
 // Used for inlining closures.
-pub(crate) struct RenumberVars<'a, 'p, 'aa> {
+pub(crate) struct RenumberVars<'a, 'p> {
     pub vars: u32,
     pub mapping: &'a mut Map<Var<'p>, Var<'p>>,
-    pub(crate) _compile: &'a mut Compile<'aa, 'p>,
 }
 
-impl<'a, 'p, 'aa> WalkAst<'p> for RenumberVars<'a, 'p, 'aa> {
+impl<'a, 'p> WalkAst<'p> for RenumberVars<'a, 'p> {
     fn pre_walk_func(&mut self, func: &mut Func<'p>) {
         if let BigOption::Some(name) = &mut func.var_name {
             if let Some(new) = self.mapping.get(name) {
@@ -374,7 +374,7 @@ impl<'a, 'p, 'aa> WalkAst<'p> for RenumberVars<'a, 'p, 'aa> {
     }
 }
 
-impl<'a, 'p, 'aa> RenumberVars<'a, 'p, 'aa> {
+impl<'a, 'p> RenumberVars<'a, 'p> {
     fn decl(&mut self, name: &mut Var<'p>) {
         let new = Var { id: self.vars, ..*name };
         self.vars += 1;
@@ -385,14 +385,14 @@ impl<'a, 'p, 'aa> RenumberVars<'a, 'p, 'aa> {
 }
 
 impl<'p> FatExpr<'p> {
-    pub(crate) fn renumber_vars(&mut self, vars: u32, mapping: &mut Map<Var<'p>, Var<'p>>, compile: &mut Compile<'_, 'p>) -> u32 {
+    // note: this is not the only place i create a RenumberVars!
+    pub(crate) fn renumber_vars(&mut self, mapping: &mut Map<Var<'p>, Var<'p>>, compile: &mut Compile<'_, 'p>) {
         let mut ctx = RenumberVars {
-            vars,
+            vars: compile.program.next_var,
             mapping,
-            _compile: compile,
         };
         ctx.expr(self);
-        ctx.vars
+        compile.program.next_var = ctx.vars;
     }
 
     // TODO: this is weak! should replace with is_const then immediate_eval_expr.
