@@ -226,12 +226,16 @@ impl<'a, 'p> Compile<'a, 'p> {
                         }
                     }
                     Ok(None) => {
-                        self.last_loc = Some(arg.loc);
-                        err!("AmbiguousCall. Unknown type for argument {}", arg.log(self.program.pool))
+                        self.last_loc = Some(part.loc);
+                        err!(
+                            "While resolving call to '{}'. Couldn't quick check type for argument '{}'",
+                            self.program.pool.get(name),
+                            part.log(self.program.pool)
+                        )
                     }
                     Err(e) => err!(
                         "AmbiguousCall. Unknown type for argument {}. {}",
-                        arg.log(self.program.pool),
+                        part.log(self.program.pool),
                         e.reason.log(self.program, self.program.pool)
                     ),
                 }

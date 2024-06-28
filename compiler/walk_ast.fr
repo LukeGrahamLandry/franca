@@ -1,4 +1,8 @@
 fn walk_expr();
+fn walk_type();
+fn walk_stmt();
+fn walk_pattern();
+fn walk_func();
 fn handle_expr();
 fn handle_stmt();
 fn handle_type();
@@ -11,10 +15,10 @@ DoMore :: @enum(i64) (Break, Continue);
 /*
 WalkAst :: @trait {
     fn handle_expr(self: *State, expr: *FatExpr) Result(DoMore, Error);
-    fn handle_stmt(self: *State, expr: *FatStmt) Result(DoMore, Error);
-    fn handle_type(self: *State, expr: *LazyType) Result(DoMore, Error);
+    fn handle_stmt(self: *State, stmt: *FatStmt) Result(DoMore, Error);
+    fn handle_type(self: *State, type: *LazyType) Result(DoMore, Error);
     fn handle_func(self: *State, func: *Func) Result(DoMore, Error);
-    fn handle_pattern(self: *State, func: *Pattern) Result(DoMore, Error);
+    fn handle_pattern(self: *State, pattern: *Pattern) Result(DoMore, Error);
 };
 */
 
@@ -22,7 +26,8 @@ fn WalkAst(const State: Type, const Error: Type) void = {
     Ret :: Result(void, Error);
     
     fn walk_expr(self: *State, expr: *FatExpr) Ret = {
-        if ((@try(self.handle_expr(expr)) return) == .Break) {|
+        c := ((@try(self.handle_expr(expr)) return) == .Break);
+        if c {|
             return(.Ok);
         };
         
@@ -87,8 +92,15 @@ fn WalkAst(const State: Type, const Error: Type) void = {
     }
     
     fn walk_stmt(self: *State, stmt: *FatStmt) Ret = {
-        if ((@try(self.handle_stmt(stmt)) return) == .Break) {|
+        c := ((@try(self.handle_stmt(stmt)) return) == DoMore.Break);
+        if c {|
             return(.Ok);
+        };
+        
+        each stmt.annotations.items() { a | 
+            if a.args& { a | 
+                @try(self.walk_expr(a)) return;
+            };
         };
         
         @match(stmt.stmt&) {
@@ -108,9 +120,16 @@ fn WalkAst(const State: Type, const Error: Type) void = {
                 @try(self.walk_pattern(f.binding&)) return;
                 @try(self.walk_expr(f.value&)) return;
             });
-            (fn DeclFunc(f) void => return(self.walk_func(f[])));
-            (fn Eval(e)     void => return(self.walk_expr(e)));
-            (fn ExpandParsedStmts(_) void => unreachable()); // TODO: remove this ast node. 
+            // TODO: emit_bc wrong unreachable trap if '=> return' with no '{}'
+            (fn DeclFunc(f) void => {
+                return(self.walk_func(f[]));
+            });
+            (fn Eval(e)     void => {
+                return(self.walk_expr(e));
+            });
+            (fn ExpandParsedStmts(_) void => {
+                unreachable();
+            }); // TODO: remove this ast node. 
             (fn Noop() => ());
         };
         

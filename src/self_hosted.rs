@@ -1,11 +1,16 @@
-use std::{marker::PhantomData, mem::ManuallyDrop, ptr::addr_of};
+use std::{
+    marker::PhantomData,
+    mem::{self, ManuallyDrop},
+    ptr::addr_of,
+};
 
 use crate::{
     ast::{FatExpr, FatStmt, Flag, Func, LazyType, Pattern, ScopeId, TypeId, Var},
-    compiler::{Compile, Res, Scope},
+    compiler::{CErr, Compile, Res, Scope},
     err,
     export_ffi::{BigOption, ImportVTable, IMPORT_VTABLE},
     ffi::InterpSend,
+    logging::make_err,
     Map,
 };
 
@@ -86,7 +91,11 @@ impl<'p> SelfHosted<'p> {
         let e = ManuallyDrop::into_inner(e.clone());
         match e {
             Ok(t) => Ok(t),
-            Err(t) => err!("{:?}", t),
+            Err(t) => {
+                let mut e = make_err(CErr::Fatal(t.msg.to_string()));
+                e.loc = Some(t.span);
+                Err(e)
+            }
         }
     }
 
@@ -216,6 +225,7 @@ impl<'p> SelfHosted<'p> {
 impl<'p> Default for SelfHosted<'p> {
     fn default() -> Self {
         let mut temp = unsafe { init_self_hosted() };
+        mem::forget(temp.scopes); // TODO: remove. temp while there are two impls that disagree on what this is. -- Jun 28
         temp.scopes = Some(Box::new(Scopes { scopes: vec![] }));
         temp.vtable = addr_of!(IMPORT_VTABLE);
         temp

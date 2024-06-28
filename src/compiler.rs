@@ -938,7 +938,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let old_ret_var = func.return_var.unwrap();
         let mut new_ret_var = old_ret_var;
         new_ret_var.id = self.program.next_var;
-        self.program.next_var += 1;
+        self.program.next_var += 1; // :push_type_when_create_new_var
 
         let ret_label = LabelId::from_index(self.next_label);
         self.next_label += 1;
@@ -3350,43 +3350,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         // Some part of the argument must be known at comptime.
         // You better hope compile_expr noticed and didn't put it in a stack slot.
         let mut new_func = self.program[original_f].clone();
-        // Closures always resolve up front, so they need to renumber the clone.
-        // TODO: HACK but closures get renumbered when inlined anyway, so its just the const args that matter. im just being lazy and doing the whole thing redundantly -- May 9
-        // normal functions with const args havent had their body resolved yet so don't have to deal with it, we only resolve on the clone.
-        // the special case for generics is when args can reference previous ones so they have to resolve sign earlier.
-
-        let needs_renumber = self.program[original_f].get_flag(AllowRtCapture) || self.program[original_f].get_flag(Generic);
-        if needs_renumber {
-            // :push_type_when_create_new_var // TODO
-            let mut mapping = Default::default();
-            let mut renumber = RenumberVars {
-                vars: self.program.next_var,
-                mapping: &mut mapping,
-            };
-            renumber.func(&mut new_func);
-            self.program.next_var = renumber.vars;
-            if self.program[original_f].get_flag(Generic) && !self.program[original_f].get_flag(ResolvedBody) {
-                // the sign has already been resolved so we need to renumber before binding arguments.
-                // however, the body hasn't been resolved yet, so we can't just renumber in place.
-                // instead, remap the sign as normal and then, insert a new scope containing the remapped variables,
-                // and use that as the starting point when we resolve the body of new new function.
-                // that way when it iterates up the scopes to resolve names, it will see our remapped shadows instead of the original.
-                // this allows #generic argument types that reference the values of other argument.
-                // but doing this is a bit creepy because the Var.scope isn't updated to the new one,
-                // so they get inserted back in the old one's constants/rt_types again later.
-                // that's why its fine when we can't find a remap for something in constants or vars.      -- May 29
-                debug_assert!(self.program[original_f].get_flag(ResolvedSign));
-                debug_assert!(!self.program[original_f].get_flag(AllowRtCapture));
-                self.program[original_f].assert_body_not_resolved()?;
-                // TODO: not true for 'name :: fn() = {}' exprs because they don't stop.
-                // debug_assert!(
-                //     !matches!(body.expr, Expr::Block { .. }),
-                //     "Block should be GetParsed because body is not resolved yet. "
-                // );
-                let id = self.program.pool.dup_scope(new_func.scope.unwrap(), mapping);
-                new_func.scope = BigOption::Some(id);
-            }
-        }
+        self.maybe_renumber_and_dup_scope(&mut new_func)?;
         let new_fid = self.program.add_func(new_func);
         self.ensure_resolved_sign(new_fid)?;
         self.ensure_resolved_body(new_fid)?;
@@ -3830,6 +3794,47 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     fn exec_style(&self) -> ExecStyle {
         self.wip_stack.last().unwrap().1
+    }
+
+    // It's perhaps a bad sign that this function is half comment... 
+    fn maybe_renumber_and_dup_scope(&mut self, new_func: &mut Func<'p>) -> Res<'p, ()> {
+        // Closures always resolve up front, so they need to renumber the clone.
+        // TODO: HACK but closures get renumbered when inlined anyway, so its just the const args that matter. im just being lazy and doing the whole thing redundantly -- May 9
+        // normal functions with const args havent had their body resolved yet so don't have to deal with it, we only resolve on the clone.
+        // the special case for generics is when args can reference previous ones so they have to resolve sign earlier.
+        let needs_renumber = new_func.get_flag(AllowRtCapture) || new_func.get_flag(Generic);
+        if needs_renumber {
+            // :push_type_when_create_new_var // TODO
+            let mut mapping = Default::default();
+            let mut renumber = RenumberVars {
+                vars: self.program.next_var,
+                mapping: &mut mapping,
+            };
+            renumber.func(new_func);
+            self.program.next_var = renumber.vars;
+            if new_func.get_flag(Generic) && !new_func.get_flag(ResolvedBody) {
+                // the sign has already been resolved so we need to renumber before binding arguments.
+                // however, the body hasn't been resolved yet, so we can't just renumber in place.
+                // instead, remap the sign as normal and then, insert a new scope containing the remapped variables,
+                // and use that as the starting point when we resolve the body of new new function.
+                // that way when it iterates up the scopes to resolve names, it will see our remapped shadows instead of the original.
+                // this allows #generic argument types that reference the values of other argument.
+                // but doing this is a bit creepy because the Var.scope isn't updated to the new one,
+                // so they get inserted back in the old one's constants/rt_types again later.
+                // that's why its fine when we can't find a remap for something in constants or vars.      -- May 29
+                debug_assert!(new_func.get_flag(ResolvedSign));
+                debug_assert!(!new_func.get_flag(AllowRtCapture));
+                new_func.assert_body_not_resolved()?;
+                // TODO: not true for 'name :: fn() = {}' exprs because they don't stop.
+                // debug_assert!(
+                //     !matches!(body.expr, Expr::Block { .. }),
+                //     "Block should be GetParsed because body is not resolved yet. "
+                // );
+                let id = self.program.pool.dup_scope(new_func.scope.unwrap(), mapping);
+                new_func.scope = BigOption::Some(id);
+            }
+        }
+        Ok(())
     }
 }
 

@@ -68,11 +68,11 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         // TODO: need to remember to update from this if we get one from the user (like they added it in a macro)?
         if func.has_tag(Flag::Generic) {
             func.set_flag(FnFlag::Generic, true);
-            func.annotations.retain(|a| a.name != Flag::Generic.ident());
+            // func.annotations.retain(|a| a.name != Flag::Generic.ident());
         }
         if func.has_tag(Flag::Unsafe_Noop_Cast) {
             func.set_flag(FnFlag::UnsafeNoopCast, true);
-            func.annotations.retain(|a| a.name != Flag::Unsafe_Noop_Cast.ident());
+            // func.annotations.retain(|a| a.name != Flag::Unsafe_Noop_Cast.ident());
         }
 
         let (s, b) = (self.scope, self.block);
@@ -348,14 +348,14 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             Expr::GetVar(_) => unreachable!("added by this pass {expr:?}"),
             Expr::FieldAccess(e, _) => self.resolve_expr(e)?,
             Expr::StructLiteralP(p) => {
-                self.push_scope(None);
+                // self.push_scope(None);
                 for b in &mut p.bindings {
                     self.resolve_binding(b)?;
                     // (uncommenting) this is what makes you get the weird field shadowing, i think you never want thing.
                     // i was thinking const feilds should be allowed in later ones, but its just kinda confusing. -- Jun 27
                     // self.declare_binding(b, loc)?;
                 }
-                self.pop_block();
+                // self.pop_block();
             }
             Expr::String(_) => {}
             Expr::Cast(v) => {
@@ -434,26 +434,14 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
 
         let mut s = self.scope;
         let mut block = self.block;
-        // Check the current functions scopes.
-        let scopes = &self.compiler.program.pool.scopes.as_ref().unwrap().scopes;
-        let scope = &scopes[s.as_index()];
-        if let Some(v) = find(scope, block) {
-            return Some(v);
-        }
-        block = scope.block_in_parent;
-        s = scope.parent;
+        let mut first = true;
 
         loop {
-            // println!("- look {} in s{} b{}", self.compiler.program.pool.get(*name), s.as_index(), block);
-
             let scopes = &self.compiler.program.pool.scopes.as_ref().unwrap().scopes;
             let scope = &scopes[s.as_index()];
             let found = find(scope, block);
             if let Some(v) = found {
-                // TODO: the depth thing is a bit confusing. it was a bit less jaring before when it was just local on the resolver.
-                //       brifly needed -1 because scope 0 is now a marker and always empty i guess, but now thats done in push_scope instead.
-                //       its about which scopes count as function captures vs just normal blocks. should try to clean that up. -- Apr 23
-                if !self.captures.contains(&v) && v.kind != VarType::Const {
+                if !first && !self.captures.contains(&v) && v.kind != VarType::Const {
                     // We got it from our parent function.
                     self.captures.push(v);
                 }
@@ -464,6 +452,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             }
             s = scope.parent;
             block = scope.block_in_parent;
+            first = false;
         }
     }
 

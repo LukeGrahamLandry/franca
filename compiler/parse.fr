@@ -17,6 +17,8 @@
 //   obviously a crippling compiler bug (my asm backend only) but perhaps implies a style problem on my part.
 // - same problem i had in rust. its really annoying that you have to pass the pool to print things because it makes debugging that way more clunky.
 //   could have an implicit context system? crippling that you can't just derive print normal things. 
+// - order of struct field patterns mattering is stupid
+// - track all the errors you hit when failing overloads. 
 //
 // - make const a contextual keyword? 
 // - local_return and return implciitly rebinding is a bit confusing
@@ -40,6 +42,7 @@ fn with(p: Prec, next: PrecLevel) Prec =
 
 PrecLevel :: @enum(i64) (
     None,
+    Logical, // TODO: I don't want to allow a && b || c because i'm not convinced thats obbious
     Equality,
     Comparison,
     AddSub,
@@ -72,8 +75,6 @@ fn finish_pending_stmts(self: *Parser, id: WaitingParse) Result(RsVec(FatStmt), 
         (fn Pending(src_span) T => {
             self.lex = init(self.pool, src_span.span, src_span.src);
             e := self.parse_block_until_squiggle(true);
-            
-            
             
             // TODO: clone! :FUCKED
             // TODO: save less often!
@@ -284,7 +285,8 @@ fn parse_prefix(self: *Parser, prec: Prec) ParseRes = {
             return(self.parse_at(prec));
         });
         (fn FatRightArrow() => {
-            return(self.quick_lambda());
+            self.pop();
+            return(self.quick_lambda(Prec_None));
         });
         (fn DoubleColon() => {
             self.pop();
@@ -360,10 +362,9 @@ fn parse_prefix(self: *Parser, prec: Prec) ParseRes = {
     ParseRes.unreachable_hack()
 }
 
-fn quick_lambda(self: *Parser) ParseRes = {
-    self.pop();
+fn quick_lambda(self: *Parser, prec: Prec) ParseRes = {
     loc := self.last.span;
-    body := @try(self.parse_expr(Prec_None)) return;
+    body := @try(self.parse_expr(prec)) return;
     // FnDef :: @struct(name: ?Symbol, arg: Pattern, ret: LazyType, tags: List(Annotation));
     fn_def: FnDef = (name = .None, arg = (bindings = empty(), loc = loc), ret = (Infer = ()), tags = list(self.alloc));
     func := self.make_func(fn_def, (Some = body), loc, true);
@@ -392,16 +393,13 @@ fn parse_func(self: *Parser, allow_empty: bool) Result(Func, ParseErr) = {
     };
     
     if not(may_capture) {|
-        @match(self.peek()) {
-            (fn LeftSquiggle() => {
-                src_span := self.lex&.skip_to_closing_squigle();
-                //self.last = self.lex&.peek()[];
-                self.pop(); // TODO: why do i need this? -- Jun 22
-                id := self.push_parse(src_span._0, src_span._1);
-                body := self.expr((GetParsed = id), loc);
-                return((Ok = self.make_func(fn_def, (Some = body), loc, may_capture)));
-            });
-            @default => ();
+        @if_let(self.peek()) fn LeftSquiggle() => {
+            src_span := self.lex&.skip_to_closing_squigle();
+            //self.last = self.lex&.peek()[];
+            self.pop(); // TODO: why do i need this? -- Jun 22
+            id := self.push_parse(src_span._0, src_span._1);
+            body := self.expr((GetParsed = id), loc);
+            return((Ok = self.make_func(fn_def, (Some = body), loc, may_capture)));
         };
     };
     
@@ -560,7 +558,7 @@ fn parse_squiggle(self: *Parser, prev: FatExpr, prec: Prec) ParseRes = {
                 (fn LeftSquiggle() => ());
                 @default => {
                     self.pop();
-                    @report_error("Expected trailing lambda after named arg '%'", self.pool.get(name)) (return, self.last.span);
+                    @report_error("Expected trailing lambda after named arg '%' (did you forget a semicolon?)", self.pool.get(name)) (return, self.last.span);
                 };
             };
         });
@@ -592,6 +590,20 @@ fn parse_bin_op(self: *Parser, op: Operator, prev: FatExpr, prec: Prec) ParseRes
             name := @try(self.pop_name("macro name after '!'")) return;
             e := self.expr((SuffixMacro = (name = name, arg = self.box(prev))), loc);
             return(self.parse_infix(e, prec)); // TODO: tail
+            unreachable()
+        };
+        @case(.AmpAmp) => {
+            if(prec.prec.lt(.Logical)) {|
+                self.pop();
+                loc := self.last.span;
+                rhs := @try(self.quick_lambda(prec.with(.Logical))) return;
+                f := self.box(self.get_named(Flag.and, loc));
+                arg := self.box(self.pair(prev, rhs, loc));
+                call := self.expr((Call = (f = f, arg = arg)), loc);
+                return(self.parse_infix(call, prec)); // TODO: tail
+            } else {|
+                return(Ok = prev);  
+            };
             unreachable()
         };
         @default fn(_: Operator) => {
@@ -848,6 +860,10 @@ fn parse_pattern(self: *Parser, out: *List(Binding)) PRes = {
             // TODO: moving this up crashes????? :FUCKED
             //       but also we dont need this here for now. 
             //(fn Pipe() T => return(.Ok));
+            (fn Semicolon() => {
+                self.pop();
+                @report_error("Semicolon while parsing pattern. unmatched brackets? %", "") (return, self.last.span)
+            });
             @default => @report_error("Expected Ident or 'const' before pattern entry. (positional args cannot follow named) %", "") (return, self.last.span);
         };
         
@@ -932,7 +948,7 @@ fn fn_def_signeture(self: *Parser, loc: Span, allow_name: bool) Result(FnDef, Pa
     };
 
     if no_paren.and(not(cant_start_return_expression(self.peek()))) {|
-        @report_error("'fn <Expr> =' can't treat Expr as ret type. pls specify name or args. %", "") (return, self.last.span);
+        @report_error("'fn <Expr> =' can't treat Expr as ret type. pls specify name or args. forgot '|' before lambda body? %", "") (return, self.last.span);
     };
 
     ret: LazyType = if not(cant_start_return_expression(self.peek())) {|
@@ -1153,6 +1169,7 @@ fn parser_doesnt_crash() #test = {
         "@[@literal(as)];",
         "'@(@[@literal(as)])\n(@[@literal(T)]) @[expr]';",
         "Type :: @builtin Type;", 
+        "a > b && c < d && e;",
     ));
     
     //s := temp().read_to_string("parse.fr");
