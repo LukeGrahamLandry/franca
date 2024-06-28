@@ -463,8 +463,8 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         // TODO: when this was a hashmap ident->(_,_) of justs constants this was faster, but its a tiny difference in release mode so its probably fine for now.
         //       this makes it easier to think about having functions be the unit of resolving instead of blocks but still allowing shadowing consts in inner blocks.
 
-        let scopes = &mut self.compiler.program.pool.scopes.as_mut().unwrap().scopes;
-        let scope = &mut scopes[s.as_index()];
+        let scopes = &mut self.compiler.program.pool.scopes.as_mut().unwrap();
+        let scope = &mut scopes.scopes[s.as_index()];
         let wip = &scope.vars[self.block].vars;
         // 1.6M
         let shadow_const = |v: &Var<'_>| v.name == *name && v.kind == VarType::Const;
@@ -474,12 +474,12 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
 
         let var = Var {
             name: *name,
-            id: self.compiler.program.next_var,
+            id: scopes.next_var,
             scope: s,
             block: self.block as u16,
             kind,
         };
-        self.compiler.program.next_var += 1;
+        scopes.next_var += 1;
         if kind == VarType::Const {
             let empty = (FatExpr::synthetic(Expr::Poison, loc), LazyType::Infer);
             scope.constants.insert(var, empty); // sad. two lookups per constant. but doing it different on each branch looks verbose.

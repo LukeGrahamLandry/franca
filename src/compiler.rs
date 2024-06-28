@@ -4,7 +4,7 @@
 
 #![allow(clippy::wrong_self_convention)]
 
-use crate::self_hosted::{show_error_line, Span};
+use crate::self_hosted::{resolve_body, resolve_sign, show_error_line, Span};
 use core::slice;
 use std::collections::HashSet;
 use std::ffi::CString;
@@ -19,7 +19,7 @@ use std::{ops::Deref, panic::Location};
 use crate::ast::{
     Annotation, Binding, CallConv, FatStmt, Flag,
     FnFlag::{self, *},
-    FuncImpl, IntTypeInfo, LabelId, Name, OverloadSet, OverloadSetId, Pattern, RenumberVars, ScopeId, TargetArch, Var, VarType, WalkAst,
+    FuncImpl, IntTypeInfo, LabelId, Name, OverloadSet, OverloadSetId, Pattern, ScopeId, TargetArch, Var, VarType, WalkAst,
 };
 
 use crate::bc_to_asm::{emit_aarch64, Jitted};
@@ -28,7 +28,7 @@ use crate::export_ffi::{struct_macro, tagged_macro, type_macro, BigOption, BigRe
 use crate::ffi::InterpSend;
 use crate::logging::PoolLog;
 use crate::overloading::where_the_fuck_am_i;
-use crate::scope::ResolveScope;
+
 use crate::{
     ast::{Expr, FatExpr, FnType, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo},
     self_hosted::Ident,
@@ -146,7 +146,10 @@ impl<'a, 'p> Compile<'a, 'p> {
             #[cfg(feature = "cranelift")]
             cranelift: crate::cranelift::JittedCl::default(),
         };
-        c.program.pool.new_scope(ScopeId::from_index(0), Flag::TopLevel.ident(), 0);
+        #[cfg(not(feature = "self_scope"))]
+        {
+            c.program.pool.new_scope(ScopeId::from_index(0), Flag::TopLevel.ident(), 0);
+        }
         // TODO: HACK: for emit_relocatable_constant
         let ty = <(i64, i64)>::get_or_create_type(c.program);
         c.program.finish_layout(ty).unwrap();
@@ -936,9 +939,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         // TODO: you want to be able to share work (across all the call-sites) compiling parts of the body that don't depend on the captured variables
         // TODO: need to move the const args to the top before eval_and_close_local_constants
         let old_ret_var = func.return_var.unwrap();
-        let mut new_ret_var = old_ret_var;
-        new_ret_var.id = self.program.next_var;
-        self.program.next_var += 1; // :push_type_when_create_new_var
+        let new_ret_var = self.program.pool.dup_var(old_ret_var);
 
         let ret_label = LabelId::from_index(self.next_label);
         self.next_label += 1;
@@ -972,11 +973,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
         self.currently_inlining.retain(|check| *check != f);
         if may_have_early_return {
-            let mut mapping = Map::<Var, Var>::default();
-            mapping.insert(old_ret_var, new_ret_var);
-            // println!("renumber ret: {} to {}", old_ret_var.log(self.program.pool), new_ret_var.log(self.program.pool));
-            // :push_type_when_create_new_var // TODO
-            expr_out.renumber_vars(&mut mapping, self); // Note: not renumbering on the function. didn't need to clone it.
+            // Note: not renumbering on the function. didn't need to clone it.
+            self.program.pool.renumber_expr(expr_out, BigOption::Some((old_ret_var, new_ret_var)));
             let value = to_values(self.program, ret_label)?;
             self.save_const(new_ret_var, Expr::Value { value, coerced: false }, label_ty, loc)?;
         }
@@ -1289,7 +1287,15 @@ impl<'a, 'p> Compile<'a, 'p> {
             self.log_trace()
         );
         mut_replace!(self.program[f], |mut func: Func<'p>| {
-            ResolveScope::resolve_sign(&mut func, self)?; // TODO
+            #[cfg(not(feature = "self_scope"))]
+            {
+                crate::scope::ResolveScope::resolve_sign(&mut func, self)?;
+            }
+            
+            #[cfg(feature = "self_scope")]
+            {
+                unsafe { resolve_sign(self.program.pool, &mut func).unwrap() };
+            }
             Ok((func, ()))
         });
         Ok(())
@@ -1307,7 +1313,16 @@ impl<'a, 'p> Compile<'a, 'p> {
         );
         self.ensure_resolved_sign(f)?;
         mut_replace!(self.program[f], |mut func: Func<'p>| {
-            ResolveScope::resolve_body(&mut func, self)?; // TODO
+            #[cfg(not(feature = "self_scope"))]
+            {
+                crate::scope::ResolveScope::resolve_body(&mut func, self)?;
+            }
+            
+            #[cfg(feature = "self_scope")]
+            {
+                unsafe { resolve_body(self.program.pool, &mut func).unwrap() };
+            }
+            
             Ok((func, ()))
         });
         Ok(())
@@ -3796,45 +3811,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.wip_stack.last().unwrap().1
     }
 
-    // It's perhaps a bad sign that this function is half comment... 
     fn maybe_renumber_and_dup_scope(&mut self, new_func: &mut Func<'p>) -> Res<'p, ()> {
-        // Closures always resolve up front, so they need to renumber the clone.
-        // TODO: HACK but closures get renumbered when inlined anyway, so its just the const args that matter. im just being lazy and doing the whole thing redundantly -- May 9
-        // normal functions with const args havent had their body resolved yet so don't have to deal with it, we only resolve on the clone.
-        // the special case for generics is when args can reference previous ones so they have to resolve sign earlier.
-        let needs_renumber = new_func.get_flag(AllowRtCapture) || new_func.get_flag(Generic);
-        if needs_renumber {
-            // :push_type_when_create_new_var // TODO
-            let mut mapping = Default::default();
-            let mut renumber = RenumberVars {
-                vars: self.program.next_var,
-                mapping: &mut mapping,
-            };
-            renumber.func(new_func);
-            self.program.next_var = renumber.vars;
-            if new_func.get_flag(Generic) && !new_func.get_flag(ResolvedBody) {
-                // the sign has already been resolved so we need to renumber before binding arguments.
-                // however, the body hasn't been resolved yet, so we can't just renumber in place.
-                // instead, remap the sign as normal and then, insert a new scope containing the remapped variables,
-                // and use that as the starting point when we resolve the body of new new function.
-                // that way when it iterates up the scopes to resolve names, it will see our remapped shadows instead of the original.
-                // this allows #generic argument types that reference the values of other argument.
-                // but doing this is a bit creepy because the Var.scope isn't updated to the new one,
-                // so they get inserted back in the old one's constants/rt_types again later.
-                // that's why its fine when we can't find a remap for something in constants or vars.      -- May 29
-                debug_assert!(new_func.get_flag(ResolvedSign));
-                debug_assert!(!new_func.get_flag(AllowRtCapture));
-                new_func.assert_body_not_resolved()?;
-                // TODO: not true for 'name :: fn() = {}' exprs because they don't stop.
-                // debug_assert!(
-                //     !matches!(body.expr, Expr::Block { .. }),
-                //     "Block should be GetParsed because body is not resolved yet. "
-                // );
-                let id = self.program.pool.dup_scope(new_func.scope.unwrap(), mapping);
-                new_func.scope = BigOption::Some(id);
-            }
-        }
-        Ok(())
+        self.program.pool.maybe_renumber_and_dup_scope(new_func)
     }
 }
 

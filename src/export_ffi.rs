@@ -1,6 +1,6 @@
 #![allow(improper_ctypes_definitions)]
 
-use crate::self_hosted::{emit_llvm, Span};
+use crate::self_hosted::{emit_llvm, resolve_root, Span};
 use crate::unwrap2;
 use libc::c_void;
 
@@ -14,7 +14,6 @@ use crate::emit_bc::{emit_relocatable_constant_body, prim_sig};
 use crate::ffi::InterpSend;
 use crate::logging::{unwrap, PoolLog};
 use crate::overloading::where_the_fuck_am_i;
-use crate::scope::ResolveScope;
 use crate::self_hosted::Ident;
 use crate::{assert, emit_bc::emit_bc, err, ice, log_err, make_toplevel, signed_truncate};
 use std::fmt::{Debug, Write};
@@ -396,7 +395,16 @@ unsafe extern "C" fn parse_stmts<'p>(comp: &mut Compile<'_, 'p>, file: *const Sp
 unsafe extern "C" fn make_and_resolve_and_compile_top_level<'p>(c: &mut Compile<'_, 'p>, body: *const [FatStmt<'p>]) -> BigCErr<'p, ()> {
     let body = (*body).to_vec();
     let mut global = make_toplevel(c.program.pool, garbage_loc(), body);
-    ResolveScope::run(&mut global, c, ScopeId::from_index(0))?;
+    #[cfg(not(feature = "self_scope"))]
+    {
+        crate::scope::ResolveScope::run(&mut global, c, ScopeId::from_index(0))?;
+    }
+    #[cfg(feature = "self_scope")]
+    {
+        unsafe {
+            resolve_root(c.program.pool, &mut global, ScopeId::from_index(0)).unwrap();
+        }
+    }
     c.compile_top_level(global)?;
     Ok(())
 }
@@ -853,8 +861,7 @@ extern "C-unwind" fn unquote_macro_apply_placeholders<'p>(compile: &mut Compile<
         walk.expr(&mut template);
         let placeholders = walk.placeholders;
         assert!(placeholders.iter().all(|a| a.is_none()), "didnt use all arguments");
-        // :push_type_when_create_new_var // TODO
-        template.renumber_vars(&mut Default::default(), compile);
+        compile.program.pool.renumber_expr(&mut template, BigOption::None);
 
         Ok(template)
     }; // topdpdwkp[aspefiwfe]e

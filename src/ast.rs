@@ -329,11 +329,13 @@ pub trait WalkAst<'p> {
 }
 
 // Used for inlining closures.
+#[cfg(not(feature = "self_scope"))]
 pub(crate) struct RenumberVars<'a, 'p> {
     pub vars: u32,
     pub mapping: &'a mut Map<Var<'p>, Var<'p>>,
 }
 
+#[cfg(not(feature = "self_scope"))]
 impl<'a, 'p> WalkAst<'p> for RenumberVars<'a, 'p> {
     fn pre_walk_func(&mut self, func: &mut Func<'p>) {
         if let BigOption::Some(name) = &mut func.var_name {
@@ -375,6 +377,7 @@ impl<'a, 'p> WalkAst<'p> for RenumberVars<'a, 'p> {
     }
 }
 
+#[cfg(not(feature = "self_scope"))]
 impl<'a, 'p> RenumberVars<'a, 'p> {
     fn decl(&mut self, name: &mut Var<'p>) {
         let new = Var { id: self.vars, ..*name };
@@ -386,16 +389,6 @@ impl<'a, 'p> RenumberVars<'a, 'p> {
 }
 
 impl<'p> FatExpr<'p> {
-    // note: this is not the only place i create a RenumberVars!
-    pub(crate) fn renumber_vars(&mut self, mapping: &mut Map<Var<'p>, Var<'p>>, compile: &mut Compile<'_, 'p>) {
-        let mut ctx = RenumberVars {
-            vars: compile.program.next_var,
-            mapping,
-        };
-        ctx.expr(self);
-        compile.program.next_var = ctx.vars;
-    }
-
     // TODO: this is weak! should replace with is_const then immediate_eval_expr.
     pub(crate) fn as_const(&self) -> Option<Values> {
         if let Expr::Value { value, .. } = &self.expr {
@@ -841,7 +834,6 @@ pub struct Program<'p> {
     pub funcs: Vec<Func<'p>>,
     /// Comptime function calls that return a type are memoized so identity works out.
     /// Note: if i switch to Values being raw bytes, make sure to define any padding so this works.
-    pub next_var: u32,
     pub overload_sets: Vec<OverloadSet<'p>>, // TODO: use this instead of lookup_unique_func
     pub ffi_types: Map<u128, TypeId>,
     pub ffi_sizes: Map<TypeId, usize>,
@@ -963,7 +955,6 @@ impl<'p> Program<'p> {
                 TypeInfo::Named(TypeId::from_index(10), pool.intern("Symbol")),
             ],
             funcs: Default::default(),
-            next_var: 0,
             pool,
             overload_sets: Default::default(),
             ffi_types: Default::default(),
