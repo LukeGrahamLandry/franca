@@ -1,6 +1,7 @@
 /// Query interface /// 
 
 fn put_constant(self: *Scopes, name: Var, value: FatExpr, ty: LazyType) void #compiler = {
+    // TODO: this cant be the whole expression because then it looks for an overload returning unit. -- Jun 28
     self[name.scope].constants&.insert(name, (value, ty));
 }
 
@@ -38,7 +39,7 @@ fn resolve_sign(compiler: *SelfHosted, func: *Func) PRes #compiler = {
     r&.resolve_func_args(func)
 }
 
-fn resolve_body(compiler: *SelfHosted, func: *Func) PRes  = {
+fn resolve_body(compiler: *SelfHosted, func: *Func) PRes #compiler = {
     r: ResolveScope = new(compiler, func.scope.unwrap(), func.loc);
     r&.resolve_func_body(func)
 }
@@ -46,28 +47,27 @@ fn resolve_body(compiler: *SelfHosted, func: *Func) PRes  = {
 /// Renumbering interface ///
 
 // For unquoting, initial will be None, but for inlining closures, it will be the return variable. 
-fn renumber_expr(self: *SelfHosted, expr: *FatExpr, initial: ?Ty(Var, Var)) void = {
-    todo();
+fn renumber_expr(self: *SelfHosted, expr: *FatExpr, initial: ?Ty(Var, Var)) void #compiler = {
+    mapping: HashMap(Var, Var) = init(temp());
+    if initial& { i |
+        mapping&.insert(i._0, i._1);
+    };
+    renumber: RenumberVars = (scope = self.scopes, mapping = mapping&);
+    renumber&.walk_expr(expr);
 }
 
-// It's perhaps a bad sign that this function is half comment...
-fn maybe_renumber_and_dup_scope(self: *SelfHosted, func: *Func) PRes = {
-    todo();
+fn maybe_renumber_and_dup_scope(self: *SelfHosted, new_func: *Func) PRes #compiler = {
     // Closures always resolve up front, so they need to renumber the clone.
     // TODO: HACK but closures get renumbered when inlined anyway, so its just the const args that matter. im just being lazy and doing the whole thing redundantly -- May 9
     // normal functions with const args havent had their body resolved yet so don't have to deal with it, we only resolve on the clone.
     // the special case for generics is when args can reference previous ones so they have to resolve sign earlier.
-    let needs_renumber = new_func.get_flag(AllowRtCapture) || new_func.get_flag(Generic);
-    if needs_renumber {
-        // :push_type_when_create_new_var // TODO
-        let mut mapping = Default::default();
-        let mut renumber = RenumberVars {
-            vars: self.program.next_var,
-            mapping: &mut mapping,
-        };
-        renumber.func(new_func);
-        self.program.next_var = renumber.vars;
-        if new_func.get_flag(Generic) && !new_func.get_flag(ResolvedBody) {
+    
+    needs_renumber := new_func.get_flag(.AllowRtCapture).or(new_func.get_flag(.Generic));
+    if needs_renumber {|
+        mapping: HashMap(Var, Var) = init(temp());
+        renumber: RenumberVars = (scope = self.scopes, mapping = mapping&);
+        renumber&.walk_func(new_func);
+        if new_func.get_flag(.Generic) && !new_func.get_flag(.ResolvedBody) {|
             // the sign has already been resolved so we need to renumber before binding arguments.
             // however, the body hasn't been resolved yet, so we can't just renumber in place.
             // instead, remap the sign as normal and then, insert a new scope containing the remapped variables,
@@ -77,55 +77,44 @@ fn maybe_renumber_and_dup_scope(self: *SelfHosted, func: *Func) PRes = {
             // but doing this is a bit creepy because the Var.scope isn't updated to the new one,
             // so they get inserted back in the old one's constants/rt_types again later.
             // that's why its fine when we can't find a remap for something in constants or vars.      -- May 29
-            debug_assert!(new_func.get_flag(ResolvedSign));
-            debug_assert!(!new_func.get_flag(AllowRtCapture));
-            new_func.assert_body_not_resolved()?;
-            // TODO: not true for 'name :: fn() = {}' exprs because they don't stop.
-            // debug_assert!(
-            //     !matches!(body.expr, Expr::Block { .. }),
-            //     "Block should be GetParsed because body is not resolved yet. "
-            // );
-            let id = self.program.pool.dup_scope(new_func.scope.unwrap(), mapping);
-            new_func.scope = BigOption::Some(id);
-        }
-    }
-    Ok(())
+            
+            assert(new_func.get_flag(.ResolvedSign), "expected resolved sign");  // TODO: debug
+            assert(!new_func.get_flag(.AllowRtCapture), "expected no runtime capture"); // TODO: debug
+            old_scope := self.scopes[new_func.scope.unwrap()]&;
+            id := self.scopes.new_scope(old_scope.parent, old_scope.block_in_parent);
+            old_scope := self.scopes[new_func.scope.unwrap()]&;
+            
+            // TODO: just take the part you need. rn this copys more and more every time! -- May 29
+            //       i think this is still true -- Jun 3
+            
+            // can't use the copy directly because need to rehash
+            new_constants := self.scopes[id].constants&;
+            each old_scope.constants& { (k, v) |
+                if mapping&.get_ptr(k) { new |
+                    expr := self.clone(v._0&);
+                    ty := self.clone(v._1&);
+                    new_constants.insert(new[], (expr, ty));
+                };
+            };
+            
+            each old_scope.vars { block | 
+                new_vars: List(Var) = list(self.ast_alloc.borrow());
+                for block.vars { old | 
+                    if mapping&.get_ptr(old) { new |
+                        new_vars&.push(new[]);
+                    };
+                };
+                b: BlockScope = (vars = new_vars, parent = block.parent);
+                self.scopes[id].vars&.push(b);
+            };
+        
+            new_func.scope = (Some = id);
+        };
+    };
+    
+    .Ok
 }
 
-// :push_type_when_create_new_var
-fn dup_scope(self: *ResolveScope, prev: ScopeId, mapping: Map(Var, Var)) ScopeId = {
-    let scopes = self.scopes.as_mut().unwrap();
-    let old_scope = &scopes.scopes[prev.as_index()];
-    let p = old_scope.parent;
-    let bp = old_scope.block_in_parent;
-    let n = old_scope.name;
-    let id = self.new_scope(p, n, bp);
-    let scopes = self.scopes.as_mut().unwrap();
-    let old_scope = &scopes.scopes[prev.as_index()];
-    let old_constants = old_scope.constants.clone();
-    // TODO: just take the part you need. rn this copys more and more every time! -- May 29
-    //       i think this is still true -- Jun 3
-    let old_vars = old_scope.vars.clone();
-    // can't use the copy directly because need to rehash
-    for (k, v) in old_constants {
-        if let Some(new) = mapping.get(&k) {
-            scopes.scopes[id.as_index()].constants.insert(*new, v);
-        }
-    }
-
-    for mut block in old_vars {
-        block.vars.retain_mut(|k| {
-            if let Some(new) = mapping.get(k) {
-                *k = *new;
-                true
-            } else {
-                false
-            }
-        });
-        scopes.scopes[id.as_index()].vars.push(block);
-    }
-    id
-}
 
 /// Implementation /// 
 
@@ -606,6 +595,63 @@ fn handle_func(self: *ResolveScope, func: *Func) Result(DoMore, ParseErr) = {
 fn handle_type(self: *ResolveScope, ty: *LazyType) Result(DoMore, ParseErr) = (Ok = .Continue);
 fn handle_pattern(self: *ResolveScope, p: *Pattern) Result(DoMore, ParseErr) = (Ok = .Continue);
 
+///////////////////
+/// Renumbering ///
+
+RenumberVars :: @struct(scope: *Scopes, mapping: *HashMap(Var, Var));
+
+fn decl(self: *RenumberVars, name: *Var) void = {
+    new := name[];
+    new.id = self.scope.types.len.trunc();
+    self.scope.types&.push(.None);
+    self.mapping.insert(name[], new);
+    name[] = new;
+}
+
+fn update(self: *RenumberVars, name: *Var) void = {
+    if self.mapping.get_ptr(name[]) { new |
+        name[] = new[];
+    };
+}
+
+:: WalkAst(RenumberVars, void);
+
+fn handle_expr(self: *RenumberVars, expr: *FatExpr) Result(DoMore, void) = {
+    @if_let(expr.expr&) 
+        fn GetVar(name) => self.update(name);
+    (Ok = DoMore.Continue)
+}
+
+fn handle_stmt(self: *RenumberVars, stmt: *FatStmt) Result(DoMore, void) = {
+    @if_let(stmt.stmt&) 
+        fn DeclVar(f) => self.decl(f.name&);
+
+    (Ok = .Continue)
+}
+
+fn handle_func(self: *RenumberVars, func: *Func) Result(DoMore, void) = {
+    if func.var_name& { old |
+        self.update(old);
+        // TODO: maybe you sometimes want `self.decl(func.var_name&);` if not in mapping.
+        //       but most of the time you're just adding to an overload set.
+        //       really the func should track which case it is so we can be sure to do the right thing  -- Jun 27
+    };
+    if func.return_var& { old |
+        self.update(old);
+    };
+    (Ok = .Continue)
+}
+
+fn handle_type(self: *RenumberVars, ty: *LazyType) Result(DoMore, void) = (Ok = .Continue);
+fn handle_pattern(self: *RenumberVars, p: *Pattern) Result(DoMore, void) = {
+    each p.bindings.items() { b |
+        @if_let(b.name&) 
+            fn Var(v) => self.decl(v);
+    };
+    
+    (Ok = .Continue)
+}
+
 #test fn reach_scope() = {
     c := init_self_hosted();
     src := "fn() => { a := 1; b := a; };";
@@ -614,4 +660,11 @@ fn handle_pattern(self: *ResolveScope, p: *Pattern) Result(DoMore, ParseErr) = (
     expr := c.parser.finish_pending(id).unwrap();
     func := expr.expr.Closure;
     c&.resolve_root(func, scope_from_index(0)).unwrap();
+    c&.renumber_expr(expr&, .None);
+}
+
+fn log(s: *SelfHosted, e: *FatExpr) void = {
+    out: List(u8) = list(temp());
+    e.log(s.pool, out&, 0);
+    println(out.items());
 }

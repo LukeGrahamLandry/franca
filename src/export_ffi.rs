@@ -216,6 +216,8 @@ pub struct ImportVTable {
     number_of_functions: unsafe extern "C" fn(c: &mut &mut Program) -> i64,
     bake_var: extern "C" fn(compile: &mut Compile, v: BakedVar) -> BakedVarId,
     franca_prim_sig2: for<'p> extern "C" fn(c: &Compile<'_, 'p>, func: &Func<'p>) -> Res<'p, PrimSig<'p>>,
+    clone_expr: for<'p> extern "C" fn(e: &FatExpr<'p>) -> FatExpr<'p>,
+    clone_type: for<'p> extern "C" fn(e: &LazyType<'p>) -> LazyType<'p>,
 }
 
 #[repr(C)]
@@ -257,7 +259,17 @@ pub static IMPORT_VTABLE: ImportVTable = ImportVTable {
     number_of_functions,
     bake_var,
     franca_prim_sig2,
+    clone_expr,
+    clone_type,
 };
+
+extern "C" fn clone_expr<'p>(e: &FatExpr<'p>) -> FatExpr<'p> {
+    e.clone()
+}
+
+extern "C" fn clone_type<'p>(e: &LazyType<'p>) -> LazyType<'p> {
+    e.clone()
+}
 
 extern "C" fn franca_prim_sig2<'p>(c: &Compile<'_, 'p>, func: &Func<'p>) -> Res<'p, PrimSig<'p>> {
     let Some(ty) = func.finished_ty() else { err!("fn ty not ready",) };

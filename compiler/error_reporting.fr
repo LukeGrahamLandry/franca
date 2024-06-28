@@ -32,7 +32,11 @@ fn log(self: *FatExpr, pool: *StringPool, out: *List(u8), depth: i64) void = {
             out.push_all(")");
         });
         (fn Value(value) => out.push_all("<<value>>"));
-        (fn GetVar(v) => out.push_all(pool.get(v.name)));
+        (fn GetVar(v) => {
+            out.push_all(pool.get(v.name));
+            out.push_all("%");
+            @fmt(out, "%", v.id);
+        });
         (fn Closure(f) => {
             f[].log(pool, out, depth);
         });
@@ -72,7 +76,7 @@ fn log(self: *FatExpr, pool: *StringPool, out: *List(u8), depth: i64) void = {
 } 
 
 fn log(self: *Func, pool: *StringPool, out: *List(u8), depth: i64) void = {
-    out.push_all("fn ");
+    out.push_all("(fn ");
     out.push_all(pool.get(self.name));
     self.arg&.log(pool, out, depth);
     out.push_all(" ");
@@ -81,6 +85,15 @@ fn log(self: *Func, pool: *StringPool, out: *List(u8), depth: i64) void = {
         out.push_all(" ");
         a.log(pool, out, depth);
     };
+    out.push_all(" = ");
+    
+    @if_let(self.body&)
+        fn Normal(body) => {
+            body.log(pool, out, depth);
+        };
+    
+    out.push_all(")");
+    
 }
 
 fn log(self: *Annotation, pool: *StringPool, out: *List(u8), depth: i64) void = {
@@ -123,10 +136,12 @@ fn log(self: *LazyType, pool: *StringPool, out: *List(u8), depth: i64) void = {
     @match(self) {
         (fn PendingEval(e) => { e.log(pool, out, depth); });
         (fn Infer() => out.push_all("_"));
+        (fn Finished(ty) => {
+            @fmt(out, "Ty%", ty[].to_index());
+        });
         @default => out.push_all("<TODO>");
     };
 }
-
 
 fn indent_by(out: *List(u8), depth: i64) void = {
     range(0, depth) {i|
@@ -171,6 +186,21 @@ fn log(self: *FatStmt, pool: *StringPool, out: *List(u8), depth: i64) void = {
         });
         (fn DeclFunc(f) => {
             f[].log(pool, out, depth);
+        });
+        (fn DeclVar(f) => {
+            // TODO: kind and ty
+            out.push_all(pool.get(f.name.name));
+            out.push_all("%");
+            @fmt(out, "%", f.name.id);
+            out.push_all(": ");
+            f.ty&.log(pool, out, depth);
+            if eq(@as(i64) f.name.kind, @as(i64) VarType.Const) {|
+                out.push_all(" : ");
+            }{|
+                out.push_all(" = ");
+            };
+            f.value&.log(pool, out, depth);
+            out.push_all(";\n");
         });
         @default => out.push_all("ICE:???");
     }

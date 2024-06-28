@@ -207,76 +207,89 @@ impl<'a, 'p> Compile<'a, 'p> {
                     e.reason.log(self.program, self.program.pool)
                 ),
             }
-        } else {
-            // TODO: have a version of type_of that can't fail and if that can do it on the arg cause its simple, don't need to ever do multiple iterations here.
-            let Expr::Tuple(parts) = &mut arg.expr else {
-                err!("arg of call with multiple arguments should be tuple",)
-            };
-
-            for (i, part) in parts.iter_mut().enumerate() {
-                match self.type_of(part) {
-                    Ok(Some(part_ty)) => {
-                        overloads.ready.retain(|check| {
-                            let types = self.program.tuple_types(check.arg).expect("arity");
-                            debug_assert_eq!(types.len(), check.arity as usize);
-                            types[i] == part_ty
-                        });
-                        if overloads.ready.len() == 1 {
-                            break;
-                        }
-                    }
-                    Ok(None) => {
-                        self.last_loc = Some(part.loc);
-                        err!(
-                            "While resolving call to '{}'. Couldn't quick check type for argument '{}'",
-                            self.program.pool.get(name),
-                            part.log(self.program.pool)
-                        )
-                    }
-                    Err(e) => err!(
-                        "AmbiguousCall. Unknown type for argument {}. {}",
-                        part.log(self.program.pool),
-                        e.reason.log(self.program, self.program.pool)
-                    ),
-                }
+            #[allow(unreachable_code)]
+            {
+                unreachable!()
             }
+        }
+        // arity != 1 //
 
-            if overloads.ready.len() > 1 {
-                // TODO: same extra logic in other branch
-                if let Some(first_ret) = overloads.ready[0].ret {
-                    // if not all the ret types are the same, we must not have a requested_ret so even if some of them were
-                    // target dependent and thus mergeable, it wouldn't help, because we still wouldn't know which return type to choose.
-                    if overloads.ready.iter().all(|o| o.ret == Some(first_ret)) {
-                        self.do_merges(&mut overloads.ready, i)?;
+        // TODO: have a version of type_of that can't fail and if that can do it on the arg cause its simple, don't need to ever do multiple iterations here.
+        let Expr::Tuple(parts) = &mut arg.expr else {
+            err!("arg of call with multiple arguments should be tuple",)
+        };
+
+        for (i, part) in parts.iter_mut().enumerate() {
+            match self.type_of(part) {
+                Ok(Some(part_ty)) => {
+                    part.ty = part_ty;
+                    overloads.ready.retain(|check| {
+                        let types = self.program.tuple_types(check.arg).expect("arity");
+                        debug_assert_eq!(types.len(), check.arity as usize);
+                        types[i] == part_ty
+                    });
+                    if overloads.ready.len() == 1 {
+                        break;
                     }
                 }
+                Ok(None) => {
+                    self.last_loc = Some(part.loc);
+                    err!(
+                        "While resolving call to '{}'. Couldn't quick check type for argument '{}'",
+                        self.program.pool.get(name),
+                        part.log(self.program.pool)
+                    )
+                }
+                Err(e) => err!(
+                    "AmbiguousCall. Unknown type for argument {}. {}",
+                    part.log(self.program.pool),
+                    e.reason.log(self.program, self.program.pool)
+                ),
             }
+        }
 
-            if overloads.ready.len() == 1 {
-                let id = overloads.ready[0].func;
-                self.adjust_call(arg, id)?;
-                return Ok(id);
+        if overloads.ready.len() > 1 {
+            // TODO: same extra logic in other branch
+            if let Some(first_ret) = overloads.ready[0].ret {
+                // if not all the ret types are the same, we must not have a requested_ret so even if some of them were
+                // target dependent and thus mergeable, it wouldn't help, because we still wouldn't know which return type to choose.
+                if overloads.ready.iter().all(|o| o.ret == Some(first_ret)) {
+                    self.do_merges(&mut overloads.ready, i)?;
+                }
             }
+        }
 
-            if overloads.ready.len() > 1 && requested_ret.is_none() {
-                err!(
-                    "ambigous overload. no inferred result type. try adding a hint. \n{:?}...",
-                    overloads
-                        .ready
-                        .iter()
-                        .filter_map(|o| o.ret.map(|t| self.program.log_type(t)))
-                        .take(3)
-                        .collect::<Vec<_>>()
-                )
-            }
+        if overloads.ready.len() == 1 {
+            let id = overloads.ready[0].func;
+            self.adjust_call(arg, id)?;
+            return Ok(id);
+        }
 
+        let msg = parts
+            .iter()
+            .map(|p| format!(" - {}\n", self.program.log_type(p.ty)))
+            .collect::<Vec<_>>()
+            .join("");
+
+        if overloads.ready.len() > 1 && requested_ret.is_none() {
             err!(
-                "ambigous overload for fn {}({}) -> {}",
-                self.program.pool.get(name),
-                self.program.log_type(arg.ty),
-                requested_ret.map(|t| self.program.log_type(t)).unwrap_or_else(|| String::from("???"))
+                "ambigous overload. no inferred result type. try adding a hint. \n{msg}\n{:?}...",
+                overloads
+                    .ready
+                    .iter()
+                    .filter_map(|o| o.ret.map(|t| self.program.log_type(t)))
+                    .take(3)
+                    .collect::<Vec<_>>()
             )
         }
+
+        err!(
+            "ambigous overload for fn {}({}) -> {}\n found args\n{}",
+            self.program.pool.get(name),
+            self.program.log_type(arg.ty),
+            requested_ret.map(|t| self.program.log_type(t)).unwrap_or_else(|| String::from("???")),
+            msg
+        )
     }
 
     // TODO: use required_arity to typecheck less things.
