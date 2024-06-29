@@ -65,6 +65,7 @@ fn renumber_expr(self: *SelfHosted, expr: *FatExpr, initial: ?Ty(Var, Var)) void
 
 // TODO: this doesn't belong in this file -- Jun 28
 fn maybe_renumber_and_dup_scope(self: *SelfHosted, new_func: *Func) PRes #compiler = {
+
     // Closures always resolve up front, so they need to renumber the clone.
     // TODO: HACK but closures get renumbered when inlined anyway, so its just the const args that matter. im just being lazy and doing the whole thing redundantly -- May 9
     // normal functions with const args havent had their body resolved yet so don't have to deal with it, we only resolve on the clone.
@@ -85,12 +86,12 @@ fn maybe_renumber_and_dup_scope(self: *SelfHosted, new_func: *Func) PRes #compil
             // but doing this is a bit creepy because the Var.scope isn't updated to the new one,
             // so they get inserted back in the old one's constants/rt_types again later.
             // that's why its fine when we can't find a remap for something in constants or vars.      -- May 29
-            
             assert(new_func.get_flag(.ResolvedSign), "expected resolved sign");  // TODO: debug
             assert(!new_func.get_flag(.AllowRtCapture), "expected no runtime capture"); // TODO: debug
-            old_scope := self.scopes[new_func.scope.unwrap()]&;
+            prev := new_func.scope.unwrap();
+            old_scope := self.scopes[prev]&;
             id := self.scopes.new_scope(old_scope.parent, old_scope.block_in_parent);
-            old_scope := self.scopes[new_func.scope.unwrap()]&;
+            old_scope := self.scopes[prev]&;
             
             // TODO: just take the part you need. rn this copys more and more every time! -- May 29
             //       i think this is still true -- Jun 3
@@ -118,6 +119,8 @@ fn maybe_renumber_and_dup_scope(self: *SelfHosted, new_func: *Func) PRes #compil
         
             new_func.scope = (Some = id);
         };
+    } else {|
+        assert(!new_func.get_flag(.ResolvedBody), "resolved body");
     };
     
     .Ok
@@ -347,7 +350,7 @@ fn slow_body(self: *ResolveScope, body: *List(FatStmt)) PRes = {
                     };
                 };
                 
-                if self.compiler.scopes.already_loaded&.insert(name) {|
+                if not(self.compiler.scopes.already_loaded&.insert(name)) {|
                     name := self.compiler.pool.get(name);
                     :: ?WaitingParse;
                     file := self.compiler.get_include_std(name).or() {|
@@ -519,7 +522,10 @@ fn handle_expr(self: *ResolveScope, expr: *FatExpr) Result(DoMore, ParseErr) = {
 
     @match(expr.expr&) {
         (fn GetParsed(index) => {
-            expr[] = @try(self.compiler.parser.finish_pending(index[])) return;
+            e := @try(self.compiler.parser.finish_pending(index[])) return;
+            expr[] = self.compiler.clone(e&); // clone is important! you end up with multiple copies of the same pending parse. 
+            self.walk_expr(expr);
+            return(Ok = DoMore.Break);
         });
         (fn Block(f) => {
             self.push_scope(.None);
@@ -596,6 +602,12 @@ fn handle_stmt(self: *ResolveScope, stmt: *FatStmt) Result(DoMore, ParseErr) = {
 }
 
 fn handle_func(self: *ResolveScope, func: *Func) Result(DoMore, ParseErr) = {
+    each func.annotations.items() { a | 
+        if a.args& { a | 
+            @try(self.walk_expr(a)) return;
+        };
+    };
+    
     @try(self.resolve_func(func)) return;
     (Ok = .Break)
 }

@@ -1,3 +1,11 @@
+- forgot to clone after expanding PendingParse cause not going through the rust side anymore.
+  symptom was confusing getting same value every time for Option(T)'s arg.
+- now deep enough stack that it tried to free the stack trace's constant memory into libc free. had to not do that!
+- the self hosted scope now works but makes it 5-10% slower maybe. need to give llvm function names so i can use a profiler.
+  i wonder if its just that the scope stuff uses a lot of hashmaps and my hashmap is 150 lines and [rust's is 4000](https://github.com/rust-lang/hashbrown/blob/master/src/map.rs) (not including comments!).
+  which feels like they could be doing a lot better than me.
+  tho if i make sure ids are unique i could make it a vec and just use way more memory because of constants that aren't vars.
+
 ## self hosting feature flag (Jun 23/24)
 
 problem with running parser on llvm is pool returns ?u32.

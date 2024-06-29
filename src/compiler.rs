@@ -274,7 +274,9 @@ impl<'a, 'p> Compile<'a, 'p> {
         let Some(name) = arg.as_ident() else { panic!("@builtin requires argument",) };
         let Some((value, ty)) = self.builtin_constant(name) else {
             panic!("unknown @builtin: {:?}", self.program.pool.get(name))
-        } ;
+        };
+        // println!("@builtin {} = {value:?}", self.program.pool.get(name));
+        
         FatExpr::synthetic_ty(Expr::Value { value, coerced: false }, arg.loc, ty)
     }
 
@@ -353,6 +355,10 @@ impl<'a, 'p> Compile<'a, 'p> {
     // goal is to unify all the places you have to check the stupid tags.
     // this is safe to call even if you don't fully know the types yet, and you probably have to before trying to call it to check if it needs to be inlined.
     fn update_cc(&mut self, f: FuncId) -> Res<'p, ()> {
+        if self.program[f].cc.is_some() {
+            return Ok(());
+        }
+        
         if self.program[f].has_tag(Flag::Inline) {
             self.program[f].set_cc(CallConv::Inline)?;
         }
@@ -996,7 +1002,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         // I don't want to renumber, so make sure to do the clone before resolving.
         // TODO: reslove captured constants anyway so dont haveto do the chain lookup redundantly on each speciailization. -- Apr 24
         debug_assert!(self.program[o_f].get_flag(ResolvedBody) && self.program[o_f].get_flag(ResolvedSign));
-        // println!("bind {}", arg_name.log(self.program.pool));
         let mut arg_x = self.program[o_f].arg.clone();
         let arg_ty = self.get_type_for_arg(&mut arg_x, arg_name)?;
         self.program[o_f].arg = arg_x;

@@ -286,6 +286,8 @@ impl<'p> SelfHosted<'p> {
                 new_func.scope = BigOption::Some(id);
             }
             self.scopes.as_mut().unwrap().next_var = v;
+        } else {
+            new_func.assert_body_not_resolved()?;
         }
         Ok(())
     }
