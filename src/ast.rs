@@ -2,7 +2,7 @@
 use crate::self_hosted::Span;
 use crate::{
     bc::{Baked, BakedEntry, Prim, Values},
-    compiler::{CErr, Compile, Res},
+    compiler::{CErr, Res},
     err,
     export_ffi::BigOption,
     extend_options, impl_index, impl_index_imm,

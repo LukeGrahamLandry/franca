@@ -72,7 +72,7 @@ unsafe impl GlobalAlloc for MyAllocator {
 #[global_allocator]
 static GLOBAL: MyAllocator = MyAllocator;
 
-pub type Map<K, V> = rustc_hash::FxHashMap<K, V>;
+pub type Map<K, V> = HashMap<K, V>;
 
 #[macro_export]
 macro_rules! debug {
@@ -104,6 +104,7 @@ macro_rules! debugln_call {
 use std::alloc::GlobalAlloc;
 use std::alloc::Layout;
 use std::cell::UnsafeCell;
+use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
 use std::ptr::null_mut;

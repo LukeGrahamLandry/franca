@@ -75,7 +75,6 @@ extern "C" {
     fn put_constant(scopes: *mut (), name: Var, value: FatExpr, ty: LazyType);
     fn get_var_type(scopes: *mut (), v: Var) -> BigOption<TypeId>;
     fn put_var_type(scopes: *mut (), v: Var, ty: TypeId) -> bool;
-    // Safety: pointer is invalidated by creating new constants!
     fn get_constant<'p>(scopes: *mut (), name: Var<'p>) -> BigOption<&'p mut (FatExpr<'p>, LazyType<'p>)>;
     fn find_constant_in_scope<'p>(scopes: *mut (), s: ScopeId, name: Ident<'p>) -> BigOption<Var<'p>>;
     fn dup_var<'p>(scopes: *mut (), old: Var<'p>) -> Var<'p>;
