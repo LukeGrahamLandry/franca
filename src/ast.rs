@@ -328,66 +328,6 @@ pub trait WalkAst<'p> {
     }
 }
 
-// Used for inlining closures.
-#[cfg(not(feature = "self_scope"))]
-pub(crate) struct RenumberVars<'a, 'p> {
-    pub vars: u32,
-    pub mapping: &'a mut Map<Var<'p>, Var<'p>>,
-}
-
-#[cfg(not(feature = "self_scope"))]
-impl<'a, 'p> WalkAst<'p> for RenumberVars<'a, 'p> {
-    fn pre_walk_func(&mut self, func: &mut Func<'p>) {
-        if let BigOption::Some(name) = &mut func.var_name {
-            if let Some(new) = self.mapping.get(name) {
-                *name = *new;
-            }
-            // TODO: maybe you sometimes want `else { self.decl(name); }`
-            //       but most of the time you're just adding to an overload set.
-            //       really the func should track which case it is so we can be sure to do the right thing  -- Jun 27
-        }
-        if let BigOption::Some(name) = &mut func.return_var {
-            if let Some(new) = self.mapping.get(name) {
-                *name = *new;
-            }
-        }
-    }
-
-    fn pre_walk_expr(&mut self, expr: &mut FatExpr<'p>) -> bool {
-        if let Expr::GetVar(v) = &mut expr.expr {
-            if let Some(new) = self.mapping.get(v) {
-                *v = *new;
-            }
-        }
-        true
-    }
-
-    fn pre_walk_stmt(&mut self, stmt: &mut FatStmt<'p>) {
-        if let Stmt::DeclVar { name, .. } = &mut stmt.stmt {
-            self.decl(name);
-        }
-    }
-
-    fn walk_pattern(&mut self, binding: &mut Pattern<'p>) {
-        for b in &mut binding.bindings {
-            if let Name::Var(v) = &mut b.name {
-                self.decl(v);
-            }
-        }
-    }
-}
-
-#[cfg(not(feature = "self_scope"))]
-impl<'a, 'p> RenumberVars<'a, 'p> {
-    fn decl(&mut self, name: &mut Var<'p>) {
-        let new = Var { id: self.vars, ..*name };
-        self.vars += 1;
-        let stomp = self.mapping.insert(*name, new);
-        debug_assert!(stomp.is_none());
-        *name = new;
-    }
-}
-
 impl<'p> FatExpr<'p> {
     // TODO: this is weak! should replace with is_const then immediate_eval_expr.
     pub(crate) fn as_const(&self) -> Option<Values> {

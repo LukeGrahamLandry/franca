@@ -141,8 +141,7 @@ pub mod export_ffi;
 pub mod ffi;
 pub mod logging;
 pub mod overloading;
-#[cfg(not(feature = "self_scope"))]
-pub mod scope;
+
 pub mod self_hosted;
 
 use crate::{

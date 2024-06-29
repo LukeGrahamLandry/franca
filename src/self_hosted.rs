@@ -1,17 +1,12 @@
-use std::{
-    marker::PhantomData,
-    mem::{self, ManuallyDrop},
-    ptr::addr_of,
-};
+use std::{marker::PhantomData, mem::ManuallyDrop, ptr::addr_of};
 
 use crate::{
-    ast::{FatExpr, FatStmt, Flag, FnFlag, Func, LazyType, Pattern, ScopeId, TypeId, Var, WalkAst},
+    ast::{FatExpr, FatStmt, Flag, Func, LazyType, Pattern, ScopeId, TypeId, Var},
     compiler::{CErr, Compile, Res, Scope},
     err,
     export_ffi::{BigOption, ImportVTable, IMPORT_VTABLE},
     ffi::InterpSend,
     logging::make_err,
-    Map,
 };
 
 use crate::export_ffi::BigResult::*;
@@ -21,9 +16,6 @@ pub struct SelfHosted<'p> {
     pub codemap: *mut (),
     parser: *mut (),
     _arena: *mut (),
-    #[cfg(not(feature = "self_scope"))]
-    pub scopes: Option<Box<Scopes<'p>>>, // small option because its a nullable pointer currently. TEMP
-    #[cfg(feature = "self_scope")]
     scopes: *mut (),
     vtable: *const ImportVTable,
     a: PhantomData<&'p u8>,
@@ -68,7 +60,6 @@ extern "C" {
     pub(crate) fn log_func(pool: *mut (), s: &Func) -> *const str;
     pub(crate) fn log_lazy_type(pool: *mut (), s: &LazyType) -> *const str;
     pub fn self_hosted_main(vtable: *const ImportVTable);
-    pub(crate) fn get_include_std(arg: *mut Compile, name: &str) -> BigOption<usize>; // TODO: calling convention!!
     pub(crate) fn emit_llvm();
     pub fn show_error_line(codemap: *mut (), span_low: u32, span_high: u32);
 
@@ -161,184 +152,26 @@ impl<'p> SelfHosted<'p> {
         println!("{e:?}");
     }
 
-    #[cfg(not(feature = "self_scope"))]
-    pub fn new_scope(&mut self, parent: ScopeId, name: Ident<'p>, block_in_parent: usize) -> ScopeId {
-        let scopes = self.scopes.as_mut().unwrap();
-        let depth = if scopes.scopes.is_empty() {
-            0
-        } else {
-            scopes.scopes[parent.as_index()].depth + 1
-        }; // HACK
-        scopes.scopes.push(Scope {
-            parent,
-            constants: Default::default(),
-            vars: Default::default(),
-            depth,
-            name,
-            block_in_parent,
-            rt_types: Default::default(),
-        });
-        ScopeId::from_index(scopes.scopes.len() - 1)
-    }
-
-    #[cfg(not(feature = "self_scope"))]
-    fn dup_scope(&mut self, prev: ScopeId, mapping: Map<Var<'p>, Var<'p>>) -> ScopeId {
-        let scopes = self.scopes.as_mut().unwrap();
-        let old_scope = &scopes.scopes[prev.as_index()];
-        let p = old_scope.parent;
-        let bp = old_scope.block_in_parent;
-        let n = old_scope.name;
-        let id = self.new_scope(p, n, bp);
-        let scopes = self.scopes.as_mut().unwrap();
-        let old_scope = &scopes.scopes[prev.as_index()];
-        let old_constants = old_scope.constants.clone();
-        // TODO: just take the part you need. rn this copys more and more every time! -- May 29
-        //       i think this is still true -- Jun 3
-        let old_vars = old_scope.vars.clone();
-        // can't use the copy directly because need to rehash
-        for (k, v) in old_constants {
-            if let Some(new) = mapping.get(&k) {
-                scopes.scopes[id.as_index()].constants.insert(*new, v);
-            }
-        }
-
-        for mut block in old_vars {
-            block.vars.retain_mut(|k| {
-                if let Some(new) = mapping.get(k) {
-                    *k = *new;
-                    true
-                } else {
-                    false
-                }
-            });
-            scopes.scopes[id.as_index()].vars.push(block);
-        }
-        id
-    }
-
-    #[cfg(not(feature = "self_scope"))]
-    pub(crate) fn put_constant(&mut self, name: crate::ast::Var<'p>, value: FatExpr<'p>, ty: LazyType<'p>) {
-        let scopes = self.scopes.as_mut().unwrap();
-        scopes.scopes[name.scope.as_index()].constants.insert(name, (value, ty));
-    }
-
-    #[cfg(not(feature = "self_scope"))]
-    pub fn get_var_type(&self, v: Var) -> BigOption<TypeId> {
-        let scopes = self.scopes.as_ref().unwrap();
-        scopes.scopes[v.scope.as_index()].rt_types.get(&v).copied().into()
-    }
-
-    #[cfg(not(feature = "self_scope"))]
-    pub(crate) fn put_var_type(&mut self, name: Var<'p>, ty: TypeId) {
-        let scopes = self.scopes.as_mut().unwrap();
-        scopes.scopes[name.scope.as_index()].rt_types.insert(name, ty);
-    }
-
-    #[cfg(not(feature = "self_scope"))]
-    pub(crate) fn get_constant(&mut self, name: Var<'p>) -> BigOption<&mut (FatExpr<'p>, LazyType<'p>)> {
-        let scopes = self.scopes.as_mut().unwrap();
-        scopes.scopes[name.scope.as_index()].constants.get_mut(&name).into()
-    }
-
-    #[cfg(not(feature = "self_scope"))]
-    pub(crate) fn find_in_scope(&self, s: ScopeId, name: Ident<'p>) -> BigOption<Var<'p>> {
-        let scopes = self.scopes.as_ref().unwrap();
-        scopes.scopes[s.as_index()].constants.keys().find(|v| v.name == name).copied().into()
-    }
-
-    #[cfg(not(feature = "self_scope"))]
-    pub(crate) fn maybe_renumber_and_dup_scope(&mut self, new_func: &mut Func<'p>) -> BigResult<(), Box<crate::compiler::CompileError<'p>>> {
-        use FnFlag::*;
-        // Closures always resolve up front, so they need to renumber the clone.
-        // TODO: HACK but closures get renumbered when inlined anyway, so its just the const args that matter. im just being lazy and doing the whole thing redundantly -- May 9
-        // normal functions with const args havent had their body resolved yet so don't have to deal with it, we only resolve on the clone.
-        // the special case for generics is when args can reference previous ones so they have to resolve sign earlier.
-        let needs_renumber = new_func.get_flag(AllowRtCapture) || new_func.get_flag(Generic);
-        if needs_renumber {
-            // :push_type_when_create_new_var // TODO
-            let mut mapping = Default::default();
-            let mut renumber = crate::ast::RenumberVars {
-                vars: self.scopes.as_ref().unwrap().next_var,
-                mapping: &mut mapping,
-            };
-            renumber.func(new_func);
-            let v = renumber.vars;
-            if new_func.get_flag(Generic) && !new_func.get_flag(ResolvedBody) {
-                // the sign has already been resolved so we need to renumber before binding arguments.
-                // however, the body hasn't been resolved yet, so we can't just renumber in place.
-                // instead, remap the sign as normal and then, insert a new scope containing the remapped variables,
-                // and use that as the starting point when we resolve the body of new new function.
-                // that way when it iterates up the scopes to resolve names, it will see our remapped shadows instead of the original.
-                // this allows #generic argument types that reference the values of other argument.
-                // but doing this is a bit creepy because the Var.scope isn't updated to the new one,
-                // so they get inserted back in the old one's constants/rt_types again later.
-                // that's why its fine when we can't find a remap for something in constants or vars.      -- May 29
-                debug_assert!(new_func.get_flag(ResolvedSign));
-                debug_assert!(!new_func.get_flag(AllowRtCapture));
-                new_func.assert_body_not_resolved()?;
-                // TODO: not true for 'name :: fn() = {}' exprs because they don't stop.
-                // debug_assert!(
-                //     !matches!(body.expr, Expr::Block { .. }),
-                //     "Block should be GetParsed because body is not resolved yet. "
-                // );
-                let id = self.dup_scope(new_func.scope.unwrap(), mapping);
-                new_func.scope = BigOption::Some(id);
-            }
-            self.scopes.as_mut().unwrap().next_var = v;
-        } else {
-            new_func.assert_body_not_resolved()?;
-        }
-        Ok(())
-    }
-
-    #[cfg(not(feature = "self_scope"))]
-    pub(crate) fn renumber_expr(&mut self, expr: &mut FatExpr<'p>, initial: BigOption<(Var<'p>, Var<'p>)>) {
-        let mut mapping = Map::<Var, Var>::default();
-        if let BigOption::Some((old, new)) = initial {
-            mapping.insert(old, new);
-        }
-        let mut ctx = crate::ast::RenumberVars {
-            vars: self.scopes.as_ref().unwrap().next_var,
-            mapping: &mut mapping,
-        };
-        ctx.expr(expr);
-        self.scopes.as_mut().unwrap().next_var = ctx.vars;
-    }
-
-    #[cfg(not(feature = "self_scope"))]
-    pub(crate) fn dup_var(&mut self, old: Var<'p>) -> Var<'p> {
-        let mut new = old;
-        new.id = self.scopes.as_mut().unwrap().next_var;
-        self.scopes.as_mut().unwrap().next_var += 1;
-        new
-    }
-
-    #[cfg(feature = "self_scope")]
     pub(crate) fn put_constant(&mut self, name: crate::ast::Var<'p>, value: FatExpr<'p>, ty: LazyType<'p>) {
         unsafe { put_constant(self.scopes, name, value, ty) }
     }
 
-    #[cfg(feature = "self_scope")]
     pub fn get_var_type(&self, v: Var) -> BigOption<TypeId> {
         unsafe { get_var_type(self.scopes, v) }
     }
 
-    #[cfg(feature = "self_scope")]
     pub(crate) fn put_var_type(&mut self, v: Var<'p>, ty: TypeId) {
         unsafe { put_var_type(self.scopes, v, ty) };
     }
 
-    #[cfg(feature = "self_scope")]
     pub(crate) fn get_constant(&mut self, name: Var<'p>) -> BigOption<&mut (FatExpr<'p>, LazyType<'p>)> {
         unsafe { get_constant(self.scopes, name) }
     }
 
-    #[cfg(feature = "self_scope")]
     pub(crate) fn find_in_scope(&self, s: ScopeId, name: Ident<'p>) -> BigOption<Var<'p>> {
         unsafe { find_constant_in_scope(self.scopes, s, name) }
     }
 
-    #[cfg(feature = "self_scope")]
     pub(crate) fn maybe_renumber_and_dup_scope(&mut self, new_func: &mut Func<'p>) -> BigResult<(), Box<crate::compiler::CompileError<'p>>> {
         match unsafe { maybe_renumber_and_dup_scope(self, new_func) } {
             Ok(_) => Ok(()),
@@ -346,12 +179,10 @@ impl<'p> SelfHosted<'p> {
         }
     }
 
-    #[cfg(feature = "self_scope")]
     pub(crate) fn renumber_expr(&mut self, expr: &mut FatExpr<'p>, initial: BigOption<(Var<'p>, Var<'p>)>) {
         unsafe { renumber_expr(self, expr, initial) }
     }
 
-    #[cfg(feature = "self_scope")]
     pub(crate) fn dup_var(&mut self, old: Var<'p>) -> Var<'p> {
         unsafe { dup_var(self.scopes, old) }
     }
@@ -360,13 +191,6 @@ impl<'p> SelfHosted<'p> {
 impl<'p> Default for SelfHosted<'p> {
     fn default() -> Self {
         let mut temp = unsafe { init_self_hosted() };
-
-        #[cfg(not(feature = "self_scope"))]
-        {
-            mem::forget(temp.scopes); // TODO: remove. temp while there are two impls that disagree on what this is. -- Jun 28
-            temp.scopes = Some(Box::new(Scopes { scopes: vec![], next_var: 0 }));
-        }
-
         temp.vtable = addr_of!(IMPORT_VTABLE);
         temp
     }

@@ -146,10 +146,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             #[cfg(feature = "cranelift")]
             cranelift: crate::cranelift::JittedCl::default(),
         };
-        #[cfg(not(feature = "self_scope"))]
-        {
-            c.program.pool.new_scope(ScopeId::from_index(0), Flag::TopLevel.ident(), 0);
-        }
         // TODO: HACK: for emit_relocatable_constant
         let ty = <(i64, i64)>::get_or_create_type(c.program);
         c.program.finish_layout(ty).unwrap();
@@ -1292,15 +1288,9 @@ impl<'a, 'p> Compile<'a, 'p> {
             self.log_trace()
         );
         mut_replace!(self.program[f], |mut func: Func<'p>| {
-            #[cfg(not(feature = "self_scope"))]
-            {
-                crate::scope::ResolveScope::resolve_sign(&mut func, self)?;
-            }
-            
-            #[cfg(feature = "self_scope")]
-            {
+  
                 unsafe { resolve_sign(self.program.pool, &mut func).unwrap() };
-            }
+            
             Ok((func, ()))
         });
         Ok(())
@@ -1318,16 +1308,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         );
         self.ensure_resolved_sign(f)?;
         mut_replace!(self.program[f], |mut func: Func<'p>| {
-            #[cfg(not(feature = "self_scope"))]
-            {
-                crate::scope::ResolveScope::resolve_body(&mut func, self)?;
-            }
-            
-            #[cfg(feature = "self_scope")]
-            {
-                unsafe { resolve_body(self.program.pool, &mut func).unwrap() };
-            }
-            
+            unsafe { resolve_body(self.program.pool, &mut func).unwrap() };
             Ok((func, ()))
         });
         Ok(())

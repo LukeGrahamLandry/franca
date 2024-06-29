@@ -189,7 +189,6 @@ pub struct ImportVTable {
     find_unqiue_func: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, name: Ident<'p>) -> BigOption<FuncId>,
     // TODO: i want the meta program to be tracking these instead.
     get_fns_with_tag: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, tag: Ident<'p>) -> *const [FuncId],
-    // TODO: you can't just give it the slice from get_exports/tests because that will alias the vec that might grow, but the idea is this will go away soon anyway.
     _b: i64, // todo: remove
     compile_func: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, f: FuncId, when: ExecStyle) -> BigCErr<'p, ()>,
     get_jitted_ptr: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, f: FuncId) -> BigCErr<'p, *const u8>,
@@ -395,15 +394,8 @@ unsafe extern "C" fn parse_stmts<'p>(comp: &mut Compile<'_, 'p>, file: *const Sp
 unsafe extern "C" fn make_and_resolve_and_compile_top_level<'p>(c: &mut Compile<'_, 'p>, body: *const [FatStmt<'p>]) -> BigCErr<'p, ()> {
     let body = (*body).to_vec();
     let mut global = make_toplevel(c.program.pool, garbage_loc(), body);
-    #[cfg(not(feature = "self_scope"))]
-    {
-        crate::scope::ResolveScope::run(&mut global, c, ScopeId::from_index(0))?;
-    }
-    #[cfg(feature = "self_scope")]
-    {
-        unsafe {
-            resolve_root(c.program.pool, &mut global, ScopeId::from_index(0)).unwrap();
-        }
+    unsafe {
+        resolve_root(c.program.pool, &mut global, ScopeId::from_index(0)).unwrap();
     }
     c.compile_top_level(global)?;
     Ok(())
