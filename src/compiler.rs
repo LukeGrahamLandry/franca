@@ -4,7 +4,7 @@
 
 #![allow(clippy::wrong_self_convention)]
 
-use crate::self_hosted::{created_jit_fn_ptr_value, resolve_body, resolve_sign, show_error_line, Span};
+use crate::self_hosted::{created_jit_fn_ptr_value, resolve_body, resolve_sign, save_bake_callback, show_error_line, Span};
 use core::slice;
 use std::collections::HashSet;
 use std::ffi::CString;
@@ -26,7 +26,7 @@ use crate::bc_to_asm::{emit_aarch64, Jitted};
 use crate::emit_bc::emit_bc;
 use crate::export_ffi::{struct_macro, tagged_macro, type_macro, BigOption, BigResult, ExportVTable, ImportVTable, IMPORT_VTABLE};
 use crate::ffi::InterpSend;
-use crate::logging::PoolLog;
+use crate::logging::{make_err, PoolLog};
 use crate::overloading::where_the_fuck_am_i;
 
 use crate::{
@@ -309,6 +309,9 @@ impl<'a, 'p> Compile<'a, 'p> {
             let f = unwrap!(self.aarch64.get_fn(f.func), "failed to compile function");
             let prev = self.program.custom_bake_constant.insert(ty, unsafe { transmute(f) });
             assert!(prev.is_none(), "conflicting overload for bake AOT constant");
+            unsafe  {
+                save_bake_callback(self.program.pool, ty, transmute(f)).map_err(|e| e.as_err())?;
+            }
         }
         Ok(())
     }

@@ -2,10 +2,12 @@ use std::{marker::PhantomData, ptr::addr_of};
 
 use crate::{
     ast::{FatExpr, FatStmt, Flag, Func, FuncId, LazyType, Pattern, ScopeId, TypeId, Var},
-    compiler::Scope,
+    bc::{BakedEntry, BakedVar, BakedVarId, Values},
+    compiler::{CErr, Compile, CompileError, Scope},
     err,
     export_ffi::{BigOption, ImportVTable, IMPORT_VTABLE},
     ffi::InterpSend,
+    logging::make_err,
 };
 
 use crate::export_ffi::BigResult::*;
@@ -41,6 +43,14 @@ pub struct ParseErr<'p> {
     pub msg: &'p str,
 }
 
+impl<'p> ParseErr<'p> {
+    pub(crate) fn as_err(&self) -> Box<CompileError<'p>> {
+        let mut e = make_err(CErr::Fatal(self.msg.to_string()));
+        e.loc = Some(self.span);
+        e
+    }
+}
+
 use crate::export_ffi::BigResult;
 
 #[allow(improper_ctypes)]
@@ -73,7 +83,21 @@ extern "C" {
     fn renumber_expr<'p>(compiler: &mut SelfHosted<'p>, expr: &mut FatExpr<'p>, initial: BigOption<(Var<'p>, Var<'p>)>);
     fn maybe_renumber_and_dup_scope<'p>(compiler: &mut SelfHosted<'p>, new_func: &mut Func<'p>) -> BigResult<(), ParseErr<'p>>;
     pub fn created_jit_fn_ptr_value(compiler: &SelfHosted, f: FuncId, ptr: i64);
+    pub fn save_bake_callback<'p>(
+        s: &mut SelfHosted<'p>,
+        ty: TypeId,
+        f: unsafe extern "C" fn(*const ()) -> *const [BakedEntry],
+    ) -> BigResult<(), ParseErr<'p>>;
 
+    pub fn get_baked(c: &SelfHosted, id: BakedVarId) -> *const (i64, BakedVar);
+    pub fn put_baked(c: &SelfHosted, v: BakedVar, jit_ptr: BigOption<i64>) -> BakedVarId;
+    pub fn emit_relocatable_constant<'p>(c: &mut Compile<'_, 'p>, ty: TypeId, value: &Values) -> BigResult<BakedVarId, ParseErr<'p>>;
+    pub fn emit_relocatable_constant_body<'p>(
+        c: &mut Compile<'_, 'p>,
+        bytes: &[u8],
+        ty: TypeId,
+        force_default_handling: bool,
+    ) -> BigResult<*const [BakedEntry], ParseErr<'p>>;
 }
 
 impl<'p> SelfHosted<'p> {

@@ -1,6 +1,6 @@
 #![allow(improper_ctypes_definitions)]
 
-use crate::self_hosted::{emit_llvm, resolve_root, show_error_line, ParseErr, SelfHosted};
+use crate::self_hosted::{emit_llvm, put_baked, resolve_root, show_error_line, ParseErr, SelfHosted};
 use crate::unwrap2;
 use libc::c_void;
 
@@ -134,7 +134,7 @@ impl<T, E: Debug> BigResult<T, E> {
             Err(e) => f(e),
         }
     }
-    pub fn map_err(self, f: impl FnOnce(E) -> E) -> Self {
+    pub fn map_err<E2>(self, f: impl FnOnce(E) -> E2) -> BigResult<T, E2> {
         match self {
             Ok(t) => Ok(t),
             Err(e) => Err(f(e)),
@@ -243,6 +243,7 @@ pub struct ImportVTable {
     clone_type: for<'p> extern "C" fn(e: &LazyType<'p>) -> LazyType<'p>,
     intern_type: for<'p> extern "C" fn(compile: &mut Compile<'_, 'p>, e: TypeInfo<'p>) -> TypeId,
     get_type: for<'p> extern "C" fn(compile: &mut Compile<'_, 'p>, e: TypeId) -> *const TypeInfo<'p>,
+    log_type: extern "C" fn(compile: &mut Compile, e: TypeId) -> *const str,
 }
 
 #[repr(C)]
@@ -288,7 +289,12 @@ pub static IMPORT_VTABLE: ImportVTable = ImportVTable {
     clone_type,
     intern_type: franca_intern_type,
     get_type,
+    log_type: franca_log_type,
 };
+
+extern "C" fn franca_log_type(compile: &mut Compile, e: TypeId) -> *const str {
+    compile.program.log_type(e).leak() as *const str
+}
 
 extern "C" fn get_type<'p>(compile: &mut Compile<'_, 'p>, e: TypeId) -> *const TypeInfo<'p> {
     &compile.program[e] as *const TypeInfo<'p>
@@ -313,6 +319,9 @@ extern "C" fn franca_prim_sig2<'p>(c: &Compile<'_, 'p>, func: &Func<'p>) -> Res<
 }
 
 extern "C" fn bake_var(c: &mut Compile, val: BakedVar) -> BakedVarId {
+    unsafe {
+        put_baked(c.program.pool, val.clone(), BigOption::None);
+    }
     c.program.baked.make(val, null(), TypeId::unknown)
 }
 
@@ -321,7 +330,9 @@ extern "C" fn debug_log_bc<'p>(c: &Compile<'_, 'p>, body: &FnBody<'p>) {
 }
 
 extern "C" fn get_baked(compile: &Compile, id: BakedVarId) -> BakedVar {
-    compile.program.baked.get(id).0
+    // let new = unsafe { crate::self_hosted::get_baked(compile.program.pool, id) };
+    let old = compile.program.baked.get(id);
+    old.0
 }
 
 extern "C" fn debug_log_baked_constant(compile: &Compile, id: BakedVarId) {
@@ -407,7 +418,10 @@ unsafe extern "C" fn make_and_resolve_and_compile_top_level<'p>(c: &mut Compile<
     unsafe {
         resolve_root(c.program.pool, &mut global, ScopeId::from_index(0)).unwrap();
     }
-    c.compile_top_level(global)?;
+    if let Err(e) = c.compile_top_level(global) {
+        c.program.pool.print_diagnostic(*e.clone());
+        return Err(e);
+    }
     Ok(())
 }
 
