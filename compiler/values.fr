@@ -1,0 +1,188 @@
+
+// This avoids needing to linearly scan all the functions when they try to emit_relocatable_constant of a function pointer. 
+// You only need to call it if they created a Values of it, so we might need to emit it as a constant later 
+// (like for vtables where you construct the value in memory as with comptime pointers and then we emit relocations). 
+// [Jun 30] building the compiler ends up with ~17000 FuncIds created and 21 calls to this function. So thats pretty good. 
+// TODO: tho that means we wont find it if someone cheats somehow and gets the pointer in a way i didn't think of. 
+//       it relies on them only being created through '!fn_ptr'/const_coerce expressions. 
+fn created_jit_fn_ptr_value(self: *SelfHosted, f: FuncId, ptr: i64) void #compiler = {
+    self.baked.functions&.insert(ptr, f);
+}
+
+// TODO: call this from rust. 
+fn save_custom_bake_constant(self: *SelfHosted, ty: Type, f: BakeHandler) void #compiler = {
+    self.baked.custom_bake_constant&.insert(ty, f);
+}
+
+// BakedVar :: @tagged(Zeros: i64, Bytes: RsVec(u8), VoidPtrArray: RsVec(BakedEntry));
+// BakedEntry :: @tagged(Num: @struct(value: i64, ty: Prim), FnPtr: FuncId, AddrOf: BakedVarId);
+Baked :: @struct(
+    values: BucketArray(Ty(rawptr, BakedVar)),
+    // TODO: defend against the same memory being aliased as different types that would want to emit the constant differently? -- Jun 30
+    // TODO: this doesn't help for small strings because they're stored inline in the Values. 
+    // deduplicate values by thier jit address. 
+    lookup: HashMap(i64, BakedVarId),
+    // avoid iterating all function pointers when you try to have one as a constant. 
+    functions: HashMap(i64, FuncId),
+    // Some types need special handling (Slice, CStr, etc). This are called at comptime and might call back into the auto dynamic versions to handle thier fields. 
+    custom_bake_constant: HashMap(Type, BakeHandler),
+);
+BakeHandler :: @FnPtr(self: rawptr) Slice(BakedEntry);
+
+/*
+
+// TODO: i should have constant pointers as a concept in my language.
+//       right now i could check if its in the constant data arena for a hint that should catch a few of them.
+fn emit_relocatable_constant(c: *SelfHosted, ty: Type, value: *Values) Res(BakedVarId) = {
+    jit_ptr := value.jit_addr();
+    if c.baked.lookup&.get(jit_ptr) { v | 
+        // TODO: be careful about aliasing as different types with different custom_bake_constant? -- Jun 30 
+        return(Ok = v);
+    };
+    let raw = program.raw_type(ty);
+    
+    // TODO: is it really that helpful to tell the backend to use zeroinitilizer? could at least have a faster memcmp. 
+    (() => {
+        break :: local_return;
+        for value.bytes() { b |
+            if(b != 0, => break());
+        };
+        // return Ok(program.baked.make(BakedVar::Zeros(value.bytes().len()), jit_ptr, ty));
+    })();
+    
+    // Eventually we'll recurse to something with no pointers. ie Str -> [u8; n]
+    if (!program.get_info(raw).contains_pointers) {|
+        return Ok(program.baked.make(BakedVar::Bytes(value.bytes().to_vec()), jit_ptr, ty));
+    };
+
+    out: List(BakedEntry) = list(c.ast_alloc.borrow());
+    c.emit_relocatable_constant_body(ty, value, out&, false)?;
+    Ok(program.baked.make(BakedVar::VoidPtrArray(out), jit_ptr, ty))
+}
+
+// TODO: deduplicate small constant strings. they get stored in Values inline so can't be fixed by baked.lookup
+// TODO: make sure baked.lookup actually ever helps. might need to add checks in more places.
+fn emit_relocatable_constant_body(
+    c: *SelfHosted,
+    ty: TypeId,
+    value: *Values,
+    out: *List(BakedEntry),
+    force_default_handling: bool,
+) PRes = {
+    info := program.get_info(ty);
+    if value.len() != info.stride_bytes.zext() {|
+        msg := @format("ICE: Tried to emit constant value of wrong size. Expected % bytes but found %.", @as(i64) info.stride_bytes.zext(), value.len()) temp();
+        return(Err = (span = c.last_loc, msg = msg.items()));
+    };
+    // TODO: alignment check? 
+    
+    // :bake_relocatable_value
+    if (!force_default_handling) {|
+        if c.custom_bake_constant&.get(ty) { f |
+            values := f(value.jit_addr());
+            out.push_all(values);
+            return(.Ok);
+        };
+    };
+
+    let raw = program.raw_type(ty);
+
+    // Eventually we'll recurse to something with no pointers. ie Str -> [u8; n]
+    if !info.contains_pointers {
+        for n in value.bytes().chunks(8) {
+            // TODO: small prims
+            out.push(BakedEntry::Num(int_from_bytes(n), Prim::I64))
+        }
+
+        return Ok(());
+    }
+
+    match &program[raw] {
+        (fn FnPtr(_) => {
+            ptr := i64.assume_cast(value)[];
+            if c.baked.functions&.get(ptr) { fid |
+                assert_eq!(*f_ty, program[f].finished_ty().unwrap());
+                out.push(BakedEntry::FnPtr(f));
+                return Ok(());
+            };
+            err!("function not found",)
+        }
+        &TypeInfo::Ptr(inner) => {
+            let inner_info = program.get_info(inner);
+            let bytes = inner_info.stride_bytes as usize;
+            // load the pointer and recurse.
+            // TODO: deduplicate!
+            let ptr: i64 = from_values(program, value.clone())?;
+            let data = unsafe { &*slice_from_raw_parts(ptr as *const u8, bytes) };
+            let inner_value = Values::many(data.to_vec());
+            let value = emit_relocatable_constant(inner, &inner_value, program, dispatch)?;
+            out.push(BakedEntry::AddrOf(value));
+            Ok(())
+        }
+        TypeInfo::Struct { fields, .. } => {
+            // Just do all the fields.
+            for f in fields {
+                let info = program.get_info(f.ty);
+                assert_eq!(info.stride_bytes % 8, 0, "TODO");
+                let v = value.bytes()[f.byte_offset..f.byte_offset + info.stride_bytes as usize].to_vec();
+                emit_relocatable_constant_body(f.ty, &Values::many(v), program, dispatch, out, false)?;
+            }
+            Ok(())
+        }
+        TypeInfo::Tagged { cases } => {
+            let tag = unsafe { *(value.bytes().as_ptr() as *const usize) };
+            assert!(cases.len() > tag, "invalid constant tagged union");
+            if !program.get_info(cases[tag].1).contains_pointers {
+                // it happens that this varient is easy.
+                for n in value.bytes().chunks(8) {
+                    // TODO: small prims
+                    out.push(BakedEntry::Num(int_from_bytes(n), Prim::I64))
+                }
+
+                Ok(())
+            } else {
+                println!("{:?}", program.pool.get(cases[tag].0));
+                err!("TODO: pointers in constant tagged union: {}", program.log_type(ty))
+            }
+        }
+        TypeInfo::Enum { .. } => unreachable!(),
+        TypeInfo::VoidPtr => {
+            if value.bytes().iter().all(|b| *b == 0) {
+                // You're allowed to have a constant null pointer (like for global allocator interface instances).
+                out.push(BakedEntry::Num(0, Prim::P64));
+                Ok(())
+            } else {
+                err!("You can't have a void pointer as a constant. The compiler can't tell how many bytes to put in the final executable.",)
+            }
+        }
+        _ => err!("ICE: bad constant",),
+    }
+}
+
+fn Res(const T: Type) Type = Result(T, ParseErr);
+
+fn jit_addr(v: *Values) i64 = {
+    s := v.bytes();
+    u8.int_from_ptr(v.ptr)
+}
+
+fn bytes(v: *Values) Slice(u8) = {
+    @match(self) {
+        (fn Small(v) => (ptr = ptr_cast_unchecked(i64, u8, v._0), len = v._1));
+        (fn Big(v) => v.items());
+    }
+}
+
+fn len(self: *Values) i64 = {
+    @match(self) {
+        (fn Small(v) => v.len);
+        (fn Big(v) => v.len);
+    }
+}
+
+fn assume_cast(const T: Type, self: *Values) *T #generic = {
+    b := self.bytes();
+    assert_eq(b.len, T.size_of());  // TODO: check alignment
+    ptr_cast_unchecked(u8, T, b.ptr)
+}
+*/

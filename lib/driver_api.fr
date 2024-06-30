@@ -29,6 +29,7 @@ ImportVTable :: (@struct(
     get_fns_with_tag: @FnPtr(c: Compiler, tag: Symbol) Slice(FuncId),
     _b: usize,
     compile_func: @FnPtr(c: Compiler, f: FuncId, when: ExecStyle) CRes(void),
+    // SAFETY: you must call created_jit_fn_ptr_value if you create a Values and then compile for AOT
     get_jitted_ptr: @FnPtr(c: Compiler, f: FuncId) CRes(rawptr),
     get_function: @FnPtr(c: Compiler, f: FuncId) *Func,
     _d: usize,
@@ -55,6 +56,7 @@ ImportVTable :: (@struct(
     clone_expr: @FnPtr(e: *FatExpr) FatExpr,
     clone_type: @FnPtr(e: *LazyType) LazyType,
     intern_type: @FnPtr(c: Compiler, e: TypeInfo) Type,
+    get_type: @FnPtr(c: Compiler, e: Type) *TypeInfo,
 ))!rec;
 // TODO: better error for @FnPtr if you forget return type. 
 
@@ -76,7 +78,14 @@ fn RsVec(const T: Type) Type = {
     fn items(self: Self) Slice(T) = (ptr = self.ptr, len = self.len);
     fn items(self: *Self) Slice(T) = (ptr = self.ptr, len = self.len);
     // TODO: UNSAFE. needs to be allocated by rust if rust is going to free it. needs to follow rust aliasing rules. 
-    fn rs(self: List(T)) Self = (cap = self.maybe_uninit.len, ptr = self.maybe_uninit.ptr, len = self.len);
+    fn rs(self: List(T)) Self = {
+        :: if(Self);
+        if self.maybe_uninit.len == 0 {|
+            empty()
+        } else {|
+            (cap = self.maybe_uninit.len, ptr = self.maybe_uninit.ptr, len = self.len)
+        }
+    }
     fn empty() Self = {
         // "unsafe precondition(s) violated: slice::from_raw_parts requires the pointer to be aligned and non-null, and the total size of the slice not to exceed `isize::MAX`"
         nonnull := T.ptr_from_int(T.size_of());
@@ -180,6 +189,7 @@ FnFlag :: @enum(i64) (
     UnsafeNoopCast,
     NoStackTrace,
     MayHaveAquiredCaptures,
+    TookPointerValue,
 );
 
 Annotation :: @struct(

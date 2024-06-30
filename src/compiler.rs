@@ -4,7 +4,7 @@
 
 #![allow(clippy::wrong_self_convention)]
 
-use crate::self_hosted::{resolve_body, resolve_sign, show_error_line, Span};
+use crate::self_hosted::{created_jit_fn_ptr_value, resolve_body, resolve_sign, show_error_line, Span};
 use core::slice;
 use std::collections::HashSet;
 use std::ffi::CString;
@@ -468,6 +468,11 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
         }
         self.program[f].set_flag(AsmDone, true);
+        if self.program[f].get_flag(FnFlag::TookPointerValue) {
+            if let Some(ptr) = self.aarch64.get_fn(f) {
+                unsafe { created_jit_fn_ptr_value(self.program.pool, f,ptr as i64 )}
+            }
+        }
         self.last_loc = Some(self.program[f].loc);
         let cd = self.callees_done(f);
         self.program[f].set_flag(CalleesAsmDone, cd);
@@ -1288,9 +1293,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             self.log_trace()
         );
         mut_replace!(self.program[f], |mut func: Func<'p>| {
-  
-                unsafe { resolve_sign(self.program.pool, &mut func).unwrap() };
-            
+            unsafe { resolve_sign(self.program.pool, &mut func).unwrap_log(self.program.pool) };
             Ok((func, ()))
         });
         Ok(())
@@ -1308,7 +1311,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         );
         self.ensure_resolved_sign(f)?;
         mut_replace!(self.program[f], |mut func: Func<'p>| {
-            unsafe { resolve_body(self.program.pool, &mut func).unwrap() };
+            unsafe { resolve_body(self.program.pool, &mut func).unwrap_log(self.program.pool) };
             Ok((func, ()))
         });
         Ok(())
@@ -1644,6 +1647,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         if let TypeInfo::Fn(_) = self.program[ty] {
                             let id: FuncId = self.immediate_eval_expr_known(*arg.clone())?;
                             assert!(!self.program[id].any_const_args());
+                            self.program[id].set_flag(TookPointerValue, true);
                             // TODO: for now you just need to not make a mistake with calling convention
                             self.add_callee(id);
                             self.ensure_compiled(id, self.exec_style())?;
@@ -3656,7 +3660,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         // TODO: doing the check here every time is sad.
         if value.expr.as_suffix_macro(Flag::Uninitialized).is_some() {
             let name = self.program.pool.get(name.name);
-            err!("const bindings cannot be reassigned so '{name}' cannot be '()!uninitialized'",)
+            err!("const bindings cannot be reassigned so '{name}' cannot be uninitialized",)
         }
 
         let rec = if let Some(real_val) = value.expr.as_suffix_macro_mut(Flag::Rec) {

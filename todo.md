@@ -119,7 +119,7 @@
 - void pointer cast
 - hacky rust pointer ffi
 - inline asm
-- reading from ()!uninitialized
+- reading from uninitialized memory
 
 ## Testing
 

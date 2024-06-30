@@ -487,7 +487,8 @@ pub fn zero_padding(program: &Program, ty: TypeId, bytes: &mut [u8], i: &mut usi
 
 pub fn int_from_bytes(bytes: &[u8]) -> i64 {
     debug_assert_eq!(bytes.len(), 8);
-    i64::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]])
+    debug_assert_eq!(bytes.as_ptr() as i64 % 8, 0);
+    unsafe { *(bytes.as_ptr() as *const i64) }
 }
 
 #[derive(Debug)]
@@ -509,7 +510,7 @@ impl<'a> ReadBytes<'a> {
         debug_assert_eq!(self.i % 2, 0);
         if self.i + 1 < self.bytes.len() {
             self.i += 2;
-            Some(u16::from_ne_bytes([self.bytes[self.i - 2], self.bytes[self.i - 1]]))
+            Some(unsafe { *(self.bytes.as_ptr().add(self.i - 2) as *const u16) })
         } else {
             None
         }
@@ -518,12 +519,7 @@ impl<'a> ReadBytes<'a> {
         debug_assert_eq!(self.i % 4, 0);
         if self.i + 3 < self.bytes.len() {
             self.i += 4;
-            Some(u32::from_ne_bytes([
-                self.bytes[self.i - 4],
-                self.bytes[self.i - 3],
-                self.bytes[self.i - 2],
-                self.bytes[self.i - 1],
-            ]))
+            Some(unsafe { *(self.bytes.as_ptr().add(self.i - 4) as *const u32) })
         } else {
             None
         }

@@ -608,6 +608,7 @@ pub enum FnFlag {
     UnsafeNoopCast,
     NoStackTrace,
     MayHaveAquiredCaptures,
+    TookPointerValue,
 }
 
 impl<'p> Func<'p> {

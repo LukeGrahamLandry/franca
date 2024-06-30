@@ -1,6 +1,6 @@
 #![allow(improper_ctypes_definitions)]
 
-use crate::self_hosted::{emit_llvm, resolve_root};
+use crate::self_hosted::{emit_llvm, resolve_root, show_error_line, ParseErr, SelfHosted};
 use crate::unwrap2;
 use libc::c_void;
 
@@ -112,6 +112,7 @@ pub enum BigResult<T, E> {
     Err(E),
 }
 impl<T, E: Debug> BigResult<T, E> {
+    #[track_caller]
     pub fn unwrap(self) -> T {
         match self {
             Ok(t) => t,
@@ -153,6 +154,30 @@ impl<T, E> From<Result<T, E>> for BigResult<T, E> {
             Result::Ok(e) => Ok(e),
             Result::Err(e) => Err(e),
         }
+    }
+}
+
+impl<'p, T: 'p> BigResult<T, ParseErr<'p>> {
+    pub(crate) fn unwrap_log(self, pool: &mut SelfHosted<'p>) -> T {
+        self.unwrap_or_else(|e| {
+            unsafe {
+                show_error_line(pool.codemap, e.span.low, e.span.high);
+            }
+            panic!("{}", e.msg)
+        })
+    }
+}
+
+impl<'p, T: 'p> BigResult<T, CompileError<'p>> {
+    pub(crate) fn unwrap_log(self, pool: &mut SelfHosted<'p>) -> T {
+        self.unwrap_or_else(|e| {
+            if let Some(loc) = e.loc {
+                unsafe {
+                    show_error_line(pool.codemap, loc.low, loc.high);
+                }
+            }
+            panic!("{e:?}")
+        })
     }
 }
 
@@ -217,6 +242,7 @@ pub struct ImportVTable {
     clone_expr: for<'p> extern "C" fn(e: &FatExpr<'p>) -> FatExpr<'p>,
     clone_type: for<'p> extern "C" fn(e: &LazyType<'p>) -> LazyType<'p>,
     intern_type: for<'p> extern "C" fn(compile: &mut Compile<'_, 'p>, e: TypeInfo<'p>) -> TypeId,
+    get_type: for<'p> extern "C" fn(compile: &mut Compile<'_, 'p>, e: TypeId) -> *const TypeInfo<'p>,
 }
 
 #[repr(C)]
@@ -261,7 +287,12 @@ pub static IMPORT_VTABLE: ImportVTable = ImportVTable {
     clone_expr,
     clone_type,
     intern_type: franca_intern_type,
+    get_type,
 };
+
+extern "C" fn get_type<'p>(compile: &mut Compile<'_, 'p>, e: TypeId) -> *const TypeInfo<'p> {
+    &compile.program[e] as *const TypeInfo<'p>
+}
 
 extern "C" fn franca_intern_type<'p>(comp: &mut Compile<'_, 'p>, ty: TypeInfo<'p>) -> TypeId {
     comp.program.intern_type(ty)
@@ -818,9 +849,11 @@ extern "C-unwind" fn unquote_macro_apply_placeholders<'p>(compile: &mut Compile<
     //     args.len(),
     //     args.as_mut_ptr() as usize % mem::align_of::<FatExpr>()
     // );
-    // for a in unsafe { &*args } {
-    //     println!("{}", unsafe { &*a }.log(compile.pool));
+    // for a in unsafe { &mut *args } {
+    //     // println!("{}", unsafe { &*a }.log(compile.program.pool));
+    //     // unsafe { show_error_line(compile.program.pool.codemap, a.loc.low, a.loc.high) }
     // }
+
     let mut args = unsafe { &*args }.to_vec();
     let doo = || {
         let mut template = unwrap!(args.pop(), "template arg");

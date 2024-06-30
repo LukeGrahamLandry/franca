@@ -30,6 +30,7 @@ fn range(start: i64, end: i64, const yield: Fn(i64, void)) void = {
 // TODO: PROBLEM: now that im not just taking the first overload, this not using comptiem cache because its not #generic so multiple versions of inner functions can get made 
 //       I still want to replace @comptiem with just having const args but need to make @impl use the cache. 
 
+// :blessed: String literals and @slice create values of this type. 
 fn Slice(const T: Type) Type = {
     Self :: @struct(ptr: *T, len: i64);
     
@@ -124,19 +125,19 @@ fn Slice(const T: Type) Type = {
 }
 
 // TODO: single element if arg isn't a tuple.
-#macro fn slice(elements: FatExpr, allocator: FatExpr) FatExpr = '{
+#macro fn slice(elements: FatExpr, allocator: FatExpr) FatExpr = @{
     s := @slice @[elements];
     s := clone(s, @[allocator]);
     s.items()
-}';
+};
 
-#macro fn slice(elements: FatExpr) FatExpr = '@[elements]!slice';
+#macro fn slice(elements: FatExpr) FatExpr = @{ @[elements]!slice };
 
-#macro fn list(elements: FatExpr, allocator: FatExpr) FatExpr = '{
+#macro fn list(elements: FatExpr, allocator: FatExpr) FatExpr = @{
     s := @slice @[elements];
     s := clone(s, @[allocator]);
     s
-}';
+};
 
 // TODO: can't do this in fn Slice because it tries to deal with all the overloads too soon? 
 fn display_slice(const T: Type) void = {
@@ -154,10 +155,9 @@ fn display_slice(const T: Type) void = {
 }
 
 /// A null terminated sequence of bytes.
-/// This is magic because you can have one as a constant and the compiler knows
-/// to include all the way until a zero, not just a single byte like it would for a normal *u8. 
 CStr :: @struct(ptr: *u8);
 
+/// When emitting an aot constant, include all the way until a zero, not just a single byte like it would for a normal *u8. 
 fn bake_relocatable_value(self: *CStr) Slice(BakedEntry) = {
     bytes: List(u8) = list(ast_alloc());
     for self[] { b|
@@ -189,7 +189,7 @@ fn Array(const T: Type, const count: i64) Type = {
     
     fn init(elements: Slice(T)) Self #no_tail = {
         assert(eq(elements.len, count), "arrays have fixed length"); // TODO: better message 
-        self: Self = ()!uninitialized;
+        self := Self.uninitialized();
         enumerate(elements){ i, t |
             self&.index(i)[] = t[];
         };
@@ -197,7 +197,7 @@ fn Array(const T: Type, const count: i64) Type = {
     }
     
     fn init(copied: T) Self #no_tail = {
-        self: Self = ()!uninitialized;
+        self := Self.uninitialized();
         range(0, count){ i |
             self&.index(i)[] = copied;
         };

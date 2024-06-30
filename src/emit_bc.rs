@@ -1019,7 +1019,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         };
                         return Ok(());
                     }
-                    Flag::Return => ice!("!return is const only",),
                     name => err!("{name:?} is known flag but not builtin macro",),
                 }
             }

@@ -1,7 +1,7 @@
 use std::{marker::PhantomData, ptr::addr_of};
 
 use crate::{
-    ast::{FatExpr, FatStmt, Flag, Func, LazyType, Pattern, ScopeId, TypeId, Var},
+    ast::{FatExpr, FatStmt, Flag, Func, FuncId, LazyType, Pattern, ScopeId, TypeId, Var},
     compiler::Scope,
     err,
     export_ffi::{BigOption, ImportVTable, IMPORT_VTABLE},
@@ -17,6 +17,8 @@ pub struct SelfHosted<'p> {
     _arena: *mut (),
     scopes: *mut (),
     vtable: *const ImportVTable,
+    _baked: *mut (),
+    pub last_loc: Span,
     a: PhantomData<&'p u8>,
 }
 
@@ -64,12 +66,13 @@ extern "C" {
     fn get_constant<'p>(scopes: *mut (), name: Var<'p>) -> BigOption<&'p mut (FatExpr<'p>, LazyType<'p>)>;
     fn find_constant_in_scope<'p>(scopes: *mut (), s: ScopeId, name: Ident<'p>) -> BigOption<Var<'p>>;
     fn dup_var<'p>(scopes: *mut (), old: Var<'p>) -> Var<'p>;
-    pub fn resolve_root<'p>(compiler: &mut SelfHosted<'p>, func: &mut Func<'p>, scope: ScopeId) -> BigResult<ParseErr<'p>, ()>;
-    pub fn resolve_sign<'p>(compiler: &mut SelfHosted<'p>, func: &mut Func<'p>) -> BigResult<ParseErr<'p>, ()>;
-    pub fn resolve_body<'p>(compiler: &mut SelfHosted<'p>, func: &mut Func<'p>) -> BigResult<ParseErr<'p>, ()>;
+    pub fn resolve_root<'p>(compiler: &mut SelfHosted<'p>, func: &mut Func<'p>, scope: ScopeId) -> BigResult<(), ParseErr<'p>>;
+    pub fn resolve_sign<'p>(compiler: &mut SelfHosted<'p>, func: &mut Func<'p>) -> BigResult<(), ParseErr<'p>>;
+    pub fn resolve_body<'p>(compiler: &mut SelfHosted<'p>, func: &mut Func<'p>) -> BigResult<(), ParseErr<'p>>;
     // For unquoting, initial will be None, but for inlining closures, it will be the return variable.
     fn renumber_expr<'p>(compiler: &mut SelfHosted<'p>, expr: &mut FatExpr<'p>, initial: BigOption<(Var<'p>, Var<'p>)>);
-    fn maybe_renumber_and_dup_scope<'p>(compiler: &mut SelfHosted<'p>, new_func: &mut Func<'p>) -> BigResult<ParseErr<'p>, ()>;
+    fn maybe_renumber_and_dup_scope<'p>(compiler: &mut SelfHosted<'p>, new_func: &mut Func<'p>) -> BigResult<(), ParseErr<'p>>;
+    pub fn created_jit_fn_ptr_value(compiler: &SelfHosted, f: FuncId, ptr: i64);
 
 }
 

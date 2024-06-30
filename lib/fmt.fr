@@ -35,7 +35,7 @@ fn display(self: Str, writer: *List(u8)) void = writer.write(self);
 #macro 
 fn fmt(arg: AstExpr) AstExpr = {
     arg := compile_ast(arg);
-    args := AstExpr.slice_from_tuple(arg.expr.Tuple);
+    args := arg.expr.Tuple.items();
     // TODO: assert no side effects or use variable so it doesn't run many times. 
   
     writer := compile_ast(args[0]);
@@ -55,7 +55,7 @@ fn format_into(writer: FatExpr, args: Slice(FatExpr), loc: Span) FatExpr = {
     
     // TODO: reserve space for known length args. 
     emit :: fn(msg: AstExpr) void => {
-        action: FatExpr = 'display(@[msg], @[writer])';
+        action: FatExpr = @{ display(@[msg], @[writer]) };
         actions&.push(action);
     };
     emit(@literal parts[0]);
@@ -66,32 +66,30 @@ fn format_into(writer: FatExpr, args: Slice(FatExpr), loc: Span) FatExpr = {
         s := parts[i.add(1)]&;
         emit(compile_ast(@literal s[]));
     };
-    actions := actions&.items();
     // need to compile so @println can use a macro that expands to a tuple but dont want to remember the type since it will change when our macro gets expanded. -- Apr 25
-    (expr = (Tuple = AstExpr.tuple_from_slice(actions)), loc = loc, ty = UnknownType, done = false)
+    (expr = (Tuple = actions.rs()), loc = loc, ty = UnknownType, done = false)
 }
 
 #macro 
 fn concat(arg: AstExpr, rt_alloc: AstExpr) AstExpr = {
-    args := AstExpr.slice_from_tuple(arg.expr.Tuple);
+    args := arg.expr.Tuple.items();
     actions: List(AstExpr) = list(args.len(), ast_alloc());
     
-    '{
+    @{
         // TODO: caller needs to pass allocator since this is at runtime. 
         join_list: List(u8) = list(@[rt_alloc]);
         @[{
             args.enumerate(fn(i, param) => {  // TODO: zip iterators 
                 // TODO: having () in the cast instead of lit(void) stopped working when I changed some things to use the infallible imm_eval_known which is weird -- Apr 21 
-                action := '@as(void) push_all(join_list&, @as(Str) @[param[]])';
+                action := @{ @as(void) push_all(join_list&, @as(Str) @[param[]]) };
                 actions&.push(action);
             });
             
-            actions := actions&.items();
-            arg.expr.Tuple = AstExpr.tuple_from_slice(actions);
+            arg.expr.Tuple = actions.rs();
             arg
         }];
         join_list&.items()  // TODO: this leaks the list. 
-    }'
+    }
 }
 
 #macro 
@@ -99,7 +97,7 @@ fn prepend_tuple(arg: AstExpr, target: AstExpr) AstExpr = {
     target := compile_ast(target);
     // TODO: now that i dont double track types, this will break everything if you do it to an int literal. -- May 1
     target.ty = UnknownType;
-    original := AstExpr.slice_from_tuple(target.expr.Tuple);
+    original := target.expr.Tuple.items();
     tuple: List(AstExpr) = list(original.len.add(1), ast_alloc()); 
     tuple&.push(arg);
     tuple&.push_all(original);
@@ -108,34 +106,34 @@ fn prepend_tuple(arg: AstExpr, target: AstExpr) AstExpr = {
 }
 
 #macro 
-fn println(arg: AstExpr) AstExpr = '{
+fn println(arg: AstExpr) AstExpr = @{
     out: List(u8) = list(0, temp());
     @fmt(@prepend_tuple(out&) @[arg]);
     println(out&.items());
     out&.drop();
-}';
+};
 
 #macro 
-fn print(arg: AstExpr) AstExpr = '{
+fn print(arg: AstExpr) AstExpr = @{
     out: List(u8) = list(0, temp());
     @fmt(@prepend_tuple(out&) @[arg]);
     print(out&.items());
     out&.drop();
-}';
+};
 
 #macro 
-fn format(arg: AstExpr, alloc: AstExpr) AstExpr = '{
+fn format(arg: AstExpr, alloc: AstExpr) AstExpr = @{
     out: List(u8) = list(0, @[alloc]);
     @fmt(@prepend_tuple(out&) @[arg]);
     out
-}';
+};
 
 #macro 
-fn panic(arg: AstExpr) AstExpr = '{
+fn panic(arg: AstExpr) AstExpr = @{
     out: List(u8) = list(0, temp()); 
     @fmt(@prepend_tuple(out&) @[arg]);
     panic(out&.items());
-}';
+};
 
 // TODO: use fn display to implement fn str instead of fn str allocating. rn this leaks. 
 fn display(i: i64, s: *List(u8)) void = {

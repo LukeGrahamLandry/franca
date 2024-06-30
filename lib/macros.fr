@@ -4,34 +4,29 @@
 //       so have to pass by void ptr but currently can't just make lvalue refernce like rust. 
 //       can't decide if this macro is good enough or want ^ as more general solution. 
 #macro #outputs(AstExpr)
-fn literal(arg: AstExpr, target: AstExpr) AstExpr = {
-    '{
-        value: @[arg] = @[target];
-        literal_ast(@[arg], raw_from_ptr(@[arg], value&))
-    }'
-}
+fn literal(arg: AstExpr, target: AstExpr) AstExpr = @{
+    value: @[arg] = @[target];
+    literal_ast(@[arg], raw_from_ptr(@[arg], value&))
+};
+
 
 // Same as the two argument version but infers the type. 
 // TODO: assert that arg isn't 'void' because then its ambigous with the two argument version. -- Apr 21
 #macro #outputs(AstExpr)
-fn literal(arg: AstExpr) AstExpr = {
-    '{
-        value := @[arg];
-        literal_ast(@type value, raw_from_ptr(@type value, value&))
-    }'
-}
+fn literal(arg: AstExpr) AstExpr = @{
+    value := @[arg];
+    literal_ast(@type value, raw_from_ptr(@type value, value&))
+};
 
-/// Ast<?> -> Ast<T>
-fn as(T: Type, expr: FatExpr) FatExpr = '@(@[@literal(as)])(@[@literal(T)]) @[expr]';
+// TODO: it does that by name tho! so its a very bad idea to shadow this with another macro. HACK
+fn as(T: Type, expr: FatExpr) FatExpr = @{ @as(@[@literal(T)]) @[expr] };
 
-// TODO: need to have an actual clone method because just relying on stack copy will share heap ptrs. 
 // TODO: once i have an asm backend, this can become a jump table which is pretty cool. 
 // TODO: this has a referential transparency problem
-// TODO: allow a catch all default if last func has no name. 
 // TODO: should always inline the bodies, even if no captures? 
 #macro 
 fn match(arg: FatExpr, target: FatExpr) FatExpr = {
-    stmts := FatStmt.slice_from_tuple(target.expr.Block.body);
+    stmts := target.expr.Block.body.items();
     arg = compile_ast(arg);
     enum_type := arg.ty;
     info := get_type_info_raw(enum_type);
@@ -48,11 +43,11 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
     assert(eq(info&!tag[], tag_value(TypeInfo, @symbol(Tagged))), "@match expected argument type to be @tagged");
     info := info.Tagged;
     
-    varients := Ty(Symbol, Type).slice_from_tuple(info.cases);
+    varients := info.cases.items();
     
     // TODO: compile error to not handle all and not have a default branch
     // TODO: why can't i call 'as'? ffi unique? 
-    body: FatExpr = 'panic("unhandled match case")';
+    body: FatExpr = @{ panic("unhandled match case") };
     
     // TODO: typecheck err message (forgot to deref !tag) points at the wrong location in the expression. (1)
     // TODO: when unptr_ty wasn't getting raw type, the error message was at the return value instead of here. (2)
@@ -64,9 +59,9 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
     // TODO: use default arguments as value eq guards. 
     
     ::if(FatExpr);
-    '{
-        arg_val := @[if(is_ptr, =>'@as(void)unit', => arg)];
-        arg_ptr := @[if(is_ptr, =>arg, =>'arg_val&')];
+    @{
+        arg_val := @[if(is_ptr, => @{ @as(void)unit }, => arg)];
+        arg_ptr := @[if(is_ptr, =>arg, => @{ arg_val& })];
         tag_val := arg_ptr!tag[];
         @[{
             count := 0;
@@ -94,7 +89,7 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
                 
                         // If they didn't say the argument type, we can fill it in based on the varient name. 
                         // If they don't put an argument, just ignore the value. Have to set the type because it defaults to void. 
-                        bindings := Binding.slice_from_tuple(closure.arg.bindings);
+                        bindings := closure.arg.bindings.items();
                         if(bindings.len.eq(1)){|
                             first := bindings[0]&;
                             infer := first.ty&!tag[].eq(tag_value(LazyType, @symbol Infer));
@@ -105,12 +100,12 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
                         };
                         case_access := 'arg_ptr.___';
                         case_access.expr.FieldAccess.name = name;  // (3)
-                        tag := 'tag_value(@[@literal(Type) enum_type], @[@literal(name)])';
+                        tag := @{ tag_value(@[@literal(Type) enum_type], @[@literal(name)]) };
                         if(is_ptr){|
-                            case_access = '@[case_access]&';
+                            case_access = @{ @[case_access]& };
                         };
                         count = count.add(1);
-                        body = '(eq(tag_val, @[tag]), => @[handler_body[]](@[case_access]), => @[body])!if';
+                        body = @{ (eq(tag_val, @[tag]), => @[handler_body[]](@[case_access]), => @[body])!if };
                     } {| // else
                         // TODO: better error message if its a call because they forgot a semi-colon. 
                         //debug_log_ast(handler_body[]);
@@ -124,7 +119,7 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
                         action := branch.target[];
                         assert(name.eq(@symbol default), "unhandled prefix in @match");
                         assert(first, "@default must be the last handler in @match");
-                        body = '@[action]()';
+                        body = @{ @[action]() };
                         had_default = true;
                     };
                 };
@@ -139,31 +134,31 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
             assert(not(had_default).or(count.lt(varients.len)), "@default but too many @match cases");
             body
         }]
-    }'
+    }
 }
 
-fn if_let(arg: FatExpr, handler: FatExpr) FatExpr #macro = '
+fn if_let(arg: FatExpr, handler: FatExpr) FatExpr #macro = @{
     @match(@[arg]) {
         @[handler];
         @default => ();
     }
-';
+};
 
 /// Similar to @match but operates on values instead of enum payloads. 
 /// @switch(value) { @<specifier> => <body> }
 /// - @case(v): calls <body> if value.eq(v)
 #macro 
 fn switch(arg: FatExpr, handlers: FatExpr) FatExpr = {
-    handlers := FatStmt.slice_from_tuple(handlers.expr.Block.body);
+    handlers := handlers.expr.Block.body.items();
     arg = compile_ast(arg);
     inspected_ty: Type = arg.ty; // TODO: if you dont have the type hint you get confusing error message trying to call fn as(Type, Ast) becuase its the unique ffi TypeId type. -- Apr 21 
-    body := 'panic("unhandled switch case")';
+    body := @{ panic("unhandled switch case") };
     first := true;
     i := handlers.len().sub(1);
     
     // Declaring variables is weird because name resolution has already run. 
     // All the references to it need to be in its lexical scope, so the whole code is in an unquote. 
-    '{
+    @{
         arg_var := @[arg];
         @[{
             while(=> i.ge(0)) {|
@@ -183,24 +178,24 @@ fn switch(arg: FatExpr, handlers: FatExpr) FatExpr = {
                     if(name.eq(@symbol case)) {|
                         // TODO: probably want to require arg to be constant so it could eventually become a jump table. 
                         // TODO: improve error message if you try to pass the ast of a type instead of the type. alas I chose the same name as the as macro so it still tpyechecks. -- Apr 21
-                        cond := 'eq(arg_var, @[as(inspected_ty, arg[])])';
-                        body = '(@[cond], =>@[action](), =>@[body])!if';
+                        cond := @{ eq(arg_var, @[as(inspected_ty, arg[])]) };
+                        body = @{ (@[cond], =>@[action](), =>@[body])!if };
                     } {|
                         if(name.eq(@symbol default)) {|
                             if(first) {|
                                 // TODO: dont pass it if the function wants void arg.
                                 // If expansion err here: forgot argument for default branch handler?  // TODO: give error message
-                                body = '@[action](arg_var)';
+                                body = @{ @[action](arg_var) };
                             }{|
                                 panic("@default must be the last handler in @switch");
                             };
                         }{|
                             if(name.eq(@symbol inclusive)) {|
-                                cond := '{
+                                cond := @{
                                     min_max := @[as(Ty(inspected_ty, inspected_ty), arg[])];
                                     arg_var.ge(min_max._0).and(arg_var.le(min_max._1))
-                                }';
-                                body = '(@[cond], =>@[action](), =>@[body])!if';
+                                };
+                                body = @{ (@[cond], =>@[action](), =>@[body])!if };
                             }{|
                                 // TODO: try expanding the macro, maybe its a user added one and would create valid branches. 
                                 //n: Str = name.str(); // TODO: this broke when I started renumbering in bind_const_arg -- Apr 23. 
@@ -216,7 +211,7 @@ fn switch(arg: FatExpr, handlers: FatExpr) FatExpr = {
             };
             body
         }]
-    }'
+    }
 }
 
 // TODO: remove when the below works. -- Jun 1
@@ -227,7 +222,7 @@ fn switch(arg: FatExpr, handlers: FatExpr) FatExpr = {
 #macro #outputs(u32)
 fn __bits(arg: AstExpr) AstExpr = {
     zero := 0;
-    parts := AstExpr.slice_from_tuple(arg.expr.Tuple);
+    parts := arg.expr.Tuple.items();
     expr := '@as(u32) 0.trunc()';
     shift := 32;
     each(parts, fn(part) => {
@@ -244,12 +239,12 @@ fn __bits(arg: AstExpr) AstExpr = {
         next := if(int.signed, 
             => {
                 part_ast := as(i64, part[]);
-                'signed_truncate(@[part_ast], @[@literal(i64) int.bit_count])'
+                @{ signed_truncate(@[part_ast], @[@literal(i64) int.bit_count]) }
             },
             => as(u32, part[])
         );
-        next := 'shift_left(@[next], @[@literal(shift)])';
-        expr = 'bit_or(@[expr], @[next])';
+        next := @{ shift_left(@[next], @[@literal(shift)]) };
+        expr = @{ bit_or(@[expr], @[next]) };
     });
     
     // TODO: want to be able to just have a version of assert that does this but there's a weird dependency. 
@@ -263,7 +258,7 @@ fn __bits(arg: AstExpr) AstExpr = {
     as(u32, expr)
 }
 
-/// The parser desugars stuff into calls to these blessed functions. 
+/// :blessed: The parser desugars stuff into calls to these functions. 
 /// But it just refers to them by name. If you cause that to resolve to your own function, you can change the operator's behaviour. 
 #macro #outputs(void) fn operator_plus_equal(place: FatExpr, value: FatExpr) FatExpr = assignment_operator(place, value, add);
 #macro #outputs(void) fn operator_minus_equal(place: FatExpr, value: FatExpr) FatExpr = assignment_operator(place, value, sub);
@@ -291,7 +286,7 @@ fn assignment_operator(place: FatExpr, value: FatExpr, f: OverloadSet) FatExpr =
     
     if(is_var_access){|
         // This type of macro can't return a stmt, so it has to be wrapped in a block. Maybe we should use the other kind once that exists. 
-        '{ @[place] = @[@literal(f)](@[place], @[value]); }'
+        @{ @[place] = @[@literal(f)](@[place], @[value]); }
     } {|
         // TODO: nice report_compile_error api that lets you attatch the Span so you get useful error message rendering. 
         assert(kind.ne(tag_value(Expr, @symbol(PrefixMacro))), "TODO: support macro expansion in place expr");
@@ -302,7 +297,7 @@ fn assignment_operator(place: FatExpr, value: FatExpr, f: OverloadSet) FatExpr =
         assert(is_deref, "_= operator left hand side must be a place expr.");
         // we know the lhs is 'whatever[]', but we want to just access the pointer and add the deref later. 
         ptr_expr := place.expr.SuffixMacro.arg[];
-        '{ ptr := @[ptr_expr]; ptr[] = @[@literal(f)](ptr[], @[value]); }'
+        @{ ptr := @[ptr_expr]; ptr[] = @[@literal(f)](ptr[], @[value]); }
     }
 }
 
@@ -315,7 +310,7 @@ fn enum(names: FatExpr) FatExpr = {
 
     fn binding(name: Symbol, value: i64) Binding = {
         template := '(a = 0)';
-        all := Binding.slice_from_tuple(template.expr.StructLiteralP.bindings); 
+        all := template.expr.StructLiteralP.bindings.items();
         out := all.get(0);
         out.name = (Ident = name);
         out.default = (Some = @literal(value));
@@ -323,7 +318,7 @@ fn enum(names: FatExpr) FatExpr = {
     }
     
     cases: List(Binding) = list(ast_alloc());
-    parts := FatExpr.slice_from_tuple(names.expr.Tuple);
+    parts := names.expr.Tuple.items();
     enumerate(parts) {i, part|
         // TODO: really need @default on match cause this is annoying. 
         @switch(part[].expr&!tag[]) {
@@ -344,13 +339,13 @@ fn enum(names: FatExpr) FatExpr = {
     cases := cases.items();
     varients.expr.StructLiteralP.bindings = (cap = cases.len, ptr = cases.ptr, len = cases.len);
     
-    '@enum(i64) @[varients]'
+    @{ @enum(i64) @[varients] }
 }
 
 // TODO: @comptime_var which is like this but a constant at runtime. 
 #macro fn static(T: FatExpr) FatExpr = {
     t := @literal const_eval_type(T);
-    ':: @[t].ptr_from_raw(@as(rawptr) malloc(@[t].size_of()))'
+    @{ :: @[t].ptr_from_raw(@as(rawptr) malloc(@[t].size_of())) }
 }
 
 // TODO: instead of this, you should be able to take the address of a normal :: constant,
@@ -359,11 +354,11 @@ fn enum(names: FatExpr) FatExpr = {
 //       need !rec to work for anything, not just types?    -- Jun 18
 #macro fn constant(T: FatExpr, value: FatExpr) FatExpr = {
     t := @literal const_eval_type(T);
-    ':: {
+    @{ :: {
         ptr := @[t].ptr_from_raw(@as(rawptr) malloc(@[t].size_of()));
         ptr[] = @[value];
         ptr
-    }'
+    }}
 }
 
 // @array(1, 2, 3) creates an Array(i64, 3)
@@ -371,9 +366,9 @@ fn enum(names: FatExpr) FatExpr = {
 // NOTE: this doesn't make a constant one unless you explicitly use '::'.
 #macro fn array(elements: FatExpr) FatExpr = {
     assert(eq(elements.expr&!tag[], tag_value(Expr, @symbol Tuple)), "Expected @array(a, b, c, d)");
-    parts := FatExpr.slice_from_tuple(elements.expr.Tuple);
+    parts := elements.expr.Tuple.items();
     len := parts.len;
     first := compile_ast(parts[0]);
     parts.set(0, first);
-    '@as(Array(@[@literal parts[0].ty], @[@literal len])) init(@slice @[elements])'
+    @{ @as(Array(@[@literal parts[0].ty], @[@literal len])) init(@slice @[elements]) }
 }
