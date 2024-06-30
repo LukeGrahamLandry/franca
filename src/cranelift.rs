@@ -390,7 +390,7 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                         self.stack.push(builder.ins().bitcast(F32, MemFlags::new(), v));
                     }
                 },
-                Bc::PushGlobalAddr { id } => match self.program.baked.get(id).0 {
+                Bc::PushGlobalAddr { id } => match self.program.get_baked(id) {
                     BakedVar::Bytes(bytes) => {
                         let id: DataId = Into::<Res<_>>::into(self.cl.module.declare_anonymous_data(false, false).map_err(wrap))?;
                         let mut data = DataDescription::new();

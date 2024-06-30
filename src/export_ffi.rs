@@ -10,7 +10,7 @@ use crate::ast::{
 };
 use crate::bc::{BakedEntry, BakedVar, BakedVarId, FnBody, PrimSig, Values};
 use crate::compiler::{Compile, CompileError, ExecStyle, Res, Unquote, EXPECT_ERR_DEPTH};
-use crate::emit_bc::{emit_relocatable_constant_body, prim_sig};
+use crate::emit_bc::prim_sig;
 use crate::ffi::InterpSend;
 use crate::logging::{unwrap, PoolLog};
 use crate::overloading::where_the_fuck_am_i;
@@ -319,10 +319,14 @@ extern "C" fn franca_prim_sig2<'p>(c: &Compile<'_, 'p>, func: &Func<'p>) -> Res<
 }
 
 extern "C" fn bake_var(c: &mut Compile, val: BakedVar) -> BakedVarId {
+    #[cfg(feature = "self_const")]
     unsafe {
-        put_baked(c.program.pool, val.clone(), BigOption::None);
+        put_baked(c.program.pool, val.clone(), BigOption::None)
     }
-    c.program.baked.make(val, null(), TypeId::unknown)
+    #[cfg(not(feature = "self_const"))]
+    {
+        c.program.baked.make(val, null(), TypeId::unknown)
+    }
 }
 
 extern "C" fn debug_log_bc<'p>(c: &Compile<'_, 'p>, body: &FnBody<'p>) {
@@ -330,13 +334,26 @@ extern "C" fn debug_log_bc<'p>(c: &Compile<'_, 'p>, body: &FnBody<'p>) {
 }
 
 extern "C" fn get_baked(compile: &Compile, id: BakedVarId) -> BakedVar {
-    // let new = unsafe { crate::self_hosted::get_baked(compile.program.pool, id) };
-    let old = compile.program.baked.get(id);
-    old.0
+    #[cfg(feature = "self_const")]
+    unsafe {
+        (*crate::self_hosted::get_baked(compile.program.pool, id)).1.clone()
+    }
+
+    #[cfg(not(feature = "self_const"))]
+    {
+        compile.program.baked.get(id).0
+    }
 }
 
 extern "C" fn debug_log_baked_constant(compile: &Compile, id: BakedVarId) {
-    println!("{:?}", compile.program.baked.get(id))
+    #[cfg(not(feature = "self_const"))]
+    {
+        println!("{:?}", compile.program.baked.get(id))
+    }
+    #[cfg(feature = "self_const")]
+    unsafe {
+        println!("{:?}", (*crate::self_hosted::get_baked(compile.program.pool, id)).1)
+    }
 }
 
 extern "C" fn get_type_meta(compile: &Compile, ty: TypeId) -> TypeMeta {
@@ -554,17 +571,24 @@ pub const COMPILER: &[(&str, *const u8)] = &[
 
 extern "C-unwind" fn dyn_bake_relocatable_value(comp: &mut Compile, bytes: &[u8], ty: TypeId, force_default_handling: bool) -> *const [BakedEntry] {
     debug_assert_eq!(comp.program.get_info(ty).stride_bytes as usize, bytes.len());
-    let mut out = vec![];
-    emit_relocatable_constant_body(
-        ty,
-        &Values::from_bytes(bytes),
-        comp.program,
-        &comp.aarch64.dispatch,
-        &mut out,
-        force_default_handling,
-    )
-    .unwrap();
-    out.leak() as *const [BakedEntry]
+    #[cfg(not(feature = "self_const"))]
+    {
+        let mut out = vec![];
+        crate::emit_bc::emit_relocatable_constant_body(
+            ty,
+            &Values::from_bytes(bytes),
+            comp.program,
+            &comp.aarch64.dispatch,
+            &mut out,
+            force_default_handling,
+        )
+        .unwrap();
+        out.leak() as *const [BakedEntry]
+    }
+    #[cfg(feature = "self_const")]
+    {
+        unsafe { crate::self_hosted::emit_relocatable_constant_body(comp, bytes, ty, force_default_handling).unwrap() }
+    }
 }
 
 // TODO: make an easy way to write these from the language.
@@ -580,7 +604,14 @@ extern "C-unwind" fn save_bake_os(comp: &mut Compile, os: OverloadSetId) {
 
 // TODO: version of this that allows caching? but have to think more about when you're allowed to deduplicate.
 extern "C-unwind" fn bake_value(comp: &mut Compile, v: BakedVar) -> BakedVarId {
-    comp.program.baked.make(v, null(), TypeId::unknown)
+    #[cfg(not(feature = "self_const"))]
+    {
+        comp.program.baked.make(v, null(), TypeId::unknown)
+    }
+    #[cfg(feature = "self_const")]
+    unsafe {
+        crate::self_hosted::put_baked(comp.program.pool, v, BigOption::None)
+    }
 }
 
 extern "C-unwind" fn get_compiler_vtable(_: &mut Compile) -> *const ImportVTable {

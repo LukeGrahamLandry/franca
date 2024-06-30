@@ -1,4 +1,5 @@
 //! High level representation of a Franca program. Macros operate on these types.
+use crate::bc::BakedVar;
 use crate::self_hosted::Span;
 use crate::{
     bc::{Baked, BakedEntry, Prim, Values},
@@ -1185,6 +1186,31 @@ impl<'p> Program<'p> {
         key.2 = false;
 
         self.get_primitives(key).unwrap()
+    }
+
+    pub(crate) fn get_baked_addr(&self, id: crate::bc::BakedVarId) -> *const u8 {
+        #[cfg(feature = "self_const")]
+        unsafe {
+            (*crate::self_hosted::get_baked(self.pool, id)).0 as *const u8
+        }
+
+        #[cfg(not(feature = "self_const"))]
+        {
+            self.baked.get(id).1
+        }
+    }
+
+    pub(crate) fn get_baked(&self, id: crate::bc::BakedVarId) -> BakedVar {
+        #[cfg(feature = "self_const")]
+        unsafe {
+            // TODO: remove clone when remove feature flag
+            (*crate::self_hosted::get_baked(self.pool, id)).1.clone()
+        }
+
+        #[cfg(not(feature = "self_const"))]
+        {
+            self.baked.get(id).0
+        }
     }
 }
 

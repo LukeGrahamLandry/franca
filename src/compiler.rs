@@ -1650,6 +1650,12 @@ impl<'a, 'p> Compile<'a, 'p> {
                         if let TypeInfo::Fn(_) = self.program[ty] {
                             let id: FuncId = self.immediate_eval_expr_known(*arg.clone())?;
                             assert!(!self.program[id].any_const_args());
+                            if !self.program[id].get_flag(TookPointerValue) {
+                                if let Some(ptr) = self.aarch64.get_fn(id) {
+                                    // We've already compiled the function but didn't know we'd need to remember its address. (ie. #test fn large_struct_ret_return).
+                                    unsafe { created_jit_fn_ptr_value(self.program.pool, id, ptr as i64 )}
+                                }
+                            }
                             self.program[id].set_flag(TookPointerValue, true);
                             // TODO: for now you just need to not make a mistake with calling convention
                             self.add_callee(id);

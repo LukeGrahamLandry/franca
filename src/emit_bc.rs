@@ -24,6 +24,7 @@ use crate::{bc::*, Map, STATS};
 
 struct EmitBc<'z, 'p: 'z> {
     program: &'z Program<'p>,
+    fuck: usize,
     asm: &'z Jitted,
     last_loc: Option<Span>,
     locals: Vec<Vec<u16>>,
@@ -44,7 +45,8 @@ pub extern "C" fn emit_bc<'p>(compile: &mut Compile<'_, 'p>, f: FuncId, when: Ex
         compile.program[f].set_flag(FnFlag::NoStackTrace, true);
     }
 
-    let mut emit = EmitBc::new(compile.program, &compile.aarch64);
+    let fuck = compile as *const Compile as usize;
+    let mut emit = EmitBc::new(compile.program, &compile.aarch64, fuck);
 
     let body = emit.compile_inner(f, when)?;
     unsafe { STATS.bytecodes += body.blocks.iter().map(|b| b.insts.len()).sum::<usize>() };
@@ -77,11 +79,12 @@ pub fn empty_fn_body<'p>(program: &Program<'p>, func: FuncId, when: ExecStyle) -
 }
 
 impl<'z, 'p: 'z> EmitBc<'z, 'p> {
-    fn new(program: &'z Program<'p>, asm: &'z Jitted) -> Self {
+    fn new(program: &'z Program<'p>, asm: &'z Jitted, fuck: usize) -> Self {
         Self {
             asm,
             last_loc: None,
             program,
+            fuck,
             locals: vec![],
             var_lookup: Default::default(),
             inlined_return_addr: Default::default(),
@@ -804,8 +807,18 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 // TODO: you probably want to allow people to overload bake_relocatable_value even if !contains_pointers, but also there's no point. -- Jun 19
                 if result.when == ExecStyle::Aot && (self.program.get_info(expr.ty).contains_pointers || want_emit_by_memcpy) {
                     if result_location == PushStack || !want_emit_by_memcpy {
+                        #[cfg(not(feature = "self_const"))]
                         let mut out = vec![];
+                        #[cfg(not(feature = "self_const"))]
                         emit_relocatable_constant_body(expr.ty, value, self.program, &self.asm.dispatch, &mut out, false)?;
+
+                        #[cfg(feature = "self_const")]
+                        let out = unsafe {
+                            &*crate::self_hosted::emit_relocatable_constant_body(&mut *(self.fuck as *mut Compile), value.bytes(), expr.ty, false)
+                                .map_err(|e| e.as_err())?
+                        }
+                        .to_vec(); // TODO: no clone when remove feature flag.
+
                         for part in out {
                             match part {
                                 // TODO: now you can't have non-i64 in top level constant struct -- Jun 18
@@ -819,7 +832,14 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         }
                     } else {
                         assert!(result_location == ResAddr);
+                        #[cfg(not(feature = "self_const"))]
                         let id = emit_relocatable_constant(expr.ty, value, self.program, &self.asm.dispatch)?;
+                        #[cfg(feature = "self_const")]
+                        let id = unsafe {
+                            crate::self_hosted::emit_relocatable_constant(&mut *(self.fuck as *mut Compile), expr.ty, value)
+                                .map_err(|e| e.as_err())?
+                        };
+
                         result.push(Bc::PushGlobalAddr { id });
                         let info = self.program.get_info(expr.ty);
                         result.push(Bc::CopyBytesToFrom { bytes: info.stride_bytes })
@@ -1270,6 +1290,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
 // TODO: i should have constant pointers as a concept in my language.
 //       right now i could check if its in the constant data arena for a hint that should catch a few of them.
+#[cfg(not(feature = "self_const"))]
 fn emit_relocatable_constant<'p>(ty: TypeId, value: &Values, program: &Program<'p>, dispatch: &[*const u8]) -> Res<'p, BakedVarId> {
     let raw = program.raw_type(ty);
     let jit_ptr = value.bytes().as_ptr();
@@ -1301,6 +1322,7 @@ fn emit_relocatable_constant<'p>(ty: TypeId, value: &Values, program: &Program<'
 
 // TODO: deduplicate small constant strings. they get stored in Values inline so can't be fixed by baked.lookup
 // TODO: make sure baked.lookup actually ever helps. might need to add checks in more places.
+#[cfg(not(feature = "self_const"))]
 pub fn emit_relocatable_constant_body<'p>(
     ty: TypeId,
     value: &Values,

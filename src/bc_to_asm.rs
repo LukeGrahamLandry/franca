@@ -357,7 +357,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
 
             Bc::PushConstant { value, .. } => self.state.stack.push(Val::Literal(value)),
             Bc::PushGlobalAddr { id } => {
-                let ptr = self.program.baked.get(id).1;
+                let ptr = self.program.get_baked_addr(id);
                 self.state.stack.push(Val::Literal(ptr as i64));
             }
             Bc::GetNativeFnPtr(f) => {

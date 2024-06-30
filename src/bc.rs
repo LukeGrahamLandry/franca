@@ -161,22 +161,26 @@ pub struct Baked {
 }
 
 impl Baked {
+    #[cfg(not(feature = "self_const"))]
     fn reserve(&self, ptr: *const u8) -> BakedVarId {
         let mut vals = self.values.borrow_mut();
         vals.push((BakedVar::Bytes(vec![]), ptr));
         BakedVarId(vals.len() as u32 - 1)
     }
 
+    #[cfg(not(feature = "self_const"))]
     fn set(&self, id: BakedVarId, val: BakedVar) {
         let mut vals = self.values.borrow_mut();
         vals[id.0 as usize].0 = val;
     }
 
+    #[cfg(not(feature = "self_const"))]
     pub(crate) fn get(&self, id: BakedVarId) -> (BakedVar, *const u8) {
         let v = self.values.borrow();
         v[id.0 as usize].clone()
     }
 
+    #[cfg(not(feature = "self_const"))]
     pub(crate) fn make(&self, val: BakedVar, ptr: *const u8, ty: TypeId) -> BakedVarId {
         let id = self.reserve(ptr);
         if !ptr.is_null() && !ty.is_unknown() {
