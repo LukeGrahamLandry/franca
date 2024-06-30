@@ -10,7 +10,6 @@
 
 use crate::self_hosted::Span;
 use std::ops::Deref;
-use std::ptr::slice_from_raw_parts;
 
 use crate::ast::{CallConv, Expr, FatExpr, FnFlag, FnType, FuncId, FuncImpl, LabelId, Program, Stmt, TypeId, TypeInfo};
 use crate::ast::{FatStmt, Flag, Pattern, Var, VarType};
@@ -807,20 +806,13 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 // TODO: you probably want to allow people to overload bake_relocatable_value even if !contains_pointers, but also there's no point. -- Jun 19
                 if result.when == ExecStyle::Aot && (self.program.get_info(expr.ty).contains_pointers || want_emit_by_memcpy) {
                     if result_location == PushStack || !want_emit_by_memcpy {
-                        #[cfg(not(feature = "self_const"))]
-                        let mut out = vec![];
-                        #[cfg(not(feature = "self_const"))]
-                        emit_relocatable_constant_body(expr.ty, value, self.program, &self.asm.dispatch, &mut out, false)?;
-
-                        #[cfg(feature = "self_const")]
                         let out = unsafe {
                             &*crate::self_hosted::emit_relocatable_constant_body(&mut *(self.fuck as *mut Compile), value.bytes(), expr.ty, false)
                                 .map_err(|e| e.as_err())?
-                        }
-                        .to_vec(); // TODO: no clone when remove feature flag.
+                        };
 
                         for part in out {
-                            match part {
+                            match *part {
                                 // TODO: now you can't have non-i64 in top level constant struct -- Jun 18
                                 BakedEntry::Num(value, ty) => result.push(Bc::PushConstant { value, ty }),
                                 BakedEntry::FnPtr(f) => result.push(Bc::GetNativeFnPtr(f)),
@@ -832,9 +824,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         }
                     } else {
                         assert!(result_location == ResAddr);
-                        #[cfg(not(feature = "self_const"))]
-                        let id = emit_relocatable_constant(expr.ty, value, self.program, &self.asm.dispatch)?;
-                        #[cfg(feature = "self_const")]
                         let id = unsafe {
                             crate::self_hosted::emit_relocatable_constant(&mut *(self.fuck as *mut Compile), expr.ty, value)
                                 .map_err(|e| e.as_err())?
@@ -1285,142 +1274,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             _ => err!("struct literal but expected {:?}", requested),
         }
         Ok(())
-    }
-}
-
-// TODO: i should have constant pointers as a concept in my language.
-//       right now i could check if its in the constant data arena for a hint that should catch a few of them.
-#[cfg(not(feature = "self_const"))]
-fn emit_relocatable_constant<'p>(ty: TypeId, value: &Values, program: &Program<'p>, dispatch: &[*const u8]) -> Res<'p, BakedVarId> {
-    let raw = program.raw_type(ty);
-    let jit_ptr = value.bytes().as_ptr();
-
-    // TODO: you want to do this for strings, so need to do it below where slices are handled,
-    //       but also i need to know which were constant and can be deduplicated.
-    //       cause what if they wanted a mutable byte array.
-    //       need @static to be different from @comptime_var or @constant
-    // let i = program.pool.intern_bytes(value.bytes());
-    // let jit_ptr = program.pool.get(i).as_ptr();
-
-    if let Some(cached) = program.baked.lookup.borrow().get(&(jit_ptr as usize, ty)) {
-        return Ok(*cached);
-    }
-
-    if value.bytes().iter().all(|b| *b == 0) {
-        return Ok(program.baked.make(BakedVar::Zeros(value.bytes().len()), jit_ptr, ty));
-    }
-
-    // Eventually we'll recurse to something with no pointers. ie Str -> [u8; n]
-    if !program.get_info(raw).contains_pointers {
-        return Ok(program.baked.make(BakedVar::Bytes(value.bytes().to_vec()), jit_ptr, ty));
-    }
-
-    let mut out = vec![];
-    emit_relocatable_constant_body(ty, value, program, dispatch, &mut out, false)?;
-    Ok(program.baked.make(BakedVar::VoidPtrArray(out), jit_ptr, ty))
-}
-
-// TODO: deduplicate small constant strings. they get stored in Values inline so can't be fixed by baked.lookup
-// TODO: make sure baked.lookup actually ever helps. might need to add checks in more places.
-#[cfg(not(feature = "self_const"))]
-pub fn emit_relocatable_constant_body<'p>(
-    ty: TypeId,
-    value: &Values,
-    program: &Program<'p>,
-    dispatch: &[*const u8],
-    out: &mut Vec<BakedEntry>,
-    force_default_handling: bool,
-) -> Res<'p, ()> {
-    // :bake_relocatable_value
-    if !force_default_handling {
-        if let Some(&f) = program.custom_bake_constant.get(&ty) {
-            unsafe {
-                let values = f(value.bytes().as_ptr() as *const ());
-                out.extend(&*values);
-            }
-            return Ok(());
-        }
-    }
-
-    let raw = program.raw_type(ty);
-
-    // if let Some(cached) = program.baked.lookup.borrow().get(&(jit_ptr as usize, ty)) {
-    //     return Ok(*cached);
-    // }
-
-    // Eventually we'll recurse to something with no pointers. ie Str -> [u8; n]
-    if !program.get_info(raw).contains_pointers {
-        for n in value.bytes().chunks(8) {
-            // TODO: small prims
-            out.push(BakedEntry::Num(int_from_bytes(n), Prim::I64))
-        }
-
-        return Ok(());
-    }
-
-    match &program[raw] {
-        TypeInfo::FnPtr { ty: f_ty, .. } => {
-            // TODO: store function pointers in a hash map as they're created instead? :SLOW
-            let want: i64 = from_values(program, value.clone())?;
-            for (i, check) in dispatch.iter().enumerate() {
-                if *check as i64 == want {
-                    let f = FuncId::from_index(i);
-                    assert_eq!(*f_ty, program[f].finished_ty().unwrap());
-                    out.push(BakedEntry::FnPtr(f));
-                    return Ok(());
-                }
-            }
-            err!("function not found",)
-        }
-        &TypeInfo::Ptr(inner) => {
-            let inner_info = program.get_info(inner);
-            let bytes = inner_info.stride_bytes as usize;
-            // load the pointer and recurse.
-            // TODO: deduplicate!
-            let ptr: i64 = from_values(program, value.clone())?;
-            let data = unsafe { &*slice_from_raw_parts(ptr as *const u8, bytes) };
-            let inner_value = Values::many(data.to_vec());
-            let value = emit_relocatable_constant(inner, &inner_value, program, dispatch)?;
-            out.push(BakedEntry::AddrOf(value));
-            Ok(())
-        }
-        TypeInfo::Struct { fields, .. } => {
-            // Just do all the fields.
-            for f in fields {
-                let info = program.get_info(f.ty);
-                assert_eq!(info.stride_bytes % 8, 0, "TODO");
-                let v = value.bytes()[f.byte_offset..f.byte_offset + info.stride_bytes as usize].to_vec();
-                emit_relocatable_constant_body(f.ty, &Values::many(v), program, dispatch, out, false)?;
-            }
-            Ok(())
-        }
-        TypeInfo::Tagged { cases } => {
-            let tag = unsafe { *(value.bytes().as_ptr() as *const usize) };
-            assert!(cases.len() > tag, "invalid constant tagged union");
-            if !program.get_info(cases[tag].1).contains_pointers {
-                // it happens that this varient is easy.
-                for n in value.bytes().chunks(8) {
-                    // TODO: small prims
-                    out.push(BakedEntry::Num(int_from_bytes(n), Prim::I64))
-                }
-
-                Ok(())
-            } else {
-                println!("{:?}", program.pool.get(cases[tag].0));
-                err!("TODO: pointers in constant tagged union: {}", program.log_type(ty))
-            }
-        }
-        TypeInfo::Enum { .. } => unreachable!(),
-        TypeInfo::VoidPtr => {
-            if value.bytes().iter().all(|b| *b == 0) {
-                // You're allowed to have a constant null pointer (like for global allocator interface instances).
-                out.push(BakedEntry::Num(0, Prim::P64));
-                Ok(())
-            } else {
-                err!("You can't have a void pointer as a constant. The compiler can't tell how many bytes to put in the final executable.",)
-            }
-        }
-        _ => err!("ICE: bad constant",),
     }
 }
 

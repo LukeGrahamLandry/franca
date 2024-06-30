@@ -26,7 +26,7 @@ use crate::bc_to_asm::{emit_aarch64, Jitted};
 use crate::emit_bc::emit_bc;
 use crate::export_ffi::{struct_macro, tagged_macro, type_macro, BigOption, BigResult, ExportVTable, ImportVTable, IMPORT_VTABLE};
 use crate::ffi::InterpSend;
-use crate::logging::{make_err, PoolLog};
+use crate::logging::PoolLog;
 use crate::overloading::where_the_fuck_am_i;
 
 use crate::{
@@ -307,8 +307,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             //       especially once i overload it for things in generics, currently slices are a magic special case.    -- Jun 19  :SLOW
             self.compile(f.func, ExecStyle::Jit)?;
             let f = unwrap!(self.aarch64.get_fn(f.func), "failed to compile function");
-            let prev = self.program.custom_bake_constant.insert(ty, unsafe { transmute(f) });
-            assert!(prev.is_none(), "conflicting overload for bake AOT constant");
             unsafe  {
                 save_bake_callback(self.program.pool, ty, transmute(f)).map_err(|e| e.as_err())?;
             }

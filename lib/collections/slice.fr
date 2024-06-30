@@ -18,7 +18,8 @@ fn slice_last();
 fn empty() void;
 fn each_rev();
 fn contains();
-    
+fn index_unchecked();
+
 fn range(start: i64, end: i64, const yield: Fn(i64, void)) void = {
     i := start;
     while(=> i.lt(end)) {|
@@ -51,6 +52,10 @@ fn Slice(const T: Type) Type = {
     fn len(self: Self) i64 #inline = self.len;
     fn index(self: Self, i: i64) *T #inline = {
         assert(i.lt(self.len), "OOB!"); 
+        self.ptr.offset(i)
+    }
+    
+    fn index_unchecked(self: Self, i: i64) *T = {
         self.ptr.offset(i)
     }
     
@@ -98,6 +103,7 @@ fn Slice(const T: Type) Type = {
             info := ::get_meta(T);
             // TODO: assert alignment
             // TODO: assert len isnt big enough to be a pointer?
+            // TODO: need to check against c.baked.lookup (the first ptr not each individual element) :BLOAT
             id := if info.contains_pointers {|
                 parts: List(BakedEntry) = list(ast_alloc());
                 each self {v| 
@@ -113,7 +119,7 @@ fn Slice(const T: Type) Type = {
                 ptr := ptr_cast_unchecked(T, u8, self.ptr);
                 bytes := slice(ptr, self.len.mul(info.stride_bytes.zext()));
                 bytes := bytes.clone(ast_alloc());
-                bake_value(@as(BakedVar) (Bytes = bytes.rs()))
+                bake_value(@as(BakedVar) (Bytes = bytes.rs())) // TODO: this should take jit_ptr param? even tho its sad if you had to do work just for me to throw away. and then would want to warn if conflicting handlers or it could be super confusing.  -- Jun 30
             };
             (AddrOf = id)
         };
@@ -159,6 +165,7 @@ CStr :: @struct(ptr: *u8);
 
 /// When emitting an aot constant, include all the way until a zero, not just a single byte like it would for a normal *u8. 
 fn bake_relocatable_value(self: *CStr) Slice(BakedEntry) = {
+    // TODO: need to check against  c.baked.lookup :BLOAT
     bytes: List(u8) = list(ast_alloc());
     for self[] { b|
         bytes&.push(b);
@@ -297,7 +304,7 @@ fn DeriveIndexable(const Self: Type, const T: Type) void = {
         // TODO: this used to work as binding. new syntax is better but old should still work. broke when scan ahead resolve. -- Apr 22
         // const f = fn(i: i64, e: *T) void = dest.set(i, e[]);
         enumerate src {i, e|
-             dest.set(i, e[]);
+            dest.set(i, e[]);
         };
     }
     

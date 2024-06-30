@@ -2,7 +2,7 @@
 use crate::bc::BakedVar;
 use crate::self_hosted::Span;
 use crate::{
-    bc::{Baked, BakedEntry, Prim, Values},
+    bc::{Prim, Values},
     compiler::{CErr, Res},
     err,
     export_ffi::BigOption,
@@ -786,12 +786,10 @@ pub struct Program<'p> {
     pub const_bound_memo: Map<(FuncId, Values), FuncId>,
     pub types_extra: RefCell<Vec<Option<TypeMeta>>>,
     finished_layout_deep: BitSet,
-    pub baked: Baked,
     pub inferred_type_names: Vec<Option<Ident<'p>>>,
     pub fat_expr_type: Option<TypeId>,
     pub bake_os: Option<OverloadSetId>,
     pub primitives: RefCell<HashMap<(TypeId, u16, bool, bool), Vec<Prim>>>,
-    pub custom_bake_constant: HashMap<TypeId, unsafe extern "C" fn(*const ()) -> *const [BakedEntry]>,
     pub inject_function_header: Option<(FuncId, FuncId)>,
 }
 
@@ -871,7 +869,6 @@ impl<'p> Program<'p> {
             inject_function_header: None,
             fat_expr_type: None,
             ffi_sizes: Default::default(),
-            baked: Default::default(),
             finished_layout_deep: BitSet::empty(),
             // these are hardcoded numbers in TypeId constructors
             // if you remove any remember to fix later indices!
@@ -908,7 +905,6 @@ impl<'p> Program<'p> {
             types_extra: Default::default(),
             inferred_type_names: vec![],
             bake_os: None,
-            custom_bake_constant: Default::default(),
         };
 
         for (i, ty) in program.types.iter().enumerate() {
@@ -1189,27 +1185,13 @@ impl<'p> Program<'p> {
     }
 
     pub(crate) fn get_baked_addr(&self, id: crate::bc::BakedVarId) -> *const u8 {
-        #[cfg(feature = "self_const")]
-        unsafe {
-            (*crate::self_hosted::get_baked(self.pool, id)).0 as *const u8
-        }
-
-        #[cfg(not(feature = "self_const"))]
-        {
-            self.baked.get(id).1
-        }
+        unsafe { (*crate::self_hosted::get_baked(self.pool, id)).0 as *const u8 }
     }
 
     pub(crate) fn get_baked(&self, id: crate::bc::BakedVarId) -> BakedVar {
-        #[cfg(feature = "self_const")]
         unsafe {
-            // TODO: remove clone when remove feature flag
+            // TODO: remove clone (do by ptr since they're stable now) -- Jun 30
             (*crate::self_hosted::get_baked(self.pool, id)).1.clone()
-        }
-
-        #[cfg(not(feature = "self_const"))]
-        {
-            self.baked.get(id).0
         }
     }
 }

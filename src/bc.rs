@@ -1,12 +1,12 @@
 //! Low level instructions
 
-use std::cell::RefCell;
 use std::mem;
 use std::ptr::{slice_from_raw_parts, slice_from_raw_parts_mut};
 
 use crate::ast::{Program, TypeInfo, Var};
 use crate::emit_bc::ResultLoc;
 use crate::self_hosted::Ident;
+use crate::unwrap;
 use crate::{assert_eq, BitSet};
 use crate::{
     ast::{FuncId, TypeId},
@@ -14,7 +14,6 @@ use crate::{
     err,
     ffi::InterpSend,
 };
-use crate::{unwrap, Map};
 
 #[repr(transparent)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -151,45 +150,6 @@ pub enum BakedEntry {
     Num(i64, Prim),
     FnPtr(FuncId),
     AddrOf(BakedVarId),
-}
-
-#[repr(C)]
-#[derive(Debug, Default)]
-pub struct Baked {
-    pub values: RefCell<Vec<(BakedVar, *const u8)>>,
-    pub lookup: RefCell<Map<(usize, TypeId), BakedVarId>>,
-}
-
-impl Baked {
-    #[cfg(not(feature = "self_const"))]
-    fn reserve(&self, ptr: *const u8) -> BakedVarId {
-        let mut vals = self.values.borrow_mut();
-        vals.push((BakedVar::Bytes(vec![]), ptr));
-        BakedVarId(vals.len() as u32 - 1)
-    }
-
-    #[cfg(not(feature = "self_const"))]
-    fn set(&self, id: BakedVarId, val: BakedVar) {
-        let mut vals = self.values.borrow_mut();
-        vals[id.0 as usize].0 = val;
-    }
-
-    #[cfg(not(feature = "self_const"))]
-    pub(crate) fn get(&self, id: BakedVarId) -> (BakedVar, *const u8) {
-        let v = self.values.borrow();
-        v[id.0 as usize].clone()
-    }
-
-    #[cfg(not(feature = "self_const"))]
-    pub(crate) fn make(&self, val: BakedVar, ptr: *const u8, ty: TypeId) -> BakedVarId {
-        let id = self.reserve(ptr);
-        if !ptr.is_null() && !ty.is_unknown() {
-            let prev = self.lookup.borrow_mut().insert((ptr as usize, ty), id);
-            debug_assert!(prev.is_none());
-        }
-        self.set(id, val);
-        id
-    }
 }
 
 impl<'p> FnBody<'p> {
