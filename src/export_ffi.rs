@@ -1,6 +1,6 @@
 #![allow(improper_ctypes_definitions)]
 
-use crate::self_hosted::{emit_llvm, resolve_root, Span};
+use crate::self_hosted::{emit_llvm, resolve_root};
 use crate::unwrap2;
 use libc::c_void;
 
@@ -182,8 +182,8 @@ impl<T, E> FromResidual for BigResult<T, E> {
 
 #[repr(C)]
 pub struct ImportVTable {
-    intern_string: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, s: *const str) -> Ident<'p>,
-    get_string: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, s: Ident<'p>) -> *const str,
+    _intern_string: usize,
+    _get_string: usize,
     _a: usize,
     init_compiler: unsafe extern "C" fn(comptime_arch: TargetArch) -> *const Compile<'static, 'static>,
     find_unqiue_func: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, name: Ident<'p>) -> BigOption<FuncId>,
@@ -194,8 +194,8 @@ pub struct ImportVTable {
     get_jitted_ptr: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, f: FuncId) -> BigCErr<'p, *const u8>,
     get_function: for<'p> unsafe extern "C" fn(c: &mut Compile<'p, '_>, f: FuncId) -> *const Func<'p>,
     _d: usize,
-    add_file: unsafe extern "C" fn(c: &mut Compile, name: &str, content: &str) -> Span, // TODO: idk if this calling convention works
-    parse_stmts: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, f: *const Span) -> BigCErr<'p, *const [FatStmt<'p>]>,
+    _add_file: usize,
+    _parse_stmts: usize,
     make_and_resolve_and_compile_top_level: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, body: *const [FatStmt<'p>]) -> BigCErr<'p, ()>,
     make_jitted_exec: unsafe extern "C" fn(c: &mut Compile),
     give_vtable: unsafe extern "C" fn(c: &mut Compile, vtable: *const ExportVTable, userdata: *mut ()),
@@ -207,7 +207,7 @@ pub struct ImportVTable {
     debug_log_baked_constant: extern "C" fn(compile: &Compile, id: BakedVarId),
     get_baked: extern "C" fn(compile: &Compile, id: BakedVarId) -> BakedVar,
     debug_log_bc: for<'p> extern "C" fn(c: &Compile<'_, 'p>, body: &FnBody<'p>),
-    prim_sig: for<'p> extern "C" fn(c: &Compile<'_, 'p>, f_ty: FnType, cc: CallConv) -> Res<'p, PrimSig<'p>>,
+    _e: usize,
     get_compiler_builtins_source: extern "C" fn() -> &'static str,
     get_cranelift_builtins_source: extern "C" fn() -> &'static str,
     emit_llvm: unsafe extern "C" fn(),
@@ -216,6 +216,7 @@ pub struct ImportVTable {
     franca_prim_sig2: for<'p> extern "C" fn(c: &Compile<'_, 'p>, func: &Func<'p>) -> Res<'p, PrimSig<'p>>,
     clone_expr: for<'p> extern "C" fn(e: &FatExpr<'p>) -> FatExpr<'p>,
     clone_type: for<'p> extern "C" fn(e: &LazyType<'p>) -> LazyType<'p>,
+    intern_type: for<'p> extern "C" fn(compile: &mut Compile<'_, 'p>, e: TypeInfo<'p>) -> TypeId,
 }
 
 #[repr(C)]
@@ -226,8 +227,8 @@ pub struct ExportVTable {
 }
 
 pub static IMPORT_VTABLE: ImportVTable = ImportVTable {
-    intern_string: franca_intern_string,
-    get_string: franca_get_string,
+    _intern_string: 1,
+    _get_string: 1,
     _a: 0,
     init_compiler: franca_init_compiler,
     find_unqiue_func: franca_find_unique_fn,
@@ -237,8 +238,8 @@ pub static IMPORT_VTABLE: ImportVTable = ImportVTable {
     get_jitted_ptr,
     get_function: franca_get_function,
     _d: 0,
-    add_file,
-    parse_stmts,
+    _add_file: 1,
+    _parse_stmts: 1,
     make_and_resolve_and_compile_top_level,
     make_jitted_exec,
     give_vtable,
@@ -250,7 +251,7 @@ pub static IMPORT_VTABLE: ImportVTable = ImportVTable {
     debug_log_baked_constant,
     get_baked,
     debug_log_bc,
-    prim_sig: franca_prim_sig,
+    _e: 0,
     get_compiler_builtins_source,
     get_cranelift_builtins_source,
     emit_llvm,
@@ -259,7 +260,12 @@ pub static IMPORT_VTABLE: ImportVTable = ImportVTable {
     franca_prim_sig2,
     clone_expr,
     clone_type,
+    intern_type: franca_intern_type,
 };
+
+extern "C" fn franca_intern_type<'p>(comp: &mut Compile<'_, 'p>, ty: TypeInfo<'p>) -> TypeId {
+    comp.program.intern_type(ty)
+}
 
 extern "C" fn clone_expr<'p>(e: &FatExpr<'p>) -> FatExpr<'p> {
     e.clone()
@@ -277,10 +283,6 @@ extern "C" fn franca_prim_sig2<'p>(c: &Compile<'_, 'p>, func: &Func<'p>) -> Res<
 
 extern "C" fn bake_var(c: &mut Compile, val: BakedVar) -> BakedVarId {
     c.program.baked.make(val, null(), TypeId::unknown)
-}
-
-extern "C" fn franca_prim_sig<'p>(c: &Compile<'_, 'p>, f_ty: FnType, cc: CallConv) -> Res<'p, PrimSig<'p>> {
-    prim_sig(c.program, f_ty, cc)
 }
 
 extern "C" fn debug_log_bc<'p>(c: &Compile<'_, 'p>, body: &FnBody<'p>) {
@@ -317,12 +319,6 @@ unsafe extern "C" fn comptime_arch() -> (i64, i64) {
         -1
     };
     (arch, os)
-}
-unsafe extern "C" fn franca_intern_string<'p>(c: &mut Compile<'_, 'p>, s: *const str) -> Ident<'p> {
-    c.program.pool.intern(&*s)
-}
-unsafe extern "C" fn franca_get_string<'p>(c: &mut Compile<'_, 'p>, s: Ident<'p>) -> *const str {
-    c.program.pool.get(s) as *const str
 }
 
 unsafe extern "C" fn franca_init_compiler(comptime_arch: TargetArch) -> *const Compile<'static, 'static> {
@@ -372,23 +368,6 @@ unsafe extern "C" fn get_jitted_ptr<'p>(c: &mut Compile<'_, 'p>, f: FuncId) -> B
 #[no_mangle]
 unsafe extern "C" fn franca_get_function<'p>(c: &mut Compile<'p, '_>, f: FuncId) -> *const Func<'p> {
     &c.program[f] as *const Func
-}
-
-unsafe extern "C" fn add_file(c: &mut Compile, name: &str, content: &str) -> Span {
-    c.program.pool.add_file(name.to_string(), content.to_string())
-}
-
-unsafe extern "C" fn parse_stmts<'p>(comp: &mut Compile<'_, 'p>, file: *const Span) -> BigCErr<'p, *const [FatStmt<'p>]> {
-    let id = comp.program.pool.add_task(false, unsafe { *file });
-    let res = comp.program.pool.wait_for_stmts(id);
-    let stmts = match res {
-        Ok(s) => s,
-        Err(e) => {
-            println!("{e:?}");
-            return Err(e);
-        }
-    };
-    return Ok(stmts.leak());
 }
 
 unsafe extern "C" fn make_and_resolve_and_compile_top_level<'p>(c: &mut Compile<'_, 'p>, body: *const [FatStmt<'p>]) -> BigCErr<'p, ()> {

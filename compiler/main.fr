@@ -10,12 +10,9 @@
 #include_std("error_reporting.fr");
 #include_std("scope.fr");
 #include_std("walk_ast.fr");
+#include_std("comptime.fr");
 
 VERBOSE_TEST_LOGGING :: false;
-
-// TODO: aot backends can't do this. 
-// TODO: check which backend you're on!!! i forget every fucking time. 
-//:: print_stacktrace_on_panic();
 
 SelfHosted :: @struct(
     pool: *StringPool,
@@ -26,7 +23,6 @@ SelfHosted :: @struct(
     vtable: *ImportVTable,
 );
 
-ParseErr :: @struct(span: Span, msg: Str);
 PRes :: Result(void, ParseErr);
 
 // TODO: eventually this side should be filling out the vtable. 
@@ -45,19 +41,16 @@ fn self_hosted_main(vtable: *ImportVTable) void #compiler #no_trace = {
     // TODO: allow loading driver function from shared library 
     
     my_vtable := vtable[];
-    my_vtable.add_file = my_add_file;
+    my_vtable&.fill_self_hosted();
     run_franca_file(my_vtable&, args[1].str());
     exit(0);
 }
 
-fn my_add_file(c: Compiler, name: Str, content: Str) Span = {
-    self := (*SelfHosted).ptr_from_raw(c.pointer_to_pointer_to_selfhosted);
-    self.codemap.add_file(name, content)
-}
 
 // TODO: find it
 STDLIB_PATH :: "/Users/luke/Documents/mods/infered/lib";
 
+// TODO: print the error message!!! since this doesn't go through the rust side anymore. -- Jun 30
 fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
     source: List(u8) = "#include_std(\"core.fr\"); ".clone(libc_allocator);  // TODO: column number on error on first line will be wrong but i dont care. 
     source&.read_and_push(path);  // TODO: error handling
@@ -65,8 +58,12 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
     comp := {vtable.init_compiler}(.Aarch64); // TODO: comptime get the current arch
     c := vtable.with(comp);
     file := {c.vtable.add_file}(c.data, path, source.items());
-    stmts := @try({c.vtable.parse_stmts}(c.data, file&)) return;
-    @try({c.vtable.make_and_resolve_and_compile_top_level}(c.data, stmts)) return;
+    self := c.data.cast();
+    
+    id := self.parser.push_parse(source.items(), file);
+    // TODO: handle error
+    stmts := self.parser.finish_pending_stmts(id).unwrap(); // TODO: don't return RsVec -- Jun 29
+    @try({c.vtable.make_and_resolve_and_compile_top_level}(c.data, stmts.items())) return;
     
     if c.get_unique_named("driver") {f|
         callee := c.get_jitted(f);

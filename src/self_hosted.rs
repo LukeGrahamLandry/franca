@@ -1,12 +1,11 @@
-use std::{marker::PhantomData, mem::ManuallyDrop, ptr::addr_of};
+use std::{marker::PhantomData, ptr::addr_of};
 
 use crate::{
     ast::{FatExpr, FatStmt, Flag, Func, LazyType, Pattern, ScopeId, TypeId, Var},
-    compiler::{CErr, Compile, Res, Scope},
+    compiler::Scope,
     err,
     export_ffi::{BigOption, ImportVTable, IMPORT_VTABLE},
     ffi::InterpSend,
-    logging::make_err,
 };
 
 use crate::export_ffi::BigResult::*;
@@ -14,7 +13,7 @@ use crate::export_ffi::BigResult::*;
 pub struct SelfHosted<'p> {
     pub pool: *mut (),
     pub codemap: *mut (),
-    parser: *mut (),
+    pub parser: *mut (),
     _arena: *mut (),
     scopes: *mut (),
     vtable: *const ImportVTable,
@@ -46,14 +45,10 @@ use crate::export_ffi::BigResult;
 #[link(name = "franca")]
 extern "C" {
     fn init_self_hosted<'p>() -> SelfHosted<'p>;
-    fn finish_pending<'p>(s: *mut (), id: usize) -> BigResult<FatExpr<'p>, ParseErr<'p>>;
-    fn finish_pending_stmts<'p>(s: *mut (), id: usize) -> BigResult<Vec<FatStmt<'p>>, ParseErr<'p>>;
     fn insert_owned<'p>(s: *mut (), s: &[u8]) -> Ident<'p>;
     fn get<'p>(s: *mut (), s: Ident<'p>) -> &'p [u8];
     fn get_c_str(s: *mut (), s: Ident) -> *const u8;
-    fn add_file(s: *mut (), name: &str, content: &str) -> (i64, i64); // Span
     fn source_slice(s: *mut (), span_low: u32, span_high: u32) -> *const str;
-    fn push_parse(s: *mut (), src: &str, span_low: u32, span_high: u32) -> usize;
     pub(crate) fn log_stmt(pool: *mut (), s: &FatStmt) -> *const str;
     pub(crate) fn log_expr(pool: *mut (), s: &FatExpr) -> *const str;
     pub(crate) fn log_pattern(pool: *mut (), s: &Pattern) -> *const str;
@@ -93,53 +88,8 @@ impl<'p> SelfHosted<'p> {
         unsafe { get_c_str(self.pool, s) }
     }
 
-    pub fn wait_for_expr(&self, id: usize) -> Res<'p, FatExpr<'p>> {
-        // TODO: HACK because the franca side doesn't know how to clone.
-        //       wrong allocator! this only works because i just leak all the memory! -- Jun 23
-        let e = ManuallyDrop::new(unsafe { finish_pending(self.parser, id) });
-        let e = ManuallyDrop::into_inner(e.clone());
-        match e {
-            Ok(t) => Ok(t),
-            Err(t) => {
-                let mut e = make_err(CErr::Fatal(t.msg.to_string()));
-                e.loc = Some(t.span);
-                Err(e)
-            }
-        }
-    }
-
-    pub fn wait_for_stmts(&self, id: usize) -> Res<'p, Vec<FatStmt<'p>>> {
-        let e = unsafe { finish_pending_stmts(self.parser, id) };
-        match e {
-            Ok(t) => Ok(t),
-            Err(t) => {
-                unsafe {
-                    show_error_line(self.codemap, t.span.low, t.span.high);
-                }
-                err!("{:?}", t)
-            }
-        }
-    }
-    pub fn add_file(&self, name: String, content: String) -> Span {
-        // TODO: my version of the codemap doesn't want to own things. :LEAK
-        unsafe {
-            let s = add_file(self.codemap, name.leak(), content.leak());
-            Span {
-                low: s.0 as u32,
-                high: s.1 as u32,
-            }
-        }
-    }
     pub fn source_slice(&self, span: Span) -> &'p str {
         unsafe { &*source_slice(self.codemap, span.low, span.high) }
-    }
-
-    pub fn add_task(&mut self, _: bool, span: Span) -> usize {
-        unsafe {
-            // println!("add task {span:?}");
-            let src = source_slice(self.codemap, span.low, span.high);
-            push_parse(self.parser, &*src, span.low, span.high)
-        }
     }
 
     pub(crate) fn print_diagnostic(&self, e: crate::compiler::CompileError<'p>) {
