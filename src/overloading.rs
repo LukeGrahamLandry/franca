@@ -3,8 +3,8 @@ use crate::self_hosted::Span;
 use crate::ast::{
     Expr, FatExpr, FnFlag, FuncId, FuncImpl, LazyType, OverloadOption, OverloadSet, OverloadSetId, Pattern, TypeId, TypeInfo, Var, VarType,
 };
-use crate::bc::from_values;
-use crate::compiler::{Compile, DebugState, ExecStyle, Res};
+use crate::bc::{from_values, Values};
+use crate::compiler::{Compile, ExecStyle, Res};
 use crate::logging::PoolLog;
 use crate::{assert, assert_eq, err, unwrap, unwrap2};
 use std::mem;
@@ -13,31 +13,48 @@ use std::ops::DerefMut;
 use crate::export_ffi::{BigOption, BigResult::*};
 
 impl<'a, 'p> Compile<'a, 'p> {
+    fn maybe_direct_fn_value(&mut self, f_ty: TypeId, value: &Values, arg: &mut FatExpr<'p>, ret: Option<TypeId>) -> Res<'p, Option<FuncId>> {
+        assert!(!f_ty.is_unknown());
+        Ok(if f_ty == TypeId::overload_set {
+            let i: OverloadSetId = from_values(self.program, value.clone())?;
+            let id = self.resolve_in_overload_set(arg, ret, i)?;
+            Some(id)
+        } else if matches!(self.program[f_ty], TypeInfo::Fn(_)) || f_ty == TypeId::func {
+            let id = value.unwrap_func_id();
+            self.adjust_call(arg, id)?;
+            Some(id)
+        } else if matches!(self.program[f_ty], TypeInfo::Label(_)) || f_ty == TypeId::label {
+            // It's fine that you tried to call 'return' but I can't give you a funcid for it.
+            None
+        } else {
+            err!("not callable {:?} {}", value, self.program.log_type(f_ty))
+        })
+    }
+
+    // This can return None on valid callables: it might be a FnPtr or a Label (return).
     pub fn maybe_direct_fn(&mut self, f: &mut FatExpr<'p>, arg: &mut FatExpr<'p>, ret: Option<TypeId>) -> Res<'p, Option<FuncId>> {
+        if let Some(ty) = ret {
+            assert!(!ty.is_unknown());
+        }
+
         let f_ty = f.ty;
         // TODO: more general system for checking if its a constant known expr instead of just for functions?
         Ok(match f.deref_mut() {
             &mut Expr::GetVar(i) => {
                 if i.kind == VarType::Const {
-                    let id = self.resolve_function(i, arg, ret)?; // TODO: error here is probably fine, just return None
-                    Some(id)
-                } else {
-                    None
+                    // TODO: you might not want to force eval the constant here.
+                    //       maybe we're in type_of and only want to take it if its an easy case, and igore errors,
+                    //       but once you start evaling, you can't just stop on an error cause stuff will have changed. -- Jul 1
+                    if let Some((value, ty)) = self.find_const(i)? {
+                        f.ty = ty;
+                        let res = self.maybe_direct_fn_value(ty, &value, arg, ret);
+                        f.expr = Expr::Value { value, coerced: false };
+                        return res;
+                    }
                 }
+                None
             }
-            Expr::Value { value, .. } => {
-                if f_ty == TypeId::overload_set {
-                    let i: OverloadSetId = from_values(self.program, value.clone())?;
-                    let id = self.resolve_in_overload_set(arg, ret, i)?;
-                    Some(id)
-                } else if matches!(self.program[f_ty], TypeInfo::Fn(_)) || f_ty == TypeId::func {
-                    let id = value.unwrap_func_id();
-                    self.adjust_call(arg, id)?;
-                    Some(id)
-                } else {
-                    err!("not callable {:?} {}", value, self.program.log_type(f_ty))
-                }
-            }
+            Expr::Value { value, .. } => return self.maybe_direct_fn_value(f_ty, value, arg, ret),
             &mut Expr::WipFunc(id) => {
                 self.adjust_call(arg, id)?;
                 Some(id)
@@ -54,38 +71,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             _ => None,
         })
-    }
-
-    // TODO: rename this, it means resolve overloads, not resovle variables which is ambigous now that they happen together sometimes.
-    // TODO: better error messages
-    pub fn resolve_function(&mut self, name: Var<'p>, arg: &mut FatExpr<'p>, requested_ret: Option<TypeId>) -> Res<'p, FuncId> {
-        let state = DebugState::ResolveFnRef(name);
-        self.push_state(&state);
-
-        // TODO: get rid of any
-        if let Some(ty) = requested_ret {
-            assert!(!ty.is_unknown());
-        }
-
-        if let Some((value, ty)) = self.find_const(name)? {
-            // TODO: copy paste
-            if ty == TypeId::overload_set {
-                let i: OverloadSetId = from_values(self.program, value.clone())?;
-                let id = self.resolve_in_overload_set(arg, requested_ret, i)?;
-                self.pop_state(state);
-                Ok(id)
-            } else if matches!(self.program[ty], TypeInfo::Fn(_)) || ty == TypeId::func {
-                let id = value.unwrap_func_id();
-                self.adjust_call(arg, id)?;
-                self.pop_state(state);
-                Ok(id)
-            } else {
-                err!("Expected function for {} but found {:?}", name.log(self.program.pool), value);
-            }
-        } else {
-            // TODO: use self.program.vars[name.1].loc to show the declaration site.
-            err!("Missing constant {} (forgot to make a Fn(A, R) 'const'?)", name.log(self.program.pool))
-        }
     }
 
     pub fn resolve_in_overload_set(&mut self, arg: &mut FatExpr<'p>, requested_ret: Option<TypeId>, i: OverloadSetId) -> Res<'p, FuncId> {
@@ -473,26 +458,6 @@ impl<'a, 'p> Compile<'a, 'p> {
 }
 
 pub fn where_the_fuck_am_i(comp: &Compile, loc: Span) {
-    // if loc == garbage_loc() {
-    //     println!("called where_the_fuck_am_i on garbage_loc");
-    //     return;
-    // }
-    // let diagnostic = Diagnostic {
-    //     level: Level::Note,
-    //     message: String::from("you are here"),
-    //     code: None,
-    //     spans: vec![SpanLabel {
-    //         span: loc,
-    //         label: None,
-    //         style: SpanStyle::Primary,
-    //     }],
-    // };
-    // let mut out = vec![];
-    // let mut emitter = Emitter::vec(&mut out, Some(&comp.parsing.codemap));
-    // emitter.emit(&[diagnostic]);
-    // drop(emitter);
-    // println!("{}", String::from_utf8(out).unwrap())
-    // todo!()
     let s = comp.program.pool.source_slice(loc);
-    println!("where the fuck am i:\n {}", s)
+    println!("You Are Here:\n {}", s)
 }

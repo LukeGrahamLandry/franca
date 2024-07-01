@@ -354,7 +354,6 @@ impl<'p> DebugState<'p> {
             DebugState::EmitBody(f, i) => format!("|  Emit Body  | {:?} {}", *f, pool.get(*i)),
             DebugState::EvalConstants(f, i) => format!("| Eval Consts | {:?} {}", *f, pool.get(*i)),
             DebugState::EmitCapturingCall(f, i) => format!("| Captur Call | {:?} {}", *f, pool.get(*i)),
-            DebugState::ResolveFnRef(v) => format!("| Find Fn | {}", v.log(pool)),
             DebugState::RunInstLoop(f, i) => format!("| Execute  | {:?} {}", *f, pool.get(*i)),
             DebugState::ComptimeCall(f, i) => format!("| Comptime Call | {:?} {}", *f, pool.get(*i)),
             DebugState::ResolveFnType(f, i) => format!("| Resolve Type| {:?} {}", *f, pool.get(*i)),

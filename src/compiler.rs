@@ -114,7 +114,6 @@ pub enum DebugState<'p> {
     Msg(String),
     EmitBody(FuncId, Ident<'p>),
     EmitCapturingCall(FuncId, Ident<'p>),
-    ResolveFnRef(Var<'p>),
     TypeOf,
     ResolveConstant(Var<'p>),
 }
@@ -1436,7 +1435,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 if let TypeInfo::Label(arg_ty) = self.program[f.ty] {
                     self.compile_expr(arg, Some(arg_ty))?;
                     expr.done = f.done && arg.done;
-                    expr.ty = TypeId::never;
+                    expr.ty = TypeId::never; // :labels_return_never
                     return Ok(TypeId::never);
                 }
 
@@ -1954,11 +1953,16 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::Call(f, arg) => {
                 if let Expr::GetVar(i) = f.deref_mut().deref_mut() {
                     if i.kind == VarType::Const {
-                        if let Ok(fid) = self.resolve_function(*i, arg, None) {
+                        if let Ok(Some(fid)) = self.maybe_direct_fn(f, arg, None) {
                             if let Ok(Some(f_ty)) = self.infer_types(fid) {
                                 // Need to save this because resolving overloads eats named arguments
                                 f.set(to_values(self.program, fid)?, self.program.func_type(fid));
                                 return Ok(Some(f_ty.ret));
+                            }
+                        } else if let Ok(Some(ty)) = self.type_of(f) {
+                            // You get here for return because its a label, not a function. 
+                            if let Some(ty) = self.program.fn_ty(ty) {
+                                return Ok(Some(ty.ret));
                             }
                         }
                     } else if let BigOption::Some(ty) = self.program.pool.get_var_type(*i) {
@@ -2798,7 +2802,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             return self.compile_expr(if_macro, requested);
         }
 
-        let (true_ty, expect_fn) = if let Some(if_true) = self.maybe_direct_fn(&mut parts[1], &mut unit_expr, requested)? {
+        let (mut true_ty, expect_fn) = if let Some(if_true) = self.maybe_direct_fn(&mut parts[1], &mut unit_expr, requested)? {
             self.program[if_true].set_cc(CallConv::Inline)?; // hack
             let true_arg = self.infer_arg(if_true)?;
             self.type_check_arg(true_arg, unit, sig)?;
@@ -2817,12 +2821,18 @@ impl<'a, 'p> Compile<'a, 'p> {
             self.type_check_arg(false_arg, unit, sig)?;
             let false_ty = self.emit_call_on_unit(if_false, &mut parts[2], requested)?;
             self.type_check_arg(true_ty, false_ty, sig)?;
+            if true_ty.is_never() {
+                true_ty = false_ty;
+            }
 
             self.finish_closure(&mut parts[1]);
             self.finish_closure(&mut parts[2]);
         } else {
             assert!(!parts[2].ty.is_unknown());
             self.type_check_arg(true_ty, parts[2].ty, sig)?;
+            if true_ty.is_never() {
+                true_ty = parts[2].ty;
+            }
         }
         Ok(true_ty)
     }
@@ -2846,7 +2856,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         } else {
             todo!("shouldnt get here twice")
         }
-        while_macro_arg.ty = TypeId::unit;
+        while_macro_arg.ty = TypeId::unit; // TODO: this isn't true!
         while_macro_arg.done = true;
 
         Ok(TypeId::never)

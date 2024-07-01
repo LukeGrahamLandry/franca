@@ -1104,14 +1104,10 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         let ip = result.push_block(block_slots, prims);
         result.push_to(branch_block, Bc::JumpIf { true_ip, false_ip, slots: 0 });
         result.push_to(end_true_block, Bc::Goto { ip, slots: block_slots });
-        // TODO: hack
-        if !if_false.ty.is_never() {
-            result.push_to(end_false_block, Bc::Goto { ip, slots: block_slots });
-            result.blocks[ip.0 as usize].incoming_jumps += 2;
-        } else {
-            result.push_to(end_false_block, Bc::Unreachable);
-            result.blocks[ip.0 as usize].incoming_jumps += 1;
-        }
+
+        result.push_to(end_false_block, Bc::Goto { ip, slots: block_slots });
+        result.blocks[ip.0 as usize].incoming_jumps += 2;
+
         result.blocks[true_ip.0 as usize].incoming_jumps += 1;
         result.blocks[false_ip.0 as usize].incoming_jumps += 1;
         result.bump_clock(ip);

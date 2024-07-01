@@ -1,3 +1,14 @@
+## Jul 1
+
+- made maybe_direct_fn handle it being a Label gracefully.
+  remove resolve_function because its a copy paste of maybe_direct_fn, it just only handles named constants which isn't what you want.
+
+> I think its bad style to call something that dispatches when we know which branch it will take,
+> it feels harder to think about because the other implementation might drift.
+> // TODO: go through an see if applying this elsewhere makes it more clear?
+
+##
+
 - forgot to clone after expanding PendingParse cause not going through the rust side anymore.
   symptom was confusing getting same value every time for Option(T)'s arg.
 - now deep enough stack that it tried to free the stack trace's constant memory into libc free. had to not do that!

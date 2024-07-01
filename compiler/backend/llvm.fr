@@ -5,7 +5,6 @@
 // TODO: not reserving enough
 // TODO: implement !asm with Module-Level Inline Assembly
 // TODO: only specfiy ccc if you take a pointer to the function? you want to use one that allows tail calls otherwise. 
-// TODO: don't call pool functions through the vtable. 
 
 // All the functions we emit are name-mangled based on thier funcid, so you can't call them from the outside.
 // We also mark them as 'private' to give llvm permisson to remove them if all uses are inlined.
@@ -37,6 +36,7 @@ fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId), entry: ProgramEntr
     );
     
     // TODO: how the hell am i supposed to know these numbers without just compiling a c program with clang. 
+    //       its not a big deal tho cause passing -target to clang overrides this. 
     gen.backend.out&.push_all("""
     target datalayout = "e-m:o-i64:64-i128:128-n32:64-S128"
     target triple = "arm64-apple-macosx13.0.0"
@@ -65,7 +65,7 @@ fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId), entry: ProgramEntr
         body := {comp.vtable.emit_bc}(comp.data, fid, .Aot).unwrap();
 
         index: i64 = fid.to_index().zext();
-        real_name := {gen.backend.comp.vtable.get_string}(gen.backend.comp.data, func.name);
+        real_name := get_string(gen.backend.comp.data, func.name);
         @fmt(gen.backend.out&.current(), ";F%: %\n", index, real_name);
         
         if(body.blocks.len.eq(0)){|
@@ -88,7 +88,7 @@ fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId), entry: ProgramEntr
             s := @format("%arg%", "%", arg_index) temp();
             s.items()
         };
-        //@println("emit %", {comp.vtable.get_string}(comp.data, func.name));
+        //@println("emit %", get_string(comp.data, func.name));
         gen.backend.out&.current().push_all("{\n");
         gen&.emit_current_function();
         gen.backend.out&.current().push_all("}\n");
@@ -144,7 +144,7 @@ fn emit_debug_info(self: *EmitLlvm, funcs_done: *BitSet) void = {
     range(0, f_count) { i|
         fid := (@as(u32) i.trunc()).funcid_from_index();
         func := {self.comp.vtable.get_function}(self.comp.data, fid);
-        real_name := {self.comp.vtable.get_string}(self.comp.data, func.name);
+        real_name := get_string(self.comp.data, func.name);
         // TODO: UNSAFE: giving rust an aliased vec!!! but also i know it has the right lifetime, should rework constants. 
         // TODO: check .baked.lookup
         v: BakedVar = (Bytes = (cap = real_name.len, ptr = real_name.ptr, len = real_name.len));
@@ -170,7 +170,7 @@ fn write_export_bounce(self: *EmitLlvm, fid: FuncId) void = {
     self.next_var = 0;
     values: List(LlvmVal) = list(temp());
     func := {self.comp.vtable.get_function}(self.comp.data, fid);
-    import_name := {self.comp.vtable.get_string}(self.comp.data, func.name);
+    import_name := get_string(self.comp.data, func.name);
     self.out&.push_all("define ccc ");
     sig := {self.comp.vtable.prim_sig}(self.comp.data, func).unwrap(); // TODO: the version where you dont pass the whole func has some calling convention problem? -- Jun 26
     self.write_header(sig, import_name) {arg_index|
@@ -197,7 +197,7 @@ fn write_export_bounce(self: *EmitLlvm, fid: FuncId) void = {
 }
 
 fn emit_constant(self: *EmitLlvm, comp: CompCtx, id: BakedVarId) void = {
-    value := {comp.vtable.get_baked}(comp.data, id);
+    value := get_baked(comp.data, id);
     index: i64 = id.id.zext();
     
     @match(value&) {
@@ -253,7 +253,7 @@ fn emit_special(self: *EmitLlvm, body: *FuncImpl, func: *Func, bc: *FnBody) bool
         });
         (fn DynamicImport(name) => { 
             // TODO: do i need to hackily do the same for ComptimeAddr and hope for the best? ideally the forntend would handle that instead. 
-            import_name := {comp.vtable.get_string}(comp.data, name[]);
+            import_name := get_string(comp.data, name[]);
             self.forward_declare(bc.signeture, false, import_name);
             
             self.out&.push_all("define private ccc ");
@@ -289,13 +289,13 @@ fn emit_special(self: *EmitLlvm, body: *FuncImpl, func: *Func, bc: *FnBody) bool
         });
         (fn LlvmIr(code) => { 
             self.next_var = 0;
-            ir := {comp.vtable.get_string}(comp.data, code[]);
+            ir := get_string(comp.data, code[]);
             self.out&.push_all("define private ccc ");
             name := @format("F%", bc.func.to_index()) temp();
             self.write_header(bc.signeture, name.items()) {arg_index|
                 args := func.arg.bindings.items();
                 arg := args[arg_index].name.Var.name;
-                arg := {comp.vtable.get_string}(comp.data, arg);
+                arg := get_string(comp.data, arg);
                 arg := @format("%%", "%", arg) temp();
                 self.next_var += 1;
                 arg.items()

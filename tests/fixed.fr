@@ -219,3 +219,30 @@ fn const_closure_arg() = {
     
     fst: L = (next = (None = unit), data = 123);
 }
+
+// Problem only happened when you hit the branch after the Never one. 
+// It was the thing where if false branch type was Never it made end_false_block unreachable. 
+// Which sounds reasonable but somehow got confused by nesting I guess? I don't understand. 
+// Maybe problem is it decided if branches should have the same type so one split never vs void and then when the void one tried to rejoin, it got to the unreachable of the never? 
+// yeah cause adding `if true_ty.is_never() { true_ty = false_ty; }` in compiler instead of removing the unreahcable from emit_bc, also fixed it.
+// so problem was it assuming true branch type was correct so a branch like if(_, => Never, void) it would treat as returning Never when it should return void.
+#test fn wrongly_unreachable() = {
+    A :: @tagged(a: i64, b: i64, c: i64);
+    f :: fn(a: *A) i64 = {
+        @match(a) {
+            (fn a(_) => ());
+            (fn b(_) void => return(3));
+            (fn c(_) => ());
+        };
+        2
+    };
+    
+    a: A = (a = 1);
+    assert_eq(f(a&), 2); // this was fine
+    
+    a: A = (c = 1);
+    assert_eq(f(a&), 2); // this hit my inserted trap 0xbabe
+}
+
+
+// TODO: void as an argument disapears in bc so you can't access the variable

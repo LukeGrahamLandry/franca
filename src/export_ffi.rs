@@ -230,14 +230,14 @@ pub struct ImportVTable {
     emit_bc: for<'p> extern "C" fn(compile: &mut Compile<'_, 'p>, f: FuncId, when: ExecStyle) -> Res<'p, FnBody<'p>>,
     get_type_meta: extern "C" fn(compile: &Compile, ty: TypeId) -> TypeMeta,
     debug_log_baked_constant: extern "C" fn(compile: &Compile, id: BakedVarId),
-    get_baked: extern "C" fn(compile: &Compile, id: BakedVarId) -> BakedVar,
+    _get_baked: usize,
     debug_log_bc: for<'p> extern "C" fn(c: &Compile<'_, 'p>, body: &FnBody<'p>),
     _e: usize,
     get_compiler_builtins_source: extern "C" fn() -> &'static str,
     get_cranelift_builtins_source: extern "C" fn() -> &'static str,
     emit_llvm: unsafe extern "C" fn(),
     number_of_functions: unsafe extern "C" fn(c: &mut &mut Program) -> i64,
-    bake_var: extern "C" fn(compile: &mut Compile, v: BakedVar) -> BakedVarId,
+    _bake_var: usize,
     franca_prim_sig2: for<'p> extern "C" fn(c: &Compile<'_, 'p>, func: &Func<'p>) -> Res<'p, PrimSig<'p>>,
     clone_expr: for<'p> extern "C" fn(e: &FatExpr<'p>) -> FatExpr<'p>,
     clone_type: for<'p> extern "C" fn(e: &LazyType<'p>) -> LazyType<'p>,
@@ -276,14 +276,14 @@ pub static IMPORT_VTABLE: ImportVTable = ImportVTable {
     emit_bc,
     get_type_meta,
     debug_log_baked_constant,
-    get_baked,
+    _get_baked: 1,
     debug_log_bc,
     _e: 0,
     get_compiler_builtins_source,
     get_cranelift_builtins_source,
     emit_llvm,
     number_of_functions,
-    bake_var,
+    _bake_var: 1,
     franca_prim_sig2,
     clone_expr,
     clone_type,
@@ -318,16 +318,8 @@ extern "C" fn franca_prim_sig2<'p>(c: &Compile<'_, 'p>, func: &Func<'p>) -> Res<
     prim_sig(c.program, ty, cc)
 }
 
-extern "C" fn bake_var(c: &mut Compile, val: BakedVar) -> BakedVarId {
-    unsafe { put_baked(c.program.pool, val.clone(), BigOption::None) }
-}
-
 extern "C" fn debug_log_bc<'p>(c: &Compile<'_, 'p>, body: &FnBody<'p>) {
     println!("{}", body.log(c.program))
-}
-
-extern "C" fn get_baked(compile: &Compile, id: BakedVarId) -> BakedVar {
-    unsafe { (*crate::self_hosted::get_baked(compile.program.pool, id)).1.clone() }
 }
 
 extern "C" fn debug_log_baked_constant(compile: &Compile, id: BakedVarId) {

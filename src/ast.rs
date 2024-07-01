@@ -1234,6 +1234,12 @@ impl<'p> Program<'p> {
     pub(crate) fn fn_ty(&mut self, id: TypeId) -> Option<FnType> {
         match self[id] {
             TypeInfo::Fn(ty) | TypeInfo::FnPtr { ty, .. } => Some(ty),
+            // this lets you deal with type_of(return).
+            TypeInfo::Label(arg) => Some(FnType {
+                arg,
+                ret: TypeId::never, // :labels_return_never
+                arity: 1,
+            }),
             _ => None,
         }
     }
