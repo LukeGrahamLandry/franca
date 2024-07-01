@@ -11,7 +11,7 @@
 use crate::self_hosted::Span;
 use std::ops::Deref;
 
-use crate::ast::{CallConv, Expr, FatExpr, FnFlag, FnType, FuncId, FuncImpl, LabelId, Program, Stmt, TypeId, TypeInfo};
+use crate::ast::{CallConv, Expr, FatExpr, FnFlag, FnType, FuncId, FuncImpl, LabelId, Name, Program, Stmt, TypeId, TypeInfo};
 use crate::ast::{FatStmt, Flag, Pattern, Var, VarType};
 use crate::bc_to_asm::Jitted;
 use crate::compiler::{CErr, Compile, ExecStyle, Res};
@@ -549,10 +549,33 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         assert!(kind != VarType::Const, "{:?}", name.map(|v| v.log(self.program.pool)));
                         self.do_binding(result, name, ty, value)?;
                     }
-                } else {
-                    debug_assert_eq!(1, binding.bindings.len());
+                } else if 1 == binding.bindings.len() {
                     let (name, ty, _) = binding.flatten().into_iter().next().unwrap(); // TODO: sad alloc
                     self.do_binding(result, name, ty, value)?;
+                } else {
+                    // It's a destructuring (not inlined args)
+                    // We store the whole value in a stack slot and then save pointers into different offsets of it as thier own variables.
+                    let full_id = result.add_var(value.ty);
+                    result.addr_var(full_id);
+                    self.compile_expr(result, value, ResAddr, false)?;
+                    let TypeInfo::Struct { fields, .. } = &self.program[value.ty] else {
+                        err!("destructure must be tuple",)
+                    };
+                    assert_eq!(fields.len(), binding.bindings.len());
+                    for (b, f) in binding.bindings.iter().zip(fields.iter()) {
+                        let Name::Var(name) = b.name else { unreachable!() };
+                        result.addr_var(full_id);
+                        result.push(Bc::IncPtrBytes { bytes: f.byte_offset as u16 });
+                        let id = result.save_ssa_var();
+                        if result.want_log {
+                            extend_options2(&mut result.var_names, id as usize);
+                            result.var_names[id as usize] = BigOption::Some(name);
+                        }
+                        result.addr_var(id);
+                        self.locals.last_mut().unwrap().push(id);
+                        let prev = self.var_lookup.insert(name, id);
+                        assert!(prev.is_none(), "overwrite arg? {}", name.log(self.program.pool));
+                    }
                 }
             }
             Stmt::Noop => {}

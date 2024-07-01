@@ -57,16 +57,16 @@ fn run_examples(vtable: *ImportVTable) void = {
     // TODO: #import_std uses relative paths. 
     chdir("compiler".maybe_borrow_cstr(temp()));
     check_driver_compiles(vtable, "first.fr");
-    s__ := fork_and_catch(temp()) {|
+    (ok, out, err) := fork_and_catch(temp()) {|
         src := "#include_std(\"core.fr\");".clone(temp());
         src&.read_and_push("main.fr");
         comp := vtable.new_with_src(src.items(), TARGET);
         run_tests(vtable, comp);
     };
     // TODO: @assert
-    //println(s__._1.items());
-    //println(s__._2.items());
-    assert(s__._0, "compiler tests failed");
+    //println(out.items());
+    //println(err.items());
+    assert(ok, "compiler tests failed");
     println("- ran compiler tests");
     chdir("../".maybe_borrow_cstr(temp()));
     
@@ -128,6 +128,7 @@ fn run_sequential(c: CompCtx, const inner_run: @Fn(c: CompCtx, fns: Slice(FuncId
             inner_run(c, ff);
             true
         }{|
+            // TODO: something super sketchy happens if you try to use destructuring here. its way slower all the grouped ones are failing but all the singles still pass. :FUCKED -- Jul 1
             s__ := fork_and_catch(temp(), => inner_run(c, ff));
             if ff.len.eq(1).and(not(s__._0)) {|
                 println(s__._1.items());
@@ -237,18 +238,18 @@ fn mandelbrot(vtable: *ImportVTable) void = {
     f := assume_types_fn(Arg = void, Ret = List(u8), ptr = f);
     mandelbrot := f();
     
-    pass_out_err := fork_and_catch(temp()) {|
+    (ok, out, err) := fork_and_catch(temp()) {|
         arg := "util/mandelbrot.lua";
         HACK_LUA_PATH :: "/usr/local/bin/luajit";
         exec_cmd(HACK_LUA_PATH, (ptr = arg&, len = 1));
     };
-    assert(pass_out_err._0, "lua failed");
-    assert_eq(mandelbrot.items(), pass_out_err._1.items());
+    assert(ok, "lua failed");
+    assert_eq(mandelbrot.items(), out.items());
     println("- mandelbrot.fr == mandelbrot.lua");
 }
 
 fn fork_run_main(vtable: *ImportVTable, filepath: Str) void = {
-    s__ := fork_and_catch(temp()) {|
+    (ok, out, err) := fork_and_catch(temp()) {|
         src := "#include_std(\"core.fr\");".clone(temp());
         src&.read_and_push(filepath);
         f := jit_from_source(vtable, src&.items(), "main");
@@ -256,10 +257,10 @@ fn fork_run_main(vtable: *ImportVTable, filepath: Str) void = {
         f();
     };
     // TODO: @assert
-    assert(s__._0) {() List(u8)|
+    assert(ok) {() List(u8)|
         s: List(u8) = list(0, temp());
-        println(s__._1.items());
-        println(s__._2.items());
+        println(out.items());
+        println(err.items());
         @fmt(s&, "failed to compile %", filepath);
         s
     };

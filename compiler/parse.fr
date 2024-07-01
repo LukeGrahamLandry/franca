@@ -197,9 +197,9 @@ fn after_expr_stmt_prefix(self: *Parser, e: FatExpr) Result(FatStmt, ParseErr) =
         });
         (fn Colon() => { // TODO: double colon?
             self.pop();
-            pattern := @match(e.expr) {
-                (fn StructLiteralP(pattern) Pattern => pattern);
-                (fn Tuple(idents) => @report_error("TODO: tuple destructure %", "") (return, self.last.span));
+            pattern := @match(e.expr&) {
+                (fn StructLiteralP(pattern) Pattern => pattern[]);
+                (fn Tuple(idents) Pattern => @try(self.ident_list_to_pattern(idents, e.loc)) return);
                 @default => @report_error("destructuring statment requires tuple or struct on the left. `(a, b) := <>` or (a: c, b: d) := <>` %", "") (return, self.last.span);
             };
             loc := self.last.span;
@@ -220,6 +220,21 @@ fn after_expr_stmt_prefix(self: *Parser, e: FatExpr) Result(FatStmt, ParseErr) =
     };
     
     (Ok = stmt)
+}
+
+fn ident_list_to_pattern(self: *Parser, idents: *RsVec(FatExpr), loc: Span) Result(Pattern, ParseErr) = {
+    bindings: List(Binding) = list(idents.len, self.alloc);
+    each idents.items() { expr | 
+        @match(expr.expr&) {
+            (fn GetNamed(name) => {
+                bindings&.push((name = (Ident = name[]), ty = (Infer = unit), default = .None, kind = .Var));
+            });
+            @default => {
+                @report_error("destructuring statment requires tuple with all expressions being single identifier. %", "") (return, expr.loc);
+            };
+        };
+    };
+    (Ok = (bindings = bindings.rs(), loc = loc))
 }
 
 fn can_start_quick_expr(t: TokenType) bool = {
@@ -407,10 +422,9 @@ fn parse_func(self: *Parser, allow_empty: bool) Result(Func, ParseErr) = {
     
     if not(may_capture) {|
         @if_let(self.peek()) fn LeftSquiggle() => {
-            src_span := self.lex&.skip_to_closing_squigle();
-            //self.last = self.lex&.peek()[];
+            (src, span) := self.lex&.skip_to_closing_squigle();
             self.pop(); // TODO: why do i need this? -- Jun 22
-            id := self.push_parse(src_span._0, src_span._1);
+            id := self.push_parse(src, span);
             body := self.expr((GetParsed = id), loc);
             return((Ok = self.make_func(fn_def, (Some = body), loc, may_capture)));
         };
@@ -592,7 +606,7 @@ fn parse_squiggle(self: *Parser, prev: FatExpr, prec: Prec) ParseRes = {
 // TODO: this seems to use the wrong loc
 fn parse_bin_op(self: *Parser, op: Operator, prev: FatExpr, prec: Prec) ParseRes = {
     // TODO: destructuring: `prec, name := @switch ...`
-    next := @switch(op) {
+    (next_prec, callee) := @switch(op) {
         @case(.Plus) => (PrecLevel.AddSub, Flag.add);
         @case(.Minus) => (PrecLevel.AddSub, Flag.sub);
         @case(.Star) => (PrecLevel.MulDiv, Flag.mul);
@@ -632,11 +646,11 @@ fn parse_bin_op(self: *Parser, op: Operator, prev: FatExpr, prec: Prec) ParseRes
             unreachable()
         };
     };
-    if(prec.prec.lt(next._0)) {|
+    if(prec.prec.lt(next_prec)) {|
         self.pop();
         loc := self.last.span;
-        rhs := @try(self.parse_expr(prec.with(next._0))) return;
-        f := self.box(self.get_named(next._1, loc));
+        rhs := @try(self.parse_expr(prec.with(next_prec))) return;
+        f := self.box(self.get_named(callee, loc));
         arg := self.box(self.pair(prev, rhs, loc));
         call := self.expr((Call = (f = f, arg = arg)), loc);
         return(self.parse_infix(call, prec)); // TODO: tail
@@ -863,7 +877,7 @@ fn parse_pattern(self: *Parser, out: *List(Binding)) PRes = {
         // TODO: destructuring
         // TODO: shouldnt have to put the type annotations everywhere. 
         T :: Ty(Symbol, VarType);
-        name_kind: T = @match(self.peek()) {
+        (name, kind) := @match(self.peek()) {
             (fn RightParen() T => {
                 return(.Ok)
             });
@@ -908,7 +922,7 @@ fn parse_pattern(self: *Parser, out: *List(Binding)) PRes = {
         } {|
             (None = unit)
         };
-        b: Binding = (name = (Ident = name_kind._0), ty = ty, default = default, kind = name_kind._1);
+        b: Binding = (name = (Ident = name), ty = ty, default = default, kind = kind);
         out.push(b);
         if not(self.maybe(@symbol Comma)) {|
             return(.Ok);

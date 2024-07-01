@@ -1088,7 +1088,51 @@ impl<'a, 'p> Compile<'a, 'p> {
                     stmt.stmt = Stmt::Noop;
                     return Ok(());
                 }
-                let _ = self.infer_pattern(&mut binding.bindings)?; // TODO: don't allcoate
+                
+                let all_known = binding.bindings.iter().all(|b| matches!(b.ty, LazyType::Finished(_) | LazyType::PendingEval(_)));
+                
+                if all_known {
+                    self.infer_pattern(&mut binding.bindings)?;
+                }
+                // TODO: simplify so there isn't a seperate codepath for inlinging args vs destructuing
+                //       difference is one assumes (types are known, value is tuple) and other one assumes (no constants).
+                //       but really they're the same operations 
+                if (!matches!(value.expr, Expr::Tuple(_)) && (binding.bindings.len() != 1)) || !all_known {
+                    // We're not dealing with args of an inlined function. this is a destructuring in the user code. 
+                    
+                    // TODO: if all known, pass type hint? 
+                    let ty = self.compile_expr(value, None)?;
+                    
+                    let TypeInfo::Struct { fields, .. } = self.program[ty].clone() else { // TODO: no clone
+                        err!("destructure must be tuple",)
+                    };
+                    
+                    assert_eq!(fields.len(), binding.bindings.len());
+                    for (b, f) in binding.bindings.iter_mut().zip(fields.iter()) {
+                        let Name::Var(name) = b.name else { err!("destructure needs name",) };
+                        
+                        match b.ty.clone() {
+                            LazyType::Infer => b.ty = LazyType::Finished(f.ty),
+                            LazyType::PendingEval(expr) => {
+                                let expected: TypeId = self.immediate_eval_expr_known(expr)?;
+                                self.type_check_arg(f.ty, expected, "destructuring")?;
+                                b.ty = LazyType::Finished(expected);
+                            }
+                            LazyType::Finished(expected) => self.type_check_arg(f.ty, expected, "destructuring")?,
+                            _ => todo!(),
+                        }
+                        
+                        self.program.finish_layout_deep(f.ty)?;
+                        // TODO: this is so emit_ir which can't mutate program can find it.
+                        self.program.intern_type(TypeInfo::Ptr(f.ty));
+                        let prev = self.program.pool.get_var_type(name); // TODO: dumb double lookup when hashmap always gives you the old one
+                        self.program.pool.put_var_type(name, f.ty);
+                        assert!(prev.is_none() || prev.unwrap() == f.ty);
+                    }
+    
+                    return Ok(());
+                }
+                
                 let arguments = binding.flatten();
                 if arguments.len() == 1 {
                     let (name, ty, kind) = arguments.into_iter().next().unwrap();
