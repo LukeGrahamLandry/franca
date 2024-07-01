@@ -164,6 +164,7 @@ fn parse_decl_or_start_expr(self: *Parser, name: Symbol) Result(FatStmt, ParseEr
     };
     Result(FatStmt, ParseErr).unreachable_hack()
 }
+
 fn next_is_equals(self: *Parser) bool = {
     t := self.peek();
     eq(t&!tag[], tag_value(TokenType, @symbol Equals))
@@ -178,6 +179,7 @@ fn after_expr_stmt_prefix(self: *Parser, e: FatExpr) Result(FatStmt, ParseErr) =
             self.pop();
             loc := self.last.span;
             value := @try(self.parse_expr(Prec_None)) return;
+            // TODO: check if the left is a tuple/struct and warn because they maybe meant :=. 
             self.stmt((Set = (place = e, value = value)), loc)
         });
         (fn Op(op) => {
@@ -192,6 +194,18 @@ fn after_expr_stmt_prefix(self: *Parser, e: FatExpr) Result(FatStmt, ParseErr) =
             delta := @try(self.parse_expr(Prec_None)) return;
             e := self.bin_named_macro(f, e, delta, loc);
             self.stmt((Eval = e), loc)
+        });
+        (fn Colon() => { // TODO: double colon?
+            self.pop();
+            pattern := @match(e.expr) {
+                (fn StructLiteralP(pattern) Pattern => pattern);
+                (fn Tuple(idents) => @report_error("TODO: tuple destructure %", "") (return, self.last.span));
+                @default => @report_error("destructuring statment requires tuple or struct on the left. `(a, b) := <>` or (a: c, b: d) := <>` %", "") (return, self.last.span);
+            };
+            loc := self.last.span;
+            @try(self.eat(@symbol Equals, "destructuring statment expected ':=' (put type annotations on each name)")) return; // TODO: (a, b): (c, d) = <>;
+            value := @try(self.parse_expr(Prec_None)) return;
+            self.stmt((DeclVarPattern = (binding = pattern, value = value)), loc)
         });
         @default => {
             self.stmt((Eval = e), loc)

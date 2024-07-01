@@ -938,7 +938,7 @@ impl<'p> Program<'p> {
             0 => TypeId::unit,
             1 => types[0],
             _ => {
-                // TODO: always
+                // TODO: always. would need to change how you go arg_ty -> prim_sig.
                 if types.len() > 50 {
                     let first = types[0];
                     if types.iter().all(|t| *t == first) {
@@ -1400,16 +1400,20 @@ impl<'p> Program<'p> {
             TypeInfo::Label(_) | TypeInfo::Fn(_) => TypeMeta::new(1, 4, 0, false, 4, false),
             TypeInfo::Enum { .. } | TypeInfo::Named(_, _) => unreachable!(),
             &TypeInfo::Array { inner, len } => {
-                let info = self.get_info(inner);
-                let slots = info.size_slots * len as u16;
-                TypeMeta::new(
-                    slots,
-                    info.align_bytes,
-                    0,
-                    info.contains_pointers,
-                    info.stride_bytes * len as u16,
-                    len > 1 || info.pass_by_ref,
-                )
+                if len == 0 {
+                    TypeMeta::new(0, 1, 0, false, 0, false)
+                } else {
+                    let info = self.get_info(inner);
+                    let slots = info.size_slots * len as u16;
+                    TypeMeta::new(
+                        slots,
+                        info.align_bytes,
+                        0,
+                        info.contains_pointers,
+                        info.stride_bytes * len as u16,
+                        len > 1 || info.pass_by_ref,
+                    )
+                }
             }
         };
         self.types_extra.borrow_mut().deref_mut()[ty.as_index()] = Some(info);

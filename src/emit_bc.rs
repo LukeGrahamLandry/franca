@@ -761,7 +761,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 }
             }
             Expr::Tuple(values) => {
-                debug_assert!(values.len() > 1, "no trivial tuples: {:?}", values);
                 match &self.program[self.program.raw_type(expr.ty)] {
                     TypeInfo::Struct { fields, layout_done, .. } => {
                         assert!(*layout_done);
@@ -784,6 +783,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                             self.compile_expr(result, value, result_location, false)?;
                         }
                     }
+
                     _ => err!("Expr::Tuple should have struct type",),
                 }
 
@@ -1346,13 +1346,13 @@ impl<'p> FnBody<'p> {
 }
 
 pub fn prim_sig<'p>(program: &Program<'p>, f_ty: FnType, cc: CallConv) -> Res<'p, PrimSig<'p>> {
-    let (arg, ret) = program.get_infos(f_ty);
+    let ret = program.get_info(f_ty.ret);
 
     let has_indirect_ret = ret.size_slots > 2;
 
     let mut sig = PrimSig {
         args: &[],
-        arg_slots: arg.size_slots,
+        arg_slots: 0,
         ret_slots: ret.size_slots,
         first_arg_is_indirect_return: has_indirect_ret,
         no_return: f_ty.ret.is_never(),
@@ -1373,6 +1373,7 @@ pub fn prim_sig<'p>(program: &Program<'p>, f_ty: FnType, cc: CallConv) -> Res<'p
         _ => {
             sig.arg_slots += 1;
             sig.ret_slots = 0;
+            // Note: not adding indirect pointer to sig because its handled sperately. TODO: that's kinda confusing.
         }
     }
 
@@ -1384,47 +1385,40 @@ pub fn prim_sig<'p>(program: &Program<'p>, f_ty: FnType, cc: CallConv) -> Res<'p
         args.push(Prim::P64);
     }
 
-    // sad copy paste from compile_for_arg
-    if arg.pass_by_ref {
-        if f_ty.arity == 1 {
-            sig.arg_slots -= program.get_info(f_ty.arg).size_slots;
+    let mut found_arity = 0;
+    let mut push_arg = |ty| {
+        found_arity += 1;
+        let info = program.get_info(ty);
+        if info.pass_by_ref {
             sig.arg_slots += 1;
             args.push(Prim::P64);
-        } else if let Some(types) = program.tuple_types(f_ty.arg) {
-            if types.iter().all(|t| program.get_info(*t).pass_by_ref) {
-                for ty in types {
-                    if !ty.is_unit() && !ty.is_never() {
-                        args.push(Prim::P64);
-                        sig.arg_slots += 1;
-                        sig.arg_slots -= program.get_info(ty).size_slots;
-                    }
-                }
-            } else if types.iter().all(|t| !program.get_info(*t).pass_by_ref) {
-                for t in program.flat_tuple_types(f_ty.arg) {
-                    args.push(program.prim(t).unwrap());
-                }
-            } else {
-                for ty in types {
-                    let info = program.get_info(ty);
-                    if info.pass_by_ref {
-                        sig.arg_slots -= info.size_slots;
-                        sig.arg_slots += 1;
-                        args.push(Prim::P64);
-                    } else {
-                        for p in program.as_primatives(ty) {
-                            args.push(*p);
-                        }
-                    }
-                }
-            }
         } else {
-            // if arity == 1 ??
-            sig.arg_slots = 1;
-            args.push(Prim::P64);
+            for t in program.flat_tuple_types(ty) {
+                sig.arg_slots += 1;
+                args.push(program.prim(t).unwrap());
+            }
         }
-    } else if !f_ty.arg.is_unit() && !f_ty.arg.is_never() {
-        args.extend(program.as_primatives(f_ty.arg));
+    };
+
+    let mut done = false;
+    // TODO: if i always collapsed tuples of the same to array this would need different handling.
+    if let TypeInfo::Struct { fields, is_tuple, .. } = &program[f_ty.arg] {
+        if *is_tuple {
+            done = true;
+            for f in fields {
+                push_arg(f.ty);
+            }
+        }
     }
+
+    if !done {
+        push_arg(f_ty.arg);
+    }
+
+    // TODO: decide what i want a tuple to be. is it a real type you can have in memory or is it the thing that multiple arguments are?
+    //       those ideas should extend to return values instead of them being special.
+    //       should have a spread operator for calling a function on a tuple of arguments? like 'a := (1, 2); f(..a)'
+    // assert_eq!(found_arity, f_ty.arity, "TODO: fn(a: Ty(i64, i64))");
 
     let mut key = (f_ty.arg, sig.arg_slots, false, comp_ctx);
     program.primitives.borrow_mut().insert(key, args.clone());

@@ -1,6 +1,6 @@
 #![allow(improper_ctypes_definitions)]
 
-use crate::self_hosted::{emit_llvm, put_baked, resolve_root, show_error_line, ParseErr, SelfHosted};
+use crate::self_hosted::{resolve_root, show_error_line, ParseErr, SelfHosted};
 use crate::unwrap2;
 use libc::c_void;
 
@@ -235,7 +235,7 @@ pub struct ImportVTable {
     _e: usize,
     get_compiler_builtins_source: extern "C" fn() -> &'static str,
     get_cranelift_builtins_source: extern "C" fn() -> &'static str,
-    emit_llvm: unsafe extern "C" fn(),
+    _emit_llvm: usize,
     number_of_functions: unsafe extern "C" fn(c: &mut &mut Program) -> i64,
     _bake_var: usize,
     franca_prim_sig2: for<'p> extern "C" fn(c: &Compile<'_, 'p>, func: &Func<'p>) -> Res<'p, PrimSig<'p>>,
@@ -281,7 +281,7 @@ pub static IMPORT_VTABLE: ImportVTable = ImportVTable {
     _e: 0,
     get_compiler_builtins_source,
     get_cranelift_builtins_source,
-    emit_llvm,
+    _emit_llvm: 1,
     number_of_functions,
     _bake_var: 1,
     franca_prim_sig2,

@@ -1088,6 +1088,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     stmt.stmt = Stmt::Noop;
                     return Ok(());
                 }
+                let _ = self.infer_pattern(&mut binding.bindings)?; // TODO: don't allcoate
                 let arguments = binding.flatten();
                 if arguments.len() == 1 {
                     let (name, ty, kind) = arguments.into_iter().next().unwrap();
@@ -1474,7 +1475,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                 res
             }
             Expr::Tuple(values) => {
-                assert!(values.len() > 1, "ICE: no trivial tuples");
                 let types = requested
                     .and_then(|t| self.program.tuple_types(t))
                     .and_then(|t| if t.len() == values.len() { Some(t) } else { None });
