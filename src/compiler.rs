@@ -693,10 +693,18 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let mut a = arg.clone();
                 self.program[f].body = self.inline_asm_body(f, &mut a)?;
                 special = true;
-            }
+            } 
         } else {
             assert!(self.program[f].finished_ty().is_some(), "fn without body needs type annotations.");
-
+        }
+        
+        if self.program[f].has_tag(Flag::Asm) {
+            let FuncImpl::Normal(body) = &mut self.program[f].body else {
+                err!("#asm needs body",)
+            };
+            let mut a = body.clone();
+            self.program[f].body = self.inline_asm_body(f, &mut a)?;
+            special = true;
         }
 
         if let Some(types) = self.program[f].get_tag_mut(Flag::Redirect).cloned() {
@@ -1210,11 +1218,16 @@ impl<'a, 'p> Compile<'a, 'p> {
         debug_assert!(func.get_flag(NotEvilUninit));
         let loc = func.loc;
         // TODO: allow language to declare @macro(.func) and do this there instead. -- Apr 27
-        if let Some(when) = func.get_tag_mut(Flag::When) {
-            let cond = unwrap!(when.args.as_mut(), "#when(cond: bool) requires argument");
-            let cond: bool = self.immediate_eval_expr_known(cond.clone())?;
-            if !cond {
-                return Ok((None, None));
+        for tag in &mut func.annotations {
+            if tag.name == Flag::When.ident() {
+                let cond = unwrap!(tag.args.as_mut(), "#when(cond: bool) requires argument");
+                let cond: bool = self.immediate_eval_expr_known(cond.clone())?;
+                if !cond {
+                    return Ok((None, None));
+                }
+            } else if tag.name == Flag::Compiler_Builtin_Transform_Callsite.ident() {
+                assert!(matches!(func.body, FuncImpl::Empty));
+                func.body = FuncImpl::CompilerBuiltin(func.name);
             }
         }
 
@@ -1440,7 +1453,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     // TODO: make the indices always work out so you could just do it with a normal stack machine.
     //       and just use the slow linear types for debugging.
-    fn compile_expr_inner(&mut self, expr: &mut FatExpr<'p>, requested: Option<TypeId>) -> Res<'p, TypeId> {
+    fn compile_expr_inner(&mut self, expr: &mut FatExpr<'p>, mut requested: Option<TypeId>) -> Res<'p, TypeId> {
         self.last_loc = Some(expr.loc);
         let loc = expr.loc;
         let prev_ty = expr.ty;
@@ -1487,7 +1500,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
                 // If its not a FnPtr, it should be a Fn/FuncId/OverloadSetId
                 if let Some(f_id) = self.maybe_direct_fn(f, arg, requested)? {
-                    return self.compile_call(expr, f_id);
+                    return self.compile_call(expr, f_id, requested);
                 }
 
                 self.last_loc = Some(f.loc);
@@ -1589,6 +1602,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 expr.done = true;
                 expr.ty
             }
+            // TODO: factor these out and maybe poke thier addresses in #compiler_builtin_transform_callsite
             Expr::SuffixMacro(macro_name, arg) => {
                 let name = Flag::try_from(*macro_name)?;
                 match name {
@@ -1718,7 +1732,11 @@ impl<'a, 'p> Compile<'a, 'p> {
                         ty
                     }
                     Flag::Uninitialized => {
-                        assert!(arg.is_raw_unit());
+                        if !arg.is_raw_unit() && requested.is_none() {
+                            let ty: TypeId = self.immediate_eval_expr_known(mem::take(arg))?;
+                            requested = Some(ty);
+                            arg.expr = Expr::Value { value: Values::unit(), coerced: true };
+                        }
                         assert!(requested.is_some(), "!uninitialized expr must have known type");
                         expr.ty = requested.unwrap();
                         return Ok(requested.unwrap());
@@ -3171,11 +3189,16 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
     }
 
-    fn compile_call(&mut self, expr: &mut FatExpr<'p>, mut fid: FuncId) -> Res<'p, TypeId> {
+    fn compile_call(&mut self, expr: &mut FatExpr<'p>, mut fid: FuncId, requested: Option<TypeId>) -> Res<'p, TypeId> {
         let loc = expr.loc;
         let done = expr.done;
         let (f_expr, arg_expr) = if let Expr::Call(f, arg) = expr.deref_mut() { (f, arg) } else { ice!("") };
         self.ensure_resolved_sign(fid)?;
+        
+        if let FuncImpl::CompilerBuiltin(name) = self.program[fid].body {
+            expr.expr = Expr::SuffixMacro(name, mem::take(arg_expr));
+            return self.compile_expr(expr, requested);
+        }
 
         if self.program[fid].get_flag(Generic) {
             assert!(self.program[fid].any_const_args(), "fn with no const args redundantly marked #generic");
@@ -3705,7 +3728,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             err!("const bindings cannot be reassigned so '{name}' cannot be uninitialized",)
         }
 
-        let rec = if let Some(real_val) = value.expr.as_suffix_macro_mut(Flag::Rec) {
+        let rec = if let Some(real_val) = value.expr.as_prefix_macro_mut(Flag::Rec) {
             *value = mem::take(real_val);
             if let Some(ty) = ty.ty() {
                 assert_eq!(ty, TypeId::ty);

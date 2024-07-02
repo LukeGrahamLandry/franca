@@ -43,34 +43,34 @@ fn call_jit(input: i64, code: Slice(u32)) i64 = {
 
 #aarch64
 #test fn math_ops(canary: i64) i64 = {
-    #c_call #aarch64
+    #c_call #aarch64 #asm
     fn add_by_asm(a: i64, b: i64) i64 = (
         add_sr(Bits.X64, x0, x0, x1, Shift.LSL, 0b000000),
         ret(),
-    )!asm;
+    );
     
     three := add_by_asm(1, 2);
     assert_eq(three, 3);
     
-    #c_call #aarch64
+    #c_call #aarch64 #asm
     fn add_one(a: i64) i64 = (
         add_im(Bits.X64, x0, x0, @as(u12) 1, 0b0),
         ret(),
-    )!asm;
+    );
     assert_eq(add_one(9), 10);
     
-    #c_call #aarch64
+    #c_call #aarch64 #asm
     fn sub_one(a: i64) i64 = (
         sub_im(Bits.X64, x0, x0, @as(u12) 1, 0b0),
         ret(),
-    )!asm;
+    );
     assert_eq(sub_one(10), 9);
     
-    #c_call #aarch64
+    #c_call #aarch64 #asm
     fn bool_to_int(b: bool) i64 = (
         ret(),
         ret(), // TODO: single element tuple
-    )!asm;
+    );
     assert_eq(bool_to_int(true), 1);
     assert_eq(bool_to_int(false), 0);
     
@@ -79,7 +79,7 @@ fn call_jit(input: i64, code: Slice(u32)) i64 = {
 
 #aarch64
 #test fn branching(canary: i64) i64 = {
-    #c_call #aarch64
+    #c_call #aarch64 #asm
     fn add_or_sub(a: i64, b: i64, add_if_seven: i64) i64 = (
         cmp_im(Bits.X64, x2, @as(u12) 7, 0b0),
         b_cond(@as(i19) 3, Cond.EQ),
@@ -87,11 +87,11 @@ fn call_jit(input: i64, code: Slice(u32)) i64 = {
         ret(),
         add_sr(Bits.X64, x0, x0, x1, Shift.LSL, @as(u6) 0),
         ret(),
-    )!asm;
+    );
     assert_eq(add_or_sub(30, 20, 7), 50);
     assert_eq(add_or_sub(30, 20, 8), 10);
 
-    #c_call #aarch64
+    #c_call #aarch64 #asm
     fn add_or_sub2(a: i64, b: i64, add_if_seven: i64) i64 = (
         cmp_im(Bits.X64, x2, @as(u12) 7, 0b0),
         b_cond(@as(i19) 3, Cond.NE),
@@ -99,16 +99,16 @@ fn call_jit(input: i64, code: Slice(u32)) i64 = {
         ret(),
         sub_sr(Bits.X64, x0, x0, x1, Shift.LSL, @as(u6) 0),
         ret(),
-    )!asm;
+    );
     assert_eq(add_or_sub2(30, 20, 7), 50);
     assert_eq(add_or_sub2(30, 20, 8), 10);
     
-    #c_call #aarch64
+    #c_call #aarch64 #asm
     fn is_seven(n: i64) i64 = (
         cmp_im(Bits.X64, x0, @as(u12) 7, 0b0),
         cset(Bits.X64, x0, Cond.NE),
         ret(),
-    )!asm;
+    );
     assert_eq(is_seven(7), 1);
     assert_eq(is_seven(8), 0);
 
@@ -117,18 +117,18 @@ fn call_jit(input: i64, code: Slice(u32)) i64 = {
 
 #aarch64
 #test fn using_stack(canary: i64) i64 = {
-    #c_call #aarch64
+    #c_call #aarch64 #asm
     fn truncate_to_byte(in: *i64, out: *i64) void = (
         ldrb_uo(x2, x0, @as(u12) 0),
         strb_uo(x2, x1, @as(u12) 0),
         ret(),
-    )!asm;
+    );
     in := 257;
     out := 0;
     truncate_to_byte(in&, out&);
     assert_eq(out, 1);
     
-    #c_call #aarch64
+    #c_call #aarch64 #asm
     fn use_stack(a: i64) i64 = (
         sub_im(Bits.X64, sp, sp, @as(u12) 16, 0b0),
         str_uo(Bits.X64, x0, sp, @as(u12) 1),
@@ -137,14 +137,14 @@ fn call_jit(input: i64, code: Slice(u32)) i64 = {
         add_sr(Bits.X64, x0, x0, x1, Shift.LSL, @as(u6) 0),
         add_im(Bits.X64, sp, sp, @as(u12) 16, 0b0),
         ret(),
-    )!asm;
+    );
     assert_eq(use_stack(15), 25);
 
     // Note: you make 16 bytes of room on the stack, then use offset 0 words and 1 words above sp. 
     //       NOT offset 1 and 2, that will stomp the first slot of the outer function (in this case canary so luckily you notice)
     //       but... its fine on interp because canary is stored on the fake stack and there happens to be a gap on the real one i guess. 
     //       I also didn't notice that I forgot to reset sp, I guess rust set the value after the call instead of trusing callee to offset it back? 
-    #c_call #aarch64
+    #c_call #aarch64 #asm
     fn read_pair(a: i64, b: i64) i64 = (
         sub_im(Bits.X64, sp, sp, @as(u12) 16, 0b0),
         str_uo(Bits.X64, x0, sp, @as(u12) 0),
@@ -153,10 +153,10 @@ fn call_jit(input: i64, code: Slice(u32)) i64 = {
         sub_sr(Bits.X64, x0, x2, x3, Shift.LSL, @as(u6) 0),
         add_im(Bits.X64, sp, sp, @as(u12) 16, 0b0),
         ret(),
-    )!asm;
+    );
     assert_eq(read_pair(30, 20), 10);
     
-    #c_call #aarch64
+    #c_call #aarch64 #asm
     fn write_pair(a: i64, b: i64) i64 = (
         sub_im(Bits.X64, sp, sp, @as(u12) 16, 0b0),
         stp_so(Bits.X64, x0, x1, sp, @as(i7) 0),
@@ -165,10 +165,10 @@ fn call_jit(input: i64, code: Slice(u32)) i64 = {
         sub_sr(Bits.X64, x0, x2, x3, Shift.LSL, @as(u6) 0),
         add_im(Bits.X64, sp, sp, @as(u12) 16, 0b0),
         ret(),
-    )!asm;
+    );
     assert_eq(write_pair(30, 20), 10);
     
-    #c_call #aarch64
+    #c_call #aarch64 #asm
     fn both_pair(a: i64, b: i64) i64 = (
         sub_im(Bits.X64, sp, sp, @as(u12) 16, 0b0),
         stp_so(Bits.X64, x0, x1, sp, @as(i7) 0),
@@ -176,7 +176,7 @@ fn call_jit(input: i64, code: Slice(u32)) i64 = {
         sub_sr(Bits.X64, x0, x2, x3, Shift.LSL, @as(u6) 0),  // sub means order matters, so you can catch if flipped in encoding.
         add_im(Bits.X64, sp, sp, @as(u12) 16, 0b0),
         ret(),
-    )!asm;
+    );
     assert_eq(both_pair(30, 20), 10);
 
     canary

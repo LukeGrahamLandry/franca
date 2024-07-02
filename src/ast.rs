@@ -662,6 +662,7 @@ pub enum FuncImpl<'p> {
     Redirect(FuncId),
     Merged(Vec<FuncImpl<'p>>),
     Empty,
+    CompilerBuiltin(Ident<'p>),
 }
 
 impl<'p> Func<'p> {
@@ -1481,6 +1482,16 @@ impl<'p> Expr<'p> {
         }
         None
     }
+    // TODO: this is very bad. and only used for !rec
+    pub(crate) fn as_prefix_macro_mut(&mut self, flag: Flag) -> Option<&mut FatExpr<'p>> {
+        if let Expr::PrefixMacro { handler, arg, target } = self {
+            if handler.as_ident() == Some(flag.ident()) {
+                assert!(arg.is_raw_unit());
+                return Some(target);
+            }
+        }
+        None
+    }
 }
 
 impl<'p> Default for Func<'p> {
@@ -1670,6 +1681,7 @@ pub enum Flag {
     Bake_Relocatable_Value,
     Local_Return,
     No_Trace,
+    Compiler_Builtin_Transform_Callsite,
     _Reserved_Count_,
 }
 

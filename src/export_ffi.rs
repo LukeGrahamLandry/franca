@@ -538,7 +538,19 @@ pub const COMPILER: &[(&str, *const u8)] = &[
         Compile::save_function_header as *const u8,
     ),
     ("fn Tag(Tagged: Type) Type #fold;", get_enum_tag_type as *const u8),
+    ("fn slice(elements: FatExpr) FatExpr #macro;", slice_macro as *const u8),
+    ("fn if(args: FatExpr) FatExpr #macro;", if_macro as *const u8),
 ];
+
+extern "C-unwind" fn slice_macro<'p>(_: &mut Compile<'_, 'p>, arg: FatExpr<'p>) -> FatExpr<'p> {
+    let loc = arg.loc;
+    FatExpr::synthetic(Expr::SuffixMacro(Flag::Slice.ident(), Box::new(arg)), loc)
+}
+
+extern "C-unwind" fn if_macro<'p>(_: &mut Compile<'_, 'p>, arg: FatExpr<'p>) -> FatExpr<'p> {
+    let loc = arg.loc;
+    FatExpr::synthetic(Expr::SuffixMacro(Flag::If.ident(), Box::new(arg)), loc)
+}
 
 extern "C-unwind" fn get_enum_tag_type(comp: &mut Compile, e: TypeId) -> TypeId {
     let raw = comp.program.raw_type(e);

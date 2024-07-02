@@ -247,7 +247,7 @@ fn can_start_quick_expr(t: TokenType) bool = {
         (fn Op(op) bool => @switch(op){
             // TODO: you want this to be true so you can do 'if !whatever' but then it breaks 'Type!builtin'. -- Jun 23
             //       just prefer the quick expr one. bring back "expected trailing lambda after quick expres"
-            @case(Operator.Bang) => false;
+            @case(Operator.Bang) => true;
             @default fn(_: Operator) => false;
         });
         @default => false;
@@ -412,7 +412,7 @@ fn parse_func(self: *Parser, allow_empty: bool) Result(Func, ParseErr) = {
         (fn Equals() => false);
         (fn FatRightArrow() => true);
         (fn Semicolon() bool => {
-            if not(allow_empty) {|
+            if !allow_empty {|
                 @report_error("Function expression requires body %", "") (return, self.last.span);
             };
             return(Ok = self.make_func(fn_def, .None, loc, false))
@@ -420,7 +420,7 @@ fn parse_func(self: *Parser, allow_empty: bool) Result(Func, ParseErr) = {
         @default => @report_error("expected '=' or '=>' or ';' after function decl %", "") (return, self.last.span);
     };
     
-    if not(may_capture) {|
+    if !may_capture {|
         @if_let(self.peek()) fn LeftSquiggle() => {
             (src, span) := self.lex&.skip_to_closing_squigle();
             self.pop(); // TODO: why do i need this? -- Jun 22
@@ -613,15 +613,6 @@ fn parse_bin_op(self: *Parser, op: Operator, prev: FatExpr, prec: Prec) ParseRes
         @case(.GreaterEq) => (PrecLevel.Comparison, Flag.ge);
         @case(.BangEq) => (PrecLevel.Equality, Flag.ne);
         @case(.EqEq) => (PrecLevel.Equality, Flag.eq);
-        @case(.Bang) => {
-            self.pop();
-            loc := self.last.span;
-            // no <not> bit op. its e!name...
-            name := @try(self.pop_name("macro name after '!'")) return;
-            e := self.expr((SuffixMacro = (name = name, arg = self.box(prev))), loc);
-            return(self.parse_infix(e, prec)); // TODO: tail
-            unreachable()
-        };
         @case(.AmpAmp) => {
             if(prec.prec.lt(.Logical)) {|
                 self.pop();
@@ -919,7 +910,7 @@ fn parse_pattern(self: *Parser, out: *List(Binding)) PRes = {
         };
         b: Binding = (name = (Ident = name), ty = ty, default = default, kind = kind);
         out.push(b);
-        if not(self.maybe(.Comma)) {|
+        if !self.maybe(.Comma) {|
             return(.Ok);
         };
     };
@@ -980,9 +971,9 @@ fn fn_def_signeture(self: *Parser, loc: Span, allow_name: bool) Result(FnDef, Pa
         @report_error("'fn <Expr> =' can't treat Expr as ret type. pls specify name or args. forgot '|' before lambda body? %", "") (return, self.last.span);
     };
 
-    ret: LazyType = if not(cant_start_return_expression(self.peek())) {|
+    ret: LazyType = if !cant_start_return_expression(self.peek()) {|
         (PendingEval = @try(self.parse_expr(Prec_None)) return)
-    } {|
+    } else {|
         (Infer = unit)
     };
     tags := @try(self.parse_annotations()) return;
@@ -1005,7 +996,7 @@ fn parse_block_until_squiggle(self: *Parser, allow_eof: bool) ParseRes = {
     
     // TODO: :dont_store_noop
     ::if_opt(FatStmt, FatExpr);
-    result: FatExpr = if(stmts&.pop()) {stmt|
+    result: FatExpr = if stmts&.pop() {stmt|
         @match(stmt.stmt) {
             (fn Eval(e) FatExpr => e);
             (fn Noop() => {
@@ -1022,7 +1013,7 @@ fn parse_block_until_squiggle(self: *Parser, allow_eof: bool) ParseRes = {
                 self.raw_unit(self.last.span)
             };
         }
-    }{|
+    } else {|
         self.raw_unit(self.last.span)
     };
     
@@ -1053,7 +1044,7 @@ fn maybe(self: *Parser, type: TokenType.Tag()) bool = {
 
 fn eat(self: *Parser, type: TokenType.Tag(), msg: Str) PRes = {
     t := self.peek();
-    if not(self.maybe(type)) {|
+    if !self.maybe(type) {|
         @report_error("Expected % for %", type, msg) (return, self.last.span);
     };
     (Ok = unit)
