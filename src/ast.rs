@@ -76,6 +76,7 @@ pub enum TypeInfo<'p> {
     // What rust calls an enum
     Tagged {
         cases: Vec<(Ident<'p>, TypeId)>,
+        tag: TypeId,
     },
     // TODO: on assignment, check that it's a valid value. (at the very least do it for constants)
     Enum {
@@ -778,7 +779,6 @@ pub struct Program<'p> {
     /// Note: if i switch to Values being raw bytes, make sure to define any padding so this works.
     pub overload_sets: Vec<OverloadSet<'p>>, // TODO: use this instead of lookup_unique_func
     pub ffi_types: Map<u128, TypeId>,
-    pub ffi_sizes: Map<TypeId, usize>,
     pub log_type_rec: RefCell<Vec<TypeId>>,
     pub comptime_arch: TargetArch,
     pub inline_llvm_ir: Vec<FuncId>,
@@ -868,7 +868,6 @@ impl<'p> Program<'p> {
             primitives: Default::default(),
             inject_function_header: None,
             fat_expr_type: None,
-            ffi_sizes: Default::default(),
             finished_layout_deep: BitSet::empty(),
             // these are hardcoded numbers in TypeId constructors
             // if you remove any remember to fix later indices!
@@ -1007,7 +1006,7 @@ impl<'p> Program<'p> {
                     self.finish_layout_deep(f.ty)?
                 }
             }
-            TypeInfo::Tagged { cases } => {
+            TypeInfo::Tagged { cases, .. } => {
                 // TODO: no clone
                 for f in cases.clone() {
                     self.finish_layout_deep(f.1)?
@@ -1023,7 +1022,7 @@ impl<'p> Program<'p> {
             return self.finish_layout(inner);
         }
 
-        if let TypeInfo::Tagged { cases } = self[ty].clone() {
+        if let TypeInfo::Tagged { cases, .. } = self[ty].clone() {
             // sad!
             for c in cases {
                 self.finish_layout(c.1)?;
@@ -1111,7 +1110,7 @@ impl<'p> Program<'p> {
                 }
                 return None;
             }
-            TypeInfo::Tagged { ref cases } => {
+            TypeInfo::Tagged { ref cases, .. } => {
                 for (_, payload) in cases {
                     if !payload.is_unit() {
                         return None;
@@ -1285,7 +1284,7 @@ impl<'p> Program<'p> {
             TypeInfo::Struct { fields, .. } => fields.iter().flat_map(|f| self.flat_tuple_types(f.ty)).collect(),
             &TypeInfo::Enum { raw: ty, .. } | &TypeInfo::Named(ty, _) => self.flat_tuple_types(ty),
             // TODO: this is sketchy
-            TypeInfo::Tagged { cases } => {
+            TypeInfo::Tagged { cases, .. } => {
                 let mut varients: Vec<_> = cases.iter().map(|(_, t)| self.flat_tuple_types(*t)).filter(|t| !t.is_empty()).collect();
                 if varients.len() == 1 {
                     varients[0].insert(0, TypeId::i64());
@@ -1609,7 +1608,7 @@ pub enum Flag {
     If,
     Loop,
     Addr,
-    Tag,
+    Tag, // TODO: remove
     Reflect_Print,
     Fn_Ptr,
     TopLevel,

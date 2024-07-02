@@ -1004,10 +1004,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                             };
                         }
                     }
-                    Flag::Tag => {
-                        debug_assert_eq!(self.program[expr.ty], TypeInfo::Ptr(TypeId::i64()));
-                        self.compile_expr(result, arg, result_location, can_tail)?;
-                    }
                     Flag::Fn_Ptr => {
                         debug_assert!(matches!(self.program[arg.ty], TypeInfo::Fn(_)));
                         let mut f = unwrap!(arg.as_const(), "expected fn for ptr").unwrap_func_id();
@@ -1224,7 +1220,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 }
             }
             // TODO: make this constexpr in compiler
-            TypeInfo::Tagged { cases } => {
+            TypeInfo::Tagged { cases, .. } => {
                 debug_assert!(result_location != Discard, "todo");
 
                 let size = self.slot_count(raw_container_ty);

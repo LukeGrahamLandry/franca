@@ -537,7 +537,16 @@ pub const COMPILER: &[(&str, *const u8)] = &[
         "fn __save_function_header(push: Fn(u32, void), pop: Fn(void, void)) void;",
         Compile::save_function_header as *const u8,
     ),
+    ("fn Tag(Tagged: Type) Type #fold;", get_enum_tag_type as *const u8),
 ];
+
+extern "C-unwind" fn get_enum_tag_type(comp: &mut Compile, e: TypeId) -> TypeId {
+    let raw = comp.program.raw_type(e);
+    let TypeInfo::Tagged { tag, .. } = &comp.program[raw] else {
+        panic!("Expected @tagged found {}", comp.program.log_type(e))
+    };
+    *tag
+}
 
 extern "C-unwind" fn dyn_bake_relocatable_value(comp: &mut Compile, bytes: &[u8], ty: TypeId, force_default_handling: bool) -> *const [BakedEntry] {
     debug_assert_eq!(comp.program.get_info(ty).stride_bytes as usize, bytes.len());
@@ -924,16 +933,26 @@ extern "C-unwind" fn namespace_macro<'p>(compile: &mut Compile<'_, 'p>, mut bloc
 pub extern "C-unwind" fn tagged_macro<'p>(compile: &mut Compile<'_, 'p>, mut cases: FatExpr<'p>) -> FatExpr<'p> {
     hope(|| {
         if let Expr::StructLiteralP(pattern) = &mut cases.expr {
-            for b in &mut pattern.bindings {
+            let mut tag_fields = vec![];
+            for (i, b) in pattern.bindings.iter_mut().enumerate() {
                 if b.default.is_none() && matches!(b.ty, LazyType::Infer) {
                     // @tagged(s: i64, n) is valid and infers n as void.
                     b.ty = LazyType::Finished(TypeId::unit);
                 }
+                tag_fields.push((b.name().unwrap(), Values::one(i as i64))); // :tag_enums_are_sequential
             }
             let ty = compile.struct_type(pattern)?;
             let TypeInfo::Struct { fields, .. } = ty else { unreachable!() };
+
+            let tag = TypeInfo::Enum {
+                raw: TypeId::i64(),
+                fields: tag_fields,
+            };
+            let tag = compile.program.intern_type(tag);
+
             let ty = TypeInfo::Tagged {
                 cases: fields.into_iter().map(|f| (f.name, f.ty)).collect(),
+                tag,
             };
             let ty = compile.program.intern_type(ty);
 

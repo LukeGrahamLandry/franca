@@ -1,8 +1,6 @@
 use crate::self_hosted::Span;
 
-use crate::ast::{
-    Expr, FatExpr, FnFlag, FuncId, FuncImpl, LazyType, OverloadOption, OverloadSet, OverloadSetId, Pattern, TypeId, TypeInfo, Var, VarType,
-};
+use crate::ast::{Expr, FatExpr, FnFlag, FuncId, FuncImpl, LazyType, OverloadOption, OverloadSet, OverloadSetId, Pattern, TypeId, TypeInfo, VarType};
 use crate::bc::{from_values, Values};
 use crate::compiler::{Compile, ExecStyle, Res};
 use crate::logging::PoolLog;

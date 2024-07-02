@@ -116,8 +116,8 @@ pub use unwrap;
 use crate::ast::{FatStmt, FuncImpl, Pattern};
 use crate::bc::*;
 use crate::export_ffi::BigOption;
+use crate::self_hosted::log_pattern;
 use crate::self_hosted::{log_expr, log_func, log_lazy_type, log_stmt, SelfHosted};
-use crate::self_hosted::{log_pattern, Ident};
 use crate::{
     ast::{FatExpr, Func, FuncId, LazyType, Program, TypeId, TypeInfo, Var},
     compiler::{CErr, CompileError, DebugState},
@@ -188,65 +188,6 @@ impl<'p> Program<'p> {
 
             // format!("{t:?}={s}")
         })
-    }
-
-    pub fn find_ffi_type(&self, name: Ident<'p>) -> Option<TypeId> {
-        let mut found = None;
-        for ty in self.ffi_types.values() {
-            if let &TypeInfo::Named(ty, check) = &self[*ty] {
-                if name == check {
-                    if found.is_some() {
-                        println!("err: duplicate ffi name {}", self.pool.get(name));
-                        return None;
-                    }
-                    found = Some(ty);
-                } else if let TypeInfo::Tagged { cases, .. } = &self[ty] {
-                    for (check, ty) in cases {
-                        if *check == name {
-                            if found.is_some() {
-                                println!("err: duplicate ffi name {}", self.pool.get(name));
-                                return None;
-                            }
-                            found = Some(*ty);
-                        }
-                    }
-                }
-            } else if let TypeInfo::Tagged { cases, .. } = &self[*ty] {
-                for (check, ty) in cases {
-                    if *check == name {
-                        if found.is_some() {
-                            println!("err: duplicate ffi name {}", self.pool.get(name));
-                            return None;
-                        }
-                        found = Some(*ty);
-                    }
-                }
-            }
-        }
-        found
-    }
-
-    pub fn dump_ffi_types(&mut self) -> String {
-        let mut out = String::new();
-
-        for info in &self.types {
-            if let &TypeInfo::Named(ty, name) = info {
-                if let TypeInfo::Tagged { cases, .. } = &self[ty] {
-                    writeln!(out, "const {} = @tagged(", self.pool.get(name),).unwrap();
-                    for (name, mut ty) in cases {
-                        if let &TypeInfo::Named(inner, _) = &self[ty] {
-                            // Not unique, name is probably just name of the case.
-                            ty = inner;
-                        }
-                        writeln!(out, "    {}: {},", self.pool.get(*name), self.log_type(ty)).unwrap();
-                    }
-                    out += ");\n"
-                } else {
-                    writeln!(out, "const {} = ({});", self.pool.get(name), self.log_type(ty)).unwrap();
-                }
-            }
-        }
-        out
     }
 }
 

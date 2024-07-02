@@ -433,7 +433,7 @@ pub fn zero_padding(program: &Program, ty: TypeId, bytes: &mut [u8], i: &mut usi
 
             fix_align(bytes, i, align); // eat trailing stride padding
         }
-        TypeInfo::Tagged { cases } => {
+        TypeInfo::Tagged { cases, .. } => {
             let start = *i;
             let tag = int_from_bytes(&bytes[*i..*i + 8]);
             assert!(tag >= 0 && tag < cases.len() as i64, "bad tag {tag}");

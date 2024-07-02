@@ -31,16 +31,15 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
     enum_type := arg.ty;
     info := get_type_info_raw(enum_type);
     
-    kind := info&!tag[];
     is_ptr := false;
-    if(eq(kind, tag_value(TypeInfo, @symbol(Ptr)))){|
+    if info&.is(.Ptr) {|
         enum_type = (@as(*Type) info.Ptr&)[];
         info = get_type_info_raw(enum_type);
         is_ptr = true;
     };
     ptr_ty := *enum_type;
    
-    assert(eq(info&!tag[], tag_value(TypeInfo, @symbol(Tagged))), "@match expected argument type to be @tagged");
+    assert(info&.is(.Tagged), "@match expected argument type to be @tagged");
     info := info.Tagged;
     
     varients := info.cases.items();
@@ -61,7 +60,8 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
     @{
         arg_val := @[if(is_ptr, => @{ @as(void)unit }, => arg)];
         arg_ptr := @[if(is_ptr, =>arg, => @{ arg_val& })];
-        tag_val := arg_ptr!tag[];
+        :: tagged(@[@literal enum_type]);
+        tag_val := arg_ptr.tag();
         @[{
             count := 0;
             i := stmts.len.sub(1);
@@ -71,9 +71,9 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
                 continue :: local_return;
                 stmt: *FatStmt = stmts.index(i); 
                 i -= 1;
-                if(eq(stmt[].stmt&!tag[], tag_value(Stmt, @symbol Eval))) {|  // (1)
+                if stmt.stmt&.is(.Eval) {|  // (1)
                     handler_body := stmt.stmt.Eval&;
-                    if(eq(handler_body.expr&!tag[], tag_value(Expr, @symbol Closure))) {| 
+                    if handler_body.expr&.is(.Closure) {| 
                         closure := handler_body.expr.Closure&;
                         name: Symbol = closure.name; // (2)
                         index := tag_value(enum_type, name); // they're always sequential
@@ -91,9 +91,9 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
                         bindings := closure.arg.bindings.items();
                         if(bindings.len.eq(1)){|
                             first := bindings[0]&;
-                            infer := first.ty&!tag[].eq(tag_value(LazyType, @symbol Infer));
-                            no_name := first.name&!tag[].eq(tag_value(Name, @symbol None)); 
-                            if (infer.or(no_name)){|
+                            infer := first.ty&.is(.Infer);
+                            no_name := first.name&.is(.None); 
+                            if  infer.or(no_name) {|
                                 first.ty = (Finished = ty);
                             };
                         };
@@ -108,7 +108,7 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
                     } {| // else
                         // TODO: better error message if its a call because they forgot a semi-colon. 
                         //debug_log_ast(handler_body[]);
-                        assert(eq(handler_body.expr&!tag[], tag_value(Expr, @symbol PrefixMacro)), "expected @default");
+                        assert(handler_body.expr&.is(.PrefixMacro), "expected @default");
                         branch := handler_body.expr.PrefixMacro&;
                         macro := branch.handler;
                         // TODO: better error message that shows more context on how you got to a certain type in the nested exprression. 
@@ -164,7 +164,7 @@ fn switch(arg: FatExpr, handlers: FatExpr) FatExpr = {
             while(=> i.ge(0)) {|
                 stmt: *FatStmt = handlers.index(i); 
                 // TODO: typecheck err message (forgot to deref !tag) points at the wrong location in the expression. 
-                if(eq(stmt[].stmt&!tag[], tag_value(Stmt, @symbol Eval))) {|
+                if stmt.stmt&.is(.Eval) {|
                     handler_body := stmt.stmt.Eval&;
                     branch := handler_body.expr.PrefixMacro&;
                     macro := branch.handler;
@@ -275,12 +275,12 @@ fn __bits(arg: AstExpr) AstExpr = {
 // TODO: this should work when inlined. the problem is i dont handle DeclVarPattern of large values by address. -- May 7
 #inline
 fn assignment_operator(place: FatExpr, value: FatExpr, f: OverloadSet) FatExpr = {
-    kind := place.expr&!tag[];
+    kind := place.expr&.tag();
     // TODO: generate a typed enum for the tag so this could be kind.eq(.GetVar).or(kind.eq(.GetNamed))
     is_var_access := 
-        eq(kind, tag_value(Expr, @symbol(GetVar)))
-        .or(eq(kind, tag_value(Expr, @symbol(GetNamed))))
-        .or(eq(kind, tag_value(Expr, @symbol(FieldAccess)))); // TODO: once field access is allowed on r-values, it can have side effects.  
+        place.expr&.is(.GetVar)
+        .or(place.expr&.is(.GetNamed))
+        .or(place.expr&.is(.FieldAccess)); // TODO: once field access is allowed on r-values, it can have side effects.  
     
     ::if(FatExpr); // TODO: auto template instantiation. 
     
@@ -289,8 +289,8 @@ fn assignment_operator(place: FatExpr, value: FatExpr, f: OverloadSet) FatExpr =
         @{ @[place] = @[@literal(f)](@[place], @[value]); }
     } {|
         // TODO: nice report_compile_error api that lets you attatch the Span so you get useful error message rendering. 
-        assert(kind.ne(tag_value(Expr, @symbol(PrefixMacro))), "TODO: support macro expansion in place expr");
-        is_deref := and kind.eq(tag_value(Expr, @symbol(SuffixMacro))) {()bool|
+        assert(kind != .PrefixMacro, "TODO: support macro expansion in place expr");
+        is_deref := and kind == .SuffixMacro {()bool|
             name := place.expr.SuffixMacro.name;
             name.eq(@symbol(deref))
         };
@@ -305,8 +305,7 @@ fn assignment_operator(place: FatExpr, value: FatExpr, f: OverloadSet) FatExpr =
 /// This version can be used when you just want sequential integers. 
 #macro #outputs(Type)
 fn enum(names: FatExpr) FatExpr = {
-    kind := names.expr&!tag[];
-    assert(eq(kind, tag_value(Expr, @symbol(Tuple))), "expected @enum(name1, name2, etc)"); // TODO: single element should be legal i guess. 
+    assert(names.expr&.is(.Tuple), "expected @enum(name1, name2, etc)"); // TODO: single element should be legal i guess. 
 
     fn binding(name: Symbol, value: i64) Binding = {
         template := '(a = 0)';
@@ -321,16 +320,17 @@ fn enum(names: FatExpr) FatExpr = {
     parts := names.expr.Tuple.items();
     enumerate(parts) {i, part|
         // TODO: really need @default on match cause this is annoying. 
-        @switch(part[].expr&!tag[]) {
-            @case(tag_value(Expr, @symbol GetNamed)) => {
+        @switch(part[].expr&.tag()) {
+            @case(.GetNamed) => {
                 name := (@as(*Symbol) part.expr.GetNamed&)[];
                 bind := binding(name, i);
                 cases&.push(bind);
             };
-            @case(tag_value(Expr, @symbol GetVar)) => {
+            @case(.GetVar) => {
                 name: Symbol = part.expr.GetVar.name;
                 cases&.push(binding(name, i));
             };
+            // TODO: dont require the default arg in @switch. 
             @default() fn(_: i64) => panic("Expected symbol in @enum"); // TODO: this should work as not a closure
         };
     };
@@ -365,10 +365,44 @@ fn enum(names: FatExpr) FatExpr = {
 // because its a pain to make a constant one otherwise. 
 // NOTE: this doesn't make a constant one unless you explicitly use '::'.
 #macro fn array(elements: FatExpr) FatExpr = {
-    assert(eq(elements.expr&!tag[], tag_value(Expr, @symbol Tuple)), "Expected @array(a, b, c, d)");
+    assert(elements.expr&.is(.Tuple), "Expected @array(a, b, c, d)");
     parts := elements.expr.Tuple.items();
     len := parts.len;
     first := compile_ast(parts[0]);
     parts.set(0, first);
     @{ @as(Array(@[@literal parts[0].ty], @[@literal len])) init(@slice @[elements]) }
+}
+
+fn is();
+fn tag();
+fn tag_ptr();
+fn ordinal();
+
+// TODO: have @tagged auto call this
+// TODO: seperate out the parts that could work on any sequential enum. 
+// TODO: move these to like meta.fr maybe? enum.fr? 
+fn tagged(const Tagged: Type) void = {
+    // TODO: assert its really a tagged type.
+    
+    // assert_eq(size_of(Tagged.Tag()), size_of(i64)); // TODO: ?? doesn't type check. happening too early? -- Jul 1
+    
+    T :: Tagged.Tag();
+    
+    fn eq(a: T, b: T) bool #redirect(Ty(i64, i64), bool);
+    fn ne(a: T, b: T) bool #redirect(Ty(i64, i64), bool);
+    
+    fn tag(self: *Tagged) T #inline = self.tag_ptr()[];
+    fn tag_ptr(self: *Tagged) *T #unsafe_noop_cast;  // SAFETY: The compiler puts the tag at the front of the struct. 
+    
+    fn is(self: *Tagged, check: T) bool #inline = self.tag().eq(check);
+    
+    fn ordinal(e: T) i64 #unsafe_noop_cast; // :tag_enums_are_sequential
+    
+    fn display(self: T, out: *List(u8)) void = {
+        // TODO: without the extra force comptime eval, it wrongly thinks calling this function needs compctx.  -- Jul 1
+        names :: :: get_enum_names(T); // :tag_enums_are_sequential
+        out.push_all(names[self.ordinal()]);
+    }
+    
+    unit
 }

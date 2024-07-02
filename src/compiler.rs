@@ -179,7 +179,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 expr.set(value.clone(), ty);
                 Ok(ty)
             }
-            TypeInfo::Tagged { cases } => {
+            TypeInfo::Tagged { cases, .. } => {
                 let field = cases.iter().find(|f| f.0 == name);
                 // TODO: sad copy paste.
                 let (_, field) = unwrap!(
@@ -506,6 +506,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 self.program[to]
             );
             debug_assert!(self.aarch64.get_fn(from).is_none());
+            self.aarch64.extend_blanks(from);
             self.aarch64.dispatch[from.as_index()] = ptr;
         }
 
@@ -1668,22 +1669,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                         assert!(self.wip_stack.pop().unwrap().0.is_none());
                         ty
                     }
-                    Flag::Tag => {
-                        // TODO: auto deref and typecheking
-                        let container_ptr = self.compile_expr(arg, None)?;
-                        let container_ptr_ty = self.program.raw_type(container_ptr);
-                        let depth = self.program.ptr_depth(container_ptr_ty);
-                        assert_eq!(
-                            depth,
-                            1,
-                            "!tag ptr must be one level of indirection. {:?}",
-                            self.program.log_type(container_ptr_ty)
-                        );
-                        let ty = self.program.intern_type(TypeInfo::Ptr(TypeId::i64()));
-                        expr.done = arg.done;
-                        expr.ty = ty;
-                        ty
-                    }
                     Flag::Fn_Ptr => {
                         // TODO: this should be immediate_eval_expr (which should be updated do the constant check at the beginning anyway).
                         //       currently !fn_ptr can't be an atrbitrary comptime expr which is silly.
@@ -2116,7 +2101,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                         }
                         return Ok(None);
                     }
-                    Flag::Tag => self.program.ptr_type(TypeId::i64()),
                     Flag::Fn_Ptr => {
                         // if let Some(f_ty) = self.type_of(arg)? {
                         //     if let Some(f_ty) = self.program.fn_ty(f_ty) {
@@ -2240,10 +2224,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         Some(match name {
             "Symbol" => ffi_type!(Ident),
-            _ => {
-                let name = self.program.pool.intern(name);
-                self.program.find_ffi_type(name)?
-            }
+            _ => return None,
         })
     }
 
