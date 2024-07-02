@@ -17,9 +17,9 @@ use crate::bc_to_asm::Jitted;
 use crate::compiler::{CErr, Compile, ExecStyle, Res};
 use crate::export_ffi::{BigOption, BigResult::*};
 use crate::logging::PoolLog;
-use crate::BitSet;
 use crate::{assert, assert_eq, err, extend_options2, ice, unwrap};
 use crate::{bc::*, Map, STATS};
+use crate::{log_err, BitSet};
 
 struct EmitBc<'z, 'p: 'z> {
     program: &'z Program<'p>,
@@ -47,9 +47,13 @@ pub extern "C" fn emit_bc<'p>(compile: &mut Compile<'_, 'p>, f: FuncId, when: Ex
     let fuck = compile as *const Compile as usize;
     let mut emit = EmitBc::new(compile.program, &compile.aarch64, fuck);
 
-    let body = emit.compile_inner(f, when)?;
-    unsafe { STATS.bytecodes += body.blocks.iter().map(|b| b.insts.len()).sum::<usize>() };
-    Ok(body)
+    match emit.compile_inner(f, when) {
+        Ok(t) => Ok(t),
+        Err(e) => {
+            log_err(compile, *e.clone());
+            Err(e)
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

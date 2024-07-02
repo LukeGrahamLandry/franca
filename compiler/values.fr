@@ -38,9 +38,9 @@ fn put_baked(c: *SelfHosted, v: BakedVar, jit_ptr: ?i64) BakedVarId #compiler = 
 }
 
 fn emit_relocatable_constant_body(c: CompilerRs, bytes: Slice(u8), ty: Type, force_default_handling: bool) Res(Slice(BakedEntry)) #compiler = {
-    out: List(BakedEntry) = list(c.ast_alloc.borrow());
+    out: List(BakedEntry) = list(c.get_alloc());
     value := bytes.to_value();
-    @try(c.emit_relocatable_constant_body(ty, value&, out&, false)) return;
+    @try(c.emit_relocatable_constant_body(ty, value&, out&, force_default_handling)) return;
     (Ok = out.items())
 }
 
@@ -82,11 +82,11 @@ fn emit_relocatable_constant(c: CompilerRs, ty: Type, value: *Values) Res(BakedV
     // Eventually we'll recurse to something with no pointers. ie Str -> [u8; n]
     info := c.get_info(ty);
     if (!info.contains_pointers) {|
-        v := value.bytes().clone(c.ast_alloc.borrow()); // TODO: do i have to clone? 
+        v := value.bytes().clone(c.get_alloc()); // TODO: do i have to clone? 
         return(Ok = c[][].put_baked((Bytes = v.rs()), (Some = jit_ptr)));
     };
 
-    out: List(BakedEntry) = list(c.ast_alloc.borrow());
+    out: List(BakedEntry) = list(c.get_alloc());
     @try(c.emit_relocatable_constant_body(ty, value, out&, false)) return;
     (Ok = c[][].put_baked((VoidPtrArray = out.rs()), (Some = jit_ptr)))
 }
@@ -145,11 +145,19 @@ fn emit_relocatable_constant_body(
         (fn Ptr(inner) => {
             inner_info := c.get_info(inner[]);
             // load the pointer and recurse.
-            ptr := i64.assume_cast(value)[];
-            ptr := u8.ptr_from_int(ptr);
+            addr := i64.assume_cast(value)[];
+            
+            // emit_relocatable_constant only does it by the address of the value but pointers are small so stored inline. 
+            if c.baked.lookup&.get(addr) { v | 
+                out.push((AddrOf = v));
+                return(.Ok);
+            };
+            
+            ptr := u8.ptr_from_int(addr);
             data := slice(ptr, inner_info.stride_bytes.zext());
             inner_value := data.to_value(); // TODO: do i have to clone? 
             id := @try(c.emit_relocatable_constant(inner[], inner_value&)) return;
+            c.baked.lookup&.insert(addr, id);
             out.push((AddrOf = id));
         });
         (fn Struct(f) => {
@@ -164,13 +172,28 @@ fn emit_relocatable_constant_body(
         });
         (fn Tagged(f) => {
             tag := i64.unchecked_cast(value)[]; // just read the tag
-            assert(f.cases.len > tag, "invalid constant tagged union");
+            assert(f.cases.len >= tag, "invalid constant tagged union");
+            
+            name := c.pool.get(f.cases.items()[tag]._0);
+            println(name);
+            
             inner := f.cases.items()[tag]._1;
             case_info := c.get_info(inner);
             out.push((Num = (tag, .I64)));
-            b := value.bytes();
-            payload := b.slice(8, b.len).to_value();
-            @try(c.emit_relocatable_constant_body(inner, payload&, out, false)) return;
+            payload_size: i64 = case_info.stride_bytes.zext();
+            if payload_size > 0 {|
+                b := value.bytes();
+                tag_size := 8;
+                payload := b.slice(tag_size, tag_size + payload_size).to_value();
+                
+                for payload&.bytes() { b |
+                    print(@as(i64) b.zext());
+                    print(", ");
+                };
+                println("]");
+                
+                @try(c.emit_relocatable_constant_body(inner, payload&, out, false)) return;
+            };
         });
         (fn Enum(f) => {
             return(c.emit_relocatable_constant_body(f.raw, value, out, force_default_handling));

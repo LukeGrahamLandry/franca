@@ -3570,7 +3570,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             let ir = self.eval_str(asm)?;
             Ok(FuncImpl::CSource(ir))
         } else {
-            err!("!asm require arch tag",)
+            err!("!asm require arch tag but just {:?}", self.program[f].annotations.iter().map(|a| format!("{}-{}", self.program.pool.get(a.name), a.name.0)).collect::<Vec<_>>())
         }
     }
 
