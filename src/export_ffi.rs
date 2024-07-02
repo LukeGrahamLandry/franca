@@ -540,6 +540,7 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     ("fn Tag(Tagged: Type) Type #fold;", get_enum_tag_type as *const u8),
     ("fn slice(elements: FatExpr) FatExpr #macro;", slice_macro as *const u8),
     ("fn if(args: FatExpr) FatExpr #macro;", if_macro as *const u8),
+    // :blessed: it looks for @rec by name!! TODO: this is very bad and confusing!! you can't shadow it!! - Jul 1
 ];
 
 extern "C-unwind" fn slice_macro<'p>(_: &mut Compile<'_, 'p>, arg: FatExpr<'p>) -> FatExpr<'p> {
@@ -959,6 +960,7 @@ pub extern "C-unwind" fn tagged_macro<'p>(compile: &mut Compile<'_, 'p>, mut cas
             let tag = TypeInfo::Enum {
                 raw: TypeId::i64(),
                 fields: tag_fields,
+                sequentual: true,
             };
             let tag = compile.program.intern_type(tag);
 

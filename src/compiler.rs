@@ -102,6 +102,7 @@ pub struct BlockScope<'p> {
     pub parent: usize,
 }
 
+// TODO: track location of macro expansions and have flag to dump them when printing error messages error messages.
 #[repr(C, i64)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DebugState<'p> {
@@ -231,6 +232,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 expr.set(value, field.ty);
                 Ok(field.ty)
             }
+            &TypeInfo::Named(ty, _) => self.contextual_field(name, expr, ty),
             _ => err!("no contextual fields for type {ty:?} {}", self.program.log_type(ty)),
         }
     }
@@ -1226,6 +1228,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                     return Ok((None, None));
                 }
             } else if tag.name == Flag::Compiler_Builtin_Transform_Callsite.ident() {
+                // TODO: should just make this a @macro
+                //       its just a little sad that then i have to figure out how to do smarter constant folding for fn if. 
                 assert!(matches!(func.body, FuncImpl::Empty));
                 func.body = FuncImpl::CompilerBuiltin(func.name);
             }
@@ -1908,6 +1912,13 @@ impl<'a, 'p> Compile<'a, 'p> {
         let ty: TypeId = self.immediate_eval_expr_known(arg.clone())?;
 
         let mut fields = vec![];
+        let as_int = if let TypeInfo::Int(i) = self.program[ty] {
+            Some(i)
+        } else {
+            None
+        };
+        let mut sequentual = as_int.is_some();
+        let mut last = -1i128;
         match &mut target.expr {
             Expr::StructLiteralP(pattern) => {
                 for b in &mut pattern.bindings {
@@ -1916,6 +1927,14 @@ impl<'a, 'p> Compile<'a, 'p> {
 
                     let expr = unwrap!(b.default.take(), "");
                     let val = self.immediate_eval_expr(expr, ty)?;
+                    if sequentual {
+                        let current = Self::int_value(&val, as_int.unwrap())?;
+                        if current == last + 1 {
+                            last += 1;
+                        } else {
+                            sequentual = false;
+                        }
+                    }
                     let name = unwrap!(b.name(), "@enum field missing name??");
                     fields.push((name, val));
                 }
@@ -1928,7 +1947,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             _ => err!("Expected struct literal found {target:?}",),
         }
-        let info = TypeInfo::Enum { raw: ty, fields };
+        let info = TypeInfo::Enum { raw: ty, fields, sequentual };
         let unique_ty = self.program.intern_type(info);
 
         self.as_literal(unique_ty, loc)
@@ -2213,35 +2232,20 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     pub fn builtin_type(&mut self, name: &str) -> Option<TypeId> {
-        let ty = match name {
-            "i64" => return Some(TypeId::i64()),
-            "f64" => return Some(TypeId::f64()),
-            "f32" => return Some(TypeId::f32()),
-            "Type" => return Some(TypeId::ty),
-            "bool" => return Some(TypeId::bool()),
-            "UnknownType" => return Some(TypeId::unknown),
-            "Never" => return Some(TypeId::never),
-            "rawptr" => return Some(TypeId::voidptr),
-            "OverloadSet" => return Some(TypeId::overload_set),
-            "LabelId" => return Some(TypeId::label),
-            "ScopeId" => return Some(TypeId::scope),
-            "FuncId" => return Some(TypeId::func),
-            _ => None,
-        };
-        if let Some(ty) = ty {
-            let ty = self.program.intern_type(ty);
-            return Some(ty);
-        }
-
-        macro_rules! ffi_type {
-            ($ty:ty) => {{
-                let ty = <$ty>::get_or_create_type(self.program);
-                ty
-            }};
-        }
-
-        Some(match name {
-            "Symbol" => ffi_type!(Ident),
+         Some(match name {
+            "i64" => TypeId::i64(),
+            "f64" => TypeId::f64(),
+            "f32" => TypeId::f32(),
+            "Type" => TypeId::ty,
+            "bool" => TypeId::bool(),
+            "UnknownType" => TypeId::unknown,
+            "Never" => TypeId::never,
+            "rawptr" => TypeId::voidptr,
+            "OverloadSet" => TypeId::overload_set,
+            "LabelId" => TypeId::label,
+            "ScopeId" => TypeId::scope,
+            "FuncId" => TypeId::func,
+            "Symbol" => <Ident>::get_or_create_type(self.program),
             _ => return None,
         })
     }
@@ -2258,20 +2262,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                 true
             }
             LazyType::Finished(_) => true, // easy
-            LazyType::Different(parts) => {
-                let mut done = true;
-                for p in parts.iter_mut() {
-                    done &= self.infer_types_progress(p)?;
-                }
-                if done {
-                    let types = parts.iter().map(|p| p.unwrap()).collect();
-                    let types = self.program.tuple_of(types);
-                    *ty = LazyType::Finished(types);
-                } else {
-                    *ty = LazyType::Different(mem::take(parts));
-                }
-                done
-            }
         };
         Ok(done)
     }
@@ -2557,6 +2547,47 @@ impl<'a, 'p> Compile<'a, 'p> {
         res
     }
     
+    
+    fn range(int: IntTypeInfo) -> (i128, i128) {
+        if int.signed {
+            // TODO: UB on i1. 
+            let max = (1i128 << (int.bit_count - 1)) - 1;
+            (-max, max)
+        } else {
+            (0, (1i128 << int.bit_count) - 1)
+        }
+    }
+    
+    
+    fn int_value(value: &Values, int: IntTypeInfo) -> Res<'static, i128> {
+        let ptr = value.bytes().as_ptr();
+        debug_assert_eq!(ptr as usize % value.len(), 0, "Unaligned constant pointer.");
+        let i = unsafe {
+            if int.signed {
+                match value.len() {
+                    1 => *(ptr as *const i8) as i128,
+                    2 => *(ptr as *const i16) as i128,
+                    4 => *(ptr as *const i32) as i128,
+                    8 => *(ptr as *const i64) as i128,
+                    _ => err!("bad int size",),
+                }
+            } else {
+                match value.len() {
+                    1 => *ptr as i128,
+                    2 => *(ptr as *const u16) as i128,
+                    4 => *(ptr as *const u32) as i128,
+                    8 => *(ptr as *const u64) as i128,
+                    _ => err!("bad int size",),
+                }
+            }
+        };
+        
+        let (min, max) = Self::range(int);
+        debug_assert!(i <= max && i >= min, "tried to coerce but value out of bounds for FROM type!?!?!!?");
+        Ok(i)
+    }
+    
+    
     // TODO: :coerce_for_const_arg
     // TODO: you can never do this to a constant directly in case its aliased once i have const ptrs. 
     fn coerce_constant(&mut self, value: &mut Values, current: TypeId, requested: TypeId, loc: Span) -> Res<'p, Option<FatExpr<'p>>> {
@@ -2564,34 +2595,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             return Ok(None);
         }
         
-        fn int_value(value: &Values, int: IntTypeInfo) -> Res<'static, i128> {
-            // TODO: handle signged/unsigned correctly. test!
-            let ptr = value.bytes().as_ptr();
-            debug_assert_eq!(ptr as usize % value.len(), 0, "Unaligned constant pointer.");
-            let i = unsafe {
-                if int.signed {
-                    match value.len() {
-                        1 => *(ptr as *const i8) as i128,
-                        2 => *(ptr as *const i16) as i128,
-                        4 => *(ptr as *const i32) as i128,
-                        8 => *(ptr as *const i64) as i128,
-                        _ => err!("bad int size",),
-                    }
-                } else {
-                    match value.len() {
-                        1 => *ptr as i128,
-                        2 => *(ptr as *const u16) as i128,
-                        4 => *(ptr as *const u32) as i128,
-                        8 => *(ptr as *const u64) as i128,
-                        _ => err!("bad int size",),
-                    }
-                }
-            };
-            
-            let (min, max) = range(int);
-            debug_assert!(i <= max && i >= min, "tried to coerce but value out of bounds for FROM type!?!?!!?");
-            Ok(i)
-        }
         
         // this currently works but probably only loosly overlaps with being correct because its nap time. 
         fn adjust_int_length(value: &mut Values, int: IntTypeInfo) {
@@ -2623,22 +2626,12 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
         }
         
-        fn range(int: IntTypeInfo) -> (i128, i128) {
-            if int.signed {
-                // TODO: UB on i1. 
-                let max = (1i128 << (int.bit_count - 1)) - 1;
-                (-max, max)
-            } else {
-                (0, (1i128 << int.bit_count) - 1)
-            }
-        }
-        
         
         #[allow(clippy::single_match)]
         match (&self.program[current], &self.program[requested]) {
             (TypeInfo::Int(have), TypeInfo::Int(requested)) => {
-                let (min, max) = range(*requested);
-                let v = int_value(value, *have)?; // TODO: sign
+                let (min, max) = Self::range(*requested);
+                let v = Self::int_value(value, *have)?; // TODO: sign
                 if v <= max && v >= min {
                     // adjust_int_length(value, *requested);
                     return Ok(None)
@@ -2647,7 +2640,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             (TypeInfo::Int(have), TypeInfo::F32) => {
                 let max = (1i128 << f32::MANTISSA_DIGITS) - 1;
                 let min = -max; // TODO: is that true? 
-                let i = int_value(value, *have)?;
+                let i = Self::int_value(value, *have)?;
                 if i <= max && i >= min {
                     *value = to_values(self.program, i as f32)?;
                     return Ok(None);
@@ -2656,7 +2649,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             (TypeInfo::Int(have), TypeInfo::F64) => {
                 let max = (1i128 << f64::MANTISSA_DIGITS) - 1;
                 let min = -max; // TODO: is that true? 
-                let i = int_value(value, *have)?;
+                let i = Self::int_value(value, *have)?;
                 if i <= max && i >= min {
                     *value = to_values(self.program, i as f64)?;
                     return Ok(None);
@@ -2667,7 +2660,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let r = *requested;
                 let v: f64 = from_values(self.program, value.clone())?;
                 if v == v.floor() {
-                    let (min, max) = range(r);
+                    let (min, max) = Self::range(r);
                     let v = v as i128;
                     if v <= max && v >= min {
                         *value = to_values(self.program, v as i64)?; // TODO: rightn umer of bits

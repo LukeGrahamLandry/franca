@@ -10,7 +10,7 @@
 #redirect(Ty(i64, i64), bool) fn eq(a: ProgramEntry, b: ProgramEntry) bool;
 
 // TODO: they need to pass target arch for !asm functions. 
-fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId), entry: ProgramEntry) BucketArray(u8) = {
+fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: [] FuncId, entry: ProgramEntry) BucketArray(u8) = {
     s: EmitLlvm = (comp = comp, out = init(1024, alloc), current = BbId.zeroed());
     gen: CodeGen(EmitLlvm) = (
         comp = comp,
@@ -38,13 +38,13 @@ fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId), entry: ProgramEntr
         {comp.vtable.compile_func}(comp.data, fid, .Aot).unwrap(); 
         
         func := {comp.vtable.get_function}(comp.data, fid);
-        for(func.callees.items()){c|
-            if(not(gen.funcs_done&.get(c.to_index().zext()))){|
+        for func.callees.items() { c |
+            if !gen.funcs_done&.get(c.to_index().zext()) {|
                 gen.pending&.push(c);
             };
         };
-        for(func.mutual_callees.items()){c|
-            if(not(gen.funcs_done&.get(c.to_index().zext()))){|
+        for func.mutual_callees.items() { c |
+            if !gen.funcs_done&.get(c.to_index().zext()) {|
                 gen.pending&.push(c);
             };
         };
@@ -56,11 +56,11 @@ fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId), entry: ProgramEntr
         
         if(body.blocks.len.eq(0)){|
             success := gen.backend&.emit_special(func.body&, func, body&); 
-            if (not(success)){|
+            if !success {|
                 // TODO: pass in the arch
                 success = gen.backend&.emit_special_asm(func.body&, func, body&, Arch.Aarch64); 
             };
-            if (not(success)){|
+            if !success {|
                 // TODO: should assert but debug_tag_corruption is confused. -- Jun 27
                 println("!!!! failed to emit speciai function");
             };
@@ -81,8 +81,8 @@ fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId), entry: ProgramEntr
     };
     
     constants := 0;
-    range(0, gen.max_const_id.add(1)) {i|
-        if(gen.constants_needed&.get(i)){|
+    range(0, gen.max_const_id + 1) {i|
+        if gen.constants_needed&.get(i) {|
             gen.backend&.emit_constant(comp, (id = i.trunc()));
             constants += 1;
         };
@@ -96,9 +96,9 @@ fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId), entry: ProgramEntr
             for (fns) {f|
                 func := {comp.vtable.get_function}(comp.data, f);
                 // note: this only works because void has a fixed typeid value
-                if (func.finished_arg.unwrap().eq(void)) {|
+                if func.finished_arg.unwrap() == void {|
                     @fmt(gen.backend.out&.current(), "   call void @F%()\n", f.to_index());
-                } {| // else
+                } else {|
                     @fmt(gen.backend.out&.current(), "   %% = call i64 @F%(i64 0)\n", "%", i, f.to_index());
                     i += 1;
                 };
@@ -108,7 +108,7 @@ fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId), entry: ProgramEntr
         @case(.GiveMeTheCodeAndGiveItToMeRaw) => ();
         @case(.ExportWithNames) => {
             // TODO: warn if fns has duplicates
-            for(fns){fid|
+            for fns { fid |
                 gen.backend&.write_export_bounce(fid);
             };
         };

@@ -82,6 +82,7 @@ pub enum TypeInfo<'p> {
     Enum {
         raw: TypeId,
         fields: Vec<(Ident<'p>, Values)>,
+        sequentual: bool,
     },
     Placeholder,
     Named(TypeId, Ident<'p>),
@@ -325,7 +326,6 @@ pub trait WalkAst<'p> {
             LazyType::PendingEval(arg) => {
                 self.expr(arg);
             }
-            LazyType::Different(_) => {} // TODO
         }
     }
 }
@@ -648,11 +648,11 @@ pub enum FuncImpl<'p> {
     ComptimeAddr(usize),
     /// Some opcodes to be emitted directly as the function body.
     /// They had better be position independent and follow the expected calling convention.
-    JittedAarch64(Vec<u32>),
+    JittedAarch64(Vec<u32>), // #aarch64 #asm
     /// Lines of llvm ir text to be concatenated as the body of a function.
     /// The compiler creates the signeture, prefix arg ssa references with '%', you cant declare globals.
-    LlvmIr(Ident<'p>),
-    CSource(Ident<'p>),
+    LlvmIr(Ident<'p>), // #llvm #asm
+    CSource(Ident<'p>),   // #c #asm
     EmitCranelift(usize), // CfEmit
     PendingRedirect {
         arg: TypeId,
@@ -764,9 +764,8 @@ pub enum LazyType<'p> {
     #[default]
     EvilUnit,
     Infer,
-    PendingEval(FatExpr<'p>),
+    PendingEval(FatExpr<'p>), // TODO: should probably box this since its often the others and want to be less chonky.
     Finished(TypeId),
-    Different(Vec<Self>),
 }
 
 #[repr(C)]
