@@ -5,8 +5,6 @@
 // For reference, the rust one was 1100 loc (without math operators).
 
 // TODO: make the language less clunky
-// - have @tagged give you a Tag(E) enum type so you can do 'tagged.is(.Name)'
-// - destructure multiple return values. 'a, b := f(); f :: fn() Ty(A, B); '
 // - less verbose if let/let else? think about how to express with a macro. 
 // - equivilent of matches!(e, .A | .B | .C) more terse than @switch
 //   @or(A, B, C) could work if you don't need to capture any payload. 
@@ -246,6 +244,7 @@ fn can_start_quick_expr(t: TokenType) bool = {
         (fn Quoted(_) => true);
         (fn Number(_) => true);
         (fn BinaryNum(_) => true);
+        (fn FatRightArrow() => true); // Note: this works because you can't use trailing calls in a return type expression. 
         (fn Op(op) bool => @switch(op){
             // TODO: you want this to be true so you can do 'if !whatever' but then it breaks 'Type!builtin'. -- Jun 23
             //       just prefer the quick expr one. bring back "expected trailing lambda after quick expres"
@@ -311,7 +310,7 @@ fn parse_prefix(self: *Parser, prec: Prec) ParseRes = {
         });
         (fn FatRightArrow() => {
             self.pop();
-            return(self.quick_lambda(Prec_None));
+            return(self.quick_lambda(prec.with(.None)));
         });
         (fn DoubleColon() => {
             self.pop();
@@ -963,12 +962,13 @@ fn fn_def_signeture(self: *Parser, loc: Span, allow_name: bool) Result(FnDef, Pa
         }
     };
 
-    if no_paren.and(not(cant_start_return_expression(self.peek()))) {|
+    if no_paren && !cant_start_return_expression(self.peek()) {|
         @report_error("'fn <Expr> =' can't treat Expr as ret type. pls specify name or args. forgot '|' before lambda body? %", "") (return, self.last.span);
     };
 
     ret: LazyType = if !cant_start_return_expression(self.peek()) {|
-        (PendingEval = @try(self.parse_expr(Prec_None)) return)
+        // Note: no trailing means you can use '=>' as a quick expression so `while => e {| b}` and the trailing binds to the while not the e. 
+        (PendingEval = @try(self.parse_expr((prec = .None, allow_trailing = false))) return)
     } else {|
         .Infer
     };
@@ -982,7 +982,7 @@ fn parse_block_until_squiggle(self: *Parser, allow_eof: bool) ParseRes = {
     loc := self.last.span;
     stmts: List(FatStmt) = list(self.alloc);
     
-    while(=> not(self.maybe(.RightSquiggle)).and(not(allow_eof).or(=> not(self.maybe(.Eof)))) ) {|
+    while => !self.maybe(.RightSquiggle) && (!allow_eof).or(=> !self.maybe(.Eof)) {|
         if self.maybe(.Eof) {|
             @report_error("unexpected end of file %", "") (return, self.last.span);
         };

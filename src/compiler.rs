@@ -948,7 +948,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             self.add_callee(callee);
         }
         let func = &self.program.funcs[f.as_index()];
-
         assert!(!func.any_const_args());
         let pattern = func.arg.clone();
 
@@ -1439,9 +1438,10 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         expr.ty = res;
         if !old.is_unknown() {
-            // TODO: make work with new coercion
             // TODO: cant just assert_eq because it does change for rawptr.
-            // self.type_check_arg(expr.ty, old, "sanity ICE old_expr")?;
+            if !matches!(expr.expr, Expr::Value {.. }) {
+                self.type_check_arg(expr.ty, old, "sanity ICE old_expr")?;
+            } // else it might be a coerced constant, that's fine. 
         }
 
         Ok(res)
@@ -2974,7 +2974,6 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     pub fn struct_type(&mut self, pattern: &mut Pattern<'p>) -> Res<'p, TypeInfo<'p>> {
-        // TODO: maybe const keyword before name in func/struct lets you be generic.
         let _ = self.infer_pattern(&mut pattern.bindings)?;
         let parts: Vec<_> = pattern
             .bindings
