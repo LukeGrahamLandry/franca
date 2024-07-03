@@ -143,6 +143,7 @@ fn emit_relocatable_constant_body(
             return (Err = (span = c.last_loc, msg = msg));
         });
         (fn Ptr(inner) => {
+            // TODO: allow zero?
             inner_info := c.get_info(inner[]);
             // load the pointer and recurse.
             addr := i64.assume_cast(value)[];
@@ -202,15 +203,27 @@ fn emit_relocatable_constant_body(
             return(c.emit_relocatable_constant_body(f._0, value, out, force_default_handling));
         });
         (fn VoidPtr() => {
-            i := i64.assume_cast(value)[];
-            if i == 0 {|
+            ptr := i64.assume_cast(value)[];
+            if ptr == 0 {|
                 // You're allowed to have a constant null pointer (like for global allocator interface instances).
                 out.push((Num = (0, .P64)));
-            } else {|
-                // TODO: try it in lookup and functions. need that for doing export_ffi from my language where you want an array of type erased function pointers. 
-                msg :: "You can't have a void pointer as a constant. The compiler can't tell how many bytes to put in the final executable.";
-                return (Err = (span = c.last_loc, msg = msg));
+                return(.Ok);
             };
+            
+            if c.baked.functions&.get(ptr) { fid |
+                // Maybe you wanted to store a bunch of type erased functions (like i have to for export_ffi). 
+                out.push((FnPtr = fid));
+                return(.Ok);
+            };
+            
+            if c.baked.lookup&.get(ptr) { v | 
+                // I'm not sure why you'd get here but I guess its fine.
+                out.push((AddrOf = v));
+                return(.Ok);
+            };
+            
+            msg :: "You can't have a void pointer as a constant. The compiler can't tell how many bytes to put in the final executable.";
+            return (Err = (span = c.last_loc, msg = msg));
         });
         @default => {
             return (Err = (span = c.last_loc, msg = "ICE: bad constant"));

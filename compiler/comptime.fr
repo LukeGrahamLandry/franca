@@ -3,8 +3,6 @@ fn fill_self_hosted(vtable: *ImportVTable) void = {
     vtable.parse_stmts = parse_stmts;
     vtable.intern_string = intern_string;
     vtable.get_string = get_string;
-    vtable.get_baked = get_baked;
-    vtable.bake_var = bake_var;
     vtable.emit_llvm = emit_llvm; // TODO: have a compile option to not include the things you don't need for bootstrapping. so i can commit a smaller blob. 
 }
 
@@ -35,13 +33,23 @@ fn get_string(c: Compiler, s: Symbol) Str = {
     c.pool.get(s)
 }
 
-fn bake_var(c: Compiler, val: BakedVar) BakedVarId = {
-    put_baked(c.cast()[][], val, .None)
-}
-
+// TODO: this is only called in the compiler. because of the annoying two types for compiler data pointer. 
 fn get_baked(c: Compiler, id: BakedVarId) BakedVar = {
     val := c.cast()[][].get_baked(id); 
     val._1
 }
 
 //////////////////////////////////////////////////////////////////////
+
+fn fill_export_ffi(out: *List(u8)) void = {
+    // TODO: fix error message if you forget a semi-colon in the string. 
+    @fmt(out, "fn lookup_baked(addr: i64) ?BakedVarId #ct #comptime_addr(%);\n", lookup_baked);
+    lookup_baked: rawptr : fn(c: CompilerRs, addr: i64) ?BakedVarId = c.baked.lookup&.get(addr);
+    
+    @fmt(out, "fn cache_baked(addr: i64, id: BakedVarId) ?BakedVarId #ct #comptime_addr(%);\n", cache_baked);
+    cache_baked: rawptr : fn(c: CompilerRs, addr: i64, id: BakedVarId) void = {
+        c.baked.lookup&.insert(addr, id); // TODO: error if collide? 
+    };
+}
+
+

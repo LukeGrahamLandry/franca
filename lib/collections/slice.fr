@@ -103,29 +103,43 @@ fn Slice(const T: Type) Type = {
     fn bake_relocatable_value(self: *Self) Slice(BakedEntry) = {
         ::List(BakedEntry); ::if(BakedEntry); ::if(BakedVarId);
         
+        
         // TODO: StructName.(initilizer) so you're not forced to use @as or put the type on the other side? 
         len: BakedEntry = (Num = (value = self.len, ty = .I64));
         ptr: BakedEntry = if self.len.eq(0) {|
+            // TODO: should we make this non-zero so you can pass them to rust? 
             (Num = (value = 0, ty = .P64))
         } {|
-            info := ::get_meta(T);
-            // TODO: assert alignment
-            // TODO: assert len isnt big enough to be a pointer?
-            // TODO: need to check against c.baked.lookup (the first ptr not each individual element) :BLOAT
-            id := if info.contains_pointers {|
-                parts: List(BakedEntry) = list(ast_alloc());
-                each self { v | 
-                    bytes := T.cast_to_bytes(v);
-                    // TODO: its a bit un-intuative that you can't just call bake_relocatable_value(v), the dyn version uses the compiler auto implementation if none exists. 
-                    entries := dyn_bake_relocatable_value(bytes, T, false); // TODO: default arg. TTODO: explain somewhere
-                    parts&.push_all(entries);
-                };
-                // TODO: without cast
-                bake_value(@as(BakedVar) (VoidPtrArray = parts.rs()))
-            }{|
-                bytes := self[].interpret_as_bytes(); // TODO: decide if i need to clone. 
-                bake_value(@as(BakedVar) (Bytes = bytes.rs())) // TODO: this should take jit_ptr param? even tho its sad if you had to do work just for me to throw away. and then would want to warn if conflicting handlers or it could be super confusing.  -- Jun 30
+            addr := T.int_from_ptr(self.ptr);
+            BIG :: 104857600;
+            if self.len > BIG && addr < BIG {|
+                @println("(ptr = %, len = %) is a really weird slice. are you sure you don't have the components flipped?", addr, self.len); 
             };
+            :: ?BakedVarId;
+            id := or lookup_baked(addr) { () BakedVarId |
+                info := ::get_meta(T);
+                // TODO: assert alignment
+                // TODO: assert len isnt big enough to be a pointer?
+                // TODO: need to check against c.baked.lookup (the first ptr not each individual element) :BLOAT
+                v: BakedVarId = if info.contains_pointers {|
+                    parts: List(BakedEntry) = list(ast_alloc());
+                    each self { v | 
+                        bytes := T.cast_to_bytes(v);
+                        // TODO: its a bit un-intuative that you can't just call bake_relocatable_value(v), the dyn version uses the compiler auto implementation if none exists. 
+                        entries := dyn_bake_relocatable_value(bytes, T, false); // TODO: default arg. TTODO: explain somewhere
+                        parts&.push_all(entries);
+                    };
+                    // TODO: without cast
+                    bake_value(@as(BakedVar) (VoidPtrArray = parts.rs()))
+                }{|
+                    bytes := self[].interpret_as_bytes(); // TODO: decide if i need to clone. 
+                    bake_value(@as(BakedVar) (Bytes = bytes.rs())) // TODO: this should take jit_ptr param? even tho its sad if you had to do work just for me to throw away. and then would want to warn if conflicting handlers or it could be super confusing.  -- Jun 30
+                };
+                
+                cache_baked(addr, v);
+                v
+            };
+    
             (AddrOf = id)
         };
         
@@ -169,8 +183,8 @@ CStr :: @struct(ptr: *u8);
 
 /// When emitting an aot constant, include all the way until a zero, not just a single byte like it would for a normal *u8. 
 fn bake_relocatable_value(self: *CStr) Slice(BakedEntry) = {
-    //addr := u8.int_from_ptr(self.ptr);
-    //if c.baked.lookup&.get(addr) { v | 
+    addr := u8.int_from_ptr(self.ptr);
+    //if lookup_baked(addr) { v | 
     //    ptr: BakedEntry = (AddrOf = v);
     //    return(ptr.repeated(1, temp()).items());
     //};
@@ -182,7 +196,7 @@ fn bake_relocatable_value(self: *CStr) Slice(BakedEntry) = {
     };
     bytes&.push(@as(u8) 0.trunc());
     value := bake_value(@as(BakedVar) (Bytes = bytes.rs()));
-    //c.baked.lookup&.insert(addr, value);
+    cache_baked(addr, value);
     ptr: BakedEntry = (AddrOf = value);
     ptr.repeated(1, temp()).items()
 }

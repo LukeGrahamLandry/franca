@@ -1432,6 +1432,20 @@ impl<'a, 'p> Compile<'a, 'p> {
             // )
             // .leak();
             // where_the_fuck_am_i(self, expr.loc);
+            
+            if requested != res {
+                if let Expr::Value { value, coerced } = &mut expr.expr {
+                    if !*coerced {
+                        *coerced = true;
+                        if let Some(replacement) = self.coerce_constant(value, res, requested, expr.loc)? {
+                            *expr = replacement;
+                            return self.compile_expr(expr, Some(requested));
+                        }
+                        expr.ty = requested;
+                    }
+                }
+            }
+            
             let msg = "sanity ICE req_expr";
             self.type_check_arg(res, requested, msg)?;
         }
@@ -2594,7 +2608,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         if current == requested {
             return Ok(None);
         }
-        
+        // println!("coerce {} -> {}", self.program.log_type(current), self.program.log_type(requested));
         
         // this currently works but probably only loosly overlaps with being correct because its nap time. 
         fn adjust_int_length(value: &mut Values, int: IntTypeInfo) {
@@ -2625,7 +2639,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
             }
         }
-        
         
         #[allow(clippy::single_match)]
         match (&self.program[current], &self.program[requested]) {
@@ -2694,6 +2707,12 @@ impl<'a, 'p> Compile<'a, 'p> {
             (TypeInfo::Fn(_), _) => {
                 if TypeId::func == requested {
                     return Ok(None);
+                }
+                if TypeId::voidptr == requested {
+                    let e = FatExpr::synthetic_ty(Expr::Value { value: value.clone(), coerced: true }, loc, current);
+                    let e = FatExpr::synthetic(Expr::SuffixMacro(Flag::Fn_Ptr.ident(), Box::new(e)), loc);
+                    let e = FatExpr::synthetic_ty(Expr::Cast(Box::new(e)), loc, requested);
+                    return Ok(Some(e));
                 }
             }
             _ => {}

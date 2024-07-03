@@ -1,3 +1,7 @@
+## Jul 3
+
+- caching slices by addr saves 47/369 KB on libfranca.a (with -O2) (including emit_debug_info not using cache yet, tho with trace off so might not be included by llvm).
+
 ## Jul 1
 
 - made maybe_direct_fn handle it being a Label gracefully.
