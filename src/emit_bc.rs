@@ -572,7 +572,8 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                             extend_options2(&mut result.var_names, id as usize);
                             result.var_names[id as usize] = BigOption::Some(name);
                         }
-                        result.addr_var(id);
+                        // TODO: a test that fails if you type put this line here. -- Jul 4 (see devlog.md)
+                        // result.addr_var(id);
                         self.locals.last_mut().unwrap().push(id);
                         let prev = self.var_lookup.insert(name, id);
                         assert!(prev.is_none(), "overwrite arg? {}", name.log(self.program.pool));

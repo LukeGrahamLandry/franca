@@ -1,3 +1,13 @@
+## Jul 4
+
+- something corrupting the tag when trying to return a `Result(Str, Str)`.
+  Making it `Result(Ty(Str, i64), Str)`, kinda seems to fix it but no now the payload string is disappearing.
+  Hmmm, my destructuring was leaving the pointer on the stack an extra time, kinda distressing that so much worked like that,
+  but easy to fix. I suppose since its a statement, you mostly don't care because you're not flowing into an expression, you just end up with extra junk at the end.
+  TODO: test that catches that mistake.
+  That also fixed `// something super sketchy happens if you try to use destructuring here. its way slower all the grouped ones are failing but all the singles still pass. -- Jul 1`.
+  so thats reassuring.
+
 ## Jul 3
 
 - caching slices by addr saves 47/369 KB on libfranca.a (with -O2) (including emit_debug_info not using cache yet, tho with trace off so might not be included by llvm).
