@@ -1,4 +1,10 @@
-fn fill_self_hosted(vtable: *ImportVTable) void = {
+//! There are two contexts for compile-time execution in this language. 
+//! - fill_driver_vtable: The driver program where you're logically aware of the outside world and might have multiple compiler instances doing different things. 
+//! - fill_export_ffi: Within the program like '::' expressions and macros, where you're only aware of the current compiler instance. 
+//! In the latter, you don't manually pass the compiler context pointer to every function. 
+//! These corrispond to Zig's build.zig vs comptime and Rust's build.rs vs proc-macros/const-fns. 
+
+fn fill_driver_vtable(vtable: *ImportVTable) void = {
     vtable.add_file = add_file;
     vtable.parse_stmts = parse_stmts;
     vtable.intern_string = intern_string;
@@ -39,7 +45,7 @@ fn get_baked(c: Compiler, id: BakedVarId) BakedVar = {
     val._1
 }
 
-//////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////
 
 fn fill_export_ffi(out: *List(u8)) void = {
     // TODO: fix error message if you forget a semi-colon in the string. 
@@ -50,6 +56,40 @@ fn fill_export_ffi(out: *List(u8)) void = {
     cache_baked: rawptr : fn(c: CompilerRs, addr: i64, id: BakedVarId) void = {
         c.baked.lookup&.insert(addr, id); // TODO: error if collide? 
     };
+    
+    @fmt(out, "fn dyn_bake_relocatable_value(raw_bytes: Slice(u8), ty: Type, force_default_handling: bool) Slice(BakedEntry) #ct #comptime_addr(%);\n", bake_value);
+    bake_value: rawptr : fn(c: CompilerRs, bytes: Slice(u8), ty: Type, force_default_handling: bool) Slice(BakedEntry) = {
+        r := c.emit_relocatable_constant_body(bytes, ty, force_default_handling); // TODO: sad extra binding forces it to instantiate the type. 
+        r.unwrap()
+    };
+    
+    // TODO: remove compiler_builtin_transform_callsite and just use these? it feels a bit sad to add the extra indirection tho. 
+    @fmt(out, "fn if(e: FatExpr) FatExpr #macro #ct #comptime_addr(%);\n", node_macro(.if));
+    @fmt(out, "fn slice(e: FatExpr) FatExpr #macro #ct #comptime_addr(%);\n", node_macro(.slice));
+    // TODO: make uninitialized one of these. 
+    
+    fn node_macro(const name: Flag) rawptr = 
+        (fn(c: CompilerRs, e: FatExpr) FatExpr = {
+            out := c[][].get_alloc().alloc(FatExpr, 1);
+            out.ptr[] = e;
+            (expr = (SuffixMacro = (name = name.ident(), arg = out.ptr)), loc = e.loc, ty = UnknownType, done = false)
+        });
+    
+    @fmt(out, "fn operator_star_prefix(T: Type) Type #fold #ct #comptime_addr(%);\n", ptr);
+    ptr: rawptr : fn(c: Compiler, inner: Type) Type = {
+        {c.vtable.intern_type}(c, (Ptr = inner))
+    };
+    @fmt(out, "fn Label(Ret: Type) Type #fold #ct #comptime_addr(%);\n", label);
+    label: rawptr : fn(c: Compiler, inner: Type) Type = {
+        {c.vtable.intern_type}(c, (Label = inner))
+    };
+    
+    // These only exist for debugging the compiler when everything's broken so can't even compile the one defined in the language.
+    @fmt(out, "fn debug_log_int(i: i64) void #comptime_addr(%);\n", @as(rawptr) :: (fn(i: i64) void = println(i)));
+    @fmt(out, "fn debug_log_str(i: Str) void #comptime_addr(%);\n", @as(rawptr) :: (fn(i: Str) void = println(i)));
+    
+    @fmt(out, "fn str(i: Symbol) Str #ct #fold #comptime_addr(%);\n", str);
+    str: rawptr : fn(c: CompilerRs, i: Symbol) Str = {
+        c.pool.get(i)
+    };
 }
-
-

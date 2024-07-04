@@ -13,18 +13,16 @@ use std::ops::Deref;
 
 use crate::ast::{CallConv, Expr, FatExpr, FnFlag, FnType, FuncId, FuncImpl, LabelId, Name, Program, Stmt, TypeId, TypeInfo};
 use crate::ast::{FatStmt, Flag, Pattern, Var, VarType};
-use crate::bc_to_asm::Jitted;
 use crate::compiler::{CErr, Compile, ExecStyle, Res};
 use crate::export_ffi::{BigOption, BigResult::*};
 use crate::logging::PoolLog;
 use crate::{assert, assert_eq, err, extend_options2, ice, unwrap};
-use crate::{bc::*, Map, STATS};
+use crate::{bc::*, Map};
 use crate::{log_err, BitSet};
 
 struct EmitBc<'z, 'p: 'z> {
     program: &'z Program<'p>,
     fuck: usize,
-    asm: &'z Jitted,
     last_loc: Option<Span>,
     locals: Vec<Vec<u16>>,
     var_lookup: Map<Var<'p>, u16>,
@@ -45,7 +43,7 @@ pub extern "C" fn emit_bc<'p>(compile: &mut Compile<'_, 'p>, f: FuncId, when: Ex
     }
 
     let fuck = compile as *const Compile as usize;
-    let mut emit = EmitBc::new(compile.program, &compile.aarch64, fuck);
+    let mut emit = EmitBc::new(compile.program, fuck);
 
     match emit.compile_inner(f, when) {
         Ok(t) => Ok(t),
@@ -82,9 +80,8 @@ pub fn empty_fn_body<'p>(program: &Program<'p>, func: FuncId, when: ExecStyle) -
 }
 
 impl<'z, 'p: 'z> EmitBc<'z, 'p> {
-    fn new(program: &'z Program<'p>, asm: &'z Jitted, fuck: usize) -> Self {
+    fn new(program: &'z Program<'p>, fuck: usize) -> Self {
         Self {
-            asm,
             last_loc: None,
             program,
             fuck,

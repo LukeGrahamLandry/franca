@@ -1,6 +1,8 @@
 ## Jul 3
 
 - caching slices by addr saves 47/369 KB on libfranca.a (with -O2) (including emit_debug_info not using cache yet, tho with trace off so might not be included by llvm).
+- interestingly -O2,-Os,-O1 are make frontend time all approx the same and they're all ~6.5x faster than -O0.
+  but -Os makes a binary ~17% smaller and saves about half a second of llvm running on my thing.
 
 ## Jul 1
 

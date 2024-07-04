@@ -1,6 +1,6 @@
 //! High level representation of a Franca program. Macros operate on these types.
 use crate::bc::BakedVar;
-use crate::self_hosted::Span;
+use crate::self_hosted::{init_self_hosted, Span};
 use crate::{
     bc::{Prim, Values},
     compiler::{CErr, Res},
@@ -11,6 +11,7 @@ use crate::{
     self_hosted::SelfHosted,
     unwrap, BitSet, Map, STATS,
 };
+use std::ptr::addr_of;
 use std::{
     cell::RefCell,
     collections::HashMap,
@@ -19,7 +20,7 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
-use crate::export_ffi::BigResult::*;
+use crate::export_ffi::{BigResult::*, IMPORT_VTABLE};
 impl std::fmt::Debug for TypeId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.is_valid() {
@@ -863,7 +864,8 @@ pub struct IntTypeInfo {
 
 impl<'p> Program<'p> {
     pub fn new(comptime_arch: TargetArch) -> Self {
-        let pool = Box::leak(Box::new(SelfHosted::default()));
+        let pool = Box::leak(unsafe { init_self_hosted() });
+        pool.vtable = addr_of!(IMPORT_VTABLE);
         let mut program = Self {
             primitives: Default::default(),
             inject_function_header: None,

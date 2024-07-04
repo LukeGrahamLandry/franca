@@ -8,7 +8,7 @@ use crate::ast::{
     garbage_loc, CallConv, Expr, FatExpr, FatStmt, Flag, FnFlag, FnType, Func, FuncId, IntTypeInfo, LazyType, OverloadSetId, Pattern, Program,
     ScopeId, TargetArch, TypeId, TypeInfo, TypeMeta, WalkAst,
 };
-use crate::bc::{BakedEntry, BakedVar, BakedVarId, FnBody, PrimSig, Values};
+use crate::bc::{BakedVar, BakedVarId, FnBody, PrimSig, Values};
 use crate::compiler::{Compile, CompileError, ExecStyle, Res, Unquote, EXPECT_ERR_DEPTH};
 use crate::emit_bc::prim_sig;
 use crate::ffi::InterpSend;
@@ -434,8 +434,6 @@ extern "C" {
 // pub fn __clear_cache(beg: *mut libc::c_char, end: *mut libc::c_char);
 // IMPORTANT: since compile is repr(C), &mut &mut Program === &mut Compile
 pub const COMPILER: &[(&str, *const u8)] = &[
-    ("fn Ptr(Inner: Type) Type #fold", do_ptr_type as *const u8),
-    ("fn operator_star_prefix(Inner: Type) Type #fold", do_ptr_type as *const u8),
     ("#fold fn tag_value(E: Type, case_name: Symbol) i64", tag_value as *const u8),
     ("#fold fn tag_symbol(E: Type, tag_value: i64) Symbol", tag_symbol as *const u8),
     ("fn number_of_functions() i64", number_of_functions as *const u8),
@@ -473,10 +471,7 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     ("fn IntType(bits: i64, signed: bool) Type #fold;", make_int_type as *const u8),
     // measured in bytes
     ("fn size_of(T: Type) i64 #fold", get_size_of as *const u8),
-    ("fn Label(Arg: Type) Type", do_label_type as *const u8),
-    // useful when everything's broken so can't even compile the one defined in the language.
-    ("fn debug_log_int(i: i64) void", debug_log_int as *const u8),
-    ("fn debug_log_str(s: Str) void", debug_log_str as *const u8),
+    // ("fn Label(Arg: Type) Type", do_label_type as *const u8),
     // Generated for @BITS to bootstrap encoding for inline asm.
     ("#no_tail fn __shift_or_slice(ints: Slice(i64)) u32", shift_or_slice as *const u8),
     ("fn __save_slice_t(slice_t: Fn(Type, Type)) void", save_slice_t as *const u8),
@@ -522,14 +517,10 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     ("#macro fn Fn(Ret: FatExpr) FatExpr;", fn_type_macro_single as *const u8),
     ("#macro fn FnPtr( Ret: FatExpr) FatExpr;", fn_ptr_type_macro_single as *const u8),
     ("fn __compiler_save_fatexpr_type(t: Type) void;", compiler_save_fatexpr_type as *const u8),
-    ("#fold fn str(s: Symbol) Str", symbol_to_str as *const u8),
+    // ("#fold fn str(s: Symbol) Str", symbol_to_str as *const u8),
     ("fn get_compiler_vtable() *ImportVTable", get_compiler_vtable as *const u8),
     ("fn bake_value(v: BakedVar) BakedVarId", bake_value as *const u8),
     ("fn __save_bake_os(os: OverloadSet) void", save_bake_os as *const u8),
-    (
-        "fn dyn_bake_relocatable_value(raw_bytes: Slice(u8), ty: Type, force_default_handling: bool) Slice(BakedEntry)",
-        dyn_bake_relocatable_value as *const u8,
-    ),
     ("fn get_meta(t: Type) TypeMeta", get_meta as *const u8),
     // TODO: this should be a function, but then that needs a different bootstrapping path.
     ("#macro fn builtin(t: FatExpr) FatExpr", Compile::get_builtin_macro as *const u8),
@@ -538,20 +529,8 @@ pub const COMPILER: &[(&str, *const u8)] = &[
         Compile::save_function_header as *const u8,
     ),
     ("fn Tag(Tagged: Type) Type #fold;", get_enum_tag_type as *const u8),
-    ("fn slice(elements: FatExpr) FatExpr #macro;", slice_macro as *const u8),
-    ("fn if(args: FatExpr) FatExpr #macro;", if_macro as *const u8),
     // :blessed: it looks for @rec by name!! TODO: this is very bad and confusing!! you can't shadow it!! - Jul 1
 ];
-
-extern "C-unwind" fn slice_macro<'p>(_: &mut Compile<'_, 'p>, arg: FatExpr<'p>) -> FatExpr<'p> {
-    let loc = arg.loc;
-    FatExpr::synthetic(Expr::SuffixMacro(Flag::Slice.ident(), Box::new(arg)), loc)
-}
-
-extern "C-unwind" fn if_macro<'p>(_: &mut Compile<'_, 'p>, arg: FatExpr<'p>) -> FatExpr<'p> {
-    let loc = arg.loc;
-    FatExpr::synthetic(Expr::SuffixMacro(Flag::If.ident(), Box::new(arg)), loc)
-}
 
 extern "C-unwind" fn get_enum_tag_type(comp: &mut Compile, e: TypeId) -> TypeId {
     let raw = comp.program.raw_type(e);
@@ -559,11 +538,6 @@ extern "C-unwind" fn get_enum_tag_type(comp: &mut Compile, e: TypeId) -> TypeId 
         panic!("Expected @tagged found {}", comp.program.log_type(e))
     };
     *tag
-}
-
-extern "C-unwind" fn dyn_bake_relocatable_value(comp: &mut Compile, bytes: &[u8], ty: TypeId, force_default_handling: bool) -> *const [BakedEntry] {
-    debug_assert_eq!(comp.program.get_info(ty).stride_bytes as usize, bytes.len());
-    unsafe { crate::self_hosted::emit_relocatable_constant_body(comp, bytes, ty, force_default_handling).unwrap() }
 }
 
 // TODO: make an easy way to write these from the language.
@@ -715,11 +689,6 @@ extern "C-unwind" fn symbol_to_cstr<'p>(program: &mut &mut Program<'p>, symbol: 
     program.pool.get_c_str(symbol)
 }
 
-extern "C-unwind" fn symbol_to_str<'p>(program: &mut &mut Program<'p>, symbol: i64) -> &'p str {
-    let symbol: Ident<'p> = unsafe { transmute(symbol as u32) };
-    program.pool.get(symbol)
-}
-
 /// This must be kept in sync with the definition in unwind.fr!
 pub struct RsResolvedSymbol {
     line: i64,
@@ -775,22 +744,6 @@ extern "C-unwind" fn index_to_func_id(_: &mut &mut Program, f: usize) -> FuncId 
 
 extern "C-unwind" fn make_int_type(program: &mut &mut Program<'_>, bit_count: i64, signed: bool) -> TypeId {
     program.intern_type(TypeInfo::Int(crate::ast::IntTypeInfo { bit_count, signed }))
-}
-
-extern "C-unwind" fn do_ptr_type(program: &mut &mut Program<'_>, ty: TypeId) -> TypeId {
-    program.ptr_type(ty)
-}
-
-extern "C-unwind" fn do_label_type(program: &mut &mut Program<'_>, ty: TypeId) -> TypeId {
-    program.intern_type(TypeInfo::Label(ty))
-}
-
-extern "C-unwind" fn debug_log_int(_: &mut &mut Program<'_>, i: i64) {
-    println!("{i}");
-}
-
-extern "C-unwind" fn debug_log_str(_: &mut &mut Program<'_>, s: &str) {
-    println!("{s}");
 }
 
 fn return_from_ffi(compile: &mut Compile) {

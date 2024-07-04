@@ -1,11 +1,11 @@
-use std::{marker::PhantomData, ptr::addr_of};
+use std::marker::PhantomData;
 
 use crate::{
     ast::{FatExpr, FatStmt, Flag, Func, FuncId, LazyType, Pattern, ScopeId, TypeId, Var},
     bc::{BakedEntry, BakedVar, BakedVarId, Values},
     compiler::{CErr, Compile, CompileError, Scope},
     err,
-    export_ffi::{BigOption, ImportVTable, IMPORT_VTABLE},
+    export_ffi::{BigOption, ImportVTable},
     ffi::InterpSend,
     logging::make_err,
 };
@@ -18,7 +18,7 @@ pub struct SelfHosted<'p> {
     pub parser: *mut (),
     _arena: *mut (),
     scopes: *mut (),
-    vtable: *const ImportVTable,
+    pub vtable: *const ImportVTable,
     _baked: *mut (),
     pub last_loc: Span,
     a: PhantomData<&'p u8>,
@@ -56,7 +56,7 @@ use crate::export_ffi::BigResult;
 #[allow(improper_ctypes)]
 #[link(name = "franca")]
 extern "C" {
-    fn init_self_hosted<'p>() -> SelfHosted<'p>;
+    pub fn init_self_hosted<'p>() -> Box<SelfHosted<'p>>;
     fn insert_owned<'p>(s: *mut (), s: &[u8]) -> Ident<'p>;
     fn get<'p>(s: *mut (), s: Ident<'p>) -> &'p [u8];
     fn get_c_str(s: *mut (), s: Ident) -> *const u8;
@@ -161,14 +161,6 @@ impl<'p> SelfHosted<'p> {
 
     pub(crate) fn dup_var(&mut self, old: Var<'p>) -> Var<'p> {
         unsafe { dup_var(self.scopes, old) }
-    }
-}
-
-impl<'p> Default for SelfHosted<'p> {
-    fn default() -> Self {
-        let mut temp = unsafe { init_self_hosted() };
-        temp.vtable = addr_of!(IMPORT_VTABLE);
-        temp
     }
 }
 
