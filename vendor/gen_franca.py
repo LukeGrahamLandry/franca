@@ -55,25 +55,6 @@ prim_types = {
     'size_t':       'usize'
 }
 
-prim_defaults = {
-    'int':          '0',
-    'bool':         'false',
-    'int8_t':       '0.trunc()',
-    'uint8_t':      '0.trunc()',
-    'int16_t':      '0.trunc()',
-    'uint16_t':     '0.trunc()',
-    'int32_t':      '0.intcast()',
-    'uint32_t':     '0.trunc()',
-    'int64_t':      '0',
-    'uint64_t':     '0.bitcast()',
-    'float':        '0.0',
-    'double':       '0.0',
-    'uintptr_t':    '0.bitcast()',
-    'intptr_t':     '0',
-    'size_t':       '0'
-}
-
-
 struct_types = []
 enum_types = []
 enum_items = {}
@@ -165,9 +146,6 @@ def is_const_struct_ptr(s):
         if s == f"const {struct_type} *":
             return True
     return False
-
-def type_default_value(s):
-    return prim_defaults[s]
 
 def as_c_arg_type(arg_type, prefix):
     if arg_type == "void":

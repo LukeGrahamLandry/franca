@@ -388,20 +388,46 @@ fn tagged($Tagged: Type) void = {
     
     T :: Tagged.Tag();
     
-    fn eq(a: T, b: T) bool #redirect(Ty(i64, i64), bool);
-    fn ne(a: T, b: T) bool #redirect(Ty(i64, i64), bool);
     
     fn tag(self: *Tagged) T #inline = self.tag_ptr()[];
     fn tag_ptr(self: *Tagged) *T #unsafe_noop_cast;  // SAFETY: The compiler puts the tag at the front of the struct. 
     
     fn is(self: *Tagged, check: T) bool #inline = self.tag().eq(check);
     
+    :: enum(T);
+}
+
+fn enum($T: Type) void = {
+    fn eq(a: T, b: T) bool #redirect(Ty(i64, i64), bool);
+    fn ne(a: T, b: T) bool #redirect(Ty(i64, i64), bool);
+    
     fn ordinal(e: T) i64 #unsafe_noop_cast; // :tag_enums_are_sequential
     
     // TODO: when you move this out for other enums, assert(info.Enum.sequentual, "");
     fn display(self: T, out: *List(u8)) void = {
         // TODO: without the extra force comptime eval, it wrongly thinks calling this function needs compctx.  -- Jul 1
-        names :: :: get_enum_names(T); // :tag_enums_are_sequential
+        names :: @run get_enum_names(T); // :tag_enums_are_sequential
         out.push_all(names[self.ordinal()]);
     }
+
 }
+
+// TODO: define the syntax as a call to this function. maybe get rid of the syntax. cause its a pain.
+//       then this can just be an export_ffi that calls immediate_eval_expr, but that requores passing expected type to macros. 
+fn run(e: FatExpr) FatExpr #macro = @{ :: @[e] };
+
+// TODO: this is useless because you can't unquote inside. 
+//       tho actually, it does get here, you could handle the unquoting in here... maybe. 
+fn quote(e: FatExpr) FatExpr #macro = 
+    @literal e;
+
+/// @expand @quote X === X
+fn expand(e: FatExpr) FatExpr #macro = 
+    (const_eval(FatExpr)(e));
+
+/*
+`if :: true {| do_something_super_important(); };`
+is a footgun because it parses as a declaration not a comptime evaluation of the condition, 
+what's worse is that the body is only evaluated if the variable is referenced so if you don't try to call 'if' 
+later in that scope it won't even be an error that you can't call true with a trailing lambda. 
+*/

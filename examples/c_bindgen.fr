@@ -1,0 +1,263 @@
+CDecl :: @tagged(
+    Struct: @struct(name: Str, fields: List(CField)),
+    Enum: @struct(name: ?Str, items: List(CEnumItem)),
+    Func: @struct(name: Str, type: Str, args: List(CField)),
+);
+
+CField :: @struct(name: Str, type: Str);
+CEnumItem :: @struct(name: Str, value: Str);
+
+#include_std("vendor/wuffs.fr");
+#include_std("core.fr");
+
+fn main() void = {
+    println("Hello World");
+    ast := temp().read_to_string("target/ast.json");  
+    json: JsonParser = new(ast.items(), temp());
+    
+    loop {|
+        part := json&.next();
+        part := part.unwrap();
+        :: tagged(JsonPart);
+        @println("%", part&.tag());
+    };
+    
+    //for output.data { token | 
+    //    source := input.data.subslice(cursor, token.len());
+    //    cursor += token.len();
+    //    @println("%: %; %; %", token.repr.bitcast(), token.category(), token.len(), source);
+    //    if token.is(.Structure, .Push) {|
+    //        println("push");
+    //    };
+    //    if token.is(.Structure, .Pop) {|
+    //        println("pop");
+    //    };
+    //};
+    //@assert_eq(cursor, input.meta.ri);
+    //status.unwrap();
+}
+
+JsonParser :: @struct(
+    decoder: WuffsJsonDecoder,
+    input: WuffsIoBuffer,
+    output: WuffsTokenBuffer,
+    depth: i64 = 0,
+    cursor: i64 = 0,
+    is_dict: BitSet = empty(),
+    last_thing_was_key: bool = false,
+);
+
+// TODO: if the first thing doesn't have a payload, you get an unwrap in export_ffi. -- Jul 4
+JsonPart :: @tagged(
+    Key: Str, 
+    StringValue: Str,
+    StartDict,
+    StartList,
+    End,
+);
+
+// TODO: you can't call this init because the overload set is needed too early.
+fn new(input: Str, mem: Alloc) JsonParser = {
+    self: JsonParser = (
+        decoder = WuffsJsonDecoder.zeroed(),
+        input = WuffsIoBuffer.zeroed(),
+        output = WuffsTokenBuffer.zeroed(),
+    );
+    self.input.data = input;
+    self.input.meta.wi = self.input.data.len;
+    self.output.data = mem.alloc(WuffsToken, 256);
+    // TODO: idk if this is allowed to be moved or if it has internal pointers. 
+    self.decoder&.wuffs_json__decoder__initialize(WuffsJsonDecoder.size_of(), WUFFS_VERSION, 0).unwrap();
+    self
+}
+
+fn next(self: *JsonParser) Result(JsonPart, Str) = {
+    (token, src) := @try(self.next_token()) return;
+    
+    if token.is(.Structure, .Push) {|
+        self.last_thing_was_key = false;
+        self.depth += 1;
+        if token.is(.Structure, .ToList) {|
+            self.is_dict&.unset(self.depth);
+            return(Ok = .StartList);
+        };
+        if token.is(.Structure, .ToDict) {|
+            self.is_dict&.set(self.depth, temp());
+            return(Ok = .StartDict);
+        };
+        return(Err = "wuffs bad push?");
+    };
+    if token.is(.Structure, .Pop) {|
+        self.last_thing_was_key = false;
+        self.depth -= 1;
+        return(Ok = .End);
+    };
+    
+    if token.category() == .String {|
+        ::tagged(Result(Ty(Str, i64), Str));
+        ::tagged(Result(Str, Str));
+        s := self.parse_str(token);
+        (ss, _) := s.unwrap(); // @try(self.parse_str(token)) return;
+        println(ss);
+        if self.expecting_key() && !self.last_thing_was_key {|
+            self.last_thing_was_key = true;
+            return(Ok = (Key = ss));
+        } else {|
+            self.last_thing_was_key = false;
+            return(Ok = (StringValue = ss));
+        };
+    };
+    
+    (Err = "wuffs bad json")
+}
+
+fn expecting_key(self: *JsonParser) bool = 
+    self.is_dict&.get(self.depth);
+
+fn parse_str(self: *JsonParser, prev: WuffsToken) Result(Ty(Str, i64), Str) = {
+    msg :: "TODO: non-basic quotes";
+    assert(prev.is(.String, .Convert0DstFrom1SrcDrop), msg);
+    (token, data) := @try(self.next_token()) return;
+    assert(token.is(.String, .Convert1DstFrom1SrcCopy), msg);
+    (token, _) := @try(self.next_token()) return;
+    assert(token.is(.String, .Convert0DstFrom1SrcDrop), msg);
+    (Ok = (data, 0))
+}
+
+fn next_token(self: *JsonParser) Result(Ty(WuffsToken, Str), Str) = {
+    loop {|
+        continue :: local_return;
+        
+        if self.output.meta.ri >= self.output.meta.wi {|
+            // TODO: compact and ask for more by calling wuffs_json__decoder__decode_tokens again. 
+            
+            status := self.decoder&.wuffs_json__decoder__decode_tokens(self.output&, self.input&, empty());
+            // TODO: use status
+            if self.output.meta.ri >= self.output.meta.wi {|
+                println("todo: compact");
+                return(Err = "TODO: compact / done");
+            };
+            //return(Err = "done");
+        };
+        token := self.output.data[self.output.meta.ri];
+        self.output.meta.ri += 1;
+        
+        if token.category() == .Filler {|
+            self.cursor += token.len();
+            continue();
+        };
+        
+        source := self.input.data.subslice(self.cursor, token.len());
+        self.cursor += token.len();
+        @println("%: %; %; %", token.repr.bitcast(), token.category(), token.len(), source);
+        return(Ok = (token, source))
+    }
+}
+
+// TODO: compiler bug?!!! invalid tag when returning Result(Str, Str) :FUCKED
+// Call when you just got a key you don't care about and want to skip the whole subtree. 
+fn skip_value(self: *JsonParser) Result(void, Str) = {
+    depth := self.depth;
+    @match(@try(self.next()) return) {
+        (fn StartDict() => {
+            while => depth < self.depth {|
+                @try(self.next()) return;
+            };
+        });
+        (fn StartList() => {
+            while => depth < self.depth {|
+                @try(self.next()) return;
+            };
+        });
+        (fn StringValue() => ()); // Strings are a single Part, so we're done. 
+        @default => return(Err = "Expected start of json value.");
+    }
+    .Ok
+}
+
+fn unwrap(s: WuffsStatus) void = {
+    @assert(s.repr.ptr.is_null(), "Wuffs: %", s.repr);
+}
+
+// TODO: This is a copy paste from the one farm_game uses for sokol. 
+//       I need a more declaritive way of describing how to build a c library. 
+fn driver(vtable: *ImportVTable) void = {
+    arch_os := {vtable.comptime_arch}(); // TODO: pattern match multiple returns. 
+    // TODO: this whole thing where you have to write your program inside out is really annoying. 
+    //       I want the user program to be in charge and call into the compiler as a library. 
+    UserData :: @struct(
+        vtable: *ImportVTable,
+        lib: DlHandle,
+    );
+    
+    is_x86 := (@as(i64)arch_os._0).eq(@as(i64) Arch.X86_64);
+    //if(not(is_x86), => print_stacktrace_on_panic()); // TODO: this doesn't work! the function doesn't exist when trying to compile driver even if we don't call it
+    
+    resolve_comptime_import :: fn(userdata: rawptr, comp: Compiler, f: FuncId, lib_name: Symbol, fn_name: Symbol) ?rawptr = {
+        userdata := UserData.ptr_from_raw(userdata);
+        expected_lib_name := {userdata.vtable.intern_string}(comp, "wuffs");
+        fn_name := {userdata.vtable.get_string}(comp, fn_name);
+        if(expected_lib_name.eq(lib_name)){|
+            fn_name := fn_name.maybe_borrow_cstr(temp());
+            f := dlsym(userdata.lib, fn_name);
+            assert(f.is_null().not(), "bad function name");
+            return((Some = f));
+        };
+        .None
+    };
+
+    dylib_path := build_wuffs_cached(arch_os, .Dynamic);  // TODO: should be able to unwrap in the same expression like you can later but it hasn't been instantated yet. 
+    dylib_path := dylib_path.unwrap(); 
+
+    dylib_path_c := dylib_path.maybe_borrow_cstr(temp());
+    lib := dlopen(dylib_path_c, DlFlag.Lazy);
+    assert(lib.lib.is_null().not(), "failed to open dylib for comptime");
+    @println("Opened %", dylib_path);
+    
+    my_vtable: ExportVTable = (
+        resolve_comptime_import = (Some = resolve_comptime_import),
+    );
+    data: UserData = (vtable = vtable, lib = lib);
+    
+    src := temp().read_to_string("examples/c_bindgen.fr");  // TODO: don't depend on cwd.
+    
+    ::if(Backend);
+    comp := vtable.new_with_src(src.items(), if(is_x86, => .Cranelift, => .Aarch64));
+    {vtable.give_vtable}(comp, my_vtable&, UserData.raw_from_ptr(data&));
+    
+    main_sym := {vtable.intern_string}(comp, "main");
+    main_f := {vtable.find_unique_func}(comp, main_sym).unwrap();
+    {vtable.compile_func}(comp, main_f, .Jit).unwrap();
+
+    ptr := {vtable.get_jitted_ptr}(comp, main_f).unwrap();
+    {vtable.make_jitted_exec}(comp);
+    f := assume_types_fn(Arg = void, Ret = void, ptr = ptr);
+    f();    
+}
+
+fn build_wuffs_cached(env: Ty(Arch, Os), linking: LinkTime) Result(Str, void) = {
+    path := save_path_for_lib(env, linking, "wuffs");
+    if(path.file_exists(), => return((Ok = path)));
+    
+    args: List(Str) = list(10, temp());
+    
+    args&.push("-DWUFFS_IMPLEMENTATION");
+    args&.push("vendor/wuffs/release/c/wuffs-v0.4.c");
+    
+    @switch(linking) {
+        @case(.Static) => args&.push("-c");
+        @case(.Dynamic) => args&.push("-dynamiclib");
+    };
+    args&.push_all(@slice ("-o", path));
+    
+    // Since we save it, might as well take the extra hundred years to make it go fast. 
+    args&.push("-O2");
+    
+    @println("building wuffs: %", args.items());
+    success := run_cmd_blocking(CLANG_PATH, args.items());
+    if(not(success), => return(.Err));
+    
+    (Ok = path)
+}
+
+::display_slice(Str);
