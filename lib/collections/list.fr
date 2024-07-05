@@ -162,6 +162,75 @@ fn List($T: Type) Type = {
     Self
 }
 
+// For now this has to match the rust's Vec repr (experimentally determined for whatever rustc version i have).
+// Eventually, when fully self hosted, I'll switch this to just being something like zigs ArrayListUnmanaged,
+// so you don't have to store a billion copies of the same allocator. 
+fn RsVec($T: Type) Type = {
+    Self :: @struct(cap: i64, ptr: *T, len: i64);
+    
+    fn items(self: Self) Slice(T) = (ptr = self.ptr, len = self.len);
+    fn items(self: *Self) Slice(T) = (ptr = self.ptr, len = self.len);
+    // TODO: UNSAFE. needs to be allocated by rust if rust is going to free it. needs to follow rust aliasing rules. 
+    fn rs(self: List(T)) Self = {
+        ::if(Self);
+        if self.maybe_uninit.len == 0 {|
+            // "unsafe precondition(s) violated: slice::from_raw_parts requires the pointer to be aligned and non-null, and the total size of the slice not to exceed `isize::MAX`"
+            empty()
+        } else {|
+            (cap = self.maybe_uninit.len, ptr = self.maybe_uninit.ptr, len = self.len)
+        }
+    }
+    // TODO: name this assume_owned too? 
+    fn rs(self: Slice(T)) Self = {
+        ::if(Self);
+        if self.len == 0 {|
+            empty()
+        } else {|
+            (cap = self.len, ptr = self.ptr, len = self.len)
+        }
+    }
+    
+    fn empty() Self = {
+        // "unsafe precondition(s) violated: slice::from_raw_parts requires the pointer to be aligned and non-null, and the total size of the slice not to exceed `isize::MAX`"
+        nonnull := T.ptr_from_int(T.size_of());
+        (cap = 0, ptr = nonnull, len = 0)
+    }
+    fn assume_owned(self: Self, by: Alloc) List(T) = (maybe_uninit = (ptr = self.ptr, len = self.cap), len = self.len, gpa = by);
+    fn clear(self: *Self) void = {
+        self.len = 0;
+    }
+    
+    fn len(self: Self) i64 = self.len;
+    fn len(self: *Self) i64 = self.len;
+    
+    fn index(self: Self, i: i64) *T = self.items().index(i);
+    fn index(self: *Self, i: i64) *T = self[].items().index(i);
+    
+    ::DeriveIndexable(Self, T);
+    ::DeriveIndexable(*Self, T);
+    
+    // This type doesn't store the allocator so you have to pass it in every time.
+    fn push(self: *Self, t: T, in: Alloc) void = {
+        s := self[].assume_owned(in);
+        s&.push(t);
+        self[] = s.rs();
+    }
+    
+    fn insert(self: *Self, i: i64, t: T, in: Alloc) void = {
+        s := self[].assume_owned(in);
+        s&.insert(i, t);
+        self[] = s.rs();
+    }
+    
+    fn push_all(self: *Self, t: []T, in: Alloc) void = {
+        s := self[].assume_owned(in);
+        s&.push_all(t);
+        self[] = s.rs();
+    }
+    
+    Self
+}
+
 // TODO: this is really inefficient if you already own 'a'
 fn concat(a: Str, b: Str, gpa: Alloc) List(u8) = {
     c: List(u8) = list(a.len().add(b.len()), gpa);

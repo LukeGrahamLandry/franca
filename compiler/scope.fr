@@ -153,6 +153,7 @@ Scopes :: @struct(
     already_loaded: HashSet(Symbol),
 );
 
+// TODO: use unmanaged List/HashMap so not storing the allocator a billon times. 
 Scope :: @struct(
     parent: ScopeId,
     vars: List(BlockScope),
@@ -240,11 +241,11 @@ fn resolve_func_args(self: *ResolveScope, func: *Func) PRes = {
     func.set_flag(.ResolvedSign);
 
     if generic {|
-        each func.arg.bindings.items() { b |
+        each func.arg.bindings { b |
             @try(self.declare_binding(b, func.loc)) return;
         };
     };
-    each func.arg.bindings.items() { b |
+    each func.arg.bindings { b |
         @try(self.resolve_binding(b)) return;
     };
     self.walk_type(func.ret&);
@@ -262,7 +263,7 @@ fn resolve_func_body(self: *ResolveScope, func: *Func) PRes = {
 
     if generic {|
     } else {|
-        each func.arg.bindings.items() { b |
+        each func.arg.bindings { b |
             @try(self.declare_binding(b, func.loc)) return;
         };
     };
@@ -554,7 +555,7 @@ fn handle_expr(self: *ResolveScope, expr: *FatExpr) Result(DoMore, ParseErr) = {
 
             (=> {
                 break :: local_return;
-                each f.body.items() { stmt |
+                each f.body { stmt |
                     if stmt.annotations.len == 1 {|
                         if stmt.annotations.items()[0].name == Flag.include_std.ident() {|
                             stmts := f.body.assume_owned(self.compiler.get_alloc());
@@ -567,7 +568,7 @@ fn handle_expr(self: *ResolveScope, expr: *FatExpr) Result(DoMore, ParseErr) = {
                 };
             })();
             
-            each f.body.items() { stmt |
+            each f.body { stmt |
                 @try(self.walk_stmt(stmt)) return;
             };
             @try(self.walk_expr(f.result)) return;
@@ -609,15 +610,12 @@ fn handle_stmt(self: *ResolveScope, stmt: *FatStmt) Result(DoMore, ParseErr) = {
             return(Ok = .Break);
         });
         (fn DeclFunc(func) => {
-            // TODO: working with RsVec is painful.
-            a := func.annotations.assume_owned(self.compiler.get_alloc());
-            a&.push_all(stmt.annotations.items());
-            func.annotations = a.rs();
+            func.annotations&.push_all(stmt.annotations.items(), self.compiler.get_alloc());
             stmt.annotations&.clear();
         });
         (fn DeclVarPattern(f) => {
             // TODO: this declares the new variables before resolving the types/values. which is wrong! -- Jul 1
-            each f.binding.bindings.items() { b |
+            each f.binding.bindings { b |
                 @try(self.declare_binding(b, stmt.loc)) return;
             };
         });
@@ -627,7 +625,7 @@ fn handle_stmt(self: *ResolveScope, stmt: *FatStmt) Result(DoMore, ParseErr) = {
 }
 
 fn handle_func(self: *ResolveScope, func: *Func) Result(DoMore, ParseErr) = {
-    each func.annotations.items() { a | 
+    each func.annotations { a | 
         if a.args& { a | 
             @try(self.walk_expr(a)) return;
         };
@@ -687,7 +685,7 @@ fn handle_func(self: *RenumberVars, func: *Func) Result(DoMore, void) = {
 
 fn handle_type(self: *RenumberVars, ty: *LazyType) Result(DoMore, void) = (Ok = .Continue);
 fn handle_pattern(self: *RenumberVars, p: *Pattern) Result(DoMore, void) = {
-    each p.bindings.items() { b |
+    each p.bindings { b |
         @if_let(b.name&) 
             fn Var(v) => self.decl(v);
     };

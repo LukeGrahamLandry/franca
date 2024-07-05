@@ -193,7 +193,7 @@ fn after_expr_stmt_prefix(self: *Parser, e: FatExpr) Result(FatStmt, ParseErr) =
                 @case(.PlusEq)  => Flag.operator_plus_equal;
                 @case(.StarEq)  => Flag.operator_star_equal;
                 @case(.SlashEq) => Flag.operator_slash_equal;
-                @default fn(_: Operator) => @report_error("non-update-assingment operator after expression statement. this should be unreachable? %", "") (return, self.last.span);
+                @default => @report_error("non-update-assingment operator after expression statement. this should be unreachable? %", "") (return, self.last.span);
             };
             self.pop();
             delta := @try(self.parse_expr(Prec_None)) return;
@@ -228,7 +228,7 @@ fn after_expr_stmt_prefix(self: *Parser, e: FatExpr) Result(FatStmt, ParseErr) =
 
 fn ident_list_to_pattern(self: *Parser, idents: *RsVec(FatExpr), loc: Span) Result(Pattern, ParseErr) = {
     bindings: List(Binding) = list(idents.len, self.alloc);
-    each idents.items() { expr | 
+    each idents { expr | 
         @match(expr.expr&) {
             (fn GetNamed(name) => bindings&.push((name = (Ident = name[]), ty = .Infer, default = .None, kind = .Var)));
             @default => {
@@ -252,7 +252,7 @@ fn can_start_quick_expr(t: TokenType) bool = {
             // TODO: you want this to be true so you can do 'if !whatever' but then it breaks 'Type!builtin'. -- Jun 23
             //       just prefer the quick expr one. bring back "expected trailing lambda after quick expres"
             @case(Operator.Bang) => true;
-            @default fn(_: Operator) => false;
+            @default => false;
         });
         @default => false;
     }
@@ -294,7 +294,7 @@ fn parse_prefix(self: *Parser, prec: Prec) ParseRes = {
                 @case(.Bang) => Flag.not;
                 @case(.Star) => Flag.operator_star_prefix;
                 // TODO: don't require the arg or have better error message. -- Jun 18
-                @default fn(_: Operator) Flag => {
+                @default fn() Flag => {
                     @report_error("expected begin expression found non-prefix operator %", "") (return, self.last.span);
                     Flag.unreachable_hack()
                 };
@@ -388,8 +388,9 @@ fn parse_prefix(self: *Parser, prec: Prec) ParseRes = {
 fn quick_lambda(self: *Parser, prec: Prec) ParseRes = {
     loc := self.last.span;
     body := @try(self.parse_expr(prec)) return;
-    // FnDef :: @struct(name: ?Symbol, arg: Pattern, ret: LazyType, tags: List(Annotation));
-    fn_def: FnDef = (name = .None, arg = (bindings = empty(), loc = loc), ret = (Infer = ()), tags = list(self.alloc));
+    // TODO: this is kinda dumb (would be better not to force unit being an arg) but makes it consistant with elsewhere
+    bindings := empty_binding().single(self.alloc).rs();
+    fn_def: FnDef = (name = .None, arg = (bindings = bindings, loc = loc), ret = (Infer = ()), tags = list(self.alloc));
     func := self.make_func(fn_def, (Some = body), loc, true);
     (Ok = self.expr((Closure = self.box(func)), loc))
 }
@@ -559,7 +560,7 @@ fn parse_infix(self: *Parser, prev: FatExpr, prec: Prec) ParseRes = {
             e := self.bin_named_macro(Flag.operator_index, prev, index, loc);
             self.parse_infix(e, prec.with(.Suffix))
         });
-        @default fn()void => return(Ok = prev);
+        @default => return(Ok = prev);
     };
     prev = @try(parsed) return;
     // You can chain a bunch of the same level. 
@@ -625,7 +626,7 @@ fn parse_bin_op(self: *Parser, op: Operator, prev: FatExpr, prec: Prec) ParseRes
             };
             unreachable()
         };
-        @default fn(_: Operator) => {
+        @default => {
             // update assignment operator. hopefully we're in a statement and that will handle it.
             return(Ok = prev)
         };
@@ -655,10 +656,7 @@ fn expr_call(self: *Parser, f: FatExpr, arg: FatExpr) FatExpr = {
                 // Tuple parser eagerly flattened single tuples so we have to undo that here.
                 // TODO: have it work with named arguments. Need to support mixing named and positional.
                 (fn Tuple(parts) => {
-                    // this goes away when we're fully self hosted. 
-                    p := parts[].assume_owned(self.alloc);
-                    p&.insert(0, ff.container[]);
-                    parts[] = p.rs();
+                    parts.insert(0, ff.container[], self.alloc);
                     return(self.expr((Call = (f = self.box(f), arg = self.box(arg))), f.loc));
                 });
                 // Parser flattened empty tuples.
@@ -689,10 +687,7 @@ fn push_arg(self: *Parser, call: *FatExpr, callback: FatExpr) void = {
             @match(f.arg.expr&) {
                 // TODO: have it work with named arguments. Need to support mixing named and positional.
                 (fn Tuple(parts) => {
-                    // this goes away when we're fully self hosted. 
-                    p := parts[].assume_owned(self.alloc);
-                    p&.push(callback);
-                    parts[] = p.rs();
+                    parts.push(callback, self.alloc);
                 });
                 // Parser flattened empty tuples.
                 (fn Value(v) => {
@@ -794,7 +789,7 @@ fn parse_tuple(self: *Parser) ParseRes = {
             parts&.drop();
             e
         };
-        @default fn(_: i64) => self.expr((Tuple = parts.rs()), loc);
+        @default => self.expr((Tuple = parts.rs()), loc);
         // TODO: if you forget that semicolon it doesn't see the default and crashes at runtime if you ever hit it. :FUCKED
     };
     
@@ -837,14 +832,17 @@ fn switch_to_parsing_named(self: *Parser, parts: List(FatExpr), ty: LazyType, lo
 
 fn if_empty_add_unit(self: *List(Binding)) void = {
     if self.len == 0 {|
-        b: Binding = (
-            name = .None,
-            ty = (Finished = void),
-            default = .None,
-            kind = .Let,
-        );
-        self.push(b);
+        self.push(empty_binding());
     }
+}
+
+fn empty_binding() Binding = {
+    (
+        name = .None,
+        ty = (Finished = void),
+        default = .None,
+        kind = .Let,
+    )
 }
     
 fn parse_args(self: *Parser) Result(Pattern, ParseErr) = {
