@@ -1,3 +1,12 @@
+## Jul 5
+
+- stopped hardcoding lib path
+- figured out that llvm will keep function names if i don't mark them private.
+- made const lookups use a hashmap. made fn find (in scope.fr) go from 19/105 to 0/82 samples.
+  need one in every block, not just every scope or you get the wrong answers.
+  really smarter would be only start using it when theres a few constants because i suspect all the win is from the top level where all the code in the universe exists and its all constants.
+  so i just make it not be n^2.
+
 ## Jul 4
 
 - something corrupting the tag when trying to return a `Result(Str, Str)`.

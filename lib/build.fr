@@ -214,3 +214,41 @@ fn save_path_for_lib(env: Ty(Arch, Os), linking: LinkTime, lib_name: Str) Str = 
 fn ident(name: Flag) Symbol = {
     symbol_from_id((@as(i64) name).trunc())
 }
+
+
+// Essentially describing something to pass to clang (after adding some combination of -o -O -c -dynamiclib -static -ast-dump) 
+ForeignLibrary :: @struct(
+    name: Str, // for caching the output file and #import functions knowing which dylib to check. 
+    input_files: Slice(Str) = empty(),
+    macro_defines: Slice(Str) = empty(),     // -D, ie. SOME_LIB_IMPL
+    include_paths: Slice(Str) = empty(),     // -I,
+    macos_frameworks: Slice(Str) = empty(),  // -framework, ie. MetalKit
+    objective_c: bool = false,
+    raw_c_source: ?Str = .None,
+);
+
+// TODO: move these to x/<name>
+// TODO: impl build system with these. make it a one-liner to add a dependency to driver. 
+
+wuffs_lib: ForeignLibrary : (
+    name = "wuffs",
+    input_files = "vendor/wuffs/release/c/wuffs-v0.4.c".single(ast_alloc()),
+    macro_defines = "WUFFS_IMPLEMENTATION".single(ast_alloc()),
+);
+
+sokol_macos_lib: ForeignLibrary : (
+    name = "sokol",
+    macro_defines = @slice("SOKOL_METAL", "SOKOL_IMPL", "SOKOL_NO_ENTRY") ast_alloc(),
+    include_paths = "vendor/sokol".single(ast_alloc()),
+    macos_frameworks = @slice("Metal", "MetalKit", "Cocoa", "QuartzCore") ast_alloc(),
+    objective_c = true,
+    raw_c_source = (Some = """
+        #include "sokol_app.h"
+        #include "sokol_gfx.h"
+        #include "sokol_glue.h"
+        #include "sokol_log.h"
+        #include "util/sokol_debugtext.h"
+        #include "util/sokol_gl.h"
+        #include "util/sokol_shape.h"
+    """),
+);

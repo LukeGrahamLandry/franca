@@ -12,6 +12,7 @@ use crate::{
 
 use crate::export_ffi::BigResult::*;
 
+#[repr(C)]
 pub struct SelfHosted<'p> {
     pub pool: *mut (),
     pub codemap: *mut (),

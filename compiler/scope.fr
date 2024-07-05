@@ -22,9 +22,11 @@ fn get_constant(self: *Scopes, name: Var) ?*Ty(FatExpr, LazyType) #compiler = {
 }
 
 fn find_constant_in_scope(self: *Scopes, s: ScopeId, name: Symbol) ?Var #compiler = {
-    vars := self[s].constants&;
-    each vars { k |
-        if(k.name == name, => return(Some = k[]));
+    each self[s].vars { block | 
+        v := block.const_lookup&.get(name);
+        if v& { v |
+            return(Some = v[]);
+        };
     };
     .None
 }
@@ -98,17 +100,7 @@ fn maybe_renumber_and_dup_scope(self: *SelfHosted, new_func: *Func) PRes #compil
             
             // Note: it has to iterate and check more and more each time (but it only copies what's needed). -- Jun 29
             
-            new_constants := self.scopes[id].constants&;
-            each old_scope.constants& { k |
-                if mapping&.get_ptr(k[]) { new |
-                    v := self.scopes.get_constant(k[]);
-                    v := v.unwrap(); // TODO: destructure through a pointer? 
-                    expr := self.clone(v._0&);
-                    ty := self.clone(v._1&);
-                    self.scopes.put_constant(new[], expr, ty);
-                    new_constants.push(new[]);
-                };
-            };
+            
             
             each old_scope.vars { block | 
                 new_vars: List(Var) = list(self.get_alloc());
@@ -117,7 +109,18 @@ fn maybe_renumber_and_dup_scope(self: *SelfHosted, new_func: *Func) PRes #compil
                         new_vars&.push(new[]);
                     };
                 };
-                b: BlockScope = (vars = new_vars, parent = block.parent);
+                new_constants: HashMap(Symbol, Var) = init(self.get_alloc());
+                each block.const_lookup& { (k, v) |
+                    if mapping&.get_ptr(v[]) { new |
+                        v := self.scopes.get_constant(v[]);
+                        v := v.unwrap(); // TODO: destructure through a pointer? 
+                        expr := self.clone(v._0&);
+                        ty := self.clone(v._1&);
+                        self.scopes.put_constant(new[], expr, ty);
+                        new_constants&.insert(new.name, new[]);
+                    };
+                };
+                b: BlockScope = (vars = new_vars, const_lookup = new_constants, parent = block.parent);
                 self.scopes[id].vars&.push(b);
             };
         
@@ -150,13 +153,13 @@ Scopes :: @struct(
 
 Scope :: @struct(
     parent: ScopeId,
-    constants: List(Var),
     vars: List(BlockScope),
     block_in_parent: i64,
 );
 
 BlockScope :: @struct(
     vars: List(Var),
+    const_lookup: HashMap(Symbol, Var),
     parent: i64,
 );
 
@@ -184,7 +187,6 @@ fn scope_from_index(i: u32) ScopeId #unsafe_noop_cast = unreachable(); // TODO: 
 fn new_scope(self: *Scopes, parent: ScopeId, block_in_parent: i64) ScopeId = {
     s: Scope = (
         parent = parent,
-        constants = list(self.scopes.gpa),
         vars = list(self.scopes.gpa),
         block_in_parent = block_in_parent,
     );
@@ -414,21 +416,29 @@ fn find_var(self: *ResolveScope, name: Symbol) ?Var = {
     
     find :: fn(scope: *Scope, block: i64, name: Symbol) ?Var = {
         if scope.vars.is_empty() {|
-            assert_eq(block, 0); // TODO: debug
+            //assert_eq(block, 0); // TODO: debug
             return(.None);
         };
         vars := scope.vars[block]&;
         loop {|
+            
+            const := vars.const_lookup&.get(name);
+            if const& { v |  // TODO: needs to be by reference because arity is broken
+                return(Some = v[]);
+            };
+        
             // Reverse so you get the shadowing first.
             each_rev vars.vars& { v |
-                if(v.name == name, => return(Some = v[]));
+                if(v.name == name, => {
+                    return(Some = v[])
+                });
             };
 
             if vars.parent == block {|
-                assert_eq(block, 0); // TODO: debug
+                //assert_eq(block, 0); // TODO: debug
                 return(.None);
             };
-            @assert_ne(block, 0); // TODO: debug
+            //@assert_ne(block, 0); // TODO: debug
             block = vars.parent;
             stupid := scope.vars[block]&; // TODO
             vars = stupid;
@@ -448,18 +458,17 @@ fn decl_var(self: *ResolveScope, name: Symbol, kind: VarType, loc: Span) Result(
     scopes := self.compiler.scopes;
     scope := scopes[s]&;
     
-    for scope.vars[self.block].vars& { v|
-        if and(v.name == name, v.kind == .Const) {|
-            msg := @format("Cannot shadow constant in the same scope: %", self.compiler.pool.get(name)) temp();
-            return(Err = (span = loc, msg = msg.items()));
-        };
+    prev := scope.vars[self.block].const_lookup&.get(name);
+    if prev.is_some() {|
+        msg := @format("Cannot shadow constant in the same scope: %", self.compiler.pool.get(name)) temp();
+        return(Err = (span = loc, msg = msg.items()));
     };
     
     var: Var = (kind = kind, name = name, id = scopes.types.len.trunc(), scope = self.scope, block = self.block.trunc());
     if kind == .Const {|
         empty: Ty(FatExpr, LazyType) = ((expr = .Poison, loc = loc, ty = UnknownType, done = false), .Infer);
         scopes.constants&.push((Some = empty));
-        scope.constants&.push(var);
+        prev := scope.vars[self.block].const_lookup&.insert(name, var);
     } else {|
         scopes.constants&.push(.None);
     };
@@ -475,11 +484,19 @@ fn push_scope(self: *ResolveScope, name: ?Symbol) void = {
     scope: *Scope = if name { _ |
         self.scope = self.compiler.scopes.new_scope(self.scope, self.block);
         scope := self.compiler.scopes[self.scope]&;
-        scope.vars&.push(@as(BlockScope) (vars = list(scope.vars.gpa), parent = 0));
+        scope.vars&.push(@as(BlockScope) (
+            vars = list(scope.vars.gpa), 
+            const_lookup = init(scope.vars.gpa),
+            parent = 0
+        ));
         scope
     } else {|
         scope := self.compiler.scopes[self.scope]&;
-        scope.vars&.push(@as(BlockScope) (vars = list(scope.vars.gpa), parent = self.block));
+        scope.vars&.push(@as(BlockScope) (
+            vars = list(scope.vars.gpa), 
+            const_lookup = init(scope.vars.gpa),
+            parent = self.block
+        ));
         scope
     };
     self.block = scope.vars.len - 1;
