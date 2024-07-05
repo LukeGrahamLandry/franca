@@ -260,8 +260,12 @@ impl<'a, 'p> Compile<'a, 'p> {
                 return self.enum_constant_macro(mem::take(arg), mem::take(target));
             }
             Flag::Builtin => {
-                assert!(target.is_raw_unit());
+               assert!(target.is_raw_unit());
                return Ok(self.get_builtin_macro(mem::take(arg)));
+            }
+            Flag::Late => { // HACK 
+                assert!(target.is_raw_unit());
+                return self.as_literal((), arg.loc);
             }
             _ => err!("unknown macro invocation {:?} while bootstrapping", name),
         }

@@ -352,7 +352,7 @@ fn enum(names: FatExpr) FatExpr = {
 //       but i should know which pointers are const. 
 //       but that doesn't fix the problem of needing the constant to be ready so you can use it in functions that it contains pointers to. 
 //       need !rec to work for anything, not just types?    -- Jun 18
-#macro fn constant(T: FatExpr, value: FatExpr) FatExpr = {
+#macro fn static(T: FatExpr, value: FatExpr) FatExpr = {
     t := @literal const_eval_type(T);
     @{ :: {
         ptr := @[t].ptr_from_raw(@as(rawptr) malloc(@[t].size_of()));
@@ -398,19 +398,26 @@ fn tagged($Tagged: Type) void = {
 }
 
 fn enum($T: Type) void = {
+    @late {
+        info := get_type_info(T);
+        assert(info&.is(.Enum), "expected enum type");
+        assert(info.Enum.sequential, "expected enum elements to be sequential");
+    };
+    
     fn eq(a: T, b: T) bool #redirect(Ty(i64, i64), bool);
     fn ne(a: T, b: T) bool #redirect(Ty(i64, i64), bool);
     
     fn ordinal(e: T) i64 #unsafe_noop_cast; // :tag_enums_are_sequential
     
-    // TODO: when you move this out for other enums, assert(info.Enum.sequentual, "");
     fn display(self: T, out: *List(u8)) void = {
         // TODO: without the extra force comptime eval, it wrongly thinks calling this function needs compctx.  -- Jul 1
         names :: @run get_enum_names(T); // :tag_enums_are_sequential
         out.push_all(names[self.ordinal()]);
     }
-
 }
+
+// :blessed: This is also a builtin_prefix_macro. It lets you disable code while bootstrapping up to having the type for FatExpr. 
+fn late(e: FatExpr) FatExpr #macro = e;
 
 // TODO: define the syntax as a call to this function. maybe get rid of the syntax. cause its a pain.
 //       then this can just be an export_ffi that calls immediate_eval_expr, but that requores passing expected type to macros. 
@@ -424,6 +431,22 @@ fn quote(e: FatExpr) FatExpr #macro =
 /// @expand @quote X === X
 fn expand(e: FatExpr) FatExpr #macro = 
     (const_eval(FatExpr)(e));
+
+fn inline_for(container: FatExpr, body: FatExpr) FatExpr #macro = {
+    container := compile_ast(@{ :: @[container] });
+    len := (const_eval(i64)(@{ v := @[container]; v.len() }));
+    
+    actions: List(FatExpr) = list(ast_alloc());
+    range(0, len) { i | 
+        actions&.push(@{ @[body](:: @[container].index(@[@literal i])) });
+    };
+    container.expr = (Tuple = actions.rs());
+    container.ty = UnknownType; 
+    container.done = false;
+    container
+}
+
+// TODO: fn inline_match(container: FatExpr, body: FatExpr) FatExpr #macro = {
 
 /*
 `if :: true {| do_something_super_important(); };`

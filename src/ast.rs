@@ -1683,6 +1683,7 @@ pub enum Flag {
     Local_Return,
     No_Trace,
     Compiler_Builtin_Transform_Callsite,
+    Late,
     _Reserved_Count_,
 }
 

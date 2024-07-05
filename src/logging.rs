@@ -136,7 +136,7 @@ impl<'p> Program<'p> {
         if let Some(&Some(name)) = self.inferred_type_names.get(t.as_index()) {
             let name = self.pool.get(name);
             // HACK: need to be smarter about when to infer an assignment as a type name.
-            if name != "Self" {
+            if name != "Self" && name.len() != 1 {
                 return name.to_string();
             }
         }

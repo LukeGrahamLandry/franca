@@ -149,7 +149,7 @@ def is_const_struct_ptr(s):
 
 def as_c_arg_type(arg_type, prefix):
     if arg_type == "void":
-        return "Unit"
+        return "void"
     elif is_prim_type(arg_type):
         return as_prim_type(arg_type)
     elif is_struct_type(arg_type):
@@ -176,7 +176,7 @@ def as_arg_type(arg_prefix, arg_type, prefix):
     pre = "" if arg_prefix is None else arg_prefix
     if arg_type == "void":
         if arg_prefix is None:
-            return "Unit"
+            return "void"
         else:
             return ""
     elif is_prim_type(arg_type):
@@ -224,7 +224,7 @@ def funcptr_args_c(field_type, prefix):
 def funcptr_result_c(field_type):
     res_type = field_type[:field_type.index('(*)')].strip()
     if res_type == 'void':
-        return 'Unit'
+        return 'void'
     elif is_prim_type(res_type):
         return as_prim_type(res_type)
     elif util.is_const_void_ptr(res_type):
@@ -392,6 +392,7 @@ tasks = [
     [ 'sokol/util/sokol_gl.h',        'sgl_',      ['sg_'] ],
     [ 'sokol/util/sokol_debugtext.h', 'sdtx_',     ['sg_'] ],
     [ 'sokol/util/sokol_shape.h',     'sshape_',   ['sg_'] ],
+    [ 'sokol/util/sokol_imgui.h', 'simgui_',   ['sg_', 'sapp_'] ],
 ]
 
 if __name__ == "__main__":

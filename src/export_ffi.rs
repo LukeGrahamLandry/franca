@@ -528,9 +528,14 @@ pub const COMPILER: &[(&str, *const u8)] = &[
         "fn __save_function_header(push: Fn(u32, void), pop: Fn(void, void)) void;",
         Compile::save_function_header as *const u8,
     ),
+    ("fn has_env_bootstrapped_yet() bool;", has_env_bootstrapped_yet as *const u8), // TODO: remove
     ("fn Tag(Tagged: Type) Type #fold;", get_enum_tag_type as *const u8),
     // :blessed: it looks for @rec by name!! TODO: this is very bad and confusing!! you can't shadow it!! - Jul 1
 ];
+
+extern "C-unwind" fn has_env_bootstrapped_yet(comp: &mut Compile) -> bool {
+    comp.make_slice_t.is_some() && comp.program.fat_expr_type.is_some()
+}
 
 extern "C-unwind" fn get_enum_tag_type(comp: &mut Compile, e: TypeId) -> TypeId {
     let raw = comp.program.raw_type(e);
