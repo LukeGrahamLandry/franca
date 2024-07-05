@@ -4,7 +4,7 @@ fn main() {
     let triple = std::env::var("TARGET").unwrap();
     let path = format!("compiler/target/{triple}/libfranca.a");
     if !PathBuf::from(&path).exists() {
-        let _ = fs::create_dir(format!("compiler/target/{triple}")); // dont care if already exists
+        let _ = fs::create_dir_all(format!("compiler/target/{triple}")); // dont care if already exists
         fs::copy(format!("boot/{triple}/libfranca.a"), &path).expect("/boot has old version");
     }
     println!("cargo:rerun-if-changed={}", path);

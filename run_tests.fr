@@ -23,7 +23,8 @@ fn driver(vtable: *ImportVTable) void #export = {
                 run_jit(vtable, .Cranelift);
             };
             @case("llvm") => run_llvm(vtable);
-            @case("examples") => run_examples(vtable);
+            @case("examples") => run_examples(vtable, true);
+            @case("github") => github(vtable);
             @default fn(_: Str)=> {
                 @println("Unknown argument '%'", s);
                 println(HELP);
@@ -39,13 +40,23 @@ fn driver(vtable: *ImportVTable) void #export = {
     // TODO: see if it breaks if you run new ones in thier own namespaces in the same compiler instance as ^ 
 }
 
-fn run_examples(vtable: *ImportVTable) void = {
+fn github(vtable: *ImportVTable) void = {
+    // TODO: rebuild boot.
+    (arch, os) := {vtable.comptime_arch}();
+    assert(arch == .Aarch64 && os == .Macos, "expected macos-arm");
+    run_jit(vtable, .Aarch64);
+    run_examples(vtable, false);
+} 
+
+fn run_examples(vtable: *ImportVTable, allow_deps: bool) void = {
     fork_run_main(vtable, "examples/bf.fr");
     fork_run_main(vtable, "examples/hello.fr");
     
     // These ones I don't run because they're interactive but just make sure it compiles so it doesn't rot
     check_main_compiles(vtable, "examples/raw_terminal.fr");
-    check_driver_compiles(vtable, "examples/farm_game.fr");  // the game runs in the driver 
+    if allow_deps {|
+        check_driver_compiles(vtable, "examples/farm_game.fr");  // the game runs in the driver 
+    };
     
     // TODO: #import_std uses relative paths. 
     chdir("examples/lox".maybe_borrow_cstr(temp()));
@@ -58,7 +69,7 @@ fn run_examples(vtable: *ImportVTable) void = {
     chdir("compiler".maybe_borrow_cstr(temp()));
     check_driver_compiles(vtable, "first.fr");
     (ok, out, err) := fork_and_catch(temp()) {|
-        src := "#include_std(\"core.fr\");".clone(temp());
+        src := "#include_std(\"lib/core.fr\");".clone(temp());
         src&.read_and_push("main.fr");
         comp := vtable.new_with_src(src.items(), TARGET);
         run_tests(vtable, comp);
@@ -70,7 +81,9 @@ fn run_examples(vtable: *ImportVTable) void = {
     println("- ran compiler tests");
     chdir("../".maybe_borrow_cstr(temp()));
     
-    mandelbrot(vtable);
+    if allow_deps {|
+        mandelbrot(vtable);
+    };
     set_colour(250, 150, 200);
     println("ALL EXAMPLES PASSED!");
     unset_colour();
@@ -120,7 +133,7 @@ fn run_llvm(vtable: *ImportVTable) void = {
     };
 }
 
-NO_FORK :: true;
+NO_FORK :: false;
 
 fn run_sequential(c: CompCtx, $inner_run: @Fn(c: CompCtx, fns: Slice(FuncId)) void) void = {
     run :: fn(ff: Slice(FuncId)) bool => {
@@ -194,7 +207,7 @@ fn load_lang_tests(comp: CompCtx) void = {
         };
     };
     
-    file := {comp.vtable.add_file}(comp.data, "lib", "#include_std(\"core.fr\");");
+    file := {comp.vtable.add_file}(comp.data, "lib", "#include_std(\"lib/core.fr\");");
     all_stmts := {comp.vtable.parse_stmts}(comp.data, file&).unwrap();
     ::List(FatStmt);
     all_stmts := all_stmts.clone(temp());
@@ -231,7 +244,7 @@ fn run_tests(vtable: *ImportVTable, comp: Compiler) i64 = {
 fn mandelbrot(vtable: *ImportVTable) void = {
     // Note: can't import core at the end because you need slice type to be shared with the compiler 
     //       before '::' blocks in the program try to run because they might use !slice. 
-    src := "#include_std(\"core.fr\");".clone(temp());
+    src := "#include_std(\"lib/core.fr\");".clone(temp());
     src&.read_and_push("examples/mandelbrot.fr");
     f := jit_from_source(vtable, src&.items(), "render");
     f := assume_types_fn(Arg = void, Ret = List(u8), ptr = f);
@@ -249,7 +262,7 @@ fn mandelbrot(vtable: *ImportVTable) void = {
 
 fn fork_run_main(vtable: *ImportVTable, filepath: Str) void = {
     (ok, out, err) := fork_and_catch(temp()) {|
-        src := "#include_std(\"core.fr\");".clone(temp());
+        src := "#include_std(\"lib/core.fr\");".clone(temp());
         src&.read_and_push(filepath);
         f := jit_from_source(vtable, src&.items(), "main");
         f := assume_types_fn(Arg = void, Ret = void, ptr = f);
@@ -267,14 +280,14 @@ fn fork_run_main(vtable: *ImportVTable, filepath: Str) void = {
 }
 
 fn check_main_compiles(vtable: *ImportVTable, filepath: Str) void = {
-    src := "#include_std(\"core.fr\");".clone(temp());
+    src := "#include_std(\"lib/core.fr\");".clone(temp());
     src&.read_and_push(filepath);
     f := jit_from_source(vtable, src&.items(), "main");
     @println("- compiled %:main", filepath);
 }
 
 fn check_driver_compiles(vtable: *ImportVTable, filepath: Str) void = {
-    src := "#include_std(\"core.fr\");".clone(temp());
+    src := "#include_std(\"lib/core.fr\");".clone(temp());
     src&.read_and_push(filepath);
     f := jit_from_source(vtable, src&.items(), "driver");
     @println("- compiled %:driver", filepath);
