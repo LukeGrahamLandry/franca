@@ -113,15 +113,15 @@ impl<'p> InterpSend<'p> for FatExpr<'p> {
         9014097120714207
     }
     fn create_type(p: &mut Program) -> TypeId {
-        p.fat_expr_type.expect("used FatExpr::InterpSend during bootstrapping")
+        p.pool.env.fat_expr_type.expect("used FatExpr::InterpSend during bootstrapping")
     }
 
     fn get_type(p: &Program) -> TypeId {
-        p.fat_expr_type.expect("used FatExpr::InterpSend during bootstrapping")
+        p.pool.env.fat_expr_type.expect("used FatExpr::InterpSend during bootstrapping")
     }
 
     fn get_or_create_type(p: &mut Program) -> TypeId {
-        p.fat_expr_type.expect("used FatExpr::InterpSend during bootstrapping")
+        p.pool.env.fat_expr_type.expect("used FatExpr::InterpSend during bootstrapping")
     }
 
     fn name() -> String {

@@ -38,7 +38,7 @@ pub extern "C" fn emit_bc<'p>(compile: &mut Compile<'_, 'p>, f: FuncId, when: Ex
     // TODO: HACK. you want to make sure anything called inside the stack tracing functions doesn't try to trace themselves,
     //      this happens naturally by just not inserting them when not compiled yet, but you might
     //      emit_bc again later for aot. this just remembers if tracing was ready the first time we saw the function.  -- Jun 26
-    if compile.program.inject_function_header.is_none() {
+    if compile.program.pool.env.inject_function_header.is_none() {
         compile.program[f].set_flag(FnFlag::NoStackTrace, true);
     }
 
@@ -371,12 +371,12 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
         result.current_block = entry_block;
 
-        let do_stacktrace = self.program.inject_function_header.is_some() && !func.get_flag(FnFlag::NoStackTrace);
+        let do_stacktrace = self.program.pool.env.inject_function_header.is_some() && !func.get_flag(FnFlag::NoStackTrace);
         // eventually this will be exposed as a language feature, but for now its just used for stack traces.
         let has_defers = do_stacktrace;
 
         if do_stacktrace {
-            let (push, _) = self.program.inject_function_header.unwrap();
+            let (push, _) = self.program.pool.env.inject_function_header.unwrap();
             result.push(Bc::PushConstant {
                 value: f.as_index() as i64,
                 ty: Prim::I32,
@@ -409,7 +409,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             result.blocks[return_block.0 as usize].incoming_jumps += 1;
             result.current_block = return_block;
             if do_stacktrace {
-                let (_, pop) = self.program.inject_function_header.unwrap();
+                let (_, pop) = self.program.pool.env.inject_function_header.unwrap();
                 let sig = prim_sig(
                     self.program,
                     FnType {

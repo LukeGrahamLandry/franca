@@ -1,7 +1,7 @@
 use std::marker::PhantomData;
 
 use crate::{
-    ast::{FatExpr, FatStmt, Flag, Func, FuncId, LazyType, Pattern, ScopeId, TypeId, Var},
+    ast::{FatExpr, FatStmt, Flag, Func, FuncId, LazyType, OverloadSetId, Pattern, ScopeId, TypeId, Var},
     bc::{BakedEntry, BakedVar, BakedVarId, Values},
     compiler::{CErr, Compile, CompileError, Scope},
     err,
@@ -22,7 +22,15 @@ pub struct SelfHosted<'p> {
     pub vtable: *const ImportVTable,
     _baked: *mut (),
     pub last_loc: Span,
-    a: PhantomData<&'p u8>,
+    pub env: Box<ComptimeEnvironment>,
+    pub a: PhantomData<&'p u8>,
+}
+
+pub struct ComptimeEnvironment {
+    pub inject_function_header: BigOption<(FuncId, FuncId)>,
+    pub make_slice_t: BigOption<FuncId>,
+    pub bake_os: BigOption<OverloadSetId>,
+    pub fat_expr_type: BigOption<TypeId>,
 }
 
 pub struct Scopes<'p> {

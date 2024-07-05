@@ -85,6 +85,13 @@ impl<T> BigOption<T> {
             BigOption::None => None,
         }
     }
+
+    pub(crate) fn expect(self, arg: &str) -> T {
+        match self {
+            BigOption::Some(t) => t,
+            BigOption::None => panic!("Missing Value. {arg}"),
+        }
+    }
 }
 
 impl<T> From<BigOption<T>> for Option<T> {
@@ -244,6 +251,7 @@ pub struct ImportVTable {
     intern_type: for<'p> extern "C" fn(compile: &mut Compile<'_, 'p>, e: TypeInfo<'p>) -> TypeId,
     get_type: for<'p> extern "C" fn(compile: &mut Compile<'_, 'p>, e: TypeId) -> *const TypeInfo<'p>,
     log_type: extern "C" fn(compile: &mut Compile, e: TypeId) -> *const str,
+    check_for_new_aot_bake_overloads: for<'p> extern "C" fn(comp: &mut Compile<'_, 'p>) -> Res<'p, ()>,
 }
 
 #[repr(C)]
@@ -290,8 +298,13 @@ pub static IMPORT_VTABLE: ImportVTable = ImportVTable {
     intern_type: franca_intern_type,
     get_type,
     log_type: franca_log_type,
+    check_for_new_aot_bake_overloads,
 };
 
+// TODO: cant just call the thing because lifetime?
+extern "C" fn check_for_new_aot_bake_overloads<'p>(compile: &mut Compile<'_, 'p>) -> Res<'p, ()> {
+    compile.check_for_new_aot_bake_overloads()
+}
 extern "C" fn franca_log_type(compile: &mut Compile, e: TypeId) -> *const str {
     compile.program.log_type(e).leak() as *const str
 }
@@ -474,7 +487,6 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     // ("fn Label(Arg: Type) Type", do_label_type as *const u8),
     // Generated for @BITS to bootstrap encoding for inline asm.
     ("#no_tail fn __shift_or_slice(ints: Slice(i64)) u32", shift_or_slice as *const u8),
-    ("fn __save_slice_t(slice_t: Fn(Type, Type)) void", save_slice_t as *const u8),
     ("fn intern_type_ref(ty: *TypeInfo) Type;", intern_type as *const u8),
     // TODO: maybe it would be nice if you could override deref so Type acts like a *TypeInfo.
     ("fn get_type_info(ty: Type) TypeInfo;", get_type_info as *const u8),
@@ -516,26 +528,14 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     ("#macro fn FnPtr(Arg: FatExpr, Ret: FatExpr) FatExpr;", fn_ptr_type_macro as *const u8),
     ("#macro fn Fn(Ret: FatExpr) FatExpr;", fn_type_macro_single as *const u8),
     ("#macro fn FnPtr( Ret: FatExpr) FatExpr;", fn_ptr_type_macro_single as *const u8),
-    ("fn __compiler_save_fatexpr_type(t: Type) void;", compiler_save_fatexpr_type as *const u8),
     // ("#fold fn str(s: Symbol) Str", symbol_to_str as *const u8),
-    ("fn get_compiler_vtable() *ImportVTable", get_compiler_vtable as *const u8),
     ("fn bake_value(v: BakedVar) BakedVarId", bake_value as *const u8),
-    ("fn __save_bake_os(os: OverloadSet) void", save_bake_os as *const u8),
     ("fn get_meta(t: Type) TypeMeta", get_meta as *const u8),
     // TODO: this should be a function, but then that needs a different bootstrapping path.
     ("#macro fn builtin(t: FatExpr) FatExpr", Compile::get_builtin_macro as *const u8),
-    (
-        "fn __save_function_header(push: Fn(u32, void), pop: Fn(void, void)) void;",
-        Compile::save_function_header as *const u8,
-    ),
-    ("fn has_env_bootstrapped_yet() bool;", has_env_bootstrapped_yet as *const u8), // TODO: remove
     ("fn Tag(Tagged: Type) Type #fold;", get_enum_tag_type as *const u8),
     // :blessed: it looks for @rec by name!! TODO: this is very bad and confusing!! you can't shadow it!! - Jul 1
 ];
-
-extern "C-unwind" fn has_env_bootstrapped_yet(comp: &mut Compile) -> bool {
-    comp.make_slice_t.is_some() && comp.program.fat_expr_type.is_some()
-}
 
 extern "C-unwind" fn get_enum_tag_type(comp: &mut Compile, e: TypeId) -> TypeId {
     let raw = comp.program.raw_type(e);
@@ -552,24 +552,9 @@ extern "C-unwind" fn get_meta(comp: &mut Compile, ty: TypeId) -> TypeMeta {
     comp.program.get_info(ty)
 }
 
-extern "C-unwind" fn save_bake_os(comp: &mut Compile, os: OverloadSetId) {
-    comp.program.bake_os = Some(os);
-}
-
 // TODO: version of this that allows caching? but have to think more about when you're allowed to deduplicate.
 extern "C-unwind" fn bake_value(comp: &mut Compile, v: BakedVar) -> BakedVarId {
     unsafe { crate::self_hosted::put_baked(comp.program.pool, v, BigOption::None) }
-}
-
-extern "C-unwind" fn get_compiler_vtable(_: &mut Compile) -> *const ImportVTable {
-    addr_of!(IMPORT_VTABLE)
-}
-
-extern "C-unwind" fn compiler_save_fatexpr_type(compiler: &mut Compile, f: TypeId) {
-    compiler.program.fat_expr_type = Some(f);
-}
-extern "C-unwind" fn save_slice_t(compiler: &mut Compile, f: FuncId) {
-    compiler.make_slice_t = Some(f);
 }
 
 extern "C-unwind" fn get_size_of(compiler: &mut Compile, ty: TypeId) -> i64 {

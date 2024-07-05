@@ -76,7 +76,6 @@ pub struct Compile<'a, 'p> {
     pub wip_stack: Vec<(Option<FuncId>, ExecStyle)>,
     #[cfg(feature = "cranelift")]
     pub cranelift: crate::cranelift::JittedCl<cranelift_jit::JITModule>,
-    pub make_slice_t: Option<FuncId>,
     pending_redirects: Vec<(FuncId, FuncId)>,
     pub export: Vec<FuncId>,
     pub driver_vtable: (Box<ExportVTable>, *mut ()),
@@ -129,7 +128,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             driver_vtable: (Default::default(), ptr::null_mut()),
             export: vec![],
             pending_redirects: vec![],
-            make_slice_t: None,
             wip_stack: vec![],
             debug_trace: vec![],
             anon_fn_counter: 0,
@@ -154,7 +152,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     fn create_slice_type(&mut self, expect: TypeId, loc: Span) -> Res<'p, TypeId> {
         let value = to_values(self.program, expect)?;
-        let f = self.as_literal(unwrap!(self.make_slice_t, "slice type not ready!"), loc)?;
+        let f = self.as_literal(unwrap2!(self.program.pool.env.make_slice_t, "slice type not ready!"), loc)?;
         // f.ty = ty; // TODO: it doesn't compile the function if the type here is FuncId?
         let a = FatExpr::synthetic_ty(Expr::Value { value, coerced: false }, loc, TypeId::ty);
         let s_ty = FatExpr::synthetic(Expr::Call(Box::new(f), Box::new(a)), loc);
@@ -282,8 +280,8 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     // :bake_relocatable_value
-    pub(crate) fn check_for_new_aot_bake_overloads(&mut self) -> Res<'p, ()> {
-        let os = self.program.bake_os.expect("cannot aot during bootstrapping.");
+    pub(crate) extern "C" fn check_for_new_aot_bake_overloads(&mut self) -> Res<'p, ()> {
+        let os = self.program.pool.env.bake_os.expect("cannot aot during bootstrapping.");
         let prev = self.program[os].ready.len();
         self.compute_new_overloads(os, Some(1));
         // TODO: this will miss them if someone caused new things to resolve outside this function.
@@ -651,10 +649,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.ensure_compiled_force(f, when)?;
         self.currently_compiling.retain(|check| *check != f);
         Ok(())
-    }
-    
-    pub extern "C" fn save_function_header(&mut self, push: FuncId, pop: FuncId) {
-        self.program.inject_function_header = Some((push, pop));
     }
 
     // Don't pass constants in because the function declaration must have closed over anything it needs.
@@ -1645,7 +1639,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         walk.expr(&mut arg);
                         let mut placeholders = walk.placeholders; // drop walk.
 
-                        let ty = unwrap!(self.program.fat_expr_type, "used quoted ast during bootstrapping");
+                        let ty = unwrap2!(self.program.pool.env.fat_expr_type, "used quoted ast during bootstrapping");
                         let value = to_values(self.program, arg)?;
 
                         expr.set(value.clone(), ty);
@@ -1849,7 +1843,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 if arg.is_raw_unit() && !target.is_raw_unit() {
                     mem::swap(arg, target);
                 }
-                let Some(expr_ty) = self.program.fat_expr_type else {
+                let BigOption::Some(expr_ty) = self.program.pool.env.fat_expr_type else {
                     *expr = self.builtin_prefix_macro(handler, arg, target)?;
                     return self.compile_expr(expr, requested);
                 };
@@ -2165,7 +2159,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         // }
                         return Ok(None);
                     }
-                    Flag::Quote => unwrap!(self.program.fat_expr_type, "used quoted ast during bootstrapping"),
+                    Flag::Quote => unwrap2!(self.program.pool.env.fat_expr_type, "used quoted ast during bootstrapping"),
                     Flag::Loop => TypeId::never,
                     // TODO: there's no reason this couldn't look at the types, but if logic is more complicated (so i dont want to reproduce it) and might fail often (so id be afraid of it getting to a broken state).
                     Flag::If => return Ok(None),
@@ -3917,7 +3911,7 @@ impl<'z, 'a, 'p> WalkAst<'p> for Unquote<'z, 'a, 'p> {
             return true;
         };
         if *name == Flag::Unquote.ident() {
-            let expr_ty = self.compiler.program.fat_expr_type.expect("used unquote ast while bootstrapping");
+            let expr_ty = self.compiler.program.pool.env.fat_expr_type.expect("used unquote ast while bootstrapping");
             // self.compiler
             //     .compile_expr(self.arg, Some(expr_ty))
             //     .unwrap_or_else(|e| panic!("Expected comple ast but \n{e:?}\n{:?}", arg.log(self.compiler.program.pool))); // TODO

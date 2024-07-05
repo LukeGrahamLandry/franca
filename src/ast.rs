@@ -788,10 +788,7 @@ pub struct Program<'p> {
     pub types_extra: RefCell<Vec<Option<TypeMeta>>>,
     finished_layout_deep: BitSet,
     pub inferred_type_names: Vec<Option<Ident<'p>>>,
-    pub fat_expr_type: Option<TypeId>,
-    pub bake_os: Option<OverloadSetId>,
     pub primitives: RefCell<HashMap<(TypeId, u16, bool, bool), Vec<Prim>>>,
-    pub inject_function_header: Option<(FuncId, FuncId)>,
 }
 
 impl_index_imm!(Program<'p>, TypeId, TypeInfo<'p>, types);
@@ -868,8 +865,6 @@ impl<'p> Program<'p> {
         pool.vtable = addr_of!(IMPORT_VTABLE);
         let mut program = Self {
             primitives: Default::default(),
-            inject_function_header: None,
-            fat_expr_type: None,
             finished_layout_deep: BitSet::empty(),
             // these are hardcoded numbers in TypeId constructors
             // if you remove any remember to fix later indices!
@@ -905,7 +900,6 @@ impl<'p> Program<'p> {
             const_bound_memo: Default::default(),
             types_extra: Default::default(),
             inferred_type_names: vec![],
-            bake_os: None,
         };
 
         for (i, ty) in program.types.iter().enumerate() {

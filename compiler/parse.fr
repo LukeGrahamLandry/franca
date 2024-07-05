@@ -50,6 +50,7 @@ PrecLevel :: @enum(i64) (
 );
 ParseRes :: Result(FatExpr, ParseErr);
 
+// TODO: do the clone here instead of (on rust side + scope) so you don't have to remmeber.
 fn finish_pending(self: *Parser, id: WaitingParse) ParseRes = {
     @match(self.tasks[id.id]&) {
         (fn Pending(src_span) ParseRes => {
@@ -73,19 +74,20 @@ fn finish_pending_stmts(self: *Parser, id: WaitingParse) Result(RsVec(FatStmt), 
         (fn Pending(src_span) T => {
             self.lex = init(self.pool, src_span.span, src_span.src);
             e := self.parse_block_until_squiggle(true);
-            
-            // TODO: clone! :FUCKED
-            // TODO: save less often!
-            self.tasks[id.id] = (Expr = e);
-            self.finish_pending_stmts(id) // TODO: im lazy
-        });
-        (fn Expr(e) T => { 
-            // TODO: clone! :FUCKED
+            self.tasks[id.id] = (Expr = (Err = (span = src_span.span, msg = "ICE: WaitingParse id was stmts (which aren't reused).")));
             @match(e) {
                 (fn Ok(e) T => (Ok = e.expr.Block.body));
-                (fn Err(e) T => (Err = e[]));
+                (fn Err(e) T => (Err = e));
             }
         });
+        (fn Expr(e) T => (Err = (span = e.get_span(), msg = "ICE: WaitingParse id wanted stmts found expr.")));
+    }
+}
+
+fn get_span(e: *ParseRes) Span = {
+    @match(e) {
+        (fn Ok(e) Span => e.loc);
+        (fn Err(e) Span => e.span);
     }
 }
 
