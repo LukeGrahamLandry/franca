@@ -100,6 +100,15 @@ pub struct BasicBlock<'p> {
     pub height: u16,
 }
 
+// TODO: (maybe) instead of storing TypeId of vars, store size+align.
+//       then don't throw away fnbody after use, keep them in a hashmap to deduplicate generics.
+//       like List(*T) will often generate the same code even with different types.
+//       can keep a running hash as you construct the bc so maybe pretty fast to discard non-matches.
+//       have that as a build option so you don't have to take the hit for debug builds if you don't want to.
+//       but it actually might make it faster in general because it means giving less stuff to llvm which is 90% of the time.
+//       I kinda want to wait for emit_bc and bc_to_asm to be self hosted tho cause then its less awkward to change things.
+//       Note: you wont get all the matches until you really deduplicate because they might call different functions that actaully generate the same code,
+//             so have to have a thing like redirects where if checks if a call has been deduplicated. -- Jul 5
 #[repr(C)]
 #[derive(Clone)]
 pub struct FnBody<'p> {
@@ -113,7 +122,7 @@ pub struct FnBody<'p> {
     pub name: Ident<'p>,
     pub want_log: bool,
     // TODO: this should be moved to EmitBc
-    pub is_ssa_var: BitSet, // only used for debugging. bc has enough info for this.
+    pub is_ssa_var: BitSet, // only used for debugging (and during emit_bc). bc has enough info for this.
     pub signeture: PrimSig<'p>,
 }
 
