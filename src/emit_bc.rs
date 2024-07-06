@@ -1199,12 +1199,13 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
         match &self.program[raw_container_ty] {
             TypeInfo::Struct { fields, .. } => {
-                assert_eq!(
-                    fields.len(),
-                    values.len(),
-                    "Cannot assign {values:?} to type {} = {fields:?}",
-                    self.program.log_type(requested)
-                );
+                // TODO: acocunt for constant fields.
+                // assert_eq!(
+                //     fields.len(),
+                //     values.len(),
+                //     "Cannot assign {values:?} to type {} = {fields:?}",
+                //     self.program.log_type(requested)
+                // );
                 let all = names.into_iter().zip(values).zip(fields);
                 for ((name, value), field) in all {
                     assert_eq!(name, field.name);

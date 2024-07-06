@@ -226,9 +226,11 @@ impl<'a, 'p> Compile<'a, 'p> {
                     self.program.pool.get(name),
                     self.program.log_type(ty)
                 );
-                let value = unwrap2!(field.default.clone(), "unreachable. constant fields have value");
-                expr.set(value, field.ty);
-                Ok(field.ty)
+                let field_ty = field.ty;
+                let value = unwrap2!(field.default, "unreachable. constant fields have value");
+                let (values, _) = self.find_const(value, want(field_ty))?.unwrap();
+                expr.set(values, field_ty);
+                Ok(field_ty)
             }
             &TypeInfo::Named(ty, _) => self.contextual_field(name, expr, ty),
             _ => err!("no contextual fields for type {ty:?} {}", self.program.log_type(ty)),
@@ -1316,10 +1318,12 @@ impl<'a, 'p> Compile<'a, 'p> {
                 if let Expr::Value { value, .. } = &s.0.expr {
                     let ty = s.0.ty;
                     debug_assert!(!ty.is_unknown());
-                    debug_assert_eq!(ty, known);
+                    // TODO: coerce_constant
+                    // debug_assert_eq!(ty, known, "{} {}", self.program.log_type(ty), self.program.log_type(known));
                     return Ok(Some((value.clone(), ty)));
                 }
-                ice!("constant with known type but unknown value.")
+                // TODO: this is allowed now that const fields are lazy.
+                // ice!("constant with known type but unknown value.")
             }
             if matches!(s.0.expr, Expr::Poison) {
                 // creating an overload set gets here I think -- Apr 27
@@ -3030,8 +3034,10 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
                 let ty = unwrap!(binding.ty.ty(), "field type not inferred");
                 let default = if let BigOption::Some(expr) = binding.default.clone() {
-                    // TODO: no clone
-                    Some(self.immediate_eval_expr(expr, ty)?)
+                    let v = self.unique_const(name);
+                    self.program.pool.put_constant(v, expr, LazyType::Finished(ty));
+                    // TODO: no clone // self.immediate_eval_expr(expr, ty)?
+                    Some(v)
                 } else {
                     None
                 };
@@ -3039,6 +3045,17 @@ impl<'a, 'p> Compile<'a, 'p> {
             })
             .collect();
         self.program.make_struct(parts.into_iter(), false)
+    }
+    
+    fn unique_const(&mut self, name: Ident<'p>) -> Var<'p> {
+        // TODO: expose a function for this!
+        self.program.pool.dup_var(Var {
+            kind: VarType::Const,
+            name,
+            id: 0,
+            scope: ScopeId::from_index(0),
+            block: 0,
+        })
     }
 
     fn set_deref(&mut self, full_stmt: &mut FatStmt<'p>) -> Res<'p, ()> {
@@ -3656,16 +3673,23 @@ impl<'a, 'p> Compile<'a, 'p> {
                     }
 
                     // If they're missing some, check for default values.
+                    let mut constants = 0;
                     if pattern.bindings.len() != fields.len() {
                         for (i, field) in fields.iter().enumerate() {
                             if names.contains(&field.name) {
                                 continue;
                             }
-                            let BigOption::Some(value) = field.default.clone() else {
+                            if field.kind == VarType::Const {
+                                constants += 1;
+                                continue;
+                            }
+                            let BigOption::Some(value) = field.default else {
                                 err!("Missing required field {}", self.program.pool.get(field.name));
                             };
-
+                            
+                            let (value, _) = self.find_const(value, want(field.ty))?.unwrap();
                             let expr = FatExpr::synthetic_ty(Expr::Value { value, coerced: false }, pattern.loc, field.ty);
+                            
                             // TODO: HACK. emit_bc expects them in order
                             pattern.bindings.insert(
                                 i,
@@ -3679,7 +3703,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         }
                     }
 
-                    debug_assert_eq!(pattern.bindings.len(), fields.len());
+                    debug_assert_eq!(pattern.bindings.len() + constants, fields.len());
 
                     requested
                 }

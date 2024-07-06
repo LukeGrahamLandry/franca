@@ -3,7 +3,7 @@
 use std::mem;
 use std::ptr::{slice_from_raw_parts, slice_from_raw_parts_mut};
 
-use crate::ast::{Program, TypeInfo, Var};
+use crate::ast::{Program, TypeInfo, Var, VarType};
 use crate::emit_bc::ResultLoc;
 use crate::self_hosted::Ident;
 use crate::unwrap;
@@ -292,7 +292,7 @@ pub fn deconstruct_values(
     let info = program.get_info(ty);
     let size = info.stride_bytes as usize;
 
-    debug_assert_eq!(bytes.i % info.align_bytes as usize, 0);
+    debug_assert_eq!(bytes.i % info.align_bytes as usize, 0, "{bytes:?}");
     debug_assert!(
         size <= bytes.bytes.len() - bytes.i,
         "deconstruct_values of {} wants {size} bytes but found {bytes:?}",
@@ -357,6 +357,10 @@ pub fn deconstruct_values(
             let size = program.get_info(ty).stride_bytes;
             let start = bytes.i;
             for t in fields {
+                if t.kind == VarType::Const {
+                    // :const_field_fix
+                    continue;
+                }
                 assert!(prev <= t.byte_offset);
                 bytes.i = t.byte_offset;
                 deconstruct_values(program, t.ty, bytes, out, offsets)?;

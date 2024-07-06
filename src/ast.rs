@@ -73,6 +73,7 @@ pub enum TypeInfo<'p> {
         fields: Vec<Field<'p>>,
         layout_done: bool,
         is_tuple: bool,
+        const_field_count: u16,
     },
     // What rust calls an enum
     Tagged {
@@ -125,7 +126,7 @@ impl TypeMeta {
 pub struct Field<'p> {
     pub name: Ident<'p>,
     pub ty: TypeId,
-    pub default: BigOption<Values>,
+    pub default: BigOption<Var<'p>>,
     pub byte_offset: usize,
     pub kind: VarType,
 }
@@ -962,10 +963,11 @@ impl<'p> Program<'p> {
 
     pub(crate) fn make_struct(
         &self,
-        parts: impl Iterator<Item = Res<'p, (TypeId, Ident<'p>, Option<Values>, VarType)>>,
+        parts: impl Iterator<Item = Res<'p, (TypeId, Ident<'p>, Option<Var<'p>>, VarType)>>,
         is_tuple: bool,
     ) -> Res<'p, TypeInfo<'p>> {
         let mut fields = vec![];
+        let mut const_field_count = 0;
         for p in parts {
             let (ty, name, default, kind) = p?;
             fields.push(Field {
@@ -975,12 +977,16 @@ impl<'p> Program<'p> {
                 byte_offset: 99999999999,
                 kind,
             });
+            if kind == VarType::Const {
+                const_field_count += 1;
+            }
         }
 
         Ok(TypeInfo::Struct {
             fields,
             layout_done: false,
             is_tuple,
+            const_field_count,
         })
     }
 
@@ -1000,6 +1006,9 @@ impl<'p> Program<'p> {
             TypeInfo::Struct { fields, .. } => {
                 // TODO: no clone
                 for f in fields.clone() {
+                    if f.kind == VarType::Const {
+                        continue;
+                    }
                     self.finish_layout_deep(f.ty)?
                 }
             }
@@ -1031,6 +1040,7 @@ impl<'p> Program<'p> {
             fields,
             layout_done,
             is_tuple,
+            ..
         } = &self[ty]
         else {
             return Ok(());
@@ -1042,11 +1052,20 @@ impl<'p> Program<'p> {
 
         let mut fields = fields.clone();
         for f in &fields {
+            if f.kind == VarType::Const {
+                continue;
+            }
             self.finish_layout(f.ty)?;
         }
 
         let mut bytes = 0;
+        let mut const_field_count = 0;
         for p in &mut fields {
+            if p.kind == VarType::Const {
+                const_field_count += 1;
+                continue;
+            }
+
             let info = self.get_info(p.ty);
             let inv_pad = bytes % info.align_bytes as usize;
             if inv_pad != 0 {
@@ -1063,6 +1082,7 @@ impl<'p> Program<'p> {
             fields,
             layout_done: true,
             is_tuple,
+            const_field_count,
         };
         self.types[ty.as_index()] = info.clone();
         self.type_lookup.insert(info, ty); // TODO: don't always intern_type
@@ -1101,8 +1121,14 @@ impl<'p> Program<'p> {
 
             TypeInfo::Unit => return None,
             TypeInfo::Fn(_) | TypeInfo::Label(_) => Prim::I32,
-            TypeInfo::Struct { ref fields, .. } => {
-                if fields.len() == 1 && self.slot_count(fields[0].ty) == 1 {
+            TypeInfo::Struct {
+                ref fields,
+                const_field_count,
+                ..
+            } => {
+                // :const_field_fix
+                // TODO: don't assume the non-const field is first. but also for now, parser doesn't allow const field first. -- Jul 6
+                if (fields.len() - const_field_count as usize) == 1 && self.slot_count(fields[0].ty) == 1 {
                     return self.prim(fields[0].ty);
                 }
                 return None;
@@ -1278,7 +1304,11 @@ impl<'p> Program<'p> {
     // TODO: return prims?
     pub(crate) fn flat_tuple_types(&self, ty: TypeId) -> Vec<TypeId> {
         match &self[ty] {
-            TypeInfo::Struct { fields, .. } => fields.iter().flat_map(|f| self.flat_tuple_types(f.ty)).collect(),
+            TypeInfo::Struct { fields, .. } => fields
+                .iter()
+                .filter(|f| f.kind != VarType::Const)
+                .flat_map(|f| self.flat_tuple_types(f.ty))
+                .collect(),
             &TypeInfo::Enum { raw: ty, .. } | &TypeInfo::Named(ty, _) => self.flat_tuple_types(ty),
             // TODO: this is sketchy
             TypeInfo::Tagged { cases, .. } => {
@@ -1337,6 +1367,9 @@ impl<'p> Program<'p> {
                 let mut bytes = 0;
 
                 for arg in fields {
+                    if arg.kind == VarType::Const {
+                        continue;
+                    }
                     let info = self.get_info(arg.ty);
                     align = align.max(info.align_bytes);
                     debug_assert_eq!(arg.byte_offset % info.align_bytes as usize, 0);
