@@ -5,8 +5,8 @@ use crate::unwrap2;
 use libc::c_void;
 
 use crate::ast::{
-    garbage_loc, CallConv, Expr, FatExpr, FatStmt, Flag, FnFlag, FnType, Func, FuncId, IntTypeInfo, LazyType, OverloadSetId, Pattern, Program,
-    ScopeId, TargetArch, TypeId, TypeInfo, TypeMeta, WalkAst,
+    garbage_loc, CallConv, Expr, FatExpr, FatStmt, Flag, FnFlag, FnType, Func, FuncId, IntTypeInfo, LazyType, Pattern, Program, ScopeId, TargetArch,
+    TypeId, TypeInfo, TypeMeta, WalkAst,
 };
 use crate::bc::{BakedVar, BakedVarId, FnBody, PrimSig, Values};
 use crate::compiler::{Compile, CompileError, ExecStyle, Res, Unquote, EXPECT_ERR_DEPTH};
@@ -20,7 +20,7 @@ use std::fmt::{Debug, Write};
 use std::mem::{self, transmute};
 use std::ops::{FromResidual, Try};
 use std::path::PathBuf;
-use std::ptr::{addr_of, null, slice_from_raw_parts, slice_from_raw_parts_mut};
+use std::ptr::{null, slice_from_raw_parts, slice_from_raw_parts_mut};
 use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 
@@ -886,19 +886,26 @@ extern "C-unwind" fn namespace_macro<'p>(compile: &mut Compile<'_, 'p>, mut bloc
     compile.as_literal(s, loc).unwrap()
 }
 
-pub extern "C-unwind" fn tagged_macro<'p>(compile: &mut Compile<'_, 'p>, mut cases: FatExpr<'p>) -> FatExpr<'p> {
+pub extern "C-unwind" fn tagged_macro<'p>(compile: &mut Compile<'_, 'p>, mut cases_expr: FatExpr<'p>) -> FatExpr<'p> {
     hope(|| {
-        if let Expr::StructLiteralP(pattern) = &mut cases.expr {
+        if let Expr::StructLiteralP(pattern) = &mut cases_expr.expr {
             let mut tag_fields = vec![];
+            let mut cases = vec![];
             for (i, b) in pattern.bindings.iter_mut().enumerate() {
-                if b.default.is_none() && matches!(b.ty, LazyType::Infer) {
+                // TODO: allow as default so you can use .Name like you can with void?
+                //       then need to store default in TypeInfo::Tagged as well. -- Jul 5
+                assert!(b.default.is_none(), "dont use = with @tagged");
+                if matches!(b.ty, LazyType::Infer) {
                     // @tagged(s: i64, n) is valid and infers n as void.
                     b.ty = LazyType::Finished(TypeId::unit);
+                } else {
+                    assert!(compile.infer_binding_progress(b)?, "failed to infer @tagged type");
                 }
-                tag_fields.push((b.name().unwrap(), Values::one(i as i64))); // :tag_enums_are_sequential
+                let name = b.name().unwrap();
+                tag_fields.push((name, Values::one(i as i64))); // :tag_enums_are_sequential
+                let ty = unwrap!(b.ty.ty(), "ICE: field type not inferred");
+                cases.push((name, ty))
             }
-            let ty = compile.struct_type(pattern)?;
-            let TypeInfo::Struct { fields, .. } = ty else { unreachable!() };
 
             let tag = TypeInfo::Enum {
                 raw: TypeId::i64(),
@@ -907,21 +914,18 @@ pub extern "C-unwind" fn tagged_macro<'p>(compile: &mut Compile<'_, 'p>, mut cas
             };
             let tag = compile.program.intern_type(tag);
 
-            let ty = TypeInfo::Tagged {
-                cases: fields.into_iter().map(|f| (f.name, f.ty)).collect(),
-                tag,
-            };
+            let ty = TypeInfo::Tagged { cases, tag };
             let ty = compile.program.intern_type(ty);
 
-            compile.set_literal(&mut cases, ty)?;
+            compile.set_literal(&mut cases_expr, ty)?;
         } else {
-            err!("expected map literal: .{{ name: Type, ... }} but found {:?}", cases);
+            err!("@tagged expected map literal like `(name: Type, ...)` but found {:?}", cases_expr);
         }
         Ok(())
     });
     return_from_ffi(compile);
 
-    cases
+    cases_expr
 }
 
 pub extern "C-unwind" fn struct_macro<'p>(compile: &mut Compile<'_, 'p>, mut fields: FatExpr<'p>) -> FatExpr<'p> {

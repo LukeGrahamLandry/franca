@@ -166,7 +166,7 @@ fn emit_relocatable_constant_body(
         });
         (fn Struct(f) => {
             // Just do all the fields.
-            each f.fields.items() { f | 
+            each f.fields { f | 
                 info := c.get_info(f.ty);
                 @assert_eq(info.stride_bytes.zext().mod(8), 0, "TODO: non-8-aligned fields");
                 v := value.bytes().slice(f.byte_offset, f.byte_offset + info.stride_bytes.zext());
@@ -289,3 +289,107 @@ fn to_value(bytes: Slice(u8)) Values = {
 fn log_type(c: CompilerRs, ty: Type) Str = {
     {c.vtable.log_type}(c.cast(), ty)
 }
+
+////////////////////////
+/// Splitting Values /// 
+// - TODO: zero_padding can go in this section too if I still want it. 
+
+/*
+/// Take some opaque bytes and split them into ints. So (u8, u8) becomes a vec of two i64 but u16 becomes just one.
+pub fn deconstruct_values(
+    program: &Program,
+    ty: TypeId,
+    bytes: &mut ReadBytes,
+    out: &mut Vec<i64>,
+    offsets: &mut Option<&mut Vec<(Prim, u16)>>, // this is stupid but how else do you call it in a loop??
+) -> Res<'static, ()> {
+    let info = program.get_info(ty);
+    let size = info.stride_bytes as usize;
+
+    debug_assert_eq!(bytes.i % info.align_bytes as usize, 0);
+    debug_assert!(
+        size <= bytes.bytes.len() - bytes.i,
+        "deconstruct_values of {} wants {size} bytes but found {bytes:?}",
+        program.log_type(ty)
+    );
+    let ty = program.raw_type(ty);
+    match &program[ty] {
+        TypeInfo::Placeholder => err!("Unfinished type {ty:?}",),
+        TypeInfo::Never => err!("invalid type",),
+        TypeInfo::F64 => {
+            let offset = bytes.i;
+            out.push(unwrap!(bytes.next_i64(), ""));
+            if let Some(offsets) = offsets {
+                offsets.push((Prim::F64, offset as u16));
+            }
+        }
+        TypeInfo::FnPtr { .. } | TypeInfo::Ptr(_) | TypeInfo::VoidPtr => {
+            let offset = bytes.i;
+            out.push(unwrap!(bytes.next_i64(), ""));
+            if let Some(offsets) = offsets {
+                offsets.push((Prim::I64, offset as u16));
+            }
+        }
+        TypeInfo::F32 => {
+            let offset = bytes.i;
+            out.push(unwrap!(bytes.next_u32(), "") as i64);
+            if let Some(offsets) = offsets {
+                offsets.push((Prim::F32, offset as u16));
+            }
+        }
+        TypeInfo::Int(_) => {
+            let offset = bytes.i;
+            let (value, prim) = match program.get_info(ty).stride_bytes {
+                1 => (unwrap!(bytes.next_u8(), "") as i64, Prim::I8),
+                2 => (unwrap!(bytes.next_u16(), "") as i64, Prim::I16),
+                4 => (unwrap!(bytes.next_u32(), "") as i64, Prim::I32),
+                8 => (unwrap!(bytes.next_i64(), ""), Prim::I64),
+                n => todo!("bad int stride {n}"),
+            };
+            out.push(value);
+            if let Some(offsets) = offsets {
+                offsets.push((prim, offset as u16));
+            }
+        }
+        TypeInfo::Bool => {
+            let offset = bytes.i;
+            out.push(unwrap!(bytes.next_u8(), "") as i64);
+            if let Some(offsets) = offsets {
+                offsets.push((Prim::I8, offset as u16));
+            }
+        }
+        &TypeInfo::Array { inner, len } => {
+            let inner_align = program.get_info(inner).align_bytes;
+            for _ in 0..len {
+                debug_assert_eq!(bytes.i % inner_align as usize, 0);
+                deconstruct_values(program, inner, bytes, out, offsets)?;
+            }
+        }
+        TypeInfo::Struct { fields, layout_done, .. } => {
+            assert!(*layout_done);
+            let mut prev = 0;
+            let size = program.get_info(ty).stride_bytes;
+            let start = bytes.i;
+            for t in fields {
+                assert!(prev <= t.byte_offset);
+                bytes.i = t.byte_offset;
+                deconstruct_values(program, t.ty, bytes, out, offsets)?;
+                prev = t.byte_offset;
+            }
+            bytes.i = start + size as usize; // eat trailing stride padding
+        }
+        TypeInfo::Tagged { .. } => todo!("tagged {}", program.log_type(ty)),
+        &TypeInfo::Enum { raw, .. } => deconstruct_values(program, raw, bytes, out, offsets)?,
+        TypeInfo::Named(_, _) => unreachable!(),
+        TypeInfo::Unit => {}
+        TypeInfo::Fn(_) | TypeInfo::Label(_) => {
+            let offset = bytes.i;
+            out.push(unwrap!(bytes.next_u32(), "") as i64);
+            if let Some(offsets) = offsets {
+                offsets.push((Prim::I32, offset as u16));
+            }
+        }
+    }
+    Ok(())
+}
+*/

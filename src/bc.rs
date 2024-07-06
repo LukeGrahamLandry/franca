@@ -97,7 +97,7 @@ pub struct BasicBlock<'p> {
     pub incoming_jumps: u16,
     pub arg_slots: u16,
     pub clock: u16,
-    pub height: u16,
+    pub height: u16, // TODO: remove. unused.
 }
 
 // TODO: (maybe) instead of storing TypeId of vars, store size+align.

@@ -71,38 +71,51 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
                 continue :: local_return;
                 stmt: *FatStmt = stmts.index(i); 
                 i -= 1;
+                
+                expand_case_body :: fn(closure: *Func) void => {
+                    index := tag_value(enum_type, closure.name); // they're always sequential (TODO: assert on the enum type)
+                    (name, ty) := varients.get(index);
+                    assert(name.eq(closure.name), "ICE: bad enum index");
+                    
+                    if(is_ptr){|
+                        p: TypeInfo = (Ptr = ty);
+                        ty = intern_type(p); // TODO: should work to pass @as(TypeInfo) (Ptr = ty) directly
+                    };
+            
+                    // If they didn't say the argument type, we can fill it in based on the varient name. 
+                    // If they don't put an argument, just ignore the value. Have to set the type because it defaults to void. 
+                    bindings := closure.arg.bindings.items();
+                    if(bindings.len.eq(1)){|
+                        first := bindings[0]&;
+                        infer := first.ty&.is(.Infer);
+                        no_name := first.name&.is(.None); 
+                        if  infer.or(no_name) {|
+                            first.ty = (Finished = ty);
+                        };
+                    };
+                    case_access := 'arg_ptr.___';
+                    case_access.expr.FieldAccess.name = name;  // (3)
+                    tag := @{ tag_value(@[@literal(Type) enum_type], @[@literal(name)]) };
+                    if(is_ptr){|
+                        case_access = @{ @[case_access]& };
+                    };
+                    count = count.add(1);
+                    callable: FatExpr = (expr = (Closure = closure), loc = closure.loc, ty = UnknownType, done = false); 
+                    body = @{ @if(eq(tag_val, @[tag]), => @[callable](@[case_access]), => @[body]) };
+                };
+                
+                // This allows you to leave off the extra brackets! easy now that i delay hositing constants. which in hindsight was a change i made a long time ago. 
+                if stmt.stmt&.is(.DeclFunc) {|
+                    // TODO: warn if it looks like they're trying to add to an overload set? -- Jul 5
+                    f := stmt.stmt.DeclFunc;
+                    expand_case_body(f);
+                    stmt.stmt = .Noop;
+                };
+                
                 if stmt.stmt&.is(.Eval) {|  // (1)
                     handler_body := stmt.stmt.Eval&;
                     if handler_body.expr&.is(.Closure) {| 
-                        closure := handler_body.expr.Closure&;
-                        index := tag_value(enum_type, closure.name); // they're always sequential (TODO: assert on the enum type)
-                        (name, ty) := varients.get(index);
-                        assert(name.eq(closure.name), "ICE: bad enum index");
-                        
-                        if(is_ptr){|
-                            p: TypeInfo = (Ptr = ty);
-                            ty = intern_type(p); // TODO: should work to pass @as(TypeInfo) (Ptr = ty) directly
-                        };
-                
-                        // If they didn't say the argument type, we can fill it in based on the varient name. 
-                        // If they don't put an argument, just ignore the value. Have to set the type because it defaults to void. 
-                        bindings := closure.arg.bindings.items();
-                        if(bindings.len.eq(1)){|
-                            first := bindings[0]&;
-                            infer := first.ty&.is(.Infer);
-                            no_name := first.name&.is(.None); 
-                            if  infer.or(no_name) {|
-                                first.ty = (Finished = ty);
-                            };
-                        };
-                        case_access := 'arg_ptr.___';
-                        case_access.expr.FieldAccess.name = name;  // (3)
-                        tag := @{ tag_value(@[@literal(Type) enum_type], @[@literal(name)]) };
-                        if(is_ptr){|
-                            case_access = @{ @[case_access]& };
-                        };
-                        count = count.add(1);
-                        body = @{ @if(eq(tag_val, @[tag]), => @[handler_body[]](@[case_access]), => @[body]) };
+                        expand_case_body(handler_body.expr.Closure);
                     } {| // else
                         // TODO: better error message if its a call because they forgot a semi-colon. 
                         //debug_log_ast(handler_body[]);
@@ -118,6 +131,7 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
                         body = @{ @[action]() };
                         had_default = true;
                     };
+                    stmt.stmt = .Noop;
                 };
             };
             // TODO: check that the handlers are unique! this just checks that its the right number of them. 
@@ -394,13 +408,13 @@ fn tagged($Tagged: Type) void = {
     
     T :: Tagged.Tag();
     
-    
+    // :tag_is_always_i64
+    :: enum(T);
     fn tag(self: *Tagged) T #inline = self.tag_ptr()[];
     fn tag_ptr(self: *Tagged) *T #unsafe_noop_cast;  // SAFETY: The compiler puts the tag at the front of the struct. 
     
     fn is(self: *Tagged, check: T) bool #inline = self.tag().eq(check);
     
-    :: enum(T);
 }
 
 fn enum($T: Type) void = {
