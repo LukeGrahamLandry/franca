@@ -26,6 +26,7 @@ fn as(T: Type, expr: FatExpr) FatExpr = @{ @as(@[@literal(T)]) @[expr] };
 // TODO: should always inline the bodies, even if no captures? 
 #macro 
 fn match(arg: FatExpr, target: FatExpr) FatExpr = {
+    loc := arg.loc;
     stmts := target.expr.Block.body.items();
     arg = compile_ast(arg);
     enum_type := arg.ty;
@@ -135,16 +136,34 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
                 };
             };
             // TODO: check that the handlers are unique! this just checks that its the right number of them. 
-            if(count.ne(varients.len).and(not(had_default))) {|
-                print("warning: wrong number of @match cases (did you forget to wrap them in brackets?). ");
-                print("expected ");
-                print(varients.len);
-                print(" but found ");
-                println(count);
-            };
-            assert(not(had_default).or(count.lt(varients.len)), "@default but too many @match cases");
+            @ct_assert(!count.ne(varients.len).and(not(had_default)), loc, "wrong number of @match cases (did you forget to wrap them in brackets?)",);
+            @ct_assert(not(had_default).or(count.lt(varients.len)), loc, "@default but too many @match cases");
             body
         }]
+    }
+}
+
+fn ct_assert(arg: FatExpr) FatExpr #macro = {
+    assert(arg.expr&.is(.Tuple), "@assert___ expected multiple args");
+    parts := arg.expr.Tuple.items();
+    assert(parts.len >= 3, "not enough arguments");
+    cond := parts[0];
+    span := compile_ast(parts[1]);
+    if !(span.ty == Span) {|
+        compile_error("Expected type 'Span' for error location", span.loc);
+    };
+    
+    @{
+        if !@[cond]{ #cold |
+            out: List(u8) = list(temp());
+            @[if(parts.len == 3, => @{
+                out&.push_all(@[parts[2]]);
+            }, => @{()} )];
+            @[if(parts.len > 3, => {
+                format_into('out&', parts.rest(2), arg.loc)
+            }, => @{()} )];
+            compile_error(out.items(), @[span]);
+        };
     }
 }
 
@@ -208,7 +227,7 @@ fn switch(arg: FatExpr, handlers: FatExpr) FatExpr = {
                                 };
                                 
                             }{|
-                                panic("@default must be the last handler in @switch");
+                                compile_error("@default must be the last handler in @switch", stmt.loc);
                             };
                         }{|
                             if(name.eq(@symbol inclusive)) {|
@@ -219,10 +238,7 @@ fn switch(arg: FatExpr, handlers: FatExpr) FatExpr = {
                                 body = @{ @if(@[cond], =>@[action](), =>@[body]) };
                             }{|
                                 // TODO: try expanding the macro, maybe its a user added one and would create valid branches. 
-                                //n: Str = name.str(); // TODO: this broke when I started renumbering in bind_const_arg -- Apr 23. 
-                                // TODO: make concat less painful. 
-                                //println(n);
-                                panic("unhandled prefix in @switch");
+                                compile_error("unhandled prefix in @switch", stmt.loc);
                             };
                         };
                     };
@@ -309,13 +325,16 @@ fn assignment_operator(place: FatExpr, value: FatExpr, f: OverloadSet) FatExpr =
         // This type of macro can't return a stmt, so it has to be wrapped in a block. Maybe we should use the other kind once that exists. 
         @{ @[place] = @[@literal(f)](@[place], @[value]); }
     } {|
-        // TODO: nice report_compile_error api that lets you attatch the Span so you get useful error message rendering. 
-        assert(kind != .PrefixMacro, "TODO: support macro expansion in place expr");
+        if kind == .PrefixMacro {|
+            compile_error("TODO: support macro expansion in place expr", place.loc);
+        };
         is_deref := and kind == .SuffixMacro {()bool|
             name := place.expr.SuffixMacro.name;
             name.eq(@symbol(deref))
         };
-        assert(is_deref, "_= operator left hand side must be a place expr.");
+        if !is_deref {|
+            compile_error("_= operator left hand side must be a place expr.", place.loc);
+        };
         // we know the lhs is 'whatever[]', but we want to just access the pointer and add the deref later. 
         ptr_expr := place.expr.SuffixMacro.arg[];
         @{ ptr := @[ptr_expr]; ptr[] = @[@literal(f)](ptr[], @[value]); }
@@ -326,7 +345,7 @@ fn assignment_operator(place: FatExpr, value: FatExpr, f: OverloadSet) FatExpr =
 /// This version can be used when you just want sequential integers. 
 #macro #outputs(Type)
 fn enum(names: FatExpr) FatExpr = {
-    assert(names.expr&.is(.Tuple), "expected @enum(name1, name2, etc)"); // TODO: single element should be legal i guess. 
+    @ct_assert(names.expr&.is(.Tuple), names.loc, "expected @enum(name1, name2, etc)"); // TODO: single element should be legal i guess. 
 
     fn binding(name: Symbol, value: i64) Binding = {
         template := '(a = 0)';
@@ -340,19 +359,12 @@ fn enum(names: FatExpr) FatExpr = {
     cases: List(Binding) = list(ast_alloc());
     parts := names.expr.Tuple.items();
     enumerate(parts) {i, part|
-        // TODO: really need @default on match cause this is annoying. 
-        @switch(part[].expr&.tag()) {
-            @case(.GetNamed) => {
-                name := (@as(*Symbol) part.expr.GetNamed&)[];
-                bind := binding(name, i);
-                cases&.push(bind);
-            };
-            @case(.GetVar) => {
-                name: Symbol = part.expr.GetVar.name;
-                cases&.push(binding(name, i));
-            };
-            @default => panic("Expected symbol in @enum"); // TODO: this should work as not a closure
+        name := @switch(part[].expr&.tag()) {
+            @case(.GetNamed) => part.expr.GetNamed;
+            @case(.GetVar)   => part.expr.GetVar.name;
+            @default         => compile_error("Expected symbol in @enum", names.loc); // TODO: this should work as not a closure
         };
+        cases&.push(binding(name, i));
     };
 
     varients := '(a = 1)';
@@ -385,7 +397,7 @@ fn enum(names: FatExpr) FatExpr = {
 // because its a pain to make a constant one otherwise. 
 // NOTE: this doesn't make a constant one unless you explicitly use '::'.
 #macro fn array(elements: FatExpr) FatExpr = {
-    assert(elements.expr&.is(.Tuple), "Expected @array(a, b, c, d)");
+    @ct_assert(elements.expr&.is(.Tuple), elements.loc, "Expected @array(a, b, c, d)");
     parts := elements.expr.Tuple.items();
     len := parts.len;
     first := compile_ast(parts[0]);
@@ -434,6 +446,20 @@ fn enum($T: Type) void = {
         names :: @run get_enum_names(T); // :tag_enums_are_sequential
         out.push_all(names[self.ordinal()]);
     }
+    
+    fn from_raw(raw: i64) ?T = {
+        // Note: this relies on it being sequentual. 
+        if(raw.lt(0).or(raw >= T.enum_cases().len()), => .None) {|
+            value := bit_cast_unchecked(i64, T, raw);
+            (Some = value)
+        }
+    } 
+}
+
+fn enum_cases(T: Type) [] Ty(Ident, Values) = {
+    info := get_type_info(T);
+    assert(info&.is(.Enum), "expected enum type");
+    info.Enum.fields.items()
 }
 
 // :blessed: This is also a builtin_prefix_macro. It lets you disable code while bootstrapping up to having the type for FatExpr.
@@ -459,7 +485,7 @@ fn inline_for(container: FatExpr, body: FatExpr) FatExpr #macro = {
     
     actions: List(FatExpr) = list(ast_alloc());
     range(0, len) { i | 
-        actions&.push(@{ @[body](:: @[container].index(@[@literal i])) });
+        actions&.push(@{ @[body](:: (@[container].index(@[@literal i]))) });
     };
     container.expr = (Tuple = actions.rs());
     container.ty = UnknownType; 
@@ -469,6 +495,7 @@ fn inline_for(container: FatExpr, body: FatExpr) FatExpr #macro = {
 
 // TODO: this is kinda copy-paste from normal match. try to factor some stuff out? -- Jul 5
 fn inline_match(container: FatExpr, target: FatExpr) FatExpr #macro = {
+    loc := container.loc;
     container := compile_ast(@{ :: @[container] });
     
     stmts := target.expr.Block.body.items();
@@ -487,7 +514,7 @@ fn inline_match(container: FatExpr, target: FatExpr) FatExpr #macro = {
     };
     ptr_ty := *enum_type;
    
-    assert(info&.is(.Tagged), "@match expected argument type to be @tagged");
+    @ct_assert(info&.is(.Tagged), loc, "@match expected argument type to be @tagged");
     info := info.Tagged;
     tag_val := const_eval(i64)(tag_expr);
     
@@ -501,7 +528,7 @@ fn inline_match(container: FatExpr, target: FatExpr) FatExpr #macro = {
                     (fn Closure(closure) => {
                         index := tag_value(enum_type, closure.name); // they're always sequential
                         (name, ty) := varients.get(index);
-                        assert(name.eq(name), "ICE: bad enum index");
+                        @ct_assert(name == closure.name, handler_body.loc, "ICE: bad enum index");
                         if index != tag_val {|
                             continue();
                         };
@@ -532,20 +559,20 @@ fn inline_match(container: FatExpr, target: FatExpr) FatExpr #macro = {
                     });
                     (fn PrefixMacro(branch) => {
                         macro := branch.handler;
-                        assert(macro.expr&.is(.GetNamed), "expected @default");
+                        @ct_assert(macro.expr&.is(.GetNamed), macro.loc, "expected @default (TODO: allow GetVar?)");
                         name := macro.expr.GetNamed; 
                         arg := branch.arg;
                         action := branch.target[];
-                        assert(name.eq(@symbol default), "unhandled prefix in @inline_match");
+                        @ct_assert(name == @symbol default, macro.loc, "unhandled prefix in @inline_match");
                         return(@{ @[action]() });
                     });
-                    @default => panic("expected @default");
+                    @default => compile_error("expected @default", handler_body.loc);
                 };
             });
             @default => (); // TODO: warn
         };
     };
-    panic("inline_match not matched!")
+    compile_error("inline_match not matched!", loc)
 }
 
 /*

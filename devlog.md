@@ -1,3 +1,8 @@
+## Jul 6
+
+- flow result type through function literals + constants so you don't have to put type annotations on @match to use dot field of enum/tagged.
+- fix bad index when multiple constant args in #generic
+
 ## Jul 5
 
 - stopped hardcoding lib path

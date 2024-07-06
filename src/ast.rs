@@ -767,7 +767,7 @@ pub enum LazyType<'p> {
     Infer,
     PendingEval(FatExpr<'p>), // TODO: should probably box this since its often the others and want to be less chonky.
     Finished(TypeId),
-    Returning(TypeId), // kind hack. TODO: add to driver_api.fr
+    Returning(TypeId), // kind hack.
 }
 
 #[repr(C)]

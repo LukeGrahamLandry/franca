@@ -3513,7 +3513,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
                 self.infer_types_progress(&mut b.ty)?;
                 if is_generic {
-                    self.program[new_fid].arg.bindings[i].ty = b.ty.clone();
+                    self.program[new_fid].arg.bindings[i - removed_count].ty = b.ty.clone();
                 }
                 // bind_const_arg handles adding closure captures.
                 // since it needs to do a remap, it gives back the new argument names so we can adjust our bindings acordingly. dont have to deal with it above since there's only one.

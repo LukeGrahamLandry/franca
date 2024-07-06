@@ -278,8 +278,20 @@ fn Array($T: Type, $count: i64) Type = {
     Self
 }
 
+/*
+// TODO: this would be an easy start for traits. 
+fn resolve(e: FatExpr) FatExpr #macro = {
+    assert(e.expr&.is(.Closure), "@resolve expected function sig");
+    func := e.expr.Closure;
+    todo()
+}
+:: @resolve fn index(self: Self) *T => ();
+:: @resolve fn len(self: Self) i64  => ();
+*/
+
 // Note: Passing *Self and Self mean different things. Containers that are already logically a pointer may want both for convenience. 
 // TODO: trait bounds. fn index(Self) *T; fn len(Self) i64;
+// IMPORTANT: DO NOT impl this for a linked list! It expects fast random access to the collection!
 fn DeriveIndexable($Self: Type, $T: Type) void = {
     fn set(self: Self, i: i64, v: T) void #inline = {
         self[i] = v; 
@@ -341,16 +353,17 @@ fn DeriveIndexable($Self: Type, $T: Type) void = {
     }
     
     // TODO: add addr_eq/identical if that's really what you want but like... it never is I feel. 
-    // TODO: Something's fucked! doesn't work if not inlined!
-    // TODO: fast path if same pointer or is that creepy? 
-    #inline fn eq(lhs: Self, rhs: Self) bool = {
-        eq(lhs.len(), rhs.len()).and() { () bool |
-            i := 0;
-            while(fn()bool=>i.lt(len(lhs)).and(fn()bool=> lhs.get(i).eq(rhs.get(i)))) {| 
-                i = i.add(1); 
-            };
-            eq(i, lhs.len())
-        }
+    // TODO: for slices, if !contains_ptrs && !has_padding && no eq special overloads, just call some vectorized memcmp and skip a bunch of pointless code gen work. 
+    fn eq(lhs: Self, rhs: Self) bool = {
+        if(lhs.len != rhs.len, => return(false));
+        l_ptr := T.int_from_ptr(lhs.ptr);
+        r_ptr := T.int_from_ptr(rhs.ptr);
+        if(l_ptr == r_ptr, => return(true)); // TODO: is this too creepy? it means we might skip calling your eq overload. 
+        
+        range(0, lhs.len) { i |
+            if(!(lhs[i] == rhs[i]), => return(false));
+        };
+        true
     }
     
     /// Set all elements of the slice to 't'. 

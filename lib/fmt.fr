@@ -403,29 +403,26 @@ fn display(self: rawptr, out: *List(u8)) void =
 
 /// SAFETY: must not be cyclic!
 fn DeriveFmt($T: Type) void = {
-    info := T.get_type_info();
-    assert(info&.is(.Struct), "TODO: non-struct");
-    
     fn display(self: *T, out: *List(u8)) void = {
-        out.push_all("(");
-        prefix := "";
-        inline_for T.get_fields() { $f|
-            inner := T.int_from_ptr(self);
-            inner := inner + f[].byte_offset;
-            inner := (f[].ty).ptr_from_int(inner);
-            
-            // TODO: better error message if not defined. 
-            @fmt(out, "%% = %", prefix, :: f[].name.str(), inner[]);
-            prefix = ", ";
-        };
-        out.push_all(")");
+        @inline_match(@run T.get_type_info_ref()) {
+            // TODO: update inline_match to not need brackets! super confusing that its different. 
+            // TODO: have it put the $ there for you. currently even if you don't use the var it gets added as a runtime needed const and emitted. 
+            //       which is extra bad because my bake thing can't handle everything in a type info yet! -- Jul 6
+            (fn Struct($_) => {
+                out.push_all("(");
+                prefix := "";
+                inline_for T.get_fields() { $f | 
+                    inner := T.get_field_ptr(self, f);
+                    // TODO: better error message if not defined. 
+                    name :: f[].name.str();
+                    @fmt(out, "%% = %", prefix, name, inner);
+                    prefix = ", ";
+                };
+                out.push_all(")");
+            });
+            @default => panic("Unsupported type for DeriveFmt");
+        }
     }
-}
-
-// TODO: move to meta.fr
-fn get_fields(A: Type) Slice(Field) #fold = {
-    a := get_type_info(A); 
-    a.Struct.fields.items() 
 }
 
 fn display(i: *i64, out: *List(u8)) void = i[].display(out);
