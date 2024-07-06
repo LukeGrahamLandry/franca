@@ -9,7 +9,7 @@ use crate::ast::{
     TypeId, TypeInfo, TypeMeta, WalkAst,
 };
 use crate::bc::{BakedVar, BakedVarId, FnBody, PrimSig, Values};
-use crate::compiler::{Compile, CompileError, ExecStyle, Res, Unquote, EXPECT_ERR_DEPTH};
+use crate::compiler::{want, Compile, CompileError, ExecStyle, Res, ResultType, Unquote, EXPECT_ERR_DEPTH};
 use crate::emit_bc::prim_sig;
 use crate::ffi::InterpSend;
 use crate::logging::{unwrap, PoolLog};
@@ -608,7 +608,15 @@ extern "C-unwind" fn tag_value<'p>(comp: &mut Compile<'_, 'p>, enum_ty: TypeId, 
         ))
     });
     let index = cases.iter().position(|f| f.0 == name);
-    let index = hope(|| Ok(unwrap!(index, "bad case name id={} {}", name.0, comp.program.pool.get(name))));
+    let index = hope(|| {
+        Ok(unwrap!(
+            index,
+            "bad case name id={} {}. expected {:?}",
+            name.0,
+            comp.program.pool.get(name),
+            cases.iter().map(|f| comp.program.pool.get(f.0)).collect::<Vec<_>>(),
+        ))
+    });
     index as i64
 }
 
@@ -775,7 +783,7 @@ extern "C-unwind" fn get_type_info_raw<'p>(compile: &Compile<'_, 'p>, ty: TypeId
 
 extern "C-unwind" fn const_eval_any<'p>(compile: &mut Compile<'_, 'p>, mut expr: FatExpr<'p>, ty: TypeId, addr: usize) {
     // TODO: immediate_eval_expr doesn't do a type check. -- Apr 27
-    compile.compile_expr(&mut expr, Some(ty)).unwrap();
+    compile.compile_expr(&mut expr, want(ty)).unwrap();
 
     match compile.immediate_eval_expr(expr, ty) {
         Ok(val) => {
@@ -791,7 +799,7 @@ extern "C-unwind" fn const_eval_any<'p>(compile: &mut Compile<'_, 'p>, mut expr:
 
 extern "C-unwind" fn compile_ast<'p>(compile: &mut Compile<'_, 'p>, mut expr: FatExpr<'p>) -> FatExpr<'p> {
     compile.last_loc = Some(expr.loc);
-    let res = compile.compile_expr(&mut expr, None);
+    let res = compile.compile_expr(&mut expr, ResultType::None);
     hopec(compile, || res);
     return_from_ffi(compile);
     expr
@@ -840,7 +848,7 @@ extern "C-unwind" fn get_type_int<'p>(compile: &mut Compile<'_, 'p>, mut arg: Fa
             }
             Expr::Value { .. } => err!("todo",),
             _ => {
-                let ty = compile.compile_expr(&mut arg, None)?;
+                let ty = compile.compile_expr(&mut arg, ResultType::None)?;
                 let ty = compile.program.raw_type(ty);
                 if let TypeInfo::Int(int) = compile.program[ty] {
                     return_from_ffi(compile);
@@ -875,7 +883,7 @@ extern "C-unwind" fn namespace_macro<'p>(compile: &mut Compile<'_, 'p>, mut bloc
         ret: TypeId::unit,
         arity: 1,
     }));
-    let found_ty = compile.compile_expr(&mut block, Some(ty)).unwrap();
+    let found_ty = compile.compile_expr(&mut block, want(ty)).unwrap();
     let id = block.as_const().unwrap().unwrap_func_id();
     debug_assert_eq!(ty, found_ty);
     compile.compile(id, ExecStyle::Jit).unwrap();
@@ -977,7 +985,7 @@ extern "C-unwind" fn assert_compile_error_macro<'p>(compile: &mut Compile<'_, 'p
         unsafe {
             EXPECT_ERR_DEPTH.fetch_add(1, Ordering::SeqCst);
         }
-        let res = compile.compile_expr(&mut arg, None);
+        let res = compile.compile_expr(&mut arg, ResultType::None);
         unsafe {
             EXPECT_ERR_DEPTH.fetch_sub(1, Ordering::SeqCst);
         }
@@ -998,7 +1006,7 @@ pub extern "C-unwind" fn type_macro<'p>(compile: &mut Compile<'_, 'p>, mut arg: 
     hope(|| {
         // Note: this does not evaluate the expression.
         // TODO: warning if it has side effects. especially if it does const stuff.
-        let ty = compile.compile_expr(&mut arg, None)?;
+        let ty = compile.compile_expr(&mut arg, ResultType::None)?;
         compile.set_literal(&mut arg, ty)?;
         Ok(())
     });

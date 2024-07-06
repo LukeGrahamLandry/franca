@@ -2,7 +2,7 @@ use crate::self_hosted::Span;
 
 use crate::ast::{Expr, FatExpr, FnFlag, FuncId, FuncImpl, LazyType, OverloadOption, OverloadSet, OverloadSetId, Pattern, TypeId, TypeInfo, VarType};
 use crate::bc::{from_values, Values};
-use crate::compiler::{Compile, ExecStyle, Res};
+use crate::compiler::{Compile, ExecStyle, Res, ResultType};
 use crate::logging::PoolLog;
 use crate::{assert, assert_eq, err, unwrap, unwrap2};
 use std::mem;
@@ -11,7 +11,7 @@ use std::ops::DerefMut;
 use crate::export_ffi::{BigOption, BigResult::*};
 
 impl<'a, 'p> Compile<'a, 'p> {
-    fn maybe_direct_fn_value(&mut self, f_ty: TypeId, value: &Values, arg: &mut FatExpr<'p>, ret: Option<TypeId>) -> Res<'p, Option<FuncId>> {
+    fn maybe_direct_fn_value(&mut self, f_ty: TypeId, value: &Values, arg: &mut FatExpr<'p>, ret: ResultType) -> Res<'p, Option<FuncId>> {
         assert!(!f_ty.is_unknown());
         Ok(if f_ty == TypeId::overload_set {
             let i: OverloadSetId = from_values(self.program, value.clone())?;
@@ -30,8 +30,8 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     // This can return None on valid callables: it might be a FnPtr or a Label (return).
-    pub fn maybe_direct_fn(&mut self, f: &mut FatExpr<'p>, arg: &mut FatExpr<'p>, ret: Option<TypeId>) -> Res<'p, Option<FuncId>> {
-        if let Some(ty) = ret {
+    pub fn maybe_direct_fn(&mut self, f: &mut FatExpr<'p>, arg: &mut FatExpr<'p>, ret: ResultType) -> Res<'p, Option<FuncId>> {
+        if let Some(ty) = ret.specific() {
             assert!(!ty.is_unknown());
         }
 
@@ -43,7 +43,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                     // TODO: you might not want to force eval the constant here.
                     //       maybe we're in type_of and only want to take it if its an easy case, and igore errors,
                     //       but once you start evaling, you can't just stop on an error cause stuff will have changed. -- Jul 1
-                    if let Some((value, ty)) = self.find_const(i)? {
+                    // TODO: pass if you have whole requested type? -- Jul 6
+                    if let Some((value, ty)) = self.find_const(i, ResultType::None)? {
                         f.ty = ty;
                         let res = self.maybe_direct_fn_value(ty, &value, arg, ret);
                         f.expr = Expr::Value { value, coerced: false };
@@ -59,8 +60,8 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             Expr::Closure(_) => {
                 // This doesn't come up super often. It means you called a closure inline where you declared it for some reason.
-                let arg_ty = self.compile_expr(arg, ret)?;
-                let id = self.promote_closure(f, Some(arg_ty), ret)?;
+                let arg_ty = self.compile_expr(arg, ret.into())?;
+                let id = self.promote_closure(f, Some(arg_ty), ret.specific())?;
                 self.adjust_call(arg, id)?;
                 Some(id)
             }
@@ -71,7 +72,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         })
     }
 
-    pub fn resolve_in_overload_set(&mut self, arg: &mut FatExpr<'p>, requested_ret: Option<TypeId>, i: OverloadSetId) -> Res<'p, FuncId> {
+    pub fn resolve_in_overload_set(&mut self, arg: &mut FatExpr<'p>, requested_ret: ResultType, i: OverloadSetId) -> Res<'p, FuncId> {
         let name = self.program[i].name;
         // This might be a bad idea. its really fucked up if you accidently create an overload with the same types but different arity.
         // should at least have an optional post-check for that.
@@ -97,7 +98,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         let original = overloads.clone();
 
-        if let Some(req) = requested_ret {
+        if let Some(req) = requested_ret.specific() {
             overloads
                 .ready
                 .retain(|check| check.ret.is_none() || (req == check.ret.unwrap() || check.ret.unwrap().is_never()));
@@ -132,8 +133,11 @@ impl<'a, 'p> Compile<'a, 'p> {
                             "for fn {}({arg_ty:?}={}) {}={:?};",
                             s.program.pool.get(name),
                             s.program.log_type(arg_ty),
-                            requested_ret.map(|ret| format!("{ret:?}")).unwrap_or_default(),
-                            requested_ret.map(|t| s.program.log_type(t)).unwrap_or_else(|| "??".to_string())
+                            requested_ret.specific().map(|ret| format!("{ret:?}")).unwrap_or_default(),
+                            requested_ret
+                                .specific()
+                                .map(|t| s.program.log_type(t))
+                                .unwrap_or_else(|| "??".to_string())
                         )
                     };
 
@@ -254,7 +258,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             .collect::<Vec<_>>()
             .join("");
 
-        if overloads.ready.len() > 1 && requested_ret.is_none() {
+        if overloads.ready.len() > 1 && requested_ret.specific().is_none() {
             err!(
                 "ambigous overload. no inferred result type. try adding a hint. \n{msg}\n{:?}...",
                 overloads
@@ -270,7 +274,10 @@ impl<'a, 'p> Compile<'a, 'p> {
             "ambigous overload for fn {}({}) -> {}\n found args\n{}",
             self.program.pool.get(name),
             self.program.log_type(arg.ty),
-            requested_ret.map(|t| self.program.log_type(t)).unwrap_or_else(|| String::from("???")),
+            requested_ret
+                .specific()
+                .map(|t| self.program.log_type(t))
+                .unwrap_or_else(|| String::from("???")),
             msg
         )
     }

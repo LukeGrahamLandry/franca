@@ -323,7 +323,7 @@ pub trait WalkAst<'p> {
     fn ty(&mut self, ty: &mut LazyType<'p>) {
         self.walk_ty(ty);
         match ty {
-            LazyType::EvilUnit | LazyType::Infer | LazyType::Finished(_) => {}
+            LazyType::EvilUnit | LazyType::Infer | LazyType::Finished(_) | LazyType::Returning(_) => {}
             LazyType::PendingEval(arg) => {
                 self.expr(arg);
             }
@@ -767,6 +767,7 @@ pub enum LazyType<'p> {
     Infer,
     PendingEval(FatExpr<'p>), // TODO: should probably box this since its often the others and want to be less chonky.
     Finished(TypeId),
+    Returning(TypeId), // kind hack. TODO: add to driver_api.fr
 }
 
 #[repr(C)]

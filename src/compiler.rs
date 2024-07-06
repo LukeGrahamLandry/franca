@@ -208,7 +208,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     loc: expr.loc,
                 });
                 expr.ty = ty;
-                self.compile_expr(expr, Some(ty))
+                self.compile_expr(expr, ty.want())
             }
             TypeInfo::Struct { fields, .. } => {
                 // TODO: deny leading dot with inferred type because that only makes sense for enums so we can give a better error message here.
@@ -877,7 +877,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     // This is a normal function call. No comptime args, no runtime captures.
     fn emit_runtime_call(&mut self, f: FuncId, arg_expr: &mut FatExpr<'p>) -> Res<'p, TypeId> {
         let arg_ty = unwrap2!(self.program[f].finished_arg, "fn arg");
-        self.compile_expr(arg_expr, Some(arg_ty))?;
+        self.compile_expr(arg_expr, arg_ty.want())?;
 
         // self.last_loc = Some(expr.loc); // TODO: have a stack so i dont have to keep doing this.
         let func = &self.program[f];
@@ -1069,7 +1069,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 if matches!(expr.expr, Expr::Closure(_) | Expr::WipFunc(_)) {
                     err!("you probably don't want to discard an anonymous function.",);
                 }
-                self.compile_expr(expr, None)?;
+                self.compile_expr(expr, ResultType::None)?;
 
                 // Don't match on res being const because the function might still have side effects
                 if expr.is_raw_unit() {
@@ -1109,7 +1109,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     // We're not dealing with args of an inlined function. this is a destructuring in the user code. 
                     
                     // TODO: if all known, pass type hint? 
-                    let ty = self.compile_expr(value, None)?;
+                    let ty = self.compile_expr(value, ResultType::None)?;
                     
                     let TypeInfo::Struct { fields, .. } = self.program[ty].clone() else { // TODO: no clone
                         err!("destructure must be tuple",)
@@ -1156,7 +1156,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         if value.is_raw_unit() {
                             stmt.stmt = Stmt::Noop; // not required. just want less stuff around when debugging
                         } else {
-                            self.compile_expr(value, Some(ty))?;
+                            self.compile_expr(value, ty.want())?;
                         }
 
                         return Ok(());
@@ -1199,7 +1199,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // If we changed stuff, make sure not to give the backend false type info.
                 if removed > 0 && !value.ty.is_unknown() {
                     value.ty = TypeId::unknown;
-                    self.compile_expr(value, None)?;
+                    self.compile_expr(value, ResultType::None)?;
                 }
             }
         }
@@ -1248,7 +1248,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             // TODO: distinguish between overload sets that you add to and those that you re-export
             debug_assert!(!self.program[id].get_flag(ResolvedSign));
             debug_assert!(!self.program[id].get_flag(ResolvedBody));
-            if let Some(overloads) = self.find_const(var)? {
+            if let Some(overloads) = self.find_const(var, TypeId::overload_set.want())? {
                 assert_eq!(overloads.1, TypeId::overload_set);
                 let i: OverloadSetId = from_values(self.program, overloads.0)?;
                 let os = &mut self.program[i];
@@ -1309,7 +1309,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(out)
     }
 
-    pub fn find_const(&mut self, name: Var<'p>) -> Res<'p, Option<(Values, TypeId)>> {
+    // Passing in the requested type here feels a bit weird, but I think it will make anon-functions less painful. 
+    pub fn find_const(&mut self, name: Var<'p>, requested: ResultType) -> Res<'p, Option<(Values, TypeId)>> {
         if let BigOption::Some(s) = self.program.pool.get_constant(name) {
             if let Some(known) = s.1.ty() {
                 if let Expr::Value { value, .. } = &s.0.expr {
@@ -1331,15 +1332,27 @@ impl<'a, 'p> Compile<'a, 'p> {
             // println!("- {} {} {}", name.log(self.program.pool), ty.log(self.program.pool), val.log(self.program.pool));
             self.program.pool.get_constant(name).unwrap().1 = LazyType::Infer;
             self.infer_types_progress(&mut ty)?;
+            // TODO: this is kinda hacky and only needed for requested_type_through_match, but the basic case. 
+            //       for the actually useful thing using @match, you just need the ResultType::Returning in compile_expr(Call | Closure) -- Jul 6
+            if matches!(ty, LazyType::Infer) {
+                match requested {
+                    ResultType::Specific(_t) => {
+                        // TODO: this should work but doesn't -- Jul 6
+                        // ty = LazyType::Finished(_t);
+                    }
+                    ResultType::Returning(ret) => ty = LazyType::Returning(ret),
+                    _ => {}
+                }
+            }
             self.decl_const(name, &mut ty, &mut val)?;
             self.pop_state(state);
-            return self.find_const(name);
+            return self.find_const(name, requested);
         }
         Ok(None)
     }
 
     pub fn find_const_type(&mut self, var: Var<'p>) -> Res<'p, Option<TypeId>> {
-        Ok(self.find_const(var)?.map(|(_, ty)| ty))
+        Ok(self.find_const(var, ResultType::None)?.map(|(_, ty)| ty))
     }
 
     #[track_caller]
@@ -1386,7 +1399,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
     }
 
-    pub fn compile_expr(&mut self, expr: &mut FatExpr<'p>, requested: Option<TypeId>) -> Res<'p, TypeId> {
+    pub fn compile_expr(&mut self, expr: &mut FatExpr<'p>, requested: ResultType) -> Res<'p, TypeId> {
         // println!("{}", expr.log(self.program.pool));
         let marker = 0;
         unsafe {
@@ -1413,7 +1426,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
         // TODO: its kinda sad to do this every time. better to keep track of pending ones and somehow have safe points you know you're probably not in the middle of mutual recursion.
         self.program.finish_layout_deep(res)?;
-        if let Some(requested) = requested {
+        if let Some(requested) = requested.specific() {
             debug_assert!(requested.is_valid());
             self.program.finish_layout_deep(requested)?;
             // TODO: its possible to write code that gets here without being caught first.
@@ -1437,7 +1450,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         *coerced = true;
                         if let Some(replacement) = self.coerce_constant(value, res, requested, expr.loc)? {
                             *expr = replacement;
-                            return self.compile_expr(expr, Some(requested));
+                            return self.compile_expr(expr, requested.want());
                         }
                         expr.ty = requested;
                     }
@@ -1459,8 +1472,15 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(res)
     }
 
-    fn break_fn_type(&mut self, requested: Option<TypeId>) -> (Option<TypeId>, Option<TypeId>) {
-        let Some(ty) = requested else { return (None, None) };
+    fn break_fn_type(&mut self, requested: ResultType) -> (Option<TypeId>, Option<TypeId>) {
+        // TODO: track arg ret seperatly sometimes
+        let Some(ty) = requested.specific() else { 
+            let ret = match requested {
+                ResultType::Returning(t) => Some(t),
+                _ => None,
+            };
+            return (None, ret)
+        };
         let TypeInfo::Fn(ty) = self.program[ty] else { return (None, None) };
         let ret = if ty.ret.is_unknown() { None } else { Some(ty.ret) };
         let arg = if ty.arg.is_unknown() { None } else { Some(ty.arg) };
@@ -1469,14 +1489,14 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     // TODO: make the indices always work out so you could just do it with a normal stack machine.
     //       and just use the slow linear types for debugging.
-    fn compile_expr_inner(&mut self, expr: &mut FatExpr<'p>, mut requested: Option<TypeId>) -> Res<'p, TypeId> {
+    fn compile_expr_inner(&mut self, expr: &mut FatExpr<'p>, mut requested: ResultType) -> Res<'p, TypeId> {
         self.last_loc = Some(expr.loc);
         let loc = expr.loc;
         let prev_ty = expr.ty;
         Ok(match expr.deref_mut() {
             Expr::Cast(inner) => {
                 // TODO: you probably never get here cause .done should be set?
-                let requested = if inner.ty.is_unknown() { None } else { Some(inner.ty) };
+                let requested = if inner.ty.is_unknown() { ResultType::None } else { want(inner.ty) };
                 self.compile_expr(inner, requested)?;
                 expr.ty
             }
@@ -1498,17 +1518,23 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             Expr::Call(f, arg) => {
                 // Compile 'f' as normal, its fine if its a macro that expands to a callable or a closure we don't know the types for yet.
-                self.compile_expr(f, None)?;
+                // TODO: result type returning requested
+                let req_fn = if let Some(ty) = requested.specific() {
+                    ResultType::Returning(ty)
+                } else {
+                    ResultType::None
+                };
+                self.compile_expr(f, req_fn)?;
 
                 if let TypeInfo::FnPtr { ty, .. } = self.program[f.ty] {
-                    self.compile_expr(arg, Some(ty.arg))?;
+                    self.compile_expr(arg, want(ty.arg))?;
                     expr.done = f.done && arg.done;
                     expr.ty = ty.ret;
                     return Ok(ty.ret);
                 }
 
                 if let TypeInfo::Label(arg_ty) = self.program[f.ty] {
-                    self.compile_expr(arg, Some(arg_ty))?;
+                    self.compile_expr(arg, want(arg_ty))?;
                     expr.done = f.done && arg.done;
                     expr.ty = TypeId::never; // :labels_return_never
                     return Ok(TypeId::never);
@@ -1549,13 +1575,13 @@ impl<'a, 'p> Compile<'a, 'p> {
                 res
             }
             Expr::Tuple(values) => {
-                let types = requested
+                let types = requested.specific()
                     .and_then(|t| self.program.tuple_types(t))
                     .and_then(|t| if t.len() == values.len() { Some(t) } else { None });
                 let mut out = vec![];
                 for (i, v) in values.iter_mut().enumerate() {
                     let ty = types.as_ref().and_then(|t| t.get(i).copied());
-                    out.push(self.compile_expr(v, ty)?)
+                    out.push(self.compile_expr(v, ty.into())?)
                 }
                 let ty = self.program.tuple_of(out);
                 expr.ty = ty;
@@ -1575,10 +1601,10 @@ impl<'a, 'p> Compile<'a, 'p> {
                     // Note: not using deref_one, because don't want to just remove the ref, we want raw variable expressions to not exist. kinda HACK
                     *expr = FatExpr::synthetic_ty(Expr::SuffixMacro(Flag::Deref.ident(), Box::new(mem::take(expr))), loc, ty);
                     self.compile_expr(expr, requested)?
-                } else if let Some((value, ty)) = self.find_const(*var)? {
+                } else if let Some((value, ty)) = self.find_const(*var, requested)? {
                     expr.set(value.clone(), ty);
                     expr.done = true;
-                    if let Some(req) = requested {
+                    if let Some(req) = requested.specific() {
                         if ty != req {
                             let Expr::Value { value, coerced } = &mut expr.expr else{ unreachable!() };
                             assert!(!*coerced, "const mismatch. {} vs {} but already coerced", self.program.log_type(expr.ty), self.program.log_type(req));
@@ -1601,7 +1627,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::GetNamed(name) => err!("Undeclared Ident {} {name:?}", self.program.pool.get(*name)), //err!(CErr::UndeclaredIdent(*name)),
             Expr::Value { value, coerced } => {
                 debug_assert!(!prev_ty.is_unknown(), "Value expr must have type");
-                if let Some(req) = requested {
+                if let Some(req) = requested.specific() {
                     if prev_ty != req {
                         assert!(!*coerced, "const mismatch. {} vs {} but already coerced", self.program.log_type(expr.ty), self.program.log_type(req));
                         
@@ -1660,7 +1686,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         }
                     }
                     Flag::Slice => {
-                        let container = self.compile_expr(arg, None)?;
+                        let container = self.compile_expr(arg, ResultType::None)?;
                         let ty = self.program.tuple_types(container);
                         let expect = if let Some(types) = ty {
                             let expect = *unwrap!(types.iter().find(|t| !t.is_unknown()), "all unknown");
@@ -1677,8 +1703,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                         s_ty
                     }
                     Flag::Deref => {
-                        let requested = requested.map(|t| self.program.ptr_type(t));
-                        let ptr = self.compile_expr(arg, requested)?;
+                        let requested = requested.specific().map(|t| self.program.ptr_type(t));
+                        let ptr = self.compile_expr(arg, requested.into())?;
                         let ty = unwrap!(self.program.unptr_ty(ptr), "deref not ptr: {}", self.program.log_type(ptr));
                         expr.done = arg.done;
                         expr.ty = ty;
@@ -1702,7 +1728,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     Flag::Fn_Ptr => {
                         // TODO: this should be immediate_eval_expr (which should be updated do the constant check at the beginning anyway).
                         //       currently !fn_ptr can't be an atrbitrary comptime expr which is silly.
-                        let ty = self.compile_expr(arg, None)?;
+                        let ty = self.compile_expr(arg, ResultType::None)?;
                         if let TypeInfo::Fn(_) = self.program[ty] {
                             let id: FuncId = self.immediate_eval_expr_known(*arg.clone())?;
                             assert!(!self.program[id].any_const_args());
@@ -1748,14 +1774,14 @@ impl<'a, 'p> Compile<'a, 'p> {
                         ty
                     }
                     Flag::Uninitialized => {
-                        if !arg.is_raw_unit() && requested.is_none() {
+                        if !arg.is_raw_unit() && requested.specific().is_none() {
                             let ty: TypeId = self.immediate_eval_expr_known(mem::take(arg))?;
-                            requested = Some(ty);
+                            requested = want(ty);
                             arg.expr = Expr::Value { value: Values::unit(), coerced: true };
                         }
-                        assert!(requested.is_some(), "!uninitialized expr must have known type");
-                        expr.ty = requested.unwrap();
-                        return Ok(requested.unwrap());
+                        assert!(requested.specific().is_some(), "!uninitialized expr must have known type");
+                        expr.ty = requested.specific().unwrap();
+                        return Ok(expr.ty);
                     }
                     Flag::Unquote | Flag::Placeholder => ice!("Unhandled macro {}", self.program.pool.get(*macro_name)),
                     Flag::Builtin => {
@@ -1767,7 +1793,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         return Ok(ty);
                     }
                     Flag::Contextual_Field => {
-                        let Some(ty) = requested else {
+                        let Some(ty) = requested.specific() else {
                             err!(CErr::NeedsTypeHint("!contextual_field (leading dot) requires type hint"))
                         };
                         let Some(name) = arg.as_ident() else {
@@ -1794,7 +1820,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::FieldAccess(e, name) => {
                 // TODO: this is unfortunate. it means you prewalk instead of letting placeexpr do the recursion
                 //       but need to check if its a value that has special fields first.
-                let container = self.compile_expr(e, None)?;
+                let container = self.compile_expr(e, ResultType::None)?;
 
                 if let Some(val) = e.as_const() {
                     if container == TypeId::ty {
@@ -1807,7 +1833,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             err!(CErr::UndeclaredIdent(*name))
                         };
                         assert!(var.kind == VarType::Const);
-                        let Some((val, ty)) = self.find_const(var)? else {
+                        let Some((val, ty)) = self.find_const(var, requested)? else {
                             err!("missing constant {}", var.log(self.program.pool))
                         };
                         expr.set(val.clone(), ty);
@@ -1823,8 +1849,8 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             // TODO: replace these with a more explicit node type?
             Expr::StructLiteralP(pattern) => {
-                let requested = requested.or(Some(prev_ty)); // TODO: idk why switching to bytes made me need this. thats disturbing. -- May 26
-                let res = self.construct_struct(requested, pattern)?;
+                let requested = requested.specific().or(Some(prev_ty)); // TODO: idk why switching to bytes made me need this. thats disturbing. -- May 26
+                let res = self.construct_struct(requested.into(), pattern)?;
                 expr.ty = res;
                 res
             }
@@ -1908,8 +1934,8 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     // This is a redundant check but it means you can move the error message to before the macro expansion which might make it more clear.
     // Only works for simple cases where its possible to give a static output type for all invocations of the macro.
-    fn typecheck_macro_outputs(&mut self, macro_f: FuncId, requested: Option<TypeId>) -> Res<'p, ()> {
-        let Some(requested) = requested else { return Ok(()) };
+    fn typecheck_macro_outputs(&mut self, macro_f: FuncId, requested: ResultType) -> Res<'p, ()> {
+        let Some(requested) = requested.specific() else { return Ok(()) };
         let Some(outputs) = &self.program[macro_f].annotations.iter().find(|a| a.name == Flag::Outputs.ident()) else {
             return Ok(());
         };
@@ -1966,7 +1992,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     // :PlaceExpr
-    fn addr_macro(&mut self, macro_expr: &mut FatExpr<'p>, requested: Option<TypeId>) -> Res<'p, TypeId> {
+    fn addr_macro(&mut self, macro_expr: &mut FatExpr<'p>, requested: ResultType) -> Res<'p, TypeId> {
         let Expr::SuffixMacro(_, arg) = &mut macro_expr.expr else {
             unreachable!()
         };
@@ -2031,7 +2057,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::Call(f, arg) => {
                 if let Expr::GetVar(i) = f.deref_mut().deref_mut() {
                     if i.kind == VarType::Const {
-                        if let Ok(Some(fid)) = self.maybe_direct_fn(f, arg, None) {
+                        if let Ok(Some(fid)) = self.maybe_direct_fn(f, arg, ResultType::None) {
                             if let Ok(Some(f_ty)) = self.infer_types(fid) {
                                 // Need to save this because resolving overloads eats named arguments
                                 f.set(to_values(self.program, fid)?, self.program.func_type(fid));
@@ -2073,7 +2099,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             Expr::FieldAccess(container, _) => {
                 if (self.type_of(container)?).is_some() {
-                    self.compile_expr(expr, None)?
+                    self.compile_expr(expr, ResultType::None)?
                 } else {
                     return Ok(None);
                 }
@@ -2096,7 +2122,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // Note: need to compile first so if something's not ready yet, you dont error in the asm where you just crash.
 
                 // TODO: hack yuck. now that i rely on expr working so it can be passed into quoted things, this is extra ugly.
-                match self.compile_expr(handler, Some(TypeId::overload_set)) {
+                match self.compile_expr(handler, want(TypeId::overload_set)) {
                     Ok(_) => {
                         // TODO: allow Fn and FnPtr as well.
                         let os: OverloadSetId = if let Expr::Value { value, .. } = &handler.expr {
@@ -2105,7 +2131,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             self.immediate_eval_expr_known(*handler.clone())?
                         };
                         // Note: need to compile first so if something's not ready yet, you dont error in the asm where you just crash.
-                        if self.program[os].name == Flag::As.ident() && self.compile_expr(arg, Some(TypeId::ty)).is_ok() {
+                        if self.program[os].name == Flag::As.ident() && self.compile_expr(arg, want(TypeId::ty)).is_ok() {
                             // HACK: sad that 'as' is special
                             let ty: TypeId = self.immediate_eval_expr_known(*arg.clone())?;
                             return Ok(Some(ty));
@@ -2116,7 +2142,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
                 // TODO: seperate applying macros from full commit to compiling it all.
                 // TODO: if this fails you might have changed the state.
-                match self.compile_expr(expr, None) {
+                match self.compile_expr(expr, ResultType::None) {
                     Ok(res) => res,
                     Err(e) => ice!("TODO: PrefixMacro inference failed. need to make it non-destructive?\n{e:?}",),
                 }
@@ -2137,7 +2163,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         }
                         _ => {
                             if (self.type_of(arg)?).is_some() {
-                                self.compile_expr(expr, None)?
+                                self.compile_expr(expr, ResultType::None)?
                             } else {
                                 return Ok(None);
                             }
@@ -2188,7 +2214,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
                         if let Expr::Tuple(parts) = &mut arg.expr {
                             assert!(parts.len() == 2);
-                            if self.compile_expr(&mut parts[0], Some(TypeId::ty)).is_ok() {
+                            if self.compile_expr(&mut parts[0], want(TypeId::ty)).is_ok() {
                                 // HACK: sad that 'as' is special
                                 let ty: TypeId = self.immediate_eval_expr_known(parts[0].clone())?;
                                 return Ok(Some(ty));
@@ -2196,7 +2222,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         }
                         err!("bad !as",)
                     }
-                    _ => match self.compile_expr(expr, None) {
+                    _ => match self.compile_expr(expr, ResultType::None) {
                         Ok(res) => res,
                         Err(e) => ice!("TODO: SuffixMacro inference failed. need to make it non-destructive?\n{e:?}",),
                     },
@@ -2273,7 +2299,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 *ty = LazyType::Finished(res);
                 true
             }
-            LazyType::Finished(_) => true, // easy
+            LazyType::Returning(_) | LazyType::Finished(_) => true, // easy
         };
         Ok(done)
     }
@@ -2387,7 +2413,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             Expr::Value { value, .. } => return Ok(Some(value.clone())),
             Expr::GetVar(var) => {
-                if let Some((value, ty)) = self.find_const(*var)? {
+                if let Some((value, ty)) = self.find_const(*var, want(ret_ty))? {
                     self.type_check_arg(ty, ret_ty, "quick eval")?;
                     return Ok(Some(value));
                 } else {
@@ -2451,7 +2477,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                     let val_ty = if let Expr::Value { value, .. } = &f.expr {
                         Some((value.clone(), f.ty))
                     } else if let Expr::GetVar(var) = f.expr {
-                        self.find_const(var)?
+                        // TODO: if we know the arg type, we can make the requested fn type. 
+                        self.find_const(var, ResultType::None)?
                     } else {
                         None
                     };
@@ -2527,7 +2554,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let func_id = self.make_lit_function(e, ret_ty)?;
         if let FuncImpl::Normal(body) = &mut self.program[func_id].body {
             let mut stolen_body = mem::take(body);
-            if let Err(e) = self.compile_expr(&mut stolen_body, Some(ret_ty)) {
+            if let Err(e) = self.compile_expr(&mut stolen_body, want(ret_ty)) {
                 unsafe {
                     let loc = e.loc.or(self.last_loc);
                     if let Some(loc) = loc {
@@ -2817,7 +2844,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     fn emit_call_if(
         &mut self,
         if_macro: &mut FatExpr<'p>,
-        requested: Option<TypeId>, // TODO: allow giving return type to infer
+        requested: ResultType, // TODO: allow giving return type to infer
     ) -> Res<'p, TypeId> {
         let Expr::SuffixMacro(_, if_macro_arg) = &mut if_macro.expr else {
             err!("expected !if",)
@@ -2828,7 +2855,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let Expr::Tuple(parts) = &mut if_macro_arg.expr else {
             ice!("if args must be tuple not {:?}", if_macro_arg);
         };
-        let cond = self.compile_expr(&mut parts[0], Some(TypeId::bool()))?;
+        let cond = self.compile_expr(&mut parts[0], want(TypeId::bool()))?;
         self.type_check_arg(cond, TypeId::bool(), "bool cond")?;
 
         // TODO: this mostly can't happen anymore because you use the if function and params dont get forwarded like that. 
@@ -2866,7 +2893,8 @@ impl<'a, 'p> Compile<'a, 'p> {
             (parts[1].ty, false)
         };
         if expect_fn {
-            let Some(if_false) = self.maybe_direct_fn(&mut parts[2], &mut unit_expr, requested.or(Some(true_ty)))? else {
+            let wanted = requested.specific().or(Some(true_ty));
+            let Some(if_false) = self.maybe_direct_fn(&mut parts[2], &mut unit_expr, wanted.into())? else {
                 ice!("if third arg must be func not {:?}", parts[2]);
             };
             self.program[if_false].set_cc(CallConv::Inline)?; // hack
@@ -2899,12 +2927,12 @@ impl<'a, 'p> Compile<'a, 'p> {
         let sig = "loop(fn(Unit) Unit)";
         let mut unit_expr = self.as_literal((), while_macro_arg.loc)?;
 
-        if let Some(body_fn) = self.maybe_direct_fn(while_macro_arg, &mut unit_expr, Some(TypeId::unit))? {
+        if let Some(body_fn) = self.maybe_direct_fn(while_macro_arg, &mut unit_expr, want(TypeId::unit))? {
             self.program[body_fn].set_cc(CallConv::Inline)?; // hack
             let body_arg = self.infer_arg(body_fn)?;
             self.type_check_arg(body_arg, TypeId::unit, sig)?;
             self.finish_closure(while_macro_arg);
-            let body_ret = self.emit_call_on_unit(body_fn, while_macro_arg, Some(TypeId::unit))?;
+            let body_ret = self.emit_call_on_unit(body_fn, while_macro_arg, want(TypeId::unit))?;
             self.type_check_arg(body_ret, TypeId::unit, sig)?;
         } else {
             todo!("shouldnt get here twice")
@@ -2920,13 +2948,13 @@ impl<'a, 'p> Compile<'a, 'p> {
     //       would need better type inference to make that the same, but probably want that anyway.
     //       ideally would also allow macros to infer a type even if they can't run all the way?    -- Apr 21
     pub fn as_cast_macro(&mut self, mut arg: FatExpr<'p>, mut target: FatExpr<'p>) -> Res<'p, FatExpr<'p>> {
-        self.compile_expr(&mut arg, Some(TypeId::ty))?;
+        self.compile_expr(&mut arg, want(TypeId::ty))?;
         let ty: TypeId = self.immediate_eval_expr_known(arg)?;
         assert!(!ty.is_unknown());
         // target.ty = ty;
         // have to do this here because it doesn't pass requested in from saved infered type.  // TODO: maybe it should? -- Apr 21
         // but not calling the normal compile_expr because it has stricter typechecking on the requested type.
-        let found = self.compile_expr_inner(&mut target, Some(ty))?;
+        let found = self.compile_expr_inner(&mut target, want(ty))?;
         self.type_check_arg(found, ty, "@as")?;
         target.ty = found;
         if found != ty {
@@ -3020,9 +3048,9 @@ impl<'a, 'p> Compile<'a, 'p> {
         match place.deref_mut().deref_mut() {
             // TODO: PrefixMacro is sketchy but makes []->.index work.
             Expr::PrefixMacro {.. } | Expr::GetVar(_) | Expr::FieldAccess(_, _) | Expr::SuffixMacro(_, _) => {
-                self.compile_place_expr(place, None, true)?;
+                self.compile_place_expr(place, ResultType::None, true)?;
                 let oldty = place.ty;
-                let value_ty = self.compile_expr(value, Some(oldty))?;
+                let value_ty = self.compile_expr(value, want(oldty))?;
                 self.type_check_arg(value_ty, oldty, "reassign var")?;
                 Ok(())
             }
@@ -3035,7 +3063,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     // :PlaceExpr
     // takes any of (<ptr_expr>[] OR <var> OR <ptr>.<field>) and turns it into (<ptr_expr>[])
     #[track_caller]
-    fn compile_place_expr(&mut self, place: &mut FatExpr<'p>, requested: Option<TypeId>, want_deref: bool) -> Res<'p, ()> {
+    fn compile_place_expr(&mut self, place: &mut FatExpr<'p>, requested: ResultType, want_deref: bool) -> Res<'p, ()> {
         // println!("in: {}", place.log(self.program.pool));
         let loc = place.loc;
         match place.deref_mut().deref_mut() {
@@ -3059,7 +3087,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::FieldAccess(container, name) => {
                 // TODO: could lookup field and pass down requested
                 // Note: compile_expr may have already walked the container because it has to check if its an enum/scope.
-                self.compile_place_expr(container, None, false)?;
+                self.compile_place_expr(container, ResultType::None, false)?;
 
                 // :AutoDeref
                 {
@@ -3100,8 +3128,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                 match name {
                     Flag::Deref => {
                         // When you see a !deref, treat the expression as a pointer value.
-                        let req = requested.map(|r| self.program.ptr_type(r));
-                        self.compile_expr(arg, req)?;
+                        let req = requested.specific().map(|r| self.program.ptr_type(r));
+                        self.compile_expr(arg, req.into())?;
                         if want_deref {
                             place.ty = self.program.unptr_ty(arg.ty).unwrap();
                         } else {
@@ -3198,7 +3226,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
     }
 
-    fn compile_call(&mut self, expr: &mut FatExpr<'p>, mut fid: FuncId, requested: Option<TypeId>) -> Res<'p, TypeId> {
+    fn compile_call(&mut self, expr: &mut FatExpr<'p>, mut fid: FuncId, requested: ResultType) -> Res<'p, TypeId> {
         let loc = expr.loc;
         let done = expr.done;
         let (f_expr, arg_expr) = if let Expr::Call(f, arg) = expr.deref_mut() { (f, arg) } else { ice!("") };
@@ -3211,12 +3239,12 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         if self.program[fid].get_flag(Generic) {
             assert!(self.program[fid].any_const_args(), "fn with no const args redundantly marked #generic");
-            self.compile_expr(arg_expr, None)?;
+            self.compile_expr(arg_expr, ResultType::None)?;
             fid = self.curry_const_args(fid, f_expr, arg_expr)?;
         }
 
         let arg_ty = self.infer_arg(fid)?;
-        self.compile_expr(arg_expr, Some(arg_ty))?;
+        self.compile_expr(arg_expr, want(arg_ty))?;
         self.last_loc = Some(loc);
         self.type_check_arg(arg_expr.ty, arg_ty, "fn arg")?;
 
@@ -3401,7 +3429,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     self.type_check_arg(arg_expr.ty, new_arg_type, "const arg")?;
                 } else {
                     arg_expr.ty = TypeId::unknown;
-                    let found_type = self.compile_expr(arg_expr, Some(new_arg_type))?;
+                    let found_type = self.compile_expr(arg_expr, new_arg_type.want())?;
                     self.type_check_arg(found_type, new_arg_type, "const arg")?;
                 }
             } else {
@@ -3514,7 +3542,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
     }
 
-    fn emit_call_on_unit(&mut self, cond_fn: FuncId, expr_out: &mut FatExpr<'p>, requested: Option<TypeId>) -> Res<'p, TypeId> {
+    fn emit_call_on_unit(&mut self, cond_fn: FuncId, expr_out: &mut FatExpr<'p>, requested: ResultType) -> Res<'p, TypeId> {
         let (e, ty) = self.func_expr(cond_fn);
         let get_fn = FatExpr::synthetic_ty(e, expr_out.loc, ty);
         let unit = self.as_literal((), expr_out.loc)?;
@@ -3602,8 +3630,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(self.program.pool.intern(s))
     }
 
-    fn construct_struct(&mut self, requested: Option<TypeId>, pattern: &mut Pattern<'p>) -> Res<'p, TypeId> {
-        let Some(requested) = requested else {
+    fn construct_struct(&mut self, requested: ResultType, pattern: &mut Pattern<'p>) -> Res<'p, TypeId> {
+        let Some(requested) = requested.specific() else {
             err!(CErr::NeedsTypeHint("struct literal"))
         };
         let names: Vec<_> = pattern.flatten_names();
@@ -3622,7 +3650,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         let Some(field) = fields.iter().find(|f| f.name == *name) else {
                             err!("Tried to assign unknown field {}", self.program.pool.get(*name));
                         };
-                        let value = self.compile_expr(value, Some(field.ty))?;
+                        let value = self.compile_expr(value, want(field.ty))?;
                         self.last_loc = Some(loc);
                         self.type_check_arg(value, field.ty, "struct field")?;
                     }
@@ -3671,7 +3699,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         )
                     });
                     let type_hint = cases[i].1;
-                    let value = self.compile_expr(values[0], Some(type_hint))?;
+                    let value = self.compile_expr(values[0], type_hint.want())?;
                     self.type_check_arg(value, type_hint, "enum case")?;
                     requested
                 }
@@ -3705,7 +3733,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     let name = self.program.pool.get(name.name);
                     err!("let bindings cannot be reassigned so '{name}' cannot be !uninitialized",)
                 }
-                let value = self.compile_expr(value, ty.ty())?;
+                let value = self.compile_expr(value, ty.want())?;
                 let final_ty = if no_type {
                     *ty = LazyType::Finished(value);
                     value
@@ -3759,7 +3787,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         // TODO: :PushConstFnCtx
         // let inferred_type = self.type_of(value)?;
         // println!("{inferred_type:?}");
-        let res = self.compile_expr(value, ty.ty())?;
+        let res = self.compile_expr(value, ty.want())?;
         let mut val = self.immediate_eval_expr(value.clone(), res)?;
         // TODO: clean this up. all the vardecl stuff is kinda messy and I need to be able to reuse for the pattern matching version.
         // TODO: more efficient way of handling overload sets
@@ -3936,3 +3964,59 @@ impl<'z, 'a, 'p> WalkAst<'p> for Unquote<'z, 'a, 'p> {
         true
     }
 }
+
+#[derive(Debug, Clone, Copy)]
+pub enum ResultType {
+    Specific(TypeId),
+    Returning(TypeId),
+    None
+}
+
+impl TypeId {
+    fn want(self) -> ResultType {
+        ResultType::Specific(self)
+    }
+}
+
+impl ResultType {
+    pub fn specific(self) -> Option<TypeId> {
+        match self {
+            ResultType::Specific(t) => Some(t),
+            ResultType::Returning(_) => None,
+            ResultType::None => None,
+        }
+    }
+}
+
+impl<'p> LazyType<'p> {
+    fn want(&self) -> ResultType {
+        match *self {
+            LazyType::Finished(t) => ResultType::Specific(t),
+            LazyType::Returning(t) => ResultType::Returning(t),
+            _ => ResultType::None,
+        }
+    }
+}
+
+impl From<BigOption<TypeId>> for ResultType {
+    fn from(value: BigOption<TypeId>) -> Self {
+        match value {
+            BigOption::Some(t) => ResultType::Specific(t),
+            BigOption::None => ResultType::None,
+        }
+    }
+}
+
+impl From<Option<TypeId>> for ResultType {
+    fn from(value: Option<TypeId>) -> Self {
+        match value {
+            Some(t) => ResultType::Specific(t),
+            None => ResultType::None,
+        }
+    }
+}
+
+pub fn want(ty: TypeId) -> ResultType {
+    ty.want()
+}
+
