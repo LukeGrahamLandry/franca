@@ -20,7 +20,9 @@ fn hash(s: *Str) i64 = {
 /// This is the kind where you get bumped to the next slot if you collide, not the kind where you spill out into a linked list.
 /// TODO: reuse the first tombstone slot when inserting after a remove. currently im being dumb and just wasting search time until a resize. 
 /// (K: eq + hash + move, V: move)
+/// TODO: take hasher as param once i have default args? 
 fn HashMap($K: Type, $V: Type) Type = {
+    Hasher :: TrivialHasher;
     // TODO: instead of complicated traits, just require(eq, Ty(K, K), bool);
     Self :: @struct(alloc: Alloc, arr: Slice(Entry), len: i64, capacity: i64);
     Entry :: @struct(hash: i64, key: K, value: V);
@@ -32,12 +34,19 @@ fn HashMap($K: Type, $V: Type) Type = {
     ::if_opt(*V, ?V);
     ::if(?V);
     ::if(?*V);
+    ::if(u64);
     
     fn checked_hash(key: *K) i64 = {
-        mask :: 1.bit_not();
-        h := hash(key).abs();
+        mask: u64 : 1.bit_not();
+        hasher: Hasher = init();
+        hasher&.hash(key);
+        h := hasher&.end();
         // I use 0 to indicate an empty slot and 1 as a tombstone to mark removals. 
-        if(h.bit_and(mask).eq(0), => h.add(4), => h)   
+        // TODO: compiler bug! u64 auto casts to i64 here for some reason??
+        h := if(h.bit_and(mask).eq(@as(u64) 0), => h.add(@as(u64) 4), => h);
+        // TODO: stupid!!
+        h: i64 = h.bitcast();
+        h.abs()
     }
     
     fn insert(self: *Self, key: K, value: V) ?V = {

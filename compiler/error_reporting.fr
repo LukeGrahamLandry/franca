@@ -204,3 +204,78 @@ fn log(self: *FatStmt, pool: *StringPool, out: *List(u8), depth: i64) void = {
         @default => out.push_all("ICE:???");
     }
 } 
+
+///////////////////////////
+// TODO: should try to clean these up.
+
+
+// TODO: allow taking span as arg? take compiler as arg to put last loc? 
+fn error(arg: FatExpr) FatExpr #macro = {
+    if !arg.expr&.is(.Tuple) {|
+        return(@{ (Err = (span = Span.zeroed(), msg = @[arg])) });
+    };
+    @{
+        out: List(u8) = list(temp());
+        @[ format_into('out&', arg.expr.Tuple.items(), arg.loc) ];
+        (Err = (span = Span.zeroed(), msg = out.items()))
+    }
+}
+
+// @err_assert(cond, "msg %", 123) return;
+fn err_assert(arg: FatExpr, ret: FatExpr) FatExpr #macro = {
+    loc := arg.loc;
+    arg := compile_ast(arg);
+    arg_err :: "@assert expected '(cond, fmt_string, args)'";
+    if arg.ty == bool {|
+        arg = compile_ast(@{ (@[arg], "Assertion Failed") });
+    };
+    @ct_assert(arg.expr&.is(.Tuple), loc, arg_err);
+    parts := arg.expr.Tuple.items();
+    @ct_assert(parts.len >= 2, loc, arg_err);
+    @ct_assert(parts[1].ty == Str, loc, arg_err);
+    
+    if parts.len == 2 {|
+        @{ 
+            if !@[parts[0]] {|
+                @[ret](@error(@[parts[1]]));
+            };
+        }
+    } {|
+        cond := parts[0];
+        @{
+            if(!@[cond]){|
+                out: List(u8) = list(temp());
+                out&.push_all("Assertion Failed: ");
+                @[format_into('out&', parts.rest(1), arg.loc)];
+                @[ret](@error(out.items()));
+            };
+        }
+    }
+}
+
+
+fn unwrap(arg: FatExpr, ret: FatExpr) FatExpr #macro = {
+    loc := arg.loc;
+    arg := compile_ast(arg);
+    arg_err :: "@assert expected '(nullable, fmt_string, args)'";
+    @ct_assert(arg.expr&.is(.Tuple), loc, arg_err);
+    parts := arg.expr.Tuple.items();
+    @ct_assert(parts.len >= 2, loc, arg_err);
+    @ct_assert(parts[1].ty == Str, loc, arg_err);
+    
+    @{
+        cond := @[parts[0]];
+        if cond&.is_none() {|
+            out: List(u8) = list(temp());
+            out&.push_all("Missing Value: ");
+            // TODO: format_into should cope with length 1 just printing the string (and assert no % signs).
+            @[if parts.len == 2 {|
+                @{ out&.push_all(@[parts[1]]) }
+            } else {|
+                format_into('out&', parts.rest(1), arg.loc)
+            }];
+            @[ret](@error(out.items()));
+        };
+        cond.unwrap()
+    }
+}

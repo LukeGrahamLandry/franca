@@ -2,6 +2,9 @@ FEATURE_NEW_BC :: false;
 
 // - TODO: @match/@switch on enum names so you don't have to say @case in switch.  
 // - TODO: versions of @assert that return a compile error instead of crashing. 
+// TODO: @sanity(.DebugAsserts)? 
+debug_assert :: assert; 
+debug_assert_eq :: assert_eq;
 
 //! Converts simple ASTs into my bytecode-ish format.
 //! All comptime execution for a function is finished before it reaches this phase.
@@ -60,7 +63,7 @@ fn new_emit_bc(comp: CompilerRs, f: FuncId, when: ExecStyle) Res(FnBody) #compil
     };
     
     sig: PrimSig = (ret1 = .None, ret2 = .None);
-    test := comp.prim(i64);
+    //test := comp.prim(i64);
     
     if func.has_tag(.log_ast) {|
         // TODO
@@ -69,10 +72,10 @@ fn new_emit_bc(comp: CompilerRs, f: FuncId, when: ExecStyle) Res(FnBody) #compil
 
     self.locals&.push(list(self.out_alloc));
     
-    /*
-    body := @try(self.program.empty_fn_body(f, when)) return;
+    //body := @try(self.program.empty_fn_body(f, when)) return;
+    //res := self.emit_body(body&, f);
     
-    res := self.emit_body(body&, f);
+    /*
     if res.is_err() {|
         res.span = self.last_loc;
     };
@@ -82,20 +85,22 @@ fn new_emit_bc(comp: CompilerRs, f: FuncId, when: ExecStyle) Res(FnBody) #compil
     todo()
 }
 
+:: List(Symbol);
 fn empty_fn_body(comp: CompilerRs, func: FuncId, when: ExecStyle) Res(FnBody) = {
     f := comp[func]&;
+    f_ty := @unwrap(f.finished_ty(), "ICE: fn type not ready") return;
     (Ok = (
-        is_ssa_var = empty(),
-        var_names = list(comp[][].get_alloc()),
-        vars = list(comp[][].get_alloc()),
+        is_ssa_var = RsBitSet.zeroed(), // TODO: empty(),
+        var_names = empty(),
+        vars = empty(),
         when = when,
         func = func,
-        blocks = list(comp[][].get_alloc()),
-        name: f.name,
+        blocks = empty(),
+        name = f.name,
         current_block = (id = 0),
-        want_log = f.has_tag(.Log_Bc),
+        want_log = f.has_tag(.log_bc),
         clock = 0,
-        signeture = comp.prim_sig(unwrap!(f.finished_ty(), "ICE: fn type not ready"), f.cc.unwrap())?,
+        signeture = @try(comp.prim_sig(f_ty, f.cc.unwrap())) return,
     ))
 }
 
@@ -131,7 +136,7 @@ fn bind_args(self: *EmitBc, result: *FnBody, pattern: *Pattern) Res([] Prim) = {
         ty := binding.unwrap();
         // TODO:? probably fine, i just set to const in closure capture but then shouldn't be adding to vars below.
         // TODO: the frontend needs to remove the 'const' parts from the ast in DeclVarPattern
-        @assert(binding.kind != .Const, "arg '%' was const!", self.program.pool.get(name.name));
+        @err_assert(binding.kind != .Const, "arg '%' was const!", self.program.pool.get(name.name)) return;
 
         info := self.program.get_info(ty);
 
@@ -591,8 +596,8 @@ fn do_binding(self: *EmitBc, result: *FnBody, name: ?Var, ty: TypeId, value: *Fa
 //
 // If result_location == .ResAddr, the top of the stack on entry to this function has the pointer where the result should be stored.
 fn compile_expr(self: *EmitBc, result: *FnBody, expr: *FatExpr, result_location: ResultLoc, can_tail: bool) PRes = {
-    @assert(!expr.ty.is_unknown(), "Not typechecked: %. done: %", expr.log(self.program.pool), expr.done);
-    @assert!(self.slot_count(expr.ty).lt(16).or(result_location != PushStack), "% %", expr.log(self.program.pool), self.program.log_type(expr.ty)); // TODO: debug
+    @debug_assert(!expr.ty.is_unknown(), "Not typechecked: %. done: %", expr.log(self.program.pool), expr.done);
+    @debug_assert(self.slot_count(expr.ty).lt(16).or(result_location != PushStack), "% %", expr.log(self.program.pool), self.program.log_type(expr.ty));
     self.last_loc = (Some = expr.loc);
 
     @match(expr.expr&) {
@@ -756,13 +761,13 @@ fn emit_block_expr(self: *EmitBc, result: *FnBody, body: *RsVec(FatStmt), value:
 
         ret := self.inlined_return_addr.remove(ret_var).unwrap();
         if result.blocks[return_block].incoming_jumps > 0 {|
-            @assert(ret.used); // TODO: debug_assert
+            @debug_assert(ret.used);
             let slots = result.blocks[return_block.0 as usize].arg_slots;
             result.push(Goto = (ip = return_block, slots = slots));
             result.blocks[return_block].incoming_jumps += 1;
             result.current_block = return_block;
         } else {|
-            @assert(!ret.used); // TODO: debug_assert
+            @debug_assert(!ret.used); 
             if ret.store_res_ssa_inst { f | 
                 (block, index) := f;
                 // if we didn't use it, don't bother asking the backend to save the register with the result address.
@@ -1111,56 +1116,59 @@ fn set_deref(self: *EmitBc, result: *FnBody, place: *FatExpr, value: *FatExpr) P
     unreachable()
 }
 
+fn unwrap(self: Name) Symbol = {
+    @match(self) {
+        fn Var(v) => v.name;
+        fn Ident(v) => v;
+        @default => panic("Expected name!");
+    }
+}
+
+// TODO: rename? also used for tagged. 
 fn construct_struct(self: *EmitBc, result: *FnBody, pattern: *Pattern, requested: TypeId, result_location: ResultLoc) PRes = {
-    let names: Vec<_> = pattern.flatten_names();
-    // TODO: why must this suck so bad
-    let values: Option<_> = pattern.flatten_defaults_ref();
-    let values: Vec<_> = values.unwrap();
-    assert_eq!(names.len(), values.len());
-    let raw_container_ty = self.program.raw_type(requested);
+    raw_container_ty := self.program.raw_type(requested);
     slots := self.slot_count(raw_container_ty);
-    @assert(slots.lt(8).or(result_location != .PushStack), "too big to put on stack"); // TODO: debug_assert
-
-    match &self.program[raw_container_ty] {
-        TypeInfo::Struct { fields, .. } => {
-            assert_eq!(
-                fields.len(),
-                values.len(),
-                "Cannot assign {values:?} to type {} = {fields:?}",
-                self.program.log_type(requested)
+    @debug_assert(slots.lt(8).or(result_location != .PushStack), "too big to put on stack"); 
+    
+    @match(self.program.get_type(raw_container_ty)) {
+        fn Struct(f) => {
+            @assert_eq(f.fields.len - f.const_field_count, values.bindings.len,
+                "Cannot assign % to type % = %",
+                values, self.program.log_type(requested), fields
             );
-            let all = names.into_iter().zip(values).zip(fields);
-            for ((name, value), field) in all {
-                assert_eq!(name, field.name);
-                if result_location == ResAddr {
+            i := 0;
+            each f.fields { field | 
+                continue :: local_return;
+                i += 1;
+                if(field.kind == .Const, => continue());
+                
+                value := pattern.bindings[i]&;
+                @assert_eq(value.name.ident(), field.name.ident());
+                
+                if result_location == .ResAddr {|
                     result.push(PeekDup = 0);
-                    result.push(Bc::IncPtrBytes {
-                        bytes: field.byte_offset as u16,
-                    });
-                }
-                self.compile_expr(result, value, result_location, false)?;
-            }
-
-            if result_location == ResAddr {
-                result.pop(1) // res ptr
-            }
+                    result.push(IncPtrBytes = field.byte_offset.trunc());
+                };
+                @try(self.compile_expr(result, value, result_location, false)) return;
+            };
+            if result_location == .ResAddr {|
+                result.pop(1); // res ptr
+            };
         }
         // TODO: make this constexpr in compiler (TODO: audit: this comment is from back when i had the interp)
-        (fn Tagged { cases, .. } => {
-            debug_assert!(result_location != Discard, "todo");
-
-            let size = self.slot_count(raw_container_ty);
-            assert_eq!(
-                1,
-                values.len(),
-                "{} is @tagged, value should have one active varient not {values:?}",
-                self.program.log_type(requested)
+        (fn Tagged(f) => {
+            @debug_assert(result_location != .Discard, "todo");
+            size := self.slot_count(raw_container_ty);
+            @assert_eq(1, pattern.bindings.len.len(), 
+                "% is @tagged, value should have one active varient not %",
+                self.program.log_type(requested), values
             );
-            let i = cases.iter().position(|f| f.0 == names[0]).unwrap();
+            name := pattern.bindings[0].name.ident();
+            i := f.cases.position(fn(f) => f._0 == name).expect("case name to exist in type");
             let payload_size = self.slot_count(cases[i].1);
-            if payload_size >= size {
-                ice!("Enum value won't fit.")
-            }
+            if payload_size >= size {|
+                return(@error("Enum value won't fit."));
+            };
             @match(result_location) {
                 fn PushStack() => {
                     result.push(Bc::PushConstant {
@@ -1316,28 +1324,28 @@ fn index(self: *FnBody, i: BbId) *BasicBlock = {
 // And then compctx is weird because the front end doesn't want to insert it into the arguments, 
 // so its not as part of the function type, its in the calling convention. -- Jul 5
 //
-/* // TODO
 fn prim_sig(program: CompilerRs, f_ty: FnType, cc: CallConv) Res(PrimSig) = {
+
     ret := program.get_info(f_ty.ret);
 
     sig: PrimSig = (
         ret_slots = ret.size_slots,
-        first_arg_is_indirect_return = ret.size_slots > 2,
+        first_arg_is_indirect_return = ret.size_slots > @as(u16) 2.trunc(),
         no_return = f_ty.ret.is_never(),
         return_value_bytes = ret.stride_bytes,
         ret1 = .None,
         ret2 = .None,
-    };
+    ); // TODO: if you typeo make this a '}' need to have a good error message. -- Jul 6
 
     @switch(ret.size_slots) {
         @case(0) => ();
         @case(1) => {
-            sig.ret1 = program.prim(f_ty.ret).into()
+            sig.ret1 = program.prim(f_ty.ret);
         };
         @case(2) => {
-            let (a, b) = program.prim_pair(f_ty.ret)?;
-            sig.ret1 = BigOption::Some(a);
-            sig.ret2 = BigOption::Some(b);
+            (a, b) := @try(program.prim_pair(f_ty.ret)) return;
+            sig.ret1 = (Some = a);
+            sig.ret2 = (Some = b);
         };
         @default => {
             sig.arg_slots += 1;
@@ -1349,14 +1357,15 @@ fn prim_sig(program: CompilerRs, f_ty: FnType, cc: CallConv) Res(PrimSig) = {
     args: List(Prim) = list(program[][].get_alloc());
 
     :: enum(CallConv);
-    comp_ctx = cc == .CCallRegCt;
+    comp_ctx := cc == .CCallRegCt;
     if comp_ctx {|
         sig.arg_slots += 1;
         args&.push(.P64);
     };
 
     found_arity := 0;
-    push_arg :: fn(ty: Type) void => {
+    // TODO: compiler bug? what push_arg am i possibly shadowing?????? -- Jul 6
+    push_arg__wtf :: fn(ty: Type) void => {
         found_arity += 1;
         info := program.get_info(ty);
         if info.pass_by_ref {|
@@ -1378,12 +1387,12 @@ fn prim_sig(program: CompilerRs, f_ty: FnType, cc: CallConv) Res(PrimSig) = {
                 done = true;
                 // TODO: :const_field_fix (not done on rust side either so add test for this!)
                 each f.fields { f |
-                    push_arg(f.ty);
+                    push_arg__wtf(f.ty);
                 };
             };
         });
     if !done {|
-        push_arg(f_ty.arg);
+        push_arg__wtf(f_ty.arg);
     };
 
     // TODO: decide what i want a tuple to be. is it a real type you can have in memory or is it the thing that multiple arguments are?
@@ -1391,38 +1400,48 @@ fn prim_sig(program: CompilerRs, f_ty: FnType, cc: CallConv) Res(PrimSig) = {
     //       should have a spread operator for calling a function on a tuple of arguments? like 'a := (1, 2); f(..a)'
     // @assert_eq(found_arity, f_ty.arity, "TODO: fn(a: Ty(i64, i64))");
 
+    // i h a t e m y s e l f s o m e t i m e s
+    // a n d i d o n t k n o w w h a t t o d o
     key := (f_ty.arg, sig.arg_slots, false, comp_ctx);
-    program.primitives.borrow_mut().insert(key, args.clone());
+    r := args.items().clone(args.gpa).rs();
+    program.primitives&.insert(key, r);
     args&.insert(0, .P64); // sad
-    key.2 = true;
-    program.primitives.borrow_mut().insert(key, args); // TODO: stupid that i have to do this here
-    key.2 = false;
+    key._2 = true;
+    program.primitives&.insert(key, args.rs()); // TODO: stupid that i have to do this here
+    key._2 = false;
     sig.args = program.get_primitives(key).unwrap();
 
-    if sig.first_arg_is_indirect_return {
-        debug_assert_eq!(sig.args.len() + 1, sig.arg_slots as usize);
-    } else {
-        debug_assert_eq!(
+    if sig.first_arg_is_indirect_return {|
+        @debug_assert_eq(sig.args.len() + 1, sig.arg_slots.zext());
+    } else {|
+        @debug_assert_eq(
             sig.args.len(),
-            sig.arg_slots as usize,
-            "arg={}\n{sig:?}\n{:?}\nret={}",
+            sig.arg_slots.zext(),
+            "arg=%\n%\n%\nret=%",
             program.log_type(f_ty.arg),
+            sig,
             sig.args,
             program.log_type(f_ty.ret),
         );
-    }
+    };
 
-    sig.arg_int_count = sig.args.iter().filter(|p| !p.is_float()).count() as u8;
-
+    sig.arg_int_count = 0;
+    for sig.args { p |
+        if !p.is_float() {|
+            sig.arg_int_count += 1;
+        };
+    };
+    
     (Ok = sig)
 }
 
-*/ // TODO
 
-fn prim_pair(self: CompilerRs, ty: TypeId) Res(Ty(Prim, Prim)) = {
+fn prim_pair(self: CompilerRs, ty: Type) Res(Ty(Prim, Prim)) = {
     types := self.flat_tuple_types(ty); // TODO: don't allocate
     @assert_eq(types.len(), 2);
-    Ok((unwrap!(self.prim(types[0]), ""), unwrap!(self.prim(types[1]), "")))
+    a : Prim = @unwrap(self.prim(types[0]), "non-prim") return;
+    b := @unwrap(self.prim(types[1]), "non-prim") return;
+    (Ok = @as(Ty(Prim, Prim)) (a, b))
 }
 
 fn arity(self: CompilerRs, expr: *FatExpr) u16 = {
@@ -1451,10 +1470,8 @@ fn get_primitives(self: CompilerRs, key: (TypeId, u16, bool, bool)) ?[] Prim = {
 }
 
 fn as_primatives(self: CompilerRs, ty: TypeId) [] Prim = {
-    if ty.is_unit() || ty.is_never() {
-        return &[];
-    }
-    let slots = self.get_info(ty).size_slots;
+    if(ty.is_unit().or(ty.is_never()), => return(empty());
+    slots := self.get_info(ty).size_slots;
     let mut key = (ty, slots, false, false);
     if let Some(p) = self.get_primitives(key) {
         return p;
@@ -1472,14 +1489,14 @@ fn as_primatives(self: CompilerRs, ty: TypeId) [] Prim = {
         .collect::<Vec<_>>();
     self.primitives.borrow_mut().insert(key, types.clone());
 
-    types.insert(0, Prim::P64); // sad
-    key.2 = true;
+    types.insert(0, .P64); // sad
+    key._2 = true;
     self.primitives.borrow_mut().insert(key, types); // TODO: stupid that i have to do this here
-    key.2 = false;
+    key._2 = false;
 
     self.get_primitives(key).unwrap()
 }
-// TODO: :const_field_fix
+
 fn prim(self: CompilerRs, ty: Type) ?Prim = {
     p: Prim = @match(self.get_type(ty)) {
         fn F64()     => .F64;
@@ -1499,8 +1516,8 @@ fn prim(self: CompilerRs, ty: Type) ?Prim = {
             };
         fn Struct(f) => {
             // TODO: check len first. 0 len should be allowed. 
-            s: i64 = self.slot_count(f.fields[0].ty).zext(); // TODO: why doesn't the literal '1' coerce to u16???? -- Jul 16
-            if f.fields.len == 1 && s == 1 {|
+            // TODO: :const_field_fix
+            if f.fields.len == 1 && self.slot_count(f.fields[0].ty) == 1 {|
                 return(self.prim(f.fields[0].ty));
             };
             return(.None)
@@ -1518,6 +1535,52 @@ fn prim(self: CompilerRs, ty: Type) ?Prim = {
     (Some = p)
 }
 
+fn flat_tuple_types(self: CompilerRs, ty: Type) List(Type) = {
+    @match(self.get_type(ty)) {
+        fn Struct(f) => {
+            out: List(Type) = list(temp());
+            each f.fields { f | 
+                if !f.kind.eq(.Const) {| 
+                    out&.push_all(self.flat_tuple_types(f.ty).items());
+                };
+            };
+            out
+        }
+        fn Enum(f) => self.flat_tuple_types(f.raw);
+        fn Named(f) => self.flat_tuple_types(f._0);
+        // TODO: this is sketchy
+        fn Tagged(f) => {
+            slots: i64 = self.slot_count(ty).zext();
+            varients: List(List(Type)) = list(f.cases.len, temp());
+            for f.cases { f |
+                var := self.flat_tuple_types(f._1);
+                if var.len > 0 {|
+                    varients&.push(var);
+                };
+            };
+            if varients.len() == 1 {|
+                varients[0]&.insert(0, i64);
+                @debug_assert_eq(slots, varients[0].len());
+                return(varients[0]);
+            };
+            // TODO: hack
+            i64.repeated(slots, temp())
+        }
+        fn Array(f) => {
+            out := self.flat_tuple_types(f.inner);
+            single := out.len;
+            range(0, f.len.zext()) { i|
+                // reslice everytime because we might reallocate. TODO: just reserve at the beginning.  -- Jul 6
+                out&.push_all(out.items().slice(0, single));
+            };
+            out
+        }
+        fn void() => list(temp());
+        @default => ty.repeated(1, temp());
+    }
+}
+
 fn idx(s: FuncId) i64 = s.to_index().zext();
 fn is_unit(t: Type) bool = t == void;
 fn is_unknown(t: Type) bool = t == UnknownType;
+fn is_never(t: Type) bool = t == Never;

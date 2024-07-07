@@ -786,7 +786,8 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 }
             }
             Expr::Tuple(values) => {
-                match &self.program[self.program.raw_type(expr.ty)] {
+                let ty = self.program.raw_type(expr.ty);
+                match &self.program[ty] {
                     TypeInfo::Struct { fields, layout_done, .. } => {
                         assert!(*layout_done);
                         for (value, f) in values.iter().zip(fields.iter()) {
@@ -809,7 +810,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         }
                     }
 
-                    _ => err!("Expr::Tuple should have struct type",),
+                    _ => err!("Expr::Tuple should have struct type not {}", self.program.log_type(ty)),
                 }
 
                 if result_location == ResAddr {
@@ -1198,15 +1199,17 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         debug_assert!(slots < 8 || result_location != PushStack);
 
         match &self.program[raw_container_ty] {
-            TypeInfo::Struct { fields, .. } => {
-                // TODO: acocunt for constant fields.
-                // assert_eq!(
-                //     fields.len(),
-                //     values.len(),
-                //     "Cannot assign {values:?} to type {} = {fields:?}",
-                //     self.program.log_type(requested)
-                // );
-                let all = names.into_iter().zip(values).zip(fields);
+            TypeInfo::Struct {
+                fields, const_field_count, ..
+            } => {
+                // :const_field_fix
+                assert_eq!(
+                    fields.len() - *const_field_count as usize,
+                    values.len(),
+                    "Cannot assign {values:?} to type {} = {fields:?}",
+                    self.program.log_type(requested)
+                );
+                let all = names.into_iter().zip(values).zip(fields.iter().filter(|f| f.kind != VarType::Const));
                 for ((name, value), field) in all {
                     assert_eq!(name, field.name);
                     if result_location == ResAddr {
