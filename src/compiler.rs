@@ -3073,7 +3073,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             Expr::PtrOffset { .. } => unreachable!("compiled twice?"),
             &mut Expr::GetNamed(n) => err!(CErr::UndeclaredIdent(n)),
-            _ => ice!("TODO: other `place=e;` --"),
+            _ => ice!("TODO: other `place=e;` -- {}", place.log(self.program.pool)),
         }
     }
 
@@ -3165,7 +3165,13 @@ impl<'a, 'p> Compile<'a, 'p> {
                 self.compile_expr(place, requested)?;
                 self.compile_place_expr(place, requested, want_deref)?;
             }
-            _ => ice!("TODO: other `place=e;` {}", place.log(self.program.pool)),
+            _ => {
+                if !place.ty.is_unknown() {
+                    // TODO: pass in if we're currently trying to access a field so we can give a better error message if its on an int or something?
+                    err!("Place expression of type {} expected pointer dereference.\n{}", self.program.log_type(place.ty),  place.log(self.program.pool))
+                }
+                ice!("TODO: other `place=e;` {} {:?}", place.log(self.program.pool), place.ty)
+            },
         }
         // println!("out: {}", place.log(self.program.pool));
         Ok(())

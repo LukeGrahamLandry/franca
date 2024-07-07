@@ -53,7 +53,7 @@ fn HashMap($K: Type, $V: Type) Type = {
         full := self.len.add(1).gt(self.capacity);
         if(full, => self.resize()); // does it sooner than necessary (if replacing a slot) but thats fine. 
         h := key&.checked_hash();
-        slot := self.find_slot(key, h);
+        slot := self.find_slot(key&, h);
         
         ::if(?V);
         @switch(slot.hash) {
@@ -74,7 +74,11 @@ fn HashMap($K: Type, $V: Type) Type = {
         }
     }
 
-    fn get(self: *Self, key: K) ?V = {
+
+    fn get(self: *Self, key: K) ?V #inline = self.get(key&);
+    fn get_ptr(self: *Self, key: K) ?*V #inline = self.get_ptr(key&);
+    
+    fn get(self: *Self, key: *K) ?V = {
         found: ?*V = self.get_ptr(key);
         @match(found) {
             (fn Some(t) ?V = some(t[]));
@@ -83,16 +87,18 @@ fn HashMap($K: Type, $V: Type) Type = {
     }
     
     /// SAFETY: the returned pointer is invalid after a call to 'insert' (which may trigger a resize)
-    fn get_ptr(self: *Self, key: K) ?*V = {
+    fn get_ptr(self: *Self, key: *K) ?*V = {
         if(self.len.eq(0), => (None = ())) {|
-            slot := self.find_slot(key, key&.checked_hash());
+            slot := self.find_slot(key, key.checked_hash());
             if(slot.hash.eq(0), => (None = ()), => (Some = slot.value&))
         } 
     }
     
-    fn remove(self: *Self, key: K) ?V = {
+    fn remove(self: *Self, key: K) ?V #inline = self.remove(key&);
+    
+    fn remove(self: *Self, key: *K) ?V = {
         if(self.len.eq(0), => (None = ())) {|
-            slot := self.find_slot(key, key&.checked_hash());
+            slot := self.find_slot(key, key.checked_hash());
             if(slot.hash.eq(0), => (None = ())) {|
                 slot.hash = 1; // tombstone
                 (Some = slot.value)
@@ -100,13 +106,13 @@ fn HashMap($K: Type, $V: Type) Type = {
         } 
     }
     
-    fn find_slot(self: *Self, key: K, h: i64) *Entry = {
+    fn find_slot(self: *Self, key: *K, h: i64) *Entry = {
         ret :: return;
         i := h.mod(self.arr.len);
         
         range(0, self.arr.len) {_|
             check := self.arr[i]&;
-            if(check.hash.eq(h).and(=> check.key.eq(key)), fn() void => { ret(check); }) {|
+            if(check.hash.eq(h).and(=> check.key&.eq(key)), fn() void => { ret(check); }) {|
                 if(check.hash.eq(0), fn() void => { ret(check); }); // empty, not in map
                 // 1 => placeholder for a removed value
                 // othewise, continue, might have been bumped
@@ -128,7 +134,7 @@ fn HashMap($K: Type, $V: Type) Type = {
         real_len := 0;
         each(old_arr) {old_slot|
             if(old_slot.hash.ne(0).and(old_slot.hash.ne(1))) {|
-                new_slot := self.find_slot(old_slot.key, old_slot.hash);
+                new_slot := self.find_slot(old_slot.key&, old_slot.hash);
                 new_slot[] = old_slot[];
                 real_len += 1;
             };

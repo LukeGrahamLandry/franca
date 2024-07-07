@@ -1180,7 +1180,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 todo!()
             }
             &Expr::GetNamed(n) => err!(CErr::UndeclaredIdent(n)),
-            _ => ice!("TODO: other `place=e;` :("),
+            _ => ice!("TODO: other `place=e;` :( {:?}", place.ty),
         }
     }
 

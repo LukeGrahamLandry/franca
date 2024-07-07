@@ -411,6 +411,7 @@ impl<'p> Program<'p> {
                 String::from("TODO: help message")
             }
             (&TypeInfo::Ptr(f), &TypeInfo::Ptr(e)) => {
+                // TODO: suggest [] or & if its just mismatching levels of indirection.
                 // TODO: recurse
                 format!("{indent} you can (UNSAFELY) cast between pointers with ptr_cast_unchecked(From = {}, To = {}, ptr = <value>). this cast is a noop at runtime.",
                     self.log_type(f),

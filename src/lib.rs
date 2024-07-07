@@ -414,7 +414,6 @@ fn signed_truncate(mut x: i64, bit_count: i64) -> i64 {
 #[repr(C, i64)]
 #[derive(Clone, Debug)]
 pub enum BitSet {
-    // Note: not u128 which means they can be split which means it can use the Vec's niche.
     Small([usize; 2]),
     Big(Vec<usize>),
 }

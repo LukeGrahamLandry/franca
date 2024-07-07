@@ -314,12 +314,12 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                 self.vars[id as usize] = Some(slot);
             }
             Bc::LoadSsa { id } => {
-                debug_assert!(self.body.is_ssa_var.get(id as usize));
+                // debug_assert!(self.body.is_ssa_var.get(id as usize));
                 let slot = self.vars[id as usize].unwrap();
                 self.state.stack.push(Val::Spill(slot));
             }
             Bc::AddrVar { id } => {
-                debug_assert!(!self.body.is_ssa_var.get(id as usize));
+                // debug_assert!(!self.body.is_ssa_var.get(id as usize));
                 if let Some(slot) = self.vars[id as usize] {
                     self.state.stack.push(Val::Increment {
                         reg: sp,

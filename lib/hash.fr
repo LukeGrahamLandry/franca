@@ -33,6 +33,43 @@ fn AutoHash($T: Type, $Hasher: Type) void = {
     }
 }
 
+fn AutoEq($T: Type) void = {
+    fn eq(lhs: *T, rhs: *T) bool = {
+        @inline_match(@run T.get_type_info_ref()) {
+            (fn Struct($_) => {
+                inline_for T.get_fields() { $f | 
+                    l_inner := T.get_field_ptr(lhs, f);
+                    r_inner := T.get_field_ptr(rhs, f);
+                    // TODO: better error message if not defined. 
+                    if(!l_inner.eq(r_inner), => return(false));
+                };
+                true
+            });
+            (fn Tagged($_) => {
+                i := 0; // TODO : inline_enumerate
+                tag_value := lhs.tag().ordinal();
+                
+                if tag_value != rhs.tag().ordinal() {|
+                    return(false);
+                };
+                
+                // TODO: @inline_switch.
+                inline_for T.get_varients() { $f | 
+                    if i == tag_value {|
+                        l_inner := T.get_varient_ptr(lhs, f);
+                        r_inner := T.get_varient_ptr(rhs, f);
+                        return(l_inner.eq(r_inner));
+                    };
+                    i += 1;
+                };
+                // TODO: @safety unreachable_unchecked so you don't bloat the code. i don't trust that llvm can notice my tag preconditions. 
+                panic("Tried to eq @tagged with invalid tag value. Uninitilized memory?")
+            });
+            @default => panic("Unsupported type for AutoEq");
+        }
+    }
+}
+
 ////////////////////////////////////
 
 TrivialHasher :: @struct(h: u64);
@@ -55,6 +92,7 @@ fn HashAsInt($T: Type, $Hasher: Type) void = {
     }
 }
 
+// TODO: really need to have less painful polymorphism stuff so you don't have to put everything in one place. 
 fn StupidAddHashable($H: Type) void = {
     WalkInts() { $T | HashAsInt(T, H); };
     #redirect(Ty(*H, *u32), void) fn hash(h: *H, s: *Type) void;
@@ -68,6 +106,14 @@ fn StupidAddHashable($H: Type) void = {
 }
 
 :: StupidAddHashable(TrivialHasher);
+
+fn DerefEq($T: Type) void = {
+    fn eq(a: *T, b: *T) bool #inline = a[] == b[];
+}
+
+:: WalkInts(fn($T) => DerefEq(T));
+:: DerefEq(Type);
+:: DerefEq(Symbol);
 
 fn WalkInts($do: @Fn(t: Type) void) void = {
     do(u32);
