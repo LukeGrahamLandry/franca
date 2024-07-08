@@ -1,3 +1,5 @@
+// - did: @match/@switch on enum names so you don't have to say @case in switch.
+
 ## Jul 6
 
 - flow result type through function literals + constants so you don't have to put type annotations on @match to use dot field of enum/tagged.

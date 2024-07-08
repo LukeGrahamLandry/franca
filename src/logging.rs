@@ -167,7 +167,13 @@ impl<'p> Program<'p> {
                             .collect();
                         format!("@tagged({})", v.join(", "))
                     }
-                    TypeInfo::Enum { raw: inner, .. } => self.log_type(*inner),
+                    TypeInfo::Enum { raw: inner, fields, .. } => {
+                        format!(
+                            "{}:{:?}",
+                            self.log_type(*inner),
+                            fields.iter().map(|(n, _)| self.pool.get(*n)).collect::<Vec<_>>()
+                        )
+                    }
                     TypeInfo::Named(_, n) => self.pool.get(*n).to_string(),
                     TypeInfo::Fn(f) => format!("(fn({}) {} #arity({}))", self.log_type(f.arg), self.log_type(f.ret), f.arity),
                     TypeInfo::FnPtr { ty: f, cc } => {
@@ -280,9 +286,10 @@ impl<'p> FnBody<'p> {
 impl<'p> Debug for CompileError<'p> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "COMPILATION ERROR:")?;
+        write!(f, "{}", self.trace)?;
         writeln!(f, "{:?}", self.reason)?;
         writeln!(f, "Internal: {}", self.internal_loc.unwrap())?;
-        write!(f, "{}", self.trace)
+        Ok(())
     }
 }
 

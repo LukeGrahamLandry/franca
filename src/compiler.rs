@@ -135,7 +135,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             last_loc: None,
             currently_compiling: vec![],
             program,
-            aarch64: Jitted::new(1 << 26), // Its just virtual memory right? I really don't want to ever run out of space and need to change the address.
+            aarch64: Jitted::new(1 << 27), // Its just virtual memory right? I really don't want to ever run out of space and need to change the address.
 
             tests: vec![],
             tests_broken: vec![],

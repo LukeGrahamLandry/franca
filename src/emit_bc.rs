@@ -223,11 +223,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         if let Some(types) = self.program.tuple_types(arg.ty) {
             debug_assert!(types.len() == self.program.arity(arg) as usize);
 
-            if types.iter().all(|t| !self.program.get_info(*t).pass_by_ref) {
-                self.compile_expr(result, arg, PushStack, false)?;
-                return Ok(false);
-            }
-
             let mut _pushed = 0;
             if let Expr::Tuple(parts) = &arg.expr {
                 debug_assert!(types.len() == parts.len());
@@ -932,8 +927,9 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 match name {
                     Flag::If => self.emit_call_if(result, arg, result_location, can_tail)?,
                     Flag::Loop => {
-                        debug_assert_eq!(result_location, Discard);
+                        // debug_assert_eq!(result_location, Discard);
                         self.emit_call_loop(result, arg)?;
+                        result.push(Bc::Unreachable);
                     }
                     Flag::Addr => self.addr_macro(result, arg, result_location)?,
                     Flag::Quote => unreachable!(),

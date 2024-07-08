@@ -8,7 +8,7 @@ use crate::ast::{
     garbage_loc, CallConv, Expr, FatExpr, FatStmt, Flag, FnFlag, FnType, Func, FuncId, IntTypeInfo, LazyType, Pattern, Program, ScopeId, TargetArch,
     TypeId, TypeInfo, TypeMeta, WalkAst,
 };
-use crate::bc::{BakedVar, BakedVarId, FnBody, PrimSig, Values};
+use crate::bc::{from_values, BakedVar, BakedVarId, FnBody, PrimSig, Values};
 use crate::compiler::{want, Compile, CompileError, ExecStyle, Res, ResultType, Unquote, EXPECT_ERR_DEPTH};
 use crate::emit_bc::prim_sig;
 use crate::ffi::InterpSend;
@@ -599,25 +599,49 @@ fn hopec<'p, T>(comp: &Compile<'_, 'p>, res: impl FnOnce() -> Res<'p, T>) -> T {
 }
 
 extern "C-unwind" fn tag_value<'p>(comp: &mut Compile<'_, 'p>, enum_ty: TypeId, name: Ident<'p>) -> i64 {
-    let cases = hope(|| {
-        Ok(unwrap!(
-            comp.program.get_enum(enum_ty),
-            "{} is not enum. (tried tag_value of {})",
-            comp.program.log_type(enum_ty),
-            comp.program.pool.get(name)
-        ))
-    });
-    let index = cases.iter().position(|f| f.0 == name);
-    let index = hope(|| {
-        Ok(unwrap!(
-            index,
-            "bad case name id={} {}. expected {:?}",
-            name.0,
-            comp.program.pool.get(name),
-            cases.iter().map(|f| comp.program.pool.get(f.0)).collect::<Vec<_>>(),
-        ))
-    });
-    index as i64
+    match &comp.program[enum_ty] {
+        TypeInfo::Enum { raw, fields, .. } => {
+            // TODO: this is kinda dumb, could be in meta.fr but this us just easier right now. -- Jul 8
+
+            if !(matches!(comp.program[*raw], TypeInfo::Int(_))) {
+                panic!("tag_value on @enum (not @tagged) that is not an int!")
+            }
+            // TODO: assert 8 bytes
+            let index = fields.iter().position(|f| f.0 == name);
+            let index = hope(|| {
+                Ok(unwrap!(
+                    index,
+                    "bad case name id={} {}. expected {:?}",
+                    name.0,
+                    comp.program.pool.get(name),
+                    fields.iter().map(|f| comp.program.pool.get(f.0)).collect::<Vec<_>>(),
+                ))
+            });
+            let i: i64 = from_values(comp.program, fields[index].1.clone()).unwrap();
+            i
+        }
+        TypeInfo::Tagged { cases, .. } => {
+            let index = cases.iter().position(|f| f.0 == name);
+            let index = hope(|| {
+                Ok(unwrap!(
+                    index,
+                    "bad case name id={} {}. expected {:?}",
+                    name.0,
+                    comp.program.pool.get(name),
+                    cases.iter().map(|f| comp.program.pool.get(f.0)).collect::<Vec<_>>(),
+                ))
+            });
+            index as i64
+        }
+        &TypeInfo::Named(ty, _) => tag_value(comp, ty, name),
+        _ => {
+            panic!(
+                "{} is not enum. (tried tag_value of {})",
+                comp.program.log_type(enum_ty),
+                comp.program.pool.get(name)
+            )
+        }
+    }
 }
 
 extern "C-unwind" fn tag_symbol<'p>(program: &&Program<'p>, enum_ty: TypeId, tag_val: i64) -> Ident<'p> {

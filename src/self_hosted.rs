@@ -98,6 +98,7 @@ extern "C" {
     ) -> BigResult<(), ParseErr<'p>>;
 
     pub(crate) fn get_baked(c: &SelfHosted, id: BakedVarId) -> *const (i64, BakedVar);
+    // TODO: remove these when emit_bc is self hosted
     pub(crate) fn put_baked(c: &SelfHosted, v: BakedVar, jit_ptr: BigOption<i64>) -> BakedVarId;
     pub(crate) fn emit_relocatable_constant<'p>(c: &mut Compile<'_, 'p>, ty: TypeId, value: &Values) -> BigResult<BakedVarId, ParseErr<'p>>;
     pub(crate) fn emit_relocatable_constant_body<'p>(
@@ -128,13 +129,13 @@ impl<'p> SelfHosted<'p> {
     }
 
     pub(crate) fn print_diagnostic(&self, e: crate::compiler::CompileError<'p>) {
+        // TODO
+        println!("{e:?}");
         unsafe {
             if let Some(loc) = e.loc {
                 show_error_line(self.codemap, loc.low, loc.high);
             }
         }
-        // TODO
-        println!("{e:?}");
     }
 
     pub(crate) fn put_constant(&mut self, name: crate::ast::Var<'p>, value: FatExpr<'p>, ty: LazyType<'p>) {

@@ -520,12 +520,6 @@ impl<'a> ReadBytes<'a> {
             None
         }
     }
-
-    pub fn align_to(&mut self, v: usize) {
-        while self.i % v != 0 {
-            self.i += 1; // TODO: math
-        }
-    }
 }
 
 #[derive(Default)]

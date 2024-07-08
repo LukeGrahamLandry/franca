@@ -252,6 +252,7 @@ fn len(self: *Values) i64 = {
     }
 }
 
+// fn from_values
 fn assume_cast($T: Type, self: *Values) *T #generic = {
     b := self.bytes();
     assert_eq(b.len, T.size_of());  // TODO: check alignment
@@ -290,107 +291,96 @@ fn log_type(c: CompilerRs, ty: Type) Str = {
     {c.vtable.log_type}(c.cast(), ty)
 }
 
+// Mote: this is weak! often you'd rather use immediate_eval_expr.
+fn as_const(self: *FatExpr) ?Values = {
+    @if_let(self.expr&)
+        fn Value(f) => { return(Some = f.bytes); };  // TODO: this should work when the branch returns never (no extra { ..; }) -- Jul 8
+    
+    .None
+}
+
 ////////////////////////
 /// Splitting Values /// 
 // - TODO: zero_padding can go in this section too if I still want it. 
 
-/*
 // TODO: :const_field_fix
+// TODO: if you move the ffi dynamic abi call to this language you can remove the rust version of this function. 
 /// Take some opaque bytes and split them into ints. So (u8, u8) becomes a vec of two i64 but u16 becomes just one.
-pub fn deconstruct_values(
-    program: &Program,
-    ty: TypeId,
-    bytes: &mut ReadBytes,
-    out: &mut Vec<i64>,
-    offsets: &mut Option<&mut Vec<(Prim, u16)>>, // this is stupid but how else do you call it in a loop??
-) -> Res<'static, ()> {
-    let info = program.get_info(ty);
-    let size = info.stride_bytes as usize;
+fn deconstruct_values(program: CompilerRs, ty: Type, bytes: *ReadBytes, out: *List(i64), offsets: ?*List(Ty(Prim, u16))) PRes = {
+    info := program.get_info(ty);
 
-    debug_assert_eq!(bytes.i % info.align_bytes as usize, 0);
-    debug_assert!(
-        size <= bytes.bytes.len() - bytes.i,
-        "deconstruct_values of {} wants {size} bytes but found {bytes:?}",
-        program.log_type(ty)
-    );
-    let ty = program.raw_type(ty);
-    match &program[ty] {
-        TypeInfo::Placeholder => err!("Unfinished type {ty:?}",),
-        TypeInfo::Never => err!("invalid type",),
-        TypeInfo::F64 => {
-            let offset = bytes.i;
-            out.push(unwrap!(bytes.next_i64(), ""));
-            if let Some(offsets) = offsets {
-                offsets.push((Prim::F64, offset as u16));
-            }
-        }
-        TypeInfo::FnPtr { .. } | TypeInfo::Ptr(_) | TypeInfo::VoidPtr => {
-            let offset = bytes.i;
-            out.push(unwrap!(bytes.next_i64(), ""));
-            if let Some(offsets) = offsets {
-                offsets.push((Prim::I64, offset as u16));
-            }
-        }
-        TypeInfo::F32 => {
-            let offset = bytes.i;
-            out.push(unwrap!(bytes.next_u32(), "") as i64);
-            if let Some(offsets) = offsets {
-                offsets.push((Prim::F32, offset as u16));
-            }
-        }
-        TypeInfo::Int(_) => {
-            let offset = bytes.i;
-            let (value, prim) = match program.get_info(ty).stride_bytes {
-                1 => (unwrap!(bytes.next_u8(), "") as i64, Prim::I8),
-                2 => (unwrap!(bytes.next_u16(), "") as i64, Prim::I16),
-                4 => (unwrap!(bytes.next_u32(), "") as i64, Prim::I32),
-                8 => (unwrap!(bytes.next_i64(), ""), Prim::I64),
-                n => todo!("bad int stride {n}"),
+    @debug_assert_eq(bytes.i.mod(info.align_bytes.zext()), 0);
+    found_len := bytes.bytes.len() - bytes.i;
+    @err_assert(
+        found_len >= info.stride_bytes.zext(),
+        "deconstruct_values of % wants % bytes but found %",
+        program.log_type(ty), info.stride_bytes, found_len, // TODO: show the value
+    ) return;
+    
+    single :: fn($T: Type, prim: Prim) void => {
+        offset := bytes.i;
+        if offsets { offsets |
+            offsets.push(@as(Ty(Prim, u16)) (prim, bytes.i.trunc()));
+        };
+        raw := bytes.read_next(T);
+        out.push(@as(i64) raw.int());
+    };
+    
+    @match(program.get_type(ty)) {
+        fn Placeholder() => { return(@error("ICE: Unfinished type")); }; // TODO: show the type
+        fn Never()       => return(@error("invalid type: Never"));
+        fn F64()     => i64.single(.F64);
+        fn FnPtr(_)  => i64.single(.P64);
+        fn Ptr(_)    => i64.single(.P64);
+        fn VoidPtr() => i64.single(.P64);
+        fn F32()     => u32.single(.F32);
+        fn Fn(_)     => u32.single(.I32);
+        fn Label(_)  => u32.single(.I32);
+        fn void()    => return(.Ok);
+        fn Bool()    => u8.single(.I8);
+        fn Tagged()  => return(@error("tagged %", program.log_type(ty)));
+        fn Enum(f)   => return(deconstruct_values(program, f.raw, bytes, out, offsets));
+        fn Named(f)  => return(deconstruct_values(program, f._0, bytes, out, offsets)); // TODO: make Named payload not a tuple or do destructuring here. -- Jul 8
+        fn Int(_)    => {
+            @switch(program.get_info(ty).stride_bytes()) {
+                @case(1) => u8.single(.I8);
+                @case(2) => u16.single(.I16);
+                @case(4) => u32.single(.I32);
+                @case(8) => i64.single(.I64);
+                @default fn(n: u16) => return(@error("ICE: bad int stride %", n));
             };
-            out.push(value);
-            if let Some(offsets) = offsets {
-                offsets.push((prim, offset as u16));
-            }
         }
-        TypeInfo::Bool => {
-            let offset = bytes.i;
-            out.push(unwrap!(bytes.next_u8(), "") as i64);
-            if let Some(offsets) = offsets {
-                offsets.push((Prim::I8, offset as u16));
-            }
+        fn Array(f) => {
+            inner_align := program.get_info(f.inner).align_bytes();
+            range(0, f.len.zext()) { _ |
+                @debug_assert_eq(bytes.i.mod(inner_align.zext()), 0);
+                @try(deconstruct_values(program, f.inner, bytes, out, offsets)) return;
+            };
         }
-        &TypeInfo::Array { inner, len } => {
-            let inner_align = program.get_info(inner).align_bytes;
-            for _ in 0..len {
-                debug_assert_eq!(bytes.i % inner_align as usize, 0);
-                deconstruct_values(program, inner, bytes, out, offsets)?;
-            }
-        }
-        TypeInfo::Struct { fields, layout_done, .. } => {
-            assert!(*layout_done);
-            let mut prev = 0;
-            let size = program.get_info(ty).stride_bytes;
-            let start = bytes.i;
-            for t in fields {
-                assert!(prev <= t.byte_offset);
+        fn Struct(f) => {
+            @err_assert(f.layout_done, "ICE: layout not ready") return;
+            prev := 0;
+            size := program.get_info(ty).stride_bytes();
+            start := bytes.i;
+            for f.fields { t |
+                assert(prev <= t.byte_offset, "ICE: backwards field offset");
                 bytes.i = t.byte_offset;
-                deconstruct_values(program, t.ty, bytes, out, offsets)?;
+                @try(deconstruct_values(program, t.ty, bytes, out, offsets)) return;
                 prev = t.byte_offset;
-            }
-            bytes.i = start + size as usize; // eat trailing stride padding
+            };
+            bytes.i = start + size.zext(); // eat trailing stride padding
         }
-        TypeInfo::Tagged { .. } => todo!("tagged {}", program.log_type(ty)),
-        &TypeInfo::Enum { raw, .. } => deconstruct_values(program, raw, bytes, out, offsets)?,
-        TypeInfo::Named(_, _) => unreachable!(),
-        TypeInfo::Unit => {}
-        TypeInfo::Fn(_) | TypeInfo::Label(_) => {
-            let offset = bytes.i;
-            out.push(unwrap!(bytes.next_u32(), "") as i64);
-            if let Some(offsets) = offsets {
-                offsets.push((Prim::I32, offset as u16));
-            }
-        }
-    }
-    Ok(())
+    };
+    .Ok
 }
-*/
+
+ReadBytes :: @struct(bytes: [] u8, i: i64);
+
+fn read_next(self: *ReadBytes, $T: Type) T #generic = {
+    @debug_assert_eq(self.i.mod(T.size_of()), 0);
+    @safety(.Bounds) self.i + T.size_of() - 1 < self.bytes.len();
+    
+    ptr := self.bytes.ptr.offset(self.i);
+    self.i += T.size_of();
+    ptr_cast_unchecked(u8, T, ptr)[]
+}

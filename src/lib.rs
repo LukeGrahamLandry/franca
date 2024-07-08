@@ -302,9 +302,6 @@ pub fn find_std_lib() -> bool {
 }
 
 pub fn log_err<'p>(interp: &Compile<'_, 'p>, e: CompileError<'p>) {
-    println!("ERROR");
-    println!("{}", e.trace);
-
     println!("Internal: {}", e.internal_loc.unwrap());
     let message = e.reason.log(interp.program, interp.program.pool);
     println!("{message}");

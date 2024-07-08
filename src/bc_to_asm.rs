@@ -247,7 +247,12 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         }
 
         let mut slots = self.next_slot.0; //self.compile.ready[self.f].as_ref().unwrap().stack_slots * 8;
-        assert!(slots < 4096, "not enough bits to refer to all slots {}", slots);
+        assert!(
+            slots < 4096,
+            "not enough bits to refer to all slots ({}/4096 bytes) in {}",
+            slots,
+            self.program.pool.get(self.program[f].name)
+        );
         if slots % 16 != 0 {
             slots += 16 - (slots % 16); // play by the rules
         }
@@ -397,7 +402,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             }
             Bc::Goto { ip, slots } => {
                 let block = &self.body.blocks[ip.0 as usize];
-                debug_assert_eq!(slots, block.arg_slots);
+                debug_assert_eq!(slots, block.arg_slots, "goto {ip:?} {}", self.body.log(self.program));
                 if block.incoming_jumps == 1 {
                     debug_assert!(self.block_ips[ip.0 as usize].is_none());
                     self.emit_block(ip.0 as usize, false);
@@ -1217,7 +1222,7 @@ pub mod jit {
 
         pub fn push(&mut self, inst: i64) {
             unsafe {
-                debug_assert!((self.next as usize) < self.high, "OOB");
+                debug_assert!((self.next as usize) < self.high, "OOB {} {}", self.next as usize, self.high);
                 *(self.next as *mut u32) = inst as u32;
                 self.next = self.next.add(4);
             }

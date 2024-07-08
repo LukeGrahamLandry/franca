@@ -32,6 +32,11 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
     enum_type := arg.ty;
     info := get_type_info_raw(enum_type);
     
+    un_raw := enum_type.get_type_info();
+    if un_raw&.is(.Enum) {|
+        return(match_on_enum(arg, un_raw, stmts));
+    };
+    
     is_ptr := false;
     if info&.is(.Ptr) {|
         enum_type = (@as(*Type) info.Ptr&)[];
@@ -39,8 +44,9 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
         is_ptr = true;
     };
     ptr_ty := *enum_type;
-   
-    assert(info&.is(.Tagged), "@match expected argument type to be @tagged");
+    
+    @ct_assert(!info&.is(.Enum), arg.loc, "to @match on an @enum, dereference the pointer"); // TODO: just do it
+    @ct_assert(info&.is(.Tagged), arg.loc, "@match expected argument type to be @tagged");
     info := info.Tagged;
     
     varients := info.cases.items();
@@ -136,12 +142,80 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
                 };
             };
             // TODO: check that the handlers are unique! this just checks that its the right number of them. 
-            @ct_assert(!count.ne(varients.len).and(not(had_default)), loc, "wrong number of @match cases (did you forget to wrap them in brackets?)",);
+            @ct_assert(!count.ne(varients.len).and(not(had_default)), loc, "wrong number of @match cases",);
             @ct_assert(not(had_default).or(count.lt(varients.len)), loc, "@default but too many @match cases");
             body
         }]
     }
 }
+
+fn match_on_enum(arg: FatExpr, info: TypeInfo, stmts: [] FatStmt) FatExpr = {
+    info := info.Enum;
+    
+    varients := info.fields.items();
+    
+    // TODO: why can't i call 'as'? ffi unique? 
+    body: FatExpr = @{ panic("matched on invalid tag") }; 
+    
+    ::if(FatExpr);
+    @{
+        tag_val := @[arg].raw();
+        @[{
+            count := 0;
+            i := stmts.len.sub(1);
+            first := true;
+            had_default := false;
+            while(=> i.ge(0)) {|
+                continue :: local_return;
+                stmt: *FatStmt = stmts.index(i); 
+                i -= 1;
+                
+                expand_case_body :: fn(closure: *Func) void => {
+                    _ := tag_value(arg.ty, closure.name);  // just make sure the name exists
+                    tag := @{ tag_value(@[@literal(Type) arg.ty], @[@literal(closure.name)]) };
+                    count = count.add(1);
+                    callable: FatExpr = (expr = (Closure = closure), loc = closure.loc, ty = UnknownType, done = false); 
+                    body = @{ @if(eq(tag_val, @[tag]), => @[callable](), => @[body]) };
+                };
+                
+                // This allows you to leave off the extra brackets! easy now that i delay hositing constants. which in hindsight was a change i made a long time ago. 
+                if stmt.stmt&.is(.DeclFunc) {|
+                    // TODO: warn if it looks like they're trying to add to an overload set? -- Jul 5
+                    f := stmt.stmt.DeclFunc;
+                    expand_case_body(f);
+                    stmt.stmt = .Noop;
+                };
+                
+                if stmt.stmt&.is(.Eval) {|  // (1)
+                    handler_body := stmt.stmt.Eval&;
+                    if handler_body.expr&.is(.Closure) {| 
+                        expand_case_body(handler_body.expr.Closure);
+                    } {| // else
+                        // TODO: better error message if its a call because they forgot a semi-colon. 
+                        //debug_log_ast(handler_body[]);
+                        assert(handler_body.expr&.is(.PrefixMacro), "expected @default");
+                        branch := handler_body.expr.PrefixMacro&;
+                        macro := branch.handler;
+                        assert(macro.expr&.is(.GetNamed), "expected @default"); // TODO: bring back safety checks on tagged field access. 
+                        name := macro.expr.GetNamed; // TODO: ^ allow GetVar becuase they might have shadowed 'case' and 'default'? or should we respect their shadowing once you're allowed to expand custom macros in there. even then should give warning cause its confusing.  
+                        arg := branch.arg;
+                        action := branch.target[];
+                        assert(name.eq(@symbol default), "unhandled prefix in @match");
+                        assert(first, "@default must be the last handler in @match");
+                        body = @{ @[action]() };
+                        had_default = true;
+                    };
+                    stmt.stmt = .Noop;
+                };
+            };
+            // TODO: check that the handlers are unique! this just checks that its the right number of them. 
+            @ct_assert(!count.ne(varients.len).and(not(had_default)), arg.loc, "wrong number of @match cases (did you forget to wrap them in brackets?)",);
+            @ct_assert(not(had_default).or(count.lt(varients.len)), arg.loc, "@default but too many @match cases");
+            body
+        }]
+    }
+}
+
 
 fn ct_assert(arg: FatExpr) FatExpr #macro = {
     assert(arg.expr&.is(.Tuple), "@assert___ expected multiple args");
@@ -429,6 +503,9 @@ fn tagged($Tagged: Type) void = {
     
 }
 
+fn raw();
+fn from_raw();
+
 fn enum($T: Type) void = {
     @late {
         info := get_type_info(T);
@@ -441,13 +518,25 @@ fn enum($T: Type) void = {
     
     fn ordinal(e: T) i64 #unsafe_noop_cast; // :tag_enums_are_sequential
     
+    fn raw(e: T) { i := get_type_info(T); i.Enum.raw } #unsafe_noop_cast; 
+    
     fn display(self: T, out: *List(u8)) void = {
         // TODO: without the extra force comptime eval, it wrongly thinks calling this function needs compctx.  -- Jul 1
         names :: @run get_enum_names(T); // :tag_enums_are_sequential
         out.push_all(names[self.ordinal()]);
     }
+}
+
+// TODO: fix infinite loop from ?i64 if this is in fn enum. -- Jul 8
+fn from_raw($T: Type) void = {
+    @late {
+        info := get_type_info(T);
+        assert(info&.is(.Enum), "expected enum type");
+        assert(info.Enum.sequential, "expected enum elements to be sequential");
+    };
     
     fn from_raw(raw: i64) ?T = {
+        ::if(?T);
         // Note: this relies on it being sequentual. 
         if(raw.lt(0).or(raw >= T.enum_cases().len()), => .None) {|
             value := bit_cast_unchecked(i64, T, raw);
@@ -456,7 +545,8 @@ fn enum($T: Type) void = {
     } 
 }
 
-fn enum_cases(T: Type) [] Ty(Ident, Values) = {
+
+fn enum_cases(T: Type) [] Ty(Symbol, Values) = {
     info := get_type_info(T);
     assert(info&.is(.Enum), "expected enum type");
     info.Enum.fields.items()
