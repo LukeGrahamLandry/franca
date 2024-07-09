@@ -2,8 +2,8 @@ use std::marker::PhantomData;
 
 use crate::{
     ast::{FatExpr, FatStmt, Flag, Func, FuncId, LazyType, OverloadSetId, Pattern, ScopeId, TypeId, Var},
-    bc::{BakedEntry, BakedVar, BakedVarId, Values},
-    compiler::{CErr, Compile, CompileError, Scope},
+    bc::{BakedEntry, BakedVar, BakedVarId, FnBody, Values},
+    compiler::{CErr, Compile, CompileError, ExecStyle, Scope},
     err,
     export_ffi::{BigOption, ImportVTable},
     ffi::InterpSend,
@@ -107,6 +107,8 @@ extern "C" {
         ty: TypeId,
         force_default_handling: bool,
     ) -> BigResult<*const [BakedEntry], ParseErr<'p>>;
+
+    pub fn emit_bc<'p>(comp: &mut Compile<'_, 'p>, f: FuncId, when: ExecStyle) -> BigResult<FnBody<'p>, ParseErr<'p>>;
 }
 
 impl<'p> SelfHosted<'p> {

@@ -9,10 +9,10 @@
 // TODO: really need to fix this
 #redirect(Ty(i64, i64), bool) fn eq(a: ProgramEntry, b: ProgramEntry) bool;
 
-// Turn this off for profiling. 
+// Turn this on for profiling. 
 // TODO: put function names in the exe so don't have to print them and look up by id. 
 // TODO: make this a build option you pass to emit_llvm
-MAKE_FNS_PRIVATE :: true;
+RETAIN_FUNCTION_NAMES :: false;
 
 // TODO: they need to pass target arch for !asm functions. 
 fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: [] FuncId, entry: ProgramEntry) BucketArray(u8) = {
@@ -59,7 +59,6 @@ fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: [] FuncId, entry: ProgramEntry) B
         
         index: i64 = fid.to_index().zext();
         real_name := get_string(gen.backend.comp.data, func.name);
-        @fmt(gen.backend.out&.current(), ";F%: %\n", index, real_name);
         
         if(body.blocks.len.eq(0)){|
             success := gen.backend&.emit_special(func.body&, func, body&); 
@@ -75,13 +74,13 @@ fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: [] FuncId, entry: ProgramEntry) B
             continue();
         };
         gen.body = body&;
-        if MAKE_FNS_PRIVATE {|
-            gen.backend.out&.push_all("define private ccc ");
-        } else {|
+        if RETAIN_FUNCTION_NAMES {|
             gen.backend.out&.push_all("define ccc ");
-            @println(";F%: %\n", index, real_name);
+        } else {|
+            gen.backend.out&.push_all("define private ccc ");
         };
-        name := @format("F%", body.func.to_index()) temp();
+        name: List(u8) = list(temp());
+        gen.backend&.fmt_fn_name(body.func, name&);
         gen.backend&.write_header(body.signeture, name.items()) {arg_index|
             s := @format("%arg%", "%", arg_index) temp();
             s.items()
@@ -109,9 +108,9 @@ fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: [] FuncId, entry: ProgramEntry) B
                 func := {comp.vtable.get_function}(comp.data, f);
                 // note: this only works because void has a fixed typeid value
                 if func.finished_arg.unwrap() == void {|
-                    @fmt(gen.backend.out&.current(), "   call void @F%()\n", f.to_index());
+                    @fmt(gen.backend.out&.current(), "   call void @%()\n", (gen.backend&, f));
                 } else {|
-                    @fmt(gen.backend.out&.current(), "   %% = call i64 @F%(i64 0)\n", "%", i, f.to_index());
+                    @fmt(gen.backend.out&.current(), "   %% = call i64 @%(i64 0)\n", "%", i, (gen.backend&, f));
                     i += 1;
                 };
             };
@@ -128,12 +127,12 @@ fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: [] FuncId, entry: ProgramEntry) B
     
     // Note: even if its unreachable because RUNTIME_STACK_TRACE=false, the binary is bigger.
     // TODO: if RUNTIME_STACK_TRACE
-    //gen.backend&.emit_debug_info(gen.funcs_done&);
+    gen.backend&.emit_debug_info(gen.funcs_done&);
     //       else
-    gen.backend.out&.current().push_all("""
-        @debug_names_len = private global i64 0
-        @debug_names = private global [0 x ptr] []
-    """);
+    //gen.backend.out&.current().push_all("""
+    //    @debug_names_len = private global i64 0
+    //    @debug_names = private global [0 x ptr] []
+    //""");
     
     // TODO: if alloc != temp { temp.reset(mark ? no but that wouldn't catch if they derived a new one from temp
     gen.backend.out
@@ -196,7 +195,7 @@ fn write_export_bounce(self: *EmitLlvm, fid: FuncId) void = {
     };
     self.out&.push_all("{\n");
     ret := self.inst_call(values.items(), sig) {|
-        @fmt(self.out&.current(), "@F%", fid.to_index());
+        @fmt(self.out&.current(), "@%", (self, fid));
     };
     self.inst_return(ret);
     self.out&.current().push_all("}\n");
@@ -224,7 +223,7 @@ fn emit_constant(self: *EmitLlvm, comp: CompCtx, id: BakedVarId) void = {
             for(parts[].items()){inner|
                 @match(inner) {
                     (fn FnPtr(f) => {
-                        @fmt(self.out&.current(), "ptr @F%,", f.to_index());
+                        @fmt(self.out&.current(), "ptr @%,", (self, f));
                         // TODO: make sure we emitted the function. 
                     });
                     (fn AddrOf(id) => {
@@ -263,7 +262,7 @@ fn emit_special(self: *EmitLlvm, body: *FuncImpl, func: *Func, bc: *FnBody) bool
             self.forward_declare(bc.signeture, false, import_name);
             
             self.out&.push_all("define private ccc ");
-            name := @format("F%", bc.func.to_index()) temp();
+            name := @format("%", (self, bc.func)) temp();
             values: List(LlvmVal) = list(temp());
             self.next_var = 0;
             self.write_header(bc.signeture, name.items()) {arg_index|
@@ -297,7 +296,7 @@ fn emit_special(self: *EmitLlvm, body: *FuncImpl, func: *Func, bc: *FnBody) bool
             self.next_var = 0;
             ir := get_string(comp.data, code[]);
             self.out&.push_all("define private ccc ");
-            name := @format("F%", bc.func.to_index()) temp();
+            name := @format("%", (self, bc.func)) temp();
             self.write_header(bc.signeture, name.items()) {arg_index|
                 args := func.arg.bindings.items();
                 arg := args[arg_index].name.Var.name;
@@ -333,10 +332,10 @@ fn emit_special_asm(self: *EmitLlvm, body: *FuncImpl, func: *Func, bc: *FnBody, 
         });
         (fn JittedAarch64(code) => { 
             if(arch.ne(Arch.Aarch64), => { return(false); });
-            name := @format("F%", bc.func.to_index()) temp();
+            name := @format("%", (self, bc.func)) temp();
             self.forward_declare(bc.signeture, false, name.items());
             
-            @fmt(self.out&.current(), "module asm \"_F%:\"\n", bc.func.to_index());
+            @fmt(self.out&.current(), "module asm \"_%:\"\n", (self, bc.func));
             for code { inst |
                 v := @as(i64) inst.zext();
                 @fmt(self.out&.current(), "module asm \".word %\"\n", v);
@@ -428,9 +427,24 @@ fn setup(self: *EmitLlvm, body: *FnBody, vars_out: *List(EmitLlvm.Val)) void = {
     self.out&.push_all("   br label %b0\n"); 
 }
 
+fn fmt_fn_name(self: *EmitLlvm, f: FuncId, out: *List(u8)) void = {
+    if RETAIN_FUNCTION_NAMES {|
+        func := {self.comp.vtable.get_function}(self.comp.data, f);
+        real_name := get_string(self.comp.data, func.name);
+        @fmt(out, "%__%", real_name, f.to_index());
+    } else {|
+        @fmt(out, "F%", f.to_index());
+    }
+}
+
+fn display(self: Ty(*EmitLlvm, FuncId), out: *List(u8)) void = {
+    self._0.fmt_fn_name(self._1, out)
+}
+
 fn inst_call(self: *EmitLlvm, args: Slice(LlvmVal), sig: PrimSig, f: FuncId, tail: bool) Slice(EmitLlvm.Val) = {
     self.inst_call(args, sig) {|
-        @fmt(self.out&.current(), "@F%", f.to_index());
+        self.out&.current().push_all("@");
+        self.fmt_fn_name(f, self.out&.current());
     }
 }
 
@@ -578,7 +592,7 @@ fn inst_func_ref(self: *EmitLlvm, fid: FuncId) EmitLlvm.Val = {
     v := self.get_var(.P64);
     self.out&.reserve(30);
     temp := self.get_var(.P64);
-    @fmt(self.out&.current(), "   % = ptrtoint ptr @F% to i64\n", temp, fid.to_index()); 
+    @fmt(self.out&.current(), "   % = ptrtoint ptr @% to i64\n", temp, (self, fid));
     @fmt(self.out&.current(), "   % = inttoptr i64 % to ptr\n", v, temp); 
     v
 }

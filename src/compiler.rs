@@ -4,7 +4,7 @@
 
 #![allow(clippy::wrong_self_convention)]
 
-use crate::self_hosted::{created_jit_fn_ptr_value, resolve_body, resolve_sign, save_bake_callback, show_error_line, Span};
+use crate::self_hosted::{self, created_jit_fn_ptr_value, resolve_body, resolve_sign, save_bake_callback, show_error_line, Span};
 use core::slice;
 use std::collections::HashSet;
 use std::ffi::CString;
@@ -452,7 +452,10 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         if self.program[f].cc.unwrap() != CallConv::Inline {
             if let FuncImpl::Normal(_) = self.program[f].body {
-                let body = emit_bc(self, f, when)?;
+                // let body = emit_bc(self, f, when).unwrap();
+                let body = unsafe {
+                    self_hosted::emit_bc(self, f, when)
+                }.unwrap();
                 // TODO: they can't try to do tailcalls between eachother because they disagress about what that means.
 
                 #[cfg(feature = "cranelift")]
@@ -1625,6 +1628,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 } else {
                     let var = *var;
                     where_the_fuck_am_i(self, expr.loc);
+                    println!("{}", self.log_trace());
                     ice!("Missing resolved variable {}", var.log(self.program.pool),)
                 }
             }

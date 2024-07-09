@@ -45,7 +45,20 @@ ResultLoc :: @enum(PushStack, ResAddr, Discard);
 ::enum(ResultLoc);
 ::enum(ExecStyle);
 
-fn new_emit_bc(comp: CompilerRs, f: FuncId, when: ExecStyle) Res(FnBody) #compiler = {
+fn emit_bc(comp: CompilerRs, f: FuncId, when: ExecStyle) Res(FnBody) #compiler = {
+    ::if(Res(FnBody));
+    if FEATURE_NEW_BC {|
+        func := comp[f]&;
+        name := comp.pool.get(func.name);
+        @println("Emit bc for %", name);
+        
+        new_emit_bc(comp, f, when)
+    } else {|
+        {comp.vtable.emit_bc}(comp.cast(), f, when)
+    }
+}
+
+fn new_emit_bc(comp: CompilerRs, f: FuncId, when: ExecStyle) Res(FnBody) = {
     assert(FEATURE_NEW_BC, "Tried use disabled wip FEATURE_NEW_BC");
     if when == .Aot {|
         // :bake_relocatable_value
@@ -106,7 +119,7 @@ fn empty_fn_body(comp: CompilerRs, func: FuncId, when: ExecStyle) Res(FnBody) = 
         name = f.name,
         want_log = f.has_tag(.log_bc),
         _deprecated_is_ssa_var = RsBitSet.zeroed(), // TODO: empty(),
-        signeture = @try(comp.prim_sig(f_ty, f.cc.unwrap())) return,
+        signeture = @try(comp.prim_sig(f_ty, f.cc.expect("known cc"))) return,
         alloc = comp[][].get_alloc(),
     ))
 }
@@ -136,7 +149,7 @@ fn bind_args(self: *EmitBc, result: *FnBody, arguments: *Pattern) Res([] Prim) =
     arity: u16 = arguments.bindings.len.trunc();
 
     func := self.program[result.func]&;
-    f_ty := func.finished_ty().unwrap();
+    f_ty := func.finished_ty().expect("known function type");
     arg_ty := f_ty.arg;
     pushed := if(result.signeture.first_arg_is_indirect_return, => 1, => 0);
     already_did_prims := self.program.get_primitives(@as(PrimKey) (arg_ty, arity, false, false)).is_some(); // TODO: make it so this is always true. -- Jul 6
@@ -186,8 +199,8 @@ fn bind_args(self: *EmitBc, result: *FnBody, arguments: *Pattern) Res([] Prim) =
                         self.program.get_info(types[0]).stride_bytes().zext(),
                         self.program.get_info(types[1]).align_bytes().zext(),
                     );
-                    p0 := self.program.prim(types[0]).unwrap();
-                    p1 := self.program.prim(types[1]).unwrap();
+                    p0 := self.program.prim(types[0]).expect("ret1 prim");
+                    p1 := self.program.prim(types[1]).expect("ret2 prim");
                     self.addr_var(result, id);
                     result.inc_ptr_bytes(offset_2.trunc());
                     result.push(StorePost = p1);
@@ -417,7 +430,7 @@ fn emit_body(self: *EmitBc, result: *FnBody, f: FuncId) PRes = {
         result[return_block].incoming_jumps += 1;
         result.current_block = return_block;
         if do_stacktrace {|
-            (_, pop) := self.program[][].env.inject_function_header.unwrap();
+            (_, pop) := self.program[][].env.inject_function_header.expect("only stacktrace when ready");
             sig := @try(prim_sig(
                 self.program,
                 (arg = void, ret = void, arity = 1),
@@ -432,14 +445,14 @@ fn emit_body(self: *EmitBc, result: *FnBody, f: FuncId) PRes = {
         result.push_to(return_block, .NoCompile);
     };
 
-    self.locals&.pop().unwrap();
+    self.locals&.pop().expect("outer scope to exist");
     assert(self.locals.is_empty(), "ICE: bc leaked scopes");
 
     if !ret.is_never() {|
         slots := self.program.slot_count(ret); // TODO: this is in the sig so don't look it up again. 
         op: Bc = @switch(slots) {
             @case(1) => {
-                a := self.program.prim(ret).unwrap();
+                a := self.program.prim(ret).expect("return prim");
                 //debug_assert_eq!(BigOption::Some(a), result.signeture.ret1); // TODO: debug_assert. derive eq
                 (Ret1 = a)
             };
@@ -627,6 +640,7 @@ fn do_binding(self: *EmitBc, result: *FnBody, name: ?Var, ty: Type, value: *FatE
 //
 // If result_location == .ResAddr, the top of the stack on entry to this function has the pointer where the result should be stored.
 fn compile_expr(self: *EmitBc, result: *FnBody, expr: *FatExpr, result_location: ResultLoc, can_tail: bool) PRes = {
+    println(expr.log(self.program.pool));
     @debug_assert(!expr.ty.is_unknown(), "Not typechecked: %. done: %", expr.log(self.program.pool), expr.done);
     @debug_assert(self.slot_count(expr.ty).lt(16).or(result_location != .PushStack), "% %", expr.log(self.program.pool), self.program.log_type(expr.ty));
     self.last_loc = expr.loc;
@@ -769,14 +783,15 @@ fn emit_call(self: *EmitBc, result: *FnBody, f: *FatExpr, arg: *FatExpr, result_
             };
         }
         fn Label(ret_ty) => {
+            println("early return");
             label := @unwrap(f.as_const(), "called label must be const") return;
             return_from := LabelId.assume_cast(label&)[];
             // result_location is the result of the ret() expression, which is Never and we don't care.
             ret := @unwrap(
-                self.inlined_return_addr&.get(return_from),
+                self.inlined_return_addr&.get_ptr(return_from),
                 "missing return label. forgot '=>' on function?"
             ) return;
-            ret.used = true;
+            ret.used = true;  // note: updating the one in the map! not a copy
             slots := @match(ret.result_loc) {
                 fn PushStack() => self.slot_count(ret_ty[]);
                 fn ResAddr() => {
@@ -790,6 +805,9 @@ fn emit_call(self: *EmitBc, result: *FnBody, f: *FatExpr, arg: *FatExpr, result_
             @try(self.compile_expr(result, arg, ret.result_loc, false)) return;
             result.push(Goto = (ip = ret.block, slots = slots));
             result[ret.block].incoming_jumps += 1;
+            // TODO: :FUCKED. if you dont have the early return here, it returns uninit memory. 
+            //       so like fall through doesnt get you to the same place.
+            return(.Ok);
         }
         @default => @panic("ICE: non callable: %", f.log(self.program.pool));
     };
@@ -800,7 +818,7 @@ fn emit_block_expr(self: *EmitBc, result: *FnBody, body: *RsVec(FatStmt), value:
     self.locals&.push(list(temp()));
     // TODO: make sure value.ty here is the same as expr.ty outside which is what i used to use. -- Jul 8  :audi
     out := self.program.get_info(value.ty);
-    @debug_assert(out.size_slots.lt(8).or(result_location != .PushStack));
+    @debug_assert(out.size_slots.lt(8).or(result_location != .PushStack), "pushing large value");
 
     // TODO: this shouldn't need type hint. 
     if ret_label { (ret_var: LabelId) | 
@@ -827,22 +845,28 @@ fn emit_block_expr(self: *EmitBc, result: *FnBody, body: *RsVec(FatStmt), value:
         };
 
         prev := self.inlined_return_addr&.insert(ret_var, ret);
-        @assert(prev.is_none());
+        @assert(prev.is_none(), "stomped ret var");
 
         each body { stmt | 
             @try(self.compile_stmt(result, stmt)) return;
         };
-        @try(self.compile_expr(result, value, result_location, can_tail)) return;
+        println("a");
+        r := self.compile_expr(result, value, result_location, can_tail);
+        println("b");
+        t := ptr_cast_unchecked(PRes, i64, r&)[];
+        println(t);
+        @try(r) return;
+        println("c");
 
         ret := self.inlined_return_addr&.remove(ret_var).unwrap();
         if result[return_block].incoming_jumps > 0 {|
-            @debug_assert(ret.used);
+            @debug_assert(ret.used, "expected jumps");
             slots := result[return_block].arg_slots;
             result.push(Goto = (ip = return_block, slots = slots));
             result[return_block].incoming_jumps += 1;
             result.current_block = return_block;
         } else {|
-            @debug_assert(!ret.used); 
+            @debug_assert(!ret.used, "expected no jumps"); 
             if ret.store_res_ssa_inst { f | 
                 (block, index) := f;
                 // if we didn't use it, don't bother asking the backend to save the register with the result address.
@@ -856,12 +880,11 @@ fn emit_block_expr(self: *EmitBc, result: *FnBody, body: *RsVec(FatStmt), value:
         each body { stmt |
             @try(self.compile_stmt(result, stmt)) return;
         };
-
         @try(self.compile_expr(result, value, result_location, can_tail)) return;
     };
 
     // TODO: check if you try to let an address to a variable escape from its scope.
-    slots := self.locals&.pop().unwrap();
+    slots := self.locals&.pop().expect("block to have scope");
     for slots { id |
         result.push(LastUse = (id = id ));
     };
@@ -1209,11 +1232,11 @@ fn construct_struct(self: *EmitBc, result: *FnBody, pattern: *Pattern, requested
             i := 0;
             each f.fields { field | 
                 continue :: local_return;
+                value := pattern.bindings[i]&;
                 i += 1;
                 if(field.kind == .Const, => continue());
                 
-                value := pattern.bindings[i]&;
-                @assert_eq(value.name.unwrap(), field.name);
+                @assert_eq(value.name.unwrap(), field.name, "field name mismatch");
                 
                 if result_location == .ResAddr {|
                     result.push(PeekDup = 0);
@@ -1257,7 +1280,7 @@ fn construct_struct(self: *EmitBc, result: *FnBody, pattern: *Pattern, requested
                         types&.ordered_remove(0);
                     };
                     expected_pad := size - (payload_size + 1);
-                    @debug_assert_eq(types.len(), expected_pad.zext());
+                    @debug_assert_eq(types.len(), expected_pad.zext(), "confused about padding size");
                     // now types is just padding
 
                     // If this is a smaller varient, pad out the slot.
@@ -1365,6 +1388,7 @@ fn inc_ptr_bytes(self: *FnBody, bytes: u16) void = {
 }
 
 fn push_to(self: *FnBody, b: BbId, inst: Bc) void = {
+    @println("%", inst&.tag());
     self[b].insts&.push(inst, self.alloc);
 }
 
@@ -1589,6 +1613,8 @@ fn prim(self: CompilerRs, ty: Type) ?Prim = {
             };
             .I64 // TODO: :tag_is_always_i64
         }
+        fn Named(f) => return(self.prim(f._0));
+        fn Enum(f) => return(self.prim(f.raw));
         @default => return(.None);
     };
     (Some = p)

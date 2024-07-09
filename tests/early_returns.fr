@@ -87,3 +87,55 @@ fn write_while_with_loop() = {
     };
     assert_eq(i, 10);
 }
+
+// this was from c_bindgen/should_jit
+// if you try to just return(true/false) in those branches,
+// it always returns the first branch. same if you use two ifs instead of switch. same either if you have blocks or just => return.
+// but i cant reporduce it so maybe it got fixed elsewhere
+// this has a different problem whcih feels related. 
+// segfault in memmove somehow, i dont see why we're even calling that.
+// oh its in the compiler. when you @panic with no fmt args
+#test fn early_return_branching() = {
+    fn should_jit(i: i64) i64 = {
+        @switch(i) {
+            @case(0) => {
+                return(7);
+            };
+            @case(1) => {
+                return(5);
+            };
+            @case(2) => {
+                return(should_jit(i + 1));
+            };
+            @case(3) => ();
+            @default => @panic("bad");
+        };
+        123
+    }
+    
+    assert_eq(5, should_jit(1));
+    assert_eq(7, should_jit(0));
+    assert_eq(123, should_jit(2));
+}
+
+#test fn early_return_branching2() = {
+    fn should_jit(args: Slice(Str)) bool = {
+        for args { s |
+            @switch(s) {
+                @case("-aot") => { 
+                    return(false);
+                };
+                @case("-jit") => {
+                    return(true);
+                };
+                @default => ();
+            };
+        };
+        panic("pass -jit or -aot");
+        true
+    }
+    
+    assert_eq(true, should_jit(@slice("-jit", "")));
+    assert_eq(false, should_jit(@slice("-aot", "")));
+}
+

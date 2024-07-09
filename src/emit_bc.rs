@@ -8,13 +8,16 @@
 
 #![allow(clippy::wrong_self_convention)]
 
-use crate::self_hosted::Span;
+use crate::self_hosted::{ParseErr, Span};
 use std::ops::Deref;
 
 use crate::ast::{CallConv, Expr, FatExpr, FnFlag, FnType, FuncId, FuncImpl, LabelId, Name, Program, Stmt, TypeId, TypeInfo};
 use crate::ast::{FatStmt, Flag, Pattern, Var, VarType};
 use crate::compiler::{CErr, Compile, ExecStyle, Res};
-use crate::export_ffi::{BigOption, BigResult::*};
+use crate::export_ffi::{
+    BigOption,
+    BigResult::{self, *},
+};
 use crate::logging::PoolLog;
 use crate::{assert, assert_eq, err, extend_options2, ice, unwrap};
 use crate::{bc::*, Map};
@@ -29,10 +32,10 @@ struct EmitBc<'z, 'p: 'z> {
     inlined_return_addr: Map<LabelId, ReturnAddr>,
 }
 
-pub extern "C" fn emit_bc<'p>(compile: &mut Compile<'_, 'p>, f: FuncId, when: ExecStyle) -> Res<'p, FnBody<'p>> {
+pub extern "C" fn emit_bc<'p>(compile: &mut Compile<'_, 'p>, f: FuncId, when: ExecStyle) -> BigResult<FnBody<'p>, ParseErr<'p>> {
     if when == ExecStyle::Aot {
         // :bake_relocatable_value
-        compile.check_for_new_aot_bake_overloads()?;
+        compile.check_for_new_aot_bake_overloads().unwrap();
     }
 
     // TODO: HACK. you want to make sure anything called inside the stack tracing functions doesn't try to trace themselves,
@@ -49,7 +52,10 @@ pub extern "C" fn emit_bc<'p>(compile: &mut Compile<'_, 'p>, f: FuncId, when: Ex
         Ok(t) => Ok(t),
         Err(e) => {
             log_err(compile, *e.clone());
-            Err(e)
+            Err(ParseErr {
+                span: e.loc.unwrap(),
+                msg: format!("{:?}", e.reason).leak(),
+            })
         }
     }
 }
@@ -567,7 +573,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                             extend_options2(&mut result.var_names, id as usize);
                             result.var_names[id as usize] = BigOption::Some(name);
                         }
-                        // TODO: a test that fails if you type put this line here. -- Jul 4 (see devlog.md)
+                        // TODO: a test that fails if you typo put this line here. -- Jul 4 (see devlog.md)
                         // result.addr_var(id);
                         self.locals.last_mut().unwrap().push(id);
                         let prev = self.var_lookup.insert(name, id);
