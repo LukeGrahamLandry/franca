@@ -4,7 +4,6 @@ use std::mem;
 use std::ptr::{slice_from_raw_parts, slice_from_raw_parts_mut};
 
 use crate::ast::{Program, TypeInfo, Var, VarType};
-use crate::emit_bc::ResultLoc;
 use crate::self_hosted::Ident;
 use crate::unwrap;
 use crate::{assert_eq, BitSet};
@@ -126,16 +125,6 @@ pub struct FnBody<'p> {
     pub signeture: PrimSig<'p>,
 }
 
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub struct ReturnAddr {
-    pub block: BbId,
-    pub result_loc: ResultLoc,
-    pub store_res_ssa_inst: BigOption<(BbId, usize)>,
-    pub res_ssa_id: BigOption<u16>,
-    pub used: bool,
-}
-
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BakedVarId(pub u32);
@@ -161,15 +150,6 @@ pub enum BakedEntry {
     AddrOf(BakedVarId),
 }
 
-impl<'p> FnBody<'p> {
-    pub fn add_var(&mut self, ty: TypeId) -> u16 {
-        self.vars.push(ty);
-        self.vars.len() as u16 - 1
-    }
-}
-
-pub type Value = i64;
-
 #[repr(C, i64)]
 #[derive(Clone, Hash, PartialEq, Eq, Debug)]
 pub enum Values {
@@ -184,29 +164,29 @@ impl From<u32> for Values {
 }
 
 impl Values {
-    pub fn bytes(&self) -> &[u8] {
+    pub(crate) fn bytes(&self) -> &[u8] {
         match self {
             Values::Big(bytes) => bytes,
             Values::Small(value, len) => unsafe { &*slice_from_raw_parts(value as *const i64 as *const u8, *len as usize) },
         }
     }
 
-    pub fn bytes_mut(&mut self) -> &mut [u8] {
+    pub(crate) fn bytes_mut(&mut self) -> &mut [u8] {
         match self {
             Values::Big(bytes) => bytes,
             Values::Small(value, len) => unsafe { &mut *slice_from_raw_parts_mut(value as *mut i64 as *mut u8, *len as usize) },
         }
     }
 
-    pub fn unit() -> Self {
+    pub(crate) fn unit() -> Self {
         Self::Small(0, 0)
     }
 
-    pub fn one(v: i64) -> Self {
+    pub(crate) fn one(v: i64) -> Self {
         Self::Small(v, 8)
     }
 
-    pub fn many(v: Vec<u8>) -> Self {
+    pub(crate) fn many(v: Vec<u8>) -> Self {
         if v.len() <= 8 {
             Self::from_bytes(&v)
         } else {
@@ -214,7 +194,7 @@ impl Values {
         }
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> Self {
+    pub(crate) fn from_bytes(bytes: &[u8]) -> Self {
         if bytes.len() <= 8 {
             let mut v = 0;
             let mut shift = 0;
@@ -228,17 +208,13 @@ impl Values {
         }
     }
 
-    pub fn is_unit(&self) -> bool {
-        self.bytes().is_empty()
-    }
-
     pub(crate) fn len(&self) -> usize {
         self.bytes().len()
     }
 }
 
-impl From<Value> for Values {
-    fn from(value: Value) -> Self {
+impl From<i64> for Values {
+    fn from(value: i64) -> Self {
         Values::one(value)
     }
 }
@@ -253,7 +229,7 @@ impl Values {
 
 use crate::export_ffi::{BigOption, BigResult::*};
 #[track_caller]
-pub fn to_values<'p, T: InterpSend<'p>>(program: &mut Program<'p>, mut t: T) -> Res<'p, Values> {
+pub(crate) fn to_values<'p, T: InterpSend<'p>>(program: &mut Program<'p>, mut t: T) -> Res<'p, Values> {
     let ty = T::get_or_create_type(program); // sigh
     let bytes = unsafe { &mut *slice_from_raw_parts_mut(&mut t as *mut T as *mut u8, mem::size_of::<T>()) };
     debug_assert_eq!(bytes.as_ptr() as usize % mem::align_of::<T>(), 0);
@@ -262,7 +238,7 @@ pub fn to_values<'p, T: InterpSend<'p>>(program: &mut Program<'p>, mut t: T) -> 
     Ok(Values::from_bytes(bytes))
 }
 
-pub fn from_values<'p, T: InterpSend<'p>>(program: &Program<'p>, mut t: Values) -> Res<'p, T> {
+pub(crate) fn from_values<'p, T: InterpSend<'p>>(program: &Program<'p>, mut t: Values) -> Res<'p, T> {
     assert_eq!(t.bytes().len(), mem::size_of::<T>(), "from_values {t:?}");
     let mut i = 0;
     let ty = T::get_type(program);
@@ -273,7 +249,7 @@ pub fn from_values<'p, T: InterpSend<'p>>(program: &Program<'p>, mut t: Values) 
 }
 
 // When binding const arguments you want to split a large value into smaller ones that can be referred to by name.
-pub fn chop_prefix<'p>(program: &Program<'p>, prefix: TypeId, t: &mut ReadBytes) -> Res<'p, Values> {
+pub(crate) fn chop_prefix<'p>(program: &Program<'p>, prefix: TypeId, t: &mut ReadBytes) -> Res<'p, Values> {
     let info = program.get_info(prefix);
     debug_assert_eq!(t.i % info.align_bytes as usize, 0);
     let bytes = info.stride_bytes;
@@ -282,7 +258,7 @@ pub fn chop_prefix<'p>(program: &Program<'p>, prefix: TypeId, t: &mut ReadBytes)
 }
 
 /// Take some opaque bytes and split them into ints. So (u8, u8) becomes a vec of two i64 but u16 becomes just one.
-pub fn deconstruct_values(
+pub(crate) fn deconstruct_values(
     program: &Program,
     ty: TypeId,
     bytes: &mut ReadBytes,
@@ -383,7 +359,7 @@ pub fn deconstruct_values(
     Ok(())
 }
 
-pub fn zero_padding(program: &Program, ty: TypeId, bytes: &mut [u8], i: &mut usize) -> Res<'static, ()> {
+pub(crate) fn zero_padding(program: &Program, ty: TypeId, bytes: &mut [u8], i: &mut usize) -> Res<'static, ()> {
     let info = program.get_info(ty);
     // println!("{}", program.log_type(ty));
     let size = info.stride_bytes as usize;
@@ -462,7 +438,7 @@ pub fn zero_padding(program: &Program, ty: TypeId, bytes: &mut [u8], i: &mut usi
     Ok(())
 }
 
-pub fn int_from_bytes(bytes: &[u8]) -> i64 {
+pub(crate) fn int_from_bytes(bytes: &[u8]) -> i64 {
     debug_assert_eq!(bytes.len(), 8);
     debug_assert_eq!(bytes.as_ptr() as i64 % 8, 0);
     unsafe { *(bytes.as_ptr() as *const i64) }
@@ -475,7 +451,7 @@ pub struct ReadBytes<'a> {
 }
 
 impl<'a> ReadBytes<'a> {
-    pub fn next_u8(&mut self) -> Option<u8> {
+    pub(crate) fn next_u8(&mut self) -> Option<u8> {
         if self.i < self.bytes.len() {
             self.i += 1;
             Some(self.bytes[self.i - 1])
@@ -483,7 +459,7 @@ impl<'a> ReadBytes<'a> {
             None
         }
     }
-    pub fn next_u16(&mut self) -> Option<u16> {
+    pub(crate) fn next_u16(&mut self) -> Option<u16> {
         debug_assert_eq!(self.i % 2, 0);
         if self.i + 1 < self.bytes.len() {
             self.i += 2;
@@ -492,7 +468,7 @@ impl<'a> ReadBytes<'a> {
             None
         }
     }
-    pub fn next_u32(&mut self) -> Option<u32> {
+    pub(crate) fn next_u32(&mut self) -> Option<u32> {
         debug_assert_eq!(self.i % 4, 0);
         if self.i + 3 < self.bytes.len() {
             self.i += 4;
@@ -501,7 +477,7 @@ impl<'a> ReadBytes<'a> {
             None
         }
     }
-    pub fn next_i64(&mut self) -> Option<i64> {
+    pub(crate) fn next_i64(&mut self) -> Option<i64> {
         debug_assert_eq!(self.i % 8, 0);
         if self.i + 7 < self.bytes.len() {
             self.i += 8;
@@ -511,7 +487,7 @@ impl<'a> ReadBytes<'a> {
         }
     }
 
-    pub fn take(&mut self, len: usize) -> Option<&[u8]> {
+    pub(crate) fn take(&mut self, len: usize) -> Option<&[u8]> {
         if self.bytes.len() - self.i >= len {
             let res = Some(&self.bytes[self.i..self.i + len]);
             self.i += len;
@@ -522,53 +498,6 @@ impl<'a> ReadBytes<'a> {
     }
 }
 
-#[derive(Default)]
-pub struct WriteBytes(pub Vec<u8>);
-
-impl WriteBytes {
-    pub fn push_u8(&mut self, v: u8) {
-        self.0.push(v)
-    }
-
-    pub fn push_u16(&mut self, v: u16) {
-        debug_assert_eq!(self.0.len() % 2, 0);
-        for v in v.to_le_bytes() {
-            self.0.push(v)
-        }
-    }
-
-    pub fn push_u32(&mut self, v: u32) {
-        debug_assert_eq!(self.0.len() % 4, 0);
-        for v in v.to_le_bytes() {
-            self.0.push(v)
-        }
-    }
-
-    pub fn push_i64(&mut self, v: i64) {
-        debug_assert_eq!(self.0.len() % 8, 0);
-        for v in v.to_le_bytes() {
-            self.0.push(v)
-        }
-    }
-}
-
-#[must_use]
-pub fn align_to(offset: usize, align: usize) -> usize {
-    if offset % align == 0 {
-        offset
-    } else {
-        offset + align - offset % align
-    }
-}
-#[must_use]
-pub fn align_backwards(offset: usize, align: usize) -> usize {
-    if offset % align == 0 {
-        offset
-    } else {
-        offset - align + offset % align
-    }
-}
-
-pub fn is_float(slot_index: usize, slots: u16, float_mask: u32) -> bool {
+pub(crate) fn is_float(slot_index: usize, slots: u16, float_mask: u32) -> bool {
     (float_mask >> (slots - slot_index as u16 - 1)) & 1 == 1
 }

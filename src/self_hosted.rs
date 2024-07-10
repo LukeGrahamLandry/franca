@@ -3,7 +3,7 @@ use std::marker::PhantomData;
 use crate::{
     ast::{FatExpr, FatStmt, Flag, Func, FuncId, LazyType, OverloadSetId, Pattern, ScopeId, TypeId, Var},
     bc::{BakedEntry, BakedVar, BakedVarId, FnBody},
-    compiler::{CErr, Compile, CompileError, ExecStyle, Scope},
+    compiler::{CErr, Compile, CompileError, ExecStyle},
     err,
     export_ffi::{BigOption, ImportVTable},
     ffi::InterpSend,
@@ -16,14 +16,14 @@ use crate::export_ffi::BigResult::*;
 pub struct SelfHosted<'p> {
     pub pool: *mut (),
     pub codemap: *mut (),
-    pub parser: *mut (),
+    parser: *mut (),
     _arena: *mut (),
     scopes: *mut (),
     pub vtable: *const ImportVTable,
     _baked: *mut (),
     pub last_loc: Span,
     pub env: Box<ComptimeEnvironment>,
-    pub a: PhantomData<&'p u8>,
+    a: PhantomData<&'p u8>,
 }
 
 pub struct ComptimeEnvironment {
@@ -31,11 +31,6 @@ pub struct ComptimeEnvironment {
     pub make_slice_t: BigOption<FuncId>,
     pub bake_os: BigOption<OverloadSetId>,
     pub fat_expr_type: BigOption<TypeId>,
-}
-
-pub struct Scopes<'p> {
-    pub scopes: Vec<Scope<'p>>,
-    pub next_var: u32,
 }
 
 #[repr(C)]
@@ -65,7 +60,7 @@ use crate::export_ffi::BigResult;
 #[allow(improper_ctypes)]
 #[link(name = "franca")]
 extern "C" {
-    pub fn init_self_hosted<'p>() -> Box<SelfHosted<'p>>;
+    pub(crate) fn init_self_hosted<'p>() -> Box<SelfHosted<'p>>;
     fn insert_owned<'p>(s: *mut (), s: &[u8]) -> Ident<'p>;
     fn get<'p>(s: *mut (), s: Ident<'p>) -> &'p [u8];
     fn get_c_str(s: *mut (), s: Ident) -> *const u8;
@@ -76,7 +71,7 @@ extern "C" {
     pub(crate) fn log_func(pool: *mut (), s: &Func) -> *const str;
     pub(crate) fn log_lazy_type(pool: *mut (), s: &LazyType) -> *const str;
     pub fn self_hosted_main(vtable: *const ImportVTable);
-    pub fn show_error_line(codemap: *mut (), span_low: u32, span_high: u32);
+    pub(crate) fn show_error_line(codemap: *mut (), span_low: u32, span_high: u32);
 
     fn put_constant(scopes: *mut (), name: Var, value: FatExpr, ty: LazyType);
     fn get_var_type(scopes: *mut (), v: Var) -> BigOption<TypeId>;
@@ -98,28 +93,26 @@ extern "C" {
     ) -> BigResult<(), ParseErr<'p>>;
 
     pub(crate) fn get_baked(c: &SelfHosted, id: BakedVarId) -> *const (i64, BakedVar);
-    // TODO: remove these when emit_bc is self hosted
-    pub(crate) fn put_baked(c: &SelfHosted, v: BakedVar, jit_ptr: BigOption<i64>) -> BakedVarId;
 
-    pub fn emit_bc<'p>(comp: &mut Compile<'_, 'p>, f: FuncId, when: ExecStyle) -> BigResult<FnBody<'p>, ParseErr<'p>>;
+    pub(crate) fn emit_bc<'p>(comp: &mut Compile<'_, 'p>, f: FuncId, when: ExecStyle) -> BigResult<FnBody<'p>, ParseErr<'p>>;
 }
 
 impl<'p> SelfHosted<'p> {
-    pub fn intern(&self, s: &str) -> Ident<'p> {
+    pub(crate) fn intern(&self, s: &str) -> Ident<'p> {
         let s = s.as_bytes().to_vec();
         // TODO: my version of the pool doesn't want to own things. :LEAK
         unsafe { insert_owned(self.pool, s.leak()) }
     }
 
-    pub fn get(&self, s: Ident<'p>) -> &'p str {
+    pub(crate) fn get(&self, s: Ident<'p>) -> &'p str {
         unsafe { std::str::from_utf8_unchecked(get(self.pool, s)) }
     }
 
-    pub fn get_c_str(&self, s: Ident<'p>) -> *const u8 {
+    pub(crate) fn get_c_str(&self, s: Ident<'p>) -> *const u8 {
         unsafe { get_c_str(self.pool, s) }
     }
 
-    pub fn source_slice(&self, span: Span) -> &'p str {
+    pub(crate) fn source_slice(&self, span: Span) -> &'p str {
         unsafe { &*source_slice(self.codemap, span.low, span.high) }
     }
 
@@ -137,7 +130,7 @@ impl<'p> SelfHosted<'p> {
         unsafe { put_constant(self.scopes, name, value, ty) }
     }
 
-    pub fn get_var_type(&self, v: Var) -> BigOption<TypeId> {
+    pub(crate) fn get_var_type(&self, v: Var) -> BigOption<TypeId> {
         unsafe { get_var_type(self.scopes, v) }
     }
 
@@ -179,7 +172,7 @@ impl Flag {
 }
 
 impl<'p> Ident<'p> {
-    pub fn null() -> Ident<'p> {
+    pub(crate) fn null() -> Ident<'p> {
         Ident(0, PhantomData)
     }
 }

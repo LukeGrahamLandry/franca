@@ -1,15 +1,13 @@
 #![allow(improper_ctypes_definitions)]
 
 use crate::self_hosted::{resolve_root, show_error_line, ParseErr, SelfHosted};
-use crate::unwrap2;
 
 use crate::ast::{
     garbage_loc, CallConv, Expr, FatExpr, FatStmt, Flag, FnFlag, FnType, Func, FuncId, IntTypeInfo, LazyType, Pattern, Program, ScopeId, TargetArch,
     TypeId, TypeInfo, TypeMeta, WalkAst,
 };
-use crate::bc::{from_values, BakedVar, BakedVarId, FnBody, PrimSig, Values};
+use crate::bc::{from_values, BakedVarId, FnBody, Values};
 use crate::compiler::{want, Compile, CompileError, ExecStyle, Res, ResultType, Unquote, EXPECT_ERR_DEPTH};
-use crate::emit_bc::prim_sig;
 use crate::ffi::InterpSend;
 use crate::logging::{unwrap, PoolLog};
 use crate::overloading::where_the_fuck_am_i;
@@ -119,37 +117,31 @@ pub enum BigResult<T, E> {
 }
 impl<T, E: Debug> BigResult<T, E> {
     #[track_caller]
-    pub fn unwrap(self) -> T {
+    pub(crate) fn unwrap(self) -> T {
         match self {
             Ok(t) => t,
             Err(e) => panic!("Unwrapped error value: {e:?}"),
         }
     }
 
-    pub fn is_err(&self) -> bool {
+    pub(crate) fn is_err(&self) -> bool {
         matches!(self, Err(_))
     }
 
-    pub fn is_ok(&self) -> bool {
+    pub(crate) fn is_ok(&self) -> bool {
         matches!(self, Ok(_))
     }
 
-    pub fn unwrap_or_else(self, f: impl FnOnce(E) -> T) -> T {
+    pub(crate) fn unwrap_or_else(self, f: impl FnOnce(E) -> T) -> T {
         match self {
             Ok(t) => t,
             Err(e) => f(e),
         }
     }
-    pub fn map_err<E2>(self, f: impl FnOnce(E) -> E2) -> BigResult<T, E2> {
+    pub(crate) fn map_err<E2>(self, f: impl FnOnce(E) -> E2) -> BigResult<T, E2> {
         match self {
             Ok(t) => Ok(t),
             Err(e) => Err(f(e)),
-        }
-    }
-    pub fn map_ok<TT>(self, f: impl FnOnce(T) -> TT) -> BigResult<TT, E> {
-        match self {
-            Ok(t) => Ok(f(t)),
-            Err(e) => Err(e),
         }
     }
 }
@@ -231,7 +223,7 @@ pub struct ImportVTable {
     _emit_llvm: usize,
     number_of_functions: unsafe extern "C" fn(c: &mut &mut Program) -> i64,
     _bake_var: usize,
-    franca_prim_sig2: for<'p> extern "C" fn(c: &Compile<'_, 'p>, func: &Func<'p>) -> Res<'p, PrimSig<'p>>,
+    _h: usize,
     clone_expr: for<'p> extern "C" fn(e: &FatExpr<'p>) -> FatExpr<'p>,
     clone_type: for<'p> extern "C" fn(e: &LazyType<'p>) -> LazyType<'p>,
     intern_type: for<'p> extern "C" fn(compile: &mut Compile<'_, 'p>, e: TypeInfo<'p>) -> TypeId,
@@ -278,7 +270,7 @@ pub static IMPORT_VTABLE: ImportVTable = ImportVTable {
     _emit_llvm: 1,
     number_of_functions,
     _bake_var: 1,
-    franca_prim_sig2,
+    _h: 0,
     clone_expr,
     clone_type,
     intern_type: franca_intern_type,
@@ -309,12 +301,6 @@ extern "C" fn clone_expr<'p>(e: &FatExpr<'p>) -> FatExpr<'p> {
 
 extern "C" fn clone_type<'p>(e: &LazyType<'p>) -> LazyType<'p> {
     e.clone()
-}
-
-extern "C" fn franca_prim_sig2<'p>(c: &Compile<'_, 'p>, func: &Func<'p>) -> Res<'p, PrimSig<'p>> {
-    let Some(ty) = func.finished_ty() else { err!("fn ty not ready",) };
-    let cc = unwrap2!(func.cc, "cc not ready");
-    prim_sig(c.program, ty, cc)
 }
 
 extern "C" fn debug_log_bc<'p>(c: &Compile<'_, 'p>, body: &FnBody<'p>) {
@@ -424,10 +410,10 @@ unsafe extern "C" fn get_function_name<'p>(c: &mut Compile<'_, 'p>, f: FuncId) -
 // x86 doesn't need this and x86_64-unknown-linux-musl doesn't give me a fake one to link against
 #[cfg(target_arch = "aarch64")]
 extern "C" {
-    pub fn __clear_cache(beg: *mut libc::c_char, end: *mut libc::c_char);
+    pub(crate) fn __clear_cache(beg: *mut libc::c_char, end: *mut libc::c_char);
 }
 
-// pub fn __clear_cache(beg: *mut libc::c_char, end: *mut libc::c_char);
+// pub(crate) fn __clear_cache(beg: *mut libc::c_char, end: *mut libc::c_char);
 // IMPORTANT: since compile is repr(C), &mut &mut Program === &mut Compile
 pub const COMPILER: &[(&str, *const u8)] = &[
     ("#fold fn tag_value(E: Type, case_name: Symbol) i64", tag_value as *const u8),
@@ -508,7 +494,6 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     ("#macro fn Fn(Ret: FatExpr) FatExpr;", fn_type_macro_single as *const u8),
     ("#macro fn FnPtr( Ret: FatExpr) FatExpr;", fn_ptr_type_macro_single as *const u8),
     // ("#fold fn str(s: Symbol) Str", symbol_to_str as *const u8),
-    ("fn bake_value(v: BakedVar) BakedVarId", bake_value as *const u8),
     ("fn get_meta(t: Type) TypeMeta", get_meta as *const u8),
     // TODO: this should be a function, but then that needs a different bootstrapping path.
     ("#macro fn builtin(t: FatExpr) FatExpr", Compile::get_builtin_macro as *const u8),
@@ -529,11 +514,6 @@ extern "C-unwind" fn get_enum_tag_type(comp: &mut Compile, e: TypeId) -> TypeId 
 // TODO: write size_of in terms of this.
 extern "C-unwind" fn get_meta(comp: &mut Compile, ty: TypeId) -> TypeMeta {
     comp.program.get_info(ty)
-}
-
-// TODO: version of this that allows caching? but have to think more about when you're allowed to deduplicate.
-extern "C-unwind" fn bake_value(comp: &mut Compile, v: BakedVar) -> BakedVarId {
-    unsafe { crate::self_hosted::put_baked(comp.program.pool, v, BigOption::None) }
 }
 
 extern "C-unwind" fn get_size_of(compiler: &mut Compile, ty: TypeId) -> i64 {

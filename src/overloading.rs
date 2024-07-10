@@ -30,7 +30,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     // This can return None on valid callables: it might be a FnPtr or a Label (return).
-    pub fn maybe_direct_fn(&mut self, f: &mut FatExpr<'p>, arg: &mut FatExpr<'p>, ret: ResultType) -> Res<'p, Option<FuncId>> {
+    pub(crate) fn maybe_direct_fn(&mut self, f: &mut FatExpr<'p>, arg: &mut FatExpr<'p>, ret: ResultType) -> Res<'p, Option<FuncId>> {
         if let Some(ty) = ret.specific() {
             assert!(!ty.is_unknown());
         }
@@ -72,7 +72,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         })
     }
 
-    pub fn resolve_in_overload_set(&mut self, arg: &mut FatExpr<'p>, requested_ret: ResultType, i: OverloadSetId) -> Res<'p, FuncId> {
+    pub(crate) fn resolve_in_overload_set(&mut self, arg: &mut FatExpr<'p>, requested_ret: ResultType, i: OverloadSetId) -> Res<'p, FuncId> {
         let name = self.program[i].name;
         // This might be a bad idea. its really fucked up if you accidently create an overload with the same types but different arity.
         // should at least have an optional post-check for that.
@@ -283,7 +283,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     // TODO: use required_arity to typecheck less things.
-    pub fn compute_new_overloads(&mut self, i: OverloadSetId, required_arity: Option<u16>) -> Res<'p, ()> {
+    pub(crate) fn compute_new_overloads(&mut self, i: OverloadSetId, required_arity: Option<u16>) -> Res<'p, ()> {
         let overloads = &mut self.program[i];
         // debug_assert!(overloads.just_resolved.is_empty());
         let mut decls = mem::take(&mut overloads.pending); // Take any new things found since last time we looked at this function that haven't been typechecked yet.
@@ -462,7 +462,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 }
 
-pub fn where_the_fuck_am_i(comp: &Compile, loc: Span) {
+pub(crate) fn where_the_fuck_am_i(comp: &Compile, loc: Span) {
     let s = comp.program.pool.source_slice(loc);
     println!("You Are Here:\n {}", s)
 }

@@ -5,7 +5,7 @@ use std::fmt::{Debug, Formatter, Write};
 
 #[track_caller]
 #[inline(never)]
-pub fn break_here(e: &CErr) {
+pub(crate) fn break_here(e: &CErr) {
     let depth = unsafe { EXPECT_ERR_DEPTH.load(std::sync::atomic::Ordering::SeqCst) };
     if depth == 0 {
         // TODO: make this never happen so dont have to worry about short circuiting -- Apr 25
@@ -14,7 +14,7 @@ pub fn break_here(e: &CErr) {
 }
 
 #[track_caller]
-pub fn make_err(reason: CErr) -> Box<CompileError> {
+pub(crate) fn make_err(reason: CErr) -> Box<CompileError> {
     Box::new(CompileError {
         internal_loc: Some(std::panic::Location::caller()),
         loc: None,
@@ -132,7 +132,7 @@ use crate::ast::safe_rec;
 use crate::compiler::EXPECT_ERR_DEPTH;
 
 impl<'p> Program<'p> {
-    pub fn log_type(&self, t: TypeId) -> String {
+    pub(crate) fn log_type(&self, t: TypeId) -> String {
         if let Some(&Some(name)) = self.inferred_type_names.get(t.as_index()) {
             let name = self.pool.get(name);
             // HACK: need to be smarter about when to infer an assignment as a type name.
@@ -239,7 +239,7 @@ impl<'p> PoolLog<'p> for Func<'p> {
 }
 
 impl<'p> FnBody<'p> {
-    pub fn log(&self, program: &Program<'p>) -> String {
+    pub(crate) fn log(&self, program: &Program<'p>) -> String {
         let mut f = String::new();
 
         writeln!(
@@ -294,7 +294,7 @@ impl<'p> Debug for CompileError<'p> {
 }
 
 impl<'p> DebugState<'p> {
-    pub fn log(&self, pool: &SelfHosted<'p>, _: &Program<'p>) -> String {
+    pub(crate) fn log(&self, pool: &SelfHosted<'p>, _: &Program<'p>) -> String {
         match self {
             DebugState::Msg(s) => s.clone(),
             DebugState::Compile(f, i) => format!("| Compile    | {:?} {}", *f, pool.get(*i)),
@@ -312,7 +312,7 @@ impl<'p> DebugState<'p> {
 }
 
 impl<'p> CErr<'p> {
-    pub fn log(&self, program: &Program<'p>, pool: &SelfHosted<'p>) -> String {
+    pub(crate) fn log(&self, program: &Program<'p>, pool: &SelfHosted<'p>) -> String {
         match self {
             &CErr::UndeclaredIdent(i) => format!("Undeclared Ident: {i:?} = {}", pool.get(i)),
             &CErr::TypeCheck(found, expected, msg) => format!(
@@ -452,12 +452,6 @@ impl<'p> Program<'p> {
             }
             _ => format!("{indent} bad conversion"),
         }
-    }
-}
-
-impl<'p> FatStmt<'p> {
-    pub fn log_annotations(&self, pool: &SelfHosted<'p>) -> String {
-        self.annotations.iter().map(|a| pool.get(a.name)).collect()
     }
 }
 

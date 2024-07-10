@@ -13,7 +13,6 @@ use crate::{
 use std::ptr::addr_of;
 use std::{
     cell::RefCell,
-    collections::HashMap,
     hash::Hash,
     mem::{self, transmute},
     ops::{Deref, DerefMut},
@@ -785,7 +784,6 @@ pub struct Program<'p> {
     pub types_extra: RefCell<Vec<Option<TypeMeta>>>,
     finished_layout_deep: BitSet,
     pub inferred_type_names: Vec<Option<Ident<'p>>>,
-    pub primitives: RefCell<HashMap<(TypeId, u16, bool, bool), Vec<Prim>>>,
 }
 
 impl_index_imm!(Program<'p>, TypeId, TypeInfo<'p>, types);
@@ -857,11 +855,10 @@ pub struct IntTypeInfo {
 }
 
 impl<'p> Program<'p> {
-    pub fn new(comptime_arch: TargetArch) -> Self {
+    pub(crate) fn new(comptime_arch: TargetArch) -> Self {
         let pool = Box::leak(unsafe { init_self_hosted() });
         pool.vtable = addr_of!(IMPORT_VTABLE);
         let mut program = Self {
-            primitives: Default::default(),
             finished_layout_deep: BitSet::empty(),
             // these are hardcoded numbers in TypeId constructors
             // if you remove any remember to fix later indices!
@@ -1085,7 +1082,7 @@ impl<'p> Program<'p> {
         Ok(())
     }
 
-    pub fn find_unique_func(&self, name: Ident<'p>) -> Option<FuncId> {
+    pub(crate) fn find_unique_func(&self, name: Ident<'p>) -> Option<FuncId> {
         for overloads in &self.overload_sets {
             if overloads.name == name {
                 if overloads.ready.is_empty() && overloads.pending.len() == 1 {
@@ -1162,13 +1159,6 @@ impl<'p> Program<'p> {
             Expr::StructLiteralP(parts) => parts.bindings.len() as u16,
             _ => 1,
         }
-    }
-
-    pub(crate) fn get_primitives(&self, key: (TypeId, u16, bool, bool)) -> Option<&'p [Prim]> {
-        self.primitives
-            .borrow()
-            .get(&key)
-            .map(|found| unsafe { &*(found.deref() as *const [Prim]) })
     }
 
     pub(crate) fn get_baked_addr(&self, id: crate::bc::BakedVarId) -> *const u8 {
@@ -1305,7 +1295,7 @@ impl<'p> Program<'p> {
     // TODO: Unsized types. Any should be a TypeId and then some memory with AnyPtr being the fat ptr version.
     //       With raw Any version, you couldn't always change types without reallocating the space and couldn't pass it by value.
     //       AnyScalar=(TypeId, one value), AnyPtr=(TypeId, one value=stack/heap ptr), AnyUnsized=(TypeId, some number of stack slots...)
-    pub fn get_info(&self, ty: TypeId) -> TypeMeta {
+    pub(crate) fn get_info(&self, ty: TypeId) -> TypeMeta {
         let ty = self.raw_type(ty);
         extend_options(self.types_extra.borrow_mut().deref_mut(), ty.as_index());
         if let Some(info) = self.types_extra.borrow_mut().deref_mut()[ty.as_index()] {
@@ -1507,7 +1497,7 @@ impl<'p> Default for Func<'p> {
     }
 }
 
-pub fn garbage_loc() -> Span {
+pub(crate) fn garbage_loc() -> Span {
     // Surely any (u32, u32) is valid
     unsafe { mem::zeroed() }
 }
@@ -1677,7 +1667,7 @@ macro_rules! flag_subset {
     ($ty:ty, $before:expr, $after:expr) => {
         impl $ty {
             #[track_caller]
-            pub fn try_from(value: Ident) -> Res<$ty> {
+            pub(crate) fn try_from(value: Ident) -> Res<$ty> {
                 // # Safety
                 // https://rust-lang.github.io/unsafe-code-guidelines/layout/enums.html
                 // "As in C, discriminant values that are not specified are defined as either 0 (for the first variant) or as one more than the prior variant."
@@ -1694,7 +1684,6 @@ macro_rules! flag_subset {
     };
 }
 
-flag_subset!(TargetArch, Flag::_Reserved_Null_, Flag::_Reserved_End_Arch_);
 flag_subset!(Flag, Flag::_Reserved_Null_, Flag::_Reserved_Count_);
 
 /// When the compiler is compiled in debug mode, we set specific bits in different index types as a runtime tag to make sure we're right about what type an integer is interpreted as.
@@ -1733,7 +1722,7 @@ macro_rules! tagged_index {
                 Self(value as $backing | Self::MASK)
             }
 
-            pub(crate) fn is_valid(self) -> bool {
+            pub fn is_valid(self) -> bool {
                 cfg!(not(debug_assertions)) || (self.0 & Self::MASK) != 0
             }
         }

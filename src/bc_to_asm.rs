@@ -5,13 +5,13 @@
 #![allow(unused)]
 
 use crate::ast::{CallConv, Flag, FnFlag, FnType, Func, FuncId, FuncImpl, TypeId, TypeInfo};
-use crate::bc::{is_float, BbId, Bc, Prim, PrimSig, Value, Values};
+use crate::bc::{is_float, BbId, Bc, Prim, PrimSig, Values};
 use crate::compiler::{add_unique, Compile, ExecStyle, Res};
 use crate::export_ffi::{BigOption, BigResult::*};
 use crate::BitSet;
 use crate::{ast::Program, bc::FnBody};
 use crate::{err, logging::PoolLog};
-use crate::{extend_options, unwrap, where_am_i};
+use crate::{extend_options, unwrap};
 use std::arch::asm;
 use std::cell::UnsafeCell;
 use std::fmt::Debug;
@@ -73,7 +73,7 @@ const MEM_32: i64 = 0b10;
 const MEM_16: i64 = 0b01;
 const MEM_08: i64 = 0b00;
 
-pub fn emit_aarch64<'p>(compile: &mut Compile<'_, 'p>, f: FuncId, when: ExecStyle, body: &FnBody<'p>) -> Res<'p, ()> {
+pub(crate) fn emit_aarch64<'p>(compile: &mut Compile<'_, 'p>, f: FuncId, when: ExecStyle, body: &FnBody<'p>) -> Res<'p, ()> {
     // TODO: this should be true but breaks for aot with new baked constant trait. maybe its counting random callees when just done for aot but not actually asm?  -- Jun 19
     // debug_assert!(!compile.program[f].get_flag(FnFlag::AsmDone), "ICE: tried to double compile?");
     compile.aarch64.extend_blanks(f);
@@ -1107,18 +1107,7 @@ impl Val {
 use crate::ffi::InterpSend;
 pub use jit::Jitted;
 
-pub fn store_to_ints<'a>(values: impl Iterator<Item = &'a Value>) -> Vec<i64> {
-    let mut out = vec![];
-    for value in values {
-        // if *value != Value::Unit {
-        out.push(*value);
-        // }
-    }
-    out
-}
-
 extern "C-unwind" fn not_compiled(a: i64, b: i64, c: i64) {
-    where_am_i();
     panic!("Tried to call un-compiled function. (x0={a}, x1={b}, x2={c})");
 }
 
@@ -1127,7 +1116,6 @@ pub mod jit {
 
     use crate::ast::FuncId;
     use crate::bc_to_asm::brk;
-    use crate::{JITTED_PAGE, STATS};
     use std::cell::UnsafeCell;
     use std::ptr::{null, null_mut};
     use std::slice;
@@ -1151,7 +1139,7 @@ pub mod jit {
 
     // TODO: https://community.arm.com/arm-community-blogs/b/architectures-and-processors-blog/posts/caches-and-self-modifying-code
     impl Jitted {
-        pub fn new(bytes: usize) -> Self {
+        pub(crate) fn new(bytes: usize) -> Self {
             let mmapped = unsafe {
                 libc::mmap(
                     null_mut(),
@@ -1163,7 +1151,6 @@ pub mod jit {
                 )
             } as *mut u8;
             assert_eq!(mmapped as usize % 4, 0, "alignment's fucked");
-            unsafe { JITTED_PAGE = (mmapped as usize, bytes) }
             Self {
                 current_start: mmapped,
                 low: mmapped as usize,
@@ -1177,7 +1164,7 @@ pub mod jit {
             }
         }
 
-        pub fn copy_inline_asm(&mut self, f: FuncId, insts: &[u32]) {
+        pub(crate) fn copy_inline_asm(&mut self, f: FuncId, insts: &[u32]) {
             self.mark_start(f);
             for op in insts {
                 let op = *op as i64;
@@ -1193,26 +1180,26 @@ pub mod jit {
         }
 
         #[track_caller]
-        pub fn get_dispatch(&self) -> *const *const u8 {
+        pub(crate) fn get_dispatch(&self) -> *const *const u8 {
             self.dispatch.as_ptr()
         }
 
-        pub fn get_fn(&self, f: FuncId) -> Option<*const u8> {
+        pub(crate) fn get_fn(&self, f: FuncId) -> Option<*const u8> {
             self.dispatch
                 .get(f.as_index())
                 .and_then(|f| if (*f) as usize == Self::empty() { None } else { Some(*f) })
         }
 
         #[allow(clippy::not_unsafe_ptr_arg_deref)]
-        pub fn offset_words(&self, from_ip: *const u8, to_ip: *const u8) -> i64 {
+        pub(crate) fn offset_words(&self, from_ip: *const u8, to_ip: *const u8) -> i64 {
             unsafe { (to_ip.offset_from(from_ip) as i64 / 4) }
         }
 
-        pub fn prev(&self) -> *const u8 {
+        pub(crate) fn prev(&self) -> *const u8 {
             unsafe { self.next.offset(-4) }
         }
 
-        pub fn patch(&mut self, ip: *const u8, inst_value: i64) {
+        pub(crate) fn patch(&mut self, ip: *const u8, inst_value: i64) {
             unsafe {
                 let ptr = ip as *mut u32;
                 debug_assert_eq!(*ptr, brk(0) as u32, "unexpected patch");
@@ -1220,7 +1207,7 @@ pub mod jit {
             };
         }
 
-        pub fn push(&mut self, inst: i64) {
+        pub(crate) fn push(&mut self, inst: i64) {
             unsafe {
                 debug_assert!((self.next as usize) < self.high, "OOB {} {}", self.next as usize, self.high);
                 *(self.next as *mut u32) = inst as u32;
@@ -1229,20 +1216,20 @@ pub mod jit {
         }
 
         // Recursion shouldn't have to slowly lookup the start address.
-        pub fn mark_start(&mut self, f: FuncId) {
+        pub(crate) fn mark_start(&mut self, f: FuncId) {
             debug_assert_eq!(self.current_start as usize % 4, 0);
             self.extend_blanks(f);
             self.dispatch[f.as_index()] = self.current_start;
         }
 
-        pub fn extend_blanks(&mut self, f: FuncId) {
+        pub(crate) fn extend_blanks(&mut self, f: FuncId) {
             while self.dispatch.len() < f.as_index() + 1 {
                 self.dispatch.push(Self::empty() as *const u8);
                 self.ranges.push(&[]);
             }
         }
 
-        pub fn save_current(&mut self, f: FuncId) {
+        pub(crate) fn save_current(&mut self, f: FuncId) {
             debug_assert_ne!(self.next as usize, self.old as usize);
             debug_assert_ne!(self.next as usize, self.current_start as usize);
             self.extend_blanks(f);
@@ -1260,7 +1247,7 @@ pub mod jit {
         }
 
         // Returns the range of memory we've written since the last call.
-        pub fn bump_dirty(&mut self) -> (*mut u8, *mut u8) {
+        pub(crate) fn bump_dirty(&mut self) -> (*mut u8, *mut u8) {
             let dirty = (self.old, self.next);
             if self.old as usize != self.next as usize {
                 debug_assert_eq!(self.next as usize, self.current_start as usize);
@@ -1285,75 +1272,75 @@ use encoding::*;
 mod encoding {
     use crate::signed_truncate;
 
-    pub fn add_im(sf: i64, dest: i64, src: i64, imm: i64, lsl_12: i64) -> i64 {
+    pub(crate) fn add_im(sf: i64, dest: i64, src: i64, imm: i64, lsl_12: i64) -> i64 {
         sf << 31 | 0b100010 << 23 | lsl_12 << 22 | imm << 10 | src << 5 | dest
     }
 
-    pub fn sub_im(sf: i64, dest: i64, src: i64, imm: i64, lsl_12: i64) -> i64 {
+    pub(crate) fn sub_im(sf: i64, dest: i64, src: i64, imm: i64, lsl_12: i64) -> i64 {
         sf << 31 | 0b10100010 << 23 | lsl_12 << 22 | imm << 10 | src << 5 | dest
     }
 
-    pub fn cmp_im(sf: i64, src: i64, imm: i64, lsl_12: i64) -> i64 {
+    pub(crate) fn cmp_im(sf: i64, src: i64, imm: i64, lsl_12: i64) -> i64 {
         sf << 31 | 0b11100010 << 23 | lsl_12 << 22 | imm << 10 | src << 5 | 0b11111
     }
 
-    pub fn movz(sf: i64, dest: i64, imm: i64, hw: i64) -> i64 {
+    pub(crate) fn movz(sf: i64, dest: i64, imm: i64, hw: i64) -> i64 {
         sf << 31 | 0b10100101 << 23 | hw << 21 | imm << 5 | dest
     }
 
-    pub fn movk(sf: i64, dest: i64, imm: i64, hw: i64) -> i64 {
+    pub(crate) fn movk(sf: i64, dest: i64, imm: i64, hw: i64) -> i64 {
         sf << 31 | 0b11100101 << 23 | hw << 21 | imm << 5 | dest
     }
 
-    pub fn mov(sf: i64, dest: i64, src: i64) -> i64 {
+    pub(crate) fn mov(sf: i64, dest: i64, src: i64) -> i64 {
         sf << 31 | 0b101010 << 24 | src << 16 | 0b11111 << 5 | dest
     }
 
-    pub fn cbz(sf: i64, offset: i64, val: i64) -> i64 {
+    pub(crate) fn cbz(sf: i64, offset: i64, val: i64) -> i64 {
         sf << 31 | 0b110100 << 24 | signed_truncate(offset, 19) << 5 | val
     }
 
-    pub fn b(offset: i64, set_link: i64) -> i64 {
+    pub(crate) fn b(offset: i64, set_link: i64) -> i64 {
         set_link << 31 | 0b101 << 26 | signed_truncate(offset, 26)
     }
 
-    pub fn b_cond(offset: i64, cond: i64) -> i64 {
+    pub(crate) fn b_cond(offset: i64, cond: i64) -> i64 {
         0b1010100 << 24 | signed_truncate(offset, 19) << 5 | cond
     }
 
-    pub fn ret(_: ()) -> i64 {
+    pub(crate) fn ret(_: ()) -> i64 {
         0b11010110010111110000001111000000
     }
 
-    pub fn str_uo(size: i64, src: i64, addr: i64, offset_words: i64) -> i64 {
+    pub(crate) fn str_uo(size: i64, src: i64, addr: i64, offset_words: i64) -> i64 {
         size << 30 | 0b11100100 << 22 | offset_words << 10 | addr << 5 | src
     }
 
-    pub fn ldr_uo(size: i64, dest: i64, addr: i64, offset_words: i64) -> i64 {
+    pub(crate) fn ldr_uo(size: i64, dest: i64, addr: i64, offset_words: i64) -> i64 {
         size << 30 | 0b11100101 << 22 | offset_words << 10 | addr << 5 | dest
     }
 
-    pub fn ldp_so(sf: i64, dest1: i64, dest2: i64, addr: i64, offset_words: i64) -> i64 {
+    pub(crate) fn ldp_so(sf: i64, dest1: i64, dest2: i64, addr: i64, offset_words: i64) -> i64 {
         sf << 31 | 0b10100101 << 22 | signed_truncate(offset_words, 7) << 15 | dest2 << 10 | addr << 5 | dest1
     }
 
-    pub fn stp_so(sf: i64, src1: i64, src2: i64, addr: i64, offset_words: i64) -> i64 {
+    pub(crate) fn stp_so(sf: i64, src1: i64, src2: i64, addr: i64, offset_words: i64) -> i64 {
         sf << 31 | 0b10100100 << 22 | signed_truncate(offset_words, 7) << 15 | src2 << 10 | addr << 5 | src1
     }
 
-    pub fn br(addr: i64, set_link: i64) -> i64 {
+    pub(crate) fn br(addr: i64, set_link: i64) -> i64 {
         0b1101011000 << 22 | set_link << 21 | 0b11111000000 << 10 | addr << 5
     }
 
-    pub fn brk(context: i64) -> i64 {
+    pub(crate) fn brk(context: i64) -> i64 {
         0b11010100001 << 21 | context << 5
     }
 
-    pub fn f_ldr_uo(sf: i64, dest: i64, addr: i64, offset_scaled: i64) -> i64 {
+    pub(crate) fn f_ldr_uo(sf: i64, dest: i64, addr: i64, offset_scaled: i64) -> i64 {
         0b1 << 31 | sf << 30 | 0b11110101 << 22 | offset_scaled << 10 | addr << 5 | dest
     }
 
-    pub fn f_str_uo(sf: i64, src: i64, addr: i64, offset_scaled: i64) -> i64 {
+    pub(crate) fn f_str_uo(sf: i64, src: i64, addr: i64, offset_scaled: i64) -> i64 {
         0b1 << 31 | sf << 30 | 0b11110100 << 22 | offset_scaled << 10 | addr << 5 | src
     }
 }

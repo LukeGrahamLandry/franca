@@ -32,7 +32,7 @@ use crate::{
     ast::{Expr, FatExpr, FnType, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo},
     self_hosted::Ident,
 };
-use crate::{bc::*, extend_options, ffi, unwrap2, Map, STACK_MIN, STATS};
+use crate::{bc::*, extend_options, ffi, unwrap2,  STATS};
 
 use crate::{assert, assert_eq, err, ice, unwrap};
 use BigResult::*;
@@ -79,24 +79,6 @@ pub struct Compile<'a, 'p> {
     
     pub already_loaded: HashSet<Ident<'p>>,
 }
-#[repr(C)]
-#[derive(Debug, Clone)]
-pub struct Scope<'p> {
-    pub parent: ScopeId,
-    pub constants: Map<Var<'p>, (FatExpr<'p>, LazyType<'p>)>,
-    pub rt_types: Map<Var<'p>, TypeId>,
-    pub vars: Vec<BlockScope<'p>>,
-    pub depth: usize,
-    pub name: Ident<'p>,
-    pub block_in_parent: usize,
-}
-
-#[repr(C)]
-#[derive(Debug, Clone)]
-pub struct BlockScope<'p> {
-    pub vars: Vec<Var<'p>>,
-    pub parent: usize,
-}
 
 // TODO: track location of macro expansions and have flag to dump them when printing error messages error messages.
 #[repr(C, i64)]
@@ -118,7 +100,7 @@ pub enum DebugState<'p> {
 pub static mut EXPECT_ERR_DEPTH: AtomicIsize = AtomicIsize::new(0);
 
 impl<'a, 'p> Compile<'a, 'p> {
-    pub fn new(program: &'a mut Program<'p>) -> Self {
+    pub(crate) fn new(program: &'a mut Program<'p>) -> Self {
         let c = Self {
             temp_vtable: addr_of!(IMPORT_VTABLE),
             already_loaded: Default::default(),
@@ -314,7 +296,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     #[track_caller]
-    pub fn log_trace(&self) -> String {
+    pub(crate) fn log_trace(&self) -> String {
         let mut out = String::new();
         writeln!(out, "=== TRACE ===").unwrap();
         // writeln!(out, "{}", Location::caller()).unwrap();  // Always called from the same place now so this is useless
@@ -338,7 +320,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         debug_assert_eq!(found, s, "{}", self.log_trace()); // TODO: fix the way i deal with errors. i dont always short circuit so this doesnt work
     }
 
-    pub fn compile_top_level(&mut self, ast: Func<'p>) -> Res<'p, FuncId> {
+    pub(crate) fn compile_top_level(&mut self, ast: Func<'p>) -> Res<'p, FuncId> {
         let f = self.add_func(ast)?;
 
         if let Err(mut e) = self.ensure_compiled(f, ExecStyle::Jit) {
@@ -385,12 +367,12 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(())
     }
 
-    pub fn compile(&mut self, f: FuncId, when: ExecStyle) -> Res<'p, ()> {
+    pub(crate) fn compile(&mut self, f: FuncId, when: ExecStyle) -> Res<'p, ()> {
         let r = self.compile_inner(f, when);
         self.tag_err(r)
     }
 
-    pub fn compile_inner(&mut self, f: FuncId, when: ExecStyle) -> Res<'p, ()> {
+    pub(crate) fn compile_inner(&mut self, f: FuncId, when: ExecStyle) -> Res<'p, ()> {
         // TODO: this is a little sketchy. can one merged arch cause asm_done to be set and then other arches don't get processed?
         //       i dont think so cause overloading short circuits, and what ever arch did happen will be in the dispatch table.
         //       need to revisit when not jitting tho.   -- May 16
@@ -482,7 +464,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         callees_done
     }
 
-    pub fn flush_callees(&mut self, f: FuncId) -> Res<'p, ()> {
+    pub(crate) fn flush_callees(&mut self, f: FuncId) -> Res<'p, ()> {
       
         for (from, to) in self.pending_redirects.drain(0..) {
             self.last_loc = Some(self.program[to].loc);
@@ -528,7 +510,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(())
     }
 
-    pub fn run(&mut self, f: FuncId, arg: Values) -> Res<'p, Values> {
+    pub(crate) fn run(&mut self, f: FuncId, arg: Values) -> Res<'p, Values> {
         let loc = self.last_loc;
         unsafe { STATS.jit_call += 1 };
         let state2 = DebugState::RunInstLoop(f, self.program[f].name);
@@ -573,24 +555,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         result
     }
 
-    pub fn call_jitted<Arg: InterpSend<'p>, Ret: InterpSend<'p>>(&mut self, f: FuncId, arg: Arg) -> Res<'p, Ret> {
-        self.ensure_compiled(f, ExecStyle::Jit)?;
-        let ty = self.program[f].unwrap_ty();
-        let arg_ty = Arg::get_or_create_type(self.program);
-        self.type_check_arg(arg_ty, ty.arg, "sanity ICE jit_arg")?;
-        let ret_ty = Ret::get_or_create_type(self.program);
-        self.type_check_arg(ret_ty, ty.ret, "sanity ICE jit_ret")?;
-        self.program.finish_layout_deep(arg_ty)?;
-        self.program.finish_layout_deep(ret_ty)?;
-        let arg = to_values(self.program, arg)?;
-        // let again = Arg::deserialize_from_ints(self.program, &mut ReadBytes { bytes: &bytes, i: 0 }); // TOOD: remove!
-        // debug_assert!(again.is_some());
-        let ret = self.run(f, arg)?;
-        from_values(self.program, ret)
-    }
-
     // This is much less painful than threading it through the macros
-    pub fn tag_err<T>(&self, res: Res<'p, T>) -> Res<'p, T> {
+    pub(crate) fn tag_err<T>(&self, res: Res<'p, T>) -> Res<'p, T> {
         res.map_err(|mut err| {
             err.trace = self.log_trace();
             err.loc = err.loc.or(self.last_loc);
@@ -599,7 +565,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         })
     }
 
-    pub fn hoist_constants(&mut self, body: &mut [FatStmt<'p>]) -> Res<'p, ()> {
+    pub(crate) fn hoist_constants(&mut self, body: &mut [FatStmt<'p>]) -> Res<'p, ()> {
         // Function tags (#when) are evaluated during decl_func but may refer to constants.
         // TODO: they should be allowed to refer to functiobns too so need to delay them.
         //       plus the double loop looks really dumb.
@@ -622,7 +588,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(())
     }
 
-    pub fn ensure_compiled(&mut self, f: FuncId, when: ExecStyle) -> Res<'p, ()> {
+    pub(crate) fn ensure_compiled(&mut self, f: FuncId, when: ExecStyle) -> Res<'p, ()> {
         if !add_unique(&mut self.currently_compiling, f) {
             // This makes recursion work.
             return Ok(());
@@ -633,7 +599,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     // Don't pass constants in because the function declaration must have closed over anything it needs.
-    pub fn ensure_compiled_force(&mut self, f: FuncId, when: ExecStyle) -> Res<'p, ()> {
+    pub(crate) fn ensure_compiled_force(&mut self, f: FuncId, when: ExecStyle) -> Res<'p, ()> {
         if self.program[f].get_flag(EnsuredCompiled) {
             return Ok(());
         }
@@ -661,7 +627,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(())
     }
 
-    pub fn emit_special_body(&mut self, f: FuncId, no_redirect: bool) -> Res<'p, bool> {
+    pub(crate) fn emit_special_body(&mut self, f: FuncId, no_redirect: bool) -> Res<'p, bool> {
         debug_assert!(self.program[f].get_flag(NotEvilUninit));
         self.ensure_resolved_sign(f)?;
         self.ensure_resolved_body(f)?;
@@ -1278,9 +1244,9 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     // Passing in the requested type here feels a bit weird, but I think it will make anon-functions less painful. 
-    pub fn find_const(&mut self, name: Var<'p>, requested: ResultType) -> Res<'p, Option<(Values, TypeId)>> {
+    pub(crate) fn find_const(&mut self, name: Var<'p>, requested: ResultType) -> Res<'p, Option<(Values, TypeId)>> {
         if let BigOption::Some(s) = self.program.pool.get_constant(name) {
-            if let Some(_) = s.1.ty() {
+            if s.1.ty().is_some() {
                 if let Expr::Value { value, .. } = &s.0.expr {
                     let ty = s.0.ty;
                     debug_assert!(!ty.is_unknown());
@@ -1321,12 +1287,12 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(None)
     }
 
-    pub fn find_const_type(&mut self, var: Var<'p>) -> Res<'p, Option<TypeId>> {
+    pub(crate) fn find_const_type(&mut self, var: Var<'p>) -> Res<'p, Option<TypeId>> {
         Ok(self.find_const(var, ResultType::None)?.map(|(_, ty)| ty))
     }
 
     #[track_caller]
-    pub fn ensure_resolved_sign(&mut self, f: FuncId) -> Res<'p, ()> {
+    pub(crate) fn ensure_resolved_sign(&mut self, f: FuncId) -> Res<'p, ()> {
         if self.program[f].get_flag(ResolvedSign) {
             return Ok(());
         }
@@ -1343,7 +1309,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     #[track_caller]
-    pub fn ensure_resolved_body(&mut self, f: FuncId) -> Res<'p, ()> {
+    pub(crate) fn ensure_resolved_body(&mut self, f: FuncId) -> Res<'p, ()> {
         if self.program[f].get_flag(ResolvedBody) {
             return Ok(());
         }
@@ -1361,7 +1327,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     #[track_caller]
-    pub fn func_expr(&mut self, id: FuncId) -> (Expr<'p>, TypeId) {
+    pub(crate) fn func_expr(&mut self, id: FuncId) -> (Expr<'p>, TypeId) {
         if self.program[id].finished_ret.is_some() {
             (Expr::Value { value: (id.as_raw()).into(), coerced: false }, self.program.func_type(id))
         } else {
@@ -1369,18 +1335,11 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
     }
 
-    pub fn compile_expr(&mut self, expr: &mut FatExpr<'p>, requested: ResultType) -> Res<'p, TypeId> {
-        // println!("{}", expr.log(self.program.pool));
-        let marker = 0;
-        unsafe {
-            STACK_MIN = STACK_MIN.min(&marker as *const i32 as usize);
-            STATS.compile_expr_calls_all += 1;
-            if expr.done {
-                STATS.compile_expr_calls_with_done_set += 1;
-                debug_assert!(!expr.ty.is_unknown());
-                return Ok(expr.ty);
-            }
-        };
+    pub(crate) fn compile_expr(&mut self, expr: &mut FatExpr<'p>, requested: ResultType) -> Res<'p, TypeId> {
+        if expr.done {
+            debug_assert!(!expr.ty.is_unknown());
+            return Ok(expr.ty);
+        }
         assert!(expr.ty.as_index() < self.program.types.len());
 
         let old = expr.ty;
@@ -1916,7 +1875,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(())
     }
 
-    pub fn enum_constant_macro(&mut self, arg: FatExpr<'p>, mut target: FatExpr<'p>) -> Res<'p, FatExpr<'p>> {
+    pub(crate) fn enum_constant_macro(&mut self, arg: FatExpr<'p>, mut target: FatExpr<'p>) -> Res<'p, FatExpr<'p>> {
         let loc = arg.loc;
         let ty: TypeId = self.immediate_eval_expr_known(arg.clone())?;
 
@@ -2215,13 +2174,13 @@ impl<'a, 'p> Compile<'a, 'p> {
         }))
     }
 
-    pub fn set_literal<T: InterpSend<'p>>(&mut self, e: &mut FatExpr<'p>, t: T) -> Res<'p, ()> {
+    pub(crate) fn set_literal<T: InterpSend<'p>>(&mut self, e: &mut FatExpr<'p>, t: T) -> Res<'p, ()> {
         *e = self.as_literal(t, e.loc)?;
         Ok(())
     }
 
     // TODO: this really shouldn't return an error -- May 24
-    pub fn as_literal<T: InterpSend<'p>>(&mut self, t: T, loc: Span) -> Res<'p, FatExpr<'p>> {
+    pub(crate) fn as_literal<T: InterpSend<'p>>(&mut self, t: T, loc: Span) -> Res<'p, FatExpr<'p>> {
         let ty = T::get_or_create_type(self.program);
         self.program.finish_layout_deep(ty)?;
         let value = to_values(self.program, t)?;
@@ -2230,7 +2189,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(e)
     }
 
-    pub fn builtin_constant(&mut self, name: Ident<'p>) -> Option<(Values, TypeId)> {
+    pub(crate) fn builtin_constant(&mut self, name: Ident<'p>) -> Option<(Values, TypeId)> {
         let name = self.program.pool.get(name);
 
         match name {
@@ -2240,7 +2199,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
     }
 
-    pub fn builtin_type(&mut self, name: &str) -> Option<TypeId> {
+    pub(crate) fn builtin_type(&mut self, name: &str) -> Option<TypeId> {
          Some(match name {
             "i64" => TypeId::i64(),
             "f64" => TypeId::f64(),
@@ -2260,7 +2219,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     #[track_caller]
-    pub fn infer_types_progress(&mut self, ty: &mut LazyType<'p>) -> Res<'p, bool> {
+    pub(crate) fn infer_types_progress(&mut self, ty: &mut LazyType<'p>) -> Res<'p, bool> {
         let done = match ty {
             LazyType::EvilUnit => panic!(),
             LazyType::Infer => false,
@@ -2275,12 +2234,12 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(done)
     }
 
-    pub fn infer_binding_progress(&mut self, binding: &mut Binding<'p>) -> Res<'p, bool> {
+    pub(crate) fn infer_binding_progress(&mut self, binding: &mut Binding<'p>) -> Res<'p, bool> {
         self.infer_types_progress(&mut binding.ty)
     }
 
     #[track_caller]
-    pub fn infer_pattern(&mut self, bindings: &mut [Binding<'p>]) -> Res<'p, Vec<TypeId>> {
+    pub(crate) fn infer_pattern(&mut self, bindings: &mut [Binding<'p>]) -> Res<'p, Vec<TypeId>> {
         let mut types = vec![];
         for arg in bindings {
             if let Some(e) = arg.ty.expr_ref() {
@@ -2362,7 +2321,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(ty)
     }
 
-    pub fn immediate_eval_expr_known<Ret: InterpSend<'p>>(&mut self, e: FatExpr<'p>) -> Res<'p, Ret> {
+    pub(crate) fn immediate_eval_expr_known<Ret: InterpSend<'p>>(&mut self, e: FatExpr<'p>) -> Res<'p, Ret> {
         unsafe { STATS.const_eval_node += 1 };
         let ret_ty = Ret::get_or_create_type(self.program);
         self.program.finish_layout(ret_ty)?;
@@ -2514,7 +2473,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     // TODO: coerce_constant?
-    pub fn immediate_eval_expr(&mut self, mut e: FatExpr<'p>, ret_ty: TypeId) -> Res<'p, Values> {
+    pub(crate) fn immediate_eval_expr(&mut self, mut e: FatExpr<'p>, ret_ty: TypeId) -> Res<'p, Values> {
         self.wip_stack.push((None, ExecStyle::Jit)); // :PushConstFnCtx
         self.program.finish_layout(ret_ty)?;
         unsafe { STATS.const_eval_node += 1 };
@@ -2745,7 +2704,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     // TODO: calling this in infer is wrong because it might fail and lose the function
-    pub fn promote_closure(&mut self, expr: &mut FatExpr<'p>, req_arg: Option<TypeId>, req_ret: Option<TypeId>) -> Res<'p, FuncId> {
+    pub(crate) fn promote_closure(&mut self, expr: &mut FatExpr<'p>, req_arg: Option<TypeId>, req_ret: Option<TypeId>) -> Res<'p, FuncId> {
         let Expr::Closure(func) = expr.deref_mut() else { ice!("want closure") };
 
         // TODO: use :ClosureRequestType
@@ -2918,7 +2877,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     //       but it still has special handling in type_of to stop early.
     //       would need better type inference to make that the same, but probably want that anyway.
     //       ideally would also allow macros to infer a type even if they can't run all the way?    -- Apr 21
-    pub fn as_cast_macro(&mut self, mut arg: FatExpr<'p>, mut target: FatExpr<'p>) -> Res<'p, FatExpr<'p>> {
+    pub(crate) fn as_cast_macro(&mut self, mut arg: FatExpr<'p>, mut target: FatExpr<'p>) -> Res<'p, FatExpr<'p>> {
         self.compile_expr(&mut arg, want(TypeId::ty))?;
         let ty: TypeId = self.immediate_eval_expr_known(arg)?;
         assert!(!ty.is_unknown());
@@ -2941,7 +2900,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     #[track_caller]
-    pub fn type_check_arg(&self, found: TypeId, expected: TypeId, msg: &'static str) -> Res<'p, ()> {
+    pub(crate) fn type_check_arg(&self, found: TypeId, expected: TypeId, msg: &'static str) -> Res<'p, ()> {
         // TODO: dont do this. fix ffi types.
         let found = self.program.raw_type(found);
         let expected = self.program.raw_type(expected);
@@ -2989,7 +2948,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
     }
 
-    pub fn struct_type(&mut self, pattern: &mut Pattern<'p>) -> Res<'p, TypeInfo<'p>> {
+    pub(crate) fn struct_type(&mut self, pattern: &mut Pattern<'p>) -> Res<'p, TypeInfo<'p>> {
         let _ = self.infer_pattern(&mut pattern.bindings)?;
         let parts: Vec<_> = pattern
             .bindings
@@ -3546,7 +3505,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     /// - tuple of string literals -> llvm-ir
     /// - tuple of 32-bit int literals -> aarch64 asm ops
     /// - anything else, comptime eval expecting Slice(u32) -> aarch64 asm ops
-    pub fn inline_asm_body(&mut self, f: FuncId, asm: &mut FatExpr<'p>) -> Res<'p, FuncImpl<'p>> {
+    pub(crate) fn inline_asm_body(&mut self, f: FuncId, asm: &mut FatExpr<'p>) -> Res<'p, FuncImpl<'p>> {
         self.last_loc = Some(self.program[f].loc);
         assert!(
             self.program[f].has_tag(Flag::C) || self.program[f].has_tag(Flag::C_Call) || self.program[f].has_tag(Flag::One_Ret_Pic),
@@ -3825,7 +3784,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(())
     }
 
-    pub fn flush_cpu_instruction_cache(&mut self) {
+    pub(crate) fn flush_cpu_instruction_cache(&mut self) {
         let (beg, end) = self.aarch64.bump_dirty(); // this also sets the old page executable.
 
         // x86 doesn't this. TODO: what about riscv?
@@ -3878,7 +3837,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.save_const(name, Expr::Value { value, coerced: false }, final_ty, loc)
     }
 
-    pub fn bit_literal(&self, expr: &FatExpr<'p>) -> Option<(IntTypeInfo, i64)> {
+    pub(crate) fn bit_literal(&self, expr: &FatExpr<'p>) -> Option<(IntTypeInfo, i64)> {
         let Expr::SuffixMacro(name, arg) = &expr.expr else { return None };
         if *name != Flag::From_Bit_Literal.ident() {
             return None;
@@ -3912,7 +3871,7 @@ pub enum ExecStyle {
     Aot = 1,
 }
 
-pub fn add_unique<T: PartialEq>(vec: &mut Vec<T>, new: T) -> bool {
+pub(crate) fn add_unique<T: PartialEq>(vec: &mut Vec<T>, new: T) -> bool {
     if !vec.contains(&new) {
         vec.push(new);
         return true;
@@ -3976,7 +3935,7 @@ impl TypeId {
 }
 
 impl ResultType {
-    pub fn specific(self) -> Option<TypeId> {
+    pub(crate) fn specific(self) -> Option<TypeId> {
         match self {
             ResultType::Specific(t) => Some(t),
             ResultType::Returning(_) => None,
@@ -4013,7 +3972,7 @@ impl From<Option<TypeId>> for ResultType {
     }
 }
 
-pub fn want(ty: TypeId) -> ResultType {
+pub(crate) fn want(ty: TypeId) -> ResultType {
     ty.want()
 }
 

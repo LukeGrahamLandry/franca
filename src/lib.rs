@@ -28,11 +28,11 @@ pub struct NotThreadSafe(UnsafeCell<*mut u8>);
 unsafe impl Sync for NotThreadSafe {}
 
 impl NotThreadSafe {
-    pub fn get(&self) -> *mut u8 {
+    pub(crate) fn get(&self) -> *mut u8 {
         unsafe { *self.0.get() }
     }
 
-    pub fn set(&self, v: *mut u8) {
+    pub(crate) fn set(&self, v: *mut u8) {
         unsafe { *self.0.get() = v };
     }
 }
@@ -105,14 +105,12 @@ use std::alloc::GlobalAlloc;
 use std::alloc::Layout;
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
-use std::env;
-use std::path::PathBuf;
+
 use std::ptr::null_mut;
 
 use crate::self_hosted::Span;
 use bc::Values;
 use export_ffi::BigOption;
-use export_ffi::STDLIB_PATH;
 use self_hosted::SelfHosted;
 
 macro_rules! mut_replace {
@@ -132,10 +130,7 @@ macro_rules! mut_replace {
 pub mod ast;
 pub mod bc;
 pub mod bc_to_asm;
-
 pub mod compiler;
-
-pub mod emit_bc;
 pub mod export_ffi;
 pub mod ffi;
 pub mod logging;
@@ -152,7 +147,7 @@ use crate::{
 #[derive(Clone, Debug)]
 pub struct Stats {
     pub ast_expr_nodes_all: usize,
-    pub fn_body_resolve: usize,
+    pub(crate) fn_body_resolve: usize,
     pub make_lit_fn: usize,
     pub parser_queue: usize,
     pub parser_did: usize,
@@ -182,132 +177,14 @@ pub static mut STATS: Stats = Stats {
     bytecodes: 0,
 };
 
-// TODO: feature = "bundle_stdlib"
-/*
-macro_rules! include_std {
-    ($name:expr) => {
-        (concat!($name, ".fr"), include_str!(concat!("../../../lib/", $name, ".fr")))
-    };
-}
-
-pub const INCLUDE_STD: &[(&str, &str)] = &[
-    include_std!("core"),
-    include_std!("ast"),
-    include_std!("fmt"),
-    include_std!("list"),
-    include_std!("map"),
-    include_std!("mem"),
-    include_std!("option"),
-    include_std!("pointers"),
-    include_std!("prelude"),
-    include_std!("macros"),
-    include_std!("testing"),
-    include_std!("slice"),
-    include_std!("system"),
-    include_std!("codegen/aarch64/basic"),
-    include_std!("codegen/aarch64/basic.gen"),
-    include_std!("codegen/aarch64/instructions"),
-    include_std!("codegen/aarch64/unwind"),
-    include_std!("codegen/bf/instructions"),
-    include_std!("codegen/llvm/basic"),
-    include_std!("codegen/wasm/instructions"),
-];
-*/
-
-pub static mut STACK_START: usize = 0;
-pub static mut JITTED_PAGE: (usize, usize) = (0, 0);
-pub static mut MY_CONST_DATA: (usize, usize) = (0, 0);
-pub static mut STACK_MIN: usize = usize::MAX;
-pub static mut COMPILER_CTX_PTR: usize = 0;
-pub static mut MMAP_ARENA_START: usize = 0;
-
-pub static MY_STRING: &str = "Hello World";
-
-#[inline(never)]
-pub fn where_am_i() {
-    let marker = 0;
-    println!("ADDR OF RUST FUNCTION: {}", where_am_i as usize);
-    println!("ADDR OF RUST CONSTANT DATA: {}", MY_STRING.as_ptr() as usize);
-    println!(
-        "ADDR OF RUST STACK: {} to {} (min: {})",
-        unsafe { STACK_START },
-        &marker as *const i32 as usize,
-        unsafe { STACK_MIN }
-    );
-    println!("COMPILER_CTX_PTR: {}", unsafe { COMPILER_CTX_PTR });
-    println!("ADDR OF MMAP ARENA: {} to {} ", unsafe { MMAP_ARENA_START }, MEM.get() as usize);
-    println!("ADDR OF MMAP JITTED: {} to {}", unsafe { JITTED_PAGE.0 }, unsafe {
-        JITTED_PAGE.0 + JITTED_PAGE.1
-    });
-    println!("ADDR OF MMAP CONST DATA: {} to {}", unsafe { MY_CONST_DATA.0 }, unsafe {
-        MY_CONST_DATA.0 + MY_CONST_DATA.1
-    });
-}
-
-// I'd rather include it in the binary but I do this so I don't have to wait for the compiler to recompile every time I change the lib
-// (maybe include_bytes in a seperate crate would make it better)
-// I also like that users can put the lib somewhere an edit it for thier program. I dont want the compiler to just force its blessed version.
-// But I also don't want it to be like c where you just get whatever the system happens to have.
-pub fn find_std_lib() -> bool {
-    fn check(mut p: PathBuf) -> bool {
-        p.push("lib");
-        p.push("franca_stdlib_1.fr");
-        if p.exists() {
-            p.pop();
-            let mut path = STDLIB_PATH.lock().unwrap();
-            *path = Some(p);
-            return true;
-        }
-        false
-    }
-
-    // if a project wants to supply its own version, that should take priority.
-    if let Ok(mut p) = env::current_dir() {
-        if check(p.clone()) {
-            return true;
-        }
-        p.push("franca");
-        if check(p.clone()) {
-            return true;
-        }
-        p.pop();
-        p.push("vendor/franca");
-        if check(p.clone()) {
-            return true;
-        }
-    }
-
-    if let Ok(mut p) = env::current_exe() {
-        p.pop();
-        p.push("franca");
-        if check(p.clone()) {
-            return true;
-        }
-        // exe might be in franca/target/release/franca or franca/target/debug/deps/compiler-21be1aa281dbe5d6, so go up
-        for _ in 0..5 {
-            p.pop();
-            if check(p.clone()) {
-                return true;
-            }
-        }
-    }
-
-    let p = PathBuf::from("/Users/luke/Documents/mods/infered");
-    if check(p) {
-        return true;
-    }
-
-    false
-}
-
-pub fn log_err<'p>(interp: &Compile<'_, 'p>, e: CompileError<'p>) {
+pub(crate) fn log_err<'p>(interp: &Compile<'_, 'p>, e: CompileError<'p>) {
     println!("Internal: {}", e.internal_loc.unwrap());
     let message = e.reason.log(interp.program, interp.program.pool);
     println!("{message}");
     interp.program.pool.print_diagnostic(e);
 }
 
-pub fn make_toplevel<'p>(pool: &SelfHosted<'p>, user_span: Span, stmts: Vec<FatStmt<'p>>) -> Func<'p> {
+pub(crate) fn make_toplevel<'p>(pool: &SelfHosted<'p>, user_span: Span, stmts: Vec<FatStmt<'p>>) -> Func<'p> {
     let name = pool.intern("@toplevel@");
     let body = Some(FatExpr::synthetic(
         Expr::Block {
@@ -328,11 +205,6 @@ pub fn make_toplevel<'p>(pool: &SelfHosted<'p>, user_span: Span, stmts: Vec<FatS
 
     let (g_arg, g_ret) = Func::known_args(TypeId::unit, TypeId::unit, user_span);
     Func::new(name, g_arg, g_ret, body, user_span, false)
-}
-
-pub fn timestamp() -> f64 {
-    use std::time::SystemTime;
-    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs_f64()
 }
 
 macro_rules! impl_index_imm {
@@ -362,7 +234,7 @@ macro_rules! impl_index {
 pub(crate) use impl_index;
 pub(crate) use impl_index_imm;
 
-pub fn extend_options<T>(v: &mut Vec<Option<T>>, index: usize) {
+pub(crate) fn extend_options<T>(v: &mut Vec<Option<T>>, index: usize) {
     if v.len() > index {
         return;
     }
@@ -371,17 +243,6 @@ pub fn extend_options<T>(v: &mut Vec<Option<T>>, index: usize) {
     v.reserve(count);
     for _ in 0..count {
         v.push(None);
-    }
-}
-pub fn extend_options2<T>(v: &mut Vec<BigOption<T>>, index: usize) {
-    if v.len() > index {
-        return;
-    }
-
-    let count = index - v.len() + 1;
-    v.reserve(count);
-    for _ in 0..count {
-        v.push(BigOption::None);
     }
 }
 
@@ -411,19 +272,11 @@ pub enum BitSet {
 const BITS: usize = usize::BITS as usize;
 impl BitSet {
     /// Whatever capacity you can get without allocating.
-    pub fn empty() -> BitSet {
+    pub(crate) fn empty() -> BitSet {
         BitSet::Small([0, 0])
     }
 
-    pub fn with_capacity(size: usize) -> Self {
-        if size <= 128 {
-            BitSet::Small([0, 0])
-        } else {
-            BitSet::Big(vec![0; size / BITS + 1])
-        }
-    }
-
-    pub fn get(&self, i: usize) -> bool {
+    pub(crate) fn get(&self, i: usize) -> bool {
         let v = match self {
             BitSet::Small(v) => v.as_ref(),
             BitSet::Big(v) => v.as_ref(),
@@ -436,7 +289,7 @@ impl BitSet {
         (v[index] & (1 << bit)) != 0
     }
 
-    pub fn put(&mut self, i: usize, value: bool) {
+    pub(crate) fn put(&mut self, i: usize, value: bool) {
         let v = match self {
             BitSet::Small(v) => v.as_mut(),
             BitSet::Big(v) => v.as_mut(),
@@ -450,11 +303,7 @@ impl BitSet {
         }
     }
 
-    pub fn set(&mut self, i: usize) {
-        self.insert(i, true)
-    }
-
-    pub fn insert(&mut self, i: usize, value: bool) {
+    pub(crate) fn insert(&mut self, i: usize, value: bool) {
         match self {
             BitSet::Small(v) => {
                 if i >= 128 {
@@ -471,17 +320,6 @@ impl BitSet {
             }
         }
         self.put(i, value)
-    }
-
-    pub fn clear(&mut self) {
-        match self {
-            BitSet::Small(v) => {
-                *v = [0, 0];
-            }
-            BitSet::Big(v) => {
-                v.clear();
-            }
-        }
     }
 }
 
