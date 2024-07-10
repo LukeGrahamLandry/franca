@@ -19,7 +19,7 @@ use std::{ops::Deref, panic::Location};
 use crate::ast::{
     Annotation, Binding, CallConv, FatStmt, Flag,
     FnFlag::{self, *},
-    FuncImpl, IntTypeInfo, LabelId, Name, OverloadSet, OverloadSetId, Pattern, ScopeId, TargetArch, Var, VarType, WalkAst,
+    FuncImpl, IntTypeInfo, LabelId, Name, OverloadSet, OverloadSetId, Pattern, ScopeId,  Var, VarType, WalkAst,
 };
 
 use crate::bc_to_asm::{emit_aarch64, Jitted};
@@ -73,8 +73,6 @@ pub struct Compile<'a, 'p> {
     pub aarch64: Jitted,
     pub next_label: usize,
     pub wip_stack: Vec<(Option<FuncId>, ExecStyle)>,
-    #[cfg(feature = "cranelift")]
-    pub cranelift: crate::cranelift::JittedCl<cranelift_jit::JITModule>,
     pending_redirects: Vec<(FuncId, FuncId)>,
     pub export: Vec<FuncId>,
     pub driver_vtable: (Box<ExportVTable>, *mut ()),
@@ -139,9 +137,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             tests: vec![],
             tests_broken: vec![],
             next_label: 0,
-
-            #[cfg(feature = "cranelift")]
-            cranelift: crate::cranelift::JittedCl::default(),
         };
         // TODO: HACK: for emit_relocatable_constant
         let ty = <(i64, i64)>::get_or_create_type(c.program);
@@ -438,15 +433,8 @@ impl<'a, 'p> Compile<'a, 'p> {
     fn compile_asm_no_rec(&mut self, f: FuncId, when: ExecStyle) -> Res<'p, ()> {
         self.last_loc = Some(self.program[f].loc);
 
-        let use_cl: bool =
-            cfg!(feature = "cranelift") && (self.program[f].has_tag(Flag::Force_Cranelift) || self.program.comptime_arch == TargetArch::Cranelift);
-
         if let Some(code) = &self.program[f].body.jitted_aarch64() {
             self.aarch64.copy_inline_asm(f, code);
-        }
-        #[cfg(feature = "cranelift")]
-        if use_cl && self.program[f].body.cranelift_emit().is_some() {
-            crate::cranelift::emit_cl_intrinsic(self.program, &mut self.cranelift, f)?
         }
 
         if self.program[f].cc.unwrap() != CallConv::Inline {
@@ -457,15 +445,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }.unwrap();
                 // TODO: they can't try to do tailcalls between eachother because they disagress about what that means.
 
-                #[cfg(feature = "cranelift")]
-                let aarch = {
-                    if use_cl {
-                        let res = crate::cranelift::emit_cl(self, &body, f);
-                        self.tag_err(res)?;
-                    }
-                    !use_cl
-                };
-                #[cfg(not(feature = "cranelift"))]
+       
                 let aarch = true;
 
                 // && when == ExecStyle::Jit // TODO!!! this breaks llvm... which is odd. 
@@ -503,9 +483,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     pub fn flush_callees(&mut self, f: FuncId) -> Res<'p, ()> {
-        #[cfg(feature = "cranelift")]
-        self.cranelift.flush_pending_defs(&mut self.aarch64)?;
-
+      
         for (from, to) in self.pending_redirects.drain(0..) {
             self.last_loc = Some(self.program[to].loc);
             let ptr = unwrap!(
@@ -529,8 +507,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             debug_assert_eq!(Some(wip), cc);
         }
 
-        #[cfg(feature = "cranelift")]
-        self.cranelift.flush_pending_defs(&mut self.aarch64)?;
+       
         // assert!(self.callees_done(f));
         for c in &self.program[f].callees {
             debug_assert!(
@@ -781,15 +758,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                     special = true;
                 }
             }
-        }
-
-        #[cfg(feature = "cranelift")]
-        if let Some(addr) = self.program[f].get_tag(Flag::Cranelift_Emit) {
-            let arg = unwrap2!(addr.args.clone(), "Cranelift_Emit needs arg");
-            let addr: i64 = self.immediate_eval_expr_known(arg)?;
-            assert!(matches!(self.program[f].body, FuncImpl::Empty));
-            self.program[f].body = FuncImpl::EmitCranelift(addr as usize);
-            special = true;
         }
 
         if special {
@@ -1284,19 +1252,14 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
             }
         }
-
-        let is_cl = self.program.comptime_arch == TargetArch::Cranelift && cfg!(feature = "cranelift");
         let func = &mut self.program[id];
-        let should_skip = is_cl && func.has_tag(Flag::Skip_Cranelift);
-        if !should_skip {
-            if func.has_tag(Flag::Test) {
-                // TODO: probably want referencable_name=false? but then you couldn't call them from cli so meh.
-                self.tests.push(id);
-            }
-            if func.has_tag(Flag::Test_Broken) {
-                // TODO: probably want referencable_name=false? but then you couldn't call them from cli so meh.
-                self.tests_broken.push(id);
-            }
+        if func.has_tag(Flag::Test) {
+            // TODO: probably want referencable_name=false? but then you couldn't call them from cli so meh.
+            self.tests.push(id);
+        }
+        if func.has_tag(Flag::Test_Broken) {
+            // TODO: probably want referencable_name=false? but then you couldn't call them from cli so meh.
+            self.tests_broken.push(id);
         }
 
         if func.has_tag(Flag::Fold) {

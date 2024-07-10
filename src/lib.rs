@@ -134,8 +134,7 @@ pub mod bc;
 pub mod bc_to_asm;
 
 pub mod compiler;
-#[cfg(feature = "cranelift")]
-pub mod cranelift;
+
 pub mod emit_bc;
 pub mod export_ffi;
 pub mod ffi;
@@ -383,12 +382,6 @@ pub fn extend_options2<T>(v: &mut Vec<BigOption<T>>, index: usize) {
     v.reserve(count);
     for _ in 0..count {
         v.push(BigOption::None);
-    }
-}
-
-fn pops<T>(v: &mut Vec<T>, count: usize) {
-    for _ in 0..count {
-        v.pop().unwrap();
     }
 }
 

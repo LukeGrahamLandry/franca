@@ -1,5 +1,4 @@
 //! High level representation of a Franca program. Macros operate on these types.
-use crate::bc::BakedVar;
 use crate::self_hosted::{init_self_hosted, Span};
 use crate::{
     bc::{Prim, Values},
@@ -1172,45 +1171,8 @@ impl<'p> Program<'p> {
             .map(|found| unsafe { &*(found.deref() as *const [Prim]) })
     }
 
-    pub(crate) fn as_primatives(&self, ty: TypeId) -> &'p [Prim] {
-        if ty.is_unit() || ty.is_never() {
-            return &[];
-        }
-        let slots = self.get_info(ty).size_slots;
-        let mut key = (ty, slots, false, false);
-        if let Some(p) = self.get_primitives(key) {
-            return p;
-        }
-        let types = self.flat_tuple_types(ty);
-        let mut types = types
-            .into_iter()
-            .flat_map(|t| {
-                if t.is_unit() || t.is_never() {
-                    None
-                } else {
-                    Some(self.prim(t).unwrap_or_else(|| panic!("not prim {}", self.log_type(t))))
-                }
-            })
-            .collect::<Vec<_>>();
-        self.primitives.borrow_mut().insert(key, types.clone());
-
-        types.insert(0, Prim::P64); // sad
-        key.2 = true;
-        self.primitives.borrow_mut().insert(key, types); // TODO: stupid that i have to do this here
-        key.2 = false;
-
-        self.get_primitives(key).unwrap()
-    }
-
     pub(crate) fn get_baked_addr(&self, id: crate::bc::BakedVarId) -> *const u8 {
         unsafe { (*crate::self_hosted::get_baked(self.pool, id)).0 as *const u8 }
-    }
-
-    pub(crate) fn get_baked(&self, id: crate::bc::BakedVarId) -> BakedVar {
-        unsafe {
-            // TODO: remove clone (do by ptr since they're stable now) -- Jun 30
-            (*crate::self_hosted::get_baked(self.pool, id)).1.clone()
-        }
     }
 }
 
@@ -1834,11 +1796,6 @@ impl<'p> FuncImpl<'p> {
     pub(crate) fn jitted_aarch64(&self) -> Option<&Vec<u32>> {
         func_impl_getter!(self, JittedAarch64)
     }
-
-    pub(crate) fn cranelift_emit(&self) -> Option<&usize> {
-        func_impl_getter!(self, EmitCranelift)
-    }
-
     pub(crate) fn comptime_addr(&self) -> Option<&usize> {
         func_impl_getter!(self, ComptimeAddr)
     }

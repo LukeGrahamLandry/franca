@@ -8,36 +8,16 @@
 
 #![allow(clippy::wrong_self_convention)]
 
-use crate::ast::Flag;
-use crate::ast::{CallConv, FnType, FuncId, Program, TypeInfo};
+use crate::ast::{CallConv, FnType, Program, TypeInfo};
 use crate::bc::*;
-use crate::compiler::{ExecStyle, Res};
+use crate::compiler::Res;
 use crate::export_ffi::{BigOption, BigResult::*};
-use crate::unwrap;
-use crate::BitSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResultLoc {
     PushStack,
     ResAddr,
     Discard,
-}
-
-pub fn empty_fn_body<'p>(program: &Program<'p>, func: FuncId, when: ExecStyle) -> Res<'p, FnBody<'p>> {
-    let f = &program[func];
-    Ok(FnBody {
-        is_ssa_var: BitSet::empty(),
-        var_names: vec![],
-        vars: Default::default(),
-        when,
-        func,
-        blocks: vec![],
-        name: f.name,
-        current_block: BbId(0),
-        want_log: f.has_tag(Flag::Log_Bc),
-        clock: 0,
-        signeture: prim_sig(program, unwrap!(f.finished_ty(), "ICE: fn type not ready"), f.cc.unwrap())?,
-    })
 }
 
 pub fn prim_sig<'p>(program: &Program<'p>, f_ty: FnType, cc: CallConv) -> Res<'p, PrimSig<'p>> {

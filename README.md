@@ -20,7 +20,6 @@
 
 - aarch64 machine code.
   - i put the bytes in memory, i mark it executable, and i jump there. no assembler, no linker, no problems.
-- cranelift
 - llvm
 
 ## Progress

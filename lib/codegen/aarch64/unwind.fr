@@ -46,14 +46,8 @@ fn get_func_index(ip: InstPtr) (@struct(f: i64, rel_ip: i64)) = {
     (f = best_index, rel_ip = best_distance)
 }
 
-/// This must be kept in sync with the version in the export_ffi.rs!
-RsResolvedSymbol :: @struct(
-    line: i64,
-    owned_name: Str,
-);
-
 FrResolvedSymbol :: @struct(name: Symbol, fid: FuncId);
-ResolvedFn       :: @tagged(Rust: RsResolvedSymbol, Franca: FrResolvedSymbol, Unknown: InstPtr);
+ResolvedFn       :: @tagged(Franca: FrResolvedSymbol, Unknown: InstPtr);
 
 // TODO: take const callback instead of allocating list? since list wants to panic which wasnts to call this,
 // TODO: check for panic while panicking. 
@@ -66,22 +60,17 @@ ResolvedFn       :: @tagged(Rust: RsResolvedSymbol, Franca: FrResolvedSymbol, Un
     // TODO: nullable pointer should be spelled ?*T
     while(=> addr[].fp.int_from_rawptr().ne(0)) {|
         ::if(ResolvedFn);
-        found: ResolvedFn = if(resolve_backtrace_symbol(addr[].lr, info&),fn() ResolvedFn => {
-            (Rust = info) // TODO: should be able to do this inline
+
+        // TODO: check that its not some other ffi thing that rust couldn't find a name for. 
+        func := addr[].lr.get_func_index();
+        fid := func.f;
+        found: ResolvedFn = if(number_of_functions().gt(fid), fn() ResolvedFn=> {
+            fid := fid.index_to_func_id();
+            name := fid.name();
+            (Franca = (name = name, fid = fid))
             
         }, fn() ResolvedFn => {
-            // TODO: check that its not some other ffi thing that rust couldn't find a name for. 
-            func := addr[].lr.get_func_index();
-            fid := func.f;
-            if(number_of_functions().gt(fid), fn() ResolvedFn=> {
-                fid := fid.index_to_func_id();
-                name := fid.name();
-                (Franca = (name = name, fid = fid))
-                
-            }, fn() ResolvedFn => {
-                (Unknown = addr[].lr)
-                
-            })
+            (Unknown = addr[].lr)
         });
         yield(found);
         

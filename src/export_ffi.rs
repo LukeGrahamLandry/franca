@@ -2,7 +2,6 @@
 
 use crate::self_hosted::{resolve_root, show_error_line, ParseErr, SelfHosted};
 use crate::unwrap2;
-use libc::c_void;
 
 use crate::ast::{
     garbage_loc, CallConv, Expr, FatExpr, FatStmt, Flag, FnFlag, FnType, Func, FuncId, IntTypeInfo, LazyType, Pattern, Program, ScopeId, TargetArch,
@@ -20,7 +19,7 @@ use std::fmt::{Debug, Write};
 use std::mem::{self, transmute};
 use std::ops::{FromResidual, Try};
 use std::path::PathBuf;
-use std::ptr::{null, slice_from_raw_parts, slice_from_raw_parts_mut};
+use std::ptr::{slice_from_raw_parts, slice_from_raw_parts_mut};
 use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 
@@ -228,7 +227,7 @@ pub struct ImportVTable {
     debug_log_bc: for<'p> extern "C" fn(c: &Compile<'_, 'p>, body: &FnBody<'p>),
     _e: usize,
     get_compiler_builtins_source: extern "C" fn() -> &'static str,
-    get_cranelift_builtins_source: extern "C" fn() -> &'static str,
+    _get_cranelift_builtins_source: usize,
     _emit_llvm: usize,
     number_of_functions: unsafe extern "C" fn(c: &mut &mut Program) -> i64,
     _bake_var: usize,
@@ -275,7 +274,7 @@ pub static IMPORT_VTABLE: ImportVTable = ImportVTable {
     debug_log_bc,
     _e: 0,
     get_compiler_builtins_source,
-    get_cranelift_builtins_source,
+    _get_cranelift_builtins_source: 0,
     _emit_llvm: 1,
     number_of_functions,
     _bake_var: 1,
@@ -353,9 +352,6 @@ unsafe extern "C" fn comptime_arch() -> (i64, i64) {
 unsafe extern "C" fn franca_init_compiler(comptime_arch: TargetArch) -> *const Compile<'static, 'static> {
     if cfg!(not(target_arch = "aarch64")) && comptime_arch == TargetArch::Aarch64 {
         panic!("aarch64 jit is not supported on this architecture"); // TODO: return error instead.
-    }
-    if cfg!(not(feature = "cranelift")) && comptime_arch == TargetArch::Cranelift {
-        panic!("cranelift is not supported by this build of the compiler"); // TODO: return error instead.
     }
 
     let program = Box::leak(Box::new(Program::new(comptime_arch)));
@@ -463,10 +459,6 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     // This a null terminated packed string, useful for ffi with old c functions.
     // Currently it doesn't reallocate because all symbols are null terminated but that might change in future. --Apr, 10
     ("#fold fn c_str(s: Symbol) CStr", symbol_to_cstr as *const u8),
-    (
-        "fn resolve_backtrace_symbol(addr: *i64, out: *RsResolvedSymbol) bool",
-        resolve_backtrace_symbol as *const u8,
-    ),
     ("fn debug_log_type(ty: Type) void", log_type as *const u8),
     ("fn IntType(bits: i64, signed: bool) Type #fold;", make_int_type as *const u8),
     // measured in bytes
@@ -559,16 +551,6 @@ extern "C" fn get_compiler_builtins_source() -> &'static str {
     writeln!(out, "{}", MSG).unwrap();
     for (sig, ptr) in COMPILER {
         writeln!(out, "#comptime_addr({}) #ct #c_call {sig};", *ptr as usize).unwrap();
-    }
-    out.leak() // TODO
-}
-
-extern "C" fn get_cranelift_builtins_source() -> &'static str {
-    let mut out = String::new();
-    writeln!(out, "{}", MSG).unwrap();
-    #[cfg(feature = "cranelift")]
-    for (sig, ptr) in crate::cranelift::BUILTINS {
-        writeln!(out, "#cranelift_emit({}) #c_call {sig};", *ptr as usize).unwrap();
     }
     out.leak() // TODO
 }
@@ -696,38 +678,6 @@ extern "C-unwind" fn fn_ptr_type(program: &mut &mut Program, arg: TypeId, ret: T
 extern "C-unwind" fn symbol_to_cstr<'p>(program: &mut &mut Program<'p>, symbol: i64) -> *const u8 {
     let symbol: Ident<'p> = unsafe { transmute(symbol as u32) };
     program.pool.get_c_str(symbol)
-}
-
-/// This must be kept in sync with the definition in unwind.fr!
-pub struct RsResolvedSymbol {
-    line: i64,
-    owned_name: *const u8,
-    name_len: i64,
-}
-
-extern "C-unwind" fn resolve_backtrace_symbol(_: &mut &mut Program, addr: *mut c_void, out: &mut RsResolvedSymbol) -> i64 {
-    let mut success = 0;
-    #[cfg(feature = "backtracers")]
-    backtrace::resolve(addr, |symbol| {
-        out.line = symbol.lineno().map(|v| v as i64).unwrap_or(-1);
-        // out.col = symbol.colno().map(|v| v as i64).unwrap_or(-1);
-        if let Some(name) = symbol.name() {
-            let mut bytes = name.to_string().into_bytes();
-            if bytes.is_empty() {
-                out.owned_name = null();
-                out.name_len = 0;
-            } else {
-                bytes.shrink_to_fit();
-                out.name_len = bytes.len() as i64;
-                out.owned_name = Box::leak(bytes.into_boxed_slice()).as_ptr()
-            }
-        } else {
-            out.owned_name = null();
-            out.name_len = 0;
-        }
-        success = 1;
-    });
-    success
 }
 
 extern "C-unwind" fn log_type(p: &mut &mut Program, a: TypeId) {
