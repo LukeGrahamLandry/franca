@@ -1,3 +1,12 @@
+## Jul 9
+
+- self hosted emit_bc is about 3% slower (170ms -> 175ms) at building the compiler.
+  note that to be fair you have to build the non-self hosted version with the self hosted version
+  because there's also just ~50% more code now.
+  and pleasingly it seems the front end times are approx. linear so far.
+
+##
+
 // - did: @match/@switch on enum names so you don't have to say @case in switch.
 
 ## Jul 6

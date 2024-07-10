@@ -835,6 +835,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
 
         let hint = self.program[f].finished_ret;
+        // TODO: this means you cant early return from non-block functions but the error message will be useless -- Jul 9
         if let BigOption::Some(return_var) = self.program[f].return_var {
             if let BigOption::Some(ret_ty) = hint {
                 if let Expr::Block { ret_label, .. } = &mut body_expr.expr {

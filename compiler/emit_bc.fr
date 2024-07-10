@@ -6,7 +6,7 @@
 //! - Reduce variable usage to register sized loads/stores.
 //! - Convert large arguments/returns to references and remap signatures to use only register sized types.
 
-FEATURE_NEW_BC :: false;
+FEATURE_NEW_BC :: true;
 
 //
 // TODO: less pain
@@ -50,8 +50,6 @@ fn emit_bc(comp: CompilerRs, f: FuncId, when: ExecStyle) Res(FnBody) #compiler =
     if FEATURE_NEW_BC {|
         func := comp[f]&;
         name := comp.pool.get(func.name);
-        @println("Emit bc for %", name);
-        
         new_emit_bc(comp, f, when)
     } else {|
         {comp.vtable.emit_bc}(comp.cast(), f, when)
@@ -640,7 +638,6 @@ fn do_binding(self: *EmitBc, result: *FnBody, name: ?Var, ty: Type, value: *FatE
 //
 // If result_location == .ResAddr, the top of the stack on entry to this function has the pointer where the result should be stored.
 fn compile_expr(self: *EmitBc, result: *FnBody, expr: *FatExpr, result_location: ResultLoc, can_tail: bool) PRes = {
-    println(expr.log(self.program.pool));
     @debug_assert(!expr.ty.is_unknown(), "Not typechecked: %. done: %", expr.log(self.program.pool), expr.done);
     @debug_assert(self.slot_count(expr.ty).lt(16).or(result_location != .PushStack), "% %", expr.log(self.program.pool), self.program.log_type(expr.ty));
     self.last_loc = expr.loc;
@@ -700,8 +697,7 @@ fn compile_expr(self: *EmitBc, result: *FnBody, expr: *FatExpr, result_location:
         }
         @default => @panic("ICE: didn't desugar: %", expr.log(self.program.pool));
     };
-    // Note: ^ early returns!
-    .Ok
+    unreachable()
 }
 
 //// TODO: this would be prettier as tail calls. 
@@ -781,9 +777,9 @@ fn emit_call(self: *EmitBc, result: *FnBody, f: *FatExpr, arg: *FatExpr, result_
             if result_location == .ResAddr && will_use_indirect_ret {|
                 result.push(Snipe = 0); // original ret ptr
             };
+            return(.Ok)
         }
         fn Label(ret_ty) => {
-            println("early return");
             label := @unwrap(f.as_const(), "called label must be const") return;
             return_from := LabelId.assume_cast(label&)[];
             // result_location is the result of the ret() expression, which is Never and we don't care.
@@ -811,8 +807,7 @@ fn emit_call(self: *EmitBc, result: *FnBody, f: *FatExpr, arg: *FatExpr, result_
         }
         @default => @panic("ICE: non callable: %", f.log(self.program.pool));
     };
-    // Note: ^ early returns!
-    .Ok
+    unreachable()
 }
 fn emit_block_expr(self: *EmitBc, result: *FnBody, body: *RsVec(FatStmt), value: *FatExpr, ret_label: ?LabelId, result_location: ResultLoc, can_tail: bool) PRes = {
     self.locals&.push(list(temp()));
@@ -850,13 +845,7 @@ fn emit_block_expr(self: *EmitBc, result: *FnBody, body: *RsVec(FatStmt), value:
         each body { stmt | 
             @try(self.compile_stmt(result, stmt)) return;
         };
-        println("a");
-        r := self.compile_expr(result, value, result_location, can_tail);
-        println("b");
-        t := ptr_cast_unchecked(PRes, i64, r&)[];
-        println(t);
-        @try(r) return;
-        println("c");
+        @try(self.compile_expr(result, value, result_location, can_tail)) return;
 
         ret := self.inlined_return_addr&.remove(ret_var).unwrap();
         if result[return_block].incoming_jumps > 0 {|
@@ -981,7 +970,7 @@ fn emit_value(self: *EmitBc, result: *FnBody, value: *Values, result_location: R
         }
         fn Discard() => ();
     };
-    .Ok
+    return(.Ok)
 }
 
 fn emit_sufix_macro(self: *EmitBc, result: *FnBody, macro_name: Symbol, arg: *FatExpr, result_location: ResultLoc, can_tail: bool, expr_ty: Type) PRes = {
@@ -1112,7 +1101,7 @@ fn emit_sufix_macro(self: *EmitBc, result: *FnBody, macro_name: Symbol, arg: *Fa
         };
         @default => bad_node();
     };
-    .Ok
+    unreachable()
 }
 
 // :PlaceExpr
@@ -1232,9 +1221,9 @@ fn construct_struct(self: *EmitBc, result: *FnBody, pattern: *Pattern, requested
             i := 0;
             each f.fields { field | 
                 continue :: local_return;
-                value := pattern.bindings[i]&;
                 i += 1;
                 if(field.kind == .Const, => continue());
+                value := pattern.bindings[i - 1]&;
                 
                 @assert_eq(value.name.unwrap(), field.name, "field name mismatch");
                 
@@ -1319,7 +1308,7 @@ fn construct_struct(self: *EmitBc, result: *FnBody, pattern: *Pattern, requested
             return(@error("struct literal for non-(struct/tagged)"));
         };
     };
-    .Ok
+    return(.Ok)
 }
 
 
@@ -1388,7 +1377,7 @@ fn inc_ptr_bytes(self: *FnBody, bytes: u16) void = {
 }
 
 fn push_to(self: *FnBody, b: BbId, inst: Bc) void = {
-    @println("%", inst&.tag());
+    //@println("%", inst&.tag());
     self[b].insts&.push(inst, self.alloc);
 }
 
@@ -1598,10 +1587,12 @@ fn prim(self: CompilerRs, ty: Type) ?Prim = {
                 @default  => .I64;  // TODO: :fake_ints_too_big
             };
         fn Struct(f) => {
-            // TODO: check len first. 0 len should be allowed. 
-            // TODO: :const_field_fix
-            if f.fields.len == 1 && self.slot_count(f.fields[0].ty) == 1 {|
-                return(self.prim(f.fields[0].ty));
+            if f.fields.len - f.const_field_count.zext() == 1 {|
+                fst := f.fields[0]&;
+                assert(fst.kind != .Const, "TODO: first field const");
+                if self.slot_count(fst.ty) == 1 {|
+                    return(self.prim(fst.ty));
+                };
             };
             return(.None)
         }
@@ -1654,7 +1645,8 @@ fn flat_tuple_types(self: CompilerRs, ty: Type) List(Type) = {
         fn Array(f) => {
             out := self.flat_tuple_types(f.inner);
             single := out.len;
-            range(0, f.len.zext()) { i|
+            // TODO: fix underflow. better ban 0 len array -- Jul 9
+            range(0, f.len.zext() - 1) { i|
                 // reslice everytime because we might reallocate. TODO: just reserve at the beginning.  -- Jul 6
                 out&.push_all(out.items().slice(0, single));
             };
