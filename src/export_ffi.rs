@@ -15,7 +15,7 @@ use crate::ffi::InterpSend;
 use crate::logging::{unwrap, PoolLog};
 use crate::overloading::where_the_fuck_am_i;
 use crate::self_hosted::Ident;
-use crate::{assert, emit_bc::emit_bc, err, ice, log_err, make_toplevel, signed_truncate};
+use crate::{assert, err, ice, log_err, make_toplevel, signed_truncate};
 use std::fmt::{Debug, Write};
 use std::mem::{self, transmute};
 use std::ops::{FromResidual, Try};
@@ -175,19 +175,6 @@ impl<'p, T: 'p> BigResult<T, ParseErr<'p>> {
     }
 }
 
-impl<'p, T: 'p> BigResult<T, CompileError<'p>> {
-    pub(crate) fn unwrap_log(self, pool: &mut SelfHosted<'p>) -> T {
-        self.unwrap_or_else(|e| {
-            if let Some(loc) = e.loc {
-                unsafe {
-                    show_error_line(pool.codemap, loc.low, loc.high);
-                }
-            }
-            panic!("{e:?}")
-        })
-    }
-}
-
 pub type BigCErr<'p, T> = BigResult<T, Box<CompileError<'p>>>;
 
 impl<T, E> Try for BigResult<T, E> {
@@ -234,7 +221,7 @@ pub struct ImportVTable {
     get_function_name: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, f: FuncId) -> Ident<'p>,
     comptime_arch: unsafe extern "C" fn() -> (i64, i64),
     _c: usize,
-    emit_bc: for<'p> extern "C" fn(compile: &mut Compile<'_, 'p>, f: FuncId, when: ExecStyle) -> BigResult<FnBody<'p>, ParseErr<'p>>,
+    emit_bc: usize,
     get_type_meta: extern "C" fn(compile: &Compile, ty: TypeId) -> TypeMeta,
     debug_log_baked_constant: extern "C" fn(compile: &Compile, id: BakedVarId),
     _get_baked: usize,
@@ -281,7 +268,7 @@ pub static IMPORT_VTABLE: ImportVTable = ImportVTable {
     get_function_name,
     comptime_arch,
     _c: 0,
-    emit_bc,
+    emit_bc: 0,
     get_type_meta,
     debug_log_baked_constant,
     _get_baked: 1,

@@ -466,10 +466,6 @@ impl<'p> Pattern<'p> {
         self.bindings.iter_mut().map(|b| b.default.as_mut()).collect()
     }
 
-    pub(crate) fn flatten_defaults_ref(&self) -> Option<Vec<&FatExpr<'p>>> {
-        self.bindings.iter().map(|b| b.default.as_ref()).collect()
-    }
-
     pub(crate) fn remove_named(&mut self, arg_name: Var<'p>) {
         let start = self.bindings.len();
         self.bindings.retain(|b| match b.name {

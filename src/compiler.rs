@@ -23,7 +23,6 @@ use crate::ast::{
 };
 
 use crate::bc_to_asm::{emit_aarch64, Jitted};
-use crate::emit_bc::emit_bc;
 use crate::export_ffi::{struct_macro, tagged_macro, type_macro, BigOption, BigResult, ExportVTable, ImportVTable, IMPORT_VTABLE};
 use crate::ffi::InterpSend;
 use crate::logging::PoolLog;
@@ -1318,7 +1317,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     // Passing in the requested type here feels a bit weird, but I think it will make anon-functions less painful. 
     pub fn find_const(&mut self, name: Var<'p>, requested: ResultType) -> Res<'p, Option<(Values, TypeId)>> {
         if let BigOption::Some(s) = self.program.pool.get_constant(name) {
-            if let Some(known) = s.1.ty() {
+            if let Some(_) = s.1.ty() {
                 if let Expr::Value { value, .. } = &s.0.expr {
                     let ty = s.0.ty;
                     debug_assert!(!ty.is_unknown());

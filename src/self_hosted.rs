@@ -2,7 +2,7 @@ use std::marker::PhantomData;
 
 use crate::{
     ast::{FatExpr, FatStmt, Flag, Func, FuncId, LazyType, OverloadSetId, Pattern, ScopeId, TypeId, Var},
-    bc::{BakedEntry, BakedVar, BakedVarId, FnBody, Values},
+    bc::{BakedEntry, BakedVar, BakedVarId, FnBody},
     compiler::{CErr, Compile, CompileError, ExecStyle, Scope},
     err,
     export_ffi::{BigOption, ImportVTable},
@@ -100,13 +100,6 @@ extern "C" {
     pub(crate) fn get_baked(c: &SelfHosted, id: BakedVarId) -> *const (i64, BakedVar);
     // TODO: remove these when emit_bc is self hosted
     pub(crate) fn put_baked(c: &SelfHosted, v: BakedVar, jit_ptr: BigOption<i64>) -> BakedVarId;
-    pub(crate) fn emit_relocatable_constant<'p>(c: &mut Compile<'_, 'p>, ty: TypeId, value: &Values) -> BigResult<BakedVarId, ParseErr<'p>>;
-    pub(crate) fn emit_relocatable_constant_body<'p>(
-        c: &mut Compile<'_, 'p>,
-        bytes: &[u8],
-        ty: TypeId,
-        force_default_handling: bool,
-    ) -> BigResult<*const [BakedEntry], ParseErr<'p>>;
 
     pub fn emit_bc<'p>(comp: &mut Compile<'_, 'p>, f: FuncId, when: ExecStyle) -> BigResult<FnBody<'p>, ParseErr<'p>>;
 }

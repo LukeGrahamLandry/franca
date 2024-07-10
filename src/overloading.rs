@@ -60,7 +60,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             Expr::Closure(_) => {
                 // This doesn't come up super often. It means you called a closure inline where you declared it for some reason.
-                let arg_ty = self.compile_expr(arg, ret.into())?;
+                let arg_ty = self.compile_expr(arg, ret)?;
                 let id = self.promote_closure(f, Some(arg_ty), ret.specific())?;
                 self.adjust_call(arg, id)?;
                 Some(id)
