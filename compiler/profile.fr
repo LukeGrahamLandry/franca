@@ -1,0 +1,36 @@
+#include_std("bindings/tracy.fr");
+
+DO_TRACING :: false;
+
+TraceCtx :: @if(DO_TRACING, => TracyZoneContext, => void);
+
+TraceZone :: @enum (EmitBc, EmitLlvm, Scope, LoadFile, Parse);
+::enum(TraceZone);
+// TODO: can't index by pointer a const array
+ZONE_COLOURS :: @static(Array(u32, 5)) @array(0x00FF0000, 0x00FF6600, 0x0000FF00, 0x000000FF, 0x000000FF);
+
+// TODO: caller location
+fn zone_begin($zone: TraceZone) TraceCtx = {
+    @if(DO_TRACING) {
+        ZONE_COLOURS;  // TODO: this is dumb. makes it create the type so you can call the overloads below. 
+        forever :: @static(TracySourceLocation);  // Test that this gets a unique memory address for each const value
+        src: TracySourceLocation = (
+            name = @run zone.name().c_str(),
+            function = "".sym().c_str(),
+            file = "".sym().c_str(),
+            line = 1,
+            color = ZONE_COLOURS.items()[zone.ordinal()],
+        );
+        forever[] = src;
+        ___tracy_emit_zone_begin(forever, 1)
+    }
+}
+
+fn zone_end(c: TraceCtx) void = {
+    @if(DO_TRACING, => ___tracy_emit_zone_end(c), => ());
+}
+
+// TODO: do this in first.fr
+// RUSTFLAGS="-Zlocation-detail=none --remap-path-prefix $HOME=~" cargo +nightly build -Z build-std=std,panic_abort -Z build-std-features=panic_immediate_abort --target aarch64-apple-darwin --release
+// ar rc libtracy.a tracy.o
+// clang /Users/luke/Documents/mods/infered/target/aarch64-apple-darwin/release/deps/libfranca.a compiler/target/libfranca.o compiler/target/franca/aarch64-macos/libtracy.a

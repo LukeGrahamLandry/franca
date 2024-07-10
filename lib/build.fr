@@ -2,7 +2,8 @@
 LinkTime :: @enum(i64) (Static, Dynamic);
 
 // TODO: hack
-CLANG_PATH :: "/opt/homebrew/opt/llvm/bin/clang";
+// TODO: switch between clang and clang++ based on lib
+CLANG_PATH :: "/opt/homebrew/opt/llvm/bin/clang++";
 
 fn with(vtable: *ImportVTable, comp: Compiler) CompCtx = 
     (data = comp, vtable = vtable);
@@ -252,3 +253,63 @@ sokol_macos_lib: ForeignLibrary : (
         #include "util/sokol_shape.h"
     """),
 );
+
+// TODO: be consistant about figuring out the cwd
+tracy_lib: ForeignLibrary : (
+    name = "tracy",
+    input_files = "../bindings/tracy/public/TracyClient.cpp".single(ast_alloc()),
+    macro_defines = "TRACY_ENABLE=1".single(ast_alloc()),
+    include_paths = "../bindings/tracy".single(ast_alloc()),
+);
+
+fn build_foreign_cached(lib: ForeignLibrary, env: Ty(Arch, Os), linking: LinkTime) Result(Str, void) = {
+    path := save_path_for_lib(env, linking, lib.name);
+    if(path.file_exists(), => return((Ok = path)));
+    
+    args: List(Str) = list(10, temp());
+    
+    for lib.include_paths { s | 
+        s := @format("-I%", s) temp();
+        args&.push(s.items());
+    };
+    
+    for lib.macro_defines { s | 
+        s := @format("-D%", s) temp();
+        args&.push(s.items());
+    };
+    
+    if lib.objective_c {|
+        args&.push_all(@slice ("-x", "objective-c"));
+    };
+    
+    // TODO: put this on the lib struct? tracy spams
+    args&.push("-Wno-deprecated-declarations");
+    
+    assert(lib.raw_c_source.is_none(), "TODO: write file and compile it");
+    for lib.input_files { s | 
+        args&.push(s);
+    };
+    
+    assert(lib.macos_frameworks.is_empty(), "TODO: do you need to tell it frameworks now?");
+    
+    @switch(linking) {
+        @case(.Static) => {
+            args&.push("-c");
+            args&.push("-static");// TODO: only tracy?
+        };
+        @case(.Dynamic) => args&.push("-dynamiclib");
+    };
+    args&.push_all(@slice ("-o", path));
+    
+    // Since we save it, might as well take the extra hundred years to make it go fast. 
+    args&.push("-Os");
+    
+    
+    @println("[build %] %;", lib.name, args.items());
+    success := run_cmd_blocking(CLANG_PATH, args.items());
+    if(not(success), => return(.Err));
+    
+    (Ok = path)
+}
+
+::display_slice(Str);

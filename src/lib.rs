@@ -14,6 +14,14 @@ extern crate core;
 
 struct MyAllocator;
 
+#[no_mangle]
+extern "C" fn main() {
+    unsafe {
+        self_hosted_main(addr_of!(IMPORT_VTABLE));
+    }
+    unreachable!();
+}
+
 pub const ARENA_SIZE: usize = 1 << 30;
 
 #[cfg(feature = "be_thread_safe")]
@@ -106,11 +114,14 @@ use std::alloc::Layout;
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
 
+use std::ptr::addr_of;
 use std::ptr::null_mut;
 
 use crate::self_hosted::Span;
 use bc::Values;
 use export_ffi::BigOption;
+use export_ffi::IMPORT_VTABLE;
+use self_hosted::self_hosted_main;
 use self_hosted::SelfHosted;
 
 macro_rules! mut_replace {

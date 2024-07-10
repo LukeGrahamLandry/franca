@@ -2,10 +2,57 @@ DO_TESTS :: false;
 
 // TODO: less ass field lookup and call syntax
 // TODO: compiler needs to check type / find right overload of this function. 
+// TODO: factor out resolve_comptime_import stuff. allow runtime #import without building the dylib if not needed at comptime. 
 fn driver(vtable: *ImportVTable) void #export = {
+    do_build := true;
+    args := cli_args();
+    for(args){ arg |
+        if arg.str() == "-no-build" {|
+            do_build = false;
+        };
+    };
+    
+    arch_os := {vtable.comptime_arch}(); 
+    tracy := tracy_lib.build_foreign_cached(arch_os, .Static);
+    tracy := tracy.unwrap();
+    UserData :: @struct(
+        vtable: *ImportVTable,
+        lib: DlHandle,
+    );
+    
+    resolve_comptime_import :: fn(userdata: rawptr, comp: Compiler, f: FuncId, lib_name: Symbol, fn_name: Symbol) ?rawptr = {
+        userdata := UserData.ptr_from_raw(userdata);
+        // TODO: can't call @println here?? oh it doesnt like when no %s?
+        sym := {userdata.vtable.intern_string}(comp, "tracy");
+        fn_name := {userdata.vtable.get_string}(comp, fn_name);
+        ret :: return;
+        if(sym.eq(lib_name)){|
+            fn_name := fn_name.maybe_borrow_cstr(temp());
+            f := dlsym(userdata.lib, fn_name);
+            assert(f.is_null().not(), "bad function name");
+            ret((Some = f));
+        };
+        .None
+    };
+
+    dylib_path := tracy_lib.build_foreign_cached(arch_os, .Dynamic);  // TODO: should be able to unwrap in the same expression like you can later but it hasn't been instantated yet. 
+    dylib_path := dylib_path.unwrap(); 
+
+    dylib_path_c := dylib_path.maybe_borrow_cstr(temp());
+    lib := dlopen(dylib_path_c, DlFlag.Lazy);
+    assert(lib.lib.is_null().not(), "failed to open tracy for comptime");
+    @println("Opened %", dylib_path);
+    my_vtable: ExportVTable = (
+        resolve_comptime_import = (Some = resolve_comptime_import),
+    );
+    data: UserData = (vtable = vtable, lib = lib);
+    
+    ////////////////////////
+    
     start := timestamp();
     src := temp().read_to_string("main.fr");
     comp := vtable.new_with_src(src.items(), .Aarch64);
+    {vtable.give_vtable}(comp, my_vtable&, UserData.raw_from_ptr(data&));
     
     c := vtable.with(comp);
 
@@ -34,13 +81,17 @@ fn driver(vtable: *ImportVTable) void #export = {
         @println("Frontend time: % ms.", end.sub(start)); 
     };
     @println("Emitted % bytes of llvm ir.", ir_text.len);  // useful to see when i start trying to deduplicate bytecode. 
-    test_exe := "target/tests.exe";
-    start := timestamp();
-    build_llvm(ir_text, @slice ("-o", "target/libfranca.o", "-c", "-Os")); // "-O2"
-    success := run_cmd_blocking("/usr/bin/ar", @slice ("rc", "target/aarch64-apple-darwin/libfranca.a", "target/libfranca.o"));
-    assert(success, "link failed");
-    end := timestamp();
-    @println("LLVM time: % ms.", end.sub(start)); 
+
+    if do_build {|
+        start := timestamp();
+        build_llvm(ir_text, @slice ("-o", "target/libfranca.o", "-c", "-Os")); // "-O2"
+        success := run_cmd_blocking("/usr/bin/ar", @slice ("rc", "target/aarch64-apple-darwin/libfranca.a", "target/libfranca.o"));
+        assert(success, "link failed");
+        end := timestamp();
+        @println("LLVM time: % ms.", end.sub(start)); 
+    } else {|
+        println("SKIPPED RUNNING LLVM");
+    };
     
     //build_llvm(ir_text, @slice ("-o", "target/libfranca.o", "-c", "-target", "x86_64-apple-darwin")); // "-O2"
     //success := run_cmd_blocking("/usr/bin/ar", @slice ("rc", "target/x86_64-apple-darwin/libfranca.a", "target/libfranca.o"));

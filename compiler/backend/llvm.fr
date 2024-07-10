@@ -16,7 +16,7 @@ RETAIN_FUNCTION_NAMES :: false;
 
 // TODO: they need to pass target arch for !asm functions. 
 fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: [] FuncId, entry: ProgramEntry) BucketArray(u8) = {
-    s: EmitLlvm = (comp = comp, out = init(1024, alloc), current = BbId.zeroed());
+    s: EmitLlvm = (comp = comp, out = init(16384, alloc), current = BbId.zeroed());
     gen: CodeGen(EmitLlvm) = (
         comp = comp,
         backend = s,
@@ -57,6 +57,12 @@ fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: [] FuncId, entry: ProgramEntry) B
         };
         body := emit_bc(comp.data.cast(), fid, .Aot);
         body := body.unwrap();
+    
+        zone := zone_begin(.EmitLlvm); // TODO: defer
+        @if(DO_TRACING) {
+            real_name := get_string(comp.data, func.name);
+            ___tracy_emit_zone_name(zone, real_name);
+        };
         
         if(body.blocks.len.eq(0)){|
             success := gen.backend&.emit_special(func.body&, func, body&); 
@@ -69,6 +75,7 @@ fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: [] FuncId, entry: ProgramEntry) B
                 println("!!!! failed to emit speciai function");
             };
             //assert(success, "failed to emit speciai function");
+            zone_end(zone);
             continue();
         };
         gen.body = body&;
@@ -84,9 +91,12 @@ fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: [] FuncId, entry: ProgramEntry) B
             s.items()
         };
         //@println("emit %", get_string(comp.data, func.name));
+        
         gen.backend.out&.current().push_all("{\n");
         gen&.emit_current_function();
         gen.backend.out&.current().push_all("}\n");
+        
+        zone_end(zone);
     };
     
     constants := 0;
@@ -103,6 +113,7 @@ fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: [] FuncId, entry: ProgramEntry) B
             i := 1;
             // TODO: warn if fns has duplicates
             for (fns) {f|
+                gen.backend.out&.reserve(100);
                 func := {comp.vtable.get_function}(comp.data, f);
                 // note: this only works because void has a fixed typeid value
                 if func.finished_arg.unwrap() == void {|
@@ -202,6 +213,7 @@ fn write_export_bounce(self: *EmitLlvm, fid: FuncId) void = {
 }
 
 fn emit_constant(self: *EmitLlvm, comp: CompCtx, id: BakedVarId) void = {
+    self.out&.reserve(100);
     value := get_baked(comp.data, id);
     index: i64 = id.id.zext();
     
@@ -221,6 +233,7 @@ fn emit_constant(self: *EmitLlvm, comp: CompCtx, id: BakedVarId) void = {
         (fn VoidPtrArray(parts) => {
             @fmt(self.out&.current(), "@g% = private global [% x ptr] [", index, parts.len);
             for(parts[].items()){inner|
+                self.out&.reserve(20);
                 @match(inner) {
                     (fn FnPtr(f) => {
                         @fmt(self.out&.current(), "ptr @%,", (self, f));
@@ -283,7 +296,7 @@ fn emit_special(self: *EmitLlvm, body: *FuncImpl, func: *Func, bc: *FnBody) bool
                 self.next_var += 1;
                 s.items()
             };
-            self.out&.current().reserve(50);
+            self.out&.reserve(50);
             self.out&.current().push_all("{\n");
             ret := self.inst_call(values.items(), bc.signeture) {|
                 @fmt(self.out&.current(), "@%", import_name);
@@ -538,7 +551,7 @@ MAX_I64 :: 1.shift_left(32).sub(1);
 
 fn inst_literal(self: *EmitLlvm, value: i64, ty: Prim) EmitLlvm.Val = {
     v := self.get_var(ty);
-    self.out&.current().reserve(20);
+    self.out&.reserve(100);
     // TODO: use @switch here. 
     if(ty.eq(.F64)){|
         // for f64, llvm wants the bits as hex. 
@@ -616,7 +629,7 @@ fn inst_jump_if(self: *EmitLlvm, cond: EmitLlvm.Val, true: BbId, false: BbId, ar
 
 fn inst_jump(self: *EmitLlvm, always: BbId, args: Slice(EmitLlvm.Val)) void = {
     enumerate(args){i, arg|
-        self.out&.reserve(20);
+        self.out&.reserve(50);
         @fmt(self.out&.current(), "   store % %, ptr %a%\n", arg.ty.llvm_type(), arg[], "%", i); 
     };
     self.out&.reserve(20);
@@ -624,6 +637,7 @@ fn inst_jump(self: *EmitLlvm, always: BbId, args: Slice(EmitLlvm.Val)) void = {
 }
 
 fn inst_return(self: *EmitLlvm, args: Slice(EmitLlvm.Val)) void = {
+    self.out&.reserve(100);
     @switch(args.len){
         @case(0) => {
             self.out&.current().push_all("   ret void\n");
@@ -643,7 +657,7 @@ fn inst_return(self: *EmitLlvm, args: Slice(EmitLlvm.Val)) void = {
 }
 
 fn move_to_block(self: *EmitLlvm, block: *BasicBlock, ip: BbId) Slice(EmitLlvm.Val) = {
-    self.out&.reserve(20);
+    self.out&.reserve(100);
     @fmt(self.out&.current(), "b%:\n", @as(i64) ip.id.zext()); 
         
     self.current = ip;
