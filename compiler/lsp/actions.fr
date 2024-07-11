@@ -1,0 +1,129 @@
+LspResult :: Result(Str, LspErr);
+LspErr :: @struct(code: i64, msg: Str);
+
+:: derive_lsp();
+
+fn handle_lsp_message(id: ?f64, method: Str, json: *JsonParser) ?Str = {
+    out: List(u8) = list(temp());
+    out&.push_all("""{ "jsonrpc": "2.0", """);
+    if id { id |
+        @fmt(out&, """"id": %, """, id);
+    };
+    
+    ::if(LspResult);
+    result: LspResult = @switch(method) {
+        @case("initialize") => {
+            // TODO: I want the rootUri
+            (Ok = INITIALIZE_RESULT)
+        };
+        @case("initialized") => return(.None);
+        @case("shutdown") => (Ok = "null");
+        @case("exit") => exit(0);
+        @case("textDocument/definition") fn() LspResult => {
+            params := DefinitionParams.zeroed();
+            if !json.parse_json(params&) {|
+                (Err = (code = -32602, msg = "Failed to load params"))
+            } else {|
+                @eprintln("%", params&);
+                (Err = (code = -32601, msg = "Good!"))
+            }
+        };
+        @default => {
+            (Err = (code = -32601, msg = "I don't know how to handle this message yet."))
+        };
+    };
+    
+    @match(result) {
+        fn Ok(s) => {
+            @fmt(out&, """"result": % }""", s);
+        }
+        fn Err(err) => {
+            // TODO: be careful about escaping quotes
+            @fmt(out&, """"error": { "code": %, "message": "%" } }""", err.code, err.msg);
+        }
+    };
+    (Some = out.items())
+}
+
+// this is kind dumb but also I only need one. 
+INITIALIZE_RESULT :: """{
+    "capabilities": {
+        "definitionProvider": true
+    }
+}""";
+
+///////////////////////////////////////////////////////////
+// TODO: move this to x/json so other stuff can use it too. make an example program. 
+
+// TODO: return meaningful error message. 
+// TODO: options for how permisive to be about unexpected fields. 
+fn DeriveJson($T: Type) void = {
+    fn parse_json(json: *JsonParser, self: *T) bool = {
+        @inline_match(@run T.get_type_info_ref()) {
+            (fn Struct($_) => {
+                token := json.next().or(fn(_: Str) => return(false));
+                if(!token&.is(.StartDict), => return(false));
+                
+                found := 0;
+                
+                fields :: T.get_fields();
+                while => found < fields.len() {|
+                    continue :: local_return;
+                    token := json.next().or(fn(_: Str) => return(false));
+                    if(!token&.is(.Key), => return(false));
+                    
+                    inline_for fields { $f | 
+                        name :: f[].name.str();
+                        if name == token.Key {|
+                            inner := T.get_field_ptr(self, f);
+                            success := json.parse_json(inner);
+                            if(!success, => return(false));
+                            found += 1;
+                            continue();
+                        };
+                    };
+                    
+                    json.skip_next_value();
+                    continue();
+                };
+                json.skip_current_value();
+            });
+            @default => {
+                panic("Unsupported type for DeriveJson");
+            };
+        };
+        
+        true
+    }
+}
+
+fn parse_json(json: *JsonParser, i: *i64) bool = {
+    token := json.next().or(fn(_: Str) => return(false));
+    if(!token&.is(.Float), => return(false));
+    i[] = token.Float.int();
+    true
+}
+
+fn parse_json(json: *JsonParser, i: *Str) bool = {
+    token := json.next().or(fn(_: Str) => return(false));
+    if(!token&.is(.StringValue), => return(false));
+    i[] = token.StringValue;
+    true
+}
+
+///////////////////////////////////////////////////////////
+// TODO: move this to a bindings/
+
+fn derive_lsp() void = {
+    ?JsonPart;
+    DeriveJson(Position); DeriveFmt(Position);
+    DeriveJson(TextDocumentIdentifier); DeriveFmt(TextDocumentIdentifier);
+    DeriveJson(DefinitionParams); DeriveFmt(DefinitionParams);
+}
+
+DefinitionParams :: @struct(
+    textDocument: TextDocumentIdentifier,
+    position: Position,
+);
+TextDocumentIdentifier :: @struct(uri: Str);
+Position :: @struct(line: i64, character: i64);

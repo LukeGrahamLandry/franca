@@ -7,6 +7,9 @@ ENABLE_LSP   :: true;
 // TODO: compiler needs to check type / find right overload of this function. 
 // TODO: allow runtime #import without building the dylib if not needed at comptime. 
 fn driver(vtable: *ImportVTable) void = {
+    if !file_exists("compiler/main.fr") {|
+        panic("Working directory must be top level of the franca repository");
+    };
     start := timestamp();
     
     do_build := true;
@@ -17,7 +20,7 @@ fn driver(vtable: *ImportVTable) void = {
         };
     };
     
-    src := temp().read_to_string("main.fr");
+    src := temp().read_to_string("compiler/main.fr");
     @fmt(src&, ";ENABLE_TRACY :: %;\n", ENABLE_TRACY);
     @fmt(src&, ";ENABLE_LSP   :: %;\n", ENABLE_LSP);
     
@@ -28,7 +31,7 @@ fn driver(vtable: *ImportVTable) void = {
     libs&.intercept_imports();
     if(ENABLE_TRACY, => libs&.add_lib(tracy_lib));
     // TODO: fix relative paths. just decide everything is built from the top level. so `franca compiler/first.fr`
-    //if(ENABLE_LSP, => libs&.add_lib(wuffs_lib));
+    if(ENABLE_LSP, => libs&.add_lib(wuffs_lib));
     
     if DO_TESTS {|
         tests := c.get_tagged("test");
@@ -50,20 +53,36 @@ fn driver(vtable: *ImportVTable) void = {
     exports := c.get_tagged("compiler");
     
     ir_text := {c.vtable.emit_llvm}(c, temp(), exports, .ExportWithNames);
+    @println("Emitted % bytes of llvm ir.", ir_text.len);  // useful to see when i start trying to deduplicate bytecode. 
     end := timestamp();
     if !DO_TESTS {|
         // TODO: don't print it if we didn't have cached dependencies. 
         @println("Frontend time: % ms.", end.sub(start)); 
     };
-    @println("Emitted % bytes of llvm ir.", ir_text.len);  // useful to see when i start trying to deduplicate bytecode. 
-
     if do_build {|
         start := timestamp();
-        build_llvm(ir_text, @slice ("-o", "target/libfranca.o", "-c", "-Os")); // "-O2"
-        success := run_cmd_blocking("/usr/bin/ar", @slice ("rc", "target/aarch64-apple-darwin/libfranca.a", "target/libfranca.o"));
-        assert(success, "link failed");
+        build_llvm(ir_text, @slice ("-o", "target/franca/libfranca.o", "-c", "-Os", "-g"));
         end := timestamp();
         @println("LLVM time: % ms.", end.sub(start)); 
+        
+        // build.rs needs this if it wants to build the binary (it won't take a .o file)
+        run_cmd_blocking("/usr/bin/ar", @slice (
+            "rc", "target/franca/libfranca.a", "target/franca/libfranca.o"
+        )).assert("link failed");
+        
+        // to use tracy, we need to use clang to build the binary so it can find libc++,
+        // so we need to have the rust code as a .a file. 
+        // TODO: is my fucking with the target dir confusing its incremental?
+        //run_cmd_blocking("/Users/luke/.cargo/bin/cargo", @slice (
+        //    "build", "--release", "--lib",
+        //)).assert("cargo failed");
+        // node: this makes a much much larger binary than if cargo does it. 
+        //       i suspect im linking in the whole rust std or something? 
+        args := libs&.get_aot_objects();
+        // TODO: should output then move cause i think it deletes if it fails
+        args&.push_all(@slice("target/release/libfranca.a", "target/franca/libfranca.o", "-o", "target/release/franca", "-g"));
+        run_cmd_blocking(CLANG_PATH, args.items()).assert("link failed");
+        
     } else {|
         println("SKIPPED RUNNING LLVM");
     };

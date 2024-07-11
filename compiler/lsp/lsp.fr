@@ -1,5 +1,10 @@
+#include_std("lib/x/json.fr");
+#include_std("compiler/lsp/actions.fr");
+// TODO: fix the thing where i hangs at 100% cpu when vscode tries to crash me?
+// TODO: do i have to allow new lines in the json blob?
 
 fn lsp_main(vtable: *ImportVTable) void = {
+    ::Result(JsonPart, Str);
     eprintln("Franca Language Server.");
     input_buf: List(u8) = list(65536, page_allocator);
     
@@ -17,6 +22,43 @@ fn lsp_main(vtable: *ImportVTable) void = {
             (line, rest) := msg.eat_line();
             msg = rest;
             @eprintln("%\n===", line);
+            if line.starts_with("{") {|
+                parse: JsonParser = new_json(line, temp());
+                id: ?f64 = .None;
+                method: ?Str = .None;
+                
+                token := parse&.next().unwrap();
+                assert(token&.is(.StartDict), "expected request to be object");
+                loop() {|
+                    token := parse&.next().unwrap();
+                    assert(token&.is(.Key), "expected object key");
+                    @switch(token.Key) {
+                        @case("id") => {
+                            token := parse&.next().unwrap();
+                            assert(token&.is(.Float), "expected id to be int");
+                            id = (Some = token.Float);
+                        };
+                        @case("method") => {
+                            token := parse&.next().unwrap();
+                            assert(token&.is(.StringValue), "expected method to be string");
+                            method = (Some = token.StringValue);
+                        };
+                        @case("params") => {
+                            assert(method.is_some(), "expected keys in order (method before params)");
+                            @eprintln("got to params. %", method.unwrap());
+                            if handle_lsp_message(id, method.unwrap(), parse&) { response |
+                                @print("Content-Length: %\r\n\r\n", response.len);
+                                print(response);
+                            };
+                            continue();
+                        };
+                        @default => {
+                            parse&.skip_next_value();
+                        };
+                    };
+                };
+            };
+            
             rest.len > 0
         };
         reset_temporary_storage();
