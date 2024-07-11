@@ -123,6 +123,8 @@ pub struct FnBody<'p> {
     // TODO: this should be moved to EmitBc
     pub is_ssa_var: BitSet, // only used for debugging (and during emit_bc). bc has enough info for this.
     pub signeture: PrimSig<'p>,
+    _alloc: [usize; 2],
+    hash: i64,
 }
 
 #[repr(transparent)]

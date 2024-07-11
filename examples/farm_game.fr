@@ -235,122 +235,26 @@ fn main() void = {
 
 SOKOL_MACOS_LINK_ARGS :: @array("-framework", "Metal", "-framework", "MetalKit", "-framework", "Cocoa", "-framework", "QuartzCore");
 
-
 // TODO: test that all the functions that appear in the generated bindings are in the dylib. 
 //       ie. right now the imgui ones won't be because i haven't added that to SOKOL_C yet. -- Jul 4
 // TODO: when my c_bindgen works, stop using sokol_zig, and write out the header interdependencies for which you have to include first. 
 //       or really I guess one big generate off the same c file you'd compile makes more sense? 
 //       also write test that diffs against the old one so they don't change unexpectedly.
 // TODO: make it easy to pass -DNDEBUG for release builds. 
-fn build_sokol_cached(env: Ty(Arch, Os), linking: LinkTime) Result(Str, void) = {
-    path := save_path_for_lib(env, linking, "sokol");
-    if(path.file_exists(), => return((Ok = path)));
-    
-    SOKOL_C :: """
-        #include "sokol_app.h"
-        #include "sokol_gfx.h"
-        #include "sokol_glue.h"
-        #include "sokol_log.h"
-        #include "util/sokol_debugtext.h"
-        #include "util/sokol_gl.h"
-        #include "util/sokol_shape.h"
-    """;
-    c_file := open_temp_file();
-    c_file.fd&.write(SOKOL_C);
-    
-    args: List(Str) = list(10, temp());
-    
-    args&.push_all(@slice ("-Ibindings/sokol", "-DSOKOL_IMPL", "-DSOKOL_NO_ENTRY"));
-    if env._1.eq(.Macos) {|
-        // macos_args must go first to treat source as objective c!
-        if !eq(linking, .Static) {|
-            a := SOKOL_MACOS_LINK_ARGS;
-            args&.push_all(a&.items());
-        };
-        args&.push_all(@slice ("-DSOKOL_METAL", "-x", "objective-c"));
-    } {|
-        panic("TODO: sokol build flags on not macos");
-    };
-    args&.push(c_file&.s_name());
-    
-    @switch(linking) {
-        @case(.Static) => args&.push("-c");
-        @case(.Dynamic) => args&.push_all(@slice ("-DSOKOL_DLL", "-dynamiclib"));
-    };
-    args&.push_all(@slice ("-o", path));
-    
-    // Since we save it, might as well take the extra hundred years to make it go fast. 
-    args&.push("-O2");
-    
-    // TODO
-    //if(is_x86) {|
-    //    // cross compile for rosetta. 
-    //    args&.push_all(@slice ("-target", "x86_64-apple-darwin"));
-    //};
-    
-    @println("building sokol: %", args.items());
-    success := run_cmd_blocking(CLANG_PATH, args.items());
-    if(not(success), => return(.Err));
-    c_file.remove();
-    
-    (Ok = path)
-}
 
-fn driver(vtable: *ImportVTable) void #export = {
-    args := cli_args();
-    for(args){ arg |
-        @println("- %", arg);
-    };
-    
-    arch_os := {vtable.comptime_arch}(); // TODO: pattern match multiple returns. 
-    // TODO: this whole thing where you have to write your program inside out is really annoying. 
-    //       I want the user program to be in charge and call into the compiler as a library. 
-    UserData :: @struct(
-        vtable: *ImportVTable,
-        sokol: DlHandle,
-    );
-    
-    is_x86 := (@as(i64)arch_os._0).eq(@as(i64) Arch.X86_64);
-    //if(not(is_x86), => print_stacktrace_on_panic()); // TODO: this doesn't work! the function doesn't exist when trying to compile driver even if we don't call it
-    
-    resolve_comptime_import :: fn(userdata: rawptr, comp: Compiler, f: FuncId, lib_name: Symbol, fn_name: Symbol) ?rawptr = {
-        userdata := UserData.ptr_from_raw(userdata);
-        // TODO: can't call @println here?? oh it doesnt like when no %s?
-        sokol_sym := {userdata.vtable.intern_string}(comp, "sokol");
-        fn_name := {userdata.vtable.get_string}(comp, fn_name);
-        ret :: return;
-        //@println("Asked for a function %", fn_name);
-        if(sokol_sym.eq(lib_name)){|
-            fn_name := fn_name.maybe_borrow_cstr(temp());
-            f := dlsym(userdata.sokol, fn_name);
-            assert(f.is_null().not(), "bad sokol function name");
-            ret((Some = f));
-        };
-        .None
-    };
-
-    dylib_path := build_sokol_cached(arch_os, .Dynamic);  // TODO: should be able to unwrap in the same expression like you can later but it hasn't been instantated yet. 
-    dylib_path := dylib_path.unwrap(); 
-
-    dylib_path_c := dylib_path.maybe_borrow_cstr(temp());
-    sokol := dlopen(dylib_path_c, DlFlag.Lazy);
-    assert(sokol.lib.is_null().not(), "failed to open sokol for comptime");
-    @println("Opened %", dylib_path);
-    
-    my_vtable: ExportVTable = (
-        resolve_comptime_import = (Some = resolve_comptime_import),
-    );
-    data: UserData = (vtable = vtable, sokol = sokol);
-    
+fn driver(vtable: *ImportVTable) void #export = {    
     src := "#include_std(\"lib/core.fr\");".clone(temp());
     the_code := temp().read_to_string("examples/farm_game.fr");  // TODO: don't depend on cwd.
     src&.push_all(the_code.items());
     sokol_bindings := temp().read_to_string("bindings/sokol.fr");
     src&.push_all(sokol_bindings.items());
     
-    ::if(Backend);
     comp := vtable.new_with_src(src.items(),  .Aarch64);
-    {vtable.give_vtable}(comp, my_vtable&, UserData.raw_from_ptr(data&));
+    ctx := vtable.with(comp);
+    
+    libs := ctx.empty_libs();
+    libs&.intercept_imports();
+    libs&.add_lib(sokol_macos_lib);
     
     main_sym := {vtable.intern_string}(comp, "main");
     main_f := {vtable.find_unique_func}(comp, main_sym).unwrap();
@@ -363,17 +267,17 @@ fn driver(vtable: *ImportVTable) void #export = {
     //f();
     //print_stacktrace_on_panic();
     
-    obj_path := build_sokol_cached(arch_os, .Static).unwrap();
-    
     ir_text := {vtable.emit_llvm}((data = comp, vtable = vtable), temp(), @slice (main_f), .ExportWithNames);
     out := open_temp_file();
     for(ir_text&){bucket|
         out.fd&.write(bucket);
     };
     @println("Write llvm ir to %", out&.s_name());
+    // TODO: get these from the lib. 
     a := SOKOL_MACOS_LINK_ARGS;
-    args := a&.items().clone(temp());
-    args&.push_all(@slice (obj_path, "-x", "ir", out&.s_name(), "-o", "farm.out"));    
+    args := libs&.get_aot_objects();
+    args&.push_all(a&.items());
+    args&.push_all(@slice ("-x", "ir", out&.s_name(), "-o", "farm.out"));    
     //args&.push("-O2");
     @println("building aot exe: %", args.items());
     success := run_cmd_blocking(CLANG_PATH, args.items());

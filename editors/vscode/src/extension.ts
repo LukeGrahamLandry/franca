@@ -30,8 +30,8 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(disposable);
 
   let opts = {
-    command: "/Users/luke/Documents/mods/infered/target/debug/lsp",
-    args: ["lsp"],
+    command: "/usr/local/bin/franca",
+    args: ["-lsp"],
   };
   let serverOptions: ServerOptions = {
     run: opts,
@@ -41,7 +41,7 @@ export function activate(context: vscode.ExtensionContext) {
   // Options to control the language client
   let clientOptions: LanguageClientOptions = {
     // Register the server for plain text documents
-    documentSelector: [{ scheme: 'file', language: 'franca' }],
+    documentSelector: [{ scheme: "file", language: "franca" }],
   };
 
   // Create the language client and start the client.
@@ -51,13 +51,12 @@ export function activate(context: vscode.ExtensionContext) {
     clientOptions,
   );
   client.start();
-
 }
 
 // This method is called when your extension is deactivated
 export function deactivate(): Thenable<void> | undefined {
-	if (!client) {
-		return undefined;
-	}
-	return client.stop();
+  if (!client) {
+    return undefined;
+  }
+  return client.stop();
 }

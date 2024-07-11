@@ -18,6 +18,7 @@ fn get_unique_named(c: CompCtx, name: Str) ?FuncId = {
     f := {c.vtable.intern_string}(c.data, name);
     {c.vtable.find_unique_func}(c.data, f)
 }
+
 // SAFETY: you must call created_jit_fn_ptr_value if you create a Values and then compile for AOT
 // TODO: no unwrap! return error. but then llvm backend has to be able to deal with tagged unions correctly. 
 fn get_jitted(c: CompCtx, f: FuncId) rawptr = {
@@ -33,6 +34,14 @@ fn new_with_src(vtable: *ImportVTable, src: Str, arch: Backend) Compiler = {
     stmts := {vtable.parse_stmts}(comp, file&).unwrap();
     {vtable.make_and_resolve_and_compile_top_level}(comp, stmts).unwrap();
     comp
+}
+
+fn intern_string(comp: CompCtx, s: Str) Symbol = {
+    {comp.vtable.intern_string}(comp.data, s)
+}
+
+fn get_string(comp: CompCtx, s: Symbol) Str = {
+    {comp.vtable.get_string}(comp.data, s)
 }
 
 TmpFile :: @struct(name: Array(u8, 16), fd: Fd);
@@ -228,6 +237,8 @@ ForeignLibrary :: @struct(
     raw_c_source: ?Str = .None,
 );
 
+ForeignLanguage :: @enum(C, CPlusPlus, ObjectiveC);
+
 // TODO: move these to x/<name>
 // TODO: impl build system with these. make it a one-liner to add a dependency to driver. 
 
@@ -262,6 +273,7 @@ tracy_lib: ForeignLibrary : (
     include_paths = "../bindings/tracy".single(ast_alloc()),
 );
 
+::display_slice(Str);
 fn build_foreign_cached(lib: ForeignLibrary, env: Ty(Arch, Os), linking: LinkTime) Result(Str, void) = {
     path := save_path_for_lib(env, linking, lib.name);
     if(path.file_exists(), => return((Ok = path)));
@@ -285,19 +297,32 @@ fn build_foreign_cached(lib: ForeignLibrary, env: Ty(Arch, Os), linking: LinkTim
     // TODO: put this on the lib struct? tracy spams
     args&.push("-Wno-deprecated-declarations");
     
-    assert(lib.raw_c_source.is_none(), "TODO: write file and compile it");
+    src_file: ?TmpFile = .None;
+    if lib.raw_c_source { src | 
+        src_file = (Some = open_temp_file());
+        f := src_file.Some&;
+        f.fd&.write(src);
+        args&.push(f.s_name()); // Note: this points into the thing so it can't move. // TODO: footgun :(
+    };
+    
     for lib.input_files { s | 
         args&.push(s);
     };
-    
-    assert(lib.macos_frameworks.is_empty(), "TODO: do you need to tell it frameworks now?");
     
     @switch(linking) {
         @case(.Static) => {
             args&.push("-c");
             args&.push("-static");// TODO: only tracy?
         };
-        @case(.Dynamic) => args&.push("-dynamiclib");
+        @case(.Dynamic) => {
+            args&.push("-dynamiclib");
+            
+            // TODO: if os == macos
+            for lib.macos_frameworks { name |
+                args&.push("-framework");
+                args&.push(name);
+            };
+        };
     };
     args&.push_all(@slice ("-o", path));
     
@@ -309,7 +334,75 @@ fn build_foreign_cached(lib: ForeignLibrary, env: Ty(Arch, Os), linking: LinkTim
     success := run_cmd_blocking(CLANG_PATH, args.items());
     if(not(success), => return(.Err));
     
+    if src_file { f |
+        f.remove();
+    };
+    
     (Ok = path)
 }
 
-::display_slice(Str);
+ComptimeLibs :: @struct(
+    ctx: CompCtx, 
+    handles: HashMap(Symbol, BuiltLib),
+);
+
+// TODO: all these should get the allocator from the compiler 
+//       so they don't have to use ast_alloc#ct so drivers could be prebuilt as a normal program
+fn empty_libs(ctx: CompCtx) ComptimeLibs = {
+    (ctx = ctx, handles = init(ast_alloc()))
+}
+
+BuiltLib :: @struct(
+    jit: ?DlHandle,
+    aot_object_file: ?Str,
+);
+
+fn add_lib(self: *ComptimeLibs, lib: ForeignLibrary) void = {
+    env := {self.ctx.vtable.comptime_arch}();  // TODO: pass in for cross compiling
+    
+    ::Result(Str, void);
+    aot_path := lib.build_foreign_cached(env, .Static).unwrap();
+    
+    jit_path := lib.build_foreign_cached(env, .Dynamic).unwrap(); 
+    jit := dlopen(jit_path.maybe_borrow_cstr(temp()), DlFlag.Lazy);
+    @assert(!jit.lib.is_null(), "failed to open '%' at '%' for comptime", lib.name, jit_path);
+    
+    built: BuiltLib = (jit = (Some = jit), aot_object_file = (Some = aot_path));
+    name := self.ctx.intern_string(lib.name);
+    prev := self.handles&.insert(name, built);
+    @assert(prev.is_none(), "added lib % twice", lib.name);
+}
+
+// TODO: forward to another if we aren't the first to set the pointer? maybe all the handlers should be lists? idk. 
+fn intercept_imports(self: *ComptimeLibs) void = {
+    my_vtable: ExportVTable = (
+        resolve_comptime_import = (Some = comptimelibs_resolve_import),
+    );
+    my_vtable := ast_alloc().boxed(ExportVTable, my_vtable);
+    {self.ctx.vtable.give_vtable}(self.ctx.data, my_vtable, ComptimeLibs.raw_from_ptr(self));
+}
+
+fn get_aot_objects(self: *ComptimeLibs) List(Str) = {
+    out: List(Str) = list(self.handles.len, temp());
+    
+    each self.handles& { _, v | 
+        if v.aot_object_file { path | 
+            out&.push(path);
+        };
+    };
+    
+    out
+}
+
+// TODO: be able to use overloading and manually resolve when you need a function pointer with the first arg type erased. 
+comptimelibs_resolve_import :: fn(userdata: rawptr, comp: Compiler, f: FuncId, lib_name: Symbol, fn_name: Symbol) ?rawptr = {
+    self := ComptimeLibs.ptr_from_raw(userdata);
+    lib := self.handles&.get_ptr(lib_name).or() {|
+        return(.None)
+    };
+    fn_name := self.ctx.get_string(fn_name); // TODO: expose get_c_str function
+    // TODO: dont unwrap here and let this function return if available for jit and aot seperatly
+    f := dlsym(lib.jit.unwrap(), fn_name.maybe_borrow_cstr(temp()));
+    @assert(!f.is_null(), "Missing function '%' in '%'", fn_name, self.ctx.get_string(lib_name));
+    (Some = f)
+};

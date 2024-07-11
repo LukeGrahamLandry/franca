@@ -7,13 +7,14 @@ impl zed::Extension for MyExtension {
     where
         Self: Sized,
     {
+        println!("Hello World!");
         MyExtension {}
     }
 
     fn language_server_command(&mut self, language_server_id: &zed::LanguageServerId, worktree: &zed::Worktree) -> zed::Result<zed::Command> {
         Ok(zed::Command {
-            command: "/Users/luke/Documents/mods/infered/target/debug/lsp".to_string(),
-            args: vec![],
+            command: "/usr/local/bin/franca".to_string(),
+            args: vec!["-lsp".to_string()],
             env: vec![],
         })
     }

@@ -1,3 +1,16 @@
+```
+[
+  {
+    "label": "Franca Compiler",
+    "command": "cd /Users/luke/Documents/mods/infered/compiler && franca first.fr && clang++ /Users/luke/Documents/mods/infered/target/aarch64-apple-darwin/release/deps/libfranca.a target/libfranca.o -o ../target/release/franca_new && mv ../target/release/franca_new ../target/release/franca",
+    "description": "compiler",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  }
+]
+```
+
 ## Jul 9
 
 - self hosted emit_bc is about 3% slower (170ms -> 175ms) at building the compiler.
