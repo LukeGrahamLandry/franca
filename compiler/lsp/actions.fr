@@ -19,7 +19,6 @@ fn handle_lsp_message(state: *LspState, id: ?f64, method: Str, json: *JsonParser
             if res&.is_ok() {|
                 uri := "";
                 good := json.parse_json(uri&);
-                @eprintln("root: %", uri);
                 if good {|
                     state.initialize(uri);
                 };
@@ -28,7 +27,9 @@ fn handle_lsp_message(state: *LspState, id: ?f64, method: Str, json: *JsonParser
             };
             (Ok = INITIALIZE_RESULT)
         };
-        @case("initialized") => return(.None);
+        @case("initialized") => {
+            return(.None)
+        };
         @case("shutdown") => (Ok = "null");
         @case("exit") => exit(0);
         @case("textDocument/definition") fn() LspResult => {
@@ -36,7 +37,15 @@ fn handle_lsp_message(state: *LspState, id: ?f64, method: Str, json: *JsonParser
             if !json.parse_json(params&) {|
                 (Err = (code = -32602, msg = "Failed to load params"))
             } else {|
-                state.handle(params&)
+                state.handle_definition(params&)
+            }
+        };
+        @case("textDocument/references") fn() LspResult => {
+            params := DefinitionParams.zeroed();
+            if !json.parse_json(params&) {|
+                (Err = (code = -32602, msg = "Failed to load params"))
+            } else {|
+                state.handle_references(params&)
             }
         };
         @default => {
@@ -61,7 +70,7 @@ fn handle_lsp_message(state: *LspState, id: ?f64, method: Str, json: *JsonParser
 
 // TODO: multiple in the state so you can lsp in the driver program too. 
 fn initialize(state: *LspState, root_uri: Str) Result(void, Str) = {
-    state.root = root_uri;
+    state.root = root_uri.clone(libc_allocator).items();
     if(!root_uri&.chop_prefix("file://"), => return(Err = "expected file uri"));
     
     // TODO: be smarter
@@ -88,39 +97,39 @@ fn initialize(state: *LspState, root_uri: Str) Result(void, Str) = {
     .Ok
 }
 
-fn handle(state: *LspState, params: *DefinitionParams) LspResult = {
-    @eprintln("%", params);
+fn handle_definition(state: *LspState, params: *DefinitionParams) LspResult = {
+    c := state.ctx.unwrap()[][];
+    locations: List(Location) = list(temp());
+    if c.get_var_referenced_at(params) { index |
+        var := c.index.variables&.nested_index(index)[].unwrap();
+        loc := state.get_location(var.declaration);
+        if loc.uri.ends_with(".fr") {|  // TODO: the compiler builtins end up pointing to a directory because i say thier filename is "compiler"
+            locations&.push(loc);
+        };
+    };
+    
+    out: List(u8) = list(temp());
+    locations := locations&.items();
+    locations&.dump_json(out&);
+
+    (Ok = out.items())
+}
+
+fn handle_references(state: *LspState, params: *DefinitionParams) LspResult = {
     c := state.ctx.unwrap()[][];
     loc := c.codemap.convert_to_span(params.textDocument.uri, params.position.line, params.position.character);
     locations: List(Location) = list(temp());
-    if loc { loc |
-        @eprintln("found % %", loc.high, loc.low);
-        click_line := c.codemap.get_whole_line(loc);
-        eprintln(c.codemap.source_slice(click_line.line_text));
-        each c.index.variables& { var |
-            if var { var | 
-                // TODO: don't redundantly push?
-                push_loc :: fn(loc: Span) => {
-                    line := c.codemap.get_whole_line(var.declaration);
-                    file_uri := @format("%/%", state.root, line.filename) temp();
-                    start: Position = (line = line.line - 1, character = line.col);
-                    end: Position = (line = line.line - 1, character = line.col + var.declaration.len());
-                    locations&.push(@as(Location) (uri = file_uri.items(), range = (start = start, end = end)));
-                };
-                
-                is_declared_here := var.declaration.contains(loc);
-                if is_declared_here {|
-                    @eprintln("is_declared_here % % %", loc.high, loc.low, c.pool.get(var.var.name));
-                    push_loc(loc);
-                };
-                for var.usages { check | 
-                    is_used_here := check.contains(loc);
-                    if is_used_here {|
-                        @eprintln("is_used_here % % %", loc.high, loc.low, c.pool.get(var.var.name));
-                        push_loc(loc);
-                    };
-                };
-                //@eprintln("check % %", var.declaration.high, var.declaration.low);
+    if c.get_var_referenced_at(params) { index |
+        var := c.index.variables&.nested_index(index)[].unwrap();
+        // TODO: respect "context":{"includeDeclaration":false}
+        loc := state.get_location(var.declaration);
+        if loc.uri.ends_with(".fr") {|
+            locations&.push(loc);
+        };
+        for var.usages { check | 
+            loc := state.get_location(check);
+            if loc.uri.ends_with(".fr") {|
+                locations&.push(loc);
             };
         };
     };
@@ -128,15 +137,43 @@ fn handle(state: *LspState, params: *DefinitionParams) LspResult = {
     out: List(u8) = list(temp());
     locations := locations&.items();
     locations&.dump_json(out&);
-    eprintln(out.items());
+
     (Ok = out.items())
-    //(Ok = "null")
+}
+
+fn get_var_referenced_at(c: *SelfHosted, params: *DefinitionParams) ?i64 = {
+    loc := c.codemap.convert_to_span(params.textDocument.uri, params.position.line, params.position.character);
+    loc := loc.or(=> return(.None));
+    click_line := c.codemap.get_whole_line(loc);
+    each c.index.variables& { var |
+        if var { var | 
+            if var.declaration.contains(loc) {|
+                return(Some = var.var.id.zext());
+            };
+            for var.usages { check | 
+                if check.contains(loc) {|
+                    return(Some = var.var.id.zext());
+                };
+            };
+        };
+    };
+    .None
+}
+
+fn get_location(state: *LspState, loc: Span) Location = {
+    c := state.ctx.unwrap()[][];
+    line := c.codemap.get_whole_line(loc);
+    file_uri := @format("%/%", state.root, line.filename) temp();
+    start: Position = (line = line.line - 1, character = line.col);
+    end: Position = (line = line.line - 1, character = line.col + loc.len());
+    (uri = file_uri.items(), range = (start = start, end = end))
 }
 
 // this is kind dumb but also I only need one. 
 INITIALIZE_RESULT :: """{
     "capabilities": {
-        "definitionProvider": true
+        "definitionProvider": true,
+        "referencesProvider": true
     }
 }""";
 
@@ -154,7 +191,6 @@ fn convert_to_span(codemap: *CodeMap, full_path: Str, line: i64, col: i64) ?Span
         //       because im lazilly passing uris currently.
         //       should remove rootUri prefix because i have that,
         if full_path.ends_with(file.name) {|
-            @eprintln("found file %", file.name);
             offset := file.start;
             end := offset.add(file.content.len.trunc());
             current_line := 0;
