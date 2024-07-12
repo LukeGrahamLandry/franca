@@ -3,7 +3,7 @@ LspErr :: @struct(code: i64, msg: Str);
 
 :: derive_lsp();
 
-fn handle_lsp_message(id: ?f64, method: Str, json: *JsonParser) ?Str = {
+fn handle_lsp_message(state: *LspState, id: ?f64, method: Str, json: *JsonParser) ?Str = {
     out: List(u8) = list(temp());
     out&.push_all("""{ "jsonrpc": "2.0", """);
     if id { id |
@@ -13,7 +13,19 @@ fn handle_lsp_message(id: ?f64, method: Str, json: *JsonParser) ?Str = {
     ::if(LspResult);
     result: LspResult = @switch(method) {
         @case("initialize") => {
-            // TODO: I want the rootUri
+            ::Result(void, Str);
+            json.next();  // dictstart
+            res := json.skip_until_key("rootUri");
+            if res&.is_ok() {|
+                uri := "";
+                good := json.parse_json(uri&);
+                @eprintln("root: %", uri);
+                if good {|
+                    state.initialize(uri);
+                };
+            } else {|
+                eprintln(res.unwrap_err());
+            };
             (Ok = INITIALIZE_RESULT)
         };
         @case("initialized") => return(.None);
@@ -24,8 +36,7 @@ fn handle_lsp_message(id: ?f64, method: Str, json: *JsonParser) ?Str = {
             if !json.parse_json(params&) {|
                 (Err = (code = -32602, msg = "Failed to load params"))
             } else {|
-                @eprintln("%", params&);
-                (Err = (code = -32601, msg = "Good!"))
+                state.handle(params&)
             }
         };
         @default => {
@@ -45,12 +56,126 @@ fn handle_lsp_message(id: ?f64, method: Str, json: *JsonParser) ?Str = {
     (Some = out.items())
 }
 
+////////////////////////////////////////////
+
+
+// TODO: multiple in the state so you can lsp in the driver program too. 
+fn initialize(state: *LspState, root_uri: Str) Result(void, Str) = {
+    state.root = root_uri;
+    if(!root_uri&.chop_prefix("file://"), => return(Err = "expected file uri"));
+    
+    // TODO: be smarter
+    entry_file := root_uri.clone(temp());
+    entry_file&.push_path_segment("run_tests.fr");
+    
+    if !file_exists(entry_file.items()) {|
+        return(Err = (@format("Guessed '%' but does not exist", entry_file.items()) temp()).items());
+    };
+    
+    c := state.vtable.load_file_in_compiler(entry_file.items());
+    c := c.or() { _: rawptr | 
+        // TODO: log the actual error
+        return(Err = "load driver file failed")
+    };
+    
+    if c.get_unique_named("driver_lsp_entry") {f|
+        callee := c.get_jitted(f);
+        callee := assume_types_fn(Arg = *ImportVTable, Ret = CompilerRs, ptr = callee);
+        child_compiler := callee(state.vtable);
+        state.ctx = (Some = child_compiler);
+    };
+    
+    .Ok
+}
+
+fn handle(state: *LspState, params: *DefinitionParams) LspResult = {
+    @eprintln("%", params);
+    c := state.ctx.unwrap()[][];
+    loc := c.codemap.convert_to_span(params.textDocument.uri, params.position.line, params.position.character);
+    locations: List(Location) = list(temp());
+    if loc { loc |
+        @eprintln("found % %", loc.high, loc.low);
+        click_line := c.codemap.get_whole_line(loc);
+        eprintln(c.codemap.source_slice(click_line.line_text));
+        each c.index.variables& { var |
+            if var { var | 
+                // TODO: don't redundantly push?
+                push_loc :: fn(loc: Span) => {
+                    line := c.codemap.get_whole_line(var.declaration);
+                    file_uri := @format("%/%", state.root, line.filename) temp();
+                    start: Position = (line = line.line - 1, character = line.col);
+                    end: Position = (line = line.line - 1, character = line.col + var.declaration.len());
+                    locations&.push(@as(Location) (uri = file_uri.items(), range = (start = start, end = end)));
+                };
+                
+                is_declared_here := var.declaration.contains(loc);
+                if is_declared_here {|
+                    @eprintln("is_declared_here % % %", loc.high, loc.low, c.pool.get(var.var.name));
+                    push_loc(loc);
+                };
+                for var.usages { check | 
+                    is_used_here := check.contains(loc);
+                    if is_used_here {|
+                        @eprintln("is_used_here % % %", loc.high, loc.low, c.pool.get(var.var.name));
+                        push_loc(loc);
+                    };
+                };
+                //@eprintln("check % %", var.declaration.high, var.declaration.low);
+            };
+        };
+    };
+    
+    out: List(u8) = list(temp());
+    locations := locations&.items();
+    locations&.dump_json(out&);
+    eprintln(out.items());
+    (Ok = out.items())
+    //(Ok = "null")
+}
+
 // this is kind dumb but also I only need one. 
 INITIALIZE_RESULT :: """{
     "capabilities": {
         "definitionProvider": true
     }
 }""";
+
+//////////////////////////////////////////////////////////
+
+fn contains(self: Span, other: Span) bool = {
+    self.low <= other.low && self.high >= other.high
+    //abs((@as(i64) self.low.zext()) - (@as(i64) other.low.zext())) < 100
+}
+
+// TODO: deal with it giving utf16 once i can lex that. 
+fn convert_to_span(codemap: *CodeMap, full_path: Str, line: i64, col: i64) ?Span = {
+    each codemap.files& { file | 
+        // TODO: this will treat c/a.txt and c/b/a.txt the same. 
+        //       because im lazilly passing uris currently.
+        //       should remove rootUri prefix because i have that,
+        if full_path.ends_with(file.name) {|
+            @eprintln("found file %", file.name);
+            offset := file.start;
+            end := offset.add(file.content.len.trunc());
+            current_line := 0;
+            while => offset < end {|
+                if current_line == line {|
+                    // if it lied about it being a line (ie, there's a newline in the next <col> bytes, thats not my problem bro).
+                    offset += col.trunc();
+                    return(Some = (low = offset, high = offset + 1));
+                };
+                
+                if file.content[offset.zext() - file.start.zext()] == "\n".ascii() {|
+                    current_line += 1;
+                };
+                offset += 1;
+            };
+            return(.None);
+        };
+    };
+
+    .None
+}
 
 ///////////////////////////////////////////////////////////
 // TODO: move this to x/json so other stuff can use it too. make an example program. 
@@ -95,6 +220,44 @@ fn DeriveJson($T: Type) void = {
         
         true
     }
+    
+    fn dump_json(self: *T, out: *List(u8)) void = {
+        @inline_match(@run T.get_type_info_ref()) {
+            (fn Struct($_) => {
+                fields :: T.get_fields();
+                prefix := "";
+                out.push_all("{");
+                inline_for fields { $f | 
+                    name :: f[].name.str();
+                    @fmt(out, "%\"%\": ", prefix, name);
+                    prefix = ",";
+                    inner := T.get_field_ptr(self, f);
+                    inner.dump_json(out);
+                };
+                out.push_all("}");
+            });
+            @default => {
+                panic("Unsupported type for DeriveJson");
+            };
+        };
+    }
+}
+
+fn DeriveJsonSlice($T: Type) void = {
+    fn parse_json(json: *JsonParser, self: *[]T) bool = {
+        panic("TODO: DeriveJsonSlice parse_json")
+    }
+    
+    fn dump_json(self: *[]T, out: *List(u8)) void = {
+        out.push_all("[");
+        prefix := "";
+        each self { inner | 
+            out.push_all(prefix);
+            prefix = ",";
+            inner.dump_json(out);
+        };
+        out.push_all("]");
+    }
 }
 
 fn parse_json(json: *JsonParser, i: *i64) bool = {
@@ -111,6 +274,27 @@ fn parse_json(json: *JsonParser, i: *Str) bool = {
     true
 }
 
+fn dump_json(i: *i64, out: *List(u8)) void = {
+    i.display(out);
+}
+
+// TODO: other types of escapes
+fn dump_json(i: *Str, out: *List(u8)) void = {
+    out.push_all("\"");
+    for i[] { c |
+        if c == "\"".ascii() {|
+            out.push_all("\\\"");
+        } else {|
+            out.push(c);
+        };
+    };
+    out.push_all("\"");
+}
+
+fn chop_prefix(s: *Str, prefix: Str) bool = {
+    if(s[].starts_with(prefix), => { s.advance(prefix.len); true }, => false)
+}
+
 ///////////////////////////////////////////////////////////
 // TODO: move this to a bindings/
 
@@ -119,6 +303,10 @@ fn derive_lsp() void = {
     DeriveJson(Position); DeriveFmt(Position);
     DeriveJson(TextDocumentIdentifier); DeriveFmt(TextDocumentIdentifier);
     DeriveJson(DefinitionParams); DeriveFmt(DefinitionParams);
+    DeriveJson(Position); DeriveFmt(Position);
+    DeriveJson(Location); DeriveFmt(Location);
+    DeriveJson(Range); DeriveFmt(Range);
+    DeriveJsonSlice(Location);
 }
 
 DefinitionParams :: @struct(
@@ -127,3 +315,5 @@ DefinitionParams :: @struct(
 );
 TextDocumentIdentifier :: @struct(uri: Str);
 Position :: @struct(line: i64, character: i64);
+Range :: @struct(start: Position, end: Position);
+Location :: @struct(uri: Str, range: Range);

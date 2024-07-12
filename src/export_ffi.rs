@@ -357,7 +357,7 @@ unsafe extern "C" fn get_fns_with_tag(c: &mut Compile, tag: Ident) -> *const [Fu
             found.push(FuncId::from_index(fid));
         }
     }
-    println!("scanned {} fns", c.program.funcs.len());
+    // println!("scanned {} fns", c.program.funcs.len());
 
     found.leak() as *const [FuncId]
 }

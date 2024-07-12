@@ -1,0 +1,41 @@
+LspState :: @struct(
+    vtable: *ImportVTable,
+    // TODO: multiple at once that look at differenet files?
+    ctx: ?CompilerRs,
+    root := "",
+);
+
+VariableInfo :: @struct(
+    declaration: Span,
+    usages: RsVec(Span),
+    var: Var,
+);
+
+// TODO: really you want to be storing things as file+line because that's what the lsp gives you. 
+ProgramIndex :: @struct(
+    a: Alloc,
+    variables: BucketArray(?VariableInfo),
+);
+
+// TODO: build option do disable building the index even when lsp enabled. 
+
+fn record_var_declare(c: *SelfHosted, var: Var, loc: Span) void = {
+    @if(ENABLE_LSP) {
+        while => var.id != c.index.variables.len.trunc() {|
+            c.index.variables&.push(.None);
+        };
+        c.index.variables&.push(Some = (declaration = loc, usages = empty(), var = var));
+    };
+}
+
+fn record_var_usage(c: *SelfHosted, var: Var, loc: Span) void = {
+    @if(ENABLE_LSP) { 
+        if c.index.variables&.nested_index(var.id.zext()) { info | 
+            info.usages&.push(loc, c.index.a);
+        };
+    };
+}
+
+fn init(a: Alloc) ProgramIndex = {
+    (a = a, variables = init(1024, a))
+}

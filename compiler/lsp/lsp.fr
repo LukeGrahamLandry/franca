@@ -1,12 +1,14 @@
 #include_std("lib/x/json.fr");
 #include_std("compiler/lsp/actions.fr");
+
 // TODO: fix the thing where i hangs at 100% cpu when vscode tries to crash me?
 // TODO: do i have to allow new lines in the json blob?
-
 fn lsp_main(vtable: *ImportVTable) void = {
     ::Result(JsonPart, Str);
     eprintln("Franca Language Server.");
     input_buf: List(u8) = list(65536, page_allocator);
+    
+    state: LspState = (vtable = vtable, ctx = .None);
     
     STD_IN: Fd : (fd = 0.intcast());
     while => true {|
@@ -46,7 +48,7 @@ fn lsp_main(vtable: *ImportVTable) void = {
                         @case("params") => {
                             assert(method.is_some(), "expected keys in order (method before params)");
                             @eprintln("got to params. %", method.unwrap());
-                            if handle_lsp_message(id, method.unwrap(), parse&) { response |
+                            if state&.handle_lsp_message(id, method.unwrap(), parse&) { response |
                                 @print("Content-Length: %\r\n\r\n", response.len);
                                 print(response);
                             };
@@ -70,16 +72,16 @@ fn eat_line(s: Str) Ty(Str, Str) = {
     start.len = 0;
     while => !s.starts_with("\r\n") && s.len > 0 {|
         start.len += 1;
-        s&.advance();
+        s&.advance(1);
     };
     if s.len > 0 {|
-        s&.advance();
-        s&.advance();
+        s&.advance(2);
     };
     (start, s)
 }
 
-fn advance(s: *Str) void = {
-    s.ptr = s.ptr.offset(1);
-    s.len -= 1;
+fn advance(s: *Str, count: i64) void = {
+    @safety(.Bounds) s.len >= count;
+    s.ptr = s.ptr.offset(count);
+    s.len -= count;
 }

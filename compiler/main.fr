@@ -1,6 +1,5 @@
 #include_std("lib/core.fr"); 
 #include_std("compiler/lib.fr"); 
-#include_std("compiler/lsp/lsp.fr"); 
 
 VERBOSE_TEST_LOGGING :: false;
 
@@ -18,7 +17,9 @@ SelfHosted :: @struct(
     // NOTE: don't reorder the fields above this! Rust knows about them!
     // TODO: they should just be slices since they have to last forever anyway
     primitives: HashMap(Ty(Type, u16, bool, bool), RsVec(Prim)),
+    index: ProgramIndex,
 );
+
 
 :: AutoHash(Ty(Type, u16, bool, bool), TrivialHasher);
 :: AutoEq(Ty(Type, u16, bool, bool));
@@ -51,15 +52,16 @@ fn self_hosted_main(vtable: *ImportVTable) void #compiler #no_trace = {
   
     filename := args[1].str();
     
+    my_vtable := vtable[];
+    my_vtable&.fill_driver_vtable();
+    
     if filename == "-lsp" {|
         @if(ENABLE_LSP, => {
-            lsp_main(vtable);
+            lsp_main(my_vtable&);
             exit(0);
         }, => panic("argument '-lsp' not supported by this build of the compiler"));
     };
     
-    my_vtable := vtable[];
-    my_vtable&.fill_driver_vtable();
     @match(run_franca_file(my_vtable&, filename)) {
         (fn Ok(_) => exit(0));
         (fn Err(e) => exit(1));
@@ -69,8 +71,7 @@ fn self_hosted_main(vtable: *ImportVTable) void #compiler #no_trace = {
 // TODO: store this in SelfHosted instead of in a global -- Jul 5
 STDLIB_PATH :: @static(?Str) (None = unit);
 
-// TODO: print the error message!!! since this doesn't go through the rust side anymore. -- Jun 30
-fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
+fn load_file_in_compiler(vtable: *ImportVTable, path: Str) CRes(CompCtx) = {
     source: List(u8) = "#include_std(\"lib/core.fr\"); ".clone(libc_allocator);  // TODO: column number on error on first line will be wrong but i dont care. 
     source&.read_and_push(path);  // TODO: error handling
     
@@ -81,8 +82,16 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
     
     id := self.parser.push_parse(source.items(), file);
     // TODO: handle error
-    stmts := self.parser.finish_pending_stmts(id).unwrap(); // TODO: don't return RsVec -- Jun 29
+    stmts := self.parser.finish_pending_stmts(id);
+    stmts := stmts.unwrap(); // TODO: don't return RsVec -- Jun 29
     @try({c.vtable.make_and_resolve_and_compile_top_level}(c.data, stmts.items())) return;
+    
+    (Ok = c)
+}
+
+// TODO: print the error message!!! since this doesn't go through the rust side anymore. -- Jun 30
+fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
+    c := @try(vtable.load_file_in_compiler(path)) return;
     
     if c.get_unique_named("driver") {f|
         callee := c.get_jitted(f);
@@ -185,22 +194,6 @@ fn pop_until_endswith(self: *List(u8), suffix: []u8) bool = {
     !self.is_empty()
 }
 
-PATH_SEP :: "/";
-
-fn push_path_segment(self: *List(u8), name: []u8) void = {
-    if !self.items().ends_with(PATH_SEP) {|
-        self.push_all(PATH_SEP);
-    };
-    self.push_all(name);
-}
-
-fn pop_path_segment(self: *List(u8)) bool = {
-    if !self.is_empty() && self.items().ends_with(PATH_SEP) {|
-        self.pop();
-    };
-    self.pop_until_endswith(PATH_SEP)
-}
-
 // TODO: pass requested type through generic args so this isn't so clunky. -- Jun 23
 fn init_self_hosted() *SelfHosted #compiler = {
     a: ArenaAlloc = init(page_allocator, 1.shift_left(20));
@@ -249,6 +242,7 @@ fn init_self_hosted() *SelfHosted #compiler = {
         last_loc = (low = 0, high = 0),
         env = env,
         primitives = init(a),
+        index = init(a),
     );
     a.boxed(SelfHosted, self)
 }
