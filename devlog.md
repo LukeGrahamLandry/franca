@@ -1,3 +1,11 @@
+## Jul 13
+
+- converted my comptime ffi call asm to my language.
+  can compile itself but comptime_float_call fails.... but not in the RustRover debugger, unless no_fork... so thats fun.
+  thats really creepy, i just had the registers totally wrong.
+
+##
+
 ```
 [
   {

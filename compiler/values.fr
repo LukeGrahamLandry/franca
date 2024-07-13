@@ -387,3 +387,183 @@ fn read_next(self: *ReadBytes, $T: Type) T #generic = {
     self.i += T.size_of();
     ptr_cast_unchecked(u8, T, ptr)[]
 }
+
+////////////////////
+/// Dynamic Call ///
+
+// TODO: this is the only place I still use float_mask.
+//       i could get rid of it if i switch to using PrimSig.
+//       then the next step is to lazily jit shims so i don't have to implement the calling convention twice. 
+// Note: FnType by ptr because i think i do (u32, u32) calling convention wrong. 
+fn call_dynamic(program: CompilerRs, ptr: i64, f_ty: *FnType, args: *RsVec(i64), comp_ctx: bool) Res(Values) #compiler = {
+    arg := program.get_info(f_ty.arg);
+    ret := program.get_info(f_ty.ret);
+    F :: @FnPtr(f: i64, a: *i64) i64;
+    ::if(F);
+    bounce: F = if arg.float_mask == 0 && ret.float_mask == 0 {|
+        arg8ret1
+    } else {|
+        // TODO: assert: arg.float_mask.count_ones() == arg.size_slots as u32 && ret.float_mask.count_ones() == ret.size_slots as u32
+        //       return(@error("ICE: i dont do mixed int/float registers but backend does"))
+        // :FUCKED, but I'm going to replace this with using the normal jit once i port that. 
+        @err_assert(ret.size_slots <= 1, "TODO: float call with multiple returns at comptime") return;
+        arg8ret1_all_floats
+    };
+
+    if comp_ctx {|
+        c := (**SelfHosted).int_from_ptr(program);
+        args.insert(0, c, temp());
+    };
+    :: if(?RsVec(u8));
+    indirect_ret: ?RsVec(u8) = if ret.size_slots > 2 {|
+        mem: List(u8) = 0.repeated(@as(i64) ret.stride_bytes.zext(), program.get_alloc());
+        mem: RsVec(u8) = mem.rs();
+        ret_addr := u8.int_from_ptr(mem.ptr);
+        args.insert(0, ret_addr, temp());
+        @assert_eq(arg.float_mask, 0);
+        (Some = mem)
+    } else {|
+        .None
+    };
+    @err_assert(args.len() <= 8, "too many args for comptime call") return;
+    // not doing this is ub but like... meh.
+    // if something interesting happens to be after the args and you call with the wrong signature you could read it.
+    // its fine to read garbage memory and put it in the registers you know callee will ignore (if types are right).
+    // However, now that unit is zero sized, the vec may have no allocation, so you get a segfault trying to load from it.
+    READ_GARBAGE :: false;
+    if args.is_empty().or(!READ_GARBAGE) {|
+        a := args[].assume_owned(temp());
+        a&.reserve(8 - args.len());
+        args[] = a.rs();
+        //while args.len() < 8 {
+        //    args.push(0);
+        //}
+    };
+
+    // since we're going to be reading 8 things regardless, it has to be at least vaguely a real pointer.  
+    if args.cap == 0 {|
+        // TEMP TEMP TEMP. relies on rust leaking everything!!!!! :FUCKED
+        // no reason im just being lazy
+        mega_hack := 0;
+        args.ptr = mega_hack&;
+    };
+    
+    :: if(Res(Values));
+    if ret.size_slots <= 1 {|
+        r := bounce(ptr, args.ptr);
+        assert(ret.stride_bytes <= 8, "big ret");
+        (Ok = (Small = (r, ret.stride_bytes.trunc())))
+    } else {|
+        if ret.size_slots == 2 {|
+            (f, s) := program.prim_pair(f_ty.ret).unwrap();
+            r := arg8ret2(ptr, args.ptr);
+            // TODO: floats!
+            if f.eq(.I64).or(f.eq(.P64)) {|
+                if s.eq(.I64).or(s.eq(.P64)) {|
+                    return(Ok = to_values(program[][], Ty(i64, i64), (r.fst, r.snd)));
+                };
+                if s.eq(.I8) {|
+                    return(Ok = to_values(program[][], Ty(i64, u8), (r.fst, @as(u8) r.snd.trunc())));
+                };
+            };
+            if f.eq(.I32) {|
+                if s.eq(.I32) {|
+                    return(Ok = to_values(program[][], Ty(u32, u32), (@as(u32) r.fst.trunc(), @as(u32) r.snd.trunc())));
+                };
+            };
+            @error("TODO: unhandled prim pair for comptime call")
+        } else {|
+            arg8ret_struct(ptr, args.ptr);
+            mem := indirect_ret.unwrap();
+            (Ok = (Big = mem))
+        }
+    }
+}
+
+to_values :: fn(program: *SelfHosted, $T: Type, v: T) Values #generic = {
+    bytes := T.cast_to_bytes(v&);
+    program.from_bytes(bytes)
+}
+
+fn from_bytes(program: *SelfHosted, bytes: []u8) Values = {
+    ::if(Values);
+    if bytes.len() <= 8 {|
+        v := 0;
+        shift := 0;
+        for bytes { b |
+            v = v.bit_or(b.zext().shift_left(shift));
+            shift += 8;
+        };
+        (Small = (v, bytes.len.trunc()))
+    } else {|
+       (Big = bytes.clone(program.get_alloc()).rs())
+    }
+}
+
+// loads 8 words from args into x0-x7 then calls fnptr
+arg8ret1 :: fn(fnptr: i64, first_of_eight_args: *i64) i64 #asm #aarch64 #c_call = (
+    mov(Bits.X64, x16, x0),  // save callee since we need to use this register for args
+    mov(Bits.X64, x17, x1),
+    ldr_uo(Bits.X64, x0, x17, 0),
+    ldr_uo(Bits.X64, x1, x17, 1),
+    ldr_uo(Bits.X64, x2, x17, 2),
+    ldr_uo(Bits.X64, x3, x17, 3),
+    ldr_uo(Bits.X64, x4, x17, 4),
+    ldr_uo(Bits.X64, x5, x17, 5),
+    ldr_uo(Bits.X64, x6, x17, 6),
+    ldr_uo(Bits.X64, x7, x17, 7),
+    br(x16, 0), // tail call
+);
+
+IntPair :: @struct(fst: i64, snd: i64);
+// TODO: copy-paste of arg8ret1
+arg8ret2 :: fn(fnptr: i64, first_of_eight_args: *i64) IntPair #asm #aarch64 #c_call = (
+    mov(Bits.X64, x16, x0),  // save callee since we need to use this register for args
+    mov(Bits.X64, x17, x1),
+    ldr_uo(Bits.X64, x0, x17, 0),
+    ldr_uo(Bits.X64, x1, x17, 1),
+    ldr_uo(Bits.X64, x2, x17, 2),
+    ldr_uo(Bits.X64, x3, x17, 3),
+    ldr_uo(Bits.X64, x4, x17, 4),
+    ldr_uo(Bits.X64, x5, x17, 5),
+    ldr_uo(Bits.X64, x6, x17, 6),
+    ldr_uo(Bits.X64, x7, x17, 7),
+    br(x16, 0), // tail call
+);
+
+arg8ret_struct :: fn(fnptr: i64, first_of_eight_args: *i64) void #asm #aarch64 #c_call = (
+    ldr_uo(Bits.X64, x8, x1, 0),  // arm cc has return address in x8 but we want to represent it as first argument. 
+    add_im(Bits.X64, x1, x1, 8, 0),
+    mov(Bits.X64, x16, x0),  // save callee since we need to use this register for args
+    mov(Bits.X64, x17, x1),
+    ldr_uo(Bits.X64, x0, x17, 0),
+    ldr_uo(Bits.X64, x1, x17, 1),
+    ldr_uo(Bits.X64, x2, x17, 2),
+    ldr_uo(Bits.X64, x3, x17, 3),
+    ldr_uo(Bits.X64, x4, x17, 4),
+    ldr_uo(Bits.X64, x5, x17, 5),
+    ldr_uo(Bits.X64, x6, x17, 6),
+    ldr_uo(Bits.X64, x7, x17, 7),
+    br(x16, 0), // tail call
+);
+
+// loads 8 words from args into d0-d7 then calls fnptr. the return value in d0 is bit cast to an int in x0 for you.
+arg8ret1_all_floats :: fn(fnptr: i64, first_of_eight_args: *i64) i64 #asm #aarch64 #c_call = (
+    sub_im(Bits.X64, sp, sp, 16, 0),
+    stp_so(.X64, fp, lr, sp, @as(i7) 0),
+
+    f_ldr_uo(Bits.X64, x0, x1, 0),
+    f_ldr_uo(Bits.X64, x1, x1, 1),
+    f_ldr_uo(Bits.X64, x2, x1, 2),
+    f_ldr_uo(Bits.X64, x3, x1, 3),
+    f_ldr_uo(Bits.X64, x4, x1, 4),
+    f_ldr_uo(Bits.X64, x5, x1, 5),
+    f_ldr_uo(Bits.X64, x6, x1, 6),
+    f_ldr_uo(Bits.X64, x7, x1, 7),
+
+    br(x0, 1),
+    fmov_from(x0, x0),
+    ldp_so(.X64, fp, lr, sp, @as(i7) 0),
+    add_im(Bits.X64, sp, sp, 16, 0),
+    ret(),
+);

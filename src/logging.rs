@@ -33,6 +33,7 @@ macro_rules! err {
     }};
     ($($arg:tt)*) => {{
         let msg = format!($($arg)*);
+        // eprintln!("{msg}");
         err!($crate::compiler::CErr::Fatal(msg))
     }};
 }

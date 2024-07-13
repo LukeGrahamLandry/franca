@@ -205,10 +205,15 @@ pub mod c {
     use crate::compiler::Res;
     use crate::err;
     use crate::export_ffi::BigResult::*;
+    use crate::self_hosted;
     use std::arch::global_asm;
     use std::mem::transmute;
 
     pub fn call<'p>(program: &mut Compile<'_, 'p>, ptr: usize, f_ty: crate::ast::FnType, mut args: Vec<i64>, comp_ctx: bool) -> Res<'p, Values> {
+        if true {
+            return unsafe { Ok(self_hosted::call_dynamic(program, ptr, &f_ty, &mut args, comp_ctx).unwrap()) };
+        }
+
         let (arg, ret) = program.program.get_infos(f_ty);
         let mut bounce = if arg.float_mask == 0 && ret.float_mask == 0 {
             arg8ret1

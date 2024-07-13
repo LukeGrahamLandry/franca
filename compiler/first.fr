@@ -1,7 +1,25 @@
 DO_TESTS :: false;
 
 ENABLE_TRACY :: false;
-ENABLE_LSP   :: true;
+ENABLE_LSP   :: false;
+REPLACE_COMPILER :: true;
+
+fn load_src(vtable: *ImportVTable) Ty(CompCtx, *ComptimeLibs) = {
+    src := temp().read_to_string("compiler/main.fr");
+    @fmt(src&, ";ENABLE_TRACY :: %;\n", ENABLE_TRACY);
+    @fmt(src&, ";ENABLE_LSP   :: %;\n", ENABLE_LSP);
+    
+    comp := vtable.new_with_src(src.items(), .Aarch64);
+    c := vtable.with(comp);
+    
+    libs := c.empty_libs();
+    libs := temp().boxed(ComptimeLibs, libs);
+    libs.intercept_imports();
+    if(ENABLE_TRACY, => libs.add_lib(tracy_lib));
+    // TODO: fix relative paths. just decide everything is built from the top level. so `franca compiler/first.fr`
+    if(ENABLE_LSP, => libs.add_lib(wuffs_lib));
+    (c, libs)
+}
 
 // TODO: less ass field lookup and call syntax
 // TODO: compiler needs to check type / find right overload of this function. 
@@ -11,6 +29,7 @@ fn driver(vtable: *ImportVTable) void = {
         panic("Working directory must be top level of the franca repository");
     };
     start := timestamp();
+    (c, libs) := load_src(vtable);
     
     do_build := true;
     args := cli_args();
@@ -19,19 +38,6 @@ fn driver(vtable: *ImportVTable) void = {
             do_build = false;
         };
     };
-    
-    src := temp().read_to_string("compiler/main.fr");
-    @fmt(src&, ";ENABLE_TRACY :: %;\n", ENABLE_TRACY);
-    @fmt(src&, ";ENABLE_LSP   :: %;\n", ENABLE_LSP);
-    
-    comp := vtable.new_with_src(src.items(), .Aarch64);
-    c := vtable.with(comp);
-    
-    libs := c.empty_libs();
-    libs&.intercept_imports();
-    if(ENABLE_TRACY, => libs&.add_lib(tracy_lib));
-    // TODO: fix relative paths. just decide everything is built from the top level. so `franca compiler/first.fr`
-    if(ENABLE_LSP, => libs&.add_lib(wuffs_lib));
     
     if DO_TESTS {|
         tests := c.get_tagged("test");
@@ -78,10 +84,12 @@ fn driver(vtable: *ImportVTable) void = {
         //)).assert("cargo failed");
         // node: this makes a much much larger binary than if cargo does it. 
         //       i suspect im linking in the whole rust std or something? 
-        args := libs&.get_aot_objects();
+        args := libs.get_aot_objects();
         // TODO: should output then move cause i think it deletes if it fails
-        args&.push_all(@slice("target/release/libfranca.a", "target/franca/libfranca.o", "-o", "target/release/franca", "-g"));
-        run_cmd_blocking(CLANG_PATH, args.items()).assert("link failed");
+        if REPLACE_COMPILER {|
+            args&.push_all(@slice("target/release/libfranca.a", "target/franca/libfranca.o", "-o", "target/release/franca", "-g"));
+            run_cmd_blocking(CLANG_PATH, args.items()).assert("link failed");
+        };
         
     } else {|
         println("SKIPPED RUNNING LLVM");
@@ -110,3 +118,20 @@ fn build_llvm(ir: BucketArray(u8), args: Slice(Str)) void = {
 }
 
 ::display_slice(Str);
+
+fn driver_lsp_entry(vtable: *ImportVTable) Compiler = {
+    (c, libs) := load_src(vtable);
+    // TODO: dumb that im actually generating bc+asm for them
+    exports := c.get_tagged("compiler");
+    
+    @eprintln("Hello!");
+    for exports { fid |
+        @eprintln("Hello!");
+        func := {c.vtable.get_function}(c.data, fid);
+        name := {c.vtable.get_string}(c.data, {c.vtable.get_function_name}(c.data, fid));
+        @eprintln("%", name);
+        ptr := c.get_jitted(fid);
+    };
+    
+    c.data
+}

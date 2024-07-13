@@ -1,8 +1,8 @@
 use std::marker::PhantomData;
 
 use crate::{
-    ast::{FatExpr, FatStmt, Flag, Func, FuncId, LazyType, OverloadSetId, Pattern, ScopeId, TypeId, Var},
-    bc::{BakedEntry, BakedVar, BakedVarId, FnBody},
+    ast::{FatExpr, FatStmt, Flag, FnType, Func, FuncId, LazyType, OverloadSetId, Pattern, ScopeId, TypeId, Var},
+    bc::{BakedEntry, BakedVar, BakedVarId, FnBody, Values},
     compiler::{CErr, Compile, CompileError, ExecStyle},
     err,
     export_ffi::{BigOption, ImportVTable},
@@ -95,6 +95,14 @@ extern "C" {
     pub(crate) fn get_baked(c: &SelfHosted, id: BakedVarId) -> *const (i64, BakedVar);
 
     pub(crate) fn emit_bc<'p>(comp: &mut Compile<'_, 'p>, f: FuncId, when: ExecStyle) -> BigResult<FnBody<'p>, ParseErr<'p>>;
+
+    pub(crate) fn call_dynamic<'p>(
+        comp: &mut Compile<'_, 'p>,
+        ptr: usize,
+        f_ty: &FnType,
+        args: &mut Vec<i64>,
+        comp_ctx: bool,
+    ) -> BigResult<Values, ParseErr<'p>>;
 }
 
 impl<'p> SelfHosted<'p> {
