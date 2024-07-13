@@ -1,14 +1,14 @@
 //! High level representation of a Franca program. Macros operate on these types.
 use crate::self_hosted::{init_self_hosted, Span};
 use crate::{
-    bc::{Prim, Values},
+    bc::Values,
     compiler::{CErr, Res},
     err,
     export_ffi::BigOption,
     extend_options, impl_index, impl_index_imm,
     self_hosted::Ident,
     self_hosted::SelfHosted,
-    unwrap, BitSet, Map, STATS,
+    BitSet, Map, STATS,
 };
 use std::ptr::addr_of;
 use std::{
@@ -1097,52 +1097,6 @@ impl<'p> Program<'p> {
         None
     }
 
-    pub(crate) fn prim(&self, ty: TypeId) -> Option<Prim> {
-        let ty = self.raw_type(ty);
-        Some(match self[ty] {
-            TypeInfo::F64 => Prim::F64,
-            TypeInfo::F32 => Prim::F32,
-            TypeInfo::Int(int) => match int.bit_count {
-                8 => Prim::I8,
-                16 => Prim::I16,
-                32 => Prim::I32,
-                _ => Prim::I64,
-            },
-            TypeInfo::Bool => Prim::I8,
-            TypeInfo::VoidPtr | TypeInfo::FnPtr { .. } | TypeInfo::Ptr(_) => Prim::P64,
-
-            TypeInfo::Unit => return None,
-            TypeInfo::Fn(_) | TypeInfo::Label(_) => Prim::I32,
-            TypeInfo::Struct {
-                ref fields,
-                const_field_count,
-                ..
-            } => {
-                // :const_field_fix
-                // TODO: don't assume the non-const field is first. but also for now, parser doesn't allow const field first. -- Jul 6
-                if (fields.len() - const_field_count as usize) == 1 && self.slot_count(fields[0].ty) == 1 {
-                    return self.prim(fields[0].ty);
-                }
-                return None;
-            }
-            TypeInfo::Tagged { ref cases, .. } => {
-                for (_, payload) in cases {
-                    if !payload.is_unit() {
-                        return None;
-                    }
-                }
-                return Some(Prim::I64);
-            }
-            _ => return None,
-        })
-    }
-
-    pub(crate) fn prim_pair(&self, ty: TypeId) -> Res<'p, (Prim, Prim)> {
-        let types = self.flat_tuple_types(ty); // TODO: don't allocate
-        assert_eq!(types.len(), 2);
-        Ok((unwrap!(self.prim(types[0]), ""), unwrap!(self.prim(types[1]), "")))
-    }
-
     pub(crate) fn arity(&self, expr: &FatExpr<'p>) -> u16 {
         if !expr.ty.is_unknown() {
             let raw = self.raw_type(expr.ty);
@@ -1249,38 +1203,6 @@ impl<'p> Program<'p> {
         }
     }
 
-    // TODO: return prims?
-    pub(crate) fn flat_tuple_types(&self, ty: TypeId) -> Vec<TypeId> {
-        match &self[ty] {
-            TypeInfo::Struct { fields, .. } => fields
-                .iter()
-                .filter(|f| f.kind != VarType::Const)
-                .flat_map(|f| self.flat_tuple_types(f.ty))
-                .collect(),
-            &TypeInfo::Enum { raw: ty, .. } | &TypeInfo::Named(ty, _) => self.flat_tuple_types(ty),
-            // TODO: this is sketchy
-            TypeInfo::Tagged { cases, .. } => {
-                let mut varients: Vec<_> = cases.iter().map(|(_, t)| self.flat_tuple_types(*t)).filter(|t| !t.is_empty()).collect();
-                if varients.len() == 1 {
-                    varients[0].insert(0, TypeId::i64());
-                    debug_assert_eq!(self.slot_count(ty) as usize, varients[0].len());
-                    return varients.into_iter().next().unwrap();
-                }
-                // TODO: hack
-                vec![TypeId::i64(); self.slot_count(ty) as usize]
-            }
-            &TypeInfo::Array { inner, len } => {
-                let types = self.flat_tuple_types(inner);
-                let mut out = vec![];
-                for _ in 0..len {
-                    out.extend(&types);
-                }
-                out
-            }
-            TypeInfo::Unit => vec![],
-            _ty => vec![ty],
-        }
-    }
     // TODO: skip through named and unique as well.
     pub(crate) fn ptr_depth(&self, mut ptr_ty: TypeId) -> usize {
         ptr_ty = self.raw_type(ptr_ty);
@@ -1395,10 +1317,6 @@ impl<'p> Program<'p> {
         };
         self.types_extra.borrow_mut().deref_mut()[ty.as_index()] = Some(info);
         info
-    }
-
-    pub(crate) fn get_infos(&self, ty: FnType) -> (TypeMeta, TypeMeta) {
-        (self.get_info(ty.arg), self.get_info(ty.ret))
     }
 
     pub(crate) fn slot_count(&self, ty: TypeId) -> u16 {

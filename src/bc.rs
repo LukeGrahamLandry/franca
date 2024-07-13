@@ -3,7 +3,7 @@
 use std::mem;
 use std::ptr::{slice_from_raw_parts, slice_from_raw_parts_mut};
 
-use crate::ast::{Program, TypeInfo, Var, VarType};
+use crate::ast::{Program, Var};
 use crate::self_hosted::Ident;
 use crate::unwrap;
 use crate::{assert_eq, BitSet};
@@ -173,13 +173,6 @@ impl Values {
         }
     }
 
-    pub(crate) fn bytes_mut(&mut self) -> &mut [u8] {
-        match self {
-            Values::Big(bytes) => bytes,
-            Values::Small(value, len) => unsafe { &mut *slice_from_raw_parts_mut(value as *mut i64 as *mut u8, *len as usize) },
-        }
-    }
-
     pub(crate) fn unit() -> Self {
         Self::Small(0, 0)
     }
@@ -231,21 +224,15 @@ impl Values {
 
 use crate::export_ffi::{BigOption, BigResult::*};
 #[track_caller]
-pub(crate) fn to_values<'p, T: InterpSend<'p>>(program: &mut Program<'p>, mut t: T) -> Res<'p, Values> {
-    let ty = T::get_or_create_type(program); // sigh
+pub(crate) fn to_values<'p, T: InterpSend<'p>>(_program: &mut Program<'p>, mut t: T) -> Res<'p, Values> {
     let bytes = unsafe { &mut *slice_from_raw_parts_mut(&mut t as *mut T as *mut u8, mem::size_of::<T>()) };
     debug_assert_eq!(bytes.as_ptr() as usize % mem::align_of::<T>(), 0);
     debug_assert_eq!(bytes.len(), mem::size_of::<T>());
-    zero_padding(program, ty, bytes, &mut 0)?; // TODO: deep?
     Ok(Values::from_bytes(bytes))
 }
 
-pub(crate) fn from_values<'p, T: InterpSend<'p>>(program: &Program<'p>, mut t: Values) -> Res<'p, T> {
+pub(crate) fn from_values<'p, T: InterpSend<'p>>(_program: &Program<'p>, t: Values) -> Res<'p, T> {
     assert_eq!(t.bytes().len(), mem::size_of::<T>(), "from_values {t:?}");
-    let mut i = 0;
-    let ty = T::get_type(program);
-    zero_padding(program, ty, t.bytes_mut(), &mut i)?;
-    debug_assert_eq!(i, t.bytes().len());
     debug_assert_eq!(t.bytes().as_ptr() as usize % mem::align_of::<T>(), 0);
     unsafe { Ok(std::ptr::read(t.bytes().as_ptr() as *const T)) }
 }
@@ -259,193 +246,6 @@ pub(crate) fn chop_prefix<'p>(program: &Program<'p>, prefix: TypeId, t: &mut Rea
     Ok(Values::many(taken.to_vec()))
 }
 
-/// Take some opaque bytes and split them into ints. So (u8, u8) becomes a vec of two i64 but u16 becomes just one.
-pub(crate) fn deconstruct_values(
-    program: &Program,
-    ty: TypeId,
-    bytes: &mut ReadBytes,
-    out: &mut Vec<i64>,
-    offsets: &mut Option<&mut Vec<(Prim, u16)>>, // this is stupid but how else do you call it in a loop??
-) -> Res<'static, ()> {
-    let info = program.get_info(ty);
-    let size = info.stride_bytes as usize;
-
-    debug_assert_eq!(bytes.i % info.align_bytes as usize, 0, "{bytes:?}");
-    debug_assert!(
-        size <= bytes.bytes.len() - bytes.i,
-        "deconstruct_values of {} wants {size} bytes but found {bytes:?}",
-        program.log_type(ty)
-    );
-    let ty = program.raw_type(ty);
-    match &program[ty] {
-        TypeInfo::Placeholder => err!("Unfinished type {ty:?}",),
-        TypeInfo::Never => err!("invalid type",),
-        TypeInfo::F64 => {
-            let offset = bytes.i;
-            out.push(unwrap!(bytes.next_i64(), ""));
-            if let Some(offsets) = offsets {
-                offsets.push((Prim::F64, offset as u16));
-            }
-        }
-        TypeInfo::FnPtr { .. } | TypeInfo::Ptr(_) | TypeInfo::VoidPtr => {
-            let offset = bytes.i;
-            out.push(unwrap!(bytes.next_i64(), ""));
-            if let Some(offsets) = offsets {
-                offsets.push((Prim::I64, offset as u16));
-            }
-        }
-        TypeInfo::F32 => {
-            let offset = bytes.i;
-            out.push(unwrap!(bytes.next_u32(), "") as i64);
-            if let Some(offsets) = offsets {
-                offsets.push((Prim::F32, offset as u16));
-            }
-        }
-        TypeInfo::Int(_) => {
-            let offset = bytes.i;
-            let (value, prim) = match program.get_info(ty).stride_bytes {
-                1 => (unwrap!(bytes.next_u8(), "") as i64, Prim::I8),
-                2 => (unwrap!(bytes.next_u16(), "") as i64, Prim::I16),
-                4 => (unwrap!(bytes.next_u32(), "") as i64, Prim::I32),
-                8 => (unwrap!(bytes.next_i64(), ""), Prim::I64),
-                n => todo!("bad int stride {n}"),
-            };
-            out.push(value);
-            if let Some(offsets) = offsets {
-                offsets.push((prim, offset as u16));
-            }
-        }
-        TypeInfo::Bool => {
-            let offset = bytes.i;
-            out.push(unwrap!(bytes.next_u8(), "") as i64);
-            if let Some(offsets) = offsets {
-                offsets.push((Prim::I8, offset as u16));
-            }
-        }
-        &TypeInfo::Array { inner, len } => {
-            let inner_align = program.get_info(inner).align_bytes;
-            for _ in 0..len {
-                debug_assert_eq!(bytes.i % inner_align as usize, 0);
-                deconstruct_values(program, inner, bytes, out, offsets)?;
-            }
-        }
-        TypeInfo::Struct { fields, layout_done, .. } => {
-            assert!(*layout_done);
-            let mut prev = 0;
-            let size = program.get_info(ty).stride_bytes;
-            let start = bytes.i;
-            for t in fields {
-                if t.kind == VarType::Const {
-                    // :const_field_fix
-                    continue;
-                }
-                assert!(prev <= t.byte_offset);
-                bytes.i = t.byte_offset;
-                deconstruct_values(program, t.ty, bytes, out, offsets)?;
-                prev = t.byte_offset;
-            }
-            bytes.i = start + size as usize; // eat trailing stride padding
-        }
-        TypeInfo::Tagged { .. } => todo!("tagged {}", program.log_type(ty)),
-        &TypeInfo::Enum { raw, .. } => deconstruct_values(program, raw, bytes, out, offsets)?,
-        TypeInfo::Named(_, _) => unreachable!(),
-        TypeInfo::Unit => {}
-        TypeInfo::Fn(_) | TypeInfo::Label(_) => {
-            let offset = bytes.i;
-            out.push(unwrap!(bytes.next_u32(), "") as i64);
-            if let Some(offsets) = offsets {
-                offsets.push((Prim::I32, offset as u16));
-            }
-        }
-    }
-    Ok(())
-}
-
-pub(crate) fn zero_padding(program: &Program, ty: TypeId, bytes: &mut [u8], i: &mut usize) -> Res<'static, ()> {
-    let info = program.get_info(ty);
-    // println!("{}", program.log_type(ty));
-    let size = info.stride_bytes as usize;
-    let align = info.align_bytes as usize;
-    // println!("{:?}", &bytes[*i..*i + size]);
-
-    debug_assert_eq!(*i % align, 0);
-    debug_assert!(
-        size <= bytes.len() - *i,
-        "zero_padding of {} wants {size} bytes but found {bytes:?}",
-        program.log_type(ty)
-    );
-
-    fn eat(bytes: &mut [u8], i: &mut usize) {
-        // print!("{},", bytes[*i]);
-        bytes[*i] = 0;
-        *i += 1;
-    }
-
-    fn fix_align(bytes: &mut [u8], i: &mut usize, align: usize) {
-        while *i % align != 0 {
-            eat(bytes, i);
-        }
-    }
-
-    let ty = program.raw_type(ty);
-    match &program[ty] {
-        TypeInfo::Placeholder => err!("Unfinished type {ty:?}",),
-        TypeInfo::Never => err!("invalid type",),
-        TypeInfo::Fn(_)
-        | TypeInfo::Label(_)
-        | TypeInfo::F64
-        | TypeInfo::FnPtr { .. }
-        | TypeInfo::Ptr(_)
-        | TypeInfo::VoidPtr
-        | TypeInfo::F32
-        | TypeInfo::Int(_)
-        | TypeInfo::Bool => {
-            *i += size;
-        }
-        &TypeInfo::Array { inner, len } => {
-            let inner_align = program.get_info(inner).align_bytes;
-            for _ in 0..len {
-                zero_padding(program, inner, bytes, i)?;
-                debug_assert_eq!(*i % inner_align as usize, 0);
-            }
-        }
-        TypeInfo::Struct { fields, layout_done, .. } => {
-            assert!(*layout_done);
-            let mut prev = 0;
-            let start = *i;
-            for t in fields {
-                assert!(prev <= t.byte_offset);
-                while *i != (start + t.byte_offset) {
-                    eat(bytes, i);
-                }
-                zero_padding(program, t.ty, bytes, i)?;
-                prev = t.byte_offset;
-            }
-
-            fix_align(bytes, i, align); // eat trailing stride padding
-        }
-        TypeInfo::Tagged { cases, .. } => {
-            let start = *i;
-            let tag = int_from_bytes(&bytes[*i..*i + 8]);
-            assert!(tag >= 0 && tag < cases.len() as i64, "bad tag {tag}");
-            *i += 8;
-            zero_padding(program, cases[tag as usize].1, bytes, i)?;
-            while *i != (start + size) {
-                eat(bytes, i);
-            }
-        }
-        &TypeInfo::Enum { .. } | TypeInfo::Named(_, _) => unreachable!(),
-        TypeInfo::Unit => {}
-    }
-    Ok(())
-}
-
-pub(crate) fn int_from_bytes(bytes: &[u8]) -> i64 {
-    debug_assert_eq!(bytes.len(), 8);
-    debug_assert_eq!(bytes.as_ptr() as i64 % 8, 0);
-    unsafe { *(bytes.as_ptr() as *const i64) }
-}
-
 #[derive(Debug)]
 pub struct ReadBytes<'a> {
     pub bytes: &'a [u8],
@@ -453,37 +253,11 @@ pub struct ReadBytes<'a> {
 }
 
 impl<'a> ReadBytes<'a> {
-    pub(crate) fn next_u8(&mut self) -> Option<u8> {
-        if self.i < self.bytes.len() {
-            self.i += 1;
-            Some(self.bytes[self.i - 1])
-        } else {
-            None
-        }
-    }
-    pub(crate) fn next_u16(&mut self) -> Option<u16> {
-        debug_assert_eq!(self.i % 2, 0);
-        if self.i + 1 < self.bytes.len() {
-            self.i += 2;
-            Some(unsafe { *(self.bytes.as_ptr().add(self.i - 2) as *const u16) })
-        } else {
-            None
-        }
-    }
     pub(crate) fn next_u32(&mut self) -> Option<u32> {
         debug_assert_eq!(self.i % 4, 0);
         if self.i + 3 < self.bytes.len() {
             self.i += 4;
             Some(unsafe { *(self.bytes.as_ptr().add(self.i - 4) as *const u32) })
-        } else {
-            None
-        }
-    }
-    pub(crate) fn next_i64(&mut self) -> Option<i64> {
-        debug_assert_eq!(self.i % 8, 0);
-        if self.i + 7 < self.bytes.len() {
-            self.i += 8;
-            Some(int_from_bytes(&self.bytes[self.i - 8..self.i]))
         } else {
             None
         }

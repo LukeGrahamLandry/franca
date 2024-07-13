@@ -230,6 +230,7 @@ pub struct ImportVTable {
     get_type: for<'p> extern "C" fn(compile: &mut Compile<'_, 'p>, e: TypeId) -> *const TypeInfo<'p>,
     log_type: extern "C" fn(compile: &mut Compile, e: TypeId) -> *const str,
     check_for_new_aot_bake_overloads: for<'p> extern "C" fn(comp: &mut Compile<'_, 'p>) -> Res<'p, ()>,
+    clone_func: for<'p> extern "C" fn(e: &Func<'p>) -> Func<'p>,
 }
 
 #[repr(C)]
@@ -277,6 +278,7 @@ pub static IMPORT_VTABLE: ImportVTable = ImportVTable {
     get_type,
     log_type: franca_log_type,
     check_for_new_aot_bake_overloads,
+    clone_func,
 };
 
 // TODO: cant just call the thing because lifetime?
@@ -300,6 +302,10 @@ extern "C" fn clone_expr<'p>(e: &FatExpr<'p>) -> FatExpr<'p> {
 }
 
 extern "C" fn clone_type<'p>(e: &LazyType<'p>) -> LazyType<'p> {
+    e.clone()
+}
+
+extern "C" fn clone_func<'p>(e: &Func<'p>) -> Func<'p> {
     e.clone()
 }
 

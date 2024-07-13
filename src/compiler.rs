@@ -32,7 +32,7 @@ use crate::{
     ast::{Expr, FatExpr, FnType, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo},
     self_hosted::Ident,
 };
-use crate::{bc::*, extend_options, ffi, unwrap2,  STATS};
+use crate::{bc::{self, *}, extend_options,  unwrap2,  STATS};
 
 use crate::{assert, assert_eq, err, ice, unwrap};
 use BigResult::*;
@@ -289,7 +289,8 @@ impl<'a, 'p> Compile<'a, 'p> {
             self.compile(f.func, ExecStyle::Jit)?;
             let f = unwrap!(self.aarch64.get_fn(f.func), "failed to compile function");
             unsafe  {
-                save_bake_callback(self.program.pool, ty, transmute(f)).map_err(|e| e.as_err())?;
+                type BakeFn = unsafe extern "C" fn(*const ()) -> *const [bc::BakedEntry];
+                save_bake_callback(self.program.pool, ty, transmute::<*const u8, BakeFn>(f)).map_err(|e| e.as_err())?;
             }
         }
         Ok(())
@@ -540,19 +541,15 @@ impl<'a, 'p> Compile<'a, 'p> {
         );
         self.flush_cpu_instruction_cache();
         let expected_ret_bytes = self.program.get_info(ty.ret).stride_bytes;
-        let mut ints = vec![];
-        deconstruct_values(self.program, ty.arg, &mut ReadBytes { bytes: arg.bytes(), i: 0 }, &mut ints, &mut None)?;
-        debugln_call!("IN: {ints:?}");
-        let result = ffi::c::call(self, addr as usize, ty, ints, cc == CallConv::CCallRegCt);
+        let result = unsafe {
+            self_hosted::call_dynamic_values(self, addr as usize, &ty, arg.bytes(), cc == CallConv::CCallRegCt)
+        }.unwrap_or_else(|e| panic!("failed call_dynamic_values. (TODO: convert err types) {}", e.msg));
         debugln_call!("OUT: {result:?}");
 
-        let result = self.tag_err(result);
-        if let Ok(result) = &result {
-            assert_eq!(result.bytes().len(), expected_ret_bytes as usize, "{}\n{}", self.program.log_type(ty.ret), self.program[f].body.log(self.program.pool));
-            self.pop_state(state2);
-        }
+        assert_eq!(result.bytes().len(), expected_ret_bytes as usize, "{}\n{}", self.program.log_type(ty.ret), self.program[f].body.log(self.program.pool));
+        self.pop_state(state2);
         // println!("Done {f:?} {}", self.program.pool.get(self.program[f].name),);
-        result
+        Ok(result)
     }
 
     // This is much less painful than threading it through the macros
@@ -1554,7 +1551,12 @@ impl<'a, 'p> Compile<'a, 'p> {
                     ice!("Missing resolved variable {}", var.log(self.program.pool),)
                 }
             }
-            Expr::GetNamed(name) => err!("Undeclared Ident {} {name:?}", self.program.pool.get(*name)), //err!(CErr::UndeclaredIdent(*name)),
+            &mut Expr::GetNamed(name) => {
+                unsafe {
+                  show_error_line(self.program.pool.codemap, expr.loc.low, expr.loc.high)  
+                };
+                err!("Undeclared Ident {} {name:?}", self.program.pool.get(name))
+            }, //err!(CErr::UndeclaredIdent(*name)),
             Expr::Value { value, coerced } => {
                 debug_assert!(!prev_ty.is_unknown(), "Value expr must have type");
                 if let Some(req) = requested.specific() {
@@ -1848,7 +1850,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let ptr = unwrap!(self.aarch64.get_fn(f), "ICE: fn not compiled: {f:?} {}", self.program.pool.get(self.program[f].name));
                 let comp_ctx = matches!(self.program[f].cc.unwrap(), CallConv::CCallRegCt);
                 let f_ty = self.program[f].finished_ty().unwrap();
-                let values = ffi::c::call(self, ptr as usize, f_ty, args, comp_ctx)?;
+                let values = self_hosted::call(self, ptr as usize, f_ty, args, comp_ctx)?;
                 let new_expr: FatExpr<'p> = from_values(self.program, values)?;
 
                 *expr = new_expr;

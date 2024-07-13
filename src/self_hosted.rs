@@ -3,7 +3,7 @@ use std::marker::PhantomData;
 use crate::{
     ast::{FatExpr, FatStmt, Flag, FnType, Func, FuncId, LazyType, OverloadSetId, Pattern, ScopeId, TypeId, Var},
     bc::{BakedEntry, BakedVar, BakedVarId, FnBody, Values},
-    compiler::{CErr, Compile, CompileError, ExecStyle},
+    compiler::{CErr, Compile, CompileError, ExecStyle, Res},
     err,
     export_ffi::{BigOption, ImportVTable},
     ffi::InterpSend,
@@ -103,6 +103,19 @@ extern "C" {
         args: &mut Vec<i64>,
         comp_ctx: bool,
     ) -> BigResult<Values, ParseErr<'p>>;
+    // TODO: if macros either just used the normal fn run or called the function pointer statically,
+    //       we could hide the above function and just use the below. -- Jul 13
+    pub(crate) fn call_dynamic_values<'p>(
+        comp: &mut Compile<'_, 'p>,
+        ptr: usize,
+        f_ty: &FnType,
+        args_value: &[u8],
+        comp_ctx: bool,
+    ) -> BigResult<Values, ParseErr<'p>>;
+}
+
+pub fn call<'p>(program: &mut Compile<'_, 'p>, ptr: usize, f_ty: crate::ast::FnType, mut args: Vec<i64>, comp_ctx: bool) -> Res<'p, Values> {
+    return unsafe { Ok(call_dynamic(program, ptr, &f_ty, &mut args, comp_ctx).unwrap()) };
 }
 
 impl<'p> SelfHosted<'p> {
