@@ -112,6 +112,11 @@ extern "C" {
         args_value: &[u8],
         comp_ctx: bool,
     ) -> BigResult<Values, ParseErr<'p>>;
+
+    // This is sketchy about aliasing, but the pointer is stable.
+    // I'm not typing out two versions of this for & and &mut.
+    pub(crate) fn get_function<'p>(s: &SelfHosted<'p>, fid: FuncId) -> &'p mut Func<'p>;
+    pub(crate) fn add_function<'p>(s: &mut SelfHosted<'p>, f: Func<'p>) -> FuncId;
 }
 
 pub fn call<'p>(program: &mut Compile<'_, 'p>, ptr: usize, f_ty: crate::ast::FnType, mut args: Vec<i64>, comp_ctx: bool) -> Res<'p, Values> {

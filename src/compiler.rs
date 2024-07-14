@@ -403,6 +403,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             self.tag_err(res)?;
             i += 1;
         }
+        
         self.compile_asm_no_rec(f, when)?;
         let after = self.debug_trace.len();
         debug_assert_eq!(before, after);
@@ -414,6 +415,9 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     fn compile_asm_no_rec(&mut self, f: FuncId, when: ExecStyle) -> Res<'p, ()> {
+        if self.program[f].get_flag(AsmDone) {
+            return Ok(());
+        }
         self.last_loc = Some(self.program[f].loc);
 
         if let Some(code) = &self.program[f].body.jitted_aarch64() {
@@ -466,6 +470,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     pub(crate) fn flush_callees(&mut self, f: FuncId) -> Res<'p, ()> {
+        self.compile_asm_no_rec(f, ExecStyle::Jit)?;
       
         for (from, to) in self.pending_redirects.drain(0..) {
             self.last_loc = Some(self.program[to].loc);
@@ -869,7 +874,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         assert!(!self.currently_inlining.contains(&f), "Tried to inline recursive function.");
         self.currently_inlining.push(f);
 
-        let func = &self.program.funcs[f.as_index()];
+        let func = &self.program[f];
         // TODO: if let this? its for return_var
         let BigOption::Some(ret_ty) = func.finished_ret else {
             err!("Unknown ret type for {f:?} {}", self.program.pool.get(self.program[f].name))
@@ -881,7 +886,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         for callee in self.program[f].callees.clone() {
             self.add_callee(callee);
         }
-        let func = &self.program.funcs[f.as_index()];
+        let func = &self.program[f];
         assert!(!func.any_const_args());
         let pattern = func.arg.clone();
 
@@ -894,6 +899,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         let ret_label = LabelId::from_index(self.next_label);
         self.next_label += 1;
+        let func = &self.program[f];
         let FuncImpl::Normal(body) = &func.body else { unreachable!() };
         let may_have_early_return = !matches!(body.expr, Expr::Value { .. });
         // the second case would be sufficient for correctness but this is so common (if(_,!,!), loop(!), etc) that it makes me less sad. 

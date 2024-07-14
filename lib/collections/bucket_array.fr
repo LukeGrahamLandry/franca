@@ -14,9 +14,10 @@ fn BucketArray($T: Type) Type = {
     // TODO: should have an unmanaged version of a list so that you store the allocator once in the BucketArray and pass it in to each call. 
     // TODO: have push_within_capacity for when you want to assert that it doesn't reallocate. 
     
-    fn init(bucket_size: i64, gpa: Alloc) Self = { 
-        self: Self = (buckets = list(4, gpa), len = 0, b = 0, bucket_size = bucket_size, gpa = gpa, i = 0);
-        self.buckets&.push(@as(List(T)) list(bucket_size, self.gpa));
+    fn init(bucket_size_log_2: i64, gpa: Alloc) Self = {
+        assert(bucket_size_log_2 < 32, "bucket size too big (wanted log2)");
+        self: Self = (buckets = list(4, gpa), len = 0, b = 0, bucket_size = bucket_size_log_2, gpa = gpa, i = 0);
+        self.buckets&.push(@as(List(T)) list(1.shift_left(bucket_size_log_2), self.gpa));
         self
     }
     
@@ -31,7 +32,7 @@ fn BucketArray($T: Type) Type = {
         if(lt(old_cap, total)) {|
             self.i += 1;
             if(self.i.eq(self.buckets.len)) {|
-                cap := extra.max(self.bucket_size);
+                cap := extra.max(1.shift_left(self.bucket_size));
                 self.buckets&.push(@as(List(T)) list(cap, self.gpa));
             };
         };
@@ -73,8 +74,8 @@ fn BucketArray($T: Type) Type = {
     // this assumes all lower buckets are full (ie, you didnt use push_all) and not resized (ie, you didnt call current() and use that list)
     fn nested_index(self: *Self, i: i64) *T = {
         // TODO: fn div_mod once i have nicer destructuring
-        top := i / self.bucket_size;
-        bottom := i - (top * self.bucket_size);
+        top := i.shift_right_logical(self.bucket_size);
+        bottom := i - (top.shift_left(self.bucket_size));
         bucket := self.buckets[top]&;
         bucket.index(bottom)
     }

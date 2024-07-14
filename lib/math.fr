@@ -18,8 +18,30 @@ fn is_nan(a: f64) bool = a.eq(a).not();  // TODO: this could be fewer instructio
 /// Convert an i64 to an i<bit_count> with the (64-<bit_count>) leading bits 0.
 fn signed_truncate(x: i64, bit_count: i64) u32 = {
     mask := 1.shift_left(bit_count).sub(1);
-    if(le(x, 0), => bit_and(add(bit_not(mul(x, neg(1))), 1), mask).trunc(), => x.trunc())
+    ::if(u32);
+    if(x < 0, => mask.bit_and(bit_not(x * -1) + 1).trunc(), => x.trunc())
 }
+
+fn fold_shift_or(ints: []i64) i64 = {
+    @assert(ints.len < 32, "% is too many args for fold_shift_or", ints.len);
+    acc := 0;
+    range(0, ints.len / 3) { i |
+        x := ints[i * 3];
+        sh := ints[i * 3 + 1];
+        size_info := ints[i * 3 + 2]; // HACK. masking fixed maual_mmap. u16 has garabge memory where read as u64.
+        bit_count := size_info.abs();
+        is_signed := size_info < 0;
+        if is_signed {|
+            x = signed_truncate(x, bit_count).zext();
+        };
+        @assert(sh < 32, "% too much shift", sh);
+        // assert!(x << sh <= 1 << 32, "{x:#x} << {sh}");
+        mask := 1.shift_left(bit_count) - 1;
+        acc = acc.bit_or(x.bit_and(mask).shift_left(sh));
+    };
+    @assert(acc > 0 && acc <= MAX_u32.zext(), "% is not a valid u32", acc);
+    acc
+};
 
 ////////////////
 /// Booleans ///

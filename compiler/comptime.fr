@@ -10,6 +10,7 @@ fn fill_driver_vtable(vtable: *ImportVTable) void = {
     vtable.intern_string = intern_string;
     vtable.get_string = get_string;
     vtable.emit_llvm = emit_llvm; // TODO: have a compile option to not include the things you don't need for bootstrapping. so i can commit a smaller blob. 
+    vtable.get_fns_with_tag = get_fns_with_tag;
 }
 
 CompilerRs :: ***SelfHosted;  // TODO: really this should be a new type so you can't accidently implement call functions by just adding extra indirection. hopefully the number of pointers makes it clear something's weird. 
@@ -43,6 +44,26 @@ fn get_string(c: Compiler, s: Symbol) Str = {
 fn get_baked(c: Compiler, id: BakedVarId) BakedVar = {
     val := c.cast()[][].get_baked(id); 
     val._1
+}
+
+fn get_fns_with_tag(c: Compiler, tag: Symbol) [] FuncId = {
+    c := c.cast();
+    found: List(FuncId) = list(temp());
+    i: u32 = 0;
+    each c.functions& { func |
+        continue :: local_return;
+        // TODO: defer { i += 1; };
+        if(!func.get_flag(.NotEvilUninit), => { i += 1; continue() });
+        each func.annotations { a |
+            if a.name == tag {|
+                found&.push(funcid_from_index(i));
+                i += 1; 
+                continue();
+            };
+        };
+        i += 1; 
+    };
+    found.items()
 }
 
 /////////////////////////////////////////////////////////////////////////////////
@@ -130,7 +151,20 @@ fn fill_export_ffi(out: *List(u8)) void = {
     bake_var: rawptr : fn(c: CompilerRs, v: BakedVar) BakedVarId = {
         c[][].put_baked(v, .None)
     };
+    
+    // Generated for @BITS to bootstrap encoding for inline asm.
+    @fmt(out, "fn __shift_or_slice(ints: Slice(i64)) u32 #no_tail #fold #comptime_addr(%);\n", shift_or_slice);
+    shift_or_slice: rawptr : shift_or_slice_;
+    shift_or_slice_: @Fn(i: []i64) i64 : fold_shift_or; // TODO: hack because @as doesn't coerce_const i guess? -- Jul 13
+    
+    
+    @fmt(out, "fn number_of_functions() i64 #ct #comptime_addr(%);\n", num_f);
+    num_f: rawptr : fn(c: CompilerRs) i64 = {
+        c.functions.len
+    };
 }
+
+MAX_u32 :: 0xFFFFFFFF;
 
 //////////////////////////////////////////////////////////////////////////////
 // these are just stupid helpers to deal with the awquard multiple compiler types for calling into the rust code. 

@@ -1,5 +1,5 @@
 //! High level representation of a Franca program. Macros operate on these types.
-use crate::self_hosted::{init_self_hosted, Span};
+use crate::self_hosted::{self, init_self_hosted, Span};
 use crate::{
     bc::Values,
     compiler::{CErr, Res},
@@ -771,7 +771,6 @@ pub struct Program<'p> {
     pub types: Vec<TypeInfo<'p>>,
     // twice as much memory but it's so much faster. TODO: can i just store hashes?
     pub type_lookup: Map<TypeInfo<'p>, TypeId>,
-    pub funcs: Vec<Func<'p>>,
     /// Comptime function calls that return a type are memoized so identity works out.
     /// Note: if i switch to Values being raw bytes, make sure to define any padding so this works.
     pub overload_sets: Vec<OverloadSet<'p>>, // TODO: use this instead of lookup_unique_func
@@ -787,7 +786,6 @@ pub struct Program<'p> {
 }
 
 impl_index_imm!(Program<'p>, TypeId, TypeInfo<'p>, types);
-impl_index!(Program<'p>, FuncId, Func<'p>, funcs);
 impl_index!(Program<'p>, OverloadSetId, OverloadSet<'p>, overload_sets);
 
 #[repr(C)]
@@ -806,6 +804,20 @@ pub struct OverloadOption {
     pub arg: TypeId,
     pub ret: Option<TypeId>, // For #generic, we might not know without the args
     pub arity: u16,
+}
+
+impl<'p> std::ops::Index<FuncId> for Program<'p> {
+    type Output = Func<'p>;
+
+    fn index(&self, index: FuncId) -> &Self::Output {
+        unsafe { self_hosted::get_function(self.pool, index) }
+    }
+}
+
+impl<'p> std::ops::IndexMut<FuncId> for Program<'p> {
+    fn index_mut(&mut self, index: FuncId) -> &mut Self::Output {
+        unsafe { self_hosted::get_function(self.pool, index) }
+    }
 }
 
 // TODO: print actual type info
@@ -883,7 +895,6 @@ impl<'p> Program<'p> {
                 TypeInfo::Named(TypeId::from_index(10), pool.intern("LabelId")),
                 TypeInfo::Named(TypeId::from_index(10), pool.intern("Symbol")),
             ],
-            funcs: Default::default(),
             pool,
             overload_sets: Default::default(),
             ffi_types: Default::default(),
@@ -1150,9 +1161,7 @@ impl<'p> Program<'p> {
     #[track_caller]
     pub(crate) fn add_func<'a>(&'a mut self, func: Func<'p>) -> FuncId {
         debug_assert!(func.get_flag(FnFlag::NotEvilUninit));
-        let id = FuncId::from_index(self.funcs.len());
-        self.funcs.push(func);
-        id
+        unsafe { self_hosted::add_function(self.pool, func) }
     }
 
     pub(crate) fn fn_ty(&mut self, id: TypeId) -> Option<FnType> {
@@ -1214,9 +1223,6 @@ impl<'p> Program<'p> {
         d
     }
 
-    // TODO: Unsized types. Any should be a TypeId and then some memory with AnyPtr being the fat ptr version.
-    //       With raw Any version, you couldn't always change types without reallocating the space and couldn't pass it by value.
-    //       AnyScalar=(TypeId, one value), AnyPtr=(TypeId, one value=stack/heap ptr), AnyUnsized=(TypeId, some number of stack slots...)
     pub(crate) fn get_info(&self, ty: TypeId) -> TypeMeta {
         let ty = self.raw_type(ty);
         extend_options(self.types_extra.borrow_mut().deref_mut(), ty.as_index());

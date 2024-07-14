@@ -3,8 +3,8 @@
 use crate::self_hosted::{resolve_root, show_error_line, ParseErr, SelfHosted};
 
 use crate::ast::{
-    garbage_loc, CallConv, Expr, FatExpr, FatStmt, Flag, FnFlag, FnType, Func, FuncId, IntTypeInfo, LazyType, Pattern, Program, ScopeId, TargetArch,
-    TypeId, TypeInfo, TypeMeta, WalkAst,
+    garbage_loc, CallConv, Expr, FatExpr, FatStmt, Flag, FnType, Func, FuncId, IntTypeInfo, LazyType, Pattern, Program, ScopeId, TargetArch, TypeId,
+    TypeInfo, TypeMeta, WalkAst,
 };
 use crate::bc::{from_values, BakedVarId, FnBody, Values};
 use crate::compiler::{want, Compile, CompileError, ExecStyle, Res, ResultType, Unquote, EXPECT_ERR_DEPTH};
@@ -12,7 +12,7 @@ use crate::ffi::InterpSend;
 use crate::logging::{unwrap, PoolLog};
 use crate::overloading::where_the_fuck_am_i;
 use crate::self_hosted::Ident;
-use crate::{assert, err, ice, log_err, make_toplevel, signed_truncate};
+use crate::{assert, err, ice, log_err, make_toplevel};
 use std::fmt::{Debug, Write};
 use std::mem::{self, transmute};
 use std::ops::{FromResidual, Try};
@@ -198,7 +198,7 @@ pub struct ImportVTable {
     init_compiler: unsafe extern "C" fn(comptime_arch: TargetArch) -> *const Compile<'static, 'static>,
     find_unqiue_func: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, name: Ident<'p>) -> BigOption<FuncId>,
     // TODO: i want the meta program to be tracking these instead.
-    get_fns_with_tag: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, tag: Ident<'p>) -> *const [FuncId],
+    _get_fns_with_tag: usize,
     _b: i64, // todo: remove
     compile_func: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, f: FuncId, when: ExecStyle) -> BigCErr<'p, ()>,
     get_jitted_ptr: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, f: FuncId) -> BigCErr<'p, *const u8>,
@@ -219,9 +219,9 @@ pub struct ImportVTable {
     debug_log_bc: for<'p> extern "C" fn(c: &Compile<'_, 'p>, body: &FnBody<'p>),
     _e: usize,
     get_compiler_builtins_source: extern "C" fn() -> &'static str,
-    _get_cranelift_builtins_source: usize,
+    _i: usize,
     _emit_llvm: usize,
-    number_of_functions: unsafe extern "C" fn(c: &mut &mut Program) -> i64,
+    _j: usize,
     _bake_var: usize,
     _h: usize,
     clone_expr: for<'p> extern "C" fn(e: &FatExpr<'p>) -> FatExpr<'p>,
@@ -246,7 +246,7 @@ pub static IMPORT_VTABLE: ImportVTable = ImportVTable {
     _a: 0,
     init_compiler: franca_init_compiler,
     find_unqiue_func: franca_find_unique_fn,
-    get_fns_with_tag,
+    _get_fns_with_tag: 1,
     _b: 0,
     compile_func: franca_compile_func,
     get_jitted_ptr,
@@ -267,9 +267,9 @@ pub static IMPORT_VTABLE: ImportVTable = ImportVTable {
     debug_log_bc,
     _e: 0,
     get_compiler_builtins_source,
-    _get_cranelift_builtins_source: 0,
+    _i: 0,
     _emit_llvm: 1,
-    number_of_functions,
+    _j: 0,
     _bake_var: 1,
     _h: 0,
     clone_expr,
@@ -356,17 +356,6 @@ unsafe extern "C" fn franca_find_unique_fn<'p>(c: &mut Compile<'_, 'p>, name: Id
         None => BigOption::None,
     }
 }
-unsafe extern "C" fn get_fns_with_tag(c: &mut Compile, tag: Ident) -> *const [FuncId] {
-    let mut found = vec![];
-    for (fid, func) in c.program.funcs.iter().enumerate() {
-        if func.get_flag(FnFlag::NotEvilUninit) && func.annotations.iter().any(|a| a.name == tag) {
-            found.push(FuncId::from_index(fid));
-        }
-    }
-    // println!("scanned {} fns", c.program.funcs.len());
-
-    found.leak() as *const [FuncId]
-}
 
 unsafe extern "C" fn franca_compile_func<'p>(c: &mut Compile<'_, 'p>, f: FuncId, when: ExecStyle) -> BigCErr<'p, ()> {
     let res = c.compile(f, when);
@@ -424,13 +413,9 @@ extern "C" {
 pub const COMPILER: &[(&str, *const u8)] = &[
     ("#fold fn tag_value(E: Type, case_name: Symbol) i64", tag_value as *const u8),
     ("#fold fn tag_symbol(E: Type, tag_value: i64) Symbol", tag_symbol as *const u8),
-    ("fn number_of_functions() i64", number_of_functions as *const u8),
-    // TODO: make FuncId a unique type
     ("fn name(func_id: FuncId) Symbol", function_name as *const u8),
     ("fn index_to_func_id(func_index: i64) FuncId", index_to_func_id as *const u8),
     // TODO: all these type ones could use ffi TypeInfo if i gave it `#ct fn intern_type`
-    //       but to do that here instead of current macro message, I'd need to do ffi of enums in a less insane way.
-    //       (these functions don't use InterpSend, they just rely on C ABI).
     // Ideally this would just work with tuple syntax but L((a, b), c) === L(a, b, c) !=== L(Ty(a, b), c) because of arg flattening.
     ("fn Ty(fst: Type, snd: Type) Type #fold;", pair_type as *const u8),
     ("fn Ty(fst: Type, snd: Type, trd: Type) Type #fold;", triple_type as *const u8),
@@ -447,7 +432,6 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     //   but they could be implemented on top of this by taking an environment data pointer as an argument.
     // - The function cannot have any const arguments, they must be baked before creating the pointer.
     ("fn FnPtr(Arg: Type, Ret: Type) Type #fold;", fn_ptr_type as *const u8),
-    ("fn FnPtr(Arg: Type, Ret: Type, cc: CallConv) Type #fold;", fn_ptr_type_conv as *const u8),
     // This a null terminated packed string, useful for ffi with old c functions.
     // Currently it doesn't reallocate because all symbols are null terminated but that might change in future. --Apr, 10
     ("#fold fn c_str(s: Symbol) CStr", symbol_to_cstr as *const u8),
@@ -456,8 +440,6 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     // measured in bytes
     ("fn size_of(T: Type) i64 #fold", get_size_of as *const u8),
     // ("fn Label(Arg: Type) Type", do_label_type as *const u8),
-    // Generated for @BITS to bootstrap encoding for inline asm.
-    ("#no_tail fn __shift_or_slice(ints: Slice(i64)) u32", shift_or_slice as *const u8),
     ("fn intern_type_ref(ty: *TypeInfo) Type;", intern_type as *const u8),
     // TODO: maybe it would be nice if you could override deref so Type acts like a *TypeInfo.
     ("fn get_type_info(ty: Type) TypeInfo;", get_type_info as *const u8),
@@ -633,18 +615,6 @@ extern "C-unwind" fn fn_type(program: &mut &mut Program, arg: TypeId, ret: TypeI
     })
 }
 
-extern "C-unwind" fn fn_ptr_type_conv(program: &mut &mut Program, arg: TypeId, ret: TypeId, cc: CallConv) -> TypeId {
-    hope(|| {
-        assert!(arg.as_index() < program.types.len(), "TypeId OOB {:?}", arg);
-        assert!(ret.as_index() < program.types.len(), "TypeId OOB {:?}", ret);
-        let arity = program.tuple_types(arg).map(|t| t.len()).unwrap_or_else(|| 1) as u16;
-        Ok(program.intern_type(TypeInfo::FnPtr {
-            ty: FnType { arg, ret, arity },
-            cc,
-        }))
-    })
-}
-
 extern "C-unwind" fn fn_ptr_type(program: &mut &mut Program, arg: TypeId, ret: TypeId) -> TypeId {
     hope(|| {
         assert!(arg.as_index() < program.types.len(), "TypeId OOB {:?}", arg);
@@ -673,10 +643,6 @@ extern "C-unwind" fn log_type(p: &mut &mut Program, a: TypeId) {
 extern "C-unwind" fn log_ast<'p>(p: &mut Compile<'_, 'p>, a: FatExpr<'p>) {
     println!("{}", a.log(p.program.pool));
     where_the_fuck_am_i(p, a.loc);
-}
-
-extern "C" fn number_of_functions(program: &mut &mut Program) -> i64 {
-    program.funcs.len() as i64
 }
 
 extern "C-unwind" fn function_name<'p>(program: &mut &mut Program<'p>, f: FuncId) -> Ident<'p> {
@@ -978,11 +944,12 @@ extern "C-unwind" fn bits_macro<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatE
 
             shift -= ty.bit_count;
             assert!(shift >= 0, "expected 32 bits. TODO: other sizes.");
-            if let Some((_, v)) = compile.bit_literal(&int) {
-                // Not signed_truncate-ing here because shift_or_slice does it.
-                assert!(v < 1 << ty.bit_count, "{v} {}", ty.bit_count);
-                int = compile.as_literal(v, loc)?;
-            }
+            // don't need this since we need to handle arbirary expressions anyway.
+            // if let Some((_, v)) = compile.bit_literal(&int) {
+            //     // Not signed_truncate-ing here because shift_or_slice does it.
+            //     assert!(v < 1 << ty.bit_count, "{v} {}", ty.bit_count);
+            //     int = compile.as_literal(v, loc)?;
+            // }
             int = FatExpr::synthetic_ty(Expr::Cast(Box::new(mem::take(&mut int))), loc, TypeId::i64());
             new_args.push(int);
             let mut sh = compile.as_literal(shift, loc)?;
@@ -1007,29 +974,6 @@ extern "C-unwind" fn bits_macro<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatE
         let arg = FatExpr::synthetic(Expr::SuffixMacro(Flag::Slice.ident(), Box::new(arg)), loc);
         let ty = u32::get_type(compile.program);
         Ok(FatExpr::synthetic_ty(Expr::Call(Box::new(func), Box::new(arg)), loc, ty))
-    })
-}
-
-extern "C-unwind" fn shift_or_slice(compiler: &mut Compile, ptr: *const i64, len: usize) -> i64 {
-    hopec(compiler, || {
-        assert!(len < 32, "{} {}", ptr as usize, len);
-        let ints = unsafe { &*slice_from_raw_parts(ptr, len) };
-        let mut acc = 0;
-        for i in 0..ints.len() / 3 {
-            let mut x = ints[i * 3];
-            let sh = ints[i * 3 + 1];
-            let size_info = ints[i * 3 + 2]; // HACK. masking fixed maual_mmap. u16 has garabge memory where read as u64.
-            let bit_count = size_info.abs();
-            let is_signed = size_info < 0;
-            if is_signed {
-                x = signed_truncate(x, bit_count);
-            }
-            assert!(sh < 32, "{} {}", ptr as usize, len);
-            // assert!(x << sh <= 1 << 32, "{x:#x} << {sh}");
-            acc |= (x & ((1 << bit_count) - 1)) << sh;
-        }
-        assert!(acc <= u32::MAX as i64, "{acc:x} is not a valid u32: {ints:?}");
-        Ok(acc)
     })
 }
 

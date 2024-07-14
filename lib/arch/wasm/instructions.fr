@@ -59,11 +59,6 @@ Op :: @tagged(
     I64_Load: MemArg,
 );
 
-// TODO: flip endianness? 
-// Note: these are bytes, not LEB128
-wasm_magic: u32 : 0x0061736D;
-wasm_version: u32 : 0x01000000;
-
 Section :: @enum(u8) (
     Custom = 0,
     Type = 1,
@@ -79,3 +74,53 @@ Section :: @enum(u8) (
     Data = 11,
     DataCount = 12, 
 );
+:: enum(Section);
+
+WasmModule :: @struct(
+    types: List(), // [TypeIdx] function types
+    // Functions are split into two parts. the types are seperate from the code. 
+    functions: List(TypeIdx),  // [FuncIdx]
+    code: List(WasmFunc),      // [FuncIdx]
+);
+
+WasmFunc :: @struct(locals: RsVec(WasmLocal), insts: RsVec(u8));
+WasmLocal :: @struct(type: TypeIdx, count: i64);
+
+fn dump(self: *WasmModule, out: *BucketArray(u8)) void = {
+    out.push_all(@slice(0x00, 0x61, 0x73, 0x6D));  // magic
+    out.push_all(@slice(0x01, 0x00, 0x00, 0x00));  // version
+    
+    buf: List(u8) = list(temp());
+    
+    out.leb128_unsigned(self.functions.len); // size of the section
+    for self.functions { it | 
+        out.leb128_unsigned(id.it.zext());
+    };
+    
+    out.push(Section.Function.raw());
+    out.leb128_unsigned(buf.len);
+    out.push_all(buf);
+    buf.clear();
+    
+}
+
+//! https://en.wikipedia.org/wiki/LEB128
+
+LEB_MORE :: 128;
+MAX_u8 :: 255;
+fn leb128_unsigned(out: *List(u8), i: i64) void = {
+    dowhile {|
+        byte := i.bit_and(MAX_u8);
+        i = i.shift_right_logical(7);
+        more := i != 0;
+        if more {|
+            byte = byte.bit_or(LEB_MORE);
+        }; 
+        out.push(@as(u8) byte.trunc());
+        more
+    };
+}
+
+fn leb128_signed(out: *List(u8), i: i64) void = {
+    todo()
+}
