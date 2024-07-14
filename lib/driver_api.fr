@@ -45,7 +45,7 @@ ImportVTable :: @rec @struct(
     get_type_meta: @FnPtr(c: Compiler, ty: Type) TypeMeta,
     debug_log_baked_constant: @FnPtr(c: Compiler, id: BakedVarId) void,
     _f: usize, 
-    debug_log_bc: @FnPtr(c: Compiler, body: *FnBody) void,
+    debug_log_bc: @FnPtr(c: Compiler, fn_body: rawptr) void,
     _e: usize,
     get_compiler_builtins_source: @FnPtr() Str,
     _i: usize,
@@ -185,6 +185,7 @@ FnFlag :: @enum(i64) (
     NoStackTrace,
     MayHaveAquiredCaptures,
     TookPointerValue,
+    DidSema,
 );
 
 Annotation :: @struct(
@@ -450,88 +451,5 @@ Flag :: @enum(
     operator_squares_prefix,
 );
 
-////////////////////////////////////////////////////////////////////////////////////////////////
-// the stuff below should eventually be moved into the compiler and not exposed to build scripts?
-////////////////////////////////////////////////////////////////////////////////////////////////
-
-Bc :: @tagged(
-    CallDirect: @struct(sig: PrimSig, f: FuncId, tail: bool),     // <args:m> -> <ret:n>
-    CallFnPtr: @struct(sig: PrimSig),                             // <ptr:1> <args:m> -> <ret:n>   |OR| <ptr:1> <ret_ptr:1> <arg_ptr:1> -> _
-    PushConstant: @struct(value: i64, ty: Prim),                  // _ -> <v:1>
-    JumpIf: @struct(true_ip: BbId, false_ip: BbId, slots: u16),   // <args:slots> <cond:1> -> !
-    Goto: @struct(ip: BbId, slots: u16),                          // <args:slots> -> !
-    GetNativeFnPtr: FuncId,                                       // _ -> <ptr:1>
-    Load: Prim,                                      // <ptr:1> -> <?:n>
-    StorePost: Prim,                                 // <?:n> <ptr:1> -> _
-    StorePre: Prim,                                  // <ptr:1> <?:n> -> _
-    AddrVar: @struct(id: u16),                                    // _ -> <ptr:1>
-    SaveSsa: @struct(id: u16, ty: Prim),                          // <p:1> -> _
-    LoadSsa: @struct(id: u16),                                    // _ -> <p:1>
-    IncPtrBytes: u16,                             // <ptr:1> -> <ptr:1>
-    PeekDup: u16,                                                 // <x:1> <skip:n> -> <x:1> <skip:n> <x:1>,
-    CopyBytesToFrom: u16,                         // <to_ptr:1> <from_ptr:1> -> _
-    LastUse: @struct(id: u16),                                    // _ -> _
-    Unreachable,                                                  // _ -> !
-    GetCompCtx,                                                   // _ -> <ptr:1>
-    NoCompile,
-    PushGlobalAddr: BakedVarId,
-    Snipe: u16,
-    Ret0, // big return uses this too because code has already written to indirect return address.
-    Ret1: Prim,
-    Ret2: Ty(Prim, Prim),
-    Nop,
-);
-
-PrimSig :: @struct(
-    args: Slice(Prim) = empty(),
-    ret1: ?Prim,
-    ret2: ?Prim,
-    arg_slots: u16 = 0,
-    ret_slots: u16 = 0,
-    return_value_bytes: u16 = 0,
-    first_arg_is_indirect_return: bool = false,
-    no_return: bool = false,
-    arg_int_count: u8 = 0,
-);
-
-// TODO: make the other enum varient builtin so you can use it and still override eq. because my order independence doesn't really work. 
-Prim :: @enum(i64) (I8, I16, I32, I64, F64, F32, P64);
-
-BasicBlock :: @struct(
-    insts: RsVec(Bc),
-    arg_prims: Slice(Prim),
-    incoming_jumps: u16,
-    arg_slots: u16,
-    clock: u16,
-    height: u16,  // TODO: remove. unused.
-);
-
-OpaqueRsMap :: Array(i64, 4);
-
-BbId :: @struct(id: u16);
-
-FnBody :: @struct(
-    blocks: RsVec(BasicBlock),
-    vars: RsVec(Type),
-    var_names: RsVec(?Var),
-    when: ExecStyle,
-    func: FuncId,
-    current_block: BbId,
-    clock: u16,
-    name: Symbol,
-    want_log: bool,
-    _deprecated_is_ssa_var: RsBitSet, // only used for debugging. bc has enough info for this.
-    signeture: PrimSig,
-    alloc: Alloc,
-    hash: i64 = 0,
-);
-
-RsBitSet :: @tagged(
-    Small: Array(usize, 2),
-    Big: RsVec(usize),
-);
-
-
-#redirect(Ty(i64, i64), bool) fn eq(a: Prim, b: Prim) bool;
 #redirect(Ty(u32, u32), bool) fn eq(a: ScopeId, b: ScopeId) bool;
 #redirect(*Symbol, i64) fn hash(i: *Type) i64;

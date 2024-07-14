@@ -101,9 +101,54 @@ fn driver(vtable: *ImportVTable) void = {
         println("SKIPPED RUNNING LLVM");
     };
     
+    //render_dependencies(c, exports);
+    
     //build_llvm(ir_text, @slice ("-o", "target/libfranca.o", "-c", "-target", "x86_64-apple-darwin")); // "-O2"
     //success := run_cmd_blocking("/usr/bin/ar", @slice ("rc", "target/x86_64-apple-darwin/libfranca.a", "target/libfranca.o"));
     //assert(success, "link failed");
+}
+
+fn render_dependencies(c: CompCtx, fns: []FuncId) void = {
+    out: List(u8) = list(temp());
+    out&.push_all("digraph {\n");
+    pending: List(FuncId) = list(temp());
+    pending&.push_all(fns);
+    done: BitSet = empty();
+    
+    while => !pending.is_empty() {|
+        continue :: local_return;
+        f := pending&.pop().unwrap();
+        if done&.get(f.to_index().zext()) {|
+            continue();
+        };
+        done&.set(f.to_index().zext(), temp());
+        
+        func := {c.vtable.get_function}(c.data, f);
+        real_name := {c.vtable.get_string}(c.data, func.name);
+        @fmt(out&, "% [label = \"%\"]\n", f.to_index(), real_name);
+        @println("[%: %]", f.to_index(), real_name);
+        for func.mutual_callees { cc |
+            pending&.push(cc);
+            @fmt(out&, "% -> %\n", f.to_index(), cc.to_index());
+            func := {c.vtable.get_function}(c.data, cc);
+            @println("  - %: %", cc.to_index(), {c.vtable.get_string}(c.data, func.name));
+        };
+        for func.callees { cc |
+            pending&.push(cc);
+            @fmt(out&, "% -> %\n", f.to_index(), cc.to_index());
+            func := {c.vtable.get_function}(c.data, cc);
+            @println("  - %: %", cc.to_index(), {c.vtable.get_string}(c.data, func.name));
+        };
+    };
+    out&.push_all("}");
+    
+    path := "callgraph.dot".maybe_borrow_cstr(temp());
+    remove(path);
+    s := out.items();
+    flag := (@as(i64) OpenFlag.Write).bit_or(@as(i64) OpenFlag.Create);
+    fd := open(path, flag).unwrap();
+    write(fd, s.ptr, s.len).unwrap();
+    fd.close();
 }
 
 // TODO: return result

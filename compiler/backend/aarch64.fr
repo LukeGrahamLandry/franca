@@ -1,0 +1,1202 @@
+//! I know this is remarkably bad codegen. 
+//! Its only job is to be fast to compile because its used for throw away comptime functions that are often only run once.
+//! #c_call means https://en.wikipedia.org/wiki/Calling_convention#ARM_(A64)
+
+ZERO_DROPPED_REG :: false;
+ZERO_DROPPED_SLOTS :: false;
+TRACE_ASM :: false;
+
+// I'm using u16 everywhere cause why not, extra debug mode check might catch putting a stupid big number in there. that's 65k bytes, 8k words, the uo instructions can only do 4k words.
+SpOffset :: @struct(id: i64);
+
+AsmVal :: @tagged(
+    Increment: @struct(reg: i64, offset_bytes: i64), // not a pointer derefernce, just adding a static number to the value in the register.
+    Literal: i64,
+    Spill: SpOffset,
+    FloatReg: i64,
+);
+
+impl Debug for AsmVal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AsmVal::Increment { reg, offset_bytes } => write!(f, "x{reg} + {offset_bytes}"),
+            AsmVal::Literal(x) => write!(f, "{x}"),
+            AsmVal::Spill(slot) => write!(f, "[sp, {}]", slot.id),
+            AsmVal::FloatReg(x) => write!(f, "v{x}"),
+        }
+    }
+}
+
+const MEM_64: i64 = 0b11;
+const MEM_32: i64 = 0b10;
+const MEM_16: i64 = 0b01;
+const MEM_08: i64 = 0b00;
+
+fn emit_aarch64(compile: &mut Compile<'_, 'p), f: FuncId, when: ExecStyle, body: &FnBody) void = {
+    // TODO: this should be true but breaks for aot with new baked constant trait. maybe its counting random callees when just done for aot but not actually asm?  -- Jun 19
+    // debug_assert!(!compile.program[f].get_flag(FnFlag::AsmDone), "ICE: tried to double compile?");
+    compile.aarch64.extend_blanks(f);
+    a: BcToAsm = new(compile, when, body);
+    a&.compile(f);
+    @assert(a.wip.is_empty());
+}
+
+BcToAsm :: @struct(
+    program: CompilerRs,
+    asm: *Jitted,
+    vars: List(?SpOffset),
+    next_slot: SpOffset,
+    f: FuncId,
+    wip: List(FuncId), // make recursion work
+    when: ExecStyle,
+    patch_cbz: List(Ty(*u8, BbId, i64)),
+    patch_b: List(Ty(*u8, BbId)),
+    release_stack: List(Ty(*u8, *u8, *u8)),
+    state: BlockState,
+    block_ips: List(?*u8),
+    clock: u16,
+    markers: List(Ty(String, usize)),
+    log_asm_bc: bool,
+    body: *FnBody,
+);
+
+struct BlockState {
+    stack: List(AsmVal),
+    free_reg: List(i64),
+    open_slots: List(Ty(SpOffset, u16, u16)),
+    ssa: List(?AsmVal),
+}
+
+
+fn new(compile: CompilerRs, when: ExecStyle, body: *FnBody) BcToAsm = {
+    (
+        asm: &mut compile.aarch64,
+        program: compile,
+        vars: Default::default(),
+        next_slot: SpOffset(0),
+        f: FuncId::from_index(0), // TODO: bad
+        wip: vec![],
+        when,
+        patch_cbz: vec![], // (patch_idx, jump_idx, register)
+        patch_b: vec![],
+        release_stack: vec![],
+        state: Default::default(),
+        block_ips: vec![],
+        clock: 0,
+        markers: vec![],
+        log_asm_bc: false,
+        body,
+    )
+}
+
+// Note: you can only use Self once because this doesn't reset fields.
+fn compile(self: *EmitAsm, f: FuncId) void = {
+    if self.asm.get_fn(f).is_some() || self.wip.contains(&f) {
+        return();
+    };
+
+    self.wip.push(f);
+
+    func := &self.program[f];
+    @assert(!func.body&.is(.JittedAarch64) && !func.body&.is(.ComptimeAddr));
+
+    self.log_asm_bc = func.has_tag(Flag::log_asm_bc);
+    self.bc_to_asm(f)?;
+    self.asm.save_current(f);
+    asm := self.asm.get_fn(f).unwrap();
+
+    func := &self.program[f];
+    if TRACE_ASM.or(self.log_asm_bc).or(=> func.has_tag(.log_asm)) {
+        asm := unsafe { &*self.asm.ranges[f.as_index()] };
+        let hex: String = asm
+            .iter()
+            .copied()
+            .array_chunks::<4>()
+            .map(|b| format!("{:#02x} {:#02x} {:#02x} {:#02x} ", b[0], b[1], b[2], b[3]))
+            .collect();
+        path := "target/temp.asm".to_string();
+        fs::write(&path, hex).unwrap();
+        dis := String::from_utf8(Command::new("llvm-mc").arg("--disassemble").arg(&path).output().unwrap().stdout).unwrap();
+        println!();
+        println!("=== Asm for {f:?}: {} ===", self.program.pool.get(func.name));
+
+        it := dis.split('\n');
+        it.nth(1);
+        for (i, line) in it.enumerate() {
+            for (s, offset) in &self.markers {
+                if *offset == i {
+                    println!("{s}");
+                }
+            }
+            println!("{line}");
+        }
+        println!("===")
+    }
+
+    self.wip.retain(|c| c != &f);
+}
+
+fn bc_to_asm(self: *EmitAsm, f: FuncId) void = {
+    ff := self.program[f]&;
+    //debugln!("=== {f:?} {} ===", self.program.pool.get(self.program[f].name));
+    //debugln!("{}", self.program[f].body.log(self.program.pool));
+
+    func := self.body;
+    self.f = f;
+    self.next_slot = (id = 0);
+    self.vars.extend(vec![None; func.vars.len()]);
+    let block_count = self.body.blocks.len();
+    self.block_ips.extend(vec![None; block_count]);
+
+    self.asm.mark_start(f);
+    self.asm.push(sub_im(X64, sp, sp, 16, 0));
+    self.asm.push(stp_so(X64, fp, lr, sp, 0)); // save our return address
+    self.asm.push(add_im(X64, fp, sp, 0, 0)); // Note: normal mov encoding can't use sp
+    self.asm.push(brk(0));
+    reserve_stack := self.asm.prev();
+
+    // The code expects arguments on the virtual stack (the first thing it does might be save them to variables but that's not my problem).
+
+    sig := self.body.signeture;
+    int_count := sig.arg_int_count;
+
+    slots = if sig.first_arg_is_indirect_return {|
+        self.state.stack.push((Increment = (reg = 8, offset_bytes = 0));
+        sig.arg_slots - 1
+    } else {|
+        sig.arg_slots
+    };
+
+    // TODO: assert int_count <= 8 && float_count <= 8 or impl pass on stack.
+    self.ccall_reg_to_stack(sig.args);
+
+    @debug_assert_eq(slots as usize, sig.args.len());
+    // Any registers not containing args can be used.
+    range(int_count, 8) { i |
+        self.state.free_reg.push(i);
+    };
+    // debug_assert_eq!(self.state.stack.len() as u16, sig.arg_slots);
+
+    debugln!("entry: ({:?})", self.state.stack);
+    self.emit_block(0, false);
+
+    for (inst, false_ip, reg) in self.patch_cbz.drain(..) {
+        let false_ip = self.block_ips[false_ip.0 as usize].unwrap();
+        offset := self.asm.offset_words(inst, false_ip);
+        debug_assert!(reg < 32);
+        debug_assert_ne!(offset, 0, "!if ice: while(1);");
+        self.asm.patch(inst, cbz(X64, offset, reg));
+    }
+    for (from_inst, to_ip) in self.patch_b.drain(0..) {
+        let to_ip = self.block_ips[to_ip.0 as usize].unwrap();
+        dist := self.asm.offset_words(from_inst, to_ip);
+        debug_assert_ne!(dist, 0, "while(1);");
+        self.asm.patch(from_inst, b(dist, 0));
+    }
+
+    slots := self.next_slot.id; //self.compile.ready[self.f].as_ref().unwrap().stack_slots * 8;
+    assert!(
+        slots < 4096,
+        "not enough bits to refer to all slots ({}/4096 bytes) in {}",
+        slots,
+        self.program.pool.get(self.program[f].name)
+    );
+    if slots % 16 != 0 {
+        slots += 16 - (slots % 16); // play by the rules
+    }
+    self.asm.patch(reserve_stack, sub_im(X64, sp, sp, slots as i64, 0));
+    for (fst, snd, thd) in self.release_stack.drain(0..) {
+        self.asm.patch(fst, add_im(X64, sp, fp, 0, 0)); // Note: normal mov encoding can't use sp
+        self.asm.patch(snd, ldp_so(X64, fp, lr, sp, 0)); // get our return address
+        self.asm.patch(thd, add_im(X64, sp, sp, 16, 0));
+    };
+}
+
+fn emit_block(self: *EmitAsm, b: usize, args_not_vstacked: bool) void = {
+    if self.block_ips[b].is_some() {
+        return();
+    }
+    self.block_ips[b] = Some(self.asm.next);
+    f := self.f;
+    block := &self.body.blocks[b];
+
+    slots := block.arg_slots;
+    self.clock = block.clock;
+    // debug_assert_eq!(block.height, 0);
+    // TODO: handle normal args here as well.
+    if args_not_vstacked {
+        self.state.free_reg.clear();
+        debug_assert_eq!(slots as usize, block.arg_prims.len());
+        let int_count = self.ccall_reg_to_stack(block.arg_prims);
+        for i in int_count..8 {
+            self.drop_reg(i);
+        }
+    }
+    debug_assert!(self.state.stack.len() >= slots as usize);
+    func := self.body;
+    is_done := false;
+    range(0, func.blocks[b].insts.len) { i |
+        // TOOD: hack
+        if is_done {|
+            return();
+        }
+        // debug_assert!(!is_done);
+        block := &self.body.blocks[b];
+        inst := block.insts[i];
+        is_done = self.emit_inst(b, inst, i)?;
+        debugln!("{b}:{i} {inst:?} => {:?} | free: {:?}", self.state.stack, self.state.free_reg);
+    };
+    @debug_assert(is_done);
+}
+
+fn emit_inst(self: *EmitAsm, b: usize, inst: Bc, i: usize) bool = {
+    if TRACE_ASM.or(self.log_asm_bc) {|
+        ins := self.asm.offset_words(self.asm.current_start, self.asm.next) - 1;
+        self.markers.push((format!("[{b}:{i}] {inst:?}: {:?}", self.state.stack), ins as usize));
+    };
+    @match(inst) {
+        fn Nop() => ();
+        fn SaveSsa(f) => {
+            @assert(self.vars[f.id as usize].is_none());
+            slot := self.create_slots(1);
+            reg := self.pop_to_reg();
+            self.store_u64(reg, sp, slot.id);
+            self.drop_reg(reg);
+            self.vars[f.id as usize] = (Some = slot);
+        }
+        fn LoadSsa(f) => {
+            // debug_assert!(self.body.is_ssa_var.get(id as usize));
+            slot := self.vars[f.id as usize].unwrap();
+            self.state.stack.push(Spill = slot);
+        }
+        fn AddrVar(f) => {
+            // debug_assert!(!self.body.is_ssa_var.get(f.id as usize));
+            if self.vars[f.id as usize] { slot |
+                self.state.stack.push(Increment = (
+                    reg = sp,
+                    offset_bytes = slot.id,
+                ));
+            } else {|
+                ty := self.body.vars[f.id as usize];
+                count := self.program.slot_count(ty);
+                slot := self.create_slots(count);
+                self.vars[f.id as usize] = Some(slot);
+                self.state.stack.push(Increment = (
+                    reg = sp,
+                    offset_bytes = slot.id,
+                ));
+            }
+        }
+        fn GetCompCtx() => self.state.stack.push(Literal = self.compile_ctx_ptr as i64);
+
+        fn LastUse(f) => {
+            // TODO: I this doesn't work because if blocks are depth first now, not in order,
+            //       so the var can be done after they rejoin and then the other branch thinks that slot is free
+            //       and puts something else in it. -- May 6
+            slot := self.vars[f.id as usize]; // .take();
+                                                // TODO: .unwrap_or_else(|| panic!("ICE: missing var id {id}?? {}", self.body.log(self.program)));
+            if slot { slot |
+                ty := self.body.vars[f.id as usize];
+                count := self.program.slot_count(ty);
+                self.drop_slot(slot, count * 8);
+            };
+        }
+        fn NoCompile() => panic("tried to compile unreachable block in %", self.program[self.f].log(self.program.pool));
+
+        fn PushConstant(f) => self.state.stack.push(Literal = f.value);
+        fn PushGlobalAddr(id) => {
+            ptr := self.program[][].get_baked(id)._0;
+            self.state.stack.push(Literal = ptr.int_from_rawptr());
+        }
+        fn GetNativeFnPtr(fid) => {
+            // TODO: use adr+adrp instead of an integer. but should do that in load_imm so it always happens.
+
+            if self.asm.get_fn(fid) { ptr |
+                self.state.stack.push(Literal = ptr.int_from_rawptr());
+            } else {|
+                @assert(fid.as_index() < 4096);
+                reg := self.get_free_reg();
+                self.asm.extend_blanks(fid);
+                self.asm.pending_indirect.push(fid);
+                self.load_imm(reg, self.asm.dispatch.as_ptr() as u64); // NOTE: this means you can't ever resize
+                self.asm.push(ldr_uo(MEM_64, reg, reg, fid.as_index() as i64));
+                self.state.stack.push(Increment = (reg = reg, offset_bytes = 0));
+            };
+        }
+        Bc::JumpIf { true_ip, false_ip, slots } => {
+            cond := self.pop_to_reg();
+            debug_assert_eq!(slots, 0); // emit_bc doesn't do this
+            self.spill_abi_stompable();
+            self.asm.push(brk(0));
+
+            // branch if zero so true before false
+            self.patch_cbz.push((self.asm.prev(), false_ip, cond));
+            // we only do one branch so true block must be directly after the check.
+            // this is the only shape of flow graph that its possible to generate with my ifs/whiles.
+            debug_assert!(self.block_ips[true_ip.0 as usize].is_none());
+
+            self.drop_reg(cond);
+            state := self.state.clone();
+            self.emit_block(true_ip.0 as usize, true);
+            self.state = state;
+            self.emit_block(false_ip.0 as usize, true);
+
+            return(true);
+        }
+        Bc::Goto { ip, slots } => {
+            block := &self.body.blocks[ip.0 as usize];
+            debug_assert_eq!(slots, block.arg_slots, "goto {ip:?} {}", self.body.log(self.program));
+            if block.incoming_jumps == 1 {
+                debug_assert!(self.block_ips[ip.0 as usize].is_none());
+                self.emit_block(ip.0 as usize, false);
+            } else {
+                debug_assert_eq!(block.arg_prims.len(), block.arg_slots as usize);
+                self.stack_to_ccall_reg(block.arg_prims);
+                self.spill_abi_stompable();
+                if self.block_ips[ip.0 as usize] {_|
+                    self.asm.push(brk(0));
+                    self.patch_b.push((self.asm.prev(), ip));
+                } else {
+                    // If we haven't emitted it yet, it will be right after us, so just fall through.
+                    self.emit_block(ip.0 as usize, true);
+                };
+            };
+            return(true);
+        }
+        Bc::CallDirect { f, tail, sig } => {
+            // TODO: use with_link for tail calls. need to "Leave holes for stack fixup code." like below
+            // TODO: if you already know the stack height of the callee, you could just fixup to that and jump in past the setup code. but lets start simple.
+            self.dyn_c_call(sig) {|
+                if tail {
+                    s.emit_stack_fixup();
+                }
+                s.branch_func(f, !tail)
+            });
+            return(tail);
+        }
+        fn Ret0() => return self.emit_return(empty());
+        fn Ret1(prim) => return self.emit_return(@slice(prim));
+        fn Ret2(f) => return self.emit_return(@slice(f.a, f.b));
+        // Note: we do this statically, it wont get actually applied to a register until its needed because loads/stores have an offset immediate.
+        fn IncPtrBytes(bytes) => {
+            @match(self.state.stack.last().unwrap()) {
+                fn Increment(f) => {
+                    f.offset_bytes += bytes;
+                }
+                fn Literal(v) => {
+                    v[] += bytes.zext();
+                }
+                fn Spill(_) => {
+                    // TODO: should it hold the add statically? rn it does the load but doesn't need to restore because it just unspills it.
+                    (reg, offset_bytes) := self.pop_to_reg_with_offset();
+                    self.state.stack.push(Increment = (
+                        reg = reg,
+                        offset_bytes = offset_bytes + bytes,
+                    ));
+                }
+                fn FloatReg(_) => return(@error("don't try to gep a float"));
+            };
+        }
+        fn Load(ty) => {
+            (addr, offset_bytes) := self.pop_to_reg_with_offset(); // get the ptr
+
+            dest := self.get_free_reg();
+            v: AsmVal = (Increment = (reg = dest, offset_bytes = 0));
+            @match(y) {
+                // TODO: track open float registers so this can just switch over MEM type.
+                fn I32() => self.load_one(MEM_32, dest, addr, offset_bytes);
+                fn F32() => self.load_one(MEM_32, dest, addr, offset_bytes);
+                fn I16() => self.load_one(MEM_16, dest, addr, offset_bytes);
+                fn I8()  => self.load_one(MEM_08, dest, addr, offset_bytes);
+                @default => self.load_u64(dest, addr, offset_bytes);
+            };
+
+            self.state.stack.push(v);
+            self.drop_reg(addr);
+        }
+        fn StorePost(ty) => {
+            addr := self.state.stack.pop().unwrap();
+            value := self.state.stack.pop().unwrap();
+            self.emit_store(addr, value, ty);
+        }
+        fn StorePre(ty) => {
+            value := self.state.stack.pop().unwrap();
+            addr := self.state.stack.pop().unwrap();
+            self.emit_store(addr, value, ty);
+        }
+        Bc::CallFnPtr { sig } => {
+            // TODO: tail call
+            self.dyn_c_call(sig) {|
+                // dyn_c_call will have popped the args, so now stack is just the pointer to call
+                callee := s.state.stack.pop().unwrap();
+                // TODO: this does redundant spilling every time!
+                match callee {
+                    AsmVal::Literal(p) => s.load_imm(x16, p as u64),
+                    AsmVal::Spill(offset) => s.load_u64(x16, sp, offset.0),
+                    v => unreachable!("unspilled {v:?}"),
+                }
+                s.asm.push(br(x16, 1));
+            };
+        }
+        fn Unreachable() => {
+            self.asm.push(brk(0xbabe));
+            return(true);
+        }
+        fn Snipe(skip) => {
+            index := self.state.stack.len - skip.zext() - 1;
+            @match(self.state.stack&.ordered_remove(index)) {
+                fn Increment(f) => self.drop_reg(f.reg);
+                fn Literal(_)   => ();
+                fn Spill(_)     => ();
+                fn FloatReg(_)  => {
+                    panic("unexpected float reg");
+                }
+            };
+        }
+        fn PeekDup(skip) => {
+            val := self.state.stack[self.state.stack.len() - skip.zext() - 1];
+            @match(val) {
+                fn Increment(f) => {
+                    if f.reg == sp {|
+                        self.state.stack.push(val);
+                    } else {|
+                        new := self.get_free_reg();
+                        self.asm.push(mov(X64, new, f.reg));
+                        self.state.stack.push(Increment = (reg = new, offset_bytes = f.offset_bytes));
+                    };
+                }
+                fn Literal(_)   => self.state.stack.push(val),
+                fn Spill(_)     => self.state.stack.push(val),
+                fn FloatReg(_)  => {
+                    panic("unexpected float reg");
+                }
+            };
+        }
+        fn CopyBytesToFrom(bytes) => {
+            self.state.stack.push(Literal = bytes.zext()));
+            self.stack_to_ccall_reg(@slice(Prim.P64, Prim.P64, Prim.I64));
+            self.spill_abi_stompable();
+            addr: rawptr : memcpy;
+            // offset := self.asm.offset_words(self.asm.next, addr);
+            self.load_imm(x17, addr.int_from_rawptr());
+            self.asm.push(br(x17, 1));
+            for range(0, 8) { i |
+                add_unique(&mut self.state.free_reg, i as i64);
+            };
+        }
+    };
+
+    false
+}
+
+// TODO: refactor this. its a problem that im afraid of it! -- May 8
+fn stack_to_ccall_reg(self: *EmitAsm, types: [] Prim) void = {
+    ::display_slice(Prim);
+    @debug_assert(
+        self.state.stack.len() >= types.len(),
+        "found % things but wanted %",
+        self.state.stack.len(),
+        types
+    );
+    next_int := 0;
+    next_float := 0;
+
+    enumerate types { slot_index, ty |
+        continue :: local_return;
+        @debug_assert_eq(slot_index, next_int + next_float);
+        f := ty.is_float();
+        stack_index := self.state.stack.len() - (types.len()) + slot_index;
+
+        if f {|
+            @if_let(self.state.stack[stack_index]) fn FloatReg(have) => {
+                if have == next_float {|
+                    // its already where we want it.
+                    self.state.stack[stack_index] = (Literal = 0); // just make sure we dont see it again later.
+                    next_float += 1;
+                    continue();
+                };
+            };
+
+            // debug!("|(v{}) <- ({:?})| ", next_float, self.state.stack[stack_index]);
+
+            range(0, self.state.stack.len) { i |
+                @if_let(self.state.stack[i]) fn FloatReg(x) => {
+                    if x == next_float {|
+                        // Someone else already has the one we want, so spill that to the stack since i don't have fmov encoding. TODO
+                        worked := self.try_spill(i, true);
+                        @assert(worked);
+                    };
+                };
+            };
+
+            @match(self.state.stack[stack_index]) {
+                fn Increment(f) => {
+                    @debug_assert_eq(f.offset_bytes, 0, "dont GEP a float");
+                    @debug_assert_ne(f.reg, sp, "dont fmov the stack pointer");
+                    // TODO: fmov encoding.
+                    worked := self.try_spill(stack_index, false);
+                    @assert(worked);
+                }
+                fn Literal(x) => {
+                    // TODO: fmov encoding.
+                    reg := self.get_free_reg();
+                    self.load_imm(reg, u64::from_le_bytes(i64::to_le_bytes(x)));
+                    self.state.stack[stack_index] = (Increment = (reg = reg, offset_bytes = 0));
+                    worked := self.try_spill(stack_index, false);
+                    @assert(worked);
+                }
+                fn Spill(_)    => ();
+                fn FloatReg(_) => {
+                    // TODO: fmov encoding.
+                    worked := self.try_spill(stack_index, true);
+                    @assert(worked);
+                }
+            };
+
+            slot := self.state.stack[stack_index];
+            @assert(slot&.is(.Spill));
+            slot := slot.Spill;
+            self.asm.push(f_ldr_uo(X64, next_float as i64, sp, slot.id as i64 / 8));
+            // self.drop_slot(slot, 8); // TODO!
+
+            next_float += 1;
+            continue();
+        };
+        
+        @if_let(self.state.stack[stack_index]) fn Increment(f) => {
+            if f.reg == next_int as i64 {
+                if f.offset_bytes != 0 {
+                    self.asm.push(add_im(Bits.X64, f.reg, f.reg, f.offset_bytes as i64, 0));
+                };
+
+                // if we happen to already be in the right register, cool, don't worry about it.
+                //debug!("|x{} already| ", f.reg);
+                self.state.free_reg.retain(|r| f.reg != *r);
+                self.state.stack[stack_index] = (Literal = 0); // make sure we dont try to spill it later
+                next_int += 1;
+                continue();
+            };
+        };
+
+        found := false;
+        if self.state.free_reg.position(fn(r) => next_int == r[].zext()) { want |
+            found := true;
+            self.state.free_reg.remove(want);
+        };
+        
+        if !found {|
+            if let Some(used) = self
+                .state
+                .stack
+                .iter()
+                .position(|r| r.reg().map(|(r, _)| r as usize == next_int).unwrap_or(false))
+            {
+                found = true;
+                // The one we want is already used by something on the v-stack; swap it with a random free one. TODO: put in the right place if you can.
+                (old_reg, offset_bytes) := self.state.stack[used].reg().unwrap();
+                @debug_assert_ne(old_reg, sp); // encoding but unreachable
+                reg := self.get_free_reg();
+                self.asm.push(mov(X64, reg, old_reg));
+                self.state.stack[used] = (Increment = (reg = reg, offset_bytes = offset_bytes));
+                // Now x{i} is free and we'll use it below.
+            };
+        };
+        ::display_slice(AsmVal);
+        @assert(found, "TODO: x% is not free. stack is %. free is %",
+                next_int, self.state.stack, self.state.free_reg);
+
+        //debug!("|(x{}) <- ({:?})| ", next_int, self.state.stack[stack_index]);
+        match(self.state.stack[stack_index]) {
+            fn Increment(f) => {
+                debug_assert_ne(next_int, f.reg as usize);
+                // even if offset_bytes is 0, we need to move it to the right register. and add can encode that mov even if reg is sp.
+                self.asm.push(add_im(X64, next_int as i64, f.reg, f.offset_bytes as i64, 0));
+                self.drop_reg(f.reg);
+            }
+            fn Literal(x) => self.load_imm(next_int as i64, x as u64);
+            fn Spill(slot) => self.load_u64(next_int as i64, sp, slot.id);
+            fn FloatReg(_) => todo();
+        }
+        self.state.free_reg.retain(|r| next_int as i64 != *r);
+        self.state.stack[stack_index] = (Literal = 0); // make sure we dont try to spill it later
+        next_int += 1;
+    };
+    self.state.stack.len -= types.len;
+}
+
+::if(AsmVal);
+fn ccall_reg_to_stack(self: *EmitAsm, types: [] Prim) i64 = {
+    next_float := 0;
+    next_int := 0;
+    enumerate types { i, ty |
+        @debug_assert_eq(i, (next_int + next_float) as usize);
+        f := ty.is_float();
+        v: AsmVal = if(f, => (FloatReg = next_float)) {|
+            self.state.free_reg.retain(|r| *r != next_int);
+            (Increment = (
+                reg = next_int,
+                offset_bytes = 0,
+            ))
+        };
+        if f {|
+            next_float += 1;
+        } else {|
+            next_int += 1;
+        };
+        self.state.stack&.push(v);
+    };
+    next_int
+}
+
+fn emit_store(self: *EmitAsm, addr: AsmVal, value: AsmVal, ty: Prim) void = {
+    (reg, offset_bytes) := self.in_reg_with_offset(addr);
+    p64 :: fn() => {
+        if value&.is(.FloatReg) {|
+            r := value.FloatReg;
+            @assert_eq(offset_bytes.mod(8), 0, "TODO: align");
+            self.asm.push(f_str_uo(X64, r, reg, offset_bytes as i64 / 8))
+        } else {|
+            val := self.in_reg(value);
+            self.store_u64(val, reg, offset_bytes);
+            self.drop_reg(val);
+        };
+    };
+    @match(ty) {
+        // TODO: track open float registers
+        fn P64() => p64();
+        fn F64() => p64();
+        fn I64() => p64();
+        fn F32() => {
+            if value&.is(.FloatReg) {|
+                r := value.FloatReg;
+                @assert_eq(offset_bytes.mod(4), 0, "TODO: align");
+                self.asm.push(f_str_uo(W32, r, reg, offset_bytes as i64 / 4))
+            } else {|
+                val := self.in_reg(value);
+                self.store_one(MEM_32, val, reg, offset_bytes);
+                self.drop_reg(val);
+            };
+        }
+        fn I32() => {
+            val := self.in_reg(value);
+            self.store_one(MEM_32, val, reg, offset_bytes);
+            self.drop_reg(val);
+        }
+        fn I16() => {
+            val := self.in_reg(value);
+            self.store_one(MEM_16, val, reg, offset_bytes);
+            self.drop_reg(val);
+        }
+        fn I8() => {
+            val := self.in_reg(value);
+            self.store_one(MEM_08, val, reg, offset_bytes);
+            self.drop_reg(val);
+        }
+    }
+    self.drop_reg(reg);
+}
+
+fn load_u64(self: *EmitAsm, dest_reg: i64, src_addr_reg: i64, offset_bytes: u16) {
+    self.load_one(MEM_64, dest_reg, src_addr_reg, offset_bytes)
+}
+
+fn load_one(self: *EmitAsm, register_type: i64, dest_reg: i64, src_addr_reg: i64, offset_bytes: u16) {
+    @debug_assert_ne(dest_reg, sp);
+    scale := 1.shift_left(register_type);
+    if offset_bytes.mod(scale) == 0 {
+        self.asm
+            .push(ldr_uo(register_type, dest_reg, src_addr_reg, (offset_bytes as i64 / scale)));
+        debug_assert!(offset_bytes as i64 / scale < (1 << 12));
+    } else {
+        // Note: this relies on the access actually being aligned once you combine the value in the register without our non %8 offset.
+        reg := self.get_free_reg();
+        debug_assert!(offset_bytes < 1 << 12);
+        self.asm.push(add_im(MEM_64, reg, src_addr_reg, offset_bytes as i64, 0));
+        self.asm.push(ldr_uo(register_type, dest_reg, reg, 0));
+        self.drop_reg(reg);
+    }
+}
+
+fn store_u64(self: *EmitAsm, src_reg: i64, dest_addr_reg: i64, offset_bytes: u16) {
+    self.store_one(MEM_64, src_reg, dest_addr_reg, offset_bytes)
+}
+
+fn store_one(self: *EmitAsm, register_type: i64, src_reg: i64, dest_addr_reg: i64, offset_bytes: u16) {
+    scale := 1 << register_type;
+    if src_reg == sp {
+        // TODO: this is weird. can only happen for exactly the sp, not an offset from it. so i guess somewhere else is saving an add, maybe its fine. -- May 2
+        reg := self.get_free_reg();
+        self.asm.push(add_im(register_type, reg, sp, 0, 0)); // not mov!
+        self.store_one(register_type, reg, dest_addr_reg, offset_bytes);
+        self.drop_reg(reg);
+        return;
+    }
+    if offset_bytes % 8 == 0 {
+        self.asm
+            .push(str_uo(register_type, src_reg, dest_addr_reg, (offset_bytes as i64 / scale)));
+        debug_assert!(offset_bytes as i64 / scale < (1 << 12));
+    } else {
+        reg := self.get_free_reg();
+        self.asm.push(add_im(X64, reg, dest_addr_reg, offset_bytes as i64, 0));
+        self.asm.push(str_uo(register_type, src_reg, reg, 0));
+        self.drop_reg(reg);
+    }
+}
+
+fn reset_free_reg(&mut self) {
+    self.state.free_reg.clear();
+    self.state.free_reg.extend([0, 1, 2, 3, 4, 5, 6, 7]);
+}
+
+fn spill_abi_stompable(&mut self) {
+    for i in 0..self.state.stack.len() {
+        self.try_spill(i, true);
+    }
+    debugln!();
+}
+
+// do_floats:false if you're just trying to free up a gpr, not saving for a call.
+fn try_spill(self: *EmitAsm, i: usize, do_floats: bool) -> bool {
+    v := self.state.stack[i];
+    if let AsmVal::Increment { reg, offset_bytes } = v {
+        if reg == sp {
+            return false;
+        }
+
+        // Note: this assumes we don't need to preserve the value in the reg other than for this one v-stack slot.
+        slot := self.create_slots(1);
+        debug!("(spill (x{reg:?} + {offset_bytes}) -> [sp, {}]) ", slot.id);
+        if offset_bytes != 0 {
+            self.asm.push(add_im(X64, reg, reg, offset_bytes as i64, 0));
+        }
+
+        self.store_u64(reg, sp, slot.id);
+        self.drop_reg(reg);
+        self.state.stack[i] = AsmVal::Spill(slot);
+        return true;
+    }
+
+    if do_floats {|
+        @if_let(v) fn FloatReg(freg) => {
+            slot := self.create_slots(1);
+            self.asm.push(f_str_uo(X64, freg, sp, slot.id as i64 / 8));
+            self.state.stack[i] = (Spill = slot);
+            return(true);
+        };
+    };
+
+    false
+}
+
+fn get_free_reg(self" *EmitAsm) -> i64 {
+    if self.state.free_reg.pop() { r |
+        @debug_assert_ne(r, sp);
+        r
+    } else {|
+        i := 0;
+        while => i < self.state.stack.len() && !self.try_spill(i, false) {|
+            i += 1;
+        };
+        if i == self.state.stack.len() {|
+            panic("spill to stack failed");
+        };
+        self.state.free_reg.pop().unwrap()
+    }
+}
+
+fn drop_reg(self: *EmitAsm, reg: i64) void = {
+    if reg != sp && reg != x8 {|
+        @debug_assert(!self.state.free_reg.contains(&reg), "drop r% -> %", reg, self.state.free_reg);
+        self.state.free_reg.push(reg);
+        if ZERO_DROPPED_REG {|
+            self.load_imm(reg, 0);
+        };
+    };
+}
+
+fn pop_to_reg(&mut self) -> i64 {
+    val := self.state.stack.pop().unwrap();
+    self.in_reg(val)
+}
+
+fn in_reg(self: *EmitAsm, val: AsmVal) -> i64 {
+    match val {
+        AsmVal::Increment { mut reg, offset_bytes } => {
+            if offset_bytes > 0 {
+                out := if reg == sp { self.get_free_reg() } else { reg };
+                if offset_bytes < (1 << 12) {
+                    self.asm.push(add_im(X64, out, reg, offset_bytes as i64, 0));
+                } else {
+                    self.asm.push(add_im(X64, out, reg, (offset_bytes >> 12) as i64, 1));
+                    self.asm.push(add_im(X64, out, reg, offset_bytes as i64 & ((1 << 12) - 1), 0));
+                }
+                reg = out;
+            }
+            reg
+        }
+        AsmVal::Literal(x) => {
+            r := self.get_free_reg();
+            self.load_imm(r, u64::from_le_bytes(x.to_le_bytes()));
+            r
+        }
+        AsmVal::Spill(slot) => {
+            r := self.get_free_reg();
+            self.load_u64(r, sp, slot.id);
+            // self.drop_slot(slot, 8); TODO!
+            r
+        }
+        AsmVal::FloatReg(_) => todo!(),
+    }
+}
+
+fn peek_to_reg_with_offset(&mut self) Ty(i64, u16) = {
+    val := self.state.stack.last().unwrap()[];
+    self.in_reg_with_offset(val)
+}
+
+fn in_reg_with_offset(self: *EmitAsm, val: AsmVal) Ty(i64, u16) = {
+    match val {
+        AsmVal::Increment { reg, offset_bytes } => (reg, offset_bytes),
+        AsmVal::Literal(x) => {
+            r := self.get_free_reg();
+            self.load_imm(r, u64::from_le_bytes(x.to_le_bytes()));
+            (r, 0)
+        }
+        AsmVal::Spill(slot) => {
+            r := self.get_free_reg();
+            self.load_u64(r, sp, slot.id);
+            (r, 0)
+        }
+        AsmVal::FloatReg(_) => todo!(),
+    }
+}
+
+fn pop_to_reg_with_offset(&mut self) Ty(i64, u16) = {
+    res := self.peek_to_reg_with_offset();
+    self.state.stack.pop().unwrap();
+    res
+}
+
+fn create_slots(self: *EmitAsm, count: u16) -> SpOffset {
+    for (i, &(_, size, clock)) in self.state.open_slots.iter().enumerate() {
+        if self.clock >= clock && size == count * 8 {
+            return self.state.open_slots.remove(i).0;
+        }
+    }
+
+    made := self.next_slot;
+    self.next_slot.id += count * 8;
+    made
+}
+
+// TODO: this should check if adr is close enough since it statically knows the ip cause we're jitting.
+fn load_imm(self: *EmitAsm, reg: i64, value: u64) void = {
+    bottom := u16::MAX as u64;
+    self.asm.push(movz(X64, reg, (value & bottom) as i64, 0));
+    value = value.shift_right_logical(16);
+    if value != 0 {|
+        range(1, 4) { shift |
+            part := value.bit_and(bottom);
+            if part != 0 {|
+                self.asm.push(movk(X64, reg, part as i64, shift));
+            };
+            value = value.shift_right_logical(16);
+            if value == 0 {|
+                return();
+            };
+        }
+    }
+}
+
+// Note: comp_ctx doesn't push the ctx here, bc needs to do that. this it just does the call with an extra argument.
+/// <arg:n> -> <ret:m>
+fn dyn_c_call(self: *EmitAsm, sig: PrimSig, $do_call: @Fn() void) void = {
+    slots := if sig.first_arg_is_indirect_return {|
+        sig.arg_slots - 1
+    } else {|
+        sig.arg_slots
+    };
+    self.stack_to_ccall_reg(sig.args);
+    self.spill_abi_stompable();
+    // TODO: don't spill!
+    if sig.first_arg_is_indirect_return {|
+        @match(self.state.stack.pop().unwrap()) {
+            AsmVal::Increment { reg, offset_bytes } => {
+                assert!(reg == sp);
+                self.asm.push(add_im(X64, x8, reg, offset_bytes as i64, 0))
+            }
+            AsmVal::Literal(v) => self.load_imm(x8, v as u64),
+            AsmVal::Spill(slot) => self.load_u64(x8, sp, slot.id),
+            AsmVal::FloatReg(_) => unreachable!(),
+        };
+    };
+    do_call(self);
+
+    int_count := if sig.ret1 { fst |
+        if sig.ret2 { snd |
+            self.ccall_reg_to_stack(@slice(fst, snd));
+            fst.int_count() + snd.int_count()
+        } else {|
+            self.ccall_reg_to_stack(@slice(fst));
+            fst.int_count()
+        }
+    } else {|
+        0
+    };
+
+    range(int_count, 8) { i |
+        add_unique(self.state.free_reg&, i); // now the extras are usable again.
+    };
+}
+
+DO_BASIC_ASM_INLINE :: true;
+
+// TODO: use with_link for tail calls.
+// !with_link === tail
+fn branch_func(self: *EmitAsm, f: FuncId, with_link: bool) void = {
+    if DO_BASIC_ASM_INLINE {|
+        // TODO: save result on the function so dont have to recheck every time?
+        if self.program[f].body&.jitted_aarch64() { code |
+            if self.program[f].cc == BigOption::Some(CallConv::OneRetPic) {
+                // TODO: HACK: for no-op casts, i have two rets because I can't have single element tuples.
+                if code.len == 2 && code[0] as i64 == ret(()) && code[1] as i64 == ret(()) {|
+                    if !with_link {|
+                        // If you're trying to do a tail call to fn add, that means emit the add instruction and then return.
+                        self.asm.push(ret(()));
+                    };
+                    return();
+                };
+                for code.slice(0, code.len - 1) { op |
+                    debug_assert_ne!(*op as i64, ret(()));
+                    self.asm.push(*op as i64);
+                };
+                debug_assert_eq!(*code.last().unwrap() as i64, ret(()));
+                if !with_link {|
+                    // If you're trying to do a tail call to fn add, that means emit the add instruction and then return.
+                    self.asm.push(ret(()));
+                };
+                return();
+            };
+        };
+    };
+
+    // If we already emitted the target function, can just branch there directly.
+    // This covers the majority of cases because I try to handle callees first.
+    if self.asm.get_fn(f) { bytes |
+        offset := bytes as i64 - self.asm.next as i64;
+        debug_assert!(offset % 4 == 0, "instructions are u32 but % not mod 4", offset);
+        offset /= 4;
+        // TODO: use adr/adrp
+        if offset.abs() < 1.shift_left(25) {|
+            self.asm.push(b(offset, with_link as i64));
+            return;
+        };
+    };
+
+    // It's a function we haven't emitted yet, so we don't know where to jump to. (or we do know but it's far away)
+    // The normal solution would be punt and let the linker deal with it or go back later and patch it ourselves.
+    // But for now, I just spend a register on having a dispatch table and do an indirect call through that.
+    // TODO: have a mapping. funcs take up slots even if never indirect called.
+    // assert!(f.as_index() < 4096, "{f:?}");
+    self.asm.pending_indirect.push(f);
+    // you don't really need to do this but i dont trust it cause im not following the calling convention
+    self.load_imm(x16, self.asm.dispatch.as_ptr() as u64); // NOTE: this means you can't ever resize
+    if f.as_index() < 4096 {|
+        self.asm.push(ldr_uo(MEM_64, x16, x16, f.as_index() as i64));
+    } else {|
+        full := f.as_index() * 8;
+        bottom := full.bit_and(1.shift_left(12) - 1);
+        top := (full - bottom).shift_right_logical(12);
+        self.asm.push(add_im(X64, x16, x16, top as i64, 1));
+        self.asm.push(ldr_uo(MEM_64, x16, x16, bottom as i64 / 8));
+    };
+
+    self.asm.push(br(x16, with_link as i64));
+}
+
+// Now have to be careful about trying to use x17
+fn drop_slot(self: *EmitAsm, slot: SpOffset, bytes: u16) void = {
+    self.state.open_slots.push((slot, bytes, self.clock)); // TODO: keep this sorted by count?
+    if ZERO_DROPPED_SLOTS {|
+        self.load_imm(x17, 0);
+        range(0, bytes / 8) { i |
+            self.store_u64(x17, sp, slot.id + (i * 8));
+        };
+    };
+}
+
+fn emit_stack_fixup(self: *EmitAsm) void = {
+    self.asm.push(brk(0));
+    a := self.asm.prev();
+    self.asm.push(brk(0));
+    b := self.asm.prev();
+    self.asm.push(brk(0));
+    self.release_stack.push((a, b, self.asm.prev()));
+}
+
+fn drop_if_unused(self: *EmitAsm, register: i64) void = {
+    for self.state.stack { r |
+        @if_let(r) fn Increment(f) => {
+            if(f.reg == register, => return());
+        };
+    };
+    self.drop_reg(register);
+}
+
+fn emit_return(self: *EmitAsm, sig: [] Prim) bool = {
+    // We have the values on virtual stack and want them in r0-r7, that's the same as making a call.
+    if !sig.is_empty() {|
+        self.stack_to_ccall_reg(sig);
+    };
+    self.emit_stack_fixup();
+    self.asm.push(ret(()));
+    true
+}
+
+
+fn reg(self: AsmVal) ?Ty(i64, u16) = {
+    @match(self) {
+        fn Increment(f) => (Some = (f.reg, f.offset_bytes));
+        fn Literal(_)   => .None;
+        fn Spill(_)     => .None;
+        fn FloatReg(_)  => todo();
+    }
+}
+
+fn not_compiled(a: i64, b: i64, c: i64) void = {
+    @panic("Tried to call un-compiled function. (x0=%, x1=%, x2=%)", a, b, c);
+}
+
+
+PAGE_SIZE :: 16384; // TODO
+
+Jitted :: @struct(
+    mmapped: *u8,
+    /// This is redundant but is the pointer used for actually calling functions and there aren't that many bits in the instruction,
+    /// so I don't want to spend one doubling to skip lengths.
+    dispatch: List(*u8),
+    ranges: List([] u8),
+    current_start: *u8,
+    next: *mut u8,
+    old: *mut u8,
+    low: usize,
+    high: usize,
+    pending_indirect: List(FuncId),
+);
+
+    // TODO: https://community.arm.com/arm-community-blogs/b/architectures-and-processors-blog/posts/caches-and-self-modifying-code
+
+fn new(bytes: i64) Jitted = {
+    mmapped := page_allocator.alloc(u8, bytes);
+    @assert_eq(u8.int_from_ptr(mmapped.ptr).mod(4), 0, "alignment's fucked");
+    (
+        current_start = mmapped,
+        low: mmapped as usize,
+        high: mmapped as usize + bytes,
+        next: mmapped,
+        old: mmapped,
+        mmapped,
+        dispatch: Vec::with_capacity(99999), // Dont ever resize!
+        ranges: vec![],
+        pending_indirect: vec![],
+    )
+}
+
+fn copy_inline_asm(self: *Jitted, f: FuncId, insts: &[u32]) {
+    self.mark_start(f);
+    for op in insts {
+        op := *op as i64;
+        self.push(op);
+    }
+    self.save_current(f);
+}
+
+// This is a better marker for not compiled yet.
+// Depending on your mood this could be 0x1337 or whatever so you can recognise when you hit it in a debugger.
+fn empty() -> usize {
+    not_compiled as usize
+}
+
+fn get_dispatch(self: *Jitted) -> **u8 {
+    self.dispatch.as_ptr()
+}
+
+fn get_fn(self: *Jitted, f: FuncId) -> Option<*u8> {
+    self.dispatch
+        .get(f.as_index())
+        .and_then(|f| if (*f) as usize == Self::empty() { None } else { Some(*f) })
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+fn offset_words(self: *Jitted, from_ip: *u8, to_ip: *u8) -> i64 {
+    unsafe { (to_ip.offset_from(from_ip) as i64 / 4) }
+}
+
+fn prev(self: *Jitted) -> *u8 {
+    unsafe { self.next.offset(-4) }
+}
+
+fn patch(self: *Jitted, ip: *u8, inst_value: i64) {
+    unsafe {
+        ptr := ip as *mut u32;
+        debug_assert_eq!(*ptr, brk(0) as u32, "unexpected patch");
+        *ptr = inst_value as u32
+    };
+}
+
+fn push(self: *Jitted, inst: i64) {
+    unsafe {
+        debug_assert!((self.next as usize) < self.high, "OOB {} {}", self.next as usize, self.high);
+        *(self.next as *mut u32) = inst as u32;
+        self.next = self.next.add(4);
+    }
+}
+
+// Recursion shouldn't have to slowly lookup the start address.
+fn mark_start(self: *Jitted, f: FuncId) {
+    debug_assert_eq!(self.current_start as usize % 4, 0);
+    self.extend_blanks(f);
+    self.dispatch[f.as_index()] = self.current_start;
+}
+
+fn extend_blanks(self: *Jitted, f: FuncId) {
+    while self.dispatch.len() < f.as_index() + 1 {
+        self.dispatch.push(Self::empty() as *u8);
+        self.ranges.push(&[]);
+    }
+}
+
+fn save_current(self: *Jitted, f: FuncId) {
+    debug_assert_ne!(self.next as usize, self.old as usize);
+    debug_assert_ne!(self.next as usize, self.current_start as usize);
+    self.extend_blanks(f);
+    unsafe {
+        // TODO: make sure there's not an off by one thing here.
+        range := slice::from_raw_parts(self.current_start, self.next.offset_from(self.current_start) as usize);
+        self.dispatch[f.as_index()] = self.current_start;
+        self.ranges[f.as_index()] = range as *[u8];
+        debug_assert_eq!(self.current_start as usize % 4, 0);
+        // just a marker to make sure someone doesn't fall off the end of the function by forgetting to return.
+        // also you can see it in the debugger disassembly so you can tell if you emitted a trash instruction inside a function or you're off the end in uninit memory. -- Apr 25
+        self.push(brk(0xDEAD));
+        self.current_start = self.next;
+    }
+}
+
+// Returns the range of memory we've written since the last call.
+fn bump_dirty(self: *Jitted) -> (*mut u8, *mut u8) {
+    dirty := (self.old, self.next);
+    if self.old as usize != self.next as usize {
+        debug_assert_eq!(self.next as usize, self.current_start as usize);
+        self.push(brk(0x9801));
+        len := (self.next as usize) - self.old as usize;
+        unsafe {
+            libc::mprotect(self.old as *mut c_void, len, libc::PROT_EXEC | libc::PROT_READ);
+        };
+        let page_start = (self.next as usize / PAGE_SIZE) * PAGE_SIZE;
+        self.next = (page_start + PAGE_SIZE) as *mut u8;
+        self.old = self.next;
+        self.current_start = self.next;
+    }
+    dirty
+}

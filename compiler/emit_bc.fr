@@ -6,7 +6,91 @@
 //! - Reduce variable usage to register sized loads/stores.
 //! - Convert large arguments/returns to references and remap signatures to use only register sized types.
 
-FEATURE_NEW_BC :: true;
+// TODO: (maybe) instead of storing TypeId of vars, store size+align.
+//       then don't throw away fnbody after use, keep them in a hashmap to deduplicate generics.
+//       like List(*T) will often generate the same code even with different types.
+//       can keep a running hash as you construct the bc so maybe pretty fast to discard non-matches.
+//       have that as a build option so you don't have to take the hit for debug builds if you don't want to.
+//       but it actually might make it faster in general because it means giving less stuff to llvm which is 90% of the time.
+//       I kinda want to wait for emit_bc and bc_to_asm to be self hosted tho cause then its less awkward to change things.
+//       Note: you wont get all the matches until you really deduplicate because they might call different functions that actaully generate the same code,
+//             so have to have a thing like redirects where if checks if a call has been deduplicated. -- Jul 5
+FnBody :: @struct(
+    blocks: RsVec(BasicBlock),
+    vars: RsVec(Type),
+    var_names: RsVec(?Var),
+    when: ExecStyle,
+    func: FuncId,
+    current_block: BbId,
+    clock: u16,
+    name: Symbol,
+    want_log: bool,
+    // TODO: remove once we're not sharing this data structure with the rust side. 
+    _deprecated_is_ssa_var: RsBitSet, // only used for debugging. bc has enough info for this.
+    signeture: PrimSig,
+    alloc: Alloc,
+    hash: i64 = 0,
+);
+
+Bc :: @tagged(
+    CallDirect: @struct(sig: PrimSig, f: FuncId, tail: bool),     // <args:m> -> <ret:n>
+    CallFnPtr: @struct(sig: PrimSig),                             // <ptr:1> <args:m> -> <ret:n>
+    PushConstant: @struct(value: i64, ty: Prim),                  // _ -> <v:1>
+    JumpIf: @struct(true_ip: BbId, false_ip: BbId, slots: u16),   // <args:slots> <cond:1> -> !
+    Goto: @struct(ip: BbId, slots: u16),                          // <args:slots> -> !
+    GetNativeFnPtr: FuncId,                                       // _ -> <ptr:1>
+    Load: Prim,                                                   // <ptr:1> -> <?:n>
+    StorePost: Prim,                                              // <?:n> <ptr:1> -> _
+    StorePre: Prim,                                               // <ptr:1> <?:n> -> _
+    AddrVar: @struct(id: u16),                                    // _ -> <ptr:1>
+    SaveSsa: @struct(id: u16, ty: Prim),                          // <p:1> -> _
+    LoadSsa: @struct(id: u16),                                    // _ -> <p:1>
+    IncPtrBytes: u16,                                             // <ptr:1> -> <ptr:1>
+    PeekDup: u16,                                                 // <x:1> <skip:n> -> <x:1> <skip:n> <x:1>,
+    CopyBytesToFrom: u16,                                         // <to_ptr:1> <from_ptr:1> -> _
+    LastUse: @struct(id: u16),                                    // _ -> _
+    Unreachable,                                                  // _ -> !
+    GetCompCtx,                                                   // _ -> <ptr:1>
+    NoCompile,
+    PushGlobalAddr: BakedVarId,
+    Snipe: u16,
+    Ret0, // big return uses this too because code has already written to indirect return address.
+    Ret1: Prim,
+    Ret2: Ty(Prim, Prim),
+    Nop,
+);
+
+PrimSig :: @struct(
+    args: Slice(Prim) = empty(),
+    ret1: ?Prim,
+    ret2: ?Prim,
+    arg_slots: u16 = 0,
+    ret_slots: u16 = 0,
+    return_value_bytes: u16 = 0,
+    first_arg_is_indirect_return: bool = false,
+    no_return: bool = false,
+    arg_int_count: u8 = 0,
+);
+
+// TODO: make the other enum varient builtin so you can use it and still override eq. because my order independence doesn't really work. 
+Prim :: @enum(i64) (I8, I16, I32, I64, F64, F32, P64);
+
+BbId :: @struct(id: u16);
+BasicBlock :: @struct(
+    insts: RsVec(Bc),
+    arg_prims: Slice(Prim),
+    incoming_jumps: u16,
+    arg_slots: u16,
+    clock: u16,
+    height: u16,  // TODO: remove. unused.
+);
+
+RsBitSet :: @tagged(
+    Small: Array(usize, 2),
+    Big: RsVec(usize),
+);
+
+#redirect(Ty(i64, i64), bool) fn eq(a: Prim, b: Prim) bool;
 
 //
 // TODO: less pain
@@ -20,6 +104,7 @@ FEATURE_NEW_BC :: true;
 
 debug_assert :: assert; 
 debug_assert_eq :: assert_eq;
+debug_assert_ne :: assert_ne;
 
 EmitBc :: @struct(
     program: CompilerRs,
@@ -46,7 +131,6 @@ ResultLoc :: @enum(i64) (PushStack, ResAddr, Discard);
 ::enum(ExecStyle);
 
 fn emit_bc(comp: CompilerRs, f: FuncId, when: ExecStyle) Res(FnBody) #compiler = {
-    assert(FEATURE_NEW_BC, "Tried use disabled wip FEATURE_NEW_BC");
     if when == .Aot {|
         // :bake_relocatable_value
         comp.check_for_new_aot_bake_overloads().unwrap(); // TODO: unify error types!
