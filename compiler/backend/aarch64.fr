@@ -1,6 +1,11 @@
 //! I know this is remarkably bad codegen. 
 //! Its only job is to be fast to compile because its used for throw away comptime functions that are often only run once.
 //! #c_call means https://en.wikipedia.org/wiki/Calling_convention#ARM_(A64)
+//
+// TODO: it would be nice to use walk_bc.fr for this to avoid some boring stack stuff, 
+//       but that's geared towards ssa-like irs where you're allowed to freely copy around ssa vars. 
+//       im not sure if its worth reworking that to give you hooks to shuffle between registers and stack slots as needed.  
+//          -- Jul 15
 
 ZERO_DROPPED_REG :: false;
 ZERO_DROPPED_SLOTS :: false;
@@ -60,19 +65,18 @@ BcToAsm :: @struct(
     body: *FnBody,
 );
 
-struct BlockState {
+BlockState :: @struct(
     stack: List(AsmVal),
     free_reg: List(i64),
     open_slots: List(Ty(SpOffset, u16, u16)),
     ssa: List(?AsmVal),
-}
-
+);
 
 fn new(compile: CompilerRs, when: ExecStyle, body: *FnBody) BcToAsm = {
     (
         asm: &mut compile.aarch64,
         program: compile,
-        vars: Default::default(),
+        vars: list(temp()),
         next_slot: SpOffset(0),
         f: FuncId::from_index(0), // TODO: bad
         wip: vec![],
@@ -177,35 +181,40 @@ fn bc_to_asm(self: *EmitAsm, f: FuncId) void = {
     };
     // debug_assert_eq!(self.state.stack.len() as u16, sig.arg_slots);
 
-    debugln!("entry: ({:?})", self.state.stack);
+    //debugln!("entry: ({:?})", self.state.stack);
     self.emit_block(0, false);
 
-    for (inst, false_ip, reg) in self.patch_cbz.drain(..) {
-        let false_ip = self.block_ips[false_ip.0 as usize].unwrap();
+    // TODO: be able to destructure in the lambda args. -- Jul 15
+    for self.patch_cbz { it |
+        (inst, false_ip, reg) := it;
+        false_ip := self.block_ips[false_ip.0 as usize].unwrap();
         offset := self.asm.offset_words(inst, false_ip);
-        debug_assert!(reg < 32);
-        debug_assert_ne!(offset, 0, "!if ice: while(1);");
+        @debug_assert(reg < 32);
+        @debug_assert_ne(offset, 0, "!if ice: while(1);");
         self.asm.patch(inst, cbz(X64, offset, reg));
     }
-    for (from_inst, to_ip) in self.patch_b.drain(0..) {
-        let to_ip = self.block_ips[to_ip.0 as usize].unwrap();
+    for self.patch_b { it |
+        (from_inst, to_ip) := it;
+        to_ip := self.block_ips[to_ip.0 as usize].unwrap();
         dist := self.asm.offset_words(from_inst, to_ip);
-        debug_assert_ne!(dist, 0, "while(1);");
+        @debug_assert_ne(dist, 0, "while(1);");
         self.asm.patch(from_inst, b(dist, 0));
     }
 
     slots := self.next_slot.id; //self.compile.ready[self.f].as_ref().unwrap().stack_slots * 8;
-    assert!(
+    @assert(
         slots < 4096,
-        "not enough bits to refer to all slots ({}/4096 bytes) in {}",
+        "not enough bits to refer to all slots (%/4096 bytes) in %",
         slots,
         self.program.pool.get(self.program[f].name)
     );
-    if slots % 16 != 0 {
-        slots += 16 - (slots % 16); // play by the rules
-    }
+    extra := slots.mod(16);
+    if extra != 0 {|
+        slots += 16 - extra; // play by the rules
+    };
     self.asm.patch(reserve_stack, sub_im(X64, sp, sp, slots as i64, 0));
-    for (fst, snd, thd) in self.release_stack.drain(0..) {
+    for self.release_stack { it |
+        (fst, snd, thd) := it; // TODO: these are sequential so don't bother storing them all. 
         self.asm.patch(fst, add_im(X64, sp, fp, 0, 0)); // Note: normal mov encoding can't use sp
         self.asm.patch(snd, ldp_so(X64, fp, lr, sp, 0)); // get our return address
         self.asm.patch(thd, add_im(X64, sp, sp, 16, 0));
@@ -213,10 +222,10 @@ fn bc_to_asm(self: *EmitAsm, f: FuncId) void = {
 }
 
 fn emit_block(self: *EmitAsm, b: usize, args_not_vstacked: bool) void = {
-    if self.block_ips[b].is_some() {
+    if self.block_ips[b].is_some() {|
         return();
-    }
-    self.block_ips[b] = Some(self.asm.next);
+    };
+    self.block_ips[b] = (Some = self.asm.next);
     f := self.f;
     block := &self.body.blocks[b];
 
@@ -345,7 +354,9 @@ fn emit_inst(self: *EmitAsm, b: usize, inst: Bc, i: usize) bool = {
         }
         Bc::Goto { ip, slots } => {
             block := &self.body.blocks[ip.0 as usize];
-            debug_assert_eq!(slots, block.arg_slots, "goto {ip:?} {}", self.body.log(self.program));
+            
+            // TODO: fix ending with unreachable() :block_arg_count_wrong_unreachable
+            //debug_assert_eq!(slots, block.arg_slots, "goto {ip:?} {}", self.body.log(self.program));
             if block.incoming_jumps == 1 {
                 debug_assert!(self.block_ips[ip.0 as usize].is_none());
                 self.emit_block(ip.0 as usize, false);

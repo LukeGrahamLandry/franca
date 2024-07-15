@@ -68,13 +68,10 @@ pub struct Compile<'a, 'p> {
     currently_inlining: Vec<FuncId>,
     currently_compiling: Vec<FuncId>, // TODO: use this to make recursion work
     pub last_loc: Option<Span>,
-    pub tests: Vec<FuncId>,
-    pub tests_broken: Vec<FuncId>,
     pub aarch64: Jitted,
     pub next_label: usize,
     pub wip_stack: Vec<(Option<FuncId>, ExecStyle)>,
     pending_redirects: Vec<(FuncId, FuncId)>,
-    pub export: Vec<FuncId>,
     pub driver_vtable: (Box<ExportVTable>, *mut ()),
     
     pub already_loaded: HashSet<Ident<'p>>,
@@ -105,7 +102,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             temp_vtable: addr_of!(IMPORT_VTABLE),
             already_loaded: Default::default(),
             driver_vtable: (Default::default(), ptr::null_mut()),
-            export: vec![],
             pending_redirects: vec![],
             wip_stack: vec![],
             debug_trace: vec![],
@@ -116,8 +112,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             program,
             aarch64: Jitted::new(1 << 27), // Its just virtual memory right? I really don't want to ever run out of space and need to change the address.
 
-            tests: vec![],
-            tests_broken: vec![],
             next_label: 0,
         };
         // TODO: HACK: for emit_relocatable_constant
@@ -1222,25 +1216,8 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
         }
         let func = &mut self.program[id];
-        if func.has_tag(Flag::Test) {
-            // TODO: probably want referencable_name=false? but then you couldn't call them from cli so meh.
-            self.tests.push(id);
-        }
-        if func.has_tag(Flag::Test_Broken) {
-            // TODO: probably want referencable_name=false? but then you couldn't call them from cli so meh.
-            self.tests_broken.push(id);
-        }
-
         if func.has_tag(Flag::Fold) {
             func.set_flag(TryConstantFold, true);
-        }
-        if func.has_tag(Flag::Export) {
-            assert!(!func.any_const_args(), "functions with const arguments cannot be exported.");
-            assert!(
-                !func.get_flag(FnFlag::AllowRtCapture),
-                "functions with runtime captures cannot be exported (declare with '=' instead of '=>')."
-            );
-            self.export.push(id);
         }
 
         Ok(out)
@@ -1532,7 +1509,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                     expr.done = true;
                     // Note: not using deref_one, because don't want to just remove the ref, we want raw variable expressions to not exist. kinda HACK
                     *expr = FatExpr::synthetic_ty(Expr::SuffixMacro(Flag::Deref.ident(), Box::new(mem::take(expr))), loc, ty);
-                    self.compile_expr(expr, requested)?
+                    expr.done = true;
+                    ty
                 } else if let Some((value, ty)) = self.find_const(*var, requested)? {
                     expr.set(value.clone(), ty);
                     expr.done = true;
@@ -3267,7 +3245,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             
             
             // this fixes functions with all const args the reduce to just a value emitting useless calls to like get the number 65 or whatever if you do ascii("A"). 
-            if !deny_inline && arg_expr.is_raw_unit() && !self.program.get_info(res).contains_pointers {
+            if !deny_inline && arg_expr.is_raw_unit() {
                 if let FuncImpl::Normal(FatExpr {
                     expr: Expr::Value { value, .. }, ty: prev_ty, ..
                 }) = &self.program[fid].body {
@@ -3565,7 +3543,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             // TODO: check if they tried to give you something from the stack
 
             let ir = self.eval_str(asm)?;
-            self.program.inline_llvm_ir.push(f);
             Ok(FuncImpl::LlvmIr(ir))
         } else if self.program[f].has_tag(Flag::C) {
             let ir = self.eval_str(asm)?;

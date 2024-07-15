@@ -1,0 +1,252 @@
+// unused
+// TODO: have first.fr pass vtable to #test if non-void argument. 
+
+ResultType :: @tagged(
+    Specific: Type,
+    Returning: Type,
+    None
+);
+
+fn compile_stmt(self: *SelfHosted, stmt: *FatStmt) Maybe(void) = {
+    self.last_loc = stmt.loc;
+    @match(stmt.stmt&) {
+        fn Noop() => return(.Ok);
+        fn Eval(expr) => return(self.compile_expr(expr, .None));
+        fn DeclFunc(func) => return(@err("TODO: compile DeclFunc stmt"));
+        fn DeclVar(f) => {
+            assert(f.name.kind != .Const, "hit unhoisted constant");
+            return(@err("TODO: compile DeclVar stmt"))
+        }
+        fn DeclVarPattern(f) => return(@err("TODO: compile DeclVarPattern stmt"));
+        fn DeclNamed(f) => return(@err("TODO: compile DeclNamed stmt"));
+        fn Set(f) => return(@err("TODO: compile Set stmt"));
+        fn ExpandParsedStmts(f) => return(@err("TODO: compile ExpandParsedStmts stmt"));
+    };
+    unreachable_hack(Maybe(void))
+}
+
+fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(void) = {
+    self.last_loc = expr.loc;
+    if(expr.done) {|
+        assert(expr.ty != UnknownType, "done but unknown type");
+        return(.Ok);
+    };
+    @match(expr.expr&) {
+        fn Poison() => return(@err("Poison expression"));
+        fn Value(f) => {
+            if(expr.ty == UnknownType, => return(@err("ICE: Value expression must have known type")));
+            if !f.coerced {|
+                @if_let(requested) fn Specific(ty) => {
+                    if expr.ty != ty {|
+                        panic("TODO: coerce const");
+                    };
+                };
+            };
+            expr.done = true;
+            return(.Ok)
+        }
+        fn WipFunc() => return(@err("TODO: WipFunc expression"));
+        fn Call() => return(@err("TODO: Call expression"));
+        fn Block(f) => {
+            if !f.hoisted_constants {|
+                @check(self.hoist_constants(f.body.items())) return;
+                f.hoisted_constants = true;
+            };
+            each f.body { stmt | 
+                @check(self.compile_stmt(stmt)) return;
+            };
+            @check(self.compile_expr(f.result, requested)) return;
+            return(.Ok)
+        }
+        fn Tuple(parts) => {
+            each parts { expr | 
+                if !expr.done {|
+                    req_part := panic("TODO: pass through tuple_types if known requested");
+                    @check(self.compile_expr(expr, req_part)) return;
+                };
+            };
+            if expr.ty == UnknownType {|
+                expr.ty = panic("TODO: save tuple type");
+            };
+            return(.Ok)
+        }
+        fn Closure() => return(@err("TODO: expression"));
+        fn AddToOverloadSet() => return(@err("TODO: expression"));
+        fn SuffixMacro() => return(@err("TODO: expression"));
+        fn FieldAccess() => return(@err("TODO: expression"));
+        fn StructLiteralP() => return(@err("TODO: expression"));
+        fn PrefixMacro() => return(@err("TODO: expression"));
+        fn GetVar(var) => return(self.compile_get_var(expr, requested));
+        fn GetNamed() => return(@err("TODO: expression"));
+        fn String() => {
+            // This is only different from a Value node because the 'Str' is not a builtin so the parser is unable to create it.
+            // TODO: this is inconsistant. either turn this into a SuffixMacro or turn all the SuffixMacros into real ast nodes.
+            //       actually this could just be a @macro cause it only looks down the tree.  -- Jul 15
+            byte := self.get_or_create_type(u8);
+            expr.ty = @check(self.create_slice_type(byte)) return;
+            panic("TODO: self.set_literal(expr, self.pool.get(i)");
+            expr.done = true;
+            return(.Ok)
+        }
+        fn PtrOffset(_) => return(@err("ICE: PtrOffset should be done=true"));
+        fn GetParsed() => return(@err("ICE: GetParsed is handled by scope.fr"));
+        fn Cast() => return(@err("TODO: expression"));
+    };
+    unreachable();
+    .Ok
+}
+
+// - you want macros to be able to create new constant declarations in macro expansions and const arg functions.
+// - for now constants are always stored globally and restricted visibility is just handled by scope resolution.
+// So we delay taking constants until you try to compile the expression that contains them.
+// Also, to be order independent, we don't actually evaluate or type-check them yet, that's done lazily the first time they're referenced. 
+// TODO: the old compiler did #when here, but I think its better to delay until we know we care and can hope more stuff is ready. 
+fn hoist_constants(self: *SelfHosted, body: []FatStmt) Maybe(void) = {
+    each body { stmt |
+        @match(stmt.stmt&) {
+            fn DeclFunc(f) => {
+                panic("TODO: hoist_constants DeclFunc");
+            }
+            fn DeclVar(f) => if f.name.kind == .Const {|
+                self.scopes.put_constant(f.name, f.value, f.ty);
+                stmt.stmt = .Noop;
+            };
+            @default => ();
+        }
+    };
+    .Ok
+}
+
+::if(Maybe(void));
+::if_opt(Type, Maybe(void));
+fn compile_get_var(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(void) = {
+    @debug_assert(expr.expr&.is(.GetVar));
+    var := expr.expr.GetVar;
+    if var.kind == .Const {|
+        @err("TODO: compile const var ref")
+    } else {|
+        if self.scopes.get_var_type(var) { ty | 
+            expr.ty = ty;
+            expr.done = true;
+            // Reading a variable. Convert it to `var&[]` so compiling it checks for smaller loads (u8, etc).
+            ptr_ty := self.ptr_type(ty);
+            expr[] = synthetic_ty((SuffixMacro = (Flag.addr.ident(), self.box(expr[]))), expr.loc, ptr_ty);
+            expr.done = true;
+            // Note: not using deref_one, because don't want to just remove the ref, we want raw variable expressions to not exist. kinda HACK
+            expr[] = synthetic_ty((SuffixMacro = (Flag.deref.ident(), self.box(expr[]))), expr.loc, ty);
+            expr.done = true;
+            .Ok
+        } else {|
+            // For now runtime vars are always declared in order so we always know thier type.
+            // This might change to allow peeking into return-ed expressions when infering closure return type? -- Jul 15
+            @err("Unknown type for runtime var %", self.pool.get(var.name))
+        }
+    }
+}
+
+fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: TypeId) Maybe(Values) = {
+    panic("TODO: immediate_eval_expr")
+}
+
+fn check_quick_eval(self: *SelfHosted, expr: *FatExpr, ret_ty: TypeId) Maybe(?Values) = {
+    @match(expr.expr&) {
+        fn Value(f) => return(Ok = f.bytes&.clone(self.get_alloc()));
+    }
+}
+
+fn intern_type(self: *SelfHosted, info: TypeInfo) Type = {
+    panic("TODO: intern_type")
+}
+
+fn ptr_type(self: *SelfHosted, inner: Type) Type = {
+    self.intern_type(Ptr = inner)
+}
+
+fn create_slice_type(self: *SelfHosted, inner: Type) Maybe(Type) = {
+    panic("TODO: create_slice_type")
+}
+
+// This converts a const type in the compiler's binary to a type id in the target program.
+// It can only be done for some core interned types (not unique ones like structs and enums).
+fn get_or_create_type(self: *SelfHosted, $T: Type) Type = {
+    info :: T.get_type_info_ref();
+    @inline_match(info) {
+        fn Int(_) => self.intern_type(info[]);
+        // Some types have hardcoded ids. 
+        // they can also be used directly but doing it through this function might make it less painful to decouple them later.
+        fn Bool() => bool;
+        fn void() => void;
+        fn VoidPtr() => rawptr;
+        @default => panic("Tried to convert unsupported type from const to runtime");
+    }
+}
+
+fn synthetic_ty(expr: Expr, loc: Span, ty: Type) FatExpr = {
+    (expr = expr, loc = loc, ty = ty, done = false)
+}
+
+fn clone(self: *Values, a: Alloc) Values = {
+    @match(self) {
+        fn Small(_) => self[];
+        fn Big(f) => (Big = f.items().clone(a).rs());
+    }
+}
+
+fn err(arg: FatExpr) FatExpr #macro = {
+    if !arg.expr&.is(.Tuple) {|
+        return(@{ (Err = make_error(@[arg])) });
+    };
+    @{
+        out: List(u8) = list(temp());
+        @[ format_into('out&', arg.expr.Tuple.items(), arg.loc) ];
+        (Err = make_error(out.items()))
+    }
+}
+
+fn make_error(msg: Str) *ParseErr = {
+    mem := libc_allocator.alloc(ParseErr, 1);
+    mem.ptr[] = (span = Span.zeroed(), msg = msg);
+    mem.ptr
+}
+
+:: CBox(FatExpr);
+fn CBox($T: Type) void = {
+    fn box(self: *SelfHosted, e: T) *T = {
+        out := self.get_alloc().alloc(T, 1);
+        out.ptr[] = e;
+        out.ptr
+    }
+}
+
+fn check(v: FatExpr, ret: FatExpr) FatExpr #macro = @{
+    v := @[v];
+    if(!v&.is(.Ok)) {|
+        if(v&.is(.Err), => { @[ret](Err = v.Err); }, => { @[ret](Suspend = v.Suspend); });
+    };
+    v.Ok
+}
+
+fn parse_for_test(c: *SelfHosted, src: Str) FatExpr = {
+    span := c.codemap.add_file("name", src);
+    id := push_parse(c.parser, src, span);
+    c.parser.finish_pending(id).unwrap()
+}
+
+// TODO: why does #test try to call uncompiled function???
+fn reach_sema() void = {
+    c := init_self_hosted();
+    e := c.parse_for_test("fn() => { abc :: 123; 456 }");
+    
+    func := e.expr.Closure;
+    s := scope_from_index(0);
+    r := c.resolve_root(func, s);
+    r.unwrap();
+    e := func.body.Normal;
+    
+    res := c.compile_expr(e&, .None);
+    if res&.is(.Err) {|
+        println("bad");
+        println(res.Err.msg);
+        panic(res.Err.msg);
+    };
+}

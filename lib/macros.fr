@@ -629,40 +629,48 @@ fn inline_match(container: FatExpr, target: FatExpr) FatExpr #macro = {
     
     each stmts { stmt |
         continue :: local_return;
+        expand_case_body :: fn(closure: *Func) FatExpr => {
+            index := tag_value(enum_type, closure.name); // they're always sequential
+            (name, ty) := varients.get(index);
+            @ct_assert(name == closure.name, closure.loc, "ICE: bad enum index");
+            if index != tag_val {|
+                continue();
+            };
+            
+            if(is_ptr){|
+                p: TypeInfo = (Ptr = ty);
+                ty = intern_type(p); // TODO: should work to pass @as(TypeInfo) (Ptr = ty) directly
+            };
+    
+            // If they didn't say the argument type, we can fill it in based on the varient name. 
+            // If they don't put an argument, just ignore the value. Have to set the type because it defaults to void. 
+            bindings := closure.arg.bindings.items();
+            if(bindings.len.eq(1)){|
+                first := bindings[0]&;
+                infer := first.ty&.is(.Infer);
+                no_name := first.name&.is(.None); 
+                if  infer.or(no_name) {|
+                    first.ty = (Finished = ty);
+                };
+            };
+            // TODO: allow non-ptr
+            case_access := '@[container][].___';
+            case_access.expr.FieldAccess.name = name;  // (3)
+            if(is_ptr){|
+                case_access = @{ @[case_access]& };
+            };
+            callable: FatExpr = (expr = (Closure = closure), loc = closure.loc, ty = UnknownType, done = false); 
+            @{ @[callable](@[case_access]) }
+        };
+        
         @match(stmt.stmt&) {
-            (fn Eval(handler_body) => {
+            fn DeclFunc(f) => {
+                return(expand_case_body(f[]));
+            }
+            fn Eval(handler_body) => {
                 @match(handler_body.expr&) {
                     (fn Closure(closure) => {
-                        index := tag_value(enum_type, closure.name); // they're always sequential
-                        (name, ty) := varients.get(index);
-                        @ct_assert(name == closure.name, handler_body.loc, "ICE: bad enum index");
-                        if index != tag_val {|
-                            continue();
-                        };
-                        
-                        if(is_ptr){|
-                            p: TypeInfo = (Ptr = ty);
-                            ty = intern_type(p); // TODO: should work to pass @as(TypeInfo) (Ptr = ty) directly
-                        };
-                
-                        // If they didn't say the argument type, we can fill it in based on the varient name. 
-                        // If they don't put an argument, just ignore the value. Have to set the type because it defaults to void. 
-                        bindings := closure.arg.bindings.items();
-                        if(bindings.len.eq(1)){|
-                            first := bindings[0]&;
-                            infer := first.ty&.is(.Infer);
-                            no_name := first.name&.is(.None); 
-                            if  infer.or(no_name) {|
-                                first.ty = (Finished = ty);
-                            };
-                        };
-                        // TODO: allow non-ptr
-                        case_access := '@[container][].___';
-                        case_access.expr.FieldAccess.name = name;  // (3)
-                        if(is_ptr){|
-                            case_access = @{ @[case_access]& };
-                        };
-                        return(@{ @[handler_body[]](@[case_access]) });
+                        return(expand_case_body(closure[]));
                     });
                     (fn PrefixMacro(branch) => {
                         macro := branch.handler;
@@ -675,7 +683,7 @@ fn inline_match(container: FatExpr, target: FatExpr) FatExpr #macro = {
                     });
                     @default => compile_error("expected @default", handler_body.loc);
                 };
-            });
+            }
             @default => (); // TODO: warn
         };
     };

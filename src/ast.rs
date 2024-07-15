@@ -776,8 +776,6 @@ pub struct Program<'p> {
     pub overload_sets: Vec<OverloadSet<'p>>, // TODO: use this instead of lookup_unique_func
     pub ffi_types: Map<u128, TypeId>,
     pub log_type_rec: RefCell<Vec<TypeId>>,
-    pub comptime_arch: TargetArch,
-    pub inline_llvm_ir: Vec<FuncId>,
     // After binding const args to a function, you get a new function with fewer arguments.
     pub const_bound_memo: Map<(FuncId, Values), FuncId>,
     pub types_extra: RefCell<Vec<Option<TypeMeta>>>,
@@ -899,8 +897,6 @@ impl<'p> Program<'p> {
             overload_sets: Default::default(),
             ffi_types: Default::default(),
             log_type_rec: RefCell::new(vec![]),
-            comptime_arch,
-            inline_llvm_ir: vec![],
             type_lookup: Default::default(),
             const_bound_memo: Default::default(),
             types_extra: Default::default(),
