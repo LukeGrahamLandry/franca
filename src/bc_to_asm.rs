@@ -79,7 +79,6 @@ pub(crate) fn emit_aarch64<'p>(compile: &mut Compile<'_, 'p>, f: FuncId, when: E
     compile.aarch64.extend_blanks(f);
     let mut a = BcToAsm::new(compile, when, body);
     a.compile(f)?;
-    assert!(a.wip.is_empty());
     Ok(())
 }
 
@@ -90,7 +89,6 @@ struct BcToAsm<'z, 'p> {
     vars: Vec<Option<SpOffset>>,
     next_slot: SpOffset,
     f: FuncId,
-    wip: Vec<FuncId>, // make recursion work
     when: ExecStyle,
     patch_cbz: Vec<(*const u8, BbId, i64)>,
     patch_b: Vec<(*const u8, BbId)>,
@@ -108,7 +106,6 @@ struct BlockState {
     stack: Vec<Val>,
     free_reg: Vec<i64>,
     open_slots: Vec<(SpOffset, u16, u16)>,
-    ssa: Vec<Option<Val>>,
 }
 
 impl<'z, 'p> BcToAsm<'z, 'p> {
@@ -120,7 +117,6 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             vars: Default::default(),
             next_slot: SpOffset(0),
             f: FuncId::from_index(0), // TODO: bad
-            wip: vec![],
             when,
             patch_cbz: vec![], // (patch_idx, jump_idx, register)
             patch_b: vec![],
@@ -136,11 +132,9 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
 
     // Note: you can only use Self once because this doesn't reset fields.
     fn compile(&mut self, f: FuncId) -> Res<'p, ()> {
-        if self.asm.get_fn(f).is_some() || self.wip.contains(&f) {
+        if self.asm.get_fn(f).is_some() {
             return Ok(());
         }
-
-        self.wip.push(f);
 
         let func = &self.program[f];
         assert!(!matches!(func.body, FuncImpl::JittedAarch64(_) | FuncImpl::ComptimeAddr(_)));
@@ -184,7 +178,6 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             println!("===")
         }
 
-        self.wip.retain(|c| c != &f);
         Ok(())
     }
 
@@ -344,9 +337,6 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             Bc::GetCompCtx => self.state.stack.push(Val::Literal(self.compile_ctx_ptr as i64)),
 
             Bc::LastUse { id } => {
-                if self.body.is_ssa_var.get(id as usize) {
-                    return Ok(false);
-                }
                 // TODO: I this doesn't work because if blocks are depth first now, not in order,
                 //       so the var can be done after they rejoin and then the other branch thinks that slot is free
                 //       and puts something else in it. -- May 6
@@ -374,7 +364,6 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                     assert!(f.as_index() < 4096);
                     let reg = self.get_free_reg();
                     self.asm.extend_blanks(f);
-                    self.asm.pending_indirect.push(f);
                     self.load_imm(reg, self.asm.dispatch.as_ptr() as u64); // NOTE: this means you can't ever resize
                     self.asm.push(ldr_uo(MEM_64, reg, reg, f.as_index() as i64));
                     self.state.stack.push(Val::Increment { reg, offset_bytes: 0 })
@@ -1035,7 +1024,6 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         // But for now, I just spend a register on having a dispatch table and do an indirect call through that.
         // TODO: have a mapping. funcs take up slots even if never indirect called.
         // assert!(f.as_index() < 4096, "{f:?}");
-        self.asm.pending_indirect.push(f);
         // you don't really need to do this but i dont trust it cause im not following the calling convention
         self.load_imm(x16, self.asm.dispatch.as_ptr() as u64); // NOTE: this means you can't ever resize
         if f.as_index() < 4096 {
@@ -1135,7 +1123,6 @@ pub mod jit {
         old: *mut u8,
         pub low: usize,
         pub high: usize,
-        pub pending_indirect: Vec<FuncId>,
     }
 
     // TODO: https://community.arm.com/arm-community-blogs/b/architectures-and-processors-blog/posts/caches-and-self-modifying-code
@@ -1161,7 +1148,6 @@ pub mod jit {
                 mmapped,
                 dispatch: Vec::with_capacity(99999), // Dont ever resize!
                 ranges: vec![],
-                pending_indirect: vec![],
             }
         }
 

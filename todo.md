@@ -3,14 +3,23 @@
 - seperate fn stride_of and fn size_of so you can avoid extra padding in nested structs.
   then need to allow different reprs.
 - sign extend
-- clear temp alloc when emitting for AOT
-- have an overload set that types can add to when they have special constant emit rules instead of the current hardcoded thing.
 - bake_relocatable_value overloads are not compiled lazily. all are done when compiling for AOT even if the type isn't needed.
 - test that struct padding is zeroed before emitting comptime data and before being used as a key to cache const args instantiations.
 - bake_relocatable_value for List, Alloc, Fd.
 - deduplicate constants (strings especially), its just annoying cause i don't have const pointers.
   can do it by address at least, cause if it was a string literal in the pool, will be the same.
-- fix temp alloc
+- i think generic with multiple const args aren't typechecked (you can pass a pointer to the enum functions that should expect a tag).
+  write a test for that, need to have better support for testing that a certain error happens.
+
+## data structure changes
+
+wait until fully self hosted so its less painful because don't have to keep both sides in sync.
+(when compiling the compiler) need to seperate the ast types used for the comptime interfacing with the active compiler and the ones used internally by the new compiler.
+
+- stop storing annotations on FatStmt because only Func uses them. just put them there in the parser instead of waiting for scope.
+- 16 byte RsVec because address space is really 48 bits probable so 48 bit ptr and len and spread cap accross the upper 16 of each.
+- use null pointer as niche for `?*T`
+- make .None tag be 0 so zero initilized is a sane default (just need to swap the order in the declaration).
 
 ## regressions
 
@@ -21,7 +30,6 @@
 
 - no way to say trait bounds on generics (it just tries to compile like c++ templates). at least have fn require_overload(Ident, Type, Type);
 - need to explicitly instantiate generics
-- sometimes it can't show the codemap. should never use garbage_loc.
 - can't write a macro that expands to statements
 - errors don't show multiple locations (like conflicting overloads should show the problem)
 
@@ -29,6 +37,8 @@
 
 ## Feature Ideas
 
+- should make a derivable (fn arbitrary(rng) T) for testing hashes or stuff on psudorandom valid values of a type.
+  like eq and hash would be nice to test like that. also ffi with c.
 - loops piss me off, why isn't it just expressed as tail recursion.
 - https://llvm.org/docs/CoverageMappingFormat.html https://llvm.org/docs/LangRef.html#llvm-instrprof-increment-intrinsic
 - good error message for accidently using ' as character literal.
@@ -57,12 +67,6 @@
   - if you had all the tags unique (use TypeId) instead of starting at 0, you could make it free to convert to a super set.
     that probably gives up u8 or niche tags but even u16 is enough that its fine.
 - user defined operators so you can pick what meaning of &T makes sense for you (per module)
-- some sort of prefix call syntax because brackets are annoying.
-  - maybe Rc(RefCell(T)) === Rc$ RefCell$ T
-  - tho I do already have T.RefCell().Rc() but that seems backwards from how I want to think about it but I'm not sure why.
-    "an Rc containing a RefCell containing a T" vs "a T in a RefCell in an Rc"
-    Ptr$T "a pointer to a T" vs T.Ptr() "a T that is behind a pointer"
-  - Rc$ T.RefCell() === Rc(RefCell(T))
 - function that take a slice of args called like variadic functions.
 - let macros code generate a string and compile that
 - super cold calling convention for panics with constant args where you use return address to lookup arg values (i feel like i can do better than rustc which is really strange)
@@ -72,10 +76,6 @@
 - command line argument parser
 - getters and setters so enums and flag sets could be done in the language and still have natural syntax.
 - expose c variadic functions on llvm (because why not)
-- add @rt for freestanding which denies calling @ct fns and can resolve overloads.
-  - tho I suppose you should be able to still call @rt at compile time if no overload conflict? or does that make it pointless?
-  - one of the usecases would be having panic be exit(1) when freestanding but otherwise just hook into the compiler's error mechanism
-    so you don't just want the arch to be what decides.
 - should really have a more extensible way of describing an environment.
   - ie. what arch? do you have the compiler context? what os? do you have libc?
   - the end goal for this would be to expose what imports each module needs and let the comptime resolve differently if you really wanted.

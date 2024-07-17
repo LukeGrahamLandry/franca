@@ -217,7 +217,7 @@ fn match_on_enum(arg: FatExpr, info: TypeInfo, stmts: [] FatStmt) FatExpr = {
                 };
             };
             // TODO: check that the handlers are unique! this just checks that its the right number of them. 
-            @ct_assert(!count.ne(varients.len).and(not(had_default)), arg.loc, "wrong number of @match cases (did you forget to wrap them in brackets?)",);
+            @ct_assert(!count.ne(varients.len).and(not(had_default)), arg.loc, "wrong number of @match cases",);
             @ct_assert(not(had_default).or(count.lt(varients.len)), arg.loc, "@default but too many @match cases");
             body
         }]
@@ -333,48 +333,37 @@ fn switch(arg: FatExpr, handlers: FatExpr) FatExpr = {
     }
 }
 
-// TODO: remove when the below works. -- Jun 1
-#macro #outputs(u32) fn bits(arg: AstExpr) AstExpr = BITS(arg);
-
-// TODO: fix this with new strict casting rules. -- Jun 1
 // TODO: implicit range assertions because we get the bit count from the type of the ints. 
-#macro #outputs(u32)
-fn __bits(arg: AstExpr) AstExpr = {
-    zero := 0;
-    parts := arg.expr.Tuple.items();
-    expr := '@as(u32) 0.trunc()';
+fn bits(arg: FatExpr) FatExpr #macro = {
+    @ct_assert(arg.expr&.is(.Tuple), arg.loc, "Expected @Bits(Tuple...)");
+    parts := arg.expr.Tuple;
+
+    new_args: List(FatExpr) = list(parts.len() * 3, ast_alloc());
+    loc := arg.loc;
     shift := 32;
-    each(parts, fn(part) => {
-        int := get_type_int(part[]);
-        // TODO: fix inference + overloading. 
-        //       you only need this annotation if you include instructions.fr so there's another definition of `fn sub`
-        //       So it doesn't infer through the field lookup but even without that it should notice that
-        //       it can't possibly be the one that takes like 6 arguments. 
-        bc: i64 = int.bit_count;
-        shift = sub(shift, bc);
-        assert(ge(shift, 0), "expected 32 bits. TODO: other sizes.");  // TODO: str(i64) for negative numbers
-        
-        ::if(FatExpr);
-        next := if(int.signed, 
-            => {
-                part_ast := as(i64, part[]);
-                @{ signed_truncate(@[part_ast], @[@literal(i64) int.bit_count]) }
-            },
-            => as(u32, part[])
-        );
-        next := @{ shift_left(@[next], @[@literal(shift)]) };
-        expr = @{ bit_or(@[expr], @[next]) };
-    });
-    
-    // TODO: want to be able to just have a version of assert that does this but there's a weird dependency. 
-    if(shift.ne(0)){|
-        @println("% != 0; expected 32 bits. TODO: other sizes.", shift);
-        //msg := concat(str(shift), " != 0; expected 32 bits. TODO: other sizes.");
-        //msg: Str = msg&.items();
-        //panic(msg);
+    each parts { int |
+        ty := get_type_int(int[]); // TODO: redundant work cause of clone
+
+        shift -= ty.bit_count;
+        @ct_assert(shift >= 0, loc, "expected 32 bits. TODO: other sizes.");
+        int: FatExpr = (expr = (Cast = int), loc = loc, ty = i64, done = false);
+        new_args&.push(int);
+        sh := @literal shift;
+        new_args&.push(sh);
+        // HACK
+        if ty.signed {|
+            ty.bit_count *= -1;
+        };
+        size := @literal ty.bit_count;
+        new_args&.push(size);
     };
-    
-    as(u32, expr)
+
+    if shift != 0 {|
+        compile_error("shift != 0; expected 32 bits. TODO: other sizes.", loc);
+    };
+
+    arg.expr.Tuple = new_args.rs();
+    @{ fold_shift_or(@slice @[arg]) }
 }
 
 /// :blessed: The parser desugars stuff into calls to these functions. 
@@ -526,14 +515,22 @@ fn enum($T: Type) void = {
     fn eq(a: T, b: T) bool #redirect(Ty(i64, i64), bool);
     fn ne(a: T, b: T) bool #redirect(Ty(i64, i64), bool);
     
-    fn ordinal(e: T) i64 #unsafe_noop_cast; // :tag_enums_are_sequential
+    fn ordinal(e: T) i64 = e.raw(); // :tag_enums_are_sequential
     
-    fn raw(e: T) { i := get_type_info(T); i.Enum.raw } #unsafe_noop_cast; 
+    RAW :: { i := get_type_info(T); i.Enum.raw };
+    
+    fn raw(e: T) RAW = {
+        ptr_cast_unchecked(T, RAW, e&)[]
+    }
     
     fn display(self: T, out: *List(u8)) void = {
         // TODO: without the extra force comptime eval, it wrongly thinks calling this function needs compctx.  -- Jul 1
         names :: @run get_enum_names(T); // :tag_enums_are_sequential
         out.push_all(names[self.ordinal()]);
+    }
+    
+    fn display(self: *T, out: *List(u8)) void #inline = {
+        self[].display(out);
     }
     
     fn name(self: T) Symbol = {

@@ -1,31 +1,14 @@
 //! The standard library often provides more ergonomic wrappers of these,
 //! that will also be implemented on platforms that don't have a standard libc (like wasm in the browser). 
 
+// TODO: use my own verions for the ones that are just code not magic platform shit apple wont let me do. 
+fn malloc(size: usize) rawptr #libc;
+fn free(ptr: rawptr) void #libc;
+// easy to remove but I wonder if some c compilers bless the real one more than they would mine? 
+// should also do cool simd stuff. 
+fn memcpy(dest: rawptr, src: rawptr, len: i64) void #libc; 
+
 Fd :: @struct(fd: i32); // fd is non-negative
-// TODO: be able to mark #must_use and have the driver program check if you don't unwrap them. 
-FdResult :: @struct(fd: i32); // fd is negative on error
-fn unwrap(self: FdResult) Fd = {
-    if(self.fd.lt(0.intcast()), => panic("Fd Error"));
-    (fd = self.fd)
-}
-i64Result :: @struct(value: i64);
-fn unwrap(self: i64Result) i64 = {
-    if(self.value.lt(0), => panic("Error"));
-    self.value
-}
-voidResult :: @struct(value: i64);
-fn unwrap(self: voidResult) void = {
-    if(self.value.ne(0), => panic("Error"));
-}
-fn is_ok(self: voidResult) bool = self.value.eq(0);
-
-CStrResult :: @struct(value: CStr);
-fn unwrap(self: CStrResult) CStr = {
-    if(!self.is_ok(), => panic("Error"));
-    self.value
-}
-fn is_ok(self: CStrResult) bool = !self.value.ptr.is_null();
-
 fn open(null_terminated_path: CStr, flags: i64) FdResult #libc;
 fn read(fd: Fd, buf: *u8, size: i64) i64Result #libc;
 fn write(fd: Fd, buf: *u8, size: i64) i64Result #libc;
@@ -47,30 +30,23 @@ fn dlopen(name: CStr, flag: DlFlag) DlHandle #libc;
 fn dlsym(lib: DlHandle, name: CStr) rawptr #libc;
 fn dlclose(lib: DlHandle) voidResult #libc;
 
-fn malloc(size: usize) rawptr #libc;
-fn free(ptr: rawptr) void #libc;
 fn mmap(addr: rawptr, len: i64, prot: i64, flags: i64, fd: Fd, offset: i64) rawptr #libc;
 fn munmap(addr: rawptr, len: i64) voidResult #libc;
 fn mprotect(addr: rawptr, len: i64, prot: i64) voidResult #libc;
 
 fn exit(status: i64) Never #libc;
 fn abort() Never #libc;
+// This is probably shittier than something like execv that doesn't force you to concat the strings and deal with spaces
 fn system(null_terminated_cmd: CStr) i64 #libc;
-fn rand() i64 #libc;
 fn usleep(micro_seconds: u32) void #libc;
 fn execv(pathname: CStr, null_terminated_argv: *CStr) i32 #libc;
 fn fork() i32 #libc;
 /// wait for a child to stop. the return value is its pid. 
-fn wait(status: *i32) i32 #libc; 
+fn wait(status: *i32) i32 #libc;
 fn waitpid(pid: i32, status: *i32, options: i32) i32 #libc; 
 fn pipe(pipefd: *Array(Fd, 2)) voidResult #libc;
 fn dup2(oldfd: Fd, newfd: Fd) voidResult #libc;
 fn chdir(path: CStr) voidResult #libc;
- 
-// The c backend emits calls to this for large var assignments. 
-// TODO: This one offends me because its not doing os magic, I could write one myself. 
-//       but I wonder if some c compilers bless the real one more than they would mine? 
-fn memcpy(dest: rawptr, src: rawptr, len: i64) void #libc;
 
 TimeSpec :: @struct(seconds: i64, nanoseconds: i64);
 fn clock_gettime(clock_id: i64, time_spec: *TimeSpec) void #libc;
@@ -121,3 +97,30 @@ DirEnt :: @struct(
     d_type: DirEntType, 
     d_name: Array(u8, PATH_NAME_MAX)
 );
+
+// TODO: be able to mark #must_use and have the driver program check if you don't unwrap them. 
+// TODO: should the errors check errno and save the result for you?
+//       but then you'd have to call wrappers instead of the real libc functions.
+
+FdResult :: @struct(fd: i32); // fd is negative on error
+fn unwrap(self: FdResult) Fd = {
+    if(self.fd.lt(0.intcast()), => panic("Fd Error"));
+    (fd = self.fd)
+}
+i64Result :: @struct(value: i64);
+fn unwrap(self: i64Result) i64 = {
+    if(self.value.lt(0), => panic("Error"));
+    self.value
+}
+voidResult :: @struct(value: i64);
+fn unwrap(self: voidResult) void = {
+    if(self.value.ne(0), => panic("Error"));
+}
+fn is_ok(self: voidResult) bool = self.value.eq(0);
+
+CStrResult :: @struct(value: CStr);
+fn unwrap(self: CStrResult) CStr = {
+    if(!self.is_ok(), => panic("Error"));
+    self.value
+}
+fn is_ok(self: CStrResult) bool = !self.value.ptr.is_null();

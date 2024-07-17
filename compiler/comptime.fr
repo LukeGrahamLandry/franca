@@ -155,7 +155,7 @@ fn fill_export_ffi(out: *List(u8)) void = {
     // Generated for @BITS to bootstrap encoding for inline asm.
     @fmt(out, "fn __shift_or_slice(ints: Slice(i64)) u32 #no_tail #fold #comptime_addr(%);\n", shift_or_slice);
     shift_or_slice: rawptr : shift_or_slice_;
-    shift_or_slice_: @Fn(i: []i64) i64 : fold_shift_or; // TODO: hack because @as doesn't coerce_const i guess? -- Jul 13
+    shift_or_slice_: @Fn(i: []i64) u32 : fold_shift_or; // TODO: hack because @as doesn't coerce_const i guess? -- Jul 13
     
     
     @fmt(out, "fn number_of_functions() i64 #ct #comptime_addr(%);\n", num_f);
@@ -163,8 +163,6 @@ fn fill_export_ffi(out: *List(u8)) void = {
         c.functions.len
     };
 }
-
-MAX_u32 :: 0xFFFFFFFF;
 
 //////////////////////////////////////////////////////////////////////////////
 // these are just stupid helpers to deal with the awquard multiple compiler types for calling into the rust code. 
@@ -181,6 +179,9 @@ fn slot_count(c: CompilerRs, ty: Type) u16 = {
     info := c.get_info(ty);
     info.size_slots
 }
+
+//////////////////////////////////////////////////////////////////
+// TODO: should these go somewhere else? they used to be in ast.rs. 
 
 fn raw_type(c: CompilerRs, ty: Type) Type = {
     loop {|
@@ -206,11 +207,6 @@ fn unptr_ty(c: CompilerRs, ty: Type) ?Type = {
     }
 }
 
-
-
-///////////////////
-// TODO: should these go somewhere else? they used to be in ast.rs
-
 fn finished_ty(self: *Func) ?FnType = {
     if self.finished_arg { arg |
         if self.finished_ret { ret |
@@ -220,3 +216,17 @@ fn finished_ty(self: *Func) ?FnType = {
     .None
 }
 
+fn jitted_aarch64(self: *FuncImpl) ?[]u32 = {
+    @match(self) {
+        fn JittedAarch64(code) => (Some = code.items());
+        fn Merged(parts) => {
+            each parts { p |
+                @if_let(p) fn JittedAarch64(code) => {
+                    return(Some = code.items());
+                };
+            };
+            .None
+        }
+        @default => .None;
+    }
+}

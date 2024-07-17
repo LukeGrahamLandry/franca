@@ -28,6 +28,7 @@ arena_vtable :: @static(AllocVTable);
     arena_vtable[] = (alloc = arena_alloc, free = arena_free);
     
     // Don't try to printf debug in here...
+    // TODO: make this less derranged. 
     arena_alloc :: fn(raw_self: rawptr, size: i64, log_align: u8) rawptr = {
         self := ArenaAlloc.ptr_from_raw(raw_self);
         
@@ -75,14 +76,24 @@ arena_vtable :: @static(AllocVTable);
 };
 
 ArenaMarker :: @struct(chunk: *ArenaHeader, start: i64);
-fn mark(self: *ArenaAlloc) ArenaMarker = (chunk = self.chunk, start = self.start);
+// TODO: allow taking a mark when chunk is None (before first allocation), even tho thats dumb.  :panic
+fn mark(self: *ArenaAlloc) ArenaMarker = (chunk = self.chunk.unwrap(), start = self.start);
 
 // remember, you can't do this if you acceppted an output allocator as a parameter because they might have passed you the temp allocator. 
 // # Safety: This invalidates any allocations in self before the corresponding call to mark. 
 // Memory is NOT returned to the backing allocator. 
-//fn reset_retaining_capacity(self: *ArenaAlloc, mark: ArenaMarker) void = {
-//    todo();
-//}
+// TODO: safety check mode that writes over with garbage. 
+fn reset_retaining_capacity(self: *ArenaAlloc, mark: ArenaMarker) void = {
+    goal := ArenaHeader.int_from_ptr(mark.chunk);
+    if self.chunk { chunk |
+        while(=> chunk.prev.is_some() && @as(bool) { a := ArenaHeader.int_from_ptr(chunk); a != goal } ) {|
+            chunk = chunk.prev.unwrap();
+        };
+        self.start = mark.start;
+        self.end = chunk.size;
+        self.chunk = (Some = chunk);
+    };
+}
 
 // # Safety: This invalidates all allocations in self!
 // Memory is NOT returned to the backing allocator. 

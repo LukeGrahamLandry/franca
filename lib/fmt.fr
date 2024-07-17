@@ -11,7 +11,6 @@ fn println(msg: Str) void = {
 }
 
 fn print(msg: Str) void = {
-    STD_OUT: Fd : (fd = 1.intcast());
     written := write(STD_OUT, msg.ptr, @as(usize) msg.len);
     // TODO: confusing dependency
     //assert_eq(msg.len, written.unwrap());
@@ -27,7 +26,6 @@ fn eprintln(msg: Str) void = {
 }
 
 fn eprint(msg: Str) void = {
-    STD_ERR: Fd : (fd = 2.intcast());
     written := write(STD_ERR, msg.ptr, @as(usize) msg.len);
     // TODO: confusing dependency
     //assert_eq(msg.len, written.unwrap());
@@ -190,7 +188,6 @@ fn panic(arg: AstExpr) AstExpr = @{
     panic(out&.items())
 };
 
-// TODO: use fn display to implement fn str instead of fn str allocating. rn this leaks. 
 fn display(i: i64, s: *List(u8)) void = {
     if(i.lt(0)) {|
         push(s, "-".ascii());
@@ -463,10 +460,9 @@ fn display(self: rawptr, out: *List(u8)) void =
 fn DeriveFmt($T: Type) void = {
     fn display(self: *T, out: *List(u8)) void = {
         @inline_match(@run T.get_type_info_ref()) {
-            // TODO: update inline_match to not need brackets! super confusing that its different. 
             // TODO: have it put the $ there for you. currently even if you don't use the var it gets added as a runtime needed const and emitted. 
             //       which is extra bad because my bake thing can't handle everything in a type info yet! -- Jul 6
-            (fn Struct($_) => {
+            fn Struct($_) => {
                 out.push_all("(");
                 prefix := "";
                 inline_for T.get_fields() { $f | 
@@ -477,7 +473,27 @@ fn DeriveFmt($T: Type) void = {
                     prefix = ", ";
                 };
                 out.push_all(")");
-            });
+            }
+            fn Tagged($t) => {
+                out.push_all("(");
+                self.tag().display(out);
+                out.push_all(" = ");
+                
+                i := 0; // TODO : inline_enumerate
+                tag_value := self.tag().ordinal();
+                // TODO: @inline_switch.
+                inline_for T.get_variants() { $f | 
+                    if i == tag_value {|
+                        inner := T.get_variant_ptr_for(self, f);
+                        inner.display(out);
+                        out.push_all(")");
+                        return();
+                    };
+                    i += 1;
+                };
+                // TODO: @safety unreachable_unchecked so you don't bloat the code. i don't trust that llvm can notice my tag preconditions. 
+                panic("Tried to print @tagged with invalid tag value. Uninitilized memory?");
+            }
             @default => panic("Unsupported type for DeriveFmt");
         }
     }

@@ -637,7 +637,7 @@ extern "C-unwind" fn symbol_to_cstr<'p>(program: &mut &mut Program<'p>, symbol: 
 }
 
 extern "C-unwind" fn log_type(p: &mut &mut Program, a: TypeId) {
-    println!("{a:?} = {}", p.log_type(a));
+    println!("{a:?} = {} = {:?}", p.log_type(a), p[a]);
 }
 
 extern "C-unwind" fn log_ast<'p>(p: &mut Compile<'_, 'p>, a: FatExpr<'p>) {

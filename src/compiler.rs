@@ -6,7 +6,6 @@
 
 use crate::self_hosted::{self, created_jit_fn_ptr_value, resolve_body, resolve_sign, save_bake_callback, show_error_line, Span};
 use core::slice;
-use std::collections::HashSet;
 use std::ffi::CString;
 use std::fmt::Write;
 use std::hash::Hash;
@@ -64,7 +63,6 @@ pub struct Compile<'a, 'p> {
     temp_vtable: *const ImportVTable,
     // Since there's a kinda confusing recursive structure for interpreting a program, it feels useful to keep track of where you are.
     pub debug_trace: Vec<DebugState<'p>>,
-    pub anon_fn_counter: usize,
     currently_inlining: Vec<FuncId>,
     currently_compiling: Vec<FuncId>, // TODO: use this to make recursion work
     pub last_loc: Option<Span>,
@@ -73,8 +71,6 @@ pub struct Compile<'a, 'p> {
     pub wip_stack: Vec<(Option<FuncId>, ExecStyle)>,
     pending_redirects: Vec<(FuncId, FuncId)>,
     pub driver_vtable: (Box<ExportVTable>, *mut ()),
-    
-    pub already_loaded: HashSet<Ident<'p>>,
 }
 
 // TODO: track location of macro expansions and have flag to dump them when printing error messages error messages.
@@ -100,12 +96,10 @@ impl<'a, 'p> Compile<'a, 'p> {
     pub(crate) fn new(program: &'a mut Program<'p>) -> Self {
         let c = Self {
             temp_vtable: addr_of!(IMPORT_VTABLE),
-            already_loaded: Default::default(),
             driver_vtable: (Default::default(), ptr::null_mut()),
             pending_redirects: vec![],
             wip_stack: vec![],
             debug_trace: vec![],
-            anon_fn_counter: 0,
             currently_inlining: vec![],
             last_loc: None,
             currently_compiling: vec![],
@@ -667,7 +661,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             assert!(found.len() == 1, "{found:?}");
             assert!(matches!(self.program[f].body, FuncImpl::Empty));
-            debug_assert_ne!(f, found[0].func);
+            assert_ne!(f, found[0].func, "tried to #redirect a function to itself!");
             self.program[f].body = FuncImpl::Redirect(found[0].func);
             self.program[f].cc = self.program[found[0].func].cc;
             special = true;
@@ -2452,7 +2446,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         fake_func.finished_arg = BigOption::Some(TypeId::unit);
         fake_func.finished_ret = BigOption::Some(ret_ty);
         fake_func.scope = BigOption::Some(ScopeId::from_index(0));
-        self.anon_fn_counter += 1;
         let func_id = self.program.add_func(fake_func);
         self.update_cc(func_id)?;
         Ok(func_id)
@@ -2670,7 +2663,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 .retain(|f| f.arg == ty.arg && (f.ret.is_none() || f.ret.unwrap() == ty.ret));
             // TODO: You can't just filter here anymore because what if its a Split FuncRef.
             let found = match overloads.ready.len() {
-                0 => panic!("Missing overload",),
+                0 => panic!("Missing overload for {}", s.program.pool.get(overloads.name)),
                 1 => overloads.ready[0].func,
                 _ => panic!("Ambigous overload \n{:?}", overloads.ready),
             };
@@ -3035,11 +3028,16 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let (bytes, field_val_ty) = self.field_access_expr(container, *name)?;
                 let field_ptr_ty = self.program.ptr_type(field_val_ty);
                 debug_assert!(!matches!(container.expr, Expr::GetVar(_)));
-                place.expr = Expr::PtrOffset {
-                    ptr: Box::new(mem::take(container)),
-                    bytes,
-                    name: *name,
-                };
+                let e = Box::new(*mem::take(container));
+                if bytes == 0 {
+                    place.expr = Expr::Cast(e);
+                } else {
+                    place.expr = Expr::PtrOffset {
+                        ptr: e,
+                        bytes,
+                        name: *name,
+                    };
+                }
                 place.done = true;
                 if want_deref {
                     place.ty = field_ptr_ty;
@@ -3047,6 +3045,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     self.deref_one(place)?;
 
                     // Don't set done again because you want to go around the main compile_expr another time so special load/store overloads get processed.
+                    // TODO: that shouldn't be true anymore
                 } else {
                     // place.done = true;
                     place.ty = field_ptr_ty;
