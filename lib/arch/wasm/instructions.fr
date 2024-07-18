@@ -8,6 +8,7 @@ TableIdx :: @struct(id: u32);
 LabelIdx :: @struct(id: u32);
 LocalIdx :: @struct(id: u32);
 GlobalIdx :: @struct(id: u32);
+MemIdx :: @struct(id: u32);
 
 wasm_page_size :: 65536;
 NumType        :: @enum(u8) (I32 = 0x7F, I64 = 0x7E, F32 = 0x7D, F64 = 0x7C);
@@ -43,6 +44,8 @@ Instr :: @enum(u8) (
     I64_Add = 0x7C,
 );
 
+fn raw(s: Instr) u8 #unsafe_noop_cast;
+
 // TODO: better error message if you use '=' instead of ':'. 
 Op :: @tagged(
     Call: FuncIdx,
@@ -77,31 +80,88 @@ Section :: @enum(u8) (
 :: enum(Section);
 
 WasmModule :: @struct(
-    types: List(), // [TypeIdx] function types
+    //types: List(), // [TypeIdx] function types
     // Functions are split into two parts. the types are seperate from the code. 
     functions: List(TypeIdx),  // [FuncIdx]
+    exports: List(WasmExport),
     code: List(WasmFunc),      // [FuncIdx]
 );
 
-WasmFunc :: @struct(locals: RsVec(WasmLocal), insts: RsVec(u8));
-WasmLocal :: @struct(type: TypeIdx, count: i64);
+fn empty(a: Alloc) WasmModule = {
+    (functions = list(a), exports = list(a), code = list(a))
+} 
 
-fn dump(self: *WasmModule, out: *BucketArray(u8)) void = {
+WasmFunc :: @struct(locals: RsVec(WasmLocal), insts: RsVec(u8));
+WasmLocal :: @struct(value_type: u8, count: i64);
+// It's tempting to store 4 seperate arrays so you don't need the tag except that you have to refer to them by index. 
+WasmExport :: @struct(name: RsVec(u8), desc: WasmExportDesc);
+WasmExportDesc :: @tagged(Function: FuncIdx, Table: TableIdx, Memory: MemIdx, Global: GlobalIdx);
+:: tagged(WasmExportDesc);
+
+//
+// After the magic + version, the thing is a list of sections. 
+// Each section is [id byte, size u32, data]
+// Note that many sections are a vec of something which is encoded as [count u32, data], 
+// so you sometimes have two lengths, one in bytes and then one in elements. 
+// Also, when the spec says sizes like u32, that doesn't mean encode using that many bytes, 
+// you still use the leb128 stuff. The type is just a range restriction. 
+// 
+// TODO: use bucket arrays for less copying? 
+fn dump(self: *WasmModule, out: *List(u8)) void = {
     out.push_all(@slice(0x00, 0x61, 0x73, 0x6D));  // magic
     out.push_all(@slice(0x01, 0x00, 0x00, 0x00));  // version
-    
     buf: List(u8) = list(temp());
-    
-    out.leb128_unsigned(self.functions.len); // size of the section
-    for self.functions { it | 
-        out.leb128_unsigned(id.it.zext());
-    };
+    buf := buf&;
+    inner_buf: List(u8) = list(temp());
+    inner_buf := inner_buf&;
     
     out.push(Section.Function.raw());
+    buf.leb128_unsigned(self.functions.len); 
+    for self.functions { it | 
+        buf.leb128_unsigned(it.id.zext());
+    };
     out.leb128_unsigned(buf.len);
-    out.push_all(buf);
+    out.push_all(buf.items());
     buf.clear();
     
+    out.push(Section.Export.raw());
+    buf.leb128_unsigned(self.exports.len); 
+    each self.exports { it | 
+        buf.leb128_unsigned(it.name.len);
+        buf.push_all(it.name.items());
+        tag: u8 = it.desc&.tag().ordinal().trunc();
+        buf.push(tag);
+        @match(it.desc) {  // TODO: this is kinda sad
+            fn Function(idx) => buf.leb128_unsigned(idx.id.zext());
+            fn Table(idx)    => buf.leb128_unsigned(idx.id.zext());
+            fn Memory(idx)   => buf.leb128_unsigned(idx.id.zext());
+            fn Global(idx)   => buf.leb128_unsigned(idx.id.zext());
+        };
+    };
+    out.leb128_unsigned(buf.len);
+    out.push_all(buf.items());
+    buf.clear();
+    
+    out.push(Section.Code.raw());
+    buf.leb128_unsigned(self.code.len); 
+    each self.code { it | 
+        inner_buf.leb128_unsigned(it.locals.len);
+        each it.locals { local | 
+            inner_buf.leb128_unsigned(local.count);
+            inner_buf.push(local.value_type);
+        };
+        
+        // Expressions aren't length prefixed, they have a terminator. 
+        inner_buf.push_all(it.insts.items());
+        @assert_eq(it.insts.items().last().unwrap()[], Instr.End.raw()); // TODO: move @debug_assert_eq to lib
+        
+        buf.leb128_unsigned(inner_buf.len);
+        buf.push_all(inner_buf.items());
+        inner_buf.clear();
+    };
+    out.leb128_unsigned(buf.len);
+    out.push_all(buf.items());
+    buf.clear();
 }
 
 //! https://en.wikipedia.org/wiki/LEB128

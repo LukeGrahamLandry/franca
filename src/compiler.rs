@@ -410,6 +410,8 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         if let Some(code) = &self.program[f].body.jitted_aarch64() {
             self.aarch64.copy_inline_asm(f, code);
+            let addr = self.aarch64.get_fn(f).unwrap();
+            unsafe { self_hosted::put_jitted_function(self, f, addr as i64) };
         }
 
         if self.program[f].cc.unwrap() != CallConv::Inline {
@@ -418,15 +420,17 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let body = unsafe {
                     self_hosted::emit_bc(self, f, when)
                 }.unwrap();
-                // TODO: they can't try to do tailcalls between eachother because they disagress about what that means.
-
-       
                 let aarch = true;
 
                 // && when == ExecStyle::Jit // TODO!!! this breaks llvm... which is odd. 
                 if aarch {
-                    let res = emit_aarch64(self, f, when, &body);
-                    self.tag_err(res)?;
+                    // let res = emit_aarch64(self, f, when, &body);
+                    // self.tag_err(res)?;
+                    self.aarch64.extend_blanks(f);
+                    unsafe { self_hosted::emit_aarch64(self, f, when, &body) };
+                    let addr = unsafe { self_hosted::get_jitted_function(self, f) }.unwrap();
+                    self.aarch64.dispatch[f.as_index()] = addr as *const u8;
+
                 }
             }
         }
@@ -460,7 +464,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     pub(crate) fn flush_callees(&mut self, f: FuncId) -> Res<'p, ()> {
         self.compile_asm_no_rec(f, ExecStyle::Jit)?;
       
-        for (from, to) in self.pending_redirects.drain(0..) {
+        for (from, to) in self.pending_redirects.clone() {
             self.last_loc = Some(self.program[to].loc);
             let ptr = unwrap!(
                 self.aarch64.get_fn(to),
@@ -470,7 +474,9 @@ impl<'a, 'p> Compile<'a, 'p> {
             debug_assert!(self.aarch64.get_fn(from).is_none());
             self.aarch64.extend_blanks(from);
             self.aarch64.dispatch[from.as_index()] = ptr;
+            unsafe { self_hosted::put_jitted_function(self, f, ptr as i64) };
         }
+        self.pending_redirects.clear();
 
         // TODO: need to recurse on the mutual_callees somewhere. this is just a hack.
         //       need ensure_compiled, compile, and like really_super_compile.
@@ -673,6 +679,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             self.program[f].body = FuncImpl::ComptimeAddr(addr as usize);
             self.aarch64.extend_blanks(f);
             self.aarch64.dispatch[f.as_index()] = addr as *const u8;
+            unsafe { self_hosted::put_jitted_function(self, f, addr) };
             special = true;
         }
         // TODO: put this in the driver program? put all the special fns in the driver program?
@@ -693,6 +700,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             } else {
                 self.program[f].body = FuncImpl::Merged(vec![FuncImpl::ComptimeAddr(addr as usize), FuncImpl::DynamicImport(self.program[f].name)]);
                 self.aarch64.dispatch[f.as_index()] = addr as *const u8;
+                unsafe { self_hosted::put_jitted_function(self, f, addr as i64) };
             }
             special = true;
         }
@@ -711,6 +719,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 if let BigOption::Some(addr) = unsafe { callback(*data, self, f, lib_name, name) } {
                     self.program[f].body = FuncImpl::Merged(vec![FuncImpl::ComptimeAddr(addr as usize), FuncImpl::DynamicImport(name)]);
                     self.aarch64.dispatch[f.as_index()] = addr;
+                    unsafe { self_hosted::put_jitted_function(self, f, addr as i64) };
                     special = true;
                 }
             }
@@ -3535,6 +3544,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // let ops: Vec<u32> = self.immediate_eval_expr_known(asm.clone())?;
                 // ops
             };
+            // println!("F{} {}: {:?}", f.as_index(), self.program.pool.get(self.program[f].name), ops);
             Ok(FuncImpl::JittedAarch64(ops))
         } else if self.program[f].has_tag(Flag::Llvm) {
             // TODO: an erorr message here gets swollowed because you're probably in the type_of shit. this is really confusing. need to do beter
@@ -3769,6 +3779,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     pub(crate) fn flush_cpu_instruction_cache(&mut self) {
+        unsafe { self_hosted::bump_dirty(self) };
         let (beg, end) = self.aarch64.bump_dirty(); // this also sets the old page executable.
 
         // x86 doesn't this. TODO: what about riscv?

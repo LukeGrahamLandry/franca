@@ -6,12 +6,18 @@
 //       but that's geared towards ssa-like irs where you're allowed to freely copy around ssa vars. 
 //       im not sure if its worth reworking that to give you hooks to shuffle between registers and stack slots as needed.  
 //          -- Jul 15
+//
 
+// TODO: put all these config options somewhere consistant.
 ZERO_DROPPED_REG :: false;
 ZERO_DROPPED_SLOTS :: false;
 TRACE_ASM :: false;
+TRACE_CALLS :: false; 
+USE_LLVM_DIS :: false;
 
-// I'm using u16 everywhere cause why not, extra debug mode check might catch putting a stupid big number in there. that's 65k bytes, 8k words, the uo instructions can only do 4k words.
+// This should always be true. Otherwise you're doing a call for every add, mul, etc. 
+DO_BASIC_ASM_INLINE :: true;
+
 SpOffset :: @struct(id: i64);
 
 IncReg :: @struct(reg: i64, offset_bytes: i64);
@@ -22,6 +28,9 @@ AsmVal :: @tagged(
     FloatReg: i64,
 );
 ::tagged(AsmVal);
+::DeriveFmt(AsmVal);
+//::DeriveFmt(PrimSig);
+//::DeriveFmt(Bc);
 
 /*
 impl Debug for AsmVal {
@@ -48,7 +57,21 @@ fn emit_aarch64(program: CompilerRs, f: FuncId, when: ExecStyle, body: *FnBody) 
     mark := __temp_alloc.mark();
     a: EmitAsm = new(program, when, body, f);
     a&.compile(f);
-    __temp_alloc.reset_retaining_capacity(mark);
+    // TODO: clearly this is wrong somehow. behaviour changes if you do this. 
+    //__temp_alloc.reset_retaining_capacity(mark);
+}
+
+fn get_jitted_function(self: CompilerRs, f: FuncId) ?rawptr #compiler = {
+    self.aarch64&.get_fn(f)
+}
+
+fn put_jitted_function(self: CompilerRs, f: FuncId, addr: rawptr) void #compiler = {
+    self.aarch64&.extend_blanks(f);
+    self.aarch64.dispatch[f.as_index()] = addr;
+}
+
+fn bump_dirty(self: CompilerRs) void #compiler = {
+    self.aarch64&.bump_dirty();
 }
 
 EmitAsm :: @struct(
@@ -80,7 +103,6 @@ fn clone(self: *BlockState) BlockState = {
     (stack = self.stack&.clone(), free_reg = self.free_reg&.clone(), open_slots = self.open_slots&.clone())
 }
 
-
 fn new(compile: CompilerRs, when: ExecStyle, body: *FnBody, f: FuncId) EmitAsm = {
     (
         program = compile,
@@ -110,42 +132,72 @@ fn compile(self: *EmitAsm, f: FuncId) void = {
 
     self.log_asm_bc = func.has_tag(.log_asm_bc);
     self.bc_to_asm(f);
-    self.asm.save_current(f);
-    asm := self.asm.get_fn(f).unwrap();
+    asm := self.asm.save_current(f);
+    
+    
+    // TODO: assert that we don't generate code for a bunch of empty functions (just the size of prolouge + epiloge)
+    //       when doing instantiations like `::tagged(T);`. should get deduplicated in bytecode or earlier. 
+    // for now just make sure not to spam when disassembling. 
+    if(asm.len <= 8, => return());
 
-    /* // TODO: bring this back
-    if TRACE_ASM.or(self.log_asm_bc).or(=> func.has_tag(.log_asm)) {
-        asm := unsafe { &*self.asm.ranges[f.as_index()] };
-        let hex: String = asm
-            .iter()
-            .copied()
-            .array_chunks::<4>()
-            .map(|b| format!("{:#02x} {:#02x} {:#02x} {:#02x} ", b[0], b[1], b[2], b[3]))
-            .collect();
-        path := "target/temp.asm".to_string();
-        fs::write(&path, hex).unwrap();
-        dis := String::from_utf8(Command::new("llvm-mc").arg("--disassemble").arg(&path).output().unwrap().stdout).unwrap();
-        println!();
-        println!("=== Asm for {f:?}: {} ===", self.program.pool.get(func.name));
+    // TODO: this is kinda dumb, I could just be a bit more abstract about how im emitting instructions and then also emit text assembler.
+    if TRACE_ASM.or(self.log_asm_bc).or(=> func.has_tag(.log_asm)) {|
+        self.program[][].codemap.show_error_line(func.loc);
+        addr := u32.int_from_ptr(asm.ptr);
+        @println("% is at addr=%", self.program.pool.get(func.name), addr);
+        @if(USE_LLVM_DIS) print_llvm_mc_dis(asm);
+    };
+}
 
-        it := dis.split('\n');
-        it.nth(1);
-        for (i, line) in it.enumerate() {
-            for (s, offset) in &self.markers {
-                if *offset == i {
-                    println!("{s}");
-                }
-            }
-            println!("{line}");
-        }
-        println!("===")
-    }
-    */
+fn print_llvm_mc_dis(asm: []u32) void = {
+    @println("% instrucitons.", asm.len());
+    hex: List(u8) = list(asm.len * 17, temp());
+    for asm { op |
+        range(0, 4) { _ |
+            byte := op.bit_and(0x000000FF);
+            op = op.shift_right_logical(8);
+            hex&.push_all("0x");
+            // TODO: clean this up. it's an old copy paste from fmt_hex for llvm ir hex floats.
+            range(14, 16) {i|
+                shift := 15.sub(i).mul(4);
+                mask := 15.shift_left(shift);
+                aaaaa: i64 = byte.zext().bit_and(mask);
+                digit := aaaaa.shift_right_logical(shift);
+                ::if(u8);
+                d := if(digit.lt(10), => "0".ascii().add(digit.trunc()), => "A".ascii().add(digit.sub(10).trunc())); 
+                hex&.push(d);
+            };
+            hex&.push_all(" ");
+        };
+    };
+    
+    out := open_temp_file();
+    out.fd&.write(hex.items());
+    // TODO: figure out how to call a version that looks it up in env/PATH like a shell does
+    //       even better have the caller pass in anything like this in general 
+    //       but this is just for debugging the compiler so its not a big deal.
+    LLVM_MC_PATH :: "/opt/homebrew/opt/llvm/bin/llvm-mc"; // "llvm-mc"
+    success := run_cmd_blocking(LLVM_MC_PATH, @slice("--disassemble", out&.s_name()));
+    if(!success, => eprintln("ICE(debugging): couldn't disassemble"));
+    out.remove();
+
+    //println!("=== Asm for {f:?}: {} ===", self.program.pool.get(func.name));
+    //it := dis.split('\n');
+    //it.nth(1);
+    //for (i, line) in it.enumerate() {
+    //    for (s, offset) in &self.markers {
+    //        if *offset == i {
+    //            println!("{s}");
+    //        }
+    //    }
+    //    println!("{line}");
+    //}
+    //println!("===")
 }
 
 fn bc_to_asm(self: *EmitAsm, f: FuncId) void = {
     ff := self.program[f]&;
-    //debugln!("=== {f:?} {} ===", self.program.pool.get(self.program[f].name));
+    @if(TRACE_ASM) @println("=== F% % ===", f.as_index(), self.program.pool.get(ff.name));
     //debugln!("{}", self.program[f].body.log(self.program.pool));
 
     func := self.body;
@@ -179,7 +231,7 @@ fn bc_to_asm(self: *EmitAsm, f: FuncId) void = {
     };
     // debug_assert_eq!(self.state.stack.len() as u16, sig.arg_slots);
 
-    //debugln!("entry: ({:?})", self.state.stack);
+    @if(TRACE_ASM) @println("entry: (%)", self.state.stack.items());
     self.emit_block(0, false);
 
     // TODO: be able to destructure in the lambda args. -- Jul 15
@@ -189,13 +241,16 @@ fn bc_to_asm(self: *EmitAsm, f: FuncId) void = {
         offset := self.asm.offset_words(inst, false_ip);
         @debug_assert(reg < 32);
         @debug_assert_ne(offset, 0, "!if ice: while(1);");
+        @debug_assert(offset > 0, "always jumping forward, over the false block");
         self.asm.patch(inst, cbz(Bits.X64, offset, reg));
     };
+    
     for self.patch_b { it |
         (from_inst, to_ip) := it;
         to_ip := self.block_ips[to_ip.id.zext()].unwrap();
         dist := self.asm.offset_words(from_inst, to_ip);
         @debug_assert_ne(dist, 0, "while(1);");
+        @debug_assert(dist < 0, "always jumping backward, to a previously emitted block"); // TODO: just emit the branch imnmediatly instead of uselss patching
         self.asm.patch(from_inst, b(dist, 0));
     };
 
@@ -211,6 +266,7 @@ fn bc_to_asm(self: *EmitAsm, f: FuncId) void = {
         slots += 16 - extra; // play by the rules
     };
     self.asm.patch(reserve_stack, sub_im(Bits.X64, sp, sp, @as(u12) slots, 0));
+    
     for self.release_stack { it |
         (fst, snd, thd) := it; // TODO: these are sequential so don't bother storing them all. 
         self.asm.patch(fst, add_im(Bits.X64, sp, fp, 0, 0)); // Note: normal mov encoding can't use sp
@@ -237,12 +293,12 @@ fn emit_block(self: *EmitAsm, b: i64, args_not_vstacked: bool) void = {
     @debug_assert(self.state.stack.len >= block.arg_prims.len);
     func := self.body;
     is_done := false;
+    block := self.body.blocks[b]&;
     range(0, func.blocks[b].insts.len) { i |
         if(is_done, => return());
-        block := self.body.blocks[b]&;
         inst := block.insts[i];
         is_done = self.emit_inst(b, inst, i);
-        //debugln!("{b}:{i} {inst:?} => {:?} | free: {:?}", self.state.stack, self.state.free_reg);
+        @if(TRACE_ASM) @println("%:% % => % | free: %", b, i, inst&.tag(), self.state.stack.items(), self.state.free_reg.items());
     };
     @debug_assert(is_done);
 }
@@ -253,6 +309,7 @@ fn emit_inst(self: *EmitAsm, b: usize, inst: Bc, i: usize) bool = {
     //    ins := self.asm.offset_words(self.asm.current_start, self.asm.next) - 1;
     //    self.markers.push((format!("[{b}:{i}] {inst:?}: {:?}", self.state.stack), ins as usize));
     //};
+    @if(TRACE_ASM) @println("[%:%] %", b, i, self.state.stack.items());
     @match(inst) {
         fn Nop() => ();
         fn SaveSsa(f) => {
@@ -301,7 +358,6 @@ fn emit_inst(self: *EmitAsm, b: usize, inst: Bc, i: usize) bool = {
         fn NoCompile() => {
             @panic("tried to compile unreachable block in %", self.program[self.f]&.log(self.program.pool));
         }
-
         fn PushConstant(f) => self.state.stack&.push(Literal = f.value);
         fn PushGlobalAddr(id) => {
             (ptr, _) := self.program[][].get_baked(id)[];
@@ -328,7 +384,8 @@ fn emit_inst(self: *EmitAsm, b: usize, inst: Bc, i: usize) bool = {
             self.asm.push(brk(0));
 
             // branch if zero so true before false
-            self.patch_cbz&.push((_0 = self.asm.prev(), _1 = f.false_ip, _2 = cond)); // TODO: it sees an inline tuple as multiple args.
+            t := (self.asm.prev(), f.false_ip, cond);
+            self.patch_cbz&.push(t); // TODO: it sees an inline tuple as multiple args.
             // we only do one branch so true block must be directly after the check.
             // this is the only shape of flow graph that its possible to generate with my ifs/whiles.
             @debug_assert(self.block_ips[f.true_ip.id.zext()].is_none());
@@ -385,7 +442,8 @@ fn emit_inst(self: *EmitAsm, b: usize, inst: Bc, i: usize) bool = {
         }
         // Note: we do this statically, it wont get actually applied to a register until its needed because loads/stores have an offset immediate.
         fn IncPtrBytes(bytes) => {
-            @match(self.state.stack&.last().unwrap()) {
+            val: *AsmVal = self.state.stack&.last().unwrap();
+            @match(val) {
                 fn Increment(f) => {
                     f.offset_bytes += bytes.zext();
                 }
@@ -514,7 +572,7 @@ fn stack_to_ccall_reg(self: *EmitAsm, types: [] Prim) void = {
         self.state.stack.len >= types.len,
         "found % things but wanted %",
         self.state.stack.len,
-        types
+        types.len
     );
     next_int := 0;
     next_float := 0;
@@ -535,7 +593,7 @@ fn stack_to_ccall_reg(self: *EmitAsm, types: [] Prim) void = {
                 };
             };
 
-            // debug!("|(v{}) <- ({:?})| ", next_float, self.state.stack[stack_index]);
+            @if(TRACE_ASM) @print("|(v%) <- (%)| ", next_float, self.state.stack[stack_index]&);
 
             range(0, self.state.stack.len) { i |
                 @if_let(self.state.stack[i]) fn FloatReg(x) => {
@@ -546,7 +604,6 @@ fn stack_to_ccall_reg(self: *EmitAsm, types: [] Prim) void = {
                     };
                 };
             };
-
             @match(self.state.stack[stack_index]) {
                 fn Increment(f) => {
                     @debug_assert_eq(f.offset_bytes, 0, "dont GEP a float");
@@ -588,7 +645,7 @@ fn stack_to_ccall_reg(self: *EmitAsm, types: [] Prim) void = {
                 };
 
                 // if we happen to already be in the right register, cool, don't worry about it.
-                //debug!("|x{} already| ", f.reg);
+                @if(TRACE_ASM) @print("|x% already| ", f.reg);
                 self.state.free_reg&.ordered_retain(fn(r: *i64) => f.reg != r[]); // TODO: does unordered_retain work?
                 self.state.stack[stack_index] = (Literal = 0); // make sure we dont try to spill it later
                 next_int += 1;
@@ -598,7 +655,7 @@ fn stack_to_ccall_reg(self: *EmitAsm, types: [] Prim) void = {
 
         found := false;
         if self.state.free_reg&.position(fn(r) => next_int == r[]) { want |
-            found := true;
+            found = true;
             self.state.free_reg&.ordered_remove(want); // TODO: does unordered_remove work here?
         };
         
@@ -619,10 +676,12 @@ fn stack_to_ccall_reg(self: *EmitAsm, types: [] Prim) void = {
                 };
             };
         };
+        
+        // TODO: lexer error if you forget a quote and hit a new line. 
         @assert(found, "TODO: x% is not free. stack is %. free is %",
                 next_int, self.state.stack.items(), self.state.free_reg.items());
 
-        //debug!("|(x{}) <- ({:?})| ", next_int, self.state.stack[stack_index]);
+        @if(TRACE_ASM) @print("|(x%) <- (%)| ", next_int, self.state.stack[stack_index]&);
         @match(self.state.stack[stack_index]) {
             fn Increment(f) => {
                 @debug_assert_ne(next_int, f.reg);
@@ -638,6 +697,7 @@ fn stack_to_ccall_reg(self: *EmitAsm, types: [] Prim) void = {
         self.state.stack[stack_index] = (Literal = 0); // make sure we dont try to spill it later
         next_int += 1;
     };
+    @if(TRACE_ASM) println("");
     self.state.stack.len -= types.len;
 }
 
@@ -721,14 +781,14 @@ fn load_one(self: *EmitAsm, register_type: i64, dest_reg: i64, src_addr_reg: i64
     @debug_assert_ne(dest_reg, sp);
     scale := 1.shift_left(register_type);
     if offset_bytes.zext().mod(scale) == 0 {|
-        self.asm.push(ldr_uo(register_type, dest_reg, src_addr_reg, @as(u12) @as(i64) (offset_bytes.zext() / scale)));
+        self.asm.push(ldr_uo_any(register_type, dest_reg, src_addr_reg, @as(u12) @as(i64) (offset_bytes.zext() / scale)));
         @debug_assert((@as(i64) offset_bytes.zext()) / scale < 1.shift_left(12));
     } else {|
         // Note: this relies on the access actually being aligned once you combine the value in the register without our non %8 offset.
         reg := self.get_free_reg();
         @debug_assert((@as(i64) offset_bytes.zext()) < 1.shift_left(12));
         self.asm.push(add_im(Bits.X64, reg, src_addr_reg, @as(u12) @as(i64) offset_bytes.zext(), 0));
-        self.asm.push(ldr_uo(register_type, dest_reg, reg, 0));
+        self.asm.push(ldr_uo_any(register_type, dest_reg, reg, 0));
         self.drop_reg(reg);
     }
 }
@@ -748,12 +808,12 @@ fn store_one(self: *EmitAsm, register_type: i64, src_reg: i64, dest_addr_reg: i6
         return();
     };
     if offset_bytes.zext().mod(8) == 0 {|
-        self.asm.push(str_uo(register_type, src_reg, dest_addr_reg, @as(u12) @as(i64) (offset_bytes.zext() / scale)));
+        self.asm.push(str_uo_any(register_type, src_reg, dest_addr_reg, @as(u12) @as(i64) (offset_bytes.zext() / scale)));
         @debug_assert((@as(i64) offset_bytes.zext()) / scale < 1.shift_left(12));
     } else {|
         reg := self.get_free_reg();
         self.asm.push(add_im(Bits.X64, reg, dest_addr_reg, @as(u12) @as(i64) offset_bytes.zext(), 0));
-        self.asm.push(str_uo(register_type, src_reg, reg, 0));
+        self.asm.push(str_uo_any(register_type, src_reg, reg, 0));
         self.drop_reg(reg);
     };
 }
@@ -778,7 +838,7 @@ fn try_spill(self: *EmitAsm, i: usize, do_floats: bool) bool = {
 
         // Note: this assumes we don't need to preserve the value in the reg other than for this one v-stack slot.
         slot := self.create_slots(1);
-        //debug!("(spill (x% + %) -> [sp, %]) ", f.reg, f.offset_bytes, slot.id);
+        @if(TRACE_ASM) @print("(spill (x% + %) -> [sp, %]) ", f.reg, f.offset_bytes, slot.id);
         if f.offset_bytes != 0 {|
             self.asm.push(add_im(Bits.X64, f.reg, f.reg, f.offset_bytes, 0));
         };
@@ -842,7 +902,7 @@ fn in_reg(self: *EmitAsm, val: AsmVal) i64 = {
                 if f.offset_bytes < 1.shift_left(12) {|
                     self.asm.push(add_im(Bits.X64, out, f.reg, f.offset_bytes, 0));
                 } else {|
-                    self.asm.push(add_im(Bits.X64, out, f.reg, f.offset_bytes.shift_right_logical(12), 1));
+                    self.asm.push(add_im(Bits.X64, out, f.reg, @as(u12) @as(i64) f.offset_bytes.shift_right_logical(12), 1));
                     mask := 1.shift_left(12) - 1;
                     self.asm.push(add_im(Bits.X64, out, f.reg, @as(u12) @as(i64) f.offset_bytes.bit_and(mask), 0));
                 };
@@ -924,8 +984,8 @@ fn load_imm(self: *EmitAsm, reg: i64, value: i64) void = {
             if value == 0 {|
                 return();
             };
-        }
-    }
+        };
+    };
 }
 
 // Note: comp_ctx doesn't push the ctx here, bc needs to do that. this it just does the call with an extra argument.
@@ -967,8 +1027,6 @@ fn dyn_c_call(self: *EmitAsm, sig: PrimSig, $do_call: @Fn() void) void = {
     };
 }
 
-DO_BASIC_ASM_INLINE :: true;
-
 
 ::enum(CallConv);
 ::if(u1);
@@ -981,6 +1039,7 @@ fn branch_func(self: *EmitAsm, f: FuncId, with_link: bool) void = {
         // TODO: save result on the function so dont have to recheck every time?
         if func.body&.jitted_aarch64() { code |
             if func.cc.unwrap() == .OneRetPic {|
+                @if(TRACE_ASM) println("OneRetPic call");
                 // TODO: HACK: for no-op casts, i have two rets because I can't have single element tuples.
                 if code.len == 2 && code[0] == ret() && code[1] == ret() {|
                     if !with_link {|
@@ -1008,12 +1067,12 @@ fn branch_func(self: *EmitAsm, f: FuncId, with_link: bool) void = {
     if self.asm.get_fn(f) { bytes |
         n := u32.int_from_ptr(self.asm.next);
         offset := bytes.int_from_rawptr() - n;
-        @debug_assert(offset.mod(4) == 0, "instructions are u32 but % not mod 4", offset);
-        offset /= 4;
+        offset = offset / 4;
         // TODO: use adr/adrp
         if offset.abs() < 1.shift_left(25) {|
+            @if(TRACE_ASM) println("backwards call");
             self.asm.push(b(offset, if(with_link, => 1, => 0)));
-            return;
+            return(); // TODO: footgun. its too easy to `return;` which returns in other languages but here just evaluates and descards.
         };
     };
 
@@ -1022,18 +1081,19 @@ fn branch_func(self: *EmitAsm, f: FuncId, with_link: bool) void = {
     // But for now, I just spend a register on having a dispatch table and do an indirect call through that.
     // TODO: have a mapping. funcs take up slots even if never indirect called.
     
-    // you don't really need to do this but i dont trust it cause im not following the calling convention
     self.load_imm(x16, self.asm.get_dispatch()); // NOTE: this means you can't ever resize
     if f.as_index() < 4096 {|
+        @if(TRACE_ASM) println("short table call");
         self.asm.push(ldr_uo(Bits.X64, x16, x16, f.as_index()));
     } else {|
+        @if(TRACE_ASM) println("long table call");
+        // TODO: insert in range even tho this one is quite big. 
         full := f.as_index() * 8;
         bottom := full.bit_and(1.shift_left(12) - 1);
-        top := (full - bottom).shift_right_logical(12);
+        top := (full - bottom).shift_right_logical(12); // TODO: don't need to minus? we're shifting it off anyway. 
         self.asm.push(add_im(Bits.X64, x16, x16, top, 1));
         self.asm.push(ldr_uo(Bits.X64, x16, x16, @as(u12) @as(i64) bottom / 8));
     };
-
     self.asm.push(br(x16, if(with_link, => 1, => 0)));
 }
 
@@ -1054,9 +1114,10 @@ fn emit_stack_fixup(self: *EmitAsm) void = {
     self.asm.push(brk(0));
     b := self.asm.prev();
     self.asm.push(brk(0));
+    c := self.asm.prev();
     // TODO: can't do this inline or its seen as multiple args.
     // TODO: but also we should just save one ptr and offset it because they're always sequential. 
-    t := (a, b, self.asm.prev()); 
+    t := (a, b, c); 
     self.release_stack&.push(t);
 }
 
@@ -1145,7 +1206,7 @@ fn offset_words(self: *Jitted, from_ip: *u32, to_ip: *u32) i64 = {
 }
 
 fn prev(self: *Jitted) *u32 = {
-    self.next.offset(-4)
+    self.next.offset(-1)
 }
 
 fn patch(self: *Jitted, ip: *u32, inst_value: u32) void = {
@@ -1156,6 +1217,7 @@ fn patch(self: *Jitted, ip: *u32, inst_value: u32) void = {
 ::ptr_utils(u32);
 
 fn push(self: *Jitted, inst: u32) void = {
+    //println(inst);
     //@debug_assert((self.next as usize) < self.high, "OOB {} {}", self.next as usize, self.high);
     self.next[] = inst;
     self.next = self.next.offset(1);
@@ -1177,17 +1239,22 @@ fn extend_blanks(self: *Jitted, f: FuncId) void = {
 
 fn as_index(f: FuncId) i64 = f.to_index().zext();
 
-fn save_current(self: *Jitted, f: FuncId) void = {
+fn save_current(self: *Jitted, f: FuncId) []u32 = {
     //@debug_assert_ne!(self.next as usize, self.old as usize);
     //@debug_assert_ne!(self.next as usize, self.current_start as usize);
     self.extend_blanks(f);
+    func_start := self.current_start;
     addr := u32.raw_from_ptr(self.current_start);
-    self.dispatch[f.as_index()] = addr;
+    self.dispatch[f.as_index()] = addr;  // TODO: i do this in mark_start too so this seems redundant
+    start := u32.int_from_ptr(self.current_start);
+    end := u32.int_from_ptr(self.next);
     //@debug_assert_eq(self.current_start as usize % 4, 0);
     // just a marker to make sure someone doesn't fall off the end of the function by forgetting to return.
     // also you can see it in the debugger disassembly so you can tell if you emitted a trash instruction inside a function or you're off the end in uninit memory. -- Apr 25
-    self.push(brk(0xDEAD));
+    self.push(brk(0xDAED));
     self.current_start = self.next;
+    // TODO: have a slice_from(start, to = end);
+    (ptr = func_start, len = (end - start) / 4)
 }
 
 fn bump_dirty(self: *Jitted) void = {
@@ -1195,13 +1262,15 @@ fn bump_dirty(self: *Jitted) void = {
     end := u32.raw_from_ptr(self.next);
     if beg != end {|
         //@debug_assert_eq(self.next as usize, self.current_start as usize);
-        //self.push(brk(0x9801));
+        self.push(brk(0x3141));
         len := end.int_from_rawptr() - beg.int_from_rawptr();
         
         prot := bit_or(@as(i64) MapProt.Exec, @as(i64) MapProt.Read);
         res := mprotect(beg, len, prot);
         assert(res.value.eq(0), "mprotect failed");
         
+        // TODO: is this wrong now? if you were at the very end of a page you would have written the brk to the next one,
+        //      but i guess thats find cause we rewrite anyway when we put instructions there. 
         page_start := end.int_from_rawptr() / PAGE_SIZE * PAGE_SIZE;
         self.next = u32.ptr_from_int(page_start + PAGE_SIZE);
         self.old = self.next;
@@ -1240,5 +1309,13 @@ fn movz_rt(sf: Bits, dest: RegO, imm: u16, hw: Hw) u32 =
 /// Keep the other bits.
 fn movk_rt(sf: Bits, dest: RegO, imm: u16, hw: Hw) u32 =
     @bits(sf, 0b11100101, hw, imm, dest);
+
+
+fn str_uo_any(size: u2, src: RegI, addr: RegI, offset_words: u12) u32 = 
+    @bits(size, 0b11100100, offset_words, addr, src);
+
+fn ldr_uo_any(size: u2, dest: RegO, addr: RegI, offset_words: u12) u32 = 
+    @bits(size, 0b11100101, offset_words, addr, dest);
+
 
 // It's not symetrical or perfect but its beautiful and its mine

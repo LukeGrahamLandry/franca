@@ -117,6 +117,11 @@ extern "C" {
     // I'm not typing out two versions of this for & and &mut.
     pub(crate) fn get_function<'p>(s: &SelfHosted<'p>, fid: FuncId) -> &'p mut Func<'p>;
     pub(crate) fn add_function<'p>(s: &mut SelfHosted<'p>, f: Func<'p>) -> FuncId;
+
+    pub(crate) fn emit_aarch64<'p>(program: &mut Compile<'_, 'p>, f: FuncId, when: ExecStyle, body: &FnBody<'p>);
+    pub(crate) fn get_jitted_function<'p>(program: &mut Compile<'_, 'p>, f: FuncId) -> BigOption<i64>;
+    pub(crate) fn put_jitted_function<'p>(program: &mut Compile<'_, 'p>, f: FuncId, addr: i64);
+    pub(crate) fn bump_dirty<'p>(program: &mut Compile<'_, 'p>);
 }
 
 pub fn call<'p>(program: &mut Compile<'_, 'p>, ptr: usize, f_ty: crate::ast::FnType, mut args: Vec<i64>, comp_ctx: bool) -> Res<'p, Values> {

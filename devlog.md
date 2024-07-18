@@ -1,4 +1,25 @@
-## Jul 16
+## debugging ported aarch64 (Jul 17/18)
+
+- its a little too easy to typo a `:=` inside a scope. maybe should think about that.
+  or at least warn if a variable is shadowed and also unused.
+- had an offset by -4 not changed to -1 now that i use `*u32` for instructions.
+- ok we segfault in bootstrap_compiler_environment. trying to call debug_print_int as the first thing does run
+  but prints twice and the second time is the wrong number.
+  and it sanely prints once when not using the new backend so its just totally messed up somehow...
+  and im like doing a lot of calls with the dispatch table but the old version had direct?
+  oh im doing every call twice because i had `return;` and didn't call it in one of the cases in branch_func.
+- aaaaaa i bet im just miscompiling the code that does the inline assembly and thats why im getting garbage.
+  because i changed the brk number at the end of the function and turned off BASIC_ASM_INLINE and the op function im crashing on
+  was emitted by the rust code which means it was a copy_inline_asm. ok thats reassuring.
+  can narrow it down by finding one function that doesn't work and using the old asm for all the rest.
+  slice eq. hangs forever. if i debug_log_int(i) in the loop its always 0.
+  heck. in the old version my ldr_uo/str_uo took a u2 size so the could be used for 8/16/32/64
+  but in the new version i just called the ones that took Bits (u1, for 32/64) but still passed the u2.
+  so what we've learned is i should fix type checking for my little types, not just allow casting any i64 silently,
+  and then start using the little types more throughout the jit code.
+  and have range checks. i long time ago i took them out from shift_or_slice because you got junk reading a u16 as a i64 or soemthing,
+  and i just masked it off. perhaps i should be more strict about just letting seemingly harmless bugs exist in the universe.
+- ok now all but 3 tests pass using new asm for all functions.
 
 ## Jul 13
 

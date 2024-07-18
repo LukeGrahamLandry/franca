@@ -153,6 +153,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         let func = &self.program[f];
         if TRACE_ASM || self.log_asm_bc || func.has_tag(Flag::Log_Asm) {
             let asm = unsafe { &*self.asm.ranges[f.as_index()] };
+            println!("{} instrucitons!", asm.len() / 4);
             let hex: String = asm
                 .iter()
                 .copied()
@@ -166,7 +167,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             println!("=== Asm for {f:?}: {} ===", self.program.pool.get(func.name));
 
             let mut it = dis.split('\n');
-            it.nth(1);
+            it.next();
             for (i, line) in it.enumerate() {
                 for (s, offset) in &self.markers {
                     if *offset == i {
