@@ -21,7 +21,6 @@ use crate::ast::{
     FuncImpl, IntTypeInfo, LabelId, Name, OverloadSet, OverloadSetId, Pattern, ScopeId,  Var, VarType, WalkAst,
 };
 
-use crate::bc_to_asm::{emit_aarch64, Jitted};
 use crate::export_ffi::{struct_macro, tagged_macro, type_macro, BigOption, BigResult, ExportVTable, ImportVTable, IMPORT_VTABLE};
 use crate::ffi::InterpSend;
 use crate::logging::PoolLog;
@@ -66,7 +65,6 @@ pub struct Compile<'a, 'p> {
     currently_inlining: Vec<FuncId>,
     currently_compiling: Vec<FuncId>, // TODO: use this to make recursion work
     pub last_loc: Option<Span>,
-    pub aarch64: Jitted,
     pub next_label: usize,
     pub wip_stack: Vec<(Option<FuncId>, ExecStyle)>,
     pending_redirects: Vec<(FuncId, FuncId)>,
@@ -104,14 +102,19 @@ impl<'a, 'p> Compile<'a, 'p> {
             last_loc: None,
             currently_compiling: vec![],
             program,
-            aarch64: Jitted::new(1 << 27), // Its just virtual memory right? I really don't want to ever run out of space and need to change the address.
-
             next_label: 0,
         };
         // TODO: HACK: for emit_relocatable_constant
         let ty = <(i64, i64)>::get_or_create_type(c.program);
         c.program.finish_layout(ty).unwrap();
         c
+    }
+    
+    pub(crate) fn get_fn(&self, f: FuncId) -> Option<*const u8> {
+        match unsafe {self_hosted::get_jitted_function(self, f) } {
+            BigOption::Some(ptr) => Some(ptr as *const u8),
+            BigOption::None => None,
+        }
     }
 
     fn create_slice_type(&mut self, expect: TypeId, loc: Span) -> Res<'p, TypeId> {
@@ -275,7 +278,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             //       but this is cripplingly stupid with the current model of eh fuck it just load all the code in the universe every time. 
             //       especially once i overload it for things in generics, currently slices are a magic special case.    -- Jun 19  :SLOW
             self.compile(f.func, ExecStyle::Jit)?;
-            let f = unwrap!(self.aarch64.get_fn(f.func), "failed to compile function");
+            let f = unwrap!(self.get_fn(f.func), "failed to compile function");
             unsafe  {
                 type BakeFn = unsafe extern "C" fn(*const ()) -> *const [bc::BakedEntry];
                 save_bake_callback(self.program.pool, ty, transmute::<*const u8, BakeFn>(f)).map_err(|e| e.as_err())?;
@@ -409,34 +412,19 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.last_loc = Some(self.program[f].loc);
 
         if let Some(code) = &self.program[f].body.jitted_aarch64() {
-            self.aarch64.copy_inline_asm(f, code);
-            let addr = self.aarch64.get_fn(f).unwrap();
-            unsafe { self_hosted::put_jitted_function(self, f, addr as i64) };
+            unsafe { self_hosted::copy_inline_asm(self, f, code) };
         }
 
         if self.program[f].cc.unwrap() != CallConv::Inline {
             if let FuncImpl::Normal(_) = self.program[f].body {
-                // let body = emit_bc(self, f, when).unwrap();
-                let body = unsafe {
-                    self_hosted::emit_bc(self, f, when)
-                }.unwrap();
-                let aarch = true;
-
-                // && when == ExecStyle::Jit // TODO!!! this breaks llvm... which is odd. 
-                if aarch {
-                    // let res = emit_aarch64(self, f, when, &body);
-                    // self.tag_err(res)?;
-                    self.aarch64.extend_blanks(f);
-                    unsafe { self_hosted::emit_aarch64(self, f, when, &body) };
-                    let addr = unsafe { self_hosted::get_jitted_function(self, f) }.unwrap();
-                    self.aarch64.dispatch[f.as_index()] = addr as *const u8;
-
-                }
+                unsafe {
+                    self_hosted::emit_bc_and_aarch64(self, f, when).unwrap()
+                };
             }
         }
         self.program[f].set_flag(AsmDone, true);
         if self.program[f].get_flag(FnFlag::TookPointerValue) {
-            if let Some(ptr) = self.aarch64.get_fn(f) {
+            if let Some(ptr) = self.get_fn(f) {
                 unsafe { created_jit_fn_ptr_value(self.program.pool, f,ptr as i64 )}
             }
         }
@@ -467,14 +455,12 @@ impl<'a, 'p> Compile<'a, 'p> {
         for (from, to) in self.pending_redirects.clone() {
             self.last_loc = Some(self.program[to].loc);
             let ptr = unwrap!(
-                self.aarch64.get_fn(to),
+                self.get_fn(to),
                 "redirect target not ready {from:?} -> {to:?} {:#?}",
                 self.program[to]
             );
-            debug_assert!(self.aarch64.get_fn(from).is_none());
-            self.aarch64.extend_blanks(from);
-            self.aarch64.dispatch[from.as_index()] = ptr;
-            unsafe { self_hosted::put_jitted_function(self, f, ptr as i64) };
+            debug_assert!(self.get_fn(from).is_none());
+            unsafe { self_hosted::put_jitted_function(self, from, ptr as i64) };
         }
         self.pending_redirects.clear();
 
@@ -493,14 +479,14 @@ impl<'a, 'p> Compile<'a, 'p> {
         // assert!(self.callees_done(f));
         for c in &self.program[f].callees {
             debug_assert!(
-                self.aarch64.get_fn(*c).is_some(),
+                self.get_fn(*c).is_some(),
                 "missing callee {}",
                 self.program.pool.get(self.program[*c].name)
             )
         }
         for c in &self.program[f].mutual_callees {
             debug_assert!(
-                self.aarch64.get_fn(*c).is_some(),
+                self.get_fn(*c).is_some(),
                 "missing callee {}",
                 self.program.pool.get(self.program[*c].name)
             )
@@ -525,7 +511,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.flush_callees(f)?;
         self.last_loc = loc;
         // cranelift puts stuff here too and so does comptime_addr
-        let addr = unwrap!(self.aarch64.get_fn(f), "not compiled {f:?} {}", self.program.pool.get(self.program[f].name));
+        let addr = unwrap!(self.get_fn(f), "not compiled {f:?} {}", self.program.pool.get(self.program[f].name));
 
         let cc = self.program[f].cc.unwrap();
 
@@ -677,8 +663,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             let addr: i64 = self.immediate_eval_expr_known(unwrap2!(tag.args.clone(), ""))?;
             assert!(matches!(self.program[f].body, FuncImpl::Empty));
             self.program[f].body = FuncImpl::ComptimeAddr(addr as usize);
-            self.aarch64.extend_blanks(f);
-            self.aarch64.dispatch[f.as_index()] = addr as *const u8;
             unsafe { self_hosted::put_jitted_function(self, f, addr) };
             special = true;
         }
@@ -699,7 +683,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                 self.program[f].body = FuncImpl::DynamicImport(self.program[f].name);
             } else {
                 self.program[f].body = FuncImpl::Merged(vec![FuncImpl::ComptimeAddr(addr as usize), FuncImpl::DynamicImport(self.program[f].name)]);
-                self.aarch64.dispatch[f.as_index()] = addr as *const u8;
                 unsafe { self_hosted::put_jitted_function(self, f, addr as i64) };
             }
             special = true;
@@ -718,7 +701,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             if let BigOption::Some(callback) = vtable.resolve_comptime_import {
                 if let BigOption::Some(addr) = unsafe { callback(*data, self, f, lib_name, name) } {
                     self.program[f].body = FuncImpl::Merged(vec![FuncImpl::ComptimeAddr(addr as usize), FuncImpl::DynamicImport(name)]);
-                    self.aarch64.dispatch[f.as_index()] = addr;
                     unsafe { self_hosted::put_jitted_function(self, f, addr as i64) };
                     special = true;
                 }
@@ -1652,7 +1634,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             let id: FuncId = self.immediate_eval_expr_known(*arg.clone())?;
                             assert!(!self.program[id].any_const_args());
                             if !self.program[id].get_flag(TookPointerValue) {
-                                if let Some(ptr) = self.aarch64.get_fn(id) {
+                                if let Some(ptr) = self.get_fn(id) {
                                     // We've already compiled the function but didn't know we'd need to remember its address. (ie. #test fn large_struct_ret_return).
                                     unsafe { created_jit_fn_ptr_value(self.program.pool, id, ptr as i64 )}
                                 }
@@ -1834,7 +1816,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 self.update_cc(f)?;
                 self.flush_callees(f)?;
                 self.flush_cpu_instruction_cache();
-                let ptr = unwrap!(self.aarch64.get_fn(f), "ICE: fn not compiled: {f:?} {}", self.program.pool.get(self.program[f].name));
+                let ptr = unwrap!(self.get_fn(f), "ICE: fn not compiled: {f:?} {}", self.program.pool.get(self.program[f].name));
                 let comp_ctx = matches!(self.program[f].cc.unwrap(), CallConv::CCallRegCt);
                 let f_ty = self.program[f].finished_ty().unwrap();
                 let values = self_hosted::call(self, ptr as usize, f_ty, args, comp_ctx)?;
@@ -3780,25 +3762,6 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     pub(crate) fn flush_cpu_instruction_cache(&mut self) {
         unsafe { self_hosted::bump_dirty(self) };
-        let (beg, end) = self.aarch64.bump_dirty(); // this also sets the old page executable.
-
-        // x86 doesn't this. TODO: what about riscv?
-        #[cfg(target_arch = "aarch64")]
-        {
-            // This fixes 'illegal hardware instruction'.
-            // sleep(Duration::from_millis(1)) also works (in debug mode). That's really cool, it gives it time to update the other cache because instructions and data are seperate?!
-            // Especially fun becuase if you run it in lldb so you break on the error and disassemble... you get perfectly valid instructions because it reads the data cache!
-            // https://community.arm.com/arm-community-blogs/b/architectures-and-processors-blog/posts/caches-and-self-modifying-code
-            // https://stackoverflow.com/questions/35741814/how-does-builtin-clear-cache-work
-            // https://stackoverflow.com/questions/10522043/arm-clear-cache-equivalent-for-ios-devices
-            // https://github.com/llvm/llvm-project/blob/main/compiler-rt/lib/builtins/clear_cache.c
-            // https://github.com/apple/darwin-libplatform/blob/main/src/cachecontrol/arm64/cache.s
-            // https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/sys_icache_invalidate.3.htmls
-
-            if beg != end {
-                unsafe { crate::export_ffi::__clear_cache(beg as *mut libc::c_char, end as *mut libc::c_char) }
-            }
-        }
     }
 
     #[track_caller]

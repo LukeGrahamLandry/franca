@@ -1121,10 +1121,6 @@ impl<'p> Program<'p> {
             _ => 1,
         }
     }
-
-    pub(crate) fn get_baked_addr(&self, id: crate::bc::BakedVarId) -> *const u8 {
-        unsafe { (*crate::self_hosted::get_baked(self.pool, id)).0 as *const u8 }
-    }
 }
 
 impl<'p> Program<'p> {

@@ -7,6 +7,10 @@
 //       im not sure if its worth reworking that to give you hooks to shuffle between registers and stack slots as needed.  
 //          -- Jul 15
 //
+// TODO: this is slower than the old version. i suspect because of _fold_shift_or,
+//       i can see in objdump llvm doesn't inline it away and its calling brk,
+//       which is doing loops and shit when it could just be a single or. 
+//       need to do more of the work in the macro like i did originally so it just expands out into math that's easy to optimise. 
 
 // TODO: put all these config options somewhere consistant.
 ZERO_DROPPED_REG :: false;
@@ -29,36 +33,32 @@ AsmVal :: @tagged(
 );
 ::tagged(AsmVal);
 ::DeriveFmt(AsmVal);
-//::DeriveFmt(PrimSig);
-//::DeriveFmt(Bc);
-
-/*
-impl Debug for AsmVal {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            AsmVal::Increment { reg, offset_bytes } => write!(f, "x{reg} + {offset_bytes}"),
-            AsmVal::Literal(x) => write!(f, "{x}"),
-            AsmVal::Spill(slot) => write!(f, "[sp, {}]", slot.id),
-            AsmVal::FloatReg(x) => write!(f, "v{x}"),
-        }
-    }
-}
-*/
 
 MEM_64: i64 : 0b11;
 MEM_32: i64 : 0b10;
 MEM_16: i64 : 0b01;
 MEM_08: i64 : 0b00;
 
-fn emit_aarch64(program: CompilerRs, f: FuncId, when: ExecStyle, body: *FnBody) void #compiler = {
+fn emit_bc_and_aarch64(program: CompilerRs, f: FuncId, when: ExecStyle) PRes #compiler = {
+    body := @try(program.emit_bc(f, when)) return;
+    
     // TODO: this should be true but breaks for aot with new baked constant trait. maybe its counting random callees when just done for aot but not actually asm?  -- Jun 19
     // debug_assert!(!program[f].get_flag(FnFlag::AsmDone), "ICE: tried to double compile?");
     program.aarch64&.extend_blanks(f);
     mark := __temp_alloc.mark();
-    a: EmitAsm = new(program, when, body, f);
+    
+    zone := zone_begin(.EmitAarch64); // TODO: defer
+    @if(ENABLE_TRACY) {
+        func := program.index(f);
+        real_name := get_string(program.cast(), func.name);
+        ___tracy_emit_zone_name(zone, real_name);
+    };
+    
+    a: EmitAsm = new(program, when, body&, f);
     a&.compile(f);
-    // TODO: clearly this is wrong somehow. behaviour changes if you do this. 
-    //__temp_alloc.reset_retaining_capacity(mark);
+    zone_end(zone);
+    __temp_alloc.reset_retaining_capacity(mark);
+    .Ok
 }
 
 fn get_jitted_function(self: CompilerRs, f: FuncId) ?rawptr #compiler = {
@@ -72,6 +72,10 @@ fn put_jitted_function(self: CompilerRs, f: FuncId, addr: rawptr) void #compiler
 
 fn bump_dirty(self: CompilerRs) void #compiler = {
     self.aarch64&.bump_dirty();
+}
+
+fn copy_inline_asm(self: CompilerRs, f: FuncId, insts: []u32) void #compiler = {
+    self.aarch64&.copy_inline_asm(f, insts);
 }
 
 EmitAsm :: @struct(
@@ -802,7 +806,7 @@ fn store_one(self: *EmitAsm, register_type: i64, src_reg: i64, dest_addr_reg: i6
     if src_reg == sp {|
         // TODO: this is weird. can only happen for exactly the sp, not an offset from it. so i guess somewhere else is saving an add, maybe its fine. -- May 2
         reg := self.get_free_reg();
-        self.asm.push(add_im(register_type, reg, sp, 0, 0)); // not mov!
+        self.asm.push(add_im(Bits.X64, reg, sp, 0, 0)); // not mov!
         self.store_one(register_type, reg, dest_addr_reg, offset_bytes);
         self.drop_reg(reg);
         return();
@@ -1316,6 +1320,5 @@ fn str_uo_any(size: u2, src: RegI, addr: RegI, offset_words: u12) u32 =
 
 fn ldr_uo_any(size: u2, dest: RegO, addr: RegI, offset_words: u12) u32 = 
     @bits(size, 0b11100101, offset_words, addr, dest);
-
 
 // It's not symetrical or perfect but its beautiful and its mine

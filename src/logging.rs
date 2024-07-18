@@ -1,7 +1,7 @@
 // nobody cares its just logging. TODO: should do it anyway i guess.
 #![allow(unused_must_use)]
 use core::fmt;
-use std::fmt::{Debug, Formatter, Write};
+use std::fmt::{Debug, Formatter};
 
 #[track_caller]
 #[inline(never)]
@@ -115,8 +115,6 @@ macro_rules! unwrap2 {
 pub use unwrap;
 
 use crate::ast::{FatStmt, FuncImpl, Pattern};
-use crate::bc::*;
-use crate::export_ffi::BigOption;
 use crate::self_hosted::log_pattern;
 use crate::self_hosted::{log_expr, log_func, log_lazy_type, log_stmt, SelfHosted};
 use crate::{
@@ -236,51 +234,6 @@ impl<'p> PoolLog<'p> for Var<'p> {
 impl<'p> PoolLog<'p> for Func<'p> {
     fn log(&self, pool: &SelfHosted<'p>) -> String {
         unsafe { (*log_func(pool.pool, self)).to_string() }
-    }
-}
-
-impl<'p> FnBody<'p> {
-    pub(crate) fn log(&self, program: &Program<'p>) -> String {
-        let mut f = String::new();
-
-        writeln!(
-            f,
-            "=== Bytecode for {}: {} -> {} ===",
-            program.pool.get(self.name),
-            program.log_type(program[self.func].finished_arg.unwrap()),
-            program.log_type(program[self.func].finished_ret.unwrap())
-        );
-        for (b, insts) in self.blocks.iter().enumerate() {
-            if insts.insts.len() == 1 && insts.insts[0] == Bc::NoCompile && insts.incoming_jumps == 0 {
-                continue;
-            }
-            writeln!(
-                f,
-                "[b{b}({})]: ({} incoming. end height={})",
-                insts.arg_slots, insts.incoming_jumps, insts.height
-            );
-            for (i, op) in insts.insts.iter().enumerate() {
-                write!(f, "    {i}. {op:?}");
-                match *op {
-                    Bc::CallDirect { f: id, .. } => writeln!(
-                        f,
-                        "; {}", //({}) -> {} ",
-                        program.pool.get(program[id].name),
-                        // program.log_type(program[id].finished_arg.unwrap()),
-                        // program.log_type(program[id].finished_ret.unwrap())
-                    ),
-                    Bc::AddrVar { id } => {
-                        if let Some(&BigOption::Some(name)) = self.var_names.get(id as usize) {
-                            write!(f, "; {}", program.pool.get(name.name));
-                        }
-                        writeln!(f, "; {}", program.log_type(self.vars[id as usize]))
-                    }
-                    _ => writeln!(f),
-                };
-            }
-        }
-        writeln!(f, "===");
-        f
     }
 }
 

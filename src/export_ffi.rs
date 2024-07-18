@@ -6,7 +6,7 @@ use crate::ast::{
     garbage_loc, CallConv, Expr, FatExpr, FatStmt, Flag, FnType, Func, FuncId, IntTypeInfo, LazyType, Pattern, Program, ScopeId, TargetArch, TypeId,
     TypeInfo, TypeMeta, WalkAst,
 };
-use crate::bc::{from_values, BakedVarId, FnBody, Values};
+use crate::bc::{from_values, Values};
 use crate::compiler::{want, Compile, CompileError, ExecStyle, Res, ResultType, Unquote, EXPECT_ERR_DEPTH};
 use crate::ffi::InterpSend;
 use crate::logging::{unwrap, PoolLog};
@@ -214,9 +214,9 @@ pub struct ImportVTable {
     _c: usize,
     emit_bc: usize,
     get_type_meta: extern "C" fn(compile: &Compile, ty: TypeId) -> TypeMeta,
-    debug_log_baked_constant: extern "C" fn(compile: &Compile, id: BakedVarId),
-    _get_baked: usize,
-    debug_log_bc: for<'p> extern "C" fn(c: &Compile<'_, 'p>, body: &FnBody<'p>),
+    __a: usize,
+    _f: usize,
+    __b: usize,
     _e: usize,
     get_compiler_builtins_source: extern "C" fn() -> &'static str,
     _i: usize,
@@ -262,9 +262,9 @@ pub static IMPORT_VTABLE: ImportVTable = ImportVTable {
     _c: 0,
     emit_bc: 0,
     get_type_meta,
-    debug_log_baked_constant,
-    _get_baked: 0xbeefbeefbeef,
-    debug_log_bc,
+    __a: 0,
+    _f: 0xbeefbeefbeef,
+    __b: 0xbeefbeefbeef,
     _e: 0,
     get_compiler_builtins_source,
     _i: 0,
@@ -307,14 +307,6 @@ extern "C" fn clone_type<'p>(e: &LazyType<'p>) -> LazyType<'p> {
 
 extern "C" fn clone_func<'p>(e: &Func<'p>) -> Func<'p> {
     e.clone()
-}
-
-extern "C" fn debug_log_bc<'p>(c: &Compile<'_, 'p>, body: &FnBody<'p>) {
-    println!("{}", body.log(c.program))
-}
-
-extern "C" fn debug_log_baked_constant(compile: &Compile, id: BakedVarId) {
-    unsafe { println!("{:?}", (*crate::self_hosted::get_baked(compile.program.pool, id)).1) }
 }
 
 extern "C" fn get_type_meta(compile: &Compile, ty: TypeId) -> TypeMeta {
@@ -368,7 +360,7 @@ unsafe extern "C" fn franca_compile_func<'p>(c: &mut Compile<'_, 'p>, f: FuncId,
 
 unsafe extern "C" fn get_jitted_ptr<'p>(c: &mut Compile<'_, 'p>, f: FuncId) -> BigCErr<'p, *const u8> {
     c.flush_callees(f)?;
-    Ok(unwrap!(c.aarch64.get_fn(f), "not compiled {f:?}"))
+    Ok(unwrap!(c.get_fn(f), "not compiled {f:?}"))
 }
 
 #[no_mangle]
@@ -977,8 +969,9 @@ extern "C-unwind" fn bits_macro<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatE
     })
 }
 
-extern "C-unwind" fn get_dispatch_ptr(comp: &mut Compile) -> *mut i64 {
-    comp.aarch64.get_dispatch() as usize as *mut i64
+extern "C-unwind" fn get_dispatch_ptr(_: &mut Compile) -> *mut i64 {
+    todo!("get_dispatch_ptr")
+    // comp.aarch64.get_dispatch() as usize as *mut i64
 }
 
 extern "C-unwind" fn make_fn_type<'p>(compile: &mut Compile<'_, 'p>, arg: &mut FatExpr<'p>, ret: FatExpr<'p>) -> Res<'p, FnType> {

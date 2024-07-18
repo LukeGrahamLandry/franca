@@ -2,7 +2,7 @@ use std::marker::PhantomData;
 
 use crate::{
     ast::{FatExpr, FatStmt, Flag, FnType, Func, FuncId, LazyType, OverloadSetId, Pattern, ScopeId, TypeId, Var},
-    bc::{BakedEntry, BakedVar, BakedVarId, FnBody, Values},
+    bc::{BakedEntry, Values},
     compiler::{CErr, Compile, CompileError, ExecStyle, Res},
     err,
     export_ffi::{BigOption, ImportVTable},
@@ -92,10 +92,6 @@ extern "C" {
         f: unsafe extern "C" fn(*const ()) -> *const [BakedEntry],
     ) -> BigResult<(), ParseErr<'p>>;
 
-    pub(crate) fn get_baked(c: &SelfHosted, id: BakedVarId) -> *const (i64, BakedVar);
-
-    pub(crate) fn emit_bc<'p>(comp: &mut Compile<'_, 'p>, f: FuncId, when: ExecStyle) -> BigResult<FnBody<'p>, ParseErr<'p>>;
-
     pub(crate) fn call_dynamic<'p>(
         comp: &mut Compile<'_, 'p>,
         ptr: usize,
@@ -118,10 +114,13 @@ extern "C" {
     pub(crate) fn get_function<'p>(s: &SelfHosted<'p>, fid: FuncId) -> &'p mut Func<'p>;
     pub(crate) fn add_function<'p>(s: &mut SelfHosted<'p>, f: Func<'p>) -> FuncId;
 
-    pub(crate) fn emit_aarch64<'p>(program: &mut Compile<'_, 'p>, f: FuncId, when: ExecStyle, body: &FnBody<'p>);
-    pub(crate) fn get_jitted_function<'p>(program: &mut Compile<'_, 'p>, f: FuncId) -> BigOption<i64>;
+    pub(crate) fn get_jitted_function<'p>(program: &Compile<'_, 'p>, f: FuncId) -> BigOption<i64>;
     pub(crate) fn put_jitted_function<'p>(program: &mut Compile<'_, 'p>, f: FuncId, addr: i64);
     pub(crate) fn bump_dirty<'p>(program: &mut Compile<'_, 'p>);
+    pub(crate) fn copy_inline_asm<'p>(program: &Compile<'_, 'p>, f: FuncId, insts: &[u32]);
+
+    pub(crate) fn emit_bc_and_aarch64<'p>(comp: &mut Compile<'_, 'p>, f: FuncId, when: ExecStyle) -> BigResult<(), ParseErr<'p>>;
+
 }
 
 pub fn call<'p>(program: &mut Compile<'_, 'p>, ptr: usize, f_ty: crate::ast::FnType, mut args: Vec<i64>, comp_ctx: bool) -> Res<'p, Values> {

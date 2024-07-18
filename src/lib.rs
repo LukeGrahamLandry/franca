@@ -92,19 +92,12 @@ macro_rules! debug {
     }};
 }
 
-#[macro_export]
-macro_rules! debugln {
-    ($($arg:tt)*) => {{
-        if $crate::bc_to_asm::TRACE_ASM  {
-            println!($($arg)*);
-        }
-    }};
-}
+pub const TRACE_CALLS: bool = false;
 
 #[macro_export]
 macro_rules! debugln_call {
     ($($arg:tt)*) => {{
-        if $crate::bc_to_asm::TRACE_CALLS  {
+        if $crate::TRACE_CALLS  {
             println!($($arg)*);
         }
     }};
@@ -141,7 +134,6 @@ macro_rules! mut_replace {
 
 pub mod ast;
 pub mod bc;
-pub mod bc_to_asm;
 pub mod compiler;
 pub mod export_ffi;
 pub mod ffi;
@@ -256,20 +248,6 @@ pub(crate) fn extend_options<T>(v: &mut Vec<Option<T>>, index: usize) {
     for _ in 0..count {
         v.push(None);
     }
-}
-
-// There must be a not insane way to do this but i gave up and read the two's complement wikipedia page.
-/// Convert an i64 to an i<bit_count> with the (64-<bit_count>) leading bits 0.
-fn signed_truncate(mut x: i64, bit_count: i64) -> i64 {
-    debug_assert!(x > -(1 << (bit_count)) && (x < (1 << (bit_count))));
-    let mask = (1 << bit_count) - 1;
-    if x < 0 {
-        x *= -1;
-        x = !x;
-        x += 1;
-        x &= mask;
-    }
-    x
 }
 
 // Feels like this might be useful for representing padding?

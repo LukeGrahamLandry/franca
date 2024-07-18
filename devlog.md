@@ -20,6 +20,13 @@
   and have range checks. i long time ago i took them out from shift_or_slice because you got junk reading a u16 as a i64 or soemthing,
   and i just masked it off. perhaps i should be more strict about just letting seemingly harmless bugs exist in the universe.
 - ok now all but 3 tests pass using new asm for all functions.
+- huh found a place in the old one that used register_type instead of Bits.X64 for add_im on a pointer which is wrong but happened to work apparently
+  thats scary
+- typoed a put_jitted_function in flush_callees, saving it to `f` instead of `from`. that fixed 2/3
+- funny that the only failing one is write_empty_module which i added yesterday. lucky i did that i guess. again... scary.
+  if i hadn't got bored of this being broken and done something else it would have been silently broken for longer.
+  ha, the compiler works with new asm, so its just this one test.
+  tho now i cant make the test work with the old asm and it seems like jsut a missing overload instantiation... maybe im going crazy....
 
 ## Jul 13
 
