@@ -102,6 +102,8 @@ fn emit_relocatable_constant_body(
     out: *List(BakedEntry),
     force_default_handling: bool,
 ) PRes = {
+    c.bump_dirty();
+    
     info := c.get_info(ty);
     if value.len() != info.stride_bytes.zext() {|
         msg := @format("ICE: Tried to emit constant value of wrong size. Expected % bytes but found %.", @as(i64) info.stride_bytes.zext(), value.len()) temp();
@@ -164,7 +166,7 @@ fn emit_relocatable_constant_body(
             
             ptr := u8.ptr_from_int(addr);
             data := slice(ptr, inner_info.stride_bytes.zext());
-            inner_value := data.to_value(); // TODO: do i have to clone? 
+            inner_value := data.to_value(c[][].get_alloc()); // TODO: do i have to clone? 
             id := @try(c.emit_relocatable_constant(inner[], inner_value&)) return;
             c.baked.lookup&.insert(addr, id);
             out.push((AddrOf = id));
@@ -175,7 +177,7 @@ fn emit_relocatable_constant_body(
                 info := c.get_info(f.ty);
                 @assert_eq(info.stride_bytes.zext().mod(8), 0, "TODO: non-8-aligned fields");
                 v := value.bytes().slice(f.byte_offset, f.byte_offset + info.stride_bytes.zext());
-                v := v.to_value(); // TODO: do i have to clone? 
+                v := v.to_value(c[][].get_alloc()); // TODO: do i have to clone? 
                 @try(c.emit_relocatable_constant_body(f.ty, v&, out, false)) return;
             };
         });
@@ -186,18 +188,17 @@ fn emit_relocatable_constant_body(
             case_info := c.get_info(inner);
             out.push((Num = (tag, .I64)));
             payload_size: i64 = case_info.stride_bytes.zext();
-            if payload_size > 0 {|
-                b := value.bytes();
-                tag_size := 8;
-                payload := b.slice(tag_size, tag_size + payload_size).to_value();
-                
-                //for payload&.bytes() { b |
-                //    print(@as(i64) b.zext());
-                //    print(", ");
-                //};
-                //println("]");
-                
-                @try(c.emit_relocatable_constant_body(inner, payload&, out, false)) return;
+            b := value.bytes();
+            tag_size := 8;
+            payload := b.slice(tag_size, tag_size + payload_size).to_value();
+            
+            padding_size := b.len - payload_size - tag_size;
+            @try(c.emit_relocatable_constant_body(inner, payload&, out, false)) return;
+            
+            (d, m) := padding_size.div_mod(8);
+            @assert_eq(m, 0, "TODO: non-8-mod enum padding");
+            range(0, d) { _ | 
+                out.push((Num = (0, .I64)));
             };
         });
         (fn Enum(f) => {

@@ -23,7 +23,6 @@ SelfHosted :: @struct(
     aarch64: Jitted,
 );
 
-
 :: AutoHash(Ty(Type, u16, bool, bool), TrivialHasher);
 :: AutoEq(Ty(Type, u16, bool, bool));
 
@@ -31,7 +30,6 @@ PRes :: Result(void, ParseErr);
 
 fn self_hosted_main(vtable: *ImportVTable) void #compiler #no_trace = {
     :: by_the_way_you_are_compiling_the_compiler_right_now_just_a_helpful_hint();
-    
     if RUNTIME_STACK_TRACE {|
         get_panic_hook()[] = new_print_trace_and_abort;
         println(">>> Compiler running in slow mode.");
@@ -103,10 +101,17 @@ fn load_file_in_compiler(vtable: *ImportVTable, path: Str) CRes(CompCtx) = {
 fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
     c := @try(vtable.load_file_in_compiler(path)) return;
     
+    mem_stats :: fn() => {
+        bytes_per_mb :: 1024 * 1024;
+        cc := c.data.cast()[][];
+        @println("Compiler Memory Usage: %MB + %MB", cc.ast_alloc.current_allocated_size() / bytes_per_mb, __temp_alloc.current_allocated_size() / bytes_per_mb);
+    };
+    
     if c.get_unique_named("driver") {f|
         callee := c.get_jitted(f);
         callee := assume_types_fn(Arg = *ImportVTable, Ret = void, ptr = callee);
         callee(vtable);
+        mem_stats();
         exit(0)
     };
     
@@ -114,6 +119,7 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
         callee := c.get_jitted(f);
         callee := assume_types_fn(Arg = void, Ret = void, ptr = callee);
         callee();
+        mem_stats();
         exit(0)
     };
     
@@ -207,7 +213,7 @@ fn pop_until_endswith(self: *List(u8), suffix: []u8) bool = {
 
 // TODO: pass requested type through generic args so this isn't so clunky. -- Jun 23
 fn init_self_hosted() *SelfHosted #compiler = {
-    a: ArenaAlloc = init(page_allocator, 1.shift_left(20));
+    a: ArenaAlloc = init(page_allocator, 1.shift_left(23));
     arena := a&.borrow().boxed(ArenaAlloc, a);
     a := arena.borrow();
     pool: StringPool = init(a);
@@ -301,3 +307,11 @@ fn clone(self: *SelfHosted, e: *FatExpr) FatExpr = {
 fn clone(self: *SelfHosted, e: *LazyType) LazyType = {
     {self.vtable.clone_type}(e)
 }
+
+::tagged(BakedEntry);
+::DeriveFmt(get_variant_type(BakedEntry, BakedEntry.Tag().Num));
+::DeriveFmt(BakedEntry);
+::DeriveFmt(BakedVarId);
+::display_slice(BakedEntry);
+::enum(Prim);
+fn display(s: *FuncId, out: *List(u8)) void #redirect(Ty(*i64, *List(u8)), void);

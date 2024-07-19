@@ -84,15 +84,9 @@ fn mark(self: *ArenaAlloc) ArenaMarker = (chunk = self.chunk.unwrap(), start = s
 // Memory is NOT returned to the backing allocator. 
 // TODO: safety check mode that writes over with garbage. 
 fn reset_retaining_capacity(self: *ArenaAlloc, mark: ArenaMarker) void = {
-    goal := ArenaHeader.int_from_ptr(mark.chunk);
-    if self.chunk { chunk |
-        while(=> chunk.prev.is_some() && @as(bool) { a := ArenaHeader.int_from_ptr(chunk); a != goal } ) {|
-            chunk = chunk.prev.unwrap();
-        };
-        self.start = mark.start;
-        self.end = chunk.size;
-        self.chunk = (Some = chunk);
-    };
+    self.start = mark.start;
+    self.end = mark.chunk.size;
+    self.chunk = (Some = mark.chunk);
 }
 
 // # Safety: This invalidates all allocations in self!
@@ -155,9 +149,14 @@ fn deinit(self: *ArenaAlloc) void = {
 fn current_allocated_size(self: *ArenaAlloc) i64 = {
     size := 0
     if self.chunk { chunk |
+        // go all the way back then all the way forward because we might not be at the latest chunk. 
         while(=> chunk.prev.is_some()) {|
-            size += chunk.size;
             chunk = chunk.prev.unwrap();
+        };
+        
+        while(=> chunk.next.is_some()) {|
+            size += chunk.size;
+            chunk = chunk.next.unwrap();
         };
         size += chunk.size;
     };
