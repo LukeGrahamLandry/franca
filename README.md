@@ -24,8 +24,8 @@
 
 ## Progress
 
-- `src`: the sema stuff and the jit used for comptime execution.
-- `compiler`: the self hosted parser and llvm backend.
+- `src`: the sema stuff.
+- `compiler`: the self hosted parser, llvm backend, and the jit used for comptime execution.
 - `lib`: the standard library.
 - See `tests`, and `examples` for smaller programs.
 

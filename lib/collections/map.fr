@@ -21,14 +21,15 @@ fn hash(s: *Str) i64 = {
 /// TODO: reuse the first tombstone slot when inserting after a remove. currently im being dumb and just wasting search time until a resize. 
 /// (K: eq + hash + move, V: move)
 /// TODO: take hasher as param once i have default args? 
+/// TODO: api for getting the real len (not including tombstones)
 fn HashMap($K: Type, $V: Type) Type = {
     Hasher :: TrivialHasher;
     // TODO: instead of complicated traits, just require(eq, Ty(K, K), bool);
-    Self :: @struct(alloc: Alloc, arr: Slice(Entry), len: i64, capacity: i64);
+    Self :: @struct(alloc: Alloc, arr: Slice(Entry), len_including_tombstones: i64, capacity: i64);
     Entry :: @struct(hash: i64, key: K, value: V);
     load_percent :: 70; // TODO: default arugments in functions so its not annoying to let you set this -- Jun 12
     
-    fn init(gpa: Alloc) Self = (alloc = gpa, arr = @as(Slice(Entry)) empty(), len = 0, capacity = 0);
+    fn init(gpa: Alloc) Self = (alloc = gpa, arr = @as(Slice(Entry)) empty(), len_including_tombstones = 0, capacity = 0);
     
     ::?*V;
     ::if_opt(*V, ?V);
@@ -50,7 +51,7 @@ fn HashMap($K: Type, $V: Type) Type = {
     }
     
     fn insert(self: *Self, key: K, value: V) ?V = {
-        full := self.len.add(1).gt(self.capacity);
+        full := self.len_including_tombstones.add(1).gt(self.capacity);
         if(full, => self.resize()); // does it sooner than necessary (if replacing a slot) but thats fine. 
         h := key&.checked_hash();
         slot := self.find_slot(key&, h);
@@ -59,7 +60,7 @@ fn HashMap($K: Type, $V: Type) Type = {
         @switch(slot.hash) {
             @case(0) fn() ?V => {
                 slot[] = (hash = h, key = key, value = value);
-                self.len += 1;
+                self.len_including_tombstones += 1;
                 .None
             };
             @case(1) fn() ?V => {
@@ -88,7 +89,7 @@ fn HashMap($K: Type, $V: Type) Type = {
     
     /// SAFETY: the returned pointer is invalid after a call to 'insert' (which may trigger a resize)
     fn get_ptr(self: *Self, key: *K) ?*V = {
-        if(self.len.eq(0), => (None = ())) {|
+        if(self.len_including_tombstones.eq(0), => (None = ())) {|
             slot := self.find_slot(key, key.checked_hash());
             if(slot.hash.eq(0), => (None = ()), => (Some = slot.value&))
         } 
@@ -96,8 +97,9 @@ fn HashMap($K: Type, $V: Type) Type = {
     
     fn remove(self: *Self, key: K) ?V #inline = self.remove(key&);
     
+    // Note: this doesn't adjust self.len_including_tombstones! because we use that for resizing so need to account for the tombstone.
     fn remove(self: *Self, key: *K) ?V = {
-        if(self.len.eq(0), => (None = ())) {|
+        if(self.len_including_tombstones.eq(0), => (None = ())) {|
             slot := self.find_slot(key, key.checked_hash());
             if(slot.hash.eq(0), => (None = ())) {|
                 slot.hash = 1; // tombstone
@@ -139,7 +141,7 @@ fn HashMap($K: Type, $V: Type) Type = {
                 real_len += 1;
             };
         };
-        self.len = real_len;
+        self.len_including_tombstones = real_len;
         
         self.alloc.dealloc(Entry, old_arr);
     }
@@ -173,6 +175,38 @@ fn HashSet($V: Type) Type = {
     Self :: HashMap(V, bool); // TODO: emit_bc missing arg var when its void beacuse it thinks it doesnt matter -- Jun 27
     fn insert(self: *Self, v: V) bool = {
         self.insert(v, false).is_some() // TODO: invert? i guess makes more sense if return true if *did* add. 
+    }
+    
+    Self
+}
+
+fn EnumMap($Key: Type, $Value: Type) Type = {
+    info :: get_type_info_ref(Key);
+    :: {
+        assert(info.is(.Enum), "EnumMap key must be enum");  // TODO: fmt type 
+        assert(info[].Enum.sequential, "for now, EnumMap requires sequential integer values");
+    };
+    :: enum(Key);
+    :: from_raw(Key);
+    
+    Self :: @struct(data: Array(Value, info[].Enum.fields.len));
+    
+    fn init(copied: Value) Self = {
+        (data = init(copied))
+    }
+    
+    fn insert(self: *Self, key: Key, value: Value) void = {
+        self.data[key.ordinal()] = value;
+    }
+    
+    fn index(self: *Self, key: Key) *Value = {
+        self.data[key.ordinal()]&
+    }
+    
+    fn each(self: *Self, $body: @Fn(k: Key, v: *Value) void) void = {
+        enumerate self.data& { k, v |
+            body(k.from_raw().unwrap(), v);
+        };
     }
     
     Self

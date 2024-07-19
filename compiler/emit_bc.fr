@@ -20,16 +20,14 @@ FnBody :: @struct(
     vars: RsVec(Type),
     var_names: RsVec(?Var),
     when: ExecStyle,
-    func: FuncId,
-    current_block: BbId,
-    clock: u16,
-    name: Symbol,
-    want_log: bool,
-    // TODO: remove once we're not sharing this data structure with the rust side. 
-    _deprecated_is_ssa_var: RsBitSet, // only used for debugging. bc has enough info for this.
-    signeture: PrimSig,
     alloc: Alloc,
     hash: i64 = 0,
+    signeture: PrimSig,
+    func: FuncId,
+    name: Symbol,
+    current_block: BbId,
+    clock: u16,
+    want_log: bool,
 );
 
 // TODO: suddenly my new PrimSig makes this super chonky. 80 bytes is not ok
@@ -65,28 +63,18 @@ PrimSig :: @struct(
     args: Slice(Prim) = empty(),
     ret1: ?Prim,
     ret2: ?Prim,
-    arg_slots: u16 = 0,
-    ret_slots: u16 = 0,
     return_value_bytes: u16 = 0,
     first_arg_is_indirect_return: bool = false,
     no_return: bool = false,
     arg_int_count: u8 = 0,
 );
 
-
 BbId :: @struct(id: u16);
 BasicBlock :: @struct(
     insts: RsVec(Bc),
     arg_prims: Slice(Prim),
     incoming_jumps: u16,
-    arg_slots: u16,
     clock: u16,
-    height: u16,  // TODO: remove. unused.
-);
-
-RsBitSet :: @tagged(
-    Small: Array(usize, 2),
-    Big: RsVec(usize),
 );
 
 //
@@ -193,14 +181,13 @@ fn empty_fn_body(comp: CompilerRs, func: FuncId, when: ExecStyle) Res(FnBody) = 
         vars = empty(),
         var_names = empty(),
         when = when,
+        alloc = comp[][].get_alloc(),
+        signeture = @try(comp.prim_sig(f_ty, f.cc.expect("known cc"))) return,
         func = func,
+        name = f.name,
         current_block = (id = 0),
         clock = 0,
-        name = f.name,
         want_log = f.has_tag(.log_bc),
-        _deprecated_is_ssa_var = RsBitSet.zeroed(), // TODO: empty(),
-        signeture = @try(comp.prim_sig(f_ty, f.cc.expect("known cc"))) return,
-        alloc = comp[][].get_alloc(),
     ))
 }
 
@@ -325,7 +312,7 @@ fn compile_for_arg(self: *EmitBc, result: *FnBody, arg: *FatExpr, arity: usize) 
     info := self.program.get_info(arg.ty);
     // If the whole thing is passed in registers, cool, we're done.
     if !info.pass_by_ref {|
-        // assert_eq!(arity, info.size_slots as usize); // TODO??
+        // arity isn't always the same as info.size_slots because of two slot structs like slices. 
         @try(self.compile_expr(result, arg, .PushStack, false)) return; // TODO: tail if its for a ret of the main function?
         return(Ok = false);
     };
@@ -345,7 +332,7 @@ fn compile_for_arg(self: *EmitBc, result: *FnBody, arg: *FatExpr, arity: usize) 
     // TODO: probably assert(info.Struct.is_tuple) or we're in an odd place. need to be more consistant about what an <arguments> is -- Jul 8
     fields := info.Struct.fields;
     //@debug_assert_eq(fields.len(), self.program.arity(arg).zext());   // TODO: why do we care about this? we have it from the tuple anyway. is it just about agreeing with the overloading thing? -- Jul 8
-    @debug_assert_eq(fields.len(), parts.len());
+    @debug_assert_eq(fields.len(), parts.len(), "ICE?: not enough parts for type in compile_for_arg");
 
     _pushed := 0;
     // TODO: sad that I can't zip iterators
@@ -391,13 +378,6 @@ fn compile_for_arg(self: *EmitBc, result: *FnBody, arg: *FatExpr, arity: usize) 
         @try(self.compile_expr(result, val, .ResAddr, false)) return;
         self.addr_var(result, id);
     };
-    // TODO: this isn't always true because of slices (or any 2 slot struct).
-    // assert_eq!(
-    //     pushed as usize,
-    //     arity,
-    //     "arity mismatch. this might be a compiler bug. {:?}",
-    //     types.iter().map(|t| self.program.log_type(*t)).collect::<Vec<_>>()
-    // );
     (Ok = true)
 }
 
@@ -460,7 +440,7 @@ fn emit_body(self: *EmitBc, result: *FnBody, f: FuncId) PRes = {
         @default => return(.Ok);
     };
 
-    entry_block := result.push_block(result.signeture.arg_slots, empty());
+    entry_block := result.push_block(empty());
     entry_block_sig := @try(self.bind_args(result, func.arg&)) return;
     result[entry_block].arg_prims = entry_block_sig;
     ::if(ResultLoc); ::if([]Prim);
@@ -470,7 +450,7 @@ fn emit_body(self: *EmitBc, result: *FnBody, f: FuncId) PRes = {
     // Note: this is different from the body expr type because of early returns.
     ret := self.program[f].finished_ret.unwrap();
     prims: []Prim = if(result.signeture.first_arg_is_indirect_return, => empty(), => self.get_primatives(ret));
-    return_block := result.push_block(result.signeture.ret_slots, prims);
+    return_block := result.push_block(prims);
 
     result.current_block = entry_block;
 
@@ -499,7 +479,7 @@ fn emit_body(self: *EmitBc, result: *FnBody, f: FuncId) PRes = {
     if result[return_block].incoming_jumps.gt(0).or(has_defers) {|
         result.push(Goto = (
             ip = return_block,
-            slots = result.signeture.ret_slots,
+            slots = result.signeture&.ret_slots(),
         ));
         result[return_block].incoming_jumps += 1;
         result.current_block = return_block;
@@ -640,7 +620,7 @@ fn compile_stmt(self: *EmitBc, result: *FnBody, stmt: *FatStmt) PRes = {
         fn DeclVarPattern(f) void => {
             // TODO: test for evaluation order
             @if_let(f.value.expr&) fn Tuple(parts) => {
-                @assert_eq(parts.len(), f.binding.bindings.len());
+                @assert_eq(parts.len(), f.binding.bindings.len(), "ICE: DeclVarPattern tuple size mismatch");
                 enumerate parts { i, value |
                     b := f.binding.bindings[i]&; // TODO: zip
                     @assert_ne(b.kind, .Const);
@@ -662,7 +642,7 @@ fn compile_stmt(self: *EmitBc, result: *FnBody, stmt: *FatStmt) PRes = {
             info := self.program.get_type(f.value.ty);
             @err_assert(info.is(.Struct), "destructure must be tuple") return;
             fields := info.Struct.fields&;
-            @assert_eq(fields.len(), f.binding.bindings.len());
+            @assert_eq(fields.len(), f.binding.bindings.len(), "destructure size mismatch");
             enumerate f.binding.bindings.items() { i, b |
                 f := fields[i]&; // TODO: zip
                 continue :: local_return;
@@ -897,7 +877,7 @@ fn emit_block_expr(self: *EmitBc, result: *FnBody, body: *RsVec(FatStmt), value:
     if ret_label { (ret_var: LabelId) | 
         entry_block := result.current_block;
         return_block := @match(result_location) {
-            fn PushStack() => result.push_block(out.size_slots, self.get_primatives(value.ty));
+            fn PushStack() => result.push_block(self.get_primatives(value.ty));
             fn ResAddr()   => result.push_block_empty();
             fn Discard()   => result.push_block_empty();
         };
@@ -928,8 +908,8 @@ fn emit_block_expr(self: *EmitBc, result: *FnBody, body: *RsVec(FatStmt), value:
         ret := self.inlined_return_addr&.remove(ret_var).unwrap();
         if result[return_block].incoming_jumps > 0 {|
             @debug_assert(ret.used, "expected jumps");
-            slots := result[return_block].arg_slots;
-            result.push(Goto = (ip = return_block, slots = slots));
+            slots := result[return_block].arg_prims.len;
+            result.push(Goto = (ip = return_block, slots = slots.trunc()));
             result[return_block].incoming_jumps += 1;
             result.current_block = return_block;
         } else {|
@@ -1223,7 +1203,7 @@ fn emit_call_if(self: *EmitBc, result: *FnBody, arg: *FatExpr, result_location: 
 
     block_slots := if(result_location == .PushStack, => out.size_slots, => 0);
     prims := if(result_location == .PushStack, => self.get_primatives(if_true.ty), => empty());
-    ip := result.push_block(block_slots, prims);
+    ip := result.push_block(prims);
     result.push_to(branch_block, (JumpIf = (true_ip = true_ip, false_ip = false_ip, slots = 0 )));
     result.push_to(end_true_block, (Goto = (ip = ip, slots = block_slots)));
 
@@ -1395,23 +1375,19 @@ fn push_block_empty(self: *FnBody) BbId = {
         insts = empty(),
         arg_prims = empty(),
         incoming_jumps = 0,
-        arg_slots = 0,
         clock = self.clock,
-        height = 0, // TODO: remove. nobody uses this. 
     ), self.alloc);
     b: BbId = (id = self.blocks.len().trunc() - 1);
     self.current_block = b;
     b
 }
 
-fn push_block(self: *FnBody, arg_slots: u16, arg_prims: [] Prim) BbId = {
+fn push_block(self: *FnBody, arg_prims: [] Prim) BbId = {
     self.blocks&.push((
         insts = empty(),
         arg_prims = arg_prims,
         incoming_jumps = 0,
-        arg_slots = arg_slots, // TODO: remove? is this redundant with arg_prims.len? -- jul 5
         clock = self.clock,
-        height = 0, // note: not arg_slots cause nobody uses this!
     ), self.alloc);
     b: BbId = (id = self.blocks.len().trunc() - 1);
     self.current_block = b;
@@ -1503,12 +1479,12 @@ fn prim_sig(program: CompilerRs, f_ty: FnType, cc: CallConv) Res(PrimSig) = {
     sig: PrimSig = (
         ret1 = .None,
         ret2 = .None,
-        ret_slots = ret.size_slots,
         return_value_bytes = ret.stride_bytes,
         first_arg_is_indirect_return = ret.size_slots > @as(u16) 2.trunc(),
         no_return = f_ty.ret.is_never(),
     ); // TODO: if you typeo make this a '}' need to have a good error message. -- Jul 6
 
+    arg_slots: u16 = 0;
     @switch(ret.size_slots) {
         @case(0) => ();
         @case(1) => {
@@ -1520,8 +1496,7 @@ fn prim_sig(program: CompilerRs, f_ty: FnType, cc: CallConv) Res(PrimSig) = {
             sig.ret2 = (Some = b);
         };
         @default => {
-            sig.arg_slots += 1;
-            sig.ret_slots = 0;
+            arg_slots += 1;
             // Note: not adding indirect pointer to sig because its handled sperately. TODO: that's kinda confusing.
         };
     };
@@ -1531,7 +1506,7 @@ fn prim_sig(program: CompilerRs, f_ty: FnType, cc: CallConv) Res(PrimSig) = {
     :: enum(CallConv);
     comp_ctx := cc == .CCallRegCt;
     if comp_ctx {|
-        sig.arg_slots += 1;
+        arg_slots += 1;
         args&.push(.P64);
     };
 
@@ -1541,11 +1516,11 @@ fn prim_sig(program: CompilerRs, f_ty: FnType, cc: CallConv) Res(PrimSig) = {
         found_arity += 1;
         info := program.get_info(ty);
         if info.pass_by_ref {|
-            sig.arg_slots += 1;
+            arg_slots += 1;
             args&.push(.P64);
         } else {|
             for program.flat_tuple_types(ty) { t | 
-                sig.arg_slots += 1;
+                arg_slots += 1;
                 args&.push(program.prim(t).unwrap());
             };
         };
@@ -1574,7 +1549,7 @@ fn prim_sig(program: CompilerRs, f_ty: FnType, cc: CallConv) Res(PrimSig) = {
 
     // i h a t e m y s e l f s o m e t i m e s
     // a n d i d o n t k n o w w h a t t o d o
-    key := (f_ty.arg, sig.arg_slots, false, comp_ctx);
+    key := (f_ty.arg, arg_slots, false, comp_ctx);
     r := args.items().clone(args.gpa).rs();
     program.primitives&.insert(key, r);
     args&.insert(0, .P64); // sad
@@ -1582,21 +1557,6 @@ fn prim_sig(program: CompilerRs, f_ty: FnType, cc: CallConv) Res(PrimSig) = {
     program.primitives&.insert(key, args.rs()); // TODO: stupid that i have to do this here
     key._2 = false;
     sig.args = program.get_primitives(key).unwrap();
-
-    // TODO: zext?????
-    //if sig.first_arg_is_indirect_return {|
-    //    @debug_assert_eq(sig.args.len() + 1, sig.arg_slots.zext());
-    //} else {|
-    //    @debug_assert_eq(
-    //        sig.args.len(),
-    //        sig.arg_slots.zext(),
-    //        "arg=%\n%\n%\nret=%",
-    //        program.log_type(f_ty.arg),
-    //        sig,
-    //        sig.args,
-    //        program.log_type(f_ty.ret),
-    //    );
-    //};
 
     sig.arg_int_count = 0;
     for sig.args { p |
@@ -1764,3 +1724,16 @@ fn contains_pointers(s: TypeMeta) bool = s.contains_pointers;
 
 fn int_count(self: Prim) i64 = 
     if(self.is_float(), => 0, => 1);
+
+fn ret_slots(self: *PrimSig) u16 = {
+    if self.ret1.is_some() {|
+        if(self.ret2.is_some(), => 2, => 1)
+    } else {|
+        0
+    }
+}
+
+// This includes the indirect ret pointer!!
+fn arg_slots(self: *PrimSig) i64 = {
+    if(self.first_arg_is_indirect_return, => self.args.len + 1, => self.args.len)
+}

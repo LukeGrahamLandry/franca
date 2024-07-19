@@ -339,30 +339,35 @@ fn bits(arg: FatExpr) FatExpr #macro = {
     parts := arg.expr.Tuple;
 
     new_args: List(FatExpr) = list(parts.len() * 3, ast_alloc());
-    loc := arg.loc;
     shift := 32;
+    out := @{ 0 };
     each parts { int |
-        ty := get_type_int(int[]);
+        ty := get_type_int(int[]); // TODO: this shallow copy is sketchy.
 
         shift -= ty.bit_count;
-        @ct_assert(shift >= 0, loc, "expected 32 bits. TODO: other sizes.");
-        // note: we're using the pointer into the array as the box because we know it leaks so its fine. 
-        int: FatExpr = (expr = (Cast = int), loc = loc, ty = i64, done = false);
-        new_args&.push(int);
-        sh := @literal shift;
-        new_args&.push(sh);
-        // HACK
-        size := if(ty.signed, => ty.bit_count * -1, => ty.bit_count);
-        size := @literal size;
-        new_args&.push(size);
+        @ct_assert(shift >= 0, arg.loc, "expected 32 bits. TODO: other sizes.");
+        
+        ::if(FatExpr);
+        // TODO: HACK. this will get more sane when weird int sizes are represented as the next one up instead of always i64.
+        real_int: FatExpr = if ty.bit_count.eq(16).or(ty.bit_count == 32).or(ty.bit_count == 8) {|
+            @{ @as(i64) @[int[]].zext() }
+        } else {|
+            // note: we're using the pointer into the array as the box because we know it leaks so its fine. 
+            (expr = (Cast = int), loc = arg.loc, ty = i64, done = false)
+        };
+        
+        if ty.signed {|
+            real_int = @{ @as(i64) signed_truncate(@[real_int], @[@literal(i64) ty.bit_count]).zext() }
+        };
+        
+        out = @{ @[out].bit_or(@[real_int].shift_left(@[@literal shift])) };
     };
 
     if shift != 0 {|
-        compile_error("shift != 0; expected 32 bits. TODO: other sizes.", loc);
+        compile_error("shift != 0; expected 32 bits. TODO: other sizes.", arg.loc);
     };
-
-    arg.expr.Tuple = new_args.rs();
-    @{ fold_shift_or(@slice @[arg]) }
+    
+    @{ @as(u32) @[out].trunc() }
 }
 
 /// :blessed: The parser desugars stuff into calls to these functions. 
@@ -693,10 +698,6 @@ what's worse is that the body is only evaluated if the variable is referenced so
 later in that scope it won't even be an error that you can't call true with a trailing lambda. 
 */
 
-SafetyCheck :: @enum(i64) (
-    Bounds,
-    _
-);
 
 fn safety(kind: FatExpr, code: FatExpr) FatExpr #macro = {
     kind := (const_eval(SafetyCheck))(kind);

@@ -28,6 +28,13 @@
   ha, the compiler works with new asm, so its just this one test.
   tho now i cant make the test work with the old asm and it seems like jsut a missing overload instantiation... maybe im going crazy....
 
+// this is slower than the old version. i suspect because of \_fold_shift_or,
+// i can see in objdump llvm doesn't inline it away and its calling brk,
+// which is doing loops and shit when it could just be a single or.
+// need to do more of the work in the macro like i did originally so it just expands out into math that's easy to optimise.
+did that ^. now the function for the emitting brk is only 4 instructions... which is never called because llvm always inlines it.
+fantastic.
+
 ## Jul 13
 
 - converted my comptime ffi call asm to my language.

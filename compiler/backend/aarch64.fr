@@ -7,10 +7,6 @@
 //       im not sure if its worth reworking that to give you hooks to shuffle between registers and stack slots as needed.  
 //          -- Jul 15
 //
-// TODO: this is slower than the old version. i suspect because of _fold_shift_or,
-//       i can see in objdump llvm doesn't inline it away and its calling brk,
-//       which is doing loops and shit when it could just be a single or. 
-//       need to do more of the work in the macro like i did originally so it just expands out into math that's easy to optimise. 
 
 // TODO: put all these config options somewhere consistant.
 ZERO_DROPPED_REG :: false;
@@ -85,8 +81,6 @@ EmitAsm :: @struct(
     next_slot: SpOffset,
     f: FuncId,
     when: ExecStyle,
-    patch_cbz: List(Ty(*u32, BbId, i64)),
-    patch_b: List(Ty(*u32, BbId)),
     release_stack: List(Ty(*u32, *u32, *u32)),
     state: BlockState,
     block_ips: List(?*u32),
@@ -115,8 +109,6 @@ fn new(compile: CompilerRs, when: ExecStyle, body: *FnBody, f: FuncId) EmitAsm =
         next_slot = (id = 0),
         f = f,
         when = when,
-        patch_cbz = list(temp()), // (patch_idx, jump_idx, register)
-        patch_b = list(temp()),
         release_stack = list(temp()),
         state = (stack = list(temp()), free_reg = list(temp()), open_slots = list(temp())),
         block_ips = list(temp()),
@@ -137,7 +129,6 @@ fn compile(self: *EmitAsm, f: FuncId) void = {
     self.log_asm_bc = func.has_tag(.log_asm_bc);
     self.bc_to_asm(f);
     asm := self.asm.save_current(f);
-    
     
     // TODO: assert that we don't generate code for a bunch of empty functions (just the size of prolouge + epiloge)
     //       when doing instantiations like `::tagged(T);`. should get deduplicated in bytecode or earlier. 
@@ -238,26 +229,6 @@ fn bc_to_asm(self: *EmitAsm, f: FuncId) void = {
     @if(TRACE_ASM) @println("entry: (%)", self.state.stack.items());
     self.emit_block(0, false);
 
-    // TODO: be able to destructure in the lambda args. -- Jul 15
-    for self.patch_cbz { it |
-        (inst, false_ip, reg) := it;
-        false_ip := self.block_ips[false_ip.id.zext()].unwrap();
-        offset := self.asm.offset_words(inst, false_ip);
-        @debug_assert(reg < 32);
-        @debug_assert_ne(offset, 0, "!if ice: while(1);");
-        @debug_assert(offset > 0, "always jumping forward, over the false block");
-        self.asm.patch(inst, cbz(Bits.X64, offset, reg));
-    };
-    
-    for self.patch_b { it |
-        (from_inst, to_ip) := it;
-        to_ip := self.block_ips[to_ip.id.zext()].unwrap();
-        dist := self.asm.offset_words(from_inst, to_ip);
-        @debug_assert_ne(dist, 0, "while(1);");
-        @debug_assert(dist < 0, "always jumping backward, to a previously emitted block"); // TODO: just emit the branch imnmediatly instead of uselss patching
-        self.asm.patch(from_inst, b(dist, 0));
-    };
-
     slots := self.next_slot.id;
     @assert(
         slots < 4096,
@@ -307,13 +278,13 @@ fn emit_block(self: *EmitAsm, b: i64, args_not_vstacked: bool) void = {
     @debug_assert(is_done);
 }
 
-fn emit_inst(self: *EmitAsm, b: usize, inst: Bc, i: usize) bool = {
+fn emit_inst(self: *EmitAsm, b_idx: usize, inst: Bc, i: usize) bool = {
     // TODO: bring this back 
     //if TRACE_ASM.or(self.log_asm_bc) {|
     //    ins := self.asm.offset_words(self.asm.current_start, self.asm.next) - 1;
-    //    self.markers.push((format!("[{b}:{i}] {inst:?}: {:?}", self.state.stack), ins as usize));
+    //    self.markers.push((format!("[{b_idx}:{i}] {inst:?}: {:?}", self.state.stack), ins as usize));
     //};
-    @if(TRACE_ASM) @println("[%:%] %", b, i, self.state.stack.items());
+    @if(TRACE_ASM) @println("[%:%] %", b_idx, i, self.state.stack.items());
     @match(inst) {
         fn Nop() => ();
         fn SaveSsa(f) => {
@@ -386,10 +357,9 @@ fn emit_inst(self: *EmitAsm, b: usize, inst: Bc, i: usize) bool = {
             @debug_assert_eq(f.slots, 0); // emit_bc doesn't do this
             self.spill_abi_stompable();
             self.asm.push(brk(0));
-
+            inst := self.asm.prev();
+            
             // branch if zero so true before false
-            t := (self.asm.prev(), f.false_ip, cond);
-            self.patch_cbz&.push(t); // TODO: it sees an inline tuple as multiple args.
             // we only do one branch so true block must be directly after the check.
             // this is the only shape of flow graph that its possible to generate with my ifs/whiles.
             @debug_assert(self.block_ips[f.true_ip.id.zext()].is_none());
@@ -399,6 +369,13 @@ fn emit_inst(self: *EmitAsm, b: usize, inst: Bc, i: usize) bool = {
             self.emit_block(f.true_ip.id.zext(), true);
             self.state = state;
             self.emit_block(f.false_ip.id.zext(), true);
+            
+            false_ip := self.block_ips[f.false_ip.id.zext()].unwrap();
+            offset := self.asm.offset_words(inst, false_ip);
+            @debug_assert(cond < 32);
+            @debug_assert_ne(offset, 0, "!if ice: while(1);");
+            @debug_assert(offset > 0, "always jumping forward, over the false block");
+            self.asm.patch(inst, cbz(Bits.X64, offset, cond));
 
             return(true);
         }
@@ -414,11 +391,12 @@ fn emit_inst(self: *EmitAsm, b: usize, inst: Bc, i: usize) bool = {
             } else {|
                 self.stack_to_ccall_reg(block.arg_prims);
                 self.spill_abi_stompable();
-                if self.block_ips[idx] { (_: *u32) |
-                    // TODO: we already emitted it, why not just jump there now?
-                    self.asm.push(brk(0));
-                    t := (self.asm.prev(), f.ip); // TODO: seen as two args if done inline.
-                    self.patch_b&.push(t);
+                if self.block_ips[idx] { (to_ip: *u32) |
+                    // we've already emitted it, so we know where it is, so just go there. 
+                    dist := self.asm.offset_words(self.asm.next, to_ip);
+                    @debug_assert_ne(dist, 0, "while(1);");
+                    @debug_assert(dist < 0, "always jumping backward, to a previously emitted block"); 
+                    self.asm.push(b(dist, 0));
                 } else {|
                     // If we haven't emitted it yet, it will be right after us, so just fall through.
                     self.emit_block(idx, true);
@@ -782,15 +760,15 @@ fn load_u64(self: *EmitAsm, dest_reg: i64, src_addr_reg: i64, offset_bytes: u16)
 }
 
 fn load_one(self: *EmitAsm, register_type: i64, dest_reg: i64, src_addr_reg: i64, offset_bytes: u16) void = {
-    @debug_assert_ne(dest_reg, sp);
+    @debug_assert_ne(dest_reg, sp, "ICE: tried to load into sp");
     scale := 1.shift_left(register_type);
     if offset_bytes.zext().mod(scale) == 0 {|
         self.asm.push(ldr_uo_any(register_type, dest_reg, src_addr_reg, @as(u12) @as(i64) (offset_bytes.zext() / scale)));
-        @debug_assert((@as(i64) offset_bytes.zext()) / scale < 1.shift_left(12));
+        @debug_assert((@as(i64) offset_bytes.zext()) / scale < 1.shift_left(12), "ICE: not enough bits for load");
     } else {|
         // Note: this relies on the access actually being aligned once you combine the value in the register without our non %8 offset.
         reg := self.get_free_reg();
-        @debug_assert((@as(i64) offset_bytes.zext()) < 1.shift_left(12));
+        @debug_assert((@as(i64) offset_bytes.zext()) < 1.shift_left(12), "ICE: not enough bits for load");
         self.asm.push(add_im(Bits.X64, reg, src_addr_reg, @as(u12) @as(i64) offset_bytes.zext(), 0));
         self.asm.push(ldr_uo_any(register_type, dest_reg, reg, 0));
         self.drop_reg(reg);
@@ -813,7 +791,7 @@ fn store_one(self: *EmitAsm, register_type: i64, src_reg: i64, dest_addr_reg: i6
     };
     if offset_bytes.zext().mod(8) == 0 {|
         self.asm.push(str_uo_any(register_type, src_reg, dest_addr_reg, @as(u12) @as(i64) (offset_bytes.zext() / scale)));
-        @debug_assert((@as(i64) offset_bytes.zext()) / scale < 1.shift_left(12));
+        @debug_assert((@as(i64) offset_bytes.zext()) / scale < 1.shift_left(12), "ICE: not enough bits for store");
     } else {|
         reg := self.get_free_reg();
         self.asm.push(add_im(Bits.X64, reg, dest_addr_reg, @as(u12) @as(i64) offset_bytes.zext(), 0));
@@ -867,7 +845,7 @@ fn try_spill(self: *EmitAsm, i: usize, do_floats: bool) bool = {
 
 fn get_free_reg(self: *EmitAsm) i64 = {
     if self.state.free_reg&.pop() { r |
-        @debug_assert_ne(r, sp);
+        @debug_assert_ne(r, sp, "ICE: sp is not a gpr");
         r
     } else {|
         i := 0;
@@ -1294,6 +1272,7 @@ fn bump_dirty(self: *Jitted) void = {
         // https://github.com/llvm/llvm-project/blob/main/compiler-rt/lib/builtins/clear_cache.c
         // https://github.com/apple/darwin-libplatform/blob/main/src/cachecontrol/arm64/cache.s
         // https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/sys_icache_invalidate.3.htmls
+        //
         __clear_cache(beg, end);
     };
 }
@@ -1313,7 +1292,6 @@ fn movz_rt(sf: Bits, dest: RegO, imm: u16, hw: Hw) u32 =
 /// Keep the other bits.
 fn movk_rt(sf: Bits, dest: RegO, imm: u16, hw: Hw) u32 =
     @bits(sf, 0b11100101, hw, imm, dest);
-
 
 fn str_uo_any(size: u2, src: RegI, addr: RegI, offset_words: u12) u32 = 
     @bits(size, 0b11100100, offset_words, addr, src);
