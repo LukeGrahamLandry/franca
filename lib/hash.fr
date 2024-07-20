@@ -18,9 +18,15 @@ fn AutoHash($T: Type, $Hasher: Type) void = {
                 hasher.hash(tag_value&); // TODO: do i want to hash it as Tag so you get the type and can do cool things if you try hard enough? -- Jul 6
                 // TODO: @inline_switch.
                 inline_for T.get_variants() { $f | 
+                    // TODO: you could just implement it for void...
+                    //       but the way youd do it here would be to impl for *void,
+                    //       which is what c uses as a rawptr so feels unexpected. 
+                    non_void :: !(f[]._1 == void);
                     if i == tag_value {|
-                        inner := T.get_variant_ptr_for(self, f);
-                        hasher.hash(inner);
+                        @if(non_void) {
+                            inner := T.get_variant_ptr_for(self, f);
+                            hasher.hash(inner);
+                        };
                         return();
                     };
                     i += 1;
@@ -28,7 +34,7 @@ fn AutoHash($T: Type, $Hasher: Type) void = {
                 // TODO: @safety unreachable_unchecked so you don't bloat the code. i don't trust that llvm can notice my tag preconditions. 
                 panic("Tried to hash @tagged with invalid tag value. Uninitilized memory?")
             });
-            @default => panic("Unsupported type for AutoHash");
+            @default => :: panic("Unsupported type for AutoHash");
         }
     }
 }
@@ -101,7 +107,13 @@ fn HashAsInt($T: Type, $Hasher: Type) void = {
 }
 
 // TODO: really need to have less painful polymorphism stuff so you don't have to put everything in one place. 
+//       i think this will go away eventually with the sema rewrite. 
+// TODO: even before that move this into the compiler so you don't have to do these clones for every program? 
 fn StupidAddHashable($H: Type) void = {
+    fn DerefHash($T: Type) void = {
+        fn hash(hasher: *H, a: *T) void #inline = hasher.hash(a[]);
+    }
+    
     WalkInts() { $T | HashAsInt(T, H); };
     HashAsInt(u8, H);
     #redirect(Ty(*H, *u32), void) fn hash(h: *H, s: *Type) void;
@@ -113,11 +125,38 @@ fn StupidAddHashable($H: Type) void = {
     AutoHash(FnType, H); AutoEq(FnType);
     AutoHash(Field, H); AutoEq(Field);
     AutoHash(?Var, H); AutoEq(?Var);
+    DerefHash(*TypeInfo); DerefEq(*TypeInfo);
+    AutoHash(get_variant_type(TypeInfo, TypeInfo.Tag().FnPtr), H); AutoEq(get_variant_type(TypeInfo, TypeInfo.Tag().FnPtr));
+    AutoHash(get_variant_type(TypeInfo, TypeInfo.Tag().Array), H); AutoEq(get_variant_type(TypeInfo, TypeInfo.Tag().Array));
+    AutoHash(get_variant_type(TypeInfo, TypeInfo.Tag().Struct), H); AutoEq(get_variant_type(TypeInfo, TypeInfo.Tag().Struct));
+    AutoHash(get_variant_type(TypeInfo, TypeInfo.Tag().Tagged), H); AutoEq(get_variant_type(TypeInfo, TypeInfo.Tag().Tagged));
+    AutoHash(get_variant_type(TypeInfo, TypeInfo.Tag().Enum), H); AutoEq(get_variant_type(TypeInfo, TypeInfo.Tag().Enum));
+    enum(CallConv); DerefEq(CallConv);
+    enum(VarType); DerefEq(VarType);
+    AutoHash(Ty(Symbol, Type), H); AutoEq(Ty(Symbol, Type));
+    AutoHash(Ty(Type, Symbol), H); AutoEq(Ty(Type, Symbol));
+    AutoHash(Ty(Symbol, Values), H); AutoEq(Ty(Symbol, Values));
+    HashEach(RsVec(Field), H);
+    HashEach(RsVec(Ty(Symbol, Type)), H);
+    HashEach(RsVec(Ty(Symbol, Values)), H);
+    
+    fn hash(h: *H, s: *CallConv) void #redirect(Ty(*H, *i64), void);
+    fn hash(h: *H, s: *VarType) void #redirect(Ty(*H, *i64), void);
     
     fn hash(h: *H, s: *Var) void = {
         h.hash(s.id&);
     }
     
+    fn hash(h: *H, s: *Values) void = {
+        b := s.bytes();
+        h.hash(b&);
+    }
+    
+}
+
+
+fn eq(a: *Values, b: *Values) bool = {
+    a.bytes() == b.bytes()
 }
 
 :: StupidAddHashable(TrivialHasher);

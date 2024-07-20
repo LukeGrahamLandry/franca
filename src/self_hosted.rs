@@ -1,7 +1,7 @@
 use std::marker::PhantomData;
 
 use crate::{
-    ast::{FatExpr, FatStmt, Flag, FnType, Func, FuncId, LazyType, OverloadSetId, Pattern, ScopeId, TypeId, Var},
+    ast::{FatExpr, FatStmt, Flag, FnType, Func, FuncId, LazyType, OverloadSetId, Pattern, ScopeId, TypeId, TypeInfo, TypeMeta, Var},
     bc::{BakedEntry, Values},
     compiler::{CErr, Compile, CompileError, ExecStyle, Res},
     err,
@@ -121,6 +121,11 @@ extern "C" {
 
     pub(crate) fn emit_bc_and_aarch64<'p>(comp: &mut Compile<'_, 'p>, f: FuncId, when: ExecStyle) -> BigResult<(), ParseErr<'p>>;
 
+    pub(crate) fn intern_type<'p>(c: &SelfHosted<'p>, info: TypeInfo<'p>) -> TypeId;
+    // TODO: this shouldn't be mutable because it needs to stay the same for hashing.
+    //       for now i just want to see if this works.... -- Jul 20
+    pub(crate) fn get_type<'p>(c: &SelfHosted<'p>, ty: TypeId) -> &'p mut TypeInfo<'p>;
+    pub(crate) fn get_info<'p>(c: &SelfHosted<'p>, ty: TypeId) -> TypeMeta;
 }
 
 pub fn call<'p>(program: &mut Compile<'_, 'p>, ptr: usize, f_ty: crate::ast::FnType, mut args: Vec<i64>, comp_ctx: bool) -> Res<'p, Values> {

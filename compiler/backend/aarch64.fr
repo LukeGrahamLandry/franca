@@ -359,7 +359,7 @@ fn emit_inst(self: *EmitAsm, b_idx: usize, inst: Bc, i: usize) bool = {
                 reg := self.get_free_reg();
                 self.asm.extend_blanks(fid);
                 self.load_imm(reg, self.asm.get_dispatch()); // NOTE: this means you can't ever resize
-                self.asm.push(ldr_uo(Bits.X64, reg, reg, @as(u12) fid.as_index()));
+                self.asm.push(ldr_uo(Bits.X64, reg, reg, @as(u12) @as(i64) fid.as_index()));
                 self.state.stack&.push(Increment = (reg = reg, offset_bytes = 0));
             };
         }
@@ -723,7 +723,7 @@ fn emit_store(self: *EmitAsm, addr: AsmVal, value: AsmVal, ty: Prim) void = {
     p64 :: fn() => {
         if value&.is(.FloatReg) {|
             r := value.FloatReg;
-            @assert_eq(offset_bytes.zext().mod(8), 0, "TODO: align");
+            @assert_eq(offset_bytes.mod(8), 0, "TODO: align");
             self.asm.push(f_str_uo(Bits.X64, r, reg, @as(u12) @as(i64) (offset_bytes.zext() / 8)))
         } else {|
             val := self.in_reg(value);
@@ -739,7 +739,7 @@ fn emit_store(self: *EmitAsm, addr: AsmVal, value: AsmVal, ty: Prim) void = {
         fn F32() => {
             if value&.is(.FloatReg) {|
                 r := value.FloatReg;
-                @assert_eq(offset_bytes.zext().mod(4), 0, "TODO: align");
+                @assert_eq(offset_bytes.mod(4), 0, "TODO: align");
                 self.asm.push(f_str_uo(Bits.W32, r, reg, @as(u12) @as(i64) (offset_bytes.zext() / 4)))
             } else {|
                 val := self.in_reg(value);
@@ -773,7 +773,8 @@ fn load_u64(self: *EmitAsm, dest_reg: i64, src_addr_reg: i64, offset_bytes: u16)
 fn load_one(self: *EmitAsm, register_type: i64, dest_reg: i64, src_addr_reg: i64, offset_bytes: u16) void = {
     @debug_assert_ne(dest_reg, sp, "ICE: tried to load into sp");
     scale := 1.shift_left(register_type);
-    if offset_bytes.zext().mod(scale) == 0 {|
+    extra := (@as(i64) offset_bytes.zext()).mod(scale);
+    if extra == 0 {|
         self.asm.push(ldr_uo_any(register_type, dest_reg, src_addr_reg, @as(u12) @as(i64) (offset_bytes.zext() / scale)));
         @debug_assert((@as(i64) offset_bytes.zext()) / scale < 1.shift_left(12), "ICE: not enough bits for load");
     } else {|
@@ -800,7 +801,7 @@ fn store_one(self: *EmitAsm, register_type: i64, src_reg: i64, dest_addr_reg: i6
         self.drop_reg(reg);
         return();
     };
-    if offset_bytes.zext().mod(8) == 0 {|
+    if offset_bytes.mod(8) == 0 {|
         self.asm.push(str_uo_any(register_type, src_reg, dest_addr_reg, @as(u12) @as(i64) (offset_bytes.zext() / scale)));
         @debug_assert((@as(i64) offset_bytes.zext()) / scale < 1.shift_left(12), "ICE: not enough bits for store");
     } else {|
@@ -1078,7 +1079,7 @@ fn branch_func(self: *EmitAsm, f: FuncId, with_link: bool) void = {
     self.load_imm(x16, self.asm.get_dispatch()); // NOTE: this means you can't ever resize
     if f.as_index() < 4096 {|
         @if(TRACE_ASM) println("short table call");
-        self.asm.push(ldr_uo(Bits.X64, x16, x16, f.as_index()));
+        self.asm.push(ldr_uo(Bits.X64, x16, x16, @as(u12) @as(i64) f.as_index()));
     } else {|
         @if(TRACE_ASM) println("long table call");
         // TODO: insert in range even tho this one is quite big. 
@@ -1233,6 +1234,9 @@ fn extend_blanks(self: *Jitted, f: FuncId) void = {
 }
 
 fn as_index(f: FuncId) i64 = f.to_index().zext();
+
+// TODO: if you don't have this it just calls the FuncId for you because it decides same raw type is good enough :FUCKED -- Jul 20
+fn as_index(f: Type) i64 = f.to_index().zext();
 
 fn save_current(self: *Jitted, f: FuncId) []u32 = {
     //@debug_assert_ne!(self.next as usize, self.old as usize);

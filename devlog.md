@@ -5,6 +5,7 @@
   but just adding the redirect to pending in llvm/emit_special seems to work.
   i don't trust it tho, i think it just happens to work because i don't have a test that ends ip calling something in jit and
   then needing to include it as aot but needing to emit differently but the body has already been replaced with the redirect so you can't notice the problem.
+- TODO: i reintroduced sometimes broken const temp areana base_size i think?
 
 ## Jul 19
 
