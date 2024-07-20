@@ -59,15 +59,7 @@ fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: [] FuncId, entry: ProgramEntry) B
         
         if body.func != fid {|
             // We just noticed its a duplicate.
-
-
-            impl_name: List(u8) = list(temp());
-            gen.backend&.fmt_fn_name(body.func, impl_name&);
-            
-            fake_name := @format("%", (gen.backend&, fid)) temp();
-            
-            gen.backend&.emit_bounce_fn(impl_name.items(), fake_name.items(), body);
-            
+            gen.pending&.push(body.func);
             continue();
         };
     
@@ -78,7 +70,7 @@ fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: [] FuncId, entry: ProgramEntry) B
         };
         
         if(body.blocks.len.eq(0)){|
-            success := gen.backend&.emit_special(func.body&, func, body); 
+            success := gen.backend&.emit_special(func.body&, func, body, gen.pending&); 
             if !success {|
                 // TODO: pass in the arch
                 success = gen.backend&.emit_special_asm(func.body&, func, body, Arch.Aarch64); 
@@ -309,7 +301,7 @@ fn emit_constant(self: *EmitLlvm, comp: CompCtx, id: BakedVarId) void = {
     }
 }
 
-fn emit_special(self: *EmitLlvm, body: *FuncImpl, func: *Func, bc: *FnBody) bool = {
+fn emit_special(self: *EmitLlvm, body: *FuncImpl, func: *Func, bc: *FnBody, pending: *List(FuncId)) bool = {
     comp := self.comp;
     @match(body) {
         fn Normal(_) => { panic("ICE: empty body but expr"); };
@@ -317,11 +309,13 @@ fn emit_special(self: *EmitLlvm, body: *FuncImpl, func: *Func, bc: *FnBody) bool
             // TODO: assert that 'f' is flagged for being emitted?
             //       currently just trusting that emit_bc replaced all actual uses. 
             //       could also just have the front end check if body is redirect before adding to callees list. -- Jun 27
+            
+            pending.push(f[]);
             return(true);
         }
         fn Merged(parts) => { 
             each(parts[].items()) {check: *FuncImpl| 
-                if(self.emit_special(check, func, bc), => return(true));
+                if(self.emit_special(check, func, bc, pending), => return(true));
             };
         }
         fn DynamicImport(name) => { 

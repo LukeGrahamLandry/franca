@@ -194,3 +194,69 @@
     assert_eq(6, i64.sum(@slice (1, 2, 3)));
     assert_eq(6.0, f64.sum(@slice (1.0, 2.0, 3.0)));
 }
+
+// pass -no-deduplication to make this test fail. 
+#test fn deduplicate_functions() = {
+    {   
+        // You just need to check the tag and offset the pointer over it, so the size of the inner type doesn't matter. 
+        ::as_ref(i64);
+        ::as_ref(Str);
+        a: @FnPtr(s: *?i64) ?*i64 : as_ref;
+        b: @FnPtr(s: *?Str) ?*Str : as_ref;
+        aa: rawptr : a;
+        bb: rawptr : b;
+        assert_eq(true, aa == bb);
+    };
+    {
+        // pointers are the same size and alignment which are the only thing the list cares about.
+        a: @FnPtr(s: *List(*i64), e: *i64) void : push;
+        b: @FnPtr(s: *List(*Str), e: *Str) void : push;
+        aa: rawptr : a;
+        bb: rawptr : b;
+        assert_eq(true, aa == bb);
+    };
+    {
+        // Here the things are different sizes so need to generate different code.
+        a: @FnPtr(s: ?i64) i64 : unwrap;
+        b: @FnPtr(s: ?Str) Str : unwrap;
+        aa: rawptr : a;
+        bb: rawptr : b;
+        assert_eq(false, aa == bb);
+    };
+    
+    {
+        // They don't even have to be instantiations of the same generic. 
+        // They just have to generate the same IR. 
+        // This is much less useful than the above but still kinda cool. 
+        add_one_a :: fn(i: i64) i64 = {
+            a := 1;
+            i + a
+        };
+        add_one_b :: fn (i: i64) i64 = {
+            b := 1;  // Note: different variable name doesn't matter!
+            i + b
+        };
+        
+        aa: rawptr : add_one_a;
+        bb: rawptr : add_one_b;
+        assert_eq(true, aa == bb);
+        
+        // But this is different because it happens in the front end before optimisation (currently)
+        // so it doesn't realize these have the same behaviour. 
+        add_one_c :: fn (i: i64) i64 = {
+            c := i;
+            c + 1
+        };
+        cc: rawptr : add_one_c;
+        assert_eq(false, aa == cc);
+        
+        // But this generates the same code as the first examples because structs are passed by value. 
+        Holder :: @struct(value: i64);
+        add_one_d :: fn (i: Holder) i64 = {
+            d := 1;
+            i.value + d
+        };
+        dd: rawptr : add_one_d;
+        assert_eq(true, aa == dd);
+    };
+}

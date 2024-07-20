@@ -1,3 +1,11 @@
+## deduplication
+
+- it seems pretty effective. first attempt was ~17% less ir and made llvm take ~8% less time
+- trying to do it for jit too made aot try to call non-existant functions. i thought i had to complicated seperate redirect tracking,
+  but just adding the redirect to pending in llvm/emit_special seems to work.
+  i don't trust it tho, i think it just happens to work because i don't have a test that ends ip calling something in jit and
+  then needing to include it as aot but needing to emit differently but the body has already been replaced with the redirect so you can't notice the problem.
+
 ## Jul 19
 
 - temp alloc had the wrong base_size because baked constants weren't including tagged padding.

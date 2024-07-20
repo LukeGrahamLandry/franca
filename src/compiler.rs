@@ -2640,6 +2640,11 @@ impl<'a, 'p> Compile<'a, 'p> {
                     return Ok(Some(e));
                 }
             }
+            (TypeInfo::FnPtr { .. }, _) => {
+                if TypeId::voidptr == requested {
+                    return Ok(None);
+                }
+            }
             _ => {}
         }
         
