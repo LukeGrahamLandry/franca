@@ -21,12 +21,19 @@ SelfHosted :: @struct(
     index: ProgramIndex,
     functions: BucketArray(Func),  // TODO: have a version of this type that doesn't add gaps if you push_all because that will break the indexing
     aarch64: Jitted,
+    bytecodes: BucketArray(FnBody),
+    // TODO: just always use .Aot and make this a set?
+    saved_bytecodes: HashMap(*FnBody, ExecStyle),
+    free_bytecodes: List(*FnBody),
+    do_bytecode_deduplication: bool = true,
 );
 
 :: AutoHash(Ty(Type, u16, bool, bool), TrivialHasher);
 :: AutoEq(Ty(Type, u16, bool, bool));
 
 PRes :: Result(void, ParseErr);
+
+DO_FUNCTION_DEDUPLICAITON :: @static(bool) true;
 
 fn self_hosted_main(vtable: *ImportVTable) void #compiler #no_trace = {
     :: by_the_way_you_are_compiling_the_compiler_right_now_just_a_helpful_hint();
@@ -61,6 +68,12 @@ fn self_hosted_main(vtable: *ImportVTable) void #compiler #no_trace = {
             lsp_main(my_vtable&);
             exit(0);
         }, => panic("argument '-lsp' not supported by this build of the compiler"));
+    };
+    
+    for args { extra |
+        if extra.str() == "-no-deduplication" {|
+            DO_FUNCTION_DEDUPLICAITON[] = false;
+        };
     };
     
     //if filename == "-testv2" {|
@@ -263,6 +276,10 @@ fn init_self_hosted() *SelfHosted #compiler = {
         index = init(a),
         functions = init(10, a),
         aarch64 = new(1.shift_left(27)), // Its just virtual memory right? I really don't want to ever run out of space and need to change the address.
+        bytecodes = init(10, a),
+        saved_bytecodes = init(a),
+        free_bytecodes = list(a),
+        do_bytecode_deduplication = DO_FUNCTION_DEDUPLICAITON[],
     );
     a.boxed(SelfHosted, self)
 }

@@ -35,6 +35,9 @@ MEM_32: i64 : 0b10;
 MEM_16: i64 : 0b01;
 MEM_08: i64 : 0b00;
 
+
+fn ne(a: FuncId, b: FuncId) bool #redirect(Ty(u32, u32), bool);
+
 fn emit_bc_and_aarch64(program: CompilerRs, f: FuncId, when: ExecStyle) PRes #compiler = {
     mark := __temp_alloc.mark();
     body := @try(program.emit_bc(f, when)) return;
@@ -43,6 +46,19 @@ fn emit_bc_and_aarch64(program: CompilerRs, f: FuncId, when: ExecStyle) PRes #co
     // debug_assert!(!program[f].get_flag(FnFlag::AsmDone), "ICE: tried to double compile?");
     program.aarch64&.extend_blanks(f);
     
+    // We might have noticed that this function was a duplicate while generating bytecode.
+    // So it was Normal before but now its a Redirect. 
+    // TODO: this doesn't work. llvm loses some to deduplication?\
+    //       its because the redirect gets set when doing jit and thats bad when you then do aot i think? 
+    //        -- Jul 20
+    //if body.func != f {|
+    //    if program.aarch64&.get_fn(body.func) { old |
+    //        program.aarch64.dispatch[f.as_index()] = old;
+    //    };
+        
+    //    return(.Ok);
+    //};
+    
     zone := zone_begin(.EmitAarch64); // TODO: defer
     @if(ENABLE_TRACY) {
         func := program.index(f);
@@ -50,7 +66,7 @@ fn emit_bc_and_aarch64(program: CompilerRs, f: FuncId, when: ExecStyle) PRes #co
         ___tracy_emit_zone_name(zone, real_name);
     };
     
-    a: EmitAsm = new(program, when, body&, f);
+    a: EmitAsm = new(program, when, body, f);
     a&.compile(f);
     zone_end(zone);
     __temp_alloc.reset_retaining_capacity(mark);
@@ -289,7 +305,7 @@ fn emit_inst(self: *EmitAsm, b_idx: usize, inst: Bc, i: usize) bool = {
         fn Nop() => ();
         fn SaveSsa(f) => {
             @assert(self.vars[f.id.zext()].is_none());
-            slot := self.create_slots(1);
+            slot := self.create_slots(8);
             reg := self.pop_to_reg();
             self.store_u64(reg, sp, slot.id.trunc());
             self.drop_reg(reg);
@@ -309,8 +325,7 @@ fn emit_inst(self: *EmitAsm, b_idx: usize, inst: Bc, i: usize) bool = {
                 ));
             } else {|
                 ty := self.body.vars[idx];
-                count := self.program.slot_count(ty);
-                slot := self.create_slots(count);
+                slot := self.create_slots(ty.size);
                 self.vars[idx] = (Some = slot);
                 self.state.stack&.push(Increment = (
                     reg = sp,
@@ -326,8 +341,7 @@ fn emit_inst(self: *EmitAsm, b_idx: usize, inst: Bc, i: usize) bool = {
             slot := self.vars[f.id.zext()]; 
             if slot { slot |
                 ty := self.body.vars[f.id.zext()];
-                count := self.program.slot_count(ty);
-                self.drop_slot(slot, count * 8);
+                self.drop_slot(slot, ty.size);
             };
         }
         fn NoCompile() => {
@@ -819,7 +833,7 @@ fn try_spill(self: *EmitAsm, i: usize, do_floats: bool) bool = {
         if(f.reg == sp, => return(false));
 
         // Note: this assumes we don't need to preserve the value in the reg other than for this one v-stack slot.
-        slot := self.create_slots(1);
+        slot := self.create_slots(8);
         @if(TRACE_ASM) @print("(spill (x% + %) -> [sp, %]) ", f.reg, f.offset_bytes, slot.id);
         if f.offset_bytes != 0 {|
             self.asm.push(add_im(Bits.X64, f.reg, f.reg, f.offset_bytes, 0));
@@ -833,7 +847,7 @@ fn try_spill(self: *EmitAsm, i: usize, do_floats: bool) bool = {
 
     if do_floats {|
         @if_let(v) fn FloatReg(freg) => {
-            slot := self.create_slots(1);
+            slot := self.create_slots(8);
             self.asm.push(f_str_uo(Bits.X64, freg, sp, @as(u12) @as(i64) slot.id / 8));
             self.state.stack[i] = (Spill = slot);
             return(true);
@@ -935,16 +949,17 @@ fn pop_to_reg_with_offset(self: *EmitAsm) Ty(i64, u16) = {
     res
 }
 
-fn create_slots(self: *EmitAsm, count: u16) SpOffset = {
+fn create_slots(self: *EmitAsm, bytes: u16) SpOffset = {
+    bytes = (bytes + 7) / 8 * 8; // TODO: use alignment instead of just wasting space :aligned_stack_slots
     enumerate self.state.open_slots { i, slot |
-        if self.clock >= slot.clock && slot.size == count * 8 {|
+        if self.clock >= slot.clock && slot.size == bytes {|
             slot := self.state.open_slots&.ordered_remove(i).unwrap();  // TODO: does unordered_remove work? 
             return(slot.at); 
         };
     };
 
     made := self.next_slot;
-    self.next_slot.id += count.zext() * 8;
+    self.next_slot.id += bytes.zext();
     made
 }
 
@@ -1081,6 +1096,7 @@ fn branch_func(self: *EmitAsm, f: FuncId, with_link: bool) void = {
 
 // Now have to be careful about trying to use x17
 fn drop_slot(self: *EmitAsm, slot: SpOffset, bytes: u16) void = {
+    bytes = (bytes + 7) / 8 * 8; // TODO: use alignment instead of just wasting space :aligned_stack_slots
     self.state.open_slots&.push((at = slot, size = bytes, clock = self.clock)); // TODO: keep this sorted by count?
     if ZERO_DROPPED_SLOTS {|
         self.load_imm(x17, 0);

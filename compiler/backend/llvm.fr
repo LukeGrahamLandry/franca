@@ -56,6 +56,20 @@ fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: [] FuncId, entry: ProgramEntry) B
         };
         body := emit_bc(comp.data.cast(), fid, .Aot);
         body := body.unwrap();
+        
+        if body.func != fid {|
+            // We just noticed its a duplicate.
+
+
+            impl_name: List(u8) = list(temp());
+            gen.backend&.fmt_fn_name(body.func, impl_name&);
+            
+            fake_name := @format("%", (gen.backend&, fid)) temp();
+            
+            gen.backend&.emit_bounce_fn(impl_name.items(), fake_name.items(), body);
+            
+            continue();
+        };
     
         zone := zone_begin(.EmitLlvm); // TODO: defer
         @if(ENABLE_TRACY) {
@@ -64,10 +78,10 @@ fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: [] FuncId, entry: ProgramEntry) B
         };
         
         if(body.blocks.len.eq(0)){|
-            success := gen.backend&.emit_special(func.body&, func, body&); 
+            success := gen.backend&.emit_special(func.body&, func, body); 
             if !success {|
                 // TODO: pass in the arch
-                success = gen.backend&.emit_special_asm(func.body&, func, body&, Arch.Aarch64); 
+                success = gen.backend&.emit_special_asm(func.body&, func, body, Arch.Aarch64); 
             };
             if !success {|
                 // TODO: should assert but debug_tag_corruption is confused. -- Jun 27
@@ -78,14 +92,14 @@ fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: [] FuncId, entry: ProgramEntry) B
             zone_end(zone);
             continue();
         };
-        gen.body = body&;
+        gen.body = body;
         if RETAIN_FUNCTION_NAMES {|
             gen.backend.out&.push_all("define ccc ");
         } else {|
             gen.backend.out&.push_all("define private ccc ");
         };
         name: List(u8) = list(temp());
-        gen.backend&.fmt_fn_name(body.func, name&);
+        gen.backend&.fmt_fn_name(fid, name&);
         gen.backend&.write_header(body.signeture, name.items()) {arg_index|
             s := @format("%arg%", "%", arg_index) temp();
             s.items()
@@ -145,6 +159,38 @@ fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: [] FuncId, entry: ProgramEntry) B
     
     // TODO: if alloc != temp { temp.reset(mark ? no but that wouldn't catch if they derived a new one from temp
     gen.backend.out
+}
+
+
+fn emit_bounce_fn(self: *EmitLlvm, impl_name: Str, fake_name: Str, bc: *FnBody) void = {
+    self.out&.push_all("define private ccc ");
+    values: List(LlvmVal) = list(temp());
+    self.next_var = 0;
+    self.write_header(bc.signeture, fake_name) {arg_index|
+        ::if(Prim);
+        // TODO: format this better. 
+        ty: Prim = if(bc.signeture.first_arg_is_indirect_return){|
+            // TODO: only sokol tests this 
+            if arg_index.eq(0) {|
+                Prim.P64
+            }{|
+                bc.signeture.args[arg_index.sub(1)]
+            }
+        }{|
+            bc.signeture.args[arg_index]
+        };
+        values&.push((ty = ty, id = arg_index));
+        s := @format("%v%", "%", arg_index) temp();
+        self.next_var += 1;
+        s.items()
+    };
+    self.out&.reserve(50);
+    self.out&.current().push_all("{\n");
+    ret := self.inst_call(values.items(), bc.signeture) {|
+        @fmt(self.out&.current(), "@%", impl_name);
+    };
+    self.inst_return(ret);
+    self.out&.current().push_all("}\n");
 }
 
 // :BLOAT
@@ -216,15 +262,15 @@ fn write_export_bounce(self: *EmitLlvm, fid: FuncId) void = {
 fn emit_constant(self: *EmitLlvm, comp: CompCtx, id: BakedVarId) void = {
     self.out&.reserve(100);
     value := get_baked(comp.data, id);
-    index: i64 = id.id.zext();
+    idx: i64 = id.id.zext();
     
     @match(value&) {
         (fn Zeros(len) => {
-            @fmt(self.out&.current(), "@g% = private global [% x i8] zeroinitializer\n", index, len[]);
+            @fmt(self.out&.current(), "@g% = private global [% x i8] zeroinitializer\n", idx, len[]);
         });
         (fn Bytes(bytes) => {
             // TODO: emit string as characters if they're in a sane range. 
-            @fmt(self.out&.current(), "@g% = private global [% x i8] [", index, bytes.len + 1);
+            @fmt(self.out&.current(), "@g% = private global [% x i8] [", idx, bytes.len + 1);
             for(bytes[].items()) {b|
                 @fmt(self.out&.current(), " i8 %,", @as(i64) b.zext());
             };
@@ -232,11 +278,19 @@ fn emit_constant(self: *EmitLlvm, comp: CompCtx, id: BakedVarId) void = {
             self.out&.push_all("i8 0]\n"); // TODO: hack cause im to lazy to ask for debug names as cstr
         });
         (fn VoidPtrArray(parts) => {
-            @fmt(self.out&.current(), "@g% = private global [% x ptr] [", index, parts.len);
+            @fmt(self.out&.current(), "@g% = private global [% x ptr] [", idx, parts.len);
             for(parts[].items()){inner|
                 self.out&.reserve(20);
                 @match(inner) {
                     (fn FnPtr(f) => {
+                    
+                        // TODO: hack because of new deduplication
+                        c := self.comp.data.cast();
+                        func := c.index(f);
+                        @if_let(func.body&) fn Redirect(inner) => {
+                            f = inner[];
+                        };
+                        
                         @fmt(self.out&.current(), "ptr @%,", (self, f));
                         // TODO: make sure we emitted the function. 
                     });
@@ -274,36 +328,8 @@ fn emit_special(self: *EmitLlvm, body: *FuncImpl, func: *Func, bc: *FnBody) bool
             // TODO: do i need to hackily do the same for ComptimeAddr and hope for the best? ideally the forntend would handle that instead. 
             import_name := get_string(comp.data, name[]);
             self.forward_declare(bc.signeture, false, import_name);
-            
-            self.out&.push_all("define private ccc ");
             name := @format("%", (self, bc.func)) temp();
-            values: List(LlvmVal) = list(temp());
-            self.next_var = 0;
-            self.write_header(bc.signeture, name.items()) {arg_index|
-                ::if(Prim);
-                // TODO: format this better. 
-                ty: Prim = if(bc.signeture.first_arg_is_indirect_return){|
-                    // TODO: only sokol tests this 
-                    if arg_index.eq(0) {|
-                        Prim.P64
-                    }{|
-                        bc.signeture.args[arg_index.sub(1)]
-                    }
-                }{|
-                    bc.signeture.args[arg_index]
-                };
-                values&.push((ty = ty, id = arg_index));
-                s := @format("%v%", "%", arg_index) temp();
-                self.next_var += 1;
-                s.items()
-            };
-            self.out&.reserve(50);
-            self.out&.current().push_all("{\n");
-            ret := self.inst_call(values.items(), bc.signeture) {|
-                @fmt(self.out&.current(), "@%", import_name);
-            };
-            self.inst_return(ret);
-            self.out&.current().push_all("}\n");
+            self.emit_bounce_fn(import_name, name.items(), bc);
             return(true);
         }
         fn LlvmIr(code) => { 
@@ -412,11 +438,10 @@ fn setup(self: *EmitLlvm, body: *FnBody, vars_out: *List(EmitLlvm.Val)) void = {
     // TODO: waste for ssa vars, they just get set to the value. -- Jun 14
     vars := body.vars.items();
     enumerate(vars) {i, ty|
-        meta := {self.comp.vtable.get_type_meta}(self.comp.data, ty[]); // TODO: im not getting the right values. unless i add extra padding to the struct. so its using registers? 
         v := self.get_var(.P64);
         vars_out.push(v);
         self.out&.reserve(30); 
-        @fmt(self.out&.current(), "   % = alloca i8, i32 %, align %\n", v, @as(i64) meta.stride_bytes.zext(), @as(i64) meta.align_bytes.zext()); // uhg % was a bad choice. 
+        @fmt(self.out&.current(), "   % = alloca i8, i32 %, align %\n", v, @as(i64) ty.size.zext(), @as(i64) ty.align.zext()); // uhg % was a bad choice. 
     };
     // TODO: use phi nodes cause this is stupid but that's such a pain in the ass. 
     // I use these for block arguments. 

@@ -6,18 +6,20 @@
 //! - Reduce variable usage to register sized loads/stores.
 //! - Convert large arguments/returns to references and remap signatures to use only register sized types.
 
-// TODO: (maybe) instead of storing TypeId of vars, store size+align.
-//       then don't throw away fnbody after use, keep them in a hashmap to deduplicate generics.
-//       like List(*T) will often generate the same code even with different types.
-//       can keep a running hash as you construct the bc so maybe pretty fast to discard non-matches.
-//       have that as a build option so you don't have to take the hit for debug builds if you don't want to.
-//       but it actually might make it faster in general because it means giving less stuff to llvm which is 90% of the time.
-//       I kinda want to wait for emit_bc and bc_to_asm to be self hosted tho cause then its less awkward to change things.
-//       Note: you wont get all the matches until you really deduplicate because they might call different functions that actaully generate the same code,
-//             so have to have a thing like redirects where if checks if a call has been deduplicated. -- Jul 5
+// UNFINISHED: this cant be enabled yet!
+// TODO: you want to do this so you don't have to compile things twice, it seems to not be much slower to do the constants.
+//       but... you can't start doing it too early, because you have to compile stuff before you've compiled the bake functions. 
+//       so regardless, you have to deal with the complexity of some functions havign two copies (jit + baked),
+//       so maybe at that point you might as well not bake for anything you know will only be used at comptime 
+//       (anything that calls a #ct function).   -- Jul 19
+ALWAYS_BAKE_CONSTANTS :: false;
+// TODO: abstract out body.mix_hash(i64) instead of pasting random numbers around. 
+
 FnBody :: @struct(
     blocks: RsVec(BasicBlock),
-    vars: RsVec(Type),
+    // TODO: would be nice if i could sort these so less alignment padding on my backends. 
+    //       but thats a pain because then you need to map indexes.
+    vars: RsVec(VarSlotType),
     var_names: RsVec(?Var),
     when: ExecStyle,
     alloc: Alloc,
@@ -25,10 +27,11 @@ FnBody :: @struct(
     signeture: PrimSig,
     func: FuncId,
     name: Symbol,
-    current_block: BbId,
-    clock: u16,
-    want_log: bool,
+    current_block: BbId,  // TODO: remove. only needed while building
+    clock: u16,           // TODO: remove. only needed while building
+    want_log: bool,       // TODO: remove. only needed while building
 );
+VarSlotType :: @struct(size: u16, align: u16);
 
 // TODO: suddenly my new PrimSig makes this super chonky. 80 bytes is not ok
 Bc :: @tagged(
@@ -115,8 +118,8 @@ ResultLoc :: @enum(i64) (PushStack, ResAddr, Discard);
 ::enum(ResultLoc);
 ::enum(ExecStyle);
 
-fn emit_bc(comp: CompilerRs, f: FuncId, when: ExecStyle) Res(FnBody) = {
-    if when == .Aot {|
+fn emit_bc(comp: CompilerRs, f: FuncId, when: ExecStyle) Res(*FnBody) = {
+    if ALWAYS_BAKE_CONSTANTS.or(when == .Aot) {|
         // :bake_relocatable_value
         comp.check_for_new_aot_bake_overloads().unwrap(); // TODO: unify error types!
     };
@@ -130,7 +133,7 @@ fn emit_bc(comp: CompilerRs, f: FuncId, when: ExecStyle) Res(FnBody) = {
         //       the others are always just needed while working on it.
         //       then mark and reset temp at the end of this function. 
         //       have a pool and recycle old FnBodys that we decided we didn't need because they were duplicates.  
-        out_alloc = temp(),  
+        out_alloc = comp[][].get_alloc(),  
         is_ssa_var = empty(),
     );
     func := comp[f]&; // TODO: you can't do this inline with a call that needs a *Func. it looks for an overload for **Func. -- Jul 5
@@ -160,23 +163,51 @@ fn emit_bc(comp: CompilerRs, f: FuncId, when: ExecStyle) Res(FnBody) = {
         ___tracy_emit_zone_name(zone, real_name);
     };
     
-    res := self&.emit_body(body&, f);
+    res := self&.emit_body(body, f);
     zone_end(zone);
     
     if res&.is_err() {|
         res.Err.span = self.last_loc;
         return(Err = res.Err)
     };
-    // @println("% %", body.hash, get_string(comp.cast(), func.name));
+    
+    if body.hash != 0 && self.program.do_bytecode_deduplication {|
+        if when == .Aot {|
+            body.hash += 1;
+        };
+        
+        if self.program.saved_bytecodes&.get_key(body&) { check | 
+            if check.func.as_index() != f.as_index() {|  // TODO: this shouldn't happen?
+                func.body = (Redirect = check.func);
+                
+                //old := check.func;
+                //old_func := comp[old]&;
+                
+                //size := 0;
+                //each check.blocks { b |
+                //    size += b.insts.len;
+                //};
+                
+                //@println("F%_% <-> F%_% deduplicated, saved % ops", 
+                //    old.as_index(), get_string(comp.cast(), old_func.name),
+                //    f.as_index(), get_string(comp.cast(), func.name), 
+                //    size
+                //);
+            };
+            return(Ok = check);
+        };
+        
+        self.program.saved_bytecodes&.insert(body, when);
+    };
     
     (Ok = body)
 }
 
 :: List(Symbol);
-fn empty_fn_body(comp: CompilerRs, func: FuncId, when: ExecStyle) Res(FnBody) = {
+fn empty_fn_body(comp: CompilerRs, func: FuncId, when: ExecStyle) Res(*FnBody) = {
     f := comp[func]&;
     f_ty := @unwrap(f.finished_ty(), "ICE: fn type not ready") return;
-    (Ok = (
+    ptr := comp.bytecodes&.push(
         blocks = empty(),
         vars = empty(),
         var_names = empty(),
@@ -188,7 +219,9 @@ fn empty_fn_body(comp: CompilerRs, func: FuncId, when: ExecStyle) Res(FnBody) = 
         current_block = (id = 0),
         clock = 0,
         want_log = f.has_tag(.log_bc),
-    ))
+    );
+    
+    (Ok = ptr)
 }
 
 fn unwrap(self: *LazyType) Type = {
@@ -242,7 +275,7 @@ fn bind_args(self: *EmitBc, result: *FnBody, arguments: *Pattern) Res([] Prim) =
             self.save_ssa_var(result)
         } else {|
             slots := self.program.slot_count(ty);
-            id := result.add_var(ty);
+            id := result.add_var(self, ty);
             @switch(slots) {
                 @case(0) => (); 
                 @case(1) => {
@@ -318,7 +351,7 @@ fn compile_for_arg(self: *EmitBc, result: *FnBody, arg: *FatExpr, arity: usize) 
     };
 
     if arity == 1 {|
-        id := result.add_var(arg.ty);
+        id := result.add_var(self, arg.ty);
         self.addr_var(result, id);
         @try(self.compile_expr(result, arg, .ResAddr, false)) return;
         self.addr_var(result, id);
@@ -358,7 +391,7 @@ fn compile_for_arg(self: *EmitBc, result: *FnBody, arg: *FatExpr, arity: usize) 
             }
             // TODO: factor out aot handling from main value handling so can use here too. -- Jun 3
             fn Value(f) => {
-                if result.when == .Jit {|
+                if result.when == .Jit && !ALWAYS_BAKE_CONSTANTS {|
                     // TODO: this gets super bad if the callee isn't properly copying it because they'll be nmodifying something we think is constant
                     _pushed += 1;
                     result.push(PushConstant = (
@@ -373,7 +406,7 @@ fn compile_for_arg(self: *EmitBc, result: *FnBody, arg: *FatExpr, arity: usize) 
         };
 
         _pushed += 1;
-        id := result.add_var(ty);
+        id := result.add_var(self, ty);
         self.addr_var(result, id);
         @try(self.compile_expr(result, val, .ResAddr, false)) return;
         self.addr_var(result, id);
@@ -543,7 +576,7 @@ fn emit_runtime_call(
 
     :: if(?u16);
     result_var: ?u16 = if sig.first_arg_is_indirect_return && result_location != .ResAddr {|
-        id := result.add_var(f_ty.ret);
+        id := result.add_var(self, f_ty.ret);
         self.addr_var(result, id);
         (Some = id)
     } else {|
@@ -604,7 +637,7 @@ fn compile_stmt(self: *EmitBc, result: *FnBody, stmt: *FatStmt) PRes = {
             assert(f.ty&.is(.Finished), "type not ready");
             ty := f.ty.Finished;
 
-            id := result.add_var(ty);
+            id := result.add_var(self, ty);
             if result.want_log {|
                 // TODO: being this back -- Jul 8
                 //extend_options2(&mut result.var_names, id as usize);
@@ -636,7 +669,7 @@ fn compile_stmt(self: *EmitBc, result: *FnBody, stmt: *FatStmt) PRes = {
             
             // It's a destructuring (not inlined args)
             // We store the whole value in a stack slot and then save pointers into different offsets of it as thier own variables.
-            full_id := result.add_var(f.value.ty);
+            full_id := result.add_var(self, f.value.ty);
             self.addr_var(result, full_id);
             @try(self.compile_expr(result, f.value&, .ResAddr, false)) return;
             info := self.program.get_type(f.value.ty);
@@ -673,7 +706,7 @@ fn compile_stmt(self: *EmitBc, result: *FnBody, stmt: *FatStmt) PRes = {
 }
 
 fn do_binding(self: *EmitBc, result: *FnBody, name: ?Var, ty: Type, value: *FatExpr) PRes = {
-    id := result.add_var(ty);
+    id := result.add_var(self, ty);
     // TODO: bring this back
     //if result.want_log {|
     //    extend_options2(&mut result.var_names, id as usize);
@@ -817,6 +850,7 @@ fn emit_call(self: *EmitBc, result: *FnBody, f: *FatExpr, arg: *FatExpr, result_
             if(func.has_tag(.no_tail), => { can_tail = false; });
             
             return(self.emit_runtime_call(result, f_ty, cc, arg, result_location, can_tail) { sig, tail |
+                result.mix_hash(f_id.as_index(), 436265);
                 result.push(CallDirect = (sig = sig[], f = f_id, tail = tail))
             });
         }
@@ -942,16 +976,25 @@ fn emit_value(self: *EmitBc, result: *FnBody, value: *Values, result_location: R
     if(result_location == .Discard, => return(.Ok));
     want_emit_by_memcpy := value.len() > 16;  // dont change this to include small things unless you do something about values being stored inline.
     // TODO: you probably want to allow people to overload bake_relocatable_value even if !contains_pointers, but also there's no point. -- Jun 19
-    if result.when == .Aot && want_emit_by_memcpy.or(self.program.get_info(expr_ty).contains_pointers()) {|
+    if ALWAYS_BAKE_CONSTANTS.or(result.when == .Aot) && want_emit_by_memcpy.or(self.program.get_info(expr_ty).contains_pointers()) {|
         if result_location.eq(.PushStack).or(!want_emit_by_memcpy) {|
             out := @try(self.program.emit_relocatable_constant_body(value.bytes(), expr_ty, false)) return;
 
             for out { part | 
                 @match(part) {
                     // TODO: now you can't have non-i64 in top level constant struct -- Jun 18
-                    fn Num(f)     => result.push(PushConstant = (value = f.value, ty = f.ty));
-                    fn FnPtr(f)   => result.push(GetNativeFnPtr = f);
-                    fn AddrOf(id) => result.push(PushGlobalAddr = id);
+                    fn Num(f)     => {
+                        result.push(PushConstant = (value = f.value, ty = f.ty));
+                        result.mix_hash(f.value, 123);
+                    }
+                    fn FnPtr(f)   => {
+                        result.push(GetNativeFnPtr = f);
+                        result.mix_hash(f.as_index(), 1237);
+                    }
+                    fn AddrOf(id) => {
+                        result.push(PushGlobalAddr = id);
+                        result.mix_hash(id.id.zext(), 9765);
+                    }
                 };
             };
             if result_location == .ResAddr {|
@@ -961,6 +1004,7 @@ fn emit_value(self: *EmitBc, result: *FnBody, value: *Values, result_location: R
             @assert_eq(result_location, .ResAddr);
             id := @try(self.program.emit_relocatable_constant(expr_ty, value)) return;
 
+            result.mix_hash(id.id.zext(), 9765);
             result.push(PushGlobalAddr = id);
             info := self.program.get_info(expr_ty);
             result.push(CopyBytesToFrom = info.stride_bytes);
@@ -990,6 +1034,7 @@ fn emit_value(self: *EmitBc, result: *FnBody, value: *Values, result_location: R
             @debug_assert_eq(parts.len(), info.len());
             enumerate parts { i, value | 
                 (ty, _) := info[i];
+                result.mix_hash(value[], 1234567);
                 result.push(PushConstant = (value = value[], ty = ty));
             };
         }
@@ -1022,6 +1067,7 @@ fn emit_value(self: *EmitBc, result: *FnBody, value: *Values, result_location: R
                     result.inc_ptr_bytes(offset);
                     result.push(PushConstant = (value = value[], ty = ty));
                     result.push(StorePre = ty);
+                    result.mix_hash(value[], 1234567);
                 };
                 result.pop(1); // res ptr
             };
@@ -1054,7 +1100,7 @@ fn emit_sufix_macro(self: *EmitBc, result: *FnBody, macro_name: Symbol, arg: *Fa
                 @default => (arg.ty, 1);
             };
 
-            id := result.add_var(container_ty);
+            id := result.add_var(self, container_ty);
             self.addr_var(result, id);
             @try(self.compile_expr(result, arg, .ResAddr, false)) return;
 
@@ -1369,7 +1415,6 @@ fn construct_struct(self: *EmitBc, result: *FnBody, pattern: *Pattern, requested
     return(.Ok)
 }
 
-
 fn push_block_empty(self: *FnBody) BbId = {
     self.blocks&.push((
         insts = empty(),
@@ -1417,7 +1462,7 @@ fn addr_var(ctx: *EmitBc, self: *FnBody, id: u16) void = {
 
 // TODO: move result to EmitBc instead of passing it around? -- Jul 8
 fn save_ssa_var(ctx: *EmitBc, self: *FnBody) u16 = {
-    id := self.add_var(rawptr);
+    id := self.add_var(ctx, rawptr);
     ctx.is_ssa_var&.set(id.zext(), temp()); 
     self.push(SaveSsa = (id = id, ty = .P64));
     id
@@ -1433,9 +1478,13 @@ fn inc_ptr_bytes(self: *FnBody, bytes: u16) void = {
 ::tagged(Bc);
 fn push_to(self: *FnBody, b: BbId, inst: Bc) void = {
     //@println("%", inst&.tag());
-    self.hash += inst&.tag().ordinal();
-    self.hash *= 9801;
+    self.mix_hash(inst&.tag().ordinal(), 9801);
     self[b].insts&.push(inst, self.alloc);
+}
+
+fn mix_hash(self: *FnBody, i: i64, spice: i64) void = {
+    self.hash += i;
+    self.hash *= spice;
 }
 
 fn pop(self: *FnBody, slots: u16) void = {
@@ -1448,8 +1497,10 @@ fn index(self: *FnBody, b: BbId) *BasicBlock = {
     self.blocks.index(b.id.zext())
 }
 
-fn add_var(self: *FnBody, ty: Type) u16 = {
-    self.vars&.push(ty, self.alloc);
+fn add_var(self: *FnBody, ctx: *EmitBc, ty: Type) u16 = {
+    info := ctx.program.get_info(ty);
+    self.mix_hash(info.stride_bytes.zext(), 12345);
+    self.vars&.push((size = info.stride_bytes, align = info.align_bytes), self.alloc);
     i: u16 = self.vars.len.trunc();
     i - 1
 }
@@ -1737,3 +1788,41 @@ fn ret_slots(self: *PrimSig) u16 = {
 fn arg_slots(self: *PrimSig) i64 = {
     if(self.first_arg_is_indirect_return, => self.args.len + 1, => self.args.len)
 }
+
+// TODO: be able to derive but skip fields? or take off `func`?
+// TODO: (also in the derived version) for aggragates like this with multiple collections, check all the lengths first before iterating. 
+//       generalize quick_ne or something maybe? 
+fn eq(lhs: **FnBody, rhs: **FnBody) bool = {
+    if(lhs.when != rhs.when, => return(false));
+    if(lhs.blocks&.items() != rhs.blocks&.items(), => return(false));
+    if(lhs.vars&.items() != rhs.vars&.items(), => return(false));
+    true
+}
+
+// we do a rolling hash as we create the FnBody so just return that. 
+fn hash(h: *TrivialHasher, s: **FnBody) void = {
+    h.hash(s.hash&);
+}
+
+:: {
+    AutoEq(BasicBlock);
+    AutoEq(Bc);
+    AutoEq(PrimSig);
+    DerefEq(Prim);
+    AutoEq(?Prim);
+    AutoEq(BbId);
+    AutoEq(BakedVarId);
+    AutoEq(VarSlotType);
+    DerefEq(FuncId);
+    fn eq(a: FuncId, b: FuncId) bool #redirect(Ty(u32, u32), bool);
+    AutoEq(get_variant_type(Bc, Bc.Tag().CallDirect));
+    AutoEq(get_variant_type(Bc, Bc.Tag().CallFnPtr));
+    AutoEq(get_variant_type(Bc, Bc.Tag().PushConstant));
+    AutoEq(get_variant_type(Bc, Bc.Tag().JumpIf));
+    AutoEq(get_variant_type(Bc, Bc.Tag().Goto));
+    AutoEq(get_variant_type(Bc, Bc.Tag().AddrVar));
+    AutoEq(get_variant_type(Bc, Bc.Tag().SaveSsa));
+    AutoEq(get_variant_type(Bc, Bc.Tag().LoadSsa));
+    AutoEq(get_variant_type(Bc, Bc.Tag().LastUse));
+    AutoEq(get_variant_type(Bc, Bc.Tag().Ret2));
+};

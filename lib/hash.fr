@@ -34,6 +34,9 @@ fn AutoHash($T: Type, $Hasher: Type) void = {
 }
 
 fn AutoEq($T: Type) void = {
+    fn ne(lhs: *T, rhs: *T) bool #inline = 
+        !lhs.eq(rhs);
+    
     fn eq(lhs: *T, rhs: *T) bool = {
         @inline_match(@run T.get_type_info_ref()) {
             (fn Struct($_) => {
@@ -55,17 +58,22 @@ fn AutoEq($T: Type) void = {
                 
                 // TODO: @inline_switch.
                 inline_for T.get_variants() { $f | 
+                    non_void :: !(f[]._1 == void);
                     if i == tag_value {|
-                        l_inner := T.get_variant_ptr_for(lhs, f);
-                        r_inner := T.get_variant_ptr_for(rhs, f);
-                        return(l_inner.eq(r_inner));
+                        @if(non_void, => {
+                            l_inner := T.get_variant_ptr_for(lhs, f);
+                            r_inner := T.get_variant_ptr_for(rhs, f);
+                            return(l_inner.eq(r_inner));
+                        }, => { return(true); });
                     };
                     i += 1;
                 };
                 // TODO: @safety unreachable_unchecked so you don't bloat the code. i don't trust that llvm can notice my tag preconditions. 
-                panic("Tried to eq @tagged with invalid tag value. Uninitilized memory?")
+                @panic("Tried to eq @tagged with invalid tag value %. Uninitilized memory?", tag_value);
+                // TODO: compiler bug! if you let Never fall through you get garbage from the early return???????? -- jul 20
+                false
             });
-            @default => panic("Unsupported type for AutoEq");
+            @default => :: panic("Unsupported type for AutoEq");
         }
     }
 }
@@ -95,10 +103,16 @@ fn HashAsInt($T: Type, $Hasher: Type) void = {
 // TODO: really need to have less painful polymorphism stuff so you don't have to put everything in one place. 
 fn StupidAddHashable($H: Type) void = {
     WalkInts() { $T | HashAsInt(T, H); };
+    HashAsInt(u8, H);
     #redirect(Ty(*H, *u32), void) fn hash(h: *H, s: *Type) void;
     #redirect(Ty(*H, *u32), void) fn hash(h: *H, s: *Symbol) void;
     #redirect(Ty(*H, *u32), void) fn hash(h: *H, s: *LabelId) void;
     HashEach([]u8, H);
+    AutoHash(TypeInfo, H); AutoEq(TypeInfo);
+    AutoHash(IntTypeInfo, H); AutoEq(IntTypeInfo);
+    AutoHash(FnType, H); AutoEq(FnType);
+    AutoHash(Field, H); AutoEq(Field);
+    AutoHash(?Var, H); AutoEq(?Var);
     
     fn hash(h: *H, s: *Var) void = {
         h.hash(s.id&);
@@ -116,12 +130,17 @@ fn DerefEq($T: Type) void = {
 :: DerefEq(Type);
 :: DerefEq(Symbol);
 :: DerefEq(LabelId);
+:: DerefEq(i64);
 fn eq(a: LabelId, b: LabelId) bool #redirect(Ty(u32, u32), bool);
+
+fn eq(a: *u8, b: *u8) bool = {
+    a[] == b[]
+}
 
 fn WalkInts($do: @Fn(t: Type) void) void = {
     do(u32);
     do(u16);
-    do(u8);
+    //do(u8); // TODO: this gets less stupid once i have more robust out of order compilation i hope! sad day for now
     do(i64);
     do(i32);
     do(i16);

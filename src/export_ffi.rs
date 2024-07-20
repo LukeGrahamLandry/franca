@@ -484,6 +484,7 @@ pub const COMPILER: &[(&str, *const u8)] = &[
 extern "C-unwind" fn get_enum_tag_type(comp: &mut Compile, e: TypeId) -> TypeId {
     let raw = comp.program.raw_type(e);
     let TypeInfo::Tagged { tag, .. } = &comp.program[raw] else {
+        println!("{}", comp.log_trace());
         panic!("Expected @tagged found {}", comp.program.log_type(e))
     };
     *tag

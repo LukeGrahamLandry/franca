@@ -1,3 +1,27 @@
+## Jul 19
+
+- temp alloc had the wrong base_size because baked constants weren't including tagged padding.
+  didn't matter cause its just virtual memory but thats one less lurking bug.
+  while debugging that found another missing \_\_clear_cache when calling into the compiler for dyn_bake.
+  at some point i should just give up and write an interpreter.
+  tho i could also try to do something fancy where every time i return or call a function that might be jitted,
+  check the target address against the mmapped code segment and only clear cache if its in there and new or something.
+  i guess returning should never be a problem? how can you be returning to something that wasn't compiled yet.
+
+// TODO: (maybe) instead of storing TypeId of vars, store size+align.
+// then don't throw away fnbody after use, keep them in a hashmap to deduplicate generics.
+// like List(\*T) will often generate the same code even with different types.
+// can keep a running hash as you construct the bc so maybe pretty fast to discard non-matches.
+// have that as a build option so you don't have to take the hit for debug builds if you don't want to.
+// but it actually might make it faster in general because it means giving less stuff to llvm which is 90% of the time.
+// I kinda want to wait for emit_bc and bc_to_asm to be self hosted tho cause then its less awkward to change things.
+// Note: you wont get all the matches until you really deduplicate because they might call different functions that actaully generate the same code,
+// so have to have a thing like redirects where if checks if a call has been deduplicated. -- Jul 5
+
+Did the first part of that, now vars are just size + align.
+That's also kinda nice cause it decouples the bytecode from the rest of the compiler more,
+so it might be easier to try to import wasm or something to bytecode as a way to test that backend eventually?
+
 ## debugging ported aarch64 (Jul 17/18)
 
 - its a little too easy to typo a `:=` inside a scope. maybe should think about that.

@@ -1,0 +1,172 @@
+
+// trying to debug __temp_alloc base size being wrong
+// - emit_relocatable_constant_body had to dump_dirty/__clear_cache
+// that wasn't the problem i'm looking for tho.
+#test fn bus_error_baking_constant() = {
+    MeArena :: @struct(
+        parent: Alloc,
+        base_size: i64,
+    );
+    
+    fn bake_relocatable_value(self: *MeArena) Slice(BakedEntry) = {
+        bytes := MeArena.cast_to_bytes(self);
+        entries := dyn_bake_relocatable_value(bytes, MeArena, true);
+        entries
+    }
+    
+    constant :: @static(MeArena) (parent = page_allocator, base_size = 1234); 
+    x := constant[].base_size;
+    assert_eq(x, 1234);
+}
+
+// This was the __temp_alloc problem.
+// I just wasn't adding the padding for voids in .None (and other tagged things),
+// so the thing was too short and you were reading off the end or getting later fields.
+// but only if the payload had pointers because otherwise you'd just emit the bytes. 
+#test fn baked_constant_tagged_padding() = {
+    MeArena :: @struct(
+        chunk: ?*i64,
+        base_size: i64,
+    );
+    
+    fn bake_relocatable_value(self: *MeArena) Slice(BakedEntry) = {
+        bytes := MeArena.cast_to_bytes(self);
+        entries := dyn_bake_relocatable_value(bytes, MeArena, true);
+        entries
+    }
+
+    constant :: @static(MeArena) (chunk = .None, base_size = 1234); 
+    x := constant[].base_size;
+    assert_eq(x, 1234);
+}
+
+// this was about letting Never fall through with early returns? really need to fix that...
+// TODO: make a test for the actual problem hopefully before i forget
+#test fn derive_eq_doesnt_even_work() = {
+    Bc :: @tagged(
+        Snipe: u16,
+    );
+
+    :: {
+        tagged(Bc);
+        AutoEq(Bc);
+    };
+    
+    a := 0xFFFF;
+    b := 0xFFFF;
+    ::assert_eq(u16);
+    assert_eq(a, b); // this works...
+
+    a: Bc = (Snipe = 123);
+    b: Bc = (Snipe = 123);
+    same := a& == b&;
+    println(same);
+    assert_eq(true, same);
+}
+
+#test fn derive_eq_segfaults() = {
+    Bc :: @tagged(
+        CallDirect: @struct(sig: PrimSig, f: FuncId, tail: bool),     // <args:m> -> <ret:n>
+        CallFnPtr: @struct(sig: PrimSig),                             // <ptr:1> <args:m> -> <ret:n>
+        PushConstant: @struct(value: i64, ty: Prim),                  // _ -> <v:1>
+        JumpIf: @struct(true_ip: BbId, false_ip: BbId, slots: u16),   // <args:slots> <cond:1> -> !
+        Goto: @struct(ip: BbId, slots: u16),                          // <args:slots> -> !
+        GetNativeFnPtr: FuncId,                                       // _ -> <ptr:1>
+        Load: Prim,                                                   // <ptr:1> -> <?:n>
+        StorePost: Prim,                                              // <?:n> <ptr:1> -> _
+        StorePre: Prim,                                               // <ptr:1> <?:n> -> _
+        AddrVar: @struct(id: u16),                                    // _ -> <ptr:1>
+        SaveSsa: @struct(id: u16, ty: Prim),                          // <p:1> -> _
+        LoadSsa: @struct(id: u16),                                    // _ -> <p:1>
+        IncPtrBytes: u16,                                             // <ptr:1> -> <ptr:1>
+        PeekDup: u16,                                                 // <x:1> <skip:n> -> <x:1> <skip:n> <x:1>,
+        CopyBytesToFrom: u16,                                         // <to_ptr:1> <from_ptr:1> -> _
+        LastUse: @struct(id: u16),                                    // _ -> _
+        Unreachable,                                                  // _ -> !
+        GetCompCtx,                                                   // _ -> <ptr:1>
+        NoCompile,
+        PushGlobalAddr: BakedVarId,
+        Snipe: u16,
+        Ret0, // big return uses this too because code has already written to indirect return address.
+        Ret1: Prim,
+        Ret2: Ty(Prim, Prim),
+        Nop,
+    );
+    
+    PrimSig :: @struct(
+        args: Slice(Prim) = empty(),
+        ret1: ?Prim,
+        ret2: ?Prim,
+        return_value_bytes: u16 = 0,
+        first_arg_is_indirect_return: bool = false,
+        no_return: bool = false,
+        arg_int_count: u8 = 0,
+    );
+    
+    FnBody :: @struct(
+        blocks: RsVec(BasicBlock),
+        // TODO: would be nice if i could sort these so less alignment padding on my backends. 
+        //       but thats a pain because then you need to map indexes.
+        vars: RsVec(VarSlotType),
+        alloc: Alloc,
+        hash: i64 = 0,
+        signeture: PrimSig,
+        func: FuncId,
+        name: Symbol,
+        current_block: BbId,  // TODO: remove. only needed while building
+        clock: u16,           // TODO: remove. only needed while building
+        want_log: bool,       // TODO: remove. only needed while building
+    );
+    VarSlotType :: @struct(size: u16, align: u16);
+        
+    BbId :: @struct(id: u16);
+    BasicBlock :: @struct(
+        insts: RsVec(Bc),
+        arg_prims: Slice(Prim),
+        incoming_jumps: u16,
+        clock: u16,
+    );
+    
+    fn eq(lhs: **FnBody, rhs: **FnBody) bool = {
+        if(lhs.blocks&.items() != rhs.blocks&.items(), => return(false));
+        if(lhs.vars&.items() != rhs.vars&.items(), => return(false));
+        true
+    }
+
+
+    :: {
+        tagged(Bc);
+        enum(Prim);
+        AutoEq(Bc);
+        AutoEq(PrimSig);
+        DerefEq(Prim);
+        AutoEq(?Prim);
+        AutoEq(BbId);
+        AutoEq(BakedVarId);
+        AutoEq(BasicBlock);
+        AutoEq(VarSlotType);
+        DerefEq(FuncId);
+        fn eq(a: FuncId, b: FuncId) bool #redirect(Ty(u32, u32), bool);
+        AutoEq(get_variant_type(Bc, Bc.Tag().CallDirect));
+        AutoEq(get_variant_type(Bc, Bc.Tag().CallFnPtr));
+        AutoEq(get_variant_type(Bc, Bc.Tag().PushConstant));
+        AutoEq(get_variant_type(Bc, Bc.Tag().JumpIf));
+        AutoEq(get_variant_type(Bc, Bc.Tag().Goto));
+        AutoEq(get_variant_type(Bc, Bc.Tag().AddrVar));
+        AutoEq(get_variant_type(Bc, Bc.Tag().SaveSsa));
+        AutoEq(get_variant_type(Bc, Bc.Tag().LoadSsa));
+        AutoEq(get_variant_type(Bc, Bc.Tag().LastUse));
+        AutoEq(get_variant_type(Bc, Bc.Tag().Ret2));
+    };
+    
+    a: Bc = (AddrVar = (id = 123));
+    b: Bc = (AddrVar = (id = 123));
+    assert_eq(true, a& == b&);
+    
+    garbage := FnBody.zeroed();
+    garbage_ref := garbage&;
+    assert_eq(true, garbage_ref& == garbage_ref&);
+    
+    
+    
+}
