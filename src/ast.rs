@@ -345,6 +345,7 @@ pub struct FatExpr<'p> {
     pub loc: Span,
     pub ty: TypeId,
     pub done: bool,
+    pub debug_been_here_before: bool,
 }
 
 impl<'p> FatExpr<'p> {
@@ -489,6 +490,7 @@ impl<'p> FatExpr<'p> {
             loc,
             ty: TypeId::unknown,
             done: false,
+            debug_been_here_before: false,
         }
     }
     pub(crate) fn synthetic_ty(expr: Expr<'p>, loc: Span, ty: TypeId) -> Self {

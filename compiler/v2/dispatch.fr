@@ -1,21 +1,121 @@
-Task :: @struct(
+CompilerDispatch :: @struct(    
+    active_stack: *List(ExprAttempt),
+    const_var_in_progress: DynamicBitSet, // TODO: just store this with the expression?
+    active_tasks: List(*Task),
+);
+
+Task :: @rec @struct(
     action: Action,
-    waiting_for: List(TaskId),
+    waiting_for: List(*Task),
+    done: bool = false,
 );
 
 TaskId :: @struct(id: i64);
 
+ExprAttempt :: @struct(expr: *FatExpr, requested: ResultType);
+VarAttempt :: @struct(name: Var, requested: ResultType);
 Action :: @tagged(
-    CompileExpr: FatExpr,
-    EvalExpr: FatExpr,
+    CompileExpr: *List(ExprAttempt),
     TypeHeader: FuncId,
     CompileBody: FuncId,
-    TypeConstant: Var,
-    EvalConstant: Var,
-    EvalFunc: FuncId,
-    EmitBc: FuncId,
-    EmitJitAsm: FuncId,
+    TypeConstant: VarAttempt,
+    EvalConstant: VarAttempt,
 );
+
+fn init(a: Alloc) CompilerDispatch = {
+    temp := a.alloc(List(ExprAttempt), 1);
+    temp.ptr[] = list(a);
+    (active_stack = temp.ptr, const_var_in_progress = empty(a), active_tasks = list(a))
+}
+
+fn poll_tasks(self: *SelfHosted) Result(void, *ParseErr) = {
+    pending: List(*Task) = list(todo_allocator);
+    made_progress := true;
+    
+    while => made_progress {|
+        made_progress = false;
+        self.dispatch.active_tasks&.ordered_retain() { t | 
+            !t.done
+        };
+        for self.dispatch.active_tasks { original_task |
+            pending&.push(original_task); 
+            while => !pending.is_empty() {|
+                task := pending.last().unwrap()[];
+                task.waiting_for&.ordered_retain() { t | 
+                    !t.done
+                };
+                if task.waiting_for.is_empty() {|
+                    result := self.exec_task(task);
+                    @match(result) {  
+                        fn Err(e) => {
+                            return(Err = e);
+                        }
+                        fn Ok() => {
+                            made_progress = true;
+                            task.done = true;
+                            pending&.pop();
+                        };
+                        fn Suspend(new_dep) => {
+                            new_task := todo_allocator.alloc(Task, 1);
+                            new_task := new_task.ptr;
+                            new_task[] = (action = new_dep[], waiting_for = list(todo_allocator));
+                            
+                            task.waiting_for&.push(new_task);
+                            pending&.push(new_task);
+                            made_progress = true;
+                        };
+                    };
+                } else {|
+                    for task.waiting_for { dep | 
+                        pending&.push(dep);
+                    };
+                };
+            };
+        };
+    };
+    
+    .Ok
+}
+
+::tagged(Action);
+fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
+    @println("exec task %", task.action&.tag());
+    if task.waiting_for&.last() { dep |
+        @debug_assert(!task.done, "task done but still has dependencies");
+        return(Suspend = dep.action&);
+    };
+    if task.done {|
+        return(.Ok);
+    };
+    
+    @match(task.action) {
+        fn CompileExpr(stack) => {
+            while => !stack.is_empty() {|
+                last := stack.last().unwrap()[];
+                @check(self.compile_expr(last.expr, last.requested)) return;
+                stack.pop();
+            };
+        }
+        fn TypeConstant(v) => {
+            panic("TODO: task TypeConstant");
+        };
+        fn EvalConstant(v) => {
+            name := v.name;
+            var := self.scopes.get_constant(name);
+            var := var.unwrap();
+            @check(self.decl_const(name, var._1&, var._0&)) return;
+            self.dispatch.const_var_in_progress&.unset(name.id.zext());
+            println("ok");
+        };
+        fn TypeHeader(fid) => {
+            panic("TODO: task TypeHeader");
+        }
+        fn CompileBody(fid) => {
+            panic("TODO: task CompileBody");
+        }
+    };
+    .Ok
+}
 
 fn Maybe($T: Type) Type = {
     Self :: @tagged(
@@ -23,14 +123,22 @@ fn Maybe($T: Type) Type = {
         Err: *ParseErr,
         Suspend: *Action,
     );
+    
+    fn unwrap(self: Self) T = {
+        if self&.is(.Err) {|
+            @panic("Unwrapped Maybe Err %", self.Err.msg);
+        };
+        ::tagged(Action);
+        @assert(self&.is(.Ok), "unwrapped suspending Maybe %", self.Suspend.tag());
+        self.Ok
+    }
+    
     ::tagged(Self);
     Self
 }
 
-fn poll_tasks(self: *SelfHosted) Result(bool, *ParseErr) = {
-    for self.pending_tasks { task |
-        @match(task) {
-        };
-    };
+fn wait_for(s: *SelfHosted, t: Action) *Action = {
+    mem := s.get_alloc().alloc(Action, 1);
+    mem.ptr[] = t;
+    mem.ptr
 }
-

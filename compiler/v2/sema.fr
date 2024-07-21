@@ -1,5 +1,7 @@
 // TODO: have first.fr pass vtable to #test if non-void argument. 
 
+DEBUG_ALWAYS_BE_YIELDING :: false;
+
 ResultType :: @tagged(
     Specific: Type,
     Returning: Type,
@@ -30,8 +32,18 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
         assert(expr.ty != UnknownType, "done but unknown type");
         return(.Ok);
     };
+    self.dispatch.active_stack.push(expr = expr, requested = requested);
+    @if(DEBUG_ALWAYS_BE_YIELDING) {
+        if !expr.debug_been_here_before {|
+            expr.debug_been_here_before = true;
+            return(Suspend = self.wait_for(CompileExpr = self.dispatch.active_stack));
+        };
+    };
+    
     @match(expr.expr&) {
-        fn Poison() => return(@err("Poison expression"));
+        fn Poison() => {
+            return(@err("Poison expression"));
+        }
         fn Value(f) => {
             if(expr.ty == UnknownType, => return(@err("ICE: Value expression must have known type")));
             if !f.coerced {|
@@ -42,10 +54,11 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
                 };
             };
             expr.done = true;
-            return(.Ok)
         }
         fn WipFunc() => return(@err("TODO: WipFunc expression"));
-        fn Call() => return(@err("TODO: Call expression"));
+        fn Call() => {
+            @check(self.compile_call(expr, requested)) return;
+        }
         fn Block(f) => {
             if !f.hoisted_constants {|
                 @check(self.hoist_constants(f.body.items())) return;
@@ -55,7 +68,6 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
                 @check(self.compile_stmt(stmt)) return;
             };
             @check(self.compile_expr(f.result, requested)) return;
-            return(.Ok)
         }
         fn Tuple(parts) => {
             each parts { expr | 
@@ -67,14 +79,15 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
             if expr.ty == UnknownType {|
                 expr.ty = panic("TODO: save tuple type");
             };
-            return(.Ok)
         }
         fn Closure() => return(@err("TODO: expression"));
         fn AddToOverloadSet() => return(@err("TODO: expression"));
         fn SuffixMacro() => return(@err("TODO: expression"));
         fn FieldAccess() => return(@err("TODO: expression"));
         fn StructLiteralP() => return(@err("TODO: expression"));
-        fn PrefixMacro() => return(@err("TODO: expression"));
+        fn PrefixMacro() => {
+            @check(self.compile_prefix_macro(expr)) return;
+        }
         fn GetVar(var) => return(self.compile_get_var(expr, requested));
         fn GetNamed() => return(@err("TODO: expression"));
         fn String() => {
@@ -85,13 +98,80 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
             expr.ty = @check(self.create_slice_type(byte)) return;
             panic("TODO: self.set_literal(expr, self.pool.get(i)");
             expr.done = true;
-            return(.Ok)
         }
         fn PtrOffset(_) => return(@err("ICE: PtrOffset should be done=true"));
         fn GetParsed() => return(@err("ICE: GetParsed is handled by scope.fr"));
         fn Cast() => return(@err("TODO: expression"));
     };
-    unreachable();
+    self.dispatch.active_stack.pop();
+    .Ok
+}
+
+fn compile_call(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(void) = {
+    @debug_assert(expr.expr&.is(.Call));
+    f := expr.expr.Call.f;
+    arg := expr.expr.Call.arg;
+    req_fn: ResultType = @match(requested) {
+        fn Specific(t) => (Returning = t);
+        @default => .None;
+    };
+    
+    @check(self.compile_expr(f, req_fn)) return;
+    
+    ::if(ResultType);
+    req_arg: ResultType = if(f.ty == UnknownType, => .None, => (Specific = f.ty));
+    @check(self.compile_expr(f, req_arg)) return;
+    
+    .Ok
+}
+
+fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
+    @debug_assert(expr.expr&.is(.PrefixMacro));
+    invocation := expr.expr.PrefixMacro&;
+    fat_expr_type := or self.env.fat_expr_type {|
+        // If we're early in bootstrapping and haven't compiled the FatExpr type yet, so some special handling.
+        if !invocation.handler.expr&.is(.GetVar) {|
+            return(@err("macro calls must be GetVar while bootstrapping. tried to run something too compilicated too soon."));
+        };
+        
+        name := invocation.handler.expr.GetVar.name;
+        @switch(name) {
+            @case(Flag.builtin.ident()) => {
+                if !invocation.arg.expr&.is(.String) {|
+                    return(@err("@builtin arg must be String literal"));
+                };
+                builtin_name := invocation.arg.expr.String;
+                @println("called builtin %", self.pool.get(builtin_name));
+                @switch(builtin_name) {
+                    @case(Flag.i64.ident()) => {
+                        ptr := i64;
+                        val := ptr_cast_unchecked(Type, u32, ptr&)[];
+                        expr.set((Small = (val.zext(), 4)), i64);
+                    };
+                    @case(Flag.compiler_debug_assert_eq_i64.ident()) => {
+                        my_assert_eq: rawptr : fn(a: i64, b: i64) i64 = {
+                            println("Hello World!");
+                            assert_eq(a, b);
+                            a
+                        };
+                        ty := self.tuple_of(@slice(i64, i64));
+                        ty := self.intern_type(FnPtr = (ty = (arg = ty, ret = i64, arity = 2), cc = .CCallReg));
+                        expr.set((Small = (my_assert_eq.int_from_rawptr(), 8)), ty);
+                    };
+                    @default => {
+                        return(@err("unknown @builtin '%'.", self.pool.get(builtin_name)));
+                    };
+                };
+            };
+            @default => {
+                return(@err("tried to call non-builtin macro '%' calls while bootstrapping.", self.pool.get(name)));
+            };
+        };
+        
+        return(.Ok)
+    };
+    
+    panic("TODO: call user macros");
     .Ok
 }
 
@@ -122,7 +202,10 @@ fn compile_get_var(self: *SelfHosted, expr: *FatExpr, requested: ResultType) May
     @debug_assert(expr.expr&.is(.GetVar));
     var := expr.expr.GetVar;
     if var.kind == .Const {|
-        @err("TODO: compile const var ref")
+        (value, ty) := @check(self.find_const(var, requested)) return;
+        expr.set(value, ty);
+        @check(self.coerce_const_expr(expr, requested)) return;
+        .Ok
     } else {|
         if self.scopes.get_var_type(var) { ty | 
             expr.ty = ty;
@@ -143,82 +226,124 @@ fn compile_get_var(self: *SelfHosted, expr: *FatExpr, requested: ResultType) May
     }
 }
 
-fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: TypeId) Maybe(Values) = {
+// Passing in the requested type here feels a bit weird, but I think it will make anon-functions less painful. 
+fn find_const(self: *SelfHosted, name: Var, requested: ResultType) Maybe(Ty(Values, Type)) = {
+    // If someone else is already trying to compile this, we don't want to fight over it. 
+    if self.dispatch.const_var_in_progress&.get(name.id.zext()) {|
+        return(Suspend = self.wait_for(EvalConstant = (name = name, requested = requested)));
+    };
+    
+    var := self.scopes.get_constant(name);
+    var := var.unwrap();
+    
+    // If we've compiled this before, great.
+    //     We can't coerce_constant here because we don't have a unique expression node to stick changes into if needed. 
+    //     (need to change the expression to create function pointers because they might not be compiled yet)
+    @if_let(var._0.expr&) fn Value(f) => {
+        return(Ok = (f.bytes&.clone(self.get_alloc()), var._0.ty));
+    };
+    
+    self.dispatch.const_var_in_progress&.set(name.id.zext());
+    
+    // TODO: -- Jul 21
+    // its sad to always yield here because _most_ of the time you could just do it now and it would be fine.
+    // so an easy optimisation might be just trying now, if it wasn't already const_var_in_progress so we know nobody else is working on it. 
+    // but since any _could_ yield, its a bug if we can't compile with _everything_ yielding,
+    // so at least keep a flag to toggle this behaviour? 
+    
+    (Suspend = self.wait_for(EvalConstant = (name = name, requested = requested)))
+}
+
+fn decl_const(self: *SelfHosted, name: Var, ty: *LazyType, value: *FatExpr) Maybe(void) = {
+    // TODO: do the @rec and type checking stuff from the rust version. 
+    @check(self.compile_expr(value, .None)) return;
+    if value.ty == UnknownType {|
+        return(@err("TODO: needed type hint for %", self.pool.get(name.name)));
+    };
+    if !value.expr&.is(.Value) {|
+        val := @check(self.immediate_eval_expr(value, value.ty)) return;
+        value.set(val, value.ty);
+    };
+    .Ok
+}
+
+fn coerce_const_expr(self: *SelfHosted, expr: *FatExpr, req: ResultType) Maybe(void) = {
+    @debug_assert(expr.expr&.is(.Value), "tried to coerce non-value expr");
+    
+    if req.specific() { req | 
+        if expr.ty != req {|
+            @assert(!expr.expr.Value.coerced, "const mismatch. % vs % but already coerced", self.log_type(expr.ty), self.log_type(req));
+            
+            expr.expr.Value.coerced = true;
+            expr.ty = req;
+            panic("TODO: coerce constant (might be an actual type error)");
+        };
+    };
+    .Ok
+}
+
+fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Values) = {
+    if self.check_quick_eval(expr, ret_ty) { val |
+        return(Ok = val);
+    };
+    
+    // TODO: you need to be on a new stack for this.
+    req: ResultType = (Specific = ret_ty);
+    @check(self.compile_expr(expr, req)) return;
+    if self.check_quick_eval(expr, ret_ty) { val |
+        return(Ok = val);
+    };
+    
     panic("TODO: immediate_eval_expr")
 }
 
-fn check_quick_eval(self: *SelfHosted, expr: *FatExpr, ret_ty: TypeId) Maybe(?Values) = {
+fn check_quick_eval(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) ?Values = {
     @match(expr.expr&) {
-        fn Value(f) => return(Ok = f.bytes&.clone(self.get_alloc()));
+        fn Value(f) => (Some = f.bytes&.clone(self.get_alloc()));
+        fn Block(it) => {
+            if it.body.is_empty() {|
+                return(self.check_quick_eval(it.result, ret_ty));
+            };
+            .None
+        }
+        fn Tuple(parts) => {
+            all: List(u8) = list(self.get_alloc());
+            each parts { part |
+                // TODO: tuple_types
+                val := or self.check_quick_eval(part, part.ty) {|
+                    return(.None)
+                };
+                all&.push_all(val&.bytes());
+            };
+            (Some = (Big = all.rs()))
+        }
+        fn Call(it) => {
+            if it.f.expr&.is(.Value) {|
+                @if_let(self.get_type(it.f.ty)) fn FnPtr(f) => {
+                    if self.check_quick_eval(it.arg, f.ty.arg) { arg_value |
+                        f_ptr := i64.assume_cast(it.f.expr.Value.bytes&)[];
+                        evil_hack := self;
+                        evil_hack := self&;
+                        self.finish_layout_deep(it.f.ty);
+                        res := evil_hack&.call_dynamic_values(f_ptr, f.ty&, arg_value&.bytes(), false);
+                        @match(res) {
+                            fn Ok(res) => {
+                                expr.set(res&.clone(self.get_alloc()), f.ty.ret);
+                                return(Some = res);
+                            }
+                            fn Err(e) => (); // TODO: don't just swollow errors
+                        }
+                    };
+                };
+            };
+            .None
+        }
+        @default => .None;
     }
-}
-
-fn ptr_type(self: *SelfHosted, inner: Type) Type = {
-    self.intern_type(Ptr = inner)
 }
 
 fn create_slice_type(self: *SelfHosted, inner: Type) Maybe(Type) = {
     panic("TODO: create_slice_type")
-}
-
-// This converts a const type in the compiler's binary to a type id in the target program.
-// It can only be done for some core interned types (not unique ones like structs and enums).
-fn get_or_create_type(self: *SelfHosted, $T: Type) Type = {
-    info :: T.get_type_info_ref();
-    @inline_match(info) {
-        fn Int(_) => self.intern_type(info[]);
-        // Some types have hardcoded ids. 
-        // they can also be used directly but doing it through this function might make it less painful to decouple them later.
-        fn Bool() => bool;
-        fn void() => void;
-        fn VoidPtr() => rawptr;
-        @default => panic("Tried to convert unsupported type from const to runtime");
-    }
-}
-
-fn synthetic_ty(expr: Expr, loc: Span, ty: Type) FatExpr = {
-    (expr = expr, loc = loc, ty = ty, done = false)
-}
-
-fn clone(self: *Values, a: Alloc) Values = {
-    @match(self) {
-        fn Small(_) => self[];
-        fn Big(f) => (Big = f.items().clone(a).rs());
-    }
-}
-
-fn err(arg: FatExpr) FatExpr #macro = {
-    if !arg.expr&.is(.Tuple) {|
-        return(@{ (Err = make_error(@[arg])) });
-    };
-    @{
-        out: List(u8) = list(temp());
-        @[ format_into('out&', arg.expr.Tuple.items(), arg.loc) ];
-        (Err = make_error(out.items()))
-    }
-}
-
-fn make_error(msg: Str) *ParseErr = {
-    mem := libc_allocator.alloc(ParseErr, 1);
-    mem.ptr[] = (span = Span.zeroed(), msg = msg);
-    mem.ptr
-}
-
-:: CBox(FatExpr);
-fn CBox($T: Type) void = {
-    fn box(self: *SelfHosted, e: T) *T = {
-        out := self.get_alloc().alloc(T, 1);
-        out.ptr[] = e;
-        out.ptr
-    }
-}
-
-fn check(v: FatExpr, ret: FatExpr) FatExpr #macro = @{
-    v := @[v];
-    if(!v&.is(.Ok)) {|
-        if(v&.is(.Err), => { @[ret](Err = v.Err); }, => { @[ret](Suspend = v.Suspend); });
-    };
-    v.Ok
 }
 
 fn parse_for_test(c: *SelfHosted, src: Str) FatExpr = {
@@ -230,18 +355,43 @@ fn parse_for_test(c: *SelfHosted, src: Str) FatExpr = {
 // TODO: why does #test try to call uncompiled function???
 fn reach_sema() void = {
     c := init_self_hosted();
-    e := c.parse_for_test("fn() => { abc :: 123; 456 }");
+    src :: """fn() => { 
+        builtin :: "this will never be evaluated";
+        assert_eq :: @builtin("compiler_debug_assert_eq_i64");
+        abc :: 123; 
+        assert_eq(123, 123)
+        //abc
+    }""";
+    e := c.parse_for_test(src);
     
     func := e.expr.Closure;
     s := scope_from_index(0);
     r := c.resolve_root(func, s);
     r.unwrap();
     e := func.body.Normal;
+    stack: List(ExprAttempt) = list(1, libc_allocator);
+    stack&.push(expr = e&, requested = .None);
     
-    res := c.compile_expr(e&, .None);
+    task: Task = (action = (CompileExpr = stack&), waiting_for = list(libc_allocator));
+    c.dispatch.active_tasks&.push(task&);
+    
+    res := c.poll_tasks();
+    ::tagged(@type res);
     if res&.is(.Err) {|
-        println("bad");
-        println(res.Err.msg);
-        panic(res.Err.msg);
+        @panic("Failed %", res.Err.msg);
     };
+    
+    //res := c.compile_expr(e&, .None);
+    //if res&.is(.Err) {|
+    //    println("bad");
+    //    println(res.Err.msg);
+    //    panic(res.Err.msg);
+    //};
+    //
+    @println("%", e.expr.Block.result.log(c.pool));
+    
+    val := c.immediate_eval_expr(e.expr.Block.result, i64);
+    val := val.unwrap();
+    val := i64.assume_cast(val&)[];
+    assert_eq(val, 123);
 }

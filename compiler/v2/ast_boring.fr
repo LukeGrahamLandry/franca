@@ -1,0 +1,159 @@
+fn index(comp: *SelfHosted, f: FuncId) *Func = {
+    comp.functions&.nested_index(f.as_index())
+}
+
+fn unptr_ty(c: *SelfHosted, ty: Type) ?Type = {
+    @match(c.get_type(ty)) {
+        fn Ptr(inner) => (Some = inner[]);
+        @default => .None; // TODO: do i need to raw_type? 
+    }
+}
+
+fn finished_ty(self: *Func) ?FnType = {
+    if self.finished_arg { arg |
+        if self.finished_ret { ret |
+            return(Some = (arg = arg, ret = ret, arity = @as(u16) self.arg.bindings.len().max(1).trunc()));
+        };
+    };
+    .None
+}
+
+:: tagged(FuncImpl);
+fn jitted_aarch64(self: *FuncImpl) ?[]u32 = {
+    @match(self) {
+        fn JittedAarch64(code) => {
+            return(Some = code.items());
+        }
+        fn Merged(parts) => {
+            each parts { p |
+                @if_let(p) fn JittedAarch64(code) => {
+                    return(Some = code.items());
+                };
+            };
+        }
+        @default => ();
+    };
+    
+    .None
+}
+
+fn ptr_type(self: *SelfHosted, inner: Type) Type = {
+    self.intern_type(Ptr = inner)
+}
+
+// This converts a const type in the compiler's binary to a type id in the target program.
+// It can only be done for some core interned types (not unique ones like structs and enums).
+fn get_or_create_type(self: *SelfHosted, $T: Type) Type = {
+    info :: T.get_type_info_ref();
+    @inline_match(info) {
+        fn Int(_) => self.intern_type(info[]);
+        // Some types have hardcoded ids. 
+        // they can also be used directly but doing it through this function might make it less painful to decouple them later.
+        fn Bool() => bool;
+        fn void() => void;
+        fn VoidPtr() => rawptr;
+        @default => panic("Tried to convert unsupported type from const to runtime");
+    }
+}
+
+fn specific(self: ResultType) ?Type = {
+    @match(self) {
+        fn Specific(t) => (Some = t);
+        @default => .None;
+    }
+}
+
+fn set(self: *FatExpr, value: Values, ty: Type) void = {
+    @debug_assert(!ty.is_unknown());
+    self.expr = (Value = (bytes = value, coerced = false));
+    self.ty = ty;
+    self.done = true;
+}
+
+fn synthetic_ty(expr: Expr, loc: Span, ty: Type) FatExpr = {
+    (expr = expr, loc = loc, ty = ty, done = false)
+}
+
+fn clone(self: *Values, a: Alloc) Values = {
+    @match(self) {
+        fn Small(_) => self[];
+        fn Big(f) => (Big = f.items().clone(a).rs());
+    }
+}
+
+fn tuple_of(self: *SelfHosted, types: []Type) Type = {
+    @switch(types.len()) {
+        @case(0) => void;
+        @case(1) => types[0];
+        @default => {
+            // TODO: always. would need to change how you go arg_ty -> prim_sig.
+            if types.len() > 50 {|
+                first := types[0];
+                cond :: fn(t: *Type) bool => t[] != first;
+                if !types.contains(cond) {|
+                    return(self.intern_type(Array = (
+                        inner = first,
+                        len = types.len.trunc(),
+                    )));
+                };
+            };
+    
+            // TODO: dont allocate the string a billion times
+            fields: List(Field) = list(types.len, self.get_alloc());
+            enumerate types { i, ty | 
+                assert(i <= 20, "ICE: TODO: tuple len > 20, fmt the name (easy, just sone need it yet)");
+                ::from_raw(Flag);
+                idx := Flag._0.raw().add(i);
+                name := (@as(?Flag) idx.from_raw()).unwrap().ident();
+                fields&.push(
+                    name = name,
+                    ty = ty[],
+                    default = .None,
+                    byte_offset = 99999,
+                    kind = .Var,
+                );
+            };
+            self.intern_type(Struct = (
+                fields = fields.rs(),
+                layout_done = false,
+                is_tuple = true,
+                const_field_count = 0,
+            ))
+        };
+    }
+}
+
+fn err(arg: FatExpr) FatExpr #macro = {
+    if !arg.expr&.is(.Tuple) {|
+        return(@{ (Err = make_error(@[arg])) });
+    };
+    @{
+        out: List(u8) = list(temp());
+        @[ format_into('out&', arg.expr.Tuple.items(), arg.loc) ];
+        (Err = make_error(out.items()))
+    }
+}
+
+fn make_error(msg: Str) *ParseErr = {
+    mem := libc_allocator.alloc(ParseErr, 1);
+    mem.ptr[] = (span = Span.zeroed(), msg = msg);
+    mem.ptr
+}
+
+:: CBox(FatExpr);
+fn CBox($T: Type) void = {
+    fn box(self: *SelfHosted, e: T) *T = {
+        out := self.get_alloc().alloc(T, 1);
+        out.ptr[] = e;
+        out.ptr
+    }
+}
+
+fn check(v: FatExpr, ret: FatExpr) FatExpr #macro = @{
+    v := @[v];
+    if(!v&.is(.Ok)) {|
+        if(v&.is(.Err), => { @[ret](Err = v.Err); }, => { @[ret](Suspend = v.Suspend); });
+    };
+    v.Ok
+}
+
