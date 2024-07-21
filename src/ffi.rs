@@ -63,12 +63,10 @@ macro_rules! send_num {
 
             // TODO: use correct types
             fn get_type(p: &Program) -> TypeId {
-                *p.type_lookup
-                    .get(&TypeInfo::Int($crate::ast::IntTypeInfo {
-                        bit_count: $bits,
-                        signed: $signed,
-                    }))
-                    .expect("number type should be pre-interned")
+                p.intern_type(TypeInfo::Int($crate::ast::IntTypeInfo {
+                    bit_count: $bits,
+                    signed: $signed,
+                }))
             }
 
             fn name() -> String {
@@ -95,7 +93,7 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for *mut T {
     // TODO: use correct types
     fn get_type(p: &Program) -> TypeId {
         let t = T::get_type(p);
-        *p.type_lookup.get(&TypeInfo::Ptr(t)).unwrap()
+        p.intern_type(TypeInfo::Ptr(t))
     }
 
     fn get_or_create_type(p: &mut Program) -> TypeId {

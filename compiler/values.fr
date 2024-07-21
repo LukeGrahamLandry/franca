@@ -614,9 +614,8 @@ fn get_type(self: *SelfHosted, ty: Type) *TypeInfo /* const */ #compiler = {
     self.types&.nested_index(ty.as_index())
 }
 
-// TODO: call this maybe_intern_type?
-fn intern_type(self: *SelfHosted, info: TypeInfo) Type #compiler = {
-    deduplicate := @match(info&) {
+fn should_deduplicate(type: *TypeInfo) bool = {
+    @match(type) {
         fn Struct(f) bool => {
             f.is_tuple  // :only_intern_tuples
         }
@@ -626,11 +625,19 @@ fn intern_type(self: *SelfHosted, info: TypeInfo) Type #compiler = {
         fn Placeholder() => false; // because it will get filled in later
         fn VoidPtr()  => false; // TODO: hack to match old behaviour and still call intern_type at the beginning
         @default     => true;
-    };
-    
+    }
+}
+
+// TODO: call this maybe_intern_type?
+fn intern_type(self: *SelfHosted, info: TypeInfo) Type #compiler = {
     ::if(Type);
-    if deduplicate {|
+    if info&.should_deduplicate() {|
         key := info&;
+        
+        // TODO: miscompilation if  you try to do this>>?
+        //@assert(!key.is(.Placeholder), "wtf");
+        //@println("%", key.tag());
+        
         or self.type_lookup&.get(key&) {| 
             id := typeid_from_index(self.types.len);
             stable := self.types&.push(info);
@@ -648,7 +655,15 @@ fn intern_type(self: *SelfHosted, info: TypeInfo) Type #compiler = {
 
 fn update_placeholder(self: *SelfHosted, placeholder_slot: Type, real_type: Type, name: Symbol) void #compiler = {
     idx := placeholder_slot.as_index();
-    self.types&.nested_index(idx)[] = (Named = (real_type, name));
+    slot := self.types&.nested_index(idx);
+    @assert(slot.is(.Placeholder));
+    slot[] = (Named = (real_type, name));
+    // TODO: I don't understand why you need this, but you definitely do...
+    //       cause its always a Named (we just put that there), and we don't deduplcate those,
+    //       so who's ever trying to look it up...? 
+    //       i dont think the rust code did this????? -- Jul 21
+    @debug_assert(self.type_lookup&.get(slot&).is_none());
+    self.type_lookup&.insert(slot, placeholder_slot);
     
     // just in case.    copy-paste call to truncate but now want to have the list full size ahead of time. 
     i := self.type_extra.len - 1; // we happen to know this can't underflow because there are builtin types.  
@@ -658,6 +673,8 @@ fn update_placeholder(self: *SelfHosted, placeholder_slot: Type, real_type: Type
     };
 }
 
+// these are hardcoded numbers in TypeId constructors
+// if you remove any remember to fix later indices!
 fn init_fixed_types(self: *SelfHosted) void = {
     @assert_eq(self.types.len, 0);
     self.intern_type(.Placeholder);
@@ -719,8 +736,7 @@ fn get_info(self: *SelfHosted, ty: Type) *TypeMeta #compiler = {
                 info := self.get_info(arg.ty);
                 align = align.max(info.align_bytes);
                 @debug_assert_eq(arg.byte_offset.mod(info.align_bytes.zext()), 0, "ICE: unaligned field");
-                // TODO!!
-                //@debug_assert_ge(arg.byte_offset, bytes, "ICE: fields not in order"); // TODO: assert not past max_u16 or better have a safety checking intcast
+                @debug_assert_ge(arg.byte_offset, bytes, "ICE: fields not in order"); // TODO: assert not past max_u16 or better have a safety checking intcast
                 end := arg.byte_offset + info.stride_bytes.zext();
                 bytes = bytes.max(end);
                 size += info.size_slots;
@@ -899,7 +915,7 @@ fn finish_layout(self: *SelfHosted, ty: Type) PRes #compiler = {
         fn Struct(f) => {
             if(f.layout_done, => return(.Ok));
             f.const_field_count = 0;
-            //@debug_assert_eq(f.const_field_count, 0, "TODO: handle partial then error if you call this multiple times?");
+            @debug_assert_eq(f.const_field_count, 0, "TODO: handle partial then error if you call this multiple times?");
             // :struct_layout_in_type_info
             // Here we mutate const_field_count, layout_done, and the byte_offset of the fields, which we know the hash function ignores
             

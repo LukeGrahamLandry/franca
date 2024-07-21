@@ -141,7 +141,8 @@ impl<'p> Program<'p> {
         }
 
         safe_rec!(self, t, format!("{t:?}"), {
-            if t.is_valid() && t.as_index() < self.types.len() {
+            if t.is_valid() {
+                // && t.as_index() < self.types.len()
                 match &self[t] {
                     TypeInfo::Placeholder => "UnfinishedPlaceHolder".to_owned(),
                     TypeInfo::Never => "Never".to_owned(),

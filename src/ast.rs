@@ -5,10 +5,10 @@ use crate::{
     compiler::{CErr, Res},
     err,
     export_ffi::BigOption,
-    extend_options, impl_index, impl_index_imm,
+    impl_index,
     self_hosted::Ident,
     self_hosted::SelfHosted,
-    BitSet, Map, STATS,
+    Map, STATS,
 };
 use std::ptr::addr_of;
 use std::{
@@ -101,22 +101,6 @@ pub struct TypeMeta {
     pub align_bytes: u16,
     pub contains_pointers: bool,
     pub pass_by_ref: bool,
-}
-
-impl TypeMeta {
-    #[track_caller]
-    fn new(size_slots: u16, align_bytes: u16, float_mask: u32, contains_pointers: bool, stride_bytes: u16, pass_by_ref: bool) -> Self {
-        debug_assert_eq!(stride_bytes % align_bytes, 0);
-        Self {
-            _pad: 0,
-            size_slots,
-            align_bytes,
-            stride_bytes,
-            float_mask,
-            contains_pointers,
-            pass_by_ref,
-        }
-    }
 }
 
 #[repr(C)]
@@ -768,9 +752,6 @@ pub enum LazyType<'p> {
 #[repr(C)]
 pub struct Program<'p> {
     pub pool: &'p mut SelfHosted<'p>, // repr c matters so this is first must match franca side
-    pub types: Vec<TypeInfo<'p>>,
-    // twice as much memory but it's so much faster. TODO: can i just store hashes?
-    pub type_lookup: Map<TypeInfo<'p>, TypeId>,
     /// Comptime function calls that return a type are memoized so identity works out.
     /// Note: if i switch to Values being raw bytes, make sure to define any padding so this works.
     pub overload_sets: Vec<OverloadSet<'p>>, // TODO: use this instead of lookup_unique_func
@@ -778,8 +759,6 @@ pub struct Program<'p> {
     pub log_type_rec: RefCell<Vec<TypeId>>,
     // After binding const args to a function, you get a new function with fewer arguments.
     pub const_bound_memo: Map<(FuncId, Values), FuncId>,
-    pub types_extra: RefCell<Vec<Option<TypeMeta>>>,
-    finished_layout_deep: BitSet,
     pub inferred_type_names: Vec<Option<Ident<'p>>>,
 }
 
@@ -875,46 +854,15 @@ impl<'p> Program<'p> {
     pub(crate) fn new(_comptime_arch: TargetArch) -> Self {
         let pool = Box::leak(unsafe { init_self_hosted() });
         pool.vtable = addr_of!(IMPORT_VTABLE);
-        let mut program = Self {
-            finished_layout_deep: BitSet::empty(),
-            // these are hardcoded numbers in TypeId constructors
-            // if you remove any remember to fix later indices!
-            types: vec![
-                TypeInfo::Placeholder, // Unknown
-                TypeInfo::Unit,
-                TypeInfo::Named(TypeId::from_index(10), Flag::Type.ident()),
-                TypeInfo::Int(IntTypeInfo { bit_count: 64, signed: true }),
-                TypeInfo::Bool,
-                TypeInfo::VoidPtr,
-                TypeInfo::Never,
-                TypeInfo::F64,
-                TypeInfo::Named(TypeId::from_index(10), pool.intern("OverloadSet")),
-                TypeInfo::Named(TypeId::from_index(10), pool.intern("Scope")),
-                TypeInfo::Int(IntTypeInfo {
-                    bit_count: 32,
-                    signed: false,
-                }),
-                TypeInfo::VoidPtr,
-                TypeInfo::F32,
-                TypeInfo::Named(TypeId::from_index(10), pool.intern("FuncId")),
-                TypeInfo::Named(TypeId::from_index(10), pool.intern("LabelId")),
-                TypeInfo::Named(TypeId::from_index(10), pool.intern("Symbol")),
-            ],
+
+        Self {
             pool,
             overload_sets: Default::default(),
             ffi_types: Default::default(),
             log_type_rec: RefCell::new(vec![]),
-            type_lookup: Default::default(),
             const_bound_memo: Default::default(),
-            types_extra: Default::default(),
             inferred_type_names: vec![],
-        };
-
-        for (i, ty) in program.types.iter().enumerate() {
-            program.type_lookup.insert(ty.clone(), TypeId::from_index(i));
         }
-
-        program
     }
 
     #[track_caller]
@@ -998,103 +946,10 @@ impl<'p> Program<'p> {
 
     pub(crate) fn finish_layout_deep(&mut self, ty: TypeId) -> Res<'p, ()> {
         unsafe { self_hosted::finish_layout_deep(self.pool, ty) }.unwrap();
-        if self.finished_layout_deep.get(ty.as_index()) {
-            return Ok(());
-        }
-        self.finished_layout_deep.insert(ty.as_index(), true); // do this at the beginning to stop recursion.
-        self.finish_layout(ty)?;
-        let ty = self.raw_type(ty);
-        match &self[ty] {
-            &TypeInfo::Fn(f) | &TypeInfo::FnPtr { ty: f, .. } => {
-                self.finish_layout_deep(f.arg)?;
-                self.finish_layout_deep(f.ret)?;
-            }
-            TypeInfo::Ptr(inner) | TypeInfo::Label(inner) | TypeInfo::Array { inner, .. } => self.finish_layout_deep(*inner)?,
-            TypeInfo::Struct { fields, .. } => {
-                // TODO: no clone
-                for f in fields.clone() {
-                    if f.kind == VarType::Const {
-                        continue;
-                    }
-                    self.finish_layout_deep(f.ty)?
-                }
-            }
-            TypeInfo::Tagged { cases, .. } => {
-                // TODO: no clone
-                for f in cases.clone() {
-                    self.finish_layout_deep(f.1)?
-                }
-            }
-            _ => {}
-        }
         Ok(())
     }
     pub(crate) fn finish_layout(&mut self, ty: TypeId) -> Res<'p, ()> {
         unsafe { self_hosted::finish_layout(self.pool, ty) }.unwrap();
-        let ty = self.raw_type(ty);
-        if let TypeInfo::Array { inner, .. } = self[ty] {
-            return self.finish_layout(inner);
-        }
-
-        if let TypeInfo::Tagged { cases, .. } = self[ty].clone() {
-            // sad!
-            for c in cases {
-                self.finish_layout(c.1)?;
-            }
-            return Ok(());
-        }
-
-        let TypeInfo::Struct {
-            fields,
-            layout_done,
-            is_tuple,
-            ..
-        } = &self[ty]
-        else {
-            return Ok(());
-        };
-        if *layout_done {
-            return Ok(());
-        }
-        let is_tuple = *is_tuple;
-
-        let mut fields = fields.clone();
-        for f in &fields {
-            if f.kind == VarType::Const {
-                continue;
-            }
-            self.finish_layout(f.ty)?;
-        }
-
-        let mut bytes = 0;
-        let mut const_field_count = 0;
-        for p in &mut fields {
-            if p.kind == VarType::Const {
-                const_field_count += 1;
-                continue;
-            }
-
-            let info = self.get_info(p.ty);
-            let inv_pad = bytes % info.align_bytes as usize;
-            if inv_pad != 0 {
-                bytes += info.align_bytes as usize - inv_pad;
-            }
-            p.byte_offset = bytes;
-
-            // TODO: this must be wrong? surely you dont want to have the array padding out to alignment if its just a nested struct.
-            //       tho its what c does. so i guess i need different reprs. and then size_of vs stride_of become different things.
-            bytes += info.stride_bytes as usize;
-        }
-
-        let info = TypeInfo::Struct {
-            fields,
-            layout_done: true,
-            is_tuple,
-            const_field_count,
-        };
-        self.types[ty.as_index()] = info.clone();
-        self.type_lookup.insert(info, ty); // TODO: don't always intern_type
-
         Ok(())
     }
 
@@ -1133,34 +988,8 @@ impl<'p> Program<'p> {
 }
 
 impl<'p> Program<'p> {
-    pub(crate) fn intern_type(&mut self, ty: TypeInfo<'p>) -> TypeId {
-        let other = unsafe { self_hosted::intern_type(self.pool, ty.clone()) };
-
-        let deduplicate = match &ty {
-            TypeInfo::Placeholder => false,
-            TypeInfo::Never | TypeInfo::F32 | TypeInfo::F64 | TypeInfo::Bool | TypeInfo::Unit | TypeInfo::VoidPtr => {
-                unreachable!("ICE: Called intern_type on {ty:?}, this is fine I guess, but probably shouldn't happen.")
-            }
-            TypeInfo::Int(_) | TypeInfo::Fn(_) | TypeInfo::FnPtr { .. } | TypeInfo::Ptr(_) | TypeInfo::Array { .. } | TypeInfo::Label(_) => true,
-            &TypeInfo::Struct { is_tuple, .. } => is_tuple,
-            TypeInfo::Tagged { .. } | TypeInfo::Enum { .. } | TypeInfo::Named(_, _) => false,
-        };
-
-        let old = if deduplicate {
-            self.type_lookup.get(&ty).copied().unwrap_or_else(|| {
-                let id = self.types.len();
-                self.types.push(ty.clone());
-                let id = TypeId::from_index(id);
-                self.type_lookup.insert(ty.clone(), id);
-                id
-            })
-        } else {
-            let id = self.types.len();
-            self.types.push(ty.clone());
-            TypeId::from_index(id)
-        };
-        assert_eq!(old, other, "{ty:?}");
-        old
+    pub(crate) fn intern_type(&self, ty: TypeInfo<'p>) -> TypeId {
+        unsafe { self_hosted::intern_type(self.pool, ty) }
     }
 
     #[track_caller]
@@ -1229,107 +1058,7 @@ impl<'p> Program<'p> {
     }
 
     pub(crate) fn get_info(&self, ty: TypeId) -> TypeMeta {
-        let new = unsafe { self_hosted::get_info(self.pool, ty) };
-        let ty = self.raw_type(ty);
-        extend_options(self.types_extra.borrow_mut().deref_mut(), ty.as_index());
-        if let Some(info) = self.types_extra.borrow_mut().deref_mut()[ty.as_index()] {
-            return info;
-        }
-        extend_options(self.types_extra.borrow_mut().deref_mut(), ty.as_index());
-        let info = match &self[ty] {
-            TypeInfo::Placeholder => panic!("Unfinished type {ty:?}",), // TODO: err!
-
-            TypeInfo::Struct { fields, layout_done, .. } => {
-                debug_assert!(*layout_done);
-                let mut size = 0;
-                debug_assert_eq!(fields[0].byte_offset, 0);
-                let mut align = 1;
-                let mut mask = 0;
-                let mut pointers = false;
-                let mut bytes = 0;
-
-                for arg in fields {
-                    if arg.kind == VarType::Const {
-                        continue;
-                    }
-                    let info = self.get_info(arg.ty);
-                    align = align.max(info.align_bytes);
-                    debug_assert_eq!(arg.byte_offset % info.align_bytes as usize, 0);
-                    debug_assert!(arg.byte_offset as u16 >= bytes);
-                    let end = arg.byte_offset as u16 + info.stride_bytes;
-                    bytes = bytes.max(end);
-                    size += info.size_slots;
-                    if size > 16 {
-                        // you only actually care about floats for passing in registers so if its bigger than 16, wont matter anyway?
-                        // until i do struct c abi properly and tuples mean args in a different way.
-                        mask = 0;
-                    } else {
-                        mask <<= info.size_slots;
-                        mask |= info.float_mask;
-                    }
-                    pointers |= info.contains_pointers;
-                }
-
-                if bytes % align != 0 {
-                    bytes += align - (bytes % align);
-                }
-
-                // TODO: two u8s should have special load like a u16 (eventually).
-                TypeMeta::new(size, align, mask, pointers, bytes, size > 2)
-            }
-            TypeInfo::Tagged { cases, .. } => {
-                let size = 1 + cases.iter().map(|(_, ty)| self.get_info(*ty).size_slots).max().expect("no empty enum");
-                let mut bytes = 8 + cases.iter().map(|(_, ty)| self.get_info(*ty).stride_bytes).max().expect("no empty enum");
-                let pointers = cases.iter().any(|(_, ty)| self.get_info(*ty).contains_pointers);
-
-                let align = 8;
-                if bytes % align != 0 {
-                    bytes += align - (bytes % align);
-                }
-                // TODO: currently tag is always i64 so align 8 but should use byte since almost always enough. but you just have to pad it out anyway.
-                //       even without that, if i add 16 byte align, need to check the fields too.
-                TypeMeta::new(size, 8, 0, pointers, bytes, size > 2)
-            }
-            TypeInfo::Never => TypeMeta::new(0, 1, 0, false, 0, false),
-            TypeInfo::Int(int) => {
-                // :SmallTypes
-                match int.bit_count {
-                    8 => TypeMeta::new(1, 1, 0, false, 1, false),
-                    16 => TypeMeta::new(1, 2, 0, false, 2, false),
-                    32 => TypeMeta::new(1, 4, 0, false, 4, false),
-                    _ => TypeMeta::new(1, 8, 0, false, 8, false),
-                }
-            }
-            // TODO: the float_mask thing is no longer enough information!
-            //       you can't tell if its the whole register or just half. tho maybe you never need to know so its fine...
-            TypeInfo::F32 => TypeMeta::new(1, 4, 1, false, 4, false),
-            TypeInfo::F64 => TypeMeta::new(1, 8, 1, false, 8, false),
-            TypeInfo::Unit => TypeMeta::new(0, 1, 0, false, 0, false),
-            TypeInfo::Bool => TypeMeta::new(1, 1, 0, false, 1, false), // :SmallTypes
-            TypeInfo::Ptr(_) | TypeInfo::VoidPtr | TypeInfo::FnPtr { .. } => TypeMeta::new(1, 8, 0, true, 8, false),
-
-            TypeInfo::Label(_) | TypeInfo::Fn(_) => TypeMeta::new(1, 4, 0, false, 4, false),
-            TypeInfo::Enum { .. } | TypeInfo::Named(_, _) => unreachable!(),
-            &TypeInfo::Array { inner, len } => {
-                if len == 0 {
-                    TypeMeta::new(0, 1, 0, false, 0, false)
-                } else {
-                    let info = self.get_info(inner);
-                    let slots = info.size_slots * len as u16;
-                    TypeMeta::new(
-                        slots,
-                        info.align_bytes,
-                        0,
-                        info.contains_pointers,
-                        info.stride_bytes * len as u16,
-                        len > 1 || info.pass_by_ref,
-                    )
-                }
-            }
-        };
-        self.types_extra.borrow_mut().deref_mut()[ty.as_index()] = Some(info);
-        assert_eq!(&info, new, "{:?}\n{:?}", self[ty], unsafe { self_hosted::get_type(self.pool, ty) });
-        info
+        *unsafe { self_hosted::get_info(self.pool, ty) }
     }
 
     pub(crate) fn slot_count(&self, ty: TypeId) -> u16 {

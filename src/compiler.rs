@@ -1305,7 +1305,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             debug_assert!(!expr.ty.is_unknown());
             return Ok(expr.ty);
         }
-        assert!(expr.ty.as_index() < self.program.types.len());
+        // assert!(expr.ty.as_index() < self.program.types.len());// should always be true i just can't be bothered to do ffi now that self hosted owns it
 
         let old = expr.ty;
 
@@ -3741,8 +3741,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         if let Some(rec) = rec {
             assert_eq!(final_ty, TypeId::ty);
             let ty: TypeId = from_values(self.program, val)?;
-            self.program.types[rec.as_index()] = TypeInfo::Named(ty, name.name);
-            self.program.types_extra.borrow_mut().truncate(rec.as_index()); // just in case. copy-paste
             unsafe  {
                 self_hosted::update_placeholder(self.program.pool, rec, ty, name.name)
             };

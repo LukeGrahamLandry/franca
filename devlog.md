@@ -7,6 +7,12 @@
   then needing to include it as aot but needing to emit differently but the body has already been replaced with the redirect so you can't notice the problem.
 - TODO: i reintroduced sometimes broken const temp areana base_size i think?
 
+Moving type storage to self hosted.
+
+- a bunch of pain about when you have to extend_options on the TypeExtra
+- typo-ed @tagged starting at size 8 and fold(max) on fields instead of 8 plus fold(max) on fields
+- speed is the same it seems? generates ~8% more llvm ir (cause theres more code in my language now) and takes ~8 longer to compile itself.
+
 ## Jul 19
 
 - temp alloc had the wrong base_size because baked constants weren't including tagged padding.
