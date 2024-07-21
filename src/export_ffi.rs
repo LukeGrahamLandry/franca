@@ -197,23 +197,22 @@ pub struct ImportVTable {
     _a: usize,
     init_compiler: unsafe extern "C" fn(comptime_arch: TargetArch) -> *const Compile<'static, 'static>,
     find_unqiue_func: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, name: Ident<'p>) -> BigOption<FuncId>,
-    // TODO: i want the meta program to be tracking these instead.
     _get_fns_with_tag: usize,
     _b: i64, // todo: remove
     compile_func: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, f: FuncId, when: ExecStyle) -> BigCErr<'p, ()>,
     get_jitted_ptr: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, f: FuncId) -> BigCErr<'p, *const u8>,
-    get_function: for<'p> unsafe extern "C" fn(c: &mut Compile<'p, '_>, f: FuncId) -> *const Func<'p>,
+    _get_function: usize,
     _d: usize,
     _add_file: usize,
     _parse_stmts: usize,
     make_and_resolve_and_compile_top_level: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, body: *const [FatStmt<'p>]) -> BigCErr<'p, ()>,
     make_jitted_exec: unsafe extern "C" fn(c: &mut Compile),
     give_vtable: unsafe extern "C" fn(c: &mut Compile, vtable: *const ExportVTable, userdata: *mut ()),
-    get_function_name: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, f: FuncId) -> Ident<'p>,
+    _k: usize,
     comptime_arch: unsafe extern "C" fn() -> (i64, i64),
     _c: usize,
-    emit_bc: usize,
-    get_type_meta: extern "C" fn(compile: &Compile, ty: TypeId) -> TypeMeta,
+    _l: usize,
+    _m: usize,
     __a: usize,
     _f: usize,
     __b: usize,
@@ -226,8 +225,8 @@ pub struct ImportVTable {
     _h: usize,
     clone_expr: for<'p> extern "C" fn(e: &FatExpr<'p>) -> FatExpr<'p>,
     clone_type: for<'p> extern "C" fn(e: &LazyType<'p>) -> LazyType<'p>,
-    intern_type: for<'p> extern "C" fn(compile: &mut Compile<'_, 'p>, e: TypeInfo<'p>) -> TypeId,
-    get_type: for<'p> extern "C" fn(compile: &mut Compile<'_, 'p>, e: TypeId) -> *const TypeInfo<'p>,
+    _o: usize,
+    _n: usize,
     log_type: extern "C" fn(compile: &mut Compile, e: TypeId) -> *const str,
     check_for_new_aot_bake_overloads: for<'p> extern "C" fn(comp: &mut Compile<'_, 'p>) -> Res<'p, ()>,
     clone_func: for<'p> extern "C" fn(e: &Func<'p>) -> Func<'p>,
@@ -250,18 +249,18 @@ pub static IMPORT_VTABLE: ImportVTable = ImportVTable {
     _b: 0,
     compile_func: franca_compile_func,
     get_jitted_ptr,
-    get_function: franca_get_function,
+    _get_function: 1,
     _d: 0,
     _add_file: 0xbeefbeefbeef,
     _parse_stmts: 0xbeefbeefbeef,
     make_and_resolve_and_compile_top_level,
     make_jitted_exec,
     give_vtable,
-    get_function_name,
+    _k: 0xbeefbeefbeef,
     comptime_arch,
     _c: 0,
-    emit_bc: 0,
-    get_type_meta,
+    _l: 0,
+    _m: 0xbeefbeefbeef,
     __a: 0,
     _f: 0xbeefbeefbeef,
     __b: 0xbeefbeefbeef,
@@ -274,8 +273,8 @@ pub static IMPORT_VTABLE: ImportVTable = ImportVTable {
     _h: 0,
     clone_expr,
     clone_type,
-    intern_type: franca_intern_type,
-    get_type,
+    _o: 0,
+    _n: 0,
     log_type: franca_log_type,
     check_for_new_aot_bake_overloads,
     clone_func,
@@ -289,14 +288,6 @@ extern "C" fn franca_log_type(compile: &mut Compile, e: TypeId) -> *const str {
     compile.program.log_type(e).leak() as *const str
 }
 
-extern "C" fn get_type<'p>(compile: &mut Compile<'_, 'p>, e: TypeId) -> *const TypeInfo<'p> {
-    &compile.program[e] as *const TypeInfo<'p>
-}
-
-extern "C" fn franca_intern_type<'p>(comp: &mut Compile<'_, 'p>, ty: TypeInfo<'p>) -> TypeId {
-    comp.program.intern_type(ty)
-}
-
 extern "C" fn clone_expr<'p>(e: &FatExpr<'p>) -> FatExpr<'p> {
     e.clone()
 }
@@ -307,10 +298,6 @@ extern "C" fn clone_type<'p>(e: &LazyType<'p>) -> LazyType<'p> {
 
 extern "C" fn clone_func<'p>(e: &Func<'p>) -> Func<'p> {
     e.clone()
-}
-
-extern "C" fn get_type_meta(compile: &Compile, ty: TypeId) -> TypeMeta {
-    compile.program.get_info(ty)
 }
 
 unsafe extern "C" fn comptime_arch() -> (i64, i64) {
@@ -363,11 +350,6 @@ unsafe extern "C" fn get_jitted_ptr<'p>(c: &mut Compile<'_, 'p>, f: FuncId) -> B
     Ok(unwrap!(c.get_fn(f), "not compiled {f:?}"))
 }
 
-#[no_mangle]
-unsafe extern "C" fn franca_get_function<'p>(c: &mut Compile<'p, '_>, f: FuncId) -> *const Func<'p> {
-    &c.program[f] as *const Func
-}
-
 unsafe extern "C" fn make_and_resolve_and_compile_top_level<'p>(c: &mut Compile<'_, 'p>, body: *const [FatStmt<'p>]) -> BigCErr<'p, ()> {
     let body = (*body).to_vec();
     let mut global = make_toplevel(c.program.pool, garbage_loc(), body);
@@ -387,17 +369,6 @@ unsafe extern "C" fn make_jitted_exec(c: &mut Compile) {
 
 unsafe extern "C" fn give_vtable(c: &mut Compile, vtable: *const ExportVTable, userdata: *mut ()) {
     c.driver_vtable = (Box::new((*vtable).clone()), userdata)
-}
-
-unsafe extern "C" fn get_function_name<'p>(c: &mut Compile<'_, 'p>, f: FuncId) -> Ident<'p> {
-    c.program[f].name
-}
-
-// TODO: do this myself
-// x86 doesn't need this and x86_64-unknown-linux-musl doesn't give me a fake one to link against
-#[cfg(target_arch = "aarch64")]
-extern "C" {
-    pub(crate) fn __clear_cache(beg: *mut libc::c_char, end: *mut libc::c_char);
 }
 
 // pub(crate) fn __clear_cache(beg: *mut libc::c_char, end: *mut libc::c_char);
@@ -508,7 +479,6 @@ const MSG: &str = "//! IMPORTANT: don't try to save #comptime_addr('ASLR junk'),
 
 extern "C" fn get_compiler_builtins_source() -> &'static str {
     let mut out = String::new();
-    // writeln!(out, "{}", include_str!("../compiler/driver_api.fr")).unwrap();
     writeln!(out, "{}", MSG).unwrap();
     for (sig, ptr) in COMPILER {
         writeln!(out, "#comptime_addr({}) #ct #c_call {sig};", *ptr as usize).unwrap();
@@ -713,17 +683,6 @@ extern "C-unwind" fn compile_ast<'p>(compile: &mut Compile<'_, 'p>, mut expr: Fa
 
 // :UnquotePlaceholders
 extern "C-unwind" fn unquote_macro_apply_placeholders<'p>(compile: &mut Compile<'_, 'p>, args: *mut [FatExpr<'p>]) -> FatExpr<'p> {
-    // println!(
-    //     "ptr={} len={} ptr%align={}",
-    //     args.as_mut_ptr() as usize,
-    //     args.len(),
-    //     args.as_mut_ptr() as usize % mem::align_of::<FatExpr>()
-    // );
-    // for a in unsafe { &mut *args } {
-    //     // println!("{}", unsafe { &*a }.log(compile.program.pool));
-    //     // unsafe { show_error_line(compile.program.pool.codemap, a.loc.low, a.loc.high) }
-    // }
-
     let mut args = unsafe { &*args }.to_vec();
     let doo = || {
         let mut template = unwrap!(args.pop(), "template arg");

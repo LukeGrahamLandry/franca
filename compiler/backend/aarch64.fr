@@ -83,6 +83,7 @@ fn bump_dirty(self: CompilerRs) void #compiler = {
     self.aarch64&.bump_dirty();
 }
 
+
 fn copy_inline_asm(self: CompilerRs, f: FuncId, insts: []u32) void #compiler = {
     self.aarch64&.copy_inline_asm(f, insts);
 }
@@ -94,7 +95,7 @@ EmitAsm :: @struct(
     next_slot: SpOffset,
     f: FuncId,
     when: ExecStyle,
-    release_stack: List(Ty(*u32, *u32, *u32)),
+    release_stack: List(*u32),
     state: BlockState,
     block_ips: List(?*u32),
     clock: u16,
@@ -256,10 +257,9 @@ fn bc_to_asm(self: *EmitAsm, f: FuncId) void = {
     self.asm.patch(reserve_stack, sub_im(Bits.X64, sp, sp, @as(u12) slots, 0));
     
     for self.release_stack { it |
-        (fst, snd, thd) := it; // TODO: these are sequential so don't bother storing them all. 
-        self.asm.patch(fst, add_im(Bits.X64, sp, fp, 0, 0)); // Note: normal mov encoding can't use sp
-        self.asm.patch(snd, ldp_so(Bits.X64, fp, lr, sp, 0)); // get our return address
-        self.asm.patch(thd, add_im(Bits.X64, sp, sp, 16, 0));
+        self.asm.patch(it, add_im(Bits.X64, sp, fp, 0, 0)); // Note: normal mov encoding can't use sp
+        self.asm.patch(it.offset(1), ldp_so(Bits.X64, fp, lr, sp, 0)); // get our return address
+        self.asm.patch(it.offset(2), add_im(Bits.X64, sp, sp, 16, 0));
     };
 }
 
@@ -424,15 +424,9 @@ fn emit_inst(self: *EmitAsm, b_idx: usize, inst: Bc, i: usize) bool = {
             };
             return(f.tail);
         }
-        fn Ret0() => {
-            return(self.emit_return(empty()));
-        }
-        fn Ret1(prim) => {
-            return(self.emit_return(@slice(prim)));
-        }
-        fn Ret2(f) => {
-            return(self.emit_return(@slice(f._0, f._1)));
-        }
+        fn Ret0()     => return(self.emit_return(empty()));
+        fn Ret1(prim) => return(self.emit_return(@slice(prim)));
+        fn Ret2(f)    => return(self.emit_return(@slice(f._0, f._1)));
         // Note: we do this statically, it wont get actually applied to a register until its needed because loads/stores have an offset immediate.
         fn IncPtrBytes(bytes) => {
             val: *AsmVal = self.state.stack&.last().unwrap();
@@ -451,9 +445,7 @@ fn emit_inst(self: *EmitAsm, b_idx: usize, inst: Bc, i: usize) bool = {
                         offset_bytes = offset_bytes.zext() + bytes.zext(),
                     ));
                 }
-                fn FloatReg(_) => {
-                    panic("ICE: don't try to gep a float");
-                }
+                fn FloatReg(_) => panic("ICE: don't try to gep a float");
             };
         }
         fn Load(ty) => {
@@ -821,7 +813,6 @@ fn spill_abi_stompable(self: *EmitAsm) void = {
     range(0, self.state.stack.len) { i |
         self.try_spill(i, true);
     };
-    //debugln!();
 }
 
 // do_floats:false if you're just trying to free up a gpr, not saving for a call.
@@ -856,10 +847,7 @@ fn try_spill(self: *EmitAsm, i: usize, do_floats: bool) bool = {
 }
 
 fn get_free_reg(self: *EmitAsm) i64 = {
-    if self.state.free_reg&.pop() { r |
-        @debug_assert_ne(r, sp, "ICE: sp is not a gpr");
-        r
-    } else {|
+    or self.state.free_reg&.pop() {|
         i := 0;
         while => i < self.state.stack.len && !self.try_spill(i, false) {|
             i += 1;
@@ -976,9 +964,7 @@ fn load_imm(self: *EmitAsm, reg: i64, value: i64) void = {
                 self.asm.push(movk_rt(Bits.X64, reg, part.trunc(), shift));
             };
             value = value.shift_right_logical(16);
-            if value == 0 {|
-                return();
-            };
+            if(value == 0, => return());
         };
     };
 }
@@ -1017,11 +1003,11 @@ fn dyn_c_call(self: *EmitAsm, sig: PrimSig, $do_call: @Fn() void) void = {
         0
     };
 
+    // now the extras are usable again.
     range(int_count, 8) { i |
-        self.state.free_reg&.add_unique(i); // now the extras are usable again.
+        self.state.free_reg&.add_unique(i); 
     };
 }
-
 
 ::enum(CallConv);
 ::if(u1);
@@ -1048,10 +1034,8 @@ fn branch_func(self: *EmitAsm, f: FuncId, with_link: bool) void = {
                     self.asm.push(op);
                 };
                 @debug_assert_eq(code.last().unwrap()[], ret());
-                if !with_link {|
-                    // If you're trying to do a tail call to fn add, that means emit the add instruction and then return.
-                    self.asm.push(ret());
-                };
+                // If you're trying to do a tail call to fn add, that means emit the add instruction and then return.s
+                if(!with_link, => self.asm.push(ret()));
                 return();
             };
         };
@@ -1106,15 +1090,10 @@ fn drop_slot(self: *EmitAsm, slot: SpOffset, bytes: u16) void = {
 
 fn emit_stack_fixup(self: *EmitAsm) void = {
     self.asm.push(brk(0));
-    a := self.asm.prev();
+    fst := self.asm.prev();
     self.asm.push(brk(0));
-    b := self.asm.prev();
     self.asm.push(brk(0));
-    c := self.asm.prev();
-    // TODO: can't do this inline or its seen as multiple args.
-    // TODO: but also we should just save one ptr and offset it because they're always sequential. 
-    t := (a, b, c); 
-    self.release_stack&.push(t);
+    self.release_stack&.push(fst);
 }
 
 fn drop_if_unused(self: *EmitAsm, register: i64) void = {

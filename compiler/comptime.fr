@@ -11,6 +11,9 @@ fn fill_driver_vtable(vtable: *ImportVTable) void = {
     vtable.get_string = get_string;
     vtable.emit_llvm = emit_llvm; // TODO: have a compile option to not include the things you don't need for bootstrapping. so i can commit a smaller blob. 
     vtable.get_fns_with_tag = get_fns_with_tag;
+    vtable.get_function = fn(c: Compiler, f: FuncId) *Func = {
+        c.cast()[][].get_function(f)
+    };
 }
 
 CompilerRs :: ***SelfHosted;  // TODO: really this should be a new type so you can't accidently implement call functions by just adding extra indirection. hopefully the number of pointers makes it clear something's weird. 
@@ -80,7 +83,7 @@ fn fill_export_ffi(out: *List(u8)) void = {
     
     @fmt(out, "fn dyn_bake_relocatable_value(raw_bytes: Slice(u8), ty: Type, force_default_handling: bool) Slice(BakedEntry) #ct #comptime_addr(%);\n", dyn_bake_value);
     dyn_bake_value: rawptr : fn(c: CompilerRs, bytes: Slice(u8), ty: Type, force_default_handling: bool) Slice(BakedEntry) = {
-        r := c.emit_relocatable_constant_body(bytes, ty, force_default_handling); // TODO: sad extra binding forces it to instantiate the type. 
+        r := c[][].emit_relocatable_constant_body(bytes, ty, force_default_handling); // TODO: sad extra binding forces it to instantiate the type. 
         r.unwrap()
     };
     
@@ -98,11 +101,11 @@ fn fill_export_ffi(out: *List(u8)) void = {
     
     @fmt(out, "fn operator_star_prefix(T: Type) Type #fold #ct #comptime_addr(%);\n", ptr);
     ptr: rawptr : fn(c: Compiler, inner: Type) Type = {
-        {c.vtable.intern_type}(c, (Ptr = inner))
+        c.cast()[][].intern_type((Ptr = inner))
     };
     @fmt(out, "fn Label(Ret: Type) Type #fold #ct #comptime_addr(%);\n", label);
     label: rawptr : fn(c: Compiler, inner: Type) Type = {
-        {c.vtable.intern_type}(c, (Label = inner))
+        c.cast()[][].intern_type(Label = inner)
     };
     
     // These only exist for debugging the compiler when everything's broken so can't even compile the one defined in the language.
@@ -172,7 +175,11 @@ fn check_for_new_aot_bake_overloads(comp: CompilerRs) CRes(void) = {
 }
 
 fn index(comp: CompilerRs, f: FuncId) *Func = {
-    {comp[][].vtable.get_function}(comp.cast(), f)
+    comp[][].get_function(f)
+}
+
+fn index(comp: *SelfHosted, f: FuncId) *Func = {
+    comp.functions&.nested_index(f.as_index())
 }
 
 fn slot_count(c: CompilerRs, ty: Type) u16 = {
@@ -183,24 +190,7 @@ fn slot_count(c: CompilerRs, ty: Type) u16 = {
 //////////////////////////////////////////////////////////////////
 // TODO: should these go somewhere else? they used to be in ast.rs. 
 
-fn raw_type(c: CompilerRs, ty: Type) Type = {
-    loop {|
-        @match(c.get_type(ty)) {
-            fn Named(f) => {
-                ty = f._0;
-            }
-            fn Enum(f) => {
-                ty = f.raw;
-            }
-            @default => {
-                return(ty);
-            };
-        };
-    };
-    ty
-}
-
-fn unptr_ty(c: CompilerRs, ty: Type) ?Type = {
+fn unptr_ty(c: *SelfHosted, ty: Type) ?Type = {
     @match(c.get_type(ty)) {
         fn Ptr(inner) => (Some = inner[]);
         @default => .None; // TODO: do i need to raw_type? 
@@ -218,22 +208,19 @@ fn finished_ty(self: *Func) ?FnType = {
 
 :: tagged(FuncImpl);
 fn jitted_aarch64(self: *FuncImpl) ?[]u32 = {
-    // TODO: figure out the fuckup with mixing ear;y and nriomal returns
-    //       change this back because it was jsut that the asm gen was broken and it looked like the garbage it made was uninit memory but wasnt so this was probably fine 
-    fuck: ?[]u32 = .None;
     @match(self) {
         fn JittedAarch64(code) => {
-            fuck = (Some = code.items());
+            return(Some = code.items());
         }
         fn Merged(parts) => {
             each parts { p |
                 @if_let(p) fn JittedAarch64(code) => {
-                    fuck = (Some = code.items());
+                    return(Some = code.items());
                 };
             };
         }
         @default => ();
     };
     
-    fuck
+    .None
 }

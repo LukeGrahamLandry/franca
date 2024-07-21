@@ -97,7 +97,7 @@ debug_assert_le :: assert_le;
 debug_assert_ge :: assert_ge;
 
 EmitBc :: @struct(
-    program: CompilerRs,
+    program: *SelfHosted,
     last_loc: Span,
     locals: List(List(u16)),
     var_lookup: HashMap(Var, u16),
@@ -126,7 +126,7 @@ fn emit_bc(comp: CompilerRs, f: FuncId, when: ExecStyle) Res(*FnBody) = {
         comp.check_for_new_aot_bake_overloads().unwrap(); // TODO: unify error types!
     };
     self: EmitBc = (
-        program = comp, 
+        program = comp[][], 
         last_loc = comp[f].loc,
         locals = list(temp()),
         var_lookup = init(temp()),
@@ -202,7 +202,7 @@ fn emit_bc(comp: CompilerRs, f: FuncId, when: ExecStyle) Res(*FnBody) = {
 }
 
 :: List(Symbol);
-fn empty_fn_body(comp: CompilerRs, func: FuncId, when: ExecStyle) Res(*FnBody) = {
+fn empty_fn_body(comp: *SelfHosted, func: FuncId, when: ExecStyle) Res(*FnBody) = {
     f := comp[func]&;
     f_ty := @unwrap(f.finished_ty(), "ICE: fn type not ready") return;
     ptr := comp.bytecodes&.push(
@@ -210,7 +210,7 @@ fn empty_fn_body(comp: CompilerRs, func: FuncId, when: ExecStyle) Res(*FnBody) =
         vars = empty(),
         var_names = empty(),
         when = when,
-        alloc = comp[][].get_alloc(),
+        alloc = comp.get_alloc(),
         signeture = @try(comp.prim_sig(f_ty, f.cc.expect("known cc"))) return,
         func = func,
         name = f.name,
@@ -515,7 +515,7 @@ fn emit_body(self: *EmitBc, result: *FnBody, f: FuncId) PRes = {
         result[return_block].incoming_jumps += 1;
         result.current_block = return_block;
         if do_stacktrace {|
-            (_, pop) := self.program[][].env.inject_function_header.expect("only stacktrace when ready");
+            (_, pop) := self.program.env.inject_function_header.expect("only stacktrace when ready");
             sig := @try(prim_sig(
                 self.program,
                 (arg = void, ret = void, arity = 1),
@@ -813,7 +813,7 @@ fn compile_expr(self: *EmitBc, result: *FnBody, expr: *FatExpr, result_location:
 //}
 
 
-fn follow_redirects(program: CompilerRs, f_id: FuncId) FuncId = {
+fn follow_redirects(program: *SelfHosted, f_id: FuncId) FuncId = {
     dowhile() {|
         @match(program[f_id].body&) {
             fn Redirect(target) => {
@@ -1522,8 +1522,7 @@ fn add_var(self: *FnBody, ctx: *EmitBc, ty: Type) u16 = {
 // And then compctx is weird because the front end doesn't want to insert it into the arguments, 
 // so its not as part of the function type, its in the calling convention. -- Jul 5
 //
-fn prim_sig(program: CompilerRs, f_ty: FnType, cc: CallConv) Res(PrimSig) = {
-
+fn prim_sig(program: *SelfHosted, f_ty: FnType, cc: CallConv) Res(PrimSig) = {
     ret := program.get_info(f_ty.ret);
 
     sig: PrimSig = (
@@ -1551,7 +1550,7 @@ fn prim_sig(program: CompilerRs, f_ty: FnType, cc: CallConv) Res(PrimSig) = {
         };
     };
 
-    args: List(Prim) = list(program[][].get_alloc());
+    args: List(Prim) = list(program.get_alloc());
 
     :: enum(CallConv);
     comp_ctx := cc == .CCallRegCt;
@@ -1619,7 +1618,7 @@ fn prim_sig(program: CompilerRs, f_ty: FnType, cc: CallConv) Res(PrimSig) = {
 }
 
 
-fn prim_pair(self: CompilerRs, ty: Type) Res(Ty(Prim, Prim)) = {
+fn prim_pair(self: *SelfHosted, ty: Type) Res(Ty(Prim, Prim)) = {
     types := self.flat_tuple_types(ty); // TODO: don't allocate
     @assert_eq(types.len(), 2);
     a : Prim = @unwrap(self.prim(types[0]), "non-prim") return;
@@ -1629,13 +1628,13 @@ fn prim_pair(self: CompilerRs, ty: Type) Res(Ty(Prim, Prim)) = {
 
 PrimKey :: Ty(Type, u16, bool, bool);
 
-fn get_primitives(self: CompilerRs, key: PrimKey) ?[] Prim = {
+fn get_primitives(self: *SelfHosted, key: PrimKey) ?[] Prim = {
     :: opt_map(RsVec(Prim), []Prim);
     found := self.primitives&.get(key&);
     found&.map(fn(v) => v.items())
 }
 
-fn as_primatives(self: CompilerRs, ty: Type) [] Prim = {
+fn as_primatives(self: *SelfHosted, ty: Type) [] Prim = {
     if(ty.is_unit().or(ty.is_never()), => return(empty()));
     slots := self.get_info(ty).size_slots();
     key := (ty, slots, false, false);
@@ -1660,7 +1659,7 @@ fn as_primatives(self: CompilerRs, ty: Type) [] Prim = {
     self.get_primitives(key).unwrap()
 }
 
-fn prim(self: CompilerRs, ty: Type) ?Prim = {
+fn prim(self: *SelfHosted, ty: Type) ?Prim = {
     p: Prim = @match(self.get_type(ty)) {
         fn F64()     => .F64;
         fn F32()     => .F32;
@@ -1702,7 +1701,7 @@ fn prim(self: CompilerRs, ty: Type) ?Prim = {
     (Some = p)
 }
 
-fn flat_tuple_types(self: CompilerRs, ty: Type) List(Type) = {
+fn flat_tuple_types(self: *SelfHosted, ty: Type) List(Type) = {
     @match(self.get_type(ty)) {
         fn Struct(f) => {
             out: List(Type) = list(temp());
@@ -1767,10 +1766,15 @@ fn align_to(offset: i64, align: i64) i64 = {
 
 // TODO: this is a dumb hack to make it less painful that i can't access fields on a value (because you need a pointer to offset)
 //       fix in the compiler and remove this! -- Jul 7
-fn stride_bytes(s: TypeMeta) u16 = s.stride_bytes;
-fn align_bytes(s: TypeMeta) u16 = s.align_bytes;
-fn size_slots(s: TypeMeta) u16 = s.size_slots;
-fn contains_pointers(s: TypeMeta) bool = s.contains_pointers;
+//       now the problem is you can't access fields on a pointer if its not a dereference of it 
+//       (i changed get_info when i ported it, i didn't fix the old problem yet).  -- Jul 21
+fn stride_bytes(s: *TypeMeta) u16 = s.stride_bytes;
+fn align_bytes(s: *TypeMeta) u16 = s.align_bytes;
+fn size_slots(s: *TypeMeta) u16 = s.size_slots;
+fn contains_pointers(s: *TypeMeta) bool = s.contains_pointers;
+fn slot_count(self: *SelfHosted, ty: Type) u16 = {
+    self.get_info(ty)[].size_slots
+}
 
 fn int_count(self: Prim) i64 = 
     if(self.is_float(), => 0, => 1);

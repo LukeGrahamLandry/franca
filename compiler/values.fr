@@ -1,5 +1,8 @@
 //! Assorted functions work working with the bytes of comptime values.
 //! - Emitting relocatable baked constants for AOT (fn bake_relocatable_value).
+//! - Spilitting aggragate values into a list of integers for function calls. 
+//! - Dynamically calling (a subset of) c abi functions.
+//! - Determining struct size/layout
 
 //////////////////////
 /// Bake Constants ///
@@ -40,7 +43,7 @@ fn put_baked(c: *SelfHosted, v: BakedVar, jit_ptr: ?i64) BakedVarId = {
     id
 }
 
-fn emit_relocatable_constant_body(c: CompilerRs, bytes: Slice(u8), ty: Type, force_default_handling: bool) Res(Slice(BakedEntry)) = {
+fn emit_relocatable_constant_body(c: *SelfHosted, bytes: Slice(u8), ty: Type, force_default_handling: bool) Res(Slice(BakedEntry)) = {
     out: List(BakedEntry) = list(c.get_alloc());
     value := bytes.to_value();
     @try(c.emit_relocatable_constant_body(ty, value&, out&, force_default_handling)) return;
@@ -63,7 +66,7 @@ BakeHandler :: @FnPtr(self: rawptr) Slice(BakedEntry);
 // TODO: be careful about the same string being baked as CStr and Str.
 // TODO: i should have constant pointers as a concept in my language.
 //       right now i could check if its in the constant data arena for a hint that should catch a few of them.
-fn emit_relocatable_constant(c: CompilerRs, ty: Type, value: *Values) Res(BakedVarId) = {
+fn emit_relocatable_constant(c: *SelfHosted, ty: Type, value: *Values) Res(BakedVarId) = {
     jit_ptr := value.jit_addr();
     // TODO: this barely does anything! cause like cstr and slice don't go through this function. they call dyn_bake_relocatable_value. -- Jun 30
     //       this is the right idea, they just need to check thier pointers against the cache first. 
@@ -78,31 +81,31 @@ fn emit_relocatable_constant(c: CompilerRs, ty: Type, value: *Values) Res(BakedV
         for value.bytes() { b |
             if(b != 0, => break());
         };
-        return(Ok = c[][].put_baked((Zeros = value.bytes().len()), (Some = jit_ptr)));
+        return(Ok = c.put_baked((Zeros = value.bytes().len()), (Some = jit_ptr)));
     })();
     
     // Eventually we'll recurse to something with no pointers. ie Str -> [u8; n]
     info := c.get_info(ty);
     if (!info.contains_pointers) {|
         v := value.bytes().clone(c.get_alloc()); // TODO: do i have to clone? 
-        return(Ok = c[][].put_baked((Bytes = v.rs()), (Some = jit_ptr)));
+        return(Ok = c.put_baked((Bytes = v.rs()), (Some = jit_ptr)));
     };
 
     out: List(BakedEntry) = list(c.get_alloc());
     @try(c.emit_relocatable_constant_body(ty, value, out&, false)) return;
-    (Ok = c[][].put_baked((VoidPtrArray = out.rs()), (Some = jit_ptr)))
+    (Ok = c.put_baked((VoidPtrArray = out.rs()), (Some = jit_ptr)))
 }
 
 // TODO: deduplicate small constant strings. they get stored in Values inline so can't be fixed by baked.lookup
 // TODO: make sure baked.lookup actually ever helps. might need to add checks in more places.
 fn emit_relocatable_constant_body(
-    c: CompilerRs,
+    c: *SelfHosted,
     ty: Type,
     value: *Values,
     out: *List(BakedEntry),
     force_default_handling: bool,
 ) PRes = {
-    c.bump_dirty();
+    c.aarch64&.bump_dirty();
     
     info := c.get_info(ty);
     if value.len() != info.stride_bytes.zext() {|
@@ -166,7 +169,7 @@ fn emit_relocatable_constant_body(
             
             ptr := u8.ptr_from_int(addr);
             data := slice(ptr, inner_info.stride_bytes.zext());
-            inner_value := data.to_value(c[][].get_alloc()); // TODO: do i have to clone? 
+            inner_value := data.to_value(c.get_alloc()); // TODO: do i have to clone? 
             id := @try(c.emit_relocatable_constant(inner[], inner_value&)) return;
             c.baked.lookup&.insert(addr, id);
             out.push((AddrOf = id));
@@ -177,7 +180,7 @@ fn emit_relocatable_constant_body(
                 info := c.get_info(f.ty);
                 @assert_eq(@as(i64) info.stride_bytes.zext().mod(8), 0, "TODO: non-8-aligned fields");
                 v := value.bytes().slice(f.byte_offset, f.byte_offset + info.stride_bytes.zext());
-                v := v.to_value(c[][].get_alloc()); // TODO: do i have to clone? 
+                v := v.to_value(c.get_alloc()); // TODO: do i have to clone? 
                 @try(c.emit_relocatable_constant_body(f.ty, v&, out, false)) return;
             };
         });
@@ -270,13 +273,11 @@ fn unchecked_cast($T: Type, self: *Values) *T #generic = {
     ptr_cast_unchecked(u8, T, b.ptr)
 }
 
-fn get_type(c: CompilerRs, ty: Type) *TypeInfo = {
-    {c.vtable.get_type}(c.cast(), ty)
-}
+fn get_type(c: CompilerRs, ty: Type) *TypeInfo #inline = 
+    c[][].get_type(ty)[];
 
-fn get_info(c: CompilerRs, ty: Type) TypeMeta = {
-    {c.vtable.get_type_meta}(c.cast(), ty)
-}
+fn get_info(c: CompilerRs, ty: Type) TypeMeta #inline = 
+    c[][].get_info(ty)[];
 
 fn to_value(bytes: Slice(u8)) Values = {
     ::if(Values);
@@ -320,7 +321,7 @@ fn as_const(self: *FatExpr) ?Values = {
 // TODO: :const_field_fix
 // TODO: if you move the ffi dynamic abi call to this language you can remove the rust version of this function. 
 /// Take some opaque bytes and split them into ints. So (u8, u8) becomes a vec of two i64 but u16 becomes just one.
-fn deconstruct_values(program: CompilerRs, ty: Type, bytes: *ReadBytes, out: *List(i64), offsets: ?*List(Ty(Prim, u16))) PRes = {
+fn deconstruct_values(program: *SelfHosted, ty: Type, bytes: *ReadBytes, out: *List(i64), offsets: ?*List(Ty(Prim, u16))) PRes = {
     info := program.get_info(ty);
 
     @debug_assert_eq(bytes.i.mod(info.align_bytes.zext()), 0);
@@ -409,7 +410,7 @@ fn read_next(self: *ReadBytes, $T: Type) T #generic = {
 fn call_dynamic_values(program: CompilerRs, f_ptr: i64, f_ty: *FnType, args_value: []u8, comp_ctx: bool) Res(Values) #compiler = {
     parts: List(i64) = list(temp());
     reader: ReadBytes = (bytes = args_value, i = 0);
-    @try(program.deconstruct_values(f_ty.arg, reader&, parts&, .None)) return;
+    @try(program[][].deconstruct_values(f_ty.arg, reader&, parts&, .None)) return;
     parts := parts.rs();
     program.call_dynamic(f_ptr, f_ty, parts&, comp_ctx)
 }
@@ -481,7 +482,7 @@ fn call_dynamic(program: CompilerRs, ptr: i64, f_ty: *FnType, args: *RsVec(i64),
     } else {|
         if ret.size_slots == 2 {|
             ::Res(Ty(Prim, Prim));
-            (f, s) := program.prim_pair(f_ty.ret).unwrap();
+            (f, s) := program[][].prim_pair(f_ty.ret).unwrap();
             r := arg8ret2(ptr, args.ptr);
             // TODO: floats!
             if f.eq(.I64).or(f.eq(.P64)) {|
