@@ -783,8 +783,15 @@ pub struct Program<'p> {
     pub inferred_type_names: Vec<Option<Ident<'p>>>,
 }
 
-impl_index_imm!(Program<'p>, TypeId, TypeInfo<'p>, types);
 impl_index!(Program<'p>, OverloadSetId, OverloadSet<'p>, overload_sets);
+
+impl<'p> std::ops::Index<TypeId> for Program<'p> {
+    type Output = TypeInfo<'p>;
+
+    fn index(&self, index: TypeId) -> &Self::Output {
+        unsafe { self_hosted::get_type(self.pool, index) }
+    }
+}
 
 #[repr(C)]
 #[derive(Clone, Debug)]
@@ -990,6 +997,7 @@ impl<'p> Program<'p> {
     }
 
     pub(crate) fn finish_layout_deep(&mut self, ty: TypeId) -> Res<'p, ()> {
+        unsafe { self_hosted::finish_layout_deep(self.pool, ty) }.unwrap();
         if self.finished_layout_deep.get(ty.as_index()) {
             return Ok(());
         }
@@ -1022,6 +1030,7 @@ impl<'p> Program<'p> {
         Ok(())
     }
     pub(crate) fn finish_layout(&mut self, ty: TypeId) -> Res<'p, ()> {
+        unsafe { self_hosted::finish_layout(self.pool, ty) }.unwrap();
         let ty = self.raw_type(ty);
         if let TypeInfo::Array { inner, .. } = self[ty] {
             return self.finish_layout(inner);
@@ -1125,8 +1134,10 @@ impl<'p> Program<'p> {
 
 impl<'p> Program<'p> {
     pub(crate) fn intern_type(&mut self, ty: TypeInfo<'p>) -> TypeId {
+        let other = unsafe { self_hosted::intern_type(self.pool, ty.clone()) };
+
         let deduplicate = match &ty {
-            TypeInfo::Placeholder => panic!("Unfinished type {ty:?}",),
+            TypeInfo::Placeholder => false,
             TypeInfo::Never | TypeInfo::F32 | TypeInfo::F64 | TypeInfo::Bool | TypeInfo::Unit | TypeInfo::VoidPtr => {
                 unreachable!("ICE: Called intern_type on {ty:?}, this is fine I guess, but probably shouldn't happen.")
             }
@@ -1135,19 +1146,21 @@ impl<'p> Program<'p> {
             TypeInfo::Tagged { .. } | TypeInfo::Enum { .. } | TypeInfo::Named(_, _) => false,
         };
 
-        if deduplicate {
+        let old = if deduplicate {
             self.type_lookup.get(&ty).copied().unwrap_or_else(|| {
                 let id = self.types.len();
                 self.types.push(ty.clone());
                 let id = TypeId::from_index(id);
-                self.type_lookup.insert(ty, id);
+                self.type_lookup.insert(ty.clone(), id);
                 id
             })
         } else {
             let id = self.types.len();
             self.types.push(ty.clone());
             TypeId::from_index(id)
-        }
+        };
+        assert_eq!(old, other, "{ty:?}");
+        old
     }
 
     #[track_caller]
@@ -1216,6 +1229,7 @@ impl<'p> Program<'p> {
     }
 
     pub(crate) fn get_info(&self, ty: TypeId) -> TypeMeta {
+        let new = unsafe { self_hosted::get_info(self.pool, ty) };
         let ty = self.raw_type(ty);
         extend_options(self.types_extra.borrow_mut().deref_mut(), ty.as_index());
         if let Some(info) = self.types_extra.borrow_mut().deref_mut()[ty.as_index()] {
@@ -1314,6 +1328,7 @@ impl<'p> Program<'p> {
             }
         };
         self.types_extra.borrow_mut().deref_mut()[ty.as_index()] = Some(info);
+        assert_eq!(&info, new, "{:?}\n{:?}", self[ty], unsafe { self_hosted::get_type(self.pool, ty) });
         info
     }
 

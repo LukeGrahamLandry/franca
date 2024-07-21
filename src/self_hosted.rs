@@ -125,7 +125,11 @@ extern "C" {
     // TODO: this shouldn't be mutable because it needs to stay the same for hashing.
     //       for now i just want to see if this works.... -- Jul 20
     pub(crate) fn get_type<'p>(c: &SelfHosted<'p>, ty: TypeId) -> &'p mut TypeInfo<'p>;
-    pub(crate) fn get_info<'p>(c: &SelfHosted<'p>, ty: TypeId) -> TypeMeta;
+    pub(crate) fn get_info<'p>(c: &SelfHosted<'p>, ty: TypeId) -> &'p TypeMeta;
+    pub(crate) fn update_placeholder<'p>(c: &SelfHosted<'p>, placeholder: TypeId, real: TypeId, name: Ident<'p>) -> TypeMeta;
+
+    pub(crate) fn finish_layout_deep<'p>(c: &SelfHosted<'p>, ty: TypeId) -> BigResult<(), ParseErr<'p>>;
+    pub(crate) fn finish_layout<'p>(c: &SelfHosted<'p>, ty: TypeId) -> BigResult<(), ParseErr<'p>>;
 }
 
 pub fn call<'p>(program: &mut Compile<'_, 'p>, ptr: usize, f_ty: crate::ast::FnType, mut args: Vec<i64>, comp_ctx: bool) -> Res<'p, Values> {

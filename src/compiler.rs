@@ -3708,8 +3708,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 assert_eq!(ty, TypeId::ty);
             }
             // TODO: else!
-            let hole = TypeId::from_index(self.program.types.len());
-            self.program.types.push(TypeInfo::Placeholder);
+            let hole = self.program.intern_type(TypeInfo::Placeholder);
             let val = to_values(self.program, hole)?;
             self.save_const_values(name, val, TypeId::ty, value.loc)?;
             Some(hole)
@@ -3744,6 +3743,9 @@ impl<'a, 'p> Compile<'a, 'p> {
             let ty: TypeId = from_values(self.program, val)?;
             self.program.types[rec.as_index()] = TypeInfo::Named(ty, name.name);
             self.program.types_extra.borrow_mut().truncate(rec.as_index()); // just in case. copy-paste
+            unsafe  {
+                self_hosted::update_placeholder(self.program.pool, rec, ty, name.name)
+            };
             val = to_values(self.program, rec)?;
         }
 

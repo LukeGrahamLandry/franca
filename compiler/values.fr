@@ -617,10 +617,14 @@ fn get_type(self: *SelfHosted, ty: Type) *TypeInfo /* const */ #compiler = {
 // TODO: call this maybe_intern_type?
 fn intern_type(self: *SelfHosted, info: TypeInfo) Type #compiler = {
     deduplicate := @match(info&) {
-        fn Struct(f) bool => {f.is_tuple};
+        fn Struct(f) bool => {
+            f.is_tuple  // :only_intern_tuples
+        }
         fn Tagged(_) => false;
         fn Enum(_)   => false;
         fn Named(_)  => false;
+        fn Placeholder() => false; // because it will get filled in later
+        fn VoidPtr()  => false; // TODO: hack to match old behaviour and still call intern_type at the beginning
         @default     => true;
     };
     
@@ -630,8 +634,8 @@ fn intern_type(self: *SelfHosted, info: TypeInfo) Type #compiler = {
         or self.type_lookup&.get(key&) {| 
             id := typeid_from_index(self.types.len);
             stable := self.types&.push(info);
-            self.type_extra&.push(.None);
             self.type_lookup&.insert(stable, id);
+            self.type_extra&.push(.None);
             id
         }
     } else {|
@@ -642,11 +646,23 @@ fn intern_type(self: *SelfHosted, info: TypeInfo) Type #compiler = {
     }
 }
 
+fn update_placeholder(self: *SelfHosted, placeholder_slot: Type, real_type: Type, name: Symbol) void #compiler = {
+    idx := placeholder_slot.as_index();
+    self.types&.nested_index(idx)[] = (Named = (real_type, name));
+    
+    // just in case.    copy-paste call to truncate but now want to have the list full size ahead of time. 
+    i := self.type_extra.len - 1; // we happen to know this can't underflow because there are builtin types.  
+    while => i > idx {|
+        self.type_extra&.nested_index(i)[] = .None;
+        i -= 1;
+    };
+}
+
 fn init_fixed_types(self: *SelfHosted) void = {
     @assert_eq(self.types.len, 0);
     self.intern_type(.Placeholder);
     self.intern_type(.void);
-    self.intern_type(Named = (typeid_from_index(10), Flag.Type.ident()));
+    self.intern_type(Named = (typeid_from_index(10), Flag.type.ident()));
     self.intern_type(Int = (bit_count = 64, signed = true));
     self.intern_type(.Bool);
     self.intern_type(.VoidPtr);
@@ -662,15 +678,14 @@ fn init_fixed_types(self: *SelfHosted) void = {
     self.intern_type(Named = (typeid_from_index(10), Flag.Symbol.ident()));
 }
 
-// TODO: when i didnt have some of the trunc impls this had a "tried to call missing function"
-fn get_info(self: *SelfHosted, ty: Type) TypeMeta #compiler = {
-    @debug_assert_le(ty.as_index(), self.type_extra.len, "for now we egarly add the .None-s");
+:: as_ref(TypeMeta);
+fn get_info(self: *SelfHosted, ty: Type) *TypeMeta #compiler = {
     ty := self.raw_type(ty);
-    
-    if self.type_extra&.nested_index(ty.as_index())[] { info |
+    if self.type_extra&.nested_index(ty.as_index()) { info |
         return(info);
     };
     
+    // TODO: when i didnt have some of the trunc impls this had a "tried to call missing function"
     new :: fn(size_slots: u16, align_bytes: u16, float_mask: u32, contains_pointers: bool, stride_bytes: u16, pass_by_ref: bool) TypeMeta = {
         @debug_assert_eq(stride_bytes.mod(align_bytes), 0);
         (
@@ -684,18 +699,15 @@ fn get_info(self: *SelfHosted, ty: Type) TypeMeta #compiler = {
         )
     };
     
-    meta_u32 :: new(1, 4, 0, false, 4, false);
-    meta_ptr :: new(1, 8, 0,  true, 8, false);
-    
     info := @match(self.get_type(ty)) {
         fn Placeholder() => {
             @panic("Unfinished type %", ty.as_index()); // TODO: err!
-            meta_u32
+            new(0, 0, 0, false, 0, false)
         }
         fn Struct(f) => {
-            @debug_assert(f.layout_done);
+            @debug_assert(f.layout_done, "ICE: layout not done!");
             size: u16 = 0;
-            @debug_assert_eq(f.fields[0].byte_offset, 0);
+            @debug_assert(f.fields.is_empty().or(=> f.fields[0].byte_offset == 0), "ICE: first field should have offset 0");
             align: u16 = 1;
             mask: u32 = 0; // TODO: this is barely used. can go away if dyn call above uses prims instead. 
             pointers := false;
@@ -706,8 +718,9 @@ fn get_info(self: *SelfHosted, ty: Type) TypeMeta #compiler = {
                 if(arg.kind == .Const, => continue());
                 info := self.get_info(arg.ty);
                 align = align.max(info.align_bytes);
-                @debug_assert_eq(arg.byte_offset.mod(info.align_bytes.zext()), 0);
-                @debug_assert(arg.byte_offset >= bytes); // TODO: assert not past max_u16 or better have a safety checking intcast
+                @debug_assert_eq(arg.byte_offset.mod(info.align_bytes.zext()), 0, "ICE: unaligned field");
+                // TODO!!
+                //@debug_assert_ge(arg.byte_offset, bytes, "ICE: fields not in order"); // TODO: assert not past max_u16 or better have a safety checking intcast
                 end := arg.byte_offset + info.stride_bytes.zext();
                 bytes = bytes.max(end);
                 size += info.size_slots;
@@ -730,8 +743,8 @@ fn get_info(self: *SelfHosted, ty: Type) TypeMeta #compiler = {
             new(size, align, mask, pointers, bytes.trunc(), size > 2)
         }
         fn Tagged(f) => {
-            size: u16 = 1;
-            bytes: u16 = 8; // :tag_is_i64
+            size: u16 = 0;
+            bytes: u16 = 0;
             pointers := false;  
             
             @debug_assert(f.cases.len > 0, "TODO: i guess this can just be void");
@@ -741,12 +754,15 @@ fn get_info(self: *SelfHosted, ty: Type) TypeMeta #compiler = {
                 bytes = bytes.max(info.stride_bytes);
                 pointers = pointers.or(info.contains_pointers);
             };
+            size += 1;  // :tag_is_i64
+            bytes += 8;
             
             align: u16 = 8;
             extra := bytes.mod(align);
             if extra != 0 {|
                 bytes += align - extra;
             };
+            
             
             // TODO: currently tag is always i64 so align 8 but should use byte since almost always enough. but you just have to pad it out anyway.
             //       even without that, if i add 16 byte align, need to check the fields too.  :tag_is_i64
@@ -768,11 +784,11 @@ fn get_info(self: *SelfHosted, ty: Type) TypeMeta #compiler = {
         fn F64()    => new(1, 8, 1, false, 8, false);
         fn void() => new(0, 1, 0, false, 0, false);
         fn Bool() => new(1, 1, 0, false, 1, false); // :SmallTypes
-        fn Ptr(_)     => meta_ptr;
-        fn VoidPtr() => meta_ptr;
-        fn FnPtr(_)   => meta_ptr;
-        fn Label(_)   => meta_u32;
-        fn Fn(_)      => meta_u32;
+        fn Ptr(_)     => new(1, 8, 0,  true, 8, false);
+        fn VoidPtr()  => new(1, 8, 0,  true, 8, false);
+        fn FnPtr(_)   => new(1, 8, 0,  true, 8, false);
+        fn Label(_)   => new(1, 4, 0, false, 4, false);
+        fn Fn(_)      => new(1, 4, 0, false, 4, false);
         fn Array(f) => {
             ::if(TypeMeta);
             if f.len == 0 {|
@@ -791,15 +807,16 @@ fn get_info(self: *SelfHosted, ty: Type) TypeMeta #compiler = {
         }
         fn Enum(_) => {
             panic("unreachable: get meta of raw enum");
-            meta_u32
+            new(0, 0, 0, false, 0, false)
         }
         fn Named(_) => {
             panic("unreachable: get meta of raw named");
-            meta_u32
+            new(0, 0, 0, false, 0, false)
         }
     };
-    self.type_extra&.nested_index(ty.as_index())[] = (Some = info);
-    info
+    ptr := self.type_extra&.nested_index(ty.as_index());
+    ptr[] = (Some = info);
+    ptr.as_ref().unwrap()
 }
 
 fn raw_type(c: *SelfHosted, ty: Type) Type = {
@@ -818,3 +835,115 @@ fn raw_type(c: *SelfHosted, ty: Type) Type = {
     };
     ty
 }
+
+fn finish_layout_deep(self: *SelfHosted, ty: Type) PRes #compiler = {
+    @debug_assert_le(ty.as_index(), self.types.len);
+    if(self.finished_layout_deep&.get(ty.as_index()), => return(.Ok));
+    self.finished_layout_deep&.set(ty.as_index()); // do this at the beginning to stop recursion.
+    @try(self.finish_layout(ty)) return;
+    ty := self.raw_type(ty);
+    
+    @match(self.get_type(ty)) {
+        fn Fn(f) => {
+            @try(self.finish_layout_deep(f.arg)) return;
+            return(self.finish_layout_deep(f.ret));
+        }
+        fn FnPtr(f) => {
+            @try(self.finish_layout_deep(f.ty.arg)) return;
+            return(self.finish_layout_deep(f.ty.ret));
+        }
+        fn Ptr(inner) => {
+            return(self.finish_layout_deep(inner[]));
+        }
+        fn Label(inner) => {
+            return(self.finish_layout_deep(inner[]));
+        }
+        fn Array(f) => {
+            return(self.finish_layout_deep(f.inner));
+        }
+        fn Struct(f) => {
+            each f.fields { f |
+                if f.kind != .Const {|
+                    @try(self.finish_layout_deep(f.ty)) return;
+                };
+            };
+            return(.Ok);
+        }
+        fn Tagged(f) => {
+            each f.cases { f | 
+                @try(self.finish_layout_deep(f._1)) return;
+            };
+            return(.Ok);
+        }
+        @default => {
+            return(.Ok);
+        };
+    };
+    unreachable();
+    .Ok
+}
+
+fn finish_layout(self: *SelfHosted, ty: Type) PRes #compiler = {
+    ty := self.raw_type(ty);
+    info := self.get_type(ty);
+    @match(info) {
+        fn Array(f) => {
+            return(self.finish_layout(f.inner));
+        }
+        fn Tagged(f) => {
+            each f.cases { variant |
+                @try(self.finish_layout(variant._1)) return;
+            };
+            return(.Ok);
+        }
+        fn Struct(f) => {
+            if(f.layout_done, => return(.Ok));
+            f.const_field_count = 0;
+            //@debug_assert_eq(f.const_field_count, 0, "TODO: handle partial then error if you call this multiple times?");
+            // :struct_layout_in_type_info
+            // Here we mutate const_field_count, layout_done, and the byte_offset of the fields, which we know the hash function ignores
+            
+            bytes := 0;
+            each f.fields& { p |
+                continue :: local_return;
+                if p.kind == .Const {|
+                    f.const_field_count += 1;
+                    continue();
+                };
+                
+                @try(self.finish_layout(p.ty)) return;
+    
+                info := self.get_info(p.ty);
+                inv_pad := bytes.mod(info.align_bytes.zext());
+                if inv_pad != 0 {|
+                    bytes += info.align_bytes.zext() - inv_pad;
+                };
+                p.byte_offset = bytes;
+                
+    
+                // TODO: this must be wrong? surely you dont want to have the array padding out to alignment if its just a nested struct.
+                //       tho its what c does. so i guess i need different reprs. and then size_of vs stride_of become different things.
+                bytes += info.stride_bytes.zext();
+            };
+    
+            f.layout_done = true;
+            return(.Ok);
+        }
+        @default => {
+            return(.Ok);
+        };
+    };
+    unreachable();
+    .Ok
+}
+
+// TODO: can't have these added to the eq overload set to early or it gets stuck
+:: {
+    fn eq(a: *Field, b: *Field) bool = {
+        (a.name& == b.name&) && (a.ty& == b.ty&) && (a.default& == b.default&) && (a.kind& == b.kind&)
+    }
+    TypeInfoStruct :: get_variant_type(TypeInfo, TypeInfo.Tag().Struct);
+    fn eq(a: *TypeInfoStruct, b: *TypeInfoStruct) bool = {
+        (a.is_tuple& == b.is_tuple&) && (a.fields& == b.fields&)
+    }
+};
