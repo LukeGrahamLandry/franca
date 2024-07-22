@@ -115,7 +115,7 @@ fn clone(self: *BlockState) BlockState = {
     (stack = self.stack&.clone(), free_reg = self.free_reg&.clone(), open_slots = self.open_slots&.clone())
 }
 
-fn new(compile: CompilerRs, when: ExecStyle, body: *FnBody, f: FuncId) EmitAsm = {
+fn new(compile: CompilerRs, when: ExecStyle, body: *FnBody, f: FuncId) EmitAsm #once = {
     (
         program = compile,
         asm = compile.aarch64&,
@@ -134,7 +134,7 @@ fn new(compile: CompilerRs, when: ExecStyle, body: *FnBody, f: FuncId) EmitAsm =
 }
 
 // Note: you can only use Self once because this doesn't reset fields.
-fn compile(self: *EmitAsm, f: FuncId) void = {
+fn compile(self: *EmitAsm, f: FuncId) void #once = {
     if(self.asm.get_fn(f).is_some(), => return());
 
     func := self.program[f]&;
@@ -158,7 +158,7 @@ fn compile(self: *EmitAsm, f: FuncId) void = {
     };
 }
 
-fn print_llvm_mc_dis(asm: []u32) void = {
+fn print_llvm_mc_dis(asm: []u32) void #once = {
     @println("% instrucitons.", asm.len());
     hex: List(u8) = list(asm.len * 17, temp());
     for asm { op |
@@ -204,7 +204,7 @@ fn print_llvm_mc_dis(asm: []u32) void = {
     //println!("===")
 }
 
-fn bc_to_asm(self: *EmitAsm, f: FuncId) void = {
+fn bc_to_asm(self: *EmitAsm, f: FuncId) void #once = {
     ff := self.program[f]&;
     @if(TRACE_ASM) @println("=== F% % ===", f.as_index(), self.program.pool.get(ff.name));
     //debugln!("{}", self.program[f].body.log(self.program.pool));
@@ -291,7 +291,7 @@ fn emit_block(self: *EmitAsm, b: i64, args_not_vstacked: bool) void = {
     @debug_assert(is_done);
 }
 
-fn emit_inst(self: *EmitAsm, b_idx: usize, inst: Bc, i: usize) bool = {
+fn emit_inst(self: *EmitAsm, b_idx: usize, inst: Bc, i: usize) bool #once = {
     // TODO: bring this back 
     //if TRACE_ASM.or(self.log_asm_bc) {|
     //    ins := self.asm.offset_words(self.asm.current_start, self.asm.next) - 1;
@@ -804,11 +804,6 @@ fn store_one(self: *EmitAsm, register_type: i64, src_reg: i64, dest_addr_reg: i6
     };
 }
 
-fn reset_free_reg(self: *EmitAsm) void = {
-    self.state.free_reg&.clear();
-    self.state.free_reg&.push_all(@slice(0, 1, 2, 3, 4, 5, 6, 7));
-}
-
 fn spill_abi_stompable(self: *EmitAsm) void = {
     range(0, self.state.stack.len) { i |
         self.try_spill(i, true);
@@ -1014,7 +1009,7 @@ fn dyn_c_call(self: *EmitAsm, sig: PrimSig, $do_call: @Fn() void) void = {
 
 // TODO: use with_link for tail calls.
 // !with_link === tail
-fn branch_func(self: *EmitAsm, f: FuncId, with_link: bool) void = {
+fn branch_func(self: *EmitAsm, f: FuncId, with_link: bool) void #once = {
     if DO_BASIC_ASM_INLINE {|
         func := self.program[f]&;
         // TODO: save result on the function so dont have to recheck every time?
@@ -1096,6 +1091,7 @@ fn emit_stack_fixup(self: *EmitAsm) void = {
     self.release_stack&.push(fst);
 }
 
+// TODO: do i need to be using this instead? -- Jul 22
 fn drop_if_unused(self: *EmitAsm, register: i64) void = {
     for self.state.stack { r |
         @if_let(r) fn Increment(f) => {
@@ -1114,7 +1110,6 @@ fn emit_return(self: *EmitAsm, sig: [] Prim) bool = {
     self.asm.push(ret(()));
     true
 }
-
 
 fn reg(self: AsmVal) ?Ty(i64, u16) = {
     @match(self) {
@@ -1136,7 +1131,7 @@ Jitted :: @struct(
     old: *u32,
 );
 
-fn new(bytes: i64) Jitted = {
+fn new(bytes: i64) Jitted #once = {
     mmapped := page_allocator.alloc(u32, bytes / 4);
     (
         mmapped = mmapped,

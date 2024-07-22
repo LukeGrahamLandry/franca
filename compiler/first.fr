@@ -3,6 +3,7 @@ DO_TESTS :: false;
 ENABLE_TRACY :: false;
 ENABLE_LSP   :: false;
 REPLACE_COMPILER :: false;
+JIT_RUN_NEW_SEMA :: false;
 
 fn load_src(vtable: *ImportVTable) Ty(CompCtx, *ComptimeLibs) = {
     src := temp().read_to_string("compiler/main.fr");
@@ -71,6 +72,16 @@ fn driver(vtable: *ImportVTable) void = {
         // TODO: don't print it if we didn't have cached dependencies. 
         @println("Frontend time: % ms.", end.sub(start)); 
     };
+    
+    // TODO: this segfaults. bug in backend/aarch64.fr presumably 
+    if JIT_RUN_NEW_SEMA {|
+        reach_sema := {vtable.intern_string}(c.data, "reach_sema");
+        reach_sema := {vtable.find_unique_func}(c.data, reach_sema).unwrap();
+        reach_sema := c.get_jitted(reach_sema);
+        reach_sema := assume_types_fn(Arg = *ImportVTable, Ret = void, ptr = reach_sema);
+        reach_sema(vtable);
+    };
+    
     if do_build {|
         start := timestamp();
         build_llvm(ir_text, @slice ("-o", "target/franca/libfranca.o", "-c", "-Os", "-g"));

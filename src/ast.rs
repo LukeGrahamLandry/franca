@@ -151,7 +151,7 @@ pub enum Expr<'p> {
         value: Values,
         coerced: bool,
     },
-    _WipFunc(FuncId),
+    _WipFunc,
     Call(Box<FatExpr<'p>>, Box<FatExpr<'p>>),
     Block {
         body: Vec<FatStmt<'p>>,
@@ -161,8 +161,8 @@ pub enum Expr<'p> {
     },
     Tuple(Vec<FatExpr<'p>>),
     Closure(Box<Func<'p>>),
-    _AddToOverloadSet(Vec<Func<'p>>),
-    SuffixMacro(Ident<'p>, Box<FatExpr<'p>>),
+    _AddToOverloadSet,
+    _SuffixMacro,
     FieldAccess(Box<FatExpr<'p>>, Ident<'p>),
     StructLiteralP(Pattern<'p>),
     PrefixMacro {
@@ -232,9 +232,7 @@ pub trait WalkAst<'p> {
         }
         match &mut expr.expr {
             Expr::GetParsed(_) => {}
-            Expr::_AddToOverloadSet(_) => {
-                unreachable!("ICE: walk. {expr:?}");
-            }
+            Expr::_WipFunc | Expr::_SuffixMacro | Expr::_AddToOverloadSet => unreachable!(),
             Expr::Poison => unreachable!("ICE: POISON"),
             Expr::Call(fst, snd) => {
                 self.expr(fst);
@@ -257,7 +255,6 @@ pub trait WalkAst<'p> {
                     self.expr(p);
                 }
             }
-            Expr::SuffixMacro(_, _) => unreachable!("suffixmacro is being removed"),
             Expr::FieldAccess(arg, _) => self.expr(arg),
             Expr::StructLiteralP(binding) => {
                 self.pattern(binding);
@@ -272,7 +269,6 @@ pub trait WalkAst<'p> {
             Expr::Closure(func) => {
                 self.func(func);
             }
-            Expr::_WipFunc(_) => todo!("walkwip"),
             Expr::FromBitLiteral { .. } | Expr::Value { .. } | Expr::GetNamed(_) | Expr::String(_) => {}
             Expr::Loop(i)
             | Expr::FnPtr(i)
@@ -636,6 +632,8 @@ pub enum FnFlag {
     NoStackTrace,
     MayHaveAquiredCaptures,
     TookPointerValue,
+    Once,
+    OnceConsumed,
 }
 
 impl<'p> Func<'p> {
@@ -687,7 +685,6 @@ pub enum FuncImpl<'p> {
     Redirect(FuncId),
     Merged(Vec<FuncImpl<'p>>),
     Empty,
-    CompilerBuiltin(Ident<'p>),
 }
 
 impl<'p> Func<'p> {
@@ -1349,6 +1346,7 @@ pub enum Flag {
     No_Trace,
     Compiler_Builtin_Transform_Callsite,
     Late,
+    Once,
     _Reserved_Count_,
 }
 

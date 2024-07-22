@@ -13,6 +13,10 @@
   lox was fixed by adding a semicolon at the end of a loop body so it didn't try to infer the type of the last expression.
   because now it wants to typecheck before noticing its a loop.
   which is a bit yucky that i changed behaviour but probably fine, dont really care.
+- made it a lex error to have a string literal split across multiple lines
+  so typos don't have completely incomprehensible errors
+  where you can't find any later functions cause they're all in the string
+- fully got rid of 'quoted' syntax in favour of @{ quoted }
 
 ## deduplication (Jul 20)
 

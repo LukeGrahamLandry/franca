@@ -4,22 +4,21 @@
 
 Token :: @struct(type: TokenType, span: Span);
 
-BinNum :: @struct(bit_count: u8, value: u64);
+BinNum :: @struct(bit_count: u8, value: u64); // TODO: use this struct in the FromBitLiteral ast node? 
 TokenType :: @tagged(
     Number: i64,
     // TODO: if this is below, it gets shadowed by the varient
     Quoted: @struct(s: Symbol, escapes: bool),
     Symbol: Symbol,
-    Qualifier: VarType,
     Op: Operator, 
-    Error: LexErr, Eof,
+    Error: LexErr,
+    Float: f64,
     // Bit count means leading zeros are observable.
     BinaryNum: BinNum,
     LeftSquiggle, RightSquiggle, LeftParen, RightParen, LeftSquare, RightSquare,
-    Dot, At, Comma, Colon, Semicolon, DoubleSquare, Hash, FatRightArrow, LeftArrow, DoubleColon, SingleQuote,
-    Amp, Question, Pipe, Equals, 
-    Fn, Dollar,
-    Float: f64,
+    Dot, At, Comma, Colon, Semicolon, DoubleSquare, Hash, FatRightArrow, DoubleColon, 
+    Amp, Question, Pipe, Equals, Dollar, Eof,
+    Fn, // TODO: if i could remove this i'd have no keywords which would be kinda pleasing. 
 );
 :: tagged(TokenType);
 
@@ -93,7 +92,6 @@ fn pop(self: *Lexer) *Token = {
         @case("&".ascii()) => self.pair("&".ascii(), .Amp, (Op = .AmpAmp));
         @case("#".ascii()) => self.one(.Hash);
         @case("?".ascii()) => self.one(.Question);
-        @case("'".ascii()) => self.one(.SingleQuote);
         @case("|".ascii()) => self.one(.Pipe);
         @case("[".ascii()) => self.pair("]".ascii(), .LeftSquare, .DoubleSquare);
         @case("]".ascii()) => self.one(.RightSquare);
@@ -180,6 +178,11 @@ fn skip_string(self: *Lexer) Ty(Str, bool, bool) = {
                     escapes = true;
                     true
                 };
+                @case("\n".ascii()) => {
+                    self.error(.UnterminatedStr);
+                    err();
+                    false
+                };
                 @case(0) => {
                     self.error(.UnterminatedStr);
                     err();
@@ -195,8 +198,7 @@ fn skip_string(self: *Lexer) Ty(Str, bool, bool) = {
     (text, escapes, true)
 }
 
-
-fn lex_string(self: *Lexer) void = {
+fn lex_string(self: *Lexer) void #once = {
     // TODO: destructuring 
     (text, escapes, success) := self.skip_string();
     if success {|
@@ -241,7 +243,7 @@ fn lex_int(self: *Lexer) i64 = {
     total
 }
 
-fn lex_hex(self: *Lexer) void = {
+fn lex_hex(self: *Lexer) void #once = {
     self.current += 2;
     total := 0;
     
@@ -275,7 +277,7 @@ fn is_hex_digit(c: u8) bool = {
     }
 }
 
-fn lex_bin(self: *Lexer) void = {
+fn lex_bin(self: *Lexer) void #once = {
     self.current += 2;
     total := 0;
     

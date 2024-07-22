@@ -111,7 +111,7 @@ fn parse_stmt(self: *Parser) Result(FatStmt, ParseErr) = {
     (Ok = stmt)
 }
 
-fn parse_stmt_inner(self: *Parser, has_annotations: bool) Result(FatStmt, ParseErr) = {
+fn parse_stmt_inner(self: *Parser, has_annotations: bool) Result(FatStmt, ParseErr) #once = {
     @match(self.peek()) {
         fn Fn() => {
             self.pop();
@@ -139,7 +139,7 @@ fn parse_stmt_inner(self: *Parser, has_annotations: bool) Result(FatStmt, ParseE
     Result(FatStmt, ParseErr).unreachable_hack()
 }
 
-fn parse_decl_or_start_expr(self: *Parser, name: Symbol) Result(FatStmt, ParseErr) = {
+fn parse_decl_or_start_expr(self: *Parser, name: Symbol) Result(FatStmt, ParseErr) #once = {
     self.pop();
     @match(self.peek()) {
         // TODO: Comma. want to change destructuing syntax to `a, b : T = e` from `(a: T_1, b: T_2) := e`.
@@ -227,7 +227,7 @@ fn after_expr_stmt_prefix(self: *Parser, e: FatExpr) Result(FatStmt, ParseErr) =
     (Ok = stmt)
 }
 
-fn ident_list_to_pattern(self: *Parser, idents: *RsVec(FatExpr), loc: Span) Result(Pattern, ParseErr) = {
+fn ident_list_to_pattern(self: *Parser, idents: *RsVec(FatExpr), loc: Span) Result(Pattern, ParseErr) #once = {
     bindings: List(Binding) = list(idents.len, self.alloc);
     each idents { expr | 
         @match(expr.expr&) {
@@ -238,7 +238,7 @@ fn ident_list_to_pattern(self: *Parser, idents: *RsVec(FatExpr), loc: Span) Resu
     (Ok = (bindings = bindings.rs(), loc = loc))
 }
 
-fn can_start_quick_expr(t: TokenType) bool = {
+fn can_start_quick_expr(t: TokenType) bool #once = {
     // TODO: varargs? `t&.is(.Symbol, .At, .Quoted, .Number, .BinaryNum)`
     @match(t) {
         fn Symbol(_) => true;
@@ -316,19 +316,15 @@ fn parse_prefix(self: *Parser, prec: Prec) ParseRes = {
         }
         fn Amp() => @report_error("'&' is not a prefix operator. if you meant to take the address of a variable, use it as a suffix.%", "") (return, self.last.span);
         fn At()           => return(self.parse_at(prec));
-        fn BinaryNum(n)   => return(Ok = self.bin_num(n));
+        fn BinaryNum(b)   => {
+            self.pop();
+            return(Ok = self.expr((FromBitLiteral = (value = b.value.bitcast(), bit_count = b.bit_count.zext())), self.last.span));
+        }
         fn Question()     => return(self.named_call(prec, Flag.operator_question_prefix));
         fn DoubleSquare() => return(self.named_call(prec, Flag.operator_squares_prefix));
         fn Fn() => {
             self.pop();
             return(self.func_expr());
-        }
-        fn SingleQuote() => { // TODO: remove this syntax
-            self.pop();
-            loc := self.last.span;
-            e := @try(self.parse_expr(Prec_None)) return;
-            @try(self.eat(.SingleQuote, "end quoted expression")) return;
-            return(Ok = self.expr((Quote = self.box(e)), loc));
         }
         fn Number(n) => {
             self.pop();
@@ -370,7 +366,7 @@ fn parse_prefix(self: *Parser, prec: Prec) ParseRes = {
         @default => {
             self.pop();
             loc := self.last.span;
-            @report_error("Expected begin expression %", "") (return, self.last.span);
+            @report_error("Expected begin expression, found %", self.last.type&.tag()) (return, self.last.span);
         };
     };
     ParseRes.unreachable_hack()
@@ -419,12 +415,6 @@ fn parse_func(self: *Parser, allow_empty: bool) Result(Func, ParseErr) = {
     
     body := @try(self.parse_expr(Prec_None)) return;
     (Ok = self.make_func(fn_def, (Some = body), may_capture))
-}
-
-// TODO: this is dumb. just admit there are more ast nodes? but then you have to deal with it everywhere. 
-fn bin_num(self: *Parser, b: BinNum) FatExpr = {
-    self.pop();
-    self.expr((FromBitLiteral = (value = b.value.bitcast(), bit_count = b.bit_count.zext())), self.last.span)
 }
 
 fn named_call(self: *Parser, prec: Prec, name: Flag) ParseRes = {
@@ -544,7 +534,7 @@ fn parse_infix(self: *Parser, prev: FatExpr, prec: Prec) ParseRes = {
     self.parse_infix(prev, prec) // TODO: tail
 }
 
-fn parse_squiggle(self: *Parser, prev: FatExpr, prec: Prec) ParseRes = {
+fn parse_squiggle(self: *Parser, prev: FatExpr, prec: Prec) ParseRes #once = {
     self.pop();
     loc := self.last.span;
     fn_def := @try(self.fn_def_signeture(loc, false)) return;
@@ -576,7 +566,7 @@ fn parse_squiggle(self: *Parser, prev: FatExpr, prec: Prec) ParseRes = {
 }
 
 // TODO: this seems to use the wrong loc
-fn parse_bin_op(self: *Parser, op: Operator, prev: FatExpr, prec: Prec) ParseRes = {
+fn parse_bin_op(self: *Parser, op: Operator, prev: FatExpr, prec: Prec) ParseRes #once = {
     // TODO: destructuring: `prec, name := @switch ...`
     (next_prec, callee) := @switch(op) {
         @case(.Plus) => (PrecLevel.AddSub, Flag.add);
@@ -1019,8 +1009,9 @@ fn eat(self: *Parser, type: TokenType.Tag(), msg: Str) PRes = {
     (Ok = unit)
 }
 
+unit_value: Values : (Small = (0, 0));
 fn raw_unit(self: *Parser, loc: Span) FatExpr = {
-    e := self.expr((Value = (bytes = (Small = (0, 0)), coerced = false)), loc);
+    e := self.expr((Value = (bytes = unit_value, coerced = false)), loc);
     e.ty = void;
     e
 }

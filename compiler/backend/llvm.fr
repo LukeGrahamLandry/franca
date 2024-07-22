@@ -154,22 +154,23 @@ fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: [] FuncId, entry: ProgramEntry) B
 }
 
 
-fn emit_bounce_fn(self: *EmitLlvm, impl_name: Str, fake_name: Str, bc: *FnBody) void = {
-    self.out&.push_all("define private ccc ");
+fn emit_bounce_fn(self: *EmitLlvm, impl_name_callee: Str, fake_decl_name: Str, signeture: PrimSig, private: bool) void = {
+    spec := if(private, => "define private ccc ", => "define ccc ");
+    self.out&.push_all(spec);
     values: List(LlvmVal) = list(temp());
     self.next_var = 0;
-    self.write_header(bc.signeture, fake_name) {arg_index|
+    self.write_header(signeture, fake_decl_name) {arg_index|
         ::if(Prim);
         // TODO: format this better. 
-        ty: Prim = if(bc.signeture.first_arg_is_indirect_return){|
+        ty: Prim = if(signeture.first_arg_is_indirect_return){|
             // TODO: only sokol tests this 
             if arg_index.eq(0) {|
                 Prim.P64
             }{|
-                bc.signeture.args[arg_index.sub(1)]
+                signeture.args[arg_index.sub(1)]
             }
         }{|
-            bc.signeture.args[arg_index]
+            signeture.args[arg_index]
         };
         values&.push((ty = ty, id = arg_index));
         s := @format("%v%", "%", arg_index) temp();
@@ -178,8 +179,8 @@ fn emit_bounce_fn(self: *EmitLlvm, impl_name: Str, fake_name: Str, bc: *FnBody) 
     };
     self.out&.reserve(50);
     self.out&.current().push_all("{\n");
-    ret := self.inst_call(values.items(), bc.signeture) {|
-        @fmt(self.out&.current(), "@%", impl_name);
+    ret := self.inst_call(values.items(), signeture) {|
+        @fmt(self.out&.current(), "@%", impl_name_callee);
     };
     self.inst_return(ret);
     self.out&.current().push_all("}\n");
@@ -220,35 +221,15 @@ fn emit_debug_info(self: *EmitLlvm, funcs_done: *BitSet) void = {
 
 // TODO: copy-paste from DynamicImport but reversed so its a pain. 
 fn write_export_bounce(self: *EmitLlvm, fid: FuncId) void = {
-    self.next_var = 0;
-    values: List(LlvmVal) = list(temp());
-    func := {self.comp.vtable.get_function}(self.comp.data, fid);
-    import_name := get_string(self.comp.data, func.name);
-    self.out&.push_all("define ccc ");
+    func := self.comp.get_function(fid);
+    export_name := get_string(self.comp.data, func.name);
+    internal_name: List(u8) = list(temp()); 
+    self.fmt_fn_name(fid, internal_name&);
+    
     f_ty := func.finished_ty().unwrap();
     cc := func.cc.unwrap();
     sig := self.comp.data.cast()[][].prim_sig(f_ty, cc).unwrap();
-    self.write_header(sig, import_name) {arg_index|
-        ty: Prim = if(sig.first_arg_is_indirect_return){|
-            if arg_index.eq(0) {|
-                Prim.P64
-            }{|
-                sig.args[arg_index.sub(1)]
-            }
-        }{|
-            sig.args[arg_index]
-        };
-        values&.push((ty = ty, id = arg_index));
-        s := @format("%v%", "%", arg_index) temp();
-        self.next_var += 1;
-        s.items()
-    };
-    self.out&.push_all("{\n");
-    ret := self.inst_call(values.items(), sig) {|
-        @fmt(self.out&.current(), "@%", (self, fid));
-    };
-    self.inst_return(ret);
-    self.out&.current().push_all("}\n");
+    self.emit_bounce_fn(internal_name.items(), export_name, sig, false);
 }
 
 fn emit_constant(self: *EmitLlvm, comp: CompCtx, id: BakedVarId) void = {
@@ -323,7 +304,7 @@ fn emit_special(self: *EmitLlvm, body: *FuncImpl, func: *Func, bc: *FnBody, pend
             import_name := get_string(comp.data, name[]);
             self.forward_declare(bc.signeture, false, import_name);
             name := @format("%", (self, bc.func)) temp();
-            self.emit_bounce_fn(import_name, name.items(), bc);
+            self.emit_bounce_fn(import_name, name.items(), bc.signeture, true);
             return(true);
         }
         fn LlvmIr(code) => { 

@@ -871,9 +871,18 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         let ret_label = LabelId::from_index(self.next_label);
         self.next_label += 1;
-        let func = &self.program[f];
-        let FuncImpl::Normal(body) = &func.body else { unreachable!() };
+        let func = &mut self.program[f];
+        let once = func.get_flag(FnFlag::Once);
+        let FuncImpl::Normal(body) = &mut func.body else { unreachable!() };
         let may_have_early_return = !matches!(body.expr, Expr::Value { .. });
+        
+        let result = if once {
+            // TODO: better error message if they try to call it again. 
+            // TODO: decide what #once with const args should mean. 
+            Box::new(mem::take(body))
+        } else {
+            Box::new(body.clone())
+        };
         // the second case would be sufficient for correctness but this is so common (if(_,!,!), loop(!), etc) that it makes me less sad. 
         if arg_expr.is_raw_unit() {
             // TODO: if !may_have_early_return, should be able to just inline the value but it doesnt work!
@@ -881,7 +890,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             //       -- Jun 16
             expr_out.expr = Expr::Block {
                 body: vec![],
-                result: Box::new(body.clone()),
+                result,
                 ret_label: BigOption::Some(ret_label),
                 hoisted_constants: false, // TODO
             };
@@ -895,7 +904,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     annotations: vec![],
                     loc,
                 }],
-                result: Box::new(body.clone()),
+                result,
                 ret_label: BigOption::Some(ret_label),
                 hoisted_constants: false, // TODO
             };
@@ -1138,11 +1147,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                 if !cond {
                     return Ok((None, None));
                 }
-            } else if tag.name == Flag::Compiler_Builtin_Transform_Callsite.ident() {
-                // TODO: should just make this a @macro
-                //       its just a little sad that then i have to figure out how to do smarter constant folding for fn if. 
-                assert!(matches!(func.body, FuncImpl::Empty));
-                func.body = FuncImpl::CompilerBuiltin(func.name);
             }
         }
 
@@ -1376,7 +1380,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     // TODO: make the indices always work out so you could just do it with a normal stack machine.
     //       and just use the slow linear types for debugging.
-    fn compile_expr_inner(&mut self, expr: &mut FatExpr<'p>, mut requested: ResultType) -> Res<'p, TypeId> {
+    fn compile_expr_inner(&mut self, expr: &mut FatExpr<'p>, requested: ResultType) -> Res<'p, TypeId> {
         self.last_loc = Some(expr.loc);
         let loc = expr.loc;
         let prev_ty = expr.ty;
@@ -1387,7 +1391,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 self.compile_expr(inner, requested)?;
                 expr.ty
             }
-            Expr::GetParsed(_) | Expr::_AddToOverloadSet(_) => unreachable!(),
+            Expr::GetParsed(_) => unreachable!(),
             Expr::Poison => ice!("POISON",),
             Expr::Closure(_) => {
                 let (arg, ret) = self.break_fn_type(requested);
@@ -1396,9 +1400,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 expr.set((id.as_raw()).into(), ty);
                 ty
             }
-            &mut Expr::_WipFunc(_) => {
-                unreachable!("this node will be removed")
-            }
+            Expr::_SuffixMacro | Expr::_WipFunc | Expr::_AddToOverloadSet => unreachable!(),
             Expr::Call(f, arg) => {
                 // Compile 'f' as normal, its fine if its a macro that expands to a callable or a closure we don't know the types for yet.
                 // TODO: result type returning requested
@@ -1425,7 +1427,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
                 // If its not a FnPtr, it should be a Fn/FuncId/OverloadSetId
                 if let Some(f_id) = self.maybe_direct_fn(f, arg, requested)? {
-                    return self.compile_call(expr, f_id, requested);
+                    return self.compile_call(expr, f_id);
                 }
 
                 self.last_loc = Some(f.loc);
@@ -1626,6 +1628,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             unsafe { created_jit_fn_ptr_value(self.program.pool, id, ptr as i64 )}
                         }
                     }
+                    assert!(!self.program[id].get_flag(Once), "Cannot create a function pointer to something that id #once");
                     self.program[id].set_flag(TookPointerValue, true);
                     // TODO: for now you just need to not make a mistake with calling convention
                     self.add_callee(id);
@@ -1680,9 +1683,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::As { ty, value } => {
                 *expr = self.as_cast_macro(mem::take(ty), mem::take(value))?;
                 return Ok(expr.ty);
-            }
-            Expr::SuffixMacro(_, _) => {
-                todo!("SuffixMacro is being removed")
             }
             // :PlaceExpr
             Expr::FieldAccess(e, name) => {
@@ -1917,9 +1917,9 @@ impl<'a, 'p> Compile<'a, 'p> {
             return Ok(Some(self.program.intern_type(TypeInfo::Int(int))));
         }
         Ok(Some(match expr.deref_mut() {
-            Expr::GetParsed(_) | Expr::_AddToOverloadSet(_) => unreachable!(),
+            Expr::GetParsed(_)  => unreachable!(),
             Expr::Poison => ice!("POISON",),
-            Expr::_WipFunc(_) => unreachable!("nothing creates these"),
+            Expr::_WipFunc | Expr::_AddToOverloadSet | Expr::_SuffixMacro => unreachable!("nothing creates these"),
             Expr::Cast(_) => unreachable!("@as puts type"),
             Expr::Value { value, .. } => unreachable!("{value:?} requires type"),
             Expr::Call(f, arg) => {
@@ -2019,7 +2019,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::StructLiteralP(_) => return Ok(None),
             
             // TODO: there's no reason this couldn't look at the types, but if logic is more complicated (so i dont want to reproduce it) and might fail often (so id be afraid of it getting to a broken state).
-            Expr::If { cond, if_true, if_false } => return Ok(None),
+            Expr::If {.. } => return Ok(None),
             Expr::Loop(_) => TypeId::never,
             Expr::Addr(arg) => {
                 match arg.deref_mut().deref_mut() {
@@ -2062,9 +2062,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                     return Ok(Some(ty));
                 }
                 err!("bad !as",)
-            }
-            Expr::SuffixMacro(_, _) => {
-                unreachable!("suffixmacro")
             }
             Expr::GetVar(var) => {
                 let ty = if var.kind == VarType::Const {
@@ -2389,24 +2386,25 @@ impl<'a, 'p> Compile<'a, 'p> {
             return Ok(values);
         }
         let func_id = self.make_lit_function(e, ret_ty)?;
-        if let FuncImpl::Normal(body) = &mut self.program[func_id].body {
-            let mut stolen_body = mem::take(body);
-            if let Err(e) = self.compile_expr(&mut stolen_body, want(ret_ty)) {
-                unsafe {
-                    let loc = e.loc.or(self.last_loc);
-                    if let Some(loc) = loc {
-                        show_error_line(self.program.pool.codemap, loc.low, loc.high);
-                    }
+        let FuncImpl::Normal(body) = &mut self.program[func_id].body else {
+            unreachable!()
+        };
+        let mut stolen_body = mem::take(body);
+        if let Err(e) = self.compile_expr(&mut stolen_body, want(ret_ty)) {
+            unsafe {
+                let loc = e.loc.or(self.last_loc);
+                if let Some(loc) = loc {
+                    show_error_line(self.program.pool.codemap, loc.low, loc.high);
                 }
-                panic!("{e:?}")
             }
-            if let Some(values) = self.check_quick_eval(&mut stolen_body, ret_ty)? {
-                self.discard(func_id);
-                assert!(self.wip_stack.pop().unwrap().0.is_none());
-                return Ok(values);
-            }
-            self.program[func_id].body = FuncImpl::Normal(stolen_body);
+            panic!("{e:?}")
         }
+        if let Some(values) = self.check_quick_eval(&mut stolen_body, ret_ty)? {
+            self.discard(func_id);
+            assert!(self.wip_stack.pop().unwrap().0.is_none());
+            return Ok(values);
+        }
+        self.program[func_id].body = FuncImpl::Normal(stolen_body);
 
         // println!("{}", self.program[func_id].body.log(self.program.pool));
 
@@ -2610,6 +2608,9 @@ impl<'a, 'p> Compile<'a, 'p> {
     pub(crate) fn add_func(&mut self, mut func: Func<'p>) -> Res<'p, FuncId> {
         if func.has_tag(Flag::No_Trace) {
             func.set_flag(FnFlag::NoStackTrace, true);
+        }
+        if func.has_tag(Flag::Once) {
+            func.set_flag(FnFlag::Once, true);
         }
         let id = self.program.add_func(func);
         Ok(id)
@@ -3073,20 +3074,22 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
     }
 
-    fn compile_call(&mut self, expr: &mut FatExpr<'p>, mut fid: FuncId, requested: ResultType) -> Res<'p, TypeId> {
+    fn compile_call(&mut self, expr: &mut FatExpr<'p>, mut fid: FuncId) -> Res<'p, TypeId> {
         let loc = expr.loc;
         let done = expr.done;
         let (f_expr, arg_expr) = if let Expr::Call(f, arg) = expr.deref_mut() { (f, arg) } else { ice!("") };
         self.ensure_resolved_sign(fid)?;
         
-        if let FuncImpl::CompilerBuiltin(name) = self.program[fid].body {
-            panic!("FuncImpl::CompilerBuiltin is being removed");
-        }
-
         if self.program[fid].get_flag(Generic) {
             assert!(self.program[fid].any_const_args(), "fn with no const args redundantly marked #generic");
             self.compile_expr(arg_expr, ResultType::None)?;
             fid = self.curry_const_args(fid, f_expr, arg_expr)?;
+        }
+
+        
+        if self.program[fid].get_flag(Once) {
+            assert!(!self.program[fid].get_flag(OnceConsumed), "tried to call once function again");
+            self.program[fid].set_flag(OnceConsumed, true);
         }
 
         let arg_ty = self.infer_arg(fid)?;
@@ -3140,7 +3143,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             let ty = self.program.func_type(fid);
             let ret_ty = self.program[fid].finished_ret.unwrap();
             f_expr.set((fid.as_raw()).into(), ty);
-            expr.done = true; // don't infinitly recurse!
+            expr.done = true; // don't infinitly recurse! // if remove remember #once
             expr.ty = ret_ty;
 
             self.compile(fid, ExecStyle::Jit)?;
@@ -3153,7 +3156,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             // TODO: cope with emit_runtime_call baking const args, needs to change the arg expr
             let ty = self.program.func_type(fid);
             f_expr.set((fid.as_raw()).into(), ty);
-            
             
             // this fixes functions with all const args the reduce to just a value emitting useless calls to like get the number 65 or whatever if you do ascii("A"). 
             if !deny_inline && arg_expr.is_raw_unit() {
@@ -3169,6 +3171,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
             }
             // if you have to remove this, do it for arg_expr at least. 
+            // and also cope with #once
             expr.done = true;
             
             Ok(res)

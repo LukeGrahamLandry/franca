@@ -189,7 +189,6 @@ fn hash(i: *Symbol) i64 = {
     i&.hash()
 }
 
-
 fn index(self: *Scopes, i: ScopeId) *Scope = {
     index := ptr_cast_unchecked(ScopeId, u32, i&)[]; // TODO: expose id like normal struct
     s := self.scopes[@as(i64) index.zext()]&; // TODO: shouldn't need extra binding
@@ -354,7 +353,7 @@ fn scan_const_decls(self: *ResolveScope, stmt: *FatStmt) PRes = {
 
 // most blocks aren't using #include_std.
 // doing it this way means you scan_const_decls twice anything in a block before a #include_std, but that doesn't matter.
-fn slow_body(self: *ResolveScope, body: *List(FatStmt)) PRes = {
+fn slow_body(self: *ResolveScope, body: *List(FatStmt)) PRes #once = {
     new_body: List(FatStmt) = list(body.len, body.gpa);
     dirty := true;
     while (=> dirty) {|
@@ -522,7 +521,7 @@ fn pop_block(self: *ResolveScope) void = {
     self.block = scope.vars[self.block].parent;
 }
 
-fn resolve_binding(self: *ResolveScope, binding: *Binding) PRes = {
+fn resolve_binding(self: *ResolveScope, binding: *Binding) PRes #once = {
     @try(self.walk_type(binding.ty&)) return;
     if binding.default& { expr |
         @try(self.walk_expr(expr)) return;
@@ -552,7 +551,7 @@ fn declare_binding(self: *ResolveScope, binding: *Binding, loc: Span) PRes = {
 
 :: WalkAst(ResolveScope, ParseErr);
 
-fn handle_expr(self: *ResolveScope, expr: *FatExpr) Result(DoMore, ParseErr) = {
+fn handle_expr(self: *ResolveScope, expr: *FatExpr) Result(DoMore, ParseErr) #once = {
     loc := expr.loc;
 
     @match(expr.expr&) {
@@ -603,7 +602,7 @@ fn handle_expr(self: *ResolveScope, expr: *FatExpr) Result(DoMore, ParseErr) = {
     (Ok = DoMore.Continue)
 }
 
-fn handle_stmt(self: *ResolveScope, stmt: *FatStmt) Result(DoMore, ParseErr) = {
+fn handle_stmt(self: *ResolveScope, stmt: *FatStmt) Result(DoMore, ParseErr) #once = {
     @match(stmt.stmt&) {
         (fn DeclNamed(f) => {
             @try(self.walk_type(f.ty&)) return;
@@ -637,7 +636,7 @@ fn handle_stmt(self: *ResolveScope, stmt: *FatStmt) Result(DoMore, ParseErr) = {
     (Ok = .Continue)
 }
 
-fn handle_func(self: *ResolveScope, func: *Func) Result(DoMore, ParseErr) = {
+fn handle_func(self: *ResolveScope, func: *Func) Result(DoMore, ParseErr) #once = {
     each func.annotations { a | 
         if a.args& { a | 
             @try(self.walk_expr(a)) return;
@@ -648,8 +647,8 @@ fn handle_func(self: *ResolveScope, func: *Func) Result(DoMore, ParseErr) = {
     (Ok = .Break)
 }
 
-fn handle_type(self: *ResolveScope, ty: *LazyType) Result(DoMore, ParseErr) = (Ok = .Continue);
-fn handle_pattern(self: *ResolveScope, p: *Pattern) Result(DoMore, ParseErr) = (Ok = .Continue);
+fn handle_type(self: *ResolveScope, ty: *LazyType) Result(DoMore, ParseErr) #once = (Ok = .Continue);
+fn handle_pattern(self: *ResolveScope, p: *Pattern) Result(DoMore, ParseErr) #once = (Ok = .Continue);
 
 ///////////////////
 /// Renumbering ///
@@ -670,20 +669,20 @@ fn update(self: *RenumberVars, name: *Var) void = {
 
 :: WalkAst(RenumberVars, void);
 
-fn handle_expr(self: *RenumberVars, expr: *FatExpr) Result(DoMore, void) = {
+fn handle_expr(self: *RenumberVars, expr: *FatExpr) Result(DoMore, void) #once = {
     @if_let(expr.expr&) 
         fn GetVar(name) => self.update(name);
     (Ok = DoMore.Continue)
 }
 
-fn handle_stmt(self: *RenumberVars, stmt: *FatStmt) Result(DoMore, void) = {
+fn handle_stmt(self: *RenumberVars, stmt: *FatStmt) Result(DoMore, void) #once = {
     @if_let(stmt.stmt&) 
         fn DeclVar(f) => self.decl(f.name&);
 
     (Ok = .Continue)
 }
 
-fn handle_func(self: *RenumberVars, func: *Func) Result(DoMore, void) = {
+fn handle_func(self: *RenumberVars, func: *Func) Result(DoMore, void) #once = {
     if func.var_name& { old |
         self.update(old);
         // TODO: maybe you sometimes want `self.decl(func.var_name&);` if not in mapping.
@@ -696,8 +695,8 @@ fn handle_func(self: *RenumberVars, func: *Func) Result(DoMore, void) = {
     (Ok = .Continue)
 }
 
-fn handle_type(self: *RenumberVars, ty: *LazyType) Result(DoMore, void) = (Ok = .Continue);
-fn handle_pattern(self: *RenumberVars, p: *Pattern) Result(DoMore, void) = {
+fn handle_type(self: *RenumberVars, ty: *LazyType) Result(DoMore, void) #once = (Ok = .Continue);
+fn handle_pattern(self: *RenumberVars, p: *Pattern) Result(DoMore, void) #once = {
     each p.bindings { b |
         @if_let(b.name&) 
             fn Var(v) => self.decl(v);

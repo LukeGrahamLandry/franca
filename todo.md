@@ -10,6 +10,7 @@
   can do it by address at least, cause if it was a string literal in the pool, will be the same.
 - i think generic with multiple const args aren't typechecked (you can pass a pointer to the enum functions that should expect a tag).
   write a test for that, need to have better support for testing that a certain error happens.
+- make the quote syntax not make a redundant block for single expressions that you have to manually get rid of if you want to access the actual node.
 
 ## data structure changes
 

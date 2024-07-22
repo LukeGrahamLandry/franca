@@ -236,8 +236,7 @@ fn var(self: *Binding) ?Var = {
 }
 
 // TODO: if you have an unclosed string it randomly decides later top level vars are undeclared? -- Jul 7 
-
-fn bind_args(self: *EmitBc, result: *FnBody, arguments: *Pattern) Res([] Prim) = {
+fn bind_args(self: *EmitBc, result: *FnBody, arguments: *Pattern) Res([] Prim) #once = {
     arity: u16 = arguments.bindings.len.trunc();
 
     func := self.program[result.func]&;
@@ -458,7 +457,7 @@ fn load(self: *EmitBc, result: *FnBody, ty: Type) void = {
     }
 }
 
-fn emit_body(self: *EmitBc, result: *FnBody, f: FuncId) PRes = {
+fn emit_body(self: *EmitBc, result: *FnBody, f: FuncId) PRes #once = {
     func := self.program[f]&;
 
     body: *FatExpr = @match(func.body&) {
@@ -733,10 +732,10 @@ fn compile_expr(self: *EmitBc, result: *FnBody, expr: *FatExpr, result_location:
         fn Call(f)  => return(self.emit_call(result, f.f, f.arg, result_location, can_tail));
         fn Block(f) => return(self.emit_block_expr(result, f.body&, f.result, f.ret_label, result_location, can_tail));
         fn Value(f) => return(self.emit_value(result, f.bytes&, result_location, expr.ty));
-        fn SuffixMacro(f) => panic("this node is being removed. emit_bc SuffixMacro");
         fn If(_)      => return(self.emit_call_if(result, expr, result_location, can_tail));
         fn Loop(arg)  => return(self.emit_call_loop(result, arg[]));
         fn Addr(arg)  => return(self.addr_macro(result, arg[], result_location));
+        fn StructLiteralP(pattern) => return(self.construct_struct(result, pattern, expr.ty, result_location));
         fn Slice(arg) => {
             container_ty := arg.ty;
             // Note: number of elements, not size of the whole array value.
@@ -851,7 +850,6 @@ fn compile_expr(self: *EmitBc, result: *FnBody, expr: *FatExpr, result_location:
             };
             return(.Ok)
         };
-        fn StructLiteralP(pattern) => return(self.construct_struct(result, pattern, expr.ty, result_location));
         fn Tuple(values) => {
             raw := self.program.raw_type(expr.ty); // TODO: do i need this? 
             @match(self.program.get_type(raw)) {
@@ -941,7 +939,8 @@ fn follow_redirects(program: *SelfHosted, f_id: FuncId) FuncId = {
     };
     f_id
 }
-fn emit_call(self: *EmitBc, result: *FnBody, f: *FatExpr, arg: *FatExpr, result_location: ResultLoc, can_tail: bool) PRes = {
+
+fn emit_call(self: *EmitBc, result: *FnBody, f: *FatExpr, arg: *FatExpr, result_location: ResultLoc, can_tail: bool) PRes #once = {
     // TODO: not enough bits! super dumb -- Jul 8
     //@assert(!f.ty.is_unknown(), "Not typechecked: %", f.log(self.program.pool));
     //@assert(!arg.ty.is_unknown(), "Not typechecked: %", arg.log(self.program.pool));
@@ -1015,7 +1014,8 @@ fn emit_call(self: *EmitBc, result: *FnBody, f: *FatExpr, arg: *FatExpr, result_
     };
     unreachable()
 }
-fn emit_block_expr(self: *EmitBc, result: *FnBody, body: *RsVec(FatStmt), value: *FatExpr, ret_label: ?LabelId, result_location: ResultLoc, can_tail: bool) PRes = {
+
+fn emit_block_expr(self: *EmitBc, result: *FnBody, body: *RsVec(FatStmt), value: *FatExpr, ret_label: ?LabelId, result_location: ResultLoc, can_tail: bool) PRes #once = {
     self.locals&.push(list(temp()));
     // TODO: make sure value.ty here is the same as expr.ty outside which is what i used to use. -- Jul 8  :audi
     out := self.program.get_info(value.ty);
@@ -1086,7 +1086,7 @@ fn emit_block_expr(self: *EmitBc, result: *FnBody, body: *RsVec(FatStmt), value:
     .Ok
 }
 
-fn emit_value(self: *EmitBc, result: *FnBody, value: *Values, result_location: ResultLoc, expr_ty: Type) PRes = {
+fn emit_value(self: *EmitBc, result: *FnBody, value: *Values, result_location: ResultLoc, expr_ty: Type) PRes #once = {
     if(result_location == .Discard, => return(.Ok));
     want_emit_by_memcpy := value.len() > 16;  // dont change this to include small things unless you do something about values being stored inline.
     // TODO: you probably want to allow people to overload bake_relocatable_value even if !contains_pointers, but also there's no point. -- Jun 19
@@ -1193,7 +1193,7 @@ fn emit_value(self: *EmitBc, result: *FnBody, value: *Values, result_location: R
 }
 
 // :PlaceExpr
-fn addr_macro(self: *EmitBc, result: *FnBody, arg: *FatExpr, result_location: ResultLoc) PRes = {
+fn addr_macro(self: *EmitBc, result: *FnBody, arg: *FatExpr, result_location: ResultLoc) PRes #once = {
     self.last_loc = arg.loc;
     // field accesses should have been desugared.
     @err_assert(arg.expr&.is(.GetVar), "took address of r-value") return;
@@ -1212,7 +1212,7 @@ fn addr_macro(self: *EmitBc, result: *FnBody, arg: *FatExpr, result_location: Re
 }
 
 // we never make the temp variable. if the arg is big, caller needs to setup a result location.
-fn emit_call_if(self: *EmitBc, result: *FnBody, arg: *FatExpr, result_location: ResultLoc, can_tail: bool) PRes = {
+fn emit_call_if(self: *EmitBc, result: *FnBody, arg: *FatExpr, result_location: ResultLoc, can_tail: bool) PRes #once = {
     @err_assert(arg.expr&.is(.If), "ICE: expected if") return;
     parts := arg.expr.If;
     
@@ -1246,7 +1246,7 @@ fn emit_call_if(self: *EmitBc, result: *FnBody, arg: *FatExpr, result_location: 
     .Ok
 }
 
-fn emit_call_loop(self: *EmitBc, result: *FnBody, arg: *FatExpr) PRes = {
+fn emit_call_loop(self: *EmitBc, result: *FnBody, arg: *FatExpr) PRes #once = {
     @debug_assert_eq(arg.ty, void);
 
     prev_block := result.current_block;
@@ -1269,7 +1269,7 @@ fn emit_call_loop(self: *EmitBc, result: *FnBody, arg: *FatExpr) PRes = {
 }
 
 // :PlaceExpr
-fn set_deref(self: *EmitBc, result: *FnBody, place: *FatExpr, value: *FatExpr) PRes = {
+fn set_deref(self: *EmitBc, result: *FnBody, place: *FatExpr, value: *FatExpr) PRes #once = {
     // we care about the type of the pointer, not the value because there might be a cast.
     @match(place.expr&) {
         fn GetVar(_) => panic("ICE: var set should be converted to place expr");
@@ -1293,7 +1293,7 @@ fn unwrap(self: Name) Symbol = {
 }
 
 // TODO: rename? also used for tagged. 
-fn construct_struct(self: *EmitBc, result: *FnBody, pattern: *Pattern, requested: Type, result_location: ResultLoc) PRes = {
+fn construct_struct(self: *EmitBc, result: *FnBody, pattern: *Pattern, requested: Type, result_location: ResultLoc) PRes #once = {
     raw_container_ty := self.program.raw_type(requested);
     slots := self.slot_count(raw_container_ty);
     @debug_assert(slots.lt(8).or(result_location != .PushStack), "too big to put on stack"); 

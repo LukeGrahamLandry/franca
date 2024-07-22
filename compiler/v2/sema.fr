@@ -1,5 +1,6 @@
 // TODO: have first.fr pass vtable to #test if non-void argument. 
 
+// TODO: make this a usable debug flag.
 DEBUG_ALWAYS_BE_YIELDING :: false;
 
 ResultType :: @tagged(
@@ -13,15 +14,11 @@ fn compile_stmt(self: *SelfHosted, stmt: *FatStmt) Maybe(void) = {
     @match(stmt.stmt&) {
         fn Noop() => return(.Ok);
         fn Eval(expr) => return(self.compile_expr(expr, .None));
-        fn DeclFunc(func) => return(@err("TODO: compile DeclFunc stmt"));
         fn DeclVar(f) => {
             assert(f.name.kind != .Const, "hit unhoisted constant");
             return(@err("TODO: compile DeclVar stmt"))
         }
-        fn DeclVarPattern(f) => return(@err("TODO: compile DeclVarPattern stmt"));
-        fn DeclNamed(f) => return(@err("TODO: compile DeclNamed stmt"));
-        fn Set(f) => return(@err("TODO: compile Set stmt"));
-        fn ExpandParsedStmts(f) => return(@err("TODO: compile ExpandParsedStmts stmt"));
+        @default => panic("TODO: unhandled compile_stmt type");
     };
     unreachable_hack(Maybe(void))
 }
@@ -55,7 +52,6 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
             };
             expr.done = true;
         }
-        fn _WipFunc() => panic("WipFunc will be removed);
         fn Call() => {
             @check(self.compile_call(expr, requested)) return;
         }
@@ -80,11 +76,6 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
                 expr.ty = panic("TODO: save tuple type");
             };
         }
-        fn Closure() => return(@err("TODO: expression"));
-        fn _AddToOverloadSet() => panic("AddToOverloadSet will be removed");
-        fn SuffixMacro() => return(@err("TODO: expression"));
-        fn FieldAccess() => return(@err("TODO: expression"));
-        fn StructLiteralP() => return(@err("TODO: expression"));
         fn PrefixMacro() => {
             @check(self.compile_prefix_macro(expr)) return;
         }
@@ -99,7 +90,7 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
         }
         fn PtrOffset(_) => return(@err("ICE: PtrOffset should be done=true"));
         fn GetParsed() => return(@err("ICE: GetParsed is handled by scope.fr"));
-        fn Cast() => return(@err("TODO: expression"));
+        @default => panic("TODO: unhandled node type");
     };
     self.dispatch.active_stack.pop();
     .Ok
@@ -127,49 +118,64 @@ fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
     @debug_assert(expr.expr&.is(.PrefixMacro));
     invocation := expr.expr.PrefixMacro&;
     fat_expr_type := or self.env.fat_expr_type {|
-        // If we're early in bootstrapping and haven't compiled the FatExpr type yet, so some special handling.
-        if !invocation.handler.expr&.is(.GetVar) {|
-            return(@err("macro calls must be GetVar while bootstrapping. tried to run something too compilicated too soon."));
-        };
-        
-        name := invocation.handler.expr.GetVar.name;
-        @switch(name) {
-            @case(Flag.builtin.ident()) => {
-                if !invocation.arg.expr&.is(.String) {|
-                    return(@err("@builtin arg must be String literal"));
-                };
-                builtin_name := invocation.arg.expr.String;
-                @println("called builtin %", self.pool.get(builtin_name));
-                @switch(builtin_name) {
-                    @case(Flag.i64.ident()) => {
-                        ptr := i64;
-                        val := ptr_cast_unchecked(Type, u32, ptr&)[];
-                        expr.set((Small = (val.zext(), 4)), i64);
-                    };
-                    @case(Flag.compiler_debug_assert_eq_i64.ident()) => {
-                        my_assert_eq: rawptr : fn(a: i64, b: i64) i64 = {
-                            println("Hello World!");
-                            assert_eq(a, b);
-                            a
-                        };
-                        ty := self.tuple_of(@slice(i64, i64));
-                        ty := self.intern_type(FnPtr = (ty = (arg = ty, ret = i64, arity = 2), cc = .CCallReg));
-                        expr.set((Small = (my_assert_eq.int_from_rawptr(), 8)), ty);
-                    };
-                    @default => {
-                        return(@err("unknown @builtin '%'.", self.pool.get(builtin_name)));
-                    };
-                };
-            };
-            @default => {
-                return(@err("tried to call non-builtin macro '%' calls while bootstrapping.", self.pool.get(name)));
-            };
-        };
-        
-        return(.Ok)
+        return(self.early_builtin_prefix_macro(expr))
     };
     
     panic("TODO: call user macros");
+    .Ok
+}
+
+// If we're early in bootstrapping and haven't compiled the FatExpr type yet, so some special handling.
+fn early_builtin_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
+    invocation := expr.expr.PrefixMacro&;
+    if !invocation.handler.expr&.is(.GetVar) {|
+        return(@err("macro calls must be GetVar while bootstrapping. tried to run something too compilicated too soon."));
+    };
+    
+    name := invocation.handler.expr.GetVar.name;
+    @switch(name) {
+        @case(Flag.builtin.ident()) => {
+            if !invocation.arg.expr&.is(.String) {|
+                return(@err("@builtin arg must be String literal"));
+            };
+            builtin_name := invocation.arg.expr.String;
+            @println("called builtin %", self.pool.get(builtin_name));
+            builtin_type :: fn(T: Type) void => {
+                ptr := T;
+                val := ptr_cast_unchecked(Type, u32, ptr&)[];
+                expr.set((Small = (val.zext(), 4)), Type);
+            };
+            // These could call :get_or_create_type but it doesn't matter for now because these are hardcoded
+            @switch(builtin_name) {
+                @case(Flag.i64.ident())         => builtin_type(i64);
+                @case(Flag.bool.ident())        => builtin_type(bool);
+                @case(Flag.OverloadSet.ident()) => builtin_type(OverloadSet);
+                @case(Flag.Scope.ident())       => builtin_type(Scope);
+                @case(Flag.FuncId.ident())      => builtin_type(FuncId);
+                @case(Flag.LabelId.ident())     => builtin_type(LabelId);
+                @case(Flag.Symbol.ident())      => builtin_type(Symbol);
+                @case(Flag.true.ident())        => expr.set((Small = (1, 1)), bool);
+                @case(Flag.false.ident())       => expr.set((Small = (0, 1)), bool);
+                @case(Flag.compiler_debug_assert_eq_i64.ident()) => {
+                    my_assert_eq: rawptr : fn(a: i64, b: i64) i64 = {
+                        println("Hello World!");
+                        assert_eq(a, b);
+                        a
+                    };
+                    ty := self.tuple_of(@slice(i64, i64));
+                    ty := self.intern_type(FnPtr = (ty = (arg = ty, ret = i64, arity = 2), cc = .CCallReg));
+                    expr.set((Small = (my_assert_eq.int_from_rawptr(), 8)), ty);
+                };
+                @default => {
+                    return(@err("unknown @builtin '%'.", self.pool.get(builtin_name)));
+                };
+            };
+        };
+        @default => {
+            return(@err("tried to call non-builtin macro '%' calls while bootstrapping.", self.pool.get(name)));
+        };
+    };
+    
     .Ok
 }
 
@@ -354,6 +360,7 @@ fn parse_for_test(c: *SelfHosted, src: Str) FatExpr = {
 fn reach_sema(vtable: *ImportVTable) void = {
     c := {vtable.init_compiler}(.Aarch64);
     c := c.cast()[][];
+    
     src :: """fn() => { 
         builtin :: "this will never be evaluated";
         assert_eq :: @builtin("compiler_debug_assert_eq_i64");
