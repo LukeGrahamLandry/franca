@@ -923,7 +923,7 @@ extern "C-unwind" fn bits_macro<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatE
         arg.expr = Expr::Tuple(new_args);
         let (func, f_ty) = compile.func_expr(shift_or_slice);
         let func = FatExpr::synthetic_ty(func, loc, f_ty);
-        let arg = FatExpr::synthetic(Expr::SuffixMacro(Flag::Slice.ident(), Box::new(arg)), loc);
+        let arg = FatExpr::synthetic(Expr::Slice(Box::new(arg)), loc);
         let ty = u32::get_type(compile.program);
         Ok(FatExpr::synthetic_ty(Expr::Call(Box::new(func), Box::new(arg)), loc, ty))
     })

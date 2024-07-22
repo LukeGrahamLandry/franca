@@ -87,17 +87,26 @@ fn fill_export_ffi(out: *List(u8)) void = {
         r.unwrap()
     };
     
-    // TODO: remove compiler_builtin_transform_callsite and just use these? it feels a bit sad to add the extra indirection tho. 
-    @fmt(out, "fn if(e: FatExpr) FatExpr #macro #ct #comptime_addr(%);\n", node_macro(.if));
-    @fmt(out, "fn slice(e: FatExpr) FatExpr #macro #ct #comptime_addr(%);\n", node_macro(.slice));
-    // TODO: make uninitialized one of these. 
-    
-    fn node_macro($name: Flag) rawptr = 
-        (fn(c: CompilerRs, e: FatExpr) FatExpr = {
-            out := c[][].get_alloc().alloc(FatExpr, 1);
-            out.ptr[] = e;
-            (expr = (SuffixMacro = (name = name.ident(), arg = out.ptr)), loc = e.loc, ty = UnknownType, done = false)
-        });
+    @fmt(out, "fn if(e: FatExpr) FatExpr #macro #ct #comptime_addr(%);\n", if_node);
+    if_node: rawptr : fn(c: CompilerRs, e: FatExpr) FatExpr = {
+        assert(e.expr&.is(.Tuple), "@if expected tuple");
+        parts := e.expr.Tuple&;
+        (expr = (If = (cond = parts.index(0), if_true = parts.index(1), if_false = parts.index(2))), loc = e.loc, ty = UnknownType, done = false)
+    };
+    @fmt(out, "fn slice(e: FatExpr) FatExpr #macro #ct #comptime_addr(%);\n", slice_node);
+    slice_node: rawptr : fn(c: CompilerRs, e: FatExpr) FatExpr = {
+        e := c[][].box(e);
+        (expr = (Slice = e), loc = e.loc, ty = UnknownType, done = false)
+    };
+    @fmt(out, "fn _uninitialized(e: FatExpr) FatExpr #macro #ct #comptime_addr(%);\n", uninit_node);
+    uninit_node: rawptr : fn(c: CompilerRs, e: FatExpr) FatExpr = {
+        (expr = .Uninitialized, loc = e.loc, ty = UnknownType, done = false)
+    };
+    @fmt(out, "fn loop(e: FatExpr) FatExpr #macro #ct #comptime_addr(%);\n", loop_node);
+    loop_node: rawptr : fn(c: CompilerRs, e: FatExpr) FatExpr = {
+        e := c[][].box(e);
+        (expr = (Loop = e), loc = e.loc, ty = UnknownType, done = false)
+    };
     
     @fmt(out, "fn operator_star_prefix(T: Type) Type #fold #ct #comptime_addr(%);\n", ptr);
     ptr: rawptr : fn(c: Compiler, inner: Type) Type = {

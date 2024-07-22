@@ -1,4 +1,20 @@
-## deduplication
+## (Jul 21)
+
+- made typed ast nodes to replace all the SuffixMacro ones, which i like more cause there's less junk code about decoding the arguments,
+  cause you just already know the answer.
+  but sadly its slower to compile itself. (and also broke the lox test, todo).
+  i wonder if the slower is just because of removing #compiler_builtin_transform_callsite so there's more indirection.
+  old 390ms -> new 430ms, 10%.
+  yeah cause making single arg if function call macro instead of the two arg function brings it to 400ms.
+  so extra const arg function expanding really hurts.
+  doing @loop directly in fn while gets me back to 390ms.
+  so i guess thats good enough and then change is fine now, but its a bit of a bad sign for my avoidence of builtin things,
+  that implies it could be similarly 10% faster if I just had syntax for `if` and `while` like normal people instead of most code going through an extra function expansion.
+  lox was fixed by adding a semicolon at the end of a loop body so it didn't try to infer the type of the last expression.
+  because now it wants to typecheck before noticing its a loop.
+  which is a bit yucky that i changed behaviour but probably fine, dont really care.
+
+## deduplication (Jul 20)
 
 - it seems pretty effective. first attempt was ~17% less ir and made llvm take ~8% less time
 - trying to do it for jit too made aot try to call non-existant functions. i thought i had to complicated seperate redirect tracking,

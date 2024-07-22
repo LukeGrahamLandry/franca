@@ -151,7 +151,7 @@ pub enum Expr<'p> {
         value: Values,
         coerced: bool,
     },
-    WipFunc(FuncId),
+    _WipFunc(FuncId),
     Call(Box<FatExpr<'p>>, Box<FatExpr<'p>>),
     Block {
         body: Vec<FatStmt<'p>>,
@@ -161,7 +161,7 @@ pub enum Expr<'p> {
     },
     Tuple(Vec<FatExpr<'p>>),
     Closure(Box<Func<'p>>),
-    AddToOverloadSet(Vec<Func<'p>>),
+    _AddToOverloadSet(Vec<Func<'p>>),
     SuffixMacro(Ident<'p>, Box<FatExpr<'p>>),
     FieldAccess(Box<FatExpr<'p>>, Ident<'p>),
     StructLiteralP(Pattern<'p>),
@@ -181,6 +181,32 @@ pub enum Expr<'p> {
     },
     GetParsed(usize),
     Cast(Box<FatExpr<'p>>),
+
+    If {
+        cond: Box<FatExpr<'p>>,
+        if_true: Box<FatExpr<'p>>,
+        if_false: Box<FatExpr<'p>>,
+    },
+    Loop(Box<FatExpr<'p>>),
+    Addr(Box<FatExpr<'p>>),
+    Quote(Box<FatExpr<'p>>),
+    Slice(Box<FatExpr<'p>>),
+    Deref(Box<FatExpr<'p>>),
+    ConstEval(Box<FatExpr<'p>>),
+    FnPtr(Box<FatExpr<'p>>),
+    FromBitLiteral {
+        value: i64,
+        bit_count: i64,
+    },
+    Uninitialized,
+    Unquote(Box<FatExpr<'p>>),
+    Placeholder(i64),
+    Builtin(Ident<'p>),
+    ContextualField(Ident<'p>),
+    As {
+        ty: Box<FatExpr<'p>>,
+        value: Box<FatExpr<'p>>,
+    },
 }
 
 impl<'p> FatExpr<'p> {
@@ -206,7 +232,7 @@ pub trait WalkAst<'p> {
         }
         match &mut expr.expr {
             Expr::GetParsed(_) => {}
-            Expr::AddToOverloadSet(_) => {
+            Expr::_AddToOverloadSet(_) => {
                 unreachable!("ICE: walk. {expr:?}");
             }
             Expr::Poison => unreachable!("ICE: POISON"),
@@ -231,7 +257,7 @@ pub trait WalkAst<'p> {
                     self.expr(p);
                 }
             }
-            Expr::SuffixMacro(_, arg) => self.expr(arg),
+            Expr::SuffixMacro(_, _) => unreachable!("suffixmacro is being removed"),
             Expr::FieldAccess(arg, _) => self.expr(arg),
             Expr::StructLiteralP(binding) => {
                 self.pattern(binding);
@@ -242,12 +268,29 @@ pub trait WalkAst<'p> {
                 self.expr(arg);
                 self.expr(target);
             }
-            Expr::GetVar(_) => {}
+            Expr::ContextualField(_) | Expr::Builtin(_) | Expr::Placeholder(_) | Expr::Uninitialized | Expr::GetVar(_) => {}
             Expr::Closure(func) => {
                 self.func(func);
             }
-            Expr::WipFunc(_) => todo!("walkwip"),
-            Expr::Value { .. } | Expr::GetNamed(_) | Expr::String(_) => {}
+            Expr::_WipFunc(_) => todo!("walkwip"),
+            Expr::FromBitLiteral { .. } | Expr::Value { .. } | Expr::GetNamed(_) | Expr::String(_) => {}
+            Expr::Loop(i)
+            | Expr::FnPtr(i)
+            | Expr::Unquote(i)
+            | Expr::Quote(i)
+            | Expr::Slice(i)
+            | Expr::Deref(i)
+            | Expr::Addr(i)
+            | Expr::ConstEval(i) => self.expr(i),
+            Expr::If { cond, if_true, if_false } => {
+                self.expr(cond);
+                self.expr(if_true);
+                self.expr(if_false);
+            }
+            Expr::As { ty, value } => {
+                self.expr(ty);
+                self.expr(value);
+            }
         }
         self.post_walk_expr(expr);
     }
@@ -327,7 +370,7 @@ impl<'p> FatExpr<'p> {
     // this is intended to be called after compile_expr.
     pub(crate) fn is_const(&self) -> bool {
         match &self.expr {
-            Expr::String(_) | Expr::Closure(_) | Expr::AddToOverloadSet(_) | Expr::WipFunc(_) | Expr::Value { .. } => true,
+            Expr::String(_) | Expr::Closure(_) | Expr::Value { .. } => true,
             Expr::Block { .. } => false, // TODO
             Expr::Tuple(parts) => parts.iter().all(|e| e.is_const()),
             Expr::PtrOffset { ptr: inner, .. } | Expr::Cast(inner) => inner.is_const(),
@@ -1105,22 +1148,6 @@ impl<'p> Expr<'p> {
         }
     }
 
-    pub(crate) fn as_suffix_macro(&self, flag: Flag) -> Option<&FatExpr<'p>> {
-        if let Expr::SuffixMacro(name, arg) = self {
-            if *name == flag.ident() {
-                return Some(arg);
-            }
-        }
-        None
-    }
-    pub(crate) fn as_suffix_macro_mut(&mut self, flag: Flag) -> Option<&mut FatExpr<'p>> {
-        if let Expr::SuffixMacro(name, arg) = self {
-            if *name == flag.ident() {
-                return Some(arg);
-            }
-        }
-        None
-    }
     // TODO: this is very bad. and only used for !rec
     pub(crate) fn as_prefix_macro_mut(&mut self, flag: Flag) -> Option<&mut FatExpr<'p>> {
         if let Expr::PrefixMacro { handler, arg, target } = self {

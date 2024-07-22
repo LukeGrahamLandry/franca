@@ -13,7 +13,7 @@ use std::mem::{self, transmute};
 use std::ops::DerefMut;
 use std::ptr::{self, addr_of};
 use std::sync::atomic::AtomicIsize;
-use std::{ops::Deref, panic::Location};
+use std::panic::Location;
 
 use crate::ast::{
     Annotation, Binding, CallConv, FatStmt, Flag,
@@ -617,13 +617,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.last_loc = Some(self.program[f].loc);
 
         let mut special = false;
-        if let FuncImpl::Normal(body) = &mut self.program[f].body {
-            if let Some(arg) = body.as_suffix_macro_mut(Flag::Asm) {
-                let mut a = arg.clone();
-                self.program[f].body = self.inline_asm_body(f, &mut a)?;
-                special = true;
-            } 
-        } else {
+        if !matches!(self.program[f].body, FuncImpl::Normal(_)) {
             assert!(self.program[f].finished_ty().is_some(), "fn without body needs type annotations.");
         }
         
@@ -742,7 +736,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             err!("expected normal body",)
         };
 
-        debug_assert!(body_expr.as_suffix_macro_mut(Flag::Asm).is_none(), "special should handle");
 
         if !self.program[f].get_flag(Generic) && !matches!(self.program[f].ret, LazyType::Infer) {
             self.infer_types(f)?;
@@ -987,7 +980,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             Stmt::ExpandParsedStmts(_) => unreachable!(),
             Stmt::Eval(expr) => {
                 // Note: can't do this check in parser because you want to allow @match/@switch that moves around the stmts.
-                if matches!(expr.expr, Expr::Closure(_) | Expr::WipFunc(_)) {
+                if matches!(expr.expr, Expr::Closure(_)) {
                     err!("you probably don't want to discard an anonymous function.",);
                 }
                 self.compile_expr(expr, ResultType::None)?;
@@ -1296,7 +1289,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         if self.program[id].finished_ret.is_some() {
             (Expr::Value { value: (id.as_raw()).into(), coerced: false }, self.program.func_type(id))
         } else {
-            (Expr::WipFunc(id), FuncId::get_or_create_type(self.program))
+            (Expr::Value { value: (id.as_raw()).into(), coerced: false }, FuncId::get_or_create_type(self.program))
         }
     }
 
@@ -1394,7 +1387,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 self.compile_expr(inner, requested)?;
                 expr.ty
             }
-            Expr::GetParsed(_) | Expr::AddToOverloadSet(_) => unreachable!(),
+            Expr::GetParsed(_) | Expr::_AddToOverloadSet(_) => unreachable!(),
             Expr::Poison => ice!("POISON",),
             Expr::Closure(_) => {
                 let (arg, ret) = self.break_fn_type(requested);
@@ -1403,12 +1396,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                 expr.set((id.as_raw()).into(), ty);
                 ty
             }
-            &mut Expr::WipFunc(id) => {
-                self.infer_types(id)?;
-                // When Expr::Call compiles its 'f', the closure might not know its types yet, so just say its some const known Fn and figure it out later.
-                let ty = self.program.fn_type(id).unwrap_or_else(|| FuncId::get_or_create_type(self.program));
-                expr.set((id.as_raw()).into(), ty);
-                ty
+            &mut Expr::_WipFunc(_) => {
+                unreachable!("this node will be removed")
             }
             Expr::Call(f, arg) => {
                 // Compile 'f' as normal, its fine if its a macro that expands to a callable or a closure we don't know the types for yet.
@@ -1489,11 +1478,11 @@ impl<'a, 'p> Compile<'a, 'p> {
                     expr.done = true; // don't recurse on the var expr again.
                     let loc = expr.loc;
                     let ptr_ty = self.program.ptr_type(ty);
-                    *expr = FatExpr::synthetic_ty(Expr::SuffixMacro(Flag::Addr.ident(), Box::new(mem::take(expr))), loc, ptr_ty);
+                    *expr = FatExpr::synthetic_ty(Expr::Addr(Box::new(mem::take(expr))), loc, ptr_ty);
                     expr.ty = ptr_ty;
                     expr.done = true;
                     // Note: not using deref_one, because don't want to just remove the ref, we want raw variable expressions to not exist. kinda HACK
-                    *expr = FatExpr::synthetic_ty(Expr::SuffixMacro(Flag::Deref.ident(), Box::new(mem::take(expr))), loc, ty);
+                    *expr = FatExpr::synthetic_ty(Expr::Deref(Box::new(mem::take(expr))), loc, ty);
                     expr.done = true;
                     ty
                 } else if let Some((value, ty)) = self.find_const(*var, requested)? {
@@ -1545,177 +1534,155 @@ impl<'a, 'p> Compile<'a, 'p> {
                 expr.done = true;
                 expr.ty
             }
-            // TODO: factor these out and maybe poke thier addresses in #compiler_builtin_transform_callsite
-            Expr::SuffixMacro(macro_name, arg) => {
-                let name = Flag::try_from(*macro_name)?;
-                match name {
-                    // TODO: make `let` deeply immutable so only const addr
-                    // Note: arg is not evalutated
-                    Flag::If => self.emit_call_if(expr, requested)?,
-                    Flag::Loop => self.emit_call_loop(arg)?,
-                    Flag::Addr => self.addr_macro(expr, requested)?,
-                    // :UnquotePlaceholders
-                    Flag::Quote => {
-                        let mut arg: FatExpr<'p> = *arg.clone(); // Take the contents of the box, not the box itself!
-                        let loc = arg.loc;
+            Expr::If { .. } => {
+                self.emit_call_if(expr, requested)?
+            }
+            Expr::Loop(body) => {
+                self.emit_call_loop(body)?
+            }
+            Expr::Addr(_) => self.addr_macro(expr, requested)?,
+            // :UnquotePlaceholders
+            Expr::Quote(arg) => {
+                let mut arg: FatExpr<'p> = *arg.clone(); // Take the contents of the box, not the box itself!
+                let loc = arg.loc;
 
-                        let mut walk = Unquote {
-                            compiler: self,
-                            placeholders: vec![],
-                        };
-                        walk.expr(&mut arg);
-                        let mut placeholders = walk.placeholders; // drop walk.
+                let mut walk = Unquote {
+                    compiler: self,
+                    placeholders: vec![],
+                };
+                walk.expr(&mut arg);
+                let mut placeholders = walk.placeholders; // drop walk.
 
-                        let ty = unwrap2!(self.program.pool.env.fat_expr_type, "used quoted ast during bootstrapping");
-                        let value = to_values(self.program, arg)?;
+                let ty = unwrap2!(self.program.pool.env.fat_expr_type, "used quoted ast during bootstrapping");
+                let value = to_values(self.program, arg)?;
 
-                        expr.set(value.clone(), ty);
-                        if placeholders.is_empty() {
-                            ty
-                        } else {
-                            placeholders.push(Some(mem::take(expr)));
-                            let arg = Box::new(FatExpr::synthetic(
-                                Expr::Tuple(placeholders.into_iter().map(|p| p.unwrap()).collect()),
-                                loc,
-                            ));
-                            let arg = FatExpr::synthetic(Expr::SuffixMacro(Flag::Slice.ident(), arg), loc);
-                            let f = self.program.find_unique_func(Flag::Unquote_Macro_Apply_Placeholders.ident()).unwrap(); // TODO
-                            let _ = self.infer_types(f)?.unwrap();
-                            let f = FatExpr::synthetic_ty(Expr::Value { value: (f.as_raw()).into(), coerced: false }, loc, self.program.func_type(f));
-                            *expr = FatExpr::synthetic_ty(Expr::Call(Box::new(f), Box::new(arg)), loc, ty);
-                            self.compile_expr(expr, requested)?
+                expr.set(value.clone(), ty);
+                if placeholders.is_empty() {
+                    ty
+                } else {
+                    placeholders.push(Some(mem::take(expr)));
+                    let arg = Box::new(FatExpr::synthetic(
+                        Expr::Tuple(placeholders.into_iter().map(|p| p.unwrap()).collect()),
+                        loc,
+                    ));
+                    let arg = FatExpr::synthetic(Expr::Slice(arg), loc);
+                    let f = self.program.find_unique_func(Flag::Unquote_Macro_Apply_Placeholders.ident()).unwrap(); // TODO
+                    let _ = self.infer_types(f)?.unwrap();
+                    let f = FatExpr::synthetic_ty(Expr::Value { value: (f.as_raw()).into(), coerced: false }, loc, self.program.func_type(f));
+                    *expr = FatExpr::synthetic_ty(Expr::Call(Box::new(f), Box::new(arg)), loc, ty);
+                    self.compile_expr(expr, requested)?
+                }
+            }
+            Expr::Slice(arg) => {
+                let container = self.compile_expr(arg, ResultType::None)?;
+                let ty = self.program.tuple_types(container);
+                let expect = if let Some(types) = ty {
+                    let expect = *unwrap!(types.iter().find(|t| !t.is_unknown()), "all unknown");
+                    for t in types {
+                        self.type_check_arg(t, expect, "match slice types")?;
+                    }
+                    expect
+                } else {
+                    container
+                };
+                let s_ty = self.create_slice_type(expect, arg.loc)?;
+                expr.done = arg.done;
+                expr.ty = s_ty;
+                s_ty
+            }
+            Expr::Deref(arg) => {
+                let requested = requested.specific().map(|t| self.program.ptr_type(t));
+                let ptr = self.compile_expr(arg, requested.into())?;
+                let ty = unwrap!(self.program.unptr_ty(ptr), "deref not ptr: {}", self.program.log_type(ptr));
+                expr.done = arg.done;
+                expr.ty = ty;
+                ty
+            }
+            Expr::ConstEval(arg) =>  {
+                self.wip_stack.push((None, ExecStyle::Jit));  // :PushConstFnCtx
+                let res = self.compile_expr(arg, requested)?;
+                let ty = res;
+                let arg = *mem::take(arg);
+                let value = if let Expr::Value { value, .. } = arg.expr {
+                    value
+                } else {
+                    // TODO: its a bit silly that i have to specifiy the type since the first thing it does is compile it
+                    self.immediate_eval_expr(arg, ty)?
+                };
+                expr.set(value.clone(), ty);
+                assert!(self.wip_stack.pop().unwrap().0.is_none());
+                ty
+            }
+            Expr::FnPtr(arg) => {
+                // TODO: this should be immediate_eval_expr (which should be updated do the constant check at the beginning anyway).
+                //       currently !fn_ptr can't be an atrbitrary comptime expr which is silly.
+                let ty = self.compile_expr(arg, ResultType::None)?;
+                if let TypeInfo::Fn(_) = self.program[ty] {
+                    let id: FuncId = self.immediate_eval_expr_known(*arg.clone())?;
+                    assert!(!self.program[id].any_const_args());
+                    if !self.program[id].get_flag(TookPointerValue) {
+                        if let Some(ptr) = self.get_fn(id) {
+                            // We've already compiled the function but didn't know we'd need to remember its address. (ie. #test fn large_struct_ret_return).
+                            unsafe { created_jit_fn_ptr_value(self.program.pool, id, ptr as i64 )}
                         }
                     }
-                    Flag::Slice => {
-                        let container = self.compile_expr(arg, ResultType::None)?;
-                        let ty = self.program.tuple_types(container);
-                        let expect = if let Some(types) = ty {
-                            let expect = *unwrap!(types.iter().find(|t| !t.is_unknown()), "all unknown");
-                            for t in types {
-                                self.type_check_arg(t, expect, "match slice types")?;
-                            }
-                            expect
-                        } else {
-                            container
-                        };
-                        let s_ty = self.create_slice_type(expect, arg.loc)?;
-                        expr.done = arg.done;
-                        expr.ty = s_ty;
-                        s_ty
-                    }
-                    Flag::Deref => {
-                        let requested = requested.specific().map(|t| self.program.ptr_type(t));
-                        let ptr = self.compile_expr(arg, requested.into())?;
-                        let ty = unwrap!(self.program.unptr_ty(ptr), "deref not ptr: {}", self.program.log_type(ptr));
-                        expr.done = arg.done;
-                        expr.ty = ty;
-                        ty
-                    }
-                    Flag::Const_Eval => {
-                        self.wip_stack.push((None, ExecStyle::Jit));  // :PushConstFnCtx
-                        let res = self.compile_expr(arg, requested)?;
-                        let ty = res;
-                        let arg = *mem::take(arg);
-                        let value = if let Expr::Value { value, .. } = arg.expr {
-                            value
-                        } else {
-                            // TODO: its a bit silly that i have to specifiy the type since the first thing it does is compile it
-                            self.immediate_eval_expr(arg, ty)?
-                        };
-                        expr.set(value.clone(), ty);
-                        assert!(self.wip_stack.pop().unwrap().0.is_none());
-                        ty
-                    }
-                    Flag::Fn_Ptr => {
-                        // TODO: this should be immediate_eval_expr (which should be updated do the constant check at the beginning anyway).
-                        //       currently !fn_ptr can't be an atrbitrary comptime expr which is silly.
-                        let ty = self.compile_expr(arg, ResultType::None)?;
-                        if let TypeInfo::Fn(_) = self.program[ty] {
-                            let id: FuncId = self.immediate_eval_expr_known(*arg.clone())?;
-                            assert!(!self.program[id].any_const_args());
-                            if !self.program[id].get_flag(TookPointerValue) {
-                                if let Some(ptr) = self.get_fn(id) {
-                                    // We've already compiled the function but didn't know we'd need to remember its address. (ie. #test fn large_struct_ret_return).
-                                    unsafe { created_jit_fn_ptr_value(self.program.pool, id, ptr as i64 )}
-                                }
-                            }
-                            self.program[id].set_flag(TookPointerValue, true);
-                            // TODO: for now you just need to not make a mistake with calling convention
-                            self.add_callee(id);
-                            self.ensure_compiled(id, self.exec_style())?;
-                            // The backend still needs to do something with this, so just leave it
-                            let fn_ty = self.program.func_type(id);
-                            let ty = self.program.fn_ty(fn_ty).unwrap();
-                            let cc = unwrap2!(self.program[id].cc, "unknown calling convention");
-                            let ty = self.program.intern_type(TypeInfo::FnPtr { ty, cc }); // TODO: callconv as part of type
-                            arg.set((id.as_raw()).into(), fn_ty);
-                            expr.ty = ty;
-                            ty
-                        } else {
-                            err!("!fn_ptr expected const fn not {}", self.program.log_type(ty));
+                    self.program[id].set_flag(TookPointerValue, true);
+                    // TODO: for now you just need to not make a mistake with calling convention
+                    self.add_callee(id);
+                    self.ensure_compiled(id, self.exec_style())?;
+                    // The backend still needs to do something with this, so just leave it
+                    let fn_ty = self.program.func_type(id);
+                    let ty = self.program.fn_ty(fn_ty).unwrap();
+                    let cc = unwrap2!(self.program[id].cc, "unknown calling convention");
+                    let ty = self.program.intern_type(TypeInfo::FnPtr { ty, cc }); // TODO: callconv as part of type
+                    arg.set((id.as_raw()).into(), fn_ty);
+                    expr.ty = ty;
+                    ty
+                } else {
+                    err!("!fn_ptr expected const fn not {}", self.program.log_type(ty));
+                }
+            }
+            Expr::FromBitLiteral { value, bit_count } => {
+                let ty = self.program.intern_type(TypeInfo::Int(IntTypeInfo { bit_count: *bit_count, signed: false }));
+                // this fixed a size check in from_values
+                let mut values = self.as_values(*value)?;
+                match &mut values {
+                    Values::Big(_) => todo!(),
+                    Values::Small(_, len) => {
+                        match bit_count {
+                            8 => *len = 1,
+                            16 =>* len = 2,
+                            32 => *len = 4,
+                            _ => {}
                         }
-                    }
-                    Flag::From_Bit_Literal => {
-                        let int = unwrap!(self.bit_literal(expr), "not int");
-                        let ty = self.program.intern_type(TypeInfo::Int(int.0));
-                        let mut values = int.1.into();
-                        // this fixed a size check in from_values
-                        match &mut values {
-                            Values::Big(_) => todo!(),
-                            Values::Small(_, len) => {
-                                match int.0.bit_count {
-                                    8 => *len = 1,
-                                    16 =>* len = 2,
-                                    32 => *len = 4,
-                                    _ => {}
-                                }
-                            }
-                        }
-                        expr.set(values, ty);
-                        ty
-                    }
-                    Flag::Uninitialized => {
-                        if !arg.is_raw_unit() && requested.specific().is_none() {
-                            let ty: TypeId = self.immediate_eval_expr_known(mem::take(arg))?;
-                            requested = want(ty);
-                            arg.expr = Expr::Value { value: Values::unit(), coerced: true };
-                        }
-                        assert!(requested.specific().is_some(), "!uninitialized expr must have known type");
-                        expr.ty = requested.specific().unwrap();
-                        return Ok(expr.ty);
-                    }
-                    Flag::Unquote | Flag::Placeholder => ice!("Unhandled macro {}", self.program.pool.get(*macro_name)),
-                    Flag::Builtin => {
-                        let Some(name) = arg.as_ident() else {
-                            err!("@builtin requires argument",);
-                        };
-                        let (value, ty) = unwrap!(self.builtin_constant(name), "unknown @builtin: {:?}", self.program.pool.get(name));
-                        expr.set(value, ty);
-                        return Ok(ty);
-                    }
-                    Flag::Contextual_Field => {
-                        let Some(ty) = requested.specific() else {
-                            err!(CErr::NeedsTypeHint("!contextual_field (leading dot) requires type hint"))
-                        };
-                        let Some(name) = arg.as_ident() else {
-                            err!("!contextual_field (leading dot) requires name",)
-                        };
-
-                        return self.contextual_field(name, expr, ty);
-                    }
-                    Flag::As => {
-                        // TODO: constants?
-                        let Expr::Tuple(parts) = &mut arg.expr else {
-                            err!("bad !as: {}", arg.log(self.program.pool))
-                        };
-                        assert!(parts.len() == 2, "bad !as: {}", arg.log(self.program.pool));
-                        *expr = self.as_cast_macro(mem::take(&mut parts[0]), mem::take(&mut parts[1]))?;
-                        return Ok(expr.ty);
-                    }
-                    _ => {
-                        err!(CErr::UndeclaredIdent(*macro_name))
                     }
                 }
+                expr.set(values, ty);
+                ty
+            }
+            Expr::Uninitialized => {
+                assert!(requested.specific().is_some(), "!uninitialized expr must have known type");
+                expr.ty = requested.specific().unwrap();
+                return Ok(expr.ty);
+            }
+            Expr::Unquote(_) | Expr::Placeholder(_) => ice!("Unhandled unquote/placeholder"),
+            &mut Expr::Builtin(name) => {
+                let (value, ty) = unwrap!(self.builtin_constant(name), "unknown @builtin: {:?}", self.program.pool.get(name));
+                expr.set(value, ty);
+                return Ok(ty);
+            }
+            &mut Expr::ContextualField(name) => {
+                let Some(ty) = requested.specific() else {
+                    err!(CErr::NeedsTypeHint("!contextual_field (leading dot) requires type hint"))
+                };
+                return self.contextual_field(name, expr, ty);
+            }
+            Expr::As { ty, value } => {
+                *expr = self.as_cast_macro(mem::take(ty), mem::take(value))?;
+                return Ok(expr.ty);
+            }
+            Expr::SuffixMacro(_, _) => {
+                todo!("SuffixMacro is being removed")
             }
             // :PlaceExpr
             Expr::FieldAccess(e, name) => {
@@ -1894,7 +1861,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     // :PlaceExpr
     fn addr_macro(&mut self, macro_expr: &mut FatExpr<'p>, requested: ResultType) -> Res<'p, TypeId> {
-        let Expr::SuffixMacro(_, arg) = &mut macro_expr.expr else {
+        let Expr::Addr(arg) = &mut macro_expr.expr else {
             unreachable!()
         };
         // This is kinda weird. base case because compile_place_expr turns anything into <ptr>[],
@@ -1950,9 +1917,9 @@ impl<'a, 'p> Compile<'a, 'p> {
             return Ok(Some(self.program.intern_type(TypeInfo::Int(int))));
         }
         Ok(Some(match expr.deref_mut() {
-            Expr::GetParsed(_) | Expr::AddToOverloadSet(_) => unreachable!(),
+            Expr::GetParsed(_) | Expr::_AddToOverloadSet(_) => unreachable!(),
             Expr::Poison => ice!("POISON",),
-            Expr::WipFunc(_) => return Ok(None),
+            Expr::_WipFunc(_) => unreachable!("nothing creates these"),
             Expr::Cast(_) => unreachable!("@as puts type"),
             Expr::Value { value, .. } => unreachable!("{value:?} requires type"),
             Expr::Call(f, arg) => {
@@ -2050,84 +2017,54 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             &mut Expr::GetNamed(_) => return Ok(None),
             Expr::StructLiteralP(_) => return Ok(None),
-            Expr::SuffixMacro(macro_name, arg) => {
-                let name = Flag::try_from(*macro_name)?;
-                match name {
-                    // TODO: make `let` deeply immutable so only const addr
-                    Flag::Addr => match arg.deref_mut().deref_mut() {
-                        Expr::GetVar(var) => {
-                            let value_ty = unwrap2!(self.program.pool.get_var_type(*var), "Missing resolved var (TODO: addr of const?)");
-                            self.program.intern_type(TypeInfo::Ptr(value_ty))
-                        }
-                        &mut Expr::GetNamed(i) => {
-                            err!(CErr::UndeclaredIdent(i))
-                        }
-                        _ => {
-                            if (self.type_of(arg)?).is_some() {
-                                self.compile_expr(expr, ResultType::None)?
-                            } else {
-                                return Ok(None);
-                            }
-                        } // _ => err!("took address of r-value {}", arg.log(self.program.pool)),
-                    },
-                    Flag::Deref => {
-                        let ptr_ty = self.type_of(arg)?;
-                        if let Some(ptr_ty) = ptr_ty {
-                            return Ok(self.program.unptr_ty(ptr_ty));
-                        }
-                        return Ok(None);
+            
+            // TODO: there's no reason this couldn't look at the types, but if logic is more complicated (so i dont want to reproduce it) and might fail often (so id be afraid of it getting to a broken state).
+            Expr::If { cond, if_true, if_false } => return Ok(None),
+            Expr::Loop(_) => TypeId::never,
+            Expr::Addr(arg) => {
+                match arg.deref_mut().deref_mut() {
+                    Expr::GetVar(var) => {
+                        let value_ty = unwrap2!(self.program.pool.get_var_type(*var), "Missing resolved var (TODO: addr of const?)");
+                        self.program.intern_type(TypeInfo::Ptr(value_ty))
                     }
-                    Flag::Fn_Ptr => {
-                        // if let Some(f_ty) = self.type_of(arg)? {
-                        //     if let Some(f_ty) = self.program.fn_ty(f_ty) {
-                        //         // TODO: need to know the function because it might specify non-default calling convention.
-                        //         return Ok(Some(self.program.intern_type(TypeInfo::FnPtr(f_ty))));
-                        //     }
-                        // }
-                        return Ok(None);
+                    &mut Expr::GetNamed(i) => {
+                        err!(CErr::UndeclaredIdent(i))
                     }
-                    Flag::Quote => unwrap2!(self.program.pool.env.fat_expr_type, "used quoted ast during bootstrapping"),
-                    Flag::Loop => TypeId::never,
-                    // TODO: there's no reason this couldn't look at the types, but if logic is more complicated (so i dont want to reproduce it) and might fail often (so id be afraid of it getting to a broken state).
-                    Flag::If => return Ok(None),
-                    Flag::As => {
-                        // TODO: sad day
-                        if let Expr::Value { value, .. } = &mut arg.expr {
-                            let ty = unwrap!(self.program.tuple_types(arg.ty), "TODO: non-trivial pattern matching");
-                            assert_eq!(ty[0], TypeId::ty, "@as expected type");
-                            let mut reader = ReadBytes { bytes: value.bytes(), i: 0 };
-                            let ty_val = chop_prefix(self.program, TypeId::ty, &mut reader)?;
-                            assert!(ty.len() == 2);
-                            let rest_ty = ty[1];
-                            let parts = vec![
-                                FatExpr::synthetic_ty(Expr::Value { value: ty_val, coerced: false }, arg.loc, TypeId::ty),
-                                FatExpr::synthetic_ty(
-                                    Expr::Value {
-                                        value: Values::many(reader.bytes[reader.i..].to_vec()), 
-                                        coerced: false
-                                    },
-                                    arg.loc,
-                                    rest_ty,
-                                ),
-                            ];
-                            arg.expr = Expr::Tuple(parts);
+                    _ => {
+                        if (self.type_of(arg)?).is_some() {
+                            self.compile_expr(expr, ResultType::None)?
+                        } else {
+                            return Ok(None);
                         }
-
-                        if let Expr::Tuple(parts) = &mut arg.expr {
-                            assert!(parts.len() == 2);
-                            if self.compile_expr(&mut parts[0], want(TypeId::ty)).is_ok() {
-                                // HACK: sad that 'as' is special
-                                let ty: TypeId = self.immediate_eval_expr_known(parts[0].clone())?;
-                                return Ok(Some(ty));
-                            }
-                        }
-                        err!("bad !as",)
-                    }
-                    _ => match self.compile_expr(expr, ResultType::None) {
-                        Ok(res) => res,
-                        Err(e) => ice!("TODO: SuffixMacro inference failed. need to make it non-destructive?\n{e:?}",),
-                    },
+                    } // _ => err!("took address of r-value {}", arg.log(self.program.pool)),
                 }
+            }
+            Expr::Quote(_) => unwrap2!(self.program.pool.env.fat_expr_type, "used quoted ast during bootstrapping"),
+            Expr::Deref(arg) => {
+                let ptr_ty = self.type_of(arg)?;
+                if let Some(ptr_ty) = ptr_ty {
+                    return Ok(self.program.unptr_ty(ptr_ty));
+                }
+                return Ok(None);
+            }
+            Expr::FnPtr(_) => return Ok(None),
+            Expr::Slice(_) | Expr::ConstEval(_) | Expr::FromBitLiteral { .. } | Expr::Uninitialized | Expr::Unquote(_) |  Expr::Placeholder(_) | Expr::Builtin(_) | Expr::ContextualField(_) => 
+            {
+                match self.compile_expr(expr, ResultType::None) {
+                    Ok(res) => res,
+                    Err(e) => ice!("TODO: inference failed. need to make it non-destructive?\n{e:?}",),
+                }
+            }
+            Expr::As { ty, .. } => {
+                if self.compile_expr(ty, want(TypeId::ty)).is_ok() {
+                    // HACK: sad that 'as' is special
+                    let ty: TypeId = self.immediate_eval_expr_known(*ty.clone())?;
+                    return Ok(Some(ty));
+                }
+                err!("bad !as",)
+            }
+            Expr::SuffixMacro(_, _) => {
+                unreachable!("suffixmacro")
             }
             Expr::GetVar(var) => {
                 let ty = if var.kind == VarType::Const {
@@ -2374,7 +2311,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             Expr::Call(f, arg) => {
                 // !slice and !addr can't be const evaled!
-                if !matches!(arg.expr, Expr::SuffixMacro(_, _)) {
+                if !matches!(arg.expr, Expr::Slice(_) | Expr::Addr(_)) {
                     let val_ty = if let Expr::Value { value, .. } = &f.expr {
                         Some((value.clone(), f.ty))
                     } else if let Expr::GetVar(var) = f.expr {
@@ -2427,7 +2364,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     fn make_lit_function(&mut self, e: FatExpr<'p>, ret_ty: TypeId) -> Res<'p, FuncId> {
-        debug_assert!(!(e.as_suffix_macro(Flag::Slice).is_some() || e.as_suffix_macro(Flag::Addr).is_some()));
+        debug_assert!(!matches!(e.expr, Expr::Slice(_) | Expr::Addr(_)));
         unsafe { STATS.make_lit_fn += 1 };
         let name = Flag::Anon.ident();
         let (arg, ret) = Func::known_args(TypeId::unit, ret_ty, e.loc);
@@ -2612,14 +2549,14 @@ impl<'a, 'p> Compile<'a, 'p> {
                 if let TypeInfo::Fn(_) = c {
                     // TODO: pull up typechecking logic?
                     let e = FatExpr::synthetic_ty(Expr::Value { value: value.clone(), coerced: true }, loc, current);
-                    let e = FatExpr::synthetic(Expr::SuffixMacro(Flag::Fn_Ptr.ident(), Box::new(e)), loc);
+                    let e = FatExpr::synthetic(Expr::FnPtr(Box::new(e)), loc);
                     return Ok(Some(e));
                 } else if TypeId::overload_set == current {
                     let ty = *ty;
                     let val = resolve_os(self, value, ty)?;
                     let ty = self.program.intern_type(TypeInfo::Fn(ty));
                     let e = FatExpr::synthetic_ty(Expr::Value { value: val, coerced: true }, loc, ty);
-                    let e = FatExpr::synthetic(Expr::SuffixMacro(Flag::Fn_Ptr.ident(), Box::new(e)), loc);
+                    let e = FatExpr::synthetic(Expr::FnPtr(Box::new(e)), loc);
                     return Ok(Some(e));
                 }
             }
@@ -2635,7 +2572,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
                 if TypeId::voidptr == requested {
                     let e = FatExpr::synthetic_ty(Expr::Value { value: value.clone(), coerced: true }, loc, current);
-                    let e = FatExpr::synthetic(Expr::SuffixMacro(Flag::Fn_Ptr.ident(), Box::new(e)), loc);
+                    let e = FatExpr::synthetic(Expr::FnPtr(Box::new(e)), loc);
                     let e = FatExpr::synthetic_ty(Expr::Cast(Box::new(e)), loc, requested);
                     return Ok(Some(e));
                 }
@@ -2736,14 +2673,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(f)
     }
 
-    fn finish_closure(&mut self, expr: &mut FatExpr<'p>) {
-        if let Expr::WipFunc(id) = expr.expr {
-            let (e, ty) = self.func_expr(id);
-            expr.expr = e;
-            expr.ty = ty;
-        }
-    }
-
     // TODO: adding inline to the func is iffy now that i dont require it to be an inline closure. it will affect other callsites. only want that if this is the only one.
     // TODO: it still doesnt allow the funcs to be any expr because i dont compile them first.
     fn emit_call_if(
@@ -2751,73 +2680,68 @@ impl<'a, 'p> Compile<'a, 'p> {
         if_macro: &mut FatExpr<'p>,
         requested: ResultType, // TODO: allow giving return type to infer
     ) -> Res<'p, TypeId> {
-        let Expr::SuffixMacro(_, if_macro_arg) = &mut if_macro.expr else {
+        let Expr::If { cond, if_true, if_false } = &mut if_macro.expr else {
             err!("expected !if",)
         };
         let unit = TypeId::unit;
         let sig = "if(bool, fn(Unit) T, fn(Unit) T)";
-        let mut unit_expr = self.as_literal((), if_macro_arg.loc)?;
-        let Expr::Tuple(parts) = &mut if_macro_arg.expr else {
-            ice!("if args must be tuple not {:?}", if_macro_arg);
-        };
-        let cond = self.compile_expr(&mut parts[0], want(TypeId::bool()))?;
-        self.type_check_arg(cond, TypeId::bool(), "bool cond")?;
+        let mut unit_expr = self.as_literal((), cond.loc)?;
+        let cond_ty = self.compile_expr(cond, want(TypeId::bool()))?;
+        self.type_check_arg(cond_ty, TypeId::bool(), "bool cond")?;
 
         // TODO: this mostly can't happen anymore because you use the if function and params dont get forwarded like that. 
         //       should allow promoting things to constants. 
         // If its constant, don't even bother emitting the other branch
         // TODO: option to toggle this off for testing.
-        if let Some(val) = parts[0].as_const() {
+        if let Some(val) = cond.as_const() {
             let cond: bool = from_values(self.program, val)?;
-            let cond_index = if cond { 1 } else { 2 };
-            let Some(branch_body) = self.maybe_direct_fn(&mut parts[cond_index], &mut unit_expr, requested)? else {
-                ice!("!if arg must be func not {:?}", parts[cond_index]);
+            let chosen = if cond { if_true } else { if_false };
+            let Some(branch_body) = self.maybe_direct_fn(chosen, &mut unit_expr, requested)? else {
+                ice!("!if arg must be func not {:?}", chosen);
             };
 
             let branch_arg = self.infer_arg(branch_body)?;
             self.type_check_arg(branch_arg, unit, sig)?;
             self.program[branch_body].set_cc(CallConv::Inline)?; // hack
-            self.emit_call_on_unit(branch_body, &mut parts[cond_index], requested)?;
+            self.emit_call_on_unit(branch_body, chosen, requested)?;
             assert!(self.program[branch_body].finished_ret.is_some());
             // Now we fully dont emit the branch
             // TODO: this is wrong, the cond could have returned a const but still had rt side effects (like if it was a block { blow_up_moon(); true }) -- May 2
-            *if_macro = mem::take(&mut parts[cond_index]);
+            *if_macro = mem::take(chosen);
 
             // need to force the compile again to keep if constant for nested folding.
             return self.compile_expr(if_macro, requested);
         }
 
-        let (mut true_ty, expect_fn) = if let Some(if_true) = self.maybe_direct_fn(&mut parts[1], &mut unit_expr, requested)? {
-            self.program[if_true].set_cc(CallConv::Inline)?; // hack
-            let true_arg = self.infer_arg(if_true)?;
+        let (mut true_ty, expect_fn) = if let Some(if_true_fn) = self.maybe_direct_fn(if_true, &mut unit_expr, requested)? {
+            self.program[if_true_fn].set_cc(CallConv::Inline)?; // hack
+            let true_arg = self.infer_arg(if_true_fn)?;
             self.type_check_arg(true_arg, unit, sig)?;
-            (self.emit_call_on_unit(if_true, &mut parts[1], requested)?, true)
-        } else if parts[1].ty.is_unknown() {
-            ice!("if second arg must be func not {}", parts[1].log(self.program.pool));
+            (self.emit_call_on_unit(if_true_fn, if_true, requested)?, true)
+        } else if if_true.ty.is_unknown() {
+            ice!("if second arg must be func not {}", if_true.log(self.program.pool));
         } else {
-            (parts[1].ty, false)
+            (if_true.ty, false)
         };
         if expect_fn {
             let wanted = requested.specific().or(Some(true_ty));
-            let Some(if_false) = self.maybe_direct_fn(&mut parts[2], &mut unit_expr, wanted.into())? else {
-                ice!("if third arg must be func not {:?}", parts[2]);
+            let Some(if_false_fn) = self.maybe_direct_fn(if_false, &mut unit_expr, wanted.into())? else {
+                ice!("if third arg must be func not {:?}", if_false);
             };
-            self.program[if_false].set_cc(CallConv::Inline)?; // hack
-            let false_arg = self.infer_arg(if_false)?;
+            self.program[if_false_fn].set_cc(CallConv::Inline)?; // hack
+            let false_arg = self.infer_arg(if_false_fn)?;
             self.type_check_arg(false_arg, unit, sig)?;
-            let false_ty = self.emit_call_on_unit(if_false, &mut parts[2], requested)?;
+            let false_ty = self.emit_call_on_unit(if_false_fn, if_false, requested)?;
             self.type_check_arg(true_ty, false_ty, sig)?;
             if true_ty.is_never() {
                 true_ty = false_ty;
             }
 
-            self.finish_closure(&mut parts[1]);
-            self.finish_closure(&mut parts[2]);
         } else {
-            assert!(!parts[2].ty.is_unknown());
-            self.type_check_arg(true_ty, parts[2].ty, sig)?;
+            assert!(!if_false.ty.is_unknown());
+            self.type_check_arg(true_ty, if_false.ty, sig)?;
             if true_ty.is_never() {
-                true_ty = parts[2].ty;
+                true_ty = if_false.ty;
             }
         }
         Ok(true_ty)
@@ -2836,7 +2760,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             self.program[body_fn].set_cc(CallConv::Inline)?; // hack
             let body_arg = self.infer_arg(body_fn)?;
             self.type_check_arg(body_arg, TypeId::unit, sig)?;
-            self.finish_closure(while_macro_arg);
             let body_ret = self.emit_call_on_unit(body_fn, while_macro_arg, want(TypeId::unit))?;
             self.type_check_arg(body_ret, TypeId::unit, sig)?;
         } else {
@@ -2965,7 +2888,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         };
         match place.deref_mut().deref_mut() {
             // TODO: PrefixMacro is sketchy but makes []->.index work.
-            Expr::PrefixMacro {.. } | Expr::GetVar(_) | Expr::FieldAccess(_, _) | Expr::SuffixMacro(_, _) => {
+            Expr::PrefixMacro {.. } | Expr::GetVar(_) | Expr::FieldAccess(_, _) | Expr::Deref(_) => {
                 self.compile_place_expr(place, ResultType::None, true)?;
                 let oldty = place.ty;
                 let value_ty = self.compile_expr(value, want(oldty))?;
@@ -2994,7 +2917,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let val_ty = unwrap2!(val_ty, "var must be declared: {}", var.log(self.program.pool));
                 let ptr_ty = self.program.ptr_type(val_ty);
 
-                *place = FatExpr::synthetic_ty(Expr::SuffixMacro(Flag::Addr.ident(), Box::new(mem::take(place))), loc, ptr_ty);
+                *place = FatExpr::synthetic_ty(Expr::Addr(Box::new(mem::take(place))), loc, ptr_ty);
                 place.done = true;
                 if want_deref {
                     self.deref_one(place)?;
@@ -3047,23 +2970,17 @@ impl<'a, 'p> Compile<'a, 'p> {
                     place.ty = field_ptr_ty;
                 }
             }
-            Expr::SuffixMacro(macro_name, arg) => {
-                let name = Flag::try_from(*macro_name)?;
-                match name {
-                    Flag::Deref => {
-                        // When you see a !deref, treat the expression as a pointer value.
-                        let req = requested.specific().map(|r| self.program.ptr_type(r));
-                        self.compile_expr(arg, req.into())?;
-                        if want_deref {
-                            place.ty = self.program.unptr_ty(arg.ty).unwrap();
-                        } else {
-                            *place = mem::take(arg);
-                        }
-                        // Don't set done because you want to go around the main compile_expr another time so special load/store overloads get processed.
-                        // place.done = true;
-                    }
-                    _ => err!("other place expr: {}!{}", arg.log(self.program.pool), self.program.pool.get(*macro_name)),
+            Expr::Deref(arg) => {
+                // When you see a !deref, treat the expression as a pointer value.
+                let req = requested.specific().map(|r| self.program.ptr_type(r));
+                self.compile_expr(arg, req.into())?;
+                if want_deref {
+                    place.ty = self.program.unptr_ty(arg.ty).unwrap();
+                } else {
+                    *place = mem::take(arg);
                 }
+                // Don't set done because you want to go around the main compile_expr another time so special load/store overloads get processed.
+                // place.done = true;
             }
             &mut Expr::GetNamed(n) => err!(CErr::UndeclaredIdent(n)),
             Expr::PrefixMacro { .. } => {
@@ -3092,12 +3009,12 @@ impl<'a, 'p> Compile<'a, 'p> {
             err!("expected ptr",)
         };
 
-        if let Some(arg) = ptr.as_suffix_macro_mut(Flag::Addr) {
+        if let Expr::Addr(arg) = &mut ptr.expr {
             // this allows auto deref to work on let ptr vars.
             if matches!(arg.expr, Expr::GetVar(_)) {
                 // raw var expr is not allowed, we always refer to variables through thier address.
                 let loc = ptr.loc;
-                *ptr = FatExpr::synthetic_ty(Expr::SuffixMacro(Flag::Deref.ident(), Box::new(mem::take(ptr))), loc, inner);
+                *ptr = FatExpr::synthetic_ty(Expr::Deref(Box::new(mem::take(ptr))), loc, inner);
             } else {
                 // Avoid reduntant (whatever)&[].
                 *ptr = mem::take(arg);
@@ -3107,7 +3024,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
         } else {
             let loc = ptr.loc;
-            *ptr = FatExpr::synthetic_ty(Expr::SuffixMacro(Flag::Deref.ident(), Box::new(mem::take(ptr))), loc, inner);
+            *ptr = FatExpr::synthetic_ty(Expr::Deref(Box::new(mem::take(ptr))), loc, inner);
         }
         assert!(!ptr.ty.is_unknown(), "unknown type for deref_one");
         Ok(())
@@ -3163,8 +3080,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.ensure_resolved_sign(fid)?;
         
         if let FuncImpl::CompilerBuiltin(name) = self.program[fid].body {
-            expr.expr = Expr::SuffixMacro(name, mem::take(arg_expr));
-            return self.compile_expr(expr, requested);
+            panic!("FuncImpl::CompilerBuiltin is being removed");
         }
 
         if self.program[fid].get_flag(Generic) {
@@ -3666,10 +3582,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         match kind {
             VarType::Const => self.decl_const(name, ty, value)?,
             VarType::Let | VarType::Var => {
-                if kind == VarType::Let && value.expr.as_suffix_macro(Flag::Uninitialized).is_some() {
-                    let name = self.program.pool.get(name.name);
-                    err!("let bindings cannot be reassigned so '{name}' cannot be !uninitialized",)
-                }
                 let value = self.compile_expr(value, ty.want())?;
                 let final_ty = if no_type {
                     *ty = LazyType::Finished(value);
@@ -3697,7 +3609,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     fn decl_const(&mut self, name: Var<'p>, ty: &mut LazyType<'p>, value: &mut FatExpr<'p>) -> Res<'p, ()> {
         // TODO: doing the check here every time is sad.
-        if value.expr.as_suffix_macro(Flag::Uninitialized).is_some() {
+        if matches!(value.expr, Expr::Uninitialized) {
             let name = self.program.pool.get(name.name);
             err!("const bindings cannot be reassigned so '{name}' cannot be uninitialized",)
         }
@@ -3801,21 +3713,8 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     pub(crate) fn bit_literal(&self, expr: &FatExpr<'p>) -> Option<(IntTypeInfo, i64)> {
-        let Expr::SuffixMacro(name, arg) = &expr.expr else { return None };
-        if *name != Flag::From_Bit_Literal.ident() {
-            return None;
-        }
-        let Expr::Tuple(parts) = arg.deref().deref() else { return None };
-        let bit_count = parts[0].clone().as_const()?;
-        let Ok(bit_count): Res<'p, i64> = from_values(self.program, bit_count) else {
-            return None;
-        };
-        let val = parts[1].clone().as_const()?;
-        let Ok(val): Res<'p, i64> = from_values(self.program, val) else {
-            return None;
-        };
-
-        Some((IntTypeInfo { bit_count, signed: false }, val))
+        let Expr::FromBitLiteral{value, bit_count} = expr.expr else { return None };
+        Some((IntTypeInfo { bit_count, signed: false }, value))
     }
 
     fn exec_style(&self) -> ExecStyle {
@@ -3854,33 +3753,34 @@ pub struct Unquote<'z, 'a, 'p> {
 impl<'z, 'a, 'p> WalkAst<'p> for Unquote<'z, 'a, 'p> {
     // TODO: track if we're in unquote mode or placeholder mode.
     fn pre_walk_expr(&mut self, expr: &mut FatExpr<'p>) -> bool {
-        let Expr::SuffixMacro(name, arg) = &mut expr.expr else {
-            return true;
-        };
-        if *name == Flag::Unquote.ident() {
-            let expr_ty = self.compiler.program.pool.env.fat_expr_type.expect("used unquote ast while bootstrapping");
-            // self.compiler
-            //     .compile_expr(self.arg, Some(expr_ty))
-            //     .unwrap_or_else(|e| panic!("Expected comple ast but \n{e:?}\n{:?}", arg.log(self.compiler.program.pool))); // TODO
-            let loc = arg.loc;
-            let placeholder = self.compiler.as_literal(self.placeholders.len() as i64, loc).unwrap();
-            let mut placeholder = FatExpr::synthetic(Expr::SuffixMacro(Flag::Placeholder.ident(), Box::new(placeholder)), loc);
-            placeholder.ty = expr_ty;
-            // Note: take <arg> but replace the whole <expr>
-            self.placeholders.push(Some(mem::take(arg.deref_mut())));
-            *expr = placeholder;
-        } else if *name == Flag::Placeholder.ident() {
-            let index: i64 = from_values(self.compiler.program, arg.as_const().unwrap()).unwrap();
-            let value = self.placeholders[index as usize].take(); // TODO: make it more obvious that its only one use and the slot is empty.
-            *expr = value.unwrap();
-        } else if *name == Flag::Quote.ident() {
-            // TODO: add a simpler test case than the derive thing (which is what discovered this problem).
-            // Don't go into nested !quote. This allows having macros expand to other macro calls without stomping eachother.
-            // TODO: feels like you might still end up with two going on at once so need to have a monotonic id number for each expansion stored in the !placeholder.
-            //       but so far this is good enough.
-            return false;
+        match &mut expr.expr {
+            Expr::Unquote(arg) => {
+                let expr_ty = self.compiler.program.pool.env.fat_expr_type.expect("used unquote ast while bootstrapping");
+                // self.compiler
+                //     .compile_expr(self.arg, Some(expr_ty))
+                //     .unwrap_or_else(|e| panic!("Expected comple ast but \n{e:?}\n{:?}", arg.log(self.compiler.program.pool))); // TODO
+                let loc = arg.loc;
+                let mut placeholder = FatExpr::synthetic(Expr::Placeholder(self.placeholders.len() as i64), loc);
+                placeholder.ty = expr_ty;
+                // Note: take <arg> but replace the whole <expr>
+                self.placeholders.push(Some(mem::take(arg.deref_mut())));
+                *expr = placeholder;
+                true
+            }
+            &mut Expr::Placeholder(index) => {
+                let value = self.placeholders[index as usize].take(); // TODO: make it more obvious that its only one use and the slot is empty.
+                *expr = value.unwrap();
+                true
+            }
+            Expr::Quote(_) => {
+                // TODO: add a simpler test case than the derive thing (which is what discovered this problem).
+                // Don't go into nested !quote. This allows having macros expand to other macro calls without stomping eachother.
+                // TODO: feels like you might still end up with two going on at once so need to have a monotonic id number for each expansion stored in the !placeholder.
+                //       but so far this is good enough.
+                false
+            }
+            _ => true,
         }
-        true
     }
 }
 

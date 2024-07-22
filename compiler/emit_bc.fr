@@ -378,14 +378,12 @@ fn compile_for_arg(self: *EmitBc, result: *FnBody, arg: *FatExpr, arity: usize) 
         };
         
         @match(val.expr&) {
-            fn SuffixMacro(f) => {
-                if f.name == Flag.deref.ident() {|
-                    _pushed += 1;
-                    // TODO: this is probably unsound.
-                    //       we're assuming that we can defer the load to be done by the callee but that might not be true.
-                    @try(self.compile_expr(result, f.arg, .PushStack, false)) return;
-                    continue();
-                };
+            fn Deref(arg) => {
+                _pushed += 1;
+                // TODO: this is probably unsound.
+                //       we're assuming that we can defer the load to be done by the callee but that might not be true.
+                @try(self.compile_expr(result, arg[], .PushStack, false)) return;
+                continue();
             }
             // TODO: factor out aot handling from main value handling so can use here too. -- Jun 3
             fn Value(f) => {
@@ -729,12 +727,130 @@ fn compile_expr(self: *EmitBc, result: *FnBody, expr: *FatExpr, result_location:
     @debug_assert(self.slot_count(expr.ty).lt(16).or(result_location != .PushStack), "% %", expr.log(self.program.pool), self.program.log_type(expr.ty));
     self.last_loc = expr.loc;
 
+    expr_ty := expr.ty;
     @match(expr.expr&) {
         fn Cast(v)  => return(self.compile_expr(result, v[], result_location, can_tail));
         fn Call(f)  => return(self.emit_call(result, f.f, f.arg, result_location, can_tail));
         fn Block(f) => return(self.emit_block_expr(result, f.body&, f.result, f.ret_label, result_location, can_tail));
         fn Value(f) => return(self.emit_value(result, f.bytes&, result_location, expr.ty));
-        fn SuffixMacro(f)          => return(self.emit_sufix_macro(result, f.name, f.arg, result_location, can_tail, expr.ty));
+        fn SuffixMacro(f) => panic("this node is being removed. emit_bc SuffixMacro");
+        fn If(_)      => return(self.emit_call_if(result, expr, result_location, can_tail));
+        fn Loop(arg)  => return(self.emit_call_loop(result, arg[]));
+        fn Addr(arg)  => return(self.addr_macro(result, arg[], result_location));
+        fn Slice(arg) => {
+            container_ty := arg.ty;
+            // Note: number of elements, not size of the whole array value.
+            (ty, count) := @match(arg.expr) {
+                fn Tuple(parts) Ty(Type, i64) => { 
+                    fst := parts[0];
+                    (fst.ty, parts.len) 
+                };
+                @default => (arg.ty, 1);
+            };
+
+            id := result.add_var(self, container_ty);
+            self.addr_var(result, id);
+            @try(self.compile_expr(result, arg[], .ResAddr, false)) return;
+
+            self.addr_var(result, id);
+            result.push(PushConstant = (
+                value = count,
+                ty = .I64,
+            ));
+            @match(result_location) {
+                fn PushStack() => ();
+                fn ResAddr() => {
+                    result.push(PeekDup = 2);
+                    result.inc_ptr_bytes(8); // Note: backwards!
+                    result.push(StorePost = .I64);
+                    result.push(PeekDup = 1);
+                    result.push(StorePost = .P64);
+                    result.pop(1);
+                }
+                fn Discard() => result.pop(2);
+            };
+            self.locals.last().unwrap().push(id);
+            return(.Ok)
+        };
+        fn Deref(arg) => {
+            @try(self.compile_expr(result, arg[], .PushStack, false)) return; // get the pointer
+            slots := self.slot_count(expr_ty);
+            // we care about the type of the pointer, not the value because there might be a cast. (// TODO: that shouldn't be true anymore because of ::Cast)
+            value_type := self.program.unptr_ty(arg.ty).unwrap();
+            if slots == 0 {|
+                @match(result_location) {
+                    fn ResAddr() => result.pop(2); // pop dest too!
+                    @default     => result.push(Snipe = 0);
+                };
+            } else {|
+                @match(result_location) {
+                    fn PushStack() => self.load(result, value_type);
+                    fn ResAddr() => {
+                        info := self.program.get_info(expr_ty);
+
+                        if info.size_slots == 1 {|
+                            ty := self.program.prim(value_type).unwrap();
+                            result.push(Load = ty);
+                            result.push(StorePre = ty);
+                        } else {| // TODO: else if
+                            if info.size_slots == 2 && info.stride_bytes == 16 && info.align_bytes == 8 {|
+                                result.push(PeekDup = 1);
+                                result.inc_ptr_bytes(8);
+                                result.push(PeekDup = 1);
+                                result.inc_ptr_bytes(8);
+                                result.push(Load = .I64);
+                                result.push(StorePre = .I64);
+                                result.push(Load = .I64);
+                                result.push(StorePre = .I64);
+                            } else {|
+                                bytes := info.stride_bytes;
+                                result.push(CopyBytesToFrom = bytes);
+                            };
+                        };
+                    }
+                    fn Discard() => result.push(Snipe = 0);
+                };
+            };
+            return(.Ok)
+        };
+        fn FnPtr(arg) => {
+            // debug_assert!(matches!(self.program[arg.ty], TypeInfo::Fn(_))); // TODO: debug_assert
+            f := @unwrap(arg[].as_const(), "expected fn for ptr") return;
+            f := FuncId.assume_cast(f&)[];
+            // For jit, the redirects go in the dispatch table so it doesn't matter,
+            // but for emitting c, you need to get the real name.
+            f = self.program.follow_redirects(f);
+            result.push(GetNativeFnPtr = f);
+            @match(result_location) {
+                fn PushStack() => ();
+                fn ResAddr()   => result.push(StorePre = .P64);
+                fn Discard()   => result.push(Snipe = 0);
+            };
+            return(.Ok)
+        };
+        fn Uninitialized() => {
+            @assert(!expr_ty.is_never(), "call exit() to produce a value of type 'Never'");
+            // Wierd special case I have mixed feelings about. should at least set to sentinal value in debug mode.
+            // Now I have to not mess up the stack, tell the backend somehow.
+            @match(result_location) {
+                fn PushStack() => {
+                    // for ty in self.program.flat_tuple_types(expr.ty) {
+                    //     result.push(Bc::PushConstant {
+                    //         value: 0,
+                    //         ty: self.program.prim(ty).unwrap(),
+                    //     });
+                    // }
+                    slots := self.slot_count(expr_ty);
+                    range(0, slots.zext()) { _ |
+                        result.push(PushConstant = (value = 0, ty = .I64));
+                        // TODO: wrong prim!
+                    };
+                }
+                fn ResAddr() => result.push(Snipe = 0); // just pop the res ptr
+                fn Discard() => ();
+            };
+            return(.Ok)
+        };
         fn StructLiteralP(pattern) => return(self.construct_struct(result, pattern, expr.ty, result_location));
         fn Tuple(values) => {
             raw := self.program.raw_type(expr.ty); // TODO: do i need this? 
@@ -1076,137 +1192,6 @@ fn emit_value(self: *EmitBc, result: *FnBody, value: *Values, result_location: R
     return(.Ok)
 }
 
-fn emit_sufix_macro(self: *EmitBc, result: *FnBody, macro_name: Symbol, arg: *FatExpr, result_location: ResultLoc, can_tail: bool, expr_ty: Type) PRes = {
-    bad_node :: => @panic("ICE: invalid dynamic ast node '%' in emit_bc.", self.program.pool.get(macro_name));
-    
-    ::?Flag;
-    :: from_raw(Flag);
-    :: enum(Flag);
-    // TODO: have to return from every branch if you return from the first one because it decides the type should be Never -- Jul 9
-    name: Flag = (@as(i64) macro_name.id().zext()).from_raw().or(=> bad_node());
-    @switch(name) {
-        @case(.if)    => return(self.emit_call_if(result, arg, result_location, can_tail));
-        @case(.loop)  => return(self.emit_call_loop(result, arg));
-        @case(.addr)  => return(self.addr_macro(result, arg, result_location));
-        @case(.slice) => {
-            container_ty := arg.ty;
-            // Note: number of elements, not size of the whole array value.
-            (ty, count) := @match(arg.expr) {
-                fn Tuple(parts) Ty(Type, i64) => { 
-                    fst := parts[0];
-                    (fst.ty, parts.len) 
-                };
-                @default => (arg.ty, 1);
-            };
-
-            id := result.add_var(self, container_ty);
-            self.addr_var(result, id);
-            @try(self.compile_expr(result, arg, .ResAddr, false)) return;
-
-            self.addr_var(result, id);
-            result.push(PushConstant = (
-                value = count,
-                ty = .I64,
-            ));
-            @match(result_location) {
-                fn PushStack() => ();
-                fn ResAddr() => {
-                    result.push(PeekDup = 2);
-                    result.inc_ptr_bytes(8); // Note: backwards!
-                    result.push(StorePost = .I64);
-                    result.push(PeekDup = 1);
-                    result.push(StorePost = .P64);
-                    result.pop(1);
-                }
-                fn Discard() => result.pop(2);
-            };
-            self.locals.last().unwrap().push(id);
-            return(.Ok)
-        };
-        @case(.deref) => {
-            @try(self.compile_expr(result, arg, .PushStack, false)) return; // get the pointer
-            slots := self.slot_count(expr_ty);
-            // we care about the type of the pointer, not the value because there might be a cast. (// TODO: that shouldn't be true anymore because of ::Cast)
-            value_type := self.program.unptr_ty(arg.ty).unwrap();
-            if slots == 0 {|
-                @match(result_location) {
-                    fn ResAddr() => result.pop(2); // pop dest too!
-                    @default     => result.push(Snipe = 0);
-                };
-            } else {|
-                @match(result_location) {
-                    fn PushStack() => self.load(result, value_type);
-                    fn ResAddr() => {
-                        info := self.program.get_info(expr_ty);
-
-                        if info.size_slots == 1 {|
-                            ty := self.program.prim(value_type).unwrap();
-                            result.push(Load = ty);
-                            result.push(StorePre = ty);
-                        } else {| // TODO: else if
-                            if info.size_slots == 2 && info.stride_bytes == 16 && info.align_bytes == 8 {|
-                                result.push(PeekDup = 1);
-                                result.inc_ptr_bytes(8);
-                                result.push(PeekDup = 1);
-                                result.inc_ptr_bytes(8);
-                                result.push(Load = .I64);
-                                result.push(StorePre = .I64);
-                                result.push(Load = .I64);
-                                result.push(StorePre = .I64);
-                            } else {|
-                                bytes := info.stride_bytes;
-                                result.push(CopyBytesToFrom = bytes);
-                            };
-                        };
-                    }
-                    fn Discard() => result.push(Snipe = 0);
-                };
-            };
-            return(.Ok)
-        };
-        @case(.fn_ptr) => {
-            // debug_assert!(matches!(self.program[arg.ty], TypeInfo::Fn(_))); // TODO: debug_assert
-            f := @unwrap(arg.as_const(), "expected fn for ptr") return;
-            f := FuncId.assume_cast(f&)[];
-            // For jit, the redirects go in the dispatch table so it doesn't matter,
-            // but for emitting c, you need to get the real name.
-            f = self.program.follow_redirects(f);
-            result.push(GetNativeFnPtr = f);
-            @match(result_location) {
-                fn PushStack() => ();
-                fn ResAddr()   => result.push(StorePre = .P64);
-                fn Discard()   => result.push(Snipe = 0);
-            };
-            return(.Ok)
-        };
-        @case(.uninitialized) => {
-            @assert(!expr_ty.is_never(), "call exit() to produce a value of type 'Never'");
-            // Wierd special case I have mixed feelings about. should at least set to sentinal value in debug mode.
-            // Now I have to not mess up the stack, tell the backend somehow.
-            @match(result_location) {
-                fn PushStack() => {
-                    // for ty in self.program.flat_tuple_types(expr.ty) {
-                    //     result.push(Bc::PushConstant {
-                    //         value: 0,
-                    //         ty: self.program.prim(ty).unwrap(),
-                    //     });
-                    // }
-                    slots := self.slot_count(expr_ty);
-                    range(0, slots.zext()) { _ |
-                        result.push(PushConstant = (value = 0, ty = .I64));
-                        // TODO: wrong prim!
-                    };
-                }
-                fn ResAddr() => result.push(Snipe = 0); // just pop the res ptr
-                fn Discard() => ();
-            };
-            return(.Ok)
-        };
-        @default => bad_node();
-    };
-    unreachable()
-}
-
 // :PlaceExpr
 fn addr_macro(self: *EmitBc, result: *FnBody, arg: *FatExpr, result_location: ResultLoc) PRes = {
     self.last_loc = arg.loc;
@@ -1228,12 +1213,11 @@ fn addr_macro(self: *EmitBc, result: *FnBody, arg: *FatExpr, result_location: Re
 
 // we never make the temp variable. if the arg is big, caller needs to setup a result location.
 fn emit_call_if(self: *EmitBc, result: *FnBody, arg: *FatExpr, result_location: ResultLoc, can_tail: bool) PRes = {
-    @err_assert(arg.expr&.is(.Tuple), "ICE: if args must be tuple") return;
-    parts := arg.expr.Tuple;
-    @debug_assert_eq(parts.len, 3);
+    @err_assert(arg.expr&.is(.If), "ICE: expected if") return;
+    parts := arg.expr.If;
     
-    @try(self.compile_expr(result, parts.index(0), .PushStack, false)) return; // cond
-    (if_true, if_false) := (parts[1]&, parts[2]&);
+    @try(self.compile_expr(result, parts.cond, .PushStack, false)) return; // cond
+    (if_true, if_false) := (parts.if_true, parts.if_false);
 
     out := self.program.get_info(if_true.ty);
     @assert(out.size_slots.lt(4).or(result_location != .PushStack), "ICE: 'if' result too big to go on stack"); // now its the callers problem to deal with this case
@@ -1289,14 +1273,11 @@ fn set_deref(self: *EmitBc, result: *FnBody, place: *FatExpr, value: *FatExpr) P
     // we care about the type of the pointer, not the value because there might be a cast.
     @match(place.expr&) {
         fn GetVar(_) => panic("ICE: var set should be converted to place expr");
-        fn SuffixMacro(f) => {
+        fn Deref(arg) => {
             // TODO: write a test for pooiinter eval oreder. left hsould come first. -- MAy 7
-            if Flag.deref.ident() == f.name {|
-                @try(self.compile_expr(result, f.arg, .PushStack, false)) return;
-                @try(self.compile_expr(result, value, .ResAddr, false)) return;
-                return(.Ok);
-            };
-            return(@error("TODO: other `place=e;` :("))
+            @try(self.compile_expr(result, arg[], .PushStack, false)) return;
+            @try(self.compile_expr(result, value, .ResAddr, false)) return;
+            return(.Ok)
         }
         @default => return(@error("TODO: other `place=e;` :("));
     };

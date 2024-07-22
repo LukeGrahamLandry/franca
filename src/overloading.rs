@@ -54,10 +54,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                 None
             }
             Expr::Value { value, .. } => return self.maybe_direct_fn_value(f_ty, value, arg, ret),
-            &mut Expr::WipFunc(id) => {
-                self.adjust_call(arg, id)?;
-                Some(id)
-            }
             Expr::Closure(_) => {
                 // This doesn't come up super often. It means you called a closure inline where you declared it for some reason.
                 let arg_ty = self.compile_expr(arg, ret)?;

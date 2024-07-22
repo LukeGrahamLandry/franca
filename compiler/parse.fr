@@ -309,7 +309,9 @@ fn parse_prefix(self: *Parser, prec: Prec) ParseRes = {
         }
         fn DoubleColon() => {
             self.pop();
-            e := self.bang(.const_eval, @try(self.parse_expr(prec.with(.Neg))) return, self.last.span);
+            loc := self.last.span;
+            arg := @try(self.parse_expr(prec.with(.Neg))) return;
+            e := self.expr((ConstEval = self.box(arg)), loc);
             return (Ok = e);
         }
         fn Amp() => @report_error("'&' is not a prefix operator. if you meant to take the address of a variable, use it as a suffix.%", "") (return, self.last.span);
@@ -321,12 +323,12 @@ fn parse_prefix(self: *Parser, prec: Prec) ParseRes = {
             self.pop();
             return(self.func_expr());
         }
-        fn SingleQuote() => {
+        fn SingleQuote() => { // TODO: remove this syntax
             self.pop();
             loc := self.last.span;
             e := @try(self.parse_expr(Prec_None)) return;
             @try(self.eat(.SingleQuote, "end quoted expression")) return;
-            return(Ok = self.bang(.quote, e, loc));
+            return(Ok = self.expr((Quote = self.box(e)), loc));
         }
         fn Number(n) => {
             self.pop();
@@ -347,8 +349,7 @@ fn parse_prefix(self: *Parser, prec: Prec) ParseRes = {
             self.pop();
             loc := self.last.span;
             name := @try(self.pop_name("after leading dot")) return;
-            prev := self.expr((GetNamed = name), self.last.span);
-            return(Ok = self.bang(.contextual_field, prev, loc));
+            return(Ok = self.expr((ContextualField = name), loc));
         }
         // TODO: its a waste to intern these since you want to deduplicate before putting in an aot exe anyway since they might be computed. 
         fn Quoted(s) => {
@@ -423,18 +424,7 @@ fn parse_func(self: *Parser, allow_empty: bool) Result(Func, ParseErr) = {
 // TODO: this is dumb. just admit there are more ast nodes? but then you have to deal with it everywhere. 
 fn bin_num(self: *Parser, b: BinNum) FatExpr = {
     self.pop();
-    loc := self.last.span;
-    v := self.expr((Value = (
-        bytes = (Small = (b.value.bitcast(), 8)),
-        coerced = false,
-    )), loc);
-    v.ty = i64; // this is hardcoded. 
-    bits := self.expr((Value = (
-        bytes = (Small = (b.bit_count.zext(), 8)),
-        coerced = false,
-    )), loc);
-    bits.ty = i64;
-    self.bang(.from_bit_literal, self.pair(bits, v, loc), loc)
+    self.expr((FromBitLiteral = (value = b.value.bitcast(), bit_count = b.bit_count.zext())), self.last.span)
 }
 
 fn named_call(self: *Parser, prec: Prec, name: Flag) ParseRes = {
@@ -454,7 +444,7 @@ fn parse_at(self: *Parser, prec: Prec) ParseRes = {
             loc = self.last.span;
             e := @try(self.parse_expr(Prec_None)) return;
             @try(self.eat(.RightSquare, "close unquote")) return;
-            return(Ok = self.bang(.unquote, e, self.last.span))
+            return(Ok = self.expr((Unquote = self.box(e)), self.last.span))
         }
         fn LeftParen() FatExpr => {
             self.pop();
@@ -472,7 +462,7 @@ fn parse_at(self: *Parser, prec: Prec) ParseRes = {
             self.pop();
             loc := self.last.span;
             e := @try(self.parse_block_until_squiggle(false)) return;
-            return(Ok = self.bang(.quote, e, loc))
+            return(Ok = self.expr((Quote = self.box(e)), loc))
         }
         @default fn() FatExpr => {
             self.pop(); // TODO: have lex.next:span
@@ -526,12 +516,12 @@ fn parse_infix(self: *Parser, prev: FatExpr, prec: Prec) ParseRes = {
         }
         fn DoubleSquare() => {
             self.pop();
-            e := self.bang(.deref, prev, self.last.span);
+            e := self.expr((Deref = self.box(prev)), self.last.span);
             self.parse_infix(e, prec.with(.Suffix))
         }
         fn Amp() => {
             self.pop();
-            e := self.bang(.addr, prev, self.last.span);
+            e := self.expr((Addr = self.box(prev)), self.last.span);
             self.parse_infix(e, prec.with(.Suffix))
         }
         fn LeftSquare() => {
@@ -1037,9 +1027,6 @@ fn raw_unit(self: *Parser, loc: Span) FatExpr = {
 
 fn get_named(self: *Parser, name: Flag, loc: Span) FatExpr = 
     self.expr((GetNamed = name.ident()), loc);
-
-fn bang(self: *Parser, name: Flag, arg: FatExpr, loc: Span) FatExpr = 
-    self.expr((SuffixMacro = (name = name.ident(), arg = self.box(arg))), loc);
 
 fn bin_named_macro(self: *Parser, name: Flag, arg: FatExpr, target: FatExpr, loc: Span) FatExpr = {
     handler := self.box(self.get_named(name, loc));
