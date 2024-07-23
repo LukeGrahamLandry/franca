@@ -35,6 +35,7 @@ fn driver(vtable: *ImportVTable) void = {
                 run_jit(vtable, .Aarch64);
             };
             @case("llvm") => run_llvm(vtable);
+            @case("qbe") => run_qbe(vtable);
             @case("examples") => run_examples(vtable, true);
             @case("github") => github(vtable);
             @default => {
@@ -45,7 +46,7 @@ fn driver(vtable: *ImportVTable) void = {
     };
     
     if(did <= 1, => println(HELP));
-    HELP :: "start with \"-- \" to seperate from compiler args, then any of [arm, cl, llvm, examples]";
+    HELP :: "start with \"-- \" to seperate from compiler args, then any of [arm, llvm, qbe, examples]";
 
     // TODO: do this in the loop
     //__temp_alloc.reset_retaining_capacity();
@@ -146,7 +147,59 @@ fn run_llvm(vtable: *ImportVTable) void = {
     };
 }
 
+QBE_PATH :: "/Users/luke/Documents/mods/infered/bindings/qbe/qbe";
+AS_PATH :: "/opt/homebrew/opt/llvm/bin/llvm-as";
+
+fn run_qbe(vtable: *ImportVTable) void = {
+    println("=== Qbe Aot ===");
+    c := vtable.with({vtable.init_compiler}(.Aarch64));
+    load_lang_tests(c);
+    run_sequential(c) {c, tests|
+        ir_text := {c.vtable.emit_qbe}(c, temp(), tests, .TestRunnerMain);
+        // TODO: clean up this hack for inline asm
+        ::?List(u8);
+        inline_asm_functions := ir_text&.pop_current_bucket().unwrap();
+        @eprintln("%", inline_asm_functions.items().len());
+        
+        ir_out := open_temp_file();
+        for(ir_text&){bucket|
+            ir_out.fd&.write(bucket);
+        };
+        @println("Write qbe ir to %", ir_out&.s_name());
+        
+        args: List(Str) = list(temp());
+        args&.push(ir_out&.s_name());
+        
+        // TODO: easy version of exec that lets us pass to stdin so we don't have to write the file. 
+        (ok, out, err) := exec_and_catch(QBE_PATH, args.items(), temp());
+        @assert(ok, "qbe failed\n%", err.items());
+        out&.push_all(inline_asm_functions.items());
+        
+        assemble_and_run :: fn(out: *List(u8)) void = {
+            // TOdO: pass the right mode in write_entire_file or this has to exist first
+            asm_out :: "target/franca_test_temp.s"; // TODO: the version of tmp file that lets you have an extension because it wants the .s
+        
+            write_entire_file(asm_out, out.items());
+            args: List(Str) = list(temp());
+            args&.clear();
+            args&.push(asm_out);
+            args&.push("-o");
+            args&.push("a.out");
+            success := run_cmd_blocking(CLANG_PATH, args.items()); 
+            assert(success, "as failed");
+            
+            args: List(Str) = list(temp());
+            success := run_cmd_blocking("a.out", args.items()); 
+            assert(success, "test failed");
+        };
+        assemble_and_run(out&);
+        
+        ir_out.remove();
+    };
+}
+
 NO_FORK :: false;
+SHOW_FAILING_OUTPUT :: false;
 
 fn run_sequential(c: CompCtx, $inner_run: @Fn(c: CompCtx, fns: Slice(FuncId)) void) void = {
     run :: fn(ff: Slice(FuncId)) bool => {
@@ -155,7 +208,7 @@ fn run_sequential(c: CompCtx, $inner_run: @Fn(c: CompCtx, fns: Slice(FuncId)) vo
             true
         }{|
             (ok, out, err) := fork_and_catch(temp(), => inner_run(c, ff));
-            if ff.len.eq(1).and(not(ok)) {|
+            if SHOW_FAILING_OUTPUT && ff.len == 1 && !ok {|
                 println(out.items());
                 println(err.items());
             };

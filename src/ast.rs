@@ -685,6 +685,7 @@ pub enum FuncImpl<'p> {
     Redirect(FuncId),
     Merged(Vec<FuncImpl<'p>>),
     Empty,
+    QbeIr(Ident<'p>),
 }
 
 impl<'p> Func<'p> {
@@ -1347,6 +1348,7 @@ pub enum Flag {
     Compiler_Builtin_Transform_Callsite,
     Late,
     Once,
+    Qbe,
     _Reserved_Count_,
 }
 

@@ -1,11 +1,19 @@
 // I'm not super thrilled about writing it this way but its really annoying to do the boring stack manipulation every time. 
 
+// TODO: really need to fix this
+#redirect(Ty(i64, i64), bool) fn eq(a: ProgramEntry, b: ProgramEntry) bool;
+
+// Turn this on for profiling. 
+// TODO: make this a build option you pass to emit_llvm so you don't have to remember to turn this off when updating the boot blob to make it small. 
+RETAIN_FUNCTION_NAMES :: true;
+
 // TODO: traits
 /*
 Backend :: @trait fn($B: Type) = {
     // B.Val needs to be Copy.
     :: assert_eq(@type :: B.Val, Type); // TODO: better syntax for associated types? 
     
+    fn new(comp: CompCtx, alloc: Alloc) B; 
     fn inst_call(self: *B, args: Slice(B.Val), sig: PrimSig, f: FuncId, tail: bool) Slice(B.Val);
     fn inst_trap(self: *B) void;
     fn inst_call_ptr(self: *B, args: Slice(B.Val), sig: PrimSig, ptr: B.Val) Slice(B.Val);
@@ -28,9 +36,10 @@ Backend :: @trait fn($B: Type) = {
 
 fn walk_block();
 fn emit_current_function();
+fn add_pending_callees();
 
 // Note: B.Val is the example usecase for const struct fields. 
-fn CodeGen($B: Type) Type = {
+fn CodeGen($B: Type, $zone_name: TraceZone) Type = {
     MAX_BLOCKS :: 512;
     Self :: @struct(
         program: *SelfHosted,
@@ -43,8 +52,97 @@ fn CodeGen($B: Type) Type = {
         constants_needed: BitSet = empty(),
         max_const_id: i64 = 0,
         pending: List(FuncId),
+        $emit := emit_program,
     );
     
+    // TODO: they need to pass target arch for !asm functions. 
+    emit_program :: fn(comp: CompCtx, alloc: Alloc, fns: [] FuncId, entry: ProgramEntry) BucketArray(u8) = {
+        gen: Self = (
+            program = comp.data.cast()[][],
+            backend = new(comp, alloc),
+            body = zeroed(*FnBody), // EVIL
+            vars = list(20, temp()),
+            stack = list(20, temp()),
+            pending = fns.clone(temp()),
+        );
+        
+        while(=> gen.pending.len.ne(0)){|
+            continue :: local_return;
+            fid := gen.pending&.pop().unwrap();
+            if(gen.funcs_done&.get(fid.to_index().zext()), => continue()); // might have been added multiple times
+            gen.funcs_done&.set(fid.to_index().zext(), temp());
+            
+            // Note: compile before checking callees!
+            {comp.vtable.compile_func}(comp.data, fid, .Aot).unwrap(); 
+            func := {comp.vtable.get_function}(comp.data, fid);
+            gen&.add_pending_callees(func);
+            
+            body := emit_bc(comp.data.cast(), fid, .Aot);
+            body := body.unwrap();
+            
+            if body.func != fid {|
+                // We just noticed its a duplicate.
+                gen.pending&.push(body.func);
+                continue();
+            };
+        
+            zone := zone_begin(zone_name); // TODO: defer
+            @if(ENABLE_TRACY) {
+                real_name := get_string(comp.data, func.name);
+                ___tracy_emit_zone_name(zone, real_name);
+            };
+            
+            if(body.blocks.len.eq(0)){|
+                success := gen.backend&.emit_special(func.body&, func, body, gen.pending&); 
+                if !success {|
+                    // TODO: pass in the arch
+                    success = gen.backend&.emit_special_asm(func.body&, func, body, Arch.Aarch64); 
+                };
+                if !success {|
+                    // TODO: should assert but debug_tag_corruption is confused. -- Jun 27
+                    real_name := get_string(comp.data, func.name);
+                    @eprintln("!!!! failed to emit speciai function: %", real_name);
+                };
+                //assert(success, "failed to emit speciai function");
+                zone_end(zone);
+                continue();
+            };
+            gen.body = body;
+            gen.backend&.emit_function_husk(fid, body.signeture) {|
+                gen&.emit_current_function();
+            };
+            
+            zone_end(zone);
+        };
+        
+        constants := 0;
+        range(0, gen.max_const_id + 1) {i|
+            if gen.constants_needed&.get(i) {|
+                gen.backend&.emit_constant(comp, (id = i.trunc()));
+                constants += 1;
+            };
+        };    
+        
+        gen&.emit_entry_points_and_debug_info(comp, fns, entry); // note: qbe hack needs this to be last
+        
+        // TODO: if alloc != temp { temp.reset(mark ? no but that wouldn't catch if they derived a new one from temp
+        gen.backend.out
+    }
+
+    
+    fn add_pending_callees(self: *Self, func: *Func) void = {
+        for func.callees { c |
+            if !self.funcs_done&.get(c.to_index().zext()) {|
+                self.pending&.push(c);
+            };
+        };
+        for func.mutual_callees { c |
+            if !self.funcs_done&.get(c.to_index().zext()) {|
+                self.pending&.push(c);
+            };
+        };
+    }
+   
     fn emit_current_function(self: *Self) void = {
         s := self.body.blocks.items();
         assert(s.len.lt(MAX_BLOCKS), "TODO: dynamic bitset");

@@ -3459,6 +3459,9 @@ impl<'a, 'p> Compile<'a, 'p> {
 
             let ir = self.eval_str(asm)?;
             Ok(FuncImpl::LlvmIr(ir))
+        }  else if self.program[f].has_tag(Flag::Qbe) {
+            let ir = self.eval_str(asm)?;
+            Ok(FuncImpl::QbeIr(ir))
         } else if self.program[f].has_tag(Flag::C) {
             let ir = self.eval_str(asm)?;
             Ok(FuncImpl::CSource(ir))

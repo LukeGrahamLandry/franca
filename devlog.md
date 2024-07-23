@@ -1,3 +1,11 @@
+- discovered one bug with llvm tests failing grouped but passing individual.
+  when entry points get deduplicated, i don't make shims or call the deduplicated version.
+  TODO. but also im pretty sure that was happening before too.
+- XProtextService sucks infinite cpu. thank you internet the magic incantation is `spctl developer-mode enable-terminal`
+  and then in settings you can see the developer tools tab in privacy/security and then you can add other things (like other terminals),
+  and then they're allowed to run new programs without being crippled. that takes running the tests on the llvm backend from 5.5 seconds to 1.7 seconds.
+  so thats nice.
+
 ## (Jul 21)
 
 - made typed ast nodes to replace all the SuffixMacro ones, which i like more cause there's less junk code about decoding the arguments,

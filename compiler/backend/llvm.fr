@@ -6,120 +6,49 @@
 // TODO: implement !asm with Module-Level Inline Assembly
 // TODO: only specfiy ccc if you take a pointer to the function? you want to use one that allows tail calls otherwise. 
 
-// TODO: really need to fix this
-#redirect(Ty(i64, i64), bool) fn eq(a: ProgramEntry, b: ProgramEntry) bool;
-
-// Turn this on for profiling. 
-// TODO: make this a build option you pass to emit_llvm so you don't have to remember to turn this off when updating the boot blob to make it small. 
-RETAIN_FUNCTION_NAMES :: false;
-
-// TODO: they need to pass target arch for !asm functions. 
-fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: [] FuncId, entry: ProgramEntry) BucketArray(u8) = {
+emit_llvm :: { T :: CodeGen(EmitLlvm, .EmitLlvm); T.emit }
+    
+// TODO: dependency problem so can't call this `init`
+fn new(comp: CompCtx, alloc: Alloc) EmitLlvm #inline = {
     s: EmitLlvm = (comp = comp, out = init(12, alloc), current = BbId.zeroed());
-    gen: CodeGen(EmitLlvm) = (
-        program = comp.data.cast()[][],
-        backend = s,
-        body = zeroed(*FnBody), // EVIL
-        vars = list(20, temp()),
-        stack = list(20, temp()),
-        pending = fns.clone(temp()),
-    );
     
     // TODO: how the hell am i supposed to know these numbers without just compiling a c program with clang. 
     //       its not a big deal tho cause passing -target to clang overrides this. 
-    gen.backend.out&.push_all("""
+    s.out&.push_all("""
     target datalayout = "e-m:o-i64:64-i128:128-n32:64-S128"
     target triple = "arm64-apple-macosx13.0.0"
     """);
     
-    while(=> gen.pending.len.ne(0)){|
-        continue :: local_return;
-        fid := gen.pending&.pop().unwrap();
-        if(gen.funcs_done&.get(fid.to_index().zext()), => continue()); // might have been added multiple times
-        gen.funcs_done&.set(fid.to_index().zext(), temp());
-        
-        // Note: compile before checking callees!
-        
-        {comp.vtable.compile_func}(comp.data, fid, .Aot).unwrap(); 
-        
-        func := {comp.vtable.get_function}(comp.data, fid);
-        
-        for func.callees { c |
-            if !gen.funcs_done&.get(c.to_index().zext()) {|
-                gen.pending&.push(c);
-            };
-        };
-        for func.mutual_callees { c |
-            if !gen.funcs_done&.get(c.to_index().zext()) {|
-                gen.pending&.push(c);
-            };
-        };
-        body := emit_bc(comp.data.cast(), fid, .Aot);
-        body := body.unwrap();
-        
-        if body.func != fid {|
-            // We just noticed its a duplicate.
-            gen.pending&.push(body.func);
-            continue();
-        };
-    
-        zone := zone_begin(.EmitLlvm); // TODO: defer
-        @if(ENABLE_TRACY) {
-            real_name := get_string(comp.data, func.name);
-            ___tracy_emit_zone_name(zone, real_name);
-        };
-        
-        if(body.blocks.len.eq(0)){|
-            success := gen.backend&.emit_special(func.body&, func, body, gen.pending&); 
-            if !success {|
-                // TODO: pass in the arch
-                success = gen.backend&.emit_special_asm(func.body&, func, body, Arch.Aarch64); 
-            };
-            if !success {|
-                // TODO: should assert but debug_tag_corruption is confused. -- Jun 27
-                real_name := get_string(comp.data, func.name);
-                @eprintln("!!!! failed to emit speciai function: %", real_name);
-            };
-            //assert(success, "failed to emit speciai function");
-            zone_end(zone);
-            continue();
-        };
-        gen.body = body;
-        if RETAIN_FUNCTION_NAMES {|
-            gen.backend.out&.push_all("define ccc ");
-        } else {|
-            gen.backend.out&.push_all("define private ccc ");
-        };
-        name: List(u8) = list(temp());
-        gen.backend&.fmt_fn_name(fid, name&);
-        gen.backend&.write_header(body.signeture, name.items()) {arg_index|
-            s := @format("%arg%", "%", arg_index) temp();
-            s.items()
-        };
-        //@println("emit %", get_string(comp.data, func.name));
-        
-        gen.backend.out&.current().push_all("{\n");
-        gen&.emit_current_function();
-        gen.backend.out&.current().push_all("}\n");
-        
-        zone_end(zone);
+    s
+}
+
+fn emit_function_husk(self: *EmitLlvm, fid: FuncId, signeture: PrimSig, $emit_body: @Fn() void) void = {
+    if RETAIN_FUNCTION_NAMES {|
+        self.out&.push_all("define ccc ");
+    } else {|
+        self.out&.push_all("define private ccc ");
     };
-    
-    constants := 0;
-    range(0, gen.max_const_id + 1) {i|
-        if gen.constants_needed&.get(i) {|
-            gen.backend&.emit_constant(comp, (id = i.trunc()));
-            constants += 1;
-        };
-    };    
-    
+    name: List(u8) = list(temp());
+    self.fmt_fn_name(fid, name&);
+    self.write_header(signeture, name.items()) {arg_index|
+        s := @format("%arg%", "%", arg_index) temp();
+        s.items()
+    };
+    self.out&.current().push_all("{\n");
+    emit_body();
+    self.out&.current().push_all("}\n");
+};
+
+fn emit_entry_points_and_debug_info(gen: *CodeGen(EmitLlvm, .EmitLlvm), comp: CompCtx, fns: []FuncId, entry: ProgramEntry) void = {
     @switch(entry) {
         @case(.TestRunnerMain) => {
             gen.backend.out&.push_all("define ccc i64 @main(){\n");
+            
             i := 1;
             // TODO: warn if fns has duplicates
-            for (fns) {f|
+            for fns { f |
                 gen.backend.out&.reserve(100);
+                f = gen.program.follow_redirects(f);
                 func := {comp.vtable.get_function}(comp.data, f);
                 // note: this only works because void has a fixed typeid value
                 if func.finished_arg.unwrap() == void {|
@@ -148,11 +77,7 @@ fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: [] FuncId, entry: ProgramEntry) B
         @debug_names_len = private global i64 0
         @debug_names = private global [0 x ptr] []
     """);
-    
-    // TODO: if alloc != temp { temp.reset(mark ? no but that wouldn't catch if they derived a new one from temp
-    gen.backend.out
 }
-
 
 fn emit_bounce_fn(self: *EmitLlvm, impl_name_callee: Str, fake_decl_name: Str, signeture: PrimSig, private: bool) void = {
     spec := if(private, => "define private ccc ", => "define ccc ");

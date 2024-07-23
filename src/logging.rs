@@ -424,6 +424,7 @@ impl<'p> PoolLog<'p> for FuncImpl<'p> {
             FuncImpl::ComptimeAddr(n) => format!("ComptimeAddr({n})"),
             FuncImpl::JittedAarch64(c) => format!("JittedAarch64({c:?})"),
             &FuncImpl::LlvmIr(ir) => pool.get(ir).to_string(),
+            &FuncImpl::QbeIr(ir) => pool.get(ir).to_string(),
             FuncImpl::EmitCranelift(n) => format!("EmitCranelift({n})"),
             FuncImpl::PendingRedirect { .. } => todo!(),
             FuncImpl::Redirect(n) => format!("Redirect({n:?})"),
