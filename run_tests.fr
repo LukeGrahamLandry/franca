@@ -159,32 +159,32 @@ fn run_qbe(vtable: *ImportVTable) void = {
         // TODO: clean up this hack for inline asm
         ::?List(u8);
         inline_asm_functions := ir_text&.pop_current_bucket().unwrap();
-        @eprintln("%", inline_asm_functions.items().len());
         
         ir_out := open_temp_file();
         for(ir_text&){bucket|
-            ir_out.fd&.write(bucket);
+            ir_out.fd&.write(bucket).unwrap();
         };
         @println("Write qbe ir to %", ir_out&.s_name());
         
+        asm_out :: "target/franca_test_temp.s"; // TODO: the version of tmp file that lets you have an extension because it wants the .s
+        
         args: List(Str) = list(temp());
+        args&.push("-o");
+        args&.push(asm_out);
         args&.push(ir_out&.s_name());
+        success := run_cmd_blocking(QBE_PATH, args.items()); 
         
-        // TODO: easy version of exec that lets us pass to stdin so we don't have to write the file. 
-        (ok, out, err) := exec_and_catch(QBE_PATH, args.items(), temp());
-        @assert(ok, "qbe failed\n%", err.items());
-        out&.push_all(inline_asm_functions.items());
+        // TODO: it would be easier if i could use exec_and_catch but it hangs forever waiting on a few tests???
+        append_to_file(asm_out, inline_asm_functions.items());
         
-        assemble_and_run :: fn(out: *List(u8)) void = {
-            // TOdO: pass the right mode in write_entire_file or this has to exist first
-            asm_out :: "target/franca_test_temp.s"; // TODO: the version of tmp file that lets you have an extension because it wants the .s
-        
-            write_entire_file(asm_out, out.items());
+        assemble_and_run :: fn() void = {
+            asm_out :: "target/franca_test_temp.s"; // TODO: shouldb't need two
             args: List(Str) = list(temp());
             args&.clear();
             args&.push(asm_out);
             args&.push("-o");
             args&.push("a.out");
+            println("Run clang");
             success := run_cmd_blocking(CLANG_PATH, args.items()); 
             assert(success, "as failed");
             
@@ -192,14 +192,14 @@ fn run_qbe(vtable: *ImportVTable) void = {
             success := run_cmd_blocking("a.out", args.items()); 
             assert(success, "test failed");
         };
-        assemble_and_run(out&);
+        assemble_and_run();
         
         ir_out.remove();
     };
 }
 
 NO_FORK :: false;
-SHOW_FAILING_OUTPUT :: false;
+SHOW_FAILING_OUTPUT :: true;
 
 fn run_sequential(c: CompCtx, $inner_run: @Fn(c: CompCtx, fns: Slice(FuncId)) void) void = {
     run :: fn(ff: Slice(FuncId)) bool => {
@@ -219,6 +219,15 @@ fn run_sequential(c: CompCtx, $inner_run: @Fn(c: CompCtx, fns: Slice(FuncId)) vo
     
     tests := c.get_tagged("test");
     
+    //tests_ := c.get_tagged("test");
+    //tests: List(FuncId) = tests_.clone(temp());
+    //want := c.intern_string("buckets");
+    //// TODO: unordered_retain fails safety check!
+    //tests&.ordered_retain() { i | 
+    //    c.get_function_name(i[]) == want
+    //};
+    //tests := tests.items();
+    
     chunk_size :: 10;
     failing: List(FuncId) = list(temp());
     i := 0;
@@ -237,7 +246,7 @@ fn run_sequential(c: CompCtx, $inner_run: @Fn(c: CompCtx, fns: Slice(FuncId)) vo
             failing&.push_all(fns);
         };
     };
-    
+
     // TODO: fail if one fails as a group but all pass individually. 
     fails := 0;
     for(failing.items()) {fid|

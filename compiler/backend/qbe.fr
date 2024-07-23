@@ -25,19 +25,9 @@ fn emit_function_husk(self: *EmitQbe, fid: FuncId, signeture: PrimSig, $emit_bod
     self.out&.current().push_all("{\n");
     emit_body();
     self.out&.current().push_all("}\n");
-};
+}
 
 fn emit_entry_points_and_debug_info(gen: *CodeGen(EmitQbe, .EmitQbe), comp: CompCtx, fns: []FuncId, entry: ProgramEntry) void = {
-    // "They have file scope, but types must be defined before being referenced."
-    out: List(u8) = list(gen.backend.out.buckets.gpa);
-    range(0, gen.backend.return_value_type_sizes&.capacity()) { i |
-        if gen.backend.return_value_type_sizes&.get(i) {|
-            @fmt(out&, "   type :Ret% = align 8 { % }\n", i, i);
-        };
-    };
-    gen.backend.out.buckets&.insert(0, out);
-    gen.backend.out.i += 1;
-
     @switch(entry) {
         @case(.TestRunnerMain) => {
             gen.backend.out&.push_all("export function w $main() {\n@start\n");
@@ -66,6 +56,20 @@ fn emit_entry_points_and_debug_info(gen: *CodeGen(EmitQbe, .EmitQbe), comp: Comp
             };
         };
     };
+    
+    // "They have file scope, but types must be defined before being referenced."
+    out: List(u8) = list(gen.backend.out.buckets.gpa);
+    range(0, gen.backend.return_value_type_sizes&.capacity()) { i |
+        if gen.backend.return_value_type_sizes&.get(i) {|
+            @fmt(out&, "   type :Ret% = align 8 { % }\n", i, i);
+        };
+    };
+    // Note: not the same as Ret16! we need this be be passed in registers if i want to call between backends. 
+    @fmt(out&, "   type :RetPair = { l, l }\n");
+    
+    gen.backend.out.buckets&.insert(0, out);
+    gen.backend.out.i += 1;
+
     
     // Note: even if its unreachable because RUNTIME_STACK_TRACE=false, the binary is bigger.
     // TODO: if RUNTIME_STACK_TRACE
@@ -109,8 +113,24 @@ fn emit_bounce_fn(self: *EmitQbe, impl_name_callee: Str, fake_decl_name: Str, si
     };
     self.out&.reserve(50);
     self.out&.current().push_all("{\n@start\n");
+    
+    self.current_has_indirect_return = signeture.first_arg_is_indirect_return;
+    if signeture.first_arg_is_indirect_return {|
+        @fmt(self.out&.current(), "   %ret =l alloc8 %\n", "%", signeture.return_value_bytes);
+        @fmt(self.out&.current(), "   %v0 =l alloc8 %\n", "%", signeture.return_value_bytes);
+    };
+    if signeture.ret2.is_some() {|
+        @fmt(self.out&.current(), "   %ret =l alloc8 16\n", "%");
+    };
+    
     ret := self.inst_call(values.items(), signeture) {|
         @fmt(self.out&.current(), "$%", impl_name_callee);
+    };
+    
+    if signeture.first_arg_is_indirect_return {|
+        size: i64 = signeture.return_value_bytes.zext();
+        // backwards from memcpy!!
+        @fmt(self.out&.current(), "   blit %v0, %ret, %\n", "%", "%", size);
     };
     self.inst_return(ret);
     self.out&.current().push_all("}\n");
@@ -181,7 +201,11 @@ fn emit_constant(self: *EmitQbe, comp: CompCtx, id: BakedVarId) void = {
             self.out&.push_all("0 }\n"); // TODO: hack cause im to lazy to ask for debug names as cstr
         });
         (fn VoidPtrArray(parts) => {
-            @fmt(self.out&.current(), "data $g% = { l ", idx);
+            // it feels like this should be ok cause it works for bytes 
+            // data $g9 = { l $arena_alloc__2375 $arena_free__2771  }
+            // but no i get two frees, so do it this way. idk if qbe bug or im just failing at reading the docs
+            // data $g9 = { l $arena_alloc__2375, l $arena_free__2771  }
+            @fmt(self.out&.current(), "data $g% = { ", idx);
             for(parts[].items()){inner|
                 self.out&.reserve(20);
                 @match(inner) {
@@ -192,15 +216,15 @@ fn emit_constant(self: *EmitQbe, comp: CompCtx, id: BakedVarId) void = {
                             f = inner[];
                         };
                         
-                        @fmt(self.out&.current(), "$% ", (self, f));
+                        @fmt(self.out&.current(), " l $%, ", (self, f));
                         // TODO: make sure we emitted the function. 
                     });
                     (fn AddrOf(id) => {
-                        @fmt(self.out&.current(), "$g% ", @as(i64) id.id.zext());
+                        @fmt(self.out&.current(), " l $g%, ", @as(i64) id.id.zext());
                     });
                     (fn Num(v) => {
                         // TODO: small prims
-                        @fmt(self.out&.current(), "% ", v.value);
+                        @fmt(self.out&.current(), " l %, ", v.value);
                     });
                 };
             };
@@ -293,6 +317,7 @@ EmitQbe :: @struct(
     next_var: i64 = 0,
     return_value_type_sizes: BitSet,
     inline_asm: List(u8),
+    current_has_indirect_return := false,
     $Val := QbeVal, // TODO: const can't be first (doesn't parse).  -- Jun 14
 );
 
@@ -300,9 +325,9 @@ fn write_header(self: *EmitQbe, sig: PrimSig, name: Str, $get_arg_name: @Fn(idx:
     self.out&.reserve(50);
     if(sig.ret1) {fst: Prim|
         if(sig.ret2) {snd: Prim| // two
-            @fmt(self.out&.current(), " :Ret16");
+            @fmt(self.out&.current(), " :RetPair");
         }{| // one
-            @fmt(self.out&.current(), "%", fst.type_char_sign());
+            @fmt(self.out&.current(), "%", fst.type_char_var());
         };
     }{|
         if sig.return_value_bytes != 0 {| // indirect
@@ -325,7 +350,7 @@ fn write_header(self: *EmitQbe, sig: PrimSig, name: Str, $get_arg_name: @Fn(idx:
     enumerate(sig.args) {i, ty|
         self.out&.reserve(20);
         i := i.add(shift);
-        @fmt(self.out&.current(), "% %,", ty[].type_char_sign(), get_arg_name(i)); 
+        @fmt(self.out&.current(), "% %,", ty[].type_char_var(), get_arg_name(i)); 
     };
     self.pop_trailing_comma();
     self.out&.current().push_all(")");
@@ -357,6 +382,7 @@ fn setup(self: *EmitQbe, body: *FnBody, vars_out: *List(EmitQbe.Val)) void = {
         @fmt(self.out&.current(), "   %a% =l alloc8 8\n", "%", i); // uhg % was a bad choice. 
     };
     
+    self.current_has_indirect_return = body.signeture.first_arg_is_indirect_return;
     shift := if body.signeture.first_arg_is_indirect_return {|
         @fmt(self.out&.current(), "   %ret =l alloc8 %\n", "%", body.signeture.return_value_bytes);
         @fmt(self.out&.current(), "   storel %ret, %a0\n", "%", "%");
@@ -404,7 +430,7 @@ fn inst_call(self: *EmitQbe, args: Slice(QbeVal), sig: PrimSig, $do_call: @Fn() 
         if(sig.ret2) {snd: Prim| // two
             out_vals&.push(self.get_var(fst));
             out_vals&.push(self.get_var(snd));
-            @fmt(self.out&.current(), "   %v% =:Ret16 call ", "%", self.next_var);
+            @fmt(self.out&.current(), "   %v% =:RetPair call ", "%", self.next_var);
             self.next_var += 1;
         }{| // one
             v := self.get_var(fst);
@@ -435,7 +461,8 @@ fn inst_call(self: *EmitQbe, args: Slice(QbeVal), sig: PrimSig, $do_call: @Fn() 
         self.out&.reserve(30);
         ::assert_eq(Prim);
         //assert_eq(ty, v.ty); // TODO
-        @fmt(self.out&.current(), " % %,", ty.type_char_sign(), v);
+        // TODO: qbe bug? docs say im supposed to use fake types for calls but it loses arguments
+        @fmt(self.out&.current(), " % %,", ty.type_char_var(), v);
     };
     self.pop_trailing_comma();
     
@@ -445,17 +472,23 @@ fn inst_call(self: *EmitQbe, args: Slice(QbeVal), sig: PrimSig, $do_call: @Fn() 
         v1 := out_vals[0];
         v2 := out_vals[1];
         self.out&.reserve(30);
-        @fmt(self.out&.current(), "   % =% load% %v%\n", v1, type_char_sign(v1.ty), type_char_sign(v1.ty), "%", maybe_struct_out);
-        @fmt(self.out&.current(), "   % =% load% %v%\n", v2, type_char_sign(v2.ty), type_char_sign(v2.ty), "%", maybe_struct_out);
+        @fmt(self.out&.current(), "   % =% load% %v%\n", v1, type_char_var(v1.ty), type_char_sign(v1.ty), "%", maybe_struct_out);
+        
+        offset_to_second_field := 8;
+        struct_out_2 := self.get_var(.P64);
+        @fmt(self.out&.current(), "   % =l add %v%, %\n", struct_out_2, "%", maybe_struct_out, offset_to_second_field); 
+        @fmt(self.out&.current(), "   % =% load% %\n", v2, type_char_var(v2.ty), type_char_sign(v2.ty), struct_out_2);
     };
     if sig.first_arg_is_indirect_return {|
         size: i64 = sig.return_value_bytes.zext();
+        // backwards from memcpy!!
         @fmt(self.out&.current(), "   blit %v%, %, %\n", "%", maybe_struct_out, args[0], size);
     };
     
     out_vals.items()
 }
 
+// TODO: not true on qbe i think?s
 fn pop_trailing_comma(self: *EmitQbe) void = {
     // they don't allow trailing comma because they hate us personally 
     if(self.out&.current().items().ends_with(",")) {|
@@ -542,7 +575,11 @@ fn inst_return(self: *EmitQbe, args: Slice(EmitQbe.Val)) void = {
     self.out&.reserve(100);
     @switch(args.len){
         @case(0) => {
-            self.out&.current().push_all("   ret\n");
+            if self.current_has_indirect_return {|
+                self.out&.current().push_all("   ret %ret\n");
+            } else {|
+                self.out&.current().push_all("   ret\n");
+            };
         };
         @case(1) => {
             @fmt(self.out&.current(), "   ret %\n", args[0]); 

@@ -5,6 +5,34 @@
   and then in settings you can see the developer tools tab in privacy/security and then you can add other things (like other terminals),
   and then they're allowed to run new programs without being crippled. that takes running the tests on the llvm backend from 5.5 seconds to 1.7 seconds.
   so thats nice.
+- i bet qbe never passes an opque thing in regisers even if its 16 bytes.
+  yeah, saying pairs are a `{ l l }` made the temp function stop touching x8 (indirect return).
+  that fixed it jumping to null when trying to call through alloc vtable.
+
+```
+qbe bug? docs say im supposed to use fake types for calls but this loses the argument.
+making it w works. but without -NDEBUG it hits an assertion so maybe the docs are lying?
+Assertion failed: (v->t[0] == T.rglob), function spill, file spill.c, line 507.
+yeah apparently just use w for everything.
+
+  function l $trivial(){
+  @start
+  %v1 =l call $something_important(ub 123)
+  ret %v1
+  }
+.text
+.balign 4
+\_trivial:
+hint #34
+stp x29, x30, [sp, -16]!
+mov x29, sp
+bl \_something_important
+ldp x29, x30, [sp], 16
+ret
+/_ end function trivial \*/
+```
+
+- hangs on test `buckets` but its something wrong with my fork_and_catch
 
 ## (Jul 21)
 

@@ -81,6 +81,59 @@ fn driver(vtable: *ImportVTable) void = {
         reach_sema := assume_types_fn(Arg = *ImportVTable, Ret = void, ptr = reach_sema);
         reach_sema(vtable);
     };
+    if true {|
+        build_with_qbe(c, exports);
+    };
+    fn build_with_qbe(c: CompCtx, exports: []FuncId) void = {
+        QBE_PATH :: "/Users/luke/Documents/mods/infered/bindings/qbe/qbe";
+        ir_text := {c.vtable.emit_qbe}(c, temp(), exports, .ExportWithNames);
+        // TODO: clean up this hack for inline asm
+        ::?List(u8);
+        inline_asm_functions := ir_text&.pop_current_bucket().unwrap();
+
+        ir_out := open_temp_file();
+        for(ir_text&){bucket|
+            ir_out.fd&.write(bucket).unwrap();
+        };
+        @println("Write qbe ir to %", ir_out&.s_name());
+        
+        
+        start := timestamp();
+        args: List(Str) = list(temp());
+        args&.push("-o");
+        args&.push(asm_out);
+        args&.push(ir_out&.s_name());
+        success := run_cmd_blocking(QBE_PATH, args.items()); 
+        @assert(success, "qbe failed");
+        end := timestamp();
+        @println("QBE time: % ms.", end.sub(start)); 
+        
+        asm_out :: "target/franca_test_temp.s"; // TODO: the version of tmp file that lets you have an extension because it wants the .s
+        append_to_file(asm_out, inline_asm_functions.items());
+        // TOdO: pass the right mode in write_entire_file or this has to exist first
+        //
+        start := timestamp();
+        args: List(Str) = list(temp());
+        args&.clear();
+        args&.push(asm_out);
+        args&.push("-o");
+        args&.push("target/franca/libfranca_qbe.o");
+        args&.push("-c");
+        println("Run clang");
+        success := run_cmd_blocking(CLANG_PATH, args.items()); 
+        assert(success, "as failed");
+        end := timestamp();
+        @println("ASM time: % ms.", end.sub(start)); 
+        
+        run_cmd_blocking("/usr/bin/ar", @slice (
+            "rc", "target/franca/libfranca_qbe.a", "target/franca/libfranca_qbe.o"
+        )).assert("link failed");
+        
+        //args := libs.get_aot_objects();
+        args: List(Str) = list(temp());
+        args&.push_all(@slice("target/release/libfranca.a", "target/franca/libfranca_qbe.o", "-o", "target/release/franca_qbe"));
+        run_cmd_blocking(CLANG_PATH, args.items()).assert("link failed");
+    };
     
     if do_build {|
         start := timestamp();
