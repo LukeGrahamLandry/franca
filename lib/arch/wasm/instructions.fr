@@ -15,7 +15,7 @@ NumType        :: @enum(u8) (I32 = 0x7F, I64 = 0x7E, F32 = 0x7D, F64 = 0x7C);
 BlockType      :: @tagged(Empty: void, Value: u8, Index: i33);
 MemArg         :: @struct(offset: u32, align: u32);
 
-Instr :: @enum(u8) (
+WasmInst :: @enum(u8) (
     Unreachable = 0x00,
     Nop = 0x01,
     Block = 0x02,
@@ -44,7 +44,8 @@ Instr :: @enum(u8) (
     I64_Add = 0x7C,
 );
 
-fn raw(s: Instr) u8 #unsafe_noop_cast;
+fn raw(s: WasmInst) u8 #unsafe_noop_cast;
+fn raw(s: NumType) u8 #unsafe_noop_cast;
 
 // TODO: better error message if you use '=' instead of ':'. 
 Op :: @tagged(
@@ -79,8 +80,14 @@ Section :: @enum(u8) (
 );
 :: enum(Section);
 
+// Note: 
+// "Every import defines an index in the respective index space. 
+// In each index space, the indices of imports go before the first 
+// index of any definition contained in the module itself."
+//
+
 WasmModule :: @struct(
-    //types: List(), // [TypeIdx] function types
+    types: List(WasmFuncType), // [TypeIdx] function types
     // Functions are split into two parts. the types are seperate from the code. 
     functions: List(TypeIdx),  // [FuncIdx]
     exports: List(WasmExport),
@@ -88,11 +95,15 @@ WasmModule :: @struct(
 );
 
 fn empty(a: Alloc) WasmModule = {
-    (functions = list(a), exports = list(a), code = list(a))
+    (types = list(a), functions = list(a), exports = list(a), code = list(a))
 } 
 
+// "Value types can occur in contexts where type indices are also allowed, such as in the case of block types. Thus, the binary format for types corresponds to the signed LEB128 encoding of small negative 
+// values, so that they can coexist with (positive) type indices in the future."
+WasmValType :: @struct(repr: u8);
+WasmFuncType :: @struct(arg: RsVec(WasmValType), ret: RsVec(WasmValType));
 WasmFunc :: @struct(locals: RsVec(WasmLocal), insts: RsVec(u8));
-WasmLocal :: @struct(value_type: u8, count: i64);
+WasmLocal :: @struct(ty: WasmValType, count: i64);
 // It's tempting to store 4 seperate arrays so you don't need the tag except that you have to refer to them by index. 
 WasmExport :: @struct(name: RsVec(u8), desc: WasmExportDesc);
 WasmExportDesc :: @tagged(Function: FuncIdx, Table: TableIdx, Memory: MemIdx, Global: GlobalIdx);
@@ -114,6 +125,23 @@ fn dump(self: *WasmModule, out: *List(u8)) void = {
     buf := buf&;
     inner_buf: List(u8) = list(temp());
     inner_buf := inner_buf&;
+    
+    out.push(Section.Type.raw());
+    buf.leb128_unsigned(self.types.len); 
+    for self.types { it | 
+        buf.push(0x60);
+        buf.leb128_unsigned(it.arg.len);
+        for it.arg { ty |
+            buf.push(ty.repr);
+        };
+        buf.leb128_unsigned(it.ret.len);
+        for it.ret { ty |
+            buf.push(ty.repr);
+        };
+    };
+    out.leb128_unsigned(buf.len);
+    out.push_all(buf.items());
+    buf.clear();
     
     out.push(Section.Function.raw());
     buf.leb128_unsigned(self.functions.len); 
@@ -148,14 +176,14 @@ fn dump(self: *WasmModule, out: *List(u8)) void = {
         inner_buf.leb128_unsigned(it.locals.len);
         each it.locals { local | 
             inner_buf.leb128_unsigned(local.count);
-            inner_buf.push(local.value_type);
+            inner_buf.push(local.ty.repr);
         };
         
         // Expressions aren't length prefixed, they have a terminator. 
         inner_buf.push_all(it.insts.items());
         ::?*u8;
         end := it.insts.items().last().unwrap()[];
-        @assert_eq(end, Instr.End.raw()); // TODO: move @debug_assert_eq to lib
+        @assert_eq(end, WasmInst.End.raw()); // TODO: move @debug_assert_eq to lib
         
         buf.leb128_unsigned(inner_buf.len);
         buf.push_all(inner_buf.items());
@@ -184,5 +212,17 @@ fn leb128_unsigned(out: *List(u8), i: i64) void = {
 }
 
 fn leb128_signed(out: *List(u8), i: i64) void = {
-    todo()
+    done := false;
+    while => !done {|
+        byte: u8 = i.trunc();
+        i = i.shift_right_arithmetic(6);
+        done = i.eq(0).or(i == -1);
+        if done {|
+            byte = (@as(i64) byte.zext().bit_and(LEB_MORE.bit_not())).trunc();
+        } else {|
+            i = i.shift_right_arithmetic(1);
+            byte = (@as(i64) byte.zext().bit_or(LEB_MORE)).trunc();
+        };
+        out.push(byte);
+    };
 }

@@ -60,7 +60,9 @@ Bc :: @tagged(
     Ret1: Prim,
     Ret2: Ty(Prim, Prim),
     Nop,
+    Intrinsic: @struct(op: Intrinsic, controlling_type: Prim),
 );
+::enum(Intrinsic);
 
 PrimSig :: @struct(
     args: Slice(Prim) = empty(),
@@ -462,6 +464,15 @@ fn emit_body(self: *EmitBc, result: *FnBody, f: FuncId) PRes #once = {
 
     body: *FatExpr = @match(func.body&) {
         fn Normal(body) => body;
+        fn Intrinsic(op) => {
+            // Direct calls will be inlined in emit_bc but someone might be trying to call through a function pointer. 
+            // TODO: don't add to callees for direct calls. -- Jul 24
+            entry_block := result.push_block(empty());
+            result.push(Intrinsic = (op = op[], controlling_type = result.signeture.args[0]));
+            @debug_assert(result.signeture.ret2.is_none(), "So far all intrinsics return one thing.");
+            result.push(Ret1 = result.signeture.ret1.unwrap());
+            return(.Ok)
+        }
         // You should never actually try to run this code, the caller should have just done the call,
         // so there isn't an extra indirection and I don't have to deal with two bodies for comptime vs runtime,
         // just two ways of emitting the call.
@@ -964,7 +975,13 @@ fn emit_call(self: *EmitBc, result: *FnBody, f: *FatExpr, arg: *FatExpr, result_
             
             return(self.emit_runtime_call(result, f_ty, cc, arg, result_location, can_tail) { sig, tail |
                 result.mix_hash(f_id.as_index(), 436265);
-                result.push(CallDirect = (sig = sig[], f = f_id, tail = tail))
+                if self.program[f_id].body&.is(.Intrinsic) {|
+                    op := self.program[f_id].body.Intrinsic;
+                    // TODO: if tail return
+                    result.push(Intrinsic = (op = op, controlling_type = sig.args[1]));
+                } else {|
+                    result.push(CallDirect = (sig = sig[], f = f_id, tail = tail));
+                };
             });
         }
         fn FnPtr(f_ty) => {
@@ -1793,6 +1810,7 @@ fn hash(h: *TrivialHasher, s: **FnBody) void = {
     AutoEq(Bc);
     AutoEq(PrimSig);
     DerefEq(Prim);
+    DerefEq(Intrinsic);
     AutoEq(?Prim);
     AutoEq(BbId);
     AutoEq(BakedVarId);
@@ -1809,4 +1827,5 @@ fn hash(h: *TrivialHasher, s: **FnBody) void = {
     AutoEq(get_variant_type(Bc, Bc.Tag().LoadSsa));
     AutoEq(get_variant_type(Bc, Bc.Tag().LastUse));
     AutoEq(get_variant_type(Bc, Bc.Tag().Ret2));
+    AutoEq(get_variant_type(Bc, Bc.Tag().Intrinsic));
 };

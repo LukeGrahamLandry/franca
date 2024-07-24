@@ -31,6 +31,7 @@ pub struct ComptimeEnvironment {
     pub make_slice_t: BigOption<FuncId>,
     pub bake_os: BigOption<OverloadSetId>,
     pub fat_expr_type: BigOption<TypeId>,
+    pub intrinsic_type: BigOption<TypeId>,
 }
 
 #[repr(C)]
@@ -57,6 +58,10 @@ impl<'p> ParseErr<'p> {
 
 use crate::export_ffi::BigResult;
 
+// Note: im using & pointers for things the other thing thinks are by value
+//       which is fine as long as they don't mutate though it.
+//       because the abi matches on arm. and the point is to use this abi on x86 too if i get that far,
+//       because i dont want to deal with telling llvm how big arguments are.
 #[allow(improper_ctypes)]
 #[link(name = "franca")]
 extern "C" {
@@ -73,17 +78,17 @@ extern "C" {
     pub fn self_hosted_main(vtable: *const ImportVTable);
     pub(crate) fn show_error_line(codemap: *mut (), span_low: u32, span_high: u32);
 
-    fn put_constant(scopes: *mut (), name: Var, value: FatExpr, ty: LazyType);
-    fn get_var_type(scopes: *mut (), v: Var) -> BigOption<TypeId>;
-    fn put_var_type(scopes: *mut (), v: Var, ty: TypeId) -> bool;
-    fn get_constant<'p>(scopes: *mut (), name: Var<'p>) -> BigOption<&'p mut (FatExpr<'p>, LazyType<'p>)>;
+    fn put_constant(scopes: *mut (), name: &Var, value: FatExpr, ty: LazyType);
+    fn get_var_type(scopes: *mut (), v: &Var) -> BigOption<TypeId>;
+    fn put_var_type(scopes: *mut (), v: &Var, ty: TypeId) -> bool;
+    fn get_constant<'p>(scopes: *mut (), name: &Var<'p>) -> BigOption<&'p mut (FatExpr<'p>, LazyType<'p>)>;
     fn find_constant_in_scope<'p>(scopes: *mut (), s: ScopeId, name: Ident<'p>) -> BigOption<Var<'p>>;
-    fn dup_var<'p>(scopes: *mut (), old: Var<'p>) -> Var<'p>;
+    fn dup_var<'p>(scopes: *mut (), old: &Var<'p>) -> Var<'p>;
     pub(crate) fn resolve_root<'p>(compiler: &mut SelfHosted<'p>, func: &mut Func<'p>, scope: ScopeId) -> BigResult<(), ParseErr<'p>>;
     pub(crate) fn resolve_sign<'p>(compiler: &mut SelfHosted<'p>, func: &mut Func<'p>) -> BigResult<(), ParseErr<'p>>;
     pub(crate) fn resolve_body<'p>(compiler: &mut SelfHosted<'p>, func: &mut Func<'p>) -> BigResult<(), ParseErr<'p>>;
     // For unquoting, initial will be None, but for inlining closures, it will be the return variable.
-    fn renumber_expr<'p>(compiler: &mut SelfHosted<'p>, expr: &mut FatExpr<'p>, initial: BigOption<(Var<'p>, Var<'p>)>);
+    fn renumber_expr<'p>(compiler: &mut SelfHosted<'p>, expr: &mut FatExpr<'p>, initial: &BigOption<(Var<'p>, Var<'p>)>);
     fn maybe_renumber_and_dup_scope<'p>(compiler: &mut SelfHosted<'p>, new_func: &mut Func<'p>) -> BigResult<(), ParseErr<'p>>;
     pub(crate) fn created_jit_fn_ptr_value(compiler: &SelfHosted, f: FuncId, ptr: i64);
     pub(crate) fn save_bake_callback<'p>(
@@ -121,7 +126,7 @@ extern "C" {
 
     pub(crate) fn emit_bc_and_aarch64<'p>(comp: &mut Compile<'_, 'p>, f: FuncId, when: ExecStyle) -> BigResult<(), ParseErr<'p>>;
 
-    pub(crate) fn intern_type<'p>(c: &SelfHosted<'p>, info: TypeInfo<'p>) -> TypeId;
+    pub(crate) fn intern_type<'p>(c: &SelfHosted<'p>, info: &TypeInfo<'p> /* owning */) -> TypeId;
     // TODO: this shouldn't be mutable because it needs to stay the same for hashing.
     //       for now i just want to see if this works.... -- Jul 20
     pub(crate) fn get_type<'p>(c: &SelfHosted<'p>, ty: TypeId) -> &'p mut TypeInfo<'p>;
@@ -166,19 +171,19 @@ impl<'p> SelfHosted<'p> {
     }
 
     pub(crate) fn put_constant(&mut self, name: crate::ast::Var<'p>, value: FatExpr<'p>, ty: LazyType<'p>) {
-        unsafe { put_constant(self.scopes, name, value, ty) }
+        unsafe { put_constant(self.scopes, &name, value, ty) }
     }
 
     pub(crate) fn get_var_type(&self, v: Var) -> BigOption<TypeId> {
-        unsafe { get_var_type(self.scopes, v) }
+        unsafe { get_var_type(self.scopes, &v) }
     }
 
     pub(crate) fn put_var_type(&mut self, v: Var<'p>, ty: TypeId) {
-        unsafe { put_var_type(self.scopes, v, ty) };
+        unsafe { put_var_type(self.scopes, &v, ty) };
     }
 
     pub(crate) fn get_constant(&mut self, name: Var<'p>) -> BigOption<&mut (FatExpr<'p>, LazyType<'p>)> {
-        unsafe { get_constant(self.scopes, name) }
+        unsafe { get_constant(self.scopes, &name) }
     }
 
     pub(crate) fn find_in_scope(&self, s: ScopeId, name: Ident<'p>) -> BigOption<Var<'p>> {
@@ -193,11 +198,11 @@ impl<'p> SelfHosted<'p> {
     }
 
     pub(crate) fn renumber_expr(&mut self, expr: &mut FatExpr<'p>, initial: BigOption<(Var<'p>, Var<'p>)>) {
-        unsafe { renumber_expr(self, expr, initial) }
+        unsafe { renumber_expr(self, expr, &initial) }
     }
 
     pub(crate) fn dup_var(&mut self, old: Var<'p>) -> Var<'p> {
-        unsafe { dup_var(self.scopes, old) }
+        unsafe { dup_var(self.scopes, &old) }
     }
 }
 

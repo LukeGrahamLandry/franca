@@ -5,7 +5,7 @@
 
 // Turn this on for profiling. 
 // TODO: make this a build option you pass to emit_llvm so you don't have to remember to turn this off when updating the boot blob to make it small. 
-RETAIN_FUNCTION_NAMES :: true;
+RETAIN_FUNCTION_NAMES :: false;
 
 // TODO: traits
 /*
@@ -31,6 +31,7 @@ Backend :: @trait fn($B: Type) = {
     // - declare basic blocks
     // - declare stack slots for local variables
     fn setup(self: *B, body: *FnBody, vars_out: *List(B.Val)) void;
+    fn inst_intrinsic(self: *B, op: Intrinsic, args: Slice(B.Val), controling_type: Prim) Slice(B.Val);
 };
 */
 
@@ -181,6 +182,13 @@ fn CodeGen($B: Type, $zone_name: TraceZone) Type = {
                     name := self.program.pool.get(f.name);
                     self.program.codemap.show_error_line(f.loc);
                     @panic("AOT bytecode for '%' should not use GetCompCtx", name);
+                });
+                (fn Intrinsic(call) => {
+                    arg_count := call.op.arg_count();
+                    args := self.stack.items().slice_last(arg_count).expect("enough args on stack for call");
+                    ret := self.backend&.inst_intrinsic(args, call.op, call.controlling_type);
+                    self.stack.len -= arg_count;
+                    self.stack&.push_all(ret);
                 });
                 (fn CallDirect(call) => { //  f, tail, sig
                     self.pending&.push(call.f); // TODO: callees list from compiler should make this redundant but im afraid.

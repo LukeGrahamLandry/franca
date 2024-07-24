@@ -424,6 +424,9 @@ fn emit_inst(self: *EmitAsm, b_idx: usize, inst: Bc, i: usize) bool #once = {
             };
             return(f.tail);
         }
+        fn Intrinsic(f) => {
+            self.emit_intrinsic(f.op, f.controlling_type);
+        }
         fn Ret0()     => return(self.emit_return(empty()));
         fn Ret1(prim) => return(self.emit_return(@slice(prim)));
         fn Ret2(f)    => return(self.emit_return(@slice(f._0, f._1)));
@@ -1109,6 +1112,25 @@ fn emit_return(self: *EmitAsm, sig: [] Prim) bool = {
     self.emit_stack_fixup();
     self.asm.push(ret(()));
     true
+}
+
+fn emit_intrinsic(self: *EmitAsm, op: Intrinsic, controling_type: Prim) void = {
+    @match(op) {
+        fn Add() => {
+            (snd, snd_offset) := self.pop_to_reg_with_offset();
+            (fst, fst_offset) := self.pop_to_reg_with_offset();
+            // TODO: do it now if offset < max(u6)
+            a: u5 = fst;
+            b: u5 = snd;
+            op := @bits(Bits.X64, 0b0001011, Shift.LSL, 0b0, a, 0b000000, b, a);
+            self.asm.push(op);
+            self.drop_reg(snd);
+            self.state.stack&.push(Increment = (reg = fst, offset_bytes = (snd_offset + fst_offset).zext()));
+        }
+        @default => {
+            @panic("ICE: unimplemented aarch64 intrinsic %", op);
+        };
+    };
 }
 
 fn reg(self: AsmVal) ?Ty(i64, u16) = {

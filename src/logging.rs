@@ -431,6 +431,7 @@ impl<'p> PoolLog<'p> for FuncImpl<'p> {
             FuncImpl::Merged(parts) => parts.iter().map(|p| p.log(pool)).collect(),
             FuncImpl::Empty => String::from("Unknown"),
             &FuncImpl::CSource(ir) => pool.get(ir).to_string(),
+            FuncImpl::Intrinsic(n) => format!("Intrinsic({n})"),
         }
     }
 }

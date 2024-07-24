@@ -1,3 +1,25 @@
+## Admiting intrinsics are special (Jul 24)
+
+The currently basic math like add is defined as just functions with inline assembly.
+Which i think is cool because it means you can click into operators and see what they do.
+It also forces making the inline asm language feature good because its tested for absolutly everything which is good.
+
+But its perhaps noteworthy that almost every real language doesn't do this, perhaps they know something I don't.
+
+- It makes a weird dependency so some of the inline asm stuff needs to make sure not to do anything fancy
+  because most stuff can't be compiled yet (which is why I need two versions of @bits).
+- It's got to be slower that i have to compile that stuff for every single program. Like its not that much work,
+  but if it were just already done it would be free.
+- If you break anything along that path its a nightmare to debug because you can't really make a minimal test case because there is no action you can perform.
+- I end up typing out a bunch of dumb strings (llvm ir for example, instead of just templating in the one operation).
+- It generates dumber code. My asm backend doesn't know you can add any registers other than x0 and x1.
+  It gives the llvm backend more work to inline it all probably, like its a super easy choice to inline the one add,
+  but surely it would be faster to have it already be done. I wonder if im wasting some optimisation juice on that.
+  I wonder if assembling the output of qbe is so slow because it wasn't expecting to resolve that many symbols,
+  and is tuned to most instructions actually being instructions, because otherwise i don't see how it could possibly be slower than llvm doing optimisations.
+
+## Playing with Qbe (Jul 23)
+
 - discovered one bug with llvm tests failing grouped but passing individual.
   when entry points get deduplicated, i don't make shims or call the deduplicated version.
   TODO. but also im pretty sure that was happening before too.

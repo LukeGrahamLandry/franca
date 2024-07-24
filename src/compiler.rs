@@ -212,15 +212,15 @@ impl<'a, 'p> Compile<'a, 'p> {
         match name {
             Flag::Type => {
                 assert!(target.is_raw_unit());
-                return Ok(type_macro(self, mem::take(arg)));
+                return Ok(type_macro(self, arg));
             }
             Flag::Struct => {
                 assert!(target.is_raw_unit());
-                return Ok(struct_macro(self, mem::take(arg)));
+                return Ok(struct_macro(self, arg));
             }
             Flag::Tagged => {
                 assert!(target.is_raw_unit());
-                return Ok(tagged_macro(self, mem::take(arg)));
+                return Ok(tagged_macro(self, arg));
             }
             Flag::Enum => {
                 assert!(!target.is_raw_unit(), "@enum type must be specified while bootstrapping.");
@@ -416,7 +416,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
 
         if self.program[f].cc.unwrap() != CallConv::Inline {
-            if let FuncImpl::Normal(_) = self.program[f].body {
+            if let FuncImpl::Normal(_) | FuncImpl::Intrinsic(_) = self.program[f].body {
                 unsafe {
                     self_hosted::emit_bc_and_aarch64(self, f, when).unwrap()
                 };
@@ -474,7 +474,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             let cc = self.wip_stack.pop();
             debug_assert_eq!(Some(wip), cc);
         }
-
        
         // assert!(self.callees_done(f));
         for c in &self.program[f].callees {
@@ -733,6 +732,18 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         // TODO: no clone. make errors recoverable. no mut_replace -- Apr 24
         let FuncImpl::Normal(mut body_expr) = self.program[f].body.clone() else {
+            if let Some(e) = self.program[f].get_tag_mut(Flag::Intrinsic) {
+                // TODO: require fn types like #asm
+                let e = unwrap2!(&mut e.args, "#intrinsic missing arg");
+                let e = mem::take(e);
+                let ty = self.program.pool.env.intrinsic_type.unwrap();
+                let intrinsic = self.immediate_eval_expr(e, ty)?;
+                let intrinsic: i64 = from_values(self.program, intrinsic)?;
+                self.program[f].body = FuncImpl::Intrinsic(intrinsic);
+                self.pop_state(state);
+                return Ok(self.program[f].finished_ret.unwrap());
+            }
+            
             err!("expected normal body",)
         };
 

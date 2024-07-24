@@ -686,6 +686,7 @@ pub enum FuncImpl<'p> {
     Merged(Vec<FuncImpl<'p>>),
     Empty,
     QbeIr(Ident<'p>),
+    Intrinsic(i64),
 }
 
 impl<'p> Func<'p> {
@@ -1032,7 +1033,9 @@ impl<'p> Program<'p> {
 
 impl<'p> Program<'p> {
     pub(crate) fn intern_type(&self, ty: TypeInfo<'p>) -> TypeId {
-        unsafe { self_hosted::intern_type(self.pool, ty) }
+        let i = unsafe { self_hosted::intern_type(self.pool, &ty) };
+        mem::forget(ty);
+        i
     }
 
     #[track_caller]
@@ -1349,6 +1352,7 @@ pub enum Flag {
     Late,
     Once,
     Qbe,
+    Intrinsic,
     _Reserved_Count_,
 }
 
