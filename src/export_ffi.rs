@@ -525,7 +525,7 @@ extern "C-unwind" fn tag_value<'p>(comp: &mut Compile<'_, 'p>, enum_ty: TypeId, 
             let index = hope(|| {
                 Ok(unwrap!(
                     index,
-                    "bad case name id={} {}. expected {:?}",
+                    "tagged type, bad case name id={} {}. expected {:?}",
                     name.0,
                     comp.program.pool.get(name),
                     cases.iter().map(|f| comp.program.pool.get(f.0)).collect::<Vec<_>>(),

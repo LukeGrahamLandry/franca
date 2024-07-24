@@ -17,6 +17,38 @@ But its perhaps noteworthy that almost every real language doesn't do this, perh
   but surely it would be faster to have it already be done. I wonder if im wasting some optimisation juice on that.
   I wonder if assembling the output of qbe is so slow because it wasn't expecting to resolve that many symbols,
   and is tuned to most instructions actually being instructions, because otherwise i don't see how it could possibly be slower than llvm doing optimisations.
+- I want to get rid of the @BITS vs @bits distinction, having a file that looks like user code but you actually can't edit without
+  careful thought about internal compiler implementation details. is a bit silly.
+
+So far converted int operations. Didn't make assembling much faster. Still worth it tho.
+Maybe im having this guy's problem and clang just sucks at being an assembler `https://github.com/llvm/llvm-project/issues/68445`.
+Older clang takes 1.5 seconds instead of 2 seconds which is interesting...
+i was hoping for actually gcc
+
+```
+$ gcc --version
+Apple clang version 14.0.3 (clang-1403.0.22.14.1)
+Target: arm64-apple-darwin22.2.0
+Thread model: posix
+InstalledDir: /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin
+$ clang --version
+Homebrew clang version 18.1.6
+Target: arm64-apple-darwin22.2.0
+Thread model: posix
+InstalledDir: /opt/homebrew/opt/llvm/bin
+```
+
+I also tried real gcc and thats 1.4 seconds
+
+```
+$ /opt/homebrew/Cellar/gcc/14.1.0_2/bin/gcc-14 --version
+gcc-14 (Homebrew GCC 14.1.0_2) 14.1.0
+Copyright (C) 2024 Free Software Foundation, Inc.
+This is free software; see the source for copying conditions.  There is NO
+warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+```
+
+So thats enough faster that it makes qbe just slightly faster than llvm.
 
 ## Playing with Qbe (Jul 23)
 

@@ -415,8 +415,45 @@ fn display(self: Ty(*EmitQbe, FuncId), out: *List(u8)) void = {
     self._0.fmt_fn_name(self._1, out)
 }
 
-fn inst_intrinsic(self: *EmitQbe, args: Slice(QbeVal), op: Intrinsic, controling_type: Prim) Slice(EmitQbe.Val) = {
-    panic("TODO: qbe inst_intrinsic")
+// TODO: are the float cmp ordered or unordered? 
+fn inst_intrinsic(self: *EmitQbe, args: Slice(QbeVal), op: Intrinsic, controlling_type: Prim) Slice(EmitQbe.Val) = {
+    bin :: fn(self: *EmitQbe, args: Slice(QbeVal), op: Str) Slice(EmitQbe.Val) = {
+        out := self.get_var(Prim.I64);
+        @fmt(self.out&.current(), "   % =% % %, %\n", out, Prim.I64.type_char_var(), op, args[0], args[1]);
+        a := temp().alloc(EmitQbe.Val, 1);
+        a.ptr[] = out;
+        a
+    };
+    bin_cmp :: fn(self: *EmitQbe, args: Slice(QbeVal), op: Str) Slice(EmitQbe.Val) = {
+        out := self.get_var(.I8);
+        @fmt(self.out&.current(), "   % =% % %, %\n", out, Prim.I8.type_char_var(), op, args[0], args[1]);
+        a := temp().alloc(EmitQbe.Val, 1);
+        a.ptr[] = out;
+        a
+    };
+
+    @match(op) {
+        fn Add() => self.bin(args, "add");
+        fn Sub() => self.bin(args, "sub");
+        fn Mul() => self.bin(args, "mul");
+        fn Div() => self.bin(args, "div");
+        fn Eq() => self.bin_cmp(args, "ceql");
+        fn Ne() => self.bin_cmp(args, "cnel");
+        fn Ge() => self.bin_cmp(args, "csgel");
+        fn Le() => self.bin_cmp(args, "cslel");
+        fn Gt() => self.bin_cmp(args, "csgtl");
+        fn Lt() => self.bin_cmp(args, "csltl");
+        // sketch aliasing because walk_bc is gonna copy the slice back onto itself but it seems to be fine. -- Jul 24  
+        fn IntToPtr() => args.slice(0, 1); // no-op 
+        fn PtrToInt() => args.slice(0, 1); // no-op
+        fn ShiftLeft()            => self.bin(args, "shl");
+        fn ShiftRightLogical()    => self.bin(args, "shr");
+        fn ShiftRightArithmetic() => self.bin(args, "sar");
+        fn BitOr()  => self.bin(args, "or");
+        fn BitAnd() => self.bin(args, "and");
+        fn BitXor() => self.bin(args, "xor");
+        @default => @panic("ICE: unhandled qbe inst_intrinsic");
+    }
 }
 
 fn inst_call(self: *EmitQbe, args: Slice(QbeVal), sig: PrimSig, f: FuncId, tail: bool) Slice(EmitQbe.Val) = {

@@ -425,7 +425,7 @@ fn emit_inst(self: *EmitAsm, b_idx: usize, inst: Bc, i: usize) bool #once = {
             return(f.tail);
         }
         fn Intrinsic(f) => {
-            self.emit_intrinsic(f.op, f.controlling_type);
+            self.inst_intrinsic(f.op, f.controlling_type);
         }
         fn Ret0()     => return(self.emit_return(empty()));
         fn Ret1(prim) => return(self.emit_return(@slice(prim)));
@@ -1114,19 +1114,50 @@ fn emit_return(self: *EmitAsm, sig: [] Prim) bool = {
     true
 }
 
-fn emit_intrinsic(self: *EmitAsm, op: Intrinsic, controling_type: Prim) void = {
+fn inst_intrinsic(self: *EmitAsm, op: Intrinsic, controling_type: Prim) void #once = {
+    // TODO: for add, include offset_bytes in the immediate if they fit or combine them and defer instead of doing 3 seperate adds.
+    bin :: fn($do: @Fn(a: u5, b: u5) void) void => {
+        snd: u5 = self.pop_to_reg();
+        fst: u5= self.pop_to_reg();
+        do(fst, snd);
+        self.drop_reg(snd);
+        self.state.stack&.push(Increment = (reg = fst, offset_bytes = 0));
+    };
+    // Note: could use better error message when you try to factor this into a '=' but keep 'bin' a '=>',
+    //       "missing value self" because 'bin' closes over the outer one, not the one you'd add as an argument to this function.
+    // TODO: allow mutiple callsites that are all tail of a '=>' function to only make one duplicate of it so there's less code bloat. 
+    //! IMPORTANT: cond is inverted because CSINC
+    bin_cmp :: fn(inv_cond: Cond) => bin(fn(a, b) => {
+        self.asm.push(cmp(Bits.X64, a, b));
+        self.asm.push(temp_cset(Bits.X64, a, inv_cond));
+    });
+    // because the other ones are @BITS
+    fn temp_cset(sf: Bits, dest: RegI, zero_when: Cond) u32 =
+        @bits(sf, 0b0011010100, 0b11111, zero_when, 0b01, 0b11111, dest);
+    fn temp_and_sr(sf: Bits, dest: RegO, a: RegI, b: RegI, shift: Shift, amount: u6) u32 =
+        @bits(sf, 0b0001010, shift, 0b0, a, amount, b, dest);
+    fn temp_orr(sf: Bits, dest: RegO, a: RegI, b: RegI, shift: Shift, amount: u6) u32 = // TODO: fix fn mov when this can be removed
+        @bits(sf, 0b0101010, shift, 0b0, a, amount, b, dest);
+    
     @match(op) {
-        fn Add() => {
-            (snd, snd_offset) := self.pop_to_reg_with_offset();
-            (fst, fst_offset) := self.pop_to_reg_with_offset();
-            // TODO: do it now if offset < max(u6)
-            a: u5 = fst;
-            b: u5 = snd;
-            op := @bits(Bits.X64, 0b0001011, Shift.LSL, 0b0, a, 0b000000, b, a);
-            self.asm.push(op);
-            self.drop_reg(snd);
-            self.state.stack&.push(Increment = (reg = fst, offset_bytes = (snd_offset + fst_offset).zext()));
-        }
+        fn Add() => bin(fn(a, b) => self.asm.push(@bits(Bits.X64, 0b0001011, Shift.LSL, 0b0, a, 0b000000, b, a)));
+        fn Sub() => bin(fn(a, b) => self.asm.push(sub_sr(Bits.X64, a, a, b, Shift.LSL, 0b000000)));
+        fn Mul() => bin(fn(a, b) => self.asm.push(madd(Bits.X64, a, a, b, 0b11111)));
+        fn Div() => bin(fn(a, b) => self.asm.push(@bits(Bits.X64, 0b0011010110, b, 0b000011, a, a)));
+        fn Eq() => bin_cmp(.NE);
+        fn Ne() => bin_cmp(.EQ);
+        fn Le() => bin_cmp(.GT);
+        fn Ge() => bin_cmp(.LT);
+        fn Lt() => bin_cmp(.GE);
+        fn Gt() => bin_cmp(.LE);
+        fn IntToPtr() => (); // no-op
+        fn PtrToInt() => (); // no-op
+        fn ShiftLeft()            => bin(fn(a, b) => self.asm.push(lslv(Bits.X64, a, a, b)));
+        fn ShiftRightLogical()    => bin(fn(a, b) => self.asm.push(lsrv(Bits.X64, a, a, b)));
+        fn ShiftRightArithmetic() => bin(fn(a, b) => self.asm.push(asrv(Bits.X64, a, a, b)));
+        fn BitOr() => bin(fn(a, b) => self.asm.push(temp_orr(Bits.X64, a, a, b, Shift.LSL, 0b000000)));
+        fn BitAnd() => bin(fn(a, b) => self.asm.push(temp_and_sr(Bits.X64, a, a, b, Shift.LSL, @as(u6) 0)));
+        fn BitXor() => bin(fn(a, b) => self.asm.push(eor(Bits.X64, a, a, b, Shift.LSL, @as(u6) 0)));
         @default => {
             @panic("ICE: unimplemented aarch64 intrinsic %", op);
         };

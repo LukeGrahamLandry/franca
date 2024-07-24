@@ -736,7 +736,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // TODO: require fn types like #asm
                 let e = unwrap2!(&mut e.args, "#intrinsic missing arg");
                 let e = mem::take(e);
-                let ty = self.program.pool.env.intrinsic_type.unwrap();
+                let ty = self.program.pool.env.intrinsic_type.expect("tried to use intrinsic_type before ready");
                 let intrinsic = self.immediate_eval_expr(e, ty)?;
                 let intrinsic: i64 = from_values(self.program, intrinsic)?;
                 self.program[f].body = FuncImpl::Intrinsic(intrinsic);

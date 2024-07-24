@@ -387,8 +387,52 @@ fn inst_call(self: *EmitLlvm, args: Slice(LlvmVal), sig: PrimSig, f: FuncId, tai
     }
 }
 
-fn inst_intrinsic(self: *EmitLlvm, args: Slice(LlvmVal), op: Intrinsic, controling_type: Prim) Slice(EmitLlvm.Val) = {
-    panic("TODO: LLVM inst_intrinsic")
+fn inst_intrinsic(self: *EmitLlvm, args: Slice(LlvmVal), op: Intrinsic, controlling_type: Prim) Slice(EmitLlvm.Val) = {
+    bin :: fn(self: *EmitLlvm, args: Slice(LlvmVal), op: Str) Slice(EmitLlvm.Val) = {
+        out := self.get_var(.I64);
+        @fmt(self.out&.current(), "   % = % %, %\n", out, op, args[0], args[1]);
+        a := temp().alloc(LlvmVal, 1);
+        a.ptr[] = out;
+        a
+    };
+    bin_cmp :: fn(self: *EmitLlvm, args: Slice(LlvmVal), op: Str) Slice(EmitLlvm.Val) = {
+        temp_bool := self.get_var(.I8);
+        out := self.get_var(.I8);
+        @fmt(self.out&.current(), "   % = % %, %\n", temp_bool, op, args[0], args[1]);
+        @fmt(self.out&.current(), "   % = zext i1 % to i8", out, temp_bool);
+        a := temp().alloc(LlvmVal, 1);
+        a.ptr[] = out;
+        a
+    };
+    cast :: fn(self: *EmitLlvm, args: Slice(LlvmVal), out: Prim, pre: Str, post: Str) Slice(EmitLlvm.Val) = {
+        out := self.get_var(out);
+        @fmt(self.out&.current(), "   % = % % %\n", out, pre, args[0], post);
+        a := temp().alloc(LlvmVal, 1);
+        a.ptr[] = out;
+        a
+    };
+    
+    @match(op) {
+        fn Add() => self.bin(args, "add i64");
+        fn Sub() => self.bin(args, "sub i64");
+        fn Mul() => self.bin(args, "mul i64");
+        fn Div() => self.bin(args, "sdiv i64");
+        fn Eq() => self.bin_cmp(args, "icmp eq i64");
+        fn Ne() => self.bin_cmp(args, "icmp ne i64");
+        fn Le() => self.bin_cmp(args, "icmp sle i64");
+        fn Ge() => self.bin_cmp(args, "icmp sge i64");
+        fn Lt() => self.bin_cmp(args, "icmp slt i64");
+        fn Gt() => self.bin_cmp(args, "icmp sgt i64");
+        fn PtrToInt() => self.cast(args, .I64, "ptrtoint ptr", "to i64"); 
+        fn IntToPtr() => self.cast(args, .P64, "inttoptr i64", "to ptr"); 
+        fn ShiftLeft()            => self.bin(args, "shl i64");
+        fn ShiftRightLogical()    => self.bin(args, "lshr i64");
+        fn ShiftRightArithmetic() => self.bin(args, "ashr i64");
+        fn BitOr()  => self.bin(args, "or i64");
+        fn BitAnd() => self.bin(args, "and i64");
+        fn BitXor() => self.bin(args, "xor i64");
+        @default => @panic("ICE: unhandled LLVM inst_intrinsic");
+    }
 }
 
 fn inst_call(self: *EmitLlvm, args: Slice(LlvmVal), sig: PrimSig, $do_call: @Fn() void) Slice(EmitLlvm.Val) = {
