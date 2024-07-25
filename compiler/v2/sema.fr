@@ -16,16 +16,50 @@ fn compile_stmt(self: *SelfHosted, stmt: *FatStmt) Maybe(void) = {
         fn Eval(expr) => return(self.compile_expr(expr, .None));
         fn DeclVar(f) => {
             assert(f.name.kind != .Const, "hit unhoisted constant");
-            return(@err("TODO: compile DeclVar stmt"))
+            return(self.decl_var(f.name, f.ty&, f.value&))
         }
         @default => panic("TODO: unhandled compile_stmt type");
     };
     unreachable_hack(Maybe(void))
 }
 
+fn decl_var(self: *SelfHosted, name: Var, ty: *LazyType, value: *FatExpr) Maybe(void) = {
+    @println("decl_var %", name&.log(self.pool)); // :debug
+    no_type := ty.is(.Infer);
+    assert(no_type.or(ty.is(.Finished)), "TODO: self.infer_types_progress(ty)?;");
+    self.last_loc = value.loc;
+    @check(self.compile_expr(value, ty.want())) return;
+    final_ty := value.ty;
+    @debug_assert(!final_ty.is_unknown(), "if we didn't yield, we should know the type");
+    if no_type {|
+        // Since there was no type annotation, we don't need a type check. Whatever we got is the type of this variable now. 
+        ty[] = (Finished = final_ty);
+    } else {|
+        expected_ty := ty.unwrap();
+        // TODO: :delay_layout
+        //       Instead of doing this now, add it as an Action in the dispatch loop.
+        //       We don't actually care about the field offsets yet, we just need them later for emitting bytecode. 
+        //       This was one of the changes that inspired the sema rewrite.  -- Jul 25
+        self.finish_layout_deep(expected_ty).unwrap();
+        self.finish_layout_deep(final_ty).unwrap();
+        // TODO: panic("TODO: self.type_check_arg(value, ty, \"var decl\")?;");
+    };
+
+    prev := self.scopes.get_var_type(name); 
+    self.scopes.put_var_type(name, final_ty); // TODO: this returns is_new, i want to just assert that. we shouldn't be compiling more than once -- Jul 25
+    // TODO: prev should always be none?? but its not a constant and seems to always be the same so its probablby not a super huge deal? -- Apr 23
+    //       maybe its just cause im not zeroing the stmt and end up compiling multiple times. -- Apr 25
+    @assert(prev.is_none().or(=> prev.unwrap() == final_ty));
+    
+    // TODO: :mark_stmt_done
+    //       this function is called multiple times (if the containing block needs to yield). need to have a done flag on the fatstmt
+    //       but thats easier to change once all the stuff is written in one language -- Jul 25
+    .Ok
+}
+
 fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(void) = {
     self.last_loc = expr.loc;
-    if(expr.done) {|
+    if expr.done {|
         assert(expr.ty != UnknownType, "done but unknown type");
         return(.Ok);
     };
@@ -241,7 +275,7 @@ fn find_const(self: *SelfHosted, name: Var, requested: ResultType) Maybe(Ty(Valu
     };
     
     var := self.scopes.get_constant(name);
-    var := var.unwrap();
+    var := var.expect("constant should always be known (even if its Poison)");
     
     // If we've compiled this before, great.
     //     We can't coerce_constant here because we don't have a unique expression node to stick changes into if needed. 
@@ -368,6 +402,7 @@ fn reach_sema(vtable: *ImportVTable) void = {
         builtin :: "this will never be evaluated";
         assert_eq :: @builtin("compiler_debug_assert_eq_i64");
         abc :: 123; 
+        a := 456;
         assert_eq(123, 123)
         //abc
     }""";
@@ -390,16 +425,10 @@ fn reach_sema(vtable: *ImportVTable) void = {
         @panic("Failed %", res.Err.msg);
     };
     
-    //res := c.compile_expr(e&, .None);
-    //if res&.is(.Err) {|
-    //    println("bad");
-    //    println(res.Err.msg);
-    //    panic(res.Err.msg);
-    //};
-    //
     @println("%", e.expr.Block.result.log(c.pool));
     
     val := c.immediate_eval_expr(e.expr.Block.result, i64);
+    println("are we ready?");
     val := val.unwrap();
     val := i64.assume_cast(val&)[];
     assert_eq(val, 123);

@@ -3,9 +3,6 @@
 // TODO: really need to fix this
 #redirect(Ty(i64, i64), bool) fn eq(a: ProgramEntry, b: ProgramEntry) bool;
 
-// Turn this on for profiling. 
-// TODO: make this a build option you pass to emit_llvm so you don't have to remember to turn this off when updating the boot blob to make it small. 
-RETAIN_FUNCTION_NAMES :: false;
 
 // TODO: traits
 /*
@@ -120,7 +117,7 @@ fn CodeGen($B: Type, $zone_name: TraceZone) Type = {
         constants := 0;
         range(0, gen.max_const_id + 1) {i|
             if gen.constants_needed&.get(i) {|
-                gen.backend&.emit_constant(comp, (id = i.trunc()));
+                gen.backend&.emit_constant((id = i.trunc()));
                 constants += 1;
             };
         };    
@@ -131,7 +128,6 @@ fn CodeGen($B: Type, $zone_name: TraceZone) Type = {
         gen.backend.out
     }
 
-    
     fn add_pending_callees(self: *Self, func: *Func) void = {
         for func.callees { c |
             if !self.funcs_done&.get(c.to_index().zext()) {|
@@ -191,11 +187,12 @@ fn CodeGen($B: Type, $zone_name: TraceZone) Type = {
                     self.stack&.push_all(ret);
                 });
                 (fn CallDirect(call) => { //  f, tail, sig
-                    self.pending&.push(call.f); // TODO: callees list from compiler should make this redundant but im afraid.
+                    f := self.program.follow_redirects(call.f); // HACK to fix redirects added by deduplication
+                    self.pending&.push(f); // TODO: callees list from compiler should make this redundant but im afraid.
                     
                     arg_count: i64 = call.sig&.arg_slots();
                     args := self.stack.items().slice_last(arg_count).expect("enough args on stack for call");
-                    ret := self.backend&.inst_call(args, call.sig, call.f, call.tail);
+                    ret := self.backend&.inst_call(args, call.sig, f, call.tail);
                     self.stack.len -= arg_count;
                     if(call.sig.no_return){|
                         self.backend&.inst_trap();
@@ -262,6 +259,7 @@ fn CodeGen($B: Type, $zone_name: TraceZone) Type = {
                     break();
                 });
                 (fn GetNativeFnPtr(f) => {
+                    f = self.program.follow_redirects(f);
                     self.pending&.push(f); // TODO: callees list from compiler should make this redundant but im afraid
                     v := self.backend&.inst_func_ref(f);
                     self.stack&.push(v);

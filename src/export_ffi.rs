@@ -195,7 +195,7 @@ pub struct ImportVTable {
     _intern_string: usize,
     _get_string: usize,
     _a: usize,
-    init_compiler: unsafe extern "C" fn(comptime_arch: TargetArch) -> *const Compile<'static, 'static>,
+    init_compiler: unsafe extern "C" fn(comptime_arch: TargetArch, build_options_ptr: usize) -> *const Compile<'static, 'static>,
     find_unqiue_func: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, name: Ident<'p>) -> BigOption<FuncId>,
     _get_fns_with_tag: usize,
     _b: i64, // todo: remove
@@ -320,12 +320,12 @@ unsafe extern "C" fn comptime_arch() -> (i64, i64) {
     (arch, os)
 }
 
-unsafe extern "C" fn franca_init_compiler(comptime_arch: TargetArch) -> *const Compile<'static, 'static> {
+unsafe extern "C" fn franca_init_compiler(comptime_arch: TargetArch, build_options_ptr: usize) -> *const Compile<'static, 'static> {
     if cfg!(not(target_arch = "aarch64")) && comptime_arch == TargetArch::Aarch64 {
         panic!("aarch64 jit is not supported on this architecture"); // TODO: return error instead.
     }
 
-    let program = Box::leak(Box::new(Program::new(comptime_arch)));
+    let program = Box::leak(Box::new(Program::new(comptime_arch, build_options_ptr)));
     let compiler = Box::leak(Box::new(Compile::new(program)));
     compiler as *const Compile
 }

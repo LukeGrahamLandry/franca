@@ -28,7 +28,6 @@ SelfHosted :: @struct(
     // TODO: just always use .Aot and make this a set?
     saved_bytecodes: HashMap(*FnBody, ExecStyle),
     free_bytecodes: List(*FnBody),
-    do_bytecode_deduplication: bool = true,
     types: BucketArray(TypeInfo),
     // TODO: decide if these are generally accessed at the same time so should be stored together.
     // TODO: have a OptionalBucketArray that stores a bit set at the beginning of each bucket? 
@@ -43,8 +42,6 @@ SelfHosted :: @struct(
 :: AutoEq(Ty(Type, u16, bool, bool));
 
 PRes :: Result(void, ParseErr);
-
-DO_FUNCTION_DEDUPLICAITON :: @static(bool) true;
 
 fn self_hosted_main(vtable: *ImportVTable) void #compiler #no_trace = {
     :: by_the_way_you_are_compiling_the_compiler_right_now_just_a_helpful_hint();
@@ -81,12 +78,6 @@ fn self_hosted_main(vtable: *ImportVTable) void #compiler #no_trace = {
         }, => panic("argument '-lsp' not supported by this build of the compiler"));
     };
     
-    for args { extra |
-        if extra.str() == "-no-deduplication" {|
-            DO_FUNCTION_DEDUPLICAITON[] = false;
-        };
-    };
-    
     if filename == "-testv2" {|
         @if(INCLUDE_NEW_SEMA, => {
             println("Test!");
@@ -109,7 +100,7 @@ fn load_file_in_compiler(vtable: *ImportVTable, path: Str) CRes(CompCtx) = {
     source: List(u8) = "#include_std(\"lib/core.fr\"); ".clone(libc_allocator);  // TODO: column number on error on first line will be wrong but i dont care. 
     source&.read_and_push(path);  // TODO: error handling
     
-    comp := {vtable.init_compiler}(.Aarch64); // TODO: comptime get the current arch
+    comp := {vtable.init_compiler}(.Aarch64, default_build_options()); // TODO: comptime get the current arch
     c := vtable.with(comp);
     file := {c.vtable.add_file}(c.data, path, source.items());
     self := c.data.cast();
@@ -238,7 +229,7 @@ fn pop_until_endswith(self: *List(u8), suffix: []u8) bool = {
 }
 
 // TODO: pass requested type through generic args so this isn't so clunky. -- Jun 23
-fn init_self_hosted() *SelfHosted #compiler = {
+fn init_self_hosted(build_options: *BuildOptions) *SelfHosted #compiler = {
     a: ArenaAlloc = init(page_allocator, 1.shift_left(23));
     arena := a&.borrow().boxed(ArenaAlloc, a);
     a := arena.borrow();
@@ -265,9 +256,6 @@ fn init_self_hosted() *SelfHosted #compiler = {
         custom_bake_constant = init(a),
     );
     b := a.boxed(Baked, b);
-    
-    build_options: BuildOptions = (_hack = 0);
-    build_options := a.boxed(BuildOptions, build_options);
     
     // Sadly this can't use default fields, I think because it loads too early. 
     env: ComptimeEnvironment = (
@@ -296,7 +284,6 @@ fn init_self_hosted() *SelfHosted #compiler = {
         bytecodes = init(10, a),
         saved_bytecodes = init(a),
         free_bytecodes = list(a),
-        do_bytecode_deduplication = DO_FUNCTION_DEDUPLICAITON[],
         types = init(10, a),
         type_extra = init(10, a), 
         type_lookup = init(a),

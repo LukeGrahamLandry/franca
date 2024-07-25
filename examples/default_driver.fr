@@ -1,0 +1,207 @@
+//! For large programs, you'll probably want to write your own driver to have more control, 
+//! and to ensure that all information required to build your program is contained in the code of your program
+//! (rather than in a seperate mass of shell scripts or whatever). 
+//! However, for smaller programs where you just want to try something out, 
+//! its a pain to have to write an extra program just to build it, so you can use this one instead. 
+
+// - TODO: get clang path from env instead of hardcoding one. (make run_cmd_blocking api less dumb). 
+// - TODO: make llvm main function return 0 at the end so it doesn't make my terminal red. 
+// - TODO: think about how to make cli args less painful cause if you run a jit thing, it gets all the args for the driver too,
+//         and it seems kinda annoying to make you deal with that in every program. 
+// - TODO: -S -o -O
+// - TODO: declaritive way to add libraries. 
+// - TODO: rename this? its not the default really. its not what the compiler uses to load your driver program for example. 
+// - TODO: factor out the arg parsing into a struct so its a nicer copy paste 
+//         and then can think about if its a good idea to use reflection for that. 
+
+forever :: todo_allocator;
+fn driver(vtable: *ImportVTable) void = {
+    use_v2 := false;
+    jit := true;
+    llvm := false;
+    qbe := false;
+    keep_names := false;
+    deduplicate := true;
+    
+    args := cli_args();
+    args := args.slice(1, args.len); // skip exe
+    extra_args: List(Str) = list(forever);
+    for args { arg |
+        arg := arg.str();
+        
+        @switch(arg) {
+            @case("-v2") => { 
+                use_v2 = true;
+            };
+            @case("-aot=llvm") => {
+                jit = false; llvm = true;
+                assert(!qbe, "choose one backend");
+            };
+            @case("-aot=qbe") => {
+                jit = false; qbe = true;
+                assert(!llvm, "choose one backend");
+            };
+            @case("-keep-names") => {
+                keep_names = true;
+            };
+            @case("-no-deduplication") => {
+                deduplicate = false;
+            };
+            @default => {
+                extra_args&.push(arg);
+            };
+        };
+    };
+    
+    build_options := default_build_options();
+    build_options.retain_function_names = keep_names;
+    build_options.deduplicate_bytecode = deduplicate;
+    
+    choose_action :: "pass cli argument ['build', 'run', 'test'] and then the path to a '.fr' source file.";
+    usage_msg :: "USAGE: franca examples/default_driver.fr % [filepath.fr]\n       %";
+    assert(!extra_args.is_empty(), choose_action);
+    enumerate extra_args { i, arg |
+        args_after_action := extra_args.items().slice(i, extra_args.len);
+        file := find_first_fr_file(args_after_action);
+        @switch(arg[]) {
+            @case("build") => {
+                if(file == "", => @panic(usage_msg, "build", "creates an executable that runs 'main'"));
+                c := load_file(file, vtable, build_options);
+                fid := c.get_unique_named("main");
+                fid := fid.expect("did not find exactly one function called 'main'");
+                if jit {|
+                    println("Compiled successfully but selected jit backend so no artifact was produced.");
+                } else {|
+                    assert(llvm, "Not Yet Implemented: build main with -aot=qbe");
+                    c.compile_with_llvm(fid, .ExportWithNames);
+                    println("[built a.out]");
+                };
+                exit(0);
+            };
+            @case("run") => {
+                if(file == "", => @panic(usage_msg, "run", "runs the function called 'main'"));
+                c := load_file(file, vtable, build_options);
+                fid := c.get_unique_named("main");
+                fid := fid.expect("did not find exactly one function called 'main'");
+                
+                if jit {|
+                    ptr := c.get_jitted(fid);
+                    f := assume_types_fn(Arg = void, Ret = void, ptr = ptr);
+                    // TODO: how to pass cli args
+                    f();
+                } else {|
+                    if llvm {|
+                        c.compile_with_llvm(fid, .ExportWithNames);
+                    } else {|
+                        assert(qbe, "rn only two backends. update me as needed!");
+                        c.compile_with_qbe(fid, .ExportWithNames);
+                    };
+                    child_args := find_args_after_double_dash(args_after_action);
+                    run_cmd_blocking("a.out", child_args);
+                };
+                exit(0);
+            };
+            @case("test") => {
+                if(file == "", => @panic(usage_msg, "test", "runs all functions marked '#test'"));
+                c := load_file(file, vtable, build_options);
+                
+                tests := c.get_tagged("test");
+                for tests { fid |
+                    if jit {|
+                        ptr := c.get_jitted(fid);
+                        f := assume_types_fn(Arg = void, Ret = void, ptr = ptr);
+                        @eprintln("[run %]", c.get_string(c.get_function_name(fid)));
+                        f();
+                    } else {|
+                        assert(llvm, "Not Yet Implemented: run test with -aot=qbe");
+                        c.compile_with_llvm(fid, .TestRunnerMain);
+                        child_args := find_args_after_double_dash(args_after_action);
+                        @eprintln("[run %]", c.get_string(c.get_function_name(fid)));
+                        run_cmd_blocking("a.out", empty());
+                    };
+                };
+                // TODO: do the fork stuff to report all even when some fail. 
+                @eprintln("[Passed %/% tests]", tests.len, tests.len);
+                exit(0);
+            };
+            @default => ();
+        };
+    };
+    panic(choose_action);
+}
+
+fn compile_with_llvm(c: CompCtx, fid: FuncId, entry: ProgramEntry) void = {
+    ir_text := {c.vtable.emit_llvm}(c, temp(), @slice (fid), entry);
+    out := open_temp_file();
+    for ir_text& { bucket |
+        out.fd&.write(bucket);
+    };
+    args := @slice ("-x", "ir", out&.s_name(), "-o", "a.out", "-Os");    
+    @eprintln("[run clang] %", args);
+    success := run_cmd_blocking(CLANG_PATH, args);
+    assert(success, "clang failed");
+    out.remove(); // TODO: defer 
+}
+
+QBE_PATH :: "/Users/luke/Documents/mods/infered/bindings/qbe/qbe";
+fn compile_with_qbe(c: CompCtx, fid: FuncId, entry: ProgramEntry) void = {
+    ir_text := {c.vtable.emit_qbe}(c, temp(), @slice(fid), entry);
+    // TODO: clean up this hack for inline asm
+    ::?List(u8);
+    inline_asm_functions := ir_text&.pop_current_bucket().unwrap();
+    
+    ir_out := open_temp_file();
+    for(ir_text&){bucket|
+        ir_out.fd&.write(bucket).unwrap();
+    };
+    
+    asm_out :: "target/franca_qbe_temp.s"; // TODO: the version of tmp file that lets you have an extension because it wants the .s
+    
+    args: List(Str) = list(temp());
+    args&.push("-o");
+    args&.push(asm_out);
+    args&.push(ir_out&.s_name());
+    success := run_cmd_blocking(QBE_PATH, args.items());
+    
+    // TODO: it would be easier if i could use exec_and_catch but it hangs forever waiting on a few tests???
+    append_to_file(asm_out, inline_asm_functions.items());
+
+    args: List(Str) = list(temp());
+    args&.clear();
+    args&.push(asm_out);
+    args&.push("-o");
+    args&.push("a.out");
+    ASSEMBLER_PATH :: "/usr/bin/gcc"; // this isn't actually gcc for me, its an older clang but its 25% faster
+    println("Run assembler");
+    success := run_cmd_blocking(CLANG_PATH, args.items()); 
+    assert(success, "as failed");
+    ir_out.remove();   
+}
+
+fn load_file(path: Str, vtable: *ImportVTable, build_options: *BuildOptions) CompCtx = {
+    the_code := temp().read_to_string(path);
+    src := "#include_std(\"lib/core.fr\");".clone(forever);
+    src&.push_all(the_code.items());
+    comp := vtable.new_with_src(src.items(), build_options);
+    // TODO: libs
+    vtable.with(comp)
+}
+
+fn find_first_fr_file(args: []Str) Str = {
+    for args { arg | 
+        // TODO: caring about the file extension is so stupid. 
+        if arg.ends_with(".fr") {|
+            return(arg);
+        };
+    };
+    ""
+}
+
+fn find_args_after_double_dash(args: []Str) []Str = {
+    enumerate args { i, arg | 
+        if arg[] == "--" {|
+            return(args.slice(i, args.len));
+        }; 
+    };
+    empty()
+}

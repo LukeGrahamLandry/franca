@@ -1,3 +1,12 @@
+## (Jul 25)
+
+- ask the compiler which safety checks are enabled. i have some bug with order of compilatio nwhen disabling debug_assertions on the compiler.
+- finished porting bloat.fr from size.py
+- fixed fork_and_catch to poll the pipes so it doens't block on big outputs.
+- discovered how fast you clear the pipe is the main thing that determains how long it takes to disassemble.
+  bloat.fr running objdump on the compiler takes 430ms jitted and 230ms llvm-Os.
+- wrote a generic example driver program so its easier to just run random programs with different backends.
+
 ## Admiting intrinsics are special (Jul 24)
 
 The currently basic math like add is defined as just functions with inline assembly.

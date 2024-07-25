@@ -895,8 +895,8 @@ pub struct IntTypeInfo {
 }
 
 impl<'p> Program<'p> {
-    pub(crate) fn new(_comptime_arch: TargetArch) -> Self {
-        let pool = Box::leak(unsafe { init_self_hosted() });
+    pub(crate) fn new(_comptime_arch: TargetArch, build_options_ptr: usize) -> Self {
+        let pool = Box::leak(unsafe { init_self_hosted(build_options_ptr) });
         pool.vtable = addr_of!(IMPORT_VTABLE);
 
         Self {

@@ -12,7 +12,20 @@ fn load_src(vtable: *ImportVTable) Ty(CompCtx, *ComptimeLibs) = {
     @fmt(src&, ";ENABLE_LSP   :: %;\n", ENABLE_LSP);
     @fmt(src&, ";ENABLE_QBE_BACKEND :: %;\n", ENABLE_QBE_BACKEND);
     
-    comp := vtable.new_with_src(src.items(), .Aarch64);
+    opts := default_build_options();
+    opts.deduplicate_bytecode = true;
+    opts.retain_function_names = false;
+    args := cli_args();
+    for args { extra |
+        if extra.str() == "-no-deduplication" {|
+            opts.deduplicate_bytecode = false;
+        };
+        if extra.str() == "-keep-names" {|
+            opts.retain_function_names = true;
+        };
+    };
+    
+    comp := vtable.new_with_src(src.items(), opts);
     c := vtable.with(comp);
     
     libs := c.empty_libs();
@@ -41,10 +54,14 @@ fn driver(vtable: *ImportVTable) void = {
     (c, libs) := load_src(vtable);
     
     do_build := true;
+    do_replace := false;
     args := cli_args();
     for args { arg |
         if arg.str() == "-no-build" {|
             do_build = false;
+        };
+        if arg.str() == "-replace-compiler" {|
+            do_replace = true;
         };
     };
     
@@ -160,9 +177,13 @@ fn driver(vtable: *ImportVTable) void = {
         //       i suspect im linking in the whole rust std or something? 
         args := libs.get_aot_objects();
         // TODO: should output then move cause i think it deletes if it fails. and save the old one for a bit cause its scary. 
-        if REPLACE_COMPILER {|
-            args&.push_all(@slice("target/release/libfranca.a", "target/franca/libfranca.o", "-o", "target/release/franca", "-g"));
+        if do_replace {|
+            compiler_exe_path := "target/release/franca";
+            save_temp_file := open_temp_file();
+            rename(compiler_exe_path.maybe_borrow_cstr(temp()), save_temp_file&.c_name());
+            args&.push_all(@slice("target/release/libfranca.a", "target/franca/libfranca.o", "-o", compiler_exe_path, "-g"));
             run_cmd_blocking(CLANG_PATH, args.items()).assert("link failed");
+            @println("Replaced your compiler at '%' with the new one. \nThe old one was saved at '%' (NOTE: THATS A TEMP FILE!)", compiler_exe_path, save_temp_file&.s_name());
         } else {|
             println("SKIPPED REPLACING COMPILER");
         };

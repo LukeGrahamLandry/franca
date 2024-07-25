@@ -65,7 +65,7 @@ use crate::export_ffi::BigResult;
 #[allow(improper_ctypes)]
 #[link(name = "franca")]
 extern "C" {
-    pub(crate) fn init_self_hosted<'p>() -> Box<SelfHosted<'p>>;
+    pub(crate) fn init_self_hosted<'p>(build_options_ptr: usize) -> Box<SelfHosted<'p>>;
     fn insert_owned<'p>(s: *mut (), s: &[u8]) -> Ident<'p>;
     fn get<'p>(s: *mut (), s: Ident<'p>) -> &'p [u8];
     fn get_c_str(s: *mut (), s: Ident) -> *const u8;
