@@ -73,11 +73,13 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
         // TODO: when safety checks are on don't do the default branch even for garbage tag.
         //       in fast mode tho make that UB.  -- Jul 9
         @[{
-            body: FatExpr = @{ 
+            // If there's no @default, this is hit by invalid tags. 
+            // TODO: when enabled just used @safety? so the message isn't different when you have a @default branch. 
+            body: FatExpr = if(safety_check_enabled(.InvalidTag), => @{ 
                 // TODO: make this a build option / safety check. all could have None/Abort/Panic/Verbose
                 @println("tag=%, expected 0..<%", tag_val, @[@literal varients.len]);
                 panic("matched on invalid tag! Uninitialized memory?") 
-            }; 
+            }, => @{ unreachable() }); // TODO: tell llvm unreachable_unchecked when the safety check is off?
             count := 0;
             i := stmts.len.sub(1);
             first := true;
@@ -144,7 +146,15 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
                         action := branch.target[];
                         assert(name.eq(@symbol default), "unhandled prefix in @match");
                         assert(first, "@default must be the last handler in @match");
-                        body = @{ @[action]() };
+                        // Note: we throw away the starting body
+                        if safety_check_enabled(.InvalidTag) {|
+                            body = @{ 
+                                @safety(.InvalidTag) tag_val < @[@literal varients.len];
+                                @[action]() 
+                            };
+                        } else {|
+                            body = @{ @[action]() };
+                        };
                         had_default = true;
                     };
                     stmt.stmt = .Noop;
@@ -211,7 +221,15 @@ fn match_on_enum(arg: FatExpr, info: TypeInfo, stmts: [] FatStmt) FatExpr = {
                         action := branch.target[];
                         assert(name.eq(@symbol default), "unhandled prefix in @match");
                         assert(first, "@default must be the last handler in @match");
-                        body = @{ @[action]() };
+                        // Note: we throw away the starting body
+                        if safety_check_enabled(.InvalidTag) {|
+                            body = @{ 
+                                @safety(.InvalidTag) tag_val < @[@literal varients.len];
+                                @[action]() 
+                            };
+                        } else {|
+                            body = @{ @[action]() };
+                        };
                         had_default = true;
                     };
                     stmt.stmt = .Noop;
@@ -703,20 +721,10 @@ later in that scope it won't even be an error that you can't call true with a tr
 fn safety(kind: FatExpr, code: FatExpr) FatExpr #macro = {
     kind := (const_eval(SafetyCheck))(kind);
     if safety_check_enabled(kind) {|
-        code = compile_ast(code);
-        if code.ty == bool {|
-            @{ if(!@[code], => safety_check_failed()) }
-        } else {|
-            if(code.ty != void, => compile_error("@safety expected bool or void second argument", code.loc));
-            code
-        }
+        @{ if(!@[code], => safety_check_failed()) }
     } else {|
         @literal unit
     }
-}
-
-fn safety_check_enabled(check: SafetyCheck) bool = {
-    true
 }
 
 // TODO: its sad that it makes the compiler binary ~5% smaller to manually out-line this instead of just calling assert. should work on that. -- Jul 5

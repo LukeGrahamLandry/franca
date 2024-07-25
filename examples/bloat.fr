@@ -1,0 +1,117 @@
+// TODO: fix to work on .a files 
+
+fn main() void = {
+    args := cli_args();
+    if args.len < 2 {|
+        println("First arg should be path to executable.");
+        exit(1);
+    };
+    println("Running objdump...");
+    dump := timestamp();
+    OBJ_DUMP_PATH :: "/usr/bin/objdump"; // TODO: nice api to look it up in env -- Jul 24
+    file := args.last();
+    // TODO: this hangs if its too big because i don't loop when reading its output! -- Jul 24
+    (ok, out, err) := exec_and_catch(OBJ_DUMP_PATH, @slice ("-d", file.unwrap()[].str()), temp()); 
+    @assert(ok, "Objdump failed. % %", out.items(), err.items());
+    output := out.items();
+    println("Parsing...");
+    parse := timestamp();
+    FuncEntry :: @struct(name: Str, size: i64);
+    results: List(FuncEntry) = list(temp());
+    lines := output.splitlines(temp());
+    i := 0;
+    total := 0;
+    while => i < lines.len - 1 {|
+        continue :: local_return;
+        line := lines[i];
+        //if (!line.ends_with(">:")).or(=> line.contains("...")) {| // TODO: compiler bug or do i have brain damage?? -- Jul 24
+        if line.ends_with(">:").not().or(=> line.contains("...")) {|
+            i += 1;
+            continue();
+        };
+        
+        fn parse_hex(s: Str) i64 = {
+            value := 0;
+            for s {c|
+                value *= 16;
+                value += hex_digit(c);
+            };
+            value
+        }
+    
+        parts := line.split(" ", temp());
+        start_addr := parse_hex(parts[0]);
+        // objective-c message passing calls have spaces in them.
+        name_start := parts[0].len + 2;
+        name := line.slice(name_start, line.len - 2);
+        if name.starts_with("-") {|
+            name = name.slice(1, name.len);
+        };
+    
+        prev_line := "";
+        // This gets you to the last line of the function.
+        while => line.len != 0 && i < lines.len - 1 && !line.contains("...") {|
+            prev_line = line;
+            i += 1;
+            line = lines[i];
+        };
+    
+        // Want to count to the end of the last instruction, not the start of it.
+        // Instructions are 4 bytes.
+        parts = prev_line.split(":", temp());
+        end_addr := parse_hex(parts[0]) + 4;
+    
+        // If that wasn't the last function, get to first line of next function.
+        // Don't need to do this because I know the instrction length. TODO: remove
+        if i < lines.len - 1 {|
+            while => line.len.eq(0).or(=> line.starts_with("Disassembly")).or(=> line.contains("...")) {|
+                i += 1;
+                line = lines[i];
+            };
+            parts = line.split(" ", temp());
+            real_end_addr := parse_hex(parts[0]);
+            if end_addr != real_end_addr {|
+                // This has never happened to me.
+                @println("Guess was wrong. % vs %", end_addr, real_end_addr);
+            };
+            end_addr = real_end_addr;
+    
+            // Next loop iter needs to read that function again.
+            i -= 1;
+        };
+    
+        size := end_addr - start_addr;
+        results&.push((name = name, size = size));
+        i += 1;
+        total += size;
+    };
+    
+    T :: FuncEntry;
+    fn key(t: T) i64 #inline = t.size;
+    fn quicksort(self: []T) void = {
+        if(self.len <= 1, => return());
+        
+        pivot := self[self.len - 1].key();
+        s := 0;
+        range(0, self.len - 1) { i | 
+            if self[i].key() <= pivot {|
+                self.swap(i, s);
+                s += 1;
+            };
+        };
+        self.swap(self.len - 1, s);
+        
+        quicksort(self.slice(0, s));
+        quicksort(self.slice(s, self.len));
+    }
+    
+    results.items().quicksort();
+    for results { func |
+        @println("%: %", func.size, func.name);
+    };
+    
+    done := timestamp();
+    println("=======");
+    @println("TOTAL: % bytes.", total);
+    @println("Objdump: %ms. Processing: %ms", parse - dump, done - parse);
+}

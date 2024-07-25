@@ -131,6 +131,7 @@ fn exec_and_catch(path: Str, args: Slice(Str), alloc: Alloc) Ty(bool, List(u8), 
     }
 }
 
+// TODO: move this to sys/process.fr
 fn fork_and_catch(alloc: Alloc, $f: @Fn() void) Ty(bool, List(u8), List(u8)) = {
     out := Array(Fd, 2).zeroed();
     err := Array(Fd, 2).zeroed();
@@ -143,31 +144,55 @@ fn fork_and_catch(alloc: Alloc, $f: @Fn() void) Ty(bool, List(u8), List(u8)) = {
         dup2(out&[1], STD_OUT);
         dup2(err&[1], STD_ERR);
         
-        // need to make sure there's something on both pipes or it blocks?
-        println(" ");
-        eprintln(" ");
-        
         f();
         exit(0);
     };
     
-    read_all :: fn(fd: Fd) List(u8) => {
-        buf: List(u8) = list(99999, alloc);
-        len := read(fd, buf.maybe_uninit.ptr, buf.maybe_uninit.len).unwrap();
-        buf.len = len;
-        buf
-    };
-
-    status := 0.intcast();
-    waitpid(pid, status&, 0.intcast());
-
-    // TODO: how big is the pipe's buffer?
-    outs := read_all(out&[0]);
-    errs := read_all(err&[0]);
-    close(out&[0]);
-    close(err&[0]);
-
-    (status.eq(0.intcast()), outs, errs)
+    // TODO: manual outlining like people do in rust is kinda annoying.
+    //       but also mine is extra dumb because i still copy and recompile this for every const argument of the outer function,
+    //       and rely on deduplicating to fix it.
+    fn collect_output(alloc: Alloc, out: Fd, err: Fd, pid: i32) Ty(bool, List(u8), List(u8)) = {
+        base_buffer_size := 65536;
+        // TODO: make base buffer size a default argument
+        outs: List(u8) = list(base_buffer_size, alloc);
+        errs: List(u8) = list(base_buffer_size, alloc);
+        
+        flag: u16 = (@as(i64) PollEvents.In).trunc();
+        o: PollFds = (fd = out, events = flag, revents = 0);
+        e: PollFds = (fd = err, events = flag, revents = 0);
+        poll_data: Array(PollFds, 2) = init(@slice(o, e));
+        poll_data := poll_data&.items();
+        
+        // If the output of the forked thing were small it would be good enough to just allocate a big buffer and read it all into it after waiting with hang.
+        // but i think if it fills the pipe it hangs forever cause you cant read to clear the pipe because you're blocking until the process ends,
+        // and its blocking until theres room to write more in the pipe. 
+        status := 0.intcast();
+        dowhile() {()bool|
+        
+            fn read_some(buf: *List(u8), f: PollFds) void = {
+                c := (@as(i64) f.revents.zext()).bit_and(@as(i64) PollEvents.In) != 0;
+                if c {|
+                    len := read(f.fd, buf.maybe_uninit.ptr.offset(buf.len), buf.maybe_uninit.len - buf.len).unwrap();
+                    buf.len += len;
+                    if buf.len == buf.maybe_uninit.len {|
+                        buf.reserve(1024);
+                        read_some(buf, f);
+                    };
+                };
+            };
+    
+            usleep(1000);
+            was_done := waitpid(pid, status&, @as(i64) WaitPidOptions.NoHang);
+            can_read := poll(poll_data, 0).unwrap();
+            read_some(outs&, poll_data[0]);
+            read_some(errs&, poll_data[1]);
+            was_done == 0
+        };
+        close(out);
+        close(err);
+        (status.eq(0.intcast()), outs, errs)
+    }
+    collect_output(alloc, out&[0], err&[0], pid)
 }
 
 fn render_callgraph(comp: CompCtx, entry_points: Slice(FuncId), out_a: Alloc) List(u8) = {

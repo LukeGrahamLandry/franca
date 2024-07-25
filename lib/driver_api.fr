@@ -50,6 +50,7 @@ ImportVTable :: @rec @struct(
     get_compiler_builtins_source: @FnPtr() Str,
     _i: usize,
     emit_llvm: @FnPtr(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId), entry: ProgramEntry) BucketArray(u8),
+    // TODO: HACK: last bucket is inline assembly 
     emit_qbe: @FnPtr(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId), entry: ProgramEntry) BucketArray(u8),
     _g: usize,
     _h: usize,
@@ -91,26 +92,31 @@ ComptimeEnvironment :: @struct(
     build_options: rawptr,
 );
 
+// Note: changing these default values requires rebuilding the compiler! (an extra time if the program you're interested in is the compiler).
 BuildOptions :: @struct(
     // false for smaller binary, true for better debugging. 
     // Without this, we put the `private` modifer on functions so they can be removed if all uses are inlined. 
     // With this, we also include the source string name of the function (instead of just the id), but the names are still unstable!
     // For exports you want to refer to by name, use the ProgramEntry option. 
-    llvm_retain_function_names: bool = false,
-    safety_checks: EnumMap(SafetyCheck, bool) = init(true),
+    retain_function_names: bool = false,
+    // TODO: compilation order bug with disabling debug assertions -- Jul 24
+    safety_checks: EnumMap(SafetyCheck, bool) = (data = init(@slice(SAFE_MODE, true, SAFE_MODE, SAFE_MODE))),
+    _hack: i64,
 );
+
+SAFE_MODE :: true; // TODO: default driver program with this as a cli argument 
 
 SafetyCheck :: @enum(i64) (
     Bounds,
-    DebugAssertions,
+    DebugAssertions, // TODO: i cant disable DebugAssertions because i have some compilation order bug. hopefully can fix with sema rewrite. -- Jul 24
     // - `index` should not change the length of a collection. 
-    NonCompliantOverload,
+    NonCompliantOverload, // TODO: decide if i want to do this... currently UNUSED
+    InvalidTag, // @match on @tagged or @enum
 );
 
 // TODO: expose id
 fn symbol_from_id(id: u32) Symbol #unsafe_noop_cast;
 fn id(self: Symbol) u32 #unsafe_noop_cast;
-
 
 // An interned string blessed by the compiler.
 // This is the type of identifiers in source files.
