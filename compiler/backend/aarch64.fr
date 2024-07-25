@@ -7,13 +7,14 @@
 //       im not sure if its worth reworking that to give you hooks to shuffle between registers and stack slots as needed.  
 //          -- Jul 15
 //
+// TODO: be able to load directly into a float register
 
 // TODO: put all these config options somewhere consistant.
 ZERO_DROPPED_REG :: false;
 ZERO_DROPPED_SLOTS :: false;
 TRACE_ASM :: false;
 TRACE_CALLS :: false; 
-USE_LLVM_DIS :: false;
+USE_LLVM_DIS :: true;
 
 // This should always be true. Otherwise you're doing a call for every add, mul, etc. 
 DO_BASIC_ASM_INLINE :: true;
@@ -34,7 +35,6 @@ MEM_64: i64 : 0b11;
 MEM_32: i64 : 0b10;
 MEM_16: i64 : 0b01;
 MEM_08: i64 : 0b00;
-
 
 fn ne(a: FuncId, b: FuncId) bool #redirect(Ty(u32, u32), bool);
 
@@ -108,11 +108,12 @@ SpSlot :: @struct(at: SpOffset, size: u16, clock: u16);
 BlockState :: @struct(
     stack: List(AsmVal),
     free_reg: List(i64),
+    free_reg_float: List(i64),
     open_slots: List(SpSlot),
 );
 
 fn clone(self: *BlockState) BlockState = {
-    (stack = self.stack&.clone(), free_reg = self.free_reg&.clone(), open_slots = self.open_slots&.clone())
+    (stack = self.stack&.clone(), free_reg = self.free_reg&.clone(), free_reg_float = self.free_reg_float&.clone(), open_slots = self.open_slots&.clone())
 }
 
 fn new(compile: CompilerRs, when: ExecStyle, body: *FnBody, f: FuncId) EmitAsm #once = {
@@ -124,7 +125,7 @@ fn new(compile: CompilerRs, when: ExecStyle, body: *FnBody, f: FuncId) EmitAsm #
         f = f,
         when = when,
         release_stack = list(temp()),
-        state = (stack = list(temp()), free_reg = list(temp()), open_slots = list(temp())),
+        state = (stack = list(temp()), free_reg = list(temp()), free_reg_float = list(temp()), open_slots = list(temp())),
         block_ips = list(temp()),
         clock = 0,
         markers = list(temp()),
@@ -225,18 +226,19 @@ fn bc_to_asm(self: *EmitAsm, f: FuncId) void #once = {
     // The code expects arguments on the virtual stack (the first thing it does might be save them to variables but that's not my problem).
 
     sig := self.body.signeture;
-    int_count: i64 = sig.arg_int_count.zext();
-
     if sig.first_arg_is_indirect_return {|
         self.state.stack&.push(Increment = (reg = 8, offset_bytes = 0));
     };
 
     // TODO: assert int_count <= 8 && float_count <= 8 or impl pass on stack.
-    self.ccall_reg_to_stack(sig.args);
+    (int_count, float_count) := self.ccall_reg_to_stack(sig.args);
 
     // Any registers not containing args can be used.
     range(int_count, 8) { i |
         self.state.free_reg&.push(i);
+    };
+    range(float_count, 8) { i |
+        self.state.free_reg_float&.push(i);
     };
     // debug_assert_eq!(self.state.stack.len() as u16, sig.arg_slots);
 
@@ -273,9 +275,13 @@ fn emit_block(self: *EmitAsm, b: i64, args_not_vstacked: bool) void = {
     // TODO: handle normal args here as well.
     if args_not_vstacked {|
         self.state.free_reg&.clear();
-        int_count := self.ccall_reg_to_stack(block.arg_prims);
+        self.state.free_reg_float&.clear();
+        (int_count, float_count) := self.ccall_reg_to_stack(block.arg_prims);
         range(int_count, 8) { i |
             self.drop_reg(i);
+        };
+        range(float_count, 8) { i |
+            self.drop_reg_float(i);
         };
     };
     @debug_assert(self.state.stack.len >= block.arg_prims.len);
@@ -521,8 +527,10 @@ fn emit_inst(self: *EmitAsm, b_idx: usize, inst: Bc, i: usize) bool #once = {
                 }
                 fn Literal(_)   => self.state.stack&.push(val);
                 fn Spill(_)     => self.state.stack&.push(val);
-                fn FloatReg(_)  => {
-                    panic("unexpected float reg");
+                fn FloatReg(reg)  => {
+                    new := self.get_free_reg_float();
+                    self.asm.push(fmov(FType.D64, new, reg));  // I assume this works if the thing is an f32 also? just the top is zeros. 
+                    self.state.stack&.push(FloatReg = new);
                 }
             };
         }
@@ -539,13 +547,20 @@ fn emit_inst(self: *EmitAsm, b_idx: usize, inst: Bc, i: usize) bool #once = {
             // offset := self.asm.offset_words(self.asm.next, addr);
             self.load_imm(x17, addr.int_from_rawptr());
             self.asm.push(br(x17, 1));
-            range(0, 8) { i |
-                self.state.free_reg&.add_unique(i);
-            };
+            self.restore_all_registers();
         }
     };
 
     false
+}
+
+fn restore_all_registers(self: *EmitAsm) void = {
+    range(0, 8) { i |
+        self.state.free_reg&.add_unique(i);
+    };
+    range(0, 8) { i |
+        self.state.free_reg_float&.add_unique(i);
+    };
 }
 
 ::display_slice(AsmVal);
@@ -554,6 +569,7 @@ fn emit_inst(self: *EmitAsm, b_idx: usize, inst: Bc, i: usize) bool #once = {
 ::DeriveFmt(SpOffset);
 
 // TODO: refactor this. its a problem that im afraid of it! -- May 8
+// TODO: improve float handling now that i track free registers -- Jul 24
 fn stack_to_ccall_reg(self: *EmitAsm, types: [] Prim) void = {
     ::display_slice(Prim);
     @debug_assert(
@@ -587,7 +603,7 @@ fn stack_to_ccall_reg(self: *EmitAsm, types: [] Prim) void = {
                 @if_let(self.state.stack[i]) fn FloatReg(x) => {
                     if x == next_float {|
                         // Someone else already has the one we want, so spill that to the stack since i don't have fmov encoding. TODO
-                        worked := self.try_spill(i, true);
+                        worked := self.try_spill(i, false, true);
                         @assert(worked);
                     };
                 };
@@ -597,7 +613,7 @@ fn stack_to_ccall_reg(self: *EmitAsm, types: [] Prim) void = {
                     @debug_assert_eq(f.offset_bytes, 0, "dont GEP a float");
                     @debug_assert_ne(f.reg, sp, "dont fmov the stack pointer");
                     // TODO: fmov encoding.
-                    worked := self.try_spill(stack_index, false);
+                    worked := self.try_spill(stack_index, true, false);
                     @assert(worked);
                 }
                 fn Literal(x) => {
@@ -605,13 +621,14 @@ fn stack_to_ccall_reg(self: *EmitAsm, types: [] Prim) void = {
                     reg := self.get_free_reg();
                     self.load_imm(reg, x);
                     self.state.stack[stack_index] = (Increment = (reg = reg, offset_bytes = 0));
-                    worked := self.try_spill(stack_index, false);
+                    worked := self.try_spill(stack_index, true, false);
                     @assert(worked);
                 }
                 fn Spill(_)    => ();
                 fn FloatReg(_) => {
                     // TODO: fmov encoding.
-                    worked := self.try_spill(stack_index, true);
+                    // TODO: update now that we're tracking free float registers -- Jul 24
+                    worked := self.try_spill(stack_index, true, true);
                     @assert(worked);
                 }
             };
@@ -622,6 +639,8 @@ fn stack_to_ccall_reg(self: *EmitAsm, types: [] Prim) void = {
             self.asm.push(f_ldr_uo(Bits.X64, next_float, sp, @as(u12) @as(i64) slot.id / 8));
             // self.drop_slot(slot, 8); // TODO!
 
+            self.state.free_reg_float&.ordered_retain(fn(r: *i64) => next_float != r[]); // TODO: unordered retain
+            self.state.stack[stack_index] = (Literal = 0); // make sure we dont try to spill it later
             next_float += 1;
             continue();
         };
@@ -679,7 +698,10 @@ fn stack_to_ccall_reg(self: *EmitAsm, types: [] Prim) void = {
             }
             fn Literal(x) => self.load_imm(next_int, x);
             fn Spill(slot) => self.load_u64(next_int, sp, slot.id.trunc());
-            fn FloatReg(_) => todo();
+            fn FloatReg(f) => {
+                fmov_from(next_int, f);
+                self.drop_reg_float(f);
+            }
         };
         self.state.free_reg&.ordered_retain(fn(r) => next_int != r[]); // TODO: does unordered_retain work here? 
         self.state.stack[stack_index] = (Literal = 0); // make sure we dont try to spill it later
@@ -690,13 +712,16 @@ fn stack_to_ccall_reg(self: *EmitAsm, types: [] Prim) void = {
 }
 
 ::if(AsmVal);
-fn ccall_reg_to_stack(self: *EmitAsm, types: [] Prim) i64 = {
+fn ccall_reg_to_stack(self: *EmitAsm, types: [] Prim) Ty(i64, i64) = {
     next_float := 0;
     next_int := 0;
     enumerate types { i, ty |
         @debug_assert_eq(i, next_int + next_float);
         f := ty[].is_float();
-        v: AsmVal = if(f, => (FloatReg = next_float)) {|
+        v: AsmVal = if f {|
+            self.state.free_reg_float&.ordered_retain(fn(r) => r[] != next_float);
+            (FloatReg = next_float)
+        } else {|
             self.state.free_reg&.ordered_retain(fn(r) => r[] != next_int); // TODO: does unordered_retain work?
             (Increment = (
                 reg = next_int,
@@ -710,7 +735,7 @@ fn ccall_reg_to_stack(self: *EmitAsm, types: [] Prim) i64 = {
         };
         self.state.stack&.push(v);
     };
-    next_int
+    (next_int, next_float)
 }
 
 fn emit_store(self: *EmitAsm, addr: AsmVal, value: AsmVal, ty: Prim) void = {
@@ -719,7 +744,8 @@ fn emit_store(self: *EmitAsm, addr: AsmVal, value: AsmVal, ty: Prim) void = {
         if value&.is(.FloatReg) {|
             r := value.FloatReg;
             @assert_eq(offset_bytes.mod(8), 0, "TODO: align");
-            self.asm.push(f_str_uo(Bits.X64, r, reg, @as(u12) @as(i64) (offset_bytes.zext() / 8)))
+            self.asm.push(f_str_uo(Bits.X64, r, reg, @as(u12) @as(i64) (offset_bytes.zext() / 8)));
+            self.drop_reg_float(r);
         } else {|
             val := self.in_reg(value);
             self.store_u64(val, reg, offset_bytes);
@@ -727,7 +753,6 @@ fn emit_store(self: *EmitAsm, addr: AsmVal, value: AsmVal, ty: Prim) void = {
         };
     };
     @match(ty) {
-        // TODO: track open float registers
         fn P64() => p64();
         fn F64() => p64();
         fn I64() => p64();
@@ -735,7 +760,8 @@ fn emit_store(self: *EmitAsm, addr: AsmVal, value: AsmVal, ty: Prim) void = {
             if value&.is(.FloatReg) {|
                 r := value.FloatReg;
                 @assert_eq(offset_bytes.mod(4), 0, "TODO: align");
-                self.asm.push(f_str_uo(Bits.W32, r, reg, @as(u12) @as(i64) (offset_bytes.zext() / 4)))
+                self.asm.push(f_str_uo(Bits.W32, r, reg, @as(u12) @as(i64) (offset_bytes.zext() / 4)));
+                self.drop_reg_float(r);
             } else {|
                 val := self.in_reg(value);
                 self.store_one(MEM_32, val, reg, offset_bytes);
@@ -809,27 +835,29 @@ fn store_one(self: *EmitAsm, register_type: i64, src_reg: i64, dest_addr_reg: i6
 
 fn spill_abi_stompable(self: *EmitAsm) void = {
     range(0, self.state.stack.len) { i |
-        self.try_spill(i, true);
+        self.try_spill(i, true, true);
     };
 }
 
 // do_floats:false if you're just trying to free up a gpr, not saving for a call.
-fn try_spill(self: *EmitAsm, i: usize, do_floats: bool) bool = {
+fn try_spill(self: *EmitAsm, i: usize, do_ints: bool, do_floats: bool) bool = {
     v := self.state.stack[i];
-    @if_let(v) fn Increment(f) => {
-        if(f.reg == sp, => return(false));
-
-        // Note: this assumes we don't need to preserve the value in the reg other than for this one v-stack slot.
-        slot := self.create_slots(8);
-        @if(TRACE_ASM) @print("(spill (x% + %) -> [sp, %]) ", f.reg, f.offset_bytes, slot.id);
-        if f.offset_bytes != 0 {|
-            self.asm.push(add_im(Bits.X64, f.reg, f.reg, f.offset_bytes, 0));
+    if do_ints {|
+        @if_let(v) fn Increment(f) => {
+            if(f.reg == sp, => return(false));
+    
+            // Note: this assumes we don't need to preserve the value in the reg other than for this one v-stack slot.
+            slot := self.create_slots(8);
+            @if(TRACE_ASM) @print("(spill (x% + %) -> [sp, %]) ", f.reg, f.offset_bytes, slot.id);
+            if f.offset_bytes != 0 {|
+                self.asm.push(add_im(Bits.X64, f.reg, f.reg, f.offset_bytes, 0));
+            };
+    
+            self.store_u64(f.reg, sp, slot.id.trunc());
+            self.drop_reg(f.reg);
+            self.state.stack[i] = (Spill = slot);
+            return(true);
         };
-
-        self.store_u64(f.reg, sp, slot.id.trunc());
-        self.drop_reg(f.reg);
-        self.state.stack[i] = (Spill = slot);
-        return(true);
     };
 
     if do_floats {|
@@ -847,13 +875,26 @@ fn try_spill(self: *EmitAsm, i: usize, do_floats: bool) bool = {
 fn get_free_reg(self: *EmitAsm) i64 = {
     or self.state.free_reg&.pop() {|
         i := 0;
-        while => i < self.state.stack.len && !self.try_spill(i, false) {|
+        while => i < self.state.stack.len && !self.try_spill(i, true, false) {|
             i += 1;
         };
         if i == self.state.stack.len {|
             panic("ICE: spill to stack failed");
         };
         self.state.free_reg&.pop().unwrap()
+    }
+}
+
+fn get_free_reg_float(self: *EmitAsm) i64 = {
+    or self.state.free_reg_float&.pop() {|
+        i := 0;
+        while => i < self.state.stack.len && !self.try_spill(i, false, true) {|
+            i += 1;
+        };
+        if i == self.state.stack.len {|
+            panic("ICE: spill to stack failed");
+        };
+        self.state.free_reg_float&.pop().unwrap()
     }
 }
 
@@ -869,9 +910,19 @@ fn drop_reg(self: *EmitAsm, reg: i64) void = {
     };
 }
 
+fn drop_reg_float(self: *EmitAsm, reg: i64) void = {
+    @debug_assert(!self.state.free_reg_float&.contains(reg&), "drop F% -> %", reg, self.state.free_reg_float.items());
+    self.state.free_reg_float&.push(reg);
+}
+
 fn pop_to_reg(self: *EmitAsm) i64 = {
     val := self.state.stack&.pop().unwrap();
     self.in_reg(val)
+}
+
+fn pop_to_reg_float(self: *EmitAsm) i64 = {
+    val := self.state.stack&.pop().unwrap();
+    self.in_reg_float(val)
 }
 
 fn in_reg(self: *EmitAsm, val: AsmVal) i64 = {
@@ -901,7 +952,27 @@ fn in_reg(self: *EmitAsm, val: AsmVal) i64 = {
             // self.drop_slot(slot, 8); TODO!
             r
         }
-        fn FloatReg(_) => panic("ICE: shouldn't need to move from float register.");
+        fn FloatReg(float) => {
+            int := self.get_free_reg();
+            fmov_from(int, float);
+            self.drop_reg_float(float);
+            int
+        }
+    }
+}
+
+
+fn in_reg_float(self: *EmitAsm, val: AsmVal) i64 = {
+    @match(val) {
+        fn FloatReg(r) => r;
+        @default => {
+            // TODO: load spill and immediates directly into float register
+            int := self.in_reg(val);
+            float := self.get_free_reg_float();
+            self.asm.push(fmov_to(float, int));
+            self.drop_reg(int);
+            float
+        };
     }
 }
 
@@ -989,21 +1060,27 @@ fn dyn_c_call(self: *EmitAsm, sig: PrimSig, $do_call: @Fn() void) void = {
     do_call();
 
     ::if_opt(Prim, i64);
-    int_count := if sig.ret1 { (fst: Prim) |
+    ::if_opt(Prim, Ty(i64, i64));
+    (int_countt, float_count) := if sig.ret1 { (fst: Prim) |
         if sig.ret2 { (snd: Prim) |
             self.ccall_reg_to_stack(@slice(fst, snd));
-            fst.int_count() + snd.int_count()
+            ints := fst.int_count() + snd.int_count();
+            @as(Ty(i64, i64)) (ints, 2 - ints) // TODO: annoying that you need the type here. 
         } else {|
             self.ccall_reg_to_stack(@slice(fst));
-            fst.int_count()
+            ints := fst.int_count();
+            (ints, 1 - ints)
         }
     } else {|
-        0
+        (0, 0)
     };
 
     // now the extras are usable again.
-    range(int_count, 8) { i |
+    range(int_countt, 8) { i |
         self.state.free_reg&.add_unique(i); 
+    };
+    range(float_count, 8) { i |
+        self.state.free_reg_float&.add_unique(i); 
     };
 }
 
@@ -1129,49 +1206,64 @@ fn inst_intrinsic(self: *EmitAsm, op: Intrinsic, controling_type: Prim) void #on
     //! IMPORTANT: cond is inverted because CSINC
     bin_cmp :: fn(inv_cond: Cond) => bin(fn(a, b) => {
         self.asm.push(cmp(Bits.X64, a, b));
-        self.asm.push(temp_cset(Bits.X64, a, inv_cond));
+        self.asm.push(cset(Bits.X64, a, inv_cond));
     });
+    bin_float :: fn($do: @Fn(a: u5, b: u5) void) void => {
+        snd: u5 = self.pop_to_reg_float();
+        fst: u5 = self.pop_to_reg_float();
+        do(fst, snd);
+        self.drop_reg_float(snd);
+        self.state.stack&.push(FloatReg = fst);
+    };
+    bin_cmp_float :: fn(self: *EmitAsm, inv_cond: Cond) void = {
+        snd: u5 = self.pop_to_reg_float();
+        fst: u5 = self.pop_to_reg_float();
+        out := self.get_free_reg();
+        self.asm.push(fcmp(FType.D64, fst, snd));
+        self.asm.push(cset(Bits.X64, @as(u5) out, inv_cond));
+        self.drop_reg_float(fst);
+        self.drop_reg_float(snd);
+        self.state.stack&.push(Increment = (reg = out, offset_bytes = 0));
+    };
     // because the other ones are @BITS
-    fn temp_cset(sf: Bits, dest: RegI, zero_when: Cond) u32 =
-        @bits(sf, 0b0011010100, 0b11111, zero_when, 0b01, 0b11111, dest);
     fn temp_and_sr(sf: Bits, dest: RegO, a: RegI, b: RegI, shift: Shift, amount: u6) u32 =
         @bits(sf, 0b0001010, shift, 0b0, a, amount, b, dest);
-    fn temp_orr(sf: Bits, dest: RegO, a: RegI, b: RegI, shift: Shift, amount: u6) u32 = // TODO: fix fn mov when this can be removed
-        @bits(sf, 0b0101010, shift, 0b0, a, amount, b, dest);
     
     @match(op) {
-        fn Add() => bin(fn(a, b) => self.asm.push(@bits(Bits.X64, 0b0001011, Shift.LSL, 0b0, a, 0b000000, b, a)));
+        fn Add() => bin(fn(a, b) => self.asm.push(add_sr(Bits.X64, a, a, b, Shift.LSL, 0b000000)));
         fn Sub() => bin(fn(a, b) => self.asm.push(sub_sr(Bits.X64, a, a, b, Shift.LSL, 0b000000)));
         fn Mul() => bin(fn(a, b) => self.asm.push(madd(Bits.X64, a, a, b, 0b11111)));
-        fn Div() => bin(fn(a, b) => self.asm.push(@bits(Bits.X64, 0b0011010110, b, 0b000011, a, a)));
-        fn Eq() => bin_cmp(.NE);
-        fn Ne() => bin_cmp(.EQ);
-        fn Le() => bin_cmp(.GT);
-        fn Ge() => bin_cmp(.LT);
-        fn Lt() => bin_cmp(.GE);
-        fn Gt() => bin_cmp(.LE);
+        fn Div() => bin(fn(a, b) => self.asm.push(sdiv(Bits.X64, a, a, b)));
+        fn Eq()  => bin_cmp(.NE);
+        fn Ne()  => bin_cmp(.EQ);
+        fn Le()  => bin_cmp(.GT);
+        fn Ge()  => bin_cmp(.LT);
+        fn Lt()  => bin_cmp(.GE);
+        fn Gt()  => bin_cmp(.LE);
         fn IntToPtr() => (); // no-op
         fn PtrToInt() => (); // no-op
         fn ShiftLeft()            => bin(fn(a, b) => self.asm.push(lslv(Bits.X64, a, a, b)));
         fn ShiftRightLogical()    => bin(fn(a, b) => self.asm.push(lsrv(Bits.X64, a, a, b)));
         fn ShiftRightArithmetic() => bin(fn(a, b) => self.asm.push(asrv(Bits.X64, a, a, b)));
-        fn BitOr() => bin(fn(a, b) => self.asm.push(temp_orr(Bits.X64, a, a, b, Shift.LSL, 0b000000)));
+        fn BitOr()  => bin(fn(a, b) => self.asm.push(orr(Bits.X64, a, a, b, Shift.LSL, 0b000000)));
         fn BitAnd() => bin(fn(a, b) => self.asm.push(temp_and_sr(Bits.X64, a, a, b, Shift.LSL, @as(u6) 0)));
         fn BitXor() => bin(fn(a, b) => self.asm.push(eor(Bits.X64, a, a, b, Shift.LSL, @as(u6) 0)));
+        fn FAdd() => bin_float(fn(a, b) => self.asm.push(fadd(FType.D64, a, a, b)));
+        fn FSub() => bin_float(fn(a, b) => self.asm.push(fsub(FType.D64, a, a, b)));
+        fn FMul() => bin_float(fn(a, b) => self.asm.push(fmul(FType.D64, a, a, b)));
+        fn FDiv() => bin_float(fn(a, b) => self.asm.push(fdiv(FType.D64, a, a, b)));
+        fn FEq()  => self.bin_cmp_float(.NE);
+        fn FNe()  => self.bin_cmp_float(.EQ);
+        fn FLe()  => self.bin_cmp_float(.GT);
+        fn FGe()  => self.bin_cmp_float(.LT);
+        fn FLt()  => self.bin_cmp_float(.GE);
+        fn FGt()  => self.bin_cmp_float(.LE);
         @default => {
             @panic("ICE: unimplemented aarch64 intrinsic %", op);
         };
     };
 }
 
-fn reg(self: AsmVal) ?Ty(i64, u16) = {
-    @match(self) {
-        fn Increment(f) => (Some = (f.reg, f.offset_bytes));
-        fn Literal(_)   => .None;
-        fn Spill(_)     => .None;
-        fn FloatReg(_)  => todo();
-    }
-}
 
 PAGE_SIZE :: 16384; // TODO
 
