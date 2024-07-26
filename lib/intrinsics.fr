@@ -5,6 +5,10 @@
 
 // TODO: have an is_nan that's not `a != a` so you can have an optimisation option that assumes `a == a` is true,
 //       but still allows manual nan checks if you want that for like nan boxing or something? 
+// TODO: 
+//       - float to int rounding
+//       - when you need to sign extend. are i16/i8 stored as i32 because thats what you can do math on easily? 
+//         if i32 isnt stored as i64, instead high bits of register are 0, need to have <math>32.
 
 fn add(a: i64, b: i64) i64 #intrinsic(.Add) #fold; // +
 fn sub(a: i64, b: i64) i64 #intrinsic(.Sub) #fold; // -
@@ -26,6 +30,7 @@ fn bit_or(a: i64, b: i64) i64  #intrinsic(.BitOr);
 fn bit_and(a: i64, b: i64) i64 #intrinsic(.BitAnd);
 fn bit_xor(a: i64, b: i64) i64 #intrinsic(.BitXor);
 fn bit_xor(a: u64, b: u64) u64 #intrinsic(.BitXor);
+fn bit_not(a: i64) i64         #intrinsic(.BitNot);
 
 // These do nothing but llvm wants to know about it. 
 fn int_from_rawptr(ptr: rawptr) i64 #intrinsic(.PtrToInt);
@@ -68,6 +73,19 @@ fn zext(v: u16) u64 #intrinsic(.ZeroExtend16To64);
 fn zext(v: i32) i64 #intrinsic(.ZeroExtend32To64);
 fn zext(v: u8)  i64 #intrinsic(.ZeroExtend8To64);
 
+fn int(a: f64) i64     #intrinsic(.FloatToIntValue); // preserves the value (not the bit pattern)
+fn float(a: i64) f64   #intrinsic(.IntToFloatValue); // preserves the value (not the bit pattern)
+fn bitcast(a: f64) i64 #intrinsic(.FloatToIntBits);  // preserves the bit pattern (not the value)
+fn bitcast(a: i64) f64 #intrinsic(.IntToFloatBits);  // preserves the bit pattern (not the value)
+fn cast(v: f64) f32    #intrinsic(.ShrinkFloat);
+fn cast(v: f32) f64    #intrinsic(.GrowFloat);
+
+// TODO: decide if i want my asm backend to use the 32 bit math that zeros the top part,
+//       i guess i do because otherwise i can't talk to other languages (recive i32 params)
+//       if i dont do that this is wrong and should be a noop cast
+fn intcast(v: i64) i32 #intrinsic(.Trunc64To32);
+fn intcast(v: i32) i64 #intrinsic(.SignExtend32To64);
+
 Intrinsic :: @enum(i64) (
     Add, Sub, Mul, Div,
     UDiv,
@@ -83,41 +101,10 @@ Intrinsic :: @enum(i64) (
     FEq, FNe, FLt, FGt, FLe, FGe,
     // First Single Argument
     BitNot,
-    _a, _b, _c,
-    FloatFromInt,
-    IntFromFloat,
-    ShrinkFloat,
-    GrowFloat,
+    IntToFloatBits, FloatToIntBits, _a, IntToFloatValue, FloatToIntValue,
+    ShrinkFloat, GrowFloat,
     IntToPtr, PtrToInt, // These do nothing but llvm gets super stressed out if you don't tell it what's going on. 
-    FBitCast,
+    SignExtend32To64,
     Trunc64To32, Trunc64To16, Trunc64To8, Trunc32To16, Trunc32To8, Trunc16To8,
     ZeroExtend32To64, ZeroExtend16To64, ZeroExtend8To64, ZeroExtend16To32, ZeroExtend8To32, ZeroExtend8To16,
 );
-
-/*
-
-fn bit_not(a: i64) i64         #intrinsic(Intrinsic.BitNot);
-
-fn intcast(v: i32) i64 #intrinsic(Intrinsic.SignExtend32To64);
-
-// TODO: decide if i want my asm backend to use the 32 bit math that zeros the top part,
-//       i guess i do because otherwise i can't talk to other languages (recive i32 params)
-//       if i dont do that this is wrong and should be a noop cast
-fn intcast(v: i64) i32 #intrinsic(Intrinsic.Trunc64To32);
-
-// preserves the value (not the bit pattern). rounds towards zero.
-fn int(a: f64) i64 #intrinsic(Intrinsic.IntFromFloat);
-
-// preserves the value (not the bit pattern). 
-fn float(a: i64) f64 #intrinsic(Intrinsic.FloatFromInt);
-
-// preserves the bit pattern (not the value)
-fn bitcast(a: f64) i64 #intrinsic(Intrinsic.FBitCast);
-
-// preserves the bit pattern (not the value)
-fn bitcast(a: i64) f64 #intrinsic(Intrinsic.FBitCast);
-
-fn cast(v: f64) f32 #intrinsic(Intrinsic.ShrinkFloat);
-fn cast(v: f32) f64 #intrinsic(Intrinsic.GrowFloat);
-
-*/

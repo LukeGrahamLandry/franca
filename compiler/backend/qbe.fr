@@ -1,7 +1,6 @@
 //! https://c9x.me/compile/
 // TODO: This started as a copy paste of the llvm version. 
 //       should see what parts are similar enough to be factored out into walk_bc. 
-// TODO: correct alignment for allocas! -- Jul 22
 
 // TODO: because it just spits out asm for individual functions, it doesn't bother with inline assembly,
 //       so as a HACK, the last list in the bucket array we return isn't qbe ir, its extra assembly you have to add to the output of qbe. 
@@ -417,7 +416,7 @@ fn display(self: Ty(*EmitQbe, FuncId), out: *List(u8)) void = {
 }
 
 // TODO: are the float cmp ordered or unordered? 
-fn inst_intrinsic(self: *EmitQbe, args: []QbeVal, op: Intrinsic, controlling_type: Prim) []QbeVal = {
+fn inst_intrinsic(self: *EmitQbe, args: []QbeVal, op: Intrinsic) []QbeVal = {
     bin :: fn(self: *EmitQbe, args: [] QbeVal, op: Str) [] QbeVal = {
         out := self.get_var(args[0].ty);
         @fmt(self.out&.current(), "   % =% % %, %\n", out, out.ty.type_char_var(), op, args[0], args[1]);
@@ -481,6 +480,7 @@ fn inst_intrinsic(self: *EmitQbe, args: []QbeVal, op: Intrinsic, controlling_typ
         fn Trunc32To8()  => args.slice(0, 1); // no-op
         fn Trunc16To8()  => args.slice(0, 1); // no-op 
         
+        fn SignExtend32To64() => self.cast(args, .I64, "extsw");
         fn ZeroExtend32To64() => self.cast(args, .I64, "extuw");
         fn ZeroExtend16To64() => self.cast(args, .I64, "extuw");
         fn ZeroExtend8To64()  => self.cast(args, .I64, "extuw");
@@ -489,6 +489,19 @@ fn inst_intrinsic(self: *EmitQbe, args: []QbeVal, op: Intrinsic, controlling_typ
         fn ZeroExtend8To32()  => args.slice(0, 1); // no-op 
         fn ZeroExtend8To16()  => args.slice(0, 1); // no-op 
         
+        fn IntToFloatValue() => self.cast(args, .F64, "sltof"); 
+        fn FloatToIntValue() => self.cast(args, .I64, "dtosi"); 
+        fn IntToFloatBits()  => self.cast(args, .F64, "cast"); 
+        fn FloatToIntBits()  => self.cast(args, .I64, "cast"); 
+        fn ShrinkFloat()     => self.cast(args, .F32, "truncd"); 
+        fn GrowFloat()       => self.cast(args, .F64, "exts"); 
+        fn BitNot() => {
+            out := self.get_var(args[0].ty);
+            @fmt(self.out&.current(), "   % =% xor %, -1\n", out, out.ty.type_char_var(), args[0]);
+            a := temp().alloc(EmitQbe.Val, 1);
+            a.ptr[] = out;
+            a
+        }
         @default => @panic("ICE: unhandled qbe inst_intrinsic %", op);
     }
 }

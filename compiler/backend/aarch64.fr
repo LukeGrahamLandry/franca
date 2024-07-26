@@ -430,9 +430,7 @@ fn emit_inst(self: *EmitAsm, b_idx: usize, inst: Bc, i: usize) bool #once = {
             };
             return(f.tail);
         }
-        fn Intrinsic(f) => {
-            self.inst_intrinsic(f.op, f.controlling_type);
-        }
+        fn Intrinsic(op) => self.inst_intrinsic(op);
         fn Ret0()     => return(self.emit_return(empty()));
         fn Ret1(prim) => return(self.emit_return(@slice(prim)));
         fn Ret2(f)    => return(self.emit_return(@slice(f._0, f._1)));
@@ -1191,7 +1189,7 @@ fn emit_return(self: *EmitAsm, sig: [] Prim) bool = {
     true
 }
 
-fn inst_intrinsic(self: *EmitAsm, op: Intrinsic, controling_type: Prim) void #once = {
+fn inst_intrinsic(self: *EmitAsm, op: Intrinsic) void #once = {
     // TODO: for add, include offset_bytes in the immediate if they fit or combine them and defer instead of doing 3 seperate adds.
     bin :: fn($do: @Fn(a: u5, b: u5) void) void => {
         snd: u5 = self.pop_to_reg();
@@ -1254,6 +1252,31 @@ fn inst_intrinsic(self: *EmitAsm, op: Intrinsic, controling_type: Prim) void #on
         self.state.stack&.push(Increment = (reg = fst, offset_bytes = 0));
     };
     
+    float_to_int :: fn($do: @Fn(in: u5, out: u5) void) void => {
+        in: u5 = self.pop_to_reg_float();
+        out: u5 = self.get_free_reg();
+        do(in, out);
+        self.drop_reg_float(in);
+        self.state.stack&.push(Increment = (reg = out, offset_bytes = 0));
+    };
+    int_to_float :: fn($do: @Fn(in: u5, out: u5) void) void => {
+        in: u5 = self.pop_to_reg();
+        out: u5 = self.get_free_reg_float();
+        do(in, out);
+        self.drop_reg(in);
+        self.state.stack&.push(FloatReg = out);
+    };
+    float_to_float :: fn($do: @Fn(in: u5) void) void => {
+        in: u5 = self.pop_to_reg_float();
+        do(in);
+        self.state.stack&.push(FloatReg = in);
+    };
+    int_to_int :: fn($do: @Fn(in: u5) void) void => {
+        in: u5 = self.pop_to_reg();
+        do(in);
+        self.state.stack&.push(Increment = (reg = in, offset_bytes = 0));
+    };
+    
     @match(op) {
         fn Add() => bin(fn(a, b) => self.asm.push(add_sr(Bits.X64, a, a, b, Shift.LSL, 0b000000)));
         fn Sub() => bin(fn(a, b) => self.asm.push(sub_sr(Bits.X64, a, a, b, Shift.LSL, 0b000000)));
@@ -1290,12 +1313,20 @@ fn inst_intrinsic(self: *EmitAsm, op: Intrinsic, controling_type: Prim) void #on
         fn Trunc32To8()  => self.trunc8();
         fn Trunc16To8()  => self.trunc8();
         // TODO: this about how signed numbers are represented. 
+        fn SignExtend32To64() => (); // TODO: WRITE A TEST THAT FAILS BECAUSE OF THIS
         fn ZeroExtend32To64() => (); // no-op
         fn ZeroExtend16To64() => (); // no-op
         fn ZeroExtend8To64()  => (); // no-op
         fn ZeroExtend16To32() => (); // no-op
         fn ZeroExtend8To32()  => (); // no-op
         fn ZeroExtend8To16()  => (); // no-op
+        fn IntToFloatValue()  => int_to_float(fn(in, out) => self.asm.push(scvtf(Bits.X64, FType.D64, out, in)));
+        fn FloatToIntValue()  => float_to_int(fn(in, out) => self.asm.push(fcvtzs(Bits.X64, FType.D64, out, in)));
+        fn IntToFloatBits()   => int_to_float(fn(in, out) => self.asm.push(fmov_to(out, in)));
+        fn FloatToIntBits()   => float_to_int(fn(in, out) => self.asm.push(fmov_from(out, in)));
+        fn ShrinkFloat() => float_to_float(fn(in) => self.asm.push(fcnv(.D64, .S32, in, in)));
+        fn GrowFloat()   => float_to_float(fn(in) => self.asm.push(fcnv(.S32, .D64, in, in)));
+        fn BitNot()      => int_to_int(fn(in) => self.asm.push(orn(Bits.X64, in, in, 0b11111, Shift.LSL, @as(u6) 0)));
         @default => {
             @panic("ICE: unimplemented aarch64 intrinsic %", op);
         };
