@@ -737,8 +737,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let e = unwrap2!(&mut e.args, "#intrinsic missing arg");
                 let e = mem::take(e);
                 let ty = self.program.pool.env.intrinsic_type.expect("tried to use intrinsic_type before ready");
-                let intrinsic = self.immediate_eval_expr(e, ty)?;
-                let intrinsic: i64 = from_values(self.program, intrinsic)?;
+                let intrinsic = self.immediate_eval_expr(e, ty).unwrap(); // not allowed to fail because of mem::take
+                let intrinsic: i64 = from_values(self.program, intrinsic).unwrap();
                 self.program[f].body = FuncImpl::Intrinsic(intrinsic);
                 self.pop_state(state);
                 return Ok(self.program[f].finished_ret.unwrap());

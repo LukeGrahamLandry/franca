@@ -1225,9 +1225,34 @@ fn inst_intrinsic(self: *EmitAsm, op: Intrinsic, controling_type: Prim) void #on
         self.drop_reg_float(snd);
         self.state.stack&.push(Increment = (reg = out, offset_bytes = 0));
     };
-    // because the other ones are @BITS
-    fn temp_and_sr(sf: Bits, dest: RegO, a: RegI, b: RegI, shift: Shift, amount: u6) u32 =
-        @bits(sf, 0b0001010, shift, 0b0, a, amount, b, dest);
+        
+    trunc8 :: fn(self: *EmitAsm) void = {
+        fst: u5 = self.pop_to_reg();
+        extra: u5 = self.get_free_reg();
+        self.asm.push(movz(.X64, extra, 0x00FF, .Left0));
+        self.asm.push(and_sr(.X64, fst, fst, extra, Shift.LSL, @as(u6) 0));
+        self.drop_reg(extra);
+        self.state.stack&.push(Increment = (reg = fst, offset_bytes = 0));
+    };
+    
+    trunc16 :: fn(self: *EmitAsm) void = {
+        fst: u5 = self.pop_to_reg();
+        extra: u5 = self.get_free_reg();
+        self.asm.push(movz(.X64, extra, 0xFFFF, .Left0));
+        self.asm.push(and_sr(.X64, fst, fst, extra, Shift.LSL, @as(u6) 0));
+        self.drop_reg(extra);
+        self.state.stack&.push(Increment = (reg = fst, offset_bytes = 0));
+    };
+    
+    trunc32 :: fn(self: *EmitAsm) void = {
+        fst: u5 = self.pop_to_reg();
+        extra: u5 = self.get_free_reg();
+        self.asm.push(movz(.X64, extra, 0xFFFF, .Left0));
+        self.asm.push(movk(.X64, extra, 0xFFFF, .Left16));
+        self.asm.push(and_sr(.X64, fst, fst, extra, Shift.LSL, @as(u6) 0));
+        self.drop_reg(extra);
+        self.state.stack&.push(Increment = (reg = fst, offset_bytes = 0));
+    };
     
     @match(op) {
         fn Add() => bin(fn(a, b) => self.asm.push(add_sr(Bits.X64, a, a, b, Shift.LSL, 0b000000)));
@@ -1246,7 +1271,7 @@ fn inst_intrinsic(self: *EmitAsm, op: Intrinsic, controling_type: Prim) void #on
         fn ShiftRightLogical()    => bin(fn(a, b) => self.asm.push(lsrv(Bits.X64, a, a, b)));
         fn ShiftRightArithmetic() => bin(fn(a, b) => self.asm.push(asrv(Bits.X64, a, a, b)));
         fn BitOr()  => bin(fn(a, b) => self.asm.push(orr(Bits.X64, a, a, b, Shift.LSL, 0b000000)));
-        fn BitAnd() => bin(fn(a, b) => self.asm.push(temp_and_sr(Bits.X64, a, a, b, Shift.LSL, @as(u6) 0)));
+        fn BitAnd() => bin(fn(a, b) => self.asm.push(and_sr(Bits.X64, a, a, b, Shift.LSL, @as(u6) 0)));
         fn BitXor() => bin(fn(a, b) => self.asm.push(eor(Bits.X64, a, a, b, Shift.LSL, @as(u6) 0)));
         fn FAdd() => bin_float(fn(a, b) => self.asm.push(fadd(FType.D64, a, a, b)));
         fn FSub() => bin_float(fn(a, b) => self.asm.push(fsub(FType.D64, a, a, b)));
@@ -1258,6 +1283,19 @@ fn inst_intrinsic(self: *EmitAsm, op: Intrinsic, controling_type: Prim) void #on
         fn FGe()  => self.bin_cmp_float(.LT);
         fn FLt()  => self.bin_cmp_float(.GE);
         fn FGt()  => self.bin_cmp_float(.LE);
+        fn Trunc64To32() => self.trunc32();
+        fn Trunc64To16() => self.trunc16();
+        fn Trunc64To8()  => self.trunc8();
+        fn Trunc32To16() => self.trunc16();
+        fn Trunc32To8()  => self.trunc8();
+        fn Trunc16To8()  => self.trunc8();
+        // TODO: this about how signed numbers are represented. 
+        fn ZeroExtend32To64() => (); // no-op
+        fn ZeroExtend16To64() => (); // no-op
+        fn ZeroExtend8To64()  => (); // no-op
+        fn ZeroExtend16To32() => (); // no-op
+        fn ZeroExtend8To32()  => (); // no-op
+        fn ZeroExtend8To16()  => (); // no-op
         @default => {
             @panic("ICE: unimplemented aarch64 intrinsic %", op);
         };
