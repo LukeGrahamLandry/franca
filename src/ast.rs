@@ -151,7 +151,11 @@ pub enum Expr<'p> {
         value: Values,
         coerced: bool,
     },
-    _WipFunc,
+    Switch {
+        value: Box<FatExpr<'p>>,
+        default: Box<FatExpr<'p>>,
+        cases: Vec<(i64, FatExpr<'p>)>,
+    },
     Call(Box<FatExpr<'p>>, Box<FatExpr<'p>>),
     Block {
         body: Vec<FatStmt<'p>>,
@@ -232,7 +236,7 @@ pub trait WalkAst<'p> {
         }
         match &mut expr.expr {
             Expr::GetParsed(_) => {}
-            Expr::_WipFunc | Expr::_SuffixMacro | Expr::_AddToOverloadSet => unreachable!(),
+            Expr::_SuffixMacro | Expr::_AddToOverloadSet => unreachable!(),
             Expr::Poison => unreachable!("ICE: POISON"),
             Expr::Call(fst, snd) => {
                 self.expr(fst);
@@ -286,6 +290,13 @@ pub trait WalkAst<'p> {
             Expr::As { ty, value } => {
                 self.expr(ty);
                 self.expr(value);
+            }
+            Expr::Switch { value, default, cases } => {
+                self.expr(value);
+                self.expr(default);
+                for (_, case) in cases {
+                    self.expr(case);
+                }
             }
         }
         self.post_walk_expr(expr);
@@ -654,8 +665,7 @@ impl<'p> Func<'p> {
 pub enum CallConv {
     CCallReg, // This is what #c_call means currently but its not the real c abi cause it can't do structs.
     CCallRegCt,
-    // #one_ret_pic.
-    OneRetPic,
+    _OneRetPic,
     /// The front end duplicates the function body ast at each callsite.
     Inline,
 }
@@ -721,16 +731,7 @@ impl<'p> Func<'p> {
         if cc == CallConv::Inline {
             assert!(!self.has_tag(Flag::NoInline), "#inline and #noinline");
         }
-        if self.cc == BigOption::Some(CallConv::OneRetPic) && cc == CallConv::CCallReg {
-            // TODO: HACK. now with merging. the aarch64 version says OneRetPic and llvm version says Arg8Ret1 but thats fine cause really they're different functions.
-            //       so treating them as the same one is kinda but also the old SplitFunc system was more dumb.
-            return Ok(());
-        }
-        if self.cc == BigOption::Some(CallConv::CCallReg) && cc == CallConv::OneRetPic {
-            // TODO: HACK.
-            self.cc = BigOption::Some(CallConv::OneRetPic);
-            return Ok(());
-        }
+
         match self.cc {
             BigOption::Some(old) => assert!(old == cc, "tried to change cc from {old:?} to {cc:?}"),
             BigOption::None => self.cc = BigOption::Some(cc),

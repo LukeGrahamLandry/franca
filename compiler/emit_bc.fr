@@ -27,11 +27,13 @@ FnBody :: @struct(
     signeture: PrimSig,
     func: FuncId,
     name: Symbol,
+    switch_payloads: RsVec(RsVec(SwitchPayload)),
     current_block: BbId,  // TODO: remove. only needed while building
     clock: u16,           // TODO: remove. only needed while building
     want_log: bool,       // TODO: remove. only needed while building
 );
 VarSlotType :: @struct(size: u16, align: u16);
+SwitchPayload :: @struct(value: i64, block: BbId);
 
 // TODO: suddenly my new PrimSig makes this super chonky. 80 bytes is not ok
 Bc :: @tagged(
@@ -61,6 +63,7 @@ Bc :: @tagged(
     Ret2: Ty(Prim, Prim),
     Nop,
     Intrinsic: Intrinsic,
+    Switch: i64,
 );
 ::enum(Intrinsic);
 
@@ -210,6 +213,7 @@ fn empty_fn_body(comp: *SelfHosted, func: FuncId, when: ExecStyle) Res(*FnBody) 
         signeture = @try(comp.prim_sig(f_ty, f.cc.expect("known cc"))) return,
         func = func,
         name = f.name,
+        switch_payloads = empty(),
         current_block = (id = 0),
         clock = 0,
         want_log = f.has_tag(.log_bc),
@@ -904,6 +908,9 @@ fn compile_expr(self: *EmitBc, result: *FnBody, expr: *FatExpr, result_location:
             };
             return(.Ok)
         }
+        fn Switch(f) => {
+            return(self.emit_switch(result, expr, result_location, can_tail))
+        }
         @default => @panic("ICE: didn't desugar: %", expr.log(self.program.pool));
     };
     unreachable()
@@ -1239,7 +1246,7 @@ fn emit_call_if(self: *EmitBc, result: *FnBody, arg: *FatExpr, result_location: 
     
     @try(self.compile_expr(result, parts.cond, .PushStack, false)) return; // cond
     (if_true, if_false) := (parts.if_true, parts.if_false);
-
+ 
     out := self.program.get_info(if_true.ty);
     @assert(out.size_slots.lt(4).or(result_location != .PushStack), "ICE: 'if' result too big to go on stack"); // now its the callers problem to deal with this case
 
@@ -1259,7 +1266,6 @@ fn emit_call_if(self: *EmitBc, result: *FnBody, arg: *FatExpr, result_location: 
 
     result.push_to(end_false_block, (Goto = (ip = ip, slots = block_slots)));
     result[ip].incoming_jumps += 2;
-
     result[true_ip].incoming_jumps += 1;
     result[false_ip].incoming_jumps += 1;
     result.bump_clock(ip);
@@ -1267,6 +1273,47 @@ fn emit_call_if(self: *EmitBc, result: *FnBody, arg: *FatExpr, result_location: 
     .Ok
 }
 
+fn emit_switch(self: *EmitBc, result: *FnBody, arg: *FatExpr, result_location: ResultLoc, can_tail: bool) PRes #once = {
+    @err_assert(arg.expr&.is(.Switch), "ICE: expected switch") return;
+    parts := arg.expr.Switch;
+    
+    @try(self.compile_expr(result, parts.value, .PushStack, false)) return; //  this is the thing we're inspecting!
+    entry_block := result.current_block; 
+   
+    // This is where we rejoin with the value of the whole switch expression. 
+    out := self.program.get_info(arg.ty);
+    @assert(out.size_slots.lt(4).or(result_location != .PushStack), "ICE: 'switch' result too big to go on stack"); // now its the callers problem to deal with this case
+    block_slots := if(result_location == .PushStack, => out.size_slots, => 0);
+    prims := if(result_location == .PushStack, => self.get_primatives(arg.ty), => empty());
+    end_block := result.push_block(prims);
+    result.current_block = entry_block;
+    cases: List(SwitchPayload) = list(self.program.get_alloc());
+    
+    push_case :: fn(value: i64, body: *FatExpr) void => {
+        case_block := result.push_block_empty();
+        @try(self.compile_expr(result, body, result_location, false)) return; // TODO: tail call
+        end_case_block := result.current_block;
+        result.push_to(end_case_block, (Goto = (ip = end_block, slots = block_slots)));
+        cases&.push(value = value, block = case_block); 
+        result[case_block].incoming_jumps += 1;
+        result[end_block].incoming_jumps += 1;
+    };
+    
+    each parts.cases { f |
+        push_case(f._0, f._1&);
+    };
+   
+    // TODO: would it be nicer to have default branch just be the last thing in the ast node too so you could handle them uniformly? -- Jul 26
+    push_case(-1, parts.default);
+    // TODO: make sure fn neg is #fold
+    
+    result.current_block = end_block;
+    result.push_to(entry_block, (Switch = result.switch_payloads.len));
+    result.switch_payloads&.push(cases.rs(), self.program.get_alloc());
+     
+    result.bump_clock(end_block);
+    .Ok
+}
 fn emit_call_loop(self: *EmitBc, result: *FnBody, arg: *FatExpr) PRes #once = {
     @debug_assert_eq(arg.ty, void);
 

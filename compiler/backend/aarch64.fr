@@ -16,9 +16,6 @@ TRACE_ASM :: false;
 TRACE_CALLS :: false; 
 USE_LLVM_DIS :: true;
 
-// This should always be true. Otherwise you're doing a call for every add, mul, etc. 
-DO_BASIC_ASM_INLINE :: true;
-
 SpOffset :: @struct(id: i64);
 
 IncReg :: @struct(reg: i64, offset_bytes: i64);
@@ -139,7 +136,7 @@ fn compile(self: *EmitAsm, f: FuncId) void #once = {
     if(self.asm.get_fn(f).is_some(), => return());
 
     func := self.program[f]&;
-    @assert(!func.body&.is(.JittedAarch64) && !func.body&.is(.ComptimeAddr));
+    @assert(!func.body&.is(.JittedAarch64) && !func.body&.is(.ComptimeAddr), "func want body");
 
     self.log_asm_bc = func.has_tag(.log_asm_bc);
     self.bc_to_asm(f);
@@ -294,7 +291,7 @@ fn emit_block(self: *EmitAsm, b: i64, args_not_vstacked: bool) void = {
         is_done = self.emit_inst(b, inst, i);
         @if(TRACE_ASM) @println("%:% % => % | free: %", b, i, inst&.tag(), self.state.stack.items(), self.state.free_reg.items());
     };
-    @debug_assert(is_done);
+    @debug_assert(is_done, "emitted all blocks but no function terminator");
 }
 
 fn emit_inst(self: *EmitAsm, b_idx: usize, inst: Bc, i: usize) bool #once = {
@@ -547,9 +544,44 @@ fn emit_inst(self: *EmitAsm, b_idx: usize, inst: Bc, i: usize) bool #once = {
             self.asm.push(br(x17, 1));
             self.restore_all_registers();
         }
+        fn Switch(i) => {
+            cases := self.body.switch_payloads.index(i);
+            self.emit_switch(cases);
+            return(true);
+        }
     };
 
     false
+}
+
+fn emit_switch(self: *EmitAsm, cases: *RsVec(SwitchPayload)) void = {
+    @debug_assert(cases.len > 2, "switch op should have default + >=2 branches");
+    inspect := self.pop_to_reg();
+    // TODO: jump table? binary search? 
+    // TODO: is it better to have all the jumps at the top? 
+    each cases.items().slice(0, cases.len - 1) { option |
+        self.spill_abi_stompable(); // TODO: this is dumb but you need to make sure the different branches don't spill things in different places. 
+       
+        assert(option.value < 4096 && option.value >= 0, "value must fit in u12"); // TODO: use the right number types sooner?
+        self.asm.push(cmp_im(Bits.X64, @as(u5) inspect, @as(u12) option.value, 0));
+        self.asm.push(brk(0));
+        jump_inst := self.asm.prev();
+        
+        @debug_assert(self.block_ips[option.block.id.zext()].is_none(), "I only generate simple control flow");
+
+        state := self.state&.clone();
+        self.drop_reg(inspect); // Inside the new block
+        self.emit_block(option.block.id.zext(), true);
+        self.state = state;
+        
+        offset := self.asm.offset_words(jump_inst, self.asm.next);
+        @debug_assert(offset > 0, "always jumping forward");
+        self.asm.patch(jump_inst, b_cond(@as(i19) offset, .NE));
+    };
+    option := cases.last().unwrap();
+    @debug_assert(self.block_ips[option.block.id.zext()].is_none(), "I only generate simple control flow!");
+    self.drop_reg(inspect);
+    self.emit_block(option.block.id.zext(), true);
 }
 
 fn restore_all_registers(self: *EmitAsm) void = {
@@ -602,7 +634,7 @@ fn stack_to_ccall_reg(self: *EmitAsm, types: [] Prim) void = {
                     if x == next_float {|
                         // Someone else already has the one we want, so spill that to the stack since i don't have fmov encoding. TODO
                         worked := self.try_spill(i, false, true);
-                        @assert(worked);
+                        @assert(worked, "failed to spill");
                     };
                 };
             };
@@ -612,7 +644,7 @@ fn stack_to_ccall_reg(self: *EmitAsm, types: [] Prim) void = {
                     @debug_assert_ne(f.reg, sp, "dont fmov the stack pointer");
                     // TODO: fmov encoding.
                     worked := self.try_spill(stack_index, true, false);
-                    @assert(worked);
+                    @assert(worked, "failed to spill");
                 }
                 fn Literal(x) => {
                     // TODO: fmov encoding.
@@ -620,19 +652,19 @@ fn stack_to_ccall_reg(self: *EmitAsm, types: [] Prim) void = {
                     self.load_imm(reg, x);
                     self.state.stack[stack_index] = (Increment = (reg = reg, offset_bytes = 0));
                     worked := self.try_spill(stack_index, true, false);
-                    @assert(worked);
+                    @assert(worked, "failed to spill");
                 }
                 fn Spill(_)    => ();
                 fn FloatReg(_) => {
                     // TODO: fmov encoding.
                     // TODO: update now that we're tracking free float registers -- Jul 24
                     worked := self.try_spill(stack_index, true, true);
-                    @assert(worked);
+                    @assert(worked, "failed to spill");
                 }
             };
 
             slot := self.state.stack[stack_index];
-            @assert(slot&.is(.Spill));
+            @assert(slot&.is(.Spill), "expected spill");
             slot := slot.Spill;
             self.asm.push(f_ldr_uo(Bits.X64, next_float, sp, @as(u12) @as(i64) slot.id / 8));
             // self.drop_slot(slot, 8); // TODO!
@@ -1047,7 +1079,7 @@ fn dyn_c_call(self: *EmitAsm, sig: PrimSig, $do_call: @Fn() void) void = {
             fn Increment(f) => {
                 // we know emit_bc often makes the return location a stack variable. 
                 // and for now, since we just spilled, any other register would have been wastefully stored so we'd be in the Spill case.
-                @assert(f.reg == sp);
+                @assert(f.reg == sp, "spilled so must be in sp");
                 self.asm.push(add_im(Bits.X64, x8, f.reg, f.offset_bytes, 0))
             }
             fn Literal(v) => self.load_imm(x8, v);
@@ -1088,32 +1120,6 @@ fn dyn_c_call(self: *EmitAsm, sig: PrimSig, $do_call: @Fn() void) void = {
 // TODO: use with_link for tail calls.
 // !with_link === tail
 fn branch_func(self: *EmitAsm, f: FuncId, with_link: bool) void #once = {
-    if DO_BASIC_ASM_INLINE {|
-        func := self.program[f]&;
-        // TODO: save result on the function so dont have to recheck every time?
-        if func.body&.jitted_aarch64() { code |
-            if func.cc.unwrap() == .OneRetPic {|
-                @if(TRACE_ASM) println("OneRetPic call");
-                // TODO: HACK: for no-op casts, i have two rets because I can't have single element tuples.
-                if code.len == 2 && code[0] == ret() && code[1] == ret() {|
-                    if !with_link {|
-                        // If you're trying to do a tail call to fn add, that means emit the add instruction and then return.
-                        self.asm.push(ret());
-                    };
-                    return();
-                };
-                for code.slice(0, code.len - 1) { op |
-                    @debug_assert_ne(op, ret());
-                    self.asm.push(op);
-                };
-                @debug_assert_eq(code.last().unwrap()[], ret());
-                // If you're trying to do a tail call to fn add, that means emit the add instruction and then return.s
-                if(!with_link, => self.asm.push(ret()));
-                return();
-            };
-        };
-    };
-
     // If we already emitted the target function, can just branch there directly.
     // This covers the majority of cases because I try to handle callees first.
     if self.asm.get_fn(f) { bytes |

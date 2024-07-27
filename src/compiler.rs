@@ -332,9 +332,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         if self.program[f].has_tag(Flag::Inline) {
             self.program[f].set_cc(CallConv::Inline)?;
         }
-        if self.program[f].has_tag(Flag::One_Ret_Pic) {
-            self.program[f].set_cc(CallConv::OneRetPic)?;
-        }
+
         if self.program[f].cc == BigOption::Some(CallConv::Inline) {
             // TODO: err on other cc tags
             // skip cause we dont care about big arg checks.
@@ -1411,7 +1409,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 expr.set((id.as_raw()).into(), ty);
                 ty
             }
-            Expr::_SuffixMacro | Expr::_WipFunc | Expr::_AddToOverloadSet => unreachable!(),
+            Expr::_SuffixMacro | Expr::_AddToOverloadSet => unreachable!(),
             Expr::Call(f, arg) => {
                 // Compile 'f' as normal, its fine if its a macro that expands to a callable or a closure we don't know the types for yet.
                 // TODO: result type returning requested
@@ -1808,6 +1806,22 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // Now evaluate whatever the macro gave us.
                 return self.compile_expr(expr, requested);
             }
+            Expr::Switch { value, default, cases } => {
+                self.compile_expr(value, ResultType::Specific(TypeId::i64()))?;
+                let mut expected_type = requested; 
+                self.compile_expr(default, expected_type)?;
+                if default.ty.is_unknown() && matches!(expected_type, ResultType::None) {
+                    expected_type = default.ty.want();
+                }
+                // TODO: ensure the value tags are unique. 
+                for (_, case) in cases {
+                    self.compile_expr(case, expected_type)?;
+                    if case.ty.is_unknown() && matches!(expected_type, ResultType::None) {
+                        expected_type = case.ty.want();
+                    }
+                }
+                default.ty
+            }
         })
     }
 
@@ -1930,7 +1944,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(Some(match expr.deref_mut() {
             Expr::GetParsed(_)  => unreachable!(),
             Expr::Poison => ice!("POISON",),
-            Expr::_WipFunc | Expr::_AddToOverloadSet | Expr::_SuffixMacro => unreachable!("nothing creates these"),
+            Expr::_AddToOverloadSet | Expr::_SuffixMacro => unreachable!("nothing creates these"),
             Expr::Cast(_) => unreachable!("@as puts type"),
             Expr::Value { value, .. } => unreachable!("{value:?} requires type"),
             Expr::Call(f, arg) => {
@@ -2059,7 +2073,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 return Ok(None);
             }
             Expr::FnPtr(_) => return Ok(None),
-            Expr::Slice(_) | Expr::ConstEval(_) | Expr::FromBitLiteral { .. } | Expr::Uninitialized | Expr::Unquote(_) |  Expr::Placeholder(_) | Expr::Builtin(_) | Expr::ContextualField(_) => 
+            Expr::Switch { .. } | Expr::Slice(_) | Expr::ConstEval(_) | Expr::FromBitLiteral { .. } | Expr::Uninitialized | Expr::Unquote(_) |  Expr::Placeholder(_) | Expr::Builtin(_) | Expr::ContextualField(_) => 
             {
                 match self.compile_expr(expr, ResultType::None) {
                     Ok(res) => res,
@@ -3810,7 +3824,11 @@ pub enum ResultType {
 
 impl TypeId {
     fn want(self) -> ResultType {
-        ResultType::Specific(self)
+       if self.is_unknown() { 
+           ResultType::None
+       } else {
+           ResultType::Specific(self)
+       }
     }
 }
 
