@@ -1,3 +1,21 @@
+## Switch (Jul 27/28)
+
+Added a Switch ast node and bytecode instruction for @match to use instead of a chain of ifs.
+The thought is that llvm has a switch instruction and maybe it would be faster if i just told it what im doing,
+instead of it having to do work to figure out my chain of ifs.
+
+It seems llvm takes about the same amount of time, but it does make my part go from 455ms to 425ms, which is interesting.
+I guess we've learned that my thing where blocks are functions that then get inlined so my old match was kinda copying out this
+whole linked list kinda thing and then collapsing it all down again, was dumb and if i just have list of expressions its faster.
+(note: it doesnt seem to mater which version you're compiling with, its which version you're newly compiling, its just a library change in @match).
+I have mixed feelings about adding redundant things, like it would be conceptually simpler if you just have ifs.
+but also 5% for like 80 lines extra (once i remove the old @match impl) is pretty damn good.
+and it kinda is easier to think about if you ever have to look at the ast for debugging the compiler if it matches more closely with whats actually happening.
+
+- TODO: qbe inst_switch, use Switch node for @switch and @match on enums (rn only do it for @tagged-s)
+
+maybe I'll try making @if at least not expect closures so insert the call in the code instead of in the compiler.
+
 ## (Jul 25)
 
 - ask the compiler which safety checks are enabled. i have some bug with order of compilatio nwhen disabling debug_assertions on the compiler.

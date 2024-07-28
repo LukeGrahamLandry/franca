@@ -1808,22 +1808,35 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             Expr::Switch { value, default, cases } => {
                 self.compile_expr(value, ResultType::Specific(TypeId::i64()))?;
+                fn unify(expect: &mut ResultType, new: TypeId) {
+                    let dont_like_this_type = match expect {
+                        ResultType::Specific(inner) => inner.is_never(),
+                        ResultType::Returning(_) => false,
+                        ResultType::None => true,
+                    };
+                    if dont_like_this_type && !new.is_never() {
+                        *expect = ResultType::Specific(new);
+                    }
+                }
                 let mut expected_type = requested; 
                 self.compile_expr(default, expected_type)?;
-                if default.ty.is_unknown() && matches!(expected_type, ResultType::None) {
-                    expected_type = default.ty.want();
-                }
+                unify(&mut expected_type, default.ty);
                 // TODO: ensure the value tags are unique. 
                 for (_, case) in cases {
                     self.compile_expr(case, expected_type)?;
-                    if case.ty.is_unknown() && matches!(expected_type, ResultType::None) {
-                        expected_type = case.ty.want();
-                    }
+                    unify(&mut expected_type, case.ty);
                 }
-                default.ty
+                let found = match expected_type {
+                    ResultType::Specific(inner) => inner,
+                    ResultType::Returning(_) => err!("could not unify switch branch types",),
+                    ResultType::None => TypeId::never,
+                };
+                expr.ty = found;
+                found
             }
         })
     }
+    
 
     // This is a redundant check but it means you can move the error message to before the macro expansion which might make it more clear.
     // Only works for simple cases where its possible to give a static output type for all invocations of the macro.
@@ -2044,7 +2057,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::StructLiteralP(_) => return Ok(None),
             
             // TODO: there's no reason this couldn't look at the types, but if logic is more complicated (so i dont want to reproduce it) and might fail often (so id be afraid of it getting to a broken state).
-            Expr::If {.. } => return Ok(None),
+            Expr::Switch { .. } | Expr::If {.. } => return Ok(None),
             Expr::Loop(_) => TypeId::never,
             Expr::Addr(arg) => {
                 match arg.deref_mut().deref_mut() {
@@ -2073,7 +2086,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 return Ok(None);
             }
             Expr::FnPtr(_) => return Ok(None),
-            Expr::Switch { .. } | Expr::Slice(_) | Expr::ConstEval(_) | Expr::FromBitLiteral { .. } | Expr::Uninitialized | Expr::Unquote(_) |  Expr::Placeholder(_) | Expr::Builtin(_) | Expr::ContextualField(_) => 
+             Expr::Slice(_) | Expr::ConstEval(_) | Expr::FromBitLiteral { .. } | Expr::Uninitialized | Expr::Unquote(_) |  Expr::Placeholder(_) | Expr::Builtin(_) | Expr::ContextualField(_) => 
             {
                 match self.compile_expr(expr, ResultType::None) {
                     Ok(res) => res,

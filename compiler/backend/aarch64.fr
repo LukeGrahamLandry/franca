@@ -555,11 +555,12 @@ fn emit_inst(self: *EmitAsm, b_idx: usize, inst: Bc, i: usize) bool #once = {
 }
 
 fn emit_switch(self: *EmitAsm, cases: *RsVec(SwitchPayload)) void = {
-    @debug_assert(cases.len > 2, "switch op should have default + >=2 branches");
+    @debug_assert(cases.len >= 2, "switch op should have default + >=2 branches");
     inspect := self.pop_to_reg();
     // TODO: jump table? binary search? 
     // TODO: is it better to have all the jumps at the top? 
-    each cases.items().slice(0, cases.len - 1) { option |
+    (normal_branches, default) := cases.decode_switch();
+    each normal_branches { option |
         self.spill_abi_stompable(); // TODO: this is dumb but you need to make sure the different branches don't spill things in different places. 
        
         assert(option.value < 4096 && option.value >= 0, "value must fit in u12"); // TODO: use the right number types sooner?
@@ -578,10 +579,11 @@ fn emit_switch(self: *EmitAsm, cases: *RsVec(SwitchPayload)) void = {
         @debug_assert(offset > 0, "always jumping forward");
         self.asm.patch(jump_inst, b_cond(@as(i19) offset, .NE));
     };
-    option := cases.last().unwrap();
-    @debug_assert(self.block_ips[option.block.id.zext()].is_none(), "I only generate simple control flow!");
     self.drop_reg(inspect);
-    self.emit_block(option.block.id.zext(), true);
+    assert(default.is_some(), "i always have a default branch currently");
+    default_block := default.unwrap();
+    @debug_assert(self.block_ips[default_block.id.zext()].is_none(), "I only generate simple control flow!");
+    self.emit_block(default_block.id.zext(), true);
 }
 
 fn restore_all_registers(self: *EmitAsm) void = {
