@@ -2305,10 +2305,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     unreachable!("{}", self.program.log_type(ret_ty))
                 };
                 // TODO: this only helps if some can be quick-evaled by special cases above, otherwise makes it worse.
-                // TODO:  however.... it debug_asserts it you comment this case out!! -- Apr 30
-                //      because of the special casing on types? (Type, Type) === Type
-                //      I think actually its because you get here when compiling inline asm at the very beginning.
-                //      so you need to be able to do it without all basic ops being ready yet. -- May 27
+                //       (Jul 28) i timed it and it makes it self compile faster so it stays for now
                 let mut values = vec![];
                 for (e, ty) in elements.iter().zip(types) {
                     values.push(self.immediate_eval_expr(e.clone(), ty)?)

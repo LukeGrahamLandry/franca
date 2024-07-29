@@ -201,3 +201,52 @@ fn WalkInts($do: @Fn(t: Type) void) void = {
 }
 
 ::enum(VarType);
+
+///////////////////////////////////
+// TODO: rename to derives.fr?
+
+// Note: we only recursivly call deep_clone if the type contains_pointers, otherwise its just a memcpy. 
+fn AutoClone($T: Type) void = {
+    fn deep_clone(self: *T, a: Alloc) T = {
+        @if(!T.has_pointers(), { self[] }, {
+            @inline_match(T.get_type_info_ref()) {
+                fn Struct($_) => {
+                    result := T.uninitialized();
+                    inline_for T.get_fields() { $f | 
+                        in := T.get_field_ptr(self, f);
+                        out := T.get_field_ptr(result&, f);
+                        out[] = @if(@run f[].ty.has_pointers(), in.deep_clone(a), in[]);
+                    };
+                    result
+                }
+                fn Tagged($_) => {
+                    ::tagged(T);
+                    i := 0; // TODO : inline_enumerate
+                    tag_value := self.tag().ordinal();
+                    result := T.uninitialized();
+                    inline_for T.get_variants() { $f | 
+                        if i == tag_value {|
+                            result&.tag_ptr()[] = tag_value;
+                            in := T.get_variant_ptr_for(self, f);
+                            out := T.get_variant_ptr_for(result&, f);
+                            out[] = @if(@run f[]._1.has_pointers(), in.deep_clone(a), in[]);
+                            return(result);
+                        };
+                        i += 1;
+                    };
+                    // TODO: @safety unreachable_unchecked so you don't bloat the code. i don't trust that llvm can notice my tag preconditions. 
+                    panic("Tried to clone @tagged with invalid tag value. Uninitilized memory?")
+                }
+                fn Ptr($inner) => {
+                    mem := a.alloc(inner[], 1);
+                    mem.ptr[] = self[].deep_clone(a);
+                    mem.ptr
+                }
+                @default => :: {
+                    debug_log_type(T);
+                    panic("Unsupported type for AutoClone")
+                };
+            }
+        })
+    }
+}
