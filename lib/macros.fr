@@ -10,7 +10,7 @@ fn literal(arg: AstExpr, target: AstExpr) AstExpr = @{
 };
 
 fn if(cond: FatExpr, do: FatExpr) FatExpr #macro = {
-    @{ @if(@[cond], => @[do], =>()) }
+    @{ @if(@[cond], @[do], ()) }
 }
 
 // Same as the two argument version but infers the type. 
@@ -24,225 +24,9 @@ fn literal(arg: AstExpr) AstExpr = @{
 // TODO: it does that by name tho! so its a very bad idea to shadow this with another macro. HACK
 fn as(T: Type, expr: FatExpr) FatExpr = @{ @as(@[@literal(T)]) @[expr] };
 
+
 // TODO: once i have an asm backend, this can become a jump table which is pretty cool. 
 // TODO: this has a referential transparency problem
-// TODO: should always inline the bodies, even if no captures? 
-#macro 
-fn new_match(arg: FatExpr, target: FatExpr) FatExpr = {
-    loc := arg.loc;
-    stmts := target.expr.Block.body.items();
-    arg = compile_ast(arg);
-    enum_type := arg.ty;
-    info := get_type_info_raw(enum_type);
-    
-    un_raw := enum_type.get_type_info();
-    if un_raw&.is(.Enum) {|
-        return(match_on_enum(arg, un_raw, stmts));
-    };
-    
-    is_ptr := false;
-    if info&.is(.Ptr) {|
-        enum_type = (@as(*Type) info.Ptr&)[];
-        info = get_type_info_raw(enum_type);
-        is_ptr = true;
-    };
-    ptr_ty := *enum_type;
-    
-    @ct_assert(!info&.is(.Enum), arg.loc, "to @match on an @enum, dereference the pointer"); // TODO: just do it
-    @ct_assert(info&.is(.Tagged), arg.loc, "@match expected argument type to be @tagged");
-    info := info.Tagged;
-    
-    varients := info.cases.items();
-
-    
-    // TODO: typecheck err message (forgot to deref !tag) points at the wrong location in the expression. (1)
-    // TODO: when unptr_ty wasn't getting raw type, the error message was at the return value instead of here. (2)
-    // TODO: check that no duplicate handlers
-    // TODO: give error message here if invalid name instead of it showing up later in the generated code. (3)
-    //       maybe add a 'fn compile_error(Span, Str)' instead of making you use panic so its more clear and you can attach context.
-    // TODO: infer function argument type since we know it must match the enum payload,
-    //       but allow no arg if you just want to use it as a switch. 
-    // TODO: use default arguments as value eq guards. 
-    
-    ::if(FatExpr);
-    @{
-        arg_val := @[if(is_ptr, => @{ @as(void)unit }, => arg)];
-        arg_ptr := @[if(is_ptr, =>arg, => @{ arg_val& })];
-        :: tagged(@[@literal enum_type]);
-        tag_val := arg_ptr.tag().ordinal();
-        // TODO: when safety checks are on don't do the default branch even for garbage tag.
-        //       in fast mode tho make that UB.  -- Jul 9
-        @[{
-            // If there's no @default, this is hit by invalid tags. 
-            // TODO: when enabled just used @safety? so the message isn't different when you have a @default branch. 
-            body: FatExpr = if(safety_check_enabled(.InvalidTag), => @{ 
-                // TODO: make this a build option / safety check. all could have None/Abort/Panic/Verbose
-                @println("tag=%, expected 0..<%", tag_val, @[@literal varients.len]);
-                panic("matched on invalid tag! Uninitialized memory?") 
-            }, => @{ unreachable() }); // TODO: tell llvm unreachable_unchecked when the safety check is off?
-            count := 0;
-            i := stmts.len.sub(1);
-            first := true;
-            had_default := false;
-            while(=> i.ge(0)) {|
-                continue :: local_return;
-                stmt: *FatStmt = stmts.index(i); 
-                i -= 1;
-                
-                expand_case_body :: fn(closure: *Func) void => {
-                    index := tag_value(enum_type, closure.name); // they're always sequential (TODO: assert on the enum type)
-                    (name, ty) := varients.get(index);
-                    assert(name.eq(closure.name), "ICE: bad enum index");
-                    
-                    if(is_ptr){|
-                        p: TypeInfo = (Ptr = ty);
-                        ty = intern_type(p); // TODO: should work to pass @as(TypeInfo) (Ptr = ty) directly
-                    };
-            
-                    // If they didn't say the argument type, we can fill it in based on the varient name. 
-                    // If they don't put an argument, just ignore the value. Have to set the type because it defaults to void. 
-                    bindings := closure.arg.bindings.items();
-                    if(bindings.len.eq(1)){|
-                        first := bindings[0]&;
-                        infer := first.ty&.is(.Infer);
-                        no_name := first.name&.is(.None); 
-                        if  infer.or(no_name) {|
-                            first.ty = (Finished = ty);
-                        };
-                    };
-                    case_access := @{ arg_ptr.___ };
-                    case_access := case_access.expr.Block.result[];
-                    case_access.expr.FieldAccess.name = name;  // (3)
-                    tag := @{ tag_value(@[@literal(Type) enum_type], @[@literal(name)]) };
-                    if(is_ptr){|
-                        case_access = @{ @[case_access]& };
-                    };
-                    count = count.add(1);
-                    callable: FatExpr = (expr = (Closure = closure), loc = closure.loc, ty = UnknownType, done = false); 
-                    body = @{ @if(eq(tag_val, @[tag]), => @[callable](@[case_access]), => @[body]) };
-                };
-                
-                // This allows you to leave off the extra brackets! easy now that i delay hositing constants. which in hindsight was a change i made a long time ago. 
-                if stmt.stmt&.is(.DeclFunc) {|
-                    // TODO: warn if it looks like they're trying to add to an overload set? -- Jul 5
-                    f := stmt.stmt.DeclFunc;
-                    expand_case_body(f);
-                    stmt.stmt = .Noop;
-                };
-                
-                if stmt.stmt&.is(.Eval) {|  // (1)
-                    handler_body := stmt.stmt.Eval&;
-                    if handler_body.expr&.is(.Closure) {| 
-                        expand_case_body(handler_body.expr.Closure);
-                    } {| // else
-                        // TODO: better error message if its a call because they forgot a semi-colon. 
-                        //debug_log_ast(handler_body[]);
-                        assert(handler_body.expr&.is(.PrefixMacro), "expected @default");
-                        branch := handler_body.expr.PrefixMacro&;
-                        macro := branch.handler;
-                        assert(macro.expr&.is(.GetNamed), "expected @default"); // TODO: bring back safety checks on tagged field access. 
-                        name := macro.expr.GetNamed; // TODO: ^ allow GetVar becuase they might have shadowed 'case' and 'default'? or should we respect their shadowing once you're allowed to expand custom macros in there. even then should give warning cause its confusing.  
-                        arg := branch.arg;
-                        action := branch.target[];
-                        assert(name.eq(@symbol default), "unhandled prefix in @match");
-                        assert(first, "@default must be the last handler in @match");
-                        // Note: we throw away the starting body
-                        if safety_check_enabled(.InvalidTag) {|
-                            body = @{ 
-                                @safety(.InvalidTag) tag_val < @[@literal varients.len];
-                                @[action]() 
-                            };
-                        } else {|
-                            body = @{ @[action]() };
-                        };
-                        had_default = true;
-                    };
-                    stmt.stmt = .Noop;
-                };
-            };
-            // TODO: check that the handlers are unique! this just checks that its the right number of them. 
-            @ct_assert(!count.ne(varients.len).and(not(had_default)), loc, "wrong number of @match cases",);
-            @ct_assert(not(had_default).or(count.lt(varients.len)), loc, "@default but too many @match cases");
-            body
-        }]
-    }
-}
-
-fn match_on_enum(arg: FatExpr, info: TypeInfo, stmts: [] FatStmt) FatExpr = {
-    info := info.Enum;
-    
-    varients := info.fields.items();
-    
-    // TODO: why can't i call 'as'? ffi unique? 
-    body: FatExpr = @{ panic("matched on invalid tag???") }; 
-    
-    ::if(FatExpr);
-    @{
-        tag_val := @[arg].raw();
-        @[{
-            count := 0;
-            i := stmts.len.sub(1);
-            first := true;
-            had_default := false;
-            while(=> i.ge(0)) {|
-                continue :: local_return;
-                stmt: *FatStmt = stmts.index(i); 
-                i -= 1;
-                
-                expand_case_body :: fn(closure: *Func) void => {
-                    _ := tag_value(arg.ty, closure.name);  // just make sure the name exists
-                    tag := @{ tag_value(@[@literal(Type) arg.ty], @[@literal(closure.name)]) };
-                    count = count.add(1);
-                    callable: FatExpr = (expr = (Closure = closure), loc = closure.loc, ty = UnknownType, done = false); 
-                    body = @{ @if(eq(tag_val, @[tag]), => @[callable](), => @[body]) };
-                };
-                
-                // This allows you to leave off the extra brackets! easy now that i delay hositing constants. which in hindsight was a change i made a long time ago. 
-                if stmt.stmt&.is(.DeclFunc) {|
-                    // TODO: warn if it looks like they're trying to add to an overload set? -- Jul 5
-                    f := stmt.stmt.DeclFunc;
-                    expand_case_body(f);
-                    stmt.stmt = .Noop;
-                };
-                
-                if stmt.stmt&.is(.Eval) {|  // (1)
-                    handler_body := stmt.stmt.Eval&;
-                    if handler_body.expr&.is(.Closure) {| 
-                        expand_case_body(handler_body.expr.Closure);
-                    } {| // else
-                        // TODO: better error message if its a call because they forgot a semi-colon. 
-                        //debug_log_ast(handler_body[]);
-                        assert(handler_body.expr&.is(.PrefixMacro), "expected @default");
-                        branch := handler_body.expr.PrefixMacro&;
-                        macro := branch.handler;
-                        assert(macro.expr&.is(.GetNamed), "expected @default"); // TODO: bring back safety checks on tagged field access. 
-                        name := macro.expr.GetNamed; // TODO: ^ allow GetVar becuase they might have shadowed 'case' and 'default'? or should we respect their shadowing once you're allowed to expand custom macros in there. even then should give warning cause its confusing.  
-                        arg := branch.arg;
-                        action := branch.target[];
-                        assert(name.eq(@symbol default), "unhandled prefix in @match");
-                        assert(first, "@default must be the last handler in @match");
-                        // Note: we throw away the starting body
-                        if safety_check_enabled(.InvalidTag) {|
-                            body = @{ 
-                                @safety(.InvalidTag) tag_val < @[@literal varients.len];
-                                @[action]() 
-                            };
-                        } else {|
-                            body = @{ @[action]() };
-                        };
-                        had_default = true;
-                    };
-                    stmt.stmt = .Noop;
-                };
-            };
-            // TODO: check that the handlers are unique! this just checks that its the right number of them. 
-            @ct_assert(!count.ne(varients.len).and(not(had_default)), arg.loc, "wrong number of @match cases",);
-            @ct_assert(not(had_default).or(count.lt(varients.len)), arg.loc, "@default but too many @match cases");
-            body
-        }]
-    }
-}
-
 #macro 
 fn match(arg: FatExpr, target: FatExpr) FatExpr = {
     loc := arg.loc;
@@ -339,7 +123,6 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
                     callable: FatExpr = (expr = (Closure = closure), loc = closure.loc, ty = UnknownType, done = false); 
                     case := (index, @{ @[callable](@[case_access]) } );
                     cases&.push(case);
-                    
                 };
                 
                 // This allows you to leave off the extra brackets! easy now that i delay hositing constants. which in hindsight was a change i made a long time ago. 
@@ -383,12 +166,92 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
             // TODO: check that the handlers are unique! this just checks that its the right number of them. 
             @ct_assert(!count.ne(varients.len).and(not(had_default)), loc, "wrong number of @match cases",);
             @ct_assert(not(had_default).or(count.lt(varients.len)), loc, "@default but too many @match cases");
-            default_box := ast_alloc().alloc(FatExpr, 1);
-            default_box.ptr[] = default;
-            value_box := ast_alloc().alloc(FatExpr, 1);
-            value_box.ptr[] = @{ tag_val };
-            switch: FatExpr = (expr = (Switch = (value = value_box.ptr, default = default_box.ptr, cases = cases.rs())), loc = arg.loc, ty = UnknownType, done = false); 
-            switch
+            make_switch(@{ tag_val }, default, cases)
+        }]
+    }
+}
+
+fn make_switch(value: FatExpr, default: FatExpr, cases: List(Ty(i64, FatExpr))) FatExpr = {
+    default_box := ast_alloc().alloc(FatExpr, 1);
+    default_box.ptr[] = default;
+    value_box := ast_alloc().alloc(FatExpr, 1);
+    value_box.ptr[] = value;
+    switch: FatExpr = (expr = (Switch = (value = value_box.ptr, default = default_box.ptr, cases = cases.rs())), loc = value.loc, ty = UnknownType, done = false); 
+    switch
+}
+
+fn match_on_enum(arg: FatExpr, info: TypeInfo, stmts: [] FatStmt) FatExpr = {
+    info := info.Enum;
+    
+    varients := info.fields.items();
+    cases: List(Ty(i64, FatExpr)) = list(ast_alloc());
+    
+    // TODO: why can't i call 'as'? ffi unique? 
+    default: FatExpr = @{ panic("matched on invalid tag???") }; 
+    
+    ::if(FatExpr);
+    @{
+        tag_val := @[arg].raw();
+        @[{
+            count := 0;
+            i := stmts.len.sub(1);
+            first := true;
+            had_default := false;
+            while(=> i.ge(0)) {|
+                continue :: local_return;
+                stmt: *FatStmt = stmts.index(i); 
+                i -= 1;
+                
+                expand_case_body :: fn(closure: *Func) void => {
+                    index := tag_value(arg.ty, closure.name);  // just make sure the name exists
+                    count = count.add(1);
+                    callable: FatExpr = (expr = (Closure = closure), loc = closure.loc, ty = UnknownType, done = false); 
+                    case := (index, @{ @[callable]() } );
+                    cases&.push(case);
+                };
+                
+                // This allows you to leave off the extra brackets! easy now that i delay hositing constants. which in hindsight was a change i made a long time ago. 
+                if stmt.stmt&.is(.DeclFunc) {|
+                    // TODO: warn if it looks like they're trying to add to an overload set? -- Jul 5
+                    f := stmt.stmt.DeclFunc;
+                    expand_case_body(f);
+                    stmt.stmt = .Noop;
+                };
+                
+                if stmt.stmt&.is(.Eval) {|  // (1)
+                    handler_body := stmt.stmt.Eval&;
+                    if handler_body.expr&.is(.Closure) {| 
+                        expand_case_body(handler_body.expr.Closure);
+                    } {| // else
+                        // TODO: better error message if its a call because they forgot a semi-colon. 
+                        //debug_log_ast(handler_body[]);
+                        assert(handler_body.expr&.is(.PrefixMacro), "expected @default");
+                        branch := handler_body.expr.PrefixMacro&;
+                        macro := branch.handler;
+                        assert(macro.expr&.is(.GetNamed), "expected @default"); // TODO: bring back safety checks on tagged field access. 
+                        name := macro.expr.GetNamed; // TODO: ^ allow GetVar becuase they might have shadowed 'case' and 'default'? or should we respect their shadowing once you're allowed to expand custom macros in there. even then should give warning cause its confusing.  
+                        arg := branch.arg;
+                        action := branch.target[];
+                        assert(name.eq(@symbol default), "unhandled prefix in @match");
+                        assert(first, "@default must be the last handler in @match");
+                        // Note: we throw away the starting body
+                        if safety_check_enabled(.InvalidTag) {|
+                            default = @{ 
+                                @safety(.InvalidTag) tag_val < @[@literal varients.len];
+                                @[action]() 
+                            };
+                        } else {|
+                            default = @{ @[action]() };
+                        };
+                        had_default = true;
+                    };
+                    stmt.stmt = .Noop;
+                };
+            };
+            // TODO: check that the handlers are unique! this just checks that its the right number of them. 
+            @ct_assert(!count.ne(varients.len).and(not(had_default)), arg.loc, "wrong number of @match cases",);
+            @ct_assert(not(had_default).or(count.lt(varients.len)), arg.loc, "@default but too many @match cases");
+            make_switch(@{ tag_val }, default, cases)
         }]
     }
 }
@@ -459,7 +322,7 @@ fn switch(arg: FatExpr, handlers: FatExpr) FatExpr = {
                         // TODO: probably want to require arg to be constant so it could eventually become a jump table. 
                         // TODO: improve error message if you try to pass the ast of a type instead of the type. alas I chose the same name as the as macro so it still tpyechecks. -- Apr 21
                         cond := @{ eq(arg_var, @[as(inspected_ty, arg[])]) };
-                        body = @{ @if(@[cond], =>@[action](), =>@[body]) };
+                        body = @{ @if(@[cond], @[action](), @[body]) };
                     } {|
                         if(name.eq(@symbol default)) {|
                             if(first) {|
@@ -485,7 +348,7 @@ fn switch(arg: FatExpr, handlers: FatExpr) FatExpr = {
                                     (min, max) := @[as(Ty(inspected_ty, inspected_ty), arg[])];
                                     arg_var.ge(min).and(arg_var.le(max))
                                 };
-                                body = @{ @if(@[cond], =>@[action](), =>@[body]) };
+                                body = @{ @if(@[cond], @[action](), @[body]) };
                             }{|
                                 // TODO: try expanding the macro, maybe its a user added one and would create valid branches. 
                                 compile_error("unhandled prefix in @switch", stmt.loc);

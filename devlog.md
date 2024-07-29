@@ -12,9 +12,10 @@ I have mixed feelings about adding redundant things, like it would be conceptual
 but also 5% for like 80 lines extra (once i remove the old @match impl) is pretty damn good.
 and it kinda is easier to think about if you ever have to look at the ast for debugging the compiler if it matches more closely with whats actually happening.
 
-- TODO: qbe inst_switch, use Switch node for @switch and @match on enums (rn only do it for @tagged-s)
-
-maybe I'll try making @if at least not expect closures so insert the call in the code instead of in the compiler.
+- @match on enums (not only for @tagged-s), down to 415ms.
+- maybe I'll try making @if at least not expect closures so insert the call in the code instead of in the compiler.
+  that takes it down to 405ms. @loop remove extra lambda makes it 395ms. and those changes were nice because they deleted code.
+- TODO: qbe inst_switch, use Switch node for @switch
 
 ## (Jul 25)
 

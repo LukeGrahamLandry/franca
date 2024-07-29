@@ -1806,6 +1806,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // Now evaluate whatever the macro gave us.
                 return self.compile_expr(expr, requested);
             }
+            // TODO: should i convert all if to this? should i convert switching over 0/1 (like Option) to if? 
             Expr::Switch { value, default, cases } => {
                 self.compile_expr(value, ResultType::Specific(TypeId::i64()))?;
                 fn unify(expect: &mut ResultType, new: TypeId) {
@@ -2722,9 +2723,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         let Expr::If { cond, if_true, if_false } = &mut if_macro.expr else {
             err!("expected !if",)
         };
-        let unit = TypeId::unit;
-        let sig = "if(bool, fn(Unit) T, fn(Unit) T)";
-        let mut unit_expr = self.as_literal((), cond.loc)?;
         let cond_ty = self.compile_expr(cond, want(TypeId::bool()))?;
         self.type_check_arg(cond_ty, TypeId::bool(), "bool cond")?;
 
@@ -2735,76 +2733,37 @@ impl<'a, 'p> Compile<'a, 'p> {
         if let Some(val) = cond.as_const() {
             let cond: bool = from_values(self.program, val)?;
             let chosen = if cond { if_true } else { if_false };
-            let Some(branch_body) = self.maybe_direct_fn(chosen, &mut unit_expr, requested)? else {
-                ice!("!if arg must be func not {:?}", chosen);
-            };
-
-            let branch_arg = self.infer_arg(branch_body)?;
-            self.type_check_arg(branch_arg, unit, sig)?;
-            self.program[branch_body].set_cc(CallConv::Inline)?; // hack
-            self.emit_call_on_unit(branch_body, chosen, requested)?;
-            assert!(self.program[branch_body].finished_ret.is_some());
             // Now we fully dont emit the branch
             // TODO: this is wrong, the cond could have returned a const but still had rt side effects (like if it was a block { blow_up_moon(); true }) -- May 2
             *if_macro = mem::take(chosen);
-
             // need to force the compile again to keep if constant for nested folding.
             return self.compile_expr(if_macro, requested);
         }
-
-        let (mut true_ty, expect_fn) = if let Some(if_true_fn) = self.maybe_direct_fn(if_true, &mut unit_expr, requested)? {
-            self.program[if_true_fn].set_cc(CallConv::Inline)?; // hack
-            let true_arg = self.infer_arg(if_true_fn)?;
-            self.type_check_arg(true_arg, unit, sig)?;
-            (self.emit_call_on_unit(if_true_fn, if_true, requested)?, true)
-        } else if if_true.ty.is_unknown() {
-            ice!("if second arg must be func not {}", if_true.log(self.program.pool));
-        } else {
-            (if_true.ty, false)
-        };
-        if expect_fn {
-            let wanted = requested.specific().or(Some(true_ty));
-            let Some(if_false_fn) = self.maybe_direct_fn(if_false, &mut unit_expr, wanted.into())? else {
-                ice!("if third arg must be func not {:?}", if_false);
-            };
-            self.program[if_false_fn].set_cc(CallConv::Inline)?; // hack
-            let false_arg = self.infer_arg(if_false_fn)?;
-            self.type_check_arg(false_arg, unit, sig)?;
-            let false_ty = self.emit_call_on_unit(if_false_fn, if_false, requested)?;
-            self.type_check_arg(true_ty, false_ty, sig)?;
-            if true_ty.is_never() {
-                true_ty = false_ty;
-            }
-
-        } else {
-            assert!(!if_false.ty.is_unknown());
-            self.type_check_arg(true_ty, if_false.ty, sig)?;
-            if true_ty.is_never() {
-                true_ty = if_false.ty;
-            }
+        
+        let mut true_ty = self.compile_expr(if_true, requested)?;
+        let wanted = requested.specific().or(Some(true_ty));
+        
+        let false_ty = self.compile_expr(if_false, match wanted {
+            Some(t) => ResultType::Specific(t),
+            None => requested,
+        })?;
+        self.type_check_arg(true_ty, false_ty, "@if(bool, T, T)")?;
+        if true_ty.is_never() {
+            true_ty = false_ty;
         }
         Ok(true_ty)
     }
 
     fn emit_call_loop(&mut self, while_macro_arg: &mut FatExpr<'p>) -> Res<'p, TypeId> {
         if !while_macro_arg.ty.is_unknown() {
-            // We've been here before and already replaced closures with calls.
+            // We've been here before.
             return Ok(TypeId::unit);
         }
 
-        let sig = "loop(fn(Unit) Unit)";
-        let mut unit_expr = self.as_literal((), while_macro_arg.loc)?;
-
-        if let Some(body_fn) = self.maybe_direct_fn(while_macro_arg, &mut unit_expr, want(TypeId::unit))? {
-            self.program[body_fn].set_cc(CallConv::Inline)?; // hack
-            let body_arg = self.infer_arg(body_fn)?;
-            self.type_check_arg(body_arg, TypeId::unit, sig)?;
-            let body_ret = self.emit_call_on_unit(body_fn, while_macro_arg, want(TypeId::unit))?;
-            self.type_check_arg(body_ret, TypeId::unit, sig)?;
-        } else {
-            todo!("shouldnt get here twice")
-        }
-        while_macro_arg.ty = TypeId::unit; // TODO: this isn't true!
+        let sig = "loop(Unit)";
+        let body_ret = self.compile_expr(while_macro_arg, want(TypeId::unit))?;
+        self.type_check_arg(body_ret, TypeId::unit, sig)?;
+        while_macro_arg.ty = TypeId::unit; 
         while_macro_arg.done = true;
 
         Ok(TypeId::never)
@@ -3427,15 +3386,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             // Don't need to explicitly force capturing because bind_const_arg added them if any args were closures.
             Ok(new_fid)
         }
-    }
-
-    fn emit_call_on_unit(&mut self, cond_fn: FuncId, expr_out: &mut FatExpr<'p>, requested: ResultType) -> Res<'p, TypeId> {
-        let (e, ty) = self.func_expr(cond_fn);
-        let get_fn = FatExpr::synthetic_ty(e, expr_out.loc, ty);
-        let unit = self.as_literal((), expr_out.loc)?;
-        expr_out.expr = Expr::Call(Box::new(get_fn), Box::new(unit));
-        expr_out.ty = self.program[cond_fn].finished_ret.unwrap_or(TypeId::unknown);
-        self.compile_expr(expr_out, requested)
     }
 
     // TODO: debug warning for misuse of #inline and #one_ret_pic
