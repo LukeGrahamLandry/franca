@@ -5,7 +5,7 @@ use crate::{
     bc::{BakedEntry, Values},
     compiler::{CErr, Compile, CompileError, ExecStyle, Res},
     err,
-    export_ffi::{BigOption, ImportVTable},
+    export_ffi::{BigOption, ExportVTable, ImportVTable},
     ffi::InterpSend,
     logging::make_err,
 };
@@ -26,12 +26,16 @@ pub struct SelfHosted<'p> {
     a: PhantomData<&'p u8>,
 }
 
+#[repr(C)]
 pub struct ComptimeEnvironment {
     pub inject_function_header: BigOption<(FuncId, FuncId)>,
     pub make_slice_t: BigOption<FuncId>,
     pub bake_os: BigOption<OverloadSetId>,
     pub fat_expr_type: BigOption<TypeId>,
     pub intrinsic_type: BigOption<TypeId>,
+    _build_options: usize,
+    pub unquote_placeholders: BigOption<FuncId>,
+    pub driver_vtable: (Box<ExportVTable>, *mut ()),
 }
 
 #[repr(C)]

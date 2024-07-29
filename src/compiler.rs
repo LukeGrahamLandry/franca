@@ -11,7 +11,7 @@ use std::fmt::Write;
 use std::hash::Hash;
 use std::mem::{self, transmute};
 use std::ops::DerefMut;
-use std::ptr::{self, addr_of};
+use std::ptr::addr_of;
 use std::sync::atomic::AtomicIsize;
 use std::panic::Location;
 
@@ -21,7 +21,7 @@ use crate::ast::{
     FuncImpl, IntTypeInfo, LabelId, Name, OverloadSet, OverloadSetId, Pattern, ScopeId,  Var, VarType, WalkAst,
 };
 
-use crate::export_ffi::{struct_macro, tagged_macro, type_macro, BigOption, BigResult, ExportVTable, ImportVTable, IMPORT_VTABLE};
+use crate::export_ffi::{struct_macro, tagged_macro, type_macro, BigOption, BigResult, ImportVTable, IMPORT_VTABLE};
 use crate::ffi::InterpSend;
 use crate::logging::PoolLog;
 use crate::overloading::where_the_fuck_am_i;
@@ -68,7 +68,6 @@ pub struct Compile<'a, 'p> {
     pub next_label: usize,
     pub wip_stack: Vec<(Option<FuncId>, ExecStyle)>,
     pending_redirects: Vec<(FuncId, FuncId)>,
-    pub driver_vtable: (Box<ExportVTable>, *mut ()),
 }
 
 // TODO: track location of macro expansions and have flag to dump them when printing error messages error messages.
@@ -94,7 +93,6 @@ impl<'a, 'p> Compile<'a, 'p> {
     pub(crate) fn new(program: &'a mut Program<'p>) -> Self {
         let c = Self {
             temp_vtable: addr_of!(IMPORT_VTABLE),
-            driver_vtable: (Default::default(), ptr::null_mut()),
             pending_redirects: vec![],
             wip_stack: vec![],
             debug_trace: vec![],
@@ -688,7 +686,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             };
 
             let name = self.program[f].name;
-            let (vtable, data) = &self.driver_vtable;
+            let (vtable, data) = &self.program.pool.env.driver_vtable;
             if let BigOption::Some(callback) = vtable.resolve_comptime_import {
                 if let BigOption::Some(addr) = unsafe { callback(*data, self, f, lib_name, name) } {
                     self.program[f].body = FuncImpl::Merged(vec![FuncImpl::ComptimeAddr(addr as usize), FuncImpl::DynamicImport(name)]);
@@ -1577,7 +1575,14 @@ impl<'a, 'p> Compile<'a, 'p> {
                         loc,
                     ));
                     let arg = FatExpr::synthetic(Expr::Slice(arg), loc);
-                    let f = self.program.find_unique_func(Flag::Unquote_Macro_Apply_Placeholders.ident()).unwrap(); // TODO
+                    let f = match self.program.pool.env.unquote_placeholders {
+                        BigOption::Some(s) => s,
+                        BigOption::None => {
+                            let f = self.program.find_unique_func(Flag::Unquote_Macro_Apply_Placeholders.ident()).unwrap();
+                            self.program.pool.env.unquote_placeholders = BigOption::Some(f);
+                            f
+                        }
+                    };
                     let _ = self.infer_types(f)?.unwrap();
                     let f = FatExpr::synthetic_ty(Expr::Value { value: (f.as_raw()).into(), coerced: false }, loc, self.program.func_type(f));
                     *expr = FatExpr::synthetic_ty(Expr::Call(Box::new(f), Box::new(arg)), loc, ty);

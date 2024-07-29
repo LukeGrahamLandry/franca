@@ -14,6 +14,15 @@ fn fill_driver_vtable(vtable: *ImportVTable) void = {
     vtable.get_function = fn(c: Compiler, f: FuncId) *Func = {
         c.cast()[][].get_function(f)
     };
+    vtable.make_jitted_exec = fn(c: Compiler) void = {
+        c := c.cast()[][]; // TODO: can't inline cause it confuses deduplicator. -- Jul 29
+        c.aarch64&.bump_dirty();
+    };
+    vtable.give_vtable = fn(c: Compiler, vptr: *ExportVTable, userdata: rawptr) void = {
+        c := c.cast()[][];
+        c.env.driver_vtable_ptr = ExportVTable.raw_from_ptr(vptr);
+        c.env.driver_vtable_user_data = userdata;
+    };
     @if(ENABLE_QBE_BACKEND) {
         vtable.emit_qbe = emit_qbe; // TODO: have a compile option to not include the things you don't need for bootstrapping. so i can commit a smaller blob. 
     };
@@ -207,6 +216,28 @@ fn fill_export_ffi(out: *List(u8)) void = {
         if(check.raw() >= build_options.safety_checks&.len(), => return(true)); // allow adding new safety checks and then bootstrapping. 
         build_options.safety_checks&.index(check)[]
     }
+     
+    @fmt(out, "fn get_type_info_ref(T: Type) *TypeInfo #fold #ct #comptime_addr(%);\n", ty_info);
+    ty_info: rawptr : fn(c: CompilerRs, ty: Type) *TypeInfo = {
+        info := c[][].get_type(ty);
+        while => info.is(.Named) {|
+            info = c[][].get_type(info.Named._0);
+        };
+        info
+    };
+    
+    @fmt(out, "fn Ty(fst: Type, snd: Type) Type #fold #ct #comptime_addr(%);\n", tuple2);
+    tuple2: rawptr : fn(c: CompilerRs, fst: Type, snd: Type) Type = {
+        c[][].tuple_of(@slice(fst, snd))
+    };
+    @fmt(out, "fn Ty(fst: Type, snd: Type, trd: Type) Type #fold #ct #comptime_addr(%);\n", tuple3);
+    tuple3: rawptr : fn(c: CompilerRs, fst: Type, snd: Type, trd: Type) Type = {
+        c[][].tuple_of(@slice(fst, snd, trd))
+    };
+    @fmt(out, "fn Ty(fst: Type, snd: Type, trd: Type, frt: Type) Type #fold #ct #comptime_addr(%);\n", tuple4);
+    tuple4: rawptr : fn(c: CompilerRs, fst: Type, snd: Type, trd: Type, frt: Type) Type = {
+        c[][].tuple_of(@slice(fst, snd, trd, frt))
+    };
 }
 
 fn get_build_options(c: *SelfHosted) *BuildOptions = {

@@ -930,34 +930,10 @@ impl<'p> Program<'p> {
     }
 
     pub(crate) fn tuple_of(&mut self, types: Vec<TypeId>) -> TypeId {
-        match types.len() {
-            0 => TypeId::unit,
-            1 => types[0],
-            _ => {
-                // TODO: always. would need to change how you go arg_ty -> prim_sig.
-                if types.len() > 50 {
-                    let first = types[0];
-                    if types.iter().all(|t| *t == first) {
-                        return self.intern_type(TypeInfo::Array {
-                            inner: first,
-                            len: types.len() as u32,
-                        });
-                    }
-                }
-
-                // TODO: dont allocate the string a billion times
-                let info = self
-                    .make_struct(
-                        types
-                            .iter()
-                            .enumerate()
-                            .map(|(i, ty)| Ok((*ty, self.pool.intern(&format!("_{i}")), None, VarType::Var))),
-                        true,
-                    )
-                    .unwrap();
-                self.intern_type(info)
-            }
+        extern "C" {
+            fn tuple_of(s: &mut SelfHosted, types: &[TypeId]) -> TypeId;
         }
+        unsafe { tuple_of(self.pool, &types) }
     }
 
     pub(crate) fn make_struct(

@@ -3,7 +3,7 @@
 use crate::self_hosted::{resolve_root, show_error_line, ParseErr, SelfHosted};
 
 use crate::ast::{
-    garbage_loc, CallConv, Expr, FatExpr, FatStmt, Flag, FnType, Func, FuncId, IntTypeInfo, LazyType, Pattern, Program, ScopeId, TargetArch, TypeId,
+    garbage_loc, CallConv, Expr, FatExpr, FatStmt, Flag, FnType, FuncId, IntTypeInfo, LazyType, Pattern, Program, ScopeId, TargetArch, TypeId,
     TypeInfo, TypeMeta, WalkAst,
 };
 use crate::bc::{from_values, Values};
@@ -63,12 +63,6 @@ impl<T> BigOption<T> {
         !self.is_none()
     }
 
-    pub(crate) fn unwrap_or(self, other: T) -> T {
-        match self {
-            BigOption::Some(t) => t,
-            BigOption::None => other,
-        }
-    }
     pub(crate) fn take(&mut self) -> Option<T>
     where
         T: Default,
@@ -206,8 +200,8 @@ pub struct ImportVTable {
     _add_file: usize,
     _parse_stmts: usize,
     make_and_resolve_and_compile_top_level: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, body: *const [FatStmt<'p>]) -> BigCErr<'p, ()>,
-    make_jitted_exec: unsafe extern "C" fn(c: &mut Compile),
-    give_vtable: unsafe extern "C" fn(c: &mut Compile, vtable: *const ExportVTable, userdata: *mut ()),
+    make_jitted_exec: usize,
+    give_vtable: usize,
     _k: usize,
     comptime_arch: unsafe extern "C" fn() -> (i64, i64),
     _c: usize,
@@ -223,13 +217,12 @@ pub struct ImportVTable {
     _j: usize,
     _bake_var: usize,
     _h: usize,
-    clone_expr: for<'p> extern "C" fn(e: &FatExpr<'p>) -> FatExpr<'p>,
-    clone_type: for<'p> extern "C" fn(e: &LazyType<'p>) -> LazyType<'p>,
+    clone_expr: usize,
+    clone_type: usize,
     _o: usize,
     _n: usize,
-    log_type: extern "C" fn(compile: &mut Compile, e: TypeId) -> *const str,
+    log_type: usize,
     check_for_new_aot_bake_overloads: for<'p> extern "C" fn(comp: &mut Compile<'_, 'p>) -> Res<'p, ()>,
-    clone_func: for<'p> extern "C" fn(e: &Func<'p>) -> Func<'p>,
 }
 
 #[repr(C)]
@@ -254,8 +247,8 @@ pub static IMPORT_VTABLE: ImportVTable = ImportVTable {
     _add_file: 0xbeefbeefbeef,
     _parse_stmts: 0xbeefbeefbeef,
     make_and_resolve_and_compile_top_level,
-    make_jitted_exec,
-    give_vtable,
+    make_jitted_exec: 0,
+    give_vtable: 0,
     _k: 0xbeefbeefbeef,
     comptime_arch,
     _c: 0,
@@ -271,13 +264,12 @@ pub static IMPORT_VTABLE: ImportVTable = ImportVTable {
     _j: 0,
     _bake_var: 0xbeefbeefbeef,
     _h: 0,
-    clone_expr,
-    clone_type,
+    clone_expr: 0,
+    clone_type: 0,
     _o: 0,
     _n: 0,
-    log_type: franca_log_type,
+    log_type: 0,
     check_for_new_aot_bake_overloads,
-    clone_func,
 };
 
 // TODO: cant just call the thing because lifetime?
@@ -286,18 +278,6 @@ extern "C" fn check_for_new_aot_bake_overloads<'p>(compile: &mut Compile<'_, 'p>
 }
 extern "C" fn franca_log_type(compile: &mut Compile, e: TypeId) -> *const str {
     compile.program.log_type(e).leak() as *const str
-}
-
-extern "C" fn clone_expr<'p>(e: &FatExpr<'p>) -> FatExpr<'p> {
-    e.clone()
-}
-
-extern "C" fn clone_type<'p>(e: &LazyType<'p>) -> LazyType<'p> {
-    e.clone()
-}
-
-extern "C" fn clone_func<'p>(e: &Func<'p>) -> Func<'p> {
-    e.clone()
 }
 
 unsafe extern "C" fn comptime_arch() -> (i64, i64) {
@@ -363,14 +343,6 @@ unsafe extern "C" fn make_and_resolve_and_compile_top_level<'p>(c: &mut Compile<
     Ok(())
 }
 
-unsafe extern "C" fn make_jitted_exec(c: &mut Compile) {
-    c.flush_cpu_instruction_cache();
-}
-
-unsafe extern "C" fn give_vtable(c: &mut Compile, vtable: *const ExportVTable, userdata: *mut ()) {
-    c.driver_vtable = (Box::new((*vtable).clone()), userdata)
-}
-
 // pub(crate) fn __clear_cache(beg: *mut libc::c_char, end: *mut libc::c_char);
 // IMPORTANT: since compile is repr(C), &mut &mut Program === &mut Compile
 pub const COMPILER: &[(&str, *const u8)] = &[
@@ -380,9 +352,9 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     ("fn index_to_func_id(func_index: i64) FuncId", index_to_func_id as *const u8),
     // TODO: all these type ones could use ffi TypeInfo if i gave it `#ct fn intern_type`
     // Ideally this would just work with tuple syntax but L((a, b), c) === L(a, b, c) !=== L(Ty(a, b), c) because of arg flattening.
-    ("fn Ty(fst: Type, snd: Type) Type #fold;", pair_type as *const u8),
-    ("fn Ty(fst: Type, snd: Type, trd: Type) Type #fold;", triple_type as *const u8),
-    ("fn Ty(fst: Type, snd: Type, trd: Type, frt: Type) Type #fold;", quad_type as *const u8),
+    // ("fn Ty(fst: Type, snd: Type) Type #fold;", pair_type as *const u8),
+    // ("fn Ty(fst: Type, snd: Type, trd: Type) Type #fold;", triple_type as *const u8),
+    // ("fn Ty(fst: Type, snd: Type, trd: Type, frt: Type) Type #fold;", quad_type as *const u8),
     // The type of 'fun(Arg) Ret'. This is a comptime only value.
     // All calls are inlined, as are calls that pass one of these as an argument.
     // Captures of runtime variables are allowed since you just inline everything anyway.

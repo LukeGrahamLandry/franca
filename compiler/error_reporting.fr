@@ -307,5 +307,93 @@ fn unwrap(arg: FatExpr, ret: FatExpr) FatExpr #macro = {
 }
 
 fn log_type(self: *SelfHosted, ty: Type) Str = {
-    "TODO:log_type"
+    safe_rec: DynamicBitSet = empty(temp());
+    out: List(u8) = list(temp()); 
+    self.log_type_inner(safe_rec&, out&, ty);
+    out.items()
+}
+
+fn log_type_inner(self: *SelfHosted, safe_rec: *DynamicBitSet, out: *List(u8), ty: Type) void = {
+    if safe_rec.get(ty.as_index()) {|
+        @fmt(out, "TY%", ty.as_index());
+        return();
+    };
+    safe_rec.set(ty.as_index());
+    
+    // TODO
+    //if let Some(&Some(name)) = self.inferred_type_names.get(t.as_index()) {
+    //    let name = self.pool.get(name);
+    //    // HACK: need to be smarter about when to infer an assignment as a type name.
+    //    if name != "Self" && name.len() != 1 {
+    //        return name.to_string();
+    //    }
+    //}
+
+    @match(self.get_type(ty)) {
+        fn Placeholder() => out.push_all("UnfinishedPlaceHolder");
+        fn Never() => out.push_all("Never");
+        fn F64()   => out.push_all("f64");
+        fn F32()   => out.push_all("f32");
+        fn Bool()  => out.push_all("bool");
+        fn void()  => out.push_all("void");
+        fn VoidPtr() => out.push_all("rawptr");
+        fn Ptr(inner)  => {
+            out.push_all("*");
+            self.log_type_inner(safe_rec, out, inner[]);
+        }
+        fn Struct(f) => {
+            out.push_all("@struct(");
+            each f.fields { f | 
+                @fmt(out, "%: ", self.pool.get(f.name));
+                self.log_type_inner(safe_rec, out, f.ty);
+                out.push_all(",");
+            };
+            out.push_all(")");
+        }
+        fn Tagged(f) => {
+            out.push_all("@tagged(");
+            each f.cases { f | 
+                @fmt(out, "%: ", self.pool.get(f._0));
+                self.log_type_inner(safe_rec, out, f._1);
+                out.push_all(",");
+            };
+            out.push_all(")");
+        }
+        fn Enum(f) => {
+            self.log_type_inner(safe_rec, out, f.raw);
+            out.push_all(":");
+            each f.fields { f | 
+                @fmt(out, "%,", self.pool.get(f._0));
+            };
+        }
+        fn Named(f) => out.push_all(self.pool.get(f._1));
+        fn Fn(f) => {
+            out.push_all("(fn(");
+            self.log_type_inner(safe_rec, out, f.arg);
+            out.push_all(")");
+            self.log_type_inner(safe_rec, out, f.ret);
+            @fmt(out, "#arity(%))", f.arity);
+        }
+        fn FnPtr(f) => {
+            out.push_all("(fn(");
+            self.log_type_inner(safe_rec, out, f.ty.arg);
+            out.push_all(")");
+            self.log_type_inner(safe_rec, out, f.ty.ret);
+            @fmt(out, "#arity(%))", f.ty.arity);
+        }
+        fn Label(f) => {
+            out.push_all("Label(");
+            self.log_type_inner(safe_rec, out, f[]);
+            out.push_all(")");
+        }
+        fn Int(int) => {
+            @fmt(out, "%%", if(int.signed, => "i", => "u"), int.bit_count);
+        }
+        fn Array(f) => {
+            out.push_all("Array(");
+            self.log_type_inner(safe_rec, out, f.inner);
+            @fmt(out, ", %)", f.len);
+        }
+    };
+    safe_rec.unset(ty.as_index());
 }

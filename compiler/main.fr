@@ -43,6 +43,44 @@ SelfHosted :: @struct(
 
 PRes :: Result(void, ParseErr);
 
+//! Entry point that uses new self hosted sema instead of the original rust one. 
+//! For now, keep it easy to switch between them by just poking different implementations into the vtable. 
+//! TODO: When the new version actually works, go through and see what indirection can be removed. 
+fn main() void = {
+    vmem := libc_allocator.alloc(ImportVTable, 1);
+    vmem.ptr[] = ImportVTable.zeroed();
+    vtable := vmem.ptr;
+    
+    // TODO: scan overload sets instead so you can skip all the groups with the same name. :SLOW
+    vtable.find_unique_func = fn(c: Compiler, name: Ident) ?FuncId = { 
+        c := c.cast()[][];
+        found: ?FuncId = .None;
+        range(0, c.functions.len) { i |
+            func := c.functions&.nested_index(i);
+            if func.name == name {|
+                if(found.is_some(), => return(.None));
+                found = (Some = (@as(u32) i.trunc()).funcid_from_index());
+            };
+        };
+        found
+    };
+    
+    //
+    // TODO: fill these in to use sema-v2 instead of the rust version. 
+    /*
+    init_compiler,
+    compile_func,
+    get_jitted_ptr,
+    get_compiler_builtins_source,
+    check_for_new_aot_bake_overloads,
+    
+    make_and_resolve_and_compile_top_level,
+    comptime_arch,
+    */
+    
+    self_hosted_main(vtable);
+}
+
 fn self_hosted_main(vtable: *ImportVTable) void #compiler #no_trace = {
     :: by_the_way_you_are_compiling_the_compiler_right_now_just_a_helpful_hint();
     if RUNTIME_STACK_TRACE {|
@@ -139,9 +177,6 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
         mem_stats();
         exit(0)
     };
-    
-    
-    // TODO: run tests
     
     .Ok
 }
@@ -265,6 +300,11 @@ fn init_self_hosted(build_options: *BuildOptions) *SelfHosted #compiler = {
         fat_expr_type = .None,
         intrinsic_type = .None,
         build_options = BuildOptions.raw_from_ptr(build_options),
+        unquote_placeholders = .None,
+        // TODO: i should be setting this to real memory will all the fields .None because rust will be looking at it
+        //       i think this just happens to work because i always set it to something else in the driver program. 
+        driver_vtable_ptr = 0.rawptr_from_int(),  
+        driver_vtable_user_data = 0.rawptr_from_int(),
     );
     env := a.boxed(ComptimeEnvironment, env);
     self: SelfHosted = (
