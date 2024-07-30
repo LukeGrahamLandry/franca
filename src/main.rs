@@ -14,7 +14,7 @@ use std::ptr::addr_of;
 
 fn main() {
     unsafe {
-        self_hosted_main(addr_of!(IMPORT_VTABLE));
+        self_hosted_main(addr_of!(IMPORT_VTABLE), false);
     }
     unreachable!();
 }

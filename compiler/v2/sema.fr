@@ -9,6 +9,19 @@ ResultType :: @tagged(
     None
 );
 
+OverloadSetData :: @struct(
+    ready: RsVec(OverloadOption),
+    name: Symbol,
+    pending: RsVec(FuncId),
+);
+
+OverloadOption :: @struct(
+    func: FuncId,
+    arg: Type,
+    ret: ?Type, // For #generic, we might not know without the args
+    arity: u16,
+);
+
 fn compile_stmt(self: *SelfHosted, stmt: *FatStmt) Maybe(void) = {
     self.last_loc = stmt.loc;
     @match(stmt.stmt&) {
@@ -18,12 +31,12 @@ fn compile_stmt(self: *SelfHosted, stmt: *FatStmt) Maybe(void) = {
             assert(f.name.kind != .Const, "hit unhoisted constant");
             return(self.decl_var(f.name, f.ty&, f.value&))
         }
-        @default => panic("TODO: unhandled compile_stmt type");
+        @default => @panic("TODO: unhandled compile_stmt type %", stmt.stmt&.tag());
     };
     unreachable_hack(Maybe(void))
 }
 
-fn decl_var(self: *SelfHosted, name: Var, ty: *LazyType, value: *FatExpr) Maybe(void) = {
+fn decl_var(self: *SelfHosted, name: Var, ty: *LazyType, value: *FatExpr) Maybe(void) #once = {
     @println("decl_var %", name&.log(self.pool)); // :debug
     no_type := ty.is(.Infer);
     assert(no_type.or(ty.is(.Finished)), "TODO: self.infer_types_progress(ty)?;");
@@ -34,6 +47,7 @@ fn decl_var(self: *SelfHosted, name: Var, ty: *LazyType, value: *FatExpr) Maybe(
     if no_type {|
         // Since there was no type annotation, we don't need a type check. Whatever we got is the type of this variable now. 
         ty[] = (Finished = final_ty);
+        self.finish_layout_deep(final_ty).unwrap();
     } else {|
         expected_ty := ty.unwrap();
         // TODO: :delay_layout
@@ -54,6 +68,64 @@ fn decl_var(self: *SelfHosted, name: Var, ty: *LazyType, value: *FatExpr) Maybe(
     // TODO: :mark_stmt_done
     //       this function is called multiple times (if the containing block needs to yield). need to have a done flag on the fatstmt
     //       but thats easier to change once all the stuff is written in one language -- Jul 25
+    .Ok
+}
+
+fn ensure_resolved_sign(self: *SelfHosted, fid: FuncId) Maybe(void) = {
+    func := self.get_function(fid);
+    if(func.get_flag(.ResolvedSign), => return(.Ok));
+    res := self.resolve_sign(func);
+    if res&.is_err() {|
+        return(Err = self.box(res.Err));
+    };
+    func.set_flag(.ResolvedSign);
+    .Ok
+}
+
+fn ensure_resolved_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
+    @check(self.ensure_resolved_sign(fid)) return;
+    func := self.get_function(fid);
+    if(func.get_flag(.ResolvedBody), => return(.Ok));
+    res := self.resolve_body(func);
+    if res&.is_err() {|
+        return(Err = self.box(res.Err));
+    };
+    func.set_flag(.ResolvedBody);
+    .Ok
+}
+
+fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = {
+    @debug_assert(self.dispatch.function_in_progress&.get(fid.as_index()), "expected to do work on in progress function");
+    self.ensure_resolved_body(fid);
+    func := self.get_function(fid);
+    if(func.get_flag(.EnsuredCompiled), => return(.Ok));
+    assert(!func.get_flag(.MayHaveAquiredCaptures), "closures need to be specialized");
+    assert(!func.get_flag(.AnyConstArgs), "const args need to be specialized");
+    
+    // Before we can do the body, we really need to know the argument types, 
+    // and it would be nice to know the return type too but that's less important. 
+    // TODO: do this for real!
+    if func.arg.bindings.len == 1 {|
+        @if_let(func.arg.bindings[0].ty) fn Finished(ty) => {
+            @debug_assert(!ty.is_unknown());
+            func.finished_arg = (Some = ty);
+        };
+    };
+    
+    @match(func.body&) {
+        fn Normal(expr) => {
+            @check(self.compile_expr(expr, func.finished_ret.want())) return;
+            if func.ret&.is(.Infer) {|
+                func.finished_ret = (Some = expr.ty);
+            };
+        }
+        fn Intrinsic(op) => ();
+        fn ComptimeAddr(ptr) => {
+            panic("TODO: ComptimeAddr");
+        }
+        @default => panic("TODO: unhandled function body type");
+    };
+    func.set_flag(.EnsuredCompiled);
     .Ok
 }
 
@@ -98,17 +170,22 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
                 @check(self.compile_stmt(stmt)) return;
             };
             @check(self.compile_expr(f.result, requested)) return;
+            expr.ty = f.result.ty;
         }
         fn Tuple(parts) => {
+            types: List(Type) = list(parts.len, temp()); 
             each parts { expr | 
                 if !expr.done {|
-                    req_part := panic("TODO: pass through tuple_types if known requested");
+                    // TODO: req_part := panic("TODO: pass through tuple_types if known requested");
+                    req_part := ResultType.None;
                     @check(self.compile_expr(expr, req_part)) return;
                 };
+                types&.push(expr.ty);
             };
-            if expr.ty == UnknownType {|
-                expr.ty = panic("TODO: save tuple type");
-            };
+            if expr.ty.is_unknown() {|
+                expr.ty = self.tuple_of(types.items());
+                self.finish_layout_deep(expr.ty);
+            };  // TODO: else :type_check
         }
         fn PrefixMacro() => {
             @check(self.compile_prefix_macro(expr)) return;
@@ -122,15 +199,27 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
             panic("TODO: self.set_literal(expr, self.pool.get(i)");
             expr.done = true;
         }
+        fn ConstEval(inner) => {
+            // :PushConstFnCtx // TODO
+            // We need to track that any callees of this expression are not runtime callees!
+            // self.wip_stack.push((None, ExecStyle::Jit)); // this is what the old version did
+            // but maybe we're trying to track that in the dispatch thing now. 
+            // i guess expression tasks need to have a containing function context? 
+            @check(self.compile_expr(inner[], requested)) return; // TODO: this is probably wrong! ^ -- Jul 30
+            // TODO: its a bit silly that i have to specifiy the type since the first thing it does is compile it
+            value := @check(self.immediate_eval_expr(inner[], inner.ty)) return;
+            expr.set(value, inner.ty);
+        }
         fn PtrOffset(_) => return(@err("ICE: PtrOffset should be done=true"));
         fn GetParsed() => return(@err("ICE: GetParsed is handled by scope.fr"));
-        @default => panic("TODO: unhandled node type");
+        @default => @panic("TODO: unhandled node type %: %", expr.expr&.tag(), expr.log(self.pool));
     };
     self.dispatch.active_stack.pop();
+    @debug_assert(!expr.ty.is_unknown(), "Unknown type for %", expr.log(self.pool));
     .Ok
 }
 
-fn compile_call(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(void) = {
+fn compile_call(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(void) #once = {
     @debug_assert(expr.expr&.is(.Call));
     f := expr.expr.Call.f;
     arg := expr.expr.Call.arg;
@@ -142,13 +231,35 @@ fn compile_call(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
     @check(self.compile_expr(f, req_fn)) return;
     
     ::if(ResultType);
-    req_arg: ResultType = if(f.ty == UnknownType, => .None, => (Specific = f.ty));
-    @check(self.compile_expr(f, req_arg)) return;
+    req_arg: ResultType = if(arg.ty == UnknownType, => .None, => (Specific = arg.ty));
+    @check(self.compile_expr(arg, req_arg)) return;
+    
+    if f.ty == OverloadSet {|  // :get_or_create_type
+        panic("TODO: OverloadSet");
+    };
+    
+    if f.ty == FuncId {|  // :get_or_create_type
+        panic("TODO: FuncId");
+    };
+    
+    @match(self.get_type(f.ty)) {
+        fn FnPtr(it) => {
+            expr.ty = it.ty.ret;
+        }
+        fn Fn(it) => {
+            panic("TODO: fn");
+        }
+        fn Label(it) => {
+            expr.ty = Never; // :get_or_create_type
+            panic("TODO: label");
+        }
+        @default => return(@err("not callable %", f.log(self.pool)));
+    };
     
     .Ok
 }
 
-fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
+fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
     // TODO: Bring back tag checks so i don't have to be paranoid!!
     //       this annoys be enough that im tempted to go back to inlining all of these. 
     //       tho maybe #once is reassuring enough. think about it. -- Jul 22
@@ -166,7 +277,7 @@ fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
 fn early_builtin_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
     invocation := expr.expr.PrefixMacro&;
     if !invocation.handler.expr&.is(.GetVar) {|
-        return(@err("macro calls must be GetVar while bootstrapping. tried to run something too compilicated too soon."));
+        return(@err("macro calls must be GetVar while bootstrapping. tried to run something too compilicated too soon: %", invocation.handler.log(self.pool)));
     };
     
     name := invocation.handler.expr.GetVar.name;
@@ -178,9 +289,9 @@ fn early_builtin_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #on
             builtin_name := invocation.arg.expr.String;
             @println("called builtin %", self.pool.get(builtin_name));
             builtin_type :: fn(T: Type) void => {
-                ptr := T;
+                ptr := T;  // :get_or_create_type
                 val := ptr_cast_unchecked(Type, u32, ptr&)[];
-                expr.set((Small = (val.zext(), 4)), Type);
+                expr.set((Small = (val.zext(), 4)), Type);  // :get_or_create_type
             };
             // These could call :get_or_create_type but it doesn't matter for now because these are hardcoded
             @switch(builtin_name) {
@@ -191,11 +302,12 @@ fn early_builtin_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #on
                 @case(Flag.FuncId.ident())      => builtin_type(FuncId);
                 @case(Flag.LabelId.ident())     => builtin_type(LabelId);
                 @case(Flag.Symbol.ident())      => builtin_type(Symbol);
+                @case(Flag.void.ident())        => builtin_type(void);
                 @case(Flag.true.ident())        => expr.set((Small = (1, 1)), bool);
                 @case(Flag.false.ident())       => expr.set((Small = (0, 1)), bool);
                 @case(Flag.compiler_debug_assert_eq_i64.ident()) => {
                     my_assert_eq: rawptr : fn(a: i64, b: i64) i64 = {
-                        println("Hello World!");
+                        @println("[my_assert_eq] % vs %", a, b);
                         assert_eq(a, b);
                         a
                     };
@@ -221,11 +333,92 @@ fn early_builtin_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #on
 // So we delay taking constants until you try to compile the expression that contains them.
 // Also, to be order independent, we don't actually evaluate or type-check them yet, that's done lazily the first time they're referenced. 
 // TODO: the old compiler did #when here, but I think its better to delay until we know we care and can hope more stuff is ready. 
-fn hoist_constants(self: *SelfHosted, body: []FatStmt) Maybe(void) = {
+fn hoist_constants(self: *SelfHosted, body: []FatStmt) Maybe(void) #once = {
     each body { stmt |
         @match(stmt.stmt&) {
-            fn DeclFunc(f) => {
-                panic("TODO: hoist_constants DeclFunc");
+            fn DeclFunc(func) => {
+                @debug_assert(func[].get_flag(.NotEvilUninit));
+                fid := self.add_function(func[][]);
+                stmt.stmt = .Noop;
+                func := self.get_function(fid);
+                overload_out: ?OverloadSet = .None;
+        
+                // I thought i dont have to add to constants here because we'll find it on the first call when resolving overloads.
+                // But it does need to have an empty entry in the overload pool because that allows it to be closed over so later stuff can find it and share if they compile it.
+                if func.var_name& { var |
+                    // TODO: allow function name to be any expression that resolves to an OverloadSet so you can overload something in a module with dot syntax.
+                    // TODO: distinguish between overload sets that you add to and those that you re-export
+                    @debug_assert(!func.get_flag(.ResolvedSign));
+                    @debug_assert(!func.get_flag(.ResolvedBody));
+                    if self.is_empty_constant(var[]) {|
+                        // We're the first to reference this overload set so create it. 
+                        i := overloadset_from_index(self.dispatch.overloads.len);
+                        self.dispatch.overloads&.push(
+                            ready = empty(),
+                            name = var.name,
+                            pending = fid.single(self.get_alloc()).rs(),
+                        );
+                        os_value := self.to_values(OverloadSet, i);
+                        @check(self.save_const_values(var[], os_value, OverloadSet, func.loc)) return;  // :get_or_create_type
+                        overload_out = (Some = i);
+                    } else {|
+                        overloads := @check(self.find_const(var[], OverloadSet.want())) return;  // :get_or_create_type
+                        i := OverloadSet.assume_cast(overloads._0&)[];
+                        os := self.dispatch.overloads&.nested_index(i.as_index());
+                        os.pending&.push(fid, self.get_alloc());
+                        overload_out = (Some = i);
+                    };
+                };
+                
+                any_const_args :: fn(self: *Func) bool = {
+                    each self.arg.bindings { b |
+                        if(b.kind == .Const, => return(true));
+                    };
+                    false
+                };
+                if func.any_const_args() {|
+                    func.set_flag(.AnyConstArgs);
+                };
+    
+                each func.annotations { tag | 
+                    @switch(tag.name) {
+                        @case(Flag.fold.ident())     => func.set_flag(.TryConstantFold);
+                        @case(Flag.noinline.ident()) => func.set_flag(.NoInline);
+                        // TODO: generic+unsafe_noop_cast are done in scope for old sema but i want to move them here. -- Jul 30
+                        @case(Flag.generic.ident())  => func.set_flag(.Generic);
+                        @case(Flag.unsafe_noop_cast.ident()) => func.set_flag(.UnsafeNoopCast);
+                        @case(Flag.redirect.ident()) => {
+                            // TODO
+                            // // dman it bnoarow chekcser
+                            //let os = self.as_literal(out.1.unwrap(), loc)?;
+                            //if let Some(types) = self.program[id].get_tag_mut(Flag::Redirect) {
+                            //    let Expr::Tuple(parts) = &mut types.args.as_mut().unwrap().expr else {
+                            //        err!("bad",)
+                            //    };
+                            //    parts.push(os);
+                            //}
+                        };
+                        // TODO: actually im not sure if its better to do this later...
+                        //       it would be nice to do only one pass over the annotations 
+                        //       but it would also be nice to do absolutely no work if you never try to call the function. 
+                        @case(Flag.comptime_addr.ident()) => {
+                            panic("TODO: hoist comptime addr into body right now?");
+                        };
+                        @case(Flag.intrinsic.ident()) => {
+                            panic("TODO: hoist intrinsic into body right now?");
+                        };
+                        @case(Flag.inline.ident()) => {
+                            func.cc = (Some = .Inline);
+                        };
+                        @case(Flag.ct.ident()) => {
+                            func.cc = (Some = .CCallRegCt);
+                        };
+                        @default => ();
+                    };
+                    if func.cc.is_none() {|
+                        func.cc = (Some = .CCallReg);
+                    };
+                };
             }
             fn DeclVar(f) => if f.name.kind == .Const {|
                 self.scopes.put_constant(f.name, f.value, f.ty);
@@ -239,7 +432,7 @@ fn hoist_constants(self: *SelfHosted, body: []FatStmt) Maybe(void) = {
 
 ::if(Maybe(void));
 ::if_opt(Type, Maybe(void));
-fn compile_get_var(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(void) = {
+fn compile_get_var(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(void) #once = {
     @debug_assert(expr.expr&.is(.GetVar));
     var := expr.expr.GetVar;
     if var.kind == .Const {|
@@ -265,6 +458,13 @@ fn compile_get_var(self: *SelfHosted, expr: *FatExpr, requested: ResultType) May
             @err("Unknown type for runtime var %", self.pool.get(var.name))
         }
     }
+}
+
+// TODO: this is kinda weird. `fn` statements create an overload set or add to an existing one. 
+fn is_empty_constant(self: *SelfHosted, name: Var) bool #once = {
+    var := self.scopes.get_constant(name);
+    var := var.expect("constant should always be known (even if its Poison)");
+    var._0.expr&.is(.Poison)
 }
 
 // Passing in the requested type here feels a bit weird, but I think it will make anon-functions less painful. 
@@ -295,7 +495,7 @@ fn find_const(self: *SelfHosted, name: Var, requested: ResultType) Maybe(Ty(Valu
     (Suspend = self.wait_for(EvalConstant = (name = name, requested = requested)))
 }
 
-fn decl_const(self: *SelfHosted, name: Var, ty: *LazyType, value: *FatExpr) Maybe(void) = {
+fn handle_declare_constant(self: *SelfHosted, name: Var, ty: *LazyType, value: *FatExpr) Maybe(void) #once = {
     // TODO: do the @rec and type checking stuff from the rust version. 
     @check(self.compile_expr(value, .None)) return;
     if value.ty == UnknownType {|
@@ -305,6 +505,30 @@ fn decl_const(self: *SelfHosted, name: Var, ty: *LazyType, value: *FatExpr) Mayb
         val := @check(self.immediate_eval_expr(value, value.ty)) return;
         value.set(val, value.ty);
     };
+    .Ok
+}
+
+fn save_const_values(self: *SelfHosted, name: Var, value: Values, final_ty: Type, loc: Span) Maybe(void) = {
+    self.save_const(name, (Value = (bytes = value, coerced = false)), final_ty, loc)
+}
+
+fn save_const(self: *SelfHosted, name: Var, val_expr: Expr, final_ty: Type, loc: Span) Maybe(void) #once = {
+    // TODO: do i have to check if someone is already working on this constant? -- Jul 30
+    val := self.scopes.get_constant(name);
+    // TODO: the old one had a case if its none for renumbering during specialization, 
+    //       but i think i want to add those sooner? -- Jul 30
+    val := val.expect("constant should always be known (even if its Poison) (?)");
+    
+    if val._1&.is(.Finished) {|
+        return(@err("tried to re-save constant %", name&.log(self.pool)));
+    };
+    if !val._0.expr&.is(.Poison) {|
+        return(@err("tried to stomp constant %", name&.log(self.pool)));
+    };
+    
+    val._0.expr = val_expr;
+    val._0.ty = final_ty;
+    val._1 = (Finished = final_ty);
     .Ok
 }
 
@@ -324,6 +548,7 @@ fn coerce_const_expr(self: *SelfHosted, expr: *FatExpr, req: ResultType) Maybe(v
 }
 
 fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Values) = {
+    ::?Values;
     if self.check_quick_eval(expr, ret_ty) { val |
         return(Ok = val);
     };
@@ -335,7 +560,8 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
         return(Ok = val);
     };
     
-    panic("TODO: immediate_eval_expr")
+    self.codemap.show_error_line(expr.loc);
+    @panic("TODO: immediate_eval_expr %", expr.log(self.pool))
 }
 
 fn check_quick_eval(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) ?Values = {
@@ -394,6 +620,7 @@ fn parse_for_test(c: *SelfHosted, src: Str) FatExpr = {
     c.parser.finish_pending(id).unwrap()
 }
 
+// TODO: remove this once the new main works all the way through
 fn reach_sema(vtable: *ImportVTable) void = {
     c := {vtable.init_compiler}(.Aarch64);
     c := c.cast()[][];

@@ -79,7 +79,7 @@ extern "C" {
     pub(crate) fn log_pattern(pool: *mut (), s: &Pattern) -> *const str;
     pub(crate) fn log_func(pool: *mut (), s: &Func) -> *const str;
     pub(crate) fn log_lazy_type(pool: *mut (), s: &LazyType) -> *const str;
-    pub fn self_hosted_main(vtable: *const ImportVTable);
+    pub fn self_hosted_main(vtable: *const ImportVTable, use_new_sema: bool);
     pub(crate) fn show_error_line(codemap: *mut (), span_low: u32, span_high: u32);
 
     fn put_constant(scopes: *mut (), name: &Var, value: FatExpr, ty: LazyType);

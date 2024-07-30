@@ -1186,7 +1186,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                     ready: vec![],
                     name: var.name,
                     pending: vec![id],
-                    just_resolved: vec![],
                 });
                 self.save_const_values(var, (index.as_raw()).into(), TypeId::overload_set, loc)?;
                 out = (Some(id), Some(index));

@@ -645,6 +645,8 @@ pub enum FnFlag {
     TookPointerValue,
     Once,
     OnceConsumed,
+    NoInline,     // not used in old sema
+    AnyConstArgs, // not used in old sema
 }
 
 impl<'p> Func<'p> {
@@ -823,7 +825,6 @@ pub struct OverloadSet<'p> {
     pub ready: Vec<OverloadOption>,
     pub name: Ident<'p>,
     pub pending: Vec<FuncId>,
-    pub just_resolved: Vec<Func<'p>>,
 }
 
 #[repr(C)]

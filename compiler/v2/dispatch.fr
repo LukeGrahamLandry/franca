@@ -1,7 +1,9 @@
 CompilerDispatch :: @struct(    
     active_stack: *List(ExprAttempt),
     const_var_in_progress: DynamicBitSet, // TODO: just store this with the expression?
+    function_in_progress: DynamicBitSet, // TODO: just store this with the expression?
     active_tasks: List(*Task),
+    overloads: BucketArray(OverloadSetData),
 );
 
 Task :: @rec @struct(
@@ -16,7 +18,8 @@ ExprAttempt :: @struct(expr: *FatExpr, requested: ResultType);
 VarAttempt :: @struct(name: Var, requested: ResultType);
 Action :: @tagged(
     CompileExpr: *List(ExprAttempt),
-    TypeHeader: FuncId,   // After this, callsites can ask what types go in and what types come out. 
+    TypeArg: FuncId,
+    TypeRet: FuncId,
     CompileBody: FuncId,  // After this, we can generate bytecode.
     Jit: FuncId, // After this, it's safe to call a function pointer. 
     TypeConstant: VarAttempt,
@@ -26,7 +29,13 @@ Action :: @tagged(
 fn init(a: Alloc) CompilerDispatch = {
     temp := a.alloc(List(ExprAttempt), 1);
     temp.ptr[] = list(a);
-    (active_stack = temp.ptr, const_var_in_progress = empty(a), active_tasks = list(a))
+    (
+        active_stack = temp.ptr, 
+        const_var_in_progress = empty(a), 
+        function_in_progress = empty(a), 
+        active_tasks = list(a),
+        overloads = init(10, a),
+    )
 }
 
 fn poll_tasks(self: *SelfHosted) Result(void, *ParseErr) = {
@@ -41,6 +50,7 @@ fn poll_tasks(self: *SelfHosted) Result(void, *ParseErr) = {
         for self.dispatch.active_tasks { original_task |
             pending&.push(original_task); 
             while => !pending.is_empty() {|
+                ::?**Task;
                 task := pending.last().unwrap()[];
                 task.waiting_for&.ordered_retain() { t | 
                     !t.done
@@ -91,9 +101,13 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
     
     @match(task.action) {
         fn CompileExpr(stack) => {
+            self.dispatch.active_stack = stack;
             while => !stack.is_empty() {|
                 last := stack.last().unwrap()[];
-                @check(self.compile_expr(last.expr, last.requested)) return;
+                l := stack.len;
+                @check(self.compile_expr(last.expr, last.requested)) return;  // TODO: this pushes the expression so really we should pop at the top
+                @assert_eq(l, stack.len, "wip expr stack changed");
+                assert(last.expr.done, "not done?");
                 stack.pop();
             };
         }
@@ -101,24 +115,60 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
             panic("TODO: task TypeConstant");
         };
         fn EvalConstant(v) => {
+            self.new_expression_stack();
             name := v.name;
-            var := self.scopes.get_constant(name);
-            var := var.expect("var should always be known");
-            @check(self.decl_const(name, var._1&, var._0&)) return;
+            var  := self.scopes.get_constant(name);
+            var  := var.expect("var should always be known");
+            @check(self.handle_declare_constant(name, var._1&, var._0&)) return;
             self.dispatch.const_var_in_progress&.unset(name.id.zext());
-            println("ok");
         };
-        fn TypeHeader(fid) => {
-            panic("TODO: task TypeHeader");
+        fn TypeArg(fid) => {
+            panic("TODO: task TypeArg");
+        }
+        fn TypeRet(fid) => {
+            panic("TODO: task TypeRet");
         }
         fn CompileBody(fid) => {
-            panic("TODO: task CompileBody");
+            self.new_expression_stack();
+            @check(self.handle_compile_func_body(fid)) return;
+            self.dispatch.function_in_progress&.unset(fid.as_index());
         }
         fn Jit(fid) => {
-            panic("TODO: task TypeHeader");
+            func := self.get_function(fid);
+            if !func.get_flag(.EnsuredCompiled) {|
+                self.dispatch.function_in_progress&.set(fid.as_index());
+                return(Suspend = self.wait_for(CompileBody = fid));
+            };
+            
+            // TODO: when possible, you want to emit_bc for callees first because they might get deduplicated. -- Jul 30
+            hack := self.stable_compiler_context().cast(); // because Bc::CompCtx stores a ***SelfHosted in the assembly 
+            body := hack.emit_bc_and_aarch64(fid, .Jit);
+            if(body&.is_err(), => return(Err = self.box(body.Err)));
         }
     };
     .Ok
+}
+
+fn would_block(self: *SelfHosted, action: Action) bool = {
+    @match(action) {
+        fn EvalConstant(v) => {
+            var  := self.scopes.get_constant(v.name);
+            var  := var.expect("var should always be known");
+            !var._0&.is(.Value)
+        };
+        fn CompileExpr(stack) => !stack.last().unwrap().is_done;
+        fn TypeArg(fid)       => self.get_function(fid)[].finished_arg.is_none();
+        fn TypeRet(fid)       => self.get_function(fid)[].finished_ret.is_none();
+        fn CompileBody(fid)   => !self.get_function(fid).get_flag(.EnsuredCompiled);
+        fn Jit(fid)           => self.aarch64&.get_fn(fid).is_none();
+    }
+}
+
+fn new_expression_stack(self: *SelfHosted) void = {
+    // TODO: reuse these when finished?
+    //       store them in the Action like compile_expr so can skip to theend if yielded? -- Jul 29
+    ::CBox(List(ExprAttempt));
+    self.dispatch.active_stack = self.box(list(self.get_alloc())); 
 }
 
 fn Maybe($T: Type) Type = {

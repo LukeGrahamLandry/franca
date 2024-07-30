@@ -2,7 +2,7 @@ DO_TESTS :: false;
 
 ENABLE_TRACY :: false;
 ENABLE_LSP   :: false;
-ENABLE_QBE_BACKEND :: true; // TODO: error message if you try to use when disabled instead of just calling a null function pointer. 
+ENABLE_QBE_BACKEND :: false; // TODO: error message if you try to use when disabled instead of just calling a null function pointer. 
 REPLACE_COMPILER :: false;
 JIT_RUN_NEW_SEMA :: false;
  
@@ -55,12 +55,16 @@ fn driver(vtable: *ImportVTable) void = {
     do_build := true;
     do_replace := false;
     args := cli_args();
+    use_new_entry_point := false;
     for args { arg |
         if arg.str() == "-no-build" {|
             do_build = false;
         };
         if arg.str() == "-replace-compiler" {|
             do_replace = true;
+        };
+        if arg.str() == "-v2" {|
+            use_new_entry_point = true;
         };
     };
     
@@ -81,7 +85,13 @@ fn driver(vtable: *ImportVTable) void = {
         assert(success, "tests failed");
     };
     
-    exports := c.get_tagged("compiler");
+    ::if([]FuncId);
+    exports: []FuncId = if use_new_entry_point {|
+        new_main := c.get_unique_named("main").unwrap();
+        (@list(new_main) temp()).items()
+    } else {|
+        c.get_tagged("compiler")
+    };
     
     ir_text := {c.vtable.emit_llvm}(c, temp(), exports, .ExportWithNames);
     @println("Emitted % bytes of llvm ir.", ir_text.len);  // useful to see when i start trying to deduplicate bytecode. 
@@ -156,6 +166,14 @@ fn driver(vtable: *ImportVTable) void = {
     };
     
     if do_build {|
+        if use_new_entry_point {| // note: exits!
+            start := timestamp();
+            build_llvm(ir_text, @slice ("-o", "target/franca/franca2", "-Os"));
+            end := timestamp();
+            @println("LLVM time: % ms.", end.sub(start));
+            exit(0);
+        };
+        
         start := timestamp();
         build_llvm(ir_text, @slice ("-o", "target/franca/libfranca.o", "-c", "-Os", "-g"));
         end := timestamp();

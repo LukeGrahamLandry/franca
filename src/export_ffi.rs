@@ -276,9 +276,6 @@ pub static IMPORT_VTABLE: ImportVTable = ImportVTable {
 extern "C" fn check_for_new_aot_bake_overloads<'p>(compile: &mut Compile<'_, 'p>) -> Res<'p, ()> {
     compile.check_for_new_aot_bake_overloads()
 }
-extern "C" fn franca_log_type(compile: &mut Compile, e: TypeId) -> *const str {
-    compile.program.log_type(e).leak() as *const str
-}
 
 unsafe extern "C" fn comptime_arch() -> (i64, i64) {
     let arch = if cfg!(target_arch = "aarch64") {
@@ -522,25 +519,6 @@ extern "C-unwind" fn tag_symbol<'p>(program: &&Program<'p>, enum_ty: TypeId, tag
     case.0
 }
 
-extern "C-unwind" fn pair_type(program: &mut &mut Program, a: TypeId, b: TypeId) -> TypeId {
-    hope(|| {
-        // assert!(a.as_index() < program.types.len(), "TypeId OOB {:?}", a);// should always be true i just can't be bothered to do ffi now that self hosted owns it
-        // assert!(b.as_index() < program.types.len(), "TypeId OOB {:?}", b);
-        Ok(program.tuple_of(vec![a, b]))
-    })
-}
-
-extern "C-unwind" fn triple_type(program: &mut &mut Program, a: TypeId, b: TypeId, c: TypeId) -> TypeId {
-    hope(|| {
-        // assert!(a.as_index() < program.types.len(), "TypeId OOB {:?}", a);
-        // assert!(b.as_index() < program.types.len(), "TypeId OOB {:?}", b);// should always be true i just can't be bothered to do ffi now that self hosted owns it
-        // assert!(c.as_index() < program.types.len(), "TypeId OOB {:?}", c);
-        Ok(program.tuple_of(vec![a, b, c]))
-    })
-}
-extern "C-unwind" fn quad_type(program: &mut &mut Program, a: TypeId, b: TypeId, c: TypeId, d: TypeId) -> TypeId {
-    hope(|| Ok(program.tuple_of(vec![a, b, c, d])))
-}
 extern "C-unwind" fn fn_type(program: &mut &mut Program, arg: TypeId, ret: TypeId) -> TypeId {
     hope(|| {
         // assert!(arg.as_index() < program.types.len(), "TypeId OOB {:?}", arg);  // should always be true i just can't be bothered to do ffi now that self hosted owns it

@@ -47,12 +47,13 @@ PRes :: Result(void, ParseErr);
 //! For now, keep it easy to switch between them by just poking different implementations into the vtable. 
 //! TODO: When the new version actually works, go through and see what indirection can be removed. 
 fn main() void = {
-    vmem := libc_allocator.alloc(ImportVTable, 1);
-    vmem.ptr[] = ImportVTable.zeroed();
-    vtable := vmem.ptr;
+    ::?Str;
+    the_vtable :: @static(ImportVTable);
+    vtable := the_vtable;
+    vtable[] = ImportVTable.zeroed();
     
     // TODO: scan overload sets instead so you can skip all the groups with the same name. :SLOW
-    vtable.find_unique_func = fn(c: Compiler, name: Ident) ?FuncId = { 
+    vtable.find_unique_func = fn(c: Compiler, name: Symbol) ?FuncId = { 
         c := c.cast()[][];
         found: ?FuncId = .None;
         range(0, c.functions.len) { i |
@@ -65,23 +66,91 @@ fn main() void = {
         found
     };
     
-    //
-    // TODO: fill these in to use sema-v2 instead of the rust version. 
-    /*
-    init_compiler,
-    compile_func,
-    get_jitted_ptr,
-    get_compiler_builtins_source,
-    check_for_new_aot_bake_overloads,
+    vtable.get_jitted_ptr = fn(c: Compiler, f: FuncId) CRes(rawptr) = {
+        self := c.cast()[][];
+        vtable := the_vtable;
+        ptr := or self.aarch64&.get_fn(f) {|
+            {vtable.compile_func}(c, f, .Jit);
+            
+            task: Task = (action = (Jit = f), waiting_for = list(self.get_alloc()));
+            self.dispatch.active_tasks&.push(task&);
+            res := self.poll_tasks(); ::tagged(@type res);
+            if res&.is(.Err) {|
+                @panic("failed to jti func: %", res.Err.msg); // TODO: return the error!
+            };
+            
+            ptr := self.aarch64&.get_fn(f);
+            ptr.expect("compield function but not ready")
+        };
+        r: CRes(rawptr) = (Ok = ptr); // TODO: fix prims llvm. -- Jul 29
+        r
+    };
     
-    make_and_resolve_and_compile_top_level,
-    comptime_arch,
-    */
+    vtable.init_compiler = fn(comptime_arch: Backend, options: *BuildOptions) Compiler = {
+        vtable := the_vtable;
+        mem := init_self_hosted(options);
+        mem.vtable = vtable;
+        mem.stable_compiler_context()
+    };
     
-    self_hosted_main(vtable);
+    vtable.compile_func = fn(c: Compiler, f: FuncId, when: ExecStyle) CRes(void) = {
+        c := c.cast()[][];
+        task: Task = (action = (CompileBody = f), waiting_for = list(c.get_alloc()));
+        c.dispatch.function_in_progress&.set(f.as_index());
+        c.dispatch.active_tasks&.push(task&);
+       
+        // TODO: have a version of poll that just goes until a specific task is done. 
+        res := c.poll_tasks(); ::tagged(@type res);
+        if res&.is(.Err) {|
+            @panic("failed to compile func: %", res.Err.msg);
+            // TODO: return the error!
+        };
+        .Ok
+    };
+    
+    vtable.get_compiler_builtins_source = fn() Str = {
+        ""
+    };
+    
+    vtable.make_and_resolve_and_compile_top_level = fn(cc: Compiler, body: Slice(FatStmt)) CRes(void) = {
+        c := cc.cast()[][];
+        name := c.pool.insert_owned("@toplevel@");
+        loc := body[0].loc;
+        result := c.box(synthetic_ty((Value = (bytes = unit_value, coerced = false)), loc, void));
+        result := synthetic_ty((Block = (body = body.rs(), result = result, ret_label = .None, hoisted_constants = false)), loc, void);
+        bindings: List(Binding) = list(c.get_alloc());
+        bindings&.if_empty_add_unit();
+        arg: Pattern = (bindings = bindings.rs(), loc = loc);
+        def: FnDef = (name = (Some = name), arg = arg, ret = (Finished = void), tags = list(temp()), loc = loc);
+        func := make_func(def, (Some = result), false);
+        r := c.resolve_root(func&, scope_from_index(0));  // TODO: more usable @try
+        assert(r&.is_ok(), "failed to resolve top level");
+        f := c.add_function(func);
+        @try({the_vtable[].compile_func}(cc, f, .Jit)) return;
+        .Ok
+    };
+    
+    vtable.comptime_arch = fn() Ty(Arch, Os) = {
+        panic("TODO: comptime_arch")
+    };
+    
+    vtable.check_for_new_aot_bake_overloads = fn(comp: Compiler) CRes(void) = {
+        panic("TODO: check_for_new_aot_bake_overloads")
+    };
+    
+    self_hosted_main(vtable, true);
 }
 
-fn self_hosted_main(vtable: *ImportVTable) void #compiler #no_trace = {
+fn stable_compiler_context(self: *SelfHosted) Compiler = {
+    mem1 := libc_allocator.alloc(*SelfHosted, 1);
+    mem1.ptr[] = self;
+    erased := (*SelfHosted).raw_from_ptr(mem1.ptr);
+    compiler := libc_allocator.alloc(CompilerValue, 1);
+    compiler.ptr[] = (pointer_to_pointer_to_selfhosted = erased);
+    compiler.ptr
+}
+
+fn self_hosted_main(vtable: *ImportVTable, use_new_sema: bool) void #compiler #no_trace = {
     :: by_the_way_you_are_compiling_the_compiler_right_now_just_a_helpful_hint();
     if RUNTIME_STACK_TRACE {|
         get_panic_hook()[] = new_print_trace_and_abort;
@@ -116,16 +185,7 @@ fn self_hosted_main(vtable: *ImportVTable) void #compiler #no_trace = {
         }, panic("argument '-lsp' not supported by this build of the compiler"));
     };
     
-    if filename == "-testv2" {|
-        @if(INCLUDE_NEW_SEMA, {
-            println("Test!");
-            reach_sema(vtable);
-            println("Ok!");
-        }, println("new sema is not included in this build of the compiler."));
-        exit(0);
-    };
-    
-    @match(run_franca_file(my_vtable&, filename)) {
+    @match(run_franca_file(my_vtable&, filename, use_new_sema)) {
         (fn Ok(_) => exit(0));
         (fn Err(e) => exit(1));
     };
@@ -134,8 +194,9 @@ fn self_hosted_main(vtable: *ImportVTable) void #compiler #no_trace = {
 // TODO: store this in SelfHosted instead of in a global -- Jul 5
 STDLIB_PATH :: @static(?Str) (None = unit);
 
-fn load_file_in_compiler(vtable: *ImportVTable, path: Str) CRes(CompCtx) = {
-    source: List(u8) = "#include_std(\"lib/core.fr\"); ".clone(libc_allocator);  // TODO: column number on error on first line will be wrong but i dont care. 
+fn load_file_in_compiler(vtable: *ImportVTable, path: Str, use_new_sema: bool) CRes(CompCtx) = {
+    prelude := if(use_new_sema, => "", => "#include_std(\"lib/core.fr\"); ");
+    source: List(u8) = prelude.clone(libc_allocator);  // TODO: column number on error on first line will be wrong but i dont care. 
     source&.read_and_push(path);  // TODO: error handling
     
     comp := {vtable.init_compiler}(.Aarch64, default_build_options()); // TODO: comptime get the current arch
@@ -148,13 +209,12 @@ fn load_file_in_compiler(vtable: *ImportVTable, path: Str) CRes(CompCtx) = {
     stmts := self.parser.finish_pending_stmts(id);
     stmts := stmts.unwrap(); // TODO: don't return RsVec -- Jun 29
     @try({c.vtable.make_and_resolve_and_compile_top_level}(c.data, stmts.items())) return;
-    
     (Ok = c)
 }
 
 // TODO: print the error message!!! since this doesn't go through the rust side anymore. -- Jun 30
-fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
-    c := @try(vtable.load_file_in_compiler(path)) return;
+fn run_franca_file(vtable: *ImportVTable, path: Str, use_new_sema: bool) CRes(void) = {
+    c := @try(vtable.load_file_in_compiler(path, use_new_sema)) return;
     
     mem_stats :: fn() => {
         bytes_per_mb :: 1024 * 1024;
@@ -175,8 +235,16 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
         callee := assume_types_fn(Arg = void, Ret = void, ptr = callee);
         callee();
         mem_stats();
-        exit(0)
     };
+    
+    sym_test := c.intern_string("test");
+    tests := c.data.get_fns_with_tag(sym_test);
+    for tests { f |
+        callee := c.get_jitted(f);
+        callee := assume_types_fn(Arg = void, Ret = void, ptr = callee);
+        callee();
+    };
+    exit(0);
     
     .Ok
 }
@@ -192,7 +260,7 @@ fn get_include_std(c: *SelfHosted, name: Str) ?WaitingParse = {
         fill_export_ffi(code&);
         code.items()
     }{|
-        lib :=  STDLIB_PATH[].unwrap();
+        lib := STDLIB_PATH[].unwrap();
         check := @format("%/%", lib, name) temp();
         // TODO: do this as one operation (error handling on read)
         if file_exists(check.items()) {|
