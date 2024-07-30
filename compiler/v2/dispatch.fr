@@ -4,6 +4,7 @@ CompilerDispatch :: @struct(
     function_in_progress: DynamicBitSet, // TODO: just store this with the expression?
     active_tasks: List(*Task),
     overloads: BucketArray(OverloadSetData),
+    enclosing_function: ?FuncId,  // for adding runtime callees. 
 );
 
 Task :: @rec @struct(
@@ -35,6 +36,7 @@ fn init(a: Alloc) CompilerDispatch = {
         function_in_progress = empty(a), 
         active_tasks = list(a),
         overloads = init(10, a),
+        enclosing_function = .None,
     )
 }
 
@@ -63,8 +65,10 @@ fn poll_tasks(self: *SelfHosted) Result(void, *ParseErr) = {
                         }
                         fn Ok() => {
                             made_progress = true;
-                            task.done = true;
-                            pending&.pop();
+                            if task.waiting_for.is_empty() {| // HACK: it might have added new callees
+                                task.done = true;
+                                pending&.pop();
+                            };
                         };
                         fn Suspend(new_dep) => {
                             new_task := todo_allocator.alloc(Task, 1);
@@ -89,8 +93,7 @@ fn poll_tasks(self: *SelfHosted) Result(void, *ParseErr) = {
 }
 
 ::tagged(Action);
-fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
-    @println("exec task %", task.action&.tag());
+fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) #once = {
     if task.waiting_for&.last() { dep |
         @debug_assert(!task.done, "task done but still has dependencies");
         return(Suspend = dep.action&);
@@ -98,9 +101,11 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
     if task.done {|
         return(.Ok);
     };
+    self.dispatch.enclosing_function = .None;
     
     @match(task.action) {
         fn CompileExpr(stack) => {
+            @println("exec task %", task.action&.tag());
             self.dispatch.active_stack = stack;
             while => !stack.is_empty() {|
                 last := stack.last().unwrap()[];
@@ -113,15 +118,16 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
         }
         fn TypeConstant(v) => {
             panic("TODO: task TypeConstant");
-        };
+        }
         fn EvalConstant(v) => {
+            @println("exec task %: %", task.action&.tag(), self.pool.get(v.name.name));
             self.new_expression_stack();
             name := v.name;
             var  := self.scopes.get_constant(name);
             var  := var.expect("var should always be known");
             @check(self.handle_declare_constant(name, var._1&, var._0&)) return;
             self.dispatch.const_var_in_progress&.unset(name.id.zext());
-        };
+        }
         fn TypeArg(fid) => {
             panic("TODO: task TypeArg");
         }
@@ -129,18 +135,35 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
             panic("TODO: task TypeRet");
         }
         fn CompileBody(fid) => {
+            @println("exec task %: %", task.action&.tag(), self.log_name(fid));
             self.new_expression_stack();
             @check(self.handle_compile_func_body(fid)) return;
             self.dispatch.function_in_progress&.unset(fid.as_index());
         }
         fn Jit(fid) => {
+            @println("exec task %: %", task.action&.tag(), self.log_name(fid));
             func := self.get_function(fid);
             if !func.get_flag(.EnsuredCompiled) {|
                 self.dispatch.function_in_progress&.set(fid.as_index());
                 return(Suspend = self.wait_for(CompileBody = fid));
             };
             
-            // TODO: when possible, you want to emit_bc for callees first because they might get deduplicated. -- Jul 30
+            // when possible, you want to emit_bc for callees first because they might get deduplicated. 
+            for func.callees { callee |
+                @println("% calls %", fid.as_index(), callee.as_index());
+                if self.aarch64&.get_fn(callee).is_none() {|
+                    new_task := self.get_alloc().alloc(Task, 1);
+                    new_task := new_task.ptr;
+                    new_task[] = (action = (Jit = callee), waiting_for = list(self.get_alloc()));
+                    task.waiting_for&.push(new_task);
+                };
+            };
+            if task.waiting_for.len != 0 {|
+                @println("sleep on %/% callees", task.waiting_for.len, func.callees.len);
+                return(.Ok); // HACK: caller has to check our waiting_for
+            };
+            
+            @println("codegen %", self.log_name(fid));
             hack := self.stable_compiler_context().cast(); // because Bc::CompCtx stores a ***SelfHosted in the assembly 
             body := hack.emit_bc_and_aarch64(fid, .Jit);
             if(body&.is_err(), => return(Err = self.box(body.Err)));
