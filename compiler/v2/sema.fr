@@ -284,18 +284,49 @@ fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = 
     
     // Before we can do the body, we really need to know the argument types, 
     // and it would be nice to know the return type too but that's less important. 
-    // TODO: do this for real!
-    if func.arg.bindings.len == 1 {|
-        @if_let(func.arg.bindings[0].ty) fn Finished(ty) => {
-            @debug_assert(!ty.is_unknown());
-            func.finished_arg = (Some = ty);
+    @check(self.infer_arguments(fid)) return;
+    
+    // you need to only do this once so args are unique but we might yield below. 
+    // you can't yield in this block! MadeVarsForRuntimeArgs needs to be atomic!
+    // TODO: alternativly, if i trusted myself, you could just say its fine when the arg is already there, 
+    //       because surely we put it there ourselves last time around. 
+    //       but for now i think this is a valuable sanity check that renumbering went well.  -- Jul 30
+    if !func.get_flag(.MadeVarsForRuntimeArgs) {|
+        each func.arg.bindings { b | 
+            // TODO: probably want to change this so you can do as much compiling as possible before expanding templates.
+            @debug_assert(b.kind != .Const, "ICE: Tried to emit before binding const args.");
+            @if_let(b.name) fn Var(name) => {
+                @debug_assert(b.kind == name.kind);
+                is_new := self.scopes.put_var_type(name, b.ty&.unwrap());
+                @println("bind %", name&.log(self.pool));
+                if(!is_new, => return(@err("overwrite arg? %", name&.log(self.pool))));
+            };
         };
+        func.set_flag(.MadeVarsForRuntimeArgs) ;
     };
     
     @match(func.body&) {
         fn Normal(expr) => {
             old_func := self.dispatch.enclosing_function;
             self.dispatch.enclosing_function = (Some = fid);
+            
+            if func.return_var { return_var |
+                // TODO: this means you cant early return from non-block functions but the error message will be useless -- Jul 9 
+                @if_let(expr.expr&) fn Block(f) => {
+                    if f.ret_label.is_none() {|  // we might have already tried to compile this function. 
+                        ret: LabelId = from_index(self.dispatch.next_label);
+                        self.dispatch.next_label += 1;
+                        label_ty := LabelId; // :get_or_create_type
+                        if func.finished_ret { ret_ty | 
+                            label_ty = self.intern_type(Label = ret_ty);
+                        };
+                        val := self.to_values(LabelId, ret);
+                        @check(self.save_const_values(return_var, val, label_ty, func.loc)) return;
+                        f.ret_label = (Some = ret);
+                    };
+                };
+            };
+
             @check(self.compile_expr(expr, func.finished_ret.want())) return;
             self.dispatch.enclosing_function = old_func;
             if func.ret&.is(.Infer) {|
@@ -437,14 +468,21 @@ fn compile_call(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
         return(self.call_direct(expr));
     };
     
+    if f.ty == LabelId {|  // :get_or_create_type
+        panic("TODO: early return before ret type infered (could try more aggressivly in handle_compile_body)");
+    };
+    
     @match(self.get_type(f.ty)) {
         fn FnPtr(it) => {
             expr.ty = it.ty.ret;
         }
         fn Fn(it) => return(self.call_direct(expr));
         fn Label(it) => {
+            if arg.ty != it[] {|
+                return(@err("early return type mismatch. TODO: better type checking"));
+            };
             expr.ty = Never; // :get_or_create_type
-            panic("TODO: label");
+            expr.done = arg.done; 
         }
         @default => return(@err("not callable %", f.log(self.pool)));
     };
@@ -498,30 +536,51 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
     .Ok
 }
 
+fn infer_type(self: *SelfHosted, b: *LazyType) Maybe(?Type) = {
+    @match(b) {
+        fn PendingEval(e) => {
+            ty := @check(self.immediate_eval_expr(e, Type)) return; // :get_or_create_type
+            ty := Type.assume_cast(ty&)[]; 
+            b[] = (Finished = ty);
+            return(Ok = (Some = ty))
+        }
+        fn Finished(ty) => return(Ok = (Some = ty[])); // cool, we're done. 
+        fn EvilUninit() => panic("ICE: nothing creates this: eviluninit binding"); 
+        fn Returning(_) => return(@err("ICE: tried to infer on LazyType.Returning... figure out what to do about that..."));
+        fn Infer() => return(Ok = .None);
+    }
+}
+
 fn infer_arguments(self: *SelfHosted, fid: FuncId) Maybe(Type) = {
     func := self.get_function(fid);
     if(func.finished_arg, fn(ty) => return(Ok = ty));
-    if func.arg.bindings.len == 1 {|
-        @if_let(func.arg.bindings[0].ty) fn Finished(ty) => {
-            @debug_assert(!ty.is_unknown());
-            func.finished_arg = (Some = ty);
-            return(Ok = ty);
-        };
-    };
+    @check(self.ensure_resolved_sign(fid)) return;
     
-    @err("infer_arguments too complex for my small brain...")
+    types: List(Type) = list(func.arg.bindings.len, temp());
+    each func.arg.bindings { b |
+        ty := or @check(self.infer_type(b.ty&)) return {|
+            // TODO: really thats not what you want for closures tho... 
+            return(@err("function arguments must have type annotation (cannot be inferred)"))
+        };
+        types&.push(ty);
+    };
+    ty := self.tuple_of(types.items());
+    func.finished_arg = (Some = ty);
+    (Ok = ty)
 }
 
 fn infer_return(self: *SelfHosted, fid: FuncId) Maybe(Type) = {
     func := self.get_function(fid);
     if(func.finished_ret, fn(ty) => return(Ok = ty));
+    @check(self.ensure_resolved_sign(fid)) return;
     
-    if func.ret&.is(.Infer) {|
+    ty := or @check(self.infer_type(func.ret&)) return {|
+        // Infer is a valid return type. To deal with that, we just compile the body, and that will set the finished_ret for us. 
         self.dispatch.function_in_progress&.set(fid.as_index());
-        return(Suspend = self.wait_for(CompileBody = fid));
+        return(Suspend = self.wait_for(CompileBody = fid))
     };
-    
-    @err("infer_return too complex for my small brain...")
+    func.finished_ret = (Some = ty);
+    (Ok = ty)
 }
 
 fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
@@ -617,7 +676,7 @@ fn hoist_constants(self: *SelfHosted, body: []FatStmt) Maybe(void) #once = {
                     @debug_assert(!func.get_flag(.ResolvedBody));
                     if self.is_empty_constant(var[]) {|
                         // We're the first to reference this overload set so create it. 
-                        i := overloadset_from_index(self.dispatch.overloads.len);
+                        i: OverloadSet = from_index(self.dispatch.overloads.len);
                         self.dispatch.overloads&.push(
                             ready = empty(),
                             name = var.name,
@@ -686,9 +745,11 @@ fn update_function_metadata(self: *SelfHosted, func: *Func) void = {
                 panic("TODO: hoist intrinsic into body right now?");
             };
             @case(Flag.inline.ident()) => {
+                // TODO: error on conflicting annotations. 
                 func.cc = (Some = .Inline);
             };
             @case(Flag.ct.ident()) => {
+                // TODO: error on conflicting annotations. 
                 func.cc = (Some = .CCallRegCt);
             };
             @default => ();

@@ -1,3 +1,11 @@
+## tiny tests on new sema (Jul 29/30)
+
+- got it to the point where it can load a test file and use the existing parse/scope/bc/asm systems.
+  so thats very pleasing because now there can be a quick feedback loop as new features are implemented.
+- addr/deref
+- call zero arg functions, needed to track callees in the new dispatch system
+- early return
+
 ## Switch (Jul 27/28)
 
 Added a Switch ast node and bytecode instruction for @match to use instead of a chain of ifs.

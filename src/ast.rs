@@ -647,6 +647,7 @@ pub enum FnFlag {
     OnceConsumed,
     NoInline,     // not used in old sema
     AnyConstArgs, // not used in old sema
+    MadeVarsForRuntimeArgs,
 }
 
 impl<'p> Func<'p> {
