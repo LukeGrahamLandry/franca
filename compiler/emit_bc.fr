@@ -633,6 +633,15 @@ fn unwrap_ty(self: *Binding) Type = {
     self.ty.Finished
 }
 
+fn mark_variable(self: *EmitBc, result: *FnBody, name: Var, id: u16) void = {
+    if result.want_log.or(self.program.get_build_options()[].debug_info) {|
+        while => result.var_names.len <= id.zext() {|
+            result.var_names&.push(.None, self.program.get_alloc());
+        };
+        result.var_names[id.zext()] = (Some = name);
+    };
+}
+
 fn compile_stmt(self: *EmitBc, result: *FnBody, stmt: *FatStmt) PRes = {
     self.last_loc = stmt.loc;
     @match(stmt.stmt&) {
@@ -641,13 +650,8 @@ fn compile_stmt(self: *EmitBc, result: *FnBody, stmt: *FatStmt) PRes = {
             @assert_ne(f.name.kind, VarType.Const);
             assert(f.ty&.is(.Finished), "type not ready");
             ty := f.ty.Finished;
-
             id := result.add_var(self, ty);
-            if result.want_log {|
-                // TODO: being this back -- Jul 8
-                //extend_options2(&mut result.var_names, id as usize);
-                //result.var_names[id as usize] = (Some = name);
-            };
+            self.mark_variable(result, f.name, id);
             self.addr_var(result, id);
             @try(self.compile_expr(result, f.value&, .ResAddr, false)) return;
             prev := self.var_lookup&.insert(f.name, id);
@@ -690,11 +694,7 @@ fn compile_stmt(self: *EmitBc, result: *FnBody, stmt: *FatStmt) PRes = {
                 self.addr_var(result, full_id);
                 result.inc_ptr_bytes(f.byte_offset.trunc());
                 id := self.save_ssa_var(result);
-                // TODO: bring this back
-                //if result.want_log {
-                //    extend_options2(&mut result.var_names, id as usize);
-                //    result.var_names[id as usize] = BigOption::Some(name);
-                //}
+                self.mark_variable(result, name, id);
                 // TODO: a test that fails if you typo put this line here. -- Jul 4 (see devlog.md)
                 // self.addr_var(result, id);
                 self.locals.last().unwrap().push(id);
@@ -712,15 +712,11 @@ fn compile_stmt(self: *EmitBc, result: *FnBody, stmt: *FatStmt) PRes = {
 
 fn do_binding(self: *EmitBc, result: *FnBody, name: ?Var, ty: Type, value: *FatExpr) PRes = {
     id := result.add_var(self, ty);
-    // TODO: bring this back
-    //if result.want_log {|
-    //    extend_options2(&mut result.var_names, id as usize);
-    //    result.var_names[id as usize] = name.into();
-    //};
     self.addr_var(result, id);
     @try(self.compile_expr(result, value, .ResAddr, false)) return;
     self.locals.last().unwrap().push(id);
     if name { name |
+        self.mark_variable(result, name, id);
         prev := self.var_lookup&.insert(name, id);
         @assert(prev.is_none(), "overwrite arg? %", name&.log(self.program.pool));
     };

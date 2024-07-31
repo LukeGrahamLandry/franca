@@ -22,6 +22,7 @@ fn driver(vtable: *ImportVTable) void = {
     qbe := false;
     keep_names := false;
     deduplicate := true;
+    debug_info := false;
     
     args := cli_args();
     args := args.slice(1, args.len); // skip exe
@@ -47,6 +48,9 @@ fn driver(vtable: *ImportVTable) void = {
             @case("-no-deduplication") => {
                 deduplicate = false;
             };
+            @case("-debug-info") => {
+                debug_info = true;
+            };
             @default => {
                 extra_args&.push(arg);
             };
@@ -56,6 +60,7 @@ fn driver(vtable: *ImportVTable) void = {
     build_options := default_build_options();
     build_options.retain_function_names = keep_names;
     build_options.deduplicate_bytecode = deduplicate;
+    build_options.debug_info = debug_info;
     
     choose_action :: "pass cli argument ['build', 'run', 'test'] and then the path to a '.fr' source file.";
     usage_msg :: "USAGE: franca examples/default_driver.fr % [filepath.fr]\n       %";
@@ -73,7 +78,7 @@ fn driver(vtable: *ImportVTable) void = {
                     println("Compiled successfully but selected jit backend so no artifact was produced.");
                 } else {|
                     assert(llvm, "Not Yet Implemented: build main with -aot=qbe");
-                    c.compile_with_llvm(fid, .ExportWithNames);
+                    c.compile_with_llvm(fid, .ExportWithNames, debug_info);
                     println("[built a.out]");
                 };
                 exit(0);
@@ -91,7 +96,7 @@ fn driver(vtable: *ImportVTable) void = {
                     f();
                 } else {|
                     if llvm {|
-                        c.compile_with_llvm(fid, .ExportWithNames);
+                        c.compile_with_llvm(fid, .ExportWithNames, debug_info);
                     } else {|
                         assert(qbe, "rn only two backends. update me as needed!");
                         c.compile_with_qbe(fid, .ExportWithNames);
@@ -114,7 +119,7 @@ fn driver(vtable: *ImportVTable) void = {
                         f();
                     } else {|
                         assert(llvm, "Not Yet Implemented: run test with -aot=qbe");
-                        c.compile_with_llvm(fid, .TestRunnerMain);
+                        c.compile_with_llvm(fid, .TestRunnerMain, debug_info);
                         child_args := find_args_after_double_dash(args_after_action);
                         @eprintln("[run %]", c.get_string(c.get_function_name(fid)));
                         run_cmd_blocking("a.out", empty());
@@ -130,15 +135,20 @@ fn driver(vtable: *ImportVTable) void = {
     panic(choose_action);
 }
 
-fn compile_with_llvm(c: CompCtx, fid: FuncId, entry: ProgramEntry) void = {
+fn compile_with_llvm(c: CompCtx, fid: FuncId, entry: ProgramEntry, debug_info: bool) void = {
     ir_text := {c.vtable.emit_llvm}(c, temp(), @slice (fid), entry);
     out := open_temp_file();
     for ir_text& { bucket |
         out.fd&.write(bucket);
     };
-    args := @slice ("-x", "ir", out&.s_name(), "-o", "a.out", "-Os");    
-    @eprintln("[run clang] %", args);
-    success := run_cmd_blocking(CLANG_PATH, args);
+    args: List(Str) = @list("-x", "ir", out&.s_name(), "-o", "a.out") temp();
+    if debug_info {|
+        args&.push_all(@slice ("-O0", "-g"));
+    } else {|
+        args&.push("-Os");
+    };
+    @eprintln("[run clang] %", args.items());
+    success := run_cmd_blocking(CLANG_PATH, args.items());
     assert(success, "clang failed");
     out.remove(); // TODO: defer 
 }

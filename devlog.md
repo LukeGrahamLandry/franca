@@ -1,3 +1,22 @@
+## debug info (Jul 31)
+
+- lldb doesn't see it. oh, need to connect the !SubProgram with the functions?
+  `inlinable function call in a function with debug info must have a !dbg location`,
+  complaining again is good i guess. adding that just segfaults tho...
+  maybe its https://github.com/llvm/llvm-project/issues/92724
+  thats the function its crashing in tho it doesn't show up multiple times in the stack trace,
+  idk if that means its not recursing or they just don't want to spam you.
+  oo i bet this one https://github.com/llvm/llvm-project/issues/59471
+  yup, you just also need it for DILocalVariable, same segfault.
+  so now its back to the state of `warning: no debug symbols in executable (-arch arm64)`
+  ok that goes away if you put a real filename in the DIFile.
+  it doesn't have to exist, you just can't have the directory be an empty string or it swollows it silently.
+  so now in clion, i can see the functions in the stacktrace have my nice names instead of the mangled names.
+  i can't see the variables tho. but `frame variable` in lldb lists them (which it didn't before), so its just clion that hates me now.
+  in lldb if i break in main and then step i can see the value of the variables.
+  i told it pointer so i just see 8 bytes always but i can see `max_steps = 0x000000000000002d`
+  which is 45 which is correct. so the value there is whats behind the pointer, not the pointer that i passed to dbg.declare.
+
 ## tiny tests on new sema (Jul 29/30)
 
 - got it to the point where it can load a test file and use the existing parse/scope/bc/asm systems.

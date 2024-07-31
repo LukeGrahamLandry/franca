@@ -6,11 +6,44 @@
 // TODO: implement !asm with Module-Level Inline Assembly
 // TODO: only specfiy ccc if you take a pointer to the function? you want to use one that allows tail calls otherwise. 
 
+// https://llvm.org/docs/SourceLevelDebugging.html#dbg-declare
+// they say the debug info intrinsics are deprecated and you should use records now... 
+// but records don't seem to work, "expecte instruction opcode", and clang generates the intrinsics, and rustc generates the intrinsics...
+// so i guess they're just lying out of spite???? 
+// oh maybe its just super recent and doesn't exist yet and they don't bother to put dates on the docs? 
+// this are like ~a month ago
+// https://github.com/llvm/llvm-project/pulls?q=is%3Apr+RemoveDIs 
+// yeah it looks like 18 exists now and they want to slowly make it possible to do the new thing during 19
+// https://discourse.llvm.org/t/rfc-instruction-api-changes-needed-to-eliminate-debug-intrinsics-from-ir/68939/11
+// tho this implies they should be able to parse it
+// https://github.com/llvm/llvm-project/pull/79818
+
+// TODO: better error mwssage if you use @enum instead of @tagged. -- Jun 14
+LlvmVal :: @struct(
+    ty: Prim,
+    id: i64
+);
+
+EmitLlvm :: @struct(
+    program: *SelfHosted,
+    out: BucketArray(u8),
+    current: BbId,
+    next_var: i64 = 0,
+    next_debug_info: i64 = 0,
+    current_debug_info: i64 = 0,
+    debug_info: List(u8),
+    debug_unit: i64 = 0,
+    debug_file: i64 = 0,
+    debug_func_type: i64 = 0,
+    debug_addr_type: i64 = 0,
+    $Val := LlvmVal, // TODO: const can't be first (doesn't parse).  -- Jun 14
+);
+
 emit_llvm :: { T :: CodeGen(EmitLlvm, .EmitLlvm); T.emit }
     
 // TODO: dependency problem so can't call this `init`
 fn new(comp: CompCtx, alloc: Alloc) EmitLlvm #inline = {
-    s: EmitLlvm = (program = comp.data.cast()[][], out = init(12, alloc), current = BbId.zeroed());
+    s: EmitLlvm = (program = comp.data.cast()[][], out = init(12, alloc), current = BbId.zeroed(), debug_info = list(alloc));
     
     // TODO: how the hell am i supposed to know these numbers without just compiling a c program with clang. 
     //       its not a big deal tho cause passing -target to clang overrides this. 
@@ -19,7 +52,28 @@ fn new(comp: CompCtx, alloc: Alloc) EmitLlvm #inline = {
     target triple = "arm64-apple-macosx13.0.0"
     """);
     
+    if s.program.get_build_options()[].debug_info {|
+        s.debug_unit = s&.next_debug();
+        s.debug_file = s&.next_debug();
+        s.debug_func_type = s&.next_debug();
+        s.debug_addr_type = s&.next_debug();
+        debug_ident := s&.next_debug();
+        // you can say language: 0, but then opt removes it and if you try to run it through again it complains theres no language
+        template :: "!% = distinct !DICompileUnit(language: 0, producer: \"Franca\", emissionKind: FullDebug, splitDebugInlining: false, nameTableKind: None, file: !%, isOptimized: false, runtimeVersion: 0)\n";
+        @fmt(s.debug_info&, template, s.debug_unit, s.debug_file);
+        @fmt(s.debug_info&, "!% = !DIFile(filename: \"mandelbrot.fr\", directory: \"examples\")\n", s.debug_file);
+        @fmt(s.debug_info&, "!llvm.dbg.cu = !{!%}\n", s.debug_unit);        
+        @fmt(s.debug_info&, "!llvm.ident = !{!%}\n", debug_ident);        
+        @fmt(s.debug_info&, "!% = !DISubroutineType(types: !{null})\n", s.debug_func_type);
+        @fmt(s.debug_info&, "!% = !DIBasicType(name: \"ptr\", size: 64, align: 64, encoding: DW_ATE_address)\n", s.debug_addr_type);
+        @fmt(s.debug_info&, "!% = !{!\"franca\"}\n", debug_ident);
+    };
     s
+}
+
+fn next_debug(self: *EmitLlvm) i64 = {
+    self.next_debug_info += 1;
+    self.next_debug_info - 1
 }
 
 fn emit_function_husk(self: *EmitLlvm, fid: FuncId, signeture: PrimSig, $emit_body: @Fn() void) void = {
@@ -34,9 +88,22 @@ fn emit_function_husk(self: *EmitLlvm, fid: FuncId, signeture: PrimSig, $emit_bo
         s := @format("%arg%", "%", arg_index) temp();
         s.items()
     };
+    
+    if self.program.get_build_options()[].debug_info {|
+        self.current_debug_info = self.next_debug();
+        @fmt(self.out&.current(), "!dbg !%", self.current_debug_info);
+    };
+    
     self.out&.current().push_all("{\n");
     emit_body();
     self.out&.current().push_all("}\n");
+    
+    if self.program.get_build_options()[].debug_info {|
+        func := self.program.get_function(fid);
+        source_name := self.program.pool.get(func.name); 
+        template :: "!% = distinct !DISubprogram(name: \"%\", linkageName: \"%\", unit: !%, scope: !%, type: !%, spFlags: DISPFlagDefinition)\n";
+        @fmt(self.out&.current(), template,  self.current_debug_info, source_name, name.items(), self.debug_unit, self.debug_file, self.debug_func_type);
+    };
 };
 
 fn emit_entry_points_and_debug_info(gen: *CodeGen(EmitLlvm, .EmitLlvm), comp: CompCtx, fns: []FuncId, entry: ProgramEntry) void = {
@@ -78,6 +145,19 @@ fn emit_entry_points_and_debug_info(gen: *CodeGen(EmitLlvm, .EmitLlvm), comp: Co
         @debug_names_len = private global i64 0
         @debug_names = private global [0 x ptr] []
     """);
+    self := gen.backend&;
+    if self.program.get_build_options()[].debug_info {|
+        version := self.next_debug();
+        d_version := self.next_debug();
+        level := self.next_debug();
+        
+        @fmt(self.out&.current(), "!% =  !{i32 8, !\"PIC Level\", i32 2}\n", level); // no idea what that means, its what rustc does
+        @fmt(self.out&.current(), "!% = !{i32 2, !\"Debug Info Version\", i32 3}\n", version);
+        @fmt(self.out&.current(), "!% = !{i32 2, !\"Dwarf Version\", i32 2}\n", d_version);
+        self.out&.push_bucket(self.debug_info);
+        self.debug_info = List(u8).zeroed();
+        @fmt(self.out&.current(), "!llvm.module.flags = !{!%, !%, !%}", version, d_version, level);
+    };
 }
 
 fn emit_bounce_fn(self: *EmitLlvm, impl_name_callee: Str, fake_decl_name: Str, signeture: PrimSig, private: bool) void = {
@@ -105,6 +185,7 @@ fn emit_bounce_fn(self: *EmitLlvm, impl_name_callee: Str, fake_decl_name: Str, s
     };
     self.out&.reserve(50);
     self.out&.current().push_all("{\n");
+    self.current_debug_info = 0;
     ret := self.inst_call(values.items(), signeture) {|
         @fmt(self.out&.current(), "@%", impl_name_callee);
     };
@@ -279,20 +360,6 @@ fn emit_special_asm(self: *EmitLlvm, body: *FuncImpl, func: *Func, bc: *FnBody, 
     false
 }
 
-// TODO: better error mwssage if you use @enum instead of @tagged. -- Jun 14
-LlvmVal :: @struct(
-    ty: Prim,
-    id: i64
-);
-
-EmitLlvm :: @struct(
-    program: *SelfHosted,
-    out: BucketArray(u8),
-    current: BbId,
-    next_var: i64 = 0,
-    $Val := LlvmVal, // TODO: const can't be first (doesn't parse).  -- Jun 14
-);
-
 fn write_header(self: *EmitLlvm, sig: PrimSig, name: Str, $get_arg_name: @Fn(idx: i64) Str) void = {
     self.out&.reserve(50);
     if(sig.ret1) {fst: Prim|
@@ -328,11 +395,26 @@ fn setup(self: *EmitLlvm, body: *FnBody, vars_out: *List(EmitLlvm.Val)) void = {
     self.next_var = 0;
     // TODO: waste for ssa vars, they just get set to the value. -- Jun 14
     vars := body.vars.items();
+    do_debug := self.program.get_build_options()[].debug_info;
     enumerate(vars) {i, ty|
         v := self.get_var(.P64);
         vars_out.push(v);
         self.out&.reserve(30); 
         @fmt(self.out&.current(), "   % = alloca i8, i32 %, align %\n", v, @as(i64) ty.size.zext(), @as(i64) ty.align.zext()); // uhg % was a bad choice. 
+        if do_debug && body.var_names.len > i {|
+            if body.var_names[i] { name | 
+                name := self.program.pool.get(name.name);
+                local := self.next_debug();
+                location := self.next_debug();
+                scope := self.current_debug_info;
+                @fmt(self.debug_info&, "!% = !DILocalVariable(name: \"%\", scope: !%, file: !%, type: !%)\n",
+                    local, name, scope, self.debug_file, self.debug_addr_type);
+                @fmt(self.debug_info&, "!% = !DILocation(line: 1, column: 1, scope: !%)\n", location, scope);
+                // because the hardest part of compilers is how few times you need to write the word "metadata" apparently 
+                template :: "    call void @llvm.dbg.declare(metadata ptr %, metadata !%, metadata !DIExpression()), !dbg !%\n";
+                @fmt(self.out&.current(), template, v, local, location);
+            };
+        };
     };
     // TODO: use phi nodes cause this is stupid but that's such a pain in the ass. 
     // I use these for block arguments. 
@@ -501,8 +583,17 @@ fn inst_call(self: *EmitLlvm, args: Slice(LlvmVal), sig: PrimSig, $do_call: @Fn(
     };
     self.pop_trailing_comma();
     
-    self.out&.current().push_all(")\n");
+    self.out&.current().push_all(")");
     
+    if self.program.get_build_options()[].debug_info && self.current_debug_info != 0 {|
+        // TODO: line info
+        // Fixes "inlinable function call in a function with debug info must have a !dbg location"
+        location := self.next_debug();
+        @fmt(self.debug_info&, "!% = !DILocation(line: 1, column: 1, scope: !%)\n", location, self.current_debug_info);
+        @fmt(self.out&.current(), ", !dbg !%", location);
+    };
+    
+    self.out&.current().push_all("\n");
     if(sig.ret2) {_| // two
         v1 := out_vals[0];
         v2 := out_vals[1];
