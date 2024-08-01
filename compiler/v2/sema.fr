@@ -1,6 +1,9 @@
-ResultType :: @tagged(
+// the compiler of theseus 
+
+ResultType :: @rec @tagged(
     Specific: Type,
     Returning: Type,
+    Tuple: []ResultType,  // temporary storage! don't hold across yield points. 
     None
 );
 
@@ -101,11 +104,8 @@ fn compile_place_expr(self: *SelfHosted, place: *FatExpr, requested: ResultType,
                 place.ty = field_ptr_ty;
                 // Now we have the offset-ed ptr, add back the deref
                 @check(self.deref_one(place)) return;
-
-                // Don't set done again because you want to go around the main compile_expr another time so special load/store overloads get processed.
-                // TODO: that shouldn't be true anymore
+                place.done = true;
             } else {|
-                // place.done = true;
                 place.ty = field_ptr_ty;
             };
         }
@@ -354,8 +354,8 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
     self.dispatch.active_stack.push(expr = expr, requested = requested);
     
     @match(expr.expr&) {
-        fn Poison() => {
-            return(@err("Poison expression"));
+        fn Poison(placeholder) => {
+            return(@err("Poison expression %", placeholder));
         }
         fn Value(f) => {
             if(expr.ty == UnknownType, => return(@err("ICE: Value expression must have known type")));
@@ -383,12 +383,11 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
             expr.ty = f.result.ty;
         }
         fn Tuple(parts) => {
+            requested_types := @try(self.tuple_types(requested, parts.len)) return;
             types: List(Type) = list(parts.len, temp()); 
-            each parts { expr | 
+            enumerate parts { i, expr | 
                 if !expr.done {|
-                    // TODO: req_part := panic("TODO: pass through tuple_types if known requested");
-                    req_part := ResultType.None;
-                    @check(self.compile_expr(expr, req_part)) return;
+                    @check(self.compile_expr(expr, requested_types[i])) return;
                 };
                 types&.push(expr.ty);
             };
@@ -438,6 +437,23 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
                 @check(self.coerce_const_expr(expr, requested)) return;
             };
         }
+        // :PlaceExpr
+        fn FieldAccess(f) => {
+            // TODO: this is unfortunate. it means you prewalk instead of letting placeexpr do the recursion
+            //       but need to check if its a value that has special fields first.
+            @check(self.compile_expr(f.container, .None)) return;
+
+            if f.container.ty == Type {| // :get_or_create_type
+                return(@err("FieldAccess contextual field on Type"));
+            };
+            if f.container.ty == ScopeId {| // :get_or_create_type
+                // TODO: this should probably be removed because its the same as a struct with const fields. 
+                return(@err("FieldAccess on Scope"));
+            };
+
+            // Otherwise its a normal struct/tagged field.
+            @check(self.compile_place_expr(expr, requested, true)) return;
+        }
         @default => @panic("TODO: unhandled node type %: %", expr.expr&.tag(), expr.log(self.pool));
     };
     self.dispatch.active_stack.pop();
@@ -445,6 +461,7 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
     .Ok
 }
 
+::if(ResultType);
 fn compile_call(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(void) #once = {
     @debug_assert(expr.expr&.is(.Call));
     f := expr.expr.Call.f;
@@ -455,10 +472,6 @@ fn compile_call(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
     };
     
     @check(self.compile_expr(f, req_fn)) return;
-    
-    ::if(ResultType);
-    req_arg: ResultType = if(arg.ty == UnknownType, => .None, => (Specific = arg.ty));
-    @check(self.compile_expr(arg, req_arg)) return;
     
     if f.ty == OverloadSet {|  // :get_or_create_type
         panic("TODO: OverloadSet");
@@ -474,10 +487,17 @@ fn compile_call(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
     
     @match(self.get_type(f.ty)) {
         fn FnPtr(it) => {
+            // Feels like a pretty reasonable invarient: if we have a function pointer, we need to know exactly what its types are. 
+            @check(self.compile_expr(arg, (Specific = it.ty.arg))) return;
             expr.ty = it.ty.ret;
         }
-        fn Fn(it) => return(self.call_direct(expr));
+        fn Fn(it) => {
+            // This happens to be an easy case where we already know the argument type.
+            @check(self.compile_expr(arg, (Specific = it.arg))) return;
+            return(self.call_direct(expr));
+        }
         fn Label(it) => {
+            @check(self.compile_expr(arg, (Specific = it[]))) return;
             if arg.ty != it[] {|
                 return(@err("early return type mismatch. TODO: better type checking"));
             };
@@ -491,29 +511,39 @@ fn compile_call(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
 }
 
 // TODO: check function ret type against requested
+// Note: when we get here, we might not know the type of the function or the argument. 
 fn call_direct(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
     f_expr := expr.expr.Call.f;
     arg_expr := expr.expr.Call.arg;
     fid := @check(self.immediate_eval_expr(f_expr, f_expr.ty)) return;
     fid := FuncId.assume_cast(fid&)[];
+    @println("compile direct call %", fid);
     func := self.get_function(fid);
     
     assert(func.cc.expect("known cc") != .Inline 
-        && !func.get_flag(.Generic) 
         && !func.get_flag(.MayHaveAquiredCaptures) && !func.get_flag(.UnsafeNoopCast)
         && !func.get_flag(.TryConstantFold)
     , "Not Yet Implemented: unhandled complex call");
     
-    arg_ty := @check(self.infer_arguments(fid)) return;
-    ret_ty := @check(self.infer_return(fid))    return;
+    arg_ty := UnknownType;
     
-    // TODO: better type checking
-    if arg_ty != arg_expr.ty {|
-        return(@err("arg type mismatch"));
-    };
-    
-    if func.get_flag(.AnyConstArgs) {|
-        @debug_assert(!func.get_flag(.Generic), "#generic was handled above");
+    // If there's no const args, we know its not generic so we should be able to know the argument types. 
+    if !func.get_flag(.AnyConstArgs) {|
+        arg_ty = @check(self.infer_arguments(fid)) return;
+        @check(self.compile_expr(arg_expr, (Specific = arg_ty))) return;
+        if arg_ty != arg_expr.ty {|
+            return(@err("arg type mismatch. TODO: better type checking"));
+        };
+    } else {| // there are const args. 
+        ::if(ResultType);
+        req_arg: ResultType = if(arg_expr.ty == UnknownType, => .None, => (Specific = arg_expr.ty));
+        @check(self.compile_expr(arg_expr, req_arg)) return;
+        arg_ty := @check(self.infer_arguments(fid)) return;
+        // TODO: better type checking
+        if arg_ty != arg_expr.ty {|
+            return(@err("arg type mismatch"));
+        };
+        
         // This creates a new function with only runtime args, and updates the arg_expr accordingly. 
         fid = @check(self.curry_const_args(fid, f_expr, arg_expr)) return;
         func = self.get_function(fid);
@@ -526,6 +556,8 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
             return(@err("arg type mismatch after removing const args"));
         };
     };
+    
+    ret_ty := @check(self.infer_return(fid))    return;
     
     if self.dispatch.enclosing_function { current |
         current := self.get_function(current);
@@ -684,17 +716,13 @@ fn curry_const_args(self: *SelfHosted, original_f: FuncId, f_expr: *FatExpr, arg
         value := @check(self.immediate_eval_expr(arg_expr, arg_expr.ty)) return;
         @check(self.bind_const_arg(new_fid, name, value, arg_expr.ty, arg_expr.loc)) return;
 
-        assert(!func.get_flag(.Generic), "TODO: the old one inferred types here");
-        //if self.program[new_fid].get_flag(Generic) {
-        //    self.program[new_fid].set_flag(Generic, false);
-        //    self.infer_types(new_fid)?;
-        //}
         func.finished_arg = .None;  // TODO: we know its void because we removed the only argument.
         fid_value := self.to_values(FuncId, new_fid);
         f_expr.set(fid_value, FuncId);
         arg_expr.set(unit_value, void);
         self.dispatch.const_bound_memo&.insert(key, new_fid);
         func.unset_flag(.AnyConstArgs);
+        func.unset_flag(.Generic);
         (Ok = new_fid)
     } else {|
         if(!arg_expr.expr&.is(.Tuple), => return(@err("TODO: pattern match on non-tuple")));
@@ -734,17 +762,11 @@ fn curry_const_args(self: *SelfHosted, original_f: FuncId, f_expr: *FatExpr, arg
         };
         @debug_assert_ne(new_fid, original_f);
 
-        assert(!func.get_flag(.Generic), "TODO: the old one inferred types here");
-        //if is_generic {
-        //    self.program[new_fid].set_flag(Generic, false);
-        //    let ty = self.infer_types(new_fid)?;
-        //    assert!(ty.is_some(), "failed to infer types of #generic function");
-        //}
-
         // We're leaving it to the caller to infer the new type and type-check the runtime arguments. 
         fid_value := self.to_values(FuncId, new_fid);
         f_expr.set(fid_value, FuncId);
         func.unset_flag(.AnyConstArgs);
+        func.unset_flag(.Generic);
         @check(self.remove_const_args(original_f, arg_expr)) return;
         self.dispatch.const_bound_memo&.insert(key, new_fid);
         // Don't need to explicitly force capturing because bind_const_arg added them if any args were closures.
@@ -947,6 +969,7 @@ fn hoist_constants(self: *SelfHosted, body: []FatStmt) Maybe(void) #once = {
                     // TODO: distinguish between overload sets that you add to and those that you re-export
                     @debug_assert(!func.get_flag(.ResolvedSign));
                     @debug_assert(!func.get_flag(.ResolvedBody));
+                    // TODO: assert placeholdervalue
                     if self.is_empty_constant(var[]) {|
                         // We're the first to reference this overload set so create it. 
                         i: OverloadSet = from_index(self.dispatch.overloads.len);

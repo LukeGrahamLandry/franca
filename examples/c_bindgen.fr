@@ -37,41 +37,69 @@ fn main() void = {
         //@println("%", part&.tag());
         //println(json.cursor);
         @match(part) {
-            (fn Eof() => {
-                exit(0);
-            }); //return());
-            (fn Key(name) => {
-                if name.eq("range").or(=> name == "loc").or(=> name == "id") {|
-                    res := json&.skip_next_value();
-                    res.unwrap();
-                    continue();
+            fn Eof() => exit(0);
+            fn Key(name) => {
+                skip_to_tag :: fn(key: Str, tag: JsonPart.Tag()) JsonPart => {
+                    res := json&.skip_until_key(key);
+                    if(res&.is_err(), => panic(res.Err));
+                    value := json&.next().unwrap();
+                    @assert(value&.is(tag), "expected % '%'", tag, key);
+                    value
                 };
+                
+                skip_to_string :: fn(key: Str) Str => {
+                    value := skip_to_tag(key, .StringValue);
+                    value.StringValue
+                };
+                
                 if name == "kind" {|
                     value := json&.next().unwrap();
                     assert(value&.is(.StringValue), "expected tag");
                     @switch(value.StringValue) {
                         @case("RecordDecl") => {
-                        
+                            res := json&.skip_until_key("name");
+                            if(res&.is_err(), => continue()); // some stuff doesn't have a name... idk bro. 
+                            value := json&.next().unwrap();
+                            assert(value&.is(.StringValue), "expected name string");
+                            @println("Struct named %", value.StringValue);
+                            
+                            skip_to_tag("inner", .StartList);
+                            
+                            dowhile {|
+                                value := json&.next().unwrap();
+                                if value&.is(.StartDict) {|
+                                    kind := skip_to_string("kind");
+                                    @assert_eq(kind, "FieldDecl");
+                                    name := skip_to_string("name");
+                                    skip_to_tag("type", .StartDict);
+                                    type := skip_to_string("qualType");
+                                    res := json&.skip_current_value();
+                                    res.unwrap();
+                                    @println("- field %: %", name, type);
+                                    value := json&.next().unwrap();
+                                    assert(value&.is(.End), "// TODO: skip_current_value should probably eat the End too?");
+                                    true
+                                } else {|
+                                    false
+                                }
+                            }
                         };
                         @case("EnumDecl") => {
                         
                         };
                         @case("FunctionDecl") => {
-                        
+                            name := skip_to_string("name");
+                            skip_to_tag("type", .StartDict);
+                            type := skip_to_string("qualType");
+                            @println("Function named '%' with type '%'", name, type);
                         };
                         @default => {
                             json&.skip_current_value().unwrap();
                             continue();
                         };
                     };
-                    //@println("=== % ===", value.StringValue);
-                } else {|
-                    //@println("%: ", name);
                 };
-            });
-            (fn StringValue(value) => {
-                println(value);
-            });
+            }
             @default => ();  
         };
     };
@@ -81,7 +109,7 @@ fn main() void = {
 //       I need a more declaritive way of describing how to build a c library. 
 fn driver(vtable: *ImportVTable) void = {
     src := temp().read_to_string("examples/c_bindgen.fr");  // TODO: don't depend on cwd.
-    comp := vtable.new_with_src(src.items(), .Aarch64, default_build_options());
+    comp := vtable.new_with_src(src.items(), default_build_options());
     ctx := vtable.with(comp);
     
     libs := ctx.empty_libs();

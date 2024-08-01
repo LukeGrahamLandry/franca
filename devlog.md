@@ -1,3 +1,9 @@
+##
+
+- thinking about how to do #generic without forcing you to mark it and letting the expressions compose better.
+  need to move argument typing to the bind_const loop. added a ResultType that holds a tuple so you can have partially known args and pass that down.
+- but first, tuples with fields should be easy.
+
 ## debug info (Jul 31)
 
 - lldb doesn't see it. oh, need to connect the !SubProgram with the functions?

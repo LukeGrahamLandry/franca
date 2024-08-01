@@ -252,7 +252,7 @@ fn resolve_func_args(self: *ResolveScope, func: *Func) PRes = {
 
     if generic {|
         each func.arg.bindings { b |
-            @try(self.declare_binding(b, func.loc)) return;
+            @try(self.declare_binding(b, func.loc, true)) return;
         };
     };
     each func.arg.bindings { b |
@@ -274,18 +274,17 @@ fn resolve_func_body(self: *ResolveScope, func: *Func) PRes = {
     if generic {|
     } else {|
         each func.arg.bindings { b |
-            @try(self.declare_binding(b, func.loc)) return;
+            @try(self.declare_binding(b, func.loc, true)) return;
         };
     };
     self.push_scope(.None);
     func.set_flag(.ResolvedBody);
     
     @if_let(func.body&) fn Normal(expr) => {
-        if func.get_flag(.AllowRtCapture) {|
-            func.return_var = (Some = @try(self.decl_var(Flag.local_return.ident(), .Const, func.loc)) return);
-        } else {|
-            func.return_var = (Some = @try(self.decl_var(Flag.return.ident(), .Const, func.loc)) return);
-        };
+        ::if(Flag);
+        name := if(func.get_flag(.AllowRtCapture), => Flag.local_return, => Flag.return);
+        var := @try(self.decl_var(name.ident(), .Const, func.loc, .Label)) return;
+        func.return_var = (Some = var);
         @try(self.walk_expr(expr)) return;
     };
     
@@ -325,7 +324,7 @@ fn scan_const_decls(self: *ResolveScope, stmt: *FatStmt) PRes = {
             };
             
             if (f.kind == .Const) {|
-                new := @try(self.decl_var(f.name, f.kind, loc)) return;
+                new := @try(self.decl_var(f.name, f.kind, loc, .Unknown)) return;
                 decl: Stmt = (DeclVar = (
                     value = f.value,
                     ty = f.ty,
@@ -339,7 +338,7 @@ fn scan_const_decls(self: *ResolveScope, stmt: *FatStmt) PRes = {
             // TOOD: @vs @private
             v := self.find_var(func.name).or(=> {
                 // TODO: we just tried to look it up so (sometimes) don't need to do the extra check if we're sillegally hadowing a const. :SLOW
-                @try(self.decl_var(func.name, .Const, func.loc)) return
+                @try(self.decl_var(func.name, .Const, func.loc, .OverloadSet)) return
             });
             func.var_name = (Some = v);
         });
@@ -461,7 +460,7 @@ fn find_var(self: *ResolveScope, name: Symbol) ?Var = {
     unreachable()
 }
 
-fn decl_var(self: *ResolveScope, name: Symbol, kind: VarType, loc: Span) Result(Var, ParseErr) = {
+fn decl_var(self: *ResolveScope, name: Symbol, kind: VarType, loc: Span, placeholder: PlaceholderValue) Result(Var, ParseErr) = {
     s := self.scope;
     // Note: you can't shadow a let with a const either but that already works because consts are done first.
 
@@ -476,7 +475,7 @@ fn decl_var(self: *ResolveScope, name: Symbol, kind: VarType, loc: Span) Result(
     
     var: Var = (kind = kind, name = name, id = scopes.types.len.trunc(), scope = self.scope, block = self.block.trunc());
     if kind == .Const {|
-        empty: Ty(FatExpr, LazyType) = ((expr = .Poison, loc = loc, ty = UnknownType, done = false), .Infer);
+        empty: Ty(FatExpr, LazyType) = ((expr = (Poison = placeholder), loc = loc, ty = UnknownType, done = false), .Infer);
         scopes.constants&.push((Some = empty));
         prev := scope.vars[self.block].const_lookup&.insert(name, var);
     } else {|
@@ -526,10 +525,12 @@ fn resolve_binding(self: *ResolveScope, binding: *Binding) PRes #once = {
     .Ok
 }
 
-fn declare_binding(self: *ResolveScope, binding: *Binding, loc: Span) PRes = {
+fn declare_binding(self: *ResolveScope, binding: *Binding, loc: Span, is_args: bool) PRes = {
     @match(binding.name) {
         (fn Ident(name) => {
-            var := @try(self.decl_var(name, binding.kind, loc)) return;
+            ::if(PlaceholderValue);
+            placeholder: PlaceholderValue = if(is_args, => .Argument, => .Unknown);
+            var := @try(self.decl_var(name, binding.kind, loc, placeholder)) return;
             b: Binding = (
                 name = (Var = var),
                 ty = binding.ty,
@@ -605,7 +606,7 @@ fn handle_stmt(self: *ResolveScope, stmt: *FatStmt) Result(DoMore, ParseErr) #on
             @try(self.walk_type(f.ty&)) return;
             @try(self.walk_expr(f.value&)) return;
             
-            new := @try(self.decl_var(f.name, f.kind, stmt.loc)) return;
+            new := @try(self.decl_var(f.name, f.kind, stmt.loc, .Unknown)) return;
             s: Stmt = (DeclVar = (
                 value = f.value,
                 ty = f.ty,
@@ -625,7 +626,7 @@ fn handle_stmt(self: *ResolveScope, stmt: *FatStmt) Result(DoMore, ParseErr) #on
         (fn DeclVarPattern(f) => {
             // TODO: this declares the new variables before resolving the types/values. which is wrong! -- Jul 1
             each f.binding.bindings { b |
-                @try(self.declare_binding(b, stmt.loc)) return;
+                @try(self.declare_binding(b, stmt.loc, false)) return;
             };
         });
         @default => ();
