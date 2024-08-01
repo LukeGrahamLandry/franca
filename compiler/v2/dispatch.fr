@@ -27,6 +27,7 @@ Action :: @tagged(
     Jit: FuncId, // After this, it's safe to call a function pointer. 
     TypeConstant: VarAttempt,
     EvalConstant: VarAttempt,  // find_const. 
+    ResolveOverload: @struct(os: OverloadSet, call: ExprAttempt),
 );
 
 fn init(a: Alloc) CompilerDispatch = {
@@ -172,6 +173,16 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) #once = {
             hack := self.stable_compiler_context().cast(); // because Bc::CompCtx stores a ***SelfHosted in the assembly 
             body := hack.emit_bc_and_aarch64(fid, .Jit);
             if(body&.is_err(), => return(Err = self.box(body.Err)));
+        }
+        fn ResolveOverload(f) => {
+            overloads := self.dispatch.overloads&.nested_index(f.os.as_index());
+            @println("[TRY TASK] %: % %", task.action&.tag(), f.os, self.pool.get(overloads.name));
+            @debug_assert(f.call.expr.expr&.is(.Call));
+            call := f.call.expr.expr.Call;
+            fid := @check(self.resolve_in_overload_set(call.arg, f.call.requested, f.os)) return;
+            f_value := self.to_values(FuncId, fid);
+            //call.f.set(f_value, fid); // THIS TYPE CHECKS! :FUCKED
+            call.f.set(f_value, FuncId);
         }
     };
     .Ok

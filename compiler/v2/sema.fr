@@ -530,11 +530,7 @@ fn compile_call(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
     if f.ty == OverloadSet {|  // :get_or_create_type
         os := @check(self.immediate_eval_expr(f, OverloadSet)) return;
         os := OverloadSet.assume_cast(os&)[];
-        
-        fid := @check(self.resolve_in_overload_set(arg, requested, os)) return;
-        f_value := self.to_values(FuncId, fid);
-        //f.set(f_value, fid); // THIS TYPE CHECKS! :FUCKED
-        f.set(f_value, FuncId);
+        return(Suspend = self.wait_for(ResolveOverload = (os = os, call = (expr = expr, requested = requested))));
     };
     
     if f.ty == FuncId {|  // :get_or_create_type
@@ -1066,22 +1062,23 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
     
     if want_arity == 1 {|
         @check(self.compile_expr(arg_expr, .None)) return;
-        each interesting& { opt | 
-            func := self.get_function(opt.func);           
-            if !func.get_flag(.AnyConstArgs) {|
-                @check(self.infer_arguments(opt.func)) return;   //  TODO: if not constant, why not just do this  
-            };
-        };
     };
     
     ::if([]FatExpr);
+    blocked: List(*Action) = list(temp());
     parts := if(arg_expr.expr&.is(.Tuple), => arg_expr.expr.Tuple.items(), => (ptr = arg_expr, len = 1));
     still_interesting: List(OverloadOption) = list(temp());
     each interesting& { opt | 
         continue :: local_return;
         func := self.get_function(opt.func);           
         if !func.get_flag(.AnyConstArgs) {|
-            @check(self.infer_arguments(opt.func)) return; // TODO: really if this yields, you want to keep looking because maybe we don't care about it that much
+            //println("danger! infer arguments");
+            //@check(self.infer_arguments(opt.func)) return; // TODO: really if this yields, you want to keep looking because maybe we don't care about it that much
+            res := self.infer_arguments(opt.func);
+            if res&.is(.Suspend) {|
+               blocked&.push(res.Suspend); 
+               continue(); // we don't like it, we skip it.
+            };
         };
         
         enumerate func.arg.bindings { i, b | 
@@ -1110,7 +1107,13 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
             continue :: local_return;
             func := self.get_function(opt.func);           
             if !func.get_flag(.AnyConstArgs) {|
-                @check(self.infer_return(opt.func)) return;   
+                //@check(self.infer_return(opt.func)) return;   
+                self.infer_return(opt.func);
+                res := self.infer_return(opt.func);
+                if res&.is(.Suspend) {|
+                    blocked&.push(res.Suspend); 
+                    continue(); // we don't like it, we skip it.
+                };
             };
             
             if func.finished_ret { found | 
@@ -1127,6 +1130,10 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
         return(Ok = still_interesting[0].func);
     };
     
+    if !blocked.is_empty() {|
+        @println("block len = %", blocked.len);
+        return(Suspend = blocked[0]);  // TODO: return all? don't just pick one. 
+    };
     return(@err("TODO: resolve_in_overload_set %", interesting.len));
     Maybe(FuncId).unreachable_hack()
 }
@@ -1472,6 +1479,7 @@ fn coerce_const_expr(self: *SelfHosted, expr: *FatExpr, req: ResultType) Maybe(v
     .Ok
 }
 
+::?FnType;
 fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Values) = {
     @println("imm_eval %", expr.log(self.pool));
     old_func := self.dispatch.enclosing_function;
