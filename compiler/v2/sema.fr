@@ -44,9 +44,63 @@ fn compile_stmt(self: *SelfHosted, stmt: *FatStmt) Maybe(void) = {
             };
             return(@err("Illegal place expression: %", tag))
         }
+        fn DeclVarPattern(f) => return(self.decl_var_pattern(stmt));
         @default => @panic("TODO: unhandled compile_stmt type %", stmt.stmt&.tag());
     };
     unreachable_hack(Maybe(void))
+}
+
+fn decl_var_pattern(self: *SelfHosted, stmt: *FatStmt) Maybe(void) #once = {
+    @debug_assert(stmt.stmt&.is(.DeclVarPattern));
+    (bindings, value) := (stmt.stmt.DeclVarPattern.binding.bindings&, stmt.stmt.DeclVarPattern.value&);
+    if value.is_raw_unit() {|
+        // TODO: typecheck the pattern! this was fine a long time ago when this node was only made by closures. 
+        stmt.stmt = .Noop;
+        return(.Ok);
+    };
+    
+    if bindings.len == 1 {|
+        b := bindings[0]&;
+        if(b.kind == .Const, => return(@err("unreachable? destructure single arg must be closure but const args should already be handled")));
+        if b.var() { name |
+            // TODO: could reduce the ast node but it doesn't matter. 
+            return(self.decl_var(name, b.ty&, value));
+        };
+        return(@err("TODO: what situation allows DeclVarPattern with no name?"));
+    };
+    
+    // So its not a tuple, we don't know how to destructure it (emit_bc does), but we can still type check it. 
+    // Even if it was a tuple, all we'd do differently is pass in the ResultTypes seperatly, but now we can just do that for any expression. 
+    // If i was inspired this could grow a speical case for tuples like the old one had to avoid allocating the lists,
+    // but temp() is cheap so its probably fine.  -- Aug 1
+    
+    result_types: List(ResultType) = list(bindings.len, temp());
+    each bindings { b | 
+        if(b.kind == .Const, => return(@err("TODO: destructure with constants")));
+        request := ResultType.None; 
+        if @check(self.infer_type(b.ty&)) return { known |
+            request = (Specific = known);
+        };
+        result_types&.push(request);
+    };
+    
+    @check(self.compile_expr(value, (Tuple = result_types.items()))) return; 
+    types := or self.tuple_types(value.ty) {|
+        return(@err("destructure expected tuple type"))
+    };
+    if(types.len != bindings.len, => return(@err("destructuring arity mismatch expected % but found %", bindings.len, types.len)));
+    
+    enumerate bindings { i, b |
+        if b.var() { name | 
+            prev := self.scopes.get_var_type(name); 
+            self.scopes.put_var_type(name, types[i]);
+            @assert(prev.is_none().or(=> prev.unwrap() == types[i]));
+        };
+    };
+    
+    // TODO: :mark_stmt_done 
+    
+    .Ok
 }
 
 ::opt_map(Type, Type);
@@ -214,7 +268,7 @@ fn deref_one(self: *SelfHosted, ptr: *FatExpr) Maybe(void) = {
     .Ok
 }
 
-fn decl_var(self: *SelfHosted, name: Var, ty: *LazyType, value: *FatExpr) Maybe(void) #once = {
+fn decl_var(self: *SelfHosted, name: Var, ty: *LazyType, value: *FatExpr) Maybe(void) = {
     @println("decl_var %", name&.log(self.pool)); // :debug
     @debug_assert(self.dispatch.enclosing_function.is_some(), "ICE: runtime vars must have an enclosing function");
     no_type := ty.is(.Infer);
@@ -556,18 +610,23 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
     
     ret_ty := @check(self.infer_return(fid))    return;
     
-    is_const_context := true;
-    if self.dispatch.enclosing_function { current_f |
-        is_const_context = false;
-        current := self.get_function(current_f);
-        current.callees&.add_unique(fid, self.get_alloc());
-        self.aarch64&.extend_blanks(fid);
-        @println("added % calls %", current_f, fid);
-    };
-    if is_const_context {|
-        @println("skip adding callee for %", fid);
+    capturing   := func.get_flag(.AllowRtCapture).or(func.get_flag(.MayHaveAquiredCaptures));
+    will_inline := capturing.or(func.cc.unwrap() == .Inline);
+    if(will_inline && func.get_flag(.NoInline), => return(@err("must inline a function marked #noinline")));
+    
+    if will_inline {|
+        // If we're just inlining for #inline, compile first so some work on the ast is only done once.
+        // note: compile() checks if its ::Inline before actually generating asm so it doesn't waste its time.
+        // if its a '=>' function, we can't compile it out of context, and same if it has a const arg of a '=>' function. 
+        if !capturing && !func.get_flag(.EnsuredCompiled) {|
+            return(Suspend = self.wait_for(CompileBody = fid));
+        };
+
+        // TODO: check that you're calling from the same place as the definition.
+        return(self.emit_capturing_call(fid, expr));
     };
     
+    is_const_context := self.add_callee(fid);
     // TODO: its a bit of a hack to check is_const_context? 
     //       it fixes a problem where you try to compile too soon and then think you're already done even if you make a function for it later.
     expr.done = f_expr.done && arg_expr.done && !is_const_context;
@@ -585,6 +644,88 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
     };
     
     .Ok
+}
+
+fn add_callee(self: *SelfHosted, fid: FuncId) bool = {
+    is_const_context := true;
+    if self.dispatch.enclosing_function { current_f |
+        is_const_context = false;
+        current := self.get_function(current_f);
+        current.callees&.add_unique(fid, self.get_alloc());
+        self.aarch64&.extend_blanks(fid);
+        @println("added % calls %", current_f, fid);
+    };
+    if is_const_context {|
+        @println("skip adding callee for %", fid);
+    };
+    is_const_context
+}
+
+// Replace a call expr with the body of the target function.
+fn emit_capturing_call(self: *SelfHosted, f: FuncId, expr_out: *FatExpr) Maybe(void) #once = {
+    @check(self.ensure_resolved_body(f)) return; // it might not be a closure. it might be an inlined thing.
+    @debug_assert(expr_out.expr&.is(.Call));
+    arg_expr := expr_out.expr.Call.arg;
+    
+    // TODO
+    //assert!(!self.currently_inlining.contains(&f), "Tried to inline recursive function.");
+    //self.currently_inlining.push(f);
+
+    func := self.get_function(f);
+    // TODO: if let this? its for return_var
+    ret_ty := or func.finished_ret {|
+        return(@err("Unknown ret type for % %", f, self.pool.get(func.name)))
+    };
+    label_ty := self.intern_type(Label = ret_ty);
+    // TODO: mutual callees as well.
+    // for inlined or things with const args, the body will already have been compiled, but the backend needs to see the whole callgraph.
+    for func.callees { callee |
+        self.add_callee(callee);
+    };
+
+    if(!func.body&.is(.Normal), => return(@err("'=>' function must have body expression.")));
+    aliased_body := func.body.Normal&;
+    may_have_early_return := !aliased_body.expr&.is(.Value);
+    pattern := func.arg&.deep_clone(self.get_alloc());
+    
+    // TODO: you want to be able to share work (across all the call-sites) compiling parts of the body that don't depend on the captured variables
+    old_ret_var := func.return_var.unwrap();
+    new_ret_var := self.scopes.dup_var(old_ret_var);
+    ret_label: LabelId = from_index(self.dispatch.next_label);
+    self.dispatch.next_label += 1;
+    
+    owned_body: FatExpr = if func.get_flag(.Once) {|
+        // TODO: better error message if they try to call it again. 
+        // TODO: decide what #once with const args should mean. 
+        temp := aliased_body[];
+        aliased_body.expr = (Poison = .OnceUsed);
+        temp
+    } else {|
+        aliased_body.deep_clone(self.get_alloc())
+    };
+    loc := arg_expr.loc;
+    // the second case would be sufficient for correctness but this is so common (if(_,!,!), loop(!), etc) that it makes me less sad. 
+    if arg_expr.is_raw_unit() {|
+        // TODO: if !may_have_early_return, should be able to just inline the value but it doesnt work!
+        //       similarly i cant have ret_label:None so im clearly wrong. its `not callable` in overloading.rs. trying to call the cond of an if??
+        //       -- Jun 16
+        expr_out.expr = (Block = (body = empty(), result = self.box(owned_body), ret_label = (Some = ret_label), hoisted_constants = false));
+    } else {|
+        stmts: List(FatStmt) = list(1, self.get_alloc());
+        arg_stmt: Stmt = (DeclVarPattern = (binding = pattern, value = arg_expr[]));
+        stmts&.push(stmt = arg_stmt, annotations = empty(), loc = loc);
+        expr_out.expr = (Block = (body = stmts.rs(), result = self.box(owned_body), ret_label = (Some = ret_label), hoisted_constants = false));
+    };
+    // TODO: self.currently_inlining.retain(|check| *check != f);
+    
+    if may_have_early_return {|
+        // Note: not renumbering on the function. didn't need to clone it.
+        self.renumber_expr(expr_out, (Some = (old_ret_var, new_ret_var)));
+        value := self.to_values(LabelId, ret_label);
+        @check(self.save_const_values(new_ret_var, value, label_ty, loc)) return;
+    };
+    
+    self.compile_expr(expr_out, (Specific = ret_ty))
 }
 
 // TODO: this still has the problem of disallowing const args that require type hint of previous const args. 
@@ -717,7 +858,6 @@ fn curry_const_args(self: *SelfHosted, original_f: FuncId, f_expr: *FatExpr, arg
         (Ok = new_fid)
     } else {|
         if(!arg_expr.expr&.is(.Tuple), => return(@err("TODO: pattern match on non-tuple")));
-        is_generic := func.get_flag(.Generic);
         removed_count := 0;
         range(0, func.arg.bindings.len) { i |
             continue :: local_return;
@@ -1077,7 +1217,7 @@ fn compile_get_var(self: *SelfHosted, expr: *FatExpr, requested: ResultType) May
 // TODO: this is kinda weird. `fn` statements create an overload set or add to an existing one. 
 fn is_empty_constant(self: *SelfHosted, name: Var) bool #once = {
     var := self.scopes.get_constant(name);
-    var := var.expect("constant should always be known (even if its Poison)");
+    var := or(var, => return(true));
     var._0.expr&.is(.Poison)
 }
 
@@ -1089,13 +1229,13 @@ fn find_const(self: *SelfHosted, name: Var, requested: ResultType) Maybe(Ty(Valu
     };
     
     var := self.scopes.get_constant(name);
-    var := var.expect("constant should always be known (even if its Poison)");
-    
-    // If we've compiled this before, great.
-    //     We can't coerce_constant here because we don't have a unique expression node to stick changes into if needed. 
-    //     (need to change the expression to create function pointers because they might not be compiled yet)
-    @if_let(var._0.expr&) fn Value(f) => {
-        return(Ok = (f.bytes&.clone(self.get_alloc()), var._0.ty));
+    if var& { var | 
+        // If we've compiled this before, great.
+        //     We can't coerce_constant here because we don't have a unique expression node to stick changes into if needed. 
+        //     (need to change the expression to create function pointers because they might not be compiled yet)
+        @if_let(var._0.expr&) fn Value(f) => {
+            return(Ok = (f.bytes&.clone(self.get_alloc()), var._0.ty));
+        };
     };
     
     self.dispatch.const_var_in_progress&.set(name.id.zext());
@@ -1115,7 +1255,7 @@ fn find_const_non_blocking(self: *SelfHosted, name: Var) ?Ty(Values, Type) #once
         return(.None);
     };
     var := self.scopes.get_constant(name);
-    var := var.expect("constant should always be known (even if its Poison)");
+    var := or(var, => return(.None));
     @if_let(var._0.expr&) fn Value(f) => {
         return(Some = (f.bytes&.clone(self.get_alloc()), var._0.ty));
     };
@@ -1144,9 +1284,13 @@ fn save_const_values(self: *SelfHosted, name: Var, value: Values, final_ty: Type
 fn save_const(self: *SelfHosted, name: Var, val_expr: Expr, final_ty: Type, loc: Span) Maybe(void) #once = {
     // TODO: do i have to check if someone is already working on this constant? -- Jul 30
     val := self.scopes.get_constant(name);
-    // TODO: the old one had a case if its none for renumbering during specialization, 
-    //       but i think i want to add those sooner? -- Jul 30
-    val := val.expect("constant should always be known (even if its Poison) (?)");
+    val := or val {|
+        // dup_var of return label in emit_capturing_call gets here.
+        // eventually should remove the ? so its smaller and just do this there instead. 
+        ptr := self.scopes.constants&.nested_index(name.id.zext());
+        ptr[] = (Some = ((expr = (Poison = .Unknown), loc = loc, ty = UnknownType, done = false), .Infer));
+        ptr.as_ref().unwrap()
+    };
     
     if val._1&.is(.Finished) {|
         return(@err("tried to re-save constant %", name&.log(self.pool)));
