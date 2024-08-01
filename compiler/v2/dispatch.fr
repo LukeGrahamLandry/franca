@@ -6,6 +6,7 @@ CompilerDispatch :: @struct(
     overloads: BucketArray(OverloadSetData),
     enclosing_function: ?FuncId,  // for adding runtime callees. 
     next_label: i64 = 0,
+    const_bound_memo: HashMap(MemoKey, FuncId),
 );
 
 Task :: @rec @struct(
@@ -38,6 +39,7 @@ fn init(a: Alloc) CompilerDispatch = {
         active_tasks = list(a),
         overloads = init(10, a),
         enclosing_function = .None,
+        const_bound_memo = init(a),
     )
 }
 
@@ -53,6 +55,7 @@ fn poll_tasks(self: *SelfHosted) Result(void, *ParseErr) = {
         for self.dispatch.active_tasks { original_task |
             pending&.push(original_task); 
             while => !pending.is_empty() {|
+                mark := __temp_alloc.mark();
                 ::?**Task;
                 task := pending.last().unwrap()[];
                 task.waiting_for&.ordered_retain() { t | 
@@ -86,6 +89,7 @@ fn poll_tasks(self: *SelfHosted) Result(void, *ParseErr) = {
                         pending&.push(dep);
                     };
                 };
+                __temp_alloc.reset_retaining_capacity(mark);
             };
         };
     };
@@ -136,13 +140,13 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) #once = {
             panic("TODO: task TypeRet");
         }
         fn CompileBody(fid) => {
-            @println("exec task %: %", task.action&.tag(), self.log_name(fid));
+            @println("exec task %: % %", task.action&.tag(), fid, self.log_name(fid));
             self.new_expression_stack();
             @check(self.handle_compile_func_body(fid)) return;
             self.dispatch.function_in_progress&.unset(fid.as_index());
         }
         fn Jit(fid) => {
-            @println("exec task %: %", task.action&.tag(), self.log_name(fid));
+            @println("exec task %: % %", task.action&.tag(), fid, self.log_name(fid));
             func := self.get_function(fid);
             if !func.get_flag(.EnsuredCompiled) {|
                 self.dispatch.function_in_progress&.set(fid.as_index());

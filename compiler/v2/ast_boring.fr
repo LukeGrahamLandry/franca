@@ -9,6 +9,10 @@ fn unptr_ty(c: *SelfHosted, ty: Type) ?Type = {
     }
 }
 
+fn is_raw_unit(self: *FatExpr) bool = {
+    self.ty == void && self.expr&.is(.Value) // :get_or_create_type
+}
+
 // TODO: skip through named and unique as well.
 fn ptr_depth(self: *SelfHosted, ptr_ty: Type) i64 = {
     ptr_ty = self.raw_type(ptr_ty);
@@ -193,6 +197,13 @@ fn want(self: *LazyType) ResultType = {
     }
 }
 
+fn ty(self: *LazyType) ?Type = {
+    @match(self) {
+        fn Finished(t) => (Some = t[]);
+        @default => .None;
+    }
+}
+
 fn want(self: ?Type) ResultType = {
     @match(self) {
         fn Some(t) => (Specific = t);
@@ -203,6 +214,60 @@ fn want(self: ?Type) ResultType = {
 fn want(self: Type) ResultType = {
     if(self.is_unknown(), => return(.None));
     (Specific = self)
+}
+
+fn unwrap(self: *LazyType) Type = {
+    // TODO: compiler segfaults if you write this with @match!! -- Jul 9 :FUCKED
+    assert(self.is(.Finished), "type not ready");
+    self.Finished
+}
+
+fn var(self: *Binding) ?Var = {
+    @match(self.name) {
+        fn Var(v) => (Some = v);
+        @default => .None;
+    }
+}
+
+fn tuple_types(self: *SelfHosted, ty: Type) ?[]Type = {
+    @match(self.get_type(ty)) {
+        fn Struct(f) => {
+            out: List(Type) = list(f.fields.len, temp());
+            each f.fields { f |
+                if f.kind != .Const {|
+                    out&.push(f.ty);
+                };
+            };
+            (Some = out.items())
+        }
+        fn Named(f) => self.tuple_types(f._0);
+        fn Array(f) => (Some = f.inner.repeated(f.len.zext(), temp()).items());
+        @default => .None;
+    }
+}
+
+fn remove_named(self: *Pattern, arg_name: Var, a: Alloc) void = {
+    start := self.bindings.len();
+    self.bindings&.ordered_retain(fn(b: *Binding) bool => @match(b.name) {
+        fn Var(name) => !(name == arg_name);
+        @default => true;
+    });
+    @debug_assert_ne(start, self.bindings.len());
+    if self.bindings.is_empty() {|
+        self.bindings&.push((
+            name = .None,
+            ty = (Finished = void),
+            default = .None,
+            kind = .Var,
+        ), a);
+    };
+}
+
+fn display(self: *FuncId, out: *List(u8)) void = {
+    @fmt(out, "F%", self[].as_index());
+}
+fn display(self: FuncId, out: *List(u8)) void = {
+    @fmt(out, "F%", self.as_index());
 }
 
 fn from_index();
@@ -225,7 +290,6 @@ fn TagBitIndex($T: Type, $magic_offset: i64) void = {
 // must match ast.rs
 :: TagBitIndex(OverloadSet, 28);
 :: TagBitIndex(LabelId, 27);
-
 
 :: {
     AutoClone(get_variant_type(Expr, Expr.Tag().Value));
@@ -256,4 +320,10 @@ fn TagBitIndex($T: Type, $magic_offset: i64) void = {
     AutoClone(get_variant_type(Stmt, Stmt.Tag().DeclVarPattern));
     AutoClone(get_variant_type(Stmt, Stmt.Tag().DeclNamed));
     AutoClone(get_variant_type(Stmt, Stmt.Tag().Set));
+    AutoHash(MemoKey, TrivialHasher);
+    AutoEq(MemoKey);
+    fn hash(h: *TrivialHasher, s: *FuncId) void = {
+        i := s[].as_index();
+        h.hash(i&);
+    }
 };

@@ -16,6 +16,16 @@
   in lldb if i break in main and then step i can see the value of the variables.
   i told it pointer so i just see 8 bytes always but i can see `max_steps = 0x000000000000002d`
   which is 45 which is correct. so the value there is whats behind the pointer, not the pointer that i passed to dbg.declare.
+- more new sema work
+  // Since were evaluating in const context, any functions that are called in the expression weren't added to anyone's callees.
+  // So we want to say we need to recompile the expression, adding to callees of the lit_fn we're about to make.
+  // I think this is not enough, and we need to deeply clear done?
+  // so really we just shouldn't have tried to compile outside a function context! -- Jul 31
+  // it works without clearing done here if you remove :the_compile_above, but you kinda want to do that for GetVar on a const
+  // i guess that should just be handled in quick_eval and just deal with the occasional redundant work.
+  // changing that should make us more robust to "ICE: Tried to call un-compiled function."
+  removing the compile attempt brings lit_fn up to 24 but adding a quick_check for already compiled constants brings
+  it back down to 5 so it's fine.
 
 ## tiny tests on new sema (Jul 29/30)
 

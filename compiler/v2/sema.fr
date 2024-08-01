@@ -1,5 +1,3 @@
-// TODO: have first.fr pass vtable to #test if non-void argument. 
-
 ResultType :: @tagged(
     Specific: Type,
     Returning: Type,
@@ -219,8 +217,10 @@ fn decl_var(self: *SelfHosted, name: Var, ty: *LazyType, value: *FatExpr) Maybe(
     @println("decl_var %", name&.log(self.pool)); // :debug
     @debug_assert(self.dispatch.enclosing_function.is_some(), "ICE: runtime vars must have an enclosing function");
     no_type := ty.is(.Infer);
-    assert(no_type.or(ty.is(.Finished)), "TODO: self.infer_types_progress(ty)?;");
     self.last_loc = value.loc;
+    if !no_type {|
+        @check(self.infer_type(ty)) return;
+    };
     @check(self.compile_expr(value, ty.want())) return;
     final_ty := value.ty;
     @debug_assert(!final_ty.is_unknown(), "if we didn't yield, we should know the type");
@@ -499,7 +499,7 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
     func := self.get_function(fid);
     
     assert(func.cc.expect("known cc") != .Inline 
-        && !func.get_flag(.Generic) && !func.get_flag(.AnyConstArgs) 
+        && !func.get_flag(.Generic) 
         && !func.get_flag(.MayHaveAquiredCaptures) && !func.get_flag(.UnsafeNoopCast)
         && !func.get_flag(.TryConstantFold)
     , "Not Yet Implemented: unhandled complex call");
@@ -510,6 +510,21 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
     // TODO: better type checking
     if arg_ty != arg_expr.ty {|
         return(@err("arg type mismatch"));
+    };
+    
+    if func.get_flag(.AnyConstArgs) {|
+        @debug_assert(!func.get_flag(.Generic), "#generic was handled above");
+        // This creates a new function with only runtime args, and updates the arg_expr accordingly. 
+        fid = @check(self.curry_const_args(fid, f_expr, arg_expr)) return;
+        func = self.get_function(fid);
+        // Since we may have just made a new function, make sure we know its types,
+        // and then sanity check that our types still match. 
+        arg_ty = @check(self.infer_arguments(fid)) return;
+        @check(self.compile_expr(arg_expr, arg_ty.want())) return;
+        // It's probably an ICE if this fails on something non-#generic. 
+        if arg_ty != arg_expr.ty {|
+            return(@err("arg type mismatch after removing const args"));
+        };
     };
     
     if self.dispatch.enclosing_function { current |
@@ -536,6 +551,263 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
     .Ok
 }
 
+fn const_args_key(self: *SelfHosted, original_f: FuncId, arg_expr: *FatExpr) Maybe(Values) = {
+    func := self[original_f]&;
+    ::if(Maybe(Values));
+    if func.arg.bindings.len == 1 {|
+        @check(self.compile_expr(arg_expr, func.finished_arg.want())) return;
+        value := @check(self.immediate_eval_expr(arg_expr, arg_expr.ty)) return;
+        (Ok = value)
+    } else {|
+        check_len :: fn(len: i64) => {
+            if func.arg.bindings.len != len {|
+                return(@err( "TODO: non-trivial pattern matching for call to %", self.pool.get(func.name)));
+            };
+        };
+
+        types := self.tuple_types(arg_expr.ty);
+        types := or types {|
+            return(@err("TODO: non-trivial pattern matching"))
+        };
+        check_len(types.len);
+        @if_let(arg_expr.expr&) fn Value(f) => {
+            panic("TODO: tuple of values");
+            // TODO: this is super dumb but better than what I did before. -- May 3 -- May 24
+            //let values = value;
+            //let mut parts = Vec::with_capacity(values.bytes().len());
+
+            //let mut reader = ReadBytes { bytes: value.bytes(), i: 0 };
+            //for ty in ty {
+            //    let taken = chop_prefix(self.program, ty, &mut reader)?;
+            //    parts.push(FatExpr::synthetic_ty(Expr::Value { value: taken, coerced: false }, arg_expr.loc, ty))
+            //}
+            //assert_eq!(reader.bytes.len(), reader.i, "TODO: nontrivial pattern matching");
+            //arg_expr.expr = Expr::Tuple(parts);
+        };
+            
+        if(!arg_expr.expr&.is(.Tuple), => return(@err("TODO: pattern match on non-tuple")));
+        arg_exprs := arg_expr.expr.Tuple;
+        check_len(arg_exprs.len);
+
+        all_const_args: List(u8) = list(self.get_alloc());
+        i := 0;
+        enumerate func.arg.bindings { i, binding |
+            continue :: local_return;
+            if(binding.kind != .Const, => continue());
+            arg_ty := binding.ty&.ty().or(=> arg_exprs[i].ty);
+            value := @check(self.immediate_eval_expr(arg_exprs.index(i), arg_ty)) return;
+            all_const_args&.push_all(value&.bytes());
+        };
+        (Ok = all_const_args.items().to_value())
+    }
+}
+
+fn remove_const_args(self: *SelfHosted, original_f: FuncId, arg_expr: *FatExpr) Maybe(void) = {
+    // println!("new_arg_type = {}", self.program.log_type(new_arg_type));
+    func := self.get_function(original_f);
+    if func.arg.bindings.len == 1 {|
+        //if(new_arg_type != void, => return(@err("single const arg new type should be void")));
+        arg_expr.set(unit_value, void);
+    } else {|
+        if(!arg_expr.expr&.is(.Tuple), => return(@err("TODO: pattern match on non-tuple")));
+        arg_exprs := arg_expr.expr.Tuple&;
+        removed := 0;
+        enumerate func.arg.bindings { i, binding | 
+            if binding.ty&.ty() { expected |
+                found := arg_exprs[i - removed].ty;
+                if(found != expected, => return(@err("TODO: better typecheck")));
+            };
+            // TODO: else!!!
+            if binding.kind == .Const {|
+                // TODO: this would be better if i was iterating backwards
+                arg_exprs.ordered_remove(i - removed);
+                removed += 1; // TODO: this sucks
+            };
+        };
+        if arg_exprs.is_empty() {|
+            //@debug_assert(new_arg_type == void); // :get_or_create_type
+            // Note: this started being required when I added fn while.
+            arg_expr.set(unit_value, void);
+        } else {|
+            if arg_exprs.len() == 1 {|
+                arg_expr[] = arg_exprs[0];
+                //if(arg_expr.ty != new_arg_type, => return(@err("TODO: better typecheck")));
+                // self.type_check_arg(arg_expr.ty, new_arg_type, "const arg")?;
+            } else {|
+                arg_expr.ty = UnknownType;
+                arg_expr.done = false;
+                //@check(self.compile_expr(arg_expr, new_arg_type.want())) return;
+                //if(arg_expr.ty != new_arg_type, => return(@err("TODO: better typecheck")));
+                //self.type_check_arg(arg_expr.ty, new_arg_type, "const arg")?;
+            };
+        };
+    };
+    
+    .Ok
+}
+
+MemoKey :: Ty(FuncId, Values);
+fn curry_const_args(self: *SelfHosted, original_f: FuncId, f_expr: *FatExpr, arg_expr: *FatExpr) Maybe(FuncId) = {
+    key: MemoKey = (original_f, @check(self.const_args_key(original_f, arg_expr)) return);
+    if self.dispatch.const_bound_memo&.get(key&) { new_f |
+        @println("reuse baked const args % -> %", original_f, new_f);
+        @check(self.remove_const_args(original_f, arg_expr)) return;
+        fid_value := self.to_values(FuncId, new_f);
+        f_expr.set(fid_value, FuncId);
+        return(Ok = new_f);
+    };
+
+    func := self.get_function(original_f);
+    @debug_assert(func.get_flag(.AnyConstArgs), "baking const args but none are there");
+    @debug_assert_eq(func.get_flag(.AllowRtCapture), func.get_flag(.ResolvedBody));
+    @println("bake const args %", original_f.as_index());
+    // Some part of the argument must be known at comptime.
+    new_func := func.deep_clone(self.get_alloc());
+    res := self.maybe_renumber_and_dup_scope(new_func&);
+    if(res&.is(.Err), => return(Err = self.box(res.Err)));
+    new_fid := self.add_function(new_func);
+    @check(self.ensure_resolved_sign(new_fid)) return;
+    @check(self.ensure_resolved_body(new_fid)) return;
+    func := self.get_function(new_fid);
+    // TODO: mark func as in progress somehow so nobody can yield on it. 
+    //       tho really i feel like you want to make this whole operation yield-able,
+    //       currently you could get into a situation with a lot of redundant work i think.  
+
+    ::if(Maybe(FuncId));
+    if func.arg.bindings.len == 1 {|
+        binding := func.arg.bindings[0]&;
+        @debug_assert_eq(binding.kind, .Const);
+        name := or binding.var() {|
+            return(@err("arg needs name (unreachable?)"))
+        };
+        // TODO: if you yield here, you spam clone the function. 
+        value := @check(self.immediate_eval_expr(arg_expr, arg_expr.ty)) return;
+        @check(self.bind_const_arg(new_fid, name, value, arg_expr.ty, arg_expr.loc)) return;
+
+        assert(!func.get_flag(.Generic), "TODO: the old one inferred types here");
+        //if self.program[new_fid].get_flag(Generic) {
+        //    self.program[new_fid].set_flag(Generic, false);
+        //    self.infer_types(new_fid)?;
+        //}
+        func.finished_arg = .None;  // TODO: we know its void because we removed the only argument.
+        fid_value := self.to_values(FuncId, new_fid);
+        f_expr.set(fid_value, FuncId);
+        arg_expr.set(unit_value, void);
+        self.dispatch.const_bound_memo&.insert(key, new_fid);
+        func.unset_flag(.AnyConstArgs);
+        (Ok = new_fid)
+    } else {|
+        if(!arg_expr.expr&.is(.Tuple), => return(@err("TODO: pattern match on non-tuple")));
+        is_generic := func.get_flag(.Generic);
+        removed_count := 0;
+        range(0, func.arg.bindings.len) { i |
+            continue :: local_return;
+            @println("%: check %/%", i, i-removed_count, func.arg.bindings.len);
+            b := func.arg.bindings[i - removed_count]&;
+            arg_expr := arg_expr.expr.Tuple[i]&;
+            if b.kind != .Const {|
+                if is_generic {|
+                    panic("TODO: generic");   
+                    //self.infer_types_progress(&mut b.ty)?;
+                    //func.arg.bindings[i - removed_count].ty = b.ty.clone();
+                };
+                continue();
+            };
+            name := or b.var() {|
+                return(@err("arg needs name (unreachable?)"))
+            };
+            @println("bake arg %: %", i, name&.log(self.pool));
+            // TODO: if you yield here, you spam clone the function. 
+            value := @check(self.immediate_eval_expr(arg_expr, arg_expr.ty)) return;
+            if !is_generic {|
+                b.ty&.unwrap();
+            } else {|
+                panic("TODO: generic");   
+                // self.infer_types_progress(&mut b.ty)?;
+                // self.program[new_fid].arg.bindings[i - removed_count].ty = b.ty.clone();
+            };
+            // bind_const_arg handles adding closure captures.
+            // since it needs to do a remap, it gives back the new argument names so we can adjust our bindings acordingly. dont have to deal with it above since there's only one.
+            @check(self.bind_const_arg(new_fid, name, value, b.ty&.unwrap(), arg_expr.loc)) return;
+            // No remove from arg here because bind_const_arg calls remove_named.
+            removed_count += 1;
+        };
+        @debug_assert_ne(new_fid, original_f);
+
+        assert(!func.get_flag(.Generic), "TODO: the old one inferred types here");
+        //if is_generic {
+        //    self.program[new_fid].set_flag(Generic, false);
+        //    let ty = self.infer_types(new_fid)?;
+        //    assert!(ty.is_some(), "failed to infer types of #generic function");
+        //}
+
+        // We're leaving it to the caller to infer the new type and type-check the runtime arguments. 
+        fid_value := self.to_values(FuncId, new_fid);
+        f_expr.set(fid_value, FuncId);
+        func.unset_flag(.AnyConstArgs);
+        @check(self.remove_const_args(original_f, arg_expr)) return;
+        self.dispatch.const_bound_memo&.insert(key, new_fid);
+        // Don't need to explicitly force capturing because bind_const_arg added them if any args were closures.
+        (Ok = new_fid)
+    }
+}
+
+// The argument type is evaluated in the function declaration's scope, the argument value is evaluated in the caller's scope.
+fn bind_const_arg(self: *SelfHosted, o_f: FuncId, arg_name: Var, arg_value: Values, arg_ty_found: Type, loc: Span) Maybe(void) = {
+    // I don't want to renumber, so make sure to do the clone before resolving.
+    // TODO: reslove captured constants anyway so dont haveto do the chain lookup redundantly on each speciailization. -- Apr 24
+    @println("Bind $% = %", arg_name&.log(self.pool), arg_value&);
+    func := self.get_function(o_f);
+    @debug_assert(func.get_flag(.ResolvedBody) && func.get_flag(.ResolvedSign));
+    arg_ty := @check(self.get_type_for_arg(func.arg&, arg_name)) return;
+    
+    assert(arg_ty_found == arg_ty, "TODO: better type-check");
+    //self.type_check_arg(arg_ty_found, arg_ty, "bind arg")?;
+
+    assert(!self.get_type(arg_ty).is(.Fn) && arg_ty != FuncId, "TODO: $fn");
+    // TODO: not sure if i actually need this but it seems like i should.
+    //if matches!(self.program[arg_ty], TypeInfo::Fn(_)) {
+    //    assert!(
+    //        !self.program[o_f].has_tag(Flag::NoInline),
+    //        "functions with constant lambda arguments are always inlined"
+    //    );
+    //    let arg_func = arg_value.unwrap_func_id();
+    //    // :ChainedCaptures
+    //    // TODO: HACK: captures aren't tracked properly.
+    //    self.program[o_f].set_flag(FnFlag::MayHaveAquiredCaptures, true);
+    //    self.program[o_f].set_cc(CallConv::Inline)?; // just this is enough to fix chained_captures
+    //    self.program[arg_func].set_cc(CallConv::Inline)?; // but this is needed too for others (perhaps just when there's a longer chain than that simple example).
+    //}
+    @check(self.save_const_values(arg_name, arg_value, arg_ty, loc)) return;
+    func.arg&.remove_named(arg_name, self.get_alloc());
+
+    known_type := func.finished_arg.is_some();
+    func.finished_arg = .None;
+    // If it was fully resolved before, we can't leave the wrong answer there.
+    // But you might want to call bind_const_arg as part of a resolving a generic signeture so its fine if the type isn't fully known yet.
+    if known_type {|
+        //panic("TODO: reinfer?");
+        //self.infer_types(o_f)?;
+    };
+    .Ok
+}
+
+/// It's fine to call this if the type isn't fully resolved yet.
+/// We just need to be able to finish infering for the referenced argument.
+fn get_type_for_arg(self: *SelfHosted, arg: *Pattern, arg_name: Var) Maybe(Type) #once = {
+    each arg.bindings { arg | 
+        if arg.var() { name | 
+            if name == arg_name {|
+                ty := or @check(self.infer_type(arg.ty&)) return {|
+                    return(@err("called get_type_for_arg on .Infer-ed arg type. expected type annotation."))
+                };
+                return(Ok = ty);
+            };
+        };
+    };
+    @err("missing argument %", arg_name&.log(self.pool))
+}
+    
 fn infer_type(self: *SelfHosted, b: *LazyType) Maybe(?Type) = {
     @match(b) {
         fn PendingEval(e) => {
@@ -626,6 +898,7 @@ fn early_builtin_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #on
                 @case(Flag.FuncId.ident())      => builtin_type(FuncId);
                 @case(Flag.LabelId.ident())     => builtin_type(LabelId);
                 @case(Flag.Symbol.ident())      => builtin_type(Symbol);
+                @case(Flag.Type.ident())        => builtin_type(Type);
                 @case(Flag.void.ident())        => builtin_type(void);
                 @case(Flag.true.ident())        => expr.set((Small = (1, 1)), bool);
                 @case(Flag.false.ident())       => expr.set((Small = (0, 1)), bool);
@@ -826,6 +1099,19 @@ fn find_const(self: *SelfHosted, name: Var, requested: ResultType) Maybe(Ty(Valu
     (Suspend = self.wait_for(EvalConstant = (name = name, requested = requested)))
 }
 
+fn find_const_non_blocking(self: *SelfHosted, name: Var) ?Ty(Values, Type) #once = {
+    // If someone else is already trying to compile this, we don't want to fight over it. 
+    if self.dispatch.const_var_in_progress&.get(name.id.zext()) {|
+        return(.None);
+    };
+    var := self.scopes.get_constant(name);
+    var := var.expect("constant should always be known (even if its Poison)");
+    @if_let(var._0.expr&) fn Value(f) => {
+        return(Some = (f.bytes&.clone(self.get_alloc()), var._0.ty));
+    };
+    .None
+}
+
 fn handle_declare_constant(self: *SelfHosted, name: Var, ty: *LazyType, value: *FatExpr) Maybe(void) #once = {
     @debug_assert(self.dispatch.enclosing_function.is_none(), "ICE: handle_declare_constant should have no enclosing function");
     
@@ -881,6 +1167,7 @@ fn coerce_const_expr(self: *SelfHosted, expr: *FatExpr, req: ResultType) Maybe(v
 }
 
 fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Values) = {
+    @println("imm_eval %", expr.log(self.pool));
     old_func := self.dispatch.enclosing_function;
     self.dispatch.enclosing_function = .None;
     ::?Values;
@@ -889,21 +1176,81 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
         return(Ok = val);
     };
     
-    // TODO: you need to be on a new stack for this.
-    req: ResultType = (Specific = ret_ty);
-    @check(self.compile_expr(expr, req)) return;
-    if self.check_quick_eval(expr, ret_ty) { val |
-        self.dispatch.enclosing_function = old_func;
-        return(Ok = val);
+    // Can't just try to compile_expr here!
+    // Since were evaluating in const context, any functions that are called in the expression weren't added to anyone's callees. 
+    // So we want to say we need to recompile the expression, adding to callees of the lit_fn we're about to make. 
+
+    // If its already a trivial function call, there's nothing else we can do to simplify, 
+    // so we have to just yield on the function. 
+    @if_let(expr.expr&) fn Call(f) => {
+        // TODO: `if self.check_quick_eval(f.arg, f_ty.arg) { arg_value |` 
+        //       instead of requiring void so its consistant with the fn_ptr version.
+        //       tho also the call_dynamic is kinda sketchy (can only handle simple cases) and 
+        //       i could just get rid of it and always generate a function that passes the arguments.    -- Jul 31
+        if f.arg.is_raw_unit() && f.f.expr&.is(.Value) && self.get_type(f.f.ty).is(.Fn).or(f.f.ty == FuncId) {|
+            fid := FuncId.assume_cast(f.f.expr.Value.bytes&)[];
+            if self.aarch64&.get_fn(fid) { fn_ptr | 
+                hack := self&;
+                args: RsVec(i64) = empty();
+                func := self.get_function(fid);
+                f_ty := func.finished_ty().expect("known type once compiled");
+                @debug_assert(func.cc.unwrap() == .CCallReg);
+                self.aarch64&.bump_dirty();
+                @println("imm_eval direct % %", fid.as_index(), self.pool.get(func.name));
+                // SAFETY: we're passing comp_ctx=false so it won't try to use the pointer as a real CompilerRs.
+                result := hack&.call_dynamic(fn_ptr.int_from_rawptr(), f_ty&, args&, false);
+                self.dispatch.enclosing_function = old_func;
+                if result&.is(.Err) {|
+                    return(Err = self.box(result.Err));
+                };
+                return(Ok = result.Ok);
+            };
+            self.dispatch.enclosing_function = old_func;
+            return(Suspend = self.wait_for(Jit = fid));
+        };
     };
     
-    self.codemap.show_error_line(expr.loc);
-    @panic("TODO: immediate_eval_expr %", expr.log(self.pool))
+    // The expression is too complex to deal with here. 
+    // So box it into a function, compile that normally, and then just call into it with no arguments when we come around again.
+    // This operation is make_lit_function from the old compiler. 
+    // We know we'll yield to compile the new function, and don't want its body to alias the old expr. 
+    
+    bindings: List(Binding) = list(self.get_alloc());
+    bindings&.if_empty_add_unit();
+    arg: Pattern = (bindings = bindings.rs(), loc = expr.loc);
+    def: FnDef = (name = .None, arg = arg, ret = (Finished = ret_ty), tags = list(temp()), loc = expr.loc);
+    @println("imm eval wait for lit %", expr.log(self.pool));
+    fake_func := make_func(def, (Some = expr[]), false);
+    // We didn't bother setting a scope because we don't need one, the expression will already have been resolved. 
+    fake_func&.set_flag(.ResolvedBody);
+    fake_func&.set_flag(.ResolvedSign);
+    fake_func.finished_arg = (Some = void);
+    fake_func.finished_ret = (Some = ret_ty);
+    fake_func.cc = (Some = .CCallReg);    
+    fid := self.add_function(fake_func);
+    f_value := self.to_values(FuncId, fid);
+    f_e: Expr = (Value = (bytes = f_value, coerced = false));
+    f_expr := self.box(synthetic_ty(f_e, expr.loc, FuncId));
+    unit_expr := self.box(synthetic_ty((Value = (bytes = unit_value, coerced = false)), expr.loc, void));
+    expr.expr = (Call = (f = f_expr, arg = unit_expr));  // so we try this task again, we get an easy function call.
+    self.dispatch.enclosing_function = old_func;
+    (Suspend = self.wait_for(Jit = fid))
 }
 
 fn check_quick_eval(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) ?Values = {
     @match(expr.expr&) {
         fn Value(f) => (Some = f.bytes&.clone(self.get_alloc()));
+        fn GetVar(f) => {
+            if f.kind == .Const {|
+                // This is a super common case because you type `arg: i64` a lot. 
+                res := self.find_const_non_blocking(f[]);
+                if res { f |
+                    // We can't report a type erorr from here so just let the slow path deal with it. 
+                    if(ret_ty == f._1, => return(Some = f._0));
+                };
+            };
+            .None
+        }
         fn Block(it) => {
             if it.body.is_empty() {|
                 return(self.check_quick_eval(it.result, ret_ty));
@@ -936,7 +1283,9 @@ fn check_quick_eval(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) ?Values = {
                                 expr.set(res&.clone(self.get_alloc()), f.ty.ret);
                                 return(Some = res);
                             }
-                            fn Err(e) => (); // TODO: don't just swollow errors
+                            fn Err(e) => {
+                                @println("ERROR: %", e.msg);   
+                            } // TODO: don't just swollow errors
                         }
                     };
                 };
