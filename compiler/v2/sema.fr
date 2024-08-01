@@ -15,9 +15,8 @@ OverloadSetData :: @struct(
 
 OverloadOption :: @struct(
     func: FuncId,
-    arg: Type,
+    args: []ResultType,
     ret: ?Type, // For #generic, we might not know without the args
-    arity: u16,
 );
 
 fn compile_stmt(self: *SelfHosted, stmt: *FatStmt) Maybe(void) = {
@@ -529,7 +528,13 @@ fn compile_call(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
     @check(self.compile_expr(f, req_fn)) return;
     
     if f.ty == OverloadSet {|  // :get_or_create_type
-        panic("TODO: OverloadSet");
+        os := @check(self.immediate_eval_expr(f, OverloadSet)) return;
+        os := OverloadSet.assume_cast(os&)[];
+        
+        fid := @check(self.resolve_in_overload_set(arg, requested, os)) return;
+        f_value := self.to_values(FuncId, fid);
+        //f.set(f_value, fid); // THIS TYPE CHECKS! :FUCKED
+        f.set(f_value, FuncId);
     };
     
     if f.ty == FuncId {|  // :get_or_create_type
@@ -575,8 +580,7 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
     @println("compile direct call %", fid);
     func := self.get_function(fid);
     
-    assert(func.cc.expect("known cc") != .Inline 
-        && !func.get_flag(.MayHaveAquiredCaptures) && !func.get_flag(.UnsafeNoopCast)
+    assert(!func.get_flag(.MayHaveAquiredCaptures) && !func.get_flag(.UnsafeNoopCast)
         && !func.get_flag(.TryConstantFold)
     , "Not Yet Implemented: unhandled complex call");
     
@@ -619,6 +623,7 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
         // note: compile() checks if its ::Inline before actually generating asm so it doesn't waste its time.
         // if its a '=>' function, we can't compile it out of context, and same if it has a const arg of a '=>' function. 
         if !capturing && !func.get_flag(.EnsuredCompiled) {|
+            self.dispatch.function_in_progress&.set(fid.as_index());
             return(Suspend = self.wait_for(CompileBody = fid));
         };
 
@@ -746,12 +751,26 @@ fn const_args_key(self: *SelfHosted, original_f: FuncId, arg_expr: *FatExpr) May
         types := self.tuple_types(arg_expr.ty);
         if types { types |
             check_len(types.len);
+            @if(false) {
+                // The rust version did this and i thought it needed but i just typo-ed the test. 
+                // TODO: does this ever happen (function are not being a tuple)? or are we strict about arity now? -- Aug 1
+                @if_let(arg_expr.expr&) fn Value(f) => {
+                    // TODO: this is super dumb but better than what I did before. -- May 3 -- May 24
+                    parts: List(FatExpr) = list(types.len, self.get_alloc());
+                    reader: ReadBytes = (bytes = f.bytes&.bytes(), i = 0);
+                    for types { ty | 
+                        taken := or self.chop_prefix(ty, reader&) {| 
+                            return(@err("ICE: not enough bytes to destructure value!"))
+                        };
+                        parts&.push(synthetic_ty((Value = (bytes = taken, coerced = false)), arg_expr.loc, ty));
+                    };
+                    @assert_eq(reader.bytes.len, reader.i, "ICE: didn't consume all bytes.");
+                    arg_expr.expr = (Tuple = parts.rs());
+                };
+            };
         };
-        @if_let(arg_expr.expr&) fn Value(f) => {
-            return(@err("TODO: tuple of values"));
-        };
-            
-        if(!arg_expr.expr&.is(.Tuple), => return(@err("TODO: pattern match on non-tuple")));
+        
+        if(!arg_expr.expr&.is(.Tuple), => return(@err("TODO: pattern match on non-tuple but expected % args.\n%", func.arg.bindings.len, arg_expr.log(self.pool))));
         arg_exprs := arg_expr.expr.Tuple;
         check_len(arg_exprs.len);
 
@@ -1004,6 +1023,137 @@ fn infer_return(self: *SelfHosted, fid: FuncId) Maybe(Type) = {
     (Ok = ty)
 }
 
+fn arity(self: *SelfHosted, expr: *FatExpr) i64 = {
+    @match(expr.expr&) {
+        fn Tuple(parts) => parts.len;
+        @default => 1;
+    }
+} 
+
+fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret: ResultType, i: OverloadSet) Maybe(FuncId) = {
+    want_arity := self.arity(arg_expr);
+    if want_arity == 1 {|
+        // There's no way we can get a hint from partial args (since theres only one), so yield early if needed.
+        @check(self.compile_expr(arg_expr, .None)) return;
+    };
+    
+    overloads := self.dispatch.overloads&.nested_index(i.as_index());
+    self.compute_new_overloads(overloads);
+    interesting: List(OverloadOption) = list(temp());
+    each overloads.ready { opt | 
+        continue :: local_return;
+        @if_let(requested_ret) fn Specific(want) => {
+            if opt.ret { have | 
+                // TODO: never
+                if have != want {|
+                    continue();
+                };
+            };
+        };
+        
+        if opt.args.len != want_arity {|
+            continue();
+        };
+        
+        interesting&.push(opt[]);
+    };
+    
+    // TODO: but what if there are more overloads coming later? 
+    if interesting.len == 1 {|
+        @println("chose overload %", interesting[0].func);
+        return(Ok = interesting[0].func);
+    };
+    
+    if want_arity == 1 {|
+        @check(self.compile_expr(arg_expr, .None)) return;
+        each interesting& { opt | 
+            func := self.get_function(opt.func);           
+            if !func.get_flag(.AnyConstArgs) {|
+                @check(self.infer_arguments(opt.func)) return;   //  TODO: if not constant, why not just do this  
+            };
+        };
+    };
+    
+    ::if([]FatExpr);
+    parts := if(arg_expr.expr&.is(.Tuple), => arg_expr.expr.Tuple.items(), => (ptr = arg_expr, len = 1));
+    still_interesting: List(OverloadOption) = list(temp());
+    each interesting& { opt | 
+        continue :: local_return;
+        func := self.get_function(opt.func);           
+        if !func.get_flag(.AnyConstArgs) {|
+            @check(self.infer_arguments(opt.func)) return; // TODO: really if this yields, you want to keep looking because maybe we don't care about it that much
+        };
+        
+        enumerate func.arg.bindings { i, b | 
+            arg_expr := parts.index(i);
+            if b.ty&.ty() { param | 
+                @check(self.compile_expr(arg_expr, .None)) return;
+                if arg_expr.ty != param {|
+                    continue();
+                };
+            };
+        };
+        still_interesting&.push(opt[]);
+    };
+    if still_interesting.len == 1 {|
+        @println("chose overload %", still_interesting[0].func);
+        return(Ok = still_interesting[0].func);
+    };
+    
+    temp := still_interesting;
+    still_interesting = interesting;
+    interesting = temp;
+    still_interesting&.clear();
+    
+    @if_let(requested_ret) fn Specific(want) => {
+        each interesting& { opt | 
+            continue :: local_return;
+            func := self.get_function(opt.func);           
+            if !func.get_flag(.AnyConstArgs) {|
+                @check(self.infer_return(opt.func)) return;   
+            };
+            
+            if func.finished_ret { found | 
+                if found != want {|
+                    continue();
+                };
+            };
+            still_interesting&.push(opt[]);
+        };
+    };
+    
+    if still_interesting.len == 1 {|
+        @println("chose overload %", still_interesting[0].func);
+        return(Ok = still_interesting[0].func);
+    };
+    
+    return(@err("TODO: resolve_in_overload_set %", interesting.len));
+    Maybe(FuncId).unreachable_hack()
+}
+
+fn compute_new_overloads(self: *SelfHosted, overloads: *OverloadSetData) void = {
+    while => !overloads.pending.is_empty() {|
+        pending := overloads.pending.items().clone(temp());
+        overloads.pending.len = 0;
+        for pending { fid | 
+            func := self.get_function(fid);
+            args: List(ResultType) = list(func.arg.bindings.len, self.get_alloc());
+            func.get_arg_types_non_blocking(args&);
+            overloads.ready&.push((func = fid, args = args.items(), ret = func.finished_ret), self.get_alloc());
+        };
+    };
+}
+
+fn get_arg_types_non_blocking(func: *Func, args: *List(ResultType)) void = {
+    args.clear();
+    for func.arg.bindings { b | 
+        @match(b.ty&.ty()) {
+            fn Some(ty) => args.push(Specific = ty);
+            fn None()   => args.push(.None);
+        };
+    };
+}
+
 fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
     // TODO: Bring back tag checks so i don't have to be paranoid!!
     //       this annoys be enough that im tempted to go back to inlining all of these. 
@@ -1107,12 +1257,14 @@ fn hoist_constants(self: *SelfHosted, body: []FatStmt) Maybe(void) #once = {
                         );
                         os_value := self.to_values(OverloadSet, i);
                         @check(self.save_const_values(var[], os_value, OverloadSet, func.loc)) return;  // :get_or_create_type
+                        @println("create os % (%) for %", i.as_index(), var.log(self.pool), fid);
                         overload_out = (Some = i);
                     } else {|
                         overloads := @check(self.find_const(var[], OverloadSet.want())) return;  // :get_or_create_type
                         i := OverloadSet.assume_cast(overloads._0&)[];
                         os := self.dispatch.overloads&.nested_index(i.as_index());
                         os.pending&.push(fid, self.get_alloc());
+                        @println("add to os % (%) for %", i.as_index(), var.log(self.pool), fid);
                         overload_out = (Some = i);
                     };
                 };

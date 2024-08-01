@@ -1,5 +1,6 @@
-//! These tests don't use defined macros, overloads, or even intrinsics, 
+//! These tests don't use defined macros or intrinsics, 
 //! so they're good for debugging when nothing works at all (like rewriting all the sema stuff... hypothetically). 
+//! We progress through calls, const args, tuples, closures, and overloads.
 //! Could be nice when adding new backends too, if you define compiler_debug_assert_eq_i64,
 //! as an extern-ed thing that prints so you can see what's going on. 
 //! You don't even need to have branching working yet because I can't call `if`. 
@@ -231,4 +232,70 @@ void :: @builtin("void");
     (a, b) := ab;
     simple_eq(a, 123);
     simple_eq(b, 456);
+    
+    make_pair :: fn(fst: i64, snd: i64) = (fst, snd);
+    (c, d) := make_pair(1, 2);
+    simple_eq(c, 1);
+    simple_eq(d, 2);
 }
+
+#test fn closure_has_const_arg() = {
+    c := 123;
+    identity :: fn($T: Type, i: T) T #generic => {
+        a: T = i;
+        c = 456;
+        a
+    };
+    b := identity(i64, 789);
+    simple_eq(b, 789);
+    simple_eq(c, 456);
+}
+
+#test fn mark_inline() = {
+    identity :: fn(i: i64) i64 #inline = i;
+    simple_eq(identity(123), 123);
+}
+
+#test fn overloaded_on_arity() = {
+    fn first(i: i64) i64 = i;
+    fn first(i: i64, j: i64) i64 = i;
+    
+    simple_eq(first(123), 123);
+    simple_eq(first(123, 456), 123);
+}
+
+#test fn overload_on_arg() = {
+    fn the_id(i: i64) i64  = 1;
+    fn the_id(i: Type) i64 = 2;
+    
+    simple_eq(the_id(123), 1);
+    simple_eq(the_id(i64), 2);
+}
+
+#test fn overload_on_ret() = {
+    fn get_something() i64  = 1;
+    fn get_something() Type = i64;
+    
+    a: get_something() = get_something();
+    simple_eq(a, 1);
+}
+
+#test fn expand_template() = {
+    fn identity();
+    fn make_identity($T: Type) void = {
+        fn identity(i: T) T = i;
+    }
+    ::make_identity(Type);
+    ::make_identity(i64);
+    
+    a: identity(i64) = identity(123);
+    simple_eq(a, 123);
+}
+
+// This is one the old system can't do! tho it can if you swap the order of declarations.
+//#test fn overloading_cycle() = {
+//    fn do_stuff() Type = i64;
+//    fn do_stuff(a: do_stuff()) do_stuff() = a;
+//    a := do_stuff(123);
+//    simple_eq(a, 123);
+//}
