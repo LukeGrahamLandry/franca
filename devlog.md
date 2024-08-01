@@ -3,6 +3,9 @@
 - thinking about how to do #generic without forcing you to mark it and letting the expressions compose better.
   need to move argument typing to the bind_const loop. added a ResultType that holds a tuple so you can have partially known args and pass that down.
 - but first, tuples with fields should be easy.
+- back to consts. so just delaying infer_types and doing it one arg at a time as enough to make it work.
+  so the remaining problem is that you still have to precompile the argument
+  because you want to know its type in const_args_key to check if its a tuple, but that can just be optional.
 
 ## debug info (Jul 31)
 
