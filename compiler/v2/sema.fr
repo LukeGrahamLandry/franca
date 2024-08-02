@@ -100,6 +100,10 @@ fn decl_var_pattern(self: *SelfHosted, stmt: *FatStmt) Maybe(void) #once = {
             self.scopes.put_var_type(name, types[i]);
             @assert(prev.is_none().or(=> prev.unwrap() == types[i]));
         };
+        // An inlined closure might have had a polymorphic parameter, but emit_bc expects known types.
+        if b.ty&.is(.Infer) {|
+            b.ty = (Finished = types[i]);
+        };
     };
     
     // TODO: :mark_stmt_done 
@@ -576,7 +580,24 @@ fn construct_struct_literal(self: *SelfHosted, requested: ResultType, expr: *Fat
             expr.ty = requested;
             .Ok
         }
-        fn Tagged(f) => @err("TODO: construct @tagged");
+        fn Tagged(f) => {
+            @err_assert(bindings.len == 1, "% is an enum, value should have one active varient not %", self.log_type(requested), bindings.len) return;
+            b := bindings.index(0);
+            name := or b.ident() {|
+                return(@err("struct literal requires field names"))
+            };
+            each f.cases& { f |
+                if f._0 == name {|
+                    value := @unwrap(b.default&.as_ref(), "struct literal needs value") return;
+                    @check(self.compile_expr(value, (Specific = f._1))) return;
+                    @err_assert(value.ty == f._1, "TODO: better type checking") return;
+                    expr.done = value.done;
+                    expr.ty = requested;
+                    return(.Ok);
+                };
+            };
+            @err("No field % exists in %", self.pool.get(name), self.log_type(requested))
+        }
         @default => @err("found struct literal but expected %", self.log_type(requested));
     }
 }
@@ -594,7 +615,27 @@ fn contextual_field(self: *SelfHosted, name: Symbol, expr_out: *FatExpr, type: T
             @err("contextual field % not found for %", self.pool.get(name), self.log_type(type))
         }
         fn Struct() => @err("TODO: contextual field of struct");
-        fn Tagged() => @err("TODO: contextual field of tagged");
+        fn Tagged(f) => {
+            enumerate f.cases { i, f | 
+                if f._0 == name {|
+                    @err_assert(f._1 == void, 
+                        "contextual field % of tagged union must be unit found %",
+                        self.pool.get(name), self.log_type(f._1)
+                    ) return;
+                    
+                    // We could create a StructLiteralP and let the backend deal with it, but we know the answer right now. 
+                    size: i64 = self.get_info(type)[].stride_bytes.zext(); // TODO: allow yield on sizing here. 
+                    bytes := 0x00.repeated(size, self.get_alloc());
+                    assert(i <= 255, "TODO: giant ass @tagged"); 
+                    bytes[0] = i.trunc(); // :endian
+                    expr_out.set(bytes.items().to_value(), type);
+                    expr_out.ty = type;
+                    expr_out.done = true;
+                    return(.Ok);
+                };
+            };
+            @err("contextual field % not found for %", self.pool.get(name), self.log_type(type))
+        }
         fn Named(f) => self.contextual_field(name, expr_out, f._0);
         @default => @err("no contextual fields for type % (wanted %)", self.log_type(type), self.pool.get(name));
     }
@@ -668,17 +709,13 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
     
     arg_ty := UnknownType;
     
-    // If there's no const args, we know its not generic so we should be able to know the argument types. 
-    if !func.get_flag(.AnyConstArgs) {|
-        arg_ty = @check(self.infer_arguments(fid)) return;
-        @check(self.compile_expr(arg_expr, (Specific = arg_ty))) return;
-        if arg_ty != arg_expr.ty {|
-            return(@err("arg type mismatch. TODO: better type checking"));
-        };
-    } else {| // there are const args. 
-        ::if(ResultType);
-        req_arg: ResultType = if(arg_expr.ty == UnknownType, => .None, => (Specific = arg_expr.ty));
-        @check(self.compile_expr(arg_expr, req_arg)) return;
+    if func.get_flag(.AnyConstArgs) {| 
+        // If you don't do this at all, you loop (TODO: why? gets stuck on EvalConstant:i64).
+        // But if you @check it, you'll error out on things that need a type hint. 
+        // We do a real typecheck after dealing with the const args so its probably fine. 
+        // TODO: compiling it at all here (check or not) has to be wrong tho, 
+        //       because you don't want things in a const arg expr to be added to runtime callees.
+        _ := self.compile_expr(arg_expr, arg_expr.ty.want());
         @check(self.ensure_resolved_sign(fid)) return;
         
         // This creates a new function with only runtime args, and updates the arg_expr accordingly. 
@@ -699,7 +736,12 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
     if(will_inline && func.get_flag(.NoInline), => return(@err("must inline a function marked #noinline")));
     
     if will_inline {|
-        println("will inline");
+        if capturing {|
+            // We want to allow for polymorphic arguments, but its better if we can infer the annotated ones before duplicating.
+            // currently this is just an optimisation.  
+            @check(self.infer_arguments_partial(fid)) return;
+        };
+        
         // If we're just inlining for #inline, compile first so some work on the ast is only done once.
         // note: compile() checks if its ::Inline before actually generating asm so it doesn't waste its time.
         // if its a '=>' function, we can't compile it out of context, and same if it has a const arg of a '=>' function. 
@@ -710,6 +752,12 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
 
         // TODO: check that you're calling from the same place as the definition.
         return(self.emit_capturing_call(fid, expr, requested));
+    };
+    
+    arg_ty = @check(self.infer_arguments(fid)) return;
+    @check(self.compile_expr(arg_expr, (Specific = arg_ty))) return;
+    if arg_ty != arg_expr.ty {|
+        return(@err("arg type mismatch. TODO: better type checking"));
     };
     
     ret_ty := @check(self.infer_return(fid))    return;
@@ -976,6 +1024,12 @@ fn curry_const_args(self: *SelfHosted, original_f: FuncId, f_expr: *FatExpr, arg
             b := func.arg.bindings[i - removed_count]&;
             arg_expr := arg_expr.expr.Tuple[i]&;
             if b.kind != .Const {|
+                if b.ty&.is(.Infer) {|
+                    // No correctness reason for this requirement but it seems fair to me. -- Aug 2
+                    @err_assert(func.get_flag(.AllowRtCapture), "only closure may have polymorphic args") return;
+                    @check(self.compile_expr(arg_expr, .None)) return;
+                    b.ty = (Finished = arg_expr.ty);
+                };
                 continue();
             };
             name := or b.var() {|
@@ -1094,6 +1148,39 @@ fn infer_arguments(self: *SelfHosted, fid: FuncId) Maybe(Type) = {
     ty := self.tuple_of(types.items());
     func.finished_arg = (Some = ty);
     (Ok = ty)
+}
+
+fn get_arg_types_non_blocking(func: *Func, args: *List(ResultType)) void #once = {
+    args.clear();
+    for func.arg.bindings { b | 
+        @match(b.ty&.ty()) {
+            fn Some(ty) => args.push(Specific = ty);
+            fn None()   => args.push(.None);
+        };
+    };
+}
+
+fn infer_arguments_partial(self: *SelfHosted, fid: FuncId) Maybe(ResultType) = {
+    func := self.get_function(fid);
+    if(func.finished_arg, fn(ty) => return(Ok = (Specific = ty)));
+    @check(self.ensure_resolved_sign(fid)) return;
+    
+    args: List(ResultType) = list(func.arg.bindings.len, temp());
+    all_known := true;
+    each func.arg.bindings { b |
+        @match(@check(self.infer_type(b.ty&)) return) {
+            fn Some(known) => args&.push(Specific = known);
+            fn None() => {
+                args&.push(.None);
+                all_known = false;
+            }
+        };
+    };
+    if all_known {|
+        ty := @check(self.infer_arguments(fid)) return;
+        return(Ok = (Specific = ty));
+    };
+    (Ok = (Tuple = args.items()))
 }
 
 fn infer_return(self: *SelfHosted, fid: FuncId) Maybe(Type) = {
@@ -1261,16 +1348,6 @@ fn compute_new_overloads(self: *SelfHosted, overloads: *OverloadSetData) void #o
             args: List(ResultType) = list(func.arg.bindings.len, self.get_alloc());
             func.get_arg_types_non_blocking(args&);
             overloads.ready&.push((func = fid, args = args.items(), ret = func.finished_ret), self.get_alloc());
-        };
-    };
-}
-
-fn get_arg_types_non_blocking(func: *Func, args: *List(ResultType)) void = {
-    args.clear();
-    for func.arg.bindings { b | 
-        @match(b.ty&.ty()) {
-            fn Some(ty) => args.push(Specific = ty);
-            fn None()   => args.push(.None);
         };
     };
 }
@@ -1715,6 +1792,10 @@ fn early_builtin_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #on
         @case(Flag.enum.ident()) => {
             expr[] = @check(self.enum_macro(invocation.arg, invocation.target)) return;
         };
+        @case(Flag.tagged.ident()) => {
+            @err_assert(invocation.target.is_raw_unit(), "@tagged expected single arg") return;
+            expr[] = @check(self.tagged_macro(invocation.arg)) return;
+        };
         @default => {
             return(@err("tried to call non-builtin macro '%' while bootstrapping.", self.pool.get(name)));
         };
@@ -1851,4 +1932,35 @@ fn enum_macro(self: *SelfHosted, arg: *FatExpr, target: *FatExpr) Maybe(FatExpr)
     ty_value := self.to_values(Type, unique_ty); // :get_or_create_type
     arg.set(ty_value, Type);
     (Ok = arg[])
+}
+
+fn tagged_macro(self: *SelfHosted, cases_expr: *FatExpr) Maybe(FatExpr) = {
+    @err_assert(cases_expr.expr&.is(.StructLiteralP), "@tagged expected map literal like `(name: Type, ...)`") return;
+    pattern := cases_expr.expr.StructLiteralP&;
+    
+    F :: Ty(Symbol, Values);
+    C :: Ty(Symbol, Type);
+    tag_fields: List(F) = list(self.get_alloc());
+    cases: List(C) = list(self.get_alloc());
+    enumerate pattern.bindings { i, b |
+        // TODO: allow as default so you can use .Name like you can with void?
+        //       then need to store default in TypeInfo::Tagged as well. -- Jul 5
+        @err_assert(b.default.is_none(), "use ':' not '=' with @tagged") return;
+        type := @check(self.infer_type(b.ty&)) return;
+        type := or type {|
+            // @tagged(s: i64, n) is valid and infers n as void.
+            b.ty = (Finished = void); // :get_or_create_type
+            void
+        };
+        name := @unwrap(b.ident(), "@tagged field requires name") return;
+        tag_value := self.to_values(i64, i);
+        tag_fields&.push(@as(F) (name, tag_value)); // :tag_enums_are_sequential
+        cases&.push(@as(C) (name, type))
+    };
+    
+    tag_type := self.intern_type(Enum = (raw = i64, fields = tag_fields.rs(), sequential = true));
+    tagged_type := self.intern_type(Tagged = (cases = cases.rs(), tag = tag_type));
+    value := self.to_values(Type, tagged_type); // :get_or_create_type
+    cases_expr.set(value, Type);
+    (Ok = cases_expr[])
 }
