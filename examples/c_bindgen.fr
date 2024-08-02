@@ -1,7 +1,7 @@
 CDecl :: @tagged(
-    Struct: @struct(name: Str, fields: List(CField)),
-    Enum: @struct(name: ?Str, items: List(CEnumItem)),
-    Func: @struct(name: Str, type: Str, args: List(CField)),
+    Struct: @struct(name: Str, fields: []CField),
+    Enum: @struct(name: ?Str, items: []CEnumItem),
+    Func: @struct(name: Str, type: Str, args: []CField),
 );
 
 CField :: @struct(name: Str, type: Str);
@@ -13,18 +13,96 @@ CEnumItem :: @struct(name: Str, value: Str);
 fn main() void = {
     // clang -Xclang -ast-dump=json bindings/sokol/sokol_app.h > target/ast.json
     // TODO: only show message if file not there. 
-    println("Don't forget to create 'target/ast.json' (dump from clang)");
+    // println("Don't forget to create 'target/ast.json' (dump from clang)");
     ast := temp().read_to_string("target/ast.json");  
-    //ast := temp().read_to_string("target/sokol.json");  
     json: JsonParser = new_json(ast.items(), temp());
+    decls := json&.extract_c_decls();
+    out: List(u8) = list(temp());
+    generate_franca_bindings(out&, decls, "sokol");
+    println(out.items());
+    exit(0);
+}
+
+fn generate_franca_bindings(out: *List(u8), decls: []CDecl, import_name: Str) void = {
+    each decls { decl |
+        continue :: local_return;
+        
+        @match(decl) {
+            fn Struct(it) => {
+                if it.name.starts_with("__darwin_pthread").or(=> it.name.starts_with("_opaque_pthread")) {|
+                    continue();
+                };
+                @fmt(out, "% :: @struct(\n", it.name);
+                for it.fields { it |
+                    @fmt(out, "   %: %,\n", it.name, it.type.translate_type());
+                };
+                @fmt(out, ");\n\n");
+            }
+            fn Enum(it) => {
+                
+            }
+            fn Func(it) => {
+                @fmt(out, "fn %(", it.name);
+                prefix := "";
+                for it.args { it |
+                    @fmt(out, "%%: %", prefix, it.name, it.type.translate_type());
+                    prefix = ", ";
+                };
+                @fmt(out, ") % #import(\"%\");\n", "/*TODO*/", import_name);
+            }
+        };
+    };
+}
+
+fn translate_type(c_type: Str) Str = {
+    @switch(c_type) { /* TODO: segfault if you paste an identifier where this comment is */
+        @case("int") => "i32";
+        @case("uint32_t") => "u32";
+        @case("uint64_t") => "u64";
+        @case("float") => "f32";
+        @case("uintptr_t") => "usize";
+        @case("void *") => "rawptr";
+        @case("const char *") => "CStr";
+        @case("char *") => "CStr";
+        @case("bool") => "bool";
+        @default => {
+            if c_type.ends_with(")") {|
+                // its a function pointer
+                // TODO
+            };
+            if c_type.ends_with("]") {|
+                // its an array
+                // TODO
+            };
+            if c_type.ends_with("*") {|
+                pointee := c_type.slice(0, c_type.len - 1);
+                if pointee.starts_with("const ") {|
+                    pointee = pointee.slice("const ".len(), pointee.len);
+                };
+                if pointee.ends_with(" ") {|
+                    pointee = pointee.slice(0, pointee.len - 1);
+                };
+                if pointee == "void" {|
+                    return("rawptr");
+                };
+                return((@format("*%", pointee.translate_type()) temp()).items());
+            };
+            c_type
+        };
+    }
+}
+
+fn extract_c_decls(json: *JsonParser) []CDecl = {
     :: Result(JsonPart, Str);
     :: tagged(JsonPart);
+    
+    decls: List(CDecl) = list(temp());
     
     // Get to the good bit
     (fn() => {
         break :: local_return;
         loop {|
-            part := json&.next().unwrap();
+            part := json.next().unwrap();
             if part&.is(.Key) && (part.Key == "inner") {|
                 break();
             };
@@ -33,16 +111,14 @@ fn main() void = {
     
     loop {|
         continue :: local_return;
-        part := json&.next().unwrap();
-        //@println("%", part&.tag());
-        //println(json.cursor);
+        part := json.next().unwrap();
         @match(part) {
-            fn Eof() => exit(0);
+            fn Eof() => return(decls.items());
             fn Key(name) => {
                 skip_to_tag :: fn(key: Str, tag: JsonPart.Tag()) JsonPart => {
-                    res := json&.skip_until_key(key);
-                    if(res&.is_err(), => panic(res.Err));
-                    value := json&.next().unwrap();
+                    res := json.skip_until_key(key);
+                    if(res&.is_err(), => @panic("expected % '%'; %", tag, key, res.Err));
+                    value := json.next().unwrap();
                     @assert(value&.is(tag), "expected % '%'", tag, key);
                     value
                 };
@@ -52,37 +128,50 @@ fn main() void = {
                     value.StringValue
                 };
                 
+                skip_to_tag_or_continue :: fn(key: Str, tag: JsonPart.Tag()) JsonPart => {
+                    res := json.skip_until_key(key);
+                    if(res&.is_err(), => continue());
+                    value := json.next().unwrap();
+                    @assert(value&.is(tag), "expected % '%'", tag, key);
+                    value
+                };
+                
+                read_fields :: fn(expected_kind: Str) []CField => {
+                    fields: List(CField) = list(temp());
+                    dowhile {|
+                        value := json.next().unwrap();
+                        if value&.is(.StartDict) {|
+                            kind := skip_to_string("kind");
+                            @assert_eq(kind, expected_kind);
+                            name := skip_to_string("name");
+                            skip_to_tag("type", .StartDict);
+                            type := skip_to_string("qualType");
+                            res := json.skip_current_value();
+                            res.unwrap();
+                            // @println("- field %: %", name, type);
+                            value := json.next().unwrap();
+                            assert(value&.is(.End), "// TODO: skip_current_value should probably eat the End too?");
+                            fields&.push(name = name, type = type);
+                            true
+                        } else {|
+                            false
+                        }
+                    };
+                    fields.items()
+                };
+                
                 if name == "kind" {|
-                    value := json&.next().unwrap();
+                    value := json.next().unwrap();
                     assert(value&.is(.StringValue), "expected tag");
                     @switch(value.StringValue) {
                         @case("RecordDecl") => {
-                            res := json&.skip_until_key("name");
-                            if(res&.is_err(), => continue()); // some stuff doesn't have a name... idk bro. 
-                            value := json&.next().unwrap();
-                            assert(value&.is(.StringValue), "expected name string");
-                            @println("Struct named %", value.StringValue);
-                            
+                            // some stuff doesn't have a name... idk bro. 
+                            value := skip_to_tag_or_continue("name", .StringValue);
+                            name := value.StringValue;
+                            // @println("Struct named %", value.StringValue);
                             skip_to_tag("inner", .StartList);
-                            
-                            dowhile {|
-                                value := json&.next().unwrap();
-                                if value&.is(.StartDict) {|
-                                    kind := skip_to_string("kind");
-                                    @assert_eq(kind, "FieldDecl");
-                                    name := skip_to_string("name");
-                                    skip_to_tag("type", .StartDict);
-                                    type := skip_to_string("qualType");
-                                    res := json&.skip_current_value();
-                                    res.unwrap();
-                                    @println("- field %: %", name, type);
-                                    value := json&.next().unwrap();
-                                    assert(value&.is(.End), "// TODO: skip_current_value should probably eat the End too?");
-                                    true
-                                } else {|
-                                    false
-                                }
-                            }
+                            fields := read_fields("FieldDecl");
+                            decls&.push(Struct = (name = name, fields = fields));
                         };
                         @case("EnumDecl") => {
                         
@@ -91,10 +180,17 @@ fn main() void = {
                             name := skip_to_string("name");
                             skip_to_tag("type", .StartDict);
                             type := skip_to_string("qualType");
-                            @println("Function named '%' with type '%'", name, type);
+                            // @println("Function named '%' with type '%'", name, type);
+                            json.skip_current_value();
+                            
+                            // no args is fine. 
+                            skip_to_tag_or_continue("inner", .StartList);
+                            
+                            args := read_fields("ParmVarDecl");   // yeah... not spelled like "param"
+                            decls&.push(Func = (name = name, type = type, args = args));
                         };
                         @default => {
-                            json&.skip_current_value().unwrap();
+                            json.skip_current_value().unwrap();
                             continue();
                         };
                     };
@@ -103,6 +199,7 @@ fn main() void = {
             @default => ();  
         };
     };
+    Slice(CDecl).unreachable_hack()
 }
 
 // TODO: This is a copy paste from the one farm_game uses for sokol. 

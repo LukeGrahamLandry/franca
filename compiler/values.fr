@@ -18,7 +18,7 @@ fn created_jit_fn_ptr_value(self: *SelfHosted, f: FuncId, ptr: i64) void #compil
 }
 
 // TODO: call this from rust. 
-fn save_bake_callback(self: *SelfHosted, ty: Type, f: BakeHandler) PRes #compiler = {
+fn save_bake_callback(self: *SelfHosted, ty: Type, f: BakeHandler) Result(void, ParseErr) #compiler = {
     prev := self.baked.custom_bake_constant&.insert(ty, f);
     if prev.is_some() {|
         // TODO: show the two locations and the type. :ERROR_QUALITY
@@ -108,10 +108,11 @@ fn emit_relocatable_constant_body(
     c.aarch64&.bump_dirty();
     
     info := c.get_info(ty);
-    if value.len() != info.stride_bytes.zext() {|
-        msg := @format("ICE: Tried to emit constant value of wrong size. Expected % bytes but found %.", @as(i64) info.stride_bytes.zext(), value.len()) temp();
-        return(Err = (span = c.last_loc, msg = msg.items()));
-    };
+    @err_assert(value.len() == info.stride_bytes.zext(), 
+        "ICE: Tried to emit constant value of wrong size. Expected % bytes but found %.", 
+        @as(i64) info.stride_bytes.zext(), value.len()
+    ) return;
+    
     // TODO: alignment check? 
     
     // :bake_relocatable_value
@@ -144,10 +145,9 @@ fn emit_relocatable_constant_body(
             if c.baked.functions&.get(ptr) { fid |
                 // assert_eq!(*f_ty, program[f].finished_ty().unwrap()); // TODO?
                 out.push((FnPtr = fid));
-                return (.Ok);
+                return(.Ok);
             };
-            msg :: "function not found for constant. (might be ICE created_jit_fn_ptr_value)";
-            return (Err = (span = c.last_loc, msg = msg));
+            return(@error("function not found for constant. (might be ICE created_jit_fn_ptr_value)"));
         });
         (fn Ptr(inner) => {
             // TODO: allow zero?
@@ -230,17 +230,16 @@ fn emit_relocatable_constant_body(
                 return(.Ok);
             };
             
-            msg :: "You can't have a void pointer as a constant. The compiler can't tell how many bytes to put in the final executable.";
-            return (Err = (span = c.last_loc, msg = msg));
+            return(@error("You can't have a void pointer as a constant. The compiler can't tell how many bytes to put in the final executable."));
         });
         @default => {
-            return (Err = (span = c.last_loc, msg = "ICE: bad constant"));
+            return(@error("ICE: bad constant"));
         };
     };
     .Ok
 }
 
-fn Res($T: Type) Type = Result(T, ParseErr);
+fn Res($T: Type) Type = Result(T, *ParseErr);
 
 fn jit_addr(v: *Values) i64 = {
     s := v.bytes();
@@ -424,19 +423,23 @@ fn take(self: *ReadBytes, size: i64) ?[]u8 = {
 ////////////////////
 /// Dynamic Call ///
 
-fn call_dynamic_values(program: CompilerRs, f_ptr: i64, f_ty: *FnType, args_value: []u8, comp_ctx: bool) Res(Values) #compiler = {
+fn call_dynamic_values(program: CompilerRs, f_ptr: i64, f_ty: *FnType, args_value: []u8, comp_ctx: bool) Result(Values, ParseErr) #compiler = {
     parts: List(i64) = list(temp());
     reader: ReadBytes = (bytes = args_value, i = 0);
-    @try(program[][].deconstruct_values(f_ty.arg, reader&, parts&, .None)) return;
+    @try_deref_err(program[][].deconstruct_values(f_ty.arg, reader&, parts&, .None)) return;
     parts: RsVec(i64) = parts.rs();
     program.call_dynamic(f_ptr, f_ty, parts&, comp_ctx)
+}
+
+fn call_dynamic(program: CompilerRs, ptr: i64, f_ty: *FnType, args: *RsVec(i64), comp_ctx: bool) Result(Values, ParseErr) #compiler = {
+    (Ok = @try_deref_err(program.call_dynamic_inner(ptr, f_ty, args, comp_ctx)) return)
 }
 
 // TODO: this is the only place I still use float_mask.
 //       i could get rid of it if i switch to using PrimSig.
 //       then the next step is to lazily jit shims so i don't have to implement the calling convention twice. 
 // Note: FnType by ptr because i think i do (u32, u32) calling convention wrong. 
-fn call_dynamic(program: CompilerRs, ptr: i64, f_ty: *FnType, args: *RsVec(i64), comp_ctx: bool) Res(Values) #compiler = {
+fn call_dynamic_inner(program: CompilerRs, ptr: i64, f_ty: *FnType, args: *RsVec(i64), comp_ctx: bool) Res(Values) = {
     @if(TRACE_CALLS) @println("[call dynamic at addr=%]", ptr);
     
     arg := program.get_info(f_ty.arg);
@@ -871,7 +874,7 @@ fn raw_type(c: *SelfHosted, ty: Type) Type = {
     ty
 }
 
-fn finish_layout_deep(self: *SelfHosted, ty: Type) PRes #compiler = {
+fn finish_layout_deep(self: *SelfHosted, ty: Type) Result(void, ParseErr) #compiler = {
     @debug_assert_le(ty.as_index(), self.types.len);
     if(self.finished_layout_deep&.get(ty.as_index()), => return(.Ok));
     self.finished_layout_deep&.set(ty.as_index()); // do this at the beginning to stop recursion.
@@ -918,7 +921,7 @@ fn finish_layout_deep(self: *SelfHosted, ty: Type) PRes #compiler = {
     .Ok
 }
 
-fn finish_layout(self: *SelfHosted, ty: Type) PRes #compiler = {
+fn finish_layout(self: *SelfHosted, ty: Type) Result(void, ParseErr) #compiler = {
     ty := self.raw_type(ty);
     info := self.get_type(ty);
     @match(info) {

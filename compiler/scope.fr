@@ -35,31 +35,31 @@ fn find_constant_in_scope(self: *Scopes, s: ScopeId, name: Symbol) ?Var #compile
 
 /// Resolver Interface. Called lazily by the compiler when it first works on a new function. /// 
 
-fn resolve_root(compiler: *SelfHosted, func: *Func, scope: ScopeId) PRes #compiler = {
+fn resolve_root(compiler: *SelfHosted, func: *Func, scope: ScopeId) Result(void, ParseErr) #compiler = {
     r: ResolveScope = new(compiler, scope, func.loc);
     
     zone := zone_begin(.Scope); // TODO: defer
-    res := r&.resolve_func(func)
+    @try_deref_err(r&.resolve_func(func)) return;
     zone_end(zone);
-    res
+    .Ok
 }
 
-fn resolve_sign(compiler: *SelfHosted, func: *Func) PRes #compiler = {
+fn resolve_sign(compiler: *SelfHosted, func: *Func) Result(void, ParseErr) #compiler = {
     r: ResolveScope = new(compiler, func.scope.expect("function to have scope"), func.loc);
     
     zone := zone_begin(.Scope); // TODO: defer
-    res := r&.resolve_func_args(func)
+    @try_deref_err(r&.resolve_func_args(func)) return;
     zone_end(zone);
-    res
+    .Ok
 }
 
-fn resolve_body(compiler: *SelfHosted, func: *Func) PRes #compiler = {
+fn resolve_body(compiler: *SelfHosted, func: *Func) Result(void, ParseErr) #compiler = {
     r: ResolveScope = new(compiler, func.scope.expect("function to have scope"), func.loc);
     
     zone := zone_begin(.Scope); // TODO: defer
-    res := r&.resolve_func_body(func)
+    @try_deref_err(r&.resolve_func_body(func)) return;
     zone_end(zone);
-    res
+    .Ok
 }
 
 /// Renumbering interface ///
@@ -83,7 +83,7 @@ fn renumber_expr(self: *SelfHosted, expr: *FatExpr, initial: ?Ty(Var, Var)) void
 }
 
 // TODO: this doesn't belong in this file -- Jun 28
-fn maybe_renumber_and_dup_scope(self: *SelfHosted, new_func: *Func) PRes #compiler = {
+fn maybe_renumber_and_dup_scope(self: *SelfHosted, new_func: *Func) Result(void, ParseErr) #compiler = {
 
     // Closures always resolve up front, so they need to renumber the clone.
     // TODO: HACK but closures get renumbered when inlined anyway, so its just the const args that matter. im just being lazy and doing the whole thing redundantly -- May 9
@@ -359,13 +359,13 @@ fn slow_body(self: *ResolveScope, body: *List(FatStmt)) PRes #once = {
             if stmt.annotations.len == 1 && stmt.annotations.items()[0].name == Flag.include_std.ident() {|
                 msg :: "#include_std requires string argument";
                 arg_expr := stmt.annotations.items()[0].args.or() {|
-                    return(Err = (span = stmt.loc, msg = msg));
+                    return(@error(msg));
                     FatExpr.unreachable_hack()
                 };
                 name := @match(arg_expr.expr) {
                     (fn String(name) Symbol => { name });
                     @default fn() Symbol => {
-                        return(Err = (span = stmt.loc, msg = msg));
+                        return(@error(msg));
                         Symbol.unreachable_hack()
                     };
                 };
@@ -374,8 +374,7 @@ fn slow_body(self: *ResolveScope, body: *List(FatStmt)) PRes #once = {
                     name := self.compiler.pool.get(name);
                     :: ?WaitingParse;
                     file := self.compiler.get_include_std(name).or() {|
-                        msg := @format("unknown path for #include_std %", name) temp();  // TODO: using temp is sketchy incase they end up storing the err for a long time like the parser does. 
-                        return(Err = (span = arg_expr.loc, msg = msg.items()));
+                        return(@error("unknown path for #include_std %", name));
                         unreachable()
                     };
                     dirty = true;
@@ -460,7 +459,7 @@ fn find_var(self: *ResolveScope, name: Symbol) ?Var = {
     unreachable()
 }
 
-fn decl_var(self: *ResolveScope, name: Symbol, kind: VarType, loc: Span, placeholder: PlaceholderValue) Result(Var, ParseErr) = {
+fn decl_var(self: *ResolveScope, name: Symbol, kind: VarType, loc: Span, placeholder: PlaceholderValue) Result(Var, *ParseErr) = {
     s := self.scope;
     // Note: you can't shadow a let with a const either but that already works because consts are done first.
 
@@ -469,8 +468,7 @@ fn decl_var(self: *ResolveScope, name: Symbol, kind: VarType, loc: Span, placeho
     
     prev := scope.vars[self.block].const_lookup&.get(name);
     if prev.is_some() {|
-        msg := @format("Cannot shadow constant in the same scope: %", self.compiler.pool.get(name)) temp();
-        return(Err = (span = loc, msg = msg.items()));
+        return(@error("Cannot shadow constant in the same scope: %", self.compiler.pool.get(name)));
     };
     
     var: Var = (kind = kind, name = name, id = scopes.types.len.trunc(), scope = self.scope, block = self.block.trunc());
@@ -540,16 +538,16 @@ fn declare_binding(self: *ResolveScope, binding: *Binding, loc: Span, is_args: b
             binding[] = b;
         });
         (fn Var(_) => {
-            return(Err = (span = loc, msg = "ICE: resolved args twice."));
+            return(@error("ICE: resolved args twice."));
         });
         (fn None() => ());
     };
     .Ok
 }
 
-:: WalkAst(ResolveScope, ParseErr);
+:: WalkAst(ResolveScope, *ParseErr);
 
-fn handle_expr(self: *ResolveScope, expr: *FatExpr) Result(DoMore, ParseErr) #once = {
+fn handle_expr(self: *ResolveScope, expr: *FatExpr) Result(DoMore, *ParseErr) #once = {
     loc := expr.loc;
 
     @match(expr.expr&) {
@@ -600,7 +598,7 @@ fn handle_expr(self: *ResolveScope, expr: *FatExpr) Result(DoMore, ParseErr) #on
     (Ok = DoMore.Continue)
 }
 
-fn handle_stmt(self: *ResolveScope, stmt: *FatStmt) Result(DoMore, ParseErr) #once = {
+fn handle_stmt(self: *ResolveScope, stmt: *FatStmt) Result(DoMore, *ParseErr) #once = {
     @match(stmt.stmt&) {
         (fn DeclNamed(f) => {
             @try(self.walk_type(f.ty&)) return;
@@ -634,7 +632,7 @@ fn handle_stmt(self: *ResolveScope, stmt: *FatStmt) Result(DoMore, ParseErr) #on
     (Ok = .Continue)
 }
 
-fn handle_func(self: *ResolveScope, func: *Func) Result(DoMore, ParseErr) #once = {
+fn handle_func(self: *ResolveScope, func: *Func) Result(DoMore, *ParseErr) #once = {
     each func.annotations { a | 
         if a.args& { a | 
             @try(self.walk_expr(a)) return;
@@ -645,8 +643,8 @@ fn handle_func(self: *ResolveScope, func: *Func) Result(DoMore, ParseErr) #once 
     (Ok = .Break)
 }
 
-fn handle_type(self: *ResolveScope, ty: *LazyType) Result(DoMore, ParseErr) #once = (Ok = .Continue);
-fn handle_pattern(self: *ResolveScope, p: *Pattern) Result(DoMore, ParseErr) #once = (Ok = .Continue);
+fn handle_type(self: *ResolveScope, ty: *LazyType) Result(DoMore, *ParseErr) #once = (Ok = .Continue);
+fn handle_pattern(self: *ResolveScope, p: *Pattern) Result(DoMore, *ParseErr) #once = (Ok = .Continue);
 
 ///////////////////
 /// Renumbering ///
@@ -701,18 +699,6 @@ fn handle_pattern(self: *RenumberVars, p: *Pattern) Result(DoMore, void) #once =
     };
     
     (Ok = .Continue)
-}
-
-// #test 
-fn reach_scope() = {
-    c := init_self_hosted();
-    src := "fn() => { a := 1; b := a; };";
-    span := c.codemap.add_file("name", src);
-    id := push_parse(c.parser, src, span);
-    expr := c.parser.finish_pending(id).unwrap();
-    func := expr.expr.Closure;
-    c.resolve_root(func, scope_from_index(0)).unwrap();
-    c.renumber_expr(expr&, .None);
 }
 
 fn log(s: *SelfHosted, e: *FatExpr) void = {

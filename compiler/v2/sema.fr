@@ -1,5 +1,10 @@
 // the compiler of theseus 
 
+// TODO: resolve lazily because some things don't care, 
+//       like @enum(a, b, c) just treats the expressions as identifiers. 
+//       we have to keep the scope info around forever anyway, if it was done here, 
+//       we wouldn't traverse the tree twice. but then even more redundant work when cloning for generics? 
+
 ResultType :: @rec @tagged(
     Specific: Type,
     Returning: Type,
@@ -211,7 +216,8 @@ fn field_access_expr(self: *SelfHosted, container_ptr: *FatExpr, name: Symbol) M
     container_ty := self.unptr_ty(container_ptr_ty).expect("ICE: we just checked its a pointer");
 
     raw_container_ty := self.raw_type(container_ty);
-    or self.finish_layout(raw_container_ty) { (e: ParseErr) |
+    x := self.finish_layout(raw_container_ty);
+    or x { (e: ParseErr) |
         return(Err = self.box(e))
     };
     @match(self.get_type(raw_container_ty)) {
@@ -272,10 +278,11 @@ fn decl_var(self: *SelfHosted, name: Var, ty: *LazyType, value: *FatExpr) Maybe(
     @debug_assert(self.dispatch.enclosing_function.is_some(), "ICE: runtime vars must have an enclosing function");
     no_type := ty.is(.Infer);
     self.last_loc = value.loc;
-    if !no_type {|
-        @check(self.infer_type(ty)) return;
+    want := ResultType.None;
+    if @check(self.infer_type(ty)) return { known |
+        want = (Specific = known);
     };
-    @check(self.compile_expr(value, ty.want())) return;
+    @check(self.compile_expr(value, want)) return;
     final_ty := value.ty;
     @debug_assert(!final_ty.is_unknown(), "if we didn't yield, we should know the type");
     if no_type {|
@@ -417,7 +424,7 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
             if !f.coerced {|
                 @if_let(requested) fn Specific(ty) => {
                     if expr.ty != ty {|
-                        panic("TODO: coerce const");
+                        return(@err("TODO: coerce const"));
                     };
                 };
             };
@@ -498,19 +505,29 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
             //       but need to check if its a value that has special fields first.
             @check(self.compile_expr(f.container, .None)) return;
 
-            if f.container.ty == Type {| // :get_or_create_type
-                return(@err("FieldAccess contextual field on Type"));
+            @switch(f.container.ty) {   // :get_or_create_type
+                @case(Type) => {
+                    type := @check(self.immediate_eval_expr(f.container, Type)) return;  // :get_or_create_type
+                    type := Type.assume_cast(type&)[];
+                    @check(self.contextual_field(f.name, expr, type)) return;
+                    // TODO: should typecheck against result type be here or elsewhere? 
+                };
+                @case(ScopeId) => {
+                    // TODO: this should probably be removed because its the same as a struct with const fields. 
+                    return(@err("TODO: FieldAccess on Scope"));
+                };
+                @default => {
+                    // Otherwise its a normal struct/tagged field.
+                    @check(self.compile_place_expr(expr, requested, true)) return;
+                };
             };
-            if f.container.ty == ScopeId {| // :get_or_create_type
-                // TODO: this should probably be removed because its the same as a struct with const fields. 
-                return(@err("FieldAccess on Scope"));
-            };
-
-            // Otherwise its a normal struct/tagged field.
-            @check(self.compile_place_expr(expr, requested, true)) return;
         }
         fn StructLiteralP() => {
             @check(self.construct_struct_literal(requested, expr)) return;
+        }
+        fn ContextualField(name) => {
+            @err_assert(requested&.is(.Specific), "ContextualField % requires type hint", self.pool.get(name[])) return;
+            @check(self.contextual_field(name[], expr, requested.Specific)) return;
         }
         @default => @panic("TODO: unhandled node type %: %", expr.expr&.tag(), expr.log(self.pool));
     };
@@ -564,6 +581,25 @@ fn construct_struct_literal(self: *SelfHosted, requested: ResultType, expr: *Fat
     }
 }
 
+fn contextual_field(self: *SelfHosted, name: Symbol, expr_out: *FatExpr, type: Type) Maybe(void) = {
+    @match(self.get_type(type)) {
+        fn Enum(f) => {
+            each f.fields { f |
+                if f._0 == name {|
+                    value := f._1&.deep_clone(self.get_alloc());
+                    expr_out.set(value, type);
+                    return(.Ok);
+                };
+            };
+            @err("contextual field % not found for %", self.pool.get(name), self.log_type(type))
+        }
+        fn Struct() => @err("TODO: contextual field of struct");
+        fn Tagged() => @err("TODO: contextual field of tagged");
+        fn Named(f) => self.contextual_field(name, expr_out, f._0);
+        @default => @err("no contextual fields for type % (wanted %)", self.log_type(type), self.pool.get(name));
+    }
+}
+
 ::if(ResultType);
 fn compile_call(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(void) #once = {
     @debug_assert(expr.expr&.is(.Call));
@@ -583,7 +619,7 @@ fn compile_call(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
     };
     
     if f.ty == FuncId {|  // :get_or_create_type
-        return(self.call_direct(expr));
+        return(self.call_direct(expr, requested));
     };
     
     if f.ty == LabelId {|  // :get_or_create_type
@@ -600,7 +636,7 @@ fn compile_call(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
         fn Fn(it) => {
             // This happens to be an easy case where we already know the argument type.
             @check(self.compile_expr(arg, (Specific = it.arg))) return;
-            return(self.call_direct(expr));
+            return(self.call_direct(expr, requested));
         }
         fn Label(it) => {
             @check(self.compile_expr(arg, (Specific = it[]))) return;
@@ -618,7 +654,7 @@ fn compile_call(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
 
 // TODO: check function ret type against requested
 // Note: when we get here, we might not know the type of the function or the argument. 
-fn call_direct(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
+fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(void) = {
     f_expr := expr.expr.Call.f;
     arg_expr := expr.expr.Call.arg;
     fid := @check(self.immediate_eval_expr(f_expr, f_expr.ty)) return;
@@ -658,13 +694,12 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
         };
     };
     
-    ret_ty := @check(self.infer_return(fid))    return;
-    
     capturing   := func.get_flag(.AllowRtCapture).or(func.get_flag(.MayHaveAquiredCaptures));
     will_inline := capturing.or(func.cc.unwrap() == .Inline);
     if(will_inline && func.get_flag(.NoInline), => return(@err("must inline a function marked #noinline")));
     
     if will_inline {|
+        println("will inline");
         // If we're just inlining for #inline, compile first so some work on the ast is only done once.
         // note: compile() checks if its ::Inline before actually generating asm so it doesn't waste its time.
         // if its a '=>' function, we can't compile it out of context, and same if it has a const arg of a '=>' function. 
@@ -674,9 +709,10 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
         };
 
         // TODO: check that you're calling from the same place as the definition.
-        return(self.emit_capturing_call(fid, expr));
+        return(self.emit_capturing_call(fid, expr, requested));
     };
     
+    ret_ty := @check(self.infer_return(fid))    return;
     is_const_context := self.add_callee(fid);
     // TODO: its a bit of a hack to check is_const_context? 
     //       it fixes a problem where you try to compile too soon and then think you're already done even if you make a function for it later.
@@ -713,7 +749,7 @@ fn add_callee(self: *SelfHosted, fid: FuncId) bool = {
 }
 
 // Replace a call expr with the body of the target function.
-fn emit_capturing_call(self: *SelfHosted, f: FuncId, expr_out: *FatExpr) Maybe(void) #once = {
+fn emit_capturing_call(self: *SelfHosted, f: FuncId, expr_out: *FatExpr, requested: ResultType) Maybe(void) #once = {
     @check(self.ensure_resolved_body(f)) return; // it might not be a closure. it might be an inlined thing.
     @debug_assert(expr_out.expr&.is(.Call));
     arg_expr := expr_out.expr.Call.arg;
@@ -723,9 +759,19 @@ fn emit_capturing_call(self: *SelfHosted, f: FuncId, expr_out: *FatExpr) Maybe(v
     //self.currently_inlining.push(f);
 
     func := self.get_function(f);
-    // TODO: if let this? its for return_var
+    
+    // This is complicated to allow `fn() => .a` to stay polymorphic and have different inferred types at different callsites. 
+    // Maybe a more robust version of this would be treating the result type like a const arg and duplicating the function? -- Aug 2
     ret_ty := or func.finished_ret {|
-        return(@err("Unknown ret type for % %", f, self.pool.get(func.name)))
+        if func.ret&.is(.Infer) {|
+            if requested&.is(.Specific) {|
+                requested.Specific
+            } else {|
+                return(@err("Unknown ret type for % %", f, self.pool.get(func.name)))
+            }
+        } else {|
+            @check(self.infer_return(f)) return
+        }
     };
     label_ty := self.intern_type(Label = ret_ty);
     // TODO: mutual callees as well.
@@ -995,14 +1041,9 @@ fn bind_const_arg(self: *SelfHosted, o_f: FuncId, arg_name: Var, arg_value: Valu
     @check(self.save_const_values(arg_name, arg_value, arg_ty, loc)) return;
     func.arg&.remove_named(arg_name, self.get_alloc());
 
-    known_type := func.finished_arg.is_some();
-    func.finished_arg = .None;
     // If it was fully resolved before, we can't leave the wrong answer there.
     // But you might want to call bind_const_arg as part of a resolving a generic signeture so its fine if the type isn't fully known yet.
-    if known_type {|
-        //panic("TODO: reinfer?");
-        //self.infer_types(o_f)?;
-    };
+    func.finished_arg = .None;
     .Ok
 }
 
@@ -1114,14 +1155,11 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
         return(Ok = interesting[0].func);
     };
     
-    if want_arity == 1 {|
-        @check(self.compile_expr(arg_expr, .None)) return;
-    };
-    
     ::if([]FatExpr);
     blocked: List(*Action) = list(temp());
     parts := if(arg_expr.expr&.is(.Tuple), => arg_expr.expr.Tuple.items(), => (ptr = arg_expr, len = 1));
     still_interesting: List(OverloadOption) = list(temp());
+    errors: List(*ParseErr) = list(temp());
     each interesting& { opt | 
         continue :: local_return;
         func := self.get_function(opt.func);           
@@ -1139,9 +1177,25 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
         enumerate func.arg.bindings { i, b | 
             arg_expr := parts.index(i);
             if b.ty&.ty() { param | 
-                @check(self.compile_expr(arg_expr, .None)) return;
-                if arg_expr.ty != param {|
-                    continue();
+                // TODO: this isn't correct because it might make some irriversable choice based on the requested type.
+                //       really you want to be able to check all the things with no type hint first, 
+                //       then if you need more check with the hint but say its optional or something so it's more conservative. 
+                //       like ContextualField`.a` -> Value`A.a` loses information.
+                //       or just do it on a clone of the arg expr? -- Aug 2
+                @match(self.compile_expr(arg_expr, (Specific = param))) {
+                    fn Suspend(f) => {
+                        blocked&.push(f); 
+                        continue(); // we don't like it, we skip it.
+                    }
+                    fn Err(e) => {
+                        errors&.push(e);
+                        continue();
+                    }
+                    fn Ok() => {
+                        if arg_expr.ty != param {|
+                            continue();
+                        };
+                    }
                 };
             };
         };
@@ -1190,6 +1244,10 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
         @println("block len = %", blocked.len);
         return(Suspend = blocked[0]);  // TODO: return all? don't just pick one. 
     };
+    ::?**ParseErr;
+    if errors.items().last() { e: **ParseErr | 
+        return(Err = e[]); // TODO: show all errors and say it was during overload resolution. 
+    };
     return(@err("TODO: resolve_in_overload_set %", interesting.len));
     Maybe(FuncId).unreachable_hack()
 }
@@ -1215,79 +1273,6 @@ fn get_arg_types_non_blocking(func: *Func, args: *List(ResultType)) void = {
             fn None()   => args.push(.None);
         };
     };
-}
-
-fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
-    // TODO: Bring back tag checks so i don't have to be paranoid!!
-    //       this annoys be enough that im tempted to go back to inlining all of these. 
-    //       tho maybe #once is reassuring enough. think about it. -- Jul 22
-    @debug_assert(expr.expr&.is(.PrefixMacro)); 
-    invocation := expr.expr.PrefixMacro&;
-    fat_expr_type := or self.env.fat_expr_type {|
-        return(self.early_builtin_prefix_macro(expr))
-    };
-    
-    panic("TODO: call user macros");
-    .Ok
-}
-
-// If we're early in bootstrapping and haven't compiled the FatExpr type yet, so some special handling.
-fn early_builtin_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
-    invocation := expr.expr.PrefixMacro&;
-    if !invocation.handler.expr&.is(.GetVar) {|
-        return(@err("macro calls must be GetVar while bootstrapping. tried to run something too compilicated too soon: %", invocation.handler.log(self.pool)));
-    };
-    
-    name := invocation.handler.expr.GetVar.name;
-    @switch(name) {
-        @case(Flag.builtin.ident()) => {
-            if !invocation.arg.expr&.is(.String) {|
-                return(@err("@builtin arg must be String literal"));
-            };
-            builtin_name := invocation.arg.expr.String;
-            @println("called builtin %", self.pool.get(builtin_name));
-            builtin_type :: fn(T: Type) void => {
-                ptr := T;  // :get_or_create_type
-                val := ptr_cast_unchecked(Type, u32, ptr&)[];
-                expr.set((Small = (val.zext(), 4)), Type);  // :get_or_create_type
-            };
-            // These could call :get_or_create_type but it doesn't matter for now because these are hardcoded
-            @switch(builtin_name) {
-                @case(Flag.i64.ident())         => builtin_type(i64);
-                @case(Flag.bool.ident())        => builtin_type(bool);
-                @case(Flag.OverloadSet.ident()) => builtin_type(OverloadSet);
-                @case(Flag.Scope.ident())       => builtin_type(Scope);
-                @case(Flag.FuncId.ident())      => builtin_type(FuncId);
-                @case(Flag.LabelId.ident())     => builtin_type(LabelId);
-                @case(Flag.Symbol.ident())      => builtin_type(Symbol);
-                @case(Flag.Type.ident())        => builtin_type(Type);
-                @case(Flag.void.ident())        => builtin_type(void);
-                @case(Flag.true.ident())        => expr.set((Small = (1, 1)), bool);
-                @case(Flag.false.ident())       => expr.set((Small = (0, 1)), bool);
-                @case(Flag.compiler_debug_assert_eq_i64.ident()) => {
-                    my_assert_eq: rawptr : fn(a: i64, b: i64) i64 = {
-                        @println("[my_assert_eq] % vs %", a, b);
-                        assert_eq(a, b);
-                        a
-                    };
-                    ty := self.tuple_of(@slice(i64, i64));
-                    ty := self.intern_type(FnPtr = (ty = (arg = ty, ret = i64, arity = 2), cc = .CCallReg));
-                    expr.set((Small = (my_assert_eq.int_from_rawptr(), 8)), ty);
-                };
-                @default => {
-                    return(@err("unknown @builtin '%'.", self.pool.get(builtin_name)));
-                };
-            };
-        };
-        @case(Flag.struct.ident()) => {
-            expr[] = @check(self.struct_macro(invocation.arg)) return;
-        };
-        @default => {
-            return(@err("tried to call non-builtin macro '%' while bootstrapping.", self.pool.get(name)));
-        };
-    };
-    
-    .Ok
 }
 
 // - you want macros to be able to create new constant declarations in macro expansions and const arg functions.
@@ -1416,7 +1401,7 @@ fn compile_get_var(self: *SelfHosted, expr: *FatExpr, requested: ResultType) May
         if self.scopes.get_var_type(var) { ty | 
             expr.ty = ty;
             expr.done = true;
-            // Reading a variable. Convert it to `var&[]` so compiling it checks for smaller loads (u8, etc).
+            // Reading a variable. Convert it to `var&[]`. 
             ptr_ty := self.ptr_type(ty);
             expr[] = synthetic_ty((Addr = self.box(expr[])), expr.loc, ptr_ty);
             expr.done = true;
@@ -1530,9 +1515,9 @@ fn coerce_const_expr(self: *SelfHosted, expr: *FatExpr, req: ResultType) Maybe(v
         if expr.ty != req {|
             @assert(!expr.expr.Value.coerced, "const mismatch. % vs % but already coerced", self.log_type(expr.ty), self.log_type(req));
             
-            expr.expr.Value.coerced = true;
-            expr.ty = req;
-            panic("TODO: coerce constant (might be an actual type error)");
+            //expr.expr.Value.coerced = true;
+            //expr.ty = req;
+            return(@err("TODO: coerce constant (might be an actual type error)"));
         };
     };
     .Ok
@@ -1584,6 +1569,14 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
             };
             self.dispatch.enclosing_function = old_func;
             return(Suspend = self.wait_for(Jit = fid));
+        };
+    };
+    
+    // Different from the version in check_quick_eval because this accepts unfinished ones too. 
+    // This is just an optimisation to avoid an intermediate Func on the first use of a given constant. 
+    @if_let(expr.expr&) fn GetVar(name) => {
+        if name.kind == .Const {|
+            return(Suspend = self.wait_for(EvalConstant = (name = name[], requested = (Specific = ret_ty))));
         };
     };
     
@@ -1683,7 +1676,90 @@ fn create_slice_type(self: *SelfHosted, inner: Type) Maybe(Type) = {
     panic("TODO: create_slice_type")
 }
 
-fn struct_type(self: *SelfHosted, pattern: *Pattern) Maybe(Type) = {
+///////////////////////
+/// Macro Expansion ///
+
+fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
+    // TODO: Bring back tag checks so i don't have to be paranoid!!
+    //       this annoys be enough that im tempted to go back to inlining all of these. 
+    //       tho maybe #once is reassuring enough. think about it. -- Jul 22
+    @debug_assert(expr.expr&.is(.PrefixMacro)); 
+    invocation := expr.expr.PrefixMacro&;
+    fat_expr_type := or self.env.fat_expr_type {|
+        return(self.early_builtin_prefix_macro(expr))
+    };
+    
+    panic("TODO: call user macros");
+    .Ok
+}
+
+// If we're early in bootstrapping and haven't compiled the FatExpr type yet, so some special handling.
+fn early_builtin_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
+    invocation := expr.expr.PrefixMacro&;
+    if !invocation.handler.expr&.is(.GetVar) {|
+        return(@err("macro calls must be GetVar while bootstrapping. tried to run something too compilicated too soon: %", invocation.handler.log(self.pool)));
+    };
+    
+    name := invocation.handler.expr.GetVar.name;
+    @switch(name) {
+        @case(Flag.builtin.ident()) => {
+            arg := invocation.arg.expr&;
+            if(!arg.is(.String), => return(@err("@builtin arg must be String literal")));
+            (value, type) := @try(self.builtin_macro(arg.String)) return;
+            expr.set(value, type);  // :get_or_create_type
+            
+        };
+        @case(Flag.struct.ident()) => {
+            expr[] = @check(self.struct_macro(invocation.arg)) return;
+        };
+        @case(Flag.enum.ident()) => {
+            expr[] = @check(self.enum_macro(invocation.arg, invocation.target)) return;
+        };
+        @default => {
+            return(@err("tried to call non-builtin macro '%' while bootstrapping.", self.pool.get(name)));
+        };
+    };
+    
+    .Ok
+}
+
+fn builtin_macro(self: *SelfHosted, builtin_name: Symbol) Result(Ty(Values, Type), *ParseErr) = {
+    builtin_type :: fn(T: Type) void => {
+        ptr := T;  // :get_or_create_type
+        val := ptr_cast_unchecked(Type, u32, ptr&)[];
+        return(Ok = ((Small = (val.zext(), 4)), Type));  // :get_or_create_type
+    };
+    // These could call :get_or_create_type but it doesn't matter for now because these are hardcoded
+    @switch(builtin_name) {
+        @case(Flag.i64.ident())         => builtin_type(i64);
+        @case(Flag.bool.ident())        => builtin_type(bool);
+        @case(Flag.OverloadSet.ident()) => builtin_type(OverloadSet);
+        @case(Flag.Scope.ident())       => builtin_type(Scope);
+        @case(Flag.FuncId.ident())      => builtin_type(FuncId);
+        @case(Flag.LabelId.ident())     => builtin_type(LabelId);
+        @case(Flag.Symbol.ident())      => builtin_type(Symbol);
+        @case(Flag.Type.ident())        => builtin_type(Type);
+        @case(Flag.void.ident())        => builtin_type(void);
+        @case(Flag.true.ident())        => return(Ok = (((Small = (1, 1)), bool)));
+        @case(Flag.false.ident())       => return(Ok = (((Small = (0, 1)), bool)));
+        @case(Flag.compiler_debug_assert_eq_i64.ident()) => {
+            my_assert_eq: rawptr : fn(a: i64, b: i64) i64 = {
+                @println("[my_assert_eq] % vs %", a, b);
+                assert_eq(a, b);
+                a
+            };
+            ty := self.tuple_of(@slice(i64, i64));
+            ty := self.intern_type(FnPtr = (ty = (arg = ty, ret = i64, arity = 2), cc = .CCallReg));
+            return(Ok = ((Small = (my_assert_eq.int_from_rawptr(), 8)), ty));
+        };
+        @default => {
+            return(@err("unknown @builtin '%'.", self.pool.get(builtin_name)));
+        };
+    };
+    unreachable()
+}
+
+fn struct_type(self: *SelfHosted, pattern: *Pattern) Maybe(Type) #once = {
     fields: List(Field) = list(pattern.bindings.len, self.get_alloc());
     const_field_count := 0;
     each pattern.bindings { b | 
@@ -1694,16 +1770,15 @@ fn struct_type(self: *SelfHosted, pattern: *Pattern) Maybe(Type) = {
         };
         
         ty := or @check(self.infer_type(b.ty&)) return {|
-            return(@err("@struct field requires type annotation"))
+            return(@err("@struct field requires type annotation (TODO: infer from default value but then have to fix the parser)"))
         };
         
-        // TODO: if you yield on a later loop you'll alias the expr. 
-        //       wasted work but its probably fine because you throw away the var too. 
         default: ?Var = .None;
         if b.default& { expr |
             v := self.unique_const(name);
             self.scopes.put_constant(v, expr[], (Finished = ty));
             default = (Some = v);
+            expr.expr = (GetVar = v);  // Save our work because we might yield on a later field. 
         };
         fields&.push(
             name = name,
@@ -1727,4 +1802,53 @@ fn struct_macro(self: *SelfHosted, fields: *FatExpr) Maybe(FatExpr) = {
     ty_value := self.to_values(Type, ty);
     fields.set(ty_value, Type); // :get_or_create_type
     (Ok = fields[])
+}
+
+fn enum_macro(self: *SelfHosted, arg: *FatExpr, target: *FatExpr) Maybe(FatExpr) = {
+    type := @check(self.immediate_eval_expr(arg, Type)) return; // :get_or_create_type
+    type := Type.assume_cast(type&)[];
+
+    F :: Ty(Symbol, Values);
+    fields: List(F) = list(self.get_alloc());
+    as_int: ?IntTypeInfo = @match(self.get_type(type)) {
+        fn Int(it) => (Some = it[]);
+        @default => .None;
+    };
+    sequential := as_int.is_some();
+    last := -1;
+    @match(target.expr&) {
+        fn StructLiteralP(pattern) => {
+            each pattern.bindings { b | 
+                name := @unwrap(b.ident(), "@enum case requires name") return;
+                @err_assert(b.default.is_some(), "@enum expected case value") return;
+                @err_assert(b.ty&.is(.Infer), "@enum case cannot have type annotation (use '=' instead of ':'") return;
+
+                expr := b.default&.as_ref().unwrap();
+                val  := @check(self.immediate_eval_expr(expr, type)) return;
+                if sequential {|
+                    current := @try(val&.int_value(as_int.unwrap())) return;
+                    if current == last + 1 {|
+                        last += 1;
+                    } else {|
+                        sequential = false;
+                    };
+                };
+                fields&.push(@as(F) (name, val));
+            };
+        }
+        fn Tuple(names) => {
+            @err_assert(sequential, "@enum on tuple of names must be of int type") return;
+            @err_assert(type == i64, "TODO: @enum(other-int-types)(Tuple)") return;
+            enumerate names { i, name |
+                name := @unwrap(name.ident(), "@enum expected ident") return;
+                value := self.to_values(i64, i); // :get_or_create_type
+                fields&.push(@as(F) (name, value));
+            };
+        }
+        @default => return(@error("@enum expected struct literal or tuple of names"));
+    };
+    unique_ty := self.intern_type(Enum = (raw = type, fields = fields.rs(), sequential = sequential));
+    ty_value := self.to_values(Type, unique_ty); // :get_or_create_type
+    arg.set(ty_value, Type);
+    (Ok = arg[])
 }

@@ -237,6 +237,45 @@ fn ident(self: *Binding) ?Symbol = {
     }
 }
 
+fn ident(self: *FatExpr) ?Symbol = {
+    @match(self.expr&) {
+        fn GetVar(v) => (Some = v.name);
+        fn GetNamed(v)  => (Some = v[]);
+        fn String(v) => (Some = v[]);
+        @default => .None;
+    }
+}
+
+// TODO: add i128 to the language so i can represent all u64/i64 easily. 
+// TODO: cope with sign extension. maybe just switch over sizes and load a casted pointer like the old version did. 
+fn int_value(value: *Values, int: IntTypeInfo) Res(i64) = {
+    len := value.len();
+    if len != 1 && len != 2 && len != 4 && len != 8 {|
+        return(@err("bad int size %", len));
+    };
+    @debug_assert(value.is(.Small));
+    i := if int.signed {|
+        // TODO: are negative i8/i16/i32 stored sign extended? 
+        value.Small._0
+    } else {|
+        // TODO: cope with u64
+        value.Small._0
+    };
+    (min, max) := int.range();
+    @debug_assert(i <= max && i >= min, "tried to coerce but value out of bounds for FROM type!?!?!!?");
+    (Ok = i)
+}
+
+::if(Ty(i64, i64));
+fn range(int: IntTypeInfo) Ty(i64, i64) = {
+    if int.signed {|
+        // TODO: UB on i1. 
+        max := 1.shift_left(int.bit_count - 1) - 1;
+        (-max, max) /// TODO: is this right? 
+    } else {|
+        (0, 1.shift_left(int.bit_count) - 1)
+    }
+}
 
 fn tuple_types(self: *SelfHosted, ty: Type) ?[]Type = {
     @match(self.get_type(ty)) {

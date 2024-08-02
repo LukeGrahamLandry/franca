@@ -81,6 +81,9 @@ fn log(self: *FatExpr, pool: *StringPool, out: *List(u8), depth: i64) void = {
         fn Poison(placeholder) => {
             @fmt(out, "%", placeholder);
         }
+        fn ContextualField(name) => {
+            @fmt(out, ".%", pool.get(name[]));
+        }
         @default => {
             @fmt(out, "TODO:print:%", self.expr&.tag());
         };
@@ -252,12 +255,20 @@ fn HasLog($T: Type) void = {
 // TODO: allow taking span as arg? take compiler as arg to put last loc? 
 fn error(arg: FatExpr) FatExpr #macro = {
     if !arg.expr&.is(.Tuple) {|
-        return(@{ (Err = (span = Span.zeroed(), msg = @[arg])) });
+        return(@{ 
+            mem := libc_allocator.alloc(ParseErr, 1);
+            e := mem.ptr;
+            e[] = (span = Span.zeroed(), msg = @[arg]);
+            (Err = e) 
+        });
     };
     @{
+        mem := libc_allocator.alloc(ParseErr, 1);
+        e := mem.ptr;
         out: List(u8) = list(temp());
         @[ format_into(@{ out& }, arg.expr.Tuple.items(), arg.loc) ];
-        (Err = (span = Span.zeroed(), msg = out.items()))
+        e[] = (span = Span.zeroed(), msg = out.items());
+        (Err = e)
     }
 }
 
@@ -293,7 +304,6 @@ fn err_assert(arg: FatExpr, ret: FatExpr) FatExpr #macro = {
     }
 }
 
-
 fn unwrap(arg: FatExpr, ret: FatExpr) FatExpr #macro = {
     loc := arg.loc;
     arg := compile_ast(arg);
@@ -322,6 +332,12 @@ fn unwrap(arg: FatExpr, ret: FatExpr) FatExpr #macro = {
         cond.unwrap()
     }
 }
+
+fn try_deref_err(maybe: FatExpr, ret: FatExpr) FatExpr #macro= @{
+    m := @[maybe];
+    if(m&.is_err(), => @[ret](Err = m.unwrap_err()[]));
+    m.unwrap()
+};
 
 fn log_type(self: *SelfHosted, ty: Type) Str = {
     safe_rec: DynamicBitSet = empty(temp());
