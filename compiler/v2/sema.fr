@@ -364,7 +364,7 @@ fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = 
             @if_let(b.name) fn Var(name) => {
                 @debug_assert(b.kind == name.kind);
                 is_new := self.scopes.put_var_type(name, b.ty&.unwrap());
-                @println("bind %", name&.log(self.pool));
+                @println("bind param %", name&.log(self.pool));
                 if(!is_new, => return(@err("overwrite arg? %", name&.log(self.pool))));
             };
         };
@@ -403,7 +403,32 @@ fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = 
         fn ComptimeAddr(ptr) => {
             panic("TODO: ComptimeAddr");
         }
-        @default => panic("TODO: unhandled function body type");
+        @default => {
+            good := false;
+            each func.annotations { tag | 
+                @switch(tag.name) {
+                    @case(Flag.unsafe_noop_cast.ident()) => {
+                        good = true;
+                    };
+                    @case(Flag.comptime_addr.ident()) => {
+                        good = true;
+                        ::as_ref(FatExpr);
+                        value := @unwrap(tag.args&.as_ref(), "#comptime_addr requires arg") return;
+                        ptr := @check(self.immediate_eval_expr(value, i64)) return;
+                        ptr := i64.assume_cast(ptr&)[];
+                        func.body = (ComptimeAddr = ptr);
+                        self.aarch64&.extend_blanks(fid);
+                        self.aarch64.dispatch[fid.as_index()] = ptr.rawptr_from_int();
+                    };
+                    @case(Flag.intrinsic.ident()) => {
+                        good = true;
+                        panic("TODO: hoist intrinsic into body right now?");
+                    };
+                    @default => ();
+                };
+            };
+            @err_assert(good, "Function has no implementation") return;
+        };
     };
     @println("body compiled: %", fid.as_index());
     func.set_flag(.EnsuredCompiled);
@@ -532,6 +557,13 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
         fn ContextualField(name) => {
             @err_assert(requested&.is(.Specific), "ContextualField % requires type hint", self.pool.get(name[])) return;
             @check(self.contextual_field(name[], expr, requested.Specific)) return;
+        }
+        fn Uninitialized() => {
+            if expr.ty.is_unknown() {|
+                @err_assert(requested&.is(.Specific), "Uninitialized requires type hint") return;
+                expr.ty = requested.Specific;
+            };
+            expr.done = true;
         }
         @default => @panic("TODO: unhandled node type %: %", expr.expr&.tag(), expr.log(self.pool));
     };
@@ -704,7 +736,7 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
     func := self.get_function(fid);
     
     assert(!func.get_flag(.MayHaveAquiredCaptures) && !func.get_flag(.UnsafeNoopCast)
-        && !func.get_flag(.TryConstantFold)
+        //&& !func.get_flag(.TryConstantFold)
     , "Not Yet Implemented: unhandled complex call");
     
     arg_ty := UnknownType;
@@ -1207,7 +1239,7 @@ fn arity(self: *SelfHosted, expr: *FatExpr) i64 = {
 // TODO: need to check for conflicts somehow but we can't assume we're able to infer all the options here,
 //       because there might be cycles or more might be added later. 
 //       do i need to keep a list of all the (os, arg_ty -> fn) and check at the end?
-fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret: ResultType, i: OverloadSet) Maybe(FuncId) #once = {
+fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret: ResultType, i: OverloadSet) Maybe(FuncId) = {
     self.last_loc = arg_expr.loc;
     want_arity := self.arity(arg_expr);
     if want_arity == 1 {|
@@ -1442,9 +1474,12 @@ fn update_function_metadata(self: *SelfHosted, func: *Func) void = {
             //       it would be nice to do only one pass over the annotations 
             //       but it would also be nice to do absolutely no work if you never try to call the function. 
             @case(Flag.comptime_addr.ident()) => {
+                //@err_assert(func.body&.is(.Empty), "#comptime_addr conflicts with body expression") return;
+                //ptr := @check(self.compile)
                 //panic("TODO: hoist comptime addr into body right now?");
             };
             @case(Flag.intrinsic.ident()) => {
+                //@err_assert(func.body&.is(.Empty), "#intrinsic conflicts with body expression") return;
                 //panic("TODO: hoist intrinsic into body right now?");
             };
             @case(Flag.inline.ident()) => {
@@ -1545,8 +1580,30 @@ fn find_const_non_blocking(self: *SelfHosted, name: Var) ?Ty(Values, Type) #once
 fn handle_declare_constant(self: *SelfHosted, name: Var, ty: *LazyType, value: *FatExpr) Maybe(void) #once = {
     @debug_assert(self.dispatch.enclosing_function.is_none(), "ICE: handle_declare_constant should have no enclosing function");
     
-    // TODO: do the @rec and type checking stuff from the rust version. 
-    @check(self.compile_expr(value, .None)) return;
+    is_rec := value.expr&.is(.PrefixMacro) && value.expr.PrefixMacro.handler.ident() == (Some = Flag.rec.ident());
+    
+    want := ResultType.None;
+    if @check(self.infer_type(ty)) return { known |
+        want = (Specific = known);
+        if(is_rec, => @err_assert(known == Type, "@rec expected Type") return);
+    };
+    
+    // TODO: HACK that doesn't respect scoping!
+    rec: ?Type = if(!is_rec, => .None) {|
+        invocation := value.expr.PrefixMacro&;
+        if invocation.arg.is_raw_unit() {|
+            invocation.arg[] = invocation.target[];
+        };
+        real_value_box := invocation.arg;
+        hole := self.intern_type(Placeholder = (rec = (Some = real_value_box)));  // TODO: if we come around again need to remember to look at this expression somehow
+        val  := self.to_values(Type, hole);
+        value.set(val, Type);
+        value = real_value_box;
+        (Some = hole)
+    };
+    
+    @check(self.compile_expr(value, want)) return;
+    
     if value.ty == UnknownType {|
         return(@err("TODO: needed type hint for %", self.pool.get(name.name)));
     };
@@ -1554,6 +1611,17 @@ fn handle_declare_constant(self: *SelfHosted, name: Var, ty: *LazyType, value: *
         val := @check(self.immediate_eval_expr(value, value.ty)) return;
         value.set(val, value.ty);
     };
+    
+    if rec { placeholder |
+        assert(value.expr&.is(.Value), "wtf");
+        val: Values = value.expr.Value.bytes;
+        result_type := Type.assume_cast(val&)[];
+        assert(result_type != placeholder, "ICE: @rec resolved to itself");
+        self.update_placeholder(placeholder, result_type, name.name);
+        @println("update_placeholder @rec % -> %", placeholder, result_type);
+    };
+    self.finish_layout_deep(value.ty).unwrap();
+    
     .Ok
 }
 
@@ -1588,13 +1656,40 @@ fn save_const(self: *SelfHosted, name: Var, val_expr: Expr, final_ty: Type, loc:
 fn coerce_const_expr(self: *SelfHosted, expr: *FatExpr, req: ResultType) Maybe(void) = {
     @debug_assert(expr.expr&.is(.Value), "tried to coerce non-value expr");
     
-    if req.specific() { req | 
-        if expr.ty != req {|
-            @assert(!expr.expr.Value.coerced, "const mismatch. % vs % but already coerced", self.log_type(expr.ty), self.log_type(req));
+    if req.specific() { want | 
+        found := expr.ty;
+        if found != want {|
+            @assert(!expr.expr.Value.coerced, "const mismatch. % vs % but already coerced", self.log_type(found), self.log_type(want));
+            // TODO: set coereced? 
+            
+            if found == OverloadSet {|
+                @if_let(self.get_type(want)) fn Fn(f_ty) => {
+                    os := @check(self.immediate_eval_expr(expr, found)) return;
+                    os := OverloadSet.assume_cast(os&)[];
+                    // TODO: mega HACK, should probably have a sperate codepath that doesn't want an expression. 
+                    types := self.tuple_types(f_ty.arg);
+                    types := types.or(=> (ptr = f_ty.arg&, len = 1));
+                    fake_args: List(FatExpr) = list(self.get_alloc());
+                    for types { ty |
+                        fake_args&.push(synthetic_ty(.Uninitialized, Span.zeroed(), ty));
+                    };
+                    fake_expr := synthetic_ty((Tuple = fake_args.rs()), Span.zeroed(), f_ty.arg);
+                    fid := @check(self.resolve_in_overload_set(self.box(fake_expr), (Specific = f_ty.ret), os)) return;
+                    fid_value := self.to_values(FuncId, fid);
+                    expr.set(fid_value, want);
+                    return(.Ok);
+                };
+            };
+            if want == FuncId {|
+                @if_let(self.get_type(found)) fn Fn() => {
+                    expr.ty = FuncId;
+                    return(.Ok);
+                };
+            };
             
             //expr.expr.Value.coerced = true;
             //expr.ty = req;
-            return(@err("TODO: coerce constant (might be an actual type error)"));
+            return(@err("TODO: coerce constant found % but want % (might be an actual type error)", self.log_type(found), self.log_type(want)));
         };
     };
     .Ok
@@ -1777,12 +1872,15 @@ fn early_builtin_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #on
         return(@err("macro calls must be GetVar while bootstrapping. tried to run something too compilicated too soon: %", invocation.handler.log(self.pool)));
     };
     
+    
     name := invocation.handler.expr.GetVar.name;
     @switch(name) {
         @case(Flag.builtin.ident()) => {
-            arg := invocation.arg.expr&;
-            if(!arg.is(.String), => return(@err("@builtin arg must be String literal")));
-            (value, type) := @try(self.builtin_macro(arg.String)) return;
+            if invocation.arg.is_raw_unit() {|
+                invocation.arg[] = invocation.target[];
+            };
+            name := @unwrap(invocation.arg.ident(), "@builtin arg must be String literal") return;
+            (value, type) := @try(self.builtin_macro(name)) return;
             expr.set(value, type);  // :get_or_create_type
             
         };
@@ -1795,6 +1893,9 @@ fn early_builtin_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #on
         @case(Flag.tagged.ident()) => {
             @err_assert(invocation.target.is_raw_unit(), "@tagged expected single arg") return;
             expr[] = @check(self.tagged_macro(invocation.arg)) return;
+        };
+        @case(Flag.late.ident()) => {
+            expr.set(unit_value, void); // :get_or_create_type
         };
         @default => {
             return(@err("tried to call non-builtin macro '%' while bootstrapping.", self.pool.get(name)));
@@ -1819,6 +1920,7 @@ fn builtin_macro(self: *SelfHosted, builtin_name: Symbol) Result(Ty(Values, Type
         @case(Flag.FuncId.ident())      => builtin_type(FuncId);
         @case(Flag.LabelId.ident())     => builtin_type(LabelId);
         @case(Flag.Symbol.ident())      => builtin_type(Symbol);
+        @case(Flag.rawptr.ident())      => builtin_type(rawptr);
         @case(Flag.Type.ident())        => builtin_type(Type);
         @case(Flag.void.ident())        => builtin_type(void);
         @case(Flag.true.ident())        => return(Ok = (((Small = (1, 1)), bool)));

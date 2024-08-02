@@ -99,6 +99,11 @@ fn main() void = {
         // TODO: have a version of poll that just goes until a specific task is done. 
         res := c.poll_tasks(); ::tagged(@type res);
         if res&.is(.Err) {|
+            garbage := res.Err.span.high == 0 && res.Err.span.low == 0;
+            if garbage {|
+                res.Err.span = c.last_loc;
+            };
+            c.codemap.show_error_line(res.Err.span);
             @panic("failed to compile func: %", res.Err.msg);
             // TODO: return the error!
         };
@@ -200,6 +205,7 @@ fn load_file_in_compiler(vtable: *ImportVTable, path: Str, use_new_sema: bool) C
     c := vtable.with(comp);
     file := {c.vtable.add_file}(c.data, path, source.items());
     self := c.data.cast();
+    self.env.new_sema = use_new_sema;
     
     id := self.parser.push_parse(source.items(), file);
     // TODO: handle error
@@ -260,6 +266,10 @@ fn get_include_std(c: *SelfHosted, name: Str) ?WaitingParse = {
     src := if name == "compiler" {() Str |
         code := {c.vtable.get_compiler_builtins_source}().clone(c.get_alloc());
         fill_export_ffi(code&);
+        if c.env.new_sema {|
+            // TODO: sad that this will make the whole thing dynamically reachable but also its all going away so i don't really care. 
+            new_sema_fill_export_ffi(code&);
+        };
         code.items()
     }{|
         lib := STDLIB_PATH[].unwrap();
@@ -375,6 +385,7 @@ fn init_self_hosted(build_options: *BuildOptions) *SelfHosted #compiler = {
         //       i think this just happens to work because i always set it to something else in the driver program. 
         driver_vtable_ptr = 0.rawptr_from_int(),  
         driver_vtable_user_data = 0.rawptr_from_int(),
+        new_sema = false,
     );
     env := a.boxed(ComptimeEnvironment, env);
     self: SelfHosted = (

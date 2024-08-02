@@ -36,6 +36,7 @@ pub struct ComptimeEnvironment {
     _build_options: usize,
     pub unquote_placeholders: BigOption<FuncId>,
     pub driver_vtable: (Box<ExportVTable>, *mut ()),
+    _new_sema: bool,
 }
 
 #[repr(C)]
