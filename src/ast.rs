@@ -1124,6 +1124,7 @@ impl<'p> Expr<'p> {
         match self {
             Expr::GetVar(v) => Some(v.name),
             &Expr::GetNamed(i) => Some(i),
+            &Expr::String(s) => Some(s),
             _ => None,
         }
     }

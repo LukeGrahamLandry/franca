@@ -21,13 +21,10 @@ ExprAttempt :: @struct(expr: *FatExpr, requested: ResultType);
 VarAttempt :: @struct(name: Var, requested: ResultType);
 Action :: @tagged(
     CompileExpr: *List(ExprAttempt),
-    TypeArg: FuncId,
-    TypeRet: FuncId,
     CompileBody: FuncId,  // After this, we can generate bytecode.
     Jit: FuncId, // After this, it's safe to call a function pointer. 
-    TypeConstant: VarAttempt,
     EvalConstant: VarAttempt,  // find_const. 
-    ResolveOverload: @struct(os: OverloadSet, call: ExprAttempt),
+    ResolveOverload: @struct(os: OverloadSet, call: ExprAttempt, callsite: ?FuncId),
 );
 
 fn init(a: Alloc) CompilerDispatch = {
@@ -114,16 +111,11 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) #once = {
             @println("[TRY TASK] %", task.action&.tag());
             self.dispatch.active_stack = stack;
             while => !stack.is_empty() {|
-                last := stack.last().unwrap()[];
+                last := stack.pop().unwrap();
                 l := stack.len;
-                @check(self.compile_expr(last.expr, last.requested)) return;  // TODO: this pushes the expression so really we should pop at the top
-                @assert_eq(l, stack.len, "wip expr stack changed");
-                assert(last.expr.done, "not done?");
-                stack.pop();
+                @check(self.compile_expr(last.expr, last.requested)) return;
+                @debug_assert_eq(l, stack.len, "wip expr stack changed");
             };
-        }
-        fn TypeConstant(v) => {
-            panic("TODO: task TypeConstant");
         }
         fn EvalConstant(v) => {
             @println("[TRY TASK] %: %", task.action&.tag(), self.pool.get(v.name.name));
@@ -133,12 +125,6 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) #once = {
             var  := var.expect("var should always be known");
             @check(self.handle_declare_constant(name, var._1&, var._0&)) return;
             self.dispatch.const_var_in_progress&.unset(name.id.zext());
-        }
-        fn TypeArg(fid) => {
-            panic("TODO: task TypeArg");
-        }
-        fn TypeRet(fid) => {
-            panic("TODO: task TypeRet");
         }
         fn CompileBody(fid) => {
             @println("[TRY TASK] %: % %", task.action&.tag(), fid, self.log_name(fid));
@@ -175,6 +161,8 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) #once = {
             if(body&.is_err(), => return(Err = self.box(body.Err)));
         }
         fn ResolveOverload(f) => {
+            self.new_expression_stack();
+            self.dispatch.enclosing_function = f.callsite;  // TODO: make test that fails without this.
             overloads := self.dispatch.overloads&.nested_index(f.os.as_index());
             @println("[TRY TASK] %: % %", task.action&.tag(), f.os, self.pool.get(overloads.name));
             @debug_assert(f.call.expr.expr&.is(.Call));

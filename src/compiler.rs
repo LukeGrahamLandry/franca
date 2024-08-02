@@ -2154,6 +2154,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             "f32" => TypeId::f32(),
             "Type" => TypeId::ty,
             "bool" => TypeId::bool(),
+            "void" => TypeId::unit,
             "UnknownType" => TypeId::unknown,
             "Never" => TypeId::never,
             "rawptr" => TypeId::voidptr,
