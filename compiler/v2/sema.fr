@@ -730,6 +730,7 @@ fn compile_call(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
 fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(void) = {
     f_expr := expr.expr.Call.f;
     arg_expr := expr.expr.Call.arg;
+    @debug_assert(!f_expr.ty.is_unknown(), "call_direct expected fn expr to be compiled");
     fid := @check(self.immediate_eval_expr(f_expr, f_expr.ty)) return;
     fid := FuncId.assume_cast(fid&)[];
     @println("compile direct call %", fid);
@@ -951,7 +952,16 @@ fn const_args_key(self: *SelfHosted, original_f: FuncId, arg_expr: *FatExpr) May
         enumerate func.arg.bindings { i, binding |
             continue :: local_return;
             if(binding.kind != .Const, => continue());
-            arg_ty := binding.ty&.ty().or(=> arg_exprs[i].ty);
+            arg_ty := or binding.ty&.ty() {|
+                // TODO: this isn't really what you want. 
+                //       the problem is you want to make the key before duplicating the function and binding const args,
+                //       so its faster after the first instantiation, but to do that you need to compile the const args, 
+                //       and they might need to get a type hint (like struct/enum literals), 
+                //       but also thier type might depend on previous const args which this doesn't handle. 
+                @check(self.compile_expr(arg_exprs.index(i), .None)) return;
+                arg_exprs[i].ty
+            };
+            @debug_assert(!arg_ty.is_unknown(), "const_args_key expected arg expr to be compiled");
             value := @check(self.immediate_eval_expr(arg_exprs.index(i), arg_ty)) return;
             all_const_args&.push_all(value&.bytes());
         };
@@ -1250,6 +1260,7 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
     overloads := self.dispatch.overloads&.nested_index(i.as_index());
     self.compute_new_overloads(overloads);
     interesting: List(OverloadOption) = list(temp());
+    println(overloads.ready.len);
     each overloads.ready { opt | 
         continue :: local_return;
         @if_let(requested_ret) fn Specific(want) => {
@@ -1262,6 +1273,8 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
         };
         
         if opt.args.len != want_arity {|
+                    //@println("% vs %", self.log_type(have), self.log_type(want));
+                    @println("% vs %", opt.args.len, want_arity);
             continue();
         };
         
@@ -1671,15 +1684,7 @@ fn coerce_const_expr(self: *SelfHosted, expr: *FatExpr, req: ResultType) Maybe(v
                 @if_let(self.get_type(want)) fn Fn(f_ty) => {
                     os := @check(self.immediate_eval_expr(expr, found)) return;
                     os := OverloadSet.assume_cast(os&)[];
-                    // TODO: mega HACK, should probably have a sperate codepath that doesn't want an expression. 
-                    types := self.tuple_types(f_ty.arg);
-                    types := types.or(=> (ptr = f_ty.arg&, len = 1));
-                    fake_args: List(FatExpr) = list(self.get_alloc());
-                    for types { ty |
-                        fake_args&.push(synthetic_ty(.Uninitialized, Span.zeroed(), ty));
-                    };
-                    fake_expr := synthetic_ty((Tuple = fake_args.rs()), Span.zeroed(), f_ty.arg);
-                    fid := @check(self.resolve_in_overload_set(self.box(fake_expr), (Specific = f_ty.ret), os)) return;
+                    fid := @check(self.resolve_by_type(os, f_ty[])) return;
                     fid_value := self.to_values(FuncId, fid);
                     expr.set(fid_value, want);
                     return(.Ok);
@@ -1700,9 +1705,22 @@ fn coerce_const_expr(self: *SelfHosted, expr: *FatExpr, req: ResultType) Maybe(v
     .Ok
 }
 
+fn resolve_by_type(self: *SelfHosted, os: OverloadSet, f_ty: FnType) Maybe(FuncId) = {
+    // TODO: mega HACK, should probably have a sperate codepath that doesn't want an expression. 
+    types := self.arg_types(f_ty.arg);
+    fake_args: List(FatExpr) = list(self.get_alloc());
+    for types { ty |
+        fake_args&.push(synthetic_ty(.Uninitialized, Span.zeroed(), ty));
+    };
+    fake_expr := synthetic_ty((Tuple = fake_args.rs()), Span.zeroed(), f_ty.arg);
+    fid := @check(self.resolve_in_overload_set(self.box(fake_expr), (Specific = f_ty.ret), os)) return;
+    (Ok = fid)
+}
+
 ::?FnType;
 fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Values) = {
     @println("imm_eval %", expr.log(self.pool));
+    @debug_assert(!ret_ty.is_unknown(), "immediate_eval_expr unknown");
     old_func := self.dispatch.enclosing_function;
     self.dispatch.enclosing_function = .None;
     ::?Values;
@@ -1733,7 +1751,7 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
                 if f.arg.ty != f_ty.arg {| // TODO
                     return(@err("TODO: type mismatch"));
                 };
-                @debug_assert(func.cc.unwrap() == .CCallReg);
+                @debug_assert(func.cc.unwrap() == .CCallReg, "expected cc CCallReg");
                 self.aarch64&.bump_dirty();
                 @println("imm_eval direct % %", fid.as_index(), self.pool.get(func.name));
                 // SAFETY: we're passing comp_ctx=false so it won't try to use the pointer as a real CompilerRs.
@@ -1766,8 +1784,13 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
     bindings&.if_empty_add_unit();
     arg: Pattern = (bindings = bindings.rs(), loc = expr.loc);
     def: FnDef = (name = .None, arg = arg, ret = (Finished = ret_ty), tags = list(temp()), loc = expr.loc);
-    // HACK? it feels like this would be too shallow... and i don't think the old compiler had to do this... but i can't yet make a test that this breaks.
-    expr.done = false; 
+
+    // we might have already tried to compile the expression in a different context,
+    // but we need to do it again so we're sure to add callees to the newly created function,
+    // so we don't try to call something that isn't compiled yet. 
+    walk: MarkNotDone = (_hack = 0);
+    walk&.walk_expr(expr);
+    
     fake_func := make_func(def, (Some = expr[]), false);
     // We didn't bother setting a scope because we don't need one, the expression will already have been resolved. 
     fake_func&.set_flag(.ResolvedBody);
@@ -1862,32 +1885,75 @@ fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
     //       tho maybe #once is reassuring enough. think about it. -- Jul 22
     @debug_assert(expr.expr&.is(.PrefixMacro)); 
     invocation := expr.expr.PrefixMacro&;
+    
+    // This allows @a E; instead of @a(E);
+    if invocation.arg.is_raw_unit() {|
+        temp := invocation.arg;
+        invocation.arg = invocation.target;
+        invocation.target = temp;
+    };
+    
     fat_expr_type := or self.env.fat_expr_type {|
         return(self.early_builtin_prefix_macro(expr))
     };
     
-    panic("TODO: call user macros");
+    @println("call user macro %", invocation.handler.log(self.pool));
+    single := invocation.target.is_raw_unit();
+    
+    @check(self.compile_expr(invocation.handler, .None)) return;
+    if invocation.handler.ty == OverloadSet {|
+        os := @check(self.immediate_eval_expr(invocation.handler, OverloadSet)) return; // :get_or_create_type
+        os := OverloadSet.assume_cast(os&)[];
+        ::if(FnType); 
+        f_ty: FnType = if single {|  // TODO: wrong! what if they actually passed unit?
+            println("one");
+            (arg = fat_expr_type, ret = fat_expr_type, arity = 1)
+        } else {|
+            println("two");
+            pair := self.tuple_of(@slice(fat_expr_type, fat_expr_type));
+            (arg = pair, ret = fat_expr_type, arity = 2)
+        };
+        fid := @check(self.resolve_by_type(os, f_ty)) return;
+        fid_value := self.to_values(FuncId, fid);
+        invocation.handler.set(fid_value, FuncId);
+    };
+    
+    fid := @check(self.immediate_eval_expr(invocation.handler, FuncId)) return; // :get_or_create_type
+    fid := FuncId.assume_cast(fid&)[];
+    fn_ptr := or self.aarch64&.get_fn(fid) {| 
+        return(Suspend = self.wait_for(Jit = fid))
+    };
+    
+    args: List(i64) = list(2, temp());
+    args&.push(FatExpr.int_from_ptr(invocation.arg));
+    args&.push(FatExpr.int_from_ptr(invocation.target));
+    args := args.rs();
+    
+    hack := self&;
+    func := self.get_function(fid);
+    // TODO: assert!(self.program[f].has_tag(Flag::Macro));
+    f_ty := func.finished_ty().expect("known type once compiled");
+    self.aarch64&.bump_dirty();
+    result := hack&.call_dynamic(fn_ptr.int_from_rawptr(), f_ty&, args&, false);
+    if result&.is(.Err) {|
+        return(Err = self.box(result.Err));
+    };
+    // TODO: fatexpr layout
+    expr[] = FatExpr.assume_cast(result.Ok&)[];
     .Ok
 }
 
 // If we're early in bootstrapping and haven't compiled the FatExpr type yet, so some special handling.
-fn early_builtin_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
+fn early_builtin_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
     invocation := expr.expr.PrefixMacro&;
     if !invocation.handler.expr&.is(.GetVar) {|
         return(@err("macro calls must be GetVar while bootstrapping. tried to run something too compilicated too soon: %", invocation.handler.log(self.pool)));
     };
     
-    
     name := invocation.handler.expr.GetVar.name;
     @switch(name) {
         @case(Flag.builtin.ident()) => {
-            if invocation.arg.is_raw_unit() {|
-                invocation.arg[] = invocation.target[];
-            };
-            name := @unwrap(invocation.arg.ident(), "@builtin arg must be String literal") return;
-            (value, type) := @try(self.builtin_macro(name)) return;
-            expr.set(value, type);  // :get_or_create_type
-            
+            expr[] = @try(self.builtin_macro(invocation.arg[])) return;
         };
         @case(Flag.struct.ident()) => {
             expr[] = @check(self.struct_macro(invocation.arg)) return;
@@ -1910,6 +1976,13 @@ fn early_builtin_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #on
     .Ok
 }
 
+fn builtin_macro(self: *SelfHosted, arg: FatExpr) Res(FatExpr) = {
+    name := @unwrap(arg&.ident(), "@builtin arg must be String literal") return;
+    (value, type) := @try(self.builtin_macro(name)) return;
+    arg&.set(value, type);  // :get_or_create_type
+    (Ok = arg)
+}
+
 fn builtin_macro(self: *SelfHosted, builtin_name: Symbol) Result(Ty(Values, Type), *ParseErr) = {
     builtin_type :: fn(T: Type) void => {
         ptr := T;  // :get_or_create_type
@@ -1921,7 +1994,7 @@ fn builtin_macro(self: *SelfHosted, builtin_name: Symbol) Result(Ty(Values, Type
         @case(Flag.i64.ident())         => builtin_type(i64);
         @case(Flag.bool.ident())        => builtin_type(bool);
         @case(Flag.OverloadSet.ident()) => builtin_type(OverloadSet);
-        @case(Flag.Scope.ident())       => builtin_type(Scope);
+        @case(Flag.ScopeId.ident())     => builtin_type(ScopeId);
         @case(Flag.FuncId.ident())      => builtin_type(FuncId);
         @case(Flag.LabelId.ident())     => builtin_type(LabelId);
         @case(Flag.Symbol.ident())      => builtin_type(Symbol);

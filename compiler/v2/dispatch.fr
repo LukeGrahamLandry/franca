@@ -43,6 +43,63 @@ fn init(a: Alloc) CompilerDispatch = {
     )
 }
 
+poll_in_place :: fn(self: *SelfHosted, $T: Type, $f: @Fn() Maybe(T)) Res(T) #generic = {
+    loop {|
+        value := f();
+        @match(value) {
+            fn Ok(it)  => {
+                return(Ok = it);
+            }
+            fn Err(it) => {
+                return(Err = it);
+            }
+            fn Suspend(new_dep) => {
+                pending: List(*Task) = list(self.get_alloc());
+                new_task := self.get_alloc().alloc(Task, 1);
+                new_task := new_task.ptr;
+                new_task[] = (action = new_dep[], waiting_for = list(self.get_alloc()));
+                pending&.push(new_task);
+                self.dispatch.active_tasks&.push(new_task);
+                while => !pending.is_empty() {|
+                    mark := __temp_alloc.mark();
+                    task := pending.last().unwrap()[];
+                    task.waiting_for&.ordered_retain() { t | 
+                        !t.done
+                    };
+                    if task.waiting_for.is_empty() {|
+                        result := self.exec_task(task);
+                        @match(result) {  
+                            fn Err(e) => {
+                                return(Err = e);
+                            }
+                            fn Ok() => {
+                                if task.waiting_for.is_empty() {| // HACK: it might have added new callees
+                                    task.done = true;
+                                    pending&.pop();
+                                };
+                            };
+                            fn Suspend(new_dep) => {
+                                new_task := self.get_alloc().alloc(Task, 1);
+                                new_task := new_task.ptr;
+                                new_task[] = (action = new_dep[], waiting_for = list(self.get_alloc()));
+                                
+                                task.waiting_for&.push(new_task);
+                                pending&.push(new_task);
+                            };
+                        };
+                    } else {|
+                        for task.waiting_for { dep | 
+                            pending&.push(dep);
+                        };
+                    };
+                    __temp_alloc.reset_retaining_capacity(mark);
+                };
+            };
+        };
+    };
+    Res(T).unreachable_hack()
+};
+
 fn poll_tasks(self: *SelfHosted) Result(void, *ParseErr) = {
     pending: List(*Task) = list(self.get_alloc());
     made_progress := true;
@@ -98,7 +155,7 @@ fn poll_tasks(self: *SelfHosted) Result(void, *ParseErr) = {
 }
 
 ::tagged(Action);
-fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) #once = {
+fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
     if task.waiting_for&.last() { dep |
         @debug_assert(!task.done, "task done but still has dependencies");
         return(Suspend = dep.action&);
