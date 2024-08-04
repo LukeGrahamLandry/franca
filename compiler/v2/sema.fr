@@ -630,7 +630,7 @@ fn construct_struct_literal(self: *SelfHosted, requested: ResultType, expr: *Fat
             };
             @err("No field % exists in %", self.pool.get(name), self.log_type(requested))
         }
-        @default => @err("found struct literal but expected %", self.log_type(requested));
+        @default => @err("found struct literal but expected % = %", requested, self.log_type(requested));
     }
 }
 
@@ -1589,17 +1589,21 @@ fn handle_declare_constant(self: *SelfHosted, name: Var, ty: *LazyType, value: *
     };
     
     // TODO: HACK that doesn't respect scoping!
-    rec: ?Type = if(!is_rec, => .None) {|
+    //       eventually it should just notice when a type tries to reference itself and switch to this path without the explicit @rec. 
+    if is_rec {|
         invocation := value.expr.PrefixMacro&;
         if invocation.arg.is_raw_unit() {|
             invocation.arg[] = invocation.target[];
         };
         real_value_box := invocation.arg;
-        hole := self.intern_type(Placeholder = (rec = (Some = real_value_box)));  // TODO: if we come around again need to remember to look at this expression somehow
+        hole := self.intern_type(.Placeholder);
+        @println("% = @rec %", name&.log(self.pool), hole);
         val  := self.to_values(Type, hole);
         value.set(val, Type);
-        value = real_value_box;
-        (Some = hole)
+        // This can't just fallthrough and call update_placeholder at the end of this function like the old version did,
+        // because we might suspend while compiling and then next time around we'll forget this value is special. 
+        // (we'll just think its already done because we'll see the placeholder).
+        return(Suspend = self.wait_for(FinishRecType = (hole = hole, name = name, value = real_value_box)))
     };
     
     @check(self.compile_expr(value, want)) return;
@@ -1612,16 +1616,17 @@ fn handle_declare_constant(self: *SelfHosted, name: Var, ty: *LazyType, value: *
         value.set(val, value.ty);
     };
     
-    if rec { placeholder |
-        assert(value.expr&.is(.Value), "wtf");
-        val: Values = value.expr.Value.bytes;
-        result_type := Type.assume_cast(val&)[];
-        assert(result_type != placeholder, "ICE: @rec resolved to itself");
-        self.update_placeholder(placeholder, result_type, name.name);
-        @println("update_placeholder @rec % -> %", placeholder, result_type);
-    };
     self.finish_layout_deep(value.ty).unwrap();
     
+    .Ok
+}
+
+fn handle_finish_rec_type(self: *SelfHosted, hole: Type, name: Var, value: *FatExpr) Maybe(void) = {
+    value := @check(self.immediate_eval_expr(value, Type)) return; // :get_or_create_type
+    result_type := Type.assume_cast(value&)[];
+    assert(result_type != hole, "ICE: @rec resolved to itself");
+    self.update_placeholder(hole, result_type, name.name);
+    @println("update_placeholder @rec % -> %", hole, result_type);
     .Ok
 }
 
