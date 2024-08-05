@@ -257,7 +257,8 @@ fn new_sema_fill_export_ffi(out: *List(u8)) void = {
     @fmt(out, "fn Fn(Arg: Type, Ret: Type) Type #fold #ct #comptime_addr(%);\n", fn_type);
     fn_type: rawptr : fn(c: CompilerRs, arg: Type, ret: Type) Type = {
         arity := 1;
-        if c[][].tuple_types(arg) { types |
+        types := c[][].tuple_types(arg);
+        if types { types |
             arity = types.len;
         };
         c[][].intern_type(Fn = (arg = arg, ret = ret, arity = arity.trunc()))
@@ -268,12 +269,127 @@ fn new_sema_fill_export_ffi(out: *List(u8)) void = {
         c[][].intern_type(Int = (bit_count = bit_count, signed = signed))
     };
     
-    
     @fmt(out, "fn builtin(t: FatExpr) FatExpr #macro #ct #comptime_addr(%);\n", builtin);
     builtin: rawptr : fn(c: CompilerRs, arg: FatExpr) FatExpr = {
         self := c[][];
         res := self.builtin_macro(arg);
         self.unwrap_report_error(FatExpr, res)
+    };
+    
+    @fmt(out, "fn unquote_macro_apply_placeholders(t: Slice(FatExpr)) FatExpr #ct #comptime_addr(%);\n", unquote_placeholders);
+    unquote_placeholders: rawptr : fn(c: CompilerRs, args: []FatExpr) FatExpr = {
+        self := c[][];
+        args := args.assume_owned(temp());
+        template := args&.pop().expect("ICE: unquote_placeholders always needs template arg");
+        walk: Unquote = (compiler = self, placeholders = args);
+        res := walk&.walk_expr(template&);
+        self.unwrap_report_error(void, res);
+        each walk.placeholders { e | 
+            if !e.expr&.is(.Poison) {|
+                panic("ice: unquote_placeholders didn't use all arguments");
+            };
+        };
+        self.renumber_expr(template&, .None);
+        template
+    };
+    
+    @fmt(out, "fn Fn(Arg: FatExpr, Ret: FatExpr) FatExpr #macro #ct #comptime_addr(%);\n", fn_type_macro_erase);
+    @fmt(out, "fn FnPtr(Arg: FatExpr, Ret: FatExpr) FatExpr #macro #ct #comptime_addr(%);\n", fn_ptr_type_macro_erase);
+    @fmt(out, "fn Fn(Ret: FatExpr) FatExpr #macro #ct #comptime_addr(%);\n", fn_type_macro_single);
+    @fmt(out, "fn FnPtr(Ret: FatExpr) FatExpr #macro #ct #comptime_addr(%);\n", fn_ptr_type_macro_single);
+   
+    make_fn_type :: fn(c: CompilerRs, arg: FatExpr, ret: FatExpr) FnType = {
+        self := c[][];
+        inner :: fn() Maybe(FnType) => {
+            return :: local_return;
+            types: []Type = @match(arg.expr&) {
+                fn StructLiteralP(parts) => {
+                    // TODO: ugh
+                    x := parts.bindings.assume_owned(self.get_alloc());
+                    x&.if_empty_add_unit();
+                    parts.bindings = x.rs();
+                    
+                    @check(self.infer_type(parts)) return
+                }
+                fn Tuple(parts) => {
+                    types: List(Type) = list(temp());
+                    each parts { e | 
+                        value := @check(self.immediate_eval_expr(e, Type)) return; // :get_or_create_type
+                        types&.push(Type.assume_cast(value&)[]);
+                    };
+                    types.items()
+                }
+                @default => {
+                    value := @check(self.immediate_eval_expr(arg&, Type)) return; // :get_or_create_type
+                    ty := Type.assume_cast(value&)[];
+                    lst: List(Type) = list(temp());
+                    lst&.push(ty);
+                    lst.items()
+                };
+            };
+            arg_ty := self.tuple_of(types);
+            value := @check(self.immediate_eval_expr(ret&, Type)) return; // :get_or_create_type
+            ret_ty := Type.assume_cast(value&)[];
+            (Ok = (arg = arg_ty, ret = ret_ty, arity = types.len.trunc()))
+        };
+        res := self.poll_in_place(FnType, => inner());
+        self.unwrap_report_error(FnType, res)
+    };
+    
+    fn_type_macro_erase: rawptr : fn_type_macro;
+    fn_type_macro :: fn(c: CompilerRs, arg: FatExpr, ret: FatExpr) FatExpr = {
+        f_ty := make_fn_type(c, arg, ret);
+        ty := c[][].intern_type(Fn = f_ty);
+        value := c[][].to_values(Type, ty); 
+        arg&.set(value, Type); // :get_or_create_type
+        arg
+    };
+    
+    fn_ptr_type_macro_erase: rawptr : fn_ptr_type_macro;
+    fn_ptr_type_macro :: fn(c: CompilerRs, arg: FatExpr, ret: FatExpr) FatExpr = {
+        f_ty := make_fn_type(c, arg, ret);
+        ty := c[][].intern_type(FnPtr = (ty = f_ty, cc = .CCallReg));
+        value := c[][].to_values(Type, ty); 
+        arg&.set(value, Type); // :get_or_create_type
+        arg
+    };
+    
+    fn_ptr_type_macro_single: rawptr : fn(c: CompilerRs, ret: FatExpr) FatExpr = 
+        c.fn_ptr_type_macro(empty_struct_literal(ret.loc), ret);
+    
+    fn_type_macro_single: rawptr : fn(c: CompilerRs, ret: FatExpr) FatExpr = 
+        c.fn_type_macro(empty_struct_literal(ret.loc), ret);
+    
+    empty_struct_literal :: fn(loc: Span) FatExpr = {
+        (expr = (StructLiteralP = (bindings = empty(), loc = loc)), loc = loc, ty = UnknownType, done = false)
+    };
+    @fmt(out, "fn literal_ast(ty: Type, ptr: rawptr) FatExpr #ct #comptime_addr(%);\n", literal_ast);
+    literal_ast: rawptr : fn(c: CompilerRs, ty: Type, ptr: *u8) FatExpr = {
+        bytes: i64 = c[][].get_info(ty)[].stride_bytes.zext();
+        value := slice(ptr, bytes);
+        value := c[][].from_bytes(value);
+        // TODO: zero_padding?
+        // TODO: caller should pass in loc?
+        synthetic_ty((Value = (bytes = value, coerced = false)), c.last_loc, ty)
+    };
+    
+    @fmt(out, "fn type(e: FatExpr) FatExpr #macro #ct #comptime_addr(%);\n", type_macro);
+    type_macro: rawptr : fn(c: CompilerRs, e: FatExpr) FatExpr = {
+        // TODO: miscompilation without this!! it just returns all zeros. losing the return address 
+        //       maybe its the use of local_return this way, i dont normally do this -- Aug 5 :FUCKED
+        fn what_the_fuck(self: *SelfHosted, e: *FatExpr) Type = {
+            ty := self.poll_in_place(Type) {()Maybe(Type)|
+                @check(self.compile_expr(e, .None)) local_return;
+                (Ok = e.ty)
+            };
+            self.unwrap_report_error(Type, ty)
+        };
+        
+        ty := c[][].what_the_fuck(e&);
+        value := c[][].to_values(Type, ty); 
+        e&.set(value, Type); // :get_or_create_type
+        @println("we know the type! %", e&.log(c[][].pool));
+        e
     };
 }
 

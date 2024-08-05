@@ -21,7 +21,7 @@ TaskId :: @struct(id: i64);
 ExprAttempt :: @struct(expr: *FatExpr, requested: ResultType);
 VarAttempt :: @struct(name: Var, requested: ResultType);
 Action :: @tagged(
-    CompileExpr: *List(ExprAttempt),
+    //CompileExpr: *List(ExprAttempt),
     CompileBody: FuncId,  // After this, we can generate bytecode.
     Jit: FuncId, // After this, it's safe to call a function pointer. 
     EvalConstant: VarAttempt,  // find_const. 
@@ -44,6 +44,7 @@ fn init(a: Alloc) CompilerDispatch = {
 }
 
 poll_in_place :: fn(self: *SelfHosted, $T: Type, $f: @Fn() Maybe(T)) Res(T) #generic = {
+    pending: List(*Task) = list(self.get_alloc());
     loop {|
         value := f();
         @match(value) {
@@ -54,51 +55,56 @@ poll_in_place :: fn(self: *SelfHosted, $T: Type, $f: @Fn() Maybe(T)) Res(T) #gen
                 return(Err = it);
             }
             fn Suspend(new_dep) => {
-                pending: List(*Task) = list(self.get_alloc());
                 new_task := self.get_alloc().alloc(Task, 1);
                 new_task := new_task.ptr;
                 new_task[] = (action = new_dep[], waiting_for = list(self.get_alloc()));
                 pending&.push(new_task);
                 self.dispatch.active_tasks&.push(new_task);
-                while => !pending.is_empty() {|
-                    mark := __temp_alloc.mark();
-                    task := pending.last().unwrap()[];
-                    task.waiting_for&.ordered_retain() { t | 
-                        !t.done
-                    };
-                    if task.waiting_for.is_empty() {|
-                        result := self.exec_task(task);
-                        @match(result) {  
-                            fn Err(e) => {
-                                return(Err = e);
-                            }
-                            fn Ok() => {
-                                if task.waiting_for.is_empty() {| // HACK: it might have added new callees
-                                    task.done = true;
-                                    pending&.pop();
-                                };
-                            };
-                            fn Suspend(new_dep) => {
-                                new_task := self.get_alloc().alloc(Task, 1);
-                                new_task := new_task.ptr;
-                                new_task[] = (action = new_dep[], waiting_for = list(self.get_alloc()));
-                                
-                                task.waiting_for&.push(new_task);
-                                pending&.push(new_task);
-                            };
-                        };
-                    } else {|
-                        for task.waiting_for { dep | 
-                            pending&.push(dep);
-                        };
-                    };
-                    __temp_alloc.reset_retaining_capacity(mark);
-                };
+                self.poll_pending_subset(pending&);
             };
         };
     };
     Res(T).unreachable_hack()
 };
+
+// TODO: use this below
+fn poll_pending_subset(self: *SelfHosted, pending: *List(*Task)) Res(void) = {
+    while => !pending.is_empty() {|
+        mark := __temp_alloc.mark();
+        task := pending.last().unwrap()[];
+        task.waiting_for&.ordered_retain() { t | 
+            !t.done
+        };
+        if task.waiting_for.is_empty() {|
+            result := self.exec_task(task);
+            @match(result) {  
+                fn Err(e) => {
+                    return(Err = e);
+                }
+                fn Ok() => {
+                    if task.waiting_for.is_empty() {| // HACK: it might have added new callees
+                        task.done = true;
+                        pending.pop();
+                    };
+                };
+                fn Suspend(new_dep) => {
+                    new_task := self.get_alloc().alloc(Task, 1);
+                    new_task := new_task.ptr;
+                    new_task[] = (action = new_dep[], waiting_for = list(self.get_alloc()));
+                    
+                    task.waiting_for&.push(new_task);
+                    pending.push(new_task);
+                };
+            };
+        } else {|
+            for task.waiting_for { dep | 
+                pending.push(dep);
+            };
+        };
+        __temp_alloc.reset_retaining_capacity(mark);
+    };
+    .Ok
+}
 
 fn poll_tasks(self: *SelfHosted) Result(void, *ParseErr) = {
     pending: List(*Task) = list(self.get_alloc());
@@ -166,16 +172,16 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
     self.dispatch.enclosing_function = .None;
     
     @match(task.action) {
-        fn CompileExpr(stack) => {
-            @println("[TRY TASK] %", task.action&.tag());
-            self.dispatch.active_stack = stack;
-            while => !stack.is_empty() {|
-                last := stack.pop().unwrap();
-                l := stack.len;
-                @check(self.compile_expr(last.expr, last.requested)) return;
-                @debug_assert_eq(l, stack.len, "wip expr stack changed");
-            };
-        }
+        //fn CompileExpr(stack) => {
+        //    @println("[TRY TASK] %", task.action&.tag());
+        //    self.dispatch.active_stack = stack;
+        //    while => !stack.is_empty() {|
+        //        last := stack.pop().unwrap();
+        //        l := stack.len;
+        //        @check(self.compile_expr(last.expr, last.requested)) return;
+        //        @debug_assert_eq(l, stack.len, "wip expr stack changed");
+        //    };
+        //}
         fn EvalConstant(v) => {
             @println("[TRY TASK] %: %", task.action&.tag(), self.pool.get(v.name.name));
             self.new_expression_stack();
@@ -248,7 +254,7 @@ fn would_block(self: *SelfHosted, action: Action) bool = {
             var  := var.expect("var should always be known");
             !var._0&.is(.Value)
         };
-        fn CompileExpr(stack) => !stack.last().unwrap().is_done;
+        //fn CompileExpr(stack) => !stack.last().unwrap().is_done;
         fn TypeArg(fid)       => self.get_function(fid)[].finished_arg.is_none();
         fn TypeRet(fid)       => self.get_function(fid)[].finished_ret.is_none();
         fn CompileBody(fid)   => !self.get_function(fid).get_flag(.EnsuredCompiled);
@@ -291,6 +297,7 @@ fn Maybe($T: Type) Type = {
 }
 
 fn wait_for(s: *SelfHosted, t: Action) *Action = {
+    @println("[YIELD] %", t&.tag());
     s.dispatch.yield_count += 1;
     mem := s.get_alloc().alloc(Action, 1);
     mem.ptr[] = t;

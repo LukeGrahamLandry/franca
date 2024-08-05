@@ -1564,7 +1564,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let ty = unwrap2!(self.program.pool.env.fat_expr_type, "used quoted ast during bootstrapping");
                 let value = to_values(self.program, arg)?;
 
-                expr.set(value.clone(), ty);
+                expr.set(value, ty);
                 if placeholders.is_empty() {
                     ty
                 } else {

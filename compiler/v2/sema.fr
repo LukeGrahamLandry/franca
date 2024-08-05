@@ -437,12 +437,14 @@ fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = 
 
 ::tagged(ResultType);
 fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(void) = {
-    self.last_loc = expr.loc;
     if expr.done {|
         assert(expr.ty != UnknownType, "done but unknown type");
         return(.Ok);
     };
+    old_loc := self.last_loc;
+    self.last_loc = expr.loc;
     self.dispatch.active_stack.push(expr = expr, requested = requested);
+    @println("compile_expr %", expr.log(self.pool));
     
     @match(expr.expr&) {
         fn Poison(placeholder) => {
@@ -489,6 +491,7 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
         }
         fn PrefixMacro() => {
             @check(self.compile_prefix_macro(expr)) return;
+            @check(self.compile_expr(expr, requested)) return;
         }
         fn GetVar(var) => return(self.compile_get_var(expr, requested));
         fn GetNamed(n) => return(@err("Undeclared Identifier: %", self.pool.get(n[])));
@@ -565,10 +568,47 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
             };
             expr.done = true;
         }
+        fn Quote(arg) => {
+            unquote_placeholders := @unwrap(self.env.unquote_placeholders, "quote during boot") return;
+            
+            // note: do this before fucking with the expr because it will yield the first time!
+            @check(self.infer_arguments(unquote_placeholders)) return;
+            @check(self.infer_return(unquote_placeholders)) return;
+            if self.aarch64&.get_fn(unquote_placeholders).is_none() {|
+                return(Suspend = self.wait_for(Jit = unquote_placeholders));
+            };
+                
+            walk: Unquote = (compiler = self, placeholders = list(self.get_alloc()));
+            @try(walk&.walk_expr(arg[])) return;
+            expr_ty := @unwrap(self.env.fat_expr_type, "used quoted ast during bootstrapping") return;
+            value := self.to_values(FatExpr, arg[][]);
+            expr.set(value, expr_ty);
+            @println("quote with % placeholders", walk.placeholders.len);
+            
+            if !walk.placeholders.is_empty() {|
+                walk.placeholders&.push(expr[]);
+                arg: FatExpr = (expr = (Tuple = walk.placeholders.rs()), loc = expr.loc, ty = UnknownType, done = false);
+                arg := self.box(arg);
+                arg: FatExpr = (expr = (Slice = arg), loc = expr.loc, ty = UnknownType, done = false);
+                f_value := self.to_values(FuncId, unquote_placeholders); // :get_or_create_type
+                f_ty := @unwrap(self.func_type(unquote_placeholders), "ice: unquote_placeholders not typechecked") return;
+                f: FatExpr = synthetic_ty((Value = (bytes = f_value, coerced = false)), expr.loc, f_ty);
+                expr[] = synthetic_ty((Call = (f = self.box(f), arg = self.box(arg))), expr.loc, expr_ty);
+                @check(self.compile_expr(expr, requested)) return;
+            };
+        }
+        fn Slice(arg) => {
+            @check(self.compile_expr(arg[], .None)) return;
+            types := self.arg_types(arg.ty);
+            // TODO: typecheck that all are the same!
+            expr.ty = @check(self.create_slice_type(types[0])) return;
+            expr.done = arg.done;
+        }
         @default => @panic("TODO: unhandled node type %: %", expr.expr&.tag(), expr.log(self.pool));
     };
+    self.last_loc = old_loc;
     self.dispatch.active_stack.pop();
-    @debug_assert(!expr.ty.is_unknown(), "Unknown type for %", expr.log(self.pool));
+    @debug_assert(!expr.ty.is_unknown(), "[compile_expr] Unknown type for %", expr.log(self.pool));
     .Ok
 }
 
@@ -736,9 +776,9 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
     @println("compile direct call %", fid);
     func := self.get_function(fid);
     
-    assert(!func.get_flag(.MayHaveAquiredCaptures) && !func.get_flag(.UnsafeNoopCast)
-        //&& !func.get_flag(.TryConstantFold)
-    , "Not Yet Implemented: unhandled complex call");
+    assert(!func.get_flag(.MayHaveAquiredCaptures), "Not Yet Implemented: MayHaveAquiredCaptures");
+    assert(!func.get_flag(.UnsafeNoopCast), "Not Yet Implemented: UnsafeNoopCast");
+    // TODO: TryConstantFold
     
     arg_ty := UnknownType;
     
@@ -1174,20 +1214,25 @@ fn infer_type(self: *SelfHosted, b: *LazyType) Maybe(?Type) = {
     }
 }
 
-fn infer_arguments(self: *SelfHosted, fid: FuncId) Maybe(Type) = {
-    func := self.get_function(fid);
-    if(func.finished_arg, fn(ty) => return(Ok = ty));
-    @check(self.ensure_resolved_sign(fid)) return;
-    
-    types: List(Type) = list(func.arg.bindings.len, temp());
-    each func.arg.bindings { b |
+fn infer_type(self: *SelfHosted, bindings: *Pattern) Maybe([]Type) = {
+    types: List(Type) = list(bindings.bindings.len, temp());
+    each bindings.bindings { b |
         ty := or @check(self.infer_type(b.ty&)) return {|
             // TODO: really thats not what you want for closures tho... 
             return(@err("function arguments must have type annotation (cannot be inferred)"))
         };
         types&.push(ty);
     };
-    ty := self.tuple_of(types.items());
+    (Ok = types.items())
+}
+
+fn infer_arguments(self: *SelfHosted, fid: FuncId) Maybe(Type) = {
+    func := self.get_function(fid);
+    if(func.finished_arg, fn(ty) => return(Ok = ty));
+    @check(self.ensure_resolved_sign(fid)) return;
+    
+    types := @check(self.infer_type(func.arg&)) return;
+    ty := self.tuple_of(types);
     func.finished_arg = (Some = ty);
     (Ok = ty)
 }
@@ -1273,8 +1318,6 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
         };
         
         if opt.args.len != want_arity {|
-                    //@println("% vs %", self.log_type(have), self.log_type(want));
-                    @println("% vs %", opt.args.len, want_arity);
             continue();
         };
         
@@ -1468,6 +1511,7 @@ fn update_function_metadata(self: *SelfHosted, func: *Func) void = {
     each func.annotations { tag | 
         @switch(tag.name) {
             @case(Flag.fold.ident())     => func.set_flag(.TryConstantFold);
+            @case(Flag.macro.ident())     => func.set_flag(.Macro);
             @case(Flag.noinline.ident()) => func.set_flag(.NoInline);
             // TODO: generic+unsafe_noop_cast are done in scope for old sema but i want to move them here. -- Jul 30
             @case(Flag.generic.ident())  => func.set_flag(.Generic);
@@ -1648,6 +1692,7 @@ fn save_const_values(self: *SelfHosted, name: Var, value: Values, final_ty: Type
 }
 
 fn save_const(self: *SelfHosted, name: Var, val_expr: Expr, final_ty: Type, loc: Span) Maybe(void) #once = {
+    @debug_assert(name.kind == .Const, "tried to save non-constant");
     // TODO: do i have to check if someone is already working on this constant? -- Jul 30
     val := self.scopes.get_constant(name);
     val := or val {|
@@ -1697,6 +1742,13 @@ fn coerce_const_expr(self: *SelfHosted, expr: *FatExpr, req: ResultType) Maybe(v
                 };
             };
             
+            if found == FuncId {|
+                @if_let(self.get_type(want)) fn Fn(f_ty) => {
+                    // TODO: typecheck
+                    return(.Ok);
+                };
+            };
+            
             //expr.expr.Value.coerced = true;
             //expr.ty = req;
             return(@err("TODO: coerce constant found % but want % (might be an actual type error)", self.log_type(found), self.log_type(want)));
@@ -1719,6 +1771,7 @@ fn resolve_by_type(self: *SelfHosted, os: OverloadSet, f_ty: FnType) Maybe(FuncI
 
 ::?FnType;
 fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Values) = {
+    self.last_loc = expr.loc;
     @println("imm_eval %", expr.log(self.pool));
     @debug_assert(!ret_ty.is_unknown(), "immediate_eval_expr unknown");
     old_func := self.dispatch.enclosing_function;
@@ -1873,7 +1926,15 @@ fn check_quick_eval(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) ?Values = {
 }
 
 fn create_slice_type(self: *SelfHosted, inner: Type) Maybe(Type) = {
-    panic("TODO: create_slice_type")
+    @println("Create slice %", inner);
+    arg_value := self.to_values(Type, inner);  // :get_or_create_type
+    f_value := self.to_values(FuncId, @unwrap(self.env.make_slice_t, "slice type not ready!") return);  // :get_or_create_type
+    arg: FatExpr = (expr = (Value = (bytes = arg_value, coerced = false)), loc = Span.zeroed(), ty = Type, done = true);
+    f: FatExpr   = (expr = (Value = (bytes = f_value, coerced = false)), loc = Span.zeroed(), ty = FuncId, done = true);
+    s_ty := synthetic_ty((Call = (f = self.box(f), arg = self.box(arg))), Span.zeroed(), Type);
+    value := self.poll_in_place(Values, => self.immediate_eval_expr(s_ty&, Type));
+    value := @try(value) return;  // TODO: miscompilation if you inline this ^ :fucked
+    (Ok = Type.assume_cast(value&)[])
 }
 
 ///////////////////////
@@ -1896,6 +1957,9 @@ fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
     fat_expr_type := or self.env.fat_expr_type {|
         return(self.early_builtin_prefix_macro(expr))
     };
+    pair := self.tuple_of(@slice(fat_expr_type, fat_expr_type));
+    
+    self.finish_layout_deep(fat_expr_type).unwrap();
     
     @println("call user macro %", invocation.handler.log(self.pool));
     single := invocation.target.is_raw_unit();
@@ -1910,7 +1974,7 @@ fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
             (arg = fat_expr_type, ret = fat_expr_type, arity = 1)
         } else {|
             println("two");
-            pair := self.tuple_of(@slice(fat_expr_type, fat_expr_type));
+            self.finish_layout_deep(pair).unwrap();
             (arg = pair, ret = fat_expr_type, arity = 2)
         };
         fid := @check(self.resolve_by_type(os, f_ty)) return;
@@ -1931,15 +1995,16 @@ fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
     
     hack := self&;
     func := self.get_function(fid);
-    // TODO: assert!(self.program[f].has_tag(Flag::Macro));
+    needs_ct := func.cc.unwrap() == .CCallRegCt;
+    self.last_loc = expr.loc;
+    @err_assert(func.get_flag(.Macro), "Tried to invoke non-macro % (missing #macro or missing overload)", self.pool.get(func.name)) return;
     f_ty := func.finished_ty().expect("known type once compiled");
+    assert(f_ty.ret == fat_expr_type, "tried to call macro with bad ret type. missing overload? \nresolve_in_overloadset assumes someone later will typecheck so giving a garabge match is fine");
+    assert(f_ty.arg.eq(fat_expr_type).or(f_ty.arg == pair), "tried to call macro with bad arg type. missing overload? \nresolve_in_overloadset assumes someone later will typecheck so giving a garabge match is fine");
     self.aarch64&.bump_dirty();
-    result := hack&.call_dynamic(fn_ptr.int_from_rawptr(), f_ty&, args&, false);
-    if result&.is(.Err) {|
-        return(Err = self.box(result.Err));
-    };
-    // TODO: fatexpr layout
-    expr[] = FatExpr.assume_cast(result.Ok&)[];
+    result := @try(hack&.call_dynamic_inner(fn_ptr.int_from_rawptr(), f_ty&, args&, needs_ct)) return;
+    expr[] = FatExpr.assume_cast(result&)[];
+    //@println("macro output: %", expr.log(self.pool));
     .Ok
 }
 
@@ -2144,3 +2209,41 @@ fn tagged_macro(self: *SelfHosted, cases_expr: *FatExpr) Maybe(FatExpr) = {
     cases_expr.set(value, Type);
     (Ok = cases_expr[])
 }
+
+// TODO: track if we're in unquote mode or placeholder mode.
+Unquote :: @struct(compiler: *SelfHosted, placeholders: List(FatExpr));
+
+// :UnquotePlaceholders
+:: WalkAst(Unquote, *ParseErr);
+
+fn handle_expr(self: *Unquote, expr: *FatExpr) Result(DoMore, *ParseErr) #once = {
+    @match(expr.expr) {
+        fn Unquote(arg) => {
+            //expr_ty := self.compiler.env.fat_expr_type.expect("used unquote ast while bootstrapping");
+            // Note: take <arg> but replace the whole <expr>
+            self.placeholders&.push(arg[]);
+            expr[] = (expr = (Placeholder = self.placeholders.len - 1), loc = expr.loc, ty = UnknownType, done = false);
+        }
+        fn Placeholder(idx) => {
+            @err_assert(idx < self.placeholders.len, "ICE: invalid unquote placeholder index %", idx) return;
+            value := self.placeholders.index(idx); // TODO: make it more obvious that its only one use and the slot is empty.
+            @err_assert(!value.expr&.is(.Poison), "ICE: missing placeholder for unquote") return;
+            expr[] = value[];
+            value.expr = (Poison = .PlaceholderUsed);
+            value.done = false;
+        }
+        fn Quote() => {
+            // TODO: add a simpler test case than the derive thing (which is what discovered this problem).
+            // Don't go into nested !quote. This allows having macros expand to other macro calls without stomping eachother.
+            // TODO: feels like you might still end up with two going on at once so need to have a monotonic id number for each expansion stored in the !placeholder.
+            //       but so far this is good enough.
+            return(Ok = .Break);
+        }
+        @default => ();
+    };
+    (Ok = .Continue)
+}
+fn handle_stmt(self: *Unquote, stmt: *FatStmt) Result(DoMore, *ParseErr) #once = (Ok = .Continue);
+fn handle_func(self: *Unquote, func: *Func)    Result(DoMore, *ParseErr) #once = (Ok = .Continue);
+fn handle_type(self: *Unquote, ty: *LazyType)  Result(DoMore, *ParseErr) #once = (Ok = .Continue);
+fn handle_pattern(self: *Unquote, p: *Pattern) Result(DoMore, *ParseErr) #once = (Ok = .Continue);
