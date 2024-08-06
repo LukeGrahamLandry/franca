@@ -458,17 +458,23 @@ fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = 
                     };
                     @case(Flag.intrinsic.ident()) => {
                         good = true;
-                        panic("TODO: hoist intrinsic into body right now?");
+                        value := @unwrap(tag.args&.as_ref(), "#redirect requires arg") return;
+                        intrinsic_ty := @unwrap(self.env.intrinsic_type, "used #intrinsic during boot") return;
+                        op := @check(self.immediate_eval_expr(value, intrinsic_ty)) return;
+                        op := Intrinsic.assume_cast(op&)[];
+                        func.body = (Intrinsic = op);
                     };
                     @case(Flag.redirect.ident()) => {
+                        good = true;
                         value := @unwrap(tag.args&.as_ref(), "#redirect requires arg") return;
                         RedirectType :: @struct(arg: Type, ret: Type, os: OverloadSet);
                         payload := self.tuple_of(@slice(Type, Type, OverloadSet));
                         payload := @check(self.immediate_eval_expr(value, payload)) return;
                         payload := RedirectType.assume_cast(payload&)[];
-                        good = true;
-                        panic("TODO: redirect?");
-                        //func.body = (Redirect = target)
+                        args := self.arg_types(payload.arg);
+                        f_ty: FnType = (arg = payload.arg, ret = payload.ret, arity = args.len.trunc());
+                        target := @check(self.resolve_by_type(payload.os, f_ty)) return;
+                        func.body = (Redirect = target)
                         
                     };
                     @default => ();
@@ -572,7 +578,7 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
             fid_value := self.to_values(FuncId, fid);
             expr.set(fid_value, FuncId); // :get_or_create_type
             func := self.get_function(fid);
-            self.update_function_metadata(func);
+            @try(self.update_function_metadata(func, .None)) return;
             if func.ret&.is(.Infer) {|
                 // TODO: this change is sketch if we're just exploring to resolve an overload  -- Aug 5
                 @match(requested) {
@@ -629,6 +635,7 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
             expr.done = true;
         }
         fn Quote(arg) => {
+            println("START QUOTE");
             unquote_placeholders := @unwrap(self.env.unquote_placeholders, "quote during boot") return;
             
             // note: do this before fucking with the expr because it will yield the first time!
@@ -644,7 +651,7 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
             value := self.to_values(FatExpr, arg[][]);
             expr.set(value, expr_ty);
             @println("quote with % placeholders", walk.placeholders.len);
-            
+                
             if !walk.placeholders.is_empty() {|
                 walk.placeholders&.push(expr[]);
                 arg: FatExpr = (expr = (Tuple = walk.placeholders.rs()), loc = expr.loc, ty = UnknownType, done = false);
@@ -699,9 +706,10 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
             @check(self.compile_expr(f.if_true, requested)) return;
             true_ty := f.if_true.ty;
             @check(self.compile_expr(f.if_false, requested)) return;  // TODO: pass hint from other branch
-            @check(self.can_assign(true_ty, f.if_false.ty)) return;
             if true_ty.is_never() {|
                 true_ty = f.if_false.ty;
+            } else {|
+                @check(self.can_assign(true_ty, f.if_false.ty)) return;
             };
             expr.ty = true_ty;
         }
@@ -1476,6 +1484,8 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
     // TODO: but what if there are more overloads coming later? 
     if interesting.len == 1 {|
         @println("chose overload %", interesting[0].func);
+        func := self.get_function(interesting[0].func);
+        self.codemap.show_error_line(func.loc);
         return(Ok = interesting[0].func);
     };
     
@@ -1527,6 +1537,8 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
     };
     if still_interesting.len == 1 {|
         @println("chose overload %", still_interesting[0].func);
+        func := self.get_function(interesting[0].func);
+        self.codemap.show_error_line(func.loc);
         return(Ok = still_interesting[0].func);
     };
     
@@ -1643,7 +1655,7 @@ fn hoist_constants(self: *SelfHosted, body: []FatStmt) Maybe(void) #once = {
                     };
                 };
                 
-                self.update_function_metadata(func);
+                @try(self.update_function_metadata(func, overload_out)) return;
             }
             fn DeclVar(f) => if f.name.kind == .Const {|
                 self.scopes.put_constant(f.name, f.value, f.ty);
@@ -1655,7 +1667,7 @@ fn hoist_constants(self: *SelfHosted, body: []FatStmt) Maybe(void) #once = {
     .Ok
 }
 
-fn update_function_metadata(self: *SelfHosted, func: *Func) void = {
+fn update_function_metadata(self: *SelfHosted, func: *Func, os: ?OverloadSet) Res(void) = {
     any_const_args :: fn(self: *Func) bool = {
         each self.arg.bindings { b |
             if(b.kind == .Const, => return(true));
@@ -1675,16 +1687,13 @@ fn update_function_metadata(self: *SelfHosted, func: *Func) void = {
             @case(Flag.generic.ident())  => func.set_flag(.Generic);
             @case(Flag.unsafe_noop_cast.ident()) => func.set_flag(.UnsafeNoopCast);
             @case(Flag.redirect.ident()) => {
-                panic("TODO: save overload set");
-                // TODO: pass in ?overloadsetid and do this stuff -- Jul 30
-                // // dman it bnoarow chekcser
-                //let os = self.as_literal(out.1.unwrap(), loc)?;
-                //if let Some(types) = self.program[id].get_tag_mut(Flag::Redirect) {
-                //    let Expr::Tuple(parts) = &mut types.args.as_mut().unwrap().expr else {
-                //        err!("bad",)
-                //    };
-                //    parts.push(os);
-                //}
+                os := @unwrap(os, "#redirect function only makes sense as part of an overload set") return;
+                os := self.to_values(OverloadSet, os);
+                expr := @unwrap(tag.args&.as_ref(), "#redirect requires argument") return;
+                os := synthetic_ty((Value = (bytes = os, coerced = false)), expr.loc, OverloadSet);
+                @err_assert(expr.expr&.is(.Tuple), "#redirect expected tuple") return;
+                parts := expr.expr.Tuple&;
+                parts.push(os, self.get_alloc());
             };
             // TODO: actually im not sure if its better to do this later...
             //       it would be nice to do only one pass over the annotations 
@@ -1695,8 +1704,7 @@ fn update_function_metadata(self: *SelfHosted, func: *Func) void = {
                 //panic("TODO: hoist comptime addr into body right now?");
             };
             @case(Flag.intrinsic.ident()) => {
-                //@err_assert(func.body&.is(.Empty), "#intrinsic conflicts with body expression") return;
-                //panic("TODO: hoist intrinsic into body right now?");
+                @err_assert(func.body&.is(.Empty), "#intrinsic conflicts with body expression") return;
             };
             @case(Flag.inline.ident()) => {
                 // TODO: error on conflicting annotations. 
@@ -1713,6 +1721,7 @@ fn update_function_metadata(self: *SelfHosted, func: *Func) void = {
     if func.cc.is_none() {|
         func.cc = (Some = .CCallReg);
     };
+    .Ok
 }
 
 ::if(Maybe(void));
@@ -2144,6 +2153,11 @@ fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
     
     @println("call user macro %", invocation.handler.log(self.pool));
     single := invocation.target.is_raw_unit();
+    if single {|
+        @println("macro input: %", invocation.arg.log(self.pool));
+    } else {|
+        @println("macro input: (%, %)", invocation.arg.log(self.pool), invocation.target.log(self.pool));
+    };
     
     @check(self.compile_expr(invocation.handler, .None)) return;
     if invocation.handler.ty == OverloadSet {|
@@ -2151,10 +2165,8 @@ fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
         os := OverloadSet.assume_cast(os&)[];
         ::if(FnType); 
         f_ty: FnType = if single {|  // TODO: wrong! what if they actually passed unit?
-            println("one");
             (arg = fat_expr_type, ret = fat_expr_type, arity = 1)
         } else {|
-            println("two");
             self.finish_layout_deep(pair).unwrap();
             (arg = pair, ret = fat_expr_type, arity = 2)
         };
@@ -2406,12 +2418,15 @@ fn handle_expr(self: *Unquote, expr: *FatExpr) Result(DoMore, *ParseErr) #once =
         fn Unquote(arg) => {
             //expr_ty := self.compiler.env.fat_expr_type.expect("used unquote ast while bootstrapping");
             // Note: take <arg> but replace the whole <expr>
+            idx := self.placeholders.len;
+            //@println("Placeholder(%) <- %", idx, arg.log(self.compiler.pool));
             self.placeholders&.push(arg[]);
-            expr[] = (expr = (Placeholder = self.placeholders.len - 1), loc = expr.loc, ty = UnknownType, done = false);
+            expr[] = (expr = (Placeholder = idx), loc = expr.loc, ty = UnknownType, done = false);
         }
         fn Placeholder(idx) => {
             @err_assert(idx < self.placeholders.len, "ICE: invalid unquote placeholder index %", idx) return;
             value := self.placeholders.index(idx); // TODO: make it more obvious that its only one use and the slot is empty.
+            //@println("Placeholder(%) -> %", idx, value.log(self.compiler.pool));
             @err_assert(!value.expr&.is(.Poison), "ICE: missing placeholder for unquote") return;
             expr[] = value[];
             value.expr = (Poison = .PlaceholderUsed);

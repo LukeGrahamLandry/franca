@@ -281,14 +281,21 @@ fn new_sema_fill_export_ffi(out: *List(u8)) void = {
         self := c[][];
         args := args.assume_owned(temp());
         template := args&.pop().expect("ICE: unquote_placeholders always needs template arg");
+        // Since we're probably going to call this with different values for the placeholders (like invoking the same macro multiple times),
+        // we duplicate to not mess up the constant value of the template. 
+        // TODO: i feel like the old version wasn't doing this. why did that work? 
+        template := template&.deep_clone(self.get_alloc());
         walk: Unquote = (compiler = self, placeholders = args);
         res := walk&.walk_expr(template&);
         self.unwrap_report_error(void, res);
-        //each walk.placeholders { e | 
-        //    if !e.expr&.is(.Poison) {|
-        //        panic("ice: unquote_placeholders didn't use all arguments");
-        //    };
-        //};
+        unused := 0;
+        enumerate walk.placeholders { i, e | 
+            if !e.expr&.is(.Poison) {|
+                unused += 1;
+                @println("- [%] %", i, e.log(self.pool));
+            };
+        };
+        @assert(unused == 0, "ice: unquote_placeholders didn't use all arguments\n%", template&.log(self.pool));
         self.renumber_expr(template&, .None);
         template
     };
@@ -443,6 +450,10 @@ fn new_sema_fill_export_ffi(out: *List(u8)) void = {
             info = c[][].get_type(info.Named._0);
         };
         info[]
+    };
+    @fmt(out, "fn debug_log_ast(expr: FatExpr) void #ct #comptime_addr(%);\n", debug_log_ast);
+    debug_log_ast: rawptr : fn(c: CompilerRs, e: FatExpr) void = {
+        @println("[debug_log_ast] %", e&.log(c[][].pool));
     };
     
 }
