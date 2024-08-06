@@ -47,20 +47,16 @@ poll_in_place :: fn(self: *SelfHosted, $T: Type, $f: @Fn() Maybe(T)) Res(T) #gen
     pending: List(*Task) = list(self.get_alloc());
     loop {|
         value := f();
-        @match(value) {
-            fn Ok(it)  => {
-                return(Ok = it);
-            }
-            fn Err(it) => {
-                return(Err = it);
-            }
+        @match(value&) {
+            fn Ok(it)  => return(Ok = it[]);
+            fn Err(it) => return(Err = it[]);
             fn Suspend(new_dep) => {
                 new_task := self.get_alloc().alloc(Task, 1);
                 new_task := new_task.ptr;
-                new_task[] = (action = new_dep[], waiting_for = list(self.get_alloc()));
+                new_task[] = (action = new_dep[][], waiting_for = list(self.get_alloc()));
                 pending&.push(new_task);
                 self.dispatch.active_tasks&.push(new_task);
-                self.poll_pending_subset(pending&);
+                @try(self.poll_pending_subset(pending&)) return;
             };
         };
     };
@@ -170,6 +166,7 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
         return(.Ok);
     };
     self.dispatch.enclosing_function = .None;
+    @println("%", self.dispatch.active_tasks.len);
     
     @match(task.action) {
         //fn CompileExpr(stack) => {
@@ -222,11 +219,23 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
             
             arg_ty := @check(self.infer_arguments(fid)) return;
             ret_ty := @check(self.infer_return(fid)) return;
-            @println("codegen % %", fid, self.log_name(fid));
-            @err_assert(!arg_ty.is_unknown() && !ret_ty.is_unknown(), "unknown fn types!!") return;
-            hack := self.stable_compiler_context().cast(); // because Bc::CompCtx stores a ***SelfHosted in the assembly 
-            body := hack.emit_bc_and_aarch64(fid, .Jit);
-            if(body&.is_err(), => return(Err = self.box(body.Err)));
+            
+            if func.body&.is(.Normal).or(func.body&.is(.Intrinsic)) {|
+                @println("codegen % %", fid, self.log_name(fid));
+                @err_assert(!arg_ty.is_unknown() && !ret_ty.is_unknown(), "unknown fn types!!") return;
+                hack := self.stable_compiler_context().cast(); // because Bc::CompCtx stores a ***SelfHosted in the assembly 
+                body := hack.emit_bc_and_aarch64(fid, .Jit);
+                if(body&.is_err(), => return(Err = self.box(body.Err)));
+            } else {|
+                @if_let(func.body) fn Redirect(target) => {
+                    ptr := or self.aarch64&.get_fn(target) {|
+                        return(Suspend = self.wait_for(Jit = target))
+                    };
+                    // TODO: save in constants lookup too if take address 
+                    self.aarch64&.extend_blanks(fid);
+                    self.aarch64.dispatch[fid.as_index()] = ptr;
+                };
+            };
         }
         fn ResolveOverload(f) => {
             self.new_expression_stack();
