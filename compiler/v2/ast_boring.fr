@@ -444,3 +444,50 @@ fn handle_stmt(self: *MarkNotDone, stmt: *FatStmt) Result(DoMore, void) #once = 
 fn handle_func(self: *MarkNotDone, func: *Func) Result(DoMore, void) #once = (Ok = .Continue);
 fn handle_type(self: *MarkNotDone, ty: *LazyType) Result(DoMore, void) #once = (Ok = .Continue);
 fn handle_pattern(self: *MarkNotDone, p: *Pattern) Result(DoMore, void) #once = (Ok = .Continue);
+
+
+// this currently works but probably only loosly overlaps with being correct because its nap time. 
+fn adjust_int_length(value: *Values, int: *IntTypeInfo) void = {
+    @assert(value.is(.Small), "ICE: big value for int");
+    byte_count := value.Small._1&;
+    value := value.Small._0&;
+    want_byte_count: u8 = ((int.bit_count + 7) / 8).trunc();
+    if want_byte_count * 8 != int.bit_count.trunc() {|
+        // weird ints are stored dumby currently 
+        want_byte_count = 8;
+    };
+    i := byte_count[];
+    while => byte_count[] > want_byte_count {|
+        byte_count[] -= 1;
+        //if int.signed {
+        //    debug_assert_eq!(*value & (255 << i), 255);
+        //} else {
+        //    debug_assert_eq!(*value & (255 << i), 0);
+        //}
+        i -= 1;
+    };
+    i := byte_count[];
+    while => byte_count[] < want_byte_count {|
+        byte_count[] += 1;
+        i += 1;
+        //if int.signed {
+        //    debug_assert_eq!(*value & (255 << i), 255);
+        //} else {
+        //    debug_assert_eq!(*value & (255 << i), 0);
+        //}
+    };
+}
+
+fn is_const(self: *FatExpr) bool = {
+    @match(self.expr&) {
+        fn Value() => true; 
+        fn Tuple(parts) => {
+            each parts { part |
+                if(!part.is_const(), => return(false));
+            };
+            true
+        }
+        fn String() => true;
+        @default => false;
+    }
+}

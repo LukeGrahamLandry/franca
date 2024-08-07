@@ -67,6 +67,7 @@ poll_in_place :: fn(self: *SelfHosted, $T: Type, $f: @Fn() Maybe(T)) Res(T) #gen
 fn poll_pending_subset(self: *SelfHosted, pending: *List(*Task)) Res(void) = {
     while => !pending.is_empty() {|
         mark := __temp_alloc.mark();
+        ::?**Task;
         task := pending.last().unwrap()[];
         task.waiting_for&.ordered_retain() { t | 
             !t.done
@@ -113,6 +114,8 @@ fn poll_tasks(self: *SelfHosted) Result(void, *ParseErr) = {
         };
         for self.dispatch.active_tasks { original_task |
             pending&.push(original_task); 
+            // TODO: you want to do this instead but it fails a safety check??????
+            // @try(self.poll_pending_subset(pending&)) return;
             while => !pending.is_empty() {|
                 mark := __temp_alloc.mark();
                 ::?**Task;
@@ -166,11 +169,11 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
         return(.Ok);
     };
     self.dispatch.enclosing_function = .None;
-    @println("%", self.dispatch.active_tasks.len);
+    @log_event("%", self.dispatch.active_tasks.len);
     
     @match(task.action) {
         //fn CompileExpr(stack) => {
-        //    @println("[TRY TASK] %", task.action&.tag());
+        //    @log_event("[TRY TASK] %", task.action&.tag());
         //    self.dispatch.active_stack = stack;
         //    while => !stack.is_empty() {|
         //        last := stack.pop().unwrap();
@@ -180,7 +183,7 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
         //    };
         //}
         fn EvalConstant(v) => {
-            @println("[TRY TASK] %: %", task.action&.tag(), self.pool.get(v.name.name));
+            @log_event("[TRY TASK] %: %", task.action&.tag(), self.pool.get(v.name.name));
             self.new_expression_stack();
             name := v.name;
             var  := self.scopes.get_constant(name);
@@ -189,13 +192,13 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
             self.dispatch.const_var_in_progress&.unset(name.id.zext());
         }
         fn CompileBody(fid) => {
-            @println("[TRY TASK] %: % %", task.action&.tag(), fid, self.log_name(fid));
+            @log_event("[TRY TASK] %: % %", task.action&.tag(), fid, self.log_name(fid));
             self.new_expression_stack();
             @check(self.handle_compile_func_body(fid)) return;
             self.dispatch.function_in_progress&.unset(fid.as_index());
         }
         fn Jit(fid) => {
-            @println("[TRY TASK] %: % %", task.action&.tag(), fid, self.log_name(fid));
+            @log_event("[TRY TASK] %: % %", task.action&.tag(), fid, self.log_name(fid));
             func := self.get_function(fid);
             if !func.get_flag(.EnsuredCompiled) {|
                 self.dispatch.function_in_progress&.set(fid.as_index());
@@ -204,8 +207,9 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
             
             // when possible, you want to emit_bc for callees first because they might get deduplicated. 
             for func.callees { callee |
-                @println("% calls %", fid.as_index(), callee.as_index());
-                if self.aarch64&.get_fn(callee).is_none() {|
+                @log_event("% calls %", fid.as_index(), callee.as_index());
+                // TODO: does the function_in_progress do anything? 
+                if self.aarch64&.get_fn(callee).is_none() && !self.dispatch.function_in_progress&.get(callee.as_index()) {|
                     new_task := self.get_alloc().alloc(Task, 1);
                     new_task := new_task.ptr;
                     new_task[] = (action = (Jit = callee), waiting_for = list(self.get_alloc()));
@@ -213,7 +217,7 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
                 };
             };
             if task.waiting_for.len != 0 {|
-                @println("sleep on %/% callees", task.waiting_for.len, func.callees.len);
+                @log_event("sleep on %/% callees", task.waiting_for.len, func.callees.len);
                 return(.Ok); // HACK: caller has to check our waiting_for
             };
             
@@ -221,7 +225,7 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
             ret_ty := @check(self.infer_return(fid)) return;
             
             if func.body&.is(.Normal).or(func.body&.is(.Intrinsic)) {|
-                @println("codegen % %", fid, self.log_name(fid));
+                @log_event("codegen % %", fid, self.log_name(fid));
                 @err_assert(!arg_ty.is_unknown() && !ret_ty.is_unknown(), "unknown fn types!!") return;
                 hack := self.stable_compiler_context().cast(); // because Bc::CompCtx stores a ***SelfHosted in the assembly 
                 body := hack.emit_bc_and_aarch64(fid, .Jit);
@@ -241,7 +245,7 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
             self.new_expression_stack();
             self.dispatch.enclosing_function = f.callsite;  // TODO: make test that fails without this.
             overloads := self.dispatch.overloads&.nested_index(f.os.as_index());
-            @println("[TRY TASK] %: % %", task.action&.tag(), f.os, self.pool.get(overloads.name));
+            @log_event("[TRY TASK] %: % %", task.action&.tag(), f.os, self.pool.get(overloads.name));
             @debug_assert(f.call.expr.expr&.is(.Call));
             call := f.call.expr.expr.Call;
             fid := @check(self.resolve_in_overload_set(call.arg, f.call.requested, f.os)) return;
@@ -306,7 +310,7 @@ fn Maybe($T: Type) Type = {
 }
 
 fn wait_for(s: *SelfHosted, t: Action) *Action = {
-    @println("[YIELD] %", t&.tag());
+    @log_event("[YIELD] %", t&.tag());
     s.dispatch.yield_count += 1;
     mem := s.get_alloc().alloc(Action, 1);
     mem.ptr[] = t;

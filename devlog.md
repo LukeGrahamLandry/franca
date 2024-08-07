@@ -1,3 +1,7 @@
+## (Aug 6)
+
+- crippling bug with `expr[] = (Tag = self.box(expr[]));` where you have to make a var for the self.box(...) or it segfaults
+
 ##
 
 - thinking about how to do #generic without forcing you to mark it and letting the expressions compose better.

@@ -354,6 +354,7 @@ fn deconstruct_values(program: *SelfHosted, ty: Type, bytes: *ReadBytes, out: *L
         fn Bool()    => u8.single(.I8);
         fn Tagged(f) => {
             start := bytes.i;
+            start_count := out.len;
             i64.single(.I64);
             tag := out.last().unwrap()[];
             @err_assert(tag < f.cases.len, "Invalid tag % in constant", tag) return;
@@ -361,12 +362,20 @@ fn deconstruct_values(program: *SelfHosted, ty: Type, bytes: *ReadBytes, out: *L
             @try(deconstruct_values(program, case._1, bytes, out, offsets)) return;
             padding := (@as(i64) info.stride_bytes.zext()) - (bytes.i - start);
             @err_assert(padding >= 0, "ICE: confused about @tagged size.") return;
+            end_count := out.len;
+            padding_slots := (@as(i64) info.size_slots.zext()) - (end_count - start_count);
+            @err_assert(padding_slots >= 0, "ICE: too many slots????") return;
+            range(0, padding_slots) { _ |
+                // TODO: wrong prim
+                i64.single(.I64);
+            };
+            
             // TODO: this is just asking for a miscompilation...
             //       because the bytes size doesn't tell you the number of primitives the caller expects. 
             //       like @tagged(a: (u8, u8), b: (u32)), what do you do with that? 
             //       i guess you push enough zeros for the varient with the highest count
             //       :FUCKED -- Aug 2
-            println(">>> WARNING: deconstruct_values @tagged is unfinished <<<");
+            @println(">>> WARNING: deconstruct_values @tagged is unfinished % <<<", program.log_type(ty));
         }
         fn Enum(f)   => return(deconstruct_values(program, f.raw, bytes, out, offsets));
         fn Named(f)  => return(deconstruct_values(program, f._0, bytes, out, offsets)); // TODO: make Named payload not a tuple or do destructuring here. -- Jul 8

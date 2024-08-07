@@ -391,7 +391,7 @@ fn new_sema_fill_export_ffi(out: *List(u8)) void = {
         ty := c[][].unwrap_report_error(Type, ty)
         value := c[][].to_values(Type, ty); 
         e&.set(value, Type); // :get_or_create_type
-        @println("we know the type! %", e&.log(c[][].pool));
+        @log_event("we know the type! %", e&.log(c[][].pool));
         return(e);
         FatExpr.unreachable_hack() // :FUCKED
     };
@@ -420,14 +420,21 @@ fn new_sema_fill_export_ffi(out: *List(u8)) void = {
     };  
     @fmt(out, "fn tagged(arg: FatExpr) FatExpr #macro #ct #comptime_addr(%);\n", tagged_macro_wrap);
     tagged_macro_wrap: rawptr : fn(c: CompilerRs, expr: FatExpr) FatExpr = {
-        @println("start tagged_macro_wrap");
         self := c[][];
         res := self.poll_in_place(FatExpr, => self.tagged_macro(expr&));
         res := self.unwrap_report_error(FatExpr, res);
         return(res); // :FUCKED. miscompilation if you just have the expr at the end normally. losing the ret ptr???? -- Aug 5
         FatExpr.unreachable_hack()
     };
-    
+    @fmt(out, "fn enum(arg: FatExpr, target: FatExpr) FatExpr #macro #ct #comptime_addr(%);\n", enum_macro_wrap);
+    enum_macro_wrap: rawptr : fn(c: CompilerRs, arg: FatExpr, target: FatExpr) FatExpr = {
+        self := c[][];
+        res := self.poll_in_place(FatExpr, => self.enum_macro(arg&, target&));
+        res := self.unwrap_report_error(FatExpr, res);
+        return(res); // :FUCKED. miscompilation if you just have the expr at the end normally. losing the ret ptr???? -- Aug 5
+        FatExpr.unreachable_hack()
+    };
+     
     // note: the old verion didn't even use this ast node, it just did the work here like @struct, et al.
     //       maybe thats better, idk, lets see if i still need the name based hack this way. -- Aug 5s
     @fmt(out, "fn as(T: FatExpr, e: FatExpr) FatExpr #macro #ct #comptime_addr(%);\n", as_node);
@@ -456,6 +463,26 @@ fn new_sema_fill_export_ffi(out: *List(u8)) void = {
         @println("[debug_log_ast] %", e&.log(c[][].pool));
     };
     
+    @fmt(out, "fn debug_log_type(type: Type) void #ct #comptime_addr(%);\n", debug_log_type);
+    debug_log_type: rawptr : fn(c: CompilerRs, type: Type) void = {
+        @println("[debug_log_type] %", c[][].log_type(type));
+    };
+    
+    @fmt(out, "fn intern_type_ref(info: *TypeInfo) Type #ct #comptime_addr(%);\n", intern_type_ref);
+    intern_type_ref: rawptr : fn(c: CompilerRs, info: *TypeInfo) Type = {
+        c[][].intern_type(info[]) // TODO: probably more useful if i make a deep copy, why else are you calling this. 
+    };
+    
+    // Infers the type and avoids some redundant work if you duplicate the ast node in a bunch of places after calling this.
+    // TODO: should take by reference so its clear that it mutates the deep structure of the node (not a copy)
+    @fmt(out, "fn compile_ast(e: FatExpr) FatExpr #ct #comptime_addr(%);\n", compile_ast);
+    compile_ast: rawptr : fn(c: CompilerRs, expr: FatExpr) FatExpr = {
+        self := c[][];
+        res := self.poll_in_place(void, => self.compile_expr(expr&, .None));
+        self.unwrap_report_error(void, res);
+        return(expr);
+        FatExpr.unreachable_hack()
+    };
 }
 
 unwrap_report_error :: fn(self: *SelfHosted, $T: Type, value: Res(T)) T #generic = {
