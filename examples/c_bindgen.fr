@@ -1,3 +1,11 @@
+//! This uses clang to parse a C header file and output the ast as json. 
+//! Then we translate that into function/struct/enum definitions in Franca syntax.
+//! Inspired by https://github.com/floooh/sokol/tree/master/bindgen 
+//!    I originally just made gen_franca.py in there but it seems dumb to be making a new language and not even use it. 
+//!    For reference this file replaces ~530 lines of python (gen_ir+gen_franca),
+//!    but mine is also much uglier and less robust. ie. I depend on the order of fields in clang's output. 
+// TODO: unnamed enum constants 
+
 CDecl :: @tagged(
     Struct: @struct(name: Str, fields: []CField),
     Enum: @struct(name: ?Str, items: []CEnumItem),
@@ -5,22 +13,55 @@ CDecl :: @tagged(
 );
 
 CField :: @struct(name: Str, type: Str);
-CEnumItem :: @struct(name: Str, value: Str);
+CEnumItem :: @struct(name: Str, value: ?Str);
 
 #include_std("lib/x/json.fr");
 #include_std("lib/core.fr");
 
 fn main() void = {
-    // clang -Xclang -ast-dump=json bindings/sokol/sokol_app.h > target/ast.json
-    // TODO: only show message if file not there. 
-    // println("Don't forget to create 'target/ast.json' (dump from clang)");
-    ast := temp().read_to_string("target/ast.json");  
-    json: JsonParser = new_json(ast.items(), temp());
+    path := cli_args();
+    path := path.last();
+    path := path.unwrap()[].str();
+    ast := load_ast(path);
+    json: JsonParser = new_json(ast, temp());
     decls := json&.extract_c_decls();
     out: List(u8) = list(temp());
     generate_franca_bindings(out&, decls, "sokol");
     println(out.items());
     exit(0);
+}
+
+fn load_ast(path: Str) Str = {
+    fn do_clang(path: Str, extra: *List(Str)) Str = {
+        // TODO: use the version of exec that looks in PATH
+        clang_path := "/opt/homebrew/opt/llvm/bin/clang"; // different output from clang++ (CompoundStmt)
+        extra.push_all(@slice("-Xclang", "-ast-dump=json", path));
+        @eprintln("%: %", clang_path, extra.items());
+        (ok, out, err) := exec_and_catch(clang_path, extra.items(), temp());
+        @assert(ok, "Clang failed. %", err.items());
+        out.items()
+    }
+    
+    if path.ends_with(".h").or(=> path.ends_with(".c")) {|
+        args: List(Str) = list(temp());
+        do_clang(path, args&)
+    } else {|
+        if path.ends_with(".json") {|
+            temp().read_to_string(path).items()
+        } else {|
+            @switch(path) {
+                @case("sokol") => {
+                    args := @list("-c", "-x", "c", "-Ibindings/sokol") temp();
+                    src_file := open_temp_file();
+                    src_file.fd&.write(SOKOL_ALL_SOURCE);
+                    ast := do_clang(src_file&.s_name(), args&);
+                    src_file.remove();
+                    ast
+                };
+                @default => @panic("expected .c/.h/.json file (or preset lib ['sokol']) as last argument, found '%'", path);
+            }
+        }
+    }
 }
 
 fn generate_franca_bindings(out: *List(u8), decls: []CDecl, import_name: Str) void = {
@@ -29,17 +70,37 @@ fn generate_franca_bindings(out: *List(u8), decls: []CDecl, import_name: Str) vo
         
         @match(decl) {
             fn Struct(it) => {
+                // TODO: pass in which ones to skip
                 if it.name.starts_with("__darwin_pthread").or(=> it.name.starts_with("_opaque_pthread")) {|
                     continue();
                 };
-                @fmt(out, "% :: @struct(\n", it.name);
+                @fmt(out, "% :: @struct(\n", it.name.unsnake_case());
                 for it.fields { it |
-                    @fmt(out, "   %: %,\n", it.name, it.type.translate_type());
+                    @fmt(out, "    %: %,\n", it.name, it.type.translate_type());
                 };
-                @fmt(out, ");\n\n");
+                @fmt(out, ");\n");
             }
             fn Enum(it) => {
-                
+                @match(it.name) {
+                    fn Some(name) => {
+                        @fmt(out, "% :: @enum(i32) (\n", name.unsnake_case());
+                        at_the_end := false;
+                        each it.items { item | 
+                            continue :: local_return;
+                            name := item.name.demangle_sokol_enum();
+                            if(name == "FORCE_U32", => continue());
+                            @fmt(out, "    %", name);
+                            if item.value { value |
+                                @fmt(out, " = %", value);
+                            };
+                            @fmt(out, ",\n");
+                        };
+                        @fmt(out, ");\n");
+                    }
+                    fn None() => {
+                        // TODO: constants
+                    }
+                }
             }
             fn Func(it) => {
                 @fmt(out, "fn %(", it.name);
@@ -48,33 +109,117 @@ fn generate_franca_bindings(out: *List(u8), decls: []CDecl, import_name: Str) vo
                     @fmt(out, "%%: %", prefix, it.name, it.type.translate_type());
                     prefix = ", ";
                 };
-                @fmt(out, ") % #import(\"%\");\n", "/*TODO*/", import_name);
+                
+                // TODO: handle returning a function pointer. 
+                idx := it.type.position(fn(b) => b[] == "(".ascii());
+                idx := idx.expect("confusing function");
+                ret := it.type.slice(0, idx).trim();
+                
+                @fmt(out, ") % #import(\"%\");\n", ret.translate_type(), import_name);
             }
         };
     };
 }
 
+fn demangle_sokol_enum(s: Str) Str = {
+    underscores := 0;
+    if s[0] == "_".ascii() {|
+        underscores = -1;
+    };
+    while => s.len > 0 {|
+        under := s[0] == "_".ascii();
+        s.ptr = s.ptr.offset(1);
+        s.len -= 1;
+        if under {|
+            underscores += 1;
+            if underscores == 2 {|
+                if s[0].is_ascii_digit() {|
+                    s = (@format("_%", s) temp()).items();
+                };
+                return(s);
+            };
+        };
+    };
+    s
+}
+
+fn ascii_to_upper(c: u8) u8 = {
+    diff :: "a".ascii() - "A".ascii();
+    ::if(u8);
+    if(c.lt("a".ascii()).or(c > "z".ascii()), => c, => c - diff)
+}
+
 fn translate_type(c_type: Str) Str = {
+    c_type = c_type.trim();
     @switch(c_type) { /* TODO: segfault if you paste an identifier where this comment is */
-        @case("int") => "i32";
-        @case("uint32_t") => "u32";
-        @case("uint64_t") => "u64";
-        @case("float") => "f32";
-        @case("uintptr_t") => "usize";
-        @case("void *") => "rawptr";
+        @case("int")          => "i32";
+        @case("long")         => "i64";
+        @case("uint8_t")      => "u8";
+        @case("uint16_t")     => "u16";
+        @case("uint32_t")     => "u32";
+        @case("uint64_t")     => "u64";
+        @case("float")        => "f32";
+        @case("double")       => "f64";
+        @case("uintptr_t")    => "usize";
+        @case("size_t")       => "usize";
+        @case("void *")       => "rawptr";
         @case("const char *") => "CStr";
-        @case("char *") => "CStr";
-        @case("bool") => "bool";
+        @case("char *")       => "CStr";
+        @case("bool")         => "bool";
+        @case("void")         => "void";
         @default => {
-            if c_type.ends_with(")") {|
-                // its a function pointer
-                // TODO
+            if c_type.ends_with(")") {|  // its a function pointer
+                parts := c_type.split("(*)", temp());
+                @assert(parts.len == 2, "confusing function pointer %", c_type);
+                ret := parts[0];
+                // TODO: support function pointer argument!
+                args := parts[1].trim();
+                assert(args.ends_with(")") && args.starts_with("("), "confusing fnptr args");
+                args.ptr = args.ptr.offset(1);
+                args.len -= 2;
+                args := args.split(",", temp());
+                out: List(u8) = list(c_type.len, temp());
+                @fmt(out&, "@FnPtr(");
+                prefix := "";
+                for args { arg | 
+                    @fmt(out&, "%%", prefix, arg.translate_type());
+                    prefix = ", ";
+                };
+                @fmt(out&, ") %", ret.translate_type());
+                
+                return(out.items());
             };
-            if c_type.ends_with("]") {|
-                // its an array
-                // TODO
+            // TODO: this does 2d arrays in the wrong order
+            if c_type.ends_with("]") {|  // its an array
+                fn last_index_of(haystack: Str, needle: u8) ?i64 = {
+                    i := haystack.len - 1;
+                    while => i >= 0 {|
+                        if(haystack[i] == needle, => return(Some = i));
+                        i -= 1;
+                    };
+                    .None
+                }
+                
+                fn split_array(s: Str) Ty(Str, Str) /* (T, len) */ = {
+                    idx := s.last_index_of("[".ascii());
+                    idx := idx.expect("confusing array");
+                    element_type := s.slice(0, idx);
+                    count := s.slice(idx + 1, s.len - 1);
+                    (element_type, count)
+                }
+                
+                // note: c 2d array types are backwards (because declaration mirrors use)
+                //       the inner most count is on the far right because you index the outer array first. 
+                (element_type, count) := c_type.split_array();
+                if element_type.ends_with("]") {|
+                    (inner_type, outer_count) := element_type.split_array();
+                    @assert(!inner_type.ends_with("]"), "im lazy and don't support 3d arrays: %", c_type);
+                    return((@format("Array(Array(%, %), %)", inner_type.translate_type(), count, outer_count) temp()).items());
+                } else {|
+                    return((@format("Array(%, %)", element_type.translate_type(), count) temp()).items());
+                };
             };
-            if c_type.ends_with("*") {|
+            if c_type.ends_with("*") {|  // its a pointer
                 pointee := c_type.slice(0, c_type.len - 1);
                 if pointee.starts_with("const ") {|
                     pointee = pointee.slice("const ".len(), pointee.len);
@@ -87,35 +232,76 @@ fn translate_type(c_type: Str) Str = {
                 };
                 return((@format("*%", pointee.translate_type()) temp()).items());
             };
-            c_type
+            
+            out: List(u8) = list(c_type.len, temp());
+            out&.push(c_type[0].ascii_to_upper());
+            enumerate c_type.slice(1, c_type.len) { i, c | 
+                if c[] == "_".ascii() {|
+                    // not +1 because skipped first
+                    c_type[i + 2] = c_type[i + 2].ascii_to_upper();
+                } else {|
+                    out&.push(c[]);
+                };
+            };
+            c_type.unsnake_case()
         };
     }
 }
 
+fn unsnake_case(c_type: Str) Str = {
+    out: List(u8) = list(c_type.len, temp());
+    out&.push(c_type[0].ascii_to_upper());
+    enumerate c_type.slice(1, c_type.len) { i, c | 
+        if c[] == "_".ascii() {|
+            // not +1 because skipped first
+            c_type[i + 2] = c_type[i + 2].ascii_to_upper();
+        } else {|
+            out&.push(c[]);
+        };
+    };
+    if out.items().ends_with("T") {| // _t
+        out.len -= 1;
+    };
+    out.items()
+}
+
+fn trim(s: Str) Str = {
+    while => s.len > 0 && s[s.len - 1] <= 32 {|
+        s.len -= 1;
+    };
+    while => s.len > 0 && s[0] <= 32 {|
+        s.ptr = s.ptr.offset(1);
+        s.len -= 1;
+    };
+    
+    s
+}
+
+// It's a massive pain to be dealing with the json format while doing useful work... so don't. 
 fn extract_c_decls(json: *JsonParser) []CDecl = {
     :: Result(JsonPart, Str);
     :: tagged(JsonPart);
     
     decls: List(CDecl) = list(temp());
     
-    // Get to the good bit
-    (fn() => {
-        break :: local_return;
+    fn skip_to_inner(json: *JsonParser) void = {
         loop {|
             part := json.next().unwrap();
             if part&.is(.Key) && (part.Key == "inner") {|
-                break();
+                return();
             };
         };
-    })();
+    }
     
+    // Get to the good bit
+    json.skip_to_inner();
     loop {|
         continue :: local_return;
         part := json.next().unwrap();
         @match(part) {
             fn Eof() => return(decls.items());
             fn Key(name) => {
-                skip_to_tag :: fn(key: Str, tag: JsonPart.Tag()) JsonPart => {
+                skip_to_tag :: fn(json: *JsonParser, key: Str, tag: JsonPart.Tag()) JsonPart = {
                     res := json.skip_until_key(key);
                     if(res&.is_err(), => @panic("expected % '%'; %", tag, key, res.Err));
                     value := json.next().unwrap();
@@ -124,27 +310,34 @@ fn extract_c_decls(json: *JsonParser) []CDecl = {
                 };
                 
                 skip_to_string :: fn(key: Str) Str => {
-                    value := skip_to_tag(key, .StringValue);
+                    value := json.skip_to_tag(key, .StringValue);
                     value.StringValue
                 };
                 
-                skip_to_tag_or_continue :: fn(key: Str, tag: JsonPart.Tag()) JsonPart => {
+                skip_to_tag_opt :: fn(key: Str, tag: JsonPart.Tag()) ?JsonPart => {
                     res := json.skip_until_key(key);
-                    if(res&.is_err(), => continue());
-                    value := json.next().unwrap();
-                    @assert(value&.is(tag), "expected % '%'", tag, key);
-                    value
+                    ::if(?JsonPart);
+                    if(res&.is_err(), => .None) {|
+                        value := json.next().unwrap();
+                        @assert(value&.is(tag), "expected % '%'", tag, key);
+                        (Some = value)
+                    }
                 };
                 
                 read_fields :: fn(expected_kind: Str) []CField => {
                     fields: List(CField) = list(temp());
                     dowhile {|
+                        continue :: local_return;
                         value := json.next().unwrap();
                         if value&.is(.StartDict) {|
                             kind := skip_to_string("kind");
+                            if kind == "FormatAttr" {|
+                                json.skip_current_value();
+                                continue(true);
+                            };
                             @assert_eq(kind, expected_kind);
                             name := skip_to_string("name");
-                            skip_to_tag("type", .StartDict);
+                            json.skip_to_tag("type", .StartDict);
                             type := skip_to_string("qualType");
                             res := json.skip_current_value();
                             res.unwrap();
@@ -160,33 +353,69 @@ fn extract_c_decls(json: *JsonParser) []CDecl = {
                     fields.items()
                 };
                 
+                read_enum_fields :: fn() []CEnumItem => {
+                    fields: List(CEnumItem) = list(temp());
+                    dowhile {|
+                        continue :: local_return;
+                        value := json.next().unwrap();
+                        if value&.is(.StartDict) {|
+                            kind := skip_to_string("kind");
+                            @assert_eq(kind, "EnumConstantDecl");
+                            name := skip_to_string("name");
+                            value: ?Str = .None;
+                            if skip_to_tag_opt("inner", .StartList) {_|
+                                res := json.next().unwrap();
+                                assert(res&.is(.StartDict), "enum inner->[]->{}");
+                                v := skip_to_string("value");
+                                value = (Some = v);
+                                json.skip_current_value().unwrap();
+                                res := json.next().unwrap();
+                                assert(res&.is(.End), "// TODO: skip_current_value should probably eat the End too?");
+                                json.skip_current_value().unwrap();
+                            };
+                            fields&.push(name = name, value = value);
+                            true
+                        } else {|
+                            false
+                        }
+                    };
+                    fields.items()
+                };
+                
                 if name == "kind" {|
                     value := json.next().unwrap();
                     assert(value&.is(.StringValue), "expected tag");
                     @switch(value.StringValue) {
                         @case("RecordDecl") => {
                             // some stuff doesn't have a name... idk bro. 
-                            value := skip_to_tag_or_continue("name", .StringValue);
-                            name := value.StringValue;
-                            // @println("Struct named %", value.StringValue);
-                            skip_to_tag("inner", .StartList);
+                            name := skip_to_tag_opt("name", .StringValue);
+                            name := name.or(=> continue());
+                            name := name.StringValue;
+                            // @println("Struct named %", value.StringValue); 
+                            json.skip_to_tag("inner", .StartList);
                             fields := read_fields("FieldDecl");
                             decls&.push(Struct = (name = name, fields = fields));
                         };
                         @case("EnumDecl") => {
-                        
+                            name := skip_to_tag_opt("name", .StringValue).or(=> continue());
+                            name := name.StringValue;
+                            json.skip_to_tag("inner", .StartList);
+                            fields := read_enum_fields();
+                            decls&.push(Enum = (name = (Some = name), items = fields));
                         };
                         @case("FunctionDecl") => {
                             name := skip_to_string("name");
-                            skip_to_tag("type", .StartDict);
+                            json.skip_to_tag("type", .StartDict);
                             type := skip_to_string("qualType");
                             // @println("Function named '%' with type '%'", name, type);
                             json.skip_current_value();
                             
                             // no args is fine. 
-                            skip_to_tag_or_continue("inner", .StartList);
+                            args: []CField = empty();
+                            if skip_to_tag_opt("inner", .StartList) {_|
+                                args = read_fields("ParmVarDecl");   // yeah... not spelled like "param"
+                            };
                             
-                            args := read_fields("ParmVarDecl");   // yeah... not spelled like "param"
                             decls&.push(Func = (name = name, type = type, args = args));
                         };
                         @default => {

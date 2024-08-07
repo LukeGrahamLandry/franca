@@ -30,14 +30,18 @@ fn log_event(arg: FatExpr) FatExpr #macro = {
     //@{ @[arg]; }
     println(arg)
 }
-fn compile_stmt(self: *SelfHosted, stmt: *FatStmt) Maybe(void) = {
+fn compile_stmt(self: *SelfHosted, stmt: *FatStmt) Maybe(bool) = {
     self.last_loc = stmt.loc;
     @match(stmt.stmt&) {
-        fn Noop() => return(.Ok);
-        fn Eval(expr) => return(self.compile_expr(expr, .None));
+        fn Noop() => return(Ok = true);
+        fn Eval(expr) => {
+            @check(self.compile_expr(expr, .None)) return;
+            return(Ok = expr.done)
+        }
         fn DeclVar(f) => {
             assert(f.name.kind != .Const, "hit unhoisted constant");
-            return(self.decl_var(f.name, f.ty&, f.value&))
+            @check(self.decl_var(f.name, f.ty&, f.value&)) return;
+            return(Ok = f.value.done)
         }
         fn Set(f) => {
             // TODO: or patterns in @match would be nice here. :lang
@@ -50,23 +54,23 @@ fn compile_stmt(self: *SelfHosted, stmt: *FatStmt) Maybe(void) = {
                     return(@err("tried to set % to %", self.log_type(f.place.ty), self.log_type(f.value.ty)));
                 };
                 // TODO: self.type_check_arg(f.place.ty, f.value.ty, "reassign var")?; /:type_check
-                return(.Ok);
+                return(Ok = f.value.done && f.place.done);
             };
             return(@err("Illegal place expression: %", tag))
         }
         fn DeclVarPattern(f) => return(self.decl_var_pattern(stmt));
         @default => @panic("TODO: unhandled compile_stmt type %", stmt.log(self.pool));
     };
-    unreachable_hack(Maybe(void))
+    unreachable_hack(Maybe(bool))
 }
 
-fn decl_var_pattern(self: *SelfHosted, stmt: *FatStmt) Maybe(void) #once = {
+fn decl_var_pattern(self: *SelfHosted, stmt: *FatStmt) Maybe(bool) #once = {
     @debug_assert(stmt.stmt&.is(.DeclVarPattern));
     (bindings, value) := (stmt.stmt.DeclVarPattern.binding.bindings&, stmt.stmt.DeclVarPattern.value&);
     if value.is_raw_unit() {|
         // TODO: typecheck the pattern! this was fine a long time ago when this node was only made by closures. 
         stmt.stmt = .Noop;
-        return(.Ok);
+        return(Ok = true);
     };
     
     if bindings.len == 1 {|
@@ -74,7 +78,8 @@ fn decl_var_pattern(self: *SelfHosted, stmt: *FatStmt) Maybe(void) #once = {
         if(b.kind == .Const, => return(@err("unreachable? destructure single arg must be closure but const args should already be handled")));
         if b.var() { name |
             // TODO: could reduce the ast node but it doesn't matter. 
-            return(self.decl_var(name, b.ty&, value));
+            @check(self.decl_var(name, b.ty&, value)) return;
+            return(Ok = value.done);
         };
         return(@err("TODO: what situation allows DeclVarPattern with no name?"));
     };
@@ -113,8 +118,8 @@ fn decl_var_pattern(self: *SelfHosted, stmt: *FatStmt) Maybe(void) #once = {
     };
     
     // TODO: :mark_stmt_done 
-    
-    .Ok
+
+    (Ok = value.done)
 }
 
 ::opt_map(Type, Type);
@@ -383,7 +388,7 @@ fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = 
                 if(!is_new, => return(@err("overwrite arg? %", name&.log(self.pool))));
             };
         };
-        func.set_flag(.MadeVarsForRuntimeArgs) ;
+        func.set_flag(.MadeVarsForRuntimeArgs);
     };
     
     @match(func.body&) {
@@ -487,7 +492,7 @@ fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = 
                         payload := RedirectType.assume_cast(payload&)[];
                         args := self.arg_types(payload.arg);
                         f_ty: FnType = (arg = payload.arg, ret = payload.ret, arity = args.len.trunc());
-                        target := @check(self.resolve_by_type(payload.os, f_ty)) return;
+                        target := @check(self.resolve_by_type(payload.os, f_ty, func.loc)) return;
                         func.body = (Redirect = target)
                         
                     };
@@ -520,7 +525,6 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
         fn Value(f) => {
             if(expr.ty == UnknownType, => return(@err("ICE: Value expression must have known type")));
             if !f.coerced {|
-                
                 @if_let(requested) fn Specific(ty) => {
                     if expr.ty != ty {|
                         @check(self.coerce_const_expr(expr, requested)) return;
@@ -537,15 +541,18 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
                 @check(self.hoist_constants(f.body.items())) return;
                 f.hoisted_constants = true;
             };
+            done := true;
             each f.body { stmt | 
-                @check(self.compile_stmt(stmt)) return;
+                new_done := @check(self.compile_stmt(stmt)) return;
+                done = new_done && done;
             };
             @check(self.compile_expr(f.result, requested)) return;
             expr.ty = f.result.ty;
             
+            expr.done = f.result.done && done;
             if f.body.is_empty() && f.ret_label.is_none() {|
                 expr[] = f.result[]; // Not required but makes debugging easier cause there's less stuff.
-            }
+            };
         }
         fn Tuple(parts) => {
             requested_types := @try(self.tuple_types(requested, parts.len)) return;
@@ -702,6 +709,7 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
         }
         fn Cast(arg) => {
             @check(self.compile_expr(arg[], .None)) return;
+            expr.done = arg.done;
         }
         fn FnPtr(arg) => {
             @check(self.compile_fn_ptr(expr)) return;
@@ -730,6 +738,7 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
                 @check(self.can_assign(true_ty, f.if_false.ty)) return;
             };
             expr.ty = true_ty;
+            expr.done = f.cond.done && f.if_true.done && f.if_false.done;
         }
         fn Loop(arg) => {
             @check(self.compile_expr(arg[], void.want())) return;
@@ -767,15 +776,16 @@ fn compile_fn_ptr(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
     };
     @err_assert(!func.get_flag(.Once), "Cannot create a function pointer to something that id #once") return;
     func.set_flag(.TookPointerValue);
-    // TODO: for now you just need to not make a mistake with calling convention
     self.add_callee(fid);
     
+    // TODO: for now you just need to not make a mistake with calling convention
     // The backend still needs to do something with this, so just leave it
     ty := @unwrap(func.finished_ty(), "!fnptr expected known type") return;
     cc := @unwrap(func.cc, "unknown calling convention") return;
     ty := self.intern_type(FnPtr = (ty = ty, cc = cc));
     arg[].set(value, FuncId);
     expr.ty = ty;
+    expr.done = true;
     .Ok
 }
 
@@ -1287,10 +1297,15 @@ MemoKey :: Ty(FuncId, Values);
 fn curry_const_args(self: *SelfHosted, original_f: FuncId, f_expr: *FatExpr, arg_expr: *FatExpr) Maybe(FuncId) #once = {
     key: MemoKey = (original_f, @check(self.const_args_key(original_f, arg_expr)) return);
     if self.dispatch.const_bound_memo&.get(key&) { new_f |
-        @log_event("reuse baked const args % -> %", original_f, new_f);
+        @log_event("reuse baked const args % -> % (%)", original_f, new_f, key._1&);
         func := self.get_function(new_f);
         if func.get_flag(.AnyConstArgs) {|
-            return(@err("unfinished const args!"));
+            original := self.get_function(original_f);
+            if func.arg.bindings.len == original.arg.bindings.len {|
+                return(self.curry_const_args_inner(original_f, new_f, f_expr, arg_expr));
+            } else {|
+                return(@err("TODO: unfinished const args but started replacing some so don't really know what to do anymore."));
+            };
         };
         @check(self.remove_const_args(original_f, arg_expr)) return;
         fid_value := self.to_values(FuncId, new_f);
@@ -1309,7 +1324,6 @@ fn curry_const_args(self: *SelfHosted, original_f: FuncId, f_expr: *FatExpr, arg
     @log_event("bake const args % -> %", original_f, new_fid);
     @check(self.ensure_resolved_sign(new_fid)) return;
     @check(self.ensure_resolved_body(new_fid)) return;
-    func := self.get_function(new_fid);
     // TODO: mark func as in progress somehow so nobody can yield on it. 
     //       tho really i feel like you want to make this whole operation yield-able,
     //       currently you could get into a situation with a lot of redundant work i think.  
@@ -1318,6 +1332,11 @@ fn curry_const_args(self: *SelfHosted, original_f: FuncId, f_expr: *FatExpr, arg
     //       you don't keep spawning new variations that can never be finished. 
     self.dispatch.const_bound_memo&.insert(key, new_fid);
     
+    self.curry_const_args_inner(original_f, new_fid, f_expr, arg_expr)
+}
+
+fn curry_const_args_inner(self: *SelfHosted, original_f: FuncId, new_fid: FuncId, f_expr: *FatExpr, arg_expr: *FatExpr) Maybe(FuncId) = {
+    func := self.get_function(new_fid);
     ::if(Maybe(FuncId));
     if func.arg.bindings.len == 1 {|
         binding := func.arg.bindings[0]&;
@@ -1411,6 +1430,16 @@ fn bind_const_arg(self: *SelfHosted, o_f: FuncId, arg_name: Var, arg_value: Valu
         func.set_flag(.MayHaveAquiredCaptures);
         self[o_f].cc = (Some = .Inline); // just this is enough to fix chained_captures
         self[arg_func].cc = (Some = .Inline); // but this is needed too for others (perhaps just when there's a longer chain than that simple example).
+        
+        // If we're passing a lambda arg, infer its return type based on the param's hint (not just the callsite). 
+        //      f :: fn(x: @Fn() @enum(a, b)) void = { x(); } // callsite doesn't give a hint because statement discards value. 
+        //      f(=> .a);  // declaration site doesn't give a hint
+        @if_let(self.get_type(arg_ty)) fn Fn(f_ty) => {
+            arg_func := self.get_function(arg_func);
+            if arg_func.ret&.is(.Infer) {|
+                arg_func.ret = (Finished = f_ty.ret);
+            };
+        };
     };
     @check(self.save_const_values(arg_name, arg_value, arg_ty, loc)) return;
     func.arg&.remove_named(arg_name, self.get_alloc());
@@ -1983,7 +2012,7 @@ fn coerce_const_expr(self: *SelfHosted, expr: *FatExpr, req: ResultType) Maybe(v
                 @if_let(want_info) fn Fn(f_ty) => {
                     os := @check(self.immediate_eval_expr(expr, found)) return;
                     os := OverloadSet.assume_cast(os&)[];
-                    fid := @check(self.resolve_by_type(os, f_ty[])) return;
+                    fid := @check(self.resolve_by_type(os, f_ty[], expr.loc)) return;
                     fid_value := self.to_values(FuncId, fid);
                     expr.set(fid_value, want);
                     return(.Ok);
@@ -1991,7 +2020,7 @@ fn coerce_const_expr(self: *SelfHosted, expr: *FatExpr, req: ResultType) Maybe(v
                 @if_let(want_info) fn FnPtr(f) => {
                     os := @check(self.immediate_eval_expr(expr, found)) return;
                     os := OverloadSet.assume_cast(os&)[];
-                    fid := @check(self.resolve_by_type(os, f.ty)) return;
+                    fid := @check(self.resolve_by_type(os, f.ty, expr.loc)) return;
                     fid_value := self.to_values(FuncId, fid);
                     expr.set(fid_value, want);
                     e := self.box(expr[]);  // :fucked segfault if you inline this!!!!!! -- Aug 6
@@ -2061,14 +2090,14 @@ fn can_assign(self: *SelfHosted, want: Type, found: Type) Maybe(void) = {
     
 }
 
-fn resolve_by_type(self: *SelfHosted, os: OverloadSet, f_ty: FnType) Maybe(FuncId) = {
+fn resolve_by_type(self: *SelfHosted, os: OverloadSet, f_ty: FnType, loc: Span) Maybe(FuncId) = {
     // TODO: mega HACK, should probably have a sperate codepath that doesn't want an expression. 
     types := self.arg_types(f_ty.arg);
     fake_args: List(FatExpr) = list(self.get_alloc());
     for types { ty |
-        fake_args&.push(synthetic_ty(.Uninitialized, Span.zeroed(), ty));
+        fake_args&.push(synthetic_ty(.Uninitialized, loc, ty));
     };
-    fake_expr := synthetic_ty((Tuple = fake_args.rs()), Span.zeroed(), f_ty.arg);
+    fake_expr := synthetic_ty((Tuple = fake_args.rs()), loc, f_ty.arg);
     fid := @check(self.resolve_in_overload_set(self.box(fake_expr), (Specific = f_ty.ret), os)) return;
     (Ok = fid)
 }
@@ -2104,6 +2133,10 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
                 args: RsVec(i64) = empty();
                 func := self.get_function(fid);
                 @debug_assert(!func.get_flag(.AnyConstArgs));
+                // TODO: it would be nice if this were true... 
+                //@if_let(func.body) fn Normal(expr) => {
+                //    @debug_assert(expr.done);
+                //};
                 f_ty := func.finished_ty().expect("known type once compiled");
                 if f.arg.ty != f_ty.arg {| // TODO
                     return(@err("TODO: type mismatch"));
@@ -2288,7 +2321,7 @@ fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
             self.finish_layout_deep(pair).unwrap();
             (arg = pair, ret = fat_expr_type, arity = 2)
         };
-        fid := @check(self.resolve_by_type(os, f_ty)) return;
+        fid := @check(self.resolve_by_type(os, f_ty, invocation.handler.loc)) return;
         fid_value := self.to_values(FuncId, fid);
         invocation.handler.set(fid_value, FuncId);
     };
