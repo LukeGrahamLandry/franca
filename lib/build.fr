@@ -279,6 +279,8 @@ ForeignLibrary :: @struct(
     macos_frameworks: Slice(Str) = empty(),  // -framework, ie. MetalKit
     objective_c: bool = false,
     raw_c_source: ?Str = .None,
+    allow_at_comptime: bool = true,
+    cpp: bool = false,
 );
 
 ForeignLanguage :: @enum(C, CPlusPlus, ObjectiveC);
@@ -307,12 +309,36 @@ SOKOL_ALL_SOURCE :: """
 #include "sokol_glue.h"
 #include "sokol_log.h"
 #include "sokol_time.h"
-#include "sokol_audio.h"
+// #include "sokol_audio.h"
 #include "util/sokol_debugtext.h"
 #include "util/sokol_gl.h"
 #include "util/sokol_shape.h"
 """
-// #include "util/sokol_imgui.h"
+
+
+sokol_and_imgui_macos_lib: ForeignLibrary : (
+    name = "sokol_imgui",
+    macro_defines = @slice("SOKOL_METAL", "SOKOL_IMPL", "SOKOL_NO_ENTRY", "CIMGUI_DEFINE_ENUMS_AND_STRUCTS") ast_alloc(),
+    include_paths = @slice("bindings/sokol", "bindings/cimgui") ast_alloc(),
+    macos_frameworks = @slice("Metal", "MetalKit", "Cocoa", "QuartzCore") ast_alloc(),
+    objective_c = true,
+    raw_c_source = (Some = SOKOL_AND_IMGUI_ALL_SOURCE),
+    allow_at_comptime = false,
+);
+
+SOKOL_AND_IMGUI_ALL_SOURCE :: """
+#include "sokol_app.h"
+#include "sokol_gfx.h"
+#include "sokol_glue.h"
+#include "sokol_log.h"
+#include "sokol_time.h"
+// #include "sokol_audio.h"
+#include "util/sokol_debugtext.h"
+#include "util/sokol_gl.h"
+#include "util/sokol_shape.h"
+#include "cimgui.h"
+#include "util/sokol_imgui.h"
+"""
 
 // TODO: be consistant about figuring out the cwd
 tracy_lib: ForeignLibrary : (
@@ -320,6 +346,22 @@ tracy_lib: ForeignLibrary : (
     input_files = "bindings/tracy/public/TracyClient.cpp".single(ast_alloc()),
     macro_defines = "TRACY_ENABLE=1".single(ast_alloc()),
     include_paths = "bindings/tracy".single(ast_alloc()),
+);
+
+// dont forget recursive clone git submodules
+dearimgui_lib: ForeignLibrary : (
+    name = "dearimgui",
+    include_paths = ("bindings/cimgui").single(ast_alloc()),
+    raw_c_source = (Some = """
+#include "imgui/imgui.cpp"
+#include "imgui/imgui_draw.cpp"
+#include "imgui/imgui_tables.cpp"
+#include "imgui/imgui_widgets.cpp"
+#include "imgui/imgui_demo.cpp"
+#define IMGUI_DEFINE_MATH_OPERATORS
+#include "cimgui.cpp"
+    """),
+    cpp = true,
 );
 
 ::display_slice(Str);
@@ -341,6 +383,10 @@ fn build_foreign_cached(lib: ForeignLibrary, env: Ty(Arch, Os), linking: LinkTim
     
     if lib.objective_c {|
         args&.push_all(@slice ("-x", "objective-c"));
+    };
+    
+    if lib.cpp {|
+        args&.push_all(@slice ("-x", "c++"));
     };
     
     // TODO: put this on the lib struct? tracy spams
@@ -412,11 +458,17 @@ fn add_lib(self: *ComptimeLibs, lib: ForeignLibrary) void = {
     ::Result(Str, void);
     aot_path := lib.build_foreign_cached(env, .Static).unwrap();
     
-    jit_path := lib.build_foreign_cached(env, .Dynamic).unwrap(); 
-    jit := dlopen(jit_path.maybe_borrow_cstr(temp()), DlFlag.Lazy);
-    @assert(!jit.lib.is_null(), "failed to open '%' at '%' for comptime", lib.name, jit_path);
+    ::if(?DlHandle);
+    jit: ?DlHandle = if lib.allow_at_comptime {|
+        jit_path := lib.build_foreign_cached(env, .Dynamic).unwrap(); 
+        jit := dlopen(jit_path.maybe_borrow_cstr(temp()), DlFlag.Lazy);
+        @assert(!jit.lib.is_null(), "failed to open '%' at '%' for comptime", lib.name, jit_path);
+        (Some = jit)
+    } else {|
+        .None
+    };
     
-    built: BuiltLib = (jit = (Some = jit), aot_object_file = (Some = aot_path));
+    built: BuiltLib = (jit = jit, aot_object_file = (Some = aot_path));
     name := self.ctx.intern_string(lib.name);
     prev := self.handles&.insert(name, built);
     @assert(prev.is_none(), "added lib % twice", lib.name);

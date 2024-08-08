@@ -692,6 +692,10 @@ impl<'a, 'p> Compile<'a, 'p> {
                     self.program[f].body = FuncImpl::Merged(vec![FuncImpl::ComptimeAddr(addr as usize), FuncImpl::DynamicImport(name)]);
                     unsafe { self_hosted::put_jitted_function(self, f, addr as i64) };
                     special = true;
+                } else {
+                    // TODO: warn? have different #import that means we expect not at comptime?
+                    self.program[f].body = FuncImpl::DynamicImport(name);
+                    special = true;
                 }
             }
         }
