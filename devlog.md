@@ -1,3 +1,10 @@
+##
+
+format_into.
+commenting out the expr.done shortcircuiting works so we know its something wrongly being marked done.
+the problem is that im leaking a loss of dispatch.enclosing_function somewhere.
+hackily setting it back every compile_expr call lets it get further. still need to track down the actual mistake.
+
 ## (Aug 6)
 
 - crippling bug with `expr[] = (Tag = self.box(expr[]));` where you have to make a var for the self.box(...) or it segfaults

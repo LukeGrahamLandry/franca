@@ -296,7 +296,9 @@ fn new_sema_fill_export_ffi(out: *List(u8)) void = {
             };
         };
         @assert(unused == 0, "ice: unquote_placeholders didn't use all arguments\n%", template&.log(self.pool));
-        self.renumber_expr(template&, .None);
+        self.renumber_expr(template&, .None); // :SLOW
+        //walk: MarkNotDone = (_hack = 0);
+        //walk&.walk_expr(template&); // TODO: might not need this :SLOW
         template
     };
     
@@ -384,14 +386,18 @@ fn new_sema_fill_export_ffi(out: *List(u8)) void = {
     
     @fmt(out, "fn type(e: FatExpr) FatExpr #macro #ct #comptime_addr(%);\n", type_macro);
     type_macro: rawptr : fn(c: CompilerRs, e: FatExpr) FatExpr = {
-        ty := c[][].poll_in_place(Type) {()Maybe(Type)|
-            @check(c[][].compile_expr(e&, .None)) local_return;
+        self := c[][];
+        old := self.dispatch.enclosing_function;
+        self.dispatch.enclosing_function = .None;
+        ty := self.poll_in_place(Type) {()Maybe(Type)|
+            @check(self.compile_expr(e&, .None)) local_return;
             (Ok = e.ty)
         };
-        ty := c[][].unwrap_report_error(Type, ty)
-        value := c[][].to_values(Type, ty); 
+        self.dispatch.enclosing_function = old;
+        ty := self.unwrap_report_error(Type, ty)
+        value := self.to_values(Type, ty); 
         e&.set(value, Type); // :get_or_create_type
-        @log_event("we know the type! %", e&.log(c[][].pool));
+        @log_event("we know the type! %", e&.log(c[][].pool)) self;
         return(e);
         FatExpr.unreachable_hack() // :FUCKED
     };
@@ -478,7 +484,10 @@ fn new_sema_fill_export_ffi(out: *List(u8)) void = {
     @fmt(out, "fn compile_ast(e: FatExpr) FatExpr #ct #comptime_addr(%);\n", compile_ast);
     compile_ast: rawptr : fn(c: CompilerRs, expr: FatExpr) FatExpr = {
         self := c[][];
+        old := self.dispatch.enclosing_function;
+        self.dispatch.enclosing_function = .None;
         res := self.poll_in_place(void, => self.compile_expr(expr&, .None));
+        self.dispatch.enclosing_function = old;
         self.unwrap_report_error(void, res);
         return(expr);
         FatExpr.unreachable_hack()

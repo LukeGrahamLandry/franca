@@ -24,11 +24,12 @@ OverloadOption :: @struct(
     ret: ?Type, // For #generic, we might not know without the args
 );
 
-DEBUG_SPAM_LOG :: true;
+DEBUG_SPAM_LOG :: false;
 //log_event :: println;
-fn log_event(arg: FatExpr) FatExpr #macro = {
-    //@{ @[arg]; }
-    println(arg)
+fn log_event(fmt_args: FatExpr, compiler: FatExpr) FatExpr #macro = {
+    @{ @[fmt_args]; }
+    //compile_ast(compiler);
+    //println(fmt_args)
 }
 fn compile_stmt(self: *SelfHosted, stmt: *FatStmt) Maybe(bool) = {
     self.last_loc = stmt.loc;
@@ -125,6 +126,7 @@ fn decl_var_pattern(self: *SelfHosted, stmt: *FatStmt) Maybe(bool) #once = {
 ::opt_map(Type, Type);
 fn compile_place_expr(self: *SelfHosted, place: *FatExpr, requested: ResultType, want_deref: bool) Maybe(void) = {
     loc := place.loc;
+    self.last_loc = place.loc;
     @match(place.expr&) {
         fn Block(f) => {
             // TODO: the old version didn't have to do this... 
@@ -133,6 +135,9 @@ fn compile_place_expr(self: *SelfHosted, place: *FatExpr, requested: ResultType,
                 return(self.compile_place_expr(place, requested, want_deref));
             };
             return(@err("a block cannot be a place expression (for spite reasons, not technical ones)"));
+        }
+        fn Cast(arg) => {
+            return(self.compile_place_expr(arg[], requested, want_deref));
         }
         fn GetVar(var) => {
             val_ty := self.scopes.get_var_type(var[]);
@@ -248,7 +253,6 @@ fn field_access_expr(self: *SelfHosted, container_ptr: *FatExpr, name: Symbol) M
             @debug_assert(f.layout_done);
             each f.fields { f | 
                 if f.name == name {|
-                    container_ptr.done = true;
                     return(Ok = (f.byte_offset, f.ty));
                 };
             };
@@ -297,7 +301,7 @@ fn deref_one(self: *SelfHosted, ptr: *FatExpr) Maybe(void) = {
 }
 
 fn decl_var(self: *SelfHosted, name: Var, ty: *LazyType, value: *FatExpr) Maybe(void) = {
-    @log_event("decl_var %", name&.log(self.pool)); // :debug
+    @log_event("decl_var %", name&.log(self.pool)) self; // :debug
     // TODO: this would make sense but i don't actually need it i guess since i store variable types globally.
     //@debug_assert(self.dispatch.enclosing_function.is_some(), "ICE: runtime vars must have an enclosing function");
     no_type := ty.is(.Infer);
@@ -384,7 +388,7 @@ fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = 
             @if_let(b.name) fn Var(name) => {
                 @debug_assert(b.kind == name.kind);
                 is_new := self.scopes.put_var_type(name, b.ty&.unwrap());
-                @log_event("bind param %", name&.log(self.pool));
+                @log_event("bind param %", name&.log(self.pool)) self;
                 if(!is_new, => return(@err("overwrite arg? %", name&.log(self.pool))));
             };
         };
@@ -418,6 +422,7 @@ fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = 
             };
 
             @check(self.compile_expr(expr, func.finished_ret.want())) return;
+            //@debug_assert(self.dispatch.enclosing_function.is_some() && self.dispatch.enclosing_function.unwrap() == fid, "lost enclosing");
             self.dispatch.enclosing_function = old_func;
             if func.ret&.is(.Infer) {|
                 func.finished_ret = (Some = expr.ty);
@@ -425,7 +430,7 @@ fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = 
         }
         fn Intrinsic(op) => ();
         fn ComptimeAddr(ptr) => {
-            //@debug_assert(self.aarch64&.get_fn(fid).is_some());
+            @debug_assert(self.aarch64&.get_fn(fid).is_some());
         }
         @default => {
             @check(self.infer_return(fid)) return;
@@ -493,7 +498,7 @@ fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = 
                         args := self.arg_types(payload.arg);
                         f_ty: FnType = (arg = payload.arg, ret = payload.ret, arity = args.len.trunc());
                         target := @check(self.resolve_by_type(payload.os, f_ty, func.loc)) return;
-                        func.body = (Redirect = target)
+                        func.body = (Redirect = target);
                         
                     };
                     @default => ();
@@ -502,7 +507,7 @@ fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = 
             @err_assert(good, "Function has no implementation %", func.log(self.pool)) return;
         };
     };
-    @log_event("body compiled: %", fid.as_index());
+    @log_event("body compiled: %", fid.as_index()) self;
     func.set_flag(.EnsuredCompiled);
     .Ok
 }
@@ -513,10 +518,11 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
         assert(expr.ty != UnknownType, "done but unknown type");
         return(.Ok);
     };
+    todo_dont_lose := self.dispatch.enclosing_function;
     old_loc := self.last_loc;
     self.last_loc = expr.loc;
     self.dispatch.active_stack.push(expr = expr, requested = requested);
-    //@log_event("compile_expr % %", expr.log(self.pool), self.dispatch.enclosing_function&.tag());
+    //@log_event("compile_expr % %", expr.log(self.pool), self.dispatch.enclosing_function&.tag()) self;
     
     @match(expr.expr&) {
         fn Poison(placeholder) => {
@@ -578,7 +584,7 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
             // This is only different from a Value node because the 'Str' is not a builtin so the parser is unable to create it.
             byte := self.get_or_create_type(u8);
             str := self.to_values(Str, self.pool.get(i[]));
-            expr.set(str, @check(self.create_slice_type(byte)) return);
+            expr.set(str, @check(self.create_slice_type(byte, expr.loc)) return);
         }
         fn ConstEval(inner) => {
             // :PushConstFnCtx 
@@ -597,7 +603,9 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
             @check(self.compile_place_expr(inner[], requested, false)) return;
             expr[] = inner[][];
         }
-        fn PtrOffset(_) => return(@err("ICE: PtrOffset should be done=true"));
+        fn PtrOffset(f) => {
+            expr.done = f.ptr.done;
+        }
         fn GetParsed() => return(@err("ICE: GetParsed is handled by scope.fr"));
         fn Closure(func) => {
             fid := self.add_function(func[][]);
@@ -643,6 +651,7 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
                 @default => {
                     // Otherwise its a normal struct/tagged field.
                     @check(self.compile_place_expr(expr, requested, true)) return;
+                    @check(self.compile_expr(expr, requested)) return;
                 };
             };
         }
@@ -669,13 +678,16 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
             if self.aarch64&.get_fn(unquote_placeholders).is_none() {|
                 return(Suspend = self.wait_for(Jit = unquote_placeholders));
             };
-                
+            
+            //walk: MarkNotDone = (_hack = 0);
+            //walk&.walk_expr(arg[]); // TODO: might not need this :SLOW
+            
             walk: Unquote = (compiler = self, placeholders = list(self.get_alloc()));
             @try(walk&.walk_expr(arg[])) return;
             expr_ty := @unwrap(self.env.fat_expr_type, "used quoted ast during bootstrapping") return;
             value := self.to_values(FatExpr, arg[][]);
             expr.set(value, expr_ty);
-            @log_event("quote with % placeholders", walk.placeholders.len);
+            @log_event("quote with % placeholders", walk.placeholders.len) self;
                 
             if !walk.placeholders.is_empty() {|
                 walk.placeholders&.push(expr[]);
@@ -693,7 +705,7 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
             @check(self.compile_expr(arg[], .None)) return;
             types := self.arg_types(arg.ty);
             // TODO: typecheck that all are the same!
-            expr.ty = @check(self.create_slice_type(types[0])) return;
+            expr.ty = @check(self.create_slice_type(types[0], arg.loc)) return;
             expr.done = arg.done;
         }
         fn As(f) => {
@@ -749,6 +761,7 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
     };
     self.last_loc = old_loc;
     self.dispatch.active_stack.pop();
+    self.dispatch.enclosing_function = todo_dont_lose;
     @debug_assert(!expr.ty.is_unknown(), "[compile_expr] Unknown type for %", expr.log(self.pool));
     .Ok
 }
@@ -914,7 +927,7 @@ fn adjust_named_arguments(self: *SelfHosted, fid: FuncId, arg_expr: *FatExpr) Re
         arg_expr.expr = (Tuple = args.rs());
         arg_expr.done = false;
         arg_expr.ty = UnknownType;
-        @log_event("after named %", arg_expr.log(self.pool))
+        @log_event("after named %", arg_expr.log(self.pool)) self;
     };
     .Ok
 }
@@ -980,7 +993,7 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
     @debug_assert(!f_expr.ty.is_unknown(), "call_direct expected fn expr to be compiled");
     fid := @check(self.immediate_eval_expr(f_expr, f_expr.ty)) return;
     fid := FuncId.assume_cast(fid&)[];
-    @log_event("compile direct call %", fid);
+    @log_event("compile direct call %", fid) self;
     func := self.get_function(fid);
     
     assert(!func.get_flag(.MayHaveAquiredCaptures), "Not Yet Implemented: MayHaveAquiredCaptures");
@@ -1021,7 +1034,7 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
         //@check(self.can_assign(arg_ty, arg_expr.ty)) return; TODO: type check
         @check(self.infer_return(fid)) return;
         ret_ty := func.finished_ret.unwrap();
-        @log_event("UnsafeNoopCast % -> %", self.log_type(arg_ty), self.log_type(ret_ty));
+        @log_event("UnsafeNoopCast % -> %", self.log_type(arg_ty), self.log_type(ret_ty)) self;
         // TODO
         // assert_eq!(self.program.slot_count(arg_expr.ty), self.program.slot_count(ret_ty));
         expr.expr = (Cast = arg_expr);
@@ -1032,7 +1045,8 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
     
     capturing   := func.get_flag(.AllowRtCapture).or(func.get_flag(.MayHaveAquiredCaptures));
     will_inline := capturing.or(func.cc.unwrap() == .Inline);
-    if(will_inline && func.get_flag(.NoInline), => return(@err("must inline a function marked #noinline")));
+    deny_inline := func.get_flag(.NoInline);
+    if(will_inline && deny_inline, => return(@err("must inline a function marked #noinline")));
     
     if will_inline {|
         if capturing {|
@@ -1076,6 +1090,13 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
     if func.get_flag(.TryConstantFold) && !self.dispatch.enclosing_function.is_some() && arg_expr.is_const() {|
         value := @check(self.immediate_eval_expr(expr, ret_ty)) return;
         expr.set(value, ret_ty); // TODO: redundant?
+    } else {|
+        // this fixes functions with all const args the reduce to just a value emitting useless calls to like get the number 65 or whatever if you do ascii("A"). 
+        if !deny_inline && arg_expr.is_raw_unit() {|
+            if func.body&.is(.Normal) && func.body.Normal.expr&.is(.Value) {|
+                expr.set(func.body.Normal.expr.Value.bytes&.deep_clone(self.get_alloc()), ret_ty);
+            };
+        }
     };
     
     if func.get_flag(.Once) {|
@@ -1100,10 +1121,10 @@ fn add_callee(self: *SelfHosted, fid: FuncId) bool = {
         };
         current.callees&.add_unique(fid, self.get_alloc());
         self.aarch64&.extend_blanks(fid);
-        @log_event("added % calls %", current_f, fid);
+        @log_event("added % calls %", current_f, fid) self;
     };
     if is_const_context {|
-        @log_event("skip adding callee for %", fid);
+        @log_event("skip adding callee for %", fid) self;
     };
     is_const_context
 }
@@ -1135,9 +1156,10 @@ fn emit_capturing_call(self: *SelfHosted, f: FuncId, expr_out: *FatExpr, request
         }
     };
     // TODO: does this ever help?
-    if !requested&.is(.Specific) {|
-        requested = (Specific = ret_ty);
-    };
+    //       no but it sure hurts...
+    //if !requested&.is(.Specific) {|
+    //    //requested = (Specific = ret_ty);
+    //};
     
     label_ty := self.intern_type(Label = ret_ty);
     // TODO: mutual callees as well.
@@ -1297,7 +1319,7 @@ MemoKey :: Ty(FuncId, Values);
 fn curry_const_args(self: *SelfHosted, original_f: FuncId, f_expr: *FatExpr, arg_expr: *FatExpr) Maybe(FuncId) #once = {
     key: MemoKey = (original_f, @check(self.const_args_key(original_f, arg_expr)) return);
     if self.dispatch.const_bound_memo&.get(key&) { new_f |
-        @log_event("reuse baked const args % -> % (%)", original_f, new_f, key._1&);
+        @log_event("reuse baked const args % -> % (%)", original_f, new_f, key._1&) self;
         func := self.get_function(new_f);
         if func.get_flag(.AnyConstArgs) {|
             original := self.get_function(original_f);
@@ -1321,7 +1343,7 @@ fn curry_const_args(self: *SelfHosted, original_f: FuncId, f_expr: *FatExpr, arg
     res := self.maybe_renumber_and_dup_scope(new_func&);
     if(res&.is(.Err), => return(Err = self.box(res.Err)));
     new_fid := self.add_function(new_func);
-    @log_event("bake const args % -> %", original_f, new_fid);
+    @log_event("bake const args % -> %", original_f, new_fid) self;
     @check(self.ensure_resolved_sign(new_fid)) return;
     @check(self.ensure_resolved_body(new_fid)) return;
     // TODO: mark func as in progress somehow so nobody can yield on it. 
@@ -1336,6 +1358,7 @@ fn curry_const_args(self: *SelfHosted, original_f: FuncId, f_expr: *FatExpr, arg
 }
 
 fn curry_const_args_inner(self: *SelfHosted, original_f: FuncId, new_fid: FuncId, f_expr: *FatExpr, arg_expr: *FatExpr) Maybe(FuncId) = {
+    @log_event("work baking const args % -> %", original_f, new_fid) self;
     func := self.get_function(new_fid);
     ::if(Maybe(FuncId));
     if func.arg.bindings.len == 1 {|
@@ -1363,7 +1386,7 @@ fn curry_const_args_inner(self: *SelfHosted, original_f: FuncId, new_fid: FuncId
         removed_count := 0;
         range(0, func.arg.bindings.len) { i |
             continue :: local_return;
-            @log_event("%: check %/%", i, i-removed_count, func.arg.bindings.len);
+            @log_event("%: check %/%", i, i-removed_count, func.arg.bindings.len) self;
             b := func.arg.bindings[i - removed_count]&;
             arg_expr := arg_expr.expr.Tuple[i]&;
             if b.kind != .Const {|
@@ -1378,7 +1401,7 @@ fn curry_const_args_inner(self: *SelfHosted, original_f: FuncId, new_fid: FuncId
             name := or b.var() {|
                 return(@err("arg needs name (unreachable?)"))
             };
-            @log_event("bake arg %: %", i, name&.log(self.pool));
+            @log_event("bake arg %: %", i, name&.log(self.pool)) self;
             // TODO: if you yield here, you spam clone the function. 
             
             // We might not be able to know the types expected for each parameter up front (because they can reference previous consts),
@@ -1412,13 +1435,14 @@ fn curry_const_args_inner(self: *SelfHosted, original_f: FuncId, new_fid: FuncId
 fn bind_const_arg(self: *SelfHosted, o_f: FuncId, arg_name: Var, arg_value: Values, arg_ty_found: Type, loc: Span) Maybe(void) = {
     // I don't want to renumber, so make sure to do the clone before resolving.
     // TODO: reslove captured constants anyway so dont haveto do the chain lookup redundantly on each speciailization. -- Apr 24
-    @log_event("Bind $% = %", arg_name&.log(self.pool), arg_value&);
+    @log_event("Bind $% = %", arg_name&.log(self.pool), arg_value&) self;
     func := self.get_function(o_f);
     @debug_assert(func.get_flag(.ResolvedBody) && func.get_flag(.ResolvedSign));
     arg_ty := @check(self.get_type_for_arg(func.arg&, arg_name)) return;
     
-    assert(arg_ty_found == arg_ty, "TODO: better type-check");
+    //assert(arg_ty_found == arg_ty, "TODO: better type-check");
     //self.type_check_arg(arg_ty_found, arg_ty, "bind arg")?;
+    @check(self.can_assign(arg_ty, arg_ty_found)) return;
 
     is_function := !(!self.get_type(arg_ty).is(.Fn) && arg_ty != FuncId);
     // TODO: not sure if i actually need this but it seems like i should.
@@ -1572,7 +1596,7 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
     overloads := self.dispatch.overloads&.nested_index(i.as_index());
     self.compute_new_overloads(overloads);
     interesting: List(OverloadOption) = list(temp());
-    @log_event("% total options", overloads.ready.len);
+    @log_event("% total options", overloads.ready.len) self;
     each overloads.ready { opt | 
         continue :: local_return;
         @if_let(requested_ret) fn Specific(want) => {
@@ -1593,7 +1617,7 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
     
     // TODO: but what if there are more overloads coming later? 
     if interesting.len == 1 {|
-        @log_event("chose overload %", interesting[0].func);
+        @log_event("chose overload %", interesting[0].func) self;
         func := self.get_function(interesting[0].func);
         @if(DEBUG_SPAM_LOG) self.codemap.show_error_line(func.loc);
         return(Ok = interesting[0].func);
@@ -1649,7 +1673,7 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
         still_interesting&.push(opt[]);
     };
     if still_interesting.len == 1 {|
-        @log_event("chose overload %", still_interesting[0].func);
+        @log_event("chose overload %", still_interesting[0].func) self;
         func := self.get_function(interesting[0].func);
         @if(DEBUG_SPAM_LOG) self.codemap.show_error_line(func.loc);
         return(Ok = still_interesting[0].func);
@@ -1686,12 +1710,12 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
     };
     
     if still_interesting.len == 1 {|
-        @log_event("chose overload %", still_interesting[0].func);
+        @log_event("chose overload %", still_interesting[0].func) self;
         return(Ok = still_interesting[0].func);
     };
     
     if !blocked.is_empty() {|
-        @log_event("block len = %", blocked.len);
+        @log_event("block len = %", blocked.len) self;
         return(Suspend = blocked[0]);  // TODO: return all? don't just pick one. 
     };
     ::?**ParseErr;
@@ -1700,9 +1724,9 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
     };
     
     // TODO: don't spam log since we might discard the error.
-    @log_event("ambigous overload for arg % %", self.log_type(arg_expr.ty), arg_expr.log(self.pool));
+    @log_event("ambigous overload for arg % %", self.log_type(arg_expr.ty), arg_expr.log(self.pool)) self;
     self.last_loc = arg_expr.loc;
-    @log_event("% matching options", interesting.len);
+    @log_event("% matching options", interesting.len) self;
     for interesting { opt |
         func := self.get_function(opt.func);
         @if(DEBUG_SPAM_LOG) self.codemap.show_error_line(func.loc);
@@ -1758,14 +1782,14 @@ fn hoist_constants(self: *SelfHosted, body: []FatStmt) Maybe(void) #once = {
                         );
                         os_value := self.to_values(OverloadSet, i);
                         @check(self.save_const_values(var[], os_value, OverloadSet, func.loc)) return;  // :get_or_create_type
-                        @log_event("create os % (%) for %", i.as_index(), var.log(self.pool), fid);
+                        @log_event("create os % (%) for %", i.as_index(), var.log(self.pool), fid) self;
                         overload_out = (Some = i);
                     } else {|
                         overloads := @check(self.find_const(var[], OverloadSet.want())) return;  // :get_or_create_type
                         i := OverloadSet.assume_cast(overloads._0&)[];
                         os := self.dispatch.overloads&.nested_index(i.as_index());
                         os.pending&.push(fid, self.get_alloc());
-                        @log_event("add to os % (%) for %", i.as_index(), var.log(self.pool), fid);
+                        @log_event("add to os % (%) for %", i.as_index(), var.log(self.pool), fid) self;
                         overload_out = (Some = i);
                     };
                 };
@@ -1935,7 +1959,7 @@ fn handle_declare_constant(self: *SelfHosted, name: Var, ty: *LazyType, value: *
         };
         real_value_box := invocation.arg;
         hole := self.intern_type(.Placeholder);
-        @log_event("% = @rec %", name&.log(self.pool), hole);
+        @log_event("% = @rec %", name&.log(self.pool), hole) self;
         val  := self.to_values(Type, hole);
         value.set(val, Type);
         // This can't just fallthrough and call update_placeholder at the end of this function like the old version did,
@@ -1964,7 +1988,7 @@ fn handle_finish_rec_type(self: *SelfHosted, hole: Type, name: Var, value: *FatE
     result_type := Type.assume_cast(value&)[];
     assert(result_type != hole, "ICE: @rec resolved to itself");
     self.update_placeholder(hole, result_type, name.name);
-    @log_event("update_placeholder @rec % -> %", hole, result_type);
+    @log_event("update_placeholder @rec % -> %", hole, result_type) self;
     .Ok
 }
 
@@ -2086,6 +2110,13 @@ fn can_assign(self: *SelfHosted, want: Type, found: Type) Maybe(void) = {
     want_info  := self.get_type(want);
     found_info := self.get_type(found);
     
+    if found == FuncId {|
+        @if_let(want_info) fn Fn(f) => {
+            // TODO: typecheck!!
+            return(.Ok);
+        };
+    };
+    
     @err("Type Error: expected % found %", self.log_type(want), self.log_type(found))
     
 }
@@ -2105,7 +2136,7 @@ fn resolve_by_type(self: *SelfHosted, os: OverloadSet, f_ty: FnType, loc: Span) 
 ::?FnType;
 fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Values) = {
     self.last_loc = expr.loc;
-    @log_event("imm_eval %", expr.log(self.pool));
+    @log_event("imm_eval %", expr.log(self.pool)) self;
     @debug_assert(!ret_ty.is_unknown(), "immediate_eval_expr unknown");
     old_func := self.dispatch.enclosing_function;
     self.dispatch.enclosing_function = .None;
@@ -2143,7 +2174,7 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
                 };
                 @debug_assert(func.cc.unwrap() == .CCallReg, "expected cc CCallReg");
                 self.aarch64&.bump_dirty();
-                @log_event("imm_eval direct % %", fid.as_index(), self.pool.get(func.name));
+                @log_event("imm_eval direct % %", fid.as_index(), self.pool.get(func.name)) self;
                 // SAFETY: we're passing comp_ctx=false so it won't try to use the pointer as a real CompilerRs.
                 result := hack&.call_dynamic(fn_ptr.int_from_rawptr(), f_ty&, args&, false);
                 self.dispatch.enclosing_function = old_func;
@@ -2191,7 +2222,7 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
     fake_func.finished_ret = (Some = ret_ty);
     fake_func.cc = (Some = .CCallReg);    
     fid := self.add_function(fake_func);
-    @log_event("imm eval wait for lit %: %", fid, expr.log(self.pool));
+    @log_event("imm eval wait for lit %: %", fid, expr.log(self.pool)) self;
     f_value := self.to_values(FuncId, fid);
     f_e: Expr = (Value = (bytes = f_value, coerced = false));
     f_expr := self.box(synthetic_ty(f_e, expr.loc, FuncId));
@@ -2252,9 +2283,36 @@ fn check_quick_eval(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) ?Values = {
                                 return(Some = res);
                             }
                             fn Err(e) => {
-                                @log_event("ERROR: %", e.msg);   
+                                @println("ERROR: %", e.msg);
                             } // TODO: don't just swollow errors
                         }
+                    };
+                };
+                
+                @if_let(self.get_type(it.f.ty)) fn Fn(f) => {
+                    if self.check_quick_eval(it.arg, f.arg) { arg_value |
+                        if it.arg.ty != f.arg {| // TODO
+                            return(.None);
+                        };
+                        f_id := FuncId.assume_cast(it.f.expr.Value.bytes&)[];
+                        if self.aarch64&.get_fn(f_id) { f_ptr |
+                            func := self.get_function(f_id);
+                            comp_ctx := func.cc.unwrap() == .CCallRegCt;
+                            evil_hack := self;
+                            evil_hack := self&; 
+                            self.finish_layout_deep(it.f.ty);
+                            self.aarch64&.bump_dirty();
+                            res := evil_hack&.call_dynamic_values(f_ptr.int_from_rawptr(), f, arg_value&.bytes(), comp_ctx);
+                            @match(res) {
+                                fn Ok(res) => {
+                                    expr.set(res&.clone(self.get_alloc()), f.ret);
+                                    return(Some = res);
+                                }
+                                fn Err(e) => {
+                                    @println("ERROR: %", e.msg);
+                                } // TODO: don't just swollow errors
+                            }
+                        };
                     };
                 };
             };
@@ -2264,14 +2322,15 @@ fn check_quick_eval(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) ?Values = {
     }
 }
 
-fn create_slice_type(self: *SelfHosted, inner: Type) Maybe(Type) = {
-    @log_event("Create slice %", inner);
+fn create_slice_type(self: *SelfHosted, inner: Type, loc: Span) Maybe(Type) = {
+    @log_event("Create slice %", inner) self;
     arg_value := self.to_values(Type, inner);  // :get_or_create_type
     f_value := self.to_values(FuncId, @unwrap(self.env.make_slice_t, "slice type not ready!") return);  // :get_or_create_type
-    arg: FatExpr = (expr = (Value = (bytes = arg_value, coerced = false)), loc = Span.zeroed(), ty = Type, done = true);
-    f: FatExpr   = (expr = (Value = (bytes = f_value, coerced = false)), loc = Span.zeroed(), ty = FuncId, done = true);
-    s_ty := synthetic_ty((Call = (f = self.box(f), arg = self.box(arg))), Span.zeroed(), Type);
-    value := self.poll_in_place(Values, => self.immediate_eval_expr(s_ty&, Type));
+    arg: FatExpr = (expr = (Value = (bytes = arg_value, coerced = false)), loc = loc, ty = Type, done = true);
+    f: FatExpr   = (expr = (Value = (bytes = f_value, coerced = false)), loc = loc, ty = FuncId, done = true);
+    s_ty := synthetic_ty((Call = (f = self.box(f), arg = self.box(arg))), loc, Type);
+    s_ty := self.box(s_ty);
+    value := self.poll_in_place(Values, => self.immediate_eval_expr(s_ty, Type));
     value := @try(value) return;  // TODO: miscompilation if you inline this ^ :fucked
     (Ok = Type.assume_cast(value&)[])
 }
@@ -2302,12 +2361,12 @@ fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
     
     self.finish_layout_deep(fat_expr_type).unwrap();
     
-    @log_event("call user macro %", invocation.handler.log(self.pool));
+    @log_event("call user macro %", invocation.handler.log(self.pool)) self;
     single := invocation.target.is_raw_unit();
     if single {|
-        @log_event("macro input: %", invocation.arg.log(self.pool));
+        @log_event("macro input: %", invocation.arg.log(self.pool)) self;
     } else {|
-        @log_event("macro input: (%, %)", invocation.arg.log(self.pool), invocation.target.log(self.pool));
+        @log_event("macro input: (%, %)", invocation.arg.log(self.pool), invocation.target.log(self.pool)) self;
     };
     
     @check(self.compile_expr(invocation.handler, .None)) return;
@@ -2351,7 +2410,9 @@ fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
     self.aarch64&.bump_dirty();
     result := @try(hack&.call_dynamic_inner(fn_ptr.int_from_rawptr(), f_ty&, args&, needs_ct)) return;
     expr[] = FatExpr.assume_cast(result&)[];
-    @log_event("macro output: %", expr.log(self.pool));
+    @log_event("macro output: %", expr.log(self.pool)) self;
+    //walk: MarkNotDone = (_hack = 0);
+    //walk&.walk_expr(expr); // TODO: might not need this :SLOW
     .Ok
 }
 
@@ -2421,7 +2482,7 @@ fn builtin_macro(self: *SelfHosted, builtin_name: Symbol) Result(Ty(Values, Type
         @case(Flag.UnknownType.ident()) => builtin_type(UnknownType);
         @case(Flag.compiler_debug_assert_eq_i64.ident()) => {
             my_assert_eq: rawptr : fn(a: i64, b: i64) i64 = {
-                @log_event("[my_assert_eq] % vs %", a, b);
+                @log_event("[my_assert_eq] % vs %", a, b) self;
                 assert_eq(a, b);
                 a
             };

@@ -2,14 +2,17 @@
 //! Then we translate that into function/struct/enum definitions in Franca syntax.
 //! Inspired by https://github.com/floooh/sokol/tree/master/bindgen 
 //!    I originally just made gen_franca.py in there but it seems dumb to be making a new language and not even use it. 
-//!    For reference this file replaces ~530 lines of python (gen_ir+gen_franca),
-//!    but mine is also much uglier and less robust. ie. I depend on the order of fields in clang's output. 
-//!    Alas now my version is more convoluted because I want to handle cimgui as well. 
+//!    For reference, when this file replaced ~530 lines of python (gen_ir+gen_franca), it was 500 lines. 
+//!    But mine is also much uglier and less robust. ie. I depend on the order of fields in clang's output. 
+//!    Alas, now my version has grown longer and more convoluted because I want to handle Dear Imgui as well. 
 // TODO: unnamed enum constants 
 // TODO: bitfields
 // TODO: anon union field
 // TODO: sad that im generating my bindings off the generated cimgui. 
 //       handle c++ and be able to generate c wrappers too so i don't rely on some guy's giant blob of lua!
+// TODO: clean up the handling of prefixes, pass in a data structure instead of switching over specific libraries. 
+//       it would be nice if people could just call this from thier driver program if they want a new library. 
+// TODO: losing function arguments for wuffs
 
 CDecl :: @rec @tagged(
     Record: @struct(name: ?Str, fields: []CRecordField, tag: CRecordTag),
@@ -18,7 +21,7 @@ CDecl :: @rec @tagged(
     TypeDef: @struct(name: Str, type: Str),
 );
 
-CRecordTag :: @enum(i64) (Struct, Union); ::enum(CRecordTag);
+CRecordTag :: @enum(i64) (struct, union); ::enum(CRecordTag); // note: these names are stringified. 
 CField :: @struct(name: Str, type: Str);
 CRecordField :: @tagged(Named: CField, Anon: *CDecl);
 CEnumItem :: @struct(name: Str, value: ?Str);
@@ -30,18 +33,25 @@ fn main() void = {
     path := cli_args();
     path := path.last();
     path := path.unwrap()[].str();
-    (ast, prefixes) := load_ast(path);
+    
+    start := timestamp();
+    (ast, prefixes, called_clang) := load_ast(path);
+    loaded := timestamp();
     json: JsonParser = new_json(ast, temp());
     decls := json&.extract_c_decls(prefixes);
     out: List(u8) = list(temp());
     generate_franca_bindings(out&, decls, path);
+    done := timestamp();
     println(out.items());
+    if called_clang {|
+        @eprintln("Clang: %ms. Processing: %ms.", loaded - start, done - loaded);
+    };
     exit(0);
 }
 
 HackPrefixes :: @enum(None, Sokol, DearImgui, Wuffs); ::enum(HackPrefixes);
 
-fn load_ast(path: Str) Ty(Str, HackPrefixes) = {
+fn load_ast(path: Str) Ty(Str, HackPrefixes, bool) = {
     fn do_clang(path: Str, extra: *List(Str)) Str = {
         // TODO: use the version of exec that looks in PATH
         clang_path := "/opt/homebrew/opt/llvm/bin/clang"; // different output from clang++ (CompoundStmt)
@@ -52,13 +62,13 @@ fn load_ast(path: Str) Ty(Str, HackPrefixes) = {
         out.items()
     }
     
-    ::if(Ty(Str, HackPrefixes));
+    ::if(Ty(Str, HackPrefixes, bool));
     if path.ends_with(".h").or(=> path.ends_with(".c")) {|
         args: List(Str) = list(temp());
-        (do_clang(path, args&), HackPrefixes.None)
+        (do_clang(path, args&), HackPrefixes.None, true)
     } else {|
         if path.ends_with(".json") {|
-            (temp().read_to_string(path).items(), HackPrefixes.None)
+            (temp().read_to_string(path).items(), HackPrefixes.None, false)
         } else {|
             @switch(path) {
                 @case("sokol") => {
@@ -67,16 +77,17 @@ fn load_ast(path: Str) Ty(Str, HackPrefixes) = {
                     src_file.fd&.write(SOKOL_AND_IMGUI_ALL_SOURCE);
                     ast := do_clang(src_file&.s_name(), args&);
                     src_file.remove();
-                    (ast, HackPrefixes.Sokol)
+                    (ast, HackPrefixes.Sokol, true)
                 };
                 @case("dearimgui") => {
                     args: List(Str) = list(1, temp());
                     args&.push("-DCIMGUI_DEFINE_ENUMS_AND_STRUCTS");
-                    (do_clang("bindings/cimgui/cimgui.h", args&), HackPrefixes.DearImgui)
+                    (do_clang("bindings/cimgui/cimgui.h", args&), HackPrefixes.DearImgui, true)
                 };
                 @case("wuffs") => {
-                    args: List(Str) = list(temp());
-                    (do_clang("bindings/wuffs/release/c/wuffs-v0.4.c", args&), HackPrefixes.Wuffs)
+                    args: List(Str) = list(1, temp());
+                    args&.push("-DWUFFS_IMPLEMENTATION"); // you need this to get struct body declarations. 
+                    (do_clang("bindings/wuffs/release/c/wuffs-v0.4.c", args&), HackPrefixes.Wuffs, true)
                 };
                 @default => @panic("expected .c/.h/.json file (or preset lib ['sokol', 'dearimgui', 'wuffs']) as last argument, found '%'", path);
             }
@@ -99,11 +110,7 @@ fn generate_franca_bindings(out: *List(u8), decls: []CDecl, import_name: Str) vo
                         @fmt(out, "%: %,\n", it.name, it.type.translate_type());
                     }
                     fn Anon(it) => {
-                        kind := @match(it.Record.tag) {
-                            fn Struct() => "struct";
-                            fn Union() => "union";
-                        };
-                        @fmt(out, "_embed: @%(\n", kind);
+                        @fmt(out, "_embed: @%(\n", it.Record.tag);
                         it.Record&.output_record_body(out, depth + 1);
                         range(0, depth) {_|
                             out.push_all("    ");
@@ -117,11 +124,7 @@ fn generate_franca_bindings(out: *List(u8), decls: []CDecl, import_name: Str) vo
         @match(decl) {
             fn Record(it) => {
                 name := it.name.expect("record name");
-                kind := @match(it.tag) {
-                    fn Struct() => "struct";
-                    fn Union() => "union";
-                };
-                @fmt(out, "% :: @%(\n", name.unsnake_case(), kind);
+                @fmt(out, "% :: @%(\n", name.unsnake_case(), it.tag);
                 it.output_record_body(out, 1);
                 @fmt(out, ");\n");
             }
@@ -237,6 +240,13 @@ fn translate_type(c_type: Str) Str = {
         @case("signed char") => "i8"; 
         @case("unsigned char") => "u8"; 
         @default => {
+            prefixes := @slice("const ", "struct ", "enum ");
+            for prefixes { pre |
+                if c_type.starts_with(pre)  {|
+                    c_type = c_type.slice(pre.len, c_type.len);
+                };
+            };
+            
             if c_type.ends_with(")") {|  // its a function pointer
                 parts := c_type.split("(*)", temp());
                 @assert(parts.len == 2, "confusing function pointer %", c_type);
@@ -435,6 +445,7 @@ fn extract_c_decls(json: *JsonParser, prefixes: HackPrefixes) []CDecl = {
                             if found&.is(.Err) {|
                                 // a function decl like `ret name(void);` doesn't have an `inner` listing arguments,
                                 // and it might not have a storageClass
+                                // TODO: clearly thats wrong tho... 
                                 
                                 decls&.push(Func = (name = name, type = type, args = empty()));
                                 continue();
@@ -523,8 +534,8 @@ fn record_decl(json: *JsonParser) ?CDecl = {
     //@println("Struct named %", name&); 
     fields := json.read_fields(true);
     tag: CRecordTag = @switch(tag_used) {
-        @case("struct") => .Struct;
-        @case("union") => .Union;
+        @case("struct") => .struct;
+        @case("union") => .union;
         @default => {
             @panic("expected struct/union found %", tag_used)
         };
