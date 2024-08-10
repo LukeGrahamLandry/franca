@@ -101,6 +101,28 @@ fn Slice($T: Type) Type = {
         (ptr = ptr, len = self.len * :: T.size_of())
     }
     
+    #inline fn copy_from(dest: Self, src: Self) void = {
+        @safety(.Bounds) dest.len == src.len;
+        // TODO: sad that this does the bounds check every iteration but a real optimiser would fix it for me anyway so meh. 
+        // TODO: this used to work as binding. new syntax is better but old should still work. broke when scan ahead resolve. -- Apr 22
+        // const f = fn(i: i64, e: *T) void = dest.set(i, e[]);
+        enumerate src {i, e|
+            dest.set(i, e[]);
+        };
+    }
+    /*
+    // Note: (Jul 29) this version saves 10ms out of 415ms at self compiling. :( check before replacing. 
+    //       maybe its just about the manual outlining so you don't have to recompile for each type. 
+    //       but doing this breaks the lox test??
+    // TODO: Something's fucked! doesn't work if not inlined!
+    #inline fn copy_from(dest: Self, src: Self) void = {
+        @safety(.Bounds) dest.len == src.len;
+        len := dest.len * @run T.size_of();
+        memcpy(T.raw_from_ptr(dest.ptr), T.raw_from_ptr(src.ptr), len);
+    }
+    */
+    
+    
     // TODO: sad to JIT compile this for all types when emitting AOT, not just needed. :SLOW
     //       can outline this because it can't call bake_relocatable_value(T) directly anyway. but should fix the actual problem anyway.
     // TODO: this api involves hella copying. caller should pass in a list of BakedEntry. :SLOW
@@ -372,31 +394,7 @@ fn DeriveIndexable($Self: Type, $T: Type) void = {
         false
     }
     
-    // TODO: Something's fucked! doesn't work if not inlined!
-    #inline fn copy_from(dest: Self, src: Self) void = {
-        @safety(.Bounds) dest.len == src.len;
-        // TODO: sad that this does the bounds check every iteration but a real optimiser would fix it for me anyway so meh. 
-        // TODO: this used to work as binding. new syntax is better but old should still work. broke when scan ahead resolve. -- Apr 22
-        // const f = fn(i: i64, e: *T) void = dest.set(i, e[]);
-        enumerate src {i, e|
-            dest.set(i, e[]);
-        };
-    }
     
-    /*
-    // Note: (Jul 29) this version saves 10ms out of 415ms at self compiling. :( check before replacing. 
-    //       maybe its just about the manual outlining so you don't have to recompile for each type. 
-    //       but doing this breaks the lox test??
-    // TODO: Something's fucked! doesn't work if not inlined!
-    #inline fn copy_from(dest: Self, src: Self) void = {
-        @safety(.Bounds) dest.len == src.len;
-        a := T.raw_from_ptr(dest.ptr);
-        b := T.raw_from_ptr(src.ptr);
-        len := dest.len * @run T.size_of();
-        memcpy(a, b, len);
-    }
-    
-    */
     // TODO: add addr_eq/identical if that's really what you want but like... it never is I feel. 
     // TODO: for slices, if !contains_ptrs && !has_padding && no eq special overloads, just call some vectorized memcmp and skip a bunch of pointless code gen work. 
     // TODO: if it has a trivial .items() (like lists, RsVec), it would be better to convert and call eq on that 
