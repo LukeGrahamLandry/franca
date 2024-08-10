@@ -193,9 +193,107 @@ fn self_hosted_main(vtable: *ImportVTable, use_new_sema: bool) void #compiler #n
         }, panic("argument '-lsp' not supported by this build of the compiler"));
     };
     
+    if filename == "-go-build-yo-self" {|
+        go_build_yo_self(my_vtable&);
+        exit(0);
+    };
+    
     @match(run_franca_file(my_vtable&, filename, use_new_sema)) {
         (fn Ok(_) => exit(0));
         (fn Err(e) => exit(1));
+    };
+}
+
+// This is a simplified copy-paste of first.fr/driver. 
+// It exists so we have a precompiled version of the compiler's build script, 
+// which allows making breaking abi changes to the driver program system (like the allocator vtable change). 
+fn go_build_yo_self(vtable: *ImportVTable) void = {
+    fn load_src(vtable: *ImportVTable) CompCtx = {
+        src := temp().read_to_string("compiler/main.fr");
+        @fmt(src&, ";ENABLE_TRACY :: false; ENABLE_LSP :: false; ENABLE_QBE_BACKEND :: false;\n");
+        opts := default_build_options();
+        opts.deduplicate_bytecode = true;
+        opts.retain_function_names = false;
+        opts.debug_info = false;
+        args := cli_args();
+        for args { extra |
+            if extra.str() == "-no-deduplication" {|
+                opts.deduplicate_bytecode = false;
+            };
+            if extra.str() == "-keep-names" {|
+                opts.retain_function_names = true;
+            };
+            if extra.str() == "-debug-info" {|
+                opts.debug_info = true;
+            };
+        };
+        
+        comp := vtable.new_with_src(src.items(), opts);
+        c := vtable.with(comp);
+        c
+    }
+
+    // TODO: return result
+    fn build_llvm(ir: BucketArray(u8), args: Slice(Str)) void = {
+        out := open_temp_file();
+        for(ir&){bucket|
+            out.fd&.write(bucket);
+        };
+        @println("Write llvm ir to %", out&.s_name());   
+        args: List(Str) = args.clone(temp());
+        args&.push("-x"); // don't check the file extension of source files that follow. 
+        args&.push("ir"); 
+        args&.push("-g"); 
+        args&.push(out&.s_name());
+        @println("%", args.items());
+        success := run_cmd_blocking(CLANG_PATH, args.items());
+        assert(success, "ICE: generated invalid llvm ir");
+        out.remove();
+    }
+
+    if !file_exists("compiler/main.fr") {|
+        panic("Working directory must be top level of the franca repository");
+    };
+    start := timestamp();
+    c := load_src(vtable);
+    
+    do_build := true;
+    do_replace := false;
+    args := cli_args();
+    use_new_entry_point := false;
+    for args { arg |
+        if arg.str() == "-replace-compiler" {|
+            do_replace = true;
+        };
+    };
+    
+    ::if([]FuncId);
+    exports: []FuncId = c.get_tagged("compiler");
+    
+    ir_text := {c.vtable.emit_llvm}(c, temp(), exports, .ExportWithNames);
+    @println("Emitted % bytes of llvm ir.", ir_text.len);  // useful to see when i start trying to deduplicate bytecode. 
+    end := timestamp();
+
+    start := timestamp();
+    build_llvm(ir_text, @slice ("-o", "target/franca/libfranca.o", "-c", "-Os"));
+    end := timestamp();
+    @println("LLVM time: % ms.", end.sub(start)); 
+    
+    // build.rs needs this if it wants to build the binary (it won't take a .o file)
+    run_cmd_blocking("/usr/bin/ar", @slice (
+        "rc", "target/franca/libfranca.a", "target/franca/libfranca.o"
+    )).assert("link failed");
+    
+    // TODO: should output then move cause i think it deletes if it fails. and save the old one for a bit cause its scary. 
+    if do_replace {|
+        compiler_exe_path := "target/release/franca";
+        save_temp_file := open_temp_file();
+        rename(compiler_exe_path.maybe_borrow_cstr(temp()), save_temp_file&.c_name());
+        args := @slice("target/release/libfranca.a", "target/franca/libfranca.o", "-o", compiler_exe_path, "-g");
+        run_cmd_blocking(CLANG_PATH, args).assert("link failed");
+        @println("Replaced your compiler at '%' with the new one. \nThe old one was saved at '%' (NOTE: THATS A TEMP FILE!)", compiler_exe_path, save_temp_file&.s_name());
+    } else {|
+        println("SKIPPED REPLACING COMPILER");
     };
 }
 

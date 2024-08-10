@@ -23,56 +23,59 @@ fn new_arena_chunk(allocator: Alloc, size: i64, prev: ?*ArenaHeader) *ArenaHeade
     chunk
 }
 
-arena_vtable :: @static(AllocVTable);
-:: {
-    arena_vtable[] = (alloc = arena_alloc, free = arena_free);
+arena_allocator_fn :: fn(self: rawptr, action: AllocatorAction, ptr: rawptr, count: i64, align: i64) rawptr = {
+    // note: we can't use @match yet... (because of printing i guess?)
+    action := @as(i64) action;
+    if action == 0 {|
+        arena_alloc(self, count, align)
+    } else {|
+        // Noop
+        rawptr.uninitialized()
+    }
+};
+
+// Don't try to printf debug in here...
+// TODO: make this less derranged. 
+arena_alloc :: fn(raw_self: rawptr, size: i64, log_align: i64) rawptr  = {
+    self := ArenaAlloc.ptr_from_raw(raw_self);
     
-    // Don't try to printf debug in here...
-    // TODO: make this less derranged. 
-    arena_alloc :: fn(raw_self: rawptr, size: i64, log_align: u8) rawptr = {
-        self := ArenaAlloc.ptr_from_raw(raw_self);
-        
-        chunk := self.chunk.or() {|
-            next := new_arena_chunk(self.parent, self.base_size, .None);
-            self.start = ArenaHeader.size_of();
-            self.end = next.size;
-            self.chunk = (Some = next);
-            next
-        };
-        chunk := self.chunk.unwrap();
-        
-        end  := self.start.add(size);
-        extra := end.mod(8);
-        if extra != 0 {|
-            end += extra;
-        };
-        
-        if(end.le(self.end)) {|
-            ptr := ptr_cast_unchecked(From = ArenaHeader, To = u8, ptr = chunk);
-            mem := ptr.offset(self.start);
-            self.start = end;
-            return(u8.raw_from_ptr(mem));
-        };
-        
-        if(chunk.next) {(next) void|
-            self.chunk = (Some = next);
-            self.start = ArenaHeader.size_of();
-            self.end = next.size;
-            return(arena_alloc(raw_self, size, log_align));
-        };
-        
-        next_size := size.add(8).max(chunk.size.mul(2));
-        new := new_arena_chunk(self.parent, next_size, (Some = chunk));
-        chunk.next = (Some = new);
-        self.chunk = (Some = new);
+    chunk := self.chunk.or() {|
+        next := new_arena_chunk(self.parent, self.base_size, .None);
         self.start = ArenaHeader.size_of();
-        self.end = new.size;
-        
-        arena_alloc(raw_self, size, log_align)
+        self.end = next.size;
+        self.chunk = (Some = next);
+        next
     };
-    arena_free :: fn(_: rawptr, _: Slice(u8), _: u8) void = {
-        // No-op
+    chunk := self.chunk.unwrap();
+    
+    end  := self.start.add(size);
+    extra := end.mod(8);
+    if extra != 0 {|
+        end += extra;
     };
+    
+    if(end.le(self.end)) {|
+        ptr := ptr_cast_unchecked(From = ArenaHeader, To = u8, ptr = chunk);
+        mem := ptr.offset(self.start);
+        self.start = end;
+        return(u8.raw_from_ptr(mem));
+    };
+    
+    if(chunk.next) {(next) void|
+        self.chunk = (Some = next);
+        self.start = ArenaHeader.size_of();
+        self.end = next.size;
+        return(arena_alloc(raw_self, size, log_align));
+    };
+    
+    next_size := size.add(8).max(chunk.size.mul(2));
+    new := new_arena_chunk(self.parent, next_size, (Some = chunk));
+    chunk.next = (Some = new);
+    self.chunk = (Some = new);
+    self.start = ArenaHeader.size_of();
+    self.end = new.size;
+    
+    arena_alloc(raw_self, size, log_align)
 };
 
 ArenaMarker :: @struct(chunk: *ArenaHeader, start: i64);
@@ -165,7 +168,7 @@ fn current_allocated_size(self: *ArenaAlloc) i64 = {
 
 fn borrow(self: *ArenaAlloc) Alloc = {
     self := ArenaAlloc.raw_from_ptr(self);
-    (data = self, vptr = arena_vtable)
+    (data = self, vptr = arena_allocator_fn)
 }
 
 fn bake_relocatable_value(self: *ArenaAlloc) Slice(BakedEntry) = {
@@ -192,8 +195,16 @@ fn reset_temporary_storage() void = {
     __temp_alloc.reset_retaining_capacity();
 }
 
-todo_allocator: Alloc : (data = 0.rawptr_from_int(), vptr = @static(AllocVTable) {
-    libc_alloc :: fn(_: rawptr, size: i64, log_align: u8) rawptr = malloc(size);
-    leak :: fn(_: rawptr, buf: Slice(u8), log_align: u8) void = ();
-    (alloc = libc_alloc, free = leak)
-});
+todo_allocator: Alloc : (data = 0.rawptr_from_int(), vptr = todo_allocator_fn);
+
+// TODO: respect alignment. but im pretty sure malloc always gives you 16 bits and mostly good enough. 
+todo_allocator_fn :: fn(_: rawptr, action: AllocatorAction, ptr: rawptr, count: i64, align: i64) rawptr = { 
+    action := @as(i64) action;
+    ::if(rawptr);
+    // Note: we can't use @match yet! because this is comptime ast_alloc rn
+    if action == 0 {|
+        malloc(count)
+    } else {|
+        rawptr.uninitialized()
+    }
+};
