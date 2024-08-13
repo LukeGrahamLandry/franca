@@ -302,10 +302,10 @@ fn new_sema_fill_export_ffi(out: *List(u8)) void = {
         template
     };
     
-    @fmt(out, "fn Fn(Arg: FatExpr, Ret: FatExpr) FatExpr #macro #ct #comptime_addr(%);\n", fn_type_macro_erase);
-    @fmt(out, "fn FnPtr(Arg: FatExpr, Ret: FatExpr) FatExpr #macro #ct #comptime_addr(%);\n", fn_ptr_type_macro_erase);
-    @fmt(out, "fn Fn(Ret: FatExpr) FatExpr #macro #ct #comptime_addr(%);\n", fn_type_macro_single);
-    @fmt(out, "fn FnPtr(Ret: FatExpr) FatExpr #macro #ct #comptime_addr(%);\n", fn_ptr_type_macro_single);
+    @fmt(out, "fn Fn(Arg: FatExpr, Ret: FatExpr) FatExpr #outputs(Type) #macro #ct #comptime_addr(%);\n", fn_type_macro_erase);
+    @fmt(out, "fn FnPtr(Arg: FatExpr, Ret: FatExpr) FatExpr #outputs(Type) #macro #ct #comptime_addr(%);\n", fn_ptr_type_macro_erase);
+    @fmt(out, "fn Fn(Ret: FatExpr) FatExpr #outputs(Type) #macro #ct #comptime_addr(%);\n", fn_type_macro_single);
+    @fmt(out, "fn FnPtr(Ret: FatExpr) FatExpr #outputs(Type) #macro #ct #comptime_addr(%);\n", fn_ptr_type_macro_single);
    
     make_fn_type :: fn(c: CompilerRs, arg: FatExpr, ret: FatExpr) FnType = {
         self := c[][];
@@ -384,7 +384,7 @@ fn new_sema_fill_export_ffi(out: *List(u8)) void = {
         synthetic_ty((Value = (bytes = value, coerced = false)), c.last_loc, ty)
     };
     
-    @fmt(out, "fn type(e: FatExpr) FatExpr #macro #ct #comptime_addr(%);\n", type_macro);
+    @fmt(out, "fn type(e: FatExpr) FatExpr #outputs(Type) #macro #ct #comptime_addr(%);\n", type_macro);
     type_macro: rawptr : fn(c: CompilerRs, e: FatExpr) FatExpr = {
         self := c[][];
         old := self.dispatch.enclosing_function;
@@ -416,7 +416,7 @@ fn new_sema_fill_export_ffi(out: *List(u8)) void = {
         c[][].unwrap_report_error(void, res);
     };
     
-    @fmt(out, "fn struct(arg: FatExpr) FatExpr #macro #ct #comptime_addr(%);\n", struct_macro_wrap);
+    @fmt(out, "fn struct(arg: FatExpr) FatExpr #outputs(Type) #macro #ct #comptime_addr(%);\n", struct_macro_wrap);
     struct_macro_wrap: rawptr : fn(c: CompilerRs, expr: FatExpr) FatExpr = {
         self := c[][];
         res := self.poll_in_place(FatExpr, => self.struct_macro(expr&));
@@ -424,7 +424,7 @@ fn new_sema_fill_export_ffi(out: *List(u8)) void = {
         return(res); // :FUCKED. miscompilation if you just have the expr at the end normally. losing the ret ptr???? -- Aug 5
         FatExpr.unreachable_hack()
     };  
-    @fmt(out, "fn tagged(arg: FatExpr) FatExpr #macro #ct #comptime_addr(%);\n", tagged_macro_wrap);
+    @fmt(out, "fn tagged(arg: FatExpr) FatExpr #outputs(Type) #macro #ct #comptime_addr(%);\n", tagged_macro_wrap);
     tagged_macro_wrap: rawptr : fn(c: CompilerRs, expr: FatExpr) FatExpr = {
         self := c[][];
         res := self.poll_in_place(FatExpr, => self.tagged_macro(expr&));
@@ -432,7 +432,7 @@ fn new_sema_fill_export_ffi(out: *List(u8)) void = {
         return(res); // :FUCKED. miscompilation if you just have the expr at the end normally. losing the ret ptr???? -- Aug 5
         FatExpr.unreachable_hack()
     };
-    @fmt(out, "fn enum(arg: FatExpr, target: FatExpr) FatExpr #macro #ct #comptime_addr(%);\n", enum_macro_wrap);
+    @fmt(out, "fn enum(arg: FatExpr, target: FatExpr) FatExpr #outputs(Type) #macro #ct #comptime_addr(%);\n", enum_macro_wrap);
     enum_macro_wrap: rawptr : fn(c: CompilerRs, arg: FatExpr, target: FatExpr) FatExpr = {
         self := c[][];
         res := self.poll_in_place(FatExpr, => self.enum_macro(arg&, target&));
@@ -493,7 +493,7 @@ fn new_sema_fill_export_ffi(out: *List(u8)) void = {
         FatExpr.unreachable_hack()
     };
     
-    @fmt(out, "fn symbol(e: FatExpr) FatExpr #macro #ct #comptime_addr(%);\n", symbol_macro);
+    @fmt(out, "fn symbol(e: FatExpr) FatExpr #outputs(Symbol) #macro #ct #comptime_addr(%);\n", symbol_macro);
     symbol_macro: rawptr : fn(c: CompilerRs, expr: FatExpr) FatExpr = {
         self := c[][];
         if expr&.ident() { sym |
@@ -503,23 +503,76 @@ fn new_sema_fill_export_ffi(out: *List(u8)) void = {
         };
         x: Res(FatExpr) = @err("@symbol expected an identifier!");
         self.unwrap_report_error(FatExpr, x)
-        
     };
+    
+    // TODO: is this made redundant by the meta.fr enum helpers or do we need to use this too early? [
+    @fmt(out, "fn tag_value(E: Type, case_name: Symbol) i64 #fold #ct #comptime_addr(%);", tag_value_erase);
+    tag_value_erase: rawptr : tag_value;
+    tag_value :: fn(c: CompilerRs, enum_ty: Type, name: Symbol) i64 = {
+        self := c[][];
+        @match(self.get_type(enum_ty)) {
+            fn Enum(it) => {
+                // TODO: this is kinda dumb, could be in meta.fr but this us just easier right now. -- Jul 8
+                if !self.get_type(it.raw).is(.Int) {|
+                    @panic("tag_value on @enum (not @tagged) that is not an int!");
+                };
+                enumerate it.fields { i, it | 
+                    if it._0 == name {|
+                        i := i64.assume_cast(it._1&)[];
+                        return(i);
+                    };
+                };
+                @panic("tagged type bad case name %", self.pool.get(name))
+            }
+            fn Tagged(it) => {
+                enumerate it.cases { i, it | 
+                    if(it._0 == name, => return(i));
+                };
+                @panic("tagged type bad case name %", self.pool.get(name))
+            }
+            fn Named(it) => tag_value(c, it._0, name);
+            @default => @panic("% is not enum. (tried tag_value of %)",
+                self.log_type(enum_ty),
+                self.pool.get(name)
+            );
+        }
+    };
+    
+    @fmt(out, "fn c_str(s: Symbol) CStr #fold #ct #comptime_addr(%);\n", symbol_to_cstr);
+    symbol_to_cstr: rawptr : fn(c: CompilerRs, s: Symbol) CStr = 
+        c.pool.get_c_str(s);
+        
+    @fmt(out, "fn assert_compile_error(e: FatExpr) FatExpr #fold #ct #macro #outputs(void) #comptime_addr(%);\n", assert_compile_error);
+    assert_compile_error: rawptr : fn(c: CompilerRs, e: FatExpr) FatExpr = {
+        self := c[][];
+        res := self.poll_in_place(void, => self.compile_expr(e&, .None));
+        if !res&.is(.Err) {|
+            self.report_error("@assert_compile_error did not find compile error", e.loc);
+        };
+        e&.set(unit_value, void);
+        return(e);
+        FatExpr.unreachable_hack()
+    };
+    
 }
 
 unwrap_report_error :: fn(self: *SelfHosted, $T: Type, value: Res(T)) T #generic = {
     @match(value) {
         fn Ok(it) => it;
         fn Err(it) => {
-            if it.span.low == 0 && it.span.high == 0 {|
-                it.span = self.last_loc;
-            };
-            self.codemap.show_error_line(it.span);
-            @panic("Compile Error: %", it.msg);
+            self.report_error(it.msg, it.span);
             T.unreachable_hack()
         }
     }
 };
+
+fn report_error(self: *SelfHosted, msg: Str, loc: Span) Never = {
+    if loc.low == 0 && loc.high == 0 {|
+        loc = self.last_loc;
+    };
+    self.codemap.show_error_line(loc);
+    @panic("Compile Error: %", msg)
+}
 
 //////////////////////////////////////////////////////////////////////////////
 // these are just stupid helpers to deal with the awquard multiple compiler types for calling into the rust code. 

@@ -125,9 +125,6 @@ wait until fully self hosted so its less painful because don't have to keep both
 ## Testing
 
 - be able to write a thing in my language that says which backend combinations to test on each snippet
-- so need to expose apis for compiling source to my language. does that mean I should allow runtime @ct and have you opt into bundling the compiler?
-- output assert_eq counts to stdout and check them from another language so it can't cheat?
-- replace shell scripts with my language?
 
 ## QBE
 
@@ -144,7 +141,6 @@ wait until fully self hosted so its less painful because don't have to keep both
 
 - repl
 - pass source as cli arg
-- support shebang line
 
 ## Lsp
 

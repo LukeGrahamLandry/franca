@@ -388,7 +388,6 @@ pub const COMPILER: &[(&str, *const u8)] = &[
         "fn unquote_macro_apply_placeholders(expr: Slice(FatExpr)) FatExpr;",
         unquote_macro_apply_placeholders as *const u8,
     ),
-    ("fn get_type_int(e: FatExpr) IntTypeInfo;", get_type_int as *const u8),
     // Convert a pointer to a value into an ast that will produce that value when evaluated.
     // It is illegal to pass a <ty> that does not match the value behind <ptr>.
     ("fn literal_ast(ty: Type, ptr: rawptr) FatExpr;", literal_ast as *const u8),

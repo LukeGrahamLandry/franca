@@ -21,15 +21,18 @@ World :: @struct(
     money: i64 = 20,
     timer: i64 = 60,
     farm_area: Rect,
+    msg: List(u8),
+    msg_timer: i64 = 0,
 );
 
 Player :: @struct(pos: Pos, inventory: ?Object = .None, dx: f64 = 0.0, dy: f64 = 0.0);
 Growth :: @enum(Seed, Ready);
 CropType :: @enum(Tomato, Potato, Acorn, Tree);
-Crop :: @struct(ty: CropType, age: Growth);
-Planted :: @struct(pos: Pos, drought: f64 = 0.0, crop: Crop);
+Crop :: @struct(type: CropType, age: Growth);
+Planted :: @struct(pos: Pos, remaining: i64 = 100, drought: f64 = 0.0, crop: Crop);
 Object :: @tagged(
-    crop: Crop,
+    Crop: Crop,
+    WateringCan,
     Scarecrow,
     Sprinkler,
     Fertalizer,
@@ -54,17 +57,25 @@ allocator :: libc_allocator;
 fn load_default_world(self: *World) void = {
     self.player =  (pos = (x = 50.0, y = 50.0));
     self.shelves = list(allocator);
+    self.money = 15;
     range(0, 5) {i|
         self.shelves&.push((pos = (x = i.float().mul(75.0).add(350.0), y = 200.0)));
     };
+    self.shelves[0].holding = (Some = .WateringCan);
+    
     self.shops = list(allocator);
     range(0, 2) {x|
         range(0, 5) {y|
             self.shops&.push((pos = (x = x.float().mul(75.0).add(175.0), y = y.float().mul(75.0).add(300.0))));
         };
     };
-    self.farm_area = (pos = (x = 350.0, y = 300.0), w = 500.0, h = 300.0);
+    self.shops[0].price = 5;
+    self.shops[0].item = (Some = (Crop = (type = .Tomato, age = .Seed)));
+    self.farm_area = (pos = (x = 350.0, y = 300.0), w = 500.0, h = 500.0);
+    self.farm = list(allocator); // :fucked you aren't forced to set this before
+    self.msg = list(allocator);
 }
+
 
 do_init :: fn(userdata: rawptr) void = {
     state := State.ptr_from_raw(userdata);
@@ -122,9 +133,24 @@ Rect :: @struct(pos: Pos, w: f64, h: f64);
 base_size :: 50.0;
 
 do_render :: fn(userdata: rawptr) void = {
+    __temp_alloc.reset_retaining_capacity();
     state := State.ptr_from_raw(userdata);
-    state.x += state.dx;
-    state.y += state.dy;
+    do_update :: fn(state: *State) void = {
+        state.x += state.dx;
+        state.y += state.dy;
+        player_speed :: 10.0;
+        state.world.player.pos.x += player_speed * state.world.player.dx;
+        state.world.player.pos.y += player_speed * state.world.player.dy;
+        each state.world.farm { planted | 
+            planted.remaining -= 1;
+            if planted.remaining <= 0 {|
+                planted.crop.age = .Ready;
+            };
+            // TODO: rotten if remaining < (-something)
+        };
+        state.world.msg_timer -= 1;  // TODO: overflow
+    };
+    do_update(state);
     
     sgl_defaults();
     sgl_viewport(0.intcast(), 0.intcast(), sapp_width(), sapp_height(), true);
@@ -133,9 +159,18 @@ do_render :: fn(userdata: rawptr) void = {
     sdtx_canvas(sapp_width().intcast().float().div(2.0).cast(), sapp_height().intcast().float().div(2.0).cast());
     sdtx_pos(state.x.cast(), state.y.cast());
     sdtx_puts("hello world".maybe_borrow_cstr(temp()));
+    sdtx_color3f(0.5.cast(), 0.5.cast(), 0.2.cast());
+    sdtx_pos(0, 0);
+    msg := @format("You have % rubles\0", state.world.money) temp();
+    sdtx_puts(@as(CStr) (ptr = msg.maybe_uninit.ptr));
     
+    if state.world.msg_timer > 0 {|
+        sdtx_color3f(1.0.cast(), 0.5.cast(), 0.2.cast());
+        sdtx_pos(0, 1);
+        sdtx_puts(@as(CStr) (ptr = state.world.msg.maybe_uninit.ptr));
+    };
     sgl_begin_quads();
-    
+   
     fn draw(area: Rect, colour: Colour) void = {
         sgl_c4b(colour.r.trunc(), colour.g.trunc(), colour.b.trunc(), colour.a.trunc());
         
@@ -156,12 +191,20 @@ do_render :: fn(userdata: rawptr) void = {
     fn draw_square(x: f64, y: f64, size: f64, colour: Colour) void = 
         draw(@as(Rect) (pos = (x = x, y = y), w = size, h = size), colour);
     
-    
-    // TODO
-    //fn draw_object(ty: Object, pos: Pos) void = {
-    //    @match(ty) {
-    //    }
-    //}
+    fn draw_object(ty: Object, pos: Pos) void = {
+        @match(ty) {
+            fn Crop(crop) => {
+                fraction := @match(crop.age) {
+                    fn Seed() => 3.0;
+                    fn Ready() => 1.5;
+                };
+                c := find_center(pos, fraction);
+                draw_square(c.x, c.y, base_size / fraction, green);
+                
+            }
+            @default => draw_square(pos.x, pos.y, base_size / 3, green);
+        }
+    }
     
     sgl_load_identity();
     draw_square(100.0, 100.0, 20.0, yellow);
@@ -169,19 +212,38 @@ do_render :: fn(userdata: rawptr) void = {
     draw_square(0.0, 0.0, 20.0, blue);
     
     state.world.farm_area.draw(light_brown);
+    each state.world.farm { planted | 
+        draw_object((Crop = planted.crop), planted.pos);
+    };
+    
     each state.world.shelves {obj|
         draw_square(obj.pos.x, obj.pos.y, base_size, brown);
+        if obj.holding { item |
+            draw_object(item, obj.pos);
+        };
     };
     each state.world.shops {obj|
         draw_square(obj.pos.x, obj.pos.y, base_size, light_brown);
+        if obj.item { item | 
+            draw_object(item, obj.pos);
+        };
     };
     
     fn draw(player: *Player) void = {
         draw_square(player.pos.x, player.pos.y, base_size, black_transparent);
+        if player.inventory { item | 
+            draw_object(item, player.pos);
+        };
+        // TODO: do the math
+        c := find_center(player.pos, 5);
+        draw_square(c.x, c.y, base_size / 5, red);
+    }
+    
+    fn find_center(pos: Pos, frac: f64) Pos = {
+        (x = pos.x + base_size / 2 - base_size / frac / 2, y = pos.y + base_size / 2 - base_size / frac / 2)
     }
     
     state.world.player&.draw();
-    
     
     sgl_end();
     
@@ -214,11 +276,121 @@ fn eqq(a: SappKeycode, b: SappKeycode) bool = (@as(i32) a).eq(@as(i32) b);
 
 do_event :: fn(event: *SappEvent, userdata: rawptr) void = {
     state := State.ptr_from_raw(userdata);
+   
+    if event.type.eqq(.KEY_DOWN) {|
+        if event.key_code.eqq(.Q) {|
+            exit(0);
+        };
+        
+        if event.key_code.eqq(.W) {|
+            state.world.player.dy = -1;
+        };
+        if event.key_code.eqq(.A) {|
+            state.world.player.dx = -1;
+        };
+        if event.key_code.eqq(.S) {|
+            state.world.player.dy = 1;
+        };
+        if event.key_code.eqq(.D) {|
+            state.world.player.dx = 1;
+        };
+        if event.key_code.eqq(.SPACE) {|
+            state.do_interact();
+        };
+    };
     
-    if(event.type.eqq(.KEY_DOWN).and(=> event.key_code.eqq(.Q))) {|
-        exit(0);
+    if event.type.eqq(.KEY_UP) {|
+        if event.key_code.eqq(.W) {|
+            state.world.player.dy = 0;
+        };
+        if event.key_code.eqq(.A) {|
+            state.world.player.dx = 0;
+        };
+        if event.key_code.eqq(.S) {|
+            state.world.player.dy = 0;
+        };
+        if event.key_code.eqq(.D) {|
+            state.world.player.dx = 0;
+        };
     };
 };
+
+fn do_interact(state: *State) void = {
+    player := state.world.player&;
+    each state.world.shelves { shelf | 
+        if center_overlaps(player.pos, base_size, shelf.pos, base_size) {|
+            temp := player.inventory;
+            player.inventory = shelf.holding;
+            shelf.holding = temp;
+            return();
+        }; 
+    };
+    if player.inventory.is_none() {|
+        each state.world.shops { shop | 
+            if center_overlaps(player.pos, base_size, shop.pos, base_size) {|
+                if shop.price <= state.world.money {|
+                    state.world.money -= shop.price; 
+                    player.inventory = shop.item;
+                    return();
+                } else {|
+                    state.world.msg&.clear();
+                    @fmt(state.world.msg&, "You need % more rubles to afford this item\0", shop.price - state.world.money);
+                    state.world.msg_timer = 100;
+                    return();
+                };
+            };    
+        };
+    };
+    if center_overlaps(state.world.player.pos, base_size, state.world.farm_area.pos, state.world.farm_area.w) {|
+        @match(player.inventory) {
+            fn Some(item) => {
+                // Try to plant a seed
+                @match(item) {
+                    fn Crop(crop) => {
+                        if crop.age == Growth.Seed {|
+                            player.inventory = .None;
+                            state.world.farm&.push(pos = player.pos, crop = crop);
+                            return();
+                        } else {|
+                            state.world.msg&.clear();
+                            @fmt(state.world.msg&, "You can only plant seeds!\0");
+                            state.world.msg_timer = 100;
+                        };
+                        
+                    }
+                    @default => {
+                        state.world.msg&.clear();
+                        @fmt(state.world.msg&, "You can only plant seeds but you are holding %.\0", item&.tag());
+                        state.world.msg_timer = 100;
+                        return();
+                    };
+                }
+            }
+            fn None() => {
+                // Try to pick up a grown plant
+                enumerate state.world.farm { i, planted | 
+                    if planted.crop.age == .Ready {|
+                        if center_overlaps(player.pos, base_size, planted.pos, base_size) {|
+                            player.inventory = (Some = (Crop = planted.crop));
+                            // TODO: unordered_remove segfaults :fucked(lib)
+                            state.world.farm&.ordered_remove(i); // do this last or life gets confusing!
+                            return();
+                        };
+                    };
+                };
+            }
+        }
+    };
+    state.world.msg&.clear();
+    @fmt(state.world.msg&, "There is nothing to interact with here\0");
+    state.world.msg_timer = 100;
+}
+
+::enum(Growth);
+fn center_overlaps(me: Pos, me_size: f64, obj: Pos, obj_size: f64) bool = {
+    center: Pos = (x = me.x + me_size / 2, y = me.y + me_size / 2);
+    center.x > obj.x && center.x < obj.x + obj_size && center.y > obj.y && center.y < obj.y + obj_size
+}
 
 fn main() void = {
     println("Hello World");
