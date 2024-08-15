@@ -5,15 +5,23 @@ Vm :: @struct(
     stack_top: *Value,
     last_return: Value,
     gc: Alloc,
-    objects: Value, // TODO: compiler bug make this *Obj
+    objects: *Obj,
+    strings: Table,
+    globals: Table,
+    compiler_locals: List(Local), // Only used during parse but we reuse the memory. 
 );
+
+Table :: RawHashMap(*ObjString, Value);
 
 lox_alloc :: libc_allocator;
 fn init_vm() Vm = {
     self := Vm.uninitialized(); // TODO: no uninit
     self.gc = lox_alloc;
     self.stack = list(stack_max, lox_alloc);  // EXTRA: grow stack
-    self.objects.bits = null_object;
+    self.objects = Obj.ptr_from_int(0); // EVIL
+    self.strings = init(); 
+    self.globals = init(); 
+    self.compiler_locals = list(128, self.gc);
     self&.reset_stack();
     self
 }
@@ -21,6 +29,9 @@ fn init_vm() Vm = {
 fn drop(self: *Vm) void = {
     // self.chunk.drop(); // TODO: but for now its always on the stack. 
     self.stack&.drop();
+    self.compiler_locals&.drop();
+    self.globals&.drop(self.gc);
+    self.strings&.drop(self.gc);
     self.free_objects();
 }
 
@@ -29,9 +40,11 @@ InterpretResult :: @enum(Ok, CompileError, RuntimeError);
 fn interpret(self: *Vm, source: Str) InterpretResult = {
     chunk: Chunk = init();
     ::if(InterpretResult);
+    self.compiler_locals&.clear();
     result := if(compile(self, source, chunk&)) {|
        self.interpret(chunk&)
     } {| InterpretResult.CompileError };
+    
     chunk&.drop();
     result
 }
@@ -50,9 +63,13 @@ fn run(self: *Vm) InterpretResult = {
         continue :: local_return;
         @if(::debug_trace_execution, {
             debug&.clear();
-            @fmt(debug&, "         %", ""); // TODO: fix 'no trivial tuples'
+            @fmt(debug&, "       stack:");
             for(self.stack&.as_ptr(), self.stack_top) {slot|
                 @fmt(debug&, "[ % ]", slot);
+            };
+            @fmt(debug&, "\n      global:"); 
+            each self.globals& { k, v |
+                @fmt(debug&, "[ % = % ]", k.data, v);
             };
             println(debug&.items());
         
@@ -105,11 +122,10 @@ fn run(self: *Vm) InterpretResult = {
                     };
                     lhs := lhs.to_string();
                     rhs := rhs.to_string();
-                    o := self.allocate_obj(ObjString, ObjType.String);
                     new := self.gc.alloc(u8, lhs.data.len + rhs.data.len);
                     new.slice(0, lhs.data.len).copy_from(lhs.data);
                     new.slice(lhs.data.len, new.len).copy_from(rhs.data);
-                    o.data = new;
+                    o := self.take_string(new);
                     self.push(o.to_value());
                     continue();
                 };
@@ -134,6 +150,51 @@ fn run(self: *Vm) InterpretResult = {
                 rhs := self.pop();
                 lhs := self.pop();
                 self.push(lhs.eq(rhs).to_value());  // Don't care about NaN != NaN for now. 
+            };
+            @case(OpCode.Print) => {
+                value := self.pop();
+                @print("%", value);
+            };
+            @case(OpCode.Pop) => {
+                _ := self.pop();
+            };
+            @case(OpCode.DefineGlobal) => {
+                value := self.pop();
+                name := self.read_constant();
+                @debug_assert(name.is_obj(.String), "LOX_ICE: DefineGlobal expected string name.");
+                self.globals&.insert(name.to_string(), value, self.gc);
+            };
+            @case(OpCode.GetGlobal) => {
+                name := self.read_constant();
+                @debug_assert(name.is_obj(.String), "LOX_ICE: GetGlobal expected string name.");
+                @match(self.globals&.get(name.to_string())) {
+                    fn Some(value) => self.push(value);
+                    fn None() => {
+                        self.runtime_error("Accessed undeclared global variable.");
+                        return(.RuntimeError);
+                    }
+                };
+            };
+            @case(OpCode.SetGlobal) => {
+                name := self.read_constant();
+                @debug_assert(name.is_obj(.String), "LOX_ICE: SetGlobal expected string name.");
+                @match(self.globals&.get_ptr(name.to_string())) {
+                    fn Some(slot) => {
+                        slot[] = self.peek();
+                    }
+                    fn None() => {
+                        self.runtime_error("Accessed undeclared global variable.");
+                        return(.RuntimeError);
+                    }
+                };
+            };
+            @case(OpCode.SetLocal) => {
+                idx: i64 = self.read_byte().zext();
+                self.stack[idx] = self.peek();
+            };
+            @case(OpCode.GetLocal) => {
+                idx: i64 = self.read_byte().zext();
+                self.push(self.stack[idx]);
             };
             @default => {
                 println("bad opcode");
@@ -173,11 +234,17 @@ fn run(self: *Vm) InterpretResult = {
 fn push(self: *Vm, value: Value) void = {
     self.stack_top[] = value;
     self.stack_top = self.stack_top.offset(1);
+    self.stack.len += 1; // redundant. but fixes safety check using locals
 }
 
 fn pop(self: *Vm) Value = {
     self.stack_top = self.stack_top.offset(1.neg());
+    self.stack.len -= 1; // redundant. but fixes safety check using locals
     self.stack_top[]
+}
+
+fn peek(self: *Vm) Value = {
+    self.stack_top.offset(-1)[]
 }
 
 fn reset_stack(self: *Vm) void = {
@@ -188,16 +255,7 @@ fn runtime_error(self: *Vm, msg: Str) void = {
     p := self.chunk.code&.as_ptr();
     i := p.ptr_diff(self.ip);
     line := self.chunk.lines[i];
-}
-
-// TODO: EXTRA: store the data contiguously with the ObjString header
-// TODO: EXTRA: track which strings are constant-ish so don't free them
-fn copy_string(self: *Vm, s: Str) *ObjString = {
-    o := self.allocate_obj(ObjString, ObjType.String);
-    new := self.gc.alloc(u8, s.len);
-    new.copy_from(s);
-    o.data = new;
-    o
+    @println("Runtime Error: %", msg);
 }
 
 ::ptr_utils(u8);

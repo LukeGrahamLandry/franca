@@ -72,23 +72,11 @@ fn to_obj(self: Value) *Obj #inline  = Obj.to_obj_subtype(self);
 fn to_string(self: Value) *ObjString #inline = ObjString.to_obj_subtype(self);
 
 fn eq(lhs: Value, rhs: Value) bool = {
-    if(lhs.bits == rhs.bits, => return(true));  // TODO: IEEE NaN
-    if lhs.is_obj() && rhs.is_obj() {|
-        if(lhs.obj_type() != rhs.obj_type(), => return(false));
-        @match(lhs.obj_type()) {
-            fn String() => {
-                lhs := lhs.to_string();
-                rhs := rhs.to_string();
-                return(lhs.data == rhs.data);
-            }
-            fn _temp() => unreachable();
-        };
-    };
-    
-    false 
+    // strings are interned so this is good enough for them too. 
+    lhs.bits == rhs.bits // TODO: IEEE NaN
 }
 
-ObjType :: @enum(String, _temp); :: enum(ObjType);
+ObjType :: @enum(i64) (String, _temp); :: enum(ObjType);
 Obj :: @rec @struct(
     type: ObjType,
     next: *Obj,
@@ -97,6 +85,7 @@ Obj :: @rec @struct(
 ObjString :: @struct(
     obj: Obj,
     data: Str,
+    hash: i64 = 0,
 );
 
 fn obj_type(self: Value) ObjType #inline = {
@@ -107,26 +96,112 @@ fn obj_type(self: Value) ObjType #inline = {
 allocate_obj :: fn(self: *Vm, $T: Type, tag: ObjType) *T #generic = {
     mem := self.gc.alloc(T, 1);
     mem.ptr.obj.type = tag;
-    mem.ptr.obj.next = self.objects.to_obj();
-    self.objects = mem.ptr.to_value();
+    mem.ptr.obj.next = self.objects;
+    self.objects = mem.ptr.obj&;
     mem.ptr
 };
 
-fn free_objects(self: *Vm) void = {
-    while => self.objects.bits != null_object {|
-        v := self.objects;
-        obj := self.objects.to_obj();
-        self.objects = obj.next.to_value();
-        @println("[FREE] [%]", v);
-        @match(obj.type) {
-            fn String() => {
-                obj := v.to_string();
-                self.gc.dealloc(u8, obj.data);
-                self.gc.dealloc(ObjString, @as([]ObjString) (ptr = obj, len = 1));
-            }
-            fn _temp() => unreachable();
+// TODO: EXTRA: store the data contiguously with the ObjString header
+// TODO: EXTRA: track which strings are constant-ish so don't free them
+fn copy_string(self: *Vm, s: Str) *ObjString = {
+    new := self.gc.alloc(u8, s.len);
+    new.copy_from(s);
+    self.take_string(new)
+}
+
+fn take_string(self: *Vm, s: Str) *ObjString = {
+    o := self.allocate_obj(ObjString, ObjType.String);
+    o.data = s;
+    o.update_hash();
+    
+    // This is a copy paste of collections/map.fr/insert but using slow_eq instead to do the interning. 
+    // TODO: its dumb that my hash table stores the hashes because the strings store them too (i don't want to rehash for each new table)
+    
+    full := self.strings.len_including_tombstones.add(1).gt(self.strings.capacity);
+    if(full, => self.strings&.resize(self.gc)); // does it sooner than necessary (if replacing a slot) but thats fine. 
+    slot := self.strings&.slow_find_slot(o);
+    
+    @switch(slot.hash) {
+        @case(0) => {
+            slot[] = (hash = o.hash, key = o, value = nil_value);
+            self.strings.len_including_tombstones += 1;
         };
+        @case(1) => {
+            slot[] = (hash = o.hash, key = o, value = nil_value);
+        };
+        @default => {
+            // It was interned!
+            // TODO: don't allocate and then immediately free the objheader.
+            //       we should just be freeing the bytes here. 
+            self.objects = o.obj.next; // we know we just made this so its the most recent
+            self.free_obj(o.obj&);
+            return(slot.key);
+        };
+    };
+        
+    fn slow_find_slot(self: *Table, key: *ObjString) *Table.Entry = {
+        i := key.hash.mod(self.arr.len); // TODO: power of two trick
+        
+        range(0, self.arr.len) {_|
+            check := self.arr[i]&;
+            if check.hash == key.hash && check.key.slow_eq(key) {|
+                return(check);
+            } else {|
+                if(check.hash == 0, => return(check)); // empty, not in map
+                // 1 => placeholder for a removed value
+                //      TODO: if you're inserting, you could use it? 
+                // othewise, continue, might have been bumped
+            };
+            i = i.add(1).mod(self.arr.len);
+        };
+        
+        panic("Unreachable unless you set the load factor to 100%");
+        (*Table.Entry).unreachable_hack()
+    }
+    
+    fn slow_eq(lhs: *ObjString, rhs: *ObjString) bool = 
+        lhs.data == rhs.data;
+
+    o
+}
+
+fn hash(h: *TrivialHasher, obj: **ObjString) void = {
+    h.hash(obj.hash&);
+}
+
+// this assumes the strings are already interned ,
+// so you can't use the normal hashmap insert functions to check if a string is unique when first creating it.
+fn eq(lhs: **ObjString, rhs: **ObjString) bool = {
+    lhs := ObjString.int_from_ptr(lhs[]);
+    rhs := ObjString.int_from_ptr(rhs[]);
+    lhs == rhs
+}
+
+fn update_hash(obj: *ObjString) void = {
+    h: TrivialHasher = init();
+    h&.hash(obj.data&);
+    obj.hash = h&.end();
+}
+
+fn free_objects(self: *Vm) void = {
+    while => !self.objects.is_null() {|
+        obj := self.objects;
+        self.objects = obj.next;
+        self.free_obj(obj);
     };
 }
 
+fn free_obj(self: *Vm, obj: *Obj) void = {
+    //@println("[FREE] [%]", v);
+    @match(obj.type) {
+        fn String() => {
+            obj := obj.to_value().to_string();
+            self.gc.dealloc(u8, obj.data);
+            self.gc.dealloc(ObjString, @as([]ObjString) (ptr = obj, len = 1));
+        }
+        fn _temp() => unreachable();
+    };
+}
+
+::ptr_utils(Obj);
 ::if(Value);

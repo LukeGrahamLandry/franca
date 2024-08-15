@@ -5,6 +5,7 @@ fn hash();
 fn remove();
 fn for_keys();
 fn get_key();
+fn resize();
 
 // TODO: use a real hashing thing. wyhash is pretty small: https://github.com/wangyi-fudan/wyhash
 // TODO: explicit wrapping_op functions. 
@@ -18,19 +19,48 @@ fn hash(s: *Str) i64 = {
     h
 }
 
+fn capacity();
+
 /// This is the kind where you get bumped to the next slot if you collide, not the kind where you spill out into a linked list.
 /// TODO: reuse the first tombstone slot when inserting after a remove. currently im being dumb and just wasting search time until a resize. 
 /// (K: eq + hash + move, V: move)
 /// TODO: take hasher as param once i have default args? 
 /// TODO: api for getting the real len (not including tombstones)
 fn HashMap($K: Type, $V: Type) Type = {
+    Self :: @struct(raw: RawHashMap(K, V), alloc: Alloc);
+    fn init(gpa: Alloc) Self = (raw = init(), alloc = gpa);
+    
+    fn insert(self: *Self, key: K, value: V) ?V #inline = self.raw&.insert(key, value, self.alloc);
+    fn get(self: *Self, key: K) ?V #inline = self.raw&.get(key&);
+    fn get_ptr(self: *Self, key: K) ?*V #inline = self.raw&.get_ptr(key&);
+    fn get(self: *Self, key: *K) ?V #inline = self.raw&.get(key);
+    
+    /// SAFETY: the returned pointer is invalid after a call to 'insert' (which may trigger a resize)
+    fn get_ptr(self: *Self, key: *K) ?*V #inline = self.raw&.get_ptr(key);
+    // this lets you do weird stuff where key matching doesn't mean really exactly the same. 
+    fn get_key(self: *Self, key: *K) ?K #inline = self.raw&.get_key(key);
+    
+    // Note: this doesn't adjust self.len_including_tombstones! because we use that for resizing so need to account for the tombstone.
+    fn remove(self: *Self, key: *K) ?V #inline = self.raw&.remove(key);
+    fn remove(self: *Self, key: K) ?V #inline = self.raw&.remove(key&);
+    
+    fn for_keys(self: *Self, $body: @Fn(key: K) void) void = self.raw&.for_keys(body);
+    fn each(self: *Self, $body: @Fn(key: K, value: *V) void) void = self.raw&.each(body);
+    fn drop(self: *Self) void #inline = self.raw&.drop(self);
+    
+    fn capacity(self: *Self) i64 = self.raw.capacity;
+    
+    Self
+}
+
+fn RawHashMap($K: Type, $V: Type) Type = {
     Hasher :: TrivialHasher;
     // TODO: instead of complicated traits, just require(eq, Ty(K, K), bool);
-    Self :: @struct(alloc: Alloc, arr: Slice(Entry), len_including_tombstones: i64, capacity: i64);
+    Self :: @struct(arr: Slice(Entry), len_including_tombstones: i64, capacity: i64, $Entry: Type = Entry);
     Entry :: @struct(hash: i64, key: K, value: V);
     load_percent :: 70; // TODO: default arugments in functions so its not annoying to let you set this -- Jun 12
     
-    fn init(gpa: Alloc) Self = (alloc = gpa, arr = @as(Slice(Entry)) empty(), len_including_tombstones = 0, capacity = 0);
+    fn init() Self = (arr = @as(Slice(Entry)) empty(), len_including_tombstones = 0, capacity = 0);
     
     ::?*V;
     ::if_opt(*V, ?V);
@@ -51,9 +81,9 @@ fn HashMap($K: Type, $V: Type) Type = {
         h.abs()
     }
     
-    fn insert(self: *Self, key: K, value: V) ?V = {
+    fn insert(self: *Self, key: K, value: V, gpa: Alloc) ?V = {
         full := self.len_including_tombstones.add(1).gt(self.capacity);
-        if(full, => self.resize()); // does it sooner than necessary (if replacing a slot) but thats fine. 
+        if(full, => self.resize(gpa)); // does it sooner than necessary (if replacing a slot) but thats fine. 
         h := key&.checked_hash();
         slot := self.find_slot(key&, h);
         
@@ -136,9 +166,9 @@ fn HashMap($K: Type, $V: Type) Type = {
         (*Entry).unreachable_hack()
     }
     
-    fn resize(self: *Self) void = {
+    fn resize(self: *Self, gpa: Alloc) void = {
         old_arr := self.arr;
-        self.arr = self.alloc.alloc(Entry, old_arr.len.mul(2).max(4));
+        self.arr = gpa.alloc(Entry, old_arr.len.mul(2).max(4));
         each(self.arr) {slot|
             slot.hash = 0;
         };
@@ -153,7 +183,7 @@ fn HashMap($K: Type, $V: Type) Type = {
         };
         self.len_including_tombstones = real_len;
         
-        self.alloc.dealloc(Entry, old_arr);
+        gpa.dealloc(Entry, old_arr);
     }
     
     fn for_keys(self: *Self, $body: @Fn(key: K) void) void = {
@@ -171,8 +201,8 @@ fn HashMap($K: Type, $V: Type) Type = {
     }
     
     // TODO: drop entries? 
-    fn drop(self: *Self) void = {
-        self.alloc.dealloc(Entry, self.arr);
+    fn drop(self: *Self, alloc: Alloc) void = {
+        alloc.dealloc(Entry, self.arr);
         self.arr = empty();
         self.len_including_tombstones = 0;
         self.capacity = 0;
