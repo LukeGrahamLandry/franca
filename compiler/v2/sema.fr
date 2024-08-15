@@ -395,120 +395,208 @@ fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = 
         func.set_flag(.MadeVarsForRuntimeArgs);
     };
     
-    @match(func.body&) {
-        fn Normal(expr) => {
-            old_func := self.dispatch.enclosing_function;
-            self.dispatch.enclosing_function = (Some = fid);
-            
-            if !func.get_flag(.Generic) && !func.ret&.is(.Infer) {|
-                @check(self.infer_return(fid)) return;
-            };
-
-            if func.return_var { return_var |
-                // TODO: this means you cant early return from non-block functions but the error message will be useless -- Jul 9 
-                @if_let(expr.expr&) fn Block(f) => {
-                    if f.ret_label.is_none() {|  // we might have already tried to compile this function. 
-                        ret: LabelId = from_index(self.dispatch.return_labels.len);
-                        self.dispatch.return_labels&.push(fid);
-                        label_ty := LabelId; // :get_or_create_type
-                        if func.finished_ret { ret_ty | 
-                            label_ty = self.intern_type(Label = ret_ty);
-                        };
-                        val := self.to_values(LabelId, ret);
-                        @check(self.save_const_values(return_var, val, label_ty, func.loc)) return;
-                        f.ret_label = (Some = ret);
-                    };
+    if func.get_flag(.BodyIsSpecial) {|
+        @check(self.emit_special_body(fid)) return;
+    } else {|
+        @match(func.body&) {
+            fn Normal(expr) => {
+                old_func := self.dispatch.enclosing_function;
+                self.dispatch.enclosing_function = (Some = fid);
+                
+                if !func.get_flag(.Generic) && !func.ret&.is(.Infer) {|
+                    @check(self.infer_return(fid)) return;
                 };
-            };
-            
-            @check(self.compile_expr(expr, func.finished_ret.want())) return;
-            //@debug_assert(self.dispatch.enclosing_function.is_some() && self.dispatch.enclosing_function.unwrap() == fid, "lost enclosing");
-            self.dispatch.enclosing_function = old_func;
-            if func.ret&.is(.Infer) {|
-                func.finished_ret = (Some = expr.ty);
-            };
-        }
-        fn Intrinsic(op) => ();
-        fn ComptimeAddr(ptr) => {
-            @debug_assert(self.aarch64&.get_fn(fid).is_some());
-        }
-        @default => {
-            @check(self.infer_return(fid)) return;
-            good := false;
-            each func.annotations { tag | 
-                @switch(tag.name) {
-                    @case(Flag.libc.ident()) => {
-                        good = true;
-                        // :io_driver TODO: all this fs stuff should be passed in (or better messaged out) by the driver
-                        // TODO: figure out the right path for different oses.
-                        // TODO: don't re-dlopen every time. tho i think its cached.
-                        s := @run c_str(@symbol "/usr/lib/libc.dylib");
-            
-                        libc := dlopen(s, .Lazy);
-                        addr := libc.dlsym(self.pool.get_c_str(func.name));
-                        if addr.is_null() {|
-                            // TODO: warn? have different #import that means we expect not at comptime?
-                            func.body = (DynamicImport = func.name);
-                        } else {|
-                            self.aarch64&.extend_blanks(fid);
-                            self.aarch64.dispatch[fid.as_index()] = addr;
-                            impls: List(FuncImpl) = list(2, self.get_alloc());
-                            impls&.push(ComptimeAddr = addr.int_from_rawptr());
-                            impls&.push(DynamicImport = func.name);
-                            func.body = (Merged = impls.rs());
+    
+                if func.return_var { return_var |
+                    // TODO: this means you cant early return from non-block functions but the error message will be useless -- Jul 9 
+                    @if_let(expr.expr&) fn Block(f) => {
+                        if f.ret_label.is_none() {|  // we might have already tried to compile this function. 
+                            ret: LabelId = from_index(self.dispatch.return_labels.len);
+                            self.dispatch.return_labels&.push(fid);
+                            label_ty := LabelId; // :get_or_create_type
+                            if func.finished_ret { ret_ty | 
+                                label_ty = self.intern_type(Label = ret_ty);
+                            };
+                            val := self.to_values(LabelId, ret);
+                            @check(self.save_const_values(return_var, val, label_ty, func.loc)) return;
+                            f.ret_label = (Some = ret);
                         };
                     };
-                    @case(Flag.import.ident()) => {
-                        good = true;
-                        // :io_driver
-                        return(@err("TODO: #import"));
-                    };
-                    @case(Flag.asm.ident()) => {
-                        good = true;
-                        return(@err("TODO: #asm"));
-                    };
-                    @case(Flag.unsafe_noop_cast.ident()) => {
-                        good = true;
-                    };
-                    @case(Flag.comptime_addr.ident()) => {
-                        good = true;
-                        ::as_ref(FatExpr);
-                        value := @unwrap(tag.args&.as_ref(), "#comptime_addr requires arg") return;
-                        ptr := @check(self.immediate_eval_expr(value, i64)) return;
-                        ptr := i64.assume_cast(ptr&)[];
-                        func.body = (ComptimeAddr = ptr);
-                        self.aarch64&.extend_blanks(fid);
-                        self.aarch64.dispatch[fid.as_index()] = ptr.rawptr_from_int();
-                    };
-                    @case(Flag.intrinsic.ident()) => {
-                        good = true;
-                        value := @unwrap(tag.args&.as_ref(), "#redirect requires arg") return;
-                        intrinsic_ty := @unwrap(self.env.intrinsic_type, "used #intrinsic during boot") return;
-                        op := @check(self.immediate_eval_expr(value, intrinsic_ty)) return;
-                        op := Intrinsic.assume_cast(op&)[];
-                        func.body = (Intrinsic = op);
-                    };
-                    @case(Flag.redirect.ident()) => {
-                        good = true;
-                        value := @unwrap(tag.args&.as_ref(), "#redirect requires arg") return;
-                        RedirectType :: @struct(arg: Type, ret: Type, os: OverloadSet);
-                        payload := self.tuple_of(@slice(Type, Type, OverloadSet));
-                        payload := @check(self.immediate_eval_expr(value, payload)) return;
-                        payload := RedirectType.assume_cast(payload&)[];
-                        args := self.arg_types(payload.arg);
-                        f_ty: FnType = (arg = payload.arg, ret = payload.ret, arity = args.len.trunc());
-                        target := @check(self.resolve_by_type(payload.os, f_ty, func.loc)) return;
-                        func.body = (Redirect = target);
-                        
-                    };
-                    @default => ();
                 };
-            };
-            @err_assert(good, "Function has no implementation %", func.log(self.pool)) return;
+                
+                @check(self.compile_expr(expr, func.finished_ret.want())) return;
+                //@debug_assert(self.dispatch.enclosing_function.is_some() && self.dispatch.enclosing_function.unwrap() == fid, "lost enclosing");
+                self.dispatch.enclosing_function = old_func;
+                if func.ret&.is(.Infer) {|
+                    func.finished_ret = (Some = expr.ty);
+                };
+            }
+            @default => return(@err("non special function must have body. (or ICE: double compiled function?)"));
         };
     };
+    
     @log_event("body compiled: %", fid.as_index()) self;
     func.set_flag(.EnsuredCompiled);
+    .Ok
+}
+
+fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = {
+    @check(self.infer_return(fid)) return;
+    func := self.get_function(fid);
+    good := false;
+    each func.annotations { tag | 
+        @switch(tag.name) {
+            @case(Flag.libc.ident()) => {
+                good = true;
+                // :io_driver TODO: all this fs stuff should be passed in (or better messaged out) by the driver
+                // TODO: figure out the right path for different oses.
+                // TODO: don't re-dlopen every time. tho i think its cached.
+                s := @run c_str(@symbol "/usr/lib/libc.dylib");
+    
+                libc := dlopen(s, .Lazy);
+                addr := libc.dlsym(self.pool.get_c_str(func.name));
+                if addr.is_null() {|
+                    // TODO: warn? have different #import that means we expect not at comptime?
+                    func.body = (DynamicImport = func.name);
+                } else {|
+                    self.aarch64&.extend_blanks(fid);
+                    self.aarch64.dispatch[fid.as_index()] = addr;
+                    impls: List(FuncImpl) = list(2, self.get_alloc());
+                    impls&.push(ComptimeAddr = addr.int_from_rawptr());
+                    impls&.push(DynamicImport = func.name);
+                    func.body = (Merged = impls.rs());
+                };
+            };
+            @case(Flag.import.ident()) => {
+                good = true;
+                // :io_driver
+                return(@err("TODO: #import"));
+            };
+            @case(Flag.unsafe_noop_cast.ident()) => {
+                good = true;
+            };
+            @case(Flag.comptime_addr.ident()) => {
+                good = true;
+                ::as_ref(FatExpr);
+                value := @unwrap(tag.args&.as_ref(), "#comptime_addr requires arg") return;
+                ptr := @check(self.immediate_eval_expr(value, i64)) return;
+                ptr := i64.assume_cast(ptr&)[];
+                func.body = (ComptimeAddr = ptr);
+                self.aarch64&.extend_blanks(fid);
+                self.aarch64.dispatch[fid.as_index()] = ptr.rawptr_from_int();
+            };
+            @case(Flag.intrinsic.ident()) => {
+                good = true;
+                value := @unwrap(tag.args&.as_ref(), "#redirect requires arg") return;
+                intrinsic_ty := @unwrap(self.env.intrinsic_type, "used #intrinsic during boot") return;
+                op := @check(self.immediate_eval_expr(value, intrinsic_ty)) return;
+                op := Intrinsic.assume_cast(op&)[];
+                func.body = (Intrinsic = op);
+            };
+            @case(Flag.redirect.ident()) => {
+                good = true;
+                value := @unwrap(tag.args&.as_ref(), "#redirect requires arg") return;
+                RedirectType :: @struct(arg: Type, ret: Type, os: OverloadSet);
+                payload := self.tuple_of(@slice(Type, Type, OverloadSet));
+                payload := @check(self.immediate_eval_expr(value, payload)) return;
+                payload := RedirectType.assume_cast(payload&)[];
+                args := self.arg_types(payload.arg);
+                f_ty: FnType = (arg = payload.arg, ret = payload.ret, arity = args.len.trunc());
+                target := @check(self.resolve_by_type(payload.os, f_ty, func.loc)) return;
+                func.body = (Redirect = target);
+            };
+            // TODO: remove all the different string based ones and have #asm("llvm") #asm("qbe") FuncImpl::AsmStr(Backend:Symbol, Source:Symbol)
+            //       so you can have driver programs add new backends without modifying the core compiler. 
+            //       then move backends/qbe.fr to be an external thing in examples.   :io_driver
+            @case(Flag.asm.ident()) => {
+                // - tuple of string literals -> llvm-ir
+                // - tuple of 32-bit int literals -> aarch64 asm ops
+                // - anything else, comptime eval expecting Slice(u32) -> aarch64 asm ops
+                @debug_assert(func.body&.is(.Normal), "we already checked that #asm has body");
+                            
+                fn eval_str(self: *SelfHosted, e: *FatExpr) Maybe(Symbol) = {
+                    str := @check(self.create_slice_type(u8, e.loc)) return;
+                    ir := @check(self.immediate_eval_expr(e, str)) return;
+                    ir := Str.assume_cast(ir&)[];
+                    (Ok = self.pool.insert_owned(ir)) 
+                }
+                            
+                asm := func.body.Normal&;
+                
+                each func.annotations { tag | 
+                    @switch(tag.name) {
+                        @case(Flag.aarch64.ident()) => {
+                            // TODO: :PushConstFnCtx
+                            // TODO: you can't just compile here because then trying to imm_eval hits a not read asm func i think because of ^ callees.
+                            //       it recurses and has to emit other asm first but they don't get put in dispatch,
+                            //       becuase they don't have a thing in the result stack to do callees first.
+                            ops: RsVec(u32) = if asm.expr&.is(.Tuple) {|
+                                parts := asm.expr.Tuple&;
+                                ops: List(u32) = list(parts.len, self.get_alloc());
+                                u32_ty := self.intern_type(Int = (bit_count = 32, signed = false));
+                                each parts { int |
+                                    i := @check(self.immediate_eval_expr(int, u32_ty)) return;
+                                    i := u32.assume_cast(i&)[];
+                                    ops&.push(i);
+                                };
+                                ops.rs()
+                            } else {|
+                                // TODO
+                                //let ty = self.type_of(asm)?;
+                                //if let Some(ty) = ty {
+                                //    self.program.finish_layout_deep(ty)?;
+                                //    if let TypeInfo::Struct { fields, .. } = &self.program[ty] {
+                                //        let is_ints = fields.iter().all(|t| matches!(self.program[t.ty], TypeInfo::Int(_)));
+                                //        if is_ints {
+                                //            let len = fields.len();
+                                //            let val = self.immediate_eval_expr(asm.clone(), ty)?;
+                                //            let mut reader = ReadBytes { bytes: val.bytes(), i: 0 };
+                                //            let mut ints = vec![];
+                                //            for _ in 0..len {
+                                //                let op = unwrap!(reader.next_u32(), "");
+                                //                ints.push(op);
+                                //            }
+                                //            assert_eq!(reader.i, val.bytes().len()); // TODO: do this check everywhere.
+                                //            break 'o ints;
+                                //        }
+                                //    }
+                                //}
+                                // let ops: Vec<u32> = self.immediate_eval_expr_known(asm.clone())?;
+                                return(@err("TODO: untested #asm case."))
+                            };
+                            func.body = (JittedAarch64 = ops);
+                            good = true; 
+                        };
+                        // TODO: an erorr message here gets swollowed because you're probably in the type_of shit. this is really confusing. need to do beter
+                        // TODO: if its a string literal just take it
+                        // TODO: check if they tried to give you something from the stack
+                        @case(Flag.llvm.ident()) => {
+                            @err_assert(func.body&.is(.Empty), "found multiple arches for #asm") return;
+                            ir := @check(self.eval_str(asm)) return;
+                            func.body = (LlvmIr = ir);
+                            good = true;
+                        };
+                        @case(Flag.qbe.ident()) => {
+                            @err_assert(func.body&.is(.Empty), "found multiple arches for #asm") return;
+                            ir := @check(self.eval_str(asm)) return;
+                            func.body = (QbeIr = ir);
+                            good = true;
+                        };
+                        @case(Flag.c.ident()) => {
+                            @err_assert(func.body&.is(.Empty), "found multiple arches for #asm") return;
+                            ir := @check(self.eval_str(asm)) return;
+                            func.body = (CSource = ir);
+                            good = true;
+                        };
+                        @default => ();
+                    };
+                    @err_assert(good, "!asm require arch tag") return;
+                };
+            };
+            @default => ();
+        };
+    };
+    @err_assert(good, "Function has no implementation %", func.log(self.pool)) return;
     .Ok
 }
 
@@ -748,11 +836,12 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
                 unify(expected_type&, it._1.ty);
                 done = done && it._1.done;
             };
-            expr.ty = @match(expected_type) {
+            ty := @match(expected_type) {
                 fn Specific(inner) => inner;
                 fn None() => Never;
                 @default => return(@err("could not unify switch branch types"));
             };
+            expr.ty = ty;
             expr.done = done;
         }
         fn Loop(arg) => {
@@ -941,9 +1030,11 @@ fn contextual_field(self: *SelfHosted, name: Symbol, expr_out: *FatExpr, type: T
                     ) return;
                     
                     // We could create a StructLiteralP and let the backend deal with it, but we know the answer right now. 
-                    size: i64 = self.get_info(type)[].stride_bytes.zext(); // TODO: allow yield on sizing here. 
+                    info := self.get_info(type);
+                    size: i64 = info.stride_bytes.zext(); // TODO: allow yield on sizing here. 
                     bytes := 0x00.repeated(size, self.get_alloc());
                     assert(i <= 255, "TODO: giant ass @tagged"); 
+                    assert(info.align_bytes <= 8, "TODO: handle large alignment");
                     bytes[0] = i.trunc(); // :endian
                     expr_out.set(bytes.items().to_value(), type);
                     expr_out.ty = type;
@@ -1071,9 +1162,6 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
     fid := FuncId.assume_cast(fid&)[];
     @log_event("compile direct call %", fid) self;
     func := self.get_function(fid);
-    
-    assert(!func.get_flag(.MayHaveAquiredCaptures), "Not Yet Implemented: MayHaveAquiredCaptures");
-    // TODO: TryConstantFold
     
     arg_ty := UnknownType;
     
@@ -1364,10 +1452,26 @@ fn const_args_key(self: *SelfHosted, original_f: FuncId, arg_expr: *FatExpr) May
             };
             @debug_assert(!arg_ty.is_unknown(), "const_args_key expected arg expr to be compiled");
             value := @check(self.immediate_eval_expr(arg_exprs.index(i), arg_ty)) return;
-            all_const_args&.push_all(value&.bytes());
+            
+            // TODO: remove? -- Aug 13
+            //       You might not need this. I was hoping it would fix deconstruct_values but i think this is only used in the map. 
+            self.aligned_append_value(all_const_args&, value, arg_ty);
         };
         (Ok = all_const_args.items().to_value())
     }
+}
+
+fn aligned_append_value(self: *SelfHosted, all_values: *List(u8), new_value: Values, arg_ty: Type) void = {
+    alignment: i64 = self.get_info(arg_ty)[].align_bytes.zext();
+    extra := all_values.len.mod(alignment);
+    if extra != 0 {|
+        padding := alignment - extra;
+        range(0, padding) { _ |
+            all_values.push(0);
+        };
+    };
+    
+    all_values.push_all(new_value&.bytes());
 }
 
 fn remove_const_args(self: *SelfHosted, original_f: FuncId, arg_expr: *FatExpr) Maybe(void) = {
@@ -1381,7 +1485,7 @@ fn remove_const_args(self: *SelfHosted, original_f: FuncId, arg_expr: *FatExpr) 
         enumerate func.arg.bindings { i, binding | 
             if binding.ty&.ty() { expected |
                 found := arg_exprs[i - removed].ty;
-                if(found != expected, => return(@err("TODO: better typecheck")));
+                @check(self.can_assign(expected, found)) return;
             };
             // TODO: else!!!
             if binding.kind == .Const {|
@@ -1742,8 +1846,7 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
         continue :: local_return;
         @if_let(requested_ret) fn Specific(want) => {
             if opt.ret { have | 
-                // TODO: never
-                if have != want {|
+                if self.can_assign(want, have).is_err() {|
                     continue();
                 };
             };
@@ -1794,22 +1897,38 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
                 //       then if you need more check with the hint but say its optional or something so it's more conservative. 
                 //       like ContextualField`.a` -> Value`A.a` loses information.
                 //       or just do it on a clone of the arg expr? -- Aug 2
-                @match(self.compile_expr(arg_expr, (Specific = param))) {
-                //@match(self.type_of(arg_expr)) {
-                    fn Suspend(f) => {
-                        blocked&.push(f); 
-                        continue(); // we don't like it, we skip it.
-                    }
-                    fn Err(e) => {
-                        errors&.push(e);
-                        continue();
-                    }
-                    fn Ok() => {
-                        if arg_expr.ty != param {|
+                //       but you cant just clone here because then you'll never make progress if you yield while compiling it. 
+                //other := arg_expr.deep_clone(self.get_alloc()); // :SLOW slow slow slow
+                //if arg_expr.ty.is_unknown() {|
+                    @match(self.compile_expr(arg_expr, (Specific = param))) {
+                    //@match(self.type_of(arg_expr)) {
+                        fn Suspend(f) => {
+                            blocked&.push(f); 
+                            //arg_expr[] = other;
+                            continue(); // we don't like it, we skip it.
+                        }
+                        fn Err(e) => {
+                            errors&.push(e);
+                            //arg_expr[] = other;
                             continue();
-                        };
-                    }
-                };
+                        }
+                        fn Ok() => {
+                            if !arg_expr.ty.is_unknown() && self.can_assign(param, arg_expr.ty).is_err() {|
+                                //@println("[%] discard % for %", i, self.log_type(arg_expr.ty), self.log_type(param));
+                                //self.codemap.show_error_line(func.loc);
+                                //arg_expr[] = other;
+                                continue();
+                            };
+                            //arg_expr[] = other;
+                        }
+                    };
+                //} else {|
+                //    if self.can_assign(param, arg_expr.ty).is_err() {|
+                //        //@println("[%] discard % for %", i, self.log_type(arg_expr.ty), self.log_type(param));
+                //        //self.codemap.show_error_line(func.loc);
+                //        continue();
+                //    };
+                //};
             };
         };
         still_interesting&.push(opt[]);
@@ -1847,7 +1966,7 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
             };
             
             if func.finished_ret { found | 
-                if found != want {|
+                if self.can_assign(want, found).is_err()  {|
                     continue();
                 };
             };
@@ -1856,6 +1975,11 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
     };
     
     check_still_interesting();
+    
+    //if interesting.len > 0 {|
+    //    // TODO: :FUCKED this picks randomly!!!
+    //    return(Ok = interesting[0].func);
+    //};
     
     if !blocked.is_empty() {|
         @log_event("block len = %", blocked.len) self;
@@ -1867,13 +1991,13 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
     };
     
     // TODO: don't spam log since we might discard the error.
-    @log_event("ambigous overload for arg % %", self.log_type(arg_expr.ty), arg_expr.log(self.pool)) self;
+    @println("ambigous overload for arg % %", self.log_type(arg_expr.ty), arg_expr.log(self.pool));
     self.last_loc = arg_expr.loc;
-    @log_event("% matching options", interesting.len) self;
+    @println("% matching options", interesting.len);
     for interesting { opt |
         func := self.get_function(opt.func);
         @if(DEBUG_SPAM_LOG) self.codemap.show_error_line(func.loc);
-        //@log_event("- % -> %", self.log_type(func.finished_arg.unwrap()), self.log_type(func.finished_ret.unwrap()));
+        @println("- % -> %", self.log_type(func.finished_arg.unwrap()), self.log_type(func.finished_ret.unwrap()));
     };
     return(@err("TODO: resolve_in_overload_set %", interesting.len));
     Maybe(FuncId).unreachable_hack()
@@ -1967,7 +2091,12 @@ fn update_function_metadata(self: *SelfHosted, func: *Func, os: ?OverloadSet) Re
             @case(Flag.noinline.ident()) => func.set_flag(.NoInline);
             // TODO: generic+unsafe_noop_cast are done in scope for old sema but i want to move them here. -- Jul 30
             @case(Flag.generic.ident())  => func.set_flag(.Generic);
-            @case(Flag.unsafe_noop_cast.ident()) => func.set_flag(.UnsafeNoopCast);
+            @case(Flag.unsafe_noop_cast.ident()) => {
+                func.set_flag(.UnsafeNoopCast);
+                func.set_flag(.BodyIsSpecial);
+            };
+            @case(Flag.import.ident())   => func.set_flag(.BodyIsSpecial);
+            @case(Flag.libc.ident())     => func.set_flag(.BodyIsSpecial);
             @case(Flag.redirect.ident()) => {
                 os := @unwrap(os, "#redirect function only makes sense as part of an overload set") return;
                 os := self.to_values(OverloadSet, os);
@@ -1976,15 +2105,22 @@ fn update_function_metadata(self: *SelfHosted, func: *Func, os: ?OverloadSet) Re
                 @err_assert(expr.expr&.is(.Tuple), "#redirect expected tuple") return;
                 parts := expr.expr.Tuple&;
                 parts.push(os, self.get_alloc());
+                func.set_flag(.BodyIsSpecial);
             };
             // TODO: actually im not sure if its better to do this later...
             //       it would be nice to do only one pass over the annotations 
             //       but it would also be nice to do absolutely no work if you never try to call the function. 
             @case(Flag.comptime_addr.ident()) => {
                 @err_assert(func.body&.is(.Empty), "#comptime_addr conflicts with body expression") return;
+                func.set_flag(.BodyIsSpecial);
             };
             @case(Flag.intrinsic.ident()) => {
                 @err_assert(func.body&.is(.Empty), "#intrinsic conflicts with body expression") return;
+                func.set_flag(.BodyIsSpecial);
+            };
+            @case(Flag.asm.ident()) => {
+                @err_assert(!func.body&.is(.Empty), "#asm requires body expression") return;
+                func.set_flag(.BodyIsSpecial);
             };
             @case(Flag.inline.ident()) => {
                 // TODO: error on conflicting annotations. 
@@ -2166,11 +2302,12 @@ fn save_const(self: *SelfHosted, name: Var, val_expr: Expr, final_ty: Type, loc:
 
 // TODO: you can never do this to a constant directly in case its aliased once i have const ptrs. 
 fn coerce_const_expr(self: *SelfHosted, expr: *FatExpr, req: ResultType) Maybe(void) = {
-    @debug_assert(expr.expr&.is(.Value), "tried to coerce non-value expr");
-    
     if req.specific() { want | 
         found := expr.ty;
         if found != want {|
+            if !expr.expr&.is(.Value) {|
+                return(@err("Type Error: tried to coerce non-value expr"));
+            };
             @assert(!expr.expr.Value.coerced, "const mismatch. % vs % but already coerced", self.log_type(found), self.log_type(want));
             // TODO: set coereced? 
             
@@ -2290,7 +2427,7 @@ fn coerce_const_expr(self: *SelfHosted, expr: *FatExpr, req: ResultType) Maybe(v
             };
             //expr.expr.Value.coerced = true;
             //expr.ty = req;
-            return(@err("TODO: coerce constant found % but want % (might be an actual type error)", self.log_type(found), self.log_type(want)));
+            return(@err("TODO: coerce constant expected % but found %: % (might be an actual type error)", self.log_type(want), self.log_type(found), expr.log(self.pool)));
         };
     };
     .Ok
@@ -2302,13 +2439,38 @@ fn can_assign(self: *SelfHosted, want: Type, found: Type) Maybe(void) = {
     want_info  := self.get_type(want);
     found_info := self.get_type(found);
     
-    if found == FuncId {|
-        @if_let(want_info) fn Fn(f) => {
-            // TODO: typecheck!!
-            return(.Ok);
-        };
+    @match(found_info) {
+        fn Fn(f) => {
+            if want == FuncId {|
+                // TODO: typecheck!!
+                return(.Ok);
+            };
+        }
+        fn Label(f) => {
+            if want == LabelId {|
+                // TODO: typecheck!!
+                return(.Ok);
+            };
+        }
+        @default => ();
+    };
+    @match(want_info) {
+        fn Fn(f) => {
+            if found == FuncId {|
+                // TODO: typecheck!!
+                return(.Ok);
+            };
+        }
+        fn Label(f) => {
+            if found == LabelId {|
+                // TODO: typecheck!!
+                return(.Ok);
+            };
+        }
+        @default => ();
     };
     
+    // TODO: dont allocate + fmt here beacause overload resolution spams this. 
     @err("Type Error: expected % found %", self.log_type(want), self.log_type(found))
     
 }
@@ -2452,7 +2614,8 @@ fn check_quick_eval(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) ?Values = {
                 val := or self.check_quick_eval(part, part.ty) {|
                     return(.None)
                 };
-                all&.push_all(val&.bytes());
+                // Required since deconstruct_values (which we use for dyn_call) expects correctly aligned fields. 
+                self.aligned_append_value(all&, val, part.ty);
             };
             (Some = (Big = all.rs()))
         }
@@ -2835,7 +2998,8 @@ fn handle_expr(self: *Unquote, expr: *FatExpr) Result(DoMore, *ParseErr) #once =
             value := self.placeholders.index(idx); // TODO: make it more obvious that its only one use and the slot is empty.
             //@log_event("Placeholder(%) -> %", idx, value.log(self.compiler.pool));
             @err_assert(!value.expr&.is(.Poison), "ICE: missing placeholder for unquote") return;
-            expr[] = value[];
+            // This clone fixes a renumbering problem. :double_use_quote
+            expr[] = value.deep_clone(self.compiler.get_alloc());
             value.expr = (Poison = .PlaceholderUsed);
             value.done = false;
         }

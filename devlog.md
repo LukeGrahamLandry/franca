@@ -1,3 +1,16 @@
+## debugging new sema (Aug 13)
+
+variables declared in quote expressions (like in @match) don't get renumbered (also didn't in old sema),
+so new ones are seen as the old type if you lookup in the global thing what the type of the variable is.
+i don't understand why it worked before since it was using the same `get_var_type`.
+wait, nvm, unquote_placeholders renumbers at the end, so i was just logging too early (inside the @[] expr),
+and seeing the template var names. So the new one is indeed getting new vars each time.
+ok but the new one isn't renumbering all the way into the switch expr,
+the `callable` is always referencing the old `arg_ptr` somehow.
+which again i don't understand because the old one also calls into the self hosted renumber_expr.
+The problem was not cloning the arguments of unquote_placeholders so the first renumber would
+mutate the template of a quoted expression was used in an unquote, and then subsequent renumbers wouldn't see it. :double_use_quote
+
 ##
 
 format_into.

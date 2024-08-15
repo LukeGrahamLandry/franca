@@ -3,12 +3,17 @@ Vm :: @struct(
     ip: *u8,
     stack: List(Value), // TODO: inline fixed size array
     stack_top: *Value,
-    last_return: Value
+    last_return: Value,
+    gc: Alloc,
+    objects: Value, // TODO: compiler bug make this *Obj
 );
 
-fn init() Vm = {
+lox_alloc :: libc_allocator;
+fn init_vm() Vm = {
     self := Vm.uninitialized(); // TODO: no uninit
+    self.gc = lox_alloc;
     self.stack = list(stack_max, lox_alloc);  // EXTRA: grow stack
+    self.objects.bits = null_object;
     self&.reset_stack();
     self
 }
@@ -16,6 +21,7 @@ fn init() Vm = {
 fn drop(self: *Vm) void = {
     // self.chunk.drop(); // TODO: but for now its always on the stack. 
     self.stack&.drop();
+    self.free_objects();
 }
 
 InterpretResult :: @enum(Ok, CompileError, RuntimeError);
@@ -23,7 +29,7 @@ InterpretResult :: @enum(Ok, CompileError, RuntimeError);
 fn interpret(self: *Vm, source: Str) InterpretResult = {
     chunk: Chunk = init();
     ::if(InterpretResult);
-    result := if(compile(source, chunk&)) {|
+    result := if(compile(self, source, chunk&)) {|
        self.interpret(chunk&)
     } {| InterpretResult.CompileError };
     chunk&.drop();
@@ -41,6 +47,7 @@ fn run(self: *Vm) InterpretResult = {
     debug: List(u8) = list(lox_alloc);
     
     loop {|
+        continue :: local_return;
         @if(::debug_trace_execution, {
             debug&.clear();
             @fmt(debug&, "         %", ""); // TODO: fix 'no trivial tuples'
@@ -78,7 +85,38 @@ fn run(self: *Vm) InterpretResult = {
                 self.push(val.to_number().neg().to_value());
             };
             // TODO: without the ret type annotation you get err walkwip, but only when it couldn't find the function to call? so just need better error message. 
-            @case(OpCode.Add)      => binary_op(add); 
+            @case(OpCode.Add) => {
+                rhs := self.pop();
+                lhs := self.pop();
+                if rhs.is_number() {|
+                    if !lhs.is_number() {|
+                        self.runtime_error("Second operand must be a number.");
+                        return(.RuntimeError);
+                    };
+                    result := add(lhs.to_number(), rhs.to_number()).to_value();
+                    self.push(result);
+                    continue();
+                };
+                
+                if rhs.is_obj(ObjType.String) {|
+                    if !lhs.is_obj(ObjType.String) {|
+                        self.runtime_error("Second operand must be a string.");
+                        return(.RuntimeError);
+                    };
+                    lhs := lhs.to_string();
+                    rhs := rhs.to_string();
+                    o := self.allocate_obj(ObjString, ObjType.String);
+                    new := self.gc.alloc(u8, lhs.data.len + rhs.data.len);
+                    new.slice(0, lhs.data.len).copy_from(lhs.data);
+                    new.slice(lhs.data.len, new.len).copy_from(rhs.data);
+                    o.data = new;
+                    self.push(o.to_value());
+                    continue();
+                };
+                
+                self.runtime_error("Operands must be numbers or strings.");
+                return(.RuntimeError);
+            };
             @case(OpCode.Subtract) => binary_op(sub); 
             @case(OpCode.Multiply) => binary_op(mul); 
             @case(OpCode.Divide)   => binary_op(div);  
@@ -150,6 +188,16 @@ fn runtime_error(self: *Vm, msg: Str) void = {
     p := self.chunk.code&.as_ptr();
     i := p.ptr_diff(self.ip);
     line := self.chunk.lines[i];
+}
+
+// TODO: EXTRA: store the data contiguously with the ObjString header
+// TODO: EXTRA: track which strings are constant-ish so don't free them
+fn copy_string(self: *Vm, s: Str) *ObjString = {
+    o := self.allocate_obj(ObjString, ObjType.String);
+    new := self.gc.alloc(u8, s.len);
+    new.copy_from(s);
+    o.data = new;
+    o
 }
 
 ::ptr_utils(u8);

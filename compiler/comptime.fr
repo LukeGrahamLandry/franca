@@ -256,12 +256,7 @@ fn new_sema_fill_export_ffi(out: *List(u8)) void = {
     
     @fmt(out, "fn Fn(Arg: Type, Ret: Type) Type #fold #ct #comptime_addr(%);\n", fn_type);
     fn_type: rawptr : fn(c: CompilerRs, arg: Type, ret: Type) Type = {
-        arity := 1;
-        types := c[][].tuple_types(arg);
-        if types { types |
-            arity = types.len;
-        };
-        c[][].intern_type(Fn = (arg = arg, ret = ret, arity = arity.trunc()))
+        c[][].intern_type(Fn = (arg = arg, ret = ret, arity = c[][].arg_types(arg).len().trunc()))
     };
     
     @fmt(out, "fn IntType(bits: i64, signed: bool) Type #fold #ct #comptime_addr(%);\n", make_int_type);
@@ -389,6 +384,7 @@ fn new_sema_fill_export_ffi(out: *List(u8)) void = {
         self := c[][];
         old := self.dispatch.enclosing_function;
         self.dispatch.enclosing_function = .None;
+        //e = self.clone(e&); // TODO: do i need to do this? :SLOW
         ty := self.poll_in_place(Type) {()Maybe(Type)|
             @check(self.compile_expr(e&, .None)) local_return;
             (Ok = e.ty)
@@ -466,7 +462,7 @@ fn new_sema_fill_export_ffi(out: *List(u8)) void = {
     };
     @fmt(out, "fn debug_log_ast(expr: FatExpr) void #ct #comptime_addr(%);\n", debug_log_ast);
     debug_log_ast: rawptr : fn(c: CompilerRs, e: FatExpr) void = {
-        @println("[debug_log_ast] %", e&.log(c[][].pool));
+        @println("[debug_log_ast] %; %", e.expr&.tag(), e&.log(c[][].pool));
     };
     
     @fmt(out, "fn debug_log_type(type: Type) void #ct #comptime_addr(%);\n", debug_log_type);
@@ -486,6 +482,7 @@ fn new_sema_fill_export_ffi(out: *List(u8)) void = {
         self := c[][];
         old := self.dispatch.enclosing_function;
         self.dispatch.enclosing_function = .None;
+        //expr = self.clone(expr&); // TODO: do i need to do this? :SLOW
         res := self.poll_in_place(void, => self.compile_expr(expr&, .None));
         self.dispatch.enclosing_function = old;
         self.unwrap_report_error(void, res);
@@ -553,6 +550,15 @@ fn new_sema_fill_export_ffi(out: *List(u8)) void = {
         return(e);
         FatExpr.unreachable_hack()
     };
+    
+    
+    @fmt(out, "fn FnPtr(arg: Type, ret: Type) Type #fold #ct #comptime_addr(%);\n", fn_ptr);
+    fn_ptr: rawptr : fn(c: CompilerRs, arg: Type, ret: Type) Type = {
+        self := c[][];
+        arity := self.arg_types(arg).len();
+        self.intern_type(FnPtr = (ty = (arg = arg, ret = ret, arity = arity.trunc()), cc = .CCallReg))
+    };
+    
     
 }
 

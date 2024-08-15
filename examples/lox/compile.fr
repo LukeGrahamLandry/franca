@@ -1,4 +1,5 @@
 Parser :: @struct(
+    vm: *Vm, // because we want to own strings so need to allocate. 
     scanner: Scanner, 
     current: Token, 
     previous: Token, 
@@ -53,11 +54,13 @@ null_rule : ParseFn : {
     table.set(@as(i64) TokenType.Greater,      @as(ParseRule) (prefix = null_rule,       infix = binary,    prec = .Comparison));
     table.set(@as(i64) TokenType.LessEqual,    @as(ParseRule) (prefix = null_rule,       infix = binary,    prec = .Comparison));
     table.set(@as(i64) TokenType.GreaterEqual, @as(ParseRule) (prefix = null_rule,       infix = binary,    prec = .Comparison));
+    table.set(@as(i64) TokenType.String,       @as(ParseRule) (prefix = parse_string,    infix = null_rule, prec = .None));
     rules[] = table;
 };
 
-fn compile(source: Str, chunk: *Chunk) bool = {
+fn compile(vm: *Vm, source: Str, chunk: *Chunk) bool = {
     self: Parser = (
+        vm = vm,
         scanner = init(source), 
         current = Token.uninitialized(), 
         previous = Token.uninitialized(), 
@@ -165,6 +168,12 @@ parse_literal :: fn(self: *Parser) void = {
     self.emit(value);
 };
 
+parse_string :: fn(self: *Parser) void = {
+    str_tok := self.previous;
+    s := str_tok.lexeme.slice(1, str_tok.lexeme.len - 1);
+    s := self.vm.copy_string(s);
+    self.emit(s.to_value())
+};
 
 fn get_rule(type: TokenType) *ParseRule = rules[].index(@as(i64) type);
 

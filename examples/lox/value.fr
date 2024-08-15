@@ -4,41 +4,129 @@ Value :: @struct(bits: i64);  // TODO: the world is probably a better place if t
 // TODO: higher prevision float rendering 
 fn display(self: *Value, out: *List(u8)) void = self[].display(out);
 fn display(self: Value, out: *List(u8)) void = {
-    if(self.is_nil(), => "nil".display(out)) {|
-        if(self.is_bool(), => self.to_bool().display(out)) {|
-            if(self.is_number(), => self.to_number().display(out)) {|
-                "~~BAD_VALUE~~".display(out)
+    if self.is_nil() {|
+        out.push_all("nil");
+        return();
+    };
+    if self.is_bool() {|
+        self.to_bool().display(out);
+        return();
+    };
+    if self.is_number() {|
+        self.to_number().display(out);
+        return();
+    };
+    if self.is_obj() {|
+        @match(self.obj_type()) {
+            fn String() => {
+                o := self.to_string();
+                o.data.display(out);
+                return();
             }
-        }
-    }
+            fn _temp() => unreachable();
+        };
+    };
+    
+    "~~BAD_VALUE~~".display(out)
 }
 
 qnan        : i64   : 0x7ffc000000000000.bitcast();
+sign_bit    : i64   : 0x8000000000000000.bitcast();
+
 nil_value   : Value : (bits = 1.bit_or(qnan));
 false_value : Value : (bits = 2.bit_or(qnan));
 true_value  : Value : (bits = 3.bit_or(qnan));
 
 #inline fn to_value(self: f64) Value = (bits = self.bitcast());
 #inline fn to_value(self: bool) Value = if(self, => true_value, => false_value);
+#inline fn to_value(self: *Obj) Value = Obj.from_obj_subtype(self);
+#inline fn to_value(self: *ObjString) Value = ObjString.from_obj_subtype(self);
+
+null_object :: sign_bit.bit_or(qnan);
+
+from_obj_subtype :: fn($T: Type, self: *T) Value #generic = {
+    addr := T.int_from_ptr(self);
+    (bits = null_object.bit_or(addr))
+};
 
 #inline fn is_number(self: Value) bool = self.bits.bit_and(qnan).ne(qnan);
 #inline fn is_bool(self: Value) bool = self.eq(true_value).or(self.eq(false_value));
 #inline fn is_nil(self: Value) bool = self.eq(nil_value);
+#inline fn is_obj(self: Value) bool = {
+    self.bits.bit_and(null_object) == null_object
+}
+fn is_obj(self: Value, type: ObjType) bool = {
+    if(!self.is_obj(), => return(false));
+    self.obj_type() == type 
+}
 
 #inline fn to_bool(self: Value) bool = self.eq(true_value);
 #inline fn to_number(self: Value) f64 = self.bits.bitcast();
 
-#redirect(Ty(i64, i64), bool) fn eq(lhs: Value, rhs: Value) bool;
+to_obj_subtype :: fn($T: Type, self: Value) *T #generic = {
+    addr := self.bits.bit_and(null_object.bit_not());
+    T.ptr_from_int(addr)
+}
 
-ObjType :: @enum(String, _temp);
-Obj :: @struct(
+fn to_obj(self: Value) *Obj #inline  = Obj.to_obj_subtype(self);
+fn to_string(self: Value) *ObjString #inline = ObjString.to_obj_subtype(self);
+
+fn eq(lhs: Value, rhs: Value) bool = {
+    if(lhs.bits == rhs.bits, => return(true));  // TODO: IEEE NaN
+    if lhs.is_obj() && rhs.is_obj() {|
+        if(lhs.obj_type() != rhs.obj_type(), => return(false));
+        @match(lhs.obj_type()) {
+            fn String() => {
+                lhs := lhs.to_string();
+                rhs := rhs.to_string();
+                return(lhs.data == rhs.data);
+            }
+            fn _temp() => unreachable();
+        };
+    };
+    
+    false 
+}
+
+ObjType :: @enum(String, _temp); :: enum(ObjType);
+Obj :: @rec @struct(
     type: ObjType,
-    next: *Obj, // TODO: i can't do this yet...
+    next: *Obj,
 );
 
 ObjString :: @struct(
     obj: Obj,
-    s: Str,
+    data: Str,
 );
+
+fn obj_type(self: Value) ObjType #inline = {
+    o := self.to_obj();
+    o.type
+}
+
+allocate_obj :: fn(self: *Vm, $T: Type, tag: ObjType) *T #generic = {
+    mem := self.gc.alloc(T, 1);
+    mem.ptr.obj.type = tag;
+    mem.ptr.obj.next = self.objects.to_obj();
+    self.objects = mem.ptr.to_value();
+    mem.ptr
+};
+
+fn free_objects(self: *Vm) void = {
+    while => self.objects.bits != null_object {|
+        v := self.objects;
+        obj := self.objects.to_obj();
+        self.objects = obj.next.to_value();
+        @println("[FREE] [%]", v);
+        @match(obj.type) {
+            fn String() => {
+                obj := v.to_string();
+                self.gc.dealloc(u8, obj.data);
+                self.gc.dealloc(ObjString, @as([]ObjString) (ptr = obj, len = 1));
+            }
+            fn _temp() => unreachable();
+        };
+    };
+}
 
 ::if(Value);

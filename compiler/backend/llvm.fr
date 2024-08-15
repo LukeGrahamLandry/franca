@@ -76,6 +76,7 @@ fn next_debug(self: *EmitLlvm) i64 = {
     self.next_debug_info - 1
 }
 
+// TODO: my impression is unnamed_addr doesn't help size (even with -no-deduplication) so maybe take it out -- Aug 13
 fn emit_function_husk(self: *EmitLlvm, fid: FuncId, signeture: PrimSig, $emit_body: @Fn() void) void = {
     if self.program.get_build_options()[].retain_function_names {|
         self.out&.push_all("define ccc ");
@@ -89,7 +90,7 @@ fn emit_function_husk(self: *EmitLlvm, fid: FuncId, signeture: PrimSig, $emit_bo
         s.items()
     };
     
-    self.out&.current().push_all(" \"frame-pointer\"=\"all\" "); // must be before debug info!
+    self.out&.current().push_all(" unnamed_addr \"frame-pointer\"=\"all\" "); // must be before debug info!
     if self.program.get_build_options()[].debug_info {|
         self.current_debug_info = self.next_debug();
         @fmt(self.out&.current(), "!dbg !%", self.current_debug_info);
@@ -246,11 +247,11 @@ fn emit_constant(self: *EmitLlvm, id: BakedVarId) void = {
     
     @match(value&) {
         (fn Zeros(len) => {
-            @fmt(self.out&.current(), "@g% = private global [% x i8] zeroinitializer\n", idx, len[]);
+            @fmt(self.out&.current(), "@g% = private unnamed_addr global [% x i8] zeroinitializer\n", idx, len[]);
         });
         (fn Bytes(bytes) => {
             // TODO: emit string as characters if they're in a sane range. 
-            @fmt(self.out&.current(), "@g% = private global [% x i8] [", idx, bytes.len + 1);
+            @fmt(self.out&.current(), "@g% = private unnamed_addr global [% x i8] [", idx, bytes.len + 1);
             for(bytes[].items()) {b|
                 @fmt(self.out&.current(), " i8 %,", @as(i64) b.zext());
             };
@@ -258,7 +259,7 @@ fn emit_constant(self: *EmitLlvm, id: BakedVarId) void = {
             self.out&.push_all("i8 0]\n"); // TODO: hack cause im to lazy to ask for debug names as cstr
         });
         (fn VoidPtrArray(parts) => {
-            @fmt(self.out&.current(), "@g% = private global [% x ptr] [", idx, parts.len);
+            @fmt(self.out&.current(), "@g% = private unnamed_addr global [% x ptr] [", idx, parts.len);
             for(parts[].items()){inner|
                 self.out&.reserve(20);
                 @match(inner) {
