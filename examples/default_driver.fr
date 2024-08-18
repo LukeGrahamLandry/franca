@@ -111,23 +111,28 @@ fn driver(vtable: *ImportVTable) void = {
                 c := load_file(file, vtable, build_options);
                 
                 tests := c.get_tagged("test");
+                passed := 0;
                 for tests { fid |
                     if jit {|
                         ptr := c.get_jitted(fid);
                         f := assume_types_fn(Arg = void, Ret = void, ptr = ptr);
                         @eprintln("[run %]", c.get_string(c.get_function_name(fid)));
                         f();
+                        // TODO: do the fork stuff to report all even when some fail. 
+                        passed += 1;
                     } else {|
                         assert(llvm, "Not Yet Implemented: run test with -aot=qbe");
                         c.compile_with_llvm(fid, .TestRunnerMain, debug_info);
                         child_args := find_args_after_double_dash(args_after_action);
                         @eprintln("[run %]", c.get_string(c.get_function_name(fid)));
-                        run_cmd_blocking("a.out", empty());
+                        success := run_cmd_blocking("a.out", empty());
+                        if success {|
+                            passed += 1;
+                        };
                     };
                 };
-                // TODO: do the fork stuff to report all even when some fail. 
-                @eprintln("[Passed %/% tests]", tests.len, tests.len);
-                exit(0);
+                @eprintln("[Passed %/% tests]", passed, tests.len);
+                exit(if(passed == tests.len, => 0, => 1));
             };
             @default => ();
         };

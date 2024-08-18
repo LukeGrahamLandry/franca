@@ -529,19 +529,36 @@ fn emit_inst(self: *EmitAsm, b_idx: usize, inst: Bc, i: usize) bool #once = {
             };
         }
         fn CopyBytesToFrom(bytes) => {
-            self.state.stack&.push(Literal = bytes.zext());
-            self.stack_to_ccall_reg(@slice(Prim.P64, Prim.P64, Prim.I64));
-            self.spill_abi_stompable();
-            // TODO: fancy version of this?
-            addr: rawptr : fn(dest: *u8, src: *u8, len: i64) void = {
-                range(0, len) { i |
-                    dest.offset(i)[] = src.offset(i)[];
+            // It takes me 7 instructions to call memcpy (not counting spilling other registers), so inline the easy case. 
+            // TODO: do smaller ones if not multiple of 8. 
+            if bytes.mod(8) == 0 && bytes <= 40 {|
+                // TODO: pop with offset here and combine the immediate constants instead of actually forming the values. 
+                src := self.pop_to_reg();
+                dest := self.pop_to_reg();
+                temp := self.get_free_reg();
+                range(0, bytes.zext() / 8) { i |
+                    offset: u16 = i.mul(8).trunc();
+                    self.load_u64(temp, src, offset);
+                    self.store_u64(temp, dest, offset);
                 };
+                self.drop_reg(temp);
+                self.drop_reg(src);
+                self.drop_reg(dest);
+            } else {|
+                self.state.stack&.push(Literal = bytes.zext());
+                self.stack_to_ccall_reg(@slice(Prim.P64, Prim.P64, Prim.I64));
+                self.spill_abi_stompable();
+                // TODO: fancy version of this?
+                addr: rawptr : fn(dest: *u8, src: *u8, len: i64) void = {
+                    range(0, len) { i |
+                        dest.offset(i)[] = src.offset(i)[];
+                    };
+                };
+                // offset := self.asm.offset_words(self.asm.next, addr);
+                self.load_imm(x17, addr.int_from_rawptr());
+                self.asm.push(br(x17, 1));
+                self.restore_all_registers();
             };
-            // offset := self.asm.offset_words(self.asm.next, addr);
-            self.load_imm(x17, addr.int_from_rawptr());
-            self.asm.push(br(x17, 1));
-            self.restore_all_registers();
         }
         fn Switch(i) => {
             cases := self.body.switch_payloads.index(i);

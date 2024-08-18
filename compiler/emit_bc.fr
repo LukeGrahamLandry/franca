@@ -397,6 +397,7 @@ fn compile_for_arg(self: *EmitBc, result: *FnBody, arg: *FatExpr, arity: usize) 
 }
 
 fn store_pre(self: *EmitBc, result: *FnBody, ty: Type) void = {
+    if(ty.is_never(), => result.push(.Unreachable));
     slots := self.program.slot_count(ty);
     @switch(slots) {
         @case(0) => ();
@@ -420,6 +421,7 @@ fn store_pre(self: *EmitBc, result: *FnBody, ty: Type) void = {
 }
 
 fn load(self: *EmitBc, result: *FnBody, ty: Type) void = {
+    if(ty.is_never(), => result.push(.Unreachable));
     slots := self.program.slot_count(ty);
     @switch(slots) {
         @case(0) => ();
@@ -545,9 +547,10 @@ fn emit_body(self: *EmitBc, result: *FnBody, f: FuncId) PRes #once = {
         };
 
         result.push(op);
+    } else {|
+        result.push(.Unreachable);
     };
     
-    // TODO: bring this back
     if result.want_log {|
         @println("[#log_bc %] %", self.program.pool.get(func.name), result.signeture&);
         enumerate result.blocks { i, block | 
@@ -647,6 +650,7 @@ fn compile_stmt(self: *EmitBc, result: *FnBody, stmt: *FatStmt) PRes = {
             self.mark_variable(result, f.name, id);
             self.addr_var(result, id);
             @try(self.compile_expr(result, f.value&, .ResAddr, false)) return;
+            if(ty.is_never(), => result.push(.Unreachable));
             prev := self.var_lookup&.insert(f.name, id);
             self.locals.last().unwrap().push(id);
             @assert(prev.is_none(), "shadow is still new var");
@@ -811,6 +815,7 @@ fn compile_expr(self: *EmitBc, result: *FnBody, expr: *FatExpr, result_location:
                     fn Discard() => result.push(Snipe = 0);
                 };
             };
+            if(expr_ty.is_never(), => result.push(.Unreachable));
             return(.Ok)
         };
         fn FnPtr(arg) => {
@@ -966,7 +971,7 @@ fn emit_call(self: *EmitBc, result: *FnBody, f: *FatExpr, arg: *FatExpr, result_
 
             if(func.has_tag(.no_tail), => { can_tail = false; });
             
-            return(self.emit_runtime_call(result, f_ty, cc, arg, result_location, can_tail) { sig, tail |
+            self.emit_runtime_call(result, f_ty, cc, arg, result_location, can_tail) { sig, tail |
                 result.mix_hash(f_id.as_index(), 436265);
                 if self.program[f_id].body&.is(.Intrinsic) {|
                     op := self.program[f_id].body.Intrinsic;
@@ -984,7 +989,7 @@ fn emit_call(self: *EmitBc, result: *FnBody, f: *FatExpr, arg: *FatExpr, result_
                     };
                     result.push(CallDirect = (sig = sig[], f = f_id, tail = tail));
                 };
-            });
+            }
         }
         fn FnPtr(f_ty) => {
             @try(self.compile_expr(result, f, .PushStack, false)) return;
@@ -1001,17 +1006,27 @@ fn emit_call(self: *EmitBc, result: *FnBody, f: *FatExpr, arg: *FatExpr, result_
             if result_location == .ResAddr && will_use_indirect_ret {|
                 result.push(Snipe = 0); // original ret ptr
             };
-            return(.Ok)
+            .Ok
         }
         fn Label(ret_ty) => {
             label := @unwrap(f.as_const(), "called label must be const") return;
             return_from := LabelId.assume_cast(label&)[];
-            // result_location is the result of the ret() expression, which is Never and we don't care.
+
             ret := @unwrap(
                 self.inlined_return_addr&.get_ptr(return_from),
                 "missing return label. forgot '=>' on function?"
             ) return;
             ret.used = true;  // note: updating the one in the map! not a copy
+            
+            // result_location is the result of the ret() expression, which is Never and we don't care (because we're going to jump away).
+            // But we have to discard it if the old expression was expecting something large. 
+            // Because the incoming pointer on the stack will flow through and confuse us later. :early_return_big
+            ::enum(ResultLoc);
+            x := (result_location.eq(.ResAddr)).or(ret.result_loc == .ResAddr);
+            if x {|
+                result.pop(1); 
+            };
+            
             slots: u16 = @match(ret.result_loc) {
                 fn PushStack() => self.slot_count(ret_ty[]);
                 fn ResAddr() => {
@@ -1025,13 +1040,10 @@ fn emit_call(self: *EmitBc, result: *FnBody, f: *FatExpr, arg: *FatExpr, result_
             @try(self.compile_expr(result, arg, ret.result_loc, false)) return;
             result.push(Goto = (ip = ret.block, slots = slots));
             result[ret.block].incoming_jumps += 1;
-            // TODO: :FUCKED. if you dont have the early return here, it returns uninit memory. 
-            //       so like fall through doesnt get you to the same place.
-            return(.Ok);
+            .Ok
         }
         @default => @panic("ICE: non callable: %", f.log(self.program.pool));
-    };
-    PRes.unreachable_hack()
+    }
 }
 
 fn emit_block_expr(self: *EmitBc, result: *FnBody, body: *RsVec(FatStmt), value: *FatExpr, ret_label: ?LabelId, result_location: ResultLoc, can_tail: bool) PRes #once = {
