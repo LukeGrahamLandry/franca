@@ -1,0 +1,115 @@
+//! This parses the format used by https://github.com/munificent/craftinginterpreters/tree/master/test
+//! Currently checks exact output for programs that are not supposed to error but otherwise just expects 
+//! runtime vs compile error to be correct (my error messages don't match). 
+
+fn main() void = {
+    // TODO: can't call ArenaAlloc/mark before any allocations have been made. 
+    @println("coconut.jpg");
+    
+    args := cli_args();
+    
+    go := false;
+    (total, pass) := (0, 0);
+    for args { s |
+        continue :: local_return;
+        s := s.str();
+        if !go {|
+            if s == "--" {|
+                go = true;
+            };
+            continue();
+        };
+        mark := __temp_alloc.mark();
+        (yes, no) := run_test_at_path(s);
+        __temp_alloc.reset_retaining_capacity(mark);
+        total += yes + no;
+        pass += yes;
+    };
+    @println("Passed %/% tests.", pass, total);
+    exit(if(pass == total, => 0, => 1));
+}
+
+::if(Ty(i64, i64));
+fn run_test_at_path(s: Str) Ty(i64, i64) = {
+    if s.ends_with(".lox") {|
+        src := temp().read_to_string(s);
+        @println("Run %", s);
+        if run_test(src) {|
+            (1, 0)
+        } else {|
+            (0, 1)
+        }
+    } else {|
+        // TODO: recurse through directories 
+        (0, 0)
+    }
+}
+
+fn run_test(src: List(u8)) bool = {
+    want := expected_output(src.items());
+    src&.push_all("\nreturn nil;"); // todo: remove
+        
+    found: List(Str) = list(temp());
+    vm: Vm = init_vm();
+    result := vm&.interpret(src.items()) { value | 
+        x := @format("%", value) temp();
+        found&.push(x.items());
+    };
+    vm&.drop();  // test a forced full collection
+    
+    @match(want) {
+        fn Ok(want) => {
+            if(result != .Ok, => return(false));
+            if want.len != found.len {|
+                @println("Expected % outputs but found %", want.len, found.len);
+                return(false);
+            };
+            
+            range(0, want.len) { i |
+                if want[i] != found[i] {|
+                    @println("[%] Expected '%' but found '%'", i, want[i], found[i]);
+                    return(false);
+                };
+            };
+            true
+        }
+        fn RuntimeError() => result == .RuntimeError;
+        fn CompileError() => result == .CompileError;
+    }
+}
+
+TestResult :: @tagged(Ok: List(Str), CompileError, RuntimeError);
+fn expected_output(src: Str) TestResult = {
+    want: List(Str) = list(temp());
+    cursor := 0;
+    tag := "// expect: ";
+    runtime_tag := "expect runtime error: ";
+    comptime_tag := "[line ";
+    while => cursor < src.len - tag.len {|
+        if cursor < src.len - runtime_tag.len {|
+            if src.subslice(cursor, runtime_tag.len) == runtime_tag {|
+                return(.RuntimeError)
+            };
+        };
+        if src.subslice(cursor, comptime_tag.len) == comptime_tag {|
+            return(.CompileError)
+        };
+        if src.subslice(cursor, tag.len) == tag {|
+            cursor += tag.len;
+            start := cursor;
+            while => cursor < src.len && src[cursor] != "\n".ascii() {|
+                cursor += 1;
+            };
+            want&.push(src.slice(start, cursor));
+            cursor -= 1;
+        };
+        cursor += 1;
+    };
+    (Ok = want)
+}
+
+#include_std("examples/lox/chunk.fr");  // TODO: rename this macro
+#include_std("examples/lox/value.fr");
+#include_std("examples/lox/vm.fr");
+#include_std("examples/lox/scanner.fr");
+#include_std("examples/lox/compile.fr");

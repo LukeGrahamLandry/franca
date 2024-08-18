@@ -1,3 +1,7 @@
+debug_trace_execution :: true;
+debug_print_code :: true;
+stack_max :: 256;
+
 Vm :: @struct(
     chunk: *Chunk,
     ip: *u8,
@@ -35,24 +39,40 @@ fn drop(self: *Vm) void = {
     self.free_objects();
 }
 
-InterpretResult :: @enum(Ok, CompileError, RuntimeError);
+InterpretResult :: @enum(i64) (Ok, CompileError, RuntimeError, SuspendPrint); ::enum(InterpretResult);
 
-fn interpret(self: *Vm, source: Str) InterpretResult = {
+fn interpret(self: *Vm, source: Str, $print: Fn(Value, void)) InterpretResult = {
     chunk: Chunk = init();
     ::if(InterpretResult);
     self.compiler_locals&.clear();
     result := if(compile(self, source, chunk&)) {|
-       self.interpret(chunk&)
+       self.interpret(chunk&, print)
     } {| InterpretResult.CompileError };
     
     chunk&.drop();
     result
 }
 
-fn interpret(self: *Vm, chunk: *Chunk) InterpretResult = {
+fn interpret(self: *Vm, source: Str) InterpretResult = {
+    self.interpret(source) { value |
+        @println("%", value);
+    }
+}
+
+fn interpret(self: *Vm, chunk: *Chunk, $print: Fn(Value, void)) InterpretResult = {
     self.chunk = chunk;
     self.ip = chunk.code&.as_ptr();
-    self.run()
+    result := InterpretResult.Ok;
+    dowhile {| // :FUCKED. compiler bug. want to just loop and early return here but you get garbage value. 
+        result = self.run();
+        if result == .SuspendPrint {|
+            print(self.last_return);
+            true
+        } else {|
+            false
+        }
+    };
+    result
 }
 
 fn run(self: *Vm) InterpretResult = {
@@ -153,7 +173,8 @@ fn run(self: *Vm) InterpretResult = {
             };
             @case(OpCode.Print) => {
                 value := self.pop();
-                @print("%", value);
+                self.last_return = value;
+                return(.SuspendPrint);
             };
             @case(OpCode.Pop) => {
                 _ := self.pop();

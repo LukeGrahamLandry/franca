@@ -1462,10 +1462,18 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // body.retain(|s| !(matches!(s.stmt, Stmt::Noop) && s.annotations.is_empty())); // Not required but makes debugging easier cause there's less stuff.
 
                 // TODO: insert drops for locals
-                let res = self.compile_expr(value, requested)?;
+                let mut res = self.compile_expr(value, requested)?;
                 if body.is_empty() && ret_label.is_none() {
                     *expr = mem::take(value); // Not required but makes debugging easier cause there's less stuff.
                 }
+                
+                // HACK. for when you inline something with an early return that ends in a never. :early_return_fallthrough_never
+                if let Some(ty) = requested.specific() {
+                    if res == TypeId::never {
+                        res = ty;
+                    }
+                }
+                
                 expr.ty = res;
                 res
             }
