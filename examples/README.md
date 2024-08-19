@@ -2,7 +2,8 @@
 - bf: translates brainfuck to c
 - mandelbrot: prints an ascii art mandelbrot set fractal
 - raw_terminal: take input without blocking and clear the terminal
-- lox: bytecode vm for the language from craftinginterpreters.com (only ch 14-18 so far)
+- 60fps: recompile mandelbrot every frame
+- lox: bytecode vm for the language from craftinginterpreters.com (only ch 14-22 so far)
 
 - bloat: parses the output of objdump and reports the space taken by each function (cli:objdump)
 - farm_game: draws some rectangles on the screen with sokol (lib:sokol)

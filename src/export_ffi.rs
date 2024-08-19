@@ -12,7 +12,7 @@ use crate::ffi::InterpSend;
 use crate::logging::{unwrap, PoolLog};
 use crate::overloading::where_the_fuck_am_i;
 use crate::self_hosted::Ident;
-use crate::{assert, err, ice, log_err, make_toplevel};
+use crate::{assert, err, ice, log_err, make_toplevel, MEM};
 use std::fmt::{Debug, Write};
 use std::mem::{self, transmute};
 use std::ops::{FromResidual, Try};
@@ -188,11 +188,11 @@ impl<T, E> FromResidual for BigResult<T, E> {
 pub struct ImportVTable {
     _intern_string: usize,
     _get_string: usize,
-    _a: usize,
+    get_old_global_allloc: unsafe extern "C" fn() -> *mut *mut u8,
     init_compiler: unsafe extern "C" fn(comptime_arch: TargetArch, build_options_ptr: usize) -> *const Compile<'static, 'static>,
     find_unqiue_func: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, name: Ident<'p>) -> BigOption<FuncId>,
     _get_fns_with_tag: usize,
-    _b: i64, // todo: remove
+    _destroy_compiler: i64,
     compile_func: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, f: FuncId, when: ExecStyle) -> BigCErr<'p, ()>,
     get_jitted_ptr: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, f: FuncId) -> BigCErr<'p, *const u8>,
     _get_function: usize,
@@ -235,11 +235,11 @@ pub struct ExportVTable {
 pub static IMPORT_VTABLE: ImportVTable = ImportVTable {
     _intern_string: 0xbeefbeefbeef,
     _get_string: 0xbeefbeefbeef,
-    _a: 0,
+    get_old_global_allloc,
     init_compiler: franca_init_compiler,
     find_unqiue_func: franca_find_unique_fn,
     _get_fns_with_tag: 0xbeefbeefbeef,
-    _b: 0,
+    _destroy_compiler: 0xbeefbeefbeef,
     compile_func: franca_compile_func,
     get_jitted_ptr,
     _get_function: 1,
@@ -271,6 +271,10 @@ pub static IMPORT_VTABLE: ImportVTable = ImportVTable {
     log_type: 0,
     check_for_new_aot_bake_overloads,
 };
+
+extern "C" fn get_old_global_allloc() -> *mut *mut u8 {
+    MEM.get_ref()
+}
 
 // TODO: cant just call the thing because lifetime?
 extern "C" fn check_for_new_aot_bake_overloads<'p>(compile: &mut Compile<'_, 'p>) -> Res<'p, ()> {

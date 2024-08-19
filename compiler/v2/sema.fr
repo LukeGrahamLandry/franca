@@ -329,7 +329,7 @@ fn decl_var(self: *SelfHosted, name: Var, ty: *LazyType, value: *FatExpr) Maybe(
         //       This was one of the changes that inspired the sema rewrite.  -- Jul 25
         self.finish_layout_deep(expected_ty).unwrap();
         self.finish_layout_deep(final_ty).unwrap();
-        if(expected_ty != final_ty, => return(@err("TODO: better var typecheck")));
+        @check(self.can_assign(expected_ty, final_ty)) return;
         // TODO: panic("TODO: self.type_check_arg(value, ty, \"var decl\")?;");
     };
 
@@ -645,7 +645,17 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
                 done = new_done && done;
             };
             @check(self.compile_expr(f.result, requested)) return;
+            
             expr.ty = f.result.ty;
+            
+            // HACK. for when you inline something with an early return that ends in a never. :early_return_fallthrough_never
+            // TODO: seperate out a `unify` operation and use it everywhere you update expr.ty? 
+            //       Switch and If already have this so its starting to feel a bit dumb.  -- Aug 19
+            if f.result.ty.is_never() {|
+                if requested.specific() { ty |
+                    expr.ty = ty;
+                };
+            };
             
             expr.done = f.result.done && done;
             if f.body.is_empty() && f.ret_label.is_none() {|
@@ -1087,36 +1097,6 @@ fn contextual_field(self: *SelfHosted, name: Symbol, expr_out: *FatExpr, type: T
         fn Named(f) => self.contextual_field(name, expr_out, f._0);
         @default => @err("no contextual fields for type % (wanted %)", self.log_type(type), self.pool.get(name));
     }
-}
-
-fn adjust_named_arguments(self: *SelfHosted, fid: FuncId, arg_expr: *FatExpr) Res(void) = {
-    @if_let(arg_expr.expr&) fn StructLiteralP(f) => {
-        func := self.get_function(fid);
-        // If there's one argument, they must be passing a struct, we don't care about that here.
-        if func.arg.bindings.len == 1 && f.bindings.len != 1 {|
-            return(.Ok);
-        };
-        args: List(FatExpr) = list(func.arg.bindings.len, self.get_alloc());
-        enumerate func.arg.bindings { i, want |
-            continue :: local_return;
-            want_name := @unwrap(want.ident(), "function param must have name") return;
-            each f.bindings { found | 
-                found_name := @unwrap(found.ident(), "TODO: mixed named and un-named args are not supported yet") return;
-                if found_name == want_name {|
-                    value := @unwrap(found.default, "use '=' not ':' for named arg") return;
-                    @err_assert(args.len == i, "TODO: out of order named args are not supported yet") return;
-                    args&.push(value);
-                    continue();
-                };
-            };
-            return(@err("arg not found for %", self.pool.get(want_name)));
-        };
-        arg_expr.expr = (Tuple = args.rs());
-        arg_expr.done = false;
-        arg_expr.ty = UnknownType;
-        @log_event("after named %", arg_expr.log(self.pool)) self;
-    };
-    .Ok
 }
 
 ::if(ResultType);
@@ -1864,6 +1844,35 @@ fn type_of(self: *SelfHosted, expr: *FatExpr) Maybe(Type) = {
     }
 }
 
+fn adjust_named_arguments(self: *SelfHosted, fid: FuncId, arg_expr: *FatExpr) Res(void) = {
+    @if_let(arg_expr.expr&) fn StructLiteralP(f) => {
+        func := self.get_function(fid);
+        // If there's one argument, they must be passing a struct, we don't care about that here.
+        if func.arg.bindings.len == 1 && f.bindings.len != 1 {|
+            return(.Ok);
+        };
+        args: List(FatExpr) = list(func.arg.bindings.len, self.get_alloc());
+        enumerate func.arg.bindings { i, want |
+            continue :: local_return;
+            want_name := @unwrap(want.ident(), "function param must have name") return;
+            each f.bindings { found | 
+                found_name := @unwrap(found.ident(), "TODO: mixed named and un-named args are not supported yet") return;
+                if found_name == want_name {|
+                    value := @unwrap(found.default, "use '=' not ':' for named arg") return;
+                    @err_assert(args.len == i, "TODO: out of order named args are not supported yet") return;
+                    args&.push(value);
+                    continue();
+                };
+            };
+            return(@err("arg not found for %", self.pool.get(want_name)));
+        };
+        arg_expr.expr = (Tuple = args.rs());
+        arg_expr.done = false;
+        arg_expr.ty = UnknownType;
+        @log_event("after named %", arg_expr.log(self.pool)) self;
+    };
+    .Ok
+}
 
 // TODO: need to check for conflicts somehow but we can't assume we're able to infer all the options here,
 //       because there might be cycles or more might be added later. 
@@ -2038,7 +2047,8 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
         @if(DEBUG_SPAM_LOG) self.codemap.show_error_line(func.loc);
         @println("- % -> %", self.log_type(func.finished_arg.unwrap()), self.log_type(func.finished_ret.unwrap()));
     };
-    return(@err("TODO: resolve_in_overload_set %", interesting.len));
+    overloads := self.dispatch.overloads&.nested_index(i.as_index());
+    return(@err("TODO: resolve_in_overload_set % %", self.pool.get(overloads.name), interesting.len));
     Maybe(FuncId).unreachable_hack()
 }
 
@@ -2296,6 +2306,12 @@ fn handle_declare_constant(self: *SelfHosted, name: Var, ty: *LazyType, value: *
         value.set(val, value.ty);
     };
     
+    @check(self.coerce_const_expr(value, want)) return;
+    
+    //@if_let(want) fn Specific(ty) => {
+    //    @check(self.can_assign(ty, value.ty)) return;
+    //};
+    
     self.finish_layout_deep(value.ty).unwrap();
     
     .Ok
@@ -2395,7 +2411,24 @@ fn coerce_const_expr(self: *SelfHosted, expr: *FatExpr, req: ResultType) Maybe(v
                     // TODO: typecheck
                     return(self.compile_expr(expr, (Specific = want)));
                 };
+                if want == rawptr {|
+                    inner := self.box(expr[]);
+                    expr.expr = (FnPtr = inner);
+                    expr.done = inner.done;
+                    expr.ty = rawptr;
+                    // TODO: not calling compile_expr do i have to note that we took a pointer?
+                    //       decide and then be consistant with the above. -- Aug 19
+                    return(.Ok);
+                };
             };
+            
+            @if_let(found_info) fn FnPtr(f_ty) => {
+                if want == rawptr {|
+                    expr.ty = rawptr;
+                    return(.Ok);
+                };
+            };
+        
             
             @match(found_info) {
                 fn Int(have_int) => {

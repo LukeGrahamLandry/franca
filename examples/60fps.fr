@@ -1,0 +1,95 @@
+//! Compiling at (Almost) 60 Frames per Second.
+//!
+//! This is a driver program that renders an (ugly) interactive mandelbrot set in the terminal. 
+//! Every frame it **recompiles** examples/mandelbrot.fr, runs main, and throws away the compiler instance. 
+//! You can move around with WASD, which is implemented by string replacing the coordinates in the source code next frame. 
+//!
+//! There's no precompiled runtime library. The mandelbrot program uses resizable lists and string formatting, 
+//! so those are compiled from source (each frame) as well. 
+//! This whole operation uses the comptime jit, which does no optimisation, prioritizing compilation speed over runtime speed. 
+//! We're still statically compiling to machine code: 
+//! it's not an interpreter and it's not a tracing jit that improves the code as it runs. 
+//! This is the same mechanisim used for all comptime code (like drivers, macros, advanced generics, etc).
+//! Compiling an llvm release build of the mandelbrot program takes closer to 185ms, well outside our 16ms frame budget. 
+//! In llvm's defence, this demo wouldn't be impressive without an optimised build of the self hosted compiler. 
+//!
+
+// TODO: The name is a lie! gotta be faster! I only get ~50 fps. 
+// TODO: can i make the flicker better? it works in Terminal.app but looks like garabge in Warp.
+// TODO: still leaks memory. comptime ast_alloc is todo_allocator. 
+// TODO: once new sema is done, allow aot bundling the compiler. 
+
+fn driver(vtable: *ImportVTable) void = {
+    // Read the file once at the beginning. 
+    name := "examples/mandelbrot.fr";
+    src := temp().read_to_string(name);
+    src_parts := src.items().split("// @InsertConfig", temp());
+    assert_eq(src_parts.len, 2);
+    src1 := src_parts[0];
+    src2 := src_parts[1];
+
+    println(start_other_terminal);
+    start_raw_terminal(STD_IN);
+
+    start := timestamp();
+    frames := 0;
+    x := -1.5;
+    y := -1.0;
+    rust_global := {vtable.hack_get_old_global_allloc}();
+    (fn() => {
+        break :: local_return;
+        loop {|
+            start := timestamp();
+            temp_mark := __temp_alloc.mark();
+            rust_mark := rust_global[];
+            
+            // Construct the full program source by including the adjusted position. 
+            src: List(u8) = list(src1.len + src2.len + 100, temp());
+            @fmt(src&, "#include_std(\"lib/core.fr\");\n %;x_start = %.0/100.0; y_start = %.0/100.0;%", src1, x * 100.0, y * 100.0, src2);
+            
+            // Create a fresh compiler instance, not reusing any state from the previous frame. 
+            opts := default_build_options();
+            c := vtable.new_with_src(src.items(), opts);
+            c := vtable.with(c);
+            f := c.get_unique_named("main").unwrap();
+            ptr := c.get_jitted(f);
+            f := assume_types_fn(Arg = void, Ret = void, ptr = ptr);
+            println(clear_terminal);
+            f();
+    
+            // Check if the user pressed a key so we can update the position for next frame. 
+            ::?u8;
+            if get_input() { c |
+                @switch(c) {
+                    @case("q".ascii()) => { break(); };
+                    @case("a".ascii()) => { x += 0.1; };
+                    @case("d".ascii()) => { x -= 0.1; };
+                    @case("s".ascii()) => { y -= 0.1; };
+                    @case("w".ascii()) => { y += 0.1; };
+                    @default => ();
+                };
+            };
+            frames += 1;
+            
+            // Release all memory used by this frame's compiler instance. 
+            rust_global[] = rust_mark;
+            {vtable.destroy_compiler}(c.data);
+            end := timestamp();
+            @println("compile + run frame time: %ms", end - start);
+            __temp_alloc.reset_retaining_capacity(temp_mark);
+        };
+    })();
+    end := timestamp();
+    s := end - start;
+    // TODO: panic hooks because this really fucks you up if the program crashes. 
+    end_raw_terminal(STD_IN);
+    println(end_other_terminal);
+    @println("% frames in % ms: %fps", frames, s, frames.float() / s.float() * 1000.0);
+
+    fn get_input() ?u8 = {
+        c: u8 = 0;
+        len := read(STD_IN, c&, 1).unwrap();
+        ::if(?u8);
+        if(len > 0, => (Some = c), => .None)
+    }
+}

@@ -44,6 +44,9 @@ impl NotThreadSafe {
     pub(crate) fn set(&self, v: *mut u8) {
         unsafe { *self.0.get() = v };
     }
+    pub(crate) fn get_ref(&self) -> *mut *mut u8 {
+        &self.0 as *const UnsafeCell<*mut u8> as *const *mut u8 as *mut *mut u8
+    }
 }
 
 fn alloc_arena() -> *mut u8 {
@@ -108,6 +111,7 @@ use std::alloc::Layout;
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
 
+use std::mem;
 use std::ptr::addr_of;
 use std::ptr::null_mut;
 

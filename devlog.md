@@ -3,6 +3,7 @@
 - track stack depth so more nested early returns work
 - struct field default values, contextual fields
 - allow DeclVarPattern with no name because @match can make them
+- fnptr -> rawptr coercion
 
 ## debugging new sema (Aug 13)
 
