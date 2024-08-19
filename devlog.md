@@ -1,3 +1,9 @@
+## (Aug 19)
+
+- track stack depth so more nested early returns work
+- struct field default values, contextual fields
+- allow DeclVarPattern with no name because @match can make them
+
 ## debugging new sema (Aug 13)
 
 variables declared in quote expressions (like in @match) don't get renumbered (also didn't in old sema),

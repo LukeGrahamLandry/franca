@@ -82,7 +82,11 @@ fn decl_var_pattern(self: *SelfHosted, stmt: *FatStmt) Maybe(bool) #once = {
             @check(self.decl_var(name, b.ty&, value)) return;
             return(Ok = value.done);
         };
-        return(@err("TODO: what situation allows DeclVarPattern with no name?"));
+        // match branch that doesn't specify an argument gets here. (because parser puts in fake Binding with name=None).
+        // just to be safe, still keep the expression in case it somehow happens in a different situation and has side effects.
+        stmt.stmt = (Eval = value[]);
+        @check(self.compile_expr(stmt.stmt.Eval&, .None)) return;
+        return(Ok = stmt.stmt.Eval.done);
     };
     
     // So its not a tuple, we don't know how to destructure it (emit_bc does), but we can still type check it. 
@@ -590,8 +594,8 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = {
                         };
                         @default => ();
                     };
-                    @err_assert(good, "!asm require arch tag") return;
                 };
+                @err_assert(good, "!asm require arch tag") return;
             };
             @default => ();
         };
@@ -979,8 +983,32 @@ fn construct_struct_literal(self: *SelfHosted, expr: *FatExpr, requested: Result
             // TODO: If they're missing some, check for default values.
             runtime_fields := f.fields.len - f.const_field_count.zext();
             if runtime_fields != bindings.len {|
-                msg :: "struct field count mismatch. expected % for type % found %";
-                return(@err(msg, runtime_fields, self.log_type(raw_container_type), bindings.len));
+                enumerate f.fields { i, field | 
+                    continue :: local_return;
+                    if(field.kind == .Const, => continue());
+                    each bindings { b | 
+                        if b.ident() { n | 
+                            if(n == field.name, => continue());
+                        };
+                    };
+                    
+                    default := @unwrap(field.default, "Missing required field %", self.pool.get(field.name)) return;
+                    (value, ty) := @check(self.find_const(default, field.ty.want())) return;
+                    expr := synthetic_ty((Value = (bytes = value, coerced = false)), pattern.loc, field.ty);
+                    
+                    // TODO: HACK. emit_bc expects them in order
+                    bindings.insert(
+                        i,
+                        (
+                            name = (Ident = field.name),
+                            ty = (Finished = ty),
+                            default = (Some = expr),
+                            kind = .Var,
+                        ),
+                        self.get_alloc()
+                    );
+                };
+                @err_assert(runtime_fields == bindings.len, "ICE: struct field count mismatch but we don't know which is missing") return;
             };
             expr.done = done;
             expr.ty = requested;
@@ -1020,7 +1048,19 @@ fn contextual_field(self: *SelfHosted, name: Symbol, expr_out: *FatExpr, type: T
             };
             @err("contextual field % not found for %", self.pool.get(name), self.log_type(type))
         }
-        fn Struct() => @err("TODO: contextual field of struct");
+        fn Struct(f) => {
+            enumerate f.fields { i, f | 
+                if f.name == name {|
+                    @err_assert(f.kind == .Const, "struct contextual field must be constant. %", self.pool.get(f.name)) return;
+                    default := @unwrap(f.default, "ICE: const field must have value") return;
+                    (value, ty) := @check(self.find_const(default, f.ty.want())) return;
+                    expr_out.set(value, ty);
+                    return(.Ok);
+                };
+            };
+            @err("const field $% not found for %", self.pool.get(name), self.log_type(type))
+        
+        }
         fn Tagged(f) => {
             enumerate f.cases { i, f | 
                 if f._0 == name {|
@@ -2774,7 +2814,7 @@ fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
 fn early_builtin_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
     invocation := expr.expr.PrefixMacro&;
     if !invocation.handler.expr&.is(.GetVar) {|
-        return(@err("macro calls must be GetVar while bootstrapping. tried to run something too compilicated too soon: %", invocation.handler.log(self.pool)));
+        return(@err("macro calls must be GetVar while bootstrapping. tried to run something too compilicated too soon: %: %", invocation.handler.expr&.tag(), invocation.handler.log(self.pool)));
     };
     
     name := invocation.handler.expr.GetVar.name;
@@ -2862,7 +2902,9 @@ fn struct_type(self: *SelfHosted, pattern: *Pattern) Maybe(Type) #once = {
         };
         
         ty := or @check(self.infer_type(b.ty&)) return {|
-            return(@err("@struct field requires type annotation (TODO: infer from default value but then have to fix the parser)"))
+            default := @unwrap(b.default&.as_ref(), "@struct field without type requires default value.") return;
+            @check(self.compile_expr(default, .None)) return;
+            default.ty
         };
         
         default: ?Var = .None;
