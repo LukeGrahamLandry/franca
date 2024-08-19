@@ -103,6 +103,7 @@ EmitBc :: @struct(
     inlined_return_addr: HashMap(LabelId, ReturnAddr),
     out_alloc: Alloc,
     is_ssa_var: BitSet,
+    result_addr_depth: i64 = 0,
 );
 
 fn hash(s: *LabelId) i64 #redirect(*u32, i64);
@@ -113,6 +114,7 @@ ReturnAddr :: @struct(
     store_res_ssa_inst: ?Ty(BbId, i64),
     res_ssa_id: ?u16,
     used: bool,
+    result_addr_depth: i64,
 );
 
 ResultLoc :: @enum(i64) (PushStack, ResAddr, Discard);
@@ -390,8 +392,10 @@ fn compile_for_arg(self: *EmitBc, result: *FnBody, arg: *FatExpr, arity: usize) 
         _pushed += 1;
         id := result.add_var(self, ty);
         self.addr_var(result, id);
+        self.result_addr_depth += 1;
         @try(self.compile_expr(result, val, .ResAddr, false)) return;
-        self.addr_var(result, id);
+        self.result_addr_depth -= 1;
+        self.addr_var(result, id);  // now we want to pass that pointer to the call, so leave it on the stack.
     };
     (Ok = true)
 }
@@ -494,6 +498,10 @@ fn emit_body(self: *EmitBc, result: *FnBody, f: FuncId) PRes #once = {
         sig := @try(self.program.prim_sig((arg = FuncId, ret = void, arity = 1), .CCallReg)) return;
         result.push(CallDirect = (sig = sig, f = push_cb, tail = false));
     };
+    
+    if result.signeture.first_arg_is_indirect_return {|  
+        self.result_addr_depth += 1;
+    };
 
     // TODO: indirect return tail
     @try(self.compile_expr(
@@ -502,6 +510,10 @@ fn emit_body(self: *EmitBc, result: *FnBody, f: FuncId) PRes #once = {
         result_location,
         !result.signeture.first_arg_is_indirect_return && !has_defers,
     )) return;
+    
+    if result.signeture.first_arg_is_indirect_return {|
+        self.result_addr_depth -= 1;
+    };
 
     if result[return_block].incoming_jumps.gt(0).or(has_defers) {|
         result.push(Goto = (
@@ -554,6 +566,10 @@ fn emit_body(self: *EmitBc, result: *FnBody, f: FuncId) PRes #once = {
     if result.want_log {|
         @println("[#log_bc %] %", self.program.pool.get(func.name), result.signeture&);
         enumerate result.blocks { i, block | 
+            continue :: local_return;
+            if block.insts.len == 1 && block.insts.index(0).is(.NoCompile) {|
+                continue();
+            };
             @println("  [b %]", i);
             each block.insts { inst | 
                 @println("    - %", inst);
@@ -579,6 +595,7 @@ fn emit_runtime_call(
     result_var: ?u16 = if sig.first_arg_is_indirect_return && result_location != .ResAddr {|
         id := result.add_var(self, f_ty.ret);
         self.addr_var(result, id);
+        // TODO: :result_addr_depth?
         (Some = id)
     } else {|
         .None
@@ -649,7 +666,9 @@ fn compile_stmt(self: *EmitBc, result: *FnBody, stmt: *FatStmt) PRes = {
             id := result.add_var(self, ty);
             self.mark_variable(result, f.name, id);
             self.addr_var(result, id);
+            self.result_addr_depth += 1;
             @try(self.compile_expr(result, f.value&, .ResAddr, false)) return;
+            self.result_addr_depth -= 1;
             if(ty.is_never(), => result.push(.Unreachable));
             prev := self.var_lookup&.insert(f.name, id);
             self.locals.last().unwrap().push(id);
@@ -677,7 +696,9 @@ fn compile_stmt(self: *EmitBc, result: *FnBody, stmt: *FatStmt) PRes = {
             // We store the whole value in a stack slot and then save pointers into different offsets of it as thier own variables.
             full_id := result.add_var(self, f.value.ty);
             self.addr_var(result, full_id);
+            self.result_addr_depth += 1;
             @try(self.compile_expr(result, f.value&, .ResAddr, false)) return;
+            self.result_addr_depth -= 1;
             info := self.program.get_type(f.value.ty);
             @err_assert(info.is(.Struct), "destructure must be tuple") return;
             fields := info.Struct.fields&;
@@ -710,7 +731,9 @@ fn compile_stmt(self: *EmitBc, result: *FnBody, stmt: *FatStmt) PRes = {
 fn do_binding(self: *EmitBc, result: *FnBody, name: ?Var, ty: Type, value: *FatExpr) PRes = {
     id := result.add_var(self, ty);
     self.addr_var(result, id);
+    self.result_addr_depth += 1;
     @try(self.compile_expr(result, value, .ResAddr, false)) return;
+    self.result_addr_depth -= 1;
     self.locals.last().unwrap().push(id);
     if name { name |
         self.mark_variable(result, name, id);
@@ -754,7 +777,9 @@ fn compile_expr(self: *EmitBc, result: *FnBody, expr: *FatExpr, result_location:
 
             id := result.add_var(self, container_ty);
             self.addr_var(result, id);
+            self.result_addr_depth += 1;
             @try(self.compile_expr(result, arg[], .ResAddr, false)) return;
+            self.result_addr_depth -= 1;
 
             self.addr_var(result, id);
             result.push(PushConstant = (
@@ -871,8 +896,12 @@ fn compile_expr(self: *EmitBc, result: *FnBody, expr: *FatExpr, result_location:
                         if result_location == .ResAddr {|
                             result.push(PeekDup = 0);
                             result.inc_ptr_bytes(f.byte_offset.trunc());
+                            self.result_addr_depth += 1;
                         };
                         @try(self.compile_expr(result, value, result_location, false)) return;
+                        if result_location == .ResAddr {|
+                            self.result_addr_depth -= 1;
+                        };
                     };
                 }
                 fn Array(f) => {
@@ -882,8 +911,12 @@ fn compile_expr(self: *EmitBc, result: *FnBody, expr: *FatExpr, result_location:
                         if result_location == .ResAddr {|
                             result.inc_ptr_bytes(element_size);
                             result.push(PeekDup = 0);
+                            self.result_addr_depth += 1;
                         };
                         @try(self.compile_expr(result, value, result_location, false)) return;
+                        if result_location == .ResAddr {|
+                            self.result_addr_depth -= 1;
+                        };
                     }
                 }
                 @default => {
@@ -1017,27 +1050,37 @@ fn emit_call(self: *EmitBc, result: *FnBody, f: *FatExpr, arg: *FatExpr, result_
                 "missing return label. forgot '=>' on function?"
             ) return;
             ret.used = true;  // note: updating the one in the map! not a copy
-            
+            ret := ret[];
             // result_location is the result of the ret() expression, which is Never and we don't care (because we're going to jump away).
             // But we have to discard it if the old expression was expecting something large. 
             // Because the incoming pointer on the stack will flow through and confuse us later. :early_return_big
-            ::enum(ResultLoc);
-            x := (result_location.eq(.ResAddr)).or(ret.result_loc == .ResAddr);
+            // this would make sense if we were checking result_location, but we're not
+            x := (ret.result_loc == .ResAddr); // (result_location.eq(.ResAddr)).or
             if x {|
                 result.pop(1); 
             };
+            // I feel this should be good enough without the above, but no.
+            // Since we might have nested expressions that push result pointers, you not only have to re-push ours,
+            // you also need to pop off anything in between that the target block isn't expecting. 
+            // ie. its important that each entry to a block has the same stack height. 
+            diff := self.result_addr_depth - ret.result_addr_depth;
+            result.pop(diff.trunc()); 
             
             slots: u16 = @match(ret.result_loc) {
                 fn PushStack() => self.slot_count(ret_ty[]);
                 fn ResAddr() => {
                     id := ret.res_ssa_id.unwrap();
                     result.push(LoadSsa = (id = id));
+                    self.result_addr_depth += 1;
                     0
                 }
                 fn Discard() => 0;
             };
             // TODO: sometimes can_tail, if you're returning the main function
             @try(self.compile_expr(result, arg, ret.result_loc, false)) return;
+            if ret.result_loc == .ResAddr {|
+                self.result_addr_depth -= 1;
+            };
             result.push(Goto = (ip = ret.block, slots = slots));
             result[ret.block].incoming_jumps += 1;
             .Ok
@@ -1066,6 +1109,7 @@ fn emit_block_expr(self: *EmitBc, result: *FnBody, body: *RsVec(FatStmt), value:
             store_res_ssa_inst = .None,
             res_ssa_id = .None,
             used = false,
+            result_addr_depth = self.result_addr_depth,
         );
         result.current_block = entry_block;
         if result_location == .ResAddr {|
@@ -1079,10 +1123,13 @@ fn emit_block_expr(self: *EmitBc, result: *FnBody, body: *RsVec(FatStmt), value:
         prev := self.inlined_return_addr&.insert(ret_var, ret);
         @assert(prev.is_none(), "stomped ret var");
 
+        depth := self.result_addr_depth;
         each body { stmt | 
             @try(self.compile_stmt(result, stmt)) return;
+            @debug_assert(self.result_addr_depth == depth, "ICE: leak result_addr_depth");
         };
         @try(self.compile_expr(result, value, result_location, can_tail)) return;
+        @debug_assert(self.result_addr_depth == depth, "ICE: leak result_addr_depth");
 
         ret := self.inlined_return_addr&.remove(ret_var).unwrap();
         if result[return_block].incoming_jumps > 0 {|
@@ -1103,10 +1150,13 @@ fn emit_block_expr(self: *EmitBc, result: *FnBody, body: *RsVec(FatStmt), value:
         };
     } else {|
         // TODO: sometimes the last one can tail, if value is Unit and we're the body of the main function.
+        depth := self.result_addr_depth;
         each body { stmt |
             @try(self.compile_stmt(result, stmt)) return;
+            @debug_assert(self.result_addr_depth == depth, "ICE: leak result_addr_depth");
         };
         @try(self.compile_expr(result, value, result_location, can_tail)) return;
+        @debug_assert(self.result_addr_depth == depth, "ICE: leak result_addr_depth");
     };
 
     // TODO: check if you try to let an address to a variable escape from its scope.
@@ -1367,7 +1417,9 @@ fn set_deref(self: *EmitBc, result: *FnBody, place: *FatExpr, value: *FatExpr) P
         fn Deref(arg) => {
             // TODO: write a test for pooiinter eval oreder. left hsould come first. -- MAy 7
             @try(self.compile_expr(result, arg[], .PushStack, false)) return;
+            self.result_addr_depth += 1;
             @try(self.compile_expr(result, value, .ResAddr, false)) return;
+            self.result_addr_depth -= 1;
             return(.Ok)
         }
         @default => return(@error("TODO: other `place=e;` :("));
@@ -1405,9 +1457,13 @@ fn construct_struct(self: *EmitBc, result: *FnBody, pattern: *Pattern, requested
                 if result_location == .ResAddr {|
                     result.push(PeekDup = 0);
                     result.inc_ptr_bytes(field.byte_offset.trunc());
+                    self.result_addr_depth += 1;
                 };
                 expr := value.default.unwrap();
                 @try(self.compile_expr(result, expr&, result_location, false)) return;
+                if result_location == .ResAddr {|
+                    self.result_addr_depth -= 1;
+                };
             };
             if result_location == .ResAddr {|
                 result.pop(1); // res ptr
