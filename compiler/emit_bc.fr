@@ -481,7 +481,7 @@ fn emit_body(self: *EmitBc, result: *FnBody, f: FuncId) PRes #once = {
     // Note: this is different from the body expr type because of early returns.
     ret := self.program[f].finished_ret.unwrap();
     prims: []Prim = if(result.signeture.first_arg_is_indirect_return, => empty(), => self.get_primatives(ret));
-    return_block := result.push_block(prims);
+    return_block := result.push_block(prims);  // TODO: this is dumb. the body expression will never jump here (even with early returns as they only go to Blocks). 
 
     result.current_block = entry_block;
 
@@ -515,6 +515,9 @@ fn emit_body(self: *EmitBc, result: *FnBody, f: FuncId) PRes #once = {
         self.result_addr_depth -= 1;
     };
 
+    // TODO: result[return_block].incoming_jumps.gt(0) will always be false because the function's return label becomes for its body block. 
+    //       we never actually use the return_block created here!
+    assert(result[return_block].incoming_jumps == 0, "sure hope you did that on purpose");
     if result[return_block].incoming_jumps.gt(0).or(has_defers) {|
         result.push(Goto = (
             ip = return_block,
@@ -570,7 +573,7 @@ fn emit_body(self: *EmitBc, result: *FnBody, f: FuncId) PRes #once = {
             if block.insts.len == 1 && block.insts.index(0).is(.NoCompile) {|
                 continue();
             };
-            @println("  [b %]", i);
+            @println("  [b %] (%)", i, block.arg_prims);
             each block.insts { inst | 
                 @println("    - %", inst);
             };
@@ -758,7 +761,7 @@ fn compile_expr(self: *EmitBc, result: *FnBody, expr: *FatExpr, result_location:
     @match(expr.expr&) {
         fn Cast(v)  => return(self.compile_expr(result, v[], result_location, can_tail));
         fn Call(f)  => return(self.emit_call(result, f.f, f.arg, result_location, can_tail));
-        fn Block(f) => return(self.emit_block_expr(result, f.body&, f.result, f.ret_label, result_location, can_tail));
+        fn Block(f) => return(self.emit_block_expr(result, expr, result_location, can_tail));
         fn Value(f) => return(self.emit_value(result, f.bytes&, result_location, expr.ty));
         fn If(_)      => return(self.emit_call_if(result, expr, result_location, can_tail));
         fn Loop(arg)  => return(self.emit_call_loop(result, arg[]));
@@ -941,8 +944,7 @@ fn compile_expr(self: *EmitBc, result: *FnBody, expr: *FatExpr, result_location:
             return(self.emit_switch(result, expr, result_location, can_tail))
         }
         @default => @panic("ICE: didn't desugar: %", expr.log(self.program.pool));
-    };
-    PRes.unreachable_hack()
+    }
 }
 
 //// TODO: this would be prettier as tail calls. 
@@ -1089,17 +1091,27 @@ fn emit_call(self: *EmitBc, result: *FnBody, f: *FatExpr, arg: *FatExpr, result_
     }
 }
 
-fn emit_block_expr(self: *EmitBc, result: *FnBody, body: *RsVec(FatStmt), value: *FatExpr, ret_label: ?LabelId, result_location: ResultLoc, can_tail: bool) PRes #once = {
+fn emit_block_expr(self: *EmitBc, result: *FnBody, expr: *FatExpr, result_location: ResultLoc, can_tail: bool) PRes #once = {
+    block := expr.expr.Block&;
+    body := block.body&;
+    value := block.result;
+    ret_label := block.ret_label;
     self.locals&.push(list(temp()));
-    // TODO: make sure value.ty here is the same as expr.ty outside which is what i used to use. -- Jul 8  :audi
-    out := self.program.get_info(value.ty);
+    
+    // :block_never_unify_early_return_type
+    // Note: block_ty can be different from value.ty if the fall through is a Never but there's an early return to the block. 
+    block_ty := expr.ty;
+    out := self.program.get_info(block_ty);
     @debug_assert(out.size_slots.lt(8).or(result_location != .PushStack), "pushing large value");
 
     // TODO: this shouldn't need type hint. 
     if ret_label { (ret_var: LabelId) | 
         entry_block := result.current_block;
+        if result.want_log {|
+            @println("% | %", self.program.log_type(value.ty), self.program.log_type(block_ty));
+        };
         return_block := @match(result_location) {
-            fn PushStack() => result.push_block(self.get_primatives(value.ty));
+            fn PushStack() => result.push_block(self.get_primatives(block_ty));
             fn ResAddr()   => result.push_block_empty();
             fn Discard()   => result.push_block_empty();
         };
@@ -1270,9 +1282,7 @@ fn emit_value(self: *EmitBc, result: *FnBody, value: *Values, result_location: R
         }
         fn Discard() => ();
     };
-    return(.Ok);
-    
-    PRes.unreachable_hack()
+    .Ok
 }
 
 // :PlaceExpr
@@ -1423,8 +1433,7 @@ fn set_deref(self: *EmitBc, result: *FnBody, place: *FatExpr, value: *FatExpr) P
             return(.Ok)
         }
         @default => return(@error("TODO: other `place=e;` :("));
-    };
-    PRes.unreachable_hack()
+    }
 }
 
 fn unwrap(self: Name) Symbol = {
@@ -1539,8 +1548,7 @@ fn construct_struct(self: *EmitBc, result: *FnBody, pattern: *Pattern, requested
             return(@error("struct literal for non-(struct/tagged)"));
         };
     };
-    return(.Ok);
-    PRes.unreachable_hack()
+    .Ok
 }
 
 fn push_block_empty(self: *FnBody) BbId = {

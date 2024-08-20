@@ -9,7 +9,6 @@
 // - equivilent of matches!(e, .A | .B | .C) more terse than @switch
 //   @or(A, B, C) could work if you don't need to capture any payload. 
 // - auto coerce payload to enum when branches aren't ambigous? maybe? thats a bit creepy. doing it for unit when you just forget to return something would be bad. 
-// - really need to fix unreachable_hack
 // - default function arguments because 'self.parse_expr(Prec.None)' and symmetry with structs. 
 // - its probably a bad thing that im choosing when to factor out functions based on "not enough bits to refer to all slots",
 //   obviously a crippling compiler bug (my asm backend only) but perhaps implies a style problem on my part.
@@ -117,26 +116,24 @@ fn parse_stmt_inner(self: *Parser, has_annotations: bool) Result(FatStmt, *Parse
             self.pop();
             loc := self.last.span;
             func := @try(self.parse_func(true)) return;
-            return(Ok = self.stmt((DeclFunc = self.box(func)), loc));
+            (Ok = self.stmt((DeclFunc = self.box(func)), loc))
         }
-        fn Symbol(name) => return(self.parse_decl_or_start_expr(name));
+        fn Symbol(name) => (self.parse_decl_or_start_expr(name));
         fn Semicolon() => {
             self.pop();
             loc := self.last.span;
             next := self.peek();
             if next&.is(.RightSquiggle).or(next&.is(.Eof)).or(has_annotations) {|
                 // At the end of blocks, i use them for distingushing when to return trailing expression. :store_noop
-                return(Ok = self.stmt(.Noop, loc));
-            } else {|
-                return(self.parse_stmt());
+                return(Ok = self.stmt(.Noop, loc))
             };
+            (self.parse_stmt())
         }
         @default => {
             e := @try(self.parse_prefix(Prec_None)) return;
-            return(self.after_expr_stmt_prefix(e));
+            self.after_expr_stmt_prefix(e)
         };
-    };
-    Result(FatStmt, *ParseErr).unreachable_hack()
+    }
 }
 
 fn parse_decl_or_start_expr(self: *Parser, name: Symbol) Result(FatStmt, *ParseErr) #once = {
@@ -287,51 +284,50 @@ fn parse_prefix(self: *Parser, prec: Prec) ParseRes = {
                 @case(.Star) => Flag.operator_star_prefix;
                 // TODO: don't require the arg or have better error message. -- Jun 18
                 @default fn() Flag => {
-                    @report_error("expected begin expression found non-prefix operator %", "") (return, self.last.span);
-                    Flag.unreachable_hack()
+                    @report_error("expected begin expression found non-prefix operator %", "") (return, self.last.span)
                 };
             };
-            return(self.named_call(prec, f));
+            self.named_call(prec, f)
         }
         fn LeftSquiggle() => {
             self.pop();
-            return(self.parse_block_until_squiggle(false));
+            self.parse_block_until_squiggle(false)
         }
         fn LeftParen() => {
             // we're a prefix, so this is NOT a call. 
             self.pop();
             e := @try(self.parse_tuple()) return;
-            return(Ok = e);
+            (Ok = e)
         }
         fn FatRightArrow() => {
             self.pop();
-            return(self.quick_lambda(prec.with(.None)));
+            self.quick_lambda(prec.with(.None))
         }
         fn DoubleColon() => {
             self.pop();
             loc := self.last.span;
             arg := @try(self.parse_expr(prec.with(.Neg))) return;
             e := self.expr((ConstEval = self.box(arg)), loc);
-            return (Ok = e);
+            (Ok = e)
         }
-        fn Amp() => @report_error("'&' is not a prefix operator. if you meant to take the address of a variable, use it as a suffix.%", "") (return, self.last.span);
-        fn At()           => return(self.parse_at(prec));
+        fn Amp() => @report_error("'&' is not a prefix operator. if you meant to take the address of a variable, use it as a suffix.%", "") (return, self.last.span)
+        fn At()           => self.parse_at(prec);
         fn BinaryNum(b)   => {
             self.pop();
-            return(Ok = self.expr((FromBitLiteral = (value = b.value.bitcast(), bit_count = b.bit_count.zext())), self.last.span));
+            (Ok = self.expr((FromBitLiteral = (value = b.value.bitcast(), bit_count = b.bit_count.zext())), self.last.span))
         }
-        fn Question()     => return(self.named_call(prec, Flag.operator_question_prefix));
-        fn DoubleSquare() => return(self.named_call(prec, Flag.operator_squares_prefix));
+        fn Question()     => self.named_call(prec, Flag.operator_question_prefix);
+        fn DoubleSquare() => self.named_call(prec, Flag.operator_squares_prefix);
         fn Fn() => {
             self.pop();
-            return(self.func_expr());
+            self.func_expr()
         }
         fn Number(n) => {
             self.pop();
             loc := self.last.span;
             e := self.expr((Value = (bytes = (Small = (n, 8)), coerced = false)), loc);
             e.ty = i64;
-            return(Ok = e);
+            (Ok = e)
         }
         fn Float(n) => {
             self.pop();
@@ -339,13 +335,13 @@ fn parse_prefix(self: *Parser, prec: Prec) ParseRes = {
             n: i64 = n.bitcast();
             e := self.expr((Value = (bytes = (Small = (n, 8)), coerced = false)), loc);
             e.ty = f64;
-            return(Ok = e);
+            (Ok = e)
         }
         fn Dot() => {
             self.pop();
             loc := self.last.span;
             name := @try(self.pop_name("after leading dot")) return;
-            return(Ok = self.expr((ContextualField = name), loc));
+            (Ok = self.expr((ContextualField = name), loc))
         }
         // TODO: its a waste to intern these since you want to deduplicate before putting in an aot exe anyway since they might be computed. 
         fn Quoted(s) => {
@@ -356,20 +352,19 @@ fn parse_prefix(self: *Parser, prec: Prec) ParseRes = {
                 f := self.box(self.get_named(.__string_escapes, loc));
                 e = self.expr((Call = (f = f, arg = self.box(e))), loc);
             };
-            return(Ok = e);
+            (Ok = e)
         }
         fn Symbol(name) => {
             self.pop();
             loc := self.last.span;
-            return(self.ident_expr_and_maybe_trailing(name, prec, loc));
+            self.ident_expr_and_maybe_trailing(name, prec, loc)
         }
         @default => {
             self.pop();
             loc := self.last.span;
-            @report_error("Expected begin expression, found %", self.last.type&.tag()) (return, self.last.span);
+            @report_error("Expected begin expression, found %", self.last.type&.tag()) (return, self.last.span)
         };
-    };
-    ParseRes.unreachable_hack()
+    }
 }
 
 fn quick_lambda(self: *Parser, prec: Prec) ParseRes = {
@@ -565,6 +560,7 @@ fn parse_squiggle(self: *Parser, prev: FatExpr, prec: Prec) ParseRes #once = {
     self.parse_infix(prev, prec.with(.Suffix))
 }
 
+::if(ParseRes);
 // TODO: this seems to use the wrong loc
 fn parse_bin_op(self: *Parser, op: Operator, prev: FatExpr, prec: Prec) ParseRes #once = {
     // TODO: destructuring: `prec, name := @switch ...`
@@ -605,11 +601,10 @@ fn parse_bin_op(self: *Parser, op: Operator, prev: FatExpr, prec: Prec) ParseRes
         f := self.box(self.get_named(callee, loc));
         arg := self.box(self.pair(prev, rhs, loc));
         call := self.expr((Call = (f = f, arg = arg)), loc);
-        return(self.parse_infix(call, prec)); // TODO: tail
+        self.parse_infix(call, prec) // TODO: tail
     } else {|
-        return(Ok = prev);  
-    };
-    ParseRes.unreachable_hack()
+        (Ok = prev)
+    }
 }
 
 fn expr_call(self: *Parser, f: FatExpr, arg: FatExpr) FatExpr = {
@@ -875,8 +870,7 @@ fn parse_pattern(self: *Parser, out: *List(Binding)) Result(void, *ParseErr) = {
         if !self.maybe(.Comma) {|
             return(.Ok);
         };
-    };
-    Result(void, *ParseErr).unreachable_hack()
+    }
 }
 
 fn pop_name(self: *Parser, msg: Str) Result(Symbol, *ParseErr) = {

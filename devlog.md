@@ -1,9 +1,15 @@
-## (Aug 19)
+## (Aug 20)
+
+- rust program with wasmtime and some libc shims to run most tests as wasm.
+
+## procrastinating fixing overloading (Aug 19)
 
 - track stack depth so more nested early returns work
 - struct field default values, contextual fields
 - allow DeclVarPattern with no name because @match can make them
 - fnptr -> rawptr coercion
+- llvm target wasm. hack around 32 bit pointers in constants (i still just pretend everything is 64 bit and pad const arrays with zeros).
+  js shim of a couple libc functions to run mandelbrot in the browser.
 
 ## debugging new sema (Aug 13)
 
