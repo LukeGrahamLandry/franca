@@ -1,0 +1,77 @@
+<!doctype html>
+<html>
+    <body>
+        see dev console.
+        <script>
+            let Franca;
+            function handleWasmLoaded(wasm) {
+                Franca = wasm.instance.exports;
+                Franca.main();
+            }
+
+            let bump = 0;
+            const page_size = 1 << 16;
+            const callbacks = {
+                env: {
+                    write: (fd, ptr, len) => {
+                        const msg = get_wasm_string(ptr, len);
+                        switch (fd) {
+                            case 1:
+                                console.log(msg);
+                                break;
+                            case 2:
+                                console.error(msg);
+                                break;
+                            default:
+                                alert("todo: write non-stdout: " + msg);
+                        }
+                        return len;
+                    },
+                    clock_gettime: (clock_id, ptr) => {
+                        const ms = performance.now();
+                        // @struct(seconds: i64, nanoseconds: i64);
+                        const time_spec = new BigInt64Array(
+                            Franca.memory.buffer,
+                            Number(ptr),
+                            2,
+                        );
+                        time_spec[0] = BigInt(Math.floor(ms / 1000));
+                        time_spec[1] = BigInt(Math.floor(ms * 1000000));
+                    },
+                    abort: () => {
+                        alert("called abort");
+                        throw "called abort";
+                    },
+                    mmap: (addr, len_, prot, flags, fd, offset) => {
+                        const start = Franca.__heap_base + bump;
+                        const len = Number(len_);
+                        bump += len;
+                        if (start + len >= Franca.__heap_end) {
+                            const pages = len / page_size + 1;
+                            Franca.memory.grow(pages);
+                            Franca.__heap_end += pages * page_size;
+                        }
+                        return start;
+                    },
+                    munmap: (addr, len) => alert("todo: munmap"),
+                },
+            };
+            WebAssembly.instantiateStreaming(
+                fetch("../a.wasm"),
+                callbacks,
+            ).then(handleWasmLoaded);
+
+            function get_wasm_string(ptr, len) {
+                if (len == 0) {
+                    return "";
+                }
+                const buffer = new Uint8Array(
+                    Franca.memory.buffer,
+                    Number(ptr),
+                    Number(len),
+                );
+                return new TextDecoder().decode(buffer);
+            }
+        </script>
+    </body>
+</html>

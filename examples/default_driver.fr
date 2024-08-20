@@ -19,6 +19,7 @@ fn driver(vtable: *ImportVTable) void = {
     use_v2 := false;
     jit := true;
     llvm := false;
+    wasm := false;
     qbe := false;
     keep_names := false;
     deduplicate := true;
@@ -36,6 +37,10 @@ fn driver(vtable: *ImportVTable) void = {
             };
             @case("-aot=llvm") => {
                 jit = false; llvm = true;
+                assert(!qbe, "choose one backend");
+            };
+            @case("-aot=llvm-wasm") => {
+                jit = false; llvm = true; wasm = true;
                 assert(!qbe, "choose one backend");
             };
             @case("-aot=qbe") => {
@@ -71,6 +76,9 @@ fn driver(vtable: *ImportVTable) void = {
         @switch(arg[]) {
             @case("build") => {
                 if(file == "", => @panic(usage_msg, "build", "creates an executable that runs 'main'"));
+                if wasm {|
+                    build_options.wasm32 = true;
+                };
                 c := load_file(file, vtable, build_options);
                 fid := c.get_unique_named("main");
                 fid := fid.expect("did not find exactly one function called 'main'");
@@ -78,7 +86,7 @@ fn driver(vtable: *ImportVTable) void = {
                     println("Compiled successfully but selected jit backend so no artifact was produced.");
                 } else {|
                     assert(llvm, "Not Yet Implemented: build main with -aot=qbe");
-                    c.compile_with_llvm(fid, .ExportWithNames, debug_info);
+                    c.compile_with_llvm(fid, .ExportWithNames, debug_info, wasm);
                     println("[built a.out]");
                 };
                 exit(0);
@@ -88,7 +96,7 @@ fn driver(vtable: *ImportVTable) void = {
                 c := load_file(file, vtable, build_options);
                 fid := c.get_unique_named("main");
                 fid := fid.expect("did not find exactly one function called 'main'");
-                
+                assert(!wasm, "cannot run wasm");
                 if jit {|
                     ptr := c.get_jitted(fid);
                     f := assume_types_fn(Arg = void, Ret = void, ptr = ptr);
@@ -96,7 +104,7 @@ fn driver(vtable: *ImportVTable) void = {
                     f();
                 } else {|
                     if llvm {|
-                        c.compile_with_llvm(fid, .ExportWithNames, debug_info);
+                        c.compile_with_llvm(fid, .ExportWithNames, debug_info, false);
                     } else {|
                         assert(qbe, "rn only two backends. update me as needed!");
                         c.compile_with_qbe(fid, .ExportWithNames);
@@ -107,6 +115,7 @@ fn driver(vtable: *ImportVTable) void = {
                 exit(0);
             };
             @case("test") => {
+                assert(!wasm, "cannot run wasm");
                 if(file == "", => @panic(usage_msg, "test", "runs all functions marked '#test'"));
                 c := load_file(file, vtable, build_options);
                 
@@ -122,7 +131,7 @@ fn driver(vtable: *ImportVTable) void = {
                         passed += 1;
                     } else {|
                         assert(llvm, "Not Yet Implemented: run test with -aot=qbe");
-                        c.compile_with_llvm(fid, .TestRunnerMain, debug_info);
+                        c.compile_with_llvm(fid, .TestRunnerMain, debug_info, false);
                         child_args := find_args_after_double_dash(args_after_action);
                         @eprintln("[run %]", c.get_string(c.get_function_name(fid)));
                         success := run_cmd_blocking("a.out", empty());
@@ -140,13 +149,22 @@ fn driver(vtable: *ImportVTable) void = {
     panic(choose_action);
 }
 
-fn compile_with_llvm(c: CompCtx, fid: FuncId, entry: ProgramEntry, debug_info: bool) void = {
+fn compile_with_llvm(c: CompCtx, fid: FuncId, entry: ProgramEntry, debug_info: bool, wasm: bool) void = {
     ir_text := {c.vtable.emit_llvm}(c, temp(), @slice (fid), entry);
     out := open_temp_file();
     for ir_text& { bucket |
         out.fd&.write(bucket);
     };
-    args: List(Str) = @list("-x", "ir", out&.s_name(), "-o", "a.out") temp();
+    path := if(wasm, => "a.wasm", => "a.out");
+    args: List(Str) = @list("-x", "ir", out&.s_name(), "-o", path) temp();
+    if wasm {|
+        // https://surma.dev/things/c-to-webassembly/
+        args&.push_all(@slice(
+            "--target=wasm32", "-nostdlib", "-Wl,--no-entry", "-Wl,--no-entry", "-Wl,--export-all", "-Wl,-z,stack-size=8388608"
+        ));
+        // also we want to just pretend we have a libc (and trust that js will provide it) 
+        args&.push_all(@slice("-Wl,-undefined", "-Wl,dynamic_lookup", "-Wl,--allow-undefined"));
+    };
     if debug_info {|
         args&.push_all(@slice ("-O0", "-g"));
     } else {|

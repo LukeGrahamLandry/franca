@@ -245,6 +245,17 @@ fn emit_constant(self: *EmitLlvm, id: BakedVarId) void = {
     value := self.program.get_baked(id)[]._1;
     idx: i64 = id.id.zext();
     
+    // :build_options_wasm
+    // The front end always treats pointers as 64bit when calculating struct sizes and offsets.
+    // However, llvm's ptr type uses the correct size for the target architecture. 
+    // Generally this doesn't matter, inttoptr/ptrtoint work fine (leave the extra as zero?) and we just use twice as much memory as we should.
+    // However, this means on 32bit targets, constants can't be arrays of type ptr because then the offsets would be wrong. 
+    // So we just lie and say they're i64 and maunually fill in zeros. 
+    // One extra disadvantage is that the host JavaScript code gets pointer arguments as BigNum instead of Number becuase a double doesn't fit an i64. 
+    // Note that constexpr zext doesn't exist anymore so we do a weird dance with bitcasting a vector. 
+    // -- Aug 19
+    wasm32 := self.program.get_build_options()[].wasm32;
+    
     @match(value&) {
         (fn Zeros(len) => {
             @fmt(self.out&.current(), "@g% = private unnamed_addr global [% x i8] zeroinitializer\n", idx, len[]);
@@ -259,21 +270,29 @@ fn emit_constant(self: *EmitLlvm, id: BakedVarId) void = {
             self.out&.push_all("i8 0]\n"); // TODO: hack cause im to lazy to ask for debug names as cstr
         });
         (fn VoidPtrArray(parts) => {
-            @fmt(self.out&.current(), "@g% = private unnamed_addr global [% x ptr] [", idx, parts.len);
+            @fmt(self.out&.current(), "@g% = private unnamed_addr global [% x i64] [", idx, parts.len);
             for(parts[].items()){inner|
                 self.out&.reserve(20);
                 @match(inner) {
                     (fn FnPtr(f) => {
                         f = self.program.follow_redirects(f);  // TODO: hack because of new deduplication
-                        @fmt(self.out&.current(), "ptr @%,", (self, f));
+                        if wasm32 {|
+                            @fmt(self.out&.current(), "i64 bitcast (<2 x i32> <i32 ptrtoint (ptr @% to i32), i32 0> to i64),", (self, f));
+                        } else {|
+                            @fmt(self.out&.current(), "i64 ptrtoint (ptr @% to i64),", (self, f));
+                        };
                         // TODO: make sure we emitted the function. 
                     });
                     (fn AddrOf(id) => {
-                        @fmt(self.out&.current(), "ptr @g%,", @as(i64) id.id.zext());
+                        if wasm32 {|
+                            @fmt(self.out&.current(), "i64 bitcast (<2 x i32> <i32 ptrtoint (ptr @g% to i32), i32 0> to i64),", @as(i64) id.id.zext());
+                        } else {|
+                            @fmt(self.out&.current(), "i64 ptrtoint (ptr @g% to i64),", @as(i64) id.id.zext());
+                        };
                     });
                     (fn Num(v) => {
                         // TODO: small prims
-                        @fmt(self.out&.current(), "ptr inttoptr (i64 % to ptr),", v.value);
+                        @fmt(self.out&.current(), "i64 %,", v.value);
                     });
                 };
             };
