@@ -2,6 +2,35 @@
 
 - rust program with wasmtime and some libc shims to run most tests as wasm.
 
+> failing 32
+
+HACK.  
+just say no type hint for the first argument when resolving overloads.
+thats good enough to not incorrectly coerce a constant and then fail to match on a runtime second arg for the binary arithmetic which is what it all ends up being.
+eventually i'll need something more robust but its not like the old version worked super well either.
+
+> failing 26
+
+regression add a @as for `mask: u32 = 1.bit_not()`. since thats a single arg, im now skipping giving the literal a type hint,
+and then since i don't have i128 anymore i think its a negative number and don't let it coerce?
+also wierd ness about if my new thing is doing #fold enough.
+
+> failing 23
+
+had a TODO when you suspended after removing some of const args and then circled back.
+for something like `get_field_ptr :: fn($S: Type, self: *S, $f: *Field) *f[].ty #generic`,
+you'd replace the first argument and suspend on the second.
+arguments are removed from the cloned function as you go because later ones might refer to the bound values,
+but we leave the arg_expr alone until the very end.
+so now when you try again, you know how many args have been removed from the function, and just skip over that many constant args before doing more processing.
+
+> failing 17
+> failing 15
+
+exec_task.Jit calls copy_inline_asm fixes all the #asm tests.
+
+> failing 10
+
 ## procrastinating fixing overloading (Aug 19)
 
 - track stack depth so more nested early returns work

@@ -229,23 +229,44 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
             arg_ty := @check(self.infer_arguments(fid)) return;
             ret_ty := @check(self.infer_return(fid)) return;
             
-            if func.body&.is(.Normal).or(func.body&.is(.Intrinsic)) {|
-                @log_event("codegen % %", fid, self.log_name(fid)) self;
-                @err_assert(!arg_ty.is_unknown() && !ret_ty.is_unknown(), "unknown fn types!!") return;
-                hack := self.stable_compiler_context().cast(); // because Bc::CompCtx stores a ***SelfHosted in the assembly 
-                body := hack.emit_bc_and_aarch64(fid, .Jit);
-                if(body&.is_err(), => return(Err = self.box(body.Err)));
-            } else {|
-                @if_let(func.body) fn Redirect(target) => {
-                    ptr := or self.aarch64&.get_fn(target) {|
-                        return(Suspend = self.wait_for(Jit = target))
-                    };
-                    // TODO: save in constants lookup too if take address 
-                    self.aarch64&.extend_blanks(fid);
-                    self.aarch64.dispatch[fid.as_index()] = ptr;
+            // TODO: assert found? 
+            found := @check(self.fill_in_jit_pointer(fid, func.body&)) return;
+            fn fill_in_jit_pointer(self: *SelfHosted, fid: FuncId, body: *FuncImpl) Maybe(bool) = {
+                if(self.aarch64&.get_fn(fid).is_some(), => return(Ok = true));
+                func := self.get_function(fid);
+                arg_ty := func.finished_arg.unwrap();
+                ret_ty := func.finished_ret.unwrap();
+                if body.is(.Normal).or(body.is(.Intrinsic)) {|
+                    @log_event("codegen % %", fid, self.log_name(fid)) self;
+                    @err_assert(!arg_ty.is_unknown() && !ret_ty.is_unknown(), "unknown fn types!!") return;
+                    hack := self.stable_compiler_context().cast(); // because Bc::CompCtx stores a ***SelfHosted in the assembly 
+                    body := hack.emit_bc_and_aarch64(fid, .Jit);
+                    if(body&.is_err(), => return(Err = self.box(body.Err)));
+                    return(Ok = true);
                 };
+                @match(body) {
+                    fn Redirect(target) => {
+                        ptr := or self.aarch64&.get_fn(target[]) {|
+                            return(Suspend = self.wait_for(Jit = target[]))
+                        };
+                        // TODO: save in constants lookup too if take address 
+                        self.aarch64&.extend_blanks(fid);
+                        self.aarch64.dispatch[fid.as_index()] = ptr;
+                    };
+                    fn ComptimeAddr(_) => unreachable("ICE: comptime addr is done before.");
+                    // TODO: do this before too? 
+                    fn JittedAarch64(insts) => self.aarch64&.copy_inline_asm(fid, insts.items());
+                    fn Merged(parts) => {
+                        each parts { option |
+                            if @check(self.fill_in_jit_pointer(fid, option)) return {|
+                                return(Ok = true);
+                            };
+                        };
+                    }
+                    @default => return(Ok = false);
+                };
+                (Ok = true)
             };
-            
             @debug_assert(self.aarch64&.get_fn(fid).is_some(), "failed to jit");
         }
         fn ResolveOverload(f) => {
