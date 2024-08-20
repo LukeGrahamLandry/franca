@@ -38,8 +38,9 @@ fn driver(vtable: *ImportVTable) void = {
                 run_jit(vtable, .Aarch64);
             };
             // TODO: new sema can't compile these yet. 
-            //@case("llvm") => run_llvm(vtable);
-            //@case("qbe") => run_qbe(vtable);
+            @case("llvm") => run_llvm(vtable, false);
+            @case("qbe") => run_qbe(vtable);
+            @case("llvm-wasm") => run_llvm(vtable, true);
             @case("examples") => run_examples(vtable, true);
             @case("github") => github(vtable);
             @default => {
@@ -122,9 +123,11 @@ fn run_jit(vtable: *ImportVTable, kind: Backend) void = {
 }
 
 // TODO: this is a dumb way to do this, when they're failing, ReportCrash pegs a core. 
-fn run_llvm(vtable: *ImportVTable) void = {
+fn run_llvm(vtable: *ImportVTable, wasm32: bool) void = {
     println("=== Llvm Aot ===");
-    comp := {vtable.init_compiler}(.Aarch64, default_build_options());
+    opts := default_build_options();
+    opts.wasm32 = wasm32;
+    comp := {vtable.init_compiler}(.Aarch64, opts);
     c := vtable.with(comp);
     load_lang_tests(c);
     run_sequential(c) {c, tests|
@@ -140,11 +143,23 @@ fn run_llvm(vtable: *ImportVTable) void = {
         args&.push("ir");
         //args&.push("-O2");
         args&.push(out&.s_name());
+        if wasm32 {|
+            args&.push_all(@slice("-o", "a.wasm"));
+            args&.push_all(@slice(
+                "--target=wasm32", "-nostdlib", "-Wl,--no-entry", "-Wl,--no-entry", "-Wl,--export-all", "-Wl,-z,stack-size=8388608"
+            ));
+            args&.push_all(@slice("-Wl,-undefined", "-Wl,dynamic_lookup", "-Wl,--allow-undefined"));
+        };
         success := run_cmd_blocking(CLANG_PATH, args.items()); 
         assert(success, "opt failed");
         
         args: List(Str) = list(temp());
-        success := run_cmd_blocking("a.out", args.items()); 
+        success := if wasm32 {|
+            args&.push("a.wasm");
+            run_cmd_blocking("./tests/test_wasm_rt/target/release/test_wasm_rt", args.items())
+        } else {|
+            run_cmd_blocking("a.out", args.items())
+        };
         assert(success, "test failed");
         
         out.remove();
