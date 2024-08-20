@@ -89,8 +89,13 @@ fn emit_function_husk(self: *EmitLlvm, fid: FuncId, signeture: PrimSig, $emit_bo
         s := @format("%arg%", "%", arg_index) temp();
         s.items()
     };
-    
-    self.out&.current().push_all(" unnamed_addr \"frame-pointer\"=\"all\" "); // must be before debug info!
+    self.out&.current().push_all(" unnamed_addr ");
+    func := self.program.get_function(fid);
+    if func.get_flag(.Cold) {|
+        // Note: this doesn't do anything on -Os unless you also pass `-mllvm -hot-cold-split=true`
+        self.out&.current().push_all(" cold optsize noinline ");
+    };
+    self.out&.current().push_all(" \"frame-pointer\"=\"all\" "); // must be before debug info!
     if self.program.get_build_options()[].debug_info {|
         self.current_debug_info = self.next_debug();
         @fmt(self.out&.current(), "!dbg !%", self.current_debug_info);
@@ -101,7 +106,6 @@ fn emit_function_husk(self: *EmitLlvm, fid: FuncId, signeture: PrimSig, $emit_bo
     self.out&.current().push_all("}\n");
     
     if self.program.get_build_options()[].debug_info {|
-        func := self.program.get_function(fid);
         source_name := self.program.pool.get(func.name); 
         template :: "!% = distinct !DISubprogram(name: \"%\", linkageName: \"%\", unit: !%, scope: !%, type: !%, spFlags: DISPFlagDefinition)\n";
         @fmt(self.out&.current(), template,  self.current_debug_info, source_name, name.items(), self.debug_unit, self.debug_file, self.debug_func_type);
