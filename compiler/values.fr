@@ -198,10 +198,19 @@ fn emit_relocatable_constant_body(
             padding_size := b.len - payload_size - tag_size;
             @try(c.emit_relocatable_constant_body(inner, payload&, out, false)) return;
             
-            d, m := padding_size.div_mod(8);
+            padding_slots, m := padding_size.div_mod(8);
             @assert_eq(m, 0, "TODO: non-8-mod enum padding");
-            range(0, d) { _ | 
-                out.push((Num = (0, .I64)));
+            
+            // :tagged_prims_hack
+            types := c.flat_tuple_types(ty);
+            types := types.items().slice_last(padding_slots);
+            types := types.unwrap();
+            // now types is just padding
+
+            // If this is a smaller varient, pad out the slot.
+            for types { p |
+                ty := @unwrap(c.prim(p), "not prim") return;
+                out.push((Num = (0, ty)));
             };
         });
         (fn Enum(f) => {
@@ -372,17 +381,30 @@ fn deconstruct_values(program: *SelfHosted, ty: Type, bytes: *ReadBytes, out: *L
             end_count := out.len;
             padding_slots := (@as(i64) info.size_slots.zext()) - (end_count - start_count);
             @err_assert(padding_slots >= 0, "ICE: too many slots????") return;
-            range(0, padding_slots) { _ |
-                // TODO: wrong prim
-                i64.single(.I64);
-            };
             
-            // TODO: this is just asking for a miscompilation...
-            //       because the bytes size doesn't tell you the number of primitives the caller expects. 
-            //       like @tagged(a: (u8, u8), b: (u32)), what do you do with that? 
-            //       i guess you push enough zeros for the varient with the highest count
-            //       :FUCKED -- Aug 2
-            //@println(">>> WARNING: deconstruct_values @tagged is unfinished % <<<", program.log_type(ty));
+            // :tagged_prims_hack
+            // TODO: try to make a test that fails without this. 
+            //       ie just replace with 
+            //       range(0, padding_slots) { _ |
+            //          // TODO: wrong prim
+            //          i64.single(.I64);
+            //      };
+            //      otherwise reduce the copy-paste of the 3 versions of this. 
+            types := program.flat_tuple_types(ty);
+            types := types.items().slice_last(padding_slots);
+            types := types.unwrap();
+            // now types is just padding
+
+            // If this is a smaller varient, pad out the slot.
+            for types { p |
+                ty := @unwrap(program.prim(p), "not prim") return;
+                out.push(0);
+                if offsets { offsets |
+                    // TODO: do we care about the offsets?
+                    offsets.push(@as(Ty(Prim, u16)) (ty, bytes.i.trunc()));
+                };
+            };
+            bytes.i += padding;
         }
         fn Enum(f)   => return(deconstruct_values(program, f.raw, bytes, out, offsets));
         fn Named(f)  => return(deconstruct_values(program, f._0, bytes, out, offsets)); // TODO: make Named payload not a tuple or do destructuring here. -- Jul 8

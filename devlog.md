@@ -4,8 +4,23 @@
 - (old) problem after making neg #fold because i write fmt_hex for llvm before i had a shift_right_logical so i was using div and it only worked when the high bit was 0
 - implement check_for_new_aot_bake_overloads
 - forgot to call created_jit_fn_ptr_value based on TookPointerValue in dispatch.
-- TODO: now problem is it doesn't fold and thinks we need GetCompCtx. like calling size_of in arena.
 - TODO: deal with execv vs execvp
+
+> failing 11 + 175
+
+now problem is it doesn't fold and thinks we need GetCompCtx. like calling size_of in arena.
+Was only folding when `!self.dispatch.enclosing_function.is_some()` to prevent recursing but thats not what you want.
+in old sema you could just mark expr.done because you know you only get there once but now i have to be able to suspend.
+skip fold when we're in a function made by imm_eval helps a bit.
+
+> failing 9 + 174
+
+but now llvm not failing on GetCompCtx, tho its still `!!!! failed to emit speciai function: size_of` which is a bad sign.
+but the actual error is i64 vs ptr of last argument to new_arena_chunk, passing a const null pointer, so thats a `.None`.
+so the problem is my new contextual_field of tagged becoming a value instead of a structliteralp, and then emit_bc gets the wrong prims for it.
+adding :tagged_prims_hack to emit_relocatable_constant_body fixed a bunch. mega ugly but progress.
+
+> failing 9 + 32
 
 ## (Aug 20)
 

@@ -1105,6 +1105,7 @@ fn contextual_field(self: *SelfHosted, name: Symbol, expr_out: *FatExpr, type: T
                     ) return;
                     
                     // We could create a StructLiteralP and let the backend deal with it, but we know the answer right now. 
+                    // Note that this forces an extra case for :tagged_prims_hack
                     info := self.get_info(type);
                     size: i64 = info.stride_bytes.zext(); // TODO: allow yield on sizing here. 
                     bytes := 0x00.repeated(size, self.get_alloc());
@@ -1295,7 +1296,13 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
     if !f_expr.expr&.is(.Value) {|
         _ := @check(self.immediate_eval_expr(f_expr, f_expr.ty)) return;
     };
-    if func.get_flag(.TryConstantFold) && !self.dispatch.enclosing_function.is_some() && arg_expr.is_const() {|
+    // !self.dispatch.enclosing_function.is_some()
+    allow_fold := self.dispatch.enclosing_function.is_some() && {
+        func := self.get_function(self.dispatch.enclosing_function.unwrap());
+        !func.get_flag(.SyntheticImmEval)
+    };
+    if func.get_flag(.TryConstantFold) && allow_fold && arg_expr.is_const() {|
+        @log_event("TryConstantFold %", expr.log(self.pool)) self;
         value := @check(self.immediate_eval_expr(expr, ret_ty)) return;
         expr.set(value, ret_ty); // TODO: redundant?
     } else {|
@@ -2757,6 +2764,7 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
     // We didn't bother setting a scope because we don't need one, the expression will already have been resolved. 
     fake_func&.set_flag(.ResolvedBody);
     fake_func&.set_flag(.ResolvedSign);
+    fake_func&.set_flag(.SyntheticImmEval);
     fake_func.finished_arg = (Some = void);
     fake_func.finished_ret = (Some = ret_ty);
     fake_func.cc = (Some = .CCallReg);    
