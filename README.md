@@ -1,5 +1,8 @@
 # Franca
 
+A programing language understandable by one person.
+That may be interpreted as "any person will be able to understand it" or "one specific person is able to understand it", at your option.
+
 ## Features
 
 - all code can run at compile time (like nim/jai)
@@ -42,12 +45,16 @@
 I strongly believe in conservation of misery so if there's a bunch of stuff I like about this language
 there must be proportional terrible things or I'm probably just lying.
 
-- I don't care about being pragmatic for large corporations. My main goal is to make sure its not boring.
+- Stability is not a core tenet. If it was worth writing once, it's probably worth writing twice.
 - I don't care about being easy to learn. I want it to be fun. Rust is fun.
-- Stuff's unsafe, deal with it, simply don't make a mistake. i.e. `fn main() = { let a: *i64 = 123.int_to_ptr(); println(a[]);` will compile, run, and (probably) crash.
+- Stuff's unsafe, deal with it, simply don't make a mistake. i.e. `fn main() = { evil := i64.int_to_ptr(123); println(evil[]);` will compile, run, and (probably) crash.
 - I don't care about fallibile memory allocation
 - It's a little heavy on the punctuation.
 - I believe I've never touched a big endian computer so I don't care.
-- (TEMP) completely incomprehensible error messages.
-- (TEMP) no caching. every time you run a program, you recompile the standard library for comptime. (...but its so fast it doesn't matter yet).
-- (TEMP) the compiler only runs on aarch64. (the llvm backend can cross compile to other targets tho)
+- Pointers are 64 bits. Wasm can just use twice as much memory as it should, not my problem, tho it irks me.
+- Sadly the error messages are completely incomprehensible.
+- Sadly I don't have nice IDE integration.
+- Sadly I don't have incremental builds. every time you run a program, you recompile the standard library for comptime. (...but its so fast it doesn't matter yet).
+- Sadly the compiler only runs on aarch64. (the llvm backend can cross compile to other targets tho, but I can't run comptime code on them yet).
+- Sadly my implementation of the C ABI is buggy. It's good enough for the example programs tho.
+- Sadly I don't have a nice debug mode that detects undefined behaviour (overflow, wrong tagged field, etc).

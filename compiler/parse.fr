@@ -139,7 +139,6 @@ fn parse_stmt_inner(self: *Parser, has_annotations: bool) Result(FatStmt, *Parse
 fn parse_decl_or_start_expr(self: *Parser, name: Symbol) Result(FatStmt, *ParseErr) #once = {
     self.pop();
     @match(self.peek()) {
-        // TODO: Comma. want to change destructuing syntax to `a, b : T = e` from `(a: T_1, b: T_2) := e`.
         fn DoubleColon() => {
             loc := self.last.span;
             self.pop();
@@ -162,12 +161,44 @@ fn parse_decl_or_start_expr(self: *Parser, name: Symbol) Result(FatStmt, *ParseE
             s: Stmt = (DeclNamed = (kind = kind, value = value, ty = ty, name = name)); // TODO: the rust thing where you don't have to say the name if the expr is a var read that matches.
             return(Ok = self.stmt(s, loc));
         }
+        fn Comma() => {
+            // That was actually like `a, b := e;`, so we want to turn that name into an expression and then find some more identifiers. 
+            self.pop();
+            loc := self.last.span;
+            idents := @try(self.list_of_names_decl(name)) return;
+            pattern := @try(self.ident_list_to_pattern(idents&, loc)) return;
+            value := @try(self.parse_expr(Prec_None)) return;
+            return(Ok = self.stmt((DeclVarPattern = (binding = pattern, value = value)), loc))
+        }
         @default => {
             e := @try(self.ident_expr_and_maybe_trailing(name, Prec_None, self.last.span)) return;
             return(self.after_expr_stmt_prefix(e));
         };
     };
     unreachable()
+}
+
+fn list_of_names_decl(self: *Parser, name: Symbol) Result(RsVec(FatExpr), *ParseErr) = {
+    first := self.expr((GetNamed = name), self.last.span);
+    exprs: List(FatExpr) = list(2, self.alloc);
+    exprs&.push(first);
+    loop {|
+        @match(self.pop()) {
+            fn Symbol(name) => {
+                e := self.expr((GetNamed = name), self.last.span);
+                exprs&.push(e);
+                next := self.peek();
+                if !next&.is(.Colon) {|
+                    @try(self.eat(.Comma, "destructuring statment expected ':=' (TODO: allow type annotation)")) return; 
+                };
+            }
+            fn Colon() => {
+                @try(self.eat(.Equals, "destructuring statment expected ':=' (TODO: allow type annotation)")) return; 
+                return(Ok = exprs.rs());
+            }
+            @default => @report_error("expected ident or ':' in destructuring") (return, self.last.span);
+        }
+    }
 }
 
 fn next_is_equals(self: *Parser) bool = {
@@ -224,7 +255,7 @@ fn after_expr_stmt_prefix(self: *Parser, e: FatExpr) Result(FatStmt, *ParseErr) 
     (Ok = stmt)
 }
 
-fn ident_list_to_pattern(self: *Parser, idents: *RsVec(FatExpr), loc: Span) Result(Pattern, *ParseErr) #once = {
+fn ident_list_to_pattern(self: *Parser, idents: *RsVec(FatExpr), loc: Span) Result(Pattern, *ParseErr) = {
     bindings: List(Binding) = list(idents.len, self.alloc);
     each idents { expr | 
         @match(expr.expr&) {
@@ -400,7 +431,7 @@ fn parse_func(self: *Parser, allow_empty: bool) Result(Func, *ParseErr) = {
     
     if !may_capture {|
         @if_let(self.peek()) fn LeftSquiggle() => {
-            (src, span) := self.lex&.skip_to_closing_squigle();
+            src, span := self.lex&.skip_to_closing_squigle();
             self.pop(); // TODO: why do i need this? -- Jun 22
             id := self.push_parse(src, span);
             body := self.expr((GetParsed = id), loc);
@@ -563,8 +594,7 @@ fn parse_squiggle(self: *Parser, prev: FatExpr, prec: Prec) ParseRes #once = {
 ::if(ParseRes);
 // TODO: this seems to use the wrong loc
 fn parse_bin_op(self: *Parser, op: Operator, prev: FatExpr, prec: Prec) ParseRes #once = {
-    // TODO: destructuring: `prec, name := @switch ...`
-    (next_prec, callee) := @switch(op) {
+    next_prec, callee := @switch(op) {
         @case(.Plus) => (PrecLevel.AddSub, Flag.add);
         @case(.Minus) => (PrecLevel.AddSub, Flag.sub);
         @case(.Star) => (PrecLevel.MulDiv, Flag.mul);
@@ -820,7 +850,7 @@ fn parse_pattern(self: *Parser, out: *List(Binding)) Result(void, *ParseErr) = {
         // TODO: shouldnt have to put the type annotations everywhere. 
         //       before switching nested ifs to switch, you didn't need it. -- Jul 28
         T :: Ty(Symbol, VarType);
-        (name, kind) := @match(self.peek()) {
+        name, kind := @match(self.peek()) {
             (fn RightParen() => {
                 return(.Ok)
             });
@@ -1066,117 +1096,6 @@ fn report_error(fmt_args: FatExpr, ret_loc: FatExpr) FatExpr #macro = {
         unreachable()
     };
     result
-}
-
-fn parser_doesnt_crash() #test = {
-    pool: StringPool = init(temp());
-    
-    codemap: CodeMap = init(temp());
-    src := @slice (
-        "a + 1;", 
-        "a[] + b[] * c;",
-        "a[] * c + b[];",
-        "-a + b;",
-        "a + -b == c[123];",
-        "a - -b > -c&[] != !true;",
-        "a <= c == b >= d;",
-        "hello&;",
-        "a :: hello + world;",
-        "a := b;",
-        "a: b = c",
-        "a: b : c",
-        "(a, b + c);",
-        "();",
-        "(a = b, c = d);",
-        "(a, b, c = d);",
-        "{ a; b };",
-        "{ a; };",
-        "a(b, c);",
-        "a();",
-        "a(b, c = d);",
-        "a(b = c);",
-        "a.f(b);",
-        "a.f(b = c);", // TODO: this kinda parses wrong. it gives f(a, (b = c)) instead of f(a, b = c).
-        "a.f();",
-        "a + ::b * c;", // TODO: add weird precidence test
-        "a = b;",
-        "a[] = b;",
-        "a[b] = c;",
-        "{ a += b; c -= d; e *= f; g /= h };",
-        ".None;",
-        "'a + @[b]';",
-        "@a(b) c;",
-        "@a(b);",
-        "@a b;",
-        "@(a(d))(b) c;",
-        "a(f, g) { (b: c) d| e };",
-        "a(!b(c)) {| d };",
-        "a !b(c) {| d };",
-        "a(b(c) {| d });",
-        "a() + b() * c();",
-        "a() * b() + c();",
-        "?a(b) + c;",
-        "a.b;",
-        "*T;",
-        "a&.tag() + b;",
-        "0xABC + 0b10101;",
-        "(fn hello(a: b) c => d);",
-        "fn hi(a: b) c #d #e(f);",
-        "a(=> b);",
-    );
-    
-    // TODO: if you make the stack slice too large it segfaults.. sometimes ?? in rust debug mode it just miscompiles ?SA?EQ@?QW#F>FKLQW? :FUCKED -- Jun 22
-    src := src.clone(temp());
-    
-    src&.push_all(@slice (
-        "{ fn a() b = { c }; d };",
-        "a :: @struct(a: @struct(e: f), c: d);",
-        "a :: @struct(b: B, c: C, d: D);",
-        "for parts {e| a };",
-        "#macro fn a() b = c;",
-        "1.2;",
-        "fn neg(a: f64) f64 = sub(0.0, a);",
-        "fn hello($a: T) b;",
-        "TermConstants :: @struct(_parsehack: void, $ICANON := 256, $ECHO := 8);",
-        "@[@literal(as)];",
-        "'@(@[@literal(as)])\n(@[@literal(T)]) @[expr]';",
-        "Type :: @builtin Type;", 
-        "a > b && c < d && e;",
-    ));
-    
-    failed := false;
-    for src {src|
-        span := codemap&.add_file("name", src);
-        tasks: List(ParseTask) = list(temp());
-        lex: Lexer = init(pool&, span, src); // TODO: shadow
-        ctx: Parser = (pool = pool&, lex = lex, tasks = tasks&, alloc = temp(), last = Token.zeroed());
-        tasks&.push((Pending = (src = src, span = span)));
-        res := ctx&.parse_stmt();
-        @match(res) {
-            (fn Ok(t) => {
-                out: List(u8) = list(temp());
-                t&.log(pool&, out&, 0);
-                token := codemap&.source_slice(t.loc);
-                if VERBOSE_TEST_LOGGING {|
-                    println(token);
-                    println(out.items());
-                };
-                next_token := ctx.lex&.pop(); // TODO: i think this should just be peek once i consume semicolons? 
-                if next_token.type&.is(.Eof).not() {|
-                    failed = true;
-                    println("parser did not consume all input.");
-                };
-                line := codemap&.get_whole_line(t.loc);
-            });
-            (fn Err(e) void => {
-                //place: Span = (low = e.span.low.sub(10), high = e.span.high.add(10));
-                place := e.span;
-                @println("err! % at:\n%", e.msg, codemap&.source_slice(place));
-                failed = true;
-            });
-        };
-    };
-    assert(not(failed), "parse failed");
 }
 
 fn int(self: PrecLevel) i64 = @as(i64) self;

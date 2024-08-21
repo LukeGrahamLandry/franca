@@ -1,5 +1,7 @@
-//! Renders a 1-bit ascii art mandelbrot set.
-//! If you like fractals, check out: https://github.com/LukeGrahamLandry/FractalViewer
+//! This can be run with `cargo -Zscript <file>`
+//! Note that it cheats! It caches build artifacts in `~/.cargo/target/db/<hash>/debug/*`
+//! Tho it still takes longer to check that nothing's changed than franca/luajit take to do it from scratch.
+//! It seems to just use the last modified date so you can `touch <file>` to trick it.
 
 #[derive(Clone, Copy)]
 struct Pos {
