@@ -1,3 +1,12 @@
+## (Aug 21)
+
+- resolve named args. mandelbrot works now. can't do a single named arg yet.
+- (old) problem after making neg #fold because i write fmt_hex for llvm before i had a shift_right_logical so i was using div and it only worked when the high bit was 0
+- implement check_for_new_aot_bake_overloads
+- forgot to call created_jit_fn_ptr_value based on TookPointerValue in dispatch.
+- TODO: now problem is it doesn't fold and thinks we need GetCompCtx. like calling size_of in arena.
+- TODO: deal with execv vs execvp
+
 ## (Aug 20)
 
 - rust program with wasmtime and some libc shims to run most tests as wasm.

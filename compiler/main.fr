@@ -142,9 +142,55 @@ fn main() void = {
         // TODO
         (.Aarch64, .Macos)
     };
-    
+   
+    // TODO: do this lazily and as part of the event loop. 
     vtable.check_for_new_aot_bake_overloads = fn(comp: Compiler) CRes(void) = {
-        panic("TODO: check_for_new_aot_bake_overloads")
+        self := comp.cast()[][];
+        os := self.env.bake_os.expect("cannot aot during bootstrapping.");
+        overloads := self.dispatch.overloads&.nested_index(os.as_index());
+        prev := overloads.ready.len();
+        self.compute_new_overloads(overloads);
+        // TODO: this will miss them if someone caused new things to resolve outside this function.
+        //       so if you ever call bake_relocatable_value manually. :FUCKED -- Jun 19
+        current := overloads.ready.len();
+        new := overloads.ready.items().slice(prev, current).clone(temp());
+        each new { f |
+            continue :: local_return;
+            func := self.get_function(f.func);
+            args := func.arg.bindings&;
+            if args.len() != 1 {|
+                continue();
+            };
+            
+            value := self.poll_in_place(void) {()Maybe(void)|
+                return :: local_return;
+                arg_ty := @check(self.infer_arguments(f.func)) return;
+                ret_ty := @check(self.infer_return(f.func)) return;
+                .Ok
+            };
+            self.unwrap_report_error(void, value);
+            f_ty := func.finished_ty().expect("bake overload fn type");
+            info := self.get_type(f_ty.ret);
+            if !info.is(.Struct) {|
+                continue();
+            };
+            fields := info.Struct.fields&;
+            // TODO: make sure its actually a Slice(BakedEntry)
+            if fields.len() != 2 {|
+                continue();
+            };
+
+            first := f_ty.arg; 
+            ty := self.unptr_ty(first).or(=> continue());
+            // TODO: you really want to do the compile lazily, so you only do it when you actually try to emit a type that needs it. 
+            //       but EmitBc doesn't have mutable access to the compiler so its painful.
+            //       but this is cripplingly stupid with the current model of eh fuck it just load all the code in the universe every time. 
+            //       especially once i overload it for things in generics, currently slices are a magic special case.    -- Jun 19  :SLOW
+            f := {the_vtable[].get_jitted_ptr}(comp, f.func).unwrap();
+            f := assume_types_fn(rawptr, Slice(BakedEntry), f);
+            self.save_bake_callback(ty, f).unwrap();
+        };
+        .Ok
     };
     
     self_hosted_main(vtable, true);
@@ -317,7 +363,7 @@ fn load_file_in_compiler(vtable: *ImportVTable, path: Str, use_new_sema: bool) C
     id := self.parser.push_parse(source.items(), file);
     // TODO: handle error
     stmts := self.parser.finish_pending_stmts(id);
-    stmts := stmts.unwrap(); // TODO: don't return RsVec -- Jun 29
+    stmts := self[][].unwrap_report_error(RsVec(FatStmt), stmts); // TODO: don't return RsVec -- Jun 29
     @try({c.vtable.make_and_resolve_and_compile_top_level}(c.data, stmts.items())) return;
     (Ok = c)
 }

@@ -1958,7 +1958,29 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
         };
         
         if opt.args.len != want_arity {|
-            continue();
+            if !arg_expr.expr&.is(.StructLiteralP) {|
+                continue();
+            };
+            // Maybe they're trying to pass named arguments. 
+            have_parts := arg_expr.expr.StructLiteralP.bindings&;
+            func := self.get_function(opt.func);
+            want_parts := func.arg.bindings&;
+            if want_parts.len != have_parts.len {| // TODO: allow default args
+                continue();
+            };
+            
+            // :SLOW
+            each want_parts { want_b | 
+                next :: local_return;
+                want_name := want_b.ident().or(=> continue()); // idk if this ever happens but it sure can't be named argument
+                each have_parts { have_b |
+                    have_name := have_b.ident().or(=> continue()); // idk if this ever happens but it sure can't be named argument
+                    if want_name == have_name {|
+                        next();
+                    };
+                };
+                continue();
+            };
         };
         
         interesting&.push(opt[]);
@@ -1991,6 +2013,50 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
             };
         };
         
+        if func.arg.bindings.len != want_arity {|
+            @debug_assert(arg_expr.expr&.is(.StructLiteralP), "expected kwargs");
+            
+            each func.arg.bindings { want_b | 
+                next :: local_return;
+                want_name := want_b.ident().or(=> continue()); // idk if this ever happens but it sure can't be named argument
+                each arg_expr.expr.StructLiteralP.bindings& { have_b |
+                    have_name := have_b.ident().or(=> continue()); // idk if this ever happens but it sure can't be named argument
+                    if want_name == have_name {|
+                        arg_expr := have_b.default&.as_ref().unwrap();
+                        if !func.get_flag(.Generic) {|
+                            @check(self.infer_type(want_b.ty&)) return;
+                        };
+                        if want_b.ty&.ty() { param | 
+                            hint: ResultType = (Specific = param);
+                            self.last_loc = arg_expr.loc;
+                            @match(self.compile_expr(arg_expr, hint)) {
+                                fn Suspend(f) => {
+                                    blocked&.push(f); 
+                                    continue(); // we don't like it, we skip it.
+                                }
+                                fn Err(e) => {
+                                    errors&.push(e);
+                                    continue();
+                                }
+                                fn Ok() => {
+                                    if !arg_expr.ty.is_unknown() && self.can_assign(param, arg_expr.ty).is_err() {|
+                                        continue();
+                                    };
+                                }
+                            };
+                        };
+                        next();
+                    };
+                };
+                
+                // Didn't find the arg
+                continue();
+            };
+            // Found all the args and liked thier types
+            still_interesting&.push(opt[]);
+            continue();
+        };
+        
         enumerate func.arg.bindings { i, b | 
             arg_expr := parts.index(i);
             if !func.get_flag(.Generic) {|
@@ -2003,39 +2069,29 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
                 //       like ContextualField`.a` -> Value`A.a` loses information.
                 //       or just do it on a clone of the arg expr? -- Aug 2
                 //       but you cant just clone here because then you'll never make progress if you yield while compiling it. 
-                //other := arg_expr.deep_clone(self.get_alloc()); // :SLOW slow slow slow
-                //if arg_expr.ty.is_unknown() {|
-                    hint: ResultType = if(i == 0, => .None, => (Specific = param));
-                    self.last_loc = arg_expr.loc;
-                    @match(self.compile_expr(arg_expr, hint)) {
-                    //@match(self.type_of(arg_expr)) {
-                        fn Suspend(f) => {
-                            blocked&.push(f); 
-                            //arg_expr[] = other;
-                            continue(); // we don't like it, we skip it.
-                        }
-                        fn Err(e) => {
-                            errors&.push(e);
+                hint: ResultType = if(i == 0, => .None, => (Specific = param));
+                self.last_loc = arg_expr.loc;
+                @match(self.compile_expr(arg_expr, hint)) {
+                    fn Suspend(f) => {
+                        blocked&.push(f); 
+                        //arg_expr[] = other;
+                        continue(); // we don't like it, we skip it.
+                    }
+                    fn Err(e) => {
+                        errors&.push(e);
+                        //arg_expr[] = other;
+                        continue();
+                    }
+                    fn Ok() => {
+                        if !arg_expr.ty.is_unknown() && self.can_assign(param, arg_expr.ty).is_err() {|
+                            //@println("[%] discard % for %", i, self.log_type(arg_expr.ty), self.log_type(param));
+                            //self.codemap.show_error_line(func.loc);
                             //arg_expr[] = other;
                             continue();
-                        }
-                        fn Ok() => {
-                            if !arg_expr.ty.is_unknown() && self.can_assign(param, arg_expr.ty).is_err() {|
-                                //@println("[%] discard % for %", i, self.log_type(arg_expr.ty), self.log_type(param));
-                                //self.codemap.show_error_line(func.loc);
-                                //arg_expr[] = other;
-                                continue();
-                            };
-                            //arg_expr[] = other;
-                        }
-                    };
-                //} else {|
-                //    if self.can_assign(param, arg_expr.ty).is_err() {|
-                //        //@println("[%] discard % for %", i, self.log_type(arg_expr.ty), self.log_type(param));
-                //        //self.codemap.show_error_line(func.loc);
-                //        continue();
-                //    };
-                //};
+                        };
+                        //arg_expr[] = other;
+                    }
+                };
             };
         };
         still_interesting&.push(opt[]);
@@ -2110,7 +2166,7 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
     @err("TODO: resolve_in_overload_set % %", self.pool.get(overloads.name), interesting.len)
 }
 
-fn compute_new_overloads(self: *SelfHosted, overloads: *OverloadSetData) void #once = {
+fn compute_new_overloads(self: *SelfHosted, overloads: *OverloadSetData) void  = {
     while => !overloads.pending.is_empty() {|
         pending := overloads.pending.items().clone(temp());
         overloads.pending.len = 0;
