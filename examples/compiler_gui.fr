@@ -1,0 +1,614 @@
+ImGuiMouseSource :: i32;
+ImGuiDir :: i32;
+ImGuiInputEventType :: i32;
+ImGuiInputSource :: i32;
+
+allocator :: libc_allocator;
+
+fn main() void = {
+    // TODO: can't call ArenaAlloc/mark before any allocations have been made. 
+    @println("coconut.jpg");
+    
+    state := State.zeroed();
+    state.vtable = new_sema_init_vtable();
+    state.vtable.fill_driver_vtable();
+    state.filename = list(255, libc_allocator);
+    state.messages = list(255, libc_allocator);
+    state.programs = list(libc_allocator);
+    
+    update_global_stdlib_path();
+    
+    desc := SappDesc.zeroed();
+    desc.init_userdata_cb = do_init;
+    desc.frame_userdata_cb = do_render;
+    desc.event_userdata_cb = do_event;
+    desc.user_data = State.raw_from_ptr(state&);
+    desc.logger.func = slog_func;
+    desc.window_title = "Franca".maybe_borrow_cstr(temp());
+    sapp_run(desc&);
+}
+
+State :: @struct(
+    pass_action: SgPassAction,
+    window_open: bool,
+    vtable: *ImportVTable,
+    filename: List(u8),
+    phase: Phase = .Start,
+    messages: List(Str),
+    programs: List(ProgramState),
+);
+
+ProgramState :: @struct(
+    compiler: *SelfHosted,
+    show: bool,
+    hide_uncompiled_functions: bool = true,
+    hide_comptimeonly_functions: bool = true,
+    hide_synthetic_functions: bool = true,
+    extra_windows: List(DetailWindow),
+    new_window_ticks: i64 = 0,
+);
+
+DetailWindow :: @tagged(
+    Function: FuncId,
+);
+
+Phase :: @enum(i64) (Start, Driver); ::enum(Phase);
+
+show_gui :: fn(state: *State) void = {
+    @match(state.phase) {
+        fn Start() => {
+            if igButton(c_str(@symbol "Start"), (x = 50, y = 50)) {
+                args := cli_args();
+                if args.len <= 1 {
+                    // TODO: gui for this instead of crashing
+                    panic("Expected cli argument: a path to a franca file."); 
+                };
+                path := args[1].str();
+                
+                c := load_file_in_compiler(state.vtable, path, true);
+                c := c.unwrap();
+                userdata := State.raw_from_ptr(state);
+                mem := allocator.alloc(ExportVTable, 1);
+                mem.ptr[] = (
+                    log_event = (Some = log_event_callback),
+                );
+                {c.vtable.give_vtable}(c.data, mem.ptr, userdata);
+                //give_vtable: @FnPtr(c: Compiler, vtable: *ExportVTable, userdata: rawptr) void,
+                //c := c.data.cast()[][];
+                state.phase = .Driver;
+                
+                if c.get_unique_named("main") {f|
+                    callee := c.get_jitted(f);
+                };
+                sym_test := c.intern_string("test");
+                tests := c.data.get_fns_with_tag(sym_test);
+                for tests { f |
+                    callee := c.get_jitted(f);
+                };
+                
+                state.programs&.push(
+                    compiler = c.data.cast()[][],
+                    show = true,
+                    extra_windows = list(allocator),
+                );
+            };
+        }
+        fn Driver() => {
+            if igButton(c_str(@symbol "Cancel"), (x = 50, y = 50)) {
+                state.phase = .Start;
+                return();
+            };
+            
+            each state.messages { msg | 
+                igTextUnformatted(@as(CStr) (ptr = msg.ptr), @as(CStr) (ptr = msg.ptr.offset(msg.len)));
+            };
+            
+            enumerate state.programs { iii, instance |  
+                continue :: local_return;
+                self := instance.compiler;
+                
+                last := true;
+                enumerate_rev instance.extra_windows { i, kind |
+                    continue :: local_return;
+                    @match(kind[]) {
+                        fn Function(f_id) => {
+                            func := self.get_function(f_id);
+                            name := @fmt_cstr("Function %##%", self.pool.get(func.name), f_id.as_index());
+                            show := true;
+                            if !igBegin(name, show&, 0) {
+                                igEnd();
+                                continue();
+                            };
+                            if last && instance.new_window_ticks > 0 {
+                                instance.new_window_ticks -= 1;
+                                igSetWindowFocus_Nil();
+                            };
+                            last = false;
+                            if !show {|
+                                instance.extra_windows&.ordered_remove(i);
+                            };
+                            instance.show_func_window(f_id);
+                            
+                            igEnd();
+                        }
+                    }
+                };
+                
+                name := @format("Instance##%", iii) temp();
+                name&.push(0);
+                if !igBegin(@as(CStr) (ptr = name.maybe_uninit.ptr), instance.show&, 0) {
+                    igEnd();
+                    continue();
+                };
+                
+                igCheckbox(@fmt_cstr("Hide Uncompiled Functions"), instance.hide_uncompiled_functions&);
+                igCheckbox(@fmt_cstr("Hide ComptimeOnly Functions"), instance.hide_comptimeonly_functions&);
+                igCheckbox(@fmt_cstr("Hide SyntheticEval Functions"), instance.hide_synthetic_functions&);
+                
+                if igCollapsingHeader_TreeNodeFlags(c_str(@symbol "Constants"), 0) {
+                    num_cols :: 4;
+                    if igBeginTable(c_str(@symbol "Constants"), num_cols, 0, (x = 800, y = 0), 0) {
+                        range(0, instance.compiler.scopes.constants.len) { i | 
+                            igPushID_Int(i.intcast());
+                            usages := instance.compiler.index.variables&.nested_index(i);
+                            if usages { usages |
+                                igTableNextRow(0, 0);
+                                igTableNextColumn();
+                                name := instance.compiler.pool.get(usages.var.name);
+                                igTextUnformatted(@as(CStr) (ptr = name.ptr), @as(CStr) (ptr = name.ptr.offset(name.len)));
+                                
+                                known := false;
+                                if usages.var.kind == .Const {|
+                                    v := instance.compiler.scopes.constants&.nested_index(usages.var.id.zext());
+                                    if v.as_ref() { value_ty | 
+                                        known := true;
+                                        igTableNextColumn();
+                                        type := value_ty._1&;
+                                        @match(type) {
+                                            fn Finished(type) => {
+                                                draw_type_ref(instance.compiler, type[]);
+                                            }
+                                            @default => {
+                                                msg := (@format("%", type.tag()) temp()).items();
+                                                igTextUnformatted(@as(CStr) (ptr = msg.ptr), @as(CStr) (ptr = msg.ptr.offset(msg.len)));
+                                            };
+                                        };
+                                        
+                                        igTableNextColumn();
+                                        value := value_ty._0&;
+                                        draw_expr_ref(instance.compiler, value);
+                                    };
+                                };
+                                if !known {|
+                                    msg := "---";
+                                    igTableNextColumn();
+                                    igTextUnformatted(@as(CStr) (ptr = msg.ptr), @as(CStr) (ptr = msg.ptr.offset(msg.len)));
+                                    igTableNextColumn();
+                                    igTextUnformatted(@as(CStr) (ptr = msg.ptr), @as(CStr) (ptr = msg.ptr.offset(msg.len)));
+                                };
+                            };
+                            igPopID();
+                        };
+                        igEndTable();
+                    };
+                };
+                
+                if igCollapsingHeader_TreeNodeFlags(c_str(@symbol "Types"), 0) {
+                    num_cols :: 1;
+                    if igBeginTable(c_str(@symbol "Types"), num_cols, 0, (x = 800, y = 0), 0) {
+                        range(0, instance.compiler.types.len) { i | 
+                            igPushID_Int(i.intcast());
+                            igTableNextRow(0, 0);
+                            igTableNextColumn();
+                            draw_type_ref(instance.compiler, typeid_from_index(i));
+                            igPopID();
+                        };
+                        igEndTable();
+                    };
+                };
+
+                if igCollapsingHeader_TreeNodeFlags(c_str(@symbol "Functions"), 0) {
+                    num_cols :: 3;
+                    if igBeginTable(c_str(@symbol "Functions"), num_cols, 0, (x = 800, y = 0), 400) {
+                        range(0, instance.compiler.functions.len) { i | 
+                            igPushID_Int(i.intcast());
+                            f_id := funcid_from_index(@as(u32) i.trunc());
+                            func := self.get_function(f_id);
+                            
+                            hide := false;
+                            if instance.hide_uncompiled_functions && !func.get_flag(.EnsuredCompiled) {
+                                hide = true;
+                            };
+                            if instance.hide_comptimeonly_functions && func.get_flag(.ComptimeOnly) {
+                                hide = true;
+                            };
+                            if instance.hide_synthetic_functions && func.get_flag(.SyntheticImmEval) {
+                                hide = true;
+                            };
+                            
+                            if !hide {
+                                draw_function_row(instance, f_id);
+                            };
+                            igPopID();
+                        };
+                        igEndTable();
+                    };
+                };
+                
+                if igCollapsingHeader_TreeNodeFlags(c_str(@symbol "Overload Sets"), 0) {
+                    num_cols :: 2;
+                    if igBeginTable(c_str(@symbol "Overload Sets"), num_cols, 0, (x = 800, y = 0), 0) {
+                        range(0, instance.compiler.dispatch.overloads.len) { i | 
+                            igPushID_Int(i.intcast());
+                            igTableNextRow(0, 0);
+                            os := instance.compiler.dispatch.overloads&.nested_index(i);
+                            
+                            igTableNextColumn();
+                            @ig_text("%_%", i, instance.compiler.pool.get(os.name));
+                            
+                            igTableNextColumn();
+                            @ig_text("%", os.ready.len);
+                            
+                            igPopID();
+                        };
+                        igEndTable();
+                    };
+                };
+                
+                igEnd();
+            };
+        };
+    };
+};
+
+fn draw_function_row(instance: *ProgramState, f_id: FuncId) void = {
+    igTableNextRow(0, 0);
+    self := instance.compiler;
+    func := self.get_function(f_id);
+    
+    igTableNextColumn();
+    @ig_text("%_%", f_id.as_index(), instance.compiler.pool.get(func.name));
+    
+    if igIsItemClicked(0) {
+        instance.extra_windows&.push(Function = f_id);
+        instance.new_window_ticks = 5;
+    };
+    
+    igTableNextColumn();
+    @match(func.finished_arg) {
+        fn Some(ty) => draw_type_ref(instance.compiler, ty);
+        fn None() => @ig_text("---");
+    };
+    igTableNextColumn();
+    @match(func.finished_ret) {
+        fn Some(ty) => draw_type_ref(instance.compiler, ty);
+        fn None() => @ig_text("---");
+    };
+}
+
+fn show_func_window(instance: *ProgramState, f_id: FuncId) void = {
+    self := instance.compiler;
+    func := self.get_function(f_id);
+    
+    i := 0;
+    for_enum FnFlag { (flag: FnFlag) | 
+        if func.get_flag(flag) {
+            ::enum(FnFlag);
+            if i.mod(4) != 0 {
+                igSameLine(0, 10);
+            };
+            i += 1;
+            @ig_text("%", flag);
+        };
+    };
+    
+    name := @fmt_cstr("Callees (%)", func.callees.len());
+    if igCollapsingHeader_TreeNodeFlags(name, 0) {
+        num_cols :: 3;
+        if igBeginTable(name, num_cols, 0, (x = 800, y = 0), 400) {
+            for func.callees { f_id | 
+                draw_function_row(instance, f_id);
+            };
+            igEndTable();
+        };
+    };
+    
+    name := @fmt_cstr("Mutual Callees (%)", func.mutual_callees.len());
+    if igCollapsingHeader_TreeNodeFlags(name, 0) {
+        num_cols :: 3;
+        if igBeginTable(name, num_cols, 0, (x = 800, y = 0), 0) {
+            for func.mutual_callees { f_id | 
+                draw_function_row(instance, f_id);
+            };
+            igEndTable();
+        };
+    };
+    
+    callers := if self.index.callers.len > f_id.as_index() {
+        self.index.callers&.nested_index(f_id.as_index())[]
+    } else {
+        empty()
+    };
+    name := @fmt_cstr("Callers (%)", callers.len());
+    if igCollapsingHeader_TreeNodeFlags(name, 0) {
+        num_cols :: 3;
+        if igBeginTable(name, num_cols, 0, (x = 800, y = 0), 0) {
+            for callers { f_id | 
+                draw_function_row(instance, f_id);
+            };
+            igEndTable();
+        };
+    };
+    
+    
+    if func.finished_bytecode_pointer { body | 
+        body := FnBody.ptr_from_int(body);
+        name := @fmt_cstr("Bytecode");
+        if igCollapsingHeader_TreeNodeFlags(name, 0) {
+            out: List(u8) = list(temp());
+            self.log_bc(func, body, out&);
+            @ig_text("%", out.items());
+        };
+    };
+    
+    if self.aarch64&.get_fn(f_id) { addr | 
+        @ig_text("This function can be jit called at %", addr);
+    };
+    
+    @if_let(func.body&) fn Normal(expr) => {
+        if expr.is_const() {
+            @ig_text("Should be trivially inlinable.");
+            draw_expr_ref(self, expr);  
+        };
+    };
+    
+    @ig_text("%", func.log(self.pool));
+}
+
+fn draw_expr_ref(self: *SelfHosted, expr: *FatExpr) void = {
+    if expr.expr&.is(.Value) && !expr.ty.is_unknown() {
+        draw_value_ref(self, expr.expr.Value.bytes&, expr.ty);
+    } else {
+        msg := (@format("%", expr.expr&.tag()) temp()).items();
+        igTextUnformatted(@as(CStr) (ptr = msg.ptr), @as(CStr) (ptr = msg.ptr.offset(msg.len)));
+    }
+}
+
+fn draw_value_ref(self: *SelfHosted, values: *Values, ty: Type) void = {
+    info := self.get_type(ty);
+    
+    show_func :: fn() => {
+        f_id := FuncId.assume_cast(values)[];
+        func := self.get_function(f_id);
+        msg := (@format("F%_%", f_id.as_index(), self.pool.get(func.name)) temp()).items();
+        igTextUnformatted(@as(CStr) (ptr = msg.ptr), @as(CStr) (ptr = msg.ptr.offset(msg.len)));
+        return();
+    };
+    show_label :: fn() => {
+        l := LabelId.assume_cast(values)[];
+        @ig_text("L%", l.as_index());
+        return();
+    };
+    @match(info) {
+        fn Fn(f) => show_func();
+        fn Int(int) => {
+            @if_let(int_value(values, int[])) fn Ok(i) => {
+                msg := (@format("%", i) temp()).items();
+                igTextUnformatted(@as(CStr) (ptr = msg.ptr), @as(CStr) (ptr = msg.ptr.offset(msg.len)));
+                return();
+            };
+        }
+        fn Label() => show_label();
+        @default => ();
+    };
+    if ty == FuncId {
+        show_func();
+    };
+    if ty == LabelId {
+        show_label();
+    };
+    
+    if ty == OverloadSet {
+        os := OverloadSet.assume_cast(values)[];
+        data := self.dispatch.overloads&.nested_index(os.as_index());
+        msg := (@format("OS%_%", os.as_index(), self.pool.get(data.name)) temp()).items();
+        igTextUnformatted(@as(CStr) (ptr = msg.ptr), @as(CStr) (ptr = msg.ptr.offset(msg.len)));
+        return();
+    };
+    
+    if ty == bool {
+        b := bool.assume_cast(values)[];
+        @ig_text("%", b);
+        return();
+    };
+    
+    if ty == Type {
+        type := Type.assume_cast(values)[];
+        draw_type_ref(self, type);
+        return();
+    };
+    
+    // if we don't know how to draw this type, just fall back to something useless
+    msg := (@format("Value:%", values.len()) temp()).items();
+    igTextUnformatted(@as(CStr) (ptr = msg.ptr), @as(CStr) (ptr = msg.ptr.offset(msg.len)));
+}
+
+fn draw_type_ref(self: *SelfHosted, ty: Type) void = {
+    info := self.get_type(ty);
+    
+    named :: fn(name: Str) => {
+        @ig_text("%", name);
+        return();
+    };
+    
+    @match(info) {
+        fn Int(int) => {
+            @ig_text("%%", if(int.signed, => "i", => "u"), int.bit_count);
+            return();
+        }
+        fn Named(f) => {
+            @ig_text("% -> %", self.pool.get(f._1), f._0.as_index());
+            return();
+        }
+        fn VoidPtr() => named("rawptr");
+        fn void() => named("void");
+        fn F64() => named("f32");
+        fn F32() => named("f64");
+        fn Bool() => named("bool");
+        fn Never() => named("never");
+        @default => ();
+    };
+    
+    // if we don't know how to draw this type, just fall back to something useless
+    @ig_text("Ty%", ty.as_index());
+}
+
+fn ig_text(fmt_args: FatExpr) FatExpr #macro = @{
+    msg := (@format(@[fmt_args]) temp()).items();
+    igTextUnformatted(@as(CStr) (ptr = msg.ptr), @as(CStr) (ptr = msg.ptr.offset(msg.len)));
+}
+
+fn fmt_cstr(fmt_args: FatExpr) FatExpr #macro = @{
+    msg := (@format(@[fmt_args]) temp());
+    msg&.push(0);
+    @as(CStr) (ptr = msg.maybe_uninit.ptr)
+}
+
+log_event_callback :: fn(userdata: rawptr, c: Compiler, event: *CompilerLogEvent) void = {
+    state := State.ptr_from_raw(userdata);
+    @match(event) {
+        fn Msg(msg) => {
+            msg := msg[].clone(allocator);
+            // no null terminator because igTextUnformatted takes an end pointer.
+            state.messages&.push(msg.items());
+        }
+    }
+};
+
+do_init :: fn(userdata: rawptr) void = {
+    state := State.ptr_from_raw(userdata);
+    state.window_open = true;
+    
+    desc := SgDesc.zeroed();
+    desc.environment = sglue_environment();
+    desc.logger.func = slog_func;
+    sg_setup(desc&);
+    
+    desc := SimguiDesc.zeroed();
+    desc.logger.func = slog_func;
+    simgui_setup(desc&);
+    
+    state.pass_action.colors&[0].load_action = .CLEAR;
+    state.pass_action.colors&[0].clear_value = (r = 0.3.cast(), g = 0.3.cast(), b = 0.3.cast(), a = 1.0.cast());
+};
+
+do_render :: fn(userdata: rawptr) void = {
+    state := State.ptr_from_raw(userdata);
+    
+    desc: SimguiFrameDesc = (width = sapp_width(), height = sapp_height(), delta_time = sapp_frame_duration(), dpi_scale = sapp_dpi_scale());
+    simgui_new_frame(desc&);
+    
+    mark := __temp_alloc.mark();
+    state.show_gui();
+    __temp_alloc.reset_retaining_capacity(mark);
+    
+    desc := SgPass.zeroed();
+    desc.action = state.pass_action;
+    desc.swapchain = sglue_swapchain();
+    
+    sg_begin_pass(desc&);
+    simgui_render();
+    sg_end_pass();
+    sg_commit();
+};
+
+do_event :: fn(event: *SappEvent, userdata: rawptr) void = {
+    state := State.ptr_from_raw(userdata);
+     
+    fn eq(a: SappEventType, b: SappEventType) bool = (@as(i32) a).eq(@as(i32) b);
+    fn eq(a: SappKeycode, b: SappKeycode) bool = (@as(i32) a).eq(@as(i32) b);
+    if event.type.eq(.KEY_DOWN) {
+        if event.key_code.eq(.Q) {
+            exit(0);
+        };
+    };
+    simgui_handle_event(event);
+};
+
+
+//////////////////////////////////////////////
+// Driver
+//
+
+fn load_src_gui(vtable: *ImportVTable) Ty(CompCtx, *ComptimeLibs) = {
+    src := temp().read_to_string("lib/core.fr");
+    src&.read_and_push("compiler/lib.fr");
+    @fmt(src&, ";ENABLE_TRACY :: false;\n");
+    @fmt(src&, ";ENABLE_LSP   :: false;\n");
+    @fmt(src&, ";ENABLE_QBE_BACKEND :: false;\n");
+    @fmt(src&, ";ENABLE_LOGGING_CALLBACKS :: true;\n");
+    @fmt(src&, ";DO_TERMINAL_COLOURS :: false;\n");
+    src&.read_and_push("bindings/sokol.fr");
+    src&.read_and_push("bindings/dearimgui.fr");
+    src&.read_and_push("examples/compiler_gui.fr");
+    
+    opts := default_build_options();
+    opts.deduplicate_bytecode = true;
+    opts.retain_function_names = true;
+    opts.debug_info = false;
+    
+    comp := vtable.new_with_src(src.items(), opts);
+    c := vtable.with(comp);
+    
+    libs := c.empty_libs();
+    libs := temp().boxed(ComptimeLibs, libs);
+    libs.intercept_imports();
+    libs.add_lib(sokol_and_imgui_macos_lib);
+    libs.add_lib(dearimgui_lib);
+    
+    (c, libs)
+}
+
+fn driver(vtable: *ImportVTable) void = {
+    if !file_exists("compiler/main.fr") {
+        panic("Working directory must be top level of the franca repository");
+    };
+    start := timestamp();
+    c, libs := load_src_gui(vtable);
+    
+    new_main := c.get_unique_named("main").unwrap();
+    exports := (@list(new_main) temp()).items();
+    ir_text := {c.vtable.emit_llvm}(c, temp(), exports, .ExportWithNames);
+    @println("Emitted % bytes of llvm ir.", ir_text.len);  // useful to see when i start trying to deduplicate bytecode. 
+    end := timestamp();
+
+    start := timestamp();
+    args := libs.get_aot_objects();
+    args&.push_all(@slice ("-o", "target/franca/franca2gui", "-g", "-Os"));
+    
+    SOKOL_MACOS_LINK_ARGS :: @array("-framework", "Metal", "-framework", "MetalKit", "-framework", "Cocoa", "-framework", "QuartzCore");
+    a := SOKOL_MACOS_LINK_ARGS;
+    args&.push_all(a&.items());
+    build_llvm(ir_text, args.items());
+    end := timestamp();
+    @println("LLVM time: % ms.", end.sub(start));
+    exit(0);
+    
+    // TODO: return result
+    fn build_llvm(ir: BucketArray(u8), args: Slice(Str)) void = {
+        out := open_temp_file();
+        for(ir&){bucket|
+            out.fd&.write(bucket);
+        };
+        @println("Write llvm ir to %", out&.s_name());   
+        args: List(Str) = args.clone(temp());
+        args&.push("-x"); // don't check the file extension of source files that follow. 
+        args&.push("ir"); 
+        args&.push("-g"); 
+        args&.push(out&.s_name());
+        @println("%", args.items());
+        success := run_cmd_blocking(CLANG_PATH, args.items());
+        assert(success, "ICE: generated invalid llvm ir");
+        out.remove();
+    }
+}

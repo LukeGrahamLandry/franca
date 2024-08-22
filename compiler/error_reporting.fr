@@ -1,12 +1,14 @@
 :: enum(PlaceholderValue);
 fn log(self: *FatExpr, pool: *StringPool, out: *List(u8), depth: i64) void = {
-    if self.done {
-        set_colour(out, 0, 250, 0);
-    } else {
-        set_colour(out, 250, 0, 0);
+    @if(DO_TERMINAL_COLOURS) {
+        if self.done {
+            set_colour(out, 0, 250, 0);
+        } else {
+            set_colour(out, 250, 0, 0);
+        };
+        out.push_all("[");
+        unset_colour(out);
     };
-    out.push_all("[");
-    unset_colour(out);
     
     @match(self.expr&) {
         fn Call(f) => {
@@ -127,13 +129,15 @@ fn log(self: *FatExpr, pool: *StringPool, out: *List(u8), depth: i64) void = {
             @fmt(out, "TODO:print:%", self.expr&.tag());
         };
     };
-    if self.done {
-        set_colour(out, 0, 250, 0);
-    } else {
-        set_colour(out, 250, 0, 0);
+    @if(DO_TERMINAL_COLOURS) {
+        if self.done {
+            set_colour(out, 0, 250, 0);
+        } else {
+            set_colour(out, 250, 0, 0);
+        };
+        out.push_all("]");
+        unset_colour(out);
     };
-    out.push_all("]");
-    unset_colour(out);
 } 
 
 fn display(value: *Values, out: *List(u8)) void = {
@@ -154,16 +158,36 @@ fn log(self: *Func, pool: *StringPool, out: *List(u8), depth: i64) void = {
         a.log(pool, out, 0);
     };
     out.push_all(" = ");
-    
-    @if_let(self.body&)
-        fn Normal(body) => {
-            body.log(pool, out, depth);
-        };
-    
+    self.body&.log(pool, out, depth);
     out.push_all(")");
-    
 }
 
+fn log(self: *FuncImpl, pool: *StringPool, out: *List(u8), depth: i64) void = {
+    @match(self) {
+        fn Normal(body) => body.log(pool, out, depth);
+        fn Intrinsic(op) => {
+            @fmt(out, "Intrinsic:%", op);
+        }
+        fn ComptimeAddr(addr) => {
+            @fmt(out, "ComptimeAddr:%", addr);
+        }
+        fn Redirect(target) => {
+            @fmt(out, "Redirect:%", target);
+        }
+        fn DynamicImport(target) => {
+            @fmt(out, "DynamicImport:%", pool.get(target[]));
+        }
+        fn Merged(parts) => {
+            each parts { part | 
+                @fmt(out, "[ ");
+                part.log(pool, out, depth);
+                @fmt(out, "] ");
+            };
+        }
+        @default => ();
+    }
+    
+}
 fn log(self: *Annotation, pool: *StringPool, out: *List(u8), depth: i64) void = {
     out.push_all("#");
     out.push_all(pool.get(self.name));

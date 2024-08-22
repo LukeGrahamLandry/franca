@@ -27,9 +27,19 @@ OverloadOption :: @struct(
 DEBUG_SPAM_LOG :: false;
 //log_event :: println;
 fn log_event(fmt_args: FatExpr, compiler: FatExpr) FatExpr #macro = {
-    @{ 1 + 1; }
-    //compile_ast(compiler);
-    //println(fmt_args)
+    @if(ENABLE_LOGGING_CALLBACKS, @{
+        c := @[compiler];
+        has_driver_handler := !c.env.driver_vtable_ptr.is_null(); // TODO: garbage
+        if has_driver_handler {
+            vtable := ExportVTable.ptr_from_raw(c.env.driver_vtable_ptr);
+            if vtable.log_event { callback | 
+                legacy := c.stable_compiler_context();
+                msg := (@format(@[fmt_args]) temp()).items();
+                event: CompilerLogEvent = (Msg = msg);
+                callback(c.env.driver_vtable_user_data, legacy, event&);
+            };
+        };
+    }, @{ 1 + 1; })
 }
 
 fn compile_stmt(self: *SelfHosted, stmt: *FatStmt) Maybe(bool) = {
@@ -1365,6 +1375,7 @@ fn add_callee(self: *SelfHosted, fid: FuncId) bool = {
         };
         self.aarch64&.extend_blanks(fid);
         @log_event("added % calls %", current_f, fid) self;
+        record_function_call(c = self, caller = current_f, callee = fid);
     };
     if is_const_context {
         @log_event("skip adding callee for %", fid) self;
@@ -3074,7 +3085,6 @@ fn builtin_macro(self: *SelfHosted, builtin_name: Symbol) Result(Ty(Values, Type
         @case(Flag.UnknownType.ident()) => builtin_type(UnknownType);
         @case(Flag.compiler_debug_assert_eq_i64.ident()) => {
             my_assert_eq: rawptr : fn(a: i64, b: i64) i64 = {
-                @log_event("[my_assert_eq] % vs %", a, b) self;
                 assert_eq(a, b);
                 a
             };
