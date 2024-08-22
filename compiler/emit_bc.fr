@@ -1002,6 +1002,7 @@ fn emit_call(self: *EmitBc, result: *FnBody, f: *FatExpr, arg: *FatExpr, result_
             // TODO: audit: is this f_ty different from the one we just got from the expression type? -- Jul 8
             func := self.program[f_id]&; // TODO: fix index overload resolution -- Jul 8
             f_ty := func.finished_ty().unwrap(); // kinda HACK to fix unaligned store? 
+            original_f_id := f_id;
             f_id = self.program.follow_redirects(f_id);
 
             if(func.has_tag(.no_tail), => { can_tail = false; });
@@ -1016,8 +1017,19 @@ fn emit_call(self: *EmitBc, result: *FnBody, f: *FatExpr, arg: *FatExpr, result_
                         result.push(Ret1 = sig.ret1.unwrap());
                     };
                 } else {|
-                    if self.program.index(f_id).has_tag(.intrinsic) {|
-                        @println("direct call to % %!", self.program.pool.get(self.program[f_id].name), f_id.as_index());
+                    callee := self.program.index(f_id);
+                    if callee.has_tag(.intrinsic) {|
+                        @println("direct call to (intrinsic) % %!", self.program.pool.get(callee.name), f_id.as_index());
+                    };
+                    if callee.has_tag(.redirect) {|
+                        @println("direct call to (redirect) % %! %", self.program.pool.get(callee.name), f_id.as_index(), callee.get_flag(.EnsuredCompiled));
+                    };
+                    caller := self.program.index(result.func);
+                    if !caller.get_flag(.ComptimeOnly) && original_f_id == f_id {|
+                        // TODO: remove debug :SLOW
+                        if caller.callees.items().contains(f_id&).not().and(=> !caller.mutual_callees.items().contains(f_id&)) {|
+                            //@println("direct call to (non-callee) % %!", self.program.pool.get(callee.name), f_id.as_index());
+                        };
                     };
                     result.push(CallDirect = (sig = sig[], f = f_id, tail = tail));
                 };

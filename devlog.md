@@ -1,4 +1,4 @@
-## (Aug 21)
+## fixing aot on new sema (Aug 21)
 
 - resolve named args. mandelbrot works now. can't do a single named arg yet.
 - (old) problem after making neg #fold because i write fmt_hex for llvm before i had a shift_right_logical so i was using div and it only worked when the high bit was 0
@@ -28,7 +28,14 @@ but fixed a bunch and type errors are less scary than an incorrect callgraph.
 
 > failing 10 + 24
 
-## (Aug 20)
+now the problem is with redirects.
+i can make it better by if the target is special, handling its body right there and pulling forward the body if its an intrinsic.
+breaks the first case in `deduplicate_functions` test tho.
+I think things aren't always getting added as callees correctly?
+
+> failing 11 + 14
+
+## fixing overloading (Aug 20)
 
 - rust program with wasmtime and some libc shims to run most tests as wasm.
 

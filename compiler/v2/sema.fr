@@ -429,7 +429,7 @@ fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = 
                 
                 @check(self.compile_expr(expr, func.finished_ret.want())) return;
                 //@debug_assert(self.dispatch.enclosing_function.is_some() && self.dispatch.enclosing_function.unwrap() == fid, "lost enclosing");
-                self.dispatch.enclosing_function = old_func;
+                
                 if func.ret&.is(.Infer) {|
                     func.finished_ret = (Some = expr.ty);
                 } else {|
@@ -439,6 +439,7 @@ fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = 
                     };
                     @check(self.can_assign(wanted, expr.ty)) return;
                 };
+                self.dispatch.enclosing_function = old_func;
             }
             @default => return(@err("non special function must have body. (or ICE: double compiled function?)"));
         };
@@ -449,7 +450,7 @@ fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = 
     .Ok
 }
 
-fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = {
+fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
     @check(self.infer_return(fid)) return;
     func := self.get_function(fid);
     good := false;
@@ -545,6 +546,17 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = {
                 f_ty: FnType = (arg = payload.arg, ret = payload.ret, arity = args.len.trunc());
                 target := @check(self.resolve_by_type(payload.os, f_ty, func.loc)) return;
                 func.body = (Redirect = target);
+                
+                // TODO: i dont super understand why this is nessesary but it clearly is
+                //       i think if i handled redirects better this could go away. 
+                target_func := self.get_function(target);
+                if target_func.get_flag(.BodyIsSpecial) {|
+                    @check(self.emit_special_body(target)) return;
+                    // TODO: this breaks deduplicate_functions test somehow. 
+                    @if_let(target_func.body) fn Intrinsic(op) => {
+                        func.body = (Intrinsic = op);
+                    };
+                };
             };
             // TODO: remove all the different string based ones and have #asm("llvm") #asm("qbe") FuncImpl::AsmStr(Backend:Symbol, Source:Symbol)
             //       so you can have driver programs add new backends without modifying the core compiler. 
@@ -1341,7 +1353,7 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
 fn add_callee(self: *SelfHosted, fid: FuncId) bool = {
     is_const_context := true;
     if self.dispatch.enclosing_function { current_f |
-        if(current_f == fid, => return(false)); // TODO: will need to handle mutual recursion more genererally. 
+        if(current_f == fid, => return(false)); 
         is_const_context = false;
         new := self.get_function(fid);
         current := self.get_function(current_f);
@@ -1414,11 +1426,11 @@ fn emit_capturing_call(self: *SelfHosted, f: FuncId, expr_out: *FatExpr, request
         .map(fn(ty) => self.intern_type(Label = ty))
         .or(=> LabelId);
     
-    // TODO: mutual callees as well.
     // for inlined or things with const args, the body will already have been compiled, but the backend needs to see the whole callgraph.
     for func.callees { callee |
         self.add_callee(callee);
     };
+    @err_assert(func.mutual_callees.is_empty(), "TODO: you can't really refer to inlined things so how'd you make it recursive?") return;
 
     if(!func.body&.is(.Normal), => return(@err("'=>' function must have body expression.")));
     aliased_body := func.body.Normal&;
@@ -2210,6 +2222,7 @@ fn hoist_constants(self: *SelfHosted, body: []FatStmt) Maybe(void) #once = {
         @match(stmt.stmt&) {
             fn DeclFunc(func) => {
                 @debug_assert(func[].get_flag(.NotEvilUninit));
+                // TODO: aren't the `@check`s below a problem because if they suspend you're totally fucked cause the function's gone but you might not know its overload set or whatever? 
                 fid := self.add_function(func[][]);
                 stmt.stmt = .Noop;
                 func := self.get_function(fid);
@@ -2634,8 +2647,11 @@ fn coerce_const_expr(self: *SelfHosted, expr: *FatExpr, req: ResultType) Maybe(v
                 }
                 @default => ();
             };
-            //expr.expr.Value.coerced = true;
-            //expr.ty = req;
+            res := self.can_assign(want, found);
+            if res&.is(.Ok) {|
+                expr.ty = want;
+                return(.Ok);
+            };
             return(@err("TODO: coerce constant expected % but found %: % (might be an actual type error)", self.log_type(want), self.log_type(found), expr.log(self.pool)));
         };
     };

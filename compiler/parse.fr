@@ -118,7 +118,7 @@ fn parse_stmt_inner(self: *Parser, has_annotations: bool) Result(FatStmt, *Parse
             func := @try(self.parse_func(true)) return;
             (Ok = self.stmt((DeclFunc = self.box(func)), loc))
         }
-        fn Symbol(name) => (self.parse_decl_or_start_expr(name));
+        fn Symbol(name) => self.parse_decl_or_start_expr(name);
         fn Semicolon() => {
             self.pop();
             loc := self.last.span;
@@ -189,11 +189,11 @@ fn list_of_names_decl(self: *Parser, name: Symbol) Result(RsVec(FatExpr), *Parse
                 exprs&.push(e);
                 next := self.peek();
                 if !next&.is(.Colon) {|
-                    @try(self.eat(.Comma, "destructuring statment expected ':=' (TODO: allow type annotation)")) return; 
+                    @try(self.eat(.Comma, "destructuring statment expected ':=' or ',' (TODO: allow type annotation)")) return; 
                 };
             }
             fn Colon() => {
-                @try(self.eat(.Equals, "destructuring statment expected ':=' (TODO: allow type annotation)")) return; 
+                @try(self.eat(.Equals, "destructuring statment expected ':=' (TODO: allow type annotation. TODO: allow const)")) return; 
                 return(Ok = exprs.rs());
             }
             @default => @report_error("expected ident or ':' in destructuring") (return, self.last.span);
@@ -560,11 +560,22 @@ fn parse_infix(self: *Parser, prev: FatExpr, prec: Prec) ParseRes = {
     self.parse_infix(prev, prec) // TODO: tail
 }
 
-fn parse_squiggle(self: *Parser, prev: FatExpr, prec: Prec) ParseRes #once = {
+fn parse_squiggle(self: *Parser, prev: FatExpr, prec: Prec) ParseRes #once = {  
+    old_line := self.lex.line;
     self.pop();
+    new_line := self.lex.line;
     loc := self.last.span;
-    fn_def := @try(self.fn_def_signeture(loc, false)) return;
-    @try(self.eat(.Pipe, "trailing lambda")) return;
+    ::if(FnDef);
+    fn_def: FnDef = if new_line == old_line {|
+        fn_def := @try(self.fn_def_signeture(loc, false)) return;
+        @try(self.eat(.Pipe, "trailing lambda")) return;
+        fn_def
+    } else {|
+        // If the next token is on a new line, assume theres no pipe annotation. 
+        // this lets you do ifs that look normal, like `if foo {` instead of `if foo {|`
+        bindings := empty_binding().single(self.alloc).rs();
+        (name = .None, arg = (bindings = bindings, loc = loc), ret = (Infer = ()), tags = list(self.alloc), loc = loc)
+    };
     
     body := @try(self.parse_block_until_squiggle(false)) return;
     func := make_func(fn_def, (Some = body), true);
@@ -587,8 +598,9 @@ fn parse_squiggle(self: *Parser, prev: FatExpr, prec: Prec) ParseRes #once = {
         @default => ();
     };
     
-    // TODO: do i want allow extra after this??
-    self.parse_infix(prev, prec.with(.Suffix))
+    // TODO: do i want allow extra after this?? i dont think so. 
+    //self.parse_infix(prev, prec.with(.Suffix))
+    (Ok = prev)
 }
 
 ::if(ParseRes);
