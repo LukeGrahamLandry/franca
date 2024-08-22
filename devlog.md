@@ -22,6 +22,12 @@ adding :tagged_prims_hack to emit_relocatable_constant_body fixed a bunch. mega 
 
 > failing 9 + 32
 
+always fold functions created by imm_eval so you never add them as a callee to a runtime function.
+hard to think about and broke the `floats` test because of a now missing coerce_const?
+but fixed a bunch and type errors are less scary than an incorrect callgraph.
+
+> failing 10 + 24
+
 ## (Aug 20)
 
 - rust program with wasmtime and some libc shims to run most tests as wasm.

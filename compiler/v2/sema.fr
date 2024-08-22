@@ -432,6 +432,12 @@ fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = 
                 self.dispatch.enclosing_function = old_func;
                 if func.ret&.is(.Infer) {|
                     func.finished_ret = (Some = expr.ty);
+                } else {|
+                    wanted := @check(self.infer_return(fid)) return;
+                    if expr.is_const() {|
+                        @check(self.coerce_const_expr(expr, (Specific = wanted))) return;
+                    };
+                    @check(self.can_assign(wanted, expr.ty)) return;
                 };
             }
             @default => return(@err("non special function must have body. (or ICE: double compiled function?)"));
@@ -548,8 +554,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = {
                 // - tuple of 32-bit int literals -> aarch64 asm ops
                 // - anything else, comptime eval expecting Slice(u32) -> aarch64 asm ops
                 @debug_assert(func.body&.is(.Normal), "we already checked that #asm has body");
-                            
-                            
+                
                 asm := func.body.Normal&;
                 
                 each func.annotations { tag | 
@@ -1283,7 +1288,7 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
     };
     
     ret_ty := @check(self.infer_return(fid))    return;
-    is_const_context := self.add_callee(fid);
+    is_const_context := self.dispatch.enclosing_function.is_none();
     // TODO: its a bit of a hack to check is_const_context? 
     //       it fixes a problem where you try to compile too soon and then think you're already done even if you make a function for it later.
     expr.done = f_expr.done && arg_expr.done && !is_const_context;
@@ -1296,7 +1301,6 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
     if !f_expr.expr&.is(.Value) {|
         _ := @check(self.immediate_eval_expr(f_expr, f_expr.ty)) return;
     };
-    // !self.dispatch.enclosing_function.is_some()
     allow_fold := self.dispatch.enclosing_function.is_some() && {
         func := self.get_function(self.dispatch.enclosing_function.unwrap());
         !func.get_flag(.SyntheticImmEval)
@@ -1311,7 +1315,17 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
             if func.body&.is(.Normal) && func.body.Normal.expr&.is(.Value) {|
                 expr.set(func.body.Normal.expr.Value.bytes&.deep_clone(self.get_alloc()), ret_ty);
             };
-        }
+        };
+    };
+    
+    if !expr.expr&.is(.Value) {|
+        if func.get_flag(.ComptimeOnly) {|
+            if self.dispatch.enclosing_function { current_f |
+                outer := self.get_function(current_f);
+                outer.set_flag(.ComptimeOnly);
+            };
+        };
+        self.add_callee(fid);
     };
     
     if func.get_flag(.Once) {|
@@ -2257,7 +2271,10 @@ fn update_function_metadata(self: *SelfHosted, func: *Func, os: ?OverloadSet) Re
     each func.annotations { tag | 
         @switch(tag.name) {
             @case(Flag.fold.ident())     => func.set_flag(.TryConstantFold);
-            @case(Flag.macro.ident())    => func.set_flag(.Macro);
+            @case(Flag.macro.ident())    => {
+                func.set_flag(.Macro);
+                func.set_flag(.ComptimeOnly);
+            };
             @case(Flag.noinline.ident()) => func.set_flag(.NoInline);
             // TODO: generic+unsafe_noop_cast+cold are done in scope for old sema but i want to move them here. -- Jul 30
             @case(Flag.generic.ident())  => func.set_flag(.Generic);
@@ -2284,6 +2301,7 @@ fn update_function_metadata(self: *SelfHosted, func: *Func, os: ?OverloadSet) Re
             @case(Flag.comptime_addr.ident()) => {
                 @err_assert(func.body&.is(.Empty), "#comptime_addr conflicts with body expression") return;
                 func.set_flag(.BodyIsSpecial);
+                func.set_flag(.ComptimeOnly);
             };
             @case(Flag.intrinsic.ident()) => {
                 @err_assert(func.body&.is(.Empty), "#intrinsic conflicts with body expression") return;
@@ -2300,6 +2318,7 @@ fn update_function_metadata(self: *SelfHosted, func: *Func, os: ?OverloadSet) Re
             @case(Flag.ct.ident()) => {
                 // TODO: error on conflicting annotations. 
                 func.cc = (Some = .CCallRegCt);
+                func.set_flag(.ComptimeOnly);
             };
             @default => ();
         };
@@ -2482,10 +2501,8 @@ fn coerce_const_expr(self: *SelfHosted, expr: *FatExpr, req: ResultType) Maybe(v
     if req.specific() { want | 
         found := expr.ty;
         if found != want {|
-            if !expr.expr&.is(.Value) {|
-                return(@err("Type Error: tried to coerce non-value expr"));
-            };
-            @assert(!expr.expr.Value.coerced, "const mismatch. % vs % but already coerced", self.log_type(found), self.log_type(want));
+            // can't do this because it mightn ot be a value
+            //@assert(!expr.expr.Value.coerced, "const mismatch. % vs % but already coerced", self.log_type(found), self.log_type(want));
             // TODO: set coereced? 
             
             want_info := self.get_type(want);
@@ -2765,6 +2782,16 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
     fake_func&.set_flag(.ResolvedBody);
     fake_func&.set_flag(.ResolvedSign);
     fake_func&.set_flag(.SyntheticImmEval);
+    fake_func&.set_flag(.ComptimeOnly);
+    // Since we know this function has no args, we'll always fold it. 
+    // This makes sure that if we start analyzing the expression without noticing that its actually in const-context,
+    // we won't add a callee that becomes unnecessary when the function call gets reduced to an inlined value eventually. 
+    // This fixes a bunch of .ComptimeOnly callees that the AOT backends choke on.  -- Aug 21
+    // The SyntheticImmEval is used to prevent a loop where we try to fold by calling imm_eval on inner nested expressions? maybe?
+    // TODO: i cant quite understand why, but you need something like that even if you don't add this extra TryConstFold. 
+    // TODO: this introduces a ICE: Tried to call un-compiled function. for the test `floats`
+    //       happens at `assert_eq(5.neg(), 5.7.neg().int());` and only if neg is #fold
+    fake_func&.set_flag(.TryConstantFold);
     fake_func.finished_arg = (Some = void);
     fake_func.finished_ret = (Some = ret_ty);
     fake_func.cc = (Some = .CCallReg);    
