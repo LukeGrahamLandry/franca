@@ -31,6 +31,7 @@ fn log_event(fmt_args: FatExpr, compiler: FatExpr) FatExpr #macro = {
     //compile_ast(compiler);
     //println(fmt_args)
 }
+
 fn compile_stmt(self: *SelfHosted, stmt: *FatStmt) Maybe(bool) = {
     self.last_loc = stmt.loc;
     @match(stmt.stmt&) {
@@ -48,10 +49,10 @@ fn compile_stmt(self: *SelfHosted, stmt: *FatStmt) Maybe(bool) = {
             // TODO: or patterns in @match would be nice here. :lang
             tag := f.place.expr&.tag();
             // TODO: PrefixMacro is sketchy but makes []->.index work.
-            if tag.eq(.PrefixMacro).or(tag == .GetVar).or(tag == .FieldAccess).or(tag == .Deref).or(tag == .Block) {|
+            if tag.eq(.PrefixMacro).or(tag == .GetVar).or(tag == .FieldAccess).or(tag == .Deref).or(tag == .Block) {
                 @check(self.compile_place_expr(f.place&, .None, true)) return;
                 @check(self.compile_expr(f.value&, f.place.ty.want())) return;
-                if f.place.ty != f.value.ty {|
+                if f.place.ty != f.value.ty {
                     return(@err("tried to set % <- % (%)", self.log_type(f.place.ty), self.log_type(f.value.ty), f.value&.log(self.pool)));
                 };
                 // TODO: self.type_check_arg(f.place.ty, f.value.ty, "reassign var")?; /:type_check
@@ -67,13 +68,13 @@ fn compile_stmt(self: *SelfHosted, stmt: *FatStmt) Maybe(bool) = {
 fn decl_var_pattern(self: *SelfHosted, stmt: *FatStmt) Maybe(bool) #once = {
     @debug_assert(stmt.stmt&.is(.DeclVarPattern));
     bindings, value := (stmt.stmt.DeclVarPattern.binding.bindings&, stmt.stmt.DeclVarPattern.value&);
-    if value.is_raw_unit() {|
+    if value.is_raw_unit() {
         // TODO: typecheck the pattern! this was fine a long time ago when this node was only made by closures. 
         stmt.stmt = .Noop;
         return(Ok = true);
     };
     
-    if bindings.len == 1 {|
+    if bindings.len == 1 {
         b := bindings[0]&;
         if(b.kind == .Const, => return(@err("unreachable? destructure single arg must be closure but const args should already be handled")));
         if b.var() { name |
@@ -104,7 +105,7 @@ fn decl_var_pattern(self: *SelfHosted, stmt: *FatStmt) Maybe(bool) #once = {
     };
     
     @check(self.compile_expr(value, (Tuple = result_types.items()))) return; 
-    types := or self.tuple_types(value.ty) {|
+    types := or self.tuple_types(value.ty) {
         return(@err("destructure expected tuple type"))
     };
     if(types.len != bindings.len, => return(@err("destructuring arity mismatch expected % but found %", bindings.len, types.len)));
@@ -116,7 +117,7 @@ fn decl_var_pattern(self: *SelfHosted, stmt: *FatStmt) Maybe(bool) #once = {
             @assert(prev.is_none().or(=> prev.unwrap() == types[i]));
         };
         // An inlined closure might have had a polymorphic parameter, but emit_bc expects known types.
-        if b.ty&.is(.Infer) {|
+        if b.ty&.is(.Infer) {
             b.ty = (Finished = types[i]);
         };
     };
@@ -133,7 +134,7 @@ fn compile_place_expr(self: *SelfHosted, place: *FatExpr, requested: ResultType,
     @match(place.expr&) {
         fn Block(f) => {
             // TODO: the old version didn't have to do this... 
-            if f.body.is_empty() && f.ret_label.is_none() {|
+            if f.body.is_empty() && f.ret_label.is_none() {
                 place[] = f.result[]; // Not required but makes debugging easier cause there's less stuff.
                 return(self.compile_place_expr(place, requested, want_deref));
             };
@@ -151,7 +152,7 @@ fn compile_place_expr(self: *SelfHosted, place: *FatExpr, requested: ResultType,
 
             place[] = synthetic_ty((Addr = self.box(place[])), loc, ptr_ty);
             place.done = true;
-            if want_deref {|
+            if want_deref {
                 @check(self.deref_one(place)) return;
                 place.done = true;
             };
@@ -165,7 +166,7 @@ fn compile_place_expr(self: *SelfHosted, place: *FatExpr, requested: ResultType,
             // :AutoDeref
             {
                 raw   := self.raw_type(f.container.ty);
-                inner := or self.unptr_ty(raw) {|
+                inner := or self.unptr_ty(raw) {
                     return(@err("PlaceExpr of FieldAccess should be ptr"))
                 };
                 inner = self.raw_type(inner);
@@ -180,9 +181,9 @@ fn compile_place_expr(self: *SelfHosted, place: *FatExpr, requested: ResultType,
             field_ptr_ty := self.ptr_type(field_val_ty);
             @debug_assert(!f.container.expr&.is(.GetVar), "ICE: place expr can't be direct var access");
             e := self.box(f.container[]);
-            if bytes == 0 {|
+            if bytes == 0 {
                 place.expr = (Cast = e);
-            } else {|
+            } else {
                 place.expr = (PtrOffset = (
                     ptr = e,
                     bytes = bytes,
@@ -190,12 +191,12 @@ fn compile_place_expr(self: *SelfHosted, place: *FatExpr, requested: ResultType,
                 ));
             };
             place.done = done;
-            if want_deref {|
+            if want_deref {
                 place.ty = field_ptr_ty;
                 // Now we have the offset-ed ptr, add back the deref
                 @check(self.deref_one(place)) return;
                 place.done = done;
-            } else {|
+            } else {
                 place.ty = field_ptr_ty;
             };
         }
@@ -210,7 +211,7 @@ fn compile_place_expr(self: *SelfHosted, place: *FatExpr, requested: ResultType,
             return(self.compile_place_expr(place, requested, want_deref));
         }
         @default => {
-            if !place.ty.is_unknown() {|
+            if !place.ty.is_unknown() {
                 // TODO: pass in if we're currently trying to access a field so we can give a better error message if its on an int or something?
                 return(@err("Place expression of type % expected pointer dereference.\n%", self.log_type(place.ty), place.log(self.pool)));
             };
@@ -226,12 +227,12 @@ fn compile_deref_place(self: *SelfHosted, place: *FatExpr, requested: ResultType
     // When you see a !deref, treat the expression as a pointer value.
     req := requested.specific().map(fn(r) => self.ptr_type(r));
     @check(self.compile_expr(arg, req.want())) return;
-    if want_deref {|
-        place.ty = or self.unptr_ty(arg.ty) {|
+    if want_deref {
+        place.ty = or self.unptr_ty(arg.ty) {
             return(@err("tried to deref non-pointer"))
         };
         place.done = arg.done;
-    } else {|
+    } else {
         place[] = arg[];
     };
     .Ok
@@ -241,7 +242,7 @@ fn compile_deref_place(self: *SelfHosted, place: *FatExpr, requested: ResultType
 fn field_access_expr(self: *SelfHosted, container_ptr: *FatExpr, name: Symbol) Maybe(Ty(i64, Type)) #once = {
     container_ptr_ty := self.raw_type(container_ptr.ty);
     depth := self.ptr_depth(container_ptr_ty);
-    if depth != 1 {|
+    if depth != 1 {
         return(@err("index expr ptr must be one level of indirection. %", self.log_type(container_ptr_ty)));
     };
     container_ty := self.unptr_ty(container_ptr_ty).expect("ICE: we just checked its a pointer");
@@ -255,7 +256,7 @@ fn field_access_expr(self: *SelfHosted, container_ptr: *FatExpr, name: Symbol) M
         fn Struct(f) => {
             @debug_assert(f.layout_done);
             each f.fields { f | 
-                if f.name == name {|
+                if f.name == name {
                     return(Ok = (f.byte_offset, f.ty));
                 };
             };
@@ -263,7 +264,7 @@ fn field_access_expr(self: *SelfHosted, container_ptr: *FatExpr, name: Symbol) M
         }
         fn Tagged(f) => {
             each f.cases { f |
-                if f._0 == name {|
+                if f._0 == name {
                     return(Ok = (8, f._1));
                 };
             };
@@ -278,20 +279,20 @@ fn field_access_expr(self: *SelfHosted, container_ptr: *FatExpr, name: Symbol) M
 // TODO: have a different version of @check for something that can error but not yield? 
 fn deref_one(self: *SelfHosted, ptr: *FatExpr) Maybe(void) = {
     raw   := self.raw_type(ptr.ty);  // TODO: why are we going through enums...? -- Jul 30
-    inner := or self.unptr_ty(raw) {|
+    inner := or self.unptr_ty(raw) {
         return(@err("expected ptr for deref_one"))
     };
     
     @match(ptr.expr&) {
         fn Addr(arg) => {
             // this allows auto deref to work on let ptr vars.
-            if arg.expr&.is(.GetVar) {|
+            if arg.expr&.is(.GetVar) {
                 // raw var expr is not allowed, we always refer to variables through thier address.
                 ptr[] = synthetic_ty((Deref = self.box(ptr[])), ptr.loc, inner);
-            } else {|
+            } else {
                 // Avoid reduntant (whatever)&[].
                 ptr[] = arg[][];
-                if ptr.ty.is_unknown() {|
+                if ptr.ty.is_unknown() {
                     ptr.ty = inner; // TODO: this shouldn't happen
                 };
             };
@@ -316,11 +317,11 @@ fn decl_var(self: *SelfHosted, name: Var, ty: *LazyType, value: *FatExpr) Maybe(
     @check(self.compile_expr(value, want)) return;
     final_ty := value.ty;
     @debug_assert(!final_ty.is_unknown(), "if we didn't yield, we should know the type");
-    if no_type {|
+    if no_type {
         // Since there was no type annotation, we don't need a type check. Whatever we got is the type of this variable now. 
         ty[] = (Finished = final_ty);
         self.finish_layout_deep(final_ty).unwrap();
-    } else {|
+    } else {
         expected_ty := ty.unwrap();
         // TODO: :delay_layout
         //       Instead of doing this now, add it as an Action in the dispatch loop.
@@ -348,7 +349,7 @@ fn ensure_resolved_sign(self: *SelfHosted, fid: FuncId) Maybe(void) = {
     func := self.get_function(fid);
     if(func.get_flag(.ResolvedSign), => return(.Ok));
     res := self.resolve_sign(func);
-    if res&.is_err() {|
+    if res&.is_err() {
         return(Err = self.box(res.Err));
     };
     func.set_flag(.ResolvedSign);
@@ -360,7 +361,7 @@ fn ensure_resolved_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
     func := self.get_function(fid);
     if(func.get_flag(.ResolvedBody), => return(.Ok));
     res := self.resolve_body(func);
-    if res&.is_err() {|
+    if res&.is_err() {
         return(Err = self.box(res.Err));
     };
     func.set_flag(.ResolvedBody);
@@ -384,7 +385,7 @@ fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = 
     // TODO: alternativly, if i trusted myself, you could just say its fine when the arg is already there, 
     //       because surely we put it there ourselves last time around. 
     //       but for now i think this is a valuable sanity check that renumbering went well.  -- Jul 30
-    if !func.get_flag(.MadeVarsForRuntimeArgs) {|
+    if !func.get_flag(.MadeVarsForRuntimeArgs) {
         each func.arg.bindings { b | 
             // TODO: probably want to change this so you can do as much compiling as possible before expanding templates.
             @debug_assert(b.kind != .Const, "ICE: Tried to emit before binding const args.");
@@ -398,15 +399,15 @@ fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = 
         func.set_flag(.MadeVarsForRuntimeArgs);
     };
     
-    if func.get_flag(.BodyIsSpecial) {|
+    if func.get_flag(.BodyIsSpecial) {
         @check(self.emit_special_body(fid)) return;
-    } else {|
+    } else {
         @match(func.body&) {
             fn Normal(expr) => {
                 old_func := self.dispatch.enclosing_function;
                 self.dispatch.enclosing_function = (Some = fid);
                 
-                if !func.get_flag(.Generic) && !func.ret&.is(.Infer) {|
+                if !func.get_flag(.Generic) && !func.ret&.is(.Infer) {
                     @check(self.infer_return(fid)) return;
                 };
     
@@ -430,11 +431,11 @@ fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = 
                 @check(self.compile_expr(expr, func.finished_ret.want())) return;
                 //@debug_assert(self.dispatch.enclosing_function.is_some() && self.dispatch.enclosing_function.unwrap() == fid, "lost enclosing");
                 
-                if func.ret&.is(.Infer) {|
+                if func.ret&.is(.Infer) {
                     func.finished_ret = (Some = expr.ty);
-                } else {|
+                } else {
                     wanted := @check(self.infer_return(fid)) return;
-                    if expr.is_const() {|
+                    if expr.is_const() {
                         @check(self.coerce_const_expr(expr, (Specific = wanted))) return;
                     };
                     @check(self.can_assign(wanted, expr.ty)) return;
@@ -471,10 +472,10 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
     
                 libc := dlopen(s, .Lazy);
                 addr := libc.dlsym(self.pool.get_c_str(func.name));
-                if addr.is_null() {|
+                if addr.is_null() {
                     // TODO: warn? have different #import that means we expect not at comptime?
                     func.body = (DynamicImport = func.name);
-                } else {|
+                } else {
                     self.aarch64&.extend_blanks(fid);
                     self.aarch64.dispatch[fid.as_index()] = addr;
                     impls: List(FuncImpl) = list(2, self.get_alloc());
@@ -491,7 +492,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
                 };
     
                 has_driver_handler := !self.env.driver_vtable_ptr.is_null(); // TODO: garbage
-                if has_driver_handler {|
+                if has_driver_handler {
                     vtable := ExportVTable.ptr_from_raw(self.env.driver_vtable_ptr);
                     if vtable.resolve_comptime_import { callback | 
                         legacy := self.stable_compiler_context();
@@ -550,7 +551,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
                 // TODO: i dont super understand why this is nessesary but it clearly is
                 //       i think if i handled redirects better this could go away. 
                 target_func := self.get_function(target);
-                if target_func.get_flag(.BodyIsSpecial) {|
+                if target_func.get_flag(.BodyIsSpecial) {
                     @check(self.emit_special_body(target)) return;
                     // TODO: this breaks deduplicate_functions test somehow. 
                     @if_let(target_func.body) fn Intrinsic(op) => {
@@ -576,7 +577,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
                             // TODO: you can't just compile here because then trying to imm_eval hits a not read asm func i think because of ^ callees.
                             //       it recurses and has to emit other asm first but they don't get put in dispatch,
                             //       becuase they don't have a thing in the result stack to do callees first.
-                            ops: RsVec(u32) = if asm.expr&.is(.Tuple) {|
+                            ops: RsVec(u32) = if asm.expr&.is(.Tuple) {
                                 parts := asm.expr.Tuple&;
                                 ops: List(u32) = list(parts.len, self.get_alloc());
                                 u32_ty := self.intern_type(Int = (bit_count = 32, signed = false));
@@ -586,7 +587,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
                                     ops&.push(i);
                                 };
                                 ops.rs()
-                            } else {|
+                            } else {
                                 // TODO
                                 //let ty = self.type_of(asm)?;
                                 //if let Some(ty) = ty {
@@ -648,7 +649,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
 
 ::tagged(ResultType);
 fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(void) = {
-    if expr.done {|
+    if expr.done {
         assert(expr.ty != UnknownType, "done but unknown type");
         return(.Ok);
     };
@@ -664,9 +665,9 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
         }
         fn Value(f) => {
             if(expr.ty == UnknownType, => return(@err("ICE: Value expression must have known type")));
-            if !f.coerced {|
+            if !f.coerced {
                 @if_let(requested) fn Specific(ty) => {
-                    if expr.ty != ty {|
+                    if expr.ty != ty {
                         @check(self.coerce_const_expr(expr, requested)) return;
                     };
                 };
@@ -677,7 +678,7 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
             @check(self.compile_call(expr, requested)) return;
         }
         fn Block(f) => {
-            if !f.hoisted_constants {|
+            if !f.hoisted_constants {
                 @check(self.hoist_constants(f.body.items())) return;
                 f.hoisted_constants = true;
             };
@@ -693,14 +694,14 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
             // HACK. for when you inline something with an early return that ends in a never. :early_return_fallthrough_never ::block_never_unify_early_return_type
             // TODO: seperate out a `unify` operation and use it everywhere you update expr.ty? 
             //       Switch and If already have this so its starting to feel a bit dumb.  -- Aug 19
-            if f.result.ty.is_never() {|
+            if f.result.ty.is_never() {
                 if requested.specific() { ty |
                     expr.ty = ty;
                 };
             };
             
             expr.done = f.result.done && done;
-            if f.body.is_empty() && f.ret_label.is_none() {|
+            if f.body.is_empty() && f.ret_label.is_none() {
                 expr[] = f.result[]; // Not required but makes debugging easier cause there's less stuff.
             };
         }
@@ -708,12 +709,12 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
             requested_types := @try(self.tuple_types(requested, parts.len)) return;
             types: List(Type) = list(parts.len, temp()); 
             enumerate parts { i, expr | 
-                if !expr.done {|
+                if !expr.done {
                     @check(self.compile_expr(expr, requested_types[i])) return;
                 };
                 types&.push(expr.ty);
             };
-            if expr.ty.is_unknown() {|
+            if expr.ty.is_unknown() {
                 expr.ty = self.tuple_of(types.items());
                 self.finish_layout_deep(expr.ty);
             };  // TODO: else :type_check
@@ -757,7 +758,7 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
             expr.set(fid_value, FuncId); // :get_or_create_type
             func := self.get_function(fid);
             @try(self.update_function_metadata(func, .None)) return;
-            if func.ret&.is(.Infer) {|
+            if func.ret&.is(.Infer) {
                 // TODO: this change is sketch if we're just exploring to resolve an overload  -- Aug 5
                 @match(requested) {
                     fn Returning(t) => {
@@ -771,7 +772,7 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
                     @default => ();
                 }
             };
-            if !requested&.is(.None) {|
+            if !requested&.is(.None) {
                 @check(self.coerce_const_expr(expr, requested)) return;
             };
         }
@@ -806,7 +807,7 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
             @check(self.contextual_field(name[], expr, requested.Specific)) return;
         }
         fn Uninitialized() => {
-            if expr.ty.is_unknown() {|
+            if expr.ty.is_unknown() {
                 @err_assert(requested&.is(.Specific), "Uninitialized requires type hint") return;
                 expr.ty = requested.Specific;
             };
@@ -826,10 +827,10 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
             type := @check(self.immediate_eval_expr(f.type, Type)) return;
             type := Type.assume_cast(type&)[];
             @check(self.compile_expr(f.value, type.want())) return;
-            if f.value.ty != type {|
+            if f.value.ty != type {
                 expr.ty = type;
                 expr.expr = (Cast = f.value);
-            } else {|
+            } else {
                 expr[] = f.value[];
             };
         }
@@ -846,7 +847,7 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
             // TODO: this mostly can't happen anymore because you use the if function and params dont get forwarded like that. 
             //       should allow promoting things to constants. 
             // If its constant, don't even bother emitting the other branch
-            if f.cond.expr&.is(.Value) {|
+            if f.cond.expr&.is(.Value) {
                 cond := bool.assume_cast(f.cond.expr.Value.bytes&)[];
                 ::if(*FatExpr);
                 // Now we fully dont emit the branch
@@ -857,14 +858,14 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
             
             @check(self.compile_expr(f.if_true, requested)) return;
             true_ty := f.if_true.ty;
-            if requested&.is(.None) && !true_ty.is_never() {|
+            if requested&.is(.None) && !true_ty.is_never() {
                 // This is especially helpful for macros that expand to chained ifs (like @switch)
                 requested = (Specific = true_ty);
             };
             @check(self.compile_expr(f.if_false, requested)) return;
-            if true_ty.is_never() {|
+            if true_ty.is_never() {
                 true_ty = f.if_false.ty;
-            } else {|
+            } else {
                 @check(self.can_assign(true_ty, f.if_false.ty)) return;
             };
             expr.ty = true_ty;
@@ -878,7 +879,7 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
                     fn Returning(_) => false;
                     @default => true;
                 };
-                if dont_like_this_type && !new.is_never() {|
+                if dont_like_this_type && !new.is_never() {
                     expect[] = (Specific = new);
                 }
             };
@@ -939,7 +940,7 @@ fn compile_quote(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe
     // note: do this before fucking with the expr because it will yield the first time!
     @check(self.infer_arguments(unquote_placeholders)) return;
     @check(self.infer_return(unquote_placeholders)) return;
-    if self.aarch64&.get_fn(unquote_placeholders).is_none() {|
+    if self.aarch64&.get_fn(unquote_placeholders).is_none() {
         return(Suspend = self.wait_for(Jit = unquote_placeholders));
     };
     
@@ -953,7 +954,7 @@ fn compile_quote(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe
     expr.set(value, expr_ty);
     @log_event("quote with % placeholders", walk.placeholders.len) self;
         
-    if !walk.placeholders.is_empty() {|
+    if !walk.placeholders.is_empty() {
         walk.placeholders&.push(expr[]);
         arg: FatExpr = (expr = (Tuple = walk.placeholders.rs()), loc = expr.loc, ty = UnknownType, done = false);
         arg := self.box(arg);
@@ -983,7 +984,7 @@ fn compile_fn_ptr(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
     // Note: else is not `Suspend = self.wait_for(Jit = fid)` because of cycles, we defer to the backend to deal with finializing it. 
     //       a better system would be to generate a shim right now so we'd always have an address? 
     if self.aarch64&.get_fn(fid) { ptr |
-        if !func.get_flag(.TookPointerValue) {|
+        if !func.get_flag(.TookPointerValue) {
             // We already compiled the function but didn't know we'd need to remember its address. (ie. #test fn large_struct_ret_return).
             self.created_jit_fn_ptr_value(fid, ptr.int_from_rawptr())
         };
@@ -1014,16 +1015,16 @@ fn construct_struct_literal(self: *SelfHosted, expr: *FatExpr, requested: Result
         fn Struct(f) => {
             done := true;
             each bindings { b | 
-                name := or b.ident() {|
+                name := or b.ident() {
                     return(@err("struct literal requires field names"))
                 };
                 // TODO: could guess that they did them in order if i cared about not looping twice.
                 miscompilation_if_you_inline_this := f.fields&.position(fn(f) => f.name == name);
-                field := or miscompilation_if_you_inline_this {|
+                field := or miscompilation_if_you_inline_this {
                     return(@err("Tried to assign unknown field %", self.pool.get(name)))
                 };
                 field := f.fields[field]&;
-                value := or b.default&.as_ref() {|
+                value := or b.default&.as_ref() {
                     return(@err("struct literal requires field value (use '=' not ':')"))
                 };
                 @check(self.compile_expr(value, (Specific = field.ty))) return;
@@ -1034,7 +1035,7 @@ fn construct_struct_literal(self: *SelfHosted, expr: *FatExpr, requested: Result
 
             // TODO: If they're missing some, check for default values.
             runtime_fields := f.fields.len - f.const_field_count.zext();
-            if runtime_fields != bindings.len {|
+            if runtime_fields != bindings.len {
                 enumerate f.fields { i, field | 
                     continue :: local_return;
                     if(field.kind == .Const, => continue());
@@ -1069,11 +1070,11 @@ fn construct_struct_literal(self: *SelfHosted, expr: *FatExpr, requested: Result
         fn Tagged(f) => {
             @err_assert(bindings.len == 1, "% is an enum, value should have one active varient not %", self.log_type(requested), bindings.len) return;
             b := bindings.index(0);
-            name := or b.ident() {|
+            name := or b.ident() {
                 return(@err("struct literal requires field names"))
             };
             each f.cases& { f |
-                if f._0 == name {|
+                if f._0 == name {
                     value := @unwrap(b.default&.as_ref(), "struct literal needs value") return;
                     @check(self.compile_expr(value, (Specific = f._1))) return;
                     @err_assert(value.ty == f._1, "TODO: better type checking") return;
@@ -1092,7 +1093,7 @@ fn contextual_field(self: *SelfHosted, name: Symbol, expr_out: *FatExpr, type: T
     @match(self.get_type(type)) {
         fn Enum(f) => {
             each f.fields { f |
-                if f._0 == name {|
+                if f._0 == name {
                     value := f._1&.deep_clone(self.get_alloc());
                     expr_out.set(value, type);
                     return(.Ok);
@@ -1102,7 +1103,7 @@ fn contextual_field(self: *SelfHosted, name: Symbol, expr_out: *FatExpr, type: T
         }
         fn Struct(f) => {
             enumerate f.fields { i, f | 
-                if f.name == name {|
+                if f.name == name {
                     @err_assert(f.kind == .Const, "struct contextual field must be constant. %", self.pool.get(f.name)) return;
                     default := @unwrap(f.default, "ICE: const field must have value") return;
                     value, ty := @check(self.find_const(default, f.ty.want())) return;
@@ -1115,7 +1116,7 @@ fn contextual_field(self: *SelfHosted, name: Symbol, expr_out: *FatExpr, type: T
         }
         fn Tagged(f) => {
             enumerate f.cases { i, f | 
-                if f._0 == name {|
+                if f._0 == name {
                     @err_assert(f._1 == void, 
                         "contextual field % of tagged union must be unit found %",
                         self.pool.get(name), self.log_type(f._1)
@@ -1243,19 +1244,19 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
         func = self.get_function(fid);
         // Since we may have just made a new function, make sure we know its types,
         // and then sanity check that our types still match. 
-        if arg_expr.expr&.is(.Tuple) {|
+        if arg_expr.expr&.is(.Tuple) {
             arg_expr.ty = UnknownType;
             arg_expr.done = false;
         };
         arg_ty = @check(self.infer_arguments(fid)) return;
         @check(self.compile_expr(arg_expr, arg_ty.want())) return;
         // It's probably an ICE if this fails on something non-#generic. 
-        if arg_ty != arg_expr.ty {|
+        if arg_ty != arg_expr.ty {
             return(@err("arg type mismatch after removing const args"));
         };
     };
     
-    if func.get_flag(.UnsafeNoopCast) {|
+    if func.get_flag(.UnsafeNoopCast) {
         @check(self.compile_expr(arg_expr, arg_ty.want())) return;
         //@check(self.can_assign(arg_ty, arg_expr.ty)) return; TODO: type check
         @check(self.infer_return(fid)) return;
@@ -1274,8 +1275,8 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
     deny_inline := func.get_flag(.NoInline);
     if(will_inline && deny_inline, => return(@err("must inline a function marked #noinline")));
     
-    if will_inline {|
-        if capturing {|
+    if will_inline {
+        if capturing {
             // We want to allow for polymorphic arguments, but its better if we can infer the annotated ones before duplicating.
             // currently this is just an optimisation.  
             @check(self.infer_arguments_partial(fid)) return;
@@ -1284,7 +1285,7 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
         // If we're just inlining for #inline, compile first so some work on the ast is only done once.
         // note: compile() checks if its ::Inline before actually generating asm so it doesn't waste its time.
         // if its a '=>' function, we can't compile it out of context, and same if it has a const arg of a '=>' function. 
-        if !capturing && !func.get_flag(.EnsuredCompiled) {|
+        if !capturing && !func.get_flag(.EnsuredCompiled) {
             self.dispatch.function_in_progress&.set(fid.as_index());
             return(Suspend = self.wait_for(CompileBody = fid));
         };
@@ -1295,7 +1296,7 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
     
     arg_ty = @check(self.infer_arguments(fid)) return;
     @check(self.compile_expr(arg_expr, (Specific = arg_ty))) return;
-    if arg_ty != arg_expr.ty {|
+    if arg_ty != arg_expr.ty {
         return(@err("arg type mismatch. TODO: better type checking\n- expected: %\n- found: %", self.log_type(arg_ty), self.log_type(arg_expr.ty)));
     };
     
@@ -1310,28 +1311,28 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
         f_expr.ty = self.intern_type(Fn = (arg = arg_ty, ret = ret_ty, arity = func.arg.bindings.len.trunc()));
     };
     
-    if !f_expr.expr&.is(.Value) {|
+    if !f_expr.expr&.is(.Value) {
         _ := @check(self.immediate_eval_expr(f_expr, f_expr.ty)) return;
     };
     allow_fold := self.dispatch.enclosing_function.is_some() && {
         func := self.get_function(self.dispatch.enclosing_function.unwrap());
         !func.get_flag(.SyntheticImmEval)
     };
-    if func.get_flag(.TryConstantFold) && allow_fold && arg_expr.is_const() {|
+    if func.get_flag(.TryConstantFold) && allow_fold && arg_expr.is_const() {
         @log_event("TryConstantFold %", expr.log(self.pool)) self;
         value := @check(self.immediate_eval_expr(expr, ret_ty)) return;
         expr.set(value, ret_ty); // TODO: redundant?
-    } else {|
+    } else {
         // this fixes functions with all const args the reduce to just a value emitting useless calls to like get the number 65 or whatever if you do ascii("A"). 
-        if !deny_inline && arg_expr.is_raw_unit() {|
-            if func.body&.is(.Normal) && func.body.Normal.expr&.is(.Value) {|
+        if !deny_inline && arg_expr.is_raw_unit() {
+            if func.body&.is(.Normal) && func.body.Normal.expr&.is(.Value) {
                 expr.set(func.body.Normal.expr.Value.bytes&.deep_clone(self.get_alloc()), ret_ty);
             };
         };
     };
     
-    if !expr.expr&.is(.Value) {|
-        if func.get_flag(.ComptimeOnly) {|
+    if !expr.expr&.is(.Value) {
+        if func.get_flag(.ComptimeOnly) {
             if self.dispatch.enclosing_function { current_f |
                 outer := self.get_function(current_f);
                 outer.set_flag(.ComptimeOnly);
@@ -1340,7 +1341,7 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
         self.add_callee(fid);
     };
     
-    if func.get_flag(.Once) {|
+    if func.get_flag(.Once) {
         // TODO: better error message. should show the previous usage. 
         if(func.get_flag(.OnceConsumed), => return(@err("tried to call once function again")));
         func.set_flag(.OnceConsumed);
@@ -1357,22 +1358,22 @@ fn add_callee(self: *SelfHosted, fid: FuncId) bool = {
         is_const_context = false;
         new := self.get_function(fid);
         current := self.get_function(current_f);
-        if new.callees.items().contains(current_f&) {|
+        if new.callees.items().contains(current_f&) {
             current.mutual_callees&.add_unique(fid, self.get_alloc());
-        } else {|
+        } else {
             current.callees&.add_unique(fid, self.get_alloc());
         };
         self.aarch64&.extend_blanks(fid);
         @log_event("added % calls %", current_f, fid) self;
     };
-    if is_const_context {|
+    if is_const_context {
         @log_event("skip adding callee for %", fid) self;
     };
     is_const_context
 }
 
 fn quick_guess_type(self: *SelfHosted, expr: *FatExpr) ?Type = {
-    if !expr.ty.is_unknown() {|
+    if !expr.ty.is_unknown() {
         return(Some = expr.ty);
     };
     @match(expr.expr&) {
@@ -1396,18 +1397,18 @@ fn emit_capturing_call(self: *SelfHosted, f: FuncId, expr_out: *FatExpr, request
     
     // This is complicated to allow `fn() => .a` to stay polymorphic and have different inferred types at different callsites. 
     // Maybe a more robust version of this would be treating the result type like a const arg and duplicating the function? -- Aug 2
-    ret_ty := or_else func.finished_ret {|
-        if func.ret&.is(.Infer) {|
-            if requested&.is(.Specific) {|
+    ret_ty := or_else func.finished_ret {
+        if func.ret&.is(.Infer) {
+            if requested&.is(.Specific) {
                 (Some = requested.Specific)
-            } else {|
+            } else {
                 body := func.body.Normal&;
                 known := self.quick_guess_type(body);
                 known
             }
-        } else {|
+        } else {
             known := @check(self.infer_return(f)) return;
-            //if !requested&.is(.Specific) {|
+            //if !requested&.is(.Specific) {
             //    requested = (Specific = known);
             //};
             (Some = known)
@@ -1415,7 +1416,7 @@ fn emit_capturing_call(self: *SelfHosted, f: FuncId, expr_out: *FatExpr, request
     };
     // TODO: does this ever help?
     //       no but it sure hurts... why?
-    //if !requested&.is(.Specific) {|
+    //if !requested&.is(.Specific) {
     //    if ret_ty { ret_ty |
     //        //@println("I think we want % for %", self.log_type(ret_ty), func.log(self.pool));
     //        requested = (Specific = ret_ty);
@@ -1443,23 +1444,23 @@ fn emit_capturing_call(self: *SelfHosted, f: FuncId, expr_out: *FatExpr, request
     ret_label: LabelId = from_index(self.dispatch.return_labels.len);
     self.dispatch.return_labels&.push(f);
     
-    owned_body: FatExpr = if func.get_flag(.Once) {|
+    owned_body: FatExpr = if func.get_flag(.Once) {
         // TODO: better error message if they try to call it again. 
         // TODO: decide what #once with const args should mean. 
         temp := aliased_body[];
         aliased_body.expr = (Poison = .OnceUsed);
         temp
-    } else {|
+    } else {
         aliased_body.deep_clone(self.get_alloc())
     };
     loc := arg_expr.loc;
     // the second case would be sufficient for correctness but this is so common (if(_,!,!), loop(!), etc) that it makes me less sad. 
-    if arg_expr.is_raw_unit() {|
+    if arg_expr.is_raw_unit() {
         // TODO: if !may_have_early_return, should be able to just inline the value but it doesnt work!
         //       similarly i cant have ret_label:None so im clearly wrong. its `not callable` in overloading.rs. trying to call the cond of an if??
         //       -- Jun 16
         expr_out.expr = (Block = (body = empty(), result = self.box(owned_body), ret_label = (Some = ret_label), hoisted_constants = false));
-    } else {|
+    } else {
         stmts: List(FatStmt) = list(1, self.get_alloc());
         arg_stmt: Stmt = (DeclVarPattern = (binding = pattern, value = arg_expr[]));
         stmts&.push(stmt = arg_stmt, annotations = empty(), loc = loc);
@@ -1470,7 +1471,7 @@ fn emit_capturing_call(self: *SelfHosted, f: FuncId, expr_out: *FatExpr, request
         expr_out.ty = ret_ty;
     };
     
-    if may_have_early_return {|
+    if may_have_early_return {
         // Note: not renumbering on the function. didn't need to clone it.
         self.renumber_expr(expr_out, (Some = (old_ret_var, new_ret_var)));
         value := self.to_values(LabelId, ret_label);
@@ -1488,13 +1489,13 @@ fn emit_capturing_call(self: *SelfHosted, f: FuncId, expr_out: *FatExpr, request
 fn const_args_key(self: *SelfHosted, original_f: FuncId, arg_expr: *FatExpr) Maybe(Values) #once = {
     func := self[original_f]&;
     ::if(Maybe(Values));
-    if func.arg.bindings.len == 1 {|
+    if func.arg.bindings.len == 1 {
         @check(self.compile_expr(arg_expr, func.finished_arg.want())) return;
         value := @check(self.immediate_eval_expr(arg_expr, arg_expr.ty)) return;
         (Ok = value)
-    } else {|
+    } else {
         check_len :: fn(len: i64) => {
-            if func.arg.bindings.len != len {|
+            if func.arg.bindings.len != len {
                 return(@err( "TODO: non-trivial pattern matching for call to %", self.pool.get(func.name)));
             };
         };
@@ -1530,7 +1531,7 @@ fn const_args_key(self: *SelfHosted, original_f: FuncId, arg_expr: *FatExpr) May
         enumerate func.arg.bindings { i, binding |
             continue :: local_return;
             if(binding.kind != .Const, => continue());
-            arg_ty := or binding.ty&.ty() {|
+            arg_ty := or binding.ty&.ty() {
                 // TODO: this isn't really what you want. 
                 //       the problem is you want to make the key before duplicating the function and binding const args,
                 //       so its faster after the first instantiation, but to do that you need to compile the const args, 
@@ -1553,7 +1554,7 @@ fn const_args_key(self: *SelfHosted, original_f: FuncId, arg_expr: *FatExpr) May
 fn aligned_append_value(self: *SelfHosted, all_values: *List(u8), new_value: Values, arg_ty: Type) void = {
     alignment: i64 = self.get_info(arg_ty)[].align_bytes.zext();
     extra := all_values.len.mod(alignment);
-    if extra != 0 {|
+    if extra != 0 {
         padding := alignment - extra;
         range(0, padding) { _ |
             all_values.push(0);
@@ -1565,9 +1566,9 @@ fn aligned_append_value(self: *SelfHosted, all_values: *List(u8), new_value: Val
 
 fn remove_const_args(self: *SelfHosted, original_f: FuncId, arg_expr: *FatExpr) Maybe(void) = {
     func := self.get_function(original_f);
-    if func.arg.bindings.len == 1 {|
+    if func.arg.bindings.len == 1 {
         arg_expr.set(unit_value, void);
-    } else {|
+    } else {
         if(!arg_expr.expr&.is(.Tuple), => return(@err("TODO: pattern match on non-tuple")));
         arg_exprs := arg_expr.expr.Tuple&;
         // We need to suspend out before removing anything...
@@ -1579,19 +1580,19 @@ fn remove_const_args(self: *SelfHosted, original_f: FuncId, arg_expr: *FatExpr) 
         };
         removed := 0;
         enumerate func.arg.bindings { i, binding | 
-            if binding.kind == .Const {|
+            if binding.kind == .Const {
                 // TODO: this would be better if i was iterating backwards
                 arg_exprs.ordered_remove(i - removed);
                 removed += 1; // TODO: this sucks
             };
         };
-        if arg_exprs.is_empty() {|
+        if arg_exprs.is_empty() {
             // Note: this started being required when I added fn while.
             arg_expr.set(unit_value, void);
-        } else {|
-            if arg_exprs.len() == 1 {|
+        } else {
+            if arg_exprs.len() == 1 {
                 arg_expr[] = arg_exprs[0];
-            } else {|
+            } else {
                 arg_expr.ty = UnknownType;
                 arg_expr.done = false;
             };
@@ -1610,11 +1611,11 @@ fn curry_const_args(self: *SelfHosted, original_f: FuncId, f_expr: *FatExpr, arg
     if self.dispatch.const_bound_memo&.get(key&) { new_f |
         @log_event("reuse baked const args % -> % (%)", original_f, new_f, key._1&) self;
         func := self.get_function(new_f);
-        if func.get_flag(.AnyConstArgs) {|
+        if func.get_flag(.AnyConstArgs) {
             original := self.get_function(original_f);
-            if func.arg.bindings.len == original.arg.bindings.len {|
+            if func.arg.bindings.len == original.arg.bindings.len {
                 return(self.curry_const_args_inner(original_f, new_f, f_expr, arg_expr, 0));
-            } else {|
+            } else {
                 removed_count := original.arg.bindings.len - func.arg.bindings.len;
                 @debug_assert(removed_count > 0);
                 return(self.curry_const_args_inner(original_f, new_f, f_expr, arg_expr, removed_count));
@@ -1655,15 +1656,15 @@ fn curry_const_args_inner(self: *SelfHosted, original_f: FuncId, new_fid: FuncId
     old_func := self.get_function(original_f);
     original_arg_count := old_func.arg.bindings.len();
     ::if(Maybe(FuncId));
-    if original_arg_count == 1 {|
+    if original_arg_count == 1 {
         assert(initial_removed_count == 0, "TODO: removed_count single");
         binding := func.arg.bindings[0]&;
         @debug_assert_eq(binding.kind, .Const);
-        name := or binding.var() {|
+        name := or binding.var() {
             return(@err("arg needs name (unreachable?)"))
         };
         // TODO: if you yield here, you spam clone the function. 
-        arg_type := or @check(self.infer_type(binding.ty&)) return {|
+        arg_type := or @check(self.infer_type(binding.ty&)) return {
             @err_assert(func.get_flag(.AllowRtCapture), "only closure may have polymorphic args") return;
             @check(self.compile_expr(arg_expr, .None)) return;
             // It was .Infer, save what we learned for when we try to call get_type_for_arg. 
@@ -1681,15 +1682,15 @@ fn curry_const_args_inner(self: *SelfHosted, original_f: FuncId, new_fid: FuncId
         func.unset_flag(.AnyConstArgs);
         func.unset_flag(.Generic);
         (Ok = new_fid)
-    } else {|
+    } else {
         if(!arg_expr.expr&.is(.Tuple), => return(@err("TODO: pattern match on non-tuple")));
         removed_count := 0;
         range(0, original_arg_count) { i |
             continue :: local_return;
             
             b := func.arg.bindings[i - removed_count]&;
-            if removed_count < initial_removed_count {|
-                if b.kind == .Const {|
+            if removed_count < initial_removed_count {
+                if b.kind == .Const {
                     removed_count += 1;
                 };
                 continue();
@@ -1698,8 +1699,8 @@ fn curry_const_args_inner(self: *SelfHosted, original_f: FuncId, new_fid: FuncId
             
             @log_event("%: check %/%", i, i-removed_count, original_arg_count) self;
             arg_expr := arg_expr.expr.Tuple[i]&;
-            if b.kind != .Const {|
-                if b.ty&.is(.Infer) {|
+            if b.kind != .Const {
+                if b.ty&.is(.Infer) {
                     // No correctness reason for this requirement but it seems fair to me. -- Aug 2
                     self.last_loc = arg_expr.loc;
                     @err_assert(func.get_flag(.AllowRtCapture), "only closure may have polymorphic args %", func.log(self.pool)) return;
@@ -1708,7 +1709,7 @@ fn curry_const_args_inner(self: *SelfHosted, original_f: FuncId, new_fid: FuncId
                 };
                 continue();
             };
-            name := or b.var() {|
+            name := or b.var() {
                 return(@err("arg needs name (unreachable?)"))
             };
             @log_event("bake arg %: %", i, name&.log(self.pool)) self;
@@ -1718,7 +1719,7 @@ fn curry_const_args_inner(self: *SelfHosted, original_f: FuncId, new_fid: FuncId
             // but once we're binding an argument, we need to be able to get its type. 
             // (TODO: closures are allowed to infer so that's not even true in the long term?)
             xx := @check(self.infer_type(b.ty&)) return;
-            arg_type := or xx {|
+            arg_type := or xx {
                 self.last_loc = func.loc;
                 @err_assert(func.get_flag(.AllowRtCapture), "only closure may have polymorphic args") return;
                 @check(self.compile_expr(arg_expr, .None)) return;
@@ -1762,7 +1763,7 @@ fn bind_const_arg(self: *SelfHosted, o_f: FuncId, arg_name: Var, arg_value: Valu
 
     is_function := !(!self.get_type(arg_ty).is(.Fn) && arg_ty != FuncId);
     // TODO: not sure if i actually need this but it seems like i should.
-    if is_function {|
+    if is_function {
         @err_assert(!func.get_flag(.NoInline), "functions with constant lambda arguments are always inlined") return;
         arg_func := FuncId.assume_cast(arg_value&)[];
         // :ChainedCaptures
@@ -1776,7 +1777,7 @@ fn bind_const_arg(self: *SelfHosted, o_f: FuncId, arg_name: Var, arg_value: Valu
         //      f(=> .a);  // declaration site doesn't give a hint
         @if_let(self.get_type(arg_ty)) fn Fn(f_ty) => {
             arg_func := self.get_function(arg_func);
-            if arg_func.ret&.is(.Infer) {|
+            if arg_func.ret&.is(.Infer) {
                 arg_func.ret = (Finished = f_ty.ret);
                 arg_func.finished_ret = (Some = f_ty.ret);
             };
@@ -1796,8 +1797,8 @@ fn bind_const_arg(self: *SelfHosted, o_f: FuncId, arg_name: Var, arg_value: Valu
 fn get_type_for_arg(self: *SelfHosted, arg: *Pattern, arg_name: Var) Maybe(Type) #once = {
     each arg.bindings { arg | 
         if arg.var() { name | 
-            if name == arg_name {|
-                ty := or @check(self.infer_type(arg.ty&)) return {|
+            if name == arg_name {
+                ty := or @check(self.infer_type(arg.ty&)) return {
                     return(@err("called get_type_for_arg on .Infer-ed arg type. expected type annotation."))
                 };
                 return(Ok = ty);
@@ -1825,7 +1826,7 @@ fn infer_type(self: *SelfHosted, b: *LazyType) Maybe(?Type) = {
 fn infer_type(self: *SelfHosted, bindings: *Pattern) Maybe([]Type) = {
     types: List(Type) = list(bindings.bindings.len, temp());
     each bindings.bindings { b |
-        ty := or @check(self.infer_type(b.ty&)) return {|
+        ty := or @check(self.infer_type(b.ty&)) return {
             // TODO: really thats not what you want for closures tho... 
             return(@err("function arguments must have type annotation (cannot be inferred)"))
         };
@@ -1871,7 +1872,7 @@ fn infer_arguments_partial(self: *SelfHosted, fid: FuncId) Maybe(ResultType) = {
             }
         };
     };
-    if all_known {|
+    if all_known {
         ty := @check(self.infer_arguments(fid)) return;
         return(Ok = (Specific = ty));
     };
@@ -1883,7 +1884,7 @@ fn infer_return(self: *SelfHosted, fid: FuncId) Maybe(Type) = {
     if(func.finished_ret, fn(ty) => return(Ok = ty));
     @check(self.ensure_resolved_sign(fid)) return;
     
-    ty := or @check(self.infer_type(func.ret&)) return {|
+    ty := or @check(self.infer_type(func.ret&)) return {
         // Infer is a valid return type. To deal with that, we just compile the body, and that will set the finished_ret for us. 
         self.dispatch.function_in_progress&.set(fid.as_index());
         return(Suspend = self.wait_for(CompileBody = fid))
@@ -1938,7 +1939,7 @@ fn adjust_named_arguments(self: *SelfHosted, fid: FuncId, arg_expr: *FatExpr) Re
     @if_let(arg_expr.expr&) fn StructLiteralP(f) => {
         func := self.get_function(fid);
         // If there's one argument, they must be passing a struct, we don't care about that here.
-        if func.arg.bindings.len == 1 && f.bindings.len != 1 {|
+        if func.arg.bindings.len == 1 && f.bindings.len != 1 {
             return(.Ok);
         };
         args: List(FatExpr) = list(func.arg.bindings.len, self.get_alloc());
@@ -1947,7 +1948,7 @@ fn adjust_named_arguments(self: *SelfHosted, fid: FuncId, arg_expr: *FatExpr) Re
             want_name := @unwrap(want.ident(), "function param must have name") return;
             each f.bindings { found | 
                 found_name := @unwrap(found.ident(), "TODO: mixed named and un-named args are not supported yet") return;
-                if found_name == want_name {|
+                if found_name == want_name {
                     value := @unwrap(found.default, "use '=' not ':' for named arg") return;
                     @err_assert(args.len == i, "TODO: out of order named args are not supported yet") return;
                     args&.push(value);
@@ -1970,7 +1971,7 @@ fn adjust_named_arguments(self: *SelfHosted, fid: FuncId, arg_expr: *FatExpr) Re
 fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret: ResultType, i: OverloadSet) Maybe(FuncId) = {
     self.last_loc = arg_expr.loc;
     want_arity := self.arity(arg_expr);
-    if want_arity == 1 {|
+    if want_arity == 1 {
         // There's no way we can get a hint from partial args (since theres only one), so yield early if needed.
         // However, you want `safety_check_enabled(.Bounds)` to work as long as its unambigous,
         // so we don't just compile_expr(arg_expr, .None) here
@@ -1984,14 +1985,14 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
         continue :: local_return;
         @if_let(requested_ret) fn Specific(want) => {
             if opt.ret { have | 
-                if self.can_assign(want, have).is_err() {|
+                if self.can_assign(want, have).is_err() {
                     continue();
                 };
             };
         };
         
-        if opt.args.len != want_arity {|
-            if !arg_expr.expr&.is(.StructLiteralP) {|
+        if opt.args.len != want_arity {
+            if !arg_expr.expr&.is(.StructLiteralP) {
                 continue();
             };
             // Maybe they're trying to pass named arguments. 
@@ -2008,7 +2009,7 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
                 want_name := want_b.ident().or(=> continue()); // idk if this ever happens but it sure can't be named argument
                 each have_parts { have_b |
                     have_name := have_b.ident().or(=> continue()); // idk if this ever happens but it sure can't be named argument
-                    if want_name == have_name {|
+                    if want_name == have_name {
                         next();
                     };
                 };
@@ -2020,7 +2021,7 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
     };
     
     // TODO: but what if there are more overloads coming later? 
-    if interesting.len == 1 {|
+    if interesting.len == 1 {
         @log_event("chose overload %", interesting[0].func) self;
         func := self.get_function(interesting[0].func);
         @if(DEBUG_SPAM_LOG) self.codemap.show_error_line(func.loc);
@@ -2035,7 +2036,7 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
     each interesting& { opt | 
         continue :: local_return;
         func := self.get_function(opt.func);           
-        if !func.get_flag(.Generic) {|
+        if !func.get_flag(.Generic) {
             @match(self.infer_arguments(opt.func)) {
                 fn Ok() => ();
                 fn Err(e) => return(Err = e);
@@ -2046,7 +2047,7 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
             };
         };
         
-        if func.arg.bindings.len != want_arity {|
+        if func.arg.bindings.len != want_arity {
             @debug_assert(arg_expr.expr&.is(.StructLiteralP), "expected kwargs");
             
             each func.arg.bindings { want_b | 
@@ -2054,9 +2055,9 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
                 want_name := want_b.ident().or(=> continue()); // idk if this ever happens but it sure can't be named argument
                 each arg_expr.expr.StructLiteralP.bindings& { have_b |
                     have_name := have_b.ident().or(=> continue()); // idk if this ever happens but it sure can't be named argument
-                    if want_name == have_name {|
+                    if want_name == have_name {
                         arg_expr := have_b.default&.as_ref().unwrap();
-                        if !func.get_flag(.Generic) {|
+                        if !func.get_flag(.Generic) {
                             @check(self.infer_type(want_b.ty&)) return;
                         };
                         if want_b.ty&.ty() { param | 
@@ -2072,7 +2073,7 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
                                     continue();
                                 }
                                 fn Ok() => {
-                                    if !arg_expr.ty.is_unknown() && self.can_assign(param, arg_expr.ty).is_err() {|
+                                    if !arg_expr.ty.is_unknown() && self.can_assign(param, arg_expr.ty).is_err() {
                                         continue();
                                     };
                                 }
@@ -2092,7 +2093,7 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
         
         enumerate func.arg.bindings { i, b | 
             arg_expr := parts.index(i);
-            if !func.get_flag(.Generic) {|
+            if !func.get_flag(.Generic) {
                 @check(self.infer_type(b.ty&)) return;
             };
             if b.ty&.ty() { param | 
@@ -2116,7 +2117,7 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
                         continue();
                     }
                     fn Ok() => {
-                        if !arg_expr.ty.is_unknown() && self.can_assign(param, arg_expr.ty).is_err() {|
+                        if !arg_expr.ty.is_unknown() && self.can_assign(param, arg_expr.ty).is_err() {
                             //@println("[%] discard % for %", i, self.log_type(arg_expr.ty), self.log_type(param));
                             //self.codemap.show_error_line(func.loc);
                             //arg_expr[] = other;
@@ -2131,7 +2132,7 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
     };
     
     check_still_interesting :: fn() => {
-        if still_interesting.len == 1 {|
+        if still_interesting.len == 1 {
             @log_event("chose overload %", still_interesting[0].func) self;
             func := self.get_function(interesting[0].func);
             @if(DEBUG_SPAM_LOG) self.codemap.show_error_line(func.loc);
@@ -2150,7 +2151,7 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
             continue :: local_return;
             func := self.get_function(opt.func);    
             // TODO: i dont want to check .Generic because i want to remove the need for the annotation eventually. 
-            if !func.get_flag(.Generic) {|
+            if !func.get_flag(.Generic) {
                 @match(self.infer_return(opt.func)) {
                     fn Ok() => ();
                     fn Err(e) => return(Err = e);
@@ -2162,7 +2163,7 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
             };
             
             if func.finished_ret { found | 
-                if self.can_assign(want, found).is_err()  {|
+                if self.can_assign(want, found).is_err()  {
                     continue();
                 };
             };
@@ -2172,12 +2173,12 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
     
     check_still_interesting();
     
-    //if interesting.len > 0 {|
+    //if interesting.len > 0 {
     //    // TODO: :FUCKED this picks randomly!!!
     //    return(Ok = interesting[0].func);
     //};
     
-    if !blocked.is_empty() {|
+    if !blocked.is_empty() {
         @log_event("block len = %", blocked.len) self;
         return(Suspend = blocked[0]);  // TODO: return all? don't just pick one. 
     };
@@ -2200,7 +2201,7 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
 }
 
 fn compute_new_overloads(self: *SelfHosted, overloads: *OverloadSetData) void  = {
-    while => !overloads.pending.is_empty() {|
+    while => !overloads.pending.is_empty() {
         pending := overloads.pending.items().clone(temp());
         overloads.pending.len = 0;
         for pending { fid | 
@@ -2236,7 +2237,7 @@ fn hoist_constants(self: *SelfHosted, body: []FatStmt) Maybe(void) #once = {
                     @debug_assert(!func.get_flag(.ResolvedSign));
                     @debug_assert(!func.get_flag(.ResolvedBody));
                     // TODO: assert placeholdervalue
-                    if self.is_empty_constant(var[]) {|
+                    if self.is_empty_constant(var[]) {
                         // We're the first to reference this overload set so create it. 
                         i: OverloadSet = from_index(self.dispatch.overloads.len);
                         self.dispatch.overloads&.push(
@@ -2248,7 +2249,7 @@ fn hoist_constants(self: *SelfHosted, body: []FatStmt) Maybe(void) #once = {
                         @check(self.save_const_values(var[], os_value, OverloadSet, func.loc)) return;  // :get_or_create_type
                         @log_event("create os % (%) for %", i.as_index(), var.log(self.pool), fid) self;
                         overload_out = (Some = i);
-                    } else {|
+                    } else {
                         overloads := @check(self.find_const(var[], OverloadSet.want())) return;  // :get_or_create_type
                         i := OverloadSet.assume_cast(overloads._0&)[];
                         os := self.dispatch.overloads&.nested_index(i.as_index());
@@ -2260,7 +2261,7 @@ fn hoist_constants(self: *SelfHosted, body: []FatStmt) Maybe(void) #once = {
                 
                 @try(self.update_function_metadata(func, overload_out)) return;
             }
-            fn DeclVar(f) => if f.name.kind == .Const {|
+            fn DeclVar(f) => if f.name.kind == .Const {
                 self.scopes.put_constant(f.name, f.value, f.ty);
                 stmt.stmt = .Noop;
             };
@@ -2277,7 +2278,7 @@ fn update_function_metadata(self: *SelfHosted, func: *Func, os: ?OverloadSet) Re
         };
         false
     };
-    if func.any_const_args() {|
+    if func.any_const_args() {
         func.set_flag(.AnyConstArgs);
     };
 
@@ -2337,7 +2338,7 @@ fn update_function_metadata(self: *SelfHosted, func: *Func, os: ?OverloadSet) Re
         };
     };
     
-    if func.cc.is_none() {|
+    if func.cc.is_none() {
         func.cc = (Some = .CCallReg);
     };
     .Ok
@@ -2348,12 +2349,12 @@ fn update_function_metadata(self: *SelfHosted, func: *Func, os: ?OverloadSet) Re
 fn compile_get_var(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(void) #once = {
     @debug_assert(expr.expr&.is(.GetVar));
     var := expr.expr.GetVar;
-    if var.kind == .Const {|
+    if var.kind == .Const {
         value, ty := @check(self.find_const(var, requested)) return;
         expr.set(value, ty);
         @check(self.coerce_const_expr(expr, requested)) return;
         .Ok
-    } else {|
+    } else {
         if self.scopes.get_var_type(var) { ty | 
             expr.ty = ty;
             expr.done = true;
@@ -2365,7 +2366,7 @@ fn compile_get_var(self: *SelfHosted, expr: *FatExpr, requested: ResultType) May
             expr[] = synthetic_ty((Deref = self.box(expr[])), expr.loc, ty);
             expr.done = true;
             .Ok
-        } else {|
+        } else {
             // For now runtime vars are always declared in order so we always know thier type.
             // This might change to allow peeking into return-ed expressions when infering closure return type? -- Jul 15
             @err("Unknown type for runtime var %", self.pool.get(var.name))
@@ -2383,7 +2384,7 @@ fn is_empty_constant(self: *SelfHosted, name: Var) bool #once = {
 // Passing in the requested type here feels a bit weird, but I think it will make anon-functions less painful. 
 fn find_const(self: *SelfHosted, name: Var, requested: ResultType) Maybe(Ty(Values, Type)) = {
     // If someone else is already trying to compile this, we don't want to fight over it. 
-    if self.dispatch.const_var_in_progress&.get(name.id.zext()) {|
+    if self.dispatch.const_var_in_progress&.get(name.id.zext()) {
         return(Suspend = self.wait_for(EvalConstant = (name = name, requested = requested)));
     };
     
@@ -2410,7 +2411,7 @@ fn find_const(self: *SelfHosted, name: Var, requested: ResultType) Maybe(Ty(Valu
 
 fn find_const_non_blocking(self: *SelfHosted, name: Var) ?Ty(Values, Type) #once = {
     // If someone else is already trying to compile this, we don't want to fight over it. 
-    if self.dispatch.const_var_in_progress&.get(name.id.zext()) {|
+    if self.dispatch.const_var_in_progress&.get(name.id.zext()) {
         return(.None);
     };
     var := self.scopes.get_constant(name);
@@ -2434,9 +2435,9 @@ fn handle_declare_constant(self: *SelfHosted, name: Var, ty: *LazyType, value: *
     
     // TODO: HACK that doesn't respect scoping!
     //       eventually it should just notice when a type tries to reference itself and switch to this path without the explicit @rec. 
-    if is_rec {|
+    if is_rec {
         invocation := value.expr.PrefixMacro&;
-        if invocation.arg.is_raw_unit() {|
+        if invocation.arg.is_raw_unit() {
             invocation.arg[] = invocation.target[];
         };
         real_value_box := invocation.arg;
@@ -2452,10 +2453,10 @@ fn handle_declare_constant(self: *SelfHosted, name: Var, ty: *LazyType, value: *
     
     @check(self.compile_expr(value, want)) return;
     
-    if value.ty == UnknownType {|
+    if value.ty == UnknownType {
         return(@err("TODO: needed type hint for %", self.pool.get(name.name)));
     };
-    if !value.expr&.is(.Value) {|
+    if !value.expr&.is(.Value) {
         val := @check(self.immediate_eval_expr(value, value.ty)) return;
         value.set(val, value.ty);
     };
@@ -2488,7 +2489,7 @@ fn save_const(self: *SelfHosted, name: Var, val_expr: Expr, final_ty: Type, loc:
     @debug_assert(name.kind == .Const, "tried to save non-constant");
     // TODO: do i have to check if someone is already working on this constant? -- Jul 30
     val := self.scopes.get_constant(name);
-    val := or val {|
+    val := or val {
         // dup_var of return label in emit_capturing_call gets here.
         // eventually should remove the ? so its smaller and just do this there instead. 
         ptr := self.scopes.constants&.nested_index(name.id.zext());
@@ -2496,10 +2497,10 @@ fn save_const(self: *SelfHosted, name: Var, val_expr: Expr, final_ty: Type, loc:
         ptr.as_ref().unwrap()
     };
     
-    if val._1&.is(.Finished) {|
+    if val._1&.is(.Finished) {
         return(@err("tried to re-save constant %", name&.log(self.pool)));
     };
-    if !val._0.expr&.is(.Poison) {|
+    if !val._0.expr&.is(.Poison) {
         return(@err("tried to stomp constant %", name&.log(self.pool)));
     };
     
@@ -2513,14 +2514,14 @@ fn save_const(self: *SelfHosted, name: Var, val_expr: Expr, final_ty: Type, loc:
 fn coerce_const_expr(self: *SelfHosted, expr: *FatExpr, req: ResultType) Maybe(void) = {
     if req.specific() { want | 
         found := expr.ty;
-        if found != want {|
+        if found != want {
             // can't do this because it mightn ot be a value
             //@assert(!expr.expr.Value.coerced, "const mismatch. % vs % but already coerced", self.log_type(found), self.log_type(want));
             // TODO: set coereced? 
             
             want_info := self.get_type(want);
             found_info := self.get_type(found);
-            if found == OverloadSet {|
+            if found == OverloadSet {
                 @if_let(want_info) fn Fn(f_ty) => {
                     os := @check(self.immediate_eval_expr(expr, found)) return;
                     os := OverloadSet.assume_cast(os&)[];
@@ -2542,14 +2543,14 @@ fn coerce_const_expr(self: *SelfHosted, expr: *FatExpr, req: ResultType) Maybe(v
                     return(.Ok);
                 }
             };
-            if want == FuncId {|
+            if want == FuncId {
                 @if_let(found_info) fn Fn() => {
                     expr.ty = FuncId;
                     return(.Ok);
                 };
             };
             
-            if found == FuncId {|
+            if found == FuncId {
                 @if_let(want_info) fn Fn(f_ty) => {
                     expr.ty = want;
                     // TODO: typecheck
@@ -2563,7 +2564,7 @@ fn coerce_const_expr(self: *SelfHosted, expr: *FatExpr, req: ResultType) Maybe(v
                     // TODO: typecheck
                     return(self.compile_expr(expr, (Specific = want)));
                 };
-                if want == rawptr {|
+                if want == rawptr {
                     inner := self.box(expr[]);
                     expr.expr = (FnPtr = inner);
                     expr.done = inner.done;
@@ -2575,7 +2576,7 @@ fn coerce_const_expr(self: *SelfHosted, expr: *FatExpr, req: ResultType) Maybe(v
             };
             
             @if_let(found_info) fn FnPtr(f_ty) => {
-                if want == rawptr {|
+                if want == rawptr {
                     expr.ty = rawptr;
                     return(.Ok);
                 };
@@ -2590,7 +2591,7 @@ fn coerce_const_expr(self: *SelfHosted, expr: *FatExpr, req: ResultType) Maybe(v
                             value := expr.expr.Value.bytes&;
                             v := @try(value.int_value(have_int[])) return;
                             //@println(" % % %", min, max, v);
-                            if v <= max && v >= min {|
+                            if v <= max && v >= min {
                                 value.adjust_int_length(want_int);
                                 expr.ty = want;
                                 return(.Ok);
@@ -2602,7 +2603,7 @@ fn coerce_const_expr(self: *SelfHosted, expr: *FatExpr, req: ResultType) Maybe(v
                             @err_assert(expr.expr&.is(.Value), "TODO: imm_eval const int cast") return;
                             value := expr.expr.Value.bytes&;
                             i := @try(value.int_value(have_int[])) return;
-                            if i <= max && i >= min {|
+                            if i <= max && i >= min {
                                 expr.set(self.to_values(f64, i.float()), f64); // :get_or_create_type
                                 return(.Ok);
                             };
@@ -2613,7 +2614,7 @@ fn coerce_const_expr(self: *SelfHosted, expr: *FatExpr, req: ResultType) Maybe(v
                             @err_assert(expr.expr&.is(.Value), "TODO: imm_eval const int cast") return;
                             value := expr.expr.Value.bytes&;
                             i := @try(value.int_value(have_int[])) return;
-                            if i <= max && i >= min {|
+                            if i <= max && i >= min {
                                 f: f32 = i.float().cast();
                                 expr.set(self.to_values(f32, f), f32); // :get_or_create_type
                                 return(.Ok);
@@ -2629,9 +2630,9 @@ fn coerce_const_expr(self: *SelfHosted, expr: *FatExpr, req: ResultType) Maybe(v
                             value := expr.expr.Value.bytes&;
                             vf := f64.assume_cast(value)[];
                             v := vf.int();
-                            if v.float() == vf {|
+                            if v.float() == vf {
                                 min, max := want_int[].range();
-                                if v <= max && v >= min {|
+                                if v <= max && v >= min {
                                     value[] = self.to_values(i64, v);
                                     value.adjust_int_length(want_int);
                                     expr.ty = want;
@@ -2648,7 +2649,7 @@ fn coerce_const_expr(self: *SelfHosted, expr: *FatExpr, req: ResultType) Maybe(v
                 @default => ();
             };
             res := self.can_assign(want, found);
-            if res&.is(.Ok) {|
+            if res&.is(.Ok) {
                 expr.ty = want;
                 return(.Ok);
             };
@@ -2666,13 +2667,13 @@ fn can_assign(self: *SelfHosted, want: Type, found: Type) Maybe(void) = {
     
     @match(found_info) {
         fn Fn(f) => {
-            if want == FuncId {|
+            if want == FuncId {
                 // TODO: typecheck!!
                 return(.Ok);
             };
         }
         fn Label(f) => {
-            if want == LabelId {|
+            if want == LabelId {
                 // TODO: typecheck!!
                 return(.Ok);
             };
@@ -2681,13 +2682,13 @@ fn can_assign(self: *SelfHosted, want: Type, found: Type) Maybe(void) = {
     };
     @match(want_info) {
         fn Fn(f) => {
-            if found == FuncId {|
+            if found == FuncId {
                 // TODO: typecheck!!
                 return(.Ok);
             };
         }
         fn Label(f) => {
-            if found == LabelId {|
+            if found == LabelId {
                 // TODO: typecheck!!
                 return(.Ok);
             };
@@ -2736,7 +2737,7 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
         //       instead of requiring void so its consistant with the fn_ptr version.
         //       tho also the call_dynamic is kinda sketchy (can only handle simple cases) and 
         //       i could just get rid of it and always generate a function that passes the arguments.    -- Jul 31
-        if f.arg.is_raw_unit() && f.f.expr&.is(.Value) && self.get_type(f.f.ty).is(.Fn).or(f.f.ty == FuncId) {|
+        if f.arg.is_raw_unit() && f.f.expr&.is(.Value) && self.get_type(f.f.ty).is(.Fn).or(f.f.ty == FuncId) {
             fid := FuncId.assume_cast(f.f.expr.Value.bytes&)[];
             if self.aarch64&.get_fn(fid) { fn_ptr | 
                 hack := self&;
@@ -2757,7 +2758,7 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
                 // SAFETY: we're passing comp_ctx=false so it won't try to use the pointer as a real CompilerRs.
                 result := hack&.call_dynamic(fn_ptr.int_from_rawptr(), f_ty&, args&, false);
                 self.dispatch.enclosing_function = old_func;
-                if result&.is(.Err) {|
+                if result&.is(.Err) {
                     return(Err = self.box(result.Err));
                 };
                 expr.expr = (Value = (bytes = result.Ok&.deep_clone(self.get_alloc()), coerced = false));
@@ -2771,7 +2772,7 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
     // Different from the version in check_quick_eval because this accepts unfinished ones too. 
     // This is just an optimisation to avoid an intermediate Func on the first use of a given constant. 
     @if_let(expr.expr&) fn GetVar(name) => {
-        if name.kind == .Const {|
+        if name.kind == .Const {
             self.dispatch.enclosing_function = old_func;
             return(Suspend = self.wait_for(EvalConstant = (name = name[], requested = (Specific = ret_ty))));
         };
@@ -2827,7 +2828,7 @@ fn check_quick_eval(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) ?Values = {
     @match(expr.expr&) {
         fn Value(f) => (Some = f.bytes&.clone(self.get_alloc()));
         fn GetVar(f) => {
-            if f.kind == .Const {|
+            if f.kind == .Const {
                 // This is a super common case because you type `arg: i64` a lot. 
                 res := self.find_const_non_blocking(f[]);
                 if res { f |
@@ -2838,7 +2839,7 @@ fn check_quick_eval(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) ?Values = {
             .None
         }
         fn Block(it) => {
-            if it.body.is_empty() {|
+            if it.body.is_empty() {
                 return(self.check_quick_eval(it.result, ret_ty));
             };
             .None
@@ -2847,7 +2848,7 @@ fn check_quick_eval(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) ?Values = {
             all: List(u8) = list(self.get_alloc());
             each parts { part |
                 // TODO: tuple_types
-                val := or self.check_quick_eval(part, part.ty) {|
+                val := or self.check_quick_eval(part, part.ty) {
                     return(.None)
                 };
                 // Required since deconstruct_values (which we use for dyn_call) expects correctly aligned fields. 
@@ -2856,7 +2857,7 @@ fn check_quick_eval(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) ?Values = {
             (Some = (Big = all.rs()))
         }
         fn Call(it) => {
-            if it.f.expr&.is(.Value) {|
+            if it.f.expr&.is(.Value) {
                 @if_let(self.get_type(it.f.ty)) fn FnPtr(f) => {
                     if self.check_quick_eval(it.arg, f.ty.arg) { arg_value |
                         if it.arg.ty != f.ty.arg {| // TODO
@@ -2939,13 +2940,13 @@ fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
     invocation := expr.expr.PrefixMacro&;
     
     // This allows @a E; instead of @a(E);
-    if invocation.arg.is_raw_unit() {|
+    if invocation.arg.is_raw_unit() {
         temp := invocation.arg;
         invocation.arg = invocation.target;
         invocation.target = temp;
     };
     
-    fat_expr_type := or self.env.fat_expr_type {|
+    fat_expr_type := or self.env.fat_expr_type {
         return(self.early_builtin_prefix_macro(expr))
     };
     pair := self.tuple_of(@slice(fat_expr_type, fat_expr_type));
@@ -2954,20 +2955,20 @@ fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
     
     @log_event("call user macro %", invocation.handler.log(self.pool)) self;
     single := invocation.target.is_raw_unit();
-    if single {|
+    if single {
         @log_event("macro input: %", invocation.arg.log(self.pool)) self;
-    } else {|
+    } else {
         @log_event("macro input: (%, %)", invocation.arg.log(self.pool), invocation.target.log(self.pool)) self;
     };
     
     @check(self.compile_expr(invocation.handler, .None)) return;
-    if invocation.handler.ty == OverloadSet {|
+    if invocation.handler.ty == OverloadSet {
         os := @check(self.immediate_eval_expr(invocation.handler, OverloadSet)) return; // :get_or_create_type
         os := OverloadSet.assume_cast(os&)[];
         ::if(FnType); 
         f_ty: FnType = if single {|  // TODO: wrong! what if they actually passed unit?
             (arg = fat_expr_type, ret = fat_expr_type, arity = 1)
-        } else {|
+        } else {
             self.finish_layout_deep(pair).unwrap();
             (arg = pair, ret = fat_expr_type, arity = 2)
         };
@@ -2979,7 +2980,7 @@ fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
     fid := @check(self.immediate_eval_expr(invocation.handler, FuncId)) return; // :get_or_create_type
     fid := FuncId.assume_cast(fid&)[];
     func := self.get_function(fid);
-    if !func.get_flag(.Macro) {|
+    if !func.get_flag(.Macro) {
         self.codemap.show_error_line(func.loc);
     };
     @err_assert(func.get_flag(.Macro), "Tried to invoke non-macro % (missing #macro or missing overload)", self.pool.get(func.name)) return;
@@ -3010,7 +3011,7 @@ fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
 // If we're early in bootstrapping and haven't compiled the FatExpr type yet, so some special handling.
 fn early_builtin_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
     invocation := expr.expr.PrefixMacro&;
-    if !invocation.handler.expr&.is(.GetVar) {|
+    if !invocation.handler.expr&.is(.GetVar) {
         return(@err("macro calls must be GetVar while bootstrapping. tried to run something too compilicated too soon: %: %", invocation.handler.expr&.tag(), invocation.handler.log(self.pool)));
     };
     
@@ -3093,12 +3094,12 @@ fn struct_type(self: *SelfHosted, pattern: *Pattern) Maybe(Type) #once = {
     const_field_count := 0;
     each pattern.bindings { b | 
         name := b.ident().expect("field name");
-        if b.kind == .Const {|
+        if b.kind == .Const {
             const_field_count += 1;
             if(b.default.is_none(), => return(@err("constant field % must have a value.", self.pool.get(name))));
         };
         
-        ty := or @check(self.infer_type(b.ty&)) return {|
+        ty := or @check(self.infer_type(b.ty&)) return {
             default := @unwrap(b.default&.as_ref(), "@struct field without type requires default value.") return;
             @check(self.compile_expr(default, .None)) return;
             default.ty
@@ -3156,11 +3157,11 @@ fn enum_macro(self: *SelfHosted, arg: *FatExpr, target: *FatExpr) Maybe(FatExpr)
 
                 expr := b.default&.as_ref().unwrap();
                 val  := @check(self.immediate_eval_expr(expr, type)) return;
-                if sequential {|
+                if sequential {
                     current := @try(val&.int_value(as_int.unwrap())) return;
-                    if current == last + 1 {|
+                    if current == last + 1 {
                         last += 1;
-                    } else {|
+                    } else {
                         sequential = false;
                     };
                 };
@@ -3197,7 +3198,7 @@ fn tagged_macro(self: *SelfHosted, cases_expr: *FatExpr) Maybe(FatExpr) = {
         //       then need to store default in TypeInfo::Tagged as well. -- Jul 5
         @err_assert(b.default.is_none(), "use ':' not '=' with @tagged") return;
         type := @check(self.infer_type(b.ty&)) return;
-        type := or type {|
+        type := or type {
             // @tagged(s: i64, n) is valid and infers n as void.
             b.ty = (Finished = void); // :get_or_create_type
             void

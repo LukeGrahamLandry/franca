@@ -43,55 +43,55 @@ fn next(self: *JsonParser) Result(JsonPart, Str) = {
     (token: WuffsToken, src: Str) := @match(self.next_token()) {
         (fn Ok(v) Ty(WuffsToken, Str) => v);
         (fn Err(status) => {
-            if status == "@base: end of data" {|
+            if status == "@base: end of data" {
                 return(Ok = .Eof);
             };
             return(Err = status)
         });
     };
     
-    if token.category() == .String {|
+    if token.category() == .String {
         ::tagged(Result(Str, Str));
         s := @try(self.parse_str(token)) return;
-        if self.expecting_key() && !self.last_thing_was_key {|
+        if self.expecting_key() && !self.last_thing_was_key {
             self.last_thing_was_key = true;
             return(Ok = (Key = s));
-        } else {|
+        } else {
             self.last_thing_was_key = false;
             return(Ok = (StringValue = s));
         };
     };
     self.last_thing_was_key = false;
     
-    if token.is(.Structure, .Push) {|
+    if token.is(.Structure, .Push) {
         self.last_thing_was_key = false;
         self.depth += 1;
-        if token.is(.Structure, .ToList) {|
+        if token.is(.Structure, .ToList) {
             self.is_dict&.unset(self.depth);
             return(Ok = .StartList);
         };
-        if token.is(.Structure, .ToDict) {|
+        if token.is(.Structure, .ToDict) {
             self.is_dict&.set(self.depth, temp());
             return(Ok = .StartDict);
         };
         return(Err = "wuffs bad push?");
     };
-    if token.is(.Structure, .Pop) {|
+    if token.is(.Structure, .Pop) {
         self.depth -= 1;
         return(Ok = .End);
     };
     
-    if token.is(.Literal, .False) {|
+    if token.is(.Literal, .False) {
         return(Ok = (BoolValue = false));
     };
-    if token.is(.Literal, .True) {|
+    if token.is(.Literal, .True) {
         return(Ok = (BoolValue = true));
     };
-    if token.is(.Literal, .Null) {|
+    if token.is(.Literal, .Null) {
         return(Ok = .Null);
     };
     
-    if token.category() == .Number {|
+    if token.category() == .Number {
         f := src.float();
         return(Ok = (Float = f));
     };
@@ -118,17 +118,17 @@ fn parse_str(self: *JsonParser, prev: WuffsToken) Result(Str, Str) = {
 }
 
 fn next_token(self: *JsonParser) Result(Ty(WuffsToken, Str), Str) = {
-    loop {|
+    loop {
         continue :: local_return;
         
-        if self.output.meta.ri >= self.output.meta.wi {|
+        if self.output.meta.ri >= self.output.meta.wi {
             // Can't call wuffs_base__token_buffer__compact (its static?)
             // but also I guess I don't even need that, cause I know I ready all the tokens. 
             self.output.meta.ri = 0;
             self.output.meta.wi = 0;
             status := self.decoder&.wuffs_json__decoder__decode_tokens(self.output&, self.input&, empty());
             // TODO: use status
-            if self.output.meta.ri >= self.output.meta.wi {|
+            if self.output.meta.ri >= self.output.meta.wi {
                 assert(!status.repr.ptr.is_null(), "didn't decode but claimed 'ok'");
                 status := status.repr.str();
                 return(Err = status);
@@ -137,7 +137,7 @@ fn next_token(self: *JsonParser) Result(Ty(WuffsToken, Str), Str) = {
         token := self.output.data[self.output.meta.ri];
         self.output.meta.ri += 1;
         
-        if token.category() == .Filler {|
+        if token.category() == .Filler {
             self.cursor += token.len();
             continue();
         };
@@ -177,13 +177,13 @@ fn skip_current_value(self: *JsonParser) Result(void, Str) = {
 // Fast path where we don't bother decoding string escapes into memory. 
 fn skip_until_depth(self: *JsonParser, end_depth: i64) Result(void, Str) = {
     //println("start skip");
-    while => end_depth < self.depth {|
+    while => end_depth < self.depth {
         token, _ := @try(self.next_token()) return; // TODO: don't even bother returning the source slice. 
     
-        if token.is(.Structure, .Push) {|
+        if token.is(.Structure, .Push) {
             self.depth += 1;
-        } else {|
-            if token.is(.Structure, .Pop) {|
+        } else {
+            if token.is(.Structure, .Pop) {
                 self.depth -= 1;
             };
         };
@@ -196,14 +196,14 @@ fn skip_until_depth(self: *JsonParser, end_depth: i64) Result(void, Str) = {
 // You should already be in a dict. returns Err if it closes before we see your key. 
 // If it returns Ok, the parser is looking at the value of your key. 
 fn skip_until_key(self: *JsonParser, name: Str) Result(void, Str) = {
-    loop() {|
+    loop() {
         token := @try(self.next()) return;
-        if token&.is(.Key) {|
-            if token.Key == name {|
+        if token&.is(.Key) {
+            if token.Key == name {
                 return(.Ok);
             };
             @try(self.skip_next_value()) return;
-        } else {|
+        } else {
             // if its End, we got to the end of the object. otherwise malformed input. 
             return(Err = "key not found")
         };

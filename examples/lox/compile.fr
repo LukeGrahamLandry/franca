@@ -73,13 +73,13 @@ fn compile(vm: *Vm, source: Str, chunk: *Chunk) bool = {
         chunk = chunk, // TODO: be like rust where you can leave off the name if it matches the expr var name. 
     );
     self&.advance();
-    while => self.current.type != .Eof {|
+    while => self.current.type != .Eof {
         self&.statement(true);
         if(self.panic_mode, => self&.syncronize());
     };
     self&.consume(.Eof, "Expect end of expression.");
     
-    if(debug_print_code.and(not(self.had_error))) {|
+    if(debug_print_code.and(not(self.had_error))) {
         self&.current_chunk().disassemble("just parsed");
     };
     self.had_error.not()
@@ -95,7 +95,7 @@ fn statement(self: *Parser, may_declare: bool) void = {
         fn Print()  => keyword_expr(.Print);
         fn Return() => keyword_expr(.Return);
         fn Var() => {
-            if !may_declare {|
+            if !may_declare {
                 self.error_at(self.current, "declaration not allowed here.");
             };
             self.declare_var();
@@ -103,7 +103,7 @@ fn statement(self: *Parser, may_declare: bool) void = {
         fn LeftBrace() => {
             self.advance();
             self.scope_depth += 1;
-            while => self.current.type != .Eof && self.current.type != .RightBrace {|
+            while => self.current.type != .Eof && self.current.type != .RightBrace {
                 self.statement(true);
                 if(self.panic_mode, => self.syncronize());
             };
@@ -123,7 +123,7 @@ fn end_scope(self: *Parser) void = {
     self.scope_depth -= 1;
     cond :: => !self.vm.compiler_locals.is_empty()
                && self.vm.compiler_locals[self.vm.compiler_locals.len - 1].depth > self.scope_depth;
-    while cond {|
+    while cond {
         self.vm.compiler_locals.len -= 1;
         self.emit(OpCode.Pop); // TODO: EXTRA: PopN
     };
@@ -135,7 +135,7 @@ fn parse(self: *Parser, prec: Prec) void = {
     rule := get_rule(self.previous.type);
     null_rule_addr :: erase_types_fn(Ty(*Parser, bool), void, null_rule).int_from_rawptr();
     my_rule_addr := erase_types_fn(Ty(*Parser, bool), void, rule.prefix).int_from_rawptr();
-    if(my_rule_addr.eq(null_rule_addr)) {|
+    if(my_rule_addr.eq(null_rule_addr)) {
         self.error_at(self.previous, "Expect expression.");
     };
     prefix := rule.prefix;
@@ -143,14 +143,14 @@ fn parse(self: *Parser, prec: Prec) void = {
     prefix(self, can_assign);
     
     r := get_rule(self.current.type);
-    while(=> (@as(i64) prec).le(@as(i64) r.prec)) {|
+    while(=> (@as(i64) prec).le(@as(i64) r.prec)) {
         self.advance();
         infix := r.infix;
         r = get_rule(self.current.type);
         infix(self, can_assign);
     };
     
-    if can_assign && self.current.type == .Equal {|
+    if can_assign && self.current.type == .Equal {
         self.advance();
         self.error_at(self.current, "invalid place expression");
     };
@@ -231,23 +231,23 @@ fn declare_var(self: *Parser) void = {
     self.advance();
     self.consume(TokenType.Ident, "expected variable name after 'var'");
     name := self.previous;
-    if self.current.type == .Equal {|
+    if self.current.type == .Equal {
         self.advance();
         self.expression();
-    } else {|
+    } else {
         self.emit(OpCode.Nil);
     };
-    if self.scope_depth > 0 {|
+    if self.scope_depth > 0 {
         // TODO: make it an error to shadow in the same scope. "Already a variable with this name in this scope." :lazy
         // TODO: deny the initilizer accessing something in an upper scope that its shadowing. Can't read local variable in its own initializer."
         //       currently i just declare later so the error message would be that its undeclared. 
         // locals just fall through and keep thier stack slot, so no opcode here.
         self.vm.compiler_locals&.push(name = name.lexeme, depth = self.scope_depth);
-        if self.vm.compiler_locals.len > 255 {|
+        if self.vm.compiler_locals.len > 255 {
             // TODO: EXTRA: GetLocal16 and SetLocal16
             self.error_at(name, "Too many locals in chunk (>255)");
         };
-    } else {|
+    } else {
         var := self.ident_const(name);
         self.emit(OpCode.DefineGlobal, var);
     };
@@ -258,7 +258,7 @@ fn declare_var(self: *Parser) void = {
 // = fast locals + late bound globals. 
 parse_ident :: fn(self: *Parser, can_assign: bool) void = {
     name := self.previous;
-    if can_assign && self.current.type == .Equal {|
+    if can_assign && self.current.type == .Equal {
         self.advance();
         self.expression();
         @match(self.find_local_index(name.lexeme)) {
@@ -268,7 +268,7 @@ parse_ident :: fn(self: *Parser, can_assign: bool) void = {
                 self.emit(OpCode.SetGlobal, var);
             }
         };
-    } else {|
+    } else {
         @match(self.find_local_index(name.lexeme)) {
             fn Some(var) => self.emit(OpCode.GetLocal, var);
             fn None() => {
@@ -281,7 +281,7 @@ parse_ident :: fn(self: *Parser, can_assign: bool) void = {
 
 fn find_local_index(self: *Parser, name: Str) ?i64 = {
     enumerate_rev self.vm.compiler_locals& { i, local |
-        if local.name == name {|
+        if local.name == name {
             return(Some = i);
         };
     };
@@ -298,7 +298,7 @@ fn get_rule(type: TokenType) *ParseRule = rules[].index(@as(i64) type);
 
 fn advance(self: *Parser) void = {
     self.previous = self.current;
-    loop {|
+    loop {
         self.current = self.scanner&.next();
         if(self.current.type != .Error, => return());
         self.error_at(self.current, "");
@@ -314,7 +314,7 @@ fn consume(self: *Parser, type: TokenType, msg: Str) void = {
 
 fn error(self: *Parser, msg: Str) void = self.error_at(self.previous, msg);
 fn error_at(self: *Parser, token: Token, msg: Str) void = {
-    if !self.panic_mode {|
+    if !self.panic_mode {
         self.panic_mode = true;
         self.had_error = true;
         // TODO: render lex err vs eof vs normal token differently
@@ -349,7 +349,7 @@ fn current_chunk(self: *Parser) *Chunk = self.chunk;
 // Skip until a statement boundary: last token ends one or current token starts one. 
 fn syncronize(self: *Parser) void = {
     self.panic_mode = false;
-    while => self.current.type != .Eof {|
+    while => self.current.type != .Eof {
         if(self.previous.type == .Semicolon, => return());
         @match(self.current.type) {
             fn Fun()    => return();

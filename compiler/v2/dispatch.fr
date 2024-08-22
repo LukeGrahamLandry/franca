@@ -46,7 +46,7 @@ fn init(a: Alloc) CompilerDispatch = {
 
 poll_in_place :: fn(self: *SelfHosted, $T: Type, $f: @Fn() Maybe(T)) Res(T) #generic = {
     pending: List(*Task) = list(self.get_alloc());
-    loop {|
+    loop {
         value := f();
         @match(value&) {
             fn Ok(it)  => return(Ok = it[]);
@@ -65,14 +65,14 @@ poll_in_place :: fn(self: *SelfHosted, $T: Type, $f: @Fn() Maybe(T)) Res(T) #gen
 
 // TODO: use this below
 fn poll_pending_subset(self: *SelfHosted, pending: *List(*Task)) Res(void) = {
-    while => !pending.is_empty() {|
+    while => !pending.is_empty() {
         mark := __temp_alloc.mark();
         ::?**Task;
         task := pending.last().unwrap()[];
         task.waiting_for&.ordered_retain() { t | 
             !t.done
         };
-        if task.waiting_for.is_empty() {|
+        if task.waiting_for.is_empty() {
             result := self.exec_task(task);
             @match(result) {  
                 fn Err(e) => {
@@ -93,7 +93,7 @@ fn poll_pending_subset(self: *SelfHosted, pending: *List(*Task)) Res(void) = {
                     pending.push(new_task);
                 };
             };
-        } else {|
+        } else {
             for task.waiting_for { dep | 
                 pending.push(dep);
             };
@@ -107,7 +107,7 @@ fn poll_tasks(self: *SelfHosted) Result(void, *ParseErr) = {
     pending: List(*Task) = list(self.get_alloc());
     made_progress := true;
     
-    while => made_progress {|
+    while => made_progress {
         made_progress = false;
         self.dispatch.active_tasks&.ordered_retain() { t | 
             !t.done
@@ -116,14 +116,14 @@ fn poll_tasks(self: *SelfHosted) Result(void, *ParseErr) = {
             pending&.push(original_task); 
             // TODO: you want to do this instead but it fails a safety check??????
             // @try(self.poll_pending_subset(pending&)) return;
-            while => !pending.is_empty() {|
+            while => !pending.is_empty() {
                 mark := __temp_alloc.mark();
                 ::?**Task;
                 task := pending.last().unwrap()[];
                 task.waiting_for&.ordered_retain() { t | 
                     !t.done
                 };
-                if task.waiting_for.is_empty() {|
+                if task.waiting_for.is_empty() {
                     result := self.exec_task(task);
                     @match(result) {  
                         fn Err(e) => {
@@ -146,7 +146,7 @@ fn poll_tasks(self: *SelfHosted) Result(void, *ParseErr) = {
                             made_progress = true;
                         };
                     };
-                } else {|
+                } else {
                     for task.waiting_for { dep | 
                         pending&.push(dep);
                     };
@@ -165,7 +165,7 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
         @debug_assert(!task.done, "task done but still has dependencies");
         return(Suspend = dep.action&);
     };
-    if task.done {|
+    if task.done {
         return(.Ok);
     };
     self.dispatch.enclosing_function = .None;
@@ -175,7 +175,7 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
         //fn CompileExpr(stack) => {
         //    @log_event("[TRY TASK] %", task.action&.tag());
         //    self.dispatch.active_stack = stack;
-        //    while => !stack.is_empty() {|
+        //    while => !stack.is_empty() {
         //        last := stack.pop().unwrap();
         //        l := stack.len;
         //        @check(self.compile_expr(last.expr, last.requested)) return;
@@ -203,7 +203,7 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
             //self.codemap.show_error_line(func.loc);
             //@log_event("%", func.log(self.pool)) self;
             
-            if !func.get_flag(.EnsuredCompiled) {|
+            if !func.get_flag(.EnsuredCompiled) {
                 self.dispatch.function_in_progress&.set(fid.as_index());
                 return(Suspend = self.wait_for(CompileBody = fid));
             };
@@ -211,17 +211,17 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
             // when possible, you want to emit_bc for callees first because they might get deduplicated. 
             for func.callees { callee |
                 @log_event("% calls %", fid.as_index(), callee.as_index()) self;
-                if self.aarch64&.get_fn(callee).is_none() {|
+                if self.aarch64&.get_fn(callee).is_none() {
                     new_task := self.get_alloc().alloc(Task, 1);
                     new_task := new_task.ptr;
                     new_task[] = (action = (Jit = callee), waiting_for = list(self.get_alloc()));
                     task.waiting_for&.push(new_task);
-                } else {|
+                } else {
                     func := self.get_function(callee);
                     @debug_assert(func.get_flag(.EnsuredCompiled));
                 };
             };
-            if task.waiting_for.len != 0 {|
+            if task.waiting_for.len != 0 {
                 @log_event("sleep on %/% callees", task.waiting_for.len, func.callees.len) self;
                 return(.Ok); // HACK: caller has to check our waiting_for
             };
@@ -236,7 +236,7 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
                 func := self.get_function(fid);
                 arg_ty := func.finished_arg.unwrap();
                 ret_ty := func.finished_ret.unwrap();
-                if body.is(.Normal).or(body.is(.Intrinsic)) {|
+                if body.is(.Normal).or(body.is(.Intrinsic)) {
                     @log_event("codegen % %", fid, self.log_name(fid)) self;
                     @err_assert(!arg_ty.is_unknown() && !ret_ty.is_unknown(), "unknown fn types!!") return;
                     hack := self.stable_compiler_context().cast(); // because Bc::CompCtx stores a ***SelfHosted in the assembly 
@@ -246,7 +246,7 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
                 };
                 @match(body) {
                     fn Redirect(target) => {
-                        ptr := or self.aarch64&.get_fn(target[]) {|
+                        ptr := or self.aarch64&.get_fn(target[]) {
                             return(Suspend = self.wait_for(Jit = target[]))
                         };
                         // TODO: save in constants lookup too if take address 
@@ -258,7 +258,7 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
                     fn JittedAarch64(insts) => self.aarch64&.copy_inline_asm(fid, insts.items());
                     fn Merged(parts) => {
                         each parts { option |
-                            if @check(self.fill_in_jit_pointer(fid, option)) return {|
+                            if @check(self.fill_in_jit_pointer(fid, option)) return {
                                 return(Ok = true);
                             };
                         };
@@ -268,7 +268,7 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
                 (Ok = true)
             };
             
-            if func.get_flag(.TookPointerValue) {|
+            if func.get_flag(.TookPointerValue) {
                 ptr := self.aarch64&.get_fn(fid).expect("have jit addr");
                 self.created_jit_fn_ptr_value(fid, ptr.int_from_rawptr());
             };
@@ -323,7 +323,7 @@ fn Maybe($T: Type) Type = {
     
     fn is_err(self: Self) bool = self&.is(.Err);
     fn unwrap(self: Self) T = {
-        if self&.is(.Err) {|
+        if self&.is(.Err) {
             @panic("Unwrapped Maybe Err %", self.Err.msg);
         };
         ::tagged(Action);
@@ -332,7 +332,7 @@ fn Maybe($T: Type) Type = {
     }
     
     fn unwrap_err(self: Self) *ParseErr = {
-        if self&.is(.Err) {|
+        if self&.is(.Err) {
             return(self.Err);
         };
         panic("unwrap_err not err")

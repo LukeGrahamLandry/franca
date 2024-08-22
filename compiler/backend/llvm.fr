@@ -52,7 +52,7 @@ fn new(comp: CompCtx, alloc: Alloc) EmitLlvm #inline = {
     target triple = "arm64-apple-macosx13.0.0"
     """);
     
-    if s.program.get_build_options()[].debug_info {|
+    if s.program.get_build_options()[].debug_info {
         s.debug_unit = s&.next_debug();
         s.debug_file = s&.next_debug();
         s.debug_func_type = s&.next_debug();
@@ -78,9 +78,9 @@ fn next_debug(self: *EmitLlvm) i64 = {
 
 // TODO: my impression is unnamed_addr doesn't help size (even with -no-deduplication) so maybe take it out -- Aug 13
 fn emit_function_husk(self: *EmitLlvm, fid: FuncId, signeture: PrimSig, $emit_body: @Fn() void) void = {
-    if self.program.get_build_options()[].retain_function_names {|
+    if self.program.get_build_options()[].retain_function_names {
         self.out&.push_all("define ccc ");
-    } else {|
+    } else {
         self.out&.push_all("define private ccc ");
     };
     name: List(u8) = list(temp());
@@ -91,12 +91,12 @@ fn emit_function_husk(self: *EmitLlvm, fid: FuncId, signeture: PrimSig, $emit_bo
     };
     self.out&.current().push_all(" unnamed_addr ");
     func := self.program.get_function(fid);
-    if func.get_flag(.Cold) {|
+    if func.get_flag(.Cold) {
         // Note: this doesn't do anything on -Os unless you also pass `-mllvm -hot-cold-split=true`
         self.out&.current().push_all(" cold optsize noinline ");
     };
     self.out&.current().push_all(" \"frame-pointer\"=\"all\" "); // must be before debug info!
-    if self.program.get_build_options()[].debug_info {|
+    if self.program.get_build_options()[].debug_info {
         self.current_debug_info = self.next_debug();
         @fmt(self.out&.current(), "!dbg !%", self.current_debug_info);
     };
@@ -105,7 +105,7 @@ fn emit_function_husk(self: *EmitLlvm, fid: FuncId, signeture: PrimSig, $emit_bo
     emit_body();
     self.out&.current().push_all("}\n");
     
-    if self.program.get_build_options()[].debug_info {|
+    if self.program.get_build_options()[].debug_info {
         source_name := self.program.pool.get(func.name); 
         template :: "!% = distinct !DISubprogram(name: \"%\", linkageName: \"%\", unit: !%, scope: !%, type: !%, spFlags: DISPFlagDefinition)\n";
         @fmt(self.out&.current(), template,  self.current_debug_info, source_name, name.items(), self.debug_unit, self.debug_file, self.debug_func_type);
@@ -125,9 +125,9 @@ fn emit_entry_points_and_debug_info(gen: *CodeGen(EmitLlvm, .EmitLlvm), comp: Co
                 f = program.follow_redirects(f);
                 func := program.get_function(f);
                 // note: this only works because void has a fixed typeid value
-                if func.finished_arg.unwrap() == void {|
+                if func.finished_arg.unwrap() == void {
                     @fmt(gen.backend.out&.current(), "   call void @%()\n", (gen.backend&, f));
-                } else {|
+                } else {
                     @fmt(gen.backend.out&.current(), "   %% = call i64 @%(i64 0)\n", "%", i, (gen.backend&, f));
                     i += 1;
                 };
@@ -152,7 +152,7 @@ fn emit_entry_points_and_debug_info(gen: *CodeGen(EmitLlvm, .EmitLlvm), comp: Co
         @debug_names = private global [0 x ptr] []
     """);
     self := gen.backend&;
-    if self.program.get_build_options()[].debug_info {|
+    if self.program.get_build_options()[].debug_info {
         version := self.next_debug();
         d_version := self.next_debug();
         level := self.next_debug();
@@ -174,14 +174,14 @@ fn emit_bounce_fn(self: *EmitLlvm, impl_name_callee: Str, fake_decl_name: Str, s
     self.write_header(signeture, fake_decl_name) {arg_index|
         ::if(Prim);
         // TODO: format this better. 
-        ty: Prim = if(signeture.first_arg_is_indirect_return){|
+        ty: Prim = if(signeture.first_arg_is_indirect_return){
             // TODO: only sokol tests this 
-            if arg_index.eq(0) {|
+            if arg_index.eq(0) {
                 Prim.P64
-            }{|
+            }{
                 signeture.args[arg_index.sub(1)]
             }
-        }{|
+        }{
             signeture.args[arg_index]
         };
         values&.push((ty = ty, id = arg_index));
@@ -192,7 +192,7 @@ fn emit_bounce_fn(self: *EmitLlvm, impl_name_callee: Str, fake_decl_name: Str, s
     self.out&.reserve(50);
     self.out&.current().push_all("{\n");
     self.current_debug_info = 0;
-    ret := self.inst_call(values.items(), signeture) {|
+    ret := self.inst_call(values.items(), signeture) {
         @fmt(self.out&.current(), "@%", impl_name_callee);
     };
     self.inst_return(ret);
@@ -280,17 +280,17 @@ fn emit_constant(self: *EmitLlvm, id: BakedVarId) void = {
                 @match(inner) {
                     (fn FnPtr(f) => {
                         f = self.program.follow_redirects(f);  // TODO: hack because of new deduplication
-                        if wasm32 {|
+                        if wasm32 {
                             @fmt(self.out&.current(), "i64 bitcast (<2 x i32> <i32 ptrtoint (ptr @% to i32), i32 0> to i64),", (self, f));
-                        } else {|
+                        } else {
                             @fmt(self.out&.current(), "i64 ptrtoint (ptr @% to i64),", (self, f));
                         };
                         // TODO: make sure we emitted the function. 
                     });
                     (fn AddrOf(id) => {
-                        if wasm32 {|
+                        if wasm32 {
                             @fmt(self.out&.current(), "i64 bitcast (<2 x i32> <i32 ptrtoint (ptr @g% to i32), i32 0> to i64),", @as(i64) id.id.zext());
-                        } else {|
+                        } else {
                             @fmt(self.out&.current(), "i64 ptrtoint (ptr @g% to i64),", @as(i64) id.id.zext());
                         };
                     });
@@ -353,7 +353,7 @@ fn emit_special(self: *EmitLlvm, body: *FuncImpl, func: *Func, bc: *FnBody, pend
 
 fn forward_declare(self: *EmitLlvm, sig: PrimSig, private: bool, name: Str) void = {
     self.out&.push_all("declare ccc ");
-    if private {|
+    if private {
         self.out&.push_all("private ");
     };
     self.write_header(sig, name) {arg_index| (@format("%v%", "%", arg_index) temp()).items() };
@@ -399,7 +399,7 @@ fn write_header(self: *EmitLlvm, sig: PrimSig, name: Str, $get_arg_name: @Fn(idx
     @fmt(self.out&.current(), " @%(", name);
     
     // TODO: don't have two callsites for get_arg_name
-    shift := if(sig.first_arg_is_indirect_return) {|
+    shift := if(sig.first_arg_is_indirect_return) {
         size: i64 = sig.return_value_bytes.zext();
         // note: when calling through function pointers, you need to put the sret attribute there as well (large_struct_ret_return tests this).
         @fmt(self.out&.current(), " ptr sret([% x i8]) %,", size, get_arg_name(0));
@@ -426,7 +426,7 @@ fn setup(self: *EmitLlvm, body: *FnBody, vars_out: *List(EmitLlvm.Val)) void = {
         vars_out.push(v);
         self.out&.reserve(30); 
         @fmt(self.out&.current(), "   % = alloca i8, i32 %, align %\n", v, @as(i64) ty.size.zext(), @as(i64) ty.align.zext()); // uhg % was a bad choice. 
-        if do_debug && body.var_names.len > i {|
+        if do_debug && body.var_names.len > i {
             if body.var_names[i] { name | 
                 name := self.program.pool.get(name.name);
                 local := self.next_debug();
@@ -451,7 +451,7 @@ fn setup(self: *EmitLlvm, body: *FnBody, vars_out: *List(EmitLlvm.Val)) void = {
         self.out&.reserve(30); 
         @fmt(self.out&.current(), "   %a% = alloca i64\n", "%", i); // uhg % was a bad choice. 
     };
-    shift := if body.signeture.first_arg_is_indirect_return {|
+    shift := if body.signeture.first_arg_is_indirect_return {
         @fmt(self.out&.current(), " store ptr %arg0, ptr %a0\n", "%", "%");
         1
     }{| 0 };
@@ -465,11 +465,11 @@ fn setup(self: *EmitLlvm, body: *FnBody, vars_out: *List(EmitLlvm.Val)) void = {
 }
 
 fn fmt_fn_name(self: *EmitLlvm, f: FuncId, out: *List(u8)) void = {
-    if self.program.get_build_options()[].retain_function_names {|
+    if self.program.get_build_options()[].retain_function_names {
         func := self.program.get_function(f);
         real_name := self.program.pool.get(func.name);
         @fmt(out, "%__%", real_name, f.to_index());
-    } else {|
+    } else {
         @fmt(out, "F%", f.to_index());
     }
 }
@@ -479,7 +479,7 @@ fn display(self: Ty(*EmitLlvm, FuncId), out: *List(u8)) void = {
 }
 
 fn inst_call(self: *EmitLlvm, args: Slice(LlvmVal), sig: PrimSig, f: FuncId, tail: bool) Slice(EmitLlvm.Val) = {
-    self.inst_call(args, sig) {|
+    self.inst_call(args, sig) {
         self.out&.current().push_all("@");
         self.fmt_fn_name(f, self.out&.current());
     }
@@ -590,7 +590,7 @@ fn inst_call(self: *EmitLlvm, args: Slice(LlvmVal), sig: PrimSig, $do_call: @Fn(
     do_call();
     
     self.out&.push_all("(");
-    shift := if(sig.first_arg_is_indirect_return) {|
+    shift := if(sig.first_arg_is_indirect_return) {
         size: i64 = sig.return_value_bytes.zext();
         // note: the sret must match the declaration! not doing this breaks large_struct_ret_return and compiler driver dylib ffi. 
         @fmt(self.out&.current(), " ptr sret([% x i8]) %,", size, args[0]);
@@ -610,7 +610,7 @@ fn inst_call(self: *EmitLlvm, args: Slice(LlvmVal), sig: PrimSig, $do_call: @Fn(
     
     self.out&.current().push_all(")");
     
-    if self.program.get_build_options()[].debug_info && self.current_debug_info != 0 {|
+    if self.program.get_build_options()[].debug_info && self.current_debug_info != 0 {
         // TODO: line info
         // Fixes "inlinable function call in a function with debug info must have a !dbg location"
         location := self.next_debug();
@@ -633,7 +633,7 @@ fn inst_call(self: *EmitLlvm, args: Slice(LlvmVal), sig: PrimSig, $do_call: @Fn(
 
 fn pop_trailing_comma(self: *EmitLlvm) void = {
     // they don't allow trailing comma because they hate us personally 
-    if(self.out&.current().items().ends_with(",")) {|
+    if(self.out&.current().items().ends_with(",")) {
         // TODO: access fields on lvalues. `self.out&.current().len += 1` should work
         l := self.out&.current();
         l.len -= 1;
@@ -646,7 +646,7 @@ fn inst_trap(self: *EmitLlvm) void = {
 }
 
 fn inst_call_ptr(self: *EmitLlvm, args: Slice(LlvmVal), sig: PrimSig, ptr: EmitLlvm.Val) Slice(EmitLlvm.Val) = {
-    self.inst_call(args, sig) {|
+    self.inst_call(args, sig) {
         @fmt(self.out&.current(), "%", ptr);
     }
 }
@@ -668,12 +668,12 @@ fn inst_literal(self: *EmitLlvm, value: i64, ty: Prim) EmitLlvm.Val = {
     v := self.get_var(ty);
     self.out&.reserve(100);
     // TODO: use @switch here. 
-    if(ty.eq(.F64)){|
+    if(ty.eq(.F64)){
         // for f64, llvm wants the bits as hex. 
         h := fmt_hex(value);
         @fmt(self.out&.current(), "   % = fadd double %, 0.0\n", v, h); 
-    } {|
-        if(ty.eq(.F32)){|
+    } {
+        if(ty.eq(.F32)){
             // for f32, llvm wants an f64 as hex that happens to be exactly representable as f32. 
             // but we store it as an f32 on the bottom with the high bits zeroed. 
             assert(value.lt(MAX_I32), "ICE: too many bits for f32");
@@ -684,11 +684,11 @@ fn inst_literal(self: *EmitLlvm, value: i64, ty: Prim) EmitLlvm.Val = {
             // TODO: does it change if you try to print here??????
             h := fmt_hex(value);
             @fmt(self.out&.current(), "   % = fadd float %, 0.0\n", v, h); 
-        } {|
-            if(ty.eq(.P64)) {|
+        } {
+            if(ty.eq(.P64)) {
                 @assert_eq(value, 0); // a literal pointer that isn't null doesn't make sense for AOT.
                 @fmt(self.out&.current(), "   % = inttoptr i64 % to ptr\n", v, value); 
-            } {|
+            } {
                 // TODO: better error message if you forget an argument
                 // TODO: just track constants myself in Val? you can't just assign to a constsant int. 
                 @fmt(self.out&.current(), "   % = add % %, 0\n", v, ty.llvm_type(), value); 

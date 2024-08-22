@@ -45,12 +45,14 @@ Lexer :: @struct(
     //       need to be smarter about how constants get emitted. 
     token: Token,
     line := 0,
+    old_line := 0,
 );
 
 // TODO: need be be able to find the ResAddr cause it might not be on top of the stack. (early return from flat_call: big ret/arg value )
 fn peek(self: *Lexer) *Token = self.token&;
 
 fn pop(self: *Lexer) *Token = {
+    self.old_line = self.line;
     if(self.eat_white_space_hit_end(), => return(self.token&));
     self.start = self.current;
     
@@ -92,8 +94,8 @@ fn pop(self: *Lexer) *Token = {
         @case("@".ascii()) => self.one(.At);
         @case("&".ascii()) => self.pair("&".ascii(), .Amp, (Op = .AmpAmp));
         @case("#".ascii()) => {
-            if self.peek_c(1) == "!".ascii() {|
-                dowhile() {|
+            if self.peek_c(1) == "!".ascii() {
+                dowhile() {
                     self.current += 1;
                     self.peek_c() != "\n".ascii() && self.peek_c() != 0
                 };
@@ -127,7 +129,7 @@ fn skip_to_closing_squigle(self: *Lexer) Ty(Str, Span) = {
     self.current += 1;
     depth := 1;
     whileb (=> depth.gt(0)) { ($break) |
-        if self.eat_white_space_hit_end() {|
+        if self.eat_white_space_hit_end() {
             break();
         };
         // TODO: skip #! ...... \n but it only matters if you had unnested stuff there which you shouldn't -- Apr 28
@@ -160,9 +162,9 @@ fn skip_string(self: *Lexer) Ty(Str, bool, bool) = {
     
     is_multiline := self.peek_c(1).eq("\"".ascii()).and(=> self.peek_c(2).eq("\"".ascii()));
     escapes := false;
-    text := if is_multiline {|
+    text := if is_multiline {
         self.current += 2;
-        dowhile {|
+        dowhile {
             self.current += 1;
             @switch(self.peek_c()) {
                 @case("\"".ascii()) => {
@@ -178,8 +180,8 @@ fn skip_string(self: *Lexer) Ty(Str, bool, bool) = {
         };
         self.current += 3;
         self.src.slice(self.start.add(3), self.current.sub(3))
-    } {|
-        dowhile {|
+    } {
+        dowhile {
             self.current += 1;
             @switch(self.peek_c()) {
                 @case("\"".ascii()) => false;
@@ -211,14 +213,14 @@ fn skip_string(self: *Lexer) Ty(Str, bool, bool) = {
 fn lex_string(self: *Lexer) void #once = {
     // TODO: destructuring 
     text, escapes, success := self.skip_string();
-    if success {|
+    if success {
         self.put_token((Quoted = (s = self.pool.insert_owned(text), escapes = escapes)));
     };
 }
 
 fn lex_num(self: *Lexer) void = {
     whole := self.lex_int();
-    if self.peek_c().eq(".".ascii()).and(=> self.peek_c(1).is_ascii_digit()) {|
+    if self.peek_c().eq(".".ascii()).and(=> self.peek_c(1).is_ascii_digit()) {
         // Actually, that's a float.
         self.current += 1;
         start := self.current;
@@ -228,7 +230,7 @@ fn lex_num(self: *Lexer) void = {
         scale := 10.pow(digits);
         n := whole.float().add(fraction.float().div(scale.float()));
         self.put_token((Float = n));
-    } {|
+    } {
         self.put_token((Number = whole));
     
     };
@@ -244,7 +246,7 @@ fn pow(base: i64, exp: i64) i64 = {
 
 fn lex_int(self: *Lexer) i64 = {
     total := 0;
-    dowhile {|
+    dowhile {
         total *= 10;
         total += self.peek_c().dec_digit();
         self.current += 1;
@@ -257,16 +259,16 @@ fn lex_hex(self: *Lexer) void #once = {
     self.current += 2;
     total := 0;
     
-    if !self.peek_c().is_hex_digit() {|
+    if !self.peek_c().is_hex_digit() {
         self.error((Unexpected = self.peek_c().zext()));
         return();
     };
     
     bits := 0;
-    dowhile {|
+    dowhile {
         total *= 16;
         bits += 4;
-        if bits > 64 {|
+        if bits > 64 {
             self.error(.TooManyBits);
             return();
         };
@@ -292,16 +294,16 @@ fn lex_bin(self: *Lexer) void #once = {
     total := 0;
     
     c := self.peek_c();
-    if c.ne("0".ascii()).and(c.ne("1".ascii())) {|
+    if c.ne("0".ascii()).and(c.ne("1".ascii())) {
         self.error((Unexpected = self.peek_c().zext()));
         return();
     };
     
     bits := 0;
-    dowhile {|
+    dowhile {
         total *= 2;
         bits += 1;
-        if bits.gt(64) {|
+        if bits.gt(64) {
             self.error(.TooManyBits);
             return();
         };
@@ -325,7 +327,7 @@ fn lex_bin(self: *Lexer) void #once = {
 }
 
 fn lex_ident(self: *Lexer) void = {
-    dowhile {|
+    dowhile {
         self.current += 1;
         c := self.peek_c();
         c.is_ascii_alpha().or(=> c.is_ascii_digit()).or(=> c == "_".ascii())
@@ -356,26 +358,26 @@ fn one(self: *Lexer, type: TokenType) void = {
 
 fn eat_white_space_hit_end(self: *Lexer) bool = {
     break :: return;
-    if self.current >= self.src.len {|
+    if self.current >= self.src.len {
         self.start = self.current;
         self.put_token(.Eof);
         break(true);
     };
-    loop {|
+    loop {
         continue :: local_return;
         c := self.peek_c();
-        if c.is_whitespace() {|
-            if c == "\n".ascii() {|
+        if c.is_whitespace() {
+            if c == "\n".ascii() {
                 self.line += 1;
             };
             self.current += 1;
             continue();
         };
         
-        if self.peek_c() == "/".ascii() {|
+        if self.peek_c() == "/".ascii() {
             @switch(self.peek_c(1)) {
                 @case("/".ascii()) => { // single line
-                    dowhile {|
+                    dowhile {
                         self.current += 1;
                         self.peek_c().ne("\n".ascii()).and(=> self.peek_c().ne(0))
                     };
@@ -385,16 +387,16 @@ fn eat_white_space_hit_end(self: *Lexer) bool = {
                     self.start = self.current; // give right error location if unterminated. 
                     self.current += 2; 
                     depth := 1; 
-                    while(=> depth > 0) {|
+                    while(=> depth > 0) {
                         @switch(self.peek_c()){
                             @case("/".ascii()) => {
-                                if self.peek_c(1) == "*".ascii() {|
+                                if self.peek_c(1) == "*".ascii() {
                                     self.current += 1;
                                     depth += 1;
                                 };
                             };
                             @case("*".ascii()) => {
-                                if self.peek_c(1) == "/".ascii() {|
+                                if self.peek_c(1) == "/".ascii() {
                                     self.current += 1;
                                     depth -= 1;
                                 };

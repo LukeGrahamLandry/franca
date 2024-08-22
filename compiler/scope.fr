@@ -91,11 +91,11 @@ fn maybe_renumber_and_dup_scope(self: *SelfHosted, new_func: *Func) Result(void,
     // the special case for generics is when args can reference previous ones so they have to resolve sign earlier.
     
     needs_renumber := new_func.get_flag(.AllowRtCapture).or(new_func.get_flag(.Generic));
-    if needs_renumber {|
+    if needs_renumber {
         mapping: HashMap(Var, Var) = init(temp());
         renumber: RenumberVars = (scope = self.scopes, mapping = mapping&);
         renumber&.walk_func(new_func);
-        if new_func.get_flag(.Generic) && !new_func.get_flag(.ResolvedBody) {|
+        if new_func.get_flag(.Generic) && !new_func.get_flag(.ResolvedBody) {
             // the sign has already been resolved so we need to renumber before binding arguments.
             // however, the body hasn't been resolved yet, so we can't just renumber in place.
             // instead, remap the sign as normal and then, insert a new scope containing the remapped variables,
@@ -137,7 +137,7 @@ fn maybe_renumber_and_dup_scope(self: *SelfHosted, new_func: *Func) Result(void,
         
             new_func.scope = (Some = id);
         };
-    } else {|
+    } else {
         assert(!new_func.get_flag(.ResolvedBody), "resolved body");
     };
     
@@ -233,10 +233,10 @@ fn resolve_func(self: *ResolveScope, func: *Func) PRes = {
     self.push_scope((Some = func.name));
     func.scope = (Some = self.scope);
 
-    if func.get_flag(.AllowRtCapture) {|
+    if func.get_flag(.AllowRtCapture) {
         @try(self.resolve_func_args(func)) return;
         @try(self.resolve_func_body(func)) return;
-    } else {|
+    } else {
         self.pop_scope();
     };
 
@@ -251,7 +251,7 @@ fn resolve_func_args(self: *ResolveScope, func: *Func) PRes = {
     generic := func.get_flag(.Generic); // ret is allowed to depend on previous args.
     func.set_flag(.ResolvedSign);
 
-    if generic {|
+    if generic {
         each func.arg.bindings { b |
             @try(self.declare_binding(b, func.loc, true)) return;
         };
@@ -272,8 +272,8 @@ fn resolve_func_body(self: *ResolveScope, func: *Func) PRes = {
 
     self.push_scope(.None);
 
-    if generic {|
-    } else {|
+    if generic {
+    } else {
         each func.arg.bindings { b |
             @try(self.declare_binding(b, func.loc, true)) return;
         };
@@ -295,7 +295,7 @@ fn resolve_func_body(self: *ResolveScope, func: *Func) PRes = {
 
     capures := self.captures;
 
-    if func.get_flag(.AllowRtCapture) {|
+    if func.get_flag(.AllowRtCapture) {
         // TODO: this is only needed for the error reporting below but involves a slow iteration (in find_var). 
         //       Track which scope you're capturing from the first time we get the var so don't have to look it up again? -- Jun 26
         // Now check which things we captured from *our* parent.
@@ -303,7 +303,7 @@ fn resolve_func_body(self: *ResolveScope, func: *Func) PRes = {
         for self.captures { c |
             self.find_var(c.name); // This adds it back to self.captures if needed
         };
-    } else {|
+    } else {
         // TODO: show the captured var use site and declaration site.
         // TODO: add a test that this error is reported
         @assert_eq(true, capures.is_empty(), "Must use '=>' for closure '%' with captures", self.compiler.pool.get(func.name));
@@ -319,12 +319,12 @@ fn scan_const_decls(self: *ResolveScope, stmt: *FatStmt) PRes = {
         (fn DeclNamed(f) => {
             // kinda hack. just makes it easier to read logs when you do 'name :: fn() ...'
             @if_let(f.value.expr&) fn Closure(func) => {
-                if func.name == Flag.Anon.ident() {|
+                if func.name == Flag.Anon.ident() {
                     func.name = f.name;
                 };
             };
             
-            if (f.kind == .Const) {|
+            if (f.kind == .Const) {
                 new := @try(self.decl_var(f.name, f.kind, loc, .Unknown)) return;
                 decl: Stmt = (DeclVar = (
                     value = f.value,
@@ -353,13 +353,13 @@ fn scan_const_decls(self: *ResolveScope, stmt: *FatStmt) PRes = {
 fn slow_body(self: *ResolveScope, body: *List(FatStmt)) PRes #once = {
     new_body: List(FatStmt) = list(body.len, body.gpa);
     dirty := true;
-    while (=> dirty) {|
+    while (=> dirty) {
         dirty = false;
         each body { stmt | 
             continue :: local_return;
-            if stmt.annotations.len == 1 && stmt.annotations.items()[0].name == Flag.include_std.ident() {|
+            if stmt.annotations.len == 1 && stmt.annotations.items()[0].name == Flag.include_std.ident() {
                 msg :: "#include_std requires string argument";
-                arg_expr := stmt.annotations.items()[0].args.or() {|
+                arg_expr := stmt.annotations.items()[0].args.or() {
                     return(@error(msg))
                 };
                 name := @match(arg_expr.expr) {
@@ -367,10 +367,10 @@ fn slow_body(self: *ResolveScope, body: *List(FatStmt)) PRes #once = {
                     @default => return(@error(msg));
                 };
                 
-                if !self.compiler.scopes.already_loaded&.insert(name) {|
+                if !self.compiler.scopes.already_loaded&.insert(name) {
                     name := self.compiler.pool.get(name);
                     :: ?WaitingParse;
-                    file := self.compiler.get_include_std(name).or() {|
+                    file := self.compiler.get_include_std(name).or() {
                         return(@error("unknown path for #include_std %", name));
                         unreachable()
                     };
@@ -403,19 +403,19 @@ fn find_var(self: *ResolveScope, name: Symbol) ?Var = {
     block := self.block;
     first := true;
 
-    loop {|
+    loop {
         scope := self.compiler.scopes[s]&;
         found := find(scope, block, name);
         if found& { v | // TODO: it gets the arity wrong if not by pointer. 
             // TODO: derive ne from eq so you can use != more often. 
             // TODO: better error message for *T vs **T, should say dereference not unsafe cast. 
-            if first.not().and(=> !v.kind.eq(.Const)).and(=> !self.captures.contains(v)) {|
+            if first.not().and(=> !v.kind.eq(.Const)).and(=> !self.captures.contains(v)) {
                 // We got it from our parent function.
                 self.captures&.push(v[]);
             };
             return(Some = v[]);
         };
-        if scope.parent == s {|
+        if scope.parent == s {
             return(.None);
         };
         s = scope.parent;
@@ -423,12 +423,12 @@ fn find_var(self: *ResolveScope, name: Symbol) ?Var = {
     };
     
     find :: fn(scope: *Scope, block: i64, name: Symbol) ?Var = {
-        if scope.vars.is_empty() {|
+        if scope.vars.is_empty() {
             //assert_eq(block, 0); // TODO: debug
             return(.None);
         };
         vars := scope.vars[block]&;
-        loop {|
+        loop {
             const := vars.const_lookup&.get(name);
             if const& { v |  // TODO: needs to be by reference because arity is broken
                 return(Some = v[]);
@@ -441,7 +441,7 @@ fn find_var(self: *ResolveScope, name: Symbol) ?Var = {
                 });
             };
 
-            if vars.parent == block {|
+            if vars.parent == block {
                 //assert_eq(block, 0); // TODO: debug
                 return(.None);
             };
@@ -464,16 +464,16 @@ fn decl_var(self: *ResolveScope, name: Symbol, kind: VarType, loc: Span, placeho
     scope := scopes[s]&;
     
     prev := scope.vars[self.block].const_lookup&.get(name);
-    if prev.is_some() {|
+    if prev.is_some() {
         return(@error("Cannot shadow constant in the same scope: %", self.compiler.pool.get(name)));
     };
     
     var: Var = (kind = kind, name = name, id = scopes.types.len.trunc(), scope = self.scope, block = self.block.trunc());
-    if kind == .Const {|
+    if kind == .Const {
         empty: Ty(FatExpr, LazyType) = ((expr = (Poison = placeholder), loc = loc, ty = UnknownType, done = false), .Infer);
         scopes.constants&.push((Some = empty));
         prev := scope.vars[self.block].const_lookup&.insert(name, var);
-    } else {|
+    } else {
         scopes.constants&.push(.None);
     };
     
@@ -489,7 +489,7 @@ fn push_scope(self: *ResolveScope, name: ?Symbol) void = {
     parent: i64 = if name { _ |
         self.scope = self.compiler.scopes.new_scope(self.scope, self.block);
         0
-    } else {|
+    } else {
         self.block
     };
     scope := self.compiler.scopes[self.scope]&;
@@ -560,8 +560,8 @@ fn handle_expr(self: *ResolveScope, expr: *FatExpr) Result(DoMore, *ParseErr) #o
             (=> {
                 break :: local_return;
                 each f.body { stmt |
-                    if stmt.annotations.len == 1 {|
-                        if stmt.annotations.items()[0].name == Flag.include_std.ident() {|
+                    if stmt.annotations.len == 1 {
+                        if stmt.annotations.items()[0].name == Flag.include_std.ident() {
                             stmts := f.body.assume_owned(self.compiler.get_alloc());
                             @try(self.slow_body(stmts&)) return;
                             f.body = stmts.rs();
