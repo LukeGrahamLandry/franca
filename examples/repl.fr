@@ -1,0 +1,230 @@
+allocator :: libc_allocator;
+
+fn main() void = {
+    vtable := new_sema_init_vtable();
+    vtable.fill_driver_vtable();
+    update_global_stdlib_path();
+    prelude := "#include_std(\"lib/core.fr\");";
+    comp := {vtable.init_compiler}(.Aarch64, default_build_options()); // TODO: comptime get the current arch
+    c := vtable.with(comp);
+    file := {c.vtable.add_file}(c.data, "repl!", prelude);
+    self := c.data.cast()[][];
+    self.env.new_sema = true;
+    id := self.parser.push_parse(prelude, file);
+    stmts := self.parser.finish_pending_stmts(id);
+    stmts := self.unwrap_report_error(RsVec(FatStmt), stmts); // TODO: don't return RsVec -- Jun 29
+    {c.vtable.make_and_resolve_and_compile_top_level}(c.data, stmts.items()).unwrap();
+    
+    // TODO: these numbers are experimentally where it happens to put the prelude constants right now. should do something more robust where you can ask it. 
+    scope_id := self.scopes.new_scope(from_index(1), 3);
+    scope := self.scopes[scope_id]&;
+    scope.vars&.push(@as(BlockScope) (
+        vars = list(scope.vars.gpa), 
+        const_lookup = init(scope.vars.gpa),
+        parent = 0
+    ));
+    block_id := scope.vars.len - 1;
+    
+    state: ReplState = (
+        program = self, 
+        variables = init(allocator),
+        top_scope = scope_id,
+        top_block = block_id,
+    );
+    loop {
+        text := "".clone(libc_allocator);
+        text&.read_line();
+        text&.push_all(";");
+        println("");
+        @println("We got code! \"%\"", text.items());    
+        
+        @match(state&.run_chunk(text.items())) {
+            fn Ok() => ();
+            fn Err(e) => {
+                if e.span.low == 0 && e.span.high == 0 {
+                    e.span = self.last_loc;
+                };
+                self.codemap.show_error_line(e.span);
+                @eprintln("Compile Error: %", e.msg);
+            }
+        };
+    };
+}
+
+ReplState :: @struct(
+    program: *SelfHosted,
+    variables: HashMap(Var, Ty([]u8, Type)),
+    top_scope: ScopeId,
+    top_block: i64,
+);
+
+fn run_chunk(state: *ReplState, src: Str) Res(void) = {
+    :: WalkAst(ReplState, void);
+    
+    self := state.program;
+    file := self.codemap.add_file("repl!", src);
+    id := self.parser.push_parse(src, file);
+    stmts := @try(self.parser.finish_pending_stmts(id)) return;
+    
+    r: ResolveScope = new(self, state.top_scope, file);
+    r.block = state.top_block;
+    each stmts { stmt | 
+        println(stmt.log(self.pool));
+        @try(r&.walk_stmt(stmt)) return;
+        println(stmt.log(self.pool));
+        state.walk_stmt(stmt);
+        println(stmt.log(self.pool));
+        
+        @match(stmt.stmt&) {
+            fn Noop() => ();
+            fn Eval(e) => {
+                value := @try(self.eval(e, .None)) return;
+            }
+            fn DeclVar(f) => {
+                if f.name.kind != .Var {
+                    self.last_loc = stmt.loc;
+                    return(@err("unhandled repl stmt type"));
+                };
+                
+                value := @try(self.eval(f.value&, .None)) return;
+                bytes := value&.bytes().clone(allocator).items();  // it might be small and stored inline
+                state.variables&.insert(f.name, (bytes, f.value.ty));
+            }
+            @default => {
+                self.last_loc = stmt.loc;
+                return(@err("unhandled repl stmt type"));
+            };
+        };
+    };
+    .Ok
+}
+
+fn eval(self: *SelfHosted, e: *FatExpr, want: ResultType) Res(Values) = {
+    self.poll_in_place(Values) {
+        return :: local_return;
+        @check(self.compile_expr(e, want)) return;
+        self.immediate_eval_expr(e, e.ty)
+    }
+}
+
+fn handle_expr(self: *ReplState, expr: *FatExpr) Result(DoMore, void) #once = {
+    @match(expr.expr&){
+        fn GetVar(name) => {
+            if self.variables&.get_ptr(name) { bytes_type |
+                ptr_val: Values = self.program.to_values(*u8, bytes_type._0.ptr);
+                expr.expr = (Value = (bytes = ptr_val, coerced = false));
+                expr.ty = self.program.ptr_ty(bytes_type._1);
+                
+                e := self.program.box(expr[]);
+                expr[] = synthetic_ty((Deref = e), expr.loc, bytes_type._1);
+            };
+            (Ok = DoMore.Break)
+        }
+        @default => (Ok = DoMore.Continue);
+    }
+}
+fn handle_stmt(self: *ReplState, stmt: *FatStmt) Result(DoMore, void) #once = (Ok = .Continue);
+fn handle_func(self: *ReplState, func: *Func) Result(DoMore, void) #once = (Ok = .Continue);
+fn handle_type(self: *ReplState, ty: *LazyType) Result(DoMore, void) #once = (Ok = .Continue);
+fn handle_pattern(self: *ReplState, p: *Pattern) Result(DoMore, void) #once = (Ok = .Continue);
+
+fn read_line(text: *List(u8)) void = {
+    start_raw_terminal(STD_IN);
+
+    render_buffer: List(u8) = list(4096, libc_allocator);
+    loop {
+        continue :: local_return;
+        c: u8 = 0;
+        len := read(STD_IN, c&, 1).unwrap();
+        if(len.eq(1)){
+            @switch(c) {
+                @case(27) => {
+                    // TODO
+                };
+                @case(10) => {
+                    // Pressed enter. 
+                    end_raw_terminal(STD_IN);
+                    return();
+                };
+                @default => text.push(c);
+            };
+        };
+        @fmt(render_buffer&, "\r");  // take it back now yall
+        render_buffer&.push_all(">>> ");
+        render_buffer&.push_all(text.items());
+        print(render_buffer.items());
+        
+        render_buffer&.clear();
+        usleep(10000);
+    };
+}
+
+//////////////////////////////////////////////
+// Driver
+//
+
+fn load_src_gui(vtable: *ImportVTable) Ty(CompCtx, *ComptimeLibs) = {
+    src := temp().read_to_string("lib/core.fr");
+    src&.read_and_push("compiler/lib.fr");
+    @fmt(src&, ";ENABLE_TRACY :: false;\n");
+    @fmt(src&, ";ENABLE_LSP   :: false;\n");
+    @fmt(src&, ";ENABLE_QBE_BACKEND :: false;\n");
+    @fmt(src&, ";ENABLE_LOGGING_CALLBACKS :: false;\n");
+    @fmt(src&, ";DO_TERMINAL_COLOURS :: false;\n");
+    src&.read_and_push("examples/repl.fr");
+    
+    opts := default_build_options();
+    opts.deduplicate_bytecode = true;
+    opts.debug_info = false;
+    opts.retain_function_names = true;
+    
+    comp := vtable.new_with_src(src.items(), opts);
+    c := vtable.with(comp);
+    
+    libs := c.empty_libs();
+    libs := temp().boxed(ComptimeLibs, libs);
+    libs.intercept_imports();
+    
+    (c, libs)
+}
+
+fn driver(vtable: *ImportVTable) void = {
+    if !file_exists("compiler/main.fr") {
+        panic("Working directory must be top level of the franca repository");
+    };
+    start := timestamp();
+    c, libs := load_src_gui(vtable);
+    
+    new_main := c.get_unique_named("main").unwrap();
+    exports := (@list(new_main) temp()).items();
+    ir_text := {c.vtable.emit_llvm}(c, temp(), exports, .ExportWithNames);
+    @println("Emitted % bytes of llvm ir.", ir_text.len);  // useful to see when i start trying to deduplicate bytecode. 
+    end := timestamp();
+
+    start := timestamp();
+    args := libs.get_aot_objects();
+    args&.push_all(@slice ("-o", "target/franca/franca2repl", "-g", "-Os"));
+    
+    build_llvm(ir_text, args.items());
+    end := timestamp();
+    @println("LLVM time: % ms.", end.sub(start));
+    exit(0);
+    
+    // TODO: return result
+    fn build_llvm(ir: BucketArray(u8), args: Slice(Str)) void = {
+        out := open_temp_file();
+        for(ir&){bucket|
+            out.fd&.write(bucket);
+        };
+        @println("Write llvm ir to %", out&.s_name());   
+        args: List(Str) = args.clone(temp());
+        args&.push("-x"); // don't check the file extension of source files that follow. 
+        args&.push("ir"); 
+        args&.push("-g"); 
+        args&.push(out&.s_name());
+        @println("%", args.items());
+        success := run_cmd_blocking(CLANG_PATH, args.items());
+        assert(success, "ICE: generated invalid llvm ir");
+        out.remove();
+    }
+}

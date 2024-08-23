@@ -10,3 +10,4 @@
 - dearimgui_demo: calls ImGui::ShowDemoWindow (lib:sokol, lib:dearimgui)
 - c_bindgen: parses clang's ast to generate franca function signetures (cli:clang, lib:wuffs)
 - default_driver: a driver program that can be used to build other franca programs (cli:clang, cli:qbe)
+- compiler_gui: uses the compiler as a libary to display introspection about a program (lib:sokol, lib:dearimgui)

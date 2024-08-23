@@ -1,32 +1,12 @@
+// TODO: the variable window shows the wrong name.  
+// TODO: c_bindgen doesn't work with unnamed enums. 
+
 ImGuiMouseSource :: i32;
 ImGuiDir :: i32;
 ImGuiInputEventType :: i32;
 ImGuiInputSource :: i32;
 
 allocator :: libc_allocator;
-
-fn main() void = {
-    // TODO: can't call ArenaAlloc/mark before any allocations have been made. 
-    @println("coconut.jpg");
-    
-    state := State.zeroed();
-    state.vtable = new_sema_init_vtable();
-    state.vtable.fill_driver_vtable();
-    state.filename = list(255, libc_allocator);
-    state.messages = list(255, libc_allocator);
-    state.programs = list(libc_allocator);
-    
-    update_global_stdlib_path();
-    
-    desc := SappDesc.zeroed();
-    desc.init_userdata_cb = do_init;
-    desc.frame_userdata_cb = do_render;
-    desc.event_userdata_cb = do_event;
-    desc.user_data = State.raw_from_ptr(state&);
-    desc.logger.func = slog_func;
-    desc.window_title = "Franca".maybe_borrow_cstr(temp());
-    sapp_run(desc&);
-}
 
 State :: @struct(
     pass_action: SgPassAction,
@@ -44,12 +24,16 @@ ProgramState :: @struct(
     hide_uncompiled_functions: bool = true,
     hide_comptimeonly_functions: bool = true,
     hide_synthetic_functions: bool = true,
+    hide_unreferenced_overloads: bool = true,
+    hide_unfinished_constants: bool = true,
     extra_windows: List(DetailWindow),
     new_window_ticks: i64 = 0,
 );
 
 DetailWindow :: @tagged(
     Function: FuncId,
+    Overloads: OverloadSet,
+    Variable: u32,
 );
 
 Phase :: @enum(i64) (Start, Driver); ::enum(Phase);
@@ -73,8 +57,6 @@ show_gui :: fn(state: *State) void = {
                     log_event = (Some = log_event_callback),
                 );
                 {c.vtable.give_vtable}(c.data, mem.ptr, userdata);
-                //give_vtable: @FnPtr(c: Compiler, vtable: *ExportVTable, userdata: rawptr) void,
-                //c := c.data.cast()[][];
                 state.phase = .Driver;
                 
                 if c.get_unique_named("main") {f|
@@ -99,10 +81,11 @@ show_gui :: fn(state: *State) void = {
                 return();
             };
             
-            each state.messages { msg | 
-                igTextUnformatted(@as(CStr) (ptr = msg.ptr), @as(CStr) (ptr = msg.ptr.offset(msg.len)));
+            if igCollapsingHeader_TreeNodeFlags(@fmt_cstr("Event Log"), 0) {
+                each state.messages { msg | 
+                    igTextUnformatted(@as(CStr) (ptr = msg.ptr), @as(CStr) (ptr = msg.ptr.offset(msg.len)));
+                };
             };
-            
             enumerate state.programs { iii, instance |  
                 continue :: local_return;
                 self := instance.compiler;
@@ -113,7 +96,7 @@ show_gui :: fn(state: *State) void = {
                     @match(kind[]) {
                         fn Function(f_id) => {
                             func := self.get_function(f_id);
-                            name := @fmt_cstr("Function %##%", self.pool.get(func.name), f_id.as_index());
+                            name := @fmt_cstr("Function % %", self.pool.get(func.name), f_id.as_index());
                             show := true;
                             if !igBegin(name, show&, 0) {
                                 igEnd();
@@ -127,16 +110,64 @@ show_gui :: fn(state: *State) void = {
                             if !show {|
                                 instance.extra_windows&.ordered_remove(i);
                             };
+                            @ig_text("%", name); // :SLOW
                             instance.show_func_window(f_id);
+                            
+                            igEnd();
+                        }
+                        fn Overloads(os) => {
+                            data := instance.compiler.dispatch.overloads&.nested_index(os.as_index());
+                            name := @fmt_cstr("Overloads % %", self.pool.get(data.name), os.as_index());
+                            show := true;
+                            if !igBegin(name, show&, 0) {
+                                igEnd();
+                                continue();
+                            };
+                            if last && instance.new_window_ticks > 0 {
+                                instance.new_window_ticks -= 1;
+                                igSetWindowFocus_Nil();
+                            };
+                            last = false;
+                            if !show {|
+                                instance.extra_windows&.ordered_remove(i);
+                            };
+                            @ig_text("%", name); // :SLOW
+                            instance.show_overloads_window(os);
+                            
+                            igEnd();
+                        }
+                        fn Variable(idx) => {
+                            idx: i64 = idx.zext();
+                            
+                            usages := instance.compiler.index.variables&.nested_index(i);
+                            name := @match(usages) {
+                                fn Some(usages) => usages.var.name;
+                                fn None() => instance.compiler.pool.insert_owned("???");
+                            };
+                            name := @fmt_cstr("Variable % %", instance.compiler.pool.get(name), idx);
+                            show := true;
+                            if !igBegin(name, show&, 0) {
+                                igEnd();
+                                continue();
+                            };
+                            if last && instance.new_window_ticks > 0 {
+                                instance.new_window_ticks -= 1;
+                                igSetWindowFocus_Nil();
+                            };
+                            last = false;
+                            if !show {|
+                                instance.extra_windows&.ordered_remove(i);
+                            };
+                            @ig_text("%", name);  // :SLOW
+                            instance.show_variable_window(idx);
                             
                             igEnd();
                         }
                     }
                 };
                 
-                name := @format("Instance##%", iii) temp();
-                name&.push(0);
-                if !igBegin(@as(CStr) (ptr = name.maybe_uninit.ptr), instance.show&, 0) {
+                name := @fmt_cstr("Instance##%", iii);
+                if !igBegin(name, instance.show&, 0) {
                     igEnd();
                     continue();
                 };
@@ -144,47 +175,51 @@ show_gui :: fn(state: *State) void = {
                 igCheckbox(@fmt_cstr("Hide Uncompiled Functions"), instance.hide_uncompiled_functions&);
                 igCheckbox(@fmt_cstr("Hide ComptimeOnly Functions"), instance.hide_comptimeonly_functions&);
                 igCheckbox(@fmt_cstr("Hide SyntheticEval Functions"), instance.hide_synthetic_functions&);
+                igCheckbox(@fmt_cstr("Hide Unreferenced Overload Sets"), instance.hide_unreferenced_overloads&);
+                igCheckbox(@fmt_cstr("Hide Unfinished Constants"), instance.hide_unfinished_constants&);
                 
                 if igCollapsingHeader_TreeNodeFlags(c_str(@symbol "Constants"), 0) {
-                    num_cols :: 4;
+                    num_cols :: 3;
                     if igBeginTable(c_str(@symbol "Constants"), num_cols, 0, (x = 800, y = 0), 0) {
                         range(0, instance.compiler.scopes.constants.len) { i | 
                             igPushID_Int(i.intcast());
                             usages := instance.compiler.index.variables&.nested_index(i);
                             if usages { usages |
-                                igTableNextRow(0, 0);
-                                igTableNextColumn();
-                                name := instance.compiler.pool.get(usages.var.name);
-                                igTextUnformatted(@as(CStr) (ptr = name.ptr), @as(CStr) (ptr = name.ptr.offset(name.len)));
-                                
-                                known := false;
+                                @assert_eq(@as(i64) usages.var.id.zext(), i);
                                 if usages.var.kind == .Const {|
-                                    v := instance.compiler.scopes.constants&.nested_index(usages.var.id.zext());
+                                    v := instance.compiler.scopes.constants&.nested_index(i);
                                     if v.as_ref() { value_ty | 
-                                        known := true;
-                                        igTableNextColumn();
-                                        type := value_ty._1&;
-                                        @match(type) {
-                                            fn Finished(type) => {
-                                                draw_type_ref(instance.compiler, type[]);
-                                            }
-                                            @default => {
-                                                msg := (@format("%", type.tag()) temp()).items();
-                                                igTextUnformatted(@as(CStr) (ptr = msg.ptr), @as(CStr) (ptr = msg.ptr.offset(msg.len)));
-                                            };
-                                        };
-                                        
-                                        igTableNextColumn();
                                         value := value_ty._0&;
-                                        draw_expr_ref(instance.compiler, value);
+                                        type := value_ty._1&;
+                                        
+                                        hide := false;
+                                        if instance.hide_unfinished_constants && !value.expr&.is(.Value) {
+                                            hide = true;
+                                        };
+                                        if !hide {
+                                            igTableNextRow(0, 0);
+                                            igTableNextColumn();
+                                            @ig_text("%", instance.compiler.pool.get(usages.var.name));
+                                            if igIsItemClicked(0) {
+                                                x: DetailWindow = (Variable = i.trunc());
+                                                instance.extra_windows&.push(x);
+                                                instance.new_window_ticks = 5;
+                                            };
+                                                                        
+                                            igTableNextColumn();
+                                            @match(type) {
+                                                fn Finished(type) => {
+                                                    draw_type_ref(instance.compiler, type[]);
+                                                }
+                                                @default => {
+                                                    @ig_text("%", type.tag());
+                                                };
+                                            };
+                                            
+                                            igTableNextColumn();
+                                            draw_expr_ref(instance.compiler, value);
+                                        };
                                     };
-                                };
-                                if !known {|
-                                    msg := "---";
-                                    igTableNextColumn();
-                                    igTextUnformatted(@as(CStr) (ptr = msg.ptr), @as(CStr) (ptr = msg.ptr.offset(msg.len)));
-                                    igTableNextColumn();
-                                    igTextUnformatted(@as(CStr) (ptr = msg.ptr), @as(CStr) (ptr = msg.ptr.offset(msg.len)));
                                 };
                             };
                             igPopID();
@@ -240,14 +275,28 @@ show_gui :: fn(state: *State) void = {
                     if igBeginTable(c_str(@symbol "Overload Sets"), num_cols, 0, (x = 800, y = 0), 0) {
                         range(0, instance.compiler.dispatch.overloads.len) { i | 
                             igPushID_Int(i.intcast());
-                            igTableNextRow(0, 0);
                             os := instance.compiler.dispatch.overloads&.nested_index(i);
                             
-                            igTableNextColumn();
-                            @ig_text("%_%", i, instance.compiler.pool.get(os.name));
+                            hide := false;
+                            if instance.hide_unreferenced_overloads && os.ready.is_empty() {
+                                hide = true;
+                            };
                             
-                            igTableNextColumn();
-                            @ig_text("%", os.ready.len);
+                            if !hide {
+                                igTableNextRow(0, 0);
+                                
+                                igTableNextColumn();
+                                @ig_text("%_%", i, instance.compiler.pool.get(os.name));
+                                
+                                if igIsItemClicked(0) {
+                                    x: DetailWindow = (Overloads = i.from_index());
+                                    instance.extra_windows&.push(x);
+                                    instance.new_window_ticks = 5;
+                                };
+                                
+                                igTableNextColumn();
+                                @ig_text("%", os.ready.len);
+                            };
                             
                             igPopID();
                         };
@@ -270,7 +319,8 @@ fn draw_function_row(instance: *ProgramState, f_id: FuncId) void = {
     @ig_text("%_%", f_id.as_index(), instance.compiler.pool.get(func.name));
     
     if igIsItemClicked(0) {
-        instance.extra_windows&.push(Function = f_id);
+        x: DetailWindow = (Function = f_id);
+        instance.extra_windows&.push(x);
         instance.new_window_ticks = 5;
     };
     
@@ -283,6 +333,30 @@ fn draw_function_row(instance: *ProgramState, f_id: FuncId) void = {
     @match(func.finished_ret) {
         fn Some(ty) => draw_type_ref(instance.compiler, ty);
         fn None() => @ig_text("---");
+    };
+}
+
+fn show_variable_window(instance: *ProgramState, i: i64) void = {
+    self := instance.compiler;
+    usages := self.index.variables&.nested_index(i);
+    usages := usages[].or(=> return());
+    @assert_eq(@as(i64) usages.var.id.zext(), i);
+    
+    if igCollapsingHeader_TreeNodeFlags(@fmt_cstr("Declaration"), 0) {
+        line := self.codemap.get_whole_line(usages.declaration);
+        @ig_text("Declared on line % of %", line.line, line.filename);
+        text := self.codemap.source_slice(line.line_text);
+        @ig_text("%", text);
+    };
+    
+    // -1 because the first is always the declaration. 
+    if igCollapsingHeader_TreeNodeFlags(@fmt_cstr("Usages (%)", usages.usages.len - 1), 0) {
+        for usages.usages.items().slice(1, usages.usages.len) { loc |
+            line := self.codemap.get_whole_line(loc);
+            @ig_text("Used on line % of %", line.line, line.filename);
+            text := self.codemap.source_slice(line.line_text);
+            @ig_text("%", text);
+        };
     };
 }
 
@@ -340,7 +414,6 @@ fn show_func_window(instance: *ProgramState, f_id: FuncId) void = {
         };
     };
     
-    
     if func.finished_bytecode_pointer { body | 
         body := FnBody.ptr_from_int(body);
         name := @fmt_cstr("Bytecode");
@@ -351,26 +424,54 @@ fn show_func_window(instance: *ProgramState, f_id: FuncId) void = {
         };
     };
     
+    if igCollapsingHeader_TreeNodeFlags(@fmt_cstr("Source"), 0) {
+        line := self.codemap.get_whole_line(func.loc);
+        @ig_text("Declared on line % of %", line.line, line.filename);
+        text := self.codemap.source_slice(line.line_text);
+        @ig_text("%", text);
+    };
+    
+    if igCollapsingHeader_TreeNodeFlags(@fmt_cstr("Body"), 0) {
+        @ig_text("%", func.log(self.pool));
+    };
+    
     if self.aarch64&.get_fn(f_id) { addr | 
         @ig_text("This function can be jit called at %", addr);
     };
     
-    @if_let(func.body&) fn Normal(expr) => {
-        if expr.is_const() {
-            @ig_text("Should be trivially inlinable.");
-            draw_expr_ref(self, expr);  
+}
+
+fn show_overloads_window(instance: *ProgramState, os: OverloadSet) void = {
+    self := instance.compiler;
+    data := instance.compiler.dispatch.overloads&.nested_index(os.as_index());
+    
+    name := @fmt_cstr("Ready (%)", data.ready.len());
+    if igCollapsingHeader_TreeNodeFlags(name, 0) {
+        num_cols :: 3;
+        if igBeginTable(name, num_cols, 0, (x = 800, y = 0), 400) {
+            for data.ready { option | 
+                draw_function_row(instance, option.func);
+            };
+            igEndTable();
         };
     };
-    
-    @ig_text("%", func.log(self.pool));
+    name := @fmt_cstr("Pending (%)", data.pending.len());
+    if igCollapsingHeader_TreeNodeFlags(name, 0) {
+        num_cols :: 3;
+        if igBeginTable(name, num_cols, 0, (x = 800, y = 0), 400) {
+            for data.pending { f_id | 
+                draw_function_row(instance, f_id);
+            };
+            igEndTable();
+        };
+    };
 }
 
 fn draw_expr_ref(self: *SelfHosted, expr: *FatExpr) void = {
     if expr.expr&.is(.Value) && !expr.ty.is_unknown() {
         draw_value_ref(self, expr.expr.Value.bytes&, expr.ty);
     } else {
-        msg := (@format("%", expr.expr&.tag()) temp()).items();
-        igTextUnformatted(@as(CStr) (ptr = msg.ptr), @as(CStr) (ptr = msg.ptr.offset(msg.len)));
+        msg := @ig_text("%", expr.expr&.tag());
     }
 }
 
@@ -380,8 +481,7 @@ fn draw_value_ref(self: *SelfHosted, values: *Values, ty: Type) void = {
     show_func :: fn() => {
         f_id := FuncId.assume_cast(values)[];
         func := self.get_function(f_id);
-        msg := (@format("F%_%", f_id.as_index(), self.pool.get(func.name)) temp()).items();
-        igTextUnformatted(@as(CStr) (ptr = msg.ptr), @as(CStr) (ptr = msg.ptr.offset(msg.len)));
+        msg := @ig_text("F%_%", f_id.as_index(), self.pool.get(func.name));
         return();
     };
     show_label :: fn() => {
@@ -393,8 +493,7 @@ fn draw_value_ref(self: *SelfHosted, values: *Values, ty: Type) void = {
         fn Fn(f) => show_func();
         fn Int(int) => {
             @if_let(int_value(values, int[])) fn Ok(i) => {
-                msg := (@format("%", i) temp()).items();
-                igTextUnformatted(@as(CStr) (ptr = msg.ptr), @as(CStr) (ptr = msg.ptr.offset(msg.len)));
+                msg := @ig_text("%", i);
                 return();
             };
         }
@@ -411,8 +510,7 @@ fn draw_value_ref(self: *SelfHosted, values: *Values, ty: Type) void = {
     if ty == OverloadSet {
         os := OverloadSet.assume_cast(values)[];
         data := self.dispatch.overloads&.nested_index(os.as_index());
-        msg := (@format("OS%_%", os.as_index(), self.pool.get(data.name)) temp()).items();
-        igTextUnformatted(@as(CStr) (ptr = msg.ptr), @as(CStr) (ptr = msg.ptr.offset(msg.len)));
+        msg := @ig_text("OS%_%", os.as_index(), self.pool.get(data.name));
         return();
     };
     
@@ -429,8 +527,7 @@ fn draw_value_ref(self: *SelfHosted, values: *Values, ty: Type) void = {
     };
     
     // if we don't know how to draw this type, just fall back to something useless
-    msg := (@format("Value:%", values.len()) temp()).items();
-    igTextUnformatted(@as(CStr) (ptr = msg.ptr), @as(CStr) (ptr = msg.ptr.offset(msg.len)));
+    @ig_text("Value:%", values.len());
 }
 
 fn draw_type_ref(self: *SelfHosted, ty: Type) void = {
@@ -469,7 +566,7 @@ fn ig_text(fmt_args: FatExpr) FatExpr #macro = @{
 }
 
 fn fmt_cstr(fmt_args: FatExpr) FatExpr #macro = @{
-    msg := (@format(@[fmt_args]) temp());
+    msg := @format(@[fmt_args]) temp();
     msg&.push(0);
     @as(CStr) (ptr = msg.maybe_uninit.ptr)
 }
@@ -484,6 +581,33 @@ log_event_callback :: fn(userdata: rawptr, c: Compiler, event: *CompilerLogEvent
         }
     }
 };
+
+//////////////////////////////////////////////
+// Sokol Rendering Glue
+//
+
+fn main() void = {
+    // TODO: can't call ArenaAlloc/mark before any allocations have been made. 
+    @println("coconut.jpg");
+    
+    state := State.zeroed();
+    state.vtable = new_sema_init_vtable();
+    state.vtable.fill_driver_vtable();
+    state.filename = list(255, libc_allocator);
+    state.messages = list(255, libc_allocator);
+    state.programs = list(libc_allocator);
+    
+    update_global_stdlib_path();
+    
+    desc := SappDesc.zeroed();
+    desc.init_userdata_cb = do_init;
+    desc.frame_userdata_cb = do_render;
+    desc.event_userdata_cb = do_event;
+    desc.user_data = State.raw_from_ptr(state&);
+    desc.logger.func = slog_func;
+    desc.window_title = "Franca".maybe_borrow_cstr(temp());
+    sapp_run(desc&);
+}
 
 do_init :: fn(userdata: rawptr) void = {
     state := State.ptr_from_raw(userdata);
@@ -534,7 +658,6 @@ do_event :: fn(event: *SappEvent, userdata: rawptr) void = {
     };
     simgui_handle_event(event);
 };
-
 
 //////////////////////////////////////////////
 // Driver

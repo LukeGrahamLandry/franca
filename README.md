@@ -2,6 +2,7 @@
 
 A programing language understandable by one person.
 That may be interpreted as "any person will be able to understand it" or "one specific person is able to understand it", at your option.
+A language for small teams. An experiment in non-defensive design.
 
 ## Features
 
@@ -56,5 +57,7 @@ there must be proportional terrible things or I'm probably just lying.
 - Sadly I don't have nice IDE integration.
 - Sadly I don't have incremental builds. every time you run a program, you recompile the standard library for comptime. (...but its so fast it doesn't matter yet).
 - Sadly the compiler only runs on aarch64. (the llvm backend can cross compile to other targets tho, but I can't run comptime code on them yet).
+  - ie. it is not yet a language that just... runs on a computer, whatever computer, nobody cares.
 - Sadly my implementation of the C ABI is buggy. It's good enough for the example programs tho.
 - Sadly I don't have a nice debug mode that detects undefined behaviour (overflow, wrong tagged field, etc).
+- Sadly I don't have good modules / namespace management.
