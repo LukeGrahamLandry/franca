@@ -12,6 +12,7 @@
   write a test for that, need to have better support for testing that a certain error happens.
 - make the quote syntax not make a redundant block for single expressions that you have to manually get rid of if you want to access the actual node.
 - combine places that do multiple walk_ast/clone passes (renumber/unmark_done)
+- auto test repl. at least compile all the example programs in run_tests.fr, at least compile the compiler.
 
 ## data structure changes
 

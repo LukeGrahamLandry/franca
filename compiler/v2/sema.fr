@@ -24,9 +24,10 @@ OverloadOption :: @struct(
     ret: ?Type, // For #generic, we might not know without the args
 );
 
-DEBUG_SPAM_LOG :: false;
-//log_event :: println;
 fn log_event(fmt_args: FatExpr, compiler: FatExpr) FatExpr #macro = {
+    if DEBUG_SPAM_LOG {
+        return(println(fmt_args));
+    };
     @if(ENABLE_LOGGING_CALLBACKS, @{
         c := @[compiler];
         has_driver_handler := !c.env.driver_vtable_ptr.is_null(); // TODO: garbage
@@ -1990,6 +1991,7 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
     
     overloads := self.dispatch.overloads&.nested_index(i.as_index());
     self.compute_new_overloads(overloads);
+    
     interesting: List(OverloadOption) = list(temp());
     @log_event("% total options", overloads.ready.len) self;
     each overloads.ready { opt | 
@@ -1997,6 +1999,7 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
         @if_let(requested_ret) fn Specific(want) => {
             if opt.ret { have | 
                 if self.can_assign(want, have).is_err() {
+                    //@println("[%] ret discard % for %", i, self.log_type(have), self.log_type(want));
                     continue();
                 };
             };
@@ -2053,6 +2056,8 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
                 fn Err(e) => return(Err = e);
                 fn Suspend(f) => {
                     blocked&.push(f); 
+                    //still_interesting&.push(opt[]);
+                    // TODO: this can't be right... if we suspended we shouldn't assume it won't match!
                     continue(); // we don't like it, we skip it.
                 }
             };
@@ -2077,6 +2082,8 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
                             @match(self.compile_expr(arg_expr, hint)) {
                                 fn Suspend(f) => {
                                     blocked&.push(f); 
+                                    //still_interesting&.push(opt[]);
+                                    // TODO: this can't be right... if we suspended we shouldn't assume it won't match!
                                     continue(); // we don't like it, we skip it.
                                 }
                                 fn Err(e) => {
@@ -2085,6 +2092,7 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
                                 }
                                 fn Ok() => {
                                     if !arg_expr.ty.is_unknown() && self.can_assign(param, arg_expr.ty).is_err() {
+                                        //@println("kwards discard % for %", self.log_type(arg_expr.ty), self.log_type(param));
                                         continue();
                                     };
                                 }
@@ -2119,7 +2127,9 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
                 @match(self.compile_expr(arg_expr, hint)) {
                     fn Suspend(f) => {
                         blocked&.push(f); 
+                        //still_interesting&.push(opt[]);
                         //arg_expr[] = other;
+                        // TODO: this can't be right... if we suspended we shouldn't assume it won't match!
                         continue(); // we don't like it, we skip it.
                     }
                     fn Err(e) => {
@@ -2142,52 +2152,62 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
         still_interesting&.push(opt[]);
     };
     
-    check_still_interesting :: fn() => {
-        if still_interesting.len == 1 {
-            @log_event("chose overload %", still_interesting[0].func) self;
-            func := self.get_function(interesting[0].func);
-            @if(DEBUG_SPAM_LOG) self.codemap.show_error_line(func.loc);
-            return(Ok = still_interesting[0].func);
-        };
-    
+    swap_interestings :: fn() => {
         temp := still_interesting;
         still_interesting = interesting;
         interesting = temp;
         still_interesting&.clear();
     };
-    check_still_interesting(); 
+    check_still_interesting :: fn() => {
+        if still_interesting.len == 1 {
+            fid := still_interesting[0].func;
+            @log_event("chose overload %", fid) self;
+            func := self.get_function(fid);
+            @if(DEBUG_SPAM_LOG) self.codemap.show_error_line(func.loc);
+            return(Ok = fid);
+        };
+        swap_interestings();
+    };
     
-    @if_let(requested_ret) fn Specific(want) => {
-        each interesting& { opt | 
-            continue :: local_return;
-            func := self.get_function(opt.func);    
-            // TODO: i dont want to check .Generic because i want to remove the need for the annotation eventually. 
-            if !func.get_flag(.Generic) {
-                @match(self.infer_return(opt.func)) {
-                    fn Ok() => ();
-                    fn Err(e) => return(Err = e);
-                    fn Suspend(f) => {
-                        blocked&.push(f); 
-                        continue(); // we don't like it, we skip it.
-                    }
+    check_still_interesting(); 
+    //swap_interestings();
+    
+    @match(requested_ret) {
+        fn Specific(want) => {
+            each interesting& { opt | 
+                continue :: local_return;
+                func := self.get_function(opt.func);    
+                // TODO: i dont want to check .Generic because i want to remove the need for the annotation eventually. 
+                if !func.get_flag(.Generic) {
+                    @match(self.infer_return(opt.func)) {
+                        fn Ok() => ();
+                        fn Err(e) => return(Err = e);
+                        fn Suspend(f) => {
+                            blocked&.push(f); 
+                            //still_interesting&.push(opt[]);
+                            // TODO: this can't be right... if we suspended we shouldn't assume it won't match!
+                            continue(); // we don't like it, we skip it.
+                        }
+                    };
                 };
-            };
-            
-            if func.finished_ret { found | 
-                if self.can_assign(want, found).is_err()  {
-                    continue();
+                
+                if func.finished_ret { found | 
+                    if self.can_assign(want, found).is_err()  {
+                        //@println("ret discard % for %", self.log_type(found), self.log_type(want));
+                        continue();
+                    };
                 };
+                still_interesting&.push(opt[]);
             };
-            still_interesting&.push(opt[]);
+        }
+        @default => {
+            temp := still_interesting;
+            still_interesting = interesting;
+            interesting = temp;
         };
     };
     
     check_still_interesting();
-    
-    //if interesting.len > 0 {
-    //    // TODO: :FUCKED this picks randomly!!!
-    //    return(Ok = interesting[0].func);
-    //};
     
     if !blocked.is_empty() {
         @log_event("block len = %", blocked.len) self;
@@ -2205,10 +2225,17 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
     for interesting { opt |
         func := self.get_function(opt.func);
         @if(DEBUG_SPAM_LOG) self.codemap.show_error_line(func.loc);
-        @println("- % -> %", self.log_type(func.finished_arg.unwrap()), self.log_type(func.finished_ret.unwrap()));
+        @println("- % -> %", self.log_type(func.finished_arg), self.log_type(func.finished_ret));
     };
     overloads := self.dispatch.overloads&.nested_index(i.as_index());
     @err("TODO: resolve_in_overload_set % %", self.pool.get(overloads.name), interesting.len)
+}
+
+fn log_type(self: *SelfHosted, ty: ?Type) Str = {
+    @match(ty) {
+        fn Some(ty) => self.log_type(ty);
+        fn None() => "???";
+    }
 }
 
 fn compute_new_overloads(self: *SelfHosted, overloads: *OverloadSetData) void  = {
@@ -2709,6 +2736,7 @@ fn can_assign(self: *SelfHosted, want: Type, found: Type) Maybe(void) = {
     
     // TODO: dont allocate + fmt here beacause overload resolution spams this. 
     @err("Type Error") // : expected % found %", self.log_type(want), self.log_type(found))
+    //@err("Type Error: expected % found %", self.log_type(want), self.log_type(found))
     
 }
 
@@ -2828,8 +2856,7 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
     f_value := self.to_values(FuncId, fid);
     f_e: Expr = (Value = (bytes = f_value, coerced = false));
     f_expr := self.box(synthetic_ty(f_e, expr.loc, FuncId));
-    unit_expr := self.box(synthetic_ty((Value = (bytes = unit_value, coerced = false)), expr.loc, void));
-    expr.expr = (Call = (f = f_expr, arg = unit_expr));  // so we try this task again, we get an easy function call.
+    expr.expr = (Call = (f = f_expr, arg = self.make_unit_expr(expr.loc)));  // so we try this task again, we get an easy function call.
     expr.done = false;
     self.dispatch.enclosing_function = old_func;
     (Suspend = self.wait_for(Jit = fid))
