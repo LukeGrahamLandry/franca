@@ -8,11 +8,13 @@ CompilerDispatch :: @struct(
     const_bound_memo: HashMap(MemoKey, FuncId),
     yield_count: i64 = 0,
     return_labels: BucketArray(FuncId), // [LabelId]
+    next_task_id: i64 = 0,
 );
 
 Task :: @rec @struct(
     action: Action,
     waiting_for: List(*Task),
+    id: i64, // TODO: remove
     done: bool = false,
 );
 
@@ -63,7 +65,8 @@ poll_in_place :: fn(self: *SelfHosted, $T: Type, $f: @Fn() Maybe(T)) Res(T) #gen
             fn Suspend(new_dep) => {
                 new_task := self.get_alloc().alloc(Task, 1);
                 new_task := new_task.ptr;
-                new_task[] = (action = new_dep[][], waiting_for = list(self.get_alloc()));
+                new_task[] = (action = new_dep[][], waiting_for = list(self.get_alloc()), id = self.dispatch.next_task_id);
+                self.dispatch.next_task_id += 1;
                 pending&.push(new_task);
                 self.dispatch.active_tasks&.push(new_task);
                 @try(self.poll_pending_subset(pending&)) return;
@@ -96,7 +99,8 @@ fn poll_pending_subset(self: *SelfHosted, pending: *List(*Task)) Res(void) = {
                 fn Suspend(new_dep) => {
                     new_task := self.get_alloc().alloc(Task, 1);
                     new_task := new_task.ptr;
-                    new_task[] = (action = new_dep[], waiting_for = list(self.get_alloc()));
+                    new_task[] = (action = new_dep[], waiting_for = list(self.get_alloc()), id = self.dispatch.next_task_id);
+                    self.dispatch.next_task_id += 1;
                     
                     self.dispatch.active_tasks&.push(new_task);
                     task.waiting_for&.push(new_task);
@@ -132,9 +136,6 @@ fn poll_tasks(self: *SelfHosted) Result(void, *ParseErr) = {
                 ::?**Task;
                 task := pending.last().unwrap()[];
                 task.waiting_for&.ordered_retain() { t | 
-                    if !self.would_block(t.action) {
-                        t.done = true;
-                    };
                     !t.done
                 };
                 if task.waiting_for.is_empty() {
@@ -153,7 +154,8 @@ fn poll_tasks(self: *SelfHosted) Result(void, *ParseErr) = {
                         fn Suspend(new_dep) => {
                             new_task := self.get_alloc().alloc(Task, 1);
                             new_task := new_task.ptr;
-                            new_task[] = (action = new_dep[], waiting_for = list(self.get_alloc()));
+                            new_task[] = (action = new_dep[], waiting_for = list(self.get_alloc()), id = self.dispatch.next_task_id);
+                            self.dispatch.next_task_id += 1;
                             
                             task.waiting_for&.push(new_task);
                             pending&.push(new_task);
@@ -227,7 +229,8 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
                 if self.aarch64&.get_fn(callee).is_none() {
                     new_task := self.get_alloc().alloc(Task, 1);
                     new_task := new_task.ptr;
-                    new_task[] = (action = (Jit = callee), waiting_for = list(self.get_alloc()));
+                    new_task[] = (action = (Jit = callee), waiting_for = list(self.get_alloc()), id = self.dispatch.next_task_id);
+                    self.dispatch.next_task_id += 1;
                     task.waiting_for&.push(new_task);
                 } else {
                     func := self.get_function(callee);

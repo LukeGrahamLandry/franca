@@ -5,6 +5,7 @@ ImGuiMouseSource :: i32;
 ImGuiDir :: i32;
 ImGuiInputEventType :: i32;
 ImGuiInputSource :: i32;
+ImGuiCond_FirstUseEver :: 4;
 
 allocator :: libc_allocator;
 
@@ -26,19 +27,31 @@ ProgramState :: @struct(
     hide_synthetic_functions: bool = true,
     hide_unreferenced_overloads: bool = true,
     hide_unfinished_constants: bool = true,
+    hide_finished_tasks: bool = true,
     extra_windows: List(DetailWindow),
     new_window_ticks: i64 = 0,
+    target_fns: List(FuncId),
+    pending: List(*Task),
+    error: ?*ParseErr = .None,
+    juice: i64 = 0,
+    speed: i64 = MAX_SPEED,
+    tick: i64 = 0,
+    pause: bool = true,
+    task_messages: BucketArray(List(Str)),
+    current_task: ?i64 = .None,
 );
 
 DetailWindow :: @tagged(
     Function: FuncId,
     Overloads: OverloadSet,
     Variable: u32,
+    Task: *Task
 );
 
-Phase :: @enum(i64) (Start, Driver); ::enum(Phase);
+Phase :: @enum(i64) (Start, Working, Done); ::enum(Phase);
 
 show_gui :: fn(state: *State) void = {
+    // TODO: phase needs to be on each compiler. 
     @match(state.phase) {
         fn Start() => {
             if igButton(c_str(@symbol "Start"), (x = 50, y = 50)) {
@@ -51,264 +64,472 @@ show_gui :: fn(state: *State) void = {
                 
                 c := load_file_in_compiler(state.vtable, path, true);
                 c := c.unwrap();
-                userdata := State.raw_from_ptr(state);
                 mem := allocator.alloc(ExportVTable, 1);
                 mem.ptr[] = (
                     log_event = (Some = log_event_callback),
                 );
-                {c.vtable.give_vtable}(c.data, mem.ptr, userdata);
-                state.phase = .Driver;
+                state.phase = .Working;
                 
+                fns: List(FuncId) = list(allocator);
                 if c.get_unique_named("main") {f|
-                    callee := c.get_jitted(f);
+                    fns&.push(f);
                 };
                 sym_test := c.intern_string("test");
                 tests := c.data.get_fns_with_tag(sym_test);
-                for tests { f |
-                    callee := c.get_jitted(f);
-                };
+                fns&.push_all(tests);
                 
                 state.programs&.push(
                     compiler = c.data.cast()[][],
                     show = true,
                     extra_windows = list(allocator),
+                    target_fns = fns,
+                    pending = list(allocator),
+                    task_messages = init(10, allocator),
                 );
+                userdata := ProgramState.raw_from_ptr(state.programs.last().unwrap());
+                {c.vtable.give_vtable}(c.data, mem.ptr, userdata);
             };
         }
-        fn Driver() => {
-            if igButton(c_str(@symbol "Cancel"), (x = 50, y = 50)) {
-                state.phase = .Start;
-                return();
-            };
-            
-            if igCollapsingHeader_TreeNodeFlags(@fmt_cstr("Event Log"), 0) {
-                each state.messages { msg | 
-                    igTextUnformatted(@as(CStr) (ptr = msg.ptr), @as(CStr) (ptr = msg.ptr.offset(msg.len)));
-                };
-            };
+        fn Working() => {
             enumerate state.programs { iii, instance |  
-                continue :: local_return;
-                self := instance.compiler;
-                
-                last := true;
-                enumerate_rev instance.extra_windows { i, kind |
-                    continue :: local_return;
-                    @match(kind[]) {
-                        fn Function(f_id) => {
-                            func := self.get_function(f_id);
-                            name := @fmt_cstr("Function % %", self.pool.get(func.name), f_id.as_index());
-                            show := true;
-                            if !igBegin(name, show&, 0) {
-                                igEnd();
-                                continue();
-                            };
-                            if last && instance.new_window_ticks > 0 {
-                                instance.new_window_ticks -= 1;
-                                igSetWindowFocus_Nil();
-                            };
-                            last = false;
-                            if !show {|
-                                instance.extra_windows&.ordered_remove(i);
-                            };
-                            @ig_text("%", name); // :SLOW
-                            instance.show_func_window(f_id);
-                            
-                            igEnd();
-                        }
-                        fn Overloads(os) => {
-                            data := instance.compiler.dispatch.overloads&.nested_index(os.as_index());
-                            name := @fmt_cstr("Overloads % %", self.pool.get(data.name), os.as_index());
-                            show := true;
-                            if !igBegin(name, show&, 0) {
-                                igEnd();
-                                continue();
-                            };
-                            if last && instance.new_window_ticks > 0 {
-                                instance.new_window_ticks -= 1;
-                                igSetWindowFocus_Nil();
-                            };
-                            last = false;
-                            if !show {|
-                                instance.extra_windows&.ordered_remove(i);
-                            };
-                            @ig_text("%", name); // :SLOW
-                            instance.show_overloads_window(os);
-                            
-                            igEnd();
-                        }
-                        fn Variable(idx) => {
-                            idx: i64 = idx.zext();
-                            
-                            usages := instance.compiler.index.variables&.nested_index(i);
-                            name := @match(usages) {
-                                fn Some(usages) => usages.var.name;
-                                fn None() => instance.compiler.pool.insert_owned("???");
-                            };
-                            name := @fmt_cstr("Variable % %", instance.compiler.pool.get(name), idx);
-                            show := true;
-                            if !igBegin(name, show&, 0) {
-                                igEnd();
-                                continue();
-                            };
-                            if last && instance.new_window_ticks > 0 {
-                                instance.new_window_ticks -= 1;
-                                igSetWindowFocus_Nil();
-                            };
-                            last = false;
-                            if !show {|
-                                instance.extra_windows&.ordered_remove(i);
-                            };
-                            @ig_text("%", name);  // :SLOW
-                            instance.show_variable_window(idx);
-                            
-                            igEnd();
-                        }
-                    }
+                igPushID_Int(iii.intcast());
+                instance.tick += 1;
+                if !instance.pause && instance.speed != 0 && instance.tick.mod(MAX_SPEED + 1 - instance.speed) == 0 {
+                    instance.juice += 1;
                 };
-                
-                name := @fmt_cstr("Instance##%", iii);
-                if !igBegin(name, instance.show&, 0) {
-                    igEnd();
-                    continue();
-                };
-                
-                igCheckbox(@fmt_cstr("Hide Uncompiled Functions"), instance.hide_uncompiled_functions&);
-                igCheckbox(@fmt_cstr("Hide ComptimeOnly Functions"), instance.hide_comptimeonly_functions&);
-                igCheckbox(@fmt_cstr("Hide SyntheticEval Functions"), instance.hide_synthetic_functions&);
-                igCheckbox(@fmt_cstr("Hide Unreferenced Overload Sets"), instance.hide_unreferenced_overloads&);
-                igCheckbox(@fmt_cstr("Hide Unfinished Constants"), instance.hide_unfinished_constants&);
-                
-                if igCollapsingHeader_TreeNodeFlags(c_str(@symbol "Constants"), 0) {
-                    num_cols :: 3;
-                    if igBeginTable(c_str(@symbol "Constants"), num_cols, 0, (x = 800, y = 0), 0) {
-                        range(0, instance.compiler.scopes.constants.len) { i | 
-                            igPushID_Int(i.intcast());
-                            usages := instance.compiler.index.variables&.nested_index(i);
-                            if usages { usages |
-                                @assert_eq(@as(i64) usages.var.id.zext(), i);
-                                if usages.var.kind == .Const {|
-                                    v := instance.compiler.scopes.constants&.nested_index(i);
-                                    if v.as_ref() { value_ty | 
-                                        value := value_ty._0&;
-                                        type := value_ty._1&;
-                                        
-                                        hide := false;
-                                        if instance.hide_unfinished_constants && !value.expr&.is(.Value) {
-                                            hide = true;
-                                        };
-                                        if !hide {
-                                            igTableNextRow(0, 0);
-                                            igTableNextColumn();
-                                            @ig_text("%", instance.compiler.pool.get(usages.var.name));
-                                            if igIsItemClicked(0) {
-                                                x: DetailWindow = (Variable = i.trunc());
-                                                instance.extra_windows&.push(x);
-                                                instance.new_window_ticks = 5;
-                                            };
-                                                                        
-                                            igTableNextColumn();
-                                            @match(type) {
-                                                fn Finished(type) => {
-                                                    draw_type_ref(instance.compiler, type[]);
-                                                }
-                                                @default => {
-                                                    @ig_text("%", type.tag());
-                                                };
-                                            };
-                                            
-                                            igTableNextColumn();
-                                            draw_expr_ref(instance.compiler, value);
-                                        };
-                                    };
-                                };
-                            };
-                            igPopID();
-                        };
-                        igEndTable();
+                if instance.error.is_none() && instance.juice > 0 {
+                    instance.juice -= 1;
+                    instance.do_work();
+                    if instance.pending.is_empty() && instance.target_fns.is_empty() {
+                        state.phase = .Done;
                     };
                 };
-                
-                if igCollapsingHeader_TreeNodeFlags(c_str(@symbol "Types"), 0) {
-                    num_cols :: 1;
-                    if igBeginTable(c_str(@symbol "Types"), num_cols, 0, (x = 800, y = 0), 0) {
-                        range(0, instance.compiler.types.len) { i | 
-                            igPushID_Int(i.intcast());
-                            igTableNextRow(0, 0);
-                            igTableNextColumn();
-                            draw_type_ref(instance.compiler, typeid_from_index(i));
-                            igPopID();
-                        };
-                        igEndTable();
-                    };
-                };
-
-                if igCollapsingHeader_TreeNodeFlags(c_str(@symbol "Functions"), 0) {
-                    num_cols :: 3;
-                    if igBeginTable(c_str(@symbol "Functions"), num_cols, 0, (x = 800, y = 0), 400) {
-                        range(0, instance.compiler.functions.len) { i | 
-                            igPushID_Int(i.intcast());
-                            f_id := funcid_from_index(@as(u32) i.trunc());
-                            func := self.get_function(f_id);
-                            
-                            hide := false;
-                            if instance.hide_uncompiled_functions && !func.get_flag(.EnsuredCompiled) {
-                                hide = true;
-                            };
-                            if instance.hide_comptimeonly_functions && func.get_flag(.ComptimeOnly) {
-                                hide = true;
-                            };
-                            if instance.hide_synthetic_functions && func.get_flag(.SyntheticImmEval) {
-                                hide = true;
-                            };
-                            
-                            if !hide {
-                                draw_function_row(instance, f_id);
-                            };
-                            igPopID();
-                        };
-                        igEndTable();
-                    };
-                };
-                
-                if igCollapsingHeader_TreeNodeFlags(c_str(@symbol "Overload Sets"), 0) {
-                    num_cols :: 2;
-                    if igBeginTable(c_str(@symbol "Overload Sets"), num_cols, 0, (x = 800, y = 0), 0) {
-                        range(0, instance.compiler.dispatch.overloads.len) { i | 
-                            igPushID_Int(i.intcast());
-                            os := instance.compiler.dispatch.overloads&.nested_index(i);
-                            
-                            hide := false;
-                            if instance.hide_unreferenced_overloads && os.ready.is_empty() {
-                                hide = true;
-                            };
-                            
-                            if !hide {
-                                igTableNextRow(0, 0);
-                                
-                                igTableNextColumn();
-                                @ig_text("%_%", i, instance.compiler.pool.get(os.name));
-                                
-                                if igIsItemClicked(0) {
-                                    x: DetailWindow = (Overloads = i.from_index());
-                                    instance.extra_windows&.push(x);
-                                    instance.new_window_ticks = 5;
-                                };
-                                
-                                igTableNextColumn();
-                                @ig_text("%", os.ready.len);
-                            };
-                            
-                            igPopID();
-                        };
-                        igEndTable();
-                    };
-                };
-                
-                igEnd();
+                instance.draw_tasks();
+                igPopID();
             };
-        };
+            state.draw_compiler_state();
+        }
+        fn Done() => {
+            state.draw_compiler_state();
+        }
     };
 };
+
+MAX_SPEED :: 200;
+
+fn do_work(instance: *ProgramState) void = {
+    self := instance.compiler;
+    pending := instance.pending&;
+    pending.ordered_retain() { t | 
+        !t.done
+    };
+    
+    if instance.pending.is_empty() {
+        if instance.target_fns&.last() { f: *FuncId | 
+            ::CBox(Task);
+            task: Task = (action = (CompileBody = f[]), waiting_for = list(self.get_alloc()), id = self.dispatch.next_task_id);
+            self.dispatch.next_task_id += 1;
+            task := self.box(task);
+            self.dispatch.function_in_progress&.set(f[].as_index());
+            self.dispatch.active_tasks&.push(task);
+            instance.pending&.push(task);
+            instance.target_fns&.pop();
+            return();
+        };
+        return();
+    };
+    
+    task := pending.last().unwrap()[];
+    instance.current_task = (Some = task.id);
+    task.waiting_for&.ordered_retain() { t | 
+        !t.done
+    };
+    if task.waiting_for.is_empty() {
+        result := self.exec_task(task);
+        @match(result) {  
+            fn Err(e) => {
+                e.msg = e.msg.clone(allocator).items(); // it's probably in temp
+                instance.error = (Some = e);
+                return();
+            }
+            fn Ok() => {
+                if task.waiting_for.is_empty() {| // HACK: it might have added new callees
+                    task.done = true;
+                    pending.pop();
+                };
+            };
+            fn Suspend(new_dep) => {
+                new_task := self.get_alloc().alloc(Task, 1);
+                new_task := new_task.ptr;
+                new_task[] = (action = new_dep[], waiting_for = list(self.get_alloc()), id = self.dispatch.next_task_id);
+                self.dispatch.next_task_id += 1;
+                
+                self.dispatch.active_tasks&.push(new_task);
+                task.waiting_for&.push(new_task);
+                pending.push(new_task);
+            };
+        };
+    } else {
+        for task.waiting_for { dep | 
+            pending.push(dep);
+        };
+    };
+}
+
+fn draw_tasks(instance: *ProgramState) void = {
+    self := instance.compiler;
+    name := @fmt_cstr("Working Instance");
+    if !igBegin(name, instance.show&, 0) {
+        igEnd();
+        return();
+    };
+    igSetWindowPos_Vec2((x = 500, y = 100), ImGuiCond_FirstUseEver);
+    igSetWindowSize_Vec2((x = 500, y = 500), ImGuiCond_FirstUseEver);
+    @match(instance.error) {
+        fn Some(error) => {
+            @ig_text("%", error.msg);
+            line := self.codemap.get_whole_line(error.span);
+            @ig_text("At line % of %", line.line, line.filename);
+            text := self.codemap.source_slice(line.line_text);
+            @ig_text("%", text);
+        }
+        fn None() => {
+            scale := 1;
+            range(0, 3) { i |
+                if igButton(@fmt_cstr("Step %", scale), (x = 75, y = 30)) {
+                    instance.juice += scale;
+                };
+                igSameLine(0, 10);
+                scale *= 10;
+            };
+            text := if(instance.pause, => "Start Auto", => "Stop Auto");
+            if igButton(@fmt_cstr("%", text), (x = 150, y = 30)) {
+                instance.pause = !instance.pause;
+            };
+            x: i32 = instance.speed.intcast();
+            igDragInt(@fmt_cstr("Auto Step Speed"), x&, 1, 0, MAX_SPEED, @fmt_cstr("%d", "%"), 0);
+            instance.speed = x.intcast();
+        }
+    }; 
+    
+    igCheckbox(@fmt_cstr("Hide Finished Tasks"), instance.hide_finished_tasks&);
+    
+    if igCollapsingHeader_TreeNodeFlags(c_str(@symbol "Tasks"), 0) {
+        num_cols :: 3;
+        if igBeginTable(c_str(@symbol "Tasks"), num_cols, 0, (x = 700, y = 0), 0) {
+            range(0, self.dispatch.active_tasks.len) { i | 
+                igPushID_Int(i.intcast());
+                task := self.dispatch.active_tasks[i];
+                hide := instance.hide_finished_tasks && task.done;
+                if !hide {
+                    draw_task_row(instance, task);
+                };
+                
+                igPopID();
+            };
+            igEndTable();
+        };
+    };
+    
+    igEnd();
+}
+
+fn draw_compiler_state(state: *State) void = {
+    if igButton(c_str(@symbol "Cancel"), (x = 50, y = 50)) {
+        state.phase = .Start;
+        return();
+    };
+    
+    if igCollapsingHeader_TreeNodeFlags(@fmt_cstr("Event Log"), 0) {
+        each state.messages { msg | 
+            igTextUnformatted(@as(CStr) (ptr = msg.ptr), @as(CStr) (ptr = msg.ptr.offset(msg.len)));
+        };
+    };
+    
+    enumerate state.programs { iii, instance |  
+        continue :: local_return;
+        self := instance.compiler;
+        
+        last := true;
+        enumerate_rev instance.extra_windows { i, kind |
+            continue :: local_return;
+            @match(kind[]) {
+                fn Function(f_id) => {
+                    func := self.get_function(f_id);
+                    name := @fmt_cstr("Function % %", self.pool.get(func.name), f_id.as_index());
+                    show := true;
+                    if !igBegin(name, show&, 0) {
+                        igEnd();
+                        continue();
+                    };
+                    if last && instance.new_window_ticks > 0 {
+                        instance.new_window_ticks -= 1;
+                        igSetWindowFocus_Nil();
+                    };
+                    last = false;
+                    if !show {|
+                        instance.extra_windows&.ordered_remove(i);
+                    };
+                    @ig_text("%", name); // :SLOW
+                    instance.show_func_window(f_id);
+                    
+                    igEnd();
+                }
+                fn Overloads(os) => {
+                    data := instance.compiler.dispatch.overloads&.nested_index(os.as_index());
+                    name := @fmt_cstr("Overloads % %", self.pool.get(data.name), os.as_index());
+                    show := true;
+                    if !igBegin(name, show&, 0) {
+                        igEnd();
+                        continue();
+                    };
+                    if last && instance.new_window_ticks > 0 {
+                        instance.new_window_ticks -= 1;
+                        igSetWindowFocus_Nil();
+                    };
+                    last = false;
+                    if !show {|
+                        instance.extra_windows&.ordered_remove(i);
+                    };
+                    @ig_text("%", name); // :SLOW
+                    instance.show_overloads_window(os);
+                    
+                    igEnd();
+                }
+                fn Variable(idx) => {
+                    idx: i64 = idx.zext();
+                    
+                    usages := instance.compiler.index.variables&.nested_index(i);
+                    name := @match(usages) {
+                        fn Some(usages) => usages.var.name;
+                        fn None() => instance.compiler.pool.insert_owned("???");
+                    };
+                    name := @fmt_cstr("Variable % %", instance.compiler.pool.get(name), idx);
+                    show := true;
+                    if !igBegin(name, show&, 0) {
+                        igEnd();
+                        continue();
+                    };
+                    if last && instance.new_window_ticks > 0 {
+                        instance.new_window_ticks -= 1;
+                        igSetWindowFocus_Nil();
+                    };
+                    last = false;
+                    if !show {|
+                        instance.extra_windows&.ordered_remove(i);
+                    };
+                    @ig_text("%", name);  // :SLOW
+                    instance.show_variable_window(idx);
+                    
+                    igEnd();
+                }
+                fn Task(task) => {
+                    name := @fmt_cstr("Task %", task.action&.log(instance.compiler));
+                    show := true;
+                    if !igBegin(name, show&, 0) {
+                        igEnd();
+                        continue();
+                    };
+                    if last && instance.new_window_ticks > 0 {
+                        instance.new_window_ticks -= 1;
+                        igSetWindowFocus_Nil();
+                    };
+                    last = false;
+                    if !show {|
+                        instance.extra_windows&.ordered_remove(i);
+                    };
+                    @ig_text("%", name);  // :SLOW
+                    instance.show_task_window(task);
+                    
+                    igEnd();
+                }
+            }
+        };
+        
+        name := @fmt_cstr("Instance##%", iii);
+        if !igBegin(name, instance.show&, 0) {
+            igEnd();
+            continue();
+        };
+        
+        igCheckbox(@fmt_cstr("Hide Uncompiled Functions"), instance.hide_uncompiled_functions&);
+        igCheckbox(@fmt_cstr("Hide ComptimeOnly Functions"), instance.hide_comptimeonly_functions&);
+        igCheckbox(@fmt_cstr("Hide SyntheticEval Functions"), instance.hide_synthetic_functions&);
+        igCheckbox(@fmt_cstr("Hide Unreferenced Overload Sets"), instance.hide_unreferenced_overloads&);
+        igCheckbox(@fmt_cstr("Hide Unfinished Constants"), instance.hide_unfinished_constants&);
+        
+        if igCollapsingHeader_TreeNodeFlags(c_str(@symbol "Constants"), 0) {
+            num_cols :: 3;
+            if igBeginTable(c_str(@symbol "Constants"), num_cols, 0, (x = 800, y = 0), 0) {
+                range(0, instance.compiler.scopes.constants.len) { i | 
+                    igPushID_Int(i.intcast());
+                    usages := instance.compiler.index.variables&.nested_index(i);
+                    if usages { usages |
+                        @assert_eq(@as(i64) usages.var.id.zext(), i);
+                        if usages.var.kind == .Const {|
+                            v := instance.compiler.scopes.constants&.nested_index(i);
+                            if v.as_ref() { value_ty | 
+                                value := value_ty._0&;
+                                type := value_ty._1&;
+                                
+                                hide := false;
+                                if instance.hide_unfinished_constants && !value.expr&.is(.Value) {
+                                    hide = true;
+                                };
+                                if !hide {
+                                    igTableNextRow(0, 0);
+                                    igTableNextColumn();
+                                    @ig_text("%", instance.compiler.pool.get(usages.var.name));
+                                    if igIsItemClicked(0) {
+                                        x: DetailWindow = (Variable = i.trunc());
+                                        instance.extra_windows&.push(x);
+                                        instance.new_window_ticks = 5;
+                                    };
+                                                                
+                                    igTableNextColumn();
+                                    @match(type) {
+                                        fn Finished(type) => {
+                                            draw_type_ref(instance.compiler, type[]);
+                                        }
+                                        @default => {
+                                            @ig_text("%", type.tag());
+                                        };
+                                    };
+                                    
+                                    igTableNextColumn();
+                                    draw_expr_ref(instance.compiler, value);
+                                };
+                            };
+                        };
+                    };
+                    igPopID();
+                };
+                igEndTable();
+            };
+        };
+        
+        if igCollapsingHeader_TreeNodeFlags(c_str(@symbol "Types"), 0) {
+            num_cols :: 1;
+            if igBeginTable(c_str(@symbol "Types"), num_cols, 0, (x = 800, y = 0), 0) {
+                range(0, instance.compiler.types.len) { i | 
+                    igPushID_Int(i.intcast());
+                    igTableNextRow(0, 0);
+                    igTableNextColumn();
+                    draw_type_ref(instance.compiler, typeid_from_index(i));
+                    igPopID();
+                };
+                igEndTable();
+            };
+        };
+
+        if igCollapsingHeader_TreeNodeFlags(c_str(@symbol "Functions"), 0) {
+            num_cols :: 3;
+            if igBeginTable(c_str(@symbol "Functions"), num_cols, 0, (x = 800, y = 0), 400) {
+                range(0, instance.compiler.functions.len) { i | 
+                    igPushID_Int(i.intcast());
+                    f_id := funcid_from_index(@as(u32) i.trunc());
+                    func := self.get_function(f_id);
+                    
+                    hide := false;
+                    if instance.hide_uncompiled_functions && !func.get_flag(.EnsuredCompiled) {
+                        hide = true;
+                    };
+                    if instance.hide_comptimeonly_functions && func.get_flag(.ComptimeOnly) {
+                        hide = true;
+                    };
+                    if instance.hide_synthetic_functions && func.get_flag(.SyntheticImmEval) {
+                        hide = true;
+                    };
+                    
+                    if !hide {
+                        draw_function_row(instance, f_id);
+                    };
+                    igPopID();
+                };
+                igEndTable();
+            };
+        };
+        
+        if igCollapsingHeader_TreeNodeFlags(c_str(@symbol "Overload Sets"), 0) {
+            num_cols :: 2;
+            if igBeginTable(c_str(@symbol "Overload Sets"), num_cols, 0, (x = 800, y = 0), 0) {
+                range(0, instance.compiler.dispatch.overloads.len) { i | 
+                    igPushID_Int(i.intcast());
+                    os := instance.compiler.dispatch.overloads&.nested_index(i);
+                    
+                    hide := false;
+                    if instance.hide_unreferenced_overloads && os.ready.is_empty() {
+                        hide = true;
+                    };
+                    
+                    if !hide {
+                        igTableNextRow(0, 0);
+                        
+                        igTableNextColumn();
+                        draw_overloads_clickable(instance, i);
+                        igTableNextColumn();
+                        @ig_text("%", os.ready.len);
+                    };
+                    
+                    igPopID();
+                };
+                igEndTable();
+            };
+        };
+        
+        igEnd();
+    };
+}
+
+fn draw_function_clickable(instance: *ProgramState, f_id: FuncId) void = {
+    self := instance.compiler;
+    func := self.get_function(f_id);
+    @ig_text("%_%", f_id.as_index(), instance.compiler.pool.get(func.name));
+    if igIsItemClicked(0) {
+        x: DetailWindow = (Function = f_id);
+        instance.extra_windows&.push(x);
+        instance.new_window_ticks = 5;
+    };
+}
+
+fn draw_overloads_clickable(instance: *ProgramState, i: i64) void = {
+    os := instance.compiler.dispatch.overloads&.nested_index(i);
+    @ig_text("%_%", i, instance.compiler.pool.get(os.name));
+    
+    if igIsItemClicked(0) {
+        x: DetailWindow = (Overloads = i.from_index());
+        instance.extra_windows&.push(x);
+        instance.new_window_ticks = 5;
+    };
+}
+
+fn draw_task_row(instance: *ProgramState, task: *Task) void = {
+    igTableNextRow(0, 0);
+    igTableNextColumn();
+    @ig_text("%", task.action&.tag());
+    if igIsItemClicked(0) {
+        x: DetailWindow = (Task = task);
+        instance.extra_windows&.push(x);
+        instance.new_window_ticks = 5;
+    };
+                        
+    igTableNextColumn();
+    @match(task.action) {
+        fn EvalConstant(v) => {
+            @ig_text("---");
+        };
+        fn CompileBody(f_id) => draw_function_clickable(instance, f_id);
+        fn Jit(f_id) => draw_function_clickable(instance, f_id);
+        fn FinishRecType(it)  => {
+            @ig_text("---");
+        }
+        fn ResolveOverload(it)  => {
+            draw_overloads_clickable(instance, it.os.as_index());
+        }
+    };
+    igTableNextColumn();
+    @ig_text("waiting=% done=%", task.waiting_for.len, task.done);
+}
 
 fn draw_function_row(instance: *ProgramState, f_id: FuncId) void = {
     igTableNextRow(0, 0);
@@ -316,13 +537,7 @@ fn draw_function_row(instance: *ProgramState, f_id: FuncId) void = {
     func := self.get_function(f_id);
     
     igTableNextColumn();
-    @ig_text("%_%", f_id.as_index(), instance.compiler.pool.get(func.name));
-    
-    if igIsItemClicked(0) {
-        x: DetailWindow = (Function = f_id);
-        instance.extra_windows&.push(x);
-        instance.new_window_ticks = 5;
-    };
+    draw_function_clickable(instance, f_id);
     
     igTableNextColumn();
     @match(func.finished_arg) {
@@ -438,7 +653,6 @@ fn show_func_window(instance: *ProgramState, f_id: FuncId) void = {
     if self.aarch64&.get_fn(f_id) { addr | 
         @ig_text("This function can be jit called at %", addr);
     };
-    
 }
 
 fn show_overloads_window(instance: *ProgramState, os: OverloadSet) void = {
@@ -465,6 +679,40 @@ fn show_overloads_window(instance: *ProgramState, os: OverloadSet) void = {
             igEndTable();
         };
     };
+}
+
+fn show_task_window(instance: *ProgramState, task: *Task) void = {
+    @ig_text("done = %", task.done);
+    
+    num_cols :: 3;
+    if igBeginTable(c_str(@symbol "Tasks"), num_cols, 0, (x = 700, y = 0), 0) {
+        draw_task_row(instance, task);
+        igEndTable();
+    };
+    
+    name := @fmt_cstr("Waiting For (%)", task.waiting_for.len);
+    if igCollapsingHeader_TreeNodeFlags(name, 0) {
+        num_cols :: 3;
+        if igBeginTable(name, num_cols, 0, (x = 700, y = 0), 0) {
+            range(0, task.waiting_for.len) { i | 
+                igPushID_Int(i.intcast());
+                task := task.waiting_for[i];
+                draw_task_row(instance, task);
+                igPopID();
+            };
+            igEndTable();
+        };
+    };
+    
+    if igCollapsingHeader_TreeNodeFlags(@fmt_cstr("Event Log"), 0) {
+        if instance.task_messages.len > task.id {
+            messages := instance.task_messages&.nested_index(task.id);
+            each messages { msg | 
+                igTextUnformatted(@as(CStr) (ptr = msg.ptr), @as(CStr) (ptr = msg.ptr.offset(msg.len)));
+            };
+        }
+    };
+    
 }
 
 fn draw_expr_ref(self: *SelfHosted, expr: *FatExpr) void = {
@@ -572,12 +820,21 @@ fn fmt_cstr(fmt_args: FatExpr) FatExpr #macro = @{
 }
 
 log_event_callback :: fn(userdata: rawptr, c: Compiler, event: *CompilerLogEvent) void = {
-    state := State.ptr_from_raw(userdata);
+    instance := ProgramState.ptr_from_raw(userdata);
     @match(event) {
         fn Msg(msg) => {
             msg := msg[].clone(allocator);
             // no null terminator because igTextUnformatted takes an end pointer.
-            state.messages&.push(msg.items());
+            
+            if instance.current_task { idx | 
+                while => instance.task_messages.len <= idx {
+                    instance.task_messages&.push(list(0, allocator));  
+                };
+                lst := instance.task_messages&.nested_index(idx);
+                lst.push(msg.items());
+            };
+            
+            //state.messages&.push(msg.items());
         }
     }
 };
@@ -671,6 +928,7 @@ fn load_src_gui(vtable: *ImportVTable) Ty(CompCtx, *ComptimeLibs) = {
     @fmt(src&, ";ENABLE_QBE_BACKEND :: false;\n");
     @fmt(src&, ";ENABLE_LOGGING_CALLBACKS :: true;\n");
     @fmt(src&, ";DO_TERMINAL_COLOURS :: false;\n");
+    @fmt(src&, ";DEBUG_SPAM_LOG :: false;\n");
     src&.read_and_push("bindings/sokol.fr");
     src&.read_and_push("bindings/dearimgui.fr");
     src&.read_and_push("examples/compiler_gui.fr");

@@ -2117,6 +2117,7 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
                     fn Ok() => {
                         if !arg_expr.ty.is_unknown() && self.can_assign(param, arg_expr.ty).is_err() {
                             //@println("[%] discard % for %", i, self.log_type(arg_expr.ty), self.log_type(param));
+                            //println(func.log(self));
                             //self.codemap.show_error_line(func.loc);
                             continue();
                         };
@@ -2159,7 +2160,8 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
                         fn Err(e) => return(Err = e);
                         fn Suspend(f) => {
                             blocked&.push(f); 
-                            //still_interesting&.push(opt[]);
+                            // TODO: write a test where this matters
+                            still_interesting&.push(opt[]);
                             // TODO: this can't be right... if we suspended we shouldn't assume it won't match!
                             continue(); // we don't like it, we skip it.
                         }
@@ -2565,8 +2567,21 @@ fn coerce_const_expr(self: *SelfHosted, expr: *FatExpr, req: ResultType) Maybe(v
             
             if found == FuncId {
                 @if_let(want_info) fn Fn(f_ty) => {
+                    fid := @check(self.immediate_eval_expr(expr, FuncId)) return;
+                    fid := FuncId.assume_cast(fid&)[];
+                    func := self.get_function(fid);
+                    //partial_args := @check(self.infer_arguments_partial(fid)) return;
+                    // TODO: adding this fixes or_wrong_type (but only if you add type annotations) but breaks more other stuff. 
+                    //if !func.ret&.is(.Infer) {
+                    //    @try(self.poll_in_place(Type, => self.infer_return(fid))) return;
+                    //};
+                    //ret := @check(self.infer_return(fid)) return;
+                    if func.finished_ret { ret | 
+                        @check(self.can_assign(f_ty.ret, ret)) return;
+                    };
+                    //@println("const_coerce func <- funcid %", self.log_type(want));
                     expr.ty = want;
-                    // TODO: typecheck
+                    // TODO: typecheck args
                     return(.Ok);
                 };
                 @if_let(want_info) fn FnPtr(f_ty) => {
@@ -2681,7 +2696,6 @@ fn can_assign(self: *SelfHosted, want: Type, found: Type) Maybe(void) = {
     @match(found_info) {
         fn Fn(f) => {
             if want == FuncId {
-                // TODO: typecheck!!
                 return(.Ok);
             };
         }
@@ -2697,6 +2711,7 @@ fn can_assign(self: *SelfHosted, want: Type, found: Type) Maybe(void) = {
         fn Fn(f) => {
             if found == FuncId {
                 // TODO: typecheck!!
+                //@println("can_assign func <- funcid %", self.log_type(want));
                 return(.Ok);
             };
         }
