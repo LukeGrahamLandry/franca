@@ -1,5 +1,7 @@
+// TODO: update old sema to pass us whole SelfHosted not just pool
+
 :: enum(PlaceholderValue);
-fn log(self: *FatExpr, pool: *StringPool, out: *List(u8), depth: i64) void = {
+fn log(self: *FatExpr, pool: *SelfHosted, out: *List(u8), depth: i64) void = {
     @if(DO_TERMINAL_COLOURS) {
         if self.done {
             set_colour(out, 0, 250, 0);
@@ -18,10 +20,10 @@ fn log(self: *FatExpr, pool: *StringPool, out: *List(u8), depth: i64) void = {
             out.push_all(")");
         }
         fn GetNamed(i) => {
-            out.push_all(pool.get(i[]));
+            out.push_all(pool.pool.get(i[]));
         }
         fn String(i) => {
-            @fmt(out, "\"%\"", pool.get(i[]));
+            @fmt(out, "\"%\"", pool.pool.get(i[]));
         }
         fn Block(f) => {
             out.push_all("{\n");
@@ -42,11 +44,10 @@ fn log(self: *FatExpr, pool: *StringPool, out: *List(u8), depth: i64) void = {
             out.push_all(")");
         }
         fn Value(value) => {
-            // TODO: if we had access to the compiler here we could do fancy printing
-            @fmt(out, "%", value.bytes&);
+            value.bytes&.log(pool, out, self.ty);
         }
         fn GetVar(v) => {
-            out.push_all(pool.get(v.name));
+            out.push_all(pool.pool.get(v.name));
             out.push_all("%");
             @fmt(out, "%", v.id);
         }
@@ -58,7 +59,7 @@ fn log(self: *FatExpr, pool: *StringPool, out: *List(u8), depth: i64) void = {
         }
         fn FieldAccess(f) => {
             f.container.log(pool, out, depth);
-            @fmt(out, ".%", pool.get(f.name));
+            @fmt(out, ".%", pool.pool.get(f.name));
         }
         fn PrefixMacro(f) => {
             out.push_all("(@(");
@@ -96,7 +97,7 @@ fn log(self: *FatExpr, pool: *StringPool, out: *List(u8), depth: i64) void = {
             @fmt(out, "%", placeholder);
         }
         fn ContextualField(name) => {
-            @fmt(out, ".%", pool.get(name[]));
+            @fmt(out, ".%", pool.pool.get(name[]));
         }
         fn If(f) => {
             out.push_all("@if(");
@@ -140,6 +141,66 @@ fn log(self: *FatExpr, pool: *StringPool, out: *List(u8), depth: i64) void = {
     };
 } 
 
+fn log(values: *Values, self: *SelfHosted, out: *List(u8), ty: Type) void = {
+    @fmt(out, "V:");
+    info := self.get_type(ty);
+    
+    show_func :: fn() => {
+        f_id := FuncId.assume_cast(values)[];
+        func := self.get_function(f_id);
+        msg := @fmt(out, "F%_%", f_id.as_index(), self.pool.get(func.name));
+        return();
+    };
+    show_label :: fn() => {
+        l := LabelId.assume_cast(values)[];
+        @fmt(out, "L%", l.as_index());
+        return();
+    };
+    @match(info) {
+        fn Fn(f) => show_func();
+        fn Int(int) => {
+            @if_let(int_value(values, int[])) fn Ok(i) => {
+                msg := @fmt(out, "%", i);
+                return();
+            };
+        }
+        fn Label() => show_label();
+        @default => ();
+    };
+    if ty == FuncId {
+        show_func();
+    };
+    if ty == LabelId {
+        show_label();
+    };
+    if ty == void {
+        msg := @fmt(out, "()");
+        return();
+    };
+    
+    if ty == OverloadSet {
+        os := OverloadSet.assume_cast(values)[];
+        data := self.dispatch.overloads&.nested_index(os.as_index());
+        msg := @fmt(out, "OS%_%", os.as_index(), self.pool.get(data.name));
+        return();
+    };
+    
+    if ty == bool {
+        b := bool.assume_cast(values)[];
+        @fmt(out, "%", b);
+        return();
+    };
+    
+    if ty == Type {
+        type := Type.assume_cast(values)[];
+        @fmt(out, "%", self.log_type(type));
+        return();
+    };
+    
+    // if we don't know how to draw this type, just fall back to something useless
+    @fmt(out, "%", values);
+}
+
 fn display(value: *Values, out: *List(u8)) void = {
     @match(value) {
         fn Small(f) => {@fmt(out, "<<value:%>>", f._0); };
@@ -147,9 +208,9 @@ fn display(value: *Values, out: *List(u8)) void = {
     };
 }
 
-fn log(self: *Func, pool: *StringPool, out: *List(u8), depth: i64) void = {
+fn log(self: *Func, pool: *SelfHosted, out: *List(u8), depth: i64) void = {
     out.push_all("(fn ");
-    out.push_all(pool.get(self.name));
+    out.push_all(pool.pool.get(self.name));
     self.arg&.log(pool, out, 0);
     out.push_all(" ");
     self.ret&.log(pool, out, 0);
@@ -162,7 +223,7 @@ fn log(self: *Func, pool: *StringPool, out: *List(u8), depth: i64) void = {
     out.push_all(")");
 }
 
-fn log(self: *FuncImpl, pool: *StringPool, out: *List(u8), depth: i64) void = {
+fn log(self: *FuncImpl, pool: *SelfHosted, out: *List(u8), depth: i64) void = {
     @match(self) {
         fn Normal(body) => body.log(pool, out, depth);
         fn Intrinsic(op) => {
@@ -175,7 +236,7 @@ fn log(self: *FuncImpl, pool: *StringPool, out: *List(u8), depth: i64) void = {
             @fmt(out, "Redirect:%", target);
         }
         fn DynamicImport(target) => {
-            @fmt(out, "DynamicImport:%", pool.get(target[]));
+            @fmt(out, "DynamicImport:%", pool.pool.get(target[]));
         }
         fn Merged(parts) => {
             each parts { part | 
@@ -188,9 +249,9 @@ fn log(self: *FuncImpl, pool: *StringPool, out: *List(u8), depth: i64) void = {
     }
     
 }
-fn log(self: *Annotation, pool: *StringPool, out: *List(u8), depth: i64) void = {
+fn log(self: *Annotation, pool: *SelfHosted, out: *List(u8), depth: i64) void = {
     out.push_all("#");
-    out.push_all(pool.get(self.name));
+    out.push_all(pool.pool.get(self.name));
     ::?*FatExpr; ::as_ref(FatExpr);
     if(self.args&.as_ref()){expr|
         out.push_all("(");
@@ -199,7 +260,7 @@ fn log(self: *Annotation, pool: *StringPool, out: *List(u8), depth: i64) void = 
     };
 }
 
-fn log(self: *Pattern, pool: *StringPool, out: *List(u8), depth: i64) void = {
+fn log(self: *Pattern, pool: *SelfHosted, out: *List(u8), depth: i64) void = {
     out.push_all("(");
     each (self.bindings.items()) {b|
         b.log(pool, out, depth);
@@ -208,10 +269,10 @@ fn log(self: *Pattern, pool: *StringPool, out: *List(u8), depth: i64) void = {
     out.push_all(")");
 }
 
-fn log(self: *Binding, pool: *StringPool, out: *List(u8), depth: i64) void = {
+fn log(self: *Binding, pool: *SelfHosted, out: *List(u8), depth: i64) void = {
     @match(self.name) {
-        (fn Ident(name) => out.push_all(pool.get(name)));
-        (fn Var(v) => out.push_all(pool.get(v.name)));
+        (fn Ident(name) => out.push_all(pool.pool.get(name)));
+        (fn Var(v) => out.push_all(pool.pool.get(v.name)));
         (fn None() => out.push_all("_"));
     };
     out.push_all(": "); // TODO
@@ -224,11 +285,11 @@ fn log(self: *Binding, pool: *StringPool, out: *List(u8), depth: i64) void = {
     };
 }
 
-fn log(v: *Var, pool: *StringPool, out: *List(u8), depth: i64) void = {
-    @fmt(out, "%%%", pool.get(v.name), "%", v.id);
+fn log(v: *Var, pool: *SelfHosted, out: *List(u8), depth: i64) void = {
+    @fmt(out, "%%%", pool.pool.get(v.name), "%", v.id);
 }
 
-fn log(self: *LazyType, pool: *StringPool, out: *List(u8), depth: i64) void = {
+fn log(self: *LazyType, pool: *SelfHosted, out: *List(u8), depth: i64) void = {
     @match(self) {
         (fn PendingEval(e) => { e.log(pool, out, depth); });
         (fn Infer() => out.push_all("_"));
@@ -245,7 +306,7 @@ fn indent_by(out: *List(u8), depth: i64) void = {
     };
 }
 
-fn log(self: *FatStmt, pool: *StringPool, out: *List(u8), depth: i64) void = {
+fn log(self: *FatStmt, pool: *SelfHosted, out: *List(u8), depth: i64) void = {
     out.indent_by(depth);
     
     each self.annotations {a|
@@ -263,7 +324,7 @@ fn log(self: *FatStmt, pool: *StringPool, out: *List(u8), depth: i64) void = {
         });
         (fn DeclNamed(f) => {
             // TODO: kind and ty
-            out.push_all(pool.get(f.name));
+            out.push_all(pool.pool.get(f.name));
             out.push_all(": ");
             f.ty&.log(pool, out, depth);
             if eq(@as(i64) f.kind, @as(i64) VarType.Const) {
@@ -285,7 +346,7 @@ fn log(self: *FatStmt, pool: *StringPool, out: *List(u8), depth: i64) void = {
         });
         (fn DeclVar(f) => {
             // TODO: kind and ty
-            out.push_all(pool.get(f.name.name));
+            out.push_all(pool.pool.get(f.name.name));
             out.push_all("%");
             @fmt(out, "%", f.name.id);
             out.push_all(": ");
@@ -310,7 +371,7 @@ fn log(self: *FatStmt, pool: *StringPool, out: *List(u8), depth: i64) void = {
 }
 
 fn HasLog($T: Type) void = {
-    fn log(self: *T, pool: *StringPool) Str = {
+    fn log(self: *T, pool: *SelfHosted) Str = {
         out: List(u8) = list(temp());
         self.log(pool, out&, 0);
         out.items()
@@ -532,4 +593,28 @@ fn display(self: OverloadSet, out: *List(u8)) void = {
 }
 fn display(self: *u16, out: *List(u8)) void = {
     @fmt(out, "%", @as(i64)self[].zext());
+}
+
+fn log(action: *Action, self: *SelfHosted, out: *List(u8)) void = {
+    @match(action) {
+        fn EvalConstant(v) => {
+            @fmt(out, "EvalConstant:");
+            v.name&.log(self, out, 0);
+        };
+        fn CompileBody(f_id)   => {
+            func := self.get_function(f_id[]);
+            @fmt(out, "CompileBody:F%_%", f_id[].as_index(), self.pool.get(func.name));
+        }
+        fn Jit(f_id) => {
+            func := self.get_function(f_id[]);
+            @fmt(out, "Jit:F%_%", f_id[].as_index(), self.pool.get(func.name));
+        }
+        fn FinishRecType(it)  => {
+            @fmt(out, "FinishRecType:%", it.hole.as_index());
+        }
+        fn ResolveOverload(it)  => {
+            data := self.dispatch.overloads&.nested_index(it.os.as_index());
+            @fmt(out, "ResolveOverload:OS%_%", it.os.as_index(), self.pool.get(data.name));
+        }
+    };
 }

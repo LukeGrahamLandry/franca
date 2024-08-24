@@ -64,7 +64,7 @@ fn compile_stmt(self: *SelfHosted, stmt: *FatStmt) Maybe(bool) = {
                 @check(self.compile_place_expr(f.place&, .None, true)) return;
                 @check(self.compile_expr(f.value&, f.place.ty.want())) return;
                 if f.place.ty != f.value.ty {
-                    return(@err("tried to set % <- % (%)", self.log_type(f.place.ty), self.log_type(f.value.ty), f.value&.log(self.pool)));
+                    return(@err("tried to set % <- % (%)", self.log_type(f.place.ty), self.log_type(f.value.ty), f.value&.log(self)));
                 };
                 // TODO: self.type_check_arg(f.place.ty, f.value.ty, "reassign var")?; /:type_check
                 return(Ok = f.value.done && f.place.done);
@@ -72,7 +72,7 @@ fn compile_stmt(self: *SelfHosted, stmt: *FatStmt) Maybe(bool) = {
             @err("Illegal place expression: %", tag)
         }
         fn DeclVarPattern(f) => self.decl_var_pattern(stmt);
-        @default => @panic("TODO: unhandled compile_stmt type %", stmt.log(self.pool));
+        @default => @panic("TODO: unhandled compile_stmt type %", stmt.log(self));
     }
 }
 
@@ -157,7 +157,7 @@ fn compile_place_expr(self: *SelfHosted, place: *FatExpr, requested: ResultType,
         fn GetVar(var) => {
             val_ty := self.scopes.get_var_type(var[]);
             val_ty := or val_ty {| 
-                return(@err("var must be declared: %", var.log(self.pool)))
+                return(@err("var must be declared: %", var.log(self)))
             };
             ptr_ty := self.ptr_type(val_ty);
 
@@ -224,9 +224,9 @@ fn compile_place_expr(self: *SelfHosted, place: *FatExpr, requested: ResultType,
         @default => {
             if !place.ty.is_unknown() {
                 // TODO: pass in if we're currently trying to access a field so we can give a better error message if its on an int or something?
-                return(@err("Place expression of type % expected pointer dereference.\n%", self.log_type(place.ty), place.log(self.pool)));
+                return(@err("Place expression of type % expected pointer dereference.\n%", self.log_type(place.ty), place.log(self)));
             };
-            return(@err("TODO: other `place=e;` % %", place.log(self.pool), self.log_type(place.ty)));
+            return(@err("TODO: other `place=e;` % %", place.log(self), self.log_type(place.ty)));
         };
     };
     .Ok
@@ -316,7 +316,7 @@ fn deref_one(self: *SelfHosted, ptr: *FatExpr) Maybe(void) = {
 }
 
 fn decl_var(self: *SelfHosted, name: Var, ty: *LazyType, value: *FatExpr) Maybe(void) = {
-    @log_event("decl_var %", name&.log(self.pool)) self; // :debug
+    @log_event("decl_var %", name&.log(self)) self; // :debug
     // TODO: this would make sense but i don't actually need it i guess since i store variable types globally.
     //@debug_assert(self.dispatch.enclosing_function.is_some(), "ICE: runtime vars must have an enclosing function");
     no_type := ty.is(.Infer);
@@ -403,8 +403,8 @@ fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = 
             @if_let(b.name) fn Var(name) => {
                 @debug_assert(b.kind == name.kind);
                 is_new := self.scopes.put_var_type(name, b.ty&.unwrap());
-                @log_event("bind param %", name&.log(self.pool)) self;
-                if(!is_new, => return(@err("overwrite arg? %", name&.log(self.pool))));
+                @log_event("bind param %", name&.log(self)) self;
+                if(!is_new, => return(@err("overwrite arg? %", name&.log(self))));
             };
         };
         func.set_flag(.MadeVarsForRuntimeArgs);
@@ -654,7 +654,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
             @default => ();
         };
     };
-    @err_assert(good, "Function has no implementation %", func.log(self.pool)) return;
+    @err_assert(good, "Function has no implementation %", func.log(self)) return;
     .Ok
 }
 
@@ -668,7 +668,7 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
     old_loc := self.last_loc;
     self.last_loc = expr.loc;
     self.dispatch.active_stack.push(expr = expr, requested = requested);
-    //@log_event("compile_expr % %", expr.log(self.pool), self.dispatch.enclosing_function&.tag()) self;
+    //@log_event("compile_expr % %", expr.log(self), self.dispatch.enclosing_function&.tag()) self;
     
     @match(expr.expr&) {
         fn Poison(placeholder) => {
@@ -934,12 +934,12 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
             };
             expr.set(value, ty);
         }
-        @default => @panic("TODO: unhandled node type %: %", expr.expr&.tag(), expr.log(self.pool));
+        @default => @panic("TODO: unhandled node type %: %", expr.expr&.tag(), expr.log(self));
     };
     self.last_loc = old_loc;
     self.dispatch.active_stack.pop();
     self.dispatch.enclosing_function = todo_dont_lose;
-    @debug_assert(!expr.ty.is_unknown(), "[compile_expr] Unknown type for %", expr.log(self.pool));
+    @debug_assert(!expr.ty.is_unknown(), "[compile_expr] Unknown type for %", expr.log(self));
     .Ok
 }
 
@@ -1220,7 +1220,7 @@ fn compile_call(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
             expr.ty = Never; // :get_or_create_type
             expr.done = arg.done; 
         }
-        @default => return(@err("not callable %", f.log(self.pool)));
+        @default => return(@err("not callable %", f.log(self)));
     };
     
     .Ok
@@ -1330,7 +1330,7 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
         !func.get_flag(.SyntheticImmEval)
     };
     if func.get_flag(.TryConstantFold) && allow_fold && arg_expr.is_const() {
-        @log_event("TryConstantFold %", expr.log(self.pool)) self;
+        @log_event("TryConstantFold %", expr.log(self)) self;
         value := @check(self.immediate_eval_expr(expr, ret_ty)) return;
         expr.set(value, ret_ty); // TODO: redundant?
     } else {
@@ -1430,7 +1430,7 @@ fn emit_capturing_call(self: *SelfHosted, f: FuncId, expr_out: *FatExpr, request
     //       no but it sure hurts... why?
     //if !requested&.is(.Specific) {
     //    if ret_ty { ret_ty |
-    //        //@println("I think we want % for %", self.log_type(ret_ty), func.log(self.pool));
+    //        //@println("I think we want % for %", self.log_type(ret_ty), func.log(self));
     //        requested = (Specific = ret_ty);
     //    };
     //};
@@ -1534,7 +1534,7 @@ fn const_args_key(self: *SelfHosted, original_f: FuncId, arg_expr: *FatExpr) May
             };
         };
         
-        if(!arg_expr.expr&.is(.Tuple), => return(@err("TODO: pattern match on non-tuple but expected % args.\n%", func.arg.bindings.len, arg_expr.log(self.pool))));
+        if(!arg_expr.expr&.is(.Tuple), => return(@err("TODO: pattern match on non-tuple but expected % args.\n%", func.arg.bindings.len, arg_expr.log(self))));
         arg_exprs := arg_expr.expr.Tuple;
         check_len(arg_exprs.len);
 
@@ -1715,7 +1715,7 @@ fn curry_const_args_inner(self: *SelfHosted, original_f: FuncId, new_fid: FuncId
                 if b.ty&.is(.Infer) {
                     // No correctness reason for this requirement but it seems fair to me. -- Aug 2
                     self.last_loc = arg_expr.loc;
-                    @err_assert(func.get_flag(.AllowRtCapture), "only closure may have polymorphic args %", func.log(self.pool)) return;
+                    @err_assert(func.get_flag(.AllowRtCapture), "only closure may have polymorphic args %", func.log(self)) return;
                     @check(self.compile_expr(arg_expr, .None)) return;
                     b.ty = (Finished = arg_expr.ty);
                 };
@@ -1724,7 +1724,7 @@ fn curry_const_args_inner(self: *SelfHosted, original_f: FuncId, new_fid: FuncId
             name := or b.var() {
                 return(@err("arg needs name (unreachable?)"))
             };
-            @log_event("bake arg %: %", i, name&.log(self.pool)) self;
+            @log_event("bake arg %: %", i, name&.log(self)) self;
             // TODO: if you yield here, you spam clone the function. 
             
             // We might not be able to know the types expected for each parameter up front (because they can reference previous consts),
@@ -1764,7 +1764,7 @@ fn curry_const_args_inner(self: *SelfHosted, original_f: FuncId, new_fid: FuncId
 fn bind_const_arg(self: *SelfHosted, o_f: FuncId, arg_name: Var, arg_value: Values, arg_ty_found: Type, loc: Span) Maybe(void) = {
     // I don't want to renumber, so make sure to do the clone before resolving.
     // TODO: reslove captured constants anyway so dont haveto do the chain lookup redundantly on each speciailization. -- Apr 24
-    @log_event("Bind $% = %", arg_name&.log(self.pool), arg_value&) self;
+    @log_event("Bind $% = %", arg_name&.log(self), arg_value&) self;
     func := self.get_function(o_f);
     @debug_assert(func.get_flag(.ResolvedBody) && func.get_flag(.ResolvedSign));
     arg_ty := @check(self.get_type_for_arg(func.arg&, arg_name)) return;
@@ -1817,7 +1817,7 @@ fn get_type_for_arg(self: *SelfHosted, arg: *Pattern, arg_name: Var) Maybe(Type)
             };
         };
     };
-    @err("missing argument %", arg_name&.log(self.pool))
+    @err("missing argument %", arg_name&.log(self))
 }
     
 fn infer_type(self: *SelfHosted, b: *LazyType) Maybe(?Type) = {
@@ -1972,7 +1972,7 @@ fn adjust_named_arguments(self: *SelfHosted, fid: FuncId, arg_expr: *FatExpr) Re
         arg_expr.expr = (Tuple = args.rs());
         arg_expr.done = false;
         arg_expr.ty = UnknownType;
-        @log_event("after named %", arg_expr.log(self.pool)) self;
+        @log_event("after named %", arg_expr.log(self)) self;
     };
     .Ok
 }
@@ -2049,7 +2049,9 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
     errors: List(*ParseErr) = list(temp());
     each interesting& { opt | 
         continue :: local_return;
-        func := self.get_function(opt.func);           
+        func := self.get_function(opt.func);         
+        ::as_ref(FatExpr);  
+        @check(self.ensure_resolved_sign(opt.func)) return;
         if !func.get_flag(.Generic) {
             @match(self.infer_arguments(opt.func)) {
                 fn Ok() => ();
@@ -2128,23 +2130,19 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
                     fn Suspend(f) => {
                         blocked&.push(f); 
                         //still_interesting&.push(opt[]);
-                        //arg_expr[] = other;
                         // TODO: this can't be right... if we suspended we shouldn't assume it won't match!
                         continue(); // we don't like it, we skip it.
                     }
                     fn Err(e) => {
                         errors&.push(e);
-                        //arg_expr[] = other;
                         continue();
                     }
                     fn Ok() => {
                         if !arg_expr.ty.is_unknown() && self.can_assign(param, arg_expr.ty).is_err() {
                             //@println("[%] discard % for %", i, self.log_type(arg_expr.ty), self.log_type(param));
                             //self.codemap.show_error_line(func.loc);
-                            //arg_expr[] = other;
                             continue();
                         };
-                        //arg_expr[] = other;
                     }
                 };
             };
@@ -2219,7 +2217,7 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
     };
     
     // TODO: don't spam log since we might discard the error.
-    @println("ambigous overload for arg % %", self.log_type(arg_expr.ty), arg_expr.log(self.pool));
+    @println("ambigous overload for arg % %", self.log_type(arg_expr.ty), arg_expr.log(self));
     self.last_loc = arg_expr.loc;
     @println("% matching options", interesting.len);
     for interesting { opt |
@@ -2285,14 +2283,14 @@ fn hoist_constants(self: *SelfHosted, body: []FatStmt) Maybe(void) #once = {
                         );
                         os_value := self.to_values(OverloadSet, i);
                         @check(self.save_const_values(var[], os_value, OverloadSet, func.loc)) return;  // :get_or_create_type
-                        @log_event("create os % (%) for %", i.as_index(), var.log(self.pool), fid) self;
+                        @log_event("create os % (%) for %", i.as_index(), var.log(self), fid) self;
                         overload_out = (Some = i);
                     } else {
                         overloads := @check(self.find_const(var[], OverloadSet.want())) return;  // :get_or_create_type
                         i := OverloadSet.assume_cast(overloads._0&)[];
                         os := self.dispatch.overloads&.nested_index(i.as_index());
                         os.pending&.push(fid, self.get_alloc());
-                        @log_event("add to os % (%) for %", i.as_index(), var.log(self.pool), fid) self;
+                        @log_event("add to os % (%) for %", i.as_index(), var.log(self), fid) self;
                         overload_out = (Some = i);
                     };
                 };
@@ -2480,7 +2478,7 @@ fn handle_declare_constant(self: *SelfHosted, name: Var, ty: *LazyType, value: *
         };
         real_value_box := invocation.arg;
         hole := self.intern_type(.Placeholder);
-        @log_event("% = @rec %", name&.log(self.pool), hole) self;
+        @log_event("% = @rec %", name&.log(self), hole) self;
         val  := self.to_values(Type, hole);
         value.set(val, Type);
         // This can't just fallthrough and call update_placeholder at the end of this function like the old version did,
@@ -2536,10 +2534,10 @@ fn save_const(self: *SelfHosted, name: Var, val_expr: Expr, final_ty: Type, loc:
     };
     
     if val._1&.is(.Finished) {
-        return(@err("tried to re-save constant %", name&.log(self.pool)));
+        return(@err("tried to re-save constant %", name&.log(self)));
     };
     if !val._0.expr&.is(.Poison) {
-        return(@err("tried to stomp constant %", name&.log(self.pool)));
+        return(@err("tried to stomp constant %", name&.log(self)));
     };
     
     val._0.expr = val_expr;
@@ -2691,7 +2689,7 @@ fn coerce_const_expr(self: *SelfHosted, expr: *FatExpr, req: ResultType) Maybe(v
                 expr.ty = want;
                 return(.Ok);
             };
-            return(@err("TODO: coerce constant expected % but found %: % (might be an actual type error)", self.log_type(want), self.log_type(found), expr.log(self.pool)));
+            return(@err("TODO: coerce constant expected % but found %: % (might be an actual type error)", self.log_type(want), self.log_type(found), expr.log(self)));
         };
     };
     .Ok
@@ -2755,7 +2753,7 @@ fn resolve_by_type(self: *SelfHosted, os: OverloadSet, f_ty: FnType, loc: Span) 
 ::?FnType;
 fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Values) = {
     self.last_loc = expr.loc;
-    @log_event("imm_eval %", expr.log(self.pool)) self;
+    @log_event("imm_eval %", expr.log(self)) self;
     @debug_assert(!ret_ty.is_unknown(), "immediate_eval_expr unknown");
     old_func := self.dispatch.enclosing_function;
     self.dispatch.enclosing_function = .None;
@@ -2852,7 +2850,7 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
     fake_func.finished_ret = (Some = ret_ty);
     fake_func.cc = (Some = .CCallReg);    
     fid := self.add_function(fake_func);
-    @log_event("imm eval wait for lit %: %", fid, expr.log(self.pool)) self;
+    @log_event("imm eval wait for lit %: %", fid, expr.log(self)) self;
     f_value := self.to_values(FuncId, fid);
     f_e: Expr = (Value = (bytes = f_value, coerced = false));
     f_expr := self.box(synthetic_ty(f_e, expr.loc, FuncId));
@@ -2991,12 +2989,12 @@ fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
     
     self.finish_layout_deep(fat_expr_type).unwrap();
     
-    @log_event("call user macro %", invocation.handler.log(self.pool)) self;
+    @log_event("call user macro %", invocation.handler.log(self)) self;
     single := invocation.target.is_raw_unit();
     if single {
-        @log_event("macro input: %", invocation.arg.log(self.pool)) self;
+        @log_event("macro input: %", invocation.arg.log(self)) self;
     } else {
-        @log_event("macro input: (%, %)", invocation.arg.log(self.pool), invocation.target.log(self.pool)) self;
+        @log_event("macro input: (%, %)", invocation.arg.log(self), invocation.target.log(self)) self;
     };
     
     @check(self.compile_expr(invocation.handler, .None)) return;
@@ -3040,7 +3038,7 @@ fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
     self.aarch64&.bump_dirty();
     result := @try(hack&.call_dynamic_inner(fn_ptr.int_from_rawptr(), f_ty&, args&, needs_ct)) return;
     expr[] = FatExpr.assume_cast(result&)[];
-    @log_event("macro output: %", expr.log(self.pool)) self;
+    @log_event("macro output: %", expr.log(self)) self;
     //walk: MarkNotDone = (_hack = 0);
     //walk&.walk_expr(expr); // TODO: might not need this :SLOW
     .Ok
@@ -3050,7 +3048,7 @@ fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
 fn early_builtin_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
     invocation := expr.expr.PrefixMacro&;
     if !invocation.handler.expr&.is(.GetVar) {
-        return(@err("macro calls must be GetVar while bootstrapping. tried to run something too compilicated too soon: %: %", invocation.handler.expr&.tag(), invocation.handler.log(self.pool)));
+        return(@err("macro calls must be GetVar while bootstrapping. tried to run something too compilicated too soon: %: %", invocation.handler.expr&.tag(), invocation.handler.log(self)));
     };
     
     name := invocation.handler.expr.GetVar.name;

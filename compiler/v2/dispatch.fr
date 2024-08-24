@@ -89,6 +89,7 @@ fn poll_pending_subset(self: *SelfHosted, pending: *List(*Task)) Res(void) = {
                     new_task := new_task.ptr;
                     new_task[] = (action = new_dep[], waiting_for = list(self.get_alloc()));
                     
+                    self.dispatch.active_tasks&.push(new_task);
                     task.waiting_for&.push(new_task);
                     pending.push(new_task);
                 };
@@ -112,6 +113,7 @@ fn poll_tasks(self: *SelfHosted) Result(void, *ParseErr) = {
         self.dispatch.active_tasks&.ordered_retain() { t | 
             !t.done
         };
+        
         for self.dispatch.active_tasks { original_task |
             pending&.push(original_task); 
             // TODO: you want to do this instead but it fails a safety check??????
@@ -121,6 +123,9 @@ fn poll_tasks(self: *SelfHosted) Result(void, *ParseErr) = {
                 ::?**Task;
                 task := pending.last().unwrap()[];
                 task.waiting_for&.ordered_retain() { t | 
+                    if !self.would_block(t.action) {
+                        t.done = true;
+                    };
                     !t.done
                 };
                 if task.waiting_for.is_empty() {
@@ -169,7 +174,6 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
         return(.Ok);
     };
     self.dispatch.enclosing_function = .None;
-    @log_event("%", self.dispatch.active_tasks.len) self;
     
     @match(task.action) {
         //fn CompileExpr(stack) => {
@@ -201,7 +205,7 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
             @log_event("[TRY TASK] %: % %", task.action&.tag(), fid, self.log_name(fid)) self;
             func := self.get_function(fid);
             //self.codemap.show_error_line(func.loc);
-            //@log_event("%", func.log(self.pool)) self;
+            //@log_event("%", func.log(self)) self;
             
             if !func.get_flag(.EnsuredCompiled) {
                 self.dispatch.function_in_progress&.set(fid.as_index());
@@ -297,13 +301,12 @@ fn would_block(self: *SelfHosted, action: Action) bool = {
         fn EvalConstant(v) => {
             var  := self.scopes.get_constant(v.name);
             var  := var.expect("var should always be known");
-            !var._0&.is(.Value)
+            !var._0.expr&.is(.Value)
         };
-        //fn CompileExpr(stack) => !stack.last().unwrap().is_done;
-        fn TypeArg(fid)       => self.get_function(fid)[].finished_arg.is_none();
-        fn TypeRet(fid)       => self.get_function(fid)[].finished_ret.is_none();
         fn CompileBody(fid)   => !self.get_function(fid).get_flag(.EnsuredCompiled);
         fn Jit(fid)           => self.aarch64&.get_fn(fid).is_none();
+        fn FinishRecType(it)  => self.get_type(it.hole).is(.Placeholder);
+        fn ResolveOverload(_)  => true;
     }
 }
 
