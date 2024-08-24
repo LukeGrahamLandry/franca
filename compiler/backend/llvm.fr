@@ -306,20 +306,26 @@ fn emit_constant(self: *EmitLlvm, id: BakedVarId) void = {
     }
 }
 
-fn emit_special(self: *EmitLlvm, body: *FuncImpl, func: *Func, bc: *FnBody, pending: *List(FuncId)) bool = {
+fn emit_special(self: *EmitLlvm, f_id: FuncId, body: *FuncImpl, func: *Func, bc: *FnBody, pending: *List(FuncId)) bool = {
     @match(body) {
         fn Normal(_) => { panic("ICE: empty body but expr"); };
         fn Redirect(f) => {
-            // TODO: assert that 'f' is flagged for being emitted?
-            //       currently just trusting that emit_bc replaced all actual uses. 
-            //       could also just have the front end check if body is redirect before adding to callees list. -- Jun 27
-            
             pending.push(f[]);
+            
+            // :sema_regression
+            // you should be able to choose an order to compile stuff so emit_bc just happens to already know when things are redirects.
+            // you didn't need to do this before. but it shouldn't matter that much i guess -- Aug 24
+            // without this, when you sema emit_special_body on a redirect you can check if the target is special too and emit it early,
+            // but that only helps a bit and breaks dedup test so this is preferable for now. 
+            assert(f[] != f_id, "redirect to yourself");
+            new_name := @format("%", (self, f[])) temp();
+            old_name := @format("%", (self, f_id)) temp();
+            self.emit_bounce_fn(new_name.items(), old_name.items(), bc.signeture, true);
             return(true);
         }
         fn Merged(parts) => { 
             each(parts[].items()) {check: *FuncImpl| 
-                if(self.emit_special(check, func, bc, pending), => return(true));
+                if(self.emit_special(f_id, check, func, bc, pending), => return(true));
             };
         }
         fn DynamicImport(name) => { 

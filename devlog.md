@@ -1,3 +1,22 @@
+## hack overloading some more (Aug 24)
+
+symptom: `arr: Array(i64, 3) = init(@slice (7, 8, 9));` choosing the overload for `Array(i64, 5)`
+It works with the arg being i64 but not []i64 or \*i64,
+so i think its about suspending in the argument type.
+so the answer that fixes this is to not continue after infer_arguments suspends in resolve_in_overload_set
+but that makes it segfault on run_tests.fr
+
+can make it work by taking out hte block where we infer args or continue which should be fine because you do it one arg at a time later,
+but that makes compiling run_tests llvm path segfault.
+also broke overloading_cycle which i guess im less attatched to cause the old one couldn't do it.
+and apparently the new one only could by randomly guessing.
+
+---
+
+aot emitting forwarding functions for redirects brings llvm to parity with aarch64.
+still kinda feels like a hack becuase i didn't need that before.
+but its certainly nicer if compilation order matters less
+
 ## fixing aot on new sema (Aug 21)
 
 - resolve named args. mandelbrot works now. can't do a single named arg yet.

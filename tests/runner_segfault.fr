@@ -1,0 +1,66 @@
+
+#test fn runner_segfault() void = { // :runner_segfault
+    return(); // we don't need to do anything the problem is while compiling.
+    
+    vtable := ImportVTable.zeroed();
+    vtable := vtable&;
+    run_llvm(vtable);
+}
+
+fn run_llvm(vtable: *ImportVTable) void = {
+    wasm32 := false;
+    opts := default_build_options();
+    comp := {vtable.init_compiler}(.Aarch64, opts);
+    c := vtable.with(comp);
+    run_sequential(c) {c, tests|
+        ir_text := {c.vtable.emit_llvm}(c, temp(), tests, .TestRunnerMain);
+        out := open_temp_file();
+        
+        args: List(Str) = list(temp());
+        if wasm32 {
+            args&.push_all(@slice("", ""));
+            args&.push_all(@slice("", ""));
+            args&.push_all(@slice("", ""));
+        };
+        success := run_cmd_blocking("", args.items()); 
+        
+        args: List(Str) = list(temp());
+        if true {
+            args&.push("");
+            run_cmd_blocking("", args.items());
+        } else {
+            run_cmd_blocking("", args.items());
+        };
+        
+        out.remove();
+    };
+}
+
+fn run_sequential(c: CompCtx, $inner_run: @Fn(c: CompCtx, fns: Slice(FuncId)) void) void = {
+    run :: fn(ff: Slice(FuncId)) bool => {
+        if false {
+            inner_run(c, ff);
+            true
+        }{
+            ok, out, err := fork_and_catch(temp(), => inner_run(c, ff));
+            if ff.len == 1 && !ok {
+                println(out.items());
+            };
+            ok
+        }
+    };
+    
+    failing: List(FuncId) = list(temp());
+    while(=> false) {
+        if run(empty()) { 
+        }else {
+            failing&.push_all(empty());
+        };
+    };
+
+    for failing.items() {fid|
+        s: Slice(FuncId) = (ptr = fid&, len = 1);
+        if(run(s), => set_colour(0, 200, 0)){
+        };
+    };
+}

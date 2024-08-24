@@ -558,17 +558,6 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
                 f_ty: FnType = (arg = payload.arg, ret = payload.ret, arity = args.len.trunc());
                 target := @check(self.resolve_by_type(payload.os, f_ty, func.loc)) return;
                 func.body = (Redirect = target);
-                
-                // TODO: i dont super understand why this is nessesary but it clearly is
-                //       i think if i handled redirects better this could go away. 
-                target_func := self.get_function(target);
-                if target_func.get_flag(.BodyIsSpecial) {
-                    @check(self.emit_special_body(target)) return;
-                    // TODO: this breaks deduplicate_functions test somehow. 
-                    @if_let(target_func.body) fn Intrinsic(op) => {
-                        func.body = (Intrinsic = op);
-                    };
-                };
             };
             // TODO: remove all the different string based ones and have #asm("llvm") #asm("qbe") FuncImpl::AsmStr(Backend:Symbol, Source:Symbol)
             //       so you can have driver programs add new backends without modifying the core compiler. 
@@ -2052,18 +2041,6 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
         func := self.get_function(opt.func);         
         ::as_ref(FatExpr);  
         @check(self.ensure_resolved_sign(opt.func)) return;
-        if !func.get_flag(.Generic) {
-            @match(self.infer_arguments(opt.func)) {
-                fn Ok() => ();
-                fn Err(e) => return(Err = e);
-                fn Suspend(f) => {
-                    blocked&.push(f); 
-                    //still_interesting&.push(opt[]);
-                    // TODO: this can't be right... if we suspended we shouldn't assume it won't match!
-                    continue(); // we don't like it, we skip it.
-                }
-            };
-        };
         
         if func.arg.bindings.len != want_arity {
             @debug_assert(arg_expr.expr&.is(.StructLiteralP), "expected kwargs");
