@@ -66,6 +66,7 @@ fn driver(vtable: *ImportVTable) void = {
     do_replace := false;
     args := cli_args();
     use_new_entry_point := false;
+    x86 := false;
     for args { arg |
         if arg.str() == "-no-build" {
             do_build = false;
@@ -76,23 +77,9 @@ fn driver(vtable: *ImportVTable) void = {
         if arg.str() == "-v2" {
             use_new_entry_point = true;
         };
-    };
-    
-    if DO_TESTS {
-        tests := c.get_tagged("test");
-        for tests { fid |
-            ptr := c.get_jitted(fid);
-            f := assume_types_fn(Arg = void, Ret = void, ptr = ptr);
-            f();
+        if arg.str() == "-x86" {
+            x86 = true;
         };
-        println(tests.len);
-        
-        // recall: you can always use emit_llvm directly instead of through the vtable to jit the newest version instead of using the old one if you broke something
-        ir_text := {c.vtable.emit_llvm}(c, temp(), tests, .TestRunnerMain);
-        test_exe := "target/tests.exe";
-        build_llvm(ir_text, @slice ("-o", test_exe));
-        success := run_cmd_blocking(test_exe, empty());
-        assert(success, "tests failed");
     };
     
     ::if([]FuncId);
@@ -177,6 +164,15 @@ fn driver(vtable: *ImportVTable) void = {
         };
         
         start := timestamp();
+        args := clone(@slice ("-c", "-Os"), temp());
+        
+        if x86 {
+            args&.push_all(@slice("-target", "x86_64-apple-darwin"));
+            //args&.push_all(@slice("-o", "target/franca/libfranca.o"));
+            panic("TODO: x86 build");
+        } else {
+            args&.push_all(@slice("-o", "target/franca/libfranca.o"));
+        };
         build_llvm(ir_text, @slice ("-o", "target/franca/libfranca.o", "-c", "-Os"));
         end := timestamp();
         @println("LLVM time: % ms.", end.sub(start)); 

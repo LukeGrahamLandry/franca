@@ -75,11 +75,11 @@ extern "C" {
     fn get<'p>(s: *mut (), s: Ident<'p>) -> &'p [u8];
     fn get_c_str(s: *mut (), s: Ident) -> *const u8;
     fn source_slice(s: *mut (), span_low: u32, span_high: u32) -> *const str;
-    pub(crate) fn log_stmt(pool: *mut (), s: &FatStmt) -> *const str;
-    pub(crate) fn log_expr(pool: *mut (), s: &FatExpr) -> *const str;
-    pub(crate) fn log_pattern(pool: *mut (), s: &Pattern) -> *const str;
-    pub(crate) fn log_func(pool: *mut (), s: &Func) -> *const str;
-    pub(crate) fn log_lazy_type(pool: *mut (), s: &LazyType) -> *const str;
+    pub(crate) fn log_stmt(pool: &SelfHosted, s: &FatStmt) -> *const str;
+    pub(crate) fn log_expr(pool: &SelfHosted, s: &FatExpr) -> *const str;
+    pub(crate) fn log_pattern(pool: &SelfHosted, s: &Pattern) -> *const str;
+    pub(crate) fn log_func(pool: &SelfHosted, s: &Func) -> *const str;
+    pub(crate) fn log_lazy_type(pool: &SelfHosted, s: &LazyType) -> *const str;
     pub fn self_hosted_main(vtable: *const ImportVTable, use_new_sema: bool);
     pub(crate) fn show_error_line(codemap: *mut (), span_low: u32, span_high: u32);
 

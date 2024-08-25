@@ -17,6 +17,18 @@ aot emitting forwarding functions for redirects brings llvm to parity with aarch
 still kinda feels like a hack becuase i didn't need that before.
 but its certainly nicer if compilation order matters less
 
+## repl (Aug 23)
+
+have to do some fixing up of the tree to make runtime vars work nicely.
+you cant just compile into a function because you don't have all the statements that might want to reference your variables.
+you can't just make a new function, append the statement, and rerun every time you get a new one because what if the print or access the file system or something.
+
+## gui (Aug 22)
+
+initial gui for introspecting the compiler.
+lets you click through functions, overload sets, and constants.
+not super helpful for me yet because you can't use it if there was a compile error.
+
 ## fixing aot on new sema (Aug 21)
 
 - resolve named args. mandelbrot works now. can't do a single named arg yet.

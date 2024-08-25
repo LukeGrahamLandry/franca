@@ -199,24 +199,24 @@ impl<'p> Program<'p> {
 
 impl<'p> PoolLog<'p> for LazyType<'p> {
     fn log(&self, pool: &SelfHosted<'p>) -> String {
-        unsafe { (*log_lazy_type(pool.pool, self)).to_string() }
+        unsafe { (*log_lazy_type(pool, self)).to_string() }
     }
 }
 impl<'p> PoolLog<'p> for Pattern<'p> {
     fn log(&self, pool: &SelfHosted<'p>) -> String {
-        unsafe { (*log_pattern(pool.pool, self)).to_string() }
+        unsafe { (*log_pattern(pool, self)).to_string() }
     }
 }
 
 impl<'p> PoolLog<'p> for FatExpr<'p> {
     fn log(&self, pool: &SelfHosted<'p>) -> String {
-        unsafe { (*log_expr(pool.pool, self)).to_string() }
+        unsafe { (*log_expr(pool, self)).to_string() }
     }
 }
 
 impl<'p> PoolLog<'p> for FatStmt<'p> {
     fn log(&self, pool: &SelfHosted<'p>) -> String {
-        unsafe { (*log_stmt(pool.pool, self)).to_string() }
+        unsafe { (*log_stmt(pool, self)).to_string() }
     }
 }
 
@@ -234,7 +234,7 @@ impl<'p> PoolLog<'p> for Var<'p> {
 
 impl<'p> PoolLog<'p> for Func<'p> {
     fn log(&self, pool: &SelfHosted<'p>) -> String {
-        unsafe { (*log_func(pool.pool, self)).to_string() }
+        unsafe { (*log_func(pool, self)).to_string() }
     }
 }
 
