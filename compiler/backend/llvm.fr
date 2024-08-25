@@ -5,6 +5,7 @@
 // TODO: not reserving enough
 // TODO: implement !asm with Module-Level Inline Assembly
 // TODO: only specfiy ccc if you take a pointer to the function? you want to use one that allows tail calls otherwise. 
+// TODO: use the arch passed in instead of buildoptions.wasm32
 
 // https://llvm.org/docs/SourceLevelDebugging.html#dbg-declare
 // they say the debug info intrinsics are deprecated and you should use records now... 
@@ -36,14 +37,15 @@ EmitLlvm :: @struct(
     debug_file: i64 = 0,
     debug_func_type: i64 = 0,
     debug_addr_type: i64 = 0,
+    arch: Arch,
     $Val := LlvmVal, // TODO: const can't be first (doesn't parse).  -- Jun 14
 );
 
 emit_llvm :: { T :: CodeGen(EmitLlvm, .EmitLlvm); T.emit }
     
 // TODO: dependency problem so can't call this `init`
-fn new(comp: CompCtx, alloc: Alloc) EmitLlvm #inline = {
-    s: EmitLlvm = (program = comp.data.cast()[][], out = init(12, alloc), current = BbId.zeroed(), debug_info = list(alloc));
+fn new(comp: CompCtx, alloc: Alloc, arch: Arch) EmitLlvm #inline = {
+    s: EmitLlvm = (program = comp.data.cast()[][], out = init(12, alloc), current = BbId.zeroed(), debug_info = list(alloc), arch = arch);
     
     // TODO: how the hell am i supposed to know these numbers without just compiling a c program with clang. 
     //       its not a big deal tho cause passing -target to clang overrides this. 
@@ -51,6 +53,9 @@ fn new(comp: CompCtx, alloc: Alloc) EmitLlvm #inline = {
     target datalayout = "e-m:o-i64:64-i128:128-n32:64-S128"
     target triple = "arm64-apple-macosx13.0.0"
     """);
+    if arch == .X86_64 {
+        s.out&.push_all("module asm \".intel_syntax noprefix\"\n");
+    };
     
     if s.program.get_build_options()[].debug_info {
         s.debug_unit = s&.next_debug();
@@ -368,13 +373,15 @@ fn forward_declare(self: *EmitLlvm, sig: PrimSig, private: bool, name: Str) void
 
 fn emit_special_asm(self: *EmitLlvm, body: *FuncImpl, func: *Func, bc: *FnBody, arch: Arch) bool = {
     @match(body) {
-        (fn Merged(parts) => { 
+        fn Merged(parts) => { 
             each(parts[].items()) {check: *FuncImpl| 
                 if(self.emit_special_asm(check, func, bc, arch), => return(true));
             };
-        });
-        (fn JittedAarch64(code) => { 
-            if(arch.ne(Arch.Aarch64), => { return(false); });
+        }
+        fn JittedAarch64(code) => { 
+            if arch != .Aarch64 { 
+                return(false); 
+            };
             name := @format("%", (self, bc.func)) temp();
             self.forward_declare(bc.signeture, false, name.items());
             
@@ -385,8 +392,23 @@ fn emit_special_asm(self: *EmitLlvm, body: *FuncImpl, func: *Func, bc: *FnBody, 
             };
             
             return(true);
-        });
-        @default fn() void => return(false);
+        }
+        fn X86AsmText(code) => { 
+            if arch != .X86_64 { 
+                return(false); 
+            };
+            name := @format("%", (self, bc.func)) temp();
+            self.forward_declare(bc.signeture, false, name.items());
+            
+            @fmt(self.out&.current(), "module asm \"_%:\"\n", (self, bc.func));
+            code := self.program.pool.get(code[]);
+            code := code.splitlines(temp());
+            for code { inst |
+                @fmt(self.out&.current(), "module asm \"%\"\n", inst);
+            };
+            return(true);
+        }
+        @default => return(false);
     };
     false
 }

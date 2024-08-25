@@ -3,8 +3,8 @@ CompilerValue :: @struct(pointer_to_pointer_to_selfhosted: rawptr);
 CompCtx :: @struct(data: Compiler, vtable: *ImportVTable);
 fn CRes($T: Type) Type = Result(T, rawptr);
  
-Backend :: @enum(i64) (Aarch64 = 1);
-Arch :: @enum(i64) (Aarch64 = 1, X86_64 = 2);
+Backend :: @enum(i64) (Aarch64 = 1, Cranelift = 3); ::enum(Backend);
+Arch :: @enum(i64) (Aarch64 = 1, X86_64 = 2, Wasm32 = 3);
 ExecStyle :: @enum(i64) (Jit = 0, Aot = 1);
 Os :: @enum(i64) (Macos = 0, Linux = 1, Windows = 2);
 
@@ -50,7 +50,7 @@ ImportVTable :: @rec @struct(
     _e: usize,
     get_compiler_builtins_source: @FnPtr() Str,
     _i: usize,
-    emit_llvm: @FnPtr(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId), entry: ProgramEntry) BucketArray(u8),
+    emit_llvm: @FnPtr(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId), entry: ProgramEntry, target: Arch) BucketArray(u8),
     // TODO: HACK: last bucket is inline assembly 
     emit_qbe: @FnPtr(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId), entry: ProgramEntry) BucketArray(u8),
     _g: usize,
@@ -113,6 +113,7 @@ BuildOptions :: @struct(
     deduplicate_bytecode: bool = true,
     debug_info: bool = false,
     wasm32: bool = false,  // :build_options_wasm
+    comptime_jit: Backend = .Aarch64,
     // TODO: want to do this but putting it in fn uninitialized or areana new_chuck seems to cause a circular dependency -- Jul 29
     //fill_uninitialized_memory: bool = true,
 );
@@ -289,6 +290,7 @@ FuncImpl :: @rec @tagged(
     Empty: void,
     QbeIr: Symbol,
     Intrinsic: Intrinsic,
+    X86AsmText: Symbol,
 );
 
 Pattern :: @struct(
@@ -511,6 +513,7 @@ Flag :: @enum(
     once,
     qbe,
     intrinsic,
+    x86,
     _reserved_count_,  // TODO: remove. this langauge has non-garbage reflection. 
     compiler_debug_assert_eq_i64,
     cold,

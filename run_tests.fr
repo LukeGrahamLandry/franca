@@ -37,7 +37,10 @@ fn driver(vtable: *ImportVTable) void = {
                 println("=== Aarch64 Jit ===");
                 run_jit(vtable, .Aarch64);
             };
-            
+            @case("cranelift") => {
+                println("=== Cranelift Jit ===");
+                run_jit(vtable, .Cranelift);
+            };
             @case("llvm") => run_llvm(vtable, false);
             //@case("llvm-wasm") => run_llvm(vtable, true);
             // TODO: new sema can't compile this yet. 
@@ -111,7 +114,9 @@ fn run_examples(vtable: *ImportVTable, allow_deps: bool) void = {
 }
 
 fn run_jit(vtable: *ImportVTable, kind: Backend) void = {
-    comp := {vtable.init_compiler}(kind, default_build_options());
+    opts := default_build_options();
+    opts.comptime_jit = kind;
+    comp := {vtable.init_compiler}(kind, opts);
     // TODO: (before fn with) can't inline the arg without an extra @as, because it thinks you're passing named args. 
     c := vtable.with(comp);
     load_lang_tests(c);
@@ -134,7 +139,7 @@ fn run_llvm(vtable: *ImportVTable, $wasm32: bool) void = {
     c := vtable.with(comp);
     load_lang_tests(c);
     run_sequential(c) {c, tests|
-        ir_text := {c.vtable.emit_llvm}(c, temp(), tests, .TestRunnerMain);
+        ir_text := {c.vtable.emit_llvm}(c, temp(), tests, .TestRunnerMain, get_comptime_arch());
         out := open_temp_file();
         for(ir_text&){bucket|
             out.fd&.write(bucket);

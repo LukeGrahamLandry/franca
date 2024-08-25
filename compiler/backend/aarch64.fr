@@ -35,6 +35,7 @@ MEM_08: i64 : 0b00;
 
 fn ne(a: FuncId, b: FuncId) bool #redirect(Ty(u32, u32), bool);
 
+// TODO: now this function is missnamed
 fn emit_bc_and_aarch64(program: CompilerRs, f: FuncId, when: ExecStyle) Result(void, ParseErr) #compiler = {
     mark := __temp_alloc.mark();
     body := @try_deref_err(program.emit_bc(f, when)) return;
@@ -58,6 +59,18 @@ fn emit_bc_and_aarch64(program: CompilerRs, f: FuncId, when: ExecStyle) Result(v
         func := program.index(f);
         real_name := get_string(program.cast(), func.name);
         ___tracy_emit_zone_name(zone, real_name);
+    };
+    
+    @if(INCLUDE_COMPTIME_CRANELIFT) {
+        opts := program[][].get_build_options();
+        if opts.comptime_jit == .Cranelift {
+            data := program.cranelift.expect("cranelift backend to be initilized");
+            franca_comptime_cranelift_emit(data, f, body, program);
+            
+            zone_end(zone);
+            __temp_alloc.reset_retaining_capacity(mark);
+            return(.Ok);
+        };
     };
     
     a: EmitAsm = new(program, when, body, f);

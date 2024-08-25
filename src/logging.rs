@@ -432,6 +432,7 @@ impl<'p> PoolLog<'p> for FuncImpl<'p> {
             FuncImpl::Empty => String::from("Unknown"),
             &FuncImpl::CSource(ir) => pool.get(ir).to_string(),
             FuncImpl::Intrinsic(n) => format!("Intrinsic({n})"),
+            &FuncImpl::X86AsmText(ir) => pool.get(ir).to_string(),
         }
     }
 }

@@ -700,6 +700,7 @@ pub enum FuncImpl<'p> {
     Empty,
     QbeIr(Ident<'p>),
     Intrinsic(i64),
+    X86AsmText(Ident<'p>),
 }
 
 impl<'p> Func<'p> {
@@ -1333,6 +1334,7 @@ pub enum Flag {
     Once,
     Qbe,
     Intrinsic,
+    X86,
     _Reserved_Count_,
 }
 

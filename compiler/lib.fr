@@ -17,7 +17,8 @@
 #include_std("compiler/lsp/hooks.fr"); 
 #include_std("compiler/v2/dispatch.fr"); 
 #include_std("compiler/v2/sema.fr"); 
-#include_std("compiler/v2/ast_boring.fr"); 
+#include_std("compiler/v2/ast_boring.fr");
+#include_std("compiler/backend/cranelift.fr"); 
 
 ::?[]Prim; // TODO: why do i need this extra when lsp????? order of exports changed maybe??
 
@@ -50,6 +51,7 @@ SelfHosted :: @struct(
     // TODO: its dumb that deep is here and shallow is in typeinfo struct?  -- Jul 21
     finished_layout_deep: DynamicBitSet,
     dispatch: CompilerDispatch,
+    cranelift: ?JittedCranelift = .None,
 );
 
 :: AutoHash(Ty(Type, u16, bool, bool), TrivialHasher);
@@ -341,7 +343,7 @@ fn go_build_yo_self(vtable: *ImportVTable) void = {
     ::if([]FuncId);
     exports: []FuncId = c.get_tagged("compiler");
     
-    ir_text := {c.vtable.emit_llvm}(c, temp(), exports, .ExportWithNames);
+    ir_text := {c.vtable.emit_llvm}(c, temp(), exports, .ExportWithNames, get_comptime_arch());
     @println("Emitted % bytes of llvm ir.", ir_text.len);  // useful to see when i start trying to deduplicate bytecode. 
     end := timestamp();
 
@@ -377,7 +379,17 @@ fn load_file_in_compiler(vtable: *ImportVTable, path: Str, use_new_sema: bool) C
     source: List(u8) = prelude.clone(libc_allocator);  // TODO: column number on error on first line will be wrong but i dont care. 
     source&.read_and_push(path);  // TODO: error handling
     
-    comp := {vtable.init_compiler}(.Aarch64, default_build_options()); // TODO: comptime get the current arch
+    opts := default_build_options();
+    @if(INCLUDE_COMPTIME_CRANELIFT) {
+        x := query_current_arch();
+        if x { arch | 
+            if arch != .Aarch64 {
+                opts.comptime_jit = .Cranelift;
+            }
+        };  
+    };
+    
+    comp := {vtable.init_compiler}(opts.comptime_jit, opts);
     c := vtable.with(comp);
     file := {c.vtable.add_file}(c.data, path, source.items());
     self := c.data.cast();
@@ -600,7 +612,17 @@ fn init_self_hosted(build_options: *BuildOptions) *SelfHosted #compiler = {
         dispatch = init(a),
     );
     self&.init_fixed_types();
-    a.boxed(SelfHosted, self)
+    self := a.boxed(SelfHosted, self);
+    
+    @if(INCLUDE_COMPTIME_CRANELIFT) {
+        if build_options.comptime_jit == .Cranelift {
+            dispatch_ptr := self.aarch64&.get_dispatch();
+            data := franca_comptime_cranelift_init(self, get_backend_vtable(), dispatch_ptr);
+            self.cranelift = (Some = data);
+        };
+    };
+    
+    self
 }
 
 fn get_function(self: *SelfHosted, fid: FuncId) *Func #compiler = {

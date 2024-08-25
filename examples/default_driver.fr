@@ -24,6 +24,7 @@ fn driver(vtable: *ImportVTable) void = {
     keep_names := false;
     deduplicate := true;
     debug_info := false;
+    target_x86 := false;
     
     args := cli_args();
     args := args.slice(1, args.len); // skip exe
@@ -56,6 +57,9 @@ fn driver(vtable: *ImportVTable) void = {
             @case("-debug-info") => {
                 debug_info = true;
             };
+            @case("-x86") => {
+                target_x86 = true;
+            };
             @default => {
                 extra_args&.push(arg);
             };
@@ -86,7 +90,7 @@ fn driver(vtable: *ImportVTable) void = {
                     println("Compiled successfully but selected jit backend so no artifact was produced.");
                 } else {
                     assert(llvm, "Not Yet Implemented: build main with -aot=qbe");
-                    c.compile_with_llvm(fid, .ExportWithNames, debug_info, wasm);
+                    c.compile_with_llvm(fid, .ExportWithNames, debug_info, wasm, target_x86);
                     println("[built a.out]");
                 };
                 exit(0);
@@ -104,7 +108,7 @@ fn driver(vtable: *ImportVTable) void = {
                     f();
                 } else {
                     if llvm {
-                        c.compile_with_llvm(fid, .ExportWithNames, debug_info, false);
+                        c.compile_with_llvm(fid, .ExportWithNames, debug_info, false, target_x86);
                     } else {
                         assert(qbe, "rn only two backends. update me as needed!");
                         c.compile_with_qbe(fid, .ExportWithNames);
@@ -131,7 +135,7 @@ fn driver(vtable: *ImportVTable) void = {
                         passed += 1;
                     } else {
                         assert(llvm, "Not Yet Implemented: run test with -aot=qbe");
-                        c.compile_with_llvm(fid, .TestRunnerMain, debug_info, false);
+                        c.compile_with_llvm(fid, .TestRunnerMain, debug_info, false, target_x86);
                         child_args := find_args_after_double_dash(args_after_action);
                         @eprintln("[run %]", c.get_string(c.get_function_name(fid)));
                         success := run_cmd_blocking("./a.out", empty());
@@ -149,8 +153,10 @@ fn driver(vtable: *ImportVTable) void = {
     panic(choose_action);
 }
 
-fn compile_with_llvm(c: CompCtx, fid: FuncId, entry: ProgramEntry, debug_info: bool, wasm: bool) void = {
-    ir_text := {c.vtable.emit_llvm}(c, temp(), @slice (fid), entry);
+fn compile_with_llvm(c: CompCtx, fid: FuncId, entry: ProgramEntry, debug_info: bool, wasm: bool, x86: bool) void = {
+    ::if(Arch);
+    arch := if(wasm, => Arch.Wasm32, => if(x86, => Arch.X86_64, => Arch.Aarch64));
+    ir_text := {c.vtable.emit_llvm}(c, temp(), @slice (fid), entry, arch);
     out := open_temp_file();
     for ir_text& { bucket |
         out.fd&.write(bucket);
@@ -164,6 +170,9 @@ fn compile_with_llvm(c: CompCtx, fid: FuncId, entry: ProgramEntry, debug_info: b
         ));
         // also we want to just pretend we have a libc (and trust that js will provide it) 
         args&.push_all(@slice("-Wl,-undefined", "-Wl,dynamic_lookup", "-Wl,--allow-undefined"));
+    };
+    if x86 {
+        args&.push_all(@slice("-target", "x86_64-apple-darwin"));
     };
     if debug_info {
         args&.push_all(@slice ("-O0", "-g"));

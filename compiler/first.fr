@@ -5,13 +5,14 @@ ENABLE_LSP_   :: false;
 ENABLE_QBE_BACKEND_ :: false; // TODO: error message if you try to use when disabled instead of just calling a null function pointer. 
 REPLACE_COMPILER :: false;
  
-fn load_src(vtable: *ImportVTable) Ty(CompCtx, *ComptimeLibs) = {
+fn load_src(vtable: *ImportVTable, include_cranelift: bool) Ty(CompCtx, *ComptimeLibs) = {
     src := temp().read_to_string("compiler/main.fr");
     @fmt(src&, ";ENABLE_TRACY :: %;\n", ENABLE_TRACY_);
     @fmt(src&, ";ENABLE_LSP   :: %;\n", ENABLE_LSP_);
     @fmt(src&, ";ENABLE_QBE_BACKEND :: %;\n", ENABLE_QBE_BACKEND_);
     @fmt(src&, ";ENABLE_LOGGING_CALLBACKS :: false;\n");
     @fmt(src&, ";DO_TERMINAL_COLOURS :: true;\n");
+    @fmt(src&, ";INCLUDE_COMPTIME_CRANELIFT :: %;\n", include_cranelift);
     
     opts := default_build_options();
     opts.deduplicate_bytecode = true;
@@ -31,6 +32,9 @@ fn load_src(vtable: *ImportVTable) Ty(CompCtx, *ComptimeLibs) = {
         };
         if extra.str() == "-spam" {
             spam = true;
+        };
+        if extra.str() == "-x86" {
+            opts.comptime_jit = .Cranelift;
         };
     };
     @fmt(src&, ";DEBUG_SPAM_LOG :: %;\n", spam);
@@ -60,13 +64,14 @@ fn driver(vtable: *ImportVTable) void = {
         panic("Working directory must be top level of the franca repository");
     };
     start := timestamp();
-    c, libs := load_src(vtable);
     
     do_build := true;
     do_replace := false;
     args := cli_args();
     use_new_entry_point := false;
     x86 := false;
+    arch := Arch.Aarch64;
+    include_cranelift := false;
     for args { arg |
         if arg.str() == "-no-build" {
             do_build = false;
@@ -79,8 +84,13 @@ fn driver(vtable: *ImportVTable) void = {
         };
         if arg.str() == "-x86" {
             x86 = true;
+            arch = .X86_64;
+        };
+        if arg.str() == "-include-cranelift" {
+            include_cranelift = true;
         };
     };
+    c, libs := load_src(vtable, include_cranelift);
     
     ::if([]FuncId);
     exports: []FuncId = if use_new_entry_point {
@@ -90,7 +100,7 @@ fn driver(vtable: *ImportVTable) void = {
         c.get_tagged("compiler")
     };
     
-    ir_text := {c.vtable.emit_llvm}(c, temp(), exports, .ExportWithNames);
+    ir_text := {c.vtable.emit_llvm}(c, temp(), exports, .ExportWithNames, arch);
     @println("Emitted % bytes of llvm ir.", ir_text.len);  // useful to see when i start trying to deduplicate bytecode. 
     end := timestamp();
     if !DO_TESTS {
@@ -154,32 +164,35 @@ fn driver(vtable: *ImportVTable) void = {
         run_cmd_blocking(CLANG_PATH, args.items()).assert("link failed");
     };
     
+    fn fmt_str(fmt_args: FatExpr) FatExpr #macro = @{
+        (@format(@[fmt_args]) temp()).items()
+    };
+    
+    arch_path := if(x86, => "x86_64-apple-darwin", => "aarch64-apple-darwin");
+    out_dir := @fmt_str("target/franca/%", arch_path);
+    
     if do_build {
         if use_new_entry_point {| // note: exits!
             start := timestamp();
-            build_llvm(ir_text, @slice ("-o", "target/franca/franca2", "-g", "-Os"));  // "-mllvm", "-hot-cold-split=true",
+            build_llvm(ir_text, @slice ("-o", @fmt_str("%/franca2", out_dir), "-g", "-Os"));  // "-mllvm", "-hot-cold-split=true",
             end := timestamp();
             @println("LLVM time: % ms.", end.sub(start));
             exit(0);
         };
         
         start := timestamp();
-        args := clone(@slice ("-c", "-Os"), temp());
+        args := clone(@slice ("-o", @fmt_str("%/libfranca.o", out_dir), "-c", "-Os"), temp());
         
         if x86 {
             args&.push_all(@slice("-target", "x86_64-apple-darwin"));
-            //args&.push_all(@slice("-o", "target/franca/libfranca.o"));
-            panic("TODO: x86 build");
-        } else {
-            args&.push_all(@slice("-o", "target/franca/libfranca.o"));
         };
-        build_llvm(ir_text, @slice ("-o", "target/franca/libfranca.o", "-c", "-Os"));
+        build_llvm(ir_text, args.items());
         end := timestamp();
         @println("LLVM time: % ms.", end.sub(start)); 
         
         // build.rs needs this if it wants to build the binary (it won't take a .o file)
         run_cmd_blocking("/usr/bin/ar", @slice (
-            "rc", "target/franca/libfranca.a", "target/franca/libfranca.o"
+            "rc", @fmt_str("%/libfranca.a", out_dir), @fmt_str("%/libfranca.o", out_dir)
         )).assert("link failed");
         
         // to use tracy, we need to use clang to build the binary so it can find libc++,
@@ -193,12 +206,22 @@ fn driver(vtable: *ImportVTable) void = {
         args := libs.get_aot_objects();
         // TODO: should output then move cause i think it deletes if it fails. and save the old one for a bit cause its scary. 
         if do_replace {
-            compiler_exe_path := "target/release/franca";
+            compiler_exe_path := @fmt_str("%/franca", out_dir);
             save_temp_file := open_temp_file();
+            rust_path := if(x86, => "target/x86_64-apple-darwin/release/libfranca.a", => "target/release/libfranca.a");
             rename(compiler_exe_path.maybe_borrow_cstr(temp()), save_temp_file&.c_name());
-            args&.push_all(@slice("target/release/libfranca.a", "target/franca/libfranca.o", "-o", compiler_exe_path, "-g"));
+            @println("Replacing your compiler at '%' with the new one. \nThe old one was saved at '%' (NOTE: THATS A TEMP FILE!)", compiler_exe_path, save_temp_file&.s_name());
+            args&.push_all(@slice(rust_path, @fmt_str("%/libfranca.o", out_dir), "-o", compiler_exe_path, "-g"));
+            if x86 {
+                args&.push_all(@slice("-target", "x86_64-apple-darwin"));
+            };
+            if include_cranelift {
+                cl_path := if(x86, 
+                    => "crates/comptime_cranelift/target/x86_64-apple-darwin/release/libcomptime_cranelift.a", 
+                    => "crates/comptime_cranelift/target/release/libcomptime_cranelift.a");
+                args&.push(cl_path);
+            };
             run_cmd_blocking(CLANG_PATH, args.items()).assert("link failed");
-            @println("Replaced your compiler at '%' with the new one. \nThe old one was saved at '%' (NOTE: THATS A TEMP FILE!)", compiler_exe_path, save_temp_file&.s_name());
         } else {
             println("SKIPPED REPLACING COMPILER");
         };

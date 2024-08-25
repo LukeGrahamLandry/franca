@@ -1,3 +1,19 @@
+## supporting x86_64 (Aug 25)
+
+x86 inline asm because the compiler uses it for comptime c calls. just passing a string to llvm for now.
+
+- magic incantation `.intel_syntax noprefix` from https://stackoverflow.com/questions/66532417/how-to-inline-assembly-with-clang-11-intel-syntax-and-substitution-variables
+
+bringing back cranelift because i want the compiler to work on x86_64 but i dont want to deal with it yet.
+
+- int intrinsics. failing 50
+- switch. failing 35
+- fcmp. failing 23
+- float casts. failing 11
+- clone stack before each case of switch. failing 1, but its the runner_segfault that always fails.
+
+fixed runner_segfault on old.
+
 ## hack overloading some more (Aug 24)
 
 symptom: `arr: Array(i64, 3) = init(@slice (7, 8, 9));` choosing the overload for `Array(i64, 5)`
