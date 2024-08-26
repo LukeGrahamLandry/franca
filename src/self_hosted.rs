@@ -1,4 +1,4 @@
-use std::marker::PhantomData;
+use std::{marker::PhantomData, mem};
 
 use crate::{
     ast::{FatExpr, FatStmt, Flag, FnType, Func, FuncId, LazyType, OverloadSetId, Pattern, ScopeId, TypeId, TypeInfo, TypeMeta, Var},
@@ -71,7 +71,7 @@ use crate::export_ffi::BigResult;
 #[link(name = "franca")]
 extern "C" {
     pub(crate) fn init_self_hosted<'p>(build_options_ptr: usize) -> Box<SelfHosted<'p>>;
-    fn insert_owned<'p>(s: *mut (), s: &[u8]) -> Ident<'p>;
+    fn insert_owned<'p>(s: *mut (), s_ptr: *const u8, s_len: usize) -> Ident<'p>;
     fn get<'p>(s: *mut (), s: Ident<'p>) -> &'p [u8];
     fn get_c_str(s: *mut (), s: Ident) -> *const u8;
     fn source_slice(s: *mut (), span_low: u32, span_high: u32) -> *const str;
@@ -83,7 +83,7 @@ extern "C" {
     pub fn self_hosted_main(vtable: *const ImportVTable, use_new_sema: bool);
     pub(crate) fn show_error_line(codemap: *mut (), span_low: u32, span_high: u32);
 
-    fn put_constant(scopes: *mut (), name: &Var, value: FatExpr, ty: LazyType);
+    fn put_constant(scopes: *mut (), name: &Var, value: &FatExpr, ty: &LazyType);
     fn get_var_type(scopes: *mut (), v: &Var) -> BigOption<TypeId>;
     fn put_var_type(scopes: *mut (), v: &Var, ty: TypeId) -> bool;
     fn get_constant<'p>(scopes: *mut (), name: &Var<'p>) -> BigOption<&'p mut (FatExpr<'p>, LazyType<'p>)>;
@@ -115,7 +115,8 @@ extern "C" {
         comp: &mut Compile<'_, 'p>,
         ptr: usize,
         f_ty: &FnType,
-        args_value: &[u8],
+        args_value_ptr: *const u8,
+        args_value_len: usize,
         comp_ctx: bool,
     ) -> BigResult<Values, ParseErr<'p>>;
 
@@ -127,7 +128,7 @@ extern "C" {
     pub(crate) fn get_jitted_function<'p>(program: &Compile<'_, 'p>, f: FuncId) -> BigOption<i64>;
     pub(crate) fn put_jitted_function<'p>(program: &mut Compile<'_, 'p>, f: FuncId, addr: i64);
     pub(crate) fn bump_dirty<'p>(program: &mut Compile<'_, 'p>);
-    pub(crate) fn copy_inline_asm<'p>(program: &Compile<'_, 'p>, f: FuncId, insts: &[u32]);
+    pub(crate) fn copy_inline_asm<'p>(program: &Compile<'_, 'p>, f: FuncId, insts_ptr: *const u32, insts_len: usize);
 
     pub(crate) fn emit_bc_and_aarch64<'p>(comp: &mut Compile<'_, 'p>, f: FuncId, when: ExecStyle) -> BigResult<(), ParseErr<'p>>;
 
@@ -150,7 +151,8 @@ impl<'p> SelfHosted<'p> {
     pub(crate) fn intern(&self, s: &str) -> Ident<'p> {
         let s = s.as_bytes().to_vec();
         // TODO: my version of the pool doesn't want to own things. :LEAK
-        unsafe { insert_owned(self.pool, s.leak()) }
+        let s = s.leak();
+        unsafe { insert_owned(self.pool, s.as_ptr(), s.len()) }
     }
 
     pub(crate) fn get(&self, s: Ident<'p>) -> &'p str {
@@ -176,7 +178,9 @@ impl<'p> SelfHosted<'p> {
     }
 
     pub(crate) fn put_constant(&mut self, name: crate::ast::Var<'p>, value: FatExpr<'p>, ty: LazyType<'p>) {
-        unsafe { put_constant(self.scopes, &name, value, ty) }
+        unsafe { put_constant(self.scopes, &name, &value, &ty) };
+        mem::forget(value);
+        mem::forget(ty);
     }
 
     pub(crate) fn get_var_type(&self, v: Var) -> BigOption<TypeId> {

@@ -335,7 +335,23 @@ fn emit_special(self: *EmitLlvm, f_id: FuncId, body: *FuncImpl, func: *Func, bc:
         }
         fn DynamicImport(name) => { 
             // TODO: do i need to hackily do the same for ComptimeAddr and hope for the best? ideally the forntend would handle that instead. 
-            import_name := self.program.pool.get(name[]);
+
+            // :link_rename
+            import_name: Str = if func.nullable_link_rename_func != 0 {
+                out: List(u8) = list(temp());
+                arg: LinkRenameArg = (
+                    target = (arch = self.arch, os = .Macos),
+                    out = out&,
+                    old_name = self.program.pool.get(name[]),
+                );
+                addr := rawptr_from_int(func.nullable_link_rename_func);
+                addr := assume_types_fn(*LinkRenameArg, void, addr);
+                addr(arg&);
+                out.items()
+            } else {
+                self.program.pool.get(name[])
+            };
+            
             self.forward_declare(bc.signeture, false, import_name);
             name := @format("%", (self, bc.func)) temp();
             self.emit_bounce_fn(import_name, name.items(), bc.signeture, true);
@@ -493,7 +509,9 @@ fn setup(self: *EmitLlvm, body: *FnBody, vars_out: *List(EmitLlvm.Val)) void = {
 }
 
 fn fmt_fn_name(self: *EmitLlvm, f: FuncId, out: *List(u8)) void = {
-    if self.program.get_build_options()[].retain_function_names {
+    retain_function_names := self.program.get_build_options()[].retain_function_names;
+    
+    if retain_function_names {
         func := self.program.get_function(f);
         real_name := self.program.pool.get(func.name);
         @fmt(out, "%__%", real_name, f.to_index());

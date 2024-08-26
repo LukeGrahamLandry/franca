@@ -1,3 +1,78 @@
+##
+
+v2;  
+so tuple2 is getting the right type args but it segfaults if i try to print types.len so comp_ctx ptr is garbage?
+yeah the hack number im passing to emit_bc_and_aarch64 is not the one i get out, but it is on arm.
+ooooooooo kkkkkkk now it seems to be working....
+maybe i didn't recompile comptime_cranelift for x86 since i changed how comptime_ctx_ptr was passed...
+i feel like i did.... but i must just be super dumb.
+but anyway now i can run mandelbrot on franca2 x86.
+v1 doesn't work still but that makes more sense because it has to deal with matching rust's c abi.
+
+v2 can't `run_tests -- cranelift`. maybe `DirEntType.File` has a different value on x86 macos libc?
+no `clang libc_constants.c -target x86_64-apple-darwin` gives the same results and file says `a.out: Mach-O 64-bit executable x86_64` so it seems to have worked.
+but my basic_libc walk_dir test works on arm with v2 but not x86.
+different DirEnt layout? seems like no.
+but cross compiling `franca examples/default_driver.fr test tests/basic_libc.fr -aot=llvm -x86` also doesn't work so thats definitly the problem.
+`println(entry.name().len());` gets garbage lengths.
+
+what the fuck?? ok so i can write a c program that uses readdir_r and works, but if you look at the llvm ir clang produces,
+its calling `readdir_r$INODE64` on x86. on arm it just calls `readdir_r` like you'd expect.
+and sure enough if i manually edit the ir i produce and call `readdir_r$INODE64` it works on x86.
+how the fuck am i supposed to know that??
+oh damn if i google that string its just a thing people know,
+
+- https://www.reddit.com/r/Compilers/comments/fuosy2/psa_link_name_for_readdir_on_64bit_osx_is/
+- https://github.com/rust-lang/libc/issues/414
+
+and if i look in my dirent.h
+
+```
+int readdir_r(DIR *, struct dirent *, struct dirent **) __DARWIN_INODE64(readdir_r);
+```
+
+and then in cdefs.h
+
+```
+#define __DARWIN_INODE64(sym)           __asm("_" __STRING(sym) __DARWIN_SUF_64_BIT_INO_T)
+```
+
+and
+
+```
+#  if __DARWIN_64_BIT_INO_T
+#    if __DARWIN_ONLY_64_BIT_INO_T
+#      define __DARWIN_SUF_64_BIT_INO_T /* nothing */
+#    else /* !__DARWIN_ONLY_64_BIT_INO_T */
+#      define __DARWIN_SUF_64_BIT_INO_T "$INODE64"
+#    endif /* __DARWIN_ONLY_64_BIT_INO_T */
+#  else /* !__DARWIN_64_BIT_INO_T */
+#    define __DARWIN_SUF_64_BIT_INO_T   /* nothing */
+#  endif /* __DARWIN_64_BIT_INO_T */
+
+```
+
+we need to appritiate reddit bro for a moment
+
+```
+// https://github.com/peterdelevoryas/mylang/blob/master/src/llvm.rs#L52
+for func_decl in &module.func_decls {
+      let lltype = type_bld.func_type(&func_decl.ty);
+      let mut name = func_decl.name.deref().to_string();
+      name.push('\0');
+      let mut link_name = name.as_ptr() as *const i8;
+      if cfg!(target_os = "macos") && name == "readdir\0" {
+          link_name = "readdir$INODE64\0".as_ptr() as *const i8;
+      }
+      let llfunc = LLVMAddFunction(llmodule, link_name, lltype);
+      llfuncs.push(llfunc);
+  }
+```
+
+thats funny.
+ok so this is just how life is i guess.
+now i need to make a better #import that lets you set a link name.
+
 ## supporting x86_64 (Aug 25)
 
 x86 inline asm because the compiler uses it for comptime c calls. just passing a string to llvm for now.
@@ -13,6 +88,17 @@ bringing back cranelift because i want the compiler to work on x86_64 but i dont
 - clone stack before each case of switch. failing 1, but its the runner_segfault that always fails.
 
 fixed runner_segfault on old.
+
+now to make it actually run on x86 i get the thrilling job of hunting down everywhere i was sketchy with abi stuff.
+
+v2 dying in tuple_of after a call_dynamic.  
+v1 dying in platform_mmemmove after hoist_constants
+
+- put_constant taking by value instead of ref. that didnt help but probably will eventually.
+- call_dynamic_values took a slice as an argument. converted to ptr, len.
+  that moved the problem, only for v1 not v2, which makes sense.
+  now v1 isn't crashing, it just thinks theres no overloads for bootstrap_compiler_environment which is kinda worse cause you don't know where to look.
+- make_and_resolve_and_compile_top_level, unquote_macro_apply_placeholders, insert_owned, and tuple_of took slice arg. didnt help
 
 ## hack overloading some more (Aug 24)
 

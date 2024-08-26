@@ -408,7 +408,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.last_loc = Some(self.program[f].loc);
 
         if let Some(code) = &self.program[f].body.jitted_aarch64() {
-            unsafe { self_hosted::copy_inline_asm(self, f, code) };
+            unsafe { self_hosted::copy_inline_asm(self, f, code.as_ptr(), code.len()) };
         }
 
         if self.program[f].cc.unwrap() != CallConv::Inline {
@@ -522,7 +522,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.flush_cpu_instruction_cache();
         let expected_ret_bytes = self.program.get_info(ty.ret).stride_bytes;
         let result = unsafe {
-            self_hosted::call_dynamic_values(self, addr as usize, &ty, arg.bytes(), cc == CallConv::CCallRegCt)
+            self_hosted::call_dynamic_values(self, addr as usize, &ty,  arg.bytes().as_ptr(), arg.bytes().len(), cc == CallConv::CCallRegCt)
         }.unwrap_or_else(|e| panic!("failed call_dynamic_values. (TODO: convert err types) {}", e.msg));
         debugln_call!("OUT: {result:?}");
 

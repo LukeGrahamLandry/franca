@@ -199,7 +199,8 @@ pub struct ImportVTable {
     _d: usize,
     _add_file: usize,
     _parse_stmts: usize,
-    make_and_resolve_and_compile_top_level: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, body: *const [FatStmt<'p>]) -> BigCErr<'p, ()>,
+    make_and_resolve_and_compile_top_level:
+        for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, body_ptr: *const FatStmt<'p>, body_len: usize) -> BigCErr<'p, ()>,
     make_jitted_exec: usize,
     give_vtable: usize,
     _k: usize,
@@ -306,7 +307,7 @@ unsafe extern "C" fn franca_init_compiler(comptime_arch: TargetArch, build_optio
         panic!("aarch64 jit is not supported on this architecture"); // TODO: return error instead.
     }
 
-    let program = Box::leak(Box::new(Program::new(comptime_arch, build_options_ptr)));
+    let program = Box::leak(Box::new(Program::new(build_options_ptr)));
     let compiler = Box::leak(Box::new(Compile::new(program)));
     compiler as *const Compile
 }
@@ -331,7 +332,12 @@ unsafe extern "C" fn get_jitted_ptr<'p>(c: &mut Compile<'_, 'p>, f: FuncId) -> B
     Ok(unwrap!(c.get_fn(f), "not compiled {f:?}"))
 }
 
-unsafe extern "C" fn make_and_resolve_and_compile_top_level<'p>(c: &mut Compile<'_, 'p>, body: *const [FatStmt<'p>]) -> BigCErr<'p, ()> {
+unsafe extern "C" fn make_and_resolve_and_compile_top_level<'p>(
+    c: &mut Compile<'_, 'p>,
+    body_ptr: *const FatStmt<'p>,
+    body_len: usize,
+) -> BigCErr<'p, ()> {
+    let body = slice_from_raw_parts(body_ptr, body_len);
     let body = (*body).to_vec();
     let mut global = make_toplevel(c.program.pool, garbage_loc(), body);
     unsafe {
@@ -635,7 +641,8 @@ extern "C-unwind" fn compile_ast<'p>(compile: &mut Compile<'_, 'p>, expr: &mut F
 }
 
 // :UnquotePlaceholders
-extern "C-unwind" fn unquote_macro_apply_placeholders<'p>(compile: &mut Compile<'_, 'p>, args: *mut [FatExpr<'p>]) -> FatExpr<'p> {
+extern "C-unwind" fn unquote_macro_apply_placeholders<'p>(compile: &mut Compile<'_, 'p>, args_ptr: *mut FatExpr<'p>, args_len: usize) -> FatExpr<'p> {
+    let args = slice_from_raw_parts(args_ptr, args_len);
     let mut args = unsafe { &*args }.to_vec();
     let doo = || {
         let mut template = unwrap!(args.pop(), "template arg");

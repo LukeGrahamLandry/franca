@@ -899,7 +899,7 @@ pub struct IntTypeInfo {
 }
 
 impl<'p> Program<'p> {
-    pub(crate) fn new(_comptime_arch: TargetArch, build_options_ptr: usize) -> Self {
+    pub(crate) fn new(build_options_ptr: usize) -> Self {
         let pool = Box::leak(unsafe { init_self_hosted(build_options_ptr) });
         pool.vtable = addr_of!(IMPORT_VTABLE);
 
@@ -934,9 +934,9 @@ impl<'p> Program<'p> {
 
     pub(crate) fn tuple_of(&mut self, types: Vec<TypeId>) -> TypeId {
         extern "C" {
-            fn tuple_of(s: &mut SelfHosted, types: &[TypeId]) -> TypeId;
+            fn tuple_of(s: &mut SelfHosted, types_ptr: *const TypeId, types_len: usize) -> TypeId;
         }
-        unsafe { tuple_of(self.pool, &types) }
+        unsafe { tuple_of(self.pool, types.as_ptr(), types.len()) }
     }
 
     pub(crate) fn make_struct(

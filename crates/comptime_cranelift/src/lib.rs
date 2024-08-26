@@ -64,7 +64,7 @@ pub extern "C" fn franca_comptime_cranelift_init(
 #[no_mangle]
 pub extern "C" fn franca_comptime_cranelift_emit(cl: &mut JittedCl<JITModule>, f: FuncId, body: &'static FnBody, compile_ctx_ptr: i64) {
     let ctx = cl.module.make_context();
-
+    // println!("compile_ctx_ptr = {}", compile_ctx_ptr);
     let mut e = Emit {
         body,
         blocks: vec![],

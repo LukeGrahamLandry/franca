@@ -482,7 +482,32 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
                 s := @run c_str(@symbol "/usr/lib/libc.dylib");
     
                 libc := dlopen(s, .Lazy);
-                addr := libc.dlsym(self.pool.get_c_str(func.name));
+                
+                // :link_rename
+                // TODO: allow #libc before #link_rename
+                fn get_link_name(self: *SelfHosted, func: *Func) CStr = {
+                    out: List(u8) = list(temp());
+                    ::if(CStr);
+                    if func.nullable_link_rename_func != 0 {
+                        arch := query_current_arch();
+                        arch := arch.expect("unknown comptime arch");
+                        arg: LinkRenameArg = (
+                            target = (arch = arch, os = .Macos),
+                            out = out&,
+                            old_name = self.pool.get(func.name),
+                        );
+                        addr := rawptr_from_int(func.nullable_link_rename_func);
+                        addr := assume_types_fn(*LinkRenameArg, void, addr);
+                        addr(arg&);
+                        out&.push(0);
+                        (ptr = out.maybe_uninit.ptr)
+                    } else {
+                        self.pool.get_c_str(func.name)
+                    }
+                }
+                
+                name := self.get_link_name(func);
+                addr := libc.dlsym(name);
                 if addr.is_null() {
                     // TODO: warn? have different #import that means we expect not at comptime?
                     func.body = (DynamicImport = func.name);
@@ -507,6 +532,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
                     vtable := ExportVTable.ptr_from_raw(self.env.driver_vtable_ptr);
                     if vtable.resolve_comptime_import { callback | 
                         legacy := self.stable_compiler_context();
+                        // TODO: whose job is it to deal with :link_rename?
                         @match(callback(self.env.driver_vtable_user_data, legacy, fid, lib_name, func.name)) {
                             fn Some(addr) => {
                                 impls := self.get_alloc().alloc(FuncImpl, 2);
@@ -639,6 +665,18 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
                     };
                 };
                 @err_assert(good, "!asm require arch tag") return;
+            };
+            // :link_rename
+            @case(Flag.link_rename.ident()) => {
+                // TODO: for now we only support this for special body (like imports), you should be allowed to do it for exports too tho. 
+                // :SLOW
+                link_rename_arg := self.env.link_rename_arg.expect("no #link_rename during bootstrap");
+                link_rename_arg_ptr := self.ptr_ty(link_rename_arg);
+                renamer_func_ty := self.intern_type(FnPtr = (ty = (arg = link_rename_arg_ptr, ret = void, arity = 1), cc = .CCallReg));
+                value := @unwrap(tag.args&.as_ref(), "#link_rename requires arg") return;
+                renamer_func_ptr := @check(self.immediate_eval_expr(value, renamer_func_ty)) return;
+                renamer_func_ptr := i64.assume_cast(renamer_func_ptr&)[];
+                func.nullable_link_rename_func = renamer_func_ptr;
             };
             @default => ();
         };

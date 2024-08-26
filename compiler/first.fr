@@ -34,7 +34,8 @@ fn load_src(vtable: *ImportVTable, include_cranelift: bool) Ty(CompCtx, *Comptim
             spam = true;
         };
         if extra.str() == "-x86" {
-            opts.comptime_jit = .Cranelift;
+            // you don't need this just to target x86, only when running on it. 
+            // opts.comptime_jit = .Cranelift;
         };
     };
     @fmt(src&, ";DEBUG_SPAM_LOG :: %;\n", spam);
@@ -174,9 +175,24 @@ fn driver(vtable: *ImportVTable) void = {
     if do_build {
         if use_new_entry_point {| // note: exits!
             start := timestamp();
-            build_llvm(ir_text, @slice ("-o", @fmt_str("%/franca2", out_dir), "-g", "-Os"));  // "-mllvm", "-hot-cold-split=true",
+            args := clone(@slice ("-o", @fmt_str("%/franca2.o", out_dir), "-c", "-Os", "-g"), temp());
+            if x86 {
+                args&.push_all(@slice("-target", "x86_64-apple-darwin"));
+            };
+            build_llvm(ir_text, args.items());  // "-mllvm", "-hot-cold-split=true",
             end := timestamp();
             @println("LLVM time: % ms.", end.sub(start));
+            args := clone(@slice ("-o", @fmt_str("%/franca2", out_dir), @fmt_str("%/franca2.o", out_dir)), temp());
+            if include_cranelift {
+                cl_path := if(x86, 
+                    => "crates/comptime_cranelift/target/x86_64-apple-darwin/release/libcomptime_cranelift.a", 
+                    => "crates/comptime_cranelift/target/release/libcomptime_cranelift.a");
+                args&.push(cl_path);
+                if x86 {
+                    args&.push_all(@slice("-target", "x86_64-apple-darwin"));
+                };
+            };
+            run_cmd_blocking(CLANG_PATH, args.items()).assert("link failed");
             exit(0);
         };
         
@@ -294,6 +310,10 @@ fn build_llvm(ir: BucketArray(u8), args: Slice(Str)) void = {
     @println("%", args.items());
     success := run_cmd_blocking(CLANG_PATH, args.items());
     assert(success, "ICE: generated invalid llvm ir");
+    
+    // i really hope this changes every time just because i iterate over rust hashtables somewhere. 
+    //s := out&.s_name();
+    //run_cmd_blocking("shasum", (ptr = s&, len = 1));
     out.remove();
 }
 

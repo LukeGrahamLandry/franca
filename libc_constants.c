@@ -42,6 +42,12 @@ int main() {
          "= %d);\n",
          DT_DIR, DT_REG, DT_LNK);
 
+  // struct dirent test;
+  // printf("// dirent->d_namlen:%ld; dirent->d_type:%ld; dirent->d_name:%ld; "
+  //        "sizeof:%ld\n",
+  //        (long)&test.d_namlen - (long)&test, (long)&test.d_type -
+  //        (long)&test, (long)&test.d_name - (long)&test, sizeof(test));
+
   printf("TermConstants :: @struct(_parsehack: void, $ICANON := %d, $ "
          "ECHO := "
          "%d, $VMIN := %d, $VTIME := %d, $ TCSANOW := %d, $"

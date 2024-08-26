@@ -493,7 +493,7 @@ fn call_dynamic(program: CompilerRs, ptr: i64, f_ty: *FnType, args: *RsVec(i64),
 //       then the next step is to lazily jit shims so i don't have to implement the calling convention twice. 
 // Note: FnType by ptr because i think i do (u32, u32) calling convention wrong. 
 fn call_dynamic_inner(program: CompilerRs, ptr: i64, f_ty: *FnType, args: *RsVec(i64), comp_ctx: bool) Res(Values) = {
-    @if(TRACE_CALLS) @println("[call dynamic at addr=%]", ptr);
+    @if(TRACE_CALLS) @println("[call dynamic at addr=%] args=%", ptr, args.items());
     
     arg := program.get_info(f_ty.arg);
     ret := program.get_info(f_ty.ret);
@@ -504,6 +504,7 @@ fn call_dynamic_inner(program: CompilerRs, ptr: i64, f_ty: *FnType, args: *RsVec
 
     if comp_ctx {
         c := (**SelfHosted).int_from_ptr(program);
+        //@println("comp_ctx; %", c);
         args.insert(0, c, temp());
     };
     :: if(?RsVec(u8));
@@ -535,7 +536,7 @@ fn call_dynamic_inner(program: CompilerRs, ptr: i64, f_ty: *FnType, args: *RsVec
     //@println("call with %", args.items());
 
     :: if(Res(Values));
-    if ret.size_slots <= 1 {
+    result: Res(Values) = if ret.size_slots <= 1 {
         r := if arg.float_mask == 0 && ret.float_mask == 0 {
             arg8ret1(ptr, args.ptr)
         } else {
@@ -571,7 +572,9 @@ fn call_dynamic_inner(program: CompilerRs, ptr: i64, f_ty: *FnType, args: *RsVec
             mem := indirect_ret.unwrap();
             (Ok = (Big = mem))
         }
-    }
+    };
+    @if(TRACE_CALLS) @println("[returned dynamic from addr=%]", ptr);
+    result
 }
 
 to_values :: fn(program: *SelfHosted, $T: Type, v: T) Values #generic = {
@@ -693,7 +696,7 @@ simple_x86 :: """
     push [r11 + 56]
     push [r11 + 64] // want to always allow 8 args but we might have a struct return pointer as a fake first arg. 
     call rax
-    add sp, 24 // i have to fix the stack pointer
+    add sp, 24 // i have to fix the stack pointer // TODO: i don't trust if callee was expecting the args? 
     ret
 """;
 
