@@ -1,4 +1,5 @@
-use std::{marker::PhantomData, mem};
+use core::str;
+use std::{marker::PhantomData, mem, ptr::slice_from_raw_parts};
 
 use crate::{
     ast::{FatExpr, FatStmt, Flag, FnType, Func, FuncId, LazyType, OverloadSetId, Pattern, ScopeId, TypeId, TypeInfo, TypeMeta, Var},
@@ -50,14 +51,19 @@ pub struct Span {
 #[repr(C)]
 pub struct ParseErr<'p> {
     pub span: Span,
-    pub msg: &'p str,
+    msg_ptr: *const u8,
+    msg_len: usize,
+    _a: PhantomData<&'p ()>,
 }
 
 impl<'p> ParseErr<'p> {
     pub(crate) fn as_err(&self) -> Box<CompileError<'p>> {
-        let mut e = make_err(CErr::Fatal(self.msg.to_string()));
+        let mut e = make_err(CErr::Fatal(self.msg().to_string()));
         e.loc = Some(self.span);
         e
+    }
+    pub fn msg(&self) -> &str {
+        unsafe { str::from_utf8(&*slice_from_raw_parts(self.msg_ptr, self.msg_len)).unwrap() }
     }
 }
 
@@ -68,7 +74,7 @@ use crate::export_ffi::BigResult;
 //       because the abi matches on arm. and the point is to use this abi on x86 too if i get that far,
 //       because i dont want to deal with telling llvm how big arguments are.
 #[allow(improper_ctypes)]
-#[link(name = "franca")]
+#[link(name = "selffranca")]
 extern "C" {
     pub(crate) fn init_self_hosted<'p>(build_options_ptr: usize) -> Box<SelfHosted<'p>>;
     fn insert_owned<'p>(s: *mut (), s_ptr: *const u8, s_len: usize) -> Ident<'p>;

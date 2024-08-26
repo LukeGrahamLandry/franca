@@ -9,6 +9,8 @@ i feel like i did.... but i must just be super dumb.
 but anyway now i can run mandelbrot on franca2 x86.
 v1 doesn't work still but that makes more sense because it has to deal with matching rust's c abi.
 
+---
+
 v2 can't `run_tests -- cranelift`. maybe `DirEntType.File` has a different value on x86 macos libc?
 no `clang libc_constants.c -target x86_64-apple-darwin` gives the same results and file says `a.out: Mach-O 64-bit executable x86_64` so it seems to have worked.
 but my basic_libc walk_dir test works on arm with v2 but not x86.
@@ -72,6 +74,39 @@ for func_decl in &module.func_decls {
 thats funny.
 ok so this is just how life is i guess.
 now i need to make a better #import that lets you set a link name.
+
+---
+
+now back to trying to get v1 to work;  
+changed the name of the self hosted lib file so it doesn't collide with the rust one and that got rid of `ld: warning: ignoring file 'target/x86_64-apple-darwin/release/libfranca.a[19](libfranca.o)': found architecture 'arm64', required architecture 'x86_64'`
+but that didn't help.
+if i compile the rust with `TRACE_CALLS = true`, it panics on `Expected function to have scope` instead.
+so thats interesting.
+tho arm fails a safety check with that so maybe its just all fucked.
+maybe x86 doens't have the same field alignment rules? but sizeof(Func) is 448 on both.
+actually maybe that happens to be sorted to not have obvious padding.
+
+```
+pub fn main(){
+    #[cfg(target_arch = "x86_64")]
+    println!("sizeof(A) = {}", core::mem::size_of::<A>())
+}
+#[repr(C)]
+struct A {
+    a: i64,
+    b: bool,
+    c: i64,
+}
+```
+
+on rust playground says 24 tho so that seems to be normal.
+
+- make_and_resolve_and_compile_top_level print stmts, they seem reasonable
+- printing names of functions as they're added also panics on `Expected function to have scope`.
+- compiling rust debug instead of release makes it `assertion failed: func.get_flag(NotEvilUninit)`
+
+so like everything's just confused. and it changes if you try to observe it.
+feels a lot like the instruction cache flushing problem i had a long time ago but the whole thing we learned there x86 doesn't do that.
 
 ## supporting x86_64 (Aug 25)
 

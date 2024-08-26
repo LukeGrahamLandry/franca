@@ -155,7 +155,7 @@ impl<'p, T: 'p> BigResult<T, ParseErr<'p>> {
             unsafe {
                 show_error_line(pool.codemap, e.span.low, e.span.high);
             }
-            panic!("{}", e.msg)
+            panic!("{}", e.msg())
         })
     }
 }

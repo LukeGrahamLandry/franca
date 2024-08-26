@@ -523,7 +523,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let expected_ret_bytes = self.program.get_info(ty.ret).stride_bytes;
         let result = unsafe {
             self_hosted::call_dynamic_values(self, addr as usize, &ty,  arg.bytes().as_ptr(), arg.bytes().len(), cc == CallConv::CCallRegCt)
-        }.unwrap_or_else(|e| panic!("failed call_dynamic_values. (TODO: convert err types) {}", e.msg));
+        }.unwrap_or_else(|e| panic!("failed call_dynamic_values. (TODO: convert err types) {}", e.msg()));
         debugln_call!("OUT: {result:?}");
 
         assert_eq!(result.bytes().len(), expected_ret_bytes as usize, "{}\n{}", self.program.log_type(ty.ret), self.program[f].body.log(self.program.pool));
@@ -1143,10 +1143,10 @@ impl<'a, 'p> Compile<'a, 'p> {
     fn decl_func(&mut self, mut func: Func<'p>) -> Res<'p, (Option<FuncId>, Option<OverloadSetId>)> {
         // println!("{}", self.program.pool.get(func.name));
         // TODO: cross compiling.
-        #[cfg(not(target_arch = "aarch64"))]
-        if func.has_tag(Flag::Aarch64) {
-            return Ok((None, None));
-        }
+        // #[cfg(not(target_arch = "aarch64"))]
+        // if func.has_tag(Flag::Aarch64) {
+        //     return Ok((None, None));
+        // }
 
         debug_assert!(func.get_flag(NotEvilUninit));
         let loc = func.loc;

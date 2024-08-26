@@ -670,6 +670,8 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
             @case(Flag.link_rename.ident()) => {
                 // TODO: for now we only support this for special body (like imports), you should be allowed to do it for exports too tho. 
                 // :SLOW
+                old := self.dispatch.enclosing_function;
+                self.dispatch.enclosing_function = .None;
                 link_rename_arg := self.env.link_rename_arg.expect("no #link_rename during bootstrap");
                 link_rename_arg_ptr := self.ptr_ty(link_rename_arg);
                 renamer_func_ty := self.intern_type(FnPtr = (ty = (arg = link_rename_arg_ptr, ret = void, arity = 1), cc = .CCallReg));
@@ -677,6 +679,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
                 renamer_func_ptr := @check(self.immediate_eval_expr(value, renamer_func_ty)) return;
                 renamer_func_ptr := i64.assume_cast(renamer_func_ptr&)[];
                 func.nullable_link_rename_func = renamer_func_ptr;
+                self.dispatch.enclosing_function = old;
             };
             @default => ();
         };
@@ -796,6 +799,7 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
             expr.set(fid_value, FuncId); // :get_or_create_type
             func := self.get_function(fid);
             @try(self.update_function_metadata(func, .None)) return;
+            
             if func.ret&.is(.Infer) {
                 // TODO: this change is sketch if we're just exploring to resolve an overload  -- Aug 5
                 @match(requested) {
@@ -2613,6 +2617,20 @@ fn coerce_const_expr(self: *SelfHosted, expr: *FatExpr, req: ResultType) Maybe(v
                     //if !func.ret&.is(.Infer) {
                     //    @try(self.poll_in_place(Type, => self.infer_return(fid))) return;
                     //};
+                    
+                    // this doesn't help. doesn't happen. but its similar to what the old one did in promote_closure
+                    // if you take out infering from requested in fn Closure, this happens, but then its wrong in the prelude. 
+                    if func.ret&.is(.Infer) {
+                        @if_let(func.body&) fn Normal(body) => {
+                            guessed := self.type_of(body);
+                            @if_let(guessed) fn Ok(type) => {
+                                @println("guessed! %", self.log_type(type));
+                                func.ret = (Finished = type);
+                                func.finished_ret = (Some = type);
+                            };
+                        };
+                    };
+                    
                     //ret := @check(self.infer_return(fid)) return;
                     if func.finished_ret { ret | 
                         @check(self.can_assign(f_ty.ret, ret)) return;
@@ -2890,6 +2908,7 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
     (Suspend = self.wait_for(Jit = fid))
 }
 
+// TODO: decide if need to set 
 fn check_quick_eval(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) ?Values = {
     @match(expr.expr&) {
         fn Value(f) => (Some = f.bytes&.clone(self.get_alloc()));
@@ -2898,6 +2917,11 @@ fn check_quick_eval(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) ?Values = {
                 // This is a super common case because you type `arg: i64` a lot. 
                 res := self.find_const_non_blocking(f[]);
                 if res { f |
+                    // TODO: this is wrong, you need to const coerce before doing it and not lose information if there's a type error. 
+                    //       but without this you get an infinite loop on #link_rename
+                    // TODO: make a test that fails if you just do this now!
+                    expr.expr = (Value = (bytes = f._0&.clone(self.get_alloc()), coerced = false));
+                    expr.ty = f._1;
                     // We can't report a type erorr from here so just let the slow path deal with it. 
                     if(ret_ty == f._1, => return(Some = f._0));
                 };
