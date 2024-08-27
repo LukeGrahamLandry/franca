@@ -28,9 +28,9 @@ fn get_jitted(c: CompCtx, f: FuncId) rawptr = {
     ptr
 }
 
-fn default_build_options() *BuildOptions = {
+fn default_build_options(vtable: *ImportVTable) *BuildOptions = {
     mem := libc_allocator.alloc(BuildOptions, 1);
-    mem.ptr[] = (_hack = 0);
+    mem.ptr[] = (driver_vtable_ptr = {vtable.get_default_driver_exports}());
     mem.ptr
 }
 
@@ -476,11 +476,10 @@ fn add_lib(self: *ComptimeLibs, lib: ForeignLibrary) void = {
 
 // TODO: forward to another if we aren't the first to set the pointer? maybe all the handlers should be lists? idk. 
 fn intercept_imports(self: *ComptimeLibs) void = {
-    my_vtable: ExportVTable = (
-        resolve_comptime_import = (Some = comptimelibs_resolve_import),
-    );
-    my_vtable := ast_alloc().boxed(ExportVTable, my_vtable);
-    {self.ctx.vtable.give_vtable}(self.ctx.data, my_vtable, ComptimeLibs.raw_from_ptr(self));
+    opts := {self.ctx.vtable.get_build_options}(self.ctx.data);
+    opts.driver_vtable_ptr.resolve_comptime_import = (Some = comptimelibs_resolve_import);
+    opts.driver_vtable_user_data = ComptimeLibs.raw_from_ptr(self);
+    {self.ctx.vtable.update_vtable}(self.ctx.data);
 }
 
 fn get_aot_objects(self: *ComptimeLibs) List(Str) = {

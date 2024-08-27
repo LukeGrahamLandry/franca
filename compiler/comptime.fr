@@ -18,16 +18,28 @@ fn fill_driver_vtable(vtable: *ImportVTable) void = {
         c := c.cast()[][]; // TODO: can't inline cause it confuses deduplicator. -- Jul 29
         c.aarch64&.bump_dirty();
     };
-    vtable.give_vtable = fn(c: Compiler, vptr: *ExportVTable, userdata: rawptr) void = {
+    // hack because rust wants to read the fields from the wrong place
+    vtable.update_vtable = fn(c: Compiler) void = {
         c := c.cast()[][];
-        c.env.driver_vtable_ptr = ExportVTable.raw_from_ptr(vptr);
-        c.env.driver_vtable_user_data = userdata;
+        build_options := c.get_build_options();
+        assert(c.env.driver_vtable_user_data.is_null(), "tried to stomp in update_vtable. you don't need to call it if it was set before creating the compiler");
+        c.env.driver_vtable_ptr = ExportVTable.raw_from_ptr(build_options.driver_vtable_ptr);
+        c.env.driver_vtable_user_data = build_options.driver_vtable_user_data;
     };
     vtable.destroy_compiler = fn(c: Compiler) void = {
         c := c.cast()[][];
         page_allocator.dealloc(u32, c.aarch64.mmapped);
         arena := c.ast_alloc[];  // copy because the areana is inside itself!
         arena&.deinit();
+    };
+    vtable.get_build_options = fn(c: Compiler) *BuildOptions = {
+        c := c.cast()[][];
+        c.get_build_options()
+    };
+    vtable.get_default_driver_exports = fn() *ExportVTable = {
+        mem := todo_allocator.alloc(ExportVTable, 1);
+        mem.ptr[] = default_driver_exports();
+        mem.ptr
     };
     
     

@@ -62,32 +62,31 @@ show_gui :: fn(state: *State) void = {
                 };
                 path := args[1].str();
                 
-                c := load_file_in_compiler(state.vtable, path, true);
-                c := c.unwrap();
-                mem := allocator.alloc(ExportVTable, 1);
-                mem.ptr[] = (
-                    log_event = (Some = log_event_callback),
-                );
-                state.phase = .Working;
-                
-                fns: List(FuncId) = list(allocator);
-                if c.get_unique_named("main") {f|
-                    fns&.push(f);
-                };
-                sym_test := c.intern_string("test");
-                tests := c.data.get_fns_with_tag(sym_test);
-                fns&.push_all(tests);
+                opts := state.vtable.default_build_options();
+                opts.driver_vtable_ptr.log_event = (Some = log_event_callback);
                 
                 state.programs&.push(
-                    compiler = c.data.cast()[][],
+                    compiler = SelfHosted.ptr_from_int(0),
                     show = true,
                     extra_windows = list(allocator),
-                    target_fns = fns,
+                    target_fns = list(allocator),
                     pending = list(allocator),
                     task_messages = init(10, allocator),
                 );
-                userdata := ProgramState.raw_from_ptr(state.programs.last().unwrap());
-                {c.vtable.give_vtable}(c.data, mem.ptr, userdata);
+                userdata := state.programs.last().unwrap();
+                opts.driver_vtable_user_data = ProgramState.raw_from_ptr(userdata);
+                c := load_file_in_compiler(state.vtable, path, true, opts);
+                c := c.unwrap();
+                state.phase = .Working;
+                
+                if c.get_unique_named("main") {f|
+                    userdata.target_fns&.push(f);
+                };
+                sym_test := c.intern_string("test");
+                tests := c.data.get_fns_with_tag(sym_test);
+                userdata.target_fns&.push_all(tests);
+                
+                userdata.compiler = c.data.cast()[][];
             };
         }
         fn Working() => {
@@ -934,7 +933,7 @@ fn load_src_gui(vtable: *ImportVTable) Ty(CompCtx, *ComptimeLibs) = {
     src&.read_and_push("bindings/dearimgui.fr");
     src&.read_and_push("examples/compiler_gui.fr");
     
-    opts := default_build_options();
+    opts := vtable.default_build_options();
     opts.deduplicate_bytecode = true;
     opts.retain_function_names = true;
     opts.debug_info = false;
@@ -989,7 +988,7 @@ fn driver(vtable: *ImportVTable) void = {
         args&.push("-g"); 
         args&.push(out&.s_name());
         @println("%", args.items());
-        success := run_cmd_blocking("clang", args.items());
+        success := run_cmd_blocking("clang++", args.items());
         assert(success, "ICE: generated invalid llvm ir");
         out.remove();
     }

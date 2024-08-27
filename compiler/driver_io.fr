@@ -1,0 +1,81 @@
+//! All communication between the compiler and the outside world should go through the driver program. 
+//! This file has defaults used to load drivers (but they can be skipped entirely by precompiling to a dynamic library,
+//! and passing that to the compiler, just be careful about ABI breakage).
+//! The ExportVTable will be prepopulated with these functions and you can replace them as needed. 
+//! For sanity's sake, the compiler itself should be buildable with these defaults so its not super painful to change the ABI. 
+
+// TODO: bring back dylib drivers
+// TODO: add to import vtable but provide default implementations. 
+//       disassembler, find_std_lib, comptime libc, get_include_std, comptime jit
+// TODO: remove comptime jit switching on Backend and just use opaque pointer. 
+// TODO: std lib Nullable(*T) with the same api as ?*T but a niche. 
+// find_std_lib: @FnPtr(userdata: rawptr, c: Compiler) ?Str,
+// get_include_std: @FnPtr(userdata: rawptr, c: Compiler, name: Str) ?WaitingParse,
+// comptime_jit_init: @FnPtr(data: *SelfHosted, vtable: *BackendImportVTable, dispatch_ptr: i64) Result(rawptr, Str); 
+// comptime_jit_emit: @FnPtr(jit_userdata: rawptr, f: FuncId, body: *FnBody, compile_ctx_ptr: CompilerRs) Result(void, Str); 
+// comptime_jit_free: @FnPtr(jit_userdata: rawptr, f: FuncId, body: *FnBody, compile_ctx_ptr: CompilerRs) Result(void, Str); 
+// disassemble: @FnPtr(userdata: rawptr, bytes: []u8, out: *List(u8)) Result(void, Str),
+
+fn default_driver_exports() ExportVTable = {
+    vtable: ExportVTable = (
+        resolve_comptime_import = .None,
+        log_event = .None,
+    );
+    vtable
+}
+
+
+////////////////////
+/// Defaults
+
+// get_include_std: @FnPtr(userdata: rawptr, c: Compiler, name: Str) ?Str = .None,
+// fn driver_get_include_std(_userdata: rawptr, c: Compiler, name: Str) ?Str = {}
+
+//////////////////////////////////
+/// Entry points from the compiler
+
+fn resolve_comptime_import(self: *SelfHosted, fid: FuncId, func: *Func, lib_name: Symbol) void = {
+    // TODO: allow it to tell us no that doesn't exist
+    has_driver_handler := !self.env.driver_vtable_ptr.is_null(); // TODO: garbage
+    if has_driver_handler {
+        vtable := ExportVTable.ptr_from_raw(self.env.driver_vtable_ptr);
+        if vtable.resolve_comptime_import { callback | 
+            legacy := self.stable_compiler_context();
+            // TODO: whose job is it to deal with :link_rename?
+            @match(callback(self.env.driver_vtable_user_data, legacy, fid, lib_name, func.name)) {
+                fn Some(addr) => {
+                    impls := self.get_alloc().alloc(FuncImpl, 2);
+                    impls[0] = (ComptimeAddr = addr.int_from_rawptr());
+                    impls[1] = (DynamicImport = func.name);
+                    func.body = (Merged = impls.rs());
+                    self.aarch64&.extend_blanks(fid);
+                    self.aarch64.dispatch[fid.as_index()] = addr;
+                }
+                fn None() => {
+                    // TODO: warn? have different #import that means we expect not at comptime?
+                    func.body = (DynamicImport = func.name);
+                }
+            };
+        };
+    };
+}
+
+// Boring. used for the compiler_gui
+fn log_event(fmt_args: FatExpr, compiler: FatExpr) FatExpr #macro = {
+    if DEBUG_SPAM_LOG {
+        return(println(fmt_args));
+    };
+    @if(ENABLE_LOGGING_CALLBACKS, @{
+        c := @[compiler];
+        has_driver_handler := !c.env.driver_vtable_ptr.is_null(); // TODO: garbage
+        if has_driver_handler {
+            vtable := ExportVTable.ptr_from_raw(c.env.driver_vtable_ptr);
+            if vtable.log_event { callback | 
+                legacy := c.stable_compiler_context();
+                msg := (@format(@[fmt_args]) temp()).items();
+                event: CompilerLogEvent = (Msg = msg);
+                callback(c.env.driver_vtable_user_data, legacy, event&);
+            };
+        };
+    }, @{ 1 + 1; })
+}

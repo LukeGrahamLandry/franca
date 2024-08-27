@@ -18,7 +18,9 @@
 #include_std("compiler/v2/dispatch.fr"); 
 #include_std("compiler/v2/sema.fr"); 
 #include_std("compiler/v2/ast_boring.fr");
-#include_std("compiler/backend/cranelift.fr"); 
+#include_std("compiler/backend/cranelift.fr");
+#include_std("compiler/backend/cranelift.fr");  
+#include_std("compiler/driver_io.fr");  
 
 ::?[]Prim; // TODO: why do i need this extra when lsp????? order of exports changed maybe??
 
@@ -232,8 +234,8 @@ fn update_global_stdlib_path() void = {
     if STDLIB_PATH.is_none() {
         // :io_driver
         a := find_std_lib(libc_allocator);
-        if a& { (lst: *List(u8)) |  // TODO: why the fuck does this need the type annotation1!!@##@!
-            STDLIB_PATH[] = (Some = lst.items());
+        if a& { (lst: *Str) |  // TODO: why the fuck does this need the type annotation1!!@##@!
+            STDLIB_PATH[] = (Some = lst[]);
         } else {
             panic("Could not find franca standard library."); // TODO: return error
         };
@@ -284,7 +286,7 @@ fn go_build_yo_self(vtable: *ImportVTable) void = {
     fn load_src(vtable: *ImportVTable) CompCtx = {
         src := temp().read_to_string("compiler/main.fr");
         @fmt(src&, ";ENABLE_TRACY :: false; ENABLE_LSP :: false; ENABLE_QBE_BACKEND :: false;\n");
-        opts := default_build_options();
+        opts := vtable.default_build_options();
         opts.deduplicate_bytecode = true;
         opts.retain_function_names = false;
         opts.debug_info = false;
@@ -373,13 +375,12 @@ fn go_build_yo_self(vtable: *ImportVTable) void = {
 // TODO: store this in SelfHosted instead of in a global -- Jul 5
 STDLIB_PATH :: @static(?Str) (None = unit);
 
-fn load_file_in_compiler(vtable: *ImportVTable, path: Str, use_new_sema: bool) CRes(CompCtx) = {
+fn load_file_in_compiler(vtable: *ImportVTable, path: Str, use_new_sema: bool, opts: *BuildOptions) CRes(CompCtx) = {
     // :io_driver
     prelude := "#include_std(\"lib/core.fr\");";
     source: List(u8) = prelude.clone(libc_allocator);  // TODO: column number on error on first line will be wrong but i dont care. 
     source&.read_and_push(path);  // TODO: error handling
     
-    opts := default_build_options();
     @if(INCLUDE_COMPTIME_CRANELIFT) {
         x := query_current_arch();
         if x { arch | 
@@ -405,7 +406,8 @@ fn load_file_in_compiler(vtable: *ImportVTable, path: Str, use_new_sema: bool) C
 
 // TODO: print the error message!!! since this doesn't go through the rust side anymore. -- Jun 30
 fn run_franca_file(vtable: *ImportVTable, path: Str, use_new_sema: bool) CRes(void) = {
-    c := @try(vtable.load_file_in_compiler(path, use_new_sema)) return;
+    opts := vtable.default_build_options(); 
+    c := @try(vtable.load_file_in_compiler(path, use_new_sema, opts)) return;
     
     mem_stats :: fn() => {
         bytes_per_mb :: 1024 * 1024;
@@ -426,6 +428,7 @@ fn run_franca_file(vtable: *ImportVTable, path: Str, use_new_sema: bool) CRes(vo
         callee := assume_types_fn(Arg = void, Ret = void, ptr = callee);
         callee();
         mem_stats();
+        exit(0);
     };
     
     sym_test := c.intern_string("test");
@@ -498,7 +501,7 @@ fn get_include_std(c: *SelfHosted, name: Str) ?WaitingParse = {
 // (maybe include_bytes in a seperate crate would make it better)
 // I also like that users can put the lib somewhere an edit it for thier program. I dont want the compiler to just force its blessed version.
 // But I also don't want it to be like c where you just get whatever the system happens to have.
-fn find_std_lib(a: Alloc) ?List(u8) = {
+fn find_std_lib(a: Alloc) ?Str = {
     // :io_driver
     check :: fn(p: *List(u8)) bool = {
         p.push_path_segment("lib");
@@ -513,12 +516,12 @@ fn find_std_lib(a: Alloc) ?List(u8) = {
     // check current directory first? 
     p := get_working_directory(a);
     p := p&;
-    if(check(p), => return(Some = p[]));
+    if(check(p), => return(Some = p.items()));
     
     // TODO: also check like ./vendor/franca
     range(0, 3) { _ |
         p.pop_path_segment();
-        if(check(p), => return(Some = p[]));
+        if(check(p), => return(Some = p.items()));
     };
 
     // TODO: this doesn't work if its a symlink to the exe. need to follow that? 
@@ -527,11 +530,11 @@ fn find_std_lib(a: Alloc) ?List(u8) = {
     assert(p.pop_until_endswith("/"), "path should have slashes"); // we want our folder, not our exe. 
     
     p.push_path_segment("franca");
-    if(check(p), => return(Some = p[]));
+    if(check(p), => return(Some = p.items()));
     // exe might be in franca/target/release/franca or franca/target/debug/deps/compiler-21be1aa281dbe5d6, so go up
     range(0, 5) { _ |
         p.pop_path_segment();
-        if(check(p), => return(Some = p[]));
+        if(check(p), => return(Some = p.items()));
     };
     .None
 }
@@ -583,8 +586,8 @@ fn init_self_hosted(build_options: *BuildOptions) *SelfHosted #compiler = {
         unquote_placeholders = .None,
         // TODO: i should be setting this to real memory will all the fields .None because rust will be looking at it
         //       i think this just happens to work because i always set it to something else in the driver program. 
-        driver_vtable_ptr = 0.rawptr_from_int(),  
-        driver_vtable_user_data = 0.rawptr_from_int(),
+        driver_vtable_ptr = ExportVTable.raw_from_ptr(build_options.driver_vtable_ptr),  
+        driver_vtable_user_data = build_options.driver_vtable_user_data,
         new_sema = false,
         link_rename_arg = .None,
     );

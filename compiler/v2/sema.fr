@@ -24,25 +24,6 @@ OverloadOption :: @struct(
     ret: ?Type, // For #generic, we might not know without the args
 );
 
-fn log_event(fmt_args: FatExpr, compiler: FatExpr) FatExpr #macro = {
-    if DEBUG_SPAM_LOG {
-        return(println(fmt_args));
-    };
-    @if(ENABLE_LOGGING_CALLBACKS, @{
-        c := @[compiler];
-        has_driver_handler := !c.env.driver_vtable_ptr.is_null(); // TODO: garbage
-        if has_driver_handler {
-            vtable := ExportVTable.ptr_from_raw(c.env.driver_vtable_ptr);
-            if vtable.log_event { callback | 
-                legacy := c.stable_compiler_context();
-                msg := (@format(@[fmt_args]) temp()).items();
-                event: CompilerLogEvent = (Msg = msg);
-                callback(c.env.driver_vtable_user_data, legacy, event&);
-            };
-        };
-    }, @{ 1 + 1; })
-}
-
 fn compile_stmt(self: *SelfHosted, stmt: *FatStmt) Maybe(bool) = {
     self.last_loc = stmt.loc;
     @match(stmt.stmt&) {
@@ -526,31 +507,8 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
                     fn Some(lib_name) => @check(self.eval_str(lib_name)) return;
                     fn None() => self.pool.insert_owned("");
                 };
-    
-                has_driver_handler := !self.env.driver_vtable_ptr.is_null(); // TODO: garbage
-                if has_driver_handler {
-                    vtable := ExportVTable.ptr_from_raw(self.env.driver_vtable_ptr);
-                    if vtable.resolve_comptime_import { callback | 
-                        legacy := self.stable_compiler_context();
-                        // TODO: whose job is it to deal with :link_rename?
-                        @match(callback(self.env.driver_vtable_user_data, legacy, fid, lib_name, func.name)) {
-                            fn Some(addr) => {
-                                impls := self.get_alloc().alloc(FuncImpl, 2);
-                                impls[0] = (ComptimeAddr = addr.int_from_rawptr());
-                                impls[1] = (DynamicImport = func.name);
-                                func.body = (Merged = impls.rs());
-                                self.aarch64&.extend_blanks(fid);
-                                self.aarch64.dispatch[fid.as_index()] = addr;
-                                good = true;
-                            }
-                            fn None() => {
-                                // TODO: warn? have different #import that means we expect not at comptime?
-                                func.body = (DynamicImport = func.name);
-                                good = true;
-                            }
-                        };
-                    };
-                };
+                self.resolve_comptime_import(fid, func, lib_name);
+                good = true;
             };
             @case(Flag.unsafe_noop_cast.ident()) => {
                 good = true;
@@ -690,6 +648,23 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
 
 ::tagged(ResultType);
 fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(void) = {
+    @check(self.compile_expr_inner(expr, requested)) return;
+    @if_let(requested) fn Specific(type) => {
+        if expr.expr&.is(.Value) {
+            if type != expr.ty {
+                @check(self.coerce_const_expr(expr, requested)) return;
+            };
+        };
+            //if self.can_assign(type, expr.ty).is_err() {
+            //    @println("% vs %", self.log_type(type), self.log_type(expr.ty));
+            //    @println("%", expr.log(self));
+            //};
+        //};
+    };
+    .Ok
+}
+
+fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(void) = {
     if expr.done {
         assert(expr.ty != UnknownType, "done but unknown type");
         return(.Ok);
@@ -799,7 +774,16 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
             expr.set(fid_value, FuncId); // :get_or_create_type
             func := self.get_function(fid);
             @try(self.update_function_metadata(func, .None)) return;
-            
+            //if func.ret&.is(.Infer) {
+            //    @if_let(func.body&) fn Normal(body) => {
+            //        guessed := self.type_of(body);
+            //        @if_let(guessed) fn Ok(type) => {
+            //            @println("guessed! %", self.log_type(type));
+            //            func.ret = (Finished = type);
+            //            func.finished_ret = (Some = type);
+            //        };
+            //    };
+            //};
             if func.ret&.is(.Infer) {
                 // TODO: this change is sketch if we're just exploring to resolve an overload  -- Aug 5
                 @match(requested) {
@@ -808,6 +792,7 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
                     }
                     fn Specific(f_ty) =>{
                         @if_let(self.get_type(f_ty)) fn Fn(f_ty) => {
+                            @log_event("% infer closure return from requested. %", fid, self.log_type(f_ty.ret)) self;
                             func.ret = (Finished = f_ty.ret);
                         };
                     }
@@ -868,7 +853,7 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
         fn As(f) => {
             type := @check(self.immediate_eval_expr(f.type, Type)) return;
             type := Type.assume_cast(type&)[];
-            @check(self.compile_expr(f.value, type.want())) return;
+            @check(self.compile_expr_inner(f.value, type.want())) return;  // Note: skipping stricter check
             if f.value.ty != type {
                 expr.ty = type;
                 expr.expr = (Cast = f.value);
@@ -1964,7 +1949,7 @@ fn type_of(self: *SelfHosted, expr: *FatExpr) Maybe(Type) = {
             ty := @check(self.type_of(inner[])) return;
             (Ok = self.ptr_ty(ty))
         }
-        fn Quote() => (Ok = @unwrap(self.env.fat_expr_type, "quote during boot") return);
+        //fn Quote() => (Ok = @unwrap(self.env.fat_expr_type, "quote during boot") return);
         fn As(f) => {
             type := @check(self.immediate_eval_expr(f.type, Type)) return;
             type := Type.assume_cast(type&)[];
@@ -2781,8 +2766,8 @@ fn can_assign(self: *SelfHosted, want: Type, found: Type) Maybe(void) = {
     };
     
     // TODO: dont allocate + fmt here beacause overload resolution spams this. 
-    @err("Type Error") // : expected % found %", self.log_type(want), self.log_type(found))
-    //@err("Type Error: expected % found %", self.log_type(want), self.log_type(found))
+    //@err("Type Error") // : expected % found %", self.log_type(want), self.log_type(found))
+    @err("Type Error: expected % found %", self.log_type(want), self.log_type(found)) // :SLOW
     
 }
 
