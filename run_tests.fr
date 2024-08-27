@@ -40,9 +40,8 @@ fn driver(vtable: *ImportVTable) void = {
                 run_jit(vtable, .Cranelift);
             };
             @case("llvm") => run_llvm(vtable, false);
-            //@case("llvm-wasm") => run_llvm(vtable, true);
             // TODO: new sema can't compile this yet. 
-            //       but also who cares 'til i fix it
+            //@case("llvm-wasm") => run_llvm(vtable, true);
             @case("qbe") => run_qbe(vtable);
             @case("examples") => run_examples(vtable, true);
             @case("github") => github(vtable);
@@ -158,7 +157,7 @@ fn run_llvm(vtable: *ImportVTable, $wasm32: bool) void = {
             ));
             args&.push_all(@slice("-Wl,-undefined", "-Wl,dynamic_lookup", "-Wl,--allow-undefined"));
         };
-        success := run_cmd_blocking(CLANG_PATH, args.items()); 
+        success := run_cmd_blocking("clang", args.items()); 
         assert(success, "opt failed");
         
         args: List(Str) = list(temp());
@@ -211,9 +210,9 @@ fn run_qbe(vtable: *ImportVTable) void = {
             args&.push(asm_out);
             args&.push("-o");
             args&.push("./a.out");
-            ASSEMBLER_PATH :: "/usr/bin/gcc"; // this isn't actually gcc for me, its an older clang but its 25% faster
+            // this isn't actually gcc for me, its an older clang but its 25% faster
             println("Run assembler");
-            success := run_cmd_blocking(CLANG_PATH, args.items()); 
+            success := run_cmd_blocking("gcc", args.items()); 
             assert(success, "as failed");
             
             args: List(Str) = list(temp());
@@ -354,8 +353,7 @@ fn mandelbrot(vtable: *ImportVTable) void = {
     
     ok, out, err := fork_and_catch(temp()) {
         arg := "bench/mandelbrot/mandelbrot.lua";
-        HACK_LUA_PATH :: "/usr/local/bin/luajit";
-        exec_cmd(HACK_LUA_PATH, (ptr = arg&, len = 1));
+        exec_cmd("luajit", (ptr = arg&, len = 1));
     };
     assert(ok, "lua failed");
     assert_eq(mandelbrot.items(), out.items());
@@ -369,15 +367,8 @@ fn fork_run_main(vtable: *ImportVTable, filepath: Str) void = {
         f := jit_from_source(vtable, src&.items(), "main");
         f := assume_types_fn(Arg = void, Ret = void, ptr = f);
         f();
-    };
-    // TODO: @assert
-    assert(ok) {() List(u8)|
-        s: List(u8) = list(0, temp());
-        println(out.items());
-        println(err.items());
-        @fmt(s&, "failed to compile %", filepath);
-        s
-    };
+    }
+    @assert(ok, "%\n%\nfailed to compile %", out.items(), err.items(), filepath);
     @println("- ran %:main", filepath);
 }
 

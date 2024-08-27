@@ -1,4 +1,4 @@
-##
+## debugging on x86 (Aug 26)
 
 v2;  
 so tuple2 is getting the right type args but it segfaults if i try to print types.len so comp_ctx ptr is garbage?
@@ -107,6 +107,14 @@ on rust playground says 24 tho so that seems to be normal.
 
 so like everything's just confused. and it changes if you try to observe it.
 feels a lot like the instruction cache flushing problem i had a long time ago but the whole thing we learned there x86 doesn't do that.
+
+---
+
+cleaning up some todos
+
+- (run_tests) @assert
+- (mandelbrot) fix += with new place expressions.
+- a bunch of places with hardcoded exe paths from when i used execv instead of execvp
 
 ## supporting x86_64 (Aug 25)
 

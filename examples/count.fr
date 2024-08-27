@@ -1,0 +1,72 @@
+//! Count the lines of Franca code in a file. 
+//! Usage: pass file/directory paths as command line arguments. 
+//! The trick is that the only tokens that span multiple lines are comments and raw strings, 
+//! which i don't want to count anyway. So any time consecutive tokens are on different lines, we count that as one interesting line, 
+//! regardless of how many lines were actually between them. 
+//! You can check this by seeing that removing this comment doesn't change the counted length of this file.
+//! For now I include lines with just `};` and `}`, but maybe that should change because those don't really contribute to the bigness of the program. 
+
+#include_std("compiler/lex.fr");     // - we use the same lexer implementation as the normal compiler
+#include_std("compiler/codemap.fr"); // - only used for the declaration of `Span`
+#include_std("compiler/pool.fr");    // - the lexer expects to be able to intern strings
+
+fn main() = {
+    args := cli_args();
+    total := 0;
+    for args { arg |
+        handle_path(arg.str(), total&);
+    };
+    @println("Counted % total interesting lines", total);
+    exit(0);
+}
+
+fn handle_path(arg: Str, total: *i64) void = {
+    if arg.ends_with(".fr") {
+        text := read_file(temp(), arg);
+        @match(text) {
+            fn Some(text) => {
+                text := text.items();
+                pool: StringPool = init(temp());
+                span: Span = (low = 0, high = text.len.trunc()); // doesn't have to be in a real codemap. nobody checks. 
+                lex: Lexer = init(pool&, span, text);
+                lines := 1;
+                loop {
+                    token := lex&.pop();
+                    @match(token.type) {
+                        fn Error(err) => {
+                            ::DeriveFmt(@type err);
+                            ::tagged(LexErr);
+                            @eprintln("Lex Error on line % of %: %", lex.line, arg, err&);
+                            return();
+                        }
+                        fn Eof() => {
+                            // We're done!
+                            @println("% -> % interesting lines", arg, lines);
+                            total[] += lines;
+                            return();
+                        }
+                        @default => {
+                            if lex.line != lex.old_line {
+                                //@println("%: %", token.type&.tag(), text.slice(token.span.low.zext(), token.span.high.zext()));
+                                lines += 1;
+                            };
+                        };
+                    };
+                };
+            }
+            fn None() => {
+                @eprintln("Failed to read file %", arg);
+            }
+        };
+        return();
+    };
+    
+    // Otherwise treat it as a directory. 
+    walk_directory(@as(CStr)(ptr = arg.ptr)) { entry | 
+        entry := entry.name();
+        if !entry.starts_with(".") {
+            full_path := items(@format("%/%", arg, entry) temp());
+            handle_path(full_path, total);
+        };
+    };
+}
