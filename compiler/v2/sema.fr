@@ -434,7 +434,14 @@ fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = 
                 };
                 self.dispatch.enclosing_function = old_func;
             }
-            @default => return(@err("non special function must have body. (or ICE: double compiled function?)"));
+            @default => {
+                self.last_loc = func.loc;
+                return(@err(
+                    "non special function '%' must have body not %. (or ICE: double compiled function?)", 
+                    self.pool.get(func.name),
+                    func.body&.tag(),
+                ))
+            };
         };
     };
     
@@ -1183,7 +1190,13 @@ fn compile_call(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
     if f.ty == OverloadSet {|  // :get_or_create_type
         os := @check(self.immediate_eval_expr(f, OverloadSet)) return;
         os := OverloadSet.assume_cast(os&)[];
-        return(Suspend = self.wait_for(ResolveOverload = (os = os, call = (expr = expr, requested = requested), callsite = self.dispatch.enclosing_function)));
+        return(Suspend = self.wait_for(ResolveOverload = (
+            os = os, 
+            call = (expr = expr, requested = requested), 
+            callsite = self.dispatch.enclosing_function,
+            last_ready_count = 0,
+            options = list(self.get_alloc()),
+        )));
     };
     
     if f.ty == FuncId {|  // :get_or_create_type
@@ -1434,20 +1447,15 @@ fn emit_capturing_call(self: *SelfHosted, f: FuncId, expr_out: *FatExpr, request
             }
         } else {
             known := @check(self.infer_return(f)) return;
-            //if !requested&.is(.Specific) {
-            //    requested = (Specific = known);
-            //};
             (Some = known)
         }
     };
-    // TODO: does this ever help?
-    //       no but it sure hurts... why?
-    //if !requested&.is(.Specific) {
-    //    if ret_ty { ret_ty |
-    //        //@println("I think we want % for %", self.log_type(ret_ty), func.log(self));
-    //        requested = (Specific = ret_ty);
-    //    };
-    //};
+    // Note: this relies on you never passing a garbage hint when exploring overloads. 
+    if !requested&.is(.Specific) {
+        if ret_ty { ret_ty |
+            requested = (Specific = ret_ty);
+        };
+    };
     
     label_ty := ret_ty
         .map(fn(ty) => self.intern_type(Label = ty))
@@ -1505,9 +1513,9 @@ fn emit_capturing_call(self: *SelfHosted, f: FuncId, expr_out: *FatExpr, request
     };
     
     @check(self.compile_expr(expr_out, requested)) return;
-    //if ret_ty { ret_ty |
-    //    @check(self.can_assign(ret_ty, expr_out.ty)) return;
-    //};
+    if ret_ty { ret_ty |
+        @check(self.can_assign(ret_ty, expr_out.ty)) return;
+    };
     .Ok
 }
 
@@ -1954,10 +1962,21 @@ fn type_of(self: *SelfHosted, expr: *FatExpr) Maybe(Type) = {
             (Ok = type)
         }
         fn GetVar(name) => {
-            val_ty := self.scopes.get_var_type(name[]);
-            (Ok = val_ty.or(=> return(@err("type_of pending var: %", self.pool.get(name.name)))))
+            val_ty := or self.scopes.get_var_type(name[]) { 
+                if name.kind == .Const {
+                    v, type := @check(self.find_const(name[], .None)) return;
+                    type
+                } else {
+                    return(@err("type_of pending var: %", self.pool.get(name.name)))
+                }
+            };
+            (Ok = val_ty)
         }
-        @default => @err("failed to guess type"); 
+        fn Closure(f) => {
+            @check(self.compile_expr(expr, .None)) return;
+            (Ok = expr.ty)
+        }
+        @default => @err("failed to guess type %", expr.log(self)); 
     }
 }
 
@@ -1990,6 +2009,297 @@ fn adjust_named_arguments(self: *SelfHosted, fid: FuncId, arg_expr: *FatExpr) Re
     };
     .Ok
 }
+
+fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *OverloadAttempt) Maybe(FuncId) = {
+    overloads := self.dispatch.overloads&.nested_index(attempt.os.as_index());
+    self.compute_new_overloads(overloads);
+    if overloads.ready.len > attempt.last_ready_count {
+        new := overloads.ready.items().slice(attempt.last_ready_count, overloads.ready.len);
+        for new { option | 
+            if self.filter_overload_sync(arg_expr, option.func) {
+                @check(self.ensure_resolved_sign(option.func)) return; // TODO: dont let this suspend cause it cant
+                attempt.options&.push(
+                    opt = option,
+                    possible = true,
+                );
+            };
+        };
+        attempt.last_ready_count = overloads.ready.len;
+    };
+    @log_event("checking %/% options", attempt.options.len, overloads.ready.len) self;
+    want_arity := self.arity(arg_expr);
+    are_we_done_yet();
+    
+    ::if([]FatExpr);
+    blocked: List(*Action) = list(temp());
+    parts := if(arg_expr.expr&.is(.Tuple), => arg_expr.expr.Tuple.items(), => (ptr = arg_expr, len = 1));
+    
+    are_we_done_yet :: fn() => {
+        if attempt.options.len == 1 {
+            fid := attempt.options[0].opt.func;
+            @log_event("selected % from '%'", fid, self.pool.get(overloads.name)) self;
+            return(Ok = fid);
+        };
+        if attempt.options.len <= 0 {
+            self.last_loc = arg_expr.loc;
+            return(@err("overload not found in '%'", self.pool.get(overloads.name)));
+        };      
+    };
+    
+    enumerate parts { arg_index, arg_expr | 
+        f_i := attempt.options.len;
+        while => f_i > 0 {
+            continue :: local_return;
+            f_i -= 1;
+            reject :: fn() void => {
+                attempt.options&.ordered_remove(f_i);
+                continue();
+            };
+            fid := attempt.options[f_i].opt.func;
+            func := self.get_function(fid);
+            if func.arg.bindings.len != want_arity {
+                continue();
+            };
+            b := func.arg.bindings.index(arg_index);
+            if !func.get_flag(.Generic) {
+                @check(self.infer_type(b.ty&)) return;
+            };
+            if b.ty&.ty() { param | 
+                if !self.can_structurally_be(arg_expr, param) {
+                    reject();
+                };
+            };
+        };
+        are_we_done_yet();
+    };
+    
+    enumerate parts { arg_index, arg_expr | 
+        continue :: local_return;
+        type := self.type_of(arg_expr);
+        if type&.is(.Err) {
+            continue();
+        };
+        type := @check(type) return;
+        arg_expr.ty = type;
+        
+        f_i := attempt.options.len;
+        while => f_i > 0 {
+            continue :: local_return;
+            f_i -= 1;
+            reject :: fn() void => {
+                attempt.options&.ordered_remove(f_i);
+                continue();
+            };
+            fid := attempt.options[f_i].opt.func;
+            func := self.get_function(fid);
+            if func.arg.bindings.len != want_arity {
+                continue();
+            };
+            
+            b := func.arg.bindings.index(arg_index);
+            if b.ty&.ty() { param | 
+                if self.can_assign(param, type).is_err() {
+                    //@println("[%] reject arg % <- %", arg_index, self.log_type(param), self.log_type(type));
+                    reject();
+                };
+                
+                //@println("[%] allow arg % <- %", arg_index, self.log_type(param), self.log_type(type));
+            };
+        };
+        are_we_done_yet();
+    };
+    
+    @if_let(attempt.call.requested) fn Specific(type) => {
+        f_i := attempt.options.len;
+        while => f_i > 0 {
+            continue :: local_return;
+            f_i -= 1;
+            reject :: fn() void => {
+                attempt.options&.ordered_remove(f_i);
+                continue();
+            };
+            fid := attempt.options[f_i].opt.func;
+            func := self.get_function(fid);
+            if !func.get_flag(.Generic) {
+                @check(self.infer_return(fid)) return;
+            };
+            
+            if func.finished_ret { ret | 
+                if self.can_assign(type, ret).is_err() {
+                    reject();
+                };
+            };
+        };
+        are_we_done_yet();
+        //@println("requested %", self.log_type(type));
+    };
+    
+    enumerate parts { arg_index, arg_expr | 
+        continue :: local_return;
+        @check(self.compile_expr(arg_expr, .None)) return;
+        type := arg_expr.ty;
+        
+        f_i := attempt.options.len;
+        while => f_i > 0 {
+            continue :: local_return;
+            f_i -= 1;
+            reject :: fn() void => {
+                attempt.options&.ordered_remove(f_i);
+                continue();
+            };
+            fid := attempt.options[f_i].opt.func;
+            func := self.get_function(fid);
+            if func.arg.bindings.len != want_arity {
+                continue();
+            };
+            
+            b := func.arg.bindings.index(arg_index);
+            if b.ty&.ty() { param | 
+                if self.can_assign(param, type).is_err() {
+                    //@println("[%] reject arg % <- %", arg_index, self.log_type(param), self.log_type(type));
+                    reject();
+                };
+                
+                //@println("[%] allow arg % <- %", arg_index, self.log_type(param), self.log_type(type));
+            };
+        };
+        are_we_done_yet();
+    };
+    
+    enumerate parts { arg_index, arg_expr | 
+        continue :: local_return;
+        
+        arg_fid := if arg_expr.is_const() && arg_expr.ty.eq(FuncId).or(=> self.get_type(arg_expr.ty).is(.Fn)) {
+            @check(self.immediate_eval_expr(arg_expr, arg_expr.ty)) return
+        } else {
+            continue()
+        };
+        arg_fid := FuncId.assume_cast(arg_fid&)[];
+        arg_func := self.get_function(arg_fid);
+        f_i := attempt.options.len;
+        while => f_i > 0 {
+            continue :: local_return;
+            f_i -= 1;
+            reject :: fn() void => {
+                attempt.options&.ordered_remove(f_i);
+                continue();
+            };
+            fid := attempt.options[f_i].opt.func;
+            func := self.get_function(fid);
+            if func.arg.bindings.len != want_arity {
+                continue();
+            };
+            
+            b := func.arg.bindings.index(arg_index);
+            if b.ty&.ty() { param | 
+                param_info := self.get_type(param);
+                if not(arg_expr.ty.eq(FuncId).or(=> param_info.is(.Fn))) {
+                    reject();
+                };
+                
+                @if_let(param_info) fn Fn(ty) => {
+                    res := self.check_promote_id_to_func(arg_fid, ty[]);
+                    if res&.is(.Err) {
+                        reject();
+                    };
+                    @check(res) return;
+                };
+            };
+        };
+        are_we_done_yet();
+    };
+    
+    self.last_loc = arg_expr.loc;
+    @println("% matching options", attempt.options.len);
+    if attempt.options.len < 6 {
+        for attempt.options { opt |
+            func := self.get_function(opt.opt.func);
+            @if(DEBUG_SPAM_LOG) self.codemap.show_error_line(func.loc);
+            @print("- (");
+            each func.arg.bindings { b |
+                @match(b.ty&.ty()) {
+                    fn Some(type) => {
+                        @print("%, ", self.log_type(type));
+                    }
+                    fn None() => {
+                        @print("???, ");
+                    };
+                };
+            };
+            @println(") -> %", self.log_type(func.finished_ret));
+        };
+    };
+    
+    @err("TODO: end of loop. still too many options for '%'", self.pool.get(overloads.name))
+}
+
+
+fn check_promote_id_to_func(self: *SelfHosted, fid: FuncId, f_ty: FnType) Maybe(void) = {
+    func := self.get_function(fid);
+    //@println("check_promote_id_to_func func <- funcid %", self.log_type(self.intern_type(Fn = f_ty)));
+    //partial_args := @check(self.infer_arguments_partial(fid)) return;
+    // TODO: adding this fixes or_wrong_type (but only if you add type annotations) but breaks more other stuff. 
+    //if !func.ret&.is(.Infer) {
+    //    @try(self.poll_in_place(Type, => self.infer_return(fid))) return;
+    //};
+    
+    // this doesn't help. doesn't happen. but its similar to what the old one did in promote_closure
+    // if you take out infering from requested in fn Closure, this happens, but then its wrong in the prelude. 
+    if func.ret&.is(.Infer) {
+        @if_let(func.body&) fn Normal(body) => {
+            guessed := self.type_of(body);
+            @if_let(guessed) fn Ok(type) => {
+                //@println("guessed! %", self.log_type(type));
+                func.ret = (Finished = type);
+                func.finished_ret = (Some = type);
+            };
+        };
+    };
+    
+    ret := @check(self.infer_return(fid)) return;
+    if func.finished_ret { ret | 
+        @check(self.can_assign(f_ty.ret, ret)) return;
+    };
+    //@println("const_coerce func <- funcid %", self.log_type(want));
+    .Ok
+}
+
+fn filter_overload_sync(self: *SelfHosted, arg_expr: *FatExpr, fid: FuncId) bool = {
+    want_arity := self.arity(arg_expr);
+    func := self.get_function(fid);
+    
+    if func.body&.is(.Empty) && func.annotations.len == 0 && func.ret&.is(.Infer) {
+        // foward declaration if an overload set. 
+        return(false);
+    };
+    
+    if func.arg.bindings.len != want_arity {
+        if !arg_expr.expr&.is(.StructLiteralP) {
+            return(false);
+        };
+        // Maybe they're trying to pass named arguments. 
+        have_parts := arg_expr.expr.StructLiteralP.bindings&;
+        want_parts := func.arg.bindings&;
+        if want_parts.len != have_parts.len {| // TODO: allow default args
+            return(false);
+        };
+        
+        // :SLOW
+        each want_parts { want_b | 
+            next :: local_return;
+            want_name := want_b.ident().or(=> return(false)); // idk if this ever happens but it sure can't be named argument
+            each have_parts { have_b |
+                have_name := have_b.ident().or(=> return(false)); // idk if this ever happens but it sure can't be named argument
+                if want_name == have_name {
+                    next();
+                };
+            };
+            return(false);
+        };
+    };
+    
+    true
+} 
 
 // TODO: need to check for conflicts somehow but we can't assume we're able to infer all the options here,
 //       because there might be cycles or more might be added later. 
@@ -2537,16 +2847,18 @@ fn save_const(self: *SelfHosted, name: Var, val_expr: Expr, final_ty: Type, loc:
         ptr.as_ref().unwrap()
     };
     
-    if val._1&.is(.Finished) {
-        return(@err("tried to re-save constant %", name&.log(self)));
-    };
-    if !val._0.expr&.is(.Poison) {
-        return(@err("tried to stomp constant %", name&.log(self)));
-    };
+    // TODO: this used to work before new overloading rework. -- Aug 27
+    //if val._1&.is(.Finished) {
+    //    return(@err("tried to re-save constant %", name&.log(self)));
+    //};
+    //if !val._0.expr&.is(.Poison) {
+    //    return(@err("tried to stomp constant %", name&.log(self)));
+    //};
     
     val._0.expr = val_expr;
     val._0.ty = final_ty;
     val._1 = (Finished = final_ty);
+    self.scopes.put_var_type(name, final_ty);
     .Ok
 }
 
@@ -2594,31 +2906,8 @@ fn coerce_const_expr(self: *SelfHosted, expr: *FatExpr, req: ResultType) Maybe(v
                 @if_let(want_info) fn Fn(f_ty) => {
                     fid := @check(self.immediate_eval_expr(expr, FuncId)) return;
                     fid := FuncId.assume_cast(fid&)[];
-                    func := self.get_function(fid);
-                    //partial_args := @check(self.infer_arguments_partial(fid)) return;
-                    // TODO: adding this fixes or_wrong_type (but only if you add type annotations) but breaks more other stuff. 
-                    //if !func.ret&.is(.Infer) {
-                    //    @try(self.poll_in_place(Type, => self.infer_return(fid))) return;
-                    //};
+                    @check(self.check_promote_id_to_func(fid, f_ty[])) return;
                     
-                    // this doesn't help. doesn't happen. but its similar to what the old one did in promote_closure
-                    // if you take out infering from requested in fn Closure, this happens, but then its wrong in the prelude. 
-                    if func.ret&.is(.Infer) {
-                        @if_let(func.body&) fn Normal(body) => {
-                            guessed := self.type_of(body);
-                            @if_let(guessed) fn Ok(type) => {
-                                @println("guessed! %", self.log_type(type));
-                                func.ret = (Finished = type);
-                                func.finished_ret = (Some = type);
-                            };
-                        };
-                    };
-                    
-                    //ret := @check(self.infer_return(fid)) return;
-                    if func.finished_ret { ret | 
-                        @check(self.can_assign(f_ty.ret, ret)) return;
-                    };
-                    //@println("const_coerce func <- funcid %", self.log_type(want));
                     expr.ty = want;
                     // TODO: typecheck args
                     return(.Ok);
@@ -2729,12 +3018,15 @@ fn coerce_const_expr(self: *SelfHosted, expr: *FatExpr, req: ResultType) Maybe(v
 fn can_assign(self: *SelfHosted, want: Type, found: Type) Maybe(void) = {
     if(want == found, => return(.Ok));
     if(found == Never, => return(.Ok));
+    if(want == UnknownType, => return(.Ok)); // TODO: remove
+    if(found == UnknownType, => return(.Ok)); // TODO: remove
     want_info  := self.get_type(want);
     found_info := self.get_type(found);
     
     @match(found_info) {
         fn Fn(f) => {
             if want == FuncId {
+                //@println("can_assign func -> funcid %", self.log_type(want));
                 return(.Ok);
             };
         }

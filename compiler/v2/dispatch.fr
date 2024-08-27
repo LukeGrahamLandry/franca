@@ -22,26 +22,26 @@ TaskId :: @struct(id: i64);
 ExprAttempt :: @struct(expr: *FatExpr, requested: ResultType);
 VarAttempt :: @struct(name: Var, requested: ResultType);
 Action :: @rec @tagged(
-    //CompileExpr: *List(ExprAttempt),
     CompileBody: FuncId,  // After this, we can generate bytecode.
     Jit: FuncId, // After this, it's safe to call a function pointer. 
     EvalConstant: VarAttempt,  // find_const. 
-    ResolveOverload: @struct(os: OverloadSet, call: ExprAttempt, callsite: ?FuncId),
+    ResolveOverload: OverloadAttempt,
     FinishRecType: @struct(hole: Type, name: Var, value: *FatExpr),
+    // Used for function callees, you can't call a function until ~all~ are ready.
     All: List(*Task),
     Any: @struct(options: List(CountedTask), progress: bool),
 );
 
 CountedTask :: @struct(task: *Task, steps: i64);
 
-//OverloadAttempt :: @struct(
-//    os: OverloadSet, 
-//    call: ExprAttempt, 
-//    callsite: ?FuncId,
-//    last_ready_count: i64,
-//    interesting: List(WipOverload),
-//);
-//WipOverload :: @struct(opt: OverloadOption, task: *Task);
+OverloadAttempt :: @struct(
+    os: OverloadSet, 
+    call: ExprAttempt, 
+    callsite: ?FuncId,
+    last_ready_count: i64,
+    options: List(WipOverload),
+);
+WipOverload :: @struct(opt: OverloadOption, possible: bool);
 
 fn init(a: Alloc) CompilerDispatch = {
     temp := a.alloc(List(ExprAttempt), 1);
@@ -147,7 +147,7 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
     };
     self.dispatch.enclosing_function = .None;
     
-    @match(task.action) {
+    @match(task.action&) {
         fn EvalConstant(v) => {
             @log_event("[TRY TASK] %: %", task.action&.tag(), self.pool.get(v.name.name)) self;
             self.new_expression_stack();
@@ -158,12 +158,14 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
             self.dispatch.const_var_in_progress&.unset(name.id.zext());
         }
         fn CompileBody(fid) => {
+            fid := fid[];
             @log_event("[TRY TASK] %: % %", task.action&.tag(), fid, self.log_name(fid)) self;
             self.new_expression_stack();
             @check(self.handle_compile_func_body(fid)) return;
             self.dispatch.function_in_progress&.unset(fid.as_index());
         }
         fn Jit(fid) => {
+            fid := fid[];
             @log_event("[TRY TASK] %: % %", task.action&.tag(), fid, self.log_name(fid)) self;
             func := self.get_function(fid);
             //self.codemap.show_error_line(func.loc);
@@ -250,7 +252,7 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
             @log_event("[TRY TASK] %: % %", task.action&.tag(), f.os, self.pool.get(overloads.name)) self;
             @debug_assert(f.call.expr.expr&.is(.Call), "overload resolve must be call");
             call := f.call.expr.expr.Call;
-            fid := @check(self.resolve_in_overload_set(call.arg, f.call.requested, f.os)) return;
+            fid := @check(self.resolve_in_overload_set_new(call.arg, f)) return;
             f_value := self.to_values(FuncId, fid);
             //call.f.set(f_value, fid); // THIS TYPE CHECKS! :FUCKED
             call.f.set(f_value, FuncId);
