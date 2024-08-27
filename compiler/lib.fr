@@ -83,25 +83,13 @@ fn new_sema_init_vtable() *ImportVTable = {
     vtable.get_jitted_ptr = fn(c: Compiler, f: FuncId) CRes(rawptr) = {
         self := c.cast()[][];
         vtable := the_vtable;
-        ptr := or self.aarch64&.get_fn(f) {
-            {vtable.compile_func}(c, f, .Jit);
-            
-            task: Task = (action = (Jit = f), waiting_for = list(self.get_alloc()), id = self.dispatch.next_task_id);
-            self.dispatch.next_task_id += 1;
-            self.dispatch.active_tasks&.push(task&);
-            res := self.poll_tasks(); ::tagged(@type res);
-            if res&.is(.Err) {
-                garbage := res.Err.span.high == 0 && res.Err.span.low == 0;
-                if garbage {
-                    res.Err.span = self.last_loc;
-                };
-                self.codemap.show_error_line(res.Err.span);
-                @panic("failed to jti func: %", res.Err.msg); // TODO: return the error!
-            };
-            
-            ptr := self.aarch64&.get_fn(f);
-            ptr.expect("compield function but not ready")
+        res := self.poll_in_place(rawptr) { () Maybe(rawptr) |
+            @match(self.aarch64&.get_fn(f)) {
+                fn Some(ptr) => (Ok = ptr);
+                fn None() => (Suspend = self.wait_for(Jit = f));
+            }
         };
+        ptr := self.unwrap_report_error(rawptr, res);
         r: CRes(rawptr) = (Ok = ptr); // TODO: fix prims llvm. -- Jul 29
         r
     };
@@ -115,23 +103,17 @@ fn new_sema_init_vtable() *ImportVTable = {
     };
     
     vtable.compile_func = fn(c: Compiler, f: FuncId, when: ExecStyle) CRes(void) = {
-        c := c.cast()[][];
-        task: Task = (action = (CompileBody = f), waiting_for = list(c.get_alloc()), id = c.dispatch.next_task_id);
-        c.dispatch.next_task_id += 1;
-        c.dispatch.function_in_progress&.set(f.as_index());
-        c.dispatch.active_tasks&.push(task&);
-       
-        // TODO: have a version of poll that just goes until a specific task is done. 
-        res := c.poll_tasks(); ::tagged(@type res);
-        if res&.is(.Err) {
-            garbage := res.Err.span.high == 0 && res.Err.span.low == 0;
-            if garbage {
-                res.Err.span = c.last_loc;
-            };
-            c.codemap.show_error_line(res.Err.span);
-            @panic("failed to compile func: %", res.Err.msg);
-            // TODO: return the error!
+        self := c.cast()[][];
+        res := self.poll_in_place(void) { () Maybe(void) |
+            func := self.get_function(f);
+            if func.get_flag(.EnsuredCompiled) {
+                .Ok
+            } else {
+                self.dispatch.function_in_progress&.set(f.as_index());
+                (Suspend = self.wait_for(CompileBody = f))
+            }
         };
+        self.unwrap_report_error(void, res);
         .Ok
     };
     
