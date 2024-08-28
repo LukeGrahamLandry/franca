@@ -1,3 +1,38 @@
+##
+
+seems you no longer need this.
+
+```
+// If you don't do this at all, you loop (TODO: why? gets stuck on EvalConstant:i64).
+// But if you @check it, you'll error out on things that need a type hint.
+// We do a real typecheck after dealing with the const args so its probably fine.
+// TODO: compiling it at all here (check or not) has to be wrong tho,
+//       because you don't want things in a const arg expr to be added to runtime callees.
+_ := self.compile_expr(arg_expr, arg_expr.ty.want());
+```
+
+a couple mistakes in the compiler code that were incorrectly allowed by the old sema. thats kinda cool.
+
+- `self.put_token((BinaryNum = (bit_count = bits.trunc(), value = total)));`
+  with value wanting u64 but total being i64 used to work without .bitcast() but shouldn't
+- `out.push((Num = (i, .I64)));` where `Num: @struct(value: i64, ty: Prim),` used to work but you should need field names.
+
+---
+
+- forgot to call get_or_create_type for u8 in eval_str
+
+##
+
+remove some unneeded sema_regression changes.
+
+- (macros, bits) didn't used to need the annotation.
+- (mandelbrot, mul) this should be able to be #inline and still get its type hint.
+- (panic, panic) i used to just call unreachable() here but now i can't cope with mutual recursion
+  even when fixed, this should still actually abort() because if the hook returns we're in a fucked state. -- Aug 6
+- (arena, ::) old sema didn't need the type annotation! its picking the wrong overlaod now
+- (hash, StupidAddHashable) used to work without `: Type`
+- (run_tests, run_llvm) shouldn't need to be constant :runner_segfault
+
 ## debugging on x86 (Aug 26)
 
 v2;  
