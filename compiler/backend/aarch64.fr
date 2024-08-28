@@ -318,7 +318,7 @@ fn emit_inst(self: *EmitAsm, b_idx: usize, inst: Bc, i: usize) bool #once = {
     @match(inst) {
         fn Nop() => ();
         fn SaveSsa(f) => {
-            @assert(self.vars[f.id.zext()].is_none());
+            @assert(self.vars[f.id.zext()].is_none(), "SaveSsa missing");
             slot := self.create_slots(8);
             reg := self.pop_to_reg();
             self.store_u64(reg, sp, slot.id.trunc());
@@ -372,11 +372,9 @@ fn emit_inst(self: *EmitAsm, b_idx: usize, inst: Bc, i: usize) bool #once = {
             if self.asm.get_fn(fid) { (ptr: rawptr) |
                 self.state.stack&.push(Literal = ptr.int_from_rawptr());
             } else {
-                @assert(fid.as_index() < 4096);
                 reg := self.get_free_reg();
                 self.asm.extend_blanks(fid);
-                self.load_imm(reg, self.asm.get_dispatch()); // NOTE: this means you can't ever resize
-                self.asm.push(ldr_uo(Bits.X64, reg, reg, @as(u12) @as(i64) fid.as_index()));
+                self.load_fnptr_from_dispatch(fid, reg);
                 self.state.stack&.push(Increment = (reg = reg, offset_bytes = 0));
             };
         }
@@ -1093,7 +1091,7 @@ fn load_imm(self: *EmitAsm, reg: i64, value: i64) void = {
             part := value.bit_and(bottom);
             if part != 0 {
                 // TODO: have intcast vs trunc like zig has. one safety checked that it fits in the target type and one that allows chopping stuff off. 
-                self.asm.push(movk_rt(Bits.X64, reg, part.trunc(), shift));
+                self.asm.push(movk_rt(Bits.X64, reg, part.trunc(), @as(Hw) shift));
             };
             value = value.shift_right_logical(16);
             if(value == 0, => return());
@@ -1148,7 +1146,6 @@ fn dyn_c_call(self: *EmitAsm, sig: PrimSig, $do_call: @Fn() void) void = {
 }
 
 ::enum(CallConv);
-::if(u1);
 
 // TODO: use with_link for tail calls.
 // !with_link === tail
@@ -1162,7 +1159,8 @@ fn branch_func(self: *EmitAsm, f: FuncId, with_link: bool) void #once = {
         // TODO: use adr/adrp
         if offset.abs() < 1.shift_left(25) {
             @if(TRACE_ASM) println("backwards call");
-            self.asm.push(b(offset, if(with_link, => 1, => 0)));
+            // :sema_regression
+            self.asm.push(b(offset, @as(u1) @as(i64) if(with_link, => 1, => 0)));
             return(); // TODO: footgun. its too easy to `return;` which returns in other languages but here just evaluates and descards.
         };
     };
@@ -1171,21 +1169,25 @@ fn branch_func(self: *EmitAsm, f: FuncId, with_link: bool) void #once = {
     // The normal solution would be punt and let the linker deal with it or go back later and patch it ourselves.
     // But for now, I just spend a register on having a dispatch table and do an indirect call through that.
     // TODO: have a mapping. funcs take up slots even if never indirect called.
-    
-    self.load_imm(x16, self.asm.get_dispatch()); // NOTE: this means you can't ever resize
+    self.load_fnptr_from_dispatch(f, x16);
+    // :sema_regression
+    self.asm.push(br(x16, @as(u1) @as(i64) if(with_link, => 1, => 0)));
+}
+
+fn load_fnptr_from_dispatch(self: *EmitAsm, f: FuncId, reg: i64) void = {
+    self.load_imm(reg, self.asm.get_dispatch()); // NOTE: this means you can't ever resize
     if f.as_index() < 4096 {
         @if(TRACE_ASM) println("short table call");
-        self.asm.push(ldr_uo(Bits.X64, x16, x16, @as(u12) @as(i64) f.as_index()));
+        self.asm.push(ldr_uo(Bits.X64, reg, reg, @as(u12) @as(i64) f.as_index()));
     } else {
         @if(TRACE_ASM) println("long table call");
-        // TODO: insert in range even tho this one is quite big. 
         full := f.as_index() * 8;
         bottom := full.bit_and(1.shift_left(12) - 1);
         top := (full - bottom).shift_right_logical(12); // TODO: don't need to minus? we're shifting it off anyway. 
-        self.asm.push(add_im(Bits.X64, x16, x16, top, 1));
-        self.asm.push(ldr_uo(Bits.X64, x16, x16, @as(u12) @as(i64) bottom / 8));
+        @assert(top < 4096, "not enough bits for load_fnptr_from_dispatch %", f);
+        self.asm.push(add_im(Bits.X64, reg, reg, top, 1));
+        self.asm.push(ldr_uo(Bits.X64, reg, reg, @as(u12) @as(i64) bottom / 8));
     };
-    self.asm.push(br(x16, if(with_link, => 1, => 0)));
 }
 
 // Now have to be careful about trying to use x17
@@ -1477,7 +1479,7 @@ fn save_current(self: *Jitted, f: FuncId) []u32 = {
     end := u32.int_from_ptr(self.next);
     xx := u32.int_from_ptr(self.mmapped.ptr);
     last_space := xx + self.mmapped.len * 4;
-    assert(end < last_space, "ICE: out of space for jitted code");
+    @assert(end < last_space, "ICE: out of space for jitted code (% MB)", self.mmapped.len * 4 / 1024 / 1024);
     //@debug_assert_eq(self.current_start as usize % 4, 0);
     // just a marker to make sure someone doesn't fall off the end of the function by forgetting to return.
     // also you can see it in the debugger disassembly so you can tell if you emitted a trash instruction inside a function or you're off the end in uninit memory. -- Apr 25

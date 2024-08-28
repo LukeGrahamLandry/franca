@@ -361,7 +361,7 @@ fn ensure_resolved_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
 }
 
 fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = {
-    @debug_assert(self.dispatch.function_in_progress&.get(fid.as_index()), "expected to do work on in progress function");
+    @debug_assert(self.dispatch.function_in_progress&.get(fid.as_index()), "expected to do work on in progress function %", fid);
     self.ensure_resolved_body(fid);
     func := self.get_function(fid);
     if(func.get_flag(.EnsuredCompiled), => return(.Ok));
@@ -399,7 +399,7 @@ fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = 
                 old_func := self.dispatch.enclosing_function;
                 self.dispatch.enclosing_function = (Some = fid);
                 
-                if !func.get_flag(.Generic) && !func.ret&.is(.Infer) {
+                if !func.ret&.is(.Infer) {
                     @check(self.infer_return(fid)) return;
                 };
     
@@ -720,6 +720,9 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
                 new_done := @check(self.compile_stmt(stmt)) return;
                 done = new_done && done;
             };
+            if requested&.is(.None) && !expr.ty.is_unknown() && !expr.ty.is_never() {
+                requested = (Specific = expr.ty);
+            };
             @check(self.compile_expr(f.result, requested)) return;
             
             expr.ty = f.result.ty;
@@ -946,7 +949,7 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
             expr.done = done;
         }
         fn Loop(arg) => {
-            @check(self.compile_expr(arg[], void.want())) return;
+            @check(self.compile_expr(arg[], .None)) return;
             expr.done = arg.done;
             expr.ty = Never; // :get_or_create_type
         }
@@ -1034,7 +1037,15 @@ fn compile_fn_ptr(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
     };
     @err_assert(!func.get_flag(.Once), "Cannot create a function pointer to something that id #once") return;
     func.set_flag(.TookPointerValue);
-    self.add_callee(fid);
+    
+    // Instead of self.add_callee(fid)
+    if self.dispatch.enclosing_function { current_f |
+        current := self.get_function(current_f);
+        current.mutual_callees&.add_unique(fid, self.get_alloc());
+        self.aarch64&.extend_blanks(fid);
+        @log_event("added % mutual calls %", current_f, fid) self;
+        record_function_call(c = self, caller = current_f, callee = fid);
+    };
     
     // TODO: for now you just need to not make a mistake with calling convention
     // The backend still needs to do something with this, so just leave it
@@ -1332,7 +1343,7 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
             self.dispatch.function_in_progress&.set(fid.as_index());
             return(Suspend = self.wait_for(CompileBody = fid));
         };
-
+        
         // TODO: check that you're calling from the same place as the definition.
         return(self.emit_capturing_call(fid, expr, requested));
     };
@@ -1340,7 +1351,7 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
     arg_ty = @check(self.infer_arguments(fid)) return;
     @check(self.compile_expr(arg_expr, (Specific = arg_ty))) return;
     if arg_ty != arg_expr.ty {
-        return(@err("arg type mismatch. TODO: better type checking\n- expected: %\n- found: %", self.log_type(arg_ty), self.log_type(arg_expr.ty)));
+        @check(self.can_assign(arg_ty, arg_expr.ty)) return;
     };
     
     ret_ty := @check(self.infer_return(fid))    return;
@@ -1401,7 +1412,8 @@ fn add_callee(self: *SelfHosted, fid: FuncId) bool = {
         is_const_context = false;
         new := self.get_function(fid);
         current := self.get_function(current_f);
-        if new.callees.items().contains(current_f&) {
+        mutual := new.callees.items().contains(current_f&);
+        if mutual {
             current.mutual_callees&.add_unique(fid, self.get_alloc());
         } else {
             current.callees&.add_unique(fid, self.get_alloc());
@@ -2119,12 +2131,12 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
                 if self.can_assign(param, type).is_err() {
                     if arg_expr.is_const() { // this helps with :type_through_field
                         res := self.coerce_const_expr(arg_expr, (Specific = param), true);
-                        if res&.is(.Err) {
-                            reject();
+                        if !res&.is(.Err) {
+                            @check(res) return;
+                            continue();
                         };
-                        @check(res) return;
-                        continue();
                     };
+                    
                     //@println("[%] reject arg % <- %", arg_index, self.log_type(param), self.log_type(type));
                     reject();
                 };
@@ -3215,6 +3227,34 @@ fn can_assign(self: *SelfHosted, want: Type, found: Type) Maybe(void) = {
                 return(.Ok);
             };
         }
+        fn Ptr(found_inner) => {
+            @if_let(want_info) fn Ptr(want_inner) => {
+                return(self.can_assign(want_inner[], found_inner[]));
+            };
+        }
+        fn Struct(found_struct) => {
+            @if_let(want_info) fn Struct(want_struct) => {
+                if found_struct.is_tuple && want_struct.is_tuple {
+                    if found_struct.fields.len != want_struct.fields.len {
+                        return(@err("arity mismatch"));
+                    };
+                    range(0, want_struct.fields.len) { i | 
+                        @check(self.can_assign(want_struct.fields[i].ty, found_struct.fields[i].ty)) return;
+                    };
+                    return(.Ok);
+                };
+            };
+        }
+        fn Int(a) => {
+            @if_let(want_info) fn Int(b) => {
+                if a.bit_count == 64 && b.bit_count != 32 && b.bit_count != 16 && b.bit_count != 8 && b.bit_count != 64 {
+                    return(.Ok);
+                };
+                if b.bit_count == 64 && a.bit_count != 32 && a.bit_count != 16 && a.bit_count != 8 && a.bit_count != 64 {
+                    return(.Ok);
+                };
+            };
+        };
         @default => ();
     };
     @match(want_info) {
@@ -3304,6 +3344,7 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
                 // SAFETY: we're passing comp_ctx=false so it won't try to use the pointer as a real CompilerRs.
                 result := hack&.call_dynamic(fn_ptr.int_from_rawptr(), f_ty&, args&, false);
                 self.dispatch.enclosing_function = old_func;
+                ::tagged(Result(Values, ParseErr));  // :sema_regression order?
                 if result&.is(.Err) {
                     return(Err = self.box(result.Err));
                 };
