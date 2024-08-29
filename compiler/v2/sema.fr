@@ -20,8 +20,6 @@ OverloadSetData :: @struct(
 
 OverloadOption :: @struct(
     func: FuncId,
-    args: []ResultType,
-    ret: ?Type, // For #generic, we might not know without the args
 );
 
 fn compile_stmt(self: *SelfHosted, stmt: *FatStmt) Maybe(bool) = {
@@ -2055,6 +2053,7 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
     overloads := self.dispatch.overloads&.nested_index(attempt.os.as_index());
     self.compute_new_overloads(overloads);
     if overloads.ready.len > attempt.last_ready_count {
+        attempt.state = 0;
         new := overloads.ready.items().slice(attempt.last_ready_count, overloads.ready.len);
         for new { option | 
             if self.filter_overload_sync(arg_expr, option.func) {
@@ -2087,177 +2086,196 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
         };      
     };
     
-    enumerate parts { arg_index, arg_expr | 
-        f_i := attempt.options.len;
-        while => f_i > 0 {
-            continue :: local_return;
-            f_i -= 1;
-            reject :: fn() void => {
-                attempt.options&.unordered_remove(f_i);
-                continue();
-            };
-            fid := attempt.options[f_i].opt.func;
-            func := self.get_function(fid);
-            if func.arg.bindings.len != want_arity {
-                continue();
-            };
-            b := func.arg.bindings.index(arg_index);
-            if !func.get_flag(.Generic) {
-                @check(self.infer_type(b.ty&)) return;
-            };
-            if b.ty&.ty() { param | 
-                if !self.can_structurally_be(arg_expr, param) {
-                    reject();
+    if attempt.state < 1 {
+        enumerate parts { arg_index, arg_expr | 
+            f_i := attempt.options.len;
+            while => f_i > 0 {
+                continue :: local_return;
+                f_i -= 1;
+                reject :: fn() void => {
+                    attempt.options&.unordered_remove(f_i);
+                    continue();
                 };
-            };
-        };
-        are_we_done_yet();
-    };
-    
-    enumerate parts { arg_index, arg_expr | 
-        continue :: local_return;
-        type := self.type_of(arg_expr);
-        if type&.is(.Err) {
-            continue();
-        };
-        type := @check(type) return;
-        arg_expr.ty = type;
-        
-        f_i := attempt.options.len;
-        while => f_i > 0 {
-            continue :: local_return;
-            f_i -= 1;
-            reject :: fn() void => {
-                attempt.options&.unordered_remove(f_i);
-                continue();
-            };
-            fid := attempt.options[f_i].opt.func;
-            func := self.get_function(fid);
-            if func.arg.bindings.len != want_arity {
-                continue();
-            };
-            
-            b := func.arg.bindings.index(arg_index);
-            if b.ty&.ty() { param | 
-                if !self.ask_can_assign(param, type) {
-                    if arg_expr.is_const() { // this helps with :type_through_field
-                        res := self.coerce_const_expr(arg_expr, (Specific = param), true);
-                        if !res&.is(.Err) {
-                            @check(res) return;
-                            continue();
-                        };
-                    };
-                    
-                    //@println("[%] reject arg % <- %", arg_index, self.log_type(param), self.log_type(type));
-                    reject();
+                fid := attempt.options[f_i].opt.func;
+                func := self.get_function(fid);
+                if func.arg.bindings.len != want_arity {
+                    continue();
                 };
-                
-                //@println("[%] allow arg % <- %", arg_index, self.log_type(param), self.log_type(type));
-            };
-        };
-        are_we_done_yet();
-    };
-    
-    @if_let(attempt.call.requested) fn Specific(type) => {
-        f_i := attempt.options.len;
-        while => f_i > 0 {
-            continue :: local_return;
-            f_i -= 1;
-            reject :: fn() void => {
-                attempt.options&.unordered_remove(f_i);
-                continue();
-            };
-            fid := attempt.options[f_i].opt.func;
-            func := self.get_function(fid);
-            if !func.get_flag(.Generic) {
-                @check(self.infer_return(fid)) return;
-            };
-            
-            if func.finished_ret { ret | 
-                if !self.ask_can_assign(type, ret) {
-                    reject();
+                b := func.arg.bindings.index(arg_index);
+                if !func.get_flag(.Generic) {
+                    @check(self.infer_type(b.ty&)) return;
                 };
-            };
-        };
-        are_we_done_yet();
-        //@println("requested %", self.log_type(type));
-    };
-    
-    enumerate parts { arg_index, arg_expr | 
-        continue :: local_return;
-        @check(self.compile_expr(arg_expr, .None)) return;
-        type := arg_expr.ty;
-        
-        f_i := attempt.options.len;
-        while => f_i > 0 {
-            continue :: local_return;
-            f_i -= 1;
-            reject :: fn() void => {
-                attempt.options&.unordered_remove(f_i);
-                continue();
-            };
-            fid := attempt.options[f_i].opt.func;
-            func := self.get_function(fid);
-            if func.arg.bindings.len != want_arity {
-                continue();
-            };
-            
-            b := func.arg.bindings.index(arg_index);
-            if b.ty&.ty() { param | 
-                if !self.ask_can_assign(param, type) {
-                    //@println("[%] reject arg % <- %", arg_index, self.log_type(param), self.log_type(type));
-                    reject();
-                };
-                
-                //@println("[%] allow arg % <- %", arg_index, self.log_type(param), self.log_type(type));
-            };
-        };
-        are_we_done_yet();
-    };
-    
-    enumerate parts { arg_index, arg_expr | 
-        continue :: local_return;
-        
-        arg_fid := if arg_expr.is_const() && arg_expr.ty.eq(FuncId).or(=> self.get_type(arg_expr.ty).is(.Fn)) {
-            @check(self.immediate_eval_expr(arg_expr, arg_expr.ty)) return
-        } else {
-            continue()
-        };
-        arg_fid := FuncId.assume_cast(arg_fid&)[];
-        arg_func := self.get_function(arg_fid);
-        f_i := attempt.options.len;
-        while => f_i > 0 {
-            continue :: local_return;
-            f_i -= 1;
-            reject :: fn() void => {
-                attempt.options&.unordered_remove(f_i);
-                continue();
-            };
-            fid := attempt.options[f_i].opt.func;
-            func := self.get_function(fid);
-            if func.arg.bindings.len != want_arity {
-                continue();
-            };
-            
-            b := func.arg.bindings.index(arg_index);
-            if b.ty&.ty() { param | 
-                param_info := self.get_type(param);
-                if not(arg_expr.ty.eq(FuncId).or(=> param_info.is(.Fn))) {
-                    reject();
-                };
-                
-                @if_let(param_info) fn Fn(ty) => {
-                    res := self.check_promote_id_to_func(arg_fid, ty[]);
-                    if res&.is(.Err) {
+                if b.ty&.ty() { param | 
+                    if !self.can_structurally_be(arg_expr, param) {
                         reject();
                     };
-                    @check(res) return;
                 };
             };
+            are_we_done_yet();
         };
-        are_we_done_yet();
+        attempt.state = 1;
     };
-    @check(self.do_merges(attempt)) return;
+    
+    if attempt.state < 2 {
+        enumerate parts { arg_index, arg_expr | 
+            continue :: local_return;
+            type := self.type_of(arg_expr);
+            if type&.is(.Err) {
+                continue();
+            };
+            type := @check(type) return;
+            arg_expr.ty = type;
+            
+            f_i := attempt.options.len;
+            while => f_i > 0 {
+                continue :: local_return;
+                f_i -= 1;
+                reject :: fn() void => {
+                    attempt.options&.unordered_remove(f_i);
+                    continue();
+                };
+                fid := attempt.options[f_i].opt.func;
+                func := self.get_function(fid);
+                if func.arg.bindings.len != want_arity {
+                    continue();
+                };
+                
+                b := func.arg.bindings.index(arg_index);
+                if b.ty&.ty() { param | 
+                    if !self.ask_can_assign(param, type) {
+                        if arg_expr.is_const() { // this helps with :type_through_field
+                            res := self.coerce_const_expr(arg_expr, (Specific = param), true);
+                            if !res&.is(.Err) {
+                                @check(res) return;
+                                continue();
+                            };
+                        };
+                        
+                        //@println("[%] reject arg % <- %", arg_index, self.log_type(param), self.log_type(type));
+                        reject();
+                    };
+                    
+                    //@println("[%] allow arg % <- %", arg_index, self.log_type(param), self.log_type(type));
+                };
+            };
+            are_we_done_yet();
+        };
+        attempt.state = 2;
+    };
+    
+    if attempt.state < 3 {
+        @if_let(attempt.call.requested) fn Specific(type) => {
+            f_i := attempt.options.len;
+            while => f_i > 0 {
+                continue :: local_return;
+                f_i -= 1;
+                reject :: fn() void => {
+                    attempt.options&.unordered_remove(f_i);
+                    continue();
+                };
+                fid := attempt.options[f_i].opt.func;
+                func := self.get_function(fid);
+                if !func.get_flag(.Generic) {
+                    @check(self.infer_return(fid)) return;
+                };
+                
+                if func.finished_ret { ret | 
+                    if !self.ask_can_assign(type, ret) {
+                        reject();
+                    };
+                };
+            };
+            are_we_done_yet();
+            //@println("requested %", self.log_type(type));
+        };
+        attempt.state = 3;
+    };
+    
+    if attempt.state < 4 {
+        enumerate parts { arg_index, arg_expr | 
+            continue :: local_return;
+            @check(self.compile_expr(arg_expr, .None)) return;
+            type := arg_expr.ty;
+            
+            f_i := attempt.options.len;
+            while => f_i > 0 {
+                continue :: local_return;
+                f_i -= 1;
+                reject :: fn() void => {
+                    attempt.options&.unordered_remove(f_i);
+                    continue();
+                };
+                fid := attempt.options[f_i].opt.func;
+                func := self.get_function(fid);
+                if func.arg.bindings.len != want_arity {
+                    continue();
+                };
+                
+                b := func.arg.bindings.index(arg_index);
+                if b.ty&.ty() { param | 
+                    if !self.ask_can_assign(param, type) {
+                        //@println("[%] reject arg % <- %", arg_index, self.log_type(param), self.log_type(type));
+                        reject();
+                    };
+                    
+                    //@println("[%] allow arg % <- %", arg_index, self.log_type(param), self.log_type(type));
+                };
+            };
+            are_we_done_yet();
+        };
+        attempt.state = 4;
+    };
+    
+    if attempt.state < 5 {
+        enumerate parts { arg_index, arg_expr | 
+            continue :: local_return;
+            
+            arg_fid := if arg_expr.is_const() && arg_expr.ty.eq(FuncId).or(=> self.get_type(arg_expr.ty).is(.Fn)) {
+                @check(self.immediate_eval_expr(arg_expr, arg_expr.ty)) return
+            } else {
+                continue()
+            };
+            arg_fid := FuncId.assume_cast(arg_fid&)[];
+            arg_func := self.get_function(arg_fid);
+            f_i := attempt.options.len;
+            while => f_i > 0 {
+                continue :: local_return;
+                f_i -= 1;
+                reject :: fn() void => {
+                    attempt.options&.unordered_remove(f_i);
+                    continue();
+                };
+                fid := attempt.options[f_i].opt.func;
+                func := self.get_function(fid);
+                if func.arg.bindings.len != want_arity {
+                    continue();
+                };
+                
+                b := func.arg.bindings.index(arg_index);
+                if b.ty&.ty() { param | 
+                    param_info := self.get_type(param);
+                    if not(arg_expr.ty.eq(FuncId).or(=> param_info.is(.Fn))) {
+                        reject();
+                    };
+                    
+                    @if_let(param_info) fn Fn(ty) => {
+                        res := self.check_promote_id_to_func(arg_fid, ty[]);
+                        if res&.is(.Err) {
+                            reject();
+                        };
+                        @check(res) return;
+                    };
+                };
+            };
+            are_we_done_yet();
+        };
+        attempt.state = 5;
+    };
+    
+    if attempt.state < 6 {
+        @check(self.do_merges(attempt)) return;
+        attempt.state = 6;
+    };
     are_we_done_yet();
     
     self.last_loc = arg_expr.loc;
@@ -2371,8 +2389,10 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
     @log_event("% total options", overloads.ready.len) self;
     each overloads.ready { opt | 
         continue :: local_return;
+        func := self.get_function(opt.func);
         @if_let(requested_ret) fn Specific(want) => {
-            if opt.ret { have | 
+            ret := func.finished_ret;
+            if ret { have | 
                 if !self.ask_can_assign(want, have) {
                     //@println("[%] ret discard % for %", i, self.log_type(have), self.log_type(want));
                     continue();
@@ -2380,7 +2400,7 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
             };
         };
         
-        if opt.args.len != want_arity {
+        if func.arg.bindings.len != want_arity {
             if !arg_expr.expr&.is(.StructLiteralP) {
                 continue();
             };
@@ -2613,7 +2633,7 @@ fn do_merges(self: *SelfHosted, attempt: *OverloadAttempt) Maybe(void) = {
         func.set_flag(.EnsuredCompiled);
     };
     
-    @println("doing merges %", self.pool.get(overloads.name));
+    //@println("doing merges %", self.pool.get(overloads.name));
     f_i := attempt.options.len;
     while => f_i > 0 {
         continue :: local_return;
@@ -2638,7 +2658,6 @@ fn do_merges(self: *SelfHosted, attempt: *OverloadAttempt) Maybe(void) = {
                     merged&.push(other_func.body);
                     other_func.body = (Redirect = fid);
                     attempt.options&.unordered_remove(f_j);
-                    @println("f_j=% f_i=%", f_j, f_i);
                     if f_j < f_i {
                         f_i -= 1;
                     };
@@ -2665,10 +2684,7 @@ fn compute_new_overloads(self: *SelfHosted, overloads: *OverloadSetData) void  =
         pending := overloads.pending.items().clone(temp());
         overloads.pending.len = 0;
         for pending { fid | 
-            func := self.get_function(fid);
-            args: List(ResultType) = list(func.arg.bindings.len, self.get_alloc());
-            func.get_arg_types_non_blocking(args&);
-            overloads.ready&.push((func = fid, args = args.items(), ret = func.finished_ret), self.get_alloc());
+            overloads.ready&.push((func = fid), self.get_alloc());
         };
     };
 }
@@ -2830,7 +2846,6 @@ fn compile_get_var(self: *SelfHosted, expr: *FatExpr, requested: ResultType) May
                         };
                     };
                     func.set_flag(.TookPointerValue);
-                    println("a fn ptr");
                     expr.done = false;
                     fid := self.box(expr[]);
                     expr.expr = (FnPtr = fid);
@@ -3217,7 +3232,9 @@ fn ask_can_assign(self: *SelfHosted, want: Type, found: Type) bool = {
                         return(false);
                     };
                     range(0, want_struct.fields.len) { i | 
-                        if !self.ask_can_assign(want_struct.fields[i].ty, found_struct.fields[i].ty) {
+                        w := want_struct.fields[i].ty;
+                        f := found_struct.fields[i].ty;
+                        if !self.ask_can_assign(w, f) {
                             return(false);
                         };
                     };

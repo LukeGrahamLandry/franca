@@ -1,3 +1,9 @@
+## it compiles itself!
+
+its like 3x slower.
+
+with -spam you can see `decl_var as_int%100600` 71 times. so i think a done flag on FatStmt will help a lot.
+
 ##
 
 seems you no longer need this.

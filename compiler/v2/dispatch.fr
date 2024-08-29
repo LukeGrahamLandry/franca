@@ -40,6 +40,7 @@ OverloadAttempt :: @struct(
     callsite: ?FuncId,
     last_ready_count: i64,
     options: List(WipOverload),
+    state: i64 = 0,
 );
 WipOverload :: @struct(opt: OverloadOption, possible: bool);
 
@@ -178,7 +179,6 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
     @match(task.action&) {
         fn EvalConstant(v) => {
             @log_event("[TRY TASK] %: %", task.action&.tag(), self.pool.get(v.name.name)) self;
-            self.new_expression_stack();
             name := v.name;
             var  := self.scopes.get_constant(name);
             var  := var.expect("var should always be known");
@@ -189,7 +189,6 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
             fid := fid[];
             @log_event("[TRY TASK] %: % %", task.action&.tag(), fid, self.log_name(fid)) self;
             if !self.get_function(fid).get_flag(.EnsuredCompiled) {
-                self.new_expression_stack();
                 @check(self.handle_compile_func_body(fid)) return;
             };
             self.dispatch.function_in_progress&.unset(fid.as_index());
@@ -290,7 +289,6 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
             //};
             
             // created function pointers are always added as mutual_callees to be more chill about loops. 
-            waiting: List(*Task) = list(self.get_alloc());
             for func.mutual_callees { callee |
                 @log_event("% mutual calls %", fid.as_index(), callee.as_index()) self;
                 if self.aarch64&.get_fn(callee).is_none() {
@@ -310,7 +308,6 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
             };
         }
         fn ResolveOverload(f) => {
-            self.new_expression_stack();
             self.dispatch.enclosing_function = f.callsite;  // TODO: make test that fails without this.
             overloads := self.dispatch.overloads&.nested_index(f.os.as_index());
             @log_event("[TRY TASK] %: % %", task.action&.tag(), f.os, self.pool.get(overloads.name)) self;
@@ -332,14 +329,14 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
 }
 
 fn is_mutually_recursive(task: *Task, callee: FuncId) bool = {
-    while => task.waiting_for.is_some() {
-        task = task.waiting_for.unwrap();
-        @if_let(task.action) fn Jit(other) => {
-            if other == callee {
-                return(true);
-            };
-        };
-    };
+    //while => task.waiting_for.is_some() {
+    //    task = task.waiting_for.unwrap();
+    //    @if_let(task.action) fn Jit(other) => {
+    //        if other == callee {
+    //            return(true);
+    //        };
+    //    };
+    //};
     while => task.parent.is_some() {
         task = task.parent.unwrap();
         @if_let(task.action) fn Jit(other) => {
@@ -363,12 +360,6 @@ fn would_block(self: *SelfHosted, action: Action) bool = {
         fn FinishRecType(it)  => self.get_type(it.hole).is(.Placeholder);
         fn ResolveOverload(_)  => true;
     }
-}
-
-fn new_expression_stack(self: *SelfHosted) void = {
-    // TODO: reuse these when finished?
-    //       store them in the Action like compile_expr so can skip to theend if yielded? -- Jul 29
-    ::CBox(List(ExprAttempt));
 }
 
 fn Maybe($T: Type) Type = {
