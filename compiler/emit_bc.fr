@@ -139,8 +139,17 @@ fn emit_bc(comp: CompilerRs, f: FuncId, when: ExecStyle) Res(*FnBody) = {
         out_alloc = comp[][].get_alloc(),  
         is_ssa_var = empty(),
     );
-    func := comp[f]&; // TODO: you can't do this inline with a call that needs a *Func. it looks for an overload for **Func. -- Jul 5
-    
+    func := comp[][].get_function(f); // TODO: you can't do this inline with a call (if comp[f]) that needs a *Func. it looks for an overload for **Func. -- Jul 5
+    @debug_assert(func.get_flag(.EnsuredCompiled), "fn not compiled?");
+    // TODO: this should be true
+    //if func.finished_bytecode_pointer.is_some() {
+    //    old := func.finished_bytecode_pointer.unwrap();
+    //    old := FnBody.ptr_from_int(old);
+    //    if old.when == when {
+    //        //@println("compiled twice");
+    ////        //return(Ok = old);
+    //    };
+    //};
     // TODO: HACK. you want to make sure anything called inside the stack tracing functions doesn't try to trace themselves,
     //      this happens naturally by just not inserting them when not compiled yet, but you might
     //      emit_bc again later for aot. this just remembers if tracing was ready the first time we saw the function.  -- Jun 26
@@ -152,7 +161,8 @@ fn emit_bc(comp: CompilerRs, f: FuncId, when: ExecStyle) Res(*FnBody) = {
     //test := comp.prim(i64);
     
     if func.has_tag(.log_ast) {
-        @println("%", func.log(comp[][]));
+        @println("[#log_ast %] %", f, func.log(comp[][]));
+        comp[][].codemap.show_error_line(func.loc);
     };
 
     self.locals&.push(list(self.out_alloc));
@@ -1039,10 +1049,9 @@ fn emit_call(self: *EmitBc, result: *FnBody, f: *FatExpr, arg: *FatExpr, result_
                     };
                     caller := self.program.index(result.func);
                     if !caller.get_flag(.ComptimeOnly) && original_f_id == f_id {
-                        // TODO: remove debug :SLOW
-                        if caller.callees.items().contains(f_id&).not().and(=> !caller.mutual_callees.items().contains(f_id&)) {
-                            //@println("direct call to (non-callee) % %!", self.program.pool.get(callee.name), f_id.as_index());
-                        };
+                        // TODO: it would be nice if this was at the beginning and you never tried to emit anything that was comptimeonly
+                        //       that requires never adding them to callees and then later realizing you can inline them, which would make sense. -- Aug 29
+                        @debug_assert(!(result.when == .Aot && callee.get_flag(.ComptimeOnly)), "cannot .Aot .ComptimeOnly % %", f_id, callee.log(self.program));
                     };
                     result.push(CallDirect = (sig = sig[], f = f_id, tail = tail));
                 };

@@ -39,6 +39,7 @@ ProgramState :: @struct(
     tick: i64 = 0,
     task_messages: BucketArray(List(Str)),
     current_task: ?i64 = .None,
+    wip_task: ?*Task = .None,
 );
 
 DetailWindow :: @tagged(
@@ -119,20 +120,17 @@ MAX_SPEED :: 200;
 fn do_work(instance: *ProgramState) void = {
     self := instance.compiler;
     pending := instance.pending&;
-    pending.ordered_retain() { t | 
-        !t.done
-    };
-    
-    if instance.pending.is_empty() {
+    if pending.is_empty() {
         if instance.target_fns&.last() { f: *FuncId | 
             ::CBox(Task);
-            task: Task = (action = (CompileBody = f[]), waiting_for = list(self.get_alloc()), id = self.dispatch.next_task_id);
+            task: Task = (action = (CompileBody = f[]), waiting_for = .None, parent = .None, id = self.dispatch.next_task_id);
             self.dispatch.next_task_id += 1;
             task := self.box(task);
             self.dispatch.function_in_progress&.set(f[].as_index());
-            self.dispatch.active_tasks&.push(task);
             instance.pending&.push(task);
             instance.target_fns&.pop();
+            instance.wip_task = (Some = task);
+            self.dispatch.root_tasks&.push(task);
             return();
         };
         return();
@@ -140,38 +138,24 @@ fn do_work(instance: *ProgramState) void = {
     
     task := pending.last().unwrap()[];
     instance.current_task = (Some = task.id);
-    task.waiting_for&.ordered_retain() { t | 
-        !t.done
-    };
-    if task.waiting_for.is_empty() {
-        result := self.exec_task(task);
-        @match(result) {  
-            fn Err(e) => {
-                e.msg = e.msg.clone(allocator).items(); // it's probably in temp
-                instance.error = (Some = e);
-                return();
-            }
-            fn Ok() => {
-                if task.waiting_for.is_empty() {| // HACK: it might have added new callees
+    ::as_ref(*Task);
+    if instance.wip_task&.as_ref() { task | 
+        result := Result(void, *ParseErr).zeroed();
+        println(task.id);
+        if instance.compiler.poll_loop_body(task, result&) {
+            @match(result) {  
+                fn Err(e) => {
+                    e.msg = e.msg.clone(allocator).items(); // it's probably in temp
+                    instance.error = (Some = e);
+                    return();
+                }
+                fn Ok() => {
                     task.done = true;
                     pending.pop();
-                };
+                    instance.wip_task = .None;
+                }
             };
-            fn Suspend(new_dep) => {
-                new_task := self.get_alloc().alloc(Task, 1);
-                new_task := new_task.ptr;
-                new_task[] = (action = new_dep[], waiting_for = list(self.get_alloc()), id = self.dispatch.next_task_id);
-                self.dispatch.next_task_id += 1;
-                
-                self.dispatch.active_tasks&.push(new_task);
-                task.waiting_for&.push(new_task);
-                pending.push(new_task);
-            };
-        };
-    } else {
-        for task.waiting_for { dep | 
-            pending.push(dep);
-        };
+        }
     };
 }
 
@@ -216,15 +200,22 @@ fn draw_tasks(instance: *ProgramState) void = {
     if igCollapsingHeader_TreeNodeFlags(c_str(@symbol "Tasks"), 0) {
         num_cols :: 3;
         if igBeginTable(c_str(@symbol "Tasks"), num_cols, 0, (x = 700, y = 0), 0) {
-            range(0, self.dispatch.active_tasks.len) { i | 
-                igPushID_Int(i.intcast());
-                task := self.dispatch.active_tasks[i];
-                hide := instance.hide_finished_tasks && task.done;
-                if !hide {
-                    draw_task_row(instance, task);
+            if instance.wip_task { task |
+                break :: local_return;
+                i := 0;
+                loop {
+                    i += 1;
+                    igPushID_Int(i.intcast());
+                    hide := instance.hide_finished_tasks && task.done;
+                    if !hide {
+                        draw_task_row(instance, task);
+                    };
+                    igPopID();
+                    if task.parent.is_none() {
+                        break();
+                    };
+                    task = task.parent.unwrap();
                 };
-                
-                igPopID();
             };
             igEndTable();
         };
@@ -696,15 +687,44 @@ fn show_task_window(instance: *ProgramState, task: *Task) void = {
     if igCollapsingHeader_TreeNodeFlags(name, 0) {
         num_cols :: 3;
         if igBeginTable(name, num_cols, 0, (x = 700, y = 0), 0) {
-            t := task;
-            i := 0;
-            while => t.waiting_for.is_some() {
-                igPushID_Int(i.intcast());
-                t := t.waiting_for.unwrap();
-                draw_task_row(instance, t);
-                igPopID();
-                i += 1;
-            };
+            (=>{
+                break :: local_return;
+                t := task;
+                i := 0;
+                loop {
+                    if t.waiting_for.is_none() {
+                        break();
+                    };
+                    t = t.waiting_for.unwrap();
+                    igPushID_Int(i.intcast());
+                    draw_task_row(instance, t);
+                    igPopID();
+                    i += 1;
+                };
+            })();
+            igEndTable();
+        };
+    };
+    
+    name := @fmt_cstr("Parent");
+    if igCollapsingHeader_TreeNodeFlags(name, 0) {
+        num_cols :: 3;
+        if igBeginTable(name, num_cols, 0, (x = 700, y = 0), 0) {
+            (=>{
+                break :: local_return;
+                t := task;
+                i := 0;
+                loop {
+                    if t.parent.is_none() {
+                        break();
+                    };
+                    t = t.parent.unwrap();
+                    igPushID_Int(i.intcast());
+                    draw_task_row(instance, t);
+                    igPopID();
+                    i += 1;
+                };
+            })();
             igEndTable();
         };
     };

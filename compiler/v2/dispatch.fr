@@ -80,69 +80,87 @@ fn poll_until_finished(self: *SelfHosted, task: *Task) Result(void, *ParseErr) =
     top_task := task;
     the_mark := __temp_alloc.mark();
     @debug_assert(task.parent.is_none(), "cannot poll a task with a parent. recursion bad.");
+    out := Result(void, *ParseErr).zeroed();
     loop {
-        continue :: local_return;
-        if task.waiting_for { next | 
+        __temp_alloc.reset_retaining_capacity(the_mark);
+        if self.poll_loop_body(task&, out&) {
+            return(out);
+        };
+    }
+}
+
+// TODO: we never set waiting_for! decide if we want that or remove it. 
+
+// this is a dumb way to factor this but i want to call it from examples/compiler_gui too. 
+fn poll_loop_body(self: *SelfHosted, task_in: **Task, out: *Result(void, *ParseErr)) bool = {
+    task := task_in[];
+    continue :: fn() Never => {
+        task_in[] = task;
+        return(false)
+    };
+    
+    if task.waiting_for { next | 
+        task = next;
+        continue();
+    };
+    
+    finished :: fn() void => {
+        @debug_assert(task.waiting_for.is_none(), "made itself wait??");
+        task.done = true;
+        if task.parent { next | 
             task = next;
             continue();
         };
-        __temp_alloc.reset_retaining_capacity(the_mark);
         
-        finished :: fn() void => {
-            @debug_assert(task.waiting_for.is_none(), "made itself wait??");
-            task.done = true;
-            if task.parent { next | 
-                task = next;
-                continue();
-            };
-            
-            @debug_assert(top_task.done, "we think we're done but no");
-            self.dispatch.root_tasks&.pop();
-            @debug_assert_eq(root_len, self.dispatch.root_tasks.len, "book keeping?");
-            
-            return(.Ok);
-        };
+        //@debug_assert(top_task.done, "we think we're done but no");  // TOOD: pass in
+        self.dispatch.root_tasks&.pop();
+        //@debug_assert_eq(root_len, self.dispatch.root_tasks.len, "book keeping?"); // TOOD: pass in
         
-        if task.done {
-            finished();
-        };
-        
-        @match(task.action&) {
-            fn All(tasks) => {
-                while => tasks.len != 0 {
-                    xx := tasks.items().last();
-                    next := xx.unwrap()[];
-                    if next.done {
-                        tasks.pop().unwrap();
-                    } else {
-                        next.parent = (Some = task); // TODO: make this already be done 
-                        task = next;
-                        continue();
-                    };
+        out[] = .Ok;
+        return(true);
+    };
+    
+    if task.done {
+        finished();
+    };
+    
+    @match(task.action&) {
+        fn All(tasks) => {
+            while => tasks.len != 0 {
+                xx := tasks.items().last();
+                next := xx.unwrap()[];
+                if next.done {
+                    tasks.pop().unwrap();
+                } else {
+                    next.parent = (Some = task); // TODO: make this already be done 
+                    task = next;
+                    continue();
                 };
-                finished();
-            }
-            @default => ();
-        };
-        
-        @match(self.exec_task(task)) {
-            fn Err(e) => {
-                self.dispatch.root_tasks&.pop();
-                @debug_assert_eq(root_len, self.dispatch.root_tasks.len, "book keeping?");
-                return(Err = e);
-            }
-            fn Ok() => finished();
-            fn Suspend(next) => {
-                @debug_assert(task.waiting_for.is_none(), "already waiting??");
-                new_task := self.get_alloc().alloc(Task, 1);
-                new_task := new_task.ptr;
-                new_task[] = (action = next[], waiting_for = .None, parent = (Some = task), id = self.dispatch.next_task_id);
-                self.dispatch.next_task_id += 1;
-                task = new_task;
-                continue();
-            }
-        };
-    }
+            };
+            finished();
+        }
+        @default => ();
+    };
+    
+    @match(self.exec_task(task)) {
+        fn Err(e) => {
+            self.dispatch.root_tasks&.pop();
+            //@debug_assert_eq(root_len, self.dispatch.root_tasks.len, "book keeping?");  // TODO: pass in
+            out[] = (Err = e);
+            return(true);
+        }
+        fn Ok() => finished();
+        fn Suspend(next) => {
+            @debug_assert(task.waiting_for.is_none(), "already waiting??");
+            new_task := self.get_alloc().alloc(Task, 1);
+            new_task := new_task.ptr;
+            new_task[] = (action = next[], waiting_for = .None, parent = (Some = task), id = self.dispatch.next_task_id);
+            self.dispatch.next_task_id += 1;
+            task = new_task;
+            continue();
+        }
+    };
+    unreachable()
 }
 
 ::tagged(Action);
@@ -280,7 +298,7 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
                 };
             };
             if waiting.len != 0 {
-                @log_event("sleep on %/% mutual callees", waiting.len, func.callees.len) self;
+                @log_event("sleep on %/% mutual callees", waiting.len, func.mutual_callees.len) self;
                 return(Suspend = self.wait_for(All = waiting));
             };
         }
