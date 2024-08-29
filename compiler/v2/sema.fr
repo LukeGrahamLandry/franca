@@ -23,6 +23,9 @@ OverloadOption :: @struct(
 );
 
 fn compile_stmt(self: *SelfHosted, stmt: *FatStmt) Maybe(bool) = {
+    if stmt.done {
+        return(Ok = true);
+    };
     self.last_loc = stmt.loc;
     @match(stmt.stmt&) {
         fn Noop() => (Ok = true);
@@ -718,6 +721,7 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
             done := true;
             each f.body { stmt | 
                 new_done := @check(self.compile_stmt(stmt)) return;
+                stmt.done = true; // TODO: you probably want to check if inner expressions are done but this seems fine so far. 
                 done = new_done && done;
             };
             if requested&.is(.None) && !expr.ty.is_unknown() && !expr.ty.is_never() {
@@ -1521,7 +1525,7 @@ fn emit_capturing_call(self: *SelfHosted, f: FuncId, expr_out: *FatExpr, request
     } else {
         stmts: List(FatStmt) = list(1, self.get_alloc());
         arg_stmt: Stmt = (DeclVarPattern = (binding = pattern, value = arg_expr[]));
-        stmts&.push(stmt = arg_stmt, annotations = empty(), loc = loc);
+        stmts&.push(stmt = arg_stmt, loc = loc);
         expr_out.expr = (Block = (body = stmts.rs(), result = self.box(owned_body), ret_label = (Some = ret_label), hoisted_constants = false));
     };
     // TODO: self.currently_inlining.retain(|check| *check != f);

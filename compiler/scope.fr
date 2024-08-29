@@ -362,30 +362,31 @@ fn slow_body(self: *ResolveScope, body: *List(FatStmt)) PRes #once = {
         dirty = false;
         each body { stmt | 
             continue :: local_return;
-            if stmt.annotations.len == 1 && stmt.annotations.items()[0].name == Flag.include_std.ident() {
-                msg :: "#include_std requires string argument";
-                arg_expr := stmt.annotations.items()[0].args.or() {
-                    return(@error(msg))
-                };
-                name := @match(arg_expr.expr) {
-                    (fn String(name) Symbol => { name });
-                    @default => return(@error(msg));
-                };
-                
-                if !self.compiler.scopes.already_loaded&.insert(name) {
-                    name := self.compiler.pool.get(name);
-                    :: ?WaitingParse;
-                    file := self.compiler.get_include_std(name).or() {
-                        return(@error("unknown path for #include_std %", name));
-                        unreachable()
+            @if_let(stmt.stmt&) fn Annotations(annotations) => {
+                if annotations.len == 1 && annotations.items()[0].name == Flag.include_std.ident() {
+                    msg :: "#include_std requires string argument";
+                    arg_expr := annotations.items()[0].args.or() {
+                        return(@error(msg))
                     };
-                    dirty = true;
-                    stmts := @try(self.compiler.parser.finish_pending_stmts(file)) return;
-                    new_body&.push_all(stmts.items());
+                    name := @match(arg_expr.expr) {
+                        (fn String(name) Symbol => { name });
+                        @default => return(@error(msg));
+                    };
+                    
+                    if !self.compiler.scopes.already_loaded&.insert(name) {
+                        name := self.compiler.pool.get(name);
+                        :: ?WaitingParse;
+                        file := self.compiler.get_include_std(name).or() {
+                            return(@error("unknown path for #include_std %", name));
+                            unreachable()
+                        };
+                        dirty = true;
+                        stmts := @try(self.compiler.parser.finish_pending_stmts(file)) return;
+                        new_body&.push_all(stmts.items());
+                    };
+                    continue();
                 };
-                continue();
             };
-
             new_body&.push(stmt[]);
         };
         temp := body[];
@@ -566,12 +567,14 @@ fn handle_expr(self: *ResolveScope, expr: *FatExpr) Result(DoMore, *ParseErr) #o
             (=> {
                 break :: local_return;
                 each f.body { stmt |
-                    if stmt.annotations.len == 1 {
-                        if stmt.annotations.items()[0].name == Flag.include_std.ident() {
-                            stmts := f.body.assume_owned(self.compiler.get_alloc());
-                            @try(self.slow_body(stmts&)) return;
-                            f.body = stmts.rs();
-                            break();
+                    @if_let(stmt.stmt&) fn Annotations(annotations) => {
+                        if annotations.len == 1 {
+                            if annotations.items()[0].name == Flag.include_std.ident() {
+                                stmts := f.body.assume_owned(self.compiler.get_alloc());
+                                @try(self.slow_body(stmts&)) return;
+                                f.body = stmts.rs();
+                                break();
+                            };
                         };
                     };
                     @try(self.scan_const_decls(stmt)) return;
@@ -619,10 +622,6 @@ fn handle_stmt(self: *ResolveScope, stmt: *FatStmt) Result(DoMore, *ParseErr) #o
             // Which is what you want for local variables, but not constant functions since they should be able to recurse, 
             // but that works out because constants were already handled in scan_const_decls.  -- Jun 27
             return(Ok = .Break);
-        });
-        (fn DeclFunc(func) => {
-            func.annotations&.push_all(stmt.annotations.items(), self.compiler.get_alloc());
-            stmt.annotations&.clear();
         });
         (fn DeclVarPattern(f) => {
             // TODO: this declares the new variables before resolving the types/values. which is wrong! -- Jul 1

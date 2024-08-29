@@ -103,16 +103,23 @@ fn push_parse(self: *Parser, src: Str, span: Span) WaitingParse = {
 fn parse_stmt(self: *Parser) Result(FatStmt, *ParseErr) = {
     tags := @try(self.parse_annotations()) return;
     stmt := @try(self.parse_stmt_inner(!tags.is_empty())) return;
-    @if_let(stmt.stmt&) fn DeclFunc(f) => {
-        if !tags.is_empty() {
-            f.annotations&.push_all(tags.items(), self.alloc);
+    
+    if !tags.is_empty() {
+        @match(stmt.stmt&) {
+            fn DeclFunc(f) => {
+                if f.annotations.is_empty() {
+                    f.annotations = tags.rs();
+                } else {
+                    f.annotations&.push_all(tags.items(), self.alloc);
+                };
+            }
+            fn Noop() => {
+                stmt.stmt = (Annotations = tags.rs());
+            }
+            @default => @report_error("#annotations can only go before functions or semicolons.") (return, self.last.span);
         };
     };
-    if stmt.annotations.items().is_empty() {| // hack for ; stmts because they recurse back to here so will have thier own annotations. 
-        stmt.annotations = tags.rs();
-    };
     
-    // TODO: if DeclFn, put the annotations on here. otherwise make them seperate stmt nodes. and remove annotations from FatStmt.
     (Ok = stmt)
 }
 
@@ -1012,13 +1019,6 @@ fn parse_block_until_squiggle(self: *Parser, allow_eof: bool) ParseRes = {
     result: FatExpr = if stmts&.pop() {stmt|
         @match(stmt.stmt) {
             (fn Eval(e) FatExpr => e);
-            (fn Noop() => { // :store_noop
-                // It might be #include_std
-                if stmt.annotations.len.ne(0) {
-                    stmts&.push(stmt);
-                };
-                self.raw_unit(self.last.span)
-            });
             @default => {
                 // block might end with a func decl with no semicolon.
                 stmts&.push(stmt);
@@ -1081,7 +1081,7 @@ fn expr(self: *Parser, e: Expr, loc: Span) FatExpr =
     (expr = e, loc = loc, ty = UnknownType, done = false);
 
 fn stmt(self: *Parser, e: Stmt, loc: Span) FatStmt = 
-    (stmt = e, annotations = RsVec(Annotation).zeroed(), loc = loc);
+    (stmt = e, loc = loc);
     
 fn box();
 fn PBox($T: Type) void = {

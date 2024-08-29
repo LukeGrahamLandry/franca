@@ -4,6 +4,11 @@ its like 3x slower.
 
 with -spam you can see `decl_var as_int%100600` 71 times. so i think a done flag on FatStmt will help a lot.
 
+oh damn, turning off debug assertions goes from 1800 ms to 1580 ms, thats the combination of saved time and not having to compile them.
+using that to compile a version with debug assertions + indexing takes ~1650 ms.
+
+done flag on FatStmt gets down to (unsafe 1400, safe 1780) and brings spam output from 4396386 lines to 2033850 lines.
+
 ##
 
 seems you no longer need this.
