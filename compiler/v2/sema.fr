@@ -1348,6 +1348,7 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
         // note: compile() checks if its ::Inline before actually generating asm so it doesn't waste its time.
         // if its a '=>' function, we can't compile it out of context, and same if it has a const arg of a '=>' function. 
         if !capturing && !func.get_flag(.EnsuredCompiled) {
+            assert(! self.dispatch.function_in_progress&.get(fid.as_index()), "unhanlded mutual recursion");
             self.dispatch.function_in_progress&.set(fid.as_index());
             return(Suspend = self.wait_for(CompileBody = fid));
         };
@@ -1958,6 +1959,7 @@ fn infer_return(self: *SelfHosted, fid: FuncId) Maybe(Type) = {
     
     ty := or @check(self.infer_type(func.ret&)) return {
         // Infer is a valid return type. To deal with that, we just compile the body, and that will set the finished_ret for us. 
+        assert(! self.dispatch.function_in_progress&.get(fid.as_index()), "unhanlded mutual recursion");
         self.dispatch.function_in_progress&.set(fid.as_index());
         return(Suspend = self.wait_for(CompileBody = fid))
     };
@@ -2810,6 +2812,37 @@ fn compile_get_var(self: *SelfHosted, expr: *FatExpr, requested: ResultType) May
     if var.kind == .Const {
         value, ty := @check(self.find_const(var, requested)) return;
         expr.set(value, ty);
+        
+        // :fn_addr_const_hack
+        // TODO: THIS IS A HACK. for the general case we need shims. 
+        @if_let(requested) fn Specific(requested) => {
+            if ty != requested && ty == FuncId {
+                want_info := self.get_type(requested);
+                if want_info.is(.FnPtr).or(requested == rawptr) { 
+                    // HACK HACK HACK
+                    fid := @check(self.immediate_eval_expr(expr, FuncId)) return;
+                    fid := FuncId.assume_cast(fid&)[];
+                    func := self.get_function(fid);
+                    if self.aarch64&.get_fn(fid) { ptr |
+                        if !func.get_flag(.TookPointerValue) {
+                            // We already compiled the function but didn't know we'd need to remember its address. (ie. #test fn large_struct_ret_return).
+                            self.created_jit_fn_ptr_value(fid, ptr.int_from_rawptr())
+                        };
+                    };
+                    func.set_flag(.TookPointerValue);
+                    println("a fn ptr");
+                    expr.done = false;
+                    fid := self.box(expr[]);
+                    expr.expr = (FnPtr = fid);
+                    expr.ty = requested;
+                    expr.done = false;
+                    @check(self.compile_fn_ptr(expr)) return;
+                    expr.done = true;
+                    return(.Ok);
+                };
+            };
+        };
+        
         @check(self.coerce_const_expr(expr, requested, false)) return;
         .Ok
     } else {
@@ -2848,6 +2881,7 @@ fn find_const(self: *SelfHosted, name: Var, requested: ResultType) Maybe(Ty(Valu
     
     var := self.scopes.get_constant(name);
     if var& { var | 
+        //@println("find_const %", name&.log(self));
         // If we've compiled this before, great.
         //     We can't coerce_constant here because we don't have a unique expression node to stick changes into if needed. 
         //     (need to change the expression to create function pointers because they might not be compiled yet)
@@ -2920,7 +2954,6 @@ fn handle_declare_constant(self: *SelfHosted, name: Var, ty: *LazyType, value: *
     };
     
     @check(self.coerce_const_expr(value, want, false)) return;
-    
     //@if_let(want) fn Specific(ty) => {
     //    @check(self.can_assign(ty, value.ty)) return;
     //};

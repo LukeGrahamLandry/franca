@@ -202,6 +202,8 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
             //@log_event("%", func.log(self)) self;
             
             if !func.get_flag(.EnsuredCompiled) {
+                frontend_mutual := self.dispatch.function_in_progress&.get(fid.as_index());
+                //@err_assert(!frontend_mutual, "ICE: unhandled mutual recursion!") return;
                 self.dispatch.function_in_progress&.set(fid.as_index());
                 return(Suspend = self.wait_for(CompileBody = fid));
             };
@@ -251,6 +253,8 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
                     //@println("hack; %", addr); 
                     body := hack.emit_bc_and_aarch64(fid, .Jit);
                     if(body&.is_err(), => return(Err = self.box(body.Err)));
+                    // TODO: not true for rediurects????
+                    //@debug_assert(self.aarch64&.get_fn(fid).is_some(), "we just emitted but no pointer?? %", func.log(self));
                     return(Ok = true);
                 };
                 @match(body) {
@@ -277,10 +281,13 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
                 (Ok = true)
             };
             
-            if func.get_flag(.TookPointerValue) {
-                ptr := self.aarch64&.get_fn(fid).expect("have jit addr");
-                self.created_jit_fn_ptr_value(fid, ptr.int_from_rawptr());
-            };
+            // TODO: only when .TookPointerValue
+            //if func.get_flag(.TookPointerValue) {
+                //ptr := self.aarch64&.get_fn(fid).expect("have jit addr"); // not true for redirects
+                if self.aarch64&.get_fn(fid) { ptr | 
+                    self.created_jit_fn_ptr_value(fid, ptr.int_from_rawptr());
+                };
+            //};
             
             // created function pointers are always added as mutual_callees to be more chill about loops. 
             waiting: List(*Task) = list(self.get_alloc());
