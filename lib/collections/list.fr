@@ -93,19 +93,23 @@ fn List($T: Type) Type = {
     ::DeriveIndexable(*Self, T);
 
     fn reserve(self: *Self, extra: i64) void = {
-        total := self.len.add(extra);
-        old_cap := self.maybe_uninit.len;
-        if(lt(old_cap, total)) {
-            cap := 4.max(old_cap.add(extra).max(old_cap.mul(2)));
-            new: Self = list(cap, self.gpa);
-            if(self.len.gt(0)) {|  // TODO: it doesnt let you create a zero length slice in items()
-                dest: Slice(T) = new.maybe_uninit.subslice(0, self.len);
-                dest.copy_from(items(self));
-                new.len = self.len;
-            };
-            drop(self);
-            self[] = new;
+        if self.maybe_uninit.len < self.len + extra {
+            self.reserve_expand(extra);
         };
+    }
+    
+    // The rust stdlib Vec does this thing where you manually outline the slow path, so it probably helps a bit. 
+    fn reserve_expand(self: *Self, extra: i64) void #cold = {
+        old_cap := self.maybe_uninit.len;
+        cap := 4.max(old_cap.add(extra).max(old_cap.mul(2)));
+        new: Self = list(cap, self.gpa);
+        if(self.len.gt(0)) {|  // TODO: it doesnt let you create a zero length slice in items()
+            dest: Slice(T) = new.maybe_uninit.subslice(0, self.len);
+            dest.copy_from(items(self));
+            new.len = self.len;
+        };
+        drop(self);
+        self[] = new; 
     }
     
     fn push(self: *Self, v: T) void = {
@@ -176,17 +180,12 @@ fn List($T: Type) Type = {
         reserve(self, len(new));
         dest := subslice(self.maybe_uninit, self.len, len(new));
         dest.copy_from(new);
-        self.len = add(self.len, len(new));
-    }
-    
-    fn push_all(self: *Self, owned: *Self) void = {
-        self.push_all(owned.items());
-        owned.drop();
+        self.len += new.len;
     }
     
     // TODO: this doesn't drop the entries. 
     fn drop(self: *Self) void = {
-        if(self.maybe_uninit.len.ne(0)) {
+        if self.maybe_uninit.len != 0 {
             // TODO: calling this makes fmt.fr fail when runtime target is aarch64,
             //       but it fails in the comptime interp still which is scary. 
             //       its a poison on taking args of a SplitFunc. 

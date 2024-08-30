@@ -20,6 +20,7 @@ fn load_src(vtable: *ImportVTable, include_cranelift: bool) Ty(CompCtx, *Comptim
     opts.debug_info = false;
     spam := false;
     args := cli_args();
+    bootstrap_mode := false;
     for args { extra |
         if extra.str() == "-no-deduplication" {
             opts.deduplicate_bytecode = false;
@@ -42,7 +43,12 @@ fn load_src(vtable: *ImportVTable, include_cranelift: bool) Ty(CompCtx, *Comptim
             opts.safety_checks&.insert(SafetyCheck.DebugAssertions, false);
             opts.safety_checks&.insert(SafetyCheck.InvalidTag, false);
         };
+        if extra.str() == "-boot-only" {
+            bootstrap_mode = true;
+            opts.safety_checks&.insert(SafetyCheck.KeepPanicMessages, false);
+        };
     };
+    @fmt(src&, ";BOOTSTRAP_ONLY_MODE :: %;\n", bootstrap_mode);
     @fmt(src&, ";DEBUG_SPAM_LOG :: %;\n", spam);
     
     comp := vtable.new_with_src(src.items(), opts);
@@ -78,6 +84,8 @@ fn driver(vtable: *ImportVTable) void = {
     x86 := false;
     arch := Arch.Aarch64;
     include_cranelift := false;
+    slow := false;
+    keep_ir := false;
     for args { arg |
         if arg.str() == "-no-build" {
             do_build = false;
@@ -94,6 +102,12 @@ fn driver(vtable: *ImportVTable) void = {
         };
         if arg.str() == "-include-cranelift" {
             include_cranelift = true;
+        };
+        if arg.str() == "-opt=none" {
+            slow = true;
+        };
+        if arg.str() == "-S" {
+            keep_ir = true;
         };
     };
     c, libs := load_src(vtable, include_cranelift);
@@ -177,11 +191,27 @@ fn driver(vtable: *ImportVTable) void = {
     arch_path := if(x86, => "x86_64-apple-darwin", => "aarch64-apple-darwin");
     out_dir := @fmt_str("target/franca/%", arch_path);
     
+    if keep_ir { 
+        out := open_temp_file();
+        for(ir_text&){bucket|
+            out.fd&.write(bucket);
+        };
+        @println("Write llvm ir to %", out&.s_name());   
+        println("SKIPPED RUNNING LLVM");
+        exit(0);
+    };
+    
     if do_build {
         if use_new_entry_point {| // note: exits!
             start := timestamp();
             args := libs.get_aot_objects();
-            args&.push_all(@slice ("-o", @fmt_str("%/franca2.o", out_dir), "-c", "-Os", "-g"));
+            if slow {
+                // TODO: #cold are still optsize
+                args&.push("-O0");
+            } else {
+                args&.push("-Os");
+            };
+            args&.push_all(@slice ("-o", @fmt_str("%/franca2.o", out_dir), "-c", "-g"));
             if x86 {
                 args&.push_all(@slice("-target", "x86_64-apple-darwin"));
             };

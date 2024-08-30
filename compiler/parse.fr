@@ -80,8 +80,8 @@ fn finish_pending_stmts(self: *Parser, id: WaitingParse) Result(RsVec(FatStmt), 
             zone_end(zone);
             self.tasks[id.id] = (Expr = @error("ICE: WaitingParse id was stmts (which aren't reused)."));
             @match(e) {
-                (fn Ok(e) => (Ok = e.expr.Block.body));
-                (fn Err(e) => (Err = e));
+                fn Ok(e) => (Ok = e.expr.Block.body);
+                fn Err(e) => (Err = e);
             }
         }
         fn Expr(e) => @error("ICE: WaitingParse id wanted stmts found expr.");
@@ -140,7 +140,7 @@ fn parse_stmt_inner(self: *Parser, has_annotations: bool) Result(FatStmt, *Parse
                 // At the end of blocks, i use them for distingushing when to return trailing expression. :store_noop
                 return(Ok = self.stmt(.Noop, loc))
             };
-            (self.parse_stmt())
+            self.parse_stmt()
         }
         @default => {
             e := @try(self.parse_prefix(Prec_None)) return;
@@ -232,11 +232,11 @@ fn after_expr_stmt_prefix(self: *Parser, e: FatExpr) Result(FatStmt, *ParseErr) 
             self.stmt((Set = (place = e, value = value)), loc)
         }
         fn Op(op) => {
-            f := @switch(op) {
-                @case(.MinusEq) => Flag.operator_minus_equal;
-                @case(.PlusEq)  => Flag.operator_plus_equal;
-                @case(.StarEq)  => Flag.operator_star_equal;
-                @case(.SlashEq) => Flag.operator_slash_equal;
+            f := @match(op) {
+                fn MinusEq() => Flag.operator_minus_equal;
+                fn PlusEq()  => Flag.operator_plus_equal;
+                fn StarEq()  => Flag.operator_star_equal;
+                fn SlashEq() => Flag.operator_slash_equal;
                 @default => @report_error("non-update-assingment operator after expression statement. this should be unreachable? %", "") (return, self.last.span);
             };
             self.pop();
@@ -322,10 +322,11 @@ fn parse_expr(self: *Parser, prec: Prec) ParseRes = {
 fn parse_prefix(self: *Parser, prec: Prec) ParseRes = {
     @match(self.peek()) {
         fn Op(op) => {
-            f := @switch(op) {
-                @case(.Minus) => Flag.neg;
-                @case(.Bang) => Flag.not;
-                @case(.Star) => Flag.operator_star_prefix;
+            // TODO: @switch warning or handle like @match if you typo call the wrong one. 
+            f := @match(op) {
+                fn Minus() => Flag.neg;
+                fn Bang() => Flag.not;
+                fn Star() => Flag.operator_star_prefix;
                 // TODO: don't require the arg or have better error message. -- Jun 18
                 @default fn() Flag => {
                     @report_error("expected begin expression found non-prefix operator %", "") (return, self.last.span)
@@ -629,18 +630,18 @@ fn parse_squiggle(self: *Parser, prev: FatExpr, prec: Prec) ParseRes #once = {
 ::if(ParseRes);
 // TODO: this seems to use the wrong loc
 fn parse_bin_op(self: *Parser, op: Operator, prev: FatExpr, prec: Prec) ParseRes #once = {
-    next_prec, callee := @switch(op) {
-        @case(.Plus) => (PrecLevel.AddSub, Flag.add);
-        @case(.Minus) => (PrecLevel.AddSub, Flag.sub);
-        @case(.Star) => (PrecLevel.MulDiv, Flag.mul);
-        @case(.Slash) => (PrecLevel.MulDiv, Flag.div);
-        @case(.Less) => (PrecLevel.Comparison, Flag.lt);
-        @case(.Greater) => (PrecLevel.Comparison, Flag.gt);
-        @case(.LessEq) => (PrecLevel.Comparison, Flag.le);
-        @case(.GreaterEq) => (PrecLevel.Comparison, Flag.ge);
-        @case(.BangEq) => (PrecLevel.Equality, Flag.ne);
-        @case(.EqEq) => (PrecLevel.Equality, Flag.eq);
-        @case(.AmpAmp) => {
+    next_prec, callee := @match(op) {
+        fn Plus() => (PrecLevel.AddSub, Flag.add);
+        fn Minus() => (PrecLevel.AddSub, Flag.sub);
+        fn Star() => (PrecLevel.MulDiv, Flag.mul);
+        fn Slash() => (PrecLevel.MulDiv, Flag.div);
+        fn Less() => (PrecLevel.Comparison, Flag.lt);
+        fn Greater() => (PrecLevel.Comparison, Flag.gt);
+        fn LessEq() => (PrecLevel.Comparison, Flag.le);
+        fn GreaterEq() => (PrecLevel.Comparison, Flag.ge);
+        fn BangEq() => (PrecLevel.Equality, Flag.ne);
+        fn EqEq() => (PrecLevel.Equality, Flag.eq);
+        fn AmpAmp() => {
             if(prec.prec.lt(.Logical)) {
                 self.pop();
                 loc := self.last.span;
@@ -675,7 +676,7 @@ fn parse_bin_op(self: *Parser, op: Operator, prev: FatExpr, prec: Prec) ParseRes
 fn expr_call(self: *Parser, f: FatExpr, arg: FatExpr) FatExpr = {
     // TODO: let else would be nice.
     @match(f.expr) {
-        (fn FieldAccess(ff) => {
+        fn FieldAccess(ff) => {
             // Dot call syntax sugar.
             // TODO: I want this to just call push_arg
             f := self.expr((GetNamed = ff.name), f.loc);
@@ -698,17 +699,16 @@ fn expr_call(self: *Parser, f: FatExpr, arg: FatExpr) FatExpr = {
                 @default => (); // fallthrough
             };
             arg := self.expr((Tuple = (@list(ff.container[], arg) self.alloc).rs()), f.loc);
-            return(self.expr((Call = (f = self.box(f), arg = self.box(arg))), f.loc));
-        });
+            return(self.expr((Call = (f = self.box(f), arg = self.box(arg))), f.loc))
+        }
         @default => return(self.expr((Call = (f = self.box(f), arg = self.box(arg))), f.loc));
-    };
-    unreachable()
+    }
 }
 
 fn push_arg(self: *Parser, call: *FatExpr, callback: FatExpr) void = {
     // TODO: let else would be nice.
     @match(call.expr&) {
-        (fn Call(f) => {
+        fn Call(f) => {
             @match(f.arg.expr&) {
                 // TODO: have it work with named arguments. Need to support mixing named and positional.
                 (fn Tuple(parts) => {
@@ -726,7 +726,7 @@ fn push_arg(self: *Parser, call: *FatExpr, callback: FatExpr) void = {
                     f.arg = self.box(self.pair(f.arg[], callback, call.loc));
                 };
             };
-        });
+        }
         @default => {
             // It might just be a function access. like 'while {| _ } {| _ }' should be valid.
             call[] = self.expr((Call = (f = self.box(call[]), arg = self.box(callback))), call.loc);
@@ -828,7 +828,7 @@ fn switch_to_parsing_named(self: *Parser, parts: List(FatExpr), ty: LazyType, lo
     // TODO: let else
     ident_expr := parts&.pop().unwrap();
     name: Symbol = @match(ident_expr.expr) {
-        (fn GetNamed(name: Symbol) Symbol => { name });
+        fn GetNamed(name) Symbol => name;
         @default => @report_error("Expected Ident before ':'/'=' in argument pattern. %", "") (return, ident_expr.loc);
     };
     
@@ -866,7 +866,7 @@ fn empty_binding() Binding = {
         name = .None,
         ty = (Finished = void),
         default = .None,
-        kind = .Let,
+        kind = .Var,
     )
 }
     
@@ -885,26 +885,26 @@ fn parse_pattern(self: *Parser, out: *List(Binding)) Result(void, *ParseErr) = {
         //       before switching nested ifs to switch, you didn't need it. -- Jul 28
         T :: Ty(Symbol, VarType);
         name, kind := @match(self.peek()) {
-            (fn RightParen() => {
+            fn RightParen() => {
                 return(.Ok)
-            });
-            (fn Dollar() => {
+            }
+            fn Dollar() => {
                 self.pop();
                 // TODO: better let else.
                 name: Symbol = @try(self.pop_name("after '$'")) return;
                 (name, VarType.Const)
-            });
-            (fn Symbol(name) T => {
+            }
+            fn Symbol(name) T => {
                 self.pop();
                 (name, VarType.Var)
-            });
+            }
             // TODO: moving this up crashes????? :FUCKED
             //       but also we dont need this here for now. 
             //(fn Pipe() => return(.Ok));
-            (fn Semicolon() => {
+            fn Semicolon() => {
                 self.pop();
                 @report_error("Semicolon while parsing pattern. unmatched brackets? %", "") (return, self.last.span)
-            });
+            }
             @default => @report_error("Expected Ident or '$' before pattern entry. (positional args cannot follow named) %", "") (return, self.last.span);
         };
         
@@ -912,13 +912,13 @@ fn parse_pattern(self: *Parser, out: *List(Binding)) Result(void, *ParseErr) = {
         ty: LazyType = if self.maybe(.Colon) {
             // deal with := 
             @match(self.peek()) {
-                (fn Equals() => .Infer);
+                fn Equals() => .Infer;
                 @default => {
                     e := @try(self.parse_expr(Prec_None)) return;
                     (PendingEval = e)
                 };
             }
-        } {
+        } else {
             .Infer
         };
         
@@ -926,7 +926,7 @@ fn parse_pattern(self: *Parser, out: *List(Binding)) Result(void, *ParseErr) = {
         default: ?FatExpr = if self.maybe(.Equals) {
             e := @try(self.parse_expr(Prec_None)) return;
             (Some = e)
-        } {
+        } else {
             .None
         };
         b: Binding = (name = (Ident = name), ty = ty, default = default, kind = kind);
@@ -939,10 +939,10 @@ fn parse_pattern(self: *Parser, out: *List(Binding)) Result(void, *ParseErr) = {
 
 fn pop_name(self: *Parser, msg: Str) Result(Symbol, *ParseErr) = {
     (Ok = @match(self.peek()) {
-        (fn Symbol(name) => {
+        fn Symbol(name) => {
             self.pop();
             name
-        });
+        }
         @default => @report_error("Expected Ident %", msg) (return, self.last.span);
     })
 }
@@ -952,21 +952,21 @@ fn fn_def_signeture(self: *Parser, loc: Span, allow_name: bool) Result(FnDef, *P
     ::if(?Symbol);
     name: ?Symbol = if(not(allow_name), => .None) {
         @match(self.peek()) {
-            (fn Symbol(name) => {
+            fn Symbol(name) => {
                 self.pop();
                 loc = self.last.span;  // if there's a name, use that as the loc for the function because that's nicer for the ide. 
                 (Some = name)
-            });
+            }
             @default fn() => .None;
         }
     };
     cant_start_return_expression :: fn(t: TokenType) bool = {
         @match(t) {
-            (fn Equals() => true);
-            (fn Semicolon() => true);
-            (fn Pipe() => true);
-            (fn FatRightArrow() => true);
-            (fn Hash() => true);
+            fn Equals() => true;
+            fn Semicolon() => true;
+            fn Pipe() => true;
+            fn FatRightArrow() => true;
+            fn Hash() => true;
             @default => false;
         }
     };
@@ -977,11 +977,11 @@ fn fn_def_signeture(self: *Parser, loc: Span, allow_name: bool) Result(FnDef, *P
         a := @try(self.parse_args()) return;
         @try(self.eat(.RightParen, "')' to end argument list")) return;
         a
-    } {
+    } else {
         no_paren = true;
         if allow_name.or(cant_start_return_expression(self.peek())) {
             (bindings = empty(), loc = self.last.span)
-        } {
+        } else {
             disallow_return = true;
             @try(self.parse_args()) return
         }
@@ -1018,7 +1018,7 @@ fn parse_block_until_squiggle(self: *Parser, allow_eof: bool) ParseRes = {
     ::if_opt(FatStmt, FatExpr);
     result: FatExpr = if stmts&.pop() {stmt|
         @match(stmt.stmt) {
-            (fn Eval(e) FatExpr => e);
+            fn Eval(e) => e;
             @default => {
                 // block might end with a func decl with no semicolon.
                 stmts&.push(stmt);
@@ -1112,6 +1112,9 @@ fn peek(self: *Parser) TokenType = {
 }
 
 fn report_error(fmt_args: FatExpr, ret_loc: FatExpr) FatExpr #macro = {
+    @if(BOOTSTRAP_ONLY_MODE) {
+        fmt_args = @{"---"};
+    };
     @assert_eq(ret_loc.expr&.tag(), Expr.Tag().Tuple);
     args := ret_loc.expr.Tuple.items();
     result := @{

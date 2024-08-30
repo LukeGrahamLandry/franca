@@ -228,12 +228,9 @@ fn new(compiler: *SelfHosted, scope: ScopeId, last_loc: Span) ResolveScope = (
 
 fn resolve_func(self: *ResolveScope, func: *Func) PRes = {
     if(func.get_flag(.ResolvedBody).and(func.get_flag(.ResolvedSign)), => return(.Ok)); 
-
     // TODO: need to remember to update from this if we get one from the user (like they added it in a macro)?
     // TODO: could remove from func.annotations but it doesn't actually matter. 
     if(func.has_tag(.generic), => func.set_flag(.Generic));
-    if(func.has_tag(.unsafe_noop_cast), => func.set_flag(.UnsafeNoopCast));
-    if(func.has_tag(.cold), => func.set_flag(.Cold));
 
     self.push_scope((Some = func.name));
     func.scope = (Some = self.scope);
@@ -311,7 +308,7 @@ fn resolve_func_body(self: *ResolveScope, func: *Func) PRes = {
     } else {
         // TODO: show the captured var use site and declaration site.
         // TODO: add a test that this error is reported
-        @assert_eq(true, capures.is_empty(), "Must use '=>' for closure '%' with captures", self.compiler.pool.get(func.name));
+        @err_assert(capures.is_empty(), "Must use '=>' for closure '%' with captures", self.compiler.pool.get(func.name)) return;
     };
     self.captures&.clear();
 
@@ -369,7 +366,7 @@ fn slow_body(self: *ResolveScope, body: *List(FatStmt)) PRes #once = {
                         return(@error(msg))
                     };
                     name := @match(arg_expr.expr) {
-                        (fn String(name) Symbol => { name });
+                        fn String(name) => name;
                         @default => return(@error(msg));
                     };
                     
@@ -377,8 +374,7 @@ fn slow_body(self: *ResolveScope, body: *List(FatStmt)) PRes #once = {
                         name := self.compiler.pool.get(name);
                         :: ?WaitingParse;
                         file := self.compiler.get_include_std(name).or() {
-                            return(@error("unknown path for #include_std %", name));
-                            unreachable()
+                            return(@error("unknown path for #include_std %", name))
                         };
                         dirty = true;
                         stmts := @try(self.compiler.parser.finish_pending_stmts(file)) return;

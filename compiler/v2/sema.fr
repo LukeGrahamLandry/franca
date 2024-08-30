@@ -13,13 +13,10 @@ ResultType :: @rec @tagged(
 );
 
 OverloadSetData :: @struct(
-    ready: RsVec(OverloadOption),
+    ready: RsVec(FuncId),
     name: Symbol,
     pending: RsVec(FuncId),
-);
-
-OverloadOption :: @struct(
-    func: FuncId,
+    inline_cache: Ty(OverloadKey, FuncId),
 );
 
 fn compile_stmt(self: *SelfHosted, stmt: *FatStmt) Maybe(bool) = {
@@ -107,7 +104,7 @@ fn decl_var_pattern(self: *SelfHosted, stmt: *FatStmt) Maybe(bool) #once = {
         if b.var() { name | 
             prev := self.scopes.get_var_type(name); 
             self.scopes.put_var_type(name, types[i]);
-            @assert(prev.is_none().or(=> prev.unwrap() == types[i]));
+            @debug_assert(prev.is_none().or(=> prev.unwrap() == types[i]));
         };
         // An inlined closure might have had a polymorphic parameter, but emit_bc expects known types.
         if b.ty&.is(.Infer) {
@@ -331,7 +328,7 @@ fn decl_var(self: *SelfHosted, name: Var, ty: *LazyType, value: *FatExpr) Maybe(
     self.scopes.put_var_type(name, final_ty); // TODO: this returns is_new, i want to just assert that. we shouldn't be compiling more than once -- Jul 25
     // TODO: prev should always be none?? but its not a constant and seems to always be the same so its probablby not a super huge deal? -- Apr 23
     //       maybe its just cause im not zeroing the stmt and end up compiling multiple times. -- Apr 25
-    @assert(prev.is_none().or(=> prev.unwrap() == final_ty));
+    @debug_assert(prev.is_none().or(=> prev.unwrap() == final_ty));
     
     // TODO: :mark_stmt_done
     //       this function is called multiple times (if the containing block needs to yield). need to have a done flag on the fatstmt
@@ -1213,13 +1210,20 @@ fn compile_call(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
     if f.ty == OverloadSet {|  // :get_or_create_type
         os := @check(self.immediate_eval_expr(f, OverloadSet)) return;
         os := OverloadSet.assume_cast(os&)[];
-        return(Suspend = self.wait_for(ResolveOverload = (
-            os = os, 
-            call = (expr = expr, requested = requested), 
-            callsite = self.dispatch.enclosing_function,
-            last_ready_count = 0,
-            options = list(self.get_alloc()),
-        )));
+        data := self.dispatch.overloads&.nested_index(os.as_index());
+        if data.ready.len == 1 && data.pending.len == 0 {
+            fid := data.ready[0];
+            value := self.to_values(FuncId, fid);
+            f.set(value, FuncId);
+        } else {
+            return(Suspend = self.wait_for(ResolveOverload = (
+                os = os, 
+                call = (expr = expr, requested = requested), 
+                callsite = self.dispatch.enclosing_function,
+                last_ready_count = 0,
+                options = list(self.get_alloc()),
+            )));
+        };
     };
     
     if f.ty == FuncId {|  // :get_or_create_type
@@ -1575,7 +1579,7 @@ fn const_args_key(self: *SelfHosted, original_f: FuncId, arg_expr: *FatExpr) May
                         };
                         parts&.push(synthetic_ty((Value = (bytes = taken, coerced = false)), arg_expr.loc, ty));
                     };
-                    @assert_eq(reader.bytes.len, reader.i, "ICE: didn't consume all bytes.");
+                    @debug_assert(reader.bytes.len, reader.i, "ICE: didn't consume all bytes.");
                     arg_expr.expr = (Tuple = parts.rs());
                 };
             };
@@ -2051,12 +2055,9 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
         attempt.state = 0;
         new := overloads.ready.items().slice(attempt.last_ready_count, overloads.ready.len);
         for new { option | 
-            if self.filter_overload_sync(arg_expr, option.func) {
-                @check(self.ensure_resolved_sign(option.func)) return; // TODO: dont let this suspend cause it cant
-                attempt.options&.push(
-                    opt = option,
-                    possible = true,
-                );
+            if self.filter_overload_sync(arg_expr, option) {
+                @check(self.ensure_resolved_sign(option)) return; // TODO: dont let this suspend cause it cant
+                attempt.options&.push(option);
             };
         };
         attempt.last_ready_count = overloads.ready.len;
@@ -2066,16 +2067,15 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
     are_we_done_yet();
     
     ::if([]FatExpr);
-    blocked: List(*Action) = list(temp());
     parts := if(arg_expr.expr&.is(.Tuple), => arg_expr.expr.Tuple.items(), => (ptr = arg_expr, len = 1));
     
     are_we_done_yet :: fn() => {
         if attempt.options.len == 1 {
-            fid := attempt.options[0].opt.func;
+            fid := attempt.options[0];
             @log_event("selected % from '%'", fid, self.pool.get(overloads.name)) self;
             return(Ok = fid);
         };
-        if attempt.options.len <= 0 {
+        if attempt.options.len == 0 {
             self.last_loc = arg_expr.loc;
             return(@err("overload not found in '%'", self.pool.get(overloads.name)));
         };      
@@ -2091,7 +2091,7 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
                     attempt.options&.unordered_remove(f_i);
                     continue();
                 };
-                fid := attempt.options[f_i].opt.func;
+                fid := attempt.options[f_i];
                 func := self.get_function(fid);
                 if func.arg.bindings.len != want_arity {
                     continue();
@@ -2112,13 +2112,14 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
     };
     
     if attempt.state < 2 {
+        // Currently this pass is not needed for correctness but it makes it ~7% faster because you don't have to do an expensive suspend on compiling the whole arg later. -- Aug 30
         enumerate parts { arg_index, arg_expr | 
             continue :: local_return;
             type := self.type_of(arg_expr);
-            if type&.is(.Err) {
+            if type&.is(.Err).or(type&.is(.Suspend)) {
                 continue();
             };
-            type := @check(type) return;
+            type := type.Ok;
             arg_expr.ty = type;
             
             f_i := attempt.options.len;
@@ -2129,7 +2130,7 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
                     attempt.options&.unordered_remove(f_i);
                     continue();
                 };
-                fid := attempt.options[f_i].opt.func;
+                fid := attempt.options[f_i];
                 func := self.get_function(fid);
                 if func.arg.bindings.len != want_arity {
                     continue();
@@ -2140,8 +2141,7 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
                     if !self.ask_can_assign(param, type) {
                         if arg_expr.is_const() { // this helps with :type_through_field
                             res := self.coerce_const_expr(arg_expr, (Specific = param), true);
-                            if !res&.is(.Err) {
-                                @check(res) return;
+                            if res&.is(.Ok) {
                                 continue();
                             };
                         };
@@ -2168,7 +2168,7 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
                     attempt.options&.unordered_remove(f_i);
                     continue();
                 };
-                fid := attempt.options[f_i].opt.func;
+                fid := attempt.options[f_i];
                 func := self.get_function(fid);
                 if !func.get_flag(.Generic) {
                     @check(self.infer_return(fid)) return;
@@ -2200,7 +2200,7 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
                     attempt.options&.unordered_remove(f_i);
                     continue();
                 };
-                fid := attempt.options[f_i].opt.func;
+                fid := attempt.options[f_i];
                 func := self.get_function(fid);
                 if func.arg.bindings.len != want_arity {
                     continue();
@@ -2240,7 +2240,7 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
                     attempt.options&.unordered_remove(f_i);
                     continue();
                 };
-                fid := attempt.options[f_i].opt.func;
+                fid := attempt.options[f_i];
                 func := self.get_function(fid);
                 if func.arg.bindings.len != want_arity {
                     continue();
@@ -2277,7 +2277,7 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
     @println("% matching options", attempt.options.len);
     if attempt.options.len < 6 {
         for attempt.options { opt |
-            func := self.get_function(opt.opt.func);
+            func := self.get_function(opt);
             @if(DEBUG_SPAM_LOG) self.codemap.show_error_line(func.loc);
             @print("- (");
             each func.arg.bindings { b |
@@ -2380,11 +2380,11 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
     overloads := self.dispatch.overloads&.nested_index(i.as_index());
     self.compute_new_overloads(overloads);
     
-    interesting: List(OverloadOption) = list(temp());
+    interesting: List(FuncId) = list(temp());
     @log_event("% total options", overloads.ready.len) self;
-    each overloads.ready { opt | 
+    for overloads.ready { opt | 
         continue :: local_return;
-        func := self.get_function(opt.func);
+        func := self.get_function(opt);
         @if_let(requested_ret) fn Specific(want) => {
             ret := func.finished_ret;
             if ret { have | 
@@ -2401,7 +2401,6 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
             };
             // Maybe they're trying to pass named arguments. 
             have_parts := arg_expr.expr.StructLiteralP.bindings&;
-            func := self.get_function(opt.func);
             want_parts := func.arg.bindings&;
             if want_parts.len != have_parts.len {| // TODO: allow default args
                 continue();
@@ -2421,27 +2420,27 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
             };
         };
         
-        interesting&.push(opt[]);
+        interesting&.push(opt);
     };
     
     // TODO: but what if there are more overloads coming later? 
     if interesting.len == 1 {
-        @log_event("chose overload %", interesting[0].func) self;
-        func := self.get_function(interesting[0].func);
+        @log_event("chose overload %", interesting[0]) self;
+        func := self.get_function(interesting[0]);
         @if(DEBUG_SPAM_LOG) self.codemap.show_error_line(func.loc);
-        return(Ok = interesting[0].func);
+        return(Ok = interesting[0]);
     };
     
     ::if([]FatExpr);
     blocked: List(*Action) = list(temp());
     parts := if(arg_expr.expr&.is(.Tuple), => arg_expr.expr.Tuple.items(), => (ptr = arg_expr, len = 1));
-    still_interesting: List(OverloadOption) = list(temp());
+    still_interesting: List(FuncId) = list(temp());
     errors: List(*ParseErr) = list(temp());
-    each interesting& { opt | 
+    for interesting& { opt | 
         continue :: local_return;
-        func := self.get_function(opt.func);         
+        func := self.get_function(opt);         
         ::as_ref(FatExpr);  
-        @check(self.ensure_resolved_sign(opt.func)) return;
+        @check(self.ensure_resolved_sign(opt)) return;
         
         if func.arg.bindings.len != want_arity {
             @debug_assert(arg_expr.expr&.is(.StructLiteralP), "expected kwargs");
@@ -2462,7 +2461,7 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
                             @match(self.compile_expr(arg_expr, hint)) {
                                 fn Suspend(f) => {
                                     blocked&.push(f); 
-                                    //still_interesting&.push(opt[]);
+                                    //still_interesting&.push(opt);
                                     // TODO: this can't be right... if we suspended we shouldn't assume it won't match!
                                     continue(); // we don't like it, we skip it.
                                 }
@@ -2486,7 +2485,7 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
                 continue();
             };
             // Found all the args and liked thier types
-            still_interesting&.push(opt[]);
+            still_interesting&.push(opt);
             continue();
         };
         
@@ -2507,7 +2506,7 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
                 @match(self.compile_expr(arg_expr, hint)) {
                     fn Suspend(f) => {
                         blocked&.push(f); 
-                        //still_interesting&.push(opt[]);
+                        //still_interesting&.push(opt);
                         // TODO: this can't be right... if we suspended we shouldn't assume it won't match!
                         continue(); // we don't like it, we skip it.
                     }
@@ -2526,7 +2525,7 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
                 };
             };
         };
-        still_interesting&.push(opt[]);
+        still_interesting&.push(opt);
     };
     
     swap_interestings :: fn() => {
@@ -2537,7 +2536,7 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
     };
     check_still_interesting :: fn() => {
         if still_interesting.len == 1 {
-            fid := still_interesting[0].func;
+            fid := still_interesting[0];
             @log_event("chose overload %", fid) self;
             func := self.get_function(fid);
             @if(DEBUG_SPAM_LOG) self.codemap.show_error_line(func.loc);
@@ -2551,18 +2550,18 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
     
     @match(requested_ret) {
         fn Specific(want) => {
-            each interesting& { opt | 
+            for interesting& { opt | 
                 continue :: local_return;
-                func := self.get_function(opt.func);    
+                func := self.get_function(opt);    
                 // TODO: i dont want to check .Generic because i want to remove the need for the annotation eventually. 
                 if !func.get_flag(.Generic) {
-                    @match(self.infer_return(opt.func)) {
+                    @match(self.infer_return(opt)) {
                         fn Ok() => ();
                         fn Err(e) => return(Err = e);
                         fn Suspend(f) => {
                             blocked&.push(f); 
                             // TODO: write a test where this matters
-                            still_interesting&.push(opt[]);
+                            still_interesting&.push(opt);
                             // TODO: this can't be right... if we suspended we shouldn't assume it won't match!
                             continue(); // we don't like it, we skip it.
                         }
@@ -2575,7 +2574,7 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
                         continue();
                     };
                 };
-                still_interesting&.push(opt[]);
+                still_interesting&.push(opt);
             };
         }
         @default => {
@@ -2601,7 +2600,7 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
     self.last_loc = arg_expr.loc;
     @println("% matching options", interesting.len);
     for interesting { opt |
-        func := self.get_function(opt.func);
+        func := self.get_function(opt);
         @if(DEBUG_SPAM_LOG) self.codemap.show_error_line(func.loc);
         @println("- % -> %", self.log_type(func.finished_arg), self.log_type(func.finished_ret));
     };
@@ -2615,16 +2614,16 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
 fn do_merges(self: *SelfHosted, attempt: *OverloadAttempt) Maybe(void) = {
     overloads := self.dispatch.overloads&.nested_index(attempt.os.as_index());
     
-    each attempt.options { opt | 
-        func := self.get_function(opt.opt.func);
+    for attempt.options { opt | 
+        func := self.get_function(opt);
         if !func.get_flag(.BodyIsSpecial) {
             // since we know we do this at the end, we aren't going to be able to help you if you have multiple overloads and not all are special. 
             return(.Ok);
         };
-        @check(self.infer_arguments(opt.opt.func)) return;
-        @check(self.infer_return(opt.opt.func)) return;
-        @check(self.ensure_resolved_body(opt.opt.func)) return;
-        @check(self.emit_special_body(opt.opt.func)) return;
+        @check(self.infer_arguments(opt)) return;
+        @check(self.infer_return(opt)) return;
+        @check(self.ensure_resolved_body(opt)) return;
+        @check(self.emit_special_body(opt)) return;
         func.set_flag(.EnsuredCompiled);
     };
     
@@ -2633,7 +2632,7 @@ fn do_merges(self: *SelfHosted, attempt: *OverloadAttempt) Maybe(void) = {
     while => f_i > 0 {
         continue :: local_return;
         f_i -= 1;
-        fid := attempt.options[f_i].opt.func;
+        fid := attempt.options[f_i];
         func := self.get_function(fid);
         f_ty := func.finished_ty().expect("types to be infered");
         
@@ -2644,7 +2643,7 @@ fn do_merges(self: *SelfHosted, attempt: *OverloadAttempt) Maybe(void) = {
         f_j := f_i;
         while => f_j > 0 {
             f_j -= 1;
-            other_fid := attempt.options[f_j].opt.func;
+            other_fid := attempt.options[f_j];
             other_func := self.get_function(other_fid);
             
             other_f_ty := other_func.finished_ty().expect("types to be infered");
@@ -2674,14 +2673,9 @@ fn log_type(self: *SelfHosted, ty: ?Type) Str = {
     }
 }
 
-fn compute_new_overloads(self: *SelfHosted, overloads: *OverloadSetData) void  = {
-    while => !overloads.pending.is_empty() {
-        pending := overloads.pending.items().clone(temp());
-        overloads.pending.len = 0;
-        for pending { fid | 
-            overloads.ready&.push((func = fid), self.get_alloc());
-        };
-    };
+fn compute_new_overloads(self: *SelfHosted, overloads: *OverloadSetData) void = {
+    overloads.ready&.push_all(overloads.pending&.items(), self.get_alloc());
+    overloads.pending.len = 0;
 }
 
 // - you want macros to be able to create new constant declarations in macro expansions and const arg functions.
@@ -2715,6 +2709,8 @@ fn hoist_constants(self: *SelfHosted, body: []FatStmt) Maybe(void) #once = {
                             ready = empty(),
                             name = var.name,
                             pending = fid.single(self.get_alloc()).rs(),
+                            // zero is UnknownType which we'll never query so its a fine .None replacement value since i don't have niches yet. 
+                            inline_cache = Ty(OverloadKey, FuncId).zeroed(),
                         );
                         os_value := self.to_values(OverloadSet, i);
                         @check(self.save_const_values(var[], os_value, OverloadSet, func.loc)) return;  // :get_or_create_type
@@ -3282,6 +3278,13 @@ fn ask_can_assign(self: *SelfHosted, want: Type, found: Type) bool = {
 }
 
 fn resolve_by_type(self: *SelfHosted, os: OverloadSet, f_ty: FnType, loc: Span) Maybe(FuncId) = {
+    // This is mostly used for macros so its a big win to not spin up a whole operation just to notice that @match still goes to the same place. 
+    // saves ~10% of the time Aug 30. 
+    data := self.dispatch.overloads&.nested_index(os.as_index());
+    key: OverloadKey = (arg = f_ty.arg, req = f_ty.ret);
+    if data.inline_cache._0& == key& {
+        return(Ok = data.inline_cache._1);
+    };
     // TODO: mega HACK, should probably have a sperate codepath that doesn't want an expression. 
     types := self.arg_types(f_ty.arg);
     fake_args: List(FatExpr) = list(self.get_alloc());
@@ -3290,6 +3293,7 @@ fn resolve_by_type(self: *SelfHosted, os: OverloadSet, f_ty: FnType, loc: Span) 
     };
     fake_expr := synthetic_ty((Tuple = fake_args.rs()), loc, f_ty.arg);
     fid := @check(self.resolve_in_overload_set(self.box(fake_expr), (Specific = f_ty.ret), os)) return;
+    data.inline_cache = (key, fid);
     (Ok = fid)
 }
 
@@ -3355,6 +3359,7 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
     // This is just an optimisation to avoid an intermediate Func on the first use of a given constant. 
     @if_let(expr.expr&) fn GetVar(name) => {
         if name.kind == .Const {
+            // Don't need to call find_const here because check_quick_eval already did the easy case. 
             self.dispatch.enclosing_function = old_func;
             return(Suspend = self.wait_for(EvalConstant = (name = name[], requested = (Specific = ret_ty))));
         };
@@ -3551,8 +3556,6 @@ fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
     };
     pair := self.tuple_of(@slice(fat_expr_type, fat_expr_type));
     
-    self.finish_layout_deep(fat_expr_type).unwrap();
-    
     @log_event("call user macro %", invocation.handler.log(self)) self;
     single := invocation.target.is_raw_unit();
     if single {
@@ -3569,7 +3572,6 @@ fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
         f_ty: FnType = if single {|  // TODO: wrong! what if they actually passed unit?
             (arg = fat_expr_type, ret = fat_expr_type, arity = 1)
         } else {
-            self.finish_layout_deep(pair).unwrap();
             (arg = pair, ret = fat_expr_type, arity = 2)
         };
         fid := @check(self.resolve_by_type(os, f_ty, invocation.handler.loc)) return;

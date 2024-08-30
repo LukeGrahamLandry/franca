@@ -56,8 +56,12 @@ SelfHosted :: @struct(
     cranelift: ?JittedCranelift = .None,
 );
 
+OverloadKey :: @struct(arg: Type, req: Type);
+
 :: AutoHash(Ty(Type, u16, bool, bool), TrivialHasher);
 :: AutoEq(Ty(Type, u16, bool, bool));
+:: AutoHash(OverloadKey, TrivialHasher);
+:: AutoEq(OverloadKey);
 
 PRes :: Result(void, *ParseErr);
 
@@ -146,9 +150,9 @@ fn new_sema_init_vtable() *ImportVTable = {
         //       so if you ever call bake_relocatable_value manually. :FUCKED -- Jun 19
         current := overloads.ready.len();
         new := overloads.ready.items().slice(prev, current).clone(temp());
-        each new { f |
+        for new { f |
             continue :: local_return;
-            func := self.get_function(f.func);
+            func := self.get_function(f);
             args := func.arg.bindings&;
             if args.len() != 1 {
                 continue();
@@ -156,8 +160,8 @@ fn new_sema_init_vtable() *ImportVTable = {
             
             value := self.poll_in_place(void) {()Maybe(void)|
                 return :: local_return;
-                arg_ty := @check(self.infer_arguments(f.func)) return;
-                ret_ty := @check(self.infer_return(f.func)) return;
+                arg_ty := @check(self.infer_arguments(f)) return;
+                ret_ty := @check(self.infer_return(f)) return;
                 .Ok
             };
             self.unwrap_report_error(void, value);
@@ -178,7 +182,7 @@ fn new_sema_init_vtable() *ImportVTable = {
             //       but EmitBc doesn't have mutable access to the compiler so its painful.
             //       but this is cripplingly stupid with the current model of eh fuck it just load all the code in the universe every time. 
             //       especially once i overload it for things in generics, currently slices are a magic special case.    -- Jun 19  :SLOW
-            f := {the_vtable[].get_jitted_ptr}(comp, f.func).unwrap();
+            f := {the_vtable[].get_jitted_ptr}(comp, f).unwrap();
             f := assume_types_fn(rawptr, Slice(BakedEntry), f);
             self.save_bake_callback(ty, f).unwrap();
         };
@@ -230,6 +234,9 @@ fn self_hosted_main(vtable: *ImportVTable, use_new_sema: bool) void #compiler #n
     if RUNTIME_STACK_TRACE {
         get_panic_hook()[] = new_print_trace_and_abort;
         println(">>> Compiler running in slow mode.");
+    };
+    if ENABLE_TRACY {
+        println(">>> Compiler includes tracy instrumentation.");
     };
     update_global_stdlib_path();
     

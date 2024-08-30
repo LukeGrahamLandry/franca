@@ -99,6 +99,10 @@ fn emit_function_husk(self: *EmitLlvm, fid: FuncId, signeture: PrimSig, $emit_bo
     if func.get_flag(.Cold) {
         // Note: this doesn't do anything on -Os unless you also pass `-mllvm -hot-cold-split=true`
         self.out&.current().push_all(" cold optsize noinline ");
+    } else {
+        if func.get_flag(.NoInline) {
+            self.out&.current().push_all(" noinline ");
+        };
     };
     self.out&.current().push_all(" \"frame-pointer\"=\"all\" "); // must be before debug info!
     if self.program.get_build_options()[].debug_info {
@@ -117,10 +121,11 @@ fn emit_function_husk(self: *EmitLlvm, fid: FuncId, signeture: PrimSig, $emit_bo
     };
 };
 
+::enum(ProgramEntry);
 fn emit_entry_points_and_debug_info(gen: *CodeGen(EmitLlvm, .EmitLlvm), comp: CompCtx, fns: []FuncId, entry: ProgramEntry) void = {
     program := gen.backend.program;
-    @switch(entry) {
-        @case(.TestRunnerMain) => {
+    @match(entry) {
+        fn TestRunnerMain() => {
             gen.backend.out&.push_all("define ccc i64 @main(){\n");
             
             i := 1;
@@ -139,8 +144,8 @@ fn emit_entry_points_and_debug_info(gen: *CodeGen(EmitLlvm, .EmitLlvm), comp: Co
             };
             gen.backend.out&.push_all("ret i64 0\n}\n");
         };
-        @case(.GiveMeTheCodeAndGiveItToMeRaw) => ();
-        @case(.ExportWithNames) => {
+        fn GiveMeTheCodeAndGiveItToMeRaw() => ();
+        fn ExportWithNames() => {
             // TODO: warn if fns has duplicates
             for fns { fid |
                 gen.backend&.write_export_bounce(fid);
@@ -642,7 +647,7 @@ fn inst_call(self: *EmitLlvm, args: Slice(LlvmVal), sig: PrimSig, $do_call: @Fn(
         @fmt(self.out&.current(), " ptr sret([% x i8]) %,", size, args[0]);
         1
     }{| 0 };
-    @assert_eq(args.len, sig.args.len.add(shift));
+    @debug_assert_eq(args.len, sig.args.len.add(shift));
     
     range(0, sig.args.len) {i|
         ty := sig.args[i];
@@ -862,14 +867,14 @@ fn display(self: LlvmVal, out: *List(u8)) void = {
 ::enum(Prim);
 
 // TODO: these are super clunky, you want to have 'or' in switch cases. 
-fn llvm_type(ty: Prim) Str = @switch(ty) {
-    @case(.I8) => "i8";
-    @case(.I16) => "i16";
-    @case(.I32) => "i32";
-    @case(.I64) => "i64";
-    @case(.F64) => "double";
-    @case(.F32) => "float";
-    @case(.P64) => "ptr";
+fn llvm_type(ty: Prim) Str = @match(ty) {
+    fn I8() => "i8";
+    fn I16() => "i16";
+    fn I32() => "i32";
+    fn I64() => "i64";
+    fn F64() => "double";
+    fn F32() => "float";
+    fn P64() => "ptr";
 };
 
 fn llvm_pair_type(a: Prim, b: Prim) Str = {
