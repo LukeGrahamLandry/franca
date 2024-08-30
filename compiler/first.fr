@@ -80,7 +80,6 @@ fn driver(vtable: *ImportVTable) void = {
     do_build := true;
     do_replace := false;
     args := cli_args();
-    use_new_entry_point := false;
     x86 := false;
     arch := Arch.Aarch64;
     include_cranelift := false;
@@ -92,9 +91,6 @@ fn driver(vtable: *ImportVTable) void = {
         };
         if arg.str() == "-replace-compiler" {
             do_replace = true;
-        };
-        if arg.str() == "-v2" {
-            use_new_entry_point = true;
         };
         if arg.str() == "-x86" {
             x86 = true;
@@ -112,78 +108,15 @@ fn driver(vtable: *ImportVTable) void = {
     };
     c, libs := load_src(vtable, include_cranelift);
     
-    ::if([]FuncId);
-    exports: []FuncId = if use_new_entry_point {
-        new_main := c.get_unique_named("main").unwrap();
-        (@list(new_main) temp()).items()
-    } else {
-        c.get_tagged("compiler")
-    };
-    
+    new_main := c.get_unique_named("main").unwrap();
+    exports := (@list(new_main) temp()).items();
     ir_text := {c.vtable.emit_llvm}(c, temp(), exports, .ExportWithNames, arch);
     @println("Emitted % bytes of llvm ir.", ir_text.len);  // useful to see when i start trying to deduplicate bytecode. 
     end := timestamp();
-    if !DO_TESTS {
-        // TODO: don't print it if we didn't have cached dependencies. 
-        @println("Frontend time: % ms.", end.sub(start)); 
-    };
-    
-    if false {
-        build_with_qbe(c, exports);
-    };
-    fn build_with_qbe(c: CompCtx, exports: []FuncId) void = {
-        QBE_PATH :: "/Users/luke/Documents/mods/infered/bindings/qbe/qbe";
-        // `/usr/bin/gcc` isn't actually gcc for me, its an older clang but its 25% faster than what i have thats called clang
-        // real gcc is 6% faster again than that. 
-        ASSEMBLER_PATH :: "/opt/homebrew/Cellar/gcc/14.1.0_2/bin/gcc-14"; 
-        ir_text := {c.vtable.emit_qbe}(c, temp(), exports, .ExportWithNames);
-        // TODO: clean up this hack for inline asm
-        ::?List(u8);
-        inline_asm_functions := ir_text&.pop_current_bucket().unwrap();
 
-        ir_out := open_temp_file();
-        for(ir_text&){bucket|
-            ir_out.fd&.write(bucket).unwrap();
-        };
-        @println("Write qbe ir to %", ir_out&.s_name());
-        
-        start := timestamp();
-        args: List(Str) = list(temp());
-        args&.push("-o");
-        args&.push(asm_out);
-        args&.push(ir_out&.s_name());
-        success := run_cmd_blocking(QBE_PATH, args.items()); 
-        @assert(success, "qbe failed");
-        end := timestamp();
-        @println("QBE time: % ms.", end.sub(start)); 
-        
-        asm_out :: "target/franca_test_temp.s"; // TODO: the version of tmp file that lets you have an extension because it wants the .s
-        append_to_file(asm_out, inline_asm_functions.items());
-        // TOdO: pass the right mode in write_entire_file or this has to exist first
-        //
-        start := timestamp();
-        args: List(Str) = list(temp());
-        args&.clear();
-        args&.push(asm_out);
-        args&.push("-o");
-        args&.push("target/franca/libfranca_qbe.o");
-        args&.push("-c");
-        println("Run assembler");
-        success := run_cmd_blocking(ASSEMBLER_PATH, args.items()); 
-        assert(success, "as failed");
-        end := timestamp();
-        @println("ASM time: % ms.", end.sub(start)); 
-        
-        run_cmd_blocking("/usr/bin/ar", @slice (
-            "rc", "target/franca/libfranca_qbe.a", "target/franca/libfranca_qbe.o"
-        )).assert("link failed");
-        
-        //args := libs.get_aot_objects();
-        args: List(Str) = list(temp());
-        args&.push_all(@slice("target/release/libfranca.a", "target/franca/libfranca_qbe.o", "-o", "target/release/franca_qbe"));
-        run_cmd_blocking("clang", args.items()).assert("link failed");
-    };
-    
+    // TODO: don't print it if we didn't have cached dependencies. 
+    @println("Frontend time: % ms.", end.sub(start)); 
+
     fn fmt_str(fmt_args: FatExpr) FatExpr #macro = @{
         (@format(@[fmt_args]) temp()).items()
     };
@@ -202,25 +135,30 @@ fn driver(vtable: *ImportVTable) void = {
     };
     
     if do_build {
-        if use_new_entry_point {| // note: exits!
-            start := timestamp();
-            args := libs.get_aot_objects();
-            if slow {
-                // TODO: #cold are still optsize
-                args&.push("-O0");
-            } else {
-                args&.push("-Os");
-            };
-            args&.push_all(@slice ("-o", @fmt_str("%/franca2.o", out_dir), "-c", "-g"));
-            if x86 {
-                args&.push_all(@slice("-target", "x86_64-apple-darwin"));
-            };
-            build_llvm(ir_text, args.items());  // "-mllvm", "-hot-cold-split=true",
-            end := timestamp();
-            @println("LLVM time: % ms.", end.sub(start));
+        start := timestamp();
+        args := libs.get_aot_objects();
+        if slow {
+            // TODO: #cold are still optsize
+            args&.push("-O0");
+        } else {
+            args&.push("-Os");
+        };
+        args&.push_all(@slice ("-o", @fmt_str("%/franca2.o", out_dir), "-c", "-g"));
+        if x86 {
+            args&.push_all(@slice("-target", "x86_64-apple-darwin"));
+        };
+        build_llvm(ir_text, args.items());  // "-mllvm", "-hot-cold-split=true",
+        end := timestamp();
+        @println("LLVM time: % ms.", end.sub(start));
+        
+        if do_replace {
+            save_temp_file := open_temp_file();
+            compiler_exe_path := @fmt_str("%/franca2", out_dir);
+            rename(compiler_exe_path.maybe_borrow_cstr(temp()), save_temp_file&.c_name());
+            @println("Replacing your compiler at '%' with the new one. \nThe old one was saved at '%' (NOTE: THATS A TEMP FILE!)", compiler_exe_path, save_temp_file&.s_name());
             
             args := libs.get_aot_objects();
-            args&.push_all(@slice ("-o", @fmt_str("%/franca2", out_dir), @fmt_str("%/franca2.o", out_dir)));
+            args&.push_all(@slice ("-o", compiler_exe_path, @fmt_str("%/franca2.o", out_dir)));
             if include_cranelift {
                 cl_path := if(x86, 
                     => "crates/comptime_cranelift/target/x86_64-apple-darwin/release/libcomptime_cranelift.a", 
@@ -230,65 +168,15 @@ fn driver(vtable: *ImportVTable) void = {
                     args&.push_all(@slice("-target", "x86_64-apple-darwin"));
                 };
             };
-            run_cmd_blocking("clang++", args.items()).assert("link failed");
-            exit(0);
-        };
-        
-        start := timestamp();
-        args := clone(@slice ("-o", @fmt_str("%/libselffranca.o", out_dir), "-c", "-Os"), temp());
-        
-        if x86 {
-            args&.push_all(@slice("-target", "x86_64-apple-darwin"));
-        };
-        build_llvm(ir_text, args.items());
-        end := timestamp();
-        @println("LLVM time: % ms.", end.sub(start)); 
-        
-        // build.rs needs this if it wants to build the binary (it won't take a .o file)
-        run_cmd_blocking("/usr/bin/ar", @slice (
-            "rc", @fmt_str("%/libselffranca.a", out_dir), @fmt_str("%/libselffranca.o", out_dir)
-        )).assert("link failed");
-        
-        // to use tracy, we need to use clang to build the binary so it can find libc++,
-        // so we need to have the rust code as a .a file. 
-        // TODO: is my fucking with the target dir confusing its incremental?
-        //run_cmd_blocking("/Users/luke/.cargo/bin/cargo", @slice (
-        //    "build", "--release", "--lib",
-        //)).assert("cargo failed");
-        // node: this makes a much much larger binary than if cargo does it. 
-        //       i suspect im linking in the whole rust std or something? 
-        args := libs.get_aot_objects();
-        // TODO: should output then move cause i think it deletes if it fails. and save the old one for a bit cause its scary. 
-        if do_replace {
-            compiler_exe_path := @fmt_str("%/franca", out_dir);
-            save_temp_file := open_temp_file();
-            rust_path := if(x86, => "target/x86_64-apple-darwin/release/libfranca.a", => "target/release/libfranca.a");
-            rename(compiler_exe_path.maybe_borrow_cstr(temp()), save_temp_file&.c_name());
-            @println("Replacing your compiler at '%' with the new one. \nThe old one was saved at '%' (NOTE: THATS A TEMP FILE!)", compiler_exe_path, save_temp_file&.s_name());
-            args&.push_all(@slice(rust_path, @fmt_str("%/libselffranca.o", out_dir), "-o", compiler_exe_path, "-g"));
-            if x86 {
-                args&.push_all(@slice("-target", "x86_64-apple-darwin"));
-            };
-            if include_cranelift {
-                cl_path := if(x86, 
-                    => "crates/comptime_cranelift/target/x86_64-apple-darwin/release/libcomptime_cranelift.a", 
-                    => "crates/comptime_cranelift/target/release/libcomptime_cranelift.a");
-                args&.push(cl_path);
-            };
-            @println("%", args.items());
-            run_cmd_blocking(CLANG_PATH, args.items()).assert("link failed");
+            clang := if(ENABLE_TRACY_, => "clang++", => "clang");
+            run_cmd_blocking(clang, args.items()).assert("link failed");
         } else {
             println("SKIPPED REPLACING COMPILER");
         };
+        exit(0);
     } else {
         println("SKIPPED RUNNING LLVM");
     };
-    
-    //render_dependencies(c, exports);
-    
-    //build_llvm(ir_text, @slice ("-o", "target/libfranca.o", "-c", "-target", "x86_64-apple-darwin")); // "-O2"
-    //success := run_cmd_blocking("/usr/bin/ar", @slice ("rc", "target/x86_64-apple-darwin/libfranca.a", "target/libfranca.o"));
-    //assert(success, "link failed");
 }
 
 fn render_dependencies(c: CompCtx, fns: []FuncId) void = {

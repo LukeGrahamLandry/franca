@@ -1,8 +1,11 @@
 # Franca
 
+> Self Hosted!
+
 A programing language understandable by one person.
 That may be interpreted as "any person will be able to understand it" or "one specific person is able to understand it", at your option.
-A language for small teams. An experiment in non-defensive design.
+
+If you just want to see what the syntax looks like, click on examples or compiler or lib or tests, really anywhere, just click a folder.
 
 ## Features
 
@@ -22,24 +25,9 @@ A language for small teams. An experiment in non-defensive design.
 
 ## Backends
 
-- aarch64 machine code.
-  - i put the bytes in memory, i mark it executable, and i jump there. no assembler, no linker, no problems.
-- llvm
-
-## Progress
-
-- `src`: the sema stuff.
-- `compiler`: the self hosted parser, llvm backend, and the jit used for comptime execution.
-- `lib`: the standard library.
-- See `tests`, and `examples` for smaller programs.
-
-## Future Goals
-
-- macros that derive implimentations of common operations on your types (like rust).
-- parse declarations from other languages and generate ffi bindings.
-- checked mode with less undefined behaviour.
-- i want to produce an executable such that every byte in the file is there because i personally put it there.
-- support x86-64
+- **aarch64 machine code**: i put the bytes in memory, i mark it executable, and i jump there. no assembler, no linker, no problems.
+  no optimisation but compiles fast. only JIT, cannot output an AOT executable.
+- **llvm ir text**: you can feed it to clang to produce an AOT optimised build or integrate with projects written in other languages.
 
 ## Tradeoffs
 
@@ -53,6 +41,7 @@ there must be proportional terrible things or I'm probably just lying.
 - It's a little heavy on the punctuation.
 - I believe I've never touched a big endian computer so I don't care.
 - Pointers are 64 bits. Wasm can just use twice as much memory as it should, not my problem, tho it irks me.
+- It's probably not a good fit for large teams where you want the language to help you design your whole program defensively because you don't trust your coworkers.
 - Sadly the error messages are completely incomprehensible.
 - Sadly I don't have nice IDE integration.
 - Sadly I don't have incremental builds. every time you run a program, you recompile the standard library for comptime. (...but its so fast it doesn't matter yet).
