@@ -8,6 +8,7 @@ CompilerDispatch :: @struct(
     return_labels: BucketArray(FuncId), // [LabelId]
     next_task_id: i64 = 0,
     root_tasks: List(*Task),
+    lit_fn_count: i64 = 0,
 );
 
 Task :: @rec @struct(
@@ -188,8 +189,16 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
         fn CompileBody(fid) => {
             fid := fid[];
             @log_event("[TRY TASK] %: % %", task.action&.tag(), fid, self.log_name(fid)) self;
-            if !self.get_function(fid).get_flag(.EnsuredCompiled) {
-                @check(self.handle_compile_func_body(fid)) return;
+            func := self.get_function(fid);
+            if !func.get_flag(.EnsuredCompiled) {
+                zone := zone_begin(.SemaFunction); // TODO: defer
+                @if(ENABLE_TRACY) {
+                    real_name := self.pool.get(func.name);
+                    ___tracy_emit_zone_name(zone, real_name);
+                };
+                res := self.handle_compile_func_body(fid);
+                zone_end(zone);
+                @check(res) return;
             };
             self.dispatch.function_in_progress&.unset(fid.as_index());
         }
@@ -247,7 +256,7 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
                 if body.is(.Normal).or(body.is(.Intrinsic)) {
                     @log_event("codegen % %", fid, self.log_name(fid)) self;
                     @err_assert(!arg_ty.is_unknown() && !ret_ty.is_unknown(), "unknown fn types!!") return;
-                    hack := self.stable_compiler_context().cast(); // because Bc::CompCtx stores a ***SelfHosted in the assembly
+                    hack := self.legacy_indirection.cast(); // because Bc::CompCtx stores a ***SelfHosted in the assembly
                     //addr := (**SelfHosted).int_from_ptr(hack);
                     //@println("hack; %", addr); 
                     body := hack.emit_bc_and_aarch64(fid, .Jit);
@@ -317,7 +326,14 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
             @log_event("[TRY TASK] %: % %", task.action&.tag(), f.os, self.pool.get(overloads.name)) self;
             @debug_assert(f.call.expr.expr&.is(.Call), "overload resolve must be call");
             call := f.call.expr.expr.Call;
-            fid := @check(self.resolve_in_overload_set_new(call.arg, f)) return;
+            zone := zone_begin(.SemaOverloads); // TODO: defer
+            @if(ENABLE_TRACY) {
+                real_name := self.pool.get(overloads.name);
+                ___tracy_emit_zone_name(zone, real_name);
+            };
+            res := self.resolve_in_overload_set_new(call.arg, f);
+            zone_end(zone);
+            fid := @check(res) return;
             f_value := self.to_values(FuncId, fid);
             //call.f.set(f_value, fid); // THIS TYPE CHECKS! :FUCKED
             call.f.set(f_value, FuncId);

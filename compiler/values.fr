@@ -17,17 +17,6 @@ fn created_jit_fn_ptr_value(self: *SelfHosted, f: FuncId, ptr: i64) void #compil
     self.baked.functions&.insert(ptr, f);
 }
 
-// TODO: call this from rust. 
-fn save_bake_callback(self: *SelfHosted, ty: Type, f: BakeHandler) Result(void, ParseErr) #compiler = {
-    prev := self.baked.custom_bake_constant&.insert(ty, f);
-    if prev.is_some() {
-        // TODO: show the two locations and the type. :ERROR_QUALITY
-        msg :: "conflicting overload for bake AOT constant";
-        return (Err = (span = self.last_loc, msg = msg));
-    };
-    .Ok
-}
-
 fn get_baked(c: *SelfHosted, id: BakedVarId) *Ty(rawptr, BakedVar) = {
     c.baked.values&.nested_index(@as(i64) id.id.zext())
 }
@@ -59,8 +48,9 @@ Baked :: @struct(
     // avoid iterating all function pointers when you try to have one as a constant. 
     functions: HashMap(i64, FuncId),
     // Some types need special handling (Slice, CStr, etc). This are called at comptime and might call back into the auto dynamic versions to handle thier fields. 
-    custom_bake_constant: HashMap(Type, BakeHandler),
+    custom_bake_constant: HashMap(Type, FuncId),
 );
+
 BakeHandler :: @FnPtr(self: rawptr) Slice(BakedEntry);
 
 // TODO: be careful about the same string being baked as CStr and Str.
@@ -95,7 +85,7 @@ fn emit_relocatable_constant(c: *SelfHosted, ty: Type, value: *Values) Res(Baked
     @try(c.emit_relocatable_constant_body(ty, value, out&, false)) return;
     (Ok = c.put_baked((VoidPtrArray = out.rs()), (Some = jit_ptr)))
 }
-
+    
 // TODO: deduplicate small constant strings. they get stored in Values inline so can't be fixed by baked.lookup
 // TODO: make sure baked.lookup actually ever helps. might need to add checks in more places.
 fn emit_relocatable_constant_body(
@@ -117,7 +107,8 @@ fn emit_relocatable_constant_body(
     
     // :bake_relocatable_value
     if (!force_default_handling) {
-        if c.baked.custom_bake_constant&.get(ty) { f |
+        xx := @try(c.get_custom_bake_handler(ty)) return;
+        if xx { f |
             values := f(value.jit_addr().rawptr_from_int());
             out.push_all(values);
             return(.Ok);
@@ -252,6 +243,73 @@ fn emit_relocatable_constant_body(
     };
     .Ok
 }
+
+// :bake_relocatable_value
+fn get_custom_bake_handler(c: *SelfHosted, ty: Type) Res(?BakeHandler) = {
+    if c.baked.custom_bake_constant&.get(ty) { fid |
+        if c.aarch64&.get_fn(fid) { fptr |
+            fptr := assume_types_fn(rawptr, Slice(BakedEntry), fptr);
+            return(Ok = (Some = fptr));
+        };
+        res := c.poll_in_place(rawptr) { () Maybe(rawptr) |
+            @match(c.aarch64&.get_fn(fid)) {
+                fn Some(ptr) => (Ok = ptr);
+                fn None() => (Suspend = c.wait_for(Jit = fid));
+            }
+        };
+        fptr := @try(res) return;
+        c.aarch64&.bump_dirty();
+        fptr := assume_types_fn(rawptr, Slice(BakedEntry), fptr);
+        return(Ok = (Some = fptr));
+    };
+    (Ok = .None)
+}
+
+
+// TODO: do this lazily and as part of the event loop. 
+fn check_for_new_aot_bake_overloads(self: *SelfHosted) PRes = {
+    os := self.env.bake_os.expect("cannot aot during bootstrapping.");
+    overloads := self.dispatch.overloads&.nested_index(os.as_index());
+    prev := overloads.ready.len();
+    self.compute_new_overloads(overloads);
+    // TODO: this will miss them if someone caused new things to resolve outside this function.
+    //       so if you ever call bake_relocatable_value manually. :FUCKED -- Jun 19
+    current := overloads.ready.len();
+    new := overloads.ready.items().slice(prev, current).clone(temp());
+    for new { f |
+        continue :: local_return;
+        func := self.get_function(f);
+        args := func.arg.bindings&;
+        if args.len() != 1 {
+            continue();
+        };
+        
+        value := self.poll_in_place(void) {()Maybe(void)|
+            return :: local_return;
+            arg_ty := @check(self.infer_arguments(f)) return;
+            ret_ty := @check(self.infer_return(f)) return;
+            .Ok
+        };
+        @try(value) return;
+        f_ty := func.finished_ty().expect("bake overload fn type");
+        info := self.get_type(f_ty.ret);
+        if !info.is(.Struct) {
+            continue();
+        };
+        fields := info.Struct.fields&;
+        // TODO: make sure its actually a Slice(BakedEntry)
+        if fields.len() != 2 {
+            continue();
+        };
+
+        first := f_ty.arg; 
+        ty := self.unptr_ty(first).or(=> continue());
+        prev := self.baked.custom_bake_constant&.insert(ty, f);
+        // TODO: show the two locations and the type. :ERROR_QUALITY
+        @err_assert(prev.is_none(), "conflicting overload for bake AOT constant") return;
+    };
+    .Ok
+};
 
 fn Res($T: Type) Type = Result(T, *ParseErr);
 

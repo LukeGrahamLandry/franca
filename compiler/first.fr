@@ -1,13 +1,11 @@
 DO_TESTS :: false;
 
-ENABLE_TRACY_ :: false;
 ENABLE_LSP_   :: false;
 ENABLE_QBE_BACKEND_ :: false; // TODO: error message if you try to use when disabled instead of just calling a null function pointer. 
 REPLACE_COMPILER :: false;
  
 fn load_src(vtable: *ImportVTable, include_cranelift: bool) Ty(CompCtx, *ComptimeLibs) = {
     src := temp().read_to_string("compiler/main.fr");
-    @fmt(src&, ";ENABLE_TRACY :: %;\n", ENABLE_TRACY_);
     @fmt(src&, ";ENABLE_LSP   :: %;\n", ENABLE_LSP_);
     @fmt(src&, ";ENABLE_QBE_BACKEND :: %;\n", ENABLE_QBE_BACKEND_);
     @fmt(src&, ";ENABLE_LOGGING_CALLBACKS :: false;\n");
@@ -21,6 +19,7 @@ fn load_src(vtable: *ImportVTable, include_cranelift: bool) Ty(CompCtx, *Comptim
     spam := false;
     args := cli_args();
     bootstrap_mode := false;
+    trace := false;
     for args { extra |
         if extra.str() == "-no-deduplication" {
             opts.deduplicate_bytecode = false;
@@ -47,9 +46,13 @@ fn load_src(vtable: *ImportVTable, include_cranelift: bool) Ty(CompCtx, *Comptim
             bootstrap_mode = true;
             opts.safety_checks&.insert(SafetyCheck.KeepPanicMessages, false);
         };
+        if extra.str() == "-trace" {
+            trace = true;
+        };
     };
     @fmt(src&, ";BOOTSTRAP_ONLY_MODE :: %;\n", bootstrap_mode);
     @fmt(src&, ";DEBUG_SPAM_LOG :: %;\n", spam);
+    @fmt(src&, ";ENABLE_TRACY :: %;\n", trace);
     
     comp := vtable.new_with_src(src.items(), opts);
     c := vtable.with(comp);
@@ -57,7 +60,7 @@ fn load_src(vtable: *ImportVTable, include_cranelift: bool) Ty(CompCtx, *Comptim
     libs := c.empty_libs();
     libs := temp().boxed(ComptimeLibs, libs);
     libs.intercept_imports();
-    if(ENABLE_TRACY_, => libs.add_lib(tracy_lib));
+    if(trace, => libs.add_lib(tracy_lib));
     if(ENABLE_LSP_, => libs.add_lib(wuffs_lib));
     
     // TODO: but we're not there yet as a society 
@@ -85,6 +88,7 @@ fn driver(vtable: *ImportVTable) void = {
     include_cranelift := false;
     slow := false;
     keep_ir := false;
+    trace := false;
     for args { arg |
         if arg.str() == "-no-build" {
             do_build = false;
@@ -104,6 +108,9 @@ fn driver(vtable: *ImportVTable) void = {
         };
         if arg.str() == "-S" {
             keep_ir = true;
+        };
+        if arg.str() == "-trace" {
+            trace = true;
         };
     };
     c, libs := load_src(vtable, include_cranelift);
@@ -168,7 +175,7 @@ fn driver(vtable: *ImportVTable) void = {
                     args&.push_all(@slice("-target", "x86_64-apple-darwin"));
                 };
             };
-            clang := if(ENABLE_TRACY_, => "clang++", => "clang");
+            clang := if(trace, => "clang++", => "clang");
             run_cmd_blocking(clang, args.items()).assert("link failed");
         } else {
             println("SKIPPED REPLACING COMPILER");

@@ -1,6 +1,37 @@
-## it compiles itself!
+## faster! (Aug 30)
+
+the old one was ~580ms safe. at the very least i should be able to match that unsafe.
+
+(times are -unsafe).
+
+another like 10% is the old resolve_in_overload_set because every single macro call goes through resolve_by_type.
+inline_cache takes us from 900ms to 800ms.
+can do a hash table in resolve_in_overload_set_new and get to somewhere around 770-730.
+but its kinda clunky because you need to be constantly checking if you know all the types for the parts and then creating a tuple of them.
+and its hacky because i can only get it to work if i don't add to table when any part.is_const.
+becuase of the coercion stuff i assume but it feels too fragile.
+so im just doing the simpiler inline_cache that makes macros not crippling and takes like 10 lines of code.
+
+misc, got to around 750.
+
+theres a whole seperate tree where its doing check_for_new_aot_bake_overloads thats 10% of the time.
+thats just a bunch of extra work thats flat with number of types in the universe when doing AOT, not with number actually used.
+so instead just collect from the overload set up front but only compile+jit once you actually need to emit a constant of that type.
+doing custom constant bake functions lazily got to ~680.
+and the whole emit_bc is now ~5%.
+
+that one was a bit less satisfying because this fix would speed up the rust version too.
+but it was a pain to do back when everything was rust and i didn't want to just turn off the borrow checker.
+so maybe it counts as an advantage of this langauge.
+
+but anyway thats like 17% slower than the old compiler. getting there.
+the correct thing to do would be fix whatever the crazy exponential overloading problem is thats taking half the time,
+but i kinda want to see if theres any other low hanging fruit first.
+
+## it compiles itself! (Aug 29)
 
 its like 3x slower.
+the first number i remember was ~2200ms safe.
 
 with -spam you can see `decl_var as_int%100600` 71 times. so i think a done flag on FatStmt will help a lot.
 

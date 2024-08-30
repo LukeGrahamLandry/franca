@@ -25,7 +25,7 @@
 ::?[]Prim; // TODO: why do i need this extra when lsp????? order of exports changed maybe??
 
 // TODO: don't individually allocate all these. it just makes it easier to do rust ffi while not fully self hosted. 
-SelfHosted :: @struct(
+SelfHosted :: @rec @struct(
     pool: *StringPool,
     codemap: *CodeMap,
     parser: *Parser,
@@ -54,6 +54,7 @@ SelfHosted :: @struct(
     finished_layout_deep: DynamicBitSet,
     dispatch: CompilerDispatch,
     cranelift: ?JittedCranelift = .None,
+    legacy_indirection: Compiler = Compiler.zeroed(),
 );
 
 OverloadKey :: @struct(arg: Type, req: Type);
@@ -103,7 +104,7 @@ fn new_sema_init_vtable() *ImportVTable = {
         mem := init_self_hosted(options);
         mem.vtable = vtable;
         mem.env.new_sema = true;
-        mem.stable_compiler_context()
+        mem.legacy_indirection
     };
     
     vtable.compile_func = fn(c: Compiler, f: FuncId, when: ExecStyle) CRes(void) = {
@@ -139,55 +140,6 @@ fn new_sema_init_vtable() *ImportVTable = {
         (.Aarch64, .Macos)
     };
    
-    // TODO: do this lazily and as part of the event loop. 
-    vtable.check_for_new_aot_bake_overloads = fn(comp: Compiler) CRes(void) = {
-        self := comp.cast()[][];
-        os := self.env.bake_os.expect("cannot aot during bootstrapping.");
-        overloads := self.dispatch.overloads&.nested_index(os.as_index());
-        prev := overloads.ready.len();
-        self.compute_new_overloads(overloads);
-        // TODO: this will miss them if someone caused new things to resolve outside this function.
-        //       so if you ever call bake_relocatable_value manually. :FUCKED -- Jun 19
-        current := overloads.ready.len();
-        new := overloads.ready.items().slice(prev, current).clone(temp());
-        for new { f |
-            continue :: local_return;
-            func := self.get_function(f);
-            args := func.arg.bindings&;
-            if args.len() != 1 {
-                continue();
-            };
-            
-            value := self.poll_in_place(void) {()Maybe(void)|
-                return :: local_return;
-                arg_ty := @check(self.infer_arguments(f)) return;
-                ret_ty := @check(self.infer_return(f)) return;
-                .Ok
-            };
-            self.unwrap_report_error(void, value);
-            f_ty := func.finished_ty().expect("bake overload fn type");
-            info := self.get_type(f_ty.ret);
-            if !info.is(.Struct) {
-                continue();
-            };
-            fields := info.Struct.fields&;
-            // TODO: make sure its actually a Slice(BakedEntry)
-            if fields.len() != 2 {
-                continue();
-            };
-
-            first := f_ty.arg; 
-            ty := self.unptr_ty(first).or(=> continue());
-            // TODO: you really want to do the compile lazily, so you only do it when you actually try to emit a type that needs it. 
-            //       but EmitBc doesn't have mutable access to the compiler so its painful.
-            //       but this is cripplingly stupid with the current model of eh fuck it just load all the code in the universe every time. 
-            //       especially once i overload it for things in generics, currently slices are a magic special case.    -- Jun 19  :SLOW
-            f := {the_vtable[].get_jitted_ptr}(comp, f).unwrap();
-            f := assume_types_fn(rawptr, Slice(BakedEntry), f);
-            self.save_bake_callback(ty, f).unwrap();
-        };
-        .Ok
-    };
     the_vtable
 }
 
@@ -206,15 +158,6 @@ make_top_level :: fn(c: *SelfHosted, body: Slice(FatStmt)) Res(FuncId) = {
     f := c.add_function(func);
     return(Ok = f)
 };
-
-fn stable_compiler_context(self: *SelfHosted) Compiler = {
-    mem1 := libc_allocator.alloc(*SelfHosted, 1);
-    mem1.ptr[] = self;
-    erased := (*SelfHosted).raw_from_ptr(mem1.ptr);
-    compiler := libc_allocator.alloc(CompilerValue, 1);
-    compiler.ptr[] = (pointer_to_pointer_to_selfhosted = erased);
-    compiler.ptr
-}
 
 fn update_global_stdlib_path() void = {
     :: ?Str; 
@@ -607,6 +550,16 @@ fn init_self_hosted(build_options: *BuildOptions) *SelfHosted #compiler = {
     );
     self&.init_fixed_types();
     self := a.boxed(SelfHosted, self);
+    
+    stable_compiler_context :: fn(self: *SelfHosted) Compiler = {
+        mem1 := libc_allocator.alloc(*SelfHosted, 1);
+        mem1.ptr[] = self;
+        erased := (*SelfHosted).raw_from_ptr(mem1.ptr);
+        compiler := libc_allocator.alloc(CompilerValue, 1);
+        compiler.ptr[] = (pointer_to_pointer_to_selfhosted = erased);
+        compiler.ptr
+    };
+    self.legacy_indirection = self.stable_compiler_context();
     
     @if(INCLUDE_COMPTIME_CRANELIFT) {
         if build_options.comptime_jit == .Cranelift {
