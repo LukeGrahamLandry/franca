@@ -339,9 +339,18 @@ impl<'z, M: Module> Emit<'z, M> {
                         let id = self.cl.module.declare_func_in_func(id, builder.func);
                         self.stack.push(builder.ins().func_addr(I64, id));
                     } else {
+                        // :copy-paste
                         let addr = unsafe { ((*self.cl.vtable).get_jitted_function)(self.cl.data, f) };
-                        let addr = addr.expect("fn not ready");
-                        self.stack.push(builder.ins().iconst(I64, addr as i64));
+                        match addr {
+                            BigOption::Some(addr) => {
+                                self.stack.push(builder.ins().iconst(I64, addr as i64));
+                            }
+                            BigOption::None => {
+                                let dispatch = builder.ins().iconst(I64, self.cl.dispatch_ptr);
+                                let addr = builder.ins().load(I64, MemFlags::new(), dispatch, f.as_index() as i32 * 8);
+                                self.stack.push(addr);
+                            }
+                        }
                     }
                 }
                 Bc::Load { ty } => {

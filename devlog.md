@@ -9,6 +9,8 @@ using that to compile a version with debug assertions + indexing takes ~1650 ms.
 
 done flag on FatStmt gets down to (unsafe 1400, safe 1780) and brings spam output from 4396386 lines to 2033850 lines.
 
+fixing .TookPointerValue (unsafe 950, safe 1300). my hashtable of integers is really fucking slow.
+
 ##
 
 seems you no longer need this.

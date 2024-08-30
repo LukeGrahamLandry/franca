@@ -1037,16 +1037,7 @@ fn compile_fn_ptr(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
     
     @err_assert(!func.get_flag(.AnyConstArgs), "cannot take pointer to function with const args") return;
     
-    // Note: else is not `Suspend = self.wait_for(Jit = fid)` because of cycles, we defer to the backend to deal with finializing it. 
-    //       a better system would be to generate a shim right now so we'd always have an address? 
-    if self.aarch64&.get_fn(fid) { ptr |
-        if !func.get_flag(.TookPointerValue) {
-            // We already compiled the function but didn't know we'd need to remember its address. (ie. #test fn large_struct_ret_return).
-            self.created_jit_fn_ptr_value(fid, ptr.int_from_rawptr())
-        };
-    };
-    @err_assert(!func.get_flag(.Once), "Cannot create a function pointer to something that id #once") return;
-    func.set_flag(.TookPointerValue);
+    self.took_pointer_value(fid);
     
     // Instead of self.add_callee(fid)
     if self.dispatch.enclosing_function { current_f |
@@ -2839,17 +2830,6 @@ fn compile_get_var(self: *SelfHosted, expr: *FatExpr, requested: ResultType) May
             if ty != requested && ty == FuncId {
                 want_info := self.get_type(requested);
                 if want_info.is(.FnPtr).or(requested == rawptr) { 
-                    // HACK HACK HACK
-                    fid := @check(self.immediate_eval_expr(expr, FuncId)) return;
-                    fid := FuncId.assume_cast(fid&)[];
-                    func := self.get_function(fid);
-                    if self.aarch64&.get_fn(fid) { ptr |
-                        if !func.get_flag(.TookPointerValue) {
-                            // We already compiled the function but didn't know we'd need to remember its address. (ie. #test fn large_struct_ret_return).
-                            self.created_jit_fn_ptr_value(fid, ptr.int_from_rawptr())
-                        };
-                    };
-                    func.set_flag(.TookPointerValue);
                     expr.done = false;
                     fid := self.box(expr[]);
                     expr.expr = (FnPtr = fid);
@@ -2882,6 +2862,19 @@ fn compile_get_var(self: *SelfHosted, expr: *FatExpr, requested: ResultType) May
             @err("Unknown type for runtime var %", self.pool.get(var.name))
         }
     }
+}
+
+fn took_pointer_value(self: *SelfHosted, fid: FuncId) void = {
+    func := self.get_function(fid);
+    // Note: else is not `Suspend = self.wait_for(Jit = fid)` because of cycles, we defer to the backend to deal with finializing it. 
+    //       a better system would be to generate a shim right now so we'd always have an address? 
+    if self.aarch64&.get_fn(fid) { ptr |
+        if !func.get_flag(.TookPointerValue) {
+            // We already compiled the function but didn't know we'd need to remember its address. (ie. #test fn large_struct_ret_return).
+            self.created_jit_fn_ptr_value(fid, ptr.int_from_rawptr())
+        };
+    };
+    func.set_flag(.TookPointerValue);
 }
 
 // TODO: this is kinda weird. `fn` statements create an overload set or add to an existing one. 
@@ -3050,6 +3043,7 @@ fn coerce_const_expr(self: *SelfHosted, expr: *FatExpr, req: ResultType, query: 
                     if(query, => return(.Ok));
                     fid_value := self.to_values(FuncId, fid);
                     expr.set(fid_value, want);
+                    self.took_pointer_value(fid);
                     e := self.box(expr[]);  // :fucked segfault if you inline this!!!!!! -- Aug 6
                     expr.expr = (FnPtr = e);
                     expr.ty = want;
@@ -3086,12 +3080,14 @@ fn coerce_const_expr(self: *SelfHosted, expr: *FatExpr, req: ResultType, query: 
                 };
                 if want == rawptr {
                     if(query, => return(.Ok));
+                    fid := @check(self.immediate_eval_expr(expr, FuncId)) return;
+                    fid := FuncId.assume_cast(fid&)[];
                     inner := self.box(expr[]);
                     expr.expr = (FnPtr = inner);
                     expr.done = inner.done;
                     expr.ty = rawptr;
-                    // TODO: not calling compile_expr do i have to note that we took a pointer?
-                    //       decide and then be consistant with the above. -- Aug 19
+                    self.took_pointer_value(fid);
+                    // TODO: could call compile_expr/compile_fn_expr instead of imm+took
                     return(.Ok);
                 };
             };
@@ -3518,6 +3514,7 @@ fn check_quick_eval(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) ?Values = {
 }
 
 fn create_slice_type(self: *SelfHosted, inner: Type, loc: Span) Maybe(Type) = {
+    // TODO: this is called 3208 times when self-compiling. Aug 29. 
     @log_event("Create slice %", inner) self;
     arg_value := self.to_values(Type, inner);  // :get_or_create_type
     f_value := self.to_values(FuncId, @unwrap(self.env.make_slice_t, "slice type not ready!") return);  // :get_or_create_type
