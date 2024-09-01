@@ -2,69 +2,59 @@
 
 /// Query interface /// 
 
-fn put_constant(self: *Scopes, name: Var, value: FatExpr, ty: LazyType) void #compiler = {
+fn put_constant(self: *Scopes, name: Var, value: FatExpr, ty: LazyType) void = {
     // TODO: this cant be the whole expression because then it looks for an overload returning unit. -- Jun 28
     ptr := self.constants&.nested_index(name.id.zext());
     ptr[] = (Some = (value, ty));
 }
 
-fn get_var_type(self: *Scopes, v: Var) ?Type #compiler = 
+fn get_var_type(self: *Scopes, v: Var) ?Type = 
     self.types&.nested_index(v.id.zext())[];
 
-fn put_var_type(self: *Scopes, v: Var, ty: Type) bool #compiler = {
+fn put_var_type(self: *Scopes, v: Var, ty: Type) bool = {
     slot := self.types&.nested_index(@as(i64) v.id.zext());
     is_new := slot.is_none();
     slot[] = (Some = ty);
     is_new
 }
 
-fn get_constant(self: *Scopes, name: Var) ?*Ty(FatExpr, LazyType) #compiler = {
+fn get_constant(self: *Scopes, name: Var) ?*Ty(FatExpr, LazyType) = {
     ::as_ref(Ty(FatExpr, LazyType));
     self.constants&.nested_index(name.id.zext()).as_ref()
 }
 
-fn find_constant_in_scope(self: *Scopes, s: ScopeId, name: Symbol) ?Var #compiler = {
-    each self[s].vars { block | 
-        v := block.const_lookup&.get(name);
-        if v& { v |
-            return(Some = v[]);
-        };
-    };
-    .None
-}
-
 /// Resolver Interface. Called lazily by the compiler when it first works on a new function. /// 
 
-fn resolve_root(compiler: *SelfHosted, func: *Func, scope: ScopeId) Result(void, ParseErr) #compiler = {
+fn resolve_root(compiler: *SelfHosted, func: *Func, scope: ScopeId) PRes #once = {
     r: ResolveScope = new(compiler, scope, func.loc);
     
     zone := zone_begin(.Scope); // TODO: defer
-    @try_deref_err(r&.resolve_func(func)) return;
+    @try(r&.resolve_func(func)) return;
     zone_end(zone);
     .Ok
 }
 
-fn resolve_sign(compiler: *SelfHosted, func: *Func) Result(void, ParseErr) #compiler = {
+fn resolve_sign(compiler: *SelfHosted, func: *Func) PRes #once = {
     r: ResolveScope = new(compiler, func.scope.expect("function to have scope"), func.loc);
     
     zone := zone_begin(.Scope); // TODO: defer
-    @try_deref_err(r&.resolve_func_args(func)) return;
+    @try(r&.resolve_func_args(func)) return;
     zone_end(zone);
     .Ok
 }
 
-fn resolve_body(compiler: *SelfHosted, func: *Func) Result(void, ParseErr) #compiler = {
+fn resolve_body(compiler: *SelfHosted, func: *Func) PRes #once = {
     r: ResolveScope = new(compiler, func.scope.expect("function to have scope"), func.loc);
     
     zone := zone_begin(.Scope); // TODO: defer
-    @try_deref_err(r&.resolve_func_body(func)) return;
+    @try(r&.resolve_func_body(func)) return;
     zone_end(zone);
     .Ok
 }
 
 /// Renumbering interface ///
 
-fn dup_var(self: *Scopes, old: Var) Var #compiler = {
+fn dup_var(self: *Scopes, old: Var) Var = {
     new := old;
     new.id = self.types.len.trunc();
     self.types&.push(.None);
@@ -73,7 +63,7 @@ fn dup_var(self: *Scopes, old: Var) Var #compiler = {
 }
 
 // For unquoting, initial will be None, but for inlining closures, it will be the return variable. 
-fn renumber_expr(self: *SelfHosted, expr: *FatExpr, initial: ?Ty(Var, Var)) void #compiler = {
+fn renumber_expr(self: *SelfHosted, expr: *FatExpr, initial: ?Ty(Var, Var)) void = {
     mapping: HashMap(Var, Var) = init(temp());
     if initial& { i |
         mapping&.insert(i._0, i._1);
@@ -81,69 +71,6 @@ fn renumber_expr(self: *SelfHosted, expr: *FatExpr, initial: ?Ty(Var, Var)) void
     renumber: RenumberVars = (scope = self.scopes, mapping = mapping&);
     renumber&.walk_expr(expr);
 }
-
-// TODO: this doesn't belong in this file -- Jun 28
-fn maybe_renumber_and_dup_scope(self: *SelfHosted, new_func: *Func) Result(void, ParseErr) #compiler = {
-
-    // Closures always resolve up front, so they need to renumber the clone.
-    // TODO: HACK but closures get renumbered when inlined anyway, so its just the const args that matter. im just being lazy and doing the whole thing redundantly -- May 9
-    // normal functions with const args havent had their body resolved yet so don't have to deal with it, we only resolve on the clone.
-    // the special case for generics is when args can reference previous ones so they have to resolve sign earlier.
-    
-    needs_renumber := new_func.get_flag(.AllowRtCapture).or(new_func.get_flag(.Generic));
-    if needs_renumber {
-        mapping: HashMap(Var, Var) = init(temp());
-        renumber: RenumberVars = (scope = self.scopes, mapping = mapping&);
-        renumber&.walk_func(new_func);
-        if new_func.get_flag(.Generic) && !new_func.get_flag(.ResolvedBody) {
-            // the sign has already been resolved so we need to renumber before binding arguments.
-            // however, the body hasn't been resolved yet, so we can't just renumber in place.
-            // instead, remap the sign as normal and then, insert a new scope containing the remapped variables,
-            // and use that as the starting point when we resolve the body of new new function.
-            // that way when it iterates up the scopes to resolve names, it will see our remapped shadows instead of the original.
-            // this allows #generic argument types that reference the values of other argument.
-            // but doing this is a bit creepy because the Var.scope isn't updated to the new one,
-            // so they get inserted back in the old one's constants/rt_types again later.
-            // that's why its fine when we can't find a remap for something in constants or vars.      -- May 29
-            assert(new_func.get_flag(.ResolvedSign), "expected resolved sign");  // TODO: debug
-            assert(!new_func.get_flag(.AllowRtCapture), "expected no runtime capture"); // TODO: debug
-            prev := new_func.scope.unwrap();
-            old_scope := self.scopes[prev]&;
-            id := self.scopes.new_scope(old_scope.parent, old_scope.block_in_parent);
-            old_scope := self.scopes[prev]&;
-            
-            // Note: it has to iterate and check more and more each time (but it only copies what's needed). -- Jun 29
-            each old_scope.vars { block | 
-                new_vars: List(Var) = list(self.get_alloc());
-                for block.vars { old | 
-                    if mapping&.get_ptr(old) { new |
-                        new_vars&.push(new[]);
-                    };
-                };
-                new_constants: HashMap(Symbol, Var) = init(self.get_alloc());
-                each block.const_lookup& { (k, v) |
-                    if mapping&.get_ptr(v[]) { new |
-                        v := self.scopes.get_constant(v[]);
-                        v := v.unwrap(); // TODO: destructure through a pointer? 
-                        expr := self.clone(v._0&);
-                        ty := self.clone(v._1&);
-                        self.scopes.put_constant(new[], expr, ty);
-                        new_constants&.insert(new.name, new[]);
-                    };
-                };
-                b: BlockScope = (vars = new_vars, const_lookup = new_constants, parent = block.parent);
-                self.scopes[id].vars&.push(b);
-            };
-        
-            new_func.scope = (Some = id);
-        };
-    } else {
-        assert(!new_func.get_flag(.ResolvedBody), "resolved body");
-    };
-    
-    .Ok
-}
-
 
 /// Implementation /// 
 
@@ -187,9 +114,8 @@ fn hash(i: *Symbol) i64 = {
 }
 
 fn index(self: *Scopes, i: ScopeId) *Scope = {
-    index := ptr_cast_unchecked(ScopeId, u32, i&)[]; // TODO: expose id like normal struct
-    s := self.scopes[@as(i64) index.zext()]&; // TODO: shouldn't need extra binding
-    s
+    i := i.as_index();
+    self.scopes.index(i)
 }
 
 fn scope_from_index(i: u32) ScopeId = {
@@ -363,18 +289,18 @@ fn slow_body(self: *ResolveScope, body: *List(FatStmt)) PRes #once = {
                 if annotations.len == 1 && annotations.items()[0].name == Flag.include_std.ident() {
                     msg :: "#include_std requires string argument";
                     arg_expr := annotations.items()[0].args.or() {
-                        return(@error(msg))
+                        return(@err(msg))
                     };
                     name := @match(arg_expr.expr) {
                         fn String(name) => name;
-                        @default => return(@error(msg));
+                        @default => return(@err(msg));
                     };
                     
                     if !self.compiler.scopes.already_loaded&.insert(name) {
                         name := self.compiler.pool.get(name);
                         :: ?WaitingParse;
                         file := self.compiler.get_include_std(name).or() {
-                            return(@error("unknown path for #include_std %", name))
+                            return(@err("unknown path for #include_std %", name))
                         };
                         dirty = true;
                         stmts := @try(self.compiler.parser.finish_pending_stmts(file)) return;
@@ -467,7 +393,7 @@ fn decl_var(self: *ResolveScope, name: Symbol, kind: VarType, loc: Span, placeho
     
     prev := scope.vars[self.block].const_lookup&.get(name);
     if prev.is_some() {
-        return(@error("Cannot shadow constant in the same scope: %", self.compiler.pool.get(name)));
+        return(@err("Cannot shadow constant in the same scope: %", self.compiler.pool.get(name)));
     };
     //@println("Declare % in scope % block %", self.compiler.pool.get(name), self.scope.as_index(), self.block);
     
@@ -538,7 +464,7 @@ fn declare_binding(self: *ResolveScope, binding: *Binding, loc: Span, is_args: b
             binding[] = b;
         });
         (fn Var(_) => {
-            return(@error("ICE: resolved args twice."));
+            return(@err("ICE: resolved args twice."));
         });
         (fn None() => ());
     };

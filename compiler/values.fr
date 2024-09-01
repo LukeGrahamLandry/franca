@@ -13,7 +13,7 @@
 // [Jun 30] building the compiler ends up with ~17000 FuncIds created and 21 calls to this function. So thats pretty good. 
 // TODO: tho that means we wont find it if someone cheats somehow and gets the pointer in a way i didn't think of. 
 //       it relies on them only being created through '!fn_ptr'/const_coerce expressions. 
-fn created_jit_fn_ptr_value(self: *SelfHosted, f: FuncId, ptr: i64) void #compiler = {
+fn created_jit_fn_ptr_value(self: *SelfHosted, f: FuncId, ptr: i64) void = {
     self.baked.functions&.insert(ptr, f);
 }
 
@@ -138,7 +138,7 @@ fn emit_relocatable_constant_body(
                 out.push((FnPtr = fid));
                 return(.Ok);
             };
-            return(@error("function not found for constant. (might be ICE created_jit_fn_ptr_value)"));
+            return(@err("function not found for constant. (might be ICE created_jit_fn_ptr_value)"));
         });
         (fn Ptr(inner) => {
             // TODO: allow zero?
@@ -235,10 +235,10 @@ fn emit_relocatable_constant_body(
                 return(.Ok);
             };
             
-            return(@error("You can't have a void pointer as a constant. The compiler can't tell how many bytes to put in the final executable."));
+            return(@err("You can't have a void pointer as a constant. The compiler can't tell how many bytes to put in the final executable."));
         });
         @default => {
-            return(@error("ICE: bad constant"));
+            return(@err("ICE: bad constant"));
         };
     };
     .Ok
@@ -420,8 +420,8 @@ fn deconstruct_values(program: *SelfHosted, ty: Type, bytes: *ReadBytes, out: *L
     };
     
     @match(program.get_type(ty)) {
-        fn Placeholder() => { return(@error("ICE: Unfinished type")); }; // TODO: show the type
-        fn Never()       => return(@error("invalid type: Never"));
+        fn Placeholder() => { return(@err("ICE: Unfinished type")); }; // TODO: show the type
+        fn Never()       => return(@err("invalid type: Never"));
         fn F64()     => i64.single(.F64);
         fn FnPtr(_)  => i64.single(.P64);
         fn Ptr(_)    => i64.single(.P64);
@@ -477,7 +477,7 @@ fn deconstruct_values(program: *SelfHosted, ty: Type, bytes: *ReadBytes, out: *L
                 @case(2) => u16.single(.I16);
                 @case(4) => u32.single(.I32);
                 @case(8) => i64.single(.I64);
-                @default fn(n: u16) => return(@error("ICE: bad int stride %", n));
+                @default fn(n: u16) => return(@err("ICE: bad int stride %", n));
             };
         }
         fn Array(f) => {
@@ -539,16 +539,16 @@ fn take(self: *ReadBytes, size: i64) ?[]u8 = {
 ////////////////////
 /// Dynamic Call ///
 
-fn call_dynamic_values(program: CompilerRs, f_ptr: i64, f_ty: *FnType, args_value: []u8, comp_ctx: bool) Result(Values, ParseErr) #compiler = {
+fn call_dynamic_values(program: CompilerRs, f_ptr: i64, f_ty: *FnType, args_value: []u8, comp_ctx: bool) Res(Values) = {
     parts: List(i64) = list(temp());
     reader: ReadBytes = (bytes = args_value, i = 0);
-    @try_deref_err(program[][].deconstruct_values(f_ty.arg, reader&, parts&, .None)) return;
+    @try(program[][].deconstruct_values(f_ty.arg, reader&, parts&, .None)) return;
     parts: RsVec(i64) = parts.rs();
     program.call_dynamic(f_ptr, f_ty, parts&, comp_ctx)
 }
 
-fn call_dynamic(program: CompilerRs, ptr: i64, f_ty: *FnType, args: *RsVec(i64), comp_ctx: bool) Result(Values, ParseErr) #compiler = {
-    (Ok = @try_deref_err(program.call_dynamic_inner(ptr, f_ty, args, comp_ctx)) return)
+fn call_dynamic(program: CompilerRs, ptr: i64, f_ty: *FnType, args: *RsVec(i64), comp_ctx: bool) Res(Values) = {
+    program.call_dynamic_inner(ptr, f_ty, args, comp_ctx)
 }
 
 // TODO: this is the only place I still use float_mask.
@@ -604,7 +604,7 @@ fn call_dynamic_inner(program: CompilerRs, ptr: i64, f_ty: *FnType, args: *RsVec
             arg8ret1(ptr, args.ptr)
         } else {
             // TODO: assert: arg.float_mask.count_ones() == arg.size_slots as u32 && ret.float_mask.count_ones() == ret.size_slots as u32
-            //       return(@error("ICE: i dont do mixed int/float registers but backend does"))
+            //       return(@err("ICE: i dont do mixed int/float registers but backend does"))
             // :FUCKED, but I'm going to replace this with using the normal jit once i port that. 
             arg8ret1_all_floats(ptr, args.ptr)
         };
@@ -629,7 +629,7 @@ fn call_dynamic_inner(program: CompilerRs, ptr: i64, f_ty: *FnType, args: *RsVec
                     return(Ok = to_values(program[][], Ty(u32, u32), (@as(u32) r.fst.trunc(), @as(u32) r.snd.trunc())));
                 };
             };
-            @error("TODO: unhandled prim pair for comptime call")
+            @err("TODO: unhandled prim pair for comptime call")
         } else {
             arg8ret_struct(ptr, args.ptr);
             mem := indirect_ret.unwrap();
@@ -779,7 +779,7 @@ simple_x86 :: """
 // TODO: maybe the compiler should have an ast.fr for stuff like this. 
 
 // TODO: should this do raw_type?
-fn get_type(self: *SelfHosted, ty: Type) *TypeInfo /* const */ #compiler #inline = {
+fn get_type(self: *SelfHosted, ty: Type) *TypeInfo /* const */ #inline = {
     self.types&.nested_index(ty.as_index())
 }
 
@@ -798,7 +798,7 @@ fn should_deduplicate(type: *TypeInfo) bool = {
 }
 
 // TODO: call this maybe_intern_type?
-fn intern_type(self: *SelfHosted, info: TypeInfo) Type #compiler = {
+fn intern_type(self: *SelfHosted, info: TypeInfo) Type = {
     ::if(Type);
     if info&.should_deduplicate() {
         key := info&;
@@ -822,7 +822,7 @@ fn intern_type(self: *SelfHosted, info: TypeInfo) Type #compiler = {
     }
 }
 
-fn update_placeholder(self: *SelfHosted, placeholder_slot: Type, real_type: Type, name: Symbol) void #compiler = {
+fn update_placeholder(self: *SelfHosted, placeholder_slot: Type, real_type: Type, name: Symbol) void = {
     idx := placeholder_slot.as_index();
     slot := self.types&.nested_index(idx);
     @debug_assert(slot.is(.Placeholder));
@@ -865,7 +865,7 @@ fn init_fixed_types(self: *SelfHosted) void = {
 }
 
 :: as_ref(TypeMeta);
-fn get_info(self: *SelfHosted, ty: Type) *TypeMeta #compiler = {
+fn get_info(self: *SelfHosted, ty: Type) *TypeMeta = {
     ty := self.raw_type(ty);
     if self.type_extra&.nested_index(ty.as_index()) { info |
         return(info);
@@ -1024,68 +1024,53 @@ fn raw_type(c: *SelfHosted, ty: Type) Type = {
     ty
 }
 
-fn finish_layout_deep(self: *SelfHosted, ty: Type) Result(void, ParseErr) #compiler = {
+fn finish_layout_deep(self: *SelfHosted, ty: Type) void = {
     @debug_assert_le(ty.as_index(), self.types.len);
-    if(self.finished_layout_deep&.get(ty.as_index()), => return(.Ok));
+    if(self.finished_layout_deep&.get(ty.as_index()), => return());
     self.finished_layout_deep&.set(ty.as_index()); // do this at the beginning to stop recursion.
-    @try(self.finish_layout(ty)) return;
+    self.finish_layout(ty);
     ty := self.raw_type(ty);
     
     @match(self.get_type(ty)) {
         fn Fn(f) => {
-            @try(self.finish_layout_deep(f.arg)) return;
-            return(self.finish_layout_deep(f.ret));
+            self.finish_layout_deep(f.arg);
+            self.finish_layout_deep(f.ret);
         }
         fn FnPtr(f) => {
-            @try(self.finish_layout_deep(f.ty.arg)) return;
-            return(self.finish_layout_deep(f.ty.ret));
+            self.finish_layout_deep(f.ty.arg);
+            self.finish_layout_deep(f.ty.ret);
         }
-        fn Ptr(inner) => {
-            return(self.finish_layout_deep(inner[]));
-        }
-        fn Label(inner) => {
-            return(self.finish_layout_deep(inner[]));
-        }
-        fn Array(f) => {
-            return(self.finish_layout_deep(f.inner));
-        }
+        fn Ptr(inner) => self.finish_layout_deep(inner[]);
+        fn Label(inner) => self.finish_layout_deep(inner[]);
+        fn Array(f) => self.finish_layout_deep(f.inner);
         fn Struct(f) => {
             each f.fields { f |
                 if f.kind != .Const {
-                    @try(self.finish_layout_deep(f.ty)) return;
+                    self.finish_layout_deep(f.ty);
                 };
             };
-            return(.Ok);
         }
         fn Tagged(f) => {
             each f.cases { f | 
-                @try(self.finish_layout_deep(f._1)) return;
+                self.finish_layout_deep(f._1);
             };
-            return(.Ok);
         }
-        @default => {
-            return(.Ok);
-        };
+        @default => ();
     };
-    unreachable();
-    .Ok
 }
 
-fn finish_layout(self: *SelfHosted, ty: Type) Result(void, ParseErr) #compiler = {
+fn finish_layout(self: *SelfHosted, ty: Type) void = {
     ty := self.raw_type(ty);
     info := self.get_type(ty);
     @match(info) {
-        fn Array(f) => {
-            return(self.finish_layout(f.inner));
-        }
+        fn Array(f) => self.finish_layout(f.inner);
         fn Tagged(f) => {
             each f.cases { variant |
-                @try(self.finish_layout(variant._1)) return;
+                self.finish_layout(variant._1);
             };
-            return(.Ok);
         }
         fn Struct(f) => {
-            if(f.layout_done, => return(.Ok));
+            if(f.layout_done, => return());
             f.const_field_count = 0;
             @debug_assert_eq(f.const_field_count, 0, "TODO: handle partial then error if you call this multiple times?");
             // :struct_layout_in_type_info
@@ -1099,7 +1084,7 @@ fn finish_layout(self: *SelfHosted, ty: Type) Result(void, ParseErr) #compiler =
                     continue();
                 };
                 
-                @try(self.finish_layout(p.ty)) return;
+                self.finish_layout(p.ty);
     
                 info := self.get_info(p.ty);
                 inv_pad := bytes.mod(info.align_bytes.zext());
@@ -1115,14 +1100,9 @@ fn finish_layout(self: *SelfHosted, ty: Type) Result(void, ParseErr) #compiler =
             };
     
             f.layout_done = true;
-            return(.Ok);
         }
-        @default => {
-            return(.Ok);
-        };
+        @default => ();
     };
-    unreachable();
-    .Ok
 }
 
 // TODO: can't have these added to the eq overload set to early or it gets stuck

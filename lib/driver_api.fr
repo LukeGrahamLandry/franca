@@ -3,10 +3,10 @@ CompilerValue :: @struct(pointer_to_pointer_to_selfhosted: rawptr);
 CompCtx :: @struct(data: Compiler, vtable: *ImportVTable);
 fn CRes($T: Type) Type = Result(T, rawptr);
  
-Backend :: @enum(i64) (Aarch64 = 1, Cranelift = 3); ::enum(Backend);
-Arch :: @enum(i64) (Aarch64 = 1, X86_64 = 2, Wasm32 = 3);
-ExecStyle :: @enum(i64) (Jit = 0, Aot = 1);
-Os :: @enum(i64) (Macos = 0, Linux = 1, Windows = 2);
+Backend :: @enum(i64) (Aarch64, Cranelift); ::enum(Backend);
+Arch :: @enum(i64) (Aarch64, X86_64, Wasm32);
+ExecStyle :: @enum(i64) (Jit, Aot);
+Os :: @enum(i64) (Macos, Linux, Windows);
 
 TargetEnv :: @struct(
     arch: Arch,
@@ -21,44 +21,23 @@ ExportVTable :: @struct(
 ImportVTable :: @rec @struct(
     intern_string: @FnPtr(c: Compiler, s: Str) Symbol,
     get_string: @FnPtr(c: Compiler, s: Symbol) Str,
-    hack_get_old_global_allloc: @FnPtr() **u8,
     init_compiler: @FnPtr(comptime_arch: Backend, options: *BuildOptions) Compiler,
     find_unique_func: @FnPtr(c: Compiler, name: Symbol) ?FuncId,
     // TODO: i want the meta program to be tracking these instead. 
     get_fns_with_tag: @FnPtr(c: Compiler, tag: Symbol) Slice(FuncId),
-    destroy_compiler: @FnPtr(c: Compiler) void, // TODO: this still leaks (until fully self hosted?)
+    destroy_compiler: @FnPtr(c: Compiler) void, 
     compile_func: @FnPtr(c: Compiler, f: FuncId, when: ExecStyle) CRes(void),
     // SAFETY: you must call created_jit_fn_ptr_value if you create a Values and then compile for AOT
     get_jitted_ptr: @FnPtr(c: Compiler, f: FuncId) CRes(rawptr),
     get_function: @FnPtr(c: Compiler, f: FuncId) *Func,
-    _d: usize,
     add_file: @FnPtr(c: Compiler, name: Str, content: Str) Span, 
-    parse_stmts: @FnPtr(c: Compiler, f: *Span) Result(Slice(FatStmt), ParseErr),
+    parse_stmts: @FnPtr(c: Compiler, f: *Span) Result(Slice(FatStmt), *ParseErr),
     make_and_resolve_and_compile_top_level: @FnPtr(c: Compiler, body: Slice(FatStmt)) CRes(void),
     make_jitted_exec: @FnPtr(c: Compiler) void,
-    update_vtable: @FnPtr(c: Compiler) void,
     get_build_options: @FnPtr(c: Compiler) *BuildOptions,
     comptime_arch: @FnPtr() Ty(Arch, Os),
     get_default_driver_exports: @FnPtr() *ExportVTable, 
-    _l: usize,
-    _m: usize,
-    __a: usize,
-    _f: usize, 
-    __b: @FnPtr(c: Compiler, fn_body: rawptr) void,
-    _e: usize,
-    get_compiler_builtins_source: @FnPtr() Str,
-    _i: usize,
     emit_llvm: @FnPtr(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId), entry: ProgramEntry, target: Arch) BucketArray(u8),
-    // TODO: HACK: last bucket is inline assembly 
-    emit_qbe: @FnPtr(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId), entry: ProgramEntry) BucketArray(u8),
-    _g: usize,
-    _h: usize,
-    _clone_expr: usize,
-    _clone_type: usize,
-    _intern_type: usize,
-    _get_type: usize,
-    _log_type: usize,
-    _check_for_new_aot_bake_overloads: usize,
 );
 // TODO: better error for @FnPtr if you forget return type. 
 
@@ -90,11 +69,9 @@ ComptimeEnvironment :: @struct(
     intrinsic_type: ?Type,
     build_options: rawptr,
     unquote_placeholders: ?FuncId,
-    // TODO: remove these in favour of using the ones in BuildOptions directly. but the rust code uses them. 
-    //       for now these get set by init_self_hosted based on BuildOptions and you just have to not change them later. 
-    driver_vtable_ptr: rawptr,
-    driver_vtable_user_data: rawptr,
-    new_sema: bool,
+    pad1: i64 = 0,  
+    pad2: i64 = 0,
+    padd3: i64 = 0,
     link_rename_arg: ?Type,
 );
 
@@ -439,122 +416,4 @@ LinkRenameArg :: @struct(
     target: TargetEnv,
     out: *List(u8),
     old_name: Str,
-);
-
-Flag :: @enum(
-    _reserved_null_,
-    aarch64,
-    llvm,
-    cranelift,
-    _reserved_end_arch_, // It's important which are above and below this point.
-    generic,
-    as,
-    inline,
-    noinline,
-    asm,
-    c_call,
-    macro,
-    placeholder,
-    comptime_addr,
-    init,
-    slice,
-    unquote_macro_apply_placeholders,
-    from_bit_literal,
-    rec,
-    quote,
-    unquote,
-    deref,
-    patch,
-    ct,
-    any_reg,
-    Impl,
-    main,
-    builtin_if,
-    builtin_while,
-    if,
-    loop,
-    addr,
-    tag,
-    reflect_print,
-    fn_ptr,
-    toplevel,
-    include_std,
-    unreachable,
-    rt,
-    test,
-    operator_star_prefix,
-    operator_question_prefix,
-    operator_up_arrow_prefix,
-    operator_ampersand_prefix,
-    operator_plus_equal,
-    operator_minus_equal,
-    operator_star_equal,
-    operator_slash_equal,
-    operator_index,
-    builtin,
-    no_memo,
-    uninitialized,
-    const_eval,
-    contextual_field,
-    outputs,
-    when,
-    one_ret_pic,
-    Anon,
-    log_bc,
-    log_asm,
-    log_ir,
-    log_ast,
-    skip_cranelift,
-    log_asm_bc,
-    return,
-    cranelift_emit,
-    force_cranelift,
-    force_aarch64,
-    tail,
-    redirect,
-    libc,
-    __shift_or_slice,
-    no_tail, // TOOD: HACK. stack ptr/slice arg is UB so have to manually use this! not acceptable!
-    __return,
-    __get_assertions_passed,
-    __string_escapes,
-    test_broken,
-    load,
-    store,
-    fold,
-    ptr,
-    len,
-    export,
-    __tag_check,
-    c,
-    unsafe_noop_cast,
-    import,
-    type,
-    struct,
-    tagged,
-    enum,
-    bake_relocatable_value,
-    local_return,
-    no_trace,
-    compiler_builtin_transform_callsite,
-    late,
-    once,
-    qbe,
-    intrinsic,
-    x86,
-    _reserved_count_,  // TODO: remove. this langauge has non-garbage reflection. 
-    compiler_debug_assert_eq_i64,
-    cold,
-    
-    // These are operators that have syntax desugaring. 
-    add, sub, mul, div, lt, gt, ge, le, eq, ne, neg, not, and,
-    operator_squares_prefix,
-    
-    // These can be used with @builtin.
-    OverloadSet, ScopeId, FuncId, LabelId, Symbol, i64, bool, true, false, void, Type, rawptr, Never, f64, f32, UnknownType,
-    
-    // These must be in order because tuple field names use them and compute by offsetting Flag._0.raw().
-     _0,  _1,  _2,  _3,  _4,  _5,  _6,  _7,  _8,  _9, 
-    _10, _11, _12, _13, _14, _15, _16, _17, _18, _19, _20,
-    link_rename,
 );

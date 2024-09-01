@@ -36,9 +36,9 @@ MEM_08: i64 : 0b00;
 fn ne(a: FuncId, b: FuncId) bool #redirect(Ty(u32, u32), bool);
 
 // TODO: now this function is missnamed
-fn emit_bc_and_aarch64(program: CompilerRs, f: FuncId, when: ExecStyle) Result(void, ParseErr) #compiler = {
+fn emit_bc_and_aarch64(program: *SelfHosted, f: FuncId, when: ExecStyle) PRes = {
     mark := __temp_alloc.mark();
-    body := @try_deref_err(program.emit_bc(f, when)) return;
+    body := @try(program.emit_bc(f, when)) return;
     
     // TODO: this should be true but breaks for aot with new baked constant trait. maybe its counting random callees when just done for aot but not actually asm?  -- Jun 19
     // debug_assert!(!program[f].get_flag(FnFlag::AsmDone), "ICE: tried to double compile?");
@@ -48,7 +48,7 @@ fn emit_bc_and_aarch64(program: CompilerRs, f: FuncId, when: ExecStyle) Result(v
     // So it was Normal before but now its a Redirect. 
     if body.func != f {
         if program.aarch64&.get_fn(body.func) { old |
-            program.aarch64.dispatch[f.as_index()] = old;
+            program.put_jitted_function(f, old);
         };
         
         return(.Ok);
@@ -66,10 +66,10 @@ fn emit_bc_and_aarch64(program: CompilerRs, f: FuncId, when: ExecStyle) Result(v
     };
     
     @if(INCLUDE_COMPTIME_CRANELIFT) {
-        opts := program[][].get_build_options();
+        opts := program.get_build_options();
         if opts.comptime_jit == .Cranelift {
             data := program.cranelift.expect("cranelift backend to be initilized");
-            franca_comptime_cranelift_emit(data, f, body, program);
+            franca_comptime_cranelift_emit(data, f, body, program.legacy_indirection.cast());
             
             zone_end(zone);
             __temp_alloc.reset_retaining_capacity(mark);
@@ -77,28 +77,12 @@ fn emit_bc_and_aarch64(program: CompilerRs, f: FuncId, when: ExecStyle) Result(v
         };
     };
     
-    a: EmitAsm = new(program, when, body, f);
+    old := program.legacy_indirection.cast();
+    a: EmitAsm = new(old, when, body, f);
     a&.compile(f);
     zone_end(zone);
     __temp_alloc.reset_retaining_capacity(mark);
     .Ok
-}
-
-fn get_jitted_function(self: CompilerRs, f: FuncId) ?rawptr #compiler = {
-    self.aarch64&.get_fn(f)
-}
-
-fn put_jitted_function(self: CompilerRs, f: FuncId, addr: rawptr) void #compiler = {
-    self.aarch64&.extend_blanks(f);
-    self.aarch64.dispatch[f.as_index()] = addr;
-}
-
-fn bump_dirty(self: CompilerRs) void #compiler = {
-    self.aarch64&.bump_dirty();
-}
-
-fn copy_inline_asm(self: CompilerRs, f: FuncId, insts: []u32) void #compiler = {
-    self.aarch64&.copy_inline_asm(f, insts);
 }
 
 EmitAsm :: @struct(
@@ -1462,8 +1446,6 @@ fn extend_blanks(self: *Jitted, f: FuncId) void = {
         self.dispatch&.push(uncompiled_function_placeholder());
     };
 }
-
-fn as_index(f: FuncId) i64 = f.to_index().zext();
 
 // TODO: if you don't have this it just calls the FuncId for you because it decides same raw type is good enough :FUCKED -- Jul 20
 fn as_index(f: Type) i64 = f.to_index().zext();

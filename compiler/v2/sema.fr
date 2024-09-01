@@ -239,10 +239,7 @@ fn field_access_expr(self: *SelfHosted, container_ptr: *FatExpr, name: Symbol) M
     container_ty := self.unptr_ty(container_ptr_ty).expect("ICE: we just checked its a pointer");
 
     raw_container_ty := self.raw_type(container_ty);
-    x := self.finish_layout(raw_container_ty);
-    or x { (e: ParseErr) |
-        return(Err = self.box(e))
-    };
+    self.finish_layout(raw_container_ty);
     @match(self.get_type(raw_container_ty)) {
         fn Struct(f) => {
             @debug_assert(f.layout_done);
@@ -311,15 +308,15 @@ fn decl_var(self: *SelfHosted, name: Var, ty: *LazyType, value: *FatExpr) Maybe(
     if no_type {
         // Since there was no type annotation, we don't need a type check. Whatever we got is the type of this variable now. 
         ty[] = (Finished = final_ty);
-        self.finish_layout_deep(final_ty).unwrap();
+        self.finish_layout_deep(final_ty);
     } else {
         expected_ty := ty.unwrap();
         // TODO: :delay_layout
         //       Instead of doing this now, add it as an Action in the dispatch loop.
         //       We don't actually care about the field offsets yet, we just need them later for emitting bytecode. 
         //       This was one of the changes that inspired the sema rewrite.  -- Jul 25
-        self.finish_layout_deep(expected_ty).unwrap();
-        self.finish_layout_deep(final_ty).unwrap();
+        self.finish_layout_deep(expected_ty);
+        self.finish_layout_deep(final_ty);
         @check(self.can_assign(expected_ty, final_ty)) return;
         // TODO: panic("TODO: self.type_check_arg(value, ty, \"var decl\")?;");
     };
@@ -339,10 +336,7 @@ fn decl_var(self: *SelfHosted, name: Var, ty: *LazyType, value: *FatExpr) Maybe(
 fn ensure_resolved_sign(self: *SelfHosted, fid: FuncId) Maybe(void) = {
     func := self.get_function(fid);
     if(func.get_flag(.ResolvedSign), => return(.Ok));
-    res := self.resolve_sign(func);
-    if res&.is_err() {
-        return(Err = self.box(res.Err));
-    };
+    @try(self.resolve_sign(func)) return;
     func.set_flag(.ResolvedSign);
     .Ok
 }
@@ -351,10 +345,7 @@ fn ensure_resolved_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
     @check(self.ensure_resolved_sign(fid)) return;
     func := self.get_function(fid);
     if(func.get_flag(.ResolvedBody), => return(.Ok));
-    res := self.resolve_body(func);
-    if res&.is_err() {
-        return(Err = self.box(res.Err));
-    };
+    @try(self.resolve_body(func)) return;
     func.set_flag(.ResolvedBody);
     .Ok
 }
@@ -503,8 +494,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
                     // TODO: warn? have different #import that means we expect not at comptime?
                     func.body = (DynamicImport = func.name);
                 } else {
-                    self.aarch64&.extend_blanks(fid);
-                    self.aarch64.dispatch[fid.as_index()] = addr;
+                    self.put_jitted_function(fid, addr);
                     impls: List(FuncImpl) = list(2, self.get_alloc());
                     impls&.push(ComptimeAddr = addr.int_from_rawptr());
                     impls&.push(DynamicImport = func.name);
@@ -530,8 +520,8 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
                 ptr := @check(self.immediate_eval_expr(value, i64)) return;
                 ptr := i64.assume_cast(ptr&)[];
                 func.body = (ComptimeAddr = ptr);
-                self.aarch64&.extend_blanks(fid);
-                self.aarch64.dispatch[fid.as_index()] = ptr.rawptr_from_int();
+                ptr := ptr.rawptr_from_int();
+                self.put_jitted_function(fid, ptr);
             };
             @case(Flag.intrinsic.ident()) => {
                 good = true;
@@ -1715,8 +1705,7 @@ fn curry_const_args(self: *SelfHosted, original_f: FuncId, f_expr: *FatExpr, arg
     @debug_assert_eq(func.get_flag(.AllowRtCapture), func.get_flag(.ResolvedBody));
     // Some part of the argument must be known at comptime.
     new_func := func.deep_clone(self.get_alloc());
-    res := self.maybe_renumber_and_dup_scope(new_func&);
-    if(res&.is(.Err), => return(Err = self.box(res.Err)));
+    self.maybe_renumber_and_dup_scope(new_func&);
     new_fid := self.add_function(new_func);
     @log_event("bake const args % -> %", original_f, new_fid) self;
     @check(self.ensure_resolved_sign(new_fid)) return;
@@ -1730,6 +1719,64 @@ fn curry_const_args(self: *SelfHosted, original_f: FuncId, f_expr: *FatExpr, arg
     self.dispatch.const_bound_memo&.insert(key, new_fid);
     
     self.curry_const_args_inner(original_f, new_fid, f_expr, arg_expr, 0)
+}
+
+fn maybe_renumber_and_dup_scope(self: *SelfHosted, new_func: *Func) void #once = {
+    // Closures always resolve up front, so they need to renumber the clone.
+    // TODO: HACK but closures get renumbered when inlined anyway, so its just the const args that matter. im just being lazy and doing the whole thing redundantly -- May 9
+    // normal functions with const args havent had their body resolved yet so don't have to deal with it, we only resolve on the clone.
+    // the special case for generics is when args can reference previous ones so they have to resolve sign earlier.
+    
+    needs_renumber := new_func.get_flag(.AllowRtCapture).or(new_func.get_flag(.Generic));
+    if needs_renumber {
+        mapping: HashMap(Var, Var) = init(temp());
+        renumber: RenumberVars = (scope = self.scopes, mapping = mapping&);
+        renumber&.walk_func(new_func);
+        if new_func.get_flag(.Generic) && !new_func.get_flag(.ResolvedBody) {
+            // the sign has already been resolved so we need to renumber before binding arguments.
+            // however, the body hasn't been resolved yet, so we can't just renumber in place.
+            // instead, remap the sign as normal and then, insert a new scope containing the remapped variables,
+            // and use that as the starting point when we resolve the body of new new function.
+            // that way when it iterates up the scopes to resolve names, it will see our remapped shadows instead of the original.
+            // this allows #generic argument types that reference the values of other argument.
+            // but doing this is a bit creepy because the Var.scope isn't updated to the new one,
+            // so they get inserted back in the old one's constants/rt_types again later.
+            // that's why its fine when we can't find a remap for something in constants or vars.      -- May 29
+            assert(new_func.get_flag(.ResolvedSign), "expected resolved sign");  // TODO: debug
+            assert(!new_func.get_flag(.AllowRtCapture), "expected no runtime capture"); // TODO: debug
+            prev := new_func.scope.unwrap();
+            old_scope := self.scopes[prev]&;
+            id := self.scopes.new_scope(old_scope.parent, old_scope.block_in_parent);
+            old_scope := self.scopes[prev]&;
+            
+            // Note: it has to iterate and check more and more each time (but it only copies what's needed). -- Jun 29
+            each old_scope.vars { block | 
+                new_vars: List(Var) = list(self.get_alloc());
+                for block.vars { old | 
+                    if mapping&.get_ptr(old) { new |
+                        new_vars&.push(new[]);
+                    };
+                };
+                new_constants: HashMap(Symbol, Var) = init(self.get_alloc());
+                each block.const_lookup& { (k, v) |
+                    if mapping&.get_ptr(v[]) { new |
+                        v := self.scopes.get_constant(v[]);
+                        v := v.unwrap(); // TODO: destructure through a pointer? 
+                        expr := self.clone(v._0&);
+                        ty := self.clone(v._1&);
+                        self.scopes.put_constant(new[], expr, ty);
+                        new_constants&.insert(new.name, new[]);
+                    };
+                };
+                b: BlockScope = (vars = new_vars, const_lookup = new_constants, parent = block.parent);
+                self.scopes[id].vars&.push(b);
+            };
+        
+            new_func.scope = (Some = id);
+        };
+    } else {
+        assert(!new_func.get_flag(.ResolvedBody), "resolved body");
+    };
 }
 
 fn curry_const_args_inner(self: *SelfHosted, original_f: FuncId, new_fid: FuncId, f_expr: *FatExpr, arg_expr: *FatExpr, initial_removed_count: i64) Maybe(FuncId) = {
@@ -2978,7 +3025,7 @@ fn handle_declare_constant(self: *SelfHosted, name: Var, ty: *LazyType, value: *
     //    @check(self.can_assign(ty, value.ty)) return;
     //};
     
-    self.finish_layout_deep(value.ty).unwrap();
+    self.finish_layout_deep(value.ty);
     
     .Ok
 }
@@ -3202,8 +3249,13 @@ fn can_assign(self: *SelfHosted, want: Type, found: Type) Maybe(void) = {
 fn ask_can_assign(self: *SelfHosted, want: Type, found: Type) bool = {
     if(want == found, => return(true));
     if(found == Never, => return(true));
-    if(want == Never, => return(true)); // TODO: sketch. i think this might be a mistake in the old compiler
-    if(want == UnknownType, => return(true)); // TODO: remove
+    // you only need this if you have fn loop($f: Fn(void, void)) Never = @loop(f()); it works if the arg type is just FuncId
+    //if(want == Never, => { @println("sketch %", self.log_type(found)); self.codemap.show_error_line(self.last_loc); return(true); }); // TODO: sketch. i think this might be a mistake in the old compiler
+    
+    // dont seem to need this
+    //if(want == UnknownType, => return(true)); // TODO: remove
+    
+    // do need this tho sadly. TODO: fix me!
     if(found == UnknownType, => return(true)); // TODO: remove
     want_info  := self.get_type(want);
     found_info := self.get_type(found);
@@ -3354,13 +3406,10 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
                 // SAFETY: we're passing comp_ctx=false so it won't try to use the pointer as a real CompilerRs.
                 result := hack&.call_dynamic(fn_ptr.int_from_rawptr(), f_ty&, args&, false);
                 self.dispatch.enclosing_function = old_func;
-                ::tagged(Result(Values, ParseErr));  // :sema_regression order?
-                if result&.is(.Err) {
-                    return(Err = self.box(result.Err));
-                };
-                expr.expr = (Value = (bytes = result.Ok&.deep_clone(self.get_alloc()), coerced = false));
+                result := @try(result) return;
+                expr.expr = (Value = (bytes = result&.deep_clone(self.get_alloc()), coerced = false));
                 expr.done = true;
-                return(Ok = result.Ok);
+                return(Ok = result);
             };
             self.dispatch.enclosing_function = old_func;
             return(Suspend = self.wait_for(Jit = fid));
@@ -3520,7 +3569,7 @@ fn check_quick_eval(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) ?Values = {
                                 fn Err(e) => {
                                     @println("ERROR: %", e.msg);
                                 } // TODO: don't just swollow errors
-                            }
+                            };
                         };
                     };
                 };
@@ -3791,7 +3840,7 @@ fn enum_macro(self: *SelfHosted, arg: *FatExpr, target: *FatExpr) Maybe(FatExpr)
                 fields&.push(@as(F) (name, value));
             };
         }
-        @default => return(@error("@enum expected struct literal or tuple of names"));
+        @default => return(@err("@enum expected struct literal or tuple of names"));
     };
     unique_ty := self.intern_type(Enum = (raw = type, fields = fields.rs(), sequential = sequential));
     ty_value := self.to_values(Type, unique_ty); // :get_or_create_type

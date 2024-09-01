@@ -141,7 +141,7 @@ fn clone(self: *Values, a: Alloc) Values = {
     }
 }
 
-fn tuple_of(self: *SelfHosted, types: []Type) Type #compiler = {
+fn tuple_of(self: *SelfHosted, types: []Type) Type = {
     @switch(types.len()) {
         @case(0) => void;
         @case(1) => types[0];
@@ -204,7 +204,7 @@ fn err(arg: FatExpr) FatExpr #macro = {
         return(@{ (Err = make_error(@[arg])) });
     };
     @{
-        out: List(u8) = list(temp());
+        out: List(u8) = list(libc_allocator);
         @[ format_into(@{ out& }, arg.expr.Tuple.items(), arg.loc) ];
         (Err = make_error(out.items()))
     }
@@ -422,11 +422,14 @@ fn TagBitIndex($T: Type, $magic_offset: i64) void = {
     }
 }
 
-// must match ast.rs
+fn funcid_from_index(f: i64) FuncId = from_index(f);
+
+
+:: TagBitIndex(FuncId, 30);
 :: TagBitIndex(OverloadSet, 28);
 :: TagBitIndex(LabelId, 27);
 
-fn unique_const(self: *SelfHosted, name: Symbol) Var = {
+fn unique_const(self: *SelfHosted, name: Symbol) Var #once = {
     // TODO: expose a function for this!
     self.scopes.dup_var(
         kind = .Const,
@@ -589,3 +592,54 @@ fn is_const(self: *FatExpr) bool = {
     }
 }
 
+fn ident(name: Flag) Symbol = {
+    symbol_from_id((@as(i64) name).trunc())
+}
+
+Flag :: @enum(i64) (
+    toplevel,
+    include_std,
+    Anon,
+    
+    // These are function #tags that the compiler knows about. 
+    log_bc, log_asm, log_ir, log_ast, log_asm_bc,
+    cold, inline, noinline, asm, c_call, unsafe_noop_cast, 
+    import, intrinsic, libc, redirect, comptime_addr,
+    once, fold, no_trace, ct, outputs, macro, 
+    link_rename, generic, 
+    llvm, aarch64, x86, qbe, c,
+    no_tail, // TOOD: HACK. stack ptr/slice arg is UB so have to manually use this! not acceptable!
+    
+    // These are variables that are automatically shadowed in new scopes. 
+    return, local_return,
+    
+    // These are macros that need to be called before we've compiled enough to evaluate the type FatExpr.
+    builtin, type, struct, tagged, enum, late,
+    
+    // This is a magic blessed macro with no implementation but recognised by name. 
+    rec, 
+    
+    // These are operators that have syntax desugaring. 
+    add, sub, mul, div, lt, gt, ge, le, eq, ne, neg, not, and,
+    operator_squares_prefix, operator_star_prefix, operator_question_prefix,  operator_index,
+    operator_plus_equal, operator_minus_equal, operator_star_equal, operator_slash_equal,
+    __string_escapes,
+    
+    // These can be used with @builtin.
+    OverloadSet, ScopeId, FuncId, LabelId, Symbol, i64, bool, true, false, void, Type, rawptr, Never, f64, f32, UnknownType,
+    compiler_debug_assert_eq_i64,  // this is maybe helpful for debugging the compiler when nothing works at all. 
+    
+    // These must be in order because tuple field names use them and compute by offsetting Flag._0.raw().
+     _0,  _1,  _2,  _3,  _4,  _5,  _6,  _7,  _8,  _9, 
+    _10, _11, _12, _13, _14, _15, _16, _17, _18, _19, _20,
+);
+
+fn typeid_from_index(idx: i64) Type = {
+    magic_offset :: 31;  // must match ast.rs
+    val: u32 = 1.shift_left(magic_offset).bit_or(idx).trunc(); // TODO: better error message if you typeo make this a constant. 
+    ptr_cast_unchecked(From = u32, To = Type, ptr = val&)[]
+}
+
+fn get_build_options(c: *SelfHosted) *BuildOptions = {
+    BuildOptions.ptr_from_raw(c.env.build_options)
+}

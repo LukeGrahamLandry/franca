@@ -36,26 +36,22 @@ fn default_driver_exports() ExportVTable = {
 
 fn resolve_comptime_import(self: *SelfHosted, fid: FuncId, func: *Func, lib_name: Symbol) void = {
     // TODO: allow it to tell us no that doesn't exist
-    has_driver_handler := !self.env.driver_vtable_ptr.is_null(); // TODO: garbage
-    if has_driver_handler {
-        vtable := ExportVTable.ptr_from_raw(self.env.driver_vtable_ptr);
-        if vtable.resolve_comptime_import { callback | 
-            legacy := self.legacy_indirection;
-            // TODO: whose job is it to deal with :link_rename?
-            @match(callback(self.env.driver_vtable_user_data, legacy, fid, lib_name, func.name)) {
-                fn Some(addr) => {
-                    impls := self.get_alloc().alloc(FuncImpl, 2);
-                    impls[0] = (ComptimeAddr = addr.int_from_rawptr());
-                    impls[1] = (DynamicImport = func.name);
-                    func.body = (Merged = impls.rs());
-                    self.aarch64&.extend_blanks(fid);
-                    self.aarch64.dispatch[fid.as_index()] = addr;
-                }
-                fn None() => {
-                    // TODO: warn? have different #import that means we expect not at comptime?
-                    func.body = (DynamicImport = func.name);
-                }
-            };
+    opts := self.get_build_options();
+    if opts.driver_vtable_ptr.resolve_comptime_import { callback | 
+        legacy := self.legacy_indirection;
+        // TODO: whose job is it to deal with :link_rename?
+        @match(callback(opts.driver_vtable_user_data, legacy, fid, lib_name, func.name)) {
+            fn Some(addr) => {
+                impls := self.get_alloc().alloc(FuncImpl, 2);
+                impls[0] = (ComptimeAddr = addr.int_from_rawptr());
+                impls[1] = (DynamicImport = func.name);
+                func.body = (Merged = impls.rs());
+                self.put_jitted_function(fid, addr);
+            }
+            fn None() => {
+                // TODO: warn? have different #import that means we expect not at comptime?
+                func.body = (DynamicImport = func.name);
+            }
         };
     };
 }

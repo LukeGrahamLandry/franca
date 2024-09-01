@@ -66,83 +66,6 @@ OverloadKey :: @struct(arg: Type, req: Type);
 
 PRes :: Result(void, *ParseErr);
 
-fn new_sema_init_vtable() *ImportVTable = {
-    the_vtable :: @static(ImportVTable);
-    vtable := the_vtable;
-    vtable[] = ImportVTable.zeroed();
-    
-    // TODO: scan overload sets instead so you can skip all the groups with the same name. :SLOW
-    vtable.find_unique_func = fn(c: Compiler, name: Symbol) ?FuncId = { 
-        c := c.cast()[][];
-        found: ?FuncId = .None;
-        range(0, c.functions.len) { i |
-            func := c.functions&.nested_index(i);
-            if func.name == name {
-                if(found.is_some(), => return(.None));
-                found = (Some = (@as(u32) i.trunc()).funcid_from_index());
-            };
-        };
-        found
-    };
-    
-    vtable.get_jitted_ptr = fn(c: Compiler, f: FuncId) CRes(rawptr) = {
-        self := c.cast()[][];
-        vtable := the_vtable;
-        res := self.poll_in_place(rawptr) { () Maybe(rawptr) |
-            @match(self.aarch64&.get_fn(f)) {
-                fn Some(ptr) => (Ok = ptr);
-                fn None() => (Suspend = self.wait_for(Jit = f));
-            }
-        };
-        ptr := self.unwrap_report_error(rawptr, res);
-        r: CRes(rawptr) = (Ok = ptr); // TODO: fix prims llvm. -- Jul 29
-        r
-    };
-    
-    vtable.init_compiler = fn(comptime_arch: Backend, options: *BuildOptions) Compiler = {
-        vtable := the_vtable;
-        mem := init_self_hosted(options);
-        mem.vtable = vtable;
-        mem.env.new_sema = true;
-        mem.legacy_indirection
-    };
-    
-    vtable.compile_func = fn(c: Compiler, f: FuncId, when: ExecStyle) CRes(void) = {
-        self := c.cast()[][];
-        res := self.poll_in_place(void) { () Maybe(void) |
-            func := self.get_function(f);
-            if func.get_flag(.EnsuredCompiled) {
-                .Ok
-            } else {
-                assert(!self.dispatch.function_in_progress&.get(f.as_index()), "unhanlded mutual recursion");
-                self.dispatch.function_in_progress&.set(f.as_index());
-                (Suspend = self.wait_for(CompileBody = f))
-            }
-        };
-        self.unwrap_report_error(void, res);
-        .Ok
-    };
-    
-    vtable.get_compiler_builtins_source = fn() Str = {
-        ""
-    };
-    
-    vtable.make_and_resolve_and_compile_top_level = fn(cc: Compiler, body: Slice(FatStmt)) CRes(void) = {
-        c := cc.cast()[][];
-        f := c.make_top_level(body);
-        f := f.unwrap();
-        @try({the_vtable[].compile_func}(cc, f, .Jit)) return;
-        .Ok
-    };
-    
-    vtable.comptime_arch = fn() Ty(Arch, Os) = {
-        // TODO
-        (.Aarch64, .Macos)
-    };
-   
-    the_vtable
-}
-
 make_top_level :: fn(c: *SelfHosted, body: Slice(FatStmt)) Res(FuncId) = {
     name := c.pool.insert_owned("@toplevel@");
     loc := body[0].loc;
@@ -153,8 +76,7 @@ make_top_level :: fn(c: *SelfHosted, body: Slice(FatStmt)) Res(FuncId) = {
     arg: Pattern = (bindings = bindings.rs(), loc = loc);
     def: FnDef = (name = (Some = name), arg = arg, ret = (Finished = void), tags = list(temp()), loc = loc);
     func := make_func(def, (Some = result), false);
-    r := c.resolve_root(func&, scope_from_index(0));  // TODO: more usable @try
-    assert(r&.is_ok(), "failed to resolve top level");
+    r := @try(c.resolve_root(func&, scope_from_index(0))) return;  
     f := c.add_function(func);
     return(Ok = f)
 };
@@ -172,8 +94,9 @@ fn update_global_stdlib_path() void = {
     };
 }
 
-fn self_hosted_main(vtable: *ImportVTable, use_new_sema: bool) void #compiler #no_trace = {
+fn self_hosted_main() void = {
     :: by_the_way_you_are_compiling_the_compiler_right_now_just_a_helpful_hint();
+    vtable := init_driver_vtable();
     if RUNTIME_STACK_TRACE {
         get_panic_hook()[] = new_print_trace_and_abort;
         println(">>> Compiler running in slow mode.");
@@ -191,22 +114,20 @@ fn self_hosted_main(vtable: *ImportVTable, use_new_sema: bool) void #compiler #n
   
     filename := args[1].str();
     
-    my_vtable := vtable[];
-    my_vtable&.fill_driver_vtable();
     
     if filename == "-lsp" {
         @if(ENABLE_LSP, {
-            lsp_main(my_vtable&);
+            lsp_main(vtable);
             exit(0);
         }, panic("argument '-lsp' not supported by this build of the compiler"));
     };
     
     if filename == "-go-build-yo-self" {
-        go_build_yo_self(my_vtable&);
+        go_build_yo_self(vtable);
         exit(0);
     };
     
-    @match(run_franca_file(my_vtable&, filename, use_new_sema)) {
+    @match(run_franca_file(vtable, filename)) {
         (fn Ok(_) => exit(0));
         (fn Err(e) => exit(1));
     };
@@ -218,7 +139,11 @@ fn self_hosted_main(vtable: *ImportVTable, use_new_sema: bool) void #compiler #n
 fn go_build_yo_self(vtable: *ImportVTable) void = {
     fn load_src(vtable: *ImportVTable) CompCtx = {
         src := temp().read_to_string("compiler/main.fr");
-        @fmt(src&, ";ENABLE_TRACY :: false; ENABLE_LSP :: false; ENABLE_QBE_BACKEND :: false;\n");
+        @fmt(src&, """;ENABLE_TRACY :: false; ENABLE_LSP :: false; 
+        ENABLE_QBE_BACKEND :: false; ENABLE_LOGGING_CALLBACKS :: false; 
+        DO_TERMINAL_COLOURS :: true; INCLUDE_COMPTIME_CRANELIFT :: false;
+        DEBUG_SPAM_LOG :: false; BOOTSTRAP_ONLY_MODE :: false;
+        """);
         opts := vtable.default_build_options();
         opts.deduplicate_bytecode = true;
         opts.retain_function_names = false;
@@ -265,50 +190,25 @@ fn go_build_yo_self(vtable: *ImportVTable) void = {
     start := timestamp();
     c := load_src(vtable);
     
-    do_build := true;
-    do_replace := false;
     args := cli_args();
-    use_new_entry_point := false;
-    for args { arg |
-        if arg.str() == "-replace-compiler" {
-            do_replace = true;
-        };
-    };
     
-    ::if([]FuncId);
-    exports: []FuncId = c.get_tagged("compiler");
+    new_main := c.get_unique_named("main").unwrap();
+    exports := (@list(new_main) temp()).items();
     
     ir_text := {c.vtable.emit_llvm}(c, temp(), exports, .ExportWithNames, get_comptime_arch());
     @println("Emitted % bytes of llvm ir.", ir_text.len);  // useful to see when i start trying to deduplicate bytecode. 
     end := timestamp();
 
     start := timestamp();
-    build_llvm(ir_text, @slice ("-o", "target/franca/libfranca.o", "-c", "-Os"));
+    build_llvm(ir_text, @slice ("-o", "target/franca/franca2", "-Os"));
     end := timestamp();
     @println("LLVM time: % ms.", end.sub(start)); 
-    
-    // build.rs needs this if it wants to build the binary (it won't take a .o file)
-    run_cmd_blocking("/usr/bin/ar", @slice (
-        "rc", "target/franca/libfranca.a", "target/franca/libfranca.o"
-    )).assert("link failed");
-    
-    // TODO: should output then move cause i think it deletes if it fails. and save the old one for a bit cause its scary. 
-    if do_replace {
-        compiler_exe_path := "target/release/franca";
-        save_temp_file := open_temp_file();
-        rename(compiler_exe_path.maybe_borrow_cstr(temp()), save_temp_file&.c_name());
-        args := @slice("target/release/libfranca.a", "target/franca/libfranca.o", "-o", compiler_exe_path, "-g");
-        run_cmd_blocking("clang", args).assert("link failed");
-        @println("Replaced your compiler at '%' with the new one. \nThe old one was saved at '%' (NOTE: THATS A TEMP FILE!)", compiler_exe_path, save_temp_file&.s_name());
-    } else {
-        println("SKIPPED REPLACING COMPILER");
-    };
 }
 
 // TODO: store this in SelfHosted instead of in a global -- Jul 5
 STDLIB_PATH :: @static(?Str) (None = unit);
 
-fn load_file_in_compiler(vtable: *ImportVTable, path: Str, use_new_sema: bool, opts: *BuildOptions) CRes(CompCtx) = {
+fn load_file_in_compiler(vtable: *ImportVTable, path: Str, opts: *BuildOptions) CRes(CompCtx) = {
     // :io_driver
     prelude := "#include_std(\"lib/core.fr\");";
     source: List(u8) = prelude.clone(libc_allocator);  // TODO: column number on error on first line will be wrong but i dont care. 
@@ -327,7 +227,6 @@ fn load_file_in_compiler(vtable: *ImportVTable, path: Str, use_new_sema: bool, o
     c := vtable.with(comp);
     file := {c.vtable.add_file}(c.data, path, source.items());
     self := c.data.cast();
-    self.env.new_sema = use_new_sema;
     
     id := self.parser.push_parse(source.items(), file);
     // TODO: handle error
@@ -338,9 +237,9 @@ fn load_file_in_compiler(vtable: *ImportVTable, path: Str, use_new_sema: bool, o
 }
 
 // TODO: print the error message!!! since this doesn't go through the rust side anymore. -- Jun 30
-fn run_franca_file(vtable: *ImportVTable, path: Str, use_new_sema: bool) CRes(void) = {
+fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
     opts := vtable.default_build_options(); 
-    c := @try(vtable.load_file_in_compiler(path, use_new_sema, opts)) return;
+    c := @try(vtable.load_file_in_compiler(path, opts)) return;
     
     mem_stats :: fn() => {
         bytes_per_mb :: 1024 * 1024;
@@ -400,12 +299,8 @@ fn get_include_std(c: *SelfHosted, name: Str) ?WaitingParse = {
     
     //@println("TODO: tried to import %", name);
     src := if name == "compiler" {() Str |
-        code := {c.vtable.get_compiler_builtins_source}().clone(c.get_alloc());
+        code: List(u8) = list(c.get_alloc());
         fill_export_ffi(code&);
-        if c.env.new_sema {
-            // TODO: sad that this will make the whole thing dynamically reachable but also its all going away so i don't really care. 
-            new_sema_fill_export_ffi(code&);
-        };
         code.items()
     }{
         lib := STDLIB_PATH[].unwrap();
@@ -480,7 +375,7 @@ fn pop_until_endswith(self: *List(u8), suffix: []u8) bool = {
 }
 
 // TODO: pass requested type through generic args so this isn't so clunky. -- Jun 23
-fn init_self_hosted(build_options: *BuildOptions) *SelfHosted #compiler = {
+fn init_self_hosted(build_options: *BuildOptions) *SelfHosted = {
     a: ArenaAlloc = init(page_allocator, 1.shift_left(23));
     arena := a&.borrow().boxed(ArenaAlloc, a);
     a := arena.borrow();
@@ -517,11 +412,6 @@ fn init_self_hosted(build_options: *BuildOptions) *SelfHosted #compiler = {
         intrinsic_type = .None,
         build_options = BuildOptions.raw_from_ptr(build_options),
         unquote_placeholders = .None,
-        // TODO: i should be setting this to real memory will all the fields .None because rust will be looking at it
-        //       i think this just happens to work because i always set it to something else in the driver program. 
-        driver_vtable_ptr = ExportVTable.raw_from_ptr(build_options.driver_vtable_ptr),  
-        driver_vtable_user_data = build_options.driver_vtable_user_data,
-        new_sema = false,
         link_rename_arg = .None,
     );
     env := a.boxed(ComptimeEnvironment, env);
@@ -549,6 +439,12 @@ fn init_self_hosted(build_options: *BuildOptions) *SelfHosted #compiler = {
         dispatch = init(a),
     );
     self&.init_fixed_types();
+    
+    enumerate (::get_enum_names(Flag)) {i, name|
+        s := self.pool.insert_owned(name[]);
+        assert_eq(i, @as(i64) s.id().zext());
+    };
+    
     self := a.boxed(SelfHosted, self);
     
     stable_compiler_context :: fn(self: *SelfHosted) Compiler = {
@@ -572,37 +468,25 @@ fn init_self_hosted(build_options: *BuildOptions) *SelfHosted #compiler = {
     self
 }
 
-fn get_function(self: *SelfHosted, fid: FuncId) *Func #compiler #inline = {
+fn get_function(self: *SelfHosted, fid: FuncId) *Func #inline = {
     self.functions&.nested_index(fid.to_index().zext())
 }
 
-fn add_function(self: *SelfHosted, f: Func) FuncId #compiler = {
+fn add_function(self: *SelfHosted, f: Func) FuncId = {
     self.functions&.push(f);
-    i: u32 = self.functions.len.sub(1).trunc();
+    i := self.functions.len - 1;
     funcid_from_index(i)
 }
 
 fn get_alloc(self: *SelfHosted) Alloc = self.ast_alloc.borrow();
 fn get_alloc(self: CompilerRs) Alloc = self[][].get_alloc();
 
-fn show_error_line(self: *CodeMap, span: Span) void #compiler = {
+fn show_error_line(self: *CodeMap, span: Span) void = {
     line := self.get_whole_line(span);
     set_colour(250, 0, 0);
     @println("%:%:%", line.filename, line.line, line.col);
     unset_colour();
     println(self.source_slice(line.line_text));
-}
-
-fn log_stmt(pool: *SelfHosted, s: *FatStmt) Str #compiler = FatStmt.export_log(pool, s);
-fn log_expr(pool: *SelfHosted, s: *FatExpr) Str #compiler = FatExpr.export_log(pool, s);
-fn log_pattern(pool: *SelfHosted, s: *Pattern) Str #compiler = Pattern.export_log(pool, s);
-fn log_func(pool: *SelfHosted, s: *Func) Str #compiler = Func.export_log(pool, s);
-fn log_lazy_type(pool: *SelfHosted, s: *LazyType) Str #compiler = LazyType.export_log(pool, s);
-
-export_log :: fn($T: Type, pool: *SelfHosted, self: *T) Str #generic = {
-    out: List(u8) = list(temp());
-    self.log(pool, out&, 0);
-    out.items()
 }
 
 fn clone(self: *SelfHosted, e: *FatExpr) FatExpr = {

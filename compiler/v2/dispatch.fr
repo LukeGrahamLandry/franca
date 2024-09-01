@@ -256,11 +256,7 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
                 if body.is(.Normal).or(body.is(.Intrinsic)) {
                     @log_event("codegen % %", fid, self.log_name(fid)) self;
                     @err_assert(!arg_ty.is_unknown() && !ret_ty.is_unknown(), "unknown fn types!!") return;
-                    hack := self.legacy_indirection.cast(); // because Bc::CompCtx stores a ***SelfHosted in the assembly
-                    //addr := (**SelfHosted).int_from_ptr(hack);
-                    //@println("hack; %", addr); 
-                    body := hack.emit_bc_and_aarch64(fid, .Jit);
-                    if(body&.is_err(), => return(Err = self.box(body.Err)));
+                    body := @try(self.emit_bc_and_aarch64(fid, .Jit)) return;
                     // TODO: not true for rediurects????
                     //@debug_assert(self.aarch64&.get_fn(fid).is_some(), "we just emitted but no pointer?? %", func.log(self));
                     return(Ok = true);
@@ -270,13 +266,7 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
                         ptr := or self.aarch64&.get_fn(target[]) {
                             return(Suspend = self.wait_for(Jit = target[]))
                         };
-                        // TODO: save in constants lookup too if take address 
-                        self.aarch64&.extend_blanks(fid);
-                        self.aarch64.dispatch[fid.as_index()] = ptr;
-                        
-                        if func.get_flag(.TookPointerValue) {
-                            self.created_jit_fn_ptr_value(fid, ptr.int_from_rawptr());
-                        };
+                        self.put_jitted_function(fid, ptr);
                     };
                     fn ComptimeAddr(_) => unreachable("ICE: comptime addr is done before.");
                     // TODO: do this before too? 
@@ -293,9 +283,8 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
                 (Ok = true)
             };
             
-            // TODO: only when .TookPointerValue
+            // TODO: make copy_inline_asm and save_current just call put_jitted_ptr? 
             if func.get_flag(.TookPointerValue) {
-                //ptr := self.aarch64&.get_fn(fid).expect("have jit addr"); // not true for redirects
                 if self.aarch64&.get_fn(fid) { ptr | 
                     self.created_jit_fn_ptr_value(fid, ptr.int_from_rawptr());
                 };
@@ -347,6 +336,17 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
     };
     .Ok
 }
+
+// TODO: not called by aarch64.fr save_current/copy_inline_asm
+// TODO: factor out the dispatch table from the aarch64 backend. 
+put_jitted_function :: fn(self: *SelfHosted, f: FuncId, addr: rawptr) void = {
+    self.aarch64&.extend_blanks(f);
+    self.aarch64.dispatch[f.as_index()] = addr;
+    func := self.get_function(f);
+    if func.get_flag(.TookPointerValue) {
+        self.created_jit_fn_ptr_value(f, addr.int_from_rawptr());
+    };
+};
 
 fn is_mutually_recursive(task: *Task, callee: FuncId) bool = {
     //while => task.waiting_for.is_some() {

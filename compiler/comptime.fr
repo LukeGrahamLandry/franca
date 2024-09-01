@@ -1,10 +1,78 @@
 //! There are two contexts for compile-time execution in this language. 
-//! - fill_driver_vtable: The driver program where you're logically aware of the outside world and might have multiple compiler instances doing different things. 
+//! - init_driver_vtable: The driver program where you're logically aware of the outside world and might have multiple compiler instances doing different things. 
 //! - fill_export_ffi: Within the program like '::' expressions and macros, where you're only aware of the current compiler instance. 
 //! In the latter, you don't manually pass the compiler context pointer to every function. 
 //! These corrispond to Zig's build.zig vs comptime and Rust's build.rs vs proc-macros/const-fns. 
 
-fn fill_driver_vtable(vtable: *ImportVTable) void = {
+fn init_driver_vtable() *ImportVTable = {
+    the_vtable :: @static(ImportVTable);
+    vtable := the_vtable;
+    vtable[] = ImportVTable.zeroed();
+    
+    // TODO: scan overload sets instead so you can skip all the groups with the same name. :SLOW
+    vtable.find_unique_func = fn(c: Compiler, name: Symbol) ?FuncId = { 
+        c := c.cast()[][];
+        found: ?FuncId = .None;
+        range(0, c.functions.len) { i |
+            func := c.functions&.nested_index(i);
+            if func.name == name {
+                if(found.is_some(), => return(.None));
+                found = (Some = i.funcid_from_index());
+            };
+        };
+        found
+    };
+    
+    vtable.get_jitted_ptr = fn(c: Compiler, f: FuncId) CRes(rawptr) = {
+        self := c.cast()[][];
+        vtable := the_vtable;
+        res := self.poll_in_place(rawptr) { () Maybe(rawptr) |
+            @match(self.aarch64&.get_fn(f)) {
+                fn Some(ptr) => (Ok = ptr);
+                fn None() => (Suspend = self.wait_for(Jit = f));
+            }
+        };
+        ptr := self.unwrap_report_error(rawptr, res);
+        r: CRes(rawptr) = (Ok = ptr); // TODO: fix prims llvm. -- Jul 29
+        r
+    };
+    
+    vtable.init_compiler = fn(comptime_arch: Backend, options: *BuildOptions) Compiler = {
+        vtable := the_vtable;
+        mem := init_self_hosted(options);
+        mem.vtable = vtable;
+        mem.legacy_indirection
+    };
+    
+    vtable.compile_func = fn(c: Compiler, f: FuncId, when: ExecStyle) CRes(void) = {
+        self := c.cast()[][];
+        res := self.poll_in_place(void) { () Maybe(void) |
+            func := self.get_function(f);
+            if func.get_flag(.EnsuredCompiled) {
+                .Ok
+            } else {
+                assert(!self.dispatch.function_in_progress&.get(f.as_index()), "unhanlded mutual recursion");
+                self.dispatch.function_in_progress&.set(f.as_index());
+                (Suspend = self.wait_for(CompileBody = f))
+            }
+        };
+        self.unwrap_report_error(void, res);
+        .Ok
+    };
+    
+    vtable.make_and_resolve_and_compile_top_level = fn(cc: Compiler, body: Slice(FatStmt)) CRes(void) = {
+        c := cc.cast()[][];
+        f := c.make_top_level(body);
+        f := f.unwrap();
+        @try({the_vtable[].compile_func}(cc, f, .Jit)) return;
+        .Ok
+    };
+    
+    vtable.comptime_arch = fn() Ty(Arch, Os) = {
+        // TODO
+        (.Aarch64, .Macos)
+    };
+   
     vtable.add_file = add_file;
     vtable.parse_stmts = parse_stmts;
     vtable.intern_string = intern_string;
@@ -17,14 +85,6 @@ fn fill_driver_vtable(vtable: *ImportVTable) void = {
     vtable.make_jitted_exec = fn(c: Compiler) void = {
         c := c.cast()[][]; // TODO: can't inline cause it confuses deduplicator. -- Jul 29
         c.aarch64&.bump_dirty();
-    };
-    // hack because rust wants to read the fields from the wrong place
-    vtable.update_vtable = fn(c: Compiler) void = {
-        c := c.cast()[][];
-        build_options := c.get_build_options();
-        assert(c.env.driver_vtable_user_data.is_null(), "tried to stomp in update_vtable. you don't need to call it if it was set before creating the compiler");
-        c.env.driver_vtable_ptr = ExportVTable.raw_from_ptr(build_options.driver_vtable_ptr);
-        c.env.driver_vtable_user_data = build_options.driver_vtable_user_data;
     };
     vtable.destroy_compiler = fn(c: Compiler) void = {
         c := c.cast()[][];
@@ -42,10 +102,7 @@ fn fill_driver_vtable(vtable: *ImportVTable) void = {
         mem.ptr
     };
     
-    
-    @if(ENABLE_QBE_BACKEND) {
-        vtable.emit_qbe = emit_qbe; // TODO: have a compile option to not include the things you don't need for bootstrapping. so i can commit a smaller blob. 
-    };
+    the_vtable
 }
 
 CompilerRs :: ***SelfHosted;  // TODO: really this should be a new type so you can't accidently implement call functions by just adding extra indirection. hopefully the number of pointers makes it clear something's weird. 
@@ -57,11 +114,11 @@ fn add_file(c: Compiler, name: Str, content: Str) Span = {
     c.codemap.add_file(name, content)
 }
 
-fn parse_stmts(c: Compiler, f: *Span) Result(Slice(FatStmt), ParseErr) = {
+fn parse_stmts(c: Compiler, f: *Span) Res(Slice(FatStmt)) = {
     c := c.cast();
     source := c.codemap.source_slice(f[]);
     id := c.parser.push_parse(source, f[]);
-    stmts := @try_deref_err(c.parser.finish_pending_stmts(id)) return; // TODO: don't return RsVec -- Jun 29
+    stmts := @try(c.parser.finish_pending_stmts(id)) return; // TODO: don't return RsVec -- Jun 29
     (Ok = stmts.items())
 }
 
@@ -84,7 +141,7 @@ fn get_baked(c: Compiler, id: BakedVarId) BakedVar = {
 fn get_fns_with_tag(c: Compiler, tag: Symbol) [] FuncId = {
     c := c.cast();
     found: List(FuncId) = list(temp());
-    i: u32 = 0;
+    i := 0;
     each c.functions& { func |
         continue :: local_return;
         // TODO: defer { i += 1; };
@@ -138,7 +195,7 @@ fn fill_export_ffi(out: *List(u8)) void = {
     @fmt(out, "fn loop(e: FatExpr) FatExpr #macro #ct #comptime_addr(%);\n", loop_node);
     loop_node: rawptr : fn(c: CompilerRs, e: FatExpr) FatExpr = {
         e := c[][].box(e);
-        (expr = (Loop = e), loc = e.loc, ty = UnknownType, done = false)
+        (expr = (Loop = e), loc = e.loc, ty = Never, done = false)
     };
     
     // TODO it saves ~60/990 ms to have this be a constant instead of an overload set. 
@@ -237,14 +294,25 @@ fn fill_export_ffi(out: *List(u8)) void = {
         if(check.raw() >= build_options.safety_checks&.len(), => return(true)); // allow adding new safety checks and then bootstrapping. 
         build_options.safety_checks&.index(check)[]
     }
-     
-    @fmt(out, "fn get_type_info_ref(T: Type) *TypeInfo #fold #ct #comptime_addr(%);\n", ty_info);
-    ty_info: rawptr : fn(c: CompilerRs, ty: Type) *TypeInfo = {
+    
+    // TODO: if you name the thing something that collides, the error message is wrong. 
+    @fmt(out, "fn get_type_info_ref(T: Type) *TypeInfo #fold #ct #comptime_addr(%);\n", ty_info_r);
+    ty_info_r: rawptr : fn(c: CompilerRs, ty: Type) *TypeInfo = {
         info := c[][].get_type(ty);
         while => info.is(.Named) {
             info = c[][].get_type(info.Named._0);
         };
         info
+    };
+    
+    // TODO: redundant with get_type_info_ref. just impl this in the language.
+    @fmt(out, "fn get_type_info(T: Type) TypeInfo #fold #ct #comptime_addr(%);\n", ty_info);
+    ty_info: rawptr : fn(c: CompilerRs, ty: Type) TypeInfo = {
+        info := c[][].get_type(ty);
+        while => info.is(.Named) {
+            info = c[][].get_type(info.Named._0);
+        };
+        info[]
     };
     
     @fmt(out, "fn Ty(fst: Type, snd: Type) Type #fold #ct #comptime_addr(%);\n", tuple2);
@@ -265,13 +333,7 @@ fn fill_export_ffi(out: *List(u8)) void = {
     
     @fmt(out, "fn rawptr_from_value(value: *Values) rawptr #comptime_addr(%);\n", rawptr_from_value);
     rawptr_from_value: rawptr : fn(value: *Values) i64 = value.jit_addr();
-}
-
-fn get_build_options(c: *SelfHosted) *BuildOptions = {
-    BuildOptions.ptr_from_raw(c.env.build_options)
-}
-
-fn new_sema_fill_export_ffi(out: *List(u8)) void = {
+    
     @fmt(out, "fn Tag(tagged: Type) Type #fold #ct #comptime_addr(%);\n", get_tag);
     get_tag: rawptr : fn(c: CompilerRs, tagged: Type) Type = {
         raw := c[][].raw_type(tagged);
@@ -287,6 +349,7 @@ fn new_sema_fill_export_ffi(out: *List(u8)) void = {
         c[][].intern_type(Fn = (arg = arg, ret = ret, arity = c[][].arg_types(arg).len().trunc()))
     };
     
+   
     @fmt(out, "fn IntType(bits: i64, signed: bool) Type #fold #ct #comptime_addr(%);\n", make_int_type);
     make_int_type: rawptr : fn(c: CompilerRs, bit_count: i64, signed: bool) Type = {
         c[][].intern_type(Int = (bit_count = bit_count, signed = signed))
@@ -395,6 +458,7 @@ fn new_sema_fill_export_ffi(out: *List(u8)) void = {
     empty_struct_literal :: fn(loc: Span) FatExpr = {
         (expr = (StructLiteralP = (bindings = empty(), loc = loc)), loc = loc, ty = UnknownType, done = false)
     };
+    
     @fmt(out, "fn literal_ast(ty: Type, ptr: rawptr) FatExpr #ct #comptime_addr(%);\n", literal_ast);
     literal_ast: rawptr : fn(c: CompilerRs, ty: Type, ptr: *u8) FatExpr = {
         bytes: i64 = c[][].get_info(ty)[].stride_bytes.zext();
@@ -456,7 +520,6 @@ fn new_sema_fill_export_ffi(out: *List(u8)) void = {
         res := self.poll_in_place(FatExpr, => self.enum_macro(arg&, target&));
         self.unwrap_report_error(FatExpr, res)
     };
-     
     // note: the old verion didn't even use this ast node, it just did the work here like @struct, et al.
     //       maybe thats better, idk, lets see if i still need the name based hack this way. -- Aug 5s
     @fmt(out, "fn as(T: FatExpr, e: FatExpr) FatExpr #macro #ct #comptime_addr(%);\n", as_node);
@@ -471,15 +534,6 @@ fn new_sema_fill_export_ffi(out: *List(u8)) void = {
     size_of: rawptr : fn(c: CompilerRs, type: Type) i64 =
         c[][].get_info(type)[].stride_bytes.zext();
     
-    // TODO: redundant with get_type_info_ref. just impl this in the language.
-    @fmt(out, "fn get_type_info(T: Type) TypeInfo #fold #ct #comptime_addr(%);\n", ty_info);
-    ty_info: rawptr : fn(c: CompilerRs, ty: Type) TypeInfo = {
-        info := c[][].get_type(ty);
-        while => info.is(.Named) {
-            info = c[][].get_type(info.Named._0);
-        };
-        info[]
-    };
     @fmt(out, "fn debug_log_ast(expr: FatExpr) void #ct #comptime_addr(%);\n", debug_log_ast);
     debug_log_ast: rawptr : fn(c: CompilerRs, e: FatExpr) void = {
         @println("[debug_log_ast] %; %", e.expr&.tag(), e&.log(c[][]));
@@ -569,6 +623,7 @@ fn new_sema_fill_export_ffi(out: *List(u8)) void = {
         e
     };
     
+    
     @fmt(out, "fn FnPtr(arg: Type, ret: Type) Type #fold #ct #comptime_addr(%);\n", fn_ptr);
     fn_ptr: rawptr : fn(c: CompilerRs, arg: Type, ret: Type) Type = {
         self := c[][];
@@ -577,8 +632,10 @@ fn new_sema_fill_export_ffi(out: *List(u8)) void = {
     };
     
     @fmt(out, "fn get_meta(s: Type) TypeMeta #fold #ct #comptime_addr(%);\n", get_m);
-    get_m: rawptr : fn(c: CompilerRs, s: Type) TypeMeta = 
-        c[][].get_info(s)[];
+    get_m: rawptr : fn(c: CompilerRs, s: Type) TypeMeta = {
+        c[][].get_info(s)[]
+    };
+    
 }
 
 unwrap_report_error :: fn(self: *SelfHosted, $T: Type, value: Res(T)) T #generic = {
@@ -606,7 +663,6 @@ fn report_error(self: *SelfHosted, msg: Str, loc: Span) Never = {
 
 //////////////////////////////////////////////////////////////////////////////
 // these are just stupid helpers to deal with the awquard multiple compiler types for calling into the rust code. 
-
 
 fn index(comp: CompilerRs, f: FuncId) *Func = {
     comp[][].get_function(f)

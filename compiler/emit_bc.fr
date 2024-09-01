@@ -121,14 +121,16 @@ ResultLoc :: @enum(i64) (PushStack, ResAddr, Discard);
 ::enum(ResultLoc);
 ::enum(ExecStyle);
 
-fn emit_bc(comp: CompilerRs, f: FuncId, when: ExecStyle) Res(*FnBody) = {
+fn emit_bc(comp: *SelfHosted, f: FuncId, when: ExecStyle) Res(*FnBody) = {
     if ALWAYS_BAKE_CONSTANTS.or(when == .Aot) {
         // :bake_relocatable_value
-        @try(comp[][].check_for_new_aot_bake_overloads()) return; 
+        @try(comp.check_for_new_aot_bake_overloads()) return; 
     };
+    func := comp.get_function(f); // TODO: you can't do this inline with a call (if comp[f]) that needs a *Func. it looks for an overload for **Func. -- Jul 5
+    
     self: EmitBc = (
-        program = comp[][], 
-        last_loc = comp[f].loc,
+        program = comp, 
+        last_loc = func.loc,
         locals = list(temp()),
         var_lookup = init(temp()),
         inlined_return_addr = init(temp()),
@@ -136,11 +138,9 @@ fn emit_bc(comp: CompilerRs, f: FuncId, when: ExecStyle) Res(*FnBody) = {
         //       the others are always just needed while working on it.
         //       then mark and reset temp at the end of this function. 
         //       have a pool and recycle old FnBodys that we decided we didn't need because they were duplicates.  
-        out_alloc = comp[][].get_alloc(),  
+        out_alloc = comp.get_alloc(),  
         is_ssa_var = empty(),
     );
-    func := comp[][].get_function(f); // TODO: you can't do this inline with a call (if comp[f]) that needs a *Func. it looks for an overload for **Func. -- Jul 5
-    
     //@println("emit_bc % % %", when, f, comp.pool.get(func.name));
     @debug_assert(func.get_flag(.EnsuredCompiled), "fn not compiled?");
     // TODO: this should be true
@@ -155,7 +155,7 @@ fn emit_bc(comp: CompilerRs, f: FuncId, when: ExecStyle) Res(*FnBody) = {
     // TODO: HACK. you want to make sure anything called inside the stack tracing functions doesn't try to trace themselves,
     //      this happens naturally by just not inserting them when not compiled yet, but you might
     //      emit_bc again later for aot. this just remembers if tracing was ready the first time we saw the function.  -- Jun 26
-    if comp[][].env.inject_function_header.is_none() {
+    if comp.env.inject_function_header.is_none() {
         func.set_flag(.NoStackTrace);
     };
     
@@ -163,8 +163,8 @@ fn emit_bc(comp: CompilerRs, f: FuncId, when: ExecStyle) Res(*FnBody) = {
     //test := comp.prim(i64);
     
     if func.has_tag(.log_ast) {
-        @println("[#log_ast %] %", f, func.log(comp[][]));
-        comp[][].codemap.show_error_line(func.loc);
+        @println("[#log_ast %] %", f, func.log(comp));
+        comp.codemap.show_error_line(func.loc);
     };
 
     self.locals&.push(list(self.out_alloc));
@@ -948,7 +948,7 @@ fn compile_expr(self: *EmitBc, result: *FnBody, expr: *FatExpr, result_location:
                     }
                 }
                 @default => {
-                    return(@error("Expr::Tuple should have struct type not %. (0/1 element tuple maybe?)", self.program.log_type(raw)));
+                    return(@err("Expr::Tuple should have struct type not %. (0/1 element tuple maybe?)", self.program.log_type(raw)));
                 };
             };
             if(result_location == .ResAddr, => { result.pop(1); });
@@ -1463,7 +1463,7 @@ fn set_deref(self: *EmitBc, result: *FnBody, place: *FatExpr, value: *FatExpr) P
             self.result_addr_depth -= 1;
             return(.Ok)
         }
-        @default => return(@error("TODO: other `place=e;` :("));
+        @default => return(@err("TODO: other `place=e;` :("));
     }
 }
 
@@ -1521,7 +1521,7 @@ fn construct_struct(self: *EmitBc, result: *FnBody, pattern: *Pattern, requested
             i := f.cases.position(fn(f) => f._0 == name).expect("case name to exist in type");
             payload_size := self.slot_count(f.cases[i]._1);
             if payload_size >= size {
-                return(@error("Enum value won't fit."));
+                return(@err("Enum value won't fit."));
             };
             value := pattern.bindings[0].default.unwrap();
             @match(result_location) {
@@ -1578,7 +1578,7 @@ fn construct_struct(self: *EmitBc, result: *FnBody, pattern: *Pattern, requested
             //
         }
         @default => {
-            return(@error("struct literal for non-(struct/tagged)"));
+            return(@err("struct literal for non-(struct/tagged)"));
         };
     };
     .Ok

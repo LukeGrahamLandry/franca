@@ -1,3 +1,11 @@
+## cleaning up
+
+- update go-build-yo-self to create v2
+- remove padding in ExportVTable
+- make enums in driver_api zero indexed
+- move Flag (fixed ident) out of driver_api and removed unused values
+- stop tagging things #compiler, remove some now unneeded functions.
+
 ## faster! (Aug 30)
 
 the old one was ~580ms safe. at the very least i should be able to match that unsafe.

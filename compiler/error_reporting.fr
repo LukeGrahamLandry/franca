@@ -416,30 +416,6 @@ fn HasLog($T: Type) void = {
 ///////////////////////////
 // TODO: should try to clean these up.
 
-
-// TODO: allow taking span as arg? take compiler as arg to put last loc? 
-fn error(arg: FatExpr) FatExpr #macro = {
-    @if(BOOTSTRAP_ONLY_MODE) {
-        arg = @{"---"};
-    };
-    if !arg.expr&.is(.Tuple) {
-        return(@{ 
-            mem := libc_allocator.alloc(ParseErr, 1);
-            e := mem.ptr;
-            e[] = (span = Span.zeroed(), msg = @[arg]);
-            (Err = e) 
-        });
-    };
-    @{
-        mem := libc_allocator.alloc(ParseErr, 1);
-        e := mem.ptr;
-        out: List(u8) = list(temp());
-        @[ format_into(@{ out& }, arg.expr.Tuple.items(), arg.loc) ];
-        e[] = (span = Span.zeroed(), msg = out.items());
-        (Err = e)
-    }
-}
-
 // @err_assert(cond, "msg %", 123) return;
 fn err_assert(arg: FatExpr, ret: FatExpr) FatExpr #macro = {
     loc := arg.loc;
@@ -456,7 +432,7 @@ fn err_assert(arg: FatExpr, ret: FatExpr) FatExpr #macro = {
     if parts.len == 2 {
         @{ 
             if !@[parts[0]] {
-                @[ret](@error(@[parts[1]]));
+                @[ret](@err(@[parts[1]]));
             };
         }
     } {
@@ -466,7 +442,7 @@ fn err_assert(arg: FatExpr, ret: FatExpr) FatExpr #macro = {
                 out: List(u8) = list(temp());
                 out&.push_all("Assertion Failed: ");
                 @[format_into(@{ out& }, parts.rest(1), arg.loc)];
-                @[ret](@error(out.items()));
+                @[ret](@err(out.items()));
             };
         }
     }
@@ -495,17 +471,11 @@ fn unwrap(arg: FatExpr, ret: FatExpr) FatExpr #macro = {
             } else {
                 format_into(@{ out& }, parts.rest(1), arg.loc)
             }];
-            @[ret](@error(out.items()));
+            @[ret](@err(out.items()));
         };
         cond.unwrap()
     }
 }
-
-fn try_deref_err(maybe: FatExpr, ret: FatExpr) FatExpr #macro= @{
-    m := @[maybe];
-    if(m&.is_err(), => @[ret](Err = m.unwrap_err()[]));
-    m.unwrap()
-};
 
 fn log_type(self: *SelfHosted, ty: Type) Str = {
     safe_rec: DynamicBitSet = empty(temp());

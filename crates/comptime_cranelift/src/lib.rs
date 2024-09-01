@@ -62,7 +62,12 @@ pub extern "C" fn franca_comptime_cranelift_init(
 }
 
 #[no_mangle]
-pub extern "C" fn franca_comptime_cranelift_emit(cl: &mut JittedCl<JITModule>, f: FuncId, body: &'static FnBody, compile_ctx_ptr: i64) {
+pub extern "C" fn franca_comptime_cranelift_emit(
+    cl: &mut JittedCl<JITModule>,
+    f: FuncId,
+    body: &'static FnBody,
+    compile_ctx_ptr: i64,
+) {
     let ctx = cl.module.make_context();
     // println!("compile_ctx_ptr = {}", compile_ctx_ptr);
     let mut e = Emit {
@@ -114,12 +119,21 @@ struct Emit<'z, M: Module> {
 }
 
 impl<'z, M: Module> Emit<'z, M> {
-    fn emit_func(&mut self, f: FuncId, mut builder_ctx: FunctionBuilderContext, mut ctx: codegen::Context) {
+    fn emit_func(
+        &mut self,
+        f: FuncId,
+        mut builder_ctx: FunctionBuilderContext,
+        mut ctx: codegen::Context,
+    ) {
         self.f = f;
         ctx.func.signature = self.make_sig(self.body.signeture);
 
         let (name, linkage) = (format!("FN{}", f.as_index()), Linkage::Export);
-        let id = self.cl.module.declare_function(&name, linkage, &ctx.func.signature).unwrap();
+        let id = self
+            .cl
+            .module
+            .declare_function(&name, linkage, &ctx.func.signature)
+            .unwrap();
         extend_options(&mut self.cl.funcs, f.as_index());
         self.cl.funcs[f.as_index()] = Some(id);
 
@@ -149,7 +163,11 @@ impl<'z, M: Module> Emit<'z, M> {
     fn emit_body(&mut self, builder: &mut FunctionBuilder) {
         self.vars.clear();
         for ty in &self.body.vars {
-            let v = builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, ty.size as u32));
+            let v = builder.create_sized_stack_slot(StackSlotData::new(
+                StackSlotKind::ExplicitSlot,
+                ty.size as u32,
+                8,
+            )); // TODO: is last arg align?
             self.vars.push(v);
         }
 
@@ -232,7 +250,8 @@ impl<'z, M: Module> Emit<'z, M> {
                         }
                         builder.ins().call(callee, args)
                     } else {
-                        let addr = unsafe { ((*self.cl.vtable).get_jitted_function)(self.cl.data, f) };
+                        let addr =
+                            unsafe { ((*self.cl.vtable).get_jitted_function)(self.cl.data, f) };
                         let callee = match addr {
                             BigOption::Some(addr) => builder.ins().iconst(I64, addr as i64),
                             BigOption::None => {
@@ -240,12 +259,18 @@ impl<'z, M: Module> Emit<'z, M> {
                                 //       its just annoying because then i need to make sure i know if im supposed to be declaring
                                 //       or jsut waiting on it to be done by a different backend if i want to allow you mixing them    -- May 16
                                 let dispatch = builder.ins().iconst(I64, self.cl.dispatch_ptr);
-                                builder.ins().load(I64, MemFlags::new(), dispatch, f.as_index() as i32 * 8)
+                                builder.ins().load(
+                                    I64,
+                                    MemFlags::new(),
+                                    dispatch,
+                                    f.as_index() as i32 * 8,
+                                )
                             }
                         };
                         let cl_sig = self.make_sig(sig);
                         let sl_sig = builder.import_signature(cl_sig);
-                        let args = &self.stack[self.stack.len() - sig.arg_slots()..self.stack.len()];
+                        let args =
+                            &self.stack[self.stack.len() - sig.arg_slots()..self.stack.len()];
 
                         let call = builder.ins().call_indirect(sl_sig, callee, args);
                         if tail {
@@ -286,22 +311,33 @@ impl<'z, M: Module> Emit<'z, M> {
                     }
                 }
                 Bc::PushConstant { value, ty } => match ty {
-                    Prim::P64 | Prim::I8 | Prim::I16 | Prim::I32 | Prim::I64 => self.stack.push(builder.ins().iconst(primitive(ty), value)),
+                    Prim::P64 | Prim::I8 | Prim::I16 | Prim::I32 | Prim::I64 => {
+                        self.stack.push(builder.ins().iconst(primitive(ty), value))
+                    }
                     Prim::F64 => {
                         let v = builder.ins().iconst(I64, value);
-                        self.stack.push(builder.ins().bitcast(F64, MemFlags::new(), v));
+                        self.stack
+                            .push(builder.ins().bitcast(F64, MemFlags::new(), v));
                     }
                     Prim::F32 => {
                         let v = builder.ins().iconst(I32, value);
-                        self.stack.push(builder.ins().bitcast(F32, MemFlags::new(), v));
+                        self.stack
+                            .push(builder.ins().bitcast(F32, MemFlags::new(), v));
                     }
                 },
                 Bc::PushGlobalAddr { id } => {
                     let value = unsafe { ((*self.cl.vtable).get_jit_addr)(self.cl.data, id) };
                     self.stack.push(builder.ins().iconst(I64, value as i64))
                 }
-                Bc::JumpIf { true_ip, false_ip, slots } => {
-                    debug_assert_eq!(slots, 0, "this is probably fine. but not tested cause emit_bc never does it");
+                Bc::JumpIf {
+                    true_ip,
+                    false_ip,
+                    slots,
+                } => {
+                    debug_assert_eq!(
+                        slots, 0,
+                        "this is probably fine. but not tested cause emit_bc never does it"
+                    );
                     let cond = self.stack.pop().unwrap();
                     let t = self.blocks[true_ip.0 as usize];
                     let f = self.blocks[false_ip.0 as usize];
@@ -340,14 +376,20 @@ impl<'z, M: Module> Emit<'z, M> {
                         self.stack.push(builder.ins().func_addr(I64, id));
                     } else {
                         // :copy-paste
-                        let addr = unsafe { ((*self.cl.vtable).get_jitted_function)(self.cl.data, f) };
+                        let addr =
+                            unsafe { ((*self.cl.vtable).get_jitted_function)(self.cl.data, f) };
                         match addr {
                             BigOption::Some(addr) => {
                                 self.stack.push(builder.ins().iconst(I64, addr as i64));
                             }
                             BigOption::None => {
                                 let dispatch = builder.ins().iconst(I64, self.cl.dispatch_ptr);
-                                let addr = builder.ins().load(I64, MemFlags::new(), dispatch, f.as_index() as i32 * 8);
+                                let addr = builder.ins().load(
+                                    I64,
+                                    MemFlags::new(),
+                                    dispatch,
+                                    f.as_index() as i32 * 8,
+                                );
                                 self.stack.push(addr);
                             }
                         }
@@ -392,7 +434,8 @@ impl<'z, M: Module> Emit<'z, M> {
                 Bc::NoCompile => panic!("tried to compile a NoCompile block"),
                 Bc::LastUse { .. } => {}
                 Bc::PeekDup(skip) => {
-                    self.stack.push(self.stack[self.stack.len() - skip as usize - 1]);
+                    self.stack
+                        .push(self.stack[self.stack.len() - skip as usize - 1]);
                 }
                 Bc::Snipe(skip) => {
                     self.stack.remove(self.stack.len() - skip as usize - 1);
@@ -480,11 +523,13 @@ impl<'z, M: Module> Emit<'z, M> {
                         bc::Intrinsic::_Unused => unreachable!("unused intrinsic"),
                         bc::Intrinsic::IntToFloatBits => {
                             let v = self.stack.pop().unwrap();
-                            self.stack.push(builder.ins().bitcast(F64, MemFlags::new(), v))
+                            self.stack
+                                .push(builder.ins().bitcast(F64, MemFlags::new(), v))
                         }
                         bc::Intrinsic::FloatToIntBits => {
                             let v = self.stack.pop().unwrap();
-                            self.stack.push(builder.ins().bitcast(I64, MemFlags::new(), v))
+                            self.stack
+                                .push(builder.ins().bitcast(I64, MemFlags::new(), v))
                         }
                         bc::Intrinsic::ShrinkFloat => {
                             let v = self.stack.pop().unwrap();
@@ -508,11 +553,15 @@ impl<'z, M: Module> Emit<'z, M> {
                             let v = self.stack.pop().unwrap();
                             self.stack.push(builder.ins().ireduce(I16, v))
                         }
-                        bc::Intrinsic::Trunc64To8 | bc::Intrinsic::Trunc32To8 | bc::Intrinsic::Trunc16To8 => {
+                        bc::Intrinsic::Trunc64To8
+                        | bc::Intrinsic::Trunc32To8
+                        | bc::Intrinsic::Trunc16To8 => {
                             let v = self.stack.pop().unwrap();
                             self.stack.push(builder.ins().ireduce(I8, v))
                         }
-                        bc::Intrinsic::ZeroExtend32To64 | bc::Intrinsic::ZeroExtend16To64 | bc::Intrinsic::ZeroExtend8To64 => {
+                        bc::Intrinsic::ZeroExtend32To64
+                        | bc::Intrinsic::ZeroExtend16To64
+                        | bc::Intrinsic::ZeroExtend8To64 => {
                             let v = self.stack.pop().unwrap();
                             self.stack.push(builder.ins().uextend(I64, v))
                         }
@@ -541,14 +590,22 @@ impl<'z, M: Module> Emit<'z, M> {
                     for case in cases {
                         let check = builder.ins().iconst(I64, case.value);
                         let cond = builder.ins().icmp(IntCC::Equal, value, check);
-                        builder.ins().brif(cond, self.blocks[case.block.0 as usize], &[], next_block, &[]);
+                        builder.ins().brif(
+                            cond,
+                            self.blocks[case.block.0 as usize],
+                            &[],
+                            next_block,
+                            &[],
+                        );
                         let stack = self.stack.clone();
                         self.emit_block(case.block.0 as usize, builder);
                         self.stack = stack;
                         builder.switch_to_block(next_block);
                         next_block = builder.create_block();
                     }
-                    builder.ins().jump(self.blocks[default.block.0 as usize], &[]);
+                    builder
+                        .ins()
+                        .jump(self.blocks[default.block.0 as usize], &[]);
                     self.emit_block(default.block.0 as usize, builder);
                     builder.switch_to_block(next_block);
                     builder.ins().trap(TrapCode::UnreachableCodeReached);
