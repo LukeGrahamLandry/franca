@@ -57,6 +57,9 @@ BakeHandler :: @FnPtr(self: rawptr) Slice(BakedEntry);
 // TODO: i should have constant pointers as a concept in my language.
 //       right now i could check if its in the constant data arena for a hint that should catch a few of them.
 fn emit_relocatable_constant(c: *SelfHosted, ty: Type, value: *Values) Res(BakedVarId) = {
+    to_zero: ReadBytes = (bytes = value.bytes(), i = 0);
+    c.zero_padding(ty, to_zero&);  // Needed for reproducible builds!
+    
     jit_ptr := value.jit_addr();
     // TODO: this barely does anything! cause like cstr and slice don't go through this function. they call dyn_bake_relocatable_value. -- Jun 30
     //       this is the right idea, they just need to check thier pointers against the cache first. 
@@ -394,7 +397,7 @@ fn deconstruct_values(program: *SelfHosted, ty: Type, bytes: *ReadBytes, out: *L
 
     @debug_assert_eq(bytes.i.mod(info.align_bytes.zext()), 0);
     found_len := bytes.bytes.len() - bytes.i;
-    @err_assert(
+    @debug_assert(
         found_len >= info.stride_bytes.zext(),
         "deconstruct_values of % wants % bytes but found %: %",
         program.log_type(ty), info.stride_bytes, found_len, {
@@ -405,7 +408,7 @@ fn deconstruct_values(program: *SelfHosted, ty: Type, bytes: *ReadBytes, out: *L
             };
             out.items()
         }
-    ) return;
+    );
     
     single :: fn($T: Type, prim: Prim) void => {
         offset := bytes.i;
@@ -514,6 +517,74 @@ fn chop_prefix(self: *SelfHosted, prefix: Type, t: *ReadBytes) ?Values #once = {
     };
     .None
 }
+
+// You need this for reproducible builds!
+// Without calling this on when baking constants, you can leak comptime addresses in @tagged padding (which happened in get_or_create_type in the compiler).
+// TODO: decide if i need to do this for baked arg key hashing. 
+fn zero_padding(program: *SelfHosted, ty: Type, bytes: *ReadBytes) PRes = {
+    info := program.get_info(ty);
+
+    @debug_assert_eq(bytes.i.mod(info.align_bytes.zext()), 0);
+    found_len := bytes.bytes.len() - bytes.i;
+    @debug_assert(
+        found_len >= info.stride_bytes.zext(),
+        "zero_padding of % wants % bytes but found %",
+        program.log_type(ty), info.stride_bytes, found_len
+    );
+    
+    set_zeros :: fn(padding: i64) void => {
+        range(0, padding) { i |
+            bytes.bytes[bytes.i + i] = 0;
+        };
+        bytes.i += padding;
+    };
+    
+    @match(program.get_type(ty)) {
+        fn Tagged(f) => {
+            start := bytes.i;
+            tag := bytes.read_next(i64);
+            @err_assert(tag < f.cases.len, "Invalid tag % in constant", tag) return;
+            case := f.cases.index(tag);
+            @try(zero_padding(program, case._1, bytes)) return;
+            padding := (@as(i64) info.stride_bytes.zext()) - (bytes.i - start);
+            @err_assert(padding >= 0, "ICE: confused about @tagged size.") return;
+            set_zeros(padding);
+        }
+        fn Enum(f)   => return(zero_padding(program, f.raw, bytes));
+        fn Named(f)  => return(zero_padding(program, f._0, bytes)); 
+        fn Array(f) => {
+            inner_align := program.get_info(f.inner).align_bytes();
+            range(0, f.len.zext()) { _ |
+                @debug_assert_eq(bytes.i.mod(inner_align.zext()), 0);
+                @try(zero_padding(program, f.inner, bytes)) return;
+            };
+        }
+        fn Struct(f) => {
+            @err_assert(f.layout_done, "ICE: layout not ready") return;
+            prev := 0;
+            size := program.get_info(ty).stride_bytes();
+            start := bytes.i;
+            for f.fields { t |
+                continue :: local_return;
+                if t.kind == .Const {
+                    continue();
+                };
+                diff := t.byte_offset - prev;
+                assert(diff >= 0, "ICE: backwards field offset");
+                set_zeros(diff);
+                @try(zero_padding(program, t.ty, bytes)) return;
+                prev = bytes.i - start;
+            };
+            set_zeros(size.zext() - prev); // eat trailing stride padding
+        }
+        @default => {
+            // no padding
+            bytes.i += info.stride_bytes.zext();  
+        };
+    };
+    .Ok
+}
+
 
 ReadBytes :: @struct(bytes: [] u8, i: i64);
 

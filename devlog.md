@@ -14,6 +14,9 @@ maybe calling finalize_definitions on every function stresses it out.
 debug mode revealed `FunctionBuilder finalized, but block block_ is not sealed`, which i can fix with builder.seal_all_blocks at the end.
 still super flaky.
 
+in other news, added back zero_padding which fixed the easy case of reproducible builds (run the compiler twice back to back and the checksum of the binary should be the same both times).
+// TODO: should add a test for that
+
 ## cleaning up
 
 - update go-build-yo-self to create v2

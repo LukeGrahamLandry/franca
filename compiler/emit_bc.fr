@@ -173,7 +173,7 @@ fn emit_bc(comp: *SelfHosted, f: FuncId, when: ExecStyle) Res(*FnBody) = {
     
     zone := zone_begin(.EmitBc); // TODO: defer
     @if(ENABLE_TRACY) {
-        real_name := get_string(comp.cast(), func.name);
+        real_name := comp.pool.get(func.name);
         ___tracy_emit_zone_name(zone, real_name);
     };
     
@@ -904,7 +904,14 @@ fn compile_expr(self: *EmitBc, result: *FnBody, expr: *FatExpr, result_location:
                         // TODO: wrong prim!
                     };
                 }
-                fn ResAddr() => result.push(Snipe = 0); // just pop the res ptr
+                fn ResAddr() => {
+                    opts := self.program.get_build_options();
+                    if opts.zero_init_memory {
+                        self.zero_memory_at_top_of_stack(result, expr_ty);
+                    } else {
+                        result.push(Snipe = 0); // just pop the res ptr
+                    };
+                }  
                 fn Discard() => ();
             };
             return(.Ok)
@@ -970,6 +977,27 @@ fn compile_expr(self: *EmitBc, result: *FnBody, expr: *FatExpr, result_location:
         }
         @default => @panic("ICE: didn't desugar: %", expr.log(self.program));
     }
+}
+
+// consumes the pointer at the top of the stack.
+fn zero_memory_at_top_of_stack(self: *EmitBc, result: *FnBody, expr_ty: Type) void = {
+    info := self.program.get_info(expr_ty);
+    align := info.align_bytes.min(8);
+    chunks := info.stride_bytes / align;
+    prim := @switch(align) {
+        @case(1) => Prim.I8;
+        @case(2) => Prim.I16;
+        @case(4) => Prim.I32;
+        @case(8) => Prim.I64;
+        @default => panic("ICE: strange alignment");
+    };
+    range(0, chunks.zext()) { _ | 
+        result.push(PeekDup = 0); 
+        result.push(PushConstant = (value = 0, ty = prim));
+        result.push(StorePre = prim);
+        result.inc_ptr_bytes(align);
+    }; 
+    result.push(Snipe = 0); 
 }
 
 //// TODO: this would be prettier as tail calls. 

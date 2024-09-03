@@ -1185,6 +1185,40 @@ fn contextual_field(self: *SelfHosted, name: Symbol, expr_out: *FatExpr, type: T
     }
 }
 
+fn compile_call_overload_set(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(void) #once = {
+    f := expr.expr.Call.f;
+    arg := expr.expr.Call.arg;
+    os := @check(self.immediate_eval_expr(f, OverloadSet)) return;
+    os := OverloadSet.assume_cast(os&)[];
+    data := self.dispatch.overloads&.nested_index(os.as_index());
+    if data.ready.len == 1 && data.pending.len == 0 {
+        fid := data.ready[0];
+        value := self.to_values(FuncId, fid);
+        f.set(value, FuncId);
+    } else {
+        // HACK. experiment. 
+        // interesting that this doesnt work. i guess it needs help to know the type? 
+        //if Flag.if.ident() == data.name {
+        //    if arg.expr&.is(.Tuple) && arg.expr.Tuple.len == 3 {
+        //        parts := arg.expr.Tuple&;
+        //        tt := synthetic_ty((Call = (f = parts.index(1), arg = self.make_unit_expr(expr.loc))), expr.loc, UnknownType);
+        //        ff := synthetic_ty((Call = (f = parts.index(2), arg = self.make_unit_expr(expr.loc))), expr.loc, UnknownType);
+        //        expr.expr = (If = (cond = parts.index(0), if_true = self.box(tt), if_false = self.box(ff)));
+        //        return(self.compile_expr(expr, requested));
+        //    };
+        //};
+    
+        return(Suspend = self.wait_for(ResolveOverload = (
+            os = os, 
+            call = (expr = expr, requested = requested), 
+            callsite = self.dispatch.enclosing_function,
+            last_ready_count = 0,
+            options = list(self.get_alloc()),
+        )));
+    };
+    .Ok
+}
+
 ::if(ResultType);
 fn compile_call(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(void) #once = {
     @debug_assert(expr.expr&.is(.Call));
@@ -1198,34 +1232,7 @@ fn compile_call(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
     @check(self.compile_expr(f, req_fn)) return;
     
     if f.ty == OverloadSet {|  // :get_or_create_type
-        os := @check(self.immediate_eval_expr(f, OverloadSet)) return;
-        os := OverloadSet.assume_cast(os&)[];
-        data := self.dispatch.overloads&.nested_index(os.as_index());
-        if data.ready.len == 1 && data.pending.len == 0 {
-            fid := data.ready[0];
-            value := self.to_values(FuncId, fid);
-            f.set(value, FuncId);
-        } else {
-            // HACK. experiment. 
-            // interesting that this doesnt work. i guess it needs help to know the type? 
-            //if Flag.if.ident() == data.name {
-            //    if arg.expr&.is(.Tuple) && arg.expr.Tuple.len == 3 {
-            //        parts := arg.expr.Tuple&;
-            //        tt := synthetic_ty((Call = (f = parts.index(1), arg = self.make_unit_expr(expr.loc))), expr.loc, UnknownType);
-            //        ff := synthetic_ty((Call = (f = parts.index(2), arg = self.make_unit_expr(expr.loc))), expr.loc, UnknownType);
-            //        expr.expr = (If = (cond = parts.index(0), if_true = self.box(tt), if_false = self.box(ff)));
-            //        return(self.compile_expr(expr, requested));
-            //    };
-            //};
-        
-            return(Suspend = self.wait_for(ResolveOverload = (
-                os = os, 
-                call = (expr = expr, requested = requested), 
-                callsite = self.dispatch.enclosing_function,
-                last_ready_count = 0,
-                options = list(self.get_alloc()),
-            )));
-        };
+        @check(self.compile_call_overload_set(expr, requested)) return;
     };
     
     if f.ty == FuncId {|  // :get_or_create_type
@@ -2068,7 +2075,7 @@ fn type_of(self: *SelfHosted, expr: *FatExpr) Maybe(Type) = {
             };
             (Ok = val_ty)
         }
-        fn Closure(f) => {
+        fn Closure(f) => {  
             @check(self.compile_expr(expr, .None)) return;
             (Ok = expr.ty)
         }
@@ -2113,6 +2120,7 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
     if overloads.ready.len > attempt.last_ready_count {
         attempt.state = 0;
         new := overloads.ready.items().slice(attempt.last_ready_count, overloads.ready.len);
+        attempt.options&.reserve(new.len);
         for new { option | 
             if self.filter_overload_sync(arg_expr, option) {
                 @check(self.ensure_resolved_sign(option)) return; // TODO: dont let this suspend cause it cant
@@ -2140,32 +2148,21 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
         };      
     };
     
+    // TODO: should be able to move the infer_type into the next phase just before you need it but no -- Sep 2
     if attempt.state < 1 {
-        enumerate parts { arg_index, arg_expr | 
-            f_i := attempt.options.len;
-            while => f_i > 0 {
-                continue :: local_return;
-                f_i -= 1;
-                reject :: fn() void => {
-                    attempt.options&.unordered_remove(f_i);
-                    continue();
-                };
-                fid := attempt.options[f_i];
-                func := self.get_function(fid);
-                if func.arg.bindings.len != want_arity {
-                    continue();
-                };
-                b := func.arg.bindings.index(arg_index);
-                if !func.get_flag(.Generic) {
+        are_we_done_yet();
+        // TODO: while is it faster to write the loop like this than with for?
+        f_i := attempt.options.len;
+        while => f_i > 0 {
+            f_i -= 1;
+            fid := attempt.options[f_i];
+            func := self.get_function(fid);
+            if !func.get_flag(.Generic) {
+                // its slower to call infer type on the whole Pattern because that needs to create the full tuple type. 
+                each func.arg.bindings& { b |
                     @check(self.infer_type(b.ty&)) return;
                 };
-                if b.ty&.ty() { param | 
-                    if !self.can_structurally_be(arg_expr, param) {
-                        reject();
-                    };
-                };
             };
-            are_we_done_yet();
         };
         attempt.state = 1;
     };
@@ -2196,6 +2193,7 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
                 };
                 
                 b := func.arg.bindings.index(arg_index);
+                @check(self.infer_type(b.ty&)) return;
                 if b.ty&.ty() { param | 
                     if !self.ask_can_assign(param, type) {
                         if arg_expr.is_const() { // this helps with :type_through_field
@@ -2391,7 +2389,7 @@ fn filter_overload_sync(self: *SelfHosted, arg_expr: *FatExpr, fid: FuncId) bool
     want_arity := self.arity(arg_expr);
     func := self.get_function(fid);
     
-    if func.body&.is(.Empty) && func.annotations.len == 0 && func.ret&.is(.Infer) {
+    if func.body&.is(.Empty) && func.annotations.len == 0 {
         // foward declaration if an overload set. 
         return(false);
     };
@@ -3264,7 +3262,8 @@ fn ask_can_assign(self: *SelfHosted, want: Type, found: Type) bool = {
         fn Named(f) => {
             // TODO: hack because normally Named means @rec which should be transparent but the special id types also use it. 
             //       they should be changed to unique types
-            if found != OverloadSet && found != FuncId && found != Type && found != Symbol && found != LabelId && found != ScopeId {
+            // found != OverloadSet && found != FuncId && found != Type && found != Symbol && found != LabelId && found != ScopeId
+            if found.as_index() > 16 {
                 return(self.ask_can_assign(want, f._0));
             };
         }
@@ -3287,10 +3286,7 @@ fn ask_can_assign(self: *SelfHosted, want: Type, found: Type) bool = {
         }
         fn Struct(found_struct) => {
             @if_let(want_info) fn Struct(want_struct) => {
-                if found_struct.is_tuple && want_struct.is_tuple {
-                    if found_struct.fields.len != want_struct.fields.len {
-                        return(false);
-                    };
+                if found_struct.is_tuple && want_struct.is_tuple && found_struct.fields.len == want_struct.fields.len {
                     range(0, want_struct.fields.len) { i | 
                         w := want_struct.fields[i].ty;
                         f := found_struct.fields[i].ty;
@@ -3318,7 +3314,8 @@ fn ask_can_assign(self: *SelfHosted, want: Type, found: Type) bool = {
         fn Named(f) => {
             // TODO: hack because normally Named means @rec which should be transparent but the special id types also use it. 
             //       they should be changed to unique types
-            if want != OverloadSet && want != FuncId && want != Type && want != Symbol && want != LabelId && want != ScopeId {
+            // want != OverloadSet && want != FuncId && want != Type && want != Symbol && want != LabelId && want != ScopeId 
+            if want.as_index() > 16 {
                 return(self.ask_can_assign(f._0, found));
             };
         }
@@ -3369,6 +3366,30 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
     old_func := self.dispatch.enclosing_function;
     self.dispatch.enclosing_function = .None;
     ::?Values;
+    
+    @match(expr.expr&) {
+        fn Call(f) => {
+            // goes from 30000 lit_fn to 7000. saved 55/645 ms.   -- Sep 2
+            // this might fold so it should go before a check_quick_eval. 
+            @check(self.compile_call(expr, (Specific = ret_ty))) return;
+        }
+        fn ContextualField(name) => {
+            // saves 500
+            @check(self.contextual_field(name[], expr, ret_ty)) return;
+        }
+        fn String(ident) => {
+            @check(self.compile_expr(expr, (Specific = ret_ty))) return;
+        }
+        fn Closure() => {
+            // saves 500
+            @check(self.compile_expr(expr, (Specific = ret_ty))) return;
+        }
+        fn FromBitLiteral() => {
+            @check(self.compile_expr(expr, (Specific = ret_ty))) return;
+        }
+        @default => ();
+    };
+    
     if self.check_quick_eval(expr, ret_ty) { val |
         self.dispatch.enclosing_function = old_func;
         return(Ok = val);
@@ -3385,7 +3406,7 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
         //       instead of requiring void so its consistant with the fn_ptr version.
         //       tho also the call_dynamic is kinda sketchy (can only handle simple cases) and 
         //       i could just get rid of it and always generate a function that passes the arguments.    -- Jul 31
-        if f.arg.is_raw_unit() && f.f.expr&.is(.Value) && self.get_type(f.f.ty).is(.Fn).or(f.f.ty == FuncId) {
+        if expr.expr&.is(.Call) && f.arg.is_raw_unit() && f.f.expr&.is(.Value) && self.get_type(f.f.ty).is(.Fn).or(f.f.ty == FuncId) {
             fid := FuncId.assume_cast(f.f.expr.Value.bytes&)[];
             
             func := self.get_function(fid);
@@ -3453,6 +3474,7 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
     // This operation is make_lit_function from the old compiler. 
     // We know we'll yield to compile the new function, and don't want its body to alias the old expr. 
     
+    //@println("slow imm eval %", expr.log(self));
     bindings: List(Binding) = list(self.get_alloc());
     bindings&.if_empty_add_unit();
     arg: Pattern = (bindings = bindings.rs(), loc = expr.loc);
