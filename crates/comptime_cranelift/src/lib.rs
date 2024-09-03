@@ -3,6 +3,9 @@
 //! - backtrace needs to deal with pointer authentication
 //! - soemthing makes it jump into garbage when you run too many tests
 //! - signed math on smaller int types needs work because i always zero extend everything.
+//! - cranelift is broken https://github.com/bytecodealliance/wasmtime/issues/8852
+//!   "I just noticed that the assertion failure is unrelated to StructArgument. [...] I'm not sure when this assertion fires though."
+//!
 
 mod bc;
 mod ds;
@@ -12,7 +15,7 @@ use std::{
 };
 
 use bc::{BackendImportVTable, Bc, BigOption, FnBody, FuncId, Prim, PrimSig, SelfHosted};
-use codegen::ir::BlockCall;
+use codegen::control::ControlPlane;
 use cranelift::{
     codegen::{
         ir::{
@@ -67,9 +70,11 @@ pub extern "C" fn franca_comptime_cranelift_emit(
     f: FuncId,
     body: &'static FnBody,
     compile_ctx_ptr: i64,
+    log_ir: bool,
 ) {
+    assert!(!cl.pending.contains(&f));
+    cl.pending.push(f);
     let ctx = cl.module.make_context();
-    // println!("compile_ctx_ptr = {}", compile_ctx_ptr);
     let mut e = Emit {
         body,
         blocks: vec![],
@@ -81,11 +86,24 @@ pub extern "C" fn franca_comptime_cranelift_emit(
         compile_ctx_ptr,
         cl,
     };
-    e.emit_func(f, FunctionBuilderContext::new(), ctx);
+    e.emit_func(f, FunctionBuilderContext::new(), ctx, log_ir);
+    // cl.module.finalize_definitions().unwrap();
+    // let ff = cl.funcs[f.as_index()].unwrap();
+    // let addr = cl.module.get_finalized_function(ff);
+    // unsafe { ((*cl.vtable).put_jitted_function)(cl.data, f, addr as usize) };
+}
+
+#[no_mangle]
+pub extern "C" fn franca_comptime_cranelift_flush(cl: &mut JittedCl<JITModule>) {
+    if cl.pending.is_empty() {
+        return;
+    }
     cl.module.finalize_definitions().unwrap();
-    let ff = cl.funcs[f.as_index()].unwrap();
-    let addr = cl.module.get_finalized_function(ff);
-    unsafe { ((*cl.vtable).put_jitted_function)(cl.data, f, addr as usize) }
+    for f in cl.pending.drain(0..) {
+        let ff = cl.funcs[f.as_index()].unwrap();
+        let addr = cl.module.get_finalized_function(ff);
+        unsafe { ((*cl.vtable).put_jitted_function)(cl.data, f, addr as usize) };
+    }
 }
 
 pub struct JittedCl<M: Module> {
@@ -124,6 +142,7 @@ impl<'z, M: Module> Emit<'z, M> {
         f: FuncId,
         mut builder_ctx: FunctionBuilderContext,
         mut ctx: codegen::Context,
+        log_ir: bool,
     ) {
         self.f = f;
         ctx.func.signature = self.make_sig(self.body.signeture);
@@ -139,25 +158,26 @@ impl<'z, M: Module> Emit<'z, M> {
 
         let mut builder = FunctionBuilder::new(&mut ctx.func, &mut builder_ctx);
         self.emit_body(&mut builder);
-        // TODO: bring this back
-        // if self.program[f].has_tag(Flag::Log_Ir) {
-        // println!("=== Cranelift IR for {} ===", f.as_index());
-        // println!("{}", builder.func.display());
-        // println!("===");
-        // }
+        if log_ir {
+            println!("=== Cranelift IR for {} ===", f.as_index());
+            println!("{}", builder.func.display());
+            println!("===");
+        }
         builder.finalize();
         self.cl.module.define_function(id, &mut ctx).unwrap();
 
         // TODO: bring this back
-        // if self.program[f].has_tag(Flag::Log_Asm) {
-        //     ctx.want_disasm = true;
-        //     let code = Into::<Res<_>>::into(ctx.compile_stencil(self.cl.module.isa(), &mut ControlPlane::default()).map_err(wrapg))?;
-        //     println!("=== asm for {f:?} {} ===", self.program.pool.get(self.program[f].name));
-        //     println!("{}", code.vcode.unwrap());
-        // }
+        let log_asm = false;
+        if log_asm {
+            ctx.want_disasm = true;
+            let code = ctx
+                .compile_stencil(self.cl.module.isa(), &mut ControlPlane::default())
+                .unwrap();
+            println!("=== asm for {} ===", f.as_index());
+            println!("{}", code.vcode.unwrap());
+        }
 
         self.cl.module.clear_context(&mut ctx);
-        self.cl.pending.push(f);
     }
 
     fn emit_body(&mut self, builder: &mut FunctionBuilder) {
@@ -189,11 +209,7 @@ impl<'z, M: Module> Emit<'z, M> {
 
         self.emit_block(0, builder);
 
-        for (b, bl) in self.blocks.iter().enumerate() {
-            if self.block_done.get(b) {
-                builder.seal_block(*bl);
-            }
-        }
+        builder.seal_all_blocks();
     }
 
     fn emit_block(&mut self, b: usize, builder: &mut FunctionBuilder) {

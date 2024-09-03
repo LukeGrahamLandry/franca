@@ -95,8 +95,6 @@ fn emit_relocatable_constant_body(
     out: *List(BakedEntry),
     force_default_handling: bool,
 ) PRes = {
-    c.aarch64&.bump_dirty();
-    
     info := c.get_info(ty);
     @err_assert(value.len() == info.stride_bytes.zext(), 
         "ICE: Tried to emit constant value of wrong size. Expected % bytes but found %.", 
@@ -247,18 +245,17 @@ fn emit_relocatable_constant_body(
 // :bake_relocatable_value
 fn get_custom_bake_handler(c: *SelfHosted, ty: Type) Res(?BakeHandler) = {
     if c.baked.custom_bake_constant&.get(ty) { fid |
-        if c.aarch64&.get_fn(fid) { fptr |
+        if c.get_fn_callable(fid) { fptr |
             fptr := assume_types_fn(rawptr, Slice(BakedEntry), fptr);
             return(Ok = (Some = fptr));
         };
         res := c.poll_in_place(rawptr) { () Maybe(rawptr) |
-            @match(c.aarch64&.get_fn(fid)) {
+            @match(c.get_fn_callable(fid)) {
                 fn Some(ptr) => (Ok = ptr);
                 fn None() => (Suspend = c.wait_for(Jit = fid));
             }
         };
         fptr := @try(res) return;
-        c.aarch64&.bump_dirty();
         fptr := assume_types_fn(rawptr, Slice(BakedEntry), fptr);
         return(Ok = (Some = fptr));
     };
@@ -557,6 +554,7 @@ fn call_dynamic(program: CompilerRs, ptr: i64, f_ty: *FnType, args: *RsVec(i64),
 // Note: FnType by ptr because i think i do (u32, u32) calling convention wrong. 
 fn call_dynamic_inner(program: CompilerRs, ptr: i64, f_ty: *FnType, args: *RsVec(i64), comp_ctx: bool) Res(Values) = {
     @if(TRACE_CALLS) @println("[call dynamic at addr=%] args=%", ptr, args.items());
+    program[][].flush_cranelift();
     
     arg := program.get_info(f_ty.arg);
     ret := program.get_info(f_ty.ret);

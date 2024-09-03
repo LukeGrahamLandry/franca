@@ -5,7 +5,6 @@
 //! regardless of how many lines were actually between them. 
 //! You can check this by seeing that removing this comment doesn't change the counted length of this file.
 //! For now I include lines with just `};` and `}`, but maybe that should change because those don't really contribute to the bigness of the program. 
-// TODO: sort the output
 
 #include_std("compiler/lex.fr");     // - we use the same lexer implementation as the normal compiler
 #include_std("compiler/codemap.fr"); // - only used for the declaration of `Span`
@@ -13,15 +12,27 @@
 
 fn main() = {
     args := cli_args();
-    total := 0;
+    results: List(Count) = list(temp());
     for args { arg |
-        handle_path(arg.str(), total&);
+        handle_path(arg.str(), results&);
     };
+    
+    sort :: quicksort(Count, fn(a, b) => a.size >= b.size);
+    results.items().sort();
+    total := 0;
+    for results { e | 
+        total += e.size;
+    };
+    out: List(u8) = list(temp());
+    fmt_table(out&, results.items());
+    println(out.items());
     @println("Counted % total interesting lines", total);
     exit(0);
 }
 
-fn handle_path(arg: Str, total: *i64) void = {
+Count :: @struct(name: Str, size: i64);
+
+fn handle_path(arg: Str, total: *List(Count)) void = {
     if arg.ends_with(".fr") {
         text := read_file(temp(), arg);
         @match(text) {
@@ -42,8 +53,7 @@ fn handle_path(arg: Str, total: *i64) void = {
                         }
                         fn Eof() => {
                             // We're done!
-                            @println("% -> % interesting lines", arg, lines);
-                            total[] += lines;
+                            total.push(name = arg, size = lines);
                             return();
                         }
                         @default => {
@@ -59,7 +69,6 @@ fn handle_path(arg: Str, total: *i64) void = {
                 @eprintln("Failed to read file %", arg);
             }
         };
-        return();
     };
     
     // Otherwise treat it as a directory. 
@@ -69,5 +78,32 @@ fn handle_path(arg: Str, total: *i64) void = {
             full_path := items(@format("%/%", arg, entry) temp());
             handle_path(full_path, total);
         };
+    };
+}
+
+fn fmt_table(out: *List(u8), results: []Count) void = {
+    max_digits := results[0].size.number_of_digits(); // its sorted
+    max_len := 0;
+    for results { e | 
+        max_len = max_len.max(e.name.len);
+    };
+    
+    extra_space :: 10;
+    for results { e | 
+        out.push_all(e.name);
+        padding := extra_space + max_len - e.name.len + max_digits - e.size.number_of_digits();
+        out.push_spaces(padding);
+        @fmt(out, "%\n", e.size);
+    };
+    
+    push_spaces :: fn(out: *List(u8), count: i64) void = {
+        out.reserve(count);
+        range(0, count, => out.push_all(" "));
+    };
+    
+    // TODO: log
+    number_of_digits :: fn(i: i64) i64 = {
+        if(i < 10, => return(1));
+        1 + number_of_digits(i / 10)
     };
 }

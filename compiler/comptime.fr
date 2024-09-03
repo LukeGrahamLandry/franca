@@ -27,7 +27,7 @@ fn init_driver_vtable() *ImportVTable = {
         self := c.cast()[][];
         vtable := the_vtable;
         res := self.poll_in_place(rawptr) { () Maybe(rawptr) |
-            @match(self.aarch64&.get_fn(f)) {
+            @match(self.get_fn_callable(f)) {
                 fn Some(ptr) => (Ok = ptr);
                 fn None() => (Suspend = self.wait_for(Jit = f));
             }
@@ -81,10 +81,6 @@ fn init_driver_vtable() *ImportVTable = {
     vtable.get_fns_with_tag = get_fns_with_tag;
     vtable.get_function = fn(c: Compiler, f: FuncId) *Func = {
         c.cast()[][].get_function(f)
-    };
-    vtable.make_jitted_exec = fn(c: Compiler) void = {
-        c := c.cast()[][]; // TODO: can't inline cause it confuses deduplicator. -- Jul 29
-        c.aarch64&.bump_dirty();
     };
     vtable.destroy_compiler = fn(c: Compiler) void = {
         c := c.cast()[][];
@@ -255,34 +251,6 @@ fn fill_export_ffi(out: *List(u8)) void = {
         c[][].put_baked(v, .None)
     };
     
-    // Generated for @BITS to bootstrap encoding for inline asm.
-    // TODO: remove this. @BITS is unused because of intrinsics. 
-    @fmt(out, "fn __shift_or_slice(ints: Slice(i64)) u32 #no_tail #fold #comptime_addr(%);\n", shift_or_slice);
-    shift_or_slice: rawptr : fn(ints: []i64) u32 = {
-        //::display_slice(i64);
-        //@println("%", ints);
-        @assert(ints.len < 32, "% is too many args for fold_shift_or", ints.len);
-        acc := 0;
-        range(0, ints.len / 3) { i |
-            //@print("% ", acc); // :debug
-            x := ints[i * 3];
-            sh := ints[i * 3 + 1];
-            size_info := ints[i * 3 + 2]; // HACK. masking fixed maual_mmap. u16 has garabge memory where read as u64.
-            bit_count := size_info.abs();
-            is_signed := size_info < 0;
-            if is_signed {
-                x = signed_truncate(x, bit_count).zext();
-            };
-            @assert(sh < 32, "% too much shift", sh);
-            //@assert(x.shift_left(sh) <= 1.shift_left(32), "% << %", x, sh);
-            mask := 1.shift_left(bit_count) - 1;
-            acc = acc.bit_or(x.bit_and(mask).shift_left(sh));
-        };
-        //@println("%", acc); // :debug
-        @assert(acc > 0 && acc <= MAX_u32.zext(), "% is not a valid u32", acc);
-        acc.trunc()
-    };
- 
     @fmt(out, "fn number_of_functions() i64 #ct #comptime_addr(%);\n", num_f);
     num_f: rawptr : fn(c: CompilerRs) i64 = {
         c.functions.len
@@ -378,7 +346,6 @@ fn fill_export_ffi(out: *List(u8)) void = {
         enumerate walk.placeholders { i, e | 
             if !e.expr&.is(.Poison) {
                 unused += 1;
-                @println("- [%] %", i, e.log(self));
             };
         };
         @assert(unused == 0, "ice: unquote_placeholders didn't use all arguments\n%", template&.log(self));

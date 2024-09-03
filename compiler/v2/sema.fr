@@ -471,7 +471,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
                     out: List(u8) = list(temp());
                     ::if(CStr);
                     if func.nullable_link_rename_func != 0 {
-                        arch := query_current_arch();
+                        arch := query_current_arch(); // TODO: cache this!
                         arch := arch.expect("unknown comptime arch");
                         arg: LinkRenameArg = (
                             target = (arch = arch, os = .Macos),
@@ -982,7 +982,7 @@ fn compile_quote(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe
     // note: do this before fucking with the expr because it will yield the first time!
     @check(self.infer_arguments(unquote_placeholders)) return;
     @check(self.infer_return(unquote_placeholders)) return;
-    if self.aarch64&.get_fn(unquote_placeholders).is_none() {
+    if self.get_fn_callable(unquote_placeholders).is_none() {
         return(Suspend = self.wait_for(Jit = unquote_placeholders));
     };
     
@@ -2923,7 +2923,7 @@ fn took_pointer_value(self: *SelfHosted, fid: FuncId) void = {
     func := self.get_function(fid);
     // Note: else is not `Suspend = self.wait_for(Jit = fid)` because of cycles, we defer to the backend to deal with finializing it. 
     //       a better system would be to generate a shim right now so we'd always have an address? 
-    if self.aarch64&.get_fn(fid) { ptr |
+    if self.aarch64&.get_fn_old(fid) { ptr |
         if !func.get_flag(.TookPointerValue) {
             // We already compiled the function but didn't know we'd need to remember its address. (ie. #test fn large_struct_ret_return).
             self.created_jit_fn_ptr_value(fid, ptr.int_from_rawptr())
@@ -3387,10 +3387,21 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
         //       i could just get rid of it and always generate a function that passes the arguments.    -- Jul 31
         if f.arg.is_raw_unit() && f.f.expr&.is(.Value) && self.get_type(f.f.ty).is(.Fn).or(f.f.ty == FuncId) {
             fid := FuncId.assume_cast(f.f.expr.Value.bytes&)[];
-            if self.aarch64&.get_fn(fid) { fn_ptr | 
+            
+            func := self.get_function(fid);
+            
+            // note: this seems to help cranelift
+            @if_let(func.body&) fn Normal(e) => {
+                @if_let(e.expr&) fn Value(e) => {
+                    expr.expr = (Value = (bytes = e.bytes&.deep_clone(self.get_alloc()), coerced = false));
+                    expr.done = true;
+                    return(Ok = e.bytes&.deep_clone(self.get_alloc()));
+                };  
+            };
+            
+            if self.get_fn_callable(fid) { fn_ptr | 
                 hack := self&;
                 args: RsVec(i64) = empty();
-                func := self.get_function(fid);
                 @debug_assert(!func.get_flag(.AnyConstArgs));
                 // TODO: it would be nice if this were true... 
                 //@if_let(func.body) fn Normal(expr) => {
@@ -3401,7 +3412,6 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
                     return(@err("TODO: type mismatch"));
                 };
                 @debug_assert(func.cc.unwrap() == .CCallReg, "expected cc CCallReg");
-                self.aarch64&.bump_dirty();
                 @log_event("imm_eval direct % %", fid.as_index(), self.pool.get(func.name)) self;
                 // SAFETY: we're passing comp_ctx=false so it won't try to use the pointer as a real CompilerRs.
                 result := hack&.call_dynamic(fn_ptr.int_from_rawptr(), f_ty&, args&, false);
@@ -3428,7 +3438,7 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
     @if_let(expr.expr&) fn FnPtr(f_expr) => {
         fid := @check(self.immediate_eval_expr(f_expr[], FuncId)) return;
         fid := FuncId.assume_cast(fid&)[];
-        if self.aarch64&.get_fn(fid) { fn_ptr | 
+        if self.get_fn_callable(fid) { fn_ptr | 
             values := self.to_values(rawptr, fn_ptr);
             expr.expr = (Value = (bytes = values, coerced = false));
             expr.done = true;
@@ -3553,13 +3563,12 @@ fn check_quick_eval(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) ?Values = {
                             return(.None);
                         };
                         f_id := FuncId.assume_cast(it.f.expr.Value.bytes&)[];
-                        if self.aarch64&.get_fn(f_id) { f_ptr |
+                        if self.get_fn_callable(f_id) { f_ptr |
                             func := self.get_function(f_id);
                             comp_ctx := func.cc.unwrap() == .CCallRegCt;
                             evil_hack := self;
                             evil_hack := self&; 
                             self.finish_layout_deep(it.f.ty);
-                            self.aarch64&.bump_dirty();
                             res := evil_hack&.call_dynamic_values(f_ptr.int_from_rawptr(), f, arg_value&.bytes(), comp_ctx);
                             @match(res) {
                                 fn Ok(res) => {
@@ -3648,7 +3657,7 @@ fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
         self.codemap.show_error_line(func.loc);
     };
     @err_assert(func.get_flag(.Macro), "Tried to invoke non-macro % (missing #macro or missing overload)", self.pool.get(func.name)) return;
-    fn_ptr := or self.aarch64&.get_fn(fid) {| 
+    fn_ptr := or self.get_fn_callable(fid) {| 
         return(Suspend = self.wait_for(Jit = fid))
     };
     
@@ -3663,7 +3672,6 @@ fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
     f_ty := func.finished_ty().expect("known type once compiled");
     assert(f_ty.ret == fat_expr_type, "tried to call macro with bad ret type. missing overload? \nresolve_in_overloadset assumes someone later will typecheck so giving a garabge match is fine");
     assert(f_ty.arg.eq(fat_expr_type).or(f_ty.arg == pair), "tried to call macro with bad arg type. missing overload? \nresolve_in_overloadset assumes someone later will typecheck so giving a garabge match is fine");
-    self.aarch64&.bump_dirty();
     expr.expr = (Poison = .InProgressMacro);  // they call me RefCell<FatExpr> because im always refing cells 
     result := @try(hack&.call_dynamic_inner(fn_ptr.int_from_rawptr(), f_ty&, args&, needs_ct)) return;
     expr[] = FatExpr.assume_cast(result&)[];

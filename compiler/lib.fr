@@ -214,15 +214,6 @@ fn load_file_in_compiler(vtable: *ImportVTable, path: Str, opts: *BuildOptions) 
     source: List(u8) = prelude.clone(libc_allocator);  // TODO: column number on error on first line will be wrong but i dont care. 
     source&.read_and_push(path);  // TODO: error handling
     
-    @if(INCLUDE_COMPTIME_CRANELIFT) {
-        x := query_current_arch();
-        if x { arch | 
-            if arch != .Aarch64 {
-                opts.comptime_jit = .Cranelift;
-            };
-        };  
-    };
-    
     comp := {vtable.init_compiler}(opts.comptime_jit, opts);
     c := vtable.with(comp);
     file := {c.vtable.add_file}(c.data, path, source.items());
@@ -457,13 +448,25 @@ fn init_self_hosted(build_options: *BuildOptions) *SelfHosted = {
     };
     self.legacy_indirection = self.stable_compiler_context();
     
-    @if(INCLUDE_COMPTIME_CRANELIFT) {
+    x := query_current_arch();
+    if x { arch | 
+        if arch != .Aarch64 {
+            @if(INCLUDE_COMPTIME_CRANELIFT) {
+                build_options.comptime_jit = .Cranelift;
+            };
+            assert(build_options.comptime_jit != .Aarch64, "Aarch64 backend does not support this archtecture.");
+        };
+    };
+    
+    @if(INCLUDE_COMPTIME_CRANELIFT, {
         if build_options.comptime_jit == .Cranelift {
             dispatch_ptr := self.aarch64&.get_dispatch();
             data := franca_comptime_cranelift_init(self, get_backend_vtable(), dispatch_ptr);
             self.cranelift = (Some = data);
         };
-    };
+    }, {
+        @assert(build_options.comptime_jit != .Cranelift, "cranelift backend is not enabled in this build of the compiler");
+    });
     
     self
 }

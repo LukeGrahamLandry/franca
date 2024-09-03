@@ -36,7 +36,11 @@ MEM_08: i64 : 0b00;
 fn ne(a: FuncId, b: FuncId) bool #redirect(Ty(u32, u32), bool);
 
 // TODO: now this function is missnamed
-fn emit_bc_and_aarch64(program: *SelfHosted, f: FuncId, when: ExecStyle) PRes = {
+fn emit_bc_and_aarch64(program: *SelfHosted, f: FuncId, when: ExecStyle) PRes #once = {
+    func := program.get_function(f);
+    if(func.get_flag(.AsmDone), => return(.Ok));
+    @debug_assert(program.aarch64&.get_fn_old(f).is_none(), "ICE: not .AsmDone but have pointer");
+    
     mark := __temp_alloc.mark();
     body := @try(program.emit_bc(f, when)) return;
     
@@ -47,20 +51,15 @@ fn emit_bc_and_aarch64(program: *SelfHosted, f: FuncId, when: ExecStyle) PRes = 
     // We might have noticed that this function was a duplicate while generating bytecode.
     // So it was Normal before but now its a Redirect. 
     if body.func != f {
-        if program.aarch64&.get_fn(body.func) { old |
+        if program.get_fn_callable(body.func) { old |
             program.put_jitted_function(f, old);
         };
         
         return(.Ok);
     };
     
-    if program.aarch64&.get_fn(body.func).is_some() { 
-        return(.Ok);
-    };
-    
     zone := zone_begin(.EmitAarch64); // TODO: defer
     @if(ENABLE_TRACY) {
-        func := program.index(f);
         real_name := get_string(program.cast(), func.name);
         ___tracy_emit_zone_name(zone, real_name);
     };
@@ -69,8 +68,9 @@ fn emit_bc_and_aarch64(program: *SelfHosted, f: FuncId, when: ExecStyle) PRes = 
         opts := program.get_build_options();
         if opts.comptime_jit == .Cranelift {
             data := program.cranelift.expect("cranelift backend to be initilized");
-            franca_comptime_cranelift_emit(data, f, body, program.legacy_indirection.cast());
-            
+            log_ir := func.has_tag(.log_ir);
+            franca_comptime_cranelift_emit(data, f, body, program.legacy_indirection.cast(), log_ir);
+            func.set_flag(.AsmDone);
             zone_end(zone);
             __temp_alloc.reset_retaining_capacity(mark);
             return(.Ok);
@@ -79,7 +79,8 @@ fn emit_bc_and_aarch64(program: *SelfHosted, f: FuncId, when: ExecStyle) PRes = 
     
     old := program.legacy_indirection.cast();
     a: EmitAsm = new(old, when, body, f);
-    a&.compile(f);
+    addr := a&.compile(f);
+    program.put_jitted_function(f, addr);
     zone_end(zone);
     __temp_alloc.reset_retaining_capacity(mark);
     .Ok
@@ -132,9 +133,7 @@ fn new(compile: CompilerRs, when: ExecStyle, body: *FnBody, f: FuncId) EmitAsm #
 }
 
 // Note: you can only use Self once because this doesn't reset fields.
-fn compile(self: *EmitAsm, f: FuncId) void #once = {
-    if(self.asm.get_fn(f).is_some(), => return());
-
+fn compile(self: *EmitAsm, f: FuncId) rawptr #once = {
     func := self.program[f]&;
     @assert(!func.body&.is(.JittedAarch64) && !func.body&.is(.ComptimeAddr), "func want body");
 
@@ -145,15 +144,16 @@ fn compile(self: *EmitAsm, f: FuncId) void #once = {
     // TODO: assert that we don't generate code for a bunch of empty functions (just the size of prolouge + epiloge)
     //       when doing instantiations like `::tagged(T);`. should get deduplicated in bytecode or earlier. 
     // for now just make sure not to spam when disassembling. 
-    if(asm.len <= 8, => return());
-
-    // TODO: this is kinda dumb, I could just be a bit more abstract about how im emitting instructions and then also emit text assembler.
-    if TRACE_ASM.or(self.log_asm_bc).or(=> func.has_tag(.log_asm)) {
-        self.program[][].codemap.show_error_line(func.loc);
-        addr := u32.int_from_ptr(asm.ptr);
-        @println("% is at addr=%", self.program.pool.get(func.name), addr);
-        @if(USE_LLVM_DIS) print_llvm_mc_dis(asm);
+    if asm.len > 8 {
+        // TODO: this is kinda dumb, I could just be a bit more abstract about how im emitting instructions and then also emit text assembler.
+        if TRACE_ASM.or(self.log_asm_bc).or(=> func.has_tag(.log_asm)) {
+            self.program[][].codemap.show_error_line(func.loc);
+            addr := u32.int_from_ptr(asm.ptr);
+            @println("% is at addr=%", self.program.pool.get(func.name), addr);
+            @if(USE_LLVM_DIS) print_llvm_mc_dis(asm);
+        };
     };
+    u32.raw_from_ptr(asm.ptr)
 }
 
 fn print_llvm_mc_dis(asm: []u32) void #once = {
@@ -353,7 +353,7 @@ fn emit_inst(self: *EmitAsm, b_idx: usize, inst: Bc, i: usize) bool #once = {
         fn GetNativeFnPtr(fid) => {
             // TODO: use adr+adrp instead of an integer. but should do that in load_imm so it always happens.
 
-            if self.asm.get_fn(fid) { (ptr: rawptr) |
+            if self.asm.get_fn_old(fid) { (ptr: rawptr) |
                 self.state.stack&.push(Literal = ptr.int_from_rawptr());
             } else {
                 reg := self.get_free_reg();
@@ -1136,7 +1136,7 @@ fn dyn_c_call(self: *EmitAsm, sig: PrimSig, $do_call: @Fn() void) void = {
 fn branch_func(self: *EmitAsm, f: FuncId, with_link: bool) void #once = {
     // If we already emitted the target function, can just branch there directly.
     // This covers the majority of cases because I try to handle callees first.
-    if self.asm.get_fn(f) { bytes |
+    if self.asm.get_fn_old(f) { bytes |
         n := u32.int_from_ptr(self.asm.next);
         offset := bytes.int_from_rawptr() - n;
         offset = offset / 4;
@@ -1381,13 +1381,6 @@ fn new(bytes: i64) Jitted #once = {
     )
 }
 
-fn copy_inline_asm(self: *Jitted, f: FuncId, insts: []u32) void = {
-    self.mark_start(f);
-    for insts { op |
-        self.push(op);
-    };
-    self.save_current(f);
-}
 
 // This is a better marker for not compiled yet.
 // Depending on your mood this could be 0x1337 or whatever so you can recognise when you hit it in a debugger.
@@ -1403,7 +1396,7 @@ fn get_dispatch(self: *Jitted) i64 = {
     rawptr.int_from_ptr(self.dispatch.maybe_uninit.ptr)
 }
 
-fn get_fn(self: *Jitted, f: FuncId) ?rawptr = {
+fn get_fn_old(self: *Jitted, f: FuncId) ?rawptr = {
     if(f.as_index() >= self.dispatch.len, => return(.None));
     addr := self.dispatch[f.as_index()];
     if(addr == uncompiled_function_placeholder(), => return(.None));
@@ -1441,7 +1434,7 @@ fn mark_start(self: *Jitted, f: FuncId) void = {
 }
 
 fn extend_blanks(self: *Jitted, f: FuncId) void = {
-    // TODO: call reserve :SLOW
+    assert(self.dispatch.maybe_uninit.len > f.as_index(), "cannot resize dispatch table");
     while => self.dispatch.len() < f.to_index().zext() + 1 {
         self.dispatch&.push(uncompiled_function_placeholder());
     };
@@ -1450,13 +1443,12 @@ fn extend_blanks(self: *Jitted, f: FuncId) void = {
 // TODO: if you don't have this it just calls the FuncId for you because it decides same raw type is good enough :FUCKED -- Jul 20
 fn as_index(f: Type) i64 = f.to_index().zext();
 
-fn save_current(self: *Jitted, f: FuncId) []u32 = {
+fn save_current(self: *Jitted, f: FuncId) []u32 #once = {
     //@debug_assert_ne!(self.next as usize, self.old as usize);
     //@debug_assert_ne!(self.next as usize, self.current_start as usize);
     self.extend_blanks(f);
     func_start := self.current_start;
     addr := u32.raw_from_ptr(self.current_start);
-    self.dispatch[f.as_index()] = addr;  // TODO: i do this in mark_start too so this seems redundant
     start := u32.int_from_ptr(self.current_start);
     end := u32.int_from_ptr(self.next);
     xx := u32.int_from_ptr(self.mmapped.ptr);

@@ -1,3 +1,19 @@
+##
+
+it feels like i should be able to get cranelift passing everything on aarch64 before dealing with x86,
+but it seems super unreliable. a different subset of my tests fail every time i run.  
+ocassionally all except multistack work so i suspect thats the only one that's actually broken.
+i must be doing something wrong.
+A common crash is this
+https://github.com/bytecodealliance/wasmtime/issues/8852
+"I just noticed that the assertion failure is unrelated to StructArgument. [...] I'm not sure when this assertion fires though."
+but thats not the only one.
+i don't remember it being this flaky before tho.
+maybe calling finalize_definitions on every function stresses it out.
+
+debug mode revealed `FunctionBuilder finalized, but block block_ is not sealed`, which i can fix with builder.seal_all_blocks at the end.
+still super flaky.
+
 ## cleaning up
 
 - update go-build-yo-self to create v2

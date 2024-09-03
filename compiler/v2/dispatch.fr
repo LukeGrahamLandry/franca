@@ -220,7 +220,8 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
             waiting: List(*Task) = list(self.get_alloc());
             for func.callees { callee |
                 @log_event("% calls %", fid.as_index(), callee.as_index()) self;
-                if self.aarch64&.get_fn(callee).is_none() {
+                callee_func := self.get_function(callee);
+                if !callee_func.get_flag(.AsmDone) {
                     if is_mutually_recursive(task, callee) {
                         //@println("mutual recursion %", callee);
                         // TODO: add to mutual_callees and remove from callees. 
@@ -249,8 +250,8 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
             // TODO: assert found? 
             found := @check(self.fill_in_jit_pointer(fid, func.body&)) return;
             fn fill_in_jit_pointer(self: *SelfHosted, fid: FuncId, body: *FuncImpl) Maybe(bool) = {
-                if(self.aarch64&.get_fn(fid).is_some(), => return(Ok = true));
                 func := self.get_function(fid);
+                if(func.get_flag(.AsmDone), => return(Ok = true));
                 arg_ty := func.finished_arg.unwrap();
                 ret_ty := func.finished_ret.unwrap();
                 if body.is(.Normal).or(body.is(.Intrinsic)) {
@@ -263,14 +264,21 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
                 };
                 @match(body) {
                     fn Redirect(target) => {
-                        ptr := or self.aarch64&.get_fn(target[]) {
+                        ptr := or self.get_fn_callable(target[]) {
                             return(Suspend = self.wait_for(Jit = target[]))
                         };
                         self.put_jitted_function(fid, ptr);
                     };
-                    fn ComptimeAddr(_) => unreachable("ICE: comptime addr is done before.");
                     // TODO: do this before too? 
-                    fn JittedAarch64(insts) => self.aarch64&.copy_inline_asm(fid, insts.items());
+                    fn JittedAarch64(insts) => {
+                        self.aarch64&.mark_start(fid);
+                        for insts { op |
+                            self.aarch64&.push(op);
+                        };
+                        code := self.aarch64&.save_current(fid);
+                        addr := u32.raw_from_ptr(code.ptr);
+                        self.put_jitted_function(fid, addr);
+                    }
                     fn Merged(parts) => {
                         each parts { option |
                             if @check(self.fill_in_jit_pointer(fid, option)) return {
@@ -283,25 +291,18 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
                 (Ok = true)
             };
             
-            // TODO: make copy_inline_asm and save_current just call put_jitted_ptr? 
-            if func.get_flag(.TookPointerValue) {
-                if self.aarch64&.get_fn(fid) { ptr | 
-                    self.created_jit_fn_ptr_value(fid, ptr.int_from_rawptr());
-                };
-            };
-            
             // created function pointers are always added as mutual_callees to be more chill about loops. 
             for func.mutual_callees { callee |
                 @log_event("% mutual calls %", fid.as_index(), callee.as_index()) self;
-                if self.aarch64&.get_fn(callee).is_none() {
+                callee_func := self.get_function(callee);
+                if !callee_func.get_flag(.AsmDone) {
                     new_task := self.get_alloc().alloc(Task, 1);
                     new_task := new_task.ptr;
                     new_task[] = (action = (Jit = callee), waiting_for = .None, parent = .None, id = self.dispatch.next_task_id);
                     self.dispatch.next_task_id += 1;
                     waiting&.push(new_task);
                 } else {
-                    func := self.get_function(callee);
-                    @debug_assert(func.get_flag(.EnsuredCompiled));
+                    @debug_assert(callee_func.get_flag(.EnsuredCompiled));
                 };
             };
             if waiting.len != 0 {
@@ -337,17 +338,35 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
     .Ok
 }
 
-// TODO: not called by aarch64.fr save_current/copy_inline_asm
 // TODO: factor out the dispatch table from the aarch64 backend. 
 put_jitted_function :: fn(self: *SelfHosted, f: FuncId, addr: rawptr) void = {
     self.aarch64&.extend_blanks(f);
     self.aarch64.dispatch[f.as_index()] = addr;
     func := self.get_function(f);
+    func.set_flag(.AsmDone);
     if func.get_flag(.TookPointerValue) {
         self.created_jit_fn_ptr_value(f, addr.int_from_rawptr());
     };
 };
 
+// If you're about to actually call the pointer, we need to mark the memory as executable.
+// If using the cranelift backend, give it a chance to do relocations. (im hoping batching them makes it less flakey). 
+fn get_fn_callable(self: *SelfHosted, fid: FuncId) ?rawptr = {
+    if self.aarch64&.get_fn_old(fid) { ptr |
+        self.aarch64&.bump_dirty();
+        return(Some = ptr);
+    };
+    
+    @if(INCLUDE_COMPTIME_CRANELIFT) {
+        if self.cranelift { data |
+            franca_comptime_cranelift_flush(data);
+            return(self.aarch64&.get_fn_old(fid));
+        };
+    };
+    
+    .None
+}
+        
 fn is_mutually_recursive(task: *Task, callee: FuncId) bool = {
     //while => task.waiting_for.is_some() {
     //    task = task.waiting_for.unwrap();
@@ -366,20 +385,6 @@ fn is_mutually_recursive(task: *Task, callee: FuncId) bool = {
         };
     };
     false
-}
-
-fn would_block(self: *SelfHosted, action: Action) bool = {
-    @match(action) {
-        fn EvalConstant(v) => {
-            var  := self.scopes.get_constant(v.name);
-            var  := var.expect("var should always be known");
-            !var._0.expr&.is(.Value)
-        };
-        fn CompileBody(fid)   => !self.get_function(fid).get_flag(.EnsuredCompiled);
-        fn Jit(fid)           => self.aarch64&.get_fn(fid).is_none();
-        fn FinishRecType(it)  => self.get_type(it.hole).is(.Placeholder);
-        fn ResolveOverload(_)  => true;
-    }
 }
 
 fn Maybe($T: Type) Type = {
