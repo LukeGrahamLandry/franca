@@ -1,25 +1,13 @@
-DO_TESTS :: false;
-
-ENABLE_LSP_   :: false;
-ENABLE_QBE_BACKEND_ :: false; // TODO: error message if you try to use when disabled instead of just calling a null function pointer. 
-REPLACE_COMPILER :: false;
+#include_std("compiler/build.fr");
  
 fn load_src(vtable: *ImportVTable, include_cranelift: bool) Ty(CompCtx, *ComptimeLibs) = {
     src := temp().read_to_string("compiler/main.fr");
-    @fmt(src&, ";ENABLE_LSP   :: %;\n", ENABLE_LSP_);
-    @fmt(src&, ";ENABLE_QBE_BACKEND :: %;\n", ENABLE_QBE_BACKEND_);
-    @fmt(src&, ";ENABLE_LOGGING_CALLBACKS :: false;\n");
-    @fmt(src&, ";DO_TERMINAL_COLOURS :: true;\n");
-    @fmt(src&, ";INCLUDE_COMPTIME_CRANELIFT :: %;\n", include_cranelift);
-    
+    cfg: CompilerBuildOptions = (include_cranelift = include_cranelift);
     opts := vtable.default_build_options();
     opts.deduplicate_bytecode = true;
     opts.retain_function_names = false;
     opts.debug_info = false;
-    spam := false;
     args := cli_args();
-    bootstrap_mode := false;
-    trace := false;
     for args { extra |
         if extra.str() == "-no-deduplication" {
             opts.deduplicate_bytecode = false;
@@ -31,7 +19,7 @@ fn load_src(vtable: *ImportVTable, include_cranelift: bool) Ty(CompCtx, *Comptim
             opts.debug_info = true;
         };
         if extra.str() == "-spam" {
-            spam = true;
+            cfg.spam_debug = true;
         };
         if extra.str() == "-x86" {
             // you don't need this just to target x86, only when running on it. 
@@ -43,25 +31,22 @@ fn load_src(vtable: *ImportVTable, include_cranelift: bool) Ty(CompCtx, *Comptim
             opts.safety_checks&.insert(SafetyCheck.InvalidTag, false);
         };
         if extra.str() == "-boot-only" {
-            bootstrap_mode = true;
+            cfg.boot_only = true;
             opts.safety_checks&.insert(SafetyCheck.KeepPanicMessages, false);
         };
         if extra.str() == "-trace" {
-            trace = true;
+            cfg.profile = true;
         };
     };
-    @fmt(src&, ";BOOTSTRAP_ONLY_MODE :: %;\n", bootstrap_mode);
-    @fmt(src&, ";DEBUG_SPAM_LOG :: %;\n", spam);
-    @fmt(src&, ";ENABLE_TRACY :: %;\n", trace);
     
+    cfg.get_compiler_source(src&);
     comp := vtable.new_with_src(src.items(), opts);
     c := vtable.with(comp);
     
     libs := c.empty_libs();
     libs := temp().boxed(ComptimeLibs, libs);
     libs.intercept_imports();
-    if(trace, => libs.add_lib(tracy_lib));
-    if(ENABLE_LSP_, => libs.add_lib(wuffs_lib));
+    if(cfg.profile, => libs.add_lib(tracy_lib));
     
     // TODO: but we're not there yet as a society 
     //exports := c.get_tagged("export_builtin_ct");

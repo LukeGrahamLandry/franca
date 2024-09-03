@@ -1,0 +1,90 @@
+PrimaryOp :: @enum(u8) (
+    Ret = 0xc3,
+    MovImm32 = 0xc7,
+    MovReg = 0x89,
+    AddReg = 0x01,
+);
+
+rax :: 0b0000;
+rdi :: 0b0111;
+rsi :: 0b0110;
+
+// TODO: test r8+
+// REX prefix lets you use new numbered registers
+// (fixed:u4 = 0100, 64_bit_operand?:u1, reg_extend:u1 = 1 for r8-r15, indexing_extend:u1, rm_extend:u1 = 1 for r8-r15)
+fn encode_bin(code: *List(u8), op: PrimaryOp, dest: u4, src: u4) void = {
+    // TODO: don't need prefix if all bits unset?
+    prefix := 0b01000000;
+    modrm: i64 = 0b11000000;
+    x: i64 = src; // TODO: should be able to inline @as
+    modrm = modrm.bit_or(x.shift_left(3));
+    if x >= 8 {   
+        prefix = prefix.bit_or(0b00000100);
+    };
+    x = dest;
+    modrm = modrm.bit_or(x);
+    if x >= 8 {   
+        prefix = prefix.bit_or(0b00000001);
+    };
+    code.push(prefix);
+    code.push(@as(u8) op);
+    code.push(@as(u8) modrm.trunc());
+}
+
+fn encode_imm(code: *List(u8), dest: u4, value: u64) void = {
+    assert(value <= MAX_u32, "TODO: set the bit for 64 bit immediate");
+    
+    prefix := 0b01000000;
+    modrm: i64 = 0b11000000;
+    x: i64 = dest; // TODO: should be able to inline @as
+    modrm = modrm.bit_or(x);
+    if x >= 8 {   
+        prefix = prefix.bit_or(0b00000001);
+    };
+    code.push(prefix);
+    code.push(@as(u8) PrimaryOp.MovImm32);
+    code.push(@as(u8) modrm.trunc());
+    code.push_u32(value.trunc());
+}
+
+// See tests/x86_64_jit.fr for how to use this. 
+fn asm_x64(arg: FatExpr, out: FatExpr) FatExpr #macro = {
+    @ct_assert(arg.expr&.is(.Tuple), arg.loc, "Expected @asm_x64(Tuple...)");
+    parts := arg.expr.Tuple;
+
+    actions: List(FatExpr) = list(parts.len() * 3, ast_alloc());
+    @{
+        out := @[out];
+        @[{
+            each parts { part |
+                if part.expr&.is(.Call) {
+                    part.expr.Call.arg[] = prepend_tuple(@{ out }, part.expr.Call.arg[]);
+                    actions&.push(part[]);
+                } else {
+                    part[] = compile_ast(part[]);
+                    @switch(part.ty) {
+                        @case(u8) => actions&.push(@{ out.push(@[part[]]) });
+                        @case(PrimaryOp) => actions&.push(@{ out.push(@as(u8) @[part[]]) });
+                        @case(u32) => actions&.push(@{ out.push_u32(@[part[]]) });
+                        @default => compile_error("unhandled type in @asm_x64.", part.loc);
+                    };
+                };
+            };
+        
+            arg.expr.Tuple = actions.rs();
+            arg
+        }];
+    }
+}
+
+// TODO: this doesn't work because of how it wants to evaluate constants. 
+//fn asm_x64(arg: FatExpr) FatExpr #macro = @{
+//    (fn(out: *List(u8)) void = @asm_x64(@[arg]) out)
+//};
+
+fn push_u32(code: *List(u8), value: u32) void = {
+    code.push(@as(u8) value.bit_and(0xFF).trunc());
+    code.push(@as(u8) value.shift_right_logical(8).bit_and(0xFF).trunc());
+    code.push(@as(u8) value.shift_right_logical(16).bit_and(0xFF).trunc());
+    code.push(@as(u8) value.shift_right_logical(24).bit_and(0xFF).trunc());
+}

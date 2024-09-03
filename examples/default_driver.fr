@@ -10,156 +10,105 @@
 // - TODO: -S -o -O
 // - TODO: declaritive way to add libraries. 
 // - TODO: rename this? its not the default really. its not what the compiler uses to load your driver program for example. 
-// - TODO: factor out the arg parsing into a struct so its a nicer copy paste 
-//         and then can think about if its a good idea to use reflection for that. 
+
+Options :: @struct(
+    use_v2 := false,
+    jit := true,
+    llvm := false,
+    wasm := false,
+    qbe := false,
+    keep_names := false,
+    deduplicate := true,
+    debug_info := false,
+    target_x86 := false,
+    cranelift := false,
+);
+
+Action  :: @enum(i64) (run, build, test); ::enum(Action);
+Command :: @struct(cfg: Options, action: Action, file: Str, child_args: []Str);
 
 forever :: todo_allocator;
 fn driver(vtable: *ImportVTable) void = {
-    use_v2 := false;
-    jit := true;
-    llvm := false;
-    wasm := false;
-    qbe := false;
-    keep_names := false;
-    deduplicate := true;
-    debug_info := false;
-    target_x86 := false;
-    cranelift := false;
-    
-    args := cli_args();
-    args := args.slice(1, args.len); // skip exe
-    extra_args: List(Str) = list(forever);
-    for args { arg |
-        arg := arg.str();
-        
-        @switch(arg) {
-            @case("-v2") => { 
-                use_v2 = true;
-            };
-            @case("-aot=llvm") => {
-                jit = false; llvm = true;
-                assert(!qbe, "choose one backend");
-            };
-            @case("-aot=llvm-wasm") => {
-                jit = false; llvm = true; wasm = true;
-                assert(!qbe, "choose one backend");
-            };
-            @case("-aot=qbe") => {
-                jit = false; qbe = true;
-                assert(!llvm, "choose one backend");
-            };
-            @case("-jit=cranelift") => {
-                cranelift = true;
-                assert(jit, "cannot -aot with cranelift");
-                assert(!llvm && !qbe, "choose one backend");
-            };
-            @case("-keep-names") => {
-                keep_names = true;
-            };
-            @case("-no-deduplication") => {
-                deduplicate = false;
-            };
-            @case("-debug-info") => {
-                debug_info = true;
-            };
-            @case("-x86") => {
-                target_x86 = true;
-            };
-            @default => {
-                extra_args&.push(arg);
-            };
-        };
-    };
-    
+    cmd := parse_cli_args();
     build_options := vtable.default_build_options();
-    build_options.retain_function_names = keep_names;
-    build_options.deduplicate_bytecode = deduplicate;
-    build_options.debug_info = debug_info;
-    if cranelift {
+    build_options.retain_function_names = cmd.cfg.keep_names;
+    build_options.deduplicate_bytecode = cmd.cfg.deduplicate;
+    build_options.debug_info = cmd.cfg.debug_info;
+    if cmd.cfg.cranelift {
         build_options.comptime_jit = .Cranelift;
     };
-    
-    choose_action :: "pass cli argument ['build', 'run', 'test'] and then the path to a '.fr' source file.";
+
     usage_msg :: "USAGE: franca examples/default_driver.fr % [filepath.fr]\n       %";
-    assert(!extra_args.is_empty(), choose_action);
-    enumerate extra_args { i, arg |
-        args_after_action := extra_args.items().slice(i, extra_args.len);
-        file := find_first_fr_file(args_after_action);
-        @switch(arg[]) {
-            @case("build") => {
-                if(file == "", => @panic(usage_msg, "build", "creates an executable that runs 'main'"));
-                if wasm {
-                    build_options.wasm32 = true;
-                };
-                c := load_file(file, vtable, build_options);
-                fid := c.get_unique_named("main");
-                fid := fid.expect("did not find exactly one function called 'main'");
-                if jit {
-                    println("Compiled successfully but selected jit backend so no artifact was produced.");
-                } else {
-                    assert(llvm, "Not Yet Implemented: build main with -aot=qbe");
-                    c.compile_with_llvm(fid, .ExportWithNames, debug_info, wasm, target_x86);
-                    println("[built a.out]");
-                };
-                exit(0);
+    @match(cmd.action) {
+        fn build() => {
+            if(cmd.file == "", => @panic(usage_msg, "build", "creates an executable that runs 'main'"));
+            if cmd.cfg.wasm {
+                build_options.wasm32 = true;
             };
-            @case("run") => {
-                if(file == "", => @panic(usage_msg, "run", "runs the function called 'main'"));
-                c := load_file(file, vtable, build_options);
-                fid := c.get_unique_named("main");
-                fid := fid.expect("did not find exactly one function called 'main'");
-                assert(!wasm, "cannot run wasm");
-                if jit {
+            c := load_file(cmd.file, vtable, build_options);
+            fid := c.get_unique_named("main");
+            fid := fid.expect("did not find exactly one function called 'main'");
+            if cmd.cfg.jit {
+                println("Compiled successfully but selected jit backend so no artifact was produced.");
+            } else {
+                assert(cmd.cfg.llvm, "Not Yet Implemented: build main with -aot=qbe");
+                c.compile_with_llvm(fid, .ExportWithNames, cmd.cfg.debug_info, cmd.cfg.wasm, cmd.cfg.target_x86);
+                println("[built a.out]");
+            };
+            exit(0);
+        };
+        fn run() => {
+            if(cmd.file == "", => @panic(usage_msg, "run", "runs the function called 'main'"));
+            c := load_file(cmd.file, vtable, build_options);
+            fid := c.get_unique_named("main");
+            fid := fid.expect("did not find exactly one function called 'main'");
+            assert(!cmd.cfg.wasm, "cannot run wasm");
+            if cmd.cfg.jit {
+                ptr := c.get_jitted(fid);
+                f := assume_types_fn(Arg = void, Ret = void, ptr = ptr);
+                // TODO: how to pass cli args
+                f();
+            } else {
+                if cmd.cfg.llvm {
+                    c.compile_with_llvm(fid, .ExportWithNames, cmd.cfg.debug_info, false, cmd.cfg.target_x86);
+                } else {
+                    assert(cmd.cfg.qbe, "rn only two backends. update me as needed!");
+                    panic("TODO: impl switch on qbe");
+                    //c.compile_with_qbe(fid, .ExportWithNames);
+                };
+                run_cmd_blocking("./a.out", cmd.child_args);
+            };
+            exit(0);
+        };
+        fn test() => {
+            assert(!cmd.cfg.wasm, "cannot run wasm");
+            if(cmd.file == "", => @panic(usage_msg, "test", "runs all functions marked '#test'"));
+            c := load_file(cmd.file, vtable, build_options);
+            
+            tests := c.get_tagged("test");
+            passed := 0;
+            for tests { fid |
+                if cmd.cfg.jit {
                     ptr := c.get_jitted(fid);
                     f := assume_types_fn(Arg = void, Ret = void, ptr = ptr);
-                    // TODO: how to pass cli args
+                    @eprintln("[run %]", c.get_string(c.get_function_name(fid)));
                     f();
+                    // TODO: do the fork stuff to report all even when some fail. 
+                    passed += 1;
                 } else {
-                    if llvm {
-                        c.compile_with_llvm(fid, .ExportWithNames, debug_info, false, target_x86);
-                    } else {
-                        assert(qbe, "rn only two backends. update me as needed!");
-                        panic("TODO: impl switch on qbe");
-                        //c.compile_with_qbe(fid, .ExportWithNames);
-                    };
-                    child_args := find_args_after_double_dash(args_after_action);
-                    run_cmd_blocking("./a.out", child_args);
-                };
-                exit(0);
-            };
-            @case("test") => {
-                assert(!wasm, "cannot run wasm");
-                if(file == "", => @panic(usage_msg, "test", "runs all functions marked '#test'"));
-                c := load_file(file, vtable, build_options);
-                
-                tests := c.get_tagged("test");
-                passed := 0;
-                for tests { fid |
-                    if jit {
-                        ptr := c.get_jitted(fid);
-                        f := assume_types_fn(Arg = void, Ret = void, ptr = ptr);
-                        @eprintln("[run %]", c.get_string(c.get_function_name(fid)));
-                        f();
-                        // TODO: do the fork stuff to report all even when some fail. 
+                    assert(cmd.cfg.llvm, "Not Yet Implemented: run test with -aot=qbe");
+                    c.compile_with_llvm(fid, .TestRunnerMain, cmd.cfg.debug_info, false, cmd.cfg.target_x86);
+                    @eprintln("[run %]", c.get_string(c.get_function_name(fid)));
+                    success := run_cmd_blocking("./a.out", empty());
+                    if success {
                         passed += 1;
-                    } else {
-                        assert(llvm, "Not Yet Implemented: run test with -aot=qbe");
-                        c.compile_with_llvm(fid, .TestRunnerMain, debug_info, false, target_x86);
-                        child_args := find_args_after_double_dash(args_after_action);
-                        @eprintln("[run %]", c.get_string(c.get_function_name(fid)));
-                        success := run_cmd_blocking("./a.out", empty());
-                        if success {
-                            passed += 1;
-                        };
                     };
                 };
-                @eprintln("[Passed %/% tests]", passed, tests.len);
-                exit(if(passed == tests.len, => 0, => 1));
             };
-            @default => ();
+            @eprintln("[Passed %/% tests]", passed, tests.len);
+            exit(if(passed == tests.len, => 0, => 1));
         };
     };
-    panic(choose_action);
 }
 
 fn compile_with_llvm(c: CompCtx, fid: FuncId, entry: ProgramEntry, debug_info: bool, wasm: bool, x86: bool) void = {
@@ -254,4 +203,71 @@ fn find_args_after_double_dash(args: []Str) []Str = {
         }; 
     };
     empty()
+}
+
+// TODO: think about if its a good idea to use reflection for this. 
+fn parse_cli_args() Command = {
+    cfg: Options = ();
+    args := cli_args();
+    args := args.slice(1, args.len); // skip exe
+    extra_args: List(Str) = list(forever);
+    for args { arg |
+        arg := arg.str();
+        
+        @switch(arg) {
+            @case("-v2") => { 
+                cfg.use_v2 = true;
+            };
+            @case("-aot=llvm") => {
+                cfg.jit = false; cfg.llvm = true;
+                assert(!cfg.qbe, "choose one backend");
+            };
+            @case("-aot=llvm-wasm") => {
+                cfg.jit = false; cfg.llvm = true; cfg.wasm = true;
+                assert(!cfg.qbe, "choose one backend");
+            };
+            @case("-aot=qbe") => {
+                cfg.jit = false; cfg.qbe = true;
+                assert(!cfg.llvm, "choose one backend");
+            };
+            @case("-jit=cranelift") => {
+                cfg.cranelift = true;
+                assert(cfg.jit, "cannot -aot with cranelift");
+                assert(!cfg.llvm && !cfg.qbe, "choose one backend");
+            };
+            @case("-keep-names") => {
+                cfg.keep_names = true;
+            };
+            @case("-no-deduplication") => {
+                cfg.deduplicate = false;
+            };
+            @case("-debug-info") => {
+                cfg.debug_info = true;
+            };
+            @case("-x86") => {
+                cfg.target_x86 = true;
+            };
+            @default => {
+                extra_args&.push(arg);
+            };
+        };
+    };
+    
+    choose_action :: "pass cli argument ['build', 'run', 'test'] and then the path to a '.fr' source file.";
+    assert(!extra_args.is_empty(), choose_action);
+    enumerate extra_args { i, arg |
+        done :: fn(action: Action) => {
+            args_after_action := extra_args.items().slice(i, extra_args.len);
+            file := find_first_fr_file(args_after_action);
+            return(cfg = cfg, action = action, file = file, child_args = find_args_after_double_dash(args_after_action));
+        };
+        
+        @switch(arg[]) {
+            @case("build") => done(.build);
+            @case("run")   => done(.run);
+            @case("test")  => done(.test);
+            @default => ();
+        };
+    };
+    panic(choose_action)
 }

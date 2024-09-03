@@ -2,5 +2,111 @@
 #include_std("compiler/lib.fr"); 
 
 fn main() void = {
-    self_hosted_main();
+    :: by_the_way_you_are_compiling_the_compiler_right_now_just_a_helpful_hint();
+    vtable := init_driver_vtable();
+    if RUNTIME_STACK_TRACE {
+        get_panic_hook()[] = new_print_trace_and_abort;
+        println(">>> Compiler running in slow mode.");
+    };
+    if ENABLE_TRACY {
+        println(">>> Compiler includes tracy instrumentation.");
+    };
+    update_global_stdlib_path();
+    
+    args := cli_args();
+    if args.len <= 1 {
+        panic("Expected cli argument: a path to a franca file."); // or driver shared library
+    };
+    // TODO: allow loading driver function from shared library 
+  
+    filename := args[1].str();
+    
+    //if filename == "-lsp" {
+    //    @if(ENABLE_LSP, {
+    //        lsp_main(vtable);
+    //        exit(0);
+    //    }, panic("argument '-lsp' not supported by this build of the compiler"));
+    //};
+    
+    if filename == "-go-build-yo-self" {
+        go_build_yo_self(vtable);
+        exit(0);
+    };
+    
+    @match(run_franca_file(vtable, filename)) {
+        (fn Ok(_) => exit(0));
+        (fn Err(e) => exit(1));
+    };
+}
+
+// This is a simplified copy-paste of first.fr/driver. 
+// It exists so we have a precompiled version of the compiler's build script, 
+// which allows making breaking abi changes to the driver program system (like the allocator vtable change). 
+fn go_build_yo_self(vtable: *ImportVTable) void = {
+    fn load_src(vtable: *ImportVTable) CompCtx = {
+        src := temp().read_to_string("compiler/main.fr");
+        @fmt(src&, """;ENABLE_TRACY :: false; ENABLE_LSP :: false; 
+        ENABLE_LOGGING_CALLBACKS :: false; 
+        DO_TERMINAL_COLOURS :: true; INCLUDE_COMPTIME_CRANELIFT :: false;
+        DEBUG_SPAM_LOG :: false; BOOTSTRAP_ONLY_MODE :: false;
+        """);
+        opts := vtable.default_build_options();
+        opts.deduplicate_bytecode = true;
+        opts.retain_function_names = false;
+        opts.debug_info = false;
+        args := cli_args();
+        for args { extra |
+            if extra.str() == "-no-deduplication" {
+                opts.deduplicate_bytecode = false;
+            };
+            if extra.str() == "-keep-names" {
+                opts.retain_function_names = true;
+            };
+            if extra.str() == "-debug-info" {
+                opts.debug_info = true;
+            };
+        };
+        
+        comp := vtable.new_with_src(src.items(), opts);
+        c := vtable.with(comp);
+        c
+    }
+
+    // TODO: return result
+    fn build_llvm(ir: BucketArray(u8), args: Slice(Str)) void = {
+        out := open_temp_file();
+        for(ir&){bucket|
+            out.fd&.write(bucket);
+        };
+        @println("Write llvm ir to %", out&.s_name());   
+        args: List(Str) = args.clone(temp());
+        args&.push("-x"); // don't check the file extension of source files that follow. 
+        args&.push("ir"); 
+        args&.push("-g"); 
+        args&.push(out&.s_name());
+        @println("%", args.items());
+        success := run_cmd_blocking("clang", args.items());
+        assert(success, "ICE: generated invalid llvm ir");
+        out.remove();
+    }
+
+    if !file_exists("compiler/main.fr") {
+        panic("Working directory must be top level of the franca repository");
+    };
+    start := timestamp();
+    c := load_src(vtable);
+    
+    args := cli_args();
+    
+    new_main := c.get_unique_named("main").unwrap();
+    exports := (@list(new_main) temp()).items();
+    
+    ir_text := {c.vtable.emit_llvm}(c, temp(), exports, .ExportWithNames, get_comptime_arch());
+    @println("Emitted % bytes of llvm ir.", ir_text.len);  // useful to see when i start trying to deduplicate bytecode. 
+    end := timestamp();
+
+    start := timestamp();
+    build_llvm(ir_text, @slice ("-o", "target/franca/franca2", "-Os"));
+    end := timestamp();
+    @println("LLVM time: % ms.", end.sub(start)); 
 }

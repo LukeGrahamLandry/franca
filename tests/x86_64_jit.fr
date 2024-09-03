@@ -1,0 +1,90 @@
+//! https://wiki.osdev.org/X86-64_Instruction_Encodin
+//! http://ref.x86asm.net/coder64.html
+//! 
+//! The more fun game is `from pwn import *; context.arch = "amd64"; print(asm("mov rbx, rcx"));`
+//! and then slowly figure out how to map that back to the tables. 
+//! important to note that it prints normal ascii things as charact ers instead of in hex because we like confusion!
+
+#x86
+fn call_jit(input: i64, code: Slice(u8)) i64 = {
+    mapped := page_allocator.alloc(u8, code.len);
+    mapped.copy_from(code);
+    
+    beg := u8.raw_from_ptr(mapped.ptr);
+    end := beg.int_from_rawptr().add(code.len).rawptr_from_int();
+    exec := make_exec(mapped);
+    f := assume_types_fn(i64, i64, exec.ptr);
+    __clear_cache(beg, end);
+    out := f(input);
+    os_dealloc(exec);
+    out
+}
+
+#x86
+#test fn manual_mmap_x86(canary: i64) i64 = {
+    if query_current_arch().unwrap() != .X86_64 {
+        return(canary);
+    };
+
+    code: List(u8) = list(temp());
+    
+    RAX_FROM_RDI :: 0b11111000;  // modrm. (mode:u2= registers not memory= 3, reg_src:u3=rdi=7, reg_dest:u3=rax=0)
+    JUST_RAX :: 0b11000000;
+    
+    @asm_x64(
+        PrimaryOp.MovImm32, JUST_RAX, @as(u32) 10, // mov rax, 10
+        PrimaryOp.Ret,
+    ) code&;
+    assert_eq(call_jit(0, code.items()), 10);
+    
+    code&.clear();
+    code&.encode_bin(PrimaryOp.MovReg, rax, rdi);
+    code&.push(@as(u8) PrimaryOp.Ret);
+    assert_eq(call_jit(90, code.items()), 90);
+   
+    code&.clear();
+    @asm_x64(
+        PrimaryOp.MovImm32, JUST_RAX, @as(u32) 10, // mov rax, 10
+        PrimaryOp.AddReg, RAX_FROM_RDI,   // add rax, rdi
+        PrimaryOp.Ret,
+    ) code&;
+    assert_eq(call_jit(90, code.items()), 100);
+    
+    // same thing but with fancier macro usage
+    code&.clear();
+    @asm_x64(
+        encode_imm(rax, @as(u64) 10),
+        encode_bin(PrimaryOp.AddReg, rax, rdi),
+        PrimaryOp.Ret,
+    ) code&;
+    assert_eq(call_jit(90, code.items()), 100);
+    
+    // big immediate works 
+    code&.clear();
+    @asm_x64(
+        PrimaryOp.MovImm32, JUST_RAX, @as(u32) 1234567,
+        PrimaryOp.Ret,
+    ) code&;
+    assert_eq(call_jit(0, code.items()), 1234567);
+    
+    // now using inline asm that the compiler knows about
+    #c_call #x86_bytes #asm
+    fn add_by_asm(a: i64, b: i64) i64 = fn(out: *List(u8)) void = @asm_x64(
+        encode_imm(rax, @as(u64) 0),
+        encode_bin(PrimaryOp.AddReg, rax, rdi),
+        encode_bin(PrimaryOp.AddReg, rax, rsi),
+        PrimaryOp.Ret,
+    ) out;
+    assert_eq(add_by_asm(10, 15), 25);
+    
+    canary
+}
+
+fn show(code: *List(u8)) void = {
+    hex: List(u8) = list(code.len * 5, temp());
+    for code { b |
+        hex&.push_prefixed_hex_byte(b);
+        hex&.push_all(" ");
+    };
+    println(hex.items());
+}

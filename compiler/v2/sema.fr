@@ -626,6 +626,28 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
                             func.body = (X86AsmText = ir);
                             good = true;
                         };
+                        @case(Flag.x86_bytes.ident()) => {
+                            @err_assert(!good, "found multiple arches for #asm") return;
+                            // TODO: typecheck
+                            fid := @check(self.immediate_eval_expr(asm, FuncId)) return; // :get_or_create_type
+                            fid := FuncId.assume_cast(fid&)[];
+                            fn_ptr := or self.get_fn_callable(fid) {| 
+                                return(Suspend = self.wait_for(Jit = fid))
+                            };
+    
+                            ir: List(u8) = list(self.get_alloc());
+                            ir_ptr := List(u8).int_from_ptr(ir&);
+                            args: List(i64) = list(1, temp());
+                            args&.push(ir_ptr);
+                            args := args.rs();
+                            hack := self&;
+                            needs_ct := func.cc.unwrap() == .CCallRegCt;
+                            f_ty: FnType = (arg = i64, ret = void, arity = 1);
+                            @try(hack&.call_dynamic_inner(fn_ptr.int_from_rawptr(), f_ty&, args&, needs_ct)) return;
+                            
+                            func.body = (X86AsmBytes = ir.rs());
+                            good = true;
+                        };
                         @default => ();
                     };
                 };
@@ -986,7 +1008,7 @@ fn compile_quote(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe
         return(Suspend = self.wait_for(Jit = unquote_placeholders));
     };
     
-    //walk: MarkNotDone = (_hack = 0);
+    //walk: MarkNotDone = ();
     //walk&.walk_expr(arg); // TODO: might not need this :SLOW
     
     walk: Unquote = (compiler = self, placeholders = list(self.get_alloc()));
@@ -1045,7 +1067,7 @@ fn compile_fn_ptr(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
     .Ok
 }
 
-fn construct_struct_literal(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(void) #once = {
+fn construct_struct_literal(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(void) = {
     pattern := expr.expr.StructLiteralP&;
     if(!requested&.is(.Specific), => return(@err("struct literal requires type hint"))); // TODO: I'll probably want this to be a new type of yield eventually. 
     requested := requested.Specific;
@@ -1117,6 +1139,7 @@ fn construct_struct_literal(self: *SelfHosted, expr: *FatExpr, requested: Result
             };
             each f.cases& { f |
                 if f._0 == name {
+                    ::as_ref(FatExpr);
                     value := @unwrap(b.default&.as_ref(), "struct literal needs value") return;
                     @check(self.compile_expr(value, (Specific = f._1))) return;
                     @check(self.can_assign(f._1, value.ty)) return;
@@ -3080,29 +3103,33 @@ fn coerce_const_expr(self: *SelfHosted, expr: *FatExpr, req: ResultType, query: 
             want_info := self.get_type(want);
             found_info := self.get_type(found);
             if found == OverloadSet {
-                @if_let(want_info) fn Fn(f_ty) => {
-                    os := @check(self.immediate_eval_expr(expr, found)) return;
-                    os := OverloadSet.assume_cast(os&)[];
-                    fid := @check(self.resolve_by_type(os, f_ty[], expr.loc)) return;
-                    if(query, => return(.Ok));
-                    fid_value := self.to_values(FuncId, fid);
-                    expr.set(fid_value, want);
-                    return(.Ok);
+                @match(want_info) {
+                    fn Fn(f_ty) => {
+                        os := @check(self.immediate_eval_expr(expr, found)) return;
+                        os := OverloadSet.assume_cast(os&)[];
+                        fid := @check(self.resolve_by_type(os, f_ty[], expr.loc)) return;
+                        if(query, => return(.Ok));
+                        fid_value := self.to_values(FuncId, fid);
+                        expr.set(fid_value, want);
+                        return(.Ok);
+                    }
+                    fn FnPtr(f) => {
+                        os := @check(self.immediate_eval_expr(expr, found)) return;
+                        os := OverloadSet.assume_cast(os&)[];
+                        fid := @check(self.resolve_by_type(os, f.ty, expr.loc)) return;
+                        if(query, => return(.Ok));
+                        fid_value := self.to_values(FuncId, fid);
+                        expr.set(fid_value, want);
+                        expr.done = false;
+                        self.took_pointer_value(fid);
+                        e := self.box(expr[]);  // :fucked segfault if you inline this!!!!!! -- Aug 6
+                        expr.expr = (FnPtr = e);
+                        expr.ty = want;
+                        expr.done = false;
+                        return(self.compile_fn_ptr(expr));
+                    }
+                    @default => ();
                 };
-                @if_let(want_info) fn FnPtr(f) => {
-                    os := @check(self.immediate_eval_expr(expr, found)) return;
-                    os := OverloadSet.assume_cast(os&)[];
-                    fid := @check(self.resolve_by_type(os, f.ty, expr.loc)) return;
-                    if(query, => return(.Ok));
-                    fid_value := self.to_values(FuncId, fid);
-                    expr.set(fid_value, want);
-                    self.took_pointer_value(fid);
-                    e := self.box(expr[]);  // :fucked segfault if you inline this!!!!!! -- Aug 6
-                    expr.expr = (FnPtr = e);
-                    expr.ty = want;
-                    expr.done = false;
-                    return(.Ok);
-                }
             };
             if want == FuncId {
                 @if_let(found_info) fn Fn() => {
@@ -3113,47 +3140,63 @@ fn coerce_const_expr(self: *SelfHosted, expr: *FatExpr, req: ResultType, query: 
             };
             
             if found == FuncId {
-                @if_let(want_info) fn Fn(f_ty) => {
-                    fid := @check(self.immediate_eval_expr(expr, FuncId)) return;
-                    fid := FuncId.assume_cast(fid&)[];
-                    @check(self.check_promote_id_to_func(fid, f_ty[])) return;
-                    if(query, => return(.Ok));
-                    
-                    expr.ty = want;
-                    // TODO: typecheck args
-                    return(.Ok);
-                };
-                @if_let(want_info) fn FnPtr(f_ty) => {
-                    inner := self.box(expr[]);
-                    expr.expr = (FnPtr = inner);
-                    expr.done = false;
-                    expr.ty = UnknownType;
-                    // TODO: typecheck
-                    return(self.compile_expr(expr, (Specific = want)));
-                };
-                if want == rawptr {
-                    if(query, => return(.Ok));
-                    fid := @check(self.immediate_eval_expr(expr, FuncId)) return;
-                    fid := FuncId.assume_cast(fid&)[];
-                    inner := self.box(expr[]);
-                    expr.expr = (FnPtr = inner);
-                    expr.done = inner.done;
-                    expr.ty = rawptr;
-                    self.took_pointer_value(fid);
-                    // TODO: could call compile_expr/compile_fn_expr instead of imm+took
-                    return(.Ok);
-                };
-            };
-            
-            @if_let(found_info) fn FnPtr(f_ty) => {
-                if want == rawptr {
-                    if(query, => return(.Ok));
-                    expr.ty = rawptr;
-                    return(.Ok);
+                @match(want_info) {
+                    fn Fn(f_ty) => {
+                        fid := @check(self.immediate_eval_expr(expr, FuncId)) return;
+                        fid := FuncId.assume_cast(fid&)[];
+                        @check(self.check_promote_id_to_func(fid, f_ty[])) return;
+                        if(query, => return(.Ok));
+                        
+                        expr.ty = want;
+                        // TODO: typecheck args
+                        return(.Ok);
+                    }
+                    fn FnPtr(f_ty) => {
+                        expr.done = false;
+                        inner := self.box(expr[]);
+                        expr.expr = (FnPtr = inner);
+                        expr.done = false;
+                        expr.ty = UnknownType;
+                        // TODO: typecheck
+                        return(self.compile_expr(expr, (Specific = want)));
+                    }
+                    fn VoidPtr() => {
+                        if(query, => return(.Ok));
+                        fid := @check(self.immediate_eval_expr(expr, FuncId)) return;
+                        fid := FuncId.assume_cast(fid&)[];
+                        inner := self.box(expr[]);
+                        expr.expr = (FnPtr = inner);
+                        expr.done = inner.done;
+                        expr.ty = rawptr;
+                        self.took_pointer_value(fid);
+                        // TODO: could call compile_expr/compile_fn_expr instead of imm+took
+                        return(.Ok);
+                    }
+                    @default => ();
                 };
             };
         
             @match(found_info) {
+                fn FnPtr(f_ty) => {
+                    if want == rawptr {
+                        if(query, => return(.Ok));
+                        expr.ty = rawptr;
+                        return(.Ok);
+                    };
+                }
+                fn void() => {
+                    @if_let(want_info) fn Struct(f) => {
+                        each f.fields { f | 
+                            if f.default.is_none() {
+                                return(@err("had non-default fields"));
+                            };
+                        };
+                        if(query, => return(.Ok));
+                        expr[] = empty_struct_literal(expr.loc);
+                        expr.ty = want;
+                        return(self.construct_struct_literal(expr, req));
+                    };
+                }
                 fn Int(have_int) => {
                     @match(want_info) {
                         fn Int(want_int) => {
@@ -3483,7 +3526,7 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
     // we might have already tried to compile the expression in a different context,
     // but we need to do it again so we're sure to add callees to the newly created function,
     // so we don't try to call something that isn't compiled yet. 
-    walk: MarkNotDone = (_hack = 0);
+    walk: MarkNotDone = ();
     walk&.walk_expr(expr);
     
     fake_func := make_func(def, (Some = expr[]), false);
@@ -3697,7 +3740,7 @@ fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
     expr.expr = (Poison = .InProgressMacro);  // they call me RefCell<FatExpr> because im always refing cells 
     result := @try(hack&.call_dynamic_inner(fn_ptr.int_from_rawptr(), f_ty&, args&, needs_ct)) return;
     expr[] = FatExpr.assume_cast(result&)[];
-    //walk: MarkNotDone = (_hack = 0);
+    //walk: MarkNotDone = ();
     //walk&.walk_expr(expr); // TODO: might not need this :SLOW
     .Ok
 }
@@ -3822,8 +3865,26 @@ fn struct_type(self: *SelfHosted, pattern: *Pattern) Maybe(Type) #once = {
 }
 
 fn struct_macro(self: *SelfHosted, fields: *FatExpr) Maybe(FatExpr) = {
-    if(!fields.expr&.is(.StructLiteralP), => return(@err("expected map literal: (name: Type, ... ) for @struct")));
-    ty := @check(self.struct_type(fields.expr.StructLiteralP&)) return;
+    msg :: "expected map literal: (name: Type, ... ) for @struct";
+    ty := @match(fields.expr) {
+        fn StructLiteralP() => {
+            @check(self.struct_type(fields.expr.StructLiteralP&)) return
+        }
+        fn Value(f) => {
+            if fields.ty == void {  // :get_or_create_type
+                self.intern_type(Struct = (
+                    fields = empty(),
+                    layout_done = false,
+                    is_tuple = false,
+                    const_field_count = 0,
+                ))
+            } else {
+                return(@err(msg))
+            }
+        }
+        @default => return(@err(msg));
+    };
+    
     ty_value := self.to_values(Type, ty);
     fields.set(ty_value, Type); // :get_or_create_type
     (Ok = fields[])

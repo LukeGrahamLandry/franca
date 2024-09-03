@@ -1,4 +1,16 @@
-##
+## (Sep 3)
+
+- allow `:=` for default with inferred type on first field of sturct
+- init all default fields with `()` literal
+- allow empty struct when you just need to implement a trait.
+  which is kinda dumb but its even dumber if you can't do it.
+- trying to clean up building the compiler.
+  ok the problem statement is that when repl wants to depend on the compiler it has to copy paste a 70 line driver program.
+- `Tried to call un-compiled function` when coerce const overload set to runtime fn ptr (but not fid -> fnptr).
+  just needed to call compile_fn_ptr.
+  that got running repl on jit a bit farther but its still calling uncompiled.
+
+## (Sep 2)
 
 it feels like i should be able to get cranelift passing everything on aarch64 before dealing with x86,
 but it seems super unreliable. a different subset of my tests fail every time i run.  

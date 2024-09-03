@@ -163,17 +163,7 @@ fn print_llvm_mc_dis(asm: []u32) void #once = {
         range(0, 4) { _ |
             byte := op.bit_and(0x000000FF);
             op = op.shift_right_logical(8);
-            hex&.push_all("0x");
-            // TODO: clean this up. it's an old copy paste from fmt_hex for llvm ir hex floats.
-            range(14, 16) {i|
-                shift := 15.sub(i).mul(4);
-                mask := 15.shift_left(shift);
-                aaaaa: i64 = byte.zext().bit_and(mask);
-                digit := aaaaa.shift_right_logical(shift);
-                ::if(u8);
-                d := if(digit.lt(10), => "0".ascii().add(digit.trunc()), => "A".ascii().add(digit.sub(10).trunc())); 
-                hex&.push(d);
-            };
+            hex&.push_prefixed_hex_byte(byte.trunc());
             hex&.push_all(" ");
         };
     };
@@ -429,6 +419,7 @@ fn emit_inst(self: *EmitAsm, b_idx: usize, inst: Bc, i: usize) bool #once = {
         fn Ret2(f)    => return(self.emit_return(@slice(f._0, f._1)));
         // Note: we do this statically, it wont get actually applied to a register until its needed because loads/stores have an offset immediate.
         fn IncPtrBytes(bytes) => {
+            ::?*AsmVal;
             val: *AsmVal = self.state.stack&.last().unwrap();
             @match(val) {
                 fn Increment(f) => {
@@ -1068,14 +1059,14 @@ MAX_u16 :: 0xFFFF;
 fn load_imm(self: *EmitAsm, reg: i64, value: i64) void = {
     value: u64 = value.bitcast();
     bottom: u64 = MAX_u16.zext();
-    self.asm.push(movz_rt(Bits.X64, reg, value.bit_and(bottom).trunc(), .Left0));
+    self.asm.push(movz(Bits.X64, reg, value.bit_and(bottom).trunc(), .Left0));
     value = value.shift_right_logical(16);
     if value != 0 {
         range(1, 4) { shift |
             part := value.bit_and(bottom);
             if part != 0 {
                 // TODO: have intcast vs trunc like zig has. one safety checked that it fits in the target type and one that allows chopping stuff off. 
-                self.asm.push(movk_rt(Bits.X64, reg, part.trunc(), @as(Hw) shift));
+                self.asm.push(movk(Bits.X64, reg, part.trunc(), @as(Hw) shift));
             };
             value = value.shift_right_logical(16);
             if(value == 0, => return());
@@ -1425,6 +1416,22 @@ fn push(self: *Jitted, inst: u32) void = {
     self.next[] = inst;
     self.next = self.next.offset(1);
 }
+fn push_bytes_x86(self: *Jitted, insts: []u8) void = {  
+    byte := u32.raw_from_ptr(self.next);
+    byte := u8.ptr_from_raw(byte);
+    for insts { op |
+        byte[] = op;
+        byte = byte.offset(1);
+    };
+    extra := insts.len.mod(4);
+    range(0, extra) { _ |
+        byte[] = 0;
+        byte = byte.offset(1);
+    };
+    
+    byte := u8.raw_from_ptr(byte);
+    self.next = u32.ptr_from_raw(byte);
+}
 
 // Recursion shouldn't have to slowly lookup the start address.
 fn mark_start(self: *Jitted, f: FuncId) void = {
@@ -1500,22 +1507,6 @@ fn bump_dirty(self: *Jitted) void = {
         __clear_cache(beg, end);
     };
 }
-
-//
-// TODO: this is very sad.
-//       since core functions like `trunc` are written with inline assembly and not precompiled, 
-//       the normal versions of encoding some instructions need to use the compiler's @BITS since
-//       they can't compile the library @bits yet. so the functions below are the same as the versions in arch/aarch64instructions.fr,
-//       except for which macros they call.   -- Jul 16
-// TODO: thats not true anymore! remove these -- Jul 31
-
-/// Zero the other bits.
-fn movz_rt(sf: Bits, dest: RegO, imm: u16, hw: Hw) u32 =
-    @bits(sf, 0b10100101, hw, imm, dest); // TOOD: this broke on @bits when u16 became a real type. 
-
-/// Keep the other bits.
-fn movk_rt(sf: Bits, dest: RegO, imm: u16, hw: Hw) u32 =
-    @bits(sf, 0b11100101, hw, imm, dest);
 
 fn str_uo_any(size: u2, src: RegI, addr: RegI, offset_words: u12) u32 = 
     @bits(size, 0b11100100, offset_words, addr, src);
