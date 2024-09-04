@@ -43,6 +43,7 @@ OverloadAttempt :: @struct(
     options: List(FuncId),
     state: i64 = 0,
     needed_coerce: bool = false,
+    arg_index: i64 = 0,
 );
 
 fn init(a: Alloc) CompilerDispatch = {
@@ -271,6 +272,9 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
                     };
                     // TODO: do this before too? 
                     fn JittedAarch64(insts) => {
+                        if query_current_arch().unwrap() != .Aarch64 {
+                            return(Ok = false);
+                        };
                         self.aarch64&.mark_start(fid);
                         for insts { op |
                             self.aarch64&.push(op);
@@ -280,11 +284,17 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
                         self.put_jitted_function(fid, addr);
                     }
                     fn X86AsmBytes(insts) => {
+                        if query_current_arch().unwrap() != .X86_64 {
+                            return(Ok = false);
+                        };
                         self.aarch64&.mark_start(fid);
                         self.aarch64&.push_bytes_x86(insts.items());
                         code := self.aarch64&.save_current(fid);
                         addr := u32.raw_from_ptr(code.ptr);
                         self.put_jitted_function(fid, addr);
+                        // TODO: why do i need to do this here but not for arm? 
+                        //       i guess since cl means you don't happen to bump while doing other things in get_fn_callable.
+                        self.aarch64&.bump_dirty(); 
                     }
                     fn Merged(parts) => {
                         each parts { option |

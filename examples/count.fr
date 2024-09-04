@@ -1,3 +1,4 @@
+#!/usr/bin/env franca
 //! Count the lines of Franca code in a file. 
 //! Usage: pass file/directory paths as command line arguments. 
 //! The trick is that the only tokens that span multiple lines are comments and raw strings, 
@@ -13,8 +14,14 @@
 fn main() = {
     args := cli_args();
     results: List(Count) = list(temp());
+    if args.len >= 2 && args[0].str() == "franca" && args[1].str().ends_with("count.fr") {
+        args = args.slice(2, args.len);
+    };
     for args { arg |
         handle_path(arg.str(), results&);
+    };
+    if results.is_empty() {
+        panic("nothing to count");
     };
     
     sort :: quicksort(Count, fn(a, b) => a.size >= b.size);
@@ -30,7 +37,7 @@ fn main() = {
     exit(0);
 }
 
-Count :: @struct(name: Str, size: i64);
+Count :: @struct(name: Str, size: i64, total: i64);
 
 fn handle_path(arg: Str, total: *List(Count)) void = {
     if arg.ends_with(".fr") {
@@ -53,7 +60,7 @@ fn handle_path(arg: Str, total: *List(Count)) void = {
                         }
                         fn Eof() => {
                             // We're done!
-                            total.push(name = arg, size = lines);
+                            total.push(name = arg, size = lines, total = lex.line + 1);
                             return();
                         }
                         @default => {
@@ -83,17 +90,25 @@ fn handle_path(arg: Str, total: *List(Count)) void = {
 
 fn fmt_table(out: *List(u8), results: []Count) void = {
     max_digits := results[0].size.number_of_digits(); // its sorted
+    max_digits_total := 0;
     max_len := 0;
     for results { e | 
         max_len = max_len.max(e.name.len);
+        max_digits_total = e.total.number_of_digits(); 
     };
+    
     
     extra_space :: 10;
     for results { e | 
         out.push_all(e.name);
         padding := extra_space + max_len - e.name.len + max_digits - e.size.number_of_digits();
         out.push_spaces(padding);
-        @fmt(out, "%\n", e.size);
+        @fmt(out, "%", e.size);
+        
+        padding = extra_space + max_digits_total- e.total.number_of_digits();
+        out.push_spaces(padding);
+        @fmt(out, "%\n", e.total);
+        
     };
     
     push_spaces :: fn(out: *List(u8), count: i64) void = {

@@ -1222,6 +1222,7 @@ fn compile_call_overload_set(self: *SelfHosted, expr: *FatExpr, requested: Resul
         // HACK. experiment. 
         // interesting that this doesnt work. i guess it needs help to know the type? 
         //if Flag.if.ident() == data.name {
+            //self.codemap.show_error_line(arg.loc);
         //    if arg.expr&.is(.Tuple) && arg.expr.Tuple.len == 3 {
         //        parts := arg.expr.Tuple&;
         //        tt := synthetic_ty((Call = (f = parts.index(1), arg = self.make_unit_expr(expr.loc))), expr.loc, UnknownType);
@@ -2137,8 +2138,19 @@ fn adjust_named_arguments(self: *SelfHosted, fid: FuncId, arg_expr: *FatExpr) Re
     .Ok
 }
 
-fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *OverloadAttempt) Maybe(FuncId) = {
+fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *OverloadAttempt) Maybe(FuncId) #once = {
     overloads := self.dispatch.overloads&.nested_index(attempt.os.as_index());
+    // this does catch some but doesn't help much. TODO: maybe remove
+    if !arg_expr.ty.is_unknown() {
+        req := UnknownType;
+        @if_let(attempt.call.requested) fn Specific(t) => {
+            req = t;
+        };
+        key: OverloadKey = (arg = arg_expr.ty, req = req);
+        if overloads.inline_cache._0& == key& {
+            return(Ok = overloads.inline_cache._1);
+        };
+    };
     self.compute_new_overloads(overloads);
     if overloads.ready.len > attempt.last_ready_count {
         attempt.state = 0;
@@ -2163,6 +2175,15 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
         if attempt.options.len == 1 {
             fid := attempt.options[0];
             @log_event("selected % from '%'", fid, self.pool.get(overloads.name)) self;
+            
+            if !arg_expr.ty.is_unknown() {
+                req := UnknownType;
+                @if_let(attempt.call.requested) fn Specific(t) => {
+                    req = t;
+                };
+                key: OverloadKey = (arg = arg_expr.ty, req = req);
+                overloads.inline_cache = (key, fid);
+            };
             return(Ok = fid);
         };
         if attempt.options.len == 0 {
@@ -2191,6 +2212,7 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
     };
     
     if attempt.state < 2 {
+        //@println("%) % has % options", attempt.state, self.pool.get(overloads.name), attempt.options.len);
         // Currently this pass is not needed for correctness but it makes it ~7% faster because you don't have to do an expensive suspend on compiling the whole arg later. -- Aug 30
         enumerate parts { arg_index, arg_expr | 
             continue :: local_return;
@@ -2199,6 +2221,9 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
                 continue();
             };
             type := type.Ok;
+            if type == FuncId {
+                continue();
+            };
             arg_expr.ty = type;
             
             f_i := attempt.options.len;
@@ -2240,6 +2265,7 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
     
     if attempt.state < 3 {
         @if_let(attempt.call.requested) fn Specific(type) => {
+            //@println("%) % has % options", attempt.state, self.pool.get(overloads.name), attempt.options.len);
             f_i := attempt.options.len;
             while => f_i > 0 {
                 continue :: local_return;
@@ -2267,6 +2293,7 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
     };
     
     if attempt.state < 4 {
+        //@println("%) % has % options", attempt.state, self.pool.get(overloads.name), attempt.options.len);
         enumerate parts { arg_index, arg_expr | 
             continue :: local_return;
             @check(self.compile_expr(arg_expr, .None)) return;
@@ -2302,6 +2329,7 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
     };
     
     if attempt.state < 5 {
+        //@println("%) % has % options", attempt.state, self.pool.get(overloads.name), attempt.options.len);
         enumerate parts { arg_index, arg_expr | 
             continue :: local_return;
             
@@ -2377,7 +2405,6 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
     @err("TODO: end of loop. still too many options for '%'", self.pool.get(overloads.name))
 }
 
-
 fn check_promote_id_to_func(self: *SelfHosted, fid: FuncId, f_ty: FnType) Maybe(void) = {
     func := self.get_function(fid);
     //@println("check_promote_id_to_func func <- funcid %", self.log_type(self.intern_type(Fn = f_ty)));
@@ -2408,7 +2435,7 @@ fn check_promote_id_to_func(self: *SelfHosted, fid: FuncId, f_ty: FnType) Maybe(
     .Ok
 }
 
-fn filter_overload_sync(self: *SelfHosted, arg_expr: *FatExpr, fid: FuncId) bool = {
+fn filter_overload_sync(self: *SelfHosted, arg_expr: *FatExpr, fid: FuncId) bool #once = {
     want_arity := self.arity(arg_expr);
     func := self.get_function(fid);
     
@@ -2571,7 +2598,7 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
         
         enumerate func.arg.bindings { i, b | 
             arg_expr := parts.index(i);
-            if !func.get_flag(.Generic) {
+            if !func.get_flag(.Generic) && !b.ty&.is(.Finished) {
                 @check(self.infer_type(b.ty&)) return;
             };
             if b.ty&.ty() { param | 
@@ -2581,7 +2608,7 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
                 //       like ContextualField`.a` -> Value`A.a` loses information.
                 //       or just do it on a clone of the arg expr? -- Aug 2
                 //       but you cant just clone here because then you'll never make progress if you yield while compiling it. 
-                hint: ResultType = if(i == 0, => .None, => (Specific = param));
+                hint: ResultType = (Specific = param); // used to need if(i == 0, => .None, => 
                 self.last_loc = arg_expr.loc;
                 @match(self.compile_expr(arg_expr, hint)) {
                     fn Suspend(f) => {
@@ -2634,7 +2661,7 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
                 continue :: local_return;
                 func := self.get_function(opt);    
                 // TODO: i dont want to check .Generic because i want to remove the need for the annotation eventually. 
-                if !func.get_flag(.Generic) {
+                if !func.get_flag(.Generic) && func.finished_ret&.is_none() {
                     @match(self.infer_return(opt)) {
                         fn Ok() => ();
                         fn Err(e) => return(Err = e);
@@ -2735,7 +2762,9 @@ fn do_merges(self: *SelfHosted, attempt: *OverloadAttempt) Maybe(void) = {
                     if f_j < f_i {
                         f_i -= 1;
                     };
-                    // TODO: remove from the overload set as well. 
+                    overloads.ready&.unordered_retain() { (f: *FuncId) bool | 
+                        f[] != other_fid
+                    };
                 };
             };
         };
@@ -2840,6 +2869,12 @@ fn update_function_metadata(self: *SelfHosted, func: *Func, os: ?OverloadSet) Re
             // TODO: generic+unsafe_noop_cast+cold are done in scope for old sema but i want to move them here. -- Jul 30
             @case(Flag.generic.ident())  => func.set_flag(.Generic);
             @case(Flag.cold.ident())     => func.set_flag(.Cold);
+            @case(Flag.log_bc.ident())   => func.set_flag(.LogBc);
+            @case(Flag.log_asm.ident())  => func.set_flag(.LogAsm);
+            @case(Flag.log_asm_bc.ident()) => func.set_flag(.LogAsmBc);
+            @case(Flag.log_ir.ident())     => func.set_flag(.LogIr);
+            @case(Flag.log_ast.ident())    => func.set_flag(.LogAst);
+            @case(Flag.no_tail.ident())    => func.set_flag(.NoTail);
             @case(Flag.unsafe_noop_cast.ident()) => {
                 func.set_flag(.UnsafeNoopCast);
                 func.set_flag(.BodyIsSpecial);
@@ -3430,6 +3465,9 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
         fn FromBitLiteral() => {
             @check(self.compile_expr(expr, (Specific = ret_ty))) return;
         }
+        fn PrefixMacro() => {
+            @check(self.compile_expr(expr, (Specific = ret_ty))) return;
+        }
         @default => ();
     };
     
@@ -3650,6 +3688,17 @@ fn check_quick_eval(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) ?Values = {
             };
             .None
         }
+        // TODO: why does this make it fail `derive_clone_rec`?  -- Sep 3
+        //       doesn't help much anyway so not a big deal but i should still understand. 
+        //fn PtrOffset(it) => {
+        //    if self.check_quick_eval(it.ptr, it.ptr.ty) { ptr |
+        //        @debug_assert(ptr&.is(.Small) && ptr.Small._1 == 8);
+        //        ptr.Small._0 += it.bytes;
+        //        expr.expr = (Value = (bytes = ptr, coerced = false));
+        //        return(Some = ptr);
+        //    };
+        //    .None
+        //}
         @default => .None;
     }
 }

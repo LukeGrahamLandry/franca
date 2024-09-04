@@ -29,23 +29,27 @@ write_secret :: fn(ctx: rawptr) void = {
 
 #test #aarch64
 fn multistack() = {
-    stack_size := 30;
-    new_stack  := libc_allocator.alloc(i64, stack_size); // TODO: zero it and use temp. 
-    new_sp := new_stack.ptr.offset(stack_size);     // the stack grows downword, so this has to point to the *end* of the memory.
-    assert_eq(@as(i64) i64.int_from_ptr(new_sp).mod(16), 0); // arm wants sp to be 16 byte aligned. malloc should give us that. 
-   
-    assert_eq(count_secrets(), 0);
-    call_in_stack(new_sp, write_secret, 0.rawptr_from_int());
-    // now we should be able to read the callee's leftover variables. 
-    assert_eq(count_secrets(), 1);
+    @if(@run query_current_arch().unwrap() == .Aarch64) {
+        stack_size := 30;
+        new_stack  := libc_allocator.alloc(i64, stack_size); // TODO: zero it and use temp. 
+        new_sp := new_stack.ptr.offset(stack_size);     // the stack grows downword, so this has to point to the *end* of the memory.
+        assert_eq(@as(i64) i64.int_from_ptr(new_sp).mod(16), 0); // arm wants sp to be 16 byte aligned. malloc should give us that. 
     
-    count_secrets :: fn() i64 => {
-        found := 0;
-        for(new_stack) { v |
-            if (v.eq(SECRET)) {
-                found += 1;
+        // TODO: why can't this go at the end of the block if its in an @if
+        //       are we dropping trailing declarations in blocks sometimes??
+        count_secrets :: fn() i64 => {
+            found := 0;
+            for(new_stack) { v |
+                if (v.eq(SECRET)) {
+                    found += 1;
+                };
             };
+            found
         };
-        found
+        
+        assert_eq(count_secrets(), 0);
+        call_in_stack(new_sp, write_secret, 0.rawptr_from_int());
+        // now we should be able to read the callee's leftover variables. 
+        assert_eq(count_secrets(), 1);
     };
 }

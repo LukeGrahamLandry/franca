@@ -10,6 +10,19 @@
   just needed to call compile_fn_ptr.
   that got running repl on jit a bit farther but its still calling uncompiled.
 
+started x86_64 encoding
+//! The more fun game is `from pwn import *; context.arch = "amd64"; print(asm("mov rbx, rcx"));`
+//! and then slowly figure out how to map that back to the tables.
+//! important to note that it prints normal ascii things as characters instead of in hex because we like confusion!
+
+- expand macros in imm_eval without function context (@FnPtr is common).
+
+also (with new using -unsafe) its now faster than the old compiler (~520ms vs ~580ms).
+safe its still 780 tho which is sad.
+
+- replacing if with @if in a few places that get instantiated a lot makes SemaOverloads go from 10k to 6k.
+- the step where you do type_of seems to never make progress if the type is funcid so can skip it. that might be a big fragile.
+
 ## (Sep 2)
 
 it feels like i should be able to get cranelift passing everything on aarch64 before dealing with x86,

@@ -202,7 +202,7 @@ fn emit_bounce_fn(self: *EmitLlvm, impl_name_callee: Str, fake_decl_name: Str, s
     self.out&.reserve(50);
     self.out&.current().push_all("{\n");
     self.current_debug_info = 0;
-    ret := self.inst_call(values.items(), signeture) {
+    ret := self.inst_call(values.items(), signeture, .None) {
         @fmt(self.out&.current(), "@%", impl_name_callee);
     };
     self.inst_return(ret);
@@ -529,8 +529,8 @@ fn display(self: Ty(*EmitLlvm, FuncId), out: *List(u8)) void = {
     self._0.fmt_fn_name(self._1, out)
 }
 
-fn inst_call(self: *EmitLlvm, args: Slice(LlvmVal), sig: PrimSig, f: FuncId, tail: bool) Slice(EmitLlvm.Val) = {
-    self.inst_call(args, sig) {
+fn inst_call(self: *EmitLlvm, args: Slice(LlvmVal), sig: PrimSig, f: FuncId, tail: bool, loc: ?Span) Slice(EmitLlvm.Val) = {
+    self.inst_call(args, sig, loc) {
         self.out&.current().push_all("@");
         self.fmt_fn_name(f, self.out&.current());
     }
@@ -618,7 +618,7 @@ fn inst_intrinsic(self: *EmitLlvm, args: Slice(LlvmVal), op: Intrinsic) Slice(Em
     }
 }
 
-fn inst_call(self: *EmitLlvm, args: Slice(LlvmVal), sig: PrimSig, $do_call: @Fn() void) Slice(EmitLlvm.Val) = {
+fn inst_call(self: *EmitLlvm, args: Slice(LlvmVal), sig: PrimSig, loc: ?Span, $do_call: @Fn() void) Slice(EmitLlvm.Val) = {
     self.out&.reserve(30);
     
     out_vals: List(LlvmVal) = list(temp());
@@ -665,7 +665,14 @@ fn inst_call(self: *EmitLlvm, args: Slice(LlvmVal), sig: PrimSig, $do_call: @Fn(
         // TODO: line info
         // Fixes "inlinable function call in a function with debug info must have a !dbg location"
         location := self.next_debug();
-        @fmt(self.debug_info&, "!% = !DILocation(line: 1, column: 1, scope: !%)\n", location, self.current_debug_info);
+        line := 1;
+        column := 1;
+        if loc { loc |
+            place := self.program.codemap.get_whole_line(loc);
+            line = place.line;
+            column = place.col;
+        };
+        @fmt(self.debug_info&, "!% = !DILocation(line: %, column: %, scope: !%)\n", line, column, location, self.current_debug_info);
         @fmt(self.out&.current(), ", !dbg !%", location);
     };
     
@@ -696,8 +703,8 @@ fn inst_trap(self: *EmitLlvm) void = {
     self.out&.push_all("   call void @llvm.trap()\n   unreachable\n");
 }
 
-fn inst_call_ptr(self: *EmitLlvm, args: Slice(LlvmVal), sig: PrimSig, ptr: EmitLlvm.Val) Slice(EmitLlvm.Val) = {
-    self.inst_call(args, sig) {
+fn inst_call_ptr(self: *EmitLlvm, args: Slice(LlvmVal), sig: PrimSig, ptr: EmitLlvm.Val, loc: ?Span) Slice(EmitLlvm.Val) = {
+    self.inst_call(args, sig, loc) {
         @fmt(self.out&.current(), "%", ptr);
     }
 }

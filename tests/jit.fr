@@ -1,0 +1,288 @@
+#test fn manual_mmap(canary: i64) i64 = {
+    arch := query_current_arch().unwrap();
+    if arch == .Aarch64 {
+        code := @slice (
+            movz(Bits.X64, x1, 0b0000000000001010, Hw.Left0),
+            add_sr(Bits.X64, x0, x1, x0, Shift.LSL, 0b000000), 
+            ret()
+        );
+        assert_eq(call_jit(90, code), 100);
+        
+        // TODO: Decimal literals auto cast to any bit size. 
+        // TODO: bounds checking for constants. 
+        code := @slice (
+            movz(Bits.X64, x1, 0x0078, Hw.Left0), 
+            add_sr(Bits.X64, x0, x0, x1, Shift.LSL, 0b000000), 
+            ret()
+        );
+        assert_eq(call_jit(80, code), 200);
+    };
+    if arch == .X86_64 {
+        code: List(u8) = list(temp());
+        
+        RAX_FROM_RDI :: 0b11111000;  // modrm. (mode:u2= registers not memory= 3, reg_src:u3=rdi=7, reg_dest:u3=rax=0)
+        JUST_RAX :: 0b11000000;
+        
+        @asm_x64(
+            PrimaryOp.MovImm32, JUST_RAX, @as(u32) 10, // mov rax, 10
+            PrimaryOp.Ret,
+        ) code&;
+        assert_eq(call_jit(0, code.items()), 10);
+        
+        code&.clear();
+        code&.encode_bin(PrimaryOp.MovReg, rax, rdi);
+        code&.push(@as(u8) PrimaryOp.Ret);
+        assert_eq(call_jit(90, code.items()), 90);
+    
+        code&.clear();
+        @asm_x64(
+            PrimaryOp.MovImm32, JUST_RAX, @as(u32) 10, // mov rax, 10
+            PrimaryOp.AddReg, RAX_FROM_RDI,   // add rax, rdi
+            PrimaryOp.Ret,
+        ) code&;
+        assert_eq(call_jit(90, code.items()), 100);
+        
+        // same thing but with fancier macro usage
+        code&.clear();
+        @asm_x64(
+            encode_imm(rax, @as(u64) 10),
+            encode_bin(PrimaryOp.AddReg, rax, rdi),
+            PrimaryOp.Ret,
+        ) code&;
+        assert_eq(call_jit(90, code.items()), 100);
+        
+        // big immediate works 
+        code&.clear();
+        @asm_x64(
+            PrimaryOp.MovImm32, JUST_RAX, @as(u32) 1234567,
+            PrimaryOp.Ret,
+        ) code&;
+        assert_eq(call_jit(0, code.items()), 1234567);
+    };
+    
+    canary
+}
+
+// TODO: compiler hangs when trying to jit inline asm if it doesn't support the comptime arch.
+// TODO: go through and implement on x86 everything with `@if(@run query_current_arch().unwrap() == .Aarch64) {`
+// TODO: output llvm asm for #x86_bytes like i do for #aarch64
+
+#test fn math_ops(canary: i64) i64 = {
+    #c_call #aarch64 #asm
+    fn add_by_asm(a: i64, b: i64) i64 = (
+        add_sr(Bits.X64, x0, x0, x1, Shift.LSL, 0b000000),
+        ret(),
+    );
+    // now using inline asm that the compiler knows about
+    #c_call #x86_bytes #asm
+    fn add_by_asm(a: i64, b: i64) i64 = fn(out: *List(u8)) void = @asm_x64(
+        encode_imm(rax, @as(u64) 0),
+        encode_bin(PrimaryOp.AddReg, rax, rdi),
+        encode_bin(PrimaryOp.AddReg, rax, rsi),
+        PrimaryOp.Ret,
+    ) out;
+    assert_eq(add_by_asm(10, 15), 25);
+    
+    three := add_by_asm(1, 2);
+    assert_eq(three, 3);
+    
+    @if(@run query_current_arch().unwrap() == .Aarch64) {
+        #c_call #aarch64 #asm
+        fn add_one(a: i64) i64 = (
+            add_im(Bits.X64, x0, x0, @as(u12) 1, 0b0),
+            ret(),
+        );
+        assert_eq(add_one(9), 10);
+        
+        #c_call #aarch64 #asm
+        fn sub_one(a: i64) i64 = (
+            sub_im(Bits.X64, x0, x0, @as(u12) 1, 0b0),
+            ret(),
+        );
+        assert_eq(sub_one(10), 9);
+        
+        #c_call #aarch64 #asm
+        fn bool_to_int(b: bool) i64 = (
+            ret(),
+            ret(), // TODO: single element tuple
+        );
+        assert_eq(bool_to_int(true), 1);
+        assert_eq(bool_to_int(false), 0);
+    };
+    
+    canary
+}
+
+#aarch64
+#test fn branching(canary: i64) i64 = {
+    @if(@run query_current_arch().unwrap() == .Aarch64) {
+        #c_call #aarch64 #asm
+        fn add_or_sub(a: i64, b: i64, add_if_seven: i64) i64 = (
+            cmp_im(Bits.X64, x2, @as(u12) 7, 0b0),
+            b_cond(@as(i19) 3, Cond.EQ),
+            sub_sr(Bits.X64, x0, x0, x1, Shift.LSL, @as(u6) 0),
+            ret(),
+            add_sr(Bits.X64, x0, x0, x1, Shift.LSL, @as(u6) 0),
+            ret(),
+        );
+        assert_eq(add_or_sub(30, 20, 7), 50);
+        assert_eq(add_or_sub(30, 20, 8), 10);
+    
+        #c_call #aarch64 #asm
+        fn add_or_sub2(a: i64, b: i64, add_if_seven: i64) i64 = (
+            cmp_im(Bits.X64, x2, @as(u12) 7, 0b0),
+            b_cond(@as(i19) 3, Cond.NE),
+            add_sr(Bits.X64, x0, x0, x1, Shift.LSL, @as(u6) 0),
+            ret(),
+            sub_sr(Bits.X64, x0, x0, x1, Shift.LSL, @as(u6) 0),
+            ret(),
+        );
+        assert_eq(add_or_sub2(30, 20, 7), 50);
+        assert_eq(add_or_sub2(30, 20, 8), 10);
+        
+        #c_call #aarch64 #asm
+        fn is_seven(n: i64) i64 = (
+            cmp_im(Bits.X64, x0, @as(u12) 7, 0b0),
+            cset(Bits.X64, x0, Cond.NE),
+            ret(),
+        );
+        assert_eq(is_seven(7), 1);
+        assert_eq(is_seven(8), 0);
+    };
+    canary
+}
+
+#aarch64
+#test fn using_stack(canary: i64) i64 = {
+    @if(@run query_current_arch().unwrap() == .Aarch64) {
+        #c_call #aarch64 #asm
+        fn truncate_to_byte(in: *i64, out: *i64) void = (
+            ldrb_uo(x2, x0, @as(u12) 0),
+            strb_uo(x2, x1, @as(u12) 0),
+            ret(),
+        );
+        in := 257;
+        out := 0;
+        truncate_to_byte(in&, out&);
+        assert_eq(out, 1);
+        
+        #c_call #aarch64 #asm
+        fn use_stack(a: i64) i64 = (
+            sub_im(Bits.X64, sp, sp, @as(u12) 16, 0b0),
+            str_uo(Bits.X64, x0, sp, @as(u12) 1),
+            movz(Bits.X64, x0, 0x000A, Hw.Left0), 
+            ldr_uo(Bits.X64, x1, sp, @as(u12) 1),
+            add_sr(Bits.X64, x0, x0, x1, Shift.LSL, @as(u6) 0),
+            add_im(Bits.X64, sp, sp, @as(u12) 16, 0b0),
+            ret(),
+        );
+        assert_eq(use_stack(15), 25);
+    
+        // Note: you make 16 bytes of room on the stack, then use offset 0 words and 1 words above sp. 
+        //       NOT offset 1 and 2, that will stomp the first slot of the outer function (in this case canary so luckily you notice)
+        //       but... its fine on interp because canary is stored on the fake stack and there happens to be a gap on the real one i guess. 
+        //       I also didn't notice that I forgot to reset sp, I guess rust set the value after the call instead of trusing callee to offset it back? 
+        #c_call #aarch64 #asm
+        fn read_pair(a: i64, b: i64) i64 = (
+            sub_im(Bits.X64, sp, sp, @as(u12) 16, 0b0),
+            str_uo(Bits.X64, x0, sp, @as(u12) 0),
+            str_uo(Bits.X64, x1, sp, @as(u12) 1),
+            ldp_so(Bits.X64, x2, x3, sp, @as(i7) 0),
+            sub_sr(Bits.X64, x0, x2, x3, Shift.LSL, @as(u6) 0),
+            add_im(Bits.X64, sp, sp, @as(u12) 16, 0b0),
+            ret(),
+        );
+        assert_eq(read_pair(30, 20), 10);
+        
+        #c_call #aarch64 #asm
+        fn write_pair(a: i64, b: i64) i64 = (
+            sub_im(Bits.X64, sp, sp, @as(u12) 16, 0b0),
+            stp_so(Bits.X64, x0, x1, sp, @as(i7) 0),
+            ldr_uo(Bits.X64, x2, sp, @as(u12) 0),
+            ldr_uo(Bits.X64, x3, sp, @as(u12) 1),
+            sub_sr(Bits.X64, x0, x2, x3, Shift.LSL, @as(u6) 0),
+            add_im(Bits.X64, sp, sp, @as(u12) 16, 0b0),
+            ret(),
+        );
+        assert_eq(write_pair(30, 20), 10);
+        
+        #c_call #aarch64 #asm
+        fn both_pair(a: i64, b: i64) i64 = (
+            sub_im(Bits.X64, sp, sp, @as(u12) 16, 0b0),
+            stp_so(Bits.X64, x0, x1, sp, @as(i7) 0),
+            ldp_so(Bits.X64, x2, x3, sp, @as(i7) 0),
+            sub_sr(Bits.X64, x0, x2, x3, Shift.LSL, @as(u6) 0),  // sub means order matters, so you can catch if flipped in encoding.
+            add_im(Bits.X64, sp, sp, @as(u12) 16, 0b0),
+            ret(),
+        );
+        assert_eq(both_pair(30, 20), 10);
+    };
+    canary
+}
+
+#aarch64
+#test fn asm_fn_ptr(canary: i64) i64 = {
+    @if(@run query_current_arch().unwrap() == .Aarch64) {
+        fn double_it(a: i64) i64 #c_call #aarch64 #asm = (
+            add_sr(Bits.X64, x0, x0, x0, Shift.LSL, @as(u6) 0),
+            ret(),
+        );
+        
+        f: @FnPtr(a: i64) i64 : double_it; // constant ':'
+        assert_eq(f(5), 10);
+        
+        // TODO: easy, im just lazy
+        fn do_nothing(a: i64) i64 #c_call #aarch64 #asm = (
+            add_sr(Bits.X64, x0, x0, xzr, Shift.LSL, @as(u6) 0),
+            ret(),
+        );
+        f2: @FnPtr(a: i64) i64 = do_nothing; // runtime '='
+        assert_eq(f2(5), 5);
+    };
+    canary
+}
+
+fn show(code: *List(u8)) void = {
+    hex: List(u8) = list(code.len * 5, temp());
+    for code { b |
+        hex&.push_prefixed_hex_byte(b);
+        hex&.push_all(" ");
+    };
+    println(hex.items());
+}
+
+// aarch64 instructions are u32, x86_64 are u8
+
+fn call_jit(input: i64, code: Slice(u32)) i64 = {
+    assert(query_current_arch().unwrap() == .Aarch64, "wrong size instructions wont go well");
+    bytes := code.len().mul(4);
+    mapped := page_allocator.alloc(u8, bytes);
+    
+    assert(eq(0, u8.int_from_ptr(mapped.ptr).mod(4)), "bad alignment");
+    dest: Slice(u32) = (ptr = ptr_cast_unchecked(From = u8, To = u32, ptr = mapped.ptr), len = code.len);
+    dest.copy_from(code);
+    
+    beg := u8.raw_from_ptr(mapped.ptr);
+    end := beg.int_from_rawptr().add(bytes).rawptr_from_int();
+    exec := make_exec(mapped);
+    f := assume_types_fn(i64, i64, exec.ptr);
+    __clear_cache(beg, end);
+    out := f(input);
+    os_dealloc(exec);
+    out
+}
+
+fn call_jit(input: i64, code: Slice(u8)) i64 = {
+    assert(query_current_arch().unwrap() == .X86_64, "wrong size instructions wont go well");
+    mapped := page_allocator.alloc(u8, code.len);
+    mapped.copy_from(code);
+    
+    beg := u8.raw_from_ptr(mapped.ptr);
+    end := beg.int_from_rawptr().add(code.len).rawptr_from_int();
+    exec := make_exec(mapped);
+    f := assume_types_fn(i64, i64, exec.ptr);
+    __clear_cache(beg, end);
+    out := f(input);
+    os_dealloc(exec);
+    out
+}
