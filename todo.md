@@ -3,23 +3,21 @@
 - seperate fn stride_of and fn size_of so you can avoid extra padding in nested structs.
   then need to allow different reprs.
 - sign extend
-- bake_relocatable_value overloads are not compiled lazily. all are done when compiling for AOT even if the type isn't needed.
 - test that struct padding is zeroed before emitting comptime data and before being used as a key to cache const args instantiations.
 - bake_relocatable_value for List, Alloc, Fd.
 - deduplicate constants (strings especially), its just annoying cause i don't have const pointers.
   can do it by address at least, cause if it was a string literal in the pool, will be the same.
-- i think generic with multiple const args aren't typechecked (you can pass a pointer to the enum functions that should expect a tag).
-  write a test for that, need to have better support for testing that a certain error happens.
 - make the quote syntax not make a redundant block for single expressions that you have to manually get rid of if you want to access the actual node.
 - combine places that do multiple walk_ast/clone passes (renumber/unmark_done)
 - auto test repl. at least compile all the example programs in run_tests.fr, at least compile the compiler.
+- `name :: @merged { fn() #asm #aarch64 = ...; fn() #asm #x86_bytes = ...; };`
+  so you can use inline asm without making an overload set.
 
 ## data structure changes
 
 wait until fully self hosted so its less painful because don't have to keep both sides in sync.
 (when compiling the compiler) need to seperate the ast types used for the comptime interfacing with the active compiler and the ones used internally by the new compiler.
 
-- stop storing annotations on FatStmt because only Func uses them. just put them there in the parser instead of waiting for scope.
 - 16 byte RsVec because address space is really 48 bits probable so 48 bit ptr and len and spread cap accross the upper 16 of each.
 - use null pointer as niche for `?*T`
 - make .None tag be 0 so zero initilized is a sane default (just need to swap the order in the declaration).
@@ -27,7 +25,6 @@ wait until fully self hosted so its less painful because don't have to keep both
 ## regressions
 
 - @tagged tag check on field access
-- I rely on Vec field order (cap, ptr, len) which is crimes
 
 ## Deeply annoying
 
@@ -139,12 +136,6 @@ wait until fully self hosted so its less painful because don't have to keep both
 - does it make sense to put all thier statics in a thread local and hope that makes it thread safe?
 - figure out how to make a memory backed \*FILE
 
-## Ui
-
-- repl
-- pass source as cli arg
-
 ## Lsp
 
-- factor out lsp dispatch
 - more tolarant parser. Need to be able to represent holes in the ast.

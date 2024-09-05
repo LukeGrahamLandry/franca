@@ -1,3 +1,5 @@
+//! This is nice for sanity checking instruction encoding seperatly from the comptime jit because you can cross compile. 
+
 #test fn manual_mmap(canary: i64) i64 = {
     arch := query_current_arch().unwrap();  // note: at comptime we don't know if we're cross compiling, so both branches are compiled. 
     if arch == .Aarch64 {
@@ -129,7 +131,6 @@
     canary
 }
 
-#aarch64
 #test fn branching(canary: i64) i64 = {
     #c_call #aarch64 #asm
     fn is_seven(n: i64) i64  = (
@@ -173,24 +174,36 @@
     assert_eq(add_or_sub(30, 20, 7), 50);
     assert_eq(add_or_sub(30, 20, 8), 10);
     
-    @if(@run query_current_arch().unwrap() == .Aarch64) {
-        #c_call #aarch64 #asm
-        fn add_or_sub2(a: i64, b: i64, add_if_seven: i64) i64 = (
-            cmp_im(Bits.X64, x2, @as(u12) 7, 0b0),
-            b_cond(@as(i19) 3, Cond.NE),
-            add_sr(Bits.X64, x0, x0, x1, Shift.LSL, @as(u6) 0),
-            ret(),
-            sub_sr(Bits.X64, x0, x0, x1, Shift.LSL, @as(u6) 0),
-            ret(),
-        );
-        assert_eq(add_or_sub2(30, 20, 7), 50);
-        assert_eq(add_or_sub2(30, 20, 8), 10);
-    };
+    #c_call #aarch64 #asm
+    fn add_or_sub2(a: i64, b: i64, add_if_seven: i64) i64 = (
+        cmp_im(Bits.X64, x2, @as(u12) 7, 0b0),
+        b_cond(@as(i19) 3, Cond.NE),
+        add_sr(Bits.X64, x0, x0, x1, Shift.LSL, @as(u6) 0),
+        ret(),
+        sub_sr(Bits.X64, x0, x0, x1, Shift.LSL, @as(u6) 0),
+        ret(),
+    );
+    #c_call #x86_bytes #asm
+    fn add_or_sub2(a: i64, b: i64, add_if_seven: i64) i64 = fn(out) = @asm_x64(
+        encode_bin(PrimaryOp.MovReg, rax, rdi),
+        encode_imm(rcx, @as(u64) 7),
+        encode_bin(PrimaryOp.CmpReg, rcx, rdx),
+        encode_jmp(TwoByteOp.JmpNe, 4),
+        encode_bin(PrimaryOp.AddReg, rax, rsi),   // 3
+        PrimaryOp.Ret, // 1
+        encode_bin(PrimaryOp.SubReg, rax, rsi),   // 3
+        PrimaryOp.Ret, // 1
+    ) out;
+    assert_eq(add_or_sub2(30, 20, 7), 50);
+    assert_eq(add_or_sub2(30, 20, 8), 10);
+    
     canary
 }
 
 #aarch64
 #test fn using_stack(canary: i64) i64 = {
+    // TODO: fancy enough driver that you can warn on this (@run query_current_arch()) becuase it's a footgun for cross compiling. 
+    //       but i don't want to just keep adding shit to the compiler. 
     @if(@run query_current_arch().unwrap() == .Aarch64) {
         #c_call #aarch64 #asm
         fn truncate_to_byte(in: *i64, out: *i64) void = (
@@ -257,22 +270,34 @@
     canary
 }
 
-#aarch64
 #test fn asm_fn_ptr(canary: i64) i64 = {
+    // TODO: need to do_merges when resolving by type. 
+    //       should clean up the old resolve_in_overload_set
     @if(@run query_current_arch().unwrap() == .Aarch64) {
         fn double_it(a: i64) i64 #c_call #aarch64 #asm = (
             add_sr(Bits.X64, x0, x0, x0, Shift.LSL, @as(u6) 0),
             ret(),
         );
+        //#c_call #x86_bytes #asm
+        //fn double_it(a: i64) i64 = fn(out) = @asm_x64(
+        //    encode_bin(PrimaryOp.MovReg, rax, rdi),
+        //    encode_bin(PrimaryOp.AddReg, rax, rax),
+        //    PrimaryOp.Ret,
+        //) out;
         
         f: @FnPtr(a: i64) i64 : double_it; // constant ':'
         assert_eq(f(5), 10);
         
-        // TODO: easy, im just lazy
         fn do_nothing(a: i64) i64 #c_call #aarch64 #asm = (
             add_sr(Bits.X64, x0, x0, xzr, Shift.LSL, @as(u6) 0),
             ret(),
         );
+        //#c_call #x86_bytes #asm
+        //fn do_nothing(a: i64) i64 = fn(out) = @asm_x64(
+        //    encode_bin(PrimaryOp.MovReg, rax, rdi),
+        //    PrimaryOp.Ret,
+        //) out;
+        
         f2: @FnPtr(a: i64) i64 = do_nothing; // runtime '='
         assert_eq(f2(5), 5);
     };

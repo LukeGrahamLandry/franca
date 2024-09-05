@@ -8,7 +8,7 @@
 - bloat: parses the output of objdump and reports the space taken by each function (cli:objdump)
 - farm_game: draws some rectangles on the screen with sokol (lib:sokol)
 - dearimgui_demo: calls ImGui::ShowDemoWindow (lib:sokol, lib:dearimgui)
-- c_bindgen: parses clang's ast to generate franca function signetures (cli:clang, lib:wuffs)
+- c_bindgen: parses clang's ast to generate franca function signetures (cli:clang)
 - default_driver: a driver program that can be used to build other franca programs (cli:clang, cli:qbe)
 - compiler_gui: uses the compiler as a libary to display introspection about a program (lib:sokol, lib:dearimgui)
 - repl: a franca repl using the comptime jit.

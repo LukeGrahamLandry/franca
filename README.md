@@ -19,7 +19,7 @@ If you just want to see what the syntax looks like, click on examples or compile
 - nonlocal returns from inline lambdas (like kotlin/ruby)
 - manual memory management with explicit allocators (like zig)
 - no seperate build system. write a program that builds your program (like jai)
-- custom jit for quick debug builds, optional llvm backend for optimised release builds (like zig/jai)
+- custom asm backend for quick debug builds, optional llvm backend for optimised release builds (like zig/jai)
 - use c abi functions/structs with no overhead (like everything)
 - ships with [sokol](https://github.com/floooh/sokol) bindings so its not a research exercise if you just want to put a triangle on the screen.
 

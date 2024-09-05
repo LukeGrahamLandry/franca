@@ -1,0 +1,276 @@
+//! This is not a best in class json parser!
+//! - for now you have to have the whole thing in memory, i dont care about your 50gb json file or whatever. 
+//! - error handling is like meh, i tend to use it for parsing clang --dump-ast which presumably is always valid json. 
+//! - i assume the world speaks 7-bit ascii which is pretty cringe. 
+//! - i don't support string escapes yet.
+//! - it made c_bindgen processing time ~30% slower. bounds checks? 
+
+JsonParser :: @struct(  
+    input: Str,
+    out: Alloc,
+    depth: i64 = 0,
+    current: i64 = 0,
+    is_dict: BitSet = empty(),
+    last_thing_was_key: bool = false,
+    is_skipping := false,
+);
+
+// TODO: if the first thing doesn't have a payload, you get an unwrap in export_ffi. -- Jul 4
+JsonPart :: @tagged(
+    Key: Str, 
+    StringValue: Str,
+    BoolValue: bool,
+    Null,
+    Float: f64,
+    StartDict,
+    StartList,
+    End,
+    Eof,
+);
+
+// TODO: you can't call this init because the overload set is needed too early.
+fn new_json(input: Str, mem: Alloc) JsonParser = {
+    :: tagged(JsonPart);
+    self: JsonParser = (
+        input = input,
+        out = mem,
+    );
+    self
+}
+
+fn next2(self: *JsonParser) Result(JsonPart, Str) = {
+    start := self.current;
+    r := self.next2();
+    lexeme := self.input.slice(start, self.current);
+    @print("|%| ", lexeme);
+    @match(r&) {
+        fn Ok(it) => {
+            @println("%", it.tag());
+        }
+        fn Err(it) => {
+            println(it[]);
+        }
+    };
+    r
+}
+fn next(self: *JsonParser) Result(JsonPart, Str) = { 
+    if self.at_end() {
+        return(Ok = .Eof);
+    };
+    loop {
+        self.skip_whitespace();
+        @switch(self.peek_c()) {
+            //@case(0) => return(Ok = .Eof);
+            @case("{".ascii()) => { 
+                self.last_thing_was_key = false;
+                self.current += 1;
+                self.last_thing_was_key = false;
+                self.depth += 1;
+                self.is_dict&.set(self.depth, temp());
+                return(Ok = .StartDict);
+            };
+            @case("[".ascii()) => { 
+                self.last_thing_was_key = false;
+                self.current += 1;
+                self.last_thing_was_key = false;
+                self.depth += 1;
+                self.is_dict&.unset(self.depth);
+                return(Ok = .StartList);
+            };
+            @case("]".ascii()) => { 
+                self.last_thing_was_key = false;
+                self.current += 1;
+                self.depth -= 1;
+                return(Ok = .End);
+            };
+            @case("}".ascii()) => { 
+                self.last_thing_was_key = false;
+                self.current += 1;
+                self.depth -= 1;
+                return(Ok = .End);
+            };
+            // TODO: do these literals properly
+            @case("f".ascii()) => {
+                self.last_thing_was_key = false;
+                self.current += "false".len();
+                return(Ok = (BoolValue = false));
+            };
+            @case("t".ascii()) => {
+                self.last_thing_was_key = false;
+                self.current += "true".len();
+                return(Ok = (BoolValue = true));
+            };
+            @case("n".ascii()) => {
+                self.last_thing_was_key = false;
+                self.current += "null".len();
+                return(Ok = .Null);
+            };
+            @case("\"".ascii()) => {
+                self.current += 1;
+                s := @try(self.lex_str()) return;
+                self.current += 1;
+                if self.expecting_key() && !self.last_thing_was_key {
+                    self.last_thing_was_key = true;
+                    return(Ok = (Key = s));
+                } else {
+                    self.last_thing_was_key = false;
+                    return(Ok = (StringValue = s));
+                };
+            };
+            @inclusive("0".ascii(), "9".ascii()) => {
+                self.last_thing_was_key = false;
+                return(Ok = (Float = self.lex_num()))
+            };
+            // TODO: error if you forget the .ascii()
+            @case(",".ascii()) => { 
+                self.current += 1;
+            };
+            @case(":".ascii()) => { 
+                self.current += 1;
+            };
+            @default => return(Err = items(@format("invalid json character: %", self.input.slice(self.current, self.current + 1)) temp()));
+        };
+    };
+    unreachable()
+}
+
+fn expecting_key(self: *JsonParser) bool = 
+    self.is_dict&.get(self.depth);
+
+// Call when you just got a key you don't care about and want to skip the whole subtree of its value. 
+fn skip_next_value(self: *JsonParser) Result(void, Str) = {
+    // TODO: debug assert in list or last was key. 
+    depth := self.depth;
+    self.is_skipping = true;
+    part := @try(self.next()) return;
+    self.is_skipping = false; // TODO: reset if err in loop
+    @match(part) {
+        (fn StartDict() => return(self.skip_until_depth(depth)));
+        (fn StartList() => return(self.skip_until_depth(depth)));
+        // TODO: it used to work if this fell through
+        (fn StringValue() => return(.Ok)); // Strings are a single Part, so we're done. 
+        (fn BoolValue(_) => return(.Ok));
+        (fn Float(_) => return(.Ok));
+        (fn Null() => return(.Ok));
+        @default => return(Err = "Expected start of json value.");
+    }; // TODO: the compiler segfaults if you forget this semicolon. :FUCKED -- Jul 4
+    .Ok
+}
+
+// This skips the rest of the current dist/list. 
+// So you can see a key, and its value, and then decide to discard the whole thing. 
+fn skip_current_value(self: *JsonParser) Result(void, Str) = {
+    self.skip_until_depth(self.depth - 1)
+}
+
+// Fast path where we don't bother decoding string escapes into memory. 
+fn skip_until_depth(self: *JsonParser, end_depth: i64) Result(void, Str) = {
+    self.is_skipping = true;
+    while => end_depth < self.depth && !self.at_end() { 
+        // TODO: don't bother parsing numbers. (once i support escales) don't bother reallocating strings 
+        @try(self.next()) return; 
+    };
+    self.is_skipping = false; // TODO: reset if err in loop
+    if self.at_end() && end_depth < self.depth {
+        return(Err = "hit end before depth");
+    };
+    .Ok
+}
+
+// TODO: better errors. should be able to tell difference between parse error and missing key. 
+// You should already be in a dict. returns Err if it closes before we see your key. 
+// If it returns Ok, the parser is looking at the value of your key. 
+fn skip_until_key(self: *JsonParser, name: Str) Result(void, Str) = {
+    loop() {
+        token := @try(self.next()) return;
+        if token&.is(.Key) {
+            if token.Key == name {
+                return(.Ok);
+            };
+            @try(self.skip_next_value()) return;
+        } else {
+            // if its End, we got to the end of the object. otherwise malformed input. 
+            return(Err = "key not found");
+        };
+    };
+    unreachable()
+}
+
+// TODO: have a simple lexer library? this is the third one ive written. 
+// START: copy-paste from lox
+fn skip_whitespace(self: *JsonParser) void = {
+    done :: return;
+    loop {
+        // TODO: multi case
+        @switch(self.peek_c()) {
+            @case(" ".ascii()) => { self.pop(); };
+            @case("\t".ascii()) => { self.pop(); }; 
+            @case("\r".ascii()) => { self.pop(); }; 
+            @case("\n".ascii()) => { 
+                self.pop();
+            }; 
+            @case("/".ascii()) => {
+                if(self.peek_c(1).eq("/".ascii())){
+                    dowhile {
+                        self.at_end().not().and(=> self.pop().ne("\n".ascii()))
+                    };
+                };
+            };
+            @default => {
+                done();
+            };
+        }
+    };
+}
+fn at_end(self: *JsonParser) bool = self.current >= self.input.len;
+fn pop(self: *JsonParser) u8 = {
+    self.current += 1;
+    self.input[self.current - 1]
+}
+fn peek_c(self: *JsonParser) u8 = self.peek_c(0);
+fn peek_c(self: *JsonParser, n: i64) u8 = 
+    if(self.current + n < self.input.len, => self.input[self.current.add(n)], => 0);
+
+fn lex_num(self: *JsonParser) f64 = {
+    whole := self.lex_int();
+    ::if(f64);
+    if self.peek_c() == ".".ascii() && self.peek_c(1).is_ascii_digit() {
+        // Actually, that's a float.
+        self.current += 1;
+        start := self.current;
+        fraction := self.lex_int();
+        end := self.current;
+        digits := end.sub(start);
+        scale := 10.pow(digits);
+        whole.float().add(fraction.float().div(scale.float()))
+    } else {
+        whole.float()
+    }
+}
+
+fn lex_int(self: *JsonParser) i64 = {
+    total := 0;
+    dowhile {
+        total *= 10;
+        total += self.peek_c().dec_digit();
+        self.current += 1;
+        self.peek_c().is_ascii_digit()
+    };
+    total
+}
+fn lex_str(self: *JsonParser) Result(Str, Str) = {
+    start := self.current;
+    dowhile {
+        c := self.pop();
+        if c == "\\".ascii() {
+            if self.is_skipping {
+                self.current += 1;  // it might be a quote
+            } else {
+                return(Err = "TODO: json string escapes are not supported");
+            };
+        };
+        c != "\"".ascii()
+    };
+    (Ok = self.input.slice(start, self.current - 1))
+}
+// END: copy-paste from lox

@@ -16,6 +16,16 @@ improving some error messages.
   this is gonna take a billon years, sema still does `@err` 133 times.
   started with what seems like the most common ones (ExpectedCompileError, TypeMismatch, CoerceConst, InvalidField).
 
+wrote my own json lexer for c_bindgen instead of using wuffs.
+processing time for c_bindgen sokol is ~70ms for wuffs and ~95ms for mine (both aot).
+the json.fr for both versions is the same amount of code tho (not counting bindings/wuffs).
+mine doesn't do much error handling or support string escapes (tho my old couldn't cope with escapes either).
+
+// TODO: examples/llvm_mc_repl.fr so i don't have to use the python thing
+// TODO: example image viewer to use an actually interesting part of wuffs because i still think it's cool
+// TODO: nicer imports system. json.fr shouldn't clutter the namespace, most programs won't use it.
+// #file_scope, better namespaces in general.
+
 ## (Sep 3)
 
 - allow `:=` for default with inferred type on first field of sturct

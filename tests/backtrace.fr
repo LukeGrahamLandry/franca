@@ -1,45 +1,104 @@
+// TODO: doesn't work on cranelift arm becuase they use the magic encryption instruction bscibp (those arent the right letters but you get the point) 
+// TODO: implement `get_fp` for x86_64
+
+fn backtrace_t(canary: i64) i64 #test = {
+    @if(@run query_current_arch().unwrap() == .Aarch64) {
+        assert_eq(123, thing1());
+    };
+    canary
+}
+
+// TODO: rename it to #no_inline
+fn thing1() i64 #noinline #no_tail = {
+    _ := 1.add(2);
+    thing2()
+}
+
+fn thing2() i64 #noinline #no_tail = {
+    trace := collect_backtrace();
+    dist := 0;
+    last := trace[0].lr.int_from_rawptr();
+    close_dist := 0;
+    enumerate trace { i, frame |
+        if i == 3 {
+            close_dist = dist;
+        };
+        current := frame.lr.int_from_rawptr();
+        dist = dist.max(last.sub(current).abs());
+        last = current;
+    };
+    
+    // we expect [XXX, backtrace_t, thing1, thing2]
+    // when running jitted in the compiler, XXX will be a bunch of precompiled stuff, 
+    // so the first 3 functions should be quite close together and then there should be a big jump before the rest. 
+    // when running aot, XXX should just be main, and it should be close to the other functions. 
+    // this is pretty fragile, what if we can see into the platform's libc? this test might not live long...
+    very_scientific_close_scale :: 4000;
+    assert_eq(true, trace.len.gt(3));
+    if trace.len == 4 { // guessed aot
+        @assert(dist < close_dist * very_scientific_close_scale);
+    } else {  // guessed jit
+        @assert(dist > close_dist * very_scientific_close_scale);
+    };
+    
+    123
+}
+
+// The first 16 bytes of a stack frame is always one of these. 
+Frame :: @rec @struct(
+    fp: *Frame,  // Pointer to the previous Frame (start of its stack). 
+    lr: rawptr   // Saved instruction pointer value. 
+);
+
+fn get_fp() *Frame #aarch64 #c_call #asm = (
+    mov(Bits.X64, x0, fp),
+    ret(),
+);
+
+fn walk_backtrace($yield: @Fn(f: *Frame) void) void #aarch64 = {
+    addr := get_fp();
+    // TODO: nullable pointer should be spelled ?*T
+    ::ptr_utils(Frame);
+    while => !addr[].fp.is_null()  {
+        yield(addr);
+        addr = addr[].fp;
+    };
+}
+
 // TODO: this should show up in the stack trace. 
-fn collect_backtrace() List(ResolvedFn) = {
-    trace: List(ResolvedFn) = list(libc_allocator);
-    walk_backtrace {f|
+fn collect_backtrace() List(*Frame) = {
+    trace: List(*Frame) = list(libc_allocator);
+    walk_backtrace { f |
         trace&.push(f);
     };
     trace
 }
 
-#no_tail #noinline
-fn thing2() i64 = {
-    trace := collect_backtrace();
-    
-    //assert_eq(trace&.index(0)[].Franca.name, @symbol thing2);
-    //assert_eq(trace&.index(1)[].Franca.name, @symbol thing1);
-    //assert_eq(trace&.index(2)[].Franca.name, @symbol backtrace_t);
-    assert_eq(true, trace.len.gt(3)); // must have got some functions from the rust side. 
-    
-    //if RUNTIME_STACK_TRACE {
-    //    ctx := get_context();
-        
-    //    fn f_name(i: u32) Symbol = {
-    //        fid := i.zext().index_to_func_id();
-    //        fid.name()
-    //    }
-        
-    //    assert_eq(ctx.stack_trace[2].f_name(), @symbol thing2);
-    //    assert_eq(ctx.stack_trace[1].f_name(), @symbol thing1);
-    //    assert_eq(ctx.stack_trace[0].f_name(), @symbol backtrace_t);
-    //};
-    
-    123
-}
+/*
+// TODO: the compiler could do this internally tho. 
 
-#noinline 
-fn thing1() i64 = {
-    _ := 1.add(2);
-    thing2()
+/// Guess which function contains the instruction pointer 'ip'.
+/// 'f' will be the one that starts closest to 'ip' but before it. 
+/// 'rel_ip' is how many bytes into the function 'ip' is (1 asm instruction is 4 bytes). 
+/// If 'ip' is in an ffi (or compiler builtin) function, 'rel_ip' will be very large. 
+fn get_func_index(ip: InstPtr) (@struct(f: i64, rel_ip: i64)) = {
+    functions := get_indirect_fn_array();
+    best_index: i64 = number_of_functions();
+    best_distance := 99999999;
+    
+    // Check every function id. 
+    functions.enumerate(fn(i, func) => {
+        func := AsmInst.int_from_ptr(func[]);
+        ip := AsmInst.int_from_ptr(ip);
+        dist := ip.sub(func);
+        // If distance is negative, 'ip' is before 'func' so can't be inside it (don't care if its closer). 
+        if(dist.lt(best_distance).and(dist.ge(0))) {
+            best_distance = dist;
+            best_index = i;
+        };
+    });
+    
+    // TODO: return optional. 
+    (f = best_index, rel_ip = best_distance)
 }
-
-//#test #skip_cranelift
-fn backtrace_t(canary: i64) i64 = {
-    assert_eq(123, thing1());
-    canary
-}
+*/

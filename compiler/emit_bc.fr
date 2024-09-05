@@ -152,13 +152,7 @@ fn emit_bc(comp: *SelfHosted, f: FuncId, when: ExecStyle) Res(*FnBody) = {
     ////        //return(Ok = old);
     //    };
     //};
-    // TODO: HACK. you want to make sure anything called inside the stack tracing functions doesn't try to trace themselves,
-    //      this happens naturally by just not inserting them when not compiled yet, but you might
-    //      emit_bc again later for aot. this just remembers if tracing was ready the first time we saw the function.  -- Jun 26
-    if comp.env.inject_function_header.is_none() {
-        func.set_flag(.NoStackTrace);
-    };
-    
+
     sig: PrimSig = (ret1 = .None, ret2 = .None);
     //test := comp.prim(i64);
     
@@ -498,20 +492,6 @@ fn emit_body(self: *EmitBc, result: *FnBody, f: FuncId) PRes #once = {
 
     result.current_block = entry_block;
 
-    do_stacktrace := self.program.env.inject_function_header.is_some() && !func.get_flag(.NoStackTrace);
-    // eventually this will be exposed as a language feature, but for now its just used for stack traces.
-    has_defers := do_stacktrace;
-
-    if do_stacktrace {
-        push_cb, _ := self.program.env.inject_function_header.unwrap();
-        result.push(PushConstant = (
-            value = f.idx(),
-            ty = .I32,
-        ));
-        sig := @try(self.program.prim_sig((arg = FuncId, ret = void, arity = 1), .CCallReg)) return;
-        result.push(CallDirect = (sig = sig, f = push_cb, tail = false));
-    };
-    
     if result.signeture.first_arg_is_indirect_return {|  
         self.result_addr_depth += 1;
     };
@@ -521,38 +501,16 @@ fn emit_body(self: *EmitBc, result: *FnBody, f: FuncId) PRes #once = {
         result,
         body,
         result_location,
-        !result.signeture.first_arg_is_indirect_return && !has_defers,
+        !result.signeture.first_arg_is_indirect_return,
     )) return;
     
     if result.signeture.first_arg_is_indirect_return {
         self.result_addr_depth -= 1;
     };
 
-    // TODO: result[return_block].incoming_jumps.gt(0) will always be false because the function's return label becomes for its body block. 
-    //       we never actually use the return_block created here!
+    // TODO: we never actually use the return_block created here!
     assert(result[return_block].incoming_jumps == 0, "sure hope you did that on purpose");
-    if result[return_block].incoming_jumps.gt(0).or(has_defers) {
-        result.push(Goto = (
-            ip = return_block,
-            slots = result.signeture&.ret_slots(),
-        ));
-        result[return_block].incoming_jumps += 1;
-        result.current_block = return_block;
-        if do_stacktrace {
-            _, pop := self.program.env.inject_function_header.expect("only stacktrace when ready");
-            sig := @try(prim_sig(
-                self.program,
-                (arg = void, ret = void, arity = 1),
-                .CCallReg,
-            )) return;
-            // TODO: this just totally kills tail calls which is sad. tho really, since it returns nothing, it should always tailcall out of itself. -- Jun 25
-            // we're in the return block
-            result.push(CallDirect = (sig = sig, f = pop, tail = false));
-        }
-    } else {
-        // Since there are no defers and no early returns, we don't need an extra trampoline block.
-        result.push_to(return_block, .NoCompile);
-    };
+    result.push_to(return_block, .NoCompile);
 
     self.locals&.pop().expect("outer scope to exist");
     assert(self.locals.is_empty(), "ICE: bc leaked scopes");
@@ -1381,7 +1339,8 @@ fn emit_call_if(self: *EmitBc, result: *FnBody, arg: *FatExpr, result_location: 
     false_ip := result.push_block_empty();
     @try(self.compile_expr(result, if_false, result_location, can_tail)) return;
     end_false_block := result.current_block;
-
+    
+    ::if(u16);
     block_slots := if(result_location == .PushStack, => out.size_slots, => 0);
     prims := if(result_location == .PushStack, => self.get_primatives(if_true.ty), => empty());
     ip := result.push_block(prims);

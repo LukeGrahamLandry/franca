@@ -1,3 +1,4 @@
+#!/usr/bin/env franca
 //! This uses clang to parse a C header file and output the ast as json. 
 //! Then we translate that into function/struct/enum definitions in Franca syntax.
 //! Inspired by https://github.com/floooh/sokol/tree/master/bindgen 
@@ -26,7 +27,6 @@ CField :: @struct(name: Str, type: Str);
 CRecordField :: @tagged(Named: CField, Anon: *CDecl);
 CEnumItem :: @struct(name: Str, value: ?Str);
 
-#include_std("lib/x/json.fr");
 #include_std("lib/core.fr");
 
 fn main() void = {
@@ -38,8 +38,10 @@ fn main() void = {
     ast, prefixes, called_clang := load_ast(path);
     loaded := timestamp();
     json: JsonParser = new_json(ast, temp());
+    println("parsing...");
     decls := json&.extract_c_decls(prefixes);
     out: List(u8) = list(temp());
+    println("generating...");
     generate_franca_bindings(out&, decls, path);
     done := timestamp();
     println(out.items());
@@ -378,6 +380,9 @@ fn extract_c_decls(json: *JsonParser, prefixes: HackPrefixes) []CDecl = {
             if part&.is(.Key) && (part.Key == "inner") {
                 return();
             };
+            if part&.is(.Eof) {
+                panic("eof before key 'inner'");  
+            };
         };
     }
     
@@ -440,7 +445,8 @@ fn extract_c_decls(json: *JsonParser, prefixes: HackPrefixes) []CDecl = {
                             json.skip_current_value();
                             
                             //@println("Function named '%' with type '%'", name, type);
-                            
+                           
+                            ::tagged(Result(Str, Str)); 
                             found := json.skip_until_key_switch(@slice("storageClass", "inner"));
                             if found&.is(.Err) {
                                 // a function decl like `ret name(void);` doesn't have an `inner` listing arguments,
@@ -573,7 +579,7 @@ fn skip_until_key_switch(self: *JsonParser, keys: []Str) Result(Str, Str) = {
     unreachable()
 }
 
-fn skip_to_tag_opt(json: *JsonParser, key: Str, tag: JsonPart.Tag()) ?JsonPart => {
+fn skip_to_tag_opt(json: *JsonParser, key: Str, tag: JsonPart.Tag()) ?JsonPart = {
     res := json.skip_until_key(key);
     ::if(?JsonPart);
     if(res&.is_err(), => .None) {
@@ -666,68 +672,4 @@ fn read_enum_fields(json: *JsonParser) []CEnumItem => {
         }
     };
     fields.items()
-}
-       
-// TODO: This is a copy paste from the one farm_game uses for sokol. 
-//       I need a more declaritive way of describing how to build a c library. 
-fn driver(vtable: *ImportVTable) void = {
-    src := temp().read_to_string("examples/c_bindgen.fr");  // TODO: don't depend on cwd.
-    comp := vtable.new_with_src(src.items(), vtable.default_build_options());
-    ctx := vtable.with(comp);
-    
-    libs := ctx.empty_libs();
-    libs&.intercept_imports();
-    libs&.add_lib(wuffs_lib);
-    
-    main_sym := {vtable.intern_string}(comp, "main");
-    main_f := {vtable.find_unique_func}(comp, main_sym).unwrap();
-    {vtable.compile_func}(comp, main_f, .Jit).unwrap();
-
-    v := should_jit();
-    if v {
-        ptr := {vtable.get_jitted_ptr}(comp, main_f).unwrap();
-        f := assume_types_fn(Arg = void, Ret = void, ptr = ptr);
-        f();
-        exit(0);
-    };
-    
-    ir_text := {vtable.emit_llvm}((data = comp, vtable = vtable), temp(), @slice (main_f), .ExportWithNames, get_comptime_arch());
-    out := open_temp_file();
-    for(ir_text&){bucket|
-        out.fd&.write(bucket);
-    };
-    @println("Write llvm ir to %", out&.s_name());
-    // TODO: this includes all the wuffs functions (like png, etc that i don't use) figure out how to make -flto work. :BLOAT
-    args := libs&.get_aot_objects();
-    args&.push_all(@slice ("-x", "ir", out&.s_name(), "-o", "bind.out", "-Os"));  
-    @println("building aot exe: %", args.items());
-    success := run_cmd_blocking("clang", args.items());
-    assert(success, "clang failed");
-    out.remove(); // TODO: defer 
-}
-
-::display_slice(Str);
-
-// TODO: compiler bug! if you try to just return(true/false) in those branches, 
-//       it always returns the first branch. same if you use two ifs instead of switch. same either if you have blocks or just => return.
-//        -- Jul 4 :FUCKED
-fn should_jit() bool = {
-    args := cli_args();
-    for args { arg |
-        s := arg.str();
-        a: ?bool = .None;
-        @switch(s) {
-            @case("-aot") => {
-                a = (Some = false);
-            };
-            @case("-jit") => {
-                a = (Some = true);
-            };
-            @default => ();
-        };
-        if a {a|
-            return(a);
-        };
-    };
-    panic("Please pass -jit or -aot as an argument. (aot runs ~10x faster, dont forget to run the exe tho")
 }
