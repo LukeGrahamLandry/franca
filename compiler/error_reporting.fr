@@ -630,3 +630,110 @@ fn log(action: *Action, self: *SelfHosted, out: *List(u8)) void = {
         }
     };
 }
+
+fn report_missing_overload(self: *SelfHosted, parts: []FatExpr, overloads: *OverloadSetData, requested: ResultType) Maybe(FuncId) #cold = {
+    buf: List(u8) = list(temp());
+    @fmt(buf&, "(");
+    each parts { part |
+        if part.ty.is_unknown() {
+            @fmt(buf&, "???, ");
+        } else {
+            @fmt(buf&, "%, ", self.log_type(part.ty));
+        };
+    };
+    @fmt(buf&, ") -> ");
+    @match(requested) {
+        fn Specific(type) => {
+            @fmt(buf&, "%, ", self.log_type(type));
+        }
+        @default => {   
+            @fmt(buf&, "???, ");
+        };
+    };
+    return(@err("overload not found in '%'\nwanted: %", self.pool.get(overloads.name), buf.items()))
+}
+
+unwrap_report_error :: fn(self: *SelfHosted, $T: Type, value: Res(T)) T #generic = {
+    @match(value) {
+        fn Ok(it) => it;
+        fn Err(it) => {
+            self.report_error(it)
+        }
+    }
+};
+
+fn report_error2(self: *SelfHosted, err: CompileError) Never = self.report_error(err&);
+
+fn report_error(self: *SelfHosted, err: *CompileError) Never = {
+    @if(BOOTSTRAP_ONLY_MODE) panic("error");
+    
+    err.update_main_span(self.last_loc);
+    @match(err) {
+        fn Msg(it) => {
+            self.codemap.show_error_line(it.span);
+            @panic("Compile Error: %", it.msg)
+        };
+        fn ExpectedCompileError(loc) => {
+            self.codemap.show_error_line(loc[]);
+            @panic("Compile Error: @assert_compile_error did not find compile error")
+        }
+        fn Parse(it) => {
+            self.codemap.show_error_line(it.span);
+            @panic("Parse Error: %", it.msg)
+        }
+        fn TypeMismatch(it) => {
+            self.codemap.show_error_line(it.span);
+            @panic("Type Error: expected % but found %", self.log_type(it.wanted), self.log_type(it.found))
+        }
+        fn CoerceConst(it) => {
+            self.codemap.show_error_line(it.span);
+            @panic(
+                "Type Error: expected % but found %\nWhile coercing constant: %", 
+                self.log_type(it.wanted), self.log_type(it.found), it.expr.log(self)
+            )
+        }
+        fn InvalidField(it) => {
+            self.codemap.show_error_line(it.span);
+            extra := if(self.has_fields(it.container), => "", => "\nbut only structs/enums support field access");
+            @panic(
+                "Type Error: expected field % on type % %", 
+                self.pool.get(it.name), self.log_type(it.container), extra,
+            )
+        }
+    }
+}
+
+fn has_fields(self: *SelfHosted, ty: Type) bool = {
+    raw_container_ty := self.raw_type(ty);
+    @match(self.get_type(raw_container_ty)) {
+        fn Struct() => true;
+        fn Tagged() => true;
+        @default => false;
+    }
+}
+
+fn update_main_span(err: *CompileError, new_loc: Span) void = {
+    @match(err) {
+        fn Msg(it) => {
+            if it.span.low == 0 && it.span.high == 0 {
+                it.span = new_loc;
+            };
+        }
+        fn TypeMismatch(it) => {
+            if it.span.low == 0 && it.span.high == 0 {
+                it.span = new_loc;
+            };
+        }
+        fn CoerceConst(it) => {
+            if it.span.low == 0 && it.span.high == 0 {
+                it.span = new_loc;
+            };
+        }
+        fn InvalidField(it) => {
+            if it.span.low == 0 && it.span.high == 0 {
+                it.span = new_loc;
+            };
+        }
+        @default => (); // TODO
+    };
+}

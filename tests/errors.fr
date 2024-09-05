@@ -1,0 +1,102 @@
+//! The obnoxious super structured errors means i don't have to paste exact error message strings and update them constantly. 
+// TODO: @assert_compile_error can't catch parse errors 
+
+fn type_errors() #test => {
+    @assert_type_error(i64, Str) {
+        a: i64 = "";
+    };
+    
+    @assert_type_error(i64, Str) {
+        a := 0;
+        a = "";
+    };
+    
+    @assert_type_error(i64, Str) {
+        a := 0;
+        b := "";
+        a = b;
+    };
+    
+    @assert_type_error(@FnPtr(a: u32) bool, @FnPtr(a: i64) bool) {
+        hello :: fn(a: i64) bool = a == 0;
+        b: @FnPtr(a: u32) bool = hello;
+    };
+    
+    @assert_type_error(Tag(?i64), *Ty(Symbol, Type)) {
+        // Passing a bad type as a later const arg. 
+        // a bug from a long time ago. for the record, the old compiler made this mistake too.
+        s: ?i64 = (Some = 123);
+        info :: get_variants(?i64).index(0);
+        get_variant_ptr(?i64, s&, info);
+    };
+    
+    A :: @struct(a: i64, b: i64);
+    @assert_field_error(@symbol c, A) {
+        a := A.zeroed();
+        a.c;
+    };
+    
+    B :: @tagged(a: i64, b: i64);
+    @assert_field_error(@symbol cc, B) {
+        a := B.zeroed();
+        a.cc;
+    };
+    
+    @assert_field_error(@symbol ccc, i64) {
+        a := 123;
+        a.ccc;
+    };
+}
+
+///////
+/// Extensions to @assert_compile_error that check for specific errors so we don't pass tests for the wrong reasons. 
+
+fn assert_type_error(want_found: FatExpr, expr: FatExpr) FatExpr #macro = {
+    @ct_assert(want_found.expr&.is(.Tuple), want_found.loc, "(want, found)");
+    parts := want_found.expr.Tuple&;
+    @ct_assert(parts.len == 2, want_found.loc, "(want, found)");
+    
+    @{ 
+        @run { 
+            err := @assert_compile_error {
+                @[expr]
+            };
+            want := @[parts[0]];
+            found := @[parts[1]];
+            @match(err) {
+                fn CoerceConst(it) => {
+                    assert_eq(it.wanted, want);
+                    assert_eq(it.found, found);
+                }
+                fn TypeMismatch(it) => {
+                    assert_eq(it.wanted, want);
+                    assert_eq(it.found, found);
+                }
+                @default => panic("expected type error");
+            };
+        };
+    }
+}
+
+fn assert_field_error(name_type: FatExpr, expr: FatExpr) FatExpr #macro = {
+    @ct_assert(name_type.expr&.is(.Tuple), name_type.loc, "(name, type)");
+    parts := name_type.expr.Tuple&;
+    @ct_assert(parts.len == 2, name_type.loc, "(name, type)");
+    
+    @{ 
+        @run { 
+            err := @assert_compile_error {
+                @[expr]
+            };
+            name := @[parts[0]];
+            type := @[parts[1]];
+            @match(err) {
+                fn InvalidField(it) => {
+                    assert_eq(it.name, name);
+                    assert_eq(it.container, type);
+                }
+                @default => panic("expected InvalidField error");
+            };
+        };
+    }
+}

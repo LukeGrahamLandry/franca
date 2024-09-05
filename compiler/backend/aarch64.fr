@@ -8,6 +8,7 @@
 //          -- Jul 15
 //
 // TODO: be able to load directly into a float register
+// TODO: factor out what's common between arm and x86
 
 // TODO: put all these config options somewhere consistant.
 ZERO_DROPPED_REG :: false;
@@ -156,7 +157,7 @@ fn compile(self: *EmitAsm, f: FuncId) rawptr #once = {
     u32.raw_from_ptr(asm.ptr)
 }
 
-fn print_llvm_mc_dis(asm: []u32) void #once = {
+fn print_llvm_mc_dis(asm: []u32) void = {
     @println("% instrucitons.", asm.len());
     hex: List(u8) = list(asm.len * 17, temp());
     for asm { op |
@@ -167,28 +168,29 @@ fn print_llvm_mc_dis(asm: []u32) void #once = {
             hex&.push_all(" ");
         };
     };
-    
+    print_llvm_mc_dis("--arch=aarch64", hex.items());
+}
+
+fn print_llvm_mc_dis(asm: []u8) void = {
+    @println("% bytes.", asm.len());
+    hex: List(u8) = list(asm.len * 5, temp());
+    for asm { byte |
+        hex&.push_prefixed_hex_byte(byte);
+        hex&.push_all(" ");
+    };
+    print_llvm_mc_dis("--arch=x86-64", hex.items());
+}
+
+fn print_llvm_mc_dis(arch: Str, hex: Str) void = {
     out := open_temp_file();
-    out.fd&.write(hex.items());
+    out.fd&.write(hex);
     // TODO: have the caller pass in anything like this, 
     //       but this is just for debugging the compiler so its not a big deal. :driver_io
-    success := run_cmd_blocking("llvm-mc", @slice("--disassemble", out&.s_name()));
+    // varient 1 means intel syntax. ignored when doing arm. 
+    success := run_cmd_blocking("llvm-mc", @slice(arch, "--disassemble", "-output-asm-variant=1", "--show-encoding", out&.s_name()));
     if(!success, => eprintln("ICE(debugging): couldn't disassemble"));
     out.remove();
-
-    //println!("=== Asm for {f:?}: {} ===", self.program.pool.get(func.name));
-    //it := dis.split('\n');
-    //it.nth(1);
-    //for (i, line) in it.enumerate() {
-    //    for (s, offset) in &self.markers {
-    //        if *offset == i {
-    //            println!("{s}");
-    //        }
-    //    }
-    //    println!("{line}");
-    //}
-    //println!("===")
-}
+} 
 
 fn bc_to_asm(self: *EmitAsm, f: FuncId) void #once = {
     ff := self.program[f]&;

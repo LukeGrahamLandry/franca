@@ -43,7 +43,8 @@ fn compile_stmt(self: *SelfHosted, stmt: *FatStmt) Maybe(bool) = {
                 @check(self.compile_place_expr(f.place&, .None, true)) return;
                 @check(self.compile_expr(f.value&, f.place.ty.want())) return;
                 if !self.ask_can_assign(f.place.ty, f.value.ty) {
-                    return(@err("tried to set % <- % (%)", self.log_type(f.place.ty), self.log_type(f.value.ty), f.value&.log(self)));
+                    //return(@err("tried to set % <- % (%)", self.log_type(f.place.ty), self.log_type(f.value.ty), f.value&.log(self)));
+                    return(Err = self.error(TypeMismatch = (span = Span.zeroed(), wanted = f.place.ty, found = f.value.ty)));
                 };
                 // TODO: self.type_check_arg(f.place.ty, f.value.ty, "reassign var")?; /:type_check
                 return(Ok = f.value.done && f.place.done);
@@ -248,7 +249,7 @@ fn field_access_expr(self: *SelfHosted, container_ptr: *FatExpr, name: Symbol) M
                     return(Ok = (f.byte_offset, f.ty));
                 };
             };
-            return(@err("unknown name % on %!", self.pool.get(name), self.log_type(container_ty)))
+            return(Err = self.error(InvalidField = (span = Span.zeroed(), container = container_ty, name = name)))
         }
         fn Tagged(f) => {
             each f.cases { f |
@@ -256,10 +257,10 @@ fn field_access_expr(self: *SelfHosted, container_ptr: *FatExpr, name: Symbol) M
                     return(Ok = (8, f._1));
                 };
             };
-            return(@err("unknown name % on %", self.pool.get(name), self.log_type(container_ty)))
+            return(Err = self.error(InvalidField = (span = Span.zeroed(), container = container_ty, name = name)))
         }
         @default => {
-            return(@err("only structs/enums support field access (name: %) but found %", self.pool.get(name), self.log_type(container_ty)))
+            return(Err = self.error(InvalidField = (span = Span.zeroed(), container = container_ty, name = name)))
         };
     }
 }
@@ -352,7 +353,7 @@ fn ensure_resolved_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
 
 fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = {
     @debug_assert(self.dispatch.function_in_progress&.get(fid.as_index()), "expected to do work on in progress function %", fid);
-    self.ensure_resolved_body(fid);
+    @check(self.ensure_resolved_body(fid)) return;
     func := self.get_function(fid);
     if(func.get_flag(.EnsuredCompiled), => return(.Ok));
     assert(!func.get_flag(.MayHaveAquiredCaptures), "closures need to be specialized");
@@ -573,31 +574,17 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
                                 };
                                 ops.rs()
                             } else {
-                                // TODO
-                                //let ty = self.type_of(asm)?;
-                                //if let Some(ty) = ty {
-                                //    self.program.finish_layout_deep(ty)?;
-                                //    if let TypeInfo::Struct { fields, .. } = &self.program[ty] {
-                                //        let is_ints = fields.iter().all(|t| matches!(self.program[t.ty], TypeInfo::Int(_)));
-                                //        if is_ints {
-                                //            let len = fields.len();
-                                //            let val = self.immediate_eval_expr(asm.clone(), ty)?;
-                                //            let mut reader = ReadBytes { bytes: val.bytes(), i: 0 };
-                                //            let mut ints = vec![];
-                                //            for _ in 0..len {
-                                //                let op = unwrap!(reader.next_u32(), "");
-                                //                ints.push(op);
-                                //            }
-                                //            assert_eq!(reader.i, val.bytes().len()); // TODO: do this check everywhere.
-                                //            break 'o ints;
-                                //        }
-                                //    }
-                                //}
-                                // let ops: Vec<u32> = self.immediate_eval_expr_known(asm.clone())?;
                                 return(@err("TODO: untested #asm case."))
                             };
+                        
                             func.body = (JittedAarch64 = ops);
                             good = true; 
+                            
+                            // note: you want to do this before do_merges because flags aren't preserved. 
+                            if func.get_flag(.LogAsm) {
+                                self.codemap.show_error_line(func.loc);
+                                @if(USE_LLVM_DIS) print_llvm_mc_dis(ops.items());
+                            }; 
                         };
                         // TODO: an erorr message here gets swollowed because you're probably in the type_of shit. this is really confusing. need to do beter
                         // TODO: if its a string literal just take it
@@ -629,7 +616,8 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
                         @case(Flag.x86_bytes.ident()) => {
                             @err_assert(!good, "found multiple arches for #asm") return;
                             // TODO: typecheck
-                            fid := @check(self.immediate_eval_expr(asm, FuncId)) return; // :get_or_create_type
+                            type := @unwrap(self.env.push_x86_func, "cannot use #asm before bootstrap") return;
+                            fid := @check(self.immediate_eval_expr(asm, type)) return; // :get_or_create_type
                             fid := FuncId.assume_cast(fid&)[];
                             fn_ptr := or self.get_fn_callable(fid) {| 
                                 return(Suspend = self.wait_for(Jit = fid))
@@ -647,6 +635,13 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
                             
                             func.body = (X86AsmBytes = ir.rs());
                             good = true;
+                            
+                            // note: you want to do this before do_merges because flags aren't preserved. 
+                            if func.get_flag(.LogAsm) {
+                                self.codemap.show_error_line(func.loc);
+                                show_hex_bytes(ir.items());
+                                @if(USE_LLVM_DIS) print_llvm_mc_dis(ir.items());
+                            }; 
                         };
                         @default => ();
                     };
@@ -805,7 +800,11 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
         fn PtrOffset(f) => {
             expr.done = f.ptr.done;
         }
-        fn GetParsed() => return(@err("ICE: GetParsed is handled by scope.fr"));
+        fn GetParsed(index) => {
+            eprintln("ICE: if you get here i think it means you dropped an error from resolve and we hit it later?");
+            e := @try(self.parser.finish_pending(index[])) return;
+            return(@err("ICE: GetParsed is should have been handled by scope.fr. %", e&.log(self)));
+        }
         fn Closure(func) => {
             fid := self.add_function(func[][]);
             fid_value := self.to_values(FuncId, fid);
@@ -822,6 +821,23 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
             //        };
             //    };
             //};
+            
+            // this avoids `function arguments must have type annotation (cannot be inferred)` on `=` functions with hint. 
+            // you want it so you don't have to type `: *List(u8)` on every #x86_bytes inline asm
+            // TODO: handle multiple/partial args. 
+            // TODO: unify with inference for '=>' functions?
+            if func.arg.bindings.len == 1 {
+                arg := func.arg.bindings.index(0);
+                if arg.ty&.is(.Infer) {
+                    @if_let(requested) fn Specific(ty) => {
+                        info := self.get_type(ty);
+                        @if_let(info) fn Fn(ty) => {
+                            arg.ty = (Finished = ty.arg);
+                        };
+                    };
+                };
+            };
+            
             if func.ret&.is(.Infer) {
                 // TODO: this change is sketch if we're just exploring to resolve an overload  -- Aug 5
                 @match(requested) {
@@ -1587,7 +1603,8 @@ fn const_args_key(self: *SelfHosted, original_f: FuncId, arg_expr: *FatExpr) May
         };
         
         @check(self.compile_expr(arg_expr, func.finished_arg.want())) return;
-        value := @check(self.immediate_eval_expr(arg_expr, arg_expr.ty)) return;
+        ty := func.finished_arg.or(=> arg_expr.ty);
+        value := @check(self.immediate_eval_expr(arg_expr, ty)) return;
         (Ok = value)
     } else {
         check_len :: fn(len: i64) => {
@@ -1644,7 +1661,8 @@ fn const_args_key(self: *SelfHosted, original_f: FuncId, arg_expr: *FatExpr) May
             };
             has_seen_first_const = true;
             @debug_assert(!arg_ty.is_unknown(), "const_args_key expected arg expr to be compiled");
-            value := @check(self.immediate_eval_expr(arg_exprs.index(i), arg_ty)) return;
+            arg := arg_exprs.index(i);
+            value := @check(self.immediate_eval_expr(arg, arg_ty)) return;
             
             // TODO: remove? -- Aug 13
             //       You might not need this. I was hoping it would fix deconstruct_values but i think this is only used in the map. 
@@ -1884,6 +1902,7 @@ fn curry_const_args_inner(self: *SelfHosted, original_f: FuncId, new_fid: FuncId
                 @err_assert(func.get_flag(.AllowRtCapture), "only closure may have polymorphic args") return;
                 @check(self.compile_expr(arg_expr, .None)) return;
                 // It was .Infer, save what we learned for when we try to call get_type_for_arg. 
+                @debug_assert(b.ty&.is(.Infer));
                 b.ty = (Finished = arg_expr.ty);
                 arg_expr.ty
             };
@@ -1891,7 +1910,7 @@ fn curry_const_args_inner(self: *SelfHosted, original_f: FuncId, new_fid: FuncId
             
             // bind_const_arg handles adding closure captures.
             // since it needs to do a remap, it gives back the new argument names so we can adjust our bindings acordingly. dont have to deal with it above since there's only one.
-            @check(self.bind_const_arg(new_fid, name, value, arg_type, arg_expr.loc)) return;
+            @check(self.bind_const_arg(new_fid, name, value, arg_expr.ty, arg_expr.loc)) return;
             // No remove from arg here because bind_const_arg calls remove_named.
             removed_count += 1;
         };
@@ -1917,8 +1936,6 @@ fn bind_const_arg(self: *SelfHosted, o_f: FuncId, arg_name: Var, arg_value: Valu
     @debug_assert(func.get_flag(.ResolvedBody) && func.get_flag(.ResolvedSign));
     arg_ty := @check(self.get_type_for_arg(func.arg&, arg_name)) return;
     
-    //assert(arg_ty_found == arg_ty, "TODO: better type-check");
-    //self.type_check_arg(arg_ty_found, arg_ty, "bind arg")?;
     @check(self.can_assign(arg_ty, arg_ty_found)) return;
 
     is_function := !(!self.get_type(arg_ty).is(.Fn) && arg_ty != FuncId);
@@ -2166,10 +2183,10 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
     };
     @log_event("checking %/% options", attempt.options.len, overloads.ready.len) self;
     want_arity := self.arity(arg_expr);
-    are_we_done_yet();
-    
     ::if([]FatExpr);
     parts := if(arg_expr.expr&.is(.Tuple), => arg_expr.expr.Tuple.items(), => (ptr = arg_expr, len = 1));
+    are_we_done_yet();
+    
     
     are_we_done_yet :: fn() => {
         if attempt.options.len == 1 {
@@ -2188,7 +2205,7 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
         };
         if attempt.options.len == 0 {
             self.last_loc = arg_expr.loc;
-            return(@err("overload not found in '%'", self.pool.get(overloads.name)));
+            return(self.report_missing_overload(parts, overloads, attempt.call.requested));
         };      
     };
     
@@ -2404,7 +2421,7 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
     
     @err("TODO: end of loop. still too many options for '%'", self.pool.get(overloads.name))
 }
-
+    
 fn check_promote_id_to_func(self: *SelfHosted, fid: FuncId, f_ty: FnType) Maybe(void) = {
     func := self.get_function(fid);
     //@println("check_promote_id_to_func func <- funcid %", self.log_type(self.intern_type(Fn = f_ty)));
@@ -2542,7 +2559,7 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
     blocked: List(*Action) = list(temp());
     parts := if(arg_expr.expr&.is(.Tuple), => arg_expr.expr.Tuple.items(), => (ptr = arg_expr, len = 1));
     still_interesting: List(FuncId) = list(temp());
-    errors: List(*ParseErr) = list(temp());
+    errors: List(*CompileError) = list(temp());
     for interesting& { opt | 
         continue :: local_return;
         func := self.get_function(opt);         
@@ -2697,8 +2714,8 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
         @log_event("block len = %", blocked.len) self;
         return(Suspend = blocked[0]);  // TODO: return all? don't just pick one. 
     };
-    ::?**ParseErr;
-    if errors.items().last() { e: **ParseErr | 
+    ::?**CompileError;
+    if errors.items().last() { e: **CompileError | 
         return(Err = e[]); // TODO: show all errors and say it was during overload resolution. 
     };
     
@@ -2808,8 +2825,8 @@ fn hoist_constants(self: *SelfHosted, body: []FatStmt) Maybe(void) #once = {
                 if func.var_name& { var |
                     // TODO: allow function name to be any expression that resolves to an OverloadSet so you can overload something in a module with dot syntax.
                     // TODO: distinguish between overload sets that you add to and those that you re-export
-                    @debug_assert(!func.get_flag(.ResolvedSign));
-                    @debug_assert(!func.get_flag(.ResolvedBody));
+                    //@debug_assert(!func.get_flag(.ResolvedSign), "unresolved"); // TODO!
+                    //@debug_assert(!func.get_flag(.ResolvedBody), "unresolved"); // TODO!
                     // TODO: assert placeholdervalue
                     if self.is_empty_constant(var[]) {
                         // We're the first to reference this overload set so create it. 
@@ -3041,6 +3058,13 @@ fn handle_declare_constant(self: *SelfHosted, name: Var, ty: *LazyType, value: *
     @debug_assert(self.dispatch.enclosing_function.is_none(), "ICE: handle_declare_constant should have no enclosing function");
     
     is_rec := value.expr&.is(.PrefixMacro) && value.expr.PrefixMacro.handler.ident() == (Some = Flag.rec.ident());
+    
+    // infer the more useful name when you do `foo :: fn() = { ... };`
+    @if_let(value.expr) fn Closure(func) => {
+        if func.name == @run Flag.Anon.ident() {
+            func.name = name.name;
+        };
+    };
     
     want := ResultType.None;
     if @check(self.infer_type(ty)) return { known |
@@ -3304,8 +3328,7 @@ fn coerce_const_expr(self: *SelfHosted, expr: *FatExpr, req: ResultType, query: 
             if self.ask_can_assign(want, found) {
                 return(.Ok);
             };
-            //return(@err("TODO: coerce constant expected % but found %: % (might be an actual type error)", self.log_type(want), self.log_type(found), expr.log(self)));
-            return(@err("coerce constant had type mismatch"));
+            return(Err = self.error(CoerceConst = (span = Span.zeroed(), wanted = want, found = found, expr = expr)));
         };
     };
     .Ok
@@ -3317,8 +3340,7 @@ fn can_assign(self: *SelfHosted, want: Type, found: Type) Maybe(void) = {
         .Ok
     } else {
         // TODO: dont allocate + fmt here beacause overload resolution spams this. 
-        @err("Type Error") // : expected % found %", self.log_type(want), self.log_type(found))
-        //@err("Type Error: expected % found %", self.log_type(want), self.log_type(found)) // :SLOW
+        (Err = self.error(TypeMismatch = (span = Span.zeroed(), wanted = want, found = found)))
     }
 }
 
@@ -3654,7 +3676,8 @@ fn check_quick_eval(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) ?Values = {
                                 return(Some = res);
                             }
                             fn Err(e) => {
-                                @println("ERROR: %", e.msg);
+                                self.report_error(e);
+                                //@println("ERROR: %", e.msg);
                             } // TODO: don't just swollow errors
                         }
                     };
@@ -3679,7 +3702,8 @@ fn check_quick_eval(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) ?Values = {
                                     return(Some = res);
                                 }
                                 fn Err(e) => {
-                                    @println("ERROR: %", e.msg);
+                                    self.report_error(e);
+                                    //@println("ERROR: %", e.msg);
                                 } // TODO: don't just swollow errors
                             };
                         };
@@ -3834,7 +3858,7 @@ fn builtin_macro(self: *SelfHosted, arg: FatExpr) Res(FatExpr) = {
     (Ok = arg)
 }
 
-fn builtin_macro(self: *SelfHosted, builtin_name: Symbol) Result(Ty(Values, Type), *ParseErr) = {
+fn builtin_macro(self: *SelfHosted, builtin_name: Symbol) Result(Ty(Values, Type), *CompileError) = {
     builtin_type :: fn(T: Type) void => {
         ptr := T;  // :get_or_create_type
         val := ptr_cast_unchecked(Type, u32, ptr&)[];
@@ -4023,9 +4047,9 @@ fn tagged_macro(self: *SelfHosted, cases_expr: *FatExpr) Maybe(FatExpr) = {
 Unquote :: @struct(compiler: *SelfHosted, placeholders: List(FatExpr));
 
 // :UnquotePlaceholders
-:: WalkAst(Unquote, *ParseErr);
+:: WalkAst(Unquote, *CompileError);
 
-fn handle_expr(self: *Unquote, expr: *FatExpr) Result(DoMore, *ParseErr) #once = {
+fn handle_expr(self: *Unquote, expr: *FatExpr) Result(DoMore, *CompileError) #once = {
     @match(expr.expr) {
         fn Unquote(arg) => {
             //expr_ty := self.compiler.env.fat_expr_type.expect("used unquote ast while bootstrapping");
@@ -4056,7 +4080,7 @@ fn handle_expr(self: *Unquote, expr: *FatExpr) Result(DoMore, *ParseErr) #once =
     };
     (Ok = .Continue)
 }
-fn handle_stmt(self: *Unquote, stmt: *FatStmt) Result(DoMore, *ParseErr) #once = (Ok = .Continue);
-fn handle_func(self: *Unquote, func: *Func)    Result(DoMore, *ParseErr) #once = (Ok = .Continue);
-fn handle_type(self: *Unquote, ty: *LazyType)  Result(DoMore, *ParseErr) #once = (Ok = .Continue);
-fn handle_pattern(self: *Unquote, p: *Pattern) Result(DoMore, *ParseErr) #once = (Ok = .Continue);
+fn handle_stmt(self: *Unquote, stmt: *FatStmt) Result(DoMore, *CompileError) #once = (Ok = .Continue);
+fn handle_func(self: *Unquote, func: *Func)    Result(DoMore, *CompileError) #once = (Ok = .Continue);
+fn handle_type(self: *Unquote, ty: *LazyType)  Result(DoMore, *CompileError) #once = (Ok = .Continue);
+fn handle_pattern(self: *Unquote, p: *Pattern) Result(DoMore, *CompileError) #once = (Ok = .Continue);

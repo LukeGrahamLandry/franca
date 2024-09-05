@@ -2,30 +2,57 @@
 //! http://ref.x86asm.net/coder64.html
 
 PrimaryOp :: @enum(u8) (
+    AddReg = 0x01,
+    SubReg = 0x29,
+    CmpReg = 0x39,
+    AddImm32 = 0x81,
+    MovReg = 0x89,
     Ret = 0xc3,
     MovImm32 = 0xc7,
-    MovReg = 0x89,
-    AddReg = 0x01,
+    Jmp = 0xe9,
 );
 
-rax :: 0b0000;
-rdi :: 0b0111;
-rsi :: 0b0110;
+TwoByteOp :: @enum(u8) (
+    JmpEq = 0x84,
+);
+TWO_BYTE_OP_PREFIX :: 0x0f;
 
-// TODO: test r8+
+// note: a,b,c,d are NOT in order!
+rax :: 0b0000;
+rcx :: 0b0001;
+rdx :: 0b0010;
+rbx :: 0b0011;
+rsp :: 0b0100;
+rbp :: 0b0101;
+rsi :: 0b0110;
+rdi :: 0b0111;
+r8  :: 0b1000;
+r9  :: 0b1001;
+r10 :: 0b1010;
+r11 :: 0b1011;
+r12 :: 0b1100;
+r13 :: 0b1101;
+r14 :: 0b1110;
+r15 :: 0b1111;
+
 // REX prefix lets you use new numbered registers
 // (fixed:u4 = 0100, 64_bit_operand?:u1, reg_extend:u1 = 1 for r8-r15, indexing_extend:u1, rm_extend:u1 = 1 for r8-r15)
+// and then the modrm byte is 
+// (??:u2:11, reg:u3 = src, rm:u3 = accumulator)
+REX_BASE_PREFIX :: 0b01000000;
+
+// TODO: test r8+
 fn encode_bin(code: *List(u8), op: PrimaryOp, dest: u4, src: u4) void = {
     // TODO: don't need prefix if all bits unset?
-    prefix := 0b01000000;
+    prefix := REX_BASE_PREFIX;
     modrm: i64 = 0b11000000;
     x: i64 = src; // TODO: should be able to inline @as
-    modrm = modrm.bit_or(x.shift_left(3));
+    modrm = modrm.bit_or(x.bit_and(@as(i64) 0b111).shift_left(3));
     if x >= 8 {   
         prefix = prefix.bit_or(0b00000100);
     };
     x = dest;
-    modrm = modrm.bit_or(x);
+    modrm = modrm.bit_or(x.bit_and(@as(i64) 0b111));
     if x >= 8 {   
         prefix = prefix.bit_or(0b00000001);
     };
@@ -34,20 +61,40 @@ fn encode_bin(code: *List(u8), op: PrimaryOp, dest: u4, src: u4) void = {
     code.push(@as(u8) modrm.trunc());
 }
 
-fn encode_imm(code: *List(u8), dest: u4, value: u64) void = {
+// note: if you're clever about encoding for smaller numbers you have to fix offsets in tests/jit.fr
+fn encode_imm(code: *List(u8), op: PrimaryOp, dest: u4, value: u64) void = {
     assert(value <= MAX_u32, "TODO: set the bit for 64 bit immediate");
     
-    prefix := 0b01000000;
+    prefix := REX_BASE_PREFIX;
     modrm: i64 = 0b11000000;
     x: i64 = dest; // TODO: should be able to inline @as
-    modrm = modrm.bit_or(x);
+    modrm = modrm.bit_or(x.bit_and(@as(i64) 0b111));
     if x >= 8 {   
         prefix = prefix.bit_or(0b00000001);
     };
     code.push(prefix);
-    code.push(@as(u8) PrimaryOp.MovImm32);
+    code.push(@as(u8) op);
     code.push(@as(u8) modrm.trunc());
     code.push_u32(value.trunc());
+}
+
+fn encode_imm(code: *List(u8), dest: u4, value: u64) void = {
+    encode_imm(code, PrimaryOp.MovImm32, dest, value);
+}
+
+// TODO: i dont understand why https://www.felixcloutier.com/x86/jcc says i need 0xcd in there but i clearly don't
+//       its it telling me x86 not x86_64? but it says 64-bit mode valid. 
+fn encode_jmp(code: *List(u8), op: TwoByteOp, offset: i64) void = {
+    offset := signed_truncate(offset, 32);
+    code.push(TWO_BYTE_OP_PREFIX);
+    code.push(@as(u8) op);
+    code.push_u32(offset);
+}
+
+fn encode_jmp(code: *List(u8), offset: i64) void = {
+    offset := signed_truncate(offset, 32);
+    code.push(@as(u8) PrimaryOp.Jmp);
+    code.push_u32(offset);
 }
 
 // See tests/x86_64_jit.fr for how to use this. 
@@ -68,12 +115,12 @@ fn asm_x64(arg: FatExpr, out: FatExpr) FatExpr #macro = {
                     @switch(part.ty) {
                         @case(u8) => actions&.push(@{ out.push(@[part[]]) });
                         @case(PrimaryOp) => actions&.push(@{ out.push(@as(u8) @[part[]]) });
+                        @case(TwoByteOp) => actions&.push(@{ out.push(@as(u8) @[part[]]) });
                         @case(u32) => actions&.push(@{ out.push_u32(@[part[]]) });
                         @default => compile_error("unhandled type in @asm_x64.", part.loc);
                     };
                 };
             };
-        
             arg.expr.Tuple = actions.rs();
             arg
         }];

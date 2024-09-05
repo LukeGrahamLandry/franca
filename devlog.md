@@ -1,3 +1,21 @@
+## (Sep 4)
+
+- infer arg type for #x86_bytes function
+- x86 branch encoding jit examples
+
+improving some error messages.
+
+- added parse error for lone identifier instead of treating it as beginning of quick expr and then getting confusing sema errors.
+- fixed losing error in resolve (missing @try) so you always hit a GetParsed in sema and reported the wrong location.
+  should make driver programs powerful enough to add warnings for that sort of thing.
+- overload not found error show the types
+- fixed missing type check error for get_variant_ptr `if you pass a pointer as $t it still tpyechecks !!! :FUCKED -- Jul 16`
+  I was passing arg_ty instead of arg_expr.ty for arg_ty_found of bind_const_arg.
+  // TODO: really immediate_eval_expr should do more strict type checking.
+- returning more sturctured errors so i can write tests for them, and so i can delay the slow formatting the error message until we know its actually going to be printed.
+  this is gonna take a billon years, sema still does `@err` 133 times.
+  started with what seems like the most common ones (ExpectedCompileError, TypeMismatch, CoerceConst, InvalidField).
+
 ## (Sep 3)
 
 - allow `:=` for default with inferred type on first field of sturct
@@ -14,6 +32,14 @@ started x86_64 encoding
 //! The more fun game is `from pwn import *; context.arch = "amd64"; print(asm("mov rbx, rcx"));`
 //! and then slowly figure out how to map that back to the tables.
 //! important to note that it prints normal ascii things as characters instead of in hex because we like confusion!
+
+```
+from pwn import *
+context.arch = "amd64"
+def show(s):
+  print(" ".join(("{: 8x}".format(x) for x in asm(s))))
+  print(" ".join(("{:08b}".format(x) for x in asm(s))))
+```
 
 - expand macros in imm_eval without function context (@FnPtr is common).
 

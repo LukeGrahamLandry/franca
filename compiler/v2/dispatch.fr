@@ -77,13 +77,13 @@ poll_in_place :: fn(self: *SelfHosted, $T: Type, $f: @Fn() Maybe(T)) Res(T) #gen
     }
 };
 
-fn poll_until_finished(self: *SelfHosted, task: *Task) Result(void, *ParseErr) = {
+fn poll_until_finished(self: *SelfHosted, task: *Task) Result(void, *CompileError) = {
     root_len := self.dispatch.root_tasks.len;
     self.dispatch.root_tasks&.push(task);
     top_task := task;
     the_mark := __temp_alloc.mark();
     @debug_assert(task.parent.is_none(), "cannot poll a task with a parent. recursion bad.");
-    out := Result(void, *ParseErr).zeroed();
+    out := Result(void, *CompileError).zeroed();
     loop {
         __temp_alloc.reset_retaining_capacity(the_mark);
         if self.poll_loop_body(task&, out&) {
@@ -95,7 +95,7 @@ fn poll_until_finished(self: *SelfHosted, task: *Task) Result(void, *ParseErr) =
 // TODO: we never set waiting_for! decide if we want that or remove it. 
 
 // this is a dumb way to factor this but i want to call it from examples/compiler_gui too. 
-fn poll_loop_body(self: *SelfHosted, task_in: **Task, out: *Result(void, *ParseErr)) bool = {
+fn poll_loop_body(self: *SelfHosted, task_in: **Task, out: *Result(void, *CompileError)) bool = {
     task := task_in[];
     continue :: fn() Never => {
         task_in[] = task;
@@ -294,7 +294,7 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
                         self.put_jitted_function(fid, addr);
                         // TODO: why do i need to do this here but not for arm? 
                         //       i guess since cl means you don't happen to bump while doing other things in get_fn_callable.
-                        self.aarch64&.bump_dirty(); 
+                        self.aarch64&.bump_dirty();
                     }
                     fn Merged(parts) => {
                         each parts { option |
@@ -407,7 +407,7 @@ fn is_mutually_recursive(task: *Task, callee: FuncId) bool = {
 fn Maybe($T: Type) Type = {
     Self :: @tagged(
         Ok: T,
-        Err: *ParseErr,
+        Err: *CompileError,
         Suspend: *Action,
     );
     
@@ -421,7 +421,7 @@ fn Maybe($T: Type) Type = {
         self.Ok
     }
     
-    fn unwrap_err(self: Self) *ParseErr = {
+    fn unwrap_err(self: Self) *CompileError = {
         if self&.is(.Err) {
             return(self.Err);
         };

@@ -27,7 +27,7 @@
 
 ParseTask :: @tagged(
     Pending: @struct(src: Str, span: Span),
-    Expr: Result(FatExpr, *ParseErr),
+    Expr: Result(FatExpr, *CompileError),
 );
 Parser :: @struct(pool: *StringPool, lex: Lexer, tasks: *List(ParseTask), alloc: Alloc, last: Token);
 Prec :: @struct(prec: PrecLevel, allow_trailing: bool = true);
@@ -47,7 +47,7 @@ PrecLevel :: @enum(i64) (
     Neg,
     Suffix,
 );
-ParseRes :: Result(FatExpr, *ParseErr);
+ParseRes :: Result(FatExpr, *CompileError);
 
 // TODO: do the clone here instead of (on rust side + scope) so you don't have to remmeber.
 fn finish_pending(self: *Parser, id: WaitingParse) ParseRes = {
@@ -70,8 +70,8 @@ fn finish_pending(self: *Parser, id: WaitingParse) ParseRes = {
     }
 }
 
-fn finish_pending_stmts(self: *Parser, id: WaitingParse) Result(RsVec(FatStmt), *ParseErr) = {
-    T :: Result(RsVec(FatStmt), *ParseErr);
+fn finish_pending_stmts(self: *Parser, id: WaitingParse) Result(RsVec(FatStmt), *CompileError) = {
+    T :: Result(RsVec(FatStmt), *CompileError);
     @match(self.tasks[id.id]&) {
         fn Pending(src_span) => {
             self.lex = init(self.pool, src_span.span, src_span.src);
@@ -100,7 +100,7 @@ fn push_parse(self: *Parser, src: Str, span: Span) WaitingParse = {
     (id = self.tasks.len.sub(1))
 }
 
-fn parse_stmt(self: *Parser) Result(FatStmt, *ParseErr) = {
+fn parse_stmt(self: *Parser) Result(FatStmt, *CompileError) = {
     tags := @try(self.parse_annotations()) return;
     stmt := @try(self.parse_stmt_inner(!tags.is_empty())) return;
     
@@ -123,7 +123,7 @@ fn parse_stmt(self: *Parser) Result(FatStmt, *ParseErr) = {
     (Ok = stmt)
 }
 
-fn parse_stmt_inner(self: *Parser, has_annotations: bool) Result(FatStmt, *ParseErr) #once = {
+fn parse_stmt_inner(self: *Parser, has_annotations: bool) Result(FatStmt, *CompileError) #once = {
     @match(self.peek()) {
         fn Fn() => {
             self.pop();
@@ -149,7 +149,7 @@ fn parse_stmt_inner(self: *Parser, has_annotations: bool) Result(FatStmt, *Parse
     }
 }
 
-fn parse_decl_or_start_expr(self: *Parser, name: Symbol) Result(FatStmt, *ParseErr) #once = {
+fn parse_decl_or_start_expr(self: *Parser, name: Symbol) Result(FatStmt, *CompileError) #once = {
     self.pop();
     @match(self.peek()) {
         fn DoubleColon() => {
@@ -191,7 +191,7 @@ fn parse_decl_or_start_expr(self: *Parser, name: Symbol) Result(FatStmt, *ParseE
     unreachable()
 }
 
-fn list_of_names_decl(self: *Parser, name: Symbol) Result(RsVec(FatExpr), *ParseErr) = {
+fn list_of_names_decl(self: *Parser, name: Symbol) Result(RsVec(FatExpr), *CompileError) = {
     first := self.expr((GetNamed = name), self.last.span);
     exprs: List(FatExpr) = list(2, self.alloc);
     exprs&.push(first);
@@ -219,7 +219,7 @@ fn next_is_equals(self: *Parser) bool = {
     t&.is(.Equals)
 }
 
-fn after_expr_stmt_prefix(self: *Parser, e: FatExpr) Result(FatStmt, *ParseErr) = {
+fn after_expr_stmt_prefix(self: *Parser, e: FatExpr) Result(FatStmt, *CompileError) = {
     loc  := e.loc;
     // TOOD: allow_trailing?
     e    := @try(self.parse_infix(e, Prec_None)) return;
@@ -258,17 +258,35 @@ fn after_expr_stmt_prefix(self: *Parser, e: FatExpr) Result(FatStmt, *ParseErr) 
         }
         @default => self.stmt((Eval = e), loc);
     };
+    
     @match(self.peek()) {
         fn Semicolon()      => ();
         fn RightSquiggle(_) => ();
         fn Eof()            => ();
-        @default => @report_error("';' (discard) or '}' (return) after expr stmt %", "") (return, self.last.span);
+        @default => @report_error("expected ';' (discard) or '}' (return) after expr stmt") (return, self.last.span);
     };
     
     (Ok = stmt)
 }
 
-fn ident_list_to_pattern(self: *Parser, idents: *RsVec(FatExpr), loc: Span) Result(Pattern, *ParseErr) = {
+/*
+// TODO: all the parse errors should tell you what token they hit (rn i don't print lex errors which is dumb)
+::DeriveFmt(TokenType);
+::enum(TokenType.Tag());
+::DeriveFmt(LexErr);
+::DeriveFmt(get_variant_type(TokenType, .Quoted));
+::DeriveFmt(BinNum);
+fn display(s: *f64, out: *List(u8)) void = s[].display(out);
+fn display(s: *Symbol, out: *List(u8)) void = s[].as_index().display(out);
+    but found %", self.peek_type()
+*/
+
+fn peek_type(self: *Parser) *TokenType = {
+    t := self.peek();
+    t.type
+}
+
+fn ident_list_to_pattern(self: *Parser, idents: *RsVec(FatExpr), loc: Span) Result(Pattern, *CompileError) = {
     bindings: List(Binding) = list(idents.len, self.alloc);
     each idents { expr | 
         @match(expr.expr&) {
@@ -300,8 +318,12 @@ fn can_start_quick_expr(t: TokenType) bool #once = {
 
 fn ident_expr_and_maybe_trailing(self: *Parser, name: Symbol, prec: Prec, loc: Span) ParseRes = {
     e := self.expr((GetNamed = name), loc);
-    
+    old := self.lex.old_line;
     if prec.allow_trailing.and(=> can_start_quick_expr(self.peek())) {
+        if old != self.lex.line {
+            // this is a rule because i typo leave junk in files too often.
+            @report_error("identifier '%' must be on the same line as quick expr.\nor you can add a semicolon if you wanted a noop expression stmt.", self.pool.get(name)) (return, loc);
+        };
         first_arg := @try(self.parse_expr(@as(Prec) (prec = .None, allow_trailing = false))) return;
         // TODO: make sure this doesn't alias e -- Jun 21
         e = self.expr_call(e, first_arg);
@@ -427,7 +449,7 @@ fn func_expr(self: *Parser) ParseRes = {
     (Ok = self.expr((Closure = self.box(func)), func.loc))
 }
 
-fn parse_func(self: *Parser, allow_empty: bool) Result(Func, *ParseErr) = {
+fn parse_func(self: *Parser, allow_empty: bool) Result(Func, *CompileError) = {
     loc := self.last.span;
     fn_def := @try(self.fn_def_signeture(loc, true)) return;
     
@@ -875,7 +897,7 @@ fn empty_binding() Binding = {
     )
 }
     
-fn parse_args(self: *Parser) Result(Pattern, *ParseErr) = {
+fn parse_args(self: *Parser) Result(Pattern, *CompileError) = {
     loc := self.last.span;
     bindings: List(Binding) = list(self.alloc);
     @try(self.parse_pattern(bindings&)) return;
@@ -883,7 +905,7 @@ fn parse_args(self: *Parser) Result(Pattern, *ParseErr) = {
     (Ok = (bindings = bindings.rs(), loc = loc))
 }
 
-fn parse_pattern(self: *Parser, out: *List(Binding)) Result(void, *ParseErr) = {
+fn parse_pattern(self: *Parser, out: *List(Binding)) Result(void, *CompileError) = {
     loop {
         // TODO: no comma allowed here
         // TODO: shouldnt have to put the type annotations everywhere. 
@@ -942,7 +964,7 @@ fn parse_pattern(self: *Parser, out: *List(Binding)) Result(void, *ParseErr) = {
     }
 }
 
-fn pop_name(self: *Parser, msg: Str) Result(Symbol, *ParseErr) = {
+fn pop_name(self: *Parser, msg: Str) Result(Symbol, *CompileError) = {
     (Ok = @match(self.peek()) {
         fn Symbol(name) => {
             self.pop();
@@ -953,7 +975,7 @@ fn pop_name(self: *Parser, msg: Str) Result(Symbol, *ParseErr) = {
 }
 
 FnDef :: @struct(name: ?Symbol, arg: Pattern, ret: LazyType, tags: List(Annotation), loc: Span);
-fn fn_def_signeture(self: *Parser, loc: Span, allow_name: bool) Result(FnDef, *ParseErr) = {
+fn fn_def_signeture(self: *Parser, loc: Span, allow_name: bool) Result(FnDef, *CompileError) = {
     ::if(?Symbol);
     name: ?Symbol = if(not(allow_name), => .None) {
         @match(self.peek()) {
@@ -1039,7 +1061,7 @@ fn parse_block_until_squiggle(self: *Parser, allow_eof: bool) ParseRes = {
 }
 
 ::if(?FatExpr);
-fn parse_annotations(self: *Parser) Result(List(Annotation), *ParseErr) = {
+fn parse_annotations(self: *Parser) Result(List(Annotation), *CompileError) = {
     tags: List(Annotation) = list(self.alloc);
     while(=> self.maybe(.Hash)) {
         name := @try(self.pop_name("ident after '#'")) return;
@@ -1059,7 +1081,7 @@ fn maybe(self: *Parser, type: TokenType.Tag()) bool = {
     yes
 }
 
-fn eat(self: *Parser, type: TokenType.Tag(), msg: Str) Result(void, *ParseErr) = {
+fn eat(self: *Parser, type: TokenType.Tag(), msg: Str) Result(void, *CompileError) = {
     t := self.peek();
     if !self.maybe(type) {
         @report_error("Expected % for %", type, msg) (return, self.last.span);
@@ -1125,8 +1147,8 @@ fn report_error(fmt_args: FatExpr, ret_loc: FatExpr) FatExpr #macro = {
     result := @{
         lst := @format(@[fmt_args]) temp();
         println(lst.items());
-        mem := libc_allocator.alloc(ParseErr, 1);
-        mem.ptr[] = (span = @[args[1]], msg = lst.items());
+        mem := libc_allocator.alloc(CompileError, 1);
+        mem.ptr[] = (Parse = (span = @[args[1]], msg = lst.items()));
         @[args[0]](Err = mem.ptr);
         unreachable()
     };

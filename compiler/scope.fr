@@ -69,7 +69,7 @@ fn renumber_expr(self: *SelfHosted, expr: *FatExpr, initial: ?Ty(Var, Var)) void
         mapping&.insert(i._0, i._1);
     };
     renumber: RenumberVars = (scope = self.scopes, mapping = mapping&);
-    renumber&.walk_expr(expr);
+    renumber&.walk_expr(expr).unwrap();
 }
 
 /// Implementation /// 
@@ -187,7 +187,7 @@ fn resolve_func_args(self: *ResolveScope, func: *Func) PRes = {
     each func.arg.bindings { b |
         @try(self.resolve_binding(b)) return;
     };
-    self.walk_type(func.ret&);
+    @try(self.walk_type(func.ret&)) return;
     self.pop_block();
     // TODO: allow block exprs with consts in arg types but for now i dont use it and this is easier to think about. -- Apr 24
     .Ok
@@ -384,7 +384,7 @@ fn find_var(self: *ResolveScope, name: Symbol) ?Var = {
     unreachable()
 }
 
-fn decl_var(self: *ResolveScope, name: Symbol, kind: VarType, loc: Span, placeholder: PlaceholderValue) Result(Var, *ParseErr) = {
+fn decl_var(self: *ResolveScope, name: Symbol, kind: VarType, loc: Span, placeholder: PlaceholderValue) Result(Var, *CompileError) = {
     s := self.scope;
     // Note: you can't shadow a let with a const either but that already works because consts are done first.
 
@@ -471,16 +471,16 @@ fn declare_binding(self: *ResolveScope, binding: *Binding, loc: Span, is_args: b
     .Ok
 }
 
-:: WalkAst(ResolveScope, *ParseErr);
+:: WalkAst(ResolveScope, *CompileError);
 
-fn handle_expr(self: *ResolveScope, expr: *FatExpr) Result(DoMore, *ParseErr) #once = {
+fn handle_expr(self: *ResolveScope, expr: *FatExpr) Result(DoMore, *CompileError) #once = {
     loc := expr.loc;
 
     @match(expr.expr&) {
         (fn GetParsed(index) => {
             e := @try(self.compiler.parser.finish_pending(index[])) return;
             expr[] = self.compiler.clone(e&); // clone is important! you end up with multiple copies of the same pending parse. 
-            self.walk_expr(expr);
+            @try(self.walk_expr(expr)) return;
             return(Ok = DoMore.Break);
         });
         (fn Block(f) => {
@@ -526,7 +526,7 @@ fn handle_expr(self: *ResolveScope, expr: *FatExpr) Result(DoMore, *ParseErr) #o
     (Ok = DoMore.Continue)
 }
 
-fn handle_stmt(self: *ResolveScope, stmt: *FatStmt) Result(DoMore, *ParseErr) #once = {
+fn handle_stmt(self: *ResolveScope, stmt: *FatStmt) Result(DoMore, *CompileError) #once = {
     @match(stmt.stmt&) {
         (fn DeclNamed(f) => {
             @try(self.walk_type(f.ty&)) return;
@@ -556,7 +556,7 @@ fn handle_stmt(self: *ResolveScope, stmt: *FatStmt) Result(DoMore, *ParseErr) #o
     (Ok = .Continue)
 }
 
-fn handle_func(self: *ResolveScope, func: *Func) Result(DoMore, *ParseErr) #once = {
+fn handle_func(self: *ResolveScope, func: *Func) Result(DoMore, *CompileError) #once = {
     each func.annotations { a | 
         if a.args& { a | 
             @try(self.walk_expr(a)) return;
@@ -567,8 +567,8 @@ fn handle_func(self: *ResolveScope, func: *Func) Result(DoMore, *ParseErr) #once
     (Ok = .Break)
 }
 
-fn handle_type(self: *ResolveScope, ty: *LazyType) Result(DoMore, *ParseErr) #once = (Ok = .Continue);
-fn handle_pattern(self: *ResolveScope, p: *Pattern) Result(DoMore, *ParseErr) #once = (Ok = .Continue);
+fn handle_type(self: *ResolveScope, ty: *LazyType) Result(DoMore, *CompileError) #once = (Ok = .Continue);
+fn handle_pattern(self: *ResolveScope, p: *Pattern) Result(DoMore, *CompileError) #once = (Ok = .Continue);
 
 ///////////////////
 /// Renumbering ///

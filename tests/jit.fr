@@ -1,5 +1,5 @@
 #test fn manual_mmap(canary: i64) i64 = {
-    arch := query_current_arch().unwrap();
+    arch := query_current_arch().unwrap();  // note: at comptime we don't know if we're cross compiling, so both branches are compiled. 
     if arch == .Aarch64 {
         code := @slice (
             movz(Bits.X64, x1, 0b0000000000001010, Hw.Left0),
@@ -75,7 +75,7 @@
     );
     // now using inline asm that the compiler knows about
     #c_call #x86_bytes #asm
-    fn add_by_asm(a: i64, b: i64) i64 = fn(out: *List(u8)) void = @asm_x64(
+    fn add_by_asm(a: i64, b: i64) i64 = fn(out) = @asm_x64(
         encode_imm(rax, @as(u64) 0),
         encode_bin(PrimaryOp.AddReg, rax, rdi),
         encode_bin(PrimaryOp.AddReg, rax, rsi),
@@ -86,48 +86,94 @@
     three := add_by_asm(1, 2);
     assert_eq(three, 3);
     
-    @if(@run query_current_arch().unwrap() == .Aarch64) {
-        #c_call #aarch64 #asm
-        fn add_one(a: i64) i64 = (
-            add_im(Bits.X64, x0, x0, @as(u12) 1, 0b0),
-            ret(),
-        );
-        assert_eq(add_one(9), 10);
-        
-        #c_call #aarch64 #asm
-        fn sub_one(a: i64) i64 = (
-            sub_im(Bits.X64, x0, x0, @as(u12) 1, 0b0),
-            ret(),
-        );
-        assert_eq(sub_one(10), 9);
-        
-        #c_call #aarch64 #asm
-        fn bool_to_int(b: bool) i64 = (
-            ret(),
-            ret(), // TODO: single element tuple
-        );
-        assert_eq(bool_to_int(true), 1);
-        assert_eq(bool_to_int(false), 0);
-    };
+    #c_call #aarch64 #asm
+    fn add_one(a: i64) i64 = (
+        add_im(Bits.X64, x0, x0, @as(u12) 1, 0b0),
+        ret(),
+    );
+    #c_call #x86_bytes #asm
+    fn add_one(a: i64) i64 = fn(out) = @asm_x64(
+        encode_imm(PrimaryOp.AddImm32, rdi, @as(u64) 1),
+        encode_bin(PrimaryOp.MovReg, rax, rdi),
+        PrimaryOp.Ret,
+    ) out;
+    assert_eq(add_one(9), 10);
+    
+    #c_call #aarch64 #asm
+    fn sub_one(a: i64) i64 = (
+        sub_im(Bits.X64, x0, x0, @as(u12) 1, 0b0),
+        ret(),
+    );
+    #c_call #x86_bytes #asm
+    fn sub_one(a: i64) i64 = fn(out) = @asm_x64(
+        encode_bin(PrimaryOp.MovReg, rax, rdi),
+        encode_imm(rdi, @as(u64) 1),
+        encode_bin(PrimaryOp.SubReg, rax, rdi),  // :slow if you cared you'd addimm -1
+        PrimaryOp.Ret,
+    ) out;
+    assert_eq(sub_one(10), 9);
+    
+    #c_call #aarch64 #asm
+    fn bool_to_int(b: bool) i64 = (
+        ret(),
+        ret(), // TODO: single element tuple
+    );
+    #c_call #x86_bytes #asm
+    fn bool_to_int(b: bool) i64 = fn(out) = @asm_x64(
+        encode_bin(PrimaryOp.MovReg, rax, rdi),
+        PrimaryOp.Ret,
+    ) out;
+    assert_eq(bool_to_int(true), 1);
+    assert_eq(bool_to_int(false), 0);
     
     canary
 }
 
 #aarch64
 #test fn branching(canary: i64) i64 = {
-    @if(@run query_current_arch().unwrap() == .Aarch64) {
-        #c_call #aarch64 #asm
-        fn add_or_sub(a: i64, b: i64, add_if_seven: i64) i64 = (
-            cmp_im(Bits.X64, x2, @as(u12) 7, 0b0),
-            b_cond(@as(i19) 3, Cond.EQ),
-            sub_sr(Bits.X64, x0, x0, x1, Shift.LSL, @as(u6) 0),
-            ret(),
-            add_sr(Bits.X64, x0, x0, x1, Shift.LSL, @as(u6) 0),
-            ret(),
-        );
-        assert_eq(add_or_sub(30, 20, 7), 50);
-        assert_eq(add_or_sub(30, 20, 8), 10);
+    #c_call #aarch64 #asm
+    fn is_seven(n: i64) i64  = (
+        cmp_im(Bits.X64, x0, @as(u12) 7, 0b0),
+        cset(Bits.X64, x0, Cond.NE),
+        ret(),
+    );
+    #c_call #x86_bytes #asm
+    fn is_seven(n: i64) i64 = fn(out) = @asm_x64(  // :slow, if you care they have setcc
+        encode_imm(rax, @as(u64) 7),
+        encode_bin(PrimaryOp.CmpReg, rdi, rax),
+        encode_jmp(TwoByteOp.JmpEq, 13),
+        encode_imm(rax, @as(u64) 0),    // 7 bytes
+        encode_jmp(7),                  // 6 bytes
+        encode_imm(rax, @as(u64) 1),    // 7 bytes
+        PrimaryOp.Ret,
+    ) out;
+    assert_eq(is_seven(7), 1);
+    assert_eq(is_seven(8), 0);
     
+    #c_call #aarch64 #asm
+    fn add_or_sub(a: i64, b: i64, add_if_seven: i64) i64 = (
+        cmp_im(Bits.X64, x2, @as(u12) 7, 0b0),
+        b_cond(@as(i19) 3, Cond.EQ),
+        sub_sr(Bits.X64, x0, x0, x1, Shift.LSL, @as(u6) 0),
+        ret(),
+        add_sr(Bits.X64, x0, x0, x1, Shift.LSL, @as(u6) 0),
+        ret(),
+    );
+    #c_call #x86_bytes #asm
+    fn add_or_sub(a: i64, b: i64, add_if_seven: i64) i64 = fn(out) = @asm_x64(
+        encode_bin(PrimaryOp.MovReg, rax, rdi),
+        encode_imm(r11, @as(u64) 7),
+        encode_bin(PrimaryOp.CmpReg, r11, rdx),
+        encode_jmp(TwoByteOp.JmpEq, 4),
+        encode_bin(PrimaryOp.SubReg, rax, rsi),   // 3
+        PrimaryOp.Ret, // 1
+        encode_bin(PrimaryOp.AddReg, rax, rsi),   // 3
+        PrimaryOp.Ret, // 1
+    ) out;
+    assert_eq(add_or_sub(30, 20, 7), 50);
+    assert_eq(add_or_sub(30, 20, 8), 10);
+    
+    @if(@run query_current_arch().unwrap() == .Aarch64) {
         #c_call #aarch64 #asm
         fn add_or_sub2(a: i64, b: i64, add_if_seven: i64) i64 = (
             cmp_im(Bits.X64, x2, @as(u12) 7, 0b0),
@@ -139,15 +185,6 @@
         );
         assert_eq(add_or_sub2(30, 20, 7), 50);
         assert_eq(add_or_sub2(30, 20, 8), 10);
-        
-        #c_call #aarch64 #asm
-        fn is_seven(n: i64) i64 = (
-            cmp_im(Bits.X64, x0, @as(u12) 7, 0b0),
-            cset(Bits.X64, x0, Cond.NE),
-            ret(),
-        );
-        assert_eq(is_seven(7), 1);
-        assert_eq(is_seven(8), 0);
     };
     canary
 }
@@ -240,15 +277,6 @@
         assert_eq(f2(5), 5);
     };
     canary
-}
-
-fn show(code: *List(u8)) void = {
-    hex: List(u8) = list(code.len * 5, temp());
-    for code { b |
-        hex&.push_prefixed_hex_byte(b);
-        hex&.push_all(" ");
-    };
-    println(hex.items());
 }
 
 // aarch64 instructions are u32, x86_64 are u8

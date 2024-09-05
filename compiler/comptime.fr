@@ -579,14 +579,16 @@ fn fill_export_ffi(out: *List(u8)) void = {
     symbol_to_cstr: rawptr : fn(c: CompilerRs, s: Symbol) CStr = 
         c.pool.get_c_str(s);
         
-    @fmt(out, "fn assert_compile_error(e: FatExpr) FatExpr #fold #ct #macro #outputs(void) #comptime_addr(%);\n", @as(rawptr) assert_compile_error);
+    @fmt(out, "fn assert_compile_error(e: FatExpr) FatExpr #fold #ct #macro #outputs(*CompileError) #comptime_addr(%);\n", @as(rawptr) assert_compile_error);
     assert_compile_error:: fn(c: CompilerRs, e: FatExpr) FatExpr = {
         self := c[][];
         res := self.poll_in_place(void, => self.compile_expr(e&, .None));
         if !res&.is(.Err) {
-            self.report_error("@assert_compile_error did not find compile error", e.loc);
+            self.report_error2(ExpectedCompileError = e.loc);
         };
-        e&.set(unit_value, void);
+        type := self.env.compile_error_pointer.expect("no @assert_compile_error before bootstrap");
+        res := self.to_values(*CompileError, res.Err);
+        e&.set(res, type);
         e
     };
     
@@ -603,29 +605,6 @@ fn fill_export_ffi(out: *List(u8)) void = {
         c[][].get_info(s)[]
     };
     
-}
-
-unwrap_report_error :: fn(self: *SelfHosted, $T: Type, value: Res(T)) T #generic = {
-    @match(value) {
-        fn Ok(it) => it;
-        fn Err(it) => {
-            self.report_error(it.msg, it.span)
-        }
-    }
-};
-
-fn report_error(self: *SelfHosted, msg: Str, loc: Span) Never = {
-    for self.dispatch.root_tasks { task | 
-        while => task.waiting_for.is_some() {
-            @println("- %", task.action&.log(self));
-            task = task.waiting_for.unwrap();
-        };
-    };
-    if loc.low == 0 && loc.high == 0 {
-        loc = self.last_loc;
-    };
-    self.codemap.show_error_line(loc);
-    @panic("Compile Error: %", msg)
 }
 
 //////////////////////////////////////////////////////////////////////////////
