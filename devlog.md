@@ -1,3 +1,18 @@
+## (Sep 6)
+
+- discovered the modrm/sib tables aren't actually that much information
+
+## tiny cleanups (Sep 5)
+
+- store a vec for debug loc of each instruction on BasicBlock
+- move a few fields only needed during building from FnBody to EmitBc
+- don't store ?TypeMeta, have is_sized field instead (padding was already there), save tag space. TODO: would be nicer to have niches in the field padding.
+- track name when assigning type to constant so can print ie. `EmitBc vs FnBody` insatead of `[50 lines of garbage ommited]`.
+  still pretty big message because it tells you all the arguments to a call instead of just the problem one.
+
+> i might be going crazy but... mandelbrot test runs faster in warp if i spam scoll down !!!!!!! i love it???
+> perhaps relates to my discovery before with bloat running objdump faster when i compiled in release mode because i could empty the pipe faster
+
 ## (Sep 4)
 
 - infer arg type for #x86_bytes function

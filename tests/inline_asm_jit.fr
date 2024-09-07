@@ -22,24 +22,24 @@
     if arch == .X86_64 {
         code: List(u8) = list(temp());
         
-        RAX_FROM_RDI :: 0b11111000;  // modrm. (mode:u2= registers not memory= 3, reg_src:u3=rdi=7, reg_dest:u3=rax=0)
+        RAX_FROM_RDI :: 0b11111000;  // modrm. (mode:u2= registers not memory= 3, reg_src:u3=.rdi=7, reg_dest:u3=rax=0)
         JUST_RAX :: 0b11000000;
         
         @asm_x64(
-            PrimaryOp.MovImm32, JUST_RAX, @as(u32) 10, // mov rax, 10
+            PrimaryOp.MovImm32, JUST_RAX, @as(u32) 10, // mov .rax, 10
             PrimaryOp.Ret,
         ) code&;
         assert_eq(call_jit(0, code.items()), 10);
         
         code&.clear();
-        code&.encode_bin(PrimaryOp.MovReg, rax, rdi);
+        code&.encode_bin(PrimaryOp.MovReg, .rax, .rdi);
         code&.push(@as(u8) PrimaryOp.Ret);
         assert_eq(call_jit(90, code.items()), 90);
     
         code&.clear();
         @asm_x64(
-            PrimaryOp.MovImm32, JUST_RAX, @as(u32) 10, // mov rax, 10
-            PrimaryOp.AddReg, RAX_FROM_RDI,   // add rax, rdi
+            PrimaryOp.MovImm32, JUST_RAX, @as(u32) 10, // mov .rax, 10
+            PrimaryOp.AddReg, RAX_FROM_RDI,   // add .rax, .rdi
             PrimaryOp.Ret,
         ) code&;
         assert_eq(call_jit(90, code.items()), 100);
@@ -47,8 +47,8 @@
         // same thing but with fancier macro usage
         code&.clear();
         @asm_x64(
-            encode_imm(rax, @as(u64) 10),
-            encode_bin(PrimaryOp.AddReg, rax, rdi),
+            encode_imm(X86Reg.rax, 10),
+            encode_bin(PrimaryOp.AddReg, X86Reg.rax, X86Reg.rdi),
             PrimaryOp.Ret,
         ) code&;
         assert_eq(call_jit(90, code.items()), 100);
@@ -78,9 +78,9 @@
     // now using inline asm that the compiler knows about
     #c_call #x86_bytes #asm
     fn add_by_asm(a: i64, b: i64) i64 = fn(out) = @asm_x64(
-        encode_imm(rax, @as(u64) 0),
-        encode_bin(PrimaryOp.AddReg, rax, rdi),
-        encode_bin(PrimaryOp.AddReg, rax, rsi),
+        encode_imm(X86Reg.rax, 0),
+        encode_bin(PrimaryOp.AddReg, X86Reg.rax, X86Reg.rdi),
+        encode_bin(PrimaryOp.AddReg, X86Reg.rax, X86Reg.rsi),
         PrimaryOp.Ret,
     ) out;
     assert_eq(add_by_asm(10, 15), 25);
@@ -95,8 +95,8 @@
     );
     #c_call #x86_bytes #asm
     fn add_one(a: i64) i64 = fn(out) = @asm_x64(
-        encode_imm(PrimaryOp.AddImm32, rdi, @as(u64) 1),
-        encode_bin(PrimaryOp.MovReg, rax, rdi),
+        encode_imm(PrimaryOp.AddImm32, X86Reg.rdi, 1),
+        encode_bin(PrimaryOp.MovReg, X86Reg.rax, X86Reg.rdi),
         PrimaryOp.Ret,
     ) out;
     assert_eq(add_one(9), 10);
@@ -108,9 +108,8 @@
     );
     #c_call #x86_bytes #asm
     fn sub_one(a: i64) i64 = fn(out) = @asm_x64(
-        encode_bin(PrimaryOp.MovReg, rax, rdi),
-        encode_imm(rdi, @as(u64) 1),
-        encode_bin(PrimaryOp.SubReg, rax, rdi),  // :slow if you cared you'd addimm -1
+        encode_imm(PrimaryOp.AddImm32, X86Reg.rdi, -1),
+        encode_bin(PrimaryOp.MovReg, X86Reg.rax, X86Reg.rdi),
         PrimaryOp.Ret,
     ) out;
     assert_eq(sub_one(10), 9);
@@ -122,7 +121,7 @@
     );
     #c_call #x86_bytes #asm
     fn bool_to_int(b: bool) i64 = fn(out) = @asm_x64(
-        encode_bin(PrimaryOp.MovReg, rax, rdi),
+        encode_bin(PrimaryOp.MovReg, X86Reg.rax, X86Reg.rdi),
         PrimaryOp.Ret,
     ) out;
     assert_eq(bool_to_int(true), 1);
@@ -140,12 +139,12 @@
     );
     #c_call #x86_bytes #asm
     fn is_seven(n: i64) i64 = fn(out) = @asm_x64(  // :slow, if you care they have setcc
-        encode_imm(rax, @as(u64) 7),
-        encode_bin(PrimaryOp.CmpReg, rdi, rax),
-        encode_jmp(TwoByteOp.JmpEq, 13),
-        encode_imm(rax, @as(u64) 0),    // 7 bytes
-        encode_jmp(7),                  // 6 bytes
-        encode_imm(rax, @as(u64) 1),    // 7 bytes
+        encode_imm(X86Reg.rax, 7),
+        encode_bin(PrimaryOp.CmpReg, X86Reg.rdi, X86Reg.rax),
+        encode_jmp(X86cc.e, 13),
+        encode_imm(X86Reg.rax, 0),    // 7 bytes
+        encode_jmp(7),                // 6 bytes
+        encode_imm(X86Reg.rax, 1),    // 7 bytes
         PrimaryOp.Ret,
     ) out;
     assert_eq(is_seven(7), 1);
@@ -162,13 +161,13 @@
     );
     #c_call #x86_bytes #asm
     fn add_or_sub(a: i64, b: i64, add_if_seven: i64) i64 = fn(out) = @asm_x64(
-        encode_bin(PrimaryOp.MovReg, rax, rdi),
-        encode_imm(r11, @as(u64) 7),
-        encode_bin(PrimaryOp.CmpReg, r11, rdx),
-        encode_jmp(TwoByteOp.JmpEq, 4),
-        encode_bin(PrimaryOp.SubReg, rax, rsi),   // 3
+        encode_bin(PrimaryOp.MovReg, X86Reg.rax, X86Reg.rdi),
+        encode_imm(X86Reg.r11, 7),
+        encode_bin(PrimaryOp.CmpReg, X86Reg.r11, X86Reg.rdx),
+        encode_jmp(X86cc.e, 4),
+        encode_bin(PrimaryOp.SubReg, X86Reg.rax, X86Reg.rsi),   // 3
         PrimaryOp.Ret, // 1
-        encode_bin(PrimaryOp.AddReg, rax, rsi),   // 3
+        encode_bin(PrimaryOp.AddReg, X86Reg.rax, X86Reg.rsi),   // 3
         PrimaryOp.Ret, // 1
     ) out;
     assert_eq(add_or_sub(30, 20, 7), 50);
@@ -185,13 +184,13 @@
     );
     #c_call #x86_bytes #asm
     fn add_or_sub2(a: i64, b: i64, add_if_seven: i64) i64 = fn(out) = @asm_x64(
-        encode_bin(PrimaryOp.MovReg, rax, rdi),
-        encode_imm(rcx, @as(u64) 7),
-        encode_bin(PrimaryOp.CmpReg, rcx, rdx),
-        encode_jmp(TwoByteOp.JmpNe, 4),
-        encode_bin(PrimaryOp.AddReg, rax, rsi),   // 3
+        encode_bin(PrimaryOp.MovReg, X86Reg.rax, X86Reg.rdi),
+        encode_imm(X86Reg.rcx, 7),
+        encode_bin(PrimaryOp.CmpReg, X86Reg.rcx, X86Reg.rdx),
+        encode_jmp(X86cc.ne, 4),
+        encode_bin(PrimaryOp.AddReg, X86Reg.rax, X86Reg.rsi),   // 3
         PrimaryOp.Ret, // 1
-        encode_bin(PrimaryOp.SubReg, rax, rsi),   // 3
+        encode_bin(PrimaryOp.SubReg, X86Reg.rax, X86Reg.rsi),   // 3
         PrimaryOp.Ret, // 1
     ) out;
     assert_eq(add_or_sub2(30, 20, 7), 50);
@@ -202,6 +201,53 @@
 
 #aarch64
 #test fn using_stack(canary: i64) i64 = {
+    #c_call #aarch64 #asm
+    fn swap_ints(a: *i64, b: *i64) void = (
+        ldr_uo(Bits.X64, x3, x0, @as(u12) 0),
+        ldr_uo(Bits.X64, x4, x1, @as(u12) 0),
+        str_uo(Bits.X64, x3, x1, @as(u12) 0),
+        str_uo(Bits.X64, x4, x0, @as(u12) 0),
+        ret(),
+    );
+    // TODO: rsp, rbp, r12, r13 use different addressing modes. 
+    #c_call #x86_bytes #asm
+    fn swap_ints(a: *i64, b: *i64) void = fn(out) = @asm_x64(
+        // memory on the left!
+        encode_bin_mem(PrimaryOp.MovRegLoad, X86Reg.rdi, X86Reg.r10),
+        encode_bin_mem(PrimaryOp.MovRegLoad, X86Reg.rsi, X86Reg.r11),
+        encode_bin_mem(PrimaryOp.MovReg, X86Reg.rdi, X86Reg.r11),
+        encode_bin_mem(PrimaryOp.MovReg, X86Reg.rsi, X86Reg.r10),
+        PrimaryOp.Ret
+    ) out;
+    a := 123;
+    b := 456;
+    swap_ints(a&, b&);
+    @println("% %", a, b); // without this print it works if you get the registers backwards which is odd. 
+    assert_eq(a, 456);
+    assert_eq(b, 123);
+    
+    #c_call #aarch64 #asm
+    fn use_stack(a: i64) i64 = (
+        sub_im(Bits.X64, sp, sp, @as(u12) 16, 0b0),
+        str_uo(Bits.X64, x0, sp, @as(u12) 1),
+        movz(Bits.X64, x0, 0x000A, Hw.Left0), 
+        ldr_uo(Bits.X64, x1, sp, @as(u12) 1),
+        add_sr(Bits.X64, x0, x0, x1, Shift.LSL, @as(u6) 0),
+        add_im(Bits.X64, sp, sp, @as(u12) 16, 0b0),
+        ret(),
+    );
+    #c_call #x86_bytes #asm
+    fn use_stack(a: i64) i64 = fn(out) = @asm_x64(
+        encode_imm(PrimaryOp.AddImm32, X86Reg.rsp, -16),
+        encode_imm(PrimaryOp.MovImm32, X86Reg.rsi, 0),
+        encode_tri_mem(PrimaryOp.MovReg, X86Reg.rdi, X86Reg.rsp, X86Reg.rsi),
+        encode_tri_mem(PrimaryOp.MovRegLoad, X86Reg.rax, X86Reg.rsp, X86Reg.rsi),
+        encode_imm(PrimaryOp.AddImm32, X86Reg.rax, 10),
+        encode_imm(PrimaryOp.AddImm32, X86Reg.rsp, 16),
+        PrimaryOp.Ret
+    ) out;
+    assert_eq(use_stack(15), 25);
+        
     // TODO: fancy enough driver that you can warn on this (@run query_current_arch()) becuase it's a footgun for cross compiling. 
     //       but i don't want to just keep adding shit to the compiler. 
     @if(@run query_current_arch().unwrap() == .Aarch64) {
@@ -216,18 +262,6 @@
         truncate_to_byte(in&, out&);
         assert_eq(out, 1);
         
-        #c_call #aarch64 #asm
-        fn use_stack(a: i64) i64 = (
-            sub_im(Bits.X64, sp, sp, @as(u12) 16, 0b0),
-            str_uo(Bits.X64, x0, sp, @as(u12) 1),
-            movz(Bits.X64, x0, 0x000A, Hw.Left0), 
-            ldr_uo(Bits.X64, x1, sp, @as(u12) 1),
-            add_sr(Bits.X64, x0, x0, x1, Shift.LSL, @as(u6) 0),
-            add_im(Bits.X64, sp, sp, @as(u12) 16, 0b0),
-            ret(),
-        );
-        assert_eq(use_stack(15), 25);
-    
         // Note: you make 16 bytes of room on the stack, then use offset 0 words and 1 words above sp. 
         //       NOT offset 1 and 2, that will stomp the first slot of the outer function (in this case canary so luckily you notice)
         //       but... its fine on interp because canary is stored on the fake stack and there happens to be a gap on the real one i guess. 
@@ -280,8 +314,8 @@
         );
         //#c_call #x86_bytes #asm
         //fn double_it(a: i64) i64 = fn(out) = @asm_x64(
-        //    encode_bin(PrimaryOp.MovReg, rax, rdi),
-        //    encode_bin(PrimaryOp.AddReg, rax, rax),
+        //    encode_bin(PrimaryOp.MovReg, .rax, .rdi),
+        //    encode_bin(PrimaryOp.AddReg, .rax, rax),
         //    PrimaryOp.Ret,
         //) out;
         
@@ -294,7 +328,7 @@
         );
         //#c_call #x86_bytes #asm
         //fn do_nothing(a: i64) i64 = fn(out) = @asm_x64(
-        //    encode_bin(PrimaryOp.MovReg, rax, rdi),
+        //    encode_bin(PrimaryOp.MovReg, .rax, .rdi),
         //    PrimaryOp.Ret,
         //) out;
         

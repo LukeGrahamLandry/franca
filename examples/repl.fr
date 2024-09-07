@@ -7,7 +7,7 @@ allocator :: libc_allocator;
 fn main() void = {
     vtable := init_driver_vtable();
     update_global_stdlib_path();
-    prelude := "#include_std(\"lib/core.fr\");";
+    prelude := "#include_std(\"lib/core.fr\");\n";
     comp := {vtable.init_compiler}(.Aarch64, vtable.default_build_options()); // TODO: comptime get the current arch
     c := vtable.with(comp);
     file := {c.vtable.add_file}(c.data, "repl!", prelude);
@@ -36,19 +36,17 @@ fn main() void = {
     );
     loop {
         text := "".clone(libc_allocator);
-        text&.read_line();
+        text&.interactive_read_line();
         text&.push_all(";");
         println("");
-        @println("We got code! \"%\"", text.items());    
+        //@println("We got code! \"%\"", text.items());    
         
         @match(state&.run_chunk(text.items())) {
             fn Ok() => ();
             fn Err(e) => {
-                if e.span.low == 0 && e.span.high == 0 {
-                    e.span = self.last_loc;
-                };
-                self.codemap.show_error_line(e.span);
-                @eprintln("Compile Error: %", e.msg);
+                out: List(u8) = list(temp());
+                self.fmt_error(e, out&);
+                println(out.items());
             }
         };
     };
@@ -72,11 +70,11 @@ fn run_chunk(state: *ReplState, src: Str) Res(void) = {
     r: ResolveScope = new(self, state.top_scope, file);
     r.block = state.top_block;
     each stmts { stmt | 
-        println(stmt.log(self));
+        //println(stmt.log(self));
         @try(r&.walk_stmt(stmt)) return;
-        println(stmt.log(self));
+        //println(stmt.log(self));
         state.walk_stmt(stmt);
-        println(stmt.log(self));
+        //println(stmt.log(self));
         
         @match(stmt.stmt&) {
             fn Noop() => ();
@@ -105,7 +103,7 @@ fn run_chunk(state: *ReplState, src: Str) Res(void) = {
             }
             @default => {
                 self.last_loc = stmt.loc;
-                return(@err("unhandled repl stmt type"));
+                return(@err("unhandled repl stmt type %", stmt.log(self)));
             };
         };
     };
@@ -141,55 +139,6 @@ fn handle_func(self: *ReplState, func: *Func) Result(DoMore, void) #once = (Ok =
 fn handle_type(self: *ReplState, ty: *LazyType) Result(DoMore, void) #once = (Ok = .Continue);
 fn handle_pattern(self: *ReplState, p: *Pattern) Result(DoMore, void) #once = (Ok = .Continue);
 
-// TODO: improve this (support arrow keys) and add it to the standard library. 
-fn read_line(text: *List(u8)) void = {
-    start_raw_terminal(STD_IN);
-    prompt := ">>> ";
-
-    render_buffer: List(u8) = list(4096, libc_allocator);
-    loop {
-        continue :: local_return;
-        c: u8 = 0;
-        len := read(STD_IN, c&, 1).unwrap();
-        if(len.eq(1)){
-            //println(@as(i64) c.zext());
-            @switch(c) {
-                @case(127) => {  // backspace
-                    if text.len > 0 {
-                        // since we're printing a shorter string, the terminal will stay showing the last character. 
-                        // so write over spaces so we don't show the old thing. 
-                        // there's gotta be some ansi escaped thing for clearing a line but i don't care right now. 
-                        @fmt(render_buffer&, "\r");
-                        range(0, text.len + prompt.len) { _ |
-                            render_buffer&.push_all(" ");
-                        };
-                        print(render_buffer.items());
-                        render_buffer&.clear();
-                        
-                        // now remove a character. 
-                        text.len -= 1;
-                    };
-                };
-                @case(27) => {
-                    // TODO
-                };
-                @case(10) => {
-                    // Pressed enter. 
-                    end_raw_terminal(STD_IN);
-                    return();
-                };
-                @default => text.push(c);
-            };
-        };
-        @fmt(render_buffer&, "\r");  // take it back now yall
-        render_buffer&.push_all(prompt);
-        render_buffer&.push_all(text.items());
-        print(render_buffer.items());
-        
-        render_buffer&.clear();
-        usleep(10000);
-    };
-}
 
 //////////////////////////////////////////////
 // Driver

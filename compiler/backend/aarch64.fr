@@ -8,124 +8,35 @@
 //          -- Jul 15
 //
 // TODO: be able to load directly into a float register
-// TODO: factor out what's common between arm and x86
-
-// TODO: put all these config options somewhere consistant.
-ZERO_DROPPED_REG :: false;
-ZERO_DROPPED_SLOTS :: false;
-TRACE_ASM :: false;
-TRACE_CALLS :: false; 
-USE_LLVM_DIS :: true;
-
-SpOffset :: @struct(id: i64);
-
-IncReg :: @struct(reg: i64, offset_bytes: i64);
-AsmVal :: @tagged(
-    Increment: IncReg, // not a pointer derefernce, just adding a static number to the value in the register.
-    Literal: i64,
-    Spill: SpOffset,
-    FloatReg: i64,
-);
-::tagged(AsmVal);
-::DeriveFmt(AsmVal);
 
 MEM_64: i64 : 0b11;
 MEM_32: i64 : 0b10;
 MEM_16: i64 : 0b01;
 MEM_08: i64 : 0b00;
 
-fn ne(a: FuncId, b: FuncId) bool #redirect(Ty(u32, u32), bool);
-
-// TODO: now this function is missnamed
-fn emit_bc_and_aarch64(program: *SelfHosted, f: FuncId, when: ExecStyle) PRes #once = {
-    func := program.get_function(f);
-    @debug_assert(!func.get_flag(.AsmDone), "double compile");
-    @debug_assert(program.aarch64&.get_fn_old(f).is_none(), "ICE: not .AsmDone but have pointer");
-    
-    mark := __temp_alloc.mark();
-    body := @try(program.emit_bc(f, when)) return;
-    
-    program.aarch64&.extend_blanks(f);
-    
-    // We might have noticed that this function was a duplicate while generating bytecode.
-    // So it was Normal before but now its a Redirect. 
-    if body.func != f {
-        if program.get_fn_callable(body.func) { old |
-            program.put_jitted_function(f, old);
-        };
-        
-        return(.Ok);
-    };
-    
-    zone := zone_begin(.EmitAarch64); // TODO: defer
-    @if(ENABLE_TRACY) {
-        real_name := program.pool.get(func.name);
-        ___tracy_emit_zone_name(zone, real_name);
-    };
-    
-    @if(INCLUDE_COMPTIME_CRANELIFT) {
-        opts := program.get_build_options();
-        if opts.comptime_jit == .Cranelift {
-            data := program.cranelift.expect("cranelift backend to be initilized");
-            log_ir := func.get_flag(.LogIr);
-            franca_comptime_cranelift_emit(data, f, body, program.legacy_indirection.cast(), log_ir);
-            func.set_flag(.AsmDone);
-            zone_end(zone);
-            __temp_alloc.reset_retaining_capacity(mark);
-            return(.Ok);
-        };
-    };
-    
-    old := program.legacy_indirection.cast();
-    a: EmitAsm = new(old, when, body, f);
-    addr := a&.compile(f);
-    program.put_jitted_function(f, addr);
-    zone_end(zone);
-    __temp_alloc.reset_retaining_capacity(mark);
-    .Ok
-}
-
 EmitAsm :: @struct(
     program: CompilerRs,
     asm: *Jitted,
     vars: List(?SpOffset),
     next_slot: SpOffset,
-    f: FuncId,
-    when: ExecStyle,
     release_stack: List(*u32),
     state: BlockState,
     block_ips: List(?*u32),
     clock: u16,
-    markers: List(Ty(List(u8), usize)),
     log_asm_bc: bool,
     body: *FnBody,
 );
 
-SpSlot :: @struct(at: SpOffset, size: u16, clock: u16);
-BlockState :: @struct(
-    stack: List(AsmVal),
-    free_reg: List(i64),
-    free_reg_float: List(i64),
-    open_slots: List(SpSlot),
-);
-
-fn clone(self: *BlockState) BlockState = {
-    (stack = self.stack&.clone(), free_reg = self.free_reg&.clone(), free_reg_float = self.free_reg_float&.clone(), open_slots = self.open_slots&.clone())
-}
-
-fn new(compile: CompilerRs, when: ExecStyle, body: *FnBody, f: FuncId) EmitAsm #once = {
+fn new(compile: CompilerRs, body: *FnBody) EmitAsm #once = {
     (
         program = compile,
-        asm = compile.aarch64&,
+        asm = compile.jitted&,
         vars = list(temp()),
         next_slot = (id = 0),
-        f = f,
-        when = when,
         release_stack = list(temp()),
         state = (stack = list(temp()), free_reg = list(temp()), free_reg_float = list(temp()), open_slots = list(temp())),
         block_ips = list(temp()),
         clock = 0,
-        markers = list(temp()),
         log_asm_bc = false,
         body = body,
     )
@@ -155,48 +66,12 @@ fn compile(self: *EmitAsm, f: FuncId) rawptr #once = {
     u32.raw_from_ptr(asm.ptr)
 }
 
-fn print_llvm_mc_dis(asm: []u32) void = {
-    @println("% instrucitons.", asm.len());
-    hex: List(u8) = list(asm.len * 17, temp());
-    for asm { op |
-        range(0, 4) { _ |
-            byte := op.bit_and(0x000000FF);
-            op = op.shift_right_logical(8);
-            hex&.push_prefixed_hex_byte(byte.trunc());
-            hex&.push_all(" ");
-        };
-    };
-    print_llvm_mc_dis("--arch=aarch64", hex.items());
-}
-
-fn print_llvm_mc_dis(asm: []u8) void = {
-    @println("% bytes.", asm.len());
-    hex: List(u8) = list(asm.len * 5, temp());
-    for asm { byte |
-        hex&.push_prefixed_hex_byte(byte);
-        hex&.push_all(" ");
-    };
-    print_llvm_mc_dis("--arch=x86-64", hex.items());
-}
-
-fn print_llvm_mc_dis(arch: Str, hex: Str) void = {
-    out := open_temp_file();
-    out.fd&.write(hex);
-    // TODO: have the caller pass in anything like this, 
-    //       but this is just for debugging the compiler so its not a big deal. :driver_io
-    // varient 1 means intel syntax. ignored when doing arm. 
-    success := run_cmd_blocking("llvm-mc", @slice(arch, "--disassemble", "-output-asm-variant=1", "--show-encoding", out&.s_name()));
-    if(!success, => eprintln("ICE(debugging): couldn't disassemble"));
-    out.remove();
-} 
-
 fn bc_to_asm(self: *EmitAsm, f: FuncId) void #once = {
     ff := self.program[f]&;
     @if(TRACE_ASM) @println("=== F% % ===", f.as_index(), self.program.pool.get(ff.name));
     //debugln!("{}", self.program[f].body.log(self.program));
 
     func := self.body;
-    self.f = f;
     self.next_slot = (id = 0);
     self.vars = .None.repeated(func.vars.len, temp());
     self.block_ips = .None.repeated(self.body.blocks.len, temp());
@@ -253,7 +128,6 @@ fn bc_to_asm(self: *EmitAsm, f: FuncId) void #once = {
 fn emit_block(self: *EmitAsm, b: i64, args_not_vstacked: bool) void = {
     if(self.block_ips[b].is_some(), => return());
     self.block_ips[b] = (Some = self.asm.next);
-    f := self.f;
     block := self.body.blocks[b]&;
 
     self.clock = block.clock;
@@ -333,7 +207,7 @@ fn emit_inst(self: *EmitAsm, b_idx: usize, inst: Bc, i: usize) bool #once = {
             };
         }
         fn NoCompile() => {
-            @panic("tried to compile unreachable block in %", self.program[self.f]&.log(self.program[][]));
+            @panic("tried to compile unreachable block in %", self.program[self.body.func]&.log(self.program[][]));
         }
         fn PushConstant(f) => self.state.stack&.push(Literal = f.value);
         fn PushGlobalAddr(id) => {
@@ -1209,7 +1083,7 @@ fn inst_intrinsic(self: *EmitAsm, op: Intrinsic) void #once = {
     // TODO: for add, include offset_bytes in the immediate if they fit or combine them and defer instead of doing 3 seperate adds.
     bin :: fn($do: @Fn(a: u5, b: u5) void) void => {
         snd: u5 = self.pop_to_reg();
-        fst: u5= self.pop_to_reg();
+        fst: u5 = self.pop_to_reg();
         do(fst, snd);
         self.drop_reg(snd);
         self.state.stack&.push(Increment = (reg = fst, offset_bytes = 0));
@@ -1346,165 +1220,6 @@ fn inst_intrinsic(self: *EmitAsm, op: Intrinsic) void #once = {
         @default => {
             @panic("ICE: unimplemented aarch64 intrinsic %", op);
         };
-    };
-}
-
-
-PAGE_SIZE :: 16384; // TODO
-
-Jitted :: @struct(
-    mmapped: []u32,
-    dispatch: List(rawptr),
-    // aarch64 instructions are always 4 bytes. 
-    current_start: *u32,
-    next: *u32,
-    old: *u32,
-);
-
-fn new(bytes: i64) Jitted #once = {
-    mmapped := page_allocator.alloc(u32, bytes / 4);
-    (
-        mmapped = mmapped,
-        dispatch = list(99999, page_allocator), // Dont ever resize!
-        current_start = mmapped.ptr,
-        next = mmapped.ptr,
-        old = mmapped.ptr,
-    )
-}
-
-
-// This is a better marker for not compiled yet.
-// Depending on your mood this could be 0x1337 or whatever so you can recognise when you hit it in a debugger.
-// TODO: generate shims so we know the function id
-fn uncompiled_function_placeholder() rawptr = {
-    addr: rawptr = fn(a: i64, b: i64, c: i64) void = {
-        @panic("ICE: Tried to call un-compiled function. (x0=%, x1=%, x2=%)", a, b, c);
-    };
-    addr
-}
-
-fn get_dispatch(self: *Jitted) i64 = {
-    rawptr.int_from_ptr(self.dispatch.maybe_uninit.ptr)
-}
-
-fn get_fn_old(self: *Jitted, f: FuncId) ?rawptr = {
-    if(f.as_index() >= self.dispatch.len, => return(.None));
-    addr := self.dispatch[f.as_index()];
-    if(addr == uncompiled_function_placeholder(), => return(.None));
-    (Some = addr)
-}
-
-fn offset_words(self: *Jitted, from_ip: *u32, to_ip: *u32) i64 = {
-    from_ip.ptr_diff(to_ip)
-}
-
-fn prev(self: *Jitted) *u32 = {
-    self.next.offset(-1)
-}
-
-fn patch(self: *Jitted, ip: *u32, inst_value: u32) void = {
-    @debug_assert_eq(ip[], brk(0), "unexpected patch");
-    ip[] = inst_value;
-}
-
-::ptr_utils(u32);
-
-fn push(self: *Jitted, inst: u32) void = {
-    //println(inst);
-    //@debug_assert((self.next as usize) < self.high, "OOB {} {}", self.next as usize, self.high);
-    
-    self.next[] = inst;
-    self.next = self.next.offset(1);
-}
-fn push_bytes_x86(self: *Jitted, insts: []u8) void = {  
-    byte := u32.raw_from_ptr(self.next);
-    byte := u8.ptr_from_raw(byte);
-    for insts { op |
-        byte[] = op;
-        byte = byte.offset(1);
-    };
-    extra := insts.len.mod(4);
-    range(0, extra) { _ |
-        byte[] = 0;
-        byte = byte.offset(1);
-    };
-    
-    byte := u8.raw_from_ptr(byte);
-    self.next = u32.ptr_from_raw(byte);
-}
-
-// Recursion shouldn't have to slowly lookup the start address.
-fn mark_start(self: *Jitted, f: FuncId) void = {
-    addr := u32.int_from_ptr(self.current_start);
-    self.extend_blanks(f);
-    self.dispatch[f.as_index()] = addr.rawptr_from_int();
-}
-
-fn extend_blanks(self: *Jitted, f: FuncId) void = {
-    assert(self.dispatch.maybe_uninit.len > f.as_index(), "cannot resize dispatch table");
-    while => self.dispatch.len() < f.to_index().zext() + 1 {
-        self.dispatch&.push(uncompiled_function_placeholder());
-    };
-}
-
-// TODO: if you don't have this it just calls the FuncId for you because it decides same raw type is good enough :FUCKED -- Jul 20
-fn as_index(f: Type) i64 = f.to_index().zext();
-
-fn save_current(self: *Jitted, f: FuncId) []u32 #once = {
-    //@debug_assert_ne!(self.next as usize, self.old as usize);
-    //@debug_assert_ne!(self.next as usize, self.current_start as usize);
-    self.extend_blanks(f);
-    func_start := self.current_start;
-    addr := u32.raw_from_ptr(self.current_start);
-    start := u32.int_from_ptr(self.current_start);
-    end := u32.int_from_ptr(self.next);
-    xx := u32.int_from_ptr(self.mmapped.ptr);
-    last_space := xx + self.mmapped.len * 4;
-    @debug_assert(end < last_space, "ICE: out of space for jitted code (% MB)", self.mmapped.len * 4 / 1024 / 1024);
-    //@debug_assert_eq(self.current_start as usize % 4, 0);
-    // just a marker to make sure someone doesn't fall off the end of the function by forgetting to return.
-    // also you can see it in the debugger disassembly so you can tell if you emitted a trash instruction inside a function or you're off the end in uninit memory. -- Apr 25
-    self.push(brk(0xDAED));
-    self.current_start = self.next;
-    // TODO: have a slice_from(start, to = end);
-    (ptr = func_start, len = (end - start) / 4)
-}
-
-fn bump_dirty(self: *Jitted) void = {
-    beg := u32.raw_from_ptr(self.old);
-    end := u32.raw_from_ptr(self.next);
-    if beg != end {
-        //@debug_assert_eq(self.next as usize, self.current_start as usize);
-        self.push(brk(0x3141));
-        len := end.int_from_rawptr() - beg.int_from_rawptr();
-        
-        prot := bit_or(@as(i64) MapProt.Exec, @as(i64) MapProt.Read);
-        res := mprotect(beg, len, prot);
-        assert(res.value.eq(0), "mprotect failed");
-        
-        // TODO: is this wrong now? if you were at the very end of a page you would have written the brk to the next one,
-        //      but i guess thats find cause we rewrite anyway when we put instructions there. 
-        page_start := end.int_from_rawptr() / PAGE_SIZE * PAGE_SIZE;
-        self.next = u32.ptr_from_int(page_start + PAGE_SIZE);
-        self.old = self.next;
-        self.current_start = self.next;
-        
-        //
-        // x86 doesn't this. TODO: what about riscv?
-        // TODO: #[cfg(target_arch = "aarch64")]
-        //
-        // This fixes 'illegal hardware instruction'.
-        // sleep(Duration::from_millis(1)) also works (in debug mode). That's really cool, it gives it time to update the other cache because instructions and data are seperate?!
-        // Especially fun becuase if you run it in lldb so you break on the error and disassemble... you get perfectly valid instructions because it reads the data cache!
-        // https://community.arm.com/arm-community-blogs/b/architectures-and-processors-blog/posts/caches-and-self-modifying-code
-        // https://stackoverflow.com/questions/35741814/how-does-builtin-clear-cache-work
-        // https://stackoverflow.com/questions/35741814/how-does-builtin-clear-cache-work
-        // https://stackoverflow.com/questions/10522043/arm-clear-cache-equivalent-for-ios-devices
-        // https://github.com/llvm/llvm-project/blob/main/compiler-rt/lib/builtins/clear_cache.c
-        // https://github.com/apple/darwin-libplatform/blob/main/src/cachecontrol/arm64/cache.s
-        // https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/sys_icache_invalidate.3.htmls
-        //
-        __clear_cache(beg, end);
     };
 }
 

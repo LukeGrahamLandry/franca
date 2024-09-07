@@ -16,7 +16,8 @@
 #include_std("compiler/v2/sema.fr"); 
 #include_std("compiler/v2/ast_boring.fr");
 #include_std("compiler/backend/cranelift.fr");
-#include_std("compiler/backend/cranelift.fr");  
+#include_std("compiler/backend/x64.fr");  
+#include_std("compiler/backend/jit.fr");  
 #include_std("compiler/driver_io.fr");  
 
 ::?[]Prim; // TODO: why do i need this extra when lsp????? order of exports changed maybe??
@@ -37,7 +38,7 @@ SelfHosted :: @rec @struct(
     primitives: HashMap(PrimKey, RsVec(Prim)),
     index: ProgramIndex,
     functions: BucketArray(Func),  // TODO: have a version of this type that doesn't add gaps if you push_all because that will break the indexing
-    aarch64: Jitted,
+    jitted: Jitted,
     bytecodes: BucketArray(FnBody),
     // TODO: just always use .Aot and make this a set?
     saved_bytecodes: HashMap(*FnBody, ExecStyle),
@@ -45,7 +46,7 @@ SelfHosted :: @rec @struct(
     types: BucketArray(TypeInfo),
     // TODO: decide if these are generally accessed at the same time so should be stored together.
     // TODO: have a OptionalBucketArray that stores a bit set at the beginning of each bucket? 
-    type_extra: BucketArray(?TypeMeta), 
+    type_extra: BucketArray(TypeMeta), 
     type_lookup: HashMap(*TypeInfo, Type),
     // TODO: its dumb that deep is here and shallow is in typeinfo struct?  -- Jul 21
     finished_layout_deep: DynamicBitSet,
@@ -306,7 +307,7 @@ fn init_self_hosted(build_options: *BuildOptions) *SelfHosted = {
         primitives = init(a),
         index = init(a),
         functions = init(10, a),
-        aarch64 = new(1.shift_left(28)), // Its just virtual memory right? I really don't want to ever run out of space and need to change the address.
+        jitted = new(1.shift_left(28)), // Its just virtual memory right? I really don't want to ever run out of space and need to change the address.
         bytecodes = init(10, a),
         saved_bytecodes = init(a),
         free_bytecodes = list(a),
@@ -347,7 +348,7 @@ fn init_self_hosted(build_options: *BuildOptions) *SelfHosted = {
     
     @if(INCLUDE_COMPTIME_CRANELIFT, {
         if build_options.comptime_jit == .Cranelift {
-            dispatch_ptr := self.aarch64&.get_dispatch();
+            dispatch_ptr := self.jitted&.get_dispatch();
             data := franca_comptime_cranelift_init(self, get_backend_vtable(), dispatch_ptr);
             self.cranelift = (Some = data);
         };
@@ -370,14 +371,6 @@ fn add_function(self: *SelfHosted, f: Func) FuncId = {
 
 fn get_alloc(self: *SelfHosted) Alloc = self.ast_alloc.borrow();
 fn get_alloc(self: CompilerRs) Alloc = self[][].get_alloc();
-
-fn show_error_line(self: *CodeMap, span: Span) void = {
-    line := self.get_whole_line(span);
-    set_colour(250, 0, 0);
-    @println("%:%:%", line.filename, line.line, line.col);
-    unset_colour();
-    println(self.source_slice(line.line_text));
-}
 
 fn clone(self: *SelfHosted, e: *FatExpr) FatExpr = {
     e.deep_clone(self.get_alloc())

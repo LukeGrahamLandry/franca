@@ -484,8 +484,14 @@ fn log_type(self: *SelfHosted, ty: Type) Str = {
     out.items()
 }
 
+// TODO: allow people to ask for the giant description instead of just name in debug_log_type
 fn log_type_inner(self: *SelfHosted, safe_rec: *DynamicBitSet, out: *List(u8), ty: Type) void = {
     @if(BOOTSTRAP_ONLY_MODE) return();
+    info := self.get_info(ty);
+    if info.inferred_name != Flag.SYMBOL_ZERO.ident() {
+        @fmt(out, "%", self.pool.get(info.inferred_name));
+        return();
+    };
     if safe_rec.get(ty.as_index()) {
         @fmt(out, "TY%", ty.as_index());
         return();
@@ -662,45 +668,53 @@ unwrap_report_error :: fn(self: *SelfHosted, $T: Type, value: Res(T)) T #generic
     }
 };
 
+fn fmt_error(self: *SelfHosted, err: *CompileError, out: *List(u8)) void = {
+    err.update_main_span(self.last_loc);
+    @match(err) {
+        fn Msg(it) => {
+            self.codemap.fmt_error_line(it.span, out);
+            @fmt(out, "Compile Error: %", it.msg);
+        };
+        fn ExpectedCompileError(loc) => {
+            self.codemap.fmt_error_line(loc[], out);
+            @fmt(out, "Compile Error: @assert_compile_error did not find compile error");
+        }
+        fn Parse(it) => {
+            self.codemap.fmt_error_line(it.span, out);
+            @panic("Parse Error: %", it.msg)
+        }
+        fn TypeMismatch(it) => {
+            // TODO: if it was in matching arguments, just report the problem fields. 
+            //       for all tuples i guess since we know they're structural. 
+            //       bring back the nicer detailed printing i had for a bit in rust. 
+            self.codemap.fmt_error_line(it.span, out);
+            @fmt(out, "Type Error: expected % but found %", self.log_type(it.wanted), self.log_type(it.found));
+        }
+        fn CoerceConst(it) => {
+            self.codemap.fmt_error_line(it.span, out);
+            @fmt(out, 
+                "Type Error: expected % but found %\nWhile coercing constant: %", 
+                self.log_type(it.wanted), self.log_type(it.found), it.expr.log(self)
+            );
+        }
+        fn InvalidField(it) => {
+            self.codemap.fmt_error_line(it.span, out);
+            extra := if(self.has_fields(it.container), => "", => "\nbut only structs/enums support field access");
+            @fmt(out, 
+                "Type Error: expected field % on type % %", 
+                self.pool.get(it.name), self.log_type(it.container), extra,
+            );
+        }
+    };
+}
+
 fn report_error2(self: *SelfHosted, err: CompileError) Never = self.report_error(err&);
 
 fn report_error(self: *SelfHosted, err: *CompileError) Never = {
     @if(BOOTSTRAP_ONLY_MODE) panic("error");
-    
-    err.update_main_span(self.last_loc);
-    @match(err) {
-        fn Msg(it) => {
-            self.codemap.show_error_line(it.span);
-            @panic("Compile Error: %", it.msg)
-        };
-        fn ExpectedCompileError(loc) => {
-            self.codemap.show_error_line(loc[]);
-            @panic("Compile Error: @assert_compile_error did not find compile error")
-        }
-        fn Parse(it) => {
-            self.codemap.show_error_line(it.span);
-            @panic("Parse Error: %", it.msg)
-        }
-        fn TypeMismatch(it) => {
-            self.codemap.show_error_line(it.span);
-            @panic("Type Error: expected % but found %", self.log_type(it.wanted), self.log_type(it.found))
-        }
-        fn CoerceConst(it) => {
-            self.codemap.show_error_line(it.span);
-            @panic(
-                "Type Error: expected % but found %\nWhile coercing constant: %", 
-                self.log_type(it.wanted), self.log_type(it.found), it.expr.log(self)
-            )
-        }
-        fn InvalidField(it) => {
-            self.codemap.show_error_line(it.span);
-            extra := if(self.has_fields(it.container), => "", => "\nbut only structs/enums support field access");
-            @panic(
-                "Type Error: expected field % on type % %", 
-                self.pool.get(it.name), self.log_type(it.container), extra,
-            )
-        }
-    }
+    out: List(u8) = list(temp());
+    self.fmt_error(err, out&);
+    panic(out.items())
 }
 
 fn has_fields(self: *SelfHosted, ty: Type) bool = {
@@ -736,4 +750,20 @@ fn update_main_span(err: *CompileError, new_loc: Span) void = {
         }
         @default => (); // TODO
     };
+}
+
+fn show_error_line(self: *CodeMap, span: Span) void = {
+    out: List(u8) = list(temp());
+    self.fmt_error_line(span, out&);
+    println(out.items());
+}
+
+fn fmt_error_line(self: *CodeMap, span: Span, out: *List(u8)) void = {
+    line := self.get_whole_line(span);
+    set_colour(out, 250, 0, 0);
+    @fmt(out, "%:%:%", line.filename, line.line, line.col);
+    unset_colour(out);
+    out.push_all("\n");
+    out.push_all(self.source_slice(line.line_text));
+    out.push_all("\n");
 }

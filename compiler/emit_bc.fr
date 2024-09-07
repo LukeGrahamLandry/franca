@@ -15,22 +15,18 @@
 ALWAYS_BAKE_CONSTANTS :: false;
 // TODO: abstract out body.mix_hash(i64) instead of pasting random numbers around. 
 
-FnBody :: @struct(
+FnBody :: @struct(  
     blocks: RsVec(BasicBlock),
     // TODO: would be nice if i could sort these so less alignment padding on my backends. 
     //       but thats a pain because then you need to map indexes.
     vars: RsVec(VarSlotType),
-    var_names: RsVec(?Var),
+    var_names: RsVec(Symbol),
     when: ExecStyle,
-    alloc: Alloc,
     hash: i64 = 0,
     signeture: PrimSig,
     func: FuncId,
     name: Symbol,
     switch_payloads: RsVec(RsVec(SwitchPayload)),
-    current_block: BbId,  // TODO: remove. only needed while building
-    clock: u16,           // TODO: remove. only needed while building
-    want_log: bool,       // TODO: remove. only needed while building
 );
 VarSlotType :: @struct(size: u16, align: u16);
 SwitchPayload :: @struct(value: i64, block: BbId);
@@ -80,6 +76,7 @@ PrimSig :: @struct(
 BbId :: @struct(id: u16);
 BasicBlock :: @struct(
     insts: RsVec(Bc),
+    debug: RsVec(Span), // TODO: use this if self.debug
     arg_prims: Slice(Prim),
     incoming_jumps: u16,
     clock: u16,
@@ -96,14 +93,19 @@ BasicBlock :: @struct(
 // - TODO: it seems the compiler segfaults trying to cope with this line?????????! -- Jul 7 //ty := binding.ty&.unwrap();
 
 EmitBc :: @struct(
+    result: *FnBody,
     program: *SelfHosted,
     last_loc: Span,
     locals: List(List(u16)),
     var_lookup: HashMap(Var, u16),
     inlined_return_addr: HashMap(LabelId, ReturnAddr),
-    out_alloc: Alloc,
     is_ssa_var: BitSet,
     result_addr_depth: i64 = 0,
+    out_alloc: Alloc,
+    current_block: BbId, 
+    clock: u16,
+    want_log: bool,
+    debug: bool,
 );
 
 fn hash(s: *LabelId) i64 #redirect(*u32, i64);
@@ -129,17 +131,22 @@ fn emit_bc(comp: *SelfHosted, f: FuncId, when: ExecStyle) Res(*FnBody) = {
     func := comp.get_function(f); // TODO: you can't do this inline with a call (if comp[f]) that needs a *Func. it looks for an overload for **Func. -- Jul 5
     
     self: EmitBc = (
+        result = FnBody.ptr_from_int(0), // EVIL. filled in soon! 
         program = comp, 
         last_loc = func.loc,
         locals = list(temp()),
         var_lookup = init(temp()),
         inlined_return_addr = init(temp()),
+        is_ssa_var = empty(),
         // TODO: change this if I want to keep them around for deduplicating. 
         //       the others are always just needed while working on it.
         //       then mark and reset temp at the end of this function. 
         //       have a pool and recycle old FnBodys that we decided we didn't need because they were duplicates.  
         out_alloc = comp.get_alloc(),  
-        is_ssa_var = empty(),
+        current_block = (id = 0),
+        clock = 0,
+        want_log = func.get_flag(.LogBc),
+        debug = comp.get_build_options()[].debug_info,
     );
     //@println("emit_bc % % %", when, f, comp.pool.get(func.name));
     @debug_assert(func.get_flag(.EnsuredCompiled), "fn not compiled?");
@@ -160,10 +167,9 @@ fn emit_bc(comp: *SelfHosted, f: FuncId, when: ExecStyle) Res(*FnBody) = {
         @println("[#log_ast %] %", f, func.log(comp));
         comp.codemap.show_error_line(func.loc);
     };
-
-    self.locals&.push(list(self.out_alloc));
-    
+    self.locals&.push(list(temp()));
     body := @try(self.program.empty_fn_body(f, when)) return;
+    self.result = body;
     
     zone := zone_begin(.EmitBc); // TODO: defer
     @if(ENABLE_TRACY) {
@@ -171,7 +177,7 @@ fn emit_bc(comp: *SelfHosted, f: FuncId, when: ExecStyle) Res(*FnBody) = {
         ___tracy_emit_zone_name(zone, real_name);
     };
     
-    res := self&.emit_body(body, f);
+    res := self&.emit_body(f);
     zone_end(zone);
     
     if res&.is_err() {
@@ -217,14 +223,10 @@ fn empty_fn_body(comp: *SelfHosted, func: FuncId, when: ExecStyle) Res(*FnBody) 
         vars = empty(),
         var_names = empty(),
         when = when,
-        alloc = comp.get_alloc(),
         signeture = @try(comp.prim_sig(f_ty, f.cc.expect("known cc"))) return,
         func = func,
         name = f.name,
         switch_payloads = empty(),
-        current_block = (id = 0),
-        clock = 0,
-        want_log = f.get_flag(.LogBc),
     );
     
     (Ok = ptr)
@@ -232,13 +234,13 @@ fn empty_fn_body(comp: *SelfHosted, func: FuncId, when: ExecStyle) Res(*FnBody) 
 
 
 // TODO: if you have an unclosed string it randomly decides later top level vars are undeclared? -- Jul 7 
-fn bind_args(self: *EmitBc, result: *FnBody, arguments: *Pattern) Res([] Prim) #once = {
+fn bind_args(self: *EmitBc, arguments: *Pattern) Res([] Prim) #once = {
     arity: u16 = arguments.bindings.len.trunc();
 
-    func := self.program[result.func]&;
+    func := self.program[self.result.func]&;
     f_ty := func.finished_ty().expect("known function type");
     arg_ty := f_ty.arg;
-    pushed := if(result.signeture.first_arg_is_indirect_return, => 1, => 0);
+    pushed := if(self.result.signeture.first_arg_is_indirect_return, => 1, => 0);
     already_did_prims := self.program.get_primitives(@as(PrimKey) (arg_ty, arity, false, false)).is_some(); // TODO: make it so this is always true. -- Jul 6
     :: if(?List(Prim));
     prim_args: ?List(Prim) = if(already_did_prims, => .None) {
@@ -265,10 +267,10 @@ fn bind_args(self: *EmitBc, result: *FnBody, arguments: *Pattern) Res([] Prim) #
                 args.push(.P64);
             };
             // TODO: callee make copy if it wants to modify
-            self.save_ssa_var(result)
+            self.save_ssa_var()
         } else {
             slots := self.program.slot_count(ty);
-            id := result.add_var(self, ty);
+            id := self.add_var(ty);
             @switch(slots) {
                 @case(0) => (); 
                 @case(1) => {
@@ -277,8 +279,8 @@ fn bind_args(self: *EmitBc, result: *FnBody, arguments: *Pattern) Res([] Prim) #
                     if prim_args& { args | 
                         args.push(ty);
                     };
-                    self.addr_var(result, id);
-                    result.push(StorePost = ty);
+                    self.addr_var(id);
+                    self.push(StorePost = ty);
                 };
                 @case(2) => {
                     types := self.program.flat_tuple_types(ty);
@@ -288,11 +290,11 @@ fn bind_args(self: *EmitBc, result: *FnBody, arguments: *Pattern) Res([] Prim) #
                     );
                     p0 := self.program.prim(types[0]).expect("ret1 prim");
                     p1 := self.program.prim(types[1]).expect("ret2 prim");
-                    self.addr_var(result, id);
-                    result.inc_ptr_bytes(offset_2.trunc());
-                    result.push(StorePost = p1);
-                    self.addr_var(result, id);
-                    result.push(StorePost = p0);
+                    self.addr_var(id);
+                    self.inc_ptr_bytes(offset_2.trunc());
+                    self.push(StorePost = p1);
+                    self.addr_var(id);
+                    self.push(StorePost = p0);
                     pushed += 2;
                     if prim_args& { args |
                         args.push(p1); //reverse cause we reverse at the end
@@ -312,20 +314,20 @@ fn bind_args(self: *EmitBc, result: *FnBody, arguments: *Pattern) Res([] Prim) #
         };
     };
 
-    //assert_eq!(pushed, result.signeture.arg_slots);
+    //assert_eq!(pushed, self.result.signeture.arg_slots);
     if prim_args& { args |
         args.reverse(); // sigh
-        //debug_assert_eq!(&args, result.signeture.args); // TODO: remove all this shit cause now its redundant.
+        //debug_assert_eq!(&args, self.result.signeture.args); // TODO: remove all this shit cause now its redundant.
         prims := self.program.primitives&;
-        //debug_assert!(result.signeture.first_arg_is_indirect_return || (pushed as usize == args.len()));
+        //debug_assert!(self.result.signeture.first_arg_is_indirect_return || (pushed as usize == args.len()));
         just_args := args.items().clone(self.program.get_alloc()).rs();
         prims.insert((arg_ty, arity, false, false), just_args);
         args.insert(0, .P64); // sad
-        //debug_assert!(!result.signeture.first_arg_is_indirect_return || (pushed as usize == args.len()));
+        //debug_assert!(!self.result.signeture.first_arg_is_indirect_return || (pushed as usize == args.len()));
         prims.insert((arg_ty, arity, true, false), args[].rs());
     };
 
-    key: PrimKey = (arg_ty, arity, result.signeture.first_arg_is_indirect_return, false);
+    key: PrimKey = (arg_ty, arity, self.result.signeture.first_arg_is_indirect_return, false);
     arg_sig := self.program.get_primitives(key).unwrap();
     (Ok = arg_sig)
 }
@@ -334,20 +336,20 @@ fn get_primatives(self: *EmitBc, ty: Type) [] Prim = {
     self.program.as_primatives(ty)
 }
 
-fn compile_for_arg(self: *EmitBc, result: *FnBody, arg: *FatExpr, arity: usize) Res(bool) = {
+fn compile_for_arg(self: *EmitBc, arg: *FatExpr, arity: usize) Res(bool) = {
     info := self.program.get_info(arg.ty);
     // If the whole thing is passed in registers, cool, we're done.
     if !info.pass_by_ref {
         // arity isn't always the same as info.size_slots because of two slot structs like slices. 
-        @try(self.compile_expr(result, arg, .PushStack, false)) return; // TODO: tail if its for a ret of the main function?
+        @try(self.compile_expr(arg, .PushStack, false)) return; // TODO: tail if its for a ret of the main function?
         return(Ok = false);
     };
 
     if arity == 1 {
-        id := result.add_var(self, arg.ty);
-        self.addr_var(result, id);
-        @try(self.compile_expr(result, arg, .ResAddr, false)) return;
-        self.addr_var(result, id);
+        id := self.add_var(arg.ty);
+        self.addr_var(id);
+        @try(self.compile_expr(arg, .ResAddr, false)) return;
+        self.addr_var(id);
         return(Ok = true);
     };
     
@@ -368,7 +370,7 @@ fn compile_for_arg(self: *EmitBc, result: *FnBody, arg: *FatExpr, arity: usize) 
         info := self.program.get_info(ty);
         if !info.pass_by_ref {
             _pushed += info.size_slots.zext();
-            @try(self.compile_expr(result, val, .PushStack, false)) return;
+            @try(self.compile_expr(val, .PushStack, false)) return;
             continue();
         };
         
@@ -377,15 +379,15 @@ fn compile_for_arg(self: *EmitBc, result: *FnBody, arg: *FatExpr, arity: usize) 
                 _pushed += 1;
                 // TODO: this is probably unsound.
                 //       we're assuming that we can defer the load to be done by the callee but that might not be true.
-                @try(self.compile_expr(result, arg[], .PushStack, false)) return;
+                @try(self.compile_expr(arg[], .PushStack, false)) return;
                 continue();
             }
             // TODO: factor out aot handling from main value handling so can use here too. -- Jun 3
             fn Value(f) => {
-                if result.when == .Jit && !ALWAYS_BAKE_CONSTANTS {
+                if self.result.when == .Jit && !ALWAYS_BAKE_CONSTANTS {
                     // TODO: this gets super bad if the callee isn't properly copying it because they'll be nmodifying something we think is constant
                     _pushed += 1;
-                    result.push(PushConstant = (
+                    self.push(PushConstant = (
                         value = f.bytes&.jit_addr(),  // Note: we know it's pass_by_ref so its large and not stored inline. 
                         ty = .P64,
                     ));
@@ -397,24 +399,24 @@ fn compile_for_arg(self: *EmitBc, result: *FnBody, arg: *FatExpr, arity: usize) 
         };
 
         _pushed += 1;
-        id := result.add_var(self, ty);
-        self.addr_var(result, id);
+        id := self.add_var(ty);
+        self.addr_var(id);
         self.result_addr_depth += 1;
-        @try(self.compile_expr(result, val, .ResAddr, false)) return;
+        @try(self.compile_expr(val, .ResAddr, false)) return;
         self.result_addr_depth -= 1;
-        self.addr_var(result, id);  // now we want to pass that pointer to the call, so leave it on the stack.
+        self.addr_var(id);  // now we want to pass that pointer to the call, so leave it on the stack.
     };
     (Ok = true)
 }
 
-fn store_pre(self: *EmitBc, result: *FnBody, ty: Type) void = {
-    if(ty.is_never(), => result.push(.Unreachable));
+fn store_pre(self: *EmitBc, ty: Type) void = {
+    if(ty.is_never(), => self.push(.Unreachable));
     slots := self.program.slot_count(ty);
     @switch(slots) {
         @case(0) => ();
         @case(1) => {
             ty := self.program.prim(ty).unwrap();
-            result.push(StorePre = ty);
+            self.push(StorePre = ty);
         };
         @case(2) => {
             types := self.program.flat_tuple_types(ty);
@@ -422,23 +424,23 @@ fn store_pre(self: *EmitBc, result: *FnBody, ty: Type) void = {
                 self.program.get_info(types[0]).stride_bytes().zext(),
                 self.program.get_info(types[1]).align_bytes().zext(),
             );
-            result.push(PeekDup = 2); // grab the pointer
-            result.inc_ptr_bytes(offset_2.trunc());
-            result.push(StorePost = self.program.prim(types[1]).unwrap());
-            result.push(StorePre = self.program.prim(types[0]).unwrap());
+            self.push(PeekDup = 2); // grab the pointer
+            self.inc_ptr_bytes(offset_2.trunc());
+            self.push(StorePost = self.program.prim(types[1]).unwrap());
+            self.push(StorePre = self.program.prim(types[0]).unwrap());
         };
         @default => panic("ICE: Tried to store big value.");
     }
 }
 
-fn load(self: *EmitBc, result: *FnBody, ty: Type) void = {
-    if(ty.is_never(), => result.push(.Unreachable));
+fn load(self: *EmitBc, ty: Type) void = {
+    if(ty.is_never(), => self.push(.Unreachable));
     slots := self.program.slot_count(ty);
     @switch(slots) {
         @case(0) => ();
         @case(1) => {
             ty := self.program.prim(ty).unwrap();
-            result.push(Load = ty);
+            self.push(Load = ty);
         };
         @case(2) => {
             types := self.program.flat_tuple_types(ty);
@@ -446,18 +448,18 @@ fn load(self: *EmitBc, result: *FnBody, ty: Type) void = {
                 self.program.get_info(types[0]).stride_bytes().zext(),
                 self.program.get_info(types[1]).align_bytes().zext(),
             );
-            result.push(PeekDup = 0);
-            result.push(Load = self.program.prim(types[0]).unwrap());
-            result.push(PeekDup = 1);
-            result.inc_ptr_bytes(offset_2.trunc());
-            result.push(Load = self.program.prim(types[1]).unwrap());
-            result.push(Snipe = 2);
+            self.push(PeekDup = 0);
+            self.push(Load = self.program.prim(types[0]).unwrap());
+            self.push(PeekDup = 1);
+            self.inc_ptr_bytes(offset_2.trunc());
+            self.push(Load = self.program.prim(types[1]).unwrap());
+            self.push(Snipe = 2);
         };
         @default => panic("ICE: Tried to load big value.");
     }
 }
 
-fn emit_body(self: *EmitBc, result: *FnBody, f: FuncId) PRes #once = {
+fn emit_body(self: *EmitBc, f: FuncId) PRes #once = {
     func := self.program[f]&;
 
     body: *FatExpr = @match(func.body&) {
@@ -465,11 +467,11 @@ fn emit_body(self: *EmitBc, result: *FnBody, f: FuncId) PRes #once = {
         fn Intrinsic(op) => {
             // Direct calls will be inlined in emit_bc but someone might be trying to call through a function pointer. 
             // TODO: don't add to callees for direct calls. -- Jul 24
-            entry_block := result.push_block(result.signeture.args);
-            result.push(Intrinsic = op[]);
-            @debug_assert(result.signeture.ret2.is_none(), "So far all intrinsics return one thing.");
-            result.push(Ret1 = result.signeture.ret1.unwrap());
-            result.hash = 0;
+            entry_block := self.push_block(self.result.signeture.args);
+            self.push(Intrinsic = op[]);
+            @debug_assert(self.result.signeture.ret2.is_none(), "So far all intrinsics return one thing.");
+            self.push(Ret1 = self.result.signeture.ret1.unwrap());
+            self.result.hash = 0;
             return(.Ok)
         }
         // You should never actually try to run this code, the caller should have just done the call,
@@ -478,39 +480,38 @@ fn emit_body(self: *EmitBc, result: *FnBody, f: FuncId) PRes #once = {
         @default => return(.Ok);
     };
 
-    entry_block := result.push_block(empty());
-    entry_block_sig := @try(self.bind_args(result, func.arg&)) return;
-    result[entry_block].arg_prims = entry_block_sig;
+    entry_block := self.push_block(empty());
+    entry_block_sig := @try(self.bind_args(func.arg&)) return;
+    self.result[entry_block].arg_prims = entry_block_sig;
     ::if(ResultLoc); ::if([]Prim);
     // We represent the indirect return argument as the left-most thing on the stack,
     // so after popping all the args, its at the top and we can emit the thing normally.
-    result_location: ResultLoc = if(result.signeture.first_arg_is_indirect_return, => .ResAddr, => .PushStack);
+    result_location: ResultLoc = if(self.result.signeture.first_arg_is_indirect_return, => .ResAddr, => .PushStack);
     // Note: this is different from the body expr type because of early returns.
     ret := self.program[f].finished_ret.unwrap();
-    prims: []Prim = if(result.signeture.first_arg_is_indirect_return, => empty(), => self.get_primatives(ret));
-    return_block := result.push_block(prims);  // TODO: this is dumb. the body expression will never jump here (even with early returns as they only go to Blocks). 
+    prims: []Prim = if(self.result.signeture.first_arg_is_indirect_return, => empty(), => self.get_primatives(ret));
+    return_block := self.push_block(prims);  // TODO: this is dumb. the body expression will never jump here (even with early returns as they only go to Blocks). 
 
-    result.current_block = entry_block;
+   self.current_block = entry_block;
 
-    if result.signeture.first_arg_is_indirect_return {|  
+    if self.result.signeture.first_arg_is_indirect_return {|  
         self.result_addr_depth += 1;
     };
 
     // TODO: indirect return tail
     @try(self.compile_expr(
-        result,
         body,
         result_location,
-        !result.signeture.first_arg_is_indirect_return,
+        !self.result.signeture.first_arg_is_indirect_return,
     )) return;
     
-    if result.signeture.first_arg_is_indirect_return {
+    if self.result.signeture.first_arg_is_indirect_return {
         self.result_addr_depth -= 1;
     };
 
     // TODO: we never actually use the return_block created here!
-    assert(result[return_block].incoming_jumps == 0, "sure hope you did that on purpose");
-    result.push_to(return_block, .NoCompile);
+    assert(self.result[return_block].incoming_jumps == 0, "sure hope you did that on purpose");
+    self.push_to(return_block, .NoCompile);
 
     self.locals&.pop().expect("outer scope to exist");
     assert(self.locals.is_empty(), "ICE: bc leaked scopes");
@@ -520,26 +521,26 @@ fn emit_body(self: *EmitBc, result: *FnBody, f: FuncId) PRes #once = {
         op: Bc = @switch(slots) {
             @case(1) => {
                 a := self.program.prim(ret).expect("return prim");
-                //debug_assert_eq!(BigOption::Some(a), result.signeture.ret1); // TODO: debug_assert. derive eq
+                //debug_assert_eq!(BigOption::Some(a), self.result.signeture.ret1); // TODO: debug_assert. derive eq
                 (Ret1 = a)
             };
             @case(2) => {
                 a, b := @try(self.program.prim_pair(ret)) return;
-                //debug_assert_eq!(BigOption::Some(a), result.signeture.ret1); // TODO: debug_assert. derive eq
-                //debug_assert_eq!(BigOption::Some(b), result.signeture.ret2);
+                //debug_assert_eq!(BigOption::Some(a), self.result.signeture.ret1); // TODO: debug_assert. derive eq
+                //debug_assert_eq!(BigOption::Some(b), self.result.signeture.ret2);
                 (Ret2 = (a, b))
             };
             @default => .Ret0; // void or indirect return
         };
 
-        result.push(op);
+        self.push(op);
     } else {
-        result.push(.Unreachable);
+        self.push(.Unreachable);
     };
     
-    if result.want_log {
+    if self.want_log {
         out: List(u8) = list(temp());
-        self.program.log_bc(func, result, out&);
+        self.program.log_bc(func, self.result, out&);
         println(out.items());
     };
     .Ok
@@ -562,7 +563,6 @@ fn log_bc(self: *SelfHosted, func: *Func, result: *FnBody, out: *List(u8)) void 
 
 fn emit_runtime_call(
     self: *EmitBc,
-    result: *FnBody,
     f_ty: FnType,
     cc: CallConv,
     arg_expr: *FatExpr,
@@ -574,8 +574,8 @@ fn emit_runtime_call(
 
     :: if(?u16);
     result_var: ?u16 = if sig.first_arg_is_indirect_return && result_location != .ResAddr {
-        id := result.add_var(self, f_ty.ret);
-        self.addr_var(result, id);
+        id := self.add_var(f_ty.ret);
+        self.addr_var(id);
         // TODO: :result_addr_depth?
         (Some = id)
     } else {
@@ -583,10 +583,10 @@ fn emit_runtime_call(
     };
 
     if cc == .CCallRegCt {
-        result.push(.GetCompCtx);
+        self.push(.GetCompCtx);
     };
     
-    any_by_ref := @try(self.compile_for_arg(result, arg_expr, f_ty.arity.zext())) return;
+    any_by_ref := @try(self.compile_for_arg(arg_expr, f_ty.arity.zext())) return;
     // if any args are pointers, they might be to the stack and then you probably can't tail call.
     // TODO: can do better than this without getting too fancy, function pointers are fine, and anything in constant data is fine (we know if the arg is a Values).
     // TODO: !tail to force it when you know its fine.
@@ -600,23 +600,23 @@ fn emit_runtime_call(
             fn PushStack() => {
                 if sig.first_arg_is_indirect_return {
                     if result_var { id |
-                        self.addr_var(result, id);
+                        self.addr_var(id);
                     };
-                    self.load(result, f_ty.ret);
+                    self.load(f_ty.ret);
                 }
             }
-            fn ResAddr() => if(!sig.first_arg_is_indirect_return, => self.store_pre(result, f_ty.ret));
-            fn Discard() => if(!sig.first_arg_is_indirect_return, => result.pop(slots));
+            fn ResAddr() => if(!sig.first_arg_is_indirect_return, => self.store_pre(f_ty.ret));
+            fn Discard() => if(!sig.first_arg_is_indirect_return, => self.pop(slots));
         };
     } else {
         if result_location == .ResAddr {
             // pop dest!
-            result.pop(1);
+            self.pop(1);
         };
     };
 
     if f_ty.ret.is_never() {
-        result.push(.Unreachable);
+        self.push(.Unreachable);
     };
     
     // :sema_regression this shouldn't need the hint
@@ -628,35 +628,35 @@ fn unwrap_ty(self: *Binding) Type = {
     self.ty.Finished
 }
 
-fn mark_variable(self: *EmitBc, result: *FnBody, name: Var, id: u16) void = {
-    if result.want_log.or(self.program.get_build_options()[].debug_info) {
-        while => result.var_names.len <= id.zext() {
-            result.var_names&.push(.None, self.program.get_alloc());
+fn mark_variable(self: *EmitBc, name: Var, id: u16) void = {
+    if self.want_log.or(self.program.get_build_options()[].debug_info) {
+        while => self.result.var_names.len <= id.zext() {
+            self.result.var_names&.push(Flag.UN_NAMED.ident(), self.program.get_alloc());
         };
-        result.var_names[id.zext()] = (Some = name);
+        self.result.var_names[id.zext()] = name.name;
     };
 }
 
-fn compile_stmt(self: *EmitBc, result: *FnBody, stmt: *FatStmt) PRes = {
+fn compile_stmt(self: *EmitBc, stmt: *FatStmt) PRes = {
     self.last_loc = stmt.loc;
     @match(stmt.stmt&) {
-        fn Eval(expr) void => return(self.compile_expr(result, expr, .Discard, false));
+        fn Eval(expr) void => return(self.compile_expr(expr, .Discard, false));
         fn DeclVar(f) void => {
             @assert_ne(f.name.kind, VarType.Const);
             assert(f.ty&.is(.Finished), "type not ready");
             ty := f.ty.Finished;
-            id := result.add_var(self, ty);
-            self.mark_variable(result, f.name, id);
-            self.addr_var(result, id);
+            id := self.add_var(ty);
+            self.mark_variable(f.name, id);
+            self.addr_var(id);
             self.result_addr_depth += 1;
-            @try(self.compile_expr(result, f.value&, .ResAddr, false)) return;
+            @try(self.compile_expr(f.value&, .ResAddr, false)) return;
             self.result_addr_depth -= 1;
-            if(ty.is_never(), => result.push(.Unreachable));
+            if(ty.is_never(), => self.push(.Unreachable));
             prev := self.var_lookup&.insert(f.name, id);
             self.locals.last().unwrap().push(id);
             @assert(prev.is_none(), "shadow is still new var");
         }
-        fn Set(f) void => return(self.set_deref(result, f.place&, f.value&));
+        fn Set(f) void => return(self.set_deref(f.place&, f.value&));
         fn DeclVarPattern(f) void => {
             // TODO: test for evaluation order
             @if_let(f.value.expr&) fn Tuple(parts) => {
@@ -664,22 +664,22 @@ fn compile_stmt(self: *EmitBc, result: *FnBody, stmt: *FatStmt) PRes = {
                 enumerate parts { i, value |
                     b := f.binding.bindings[i]&; // TODO: zip
                     @assert_ne(b.kind, .Const);
-                    @try(self.do_binding(result, b.var(), b.unwrap_ty(), value)) return;
+                    @try(self.do_binding(b.var(), b.unwrap_ty(), value)) return;
                 };
                 return(.Ok);
             };
             
             if 1 == f.binding.bindings.len() {
                 b := f.binding.bindings[0]&;
-                return(self.do_binding(result, b.var(), b.unwrap_ty(), f.value&));
+                return(self.do_binding(b.var(), b.unwrap_ty(), f.value&));
             };
             
             // It's a destructuring (not inlined args)
             // We store the whole value in a stack slot and then save pointers into different offsets of it as thier own variables.
-            full_id := result.add_var(self, f.value.ty);
-            self.addr_var(result, full_id);
+            full_id := self.add_var(f.value.ty);
+            self.addr_var(full_id);
             self.result_addr_depth += 1;
-            @try(self.compile_expr(result, f.value&, .ResAddr, false)) return;
+            @try(self.compile_expr(f.value&, .ResAddr, false)) return;
             self.result_addr_depth -= 1;
             info := self.program.get_type(f.value.ty);
             @err_assert(info.is(.Struct), "destructure must be tuple") return;
@@ -691,12 +691,12 @@ fn compile_stmt(self: *EmitBc, result: *FnBody, stmt: *FatStmt) PRes = {
                 @err_assert(f.kind != .Const, "TODO: destructuring skip const fields") return;
                 
                 name := b.var().unwrap();
-                self.addr_var(result, full_id);
-                result.inc_ptr_bytes(f.byte_offset.trunc());
-                id := self.save_ssa_var(result);
-                self.mark_variable(result, name, id);
+                self.addr_var(full_id);
+                self.inc_ptr_bytes(f.byte_offset.trunc());
+                id := self.save_ssa_var();
+                self.mark_variable(name, id);
                 // TODO: a test that fails if you typo put this line here. -- Jul 4 (see devlog.md)
-                // self.addr_var(result, id);
+                // self.addr_var(id);
                 self.locals.last().unwrap().push(id);
                 prev := self.var_lookup&.insert(name, id);
                 @assert(prev.is_none(), "overwrite arg? %", name&.log(self.program));
@@ -710,15 +710,15 @@ fn compile_stmt(self: *EmitBc, result: *FnBody, stmt: *FatStmt) PRes = {
     .Ok
 }
 
-fn do_binding(self: *EmitBc, result: *FnBody, name: ?Var, ty: Type, value: *FatExpr) PRes = {
-    id := result.add_var(self, ty);
-    self.addr_var(result, id);
+fn do_binding(self: *EmitBc, name: ?Var, ty: Type, value: *FatExpr) PRes = {
+    id := self.add_var(ty);
+    self.addr_var(id);
     self.result_addr_depth += 1;
-    @try(self.compile_expr(result, value, .ResAddr, false)) return;
+    @try(self.compile_expr(value, .ResAddr, false)) return;
     self.result_addr_depth -= 1;
     self.locals.last().unwrap().push(id);
     if name { name |
-        self.mark_variable(result, name, id);
+        self.mark_variable(name, id);
         prev := self.var_lookup&.insert(name, id);
         @assert(prev.is_none(), "overwrite arg? %", name&.log(self.program));
     };
@@ -729,7 +729,7 @@ fn do_binding(self: *EmitBc, result: *FnBody, name: ?Var, ty: Type, value: *FatE
 // but this operation is subtble enough that making control flow more indirect would probably make it more confusing. 
 //
 // If result_location == .ResAddr, the top of the stack on entry to this function has the pointer where the result should be stored.
-fn compile_expr(self: *EmitBc, result: *FnBody, expr: *FatExpr, result_location: ResultLoc, can_tail: bool) PRes = {
+fn compile_expr(self: *EmitBc, expr: *FatExpr, result_location: ResultLoc, can_tail: bool) PRes = {
     @debug_assert(!expr.ty.is_unknown(), "Not typechecked: %. done: %", expr.log(self.program), {
         self.program.codemap.show_error_line(expr.loc);
         expr.done
@@ -741,14 +741,14 @@ fn compile_expr(self: *EmitBc, result: *FnBody, expr: *FatExpr, result_location:
 
     expr_ty := expr.ty;
     @match(expr.expr&) {
-        fn Cast(v)  => return(self.compile_expr(result, v[], result_location, can_tail));
-        fn Call(f)  => return(self.emit_call(result, f.f, f.arg, result_location, can_tail));
-        fn Block(f) => return(self.emit_block_expr(result, expr, result_location, can_tail));
-        fn Value(f) => return(self.emit_value(result, f.bytes&, result_location, expr.ty));
-        fn If(_)      => return(self.emit_call_if(result, expr, result_location, can_tail));
-        fn Loop(arg)  => return(self.emit_call_loop(result, arg[]));
-        fn Addr(arg)  => return(self.addr_macro(result, arg[], result_location));
-        fn StructLiteralP(pattern) => return(self.construct_struct(result, pattern, expr.ty, result_location));
+        fn Cast(v)  => return(self.compile_expr(v[], result_location, can_tail));
+        fn Call(f)  => return(self.emit_call(f.f, f.arg, result_location, can_tail));
+        fn Block(f) => return(self.emit_block_expr(expr, result_location, can_tail));
+        fn Value(f) => return(self.emit_value(f.bytes&, result_location, expr.ty));
+        fn If(_)      => return(self.emit_call_if(expr, result_location, can_tail));
+        fn Loop(arg)  => return(self.emit_call_loop(arg[]));
+        fn Addr(arg)  => return(self.addr_macro(arg[], result_location));
+        fn StructLiteralP(pattern) => return(self.construct_struct(pattern, expr.ty, result_location));
         fn Slice(arg) => {
             container_ty := arg.ty;
             // Note: number of elements, not size of the whole array value.
@@ -760,73 +760,73 @@ fn compile_expr(self: *EmitBc, result: *FnBody, expr: *FatExpr, result_location:
                 @default => (arg.ty, 1);
             };
 
-            id := result.add_var(self, container_ty);
-            self.addr_var(result, id);
+            id := self.add_var(container_ty);
+            self.addr_var(id);
             self.result_addr_depth += 1;
-            @try(self.compile_expr(result, arg[], .ResAddr, false)) return;
+            @try(self.compile_expr(arg[], .ResAddr, false)) return;
             self.result_addr_depth -= 1;
 
-            self.addr_var(result, id);
-            result.push(PushConstant = (
+            self.addr_var(id);
+            self.push(PushConstant = (
                 value = count,
                 ty = .I64,
             ));
             @match(result_location) {
                 fn PushStack() => ();
                 fn ResAddr() => {
-                    result.push(PeekDup = 2);
-                    result.inc_ptr_bytes(8); // Note: backwards!
-                    result.push(StorePost = .I64);
-                    result.push(PeekDup = 1);
-                    result.push(StorePost = .P64);
-                    result.pop(1);
+                    self.push(PeekDup = 2);
+                    self.inc_ptr_bytes(8); // Note: backwards!
+                    self.push(StorePost = .I64);
+                    self.push(PeekDup = 1);
+                    self.push(StorePost = .P64);
+                    self.pop(1);
                 }
-                fn Discard() => result.pop(2);
+                fn Discard() => self.pop(2);
             };
             ::?*List(u16);
             self.locals.last().unwrap().push(id);
             return(.Ok)
         };
         fn Deref(arg) => {
-            @try(self.compile_expr(result, arg[], .PushStack, false)) return; // get the pointer
+            @try(self.compile_expr(arg[], .PushStack, false)) return; // get the pointer
             slots := self.slot_count(expr_ty);
             // we care about the type of the pointer, not the value because there might be a cast. (// TODO: that shouldn't be true anymore because of ::Cast)
             value_type := self.program.unptr_ty(arg.ty).unwrap();
             if slots == 0 {
                 @match(result_location) {
-                    fn ResAddr() => result.pop(2); // pop dest too!
-                    @default     => result.push(Snipe = 0);
+                    fn ResAddr() => self.pop(2); // pop dest too!
+                    @default     => self.push(Snipe = 0);
                 };
             } else {
                 @match(result_location) {
-                    fn PushStack() => self.load(result, value_type);
+                    fn PushStack() => self.load(value_type);
                     fn ResAddr() => {
                         info := self.program.get_info(expr_ty);
 
                         if info.size_slots == 1 {
                             ty := self.program.prim(value_type).unwrap();
-                            result.push(Load = ty);
-                            result.push(StorePre = ty);
+                            self.push(Load = ty);
+                            self.push(StorePre = ty);
                         } else {| // TODO: else if
                             if info.size_slots == 2 && info.stride_bytes == 16 && info.align_bytes == 8 {
-                                result.push(PeekDup = 1);
-                                result.inc_ptr_bytes(8);
-                                result.push(PeekDup = 1);
-                                result.inc_ptr_bytes(8);
-                                result.push(Load = .I64);
-                                result.push(StorePre = .I64);
-                                result.push(Load = .I64);
-                                result.push(StorePre = .I64);
+                                self.push(PeekDup = 1);
+                                self.inc_ptr_bytes(8);
+                                self.push(PeekDup = 1);
+                                self.inc_ptr_bytes(8);
+                                self.push(Load = .I64);
+                                self.push(StorePre = .I64);
+                                self.push(Load = .I64);
+                                self.push(StorePre = .I64);
                             } else {
                                 bytes := info.stride_bytes;
-                                result.push(CopyBytesToFrom = bytes);
+                                self.push(CopyBytesToFrom = bytes);
                             };
                         };
                     }
-                    fn Discard() => result.push(Snipe = 0);
+                    fn Discard() => self.push(Snipe = 0);
                 };
             };
-            if(expr_ty.is_never(), => result.push(.Unreachable));
+            if(expr_ty.is_never(), => self.push(.Unreachable));
             return(.Ok)
         };
         fn FnPtr(arg) => {
@@ -836,11 +836,11 @@ fn compile_expr(self: *EmitBc, result: *FnBody, expr: *FatExpr, result_location:
             // For jit, the redirects go in the dispatch table so it doesn't matter,
             // but for emitting c, you need to get the real name.
             f = self.program.follow_redirects(f);
-            result.push(GetNativeFnPtr = f);
+            self.push(GetNativeFnPtr = f);
             @match(result_location) {
                 fn PushStack() => ();
-                fn ResAddr()   => result.push(StorePre = .P64);
-                fn Discard()   => result.push(Snipe = 0);
+                fn ResAddr()   => self.push(StorePre = .P64);
+                fn Discard()   => self.push(Snipe = 0);
             };
             return(.Ok)
         };
@@ -851,23 +851,23 @@ fn compile_expr(self: *EmitBc, result: *FnBody, expr: *FatExpr, result_location:
             @match(result_location) {
                 fn PushStack() => {
                     // for ty in self.program.flat_tuple_types(expr.ty) {
-                    //     result.push(Bc::PushConstant {
+                    //     self.push(Bc::PushConstant {
                     //         value: 0,
                     //         ty: self.program.prim(ty).unwrap(),
                     //     });
                     // }
                     slots := self.slot_count(expr_ty);
                     range(0, slots.zext()) { _ |
-                        result.push(PushConstant = (value = 0, ty = .I64));
+                        self.push(PushConstant = (value = 0, ty = .I64));
                         // TODO: wrong prim!
                     };
                 }
                 fn ResAddr() => {
                     opts := self.program.get_build_options();
                     if opts.zero_init_memory {
-                        self.zero_memory_at_top_of_stack(result, expr_ty);
+                        self.zero_memory_at_top_of_stack(expr_ty);
                     } else {
-                        result.push(Snipe = 0); // just pop the res ptr
+                        self.push(Snipe = 0); // just pop the res ptr
                     };
                 }  
                 fn Discard() => ();
@@ -887,11 +887,11 @@ fn compile_expr(self: *EmitBc, result: *FnBody, expr: *FatExpr, result_location:
                         f := f.fields[i]&;
                         value := values[i]&;
                         if result_location == .ResAddr {
-                            result.push(PeekDup = 0);
-                            result.inc_ptr_bytes(f.byte_offset.trunc());
+                            self.push(PeekDup = 0);
+                            self.inc_ptr_bytes(f.byte_offset.trunc());
                             self.result_addr_depth += 1;
                         };
-                        @try(self.compile_expr(result, value, result_location, false)) return;
+                        @try(self.compile_expr(value, result_location, false)) return;
                         if result_location == .ResAddr {
                             self.result_addr_depth -= 1;
                         };
@@ -902,11 +902,11 @@ fn compile_expr(self: *EmitBc, result: *FnBody, expr: *FatExpr, result_location:
                     element_size := self.program.get_info(f.inner).stride_bytes();
                     each values { value |
                         if result_location == .ResAddr {
-                            result.inc_ptr_bytes(element_size);
-                            result.push(PeekDup = 0);
+                            self.inc_ptr_bytes(element_size);
+                            self.push(PeekDup = 0);
                             self.result_addr_depth += 1;
                         };
-                        @try(self.compile_expr(result, value, result_location, false)) return;
+                        @try(self.compile_expr(value, result_location, false)) return;
                         if result_location == .ResAddr {
                             self.result_addr_depth -= 1;
                         };
@@ -916,29 +916,29 @@ fn compile_expr(self: *EmitBc, result: *FnBody, expr: *FatExpr, result_location:
                     return(@err("Expr::Tuple should have struct type not %. (0/1 element tuple maybe?)", self.program.log_type(raw)));
                 };
             };
-            if(result_location == .ResAddr, => { result.pop(1); });
+            if(result_location == .ResAddr, => { self.pop(1); });
             return(.Ok)
         }
         fn PtrOffset(f) => {
             // TODO: compiler has to emit tagchecks for enums now!!
-            @try(self.compile_expr(result, f.ptr, .PushStack, false)) return;
-            result.inc_ptr_bytes(f.bytes.trunc());
+            @try(self.compile_expr(f.ptr, .PushStack, false)) return;
+            self.inc_ptr_bytes(f.bytes.trunc());
             @match(result_location) {
                 fn PushStack() => ();
-                fn ResAddr() => result.push(StorePre = .P64);
-                fn Discard() => result.push(Snipe = 0);
+                fn ResAddr() => self.push(StorePre = .P64);
+                fn Discard() => self.push(Snipe = 0);
             };
             return(.Ok)
         }
         fn Switch(f) => {
-            return(self.emit_switch(result, expr, result_location, can_tail))
+            return(self.emit_switch(expr, result_location, can_tail))
         }
         @default => @panic("ICE: didn't desugar: %", expr.log(self.program));
     }
 }
 
 // consumes the pointer at the top of the stack.
-fn zero_memory_at_top_of_stack(self: *EmitBc, result: *FnBody, expr_ty: Type) void = {
+fn zero_memory_at_top_of_stack(self: *EmitBc, expr_ty: Type) void = {
     info := self.program.get_info(expr_ty);
     align := info.align_bytes.min(8);
     chunks := info.stride_bytes / align;
@@ -950,12 +950,12 @@ fn zero_memory_at_top_of_stack(self: *EmitBc, result: *FnBody, expr_ty: Type) vo
         @default => panic("ICE: strange alignment");
     };
     range(0, chunks.zext()) { _ | 
-        result.push(PeekDup = 0); 
-        result.push(PushConstant = (value = 0, ty = prim));
-        result.push(StorePre = prim);
-        result.inc_ptr_bytes(align);
+        self.push(PeekDup = 0); 
+        self.push(PushConstant = (value = 0, ty = prim));
+        self.push(StorePre = prim);
+        self.inc_ptr_bytes(align);
     }; 
-    result.push(Snipe = 0); 
+    self.push(Snipe = 0); 
 }
 
 //// TODO: this would be prettier as tail calls. 
@@ -995,7 +995,7 @@ fn follow_redirects(program: *SelfHosted, f_id: FuncId) FuncId = {
     f_id
 }
 
-fn emit_call(self: *EmitBc, result: *FnBody, f: *FatExpr, arg: *FatExpr, result_location: ResultLoc, can_tail: bool) PRes #once = {
+fn emit_call(self: *EmitBc, f: *FatExpr, arg: *FatExpr, result_location: ResultLoc, can_tail: bool) PRes #once = {
     // TODO: not enough bits! super dumb -- Jul 8
     //@assert(!f.ty.is_unknown(), "Not typechecked: %", f.log(self.program));
     //@assert(!arg.ty.is_unknown(), "Not typechecked: %", arg.log(self.program));
@@ -1018,48 +1018,48 @@ fn emit_call(self: *EmitBc, result: *FnBody, f: *FatExpr, arg: *FatExpr, result_
 
             if(func.get_flag(.NoTail), => { can_tail = false; });
             
-            self.emit_runtime_call(result, f_ty, cc, arg, result_location, can_tail) { sig, tail |
-                result.mix_hash(f_id.as_index(), 436265);
+            self.emit_runtime_call(f_ty, cc, arg, result_location, can_tail) { sig, tail |
+                self.result.mix_hash(f_id.as_index(), 436265);
                 if self.program[f_id].body&.is(.Intrinsic) {
                     op := self.program[f_id].body.Intrinsic;
-                    result.push(Intrinsic = op);
+                    self.push(Intrinsic = op);
                     if tail {
                         @debug_assert(sig.ret2.is_none(), "So far all intrinsics return one thing.");
-                        result.push(Ret1 = sig.ret1.unwrap());
+                        self.push(Ret1 = sig.ret1.unwrap());
                     };
                 } else {
                     callee := self.program.index(f_id);
                     // TODO: this didnt used to happen. :sema_regression
                     //if callee.has_tag(.intrinsic) {
-                    //    @println("direct call to (intrinsic) % % from %!", self.program.pool.get(callee.name), f_id.as_index(), self.program.log_name(result.func));
+                    //    @println("direct call to (intrinsic) % % from %!", self.program.pool.get(callee.name), f_id.as_index(), self.program.log_name(self.result.func));
                     //};
                     //if callee.has_tag(.redirect) {
-                    //    @println("direct call to (redirect) % %! %. from %", self.program.pool.get(callee.name), f_id.as_index(), callee.get_flag(.EnsuredCompiled), self.program.log_name(result.func));
+                    //    @println("direct call to (redirect) % %! %. from %", self.program.pool.get(callee.name), f_id.as_index(), callee.get_flag(.EnsuredCompiled), self.program.log_name(self.result.func));
                     //};
-                    caller := self.program.index(result.func);
+                    caller := self.program.index(self.result.func);
                     if !caller.get_flag(.ComptimeOnly) && original_f_id == f_id {
                         // TODO: it would be nice if this was at the beginning and you never tried to emit anything that was comptimeonly
                         //       that requires never adding them to callees and then later realizing you can inline them, which would make sense. -- Aug 29
-                        @debug_assert(!(result.when == .Aot && callee.get_flag(.ComptimeOnly)), "cannot .Aot .ComptimeOnly % %", f_id, callee.log(self.program));
+                        @debug_assert(!(self.result.when == .Aot && callee.get_flag(.ComptimeOnly)), "cannot .Aot .ComptimeOnly % %", f_id, callee.log(self.program));
                     };
-                    result.push(CallDirect = (sig = sig[], f = f_id, tail = tail));
+                    self.push(CallDirect = (sig = sig[], f = f_id, tail = tail));
                 };
             }
         }
         fn FnPtr(f_ty) => {
-            @try(self.compile_expr(result, f, .PushStack, false)) return;
+            @try(self.compile_expr(f, .PushStack, false)) return;
             will_use_indirect_ret := self.program.slot_count(f_ty.ty.ret) > 2; // TODO: get this from sig
             if result_location == .ResAddr && will_use_indirect_ret {
                 // grab the result pointer to the top of the stack so the layout matches a normal call.
                 // however, if the function wants to push stack but we want it to a resaddr, we don't do this here because emit_runtime_call handles it which is kinda HACK.
-                result.push(PeekDup = 1);
+                self.push(PeekDup = 1);
             };
             // TODO: allow tail calling through pointer depending on the calling convention 
-            @try(self.emit_runtime_call(result, f_ty.ty, f_ty.cc, arg, result_location, can_tail) { sig, _tail |
-                result.push(CallFnPtr = (sig = sig[]));
+            @try(self.emit_runtime_call(f_ty.ty, f_ty.cc, arg, result_location, can_tail) { sig, _tail |
+                self.push(CallFnPtr = (sig = sig[]));
             }) return;
             if result_location == .ResAddr && will_use_indirect_ret {
-                result.push(Snipe = 0); // original ret ptr
+                self.push(Snipe = 0); // original ret ptr
             };
             .Ok
         }
@@ -1079,39 +1079,39 @@ fn emit_call(self: *EmitBc, result: *FnBody, f: *FatExpr, arg: *FatExpr, result_
             // this would make sense if we were checking result_location, but we're not
             x := (ret.result_loc == .ResAddr); // (result_location.eq(.ResAddr)).or
             if x {
-                result.pop(1); 
+                self.pop(1); 
             };
             // I feel this should be good enough without the above, but no.
             // Since we might have nested expressions that push result pointers, you not only have to re-push ours,
             // you also need to pop off anything in between that the target block isn't expecting. 
             // ie. its important that each entry to a block has the same stack height. 
             diff := self.result_addr_depth - ret.result_addr_depth;
-            result.pop(diff.trunc()); 
+            self.pop(diff.trunc()); 
             
             slots: u16 = @match(ret.result_loc) {
                 fn PushStack() => self.slot_count(ret_ty[]);
                 fn ResAddr() => {
                     id := ret.res_ssa_id.unwrap();
-                    result.push(LoadSsa = (id = id));
+                    self.push(LoadSsa = (id = id));
                     self.result_addr_depth += 1;
                     0
                 }
                 fn Discard() => 0;
             };
             // TODO: sometimes can_tail, if you're returning the main function
-            @try(self.compile_expr(result, arg, ret.result_loc, false)) return;
+            @try(self.compile_expr(arg, ret.result_loc, false)) return;
             if ret.result_loc == .ResAddr {
                 self.result_addr_depth -= 1;
             };
-            result.push(Goto = (ip = ret.block, slots = slots));
-            result[ret.block].incoming_jumps += 1;
+            self.push(Goto = (ip = ret.block, slots = slots));
+            self.result[ret.block].incoming_jumps += 1;
             .Ok
         }
         @default => @panic("ICE: non callable: %", f.log(self.program));
     }
 }
 
-fn emit_block_expr(self: *EmitBc, result: *FnBody, expr: *FatExpr, result_location: ResultLoc, can_tail: bool) PRes #once = {
+fn emit_block_expr(self: *EmitBc, expr: *FatExpr, result_location: ResultLoc, can_tail: bool) PRes #once = {
     block := expr.expr.Block&;
     body := block.body&;
     value := block.result;
@@ -1126,11 +1126,11 @@ fn emit_block_expr(self: *EmitBc, result: *FnBody, expr: *FatExpr, result_locati
 
     // TODO: this shouldn't need type hint. 
     if ret_label { (ret_var: LabelId) | 
-        entry_block := result.current_block;
+        entry_block := self.current_block;
         return_block := @match(result_location) {
-            fn PushStack() => result.push_block(self.get_primatives(block_ty));
-            fn ResAddr()   => result.push_block_empty();
-            fn Discard()   => result.push_block_empty();
+            fn PushStack() => self.push_block(self.get_primatives(block_ty));
+            fn ResAddr()   => self.push_block_empty();
+            fn Discard()   => self.push_block_empty();
         };
         ret: ReturnAddr = (
             block = return_block,
@@ -1140,12 +1140,12 @@ fn emit_block_expr(self: *EmitBc, result: *FnBody, expr: *FatExpr, result_locati
             used = false,
             result_addr_depth = self.result_addr_depth,
         );
-        result.current_block = entry_block;
+        self.current_block = entry_block;
         if result_location == .ResAddr {
-            result.push(PeekDup = 0);
-            id := self.save_ssa_var(result);
+            self.push(PeekDup = 0);
+            id := self.save_ssa_var();
             ret.res_ssa_id = (Some = id);
-            index := result[entry_block].insts.len - 1;
+            index := self.result[entry_block].insts.len - 1;
             ret.store_res_ssa_inst = (Some = (entry_block, index));
         };
 
@@ -1154,53 +1154,53 @@ fn emit_block_expr(self: *EmitBc, result: *FnBody, expr: *FatExpr, result_locati
 
         depth := self.result_addr_depth;
         each body { stmt | 
-            @try(self.compile_stmt(result, stmt)) return;
+            @try(self.compile_stmt(stmt)) return;
             @debug_assert(self.result_addr_depth == depth, "ICE: leak result_addr_depth");
         };
-        @try(self.compile_expr(result, value, result_location, can_tail)) return;
+        @try(self.compile_expr(value, result_location, can_tail)) return;
         @debug_assert(self.result_addr_depth == depth, "ICE: leak result_addr_depth");
 
         ret := self.inlined_return_addr&.remove(ret_var).unwrap();
-        if result[return_block].incoming_jumps > 0 {
+        if self.result[return_block].incoming_jumps > 0 {
             @debug_assert(ret.used, "expected jumps");
-            slots := result[return_block].arg_prims.len;
-            result.push(Goto = (ip = return_block, slots = slots.trunc()));
-            result[return_block].incoming_jumps += 1;
-            result.current_block = return_block;
+            slots := self.result[return_block].arg_prims.len;
+            self.push(Goto = (ip = return_block, slots = slots.trunc()));
+            self.result[return_block].incoming_jumps += 1;
+            self.current_block = return_block;
         } else {
             @debug_assert(!ret.used, "expected no jumps"); 
             if ret.store_res_ssa_inst { f | 
                 block, index := f;
                 // if we didn't use it, don't bother asking the backend to save the register with the result address.
-                result[block].insts[index] = .Nop;
-                result[block].insts[index - 1] = .Nop;
+                self.result[block].insts[index] = .Nop;
+                self.result[block].insts[index - 1] = .Nop;
             };
-            result.push_to(return_block, .NoCompile);
+            self.push_to(return_block, .NoCompile);
         };
     } else {
         // TODO: sometimes the last one can tail, if value is Unit and we're the body of the main function.
         depth := self.result_addr_depth;
         each body { stmt |
-            @try(self.compile_stmt(result, stmt)) return;
+            @try(self.compile_stmt(stmt)) return;
             @debug_assert(self.result_addr_depth == depth, "ICE: leak result_addr_depth");
         };
-        @try(self.compile_expr(result, value, result_location, can_tail)) return;
+        @try(self.compile_expr(value, result_location, can_tail)) return;
         @debug_assert(self.result_addr_depth == depth, "ICE: leak result_addr_depth");
     };
 
     // TODO: check if you try to let an address to a variable escape from its scope.
     slots := self.locals&.pop().expect("block to have scope");
     for slots { id |
-        result.push(LastUse = (id = id ));
+        self.push(LastUse = (id = id ));
     };
     .Ok
 }
 
-fn emit_value(self: *EmitBc, result: *FnBody, value: *Values, result_location: ResultLoc, expr_ty: Type) PRes #once = {
+fn emit_value(self: *EmitBc, value: *Values, result_location: ResultLoc, expr_ty: Type) PRes #once = {
     if(result_location == .Discard, => return(.Ok));
     want_emit_by_memcpy := value.len() > 16;  // dont change this to include small things unless you do something about values being stored inline.
     // TODO: you probably want to allow people to overload bake_relocatable_value even if !contains_pointers, but also there's no point. -- Jun 19
-    if ALWAYS_BAKE_CONSTANTS.or(result.when == .Aot) && want_emit_by_memcpy.or(self.program.get_info(expr_ty).contains_pointers()) {
+    if ALWAYS_BAKE_CONSTANTS.or(self.result.when == .Aot) && want_emit_by_memcpy.or(self.program.get_info(expr_ty).contains_pointers()) {
         if result_location.eq(.PushStack).or(!want_emit_by_memcpy) {
             out := @try(self.program.emit_relocatable_constant_body(value.bytes(), expr_ty, false)) return;
 
@@ -1208,31 +1208,31 @@ fn emit_value(self: *EmitBc, result: *FnBody, value: *Values, result_location: R
                 @match(part) {
                     // TODO: now you can't have non-i64 in top level constant struct -- Jun 18
                     fn Num(f)     => {
-                        result.push(PushConstant = (value = f.value, ty = f.ty));
-                        result.mix_hash(f.value, 123);
+                        self.push(PushConstant = (value = f.value, ty = f.ty));
+                        self.result.mix_hash(f.value, 123);
                     }
                     fn FnPtr(f)   => {
                         f = self.program.follow_redirects(f);
-                        result.push(GetNativeFnPtr = f);
-                        result.mix_hash(f.as_index(), 1237);
+                        self.push(GetNativeFnPtr = f);
+                        self.result.mix_hash(f.as_index(), 1237);
                     }
                     fn AddrOf(id) => {
-                        result.push(PushGlobalAddr = id);
-                        result.mix_hash(id.id.zext(), 9765);
+                        self.push(PushGlobalAddr = id);
+                        self.result.mix_hash(id.id.zext(), 9765);
                     }
                 };
             };
             if result_location == .ResAddr {
-                self.store_pre(result, expr_ty);
+                self.store_pre(expr_ty);
             };
         } else {
             @assert_eq(result_location, .ResAddr);
             id := @try(self.program.emit_relocatable_constant(expr_ty, value)) return;
 
-            result.mix_hash(id.id.zext(), 9765);
-            result.push(PushGlobalAddr = id);
+            self.result.mix_hash(id.id.zext(), 9765);
+            self.push(PushGlobalAddr = id);
             info := self.program.get_info(expr_ty);
-            result.push(CopyBytesToFrom = info.stride_bytes);
+            self.push(CopyBytesToFrom = info.stride_bytes);
         };
         return(.Ok);
     };
@@ -1259,8 +1259,8 @@ fn emit_value(self: *EmitBc, result: *FnBody, value: *Values, result_location: R
             @debug_assert_eq(parts.len(), info.len());
             enumerate parts { i, value | 
                 ty, _ := info[i];
-                result.mix_hash(value[], 1234567);
-                result.push(PushConstant = (value = value[], ty = ty));
+                self.result.mix_hash(value[], 1234567);
+                self.push(PushConstant = (value = value[], ty = ty));
             };
         }
         fn ResAddr() => {
@@ -1269,13 +1269,13 @@ fn emit_value(self: *EmitBc, result: *FnBody, value: *Values, result_location: R
                 // TODO: HACK
                 //       for a constant ast node, you need to load an enum but my deconstruct_values can't handle it.
                 //       this solution is extra bad becuase it relies on the value vec not being free-ed
-                result.push(PushConstant = (
+                self.push(PushConstant = (
                     value = value.jit_addr(),
                     ty = .P64,
                 ));
                 
                 // Note: not the same as value.len!!!!!      // TODO: audit: why not? -- Jul 8
-                result.push(CopyBytesToFrom = self.program.get_info(expr_ty).stride_bytes());
+                self.push(CopyBytesToFrom = self.program.get_info(expr_ty).stride_bytes());
             } else {
                 parts: List(i64) = list(temp());
                 offsets: List(Ty(Prim, u16)) = list(temp());
@@ -1288,13 +1288,13 @@ fn emit_value(self: *EmitBc, result: *FnBody, value: *Values, result_location: R
                 @debug_assert_eq(parts.len(), offsets.len());
                 enumerate parts { i, value | 
                     ty, offset := offsets[i];
-                    result.push(PeekDup = 0);
-                    result.inc_ptr_bytes(offset);
-                    result.push(PushConstant = (value = value[], ty = ty));
-                    result.push(StorePre = ty);
-                    result.mix_hash(value[], 1234567);
+                    self.push(PeekDup = 0);
+                    self.inc_ptr_bytes(offset);
+                    self.push(PushConstant = (value = value[], ty = ty));
+                    self.push(StorePre = ty);
+                    self.result.mix_hash(value[], 1234567);
                 };
-                result.pop(1); // res ptr
+                self.pop(1); // res ptr
             };
         }
         fn Discard() => ();
@@ -1303,7 +1303,7 @@ fn emit_value(self: *EmitBc, result: *FnBody, value: *Values, result_location: R
 }
 
 // :PlaceExpr
-fn addr_macro(self: *EmitBc, result: *FnBody, arg: *FatExpr, result_location: ResultLoc) PRes #once = {
+fn addr_macro(self: *EmitBc, arg: *FatExpr, result_location: ResultLoc) PRes #once = {
     self.last_loc = arg.loc;
     // field accesses should have been desugared.
     @err_assert(arg.expr&.is(.GetVar), "took address of r-value") return;
@@ -1311,82 +1311,82 @@ fn addr_macro(self: *EmitBc, result: *FnBody, arg: *FatExpr, result_location: Re
     // TODO: this shouldn't allow let either but i changed how variable refs work for :SmallTypes
     @assert_ne(var.kind, .Const, "Can only take address of var (not let/const) %", var&.log(self.program));
     id := @unwrap(self.var_lookup&.get(var), "Missing var % (in !addr) \n(missing $ when used in const context or missing '=>'? TODO: better error message)", var&.log(self.program)) return;
-    self.addr_var(result, id);
+    self.addr_var(id);
 
     @match(result_location) {
         fn PushStack() => ();
-        fn ResAddr()   => result.push(StorePre = .P64);
-        fn Discard()   => result.push(Snipe = 0);
+        fn ResAddr()   => self.push(StorePre = .P64);
+        fn Discard()   => self.push(Snipe = 0);
     };
     .Ok
 }
 
 // we never make the temp variable. if the arg is big, caller needs to setup a result location.
-fn emit_call_if(self: *EmitBc, result: *FnBody, arg: *FatExpr, result_location: ResultLoc, can_tail: bool) PRes #once = {
+fn emit_call_if(self: *EmitBc, arg: *FatExpr, result_location: ResultLoc, can_tail: bool) PRes #once = {
     @err_assert(arg.expr&.is(.If), "ICE: expected if") return;
     parts := arg.expr.If;
     
-    @try(self.compile_expr(result, parts.cond, .PushStack, false)) return; // cond
+    @try(self.compile_expr(parts.cond, .PushStack, false)) return; // cond
     if_true, if_false := (parts.if_true, parts.if_false);
  
     out := self.program.get_info(if_true.ty);
     @assert(out.size_slots.lt(4).or(result_location != .PushStack), "ICE: 'if' result too big to go on stack"); // now its the callers problem to deal with this case
 
-    branch_block := result.current_block;
-    true_ip := result.push_block_empty();
-    @try(self.compile_expr(result, if_true, result_location, can_tail)) return;
-    end_true_block := result.current_block;
-    false_ip := result.push_block_empty();
-    @try(self.compile_expr(result, if_false, result_location, can_tail)) return;
-    end_false_block := result.current_block;
+    branch_block := self.current_block;
+    true_ip := self.push_block_empty();
+    @try(self.compile_expr(if_true, result_location, can_tail)) return;
+    end_true_block := self.current_block;
+    false_ip := self.push_block_empty();
+    @try(self.compile_expr(if_false, result_location, can_tail)) return;
+    end_false_block := self.current_block;
     
     ::if(u16);
     block_slots := if(result_location == .PushStack, => out.size_slots, => 0);
     prims := if(result_location == .PushStack, => self.get_primatives(if_true.ty), => empty());
-    ip := result.push_block(prims);
-    result.push_to(branch_block, (JumpIf = (true_ip = true_ip, false_ip = false_ip, slots = 0 )));
-    result.push_to(end_true_block, (Goto = (ip = ip, slots = block_slots)));
+    ip := self.push_block(prims);
+    self.push_to(branch_block, (JumpIf = (true_ip = true_ip, false_ip = false_ip, slots = 0 )));
+    self.push_to(end_true_block, (Goto = (ip = ip, slots = block_slots)));
 
-    result.push_to(end_false_block, (Goto = (ip = ip, slots = block_slots)));
-    result[ip].incoming_jumps += 2;
-    result[true_ip].incoming_jumps += 1;
-    result[false_ip].incoming_jumps += 1;
-    result.bump_clock(ip);
+    self.push_to(end_false_block, (Goto = (ip = ip, slots = block_slots)));
+    self.result[ip].incoming_jumps += 2;
+    self.result[true_ip].incoming_jumps += 1;
+    self.result[false_ip].incoming_jumps += 1;
+    self.bump_clock(ip);
 
     .Ok
 }
 
-fn emit_switch(self: *EmitBc, result: *FnBody, arg: *FatExpr, result_location: ResultLoc, can_tail: bool) PRes #once = {
+fn emit_switch(self: *EmitBc, arg: *FatExpr, result_location: ResultLoc, can_tail: bool) PRes #once = {
     @err_assert(arg.expr&.is(.Switch), "ICE: expected switch") return;
     parts := arg.expr.Switch;
     
     if parts.cases.len == 0 {
         // There's only a default; that's not really a switch bro but ok... 
-        @try(self.compile_expr(result, parts.value, .Discard, false)) return;
-        @try(self.compile_expr(result, parts.default, result_location, false)) return;
+        @try(self.compile_expr(parts.value, .Discard, false)) return;
+        @try(self.compile_expr(parts.default, result_location, false)) return;
         return(.Ok);
     };
     
-    @try(self.compile_expr(result, parts.value, .PushStack, false)) return; //  this is the thing we're inspecting!
-    entry_block := result.current_block; 
+    @try(self.compile_expr(parts.value, .PushStack, false)) return; //  this is the thing we're inspecting!
+    entry_block := self.current_block; 
    
     // This is where we rejoin with the value of the whole switch expression. 
     out := self.program.get_info(arg.ty);
     @assert(out.size_slots.lt(4).or(result_location != .PushStack), "ICE: 'switch' result too big to go on stack"); // now its the callers problem to deal with this case
     block_slots := if(result_location == .PushStack, => out.size_slots, => 0);
     prims := if(result_location == .PushStack, => self.get_primatives(arg.ty), => empty());
-    end_block := result.push_block(prims);
-    result.current_block = entry_block;
+    end_block := self.push_block(prims);
+    self.current_block = entry_block;
     cases: List(SwitchPayload) = list(self.program.get_alloc());
     
     push_case :: fn(value: i64, body: *FatExpr) void => {
-        case_block := result.push_block_empty();
-        @try(self.compile_expr(result, body, result_location, false)) return; // TODO: tail call
-        end_case_block := result.current_block;
-        result.push_to(end_case_block, (Goto = (ip = end_block, slots = block_slots)));
+        case_block := self.push_block_empty();
+        @try(self.compile_expr(body, result_location, false)) return; // TODO: tail call
+        end_case_block := self.current_block;
+        self.push_to(end_case_block, (Goto = (ip = end_block, slots = block_slots)));
         cases&.push(value = value, block = case_block); 
-        result[case_block].incoming_jumps += 1;
-        result[end_block].incoming_jumps += 1;
+        self.result[case_block].incoming_jumps += 1;
+        self.result[end_block].incoming_jumps += 1;
     };
     
     each parts.cases { f |
@@ -1397,11 +1397,11 @@ fn emit_switch(self: *EmitBc, result: *FnBody, arg: *FatExpr, result_location: R
     push_case(-1, parts.default);
     // TODO: make sure fn neg is #fold
     
-    result.current_block = end_block;
-    result.push_to(entry_block, (Switch = result.switch_payloads.len));
-    result.switch_payloads&.push(cases.rs(), self.program.get_alloc());
+    self.current_block = end_block;
+    self.push_to(entry_block, (Switch = self.result.switch_payloads.len));
+    self.result.switch_payloads&.push(cases.rs(), self.program.get_alloc());
      
-    result.bump_clock(end_block);
+    self.bump_clock(end_block);
     .Ok
 }
 
@@ -1415,38 +1415,38 @@ fn decode_switch(cases: *RsVec(SwitchPayload)) Ty([]SwitchPayload, ?BbId) = {
     }
 }
 
-fn emit_call_loop(self: *EmitBc, result: *FnBody, arg: *FatExpr) PRes #once = {
+fn emit_call_loop(self: *EmitBc, arg: *FatExpr) PRes #once = {
     @debug_assert_eq(arg.ty, void);
 
-    prev_block := result.current_block;
-    start_body_block := result.push_block_empty();
-    result.current_block = start_body_block;
-    result.push_to(
+    prev_block := self.current_block;
+    start_body_block := self.push_block_empty();
+    self.current_block = start_body_block;
+    self.push_to(
         prev_block,
         (Goto = (ip = start_body_block, slots = 0)),
     );
 
-    @try(self.compile_expr(result, arg, .Discard, false)) return;
-    end_body_block := result.current_block;
+    @try(self.compile_expr(arg, .Discard, false)) return;
+    end_body_block := self.current_block;
 
-    result.push_to(
+    self.push_to(
         end_body_block,
         (Goto = (ip = start_body_block, slots = 0)),
     );
-    result[start_body_block].incoming_jumps += 2;
+    self.result[start_body_block].incoming_jumps += 2;
     .Ok
 }
 
 // :PlaceExpr
-fn set_deref(self: *EmitBc, result: *FnBody, place: *FatExpr, value: *FatExpr) PRes #once = {
+fn set_deref(self: *EmitBc, place: *FatExpr, value: *FatExpr) PRes #once = {
     // we care about the type of the pointer, not the value because there might be a cast.
     @match(place.expr&) {
         fn GetVar(_) => panic("ICE: var set should be converted to place expr");
         fn Deref(arg) => {
             // TODO: write a test for pooiinter eval oreder. left hsould come first. -- MAy 7
-            @try(self.compile_expr(result, arg[], .PushStack, false)) return;
+            @try(self.compile_expr(arg[], .PushStack, false)) return;
             self.result_addr_depth += 1;
-            @try(self.compile_expr(result, value, .ResAddr, false)) return;
+            @try(self.compile_expr(value, .ResAddr, false)) return;
             self.result_addr_depth -= 1;
             return(.Ok)
         }
@@ -1463,7 +1463,7 @@ fn unwrap(self: Name) Symbol = {
 }
 
 // TODO: rename? also used for tagged. 
-fn construct_struct(self: *EmitBc, result: *FnBody, pattern: *Pattern, requested: Type, result_location: ResultLoc) PRes #once = {
+fn construct_struct(self: *EmitBc, pattern: *Pattern, requested: Type, result_location: ResultLoc) PRes #once = {
     raw_container_ty := self.program.raw_type(requested);
     slots := self.slot_count(raw_container_ty);
     @debug_assert(slots.lt(8).or(result_location != .PushStack), "too big to put on stack"); 
@@ -1482,18 +1482,18 @@ fn construct_struct(self: *EmitBc, result: *FnBody, pattern: *Pattern, requested
                 @debug_assert_eq(value.name.unwrap(), field.name, "field name mismatch (ICE: should be checked by sema)");
                 
                 if result_location == .ResAddr {
-                    result.push(PeekDup = 0);
-                    result.inc_ptr_bytes(field.byte_offset.trunc());
+                    self.push(PeekDup = 0);
+                    self.inc_ptr_bytes(field.byte_offset.trunc());
                     self.result_addr_depth += 1;
                 };
                 expr := value.default.unwrap();
-                @try(self.compile_expr(result, expr&, result_location, false)) return;
+                @try(self.compile_expr(expr&, result_location, false)) return;
                 if result_location == .ResAddr {
                     self.result_addr_depth -= 1;
                 };
             };
             if result_location == .ResAddr {
-                result.pop(1); // res ptr
+                self.pop(1); // res ptr
             };
         }
         // TODO: make this constexpr in compiler (TODO: audit: this comment is from back when i had the interp)
@@ -1513,11 +1513,11 @@ fn construct_struct(self: *EmitBc, result: *FnBody, pattern: *Pattern, requested
             value := pattern.bindings[0].default.unwrap();
             @match(result_location) {
                 fn PushStack() => {
-                    result.push(PushConstant = (
+                    self.push(PushConstant = (
                         value = i,
                         ty = .I64,
                     ));
-                    @try(self.compile_expr(result, value&, result_location, false)) return;
+                    @try(self.compile_expr(value&, result_location, false)) return;
 
                     // :tagged_prims_hack
                     // TODO: this is a dumb hack to make the padding have the right prim types for backends that care. :SLOW -- Jun 23
@@ -1535,21 +1535,21 @@ fn construct_struct(self: *EmitBc, result: *FnBody, pattern: *Pattern, requested
                     // If this is a smaller varient, pad out the slot.
                     for types { p |
                         ty := @unwrap(self.program.prim(p), "not prim") return;
-                        result.push(PushConstant = (value = 0, ty = ty));
+                        self.push(PushConstant = (value = 0, ty = ty));
                     };
                 }
                 fn ResAddr() => {
-                    result.push(PeekDup = 0);
-                    result.push(PushConstant = (
+                    self.push(PeekDup = 0);
+                    self.push(PushConstant = (
                         value = i,
                         ty = .I64,
                     ));
-                    result.push(StorePre = .I64);
-                    result.inc_ptr_bytes(8); // TODO: differetn sizes of tag
-                    @try(self.compile_expr(result, value&, result_location, false)) return;
+                    self.push(StorePre = .I64);
+                    self.inc_ptr_bytes(8); // TODO: differetn sizes of tag
+                    @try(self.compile_expr(value&, result_location, false)) return;
                 }
                 fn Discard() => {
-                    @try(self.compile_expr(result, value&, result_location, false)) return;
+                    @try(self.compile_expr(value&, result_location, false)) return;
                 }
             };
 
@@ -1571,60 +1571,61 @@ fn construct_struct(self: *EmitBc, result: *FnBody, pattern: *Pattern, requested
     .Ok
 }
 
-fn push_block_empty(self: *FnBody) BbId = {
-    self.blocks&.push((
+fn push_block_empty(self: *EmitBc) BbId = {
+    self.result.blocks&.push((
         insts = empty(),
+        debug = empty(),
         arg_prims = empty(),
         incoming_jumps = 0,
         clock = self.clock,
-    ), self.alloc);
-    b: BbId = (id = self.blocks.len().trunc() - 1);
+    ), self.out_alloc);
+    b: BbId = (id = self.result.blocks.len().trunc() - 1);
     self.current_block = b;
     b
 }
 
-fn push_block(self: *FnBody, arg_prims: [] Prim) BbId = {
-    self.blocks&.push((
+fn push_block(self: *EmitBc, arg_prims: [] Prim) BbId = {
+    self.result.blocks&.push((
         insts = empty(),
+        debug = empty(),
         arg_prims = arg_prims,
         incoming_jumps = 0,
         clock = self.clock,
-    ), self.alloc);
-    b: BbId = (id = self.blocks.len().trunc() - 1);
+    ), self.out_alloc);
+    b: BbId = (id = self.result.blocks.len().trunc() - 1);
     self.current_block = b;
     b
 }
 
-fn bump_clock(self: *FnBody, b: BbId) void ={
+fn bump_clock(self: *EmitBc, b: BbId) void ={
     self.clock += 1;
-    self[b].clock = self.clock;
+    self.result[b].clock = self.clock;
 }
 
 fn slot_count(self: *EmitBc, ty: Type) u16 = {
     self.program.slot_count(ty)
 }
 
-fn push(self: *FnBody, inst: Bc) void = {
+fn push(self: *EmitBc, inst: Bc) void = {
     self.push_to(self.current_block, inst);
 }
 
-fn addr_var(ctx: *EmitBc, self: *FnBody, id: u16) void = {
+fn addr_var(ctx: *EmitBc, id: u16) void = {
     if ctx.is_ssa_var&.get(id.zext()) {
-        self.push(LoadSsa = (id = id));
+        ctx.push(LoadSsa = (id = id));
     } else {
-        self.push(AddrVar = (id = id));
+        ctx.push(AddrVar = (id = id));
     };
 }
 
-// TODO: move result to EmitBc instead of passing it around? -- Jul 8
-fn save_ssa_var(ctx: *EmitBc, self: *FnBody) u16 = {
-    id := self.add_var(ctx, rawptr);
+fn save_ssa_var(ctx: *EmitBc) u16 = {
+    id := ctx.add_var(rawptr);
     ctx.is_ssa_var&.set(id.zext(), temp()); 
-    self.push(SaveSsa = (id = id, ty = .P64));
+    ctx.push(SaveSsa = (id = id, ty = .P64));
     id
 }
 
-fn inc_ptr_bytes(self: *FnBody, bytes: u16) void = {
+fn inc_ptr_bytes(self: *EmitBc, bytes: u16) void = {
     // TODO: also check if the last op was also incptrbytes or constant and merge them. 
     if bytes != 0 {
         self.push(IncPtrBytes = bytes);
@@ -1632,10 +1633,10 @@ fn inc_ptr_bytes(self: *FnBody, bytes: u16) void = {
 }
 
 ::tagged(Bc);
-fn push_to(self: *FnBody, b: BbId, inst: Bc) void = {
+fn push_to(self: *EmitBc, b: BbId, inst: Bc) void = {
     //@println("%", inst&.tag());
-    self.mix_hash(inst&.tag().ordinal(), 9801);
-    self[b].insts&.push(inst, self.alloc);
+    self.result.mix_hash(inst&.tag().ordinal(), 9801);
+    self.result[b].insts&.push(inst, self.out_alloc);
 }
 
 fn mix_hash(self: *FnBody, i: i64, spice: i64) void = {
@@ -1643,7 +1644,7 @@ fn mix_hash(self: *FnBody, i: i64, spice: i64) void = {
     self.hash *= spice;
 }
 
-fn pop(self: *FnBody, slots: u16) void = {
+fn pop(self: *EmitBc, slots: u16) void = {
     range(0, slots.zext()) { _ | 
         self.push(Snipe = 0);
     }
@@ -1652,12 +1653,11 @@ fn pop(self: *FnBody, slots: u16) void = {
 fn index(self: *FnBody, b: BbId) *BasicBlock = {
     self.blocks.index(b.id.zext())
 }
-
-fn add_var(self: *FnBody, ctx: *EmitBc, ty: Type) u16 = {
+fn add_var(ctx: *EmitBc, ty: Type) u16 = {
     info := ctx.program.get_info(ty);
-    self.mix_hash(info.stride_bytes.zext(), 12345);
-    self.vars&.push((size = info.stride_bytes, align = info.align_bytes), self.alloc);
-    i: u16 = self.vars.len.trunc();
+    ctx.result.mix_hash(info.stride_bytes.zext(), 12345);
+    ctx.result.vars&.push((size = info.stride_bytes, align = info.align_bytes), ctx.out_alloc);
+    i: u16 = ctx.result.vars.len.trunc();
     i - 1
 }
 
@@ -1967,7 +1967,10 @@ fn hash(h: *TrivialHasher, s: **FnBody) void = {
 }
 
 :: {
-    AutoEq(BasicBlock);
+    fn eq(a: *BasicBlock, b: *BasicBlock) bool = {
+        // not comparing debug info, who cares. 
+        a.insts& == b.insts& && a.arg_prims& == b.arg_prims& && a.incoming_jumps == b.incoming_jumps && a.clock == b.clock
+    }
     AutoEq(Bc);
     AutoEq(PrimSig);
     DerefEq(Prim);

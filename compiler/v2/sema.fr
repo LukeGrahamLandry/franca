@@ -1068,7 +1068,7 @@ fn compile_fn_ptr(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
     if self.dispatch.enclosing_function { current_f |
         current := self.get_function(current_f);
         current.mutual_callees&.add_unique(fid, self.get_alloc());
-        self.aarch64&.extend_blanks(fid);
+        self.jitted&.extend_blanks(fid);
         @log_event("added % mutual calls %", current_f, fid) self;
         record_function_call(c = self, caller = current_f, callee = fid);
     };
@@ -1473,7 +1473,7 @@ fn add_callee(self: *SelfHosted, fid: FuncId) bool = {
         } else {
             current.callees&.add_unique(fid, self.get_alloc());
         };
-        self.aarch64&.extend_blanks(fid);
+        self.jitted&.extend_blanks(fid);
         @log_event("added % calls %", current_f, fid) self;
         record_function_call(c = self, caller = current_f, callee = fid);
     };
@@ -1927,6 +1927,9 @@ fn curry_const_args_inner(self: *SelfHosted, original_f: FuncId, new_fid: FuncId
     }
 }
 
+// TODO: save the bake site on the new variable. 
+//       and have self.can_assign take an optional context thingy that tells why it wanted that type, 
+//       and try to stick the variable in there sometimes? or show it if the type error happens from a baked thing. 
 // The argument type is evaluated in the function declaration's scope, the argument value is evaluated in the caller's scope.
 fn bind_const_arg(self: *SelfHosted, o_f: FuncId, arg_name: Var, arg_value: Values, arg_ty_found: Type, loc: Span) Maybe(void) = {
     // I don't want to renumber, so make sure to do the clone before resolving.
@@ -2996,7 +2999,7 @@ fn took_pointer_value(self: *SelfHosted, fid: FuncId) void = {
     func := self.get_function(fid);
     // Note: else is not `Suspend = self.wait_for(Jit = fid)` because of cycles, we defer to the backend to deal with finializing it. 
     //       a better system would be to generate a shim right now so we'd always have an address? 
-    if self.aarch64&.get_fn_old(fid) { ptr |
+    if self.jitted&.get_fn_old(fid) { ptr |
         if !func.get_flag(.TookPointerValue) {
             // We already compiled the function but didn't know we'd need to remember its address. (ie. #test fn large_struct_ret_return).
             self.created_jit_fn_ptr_value(fid, ptr.int_from_rawptr())
@@ -3106,6 +3109,13 @@ fn handle_declare_constant(self: *SelfHosted, name: Var, ty: *LazyType, value: *
     //};
     
     self.finish_layout_deep(value.ty);
+    
+    if value.ty == Type {
+        @debug_assert(value.expr&.is(.Value));
+        type_value := Type.assume_cast(value.expr.Value.bytes&)[];
+        // You're still gonna get a lot of T/Self/RAW which is unhelpful. 
+        self.save_guessed_name(type_value, name.name);
+    };
     
     .Ok
 }
@@ -3247,7 +3257,8 @@ fn coerce_const_expr(self: *SelfHosted, expr: *FatExpr, req: ResultType, query: 
                     @if_let(want_info) fn Struct(f) => {
                         each f.fields { f | 
                             if f.default.is_none() {
-                                return(@err("had non-default fields"));
+                                // TODO: better error message
+                                return(@err("had non-default fields (or if it's a call: expected function args)"));
                             };
                         };
                         if(query, => return(.Ok));

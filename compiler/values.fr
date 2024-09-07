@@ -141,7 +141,7 @@ fn emit_relocatable_constant_body(
             };
             
             // This is super slow but its only the error path so its fine. 
-            enumerate c.aarch64.dispatch { i, check | 
+            enumerate c.jitted.dispatch { i, check | 
                 check := int_from_rawptr(check[]);
                 if check == ptr {
                     fid := funcid_from_index(i);
@@ -896,15 +896,23 @@ fn intern_type(self: *SelfHosted, info: TypeInfo) Type = {
             id := typeid_from_index(self.types.len);
             stable := self.types&.push(info);
             self.type_lookup&.insert(stable, id);
-            self.type_extra&.push(.None);
+            self.type_extra&.push(TypeMeta.zeroed()); // is_sized = false
             id
         }
     } else {
         id := typeid_from_index(self.types.len);
         self.types&.push(info);
-        self.type_extra&.push(.None);
+        self.type_extra&.push(TypeMeta.zeroed()); // is_sized = false
         id
     }
+}
+
+fn save_guessed_name(self: *SelfHosted, type: Type, name: Symbol) void = {
+    guessed := self.type_extra&.nested_index(type.as_index())[].inferred_name&;
+    if guessed[] == Flag.SYMBOL_ZERO.ident() { 
+        // TODO: also check first_dumb_type_name - last_dumb_type_name range?
+        guessed[] = name;
+    };
 }
 
 fn update_placeholder(self: *SelfHosted, placeholder_slot: Type, real_type: Type, name: Symbol) void = {
@@ -922,7 +930,7 @@ fn update_placeholder(self: *SelfHosted, placeholder_slot: Type, real_type: Type
     // just in case.    copy-paste call to truncate but now want to have the list full size ahead of time. 
     i := self.type_extra.len - 1; // we happen to know this can't underflow because there are builtin types.  
     while => i > idx {
-        self.type_extra&.nested_index(i)[] = .None;
+        self.type_extra&.nested_index(i)[] = TypeMeta.zeroed(); // is_sized = false
         i -= 1;
     };
 }
@@ -952,8 +960,9 @@ fn init_fixed_types(self: *SelfHosted) void = {
 :: as_ref(TypeMeta);
 fn get_info(self: *SelfHosted, ty: Type) *TypeMeta = {
     ty := self.raw_type(ty);
-    if self.type_extra&.nested_index(ty.as_index()) { info |
-        return(info);
+    old := self.type_extra&.nested_index(ty.as_index());
+    if old.is_sized {
+        return(old);
     };
     
     // TODO: when i didnt have some of the trunc impls this had a "tried to call missing function"
@@ -966,6 +975,7 @@ fn get_info(self: *SelfHosted, ty: Type) *TypeMeta = {
             align_bytes = align_bytes,
             contains_pointers = contains_pointers,
             pass_by_ref = pass_by_ref,
+            is_sized = true,
         )
     };
     
@@ -1086,10 +1096,9 @@ fn get_info(self: *SelfHosted, ty: Type) *TypeMeta = {
             new(0, 0, 0, false, 0, false)
         }
     };
-    ptr := self.type_extra&.nested_index(ty.as_index());
-    ptr[] = (Some = info);
-    p := ptr.as_ref();
-    p.unwrap()
+    info.inferred_name = old.inferred_name;  // save if we poked this in before. 
+    old[] = info;
+    old
 }
 
 fn raw_type(c: *SelfHosted, ty: Type) Type = {

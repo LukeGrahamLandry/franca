@@ -258,9 +258,9 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
                 if body.is(.Normal).or(body.is(.Intrinsic)) {
                     @log_event("codegen % %", fid, self.log_name(fid)) self;
                     @err_assert(!arg_ty.is_unknown() && !ret_ty.is_unknown(), "unknown fn types!!") return;
-                    body := @try(self.emit_bc_and_aarch64(fid, .Jit)) return;
+                    body := @try(self.emit_bc_and_jit(fid)) return;
                     // TODO: not true for rediurects????
-                    //@debug_assert(self.aarch64&.get_fn(fid).is_some(), "we just emitted but no pointer?? %", func.log(self));
+                    //@debug_assert(self.jitted&.get_fn(fid).is_some(), "we just emitted but no pointer?? %", func.log(self));
                     return(Ok = true);
                 };
                 @match(body) {
@@ -275,11 +275,11 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
                         if query_current_arch().unwrap() != .Aarch64 {
                             return(Ok = false);
                         };
-                        self.aarch64&.mark_start(fid);
+                        self.jitted&.mark_start(fid);
                         for insts { op |
-                            self.aarch64&.push(op);
+                            self.jitted&.push(op);
                         };
-                        code := self.aarch64&.save_current(fid);
+                        code := self.jitted&.save_current(fid);
                         addr := u32.raw_from_ptr(code.ptr);
                         self.put_jitted_function(fid, addr);
                     }
@@ -287,14 +287,14 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
                         if query_current_arch().unwrap() != .X86_64 {
                             return(Ok = false);
                         };
-                        self.aarch64&.mark_start(fid);
-                        self.aarch64&.push_bytes_x86(insts.items());
-                        code := self.aarch64&.save_current(fid);
+                        self.jitted&.mark_start(fid);
+                        self.jitted&.push_bytes_x86(insts.items());
+                        code := self.jitted&.save_current(fid);
                         addr := u32.raw_from_ptr(code.ptr);
                         self.put_jitted_function(fid, addr);
                         // TODO: why do i need to do this here but not for arm? 
                         //       i guess since cl means you don't happen to bump while doing other things in get_fn_callable.
-                        self.aarch64&.bump_dirty();
+                        self.jitted&.bump_dirty();
                     }
                     fn Merged(parts) => {
                         each parts { option |
@@ -357,8 +357,8 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
 
 // TODO: factor out the dispatch table from the aarch64 backend. 
 put_jitted_function :: fn(self: *SelfHosted, f: FuncId, addr: rawptr) void = {
-    self.aarch64&.extend_blanks(f);
-    self.aarch64.dispatch[f.as_index()] = addr;
+    self.jitted&.extend_blanks(f);
+    self.jitted.dispatch[f.as_index()] = addr;
     func := self.get_function(f);
     func.set_flag(.AsmDone);
     if func.get_flag(.TookPointerValue) {
@@ -369,15 +369,15 @@ put_jitted_function :: fn(self: *SelfHosted, f: FuncId, addr: rawptr) void = {
 // If you're about to actually call the pointer, we need to mark the memory as executable.
 // If using the cranelift backend, give it a chance to do relocations. (im hoping batching them makes it less flakey). 
 fn get_fn_callable(self: *SelfHosted, fid: FuncId) ?rawptr = {
-    if self.aarch64&.get_fn_old(fid) { ptr |
-        self.aarch64&.bump_dirty();
+    if self.jitted&.get_fn_old(fid) { ptr |
+        self.jitted&.bump_dirty();
         return(Some = ptr);
     };
     
     @if(INCLUDE_COMPTIME_CRANELIFT) {
         if self.cranelift { data |
             franca_comptime_cranelift_flush(data);
-            return(self.aarch64&.get_fn_old(fid));
+            return(self.jitted&.get_fn_old(fid));
         };
     };
     

@@ -127,6 +127,7 @@ impl Prim {
 #[derive(Clone, Debug)]
 pub struct BasicBlock {
     pub insts: Vec<Bc>,
+    pub debug: [usize; 3],
     pub arg_prims: &'static [Prim],
     pub incoming_jumps: u16,
     pub clock: u16,
@@ -138,15 +139,12 @@ pub struct FnBody {
     pub vars: Vec<VarSlotType>,
     _var_names: [usize; 3],
     _when: usize,
-    _alloc: [usize; 2],
     _hash: i64,
     pub signeture: PrimSig,
     pub func: FuncId,
     _name: u32,
     pub switch_payloads: Vec<Vec<SwitchPayload>>,
-    _current_block: i16,
-    _clock: u16,
-    want_log: bool,
+
 }
 
 #[repr(C)]

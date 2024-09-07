@@ -1,5 +1,3 @@
-- hello: prints hello world
-- bf: translates brainfuck to c
 - mandelbrot: prints an ascii art mandelbrot set fractal
 - raw_terminal: take input without blocking and clear the terminal
 - 60fps: recompile mandelbrot every frame
@@ -13,3 +11,4 @@
 - compiler_gui: uses the compiler as a libary to display introspection about a program (lib:sokol, lib:dearimgui)
 - repl: a franca repl using the comptime jit.
 - count: counts the number of code lines in a franca file.
+- x64_encoding: test my opcode encoding against a disasembler (cli:llvm-mc)

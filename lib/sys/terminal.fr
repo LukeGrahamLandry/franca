@@ -37,3 +37,66 @@ fn set_colour(out: *List(u8), r: i64, g: i64, b: i64) void = {
 fn unset_colour(out: *List(u8)) void = {
     @fmt(out, "\x1B[0m");
 }
+
+// TODO: improve this (support arrow keys)
+// TODO: if the input spans multiple lines (just by being long) clear those as well. 
+// TODO: optional timeout, return error
+fn interactive_read_line(text: *List(u8)) void = {
+    start_raw_terminal(STD_IN);
+    prompt := ">>> ";
+
+    render_buffer: List(u8) = list(64, temp());
+    waiting := 0;
+    loop {
+        continue :: local_return;
+        c: u8 = 0;
+        len := read(STD_IN, c&, 1).unwrap();
+        if(len.eq(1)){
+            //println(@as(i64) c.zext());
+            @switch(c) {
+                @case(127) => {  // backspace
+                    if text.len > 0 {
+                        // since we're printing a shorter string, the terminal will stay showing the last character. 
+                        // so write over spaces so we don't show the old thing. 
+                        // there's gotta be some ansi escaped thing for clearing a line but i don't care right now. 
+                        @fmt(render_buffer&, "\r");
+                        range(0, text.len + prompt.len) { _ |
+                            render_buffer&.push_all(" ");
+                        };
+                        print(render_buffer.items());
+                        render_buffer&.clear();
+                        
+                        // now remove a character. 
+                        text.len -= 1;
+                    };
+                };
+                @case(27) => {
+                    // TODO
+                };
+                @case(10) => {
+                    // Pressed enter. 
+                    end_raw_terminal(STD_IN);
+                    return();
+                };
+                @default => text.push(c);
+            };
+        };
+        @fmt(render_buffer&, "\r");  // take it back now yall
+        render_buffer&.push_all(prompt);
+        render_buffer&.push_all(text.items());
+        print(render_buffer.items());
+        
+        render_buffer&.clear();
+        
+        // don't make the terminal program burn cycles redrawing the line if you're not typing. 
+        // but also dont make it painful if you paste something. 
+        // TODO: just use poll
+        if len == 0 {
+            waiting = abs(waiting + 1);
+            delay := if(waiting > 300, => 200, => 10);
+            usleep((delay * 1000).trunc());
+        } else {
+            waiting = 0;
+        };
+    };
+}

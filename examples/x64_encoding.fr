@@ -1,0 +1,248 @@
+#!/usr/bin/env franca
+//! Sanity test that I can encode x86-64 instructions correctly with all the registers.
+//! Uses lib/arch/x86_64.fr to produce machine code and feeds that to a cli disassembler.  
+
+VERBOSE              :: false; // print out all the comparisons so you can be reassured its actually running the tests. 
+DISASSEMBLER_COMMAND :: "llvm-mc";
+
+fn main() = {
+    all_tests := get_test_cases(libc_allocator);
+    
+    // Optimise for the case where all tests pass. Batch all tests together in one llvm-mc call. 
+    // If you fail one, skip that and call again on the remainder (becuase variable length instructions make it sketchy to just keep parsing).
+    // This makes 256 (passing) tests take 50ms instead of 2000ms.
+    fails := 0;
+    tests := all_tests;
+    offset := 0;
+    dowhile {
+        mark := __temp_alloc.mark();
+        pass_count := run_test_chunk(offset, tests);
+        offset += pass_count + 1;
+        if pass_count < tests.len {
+            fails += 1;
+            tests = tests.slice(pass_count + 1, tests.len);
+        };
+        __temp_alloc.reset_retaining_capacity(mark);
+        offset < all_tests.len
+    };
+    
+    if fails == 0 {
+        @println("Passed all % tests.", all_tests.len);
+    } else {
+        @println("Failed %/% tests.", fails, all_tests.len);
+    };
+}
+
+fn get_test_cases(alloc: Alloc) []TestCase = {
+    ::enum(X86Reg);
+    tests: List(TestCase) = list(alloc);
+    
+    push_case :: fn(text: Str, $f: @Fn(asm: *List(u8)) void) void => {
+        asm: List(u8) = list(alloc);
+        f(asm&);
+        tests&.push(bytes = asm.items(), text = text);
+    };
+    
+    push_case("nop") { asm |
+        asm.push(@as(u8) PrimaryOp.Nop);
+    };
+    push_case("ret") { asm |
+        asm.push(@as(u8) PrimaryOp.Ret);
+    };
+    
+    // the first seperator is a tab not spaces!
+    
+    ops: []Ty(PrimaryOp, Str) = @slice(
+        (PrimaryOp.MovReg, "mov"),
+        (PrimaryOp.AddReg, "add"),
+        (PrimaryOp.SubReg, "sub"),
+        (PrimaryOp.CmpReg, "cmp"),
+        (PrimaryOp.OrReg,  "or"),
+        (PrimaryOp.AndReg, "and"),
+        (PrimaryOp.XorReg, "xor"),
+    );
+    
+    for_op_pair :: fn($f: @Fn(op: PrimaryOp, name: Str, a: X86Reg, b: X86Reg) void) void => {
+        for ops { op |
+            for_enum X86Reg { a | 
+                for_enum X86Reg { b | 
+                    f(op._0, op._1, a, b);
+                };
+            };
+        };
+    };
+    
+    // 2 reg
+    for_op_pair { op, name, a, b |
+        text := items(@format("%	%, %", name, a, b) alloc);
+        push_case(text) { asm |
+            encode_bin(asm, op, a, b);
+        };
+    };
+    
+    // mem <- reg
+    for_op_pair { op, name, a, b |
+        meaning := table_modrm(ModrmMode.Indirect00, a);
+        if meaning.tag == .Rm {
+            @assert_eq(meaning.disp, .D0);
+            text := items(@format("%	qword ptr [%], %", name, a, b) alloc);
+            push_case(text) { asm |
+                encode_bin_mem(asm, op, a, b);
+            };
+        };
+        // Else use different addressing modes w.r.t. rip/disp, etc.
+    };
+    
+    // reg <- mem
+    for_op_pair { op, name, a, b |
+        meaning := table_modrm(ModrmMode.Indirect00, a);
+        if meaning.tag == .Rm {
+            @assert_eq(meaning.disp, .D0);
+            // This bit changes which operand is in memory! (for these specific few instructions)
+            op = @as(PrimaryOp) @as(i64) bit_or(@as(i64) op, @as(i64) 0b10); 
+            text := items(@format("%	%, qword ptr [%]", name, b, a) alloc); // flip! 
+            push_case(text) { asm |
+                encode_bin_mem(asm, op, a, b);
+            };
+        };
+        // Else use different addressing modes w.r.t. rip/disp, etc.
+    };
+    
+    for_enum X86Reg { a | 
+        text := items(@format("call	%", a) alloc); 
+        push_case(text) { asm |
+            encode_call_reg(asm, ModrmMode.Direct, a);
+        };
+    };
+    
+    fun_offsets := @slice(1, 10, 256, 70000, -1, -10, -256, -70000, 1073741824, -1073741824);
+    for fun_offsets { offset |
+        text := items(@format("jmp	%", offset) alloc); 
+        push_case(text) { asm |
+            encode_jmp(asm, offset);
+        };
+        for_enum X86cc { cc | 
+            text := items(@format("j%	%", cc, offset) alloc); 
+            push_case(text) { asm |
+                encode_jmp(asm, cc, offset);
+            };
+        };
+    };
+    
+    tests.items()
+}
+
+fn run_test_chunk(offset: i64, tests: []TestCase) i64 #once = {
+    hex: List(u8) = list(temp());
+    
+    for tests { test |   
+        hex&.push_as_hex(test.bytes);
+        
+        // Since instructions are variable length, put a marker so we can make sure we don't get confused and have tests blur together. 
+        hex&.push_prefixed_hex_byte(@as(u8) PrimaryOp.Nop);
+        hex&.push_all(" ");
+    };
+    
+    dis := llvm_mc_dis(hex.items());
+    dis := dis.trim().split_lines(temp());
+    @assert_eq(dis[0].trim(), ".section	__TEXT,__text,regular,pure_instructions", "did you change disassemblers?");
+    dis := dis.items().slice(1, dis.len);
+    
+    enumerate tests { test_index, test | 
+        want := test.text.trim();
+        found := dis[0].trim();
+        dis = dis.slice(1, dis.len);
+        
+        if VERBOSE {
+            @println("[%] % vs %", offset + test_index, found, want);  
+        };
+        if found != want {
+            @println("Failed test %:\n", offset + test_index);
+            print_detail(test, found);
+            return(test_index);
+        };
+        
+        // check for the marker between tests
+        found := dis[0].trim();
+        dis = dis.slice(1, dis.len);
+        if found != "nop" {
+            @println("Failed test %: confused about instruction count", offset + test_index);
+            return(test_index);
+        };
+    };
+    tests.len
+}
+
+TestCase :: @struct(bytes: []u8, text: Str); 
+
+fn print_detail(test: *TestCase, found: Str) void = {
+    out: List(u8) = list(temp());
+    @fmt(out&, "---------------------------\n"); 
+    @fmt(out&, "- expect: %\n", test.text);
+    correct_bytes := assemble(test.text);
+    @fmt(out&, "- | bytes: "); 
+    out&.push_as_hex(correct_bytes);
+    @fmt(out&, "\n"); 
+    @fmt(out&, "- |  bits: "); 
+    out&.push_as_bin(correct_bytes);
+    @fmt(out&, "\n-----------------\n"); 
+    @fmt(out&, "- actual: %\n", found); 
+    @fmt(out&, "- | bytes: "); 
+    out&.push_as_hex(test.bytes);
+    @fmt(out&, "\n"); 
+    @fmt(out&, "- |  bits: "); 
+    out&.push_as_bin(test.bytes);
+    @fmt(out&, "\n------"); 
+    println(out.items());
+}
+
+fn push_as_hex(out: *List(u8), bytes: []u8) void = {
+    out.reserve(bytes.len * 5);
+    for bytes { byte |
+        out.push_prefixed_hex_byte(byte);
+        out.push_all(" ");
+    };
+}
+
+fn push_as_bin(out: *List(u8), bytes: []u8) void = {
+    out.reserve(bytes.len * 9);
+    for bytes { byte |
+        byte: i64 = byte.zext();
+        range(0, 8) { i |
+            bit := 1.shift_left(7 - i);
+            if byte.bit_and(bit) != 0 {
+                out.push_all("1");
+            } else {
+                out.push_all("0");
+            };
+        };
+        out.push_all(" ");
+    };
+}
+
+fn llvm_mc_dis(hex: []u8) Str = {
+    file := open_temp_file();
+    file.fd&.write(hex);
+    // varient 1 means intel syntax, we're not animals
+    success, out, err := exec_and_catch(DISASSEMBLER_COMMAND, @slice("--arch=x86-64", "--disassemble", "-output-asm-variant=1", file&.s_name()), temp());
+    if(!success, => @eprintln("couldn't disassemble % %", out.items(), err.items()));
+    file.remove();
+    out.items()
+}
+
+fn assemble(text: Str) []u8 = {
+    file := open_temp_file();
+    file.fd&.write(".intel_syntax noprefix\n");
+    file.fd&.write(text);
+    
+    success, out, err := exec_and_catch(DISASSEMBLER_COMMAND, @slice("--arch=x86-64", "--filetype=obj", file&.s_name()), temp());
+    if !success {
+        @eprintln("couldn't assemble % %", out.items(), err.items());
+        return("");
+    };
+    file.remove();
+    
+    // hack: i just looked at one and this is the junk part of the object file. 
+    // TODO: this will probably change on not-macos where its not a macho file? 
+    out.items().slice(208, out.len - 5)
+}
