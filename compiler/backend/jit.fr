@@ -49,32 +49,47 @@ fn emit_bc_and_jit(program: *SelfHosted, f: FuncId) PRes #once = {
             program.put_jitted_function(f, old);
         };
         
+        __temp_alloc.reset_retaining_capacity(mark);
         return(.Ok);
     };
     
-    zone := zone_begin(.EmitAarch64); // TODO: defer
+    zone := zone_begin(.EmitJit); // TODO: defer
     @if(ENABLE_TRACY) {
         real_name := program.pool.get(func.name);
         ___tracy_emit_zone_name(zone, real_name);
     };
     
-    @if(INCLUDE_COMPTIME_CRANELIFT) {
-        opts := program.get_build_options();
-        if opts.comptime_jit == .Cranelift {
+    opts := program.get_build_options();
+    
+    call_cranelift :: fn() => {
+        @if(INCLUDE_COMPTIME_CRANELIFT, {
             data := program.cranelift.expect("cranelift backend to be initilized");
             log_ir := func.get_flag(.LogIr);
             franca_comptime_cranelift_emit(data, f, body, program.legacy_indirection.cast(), log_ir);
             func.set_flag(.AsmDone);
-            zone_end(zone);
-            __temp_alloc.reset_retaining_capacity(mark);
-            return(.Ok);
-        };
+        }, panic("unreachable: cranelift not included"));
     };
     
-    old := program.legacy_indirection.cast();
-    a: EmitAsm = new(old, body);
-    addr := a&.compile(f);
-    program.put_jitted_function(f, addr);
+    @match(opts.comptime_jit) {
+        fn CompilerJit() => {
+            @match(program.env.comptime_arch) {
+                fn aarch64() => {
+                    old := program.legacy_indirection.cast();
+                    a: EmitAsm = new(old, body);
+                    addr := a&.compile(f);
+                    program.put_jitted_function(f, addr);
+                }
+                fn x86_64() => {
+                    call_cranelift();
+                }
+                fn wasm32() => panic("unreachable: compiler doesn't support wasm yet");
+            };
+        }
+        fn Cranelift() => {
+            call_cranelift();
+        }
+    };
+    
     zone_end(zone);
     __temp_alloc.reset_retaining_capacity(mark);
     .Ok

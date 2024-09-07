@@ -281,6 +281,13 @@ fn init_self_hosted(build_options: *BuildOptions) *SelfHosted = {
     );
     b := a.boxed(Baked, b);
     
+    // TODO: this annoys me, generally this could just be compiled into the binary, 
+    //       but i want to experiment with ape/comsmolibc eventually where you don't know where you're going to run up front,
+    //       tho they still need to compile the x86 and arm parts seperatly so i guess there should be somewhere to stick this information? 
+    arch := or query_current_arch() {
+        panic("Failed to determine comptime arch. Franca only supports arm64 and x86_64")  
+    };
+    
     // Sadly this can't use default fields, I think because it loads too early. 
     env: ComptimeEnvironment = (
         make_slice_t = .None,
@@ -292,7 +299,7 @@ fn init_self_hosted(build_options: *BuildOptions) *SelfHosted = {
         link_rename_arg = .None,
         push_x86_func = .None,
         compile_error_pointer = .None,
-        comptime_arch = query_current_arch(),
+        comptime_arch = arch,
     );
     env := a.boxed(ComptimeEnvironment, env);
     self: SelfHosted = (
@@ -337,24 +344,19 @@ fn init_self_hosted(build_options: *BuildOptions) *SelfHosted = {
     };
     self.legacy_indirection = self.stable_compiler_context();
     
-    //x := query_current_arch();
-    //if x { arch | 
-    //    if arch != .Aarch64 {
-    //        @if(INCLUDE_COMPTIME_CRANELIFT) {
-    //            build_options.comptime_jit = .Cranelift;
-    //        };
-    //        assert(build_options.comptime_jit != .Aarch64, "Aarch64 backend does not support this archtecture.");
-    //    };
-    //};
-    
+    want_cl := build_options.comptime_jit == .Cranelift;
+    // While working on my custom x64 backend, i revert to cranelift if i hit something not implemented yet. 
+    // TODO: remove when ready!
+    want_cl = want_cl.or(arch == Arch.x86_64 && build_options.comptime_jit == .CompilerJit);
+        
     @if(INCLUDE_COMPTIME_CRANELIFT, {
-        if build_options.comptime_jit == .Cranelift {
+        if want_cl {
             dispatch_ptr := self.jitted&.get_dispatch();
             data := franca_comptime_cranelift_init(self, get_backend_vtable(), dispatch_ptr);
             self.cranelift = (Some = data);
         };
     }, {
-        @assert(build_options.comptime_jit != .Cranelift, "cranelift backend is not enabled in this build of the compiler");
+        @assert(!want_cl, "cranelift backend is not enabled in this build of the compiler");
     });
     
     self
