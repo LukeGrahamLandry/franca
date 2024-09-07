@@ -19,21 +19,21 @@ OverloadSetData :: @struct(
     inline_cache: Ty(OverloadKey, FuncId),
 );
 
-fn compile_stmt(self: *SelfHosted, stmt: *FatStmt) Maybe(bool) = {
+fn compile_stmt(self: *SelfHosted, stmt: *FatStmt) Maybe(Ty(bool, bool)) #once = {
     if stmt.done {
-        return(Ok = true);
+        return(Ok = (true, false));
     };
     self.last_loc = stmt.loc;
     @match(stmt.stmt&) {
-        fn Noop() => (Ok = true);
+        fn Noop() => (Ok = (true, false));
         fn Eval(expr) => {
             @check(self.compile_expr(expr, .None)) return;
-            (Ok = expr.done)
+            (Ok = (expr.done, expr.ty.is_never()))
         }
         fn DeclVar(f) => {
             assert(f.name.kind != .Const, "hit unhoisted constant");
             @check(self.decl_var(f.name, f.ty&, f.value&)) return;
-            (Ok = f.value.done)
+            (Ok = (f.value.done, false))
         }
         fn Set(f) => {
             // TODO: or patterns in @match would be nice here. :lang
@@ -47,7 +47,7 @@ fn compile_stmt(self: *SelfHosted, stmt: *FatStmt) Maybe(bool) = {
                     return(Err = self.error(TypeMismatch = (span = Span.zeroed(), wanted = f.place.ty, found = f.value.ty)));
                 };
                 // TODO: self.type_check_arg(f.place.ty, f.value.ty, "reassign var")?; /:type_check
-                return(Ok = f.value.done && f.place.done);
+                return(Ok = (f.value.done && f.place.done, false));
             };
             @err("Illegal place expression: %", tag)
         }
@@ -56,13 +56,13 @@ fn compile_stmt(self: *SelfHosted, stmt: *FatStmt) Maybe(bool) = {
     }
 }
 
-fn decl_var_pattern(self: *SelfHosted, stmt: *FatStmt) Maybe(bool) #once = {
+fn decl_var_pattern(self: *SelfHosted, stmt: *FatStmt) Maybe(Ty(bool, bool)) #once = {
     @debug_assert(stmt.stmt&.is(.DeclVarPattern));
     bindings, value := (stmt.stmt.DeclVarPattern.binding.bindings&, stmt.stmt.DeclVarPattern.value&);
     if value.is_raw_unit() {
         // TODO: typecheck the pattern! this was fine a long time ago when this node was only made by closures. 
         stmt.stmt = .Noop;
-        return(Ok = true);
+        return(Ok = (true, false));
     };
     
     if bindings.len == 1 {
@@ -71,13 +71,13 @@ fn decl_var_pattern(self: *SelfHosted, stmt: *FatStmt) Maybe(bool) #once = {
         if b.var() { name |
             // TODO: could reduce the ast node but it doesn't matter. 
             @check(self.decl_var(name, b.ty&, value)) return;
-            return(Ok = value.done);
+            return(Ok = (value.done, false));
         };
         // match branch that doesn't specify an argument gets here. (because parser puts in fake Binding with name=None).
         // just to be safe, still keep the expression in case it somehow happens in a different situation and has side effects.
         stmt.stmt = (Eval = value[]);
         @check(self.compile_expr(stmt.stmt.Eval&, .None)) return;
-        return(Ok = stmt.stmt.Eval.done);
+        return(Ok = (stmt.stmt.Eval.done, false));
     };
     
     // So its not a tuple, we don't know how to destructure it (emit_bc does), but we can still type check it. 
@@ -115,7 +115,7 @@ fn decl_var_pattern(self: *SelfHosted, stmt: *FatStmt) Maybe(bool) #once = {
     
     // TODO: :mark_stmt_done 
 
-    (Ok = value.done)
+    (Ok = (value.done, false))
 }
 
 ::opt_map(Type, Type);
@@ -723,11 +723,24 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
                 f.hoisted_constants = true;
             };
             done := true;
+            dead := false;
             each f.body { stmt | 
-                new_done := @check(self.compile_stmt(stmt)) return;
-                stmt.done = true; // TODO: you probably want to check if inner expressions are done but this seems fine so far. 
-                done = new_done && done;
+                // TODO: maybe this is dumb. should give warning? 
+                //       but it makes it faster at compiling -boot-only because i do that by inserting `return()`
+                //       at the top of functions and this lets that just delete the unused code without checking it. 
+                if dead { 
+                    stmt.stmt = .Noop;
+                } else {
+                    new_done, new_dead := @check(self.compile_stmt(stmt)) return;
+                    dead = new_dead;
+                    stmt.done = true; // TODO: you probably want to check if inner expressions are done but this seems fine so far. 
+                    done = new_done && done;
+                };
             };
+            if dead {
+                f.result.expr = .Unreachable;
+            };
+                
             if requested&.is(.None) && !expr.ty.is_unknown() && !expr.ty.is_never() {
                 requested = (Specific = expr.ty);
             };
@@ -1003,6 +1016,10 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
                 @default => ();
             };
             expr.set(value, ty);
+        }
+        fn Unreachable() => {
+            expr.done = true;
+            expr.ty = Never; // :get_or_create_type
         }
         @default => @panic("TODO: unhandled node type %: %", expr.expr&.tag(), expr.log(self));
     };

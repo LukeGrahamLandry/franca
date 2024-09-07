@@ -2,8 +2,8 @@ Compiler :: *CompilerValue;
 CompilerValue :: @struct(pointer_to_pointer_to_selfhosted: rawptr);
 CompCtx :: @struct(data: Compiler, vtable: *ImportVTable);
 fn CRes($T: Type) Type = Result(T, rawptr);
- 
-Backend :: @enum(i64) (Aarch64, Cranelift); ::enum(Backend);
+
+Backend :: @enum(i64) (CompilerJit, Cranelift); ::enum(Backend);
 Arch :: @enum(i64) (Aarch64, X86_64, Wasm32);
 ExecStyle :: @enum(i64) (Jit, Aot);
 Os :: @enum(i64) (Macos, Linux, Windows);
@@ -21,7 +21,7 @@ ExportVTable :: @struct(
 ImportVTable :: @rec @struct(
     intern_string: @FnPtr(c: Compiler, s: Str) Symbol,
     get_string: @FnPtr(c: Compiler, s: Symbol) Str,
-    init_compiler: @FnPtr(comptime_arch: Backend, options: *BuildOptions) Compiler,
+    init_compiler: @FnPtr(options: *BuildOptions) Compiler,
     find_unique_func: @FnPtr(c: Compiler, name: Symbol) ?FuncId,
     // TODO: i want the meta program to be tracking these instead. 
     get_fns_with_tag: @FnPtr(c: Compiler, tag: Symbol) Slice(FuncId),
@@ -83,6 +83,7 @@ ComptimeEnvironment :: @struct(
     link_rename_arg: ?Type,
     push_x86_func: ?Type,
     compile_error_pointer: ?Type,
+    comptime_arch: ?Arch,
 );
 
 // Note: changing these default values requires rebuilding the compiler! (an extra time if the program you're interested in is the compiler).
@@ -101,7 +102,7 @@ BuildOptions :: @struct(
     deduplicate_bytecode: bool = true,
     debug_info: bool = false,
     wasm32: bool = false,  // :build_options_wasm
-    comptime_jit: Backend = .Aarch64,
+    comptime_jit: Backend = .CompilerJit,
     driver_vtable_ptr: *ExportVTable,
     driver_vtable_user_data: rawptr = 0.rawptr_from_int(),
     // This effects what emit_bc does for the @uninitilized ast node. 
@@ -185,6 +186,7 @@ Expr :: @tagged(
     Builtin: Symbol,
     ContextualField: Symbol,
     As: @struct(type: *FatExpr, value: *FatExpr),
+    Unreachable,
 );
 
 WaitingParse :: @struct(id: i64);
@@ -390,7 +392,7 @@ Field :: @struct(
 fn ast_alloc() Alloc = todo_allocator;
 
 // TODO: make the other enum varient builtin so you can use it and still override eq. because my order independence doesn't really work. 
-// TODO: unhandled switch case if i try to make this u8
+// TODO: unhandled switch case if i try to make this u8. becuase of comptime BakedEntry?
 Prim :: @enum(i64) (I8, I16, I32, I64, F64, F32, P64);
 
 BakedVarId :: @struct(id: u32);

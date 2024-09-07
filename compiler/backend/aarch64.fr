@@ -279,9 +279,10 @@ fn emit_inst(self: *EmitAsm, b_idx: usize, inst: Bc, i: usize) bool #once = {
             return(true);
         }
         fn CallDirect(f) => {
+            sig := self.body.decode_sig(f.sig);
             // TODO: use with_link for tail calls. need to "Leave holes for stack fixup code." like below
             // TODO: if you already know the stack height of the callee, you could just fixup to that and jump in past the setup code. but lets start simple.
-            self.dyn_c_call(f.sig) {
+            self.dyn_c_call(sig) {
                 if(f.tail, => self.emit_stack_fixup());
                 self.branch_func(f.f, !f.tail)
             };
@@ -340,7 +341,8 @@ fn emit_inst(self: *EmitAsm, b_idx: usize, inst: Bc, i: usize) bool #once = {
         }
         fn CallFnPtr(f) => {
             // TODO: tail call
-            self.dyn_c_call(f.sig) {
+            sig := self.body.decode_sig(f.sig);
+            self.dyn_c_call(sig) {
                 // dyn_c_call will have popped the args, so now stack is just the pointer to call
                 callee := self.state.stack&.pop().expect("enough stack for call");
                 // TODO: this does redundant spilling every time!
@@ -423,7 +425,7 @@ fn emit_inst(self: *EmitAsm, b_idx: usize, inst: Bc, i: usize) bool #once = {
             };
         }
         fn Switch(i) => {
-            cases := self.body.switch_payloads.index(i);
+            cases := self.body.switch_payloads.index(i.zext());
             self.emit_switch(cases);
             return(true);
         }
@@ -950,7 +952,7 @@ fn load_imm(self: *EmitAsm, reg: i64, value: i64) void = {
 
 // Note: comp_ctx doesn't push the ctx here, bc needs to do that. this it just does the call with an extra argument.
 /// <arg:n> -> <ret:m>
-fn dyn_c_call(self: *EmitAsm, sig: PrimSig, $do_call: @Fn() void) void = {
+fn dyn_c_call(self: *EmitAsm, sig: *PrimSig, $do_call: @Fn() void) void = {
     self.stack_to_ccall_reg(sig.args);
     self.spill_abi_stompable();
     // TODO: don't spill!

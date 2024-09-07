@@ -243,6 +243,7 @@ impl<'z, M: Module> Emit<'z, M> {
                     self.stack.push(v);
                 }
                 Bc::CallDirect { f, tail, sig } => {
+                    let sig = self.body.sig_paylods[sig as usize];
                     let args = &self.stack[self.stack.len() - sig.arg_slots()..self.stack.len()];
 
                     // I want to allow mixing backends so you could ask for better optimisation for specific comptime functions
@@ -311,6 +312,7 @@ impl<'z, M: Module> Emit<'z, M> {
                     }
                 }
                 Bc::CallFnPtr { sig, .. } => {
+                    let sig = self.body.sig_paylods[sig as usize];
                     let cl_sig = builder.import_signature(self.make_sig(sig));
                     let first_arg = self.stack.len() - sig.arg_slots();
                     let callee = self.stack[first_arg - 1];

@@ -210,16 +210,17 @@ fn CodeGen($B: Type) Type = {
                 (fn CallDirect(call) => { //  f, tail, sig
                     f := self.program.follow_redirects(call.f); // HACK to fix redirects added by deduplication
                     self.pending&.push(f); // TODO: callees list from compiler should make this redundant but im afraid.
-                    
-                    arg_count: i64 = call.sig&.arg_slots();
+                   
+                    sig := self.body.decode_sig(call.sig); 
+                    arg_count: i64 = sig.arg_slots();
                     args := self.stack.items().slice_last(arg_count).expect("enough args on stack for call");
-                    ret := self.backend&.inst_call(args, call.sig, f, call.tail, .None);
+                    ret := self.backend&.inst_call(args, sig[], f, call.tail, .None);
                     self.stack.len -= arg_count;
-                    if(call.sig.no_return){
+                    if sig.no_return {
                         self.backend&.inst_trap();
                         break();
                     };
-                    if(call.tail){
+                    if call.tail {
                         // TODO: do this properly
                         self.backend&.inst_return(ret);
                         break();
@@ -227,11 +228,12 @@ fn CodeGen($B: Type) Type = {
                     self.stack&.push_all(ret);
                 });
                 (fn CallFnPtr(call) => {
+                    sig := self.body.decode_sig(call.sig);
                     // TODO: better error message if you don't put the type annotation here. 
-                    arg_count: i64 = call.sig&.arg_slots();
+                    arg_count: i64 = sig.arg_slots();
                     ptr := self.stack.items()[self.stack.len.sub(arg_count).sub(1)];
                     args := self.stack.items().slice_last(arg_count).expect("enough args on stack for call");
-                    ret := self.backend&.inst_call_ptr(args, call.sig, ptr, .None);
+                    ret := self.backend&.inst_call_ptr(args, sig[], ptr, .None);
                     self.stack.len -= arg_count;
                     self.stack.len -= 1;
                     self.stack&.push_all(ret);
@@ -335,7 +337,7 @@ fn CodeGen($B: Type) Type = {
                     self.backend&.inst_copy(from, to, bytes);
                 });
                 fn Switch(idx) => {
-                    info := self.body.switch_payloads.index(idx);
+                    info := self.body.switch_payloads.index(idx.zext());
                     value := self.stack&.pop().unwrap();
                     self.backend&.inst_switch(info, value);
                     for info { case |

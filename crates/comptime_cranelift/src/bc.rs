@@ -35,8 +35,8 @@ pub struct BbId(pub u16);
 #[repr(C, i64)]
 #[derive(Clone, Debug, Copy, PartialEq)]
 pub enum Bc {
-    CallDirect { sig: PrimSig, f: FuncId, tail: bool },
-    CallFnPtr { sig: PrimSig },
+    CallDirect { sig: u32, f: FuncId, tail: bool },
+    CallFnPtr { sig: u32 },
     PushConstant { value: i64, ty: Prim },
     JumpIf { true_ip: BbId, false_ip: BbId, slots: u16 },
     Goto { ip: BbId, slots: u16 },
@@ -61,7 +61,7 @@ pub enum Bc {
     Ret2((Prim, Prim)),
     Nop,
     Intrinsic(Intrinsic),
-    Switch(i64),
+    Switch(u32),
 }
 
 #[repr(C)]
@@ -144,7 +144,7 @@ pub struct FnBody {
     pub func: FuncId,
     _name: u32,
     pub switch_payloads: Vec<Vec<SwitchPayload>>,
-
+    pub sig_payloads: Vec<PrimSig>,
 }
 
 #[repr(C)]
