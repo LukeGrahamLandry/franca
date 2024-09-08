@@ -11,4 +11,3 @@
 - compiler_gui: uses the compiler as a libary to display introspection about a program (lib:sokol, lib:dearimgui)
 - repl: a franca repl using the comptime jit.
 - count: counts the number of code lines in a franca file.
-- x64_encoding: test my opcode encoding against a disasembler (cli:llvm-mc)

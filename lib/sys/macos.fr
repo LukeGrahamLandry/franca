@@ -1,0 +1,77 @@
+fn _NSGetArgc() *i64 #libc;
+fn _NSGetArgv() **CStr #libc;
+fn _NSGetExecutablePath(buf: *u8, len: *i64) voidResult #libc;
+
+////////////////
+/// Objective C
+// https://opensource.apple.com/source/objc4/objc4-709/runtime/runtime.h.auto.html
+// https://opensource.apple.com/source/objc4/objc4-706/runtime/objc.h.auto.html
+// TODO: this could be seperate from macos but my impression is that nobody else uses it. 
+
+ObjCClass    :: @struct(_: rawptr);
+ObjCObject   :: @struct(isa: ObjCClass);
+ObjCId       :: *ObjCObject;
+ObjCSelector :: @struct(_: rawptr);
+
+// TODO: fix loop trying to compile if no driver to supply these. 
+fn objc_msgSend() void #import("objc");  // this is magic! use it by casting to a function pointer of the right type
+fn objc_getClass(name: CStr) ObjCClass #import("objc");
+fn sel_getUid(name: CStr) ObjCSelector #import("objc");
+fn objc_allocateClassPair(superclass: ObjCClass, name: CStr, extraBytes: i64) ObjCClass #import("objc");
+fn objc_registerClassPair(cls: ObjCClass) void #import("objc");
+// imp is a function pointer (reciever, selector, <any other args>)
+fn class_addMethod(cls: ObjCClass, name: ObjCSelector, imp: rawptr, types: CStr) bool #import("objc"); 
+
+// This makes a point of forcing all selectors (method + param names) to be constant,
+// so the calls to sel_getUid could (in theory) be batched at program startup. 
+fn objc_msg(ret_reciever_arg_pattern: FatExpr) FatExpr #macro = {
+    a := ret_reciever_arg_pattern;
+    @ct_assert(a.expr&.is(.Tuple), a.loc, "@objc_msg expected 3 args");
+    parts := a.expr.Tuple&;
+    @ct_assert(parts.len == 3, a.loc, "@objc_msg expected 3 args");
+    
+    ret_ty      := const_eval_type(parts[0]);
+    reciever    := compile_ast(parts[1]);
+    arg_pattern := parts[2];
+    
+    args_type: List(Type) = list(temp());
+    args_type&.push(reciever.ty);
+    args_type&.push(ObjCSelector);
+    args: List(FatExpr) = list(ast_alloc());
+    args&.push(reciever);
+    args&.push(@{ panic("this will be replaced with the selector uid") });
+    selector: List(u8) = list(ast_alloc());
+    
+    @match(arg_pattern.expr&) {
+        fn StructLiteralP(p) => {
+            each p.bindings { b |
+                name := or b.ident() {
+                    compile_error("Expected param name", p.loc)
+                };
+                value := or b.default {
+                    compile_error("Expected param value", p.loc)
+                };
+                @fmt(selector&, "%:", name.str());
+                value := compile_ast(value);
+                args&.push(value);
+                args_type&.push(value.ty);
+            };
+        };
+        @default => {
+            name := const_eval_string(arg_pattern);
+            selector&.push_all(name);  
+        };
+    };
+    
+    arg_ty := Ty(args_type.items());
+    selector := selector.items().sym().c_str();
+    // TODO: you don't want to call this every time, but you can't do it at comptime.  :SLOW
+    args[1] = @{ sel_getUid(@[@literal selector]) };  
+    arg_pattern.expr = (Tuple = args.rs());
+    arg_pattern.ty = UnknownType;
+    arg_pattern.done = false;
+    @{
+        f := @run assume_types_fn(@[@literal arg_ty], @[@literal ret_ty], @as(rawptr) @as(FnPtr(void, void)) objc_msgSend);
+        f(@[arg_pattern])
+    }
+}

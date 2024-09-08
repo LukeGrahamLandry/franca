@@ -1,10 +1,37 @@
-## (Sep 6)
+## (Sep 8)
+
+- working on calling objective-c to make a window with the raw macos apis.
+  very very confusing time with strange warnings about passing the wrong flag values but with numbers i wasnt using.
+  problem was that i was passing a struct of 4 f64 as a pointer to memory instead of in 4 registers. (arm).
+  because i can't read apparently and assumed the calling convention was the same as ints (only reg if <2).
+  so that pointer was being seen as the first flag int and it was using whatever garbage happened to be in the float registers for the rect.
+  note: its not an objective-c thing, i have the normal c-abi wrong.
+  :float_struct_cc still need to actually fix that.
+- x64: handle calls to known address with no args/rets.
+  jump distance is from the end of the instruction! so you need to know how big the instruction is when writting the offset.
+- working on :trivial becuase it annoys me.
+  for functions like List/Slice, it doesn't realize they're just a value because thier body becomes noops.
+  changed the criteria for a block result replacing the whole block so it does it for noops nbot just empty.
+  and do it even if that block has a return label if the result is just a value since it can't possibly early return.
+  so now i think at least it doesn't actually call them,
+  but it still jits them because to compile the body it suspends on Jit.
+  i was hoping i could just catch those trivial ones in emit_bc_and_jit and not bother since they'd be snatched anyway but it didn't make much difference.
+  it was like 100 not 600 and it didn't make the 600 go down.
+  i guess you still end up with calls to Option which isn't .SyntheticImmEval or .ComptimeOnly.
+
+## (Sep 7)
 
 - store PrimSig in a seperate array from the bc so the instructions are less chunky.
 - fixed not checking switch_payloads when deduplicating and made a test for it
 
 - such a painful time on -spam now tries to get_info too soon so i didn't notice that the error was different when i tried to debug it.
   real problem was just an extra == .Cranelift check but uuuuughghhgh im stupid.
+
+- did the pumbing to get fuctions jitted with my own x64 backend.
+  currently any functions that just push constants and return 0/1/2 (no args, no vars, no calls, etc),
+  are done by me and the rest are given to cranelift.
+  kinda embarrassing that my:cl is 617:3391 already (when compiling the compiler). so 15% of the functions i jit are trivial.
+  :trivial
 
 ## (Sep 6)
 

@@ -1,0 +1,182 @@
+#!/usr/bin/env franca
+//! Based on https://github.com/zserge/fenster/blob/main/fenster.h 
+//! The original is `MIT License Copyright (c) 2022 Serge Zaitsev`
+//! I just do it on macos so far tho, so this is mostly an example of how to call objective c code. 
+// TODO: it doesn't work tho
+// TODO: I'm not sure if i have to manually adjust reference counts on objects. I'm probably just leaking everything in this example. 
+
+CGSize  :: @struct(width: f64, height: f64);
+CGPoint :: @struct(x: f64, y: f64);
+CGRect  :: @struct(origin: CGPoint, size: CGSize);
+
+NSApp :: @static(ObjCId);
+buf :: @static([]u8);
+::ptr_utils(ObjCObject);
+
+fn main() void = {
+    println("===== THIS IS NOT A WORKING EXAMPLE =====");
+    
+    // TODO: have extern variables with #import just like functions. 
+    //       so you can have the driver dlopen for you when jitting or have the linker ask for it when doing aot. 
+    // You do have to open this dylib to have the classes exist when running at comptime (or i assume pass -framework Cocoa for aot)
+    // even if we didn't want NSDefaultRunLoopMode
+    appkit := dlopen("/System/Library/Frameworks/AppKit.framework/AppKit".sym().c_str(), DlFlag.Lazy);
+    @assert(!appkit.lib.is_null(), "failed to open appkit");
+    
+    width := 300.0;
+    height := 300.0;
+    
+    NSApplication := class("NSApplication");
+    NSWindow := class("NSWindow"); 
+    NSObject := class("NSObject");
+    NSView   := class("NSView");
+    NSString := class("NSString");
+    
+    NSApp[] = @objc_msg(ObjCId, NSApplication, "sharedApplication");
+    @assert(!NSApp[].is_null(), "NSApp null");
+    // ~After~ calling sharedApplication, you can appkit.get_constant(ObjCId, "NSApp").unwrap() and get the same value it returns. 
+    // Which is the same as a c program declaring NSApp as an extern variable, but there's no need. 
+    
+    ok := @objc_msg(bool, NSApp[], (setActivationPolicy = 0));
+    @assert(ok, "setActivationPolicy");
+    window := @objc_msg(ObjCId, NSWindow, "alloc");
+    @assert(!window.is_null());
+    
+    // TODO: pass struct of 4 floats in registers. https://godbolt.org/z/3sacKsKW6
+    //       https://student.cs.uwaterloo.ca/~cs452/docs/rpi4b/aapcs64.pdf
+    //       i really need to generate a bunch of c abi tests.  
+    //rect: CGRect = (origin = (x = 0, y = 0), size = (width = width, height = height));
+    //window = @objc_msg(ObjCId, window, (initWithContentRect = rect, styleMask = 3, backing = 2, defer = false));
+    //rect: CGRect = (origin = (x = 0, y = 0), size = (width = width, height = height));
+    // :float_struct_cc
+    ass_calling_convention_hack :: fn(a: f64, b: f64, c: f64, d: f64) void #noinline = ();
+    ass_calling_convention_hack(0, 0, width, height);
+    window = @objc_msg(ObjCId, window, (initWithContentRect = (), styleMask = 3, backing = 2, defer = false));
+    
+    // We have to give it a class with a callback
+    Delegate := objc_allocateClassPair(NSObject, "SoftDrawDelegate".sym().c_str(), 0);
+    class_addMethod(Delegate, "windowShouldClose:".sym().c_str().sel_getUid(), should_close_callback, "c@:@".sym().c_str());
+    objc_registerClassPair(Delegate);
+    should_close_callback: rawptr : fn(self: ObjCId, sel: ObjCSelector, window: ObjCId) bool = {
+        println("close");
+        @objc_msg(void, NSApp[], (terminate = NSApp[]));
+        true
+    };
+    delegate := @objc_msg(ObjCId, Delegate, "alloc");
+    delegate = @objc_msg(ObjCId, delegate, "init");
+    @assert(!delegate.is_null());
+    @objc_msg(void, window, (setDelegate = delegate));
+    
+    // Now another...
+    View := objc_allocateClassPair(NSView, "SoftDrawView".sym().c_str(), 0);
+    class_addMethod(View, "drawRect:".sym().c_str().sel_getUid(), draw_rect_callback, "i@:@@".sym().c_str());
+    objc_registerClassPair(View);
+    
+    view := @objc_msg(ObjCId, View, "alloc");
+    view = @objc_msg(ObjCId, view, "init");
+    @assert(!view.is_null());
+    @objc_msg(void, window, (setContentView = view));
+    // TODO: could smuggle a pointer through to the callback with objc_setAssociatedObject 
+    
+    title := @objc_msg(ObjCId, NSString, (stringWithUTF8String = "SoftDraw Demo".sym().c_str()));
+    @assert(!title.is_null());
+    @objc_msg(void, window, (setTitle = title));
+    @objc_msg(void, window, (makeKeyAndOrderFront = ObjCId.zeroed()));
+    @objc_msg(void, window, "center");
+    @objc_msg(void, NSApp[], (activateIgnoringOtherApps = true));
+    
+    println("Hello World");
+    
+    NSDefaultRunLoopMode := appkit.get_constant(ObjCId, "NSDefaultRunLoopMode").unwrap();
+    @assert(!NSDefaultRunLoopMode.is_null(), "NSApp null");
+    loop {  // TODO: do i have to do reference counting things? 
+        content := @objc_msg(ObjCId, window, "contentView");
+        @assert(!content.is_null());
+        @objc_msg(void, content, (setNeedsDisplay = true));
+        
+        MAX_u64 :: 0xFFFFFFFFFFFFFFFF;
+        event := @objc_msg(ObjCId, NSApp[], (nextEventMatchingMask = MAX_u64, untilDate = ObjCId.zeroed(), inMode = NSDefaultRunLoopMode, dequeue = true));
+
+        if !event.is_null() {
+            type := @objc_msg(i64, event, "type");
+            println(type);
+            // TODO: actually handle the event
+            @objc_msg(void, NSApp[], (sendEvent = event));
+        };
+        usleep(@as(u32) trunc(1000.mul(16)));
+        
+    };
+}
+draw_rect_callback: rawptr : fn(self: ObjCId, sel: ObjCSelector, r: CGRect) void = {
+    println("draw");
+    // TODO: actually draw stuff, but we never get here...
+};
+    
+fn class($name: Str) ObjCClass = {
+    c := objc_getClass(name.sym().c_str());
+    @assert(!c._.is_null(), name);
+    c
+}
+
+fn get_constant(lib: DlHandle, $T: Type, $name: Str) ?T #generic = {
+    ref := dlsym(lib, name.sym().c_str());
+    if(ref.is_null(), => return(.None));
+    (Some = T.ptr_from_raw(ref)[])
+}
+
+// TODO: idk why i didn't use ComptimeLibs. should do that
+fn driver(vtable: *ImportVTable) void #export = {    
+    src := "#include_std(\"lib/core.fr\");".clone(temp());
+    the_code := temp().read_to_string("examples/soft_draw.fr");  // TODO: don't depend on cwd.
+    src&.push_all(the_code.items());
+    
+    Data :: @struct(objc: DlHandle, cg: DlHandle, vtable: *ImportVTable);
+    objc := dlopen(c_str(@symbol "/usr/lib/libobjc.dylib"), DlFlag.Lazy);
+    @assert(!objc.lib.is_null(), "failed to open objc");
+    cg := dlopen(c_str(@symbol "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics"), DlFlag.Lazy);
+    @assert(!cg.lib.is_null(), "failed to open coregraphics");
+    data: Data = (objc = objc, cg = cg, vtable = vtable);
+    data := Data.raw_from_ptr(data&);
+    opts := vtable.default_build_options();
+    opts.driver_vtable_ptr.resolve_comptime_import = (Some = comptimelibs_resolve_import);
+    opts.driver_vtable_user_data = data;
+
+    // TODO: be able to use overloading and manually resolve when you need a function pointer with the first arg type erased. 
+    comptimelibs_resolve_import :: fn(userdata: rawptr, comp: Compiler, f: FuncId, lib_name: Symbol, fn_name: Symbol) ?rawptr = {
+        data := Data.ptr_from_raw(userdata);
+        ctx := data.vtable.with(comp);
+        lib_name := ctx.get_string(lib_name);
+        fn_name := ctx.get_string(fn_name); // TODO: expose get_c_str function
+        lib := @switch(lib_name) {
+            @case("objc") => data.objc;
+            @case("CoreGraphics") => data.cg;
+            @default => panic("TODO: this will hang because compiler is dumb rn.");
+        }
+        // TODO: dont unwrap here and let this function return if available for jit and aot seperatly
+        f := dlsym(lib, fn_name.maybe_borrow_cstr(temp()));
+        @assert(!f.is_null(), "Missing function '%' in '%'", fn_name, lib_name);
+        (Some = f)
+    };
+    comp := vtable.new_with_src(src.items(), opts);
+    ctx := vtable.with(comp);
+    
+    main_sym := {vtable.intern_string}(comp, "main");
+    main_f := {vtable.find_unique_func}(comp, main_sym).unwrap();
+    {vtable.compile_func}(comp, main_f, .Jit).unwrap();
+
+    ptr := {vtable.get_jitted_ptr}(comp, main_f).unwrap();
+    f := assume_types_fn(Arg = void, Ret = void, ptr = ptr);
+    f();
+    
+    ir_text := {vtable.emit_llvm}((data = comp, vtable = vtable), temp(), @slice (main_f), .ExportWithNames, get_comptime_arch());
+    out := open_temp_file();
+    for(ir_text&){bucket|
+        out.fd&.write(bucket);
+    };
+    @println("Write llvm ir to %", out&.s_name());
+    // TODO: get these from the lib. 
+    args := @slice ("-x", "ir", out&.s_name(), "-o", "a.out", "-framework", "Cocoa");    
+    @println("building aot exe: %", args);
+    success := run_cmd_blocking("clang", args);
+    assert(success, "clang failed");
+}

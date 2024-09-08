@@ -20,7 +20,7 @@ If you just want to see what the syntax looks like, click on examples or compile
 - manual memory management with explicit allocators (like zig)
 - no seperate build system. write a program that builds your program (like jai)
 - custom asm backend for quick debug builds, optional llvm backend for optimised release builds (like zig/jai)
-- use c abi functions/structs with no overhead (like everything)
+- use c abi\* functions/structs with no overhead (like everything)
 - ships with [sokol](https://github.com/floooh/sokol) bindings so its not a research exercise if you just want to put a triangle on the screen.
 
 ## Backends
@@ -47,6 +47,7 @@ there must be proportional terrible things or I'm probably just lying.
 - Sadly I don't have incremental builds. every time you run a program, you recompile the standard library for comptime. (...but its so fast it doesn't matter yet).
 - Sadly the compiler only runs on aarch64. (the llvm backend can cross compile to other targets tho, but I can't run comptime code on them yet).
   - ie. it is not yet a language that just... runs on a computer, whatever computer, nobody cares.
-- Sadly my implementation of the C ABI is buggy. It's good enough for the example programs tho.
+- \*Sadly my implementation of the C ABI is buggy. It's good enough for the example programs tho.
+  - arm: obvious problems are passing struct(u32, u32) in 2 registers instead of 1 and passing struct(f64, f64, f64, f64) in memory instead of 4 registers.
 - Sadly I don't have a nice debug mode that detects undefined behaviour (overflow, wrong tagged field, etc).
 - Sadly I don't have good modules / namespace management.

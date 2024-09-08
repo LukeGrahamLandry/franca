@@ -28,7 +28,11 @@ fn compile_stmt(self: *SelfHosted, stmt: *FatStmt) Maybe(Ty(bool, bool)) #once =
         fn Noop() => (Ok = (true, false));
         fn Eval(expr) => {
             @check(self.compile_expr(expr, .None)) return;
-            (Ok = (expr.done, expr.ty.is_never()))
+            res := (expr.done, expr.ty.is_never());
+            if expr.expr&.is(.Value) && expr.ty == void { // :get_or_create_type
+                stmt.stmt = .Noop;
+            };
+            (Ok = res)
         }
         fn DeclVar(f) => {
             assert(f.name.kind != .Const, "hit unhoisted constant");
@@ -724,22 +728,24 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
             };
             done := true;
             dead := false;
+            all_nop := true;
             each f.body { stmt | 
                 // TODO: maybe this is dumb. should give warning? 
                 //       but it makes it faster at compiling -boot-only because i do that by inserting `return()`
-                //       at the top of functions and this lets that just delete the unused code without checking it. 
-                //if dead { 
-                //    stmt.stmt = .Noop;
-                //} else {
+                //       at the ftop of functions and this lets that just delete the unused code without checking it. 
+                if dead { 
+                    stmt.stmt = .Noop;
+                } else {
                     new_done, new_dead := @check(self.compile_stmt(stmt)) return;
                     dead = new_dead;
                     stmt.done = true; // TODO: you probably want to check if inner expressions are done but this seems fine so far. 
                     done = new_done && done;
-                //};
+                };
+                all_nop = all_nop && stmt.stmt&.is(.Noop);
             };
-            //if dead {
-            //    f.result.expr = .Unreachable;
-            //};
+            if dead {
+                f.result.expr = .Unreachable;
+            };
                 
             if requested&.is(.None) && !expr.ty.is_unknown() && !expr.ty.is_never() {
                 requested = (Specific = expr.ty);
@@ -758,7 +764,8 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
             };
             
             expr.done = f.result.done && done;
-            if f.body.is_empty() && f.ret_label.is_none() {
+            // this should help imm_eval not actually call things that are just a value (tho for now it still jits them -- Sep 8)
+            if all_nop && f.ret_label.is_none().or(f.result.expr&.is(.Value)) {
                 expr[] = f.result[]; // Not required but makes debugging easier cause there's less stuff.
             };
         }
@@ -3539,40 +3546,7 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
         //       i could just get rid of it and always generate a function that passes the arguments.    -- Jul 31
         if expr.expr&.is(.Call) && f.arg.is_raw_unit() && f.f.expr&.is(.Value) && self.get_type(f.f.ty).is(.Fn).or(f.f.ty == FuncId) {
             fid := FuncId.assume_cast(f.f.expr.Value.bytes&)[];
-            
-            func := self.get_function(fid);
-            
-            // note: this seems to help cranelift
-            @if_let(func.body&) fn Normal(e) => {
-                @if_let(e.expr&) fn Value(e) => {
-                    expr.expr = (Value = (bytes = e.bytes&.deep_clone(self.get_alloc()), coerced = false));
-                    expr.done = true;
-                    return(Ok = e.bytes&.deep_clone(self.get_alloc()));
-                };  
-            };
-            
-            if self.get_fn_callable(fid) { fn_ptr | 
-                hack := self&;
-                args: RsVec(i64) = empty();
-                @debug_assert(!func.get_flag(.AnyConstArgs));
-                // TODO: it would be nice if this were true... 
-                //@if_let(func.body) fn Normal(expr) => {
-                //    @debug_assert(expr.done);
-                //};
-                f_ty := func.finished_ty().expect("known type once compiled");
-                if f.arg.ty != f_ty.arg {| // TODO
-                    return(@err("TODO: type mismatch"));
-                };
-                @debug_assert(func.cc.unwrap() == .CCallReg, "expected cc CCallReg");
-                @log_event("imm_eval direct % %", fid.as_index(), self.pool.get(func.name)) self;
-                // SAFETY: we're passing comp_ctx=false so it won't try to use the pointer as a real CompilerRs.
-                result := hack&.call_dynamic(fn_ptr.int_from_rawptr(), f_ty&, args&, false);
-                self.dispatch.enclosing_function = old_func;
-                result := @try(result) return;
-                expr.expr = (Value = (bytes = result&.deep_clone(self.get_alloc()), coerced = false));
-                expr.done = true;
-                return(Ok = result);
-            };
+            assert(self.get_fn_callable(fid).is_none(), "ICE: i expect it to never be ready by now? otherwise we would have done the call in check_quick_eval?");
             self.dispatch.enclosing_function = old_func;
             return(Suspend = self.wait_for(Jit = fid));
         };
