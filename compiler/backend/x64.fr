@@ -1,1 +1,209 @@
 
+EmitX64 :: @struct(
+    program: CompilerRs,
+    asm: *Jitted,
+    vars: List(?SpOffset),
+    next_slot: SpOffset,
+    release_stack: List(*u8),
+    state: BlockState,
+    block_ips: List(?*u8),
+    clock: u16,
+    log_asm_bc: bool,
+    body: *FnBody,
+    asm_out: List(u8),
+);
+
+fn new(compile: CompilerRs, body: *FnBody) EmitX64 #once = {
+    (
+        program = compile,
+        asm = compile.jitted&,
+        vars = list(temp()),
+        next_slot = (id = 0),
+        release_stack = list(temp()),
+        state = (stack = list(temp()), free_reg = list(temp()), free_reg_float = list(temp()), open_slots = list(temp())),
+        block_ips = list(temp()),
+        clock = 0,
+        log_asm_bc = false,
+        body = body,
+        asm_out = (
+            maybe_uninit = (ptr = compile.jitted.next.as_u8(), len = 9999), // TODO: use real cap
+            len = 0,
+            gpa = Alloc.zeroed(), // no growing!
+        ),
+    )
+}
+
+fn as_u8(ptr: *u32) *u8 = {
+    ptr := u32.raw_from_ptr(ptr);
+    ptr := u8.ptr_from_raw(ptr);
+    ptr
+}
+
+// Note: you can only use Self once because this doesn't reset fields.
+fn compile(self: *EmitX64, f: FuncId) Result(rawptr, Str) #once = {
+    func := self.program[f]&;
+    self.log_asm_bc = func.get_flag(.LogAsmBc);
+    @try(self.bc_to_asm(f)) return;
+    
+    //out: List(u8) = list(temp());
+    //self.program[][].log_bc(func, self.body, out&);
+    //println(out.items());
+    
+    len, extra := self.asm_out.len.div_mod(4);
+    range(0, 4 - extra) { _ | 
+        self.asm_out&.push(@as(u8) PrimaryOp.Int3);
+    };
+    
+    if TRACE_ASM.or(self.log_asm_bc).or(=> func.get_flag(.LogAsm)) {
+        bytes := self.asm_out.items();
+        addr := u8.int_from_ptr(bytes.ptr);
+        @println("% is at addr=%", self.program.pool.get(func.name), addr);
+        self.program[][].codemap.show_error_line(func.loc);
+        @if(USE_LLVM_DIS) print_llvm_mc_dis(bytes);
+    };
+    
+    self.asm.mark_start(f);
+    self.program.jitted.next = self.program.jitted.next.offset(len + 2);
+    asm := self.asm.save_current(f);
+    (Ok = u32.raw_from_ptr(asm.ptr))
+}
+
+fn bc_to_asm(self: *EmitX64, f: FuncId) Result(void, Str) #once = {
+    ff := self.program[f]&;
+    @if(TRACE_ASM) @println("=== F% % ===", f.as_index(), self.program.pool.get(ff.name));
+
+    func := self.body;
+    self.next_slot = (id = 0);
+    self.vars = .None.repeated(func.vars.len, temp());
+    self.block_ips = .None.repeated(self.body.blocks.len, temp());
+
+    //self.asm.mark_start(f); // TODO
+    sig := self.body.signeture;
+    if sig.first_arg_is_indirect_return {
+        return(Err = "indirect ret");
+    };
+    
+    if sig.args.len != 0 {
+        return(Err = "args");
+    };
+    
+    arg_regs := @slice(X86Reg.rdi, X86Reg.rsi, X86Reg.rdx, X86Reg.rcx, X86Reg.r8, X86Reg.r9);
+    // Any registers not containing args can be used.
+    int_count := 0;
+    for arg_regs.slice(int_count, arg_regs.len) { r |
+        self.state.free_reg&.push(@as(i64) r);
+    };
+    @try(self.emit_block(0, false)) return;
+
+    slots := self.next_slot.id;
+    if slots != 0 {
+        panic("not handled: slots");
+    };
+    .Ok
+}
+
+fn emit_block(self: *EmitX64, b: i64, args_not_vstacked: bool) Result(void, Str) = {
+    if(self.block_ips[b].is_some(), => return(.Ok));
+    self.block_ips[b] = (Some = self.asm.next.as_u8());
+    block := self.body.blocks[b]&;
+
+    self.clock = block.clock;
+    // TODO: handle normal args here as well.
+    if args_not_vstacked {
+        self.state.free_reg&.clear();
+        self.state.free_reg_float&.clear();
+        if block.arg_prims.len != 0 {
+            return(Err = "block args");
+        };
+        arg_regs := @slice(X86Reg.rdi, X86Reg.rsi, X86Reg.rdx, X86Reg.rcx, X86Reg.r8, X86Reg.r9);
+        int_count := 0;
+        for arg_regs.slice(int_count, arg_regs.len) { r |
+            self.state.free_reg&.push(@as(i64) r);
+        };
+    };
+    @debug_assert(self.state.stack.len >= block.arg_prims.len);
+    func := self.body;
+    is_done := false;
+    block := self.body.blocks[b]&;
+    range(0, func.blocks[b].insts.len) { i |
+        if(is_done, => return(.Ok));
+        inst := block.insts[i];
+        is_done = @try(self.emit_inst(b, inst, i)) return;
+        @if(TRACE_ASM) @println("%:% % => % | free: %", b, i, inst&.tag(), self.state.stack.items(), self.state.free_reg.items());
+    };
+    @debug_assert(is_done, "emitted all blocks but no function terminator");
+    .Ok
+}
+
+fn emit_inst(self: *EmitX64, b_idx: usize, inst: Bc, i: usize) Result(bool, Str) #once = {
+    @if(TRACE_ASM) @println("[%:%] %", b_idx, i, self.state.stack.items());
+    @match(inst) {
+        fn Nop() => ();
+        fn GetCompCtx() => {
+            addr := (**SelfHosted).int_from_ptr(self.program);
+            self.state.stack&.push(Literal = addr);
+        }
+        fn NoCompile() => {
+            @panic("tried to compile unreachable block in %", self.program[self.body.func]&.log(self.program[][]));
+        }
+        fn PushConstant(f) => self.state.stack&.push(Literal = f.value);
+        fn PushGlobalAddr(id) => {
+            ptr, _ := self.program[][].get_baked(id)[];
+            self.state.stack&.push(Literal = ptr.int_from_rawptr());
+        }
+        fn Ret0()     => return(self.emit_return(empty()));
+        fn Ret1(prim) => return(self.emit_return(@slice(prim)));
+        fn Ret2(prim) => return(self.emit_return(@slice(prim._0, prim._1)));
+        @default => return(Err = "unhandled inst");
+    };
+
+    (Ok = false)
+}
+
+fn emit_return(self: *EmitX64, sig: [] Prim) Result(bool, Str) = {
+    @switch(sig.len) {
+        @case(0) => ();
+        @case(1) => {
+            if(!(sig[0] != .F32 && sig[0] != .F64), => return(Err = "TODO: floats"));
+            self.pop_to_specific_reg(X86Reg.rax);
+        };
+        @case(2) => {
+            if(!(sig[1] != .F32 && sig[1] != .F64), => return(Err = "TODO: floats"));
+            self.pop_to_specific_reg(X86Reg.rdx);
+            if(!(sig[0] != .F32 && sig[0] != .F64), => return(Err = "TODO: floats"));
+            self.pop_to_specific_reg(X86Reg.rax);
+        };
+        @default => @panic("ICE: invalid bytecode. tried to return %", sig);
+    };
+    // TODO: self.emit_stack_fixup();
+    self.asm_out&.push(@as(u8) PrimaryOp.Ret);
+    (Ok = true)
+}
+
+fn pop_to_specific_reg(self: *EmitX64, reg: X86Reg) void = {
+    val := self.state.stack&.pop().unwrap();
+    self.in_specific_reg(reg, val);
+}
+
+fn in_specific_reg(self: *EmitX64, reg: X86Reg, val: AsmVal) void = {
+    @match(val) {
+        fn Literal(x) => {
+            self.load_imm(reg, x);
+        }
+        @default => panic("unhandled in_reg");
+    };
+}
+
+i32_MAX :: 2147483647;
+i32_MIN :: -2147483648;
+
+fn load_imm(self: *EmitX64, reg: X86Reg, value: i64) void = {
+    fits_in_32 := value <= i32_MAX && value >= i32_MIN;
+    
+    if fits_in_32 {
+        encode_imm(self.asm_out&, reg, value);
+    } else {
+        value: u64 = value.bitcast();
+        self.asm_out&.encode_imm64(reg, value);
+    };
+}

@@ -18,6 +18,8 @@ PrimaryOp :: @enum(u8) (
     CallImm32 = 0xe8, // push return address to stack and then jump to an offset.
     JmpImm32 = 0xe9,  // ??? "Use of operand-size prefix in 64-bit mode may result in implementation-dependent behaviour"
     JmpImm8  = 0xeb,
+    Int3 = 0xcc,
+    MovImm64Base = 0xB8,
 );
 
 // (AddReg, OrReg, AndReg, SubReg, XorReg, CmpReg, MovReg)
@@ -136,7 +138,7 @@ fn pack_rex(rm__dest_or_addr: X86Reg, reg__src: X86Reg) u8 = {
 
 // for three arg instructions where you need to extend (reg, index, base)
 fn pack_rex_si(reg_modrm: X86Reg, base_sib: X86Reg, index_sib: X86Reg) u8 = {
-    REX_BASE_PREFIX :: 0b01001000;
+    REX_BASE_PREFIX :: 0b01001000;  // :W=1
     
     prefix: i64 = REX_BASE_PREFIX;
     x: i64 = @as(u4) reg_modrm;
@@ -222,6 +224,13 @@ fn encode_jmp(code: *List(u8), offset: i64) void = {
     code.push_u32(offset);
 }
 
+fn encode_imm64(out: *List(u8), reg: X86Reg, value: u64) void = {
+    out.push(pack_rex_si(reg, reg, reg)); // TODO: only one of these
+    x := @as(i64) (@as(u8) PrimaryOp.MovImm64Base).zext() + bit_and(@as(i64) reg, @as(i64) 0b111);
+    out.push(@as(u8) x.trunc());  // :W=1
+    out.push_u64(value);
+}
+
 // See tests/x86_64_jit.fr for how to use this. 
 fn asm_x64(arg: FatExpr, out: FatExpr) FatExpr #macro = {
     @ct_assert(arg.expr&.is(.Tuple), arg.loc, "Expected @asm_x64(Tuple...)");
@@ -262,4 +271,15 @@ fn push_u32(code: *List(u8), value: u32) void = {
     code.push(@as(u8) value.shift_right_logical(8).bit_and(0xFF).trunc());
     code.push(@as(u8) value.shift_right_logical(16).bit_and(0xFF).trunc());
     code.push(@as(u8) value.shift_right_logical(24).bit_and(0xFF).trunc());
+}
+
+fn push_u64(code: *List(u8), value: u64) void = {
+    code.push(@as(u8) value.bit_and(0xFF).trunc());
+    code.push(@as(u8) value.shift_right_logical(8).bit_and(0xFF).trunc());
+    code.push(@as(u8) value.shift_right_logical(16).bit_and(0xFF).trunc());
+    code.push(@as(u8) value.shift_right_logical(24).bit_and(0xFF).trunc());
+    code.push(@as(u8) value.shift_right_logical(32).bit_and(0xFF).trunc());
+    code.push(@as(u8) value.shift_right_logical(40).bit_and(0xFF).trunc());
+    code.push(@as(u8) value.shift_right_logical(48).bit_and(0xFF).trunc());
+    code.push(@as(u8) value.shift_right_logical(56).bit_and(0xFF).trunc());
 }

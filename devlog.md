@@ -1,5 +1,13 @@
 ## (Sep 6)
 
+- store PrimSig in a seperate array from the bc so the instructions are less chunky.
+- fixed not checking switch_payloads when deduplicating and made a test for it
+
+- such a painful time on -spam now tries to get_info too soon so i didn't notice that the error was different when i tried to debug it.
+  real problem was just an extra == .Cranelift check but uuuuughghhgh im stupid.
+
+## (Sep 6)
+
 - discovered the modrm/sib tables aren't actually that much information
 
 ## tiny cleanups (Sep 5)

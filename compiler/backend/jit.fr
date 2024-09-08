@@ -80,7 +80,18 @@ fn emit_bc_and_jit(program: *SelfHosted, f: FuncId) PRes #once = {
                     program.put_jitted_function(f, addr);
                 }
                 fn x86_64() => {
-                    call_cranelift();
+                    old := program.legacy_indirection.cast();
+                    a: EmitX64 = new(old, body);
+                    @match(a&.compile(f)) {
+                        fn Ok(addr) => {
+                            program.put_jitted_function(f, addr);
+                            program.my_jit += 1;
+                        }
+                        fn Err(msg) => {
+                            call_cranelift();
+                            program.cl_jit += 1;
+                        }
+                    };
                 }
                 fn wasm32() => panic("unreachable: compiler doesn't support wasm yet");
             };
@@ -133,7 +144,11 @@ fn print_llvm_mc_dis(arch: Str, hex: Str) void = {
 fn get_backend_vtable() *BackendImportVTable = {
     vtable := @static(BackendImportVTable);
     vtable.get_jitted_function = fn(self: *SelfHosted, f: FuncId) ?rawptr = {
-        self.jitted&.get_fn_old(f)
+        x := self.jitted&.get_fn_old(f);
+        if x.is_some() { // needed now with mixed backend
+            self.jitted&.bump_dirty();
+        };
+        x
     };
     vtable.put_jitted_function = put_jitted_function;
     vtable.get_jit_addr = fn(self: *SelfHosted, id: BakedVarId) rawptr = {
@@ -263,7 +278,7 @@ fn save_current(self: *Jitted, f: FuncId) []u32 #once = {
     //@debug_assert_eq(self.current_start as usize % 4, 0);
     // just a marker to make sure someone doesn't fall off the end of the function by forgetting to return.
     // also you can see it in the debugger disassembly so you can tell if you emitted a trash instruction inside a function or you're off the end in uninit memory. -- Apr 25
-    self.push(brk(0xDAED));
+    self.push(brk(0xDAED)); // TODO: x86 int3 or whatever
     self.current_start = self.next;
     // TODO: have a slice_from(start, to = end);
     (ptr = func_start, len = (end - start) / 4)
@@ -274,7 +289,7 @@ fn bump_dirty(self: *Jitted) void = {
     end := u32.raw_from_ptr(self.next);
     if beg != end {
         //@debug_assert_eq(self.next as usize, self.current_start as usize);
-        self.push(brk(0x3141));
+        self.push(brk(0x3141));  // TODO: x86 int3 or whatever
         len := end.int_from_rawptr() - beg.int_from_rawptr();
         
         prot := bit_or(@as(i64) MapProt.Exec, @as(i64) MapProt.Read);
