@@ -74,22 +74,21 @@ fn emit_bc_and_jit(program: *SelfHosted, f: FuncId) PRes #once = {
             @match(program.env.comptime_arch) {
                 fn aarch64() => {
                     old := program.legacy_indirection.cast();
-                    a: EmitAsm = new(old, body);
+                    a: EmitArm64 = new(old, body);
                     addr := a&.compile(f);
                     program.put_jitted_function(f, addr);
                 }
                 fn x86_64() => {
                     old := program.legacy_indirection.cast();
                     a: EmitX64 = new(old, body);
-                    @match(a&.compile(f)) {
-                        fn Ok(addr) => {
-                            program.put_jitted_function(f, addr);
-                            program.my_jit += 1;
-                        }
-                        fn Err(msg) => {
-                            call_cranelift();
-                            program.cl_jit += 1;
-                        }
+                    addr := a&.compile(f);
+                    if a.backend.valid {
+                        program.put_jitted_function(f, addr);
+                        program.my_jit += 1;
+                    } else {
+                        program.jitted.dispatch[f.as_index()] = uncompiled_function_placeholder();
+                        call_cranelift();
+                        program.cl_jit += 1;
                     };
                 }
                 fn wasm32() => panic("unreachable: compiler doesn't support wasm yet");
@@ -320,3 +319,485 @@ fn bump_dirty(self: *Jitted) void = {
         __clear_cache(beg, end);
     };
 }
+
+
+/* // TODO: traits
+    CGJ :: CodeGenJit(B);
+    fn emit_switch(self: *CGJ, cases: *RsVec(SwitchPayload)) void;
+    fn stack_to_ccall_reg(self: *CGJ, types: [] Prim, extra_special_ret: bool) void;
+    fn ccall_reg_to_stack(self: *CGJ, types: [] Prim, extra_special_ret: bool) Ty(i64, i64);
+    fn emit_store(self: *CGJ, addr: AsmVal, value: AsmVal, ty: Prim) void;
+    fn store_u64(self: *CGJ, src_reg: i64, dest_addr_reg: i64, offset_bytes: u16) void;
+    fn in_reg_float(self: *CGJ, val: AsmVal) i64;
+    fn in_reg(self: *CGJ, val: AsmVal) i64;
+    fn load_imm(self: *CGJ, reg: i64, value: i64) void;  // TODO: this should check if adr is close enough since it statically knows the ip cause we're jitting.
+    fn add_free_args(self: *CGJ, taken_int_count: i64, taken_float_count: i64) void;
+    fn branch_func(self: *CGJ, f: FuncId, with_link: bool) void ;
+    fn load_fnptr_from_dispatch(self: *CGJ, f: FuncId, reg: i64) void;
+    fn emit_stack_fixup(self: *CGJ) void;
+    fn emit_return(self: *CGJ, sig: [] Prim) void;
+    fn inst_intrinsic(self: *CGJ, op: Intrinsic) void;
+    fn is_special_reg(self: *CGJ, reg: i64) bool;
+    // do_floats:false if you're just trying to free up a gpr, not saving for a call.
+    fn try_spill(self: *CGJ, i: usize, do_ints: bool, do_floats: bool) bool;
+    fn patch_reserve_stack(self: *CGJ, reserve_stack: *u8) void;
+    fn emit_header(self: *CGJ) *InstUnit;
+    fn next_inst(self: *CGJ) *InstUnit;
+    fn new(compile: CompilerRs) B;
+    fn jump_to(self: *CGJ, to_ip: *InstUnit) void;
+    // fn Load(ty) => {
+    // fn JumpIf(f) => {
+    // fn Unreachable() => {
+    // fn PeekDup(skip) => {
+    // fn CopyBytesToFrom(bytes) => {
+    // fn CallFnPtr(f) => 
+    fn emit_other_inst(self: *CGJ, inst: Bc) bool;
+    
+*/
+
+fn pop_to_reg();
+fn get_free_reg();
+fn drop_reg();
+fn spill_abi_stompable();
+fn restore_all_registers();
+fn get_free_reg_float();
+fn pop_to_reg_with_offset();
+fn create_slots();
+fn drop_reg_float();
+fn pop_to_reg_float();
+fn in_reg_with_offset();
+fn compile();
+fn dyn_c_call();
+fn emit_block();
+
+// ehhh i don't like this but i also don't want to write it twice. 
+// ive just reinvented inheritance. but only when you want it for typing less code, not dynamic dispatch. 
+// CodeGenJit is an abstract class, the trait overload sets are abstract methods, 
+// B is the extra fields you add when you extend it. EmitArm64 extends CodeGenJit. 
+// i wonder if i just dont like it because it goes against my brainwashing
+
+// important: be careful not to use the wrong arch's register constants in here. 
+fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64) Type = {
+    Emit :: @struct(
+        program: CompilerRs,
+        asm: *Jitted,
+        vars: List(?SpOffset),
+        next_slot: SpOffset,
+        release_stack: List(*InstUnit),
+        state: BlockState,
+        block_ips: List(?*InstUnit),
+        clock: u16,
+        log_asm_bc: bool,
+        body: *FnBody,
+        backend: B,
+    );
+    
+    fn new(compile: CompilerRs, body: *FnBody) Emit = {
+        (
+            program = compile,
+            asm = compile.jitted&,
+            vars = list(temp()),
+            next_slot = (id = 0),
+            release_stack = list(temp()),
+            state = (stack = list(temp()), free_reg = list(temp()), free_reg_float = list(temp()), open_slots = list(temp())),
+            block_ips = list(temp()),
+            clock = 0,
+            log_asm_bc = false,
+            body = body,
+            backend = new(compile),
+        )
+    }
+    
+    // Note: you can only use Self once because this doesn't reset fields.
+    fn compile(self: *Emit, f: FuncId) rawptr = {
+        func := self.program[f]&;
+        @assert(!func.body&.is(.JittedAarch64) && !func.body&.is(.ComptimeAddr), "func want body");
+    
+        self.log_asm_bc = func.get_flag(.LogAsmBc);
+        self.bc_to_asm(f);
+        asm := self.asm.save_current(f);
+        
+        // TODO: assert that we don't generate code for a bunch of empty functions (just the size of prolouge + epiloge)
+        //       when doing instantiations like `::tagged(T);`. should get deduplicated in bytecode or earlier. 
+        // for now just make sure not to spam when disassembling. 
+        // TODO: call the right one 
+        //if asm.len > 8 {
+        //    // TODO: this is kinda dumb, I could just be a bit more abstract about how im emitting instructions and then also emit text assembler.
+        //    if TRACE_ASM.or(self.log_asm_bc).or(=> func.get_flag(.LogAsm)) {
+        //        self.program[][].codemap.show_error_line(func.loc);
+        //        addr := u32.int_from_ptr(asm.ptr);
+        //        @println("% is at addr=%", self.program.pool.get(func.name), addr);
+        //        @if(USE_LLVM_DIS) print_llvm_mc_dis(asm);
+        //    };
+        //};
+        u32.raw_from_ptr(asm.ptr)
+    }
+    
+    fn bc_to_asm(self: *Emit, f: FuncId) void = {
+        ff := self.program[f]&;
+        @if(TRACE_ASM) @println("=== F% % ===", f.as_index(), self.program.pool.get(ff.name));
+        //debugln!("{}", self.program[f].body.log(self.program));
+    
+        func := self.body;
+        self.next_slot = (id = 0);
+        self.vars = .None.repeated(func.vars.len, temp());
+        self.block_ips = .None.repeated(self.body.blocks.len, temp());
+    
+        self.asm.mark_start(f);
+        reserve_stack := self.emit_header();
+    
+        // TODO: assert int_count <= 8 && float_count <= 8 or impl pass on stack.
+        sig := func.signeture&;
+        int_count, float_count := self.ccall_reg_to_stack(sig.args, sig.first_arg_is_indirect_return);
+        // Any registers not containing args can be used.
+        self.add_free_args(int_count, float_count);
+    
+        @if(TRACE_ASM) @println("entry: (%)", self.state.stack.items());
+        self.emit_block(0, false);
+        self.patch_reserve_stack(reserve_stack);
+    }
+    
+    fn emit_block(self: *Emit, b: i64, args_not_vstacked: bool) void = {
+        if(self.block_ips[b].is_some(), => return());
+        self.block_ips[b] = (Some = self.next_inst());
+        block := self.body.blocks[b]&;
+    
+        self.clock = block.clock;
+        // TODO: handle normal args here as well.
+        if args_not_vstacked {
+            self.state.free_reg&.clear();
+            self.state.free_reg_float&.clear();
+            int_count, float_count := self.ccall_reg_to_stack(block.arg_prims, false);
+            self.add_free_args(int_count, float_count);
+        };
+        @debug_assert(self.state.stack.len >= block.arg_prims.len);
+        func := self.body;
+        is_done := false;
+        block := self.body.blocks[b]&;
+        range(0, func.blocks[b].insts.len) { i |
+            if(is_done, => return());
+            inst := block.insts[i];
+            is_done = self.emit_inst(b, inst, i);
+            @if(TRACE_ASM) @println("%:% % => % | free: %", b, i, inst&.tag(), self.state.stack.items(), self.state.free_reg.items());
+        };
+        @debug_assert(is_done, "emitted all blocks but no function terminator");
+    }
+    
+    fn emit_inst(self: *Emit, b_idx: usize, inst: Bc, i: usize) bool = {
+        if !self.backend.valid {
+            return (true);  // TODO: remove
+        };
+        // TODO: bring this back 
+        //if TRACE_ASM.or(self.log_asm_bc) {
+        //    ins := self.asm.offset_words(self.asm.current_start, self.asm.next) - 1;
+        //    self.markers.push((format!("[{b_idx}:{i}] {inst:?}: {:?}", self.state.stack), ins as usize));
+        //};
+        @if(TRACE_ASM) @println("[%:%] %", b_idx, i, self.state.stack.items());
+        @match(inst) {
+            fn Nop() => ();
+            fn SaveSsa(f) => {
+                @assert(self.vars[f.id.zext()].is_none(), "SaveSsa missing");
+                slot := self.create_slots(8);
+                reg := self.pop_to_reg();
+                self.store_u64(reg, SP, slot.id.trunc());
+                self.drop_reg(reg);
+                self.vars[f.id.zext()] = (Some = slot);
+            }
+            fn LoadSsa(f) => {
+                // debug_assert!(self.body.is_ssa_var.get(id as usize));
+                slot := self.vars[f.id.zext()].unwrap();
+                self.state.stack&.push(Spill = slot);
+            }
+            fn AddrVar(f) => {
+                idx: i64 = f.id.zext();
+                if self.vars[idx] { (slot: SpOffset) |
+                    self.state.stack&.push(Increment = (
+                        reg = SP,
+                        offset_bytes = slot.id,
+                    ));
+                } else {
+                    ty := self.body.vars[idx];
+                    slot := self.create_slots(ty.size);
+                    self.vars[idx] = (Some = slot);
+                    self.state.stack&.push(Increment = (
+                        reg = SP,
+                        offset_bytes = slot.id,
+                    ));
+                };
+            }
+            fn GetCompCtx() => {
+                addr := (**SelfHosted).int_from_ptr(self.program);
+                self.state.stack&.push(Literal = addr);
+            }
+            fn LastUse(f) => {
+                slot := self.vars[f.id.zext()]; 
+                if slot { slot |
+                    ty := self.body.vars[f.id.zext()];
+                    self.drop_slot(slot, ty.size);
+                };
+            }
+            fn NoCompile() => {
+                @panic("tried to compile unreachable block in %", self.program[self.body.func]&.log(self.program[][]));
+            }
+            fn PushConstant(f) => self.state.stack&.push(Literal = f.value);
+            fn PushGlobalAddr(id) => {
+                ptr, _ := self.program[][].get_baked(id)[];
+                self.state.stack&.push(Literal = ptr.int_from_rawptr());
+            }
+            fn GetNativeFnPtr(fid) => {
+                // TODO: use adr+adrp instead of an integer. but should do that in load_imm so it always happens.
+    
+                if self.asm.get_fn_old(fid) { (ptr: rawptr) |
+                    self.state.stack&.push(Literal = ptr.int_from_rawptr());
+                } else {
+                    reg := self.get_free_reg();
+                    self.asm.extend_blanks(fid);
+                    self.load_fnptr_from_dispatch(fid, reg);
+                    self.state.stack&.push(Increment = (reg = reg, offset_bytes = 0));
+                };
+            }
+            fn Goto(f) => {
+                idx: i64 = f.ip.id.zext();
+                block := self.body.blocks[idx]&;
+                
+                // TODO: fix ending with unreachable() :block_arg_count_wrong_unreachable
+                //debug_assert_eq!(slots, block.arg_slots, "goto {ip:?} {}", self.body.log(self.program));
+                if block.incoming_jumps == 1 {
+                    @debug_assert(self.block_ips[idx].is_none());
+                    self.emit_block(idx, false);
+                } else {
+                    self.stack_to_ccall_reg(block.arg_prims, false);
+                    self.spill_abi_stompable();
+                    if self.block_ips[idx] { (to_ip: *InstUnit) |
+                        // we've already emitted it, so we know where it is, so just go there. 
+                        self.jump_to(to_ip);
+                    } else {
+                        // If we haven't emitted it yet, it will be right after us, so just fall through.
+                        self.emit_block(idx, true);
+                    };
+                };
+                return(true);
+            }
+            fn CallDirect(f) => {
+                sig := self.body.decode_sig(f.sig);
+                // TODO: use with_link for tail calls. need to "Leave holes for stack fixup code." like below
+                // TODO: if you already know the stack height of the callee, you could just fixup to that and jump in past the setup code. but lets start simple.
+                self.dyn_c_call(sig) {
+                    if(f.tail, => self.emit_stack_fixup());
+                    self.branch_func(f.f, !f.tail)
+                };
+                return(f.tail);
+            }
+            fn Intrinsic(op) => self.inst_intrinsic(op);
+            fn Ret0()     => return(self.emit_return(empty()));
+            fn Ret1(prim) => return(self.emit_return(@slice(prim)));
+            fn Ret2(f)    => return(self.emit_return(@slice(f._0, f._1)));
+            // Note: we do this statically, it wont get actually applied to a register until its needed because loads/stores have an offset immediate.
+            fn IncPtrBytes(bytes) => {
+                ::?*AsmVal;
+                val: *AsmVal = self.state.stack&.last().unwrap();
+                @match(val) {
+                    fn Increment(f) => {
+                        f.offset_bytes += bytes.zext();
+                    }
+                    fn Literal(v) => {
+                        v[] += bytes.zext();
+                    }
+                    fn Spill(_) => {
+                        // TODO: should it hold the add statically? rn it does the load but doesn't need to restore because it just unspills it.
+                        reg, offset_bytes := self.pop_to_reg_with_offset();
+                        self.state.stack&.push(Increment = (
+                            reg = reg,
+                            offset_bytes = offset_bytes.zext() + bytes.zext(),
+                        ));
+                    }
+                    fn FloatReg(_) => panic("ICE: don't try to gep a float");
+                };
+            }
+            fn StorePost(ty) => {
+                addr := self.state.stack&.pop().expect("enough stack for store");
+                value := self.state.stack&.pop().expect("enough stack for store");
+                self.emit_store(addr, value, ty);
+            }
+            fn StorePre(ty) => {
+                value := self.state.stack&.pop().expect("enough stack for store");
+                addr := self.state.stack&.pop().expect("enough stack for store");
+                self.emit_store(addr, value, ty);
+            }
+            fn Snipe(skip) => {
+                index := self.state.stack.len - skip.zext() - 1;
+                @match(self.state.stack&.ordered_remove(index).unwrap()) {
+                    fn Increment(f) => self.drop_reg(f.reg);
+                    fn Literal(_)   => ();
+                    fn Spill(_)     => ();
+                    fn FloatReg(_)  => {
+                        panic("unexpected float reg");
+                    }
+                };
+            }
+            fn Switch(i) => {
+                cases := self.body.switch_payloads.index(i.zext());
+                self.emit_switch(cases);
+                return(true);
+            }
+            @default => return(self.emit_other_inst(inst));
+        };
+    
+        false
+    }
+    
+    fn restore_all_registers(self: *Emit) void = 
+        self.add_free_args(0, 0);
+
+    fn spill_abi_stompable(self: *Emit) void = {
+        range(0, self.state.stack.len) { i |
+            self.try_spill(i, true, true);
+        };
+    }
+
+    fn get_free_reg(self: *Emit) i64 = {
+        or self.state.free_reg&.pop() {
+            i := 0;
+            while => i < self.state.stack.len && !self.try_spill(i, true, false) {
+                i += 1;
+            };
+            if i == self.state.stack.len {
+                panic("ICE: spill to stack failed");
+            };
+            self.state.free_reg&.pop().unwrap()
+        }
+    }
+
+    fn get_free_reg_float(self: *Emit) i64 = {
+        or self.state.free_reg_float&.pop() {
+            i := 0;
+            while => i < self.state.stack.len && !self.try_spill(i, false, true) {
+                i += 1;
+            };
+            if i == self.state.stack.len {
+                panic("ICE: spill to stack failed");
+            };
+            self.state.free_reg_float&.pop().unwrap()
+        }
+    }
+    
+    fn drop_reg(self: *Emit, reg: i64) void = {
+        if !self.is_special_reg(reg) {
+            @debug_assert(!self.state.free_reg&.contains(reg&), "drop r% -> %", reg, self.state.free_reg.items());
+            self.state.free_reg&.push(reg);
+            if ZERO_DROPPED_REG {
+                self.load_imm(reg, 0);
+            };
+        };
+    }
+
+    fn drop_reg_float(self: *Emit, reg: i64) void = {
+        @debug_assert(!self.state.free_reg_float&.contains(reg&), "drop F% -> %", reg, self.state.free_reg_float.items());
+        self.state.free_reg_float&.push(reg);
+    }
+
+    fn pop_to_reg(self: *Emit) i64 = {
+        val := self.state.stack&.pop().unwrap();
+        self.in_reg(val)
+    }
+
+    fn pop_to_reg_float(self: *Emit) i64 = {
+        val := self.state.stack&.pop().unwrap();
+        self.in_reg_float(val)
+    }
+
+    fn peek_to_reg_with_offset(self: *Emit) Ty(i64, u16) = {
+        val := self.state.stack&.last().unwrap()[];
+        self.in_reg_with_offset(val)
+    }
+
+    fn in_reg_with_offset(self: *Emit, val: AsmVal) Ty(i64, u16) = {
+        @match(val) {
+            fn Increment(f) => (f.reg, f.offset_bytes.trunc());
+            fn Literal(x) => {
+                r := self.get_free_reg();
+                self.load_imm(r, x);
+                (r, 0)
+            }
+            fn Spill(slot) => {
+                r := self.get_free_reg();
+                self.load_u64(r, SP, slot.id.trunc());
+                (r, 0)
+            }
+            fn FloatReg(_) => panic("ICE: in_reg_with_offset on a float register");
+        }
+    }
+
+    fn pop_to_reg_with_offset(self: *Emit) Ty(i64, u16) = {
+        res := self.peek_to_reg_with_offset();
+        self.state.stack&.pop().unwrap();
+        res
+    }
+
+    fn create_slots(self: *Emit, bytes: u16) SpOffset = {
+        bytes = (bytes + 7) / 8 * 8; // TODO: use alignment instead of just wasting space :aligned_stack_slots
+        enumerate self.state.open_slots { i, slot |
+            if self.clock >= slot.clock && slot.size == bytes {
+                slot := self.state.open_slots&.unordered_remove(i).unwrap();  // TODO: does unordered_remove work? 
+                return(slot.at); 
+            };
+        };
+    
+        made := self.next_slot;
+        self.next_slot.id += bytes.zext();
+        made
+    }
+
+    // Note: comp_ctx doesn't push the ctx here, bc needs to do that. this it just does the call with an extra argument.
+    /// <arg:n> -> <ret:m>
+    fn dyn_c_call(self: *Emit, sig: *PrimSig, $do_call: @Fn() void) void = {
+        self.stack_to_ccall_reg(sig.args, sig.first_arg_is_indirect_return);
+        self.spill_abi_stompable();
+        do_call();
+    
+        ::if_opt(Prim, i64);
+        ::if_opt(Prim, Ty(i64, i64));
+        int_countt, float_count := if sig.ret1 { (fst: Prim) |
+            if sig.ret2 { (snd: Prim) |
+                self.ccall_reg_to_stack(@slice(fst, snd), false);
+                ints := fst.int_count() + snd.int_count();
+                @as(Ty(i64, i64)) (ints, 2 - ints) // TODO: annoying that you need the type here. 
+            } else {
+                self.ccall_reg_to_stack(@slice(fst), false);
+                ints := fst.int_count();
+                (ints, 1 - ints)
+            }
+        } else {
+            (0, 0)
+        };
+    
+        // now the extras are usable again.
+        self.add_free_args(int_countt, float_count);
+    }
+
+    fn drop_slot(self: *Emit, slot: SpOffset, bytes: u16) void = {
+        bytes = (bytes + 7) / 8 * 8; // TODO: use alignment instead of just wasting space :aligned_stack_slots
+        self.state.open_slots&.push((at = slot, size = bytes, clock = self.clock)); // TODO: keep this sorted by count?
+        // TODO: if ZERO_DROPPED_SLOTS
+    }
+
+    // TODO: do i need to be using this instead? -- Jul 22
+    fn drop_if_unused(self: *Emit, register: i64) void = {
+        for self.state.stack { r |
+            @if_let(r) fn Increment(f) => {
+                if(f.reg == register, => return());
+            };
+        };
+        self.drop_reg(register);
+    }
+    
+    Emit
+}
+
+::display_slice(AsmVal);
+::DeriveFmt(AsmVal);
+::DeriveFmt(IncReg);
+::DeriveFmt(SpOffset);
+::if(AsmVal);
+::display_slice(i64);
+::enum(CallConv);
