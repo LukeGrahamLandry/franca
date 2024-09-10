@@ -7,6 +7,7 @@ DISASSEMBLER_COMMAND :: "llvm-mc";
 
 fn main() = {
     all_tests := get_test_cases(libc_allocator);
+    @println("Running % tests...", all_tests.len);
     
     // Optimise for the case where all tests pass. Batch all tests together in one llvm-mc call. 
     // If you fail one, skip that and call again on the remainder (becuase variable length instructions make it sketchy to just keep parsing).
@@ -34,7 +35,6 @@ fn main() = {
 }
 
 fn get_test_cases(alloc: Alloc) []TestCase = {
-    ::enum(X86Reg);
     tests: List(TestCase) = list(alloc);
     
     push_case :: fn(text: Str, $f: @Fn(asm: *List(u8)) void) void => {
@@ -119,6 +119,15 @@ fn get_test_cases(alloc: Alloc) []TestCase = {
         push_case(text) { asm |
             encode_imm64(asm, a, big);
         };
+        
+        text := items(@format("push	%", a) alloc); 
+        push_case(text) { asm |
+            encode_op_reg(asm, PrimaryOp.PushBase, a);
+        };
+        text := items(@format("pop	%", a) alloc); 
+        push_case(text) { asm |
+            encode_op_reg(asm, PrimaryOp.PopBase, a);
+        };
     };
     
     fun_offsets := @slice(1, 10, 256, 70000, -1, -10, -256, -70000, 1073741824, -1073741824);
@@ -138,13 +147,47 @@ fn get_test_cases(alloc: Alloc) []TestCase = {
         push_case(text) { asm |
             encode_imm32_only(asm, PrimaryOp.CallImm32, offset);
         };
+        
+         for_enum X86Reg { a | 
+            for_enum X86Reg { b | 
+                if b != X86Reg.rsp {
+                    // store
+                    text := if offset > 0 {
+                        items(@format("mov	qword ptr [1*% + %], %", b, offset, a) alloc)
+                    } else {
+                        items(@format("mov	qword ptr [1*% - %], %", b, offset.abs(), a) alloc)
+                    };
+                    push_case(text) { asm |
+                        encode_non_sp_offset(asm, PrimaryOp.MovReg, a, b, offset);
+                    };
+                    
+                    // load
+                    text := if offset > 0 {
+                        items(@format("mov	%, qword ptr [1*% + %]", a, b, offset) alloc)
+                    } else {
+                        items(@format("mov	%, qword ptr [1*% - %]", a, b, offset.abs()) alloc)
+                    };
+                    push_case(text) { asm |
+                        encode_non_sp_offset(asm, PrimaryOp.MovRegLoad, a, b, offset);
+                    };
+                };
+            };
+        };
     };
-    
     
     tests.items()
 }
 
-fn run_test_chunk(offset: i64, tests: []TestCase) i64 #once = {
+fn run_test_chunk(offset: i64, tests: []TestCase) i64 = {
+    // without this, you can mess up at the beginning and then get a lot of invalid instruction encodings,
+    // and then it takes a really long time to print back all the bytes again (?) before you get any output. 
+    max_call_size :: 1500; 
+    if tests.len > max_call_size {
+        fail := run_test_chunk(offset, tests.slice(0, max_call_size));
+        if(fail != max_call_size, => return(fail));
+        return(max_call_size + run_test_chunk(max_call_size + offset, tests.slice(max_call_size, tests.len)));
+    };
+
     hex: List(u8) = list(temp());
     
     for tests { test |   

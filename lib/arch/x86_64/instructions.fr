@@ -19,7 +19,11 @@ PrimaryOp :: @enum(u8) (
     JmpImm32 = 0xe9,  // ??? "Use of operand-size prefix in 64-bit mode may result in implementation-dependent behaviour"
     JmpImm8  = 0xeb,
     Int3 = 0xcc,
-    MovImm64Base = 0xB8,
+    MovImm64Base = 0xb8,
+    PushBase = 0x50,
+    PopBase = 0x58,
+    MovByte = 0x88,
+    MovByteLoad = 0x8A,
 );
 
 // (AddReg, OrReg, AndReg, SubReg, XorReg, CmpReg, MovReg)
@@ -50,7 +54,7 @@ X86Reg :: @enum(u4) (
     r13 = 0b1101,
     r14 = 0b1110,
     r15 = 0b1111,
-);
+); ::enum(X86Reg);
 
 // for now names match default assembly for the test. meh. maybe shouldn't do that. 
 X86cc :: @enum(u4) (
@@ -229,10 +233,24 @@ fn encode_imm32_only(code: *List(u8), op: PrimaryOp, offset: i64) void = {
 }
 
 fn encode_imm64(out: *List(u8), reg: X86Reg, value: u64) void = {
-    out.push(pack_rex_si(reg, reg, reg)); // TODO: only one of these
-    x := @as(i64) (@as(u8) PrimaryOp.MovImm64Base).zext() + bit_and(@as(i64) reg, @as(i64) 0b111);
-    out.push(@as(u8) x.trunc());  // :W=1
+    encode_op_reg(out, PrimaryOp.MovImm64Base, reg);
     out.push_u64(value);
+}
+
+fn encode_op_reg(out: *List(u8), op: PrimaryOp, reg: X86Reg) void = {
+    out.push(pack_rex_si(reg, reg, reg)); // TODO: only one of these
+    x := @as(i64) (@as(u8) op).zext() + bit_and(@as(i64) reg, @as(i64) 0b111);
+    out.push(@as(u8) x.trunc());  // :W=1
+}
+
+fn encode_non_sp_offset(asm: *List(u8), op: PrimaryOp, reg: X86Reg, index: X86Reg, offset: i64) void = {
+    @debug_assert_ne(index, X86Reg.rsp, "guess what you passed to encode_non_sp_offset");
+    asm.push(pack_rex_si(reg, X86Reg.rbp, index));
+    asm.push(@as(u8) op);
+    asm.push(pack_modrm(ModrmMode.Indirect00, X86Reg.rsp, reg)); // mod=0, rm=sp means use sib
+    asm.push(pack_sib(SibScale.One, index, X86Reg.rbp));
+    offset := signed_truncate(offset, 32);
+    asm.push_u32(offset);
 }
 
 // See tests/x86_64_jit.fr for how to use this. 

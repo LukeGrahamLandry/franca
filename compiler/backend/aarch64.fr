@@ -15,8 +15,8 @@ MEM_32: i64 : 0b10;
 MEM_16: i64 : 0b01;
 MEM_08: i64 : 0b00;
 
-OhWereDoingTypeSystemNow :: @struct(valid := true); // TODO: remove valid when x64 works.
-EmitArm64 :: CodeGenJit(OhWereDoingTypeSystemNow, u32, sp);
+OhWereDoingTypeSystemNow :: @struct(valid := true, interesting := false); // TODO: remove valid+interesting when x64 works.
+EmitArm64 :: CodeGenJit(OhWereDoingTypeSystemNow, u32, sp, false);
 
 fn new(_: CompilerRs) OhWereDoingTypeSystemNow = ();
 
@@ -121,7 +121,7 @@ fn emit_other_inst(self: *EmitArm64, inst: Bc) bool #once = {
                 // TODO: this does redundant spilling every time!
                 @match(callee) {
                     fn Literal(p) => self.load_imm(x16, p);
-                    fn Spill(offset) => self.load_u64(x16, sp, offset.id.trunc());
+                    fn Spill(offset) => self.load_u64(x16, sp, offset.id);
                     @default => {
                         panic("ICE: unspilled register");
                     };
@@ -163,9 +163,8 @@ fn emit_other_inst(self: *EmitArm64, inst: Bc) bool #once = {
                 dest := self.pop_to_reg();
                 temp := self.get_free_reg();
                 range(0, bytes.zext() / 8) { i |
-                    offset: u16 = i.mul(8).trunc();
-                    self.load_u64(temp, src, offset);
-                    self.store_u64(temp, dest, offset);
+                    self.load_u64(temp, src, i * 8);
+                    self.store_u64(temp, dest, i * 8);
                 };
                 self.drop_reg(temp);
                 self.drop_reg(src);
@@ -353,7 +352,7 @@ fn stack_to_ccall_reg(self: *EmitArm64, types: [] Prim, special: bool) void = {
                 self.drop_reg(f.reg);
             }
             fn Literal(x) => self.load_imm(next_int, x);
-            fn Spill(slot) => self.load_u64(next_int, sp, slot.id.trunc());
+            fn Spill(slot) => self.load_u64(next_int, sp, slot.id);
             fn FloatReg(f) => {
                 fmov_from(next_int, f);
                 self.drop_reg_float(f);
@@ -378,7 +377,7 @@ fn stack_to_ccall_reg(self: *EmitArm64, types: [] Prim, special: bool) void = {
                 self.asm.push(add_im(Bits.X64, x8, f.reg, f.offset_bytes, 0))
             }
             fn Literal(v) => self.load_imm(x8, v);
-            fn Spill(slot) => self.load_u64(x8, sp, slot.id.trunc());
+            fn Spill(slot) => self.load_u64(x8, sp, slot.id);
             fn FloatReg(_) => panic("ICE: tried to use float register as indirect return");
         };
     };
@@ -420,7 +419,7 @@ fn emit_store(self: *EmitArm64, addr: AsmVal, value: AsmVal, ty: Prim) void = {
         if value&.is(.FloatReg) {
             r := value.FloatReg;
             @assert_eq(offset_bytes.mod(8), 0, "TODO: align");
-            self.asm.push(f_str_uo(Bits.X64, r, reg, @as(u12) @as(i64) (offset_bytes.zext() / 8)));
+            self.asm.push(f_str_uo(Bits.X64, r, reg, @as(u12) @as(i64) (offset_bytes / 8)));
             self.drop_reg_float(r);
         } else {
             val := self.in_reg(value);
@@ -436,7 +435,7 @@ fn emit_store(self: *EmitArm64, addr: AsmVal, value: AsmVal, ty: Prim) void = {
             if value&.is(.FloatReg) {
                 r := value.FloatReg;
                 @assert_eq(offset_bytes.mod(4), 0, "TODO: align");
-                self.asm.push(f_str_uo(Bits.W32, r, reg, @as(u12) @as(i64) (offset_bytes.zext() / 4)));
+                self.asm.push(f_str_uo(Bits.W32, r, reg, @as(u12) @as(i64) (offset_bytes / 4)));
                 self.drop_reg_float(r);
             } else {
                 val := self.in_reg(value);
@@ -463,32 +462,32 @@ fn emit_store(self: *EmitArm64, addr: AsmVal, value: AsmVal, ty: Prim) void = {
     self.drop_reg(reg);
 }
 
-fn load_u64(self: *EmitArm64, dest_reg: i64, src_addr_reg: i64, offset_bytes: u16) void = {
+fn load_u64(self: *EmitArm64, dest_reg: i64, src_addr_reg: i64, offset_bytes: i64) void = {
     self.load_one(MEM_64, dest_reg, src_addr_reg, offset_bytes)
 }
 
-fn load_one(self: *EmitArm64, register_type: i64, dest_reg: i64, src_addr_reg: i64, offset_bytes: u16) void = {
+fn load_one(self: *EmitArm64, register_type: i64, dest_reg: i64, src_addr_reg: i64, offset_bytes: i64) void = {
     @debug_assert_ne(dest_reg, sp, "ICE: tried to load into sp");
     scale := 1.shift_left(register_type);
-    extra := (@as(i64) offset_bytes.zext()).mod(scale);
+    extra := offset_bytes.mod(scale);
     if extra == 0 {
-        self.asm.push(ldr_uo_any(register_type, dest_reg, src_addr_reg, @as(u12) @as(i64) (offset_bytes.zext() / scale)));
-        @debug_assert((@as(i64) offset_bytes.zext()) / scale < 1.shift_left(12), "ICE: not enough bits for load");
+        self.asm.push(ldr_uo_any(register_type, dest_reg, src_addr_reg, @as(u12) @as(i64) (offset_bytes / scale)));
+        @debug_assert((@as(i64) offset_bytes) / scale < 1.shift_left(12), "ICE: not enough bits for load");
     } else {
         // Note: this relies on the access actually being aligned once you combine the value in the register without our non %8 offset.
         reg := self.get_free_reg();
-        @debug_assert((@as(i64) offset_bytes.zext()) < 1.shift_left(12), "ICE: not enough bits for load");
-        self.asm.push(add_im(Bits.X64, reg, src_addr_reg, @as(u12) @as(i64) offset_bytes.zext(), 0));
+        @debug_assert((@as(i64) offset_bytes) < 1.shift_left(12), "ICE: not enough bits for load");
+        self.asm.push(add_im(Bits.X64, reg, src_addr_reg, @as(u12) @as(i64) offset_bytes, 0));
         self.asm.push(ldr_uo_any(register_type, dest_reg, reg, 0));
         self.drop_reg(reg);
     }
 }
 
-fn store_u64(self: *EmitArm64, src_reg: i64, dest_addr_reg: i64, offset_bytes: u16) void = {
+fn store_u64(self: *EmitArm64, src_reg: i64, dest_addr_reg: i64, offset_bytes: i64) void = {
     self.store_one(MEM_64, src_reg, dest_addr_reg, offset_bytes)
 }
 
-fn store_one(self: *EmitArm64, register_type: i64, src_reg: i64, dest_addr_reg: i64, offset_bytes: u16) void = {
+fn store_one(self: *EmitArm64, register_type: i64, src_reg: i64, dest_addr_reg: i64, offset_bytes: i64) void = {
     scale := 1.shift_left(register_type);
     if src_reg == sp {
         // TODO: this is weird. can only happen for exactly the sp, not an offset from it. so i guess somewhere else is saving an add, maybe its fine. -- May 2
@@ -499,11 +498,11 @@ fn store_one(self: *EmitArm64, register_type: i64, src_reg: i64, dest_addr_reg: 
         return();
     };
     if offset_bytes.mod(8) == 0 {
-        self.asm.push(str_uo_any(register_type, src_reg, dest_addr_reg, @as(u12) @as(i64) (offset_bytes.zext() / scale)));
-        @debug_assert((@as(i64) offset_bytes.zext()) / scale < 1.shift_left(12), "ICE: not enough bits for store");
+        self.asm.push(str_uo_any(register_type, src_reg, dest_addr_reg, @as(u12) @as(i64) (offset_bytes / scale)));
+        @debug_assert((@as(i64) offset_bytes) / scale < 1.shift_left(12), "ICE: not enough bits for store");
     } else {
         reg := self.get_free_reg();
-        self.asm.push(add_im(Bits.X64, reg, dest_addr_reg, @as(u12) @as(i64) offset_bytes.zext(), 0));
+        self.asm.push(add_im(Bits.X64, reg, dest_addr_reg, @as(u12) @as(i64) offset_bytes, 0));
         self.asm.push(str_uo_any(register_type, src_reg, reg, 0));
         self.drop_reg(reg);
     };
@@ -523,7 +522,7 @@ fn try_spill(self: *EmitArm64, i: usize, do_ints: bool, do_floats: bool) bool = 
                 self.asm.push(add_im(Bits.X64, f.reg, f.reg, f.offset_bytes, 0));
             };
     
-            self.store_u64(f.reg, sp, slot.id.trunc());
+            self.store_u64(f.reg, sp, slot.id);
             self.drop_reg(f.reg);
             self.state.stack[i] = (Spill = slot);
             return(true);
@@ -542,7 +541,7 @@ fn try_spill(self: *EmitArm64, i: usize, do_ints: bool, do_floats: bool) bool = 
     false
 }
 
-fn is_special_reg(self: *EmitArm64, reg: i64) bool = reg.eq(sp).or(reg == x8);
+fn is_special_reg(self: *EmitArm64, reg: i64) bool = reg.eq(sp).or(reg == x8).or(reg == fp);
 
 fn in_reg(self: *EmitArm64, val: AsmVal) i64 = {
     @match(val) {
@@ -567,7 +566,7 @@ fn in_reg(self: *EmitArm64, val: AsmVal) i64 = {
         }
         fn Spill(slot) => {
             r := self.get_free_reg();
-            self.load_u64(r, sp, slot.id.trunc());
+            self.load_u64(r, sp, slot.id);
             // self.drop_slot(slot, 8); TODO!
             r
         }
@@ -818,6 +817,8 @@ fn inst_intrinsic(self: *EmitArm64, op: Intrinsic) void #once = {
         };
     };
 }
+
+fn print_llvm_mc_dis(self: *EmitArm64, asm: []u32) void #inline = print_llvm_mc_dis(asm);
 
 fn str_uo_any(size: u2, src: RegI, addr: RegI, offset_words: u12) u32 = 
     @bits(size, 0b11100100, offset_words, addr, src);

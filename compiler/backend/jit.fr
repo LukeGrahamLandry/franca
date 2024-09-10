@@ -84,6 +84,7 @@ fn emit_bc_and_jit(program: *SelfHosted, f: FuncId) PRes #once = {
                     addr := a&.compile(f);
                     if a.backend.valid {
                         program.put_jitted_function(f, addr);
+                        program.jitted&.bump_dirty(); // TODO: dont do this
                         program.my_jit += 1;
                     } else {
                         program.jitted.dispatch[f.as_index()] = uncompiled_function_placeholder();
@@ -327,7 +328,7 @@ fn bump_dirty(self: *Jitted) void = {
     fn stack_to_ccall_reg(self: *CGJ, types: [] Prim, extra_special_ret: bool) void;
     fn ccall_reg_to_stack(self: *CGJ, types: [] Prim, extra_special_ret: bool) Ty(i64, i64);
     fn emit_store(self: *CGJ, addr: AsmVal, value: AsmVal, ty: Prim) void;
-    fn store_u64(self: *CGJ, src_reg: i64, dest_addr_reg: i64, offset_bytes: u16) void;
+    fn store_u64(self: *CGJ, src_reg: i64, dest_addr_reg: i64, offset_bytes: i64) void;
     fn in_reg_float(self: *CGJ, val: AsmVal) i64;
     fn in_reg(self: *CGJ, val: AsmVal) i64;
     fn load_imm(self: *CGJ, reg: i64, value: i64) void;  // TODO: this should check if adr is close enough since it statically knows the ip cause we're jitting.
@@ -377,7 +378,7 @@ fn emit_block();
 // i wonder if i just dont like it because it goes against my brainwashing
 
 // important: be careful not to use the wrong arch's register constants in here. 
-fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64) Type = {
+fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $negative_slots: bool) Type = {
     Emit :: @struct(
         program: CompilerRs,
         asm: *Jitted,
@@ -415,21 +416,20 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64) Type = {
     
         self.log_asm_bc = func.get_flag(.LogAsmBc);
         self.bc_to_asm(f);
+        if !self.backend.valid {
+            return(rawptr.zeroed());
+        };
         asm := self.asm.save_current(f);
         
         // TODO: assert that we don't generate code for a bunch of empty functions (just the size of prolouge + epiloge)
         //       when doing instantiations like `::tagged(T);`. should get deduplicated in bytecode or earlier. 
-        // for now just make sure not to spam when disassembling. 
-        // TODO: call the right one 
-        //if asm.len > 8 {
-        //    // TODO: this is kinda dumb, I could just be a bit more abstract about how im emitting instructions and then also emit text assembler.
-        //    if TRACE_ASM.or(self.log_asm_bc).or(=> func.get_flag(.LogAsm)) {
-        //        self.program[][].codemap.show_error_line(func.loc);
-        //        addr := u32.int_from_ptr(asm.ptr);
-        //        @println("% is at addr=%", self.program.pool.get(func.name), addr);
-        //        @if(USE_LLVM_DIS) print_llvm_mc_dis(asm);
-        //    };
-        //};
+        // TODO: this is kinda dumb, I could just be a bit more abstract about how im emitting instructions and then also emit text assembler.
+        if TRACE_ASM.or(self.log_asm_bc).or(=> func.get_flag(.LogAsm)).or(self.backend.interesting) {
+            self.program[][].codemap.show_error_line(func.loc);
+            addr := u32.int_from_ptr(asm.ptr);
+            @println("% is at addr=%", self.program.pool.get(func.name), addr);
+            @if(USE_LLVM_DIS) self.print_llvm_mc_dis(asm);
+        };
         u32.raw_from_ptr(asm.ptr)
     }
     
@@ -454,10 +454,16 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64) Type = {
     
         @if(TRACE_ASM) @println("entry: (%)", self.state.stack.items());
         self.emit_block(0, false);
+        if !self.backend.valid {
+            return();
+        };
         self.patch_reserve_stack(reserve_stack);
     }
     
     fn emit_block(self: *Emit, b: i64, args_not_vstacked: bool) void = {
+        if !self.backend.valid {
+            return();
+        };
         if(self.block_ips[b].is_some(), => return());
         self.block_ips[b] = (Some = self.next_inst());
         block := self.body.blocks[b]&;
@@ -499,7 +505,7 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64) Type = {
                 @assert(self.vars[f.id.zext()].is_none(), "SaveSsa missing");
                 slot := self.create_slots(8);
                 reg := self.pop_to_reg();
-                self.store_u64(reg, SP, slot.id.trunc());
+                self.store_u64(reg, SP, slot.id);
                 self.drop_reg(reg);
                 self.vars[f.id.zext()] = (Some = slot);
             }
@@ -608,7 +614,7 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64) Type = {
                         reg, offset_bytes := self.pop_to_reg_with_offset();
                         self.state.stack&.push(Increment = (
                             reg = reg,
-                            offset_bytes = offset_bytes.zext() + bytes.zext(),
+                            offset_bytes = offset_bytes + bytes.zext(),
                         ));
                     }
                     fn FloatReg(_) => panic("ICE: don't try to gep a float");
@@ -662,7 +668,12 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64) Type = {
                 i += 1;
             };
             if i == self.state.stack.len {
-                panic("ICE: spill to stack failed");
+                //if !self.backend.valid {
+                    // TODO
+                    self.backend.valid = false;
+                    return(0);
+                //};
+                //panic("ICE: spill to stack failed");
             };
             self.state.free_reg&.pop().unwrap()
         }
@@ -675,7 +686,10 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64) Type = {
                 i += 1;
             };
             if i == self.state.stack.len {
-                panic("ICE: spill to stack failed");
+                if !self.backend.valid {
+                    return(0);
+                };
+                panic("ICE: spill to stack failed!");
             };
             self.state.free_reg_float&.pop().unwrap()
         }
@@ -706,14 +720,14 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64) Type = {
         self.in_reg_float(val)
     }
 
-    fn peek_to_reg_with_offset(self: *Emit) Ty(i64, u16) = {
+    fn peek_to_reg_with_offset(self: *Emit) Ty(i64, i64) = {
         val := self.state.stack&.last().unwrap()[];
         self.in_reg_with_offset(val)
     }
 
-    fn in_reg_with_offset(self: *Emit, val: AsmVal) Ty(i64, u16) = {
+    fn in_reg_with_offset(self: *Emit, val: AsmVal) Ty(i64, i64) = {
         @match(val) {
-            fn Increment(f) => (f.reg, f.offset_bytes.trunc());
+            fn Increment(f) => (f.reg, f.offset_bytes);
             fn Literal(x) => {
                 r := self.get_free_reg();
                 self.load_imm(r, x);
@@ -721,14 +735,14 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64) Type = {
             }
             fn Spill(slot) => {
                 r := self.get_free_reg();
-                self.load_u64(r, SP, slot.id.trunc());
+                self.load_u64(r, SP, slot.id);
                 (r, 0)
             }
             fn FloatReg(_) => panic("ICE: in_reg_with_offset on a float register");
         }
     }
 
-    fn pop_to_reg_with_offset(self: *Emit) Ty(i64, u16) = {
+    fn pop_to_reg_with_offset(self: *Emit) Ty(i64, i64) = {
         res := self.peek_to_reg_with_offset();
         self.state.stack&.pop().unwrap();
         res
@@ -743,8 +757,14 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64) Type = {
             };
         };
     
+        @if (negative_slots) {
+            self.next_slot.id -= bytes.zext();
+        };
         made := self.next_slot;
-        self.next_slot.id += bytes.zext();
+        
+        @if (!negative_slots) {
+            self.next_slot.id += bytes.zext();
+        };
         made
     }
 
