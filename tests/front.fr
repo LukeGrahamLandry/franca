@@ -1,0 +1,193 @@
+#include_std("compiler/lex.fr"); 
+#include_std("compiler/codemap.fr");
+#include_std("compiler/pool.fr"); 
+#include_std("compiler/parse.fr"); 
+BOOTSTRAP_ONLY_MODE :: false;
+
+// TODO: doesnt work with cranelift! -- Sep 9
+fn parser_doesnt_crash() #test = {
+    pool: StringPool = init(temp());
+
+    codemap: CodeMap = init(temp());
+    src := @slice (
+        "a + 1;", 
+        "a[] + b[] * c;",
+        "a[] * c + b[];",
+        "-a + b;",
+        "a + -b == c[123];",
+        "a - -b > -c&[] != !true;",
+        "a <= c == b >= d;",
+        "hello&;",
+        "a :: hello + world;",
+        "a := b;",
+        "a: b = c;",
+        "a: b : c;",
+        "(a, b + c);",
+        "();",
+        "(a = b, c = d);",
+        "(a, b, c = d);",
+        "{ a; b };",
+        "{ a; };",
+        "a(b, c);",
+        "a();",
+        "a(b, c = d);",
+        "a(b = c);",
+        "a.f(b);",
+        "a.f(b = c);", // TODO: this kinda parses wrong. it gives f(a, (b = c)) instead of f(a, b = c).
+        "a.f();",
+        "a + ::b * c;", // TODO: add weird precidence test
+        "a = b;",
+        "a[] = b;",
+        "a[b] = c;",
+        "{ a += b; c -= d; e *= f; g /= h };",
+        ".None;",
+        "@{ a + @[b] };",
+        "@a(b) c;",
+        "@a(b);",
+        "@a b;",
+        "@(a(d))(b) c;",
+        "a(f, g) { (b: c) d| e };",
+        "a(!b(c)) {| d };",
+        "a !b(c) {| d };",
+        "a(b(c) {| d });",
+        "a() + b() * c();",
+        "a() * b() + c();",
+        "?a(b) + c;",
+        "a.b;",
+        "*T;",
+        "a&.tag() + b;",
+        "0xABC + 0b10101;",
+        "(fn hello(a: b) c => d);",
+        "fn hi(a: b) c #d #e(f);",
+        "a(=> b);",
+        // dont add more! compiler bug! -- Sep 9
+    );
+
+    // TODO: if you make the stack slice too large it segfaults.. sometimes ?? in rust debug mode it just miscompiles ?SA?EQ@?QW#F>FKLQW? :FUCKED -- Jun 22
+    src := src.clone(temp());
+
+    src&.push_all(@slice (
+        "{ fn a() b = { c }; d };",
+        "a :: @struct(a: @struct(e: f), c: d);",
+        "a :: @struct(b: B, c: C, d: D);",
+        "for parts {e| a };",
+        "#macro fn a() b = c;",
+        "1.2;",
+        "fn neg(a: f64) f64 = sub(0.0, a);",
+        "fn hello($a: T) b;",
+        "TermConstants :: @struct(_parsehack: void, $ICANON := 256, $ECHO := 8);",
+        "@[@literal(as)];",
+        "@{ @(@[@literal(as)])\n(@[@literal(T)]) @[expr] };",
+        "Type :: @builtin Type;", 
+        "a > b && c < d && e;",
+        "a / b",
+        "(a, b) := (c, d);",
+        "a, b := (c, d);",
+        "a& && b&;",
+    ));
+    
+    fn parse(pool: *StringPool, codemap: *CodeMap, src: Str) Ty(Result(FatStmt, *CompileError), Parser) = {
+        span := codemap.add_file("name", src);
+        tasks: List(ParseTask) = list(temp());
+        lex: Lexer = init(pool, span, src); 
+        ctx: Parser = (pool = pool, lex = lex, tasks = tasks&, alloc = temp(), last = Token.zeroed());
+        tasks&.push((Pending = (src = src, span = span)));
+        (ctx&.parse_stmt(), ctx) // order matters!
+    }
+    
+    failed := false;
+    for src { src |
+        res, ctx := parse(pool&, codemap&, src);
+        @match(res) {
+            fn Ok(t) => {
+                out: List(u8) = list(temp());
+                token := codemap&.source_slice(t.loc);
+                next_token := ctx.lex&.pop(); // TODO: i think this should just be peek once i consume semicolons? 
+                if next_token.type&.is(.Eof).not() {|
+                    println(src);
+                    failed = true;
+                    println("parser did not consume all input.");
+                };
+                line := codemap&.get_whole_line(t.loc);
+            }
+            fn Err(e) void => {
+                println(src);
+                e := e.Parse;
+                //place: Span = (low = e.span.low.sub(10), high = e.span.high.add(10));
+                place := e.span;
+                @println("err! % at:\n%", e.msg, codemap&.source_slice(place));
+                failed = true;
+            }
+        };
+    };
+    assert(not(failed), "parse failed");
+    
+    fail_but_not_crash := @slice (
+        "{", "}", "\"", "'", "", "{{}", "(", "a := (a, b;",
+        "fn(", "a :=;", "a :=", "[", "]", "[[]",
+        "a& &b;", "0b;", "0x;", "00123;", ".", "1.;",
+        // TODO: don't allow this: "fn() b == a;"
+        // TODO: not sure if this should be allowed (rn it is): "a, := b;"
+    );
+    
+    failed := false;
+    for fail_but_not_crash {src|
+        res, ctx := parse(pool&, codemap&, src);
+        @match(res) {
+            fn Ok(t) => {
+                failed = true;
+                println(src);
+                println("that should have failed to parse");
+            }
+            fn Err(e) void => {
+                // expected
+            }
+        };
+    };
+    assert(not(failed), "parse failed at failing");
+}
+
+fn test_string_pool() #test = {
+    m: StringPool = init(temp());
+    s: Str = "hello";
+    b: Str = "goodbye";
+    hello := m&.insert_owned(s);
+    hello2 := m&.insert_owned(s);
+    bye := m&.insert_owned(b);
+    assert_eq(true, eq(hello, hello2));
+    assert_eq(false, eq(hello, bye));
+    s2 := m&.get(hello);
+    assert_eq(true, eq(s, s2));
+    b2 := m&.get(bye);
+    assert_eq(false, eq(b2, s2));
+    assert_eq(true, eq(b, b2));
+}
+
+// This failed when I wasn't correctly offseting for saving (u32, u32) arguments (just assuming 8 instead of 4). 
+fn codemap_len() #test = {
+    codemap: CodeMap = init(temp());
+    wisdom := "Everything is text.";
+    span   := codemap&.add_file("wisdom", wisdom);
+    assert_eq(span.len(), wisdom.len);
+}
+
+fn test_code_map() #test = {
+    ::assert_eq(Str);
+    
+    codemap: CodeMap = init(temp());
+    file_a := "Hello World!";
+    file_b := "This is some text.\n It has multiple lines.\n";
+    span_a := codemap&.add_file("file_a", file_a);
+    span_b := codemap&.add_file("file_b", file_b);
+    
+    assert_eq(file_a, codemap&.source_slice(span_a));
+    assert_eq(file_b, codemap&.source_slice(span_b));
+    
+    is := span_b.subspan(5, 7);
+    assert_eq("is", codemap&.source_slice(is));
+    some := span_b.subspan(8, 12);
+    assert_eq("some", codemap&.source_slice(some));
+    
+    is_some := is.merge(some);
+    assert_eq("is some", codemap&.source_slice(is_some));
+}

@@ -1,3 +1,22 @@
+## (Sep 10)
+
+> 683
+
+fix dumb load bug, was using addr twice.
+
+> 885
+
+enabling stack_to_ccall_reg for more args breaks in new_arena_chunk but mostly works if you add a debug_log_str call.
+so at least thats a classic spilling bug.
+yeah missing a ensure_specific_free.
+
+> 1284
+
+## (Sep 9)
+
+- x64: setup stack frames. indexing down from rbp this time. had to go back and get rid of u16 everywhere.
+  attempt load+store.
+
 ## (Sep 8)
 
 - working on calling objective-c to make a window with the raw macos apis.

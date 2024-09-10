@@ -64,7 +64,8 @@ fn emit_bc_and_jit(program: *SelfHosted, f: FuncId) PRes #once = {
         @if(INCLUDE_COMPTIME_CRANELIFT, {
             data := program.cranelift.expect("cranelift backend to be initilized");
             log_ir := func.get_flag(.LogIr);
-            franca_comptime_cranelift_emit(data, f, body, program.legacy_indirection.cast(), log_ir);
+            log_asm := func.get_flag(.LogAsm);
+            franca_comptime_cranelift_emit(data, f, body, program.legacy_indirection.cast(), log_ir, log_asm);
             func.set_flag(.AsmDone);
         }, panic("unreachable: cranelift not included"));
     };
@@ -84,8 +85,8 @@ fn emit_bc_and_jit(program: *SelfHosted, f: FuncId) PRes #once = {
                     addr := a&.compile(f);
                     if a.backend.valid {
                         program.put_jitted_function(f, addr);
-                        program.jitted&.bump_dirty(); // TODO: dont do this
                         program.my_jit += 1;
+                        program.flush_cranelift();
                     } else {
                         program.jitted.dispatch[f.as_index()] = uncompiled_function_placeholder();
                         call_cranelift();
@@ -696,7 +697,7 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $negative_slots: bool) Type =
     }
     
     fn drop_reg(self: *Emit, reg: i64) void = {
-        if !self.is_special_reg(reg) {
+        if !self.is_special_reg(reg) && self.backend.valid {
             @debug_assert(!self.state.free_reg&.contains(reg&), "drop r% -> %", reg, self.state.free_reg.items());
             self.state.free_reg&.push(reg);
             if ZERO_DROPPED_REG {
@@ -773,17 +774,19 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $negative_slots: bool) Type =
     fn dyn_c_call(self: *Emit, sig: *PrimSig, $do_call: @Fn() void) void = {
         self.stack_to_ccall_reg(sig.args, sig.first_arg_is_indirect_return);
         self.spill_abi_stompable();
+        self.state.free_reg&.clear();
+        self.state.free_reg_float&.clear();
         do_call();
     
         ::if_opt(Prim, i64);
         ::if_opt(Prim, Ty(i64, i64));
         int_countt, float_count := if sig.ret1 { (fst: Prim) |
             if sig.ret2 { (snd: Prim) |
-                self.ccall_reg_to_stack(@slice(fst, snd), false);
+                self.ccall_ret_reg_to_stack(@slice(fst, snd));
                 ints := fst.int_count() + snd.int_count();
                 @as(Ty(i64, i64)) (ints, 2 - ints) // TODO: annoying that you need the type here. 
             } else {
-                self.ccall_reg_to_stack(@slice(fst), false);
+                self.ccall_ret_reg_to_stack(@slice(fst));
                 ints := fst.int_count();
                 (ints, 1 - ints)
             }
@@ -792,7 +795,7 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $negative_slots: bool) Type =
         };
     
         // now the extras are usable again.
-        self.add_free_args(int_countt, float_count);
+        self.add_free_rets(int_countt, float_count);
     }
 
     fn drop_slot(self: *Emit, slot: SpOffset, bytes: u16) void = {

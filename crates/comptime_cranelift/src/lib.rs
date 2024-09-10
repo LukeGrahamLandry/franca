@@ -71,6 +71,7 @@ pub extern "C" fn franca_comptime_cranelift_emit(
     body: &'static FnBody,
     compile_ctx_ptr: i64,
     log_ir: bool,
+    log_asm: bool,
 ) {
     assert!(!cl.pending.contains(&f));
     cl.pending.push(f);
@@ -86,7 +87,7 @@ pub extern "C" fn franca_comptime_cranelift_emit(
         compile_ctx_ptr,
         cl,
     };
-    e.emit_func(f, FunctionBuilderContext::new(), ctx, log_ir);
+    e.emit_func(f, FunctionBuilderContext::new(), ctx, log_ir, log_asm);
     // cl.module.finalize_definitions().unwrap();
     // let ff = cl.funcs[f.as_index()].unwrap();
     // let addr = cl.module.get_finalized_function(ff);
@@ -143,6 +144,7 @@ impl<'z, M: Module> Emit<'z, M> {
         mut builder_ctx: FunctionBuilderContext,
         mut ctx: codegen::Context,
         log_ir: bool,
+        log_asm: bool,
     ) {
         self.f = f;
         ctx.func.signature = self.make_sig(self.body.signeture);
@@ -166,8 +168,6 @@ impl<'z, M: Module> Emit<'z, M> {
         builder.finalize();
         self.cl.module.define_function(id, &mut ctx).unwrap();
 
-        // TODO: bring this back
-        let log_asm = false;
         if log_asm {
             ctx.want_disasm = true;
             let code = ctx
