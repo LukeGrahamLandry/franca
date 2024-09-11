@@ -1,3 +1,16 @@
+# (Sep 11)
+
+- x64 jump if. setcc and load byte don't zero the register (TODO: there's a move with zero for the latter at least).
+- 2227 but unreliable. lox test fails most of the time, but i've seen it work.
+  and it almost always works if you run it alone (and never fails the way it does when run through examples).
+  but i think its cranelift getting stressed out by a lot of functions existing?
+  becuase if i comment out the part where i flush_cranelift after every time i use my backend, a bunch of tests fail
+  (with uncompiled as expected), but then the lox one works every time.
+  and that matches my previous impression of it getting more fragile the more you call finalize_definitions,
+  (and i was calling it more now that more used my backend).
+  and now that most use mine, flushing after using cranelift is more reliable.
+  so i choose to belive this will fix itself when i can stop using cranelift all together.
+
 ## (Sep 10)
 
 - 683

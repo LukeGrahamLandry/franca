@@ -155,7 +155,10 @@ fn emit_other_inst(self: *EmitX64, inst: Bc) bool #once = {
             @match(ty) {
                 fn I64() => self.load_u64(dest, addr, offset_bytes);
                 fn P64() => self.load_u64(dest, addr, offset_bytes);
-                fn I8() => self.encode_non_sp_offset(PrimaryOp.MovByteLoad, dest, addr, offset_bytes);
+                fn I8() => {
+                    self.load_imm(dest, 0); // TODO: MOVZX?
+                    self.encode_non_sp_offset(PrimaryOp.MovByteLoad, dest, addr, offset_bytes);
+                };
                 @default => {
                     self.backend.valid = false;
                     return(true);
@@ -199,6 +202,45 @@ fn emit_other_inst(self: *EmitX64, inst: Bc) bool #once = {
                 };
                 encode_call_reg(self.backend.asm_out&, ModrmMode.Direct, X86Reg.r11);
             };
+        }
+        fn JumpIf(f) => {
+            cond := self.pop_to_reg();
+            @debug_assert_eq(f.slots, 0); // emit_bc doesn't do this
+            self.spill_abi_stompable();
+            self.backend.asm_out&.encode_bin(PrimaryOp.Test, @as(X86Reg) cond, @as(X86Reg) cond);
+            // The offset is from **the end** of the jump instruction
+            JUMP_ENCODE_SIZE :: 6;
+            patch := self.backend.asm_out.maybe_uninit.ptr.offset(self.backend.asm_out.len);
+            range(0, JUMP_ENCODE_SIZE) { _ |
+                self.backend.asm_out&.push(@as(u8) PrimaryOp.Int3);
+            };
+            jump_ip := u8.int_from_ptr(self.backend.asm_out.maybe_uninit.ptr) + self.backend.asm_out.len;
+            
+            // branch if zero so true before false
+            // we only do one branch so true block must be directly after the check.
+            // this is the only shape of flow graph that its possible to generate with my ifs/whiles.
+            @debug_assert(self.block_ips[f.true_ip.id.zext()].is_none());
+
+            self.drop_reg(cond);
+            state := self.state&.clone();
+            self.emit_block(f.true_ip.id.zext(), true);
+            if !self.backend.valid {
+                return(true);
+            };
+            self.state = state;
+            self.emit_block(f.false_ip.id.zext(), true);
+            if !self.backend.valid {
+                return(true);
+            };
+            
+            false_ip := self.block_ips[f.false_ip.id.zext()].unwrap();
+            offset := u8.int_from_ptr(false_ip) - jump_ip;
+            @debug_assert(offset.abs() < 1.shift_left(31), "cant jump that far");
+            patch: List(u8) = (maybe_uninit = (ptr = patch, len = JUMP_ENCODE_SIZE), len = 0, gpa = panicking_allocator);
+            patch&.encode_jmp(.e, offset);
+            @debug_assert_eq(patch.len, JUMP_ENCODE_SIZE);
+            //self.backend.interesting = true;
+            return(true); 
         }
         @default => {
             self.backend.valid = false;
@@ -539,6 +581,7 @@ fn inst_intrinsic(self: *EmitX64, op: Intrinsic) void = {
     //! IMPORTANT: cond is inverted because CSINC
     bin_cmp :: fn(cond: X86cc) => bin(fn(a, b) => {
         self.backend.asm_out&.encode_bin(PrimaryOp.CmpReg, a, b);
+        self.load_imm(@as(i64) a, 0); // setcc doesn't zero the whole register!
         self.backend.asm_out&.encode_setcc(a, cond);
     });
     
