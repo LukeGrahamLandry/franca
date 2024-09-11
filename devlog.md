@@ -1,16 +1,26 @@
 ## (Sep 10)
 
-> 683
-
-fix dumb load bug, was using addr twice.
-
-> 885
-
-enabling stack_to_ccall_reg for more args breaks in new_arena_chunk but mostly works if you add a debug_log_str call.
-so at least thats a classic spilling bug.
-yeah missing a ensure_specific_free.
-
-> 1284
+- 683
+- fix dumb load bug, was using addr twice.
+- 885
+- enabling stack_to_ccall_reg for more args breaks in new_arena_chunk but mostly works if you add a debug_log_str call.
+  so at least thats a classic spilling bug.
+  yeah missing a ensure_specific_free.
+- 1284
+- allow indirect ret
+- 1329
+- CopyBytesToFrom (simple version where its always a call)
+- 1376
+- intrinsics: int cmp (with setcc), nop zext/int<->ptr.
+  i'd messed up the condition codes because i didn't have a check for declaring conflicting enum values.
+  and then in the encoding test it picked the first name (because that matched the index) so it thought it was fine,
+  and just ran redundant tests.
+- 1657
+- intrinsics: int add/sub/mul
+  mul is insane and can only use rax but imul is all i actaully use for now.
+- 1736
+- CallFnPtr 1764
+- bitwise and/or/xor only 1771
 
 ## (Sep 9)
 

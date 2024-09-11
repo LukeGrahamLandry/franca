@@ -1,5 +1,8 @@
 // TODO: the variable window shows the wrong name.  
 // TODO: c_bindgen doesn't work with unnamed enums. 
+// TODO: now it crashes on the constants window.
+// TODO: need to copy message in error value again.
+// TODO: support multiple compiler instances so you can point this at a driver that spawns new ones. 
 
 ImGuiMouseSource :: i32;
 ImGuiDir :: i32;
@@ -76,7 +79,7 @@ show_gui :: fn(state: *State) void = {
                 );
                 userdata := state.programs.last().unwrap();
                 opts.driver_vtable_user_data = ProgramState.raw_from_ptr(userdata);
-                c := load_file_in_compiler(state.vtable, path, true, opts);
+                c := load_file_in_compiler(state.vtable, path, opts);
                 c := c.unwrap();
                 state.phase = .Working;
                 
@@ -145,7 +148,8 @@ fn do_work(instance: *ProgramState) void = {
         if instance.compiler.poll_loop_body(task, result&) {
             @match(result) {  
                 fn Err(e) => {
-                    e.msg = e.msg.clone(allocator).items(); // it's probably in temp
+                    // TODO
+                    //e.msg = e.msg.clone(allocator).items(); // it's probably in temp
                     instance.error = (Some = e);
                     return();
                 }
@@ -170,11 +174,9 @@ fn draw_tasks(instance: *ProgramState) void = {
     igSetWindowSize_Vec2((x = 500, y = 500), ImGuiCond_FirstUseEver);
     @match(instance.error) {
         fn Some(error) => {
-            @ig_text("%", error.msg);
-            line := self.codemap.get_whole_line(error.span);
-            @ig_text("At line % of %", line.line, line.filename);
-            text := self.codemap.source_slice(line.line_text);
-            @ig_text("%", text);
+            msg: List(u8) = list(temp());
+            self.fmt_error(error, msg&);
+            @ig_text("%", msg.items());
         }
         fn None() => {
             scale := 1;
@@ -358,6 +360,7 @@ fn draw_compiler_state(state: *State) void = {
                         @assert_eq(@as(i64) usages.var.id.zext(), i);
                         if usages.var.kind == .Const {|
                             v := instance.compiler.scopes.constants&.nested_index(i);
+                            ::as_ref(Ty(FatExpr, LazyType));
                             if v.as_ref() { value_ty | 
                                 value := value_ty._0&;
                                 type := value_ty._1&;
@@ -606,6 +609,7 @@ fn show_func_window(instance: *ProgramState, f_id: FuncId) void = {
         };
     };
     
+    ::if(FuncId.RsVec());
     callers := if self.index.callers.len > f_id.as_index() {
         self.index.callers&.nested_index(f_id.as_index())[]
     } else {
@@ -657,7 +661,7 @@ fn show_overloads_window(instance: *ProgramState, os: OverloadSet) void = {
         num_cols :: 3;
         if igBeginTable(name, num_cols, 0, (x = 800, y = 0), 400) {
             for data.ready { option | 
-                draw_function_row(instance, option.func);
+                draw_function_row(instance, option);
             };
             igEndTable();
         };
@@ -953,6 +957,7 @@ fn load_src_gui(vtable: *ImportVTable) Ty(CompCtx, *ComptimeLibs) = {
     @fmt(src&, ";DO_TERMINAL_COLOURS :: false;\n");
     @fmt(src&, ";DEBUG_SPAM_LOG :: false;\n");
     @fmt(src&, ";INCLUDE_COMPTIME_CRANELIFT :: false;\n");
+    @fmt(src&, ";BOOTSTRAP_ONLY_MODE :: false;\n");
     src&.read_and_push("bindings/sokol.fr");
     src&.read_and_push("bindings/dearimgui.fr");
     src&.read_and_push("examples/compiler_gui.fr");

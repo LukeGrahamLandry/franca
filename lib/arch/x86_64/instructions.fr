@@ -32,6 +32,7 @@ PrimaryOp :: @enum(u8) (
 TwoByteOp :: @enum(u8) (
     JmpImm32CC = 0x80,  // ??? "Use of operand-size prefix in 64-bit mode may result in implementation-dependent behaviour"
     SetCC = 0x90,
+    IMul = 0xaf,
 );
 TWO_BYTE_OP_PREFIX :: 0x0f;
 
@@ -70,10 +71,10 @@ X86cc :: @enum(u4) (
     ns = 0b1001,  // no sign ??
      p = 0b1010,  // parity even ??
     np = 0b1011,  // parity odd ??
-     l = 0b1010,  // less, signed >
-    nl = 0b1011,  // not less, signed >=
-    ne = 0b1010,  // less or equal, signed <=
-   nle = 0b1011,  // not (less or equal), signed > 
+     l = 0b1100,  // less, signed >
+    ge = 0b1101,  // greated or equal, not less, signed >=
+    le = 0b1110,  // less or equal, signed <=
+     g = 0b1111,   // greater, not (less or equal), signed > 
 ); ::enum(X86cc);
 
 ModRmMeaning :: @struct(tag: ModRmTag, disp := Displacement.D0);
@@ -137,14 +138,12 @@ fn pack_modrm(mode: ModrmMode, rm__dest_or_addr: X86Reg, reg__src: X86Reg) u8 = 
 
 // for two arg instructions with no sib
 fn pack_rex(rm__dest_or_addr: X86Reg, reg__src: X86Reg) u8 = {
-    pack_rex_si(reg__src, rm__dest_or_addr, DONT_CARE_REG)
+    pack_rex_si(true, reg__src, rm__dest_or_addr, DONT_CARE_REG)
 }
 
 // for three arg instructions where you need to extend (reg, index, base)
-fn pack_rex_si(reg_modrm: X86Reg, base_sib: X86Reg, index_sib: X86Reg) u8 = {
-    REX_BASE_PREFIX :: 0b01001000;  // :W=1
-    
-    prefix: i64 = REX_BASE_PREFIX;
+fn pack_rex_si(w: bool, reg_modrm: X86Reg, base_sib: X86Reg, index_sib: X86Reg) u8 = {
+    prefix: i64 = if(w, => 0b01001000, => 0b01000000);
     x: i64 = @as(u4) reg_modrm;
     if x >= 8 {   
         prefix = prefix.bit_or(0b00000100);
@@ -179,6 +178,13 @@ fn encode_bin(code: *List(u8), op: PrimaryOp, dest: X86Reg, src: X86Reg) void = 
     code.push(pack_modrm(ModrmMode.Direct, dest, src));
 }
 
+fn encode_bin2(code: *List(u8), op: TwoByteOp, dest: X86Reg, src: X86Reg) void = {
+    code.push(pack_rex(dest, src));
+    code.push(TWO_BYTE_OP_PREFIX);
+    code.push(@as(u8) op);
+    code.push(pack_modrm(ModrmMode.Direct, dest, src));
+}
+
 fn encode_bin_mem(code: *List(u8), op: PrimaryOp, dest: X86Reg, src: X86Reg) void = {
     code.push(pack_rex(dest, src));
     code.push(@as(u8) op);
@@ -186,17 +192,25 @@ fn encode_bin_mem(code: *List(u8), op: PrimaryOp, dest: X86Reg, src: X86Reg) voi
 }
 
 fn encode_tri_mem(code: *List(u8), op: PrimaryOp, reg: X86Reg, base: X86Reg, index: X86Reg) void = {
-    code.push(pack_rex_si(reg, base, index));
+    code.push(pack_rex_si(true, reg, base, index));
     code.push(@as(u8) op);
     code.push(pack_modrm(ModrmMode.Indirect00, base, reg));
     code.push(pack_sib(SibScale.One, index, base));
 }
 
-fn encode_call_reg(code: *List(u8), mode: ModrmMode, f_ptr: X86Reg) void = {
-    opcode_extension := @as(X86Reg) 0b0010;
-    code.push(pack_rex(f_ptr, opcode_extension));
-    code.push(0xff);
-    code.push(pack_modrm(mode, f_ptr, opcode_extension));
+fn encode_call_reg(code: *List(u8), mode: ModrmMode, f_ptr: X86Reg) void = {    
+    encode_extended_op(code, mode, 0xff, 0b0010, f_ptr);
+}
+
+fn encode_not(code: *List(u8), r: X86Reg) void = {    
+    encode_extended_op(code, ModrmMode.Direct, 0xf7, 0b0010, r);
+}
+
+fn encode_extended_op(code: *List(u8), mode: ModrmMode, opcode: u8, extension: u4, reg: X86Reg) void = {
+    opcode_extension := @as(X86Reg) extension;
+    code.push(pack_rex(reg, opcode_extension));
+    code.push(opcode);
+    code.push(pack_modrm(mode, reg, opcode_extension));
 }
 
 // note: if you're clever about encoding for smaller numbers you have to fix offsets in tests/jit.fr
@@ -215,10 +229,8 @@ fn encode_imm(code: *List(u8), dest: X86Reg, value: i64) void = {
 // TODO: i dont understand why https://www.felixcloutier.com/x86/jcc says i need 0xcd in there but i clearly don't
 //       its it telling me x86 not x86_64? but it says 64-bit mode valid. 
 fn encode_jmp(code: *List(u8), cc: X86cc, offset: i64) void = {
+    encode_2cc(code, TwoByteOp.JmpImm32CC, cc);
     offset := signed_truncate(offset, 32);
-    code.push(TWO_BYTE_OP_PREFIX);
-    op := bit_or(@as(i64) cc, zext(@as(u8) TwoByteOp.JmpImm32CC));
-    code.push(@as(u8) op.trunc());
     code.push_u32(offset);
 }
 
@@ -232,20 +244,32 @@ fn encode_imm32_only(code: *List(u8), op: PrimaryOp, offset: i64) void = {
     code.push_u32(offset);
 }
 
+fn encode_2cc(code: *List(u8), op: TwoByteOp, cc: X86cc) void = {
+    code.push(TWO_BYTE_OP_PREFIX);
+    op := bit_or(@as(i64) cc, zext(@as(u8) op));
+    code.push(@as(u8) op.trunc());
+}
+
+fn encode_setcc(code: *List(u8), reg: X86Reg, cc: X86cc) void = {
+    code.push(pack_rex(reg, reg));
+    encode_2cc(code, TwoByteOp.SetCC, cc);
+    code.push(pack_modrm(ModrmMode.Direct, reg, reg));
+}
+
 fn encode_imm64(out: *List(u8), reg: X86Reg, value: u64) void = {
     encode_op_reg(out, PrimaryOp.MovImm64Base, reg);
     out.push_u64(value);
 }
 
 fn encode_op_reg(out: *List(u8), op: PrimaryOp, reg: X86Reg) void = {
-    out.push(pack_rex_si(reg, reg, reg)); // TODO: only one of these
+    out.push(pack_rex_si(true, reg, reg, reg)); // TODO: only one of these
     x := @as(i64) (@as(u8) op).zext() + bit_and(@as(i64) reg, @as(i64) 0b111);
     out.push(@as(u8) x.trunc());  // :W=1
 }
 
 fn encode_non_sp_offset(asm: *List(u8), op: PrimaryOp, reg: X86Reg, index: X86Reg, offset: i64) void = {
     @debug_assert_ne(index, X86Reg.rsp, "guess what you passed to encode_non_sp_offset");
-    asm.push(pack_rex_si(reg, X86Reg.rbp, index));
+    asm.push(pack_rex_si(true, reg, X86Reg.rbp, index));
     asm.push(@as(u8) op);
     asm.push(pack_modrm(ModrmMode.Indirect00, X86Reg.rsp, reg)); // mod=0, rm=sp means use sib
     asm.push(pack_sib(SibScale.One, index, X86Reg.rbp));
