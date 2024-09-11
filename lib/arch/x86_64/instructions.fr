@@ -8,7 +8,7 @@ PrimaryOp :: @enum(u8) (
     SubReg = 0x29,
     XorReg = 0x31,
     CmpReg = 0x39,
-    AddImm32 = 0x81,
+    AddImm32 = 0x81, // opcode extension 0 (i think) 
     MovReg = 0x89, // also store. 
     MovRegLoad = 0x8b, // flip 
     Ret = 0xc3,  // pop return address from the stack and then jump there. 
@@ -25,6 +25,8 @@ PrimaryOp :: @enum(u8) (
     Test = 0x85,
     MovByte = 0x88,
     MovByteLoad = 0x8A,
+    SignExtendAxToDxAx = 0x99,  // cqo
+    ShiftBase = 0xd3,
 );
 
 // (AddReg, OrReg, AndReg, SubReg, XorReg, CmpReg, MovReg)
@@ -36,6 +38,7 @@ TwoByteOp :: @enum(u8) (
     IMul = 0xaf,
 );
 TWO_BYTE_OP_PREFIX :: 0x0f;
+operand_16bit_prefix :: 0x66; // use with REX.W=0
 
 // note: a,b,c,d are NOT in order!
 // note: names matter! i use them in x86_encoding test to compare against llvm-mc's disassembly. 
@@ -207,6 +210,13 @@ fn encode_not(code: *List(u8), r: X86Reg) void = {
     encode_extended_op(code, ModrmMode.Direct, 0xf7, 0b0010, r);
 }
 
+fn encode_cmp_imm32(code: *List(u8), r: X86Reg, value: i64) void = {    
+    encode_extended_op(code, ModrmMode.Direct, 0x81, 0b0111, r);
+    value := signed_truncate(value, 32);
+    code.push_u32(value);
+}
+
+// TODO: extension should be u3? is it allowed to be extended by rex? 
 fn encode_extended_op(code: *List(u8), mode: ModrmMode, opcode: u8, extension: u4, reg: X86Reg) void = {
     opcode_extension := @as(X86Reg) extension;
     code.push(pack_rex(reg, opcode_extension));
@@ -269,8 +279,12 @@ fn encode_op_reg(out: *List(u8), op: PrimaryOp, reg: X86Reg) void = {
 }
 
 fn encode_non_sp_offset(asm: *List(u8), op: PrimaryOp, reg: X86Reg, index: X86Reg, offset: i64) void = {
+    encode_non_sp_offset(asm, true, op, reg, index, offset);
+}
+
+fn encode_non_sp_offset(asm: *List(u8), w: bool, op: PrimaryOp, reg: X86Reg, index: X86Reg, offset: i64) void = {
     @debug_assert_ne(index, X86Reg.rsp, "guess what you passed to encode_non_sp_offset");
-    asm.push(pack_rex_si(true, reg, X86Reg.rbp, index));
+    asm.push(pack_rex_si(w, reg, X86Reg.rbp, index));
     asm.push(@as(u8) op);
     asm.push(pack_modrm(ModrmMode.Indirect00, X86Reg.rsp, reg)); // mod=0, rm=sp means use sib
     asm.push(pack_sib(SibScale.One, index, X86Reg.rbp));

@@ -1,4 +1,4 @@
-# (Sep 11)
+# more more x64 (Sep 11)
 
 - x64 jump if. setcc and load byte don't zero the register (TODO: there's a move with zero for the latter at least).
 - 2227 but unreliable. lox test fails most of the time, but i've seen it work.
@@ -10,8 +10,18 @@
   (and i was calling it more now that more used my backend).
   and now that most use mine, flushing after using cranelift is more reliable.
   so i choose to belive this will fix itself when i can stop using cranelift all together.
+- switch, 2255
+- div. they make this a massive pain. it always outputs to rax, and puts the remainder in rdx (which would be nice if i exposed div_mod).
+  and the divisor has to go in rax but its 128 bit with the rest in rdx so you have to sign extend if you just want 64 bit division.
+  2263
+- in_reg unspill, 2291
+- load/store I32, just set w=0 and then its the same as I64.
+  2891
+- bit shifts. can only use rcx as the shift amount, because they hate me personally i guess.
+  2956
+- load/store 16bits. 2967
 
-## (Sep 10)
+## more x64 (Sep 10)
 
 - 683
 - fix dumb load bug, was using addr twice.
@@ -69,7 +79,7 @@
 - such a painful time on -spam now tries to get_info too soon so i didn't notice that the error was different when i tried to debug it.
   real problem was just an extra == .Cranelift check but uuuuughghhgh im stupid.
 
-- did the pumbing to get fuctions jitted with my own x64 backend.
+- did the plumbing to get fuctions jitted with my own x64 backend.
   currently any functions that just push constants and return 0/1/2 (no args, no vars, no calls, etc),
   are done by me and the rest are given to cranelift.
   kinda embarrassing that my:cl is 617:3391 already (when compiling the compiler). so 15% of the functions i jit are trivial.

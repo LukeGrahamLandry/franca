@@ -155,6 +155,19 @@ fn emit_other_inst(self: *EmitX64, inst: Bc) bool #once = {
             @match(ty) {
                 fn I64() => self.load_u64(dest, addr, offset_bytes);
                 fn P64() => self.load_u64(dest, addr, offset_bytes);
+                fn I32() => {
+                    self.load_imm(dest, 0); // TODO: MOVZX?
+                    reg := @as(X86Reg) dest;
+                    addr := @as(X86Reg) addr;
+                    self.backend.asm_out&.encode_non_sp_offset(false, PrimaryOp.MovRegLoad, reg, addr, offset_bytes);
+                }
+                fn I16() => {
+                    self.load_imm(dest, 0); // TODO: MOVZX?
+                    reg := @as(X86Reg) dest;
+                    addr := @as(X86Reg) addr;
+                    self.backend.asm_out&.push(operand_16bit_prefix);
+                    self.backend.asm_out&.encode_non_sp_offset(false, PrimaryOp.MovRegLoad, reg, addr, offset_bytes);
+                }
                 fn I8() => {
                     self.load_imm(dest, 0); // TODO: MOVZX?
                     self.encode_non_sp_offset(PrimaryOp.MovByteLoad, dest, addr, offset_bytes);
@@ -239,17 +252,54 @@ fn emit_other_inst(self: *EmitX64, inst: Bc) bool #once = {
             patch: List(u8) = (maybe_uninit = (ptr = patch, len = JUMP_ENCODE_SIZE), len = 0, gpa = panicking_allocator);
             patch&.encode_jmp(.e, offset);
             @debug_assert_eq(patch.len, JUMP_ENCODE_SIZE);
-            //self.backend.interesting = true;
             return(true); 
         }
-        @default => {
-            self.backend.valid = false;
-            return(true);
-        };
-        //@default => return(Err = "unhandled inst");
+        @default => panic("unreachable: unhandled bc op");
     };
 
     false
+}
+
+fn emit_switch(self: *EmitX64, cases: *RsVec(SwitchPayload)) void = {
+    @debug_assert(cases.len >= 2, "switch op should have default + >=2 branches");
+    inspect := self.pop_to_reg();
+    // TODO: jump table? binary search? 
+    // TODO: is it better to have all the jumps at the top? 
+    normal_branches, default := cases.decode_switch();
+    each normal_branches { option |
+        self.spill_abi_stompable(); // TODO: this is dumb but you need to make sure the different branches don't spill things in different places. 
+       
+        JUMP_ENCODE_SIZE :: 6;
+        assert(option.value < 4096 && option.value >= 0, "value must fit in u12"); // TODO: use the right number types sooner?
+        self.backend.asm_out&.encode_cmp_imm32(@as(X86Reg) inspect, option.value);
+        
+        patch := self.backend.asm_out.maybe_uninit.ptr.offset(self.backend.asm_out.len);
+        range(0, JUMP_ENCODE_SIZE) { _ |
+            self.backend.asm_out&.push(@as(u8) PrimaryOp.Int3);
+        };
+        jump_ip := self.backend.asm_out.len;
+        
+        @debug_assert(self.block_ips[option.block.id.zext()].is_none(), "I only generate simple control flow");
+
+        state := self.state&.clone();
+        self.drop_reg(inspect); // Inside the new block
+        self.emit_block(option.block.id.zext(), true);
+        if !self.backend.valid {
+            return();
+        };
+        self.state = state;
+        
+        offset := self.backend.asm_out.len - jump_ip;
+        @debug_assert(offset.abs() < 1.shift_left(31), "cant jump that far");
+        patch: List(u8) = (maybe_uninit = (ptr = patch, len = JUMP_ENCODE_SIZE), len = 0, gpa = panicking_allocator);
+        patch&.encode_jmp(.ne, offset);
+        @debug_assert_eq(patch.len, JUMP_ENCODE_SIZE);
+    };
+    self.drop_reg(inspect);
+    assert(default.is_some(), "i always have a default branch currently");
+    default_block := default.unwrap();
+    @debug_assert(self.block_ips[default_block.id.zext()].is_none(), "I only generate simple control flow!");
+    self.emit_block(default_block.id.zext(), true);
 }
 
 // TODO: better error message if you do Result(void, str) // (lowercase)
@@ -261,7 +311,7 @@ fn branch_func(self: *EmitX64, f: FuncId, with_link: bool) void #once = {
     
     // If we already emitted the target function, can just branch there directly.
     if self.asm.get_fn_old(f) { bytes |
-    //if self.program[][].get_fn_callable(f) { bytes |
+    //if self.program[][].get_fn_callable(f) { bytes | // no cause this would bump while we're writing
         start := self.backend.asm_out.len;
         // The offset is from **the end** of the jump instruction
         CALL_ENCODE_SIZE :: 5;
@@ -386,7 +436,6 @@ fn in_specific_reg(self: *EmitX64, reg: X86Reg, val: AsmVal) void = {
             old_reg := @as(X86Reg) f.reg;
             if old_reg != reg {
                 self.ensure_specific_free(reg);
-                self.state.free_reg&.unordered_retain(fn(r) => r[] != @as(i64) reg); 
                 self.backend.asm_out&.encode_bin(PrimaryOp.MovReg, reg, old_reg);
                 self.drop_reg(f.reg);
             };
@@ -396,7 +445,6 @@ fn in_specific_reg(self: *EmitX64, reg: X86Reg, val: AsmVal) void = {
         }
         fn Spill(slot) => {
             self.ensure_specific_free(reg);
-            self.state.free_reg&.unordered_retain(fn(r) => r[] != @as(i64) reg); 
             self.load_u64(@as(i64) reg, @as(i64) X86Reg.rbp, slot.id);
         }
         @default => panic("unhandled in_reg");
@@ -415,13 +463,13 @@ fn ensure_specific_free(self: *EmitX64, goal_r: X86Reg) void = {
             if f.reg == goal {
                 ok := self.try_spill(stack_index, true, false);
                 @debug_assert(ok, "failed to spill specific");
+                self.state.free_reg&.unordered_retain(fn(r) => r[] != goal);  // TODO: its always last, we just pushed it
                 return();
             };
         };
     };
     
-    self.backend.valid = false; 
-    //@panic("ICE: lost a register %", goal_r);
+    @panic("ICE: lost a register %", goal_r);
 }
 
 i32_MAX :: 2147483647;
@@ -438,7 +486,6 @@ fn load_imm(self: *EmitX64, reg: i64, value: i64) void = {
         self.backend.asm_out&.encode_imm64(reg, value);
     };
 }
-fn emit_switch(self: *EmitX64, cases: *RsVec(SwitchPayload)) void = { self.backend.valid = false; };
 
 fn emit_store(self: *EmitX64, addr: AsmVal, value: AsmVal, ty: Prim) void = { 
     addr_reg, offset := self.in_reg_with_offset(addr);
@@ -447,6 +494,17 @@ fn emit_store(self: *EmitX64, addr: AsmVal, value: AsmVal, ty: Prim) void = {
         fn I64() => self.store_u64(value, addr_reg, offset);
         fn P64() => self.store_u64(value, addr_reg, offset);
         fn I8() => self.encode_non_sp_offset(PrimaryOp.MovByte, value, addr_reg, offset);
+        fn I32() => {
+            reg := @as(X86Reg) value;
+            addr := @as(X86Reg) addr_reg;
+            self.backend.asm_out&.encode_non_sp_offset(false, PrimaryOp.MovReg, reg, addr, offset);
+        }
+        fn I16() => {
+            reg := @as(X86Reg) value;
+            addr := @as(X86Reg) addr_reg;
+            self.backend.asm_out&.push(operand_16bit_prefix);
+            self.backend.asm_out&.encode_non_sp_offset(false, PrimaryOp.MovReg, reg, addr, offset);
+        }
         @default => {
             self.backend.valid = false;
             return();
@@ -486,22 +544,28 @@ fn in_reg(self: *EmitX64, val: AsmVal) i64 = {
                 f.reg = self.get_free_reg();
                 self.backend.asm_out&.encode_bin(PrimaryOp.MovReg, @as(X86Reg) f.reg, X86Reg.rbp);
             };
-            if f.offset_bytes == 0 {
-                return(f.reg);
+            if f.offset_bytes != 0 {
+                self.backend.asm_out&.encode_imm(PrimaryOp.AddImm32, @as(X86Reg) f.reg, f.offset_bytes);
             };
-            self.backend.asm_out&.encode_imm(PrimaryOp.AddImm32, @as(X86Reg) f.reg, f.offset_bytes);
-            return(f.reg);
+            f.reg
         }
         fn Literal(i) => {
             r := self.get_free_reg();
             self.load_imm(r, i);
-            return(r);
+            r
         }
-        @default => ();
-    };
-    self.backend.valid = false; 
-    0 
+        fn Spill(slot) => {
+            r := self.get_free_reg();
+            self.load_u64(r, @as(i64) X86Reg.rbp, slot.id);
+            r
+        }
+        fn FloatReg() => {
+            self.backend.valid = false; 
+            0 
+        }
+    }
 }
+
 fn load_fnptr_from_dispatch(self: *EmitX64, f: FuncId, reg: i64) void = { 
     self.load_imm(reg, self.asm.get_dispatch());
     self.load_u64(reg, reg, f.as_index() * 8);
@@ -510,6 +574,7 @@ fn load_fnptr_from_dispatch(self: *EmitX64, f: FuncId, reg: i64) void = {
 fn is_special_reg(self: *EmitX64, reg: i64) bool = {
     reg.eq(@as(i64) X86Reg.rsp).or(reg == @as(i64) X86Reg.rbp)
 }
+
 fn try_spill(self: *EmitX64, i: usize, do_ints: bool, do_floats: bool) bool = { 
     v := self.state.stack[i];
     if do_ints {
@@ -551,14 +616,10 @@ fn jump_to(self: *EmitX64, to_ip: *u8) void = {
     JUMP_ENCODE_SIZE :: 5;
     n := u8.int_from_ptr(self.backend.asm_out.maybe_uninit.ptr) + self.backend.asm_out.len + JUMP_ENCODE_SIZE;
     offset :=  u8.int_from_ptr(to_ip) - n;
-    if offset.abs() < 1.shift_left(31) {
-        @if(TRACE_ASM) println("backwards call");
-        encode_imm32_only(self.backend.asm_out&, PrimaryOp.JmpImm32, offset); 
-        end := self.backend.asm_out.len;
-        @debug_assert_eq(end - start, JUMP_ENCODE_SIZE, "encoding wrong size???");
-        return(); 
-    };
-    self.backend.valid = false;
+    @debug_assert(offset.abs() < 1.shift_left(31), "what a big function you have");
+    encode_imm32_only(self.backend.asm_out&, PrimaryOp.JmpImm32, offset); 
+    end := self.backend.asm_out.len;
+    @debug_assert_eq(end - start, JUMP_ENCODE_SIZE, "encoding wrong size???");
 }
 
 fn print_llvm_mc_dis(self: *EmitX64, asm: []u32) void #inline = {
@@ -588,6 +649,14 @@ fn inst_intrinsic(self: *EmitX64, op: Intrinsic) void = {
     sane_bin :: fn(op: PrimaryOp) => bin(fn(a, b) => {
         self.backend.asm_out&.encode_bin(op, a, b);
     });
+    
+    bin_rcx :: fn($do: @Fn(a: X86Reg) void) void => {
+        self.pop_to_specific_reg(X86Reg.rcx);
+        fst := self.pop_to_reg();
+        do(@as(X86Reg) fst);
+        self.drop_reg(@as(i64) X86Reg.rcx);
+        self.state.stack&.push(Increment = (reg = fst, offset_bytes = 0));
+    };
 
     @match(op) {
         fn Add()    => sane_bin(PrimaryOp.AddReg);
@@ -598,11 +667,37 @@ fn inst_intrinsic(self: *EmitX64, op: Intrinsic) void = {
         fn Mul() => bin(fn(a, b) => {
             self.backend.asm_out&.encode_bin2(TwoByteOp.IMul, b, a);
         });
+        fn Div() => {  // the year is 1726, we have 4 registers, and 2 of them are reserved for division. 
+            self.ensure_specific_free(.rax);
+            self.ensure_specific_free(.rdx);
+            divisor := self.pop_to_reg();
+            self.drop_reg(@as(i64) X86Reg.rax);
+            self.pop_to_specific_reg(X86Reg.rax);
+            
+            // :fun_with_x64_division
+            // rdx has the high bits of an i128, so sign extend rax into rdx. 
+            self.backend.asm_out&.push(0b01001000); // REX W=1
+            self.backend.asm_out&.push(@as(u8) PrimaryOp.SignExtendAxToDxAx);
+            
+            self.backend.asm_out&.encode_extended_op(ModrmMode.Direct, 0xf7, 0b0111, @as(X86Reg) divisor);
+            self.drop_reg(@as(i64) X86Reg.rdx); // TODO: expose as div_mod
+            self.drop_reg(@as(i64) divisor);
+            self.state.stack&.push(Increment = (reg = @as(i64) X86Reg.rax, offset_bytes = 0));
+        }
         fn BitNot() => {
             fst := self.pop_to_reg();
             self.backend.asm_out&.encode_not(@as(X86Reg) fst);
             self.state.stack&.push(Increment = (reg = fst, offset_bytes = 0));
         }
+        fn ShiftLeft() => bin_rcx(fn(a) => {
+            self.backend.asm_out&.encode_extended_op(ModrmMode.Direct, @as(u8) PrimaryOp.ShiftBase, 0b0100, a);
+        });
+        fn ShiftRightLogical() => bin_rcx(fn(a) => {
+            self.backend.asm_out&.encode_extended_op(ModrmMode.Direct, @as(u8) PrimaryOp.ShiftBase, 0b0101, a);
+        });
+        fn ShiftRightArithmetic() => bin_rcx(fn(a) => {
+            self.backend.asm_out&.encode_extended_op(ModrmMode.Direct, @as(u8) PrimaryOp.ShiftBase, 0b0111, a);
+        });
         fn Eq()  => bin_cmp(.e);
         fn Ne()  => bin_cmp(.ne);
         fn Le()  => bin_cmp(.le);
