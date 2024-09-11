@@ -304,11 +304,8 @@ fn emit_switch(self: *EmitX64, cases: *RsVec(SwitchPayload)) void = {
 
 // TODO: better error message if you do Result(void, str) // (lowercase)
 fn branch_func(self: *EmitX64, f: FuncId, with_link: bool) void #once = {
-    if !with_link {
-        self.backend.valid = false;
-        return();
-    };
-    
+    // TODO: im not super confident im doing with_link right but it seems to work. 
+
     // If we already emitted the target function, can just branch there directly.
     if self.asm.get_fn_old(f) { bytes |
     //if self.program[][].get_fn_callable(f) { bytes | // no cause this would bump while we're writing
@@ -319,7 +316,9 @@ fn branch_func(self: *EmitX64, f: FuncId, with_link: bool) void #once = {
         offset := bytes.int_from_rawptr() - n;
         if offset.abs() < 1.shift_left(31) {
             @if(TRACE_ASM) println("backwards call");
-            encode_imm32_only(self.backend.asm_out&, PrimaryOp.CallImm32, offset); 
+            ::if(PrimaryOp);
+            op := if(with_link, => PrimaryOp.CallImm32, => PrimaryOp.JmpImm32);
+            encode_imm32_only(self.backend.asm_out&, op, offset); 
             end := self.backend.asm_out.len;
             @debug_assert_eq(end - start, CALL_ENCODE_SIZE, "encoding wrong size???");
             return(); 
@@ -328,7 +327,11 @@ fn branch_func(self: *EmitX64, f: FuncId, with_link: bool) void #once = {
     
     r := X86Reg.r11;
     self.load_fnptr_from_dispatch(f, @as(i64) r);
-    encode_call_reg(self.backend.asm_out&, ModrmMode.Direct, r);
+    if with_link {
+        encode_call_reg(self.backend.asm_out&, ModrmMode.Direct, r);
+    } else {
+        encode_extended_op(self.backend.asm_out&, ModrmMode.Direct, 0xff, 0b0100, r);
+    };
 }
 
 fn emit_return(self: *EmitX64, sig: [] Prim) bool = {
@@ -657,6 +660,10 @@ fn inst_intrinsic(self: *EmitX64, op: Intrinsic) void = {
         self.drop_reg(@as(i64) X86Reg.rcx);
         self.state.stack&.push(Increment = (reg = fst, offset_bytes = 0));
     };
+    dumb_trunc :: fn(size: i64) void => {
+        self.state.stack&.push(Literal = 1.shift_left(size) - 1);
+        sane_bin(PrimaryOp.AndReg);
+    };
 
     @match(op) {
         fn Add()    => sane_bin(PrimaryOp.AddReg);
@@ -706,6 +713,12 @@ fn inst_intrinsic(self: *EmitX64, op: Intrinsic) void = {
         fn Gt()  => bin_cmp(.g);
         fn IntToPtr() => (); // no-op
         fn PtrToInt() => (); // no-op
+        fn Trunc64To32() => dumb_trunc(32);
+        fn Trunc64To16() => dumb_trunc(16);
+        fn Trunc64To8()  => dumb_trunc(8);
+        fn Trunc32To16() => dumb_trunc(16);
+        fn Trunc32To8()  => dumb_trunc(8);
+        fn Trunc16To8()  => dumb_trunc(8);
         // TODO: this about how signed numbers are represented. 
         fn SignExtend32To64() => (); // TODO: WRITE A TEST THAT FAILS BECAUSE OF THIS
         fn ZeroExtend32To64() => (); // no-op

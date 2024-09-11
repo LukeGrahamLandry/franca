@@ -20,6 +20,8 @@
 - bit shifts. can only use rcx as the shift amount, because they hate me personally i guess.
   2956
 - load/store 16bits. 2967
+- call without link. 3800
+- trunc. 3903
 
 ## more x64 (Sep 10)
 
