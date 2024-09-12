@@ -634,7 +634,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
                             ::RsVec(i64);
                             args := args.rs();
                             hack := self&;
-                            needs_ct := func.cc.unwrap() == .CCallRegCt;
+                            needs_ct := func.cc.expect("known cc!!!") == .CCallRegCt;
                             f_ty: FnType = (arg = i64, ret = void, arity = 1);
                             @try(hack&.call_dynamic_inner(fn_ptr.int_from_rawptr(), f_ty&, args&, needs_ct)) return;
                             
@@ -1393,18 +1393,18 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
         @check(self.compile_expr(arg_expr, arg_ty.want())) return;
         //@check(self.can_assign(arg_ty, arg_expr.ty)) return; TODO: type check
         @check(self.infer_return(fid)) return;
-        ret_ty := func.finished_ret.unwrap();
+        ret_ty := func.finished_ret.expect("known ret");
         @log_event("UnsafeNoopCast % -> %", self.log_type(arg_ty), self.log_type(ret_ty)) self;
         // TODO
         // assert_eq!(self.program.slot_count(arg_expr.ty), self.program.slot_count(ret_ty));
         expr.expr = (Cast = arg_expr);
-        expr.ty = func.finished_ret.unwrap();
+        expr.ty = ret_ty;
         expr.done = arg_expr.done;
         return(.Ok);
     };
     
     capturing   := func.get_flag(.AllowRtCapture).or(func.get_flag(.MayHaveAquiredCaptures));
-    will_inline := capturing.or(func.cc.unwrap() == .Inline);
+    will_inline := capturing.or(func.cc.expect("known cc") == .Inline);
     deny_inline := func.get_flag(.NoInline);
     if(will_inline && deny_inline, => return(@err("must inline a function marked #noinline")));
     
@@ -1570,7 +1570,7 @@ fn emit_capturing_call(self: *SelfHosted, f: FuncId, expr_out: *FatExpr, request
     pattern := func.arg&.deep_clone(self.get_alloc());
     
     // TODO: you want to be able to share work (across all the call-sites) compiling parts of the body that don't depend on the captured variables
-    old_ret_var := func.return_var.unwrap();
+    old_ret_var := func.return_var.expect("return var");
     new_ret_var := self.scopes.dup_var(old_ret_var);
     ret_label: LabelId = from_index(self.dispatch.return_labels.len);
     self.dispatch.return_labels&.push(f);
@@ -1681,7 +1681,7 @@ fn const_args_key(self: *SelfHosted, original_f: FuncId, arg_expr: *FatExpr) May
                     @check(self.compile_expr(arg_expr, .None)) return;
                     arg_exprs[i].ty
                 } else {
-                    (@check(self.infer_type(binding.ty&)) return).unwrap()
+                    (@check(self.infer_type(binding.ty&)) return).expect("infer type")
                 }
             };
             has_seen_first_const = true;
@@ -1818,7 +1818,7 @@ fn maybe_renumber_and_dup_scope(self: *SelfHosted, new_func: *Func) void #once =
             // that's why its fine when we can't find a remap for something in constants or vars.      -- May 29
             assert(new_func.get_flag(.ResolvedSign), "expected resolved sign");  // TODO: debug
             assert(!new_func.get_flag(.AllowRtCapture), "expected no runtime capture"); // TODO: debug
-            prev := new_func.scope.unwrap();
+            prev := new_func.scope.expect("func resolved");
             old_scope := self.scopes[prev]&;
             id := self.scopes.new_scope(old_scope.parent, old_scope.block_in_parent);
             old_scope := self.scopes[prev]&;
@@ -1835,7 +1835,7 @@ fn maybe_renumber_and_dup_scope(self: *SelfHosted, new_func: *Func) void #once =
                 each block.const_lookup& { (k, v) |
                     if mapping&.get_ptr(v[]) { new |
                         v := self.scopes.get_constant(v[]);
-                        v := v.unwrap(); // TODO: destructure through a pointer? 
+                        v := v.expect("known const"); // TODO: destructure through a pointer? 
                         expr := self.clone(v._0&);
                         ty := self.clone(v._1&);
                         self.scopes.put_constant(new[], expr, ty);
@@ -2603,7 +2603,7 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
                 each arg_expr.expr.StructLiteralP.bindings& { have_b |
                     have_name := have_b.ident().or(=> continue()); // idk if this ever happens but it sure can't be named argument
                     if want_name == have_name {
-                        arg_expr := have_b.default&.as_ref().unwrap();
+                        arg_expr := have_b.default&.as_ref().expect("named has value");
                         if !func.get_flag(.Generic) {
                             @check(self.infer_type(want_b.ty&)) return;
                         };
@@ -3694,7 +3694,7 @@ fn check_quick_eval(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) ?Values = {
                         f_id := FuncId.assume_cast(it.f.expr.Value.bytes&)[];
                         if self.get_fn_callable(f_id) { f_ptr |
                             func := self.get_function(f_id);
-                            comp_ctx := func.cc.unwrap() == .CCallRegCt;
+                            comp_ctx := func.cc.expect("known cc!") == .CCallRegCt;
                             evil_hack := self;
                             evil_hack := self&; 
                             self.finish_layout_deep(it.f.ty);
@@ -3808,7 +3808,7 @@ fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
     args := args.rs();
     
     hack := self&;
-    needs_ct := func.cc.unwrap() == .CCallRegCt;
+    needs_ct := func.cc.expect("known cc!!") == .CCallRegCt;
     self.last_loc = expr.loc;
     f_ty := func.finished_ty().expect("known type once compiled");
     assert(f_ty.ret == fat_expr_type, "tried to call macro with bad ret type. missing overload? \nresolve_in_overloadset assumes someone later will typecheck so giving a garabge match is fine");
@@ -3985,10 +3985,10 @@ fn enum_macro(self: *SelfHosted, arg: *FatExpr, target: *FatExpr) Maybe(FatExpr)
                 @err_assert(b.default.is_some(), "@enum expected case value") return;
                 @err_assert(b.ty&.is(.Infer), "@enum case cannot have type annotation (use '=' instead of ':'") return;
 
-                expr := b.default&.as_ref().unwrap();
+                expr := b.default&.as_ref().expect("enum value");
                 val  := @check(self.immediate_eval_expr(expr, type)) return;
                 if sequential {
-                    current := @try(val&.int_value(as_int.unwrap())) return;
+                    current := @try(val&.int_value(as_int.expect("int"))) return;
                     if current == last + 1 {
                         last += 1;
                     } else {

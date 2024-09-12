@@ -22,13 +22,13 @@ AsmVal :: @tagged(
 SpSlot :: @struct(at: SpOffset, size: u16, clock: u16);
 BlockState :: @struct(
     stack: List(AsmVal),
-    free_reg: List(i64),
-    free_reg_float: List(i64),
+    free_reg: StaticBitSet(32), // update clone if you make this not static
+    free_reg_float: StaticBitSet(32), // update clone if you make this not static
     open_slots: List(SpSlot),
 );
 
 fn clone(self: *BlockState) BlockState = {
-    (stack = self.stack&.clone(), free_reg = self.free_reg&.clone(), free_reg_float = self.free_reg_float&.clone(), open_slots = self.open_slots&.clone())
+    (stack = self.stack&.clone(), free_reg = self.free_reg, free_reg_float = self.free_reg_float, open_slots = self.open_slots&.clone())
 }
 
 fn emit_bc_and_jit(program: *SelfHosted, f: FuncId) PRes #once = {
@@ -402,7 +402,7 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $negative_slots: bool) Type =
             vars = list(temp()),
             next_slot = (id = 0),
             release_stack = list(temp()),
-            state = (stack = list(temp()), free_reg = list(temp()), free_reg_float = list(temp()), open_slots = list(temp())),
+            state = (stack = list(temp()), free_reg = empty(), free_reg_float = empty(), open_slots = list(temp())),
             block_ips = list(temp()),
             clock = 0,
             log_asm_bc = false,
@@ -486,7 +486,7 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $negative_slots: bool) Type =
             if(is_done, => return());
             inst := block.insts[i];
             is_done = self.emit_inst(b, inst, i);
-            @if(TRACE_ASM) @println("%:% % => % | free: %", b, i, inst&.tag(), self.state.stack.items(), self.state.free_reg.items());
+            @if(TRACE_ASM) @println("%:% % => %", b, i, inst&.tag(), self.state.stack.items());
         };
         @debug_assert(is_done, "emitted all blocks but no function terminator");
     }
@@ -692,13 +692,13 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $negative_slots: bool) Type =
                 panic("ICE: spill to stack failed!");
             };
             self.state.free_reg_float&.pop().unwrap()
-        }
+        } 
     }
     
     fn drop_reg(self: *Emit, reg: i64) void = {
         if !self.is_special_reg(reg) && self.backend.valid {
-            @debug_assert(!self.state.free_reg&.contains(reg&), "drop r% -> %", reg, self.state.free_reg.items());
-            self.state.free_reg&.push(reg);
+            @debug_assert(!self.state.free_reg&.contains(reg&), "drop r%", reg); // TODO: print bitset
+            self.state.free_reg&.set(reg);
             if ZERO_DROPPED_REG {
                 self.load_imm(reg, 0);
             };
@@ -706,8 +706,8 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $negative_slots: bool) Type =
     }
 
     fn drop_reg_float(self: *Emit, reg: i64) void = {
-        @debug_assert(!self.state.free_reg_float&.contains(reg&), "drop F% -> %", reg, self.state.free_reg_float.items());
-        self.state.free_reg_float&.push(reg);
+        @debug_assert(!self.state.free_reg_float&.get(reg), "drop F%", reg);
+        self.state.free_reg_float&.set(reg);
     }
 
     fn pop_to_reg(self: *Emit) i64 = {

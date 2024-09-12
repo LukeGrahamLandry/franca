@@ -20,10 +20,10 @@ fn add_free_rets(self: *EmitArm64, int_count: i64, float_count: i64) void =
 
 fn add_free_args(self: *EmitArm64, int_count: i64, float_count: i64) void = {
     range(int_count, 8) { i |
-        self.state.free_reg&.add_unique(i);
+        self.state.free_reg&.set(i);
     };
     range(float_count, 8) { i |
-        self.state.free_reg_float&.add_unique(i);
+        self.state.free_reg_float&.set(i);
     };
 }
 
@@ -291,7 +291,7 @@ fn stack_to_ccall_reg(self: *EmitArm64, types: [] Prim, special: bool) void = {
             self.asm.push(f_ldr_uo(Bits.X64, next_float, sp, @as(u12) @as(i64) slot.id / 8));
             // self.drop_slot(slot, 8); // TODO!
 
-            self.state.free_reg_float&.unordered_retain(fn(r: *i64) => next_float != r[]); // TODO: unordered retain
+            self.state.free_reg_float&.unset(next_float); 
             self.state.stack[stack_index] = (Literal = 0); // make sure we dont try to spill it later
             next_float += 1;
             continue();
@@ -305,7 +305,7 @@ fn stack_to_ccall_reg(self: *EmitArm64, types: [] Prim, special: bool) void = {
 
                 // if we happen to already be in the right register, cool, don't worry about it.
                 @if(TRACE_ASM) @print("|x% already| ", f.reg);
-                self.state.free_reg&.unordered_retain(fn(r: *i64) => f.reg != r[]); 
+                self.state.free_reg&.unset(f.reg); 
                 self.state.stack[stack_index] = (Literal = 0); // make sure we dont try to spill it later
                 next_int += 1;
                 continue();
@@ -313,9 +313,9 @@ fn stack_to_ccall_reg(self: *EmitArm64, types: [] Prim, special: bool) void = {
         };
 
         found := false;
-        if self.state.free_reg&.position(fn(r) => next_int == r[]) { want |
+        if self.state.free_reg&.get(next_int) {
             found = true;
-            self.state.free_reg&.unordered_remove(want);
+            self.state.free_reg&.unset(next_int);
         };
         
         if !found {
@@ -337,8 +337,8 @@ fn stack_to_ccall_reg(self: *EmitArm64, types: [] Prim, special: bool) void = {
         };
         
         // TODO: lexer error if you forget a quote and hit a new line. 
-        @assert(found, "TODO: x% is not free. stack is %. free is %",
-                next_int, self.state.stack.items(), self.state.free_reg.items());
+        @assert(found, "TODO: x% is not free. stack is %.",
+                next_int, self.state.stack.items());
 
         @if(TRACE_ASM) @print("|(x%) <- (%)| ", next_int, self.state.stack[stack_index]&);
         @match(self.state.stack[stack_index]) {
@@ -355,7 +355,7 @@ fn stack_to_ccall_reg(self: *EmitArm64, types: [] Prim, special: bool) void = {
                 self.drop_reg_float(f);
             }
         };
-        self.state.free_reg&.unordered_retain(fn(r) => next_int != r[]);
+        self.state.free_reg&.unset(next_int);
         self.state.stack[stack_index] = (Literal = 0); // make sure we dont try to spill it later
         next_int += 1;
     };
@@ -396,10 +396,10 @@ fn ccall_reg_to_stack(self: *EmitArm64, types: [] Prim, special: bool) Ty(i64, i
         @debug_assert_eq(i, next_int + next_float);
         f := ty[].is_float();
         v: AsmVal = if f {
-            self.state.free_reg_float&.unordered_retain(fn(r) => r[] != next_float);
+            self.state.free_reg_float&.unset(next_float);
             (FloatReg = next_float)
         } else {
-            self.state.free_reg&.unordered_retain(fn(r) => r[] != next_int); 
+            self.state.free_reg&.unset(next_int); 
             (Increment = (
                 reg = next_int,
                 offset_bytes = 0,

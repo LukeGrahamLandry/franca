@@ -58,27 +58,27 @@ x64_int_rets :: clone(@slice(X86Reg.rax, X86Reg.rdx), ast_alloc()).items();
 fn add_free_args(self: *EmitX64, taken_int_count: i64, taken_float_count: i64) void = {
     if taken_int_count < x64_int_args.len() {
         for x64_int_args.slice(taken_int_count, x64_int_args.len()) { r |
-            self.state.free_reg&.push(@as(i64) r);
+            self.state.free_reg&.set(@as(i64) r);
         };
     };
-    self.state.free_reg&.push(@as(i64) X86Reg.rax);
+    self.state.free_reg&.set(@as(i64) X86Reg.rax);
     
     range(taken_float_count, 8) { i | 
-        self.state.free_reg_float&.push(i);
+        self.state.free_reg_float&.set(i);
     };
 }
 
 fn add_free_rets(self: *EmitX64, taken_int_count: i64, taken_float_count: i64) void = {
     for x64_int_rets.slice(taken_int_count, x64_int_rets.len()) { r |
-        self.state.free_reg&.push(@as(i64) r);
+        self.state.free_reg&.set(@as(i64) r);
     };
     
     for (@slice(X86Reg.rdi, X86Reg.rsi, X86Reg.rcx, X86Reg.r8, X86Reg.r9)) { r | 
-        self.state.free_reg&.push(@as(i64) r);
+        self.state.free_reg&.set(@as(i64) r);
     };
     
     range(taken_float_count, 8) { i | 
-        self.state.free_reg_float&.push(i);
+        self.state.free_reg_float&.set(i);
     };
 }
 
@@ -350,15 +350,14 @@ fn ccall_ret_reg_to_stack(self: *EmitX64, types: [] Prim) void = {
     int_count := 0;
     float_count := 0;
     for types { ty |
-        if ty.is_float() { // TODO: this doesn't work
+        if ty.is_float() {
             goal := float_count;
-            self.state.free_reg_float&.unordered_retain(fn(r) => r[] != goal); 
+            self.state.free_reg_float&.unset(goal); 
             self.state.stack&.push(FloatReg = goal);
             float_count += 1;
-            self.backend.valid = false;  // fixme
         } else {
             goal := @as(i64) @as(X86Reg) x64_int_rets[int_count];
-            self.state.free_reg&.unordered_retain(fn(r) => r[] != goal); 
+            self.state.free_reg&.unset(goal); 
             self.state.stack&.push(Increment = (reg = goal, offset_bytes = 0));
             int_count += 1;
         };
@@ -394,6 +393,7 @@ fn stack_to_ccall_reg(self: *EmitX64, types: [] Prim, extra_special_ret: bool) v
         self.snipe_to_specific_reg(x64_int_args[0], idx);
     };
     total := types.len + int_count;
+    @debug_assert(total <= self.state.stack.len, "not enough stack for args");
     float_count := 0;
     enumerate types { i, type | 
         stack_index := self.state.stack.len - types.len + i;
@@ -464,9 +464,9 @@ fn in_specific_reg_float(self: *EmitX64, reg: i64, val: AsmVal) void = {
     @match(val) {
         fn Literal(x) => {
             self.ensure_specific_free_float(reg);
-            int := self.in_reg(val);
-            self.mov_float_from_int(reg, @as(X86Reg) int);
-            self.drop_reg(int);
+            int := X86Reg.r11;
+            self.load_imm(@as(i64) int, x);
+            self.mov_float_from_int(reg, int);
         }
         fn Increment(f) => {
             self.ensure_specific_free_float(reg);
@@ -490,8 +490,8 @@ fn in_specific_reg_float(self: *EmitX64, reg: i64, val: AsmVal) void = {
 
 fn ensure_specific_free(self: *EmitX64, goal_r: X86Reg) void = {
     goal := @as(i64) goal_r;
-    if self.state.free_reg&.position(fn(r) => goal == r[]) { want |
-        self.state.free_reg&.unordered_remove(want);
+    if self.state.free_reg&.get(goal) { 
+        self.state.free_reg&.unset(goal);
         return();
     };
     
@@ -500,7 +500,7 @@ fn ensure_specific_free(self: *EmitX64, goal_r: X86Reg) void = {
             if f.reg == goal {
                 ok := self.try_spill(stack_index, true, false);
                 @debug_assert(ok, "failed to spill specific");
-                self.state.free_reg&.unordered_retain(fn(r) => r[] != goal);  // TODO: its always last, we just pushed it
+                self.state.free_reg&.unset(goal);
                 return();
             };
         };
@@ -510,17 +510,18 @@ fn ensure_specific_free(self: *EmitX64, goal_r: X86Reg) void = {
 }
 
 fn ensure_specific_free_float(self: *EmitX64, goal: i64) void = {
-    if self.state.free_reg_float&.position(fn(r) => goal == r[]) { want |
-        self.state.free_reg_float&.unordered_remove(want);
+    if self.state.free_reg_float&.get(goal) {
+        self.state.free_reg_float&.unset(goal);
         return();
     };
     
     enumerate self.state.stack { stack_index, val |
         @if_let(val) fn FloatReg(f) => {
-            if f == goal {
+            // TODO: it compiles but segfaults if you forget the `[]` here. :fucked
+            if f[] == goal {
                 ok := self.try_spill(stack_index, false, true);
                 @debug_assert(ok, "failed to spill specific");
-                self.state.free_reg_float&.unordered_retain(fn(r) => r[] != goal);  // TODO: its always last, we just pushed it
+                self.state.free_reg_float&.unset(goal);
                 return();
             };
         };
