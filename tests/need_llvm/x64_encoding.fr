@@ -214,7 +214,43 @@ fn get_test_cases(alloc: Alloc) []TestCase = {
         };
     };
     
+    tests&.more();
+    
     tests.items()
+}
+
+fn more(tests: *List(TestCase)) void = {
+    alloc := tests.gpa;
+    
+    push_case :: fn(text: Str, $f: @Fn(asm: *List(u8)) void) void => {
+        asm: List(u8) = list(alloc);
+        f(asm&);
+        tests.push(bytes = asm.items(), text = text);
+    };
+    
+    
+    range(0, 16) { a | 
+        for_enum X86Reg { b |
+            // float <- normal
+            text := items(@format("movq	xmm%, %", a, b) alloc); 
+            push_case(text) { asm |
+                encode_binf(asm, precision_prefix, true, FloatOp.MovQTo, @as(u4) a, @as(u4) b);
+            };
+            // normal <- float
+            text := items(@format("movq	%, xmm%", b, a) alloc); 
+            push_case(text) { asm |
+                encode_binf(asm, precision_prefix, true, FloatOp.MovQ, @as(u4) a, @as(u4) b);
+            };
+        }; 
+        
+        range(0, 16) { b |
+            // float <- float
+            text := items(@format("movq	xmm%, xmm%", a, b) alloc); 
+            push_case(text) { asm |
+                encode_binf(asm, double_prefix, false, FloatOp.MovQ, @as(u4) a, @as(u4) b);
+            };
+        };
+    };
 }
 
 fn run_test_chunk(offset: i64, tests: []TestCase) i64 = {
@@ -244,7 +280,8 @@ fn run_test_chunk(offset: i64, tests: []TestCase) i64 = {
     
     enumerate tests { test_index, test | 
         want := test.text.trim();
-        found := dis[0].trim();
+        found := dis[0].split("#", temp())[0].trim();
+        
         dis = dis.slice(1, dis.len);
         
         if VERBOSE {
