@@ -1,4 +1,20 @@
-# more more x64 (Sep 11)
+## more more more x64 (Sep 12)
+
+- float add/sub/mul/div is very sane, no comment, they must have added it later.
+  tho im not sure if im supposed to be using the VEX versions that im avoiding because i don't want to deal with another encoding.
+  im not remotely at the level of optimisation where a false data dependency on the top of the simd register would be measurable,
+  so its probably fine for now...
+- x64 CVTSD2SI rounds to closest instead of towards zero like the arm one does.
+  the internet says "When the conversion is inexact, the value returned is rounded according to the rounding control bits in the MXCSR register."
+  i'd really not have magic global state that decides rounding behaviour.
+  looking at cranelift's disassembly (which does the rounding i want), it says `cvt_float64_to_sint64_sat_seq %xmm7, %rsi, %rax, %xmm6`,
+  which... drum roll please... doesn't exist 🎉🎉.
+  googling `cvt_float64_to_sint64_sat_seq` has one result and its a cranelift test. https://cocalc.com/github/bytecodealliance/wasmtime/blob/main/cranelift/filetests/filetests/isa/x64/fcvt.clif
+  ah of course, https://github.com/bytecodealliance/wasmtime/blob/main/cranelift/codegen/src/isa/x64/lower.isle#L3680
+  silly me, i want cvttps2dq not CVTSD2SI, but no thats a vector, the second t is trucate so cvttsd2si? hehe ye https://www.felixcloutier.com/x86/cvttsd2si
+  why do we even have an instruction for "eh fuck it whatever rounding the last guy wanted is probably fine".
+
+## more more x64 (Sep 11)
 
 - x64 jump if. setcc and load byte don't zero the register (TODO: there's a move with zero for the latter at least).
 - 2227 but unreliable. lox test fails most of the time, but i've seen it work.

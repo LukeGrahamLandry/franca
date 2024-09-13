@@ -1,3 +1,5 @@
+// TODO: im not following the calling convention for structs correctly. 
+
 EmitX64    :: CodeGenJit(X64AsmData, u8, @as(i64) X86Reg.rbp, true);
 X64AsmData :: @struct(asm_out: List(u8), valid := true, interesting := false);
 
@@ -54,6 +56,7 @@ fn emit_stack_fixup(self: *EmitX64) void = {
 ::List(X86Reg);
 x64_int_args :: clone(@slice(X86Reg.rdi, X86Reg.rsi, X86Reg.rdx, X86Reg.rcx, X86Reg.r8, X86Reg.r9), ast_alloc()).items();
 x64_int_rets :: clone(@slice(X86Reg.rax, X86Reg.rdx), ast_alloc()).items();
+FLOAT_ARG_REG_COUNT :: 8;
 
 fn add_free_args(self: *EmitX64, taken_int_count: i64, taken_float_count: i64) void = {
     if taken_int_count < x64_int_args.len() {
@@ -63,7 +66,7 @@ fn add_free_args(self: *EmitX64, taken_int_count: i64, taken_float_count: i64) v
     };
     self.state.free_reg&.set(@as(i64) X86Reg.rax);
     
-    range(taken_float_count, 8) { i | 
+    range(taken_float_count, FLOAT_ARG_REG_COUNT) { i | 
         self.state.free_reg_float&.set(i);
     };
 }
@@ -77,7 +80,7 @@ fn add_free_rets(self: *EmitX64, taken_int_count: i64, taken_float_count: i64) v
         self.state.free_reg&.set(@as(i64) r);
     };
     
-    range(taken_float_count, 8) { i | 
+    range(taken_float_count, FLOAT_ARG_REG_COUNT) { i | 
         self.state.free_reg_float&.set(i);
     };
 }
@@ -108,10 +111,10 @@ fn emit_other_inst(self: *EmitX64, inst: Bc) bool #once = {
                 fn Literal(_)     => self.state.stack&.push(val);
                 // TODO: this means we don't know when we can drop stack slots... gc them... lol
                 fn Spill(_)       => self.state.stack&.push(val); 
-                fn FloatReg(reg)  => {
-                    self.backend.valid = false;
-                    self.state.stack&.push(Literal = 0);
-                    return(true);
+                fn FloatReg(old_reg)  => {
+                    new_reg := self.get_free_reg_float();
+                    self.mov_float_from_float(new_reg, old_reg);
+                    self.state.stack&.push(FloatReg = new_reg);
                 }
             };
         }
@@ -313,40 +316,29 @@ fn branch_func(self: *EmitX64, f: FuncId, with_link: bool) void #once = {
     };
 }
 
+
 fn emit_return(self: *EmitX64, sig: [] Prim) bool = {
-    @switch(sig.len) {
-        @case(0) => ();
-        @case(1) => {
-            if !(sig[0] != .F32 && sig[0] != .F64) {
-                self.backend.valid = false;
-                return(true);
-            };
-            self.pop_to_specific_reg(X86Reg.rax);
+    int_count := 0;
+    float_count := 0;
+    enumerate sig { i, ty |
+        stack_index := self.state.stack.len - sig.len + i;
+        if ty[].is_float() {
+            goal := float_count;
+            self.snipe_to_specific_reg_float(float_count, stack_index);
+            float_count += 1;
+        } else {
+            goal := x64_int_rets[int_count];
+            self.snipe_to_specific_reg(goal, stack_index);
+            int_count += 1;
         };
-        @case(2) => {
-            if !(sig[1] != .F32 && sig[1] != .F64) {
-                self.backend.valid = false;
-                return(true);
-            };
-            self.pop_to_specific_reg(X86Reg.rdx);
-            if !(sig[0] != .F32 && sig[0] != .F64) {
-                self.backend.valid = false;
-                return(true);
-            };
-            self.pop_to_specific_reg(X86Reg.rax);
-        };
-        @default => @panic("ICE: invalid bytecode. tried to return %", sig);
     };
+    self.state.stack.len -= int_count + float_count;
     self.emit_stack_fixup();
     self.out().push(@as(u8) PrimaryOp.Ret);
     true
 }
 
 fn ccall_ret_reg_to_stack(self: *EmitX64, types: [] Prim) void = {
-   if types.len > 2 {
-        self.backend.valid = false;
-        return();
-    };
     int_count := 0;
     float_count := 0;
     for types { ty |
@@ -364,23 +356,35 @@ fn ccall_ret_reg_to_stack(self: *EmitX64, types: [] Prim) void = {
     };
 }
 
+// when you're out of registers, they come in on the stack, but in reverse order. 
+// last args are pushed first, so first stacked args are closest to sp (they imagine you popping them off in order).
 fn ccall_reg_to_stack(self: *EmitX64, types: [] Prim, extra_special_ret: bool) Ty(i64, i64) = {
     int_count := if(extra_special_ret, => 1, => 0); // x64 just passes the ret addr as first arg. 
+    // TODO: i think it would be cleaner if it was included in the prims and arm just had to slice forward the 
+    //       array before looping. instead of both having to do strange shit? -- Sep 12
+    if extra_special_ret { 
+        self.state.stack&.push(Increment = (reg = @as(i64) x64_int_args[0], offset_bytes = 0));
+    };
+    
     float_count := 0;
     for types { type | 
         if type.is_float() {
-            self.backend.valid = false;
+            if float_count < FLOAT_ARG_REG_COUNT {
+                self.state.stack&.push(FloatReg = float_count);
+            } else {
+                self.backend.valid = false;
+                @println("[TODO X64] too many float args %", self.program[][].log_name(self.body.func));
+            };
             float_count += 1;
         } else {
+            if int_count < x64_int_args.len() {
+                self.state.stack&.push(Increment = (reg = @as(i64) x64_int_args[int_count], offset_bytes = 0));
+            } else {
+                self.backend.valid = false;
+                @println("[TODO X64] too many int args %", self.program[][].log_name(self.body.func));
+            };
             int_count += 1;
         };
-    };
-    if int_count > x64_int_args.len() {
-        self.backend.valid = false;
-        return(0, 0);
-    };
-    for x64_int_args.slice(0, int_count) { r |
-        self.state.stack&.push(Increment = (reg = @as(i64) r, offset_bytes = 0));
     };
     
     (int_count, float_count)
@@ -398,10 +402,11 @@ fn stack_to_ccall_reg(self: *EmitX64, types: [] Prim, extra_special_ret: bool) v
     enumerate types { i, type | 
         stack_index := self.state.stack.len - types.len + i;
         if type[].is_float() {
-            if float_count < 8 {
+            if float_count < FLOAT_ARG_REG_COUNT {
                 self.snipe_to_specific_reg_float(float_count, stack_index);
             } else {
                 self.backend.valid = false;
+                @println("[TODO X64] too many float args call %", self.program[][].log_name(self.body.func));
             };
             float_count += 1;
         } else {
@@ -409,6 +414,7 @@ fn stack_to_ccall_reg(self: *EmitX64, types: [] Prim, extra_special_ret: bool) v
                 self.snipe_to_specific_reg(x64_int_args[int_count], stack_index);
             } else {
                 self.backend.valid = false;
+                @println("[TODO X64] too many int args call %", self.program[][].log_name(self.body.func));
             };
             int_count += 1;
         };
@@ -420,6 +426,11 @@ fn stack_to_ccall_reg(self: *EmitX64, types: [] Prim, extra_special_ret: bool) v
 fn pop_to_specific_reg(self: *EmitX64, reg: X86Reg) void = {
     val := self.state.stack&.pop().unwrap();
     self.in_specific_reg(reg, val);
+}
+
+fn pop_to_specific_reg_float(self: *EmitX64, reg: i64) void = {
+    val := self.state.stack&.pop().unwrap();
+    self.in_specific_reg_float(reg, val);
 }
 
 fn snipe_to_specific_reg(self: *EmitX64, reg: X86Reg, idx: i64) void = {
@@ -455,10 +466,13 @@ fn in_specific_reg(self: *EmitX64, reg: X86Reg, val: AsmVal) void = {
             self.ensure_specific_free(reg);
             self.load_u64(@as(i64) reg, @as(i64) X86Reg.rbp, slot.id);
         }
-        @default => panic("unhandled in_reg");
+        fn FloatReg(float) => {
+            self.ensure_specific_free(reg);
+            self.mov_int_from_float(reg, float);
+            self.drop_reg_float(float);
+        }
     };
 }
-
 
 fn in_specific_reg_float(self: *EmitX64, reg: i64, val: AsmVal) void = {
     @match(val) {
@@ -587,6 +601,7 @@ fn encode_non_sp_offset(self: *EmitX64, op: PrimaryOp, reg: i64, addr: i64, offs
     addr := @as(X86Reg) addr;
     if addr == X86Reg.rsp {
         self.backend.valid = false; 
+        @println("[TODO X64] cant encode");
         return();
     };
     if addr == X86Reg.rbp {
@@ -595,7 +610,18 @@ fn encode_non_sp_offset(self: *EmitX64, op: PrimaryOp, reg: i64, addr: i64, offs
     self.out().encode_non_sp_offset(op, reg, addr, offset_bytes);
 }
 
-fn in_reg_float(self: *EmitX64, val: AsmVal) i64 = { self.backend.valid = false; 0 };
+fn in_reg_float(self: *EmitX64, val: AsmVal) i64 = { 
+    @match(val) {
+        fn FloatReg(float) => float;
+        @default => {
+            r := self.get_free_reg_float();
+            self.drop_reg_float(r);
+            self.in_specific_reg_float(r, val);
+            r
+        };
+    }
+}
+
 fn in_reg(self: *EmitX64, val: AsmVal) i64 = { 
     @match(val) {
         fn Increment(f) => {
@@ -619,9 +645,11 @@ fn in_reg(self: *EmitX64, val: AsmVal) i64 = {
             self.load_u64(r, @as(i64) X86Reg.rbp, slot.id);
             r
         }
-        fn FloatReg() => {
-            self.backend.valid = false; 
-            0 
+        fn FloatReg(float) => {
+            int := self.get_free_reg();
+            self.mov_int_from_float(@as(X86Reg) int, float);
+            self.drop_reg_float(float);
+            int
         }
     }
 }
@@ -673,11 +701,11 @@ fn mov_float_from_int(self: *EmitX64, float: i64, int: X86Reg) void = {
 }
 
 fn mov_int_from_float(self: *EmitX64, int: X86Reg, float: i64) void = {
-    encode_binf(self.out(), precision_prefix, true, FloatOp.MovQ, @as(u4) int, @as(u4) float);
+    encode_binf(self.out(), precision_prefix, true, FloatOp.MovQ, @as(u4) float, @as(u4) int);
 }
 
 fn mov_float_from_float(self: *EmitX64, dest: i64, src: i64) void = {
-    encode_binf(self.out(), double_prefix, false, FloatOp.MovQ, @as(u4) dest, @as(u4) src);
+    encode_binf(self.out(), float_prefix, false, FloatOp.MovQ, @as(u4) dest, @as(u4) src);
 }
 
 // TODO: direct
@@ -693,7 +721,6 @@ fn load_f64(self: *EmitX64, float: i64, src_addr_reg: i64, offset_bytes: i64) vo
     load_u64(self, @as(i64) temp_reg, src_addr_reg, offset_bytes);
     mov_float_from_int(self, float, temp_reg);
 }
-
 
 // TODO: copy paste from call-short
 fn jump_to(self: *EmitX64, to_ip: *u8) void = {
@@ -722,10 +749,6 @@ fn inst_intrinsic(self: *EmitX64, op: Intrinsic) void = {
         self.drop_reg(snd);
         self.state.stack&.push(Increment = (reg = fst, offset_bytes = 0));
     };
-    // Note: could use better error message when you try to factor this into a '=' but keep 'bin' a '=>',
-    //       "missing value self" because 'bin' closes over the outer one, not the one you'd add as an argument to this function.
-    // TODO: allow mutiple callsites that are all tail of a '=>' function to only make one duplicate of it so there's less code bloat. 
-    //! IMPORTANT: cond is inverted because CSINC
     bin_cmp :: fn(cond: X86cc) => bin(fn(a, b) => {
         self.out().encode_bin(PrimaryOp.CmpReg, a, b);
         self.load_imm(@as(i64) a, 0); // setcc doesn't zero the whole register!
@@ -747,7 +770,30 @@ fn inst_intrinsic(self: *EmitX64, op: Intrinsic) void = {
         self.state.stack&.push(Literal = 1.shift_left(size) - 1);
         sane_bin(PrimaryOp.AndReg);
     };
-
+    
+    // TODO: actually since i always produce the value, not jump, i could use CMPPD, but then i have to do VEX encoding if i want all the codes without needing to not it.          
+    bin_fcmp :: fn(self: *EmitX64, cond: X86cc) = {
+        snd := self.pop_to_reg_float();
+        fst := self.pop_to_reg_float();
+        a := self.get_free_reg();
+        encode_binf(self.out(), precision_prefix, false, FloatOp.UComIsd, @as(u4) fst, @as(u4) snd);
+        self.load_imm(a, 0); // setcc doesn't zero the whole register!
+        self.load_imm(@as(i64) X86Reg.r11, 0); // TODO: everything is a garbage nightmare
+        self.out().encode_setcc(@as(X86Reg) a, cond);
+        self.out().encode_movcc(@as(X86Reg) a, X86Reg.r11, X86cc.p);  // TODO: everything is a garbage nightmare
+        self.drop_reg_float(snd);
+        self.drop_reg_float(fst);
+        self.state.stack&.push(Increment = (reg = a, offset_bytes = 0));
+    };
+    
+    binf :: fn($do: @Fn(a: u4, b: u4) void) void => {
+        snd := self.pop_to_reg_float();
+        fst := self.pop_to_reg_float();
+        do(@as(u4) fst, @as(u4) snd);
+        self.drop_reg_float(snd);
+        self.state.stack&.push(FloatReg = fst);
+    };
+    
     @match(op) {
         fn Add()    => sane_bin(PrimaryOp.AddReg);
         fn Sub()    => sane_bin(PrimaryOp.SubReg);
@@ -809,11 +855,56 @@ fn inst_intrinsic(self: *EmitX64, op: Intrinsic) void = {
         fn ZeroExtend8To64()  => (); // no-op
         fn ZeroExtend16To32() => (); // no-op
         fn ZeroExtend8To32()  => (); // no-op
-        fn ZeroExtend8To16()  => (); // no-op
-        @default => {
-            self.backend.valid = false; 
-            // @panic("ICE: unimplemented x64 intrinsic %", op);
-        };
+        fn ZeroExtend8To16()  => (); // no-op    
+        // These are noops because we do the translation when you try to use the register anyway. 
+        // Once i implement load/store/imm properly we could do the translation here and ICE if its required elsewhere (since bc tracks prims).
+        fn IntToFloatBits() => (); // ^
+        fn FloatToIntBits() => (); // ^
+        // Note: floats use the unsigned condition codes. i guess with parity being ordered-ness
+        // TODO: doesn't work for is_nan tho. i think that takes 2 compares (clang -O2 does 2)
+        fn FEq()  => self.bin_fcmp(.e);
+        fn FNe()  => self.bin_fcmp(.ne);
+        fn FLe()  => self.bin_fcmp(.be); 
+        fn FGe()  => self.bin_fcmp(.ae);
+        fn FLt()  => self.bin_fcmp(.b);
+        fn FGt()  => self.bin_fcmp(.a);
+        fn FAdd() => binf(fn(a, b) => {
+            encode_binf(self.out(), double_prefix, false, FloatOp.AddSd, a, b);
+        });
+        fn FSub() => binf(fn(a, b) => {
+            encode_binf(self.out(), double_prefix, false, FloatOp.SubSd, a, b);
+        });
+        fn FMul() => binf(fn(a, b) => {
+            encode_binf(self.out(), double_prefix, false, FloatOp.MulSd, a, b);
+        });
+        fn FDiv() => binf(fn(a, b) => {
+            encode_binf(self.out(), precision_prefix, false, FloatOp.DivSd, a, b);
+        });
+        fn IntToFloatValue() => {
+            int := self.pop_to_reg();
+            float := self.get_free_reg_float();
+            encode_binf(self.out(), double_prefix, true, FloatOp.CVTSI2SD, @as(u4) float, @as(u4) int);
+            self.drop_reg(int);
+            self.state.stack&.push(FloatReg = float);
+        }
+        fn FloatToIntValue() => {
+            float := self.pop_to_reg_float();
+            int := self.get_free_reg();
+            encode_binf(self.out(), double_prefix, true, FloatOp.cvttsd2si, @as(u4) int, @as(u4) float);
+            self.drop_reg_float(float);
+            self.state.stack&.push(Increment = (reg = int, offset_bytes = 0));
+        }
+        fn ShrinkFloat() => {
+            float := self.pop_to_reg_float();
+            encode_binf(self.out(), double_prefix, true, FloatOp.cvtsd2ss, @as(u4) float, @as(u4) float);
+            self.state.stack&.push(FloatReg = float);
+        }
+        fn GrowFloat() => {
+            float := self.pop_to_reg_float();
+            encode_binf(self.out(), float_prefix, true, FloatOp.cvtsd2ss, @as(u4) float, @as(u4) float);
+            self.state.stack&.push(FloatReg = float);
+        }
+        @default => @panic("ICE: unimplemented x64 intrinsic %", op);
     };
 }
 
