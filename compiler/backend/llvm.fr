@@ -38,14 +38,15 @@ EmitLlvm :: @struct(
     debug_func_type: i64 = 0,
     debug_addr_type: i64 = 0,
     arch: Arch,
+    os: Os,
     $Val := LlvmVal, // TODO: const can't be first (doesn't parse).  -- Jun 14
 );
 
 emit_llvm_impl :: { T :: CodeGen(EmitLlvm); T.emit }
     
 // TODO: dependency problem so can't call this `init`
-fn new(comp: CompCtx, alloc: Alloc, arch: Arch) EmitLlvm #inline = {
-    s: EmitLlvm = (program = comp.data.cast()[][], out = init(12, alloc), current = BbId.zeroed(), debug_info = list(alloc), arch = arch);
+fn new(comp: CompCtx, alloc: Alloc, arch: Arch, os: Os) EmitLlvm #inline = {
+    s: EmitLlvm = (program = comp.data.cast()[][], out = init(12, alloc), current = BbId.zeroed(), debug_info = list(alloc), arch = arch, os = os);
     
     // TODO: how the hell am i supposed to know these numbers without just compiling a c program with clang. 
     //       its not a big deal tho cause passing -target to clang overrides this. 
@@ -184,6 +185,7 @@ fn emit_entry_points_and_debug_info(gen: *CodeGen(EmitLlvm), comp: CompCtx, fns:
 }
 
 fn emit_bounce_fn(self: *EmitLlvm, impl_name_callee: Str, fake_decl_name: Str, signeture: PrimSig, private: bool) void = {
+    self.current_debug_info = 0;
     spec := if(private, => "define private ccc ", => "define ccc ");
     self.out&.push_all(spec);
     values: List(LlvmVal) = list(temp());
@@ -208,7 +210,6 @@ fn emit_bounce_fn(self: *EmitLlvm, impl_name_callee: Str, fake_decl_name: Str, s
     };
     self.out&.reserve(50);
     self.out&.current().push_all("{\n");
-    self.current_debug_info = 0;
     ret := self.inst_call(values.items(), signeture, .None) {
         @fmt(self.out&.current(), "@%", impl_name_callee);
     };
@@ -218,6 +219,7 @@ fn emit_bounce_fn(self: *EmitLlvm, impl_name_callee: Str, fake_decl_name: Str, s
 
 // TODO: copy-paste from DynamicImport but reversed so its a pain. 
 fn write_export_bounce(self: *EmitLlvm, fid: FuncId) void = {
+    self.current_debug_info = 0;
     func := self.program.get_function(fid);
     export_name := self.program.pool.get(func.name);
     internal_name: List(u8) = list(temp()); 
@@ -292,6 +294,7 @@ fn emit_constant(self: *EmitLlvm, id: BakedVarId) void = {
 }
 
 fn emit_special(self: *EmitLlvm, f_id: FuncId, body: *FuncImpl, func: *Func, bc: *FnBody, pending: *List(FuncId)) bool = {
+    self.current_debug_info = 0;
     @match(body) {
         fn Normal(_) => { panic("ICE: empty body but expr"); };
         fn Redirect(f) => {
@@ -320,7 +323,7 @@ fn emit_special(self: *EmitLlvm, f_id: FuncId, body: *FuncImpl, func: *Func, bc:
             import_name: Str = if func.nullable_link_rename_func != 0 {
                 out: List(u8) = list(temp());
                 arg: LinkRenameArg = (
-                    target = (arch = self.arch, os = .Macos),
+                    target = (arch = self.arch, os = .macos), // TODO: other os!
                     out = out&,
                     old_name = self.program.pool.get(name[]),
                 );
@@ -353,12 +356,24 @@ fn emit_special(self: *EmitLlvm, f_id: FuncId, body: *FuncImpl, func: *Func, bc:
             @fmt(self.out&.current(), "{\n%}\n", ir);
             return(true);
         }
+        fn TargetOsSplit(it) => {
+            if it.os == self.os {
+                // TODO: :copy-paste from emit_special:redirect
+                pending.push(it.fid);
+                assert(it.fid != f_id, "redirect to yourself");
+                new_name := @format("%", (self, it.fid)) temp();
+                old_name := @format("%", (self, f_id)) temp();
+                self.emit_bounce_fn(new_name.items(), old_name.items(), bc.signeture, true);
+                return(true);
+            };
+        }
         @default fn() void => return(false);
     };
     false
 }
 
 fn forward_declare(self: *EmitLlvm, sig: PrimSig, private: bool, name: Str) void = {
+    self.current_debug_info = 0;
     self.out&.push_all("declare ccc ");
     if private {
         self.out&.push_all("private ");
@@ -367,20 +382,22 @@ fn forward_declare(self: *EmitLlvm, sig: PrimSig, private: bool, name: Str) void
     self.out&.push_all(";\n");
 }
 
-fn emit_special_asm(self: *EmitLlvm, body: *FuncImpl, func: *Func, bc: *FnBody, arch: Arch) bool = {
+fn emit_special_asm(self: *EmitLlvm, body: *FuncImpl, func: *Func, bc: *FnBody, target: *TargetEnv) bool = {
+    self.current_debug_info = 0;
     @match(body) {
         fn Merged(parts) => { 
             each(parts[].items()) {check: *FuncImpl| 
-                if(self.emit_special_asm(check, func, bc, arch), => return(true));
+                if(self.emit_special_asm(check, func, bc, target), => return(true));
             };
         }
         fn JittedAarch64(code) => { 
-            if arch != .aarch64 { 
+            if target.arch != .aarch64 { 
                 return(false); 
             };
             name := @format("%", (self, bc.func)) temp();
             self.forward_declare(bc.signeture, false, name.items());
             
+            // TODO: on linux no underscore
             @fmt(self.out&.current(), "module asm \"_%:\"\n", (self, bc.func));
             for code { inst |
                 v := @as(i64) inst.zext();
@@ -390,7 +407,7 @@ fn emit_special_asm(self: *EmitLlvm, body: *FuncImpl, func: *Func, bc: *FnBody, 
             return(true);
         }
         fn X86AsmText(code) => { 
-            if arch != .x86_64 { 
+            if target.arch != .x86_64 { 
                 return(false); 
             };
             name := @format("%", (self, bc.func)) temp();
@@ -648,7 +665,7 @@ fn inst_call(self: *EmitLlvm, args: Slice(LlvmVal), sig: PrimSig, loc: ?Span, $d
             line = place.line;
             column = place.col;
         };
-        @fmt(self.debug_info&, "!% = !DILocation(line: %, column: %, scope: !%)\n", line, column, location, self.current_debug_info);
+        @fmt(self.debug_info&, "!% = !DILocation(line: %, column: %, scope: !%)\n", location, line, column, self.current_debug_info);
         @fmt(self.out&.current(), ", !dbg !%", location);
     };
     

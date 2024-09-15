@@ -806,12 +806,15 @@ fn parse_tuple(self: *Parser) ParseRes = {
         loop {
             parts&.push(@try(self.parse_expr(Prec_None)) return);
             @match(self.peek()) {
-                (fn RightParen() => { self.pop(); break(); });
-                (fn Comma() => {
+                fn RightParen() => { 
+                    self.pop(); 
+                    break();
+                    }
+                fn Comma() => {
                     self.pop();
                     if(self.maybe(.RightParen), => break());
-                });
-                (fn Colon() => {
+                }
+                fn Colon() => {
                     self.pop();
                     ty: LazyType = @match(self.peek()) {
                         fn Equals() => .Infer;
@@ -821,10 +824,13 @@ fn parse_tuple(self: *Parser) ParseRes = {
                         };
                     };
                     return(self.switch_to_parsing_named(parts, ty, loc));
-                });
-                (fn Equals() => {
+                }
+                fn DoubleColon() => {
                     return(self.switch_to_parsing_named(parts, .Infer, loc));
-                });
+                }
+                fn Equals() => {
+                    return(self.switch_to_parsing_named(parts, .Infer, loc));
+                }
                 @default => @report_error("Expected ',' or ':' or '=' or ')' after tuple element % (unmached parens?)", "") (return, self.last.span);
             };
         };
@@ -859,11 +865,18 @@ fn switch_to_parsing_named(self: *Parser, parts: List(FatExpr), ty: LazyType, lo
     };
     
     ::if(?FatExpr);
+    kind := VarType.Var;
     default: ?FatExpr = if (self.maybe(.Equals)) {
         e := @try(self.parse_expr(Prec_None)) return;
         (Some = e)
     } {
-        (None = unit)
+        if self.maybe(.DoubleColon) {
+            kind = .Const;
+            e := @try(self.parse_expr(Prec_None)) return;
+            (Some = e)
+        } else {
+            (None = unit)
+        }
     };
     
     bindings: List(Binding) = list(parts.len().add(1), self.alloc);
@@ -872,7 +885,7 @@ fn switch_to_parsing_named(self: *Parser, parts: List(FatExpr), ty: LazyType, lo
         anon: Binding = (name = .None, ty = .Infer, default = (Some = e), kind = .Var);
         bindings&.push(anon);
     };
-    first_named: Binding = (name = (Ident = name), ty = ty, default = default, kind = .Var);
+    first_named: Binding = (name = (Ident = name), ty = ty, default = default, kind = kind);
     bindings&.push(first_named);
     
     self.maybe(.Comma);
@@ -934,28 +947,37 @@ fn parse_pattern(self: *Parser, out: *List(Binding)) Result(void, *CompileError)
             @default => @report_error("Expected Ident or '$' before pattern entry. (positional args cannot follow named) %", "") (return, self.last.span);
         };
         
-        ::if(LazyType);
-        ty: LazyType = if self.maybe(.Colon) {
-            // deal with := 
-            @match(self.peek()) {
-                fn Equals() => .Infer;
-                @default => {
+        ::if(?FatExpr); ::if(LazyType);
+        default_: ?FatExpr = .None; // TODO: "shadows" the magic @default
+        ty := LazyType.Infer;
+        
+        @match(self.peek()) {
+            fn Colon() => {
+                self.pop();
+                if self.peek_tag() != .Equals {
                     e := @try(self.parse_expr(Prec_None)) return;
-                    (PendingEval = e)
+                    ty = (PendingEval = e);
+                };
+                if self.maybe(.Equals) {
+                    e := @try(self.parse_expr(Prec_None)) return;
+                    default_ = (Some = e);
                 };
             }
-        } else {
-            .Infer
+            fn DoubleColon() => {
+                self.pop();
+                kind = .Const;
+                e := @try(self.parse_expr(Prec_None)) return;
+                default_ = (Some = e);
+            }
+            fn Equals() => {
+                self.pop();
+                e := @try(self.parse_expr(Prec_None)) return;
+                default_ = (Some = e);
+            }
+            @default => ();
         };
         
-        ::if(?FatExpr);
-        default: ?FatExpr = if self.maybe(.Equals) {
-            e := @try(self.parse_expr(Prec_None)) return;
-            (Some = e)
-        } else {
-            .None
-        };
-        b: Binding = (name = (Ident = name), ty = ty, default = default, kind = kind);
+        b: Binding = (name = (Ident = name), ty = ty, default = default_, kind = kind);
         out.push(b);
         if !self.maybe(.Comma) {
             return(.Ok);
@@ -1135,6 +1157,11 @@ fn pop(self: *Parser) TokenType = {
 fn peek(self: *Parser) TokenType = {
     token := self.lex&.peek()[];
     token.type
+}
+
+fn peek_tag(self: *Parser) TokenType.Tag() = {
+    token := self.lex&.peek()[];
+    token.type&.tag()
 }
 
 fn report_error(fmt_args: FatExpr, ret_loc: FatExpr) FatExpr #macro = {

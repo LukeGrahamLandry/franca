@@ -1,3 +1,20 @@
+## (Sep 14)
+
+- ok the thing where mmap was failing in qemu must be because MapFlag.Anonymous needs to be 32 instead of 4096.
+  and also (not the problem yet but will be) uname struct is a different size, so its really not just the args stuff,
+  i need a general system for different impls on different targets.
+
+## linux (Sep 13)
+
+ok i know `_NSGetArgv/_NSGetArgc/_NSGetExecutablePath` wont exist but i should be able to get the rest to work.
+compiling with `-target x86_64-linux-musl` to make a .o file and then using `zig cc f26bUYh.o	-static -target x86_64-linux-musl`
+(becuase idk how to put musl somewhere clang can find it),
+it also complains (`ld.lld: error: undefined symbol:`) about the assmebly functions `arg8ret1__1000/arg8ret2__1001/arg8ret_struct__1002/arg8ret1_all_floats__1003`,
+i tried this guys gcc https://github.com/FiloSottile/homebrew-musl-cross, same thing.
+ah thank you internet https://stackoverflow.com/questions/26051946/problems-compiling-assembly-file-error-undefined-reference-to-function-name
+you just don't put the `_` prefix on linux.
+manually changing that in the llvm ir makes it only complain about the `_NS*` as expected.
+
 ## more more more x64 (Sep 12)
 
 - float add/sub/mul/div is very sane, no comment, they must have added it later.

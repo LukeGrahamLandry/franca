@@ -25,6 +25,9 @@ fn load_src(vtable: *ImportVTable, include_cranelift: bool) Ty(CompCtx, *Comptim
             // you don't need this just to target x86, only when running on it. 
             // opts.comptime_jit = .Cranelift;
         };
+        if extra.str() == "-x64" {
+            panic("for now use -x86 instead of -x64 (yes i know thats dumb sorry)");
+        };
         if extra.str() == "-unsafe" {
             opts.safety_checks&.insert(SafetyCheck.Bounds, false);
             opts.safety_checks&.insert(SafetyCheck.DebugAssertions, false);
@@ -70,10 +73,12 @@ fn driver(vtable: *ImportVTable) void = {
     args := cli_args();
     x86 := false;
     arch := Arch.aarch64;
+    os := Os.macos; // :HardcodeOs
     include_cranelift := false;
     slow := false;
     keep_ir := false;
     trace := false;
+    linux := false;
     for args { arg |
         if arg.str() == "-no-build" {
             do_build = false;
@@ -84,6 +89,10 @@ fn driver(vtable: *ImportVTable) void = {
         if arg.str() == "-x86" {
             x86 = true;
             arch = .x86_64;
+        };
+        
+        if arg.str() == "-linux" {
+            linux = true;
         };
         if arg.str() == "-include-cranelift" {
             include_cranelift = true;
@@ -102,7 +111,7 @@ fn driver(vtable: *ImportVTable) void = {
     
     new_main := c.get_unique_named("main").unwrap();
     exports := (@list(new_main) temp()).items();
-    ir_text := c.emit_llvm(temp(), exports, .ExportWithNames, arch);
+    ir_text := c.emit_llvm(temp(), exports, .ExportWithNames, arch, os);
     @println("Emitted % bytes of llvm ir.", ir_text.len);  // useful to see when i start trying to deduplicate bytecode. 
     end := timestamp();
 
@@ -114,6 +123,9 @@ fn driver(vtable: *ImportVTable) void = {
     };
     
     arch_path := if(x86, => "x86_64-apple-darwin", => "aarch64-apple-darwin");
+    if linux {
+        arch_path = if(x86, => "x86_64-linux", => "aarch64-linux");
+    };
     out_dir := @fmt_str("target/franca/%", arch_path);
     
     if keep_ir { 
@@ -137,9 +149,15 @@ fn driver(vtable: *ImportVTable) void = {
         };
         // if not linking cranelift_comptime or tracy could just not `-c` and do it in one step but meh. 
         args&.push_all(@slice ("-o", @fmt_str("%/franca2.o", out_dir), "-c", "-g"));
+        target_triple := "aarch64-apple-darwin";
         if x86 {
-            args&.push_all(@slice("-target", "x86_64-apple-darwin"));
+            if linux {
+                target_triple = "x86_64-linux-musl";
+            } else {
+                target_triple = "x86_64-apple-darwin";
+            };
         };
+        args&.push_all(@slice("-target", target_triple));
         build_llvm(ir_text, args.items());  // "-mllvm", "-hot-cold-split=true",
         end := timestamp();
         @println("LLVM time: % ms.", end.sub(start));
@@ -160,7 +178,7 @@ fn driver(vtable: *ImportVTable) void = {
                 args&.push(cl_path);
             };
             if x86 {
-                args&.push_all(@slice("-target", "x86_64-apple-darwin"));
+                args&.push_all(@slice("-target", target_triple));
             };
             clang := if(trace, => "clang++", => "clang");
             start := timestamp();

@@ -1,4 +1,5 @@
 
+// TODO: /proc/self/cmdline :Linux
 fn cli_args() Slice(CStr) = {
     argc := _NSGetArgc()[];
     argv := _NSGetArgv()[];
@@ -15,7 +16,7 @@ fn timestamp() i64 = {
     time_spec.seconds.mul(1000).add(time_spec.nanoseconds.div(NS_TO_MS))
 }
 
-// TODO: non-macos
+// TODO: /proc/self/exe :Linux
 fn get_executable_path(a: Alloc) Str = {
     size := 0;
     // use this to check the length so we allocate the right amount. 
@@ -34,10 +35,20 @@ fn get_working_directory(a: Alloc) List(u8) = {
 
 // This asks the current operating system whats up. 
 // If you run this at comptime, you get the arch you're compiling on! which might not be the target since we support cross compiling!
-fn query_current_arch() ?Arch = {
-    data := Utsname.zeroed();
+fn query_current_arch() ?Arch #target_os = (fn($os) => {
+    data := LibcType(os).Utsname.zeroed();
     data&.uname().or(=> return(.None));
     machine: CStr = (ptr = data.machine&.as_ptr());
+    machine.uname_machine_to_arch()
+});
+
+fn LibcType(os: Os) Type #fold = @match(os) {
+    fn macos() => MacosLibc;
+    fn linux() => LinuxLibc;
+    //@default => @panic("unsupported os (%) for LibcType", os);
+}
+
+fn uname_machine_to_arch(machine: CStr) ?Arch = {
     machine := machine.str();
     if(machine == "x86_64", => return(Some = .x86_64));
     if(machine == "arm64", => return(Some = .aarch64));

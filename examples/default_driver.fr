@@ -22,6 +22,8 @@ Options :: @struct(
     debug_info := false,
     target_x86 := false,
     cranelift := false,
+    show_asm := false,
+    blink := false,
 );
 
 Action  :: @enum(i64) (run, build, test); ::enum(Action);
@@ -37,7 +39,18 @@ fn driver(vtable: *ImportVTable) void = {
     if cmd.cfg.cranelift {
         build_options.comptime_jit = .Cranelift;
     };
-
+    os := Os.macos; // TODO
+    if cmd.cfg.blink {
+        os = .linux;
+    };
+    arch := query_current_arch().expect("known arch");
+    if cmd.cfg.target_x86.or(cmd.cfg.blink) {
+        arch = .x86_64;
+    };
+    if cmd.cfg.wasm {
+        arch = .wasm32;
+    };
+    
     usage_msg :: "USAGE: franca examples/default_driver.fr % [filepath.fr]\n       %";
     @match(cmd.action) {
         fn build() => {
@@ -52,7 +65,7 @@ fn driver(vtable: *ImportVTable) void = {
                 println("Compiled successfully but selected jit backend so no artifact was produced.");
             } else {
                 assert(cmd.cfg.llvm, "Not Yet Implemented: build main with -aot=qbe");
-                c.compile_with_llvm(fid, .ExportWithNames, cmd.cfg.debug_info, cmd.cfg.wasm, cmd.cfg.target_x86);
+                c.compile_with_llvm(fid, .ExportWithNames, cmd.cfg.debug_info, arch, os, cmd.cfg.show_asm);
                 println("[built a.out]");
             };
             exit(0);
@@ -64,19 +77,27 @@ fn driver(vtable: *ImportVTable) void = {
             fid := fid.expect("did not find exactly one function called 'main'");
             assert(!cmd.cfg.wasm, "cannot run wasm");
             if cmd.cfg.jit {
+                assert(!cmd.cfg.show_asm, "TODO: -S with jit");
                 ptr := c.get_jitted(fid);
                 f := assume_types_fn(Arg = void, Ret = void, ptr = ptr);
                 // TODO: how to pass cli args
                 f();
             } else {
                 if cmd.cfg.llvm {
-                    c.compile_with_llvm(fid, .ExportWithNames, cmd.cfg.debug_info, false, cmd.cfg.target_x86);
+                    c.compile_with_llvm(fid, .ExportWithNames, cmd.cfg.debug_info, arch, os, cmd.cfg.show_asm);
                 } else {
+                    assert(!cmd.cfg.show_asm, "TODO: -S with qbe");
                     assert(cmd.cfg.qbe, "rn only two backends. update me as needed!");
                     panic("TODO: impl switch on qbe");
                     //c.compile_with_qbe(fid, .ExportWithNames);
                 };
-                run_cmd_blocking("./a.out", cmd.child_args);
+                if cmd.cfg.blink {
+                    args := cmd.child_args.clone(temp());
+                    args&.insert(0, "./a.out");
+                    run_cmd_blocking("blink", args.items());
+                } else {
+                    run_cmd_blocking("./a.out", cmd.child_args);
+                };
             };
             exit(0);
         };
@@ -97,9 +118,13 @@ fn driver(vtable: *ImportVTable) void = {
                     passed += 1;
                 } else {
                     assert(cmd.cfg.llvm, "Not Yet Implemented: run test with -aot=qbe");
-                    c.compile_with_llvm(fid, .TestRunnerMain, cmd.cfg.debug_info, false, cmd.cfg.target_x86);
+                    c.compile_with_llvm(fid, .TestRunnerMain, cmd.cfg.debug_info, arch, os, cmd.cfg.show_asm);
                     @eprintln("[run %]", c.get_string(c.get_function_name(fid)));
-                    success := run_cmd_blocking("./a.out", empty());
+                    success := if cmd.cfg.blink {
+                        run_cmd_blocking("blink", @slice("./a.out"))
+                    } else {
+                        run_cmd_blocking("./a.out", empty())
+                    };
                     if success {
                         passed += 1;
                     };
@@ -111,14 +136,19 @@ fn driver(vtable: *ImportVTable) void = {
     };
 }
 
-fn compile_with_llvm(c: CompCtx, fid: FuncId, entry: ProgramEntry, debug_info: bool, wasm: bool, x86: bool) void = {
+fn compile_with_llvm(c: CompCtx, fid: FuncId, entry: ProgramEntry, debug_info: bool, arch: Arch, os: Os, show_asm: bool) void = {
     ::if(Arch);
-    arch := if(wasm, => Arch.wasm32, => if(x86, => Arch.x86_64, => Arch.aarch64));
-    ir_text := c.emit_llvm(temp(), @slice (fid), entry, arch);
+    ir_text := c.emit_llvm(temp(), @slice (fid), entry, arch, os);
     out := open_temp_file();
     for ir_text& { bucket |
         out.fd&.write(bucket);
     };
+    if show_asm {
+        @println("Llvm ir output in %  Skipping build", out&.s_name());
+        return();  
+    };
+    triple := target_triple(arch, os);
+    wasm := arch == .wasm32;
     path := if(wasm, => "a.wasm", => "a.out");
     args: List(Str) = @list("-x", "ir", out&.s_name(), "-o", path) temp();
     if wasm {
@@ -128,19 +158,28 @@ fn compile_with_llvm(c: CompCtx, fid: FuncId, entry: ProgramEntry, debug_info: b
         ));
         // also we want to just pretend we have a libc (and trust that js will provide it) 
         args&.push_all(@slice("-Wl,-undefined", "-Wl,dynamic_lookup", "-Wl,--allow-undefined"));
-    };
-    if x86 {
-        args&.push_all(@slice("-target", "x86_64-apple-darwin"));
+    } else {
+        args&.push_all(@slice("-target", triple));
     };
     if debug_info {
         args&.push_all(@slice ("-O0", "-g"));
     } else {
         args&.push("-Os");
     };
+    linux := os == .linux;
+    if linux {
+        args&.push("-c");
+    };
     @eprintln("[run clang] %", args.items());
     success := run_cmd_blocking("clang", args.items());
     assert(success, "clang failed");
     out.remove(); // TODO: defer 
+    
+    // todo: dont assume so much. this is for running with blinkenlights
+    if linux {
+        success := run_cmd_blocking("zig", @slice("cc", "-static", "-target", triple, "-Wl,-z,common-page-size=65536,-z,max-page-size=65536", "a.out"));
+        assert(success, "link failed");
+    };
 }
 
 QBE_PATH :: "/Users/luke/Documents/mods/infered/bindings/qbe/qbe";
@@ -246,6 +285,12 @@ fn parse_cli_args() Command = {
             };
             @case("-x86") => {
                 cfg.target_x86 = true;
+            };
+            @case("-S") => {
+                cfg.show_asm = true;
+            };
+            @case("-blink") => {
+                cfg.blink = true;
             };
             @default => {
                 extra_args&.push(arg);

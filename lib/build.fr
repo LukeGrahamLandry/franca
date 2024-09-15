@@ -130,9 +130,10 @@ fn read_and_push(out: *List(u8), path: Str) void = {
 }
 
 // :TooManyArgsX64
-fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId), entry: ProgramEntry, target: Arch) BucketArray(u8) #inline = {
+fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId), entry: ProgramEntry, arch: Arch, os: Os) BucketArray(u8) #inline = {
     _ := alloc;  // TODO
-    {comp.vtable.emit_llvm}(comp.data, fns, entry, target)
+    target: TargetEnv = (arch = arch, os = os);
+    {comp.vtable.emit_llvm}(comp.data, fns, entry, target&)
 }
 
 // :TooManyArgsX64
@@ -236,15 +237,6 @@ fn render_callgraph(comp: CompCtx, entry_points: Slice(FuncId), out_a: Alloc) Li
     out
 }
 
-fn display(self: Os, out: *List(u8)) void = {
-    s: Str = @switch(self) {
-        @case(.Macos) => "macos";
-        @case(.Linux) => "linux";
-        @case(.Windows) => "windows";
-    };
-    out.push_all(s);
-}
-
 fn save_path_for_lib(env: Ty(Arch, Os), linking: LinkTime, lib_name: Str) Str = {
     ::enum(LinkTime);
     ext := @match(linking) {
@@ -254,10 +246,7 @@ fn save_path_for_lib(env: Ty(Arch, Os), linking: LinkTime, lib_name: Str) Str = 
     (@format("target/franca/%-%/%.%", env._0, env._1, lib_name, ext) temp()).items()
 }
 
-#redirect(Ty(i64, i64), bool) fn eq(a: Os, b: Os) bool;
 #redirect(Ty(i64, i64), bool) fn eq(a: LinkTime, b: LinkTime) bool;
-
-
 
 // Essentially describing something to pass to clang (after adding some combination of -o -O -c -dynamiclib -static -ast-dump) 
 ForeignLibrary :: @struct(
@@ -414,20 +403,9 @@ fn build_foreign_cached(lib: ForeignLibrary, env: Ty(Arch, Os), linking: LinkTim
     // Since we save it, might as well take the extra hundred years to make it go fast. 
     args&.push("-Os");
     
-    if env._1 == .Macos {
-        @match(env._0) {
-            fn aarch64() => {
-                args&.push("-target");
-                args&.push("aarch64-apple-darwin");
-            }
-            fn x86_64() => {
-                args&.push("-target");
-                args&.push("x86_64-apple-darwin");
-            }
-            @default => ();
-        };
-    };
-    
+    args&.push("-target");
+    args&.push(target_triple(env._0, env._1));
+
     @println("[build %] %;", lib.name, args.items());
     success := run_cmd_blocking("clang++", args.items());  // TODO: use the right clang (might not want ++ for something that can be compiled as either)
     if(not(success), => return(.Err));
@@ -439,6 +417,35 @@ fn build_foreign_cached(lib: ForeignLibrary, env: Ty(Arch, Os), linking: LinkTim
     (Ok = path)
 }
 
+fn target_triple(arch: Arch, os: Os) Str = {
+    @match(os) {
+        fn macos() => {
+            @match(arch) {
+                fn aarch64() => return("aarch64-apple-darwin");
+                fn x86_64()  => return("x86_64-apple-darwin");
+                @default => ();
+            };
+        }
+        fn linux() => {
+            // TODO: dont always say musl!!
+            @match(arch) {
+                fn aarch64() => return("aarch64-linux-musl");
+                fn x86_64()  => return("x86_64-linux-musl");
+                @default => ();
+            };
+        }
+        // TODO: you want this but then you have to deal with #target_arch not supporting all options
+        //fn free_standing() => {
+        //    @match(arch) {
+        //        fn wasm32() => return("wasm32");
+        //        @default => ();
+        //    };
+        //}
+        //@default => ();
+    };
+    @panic("we don't support the triple for % % because we are dumb and bad and new", arch, os)
+}
+    
 ComptimeLibs :: @struct(
     ctx: CompCtx, 
     handles: HashMap(Symbol, BuiltLib),

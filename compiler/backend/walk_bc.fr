@@ -10,7 +10,7 @@ Backend :: @trait fn($B: Type) = {
     // B.Val needs to be Copy.
     :: assert_eq(@type :: B.Val, Type); // TODO: better syntax for associated types? 
     
-    fn new(comp: CompCtx, alloc: Alloc, arch: Arch) B; 
+    fn new(comp: CompCtx, alloc: Alloc, arch: Arch, os: Os) B; 
     fn inst_call(self: *B, args: Slice(B.Val), sig: PrimSig, f: FuncId, tail: bool, loc: ?Span) Slice(B.Val);
     fn inst_trap(self: *B) void;
     fn inst_call_ptr(self: *B, args: Slice(B.Val), sig: PrimSig, ptr: B.Val, loc: ?Span) Slice(B.Val);
@@ -56,13 +56,13 @@ fn CodeGen($B: Type) Type = {
     
     // TODO: they need to pass target arch for !asm functions. 
     // :TooManyArgsX64
-    emit_program :: fn(comp: Compiler, fns: [] FuncId, entry: ProgramEntry, arch: Arch) BucketArray(u8) = {
+    emit_program :: fn(comp: Compiler, fns: [] FuncId, entry: ProgramEntry, target: *TargetEnv) BucketArray(u8) = {
         program := comp.cast();
         comp := program.vtable.with(comp);
         alloc := program.get_alloc();
         gen: Self = (
             program = program[][],
-            backend = new(comp, alloc, arch),
+            backend = new(comp, alloc, target.arch, target.os),
             body = zeroed(*FnBody), // EVIL
             vars = list(20, temp()),
             stack = list(20, temp()),
@@ -107,8 +107,7 @@ fn CodeGen($B: Type) Type = {
             if(body.blocks.len.eq(0)){
                 success := gen.backend&.emit_special(fid, func.body&, func, body, gen.pending&); 
                 if !success {
-                    // TODO: pass in the arch
-                    success = gen.backend&.emit_special_asm(func.body&, func, body, arch); 
+                    success = gen.backend&.emit_special_asm(func.body&, func, body, target); 
                 };
                 if !success {
                     // TODO: should assert but debug_tag_corruption is confused. -- Jun 27
