@@ -1,8 +1,61 @@
+## (Sep 15)
+
+so a thing that was sketchy was calling allocators with 0 lenght,
+adding a zero check and just returning null in the general alloc broke the compiler,
+made it unwrap in poll_until_finished.
+oh probably the resetting temp before any allocations and i just happened to get lucky with a zero length one before.
+yeah, just had to fix coconut.jpg.
+that wasn't the actual segfaulting problem, it just surfaced when trying to debug by changing allocators.
+
+oooo lox test also fails on linux in a vaugely similar way, thats nice.
+but i think its differnt :( cause it changes if i don't free in libc_allocator_fn but compiler doesn't.
+tho... only if you remove a few tests, just not calling drop still crashes.
+the only libc functions it calls are (abort, write, memcpy, munmap, mmap, malloc, free).
+I already did different mmap flags number 34 (linux) vs 4098 (macos).
+i feel like the others can't be different.
+
+its super suspisious that the place in the compiler that's crashing is tuple_of
+where it was being super confusing a long time ago
+(i think it was when i tried x64 with rust).
+
+aaaa fucking stack alignment, same place as my old problem god damn it.
+and i saw it using the 16 byte load on the instruction it was faulting on `movups	xmm0, xmmword ptr [rbp - 480]`.
+and in blink it even gave the right faulting address but real linux said 0 and i assumed i was just confused somehow.
+aaa.
+
+now looping trying to get `malloc` but that makes since becuase i hardcoded the macos libc path.
+
+i think musl dlopen can't cope with glibc .so? fair enough i suppose.
+
+glibc mmap gives invalid file descriptor for -1??
+strace says
+`mmap(NULL, 1048576, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_EXECUTABLE, -1, 0) = -1 EBADF (Bad file descriptor)`
+ooooohhh they have different numbers!!! MAP_EXECUTABLE instead of MAP_ANONYMOUS...
+how can that be i thought mmap just did a syscall?
+with musl in blink i have the number right  
+`I2024-09-15T17:47:06.685846:blink/strace.c:778:52190 (sys) mmap(0, 0x1000000, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) -> 0x2168409d0000`
+oh but sometimes i have it right `mmap(NULL, 16777216, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7fffe63de000`
+so is that a calling convention thing or maybe that one was done by the libc not my code.
+jit.fr always mmaps writable and then later mprotects to exec, so im never doing that on purpose.
+and `MAP_EXECUTABLE` isn't the same as `PROT_EXEC`(the former says `This flag is ignored.`).
+hmmm `MAP_EXECUTABLE = 4096` so like its gotta just be calling the macos version instead of the linux version in #target_os.
+fuck. yeah i forgor that i `comptime_os: Os = .macos,` dumbass.
+
 ## (Sep 14)
 
 - ok the thing where mmap was failing in qemu must be because MapFlag.Anonymous needs to be 32 instead of 4096.
   and also (not the problem yet but will be) uname struct is a different size, so its really not just the args stuff,
   i need a general system for different impls on different targets.
+
+there's gotta be a better way than typing
+
+```
+mkdir [mount point]
+mount -t 9p -o trans=virtio share [mount point] -oversion=9p2000.L
+```
+
+every time, i tried the `/etc/fstab` thing but it didn't seem to work.
+how the fuck do i make it not reinstall every time.
 
 ## linux (Sep 13)
 

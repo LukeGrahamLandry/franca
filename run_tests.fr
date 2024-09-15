@@ -40,8 +40,8 @@ fn driver(vtable: *ImportVTable) void = {
                 run_jit(vtable, .Cranelift);
             };
             @case("llvm") => run_llvm(vtable, false);
-            // TODO: new sema can't compile this yet. 
-            //@case("llvm-wasm") => run_llvm(vtable, true);
+            @case("llvm-wasm") => run_llvm(vtable, true);
+            @case("blink") => run_llvm_blink(vtable);
             // TODO: fix switch
             //@case("qbe") => run_qbe(vtable);
             @case("examples") => run_examples(vtable, true);
@@ -179,6 +179,44 @@ fn run_llvm(vtable: *ImportVTable, wasm32: bool) void = {
         } else {
             run_cmd_blocking("./a.out", args.items())
         };
+        assert(success, "test failed");
+        
+        out.remove();
+    };
+}
+
+fn run_llvm_blink(vtable: *ImportVTable) void = {
+    println("=== Llvm Aot Blink ===");
+    opts := vtable.default_build_options();
+    opts.retain_function_names = true;
+    comp := {vtable.init_compiler}(opts);
+    c := vtable.with(comp);
+    load_lang_tests(c);
+    run_sequential(c) {c, tests|
+        ir_text := c.emit_llvm(temp(), tests, .TestRunnerMain, .x86_64, .linux); 
+        out := open_temp_file();
+        for(ir_text&){bucket|
+            out.fd&.write(bucket);
+        };
+        @println("Write llvm ir to %", out&.s_name());
+        
+        args: List(Str) = list(temp());
+        args&.push("-x");
+        args&.push("ir");
+        args&.push("-target");
+        triple :: "x86_64-linux-musl";
+        args&.push(triple);
+        args&.push("-c");
+        args&.push("-o");
+        args&.push("a.out");
+        //args&.push("-O2");
+        args&.push(out&.s_name());
+        success := run_cmd_blocking("clang", args.items()); 
+        assert(success, "opt failed");
+        success := run_cmd_blocking("zig", @slice("cc", "-static", "-target", triple, "-Wl,-z,common-page-size=65536,-z,max-page-size=65536", "a.out"));
+        assert(success, "link failed");
+        args: List(Str) = list(temp());
+        success := run_cmd_blocking("blink", @slice("./a.out"));
         assert(success, "test failed");
         
         out.remove();

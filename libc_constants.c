@@ -9,11 +9,11 @@
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
-#include <sys/dirent.h>
+// #include <sys/dirent.h>
 #include <sys/mman.h>
 #include <sys/signal.h>
-#include <sys/syslimits.h>
-#include <sys/unistd.h>
+// #include <sys/syslimits.h>
+// #include <sys/unistd.h>
 #include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
@@ -35,20 +35,11 @@ int main() {
   printf("Whence :: @enum(i64) (Set = %d, Cur = %d, End = %d);\n", SEEK_SET,
          SEEK_CUR, SEEK_END);
   printf("DlFlag :: @enum(i64) (Lazy = %d, Now = %d);\n", RTLD_LAZY, RTLD_NOW);
-  printf("Dir :: @struct(opaque: Array(u8, %ld)); // TODO: alignment\n",
-         sizeof(DIR));
-  printf("PATH_NAME_MAX :: %d;\n", NAME_MAX);
 
   printf("DirEntType :: @enum(u8) (Directory = %d, File = %d, "
          "SymbolicLink "
          "= %d);\n",
          DT_DIR, DT_REG, DT_LNK);
-
-  // struct dirent test;
-  // printf("// dirent->d_namlen:%ld; dirent->d_type:%ld; dirent->d_name:%ld; "
-  //        "sizeof:%ld\n",
-  //        (long)&test.d_namlen - (long)&test, (long)&test.d_type -
-  //        (long)&test, (long)&test.d_name - (long)&test, sizeof(test));
 
   printf("TermConstants :: @struct(_parsehack: void, $ICANON := %d, $ "
          "ECHO := "
@@ -61,7 +52,6 @@ int main() {
          F_OK, R_OK, W_OK, X_OK);
   printf("WaitPidOptions :: @enum(i64) (NoHang = %d);\n", WNOHANG);
   printf("PollEvents :: @enum(i64) (In = %d);\n", POLLIN);
-  printf("_SYS_NAMELEN :: %d;// todo: probably not standard\n", _SYS_NAMELEN);
   printf("SignalNum :: @enum(i32) (Interupt = %d, Quit = %d, "
          "IllegalInstruction = %d, TraceTrap = %d, Abort = %d, Kill = %d, Bus "
          "= %d, Segfault = %d);\n",

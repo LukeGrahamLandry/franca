@@ -1,11 +1,45 @@
-
-// TODO: /proc/self/cmdline :Linux
-fn cli_args() Slice(CStr) = {
-    argc := _NSGetArgc()[];
-    argv := _NSGetArgv()[];
-    // Safety: the os wouldn't lie to us... hopefully.
-    slice(argv, argc)
-}
+fn cli_args() []CStr #target_os = (fn($os) => @match(os){
+    fn macos() => {
+        argc := _NSGetArgc()[];
+        argv := _NSGetArgv()[];
+        // Safety: the os wouldn't lie to us... hopefully.
+        slice(argv, argc)
+    }
+    fn linux() => {
+        // TODO: uhg, its not ok to allocate here! :slow
+        //       if we're gonna be slow we might as well be super slow
+        // can't use read_to_string because you can't seek the magic /proc things? 
+        out: List(u8) = list(4096, page_allocator); // :Leak
+        path :: "/proc/self/cmdline".sym().c_str();
+        f := open_read(path).unwrap();
+        loop {
+            continue :: local_return;
+            read_len := read(f, out.maybe_uninit.ptr.offset(out.len), out.maybe_uninit.len - out.len);
+            if read_len.is_ok() {
+                len := read_len.unwrap();
+                out.len += len;
+                if len != 0 {
+                    continue();
+                };
+            }; // else i sure hope we're done... TODO: return error? unwrap it?
+            
+            close(f); // TODO: defer
+            
+            // if we're gonna be slow we might as well be super slow fixme fixme fixme
+            args: List(CStr) = list(4096, page_allocator); // :Leak
+            
+            while => out.len != 0 {
+                s: CStr = (ptr = out.maybe_uninit.ptr);
+                args&.push(s);
+                len := s.str().len() + 1;
+                out.maybe_uninit.ptr = out.maybe_uninit.ptr.offset(len);
+                out.len -= len;
+            }; 
+            
+            return(args.items());
+        }
+    }
+});
 
 // TODO: add 'fn int_to_float' so i can return answer in seconds like other lang versions
 fn timestamp() i64 = {
@@ -16,15 +50,36 @@ fn timestamp() i64 = {
     time_spec.seconds.mul(1000).add(time_spec.nanoseconds.div(NS_TO_MS))
 }
 
-// TODO: /proc/self/exe :Linux
-fn get_executable_path(a: Alloc) Str = {
-    size := 0;
-    // use this to check the length so we allocate the right amount. 
-    _NSGetExecutablePath(u8.ptr_from_int(0), size&);
-    buf := a.alloc(u8, size);
-    _NSGetExecutablePath(buf.ptr, size&).unwrap();
-    buf
-}
+// TODO: /proc/self/exe :Linux readlink
+
+fn get_executable_path(a: Alloc) Str #target_os = (fn($os) => @match(os){
+    fn macos() => {
+        size := 0;
+        // use this to check the length so we allocate the right amount. 
+        _NSGetExecutablePath(u8.ptr_from_int(0), size&);
+        buf := a.alloc(u8, size);
+        _NSGetExecutablePath(buf.ptr, size&).unwrap();
+        buf
+    }
+    fn linux() => {
+        path :: "/proc/self/exe".sym().c_str();
+        out: List(u8) = list(128, a);
+        loop {
+            len := or readlink(path, out.maybe_uninit) {
+                // TODO: return error!!
+                panic("error readlink /proc/self/exe I really hope you're using a broken emulator")
+            };
+            
+            if len < out.maybe_uninit.len {
+                out.len = len;
+                return(out.items());
+            } else {
+                out&.reserve(out.maybe_uninit.len);
+                // continue();
+            }
+        }
+    }
+});
 
 fn get_working_directory(a: Alloc) List(u8) = {
     out: List(u8) = list(512, a);
@@ -42,11 +97,8 @@ fn query_current_arch() ?Arch #target_os = (fn($os) => {
     machine.uname_machine_to_arch()
 });
 
-fn LibcType(os: Os) Type #fold = @match(os) {
-    fn macos() => MacosLibc;
-    fn linux() => LinuxLibc;
-    //@default => @panic("unsupported os (%) for LibcType", os);
-}
+// surely we don't need to call uname... right... right...?
+fn query_current_os() Os #target_os = (fn($os) => os);
 
 fn uname_machine_to_arch(machine: CStr) ?Arch = {
     machine := machine.str();

@@ -3,7 +3,6 @@
 // TODO: have a way of marking ones that should be imported instead of emitted so the driver program could do incremental compilation stuff. 
 // TODO: move the top level loop to walk_bc because its probably the same on all backends. 
 // TODO: not reserving enough
-// TODO: implement !asm with Module-Level Inline Assembly
 // TODO: only specfiy ccc if you take a pointer to the function? you want to use one that allows tail calls otherwise. 
 // TODO: use the arch passed in instead of buildoptions.wasm32
 
@@ -323,7 +322,7 @@ fn emit_special(self: *EmitLlvm, f_id: FuncId, body: *FuncImpl, func: *Func, bc:
             import_name: Str = if func.nullable_link_rename_func != 0 {
                 out: List(u8) = list(temp());
                 arg: LinkRenameArg = (
-                    target = (arch = self.arch, os = .macos), // TODO: other os!
+                    target = (arch = self.arch, os = self.os),
                     out = out&,
                     old_name = self.program.pool.get(name[]),
                 );
@@ -397,8 +396,8 @@ fn emit_special_asm(self: *EmitLlvm, body: *FuncImpl, func: *Func, bc: *FnBody, 
             name := @format("%", (self, bc.func)) temp();
             self.forward_declare(bc.signeture, false, name.items());
             
-            // TODO: on linux no underscore
-            @fmt(self.out&.current(), "module asm \"_%:\"\n", (self, bc.func));
+            prefix := if(self.os == .linux, => "", => "_");
+            @fmt(self.out&.current(), "module asm \"%%:\"\n", prefix, (self, bc.func));
             for code { inst |
                 v := @as(i64) inst.zext();
                 @fmt(self.out&.current(), "module asm \".word %\"\n", v);
@@ -413,7 +412,8 @@ fn emit_special_asm(self: *EmitLlvm, body: *FuncImpl, func: *Func, bc: *FnBody, 
             name := @format("%", (self, bc.func)) temp();
             self.forward_declare(bc.signeture, false, name.items());
             
-            @fmt(self.out&.current(), "module asm \"_%:\"\n", (self, bc.func));
+            prefix := if(self.os == .linux, => "", => "_");
+            @fmt(self.out&.current(), "module asm \"%%:\"\n", prefix, (self, bc.func));
             code := self.program.pool.get(code[]);
             code := code.split_lines(temp());
             for code { inst |

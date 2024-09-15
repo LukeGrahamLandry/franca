@@ -73,7 +73,7 @@ fn driver(vtable: *ImportVTable) void = {
     args := cli_args();
     x86 := false;
     arch := Arch.aarch64;
-    os := Os.macos; // :HardcodeOs
+    os := Os.macos;
     include_cranelift := false;
     slow := false;
     keep_ir := false;
@@ -93,6 +93,7 @@ fn driver(vtable: *ImportVTable) void = {
         
         if arg.str() == "-linux" {
             linux = true;
+            os = .linux;
         };
         if arg.str() == "-include-cranelift" {
             include_cranelift = true;
@@ -152,9 +153,15 @@ fn driver(vtable: *ImportVTable) void = {
         target_triple := "aarch64-apple-darwin";
         if x86 {
             if linux {
-                target_triple = "x86_64-linux-musl";
+                // :WhichLibc
+                target_triple = "x86_64-linux-gnu";
+                //target_triple = "x86_64-linux-musl";
             } else {
                 target_triple = "x86_64-apple-darwin";
+            };
+        } else {
+            if linux {
+                target_triple = "aarch64-linux-musl";
             };
         };
         args&.push_all(@slice("-target", target_triple));
@@ -168,6 +175,19 @@ fn driver(vtable: *ImportVTable) void = {
             rename(compiler_exe_path.maybe_borrow_cstr(temp()), save_temp_file&.c_name());
             @println("Replacing your compiler at '%' with the new one. \nThe old one was saved at '%' (NOTE: THATS A TEMP FILE!)", compiler_exe_path, save_temp_file&.s_name());
             
+            // TODO: cranelift
+            if linux {
+                success := run_cmd_blocking("zig", @slice(
+                    "cc", "-o", compiler_exe_path, @fmt_str("%/franca2.o", out_dir), 
+                    // :WhichLibc
+                    //"-ldl",
+                    //"-static", 
+                    //"-Wl,-z,common-page-size=65536,-z,max-page-size=65536", // TODO: dont have this. its for blink
+                    "-target", target_triple));
+                assert(success, "link failed");
+                return();
+            };
+        
             args := libs.get_aot_objects();
             args&.push_all(@slice ("-o", compiler_exe_path, @fmt_str("%/franca2.o", out_dir)));
             if include_cranelift {
@@ -192,49 +212,6 @@ fn driver(vtable: *ImportVTable) void = {
     } else {
         println("SKIPPED RUNNING LLVM");
     };
-}
-
-fn render_dependencies(c: CompCtx, fns: []FuncId) void = {
-    out: List(u8) = list(temp());
-    out&.push_all("digraph {\n");
-    pending: List(FuncId) = list(temp());
-    pending&.push_all(fns);
-    done: BitSet = empty();
-    
-    while => !pending.is_empty() {
-        continue :: local_return;
-        f := pending&.pop().unwrap();
-        if done&.get(f.to_index().zext()) {
-            continue();
-        };
-        done&.set(f.to_index().zext(), temp());
-        
-        func := {c.vtable.get_function}(c.data, f);
-        real_name := {c.vtable.get_string}(c.data, func.name);
-        @fmt(out&, "% [label = \"%\"]\n", f.to_index(), real_name);
-        @println("[%: %]", f.to_index(), real_name);
-        for func.mutual_callees { cc |
-            pending&.push(cc);
-            @fmt(out&, "% -> %\n", f.to_index(), cc.to_index());
-            func := {c.vtable.get_function}(c.data, cc);
-            @println("  - %: %", cc.to_index(), {c.vtable.get_string}(c.data, func.name));
-        };
-        for func.callees { cc |
-            pending&.push(cc);
-            @fmt(out&, "% -> %\n", f.to_index(), cc.to_index());
-            func := {c.vtable.get_function}(c.data, cc);
-            @println("  - %: %", cc.to_index(), {c.vtable.get_string}(c.data, func.name));
-        };
-    };
-    out&.push_all("}");
-    
-    path := "callgraph.dot".maybe_borrow_cstr(temp());
-    remove(path);
-    s := out.items();
-    flag := (@as(i64) OpenFlag.Write).bit_or(@as(i64) OpenFlag.Create);
-    fd := open(path, flag).unwrap();
-    write(fd, s.ptr, s.len).unwrap();
-    fd.close();
 }
 
 // TODO: return result
