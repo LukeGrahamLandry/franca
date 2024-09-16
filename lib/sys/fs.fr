@@ -18,27 +18,38 @@ fn open_trunc(path: CStr) FdResult #target_os = (fn($os) => {
 });
 
 // TODO: it wont close the directory if you use an early return from the body!!
-// TODO: :Linux 
-fn walk_directory(path: CStr, $body: @Fn(entry: *MacosLibc.DirEnt) void) bool = {
-    ::ptr_utils(Dir); ::ptr_utils(MacosLibc.DirEnt);
-    entry := MacosLibc.DirEnt.zeroed();
-    dir := opendir(path);
-    ret :: return;
-    if(dir.is_null(), => ret(false));
+// TODO: is readdir_r deprecated everywhere or is that just a linux thing.
+//       but with readdir_r its a pain becuase you have to be extra careful about agreeing on the length of the buffer. 
+//       but macos adds a d_namlen field so you need to account for that in the offset of the buffer anyway. 
+// NOTE: don't nest these opening the same directory at the same time. 
+fn walk_directory(path: CStr, $body: @Fn(entry: DirEntry) void) bool = {
+    dir := opendir(path); ::ptr_utils(Dir);
+    if(dir.is_null(), => return(false));
     
-    out := entry&;
     loop {
-        readdir_r(dir, entry&, out&); // TODO: error handling
-        if(out.is_null()) {
-            // TODO: have expr!defer that runs even if the `body` does an early return so you can use this like a normal loop without collecting the items. 
-            closedir(dir); // TODO: error handling
-            ret(true);
+        @match(dir.iter_directory()) {
+            fn Some(data) => body(data);
+            fn None() => {
+                // TODO: have expr!defer that runs even if the `body` does an early return so you can use this like a normal loop without collecting the items. 
+                closedir(dir); // TODO: error handling
+                return(true);
+            }
         };
-        body(out);
-    };
-    
-    unreachable()
+    }
 }
+
+fn iter_directory(dirp: *Dir) ?DirEntry #target_os = (fn($os) => {
+    Entry :: LibcType(os).DirEnt; ::ptr_utils(Entry);
+    e: *Entry = readdir(dirp);
+    if(e.is_null(), => return(.None));
+    name: CStr = (ptr = e.d_name&.as_ptr());
+    (Some = (name = name.str(), type = e.d_type))
+});
+
+DirEntry :: @struct(
+    name: Str,
+    type: DirEntType,
+);
 
 fn name(self: *MacosLibc.DirEnt) Str = (ptr = self.d_name&.as_ptr(), len = self.d_namlen.zext());
 
@@ -61,7 +72,6 @@ fn write_entire_file(path: Str, content: Str) bool = {
     fd.close();
     true
 }
-
 
 fn append_to_file(path: Str, content: Str) bool = {
     path := maybe_borrow_cstr(path, temp());

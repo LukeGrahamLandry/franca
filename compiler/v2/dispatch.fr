@@ -248,8 +248,9 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
             arg_ty := @check(self.infer_arguments(fid)) return;
             ret_ty := @check(self.infer_return(fid)) return;
             
-            // TODO: assert found? 
+            // TODO: assert found? but :AssumeDone
             found := @check(self.fill_in_jit_pointer(fid, func.body&)) return;
+            
             fn fill_in_jit_pointer(self: *SelfHosted, fid: FuncId, body: *FuncImpl) Maybe(bool) = {
                 func := self.get_function(fid);
                 if(func.get_flag(.AsmDone), => return(Ok = true));
@@ -258,10 +259,12 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
                 if body.is(.Normal).or(body.is(.Intrinsic)) {
                     @log_event("codegen % %", fid, self.log_name(fid)) self;
                     @err_assert(!arg_ty.is_unknown() && !ret_ty.is_unknown(), "unknown fn types!!") return;
-                    body := @try(self.emit_bc_and_jit(fid)) return;
+                    @try(self.emit_bc_and_jit(fid)) return;
                     // TODO: not true for rediurects????
                     //@debug_assert(self.jitted&.get_fn(fid).is_some(), "we just emitted but no pointer?? %", func.log(self));
-                    return(Ok = true);
+                    if body.is(.Normal).or(body.is(.Intrinsic)) {
+                        return(Ok = true);
+                    };  // else it became a redirect
                 };
                 @match(body) {
                     fn Redirect(target) => {
@@ -336,6 +339,10 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
                 @log_event("sleep on %/% mutual callees", waiting.len, func.mutual_callees.len) self;
                 return(Suspend = self.wait_for(All = waiting));
             };
+            // :AssumeDone
+            // TODO: we wont have a callable pointer if you're cross compiling and this function is in an #target_os block.
+            //       should make a shim that gives a useful message if you try to call it at comptime by mistake. 
+            func.set_flag(.AsmDone);
         }
         fn ResolveOverload(f) => {
             self.dispatch.enclosing_function = f.callsite;  // TODO: make test that fails without this.

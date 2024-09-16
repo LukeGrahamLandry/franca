@@ -1,3 +1,30 @@
+- TODO: easier is run_tests probably just doesnt work becuase of walk dir
+
+  now its compiling itself its segfaulting on 590072672032938 in compile_expr_inner.
+  i feel thats not even a pointer becuase it doesnt change if i turn aslr back on but all the other numbers passed into
+  compile_expr_inner do.
+  bindings.len == 1 case of decl_var_pattern
+  this is the one that crashes on linux and its the first time it runs
+  this is valid but its subexpr Block.result is a garbage pointer.
+  and the block loc is `case_access = @{ @[case_access]& };` so thats compelling that it would be a strange one.
+  ok good it cant do tests/front.fr or requested_type_through_match either.
+  so its not something crazy about self-compiling, its just @match is broken.
+
+i went through and fixed readdir stuff so now run_tests works on linux.
+hmmmmm now requested_type_through_match passes. but still not front or the compiler itself.
+but the number is different, and its different between compiler and front but then consistant within one.
+589312462821369, 826016700493633. and the compiler one is still very close.
+10000101111111101000000000000000100001011111111001
+10111011110100001000000000000000101110111101000001
+it doesn't have the fancy bit set for one of my indexes so its not just reading 64 bits instead of 32 from one of those being treated as a pointer.
+lox has 698683805039472. the consistant per program + compiler binary is creepy.
+i can recompile and add a check if its exactly that number and it fires.
+I can `@println("comptime: %", FatExpr.int_from_ptr(case_access.expr.Block.result));` in macros.fr and its not the same number.
+hmmmm, run_tests.fr has the same problem and just happens to not try to dereference that subexpr??
+it only crashes if doing my debug printing the tag in the compiler.
+
+todo: first i think i want to hack in using compiler impls instead of libc so it can run in blink and see if same problem.
+
 ## (Sep 15)
 
 so a thing that was sketchy was calling allocators with 0 lenght,
@@ -26,6 +53,11 @@ aaa.
 now looping trying to get `malloc` but that makes since becuase i hardcoded the macos libc path.
 
 i think musl dlopen can't cope with glibc .so? fair enough i suppose.
+gah, no they just dont do that if you statically link.
+
+- https://www.openwall.com/lists/musl/2012/12/08/4
+- https://musl.openwall.narkive.com/lW4KCyXd/static-linking-and-dlopen
+- TODO: i bet zig doesn't hate me personally, try their thing https://github.com/ziglang/zig/blob/master/lib/std/dynamic_library.zig#L14
 
 glibc mmap gives invalid file descriptor for -1??
 strace says
@@ -40,6 +72,8 @@ jit.fr always mmaps writable and then later mprotects to exec, so im never doing
 and `MAP_EXECUTABLE` isn't the same as `PROT_EXEC`(the former says `This flag is ignored.`).
 hmmm `MAP_EXECUTABLE = 4096` so like its gotta just be calling the macos version instead of the linux version in #target_os.
 fuck. yeah i forgor that i `comptime_os: Os = .macos,` dumbass.
+
+todo: it might not find dlopen because its actually `dlopen@@<some insane garbage>` like apples's opendir.
 
 ## (Sep 14)
 

@@ -1,3 +1,16 @@
+- fix all the places i `:HardcodeOs`
+- deal with arch specific functions not callable at compile time (like `_NS*` when compiling on linux).
+  its fine cause you'll never try becuase cli_args has a different implementation but it gets confused and loops forever.
+- deal with static linking and running without finding a system libc.so (like in blink)
+- have one test command that runs all the code that exists.
+  also rn examples are only jit by run_tests.fr (not llvm aot).
+  should have a more declaritive way of describing what programs exist such that they can be run by multiple backends.
+  ie. i want to add cranelift, wasm and qbe to the actually tested category.
+- more type safety in int vs float registers in jit backends would be nice.
+  also arm vs x86 register constants (they both have an sp but they're different numbers).
+
+##
+
 - generic Read/Write instead of hardcoding List(u8).
 - handle #generic in overloading.rs so you don't have to add useless @as casts in nested expressions.
 - seperate fn stride_of and fn size_of so you can avoid extra padding in nested structs.

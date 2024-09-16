@@ -80,6 +80,16 @@ fn decl_var_pattern(self: *SelfHosted, stmt: *FatStmt) Maybe(Ty(bool, bool)) #on
         // match branch that doesn't specify an argument gets here. (because parser puts in fake Binding with name=None).
         // just to be safe, still keep the expression in case it somehow happens in a different situation and has side effects.
         stmt.stmt = (Eval = value[]);
+        //// OTDO: move this to log
+        //@println("% %", FatExpr.int_from_ptr(stmt.stmt.Eval&), stmt.stmt.Eval.expr&.tag());
+        //self.codemap.show_error_line(stmt.loc);
+        //e := stmt.stmt.Eval.expr.Block.result;
+        //xx := FatExpr.int_from_ptr(e);
+        //@println("%", xx);
+        //if xx == 826016700493633 {
+        //    println("!!!! same");
+        //};
+        //@println("%", e.expr&.tag());
         @check(self.compile_expr(stmt.stmt.Eval&, .None)) return;
         return(Ok = (stmt.stmt.Eval.done, false));
     };
@@ -361,45 +371,8 @@ fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = 
     assert(!func.get_flag(.MayHaveAquiredCaptures), "closures need to be specialized");
     assert(!func.get_flag(.AnyConstArgs), "const args need to be specialized");
     
-    // TODO: don't always do all the os-es, should know runtime+comptime target
     if func.get_flag(.TargetSplit) {
-        os_ty := @unwrap(self.env.os_type, "#target_os before bootstrap") return;
-        if func.body&.is(.Normal) {
-            @debug_assert(func.return_var.is_none(), "should be before resolve");
-            // TODO: typecheck now? 
-            merged: List(FuncImpl) = list(self.get_alloc());
-            for_enum(Os) { os |
-                new_func := func.deep_clone(self.get_alloc());
-                new_func&.unset_flag(.TargetSplit); // very important to not loop!
-                factory := self.box(new_func.body.Normal);
-                os_value := self.to_values(Os, os);
-                os_value := synthetic_ty((Value = (bytes = os_value, coerced = false)), factory.loc, os_ty);
-                os_value := self.box(os_value);
-                body_expr := synthetic((Call = (f = factory, arg = os_value)), factory.loc);
-                body_expr := self.box(body_expr);
-                // TODO: garbage HACK about how i represent return labels
-                //       you need a block for the outer function's `return` to bind to,
-                //       otherwise you don't get a return_var and the error message is useless 
-                //       `Compile Error: Poison expression Label`
-                body_expr := synthetic((Block = (body = empty(), result = body_expr, ret_label = .None, hoisted_constants = false)), factory.loc);
-                new_func.body.Normal = body_expr;
-                new_fid := self.add_function(new_func);
-                merged&.push(TargetOsSplit = (os = os, fid = new_fid));
-            };
-            func.body = (Merged = merged.rs());
-        };
-        @debug_assert(func.body&.is(.Merged), "ICE: lost #target_os impls???");
-        each func.body.Merged { impl |
-            @err_assert(impl.is(.TargetOsSplit), "TODO: support do_merges + .TargetOsSplit?") return;
-            fid := impl.TargetOsSplit.fid;
-            func := self.get_function(fid);
-            if !func.get_flag(.EnsuredCompiled) {
-                self.dispatch.function_in_progress&.set(fid.as_index());
-                return(Suspend = self.wait_for(CompileBody = fid));
-            };
-        };
-        func.set_flag(.EnsuredCompiled);
-        return(.Ok);
+        return(self.handle_target_split(func));
     };
     
     @debug_assert(self.dispatch.function_in_progress&.get(fid.as_index()), "expected to do work on in progress function %", fid);
@@ -486,6 +459,50 @@ fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = 
     .Ok
 }
 
+fn handle_target_split(self: *SelfHosted, func: *Func) Maybe(void) #once = {
+    ::AutoEq(?CallConv); ::DerefEq(?CallConv); // TODO: why no '!=' ??
+    @err_assert(!(func.cc == (Some = .Inline)), "#target_os functions cannot be #inline.\nThis is a limitation of the way we handle comptime execution + cross compilation (which affects you even when not cross compiling).") return;
+    
+    os_ty := @unwrap(self.env.os_type, "#target_os before bootstrap") return;
+    if func.body&.is(.Normal) {
+        @debug_assert(func.return_var.is_none(), "should be before resolve");
+        // TODO: typecheck now? 
+        merged: List(FuncImpl) = list(self.get_alloc());
+        for_enum(Os) { os |
+            new_func := func.deep_clone(self.get_alloc());
+            new_func&.unset_flag(.TargetSplit); // very important to not loop!
+            factory := self.box(new_func.body.Normal);
+            os_value := self.to_values(Os, os);
+            os_value := synthetic_ty((Value = (bytes = os_value, coerced = false)), factory.loc, os_ty);
+            os_value := self.box(os_value);
+            body_expr := synthetic((Call = (f = factory, arg = os_value)), factory.loc);
+            body_expr := self.box(body_expr);
+            // TODO: garbage HACK about how i represent return labels
+            //       you need a block for the outer function's `return` to bind to,
+            //       otherwise you don't get a return_var and the error message is useless 
+            //       `Compile Error: Poison expression Label`
+            body_expr := synthetic((Block = (body = empty(), result = body_expr, ret_label = .None, hoisted_constants = false)), factory.loc);
+            new_func.body.Normal = body_expr;
+            new_fid := self.add_function(new_func);
+            merged&.push(TargetOsSplit = (os = os, fid = new_fid));
+        };
+        func.body = (Merged = merged.rs());
+    };
+    @debug_assert(func.body&.is(.Merged), "ICE: lost #target_os impls???");
+    // TODO: don't always do all the os-es, should know runtime+comptime target
+    each func.body.Merged { impl |
+        @err_assert(impl.is(.TargetOsSplit), "TODO: support do_merges + .TargetOsSplit?") return;
+        fid := impl.TargetOsSplit.fid;
+        func := self.get_function(fid);
+        if !func.get_flag(.EnsuredCompiled) {
+            self.dispatch.function_in_progress&.set(fid.as_index());
+            return(Suspend = self.wait_for(CompileBody = fid));
+        };
+    };
+    func.set_flag(.EnsuredCompiled);
+    .Ok
+}
+
 fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
     @check(self.infer_return(fid)) return;
     func := self.get_function(fid);
@@ -510,7 +527,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
                 s := @unwrap(find_os_libc_dylib(), "couldn't find libc dylib/so") return;
                 
                 libc := dlopen(s, .Lazy);
-                @err_assert(!libc.lib.is_null(), "couldn't find libc dylib/so (tried '%')", s) return;
+                @err_assert(!libc.lib.is_null(), "couldn't find libc dylib/so (tried '%') (or the compiler is -static with musl)", s) return;
                 
                 // :link_rename
                 // TODO: allow #libc before #link_rename
@@ -521,7 +538,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
                     ::if(CStr);
                     if func.nullable_link_rename_func != 0 {
                         arg: LinkRenameArg = (
-                            target = (arch = self.env.comptime_arch, os = .macos),
+                            target = (arch = self.env.comptime_arch, os = self.env.comptime_os),
                             out = out&,
                             old_name = self.pool.get(func.name),
                         );
@@ -1795,6 +1812,7 @@ MemoKey :: Ty(FuncId, Values);
 //       it would avoid redundant work to do that on the original func for params that don't depend on constants. 
 //       that would jsut require compile_expr to be able to yield on a Poison.Argument, and we catch that here and just ignore. 
 fn curry_const_args(self: *SelfHosted, original_f: FuncId, f_expr: *FatExpr, arg_expr: *FatExpr) Maybe(FuncId) #once = {
+    // TODO: no #target_os
     key: MemoKey = (original_f, @check(self.const_args_key(original_f, arg_expr)) return);
     if self.dispatch.const_bound_memo&.get(key&) { new_f |
         @log_event("reuse baked const args % -> % (%)", original_f, new_f, key._1&) self;
@@ -1817,6 +1835,7 @@ fn curry_const_args(self: *SelfHosted, original_f: FuncId, f_expr: *FatExpr, arg
     };
 
     func := self.get_function(original_f);
+    @err_assert(!func.get_flag(.TargetSplit), "Functions with const arguments cannot be #target_os.\nThis could be made to work for non-capturing args but i'm not ready to deal with it yet.") return;
     @debug_assert(func.get_flag(.AnyConstArgs), "baking const args but none are there");
     @debug_assert_eq(func.get_flag(.AllowRtCapture), func.get_flag(.ResolvedBody));
     // Some part of the argument must be known at comptime.
