@@ -106,3 +106,28 @@ fn uname_machine_to_arch(machine: CStr) ?Arch = {
     if(machine == "arm64", => return(Some = .aarch64));
     .None
 }
+
+//
+// You must call this function when writting machine code into memory and then trying to execute it (simply mprotect-ing it to Exec is not enough)!
+// Some ISAs don't guarentee coherency between instruction and data caches.  
+//
+// x86 doesn't this. TODO: what about riscv?
+// This fixes 'illegal hardware instruction'.
+// sleep(Duration::from_millis(1)) also works (in debug mode). That's really cool, it gives it time to update the other cache because instructions and data are seperate?!
+// Especially fun becuase if you run it in lldb so you break on the error and disassemble... you get perfectly valid instructions because it reads the data cache!
+//
+// - https://community.arm.com/arm-community-blogs/b/architectures-and-processors-blog/posts/caches-and-self-modifying-code
+// - https://stackoverflow.com/questions/35741814/how-does-builtin-clear-cache-work
+// - https://stackoverflow.com/questions/10522043/arm-clear-cache-equivalent-for-ios-devices
+// - https://github.com/llvm/llvm-project/blob/main/compiler-rt/lib/builtins/clear_cache.c
+// - https://github.com/apple/darwin-libplatform/blob/main/src/cachecontrol/arm64/cache.s
+// - https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/sys_icache_invalidate.3.htmls
+//
+// :ClearCacheHack
+// Libcs for x86 might not have __clear_cache if you try to get it from dlopen/dlsym,
+// but it seems the linker fixes it and gives you a static noop copy on those targets (even if you don't ask for -static)
+// TODO: implement #target_arch and use that here instead of leaning on someone else to do the right thing. 
+//
+fn clear_instruction_cache(beg: rawptr, end: rawptr) void = {
+    __clear_cache(beg, end);
+}

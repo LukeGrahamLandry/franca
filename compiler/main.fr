@@ -30,7 +30,7 @@ fn main(argc: i64, argv: *CStr) void = {
     //};
     
     if filename == "-go-build-yo-self" {
-        go_build_yo_self(vtable);
+        go_build_yo_self(vtable, args);
         exit(0);
     };
     
@@ -43,8 +43,9 @@ fn main(argc: i64, argv: *CStr) void = {
 // This is a simplified copy-paste of first.fr/driver. 
 // It exists so we have a precompiled version of the compiler's build script, 
 // which allows making breaking abi changes to the driver program system (like the allocator vtable change). 
-fn go_build_yo_self(vtable: *ImportVTable) void = {
-    fn load_src(vtable: *ImportVTable) CompCtx = {
+// note: passing args instead of calling cli_args becuase i want it to work on blink emulator without /proc/self/cmdline
+fn go_build_yo_self(vtable: *ImportVTable, args: [] CStr) void = {
+    fn load_src(vtable: *ImportVTable,  args: [] CStr) CompCtx = {
         src := temp().read_to_string("compiler/main.fr");
         @fmt(src&, """;ENABLE_TRACY :: false; ENABLE_LSP :: false; 
         ENABLE_LOGGING_CALLBACKS :: false; 
@@ -55,7 +56,6 @@ fn go_build_yo_self(vtable: *ImportVTable) void = {
         opts.deduplicate_bytecode = true;
         opts.retain_function_names = false;
         opts.debug_info = false;
-        args := cli_args();
         for args { extra |
             if extra.str() == "-no-deduplication" {
                 opts.deduplicate_bytecode = false;
@@ -95,14 +95,12 @@ fn go_build_yo_self(vtable: *ImportVTable) void = {
         panic("Working directory must be top level of the franca repository");
     };
     start := timestamp();
-    c := load_src(vtable);
-    
-    args := cli_args();
+    c := load_src(vtable, args);
     
     new_main := c.get_unique_named("main").unwrap();
     exports := (@list(new_main) temp()).items();
-    
-    ir_text := c.emit_llvm(temp(), exports, .ExportWithNames, get_comptime_arch(), .macos); // :HardcodeOs
+    aa := query_current_arch();
+    ir_text := c.emit_llvm(temp(), exports, .ExportWithNames, aa.unwrap(), query_current_os());
     @println("Emitted % bytes of llvm ir.", ir_text.len);  // useful to see when i start trying to deduplicate bytecode. 
     end := timestamp();
 

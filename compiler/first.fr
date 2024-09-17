@@ -79,6 +79,7 @@ fn driver(vtable: *ImportVTable) void = {
     keep_ir := false;
     trace := false;
     linux := false;
+    static := false;
     for args { arg |
         if arg.str() == "-no-build" {
             do_build = false;
@@ -90,7 +91,9 @@ fn driver(vtable: *ImportVTable) void = {
             x86 = true;
             arch = .x86_64;
         };
-        
+        if arg.str() == "-static" {
+            static = true;
+        };
         if arg.str() == "-linux" {
             linux = true;
             os = .linux;
@@ -151,17 +154,28 @@ fn driver(vtable: *ImportVTable) void = {
         // if not linking cranelift_comptime or tracy could just not `-c` and do it in one step but meh. 
         args&.push_all(@slice ("-o", @fmt_str("%/franca2.o", out_dir), "-c", "-g"));
         target_triple := "aarch64-apple-darwin";
+        if static {
+            assert(linux, "only linux supports -static");
+        };
         if x86 {
             if linux {
                 // :WhichLibc
-                target_triple = "x86_64-linux-gnu";
-                //target_triple = "x86_64-linux-musl";
+                if static {
+                    target_triple = "x86_64-linux-musl";
+                } else {
+                    target_triple = "x86_64-linux-gnu";
+                };
             } else {
                 target_triple = "x86_64-apple-darwin";
             };
         } else {
             if linux {
-                target_triple = "aarch64-linux-musl";
+                // :WhichLibc
+                if static {
+                    target_triple = "aarch64-linux-musl";
+                } else {
+                    target_triple = "aarch64-linux-gnu";
+                };
             };
         };
         args&.push_all(@slice("-target", target_triple));
@@ -175,14 +189,23 @@ fn driver(vtable: *ImportVTable) void = {
             rename(compiler_exe_path.maybe_borrow_cstr(temp()), save_temp_file&.c_name());
             @println("Replacing your compiler at '%' with the new one. \nThe old one was saved at '%' (NOTE: THATS A TEMP FILE!)", compiler_exe_path, save_temp_file&.s_name());
             
-            // TODO: cranelift
             if linux {
-                success := run_cmd_blocking("zig", @slice(
+                args := (@slice(
                     "cc", "-o", compiler_exe_path, @fmt_str("%/franca2.o", out_dir), 
-                    // :WhichLibc
-                    //"-static", 
-                    //"-Wl,-z,common-page-size=65536,-z,max-page-size=65536", // TODO: dont have this. its for blink
-                    "-target", target_triple));
+                    "-target", target_triple)).clone(temp());
+                if include_cranelift {
+                    assert(!static && x86, "TODO: cranelift");
+                    args&.push("crates/comptime_cranelift/target/x86_64-unknown-linux-gnu/release/libcomptime_cranelift.a");
+                    // this fixes undefined symbol: _Unwind_Backtrace <more spew of garbage omitted>
+                    // https://github.com/rust-lang/rust/issues/47493
+                    // you'd think panic=abort or build-std=std,panic_abort would fix it too but no. 
+                    args&.push_all(@slice("-l", "gcc_s"));
+                };
+                if static {
+                    args&.push("-Wl,-z,common-page-size=65536,-z,max-page-size=65536"); // TODO: dont have this? its for blink
+                    args&.push("-static");
+                };
+                success := run_cmd_blocking("zig", args.items());
                 assert(success, "link failed");
                 return();
             };

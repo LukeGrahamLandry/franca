@@ -24,15 +24,57 @@ fn new_arena_chunk(allocator: Alloc, size: i64, prev: ?*ArenaHeader) *ArenaHeade
 }
 
 arena_allocator_fn :: fn(self: rawptr, action: AllocatorAction, ptr: rawptr, count: i64, align: i64) rawptr = {
-    // note: we can't use @match yet... (because of printing i guess?)
-    action := @as(i64) action;
-    if action == 0 {
-        arena_alloc(self, count, align)
-    } else {
-        // Noop
-        rawptr.uninitialized()
-    }
+    // note: we can't use @match yet... (because of printing i guess?) // TODO: check again now that ast_alloc is in the compiler
+    if action == AllocatorAction.Allocate {
+        return(arena_alloc(self, count, align));
+    };
+    if action == AllocatorAction.DoYouOwnThisPointer {
+        return(arena_owns(self, ptr).to_raw());
+    };
+    
+    // Free is Noop
+    rawptr.zeroed()
 };
+
+// TODO: test this
+// TODO: edge case when it was in the current chunk but then freed?
+fn arena_owns(self: rawptr, ptr: rawptr) MemoryOwnership #cold = {
+    self := ArenaAlloc.ptr_from_raw(self);
+    ptr := int_from_rawptr(ptr);
+    chunk := or self.chunk {
+        return(MemoryOwnership.No)
+    };
+    
+    dowhile {
+        start := ArenaHeader.int_from_ptr(chunk);
+        end := start + chunk.size;
+        if ptr >= start && ptr <= end {
+            return(MemoryOwnership.Yes);
+        };
+        // Can't use @match here!
+        if chunk.prev.is_some() {
+            chunk = chunk.prev.unwrap();
+            true
+        } else {
+            false
+        }   
+    };
+    dowhile {
+        start := ArenaHeader.int_from_ptr(chunk);
+        end := start + chunk.size;
+        if ptr >= start && ptr <= end {
+            return(MemoryOwnership.Free);
+        };
+        // Can't use @match here!
+        if chunk.next.is_some() {
+            chunk = chunk.next.unwrap();
+            true
+        } else {
+            false
+        }   
+    };
+    MemoryOwnership.No
+}
 
 // Don't try to printf debug in here...
 // TODO: make this less derranged. 
@@ -213,6 +255,6 @@ todo_allocator_fn :: fn(_: rawptr, action: AllocatorAction, ptr: rawptr, count: 
     if action == 0 {
         malloc(count)
     } else {
-        rawptr.uninitialized()
+        0.rawptr_from_int()
     }
 };

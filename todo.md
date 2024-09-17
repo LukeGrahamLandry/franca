@@ -8,6 +8,7 @@
   ie. i want to add cranelift, wasm and qbe to the actually tested category.
 - more type safety in int vs float registers in jit backends would be nice.
   also arm vs x86 register constants (they both have an sp but they're different numbers).
+- automated test that builds are still reproducible
 
 ##
 

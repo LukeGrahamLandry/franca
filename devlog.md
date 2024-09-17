@@ -1,14 +1,43 @@
-- TODO: easier is run_tests probably just doesnt work becuase of walk dir
+## more more linux (Sep 17)
 
-  now its compiling itself its segfaulting on 590072672032938 in compile_expr_inner.
-  i feel thats not even a pointer becuase it doesnt change if i turn aslr back on but all the other numbers passed into
-  compile_expr_inner do.
-  bindings.len == 1 case of decl_var_pattern
-  this is the one that crashes on linux and its the first time it runs
-  this is valid but its subexpr Block.result is a garbage pointer.
-  and the block loc is `case_access = @{ @[case_access]& };` so thats compelling that it would be a strange one.
-  ok good it cant do tests/front.fr or requested_type_through_match either.
-  so its not something crazy about self-compiling, its just @match is broken.
+added ability to ask an allocator if it owns a pointer so now expr log doesn't crash on trying to print garbage
+if its not in the compiler's areana or on stack. so i can see the place where the garbage number is.
+
+// :FuckedJunkPointerExpr
+tried run_tests with cranelift on linux but `parser_doesnt_crash` still hits the `bad expr ptr` (before the cranelift type error on that test that happens on mac).
+its definitly using cranelift because it passes the tests that `[TODO X64]` normally.
+that seems pretty conclusive that the problem isn't my x86 asm backend.
+so i guess i don't need to bother setting up compiler/first to make sure it uses cranelift for jit.
+
+// :ClearCacheHack
+hmmm inline_asm_jit:manual_mmap tries to call uncompiled on real linux but works on blink if i smuggle uname.
+thats concerning. its not just -static because that still fails, tho with different args to the uncompiled and after trying to link `malloc` which it doesn't on blink.
+blink definitly is running the x64 code, it breaks predictably if i change the numbers there.
+the non-static linked problem where the args are pointers at least is x86 glibc not giving you an empty `__clear_cache`.
+and the static linked one (idk if its from musl or zig) has a noop impl of that.
+and i wasnt falling back to smuggled libc if found a dynamic one but it didn't have the function.
+but my binary dynamiclly linking glibc has a static copy of a noop \_\_clear_cache,
+so i guess its fine if you lie and say it exists at comptime because the linker magically fixes that....
+idk, the non-hack solution would be have `#target_arch` like `#target_os` (rn you can only do that with asm),
+but until there's cases i need that other than this one function + unimplemented asm tests, i don't really want to bother.
+
+> self compile can't cope if the smuggled uname uses the other os type from the compiler target because it tries to redeclare the symbol in the llvm ir.
+> for now i just hack around it with manual #redirect.
+
+## more linux (Sep 16)
+
+Fixed the looping on `_NS*` functions on linux.
+
+// :FuckedJunkPointerExpr
+now when compiling itself its segfaulting on 590072672032938 in compile_expr_inner.
+i feel thats not even a pointer becuase it doesnt change if i turn aslr back on but all the other numbers passed into
+compile_expr_inner do.
+bindings.len == 1 case of decl_var_pattern
+this is the one that crashes on linux and its the first time it runs
+this is valid but its subexpr Block.result is a garbage pointer.
+and the block loc is `case_access = @{ @[case_access]& };` so thats compelling that it would be a strange one.
+ok good it cant do tests/front.fr or requested_type_through_match either.
+so its not something crazy about self-compiling, its just @match is broken.
 
 i went through and fixed readdir stuff so now run_tests works on linux.
 hmmmmm now requested_type_through_match passes. but still not front or the compiler itself.
@@ -22,10 +51,29 @@ i can recompile and add a check if its exactly that number and it fires.
 I can `@println("comptime: %", FatExpr.int_from_ptr(case_access.expr.Block.result));` in macros.fr and its not the same number.
 hmmmm, run_tests.fr has the same problem and just happens to not try to dereference that subexpr??
 it only crashes if doing my debug printing the tag in the compiler.
+hmhmmmrmrm lox works now... well later crashes for a different reason.
+so im just like doing UB then, its not a sane mistake.
 
-todo: first i think i want to hack in using compiler impls instead of libc so it can run in blink and see if same problem.
+the compiler still generates exactly the same llvm-ir when run back to back so confusion about its behaviour isnt as easy as uninit comptime memory.
+tho running on arm and x86 give different (same target).
+oh thats just it calling get_comptime_arch in go_build_yo_self.
+fixed that and now arm-macos and x64-macos generate same code for linux which is reassuring.
+all 3 targets can build identical bf.fr which is extreamly pleasing.
+interestingly, lox build is not reproducible (even on the same system)...
+which is the program that tends to be super fragile about freeing a garbage pointer...
+what a coincidence that its the one that has a comptime pointer in the ir...
+and its build is reproducible on my linux where i turned off the aslr.
+it was the null_rule_addr constant becuase i called int_from_rawptr so it didn't know it had to be relocated. thats a footgun.
+now its reprodicible on all 3. alas too good to be true, its still unreliable to actually run on linux.
 
-## (Sep 15)
+forgot to do X86AsmBytes (the compiler itself uses X86AsmText because it was done before inline asm was implemented on x64)
+so llvm-aot tests didn't work on llvm. that fixed math_ops/branching.
+the ones that do a comptime arch check becuase they're not implemented yet don't work because im cross compiling.
+
+did: i want to hack in using compiler impls instead of libc so it can run in blink and see if same problem.
+yes same problem.
+
+## linux (Sep 15)
 
 so a thing that was sketchy was calling allocators with 0 lenght,
 adding a zero check and just returning null in the general alloc broke the compiler,

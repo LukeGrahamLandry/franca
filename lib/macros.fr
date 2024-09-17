@@ -112,17 +112,28 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
                         first := bindings[0]&;
                         infer := first.ty&.is(.Infer);
                         no_name := first.name&.is(.None); 
-                        if  infer.or(no_name) {
+                        if infer.or(no_name) {
                             first.ty = (Finished = ty);
                         };
                     };
+                    loc := closure.loc;
                     case_access := @{ arg_ptr.___ };
                     case_access := case_access.expr.Block.result[];
                     case_access.expr.FieldAccess.name = name;  // (3)
                     tag := @{ tag_value(@[@literal(Type) enum_type], @[@literal(name)]) };
                     if(is_ptr){
                         case_access = @{ @[case_access]& };
+                        // :FuckedJunkPointerExpr
+                        // HACK :FUCKED Sep 17
+                        // it doesn't work on linux if you don't do this 
+                        // but it was fine on macos arm and x64. 
+                        // what the actual fuck
+                        // and like... this is the only thing
+                        // changing this made it self compile... and reproducible build. 
+                        // so like this line is the only thing in the whole compiler that is different on linux.    
+                        case_access = case_access.expr.Block.result[];
                     };
+                    case_access.loc = loc;
                     count = count.add(1);
                     callable: FatExpr = (expr = (Closure = closure), loc = closure.loc, ty = UnknownType, done = false); 
                     case := (index, @{ @[callable](@[case_access]) } );
@@ -465,7 +476,10 @@ fn enum(names: FatExpr) FatExpr = {
 // TODO: @comptime_var which is like this but a constant at runtime. 
 #macro fn static(T: FatExpr) FatExpr = {
     t := @literal const_eval_type(T);
-    @{ :: @[t].ptr_from_raw(@as(rawptr) malloc(@[t].size_of())) }
+    @{ :: {
+        mem := ast_alloc().alloc(@[t], 1);
+        mem.ptr
+    }}
 }
 
 // TODO: instead of this, you should be able to take the address of a normal :: constant,
@@ -475,9 +489,9 @@ fn enum(names: FatExpr) FatExpr = {
 #macro fn static(T: FatExpr, value: FatExpr) FatExpr = {
     t := @literal const_eval_type(T);
     @{ :: {
-        ptr := @[t].ptr_from_raw(@as(rawptr) malloc(@[t].size_of()));
-        ptr[] = @[value];
-        ptr
+        mem := ast_alloc().alloc(@[t], 1);
+        mem.ptr[] = @[value];
+        mem.ptr
     }}
 }
 

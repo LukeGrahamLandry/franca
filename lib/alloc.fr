@@ -26,8 +26,9 @@ Alloc :: @struct(data: rawptr, vptr: AllocatorFn);
 AllocatorFn :: @FnPtr(self: rawptr, action: AllocatorAction, ptr: rawptr, count: i64, align: i64) rawptr;
 
 AllocatorAction :: @enum(i64) (
-    Allocate,
-    Deallocate,
+    Allocate = 0,
+    Deallocate = 1,
+    DoYouOwnThisPointer = 2,
 );
 ::enum(AllocatorAction);
 
@@ -55,6 +56,17 @@ dealloc :: fn(allocator: Alloc, $Element: Type, mem: Slice(Element)) void #gener
     {allocator.vptr}(allocator.data, .Deallocate, xx, bytes, 4); // TODO: alignment
 };
 
+// This is provided on a best effort basis! Not all allocators will support it (may just return .Maybe).
+// Implimentations should not return .No for internal pointers (ie, we're not just asking its ptr is the start of a segment returned from alloc).
+// You can always just return zero for unsupported messages and that will be a sane default. 
+MemoryOwnership :: @enum(i64) (Maybe, Yes, No, Free); :: from_raw(MemoryOwnership); ::enum(MemoryOwnership); :: ?MemoryOwnership;
+// TODO: flag to disable this at comptime for smaller binaries because dead code can't remove impls from allocators because its dynamiclu done.
+owns_memory :: fn(allocator: Alloc, $T: Type, ptr: *T) MemoryOwnership #generic = {
+    ptr := T.raw_from_ptr(ptr);
+    result := {allocator.vptr}(allocator.data, .DoYouOwnThisPointer, ptr, 0, 0).int_from_rawptr();
+    from_raw(result).or(=> .Maybe)
+};
+
 libc_allocator: Alloc : (data = 0.rawptr_from_int(), vptr = libc_allocator_fn);
 libc_allocator_fn :: fn(_: rawptr, action: AllocatorAction, ptr: rawptr, count: i64, align: i64) rawptr = {
     @match(action) {
@@ -63,8 +75,9 @@ libc_allocator_fn :: fn(_: rawptr, action: AllocatorAction, ptr: rawptr, count: 
         fn Allocate() => malloc(count);
         fn Deallocate() => {
             free(ptr);
-            rawptr.uninitialized()
+            0.rawptr_from_int()
         }
+        fn DoYouOwnThisPointer() => MemoryOwnership.Maybe.to_raw();
     }
 };
 
@@ -84,14 +97,17 @@ page_allocator_fn :: fn(_: rawptr, action: AllocatorAction, ptr: rawptr, size: i
             //println(get_errno());  // TODO: ugly
             panic("mmap failed");
         };
-        @as(rawptr)ptr
-    } else {
+        return(ptr);
+    };
+    if action == 1 {
         /// SAFETY: EASY: 'arr' must be from 'os_alloc', only passed to this function once, and never accessed again. 
         ///         HARD: If you're careful, its fine to split an allocation from 'os_alloc' and release seperate pages at different times. 
         res := munmap(ptr, size);
         assert(res.value.eq(0), "munmap failed");
-        rawptr.uninitialized()
-    }
+        return(0.rawptr_from_int())
+    };
+    
+    0.rawptr_from_int()
 };
 
 /// This requests new pages from the operating system on *every* allocation. 
@@ -109,6 +125,7 @@ fn make_write(arr: ExecSlice) Slice(u8) = {
     (ptr = u8.ptr_from_raw(ptr), len = arr.len)
 }
 
+/// Read the comment on clear_instruction_cache
 /// SAFETY: 'arr' must be from 'os_alloc' and not written to until 'make_write' is called on it.   
 fn make_exec(arr: Slice(u8)) ExecSlice = {
     ptr := u8.raw_from_ptr(arr.ptr);
@@ -143,6 +160,9 @@ panicking_allocator: Alloc : (data = 0.rawptr_from_int(), vptr = panicking_alloc
 panicking_allocator_fn :: fn(_: rawptr, action: AllocatorAction, ptr: rawptr, count: i64, align: i64) rawptr = {
     @match(action) {
         fn Allocate()   => @panic("Tried to allocate % bytes with panicking_allocator", count);
-        fn Deallocate() => rawptr.zeroed();
+        fn DoYouOwnThisPointer() => MemoryOwnership.No.to_raw();
+        @default => rawptr.zeroed();
     }
 };
+
+fn to_raw(s: MemoryOwnership) rawptr #inline = s.raw().rawptr_from_int();

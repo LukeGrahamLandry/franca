@@ -1,6 +1,31 @@
 :: enum(PlaceholderValue);
 fn log(self: *FatExpr, pool: *SelfHosted, out: *List(u8), depth: i64) void = {
     @if(BOOTSTRAP_ONLY_MODE) return();
+    stack_base := 0;
+    
+    bad := pool.get_alloc().owns_memory(FatExpr, self) == .No;
+    bad = bad && __temp_alloc.borrow().owns_memory(FatExpr, self) == .No;
+    top := i64.int_from_ptr(stack_base&);
+    // TODO: stack shouldn't be accepted really. could allow the first call to be stack but inner pointers really can't be.      
+    on_stack := false;
+    bad = bad && !{ // not
+        ptr := FatExpr.int_from_ptr(self);
+        on_stack = ptr >= top && ptr <= pool.stack_base; // stack grows down!
+        on_stack
+    };
+    if bad { 
+        @fmt(out, "[bad expr ptr %]", FatExpr.int_from_ptr(self));
+        return(); 
+    };
+    if on_stack {
+        out.push_all("[stack expr ptr]:");
+    };
+    
+    if out.len > 2048 {
+        out.push_all("<...>");
+        return();
+    };
+    
     @if(DO_TERMINAL_COLOURS) {
         if self.done {
             set_colour(out, 0, 250, 0);
@@ -156,6 +181,12 @@ fn log(self: *FatExpr, pool: *SelfHosted, out: *List(u8), depth: i64) void = {
     };
 } 
 
+fn log(values: *Values, self: *SelfHosted, ty: Type) Str = {
+    out: List(u8) = list(temp());
+    log(values, self, out&, ty);
+    out.items()
+}
+
 fn log(values: *Values, self: *SelfHosted, out: *List(u8), ty: Type) void = {
     @if(BOOTSTRAP_ONLY_MODE) return();
     @fmt(out, "V:");
@@ -218,6 +249,14 @@ fn log(values: *Values, self: *SelfHosted, out: *List(u8), ty: Type) void = {
         type := Type.assume_cast(values)[];
         @fmt(out, "%", self.log_type(type));
         return();
+    };
+    
+    if self.env.fat_expr_type { fat_expr | 
+        if ty == fat_expr {
+            expr := FatExpr.assume_cast(values);
+            @fmt(out, "%", expr.log(self));
+            return();
+        };
     };
     
     // if we don't know how to draw this type, just fall back to something useless

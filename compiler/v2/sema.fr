@@ -80,16 +80,18 @@ fn decl_var_pattern(self: *SelfHosted, stmt: *FatStmt) Maybe(Ty(bool, bool)) #on
         // match branch that doesn't specify an argument gets here. (because parser puts in fake Binding with name=None).
         // just to be safe, still keep the expression in case it somehow happens in a different situation and has side effects.
         stmt.stmt = (Eval = value[]);
-        //// OTDO: move this to log
+        //@println("stack base = %", self.stack_base);
         //@println("% %", FatExpr.int_from_ptr(stmt.stmt.Eval&), stmt.stmt.Eval.expr&.tag());
         //self.codemap.show_error_line(stmt.loc);
-        //e := stmt.stmt.Eval.expr.Block.result;
-        //xx := FatExpr.int_from_ptr(e);
-        //@println("%", xx);
-        //if xx == 826016700493633 {
-        //    println("!!!! same");
+        //if stmt.stmt.Eval.expr&.is(.Block) {
+        //    e := stmt.stmt.Eval.expr.Block.result;
+        //    xx := FatExpr.int_from_ptr(e);
+        //    @println("result: %", xx);
+        //    if xx == 826016700493633 {
+        //        println("!!!! same");
+        //    };
         //};
-        //@println("%", e.expr&.tag());
+        //println(stmt.stmt.Eval&.log(self));
         @check(self.compile_expr(stmt.stmt.Eval&, .None)) return;
         return(Ok = (stmt.stmt.Eval.done, false));
     };
@@ -520,14 +522,39 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
     each func.annotations { tag | 
         @switch(tag.name) {
             @case(Flag.libc.ident()) => {
+                done :: local_return;
                 good = true;
+                name := self.get_link_name(func);
                 // :io_driver TODO: all this fs stuff should be passed in (or better messaged out) by the driver
                 // TODO: figure out the right path for different oses.
                 // TODO: don't re-dlopen every time. tho i think its cached.
-                s := @unwrap(find_os_libc_dylib(), "couldn't find libc dylib/so") return;
+                s := @unwrap(find_os_libc_dylib(), "(for '%') couldn't find libc dylib/so", name) return;
                 
                 libc := dlopen(s, .Lazy);
-                @err_assert(!libc.lib.is_null(), "couldn't find libc dylib/so (tried '%') (or the compiler is -static with musl)", s) return;
+                // :AssumeDone
+                // This isn't quite what you want because you should be able to cross compile a dynamiclly linked thing
+                // from an environment where we can't call dlopen (-static musl) or can't find a libc (blink emulator)
+                // @err_assert(!libc.lib.is_null(), "(for %) couldn't find libc dylib/so (tried '%') (or the compiler is -static with musl)", name, s) return;
+                // but doing it this way means we just have faith that a #libc will exist for the target without anyway to actually check.
+                // and if you try to call it at comptime you'll probably get a useless error message. 
+                // and i was letting it jsut be DynamicImport before when you couldn't find it in the libc (like `_NS*`) anyway so this isn't much worse. 
+                if libc.lib.is_null() {
+                    @match(get_smuggled_libc_function(self.env.comptime_arch, func.name)) {
+                        fn Some(addr) => { // :copy-paste
+                            self.put_jitted_function(fid, addr);
+                            impls: List(FuncImpl) = list(2, self.get_alloc());
+                            impls&.push(ComptimeAddr = addr.int_from_rawptr());
+                            impls&.push(DynamicImport = func.name);
+                            func.body = (Merged = impls.rs());
+                        }
+                        fn None() => {
+                            // really this is fine, i just have to decide to commit to this behaviour. 
+                            @eprintln("WARNING: couldn't open libc for '%', sure hope you don't try to call that at comptime", name);
+                            func.body = (DynamicImport = func.name);
+                        }
+                    };
+                    done();
+                };
                 
                 // :link_rename
                 // TODO: allow #libc before #link_rename
@@ -552,10 +579,17 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
                     }
                 }
                 
-                name := self.get_link_name(func);
                 addr := libc.dlsym(name);
+                
+                // :ClearCacheHack
+                if addr.is_null() && func.name == Flag.__clear_cache.ident() {
+                    addr = get_smuggled_libc_function(self.env.comptime_arch, func.name).unwrap();
+                };
+                
                 if addr.is_null() {
+                    // :AssumeDone
                     // TODO: warn? have different #import that means we expect not at comptime?
+                    @eprintln("WARNING: couldn't '%' in libc, sure hope you don't try to call that at comptime", name);
                     func.body = (DynamicImport = func.name);
                 } else {
                     self.put_jitted_function(fid, addr);
@@ -732,6 +766,24 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
     };
     @err_assert(good, "Function has no implementation %", func.log(self)) return;
     .Ok
+}
+
+fn get_smuggled_libc_function(arch: Arch, name: Symbol) ?rawptr = {
+    @switch(name) {
+        @case(Flag.mmap.ident()) => (Some = @as(rawptr) @as(@FnPtr(addr: rawptr, len: i64, prot: i64, flags: i64, fd: Fd, offset: i64) rawptr) mmap);
+        @case(Flag.abort.ident()) => (Some = @as(rawptr) @as(@FnPtr() Never) abort);
+        @case(Flag.write.ident()) => (Some = @as(rawptr) @as(@FnPtr(fd: Fd, buf: *u8, size: i64) i64Result) write);
+        @case(Flag.read.ident()) => (Some = @as(rawptr) @as(@FnPtr(fd: Fd, buf: *u8, size: i64) i64Result) read);
+        @case(Flag.munmap.ident()) => (Some = @as(rawptr) @as(@FnPtr(addr: rawptr, len: i64) voidResult) munmap);
+        @case(Flag.open.ident()) => (Some = @as(rawptr) @as(@FnPtr(path: CStr, flags: i64) FdResult) open);
+        @case(Flag.close.ident()) => (Some = @as(rawptr) @as(@FnPtr(fd: Fd) voidResult) close);
+        @case(Flag.memcpy.ident()) => (Some = @as(rawptr) @as(@FnPtr(dest: rawptr, src: rawptr, len: i64) void) memcpy);  // Stupid!
+        @case(Flag.mprotect.ident()) => (Some = @as(rawptr) @as(@FnPtr(addr: rawptr, len: i64, prot: i64) voidResult) mprotect);
+        @case(Flag.__clear_cache.ident()) => (Some = @as(rawptr) @as(@FnPtr(beg: rawptr, beg: rawptr) void) clear_instruction_cache);
+        // same symbol, doesnt matter which os i say.  
+        @case(Flag.uname.ident()) => (Some = @as(rawptr) @as(@FnPtr(buf: *LinuxLibc.Utsname) voidResult) uname); 
+        @default => .None; 
+    }
 }
 
 ::tagged(ResultType);
@@ -3882,6 +3934,7 @@ fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
     expr.expr = (Poison = .InProgressMacro);  // they call me RefCell<FatExpr> because im always refing cells 
     result := @try(hack&.call_dynamic_inner(fn_ptr.int_from_rawptr(), f_ty&, args&, needs_ct)) return;
     expr[] = FatExpr.assume_cast(result&)[];
+    @log_event("macro output: %", expr.log(self)) self;
     //walk: MarkNotDone = ();
     //walk&.walk_expr(expr); // TODO: might not need this :SLOW
     .Ok
