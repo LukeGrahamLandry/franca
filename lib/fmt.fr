@@ -303,46 +303,6 @@ fn maybe_borrow_cstr(self: Str, alloc: Alloc) CStr #leak = {
     }
 }
 
-/// Like rust, not c. hex escapes eat exactly two chars. no octal escapes except \0. 
-// Note: you can't use the string escapes in the body of this function, or any it calls, because there's no bootstrapping step. 
-// :blessed: the compiler generates comptime calls to this function when you use backslashes in a string literal. 
-fn __string_escapes(raw: Str) Str #fold = {
-    backslash       : u8 : 92.trunc();
-    doublequote     : u8 : 34.trunc();
-    horizontal_tab  : u8 :  9.trunc();
-    carriage_return : u8 : 13.trunc();
-    new_line        : u8 : 0x0A;
-
-    out : List(u8) = list(raw.len, ast_alloc());
-    i := 0;
-    while(=> i.lt(raw.len)){
-        c := raw[i]; i += 1;
-        if(c.eq(backslash)){
-            c = raw[i]; i += 1;
-            c = @switch(c) {
-                @case("n".ascii()) => new_line;
-                @case(doublequote) => doublequote;
-                @case(backslash)   => backslash;
-                @case("r".ascii()) => carriage_return;
-                @case("t".ascii()) => horizontal_tab;
-                @case("'".ascii()) => "'".ascii();  // rust has this one because of single quoted char literals. 
-                @case("0".ascii()) => @as(u8) 0.trunc();
-                @case("x".ascii()) => {
-                    s := raw.subslice(i, 2); i += 2;
-                    @as(u8) hex(s).trunc()
-                };
-                @default fn(_: u8) => panic("Unknown escape character"); // TODO: compile_error. better message. show line. 
-            };
-        };
-        out&.push(c);
-    };
-    
-    // TODO: should put in the string pool. 
-    //       maybe this should be a macro that works on idents so compiler knows they're still just a string literal.
-    //       but that kinda feels less elegant. 
-    out.items() // LEAK
-}
-
 fn println(msg: bool) void = {
     msg := if(msg, =>"true", =>"false");
     println(msg);

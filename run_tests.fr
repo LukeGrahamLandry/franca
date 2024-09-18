@@ -112,9 +112,7 @@ fn run_examples(vtable: *ImportVTable, allow_deps: bool) void = {
     //assert(ok, "compiler tests failed");
     //println("- ran compiler tests");
     
-    if allow_deps {
-        mandelbrot(vtable);
-    };
+    mandelbrot(vtable, allow_deps);
     
     fork_run_main(vtable, "examples/lox/lox_main.fr");
     
@@ -385,7 +383,7 @@ fn run_tests(vtable: *ImportVTable, comp: Compiler) i64 = {
     
 }
 
-fn mandelbrot(vtable: *ImportVTable) void = {
+fn mandelbrot(vtable: *ImportVTable, allow_deps: bool) void = {
     // Note: can't import core at the end because you need slice type to be shared with the compiler 
     //       before '::' blocks in the program try to run because they might use !slice. 
     src := "#include_std(\"lib/core.fr\");".clone(temp());
@@ -393,14 +391,25 @@ fn mandelbrot(vtable: *ImportVTable) void = {
     f := jit_from_source(vtable, src&.items(), "render");
     f := assume_types_fn(Arg = void, Ret = List(u8), ptr = f);
     mandelbrot := f();
+    println("compiled examples/mandelbrot.fr");
     
-    ok, out, err := fork_and_catch(temp()) {
-        arg := "bench/mandelbrot/mandelbrot.lua";
-        exec_cmd("luajit", (ptr = arg&, len = 1));
+    count := 0;
+    for mandelbrot.items() { c | 
+        if c == "@".ascii() {
+            count += 1;
+        };
     };
-    assert(ok, "lua failed");
-    assert_eq(mandelbrot.items(), out.items());
-    println("- mandelbrot.fr == mandelbrot.lua");
+    @assert_eq(count, 883, "i don't think that worked");
+    
+    if allow_deps {
+        ok, out, err := fork_and_catch(temp()) {
+            arg := "bench/mandelbrot/mandelbrot.lua";
+            exec_cmd("luajit", (ptr = arg&, len = 1));
+        };
+        assert(ok, "lua failed");
+        assert_eq(mandelbrot.items(), out.items());
+        println("- mandelbrot.fr == mandelbrot.lua");
+    };
 }
 
 fn fork_run_main(vtable: *ImportVTable, filepath: Str) void = {

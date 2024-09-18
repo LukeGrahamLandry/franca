@@ -1,14 +1,27 @@
 - fix all the places i `:HardcodeOs`
-- deal with arch specific functions not callable at compile time (like `_NS*` when compiling on linux).
-  its fine cause you'll never try becuase cli_args has a different implementation but it gets confused and loops forever.
-- deal with static linking and running without finding a system libc.so (like in blink)
+- #target_arch
 - have one test command that runs all the code that exists.
   also rn examples are only jit by run_tests.fr (not llvm aot).
   should have a more declaritive way of describing what programs exist such that they can be run by multiple backends.
   ie. i want to add cranelift, wasm and qbe to the actually tested category.
+- wasm's totally broken.
+- i still think wasi's kinda dumb but running the compiler in a browser would be very pleasing.
+  tho i could just use blink https://trungnt2910.com/blink/blink.html
+- the compiler shouldn't know about cranelift and qbe.
+  - let driver supply comptime jit vtable (and support loading driver from a dylib becuase you can't load the driver without a jit).
+  - make walk_bc use the vtable so driver program can just load qbe.fr if it wants
 - more type safety in int vs float registers in jit backends would be nice.
   also arm vs x86 register constants (they both have an sp but they're different numbers).
 - automated test that builds are still reproducible
+- default function arguments and mixed named/positional.
+- shims! the easy version is just a better error message for "tried to call uncompiled <...>",
+  that would let me get rid of the "WARNING: <...> libc" and just give a useful error message if you actually make the mistake.
+  advanced version is don't comptime jit until the first time you call something. can't decide if thats too creepy.
+- finish getting run_tests to run on blink
+- finish >6 arg functions on x64
+- fix field_ordering
+- try to give llvm less work to do. clean up first call to intrinsic/redirect (it hurts deduplication! i have a billon fn alloc now).
+  would it help if i did less dumb inttoptr and add 0 for int constants?
 
 ##
 

@@ -190,9 +190,18 @@ fn driver(vtable: *ImportVTable) void = {
             @println("Replacing your compiler at '%' with the new one. \nThe old one was saved at '%' (NOTE: THATS A TEMP FILE!)", compiler_exe_path, save_temp_file&.s_name());
             
             if linux {
-                args := (@slice(
-                    "cc", "-o", compiler_exe_path, @fmt_str("%/franca2.o", out_dir), 
-                    "-target", target_triple)).clone(temp());
+                args: List(Str) = list(temp());
+                comptime_os := query_current_os();
+                cmd := if comptime_os == .linux {
+                    args&.push("-ldl");
+                    "clang"
+                } else {
+                    args&.push("cc");
+                    "zig"
+                };
+                args&.push_all(@slice(
+                    "-o", compiler_exe_path, @fmt_str("%/franca2.o", out_dir), 
+                    "-target", target_triple));
                 if include_cranelift {
                     assert(!static && x86, "TODO: cranelift");
                     args&.push("crates/comptime_cranelift/target/x86_64-unknown-linux-gnu/release/libcomptime_cranelift.a");
@@ -205,7 +214,7 @@ fn driver(vtable: *ImportVTable) void = {
                     args&.push("-Wl,-z,common-page-size=65536,-z,max-page-size=65536"); // TODO: dont have this? its for blink
                     args&.push("-static");
                 };
-                success := run_cmd_blocking("zig", args.items());
+                success := run_cmd_blocking(cmd, args.items());
                 assert(success, "link failed");
                 return();
             };

@@ -21,11 +21,13 @@ If you just want to see what the syntax looks like, click on examples or compile
 - no seperate build system. write a program that builds your program (like jai)
 - custom asm backend for quick debug builds, optional llvm backend for optimised release builds (like zig/jai)
 - ships with [sokol](https://github.com/floooh/sokol) bindings so its not a research exercise if you just want to put a triangle on the screen.
+- cross compilation and reproducible builds. all supported targets produce identical llvm-ir for all supported targets.
 
 ## Backends
 
 - **aarch64 machine code**: i put the bytes in memory, i mark it executable, and i jump there. no assembler, no linker, no problems.
   no optimisation but compiles fast. only JIT, cannot output an AOT executable.
+- **x64 machine code**: (WIP) same as the above but for different computers.
 - **llvm ir text**: you can feed it to clang to produce an AOT optimised build or integrate with projects written in other languages.
 
 ## Tradeoffs
@@ -44,9 +46,13 @@ there must be proportional terrible things or I'm probably just lying.
 - Sadly the error messages are completely incomprehensible.
 - Sadly I don't have nice IDE integration.
 - Sadly I don't have incremental builds. every time you run a program, you recompile the standard library for comptime. (...but its so fast it doesn't matter yet).
-- Sadly the compiler only runs on aarch64. (the llvm backend can cross compile to other targets tho, but I can't run comptime code on them yet).
-  - ie. it is not yet a language that just... runs on a computer, whatever computer, nobody cares.
-- \*Sadly my implementation of the C ABI is buggy. It's good enough for the example programs tho.
+- Sadly my implementation of the C ABI is buggy. It's good enough for the example programs tho.
   - arm: obvious problems are passing struct(u32, u32) in 2 registers instead of 1 and passing struct(f64, f64, f64, f64) in memory instead of 4 registers.
 - Sadly I don't have a nice debug mode that detects undefined behaviour (overflow, wrong tagged field, etc).
 - Sadly I don't have good modules / namespace management.
+- I've only tried arm/x64 macos and x64 linux. Only arm mac works fully but all three can build the self hosted compiler.
+- The compiler does an insane amount of redundant work.
+  Like sometimes it reparses and re-resolves names for each specialization of a generic.
+  There just happens to only be ~25k lines of code ever written in this langauge so its not a big deal yet.
+  See examples/60fps.fr judging its performace.
+- I can't emit my own macho/elf files and i don't have my own linker.

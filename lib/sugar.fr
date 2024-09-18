@@ -1,0 +1,107 @@
+fn add();
+fn sub();
+fn mul();
+fn div();
+fn eq();
+fn ne();
+fn gt();
+fn lt();
+fn le();
+fn ge();
+fn not();
+fn and();
+
+fn operator_question_prefix(); // `(Type) -> Type` is provided by the compiler. 
+fn operator_squares_prefix($T: Type) Type = Slice(T);
+fn operator_question_prefix($T: Type) Type = Option(T);
+
+/// :blessed: The parser desugars stuff into calls to these functions. 
+/// But it just refers to them by name. If you cause that to resolve to your own function, you can change the operator's behaviour. 
+#macro #outputs(void) fn operator_plus_equal(place: FatExpr, value: FatExpr) FatExpr = assignment_operator(place, value, add);
+#macro #outputs(void) fn operator_minus_equal(place: FatExpr, value: FatExpr) FatExpr = assignment_operator(place, value, sub);
+#macro #outputs(void) fn operator_star_equal(place: FatExpr, value: FatExpr) FatExpr = assignment_operator(place, value, mul);
+#macro #outputs(void) fn operator_slash_equal(place: FatExpr, value: FatExpr) FatExpr = assignment_operator(place, value, div);
+
+// The parser used to call the macro and i was hoping generating the call in the parser would be faster but its the same.
+// So i guess iterating all the overloads is so insanely slow that macro expansion is basically free.
+// But the advantage of not using the macro is that you don't put a useless location on the ast node. 
+// Using the name `operator_index` means it's less likely to collide with variable names (you might want to call something `index`). 
+// #macro fn index(container: FatExpr, i: FatExpr) FatExpr = @{ @[container].index(@[i])[] };
+
+// :blessed: the parser generates calls to this (by name). `a[b]` === `operator_index(a, b)[]`
+operator_index :: index;
+
+/// :blessed: All the  'a _= b' operators logically expand to 'a = a _ b'.
+/// Like normal assignment, the left hand side can be a variable name or a pointer dereference. 
+/// However, in the latter case, the expression that produces the pointer is only evaluated once. 
+/// Most of the time it doesn't matter but it's legal to put a function call with side effects in that position and this behaviour feels more intuitive. 
+// NOTE: don't use these operators in the dependency chain of this function or life gets real confusing, real fast!
+// TODO: should allow a mutating fn add_assign(*Self, v) if you have one. like it would be nice for owned strings. 
+// TODO: this should work when inlined. the problem is i dont handle DeclVarPattern of large values by address. -- May 7
+#inline
+fn assignment_operator(place: FatExpr, value: FatExpr, f: OverloadSet) FatExpr = {
+    kind := place.expr&.tag();
+    // TODO: generate a typed enum for the tag so this could be kind.eq(.GetVar).or(kind.eq(.GetNamed))
+    is_var_access := 
+        place.expr&.is(.GetVar)
+        .or(place.expr&.is(.GetNamed))
+        .or(place.expr&.is(.FieldAccess)); // TODO: once field access is allowed on r-values, it can have side effects.  
+    
+    ::if(FatExpr); // TODO: auto template instantiation. 
+    
+    if(is_var_access){
+        // This type of macro can't return a stmt, so it has to be wrapped in a block. Maybe we should use the other kind once that exists. 
+        @{ @[place] = @[@literal(f)](@[place], @[value]); }
+    } {
+        if kind == .PrefixMacro {
+            compile_error("TODO: support macro expansion in place expr", place.loc);
+        };
+        is_deref := kind == .Deref;
+        if !is_deref {
+            compile_error("_= operator left hand side must be a place expr.", place.loc);
+        };
+        // we know the lhs is 'whatever[]', but we want to just access the pointer and add the deref later. 
+        ptr_expr := place.expr.Deref[];
+        @{ ptr := @[ptr_expr]; ptr[] = @[@literal(f)](ptr[], @[value]); }
+    }
+}
+
+/// Like rust, not c. hex escapes eat exactly two chars. no octal escapes except \0. 
+// Note: you can't use the string escapes in the body of this function, or any it calls, because there's no bootstrapping step. 
+// :blessed: the compiler generates comptime calls to this function when you use backslashes in a string literal. 
+fn __string_escapes(raw: Str) Str #fold = {
+    backslash       : u8 : 92.trunc();
+    doublequote     : u8 : 34.trunc();
+    horizontal_tab  : u8 :  9.trunc();
+    carriage_return : u8 : 13.trunc();
+    new_line        : u8 : 0x0A;
+
+    out : List(u8) = list(raw.len, ast_alloc());
+    i := 0;
+    while(=> i.lt(raw.len)){
+        c := raw[i]; i += 1;
+        if(c.eq(backslash)){
+            c = raw[i]; i += 1;
+            c = @switch(c) {
+                @case("n".ascii()) => new_line;
+                @case(doublequote) => doublequote;
+                @case(backslash)   => backslash;
+                @case("r".ascii()) => carriage_return;
+                @case("t".ascii()) => horizontal_tab;
+                @case("'".ascii()) => "'".ascii();  // rust has this one because of single quoted char literals. 
+                @case("0".ascii()) => @as(u8) 0.trunc();
+                @case("x".ascii()) => {
+                    s := raw.subslice(i, 2); i += 2;
+                    @as(u8) hex(s).trunc()
+                };
+                @default fn(_: u8) => panic("Unknown escape character"); // TODO: compile_error. better message. show line. 
+            };
+        };
+        out&.push(c);
+    };
+    
+    // TODO: should put in the string pool. 
+    //       maybe this should be a macro that works on idents so compiler knows they're still just a string literal.
+    //       but that kinda feels less elegant. 
+    out.items() 
+}

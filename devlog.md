@@ -24,6 +24,15 @@ but until there's cases i need that other than this one function + unimplemented
 > self compile can't cope if the smuggled uname uses the other os type from the compiler target because it tries to redeclare the symbol in the llvm ir.
 > for now i just hack around it with manual #redirect.
 
+I broke `-unsafe -keep-names` but only on arm so its probably a `__clear_cache` thing.
+I really need to start running more combinations of tests in github actions.
+but.. only if i call `0.rawptr_from_int()` instead of `rawptr.uninitialized()` as the ignored argument in alloc.
+TODO: should fix the root problem
+
+also last commit needed boot update becuase i moved ast_alloc to the compiler.
+
+TODO: can't dlsym `dlopen` from the glib .so file, i assume they have it sepereatly because you also have to pass `-ldl` to clang to link (but not zig cc because its magic and knows).
+
 ## more linux (Sep 16)
 
 Fixed the looping on `_NS*` functions on linux.

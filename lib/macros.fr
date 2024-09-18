@@ -25,8 +25,7 @@ fn literal(arg: AstExpr) AstExpr = @{
     literal_ast(T, raw_from_ptr(T, value&))
 };
 
-// TODO: it does that by name tho! so its a very bad idea to shadow this with another macro. HACK
-fn as(T: Type, expr: FatExpr) FatExpr = @{ @as(@[@literal(T)]) @[expr] };
+fn as(T: Type, expr: FatExpr) FatExpr = as(@literal T, expr);
 
 // TODO: once i have an asm backend, this can become a jump table which is pretty cool. 
 // TODO: this has a referential transparency problem
@@ -50,7 +49,7 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
         info = get_type_info_ref(enum_type);
         is_ptr = true;
     };
-    ptr_ty := *enum_type;
+    ptr_ty := *enum_type;  // this is unfortunate syntax. we're creating a pointer ~type~
     
     @ct_assert(!info.is(.Enum), arg.loc, "to @match on an @enum, dereference the pointer"); // TODO: just do it
     @ct_assert(info.is(.Tagged), arg.loc, "@match expected argument type to be @tagged");
@@ -395,49 +394,6 @@ fn get_type_int(e: FatExpr) IntTypeInfo = {
     inner(e.ty, e.loc)
 }
 
-/// :blessed: The parser desugars stuff into calls to these functions. 
-/// But it just refers to them by name. If you cause that to resolve to your own function, you can change the operator's behaviour. 
-#macro #outputs(void) fn operator_plus_equal(place: FatExpr, value: FatExpr) FatExpr = assignment_operator(place, value, add);
-#macro #outputs(void) fn operator_minus_equal(place: FatExpr, value: FatExpr) FatExpr = assignment_operator(place, value, sub);
-#macro #outputs(void) fn operator_star_equal(place: FatExpr, value: FatExpr) FatExpr = assignment_operator(place, value, mul);
-#macro #outputs(void) fn operator_slash_equal(place: FatExpr, value: FatExpr) FatExpr = assignment_operator(place, value, div);
-#macro fn operator_index(container: FatExpr, i: FatExpr) FatExpr = @{ @[container].index(@[i])[] };
-
-/// All the  'a _= b' operators logically expand to 'a = _(a, b)'.
-/// Like normal assignment, the left hand side can be a variable name or a pointer dereference. 
-/// However, in the latter case, the expression that produces the pointer is only evaluated once. 
-/// Most of the time it doesn't matter but it's legal to put a function call with side effects in that position and this behaviour feels more intuitive. 
-// NOTE: don't use these operators in the dependency chain of this function or life gets real confusing, real fast!
-// TODO: should allow a mutating fn add_assign(*Self, v) if you have one. like it would be nice for owned strings. 
-// TODO: this should work when inlined. the problem is i dont handle DeclVarPattern of large values by address. -- May 7
-#inline
-fn assignment_operator(place: FatExpr, value: FatExpr, f: OverloadSet) FatExpr = {
-    kind := place.expr&.tag();
-    // TODO: generate a typed enum for the tag so this could be kind.eq(.GetVar).or(kind.eq(.GetNamed))
-    is_var_access := 
-        place.expr&.is(.GetVar)
-        .or(place.expr&.is(.GetNamed))
-        .or(place.expr&.is(.FieldAccess)); // TODO: once field access is allowed on r-values, it can have side effects.  
-    
-    ::if(FatExpr); // TODO: auto template instantiation. 
-    
-    if(is_var_access){
-        // This type of macro can't return a stmt, so it has to be wrapped in a block. Maybe we should use the other kind once that exists. 
-        @{ @[place] = @[@literal(f)](@[place], @[value]); }
-    } {
-        if kind == .PrefixMacro {
-            compile_error("TODO: support macro expansion in place expr", place.loc);
-        };
-        is_deref := kind == .Deref;
-        if !is_deref {
-            compile_error("_= operator left hand side must be a place expr.", place.loc);
-        };
-        // we know the lhs is 'whatever[]', but we want to just access the pointer and add the deref later. 
-        ptr_expr := place.expr.Deref[];
-        @{ ptr := @[ptr_expr]; ptr[] = @[@literal(f)](ptr[], @[value]); }
-    }
-}
-
 /// The compiler defines the two argument version where you specify a type and values. 
 /// This version can be used when you just want sequential integers. 
 #macro #outputs(Type)
@@ -733,11 +689,10 @@ later in that scope it won't even be an error that you can't call true with a tr
 fn safety(kind: FatExpr, code: FatExpr) FatExpr #macro = {
     kind := (const_eval(SafetyCheck))(kind);
     ::if(FatExpr);
-    ::if(FatExpr);
     if safety_check_enabled(kind) {
         @{ if(!@[code], => safety_check_failed()) }
     } else {
-        @literal unit
+        @{}
     }
 }
 

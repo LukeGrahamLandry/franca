@@ -38,7 +38,7 @@ fn with(p: Prec, next: PrecLevel) Prec =
 
 PrecLevel :: @enum(i64) (
     None,
-    Logical, // TODO: I don't want to allow a && b || c because i'm not convinced thats obbious
+    LogicalOr, LogicalAnd, Logical, // TODO: I don't want to allow a && b || c because i'm not convinced thats obbious
     Equality,
     Comparison,
     AddSub,
@@ -594,7 +594,11 @@ fn parse_infix(self: *Parser, prev: FatExpr, prec: Prec) ParseRes = {
                 @report_error("expected ']' after index expression %", "") (return, self.last.span);
             };
             
-            e := self.bin_named_macro(Flag.operator_index, prev, index, loc);
+            // This was the same speed but i think its uglier. 
+            // e := self.bin_named_macro(Flag.operator_index, prev, index, loc);
+            
+            e := self.bin_call(Flag.operator_index, self.last.span, prev, index);
+            e := self.expr((Deref = self.box(e)), self.last.span);
             self.parse_infix(e, prec.with(.Suffix))
         }
         @default => return(Ok = prev);
@@ -652,30 +656,18 @@ fn parse_squiggle(self: *Parser, prev: FatExpr, prec: Prec) ParseRes #once = {
 // TODO: this seems to use the wrong loc
 fn parse_bin_op(self: *Parser, op: Operator, prev: FatExpr, prec: Prec) ParseRes #once = {
     next_prec, callee := @match(op) {
-        fn Plus() => (PrecLevel.AddSub, Flag.add);
+        fn Plus()  => (PrecLevel.AddSub, Flag.add);
         fn Minus() => (PrecLevel.AddSub, Flag.sub);
-        fn Star() => (PrecLevel.MulDiv, Flag.mul);
+        fn Star()  => (PrecLevel.MulDiv, Flag.mul);
         fn Slash() => (PrecLevel.MulDiv, Flag.div);
-        fn Less() => (PrecLevel.Comparison, Flag.lt);
+        fn Less()  => (PrecLevel.Comparison, Flag.lt);
         fn Greater() => (PrecLevel.Comparison, Flag.gt);
-        fn LessEq() => (PrecLevel.Comparison, Flag.le);
+        fn LessEq()  => (PrecLevel.Comparison, Flag.le);
         fn GreaterEq() => (PrecLevel.Comparison, Flag.ge);
         fn BangEq() => (PrecLevel.Equality, Flag.ne);
-        fn EqEq() => (PrecLevel.Equality, Flag.eq);
-        fn AmpAmp() => {
-            if(prec.prec.lt(.Logical)) {
-                self.pop();
-                loc := self.last.span;
-                rhs := @try(self.quick_lambda(prec.with(.Logical))) return;
-                f := self.box(self.get_named(Flag.and, loc));
-                arg := self.box(self.pair(prev, rhs, loc));
-                call := self.expr((Call = (f = f, arg = arg)), loc);
-                return(self.parse_infix(call, prec)); // TODO: tail
-            } else {
-                return(Ok = prev);  
-            };
-            unreachable()
-        };
+        fn EqEq()   => (PrecLevel.Equality, Flag.eq);
+        fn AmpAmp()   => return(self.logical_operator(prev, prec, Flag.and, .LogicalAnd, .LogicalOr));
+        fn PipePipe() => return(self.logical_operator(prev, prec, Flag.or, .LogicalOr, .LogicalAnd));
         @default => {
             // update assignment operator. hopefully we're in a statement and that will handle it.
             return(Ok = prev)
@@ -685,13 +677,34 @@ fn parse_bin_op(self: *Parser, op: Operator, prev: FatExpr, prec: Prec) ParseRes
         self.pop();
         loc := self.last.span;
         rhs := @try(self.parse_expr(prec.with(next_prec))) return;
-        f := self.box(self.get_named(callee, loc));
-        arg := self.box(self.pair(prev, rhs, loc));
-        call := self.expr((Call = (f = f, arg = arg)), loc);
+        call := self.bin_call(callee, loc, prev, rhs);
         self.parse_infix(call, prec) // TODO: tail
     } else {
         (Ok = prev)
     }
+}
+
+fn logical_operator(self: *Parser, prev: FatExpr, prec: Prec, name: Flag, this: PrecLevel, other: PrecLevel) ParseRes = {
+    if(prec.prec.lt(.Logical)) {
+        self.pop();
+        if prec.prec == other {
+            @report_error("Use parens to seperate && and || clauses.") (return, self.last.span);
+        };
+        loc := self.last.span;
+        rhs := @try(self.quick_lambda(prec.with(this))) return;
+        f := self.box(self.get_named(name, loc));
+        arg := self.box(self.pair(prev, rhs, loc));
+        call := self.expr((Call = (f = f, arg = arg)), loc);
+        return(self.parse_infix(call, prec.with(this))) // TODO: tail
+    } else {
+        return(Ok = prev)
+    }
+}
+
+fn bin_call(self: *Parser, func_name: Flag, loc: Span, lhs: FatExpr, rhs: FatExpr) FatExpr = {
+    f := self.box(self.get_named(func_name, loc));
+    arg := self.box(self.pair(lhs, rhs, loc));
+    self.expr((Call = (f = f, arg = arg)), loc)
 }
 
 fn expr_call(self: *Parser, f: FatExpr, arg: FatExpr) FatExpr = {
