@@ -130,10 +130,6 @@ fn emit_bc(comp: *SelfHosted, f: FuncId, when: ExecStyle) Res(*FnBody) = {
         var_lookup = init(temp()),
         inlined_return_addr = init(temp()),
         is_ssa_var = empty(),
-        // TODO: change this if I want to keep them around for deduplicating. 
-        //       the others are always just needed while working on it.
-        //       then mark and reset temp at the end of this function. 
-        //       have a pool and recycle old FnBodys that we decided we didn't need because they were duplicates.  
         out_alloc = comp.get_alloc(),  
         current_block = (id = 0),
         clock = 0,
@@ -227,18 +223,13 @@ fn empty_fn_body(comp: *SelfHosted, func: FuncId, when: ExecStyle) Res(*FnBody) 
 }
 
 // TODO: if you have an unclosed string it randomly decides later top level vars are undeclared? -- Jul 7 
-fn bind_args(self: *EmitBc, arguments: *Pattern) Res([] Prim) #once = {
+fn bind_args(self: *EmitBc, arguments: *Pattern) Res(i64) #once = {
     arity: u16 = arguments.bindings.len.trunc();
 
     func := self.program[self.result.func]&;
     f_ty := func.finished_ty().expect("known function type");
     arg_ty := f_ty.arg;
     pushed := if(self.result.signeture.first_arg_is_indirect_return, => 1, => 0);
-    already_did_prims := self.program.get_primitives(@as(PrimKey) (arg_ty, arity, false, false)).is_some(); // TODO: make it so this is always true. -- Jul 6
-    :: if(?List(Prim));
-    prim_args: ?List(Prim) = if(already_did_prims, => .None) {
-        (Some = list(self.program.get_alloc()))
-    };
     // reversed because they're on the stack like [0, 1, 2]
     each_rev arguments.bindings { binding |
         continue :: local_return;
@@ -256,9 +247,6 @@ fn bind_args(self: *EmitBc, arguments: *Pattern) Res([] Prim) #once = {
         :: if(u16);
         id: u16 = if info.pass_by_ref {
             pushed += 1;
-            if prim_args& { args |
-                args.push(.P64);
-            };
             // TODO: callee make copy if it wants to modify
             self.save_ssa_var()
         } else {
@@ -269,9 +257,6 @@ fn bind_args(self: *EmitBc, arguments: *Pattern) Res([] Prim) #once = {
                 @case(1) => {
                     ty := @unwrap(self.program.prim(ty), "expected prim but found %", self.program.log_type(ty)) return;
                     pushed += 1;
-                    if prim_args& { args | 
-                        args.push(ty);
-                    };
                     self.addr_var(id);
                     self.push(StorePost = ty);
                 };
@@ -289,10 +274,6 @@ fn bind_args(self: *EmitBc, arguments: *Pattern) Res([] Prim) #once = {
                     self.addr_var(id);
                     self.push(StorePost = p0);
                     pushed += 2;
-                    if prim_args& { args |
-                        args.push(p1); //reverse cause we reverse at the end
-                        args.push(p0);
-                    }
                 };
                 @default => panic("ICE: unreachable because large args are passed by reference");
             };
@@ -307,26 +288,7 @@ fn bind_args(self: *EmitBc, arguments: *Pattern) Res([] Prim) #once = {
         };
     };
 
-    //assert_eq!(pushed, self.result.signeture.arg_slots);
-    if prim_args& { args |
-        args.reverse(); // sigh
-        //debug_assert_eq!(&args, self.result.signeture.args); // TODO: remove all this shit cause now its redundant.
-        prims := self.program.primitives&;
-        //debug_assert!(self.result.signeture.first_arg_is_indirect_return || (pushed as usize == args.len()));
-        just_args := args.items().clone(self.program.get_alloc()).rs();
-        prims.insert((arg_ty, arity, false, false), just_args);
-        args.insert(0, .P64); // sad
-        //debug_assert!(!self.result.signeture.first_arg_is_indirect_return || (pushed as usize == args.len()));
-        prims.insert((arg_ty, arity, true, false), args[].rs());
-    };
-
-    key: PrimKey = (arg_ty, arity, self.result.signeture.first_arg_is_indirect_return, false);
-    arg_sig := self.program.get_primitives(key).expect("known prim key");
-    (Ok = arg_sig)
-}
-
-fn get_primatives(self: *EmitBc, ty: Type) [] Prim = {
-    self.program.as_primatives(ty)
+    (Ok = pushed)
 }
 
 fn compile_for_arg(self: *EmitBc, arg: *FatExpr, arity: usize) Res(bool) = {
@@ -474,7 +436,14 @@ fn emit_body(self: *EmitBc, f: FuncId) PRes #once = {
     };
 
     entry_block := self.push_block(empty());
-    entry_block_sig := @try(self.bind_args(func.arg&)) return;
+    args_pushed := @try(self.bind_args(func.arg&)) return;
+    entry_block_sig := self.result.signeture.args;
+    if self.result.signeture.first_arg_is_indirect_return {
+        // :ConfusingPrims
+        entry_block_sig.ptr = entry_block_sig.ptr.offset(-1);
+        entry_block_sig.len += 1;
+    };
+    @debug_assert_eq(entry_block_sig.len, args_pushed, "ICE: confusing about function arity");
     self.result[entry_block].arg_prims = entry_block_sig;
     ::if(ResultLoc); ::if([]Prim);
     // We represent the indirect return argument as the left-most thing on the stack,
@@ -485,7 +454,7 @@ fn emit_body(self: *EmitBc, f: FuncId) PRes #once = {
     prims: []Prim = if(self.result.signeture.first_arg_is_indirect_return, => empty(), => self.get_primatives(ret));
     return_block := self.push_block(prims);  // TODO: this is dumb. the body expression will never jump here (even with early returns as they only go to Blocks). 
 
-   self.current_block = entry_block;
+    self.current_block = entry_block;
 
     if self.result.signeture.first_arg_is_indirect_return {|  
         self.result_addr_depth += 1;
@@ -1133,8 +1102,7 @@ fn emit_block_expr(self: *EmitBc, expr: *FatExpr, result_location: ResultLoc, ca
     out := self.program.get_info(block_ty);
     @debug_assert(out.size_slots.lt(8).or(result_location != .PushStack), "pushing large value");
 
-    // TODO: this shouldn't need type hint. 
-    if ret_label { (ret_var: LabelId) | 
+    if ret_label { ret_var | 
         entry_block := self.current_block;
         return_block := @match(result_location) {
             fn PushStack() => self.push_block(self.get_primatives(block_ty));
@@ -1475,7 +1443,7 @@ fn unwrap(self: Name) Symbol = {
 fn construct_struct(self: *EmitBc, pattern: *Pattern, requested: Type, result_location: ResultLoc) PRes #once = {
     raw_container_ty := self.program.raw_type(requested);
     slots := self.slot_count(raw_container_ty);
-    @debug_assert(slots.lt(8).or(result_location != .PushStack), "too big to put on stack"); 
+    @debug_assert(slots < 8 || result_location != .PushStack, "too big to put on stack"); 
     
     @match(self.program.get_type(raw_container_ty)) {
         fn Struct(f) => {
@@ -1488,11 +1456,9 @@ fn construct_struct(self: *EmitBc, pattern: *Pattern, requested: Type, result_lo
                 if(field.kind == .Const, => continue());
                 value := pattern.bindings[i - 1]&;
                 
-                @debug_assert_eq(value.name.unwrap(), field.name, 
-                    "field name mismatch % vs % (ICE: should be checked by sema)",
-                    self.program.pool.get(value.name.unwrap()),
-                    self.program.pool.get(field.name),
-                );
+                field := or find_struct_field(f, value.name.unwrap(), i - 1) {
+                    return(@err("field name mismatch (ICE: should be checked by sema)"))
+                };
                 
                 if result_location == .ResAddr {
                     self.push(PeekDup = 0);
@@ -1639,7 +1605,6 @@ fn save_ssa_var(ctx: *EmitBc) u16 = {
 }
 
 fn inc_ptr_bytes(self: *EmitBc, bytes: u16) void = {
-    // TODO: also check if the last op was also incptrbytes or constant and merge them. 
     if bytes != 0 {
         self.push(IncPtrBytes = bytes);
     };
@@ -1650,6 +1615,7 @@ fn push_to(self: *EmitBc, b: BbId, inst: Bc) void = {
     //@println("%", inst&.tag());
     self.result.mix_hash(inst&.tag().ordinal(), 9801);
     self.result[b].insts&.push(inst, self.out_alloc);
+    self.program.bc_count += 1;
 }
 
 fn mix_hash(self: *FnBody, i: i64, spice: i64) void = {
@@ -1704,7 +1670,6 @@ fn prim_sig(program: *SelfHosted, f_ty: FnType, cc: CallConv) Res(PrimSig) = {
         no_return = f_ty.ret.is_never(),
     ); // TODO: if you typeo make this a '}' need to have a good error message. -- Jul 6
 
-    arg_slots: u16 = 0;
     @switch(ret.size_slots) {
         @case(0) => ();
         @case(1) => {
@@ -1716,19 +1681,17 @@ fn prim_sig(program: *SelfHosted, f_ty: FnType, cc: CallConv) Res(PrimSig) = {
             sig.ret2 = (Some = b);
         };
         @default => {
-            arg_slots += 1;
             // Note: not adding indirect pointer to sig because its handled sperately. TODO: that's kinda confusing.
         };
     };
 
     args: List(Prim) = list(program.get_alloc());
+    // :ConfusingPrims
+    args&.push(.P64); // for ret
+    args&.push(.P64); // for #ct
 
     :: enum(CallConv);
     comp_ctx := cc == .CCallRegCt;
-    if comp_ctx {
-        arg_slots += 1;
-        args&.push(.P64);
-    };
 
     found_arity := 0;
     // TODO: compiler bug? what push_arg am i possibly shadowing?????? -- Jul 6
@@ -1736,11 +1699,9 @@ fn prim_sig(program: *SelfHosted, f_ty: FnType, cc: CallConv) Res(PrimSig) = {
         found_arity += 1;
         info := program.get_info(ty);
         if info.pass_by_ref {
-            arg_slots += 1;
             args&.push(.P64);
         } else {
             for program.flat_tuple_types(ty) { t | 
-                arg_slots += 1;
                 args&.push(program.prim(t).expect("arg prim"));
             };
         };
@@ -1767,16 +1728,18 @@ fn prim_sig(program: *SelfHosted, f_ty: FnType, cc: CallConv) Res(PrimSig) = {
     //       should have a spread operator for calling a function on a tuple of arguments? like 'a := (1, 2); f(..a)'
     // @assert_eq(found_arity, f_ty.arity, "TODO: fn(a: Ty(i64, i64))");
 
-    // i h a t e m y s e l f s o m e t i m e s
-    // a n d i d o n t k n o w w h a t t o d o
-    key := (f_ty.arg, arg_slots, false, comp_ctx);
-    r := args.items().clone(args.gpa).rs();
-    program.primitives&.insert(key, r);
-    args&.insert(0, .P64); // sad
-    key._2 = true;
-    program.primitives&.insert(key, args.rs()); // TODO: stupid that i have to do this here
-    key._2 = false;
-    sig.args = program.get_primitives(key).unwrap();
+    
+    // :ConfusingPrims
+    prims := args.items();
+    prims.ptr = prims.ptr.offset(2);
+    prims.len -= 2;
+    program.primitives&.insert(f_ty.arg, prims);
+    
+    sig.args = prims;
+    if comp_ctx {
+        sig.args.ptr = sig.args.ptr.offset(-1);
+        sig.args.len += 1;
+    };
 
     sig.arg_int_count = 0;
     for sig.args { p |
@@ -1788,7 +1751,6 @@ fn prim_sig(program: *SelfHosted, f_ty: FnType, cc: CallConv) Res(PrimSig) = {
     (Ok = sig)
 }
 
-
 fn prim_pair(self: *SelfHosted, ty: Type) Res(Ty(Prim, Prim)) = {
     types := self.flat_tuple_types(ty); // TODO: don't allocate
     @debug_assert_eq(types.len(), 2);
@@ -1797,37 +1759,37 @@ fn prim_pair(self: *SelfHosted, ty: Type) Res(Ty(Prim, Prim)) = {
     (Ok = @as(Ty(Prim, Prim)) (a, b))
 }
 
-PrimKey :: Ty(Type, u16, bool, bool);
-
-fn get_primitives(self: *SelfHosted, key: PrimKey) ?[] Prim = {
-    :: opt_map(RsVec(Prim), []Prim);
-    found := self.primitives&.get(key&);
-    found&.map(fn(v) => v.items())
+fn get_primitives(self: *SelfHosted, key: Type) ?[] Prim = {
+    self.primitives&.get(key&)
 }
 
-fn as_primatives(self: *SelfHosted, ty: Type) [] Prim = {
-    if(ty.is_unit().or(ty.is_never()), => return(empty()));
+fn get_primatives(self: *EmitBc, ty: Type) [] Prim = 
+    self.program.get_primatives(ty);
+
+// note: this just gives empty for unit so you can't offset it like :ConfusingPrims
+fn get_primatives(self: *SelfHosted, ty: Type) [] Prim = {
+    if(ty.is_unit() || ty.is_never(), => return(empty()));
     slots := self.get_info(ty).size_slots();
-    key := (ty, slots, false, false);
-    if self.get_primitives(key) { p|
+    if self.get_primitives(ty) { p |
         return(p);
     };
     flat_types := self.flat_tuple_types(ty);
     types: List(Prim) = list(self.get_alloc());
+    // :ConfusingPrims
+    types&.push(.P64);  // for ret
+    types&.push(.P64);  // for #ct
     
     for flat_types { t |
         if !t.is_unit().or(t.is_never()) {
             types&.push(self.prim(t).expect("tuple part to be prim"));
         };
     };
-    self.primitives&.insert(key, types.clone().rs());
-
-    types&.insert(0, .P64); // sad
-    key._2 = true;
-    self.primitives&.insert(key, types.rs()); // TODO: stupid that i have to do this here
-    key._2 = false;
-
-    self.get_primitives(key).unwrap()
+    // :ConfusingPrims
+    prims := types.items();
+    prims.ptr = prims.ptr.offset(2);
+    prims.len -= 2;
+    self.primitives&.insert(ty, prims);
+    self.get_primitives(ty).unwrap()
 }
 
 fn prim(self: *SelfHosted, ty: Type) ?Prim = {
@@ -1925,6 +1887,8 @@ fn flat_tuple_types(self: *SelfHosted, ty: Type) List(Type) = {
 }
 
 fn idx(s: FuncId) i64 = s.to_index().zext();
+
+// :get_or_create_type
 fn is_unit(t: Type) bool = t == void;
 fn is_unknown(t: Type) bool = t == UnknownType;
 fn is_never(t: Type) bool = t == Never;

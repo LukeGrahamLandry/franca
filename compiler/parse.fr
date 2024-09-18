@@ -38,7 +38,7 @@ fn with(p: Prec, next: PrecLevel) Prec =
 
 PrecLevel :: @enum(i64) (
     None,
-    LogicalOr, LogicalAnd, Logical, // TODO: I don't want to allow a && b || c because i'm not convinced thats obbious
+    LogicalOr, LogicalAnd, Logical,
     Equality,
     Comparison,
     AddSub,
@@ -156,7 +156,12 @@ fn parse_decl_or_start_expr(self: *Parser, name: Symbol) Result(FatStmt, *Compil
             self.pop();
             e := @try(self.parse_expr(Prec_None)) return;
             s: Stmt = (DeclNamed = (kind = .Const, value = e, ty = .Infer, name = name));
-            return(Ok = self.stmt(s, loc));
+            if !self.maybe(.Semicolon) {
+                // TODO: maybe i should allow it if its a function declaration because that feels better and i do it for overload set stmts. 
+                //       but that's a slippery slope to macro calls for struct declations, which i don't want becuase it feels you might accidently use the two arg version of the macro. 
+                @report_error("expected semicolon after declaration") (return, self.last.span);
+            };
+            return(Ok = self.stmt(s, loc))
         }
         fn Colon() => {
             loc := self.last.span;
@@ -171,7 +176,10 @@ fn parse_decl_or_start_expr(self: *Parser, name: Symbol) Result(FatStmt, *Compil
             };
             value := @try(self.parse_expr(Prec_None)) return;
             s: Stmt = (DeclNamed = (kind = kind, value = value, ty = ty, name = name)); // TODO: the rust thing where you don't have to say the name if the expr is a var read that matches.
-            return(Ok = self.stmt(s, loc));
+            if !self.maybe(.Semicolon) {
+                @report_error("expected semicolon after declaration") (return, self.last.span);
+            };
+            return(Ok = self.stmt(s, loc))
         }
         fn Comma() => {
             // That was actually like `a, b := e;`, so we want to turn that name into an expression and then find some more identifiers. 
@@ -180,14 +188,16 @@ fn parse_decl_or_start_expr(self: *Parser, name: Symbol) Result(FatStmt, *Compil
             idents := @try(self.list_of_names_decl(name)) return;
             pattern := @try(self.ident_list_to_pattern(idents&, loc)) return;
             value := @try(self.parse_expr(Prec_None)) return;
+            if !self.maybe(.Semicolon) {
+                @report_error("expected semicolon after declaration") (return, self.last.span);
+            };
             return(Ok = self.stmt((DeclVarPattern = (binding = pattern, value = value)), loc))
         }
         @default => {
             e := @try(self.ident_expr_and_maybe_trailing(name, Prec_None, self.last.span)) return;
-            return(self.after_expr_stmt_prefix(e));
+            return(self.after_expr_stmt_prefix(e))
         };
-    };
-    unreachable()
+    }
 }
 
 fn list_of_names_decl(self: *Parser, name: Symbol) Result(RsVec(FatExpr), *CompileError) = {
@@ -260,9 +270,9 @@ fn after_expr_stmt_prefix(self: *Parser, e: FatExpr) Result(FatStmt, *CompileErr
     
     @match(self.peek()) {
         fn Semicolon()      => ();
-        fn RightSquiggle(_) => ();
+        fn RightSquiggle()  => ();
         fn Eof()            => ();
-        @default => @report_error("expected ';' (discard) or '}' (return) after expr stmt") (return, self.last.span);
+        @default => @report_error("expected ';' (discard) or '}' (return from block) after expr stmt") (return, self.last.span);
     };
     
     (Ok = stmt)
@@ -281,8 +291,8 @@ fn display(s: *Symbol, out: *List(u8)) void = s[].as_index().display(out);
 */
 
 fn peek_type(self: *Parser) *TokenType = {
-    t := self.peek();
-    t.type
+    t := self.lex&.peek();
+    t.type&
 }
 
 fn ident_list_to_pattern(self: *Parser, idents: *RsVec(FatExpr), loc: Span) Result(Pattern, *CompileError) = {
@@ -452,17 +462,19 @@ fn parse_func(self: *Parser, allow_empty: bool) Result(Func, *CompileError) = {
     loc := self.last.span;
     fn_def := @try(self.fn_def_signeture(loc, true)) return;
     
-    may_capture := @match(self.pop()) {
+    // TODO: do i want to allow without body in expression context?
+    may_capture := @match(self.peek()) {
         fn Equals() => false;
         fn FatRightArrow() => true;
         fn Semicolon() bool => {
             if !allow_empty && fn_def.tags.len == 0 {
-                @report_error("Function expression requires body %", "") (return, self.last.span);
+                @report_error("Function expression requires body %", "") (return, loc);
             };
             return(Ok = make_func(fn_def, .None, false))
         }
         @default => @report_error("expected '=' or '=>' or ';' after function decl %", "") (return, self.last.span);
     };
+    self.pop();
     
     if !may_capture {
         @if_let(self.peek()) fn LeftSquiggle() => {
@@ -1068,7 +1080,7 @@ fn parse_block_until_squiggle(self: *Parser, allow_eof: bool) ParseRes = {
     loc := self.last.span;
     stmts: List(FatStmt) = list(self.alloc);
     
-    while => !self.maybe(.RightSquiggle) && (!allow_eof).or(=> !self.maybe(.Eof)) {
+    while => !self.maybe(.RightSquiggle) && (!allow_eof || !self.maybe(.Eof)) {
         if self.maybe(.Eof) {
             @report_error("unexpected end of file %", "") (return, self.last.span);
         };

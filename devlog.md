@@ -1,3 +1,21 @@
+## (Sep 18)
+
+- added syntax for short-circuiting `or` because its dumb to only have `and`.
+  kinda nice that you can use it like zig's `orelse` operator.
+- fused a few operations in sema so its less clunky to interact with values of known type.
+- started trying to call get_or_create_type everywhere so i can get rid of tagged indices
+  because it spiritually annoys me that i have to encode larger immediates all the time,
+  and im pretty sure its never caught a bug since before i got rid of the interpreter.
+  can't quite do it yet. maybe im missing some but also im a bit afraid of my hashing Values by bytes.
+  did get rid of tags for scope/overloadset/funcid tho.
+  there's also some `==` that don't take self parameter and use the constant void/Never/etc.
+  ah i was just missing an iteration that removes the tag bit in get_or_create_type.
+  so that works now and my indices are small.
+- made the primitives stuff a bit less painful by hackily having secret (P64, P64) before the array so you can just offset backwards for `#ct` and indirect return.
+  its slightly less ugly than the old thing, and less code, and saves 10ms self-compiling. :ConfusingPrims
+- made the parser more strict about semicolons after declarations.
+- finally fixed field_ordering
+
 ## more more linux (Sep 17)
 
 added ability to ask an allocator if it owns a pointer so now expr log doesn't crash on trying to print garbage

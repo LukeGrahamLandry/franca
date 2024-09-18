@@ -19,9 +19,10 @@
   advanced version is don't comptime jit until the first time you call something. can't decide if thats too creepy.
 - finish getting run_tests to run on blink
 - finish >6 arg functions on x64
-- fix field_ordering
+- make github actions fail if a test fails (currently it only requires examples to work).
 - try to give llvm less work to do. clean up first call to intrinsic/redirect (it hurts deduplication! i have a billon fn alloc now).
   would it help if i did less dumb inttoptr and add 0 for int constants?
+- be nicer about warning invalid arguments in examples/default_driver and compiler/first
 
 ##
 

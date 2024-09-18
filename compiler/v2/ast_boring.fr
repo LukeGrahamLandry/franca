@@ -18,7 +18,7 @@ fn unptr_ty(c: *SelfHosted, ty: Type) ?Type = {
 }
 
 fn is_raw_unit(self: *FatExpr) bool = {
-    self.ty == void && self.expr&.is(.Value) // :get_or_create_type
+    eq(self.ty, void) && self.expr&.is(.Value) // :get_or_create_type
 }
 
 // TODO: skip through named and unique as well.
@@ -72,16 +72,21 @@ fn ptr_type(self: *SelfHosted, inner: Type) Type = {
 
 // This converts a const type in the compiler's binary to a type id in the target program.
 // It can only be done for some core interned types (not unique ones like structs and enums).
-// :get_or_create_type @builtin doesn't call this but maybe should if I ever want to be able to change the numbers. 
 fn get_or_create_type(self: *SelfHosted, $T: Type) Type = {
+    @if(@run T == UnknownType || T == LabelId || T == FuncId || T == Symbol || T == ScopeId || T == OverloadSet || T == Type) {
+        return(T);
+    };
     info :: T.get_type_info_ref();
     @inline_match(info) {
-        fn Int(_) => self.intern_type(info[]);
+        fn Int() => self.intern_type(info[]);
         // Some types have hardcoded ids. 
         // they can also be used directly but doing it through this function might make it less painful to decouple them later.
         fn Bool() => bool;
         fn void() => void;
         fn VoidPtr() => rawptr;
+        fn Never() => Never;
+        fn F32() => f32;
+        fn F64() => f64;
         @default => panic("Tried to convert unsupported type from const to runtime");
     }
 }
@@ -393,27 +398,21 @@ fn tuple_types(self: *SelfHosted, requested: ResultType, len: i64) Result([]Resu
 
 fn from_index();
 
-fn TagBitIndex($T: Type, $magic_offset: i64) void = {
+fn TypedIndex($T: Type) void = {
     fn as_index(f: T) i64 = f.to_index().zext();
     
-    fn to_index(f: T) u32 = {
-        i := ptr_cast_unchecked(From = T, To = u32, ptr = f&)[];
-        mask: u32 : 1.shift_left(magic_offset).bit_not().trunc();
-        i.bit_and(mask)
-    }
+    fn to_index(f: T) u32 #unsafe_noop_cast;
     
     fn from_index(idx: i64) T = {
-        val: u32 = 1.shift_left(magic_offset).bit_or(idx).trunc();
+        val: u32 = idx.trunc();
         ptr_cast_unchecked(From = u32, To = T, ptr = val&)[]
     }
 }
 
-fn funcid_from_index(f: i64) FuncId = from_index(f);
-
-
-:: TagBitIndex(FuncId, 30);
-:: TagBitIndex(OverloadSet, 28);
-:: TagBitIndex(LabelId, 27);
+:: TypedIndex(FuncId);
+:: TypedIndex(OverloadSet);
+:: TypedIndex(LabelId);
+:: TypedIndex(Type);
 
 fn unique_const(self: *SelfHosted, name: Symbol) Var #once = {
     // TODO: expose a function for this!
@@ -578,13 +577,6 @@ fn is_const(self: *FatExpr) bool = {
     }
 }
 
-
-fn typeid_from_index(idx: i64) Type = {
-    magic_offset :: 31;  // must match ast.rs
-    val: u32 = 1.shift_left(magic_offset).bit_or(idx).trunc(); // TODO: better error message if you typeo make this a constant. 
-    ptr_cast_unchecked(From = u32, To = Type, ptr = val&)[]
-}
-
 fn get_build_options(c: *SelfHosted) *BuildOptions = {
     BuildOptions.ptr_from_raw(c.env.build_options)
 }
@@ -595,3 +587,16 @@ empty_struct_literal :: fn(loc: Span) FatExpr = {
 
 fn ne(a: FuncId, b: FuncId) bool #redirect(Ty(u32, u32), bool);
 fn ne(a: Symbol, b: Symbol) bool #redirect(Ty(u32, u32), bool);
+
+// It makes me feel better to guess that they provided the fields in order before scanning. 
+// The arrays are so short its not a measurable difference tho -- Sep 18
+fn find_struct_field(f: *get_variant_type(TypeInfo, .Struct), name: Symbol, index_guess: i64) ?*Field = {
+    field := index_guess;
+    if field >= f.fields.len || f.fields[field].name != name { 
+        miscompilation_if_you_inline_this := f.fields&.position(fn(f) => f.name == name); // :fucked // TODO: check if thats still true
+        field = or miscompilation_if_you_inline_this {
+            return(.None)
+        };
+    };
+    (Some = f.fields.index(field))
+}

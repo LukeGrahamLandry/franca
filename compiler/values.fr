@@ -144,7 +144,7 @@ fn emit_relocatable_constant_body(
             enumerate c.jitted.dispatch { i, check | 
                 check := int_from_rawptr(check[]);
                 if check == ptr {
-                    fid := funcid_from_index(i);
+                    fid: FuncId = from_index(i);
                     return(@err(
                         "function not found for constant\naddr=% fid=% name=% \n(ICE: we should have noticed that we took its address)", 
                         ptr, fid, c.log_name(fid),
@@ -732,6 +732,11 @@ fn call_dynamic_inner(program: CompilerRs, ptr: i64, f_ty: *FnType, args: *RsVec
 to_values :: fn(program: *SelfHosted, $T: Type, v: T) Values #generic = {
     bytes := T.cast_to_bytes(v&);
     program.from_bytes(bytes)
+};
+
+fn to_expr(self: *SelfHosted, $T: Type, value: T, loc: Span) FatExpr #generic = {
+    value := self.to_values(T, value); 
+    (expr = (Value = (bytes = value, coerced = false)), loc = loc, ty = self.get_or_create_type(T), done = true)
 }
 
 fn from_bytes(program: *SelfHosted, bytes: []u8) Values = {
@@ -910,14 +915,14 @@ fn intern_type(self: *SelfHosted, info: TypeInfo) Type = {
         //@println("%", key.tag());
         
         or self.type_lookup&.get(key&) {| 
-            id := typeid_from_index(self.types.len);
+            id: Type = from_index(self.types.len);
             stable := self.types&.push(info);
             self.type_lookup&.insert(stable, id);
             self.type_extra&.push(TypeMeta.zeroed()); // is_sized = false
             id
         }
     } else {
-        id := typeid_from_index(self.types.len);
+        id: Type = from_index(self.types.len);
         self.types&.push(info);
         self.type_extra&.push(TypeMeta.zeroed()); // is_sized = false
         id
@@ -958,20 +963,20 @@ fn init_fixed_types(self: *SelfHosted) void = {
     @debug_assert_eq(self.types.len, 0);
     self.intern_type(.Placeholder);  // UnknownType
     self.intern_type(.void);
-    self.intern_type(Named = (typeid_from_index(10), Flag.Type.ident()));
+    self.intern_type(Named = (from_index(10), Flag.Type.ident()));
     self.intern_type(Int = (bit_count = 64, signed = true));
     self.intern_type(.Bool);
     self.intern_type(.VoidPtr);
     self.intern_type(.Never);
     self.intern_type(.F64);
-    self.intern_type(Named = (typeid_from_index(10), Flag.OverloadSet.ident()));
-    self.intern_type(Named = (typeid_from_index(10), Flag.ScopeId.ident()));
+    self.intern_type(Named = (from_index(10), Flag.OverloadSet.ident()));
+    self.intern_type(Named = (from_index(10), Flag.ScopeId.ident()));
     self.intern_type(Int = (bit_count = 32, signed = false));
     self.intern_type(.VoidPtr); // TODO: why is this here twice? 
     self.intern_type(.F32);
-    self.intern_type(Named = (typeid_from_index(10), Flag.FuncId.ident()));
-    self.intern_type(Named = (typeid_from_index(10), Flag.LabelId.ident()));
-    self.intern_type(Named = (typeid_from_index(10), Flag.Symbol.ident()));
+    self.intern_type(Named = (from_index(10), Flag.FuncId.ident()));
+    self.intern_type(Named = (from_index(10), Flag.LabelId.ident()));
+    self.intern_type(Named = (from_index(10), Flag.Symbol.ident()));
 }
 
 fn get_info_is_ready(self: *SelfHosted, ty: Type) bool = {
@@ -1014,7 +1019,7 @@ fn get_info(self: *SelfHosted, ty: Type) *TypeMeta = {
             self.finish_layout(ty); 
             @debug_assert(f.layout_done, "ICE: layout not done! %", self.log_type(ty));
             size: u16 = 0;
-            @debug_assert(f.fields.is_empty().or(=> f.fields[0].byte_offset == 0), "ICE: first field should have offset 0");
+            @debug_assert(f.fields.is_empty() || f.fields[0].byte_offset == 0, "ICE: first field should have offset 0");
             align: u16 = 1;
             mask: u32 = 0; // TODO: this is barely used. can go away if dyn call above uses prims instead. 
             pointers := false;
