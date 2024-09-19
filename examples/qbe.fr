@@ -1,15 +1,47 @@
-//! https://c9x.me/compile/
-// TODO: This started as a copy paste of the llvm version. 
-//       should see what parts are similar enough to be factored out into walk_bc. 
-// TODO: implement switch 
+//! https://c9x.me/compile
+//!
+//! This is an alternate compiler backend that converts Franca-Ir to Qbe-Ir.
+//! You can then run qbe to convert it into assembler text and assemble+link that into a program. 
+//! In theory this can compile faster than llvm at the cost of running fewer optimisations. 
+//! However, until I find a faster assembler than clang, assembling the output of qbe takes longer than just letting llvm do the whole thing.  
+//! (I assume because I generate such poor code that not doing optimisations means there's just a lot of volume to deal with. 
+//! Tho I don't think ive checked since I added deduplication so perhaps this has improved.)
+//!
+//! Regardless of the usefulness of this backend, it's a nice demo of stuff you can do in a driver program. 
+//! See examples/default_driver.fr for how to use this to compile arbitrary franca programs. 
+//! That way of using it means this backend gets compiled by the non-optimising comptime-jit every time you run it, 
+//! So there will be an increase in frontend time compared to using the precompiled llvm backend unless you AOT compile this file as well. 
+//! TODO: make it easy to save and load drivers from a dylib. 
+//!
+//! If you want to use this yourself remember that the last bucket returned by emit_qbe is inline asm (not qbe ir) that should be added to the qbe output. 
+//!
+//! DISCLAIMER: not fully tested yet! seems to pass most of them tho. 
+
+// TODO: implement link_rename (required for macos x64)
+// TODO: auto test on all targets
+// TODO: get the compiler working with this backend 
+
+#include_std("compiler/backend/walk_bc.fr");
 
 // TODO: because it just spits out asm for individual functions, it doesn't bother with inline assembly,
 //       so as a HACK, the last list in the bucket array we return isn't qbe ir, its extra assembly you have to add to the output of qbe. 
 emit_qbe :: { T :: CodeGen(EmitQbe); T.emit };
 
+EmitQbe :: @struct(
+    comp: CompCtx,
+    out: BucketArray(u8),
+    current: BbId,
+    next_var: i64 = 0,
+    return_value_type_sizes: BitSet,
+    inline_asm: List(u8),
+    current_has_indirect_return := false,
+    os: Os,
+    $Val := QbeVal, // TODO: const can't be first (doesn't parse).  -- Jun 14
+);
+
 // TODO: dependency problem so can't call this `init`
-fn new(comp: CompCtx, alloc: Alloc, arch: Arch) EmitQbe #inline = {
-    s: EmitQbe = (comp = comp.data.cast()[][], out = init(12, alloc), current = BbId.zeroed(), return_value_type_sizes = empty(), inline_asm = list(alloc))
+fn new(comp: CompCtx, alloc: Alloc, arch: Arch, os: Os) EmitQbe #inline = {
+    s: EmitQbe = (comp = comp, out = init(12, alloc), current = BbId.zeroed(), return_value_type_sizes = empty(), inline_asm = list(alloc), os = os);
     s.return_value_type_sizes&.set(16, temp());
     s
 }
@@ -36,7 +68,7 @@ fn emit_entry_points_and_debug_info(gen: *CodeGen(EmitQbe), comp: CompCtx, fns: 
             // TODO: warn if fns has duplicates
             for (fns) {f|
                 gen.backend.out&.reserve(100);
-                f = gen.program.follow_redirects(f);
+                //f = gen.program.follow_redirects(f);
                 func := {comp.vtable.get_function}(comp.data, f);
                 // note: this only works because void has a fixed typeid value
                 if func.finished_arg.unwrap() == void {
@@ -129,19 +161,17 @@ fn emit_bounce_fn(self: *EmitQbe, impl_name_callee: Str, fake_decl_name: Str, si
 // TODO: copy-paste from DynamicImport but reversed so its a pain. 
 fn write_export_bounce(self: *EmitQbe, fid: FuncId) void = {
     func := self.comp.get_function(fid);
-    export_name := self.comp.pool.get(func.name);
+    export_name := self.comp.get_string(func.name);
     internal_name: List(u8) = list(temp()); 
     self.fmt_fn_name(fid, internal_name&);
     
-    f_ty := func.finished_ty().unwrap();
-    cc := func.cc.unwrap();
-    sig := self.comp.prim_sig(f_ty, cc).unwrap();
+    sig := {self.comp.vtable.prim_sig}(self.comp.data, func).unwrap();
     self.emit_bounce_fn(internal_name.items(), export_name, sig, false);
 }
 
 fn emit_constant(self: *EmitQbe, id: BakedVarId) void = {
     self.out&.reserve(100);
-    value := self.comp.get_baked(id)[]._1;
+    value := {self.comp.vtable.get_baked}(self.comp.data, id)[]._1;
     idx: i64 = id.id.zext();
     
     @match(value&) {
@@ -168,7 +198,7 @@ fn emit_constant(self: *EmitQbe, id: BakedVarId) void = {
                 @match(inner) {
                     (fn FnPtr(f) => {
                         // TODO: hack because of new deduplication
-                        func := self.comp.index(f);
+                        func := self.comp.get_function(f);
                         @if_let(func.body&) fn Redirect(inner) => {
                             f = inner[];
                         };
@@ -201,6 +231,12 @@ fn emit_special(self: *EmitQbe, f_id: FuncId, body: *FuncImpl, func: *Func, bc: 
             //       could also just have the front end check if body is redirect before adding to callees list. -- Jun 27
             
             pending.push(f[]);
+            
+            // :sema_regression :ExtraRedirectShim
+            assert(f[] != f_id, "redirect to yourself");
+            new_name := @format("%", (self, f[])) temp();
+            old_name := @format("%", (self, f_id)) temp();
+            self.emit_bounce_fn(new_name.items(), old_name.items(), bc.signeture, true);
             return(true);
         }
         fn Merged(parts) => { 
@@ -210,7 +246,7 @@ fn emit_special(self: *EmitQbe, f_id: FuncId, body: *FuncImpl, func: *Func, bc: 
         }
         fn DynamicImport(name) => { 
             // TODO: do i need to hackily do the same for ComptimeAddr and hope for the best? ideally the forntend would handle that instead. 
-            import_name := comp.pool.get(name[]);
+            import_name := comp.get_string(name[]);
             self.forward_declare(bc.signeture, false, import_name);
             name := @format("%", (self, bc.func)) temp();
             self.emit_bounce_fn(import_name, name.items(), bc.signeture, true);
@@ -218,19 +254,30 @@ fn emit_special(self: *EmitQbe, f_id: FuncId, body: *FuncImpl, func: *Func, bc: 
         }
         fn QbeIr(code) => { 
             self.next_var = 0;
-            ir := comp.pool.get(code[]);
+            ir := comp.get_string(code[]);
             self.out&.push_all("function ");
             name := @format("%", (self, bc.func)) temp();
             self.write_header(bc.signeture, name.items()) {arg_index|
                 args := func.arg.bindings.items();
                 arg := args[arg_index].name.Var.name;
-                arg := comp.pool.get(arg);
+                arg := comp.get_string(arg);
                 arg := @format("%%", "%", arg) temp();
                 self.next_var += 1;
                 arg.items()
             };
             @fmt(self.out&.current(), "{\n@start\n%}\n", ir);
             return(true);
+        }
+        fn TargetOsSplit(it) => {
+            if it.os == self.os {
+                // TODO: :copy-paste from emit_special:redirect
+                pending.push(it.fid);
+                assert(it.fid != f_id, "redirect to yourself");
+                new_name := @format("%", (self, it.fid)) temp();
+                old_name := @format("%", (self, f_id)) temp();
+                self.emit_bounce_fn(new_name.items(), old_name.items(), bc.signeture, true);
+                return(true);
+            };
         }
         @default fn() void => return(false);
     };
@@ -241,12 +288,13 @@ fn forward_declare(self: *EmitQbe, sig: PrimSig, private: bool, name: Str) void 
     // Qbe doesn't need external functions to be declared. The call instruction has the type information. 
 }
 
-fn emit_special_asm(self: *EmitQbe, body: *FuncImpl, func: *Func, bc: *FnBody, arch: Arch) bool = {
+fn emit_special_asm(self: *EmitQbe, body: *FuncImpl, func: *Func, bc: *FnBody, target: *TargetEnv) bool = {
+    arch := target.arch;
     comp := self.comp;
     @match(body) {
         (fn Merged(parts) => { 
             each(parts[].items()) {check: *FuncImpl| 
-                if(self.emit_special_asm(check, func, bc, arch), => return(true));
+                if(self.emit_special_asm(check, func, bc, target), => return(true));
             };
         });
         (fn JittedAarch64(code) => { 
@@ -266,17 +314,6 @@ fn emit_special_asm(self: *EmitQbe, body: *FuncImpl, func: *Func, bc: *FnBody, a
     };
     false
 }
-
-EmitQbe :: @struct(
-    comp: *SelfHosted,
-    out: BucketArray(u8),
-    current: BbId,
-    next_var: i64 = 0,
-    return_value_type_sizes: BitSet,
-    inline_asm: List(u8),
-    current_has_indirect_return := false,
-    $Val := QbeVal, // TODO: const can't be first (doesn't parse).  -- Jun 14
-);
 
 fn write_header(self: *EmitQbe, sig: PrimSig, name: Str, $get_arg_name: @Fn(idx: i64) Str) void = {
     self.out&.reserve(50);
@@ -362,7 +399,7 @@ fn fmt_fn_name(self: *EmitQbe, f: FuncId, out: *List(u8)) void = {
     opts := self.comp.get_build_options();
     if opts.retain_function_names {
         func := self.comp.get_function(f);
-        real_name := self.comp.pool.get(func.name);
+        real_name := self.comp.get_string(func.name);
         @fmt(out, "%__%", real_name, f.to_index());
     } else {
         @fmt(out, "F%", f.to_index());
@@ -464,7 +501,7 @@ fn inst_intrinsic(self: *EmitQbe, args: []QbeVal, op: Intrinsic) []QbeVal = {
     }
 }
 
-fn inst_call(self: *EmitQbe, args: Slice(QbeVal), sig: PrimSig, f: FuncId, tail: bool) Slice(EmitQbe.Val) = {
+fn inst_call(self: *EmitQbe, args: Slice(QbeVal), sig: PrimSig, f: FuncId, tail: bool, _loc: ?Span) Slice(EmitQbe.Val) = {
     self.inst_call(args, sig) {
         self.out&.current().push_all("$");
         self.fmt_fn_name(f, self.out&.current());
@@ -551,7 +588,7 @@ fn inst_trap(self: *EmitQbe) void = {
     self.out&.push_all("   hlt\n");
 }
 
-fn inst_call_ptr(self: *EmitQbe, args: Slice(QbeVal), sig: PrimSig, ptr: EmitQbe.Val) Slice(EmitQbe.Val) = {
+fn inst_call_ptr(self: *EmitQbe, args: Slice(QbeVal), sig: PrimSig, ptr: EmitQbe.Val, _loc: ?Span) Slice(EmitQbe.Val) = {
     self.inst_call(args, sig) {
         @fmt(self.out&.current(), "%", ptr);
     }
@@ -574,7 +611,7 @@ fn inst_literal(self: *EmitQbe, value: i64, ty: Prim) EmitQbe.Val = {
         if(ty.eq(.F32)){
             // for f32, qbe wants an f64 as hex that happens to be exactly representable as f32. 
             // but we store it as an f32 on the bottom with the high bits zeroed. 
-            assert(value.lt(MAX_I64), "ICE: too many bits for f32");
+            //assert(value.lt(MAX_u32), "ICE: too many bits for f32"); // TODO
             value: u32 = value.trunc();    // the bits we want to load
             value: f32 = value.bitcast();  // the number we want to load
             value: f64 = value.cast();     // the same numerical value
@@ -620,11 +657,21 @@ fn inst_jump(self: *EmitQbe, always: BbId, args: Slice(EmitQbe.Val)) void = {
     @fmt(self.out&.current(), "   jmp @b%\n", @as(i64) always.id.zext()); 
 }
 
-
-fn inst_switch(self: *EmitQbe, info: *RsVec(SwitchPayload), inspected: QbeVal) void = {
+fn inst_switch(self: *EmitQbe, info: *RsVec(SwitchPayload), inspected: QbeVal, uid: i64) void = {
     normal_branches, default := info.decode_switch();
-    panic("TODO: qbe inst_switch");
+    next_block := 0;
+    for normal_branches { case | 
+        cond := self.get_var(.I8);
+        @fmt(self.out&.current(), "   % =% ceql %, %\n", cond, Prim.I8.type_char_var(), inspected, case.value);
+        @fmt(self.out&.current(), "   jnz %, @b%, @b%_%\n", cond, @as(i64) case.block.id.zext(), uid, next_block); 
+        @fmt(self.out&.current(), "@b%_%\n", uid, next_block); 
+        next_block += 1;
+    };
+    if default { default |
+        @fmt(self.out&.current(), "   jmp @b%\n", @as(i64) default.id.zext()); 
+    };
 }
+
 fn inst_return(self: *EmitQbe, args: Slice(EmitQbe.Val)) void = {
     self.out&.reserve(100);
     @switch(args.len){

@@ -22,8 +22,14 @@ fn get_unique_named(c: CompCtx, name: Str) ?FuncId = {
 // SAFETY: you must call created_jit_fn_ptr_value if you create a Values and then compile for AOT
 // TODO: no unwrap! return error. but then llvm backend has to be able to deal with tagged unions correctly. 
 fn get_jitted(c: CompCtx, f: FuncId) rawptr = {
-    res := {c.vtable.compile_func}(c.data, f, .Jit).unwrap();
-    ptr := {c.vtable.get_jitted_ptr}(c.data, f).unwrap();
+    res := {c.vtable.compile_func}(c.data, f, .Jit);
+    or res { err |
+        c.report_error(err)
+    };
+    ptr := {c.vtable.get_jitted_ptr}(c.data, f);
+    ptr := or ptr { err |
+        c.report_error(err)
+    };
     ptr
 }
 
@@ -31,6 +37,16 @@ fn default_build_options(vtable: *ImportVTable) *BuildOptions = {
     mem := libc_allocator.alloc(BuildOptions, 1);
     mem.ptr[] = (driver_vtable_ptr = {vtable.get_default_driver_exports}());
     mem.ptr
+}
+
+fn get_build_options(c: CompCtx) *BuildOptions = {
+    {c.vtable.get_build_options}(c.data)
+}
+
+fn report_error(c: CompCtx, err: *CompileError) Never = {
+    out: List(u8) = list(temp());
+    {c.vtable.fmt_error}(c.data, err, out&);
+    panic(out.items())
 }
 
 fn new_with_src(vtable: *ImportVTable, src: Str, options: *BuildOptions) Compiler = {
@@ -133,7 +149,7 @@ fn read_and_push(out: *List(u8), path: Str) void = {
 fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId), entry: ProgramEntry, arch: Arch, os: Os) BucketArray(u8) #inline = {
     _ := alloc;  // TODO
     target: TargetEnv = (arch = arch, os = os);
-    {comp.vtable.emit_llvm}(comp.data, fns, entry, target&)
+    {comp.vtable.emit_llvm}(comp, fns, entry, target&)
 }
 
 // :TooManyArgsX64

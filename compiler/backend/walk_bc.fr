@@ -1,8 +1,7 @@
 // I'm not super thrilled about writing it this way but its really annoying to do the boring stack manipulation every time. 
-
-// TODO: really need to fix this
-#redirect(Ty(i64, i64), bool) fn eq(a: ProgramEntry, b: ProgramEntry) bool;
-
+//
+// Also this always calls through the vtable because I want you to be able to load this in your driver and write your own backends.
+// So it shouldn't directly access compiler internals. See examples/qbe.fr + examples/default_driver.fr for usage. 
 
 // TODO: traits
 /*
@@ -29,7 +28,7 @@ Backend :: @trait fn($B: Type) = {
     // - declare stack slots for local variables
     fn setup(self: *B, body: *FnBody, vars_out: *List(B.Val)) void;
     fn inst_intrinsic(self: *B, op: Intrinsic, args: Slice(B.Val)) Slice(B.Val);
-    fn inst_switch(self: *B, info: *RsVec(SwitchPayload), inspected: B.Val) void;
+    fn inst_switch(self: *B, info: *RsVec(SwitchPayload), inspected: B.Val, uid: i64) void;
 };
 */
 
@@ -41,8 +40,7 @@ fn add_pending_callees();
 fn CodeGen($B: Type) Type = {
     MAX_BLOCKS :: 512;
     Self :: @struct(
-        program: *SelfHosted,
-        backend: B,
+        program: CompCtx,
         body: *FnBody,
         vars: List(B.Val),
         stack: List(B.Val),
@@ -51,24 +49,21 @@ fn CodeGen($B: Type) Type = {
         constants_needed: BitSet = empty(),
         max_const_id: i64 = 0,
         pending: List(FuncId),
+        backend: B,
         $emit := emit_program,
     );
     
-    // TODO: they need to pass target arch for !asm functions. 
     // :TooManyArgsX64
-    emit_program :: fn(comp: Compiler, fns: [] FuncId, entry: ProgramEntry, target: *TargetEnv) BucketArray(u8) = {
-        program := comp.cast();
-        comp := program.vtable.with(comp);
-        alloc := program.get_alloc();
+    emit_program :: fn(comp: CompCtx, fns: [] FuncId, entry: ProgramEntry, target: *TargetEnv) BucketArray(u8) = {
+        alloc := todo_allocator; // TODO!
         gen: Self = (
-            program = program[][],
-            backend = new(comp, alloc, target.arch, target.os),
+            program = comp,
             body = zeroed(*FnBody), // EVIL
             vars = list(20, temp()),
             stack = list(20, temp()),
             pending = fns.clone(temp()),
+            backend = new(comp, alloc, target.arch, target.os),
         );
-        c := gen.program;
         
         emitted_functions := 0;
         while(=> gen.pending.len.ne(0)){
@@ -77,18 +72,20 @@ fn CodeGen($B: Type) Type = {
             if(gen.funcs_done&.get(fid.to_index().zext()), => continue()); // might have been added multiple times
             gen.funcs_done&.set(fid.to_index().zext(), temp());
             
-            // Note: compile before checking callees!
-            {comp.vtable.compile_func}(comp.data, fid, .Aot).unwrap(); 
-            func := c.get_function(fid);
+            func := comp.get_function(fid);
+            // Note: compile before checking callees! // TODO: return error instead
+            xx := {comp.vtable.compile_func}(comp.data, fid, .Aot);  // TODO: fix parsing to allow this as a quick expr
+            or xx { err | 
+                @println("failed compile %", comp.get_string(func.name));
+                comp.report_error(err)
+            };  // TODO: return error instead
             gen&.add_pending_callees(func);
-            // println(gen.program.pool.get(func.name));
             
-            body := emit_bc(comp.data.cast()[][], fid, .Aot);
-            if body&.is_err() {
-                @println("failed emit_bc for %", gen.program.pool.get(func.name));
-                c.report_error(body.Err);
-            };
-            body := body.unwrap();
+            xx := {comp.vtable.emit_bc}(comp.data, fid, .Aot);    // TODO: fix parsing to allow this as a quick expr
+            body := or xx { err |
+                @println("failed emit_bc for %", comp.get_string(func.name));
+                comp.report_error(err)
+            }; // TODO: return error instead
             
             if body.func != fid {
                 // We just noticed its a duplicate.
@@ -98,11 +95,12 @@ fn CodeGen($B: Type) Type = {
                 //continue(); 
             };
         
-            zone := zone_begin(.EmitAot); // TODO: defer
-            @if(ENABLE_TRACY) {
-                real_name := get_string(comp.data, func.name);
-                ___tracy_emit_zone_name(zone, real_name);
-            };
+            // TODO: bring this back. but its a pain because i want to allow drivers to use this file. :TraceEmitAot
+            //zone := zone_begin(.EmitAot); // TODO: defer
+            //@if(ENABLE_TRACY) {
+            //    real_name := comp.get_string(func.name);
+            //    ___tracy_emit_zone_name(zone, real_name);
+            //};
             
             if(body.blocks.len.eq(0)){
                 success := gen.backend&.emit_special(fid, func.body&, func, body, gen.pending&); 
@@ -111,11 +109,11 @@ fn CodeGen($B: Type) Type = {
                 };
                 if !success {
                     // TODO: should assert but debug_tag_corruption is confused. -- Jun 27
-                    real_name := get_string(comp.data, func.name);
-                    @eprintln("!!!! failed to emit speciai function: %\n%", real_name, func.log(program[][]));
+                    real_name := comp.get_string(func.name);
+                    @eprintln("!!!! failed to emit speciai function: %", real_name);
                 };
                 //assert(success, "failed to emit speciai function");
-                zone_end(zone);
+                //zone_end(zone);  :TraceEmitAot
                 continue();
             };
             gen.body = body;
@@ -124,7 +122,7 @@ fn CodeGen($B: Type) Type = {
             };
             emitted_functions += 1;
             
-            zone_end(zone);
+            //zone_end(zone);  :TraceEmitAot
         };
         
         constants := 0;
@@ -137,11 +135,6 @@ fn CodeGen($B: Type) Type = {
         
         gen&.emit_entry_points_and_debug_info(comp, fns, entry); // note: qbe hack needs this to be last
        
-        yield_count := gen.program.dispatch.yield_count;
-        if yield_count != 0 {
-            @println("[ops = %; yield_count = %; all_functions = %; aot_functions = %; lit_fns = %, my:cl = %:%]", 
-                gen.program.bc_count, yield_count, gen.program.functions.len, emitted_functions, gen.program.dispatch.lit_fn_count, gen.program.my_jit, gen.program.cl_jit );
-        };
         // TODO: if alloc != temp { temp.reset(mark ? no but that wouldn't catch if they derived a new one from temp
         gen.backend.out
     };
@@ -150,11 +143,7 @@ fn CodeGen($B: Type) Type = {
         for func.callees { c |
             if !self.funcs_done&.get(c.to_index().zext()) {
                 self.pending&.push(c);
-                new := self.program.get_function(c);
-                if new.get_flag(.ComptimeOnly) {
-                    self.program.codemap.show_error_line(new.loc);
-                    @println("% calls .ComptimeOnly function %", self.program.pool.get(func.name), new.log(self.program));
-                };
+                @debug_assert(!self.program.get_function(c).get_flag(.ComptimeOnly), "AOT calls .ComptimeOnly function");
             };
         };
         for func.mutual_callees { c |
@@ -198,9 +187,8 @@ fn CodeGen($B: Type) Type = {
                 });
                 (fn GetCompCtx() => {
                     f := self.program.get_function(self.body.func);
-                    name := self.program.pool.get(f.name);
-                    self.program.codemap.show_error_line(f.loc);
-                    @panic("AOT bytecode for '%' should not use GetCompCtx", name);
+                    name := self.program.get_string(f.name);
+                    @panic("ICE: AOT bytecode for '%' should not use GetCompCtx", name);
                 });
                 (fn Intrinsic(op) => {
                     arg_count := op.arg_count();
@@ -210,7 +198,8 @@ fn CodeGen($B: Type) Type = {
                     self.stack&.push_all(ret);
                 });
                 (fn CallDirect(call) => { //  f, tail, sig
-                    f := self.program.follow_redirects(call.f); // HACK to fix redirects added by deduplication
+                    f := call.f; // TODO: is this ok? i think i need v if i don't do as many husks
+                    //f := self.program.follow_redirects(call.f); // HACK to fix redirects added by deduplication
                     self.pending&.push(f); // TODO: callees list from compiler should make this redundant but im afraid.
                    
                     sig := self.body.decode_sig(call.sig); 
@@ -285,7 +274,7 @@ fn CodeGen($B: Type) Type = {
                     break();
                 });
                 (fn GetNativeFnPtr(f) => {
-                    f = self.program.follow_redirects(f);
+                    //f = self.program.follow_redirects(f);  // TODO: is not doing this ok? i think i need it if i don't do as many husks
                     self.pending&.push(f); // TODO: callees list from compiler should make this redundant but im afraid
                     v := self.backend&.inst_func_ref(f);
                     self.stack&.push(v);
@@ -341,7 +330,7 @@ fn CodeGen($B: Type) Type = {
                 fn Switch(idx) => {
                     info := self.body.switch_payloads.index(idx.zext());
                     value := self.stack&.pop().unwrap();
-                    self.backend&.inst_switch(info, value);
+                    self.backend&.inst_switch(info, value, idx.zext());
                     for info { case |
                         stack := self.stack.items().clone(temp());
                         self.walk_block(case.block);
@@ -360,7 +349,7 @@ fn CodeGen($B: Type) Type = {
         
         self.constants_needed&.set(index, temp());
         self.max_const_id = self.max_const_id.max(index);
-        value := self.program.get_baked(id)[]._1&;
+        value := {self.program.vtable.get_baked}(self.program.data, id)[]._1&;
         
         @match(value) {
             (fn VoidPtrArray(parts) => {
@@ -375,7 +364,6 @@ fn CodeGen($B: Type) Type = {
             @default => ();
         }
     }
-
 
     Self
 }

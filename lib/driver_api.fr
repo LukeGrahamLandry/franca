@@ -1,7 +1,7 @@
 Compiler :: *CompilerValue;
 CompilerValue :: @struct(pointer_to_pointer_to_selfhosted: rawptr);
-CompCtx :: @struct(data: Compiler, vtable: *ImportVTable);
-fn CRes($T: Type) Type = Result(T, rawptr);
+CompCtx :: @rec @struct(data: Compiler, vtable: *ImportVTable);
+fn CRes($T: Type) Type = Result(T, *CompileError);
 
 Backend :: @enum(i64) (CompilerJit, Cranelift); ::enum(Backend);
 // TODO: some of the old build stuff uses these names in file paths
@@ -20,6 +20,7 @@ ExportVTable :: @struct(
     log_event: ?@FnPtr(userdata: rawptr, c: Compiler, msg: *CompilerLogEvent) void = .None,
 );
 
+// TODO: exchange version numbers with the driver somehow so abi breaks are more sane.
 ImportVTable :: @rec @struct(
     intern_string: @FnPtr(c: Compiler, s: Str) Symbol,
     get_string: @FnPtr(c: Compiler, s: Symbol) Str,
@@ -35,12 +36,17 @@ ImportVTable :: @rec @struct(
     add_file: @FnPtr(c: Compiler, name: Str, content: Str) Span, 
     parse_stmts: @FnPtr(c: Compiler, f: *Span) Result(Slice(FatStmt), *CompileError),
     make_and_resolve_and_compile_top_level: @FnPtr(c: Compiler, body: Slice(FatStmt)) CRes(void),
-    _0: usize,
+    get_baked: @FnPtr(c: Compiler, id: BakedVarId) *Ty(rawptr, BakedVar),
     get_build_options: @FnPtr(c: Compiler) *BuildOptions,
-    comptime_arch: @FnPtr() Ty(Arch, Os),
+    comptime_arch: @FnPtr() Ty(Arch, Os),  // TODO: remove
     get_default_driver_exports: @FnPtr() *ExportVTable, 
-    emit_llvm: @FnPtr(comp: Compiler, fns: Slice(FuncId), entry: ProgramEntry, target: *TargetEnv) BucketArray(u8),
+    emit_llvm: @FnPtr(comp: CompCtx, fns: Slice(FuncId), entry: ProgramEntry, target: *TargetEnv) BucketArray(u8),
+    prim_sig: @FnPtr(comp: Compiler, func: *Func) CRes(PrimSig),
+    emit_bc: @FnPtr(comp: Compiler, f: FuncId, when: ExecStyle) CRes(*FnBody),
+    fmt_error: @FnPtr(c: Compiler, err: *CompileError, out: *List(u8)) void,
+    get_build_options: @FnPtr(c: Compiler) *BuildOptions,
 );
+
 // TODO: better error for @FnPtr if you forget return type. 
 
 // because you don't want people to depend on llvm.fr
@@ -56,7 +62,7 @@ ProgramEntry :: @enum(i64) (
     // create named wrappers for all the <fns>. if one of them is called "main", that will be the program entry point.
     // it is an error to have a name collission. 
     ExportWithNames, 
-);
+); ::enum(ProgramEntry);
 
 CompileError :: @tagged(
     Msg: @struct(span: Span, msg: Str),
@@ -147,6 +153,12 @@ FuncId  :: @builtin FuncId;
 //FuncId :: @struct(id: u32);
 //Symbol :: @struct(id: u32);
 
+// TODO: Make it sane to change the layout of these. 
+//       Put them in a namespace and seperate the compiler's comptime repr from its exported repr. 
+//       Allow having a step where they get translated if they don't match (like the first time you compile after changing them). 
+//       Currently you're pretty much fucked if you want to change the size of FatExpr/FatStmt because macros use arrays of them. 
+//       -- Sep 19
+
 FatExpr :: @rec @struct(
     expr: Expr,
     loc: Span,
@@ -173,7 +185,6 @@ Expr :: @tagged(
     PtrOffset: @struct(ptr: *FatExpr, bytes: i64, name: Symbol),
     GetParsed: WaitingParse,
     Cast: *FatExpr,
-
     If: @struct(cond: *FatExpr, if_true: *FatExpr, if_false: *FatExpr),
     Loop: *FatExpr,
     Addr: *FatExpr,
@@ -440,4 +451,76 @@ LinkRenameArg :: @struct(
     target: TargetEnv,
     out: *List(u8),
     old_name: Str,
+);
+
+// This is the ir used by the compiler so you can write your own backends in your driver program if you want. 
+// Changing the abi for these is not a big deal because the compiler contains its own driver and the llvm backend. 
+// Don't forget to update the extenal backends (examples/qbe, crates/comptime_cranelift). 
+
+FnBody :: @struct(  
+    blocks: RsVec(BasicBlock),
+    // TODO: would be nice if i could sort these so less alignment padding on my backends. 
+    //       but thats a pain because then you need to map indexes.
+    vars: RsVec(VarSlotType),
+    var_names: RsVec(Symbol),
+    when: ExecStyle,
+    hash: i64 = 0,
+    signeture: PrimSig,
+    func: FuncId,
+    name: Symbol,
+    switch_payloads: RsVec(RsVec(SwitchPayload)),  // indexed by Bc.Switch
+    sig_payloads: RsVec(PrimSig),  // indexed by `sig` field of Bc.CallDirect and Bc.CallFnPtr
+);
+VarSlotType :: @struct(size: u16, align: u16);
+SwitchPayload :: @struct(value: i64, block: BbId);
+
+// TODO: this would fit in 16 bytes instead of 24
+Bc :: @tagged(
+    CallDirect: @struct(sig: u32, f: FuncId, tail: bool),         // <args:m> -> <ret:n>
+    CallFnPtr: @struct(sig: u32),                                 // <ptr:1> <args:m> -> <ret:n>
+    PushConstant: @struct(value: i64, ty: Prim),                  // _ -> <v:1>
+    JumpIf: @struct(true_ip: BbId, false_ip: BbId, slots: u16),   // <args:slots> <cond:1> -> !
+    Goto: @struct(ip: BbId, slots: u16),                          // <args:slots> -> !
+    GetNativeFnPtr: FuncId,                                       // _ -> <ptr:1>
+    Load: Prim,                                                   // <ptr:1> -> <?:n>
+    StorePost: Prim,                                              // <?:n> <ptr:1> -> _
+    StorePre: Prim,                                               // <ptr:1> <?:n> -> _
+    AddrVar: @struct(id: u16),                                    // _ -> <ptr:1>
+    SaveSsa: @struct(id: u16, ty: Prim),                          // <p:1> -> _
+    LoadSsa: @struct(id: u16),                                    // _ -> <p:1>
+    IncPtrBytes: u16,                                             // <ptr:1> -> <ptr:1>
+    PeekDup: u16,                                                 // <x:1> <skip:n> -> <x:1> <skip:n> <x:1>,
+    CopyBytesToFrom: u16,                                         // <to_ptr:1> <from_ptr:1> -> _
+    LastUse: @struct(id: u16),                                    // _ -> _
+    Unreachable,                                                  // _ -> !
+    GetCompCtx,                                                   // _ -> <ptr:1>
+    NoCompile,
+    PushGlobalAddr: BakedVarId,
+    Snipe: u16,
+    Ret0, // big return uses this too because code has already written to indirect return address.
+    Ret1: Prim,
+    Ret2: Ty(Prim, Prim),
+    Nop,
+    Intrinsic: Intrinsic,
+    Switch: u32,
+);
+::enum(Intrinsic);
+
+PrimSig :: @struct(
+    args: Slice(Prim) = empty(),
+    ret1: ?Prim,
+    ret2: ?Prim,
+    return_value_bytes: u16 = 0,
+    first_arg_is_indirect_return: bool = false,
+    no_return: bool = false,
+    arg_int_count: u8 = 0,
+);
+
+BbId :: @struct(id: u16);
+BasicBlock :: @struct(
+    insts: RsVec(Bc),
+    debug: RsVec(Span), // TODO: use this if self.debug
+    arg_prims: Slice(Prim),
+    incoming_jumps: u16,
+    clock: u16,
 );

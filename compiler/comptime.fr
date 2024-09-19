@@ -26,15 +26,12 @@ fn init_driver_vtable() *ImportVTable = {
     vtable.get_jitted_ptr = fn(c: Compiler, f: FuncId) CRes(rawptr) = {
         self := c.cast()[][];
         vtable := the_vtable;
-        res := self.poll_in_place(rawptr) { () Maybe(rawptr) |
+        self.poll_in_place(rawptr) { () Maybe(rawptr) |
             @match(self.get_fn_callable(f)) {
                 fn Some(ptr) => (Ok = ptr);
                 fn None() => (Suspend = self.wait_for(Jit = f));
             }
-        };
-        ptr := self.unwrap_report_error(rawptr, res);
-        r: CRes(rawptr) = (Ok = ptr); // TODO: fix prims llvm. -- Jul 29
-        r
+        }
     };
     
     // TODO: remove unused first arg because comptime_jit is in BuildOptions now.
@@ -47,7 +44,7 @@ fn init_driver_vtable() *ImportVTable = {
     
     vtable.compile_func = fn(c: Compiler, f: FuncId, when: ExecStyle) CRes(void) = {
         self := c.cast()[][];
-        res := self.poll_in_place(void) { () Maybe(void) |
+        self.poll_in_place(void) { () Maybe(void) |
             func := self.get_function(f);
             if func.get_flag(.EnsuredCompiled) {
                 .Ok
@@ -56,9 +53,7 @@ fn init_driver_vtable() *ImportVTable = {
                 self.dispatch.function_in_progress&.set(f.as_index());
                 (Suspend = self.wait_for(CompileBody = f))
             }
-        };
-        self.unwrap_report_error(void, res);
-        .Ok
+        }
     };
     
     vtable.make_and_resolve_and_compile_top_level = fn(cc: Compiler, body: Slice(FatStmt)) CRes(void) = {
@@ -98,6 +93,27 @@ fn init_driver_vtable() *ImportVTable = {
         mem.ptr[] = default_driver_exports();
         mem.ptr
     };
+    
+    vtable.prim_sig = fn(comp: Compiler, func: *Func) Result(PrimSig, *CompileError) = {
+        f_ty := func.finished_ty().unwrap();  // TODO: return error
+        cc := func.cc.unwrap(); // TODO: return error
+        comp.cast()[][].prim_sig(f_ty, cc)
+    };
+    
+    vtable.get_baked = fn(c: Compiler, id: BakedVarId) *Ty(rawptr, BakedVar) = {
+        c.cast()[][].get_baked(id)
+    };
+    
+    vtable.emit_bc = fn(c: Compiler, f: FuncId, when: ExecStyle) Res(*FnBody) = {
+        c.cast()[][].emit_bc(f, when)
+    };
+    vtable.fmt_error = fn(c: Compiler, err: *CompileError, out: *List(u8)) void = {
+        c.cast()[][].fmt_error(err, out);
+    };
+    vtable.get_build_options = fn(c: Compiler) *BuildOptions = {
+        BuildOptions.ptr_from_raw(c.cast()[][].env.build_options)
+    };
+    
     the_vtable
 }
 

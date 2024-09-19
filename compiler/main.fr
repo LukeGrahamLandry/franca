@@ -73,24 +73,6 @@ fn go_build_yo_self(vtable: *ImportVTable, args: [] CStr) void = {
         c
     }
 
-    // TODO: return result
-    fn build_llvm(ir: BucketArray(u8), args: Slice(Str)) void = {
-        out := open_temp_file();
-        for(ir&){bucket|
-            out.fd&.write(bucket);
-        };
-        @println("Write llvm ir to %", out&.s_name());   
-        args: List(Str) = args.clone(temp());
-        args&.push("-x"); // don't check the file extension of source files that follow. 
-        args&.push("ir"); 
-        args&.push("-g"); 
-        args&.push(out&.s_name());
-        @println("%", args.items());
-        success := run_cmd_blocking("clang", args.items());
-        assert(success, "ICE: generated invalid llvm ir");
-        out.remove();
-    }
-
     if !file_exists("compiler/main.fr") {
         panic("Working directory must be top level of the franca repository");
     };
@@ -100,12 +82,14 @@ fn go_build_yo_self(vtable: *ImportVTable, args: [] CStr) void = {
     new_main := c.get_unique_named("main").unwrap();
     exports := (@list(new_main) temp()).items();
     aa := query_current_arch();
-    ir_text := c.emit_llvm(temp(), exports, .ExportWithNames, aa.unwrap(), query_current_os());
-    @println("Emitted % bytes of llvm ir.", ir_text.len);  // useful to see when i start trying to deduplicate bytecode. 
-    end := timestamp();
-
-    start := timestamp();
-    build_llvm(ir_text, @slice ("-o", "target/franca/franca2", "-Os"));
-    end := timestamp();
-    @println("LLVM time: % ms.", end.sub(start)); 
+    os := query_current_os();
+    arch := aa.unwrap();
+    ir := c.emit_llvm(temp(), exports, .ExportWithNames, arch, os);
+    
+    for(ir&){bucket|
+        print(bucket);
+    };
+    @eprintln("Generated llvm ir for native target (%, %).", arch, os);   
+    eprintln("Good luck. May your pointers be relocated and your redundancies elided.");
 }
+

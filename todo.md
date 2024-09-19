@@ -23,6 +23,8 @@
 - try to give llvm less work to do. clean up first call to intrinsic/redirect (it hurts deduplication! i have a billon fn alloc now).
   would it help if i did less dumb inttoptr and add 0 for int constants?
 - be nicer about warning invalid arguments in examples/default_driver and compiler/first
+- think about sharing temp allocator when loading dylibs
+- clean up what goes in lib/build.fr vs lib/sys/fs.fr
 
 ##
 
