@@ -1,3 +1,15 @@
+## (Sep 19)
+
+- update qbe backend, implement switch, make walk_bc usable from driver, enable -aot=qbe in default_driver.
+- fixed stupid typo in flags for open_append/open_trunc
+- actually show lex error reason
+- implemented stack arguments on x64 when you run out of registers (>6 ints).
+  i still don't actually implement the c abi correctly because you're supposed to pass structs in xmm registers sometimes.
+  also since then some of the functions have progressed to having >8 args which the aarch64 backend can't handle.
+  maybe i should just make you use a struct. or maybe slices should be passed by pointer if there's too many.
+- fixed silent exit(1) if you hit an error at top level of the driver.
+  TODO: figure out how to print more info since you don't have the compiler instance at the point where you decide you want to panic on it.
+
 ## (Sep 18)
 
 - added syntax for short-circuiting `or` because its dumb to only have `and`.

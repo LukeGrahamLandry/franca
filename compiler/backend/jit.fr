@@ -310,13 +310,15 @@ fn bump_dirty(self: *Jitted) void = {
 /* // TODO: traits
     CGJ :: CodeGenJit(B);
     fn emit_switch(self: *CGJ, cases: *RsVec(SwitchPayload)) void;
-    fn stack_to_ccall_reg(self: *CGJ, types: [] Prim, extra_special_ret: bool) void;
+    // returns the number of bytes pushed to the stack that need to be popped by the caller after the call. 
+    fn stack_to_ccall_reg(self: *CGJ, types: [] Prim, extra_special_ret: bool) i64;
     fn ccall_reg_to_stack(self: *CGJ, types: [] Prim, extra_special_ret: bool) Ty(i64, i64);
     fn emit_store(self: *CGJ, addr: AsmVal, value: AsmVal, ty: Prim) void;
     fn store_u64(self: *CGJ, src_reg: i64, dest_addr_reg: i64, offset_bytes: i64) void;
     fn in_reg_float(self: *CGJ, val: AsmVal) i64;
     fn in_reg(self: *CGJ, val: AsmVal) i64;
     fn load_imm(self: *CGJ, reg: i64, value: i64) void;  // TODO: this should check if adr is close enough since it statically knows the ip cause we're jitting.
+    fn pop_stacked_args(self: *CGJ, amount_stacked: i64) void;
     fn add_free_args(self: *CGJ, taken_int_count: i64, taken_float_count: i64) void;
     fn branch_func(self: *CGJ, f: FuncId, with_link: bool) void ;
     fn load_fnptr_from_dispatch(self: *CGJ, f: FuncId, reg: i64) void;
@@ -338,7 +340,6 @@ fn bump_dirty(self: *Jitted) void = {
     // fn CopyBytesToFrom(bytes) => {
     // fn CallFnPtr(f) => 
     fn emit_other_inst(self: *CGJ, inst: Bc) bool;
-    
 */
 
 fn pop_to_reg();
@@ -557,7 +558,8 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $negative_slots: bool) Type =
                     @debug_assert(self.block_ips[idx].is_none());
                     self.emit_block(idx, false);
                 } else {
-                    self.stack_to_ccall_reg(block.arg_prims, false);
+                    amount_stacked := self.stack_to_ccall_reg(block.arg_prims, false);
+                    @debug_assert_eq(amount_stacked, 0, "TODO: handle stacked args for '=>' call");
                     self.spill_abi_stompable();
                     if self.block_ips[idx] { (to_ip: *InstUnit) |
                         // we've already emitted it, so we know where it is, so just go there. 
@@ -754,11 +756,12 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $negative_slots: bool) Type =
     // Note: comp_ctx doesn't push the ctx here, bc needs to do that. this it just does the call with an extra argument.
     /// <arg:n> -> <ret:m>
     fn dyn_c_call(self: *Emit, sig: *PrimSig, $do_call: @Fn() void) void = {
-        self.stack_to_ccall_reg(sig.args, sig.first_arg_is_indirect_return);
+        amount_stacked := self.stack_to_ccall_reg(sig.args, sig.first_arg_is_indirect_return);
         self.spill_abi_stompable();
         self.state.free_reg&.clear();
         self.state.free_reg_float&.clear();
         do_call();
+        self.pop_stacked_args(amount_stacked);
     
         ::if_opt(Prim, i64);
         ::if_opt(Prim, Ty(i64, i64));

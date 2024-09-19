@@ -35,6 +35,9 @@ If you just want to see what the syntax looks like, click on examples or compile
 I strongly believe in conservation of misery so if there's a bunch of stuff I like about this language
 there must be proportional terrible things or I'm probably just lying.
 
+- DO NOT COMPILE PROGRAMS YOU DONT TRUST. comptime code is arbitrary code execution!
+  it can use inline assembly! it can dlopen libc and `system("curl | bash")`!
+  treat compiling a program with the same discretion as running it!
 - Stability is not a core tenet. If it was worth writing once, it's probably worth writing twice.
 - I don't care about being easy to learn. I want it to be fun. Rust is fun.
 - Stuff's unsafe, deal with it, simply don't make a mistake. i.e. `fn main() = { evil := i64.int_to_ptr(123); println(evil[]);` will compile, run, and (probably) crash.
@@ -56,3 +59,4 @@ there must be proportional terrible things or I'm probably just lying.
   There just happens to only be ~25k lines of code ever written in this langauge so its not a big deal yet.
   See examples/60fps.fr judging its performace.
 - I can't emit my own macho/elf files and i don't have my own linker.
+  You need to have clang if you want AOT.

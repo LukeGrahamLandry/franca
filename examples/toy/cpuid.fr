@@ -1,0 +1,29 @@
+fn main() = {
+    info := get_cpu_id();
+    @println("% % %", info&[0], info&[1], info&[2]);
+    info := ptr_cast_unchecked(@type info, u8, info&);
+    info: Str = (ptr = info, len = 12);
+    println(info);
+}
+
+CpuId :: Array(u32, 3);
+
+// https://www.felixcloutier.com/x86/cpuid
+fn get_cpu_id() CpuId #asm #x86_bytes = fn(out) = @asm_x64(
+    // follow the calling convention! without this it doesn't work on the llvm backend.
+    // cpuid always writes to rbx so we save it in a caller saved register. 
+    encode_bin(PrimaryOp.MovReg, X86Reg.r11, X86Reg.rbx),
+    
+    encode_imm(X86Reg.rax, 0), // ask for vendor id
+    0x0F, 0xA2, // CPUID
+    // now return (EBX, EDX, ECX)
+    // :SLOW could use offset stores but i dont want to
+    encode_bin_mem32(PrimaryOp.MovReg, X86Reg.rdi, X86Reg.rbx),
+    encode_imm(PrimaryOp.AddImm32, X86Reg.rdi, 4),
+    encode_bin_mem32(PrimaryOp.MovReg, X86Reg.rdi, X86Reg.rdx),
+    encode_imm(PrimaryOp.AddImm32, X86Reg.rdi, 4),
+    encode_bin_mem32(PrimaryOp.MovReg, X86Reg.rdi, X86Reg.rcx),
+    
+    encode_bin(PrimaryOp.MovReg, X86Reg.rbx, X86Reg.r11), // restore
+    PrimaryOp.Ret,
+) out;

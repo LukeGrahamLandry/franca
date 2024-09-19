@@ -7,9 +7,8 @@
 - wasm's totally broken.
 - i still think wasi's kinda dumb but running the compiler in a browser would be very pleasing.
   tho i could just use blink https://trungnt2910.com/blink/blink.html
-- the compiler shouldn't know about cranelift and qbe.
-  - let driver supply comptime jit vtable (and support loading driver from a dylib becuase you can't load the driver without a jit).
-  - make walk_bc use the vtable so driver program can just load qbe.fr if it wants
+- the compiler shouldn't know about cranelift.
+  let driver supply comptime jit vtable (and support loading driver from a dylib becuase you can't load the driver without a jit).
 - more type safety in int vs float registers in jit backends would be nice.
   also arm vs x86 register constants (they both have an sp but they're different numbers).
 - automated test that builds are still reproducible
@@ -25,6 +24,16 @@
 - be nicer about warning invalid arguments in examples/default_driver and compiler/first
 - think about sharing temp allocator when loading dylibs
 - clean up what goes in lib/build.fr vs lib/sys/fs.fr
+- instead of QbeIr+LlvmIr+X86AsmText, just have `IrText(type: Symbol, code: Symbol)`,
+  so the compiler doesn't have to know about all backends.
+  and then backends can just recognise whatever `type`s they want to support.
+  have the `#asm` tag take a string argument.
+- really the compiler shouldn't know about `#test` but its convenient for debugging if i break run_tests.fr.
+  so maybe i need to be able to load driver from a dylib first.
+- parse zig headers and generate extern declarations (like examples/c_bindgen). then i could use bits of thier standard libary.
+  they have a bunch of fun stuff that doesn't use use comptime in the api and im not interested in writing myself:
+  http, hashing, random, zip, magic numbers for wasm/elf/dwarf/macho
+- there's a few places `defer` would be really nice to have
 
 ##
 
