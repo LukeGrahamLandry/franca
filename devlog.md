@@ -1,3 +1,14 @@
+out of ~500ms, resolve overloads of `if`, `eq`, and `display` are each 50ms.
+so the root problem is my linear scan overloads thing, but can probably make it better by not instantiating those
+inside generics as much.
+I got rid of `::if_opt(T, bool); ::if_opt(T, T);` in fn Option and now if takes `25ms`.
+So like, its dumb to create a situation where im deciding how to write code to make it compile faster,
+but also its so easy to make the standard library stuff not pessimize speed so maybe thats worth it.
+The `display` is probably becuase of ::enum which i use a lot but don't print by super often.
+I bet `eq` would get a lot better if DeriveEq could create the sub-functions it needs for fields without
+adding them to the list you scan every time you type `==`, because there's a bunch where i only manually call the top of the hiarchy.
+Really i just want to be able to have generics that don't add to overload sets until you need it.
+
 ## (Sep 19)
 
 - update qbe backend, implement switch, make walk_bc usable from driver, enable -aot=qbe in default_driver.
@@ -9,6 +20,7 @@
   maybe i should just make you use a struct. or maybe slices should be passed by pointer if there's too many.
 - fixed silent exit(1) if you hit an error at top level of the driver.
   TODO: figure out how to print more info since you don't have the compiler instance at the point where you decide you want to panic on it.
+- make resolving by type without an expression less insane.
 
 ## (Sep 18)
 

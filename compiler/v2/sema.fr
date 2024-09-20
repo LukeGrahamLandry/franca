@@ -453,8 +453,8 @@ fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = 
 }
 
 fn handle_target_split(self: *SelfHosted, func: *Func) Maybe(void) #once = {
-    ::AutoEq(?CallConv); ::DerefEq(?CallConv); // TODO: why no '!=' ??
-    @err_assert(!(func.cc == (Some = .Inline)), "#target_os functions cannot be #inline.\nThis is a limitation of the way we handle comptime execution + cross compilation (which affects you even when not cross compiling).") return;
+    ::AutoEq(?CallConv); ::RefEq(?CallConv);
+    @err_assert(func.cc != (Some = .Inline), "#target_os functions cannot be #inline.\nThis is a limitation of the way we handle comptime execution + cross compilation (which affects you even when not cross compiling).") return;
     
     os_ty := @unwrap(self.env.os_type, "#target_os before bootstrap") return;
     if func.body&.is(.Normal) {
@@ -2606,14 +2606,11 @@ fn filter_overload_sync(self: *SelfHosted, arg_expr: *FatExpr, fid: FuncId) bool
 // TODO: need to check for conflicts somehow but we can't assume we're able to infer all the options here,
 //       because there might be cycles or more might be added later. 
 //       do i need to keep a list of all the (os, arg_ty -> fn) and check at the end?
-fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret: ResultType, i: OverloadSet) Maybe(FuncId) = {
-    self.last_loc = arg_expr.loc;
-    want_arity := self.arity(arg_expr);
-    if want_arity == 1 {
-        // There's no way we can get a hint from partial args (since theres only one), so yield early if needed.
-        // However, you want `safety_check_enabled(.Bounds)` to work as long as its unambigous,
-        // so we don't just compile_expr(arg_expr, .None) here
-    };
+// TODO: do merges
+fn resolve_in_overload_set(self: *SelfHosted, f_ty: FnType, i: OverloadSet, loc: Span) Maybe(FuncId) = {
+    types := self.arg_types(f_ty.arg);
+    self.last_loc = loc;
+    want_arity := types.len;
     
     overloads := self.dispatch.overloads&.nested_index(i.as_index());
     self.compute_new_overloads(overloads);
@@ -2623,219 +2620,92 @@ fn resolve_in_overload_set(self: *SelfHosted, arg_expr: *FatExpr, requested_ret:
     for overloads.ready { opt | 
         continue :: local_return;
         func := self.get_function(opt);
-        @if_let(requested_ret) fn Specific(want) => {
-            ret := func.finished_ret;
-            if ret { have | 
-                if !self.ask_can_assign(want, have) {
-                    //@println("[%] ret discard % for %", i, self.log_type(have), self.log_type(want));
-                    continue();
-                };
-            };
-        };
-        
         if func.arg.bindings.len != want_arity {
-            if !arg_expr.expr&.is(.StructLiteralP) {
-                continue();
-            };
-            // Maybe they're trying to pass named arguments. 
-            have_parts := arg_expr.expr.StructLiteralP.bindings&;
-            want_parts := func.arg.bindings&;
-            if want_parts.len != have_parts.len {| // TODO: allow default args
-                continue();
-            };
-            
-            // :SLOW
-            each want_parts { want_b | 
-                next :: local_return;
-                want_name := want_b.ident().or(=> continue()); // idk if this ever happens but it sure can't be named argument
-                each have_parts { have_b |
-                    have_name := have_b.ident().or(=> continue()); // idk if this ever happens but it sure can't be named argument
-                    if want_name == have_name {
-                        next();
-                    };
-                };
+            continue();
+        };
+        if func.finished_ret { have | 
+            if !self.ask_can_assign(f_ty.ret, have) {
                 continue();
             };
         };
-        
+        if func.finished_arg { found | 
+            if !self.ask_can_assign(f_ty.arg, found) {
+                continue();
+            };
+        };
         interesting&.push(opt);
     };
     
     // TODO: but what if there are more overloads coming later? 
     if interesting.len == 1 {
-        @log_event("chose overload %", interesting[0]) self;
-        func := self.get_function(interesting[0]);
-        @if(DEBUG_SPAM_LOG) self.codemap.show_error_line(func.loc);
         return(Ok = interesting[0]);
     };
     
     ::if([]FatExpr);
     blocked: List(*Action) = list(temp());
-    parts := if(arg_expr.expr&.is(.Tuple), => arg_expr.expr.Tuple.items(), => (ptr = arg_expr, len = 1));
     still_interesting: List(FuncId) = list(temp());
-    errors: List(*CompileError) = list(temp());
     for interesting& { opt | 
         continue :: local_return;
         func := self.get_function(opt);         
-        ::as_ref(FatExpr);  
         @check(self.ensure_resolved_sign(opt)) return;
         
-        if func.arg.bindings.len != want_arity {
-            @debug_assert(arg_expr.expr&.is(.StructLiteralP), "expected kwargs");
-            
-            each func.arg.bindings { want_b | 
-                next :: local_return;
-                want_name := want_b.ident().or(=> continue()); // idk if this ever happens but it sure can't be named argument
-                each arg_expr.expr.StructLiteralP.bindings& { have_b |
-                    have_name := have_b.ident().or(=> continue()); // idk if this ever happens but it sure can't be named argument
-                    if want_name == have_name {
-                        arg_expr := have_b.default&.as_ref().expect("named has value");
-                        if !func.get_flag(.Generic) {
-                            @check(self.infer_type(want_b.ty&)) return;
-                        };
-                        if want_b.ty&.ty() { param | 
-                            hint: ResultType = (Specific = param);
-                            self.last_loc = arg_expr.loc;
-                            @match(self.compile_expr(arg_expr, hint)) {
-                                fn Suspend(f) => {
-                                    blocked&.push(f); 
-                                    //still_interesting&.push(opt);
-                                    // TODO: this can't be right... if we suspended we shouldn't assume it won't match!
-                                    continue(); // we don't like it, we skip it.
-                                }
-                                fn Err(e) => {
-                                    errors&.push(e);
-                                    continue();
-                                }
-                                fn Ok() => {
-                                    if !arg_expr.ty.is_unknown() && !self.ask_can_assign(param, arg_expr.ty) {
-                                        //@println("kwards discard % for %", self.log_type(arg_expr.ty), self.log_type(param));
-                                        continue();
-                                    };
-                                }
-                            };
-                        };
-                        next();
-                    };
-                };
-                
-                // Didn't find the arg
-                continue();
-            };
-            // Found all the args and liked thier types
-            still_interesting&.push(opt);
-            continue();
-        };
-        
         enumerate func.arg.bindings { i, b | 
-            arg_expr := parts.index(i);
             if !func.get_flag(.Generic) && !b.ty&.is(.Finished) {
                 @check(self.infer_type(b.ty&)) return;
             };
             if b.ty&.ty() { param | 
-                // TODO: this isn't correct because it might make some irriversable choice based on the requested type.
-                //       really you want to be able to check all the things with no type hint first, 
-                //       then if you need more check with the hint but say its optional or something so it's more conservative. 
-                //       like ContextualField`.a` -> Value`A.a` loses information.
-                //       or just do it on a clone of the arg expr? -- Aug 2
-                //       but you cant just clone here because then you'll never make progress if you yield while compiling it. 
-                hint: ResultType = (Specific = param); // used to need if(i == 0, => .None, => 
-                self.last_loc = arg_expr.loc;
-                @match(self.compile_expr(arg_expr, hint)) {
-                    fn Suspend(f) => {
-                        blocked&.push(f); 
-                        //still_interesting&.push(opt);
-                        // TODO: this can't be right... if we suspended we shouldn't assume it won't match!
-                        continue(); // we don't like it, we skip it.
-                    }
-                    fn Err(e) => {
-                        errors&.push(e);
-                        continue();
-                    }
-                    fn Ok() => {
-                        if !arg_expr.ty.is_unknown() && !self.ask_can_assign(param, arg_expr.ty) {
-                            //@println("[%] discard % for %", i, self.log_type(arg_expr.ty), self.log_type(param));
-                            //println(func.log(self));
-                            //self.codemap.show_error_line(func.loc);
-                            continue();
-                        };
-                    }
+                if !self.ask_can_assign(param, types[i]) {
+                    continue();
                 };
             };
         };
         still_interesting&.push(opt);
     };
     
-    swap_interestings :: fn() => {
-        temp := still_interesting;
-        still_interesting = interesting;
-        interesting = temp;
-        still_interesting&.clear();
+    if still_interesting.len == 1 {
+        return(Ok = still_interesting[0]);
     };
-    check_still_interesting :: fn() => {
-        if still_interesting.len == 1 {
-            fid := still_interesting[0];
-            @log_event("chose overload %", fid) self;
-            func := self.get_function(fid);
-            @if(DEBUG_SPAM_LOG) self.codemap.show_error_line(func.loc);
-            return(Ok = fid);
-        };
-        swap_interestings();
-    };
-    
-    check_still_interesting(); 
-    //swap_interestings();
-    
-    @match(requested_ret) {
-        fn Specific(want) => {
-            for interesting& { opt | 
-                continue :: local_return;
-                func := self.get_function(opt);    
-                // TODO: i dont want to check .Generic because i want to remove the need for the annotation eventually. 
-                if !func.get_flag(.Generic) && func.finished_ret&.is_none() {
-                    @match(self.infer_return(opt)) {
-                        fn Ok() => ();
-                        fn Err(e) => return(Err = e);
-                        fn Suspend(f) => {
-                            blocked&.push(f); 
-                            // TODO: write a test where this matters
-                            still_interesting&.push(opt);
-                            // TODO: this can't be right... if we suspended we shouldn't assume it won't match!
-                            continue(); // we don't like it, we skip it.
-                        }
-                    };
-                };
-                
-                if func.finished_ret { found | 
-                    if !self.ask_can_assign(want, found) {
-                        //@println("ret discard % for %", self.log_type(found), self.log_type(want));
-                        continue();
-                    };
-                };
-                still_interesting&.push(opt);
+    temp := still_interesting;
+    still_interesting = interesting;
+    interesting = temp;
+    still_interesting&.clear();
+
+    want := f_ty.ret;
+    for interesting& { opt | 
+        continue :: local_return;
+        func := self.get_function(opt);    
+        // TODO: i dont want to check .Generic because i want to remove the need for the annotation eventually. 
+        if !func.get_flag(.Generic) && func.finished_ret&.is_none() {
+            @match(self.infer_return(opt)) {
+                fn Ok() => ();
+                fn Err(e) => return(Err = e);
+                fn Suspend(f) => {
+                    blocked&.push(f); 
+                    // TODO: write a test where this matters
+                    still_interesting&.push(opt);
+                    continue();
+                }
             };
-        }
-        @default => {
-            temp := still_interesting;
-            still_interesting = interesting;
-            interesting = temp;
         };
+        
+        if func.finished_ret { found | 
+            if !self.ask_can_assign(want, found) {
+                continue();
+            };
+        };
+        still_interesting&.push(opt);
     };
-    
-    check_still_interesting();
+
+    interesting = still_interesting;
     
     if !blocked.is_empty() {
         @log_event("block len = %", blocked.len) self;
         return(Suspend = blocked[0]);  // TODO: return all? don't just pick one. 
     };
-    ::?**CompileError;
-    if errors.items().last() { e: **CompileError | 
-        return(Err = e[]); // TODO: show all errors and say it was during overload resolution. 
-    };
     
     // TODO: don't spam log since we might discard the error.
-    @println("ambigous overload for arg % %", self.log_type(arg_expr.ty), arg_expr.log(self));
-    self.last_loc = arg_expr.loc;
+    @println("ambigous overload for % -> %", self.log_type(f_ty.arg), self.log_type(f_ty.ret));
+    self.last_loc = loc;
     @println("% matching options", interesting.len);
     for interesting { opt |
         func := self.get_function(opt);
@@ -3176,6 +3046,7 @@ fn find_const_non_blocking(self: *SelfHosted, name: Var) ?Ty(Values, Type) #once
 fn handle_declare_constant(self: *SelfHosted, name: Var, ty: *LazyType, value: *FatExpr) Maybe(void) #once = {
     @debug_assert(self.dispatch.enclosing_function.is_none(), "ICE: handle_declare_constant should have no enclosing function");
     
+    ::AutoEq(?Symbol); ::RefEq(?Symbol);
     is_rec := value.expr&.is(.PrefixMacro) && value.expr.PrefixMacro.handler.ident() == (Some = Flag.rec.ident());
     
     // infer the more useful name when you do `foo :: fn() = { ... };`
@@ -3575,14 +3446,7 @@ fn resolve_by_type(self: *SelfHosted, os: OverloadSet, f_ty: FnType, loc: Span) 
     if data.inline_cache._0& == key& {
         return(Ok = data.inline_cache._1);
     };
-    // TODO: mega HACK, should probably have a sperate codepath that doesn't want an expression. 
-    types := self.arg_types(f_ty.arg);
-    fake_args: List(FatExpr) = list(self.get_alloc());
-    for types { ty |
-        fake_args&.push(synthetic_ty(.Uninitialized, loc, ty));
-    };
-    fake_expr := synthetic_ty((Tuple = fake_args.rs()), loc, f_ty.arg);
-    fid := @check(self.resolve_in_overload_set(self.box(fake_expr), (Specific = f_ty.ret), os)) return;
+    fid := @check(self.resolve_in_overload_set(f_ty, os, loc)) return;
     data.inline_cache = (key, fid);
     (Ok = fid)
 }

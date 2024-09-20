@@ -34,6 +34,18 @@
   they have a bunch of fun stuff that doesn't use use comptime in the api and im not interested in writing myself:
   http, hashing, random, zip, magic numbers for wasm/elf/dwarf/macho
 - there's a few places `defer` would be really nice to have
+- do i want to expose the idea of different libcs? musl vs glibc vs cosmo
+- would be cool to transcribe my own linux syscalls
+- can i use address sanitizer with llvm ir? presumably that's how rust's `-Z sanitizer=address` works.
+
+```
+@impl(fn(T) = T.is_sequential_enum()) {
+    T :: @placeholder 0;
+    fn eq(a: T, b: T) bool = {
+
+    }
+};
+```
 
 ##
 
