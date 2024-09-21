@@ -11,9 +11,10 @@ I bet `eq` would get a lot better if DeriveEq could create the sub-functions it 
 adding them to the list you scan every time you type `==`, because there's a bunch where i only manually call the top of the hiarchy.
 Really i just want to be able to have generics that don't add to overload sets until you need it.
 
-- eek! noticed i had added get*build_options to the vtable twice. add error for conflicting field names.
+- eek! noticed i had added get_build_options to the vtable twice. add error for conflicting field names.
   same for function args because it feels weird to just have the later one shadow.
   TODO: but for function args i should allow multiple `*` if you just want to discard.
+-
 
 ## (Sep 19)
 

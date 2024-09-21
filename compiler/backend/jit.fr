@@ -34,7 +34,7 @@ fn clone(self: *BlockState) BlockState = {
 fn emit_bc_and_jit(program: *SelfHosted, f: FuncId) PRes #once = {
     when := ExecStyle.Jit;
     func := program.get_function(f);
-    @debug_assert(!func.get_flag(.AsmDone), "double compile");
+    @debug_assert(!func.get_flag(.RealAsmDone), "double compile");
     @debug_assert(program.get_fn_old(f).is_none(), "ICE: not .AsmDone but have pointer");
     
     mark := __temp_alloc.mark();
@@ -66,7 +66,6 @@ fn emit_bc_and_jit(program: *SelfHosted, f: FuncId) PRes #once = {
             log_ir := func.get_flag(.LogIr);
             log_asm := func.get_flag(.LogAsm);
             franca_comptime_cranelift_emit(data, f, body, program.legacy_indirection.cast(), log_ir, log_asm);
-            func.set_flag(.AsmDone);
         }, panic("unreachable: cranelift not included"));
     };
     
@@ -80,6 +79,7 @@ fn emit_bc_and_jit(program: *SelfHosted, f: FuncId) PRes #once = {
             program.flush_cranelift();
         }
     };
+    func.set_flag(.RealAsmDone);
     
     zone_end(zone);
     __temp_alloc.reset_retaining_capacity(mark);
@@ -104,24 +104,19 @@ fn do_self_jit(program: *SelfHosted, body: *FnBody) rawptr = {
 
 fn create_jit_shim(self: *SelfHosted, fid: FuncId) Res(void) = {
     opts := self.get_build_options();
-    if !opts.do_jit_shims {
-        return(.Ok);
-    };
-    if opts.comptime_jit == .Cranelift {
-        // TODO: the api i give external jits always treats it like the function is done 
-        //       and might internally do direct calls which we don't want since this is a fake. 
-        return(.Ok);  
+    if(!opts.do_jit_shims, => return(.Ok));
+    if opts.comptime_jit == .Cranelift {  // TODO: just check this at the beginning
+        panic("TODO: impl rotatecallptr on cranelift");
     };
     func := self.get_function(fid);
-    if func.cc.expect("known cc") == .Inline { // TODO: you probably still want to catch attempt to call but backends can't deal
+    if func.get_flag(.AlreadyHasShim) || func.get_flag(.RealAsmDone) { 
         return(.Ok);
     };
-    if func.get_flag(.SyntheticImmEval) || func.get_flag(.AlreadyHasShim) { // So many of these, so don't bother. 
-        return(.Ok);
-    };
+    mark := __temp_alloc.mark();
+    //@println("create shim for %", func.log(self));
     fake_body := @try(self.empty_fn_body(fid, .Jit)) return;
     
-    // TODO: copy-paste but i think i'll want this. 
+    // TODO: copy-paste 
     emit: EmitBc = (
         result = fake_body, 
         program = self, 
@@ -130,7 +125,7 @@ fn create_jit_shim(self: *SelfHosted, fid: FuncId) Res(void) = {
         var_lookup = init(temp()),
         inlined_return_addr = init(temp()),
         is_ssa_var = empty(),
-        out_alloc = self.get_alloc(),  
+        out_alloc = temp(), // this is fine because we don't deduplicate shims  
         current_block = (id = 0),
         clock = 0,
         want_log = false,
@@ -139,28 +134,26 @@ fn create_jit_shim(self: *SelfHosted, fid: FuncId) Res(void) = {
     
     entry_block := emit&.push_block(empty());
     arg_type := self.tuple_of(@slice(self.get_or_create_type(rawptr), self.get_or_create_type(FuncId)));
-    f_ty: FnType = (arg = arg_type, ret = self.get_or_create_type(rawptr), arity = 1);
+    f_ty: FnType = (arg = arg_type, ret = self.get_or_create_type(rawptr), arity = 2);
     sig := @try(self.prim_sig(f_ty, .CCallReg)) return;
     emit&.push(PushConstant = (value = report_called_uncompiled_or_just_fix_the_problem.int_from_rawptr(), ty = .P64));
     emit&.push(PushConstant = (value = SelfHosted.int_from_ptr(self), ty = .P64));
     emit&.push(PushConstant = (value = fid.as_index(), ty = .I32));
     emit&.push(CallFnPtr = (sig = emit&.push_sig(sig)));
     // All our arguments are still v-stacked so if we've found a pointer to call by now, we can just do that.
-    // Otherwise the compiler would have panic.  
+    // Otherwise the compiler would have panicked.  
     emit&.push(.RotateForImmediateCallPtr);
     emit&.push(CallFnPtr = (sig = emit&.push_sig(emit.result.signeture)));
     @try(emit&.emit_return(func.finished_ret.unwrap())) return;
     
-    addr := self.do_self_jit(fake_body);
     self.jitted&.extend_blanks(fid);
-    slot := self.jitted.dispatch.index(fid.as_index());
-    @debug_assert_eq(slot[], uncompiled_function_placeholder(), "already compiled??");
-    slot[] = addr;
-    // But we don't like actually mark it as done!
-    
-    @debug_assert(!func.get_flag(.AsmDone), "we didn't actually compile it why do we think we did??"); 
+    @debug_assert_eq(self.jitted.dispatch[fid.as_index()], uncompiled_function_placeholder(), "already compiled? why are we making a shim? %", func.log(self));
+    addr := self.do_self_jit(fake_body);
+    self.put_jitted_function(fid, addr);
+    @debug_assert(!func.get_flag(.RealAsmDone), "we didn't actually compile it why do we think we did??"); 
     func.set_flag(.AlreadyHasShim);
     self.jitted&.bump_dirty(); // TODO: you want to batch them
+    __temp_alloc.reset_retaining_capacity(mark);
     .Ok
 }
 
@@ -168,6 +161,13 @@ fn create_jit_shim(self: *SelfHosted, fid: FuncId) Res(void) = {
 //       but this way will be even better once i can lazily compile it and just lean on the backend to make the args flow through. 
 report_called_uncompiled_or_just_fix_the_problem :: @as(rawptr) fn(self: *SelfHosted, fid: FuncId) rawptr = {
     func := self.get_function(fid);
+    if func.get_flag(.RealAsmDone) { 
+        if self.get_fn_callable(fid) { addr | 
+            // It's been compiled since last we checked so just use that. 
+            return(addr);
+        };
+    };
+    // TODO: maybe better to put smuggle_libc here too
     if func.name == Flag.___this_function_is_not_real_im_just_testing_the_franca_compiler.ident() {
         return(fn(a: i64, b: i64, c: i64) i64 = {
             @println("% + % + % = %", a, b, c, a + b + c);
@@ -175,7 +175,28 @@ report_called_uncompiled_or_just_fix_the_problem :: @as(rawptr) fn(self: *SelfHo
         });
     };
     
-    @panic("Tried to call uncompiled function:\n %", self.get_function(fid).log(self))
+    // :ugly
+    first := true;
+    addr := self.poll_in_place(rawptr) { () Maybe(rawptr) |
+        r :: local_return;
+        if func.get_flag(.RealAsmDone) {
+            r(Ok = self.get_fn_callable(fid).expect("must have pointer if done"));
+        } else {
+            if !first {
+                // If its an import we're never gonna make progress by trying to compile it. 
+                if func.get_flag(.BodyIsSpecial) {
+                    @panic("Tried to call uncompiled function:\n %", self.get_function(fid).log(self));
+                };  
+            };
+            first = false;
+            func.unset_flag(.AsmDone);
+            r(Suspend = self.wait_for(Jit = fid));
+        };
+        unreachable()
+    };
+    addr := self.unwrap_report_error(rawptr, addr);
+    self.jitted&.bump_dirty();
+    addr
 };
    
 fn print_llvm_mc_dis(asm: []u32) void = {
@@ -447,7 +468,6 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $negative_slots: bool) Type =
         state: BlockState,
         block_ips: List(?*InstUnit),
         clock: u16,
-        log_asm_bc: bool,
         body: *FnBody,
         backend: B,
     );
@@ -462,7 +482,6 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $negative_slots: bool) Type =
             state = (stack = list(temp()), free_reg = empty(), free_reg_float = empty(), open_slots = list(temp())),
             block_ips = list(temp()),
             clock = 0,
-            log_asm_bc = false,
             body = body,
             backend = new(compile),
         )
@@ -473,7 +492,6 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $negative_slots: bool) Type =
         func := self.program[][].get_function(f);
         @assert(!func.body&.is(.JittedAarch64) && !func.body&.is(.ComptimeAddr), "func want body");
     
-        self.log_asm_bc = func.get_flag(.LogAsmBc);
         self.bc_to_asm(f);
         if !self.backend.valid {
             return(rawptr.zeroed());
@@ -483,7 +501,7 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $negative_slots: bool) Type =
         // TODO: assert that we don't generate code for a bunch of empty functions (just the size of prolouge + epiloge)
         //       when doing instantiations like `::tagged(T);`. should get deduplicated in bytecode or earlier. 
         // TODO: this is kinda dumb, I could just be a bit more abstract about how im emitting instructions and then also emit text assembler.
-        if TRACE_ASM || self.log_asm_bc || func.get_flag(.LogAsm) || self.backend.interesting {
+        if TRACE_ASM || func.get_flag(.LogAsm) || self.backend.interesting {
             self.program[][].codemap.show_error_line(func.loc);
             addr := u32.int_from_ptr(asm.ptr);
             @println("% is at addr=%", self.program.pool.get(func.name), addr);

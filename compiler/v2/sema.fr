@@ -301,7 +301,7 @@ fn deref_one(self: *SelfHosted, ptr: *FatExpr) Maybe(void) = {
 }
 
 fn decl_var(self: *SelfHosted, name: Var, ty: *LazyType, value: *FatExpr) Maybe(void) = {
-    @log_event("decl_var %", name&.log(self)) self; // :debug
+    @log_event("decl_var %", name&.log(self)) self;
     // TODO: this would make sense but i don't actually need it i guess since i store variable types globally.
     //@debug_assert(self.dispatch.enclosing_function.is_some(), "ICE: runtime vars must have an enclosing function");
     no_type := ty.is(.Infer);
@@ -405,11 +405,7 @@ fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = 
                 if !func.ret&.is(.Infer) {
                     @check(self.infer_return(fid)) return;
                 };
-                
-                if func.cc.is_some() && func.finished_arg.is_some() && func.finished_ret.is_some() { // TODO: we should always know cc by now but we don't
-                    @try(self.create_jit_shim(fid)) return;
-                };
-    
+                    
                 if func.return_var { return_var |
                     // TODO: this means you cant early return from non-block functions but the error message will be useless -- Jul 9 
                     @if_let(expr.expr&) fn Block(f) => {
@@ -539,6 +535,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
                     @match(get_smuggled_libc_function(self.env.comptime_arch, func.name)) {
                         fn Some(addr) => { // :copy-paste
                             self.put_jitted_function(fid, addr);
+                            func.set_flag(.RealAsmDone);
                             impls: List(FuncImpl) = list(2, self.get_alloc());
                             impls&.push(ComptimeAddr = addr.int_from_rawptr());
                             impls&.push(DynamicImport = func.name);
@@ -592,6 +589,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
                     @try(self.create_jit_shim(fid)) return;
                 } else {
                     self.put_jitted_function(fid, addr);
+                    func.set_flag(.RealAsmDone);
                     impls: List(FuncImpl) = list(2, self.get_alloc());
                     impls&.push(ComptimeAddr = addr.int_from_rawptr());
                     impls&.push(DynamicImport = func.name);
@@ -618,6 +616,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
                 func.body = (ComptimeAddr = ptr);
                 ptr := ptr.rawptr_from_int();
                 self.put_jitted_function(fid, ptr);
+                func.set_flag(.RealAsmDone);    
             };
             @case(Flag.intrinsic.ident()) => {
                 good = true;
@@ -2883,7 +2882,6 @@ fn update_function_metadata(self: *SelfHosted, func: *Func, os: ?OverloadSet) Re
             @case(Flag.cold.ident())     => func.set_flag(.Cold);
             @case(Flag.log_bc.ident())   => func.set_flag(.LogBc);
             @case(Flag.log_asm.ident())  => func.set_flag(.LogAsm);
-            @case(Flag.log_asm_bc.ident()) => func.set_flag(.LogAsmBc);
             @case(Flag.log_ir.ident())     => func.set_flag(.LogIr);
             @case(Flag.log_ast.ident())    => func.set_flag(.LogAst);
             @case(Flag.no_tail.ident())    => func.set_flag(.NoTail);
@@ -3530,14 +3528,27 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
     };
     @if_let(expr.expr&) fn FnPtr(f_expr) => {
         fid := @check(self.eval(f_expr[], FuncId)) return;
-        if self.get_fn_callable(fid) { fn_ptr | 
-            values := self.to_values(rawptr, fn_ptr);
-            expr.expr = (Value = (bytes = values, coerced = false));
-            expr.done = true;
-            return(Ok = values);
+        fn_ptr := or self.get_fn_callable(fid) {
+            opts := self.get_build_options();
+            if opts.do_jit_shims {
+                // TODO: really should be putting this in someone's callees list.
+                //       but for jit we fix when you try to call and for aot we notice when you relocate it so its kinda fine... 
+                //       --- Sep 21
+                @check(self.infer_arguments(fid)) return;
+                @check(self.infer_return(fid)) return;
+                // TODO: fixth ecases wehre you blindly return .Ok
+                @try(self.create_jit_shim(fid)) return;
+                self.get_fn_callable(fid).unwrap()
+            } else {
+                self.dispatch.enclosing_function = old_func;
+                return(Suspend = self.wait_for(Jit = fid))
+            }
         };
-        self.dispatch.enclosing_function = old_func;
-        return(Suspend = self.wait_for(Jit = fid));
+        
+        values := self.to_values(rawptr, fn_ptr);
+        expr.expr = (Value = (bytes = values, coerced = false));
+        expr.done = true;
+        return(Ok = values);
     };
     
     // The expression is too complex to deal with here. 
