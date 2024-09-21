@@ -630,6 +630,9 @@ impl<'z, M: Module> Emit<'z, M> {
                     break;
                 }
             }
+            Bc::RotateForImmediateCallPtr => {
+                panic!("TODO: implement RotateForImmediateCallPtr on cranelift")
+            }
         }
     }
 

@@ -1,3 +1,5 @@
+## (Sep 20)
+
 out of ~500ms, resolve overloads of `if`, `eq`, and `display` are each 50ms.
 so the root problem is my linear scan overloads thing, but can probably make it better by not instantiating those
 inside generics as much.
@@ -8,6 +10,10 @@ The `display` is probably becuase of ::enum which i use a lot but don't print by
 I bet `eq` would get a lot better if DeriveEq could create the sub-functions it needs for fields without
 adding them to the list you scan every time you type `==`, because there's a bunch where i only manually call the top of the hiarchy.
 Really i just want to be able to have generics that don't add to overload sets until you need it.
+
+- eek! noticed i had added get*build_options to the vtable twice. add error for conflicting field names.
+  same for function args because it feels weird to just have the later one shadow.
+  TODO: but for function args i should allow multiple `*` if you just want to discard.
 
 ## (Sep 19)
 

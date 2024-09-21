@@ -62,6 +62,7 @@ pub enum Bc {
     Nop,
     Intrinsic(Intrinsic),
     Switch(u32),
+    RotateForImmediateCallPtr, // TODO: implement this here!  
 }
 
 #[repr(C)]

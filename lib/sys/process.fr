@@ -5,39 +5,11 @@ fn cli_args() []CStr #target_os = (fn($os) => @match(os){
         // Safety: the os wouldn't lie to us... hopefully.
         slice(argv, argc)
     }
+    // TODO: uhg, its not ok to allocate here! :slow
+    //       if we're gonna be slow we might as well be super slow
+    //       but if im committed to doing it this way caller should pass in allocator or i should cache it, or something, idk. 
     fn linux() => {
-        // TODO: uhg, its not ok to allocate here! :slow
-        //       if we're gonna be slow we might as well be super slow
-        // can't use read_to_string because you can't seek the magic /proc things? 
-        out: List(u8) = list(4096, page_allocator); // :Leak
-        path :: "/proc/self/cmdline".sym().c_str();
-        f := open_read(path).unwrap();
-        loop {
-            continue :: local_return;
-            read_len := read(f, out.maybe_uninit.ptr.offset(out.len), out.maybe_uninit.len - out.len);
-            if read_len.is_ok() {
-                len := read_len.unwrap();
-                out.len += len;
-                if len != 0 {
-                    continue();
-                };
-            }; // else i sure hope we're done... TODO: return error? unwrap it?
-            
-            close(f); // TODO: defer
-            
-            // if we're gonna be slow we might as well be super slow fixme fixme fixme
-            args: List(CStr) = list(4096, page_allocator); // :Leak
-            
-            while => out.len != 0 {
-                s: CStr = (ptr = out.maybe_uninit.ptr);
-                args&.push(s);
-                len := s.str().len() + 1;
-                out.maybe_uninit.ptr = out.maybe_uninit.ptr.offset(len);
-                out.len -= len;
-            }; 
-            
-            return(args.items());
-        }
+        slowly_get_cli_args_from_proc_self(page_allocator)  // :Leak
     }
 });
 
@@ -49,8 +21,6 @@ fn timestamp() i64 = {
     clock_gettime(CLOCK_REALTIME, time_spec&);
     time_spec.seconds.mul(1000).add(time_spec.nanoseconds.div(NS_TO_MS))
 }
-
-// TODO: /proc/self/exe :Linux readlink
 
 fn get_executable_path(a: Alloc) Str #target_os = (fn($os) => @match(os){
     fn macos() => {
@@ -74,6 +44,7 @@ fn get_executable_path(a: Alloc) Str #target_os = (fn($os) => @match(os){
                 out.len = len;
                 return(out.items());
             } else {
+                // we probably didn't have enough room to read the whole file path, try again. 
                 out&.reserve(out.maybe_uninit.len);
                 // continue();
             }

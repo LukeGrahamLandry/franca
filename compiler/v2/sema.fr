@@ -345,6 +345,7 @@ fn ensure_resolved_sign(self: *SelfHosted, fid: FuncId) Maybe(void) = {
     func := self.get_function(fid);
     if(func.get_flag(.ResolvedSign), => return(.Ok));
     @try(self.resolve_sign(func)) return;
+    @try(self.require_unique_fields(func.arg&)) return;
     func.set_flag(.ResolvedSign);
     .Ok
 }
@@ -403,6 +404,10 @@ fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = 
                 
                 if !func.ret&.is(.Infer) {
                     @check(self.infer_return(fid)) return;
+                };
+                
+                if func.cc.is_some() && func.finished_arg.is_some() && func.finished_ret.is_some() { // TODO: we should always know cc by now but we don't
+                    @try(self.create_jit_shim(fid)) return;
                 };
     
                 if func.return_var { return_var |
@@ -514,6 +519,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
         @switch(tag.name) {
             @case(Flag.libc.ident()) => {
                 done :: local_return;
+                func.cc = (Some = .CCallReg);
                 good = true;
                 name := self.get_link_name(func);
                 // :io_driver TODO: all this fs stuff should be passed in (or better messaged out) by the driver
@@ -542,6 +548,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
                             // really this is fine, i just have to decide to commit to this behaviour. 
                             @eprintln("WARNING: couldn't open libc for '%', sure hope you don't try to call that at comptime", name);
                             func.body = (DynamicImport = func.name);
+                            @try(self.create_jit_shim(fid)) return;
                         }
                     };
                     done();
@@ -582,6 +589,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
                     // TODO: warn? have different #import that means we expect not at comptime?
                     @eprintln("WARNING: couldn't '%' in libc, sure hope you don't try to call that at comptime", name);
                     func.body = (DynamicImport = func.name);
+                    @try(self.create_jit_shim(fid)) return;
                 } else {
                     self.put_jitted_function(fid, addr);
                     impls: List(FuncImpl) = list(2, self.get_alloc());
@@ -1245,7 +1253,7 @@ fn construct_struct_literal(self: *SelfHosted, expr: *FatExpr, requested: Result
                     expr := synthetic_ty((Value = (bytes = value, coerced = false)), pattern.loc, field.ty);
                     expr.done = true;
                     
-                    // TODO: HACK. emit_bc expects them in order
+                    // we don't have to do it in order anymore but it means emit_bc will find it faster. 
                     bindings.insert(
                         i,
                         (
@@ -1260,6 +1268,7 @@ fn construct_struct_literal(self: *SelfHosted, expr: *FatExpr, requested: Result
                 @err_assert(runtime_fields == bindings.len, "ICE: struct field count mismatch but we don't know which is missing") return;
             };
 
+            @try(self.require_unique_fields(pattern)) return;  // doing this at the end, after all suspends
             expr.done = done;
             expr.ty = requested;
             .Ok
@@ -2985,7 +2994,7 @@ fn took_pointer_value(self: *SelfHosted, fid: FuncId) void = {
     func := self.get_function(fid);
     // Note: else is not `Suspend = self.wait_for(Jit = fid)` because of cycles, we defer to the backend to deal with finializing it. 
     //       a better system would be to generate a shim right now so we'd always have an address? 
-    if self.jitted&.get_fn_old(fid) { ptr |
+    if self.get_fn_old(fid) { ptr |
         if !func.get_flag(.TookPointerValue) {
             // We already compiled the function but didn't know we'd need to remember its address. (ie. #test fn large_struct_ret_return).
             self.created_jit_fn_ptr_value(fid, ptr.int_from_rawptr())
@@ -3882,6 +3891,7 @@ fn struct_type(self: *SelfHosted, pattern: *Pattern) Maybe(Type) #once = {
             kind = b.kind,
         );
     };
+    @try(self.require_unique_fields(pattern)) return;  // doing this at the end, after all suspends
     (Ok = self.intern_type(Struct = (
         fields = fields.rs(),
         layout_done = false,
@@ -3945,6 +3955,7 @@ fn enum_macro(self: *SelfHosted, arg: *FatExpr, target: *FatExpr) Maybe(FatExpr)
                 };
                 fields&.push(@as(F) (name, val));
             };
+            @try(self.require_unique_fields(pattern)) return;  // doing this at the end, after all suspends
         }
         fn Tuple(names) => {
             @err_assert(sequential, "@enum on tuple of names must be of int type") return;
@@ -3986,6 +3997,7 @@ fn tagged_macro(self: *SelfHosted, cases_expr: *FatExpr) Maybe(FatExpr) = {
         cases&.push(@as(C) (name, type))
     };
     
+    @try(self.require_unique_fields(pattern)) return;  // doing this at the end, after all suspends
     tag_type := self.intern_type(Enum = (raw = self.get_or_create_type(i64), fields = tag_fields.rs(), sequential = true));
     tagged_type := self.intern_type(Tagged = (cases = cases.rs(), tag = tag_type));
     self.set(cases_expr, Type, tagged_type);

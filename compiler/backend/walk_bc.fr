@@ -174,7 +174,8 @@ fn CodeGen($B: Type) Type = {
         args := self.backend&.move_to_block(block, b);
         assert(args.len.ge(block.arg_prims.len), "missing block args");
         self.stack&.push_all(args);
-        for(block.insts.items()){ inst |
+        enumerate (block.insts.items()){ i, inst |
+            inst := inst[];
             @match(inst){
                 (fn Nop() => ());
                 (fn SaveSsa(slot) => {
@@ -228,6 +229,15 @@ fn CodeGen($B: Type) Type = {
                     self.stack.len -= arg_count;
                     self.stack.len -= 1;
                     self.stack&.push_all(ret);
+                });
+                (fn RotateForImmediateCallPtr() => { // first it just has to work 
+                    next := block.insts[i + 1];
+                    assert(next&.is(.CallFnPtr), "bad RotateForImmediateCallPtr");
+                    sig := self.body.decode_sig(next.CallFnPtr.sig);
+                    arg_count: i64 = sig.arg_slots();
+                    stack := self.stack&;
+                    callee := stack.pop().unwrap();
+                    stack.insert(stack.len - arg_count, callee); 
                 });
                 (fn PushConstant(c) => {
                     v := self.backend&.inst_literal(c.value, c.ty);

@@ -35,7 +35,7 @@ fn emit_bc_and_jit(program: *SelfHosted, f: FuncId) PRes #once = {
     when := ExecStyle.Jit;
     func := program.get_function(f);
     @debug_assert(!func.get_flag(.AsmDone), "double compile");
-    @debug_assert(program.jitted&.get_fn_old(f).is_none(), "ICE: not .AsmDone but have pointer");
+    @debug_assert(program.get_fn_old(f).is_none(), "ICE: not .AsmDone but have pointer");
     
     mark := __temp_alloc.mark();
     body := @try(program.emit_bc(f, when)) return;
@@ -72,30 +72,8 @@ fn emit_bc_and_jit(program: *SelfHosted, f: FuncId) PRes #once = {
     
     @match(opts.comptime_jit) {
         fn CompilerJit() => {
-            @match(program.env.comptime_arch) {
-                fn aarch64() => {
-                    old := program.legacy_indirection.cast();
-                    a: EmitArm64 = new(old, body);
-                    addr := a&.compile(f);
-                    program.put_jitted_function(f, addr);
-                }
-                fn x86_64() => {
-                    old := program.legacy_indirection.cast();
-                    a: EmitX64 = new(old, body);
-                    addr := a&.compile(f);
-                    if a.backend.valid {
-                        program.put_jitted_function(f, addr);
-                        program.my_jit += 1;
-                    } else {
-                        program.jitted.dispatch[f.as_index()] = uncompiled_function_placeholder();
-                        call_cranelift();
-                        program.flush_cranelift();
-                        program.jitted&.bump_dirty();
-                        program.cl_jit += 1;
-                    };
-                }
-                fn wasm32() => panic("unreachable: compiler doesn't support wasm yet");
-            };
+            addr := program.do_self_jit(body);
+            program.put_jitted_function(f, addr);
         }
         fn Cranelift() => {
             call_cranelift();
@@ -108,6 +86,98 @@ fn emit_bc_and_jit(program: *SelfHosted, f: FuncId) PRes #once = {
     .Ok
 }
 
+fn do_self_jit(program: *SelfHosted, body: *FnBody) rawptr = {
+    old := program.legacy_indirection.cast();
+    f := body.func;
+    @match(program.env.comptime_arch) {
+        fn aarch64() => {
+            a: EmitArm64 = new(old, body);
+            a&.compile(f)
+        }
+        fn x86_64() => {
+            a: EmitX64 = new(old, body);
+            a&.compile(f)
+        }
+        fn wasm32() => panic("unreachable: compiler doesn't support wasm yet");
+    }
+}
+
+fn create_jit_shim(self: *SelfHosted, fid: FuncId) Res(void) = {
+    opts := self.get_build_options();
+    if !opts.do_jit_shims {
+        return(.Ok);
+    };
+    if opts.comptime_jit == .Cranelift {
+        // TODO: the api i give external jits always treats it like the function is done 
+        //       and might internally do direct calls which we don't want since this is a fake. 
+        return(.Ok);  
+    };
+    func := self.get_function(fid);
+    if func.cc.expect("known cc") == .Inline { // TODO: you probably still want to catch attempt to call but backends can't deal
+        return(.Ok);
+    };
+    if func.get_flag(.SyntheticImmEval) || func.get_flag(.AlreadyHasShim) { // So many of these, so don't bother. 
+        return(.Ok);
+    };
+    fake_body := @try(self.empty_fn_body(fid, .Jit)) return;
+    
+    // TODO: copy-paste but i think i'll want this. 
+    emit: EmitBc = (
+        result = fake_body, 
+        program = self, 
+        last_loc = func.loc,
+        locals = list(temp()),
+        var_lookup = init(temp()),
+        inlined_return_addr = init(temp()),
+        is_ssa_var = empty(),
+        out_alloc = self.get_alloc(),  
+        current_block = (id = 0),
+        clock = 0,
+        want_log = false,
+        debug = false,
+    );
+    
+    entry_block := emit&.push_block(empty());
+    arg_type := self.tuple_of(@slice(self.get_or_create_type(rawptr), self.get_or_create_type(FuncId)));
+    f_ty: FnType = (arg = arg_type, ret = self.get_or_create_type(rawptr), arity = 1);
+    sig := @try(self.prim_sig(f_ty, .CCallReg)) return;
+    emit&.push(PushConstant = (value = report_called_uncompiled_or_just_fix_the_problem.int_from_rawptr(), ty = .P64));
+    emit&.push(PushConstant = (value = SelfHosted.int_from_ptr(self), ty = .P64));
+    emit&.push(PushConstant = (value = fid.as_index(), ty = .I32));
+    emit&.push(CallFnPtr = (sig = emit&.push_sig(sig)));
+    // All our arguments are still v-stacked so if we've found a pointer to call by now, we can just do that.
+    // Otherwise the compiler would have panic.  
+    emit&.push(.RotateForImmediateCallPtr);
+    emit&.push(CallFnPtr = (sig = emit&.push_sig(emit.result.signeture)));
+    @try(emit&.emit_return(func.finished_ret.unwrap())) return;
+    
+    addr := self.do_self_jit(fake_body);
+    self.jitted&.extend_blanks(fid);
+    slot := self.jitted.dispatch.index(fid.as_index());
+    @debug_assert_eq(slot[], uncompiled_function_placeholder(), "already compiled??");
+    slot[] = addr;
+    // But we don't like actually mark it as done!
+    
+    @debug_assert(!func.get_flag(.AsmDone), "we didn't actually compile it why do we think we did??"); 
+    func.set_flag(.AlreadyHasShim);
+    self.jitted&.bump_dirty(); // TODO: you want to batch them
+    .Ok
+}
+
+// TODO: it would be nice if i had the arguments here for reporting what call you actually tried to make. 
+//       but this way will be even better once i can lazily compile it and just lean on the backend to make the args flow through. 
+report_called_uncompiled_or_just_fix_the_problem :: @as(rawptr) fn(self: *SelfHosted, fid: FuncId) rawptr = {
+    func := self.get_function(fid);
+    if func.name == Flag.___this_function_is_not_real_im_just_testing_the_franca_compiler.ident() {
+        return(fn(a: i64, b: i64, c: i64) i64 = {
+            @println("% + % + % = %", a, b, c, a + b + c);
+            a + b + c
+        });
+    };
+    
+    @panic("Tried to call uncompiled function:\n %", self.get_function(fid).log(self))
+};
+   
 fn print_llvm_mc_dis(asm: []u32) void = {
     @println("% instrucitons.", asm.len());
     hex: List(u8) = list(asm.len * 17, temp());
@@ -146,7 +216,7 @@ fn print_llvm_mc_dis(arch: Str, hex: Str) void = {
 fn get_backend_vtable() *BackendImportVTable = {
     vtable := @static(BackendImportVTable);
     vtable.get_jitted_function = fn(self: *SelfHosted, f: FuncId) ?rawptr = {
-        x := self.jitted&.get_fn_old(f);
+        x := self.get_fn_old(f);
         if x.is_some() { // needed now with mixed backend
             self.jitted&.bump_dirty();
         };
@@ -203,10 +273,13 @@ fn get_dispatch(self: *Jitted) i64 = {
     rawptr.int_from_ptr(self.dispatch.maybe_uninit.ptr)
 }
 
-fn get_fn_old(self: *Jitted, f: FuncId) ?rawptr = {
-    if(f.as_index() >= self.dispatch.len, => return(.None));
-    addr := self.dispatch[f.as_index()];
-    if(addr == uncompiled_function_placeholder(), => return(.None));
+fn get_fn_old(self: *SelfHosted, f: FuncId) ?rawptr = {
+    if(f.as_index() >= self.jitted.dispatch.len, => return(.None));
+    func := self.get_function(f);
+    if !func.get_flag(.AsmDone) {
+        return(.None);
+    };
+    addr := self.jitted.dispatch[f.as_index()];
     (Some = addr)
 }
 
@@ -397,7 +470,7 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $negative_slots: bool) Type =
     
     // Note: you can only use Self once because this doesn't reset fields.
     fn compile(self: *Emit, f: FuncId) rawptr = {
-        func := self.program[f]&;
+        func := self.program[][].get_function(f);
         @assert(!func.body&.is(.JittedAarch64) && !func.body&.is(.ComptimeAddr), "func want body");
     
         self.log_asm_bc = func.get_flag(.LogAsmBc);
@@ -420,7 +493,7 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $negative_slots: bool) Type =
     }
     
     fn bc_to_asm(self: *Emit, f: FuncId) void = {
-        ff := self.program[f]&;
+        ff := self.program[][].get_function(f);
         @if(TRACE_ASM) @println("=== F% % ===", f.as_index(), self.program.pool.get(ff.name));
         //debugln!("{}", self.program[f].body.log(self.program));
     
@@ -475,7 +548,7 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $negative_slots: bool) Type =
         @debug_assert(is_done, "emitted all blocks but no function terminator");
     }
     
-    fn emit_inst(self: *Emit, b_idx: usize, inst: Bc, i: usize) bool = {
+    fn emit_inst(self: *Emit, b_idx: i64, inst: Bc, i: usize) bool = {
         if !self.backend.valid {
             return (true);  // TODO: remove
         };
@@ -528,9 +601,7 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $negative_slots: bool) Type =
                     self.drop_slot(slot, ty.size);
                 };
             }
-            fn NoCompile() => {
-                @panic("tried to compile unreachable block in %", self.program[self.body.func]&.log(self.program[][]));
-            }
+            fn NoCompile() => @panic("tried to compile unreachable block in %", self.program[][].log_name(self.body.func));
             fn PushConstant(f) => self.state.stack&.push(Literal = f.value);
             fn PushGlobalAddr(id) => {
                 ptr, _ := self.program[][].get_baked(id)[];
@@ -539,7 +610,7 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $negative_slots: bool) Type =
             fn GetNativeFnPtr(fid) => {
                 // TODO: use adr+adrp instead of an integer. but should do that in load_imm so it always happens.
     
-                if self.asm.get_fn_old(fid) { (ptr: rawptr) |
+                if self.program[][].get_fn_old(fid) { (ptr: rawptr) |
                     self.state.stack&.push(Literal = ptr.int_from_rawptr());
                 } else {
                     reg := self.get_free_reg();
@@ -632,6 +703,16 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $negative_slots: bool) Type =
                 cases := self.body.switch_payloads.index(i.zext());
                 self.emit_switch(cases);
                 return(true);
+            }
+            fn RotateForImmediateCallPtr() => { // first it just has to work 
+                block := self.body.blocks.index(b_idx);
+                next := block.insts[i + 1];
+                assert(next&.is(.CallFnPtr), "bad RotateForImmediateCallPtr");
+                sig := self.body.decode_sig(next.CallFnPtr.sig);
+                arg_count: i64 = sig.arg_slots();
+                stack := self.state.stack&;
+                callee := stack.pop().unwrap();
+                stack.insert(stack.len - arg_count, callee); 
             }
             @default => return(self.emit_other_inst(inst));
         };

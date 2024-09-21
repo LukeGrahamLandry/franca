@@ -25,3 +25,36 @@ LinuxLibc :: @struct(
 fn uname(buf: *LinuxLibc.Utsname) voidResult #redirect(*MacosLibc.Utsname, voidResult);
 
 fn readdir(dirp: *Dir) *LinuxLibc.DirEnt #libc;  // TODO: nullable niche 
+
+fn slowly_get_cli_args_from_proc_self(alloc: Alloc) []CStr = { // :Leak
+    // can't use read_to_string because you can't seek the magic /proc things? 
+    out: List(u8) = list(4096, alloc); // :Leak
+    path :: "/proc/self/cmdline".sym().c_str();
+    f := open_read(path).unwrap();
+    loop {
+        continue :: local_return;
+        read_len := read(f, out.maybe_uninit.ptr.offset(out.len), out.maybe_uninit.len - out.len);
+        if read_len.is_ok() {
+            len := read_len.unwrap();
+            out.len += len;
+            if len != 0 {
+                continue();
+            };
+        }; // else i sure hope we're done... TODO: return error? unwrap it?
+        
+        close(f); // TODO: defer
+        
+        // if we're gonna be slow we might as well be super slow fixme fixme fixme
+        args: List(CStr) = list(4096, alloc); // :Leak
+        
+        while => out.len != 0 {
+            s: CStr = (ptr = out.maybe_uninit.ptr);
+            args&.push(s);
+            len := s.str().len() + 1;
+            out.maybe_uninit.ptr = out.maybe_uninit.ptr.offset(len);
+            out.len -= len;
+        }; 
+        
+        return(args.items());
+    }
+}
