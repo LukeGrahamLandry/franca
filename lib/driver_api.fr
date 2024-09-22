@@ -73,8 +73,8 @@ CompileError :: @tagged(
 );
 
 ComptimeEnvironment :: @struct(
-    pad4 := 0,
-    pad5 := 0,
+    _pad0 := 0,
+    _pad1 := 0, // TODO: why are these hard to replace
     make_slice_t: ?FuncId,
     bake_os: ?OverloadSet,
     fat_expr_type: ?Type,
@@ -91,7 +91,7 @@ ComptimeEnvironment :: @struct(
     // You can use query_current_arch instead (and compile both branches). 
     // TODO: I should be able to tell you the target arch... because i need to know it when choosing which inline asm for llvm. 
     comptime_arch: Arch,
-    // note to self: don't append! replace a pad!
+    inline_bc_fn_type: ?Type,
 );
 
 // Note: changing these default values requires rebuilding the compiler! (if your driver program is using ImportVTable.default_build_options). 
@@ -319,6 +319,7 @@ FuncImpl :: @rec @tagged(
     Intrinsic: Intrinsic,
     X86AsmText: Symbol,
     X86AsmBytes: RsVec(u8),
+    Bytecode: i64, // TODO: this is a *FnBody but its a pain because it wants to clone it. HACK -- Sep 21
 );
 
 Pattern :: @struct(
@@ -491,7 +492,7 @@ Bc :: @tagged(
     AddrVar: @struct(id: u16),                                    // _ -> <ptr:1>
     SaveSsa: @struct(id: u16, ty: Prim),                          // <p:1> -> _
     LoadSsa: @struct(id: u16),                                    // _ -> <p:1>
-    IncPtrBytes: u16,                                             // <ptr:1> -> <ptr:1>
+    IncPtrBytes: i64,                                             // <ptr:1> -> <ptr:1>
     PeekDup: u16,                                                 // <x:1> <skip:n> -> <x:1> <skip:n> <x:1>,
     CopyBytesToFrom: u16,                                         // <to_ptr:1> <from_ptr:1> -> _
     LastUse: @struct(id: u16),                                    // _ -> _
@@ -529,3 +530,14 @@ BasicBlock :: @struct(
     incoming_jumps: u16,
     clock: u16,
 );
+
+// TODO: share these with the compiler impls
+fn push_block(body: *FnBody, alloc: Alloc) void = {
+    body.blocks&.push((
+        insts = empty(),
+        debug = empty(),
+        arg_prims = empty(),
+        incoming_jumps = 0,
+        clock = 0,
+    ), alloc);
+}

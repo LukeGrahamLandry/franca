@@ -35,26 +35,63 @@ pub struct BbId(pub u16);
 #[repr(C, i64)]
 #[derive(Clone, Debug, Copy, PartialEq)]
 pub enum Bc {
-    CallDirect { sig: u32, f: FuncId, tail: bool },
-    CallFnPtr { sig: u32 },
-    PushConstant { value: i64, ty: Prim },
-    JumpIf { true_ip: BbId, false_ip: BbId, slots: u16 },
-    Goto { ip: BbId, slots: u16 },
+    CallDirect {
+        sig: u32,
+        f: FuncId,
+        tail: bool,
+    },
+    CallFnPtr {
+        sig: u32,
+    },
+    PushConstant {
+        value: i64,
+        ty: Prim,
+    },
+    JumpIf {
+        true_ip: BbId,
+        false_ip: BbId,
+        slots: u16,
+    },
+    Goto {
+        ip: BbId,
+        slots: u16,
+    },
     GetNativeFnPtr(FuncId),
-    Load { ty: Prim },
-    StorePost { ty: Prim },
-    StorePre { ty: Prim },
-    AddrVar { id: u16 },
-    SaveSsa { id: u16, ty: Prim },
-    LoadSsa { id: u16 },
-    IncPtrBytes { bytes: u16 },
+    Load {
+        ty: Prim,
+    },
+    StorePost {
+        ty: Prim,
+    },
+    StorePre {
+        ty: Prim,
+    },
+    AddrVar {
+        id: u16,
+    },
+    SaveSsa {
+        id: u16,
+        ty: Prim,
+    },
+    LoadSsa {
+        id: u16,
+    },
+    IncPtrBytes {
+        bytes: i64,
+    },
     PeekDup(u16),
-    CopyBytesToFrom { bytes: u16 },
-    LastUse { id: u16 },
+    CopyBytesToFrom {
+        bytes: u16,
+    },
+    LastUse {
+        id: u16,
+    },
     Unreachable,
     GetCompCtx,
     NoCompile,
-    PushGlobalAddr { id: BakedVarId },
+    PushGlobalAddr {
+        id: BakedVarId,
+    },
     Snipe(u16),
     Ret0,
     Ret1(Prim),
@@ -62,7 +99,7 @@ pub enum Bc {
     Nop,
     Intrinsic(Intrinsic),
     Switch(u32),
-    RotateForImmediateCallPtr, // TODO: implement this here!  
+    RotateForImmediateCallPtr, // TODO: implement this here!
 }
 
 #[repr(C)]

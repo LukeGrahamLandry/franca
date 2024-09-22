@@ -37,6 +37,7 @@
 - do i want to expose the idea of different libcs? musl vs glibc vs cosmo
 - would be cool to transcribe my own linux syscalls
 - can i use address sanitizer with llvm ir? presumably that's how rust's `-Z sanitizer=address` works.
+- make shim when you do an indirect call from a jit backend.
 
 ```
 @impl(fn(T) = T.is_sequential_enum()) {

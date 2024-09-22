@@ -438,7 +438,7 @@ impl<'z, M: Module> Emit<'z, M> {
                 }
                 Bc::IncPtrBytes { bytes } => {
                     let ptr = self.stack.pop().unwrap();
-                    let offset = builder.ins().iconst(I64, bytes as i64);
+                    let offset = builder.ins().iconst(I64, bytes);
                     let ptr = builder.ins().bitcast(I64, MemFlags::new(), ptr);
                     let res = builder.ins().iadd(ptr, offset);
                     let res = builder.ins().bitcast(I64, MemFlags::new(), res);

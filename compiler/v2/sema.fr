@@ -738,6 +738,33 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
                                 @if(USE_LLVM_DIS) print_llvm_mc_dis(ir.items());
                             }; 
                         };
+                        @case(Flag.bc.ident()) => {
+                            @err_assert(!good, "found multiple arches for #asm") return;
+                            type := @unwrap(self.env.inline_bc_fn_type, "#bc needs you to call `::enable_inline_bc();` first for now. (or tried to use before bootstrap)") return;
+                            callee := @check(self.immediate_eval_expr(asm, type)) return;
+                            callee := FuncId.assume_cast(callee&)[];
+                            fn_ptr := or self.get_fn_callable(callee) {| 
+                                return(Suspend = self.wait_for(Jit = callee))
+                            };
+                            body := @try(self.empty_fn_body(fid, .Aot)) return;
+                            
+                            args: List(i64) = list(1, temp());
+                            args&.push(FnBody.int_from_ptr(body));
+                            args := args.rs();
+                            hack := self&;
+                            needs_ct := func.cc.expect("known cc!!!") == .CCallRegCt;
+                            f_ty: FnType = (arg = i64, ret = void, arity = 1);
+                            @try(hack&.call_dynamic_inner(fn_ptr.int_from_rawptr(), f_ty&, args&, needs_ct)) return;
+                            
+                            if func.get_flag(.LogBc) {
+                                out: List(u8) = list(temp());
+                                self.log_bc(func, body, out&);
+                                println(out.items());
+                            };
+                            
+                            func.body = (Bytecode = FnBody.int_from_ptr(body));
+                            good = true;
+                        };
                         @default => ();
                     };
                 };
@@ -2892,6 +2919,7 @@ fn update_function_metadata(self: *SelfHosted, func: *Func, os: ?OverloadSet) Re
             @case(Flag.target_os.ident()) => {
                 func.set_flag(.TargetSplit);
             };
+            @case(Flag.bc.ident())       => func.set_flag(.BodyIsSpecial);
             @case(Flag.import.ident())   => func.set_flag(.BodyIsSpecial);
             @case(Flag.libc.ident())     => func.set_flag(.BodyIsSpecial);
             @case(Flag.redirect.ident()) => {
