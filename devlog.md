@@ -1,3 +1,13 @@
+## (Sep 24)
+
+- so like its gotta be https://github.com/llvm/llvm-project/blob/3fbf6f8bb183ad8b9157e50c442479f4ca7a9b8d/llvm/lib/MC/MCDwarf.cpp#L630
+  and clion warn try to manually select a file that the old name was "" so that matches.
+  but where the fuck is it getting that from. the empty string does not appear in my ir.
+  clang sets `source_filename` at the top level which i don't but that doesn't fix it.
+  At least i can use `objdump -d -l a.out` to check if its working instead of running it in lldb every time.
+  ah problem was my DISubProgram didn't have `file` field... so whats the scope field for then??? because thats also a file.
+  TODO: write a test with that objdump thing that you still get debug info.
+
 ## (Sep 22)
 
 - made most of the wasm tests work again, at some point it started generating calls to memcpy. hack: just had rt provide it.

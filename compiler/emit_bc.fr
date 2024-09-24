@@ -954,6 +954,9 @@ fn emit_call(self: *EmitBc, f: *FatExpr, arg: *FatExpr, result_location: ResultL
                     };
                     
                     self.push(CallDirect = (sig = self.push_sig(sig[]), f = f_id, tail = tail));
+                    if self.debug {
+                        self.debug_location_for_last_op(f.loc);
+                    };
                 };
             }
         }
@@ -968,6 +971,9 @@ fn emit_call(self: *EmitBc, f: *FatExpr, arg: *FatExpr, result_location: ResultL
             // TODO: allow tail calling through pointer depending on the calling convention 
             @try(self.emit_runtime_call(f_ty.ty, f_ty.cc, arg, result_location, can_tail) { sig, _tail |
                 self.push(CallFnPtr = (sig = self.push_sig(sig[])));
+                if self.debug {
+                    self.debug_location_for_last_op(f.loc);
+                };
             }) return;
             if result_location == .ResAddr && will_use_indirect_ret {
                 self.push(Snipe = 0); // original ret ptr
@@ -1026,7 +1032,6 @@ fn push_sig(self: *EmitBc, sig: PrimSig) u32 = {
     self.result.sig_payloads&.push(sig, self.out_alloc);
     self.result.sig_payloads.len.sub(1).trunc()
 }
-
 
 fn emit_block_expr(self: *EmitBc, expr: *FatExpr, result_location: ResultLoc, can_tail: bool) PRes #once = {
     block := expr.expr.Block&;
@@ -1545,6 +1550,15 @@ fn push_to(self: *EmitBc, b: BbId, inst: Bc) void = {
     self.result.mix_hash(inst&.tag().ordinal(), 9801);
     self.result[b].insts&.push(inst, self.out_alloc);
     self.program.bc_count += 1;
+}
+
+fn debug_location_for_last_op(self: *EmitBc, loc: Span) void = {
+    block := self.result[self.current_block]&;
+    // TODO: This representation is wasteful because most instructions aren't calls. 
+    while => block.debug.len < block.insts.len { // :SLOW should at least reserve
+        block.debug&.push(Span.zeroed(), self.out_alloc); 
+    };
+    block.debug[block.insts.len - 1] = loc;
 }
 
 fn mix_hash(self: *FnBody, i: i64, spice: i64) void = {

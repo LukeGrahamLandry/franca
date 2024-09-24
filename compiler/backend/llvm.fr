@@ -30,7 +30,7 @@ EmitLlvm :: @struct(
     current: BbId,
     next_var: i64 = 0,
     next_debug_info: i64 = 0,
-    current_debug_info: i64 = 0,
+    current_debug_info := 0,
     debug_info: List(u8),
     debug_unit: i64 = 0,
     debug_file: i64 = 0,
@@ -38,6 +38,7 @@ EmitLlvm :: @struct(
     debug_addr_type: i64 = 0,
     arch: Arch,
     os: Os,
+    debug_file_scopes: HashMap(Str, i64),
     $Val := LlvmVal, // TODO: const can't be first (doesn't parse).  -- Jun 14
 );
 
@@ -45,7 +46,15 @@ emit_llvm_impl :: { T :: CodeGen(EmitLlvm); T.emit };
     
 // TODO: dependency problem so can't call this `init`
 fn new(comp: CompCtx, alloc: Alloc, arch: Arch, os: Os) EmitLlvm #inline = {
-    s: EmitLlvm = (program = comp.data.cast()[][], out = init(12, alloc), current = BbId.zeroed(), debug_info = list(alloc), arch = arch, os = os);
+    s: EmitLlvm = (
+        program = comp.data.cast()[][], 
+        out = init(12, alloc), 
+        current = BbId.zeroed(), 
+        debug_info = list(alloc), 
+        arch = arch, 
+        os = os,
+        debug_file_scopes = init(alloc),
+    );
     
     // TODO: how the hell am i supposed to know these numbers without just compiling a c program with clang. 
     //       its not a big deal tho cause passing -target to clang overrides this. 
@@ -81,24 +90,52 @@ fn next_debug(self: *EmitLlvm) i64 = {
     self.next_debug_info - 1
 }
 
+fn debug_scope_for_file(self: *EmitLlvm, filename: Str) i64 = {
+    if self.debug_file_scopes&.get(filename) { id | 
+        return(id);
+    };
+    id := self.next_debug();
+    self.debug_file_scopes&.insert(filename, id);
+    // TODO: check no \n or " in filenames? its just whatever shit you passed to codemap for now. 
+    directory := filename.pop_path_segment();
+    file := filename.slice(directory.len, filename.len);
+    if directory.len > 0 {
+        // TODO: do i need to do this? 
+        directory.len -= 1; // trailing /
+    };
+    @fmt(self.debug_info&, "!% = !DIFile(filename: \"%\", directory: \"%\")\n", id, file, directory);
+    id
+}
+
 // TODO: my impression is unnamed_addr doesn't help size (even with -no-deduplication) so maybe take it out -- Aug 13
 fn emit_function_husk(self: *EmitLlvm, fid: FuncId, signeture: PrimSig, $emit_body: @Fn() void) void = {
     start_bucket_index := self.out.i;
     start_index := self.out&.current().len();
+    func := self.program.get_function(fid);
+    name: List(u8) = list(temp());
+    self.fmt_fn_name(fid, name&);
+    
+    // this has to happen before emit_body because that calls setup which wants to emit debug info for variables. 
+    if self.program.get_build_options()[].debug_info {
+        self.current_debug_info = self.next_debug();
+        place := self.program.codemap.get_whole_line(func.loc);
+        file_scope := self.debug_scope_for_file(place.filename);
+        source_name := self.program.pool.get(func.name); 
+        // lldb says <stdin> instead of the filename if you don't have the `file` field. so whats the scope field for then???
+        template :: "!% = distinct !DISubprogram(name: \"%\", linkageName: \"%\", unit: !%, scope: !%, file: !%, type: !%, spFlags: DISPFlagDefinition)\n";
+        @fmt(self.out&.current(), template, self.current_debug_info, source_name, name.items(), self.debug_unit, file_scope, file_scope, self.debug_func_type);
+    };
     
     if self.program.get_build_options()[].retain_function_names {
         self.out&.push_all("define ccc ");
     } else {
         self.out&.push_all("define private ccc ");
     };
-    name: List(u8) = list(temp());
-    self.fmt_fn_name(fid, name&);
     self.write_header(signeture, name.items()) {arg_index|
         s := @format("%arg%", "%", arg_index) temp();
         s.items()
     };
     self.out&.current().push_all(" unnamed_addr ");
-    func := self.program.get_function(fid);
     if func.get_flag(.Cold) {
         // Note: this doesn't do anything on -Os unless you also pass `-mllvm -hot-cold-split=true`
         self.out&.current().push_all(" cold optsize noinline ");
@@ -109,7 +146,6 @@ fn emit_function_husk(self: *EmitLlvm, fid: FuncId, signeture: PrimSig, $emit_bo
     };
     self.out&.current().push_all(" \"frame-pointer\"=\"all\" "); // must be before debug info!
     if self.program.get_build_options()[].debug_info {
-        self.current_debug_info = self.next_debug();
         @fmt(self.out&.current(), "!dbg !%", self.current_debug_info);
     };
    
@@ -117,11 +153,6 @@ fn emit_function_husk(self: *EmitLlvm, fid: FuncId, signeture: PrimSig, $emit_bo
     emit_body();
     self.out&.current().push_all("}\n");
     
-    if self.program.get_build_options()[].debug_info {
-        source_name := self.program.pool.get(func.name); 
-        template :: "!% = distinct !DISubprogram(name: \"%\", linkageName: \"%\", unit: !%, scope: !%, type: !%, spFlags: DISPFlagDefinition)\n";
-        @fmt(self.out&.current(), template,  self.current_debug_info, source_name, name.items(), self.debug_unit, self.debug_file, self.debug_func_type);
-    };
     
     if func.get_flag(.LogIr) {
         @println("[#log_ir % %]", fid, self.program.pool.get(func.name));
@@ -173,9 +204,9 @@ fn emit_entry_points_and_debug_info(gen: *CodeGen(EmitLlvm), comp: CompCtx, fns:
         d_version := self.next_debug();
         level := self.next_debug();
         
-        @fmt(self.out&.current(), "!% =  !{i32 8, !\"PIC Level\", i32 2}\n", level); // no idea what that means, its what rustc does
+        @fmt(self.out&.current(), "!% = !{i32 8, !\"PIC Level\", i32 2}\n", level); // no idea what that means, its what rustc does
         @fmt(self.out&.current(), "!% = !{i32 2, !\"Debug Info Version\", i32 3}\n", version);
-        @fmt(self.out&.current(), "!% = !{i32 2, !\"Dwarf Version\", i32 2}\n", d_version);
+        @fmt(self.out&.current(), "!% = !{i32 2, !\"Dwarf Version\", i32 4}\n", d_version);
         self.out&.push_bucket(self.debug_info);
         self.debug_info = List(u8).zeroed();
         @fmt(self.out&.current(), "!llvm.module.flags = !{!%, !%, !%}", version, d_version, level);
@@ -477,6 +508,13 @@ fn setup(self: *EmitLlvm, body: *FnBody, vars_out: *List(EmitLlvm.Val)) void = {
     // TODO: waste for ssa vars, they just get set to the value. -- Jun 14
     vars := body.vars.items();
     do_debug := self.program.get_build_options()[].debug_info;
+    
+    file_scope := 0;
+    if do_debug {
+        func := self.program.get_function(body.func);
+        place := self.program.codemap.get_whole_line(func.loc);
+        file_scope = self.debug_scope_for_file(place.filename);
+    };
     enumerate(vars) {i, ty|
         v := self.get_var(.P64);
         vars_out.push(v);
@@ -490,7 +528,7 @@ fn setup(self: *EmitLlvm, body: *FnBody, vars_out: *List(EmitLlvm.Val)) void = {
                 location := self.next_debug();
                 scope := self.current_debug_info;
                 @fmt(self.debug_info&, "!% = !DILocalVariable(name: \"%\", scope: !%, file: !%, type: !%)\n",
-                    local, name, scope, self.debug_file, self.debug_addr_type);
+                    local, name, scope, file_scope, self.debug_addr_type);
                 @fmt(self.debug_info&, "!% = !DILocation(line: 1, column: 1, scope: !%)\n", location, scope);
                 // because the hardest part of compilers is how few times you need to write the word "metadata" apparently 
                 template :: "    call void @llvm.dbg.declare(metadata ptr %, metadata !%, metadata !DIExpression()), !dbg !%\n";
@@ -669,16 +707,19 @@ fn inst_call(self: *EmitLlvm, args: Slice(LlvmVal), sig: PrimSig, loc: ?Span, $d
     
     self.out&.current().push_all(")");
     
-    if self.program.get_build_options()[].debug_info && self.current_debug_info != 0 {
-        // TODO: line info
+    if self.current_debug_info != 0 {
+        // we know self.program.get_build_options()[].debug_info is true. 
         // Fixes "inlinable function call in a function with debug info must have a !dbg location"
         location := self.next_debug();
         line := 1;
         column := 1;
         if loc { loc |
-            place := self.program.codemap.get_whole_line(loc);
+            // TODO: we should track line numbers instead of byte indexes if that's always what we want. -- Sep 24
+            place := self.program.codemap.get_whole_line(loc); // :SLOW
             line = place.line;
             column = place.col;
+            // TODO: if this is from a macro / inlined something the location could be wrong because current_debug_info uses the file containing the outer function, 
+            //       but this code might not be in that file and then the line we report is junk. 
         };
         @fmt(self.debug_info&, "!% = !DILocation(line: %, column: %, scope: !%)\n", location, line, column, self.current_debug_info);
         @fmt(self.out&.current(), ", !dbg !%", location);
