@@ -53,6 +53,7 @@ SelfHosted :: @rec @struct(
     legacy_indirection: Compiler = Compiler.zeroed(),
     stack_base: i64,
     bc_count := 0,
+    comptime_libraries: HashMap(Symbol, DlHandle),
 );
 
 OverloadKey :: @struct(arg: Type, req: Type);
@@ -247,13 +248,6 @@ fn find_std_lib(a: Alloc) ?Str = {
     .None
 }
 
-fn pop_until_endswith(self: *List(u8), suffix: []u8) bool = {
-    while (=> !self.is_empty() && !self.items().ends_with(suffix)) {
-        self.pop();
-    };
-    !self.is_empty()
-}
-
 // TODO: pass requested type through generic args so this isn't so clunky. -- Jun 23
 fn init_self_hosted(build_options: *BuildOptions) *SelfHosted = {
     stack_base := 0;
@@ -330,9 +324,17 @@ fn init_self_hosted(build_options: *BuildOptions) *SelfHosted = {
         finished_layout_deep = empty(a),
         dispatch = init(a),
         stack_base = i64.int_from_ptr(stack_base&),
+        comptime_libraries = init(a),
     );
     self&.init_fixed_types();
     self.pool.fill_fixed_flags();
+    
+    if find_os_libc_dylib() { libc_path | 
+        libc := dlopen(libc_path, .Lazy);
+        if !libc.lib.is_null() { 
+            self.comptime_libraries&.insert(Flag.libc.ident(), libc);
+        };
+    };
     
     self := a.boxed(SelfHosted, self);
     

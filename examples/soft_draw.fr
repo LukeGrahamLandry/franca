@@ -135,30 +135,12 @@ fn driver(vtable: *ImportVTable) void #export = {
     @assert(!objc.lib.is_null(), "failed to open objc");
     cg := dlopen(c_str(@symbol "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics"), DlFlag.Lazy);
     @assert(!cg.lib.is_null(), "failed to open coregraphics");
-    data: Data = (objc = objc, cg = cg, vtable = vtable);
     data := Data.raw_from_ptr(data&);
     opts := vtable.default_build_options();
-    opts.driver_vtable_ptr.resolve_comptime_import = (Some = comptimelibs_resolve_import);
-    opts.driver_vtable_user_data = data;
-
-    // TODO: be able to use overloading and manually resolve when you need a function pointer with the first arg type erased. 
-    comptimelibs_resolve_import :: fn(userdata: rawptr, comp: Compiler, f: FuncId, lib_name: Symbol, fn_name: Symbol) ?rawptr = {
-        data := Data.ptr_from_raw(userdata);
-        ctx := data.vtable.with(comp);
-        lib_name := ctx.get_string(lib_name);
-        fn_name := ctx.get_string(fn_name); // TODO: expose get_c_str function
-        lib := @switch(lib_name) {
-            @case("objc") => data.objc;
-            @case("CoreGraphics") => data.cg;
-            @default => panic("TODO: this will hang because compiler is dumb rn.");
-        }
-        // TODO: dont unwrap here and let this function return if available for jit and aot seperatly
-        f := dlsym(lib, fn_name.maybe_borrow_cstr(temp()));
-        @assert(!f.is_null(), "Missing function '%' in '%'", fn_name, lib_name);
-        (Some = f)
-    };
     comp := vtable.new_with_src(src.items(), opts);
     ctx := vtable.with(comp);
+    ctx.add_comptime_lib(self.ctx.intern_string("objc"), objc);
+    ctx.add_comptime_lib(self.ctx.intern_string("CoreGraphics"), cg);
     
     main_sym := {vtable.intern_string}(comp, "main");
     main_f := {vtable.find_unique_func}(comp, main_sym).unwrap();

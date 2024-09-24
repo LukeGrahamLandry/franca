@@ -629,9 +629,9 @@ impl<'z, M: Module> Emit<'z, M> {
                     builder.ins().trap(TrapCode::UnreachableCodeReached);
                     break;
                 }
-            }
-            Bc::RotateForImmediateCallPtr => {
-                panic!("TODO: implement RotateForImmediateCallPtr on cranelift")
+                Bc::RotateForImmediateCallPtr => {
+                    panic!("TODO: implement RotateForImmediateCallPtr on cranelift")
+                }
             }
         }
     }

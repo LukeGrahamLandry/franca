@@ -1,18 +1,33 @@
-// TODO: this works on x86 jit and qbe/llvm aot. 
-//       - i bet the arm problem is IncPtrBytes cant be negative 
+//!
+//! When you mark functions as `#asm #bc` they provide thier own bytecode at comptime. 
+//! This is in the compiler's unstable internal format, it will change whenever is convenient.
+//!
+//! Here we write a BrainFuck frontend so you can write individual functions with that. 
+//! They're not interpreted at runtime, the translation to bytecode happens at comptime,
+//! and then they're fed through the same backend as the rest of your program (our own jit or llvm, etc).
+//!
+//! You can check this yourself by running `strings` on an AOT binary of this program. 
+//! You'll notice that the bf text source code isn't in there because we don't need it. 
+//! If you run `objdump` you'll find the code for the print_hello_world function just like any other. 
+//!
+//! This also isn't a macro that expands to franca code that has to go through the whole pipeline 
+//! (which is what you'd do with a proc macro if you wanted this in rust) 
+//! but you still get the benifit of automagically supporting all backends. 
+//! If you think this is cool and want a similar type of metaprogramming in a more real language 
+//! you could try https://terralang.org/ They have an example that implements brainfuck with "generative programming constructs". 
+//! But again, theirs is generating ast nodes that then have to get compiled. 
+//! So it looks less ugly but isn't as quirky and fun as mine. To each thier own. 
+//!
+
 // TODO: the signeture you can make should be []u8 and wrap around / do bounds checks. 
-
-// - needing the loads/stores for phis is annoying
-// - to work on llvm i needed the entry block to have the right arg types
-// - llvm cares about i64 vs i8
-// - llvm doesnt jsut compare to 0 it wants 0 or 1 exactly. 
-
-fn print_hello_world(mem: *u8) void #asm #bc = (fn(body) = inline_bf(body, 
-    "++++++++[>++++[>++>+++>+++>+<<<<-]>+>+>->>+[<]<-]>>.>---.+++++++..+++.>>.<-.<.+++.------.--------.>>+.>++."
+fn print_hello_world(mem: *u8) void #asm #bc #log_asm = (fn(body) = inline_bf(body, 
+    //"++++++++[>++++[>++>+++>+++>+<<<<-]>+>+>->>+[<]<-]>>.>---.+++++++..+++.>>.<-.<.+++.------.--------.>>+.>++."
+    "++++++++[>++++[>++>+++>+++>+<<<<-]>+>+>->>+[<.]<-]>>.>---.+++++++..+++.>>.<-.<.+++.------.--------.>>+.>++."
 ));
 
 fn main() = {
     mem: List(u8) = repeated(0, 30000, temp());
+    println("do call");
     print_hello_world(mem.maybe_uninit.ptr);
     exit(0);
 }
@@ -27,6 +42,7 @@ fn inline_bf(body: *FnBody, bf: Str) void = {
     putchar : FuncId : fn(c: u8) void = {
         out := @slice(c);
         print(out);
+        //println(@as(i64) c.zext());
     };
     _live := @as(rawptr) putchar; // TODO: HACK 
 
@@ -162,4 +178,14 @@ fn inline_bf(body: *FnBody, bf: Str) void = {
 
     code := body.blocks[current.id.zext()].insts&; 
     code.push(.Ret0, a);
+}
+
+#test fn bf_add() = {
+    fn add_numbers(mem: *u8) void #asm #bc = (fn(body) = inline_bf(body, 
+        "[->+<]"
+    ));
+    
+    mem := @slice(@as(u8) 12, @as(u8) 13);
+    add_numbers(mem.ptr);
+    assert_eq(mem, @slice(@as(u8) 0, @as(u8) 25));
 }

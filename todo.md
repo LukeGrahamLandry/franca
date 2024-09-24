@@ -33,11 +33,13 @@
 - parse zig headers and generate extern declarations (like examples/c_bindgen). then i could use bits of thier standard libary.
   they have a bunch of fun stuff that doesn't use use comptime in the api and im not interested in writing myself:
   http, hashing, random, zip, magic numbers for wasm/elf/dwarf/macho
+- should make it easy to build rust/zig projects from your driver program since they can generally cross compile well and have libraries you might want.
 - there's a few places `defer` would be really nice to have
 - do i want to expose the idea of different libcs? musl vs glibc vs cosmo
 - would be cool to transcribe my own linux syscalls
 - can i use address sanitizer with llvm ir? presumably that's how rust's `-Z sanitizer=address` works.
-- make shim when you do an indirect call from a jit backend.
+- have it download stuff for you (ask first!) like qbe, sokol, llvm?
+  at least make the error messages for missing stuff more helpful.
 
 ```
 @impl(fn(T) = T.is_sequential_enum()) {

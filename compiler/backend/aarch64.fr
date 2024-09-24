@@ -299,9 +299,7 @@ fn stack_to_ccall_reg(self: *EmitArm64, types: [] Prim, special: bool) i64 = {
         
         @if_let(self.state.stack[stack_index]) fn Increment(f) => {
             if f.reg == next_int {
-                if f.offset_bytes != 0 {
-                    self.asm.push(add_im(Bits.X64, f.reg, f.reg, f.offset_bytes, 0));
-                };
+                self.apply_offset(f.reg, f.reg, f.offset_bytes);
 
                 // if we happen to already be in the right register, cool, don't worry about it.
                 @if(TRACE_ASM) @print("|x% already| ", f.reg);
@@ -345,7 +343,7 @@ fn stack_to_ccall_reg(self: *EmitArm64, types: [] Prim, special: bool) i64 = {
             fn Increment(f) => {
                 @debug_assert_ne(next_int, f.reg);
                 // even if offset_bytes is 0, we need to move it to the right register. and add can encode that mov even if reg is sp.
-                self.asm.push(add_im(Bits.X64, next_int, f.reg, f.offset_bytes, 0));
+                self.apply_offset(next_int, f.reg, f.offset_bytes);
                 self.drop_reg(f.reg);
             }
             fn Literal(x) => self.load_imm(next_int, x);
@@ -371,7 +369,7 @@ fn stack_to_ccall_reg(self: *EmitArm64, types: [] Prim, special: bool) i64 = {
                 // we know emit_bc often makes the return location a stack variable. 
                 // and for now, since we just spilled, any other register would have been wastefully stored so we'd be in the Spill case.
                 @assert(f.reg == sp, "spilled so must be in sp");
-                self.asm.push(add_im(Bits.X64, x8, f.reg, f.offset_bytes, 0))
+                self.apply_offset(x8, f.reg, f.offset_bytes);
             }
             fn Literal(v) => self.load_imm(x8, v);
             fn Spill(slot) => self.load_u64(x8, sp, slot.id);
@@ -478,14 +476,13 @@ fn load_one(self: *EmitArm64, register_type: i64, dest_reg: i64, src_addr_reg: i
     @debug_assert_ne(dest_reg, sp, "ICE: tried to load into sp");
     scale := 1.shift_left(register_type);
     extra := offset_bytes.mod(scale);
-    if extra == 0 {
+    if extra == 0 && offset_bytes >= 0 {
         self.asm.push(ldr_uo_any(register_type, dest_reg, src_addr_reg, @as(u12) @as(i64) (offset_bytes / scale)));
         @debug_assert((@as(i64) offset_bytes) / scale < 1.shift_left(12), "ICE: not enough bits for load");
     } else {
         // Note: this relies on the access actually being aligned once you combine the value in the register without our non %8 offset.
         reg := self.get_free_reg();
-        @debug_assert((@as(i64) offset_bytes) < 1.shift_left(12), "ICE: not enough bits for load");
-        self.asm.push(add_im(Bits.X64, reg, src_addr_reg, @as(u12) @as(i64) offset_bytes, 0));
+        self.apply_offset(reg, src_addr_reg, offset_bytes);
         self.asm.push(ldr_uo_any(register_type, dest_reg, reg, 0));
         self.drop_reg(reg);
     }
@@ -498,21 +495,40 @@ fn store_u64(self: *EmitArm64, src_reg: i64, dest_addr_reg: i64, offset_bytes: i
 fn store_one(self: *EmitArm64, register_type: i64, src_reg: i64, dest_addr_reg: i64, offset_bytes: i64) void = {
     scale := 1.shift_left(register_type);
     if src_reg == sp {
-        // TODO: this is weird. can only happen for exactly the sp, not an offset from it. so i guess somewhere else is saving an add, maybe its fine. -- May 2
         reg := self.get_free_reg();
         self.asm.push(add_im(Bits.X64, reg, sp, 0, 0)); // not mov!
         self.store_one(register_type, reg, dest_addr_reg, offset_bytes);
         self.drop_reg(reg);
         return();
     };
-    if offset_bytes.mod(8) == 0 {
+    if offset_bytes.mod(8) == 0 && offset_bytes >= 0 {
         self.asm.push(str_uo_any(register_type, src_reg, dest_addr_reg, @as(u12) @as(i64) (offset_bytes / scale)));
         @debug_assert((@as(i64) offset_bytes) / scale < 1.shift_left(12), "ICE: not enough bits for store");
     } else {
         reg := self.get_free_reg();
-        self.asm.push(add_im(Bits.X64, reg, dest_addr_reg, @as(u12) @as(i64) offset_bytes, 0));
+        self.apply_offset(reg, dest_addr_reg, offset_bytes);
         self.asm.push(str_uo_any(register_type, src_reg, reg, 0));
         self.drop_reg(reg);
+    };
+}
+
+fn apply_offset(self: *EmitArm64, dest: i64, src: i64, offset_bytes: i64) void = {
+    if dest == src && offset_bytes == 0 {
+        return();
+    };
+    if offset_bytes >= 0 {
+        if offset_bytes >= 1.shift_left(12) { 
+            // TODO: probably never get here? there used to be only one codepath (try_spill) that considered this case. 
+            self.asm.push(add_im(Bits.X64, dest, src, @as(u12) offset_bytes.shift_right_logical(12), 1));
+            mask := 1.shift_left(12) - 1;
+            self.asm.push(add_im(Bits.X64, dest, dest, @as(u12) offset_bytes.bit_and(mask), 0));
+        } else {
+            self.asm.push(add_im(Bits.X64, dest, src, @as(u12) offset_bytes, 0));
+        };
+    } else { 
+        // emit_bc never uses negative IncPtrBytes but examples/bf2bc does.
+        @debug_assert(offset_bytes.abs() < 1.shift_left(12), "not enough bits to encode offset %", offset_bytes);
+        self.asm.push(sub_im(Bits.X64, dest, src, @as(u12) -offset_bytes, 0));
     };
 }
 
@@ -526,9 +542,7 @@ fn try_spill(self: *EmitArm64, i: usize, do_ints: bool, do_floats: bool) bool = 
             // Note: this assumes we don't need to preserve the value in the reg other than for this one v-stack slot.
             slot := self.create_slots(8);
             @if(TRACE_ASM) @print("(spill (x% + %) -> [sp, %]) ", f.reg, f.offset_bytes, slot.id);
-            if f.offset_bytes != 0 {
-                self.asm.push(add_im(Bits.X64, f.reg, f.reg, f.offset_bytes, 0));
-            };
+            self.apply_offset(f.reg, f.reg, f.offset_bytes);
     
             self.store_u64(f.reg, sp, slot.id);
             self.drop_reg(f.reg);
@@ -556,13 +570,7 @@ fn in_reg(self: *EmitArm64, val: AsmVal) i64 = {
         fn Increment(f) => {
             if f.offset_bytes > 0 {
                 out := if(f.reg == sp, => self.get_free_reg(), => f.reg);
-                if f.offset_bytes < 1.shift_left(12) {
-                    self.asm.push(add_im(Bits.X64, out, f.reg, f.offset_bytes, 0));
-                } else {
-                    self.asm.push(add_im(Bits.X64, out, f.reg, @as(u12) @as(i64) f.offset_bytes.shift_right_logical(12), 1));
-                    mask := 1.shift_left(12) - 1;
-                    self.asm.push(add_im(Bits.X64, out, f.reg, @as(u12) @as(i64) f.offset_bytes.bit_and(mask), 0));
-                };
+                self.apply_offset(out, f.reg, f.offset_bytes);
                 f.reg = out;
             };
             f.reg

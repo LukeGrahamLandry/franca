@@ -1,0 +1,163 @@
+//
+// We are not alone in the universe!
+// The goal here is to make it easy (or at least not excruciatingly painful) to use libraries written in c, c++, zig, rust, etc. 
+// Also since I can't do my own binaries yet, AOT builds emit llvm-ir or asm (via qbe) that someone else has to handle.
+// Its just so painful to manually execvp in every driver program. 
+// 
+// This should probably avoid using comptime-only stuff so it might be useful to other people.  
+//
+
+//
+// zig src      -> object file   | arguments?    | zig
+// rust src     -> object file   | features      | cargo
+// c src        -> object file   | define -I     | clang, gcc, zig
+// obj-c src    -> object file                   | clang
+// c++ src      -> object file                   | clang, zig
+// llvm-ir text -> object file                   | clang
+// qbe-ir text  -> asm text      |               | qbe
+// asm text     -> object file                   | clang, gcc
+// object files -> executable    | -L -framework | clang, gcc, zig
+// 
+// But you also need to be able to do this targetting all architectures. 
+// Rust can do its own code (just have to install the right toolchain) but not libc. 
+// Zig is fantastic and will go find whatever you need for you. Love it. 
+// Rust and Zig are a pain because you have to hope someone bothered to expose a c interface. 
+//
+// Choose debug or release mode. 
+// Static or dynamic linking. 
+//    You probably always want static except that libc is sometimes a special snowflake. 
+//    But gpu stuff probably also need to be supplied by the system?  
+// Also we always need dylibs to call something at comptime. 
+// Where do we cache things? 
+// Have to ask people to not put your filepaths in the binary (*cough* rust *cough*)
+//
+// I thought i wanted just code for everything but I suppose it really needs to be declaritive because the combinatorics get crazy.  
+// Maybe I'm just reinventing build.zig. For now I don't think I want to be opinionated about setting up a dependency graph. 
+// Just start with making it easy to invoke other compilers with consistant options. 
+//
+
+LibcImpl :: @enum(i64) (gnu, musl);
+ClangLang :: @enum(i64) (ir, c, cpp, objc);
+
+CargoCmd :: @struct(
+    manifest_path: Str,
+    // we need this later to form the paths to output files. 
+    name: Str, 
+    target_triple: Str,
+    release := true,
+    // we need this later to form the paths to output files. 
+    // You have to set this explicitly if its a workspace, otherwise we can guess based on manifest_path. 
+    target_directory: ?Str = .None, 
+);
+
+ClangCmd :: @struct(
+    input_files: []Str = empty(),
+    macro_defines: []Str = empty(),     // -D, ie. "SOME_LIB_IMPL" or "FOO=5"
+    include_paths: []Str = empty(),     // -I,
+    macos_frameworks: []Str = empty(),  // -framework, ie. MetalKit
+    raw_source: ?Str = .None,
+    lang := ClangLang.c, 
+    output_path: Str,
+    optimize := ClangOptLevel.small,
+    target_triple: Str,
+    obj_type: LinkTime,
+);
+
+ClangOptLevel :: @enum(i64) (zero, one, two, small);
+
+BuildError :: @tagged(
+    Command: @struct(command: []Str, stdout: Str, stderr: Str),  // TODO: do you ever care what the actual status is? 
+);
+
+fn run(cmd: CargoCmd) Result(void, *BuildError) = {
+    args: List(Str) = list(10, temp());
+    args&.push_all(@slice("cargo", "build", "--manifest-path", cmd.manifest_path, "--target", cmd.target_triple);
+    if cmd.release {
+        args&.push("--release");
+    };
+    
+    @try(run(args.items())) return;
+    .Ok
+}
+
+// exe: ["clang"] or ["zig", "cc"]
+fn run(cmd: ClangCmd, exe: []Str) Result(void, *BuildError) = {
+    args: List(Str) = list(10, temp());
+    args&.push_all(exe);
+    
+    for lib.include_paths { s | 
+        s := @format("-I%", s) temp();
+        args&.push(s.items());
+    };
+    
+    for lib.macro_defines { s | 
+        s := @format("-D%", s) temp();
+        args&.push(s.items());
+    };
+    
+    @match(cmd.lang) {
+        fn ir()   => args&.push_all(@slice("-x", "ir"));
+        fn objc() => args&.push_all(@slice("-x", "obj-c"));
+        fn cpp()  => args&.push_all(@slice("-x", "c++"));
+        fn c()    => (); // thats the default
+    };
+    
+    src_file: ?TmpFile = .None;
+    if lib.raw_c_source { src | 
+        src_file = (Some = open_temp_file());
+        f := src_file.Some&;
+        f.fd&.write(src);
+        args&.push(f.s_name()); // Note: this points into the thing so it can't move. // TODO: footgun :(
+    };
+    
+    for lib.input_files { s | 
+        args&.push(s);
+    };
+    
+    ::enum(LinkTime);
+    @match(cmd.linking) {
+        fn Static() => {
+            args&.push("-c");
+            args&.push("-static");// TODO: only tracy?
+        };
+        fn Dynamic() => {
+            args&.push("-dynamiclib");
+            
+            // TODO: if os == macos
+            for lib.macos_frameworks { name |
+                args&.push("-framework");
+                args&.push(name);
+            };
+        };
+    };
+    args&.push_all(@slice ("-o", path));
+    
+    args&.push(@match(cmd.optimize) {
+        fn zero()  => "-O0",
+        fn one()   => "-O1",
+        fn two()   => "-O2",
+        fn small() => "-Os",
+    });
+    
+    args&.push("-target");
+    args&.push(cmd.target_triple);
+
+    @try(run(args.items())) return;
+    .Ok
+}
+
+// This always puts stuff in temp() because you probably never need it. does that make sense? idk. 
+fn run(command: []Str) Result(Str, *BuildError) = {
+    @println("%", command);
+    ok, out, err := fork_and_catch(temp()) {
+        exec_cmd(command[0], command.slice(1, command.len)) // if the exe doesn't exist, this will panic and we'll catch it as the child failing. 
+    };
+    
+    if ok {
+        (Ok = out.items())
+    } else {    
+        e := temp().box(BuildError);
+        e[] = (Command = (command = command, stdout = out.items(), stderr = err.items());
+        (Err = e)
+    }
+}

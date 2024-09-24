@@ -511,89 +511,46 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
         ir := Str.assume_cast(ir&)[];
         (Ok = self.pool.insert_owned(ir)) 
     }
+    
+    found_comptime_import :: fn(addr: rawptr) => {
+        self.put_jitted_function(fid, addr);
+        func.set_flag(.RealAsmDone);
+        impls: List(FuncImpl) = list(2, self.get_alloc());
+        impls&.push(ComptimeAddr = addr.int_from_rawptr());
+        impls&.push(DynamicImport = func.name);
+        func.body = (Merged = impls.rs());
+    };
+       
+    find_import :: fn(lib_name: Symbol) bool => {
+        ret :: local_return;
+        handle := self.comptime_libraries&.get(lib_name);
+        if handle { handle |
+            name := self.get_link_name(func);
+            addr := handle.dlsym(name);
+            if !addr.is_null() {
+                found_comptime_import(addr);
+                ret(true);
+            };
+        };
+        // :AssumeDones
+        // TODO: how to catch if it actually doesn't exist or they typo-ed the #import string.
+        func.body = (DynamicImport = func.name);
+        @try(self.create_jit_shim(fid)) return;
+        false
+    };
+    
     each func.annotations { tag | 
         @switch(tag.name) {
             @case(Flag.libc.ident()) => {
                 done :: local_return;
                 func.cc = (Some = .CCallReg);
                 good = true;
-                name := self.get_link_name(func);
-                // :io_driver TODO: all this fs stuff should be passed in (or better messaged out) by the driver
-                // TODO: figure out the right path for different oses.
-                // TODO: don't re-dlopen every time. tho i think its cached.
-                s := @unwrap(find_os_libc_dylib(), "(for '%') couldn't find libc dylib/so", name) return;
                 
-                libc := dlopen(s, .Lazy);
-                // :AssumeDone
-                // This isn't quite what you want because you should be able to cross compile a dynamiclly linked thing
-                // from an environment where we can't call dlopen (-static musl) or can't find a libc (blink emulator)
-                // @err_assert(!libc.lib.is_null(), "(for %) couldn't find libc dylib/so (tried '%') (or the compiler is -static with musl)", name, s) return;
-                // but doing it this way means we just have faith that a #libc will exist for the target without anyway to actually check.
-                // and if you try to call it at comptime you'll probably get a useless error message. 
-                // and i was letting it jsut be DynamicImport before when you couldn't find it in the libc (like `_NS*`) anyway so this isn't much worse. 
-                if libc.lib.is_null() {
-                    @match(get_smuggled_libc_function(self.env.comptime_arch, func.name)) {
-                        fn Some(addr) => { // :copy-paste
-                            self.put_jitted_function(fid, addr);
-                            func.set_flag(.RealAsmDone);
-                            impls: List(FuncImpl) = list(2, self.get_alloc());
-                            impls&.push(ComptimeAddr = addr.int_from_rawptr());
-                            impls&.push(DynamicImport = func.name);
-                            func.body = (Merged = impls.rs());
-                        }
-                        fn None() => {
-                            // really this is fine, i just have to decide to commit to this behaviour. 
-                            @eprintln("WARNING: couldn't open libc for '%', sure hope you don't try to call that at comptime", name);
-                            func.body = (DynamicImport = func.name);
-                            @try(self.create_jit_shim(fid)) return;
-                        }
+                if !find_import(Flag.libc.ident()) {
+                    if get_smuggled_libc_function(self.env.comptime_arch, func.name) { addr |
+                        found_comptime_import(addr);
                     };
-                    done();
-                };
-                
-                // :link_rename
-                // TODO: allow #libc before #link_rename
-                // TODO: the backend needs to call this again if cross compiling. 
-                //       maybe we should add jit vs aot to LinkRenameArg 
-                fn get_link_name(self: *SelfHosted, func: *Func) CStr = {
-                    out: List(u8) = list(temp());
-                    ::if(CStr);
-                    if func.nullable_link_rename_func != 0 {
-                        arg: LinkRenameArg = (
-                            target = (arch = self.env.comptime_arch, os = self.env.comptime_os),
-                            out = out&,
-                            old_name = self.pool.get(func.name),
-                        );
-                        addr := rawptr_from_int(func.nullable_link_rename_func);
-                        addr := assume_types_fn(*LinkRenameArg, void, addr);
-                        addr(arg&);
-                        out&.push(0);
-                        (ptr = out.maybe_uninit.ptr)
-                    } else {
-                        self.pool.get_c_str(func.name)
-                    }
-                }
-                
-                addr := libc.dlsym(name);
-                
-                // :ClearCacheHack
-                if addr.is_null() && func.name == Flag.__clear_cache.ident() {
-                    addr = get_smuggled_libc_function(self.env.comptime_arch, func.name).unwrap();
-                };
-                
-                if addr.is_null() {
-                    // :AssumeDone
-                    // TODO: warn? have different #import that means we expect not at comptime?
-                    @eprintln("WARNING: couldn't '%' in libc, sure hope you don't try to call that at comptime", name);
-                    func.body = (DynamicImport = func.name);
-                    @try(self.create_jit_shim(fid)) return;
-                } else {
-                    self.put_jitted_function(fid, addr);
-                    func.set_flag(.RealAsmDone);
-                    impls: List(FuncImpl) = list(2, self.get_alloc());
-                    impls&.push(ComptimeAddr = addr.int_from_rawptr());
-                    impls&.push(DynamicImport = func.name);
-                    func.body = (Merged = impls.rs());
+                    // TODO: else fall back to the driver with resolve_comptime_import?
                 };
             };
             @case(Flag.import.ident()) => {
@@ -602,7 +559,11 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
                     fn Some(lib_name) => @check(self.eval_str(lib_name)) return;
                     fn None() => self.pool.insert_owned("");
                 };
-                self.resolve_comptime_import(fid, func, lib_name);
+                
+                if !find_import(lib_name) {
+                    self.resolve_comptime_import(fid, func, lib_name);
+                };
+                
                 good = true;
             };
             @case(Flag.unsafe_noop_cast.ident()) => {
@@ -792,6 +753,29 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
     .Ok
 }
 
+// :link_rename
+// TODO: allow #libc before #link_rename
+// TODO: the backend needs to call this again if cross compiling. 
+//       maybe we should add jit vs aot to LinkRenameArg 
+fn get_link_name(self: *SelfHosted, func: *Func) CStr = {
+    out: List(u8) = list(temp());
+    ::if(CStr);
+    if func.nullable_link_rename_func != 0 {
+        arg: LinkRenameArg = (
+            target = (arch = self.env.comptime_arch, os = self.env.comptime_os),
+            out = out&,
+            old_name = self.pool.get(func.name),
+        );
+        addr := rawptr_from_int(func.nullable_link_rename_func);
+        addr := assume_types_fn(*LinkRenameArg, void, addr);
+        addr(arg&);
+        out&.push(0);
+        (ptr = out.maybe_uninit.ptr)
+    } else {
+        self.pool.get_c_str(func.name)
+    }
+}
+                
 fn get_smuggled_libc_function(arch: Arch, name: Symbol) ?rawptr = {
     @switch(name) {
         @case(Flag.mmap.ident()) => (Some = @as(rawptr) @as(@FnPtr(addr: rawptr, len: i64, prot: i64, flags: i64, fd: Fd, offset: i64) rawptr) mmap);

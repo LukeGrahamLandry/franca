@@ -12,9 +12,12 @@ fn main() {
     linker.func_wrap("env", "mmap", mmap).unwrap();
     linker.func_wrap("env", "abort", abort).unwrap();
     linker.func_wrap("env", "munmap", munmap).unwrap();
-    linker.func_wrap("env", "clock_gettime", clock_gettime).unwrap();
+    linker
+        .func_wrap("env", "clock_gettime", clock_gettime)
+        .unwrap();
     linker.func_wrap("env", "malloc", malloc).unwrap();
     linker.func_wrap("env", "free", free).unwrap();
+    linker.func_wrap("env", "memcpy", memcpy).unwrap(); // TODO: ugh. don't generate calls to this
 
     let mut store = Store::new(&engine, HostCtx::default());
     let instance = linker.instantiate(&mut store, &module).unwrap();
@@ -23,14 +26,20 @@ fn main() {
             f.call(&mut store, ()).unwrap();
         }
         Err(_) => {
-            let f = instance.get_typed_func::<(), ()>(&mut store, "main").unwrap();
+            let f = instance
+                .get_typed_func::<(), ()>(&mut store, "main")
+                .unwrap();
             f.call(&mut store, ()).unwrap();
         }
     }
 }
 
 use core::str;
-use std::{mem::zeroed, process::exit, ptr::slice_from_raw_parts};
+use std::{
+    mem::zeroed,
+    process::exit,
+    ptr::{slice_from_raw_parts, slice_from_raw_parts_mut},
+};
 
 #[derive(Default)]
 pub struct HostCtx {
@@ -93,7 +102,15 @@ pub fn abort() {
     exit(1);
 }
 
-pub fn mmap(caller: Caller<'_, HostCtx>, addr: i32, len: i64, prot: i64, flags: i64, fd: i32, offset: i64) -> i32 {
+pub fn mmap(
+    caller: Caller<'_, HostCtx>,
+    addr: i32,
+    len: i64,
+    prot: i64,
+    flags: i64,
+    fd: i32,
+    offset: i64,
+) -> i32 {
     alloc(caller, len)
 }
 
@@ -109,4 +126,17 @@ pub fn malloc(caller: Caller<'_, HostCtx>, len: i64) -> i32 {
 
 pub fn free(caller: Caller<'_, HostCtx>, ptr: i32) {
     // TODO
+}
+
+pub fn memcpy(mut caller: Caller<'_, HostCtx>, dest: i32, src: i32, len: i32) -> i32 {
+    let memory = caller.get_export("memory").unwrap().into_memory().unwrap();
+
+    unsafe {
+        let dest = memory.data_ptr(&caller).offset(dest as isize);
+        let src = memory.data_ptr(&caller).offset(src as isize);
+        let src = &mut *slice_from_raw_parts_mut(src, len as usize);
+        let dest = &*slice_from_raw_parts_mut(dest, len as usize);
+        src.copy_from_slice(dest);
+    }
+    dest
 }

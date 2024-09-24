@@ -26,10 +26,6 @@ impl FuncId {
 
 #[repr(transparent)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct Ident(u32);
-
-#[repr(transparent)]
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct BbId(pub u16);
 
 #[repr(C, i64)]
@@ -148,19 +144,6 @@ pub enum Prim {
     P64,
 }
 
-impl Prim {
-    pub(crate) fn is_float(self) -> bool {
-        matches!(self, Prim::F64 | Prim::F32)
-    }
-    pub(crate) fn int_count(self) -> i64 {
-        if self.is_float() {
-            0
-        } else {
-            1
-        }
-    }
-}
-
 #[repr(C)]
 #[derive(Clone, Debug)]
 pub struct BasicBlock {
@@ -226,26 +209,6 @@ pub enum BigOption<T> {
 }
 
 impl<T> BigOption<T> {
-    pub(crate) fn as_mut(&mut self) -> Option<&mut T> {
-        match self {
-            BigOption::Some(t) => Some(t),
-            BigOption::None => None,
-        }
-    }
-
-    pub(crate) fn as_ref(&self) -> Option<&T> {
-        match self {
-            BigOption::Some(t) => Some(t),
-            BigOption::None => None,
-        }
-    }
-    pub(crate) fn unwrap(self) -> T {
-        match self {
-            BigOption::Some(t) => t,
-            BigOption::None => panic!("Unwrapped missing Option."),
-        }
-    }
-
     pub(crate) fn is_none(&self) -> bool {
         match self {
             BigOption::Some(_) => false,
@@ -255,13 +218,6 @@ impl<T> BigOption<T> {
 
     pub(crate) fn is_some(&self) -> bool {
         !self.is_none()
-    }
-
-    pub(crate) fn expect(self, arg: &str) -> T {
-        match self {
-            BigOption::Some(t) => t,
-            BigOption::None => panic!("Missing Value. {arg}"),
-        }
     }
 }
 

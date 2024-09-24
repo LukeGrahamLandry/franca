@@ -1,3 +1,24 @@
+## (Sep 22)
+
+- made most of the wasm tests work again, at some point it started generating calls to memcpy. hack: just had rt provide it.
+  it must have been the change from calling memcpy to defining one the takes advantage of alignment but you'd think that would have the opposite
+  i guess i don't know what `@llvm.memcpy.p0.p0.i32` does.
+- (bf2bc) fixed the arm encoding problem when IncPtrBytes is negative so now i can disassemble it but it still infinite loops
+- ah printing something in the loop changes its behaviour so it must be a register allocation bug?
+
+## (Sep 21)
+
+- always use shims for jitted function pointers.
+- added a new type of inline asm comptime function where you just fill in my bytecode format.
+
+bf2bc
+
+- needing the loads/stores for phis is annoying
+- to work on llvm i needed the entry block to have the right arg types
+- llvm cares about i64 vs i8
+- llvm doesnt jsut compare to 0 it wants 0 or 1 exactly.
+- works on x86/llvm/qbe but not arm
+
 ## (Sep 20)
 
 out of ~500ms, resolve overloads of `if`, `eq`, and `display` are each 50ms.
@@ -14,7 +35,7 @@ Really i just want to be able to have generics that don't add to overload sets u
 - eek! noticed i had added get_build_options to the vtable twice. add error for conflicting field names.
   same for function args because it feels weird to just have the later one shadow.
   TODO: but for function args i should allow multiple `*` if you just want to discard.
--
+- shims for better errors when missing libc
 
 ## (Sep 19)
 
