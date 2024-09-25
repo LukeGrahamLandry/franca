@@ -6,14 +6,18 @@
 //!    For reference, when this file replaced ~530 lines of python (gen_ir+gen_franca), it was 500 lines. 
 //!    But mine is also much uglier and less robust. ie. I depend on the order of fields in clang's output. 
 //!    Alas, now my version has grown longer and more convoluted because I want to handle Dear Imgui as well. 
+//!    So at this point it probably needs to be rewritten if you want to use it for anything serious. 
+//!    I'm fine with it perpetually being in an exploration phase for now as I slowly throw more shapes of program at it. 
 // TODO: unnamed enum constants 
 // TODO: bitfields
-// TODO: anon union field
 // TODO: sad that im generating my bindings off the generated cimgui. 
 //       handle c++ and be able to generate c wrappers too so i don't rely on some guy's giant blob of lua!
 // TODO: clean up the handling of prefixes, pass in a data structure instead of switching over specific libraries. 
 //       it would be nice if people could just call this from thier driver program if they want a new library. 
 // TODO: losing function arguments for wuffs
+// TODO: only include declarations from the files we care about. ignore the giant libc includes. 
+// TODO: named inline struct declaration inside other struct. (type has name).
+// TODO: fix it getting bored after embedded struct field with a name. (field has name). 
 
 CDecl :: @rec @tagged(
     Record: @struct(name: ?Str, fields: []CRecordField, tag: CRecordTag),
@@ -97,7 +101,9 @@ fn load_ast(path: Str) Ty(Str, HackPrefixes, bool) = {
 }
 
 Record :: get_variant_type(CDecl, CDecl.Tag().Record);
+CRecord :: get_variant_type(CDecl, CDecl.Tag().Enum);
 fn generate_franca_bindings(out: *List(u8), decls: []CDecl, import_name: Str) void = {
+    is_sokol := import_name == "sokol";
     each decls { decl |
         continue :: local_return;
         
@@ -111,14 +117,48 @@ fn generate_franca_bindings(out: *List(u8), decls: []CDecl, import_name: Str) vo
                         @fmt(out, "%: %,\n", it.name, it.type.translate_type());
                     }
                     fn Anon(it) => {
-                        @fmt(out, "_embed: @%(\n", it.Record.tag);
-                        it.Record&.output_record_body(out, depth + 1);
-                        range(0, depth) {_|
-                            out.push_all("    ");
-                        };
-                        @fmt(out, "),\n");
+                        @match(it) {
+                            fn Record(it) => {
+                                @fmt(out, "_embed: @%(\n", it.tag);
+                                it.output_record_body(out, depth + 1);
+                                range(0, depth) {_|
+                                    out.push_all("    ");
+                                };
+                                @fmt(out, "),\n");
+                            }
+                            fn Enum(it) => {
+                                @fmt(out, "_embed: @enum(i32) (\n");
+                                it.output_enum_body(out, depth + 1, false); // sokol doesnt get here
+                                range(0, depth) {_|
+                                    out.push_all("    ");
+                                };
+                                @fmt(out, "),\n");
+                            }
+                            @default => panic("unhandled anon field");
+                        }
                     }
                 }
+            };
+        }
+        
+        fn output_enum_body(it: *CRecord, out: *List(u8), depth: i64, is_sokol: bool) void = {
+            at_the_end := false;
+            last_value := -1;
+            each it.items { item |
+                range(0, depth) {_|
+                    out.push_all("    ");
+                };
+                continue :: local_return;
+                name := item.name;
+                if is_sokol {
+                    name = name.demangle_sokol_enum();
+                };
+                if(name == "FORCE_U32", => continue());
+                @fmt(out, "%", name);
+                if item.value { value |
+                    @fmt(out, " = %", value);
+                };
+                @fmt(out, ",\n");
             };
         }
         
@@ -134,34 +174,31 @@ fn generate_franca_bindings(out: *List(u8), decls: []CDecl, import_name: Str) vo
                 @match(it.name) {
                     fn Some(name) => {
                         @fmt(out, "% :: @enum(i32) (\n", name.unsnake_case());
-                        at_the_end := false;
-                        each it.items { item | 
-                            continue :: local_return;
-                            name := item.name.demangle_sokol_enum();
-                            if(name == "FORCE_U32", => continue());
-                            @fmt(out, "    %", name);
-                            if item.value { value |
-                                @fmt(out, " = %", value);
-                            };
-                            @fmt(out, ",\n");
-                        };
+                        it.output_enum_body(out, 1, is_sokol);
                         @fmt(out, ");\n");
                     }
                     fn None() => {
-                        // TODO: constants
+                        @fmt(out, "/* (c_bindgen) TODO: unnamed enum as constants\n");
+                        it.output_enum_body(out, 1, is_sokol);
+                        @fmt(out, "*/\n");
                     }
                 }
             }
             fn Func(it) => {
                 @fmt(out, "fn %(", it.name);
                 prefix := "";
+                i := 0;
                 for it.args { it |
                     it: CField = @match(it) {
                         fn Named(it) => {it};
                         fn Anon(_) => panic("unreachable. anon for arg");
                     };
+                    if it.name == "" {
+                        it.name = items(@format("_%", i) temp());
+                    };
                     @fmt(out, "%%: %", prefix, it.name, it.type.translate_type());
                     prefix = ", ";
+                    i += 1;
                 };
                 
                 // TODO: handle returning a function pointer. 
@@ -250,8 +287,13 @@ fn translate_type(c_type: Str) Str = {
             };
             
             if c_type.ends_with(")") {|  // its a function pointer
+                out: List(u8) = list(c_type.len, temp());
                 parts := c_type.split("(*)", temp());
-                @assert(parts.len == 2, "confusing function pointer %", c_type);
+                //@assert(parts.len == 2, "confusing function pointer %", c_type);
+                if parts.len != 2 {
+                    @fmt(out&, "@run @panic(\"c_bindgen: confusing function pointer %\")", c_type);
+                    return(out.items());
+                };
                 ret := parts[0];
                 // TODO: support function pointer argument!
                 args := parts[1].trim();
@@ -259,7 +301,6 @@ fn translate_type(c_type: Str) Str = {
                 args.ptr = args.ptr.offset(1);
                 args.len -= 2;
                 args := args.split(",", temp());
-                out: List(u8) = list(c_type.len, temp());
                 @fmt(out&, "@FnPtr(");
                 prefix := "";
                 for args { arg | 
@@ -456,10 +497,17 @@ fn extract_c_decls(json: *JsonParser, prefixes: HackPrefixes) []CDecl = {
                             
                             // no args is fine. 
                             args: []CRecordField = empty();
-                            if found.eq("inner").or(=> json.skip_to_tag_opt("inner", .StartList).is_some()) {
-                                args = json.read_fields(false);   // yeah... not spelled like "param"
+                            have_args := false;
+                            if found == "inner" {
+                                have_args = true;
+                                json.next();
+                            } else {
+                                have_args = json.skip_to_tag_opt("inner", .StartList).is_some();
                             };
                             
+                            if have_args {
+                                args = json.read_fields(false);   // yeah... not spelled like "param"
+                            };
                             decls&.push(Func = (name = name, type = type, args = args));
                         };
                         @case("TypedefDecl") => {
@@ -550,6 +598,12 @@ fn skip_to_string(json: *JsonParser, key: Str) Str = {
     value.StringValue
 }
 
+fn pop_string(json: *JsonParser) Str = {
+    value := json.next().unwrap();
+    @assert(value&.is(.StringValue), "expected % StringValue", value&.tag());
+    value.StringValue
+}
+
 fn skip_until_key_switch(self: *JsonParser, keys: []Str) Result(Str, Str) = {
     loop() {
         token := @try(self.next()) return;
@@ -585,7 +639,7 @@ fn read_fields(json: *JsonParser, is_struct: bool) []CRecordField = {
         value := json.next().unwrap();
         if value&.is(.StartDict) {
             kind := json.skip_to_string("kind");
-            if kind == "FormatAttr" {
+            if kind == "FormatAttr" || kind == "BuiltinAttr" {
                 json.skip_current_value();
                 continue(true);
             };
@@ -601,22 +655,39 @@ fn read_fields(json: *JsonParser, is_struct: bool) []CRecordField = {
                         fields&.push(Anon = mem.ptr);
                     };
                     continue(true);
-                
+                };
+                if kind == "EnumDecl" {
+                    json.skip_to_tag("inner", .StartList);
+                    f := json.read_enum_fields();
+                    mem := temp().alloc(CDecl, 1);
+                    mem.ptr[] = (Enum = (name = .None, items = f));
+                    fields&.push(Anon = mem.ptr);
+                    continue(true);
                 };
                 @assert_eq(kind, "FieldDecl");
             } else {
-                if kind.eq("VisibilityAttr").or(kind == "FullComment") {
+                if kind != "ParmVarDecl" {
                     // no clue wtf this means...
                     res := json.skip_current_value();
                     res.unwrap();
                     continue(true);
                 };
-                @assert_eq(kind, "ParmVarDecl");
             };
             
-            name := json.skip_to_string("name");
-            json.skip_to_tag("type", .StartDict);
-            type := json.skip_to_string("qualType");
+            found := or json.skip_until_key_switch(@slice("name", "type")) { _ |
+                panic("should have 'name' or 'type'")
+            };
+            name := "";
+            type := "";
+            if found == "name" {
+                name = json.pop_string();
+                json.skip_to_tag("type", .StartDict);
+                type = json.skip_to_string("qualType");
+            } else {
+                json.next().unwrap();
+                type = json.skip_to_string("qualType");
+            };
+            
             res := json.skip_current_value();
             res.unwrap();
             //@println("- field %: %", name, type);
@@ -647,8 +718,9 @@ fn read_enum_fields(json: *JsonParser) []CEnumItem => {
             if json.skip_to_tag_opt("inner", .StartList) {_|
                 res := json.next().unwrap();
                 assert(res&.is(.StartDict), "enum inner->[]->{}");
-                v := json.skip_to_string("value");
-                value = (Some = v);
+                if json.skip_to_tag_opt("value", .StringValue) { v | 
+                    value = (Some = v.StringValue);
+                };
                 json.skip_current_value().unwrap();
                 res := json.next().unwrap();
                 assert(res&.is(.End), "// TODO: skip_current_value should probably eat the End too?");

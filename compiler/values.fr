@@ -183,6 +183,7 @@ fn emit_relocatable_constant_body(
             out.push((AddrOf = id));
         });
         (fn Struct(f) => {
+            @err_assert(!f.is_union, "TODO: union in a constant. but its hard cause what if theres pointers in there but we don't know which is active") return;
             // Just do all the fields.
             each f.fields { f | 
                 info := c.get_info(f.ty);
@@ -495,6 +496,7 @@ fn deconstruct_values(program: *SelfHosted, ty: Type, bytes: *ReadBytes, out: *L
         }
         fn Struct(f) => {
             @err_assert(f.layout_done, "ICE: layout not ready") return;
+            @err_assert(!f.is_union, "You can't deconstruct_values of a union because we don't know which varient is active.") return;
             prev := 0;
             size := program.get_info(ty).stride_bytes();
             start := bytes.i;
@@ -567,6 +569,7 @@ fn zero_padding(program: *SelfHosted, ty: Type, bytes: *ReadBytes) PRes = {
         }
         fn Struct(f) => {
             @err_assert(f.layout_done, "ICE: layout not ready") return;
+            @err_assert(!f.is_union, "TODO: you can't zero padding of a union because we don't know which varient is active.") return;
             prev := 0;
             size := program.get_info(ty).stride_bytes();
             start := bytes.i;
@@ -1024,7 +1027,11 @@ fn get_info(self: *SelfHosted, ty: Type) *TypeMeta = {
                 @debug_assert_ge(arg.byte_offset, bytes, "ICE: fields not in order"); // TODO: assert not past max_u16 or better have a safety checking intcast
                 end := arg.byte_offset + info.stride_bytes.zext();
                 bytes = bytes.max(end);
-                size += info.size_slots;
+                if f.is_union {
+                    size = size.max(info.size_slots);
+                } else {
+                    size += info.size_slots;
+                };
                 if size > 16 {
                     // you only actually care about floats for passing in registers so if its bigger than 16, wont matter anyway?
                     // until i do struct c abi properly and tuples mean args in a different way.
@@ -1198,18 +1205,20 @@ fn finish_layout(self: *SelfHosted, ty: Type) void = {
                 };
                 
                 self.finish_layout(p.ty);
-    
-                info := self.get_info(p.ty);
-                inv_pad := bytes.mod(info.align_bytes.zext());
-                if inv_pad != 0 {
-                    bytes += info.align_bytes.zext() - inv_pad;
+                if f.is_union {
+                    p.byte_offset = 0;
+                } else {
+                    info := self.get_info(p.ty);
+                    inv_pad := bytes.mod(info.align_bytes.zext());
+                    if inv_pad != 0 {
+                        bytes += info.align_bytes.zext() - inv_pad;
+                    };
+                    p.byte_offset = bytes;
+                    
+                    // TODO: this must be wrong? surely you dont want to have the array padding out to alignment if its just a nested struct.
+                    //       tho its what c does. so i guess i need different reprs. and then size_of vs stride_of become different things.
+                    bytes += info.stride_bytes.zext();
                 };
-                p.byte_offset = bytes;
-                
-    
-                // TODO: this must be wrong? surely you dont want to have the array padding out to alignment if its just a nested struct.
-                //       tho its what c does. so i guess i need different reprs. and then size_of vs stride_of become different things.
-                bytes += info.stride_bytes.zext();
             };
     
             f.layout_done = true;

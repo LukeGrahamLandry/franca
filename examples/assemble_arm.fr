@@ -1,0 +1,134 @@
+:: eprintln("This is very very unfinished! not a working example!");
+
+fn main() = {
+    filepath := "target/franca_qbe_temp.s";
+    src := temp().read_to_string(filepath);
+    asm: Assembler = (
+        src = src.items(),
+        out_alloc = libc_allocator,
+        labels = init(temp()),
+    );
+    
+    asm&.assemble();
+    if asm.error_message != "" {
+        panic(asm.error_message);
+    };
+}
+
+Assembler :: @struct(
+    src: Str,
+    out_alloc: Alloc,
+    current := 0,
+    line := 0,
+    error_message := "",
+    want_segment := KnownSegment.text,
+    want_align := 4,
+    segment_offset := EnumMap(KnownSegment, i64).zeroed(),
+    // TODO: intern so when you miss the bucket, comparisons are faster. 
+    labels: HashMap(Str, AsmLabel),
+);
+
+AsmLabel     :: @struct(offset: i64, segment: KnownSegment);
+KnownSegment :: @enum(i64) (text, data, bss);
+
+fn assemble(self: *Assembler) Result(void, void) = {
+    loop {
+        self.skip_whitespace();
+        if self.current >= self.src.len {
+            return(.Ok);
+        };
+        
+        c := self.src[self.current];
+        @switch(c) {
+            @case(".".ascii())                   => @try(self.handle_directive()) return;
+            @inclusive("a".ascii(), "z".ascii()) => @try(self.handle_ident()) return;
+            @inclusive("A".ascii(), "Z".ascii()) => @try(self.handle_ident()) return;
+            @case("_".ascii())                   => @try(self.handle_ident()) return;
+            @default => {
+                self.error_message = items(@format("Invalid character at top level (expected '.directive' or 'label:' or 'inst a b')") self.out_alloc);
+            };
+        };
+    }
+}
+
+fn handle_directive(self: *Assembler) Result(void, void) #once = {
+    @debug_assert(self.src[self.current] == ".".ascii(), "expected '.'");
+    self.current += 1;
+    ident := @try(self.pop_ident()) return;
+    
+    @switch(ident) {
+        @case("text") => { self.want_segment = .text; };
+        @case("bss")  => { self.want_segment = .bss; };
+        @case("data") => { self.want_segment = .data; };
+        @case("balign") => {
+            self.want_align = @try(self.pop_integer()) return;
+        };
+        @default => {
+            self.error_message = items(@format("Unknown directive '%'", ident) self.out_alloc);
+            return(.Err)
+        };
+    };
+    .Ok
+}
+
+fn handle_ident(self: *Assembler) Result(void, void) #once = {
+    ident := @try(self.pop_ident()) return;
+    if self.src[self.current] == ":".ascii() { // its a label
+        self.current += 1;
+        return(self.add_label(ident));
+    };
+    
+    // Otherwise it must just be an instruction. 
+    
+    @panic("TODO: handle_ident %", ident)
+}
+
+fn add_label(self: *Assembler, name: Str) Result(void, void) #once = {
+    offset := self.segment_offset&.get(self.want_segment);
+    prev := self.labels&.insert(name, (offset = offset, segment = self.want_segment));
+    if prev { prev |
+        // TODO: show location of last declaration. (could just reparse the whole thing because you don't want to waste memory storing locations). 
+        self.error_message = items(@format("Redeclared label '%'", name) self.out_alloc);
+        return(.Err);
+    };
+    .Ok
+}
+
+fn pop_ident(self: *Assembler) Result(Str, void) = {
+    self.skip_whitespace();
+    if !self.src[self.current].is_ascii_alpha() {
+        self.error_message = items(@format("Expected identifier") self.out_alloc);
+        return(.Err);
+    };
+    start := self.current;
+    while => self.src[self.current].is_ascii_alpha() || self.src[self.current].is_ascii_digit() {
+        self.current += 1;
+    };
+    (Ok = self.src.slice(start, self.current))
+}
+
+fn pop_integer(self: *Assembler) Result(i64, void) = {
+    self.skip_whitespace();
+    if !self.src[self.current].is_ascii_digit() {
+        self.error_message = items(@format("Expected integer") self.out_alloc);
+        return(.Err);
+    };
+    
+    total := 0;
+    dowhile {
+        total *= 10;
+        total += self.src[self.current].dec_digit();
+        self.current += 1;
+        self.src[self.current].is_ascii_digit()
+    };
+    (Ok = total)
+}
+
+fn skip_whitespace(self: *Assembler) void = {   
+    peek :: fn(n: i64) u8 => if(self.current >= self.src.len, => 0, => self.src[self.current + n]);
+    pop :: => { self.current += 1; };
+    // TODO: fix error message if you use '=' instead of ':='
+    //       "Illegal place expression: GetNamed" is not helpful -- Sep 24
+    xx := skip_whitespace(peek, pop, true, false);
+    self.line += xx;
+}

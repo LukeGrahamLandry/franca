@@ -26,6 +26,7 @@ Options :: @struct(
     cranelift := false,
     show_asm := false,
     blink := false,
+    slow := false,
 );
 
 Action  :: @enum(i64) (run, build, test); ::enum(Action);
@@ -68,8 +69,13 @@ fn driver(vtable: *ImportVTable) void = {
             if cmd.cfg.jit {
                 println("Compiled successfully but selected jit backend so no artifact was produced.");
             } else {
-                assert(cmd.cfg.llvm, "Not Yet Implemented: build main with -aot=qbe");
-                c.compile_with_llvm(fid, .ExportWithNames, cmd.cfg.debug_info, arch, os, cmd.cfg.show_asm);
+                if cmd.cfg.llvm {
+                    c.compile_with_llvm(fid, .ExportWithNames, cmd.cfg.debug_info, arch, os, cmd.cfg.show_asm, cmd.cfg.slow);
+                } else {
+                    assert(!cmd.cfg.show_asm, "TODO: -S with qbe");
+                    assert(cmd.cfg.qbe, "rn only two backends. update me as needed!");
+                    c.compile_with_qbe(fid, .ExportWithNames, arch, os);
+                };
                 println("[built a.out]");  // TODO: say the right path if its wasm
             };
             exit(0);
@@ -89,10 +95,9 @@ fn driver(vtable: *ImportVTable) void = {
                 f();
             } else {
                 if cmd.cfg.llvm {
-                    c.compile_with_llvm(fid, .ExportWithNames, cmd.cfg.debug_info, arch, os, false);
+                    c.compile_with_llvm(fid, .ExportWithNames, cmd.cfg.debug_info, arch, os, false, cmd.cfg.slow);
                 } else {
                     assert(!cmd.cfg.show_asm, "TODO: -S with qbe");
-                    assert(comptime_arch == arch, "TODO: not yet implemented. force qbe cross compile");
                     assert(cmd.cfg.qbe, "rn only two backends. update me as needed!");
                     //panic("TODO: impl swit ch on qbe");
                     c.compile_with_qbe(fid, .ExportWithNames, arch, os);
@@ -125,10 +130,9 @@ fn driver(vtable: *ImportVTable) void = {
                     passed += 1;
                 } else {
                     if cmd.cfg.llvm {
-                        c.compile_with_llvm(fid, .TestRunnerMain, cmd.cfg.debug_info, arch, os, cmd.cfg.show_asm);
+                        c.compile_with_llvm(fid, .TestRunnerMain, cmd.cfg.debug_info, arch, os, cmd.cfg.show_asm, cmd.cfg.slow);
                     } else {
                         assert(!cmd.cfg.show_asm, "TODO: -S with qbe");
-                        assert(comptime_arch == arch, "TODO: not yet implemented. force qbe cross compile"); // TODO: this doesn't catch rosetta but it doesn't use it 
                         assert(cmd.cfg.qbe, "rn only two backends. update me as needed!");
                         c.compile_with_qbe(fid, .TestRunnerMain, arch, os);
                     };
@@ -149,7 +153,8 @@ fn driver(vtable: *ImportVTable) void = {
     };
 }
 
-fn compile_with_llvm(c: CompCtx, fid: FuncId, entry: ProgramEntry, debug_info: bool, arch: Arch, os: Os, show_asm: bool) void = {
+// TODO: too many args
+fn compile_with_llvm(c: CompCtx, fid: FuncId, entry: ProgramEntry, debug_info: bool, arch: Arch, os: Os, show_asm: bool, slow: bool) void #inline = {
     ::if(Arch);
     ir_text := c.emit_llvm(temp(), @slice (fid), entry, arch, os);
     out := open_temp_file();
@@ -176,7 +181,10 @@ fn compile_with_llvm(c: CompCtx, fid: FuncId, entry: ProgramEntry, debug_info: b
         args&.push_all(@slice("-target", triple));
     };
     if debug_info {
-        args&.push_all(@slice ("-O0", "-g"));
+        args&.push("-g");
+    };
+    if debug_info || slow {
+        args&.push("-O0");
     } else {
         args&.push("-Os");
     };
@@ -185,8 +193,11 @@ fn compile_with_llvm(c: CompCtx, fid: FuncId, entry: ProgramEntry, debug_info: b
         args&.push("-c");
     };
     @eprintln("[run clang] %", args.items());
+    start := timestamp();
     success := run_cmd_blocking("clang", args.items());
     assert(success, "clang failed");
+    end := timestamp();
+    @println("[llvm time: %ms]", end - start);
     out.remove(); // TODO: defer 
     
     // todo: dont assume so much. this is for running with blinkenlights
@@ -212,12 +223,17 @@ fn compile_with_qbe(c: CompCtx, fid: FuncId, entry: ProgramEntry, arch: Arch, os
     asm_out :: "target/franca_qbe_temp.s"; // TODO: the version of tmp file that lets you have an extension because it wants the .s
     
     args: List(Str) = list(temp());
+    args&.push("-t");
+    args&.push(qbe_target_name(arch, os));
     args&.push("-o");
     args&.push(asm_out);
     args&.push(ir_out&.s_name());
     @println("Run qbe %", args.items());
+    start := timestamp();
     success := run_cmd_blocking(QBE_PATH, args.items());
     assert(success, "qbe failed");
+    end := timestamp();
+    @println("[qbe time: %ms]", end - start);
     
     // TODO: it would be easier if i could use exec_and_catch but it hangs forever waiting on a few tests???
     //       TODO: check again. i think i fixed that -- Sep 19
@@ -229,10 +245,15 @@ fn compile_with_qbe(c: CompCtx, fid: FuncId, entry: ProgramEntry, arch: Arch, os
     args&.push(asm_out);
     args&.push("-o");
     args&.push("a.out");
+    triple := target_triple(arch, os);
+    args&.push_all(@slice("-target", triple));
     @println("Run assembler %", args.items());
+    start := timestamp();
     success := run_cmd_blocking("clang", args.items()); 
     assert(success, "as failed");
-    ir_out.remove();   
+    end := timestamp();
+    @println("[assembler time: %ms]", end - start);
+    //ir_out.remove();   
 }
 
 fn load_file(path: Str, vtable: *ImportVTable, build_options: *BuildOptions) CompCtx = {
@@ -310,6 +331,9 @@ fn parse_cli_args() Command = {
             };
             @case("-blink") => {
                 cfg.blink = true;
+            };
+            @case("-opt=none") => {
+                cfg.slow = true;
             };
             @default => {
                 extra_args&.push(arg);

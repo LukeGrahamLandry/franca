@@ -7,6 +7,20 @@
   At least i can use `objdump -d -l a.out` to check if its working instead of running it in lldb every time.
   ah problem was my DISubProgram didn't have `file` field... so whats the scope field for then??? because thats also a file.
   TODO: write a test with that objdump thing that you still get debug info.
+- the compiler works on qbe which is pleasing. still useless because clang assembling qbe's output takes so long,
+  but its really nice to not rely on llvm as our only way of doing an AOT build.
+  (runtime of output code) qbe is 5x slower than llvm release mode.
+  oh shit i take back everything bad i ever said about qbe.
+  targetting x64 clang can assemble its output in under 380 ms.
+  compared to arm where it takes 3900 ms which i was complaining about.
+  assembly size: x64=5.3MB, arm=8.2. so like its bigger but its not 10x bigger!
+  what could clang possibly be doing.
+  so for x64, qbe+assemble takes 30% longer than llvm debug mode but runtime is twice as fast.
+  so thats like a totally reasonable option.
+  I should really make a table of times.
+- considering hooking into qbe and replacing the parser with just generating thier in memory data structures,
+  and the assembly emit with my own machine code emit. i find thier code incomprehensible so want to understand it,
+  working on making c_bindgen not choke on thier anon enum struct fields.
 
 ## (Sep 22)
 

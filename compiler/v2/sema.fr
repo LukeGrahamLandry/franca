@@ -1226,6 +1226,10 @@ fn construct_struct_literal(self: *SelfHosted, expr: *FatExpr, requested: Result
     
     @match(self.get_type(raw_container_type)) {
         fn Struct(f) => {
+            if f.is_union {
+                @err_assert(bindings.len == 1, "% is a union, value should have one active varient not %", self.log_type(requested), bindings.len) return;
+            };
+            
             done := true;
             enumerate bindings { i, b | 
                 name := or b.ident() {
@@ -1248,7 +1252,7 @@ fn construct_struct_literal(self: *SelfHosted, expr: *FatExpr, requested: Result
             
             // TODO: If they're missing some, check for default values.
             runtime_fields := f.fields.len - f.const_field_count.zext();
-            if runtime_fields != bindings.len {
+            if !f.is_union && runtime_fields != bindings.len {
                 enumerate f.fields { i, field | 
                     continue :: local_return;
                     if(field.kind == .Const, => continue());
@@ -3883,7 +3887,7 @@ fn builtin_macro(self: *SelfHosted, builtin_name: Symbol) Result(Ty(Values, Type
     unreachable()
 }
 
-fn struct_type(self: *SelfHosted, pattern: *Pattern) Maybe(Type) #once = {
+fn struct_type(self: *SelfHosted, pattern: *Pattern, is_union: bool) Maybe(Type) #once = {
     fields: List(Field) = list(pattern.bindings.len, self.get_alloc());
     const_field_count := 0;
     each pattern.bindings { b | 
@@ -3895,8 +3899,14 @@ fn struct_type(self: *SelfHosted, pattern: *Pattern) Maybe(Type) #once = {
         
         ty := or @check(self.infer_type(b.ty&)) return {
             default := @unwrap(b.default&.as_ref(), "@struct field without type requires default value.") return;
-            @check(self.compile_expr(default, .None)) return;
-            default.ty
+            // TODO: :HACK
+            is_rec := default.expr&.is(.PrefixMacro) && default.expr.PrefixMacro.handler.ident() == (Some = Flag.rec.ident());
+            if is_rec {
+                self.get_or_create_type(Type)
+            } else {
+                @check(self.compile_expr(default, .None)) return;
+                default.ty
+            }
         };
         
         default: ?Var = .None;
@@ -3919,15 +3929,23 @@ fn struct_type(self: *SelfHosted, pattern: *Pattern) Maybe(Type) #once = {
         fields = fields.rs(),
         layout_done = false,
         is_tuple = false,
+        is_union = is_union,
         const_field_count = const_field_count.trunc(),
     )))
+}
+
+fn union_macro(self: *SelfHosted, fields: *FatExpr) Maybe(FatExpr) = {
+    @err_assert(fields.expr&.is(.StructLiteralP), "expected map literal: (name: Type, ... ) for @union") return;
+    ty := @check(self.struct_type(fields.expr.StructLiteralP&, true)) return;
+    self.set(fields, Type, ty);
+    (Ok = fields[])
 }
 
 fn struct_macro(self: *SelfHosted, fields: *FatExpr) Maybe(FatExpr) = {
     msg :: "expected map literal: (name: Type, ... ) for @struct";
     ty := @match(fields.expr) {
         fn StructLiteralP() => {
-            @check(self.struct_type(fields.expr.StructLiteralP&)) return
+            @check(self.struct_type(fields.expr.StructLiteralP&, false)) return
         }
         fn Value(f) => {
             if fields.ty == self.get_or_create_type(void) {
@@ -3935,6 +3953,7 @@ fn struct_macro(self: *SelfHosted, fields: *FatExpr) Maybe(FatExpr) = {
                     fields = empty(),
                     layout_done = false,
                     is_tuple = false,
+                    is_union = false,
                     const_field_count = 0,
                 ))
             } else {

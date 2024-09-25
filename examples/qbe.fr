@@ -3,9 +3,6 @@
 //! This is an alternate compiler backend that converts Franca-Ir to Qbe-Ir.
 //! You can then run qbe to convert it into assembler text and assemble+link that into a program. 
 //! In theory this can compile faster than llvm at the cost of running fewer optimisations. 
-//! However, until I find a faster assembler than clang, assembling the output of qbe takes longer than just letting llvm do the whole thing.  
-//! (I assume because I generate such poor code that not doing optimisations means there's just a lot of volume to deal with. 
-//! Tho I don't think ive checked since I added deduplication so perhaps this has improved.)
 //!
 //! Regardless of the usefulness of this backend, it's a nice demo of stuff you can do in a driver program. 
 //! See examples/default_driver.fr for how to use this to compile arbitrary franca programs. 
@@ -18,9 +15,7 @@
 //! DISCLAIMER: not fully tested yet! seems to pass most of them tho. 
 
 // TODO: implement link_rename (required for macos x64)
-// TODO: support x86asmbytes and x86asmtext
 // TODO: auto test on all targets
-// TODO: get self-compile working with this backend 
 
 #include_std("compiler/backend/walk_bc.fr");
 
@@ -44,6 +39,10 @@ EmitQbe :: @struct(
 fn new(comp: CompCtx, alloc: Alloc, arch: Arch, os: Os) EmitQbe #inline = {
     s: EmitQbe = (comp = comp, out = init(12, alloc), current = BbId.zeroed(), return_value_type_sizes = empty(), inline_asm = list(alloc), os = os);
     s.return_value_type_sizes&.set(16, temp());
+    
+    if arch == .x86_64 {
+        s.inline_asm&.push_all(".intel_syntax noprefix\n");
+    };
     s
 }
 
@@ -311,6 +310,38 @@ fn emit_special_asm(self: *EmitQbe, body: *FuncImpl, func: *Func, bc: *FnBody, t
             
             return(true);
         });
+        fn X86AsmText(code) => {
+            if target.arch != .x86_64 { 
+                return(false); 
+            };
+            name := @format("%", (self, bc.func)) temp();
+            self.forward_declare(bc.signeture, false, name.items());
+            
+            prefix := if(self.os == .linux, => "", => "_");
+            @fmt(self.inline_asm&, "%%:\n", prefix, (self, bc.func));
+            code := self.comp.get_string(code[]);
+            code := code.split_lines(temp());
+            for code { inst |
+                @fmt(self.inline_asm&, "%\n", inst);
+            };
+            return(true);
+        }
+        fn X86AsmBytes(code) => { // :copy-paste
+            if target.arch != .x86_64 { 
+                return(false); 
+            };
+            name := @format("%", (self, bc.func)) temp();
+            self.forward_declare(bc.signeture, false, name.items());
+            
+            prefix := if(self.os == .linux, => "", => "_");
+            @fmt(self.inline_asm&, "%%:", prefix, (self, bc.func));
+            for code { inst |
+                v := @as(i64) inst.zext();
+                @fmt(self.inline_asm&, ".byte %\n", v);
+            };
+            
+            return(true);
+        }
         @default fn() void => return(false);
     };
     false
