@@ -1,0 +1,688 @@
+//! https://c9x.me/git/qbe.git/tree/all.h?id=626f0b278137ff6f8b7d910d9b3fc3cbdfbb39fc 
+//! MIT License. © 2015-2024 Quentin Carbonneaux <quentin@c9x.me>
+
+Qbe :: @rec @struct(
+    Tmp0 :: 64, // first non-reg temporary
+    MaxInstructions :: 1.shift_left(20),
+    
+    // it uses insb/curi as a buffer for emitting new instructions and then copies them out to a newly allocated array at the end of the block. 
+    // the parser starts at the beginning but the passes start at the end and `emit` in reverse. 
+    // so i think they scan block backwards. like isel will iterate backwards, adding some instructions, and copying out those it likes,
+    // and then at the end, copy from the buffer and update the block with that pointer. 
+    // so they're always in order in the blocks but you always process them backwards. 
+    Globals :: @rec @struct(
+        // These have to be pointers to the symbols Qbe externs because it uses them. 
+        types: *InsaneVec(Qbe.Typ), // typ
+        insb: *Array(Qbe.Ins, 1.shift_left(20)), // MaxInstructions
+        curi: **Qbe.Ins,
+        target: *Qbe.Target,
+        // These we need to track but Qbe doesn't use internally. 
+        number_of_types := 0, // ntyp. only used by parser
+    ),
+    Cls :: @enum(i16) (  // :QbeClsi16
+        Kx = -1, /* "top" class (see usecheck() and clsmerge()) */
+        Kw = 0,
+        Kl = 1,
+        Ks = 2,
+        Kd = 3,
+        
+        // The ones below aren't real, they just exist for the abi. So they're only used for [call args, entry args, ret]. 
+        
+        // signed/unsigned byte/half
+        Ksb = 4, /* matches Oarg/Opar/Jret */
+    	Kub = 5,
+    	Ksh = 6,
+    	Kuh = 7,
+     
+        // A pointer to a struct passed by value, treated as Wl in the ir.
+        // But the type will be in one of the instruction Ref fields, 
+        // and the backend can use that to decide if it actually needs to be passed in registers.
+    	Kc = 8,
+     
+    	K0 = 9, // void (for returns)
+    
+    	Ke = -2, /* erroneous mode */
+    	// Km = Qbe.Cls.Kl, /* memory pointer */
+    ),
+    RegKind :: @enum(i32) (
+        RTmp,
+        RCon,
+        RInt,
+        RType, /* last kind to come out of the parser */
+        RSlot,
+        RCall,
+        RMem,
+    ), // u3
+    Target :: @rec @struct(
+        name: Array(i8, 16),
+        apple: i8,
+        gpr0: i32,
+        ngpr: i32,
+        fpr0: i32,
+        nfpr: i32,
+        rglob: u64,
+        nrglob: i32,
+        rsave: *i32,
+        nrsave: Array(i32, 2),
+        retregs: @FnPtr(Qbe.Ref, *i32) u64,
+        argregs: @FnPtr(Qbe.Ref, *i32) u64,
+        memargs: @FnPtr(i32) i32,
+        abi0: @FnPtr(*Qbe.Fn) void,
+        abi1: @FnPtr(*Qbe.Fn) void,
+        isel: @FnPtr(*Qbe.Fn) void,
+        emitfn: @FnPtr(*Qbe.Fn, *FILE) void,
+        emitfin: @FnPtr(*FILE) void,
+        asloc: Array(i8, 4),
+        assym: Array(i8, 4),
+    ),
+    BSet :: @rec @struct(
+        nt: u32,
+        t: *u64,
+    ),
+    Ref :: @rec @struct(
+        // type is a RegKind
+        type3_val29: u32, // :BitField
+    ),
+    Op :: @rec @struct(
+        name: CStr,
+        argcls: Array(Array(i16, 4), 2),
+        canfold1_hasid1_idval1: u32,  // :BitField 
+    ),
+    Ins :: @rec @struct(
+        // cls is a Qbe.Cls. op is a Qbe.O
+        op30_cls2: u32, // :BitField
+        to: Qbe.Ref,
+        arg: Array(Qbe.Ref, 2),
+    ),
+    Phi :: @rec @struct(
+        to: Qbe.Ref,
+        arg: InsaneVec(Qbe.Ref),
+        blk: InsaneVec(*Qbe.Blk), 
+        narg: u32,
+        cls: i32,
+        link: *Qbe.Phi,
+    ),
+    Blk :: @rec @struct(
+        phi: *Qbe.Phi,
+        ins: *Qbe.Ins,
+        nins: u32,
+        jmp: @struct(
+            type: Qbe.J, // :QbeJi16
+            arg: Qbe.Ref,
+        ),
+        s1: *Qbe.Blk,
+        s2: *Qbe.Blk,
+        link: *Qbe.Blk,
+        
+        id: u32,
+        visit: u32,
+        
+        idom: *Qbe.Blk,
+        dom: *Qbe.Blk,
+        dlink: *Qbe.Blk,
+        fron: InsaneVec(*Qbe.Blk),
+        nfron: u32,
+    
+    	pred: **Qbe.Blk,
+        npred: u32,
+        in: Qbe.BSet,
+        out: Qbe.BSet,
+        gen: Qbe.BSet,
+    	nlive: Array(i32, 2),
+    	loop: i32,
+        name: Array(u8, 32),
+    ),
+    Use :: @rec @struct(
+        type: @enum(i32) (
+            UXXX,
+            UPhi,
+            UIns,
+            UJmp,
+        ),
+    	bid: u32,
+        u: @union(ins: *Qbe.Ins, phi: *Qbe.Phi),
+    ),
+    Sym :: @rec @struct(
+        type: @enum(i32) (
+            SGlo,
+            SThr,
+        ),
+        id: u32,
+    ),
+    Num :: @rec @struct(
+        n: u8,
+        nl: u8,
+        nr: u8,
+        l: Qbe.Ref,
+        r: Qbe.Ref,
+    ),
+    Alias :: @rec @struct(
+        type: @enum(i32) (
+            ABot = 0,
+            ALoc = 1,
+            ACon = 2,
+            AEsc = 3,
+            ASym = 4,
+            AUnk = 6,
+        ),
+    	base: i32,
+        offset: i64,
+    	u: @union(
+            sym: *Qbe.Sym,
+    		loc: @struct(
+    			sz: i32, /* -1 if > NBit */
+    			m: u64,
+    		),
+    	),
+    	slot: *Qbe.Alias,
+    ),
+    Tmp :: @rec @struct(
+        name: Array(i8, 80),
+        def: *Qbe.Ins,
+        use: InsaneVec(Qbe.Use),
+        ndef: u32,
+        nuse: u32,
+        bid: u32,
+        cost: u32,
+        slot: i32,
+        cls: Qbe.Cls,  // :QbeClsi16
+        hint: @struct(
+            r: i32,
+            w: i32,
+            m: u64,
+        ),
+        phi: i32,
+        alias: Qbe.Alias,
+        width: @enum(i32) (
+    		WFull,
+    		Wsb, /* must match Oload/Oext order */
+    		Wub,
+    		Wsh,
+    		Wuh,
+    		Wsw,
+    		Wuw
+        ),
+        visit: i32,
+    ),
+    Con :: @rec @struct(
+        type: @enum(i32) (
+            CUndef,
+            CBits,
+            CAddr,
+        ),
+       	sym := Qbe.Sym.zeroed(),
+    	bits: @union(i: i64, d: f64, s: f32),
+    	flt: u8 = 0, /* 1 to print as s, 2 to print as d */
+    ),
+    Addr :: @rec @struct(
+        offset: Qbe.Con,
+        base: Qbe.Ref,
+        index: Qbe.Ref,
+        scale: i32,
+    ),
+    Lnk :: @rec @struct(
+        export: i8,
+        thread: i8,
+        common: i8,
+        align: i8,
+        sec: CStr,
+        secf: CStr,
+    ),
+    Fn :: @rec @struct(
+        start: *Qbe.Blk,
+        tmp: InsaneVec(Qbe.Tmp),  
+        con: InsaneVec(Qbe.Con),
+        mem: InsaneVec(Qbe.Addr),
+        ntmp: i32,
+        ncon: i32,
+        nmem: i32,
+        nblk: u32,
+        retty: i32,
+        retr: Qbe.Ref,
+        rpo: **Qbe.Blk,
+        reg: u64,
+        slot: i32,
+        salign: i32,
+        vararg: i8,
+        dynalloc: i8,
+        leaf: bool,
+        name: Array(u8, 80),
+        lnk: Qbe.Lnk,
+    ),
+    FieldType :: @enum(i32) (
+        FEnd,
+        Fb,
+        Fh,
+        Fw,
+        Fl,
+        Fs,
+        Fd,
+        FPad,
+        FTyp,
+    ),
+    Field :: @rec @struct(
+        type: Qbe.FieldType,
+		len: u32, /* or index in typ[] for FTyp */
+    ),
+    Typ :: @rec @struct(
+        name: Array(i8, 80),
+        is_dark: bool,  // is it an opaque type where we only know the size and alignment. 
+        is_union: bool, 
+        align: i32,
+        size: u64,
+        // The `fields` of a struct is terminated by FEnd. 
+        // In a union, there are `nunion` structs in a row. 
+        // TODO: is_union redundant? same as nunion == 1. or is there an edge case where the abi treats a 1 case union differently.  
+        nunion: u32,
+        fields: InsaneVec(Qbe.Field), 
+    ),
+    Dat :: @rec @struct(
+        type: @enum(i32) (
+            DStart,
+            DEnd,
+            DB,
+            DH,
+            DW,
+            DL,
+            DZ,
+        ),
+       	name: CStr,
+    	lnk: *Qbe.Lnk,
+    	u: @union(
+            num: i64,
+            fltd: f64,
+            flts: f32,
+            str: CStr,
+    		ref: @struct(
+    			name: CStr,
+                off: i64,
+    		),
+    	),
+        isref: u8,
+        isstr: u8,
+    ),
+    Pool :: @rec @enum(i32) (
+        PHeap, /* free() necessary */
+        PFn,   /* discarded after processing the function */
+    ),
+    Bucket :: @struct(
+    	nstr: u32,
+    	str: *CStr,
+    ),
+    CmpI :: @enum(i32) (
+        Cieq,
+        Cine,
+        Cisge,
+        Cisgt,
+        Cisle,
+        Cislt,
+        Ciuge,
+        Ciugt,
+        Ciule,
+        Ciult,
+        NCmpI,
+    ),
+    // TODO: mixed by name and infered value    
+    CmpF :: @enum(i32) (
+        Cfeq = 0,
+        Cfge = 1,
+        Cfgt = 2,
+        Cfle = 3,
+        Cflt = 4,
+        Cfne = 5,
+        Cfo = 6,
+        Cfuo = 7,
+        NCmpF = 8,
+        NCmp = 18,
+    ),
+    O :: @enum(i32) (
+        Oxxx,
+        /* Arithmetic and Bits */
+        add,   
+        sub, 
+        neg,  
+        div,  
+        rem, 
+        udiv,   
+        urem, 
+        mul,  
+        and,  
+        or,   
+        xor,  
+        sar,  
+        shr, 
+        shl, 
+    
+        /* Comparisons */
+        ceqw,   
+        cnew, 
+        csgew,
+        csgtw, 
+        cslew, 
+        csltw, 
+        cugew, 
+        cugtw,
+        culew,  
+        cultw, 
+    
+        ceql,  
+        cnel,  
+        csgel,
+        csgtl, 
+        cslel,  
+        csltl, 
+        cugel,  
+        cugtl, 
+        culel,
+        cultl, 
+    
+        ceqs, 
+        cges, 
+        cgts, 
+        cles, 
+        clts,  
+        cnes,
+        cos,  
+        cuos, 
+    
+        ceqd,
+        cged, 
+        cgtd,
+        cled,   
+        cltd,  
+        cned,  
+        cod,   
+        cuod,  
+    
+        /* Memory */
+        storeb,
+        storeh,
+        storew, 
+        storel,
+        stores, 
+        stored, 
+    
+        loadsb,
+        loadub,
+        loadsh,
+        loaduh,
+        loadsw,
+        loaduw,
+        load,  
+    
+        /* Extensions and Truncations */
+        extsb,  
+        extub,  
+        extsh,  
+        extuh, 
+        extsw,  
+        extuw, 
+    
+        exts,  
+        truncd,
+        stosi,  
+        stoui,  
+        dtosi,   
+        dtoui,   
+        swtof,
+        uwtof,
+        sltof,
+        ultof,  
+        cast,  
+    
+        /* Stack Allocation */
+        alloc4, 
+        alloc8, 
+        alloc16, 
+    
+        /* Variadic Function Helpers */
+        vaarg,
+        vastart, 
+    
+        copy,   
+    
+        /* Debug */
+        dbgloc, 
+    
+        /****************************************/
+        /* INTERNAL OPERATIONS (keep nop first) */
+        /****************************************/
+        
+        /* Miscellaneous and Architecture-Specific Operations */
+        nop,
+        addr, 
+        blit0, 
+        blit1, 
+        swap,  
+        sign,        
+        salloc, 
+        xidiv, 
+        xdiv, 
+        xcmp,   
+        xtest, 
+        acmp,   
+        acmn,  
+        afcmp,  
+        reqz,        
+        rnez,        
+    
+        /* Arguments, Parameters, and Calls */
+        par,   
+        parsb,  
+        parub,   
+        parsh, 
+        paruh,  
+        parc,   
+        pare,   
+        arg,
+        argsb, 
+        argub, 
+        argsh, 
+        arguh, 
+        argc,   
+        arge,  
+        argv,
+        call,
+    
+        /* Flags Setting */
+        flagieq,
+        flagine,
+        flagisge,
+        flagisgt,
+        flagisle,
+        flagislt,
+        flagiuge,
+        flagiugt,
+        flagiule,
+        flagiult,
+        flagfeq,
+        flagfge,
+        flagfgt,
+        flagfle,
+        flagflt,
+        flagfne,
+        flagfo,  
+        flagfuo,
+    
+        NumberOfOps,
+    ),
+    J :: @enum(i16) ( // :QbeJi16
+        Jxxx,
+        Jretw,
+        Jretl,
+        Jrets,
+        Jretd,
+        Jretsb,
+        Jretub,
+        Jretsh,
+        Jretuh,
+        Jretc,
+        Jret0,
+        Jjmp,
+        Jjnz,
+        Jjfieq,
+        Jjfine,
+        Jjfisge,
+        Jjfisgt,
+        Jjfisle,
+        Jjfislt,
+        Jjfiuge,
+        Jjfiugt,
+        Jjfiule,
+        Jjfiult,
+        Jjffeq,
+        Jjffge,
+        Jjffgt,
+        Jjffle,
+        Jjfflt,
+        Jjffne,
+        Jjffo,
+        Jjffuo,
+        Jhlt,
+        NJmp,
+    ),
+);
+
+// TODO: this should be able to go in the struct. 
+QbeUndef :: Qbe.Ref.zeroed(); // :Undef
+
+fn freeall() void #import("qbe");
+fn vnew(len: i64, element_size: i64, pool: Qbe.Pool) rawptr #import("qbe");
+fn vfree(_0: rawptr) void #import("qbe");
+fn vgrow(_0: rawptr, _1: u64) void #import("qbe");
+fn strf(_0: CStr, _1: CStr) void #import("qbe");
+fn intern(_0: CStr) u32 #import("qbe");
+fn str(_0: u32) CStr #import("qbe");
+fn argcls(_0: *Ins, _1: i32) i32 #import("qbe");
+fn isreg(_0: Qbe.Ref) i32 #import("qbe");
+fn iscmp(_0: i32, _1: *i32, _2: *i32) i32 #import("qbe");
+fn emit(_0: i32, _1: i32, _2: Qbe.Ref, _3: Qbe.Ref, _4: Qbe.Ref) void #import("qbe");
+fn emiti(_0: Qbe.Ins) void #import("qbe");
+fn idup(_0: **Qbe.Ins, _1: *Qbe.Ins, _2: u64) void #import("qbe");
+fn icpy(_0: *Qbe.Ins, _1: *Qbe.Ins, _2: u64) *Ins #import("qbe");
+fn cmpop(_0: i32) i32 #import("qbe");
+fn cmpneg(_0: i32) i32 #import("qbe");
+fn clsmerge(_0: *i16, _1: i16) i32 #import("qbe");
+fn phicls(_0: i32, _1: *Qbe.Tmp) i32 #import("qbe");
+fn newtmp(_0: CStr, _1: i32, _2: *Qbe.Fn) Ref #import("qbe");
+fn chuse(_0: Qbe.Ref, _1: i32, _2: *Qbe.Fn) void #import("qbe");
+fn symeq(_0: Qbe.Sym, _1: Qbe.Sym) i32 #import("qbe");
+fn newcon(_0: *Qbe.Con, _1: *Qbe.Fn) Ref #import("qbe");
+fn getcon(_0: i64, _1: *Qbe.Fn) Ref #import("qbe");
+fn addcon(_0: *Qbe.Con, _1: *Qbe.Con, _2: i32) i32 #import("qbe");
+fn salloc(_0: Qbe.Ref, _1: Qbe.Ref, _2: *Qbe.Fn) void #import("qbe");
+fn dumpts(_0: *Qbe.BSet, _1: *Qbe.Tmp, _2: *FILE) void #import("qbe");
+fn runmatch(_0: *Uchar, _1: *Num, _2: Ref, _3: *Ref) void #import("qbe");
+fn bsinit(_0: *Qbe.BSet, _1: u32) void #import("qbe");
+fn bszero(_0: *Qbe.BSet) void #import("qbe");
+fn bscount(_0: *Qbe.BSet) u32 #import("qbe");
+fn bsset(_0: *Qbe.BSet, _1: u32) void #import("qbe");
+fn bsclr(_0: *Qbe.BSet, _1: u32) void #import("qbe");
+fn bscopy(_0: *Qbe.BSet, _1: *Qbe.BSet) void #import("qbe");
+fn bsunion(_0: *Qbe.BSet, _1: *Qbe.BSet) void #import("qbe");
+fn bsinter(_0: *Qbe.BSet, _1: *Qbe.BSet) void #import("qbe");
+fn bsdiff(_0: *Qbe.BSet, _1: *Qbe.BSet) void #import("qbe");
+fn bsequal(_0: *Qbe.BSet, _1: *Qbe.BSet) i32 #import("qbe");
+fn bsiter(_0: *Qbe.BSet, _1: *i32) i32 #import("qbe");
+fn parse(_0: *FILE, _1: CStr, _2: @FnPtr(CStr) void, _3: @FnPtr(*Qbe.Dat) void, _4: @FnPtr(*Qbe.Fn) void) void #import("qbe");
+fn printfn(_0: *Qbe.Fn, _1: *FILE) void #import("qbe");
+fn printref(_0: Qbe.Ref, _1: *Qbe.Fn, _2: *FILE) void #import("qbe");
+fn err(_0: CStr) void #import("qbe");
+fn elimsb(_0: *Qbe.Fn) void #import("qbe");
+fn newblk() *Qbe.Blk #import("qbe");
+fn edgedel(_0: *Qbe.Blk, _1: **Qbe.Blk) void #import("qbe");
+fn fillpreds(_0: *Qbe.Fn) void #import("qbe");
+fn fillrpo(_0: *Qbe.Fn) void #import("qbe");
+fn filldom(_0: *Qbe.Fn) void #import("qbe");
+fn sdom(_0: *Qbe.Blk, _1: *Qbe.Blk) i32 #import("qbe");
+fn dom(_0: *Qbe.Blk, _1: *Qbe.Blk) i32 #import("qbe");
+fn fillfron(_0: *Qbe.Fn) void #import("qbe");
+fn loopiter(_0: *Qbe.Fn, _1: @FnPtr(*Blk, *Blk) void) void #import("qbe");
+fn fillloop(_0: *Qbe.Fn) void #import("qbe");
+fn simpljmp(_0: *Qbe.Fn) void #import("qbe");
+fn promote(_0: *Qbe.Fn) void #import("qbe");
+fn coalesce(_0: *Qbe.Fn) void #import("qbe");
+fn fillalias(_0: *Qbe.Fn) void #import("qbe");
+fn getalias(_0: *Alias, _1: Qbe.Ref, _2: *Qbe.Fn) void #import("qbe");
+fn alias(_0: Qbe.Ref, _1: i32, _2: i32, _3: Qbe.Ref, _4: i32, _5: *i32, _6: *Qbe.Fn) i32 #import("qbe");
+fn escapes(_0: Qbe.Ref, _1: *Qbe.Fn) i32 #import("qbe");
+fn loadsz(_0: *Qbe.Ins) i32 #import("qbe");
+fn storesz(_0: *Qbe.Ins) i32 #import("qbe");
+fn loadopt(_0: *Qbe.Fn) void #import("qbe");
+fn filluse(_0: *Qbe.Fn) void #import("qbe");
+fn ssa(_0: *Qbe.Fn) void #import("qbe");
+fn ssacheck(_0: *Qbe.Fn) void #import("qbe");
+fn copy(_0: *Qbe.Fn) void #import("qbe");
+fn fold(_0: *Qbe.Fn) void #import("qbe");
+fn simpl(_0: *Qbe.Fn) void #import("qbe");
+fn liveon(_0: *Qbe.BSet, _1: *Blk, _2: *Blk) void #import("qbe");
+fn filllive(_0: *Qbe.Fn) void #import("qbe");
+fn fillcost(_0: *Qbe.Fn) void #import("qbe");
+fn spill(_0: *Qbe.Fn) void #import("qbe");
+fn rega(_0: *Qbe.Fn) void #import("qbe");
+fn emitfnlnk(_0: CStr, _1: *Qbe.Lnk, _2: *FILE) void #import("qbe");
+fn emitdat(_0: *Qbe.Dat, _1: *FILE) void #import("qbe");
+fn emitdbgfile(_0: CStr, _1: *FILE) void #import("qbe");
+fn emitdbgloc(_0: u32, _1: u32, _2: *FILE) void #import("qbe");
+fn stashbits(_0: rawptr, _1: i32) i32 #import("qbe");
+fn elf_emitfnfin(_0: CStr, _1: *FILE) void #import("qbe");
+fn elf_emitfin(_0: *FILE) void #import("qbe");
+fn macho_emitfin(_0: *FILE) void #import("qbe");
+
+// Note: you have to make this not `static` in qbe/parse.fr
+fn typecheck(_0: *Qbe.Fn) void #import("qbe");
+
+fn header();
+fn grow();
+fn new_copy();
+
+fn InsaneVec($T: Type) Type = {
+    Self :: @struct(first: *T);
+    ::ptr_utils(T);
+    
+    fn new(len: i64, pool: Qbe.Pool) Self = {
+        (first = T.ptr_from_raw(vnew(len, T.size_of(), pool)))
+    }
+    
+    fn new_copy(items: []T, pool: Qbe.Pool) Self = {
+        self: Self = new(items.len, pool);
+        self.slice(0, items.len).copy_from(items);
+        self
+    }
+    
+    // ensure capacity is >= len
+    fn grow(s: *Self, len: i64) void = {
+        v := Self.raw_from_ptr(s);
+        vgrow(v, len);
+    }
+    
+    // TODO: bounds checking but its hard as long as i have to keep qbe's memory layout because the fields aren't together. 
+    //       and anyway it would be sad to add alignment padding just for bounds checks. 
+    
+    fn index(s: Self, i: i64) *T = {
+        self.first.offset(i)
+    }
+    
+    fn slice(self: Self, start: i64, end: i64) []T = {
+        (ptr = self.first.offset(start), len = end - start)
+    }
+    
+    fn header(s: Self) *QbeVec = {
+        v := ptr_cast_unchecked(T, Vec, self.first);
+        v.offset(-1)
+    }
+    
+    Self
+}
+
+// Used with [vnew, vfree, vgrow]
+// This is a header that goes before the allocated memory for the array. 
+// When a field is an InsaneVec it points to the first entry of one of these and you offset backwards to get the header. 
+QbeVec :: @struct(
+   	mag: u64,
+   	pool: Qbe.Pool,
+   	esz: i64,
+   	cap: u64,
+    // I don't have unsized types. lets hope thats not a big deal
+   	// union { long long ll; long double ld; void *ptr; } align[];
+);

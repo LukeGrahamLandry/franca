@@ -1,3 +1,7 @@
+## (Sep 25)
+
+- my c_bindgen emits both fields as the whole backing type for bit fields. that was confusing. TODO: fix // :BitField
+
 ## (Sep 24)
 
 - so like its gotta be https://github.com/llvm/llvm-project/blob/3fbf6f8bb183ad8b9157e50c442479f4ca7a9b8d/llvm/lib/MC/MCDwarf.cpp#L630

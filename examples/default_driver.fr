@@ -12,6 +12,7 @@
 // - TODO: rename this? its not the default really. its not what the compiler uses to load your driver program for example. 
 
 #include_std("examples/qbe.fr");
+#include_std("backend2/from_bc.fr");
 
 Options :: @struct(
     use_v2 := false,
@@ -74,7 +75,7 @@ fn driver(vtable: *ImportVTable) void = {
                 } else {
                     assert(!cmd.cfg.show_asm, "TODO: -S with qbe");
                     assert(cmd.cfg.qbe, "rn only two backends. update me as needed!");
-                    c.compile_with_qbe(fid, .ExportWithNames, arch, os);
+                    c.compile_with_included_qbe(fid, .ExportWithNames, arch, os);
                 };
                 println("[built a.out]");  // TODO: say the right path if its wasm
             };
@@ -240,6 +241,32 @@ fn compile_with_qbe(c: CompCtx, fid: FuncId, entry: ProgramEntry, arch: Arch, os
     ok := append_to_file(asm_out, inline_asm_functions.items());
     assert(ok, "failed to append file");
 
+    args: List(Str) = list(temp());
+    args&.clear();
+    args&.push(asm_out);
+    args&.push("-o");
+    args&.push("a.out");
+    triple := target_triple(arch, os);
+    args&.push_all(@slice("-target", triple));
+    @println("Run assembler %", args.items());
+    start := timestamp();
+    success := run_cmd_blocking("clang", args.items()); 
+    assert(success, "as failed");
+    end := timestamp();
+    @println("[assembler time: %ms]", end - start);
+    //ir_out.remove();   
+}
+
+fn compile_with_included_qbe(c: CompCtx, fid: FuncId, entry: ProgramEntry, arch: Arch, os: Os) void = {
+    env: TargetEnv = (arch = arch, os = os);
+    asm_text := emit_qbe_included(c, @slice(fid), entry, env&);
+    asm_out :: "target/franca_qbe_temp.s"; // TODO: the version of tmp file that lets you have an extension because it wants the .s
+    
+    ir_out := open_trunc(asm_out.sym().c_str()).unwrap(); // TODO: sane error message if you forget to unwrap this
+    for(asm_text&){bucket|
+        ir_out&.write(bucket).unwrap();
+    };
+    
     args: List(Str) = list(temp());
     args&.clear();
     args&.push(asm_out);

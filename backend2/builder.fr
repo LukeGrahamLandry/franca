@@ -1,0 +1,244 @@
+// TODO: preallocate the arrays since qbe sets maximum sizes for things (and other places in the backend use those numbers). 
+// it doesnt have to be fast it just has to work
+// it doesnt have to be fast it just has to work
+// for now... 
+
+QbeBuilder :: @struct(
+    globals: *Qbe.Globals,
+    temporaries: List(Qbe.Tmp),
+    constants: List(Qbe.Con),
+    memory: List(Qbe.Addr),
+    blocks: List(WipBlock),
+    leaf := true,
+);
+
+QbeTerminator :: @struct(
+    arg := QbeUndef,
+    target1 := BbId.zeroed(),
+    target2 := BbId.zeroed(),
+    type: Qbe.J,
+);
+
+WipBlock :: @struct(
+    insts: List(Qbe.Ins),
+    jmp: QbeTerminator,
+);
+
+// TODO: reuse the memory so this should be fn clear(*QbeBuilder)
+fn init(gpa: Alloc, globals: *Qbe.Globals) QbeBuilder = {
+    b: QbeBuilder = (
+        globals = globals,
+        temporaries = list(gpa),
+        constants = list(gpa),
+        memory = list(gpa),
+        blocks = list(gpa),
+    );
+    b&.clear();
+    b
+}
+
+fn clear(b: *QbeBuilder) void = {
+    // :ClearOkBecauseCopied
+    b.constants&.clear();
+    b.temporaries&.clear(); 
+    b.memory&.clear();
+    b.blocks&.clear();
+    
+    b.constants&.push(type = .CBits, bits = (i = 0xdeaddead)); // :Undef
+    b.constants&.push(type = .CBits, bits = (i = 0));
+    
+    // Add temporaries representing physical registers.
+    // TODO: is it required to pad out fake ones up to 64? maybe they're ignored and its just to make the indices work out. -- Sep 25
+    range(0, Qbe.Tmp0) { i |
+        is_float := b.globals.target.fpr0 <= i.intcast() && i.intcast() < b.globals.target.fpr0 + b.globals.target.nfpr;
+		if is_float {
+		    b.push_temp(.Kd);
+		} else {
+		    b.push_temp(.Kl);
+		};
+    };
+}
+
+// TODO: I'm not setting width.
+fn push_temp(b: *QbeBuilder, k: Qbe.Cls) Qbe.Ref = {
+    temp := Qbe.Tmp.zeroed();
+    // TODO: set name for debug
+    temp.cls = k;
+    temp.slot = -1;
+    temp.nuse = 1;
+    temp.ndef = 1;
+    b.temporaries&.push(temp);
+    ref(.RTmp, b.temporaries.len - 1)
+}
+
+// TODO: fix load/store union in emit_bc so you can just pass `get_field_type(Qbe.Con, @symbol bits)`
+fn push_literal(b: *QbeBuilder, i: i64) Qbe.Ref = {
+    con: Qbe.Con = (type = .CBits, bits = (i = i));
+    b.constants&.push(con);
+    ref(.RCon, b.constants.len - 1)
+}
+
+fn push_literal(b: *QbeBuilder, i: f64) Qbe.Ref = {
+    con: Qbe.Con = (type = .CBits, bits = (d = i));
+    b.constants&.push(con);
+    ref(.RCon, b.constants.len - 1)
+}
+
+fn push_literal(b: *QbeBuilder, i: f32) Qbe.Ref = {
+    con: Qbe.Con = (type = .CBits, bits = (s = i));
+    b.constants&.push(con);
+    ref(.RCon, b.constants.len - 1)
+}
+
+fn push_symbol(b: *QbeBuilder, name: CStr) Qbe.Ref = {
+    con: Qbe.Con = (type = .CAddr, bits = (i = 0));
+    con.sym.id = intern(name); // TODO: why can't do this inline :FUCKED
+    b.constants&.push(con);
+    ref(.RCon, b.constants.len - 1)
+}
+
+fn push_inst(b: *QbeBuilder, block: BbId, op: Qbe.O, k: Qbe.Cls, out: Qbe.Ref, in1: Qbe.Ref, in2: Qbe.Ref) void = {
+    @debug_assert(k != .Kx, "must know class");
+    op30_cls2 := (@as(i64) k.raw().zext()).shift_left(30).bit_or(op.raw().zext());
+    // TODO: should be able to init array from tuple
+    inst: Qbe.Ins = (op30_cls2 = op30_cls2.trunc(), arg = init(@slice(in1, in2)), to = out);
+    b.blocks[block.id.zext()].insts&.push(inst);
+}
+
+fn push_inst(b: *QbeBuilder, block: BbId, op: Qbe.O, k: Qbe.Cls, in1: Qbe.Ref, in2: Qbe.Ref) Qbe.Ref = {
+    out := b.push_temp(k);
+    b.push_inst(block, op, k, out, in1, in2);
+    out
+}
+
+fn push_inst0(b: *QbeBuilder, block: BbId, op: Qbe.O,  k: Qbe.Cls, in1: Qbe.Ref, in2: Qbe.Ref) void = {
+    b.push_inst(block, op, k, QbeUndef, in1, in2);
+}
+
+// Parameters are represented as instructions at the beginning of the @start block. 
+fn push_parameter(b: *QbeBuilder, arg_type: Qbe.Cls) Qbe.Ref = {
+    @debug_assert(b.blocks.len == 1, "push args at the beginning of the start block");
+    // TODO: check that only args pushed so far just to be helpful. 
+    @debug_assert(arg_type != .Kc, "TODO: I don't support struct typed args yet because emit_bc throws away the info (but that needs to be fixed to implement the abi correctly)");
+    // if (arg_type == .Kc) *curi = (Ins){Oparc, Kl, r, {TYPE(ty)}};
+    
+    is_small_for_abi := arg_type >= Qbe.Cls.Ksb;
+    base_type := if(is_small_for_abi, => Qbe.Cls.Kw, => arg_type);
+    op := if(is_small_for_abi, => offset_by_class(Qbe.O.parsb, arg_type), => Qbe.O.par);
+    value_out := b.push_temp(base_type);
+    block: BbId = (id = 0);
+    b.push_inst(block, op, base_type, value_out, QbeUndef, QbeUndef);
+    value_out
+}
+
+// Each argument to a call is represented by an instruction. Don't forget to `push_inst(call)` at the end. 
+fn push_argument(b: *QbeBuilder, block: BbId, arg_type: Qbe.Cls, value: Qbe.Ref) void = {
+    @debug_assert(arg_type != .Kc, "TODO: I don't support struct typed args yet because emit_bc throws away the info (but that needs to be fixed to implement the abi correctly)");
+    is_small_for_abi := arg_type >= Qbe.Cls.Ksb;
+    base_type := if(is_small_for_abi, => Qbe.Cls.Kw, => arg_type);
+    op := if(is_small_for_abi, => offset_by_class(Qbe.O.argsb, arg_type), => Qbe.O.arg);
+    b.push_inst(block, op, base_type, QbeUndef, value, QbeUndef);
+}
+
+fn offset_by_class(op: Qbe.O, k: Qbe.Cls) Qbe.O = {
+    // TODO: make this not painful
+    a: i64 = k.raw().zext();
+    b: i64 = Qbe.Cls.Ksb.raw().zext();
+    c: i64 = op.raw().zext();
+    d := c + a - b;
+    @as(Qbe.O) @as(i32) d.intcast()
+}
+
+fn ge(a: Qbe.Cls, b: Qbe.Cls) bool #redirect(Ty(i64, i64), bool);
+fn add(a: i16, b: i16) i16 #redirect(Ty(i64, i64), i64);
+fn sub(a: i16, b: i16) i16 #redirect(Ty(i64, i64), i64);
+
+fn push_block(b: *QbeBuilder) BbId = {
+    // zero init terminator is Qbe.J.Jxxx
+    b.blocks&.push(insts = list(b.blocks.gpa), jmp = QbeTerminator.zeroed());
+    // TODO: set name for debug
+    (id = b.blocks.len.sub(1).trunc())
+}
+
+fn end_block(b: *QbeBuilder, bb: BbId, jmp: QbeTerminator) void = {
+    block := b.blocks[bb.id.zext()]&;
+    @debug_assert(block.jmp.type == .Jxxx, "tried to close block % twice", bb.id);
+    block.jmp = jmp;
+}
+
+fn ref(cls: Qbe.RegKind, id: i64) Qbe.Ref = {
+    (type3_val29 = cls.raw().bitcast().bit_or(id.shift_left(3).trunc()))
+}
+
+fn build(b: *QbeBuilder, name: Str, /*TODO: link_type: Qbe.Lnk,*/) Qbe.Fn = {
+    curf := Qbe.Fn.zeroed();
+    
+    // :ClearOkBecauseCopied
+    curf.ntmp = b.temporaries.len.intcast();
+    curf.tmp = new_copy(b.temporaries.items(), .PFn);
+    curf.ncon = b.constants.len.intcast();
+    curf.con = new_copy(b.constants.items(), .PFn);
+    curf.nmem = b.memory.len.intcast();
+    curf.mem = new_copy(b.memory.items(), .PFn);
+    
+	curf.leaf = b.leaf;
+	// curf.rpo = 0; filled in by later pass
+	// TODO
+	// curf.lnk
+	// curf.retty  strncpy(curf->name, tokval.str, NString-1);
+	// curf.vararg
+	// curf.name
+	//
+	// curf.start
+    
+    if b.blocks.len == 0 {
+        err("empty function".sym().c_str());
+    };
+    if name.len > 80 {
+        err("TODO: function name cannot be longer than 80 characters".sym().c_str());
+    };
+    name_dest := curf.name&.items().slice(0, name.len);
+    name_dest.copy_from(name);
+    
+    qbe_blocks: List(Qbe.Blk) = list(b.blocks.len, b.blocks.gpa); // stable!
+	curf.nblk = b.blocks.len.trunc();
+	
+    curf.start = qbe_blocks.index_unchecked(0);
+    enumerate b.blocks { i, wip |
+        qbe_blocks&.push(Qbe.Blk.zeroed());
+        block := qbe_blocks[i]&;
+        block.nins = wip.insts.len.trunc();
+        block.ins = wip.insts.maybe_uninit.ptr;
+        if i + 1 < b.blocks.len {
+            block.link = qbe_blocks.index_unchecked(i + 1);
+        } else {
+            block.link = zeroed(*Qbe.Blk);
+        };
+        block.jmp.type = wip.jmp.type;
+        block.jmp.arg = wip.jmp.arg;
+        block.s1 = qbe_blocks.index_unchecked(wip.jmp.target1.id.zext());
+        block.s2 = qbe_blocks.index_unchecked(wip.jmp.target2.id.zext());
+        
+        // TODO: don't be fucking with strings, only do this in debug mode.
+        name: List(u8) = (maybe_uninit = block.name&.items(), len = 0, gpa = panicking_allocator);
+        @fmt(name&, "b%", i);
+    };
+	
+	// TODO: be able to print invalid ir (don't assert)
+	// TODO: make sure nothing requires the extra call to fillpreds and then disable this in release mode. 
+	//       if the frontend generates valid code it will always type check. 
+	//       but always have to option to run this to make peoples lives easier! (ie if a user wants to use #bc)
+    typecheck(curf&); 
+    b.clear();
+    // TODO: retty, link, vararg, name, translate blocks
+    curf
+}
+
+::enum(Qbe.Cls);
+::enum(Qbe.J);
+::enum(Qbe.RegKind);
+::if(Qbe.Cls);
+::if(Qbe.O);
+::enum(Qbe.O);
+
+fn bitcast(x: i32) u32 #unsafe_noop_cast;
