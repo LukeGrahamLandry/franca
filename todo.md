@@ -1,4 +1,5 @@
 - make logical not an intrinsic
+- bring back lex error for unterminated comment.
 
 ##
 

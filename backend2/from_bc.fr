@@ -7,8 +7,10 @@
 // - It has to be able to generate llvm-ir for release or debug-info builds.
 //   I'm sure that will involve painfully inserting casts. Also have to be able to track debug source locations through the passes (i think Odbgloc already does that). 
 // - Have to expose it to user comptime code for #bc (examples/bf2bc.fr)
+//   maybe add optional function argument type checking to catch basic mistakes.
 // - Have to make easy to build static + dynamic.
 // - expose the pass debug logging with #log_ir("AF") or something
+// - be able to run thier .ssa tests
 //
 
 /*
@@ -17,8 +19,6 @@ ar rvs qbe_merged.o util.o parse.o abi.o cfg.o mem.o ssa.o alias.o load.o copy.o
 (for comptime dynamic link this works, you need main for the symbols _T/_debug)
 clang -dynamiclib -o qbe_merged.dylib main.o util.o parse.o abi.o cfg.o mem.o ssa.o alias.o load.o copy.o fold.o simpl.o live.o spill.o rega.o emit.o amd64/targ.o amd64/sysv.o amd64/isel.o amd64/emit.o arm64/targ.o arm64/abi.o arm64/isel.o arm64/emit.o rv64/targ.o rv64/abi.o rv64/isel.o rv64/emit.o
 */
-#include_std("bindings/qbe.fr");
-#include_std("backend2/builder.fr");
 :: {
     c := current_compiler_context();
     handle := dlopen("./bindings/qbe/qbe_merged.dylib".sym().c_str(), DlFlag.Lazy);
@@ -56,7 +56,7 @@ debugf :: @static(*FILE) {
 };
 
 run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
-    printfn(fnn, debugf[]);
+    //printfn(fnn, debugf[]);
     {qbe_globals[].target.abi0}(fnn);
     fillrpo(fnn);
     fillpreds(fnn);
@@ -77,7 +77,7 @@ run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
     filluse(fnn);
     fold(fnn);
     {qbe_globals[].target.abi1}(fnn);
-    simpl(fnn);
+    simplify(fnn);
     fillpreds(fnn);
     filluse(fnn);
     {qbe_globals[].target.isel}(fnn);
@@ -102,7 +102,7 @@ run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
     fnn.rpo.offset(fnn.nblk.zext() - 1)[].link = Qbe.Blk.ptr_from_int(0);
     
     {qbe_globals[].target.emitfn}(fnn, outf[]);
-    printfn(fnn, debugf[]);
+    //printfn(fnn, debugf[]);
     // TODO: do this but then have to reset up the type table
     //freeall();  
 };
@@ -259,7 +259,7 @@ fn emit_bounce_fn(self: *EmitQbe2, impl_name_callee: Str, fake_decl_name: Str, s
     
     params: List(Qbe.Ref) = list(temp());
     if signeture.first_arg_is_indirect_return {
-        panic("TODO: first_arg_is_indirect_return");
+        params&.push(self.b&.push_parameter(qbe_real_class(.P64)));
     };
     for signeture.args { prim | 
         params&.push(self.b&.push_parameter(qbe_real_class(prim)));
@@ -267,13 +267,14 @@ fn emit_bounce_fn(self: *EmitQbe2, impl_name_callee: Str, fake_decl_name: Str, s
     
     self.current_has_indirect_return = signeture.first_arg_is_indirect_return;
     if signeture.first_arg_is_indirect_return {
-        panic("TODO: first_arg_is_indirect_return");
-    //    @fmt(self.out&.current(), "   %ret =l alloc8 %\n", "%", signeture.return_value_bytes);
-    //    @fmt(self.out&.current(), "   %v0 =l alloc8 %\n", "%", signeture.return_value_bytes);
+        size := self.b&.push_literal(@as(i64) signeture.return_value_bytes.zext());
+        self.indirect_return_slot = self.b&.push_inst(entry, .alloc8, .Kl, size, QbeUndef);
+        self.b&.push_inst0(entry, .storel, .Kw, self.indirect_return_slot, self.block_args[0]);
+        // :set_aggragate_return_index
+        self.b.aggragate_return_index = (Some = self.b&.opaque_type_slow(signeture.return_value_bytes.zext(), 3));
     };
     if signeture.ret2.is_some() {
-        panic("TODO: ret2");
-    //    @fmt(self.out&.current(), "   %ret =l alloc8 16\n", "%");
+        self.indirect_return_slot = self.b&.push_inst(entry, .alloc8, .Kl, self.b&.push_literal(16), QbeUndef);
     };
     
     fuck := @format("%\0", impl_name_callee) libc_allocator /*TODO :LEAK*/;
@@ -281,12 +282,6 @@ fn emit_bounce_fn(self: *EmitQbe2, impl_name_callee: Str, fake_decl_name: Str, s
     self.signeture = signeture;
     ret := self.inst_call(params.items(), signeture, callee);
     
-    if signeture.first_arg_is_indirect_return {
-        panic("TODO: first_arg_is_indirect_return");
-    //    size: i64 = signeture.return_value_bytes.zext();
-    //    // backwards from memcpy!!
-    //    @fmt(self.out&.current(), "   blit %v0, %ret, %\n", "%", "%", size);
-    };
     self.inst_return(ret);
     fnn := self.b&.build(fake_decl_name);
     run_qbe_passes(fnn&);
@@ -481,7 +476,6 @@ fn setup(self: *EmitQbe2, body: *FnBody, vars_out: *List(Qbe.Ref)) void = {
     entry := self.b&.push_block();
     self.signeture = body.signeture;
     self.body = body;
-    
     params: List(Qbe.Ref) = list(temp());
     for body.signeture.args { prim | 
         params&.push(self.b&.push_parameter(qbe_real_class(prim)));
@@ -854,6 +848,7 @@ fn qbe_fake_class(ty: Prim) Qbe.Cls = {
 
 // :StoreAlwaysKw no result type so the instruction must have .Kw
 fn qbe_store(ty: Prim) Qbe.O = {
+    ::enum(Prim);
     @match(ty) {
         fn P64() => .storel;
         fn I64() => .storel;

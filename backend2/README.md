@@ -1,4 +1,9 @@
-> https://c9x.me/compile/
+An optimising compiler backend based on [Qbe](https://c9x.me/compile/).
+The passes in `opt` are ported directly from Qbe, with some light editing to use a style I find less confusing.
+
+In my brief profiling (with -O2), Qbe spends ~1/3 of its time parsing the input text and another ~1/3 outputting the assembly text.
+Then clang takes as long to assemble that text as the whole Qbe part (or somehow 10x as long on aarch64).
+However I want to use this as a JIT for comptime execution, which will only be practical if I remove those serialization steps.
 
 ## Qbe License
 

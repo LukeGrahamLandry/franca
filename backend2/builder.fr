@@ -108,9 +108,8 @@ fn push_inst(b: *QbeBuilder, block: BbId, op: Qbe.O, k: Qbe.Cls, out: Qbe.Ref, i
     // TODO: why bother
     // if k > .Ksb {| k = .Kw; };
     @debug_assert(k == .Kl || k == .Kw || k == .Ks || k == .Kd, "size must be w/l/s/d");
-    op30_cls2 := (@as(i64) k.raw().zext()).shift_left(30).bit_or(op.raw().zext());
     // TODO: should be able to init array from tuple
-    inst: Qbe.Ins = (op30_cls2 = op30_cls2.trunc(), arg = init(@slice(in1, in2)), to = out);
+    inst: Qbe.Ins = (op30_cls2 = pack_op_cls(op, k), arg = init(@slice(in1, in2)), to = out);
     b.blocks[block.id.zext()].insts&.push(inst);
 }
 
@@ -232,17 +231,10 @@ fn end_block(b: *QbeBuilder, bb: BbId, jmp: QbeTerminator) void = {
     block.jmp = jmp;
 }
 
-fn ref(cls: Qbe.RegKind, id: i64) Qbe.Ref = {
-    (type3_val29 = cls.raw().bitcast().bit_or(id.shift_left(3).trunc()))
-}
-
-// TODO: can we use this instead of making a constant for small integer literals? 
-//       qbe only uses this for blit but CBits for all constants.
-fn small_int_for_blit(x: i64) Qbe.Ref = 
-    ref(.RInt, x.bit_and(0x1fffffff));
-
 fn build(b: *QbeBuilder, name: Str, /*TODO: link_type: Qbe.Lnk,*/) Qbe.Fn = {
     curf := Qbe.Fn.zeroed();
+	// curf.rpo = 0; filled in by later pass
+	// curf.vararg = false; // TODO
     
     // :ClearOkBecauseCopied
     curf.ntmp = b.temporaries.len.intcast();
@@ -256,10 +248,7 @@ fn build(b: *QbeBuilder, name: Str, /*TODO: link_type: Qbe.Lnk,*/) Qbe.Fn = {
 	curf.leaf = b.leaf;
     curf.lnk = b.lnk;
 	curf.retty = (b.aggragate_return_index || @as(i64) -1).intcast();
-	// curf.rpo = 0; filled in by later pass
-	// TODO: curf.vararg
 	
-    
     if b.blocks.len == 0 {
         err("empty function".sym().c_str());
     };
@@ -300,17 +289,143 @@ fn build(b: *QbeBuilder, name: Str, /*TODO: link_type: Qbe.Lnk,*/) Qbe.Fn = {
         @fmt(name&, "b%", i);
     };
 	
-	
-    //printfn(curf&, debugf[]);  // TODO: remove
-    
 	// TODO: make sure nothing requires the extra call to fillpreds and then disable this in release mode. 
 	//       if the frontend generates valid code it will always type check. 
 	//       but always have to option to run this to make peoples lives easier! (ie if a user wants to use #bc)
     typecheck(curf&); 
     b.clear();
-    // TODO: retty, link, vararg, name, translate blocks
+    
+    curf.globals = b.globals;
     curf
 }
+
+//////////////////////////////////////////////
+// These are used in the optimisation passes. 
+// Note: we're always iterating backwards so `emit` inserts into the block buffer backwards!
+// For now we use the buffer in Qbe.Globals but that will move out eventually. 
+//////////////////////////////////////////////
+
+fn for_blocks(f: *Qbe.Fn, $body: @Fn(b: *Qbe.Blk) void) void = {
+    b := f.start;
+    while => !b.is_null() {
+        body(b);
+        b = b.link;
+    };
+}
+
+// Not the same as just `for_rev(b.ins.slice(0, b.nins)`
+// because the body is allowed to consume multiple instructions by offsetting the pointer. 
+// This is needed because the ir uses a vairable length encoding (for blit, call, args).
+fn for_insts_rev(b: *Qbe.Blk, $body: @Fn(i: **Qbe.Ins) void) void = {
+    i := b.ins.offset(b.nins.zext());
+    while => !i.identical(b.ins) {
+        i = i.offset(-1);
+        body(i&);
+        // TODO: @debug_assert() `i` is still in range
+    };
+}
+
+fn copy_instructions_from_scratch(f: *Qbe.Fn, b: *Qbe.Blk) void = {
+    b.nins = f.scratch_next().ptr_diff(f.scratch_start()).trunc();
+	idup(b.ins&, f.scratch_next(), b.nins.zext());
+	f.globals.curi[] = f.scratch_start(); // TODO: make sure this is right. qbe didn't do it where i'd expect in simpl
+}
+
+fn scratch_start(f: *Qbe.Fn) *Qbe.Ins #inline =
+    f.globals.insb.index_unchecked(Qbe.MaxInstructions);
+
+fn scratch_next(f: *Qbe.Fn) *Qbe.Ins #inline =
+    f.globals.curi[];
+
+fn emit(f: *Qbe.Fn, op: Qbe.O, k: Qbe.Cls, to: Qbe.Ref, arg0: Qbe.Ref, arg1: Qbe.Ref) void = {
+    i := f.globals.curi;
+    if i[].identical(f.globals.insb.as_ptr()) {
+        die("emit, too many instructions".sym().c_str());
+    };
+    i[] = i[].offset(-1);
+    i[][] = (op30_cls2 = pack_op_cls(op, k), to = to, arg = init(@slice(arg0, arg1)));
+}
+
+fn emit(f: *Qbe.Fn, i: Qbe.Ins) void #inline = {
+    f.emit(i&.op(), i&.cls(), i.to, i.arg&[0], i.arg&[1]);
+}
+
+// :TodoPort
+fn newtmp(f: *Qbe.Fn, $debug_hint: Str, k: Qbe.Cls) Qbe.Ref #inline = {
+    newtmp(debug_hint.sym().c_str(), k, f)
+}
+
+// :TodoPort
+fn getcon(f: *Qbe.Fn, val: i64) Qbe.Ref #inline = {
+    getcon(val, f)
+}
+
+//////////////////////////////////////
+
+fn pack_op_cls(op: Qbe.O, k: Qbe.Cls) u32 #inline = {
+    (@as(i64) k.raw().zext()).shift_left(30).bit_or(op.raw().zext()).trunc()
+}
+
+// TODO: ugh. garbage setter, i need to add real bit fields to my language!
+fn set_op(i: *Qbe.Ins, op: Qbe.O) void #inline = {
+    i.op30_cls2 = pack_op_cls(op, i.cls());
+}
+
+fn op(i: *Qbe.Ins) Qbe.O #inline = {
+    @as(Qbe.O) @as(i32) @as(u32) i.op30_cls2.bit_and(1.shift_left(30) - 1)
+}
+
+fn cls(i: *Qbe.Ins) Qbe.Cls #inline = {
+    x := i.op30_cls2.shift_right_logical(30).bit_and(1.shift_left(2) - 1);
+    @as(Qbe.Cls) @as(i16) x.trunc()
+}
+
+fn KBASE(k: Qbe.Cls) i64 #inline = {
+    k.raw().shift_right_logical(1).zext()
+}
+
+fn req(a: Qbe.Ref, b: Qbe.Ref) bool #inline = {
+    a.type3_val29 == b.type3_val29
+}
+
+fn rtype(r: Qbe.Ref) Qbe.RegKind #inline = {
+    if r.type3_val29 == 0 {
+        return(.Undef);
+    };
+    @as(Qbe.RegKind) @as(u32) r.type3_val29.bit_and(1.shift_left(3) - 1)
+}
+
+fn get_constant(f: *Qbe.Fn, r: Qbe.Ref) *Qbe.Con #inline = {
+    @debug_assert(rtype(r) == .RCon, "tried to get constant of non constant");
+    i: i64 = r.val().zext();
+    @safety(.Bounds) i < f.ncon.zext();
+    f.con.index(i)
+}
+
+fn trunc(x: u32) i16 #redirect(u32, u16); // TODO
+fn shift_right_logical(v: i16, shift_amount: i64) i16 #redirect(Ty(i64, i64), i64); // TODO: trunc
+
+fn ref(cls: Qbe.RegKind, id: i64) Qbe.Ref #inline = {
+    (type3_val29 = cls.raw().bitcast().bit_or(id.shift_left(3).trunc()))
+}
+
+fn val(r: Qbe.Ref) u32 #inline = {
+   @as(u32) r.type3_val29.shift_right_logical(3).bit_and(1.shift_left(29) - 1)
+}
+
+fn rsval(r: Qbe.Ref) i32 #inline = {    
+   intcast(r.val().zext().bit_xor(0x10000000) - 0x10000000)
+}
+
+// TODO: can we use this instead of making a constant for small integer literals? 
+//       qbe only uses this for blit but CBits for all constants.
+fn small_int_for_blit(x: i64) Qbe.Ref #inline = 
+    ref(.RInt, x.bit_and(0x1fffffff));
+
+//////////////////////////////////////
+
+::enum(Qbe.ConType);
+fn sub(a: u64, b: u64) u64 #redirect(Ty(i64, i64), i64); // TODO: wrong because of llvm UB
 
 ::enum(Qbe.Cls);
 ::enum(Qbe.J);
@@ -318,5 +433,9 @@ fn build(b: *QbeBuilder, name: Str, /*TODO: link_type: Qbe.Lnk,*/) Qbe.Fn = {
 ::if(Qbe.Cls);
 ::if(Qbe.O);
 ::enum(Qbe.O);
+::ptr_utils(Qbe.Blk);
 
 fn bitcast(x: i32) u32 #unsafe_noop_cast;
+
+::if(i32);
+fn sub(a: i32, b: i32) i32 #redirect(Ty(i64, i64), i64);

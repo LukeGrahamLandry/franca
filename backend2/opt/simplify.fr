@@ -1,0 +1,145 @@
+// Adapted from Qbe. MIT License. © 2015-2024 Quentin Carbonneaux <quentin@c9x.me>
+
+fn simplify(f: *Qbe.Fn) void = {
+    for_blocks f { b |
+        moved_to_new_memory := false;
+        for_insts_rev b { i |
+            f.ins(i, moved_to_new_memory&, b);
+        };
+        
+        if moved_to_new_memory {
+            f.copy_instructions_from_scratch(b);
+        };
+    };
+}
+
+fn ins(f: *Qbe.Fn, iter: **Qbe.Ins, moved_to_new_memory: *bool, b: *Qbe.Blk) void #once = {
+    i := iter[];
+    /* simplify more instructions here;
+     * copy 0 into xor, bit rotations,
+     * etc. */
+    @match(i.op()) {
+        fn blit1() => {
+            @debug_assert(i.in_memory_after(b.ins), "OOB inst");
+            start_blit := i.offset(-1);
+            @debug_assert(start_blit.op() == .blit0, "blits must be paired");
+      
+            // Currently blit is the only simplification that adds new instructions. 
+            // So if a block does not contain blits, the other simplifications can just update the instructions in place.
+            // The first time we see a blit, we need to copy the instructions we've already seen into the scratch buffer (since we might have changed then).
+            // And the at the end of the block, we'll replace the block with the contents of the scratch buffer. 
+            if !moved_to_new_memory[] {
+                f.globals.curi[] = f.scratch_start();
+                ni := ptr_diff(i.offset(1), b.ins.offset(b.nins.zext()));
+                f.globals.curi[] = f.globals.curi[].offset(-ni);
+                icpy(f.globals.curi[], i.offset(1), ni);
+                moved_to_new_memory[] = true;
+            };
+      
+            f.expand_blit(start_blit.arg&[1], start_blit.arg&[0], rsval(i.arg&[0]));
+            iter[] = i.offset(-1);  // deal with the variable length encoding (blit0, blit1). 
+            return();
+        }
+        fn udiv() => f.simplify_div_like(i);
+        fn urem() => f.simplify_div_like(i);
+        @default   => ();
+    };
+    
+    if moved_to_new_memory[] {
+       f.emit(i[]);
+    };
+}
+
+fn simplify_div_like(f: *Qbe.Fn, i: *Qbe.Ins) void = {
+    r := i.arg&[1];
+    i.cls().KBASE() != 0           || return();
+    rtype(r) != .RCon              || return();
+    c := f.get_constant(r);
+    c.type != .CBits               || return();
+    !ispow2(c.bits.i.bitcast())    || return();
+    
+    // If you want to call emit() here, don't forget to deal with moved_to_new_memory. 
+    
+    n := ulog2(c.bits.i.bitcast());
+    if i.op() == .urem {
+        i.set_op(.and);
+        // TODO: needs to be unsigned?
+        i.arg&[1] = f.getcon(1.shift_left(n.zext()) - 1);
+    } else {
+        i.set_op(.shr);
+        i.arg&[1] = f.getcon(n);
+    };
+}
+
+// Blit instructions are implemented as a sequence of loads and stores.
+fn expand_blit(f: *Qbe.Fn, dest: Qbe.Ref, src: Qbe.Ref, blit_size: i32) void #once = {
+    blit_op_table :: {
+        T   :: @struct(store: Qbe.O, load: Qbe.O, cls: Qbe.Cls, size: i32);
+        t   := ast_alloc().alloc(T, 4);
+        t[0] = (store = .storel, load = .load,   cls = .Kl, size = 8);
+        t[1] = (store = .storew, load = .load,   cls = .Kw, size = 4);
+        t[2] = (store = .storeh, load = .loaduh, cls = .Kw, size = 2);
+        t[3] = (store = .storeb, load = .loadub, cls = .Kw, size = 1);
+        t
+    };
+    
+    forward  := blit_size >= 0;
+    blit_size = blit_size.abs();
+    off: i32 = if(forward, => blit_size, => 0);
+    each blit_op_table { p |
+        while => blit_size >= p.size {
+            blit_size -= p.size;
+            if forward {
+                off -= p.size;
+            };
+            
+            r_value     := f.newtmp("blt", .Kl);
+            r_dest_slot := f.newtmp("blt", .Kl);
+            r_offset    := f.getcon(off.zext()); // compiler bug. shouildb't compile without the zext :FUCKED
+            f.emit(p.store, .Kw, QbeUndef, r_value, r_dest_slot);
+            f.emit(.add, .Kl, r_dest_slot, dest, r_offset);
+            r_src_slot  := f.newtmp("blt", .Kl);
+            f.emit(p.load, p.cls, r_value, r_src_slot, QbeUndef);
+            f.emit(.add, .Kl, r_src_slot, src, r_offset);
+            
+            if !forward {
+                off += p.size;
+            };
+        };
+    };
+}
+
+fn ulog2(pow2: u64) u32 = {
+    // TODO: generate the table at comptime but it's sad to do it every single time you compile.    
+    ulog2_tab64 :: {
+        // TODO: fix slice types compiler bug! 
+        //       crazy that this is uglier in my language than in c for now
+        n: []i64 = @slice(
+               63,  0,  1, 41, 37,  2, 16, 42,
+               38, 29, 32,  3, 12, 17, 43, 55,
+               39, 35, 30, 53, 33, 21,  4, 23,
+               13,  9, 18,  6, 25, 44, 48, 56,
+        );
+        t := ast_alloc().alloc(u8, 64);
+        enumerate n { i, nn |
+            t[i] = nn[].trunc();
+        };
+        n: []i64 = @slice(
+               62, 40, 36, 15, 28, 31, 11, 54,
+               34, 52, 20, 22,  8,  5, 24, 47,
+               61, 14, 27, 10, 51, 19,  7, 46,
+               60, 26, 50, 45, 59, 49, 58, 57
+        );
+        enumerate n { i, nn |
+            t[i + 32] = nn[].trunc();
+        };
+        
+        t
+    };
+    
+    hash := pow2.mul(0x5b31ab928877a7e).shift_left(58);
+    ulog2_tab64[hash.bitcast()].zext()
+}
+
+fn ispow2(v: u64) bool = 
+    v != 0 && v.bit_and(v - 1) == 0;
