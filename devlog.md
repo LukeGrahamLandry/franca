@@ -1,3 +1,13 @@
+## (Sep 26)
+
+- store has no result type so the instruction must have .Kw
+- forgot to set nunion to 1 and it caused a 0 opcode somewhere. took so long to figure out but can't really complain, like yeah thats my bad, don't do that.
+- i was still using qbe parsing for TestRunnerMain so at the end, it would free my `typ` and thats why only the first test case would work every time.
+- a bunch of `error: assembler local symbol 'Lfp0' not defined` because i wasn't calling `target.emitfin` for it to output float constants it made in the backend.
+- insane behaviour where it looped forever (at runtime) if you tell it store returns a value instead of using QbeUndef.
+  which again fair enough i guess. my builder should warn you about that. im surprised typecheck doesn't.
+- made TestRunnerMain return 0 which made more pass. i guess many tests just happened to leave 0 in x0.
+
 ## (Sep 25)
 
 - my c_bindgen emits both fields as the whole backing type for bit fields. that was confusing. TODO: fix // :BitField

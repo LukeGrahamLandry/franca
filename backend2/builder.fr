@@ -9,7 +9,9 @@ QbeBuilder :: @struct(
     constants: List(Qbe.Con),
     memory: List(Qbe.Addr),
     blocks: List(WipBlock),
+    lnk := Qbe.Lnk.zeroed(),
     leaf := true,
+    aggragate_return_index: ?i64,
 );
 
 QbeTerminator :: @struct(
@@ -24,7 +26,6 @@ WipBlock :: @struct(
     jmp: QbeTerminator,
 );
 
-// TODO: reuse the memory so this should be fn clear(*QbeBuilder)
 fn init(gpa: Alloc, globals: *Qbe.Globals) QbeBuilder = {
     b: QbeBuilder = (
         globals = globals,
@@ -32,6 +33,7 @@ fn init(gpa: Alloc, globals: *Qbe.Globals) QbeBuilder = {
         constants = list(gpa),
         memory = list(gpa),
         blocks = list(gpa),
+        aggragate_return_index = .None,
     );
     b&.clear();
     b
@@ -43,6 +45,7 @@ fn clear(b: *QbeBuilder) void = {
     b.temporaries&.clear(); 
     b.memory&.clear();
     b.blocks&.clear();
+    b.aggragate_return_index = .None;
     
     b.constants&.push(type = .CBits, bits = (i = 0xdeaddead)); // :Undef
     b.constants&.push(type = .CBits, bits = (i = 0));
@@ -50,7 +53,7 @@ fn clear(b: *QbeBuilder) void = {
     // Add temporaries representing physical registers.
     // TODO: is it required to pad out fake ones up to 64? maybe they're ignored and its just to make the indices work out. -- Sep 25
     range(0, Qbe.Tmp0) { i |
-        is_float := b.globals.target.fpr0 <= i.intcast() && i.intcast() < b.globals.target.fpr0 + b.globals.target.nfpr;
+        is_float := b.globals.target.fpr0 <= i.intcast() && i.intcast() < (b.globals.target.fpr0 + b.globals.target.nfpr);
 		if is_float {
 		    b.push_temp(.Kd);
 		} else {
@@ -62,7 +65,11 @@ fn clear(b: *QbeBuilder) void = {
 // TODO: I'm not setting width.
 fn push_temp(b: *QbeBuilder, k: Qbe.Cls) Qbe.Ref = {
     temp := Qbe.Tmp.zeroed();
-    // TODO: set name for debug
+    if b.temporaries.len >= Qbe.Tmp0 {
+        // TODO: don't be fucking with strings, only do this in debug mode.
+        name: List(u8) = (maybe_uninit = temp.name&.items(), len = 0, gpa = panicking_allocator);
+        @fmt(name&, "v%", b.temporaries.len - Qbe.Tmp0);
+    };
     temp.cls = k;
     temp.slot = -1;
     temp.nuse = 1;
@@ -98,7 +105,9 @@ fn push_symbol(b: *QbeBuilder, name: CStr) Qbe.Ref = {
 }
 
 fn push_inst(b: *QbeBuilder, block: BbId, op: Qbe.O, k: Qbe.Cls, out: Qbe.Ref, in1: Qbe.Ref, in2: Qbe.Ref) void = {
-    @debug_assert(k != .Kx, "must know class");
+    // TODO: why bother
+    // if k > .Ksb {| k = .Kw; };
+    @debug_assert(k == .Kl || k == .Kw || k == .Ks || k == .Kd, "size must be w/l/s/d");
     op30_cls2 := (@as(i64) k.raw().zext()).shift_left(30).bit_or(op.raw().zext());
     // TODO: should be able to init array from tuple
     inst: Qbe.Ins = (op30_cls2 = op30_cls2.trunc(), arg = init(@slice(in1, in2)), to = out);
@@ -115,6 +124,16 @@ fn push_inst0(b: *QbeBuilder, block: BbId, op: Qbe.O,  k: Qbe.Cls, in1: Qbe.Ref,
     b.push_inst(block, op, k, QbeUndef, in1, in2);
 }
 
+fn push_blit(b: *QbeBuilder, block: BbId, dest: Qbe.Ref, src: Qbe.Ref, size: i64) void = {
+    if size < 0 || size >= 0x10000000 {
+        err("invalid blit size".sym().c_str());
+    };
+    // TODO: why not just put the size in the out slot? 
+    //       maybe its about avoiding a branchy special case to check that its actually a register. 
+    b.push_inst(block, .blit0, .Kw, QbeUndef, src, dest); // note: flipped from memcpy
+    b.push_inst(block, .blit1, .Kw, QbeUndef, small_int_for_blit(size), QbeUndef);
+}
+        
 // Parameters are represented as instructions at the beginning of the @start block. 
 fn push_parameter(b: *QbeBuilder, arg_type: Qbe.Cls) Qbe.Ref = {
     @debug_assert(b.blocks.len == 1, "push args at the beginning of the start block");
@@ -149,7 +168,54 @@ fn offset_by_class(op: Qbe.O, k: Qbe.Cls) Qbe.O = {
     @as(Qbe.O) @as(i32) d.intcast()
 }
 
+// TODO: type for typeid
+// TODO: the front end should cache these since it has to track types anyway. and then we wouldn't need to do this scan. 
+//       they probably don't have to be uniqued anyway, i think we just care about the structure for the abi. 
+fn opaque_type_slow(b: *QbeBuilder, size: i64, align_log2: i64) i64 = {
+    // :SLOW
+    n := b.globals.number_of_types;
+    enumerate b.globals.types[].slice(0, n) { i, type | 
+        if type.is_dark && type.size == size && type.align_log2.zext() == align_log2 {
+            return(i);
+        };
+    };
+    b.globals.types.grow(n + 1);
+    type := b.globals.types[n]&;
+    type[] = Qbe.Typ.zeroed();
+    type.is_dark = true;
+    type.align_log2 = align_log2.intcast();
+    type.size = size;
+    type.nunion = 1; // don't forget this or life is ass 
+    b.globals.number_of_types += 1;
+    // TODO: don't be fucking with strings, only do this in debug mode.
+    name: List(u8) = (maybe_uninit = type.name&.items(), len = 0, gpa = panicking_allocator);
+    @fmt(name&, "t%s%a%", n, size, align_log2);
+    n
+}
+
+// TODO: could do the size+align calc here but my front end already does it for now.  that means you have to put FPad in too!!!
+//       but i barely use this for now. TODO: ill need to improve that when i want to follow the abi better. 
+fn struct_type(b: *QbeBuilder, fields: []Qbe.Field, size: i64, align_log2: i64) i64 = {
+    n := b.globals.number_of_types;
+    b.globals.types.grow(n + 1);
+    type := b.globals.types[n]&;
+    type[] = Qbe.Typ.zeroed();
+    type.fields = new(fields.len + 1, .PHeap);
+    type.align_log2 = align_log2.intcast();
+    type.size = size;
+    enumerate fields { i, f | 
+        type.fields[i] = f[];
+    };
+    type.nunion = 1;// don't forget this or life is ass (it caused a 0 op, `no match for (null)(w)`)
+    type.fields[fields.len] = (type = .FEnd, len = 0);
+    b.globals.number_of_types += 1;
+    name: List(u8) = (maybe_uninit = type.name&.items(), len = 0, gpa = panicking_allocator);
+    @fmt(name&, "t%", n);
+    n
+}
+
 fn ge(a: Qbe.Cls, b: Qbe.Cls) bool #redirect(Ty(i64, i64), bool);
+fn gt(a: Qbe.Cls, b: Qbe.Cls) bool #redirect(Ty(i64, i64), bool);
 fn add(a: i16, b: i16) i16 #redirect(Ty(i64, i64), i64);
 fn sub(a: i16, b: i16) i16 #redirect(Ty(i64, i64), i64);
 
@@ -170,6 +236,11 @@ fn ref(cls: Qbe.RegKind, id: i64) Qbe.Ref = {
     (type3_val29 = cls.raw().bitcast().bit_or(id.shift_left(3).trunc()))
 }
 
+// TODO: can we use this instead of making a constant for small integer literals? 
+//       qbe only uses this for blit but CBits for all constants.
+fn small_int_for_blit(x: i64) Qbe.Ref = 
+    ref(.RInt, x.bit_and(0x1fffffff));
+
 fn build(b: *QbeBuilder, name: Str, /*TODO: link_type: Qbe.Lnk,*/) Qbe.Fn = {
     curf := Qbe.Fn.zeroed();
     
@@ -180,16 +251,14 @@ fn build(b: *QbeBuilder, name: Str, /*TODO: link_type: Qbe.Lnk,*/) Qbe.Fn = {
     curf.con = new_copy(b.constants.items(), .PFn);
     curf.nmem = b.memory.len.intcast();
     curf.mem = new_copy(b.memory.items(), .PFn);
+    //@println("% temps. % blocks.", curf.ntmp.zext() - Qbe.Tmp0, b.blocks.len);
     
 	curf.leaf = b.leaf;
+    curf.lnk = b.lnk;
+	curf.retty = (b.aggragate_return_index || @as(i64) -1).intcast();
 	// curf.rpo = 0; filled in by later pass
-	// TODO
-	// curf.lnk
-	// curf.retty  strncpy(curf->name, tokval.str, NString-1);
-	// curf.vararg
-	// curf.name
-	//
-	// curf.start
+	// TODO: curf.vararg
+	
     
     if b.blocks.len == 0 {
         err("empty function".sym().c_str());
@@ -205,26 +274,35 @@ fn build(b: *QbeBuilder, name: Str, /*TODO: link_type: Qbe.Lnk,*/) Qbe.Fn = {
 	
     curf.start = qbe_blocks.index_unchecked(0);
     enumerate b.blocks { i, wip |
+        if wip.jmp.type == .Jxxx {
+            wip.jmp.type = .Jhlt;  // TODO: report error and force the front end to be precise and not have empty blocks. 
+        };
         qbe_blocks&.push(Qbe.Blk.zeroed());
         block := qbe_blocks[i]&;
         block.nins = wip.insts.len.trunc();
         block.ins = wip.insts.maybe_uninit.ptr;
-        if i + 1 < b.blocks.len {
-            block.link = qbe_blocks.index_unchecked(i + 1);
+        if i == b.blocks.len - 1 {
+            block.link = Qbe.Blk.ptr_from_int(0);
         } else {
-            block.link = zeroed(*Qbe.Blk);
+            block.link = qbe_blocks.index_unchecked(i + 1);
         };
         block.jmp.type = wip.jmp.type;
         block.jmp.arg = wip.jmp.arg;
-        block.s1 = qbe_blocks.index_unchecked(wip.jmp.target1.id.zext());
-        block.s2 = qbe_blocks.index_unchecked(wip.jmp.target2.id.zext());
+        if wip.jmp.target1.id != 0 {
+            block.s1 = qbe_blocks.index_unchecked(wip.jmp.target1.id.zext());
+        };
+        if wip.jmp.target2.id != 0 {
+            block.s2 = qbe_blocks.index_unchecked(wip.jmp.target2.id.zext());
+        };
         
         // TODO: don't be fucking with strings, only do this in debug mode.
         name: List(u8) = (maybe_uninit = block.name&.items(), len = 0, gpa = panicking_allocator);
         @fmt(name&, "b%", i);
     };
 	
-	// TODO: be able to print invalid ir (don't assert)
+	
+    //printfn(curf&, debugf[]);  // TODO: remove
+    
 	// TODO: make sure nothing requires the extra call to fillpreds and then disable this in release mode. 
 	//       if the frontend generates valid code it will always type check. 
 	//       but always have to option to run this to make peoples lives easier! (ie if a user wants to use #bc)

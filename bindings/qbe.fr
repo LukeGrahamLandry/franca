@@ -16,12 +16,25 @@ Qbe :: @rec @struct(
         insb: *Array(Qbe.Ins, 1.shift_left(20)), // MaxInstructions
         curi: **Qbe.Ins,
         target: *Qbe.Target,
+        debug: *Array(bool, "Z".char() + 1),
         // These we need to track but Qbe doesn't use internally. 
         number_of_types := 0, // ntyp. only used by parser
     ),
+    DebugKey :: @enum(i64) (
+        Parsing = "P".ascii(),
+        Memory = "M".ascii(),
+        Ssa = "N".ascii(),
+        Copy = "C".ascii(),
+        Folding = "F".ascii(),
+        Abi = "A".ascii(),
+        InstSelect = "I".ascii(),
+        Liveness = "L".ascii(),
+        Spilling = "S".ascii(),
+        RegAlloc = "R".ascii(),
+    ),
     Cls :: @enum(i16) (  // :QbeClsi16
         Kx = -1, /* "top" class (see usecheck() and clsmerge()) */
-        Kw = 0,
+        Kw = 0, // :JretOrder
         Kl = 1,
         Ks = 2,
         Kd = 3,
@@ -54,8 +67,8 @@ Qbe :: @rec @struct(
         RMem,
     ), // u3
     Target :: @rec @struct(
-        name: Array(i8, 16),
-        apple: i8,
+        name: Array(u8, 16),
+        apple: bool,
         gpr0: i32,
         ngpr: i32,
         fpr0: i32,
@@ -72,8 +85,8 @@ Qbe :: @rec @struct(
         isel: @FnPtr(*Qbe.Fn) void,
         emitfn: @FnPtr(*Qbe.Fn, *FILE) void,
         emitfin: @FnPtr(*FILE) void,
-        asloc: Array(i8, 4),
-        assym: Array(i8, 4),
+        asloc: Array(u8, 4),
+        assym: Array(u8, 4),
     ),
     BSet :: @rec @struct(
         nt: u32,
@@ -177,7 +190,7 @@ Qbe :: @rec @struct(
     	slot: *Qbe.Alias,
     ),
     Tmp :: @rec @struct(
-        name: Array(i8, 80),
+        name: Array(u8, 80),
         def: *Qbe.Ins,
         use: InsaneVec(Qbe.Use),
         ndef: u32,
@@ -220,13 +233,13 @@ Qbe :: @rec @struct(
         index: Qbe.Ref,
         scale: i32,
     ),
-    Lnk :: @rec @struct(
-        export: i8,
-        thread: i8,
-        common: i8,
-        align: i8,
-        sec: CStr,
-        secf: CStr,
+    Lnk :: @struct(
+        export := false,
+        thread := false,
+        common := false,
+        align: i8 = 8,
+        sec := CStr.zeroed(),  // TODO: Nullable(T) but thats a pain for CStr
+        secf := CStr.zeroed(),
     ),
     Fn :: @rec @struct(
         start: *Qbe.Blk,
@@ -237,7 +250,7 @@ Qbe :: @rec @struct(
         ncon: i32,
         nmem: i32,
         nblk: u32,
-        retty: i32,
+        retty: i32,  /* index in typ[], -1 if no aggregate return */
         retr: Qbe.Ref,
         rpo: **Qbe.Blk,
         reg: u64,
@@ -265,11 +278,11 @@ Qbe :: @rec @struct(
 		len: u32, /* or index in typ[] for FTyp */
     ),
     Typ :: @rec @struct(
-        name: Array(i8, 80),
+        name: Array(u8, 80),
         is_dark: bool,  // is it an opaque type where we only know the size and alignment. 
         is_union: bool, 
-        align: i32,
-        size: u64,
+        align_log2: i32,
+        size: i64,
         // The `fields` of a struct is terminated by FEnd. 
         // In a union, there are `nunion` structs in a row. 
         // TODO: is_union redundant? same as nunion == 1. or is there an edge case where the abi treats a 1 case union differently.  
@@ -298,8 +311,8 @@ Qbe :: @rec @struct(
                 off: i64,
     		),
     	),
-        isref: u8,
-        isstr: u8,
+        isref: bool,
+        isstr: bool,
     ),
     Pool :: @rec @enum(i32) (
         PHeap, /* free() necessary */
@@ -507,8 +520,8 @@ Qbe :: @rec @struct(
         NumberOfOps,
     ),
     J :: @enum(i16) ( // :QbeJi16
-        Jxxx,
-        Jretw,
+        Jxxx, // :JretOrder
+        Jretw, 
         Jretl,
         Jrets,
         Jretd,
@@ -549,7 +562,7 @@ QbeUndef :: Qbe.Ref.zeroed(); // :Undef
 fn freeall() void #import("qbe");
 fn vnew(len: i64, element_size: i64, pool: Qbe.Pool) rawptr #import("qbe");
 fn vfree(_0: rawptr) void #import("qbe");
-fn vgrow(_0: rawptr, _1: u64) void #import("qbe");
+fn vgrow(_0: rawptr, _1: i64) void #import("qbe");
 fn strf(_0: CStr, _1: CStr) void #import("qbe");
 fn intern(_0: CStr) u32 #import("qbe");
 fn str(_0: u32) CStr #import("qbe");
@@ -659,9 +672,11 @@ fn InsaneVec($T: Type) Type = {
     // TODO: bounds checking but its hard as long as i have to keep qbe's memory layout because the fields aren't together. 
     //       and anyway it would be sad to add alignment padding just for bounds checks. 
     
-    fn index(s: Self, i: i64) *T = {
-        self.first.offset(i)
-    }
+    fn index(s: Self, i: i64) *T = 
+        s.first.offset(i);
+    
+    fn index(s: *Self, i: i64) *T = 
+        s.first.offset(i);
     
     fn slice(self: Self, start: i64, end: i64) []T = {
         (ptr = self.first.offset(start), len = end - start)
@@ -686,3 +701,5 @@ QbeVec :: @struct(
     // I don't have unsized types. lets hope thats not a big deal
    	// union { long long ll; long double ld; void *ptr; } align[];
 );
+
+

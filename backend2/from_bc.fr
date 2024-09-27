@@ -1,3 +1,16 @@
+// This is a temporary measure. The plan is for the frontend to generate the qbe-style ir directly. 
+// But before I start ripping stuff apart I need to make sure this is better in every way than what i had before. 
+// - I have to be able to understand the qbe passes enough to port them to Franca and make the variable names less obfuscated. 
+// - I have to be able to replace thier backends with generating machine code directly.
+//   Both for aot and jitting into an mmap-exec-ed buffer for comptime execution. 
+// - It has to be faster than llvm debug mode (it already runs faster, i think it will compile faster by not needing to parse + emit text).
+// - It has to be able to generate llvm-ir for release or debug-info builds.
+//   I'm sure that will involve painfully inserting casts. Also have to be able to track debug source locations through the passes (i think Odbgloc already does that). 
+// - Have to expose it to user comptime code for #bc (examples/bf2bc.fr)
+// - Have to make easy to build static + dynamic.
+// - expose the pass debug logging with #log_ir("AF") or something
+//
+
 /*
 (i assume you need this thing for static link)
 ar rvs qbe_merged.o util.o parse.o abi.o cfg.o mem.o ssa.o alias.o load.o copy.o fold.o simpl.o live.o spill.o rega.o emit.o amd64/targ.o amd64/sysv.o amd64/isel.o amd64/emit.o arm64/targ.o arm64/abi.o arm64/isel.o arm64/emit.o rv64/targ.o rv64/abi.o rv64/isel.o rv64/emit.o
@@ -20,20 +33,19 @@ qbe_globals :: @static(Qbe.Globals) {
         insb = get_qbe_dylib_variable(Array(Qbe.Ins, 1.shift_left(20)), "insb"),
         curi = get_qbe_dylib_variable(*Qbe.Ins, "curi"),
         target = get_qbe_dylib_variable(Qbe.Target, "T"),
+        debug = get_qbe_dylib_variable(Array(bool, "Z".char() + 1), "debug"),
     );
+    ::enum(Qbe.DebugKey);
+    //g.debug[Qbe.DebugKey.Folding.raw()] = true;
+    //g.debug[Qbe.DebugKey.Abi.raw()] = true;
+    //g.debug[Qbe.DebugKey.InstSelect.raw()] = true;
     g.target[] = get_qbe_dylib_variable(Qbe.Target, "T_arm64_apple")[]; // TODO: choose arch!
+    g.types[] = new(0, Qbe.Pool.PHeap); // TODO: check the magic in QbeBuilder.init to make sure you remember to do this. 
     g
 };
 
 // TODO: this changes for aot!!
-outf :: @static(*FILE) {    
-    out_fd := open_temp_file();
-    outf := fdopen(out_fd.fd, "a".sym().c_str());
-    assert(!outf.is_null(), "failed to open temp file");
-    @println("Output asm to %", out_fd&.s_name());
-    aaaa_out[] = out_fd;
-    outf
-};
+outf :: @static(*FILE);
 aaaa_out :: @static(TmpFile);
 debugf :: @static(*FILE) {    
     name :: "target/franca_debug.txt";
@@ -44,7 +56,7 @@ debugf :: @static(*FILE) {
 };
 
 run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
-    //printfn(fnn, debugf[]);
+    printfn(fnn, debugf[]);
     {qbe_globals[].target.abi0}(fnn);
     fillrpo(fnn);
     fillpreds(fnn);
@@ -90,7 +102,9 @@ run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
     fnn.rpo.offset(fnn.nblk.zext() - 1)[].link = Qbe.Blk.ptr_from_int(0);
     
     {qbe_globals[].target.emitfn}(fnn, outf[]);
-    freeall();
+    printfn(fnn, debugf[]);
+    // TODO: do this but then have to reset up the type table
+    //freeall();  
 };
 
 
@@ -98,7 +112,8 @@ fn finished(self: *EmitQbe2, fid: FuncId) void = {
     name: List(u8) = list(temp()); 
     self.fmt_fn_name(fid, name&);
     fnn := self.b&.build(name.items());
-    printfn(fnn&, debugf[]);
+    run_qbe_passes(fnn&);
+    self.body = zeroed(*FnBody); // :EVIL     but just avoiding confusion. 
 }; 
 
 #include_std("compiler/backend/walk_bc.fr");
@@ -118,34 +133,38 @@ fn write(stream: *FILE, bytes: []u8) voidResult = {
 
 // this returns asm text
 emit_qbe_included :: fn(comp: CompCtx, fns: [] FuncId, entry: ProgramEntry, target: *TargetEnv) BucketArray(u8) = {
+    out_fd := open_temp_file();
+    outf_local := fdopen(out_fd.fd, "a".sym().c_str());
+    ::ptr_utils(FILE);
+    assert(!outf_local.is_null(), "failed to open temp file");
+    @println("Output asm to %", out_fd&.s_name());
+    aaaa_out[] = out_fd;
+    outf[] = outf_local;
+    
     ir_text := {CodeGen(EmitQbe2).emit}(comp, fns, entry, target);
     inline_asm_functions := ir_text&.pop_current_bucket().unwrap();
     
     ir_out := open_temp_file();
-    for ir_text& { bucket |
-        ir_out.fd&.write(bucket).unwrap();
-    };
-    ir_out.fd.close();
-    
     ir_file := fopen(ir_out&.c_name(), "r".sym().c_str());
     ::ptr_utils(FILE);
     assert(!ir_file.is_null(), "failed to open ir_file");
     
-    emitdbgfile :: fn(fnn: CStr) void = ();
-    data :: fn(d: *Qbe.Dat) void = {
-        emitdat(d, outf[]);
-        //if (d->type == DEnd) {
-        //  fputs("/* end data */\n\n", outf);
-        //  freeall();
-        //} 
-    };
-    parse(ir_file, "-".sym().c_str(), emitdbgfile, data, run_qbe_passes);
     write(outf[], inline_asm_functions.items()).unwrap();
     fclose(outf[]).unwrap();
+    
     asm := temp().read_to_string(aaaa_out.s_name());
     aaa: BucketArray(u8) = init(0, temp());
     aaa&.push_bucket(asm);
+    
     aaa
+};
+
+emit_data :: fn(d: *Qbe.Dat) void = {
+    emitdat(d, outf[]);
+    //if (d->type == DEnd) {
+    //  fputs("/* end data */\n\n", outf);
+    //  freeall();
+    //} 
 };
 
 
@@ -161,6 +180,9 @@ EmitQbe2 :: @struct(
     inline_asm: List(u8),
     current_has_indirect_return := false,
     os: Os,
+    signeture := PrimSig.zeroed(), // TODO: HACK   also now redundant except that you don't always have a body. 
+    body := zeroed(*FnBody), // :EVIL
+    pair_type_id := 99999999, // filled by init
     $Val := Qbe.Ref, // TODO: const can't be first (doesn't parse).  -- Jun 14
 );
 
@@ -175,7 +197,10 @@ fn get_qbe_dylib_variable($T: Type, $name: Str) *T #generic = {
 // TODO: dependency problem so can't call this `init`
 fn new(comp: CompCtx, alloc: Alloc, arch: Arch, os: Os) EmitQbe2 #inline = {
     s: EmitQbe2 = (comp = comp, b = init(temp(), qbe_globals), block_args = list(temp()), out = init(12, alloc), current = BbId.zeroed(), return_value_type_sizes = empty(), inline_asm = list(alloc), os = os);
-    s.return_value_type_sizes&.set(16, temp());
+    
+    ::enum(Qbe.FieldType);
+    f: []Qbe.Field = @slice(@as(Qbe.Field) (type = .Fl, len = 1.trunc()), @as(Qbe.Field) (type = .Fl, len = 1.trunc()));
+    s.pair_type_id = s.b&.struct_type(f, 16, 3);
     
     if arch == .x86_64 {
         s.inline_asm&.push_all(".intel_syntax noprefix\n");
@@ -184,30 +209,31 @@ fn new(comp: CompCtx, alloc: Alloc, arch: Arch, os: Os) EmitQbe2 #inline = {
 }
 
 fn emit_function_husk(self: *EmitQbe2, fid: FuncId, signeture: PrimSig, $emit_body: @Fn() void) void = {
-    @println("Emitting F% %", fid.to_index(), self.comp.get_string(self.comp.get_function(fid)[].name));
+    //@println("Emitting F% %", fid.to_index(), self.comp.get_string(self.comp.get_function(fid)[].name));
     emit_body();
 }
 
 fn emit_entry_points_and_debug_info(gen: *CodeGen(EmitQbe2), comp: CompCtx, fns: []FuncId, entry: ProgramEntry) void = {
+    self := gen.backend&;
+    
+    // give it a chance to spit out the constants it wanted to add (like when it loads to get a double literal)
+    {qbe_globals[].target.emitfin}(outf[]);
+
     @match(entry) {
         fn TestRunnerMain() => {
-            gen.backend.out&.push_all("export function w $main() {\n@start\n");
-            
-            i := 1;
+            self.b.lnk.export = true;
+            entry := self.b&.push_block();
+            self.current = entry;
+    
             // TODO: warn if fns has duplicates
             for (fns) {f|
-                gen.backend.out&.reserve(100);
-                //f = gen.program.follow_redirects(f);
-                func := {comp.vtable.get_function}(comp.data, f);
-                // note: this only works because void has a fixed typeid value
-                if func.finished_arg.unwrap() == void {
-                    @fmt(gen.backend.out&.current(), "   call $%()\n", (gen.backend&, f));
-                } else {
-                    @fmt(gen.backend.out&.current(), "   %v% =l call $%(l 0)\n", "%", i, (gen.backend&, f));
-                    i += 1;
-                };
+                callee := self.inst_func_ref(f);
+                self.b&.push_inst(self.current, .call, .Kl, QbeUndef, callee, QbeUndef);
             };
-            gen.backend.out&.push_all("ret 0\n}\n");
+            self.b&.end_block(self.current, (type = .Jretl, arg = self.b&.push_literal(0)));
+            fake_decl_name := @format("main\0") libc_allocator /*TODO :LEAK*/;
+            fnn := self.b&.build(fake_decl_name.items());
+            run_qbe_passes(fnn&);
         };
         fn GiveMeTheCodeAndGiveItToMeRaw() => ();
         fn ExportWithNames() => {
@@ -218,19 +244,6 @@ fn emit_entry_points_and_debug_info(gen: *CodeGen(EmitQbe2), comp: CompCtx, fns:
         };
     };
     
-    // "They have file scope, but types must be defined before being referenced."
-    out: List(u8) = list(gen.backend.out.buckets.gpa);
-    range(0, gen.backend.return_value_type_sizes&.capacity()) { i |
-        if gen.backend.return_value_type_sizes&.get(i) {
-            @fmt(out&, "   type :Ret% = align 8 { % }\n", i, i);
-        };
-    };
-    // Note: not the same as Ret16! we need this be be passed in registers if i want to call between backends. 
-    @fmt(out&, "   type :RetPair = { l, l }\n");
-    
-    gen.backend.out.buckets&.insert(0, out);
-    gen.backend.out.i += 1;
-
     // HACK we rely on this being called at the very end for our secret returning inline asm
     // TODO: clean this up and just return a struct
     gen.backend.out&.push_bucket(gen.backend.inline_asm);
@@ -238,54 +251,45 @@ fn emit_entry_points_and_debug_info(gen: *CodeGen(EmitQbe2), comp: CompCtx, fns:
 }
 
 fn emit_bounce_fn(self: *EmitQbe2, impl_name_callee: Str, fake_decl_name: Str, signeture: PrimSig, private: bool) void = {
-    panic("TODO: emit_bounce_fn");
-    //if !private {
-    //    self.out&.push_all("export ");
-    //};
-    //self.out&.push_all("function ");
-    //values: List(Qbe.Ref) = list(temp());
-    //self.next_var = 0;
-    //self.write_header(signeture, fake_decl_name) {arg_index|
-    //    ::if(Prim);
-    //    // TODO: format this better. 
-    //    ty: Prim = if(signeture.first_arg_is_indirect_return){
-    //        // TODO: only sokol tests this 
-    //        if arg_index.eq(0) {
-    //            Prim.P64
-    //        }{
-    //            signeture.args[arg_index.sub(1)]
-    //        }
-    //    }{
-    //        signeture.args[arg_index]
-    //    };
-    //    values&.push(var(ty = ty, id = arg_index));
-    //    s := @format("%v%", "%", arg_index) temp();
-    //    self.next_var += 1;
-    //    s.items()
-    //};
-    //self.out&.reserve(50);
-    //self.out&.current().push_all("{\n@start\n");
+    //@println("emit_bounce_fn %", fake_decl_name);
+    self.b.lnk.export = !private;
     
-    //self.current_has_indirect_return = signeture.first_arg_is_indirect_return;
-    //if signeture.first_arg_is_indirect_return {
+    entry := self.b&.push_block();
+    self.current = entry;
+    
+    params: List(Qbe.Ref) = list(temp());
+    if signeture.first_arg_is_indirect_return {
+        panic("TODO: first_arg_is_indirect_return");
+    };
+    for signeture.args { prim | 
+        params&.push(self.b&.push_parameter(qbe_real_class(prim)));
+    };
+    
+    self.current_has_indirect_return = signeture.first_arg_is_indirect_return;
+    if signeture.first_arg_is_indirect_return {
+        panic("TODO: first_arg_is_indirect_return");
     //    @fmt(self.out&.current(), "   %ret =l alloc8 %\n", "%", signeture.return_value_bytes);
     //    @fmt(self.out&.current(), "   %v0 =l alloc8 %\n", "%", signeture.return_value_bytes);
-    //};
-    //if signeture.ret2.is_some() {
+    };
+    if signeture.ret2.is_some() {
+        panic("TODO: ret2");
     //    @fmt(self.out&.current(), "   %ret =l alloc8 16\n", "%");
-    //};
+    };
     
-    //ret := self.inst_call(values.items(), signeture) {
-    //    @fmt(self.out&.current(), "$%", impl_name_callee);
-    //};
+    fuck := @format("%\0", impl_name_callee) libc_allocator /*TODO :LEAK*/;
+    callee := self.b&.push_symbol(ptr = fuck.maybe_uninit.ptr);
+    self.signeture = signeture;
+    ret := self.inst_call(params.items(), signeture, callee);
     
-    //if signeture.first_arg_is_indirect_return {
+    if signeture.first_arg_is_indirect_return {
+        panic("TODO: first_arg_is_indirect_return");
     //    size: i64 = signeture.return_value_bytes.zext();
     //    // backwards from memcpy!!
     //    @fmt(self.out&.current(), "   blit %v0, %ret, %\n", "%", "%", size);
-    //};
-    //self.inst_return(ret);
-    //self.out&.current().push_all("}\n");
+    };
+    self.inst_return(ret);
+    fnn := self.b&.build(fake_decl_name);
+    run_qbe_passes(fnn&);
 }
 
 // TODO: copy-paste from DynamicImport but reversed so its a pain. 
@@ -300,120 +304,114 @@ fn write_export_bounce(self: *EmitQbe2, fid: FuncId) void = {
 }
 
 fn emit_constant(self: *EmitQbe2, id: BakedVarId) void = {
-    panic("TODO: emit_constant");
-    //self.out&.reserve(100);
-    //value := {self.comp.vtable.get_baked}(self.comp.data, id)[]._1;
-    //idx: i64 = id.id.zext();
+    value := {self.comp.vtable.get_baked}(self.comp.data, id)[]._1;
+    idx: i64 = id.id.zext();
     
-    //@match(value&) {
-    //    (fn Zeros(len) => {
-    //        @fmt(self.out&.current(), "data $g% = { z % }\n", idx, len[]);
-    //    });
-    //    (fn Bytes(bytes) => {
-    //        // TODO: emit string as characters if they're in a sane range. 
-    //        @fmt(self.out&.current(), "data $g% = { b ", idx);
-    //        for(bytes[].items()) {b|
-    //            @fmt(self.out&.current(), "% ", @as(i64) b.zext());
-    //        };
-    //        // self.pop_trailing_comma(); // add back when remove below
-    //        self.out&.push_all("0 }\n"); // TODO: hack cause im to lazy to ask for debug names as cstr
-    //    });
-    //    (fn VoidPtrArray(parts) => {
-    //        // it feels like this should be ok cause it works for bytes 
-    //        // data $g9 = { l $arena_alloc__2375 $arena_free__2771  }
-    //        // but no i get two frees, so do it this way. idk if qbe bug or im just failing at reading the docs
-    //        // data $g9 = { l $arena_alloc__2375, l $arena_free__2771  }
-    //        @fmt(self.out&.current(), "data $g% = { ", idx);
-    //        for(parts[].items()){inner|
-    //            self.out&.reserve(20);
-    //            @match(inner) {
-    //                (fn FnPtr(f) => {
-    //                    // TODO: hack because of new deduplication
-    //                    func := self.comp.get_function(f);
-    //                    @if_let(func.body&) fn Redirect(inner) => {
-    //                        f = inner[];
-    //                    };
-                        
-    //                    @fmt(self.out&.current(), " l $%, ", (self, f));
-    //                    // TODO: make sure we emitted the function. 
-    //                });
-    //                (fn AddrOf(id) => {
-    //                    @fmt(self.out&.current(), " l $g%, ", @as(i64) id.id.zext());
-    //                });
-    //                (fn Num(v) => {
-    //                    // TODO: small prims
-    //                    @fmt(self.out&.current(), " l %, ", v.value);
-    //                });
-    //            };
-    //        };
-    //        self.pop_trailing_comma();
-    //        self.out&.push_all(" }\n");
-    //    });
-    //}
+    dat := Qbe.Dat.zeroed();
+    lnk: Qbe.Lnk = ();
+    fuck := @format("g%\0", idx) temp();
+    dat.name = (ptr = fuck.maybe_uninit.ptr);
+    dat.lnk = lnk&;
+    
+    dat.type = .DStart;
+    emit_data(dat&);
+    @match(value&) {
+        (fn Zeros(len) => {
+            dat.type = .DZ;
+            dat.u.num = len[];
+            emit_data(dat&);
+        });
+        (fn Bytes(bytes) => {
+            // TODO: use isstr
+            dat.type = .DB;
+            for(bytes[].items()) {b|
+                dat.u.num = b.zext();
+                emit_data(dat&);
+            };
+        });
+        (fn VoidPtrArray(parts) => {
+            for(parts[].items()){inner|
+                @match(inner) {
+                    (fn FnPtr(f) => {
+                        dat.type = .DL;
+                        // TODO: hack because of new deduplication
+                        func := self.comp.get_function(f);
+                        @if_let(func.body&) fn Redirect(inner) => {
+                            f = inner[];
+                        };
+                        dat.isref = true;
+                        fuck := @format("%\0", (self, f)) temp();
+                        dat.u.ref = (name = (ptr = fuck.maybe_uninit.ptr), off = 0);
+                        emit_data(dat&);
+                        dat.isref = false;
+                        // TODO: make sure we emitted the function. 
+                    });
+                    (fn AddrOf(id) => {
+                        dat.type = .DL;
+                        dat.isref = true;
+                        fuck := @format("g%\0", idx) temp();
+                        dat.u.ref = (name = (ptr = fuck.maybe_uninit.ptr), off = 0);
+                        emit_data(dat&);
+                        dat.isref = false;
+                    });
+                    (fn Num(v) => {
+                        dat.type = .DL; // TODO: small prims
+                        dat.u.num = v.value;
+                        emit_data(dat&);
+                    });
+                };
+            };
+        });
+    };
+    dat.type = .DEnd;
+    emit_data(dat&);
 }
 
 fn emit_special(self: *EmitQbe2, f_id: FuncId, body: *FuncImpl, func: *Func, bc: *FnBody, pending: *List(FuncId)) bool = {
-    panic("TODO: emit_special");
-    //comp := self.comp;
-    //@match(body) {
-    //    fn Normal(_) => { panic("ICE: empty body but expr"); };
-    //    fn Redirect(f) => {
-    //        // TODO: assert that 'f' is flagged for being emitted?
-    //        //       currently just trusting that emit_bc replaced all actual uses. 
-    //        //       could also just have the front end check if body is redirect before adding to callees list. -- Jun 27
+    comp := self.comp;
+    @match(body) {
+        fn Normal(_) => { panic("ICE: empty body but expr"); };
+        fn Redirect(f) => {
+            // TODO: assert that 'f' is flagged for being emitted?
+            //       currently just trusting that emit_bc replaced all actual uses. 
+            //       could also just have the front end check if body is redirect before adding to callees list. -- Jun 27
             
-    //        pending.push(f[]);
+            pending.push(f[]);
             
-    //        // :sema_regression :ExtraRedirectShim
-    //        assert(f[] != f_id, "redirect to yourself");
-    //        new_name := @format("%", (self, f[])) temp();
-    //        old_name := @format("%", (self, f_id)) temp();
-    //        self.emit_bounce_fn(new_name.items(), old_name.items(), bc.signeture, true);
-    //        return(true);
-    //    }
-    //    fn Merged(parts) => { 
-    //        each(parts[].items()) {check: *FuncImpl| 
-    //            if(self.emit_special(f_id, check, func, bc, pending), => return(true));
-    //        };
-    //    }
-    //    fn DynamicImport(name) => { 
-    //        // TODO: do i need to hackily do the same for ComptimeAddr and hope for the best? ideally the forntend would handle that instead. 
-    //        import_name := comp.get_string(name[]);
-    //        self.forward_declare(bc.signeture, false, import_name);
-    //        name := @format("%", (self, bc.func)) temp();
-    //        self.emit_bounce_fn(import_name, name.items(), bc.signeture, true);
-    //        return(true);
-    //    }
-    //    fn QbeIr(code) => { 
-    //        self.next_var = 0;
-    //        ir := comp.get_string(code[]);
-    //        self.out&.push_all("function ");
-    //        name := @format("%", (self, bc.func)) temp();
-    //        self.write_header(bc.signeture, name.items()) {arg_index|
-    //            args := func.arg.bindings.items();
-    //            arg := args[arg_index].name.Var.name;
-    //            arg := comp.get_string(arg);
-    //            arg := @format("%%", "%", arg) temp();
-    //            self.next_var += 1;
-    //            arg.items()
-    //        };
-    //        @fmt(self.out&.current(), "{\n@start\n%}\n", ir);
-    //        return(true);
-    //    }
-    //    fn TargetOsSplit(it) => {
-    //        if it.os == self.os {
-    //            // TODO: :copy-paste from emit_special:redirect
-    //            pending.push(it.fid);
-    //            assert(it.fid != f_id, "redirect to yourself");
-    //            new_name := @format("%", (self, it.fid)) temp();
-    //            old_name := @format("%", (self, f_id)) temp();
-    //            self.emit_bounce_fn(new_name.items(), old_name.items(), bc.signeture, true);
-    //            return(true);
-    //        };
-    //    }
-    //    @default fn() void => return(false);
-    //};
-    //false
+            // :sema_regression :ExtraRedirectShim
+            assert(f[] != f_id, "redirect to yourself");
+            new_name := @format("%", (self, f[])) temp();
+            old_name := @format("%", (self, f_id)) temp();
+            self.emit_bounce_fn(new_name.items(), old_name.items(), bc.signeture, true);
+            return(true);
+        }
+        fn Merged(parts) => { 
+            each(parts[].items()) {check: *FuncImpl| 
+                if(self.emit_special(f_id, check, func, bc, pending), => return(true));
+            };
+        }
+        fn DynamicImport(name) => { 
+            // TODO: do i need to hackily do the same for ComptimeAddr and hope for the best? ideally the forntend would handle that instead. 
+            import_name := comp.get_string(name[]);
+            self.forward_declare(bc.signeture, false, import_name);
+            name := @format("%", (self, bc.func)) temp();
+            self.emit_bounce_fn(import_name, name.items(), bc.signeture, true);
+            return(true);
+        }
+        fn TargetOsSplit(it) => {
+            if it.os == self.os {
+                // TODO: :copy-paste from emit_special:redirect
+                pending.push(it.fid);
+                assert(it.fid != f_id, "redirect to yourself");
+                new_name := @format("%", (self, it.fid)) temp();
+                old_name := @format("%", (self, f_id)) temp();
+                self.emit_bounce_fn(new_name.items(), old_name.items(), bc.signeture, true);
+                return(true);
+            };
+        }
+        @default fn() void => return(false);
+    };
+    false
 }
 
 fn forward_declare(self: *EmitQbe2, sig: PrimSig, private: bool, name: Str) void = {
@@ -479,44 +477,10 @@ fn emit_special_asm(self: *EmitQbe2, body: *FuncImpl, func: *Func, bc: *FnBody, 
     false
 }
 
-fn write_header(self: *EmitQbe2, sig: PrimSig, name: Str, $get_arg_name: @Fn(idx: i64) Str) []Qbe.Ref = {
-    panic("TODO: write_header");
-    //self.out&.reserve(50);
-    //if(sig.ret1) {fst: Prim|
-    //    if(sig.ret2) {snd: Prim| // two
-    //        @fmt(self.out&.current(), " :RetPair");
-    //    }{| // one
-    //        @fmt(self.out&.current(), "%", fst.type_char_var());
-    //    };
-    //}{
-    //    if sig.return_value_bytes != 0 {| // indirect
-    //        @debug_assert(sig.first_arg_is_indirect_return);
-    //        @fmt(self.out&.current(), ":Ret%", sig.return_value_bytes);
-    //        self.return_value_type_sizes&.set(sig.return_value_bytes.zext(), temp());
-    //    }
-    //    // else: void
-    //};
-    //@fmt(self.out&.current(), " $%(", name);
-    
-    //// TODO: don't have two callsites for get_arg_name
-    //// TODO: one of the verions of get_arg_name relies on it getting called the right number of times but mayeb thats fine cause it is in fact important that you have all the names
-    //indirect_arg_name := "";  // TODO: use this somewhere? 
-    //shift := if(sig.first_arg_is_indirect_return) {
-    //    indirect_arg_name = get_arg_name(0);
-    //    1
-    //}{| 0 };
-    
-    //enumerate(sig.args) {i, ty|
-    //    self.out&.reserve(20);
-    //    i := i.add(shift);
-    //    @fmt(self.out&.current(), "% %,", ty[].type_char_var(), get_arg_name(i)); 
-    //};
-    //self.pop_trailing_comma();
-    //self.out&.current().push_all(")");
-}
-
 fn setup(self: *EmitQbe2, body: *FnBody, vars_out: *List(Qbe.Ref)) void = {
     entry := self.b&.push_block();
+    self.signeture = body.signeture;
+    self.body = body;
     
     params: List(Qbe.Ref) = list(temp());
     for body.signeture.args { prim | 
@@ -541,6 +505,7 @@ fn setup(self: *EmitQbe2, body: *FnBody, vars_out: *List(Qbe.Ref)) void = {
     each body.blocks.items() { b |
         max_args = max_args.max(b.arg_prims.len);
     };
+    self.block_args&.clear();  // be careful about resetting temp() if this points in there! (clear tries to reuse memory).
     self.block_args&.reserve(max_args);
     range(0, max_args) {i|
         v := self.b&.push_inst(entry, .alloc8, .Kl, self.b&.push_literal(8), QbeUndef);
@@ -551,7 +516,9 @@ fn setup(self: *EmitQbe2, body: *FnBody, vars_out: *List(Qbe.Ref)) void = {
     shift := if body.signeture.first_arg_is_indirect_return {
         size := self.b&.push_literal(@as(i64) body.signeture.return_value_bytes.zext());
         self.indirect_return_slot = self.b&.push_inst(entry, .alloc8, .Kl, size, QbeUndef);
-        self.b&.push_inst0(entry, .storel, .Kl, self.indirect_return_slot, self.block_args[0]);
+        self.b&.push_inst0(entry, .storel, .Kw, self.indirect_return_slot, self.block_args[0]);
+        // :set_aggragate_return_index
+        self.b.aggragate_return_index = (Some = self.b&.opaque_type_slow(body.signeture.return_value_bytes.zext(), 3));
         1
     }{| 0 };
     
@@ -560,15 +527,19 @@ fn setup(self: *EmitQbe2, body: *FnBody, vars_out: *List(Qbe.Ref)) void = {
     };
     
     enumerate body.signeture.args {i, ty|
-        self.out&.reserve(20);
-        i := i.add(shift);
-        self.b&.push_inst0(entry, qbe_store(ty[]), qbe_fake_class(ty[]), params[i], self.block_args[i]);
-        // TODO: ty.qbe_type() error says it wants the raw type but found enum ptr when it should say wants the enum type
-        @fmt(self.out&.current(), "   store% %arg%, %a%\n", ty[].qbe_type(), "%", i, "%", i); 
+        // :StoreAlwaysKw
+        self.b&.push_inst0(entry, qbe_store(ty[]), .Kw, params[i], self.block_args[i + shift]);
     };
     
     // It's crimes to jump to the start block so don't use that as our entry block. 
     self.b&.end_block(entry, (type = .Jjmp, target1 = (id = 1)));
+    
+    // :AllOurBlocksUpFront
+    // The backend might not go to blocks in order but we want BbIds to match. 
+    // And we need to add more later for switches (and not have those indices mess us up)
+    while => self.b.blocks.len <= body.blocks.len + 1 {
+        self.b&.push_block();
+    };
 }
 
 fn fmt_fn_name(self: *EmitQbe2, f: FuncId, out: *List(u8)) void = {
@@ -595,94 +566,80 @@ fn display(self: Ty(*EmitQbe2, FuncId), out: *List(u8)) void = {
 
 // TODO: are the float cmp ordered or unordered? 
 fn inst_intrinsic(self: *EmitQbe2, args: []Qbe.Ref, op: Intrinsic) []Qbe.Ref = {
-    panic("TODO: inst_intrinsic")
-    //bin :: fn(self: *EmitQbe2, args: [] Qbe.Ref, op: Str) [] Qbe.Ref = {
-    //    out := self.get_var(args[0].ty);
-    //    @fmt(self.out&.current(), "   % =% % %, %\n", out, out.ty.type_char_var(), op, args[0], args[1]);
-    //    a := temp().alloc(EmitQbe2.Val, 1);
-    //    a.ptr[] = out;
-    //    a
-    //};
-    //bin_cmp :: fn(self: *EmitQbe2, args: []Qbe.Ref, op: Str) []Qbe.Ref = {
-    //    out := self.get_var(.I8);
-    //    @fmt(self.out&.current(), "   % =% % %, %\n", out, Prim.I8.type_char_var(), op, args[0], args[1]);
-    //    a := temp().alloc(EmitQbe2.Val, 1);
-    //    a.ptr[] = out;
-    //    a
-    //};    
-    //cast :: fn(self: *EmitQbe2, args: []Qbe.Ref, ty: Prim, op: Str) []Qbe.Ref = {
-    //    out := self.get_var(ty);
-    //    @fmt(self.out&.current(), "   % =% % %\n", out, ty.type_char_var(), op, args[0]);
-    //    a := temp().alloc(EmitQbe2.Val, 1);
-    //    a.ptr[] = out;
-    //    a
-    //};
+    bin :: fn(self: *EmitQbe2, args: [] Qbe.Ref, op: Qbe.O, out: Qbe.Cls) [] Qbe.Ref = {
+        a := temp().alloc(EmitQbe2.Val, 1);
+        a.ptr[] = self.b&.push_inst(self.current, op, out, args[0], args[1]);
+        a
+    };
+    cast :: fn(self: *EmitQbe2, args: []Qbe.Ref, ty: Prim, op: Qbe.O) []Qbe.Ref = {
+        a := temp().alloc(EmitQbe2.Val, 1);
+        a.ptr[] = self.b&.push_inst(self.current, op, qbe_real_class(ty), args[0], QbeUndef);
+        a
+    };
 
-    //@match(op) {
-    //    fn Add() => self.bin(args, "add");
-    //    fn Sub() => self.bin(args, "sub");
-    //    fn Mul() => self.bin(args, "mul");
-    //    fn Div() => self.bin(args, "div");
-    //    fn Eq() => self.bin_cmp(args, "ceql");
-    //    fn Ne() => self.bin_cmp(args, "cnel");
-    //    fn Ge() => self.bin_cmp(args, "csgel");
-    //    fn Le() => self.bin_cmp(args, "cslel");
-    //    fn Gt() => self.bin_cmp(args, "csgtl");
-    //    fn Lt() => self.bin_cmp(args, "csltl");
-    //    // sketch aliasing because walk_bc is gonna copy the slice back onto itself but it seems to be fine. -- Jul 24  
-    //    fn IntToPtr() => args.slice(0, 1); // no-op 
-    //    fn PtrToInt() => args.slice(0, 1); // no-op
-    //    fn ShiftLeft()            => self.bin(args, "shl");
-    //    fn ShiftRightLogical()    => self.bin(args, "shr");
-    //    fn ShiftRightArithmetic() => self.bin(args, "sar");
-    //    fn BitOr()  => self.bin(args, "or");
-    //    fn BitAnd() => self.bin(args, "and");
-    //    fn BitXor() => self.bin(args, "xor");
-    //    fn FAdd() => self.bin(args, "add");
-    //    fn FSub() => self.bin(args, "sub");
-    //    fn FMul() => self.bin(args, "mul");
-    //    fn FDiv() => self.bin(args, "div");
-    //    fn FEq() => self.bin_cmp(args, "ceqd");
-    //    fn FNe() => self.bin_cmp(args, "cned");
-    //    fn FGe() => self.bin_cmp(args, "cged");
-    //    fn FLe() => self.bin_cmp(args, "cled");
-    //    fn FGt() => self.bin_cmp(args, "cgtd");
-    //    fn FLt() => self.bin_cmp(args, "cltd");
+    @match(op) {
+        fn Add() => self.bin(args, .add, .Kl);
+        fn Sub() => self.bin(args, .sub, .Kl);
+        fn Mul() => self.bin(args, .mul, .Kl);
+        fn Div() => self.bin(args, .div, .Kl);
+        fn Eq() => self.bin(args, .ceql, .Kw);
+        fn Ne() => self.bin(args, .cnel, .Kw);
+        fn Ge() => self.bin(args, .csgel, .Kw);
+        fn Le() => self.bin(args, .cslel, .Kw);
+        fn Gt() => self.bin(args, .csgtl, .Kw);
+        fn Lt() => self.bin(args, .csltl, .Kw);
+        // sketch aliasing because walk_bc is gonna copy the slice back onto itself but it seems to be fine. -- Jul 24  
+        fn IntToPtr() => args.slice(0, 1); // no-op 
+        fn PtrToInt() => args.slice(0, 1); // no-op
+        fn ShiftLeft()            => self.bin(args, .shl, .Kl);
+        fn ShiftRightLogical()    => self.bin(args, .shr, .Kl);
+        fn ShiftRightArithmetic() => self.bin(args, .sar, .Kl);
+        fn BitOr()  => self.bin(args, .or, .Kl);
+        fn BitAnd() => self.bin(args, .and, .Kl);
+        fn BitXor() => self.bin(args, .xor, .Kl);
+        fn FAdd() => self.bin(args, .add, .Kd);
+        fn FSub() => self.bin(args, .sub, .Kd);
+        fn FMul() => self.bin(args, .mul, .Kd);
+        fn FDiv() => self.bin(args, .div, .Kd);
+        fn FEq() => self.bin(args, .ceqd, .Kw);
+        fn FNe() => self.bin(args, .cned, .Kw);
+        fn FGe() => self.bin(args, .cged, .Kw);
+        fn FLe() => self.bin(args, .cled, .Kw);
+        fn FGt() => self.bin(args, .cgtd, .Kw);
+        fn FLt() => self.bin(args, .cltd, .Kw);
         
-    //    // TODO: trunc shouldn't be a noop! it should and off the top bits! but this is what the old inline asm did.
-    //    //       MAKE A TEST THAT FAILS BECAUSE OF THIS! -- Jul 25 :FUCKED
-    //    //       also im not chaning the prim type of the value so test that makes that fail also would be good. 
-    //    fn Trunc64To32() => args.slice(0, 1); // no-op
-    //    fn Trunc64To16() => args.slice(0, 1); // no-op
-    //    fn Trunc64To8()  => args.slice(0, 1); // no-op
-    //    fn Trunc32To16() => args.slice(0, 1); // no-op
-    //    fn Trunc32To8()  => args.slice(0, 1); // no-op
-    //    fn Trunc16To8()  => args.slice(0, 1); // no-op 
+        // TODO: trunc shouldn't be a noop! it should and off the top bits! but this is what the old inline asm did.
+        //       MAKE A TEST THAT FAILS BECAUSE OF THIS! -- Jul 25 :FUCKED
+        //       also im not chaning the prim type of the value so test that makes that fail also would be good. 
+        fn Trunc64To32() => args.slice(0, 1); // no-op
+        fn Trunc64To16() => args.slice(0, 1); // no-op
+        fn Trunc64To8()  => args.slice(0, 1); // no-op
+        fn Trunc32To16() => args.slice(0, 1); // no-op
+        fn Trunc32To8()  => args.slice(0, 1); // no-op
+        fn Trunc16To8()  => args.slice(0, 1); // no-op 
         
-    //    fn SignExtend32To64() => self.cast(args, .I64, "extsw");
-    //    fn ZeroExtend32To64() => self.cast(args, .I64, "extuw");
-    //    fn ZeroExtend16To64() => self.cast(args, .I64, "extuw");
-    //    fn ZeroExtend8To64()  => self.cast(args, .I64, "extuw");
-    //    // TODO: im not changing prim type properly. if it doesn't matter don't track it!! -- Jul 25
-    //    fn ZeroExtend16To32() => args.slice(0, 1); // no-op 
-    //    fn ZeroExtend8To32()  => args.slice(0, 1); // no-op 
-    //    fn ZeroExtend8To16()  => args.slice(0, 1); // no-op 
+        fn SignExtend32To64() => self.cast(args, .I64, .extsw);
+        fn ZeroExtend32To64() => self.cast(args, .I64, .extuw);
+        fn ZeroExtend16To64() => self.cast(args, .I64, .extuw);
+        fn ZeroExtend8To64()  => self.cast(args, .I64, .extuw);
+        // TODO: im not changing prim type properly. if it doesn't matter don't track it!! -- Jul 25
+        fn ZeroExtend16To32() => args.slice(0, 1); // no-op 
+        fn ZeroExtend8To32()  => args.slice(0, 1); // no-op 
+        fn ZeroExtend8To16()  => args.slice(0, 1); // no-op 
         
-    //    fn IntToFloatValue() => self.cast(args, .F64, "sltof"); 
-    //    fn FloatToIntValue() => self.cast(args, .I64, "dtosi"); 
-    //    fn IntToFloatBits()  => self.cast(args, .F64, "cast"); 
-    //    fn FloatToIntBits()  => self.cast(args, .I64, "cast"); 
-    //    fn ShrinkFloat()     => self.cast(args, .F32, "truncd"); 
-    //    fn GrowFloat()       => self.cast(args, .F64, "exts"); 
-    //    fn BitNot() => {
-    //        out := self.get_var(args[0].ty);
-    //        @fmt(self.out&.current(), "   % =% xor %, -1\n", out, out.ty.type_char_var(), args[0]);
-    //        a := temp().alloc(EmitQbe2.Val, 1);
-    //        a.ptr[] = out;
-    //        a
-    //    }
-    //    @default => @panic("ICE: unhandled qbe inst_intrinsic %", op);
-    //}
+        fn IntToFloatValue() => self.cast(args, .F64, .sltof); 
+        fn FloatToIntValue() => self.cast(args, .I64, .dtosi); 
+        fn IntToFloatBits()  => self.cast(args, .F64, .cast); 
+        fn FloatToIntBits()  => self.cast(args, .I64, .cast); 
+        fn ShrinkFloat()     => self.cast(args, .F32, .truncd); 
+        fn GrowFloat()       => self.cast(args, .F64, .exts); 
+        fn BitNot() => {
+            a := temp().alloc(EmitQbe2.Val, 1);
+            a.ptr[] = self.b&.push_inst(self.current, .xor, .Kl, args[0], self.b&.push_literal(-1));
+            a
+        }
+        @default => @panic("ICE: unhandled qbe inst_intrinsic %", op);
+    }
 }
 
 fn inst_call(self: *EmitQbe2, args: Slice(Qbe.Ref), sig: PrimSig, f: FuncId, tail: bool, _loc: ?Span) Slice(EmitQbe2.Val) = {
@@ -698,64 +655,54 @@ fn inst_call(self: *EmitQbe2, args: Slice(Qbe.Ref), sig: PrimSig, callee: Qbe.Re
     maybe_struct_return_type := Qbe.Ref.zeroed();
     if sig.ret1 { fst: Prim |
         if sig.ret2 { snd: Prim | // two
-            @panic("TODO: return pair % %", fst, snd);
-            //out_vals&.push(self.get_var(fst));
-            //out_vals&.push(self.get_var(snd));
-            //indirect_return_slot := self.get_var(that struct type somehow)
-            //@fmt(self.out&.current(), "   %v% =:RetPair call ", "%", self.next_var);
+            return_value = self.get_var(.P64);
+            return_type = .Kl;
+            maybe_struct_return_type = ref(.RType, self.pair_type_id);
+            out_vals&.push(self.get_var(fst));
+            out_vals&.push(self.get_var(snd));
         } else { // one
             return_value = self.get_var(fst);
             out_vals&.push(return_value);
             return_type = qbe_real_class(fst);
-            //@fmt(self.out&.current(), "   % =% call ", v, fst.type_char_var());
         };
     } else { // void or indirect
         if sig.first_arg_is_indirect_return {
-            panic("TODO: return indirect");
-            //temp_for_indirect := self.get_var(.P64);
-            //size: i64 = sig.return_value_bytes.zext();
-            //@fmt(self.out&.current(), "% =:Ret% ", temp_for_indirect, size);
-            //self.return_value_type_sizes&.set(sig.return_value_bytes.zext(), temp());
+            return_type = .Kl;
+            return_value = self.get_var(.P64);
+            size: i64 = sig.return_value_bytes.zext();
+            type_id := self.b&.opaque_type_slow(size, 3);
+            maybe_struct_return_type = ref(.RType, type_id);
         };
         // TODO: push call
     };
-    //maybe_struct_out := self.next_var.sub(1);
     
     shift := if(sig.first_arg_is_indirect_return, => 1, => 0);
     @debug_assert_eq(args.len, sig.args.len.add(shift));
     
     range(0, sig.args.len) {i|
         ty := sig.args[i];
-        v := args[i.add(shift)];
+        v := args[i + shift];
         self.b&.push_argument(self.current, qbe_real_class(ty), v);
     };
     
     self.b&.push_inst(self.current, .call, return_type, return_value, callee, maybe_struct_return_type);
-    if(sig.ret2) {_| // two
-        @panic("TODO: return pair");
-    //    v1 := out_vals[0];
-    //    v2 := out_vals[1];
-    //    self.out&.reserve(30);
-    //    @fmt(self.out&.current(), "   % =% load% %v%\n", v1, type_char_var(v1.ty), type_char_sign(v1.ty), "%", maybe_struct_out);
-        
-    //    offset_to_second_field := 8;
-    //    struct_out_2 := self.get_var(.P64);
-    //    @fmt(self.out&.current(), "   % =l add %v%, %\n", struct_out_2, "%", maybe_struct_out, offset_to_second_field); 
-    //    @fmt(self.out&.current(), "   % =% load% %\n", v2, type_char_var(v2.ty), type_char_sign(v2.ty), struct_out_2);
+    if sig.ret2 { t2 | // two
+        t1 := sig.ret1.unwrap();
+        self.b&.push_inst(self.current, qbe_load(t1), qbe_fake_class(t1), out_vals[0], return_value, QbeUndef);
+        // TODO: for now i always use (i64, i64) but that probably needs to change (ie floats!). 
+        offset_to_second_field := self.b&.push_literal(@as(i64) 8);
+        struct_out_2 := self.b&.push_inst(self.current, .add, .Kl, return_value, offset_to_second_field);
+        self.b&.push_inst(self.current, qbe_load(t2), qbe_fake_class(t2), out_vals[1], struct_out_2, QbeUndef);
     };
     if sig.first_arg_is_indirect_return {
-        panic("TODO: return indirect");
-    //    size: i64 = sig.return_value_bytes.zext();
-    //    // backwards from memcpy!!
-    //    @fmt(self.out&.current(), "   blit %v%, %, %\n", "%", maybe_struct_out, args[0], size);
+        size: i64 = sig.return_value_bytes.zext();
+        self.b&.push_blit(self.current, args[0], return_value, size);
     };
-    
     out_vals.items()
 }
 
 fn inst_trap(self: *EmitQbe2) void = {
-    panic("TODO: inst_trap")
-    //self.out&.push_all("   hlt\n");
+    self.b&.end_block(self.current, (type = .Jhlt));
 }
 
 fn inst_call_ptr(self: *EmitQbe2, args: Slice(Qbe.Ref), sig: PrimSig, ptr: EmitQbe2.Val, _loc: ?Span) Slice(EmitQbe2.Val) = {
@@ -769,102 +716,92 @@ fn inst_offset(self: *EmitQbe2, ptr: EmitQbe2.Val, bytes: i64) EmitQbe2.Val = {
 
 fn inst_literal(self: *EmitQbe2, value: i64, ty: Prim) EmitQbe2.Val = {
     @match(ty) {    
-        fn F64() => self.b&.push_literal(@as(f64) value.bitcast());
-        fn F32() => self.b&.push_literal(@as(f32) value.trunc().bitcast());
+        fn F64() => self.b&.push_literal(@as(f64) value.bitcast()); 
+        fn F32() => self.b&.push_literal(@as(f32) value.trunc().bitcast()); 
         @default => self.b&.push_literal(value);
     }
 }
 
 fn inst_store(self: *EmitQbe2, addr: EmitQbe2.Val, value: EmitQbe2.Val, ty: Prim) void = {
-    panic("TODO: inst_store")
-    //self.out&.reserve(30);
-    //@fmt(self.out&.current(), "   store% %, %\n", ty.qbe_type(), value, addr); 
+    // :StoreAlwaysKw
+    self.b&.push_inst0(self.current, qbe_store(ty), .Kw, value, addr);
 }
 
 fn inst_copy(self: *EmitQbe2, from: EmitQbe2.Val, to: EmitQbe2.Val, bytes: u16) void = {
-    panic("TODO: inst_copy")
-    //self.out&.reserve(30);
-    //// note: args are swapped from memcpy because we hate ourselves apparently!
-    //@fmt(self.out&.current(), "   blit %, %, %\n", from, to, @as(i64) bytes.zext()); 
+    self.b&.push_blit(self.current, to, from, bytes.zext()); 
 }
 
 fn inst_func_ref(self: *EmitQbe2, fid: FuncId) EmitQbe2.Val = {
-    panic("TODO: inst_func_ref")
-    //v := self.get_var(.P64);
-    //self.out&.reserve(30);
-    //@fmt(self.out&.current(), "   % =l copy $%\n", v, (self, fid));
-    //v
+    self.b&.push_symbol(self.fn_name_cstr(fid))
 }
 
 fn inst_jump_if(self: *EmitQbe2, cond: EmitQbe2.Val, true: BbId, false: BbId, args: Slice(EmitQbe2.Val)) void = {
-    panic("TODO: inst_jump_if")
-    //assert(args.len.eq(0), "i dont use this yet");
-    //self.out&.reserve(40);
-    //@fmt(self.out&.current(), "   jnz %, @b%, @b%\n", cond, @as(i64) true.id.zext(), @as(i64) false.id.zext()); 
+    assert(args.len.eq(0), "i dont use this yet");
+    self.b&.end_block(self.current, (type = .Jjnz, arg = cond, target1 = (id = true.id + 1), target2 = (id = false.id + 1)));
 }
 
 fn inst_jump(self: *EmitQbe2, always: BbId, args: Slice(EmitQbe2.Val)) void = {
-    panic("TODO: inst_jump")
-    //enumerate(args){i, arg|
-    //    self.out&.reserve(50);
-    //    @fmt(self.out&.current(), "   store% %, %a%\n", arg.ty.qbe_type(), arg[], "%", i); 
-    //};
-    //self.out&.reserve(20);
-    //@fmt(self.out&.current(), "   jmp @b%\n", @as(i64) always.id.zext()); 
+    enumerate(args){i, arg|
+        ty := self.body.blocks[always.id.zext()].arg_prims[i];  // TODO: ask qbe for the type instead of smuggling the whole body here
+        self.b&.push_inst0(self.current, qbe_store(ty), .Kw, arg[], self.block_args[i]);
+    };
+    self.b&.end_block(self.current, (type = .Jjmp, target1 = (id = always.id + 1)));
 }
 
 fn inst_switch(self: *EmitQbe2, info: *RsVec(SwitchPayload), inspected: Qbe.Ref, uid: i64) void = {
-    panic("TODO: inst_switch")
-    //normal_branches, default := info.decode_switch();
-    //next_block := 0;
-    //for normal_branches { case | 
-    //    cond := self.get_var(.I8);
-    //    @fmt(self.out&.current(), "   % =% ceql %, %\n", cond, Prim.I8.type_char_var(), inspected, case.value);
-    //    @fmt(self.out&.current(), "   jnz %, @b%, @b%_%\n", cond, @as(i64) case.block.id.zext(), uid, next_block); 
-    //    @fmt(self.out&.current(), "@b%_%\n", uid, next_block); 
-    //    next_block += 1;
-    //};
-    //if default { default |
-    //    @fmt(self.out&.current(), "   jmp @b%\n", @as(i64) default.id.zext()); 
-    //};
+    // :AllOurBlocksUpFront
+    normal_branches, default := info.decode_switch();
+    next_block := self.b&.push_block();
+    for normal_branches { case | 
+        value := self.b&.push_literal(case.value);
+        ok := self.b&.push_inst(self.current, .ceql, .Kw, inspected, value);
+        self.b&.end_block(self.current, (type = .Jjnz, arg = ok, target1 = (id = case.block.id + 1), target2 = next_block));
+        self.current = next_block;
+        next_block = self.b&.push_block();
+    };
+    if default { default |
+        self.b&.end_block(self.current, (type = .Jjmp, target1 = (id = default.id + 1)));
+    };
+    self.current.id = 999;
 }
 
 fn inst_return(self: *EmitQbe2, args: Slice(EmitQbe2.Val)) void = {
     @switch(args.len){
         @case(0) => {
             if self.current_has_indirect_return {
-                panic("TODO: inst_return indirect");
-                //self.out&.current().push_all("   ret %ret\n");
+                self.b&.end_block(self.current, (type = .Jretc, arg = self.indirect_return_slot));
+                // :set_aggragate_return_index
             } else {
                 self.b&.end_block(self.current, (type = .Jret0));
             };
         };
         @case(1) => {
-            //@fmt(self.out&.current(), "   ret %\n", args[0]); 
-            panic("TODO: inst_return 1");
+            k := qbe_real_class(self.signeture.ret1.unwrap());
+            op: Qbe.J = @as(Qbe.J) @as(i64) Qbe.J.Jxxx.raw().zext() + k.raw().zext() + 1;
+            self.b&.end_block(self.current, (type = op, arg = args[0]));
         };
         @case(2) => {
-            panic("TODO: inst_return 2");
-            //offset_to_second_field := 8; // TODO
-            //@fmt(self.out&.current(), "   store% %, %ret\n", args[0].ty.qbe_type(), args[0], "%"); 
-            //@fmt(self.out&.current(), "   %ret2 =l add %ret, %\n", "%", "%", offset_to_second_field); 
-            //@fmt(self.out&.current(), "   store% %, %ret2\n", args[1].ty.qbe_type(), args[1], "%"); 
-            //@fmt(self.out&.current(), "   ret %ret\n", "%"); 
+            t1 := self.signeture.ret1.unwrap();
+            t2 := self.signeture.ret2.unwrap();
+            self.b&.push_inst0(self.current, qbe_store(t1), .Kw, args[0], self.indirect_return_slot);
+            // TODO: for now i always use (i64, i64) but that probably needs to change (ie floats!). 
+            offset_to_second_field := self.b&.push_literal(@as(i64) 8);
+            struct_out_2 := self.b&.push_inst(self.current, .add, .Kl, self.indirect_return_slot, offset_to_second_field);
+            self.b&.push_inst0(self.current, qbe_store(t2), .Kw, args[1], struct_out_2);
+            self.b&.end_block(self.current, (type = .Jretc, arg = self.indirect_return_slot));
+            self.b.aggragate_return_index = (Some = self.pair_type_id);
         };
         @default fn() => unreachable();
     };
 }
 
 fn move_to_block(self: *EmitQbe2, block: *BasicBlock, ip: BbId) Slice(EmitQbe2.Val) = {
-    // The backend might not go to blocks in order but we want BbIds to match. 
-    while => self.b.blocks.len <= ip.id.zext() + 1 {
-        self.b&.push_block();
-    };
+    // :AllOurBlocksUpFront
     self.current = (id = ip.id + 1); // off by one for entry block
     args: List(EmitQbe2.Val) = list(block.arg_prims.len, temp());
     
     enumerate block.arg_prims { i, ty |
-        v := self.b&.push_inst(self.current, qbe_load(ty[]), qbe_fake_class(ty[]), self.block_args[i], QbeUndef);
+        v := self.b&.push_inst(self.current, qbe_load(ty[]), qbe_real_class(ty[]), self.block_args[i], QbeUndef);
         args&.push(v);
     };
     
@@ -877,23 +814,8 @@ fn var(ty: Prim, id: i64) Qbe.Ref = {
 
 // TODO: need to sign extend sometimes. 
 fn inst_load(self: *EmitQbe2, addr: EmitQbe2.Val, ty: Prim) EmitQbe2.Val = {
-    panic("TODO: inst_load")
-    //value := self.get_var(ty);
-    
-    //// Prim :: @enum(I8, I16, I32, F64, F32, P64);
-    //inst := @switch(ty) {
-    //    @case(.I8) => "loadub";
-    //    @case(.I16) => "loaduh";
-    //    @case(.I32) => "loaduw";
-    //    @case(.I64) => "loadl";
-    //    @case(.F64) => "loadd";
-    //    @case(.F32) => "loads";
-    //    @case(.P64) => "loadl";
-    //};
-    
-    //self.out&.reserve(30);
-    //@fmt(self.out&.current(), "   % =% % %\n", value, ty.type_char_var(), inst, addr); 
-    //value
+    // note: cls of the dest is not the same as the cls in the load opcode. 
+    self.b&.push_inst(self.current, qbe_load(ty), qbe_real_class(ty), addr, QbeUndef)
 }
 
 fn inst_global(self: *EmitQbe2, id: BakedVarId) EmitQbe2.Val = {
@@ -930,6 +852,7 @@ fn qbe_fake_class(ty: Prim) Qbe.Cls = {
     }
 }
 
+// :StoreAlwaysKw no result type so the instruction must have .Kw
 fn qbe_store(ty: Prim) Qbe.O = {
     @match(ty) {
         fn P64() => .storel;

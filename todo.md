@@ -1,3 +1,7 @@
+- make logical not an intrinsic
+
+##
+
 - fix all the places i `:HardcodeOs`
 - #target_arch
 - have one test command that runs all the code that exists.
