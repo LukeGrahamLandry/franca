@@ -1,0 +1,178 @@
+// Adapted from Qbe. MIT License. © 2015-2024 Quentin Carbonneaux <quentin@c9x.me>
+
+/* liveness analysis
+ * requires rpo computation
+ */
+fn fill_liveness(f: *Qbe.Fn) void = {
+    target := f.globals.target;
+    
+    // all the places we loop twice is once for floats and one for ints. 
+    
+    // Before each iteration we save the previous results and then check if anything changed.
+    saved_out := Qbe.BSet.zeroed();
+    bsinit(saved_out&, f.ntmp);
+    liveon_output := Qbe.BSet.zeroed();
+    bsinit(liveon_output&, f.ntmp);
+    
+    for_blocks f { b |
+        bsinit(b.in&,  f.ntmp);
+        bsinit(b.out&, f.ntmp);
+        bsinit(b.gen&, f.ntmp);
+    };
+    changed := true;
+    while => changed {
+        changed = false;
+        for_blocks_rpo f { b |
+            bscopy(saved_out&, b.out&);
+            if !b.s1.is_null() {
+                liveon(liveon_output&, b, b.s1);
+                bsunion(b.out&, liveon_output&);
+            };
+            if !b.s2.is_null() {
+                liveon(liveon_output&, b, b.s2);
+                bsunion(b.out&, liveon_output&);
+            };
+            changed = changed || !bsequal(b.out&, saved_out&);
+            // saved_out and liveon_output are dead below. we just keep them outside the loop to reuse thier memory. 
+            
+            live_count := Array(i32, 2).zeroed();
+            b.out.t[] = b.out.t[].bit_or(target.rglob);
+            bscopy(b.in&, b.out&);
+            for b.in& { t |
+                live_count&[KBASE(f.get_temporary(t)[].cls)] += 1;
+            };
+            if rtype(b.jmp.arg) == .RCall {
+                tried_to_call_uncompiled_if_you_cant_type := bscount(b.in&);
+                @debug_assert(tried_to_call_uncompiled_if_you_cant_type == target.nrglob && b.in.t[] == target.rglob, "only globally live registers may be live at ret");
+                
+                // This jmp.arg is a number describing the argsclass. 
+                // The target converts that to the bitset of registers that will be used for the return.
+                @debug_assert(b.jmp.type.is_ret());
+                return_registers := {target.retregs}(b.jmp.arg, live_count&);
+                b.in.t[] = b.in.t[].bit_or(return_registers);
+            } else {
+                // otherwise, the arg could be a conditional branch, which is just a normal read. 
+                add_read(b.jmp.arg, b, live_count&, f.tmp);
+            };
+            b.nlive = live_count; 
+            
+            for_insts_rev b { i |
+                i := i[];
+                if i.op() == .call && rtype(i.arg&[1]) == .RCall {
+                    counts := Array(i32, 2).zeroed(); // TODO: just use multiple return values instead of passing this in.
+                    b.in.t[] = b.in.t[].bit_and(bit_not({target.retregs}(i.arg&[1], counts&)));
+                    range(0, 2) { k |
+                        live_count&[k] -= counts&[k];
+                        /* caller-save registers are used
+                        * by the callee, in that sense,
+                        * right in the middle of the call,
+                        * they are live: */
+                        live_count&[k] += target.nrsave&[k];
+                        if live_count&[k] > b.nlive&[k] {
+                            b.nlive&[k] = live_count&[k];
+                        };
+                    };
+                    
+                    // Ref.RCall stores the argsclass, convert that to the bitset of registers to be used. 
+                    counts := Array(i32, 2).zeroed(); // TODO: just use multiple return values instead of passing this in.
+                    arg_registers := {target.argregs}(i.arg&[1], counts&);
+                    b.in.t[] = b.in.t[].bit_or(arg_registers);
+                    range(0, 2) { k |
+                        live_count&[k] -= target.nrsave&[k];
+                        live_count&[k] += counts&[k];
+                    };
+                };
+                // TODO: !req(i.to&, QbeNull)  shouldnt compile!! thats a pointer! :FUCKEd
+                if !i.to.is_undef() {
+                    // This instruction has an output. 
+                    @debug_assert(rtype(i.to) == .RTmp, "can only assign to temporaries");
+                    t := i.to.val();
+                    if bshas(b.in&, t) {
+                        live_count&[KBASE(f.get_temporary(t)[].cls)] -= 1;
+                    };
+                    bsset(b.gen&, t);
+                    bsclr(b.in&, t);
+                };
+                
+                // we read our arguments so track them as inputs to the block. 
+                for i.arg& { r | 
+                    if rtype(r) == .RMem {
+                        ma := f.get_memory(r);
+                        add_read(ma.base, b, live_count&, f.tmp);
+                        add_read(ma.index, b, live_count&, f.tmp);
+                    } else {
+                        add_read(r, b, live_count&, f.tmp);
+                    };
+                };
+                
+                range(0, 2) { k |
+                    if live_count&[k] > b.nlive&[k] {
+                        b.nlive&[k] = live_count&[k];
+                    };
+                };
+            };
+        };
+    };
+
+    if f.globals.debug["L".char()] {
+        f.debug_dump_liveness();
+    };
+}
+
+// Note: for now, spill.c still calls the c version of this so don't change it
+//
+// We know source_block jumps to dest_block;
+// We're accumulating into `result` to add to `source_block.out`. 
+fn liveon(result: *Qbe.BSet, source_block: *Qbe.Blk, dest_block: *Qbe.Blk) void = {
+    // Start by assuming all inputs to dest must be outputs of source.
+    bscopy(result, dest_block.in&);
+    
+    // If a phi in dest writes to a tmp, we don't care what value that tmp had in source (because we're setting it now).
+    // (control flow can have loops, so its fine for a block before to read a value being made now, that's what phi nodes represent) 
+    for_phi dest_block { p |
+        if rtype(p.to) == .RTmp {
+            bsclr(result, p.to.val());
+        }
+    };
+    
+    // If a phi in dest is set when entering from source, the arg of that phi is an output of source (becuase we're reading it right now). 
+    for_phi dest_block { p |
+        range(0, p.narg.zext()) { a |
+            if p.blk[a].identical(source_block) && rtype(p.arg[a]) == .RTmp {
+                bsset(result, p.arg[a].val());
+                bsset(source_block.gen&, p.arg[a].val());
+            }
+        }
+    };
+}
+
+// Add the tmp to `in` and `gen` of the block and if it's new, add it to the count for its register class. 
+fn add_read(r: Qbe.Ref, b: *Qbe.Blk, live_count: *Array(i32, 2), temporaries: InsaneVec(Qbe.Tmp)) void = {
+    rtype(r) == .RTmp || return();
+    i := r.val();
+    bsset(b.gen&, i);
+    if !bshas(b.in&, i) {
+        live_count[KBASE(temporaries[i].cls)] += 1;
+        bsset(b.in&, i);
+    };
+}
+
+fn debug_dump_liveness(f: *Qbe.Fn) void = {
+    out := f.globals.debug_out;
+    write(out, "\n> Liveness analysis:\n");
+    for_blocks f { b |
+        // TODO: have a thing for @fmt with padding to the right length
+        //       i can't call fprintf becuase my old backend doesn't do varargs. 
+        //       tho qbe's abi stuff does so at the end of this process i could switch. 
+        //       but also i don't want to depend on libc (eventually) (on linux anyway)
+        // printing out a bunch of nulls but my terminal doesn't show them so its fine
+        write(out, items(@format("\t%        in:   ", b.name&.items()) temp()));
+        dumpts(b.in&, f.tmp, out);
+        write(out, "\t          out:  ");
+        dumpts(b.out&, f.tmp, out);
+        write(out, "\t          gen:  ");
+        dumpts(b.gen&, f.tmp, out);
+        write(out, "\t          live: ");
+        write(out, items(@format("% %\n", b.nlive&[0], b.nlive&[1]) temp()));
+    };
+}

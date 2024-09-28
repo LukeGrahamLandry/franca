@@ -4,6 +4,7 @@
 Qbe :: @rec @struct(
     Tmp0 :: 64, // first non-reg temporary
     MaxInstructions :: 1.shift_left(20),
+    NBit :: 64,
     
     // it uses insb/curi as a buffer for emitting new instructions and then copies them out to a newly allocated array at the end of the block. 
     // the parser starts at the beginning but the passes start at the end and `emit` in reverse. 
@@ -19,6 +20,7 @@ Qbe :: @rec @struct(
         debug: *Array(bool, "Z".char() + 1),
         // These we need to track but Qbe doesn't use internally. 
         number_of_types := 0, // ntyp. only used by parser
+        debug_out: *FILE,
     ),
     DebugKey :: @enum(i64) (
         Parsing = "P".ascii(),
@@ -71,16 +73,16 @@ Qbe :: @rec @struct(
     Target :: @rec @struct(
         name: Array(u8, 16),
         apple: bool,
-        gpr0: i32,
+        gpr0: i32, /* first general purpose reg */
         ngpr: i32,
-        fpr0: i32,
+        fpr0: i32, /* first floating point reg */
         nfpr: i32,
-        rglob: u64,
-        nrglob: i32,
-        rsave: *i32,
+        rglob: u64, /* globally live regs (e.g., sp, fp) */
+        nrglob: u32,
+        caller_saved: *i32, // rsaved.  array of nrsave[0] int registers then nrsave[2] float registers
         nrsave: Array(i32, 2),
-        retregs: @FnPtr(Qbe.Ref, *i32) u64,
-        argregs: @FnPtr(Qbe.Ref, *i32) u64,
+        retregs: @FnPtr(r: Qbe.Ref, p: *Array(i32, 2)) u64,
+        argregs: @FnPtr(r: Qbe.Ref, p: *Array(i32, 2)) u64,
         memargs: @FnPtr(i32) i32,
         abi0: @FnPtr(*Qbe.Fn) void,
         abi1: @FnPtr(*Qbe.Fn) void,
@@ -90,6 +92,7 @@ Qbe :: @rec @struct(
         asloc: Array(u8, 4),
         assym: Array(u8, 4),
     ),
+    
     BSet :: @rec @struct(
         nt: u32,
         t: *u64,
@@ -140,8 +143,8 @@ Qbe :: @rec @struct(
     
     	pred: **Qbe.Blk,
         npred: u32,
-        in: Qbe.BSet,
-        out: Qbe.BSet,
+        in: Qbe.BSet,  // the values read by this block (but not created inside it, ie. reading a value made in a different block), but including phis.
+        out: Qbe.BSet,  // the values written by this block that will be read by another. 
         gen: Qbe.BSet,
     	nlive: Array(i32, 2),
     	loop: i32,
@@ -562,8 +565,9 @@ Qbe :: @rec @struct(
     ),
 );
 
-// TODO: this should be able to go in the struct. 
-QbeUndef :: Qbe.Ref.zeroed(); // :Undef
+// Used for unused arg/output slots for non 3-reg instructions.  
+// type=0 is RTmp (and hardware register numbers are offset by one to account for us taking val=0)
+QbeNull :: Qbe.Ref.zeroed();
 
 fn die(msg: CStr) void #import("qbe");
 fn freeall() void #import("qbe");
@@ -591,19 +595,18 @@ fn newcon(_0: *Qbe.Con, _1: *Qbe.Fn) Qbe.Ref #import("qbe");
 fn getcon(_0: i64, _1: *Qbe.Fn) Qbe.Ref #import("qbe");
 fn addcon(_0: *Qbe.Con, _1: *Qbe.Con, _2: i32) i32 #import("qbe");
 fn salloc(_0: Qbe.Ref, _1: Qbe.Ref, _2: *Qbe.Fn) void #import("qbe");
-fn dumpts(_0: *Qbe.BSet, _1: *Qbe.Tmp, _2: *FILE) void #import("qbe");
+fn dumpts(_0: *Qbe.BSet, _1: InsaneVec(Qbe.Tmp), _2: *FILE) void #import("qbe");
 fn runmatch(_0: *Uchar, _1: *Num, _2: Ref, _3: *Ref) void #import("qbe");
-fn bsinit(_0: *Qbe.BSet, _1: u32) void #import("qbe");
+fn bsinit(_0: *Qbe.BSet, _1: i32) void #import("qbe");
 fn bszero(_0: *Qbe.BSet) void #import("qbe");
 fn bscount(_0: *Qbe.BSet) u32 #import("qbe");
-fn bsset(_0: *Qbe.BSet, _1: u32) void #import("qbe");
-fn bsclr(_0: *Qbe.BSet, _1: u32) void #import("qbe");
+fn bsclr(_0: *Qbe.BSet, _1: i64) void #import("qbe");
 fn bscopy(_0: *Qbe.BSet, _1: *Qbe.BSet) void #import("qbe");
 fn bsunion(_0: *Qbe.BSet, _1: *Qbe.BSet) void #import("qbe");
 fn bsinter(_0: *Qbe.BSet, _1: *Qbe.BSet) void #import("qbe");
 fn bsdiff(_0: *Qbe.BSet, _1: *Qbe.BSet) void #import("qbe");
-fn bsequal(_0: *Qbe.BSet, _1: *Qbe.BSet) i32 #import("qbe");
-fn bsiter(_0: *Qbe.BSet, _1: *i32) i32 #import("qbe");
+fn bsequal(_0: *Qbe.BSet, _1: *Qbe.BSet) bool #import("qbe");
+fn bsiter(_0: *Qbe.BSet, _1: *i32) bool #import("qbe");
 fn parse(_0: *FILE, _1: CStr, _2: @FnPtr(CStr) void, _3: @FnPtr(*Qbe.Dat) void, _4: @FnPtr(*Qbe.Fn) void) void #import("qbe");
 fn printfn(_0: *Qbe.Fn, _1: *FILE) void #import("qbe");
 fn printref(_0: Qbe.Ref, _1: *Qbe.Fn, _2: *FILE) void #import("qbe");
@@ -634,9 +637,6 @@ fn ssa(_0: *Qbe.Fn) void #import("qbe");
 fn ssacheck(_0: *Qbe.Fn) void #import("qbe");
 fn copy(_0: *Qbe.Fn) void #import("qbe");
 fn fold(_0: *Qbe.Fn) void #import("qbe");
-fn simpl(_0: *Qbe.Fn) void #import("qbe");
-fn liveon(_0: *Qbe.BSet, _1: *Blk, _2: *Blk) void #import("qbe");
-fn filllive(_0: *Qbe.Fn) void #import("qbe");
 fn fillcost(_0: *Qbe.Fn) void #import("qbe");
 fn spill(_0: *Qbe.Fn) void #import("qbe");
 fn rega(_0: *Qbe.Fn) void #import("qbe");

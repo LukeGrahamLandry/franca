@@ -15,7 +15,7 @@ QbeBuilder :: @struct(
 );
 
 QbeTerminator :: @struct(
-    arg := QbeUndef,
+    arg := QbeNull,
     target1 := BbId.zeroed(),
     target2 := BbId.zeroed(),
     type: Qbe.J,
@@ -47,7 +47,7 @@ fn clear(b: *QbeBuilder) void = {
     b.blocks&.clear();
     b.aggragate_return_index = .None;
     
-    b.constants&.push(type = .CBits, bits = (i = 0xdeaddead)); // :Undef
+    b.constants&.push(type = .CBits, bits = (i = 0xdeaddead)); // QbeNull
     b.constants&.push(type = .CBits, bits = (i = 0));
     
     // Add temporaries representing physical registers.
@@ -120,7 +120,7 @@ fn push_inst(b: *QbeBuilder, block: BbId, op: Qbe.O, k: Qbe.Cls, in1: Qbe.Ref, i
 }
 
 fn push_inst0(b: *QbeBuilder, block: BbId, op: Qbe.O,  k: Qbe.Cls, in1: Qbe.Ref, in2: Qbe.Ref) void = {
-    b.push_inst(block, op, k, QbeUndef, in1, in2);
+    b.push_inst(block, op, k, QbeNull, in1, in2);
 }
 
 fn push_blit(b: *QbeBuilder, block: BbId, dest: Qbe.Ref, src: Qbe.Ref, size: i64) void = {
@@ -129,8 +129,8 @@ fn push_blit(b: *QbeBuilder, block: BbId, dest: Qbe.Ref, src: Qbe.Ref, size: i64
     };
     // TODO: why not just put the size in the out slot? 
     //       maybe its about avoiding a branchy special case to check that its actually a register. 
-    b.push_inst(block, .blit0, .Kw, QbeUndef, src, dest); // note: flipped from memcpy
-    b.push_inst(block, .blit1, .Kw, QbeUndef, small_int_for_blit(size), QbeUndef);
+    b.push_inst(block, .blit0, .Kw, QbeNull, src, dest); // note: flipped from memcpy
+    b.push_inst(block, .blit1, .Kw, QbeNull, small_int_for_blit(size), QbeNull);
 }
         
 // Parameters are represented as instructions at the beginning of the @start block. 
@@ -145,7 +145,7 @@ fn push_parameter(b: *QbeBuilder, arg_type: Qbe.Cls) Qbe.Ref = {
     op := if(is_small_for_abi, => offset_by_class(Qbe.O.parsb, arg_type), => Qbe.O.par);
     value_out := b.push_temp(base_type);
     block: BbId = (id = 0);
-    b.push_inst(block, op, base_type, value_out, QbeUndef, QbeUndef);
+    b.push_inst(block, op, base_type, value_out, QbeNull, QbeNull);
     value_out
 }
 
@@ -155,7 +155,7 @@ fn push_argument(b: *QbeBuilder, block: BbId, arg_type: Qbe.Cls, value: Qbe.Ref)
     is_small_for_abi := arg_type >= Qbe.Cls.Ksb;
     base_type := if(is_small_for_abi, => Qbe.Cls.Kw, => arg_type);
     op := if(is_small_for_abi, => offset_by_class(Qbe.O.argsb, arg_type), => Qbe.O.arg);
-    b.push_inst(block, op, base_type, QbeUndef, value, QbeUndef);
+    b.push_inst(block, op, base_type, QbeNull, value, QbeNull);
 }
 
 fn offset_by_class(op: Qbe.O, k: Qbe.Cls) Qbe.O = {
@@ -313,6 +313,16 @@ fn for_blocks(f: *Qbe.Fn, $body: @Fn(b: *Qbe.Blk) void) void = {
     };
 }
 
+::ptr_utils(*Qbe.Blk);
+fn for_blocks_rpo(f: *Qbe.Fn, $body: @Fn(b: *Qbe.Blk) void) void = {
+    i: i64 = f.nblk.zext() - 1;
+    while => i >= 0 {
+        b := f.rpo.offset(i);
+        body(b[]);
+        i -= 1;
+    };
+}
+
 // Not the same as just `for_rev(b.ins.slice(0, b.nins)`
 // because the body is allowed to consume multiple instructions by offsetting the pointer. 
 // This is needed because the ir uses a vairable length encoding (for blit, call, args).
@@ -324,6 +334,26 @@ fn for_insts_rev(b: *Qbe.Blk, $body: @Fn(i: **Qbe.Ins) void) void = {
         // TODO: @debug_assert() `i` is still in range
     };
 }
+
+// :TodoPort bsiter and inline it here
+fn for(bs: *Qbe.BSet, $body: @Fn(i: i64) void) void = {
+    i: i32 = 0;
+    while => bsiter(bs, i&) {
+        body(i.zext());
+        i += 1;
+    };
+}
+
+::ptr_utils(Qbe.Phi);
+fn for_phi(b: *Qbe.Blk, $body: @Fn(p: *Qbe.Phi) void) void = {
+    p := b.phi;
+    while => !p.is_null() {
+        body(p);
+        p = p.link;
+    };
+}
+
+//////////////
 
 fn copy_instructions_from_scratch(f: *Qbe.Fn, b: *Qbe.Blk) void = {
     b.nins = f.scratch_next().ptr_diff(f.scratch_start()).trunc();
@@ -380,6 +410,7 @@ fn cls(i: *Qbe.Ins) Qbe.Cls #inline = {
     @as(Qbe.Cls) @as(i16) x.trunc()
 }
 
+// 0 for int, 1 for float. 
 fn KBASE(k: Qbe.Cls) i64 #inline = {
     k.raw().shift_right_logical(1).zext()
 }
@@ -388,18 +419,34 @@ fn req(a: Qbe.Ref, b: Qbe.Ref) bool #inline = {
     a.type3_val29 == b.type3_val29
 }
 
+fn is_undef(a: Qbe.Ref) bool #inline = 
+    a.type3_val29 == 0;
+
 fn rtype(r: Qbe.Ref) Qbe.RegKind #inline = {
-    if r.type3_val29 == 0 {
-        return(.Undef);
-    };
+    !r.is_undef() || return(.Undef);
     @as(Qbe.RegKind) @as(u32) r.type3_val29.bit_and(1.shift_left(3) - 1)
 }
 
 fn get_constant(f: *Qbe.Fn, r: Qbe.Ref) *Qbe.Con #inline = {
     @debug_assert(rtype(r) == .RCon, "tried to get constant of non constant");
-    i: i64 = r.val().zext();
-    @safety(.Bounds) i < f.ncon.zext();
+    i := r.val();
+    //@safety(.Bounds) i < f.ncon.zext();
+    @debug_assert(i < f.ncon.zext(), "con oob");
     f.con.index(i)
+}
+
+fn get_memory(f: *Qbe.Fn, r: Qbe.Ref) *Qbe.Addr #inline = {
+    @debug_assert(rtype(r) == .RMem, "tried to get memory of non memory");
+    i := r.val();
+    //@safety(.Bounds) i < f.nmem.zext();
+    @debug_assert(i < f.nmem.zext(), "mem oob");
+    f.mem.index(i)
+}
+
+fn get_temporary(f: *Qbe.Fn, i: i64) *Qbe.Tmp #inline = {
+    //@safety(.Bounds) i < f.ntmp.zext();
+    @debug_assert(i < f.ntmp.zext(), "tmp oob");
+    f.tmp.index(i)
 }
 
 fn trunc(x: u32) i16 #redirect(u32, u16); // TODO
@@ -409,18 +456,23 @@ fn ref(cls: Qbe.RegKind, id: i64) Qbe.Ref #inline = {
     (type3_val29 = cls.raw().bitcast().bit_or(id.shift_left(3).trunc()))
 }
 
-fn val(r: Qbe.Ref) u32 #inline = {
-   @as(u32) r.type3_val29.shift_right_logical(3).bit_and(1.shift_left(29) - 1)
+fn val(r: Qbe.Ref) i64 #inline = {
+   x := @as(u32) r.type3_val29.shift_right_logical(3).bit_and(1.shift_left(29) - 1);
+   x.zext()
 }
 
 fn rsval(r: Qbe.Ref) i32 #inline = {    
-   intcast(r.val().zext().bit_xor(0x10000000) - 0x10000000)
+   intcast(r.val().bit_xor(0x10000000) - 0x10000000)
 }
 
 // TODO: can we use this instead of making a constant for small integer literals? 
 //       qbe only uses this for blit but CBits for all constants.
-fn small_int_for_blit(x: i64) Qbe.Ref #inline = 
-    ref(.RInt, x.bit_and(0x1fffffff));
+fn small_int_for_blit(x: i64) Qbe.Ref #inline = {
+    ref(.RInt, x.bit_and(0x1fffffff))
+}
+
+fn is_ret(j: Qbe.J) bool = 
+    j.raw() >= Qbe.J.Jretw.raw() && j.raw() <= Qbe.J.Jret0.raw();
 
 //////////////////////////////////////
 

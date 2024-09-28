@@ -34,11 +34,12 @@ qbe_globals :: @static(Qbe.Globals) {
         curi = get_qbe_dylib_variable(*Qbe.Ins, "curi"),
         target = get_qbe_dylib_variable(Qbe.Target, "T"),
         debug = get_qbe_dylib_variable(Array(bool, "Z".char() + 1), "debug"),
+        debug_out = fdopen(STD_ERR, "a".sym().c_str()),
     );
     ::enum(Qbe.DebugKey);
     //g.debug[Qbe.DebugKey.Folding.raw()] = true;
     //g.debug[Qbe.DebugKey.Abi.raw()] = true;
-    //g.debug[Qbe.DebugKey.InstSelect.raw()] = true;
+    //g.debug[Qbe.DebugKey.Liveness.raw()] = true;
     g.target[] = get_qbe_dylib_variable(Qbe.Target, "T_arm64_apple")[]; // TODO: choose arch!
     g.types[] = new(0, Qbe.Pool.PHeap); // TODO: check the magic in QbeBuilder.init to make sure you remember to do this. 
     g
@@ -48,10 +49,11 @@ qbe_globals :: @static(Qbe.Globals) {
 outf :: @static(*FILE);
 aaaa_out :: @static(TmpFile);
 debugf :: @static(*FILE) {    
-    name :: "target/franca_debug.txt";
-    outf := fopen(name.sym().c_str(), "w".sym().c_str());
-    assert(!outf.is_null(), "failed to open debug file");
-    @println("Output debug logging to %", name);
+    //name :: "target/franca_debug.txt";
+    //outf := fopen(name.sym().c_str(), "w".sym().c_str());
+    outf := fdopen(STD_ERR, "a".sym().c_str());
+    assert(!outf.is_null(), "failed to open stder");
+    //@println("Output debug logging to %", name);
     outf
 };
 
@@ -82,7 +84,8 @@ run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
     filluse(fnn);
     {qbe_globals[].target.isel}(fnn);
     fillrpo(fnn);
-    filllive(fnn);
+    fill_liveness(fnn);
+    //printfn(fnn, debugf[]);
     fillloop(fnn);
     fillcost(fnn);
     spill(fnn);
@@ -228,7 +231,7 @@ fn emit_entry_points_and_debug_info(gen: *CodeGen(EmitQbe2), comp: CompCtx, fns:
             // TODO: warn if fns has duplicates
             for (fns) {f|
                 callee := self.inst_func_ref(f);
-                self.b&.push_inst(self.current, .call, .Kl, QbeUndef, callee, QbeUndef);
+                self.b&.push_inst(self.current, .call, .Kl, QbeNull, callee, QbeNull);
             };
             self.b&.end_block(self.current, (type = .Jretl, arg = self.b&.push_literal(0)));
             fake_decl_name := @format("main\0") libc_allocator /*TODO :LEAK*/;
@@ -268,13 +271,13 @@ fn emit_bounce_fn(self: *EmitQbe2, impl_name_callee: Str, fake_decl_name: Str, s
     self.current_has_indirect_return = signeture.first_arg_is_indirect_return;
     if signeture.first_arg_is_indirect_return {
         size := self.b&.push_literal(@as(i64) signeture.return_value_bytes.zext());
-        self.indirect_return_slot = self.b&.push_inst(entry, .alloc8, .Kl, size, QbeUndef);
+        self.indirect_return_slot = self.b&.push_inst(entry, .alloc8, .Kl, size, QbeNull);
         self.b&.push_inst0(entry, .storel, .Kw, self.indirect_return_slot, self.block_args[0]);
         // :set_aggragate_return_index
         self.b.aggragate_return_index = (Some = self.b&.opaque_type_slow(signeture.return_value_bytes.zext(), 3));
     };
     if signeture.ret2.is_some() {
-        self.indirect_return_slot = self.b&.push_inst(entry, .alloc8, .Kl, self.b&.push_literal(16), QbeUndef);
+        self.indirect_return_slot = self.b&.push_inst(entry, .alloc8, .Kl, self.b&.push_literal(16), QbeNull);
     };
     
     fuck := @format("%\0", impl_name_callee) libc_allocator /*TODO :LEAK*/;
@@ -489,7 +492,7 @@ fn setup(self: *EmitQbe2, body: *FnBody, vars_out: *List(Qbe.Ref)) void = {
         if(ty.align > align.trunc(), => { align = 16; op = .alloc16; });
         
         size := self.b&.push_literal(@as(i64) ty.size.zext());
-        v := self.b&.push_inst(entry, op, .Kl, size, QbeUndef);
+        v := self.b&.push_inst(entry, op, .Kl, size, QbeNull);
         vars_out.push(v);
     };
     // TODO: use phi nodes cause this is stupid but that's such a pain in the ass. 
@@ -502,14 +505,14 @@ fn setup(self: *EmitQbe2, body: *FnBody, vars_out: *List(Qbe.Ref)) void = {
     self.block_args&.clear();  // be careful about resetting temp() if this points in there! (clear tries to reuse memory).
     self.block_args&.reserve(max_args);
     range(0, max_args) {i|
-        v := self.b&.push_inst(entry, .alloc8, .Kl, self.b&.push_literal(8), QbeUndef);
+        v := self.b&.push_inst(entry, .alloc8, .Kl, self.b&.push_literal(8), QbeNull);
         self.block_args&.push(v);
     };
     
     self.current_has_indirect_return = body.signeture.first_arg_is_indirect_return;
     shift := if body.signeture.first_arg_is_indirect_return {
         size := self.b&.push_literal(@as(i64) body.signeture.return_value_bytes.zext());
-        self.indirect_return_slot = self.b&.push_inst(entry, .alloc8, .Kl, size, QbeUndef);
+        self.indirect_return_slot = self.b&.push_inst(entry, .alloc8, .Kl, size, QbeNull);
         self.b&.push_inst0(entry, .storel, .Kw, self.indirect_return_slot, self.block_args[0]);
         // :set_aggragate_return_index
         self.b.aggragate_return_index = (Some = self.b&.opaque_type_slow(body.signeture.return_value_bytes.zext(), 3));
@@ -517,7 +520,7 @@ fn setup(self: *EmitQbe2, body: *FnBody, vars_out: *List(Qbe.Ref)) void = {
     }{| 0 };
     
     if body.signeture.ret2.is_some() {
-        self.indirect_return_slot = self.b&.push_inst(entry, .alloc8, .Kl, self.b&.push_literal(16), QbeUndef);
+        self.indirect_return_slot = self.b&.push_inst(entry, .alloc8, .Kl, self.b&.push_literal(16), QbeNull);
     };
     
     enumerate body.signeture.args {i, ty|
@@ -567,7 +570,7 @@ fn inst_intrinsic(self: *EmitQbe2, args: []Qbe.Ref, op: Intrinsic) []Qbe.Ref = {
     };
     cast :: fn(self: *EmitQbe2, args: []Qbe.Ref, ty: Prim, op: Qbe.O) []Qbe.Ref = {
         a := temp().alloc(EmitQbe2.Val, 1);
-        a.ptr[] = self.b&.push_inst(self.current, op, qbe_real_class(ty), args[0], QbeUndef);
+        a.ptr[] = self.b&.push_inst(self.current, op, qbe_real_class(ty), args[0], QbeNull);
         a
     };
 
@@ -682,11 +685,11 @@ fn inst_call(self: *EmitQbe2, args: Slice(Qbe.Ref), sig: PrimSig, callee: Qbe.Re
     self.b&.push_inst(self.current, .call, return_type, return_value, callee, maybe_struct_return_type);
     if sig.ret2 { t2 | // two
         t1 := sig.ret1.unwrap();
-        self.b&.push_inst(self.current, qbe_load(t1), qbe_fake_class(t1), out_vals[0], return_value, QbeUndef);
+        self.b&.push_inst(self.current, qbe_load(t1), qbe_fake_class(t1), out_vals[0], return_value, QbeNull);
         // TODO: for now i always use (i64, i64) but that probably needs to change (ie floats!). 
         offset_to_second_field := self.b&.push_literal(@as(i64) 8);
         struct_out_2 := self.b&.push_inst(self.current, .add, .Kl, return_value, offset_to_second_field);
-        self.b&.push_inst(self.current, qbe_load(t2), qbe_fake_class(t2), out_vals[1], struct_out_2, QbeUndef);
+        self.b&.push_inst(self.current, qbe_load(t2), qbe_fake_class(t2), out_vals[1], struct_out_2, QbeNull);
     };
     if sig.first_arg_is_indirect_return {
         size: i64 = sig.return_value_bytes.zext();
@@ -795,7 +798,7 @@ fn move_to_block(self: *EmitQbe2, block: *BasicBlock, ip: BbId) Slice(EmitQbe2.V
     args: List(EmitQbe2.Val) = list(block.arg_prims.len, temp());
     
     enumerate block.arg_prims { i, ty |
-        v := self.b&.push_inst(self.current, qbe_load(ty[]), qbe_real_class(ty[]), self.block_args[i], QbeUndef);
+        v := self.b&.push_inst(self.current, qbe_load(ty[]), qbe_real_class(ty[]), self.block_args[i], QbeNull);
         args&.push(v);
     };
     
@@ -809,7 +812,7 @@ fn var(ty: Prim, id: i64) Qbe.Ref = {
 // TODO: need to sign extend sometimes. 
 fn inst_load(self: *EmitQbe2, addr: EmitQbe2.Val, ty: Prim) EmitQbe2.Val = {
     // note: cls of the dest is not the same as the cls in the load opcode. 
-    self.b&.push_inst(self.current, qbe_load(ty), qbe_real_class(ty), addr, QbeUndef)
+    self.b&.push_inst(self.current, qbe_load(ty), qbe_real_class(ty), addr, QbeNull)
 }
 
 fn inst_global(self: *EmitQbe2, id: BakedVarId) EmitQbe2.Val = {
