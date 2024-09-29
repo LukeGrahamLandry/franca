@@ -1,0 +1,68 @@
+#!/usr/bin/env franca
+//! This is just for running Qbe's test files. 
+//! For Franca's normal interaction with the backend we just generate the ir in memory. 
+
+#include_std("backend2/lib.fr");
+fn main() void = {
+    outpath := "-";
+    inpath := "-";
+    
+    args := cli_args();
+    pop :: fn() => {
+        args.ptr = args.ptr.offset(1);
+        args.len -= 1;
+    };
+    pop(); // franca
+    pop(); // exe name
+    while => args.len > 0 {
+        a := args[0].str();
+        if a == "-t?" {
+            exit(0);
+        };
+        if a == "-t" {
+            pop();
+            pop();
+        } else {
+            if a == "franca" || a.ends_with(".fr") {
+                pop();
+            } else {
+                if a == "-o" {
+                    pop();
+                    outpath = args[0].str();
+                    pop();
+                } else {
+                    inpath = a;
+                    pop();
+                };
+            }
+        };
+    };
+    
+    ::if(*FILE);
+    ::ptr_utils(FILE);
+    //@eprintln(";% -> %", inpath, outpath);
+    outfile := if outpath == "-" {
+        fdopen(STD_OUT, "a".sym().c_str())
+    } else {
+        fopen(outpath.maybe_borrow_cstr(temp()), "w".sym().c_str())
+    };
+    !outfile.is_null();
+    @assert(!outfile.is_null(), "failed to open outpu '%'", outpath);
+    infile := if inpath == "-" {
+        fdopen(STD_IN, "r".sym().c_str())
+    } else {
+        fopen(inpath.maybe_borrow_cstr(temp()), "r".sym().c_str())
+    };
+    @assert(!infile.is_null(), "failed to open input '%'", inpath);
+    
+    INFILE :: @static(*FILE);
+    INFILE[] = infile;
+    outf[] = outfile;
+    
+    handle_dbg :: fn(s: CStr) void = ();
+    
+    parse(infile, "<file>".sym().c_str(), handle_dbg, emit_data, run_qbe_passes);
+    {qbe_globals[].target.emitfin}(outf[]);
+    fclose(infile);
+    exit(0);
+}

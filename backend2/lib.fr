@@ -5,5 +5,116 @@
 #include_std("backend2/opt/live.fr");
 #include_std("backend2/opt/util.fr");
 #include_std("backend2/opt/copy.fr");
+#include_std("backend2/opt/arm64/isel.fr");
+
+/*
+(i assume you need this thing for static link)
+ar rvs qbe_merged.o util.o parse.o abi.o cfg.o mem.o ssa.o alias.o load.o copy.o fold.o simpl.o live.o spill.o rega.o emit.o amd64/targ.o amd64/sysv.o amd64/isel.o amd64/emit.o arm64/targ.o arm64/abi.o arm64/isel.o arm64/emit.o rv64/targ.o rv64/abi.o rv64/isel.o rv64/emit.o
+(for comptime dynamic link this works, you need main for the symbols _T/_debug)
+clang -dynamiclib -o qbe_merged.dylib main.o util.o parse.o abi.o cfg.o mem.o ssa.o alias.o load.o copy.o fold.o simpl.o live.o spill.o rega.o emit.o amd64/targ.o amd64/sysv.o amd64/isel.o amd64/emit.o arm64/targ.o arm64/abi.o arm64/isel.o arm64/emit.o rv64/targ.o rv64/abi.o rv64/isel.o rv64/emit.o
+*/
+:: {
+    c := current_compiler_context();
+    handle := dlopen("./bindings/qbe/qbe_merged.dylib".sym().c_str(), DlFlag.Lazy);
+    assert(!handle.lib.is_null(), "failed to open qbe dylib");
+    c.add_comptime_library(@symbol "qbe", handle);
+};
+
+// TODO: this has to change when i do static aot.
+qbe_globals :: @static(Qbe.Globals) {  
+    g: Qbe.Globals = (
+        types = get_qbe_dylib_variable(InsaneVec(Qbe.Typ), "typ"),
+        insb = get_qbe_dylib_variable(Array(Qbe.Ins, 1.shift_left(20)), "insb"),
+        curi = get_qbe_dylib_variable(*Qbe.Ins, "curi"),
+        target = get_qbe_dylib_variable(Qbe.Target, "T"),
+        debug = get_qbe_dylib_variable(Array(bool, "Z".char() + 1), "debug"),
+        debug_out = fdopen(STD_ERR, "a".sym().c_str()),
+    );
+    ::enum(Qbe.DebugKey);
+    //g.debug[Qbe.DebugKey.Folding.raw()] = true;
+    //g.debug[Qbe.DebugKey.InstSelect.raw()] = true;
+    //g.debug[Qbe.DebugKey.Liveness.raw()] = true;
+    //g.debug[Qbe.DebugKey.Spill.raw()] = true;
+    g.target[] = get_qbe_dylib_variable(Qbe.Target, "T_arm64_apple")[]; // TODO: choose arch!
+    g.target.isel = arm64_isel;
+    g.types[] = new(0, Qbe.Pool.PHeap); // TODO: check the magic in QbeBuilder.init to make sure you remember to do this. 
+    g
+};
+
+// TODO: this changes for aot!!
+outf :: @static(*FILE);
+aaaa_out :: @static(TmpFile);
+debugf :: @static(*FILE) {    
+    //name :: "target/franca_debug.txt";
+    //outf := fopen(name.sym().c_str(), "w".sym().c_str());
+    outf := fdopen(STD_ERR, "a".sym().c_str());
+    assert(!outf.is_null(), "failed to open stder");
+    //@println("Output debug logging to %", name);
+    outf
+};
+
+run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
+    fnn.globals = qbe_globals;  // if you got it from qbe's parser it doesn't set this. 
+    
+	// TODO: make sure nothing requires the extra call to fillpreds and then disable this in release mode. 
+	//       if the frontend generates valid code it will always type check. 
+	//       but always have to option to run this to make peoples lives easier! (ie if a user wants to use #bc)
+	//       same for ssacheck
+    typecheck(fnn); 
+    
+    //printfn(fnn, debugf[]);
+    {qbe_globals[].target.abi0}(fnn);
+    fillrpo(fnn);
+    fillpreds(fnn);
+    filluse(fnn);
+    promote(fnn);
+    filluse(fnn);
+    ssa(fnn);
+    filluse(fnn);
+    ssacheck(fnn);
+    fillalias(fnn);
+    loadopt(fnn);
+    filluse(fnn);
+    fillalias(fnn);
+    coalesce(fnn);
+    filluse(fnn);
+    ssacheck(fnn);
+    copy_elimination(fnn);
+    //copy(fnn);
+    filluse(fnn);
+    //printfn(fnn, debugf[]);
+    fold(fnn);
+    {qbe_globals[].target.abi1}(fnn);
+    simplify(fnn);
+    //simpl(fnn);
+    fillpreds(fnn);
+    filluse(fnn);
+    {qbe_globals[].target.isel}(fnn);
+    fillrpo(fnn);
+    fill_liveness(fnn);
+    //filllive(fnn);
+    //printfn(fnn, debugf[]);
+    fillloop(fnn);
+    fillcost(fnn);
+    spill(fnn);
+    rega(fnn);
+    fillrpo(fnn);
+    simpljmp(fnn);
+    fillpreds(fnn);
+    fillrpo(fnn);
+    
+    assert_eq(Qbe.Blk.int_from_ptr(fnn.rpo[]), Qbe.Blk.int_from_ptr(fnn.start));
+    ::ptr_utils(*Qbe.Blk);
+    // We have a linear array but want a linked list for some reason. 
+    range(0, fnn.nblk.zext() - 1) { n |
+        fnn.rpo.offset(n)[].link = fnn.rpo.offset(n + 1)[];
+    };
+    fnn.rpo.offset(fnn.nblk.zext() - 1)[].link = Qbe.Blk.ptr_from_int(0);
+    
+    {qbe_globals[].target.emitfn}(fnn, outf[]);
+    //printfn(fnn, debugf[]);
+    // TODO: do this but then have to reset up the type table
+    //freeall();  
+};
 
 // all computers know these days is fill memory and branch

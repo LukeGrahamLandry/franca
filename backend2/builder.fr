@@ -10,7 +10,7 @@ QbeBuilder :: @struct(
     memory: List(Qbe.Addr),
     blocks: List(WipBlock),
     lnk := Qbe.Lnk.zeroed(),
-    leaf := true,
+    leaf := true,  // TODO: debug assert somewhere that you don't do a call in a leaf. for now we trust the frontend to remember to unset this. 
     aggragate_return_index: ?i64,
 );
 
@@ -48,7 +48,7 @@ fn clear(b: *QbeBuilder) void = {
     b.aggragate_return_index = .None;
     
     b.constants&.push(type = .CBits, bits = (i = 0xdeaddead)); // QbeUndef
-    b.constants&.push(type = .CBits, bits = (i = 0));
+    b.constants&.push(type = .CBits, bits = (i = 0));          // QbeConZero
     
     // Add temporaries representing physical registers.
     // TODO: is it required to pad out fake ones up to 64? maybe they're ignored and its just to make the indices work out. -- Sep 25
@@ -269,7 +269,7 @@ fn build(b: *QbeBuilder, name: Str, /*TODO: link_type: Qbe.Lnk,*/) Qbe.Fn = {
         };
         qbe_blocks&.push(Qbe.Blk.zeroed());
         block := qbe_blocks[i]&;
-        block.id = i.trunc(); // TODO: probably don't need this because cfg sets it? 
+        block.id = i.trunc(); // TODO: probably don't need this because cfg sets it? but qbe parser does it so just being safe for now.  
         block.nins = wip.insts.len.trunc();
         block.ins = wip.insts.maybe_uninit.ptr;
         if i == b.blocks.len - 1 {
@@ -291,10 +291,6 @@ fn build(b: *QbeBuilder, name: Str, /*TODO: link_type: Qbe.Lnk,*/) Qbe.Fn = {
         @fmt(name&, "b%", i);
     };
 	
-	// TODO: make sure nothing requires the extra call to fillpreds and then disable this in release mode. 
-	//       if the frontend generates valid code it will always type check. 
-	//       but always have to option to run this to make peoples lives easier! (ie if a user wants to use #bc)
-    typecheck(curf&); 
     b.clear();
     
     curf.globals = b.globals;
@@ -375,6 +371,16 @@ fn for_phi(b: *Qbe.Blk, $body: @Fn(p: *Qbe.Phi) void) void = {
     };
 }
 
+fn for_jump_targets(b: *Qbe.Blk, $body: @Fn(s: *Qbe.Blk) void) void = {
+    // TODO: this pastes the code twice which isn't really what you want probably. 
+    if !b.s1.is_null() {
+        body(b.s1);
+    };
+    if !b.s2.is_null() {
+        body(b.s2);
+    };
+}
+
 //////////////
 
 fn copy_instructions_from_scratch(f: *Qbe.Fn, b: *Qbe.Blk) void = {
@@ -389,23 +395,30 @@ fn scratch_start(f: *Qbe.Fn) *Qbe.Ins #inline =
 fn scratch_next(f: *Qbe.Fn) *Qbe.Ins #inline =
     f.globals.curi[];
 
-fn emit(f: *Qbe.Fn, op: Qbe.O, k: Qbe.Cls, to: Qbe.Ref, arg0: Qbe.Ref, arg1: Qbe.Ref) void = {
+// TODO: we rely on globals.curi pointing to the last inst we emitted (in isel) :LookAtLastInst
+fn emit(f: *Qbe.Fn, op: Qbe.O, k: Qbe.Cls, to: Qbe.Ref, arg0: Qbe.Ref, arg1: Qbe.Ref) *Qbe.Ins = {
     i := f.globals.curi;
     if i[].identical(f.globals.insb.as_ptr()) {
         die("emit, too many instructions".sym().c_str());
     };
     i[] = i[].offset(-1);
     i[][] = (op30_cls2 = pack_op_cls(op, k), to = to, arg = init(@slice(arg0, arg1)));
+    i[]
 }
 
-fn emit(f: *Qbe.Fn, i: Qbe.Ins) void #inline = {
+fn emit(f: *Qbe.Fn, i: Qbe.Ins) *Qbe.Ins #inline = 
     f.emit(i&.op(), i&.cls(), i.to, i.arg&[0], i.arg&[1]);
-}
+
 
 // :TodoPort
 fn newtmp(f: *Qbe.Fn, $debug_hint: Str, k: Qbe.Cls) Qbe.Ref #inline = {
     newtmp(debug_hint.sym().c_str(), k, f)
 }
+
+// :TodoPort
+fn newcon(f: *Qbe.Fn, c0: *Qbe.Con) Qbe.Ref #inline =
+    newcon(c0, f);
+
 
 // :TodoPort
 fn getcon(f: *Qbe.Fn, val: i64) Qbe.Ref #inline = {
@@ -506,12 +519,17 @@ fn small_int_for_blit(x: i64) Qbe.Ref #inline = {
     ref(.RInt, x.bit_and(0x1fffffff))
 }
 
-fn is_ret(j: Qbe.J) bool = 
+fn is_ret(j: Qbe.J) bool =  // TODO: tried to call uncompiled if #inline :FUCKED
     j.raw() >= Qbe.J.Jretw.raw() && j.raw() <= Qbe.J.Jret0.raw();
 
-fn is_ext(j: Qbe.O) bool = 
+fn is_ext(j: Qbe.O) bool #inline = 
     j.raw() >= Qbe.O.extsb.raw() && j.raw() <= Qbe.O.extuw.raw();
+    
+fn is_alloc(j: Qbe.O) bool #inline = 
+    j.raw() >= Qbe.O.alloc4.raw() && j.raw() <= Qbe.O.alloc16.raw();
 
+fn is_int(k: Qbe.Cls) bool #inline =
+    KBASE(k) == 0;
 
 //////////////////////////////////////
 

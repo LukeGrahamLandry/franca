@@ -1,3 +1,15 @@
+## (Sep 29)
+
+- TODO: fix opsies when trying to match on a non-sequentual enum. fails safety check
+- pass: instruction selection
+- wasted so much time on a flipped condition in `imm`
+- implemented sign extension properly on my old arm backend becuase i need it for interacting with qbe's 32 bit integers.
+- added ability to run qbe's tests and caught blit mistake related to ^
+
+##
+
+- off putting that i accidently flipped the conditions in simpl div
+
 ## (Sep 26)
 
 - store has no result type so the instruction must have .Kw

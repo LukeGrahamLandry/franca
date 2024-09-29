@@ -5,6 +5,7 @@ Qbe :: @rec @struct(
     Tmp0 :: 64, // first non-reg temporary
     MaxInstructions :: 1.shift_left(20),
     NBit :: 64,
+    Rxxx :: 0, 
     
     // it uses insb/curi as a buffer for emitting new instructions and then copies them out to a newly allocated array at the end of the block. 
     // the parser starts at the beginning but the passes start at the end and `emit` in reverse. 
@@ -31,7 +32,7 @@ Qbe :: @rec @struct(
         Abi = "A".ascii(),
         InstSelect = "I".ascii(),
         Liveness = "L".ascii(),
-        Spilling = "S".ascii(),
+        Spill = "S".ascii(),
         RegAlloc = "R".ascii(),
     ),
     Cls :: @enum(i16) (  // :QbeClsi16
@@ -68,7 +69,8 @@ Qbe :: @rec @struct(
         RCall = 5,
         RMem = 6,
         
-        RNull = -1, // represented as (RTmp, 0) but useful for comparisons
+        // TODO: very confusing if you make this -1 and try to match on it
+        RNull = 7, // represented as (RTmp, 0) but useful for comparisons
     ), // u3
     Target :: @rec @struct(
         name: Array(u8, 16),
@@ -117,7 +119,7 @@ Qbe :: @rec @struct(
         arg: InsaneVec(Qbe.Ref),
         blk: InsaneVec(*Qbe.Blk), 
         narg: u32,
-        cls: i32,
+        cls: Qbe.Cls, // size changed but alignment padding makes it the same (TODO: remove comment when dont need to match abi with old version)
         link: *Qbe.Phi,
     ),
     Blk :: @rec @struct(
@@ -510,7 +512,7 @@ Qbe :: @rec @struct(
         call,
     
         /* Flags Setting */
-        flagieq,
+        flagieq,  // Order matters! for isel
         flagine,
         flagisge,
         flagisgt,
@@ -573,6 +575,8 @@ Qbe :: @rec @struct(
 QbeNull  :: Qbe.Ref.zeroed(); // ref(.RTmp, 0);
 // TODO: when do we create these? mem.c, ssa.c
 QbeUndef :: ref(.RCon, 0); ::enum(Qbe.RegKind);
+// the literal value 0
+QbeConZero :: ref(.RCon, 1);
 
 fn die(msg: CStr) void #import("qbe");
 fn freeall() void #import("qbe");
@@ -582,15 +586,14 @@ fn vgrow(_0: rawptr, _1: i64) void #import("qbe");
 fn strf(_0: CStr, _1: CStr) void #import("qbe");
 fn intern(_0: CStr) u32 #import("qbe");
 fn str(_0: u32) CStr #import("qbe");
-fn argcls(_0: *Ins, _1: i32) i32 #import("qbe");
+fn argcls(_0: *Qbe.Ins, _1: i64) Qbe.Cls #import("qbe");
 fn isreg(_0: Qbe.Ref) i32 #import("qbe");
-fn iscmp(_0: i32, _1: *i32, _2: *i32) i32 #import("qbe");
-fn emit(_0: i32, _1: i32, _2: Qbe.Ref, _3: Qbe.Ref, _4: Qbe.Ref) void #import("qbe");
-fn emiti(_0: Qbe.Ins) void #import("qbe");
+// TODO: use multiple returns
+fn iscmp(op: Qbe.O, cls_out: *Qbe.Cls, cc_out: *i32) bool #import("qbe");
 fn idup(_0: **Qbe.Ins, _1: *Qbe.Ins, _2: u64) void #import("qbe");
 fn icpy(_0: *Qbe.Ins, _1: *Qbe.Ins, _2: i64) *Qbe.Ins #import("qbe");
-fn cmpop(_0: i32) i32 #import("qbe");
-fn cmpneg(_0: i32) i32 #import("qbe");
+fn cmpop(cc: i32) i32 #import("qbe");
+fn cmpneg(cc: i32) i32 #import("qbe");
 fn clsmerge(_0: *i16, _1: i16) i32 #import("qbe");
 fn phicls(_0: i32, _1: *Qbe.Tmp) i32 #import("qbe");
 fn newtmp(_0: CStr, _1: Qbe.Cls, _2: *Qbe.Fn) Qbe.Ref #import("qbe");
@@ -640,7 +643,6 @@ fn loadopt(_0: *Qbe.Fn) void #import("qbe");
 fn filluse(_0: *Qbe.Fn) void #import("qbe");
 fn ssa(_0: *Qbe.Fn) void #import("qbe");
 fn ssacheck(_0: *Qbe.Fn) void #import("qbe");
-fn copy(_0: *Qbe.Fn) void #import("qbe");
 fn fold(_0: *Qbe.Fn) void #import("qbe");
 fn fillcost(_0: *Qbe.Fn) void #import("qbe");
 fn spill(_0: *Qbe.Fn) void #import("qbe");
@@ -653,6 +655,11 @@ fn stashbits(_0: rawptr, _1: i32) i32 #import("qbe");
 fn elf_emitfnfin(_0: CStr, _1: *FILE) void #import("qbe");
 fn elf_emitfin(_0: *FILE) void #import("qbe");
 fn macho_emitfin(_0: *FILE) void #import("qbe");
+
+// replaced. but for now you can still use the real ones when testing to find which is broken.  
+fn copy(_0: *Qbe.Fn) void #import("qbe");
+fn filllive(_0: *Qbe.Fn) void #import("qbe");
+fn simpl(_0: *Qbe.Fn) void #import("qbe");
 
 // Note: you have to make this not `static` in qbe/parse.fr
 fn typecheck(_0: *Qbe.Fn) void #import("qbe");

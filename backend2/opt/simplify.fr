@@ -13,6 +13,9 @@ fn simplify(f: *Qbe.Fn) void = {
     };
 }
 
+// TODO: divmod fusion? maybe should be a backend thing? dont really want to add two output instructions. 
+//       maybe here should just see if you do a div and rem by the same divisor in a block and move them to be next to eachother.
+//       or maybe global code motion should be its own seperate thing. 
 fn ins(f: *Qbe.Fn, iter: **Qbe.Ins, moved_to_new_memory: *bool, b: *Qbe.Blk) void #once = {
     i := iter[];
     /* simplify more instructions here;
@@ -36,7 +39,7 @@ fn ins(f: *Qbe.Fn, iter: **Qbe.Ins, moved_to_new_memory: *bool, b: *Qbe.Blk) voi
                 moved_to_new_memory[] = true;
             };
       
-            f.expand_blit(start_blit.arg&[1], start_blit.arg&[0], rsval(i.arg&[0]));
+            f.expand_blit(start_blit.arg&[1], start_blit.arg&[0], rsval(i.arg&[0]).intcast());
             iter[] = i.offset(-1);  // deal with the variable length encoding (blit0, blit1). 
             return();
         }
@@ -52,11 +55,11 @@ fn ins(f: *Qbe.Fn, iter: **Qbe.Ins, moved_to_new_memory: *bool, b: *Qbe.Blk) voi
 
 fn simplify_div_like(f: *Qbe.Fn, i: *Qbe.Ins) void = {
     r := i.arg&[1];
-    i.cls().KBASE() != 0           || return();
-    rtype(r) != .RCon              || return();
+    i.cls().is_int()            || return();
+    rtype(r) == .RCon           || return();
     c := f.get_constant(r);
-    c.type != .CBits               || return();
-    !ispow2(c.bits.i.bitcast())    || return();
+    c.type == .CBits            || return();
+    ispow2(c.bits.i.bitcast())  || return();
     // The divisor is a constant power of 2. 
     
     // If you want to call emit() here, don't forget to deal with moved_to_new_memory. 
@@ -73,9 +76,9 @@ fn simplify_div_like(f: *Qbe.Fn, i: *Qbe.Ins) void = {
 }
 
 // Blit instructions are implemented as a sequence of loads and stores.
-fn expand_blit(f: *Qbe.Fn, dest: Qbe.Ref, src: Qbe.Ref, blit_size: i32) void #once = {
+fn expand_blit(f: *Qbe.Fn, dest: Qbe.Ref, src: Qbe.Ref, blit_size: i64) void #once = {
     blit_op_table :: {
-        T   :: @struct(store: Qbe.O, load: Qbe.O, cls: Qbe.Cls, size: i32);
+        T   :: @struct(store: Qbe.O, load: Qbe.O, cls: Qbe.Cls, size: i64);
         t   := ast_alloc().alloc(T, 4);
         t[0] = (store = .storel, load = .load,   cls = .Kl, size = 8);
         t[1] = (store = .storew, load = .load,   cls = .Kw, size = 4);
@@ -86,7 +89,7 @@ fn expand_blit(f: *Qbe.Fn, dest: Qbe.Ref, src: Qbe.Ref, blit_size: i32) void #on
     
     forward  := blit_size >= 0;
     blit_size = blit_size.abs();
-    off: i32 = if(forward, => blit_size, => 0);
+    off := if(forward, => blit_size, => 0);
     each blit_op_table { p |
         while => blit_size >= p.size {
             blit_size -= p.size;
@@ -96,7 +99,7 @@ fn expand_blit(f: *Qbe.Fn, dest: Qbe.Ref, src: Qbe.Ref, blit_size: i32) void #on
             
             r_value     := f.newtmp("blt", .Kl);
             r_dest_slot := f.newtmp("blt", .Kl);
-            r_offset    := f.getcon(off.zext()); // compiler bug. shouildb't compile without the zext :FUCKED
+            r_offset    := f.getcon(off);
             f.emit(p.store, .Kw, QbeNull, r_value, r_dest_slot);
             f.emit(.add, .Kl, r_dest_slot, dest, r_offset);
             r_src_slot  := f.newtmp("blt", .Kl);

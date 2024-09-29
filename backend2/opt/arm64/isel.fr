@@ -1,0 +1,344 @@
+// Adapted from Qbe. MIT License. © 2015-2024 Quentin Carbonneaux <quentin@c9x.me>
+
+//! - Assign stack slots to allocs in the start block.
+//! - Most instructions must have both operands in registers. 
+//! - Cmp can encode some immediates. But only on the right so you might have to swap and invert. 
+//! - Combine cmp+jnz into jmp.cc.
+
+fn arm64_isel(f: *Qbe.Fn) void = {
+    /* assign slots to fast allocs */
+    // Any alloc with constant size gets assigned a fixed slot that we know as a constant offset into the stack frame. 
+    // Then the instruction for the alloc is removed. 
+    // So any remaining alloc instructions after this must be a dynamic alloca.  
+    // Note: We only do this for allocs in the start block. 
+    //       I guess if you conditionally do a large but constant size alloc, you don't want to always use the stack space. 
+    
+    allocs := @slice(Qbe.O.alloc4, Qbe.O.alloc8, Qbe.O.alloc16); // TODO: for_enum_range (these are sequentual)
+    /* specific to NAlign == 3 */ /* or change align=4 and size /= 4 below */
+    align := 4;
+    for allocs { alloc_type |
+        break :: local_return; // TODO: make break less of a pain in this language
+        for_insts_forward f.start { i |
+            if i.op() == alloc_type {
+                if rtype(i.arg&[0]) != .RCon {
+                    panic("TODO: none of my tests get here (alloca a dynamically sized stack slot)");
+                    align *= 2; // :break
+                    break(); 
+                };
+                size := f.get_constant(i.arg&[0])[].bits.i;
+                if size < 0 || size >= i32_MAX - 15 {
+                    @panic("invalid alloc size %", size);
+                };
+                size = size.add(align - 1).bit_and(-align);
+                size /= 4;
+                f.get_temporary(i.to.val())[].slot = f.slot;
+                f.slot += size.intcast();
+                i[] = Qbe.Ins.zeroed();
+                i.set_op(.nop);
+            }
+        };
+        align *= 2; // :break
+    };
+    
+    for_blocks f { b |
+        f.globals.curi[] = f.scratch_start(); // TODO: remove this once we always reset it at the end of a pass. 
+        
+        for_jump_targets b { sb |
+            for_phi sb { p |
+                n := 0;
+                // find the value the phi needs to have when coming from this block.
+                while => !p.blk[n].identical(b) {
+                    @debug_assert(n+1 < p.narg.zext(), "expected phi value when coming from %", b.name&.items());
+                    n += 1;
+                };
+                
+                f.fixarg(p.arg&.index(n), p.cls, true);
+            };
+        };
+        f.seljmp(b);
+        
+        for_insts_rev b { i | 
+            f.sel(i[][]);
+        };
+        f.copy_instructions_from_scratch(b);
+    };
+
+    if f.globals.debug["I".char()] {
+        write(f.globals.debug_out, "\n> After instruction selection:\n");
+        printfn(f, f.globals.debug_out);
+    };
+}
+
+fn sel(f: *Qbe.Fn, i: Qbe.Ins) void = {
+    if is_alloc(i&.op()) {
+        i0 := f.globals.curi[].offset(-1); // :LookAtLastInst
+        salloc(i.to, i.arg&[0], f);
+        f.fixarg(i0.arg&.index(0), .Kl, false);
+        return();
+    };
+    ck := Qbe.Cls.zeroed();
+    cc: i32 = 0;
+    if (iscmp(i&.op(), ck&, cc&)) {
+        i0 := f.emit(.flagieq, i&.cls(), i.to, QbeNull, QbeNull);
+        if f.selcmp(i.arg, ck) {
+            x := i0.op().raw() + cmpop(cc);
+            i0.set_op(x);
+        } else {
+            x := i0.op().raw() + cc;
+            i0.set_op(x);
+        };
+        return();
+    };
+    // TODO: what does the callable check do? i don't have a test that needs it. 
+    if i&.op() == .call && f.callable(i.arg&[0]) {
+        f.emit(i);
+        return();
+    };
+    if i&.op() != .nop {
+        iarg := f.emit(i)[].arg&;
+        f.fixarg(iarg[0]&, argcls(i&, 0), false);
+        f.fixarg(iarg[1]&, argcls(i&, 1), false);
+    };
+}
+
+// This is where we combine cmp+jnz.
+fn seljmp(f: *Qbe.Fn, b: *Qbe.Blk) void = {
+    // TODO: could flip this exit and assert condition so its just one !=jnz in release mode. 
+    if b.jmp.type != .Jjnz {
+        msg :: "the frontend only makes jnz conditionals and selret in abi pass removes other types of ret.";
+        @debug_assert(b.jmp.type == .Jret0 || b.jmp.type == .Jjmp || b.jmp.type == .Jhlt, msg);
+        return();
+    };
+    // If the jump condition was created in this basic block, is only used once, and was made by a comparison, 
+    // we can pull the comparison forward into the jump instruction and just jump based on the cpu flags set by the cmp instruction.
+    // Otherwise, we have to actually produce the value and compare it to 0. 
+    
+    jump_arg := b.jmp.arg;
+    b.jmp.arg = QbeNull;
+    if find_source_instruction(b, jump_arg) { i |
+        uses := f.get_temporary(jump_arg.val())[].nuse;
+        cc: i32 = 0;
+        cmp_cls := Qbe.Cls.zeroed();
+        if uses == 1 && iscmp(i.op(), cmp_cls&, cc&) {
+            if f.selcmp(i.arg, cmp_cls) {
+                cc = cmpop(cc);
+            };
+            xxx: i32 = (@as(i16) Qbe.J.Jjfieq.raw()).zext() + cc;
+            b.jmp.type = @as(Qbe.J) @as(i16) xxx.trunc();
+            i[] = Qbe.Ins.zeroed();
+            i.set_op(.nop);
+            return();
+        } // else fallthrough
+    };
+    // TODO: init array from tuple literal
+    f.selcmp(init(@slice(jump_arg, QbeConZero)), .Kw);
+    b.jmp.type = .Jjfine;
+}
+
+// Try to compare to a constant using an immidiate. 
+// Returns true if you need to invert the condition because we swapped the arguments. 
+// note: we handle the terminator first so we only get here if it we didn't jump on the result of this comparison.
+fn selcmp(f: *Qbe.Fn, arg: Array(Qbe.Ref, 2), k: Qbe.Cls) bool = {
+    if !is_int(k) {
+        // fcmp can't take an immdiate, so make sure both args are registers. (TODO: it can compare to 0 tho)
+        iarg := f.emit(.afcmp, k, QbeNull, arg&[0], arg&[1])[].arg&;
+        f.fixarg(iarg[0]&, k, false);
+        f.fixarg(iarg[1]&, k, false);
+        return(false);
+    };
+    
+    // cmp can only have an immediate on the right. so we might have to swap them and invert the condition. 
+    needed_swap := rtype(arg&[0]) == .RCon;
+    if needed_swap {
+        @debug_assert(rtype(arg&[1]) != .RCon, "cmp of constant should already have been folded. we do handle this case below tho so its fine if you want to remove that pass and this check.");
+        arg&.items().swap(0, 1);
+    };
+    
+    cant_fit_immediate := true;
+    cmp := Qbe.O.acmp;
+    r_right := arg&[1];
+    if rtype(r_right) == .RCon {
+        c := f.get_constant(r_right);
+        n := 0; // TODO: just use multiple return values.
+        // TODO: annoying that i don't have fallthrough for @match
+        imm := imm(c, k, n&);
+        cant_fit_immediate = imm == .PosLow24 || imm == .NegLow24 || imm == .Iother;
+        if imm == .NegLow12 || imm == .NegHigh12 {
+            // if we're comparing to a negative number, there's a different instruction for that. 
+            cmp = .acmn;
+            r_right = f.getcon(n);
+        };
+    };
+    
+    iarg := f.emit(cmp, k, QbeNull, arg&[0], r_right)[].arg&;
+    f.fixarg(iarg[0]&, k, false); // it could be the address of a stack slot or thread local, i guess?
+    if cant_fit_immediate {
+        f.fixarg(iarg[1]&, k, false);
+    };
+    needed_swap
+}
+
+// Force the value to be in a register (if its a constant, produce it in a different reg and then move).
+fn fixarg(f: *Qbe.Fn, pr: *Qbe.Ref, k: Qbe.Cls, phi: bool) void = {
+    r_original := pr[];
+    @match(rtype(r_original)) {
+        fn RCon() => {
+            c := f.get_constant(r_original);
+            ::enum(@type c.sym.type);
+            // Accessing a thread local requires an incantation. 
+            if f.globals.target.apple && c.type == .CAddr && c.sym.type == .SThr {
+                r1 := f.newtmp("isel", .Kl);
+                pr[] = r1;
+                if c.bits.i != 0 {
+                    r2 := f.newtmp("isel", .Kl);
+                    cc: Qbe.Con = (type = .CBits, bits = (i = c.bits.i));
+                    r3 := f.newcon(cc&);
+                    f.emit(.add, .Kl, r1, r2, r3);
+                    r1 = r2;
+                };
+                R0 :: Qbe.Rxxx + 1;
+                f.emit(.copy, .Kl, r1, ref(.RTmp, R0), QbeNull);
+                r1 := f.newtmp("isel", .Kl);
+                r2 := f.newtmp("isel", .Kl);
+                f.emit(.call, .Kw, QbeNull, r1, ref(.RCall, 33));
+                f.emit(.copy, .Kl, ref(.RTmp, R0), r2, QbeNull);
+                f.emit(.load, .Kl, r1, r2, QbeNull);
+                cc := c[];
+                cc.bits.i = 0;
+                r3 := f.newcon(cc&);
+                f.emit(.copy, .Kl, r2, r3, QbeNull);
+                return();
+            };
+        
+            // phis are just mov which can have an immediate
+            if(is_int(k) && phi, => return());
+            
+            r_output := f.newtmp("isel", k);
+            // Most instructions can't have immediates. 
+            // So we add a new instruction that produces the constant, so the actual operation has registers for both inputs. 
+            // TODO: there are a few instructions that have a small range of immediates. like add_im/sub_im can take a u12 (optionally shifted).
+            if is_int(k) {
+                f.emit(.copy, k, r_output, r_original, QbeNull);
+            } else {
+                // They don't give you float immediates (even for mov). 
+                // So we load the bits into an integer register and then move it to a float register. 
+                // TODO: qbe loads float constants from memory (and so does clang), so perhaps thats much faster. 
+                //       but I don't want to deal with the different backends yet (jit vs aot) so it feels easier to just put it in an int register and then move it to float.
+                //       I tried this change in qbe and it passed thier tests so i think it is just a performance thing. 
+                //       Perhaps I will change this back at some point. It feels weird to me to let instruction selection produce data constants tho. 
+                // TODO: assert in bounds based on `KWIDE(k) ? 8 : 4`?
+                r_int := f.newtmp("isel", .Kl);
+                f.emit(.cast, k, r_output, r_int, QbeNull);
+                f.emit(.copy, .Kl, r_int, r_original, QbeNull);
+            };
+            pr[] = r_output;
+        }
+        fn RTmp() => {
+            slot_offset := f.get_temporary(r_original.val())[].slot;
+            if slot_offset != -1 {
+                // This tmp holds the address of a stack slot. Produce it by offseting the frame pointer. 
+                r_slot := f.newtmp("isel", .Kl);
+                f.emit(.addr, .Kl, r_slot, ref(.RSlot, slot_offset.zext().bit_and(0x1fffffff)), QbeNull);
+                pr[] = r_slot;
+            }; // otherwise its already in a register
+        }
+        @default => ();
+    }; // early returns
+}
+
+fn callable(f: *Qbe.Fn, r: Qbe.Ref) bool = {
+    if rtype(r) == .RTmp {
+        return(true);
+    };
+    
+    // TODO: should have a get_constant that returns an optional? 
+    if rtype(r) == .RCon {
+        c := f.get_constant(r);
+        if c.type == .CAddr && c.bits.i == 0 {
+            return(true);
+        }
+    };
+    false
+}
+
+Imm :: @enum(i64) (
+    Iother,
+    PosLow12,
+    PosHigh12,
+    PosLow24,
+    NegLow12,
+    NegHigh12,
+    NegLow24,
+);
+::if(Imm);  ::enum(Imm);
+
+fn imm(c: *Qbe.Con, k: Qbe.Cls, pn: *i64) Imm = {
+    if c.type != .CBits {
+        return(.Iother);
+    };
+    n := c.bits.i;
+    if k == .Kw {
+        // TODO: this isn't the same i think. really you want a truncation? i dont have a test that needs it yet tho. this is gonna be a pain to debug when i forget. 
+        // n = (int32_t) n
+        //xx: i32 = n.intcast();
+        //n = xx.zext();
+        //n = n.bit_and(1.shift_left(32) - 1);
+    };
+    positive := true;
+    if n < 0 {
+        positive = false;
+        // TODO: is this the same?
+        //n = -(uint64_t)n;
+        n = -n;
+    };
+    pn[] = n;
+    if n.bit_and(0x000fff) == n {
+        return(if(positive, => .PosLow12, => .NegLow12));
+    };
+    if n.bit_and(0xfff000) == n {
+        return(if(positive, => .PosHigh12, => .NegHigh12));
+    };
+    if n.bit_and(0xffffff) == n {
+        return(if(positive, => .PosLow24, => .NegLow24));
+    };
+    .Iother
+}
+
+// note: not tested yet, only called by emit
+fn arm64_logimm(x: u64, k: Qbe.Cls) bool = {
+    if (k == .Kw) {
+        x = x.bit_and(0xffffffff).bit_or(x.shift_left(32));
+    };
+    if x.bit_and(1) != 0 {
+        x = x.bit_not();
+    };
+    if(x == 0, => return(true));
+    if(x == 0xaaaaaaaaaaaaaaaa, => return(true));
+    
+    n := x.bit_and(0xf);
+    check :: fn() => return(n.bit_and(n + n.bit_and(-n)) == 0);
+    if(0x1111111111111111 * n == x, => check());
+    n = x.bit_and(0xff);
+    if(0x0101010101010101 * n == x, => check());
+    n = x.bit_and(0xffff);
+    if(0x0001000100010001 * n == x, => check());
+    n = x.bit_and(0xffffffff);
+    if(0x0000000100000001 * n == x, => check());
+    n = x;
+    check()
+}
+
+fn trunc(x: i32) i16 = { // TODO
+    ptr_cast_unchecked(i32, i16, x&)[]
+}
+
+// this only makes sense once we're in ssa form
+fn find_source_instruction(b: *Qbe.Blk, search: Qbe.Ref) ?*Qbe.Ins #inline = {
+    // backwards because used when looking for cmp for the terminating jmp so its probably near the end. 
+    for_insts_rev b { i | 
+        if i.to == search {
+            return(Some = i[])
+        }
+    };
+    .None
+}
