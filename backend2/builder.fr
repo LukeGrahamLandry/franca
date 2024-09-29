@@ -47,7 +47,7 @@ fn clear(b: *QbeBuilder) void = {
     b.blocks&.clear();
     b.aggragate_return_index = .None;
     
-    b.constants&.push(type = .CBits, bits = (i = 0xdeaddead)); // QbeNull
+    b.constants&.push(type = .CBits, bits = (i = 0xdeaddead)); // QbeUndef
     b.constants&.push(type = .CBits, bits = (i = 0));
     
     // Add temporaries representing physical registers.
@@ -113,6 +113,7 @@ fn push_inst(b: *QbeBuilder, block: BbId, op: Qbe.O, k: Qbe.Cls, out: Qbe.Ref, i
     b.blocks[block.id.zext()].insts&.push(inst);
 }
 
+// TODO: catch the mistake of calling this instead of push_inst0 for a store (it confuses the backend)
 fn push_inst(b: *QbeBuilder, block: BbId, op: Qbe.O, k: Qbe.Cls, in1: Qbe.Ref, in2: Qbe.Ref) Qbe.Ref = {
     out := b.push_temp(k);
     b.push_inst(block, op, k, out, in1, in2);
@@ -268,6 +269,7 @@ fn build(b: *QbeBuilder, name: Str, /*TODO: link_type: Qbe.Lnk,*/) Qbe.Fn = {
         };
         qbe_blocks&.push(Qbe.Blk.zeroed());
         block := qbe_blocks[i]&;
+        block.id = i.trunc(); // TODO: probably don't need this because cfg sets it? 
         block.nins = wip.insts.len.trunc();
         block.ins = wip.insts.maybe_uninit.ptr;
         if i == b.blocks.len - 1 {
@@ -314,12 +316,21 @@ fn for_blocks(f: *Qbe.Fn, $body: @Fn(b: *Qbe.Blk) void) void = {
 }
 
 ::ptr_utils(*Qbe.Blk);
-fn for_blocks_rpo(f: *Qbe.Fn, $body: @Fn(b: *Qbe.Blk) void) void = {
+fn for_blocks_rpo_rev(f: *Qbe.Fn, $body: @Fn(b: *Qbe.Blk) void) void = {
     i: i64 = f.nblk.zext() - 1;
     while => i >= 0 {
         b := f.rpo.offset(i);
         body(b[]);
         i -= 1;
+    };
+}
+
+fn for_blocks_rpo_forward(f: *Qbe.Fn, $body: @Fn(b: *Qbe.Blk) void) void = {
+    i := 0;
+    while => i < f.nblk.zext() {
+        b := f.rpo.offset(i);
+        body(b[]);
+        i += 1;
     };
 }
 
@@ -335,7 +346,18 @@ fn for_insts_rev(b: *Qbe.Blk, $body: @Fn(i: **Qbe.Ins) void) void = {
     };
 }
 
-// :TodoPort bsiter and inline it here
+fn for_insts_forward(b: *Qbe.Blk, $body: @Fn(i: *Qbe.Ins) void) void = {
+    i := b.ins;
+    while => !i.identical(b.ins.offset(b.nins.zext())) {
+        body(i);
+        i = i.offset(1);
+    };
+}
+
+// :TodoPort bsiter. 
+// when i do firstbit, why not do whatever __builtin_ctzl does? x64 has an instruction for that. arm has reverse bits and then clz. wasm has it. 
+// the c version works with converting to that. clang -O2 doesn't treat the functions the same so maybe im missing something. 
+// have to add that as an Intrinsic to my language... which i guess means adding it to my new qbe. 
 fn for(bs: *Qbe.BSet, $body: @Fn(i: i64) void) void = {
     i: i32 = 0;
     while => bsiter(bs, i&) {
@@ -390,6 +412,13 @@ fn getcon(f: *Qbe.Fn, val: i64) Qbe.Ref #inline = {
     getcon(val, f)
 }
 
+// :TodoPort
+fn init_bitset(size: i64) Qbe.BSet #inline = {
+    s := Qbe.BSet.zeroed();
+    bsinit(s&, size);
+    s
+}
+
 //////////////////////////////////////
 
 fn pack_op_cls(op: Qbe.O, k: Qbe.Cls) u32 #inline = {
@@ -419,11 +448,17 @@ fn req(a: Qbe.Ref, b: Qbe.Ref) bool #inline = {
     a.type3_val29 == b.type3_val29
 }
 
-fn is_undef(a: Qbe.Ref) bool #inline = 
-    a.type3_val29 == 0;
+// TODO: compiler bug. this shouldn't need to be in a block. this just delays adding it to the overload set so it doesn't get confused.
+:: {
+    fn eq(a: Qbe.Ref, b: Qbe.Ref) bool #inline = 
+        a.type3_val29 == b.type3_val29;
+        
+    fn ne(a: Qbe.Ref, b: Qbe.Ref) bool #inline = 
+        a.type3_val29 != b.type3_val29;
+};
 
 fn rtype(r: Qbe.Ref) Qbe.RegKind #inline = {
-    !r.is_undef() || return(.Undef);
+    r != QbeNull || return(.RNull);
     @as(Qbe.RegKind) @as(u32) r.type3_val29.bit_and(1.shift_left(3) - 1)
 }
 
@@ -473,6 +508,10 @@ fn small_int_for_blit(x: i64) Qbe.Ref #inline = {
 
 fn is_ret(j: Qbe.J) bool = 
     j.raw() >= Qbe.J.Jretw.raw() && j.raw() <= Qbe.J.Jret0.raw();
+
+fn is_ext(j: Qbe.O) bool = 
+    j.raw() >= Qbe.O.extsb.raw() && j.raw() <= Qbe.O.extuw.raw();
+
 
 //////////////////////////////////////
 

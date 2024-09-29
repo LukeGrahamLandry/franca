@@ -1,5 +1,6 @@
 // Adapted from Qbe. MIT License. © 2015-2024 Quentin Carbonneaux <quentin@c9x.me>
 
+// note: ssa.c still calls the c version of this
 /* liveness analysis
  * requires rpo computation
  */
@@ -9,20 +10,18 @@ fn fill_liveness(f: *Qbe.Fn) void = {
     // all the places we loop twice is once for floats and one for ints. 
     
     // Before each iteration we save the previous results and then check if anything changed.
-    saved_out := Qbe.BSet.zeroed();
-    bsinit(saved_out&, f.ntmp);
-    liveon_output := Qbe.BSet.zeroed();
-    bsinit(liveon_output&, f.ntmp);
+    saved_out     := init_bitset(f.ntmp.zext());
+    liveon_output := init_bitset(f.ntmp.zext());
     
     for_blocks f { b |
-        bsinit(b.in&,  f.ntmp);
-        bsinit(b.out&, f.ntmp);
-        bsinit(b.gen&, f.ntmp);
+        bsinit(b.in&,  f.ntmp.zext());
+        bsinit(b.out&, f.ntmp.zext());
+        bsinit(b.gen&, f.ntmp.zext());
     };
     changed := true;
     while => changed {
         changed = false;
-        for_blocks_rpo f { b |
+        for_blocks_rpo_rev f { b |
             bscopy(saved_out&, b.out&);
             if !b.s1.is_null() {
                 liveon(liveon_output&, b, b.s1);
@@ -83,7 +82,7 @@ fn fill_liveness(f: *Qbe.Fn) void = {
                     };
                 };
                 // TODO: !req(i.to&, QbeNull)  shouldnt compile!! thats a pointer! :FUCKEd
-                if !i.to.is_undef() {
+                if i.to != QbeNull {
                     // This instruction has an output. 
                     @debug_assert(rtype(i.to) == .RTmp, "can only assign to temporaries");
                     t := i.to.val();

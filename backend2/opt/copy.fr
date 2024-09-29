@@ -1,0 +1,246 @@
+/* requires use and dom, breaks use */
+fn copy_elimination(f: *Qbe.Fn) void = {
+    // These are just used inside simplify_phi (and cleared every time), we just want to reuse thier memory. 
+    // TODO: could even retain them between functions and have no allocation once warmed up?
+    t_s := init_bitset(f.ntmp.zext());          //
+    a_s := init_bitset(f.ntmp.zext());          //
+    stk: InsaneVec(*Qbe.Use) = new(10, .PHeap); //
+    //////////////////////////////////////////
+    copy_of := temp().alloc_zeroed(Qbe.Ref, f.ntmp.zext());
+    
+    /* 1. build the copy-of map */
+    n := -1;
+    for_blocks_rpo_forward f { b |
+        n += 1;
+        for_phi b { p |
+            continue :: local_return;
+            @debug_assert(rtype(p.to) == .RTmp, "phi must set tmp");
+            if copy_of[p.to.val()] != QbeNull {
+                continue();
+            };
+            
+            eq_count := 0;
+            first_arg := QbeNull;
+            range(0, p.narg.zext()) { a | 
+                if p.blk[a].id.zext() < n {
+                    check_arg := get_src_or_self(p.arg[a], copy_of);
+                    if first_arg == QbeNull || first_arg == QbeUndef {
+                        first_arg = check_arg;
+                    };
+                    if check_arg == first_arg || check_arg == QbeUndef {
+                        eq_count += 1;
+                    };
+                };
+            };
+            @debug_assert(first_arg != QbeNull, "null cannot be the argument to a phi");
+            if rtype(first_arg) == .RTmp {
+                block_index: i64 = f.tmp[first_arg.val()].defining_block.zext();
+                if !dom(f.rpo.offset(block_index)[], b) {
+                    copy_of[p.to.val()] = p.to;
+                    continue();
+                }; 
+            };
+            if eq_count == p.narg.zext() {
+                // if all the phi args are copies of the same value, the phi is just a copy of that value. 
+                copy_of[p.to.val()] = first_arg;
+            } else {
+                copy_of[p.to.val()] = p.to;
+                f.simplify_phi(p, first_arg, copy_of, stk&, t_s&, a_s&);
+            };
+        };
+        
+        // For each instruction with a result, add an entry to the copy map.
+        // If the instruction is a copy, look where its argument came from. 
+        // Otherwise, its jsut a copy of itself (the start of a new chain).
+        for_insts_forward b { i |
+            @debug_assert(rtype(i.to) == .RTmp || rtype(i.to) == .RNull, "inst dest must be a tmp or null");
+            if copy_of[i.to.val()] == QbeNull {
+                source := get_src_or_self(i.arg&[0], copy_of);
+                copy_of[i.to.val()] = if(f.iscopy(i, source), => source, => i.to); 
+            }
+        }
+    };
+
+    /* 2. remove redundant phis/copies
+     * and rewrite their uses */
+    for_blocks f { b |
+        pp := b.phi&;
+        while => !pp[].is_null() {
+            p := pp[];
+            r := copy_of[p.to.val()];
+            if r == p.to {
+                range(0, p.narg.zext()) { a |
+                    subst(p.arg&.index(a), copy_of);
+                };
+                pp = p.link&;
+            } else {
+                pp[] = p.link;
+            }
+        };
+        for_insts_forward b { i |
+            r := copy_of[i.to.val()];
+            if r == i.to {
+                subst(i.arg&.index(0), copy_of);
+                subst(i.arg&.index(1), copy_of);
+            } else {
+                i[] = Qbe.Ins.zeroed();
+                i.set_op(.nop);
+            };
+        };
+        subst(b.jmp.arg&, copy_of);
+    };
+
+    if f.globals.debug["C".char()] {
+        f.debug_dump_copy(copy_of);
+    };
+    
+    free(stk);
+    temp().dealloc(Qbe.Ref, copy_of); // no need
+}
+
+fn debug_dump_copy(f: *Qbe.Fn, copy_of: []Qbe.Ref) void = {
+    out := f.globals.debug_out;
+    write(out, "\n> Copy information:");
+    range(Qbe.Tmp0, f.ntmp.zext()) { t |
+        if copy_of[t] == QbeNull {
+            write(out, items(@format("\n       % not seen!", f.tmp[t].name&.items()) temp()));
+        } else {
+            if copy_of[t] != ref(.RTmp, t) {
+                write(out, items(@format("\n       % copy of ", f.tmp[t].name&.items()) temp()));
+                printref(copy_of[t], f, out);
+            }
+        }
+    };
+    write(out, "\n\n> After copy elimination:\n");
+    printfn(f, out);
+}
+
+
+/* detects a cluster of phis/copies redundant with 'r';
+ * the algorithm is inspired by Section 3.2 of "Simple
+ * and Efficient SSA Construction" by Braun M. et al.
+ */
+fn simplify_phi(f: *Qbe.Fn, phi_start: *Qbe.Phi, r: Qbe.Ref, copy_of: []Qbe.Ref, pstk: *InsaneVec(*Qbe.Use), dests_seen: *Qbe.BSet, arguments: *Qbe.BSet) void = {
+    bszero(dests_seen);
+    bszero(arguments);
+    phi_none  := Qbe.Phi.zeroed();
+    use_stack := pstk[];
+    count  := 1;
+    use_stack_base: Qbe.Use = (type = .UPhi, bid = 0, u = (phi = phi_start));
+    use_stack[0] = use_stack_base&;
+    while => count != 0 {
+        continue :: local_return;
+        count -= 1;
+        u := use_stack[count]; // pop
+        
+        ::enum(@type u.type);
+        dest, using_phi := @match(u.type) {
+            fn UIns() => {
+                f.iscopy(u.u.ins, r) || continue();  // if this instruction isn't making a copy of `r`, we don't care. 
+                (u.u.ins.to.val(), phi_none&)
+            }
+            fn UPhi() => (u.u.phi.to.val(), u.u.phi);
+            @default  => continue();
+        };
+        !bshas(dests_seen, dest) || continue();  // only visit each dest once. 
+        bsset(dests_seen, dest);
+        
+        range(0, using_phi.narg.zext()) { a |
+            source := get_src_or_self(using_phi.arg[a], copy_of);
+            if source != r {
+                rtype(source) == .RTmp || return();  // if the source of the copy isn't a temp, that means there can't be a chain, so we don't care? i think?
+                bsset(arguments, source.val());
+            }; 
+        };
+        
+        // Now push all uses of `dest` to the stack for the next iteration. 
+        uses := f.tmp[dest].use.slice(0, f.tmp[dest].nuse.zext());
+        grow(pstk, count + uses.len);  // reserve
+        use_stack = pstk[]; // it might have resized
+        each uses { u | 
+            use_stack[count] = u; // push
+            count += 1;
+        };
+    };
+    
+    bsdiff(arguments, dests_seen);
+    if bscount(arguments) == 0 {
+        for dests_seen { t |
+            copy_of[t] = r;
+        }
+    }
+}
+
+fn iscopy(f: *Qbe.Fn, i: *Qbe.Ins, r: Qbe.Ref) bool = {
+    extcpy :: {
+        T :: Qbe.TmpType;
+        ::enum(T);
+        r :: fn(t: T) i64 = t.raw().zext();
+        t := ast_alloc().alloc(u64, T.enum_count());
+        t[T.WFull.r()] = 0;
+        t[T.Wsb.r()] = BIT(T.Wsb.r()).bit_or(BIT(T.Wsh.r())).bit_or(BIT(T.Wsw.r()));
+        t[T.Wub.r()] = BIT(T.Wub.r()).bit_or(BIT(T.Wuh.r())).bit_or(BIT(T.Wuw.r()));
+        t[T.Wsh.r()] = BIT(T.Wsh.r()).bit_or(BIT(T.Wsw.r()));
+        t[T.Wuh.r()] = BIT(T.Wuh.r()).bit_or(BIT(T.Wuw.r()));
+        t[T.Wsw.r()] = BIT(T.Wsw.r());
+        t[T.Wuw.r()] = BIT(T.Wuw.r());
+        t
+    };
+
+    if i.op() == .copy {
+        return(true)
+    };
+    has_identity, identity_value := arithmetic_identity_table(i.op());
+    if has_identity && KBASE(i.cls()) == 0 {
+        return(f.is_exactly_this_constant(i.arg&[1], identity_value));
+    };
+    if !is_ext(i.op()) || rtype(r) != .RTmp {
+        return(false);
+    };
+    xxx := (i.op() == .extsw || i.op() == .extuw);
+    if xxx && i.cls() == .Kw {
+        return(true);
+    };
+
+    t := f.get_temporary(r.val());
+    @debug_assert(KBASE(t.cls) == 0, "expexted int");
+    if i.cls() == .Kl && t.cls == .Kw {
+        return(false);
+    };
+    b := extcpy[t.width.raw().zext()];
+    // TODO: what are we doing
+    BIT(Qbe.TmpType.Wsb.raw().zext() + (i.op().raw().zext() - Qbe.O.extsb.raw().zext())).bit_and(b) != 0
+}
+
+// TODO: measure if this being branchy is slower and if so, generate the table from this at comptime. 
+//       i don't want to paste the giant thing, it makes me sad. 
+// 
+// Some operations behave like a copy from the first argument when the second argument is a specific constant. 
+fn arithmetic_identity_table(op: Qbe.O) Ty(bool, i64) = {
+    op.raw() <= Qbe.O.shl.raw() || return(false, 0);  // everything past the Arithmetic and Bits section we skip
+    op.raw() <= Qbe.O.and.raw() || return(true, 0);   // x (or,xor,sar,shr,shl) 0 = x
+    op.raw() >= Qbe.O.neg.raw() || return(true, 0);   // x (add,sub) 0 = x
+    x := op.raw().zext().mod(2) == 0; // x (div,udiv,mul) 1 = x    (but we skip neg,rem,urem)
+    (x, x.int())
+}
+
+fn subst(pr: *Qbe.Ref, copy_of: []Qbe.Ref) void = {
+    @debug_assert(rtype(pr[]) != .RTmp || copy_of[pr[].val()] != QbeNull);
+    pr[] = get_src_or_self(pr[], copy_of);
+}
+
+::if(Qbe.Ref);
+
+fn get_src_or_self(r: Qbe.Ref, copy_of: []Qbe.Ref) Qbe.Ref = {
+    if rtype(r) == .RTmp && copy_of[r.val()] != QbeNull {
+        copy_of[r.val()]
+    } else {
+        r
+    }
+}
+
+fn is_exactly_this_constant(f: *Qbe.Fn, r: Qbe.Ref, bits: i64) bool = {
+    rtype(r) == .RCon
+        && f.con[r.val()].type == .CBits
+        && f.con[r.val()].bits.i == bits
+}

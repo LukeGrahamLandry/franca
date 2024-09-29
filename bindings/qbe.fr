@@ -45,21 +45,21 @@ Qbe :: @rec @struct(
         
         // signed/unsigned byte/half
         Ksb = 4, /* matches Oarg/Opar/Jret */
-    	Kub = 5,
-    	Ksh = 6,
-    	Kuh = 7,
+        Kub = 5,
+        Ksh = 6,
+        Kuh = 7,
      
         // A pointer to a struct passed by value, treated as Wl in the ir.
         // But the type will be in one of the instruction Ref fields, 
         // and the backend can use that to decide if it actually needs to be passed in registers.
-    	Kc = 8,
+        Kc = 8,
      
-    	K0 = 9, // void (for returns)
+        K0 = 9, // void (for returns)
     
-    	Ke = -2, /* erroneous mode */
-    	// Km = Qbe.Cls.Kl, /* memory pointer */
+        Ke = -2, /* erroneous mode */
+        // Km = Qbe.Cls.Kl, /* memory pointer */
     ),
-    RegKind :: @enum(i32) (
+    RegKind :: @rec @enum(i32) (
         RTmp = 0,
         RCon = 1,
         RInt = 2,
@@ -68,7 +68,7 @@ Qbe :: @rec @struct(
         RCall = 5,
         RMem = 6,
         
-        Undef = -1, // represented as (RTmp, 0) but useful for comparisons
+        RNull = -1, // represented as (RTmp, 0) but useful for comparisons
     ), // u3
     Target :: @rec @struct(
         name: Array(u8, 16),
@@ -141,13 +141,13 @@ Qbe :: @rec @struct(
         fron: InsaneVec(*Qbe.Blk),
         nfron: u32,
     
-    	pred: **Qbe.Blk,
+        pred: **Qbe.Blk,
         npred: u32,
         in: Qbe.BSet,  // the values read by this block (but not created inside it, ie. reading a value made in a different block), but including phis.
         out: Qbe.BSet,  // the values written by this block that will be read by another. 
         gen: Qbe.BSet,
-    	nlive: Array(i32, 2),
-    	loop: i32,
+        nlive: Array(i32, 2),
+        loop: i32,
         name: Array(u8, 32),
     ),
     Use :: @rec @struct(
@@ -157,7 +157,7 @@ Qbe :: @rec @struct(
             UIns,
             UJmp,
         ),
-    	bid: u32,
+        bid: u32,
         u: @union(ins: *Qbe.Ins, phi: *Qbe.Phi),
     ),
     Sym :: @rec @struct(
@@ -183,16 +183,25 @@ Qbe :: @rec @struct(
             ASym = 4,
             AUnk = 6,
         ),
-    	base: i32,
+        base: i32,
         offset: i64,
-    	u: @union(
+        u: @union(
             sym: *Qbe.Sym,
-    		loc: @struct(
-    			sz: i32, /* -1 if > NBit */
-    			m: u64,
-    		),
-    	),
-    	slot: *Qbe.Alias,
+            loc: @struct(
+                sz: i32, /* -1 if > NBit */
+                m: u64,
+            ),
+        ),
+        slot: *Qbe.Alias,
+    ),
+    TmpType :: @rec @enum(i32) (
+        WFull,
+        Wsb, /* must match Oload/Oext order */
+        Wub,
+        Wsh,
+        Wuh,
+        Wsw,
+        Wuw,
     ),
     Tmp :: @rec @struct(
         name: Array(u8, 80),
@@ -200,26 +209,18 @@ Qbe :: @rec @struct(
         use: InsaneVec(Qbe.Use),
         ndef: u32,
         nuse: u32,
-        bid: u32,
+        defining_block: u32,
         cost: u32,
-        slot: i32,
+        slot: i32,  /* -1 for unset */
         cls: Qbe.Cls,  // :QbeClsi16
         hint: @struct(
-            r: i32,
-            w: i32,
-            m: u64,
+            r: i32,  /* register or -1 */
+            w: i32,  /* weight */
+            m: u64,  /* avoid these registers */
         ),
         phi: i32,
         alias: Qbe.Alias,
-        width: @enum(i32) (
-    		WFull,
-    		Wsb, /* must match Oload/Oext order */
-    		Wub,
-    		Wsh,
-    		Wuh,
-    		Wsw,
-    		Wuw
-        ),
+        width: Qbe.TmpType,
         visit: i32,
     ),
     ConType :: @rec @enum(i32) (
@@ -229,9 +230,9 @@ Qbe :: @rec @struct(
     ),
     Con :: @rec @struct(
         type: Qbe.ConType,
-       	sym := Qbe.Sym.zeroed(),
-    	bits: @union(i: i64, d: f64, s: f32),
-    	flt: u8 = 0, /* 1 to print as s, 2 to print as d */
+           sym := Qbe.Sym.zeroed(),
+        bits: @union(i: i64, d: f64, s: f32),
+        flt: u8 = 0, /* 1 to print as s, 2 to print as d */
     ),
     Addr :: @rec @struct(
         offset: Qbe.Con,
@@ -284,7 +285,7 @@ Qbe :: @rec @struct(
     ),
     Field :: @rec @struct(
         type: Qbe.FieldType,
-		len: u32, /* or index in typ[] for FTyp */
+        len: u32, /* or index in typ[] for FTyp */
     ),
     Typ :: @rec @struct(
         name: Array(u8, 80),
@@ -308,18 +309,18 @@ Qbe :: @rec @struct(
             DL,
             DZ,
         ),
-       	name: CStr,
-    	lnk: *Qbe.Lnk,
-    	u: @union(
+           name: CStr,
+        lnk: *Qbe.Lnk,
+        u: @union(
             num: i64,
             fltd: f64,
             flts: f32,
             str: CStr,
-    		ref: @struct(
-    			name: CStr,
+            ref: @struct(
+                name: CStr,
                 off: i64,
-    		),
-    	),
+            ),
+        ),
         isref: bool,
         isstr: bool,
     ),
@@ -328,8 +329,8 @@ Qbe :: @rec @struct(
         PFn,   /* discarded after processing the function */
     ),
     Bucket :: @struct(
-    	nstr: u32,
-    	str: *CStr,
+        nstr: u32,
+        str: *CStr,
     ),
     CmpI :: @enum(i32) (
         Cieq,
@@ -358,6 +359,7 @@ Qbe :: @rec @struct(
         NCmp = 18,
     ),
     O :: @enum(i32) (
+        // vvv BEWARE: order matters for op_identities_table vvv
         Oxxx,
         /* Arithmetic and Bits */
         add,   
@@ -374,7 +376,8 @@ Qbe :: @rec @struct(
         sar,  
         shr, 
         shl, 
-    
+        // ^^^ BEWARE: order matters for op_identities_table ^^^
+        
         /* Comparisons */
         ceqw,   
         cnew, 
@@ -566,8 +569,10 @@ Qbe :: @rec @struct(
 );
 
 // Used for unused arg/output slots for non 3-reg instructions.  
-// type=0 is RTmp (and hardware register numbers are offset by one to account for us taking val=0)
-QbeNull :: Qbe.Ref.zeroed();
+// (and hardware register numbers are offset by one to account for us taking val=0)
+QbeNull  :: Qbe.Ref.zeroed(); // ref(.RTmp, 0);
+// TODO: when do we create these? mem.c, ssa.c
+QbeUndef :: ref(.RCon, 0); ::enum(Qbe.RegKind);
 
 fn die(msg: CStr) void #import("qbe");
 fn freeall() void #import("qbe");
@@ -597,7 +602,7 @@ fn addcon(_0: *Qbe.Con, _1: *Qbe.Con, _2: i32) i32 #import("qbe");
 fn salloc(_0: Qbe.Ref, _1: Qbe.Ref, _2: *Qbe.Fn) void #import("qbe");
 fn dumpts(_0: *Qbe.BSet, _1: InsaneVec(Qbe.Tmp), _2: *FILE) void #import("qbe");
 fn runmatch(_0: *Uchar, _1: *Num, _2: Ref, _3: *Ref) void #import("qbe");
-fn bsinit(_0: *Qbe.BSet, _1: i32) void #import("qbe");
+fn bsinit(_0: *Qbe.BSet, _1: i64) void #import("qbe");
 fn bszero(_0: *Qbe.BSet) void #import("qbe");
 fn bscount(_0: *Qbe.BSet) u32 #import("qbe");
 fn bsclr(_0: *Qbe.BSet, _1: i64) void #import("qbe");
@@ -618,7 +623,7 @@ fn fillpreds(_0: *Qbe.Fn) void #import("qbe");
 fn fillrpo(_0: *Qbe.Fn) void #import("qbe");
 fn filldom(_0: *Qbe.Fn) void #import("qbe");
 fn sdom(_0: *Qbe.Blk, _1: *Qbe.Blk) i32 #import("qbe");
-fn dom(_0: *Qbe.Blk, _1: *Qbe.Blk) i32 #import("qbe");
+fn dom(_0: *Qbe.Blk, _1: *Qbe.Blk) bool #import("qbe");
 fn fillfron(_0: *Qbe.Fn) void #import("qbe");
 fn loopiter(_0: *Qbe.Fn, _1: @FnPtr(*Blk, *Blk) void) void #import("qbe");
 fn fillloop(_0: *Qbe.Fn) void #import("qbe");
@@ -676,6 +681,11 @@ fn InsaneVec($T: Type) Type = {
         vgrow(v, len);
     }
     
+    fn free(s: Self) void = {
+        v := T.raw_from_ptr(s.first);
+        vfree(v);
+    }
+    
     // TODO: bounds checking but its hard as long as i have to keep qbe's memory layout because the fields aren't together. 
     //       and anyway it would be sad to add alignment padding just for bounds checks. 
     
@@ -701,12 +711,12 @@ fn InsaneVec($T: Type) Type = {
 // This is a header that goes before the allocated memory for the array. 
 // When a field is an InsaneVec it points to the first entry of one of these and you offset backwards to get the header. 
 QbeVec :: @struct(
-   	mag: u64,
-   	pool: Qbe.Pool,
-   	esz: i64,
-   	cap: u64,
+       mag: u64,
+       pool: Qbe.Pool,
+       esz: i64,
+       cap: u64,
     // I don't have unsized types. lets hope thats not a big deal
-   	// union { long long ll; long double ld; void *ptr; } align[];
+       // union { long long ll; long double ld; void *ptr; } align[];
 );
 
 
