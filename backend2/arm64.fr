@@ -1,0 +1,683 @@
+// Unlike Qbe, we don't rely on a seperate assembler. We just put the bytes in memory and jump there. 
+// This means we also have to handle updating forward references to functions that haven't been compiled yet. 
+
+ArmState :: @struct(
+    m: *QbeModule,
+    f: *Qbe.Fn,
+    frame: i64,
+    padding: i64,
+    text: *FILE, // TODO: remove this eventually :TempAsmText
+    start_of_function: i64,
+    buf: List(u8),
+);
+
+fn emit_func_arm64(m: *QbeModule, f: *Qbe.Fn, text: *FILE) []u8 = {
+    // :TempAsmText :SLOW
+    s: CStr = (ptr = f.name&.as_ptr());
+    s := items(@format(".balign 4\n.globl _%\n_%:\n", s, s) temp());
+    write(text, s);
+    
+    // We know we're emitting the function right here so we can do old relocations now. 
+    name_id := intern(@as(CStr) (ptr = f.name&.as_ptr()));
+    
+    code := m.segments&[.Code]&;
+    start_offset := ptr_diff(code.mmapped.ptr, code.next);
+    self: ArmState = (m = m, f = f, frame = 0, padding = 0, text = text, start_of_function = start_offset, buf = list(temp()));
+    m.do_jit_relocations(name_id, .Code, start_offset);
+    
+    self&.emit_the_code();
+    write(text, self.buf.items());
+    end_offset := self&.next_inst_offset();
+    code_bytes := code.mmapped.slice(start_offset, end_offset);
+    code_bytes
+}
+
+// TODO: when doing aot we just have to ask for our segments to have the same spacing as they did now and then relative addressing will just work out. 
+//       but for data constants with pointers we'll need to remember what relocations to ask the loader to do at runtime. 
+//       would be great if my language had nice relative pointers and then you wouldn't have to deal with that as much
+//
+fn do_jit_relocations(self: *QbeModule, id: u32, segment: SegmentType, offset: i64) void = {
+    slot := self.symbols&.get_ptr(id);
+    if slot { slot | 
+        @if_let(slot) fn PendingRelocations(relocations) => {
+            for relocations { r | 
+                // TODO: this is RelocationType.CodeAdrAdrp. data relocations should be the same for both arches. 
+                
+                @debug_assert_eq(r.patch_at.len, 8, "expected to patch adrp+adr");
+                patch_start := u8.int_from_ptr(r.patch_at.ptr);
+                @debug_assert_eq(patch_start.mod(4), 0, "arm instructions are aligned");
+                dest := u8.int_from_ptr(self.segments&[segment].mmapped.ptr) + offset;
+                distance := dest - patch_start;
+                assert(distance.abs() < i32_MAX, "can't jump >4GB"); // TODO: wrong but good enough
+                low12 := distance.bit_and(1.shift_left(12) - 1); // for adr
+                high20 := distance.shift_right_arithmetic(12).bit_and(1.shift_left(20) - 1);  // for adrp (TODO: will need to split off high bits for encoding)
+                panic("TODO: do relocation"); // emit the instructions
+            };
+        };
+        
+        slot[] = (Known = (segment = segment, offset = offset));
+        return();
+    };
+    self.symbols&.insert(id, (Known = (segment = segment, offset = offset)));
+}
+
+fn emit_the_code(self: *ArmState) void #once = {
+    // TODO: what is this? is it the control flow integrety shit? 
+    // ("\thint\t#34\n");
+    self.inst(0xd503245f);
+    
+    self.framelayout();
+    
+    if self.f.vararg && !self.f.globals.target.apple {
+        panic("TODO: non-apple arm varargs.");
+        //for (n=7; n>=0; n--)
+        //    fprintf(e->f, "\tstr\tq%d, [sp, -16]!\n", n);
+        //for (n=7; n>=0; n-=2)
+        //    fprintf(e->f, "\tstp\tx%d, x%d, [sp, -16]!\n", n-1, n);
+    };
+    self.prelude_grow_stack();
+    self.inst(add_im(Bits.X64, fp, sp, 0, 0)); // Note: normal mov encoding can't use sp :SpEncoding
+    
+    offset_to_callee_saved := (self.frame - self.padding) / 4;
+    for arm64_rclob { r |
+        if self.f.reg.bit_and(BIT(r.raw())) != 0 {
+            offset_to_callee_saved -= 2;
+            op := if(r.is_float(), => Qbe.O.stored, => Qbe.O.storel);
+            i := make_ins(op, .Kw, QbeNull, TMP(r.raw()), SLOT(offset_to_callee_saved));
+            self.emitins(i&);
+        };
+    };
+    
+    // TODO: make sure b.id is sequential
+    local_labels := temp().alloc_zeroed(i64, self.f.nblk.zext());
+    Patch :: @struct(offset_from_start: i64, cond: ?Cond, target_bid: u32, text_offset: i64);
+    patches: List(Patch) = list(temp());
+    
+    branch :: b;
+    // :LinkIsNowRpo TODO: why are we iterating to set links instead of just iterating the rpo array. (don't forget to update the comparisons to .link below). 
+    for_blocks self.f { b |
+        @debug_assert(local_labels[b.id.zext()] == 0, "block ids must be unique");
+        local_labels[b.id.zext()] = self.next_inst_offset();
+        for_insts_forward b { i |
+            self.emitins(i);
+        };
+        @match(b.jmp.type) {
+            fn Jhlt() => self.inst(brk(1000));
+            fn Jret0() => {
+                // invarient: multiple returns are translated to multiple jumps to a single new return block.
+                offset_to_callee_saved = (self.frame - self.padding) / 4;
+                for arm64_rclob { r |
+                    if self.f.reg.bit_and(BIT(r.raw())) != 0 {
+                        offset_to_callee_saved -= 2;
+                        cls := if(r.is_float(), => Qbe.Cls.Kd, => Qbe.Cls.Kl);
+                        i := make_ins(.load, cls, TMP(r.raw()), SLOT(offset_to_callee_saved), QbeNull);
+                        self.emitins(i&);
+                    };
+                };
+                if self.f.dynalloc {
+                    // someone did an alloca so we don't statically know the size of our stack frame. 
+                    self.inst(add_im(Bits.X64, sp, fp, 0, 0)); // :SpEncoding
+                };
+                self.epilogue_shrink_stack();
+                self.inst(ret());
+            }
+            fn Jjmp() => {
+                // :GotoJmp
+                if !b.s1.identical(b.link) {
+                    target := local_labels[b.s1.id.zext()];
+                    here := self.next_inst_offset();
+                    if target != 0 {
+                        // TODO: bounds check
+                        self.inst(branch(s_trunc((target - here) / 4, 26), 0));
+                    } else {
+                        // we haven't made this block yet.
+                        patches&.push(offset_from_start = here, cond = .None, target_bid = b.s1.id, text_offset = self.buf.len);
+                        self.inst(brk(0xabba));
+                        @fmt(self.buf&, "             "); // :TempAsmText HACK
+                    };
+                }; // else we can just fall through becuase we're about to emit the target block
+            }
+            @default => {
+                Jjf :: Qbe.J.Jjfieq; // TODO: use this everywhere
+                c: i32 = zext(b.jmp.type.raw() - Jjf.raw());
+                if c < 0 || c > Qbe.NCmp {
+                    panic("unhandled jump") // TODO: " %d", b.jmp.type);
+                };
+                
+                if b.link.identical(b.s2) {
+                    t := b.s1;
+                    b.s1 = b.s2;
+                    b.s2 = t;
+                } else {
+                    // we jump to s2 when condition c is true, so flip the condition. 
+                    c = cmpneg(c);
+                };
+                cond := arm_condition_codes[c.zext()];
+                here := self.next_inst_offset();
+                target := local_labels[b.s2.id.zext()]; // TODO: wrong index if you forget .zext() but it still typechecks. :FUCKED
+                if target != 0 {
+                    // TODO: bounds check
+                    self.inst(b_cond(s_trunc((target - here) / 4, 19), cond));
+                } else {
+                    // we haven't made this block yet.
+                    patches&.push(offset_from_start = here, cond = (Some = cond), target_bid = b.s2.id, text_offset = self.buf.len);
+                    self.inst(brk(0xabba)); // so the offsets for the below work out
+                    @fmt(self.buf&, "             "); // :TempAsmText HACK
+                };
+                // :GotoJmp
+                if !b.s1.identical(b.link) {
+                    target := local_labels[b.s1.id.zext()];
+                    here := self.next_inst_offset();
+                    if target != 0 {
+                        // TODO: bounds check
+                        self.inst(branch(s_trunc((target - here) / 4, 26), 0));
+                    } else {
+                        // we haven't made this block yet.
+                        patches&.push(offset_from_start = here, cond = .None, target_bid = b.s1.id, text_offset = self.buf.len);
+                        self.inst(brk(0xabba));
+                        @fmt(self.buf&, "             "); // :TempAsmText HACK
+                    };
+                }; // else we can just fall through becuase we're about to emit the target block
+            };
+        };
+    };
+    each patches& { p |
+        target := local_labels[p.target_bid.zext()];
+        @debug_assert(target != 0, "we should have emitted the block");
+        distance := (target - p.offset_from_start) / 4;
+        @debug_assert(distance > 0, "dont need to patch backward jumps");
+        code := self.m.segments&[.Code]&;
+        patch := code.mmapped.ptr.offset(self.start_of_function + p.offset_from_start);
+        patch := ptr_cast_unchecked(u8, u32, patch);
+        @debug_assert_eq(brk(0xabba), patch[], "not expecting patch");
+        if distance == 0 {
+            // this shouldn't happen because we'd know to fall through without waiting for a patch
+            patch[] = arm_nop;
+        } else {
+            if p.cond { cc | 
+                patch[] = b_cond(s_trunc(distance, 19), cc);
+            } else {
+                patch[] = branch(s_trunc(distance, 26), 0);
+            };
+        };
+        // :TempAsmText HACK
+        patch_buf: List(u8) = (maybe_uninit = self.buf.items().slice(p.text_offset, p.text_offset + 25), len = 0, gpa = panicking_allocator);
+        @fmt(patch_buf&, "\t.word %;\n", patch[]);
+    };
+}
+
+fn framelayout(self: *ArmState) void = {
+    o := 0;
+    for arm64_rclob { r |
+        o += 1.bit_and(self.f.reg.bitcast().shift_right_logical(r.raw()));
+    };
+    f := self.f.slot.intcast();
+    f = (f + 3).bit_and(-4);
+    o += o.bit_and(1);
+    self.padding = 4*(f - self.f.slot.intcast());
+    self.frame = 4*f + 8*o;
+}
+
+// has to deal with limited size of immediates. stp encodes them as imm/8 in an i7
+fn prelude_grow_stack(self: *ArmState) void = {
+    if self.frame + 16 <= 512 {
+        encoded := s_trunc(-(self.frame + 16) / 8, 7);
+        self.inst(stp_pre(Bits.X64, fp, lr, sp, encoded)); 
+        return();
+    };
+    negative_16 := s_trunc(-2, 7);
+    if self.frame <= 4095 {
+        self.inst(sub_im(Bits.X64, sp, sp, @as(u12) self.frame, 0));
+        self.inst(stp_pre(Bits.X64, fp, lr, sp, negative_16)); 
+        return();
+    };
+    if self.frame <= 65535 {
+        self.inst(movz(Bits.X64, x16, self.frame.trunc(), .Left0));
+        self.inst(sub_er(Bits.X64, sp, sp, x16));
+        self.inst(stp_pre(Bits.X64, fp, lr, sp, negative_16)); 
+        return();
+    };
+    
+    top := self.frame.shift_right_logical(16);
+    bottom := self.frame.bit_and(0xFFFF);    
+    self.inst(movz(Bits.X64, x16, bottom.trunc(), .Left0));
+    self.inst(movk(Bits.X64, x16, top.trunc(), .Left16));
+    self.inst(sub_er(Bits.X64, sp, sp, x16));
+    self.inst(stp_pre(Bits.X64, fp, lr, sp, negative_16)); 
+}
+
+// has to deal with limited size of immediates. 
+fn epilogue_shrink_stack(self: *ArmState) void = {
+    o := self.frame + 16;
+    if self.f.vararg && !self.f.globals.target.apple {
+        o += 192;
+    };
+    // TODO: why isn't this also 512?
+    if o <= 504 { 
+        encoded_offset := o / 8; 
+        self.inst(ldp_post(Bits.X64, fp, lr, sp, @as(i7) encoded_offset)); 
+        return();
+    };
+    if o - 16 <= 4095 {
+        self.inst(ldp_post(Bits.X64, fp, lr, sp, @as(i7) 2)); // 16 encoded as imm7/8
+        self.inst(add_im(Bits.X64, sp, sp, @as(u12) @as(i64) o - 16, 0));
+        return();
+    };
+    if o - 16 <= 65535 {
+        self.inst(ldp_post(Bits.X64, fp, lr, sp, @as(i7) 2)); // 16 encoded as imm7/8
+        self.inst(movz(Bits.X64, x16, o.trunc() - 16, .Left0));
+        self.inst(add_sr(Bits.X64, sp, sp, x16, Shift.LSL, 0b000000));
+        return();
+    };
+    
+    top: u16 = (o - 16).bit_and(0xFFFF).trunc();
+    bottom: u16 = (o - 16).shift_right_logical(16).trunc();
+    self.inst(ldp_post(Bits.X64, fp, lr, sp, @as(i7) 2)); // 16 encoded as imm7/8
+    self.inst(movz(Bits.X64, x16, bottom, .Left0));
+    self.inst(movk(Bits.X64, x16, top, .Left16));
+    self.inst(add_sr(Bits.X64, sp, sp, x16, Shift.LSL, 0b000000));
+}
+
+// TODO: remove. we don't need this
+fn rname(r: i64, k: Qbe.Cls) CStr #import("qbe");
+
+fn slot(self: *ArmState, r: Qbe.Ref) i64 = {
+    s := rsval(r).intcast();
+    if s == -1 {
+        return(16 + self.frame);
+    };
+    if (s < 0) {
+        if self.f.vararg && !self.f.globals.target.apple {
+            return(16 + self.frame + 192 - (s+2));
+        };
+        return(16 + self.frame - (s+2));
+    };
+    16 + self.padding + 4 * s
+}
+
+fn loadaddr(self: *ArmState, c: *Qbe.Con, dest: i64, reg_name: CStr) void = {
+    @assert(c.bits.i == 0, "TODO: loadaddr with offset");
+
+    symbol_name := str(c.sym.id);
+    //p = l[0] == '"' ? "" : T.assym;
+    @match(c.sym.type) {
+        fn SGlo() => {
+            // :TempAsmText
+            if self.f.globals.target.apple {
+                @fmt(self.buf&, "\tadrp\t%, _%@page\n\tadd\t%, %, _%@pageoff\n", reg_name, symbol_name, reg_name, reg_name, symbol_name);
+            } else {
+                @fmt(self.buf&, "\tadrp\t%, %\n\tadd\t%, %, #:lo12:%\n", reg_name, symbol_name, reg_name, reg_name, symbol_name);
+            };
+        }
+        fn SThr() => {
+            // :TempAsmText
+            s := if self.f.globals.target.apple {
+                @fmt(self.buf&, "\tadrp\t%, _%@tlvppage\n\tldr\t%, [%, _%@tlvppageoff]\n", reg_name, symbol_name, reg_name, reg_name, symbol_name);
+            } else {
+                @fmt(self.buf&, "\tmrs\t%, tpidr_el0\n\tadd\t%, %, #:tprel_hi12:%, lsl #12\n\tadd\t%, %, #:tprel_lo12_nc:%\n", reg_name, reg_name, reg_name, symbol_name, reg_name, reg_name, symbol_name);
+            };
+        }
+    };
+}
+
+fn loadcon(self: *ArmState, c: *Qbe.Con, r: i64, k: Qbe.Cls) void = {
+    w := is_wide(k);
+    rn := rname(r + 1, k); // HACK
+    n := c.bits.i;
+    if (c.type == .CAddr) {
+        self.loadaddr(c, r, rn);
+        return();
+    };
+    @debug_assert(c.type == .CBits, "bad constant");
+    s := Bits.X64;
+    if !w {
+        s = .W32;
+        // TODO: is this the same?
+        //n = (int32_t)n;
+        n = n.bit_and(1.shift_left(32) - 1);
+    };
+    
+    if n.bit_and(0xffff) == n { 
+        self.inst(movz(s, r, n.trunc(), .Left0));
+        return();
+    };
+    // TODO: some have better encoding
+    //if n.bit_or(0xffff) == -1 || arm64_logimm(n, k) {
+    //    fprintf(e.f, "\tmov\t%s, #%\n", rn, n);
+    //} else {
+        self.inst(movz(s, r, n.bit_and(0xffff).trunc(), .Left0));
+        shift_encode := 1;
+        n = n.shift_right_logical(16);
+        while => n != 0 {
+            self.inst(movk(s, @as(u5) r, n.bit_and(0xffff).trunc(), @as(Hw) shift_encode));
+            shift_encode += 1;
+            n = n.shift_right_logical(16);
+        };
+    //};
+}
+
+fn fixarg(self: *ArmState, pr: *Qbe.Ref, sz: i64) void = {
+    r := pr[];
+    if (rtype(r) == .RSlot) {
+        s := self.slot(r);
+        // TODO: is this the same>
+        //if (s > sz * 4095u) {
+        if (s > sz * 4095) {  // TODO: why
+            i := make_ins(.addr, .Kl, TMP(Arm64Reg.IP0.raw()), r, QbeNull);
+            self.emitins(i&);
+            pr[] = TMP(Arm64Reg.IP0.raw());
+        }
+    }
+}
+
+fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
+    ::if(Bits);
+    ::if(u32);
+    ::if(FType);
+    F :: @Fn(s: FType, dest: u5, a: u5, b: u5) u32;
+    I :: @Fn(s: Bits, dest: u5, a: u5, b: u5) u32;
+    
+    names :: Qbe.O.get_enum_names();
+    idx := @as(i64) intcast(@as(i32) i.op().raw());
+    inst_name := names[idx];
+    si := if(i.cls().is_wide(), => Bits.X64, => Bits.W32);
+    sf := if(i.cls().is_wide(), => FType.D64, => FType.S32);
+    
+    bin :: fn($if_float: F, $if_int: I) => {
+        @assert(rtype(i.arg&[0]) == .RTmp && rtype(i.arg&[1]) == .RTmp, "TODO: args need reg. op=%", inst_name);
+        op := if i.cls().is_int() {
+            if_int(si, i.to.int_reg(), i.arg&[0].int_reg(), i.arg&[1].int_reg())
+        } else {
+            if_float(sf, i.to.float_reg(), i.arg&[0].float_reg(), i.arg&[1].float_reg())
+        };
+        self.inst(op);
+    };
+    int_bin :: fn($if_int: I) => {
+        @assert(rtype(i.arg&[0]) == .RTmp && rtype(i.arg&[1]) == .RTmp, "TODO: args need reg %", inst_name);
+        op := if_int(si, i.to.int_reg(), i.arg&[0].int_reg(), i.arg&[1].int_reg());
+        self.inst(op);
+    };
+
+    @match(i.op()) {
+        fn nop()    => ();
+        fn dbgloc() => (); // we don't do debug info yet.
+        fn copy() => {
+            if (i.to == i.arg&[0], => return());
+            if (rtype(i.to) == .RSlot) {
+                r := i.to;
+                if !isreg(i.arg&[0]) {
+                    i.to = TMP(Arm64Reg.R18.raw());
+                    self.emitins(i);
+                    i.arg&[0] = i.to;
+                };
+                op := @as(Qbe.O) @as(i32) Qbe.O.storew.raw() + i.cls().raw().zext();
+                i[] = make_ins(op, .Kw, i.to, i.arg&[0], r);
+                self.emitins(i);
+                return();
+            };
+            @debug_assert(isreg(i.to), "can only copy to a register");
+            @match(rtype(i.arg&[0])) {
+                fn RCon() => {
+                    c := self.f.get_constant(i.arg&[0]);
+                    self.loadcon(c, i.to.int_reg(), i.cls());
+                }
+                fn RSlot() => {
+                    i.set_op(.load);
+                    self.emitins(i);
+                }
+                @default => {
+                    @debug_assert(i.to.val() != Arm64Reg.R18.raw(), "please do not the platform register. thank you.");
+                    if i.cls().is_int() {
+                        self.inst(mov(si, i.to.int_reg(), i.arg&[0].int_reg())); // they can't refer to SP so its fine
+                    } else {
+                        self.inst(fmov(sf, i.to.float_reg(), i.arg&[0].float_reg()));  
+                    };
+                };
+            }
+        }
+        fn addr() => {
+            @debug_assert(rtype(i.arg&[0]) == .RSlot, "can only addr of a stack slot");
+            reg := i.to.int_reg();
+            s := self.slot(i.arg&[0]);
+            if (s <= 4095) {
+                self.inst(add_im(Bits.X64, reg, fp, @as(u12) s, 0));
+            } else {
+                panic("TODO: addr");
+                if (s <= 65535) {
+                    fprintf(e.f,
+                        "\tmov\t%s, #%\n",
+                        "\tadd\t%s, x29, %s\n",
+                        rn, s, rn, rn
+                    );
+                } else {
+                    fprintf(e.f,
+                        "\tmov\t%s, #%\n",
+                        "\tmovk\t%s, #%, lsl #16\n",
+                        "\tadd\t%s, x29, %s\n",
+                        rn, s.bit_and(0xFFFF), rn, s.shift_right_logical(16), rn, rn
+                    );
+                }
+            };
+        }
+        fn call() => {
+            callee := i.arg&[0];
+            if (rtype(callee) != .RCon) {
+                self.inst(br(callee.int_reg(), 1));
+                return();
+            };
+            c := self.f.get_constant(i.arg&[0]);
+            if c.type != .CAddr || c.sym.type != .SGlo || c.bits.i != 0 {
+                die("invalid call argument".sym().c_str());
+            };
+            
+            // :TempAsmText
+            l := str(c.sym.id);
+            p := self.f.globals.target.assym&.as_ptr();
+            p: CStr = (ptr = p);
+            p := str(p);
+            p := if(l.ptr[] == "\"".ascii(), => "", => p);
+            @fmt(self.buf&, "\tbl %%\n", p, l);
+        }
+        fn salloc() => {
+            xxx := i.arg&[0].int_reg();
+            self.inst(sub_er(Bits.X64, sp, sp, xxx));
+            if i.to != QbeNull {
+                self.inst(sub_im(Bits.X64, i.to.int_reg(), sp, 0, 0)); // :SpEncoding
+            }
+        }
+        // TODO: these could kinda be data, the encodings are the same for many of them.
+        fn add()  => bin(@as(F) fadd, fn(s, d, a, b) => if(a == sp, => add_er(s, d, a, b), => add_sr(s, d, a, b, .LSL, 0))); // :SpEncoding
+        fn sub()  => bin(@as(F) fsub, fn(s, d, a, b) => if(a == sp, => sub_er(s, d, a, b), => sub_sr(s, d, a, b, .LSL, 0))); // :SpEncoding
+        fn mul()  => bin(@as(F) fmul, fn(s, d, a, b) => madd(s, d, a, b, xzr));
+        fn div()  => bin(@as(F) fdiv, @as(I) sdiv);
+        fn udiv() => int_bin(@as(I) udiv);
+        fn sar()  => int_bin(@as(I) asrv);
+        fn shr()  => int_bin(@as(I) lsrv);
+        fn shl()  => int_bin(@as(I) lslv);
+        fn or()   => int_bin(fn(s, d, a, b) => orr(s, d, a, b, .LSL, 0));
+        fn xor()  => int_bin(fn(s, d, a, b) => eor(s, d, a, b, .LSL, 0));
+        fn and()  => int_bin(fn(s, d, a, b) => and_sr(s, d, a, b, .LSL, 0));
+        fn acmp() => {
+            a, b := (i.arg&[0], i.arg&[1]);
+            @debug_assert(rtype(a) == .RTmp, "cmp fst needs reg");
+            if rtype(b) == .RTmp {
+                self.inst(cmp(Bits.W32, a.int_reg(), b.int_reg())); 
+            } else {
+                c := self.f.get_constant(b);
+                @debug_assert(c.type == .CBits, "cmp to addr");
+                if c.bits.i < 1.shift_left(12) - 1 {
+                    self.inst(cmp_im(Bits.W32, a.int_reg(), @as(u12) c.bits.i, 0));
+                } else {
+                    self.inst(cmp_im(Bits.W32, a.int_reg(), @as(u12) @as(i64) c.bits.i.shift_right_logical(12), 1));
+                };
+            }
+        }
+        @default => {
+            if is_load(i.op()) {
+                self.fixarg(i.arg&.index(0), loadsz(i).intcast());
+                addr := i.arg&[0].int_reg();
+                offset := 0;
+                size := loadsz(i);
+                if rtype(i.arg&[0]) == .RSlot {
+                    addr = fp;
+                    offset = self.slot(i.arg&[0]) / size.zext();
+                };
+                // TODO: u/s h/b
+                if i.cls().is_int() { // TODO: is this wrong?
+                    s := @as(i64) firstbit(size).zext();
+                    self.inst(@bits(@as(u2) s, 0b11100101, @as(u12) offset, @as(u5) addr, i.to.int_reg()));
+                } else {
+                    self.inst(f_ldr_uo(si /* not sf*/, i.to.float_reg(), addr, @as(u12) offset));
+                };
+                return();
+            };
+            if is_store(i.op()) {
+                self.fixarg(i.arg&.index(1), storesz(i).intcast());
+                addr := i.arg&[1].int_reg();
+                offset := 0;
+                size := storesz(i);
+                if rtype(i.arg&[1]) == .RSlot {
+                    addr = fp;
+                    offset = self.slot(i.arg&[1]) / size.zext();
+                };
+                if i.op() == .stores {
+                    self.inst(f_str_uo(Bits.W32, @as(u5) i.arg&[0].float_reg(), addr, @as(u12) offset));
+                    return();
+                };
+                if i.op() == .stored {
+                    self.inst(f_str_uo(Bits.X64, @as(u5) i.arg&[0].float_reg(), addr, @as(u12) offset));
+                    return();
+                };
+                s := @as(i64) firstbit(size).zext();
+                self.inst(@bits(@as(u2) s, 0b11100100, @as(u12) offset, @as(u5) addr, @as(u5) i.arg&[0].int_reg()));
+                return();
+            };
+            if is_flag(i.op()) {
+                flag_base :: Qbe.O.flagieq;  // TODO: use this everywhere
+                c: i32 = i.op().raw() - flag_base.raw();
+                if c < 0 || c > Qbe.NCmp {
+                    panic("unhandled flag")
+                };
+                c = cmpneg(c); // cset is an alias for CSINC so encoding is backwards from what you'd type in an assembler. 
+                cond := arm_condition_codes[c.zext()];
+                self.inst(cset(si, i.to.int_reg(), cond));
+                return();
+            };
+            @panic("TODO: op encoding %", inst_name);
+            
+        };
+    } // early returns
+}
+
+// TODO: ctz intrinsic
+fn firstbit(b: i32) u32 #import("qbe");
+
+/*
+
+  Stack-frame layout:
+
+  +=============+
+  | varargs     |
+  |  save area  |
+  +-------------+
+  | callee-save |  ^
+  |  registers  |  |
+  +-------------+  |
+  |    ...      |  |
+  | spill slots |  |
+  |    ...      |  | e->frame
+  +-------------+  |
+  |    ...      |  |
+  |   locals    |  |
+  |    ...      |  |
+  +-------------+  |
+  | e->padding  |  v
+  +-------------+
+  |  saved x29  |
+  |  saved x30  |
+  +=============+ <- x29
+
+*/
+
+fn inst(self: *ArmState, opcode: u32) void = {
+    code := self.m.segments&[.Code]&;
+    ptr_cast_unchecked(u8, u32, code.next)[] = opcode;  // SAFETY: aligned becuase we're always emitting arm instructions
+    code.next = code.next.offset(4);
+    // :TempAsmText
+    @fmt(self.buf&, "\t.word %\n", opcode);
+}
+
+fn next_inst_offset(self: *ArmState) i64 = {
+    code := self.m.segments&[.Code]&;
+    ptr_diff(code.mmapped.ptr, code.next) - self.start_of_function
+}
+
+
+// TODO: factor out arm64/target.fr
+
+::List(Arm64Reg);
+
+// note: can't give these lists to the c code becuase they're i64 instead of i32
+arm64_rsave :: items(@list(
+    Arm64Reg.R0,  .R1,  .R2,  .R3,  .R4,  .R5,  .R6,  .R7,
+               .R8,  .R9,  .R10, .R11, .R12, .R13, .R14, .R15,
+               .IP0, .IP1, .R18, .LR,
+               .V0,  .V1,  .V2,  .V3,  .V4,  .V5,  .V6,  .V7,
+               .V16, .V17, .V18, .V19, .V20, .V21, .V22, .V23,
+               .V24, .V25, .V26, .V27, .V28, .V29, .V30,
+) ast_alloc());
+
+arm64_rclob :: items(@list(
+    Arm64Reg.R19, .R20, .R21, .R22, .R23, .R24, .R25, .R26,
+               .R27, .R28,
+               .V8,  .V9,  .V10, .V11, .V12, .V13, .V14, .V15,
+) ast_alloc());
+
+fn is_float(r: Arm64Reg) bool #inline = 
+    r.raw() >= Arm64Reg.V0.raw();
+
+fn int_id(r: Arm64Reg) u5 #inline = 
+    @as(i64) r.raw() - Arm64Reg.R0.raw();
+
+fn float_id(r: Arm64Reg) u5 #inline = 
+    @as(i64) r.raw() - Arm64Reg.V0.raw();
+
+// TODO: debug_assert tmp and in range
+fn int_reg(r: Qbe.Ref) u5 #inline = 
+    @as(i64) int_id(@as(Arm64Reg) r.val());
+    
+fn float_reg(r: Qbe.Ref) u5 #inline = 
+    @as(i64) float_id(@as(Arm64Reg) r.val());
+
+// Note: these numbers are NOT the ones you encode in the instructions. ints are of by 1, floats are off by 1+32
+// TODO: do i really care that much about catching zero init? 
+Arm64Reg :: @enum(i64) (
+    RXX,
+     R0,  R1,  R2,  R3,  R4,  R5,  R6,  R7,  
+     R8, R10,  R9, R11, R12, R13, R14, R15, 
+    IP0, IP1, R18, R19, R20, R21, R22, R23,
+    R24, R25, R26, R27, R28,  FP,  LR,  SP,
+    
+     V0,  V1,  V2,  V3,  V4,  V5,  V6,  V7,
+     V8,  V9, V10, V11, V12, V13, V14, V15,
+    V16, V17, V18, V19, V20, V21, V22, V23,
+    V24, V25, V26, V27, V28, V29, V30, /* V31, // we wasted a bit so don't have space. */
+);
+
+::List(Cond);
+arm_condition_codes :: items(@list(
+    // Cieq Cine Cisge Cisgt Cisle Cislt Ciuge Ciugt Ciule Ciult
+    Cond.EQ, .NE,  .GE,  .GT,  .LE,  .LT,  .HS,  .HI,  .LS,  .LO,
+    // Cfeq Cfge Cfgt Cfle Cflt Cfne  Cfo Cfuo
+        .EQ, .GE, .GT, .LS, .MI, .NE, .VC, .VS
+) ast_alloc());
+
+::enum(Arm64Reg);
+
+// mine: 1 100101100 000001 000 000 11111 11111
+//       1 100101100 100001 011 000 11111 11111
+fn sub_er(sf: Bits, dest: RegO, a: RegI, b: RegI) u32 =
+    @bits(sf, 0b1001011001, b, 0b011 /*option*/, 0b000 /*imm3*/, a, dest);
+    
+fn add_er(sf: Bits, dest: RegO, a: RegI, b: RegI) u32 =
+    @bits(sf, 0b0001011001, b, 0b011 /*option*/, 0b000 /*imm3*/, a, dest);

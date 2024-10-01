@@ -41,6 +41,7 @@ there must be proportional terrible things or I'm probably just lying.
 - Stability is not a core tenet. If it was worth writing once, it's probably worth writing twice.
 - I don't care about being easy to learn. I want it to be fun. Rust is fun.
 - Stuff's unsafe, deal with it, simply don't make a mistake. i.e. `fn main() = { evil := i64.int_to_ptr(123); println(evil[]);` will compile, run, and (probably) crash.
+  - You can screw up managing pointers because the languge was made by goblins in the 70s and just start trimming your os.
 - I don't care about fallibile memory allocation
 - It's a little heavy on the punctuation.
 - I believe I've never touched a big endian computer so I don't care.

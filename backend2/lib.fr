@@ -6,22 +6,35 @@
 #include_std("backend2/opt/util.fr");
 #include_std("backend2/opt/copy.fr");
 #include_std("backend2/opt/arm64/isel.fr");
+#include_std("backend2/arm64.fr");
+#include_std("backend2/emit.fr");
 
+// easy-ish (?) things to try to get used to making changes. 
+// TODO: if they don't do it already: 
+//       - track known truthyness per block (based on jumps in dominators)
+//         to remove redundant checks (like bounds checks). that use kinda relies on inlining tho.
+//       - jmp on the not (xor -1) of a cmp should just flip the cmp. 
+// TODO: add instructions for clz, ctz, popcnt, byteswap/bit reverse,
+//          when i do firstbit, why not do whatever __builtin_ctzl does? x64 has an instruction for that. arm has reverse bits and then clz. wasm has it. 
+//          the c version works with converting to that. clang -O2 doesn't treat the functions the same so maybe im missing something. 
+//          have to add that as an Intrinsic to my language... which i guess means adding it to my new qbe. 
+// TODO: don't bother emitting nops (when copying with emiti() anyway)? is avoiding a branch worth your blocks using extra memory
 /*
 (i assume you need this thing for static link)
 ar rvs qbe_merged.o util.o parse.o abi.o cfg.o mem.o ssa.o alias.o load.o copy.o fold.o simpl.o live.o spill.o rega.o emit.o amd64/targ.o amd64/sysv.o amd64/isel.o amd64/emit.o arm64/targ.o arm64/abi.o arm64/isel.o arm64/emit.o rv64/targ.o rv64/abi.o rv64/isel.o rv64/emit.o
 (for comptime dynamic link this works, you need main for the symbols _T/_debug)
 clang -dynamiclib -o qbe_merged.dylib main.o util.o parse.o abi.o cfg.o mem.o ssa.o alias.o load.o copy.o fold.o simpl.o live.o spill.o rega.o emit.o amd64/targ.o amd64/sysv.o amd64/isel.o amd64/emit.o arm64/targ.o arm64/abi.o arm64/isel.o arm64/emit.o rv64/targ.o rv64/abi.o rv64/isel.o rv64/emit.o
 */
-:: {
-    c := current_compiler_context();
-    handle := dlopen("./bindings/qbe/qbe_merged.dylib".sym().c_str(), DlFlag.Lazy);
-    assert(!handle.lib.is_null(), "failed to open qbe dylib");
-    c.add_comptime_library(@symbol "qbe", handle);
-};
 
 // TODO: this has to change when i do static aot.
 qbe_globals :: @static(Qbe.Globals) {  
+    :: { // this only runs if you reference qbe_globals but it as to run before you try to compile the rest of this initializer. 
+        c := current_compiler_context();
+        handle := dlopen("./bindings/qbe/qbe_merged.dylib".sym().c_str(), DlFlag.Lazy);
+        assert(!handle.lib.is_null(), "failed to open qbe dylib");
+        c.add_comptime_library(@symbol "qbe", handle);
+    };
+    
     g: Qbe.Globals = (
         types = get_qbe_dylib_variable(InsaneVec(Qbe.Typ), "typ"),
         insb = get_qbe_dylib_variable(Array(Qbe.Ins, 1.shift_left(20)), "insb"),
@@ -41,6 +54,8 @@ qbe_globals :: @static(Qbe.Globals) {
     g
 };
 
+global_module :: @static(QbeModule); // TODO: aaaaaaaa
+
 // TODO: this changes for aot!!
 outf :: @static(*FILE);
 aaaa_out :: @static(TmpFile);
@@ -55,35 +70,35 @@ debugf :: @static(*FILE) {
 
 run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
     fnn.globals = qbe_globals;  // if you got it from qbe's parser it doesn't set this. 
+    m := global_module;
     
 	// TODO: make sure nothing requires the extra call to fillpreds and then disable this in release mode. 
 	//       if the frontend generates valid code it will always type check. 
 	//       but always have to option to run this to make peoples lives easier! (ie if a user wants to use #bc)
 	//       same for ssacheck
-    typecheck(fnn); 
-    
+    typecheck(fnn); // debug
     //printfn(fnn, debugf[]);
     {qbe_globals[].target.abi0}(fnn);
     fillrpo(fnn);
     fillpreds(fnn);
     filluse(fnn);
-    promote(fnn);
-    filluse(fnn);
+    promote(fnn); // optional
+    filluse(fnn); // !
     ssa(fnn);
     filluse(fnn);
-    ssacheck(fnn);
-    fillalias(fnn);
-    loadopt(fnn);
-    filluse(fnn);
-    fillalias(fnn);
-    coalesce(fnn);
-    filluse(fnn);
-    ssacheck(fnn);
-    copy_elimination(fnn);
+    ssacheck(fnn); // debug
+    fillalias(fnn); // !
+    loadopt(fnn); // optional
+    filluse(fnn); // !
+    fillalias(fnn); // for coalesce
+    coalesce(fnn); // optional
+    filluse(fnn);  // !
+    ssacheck(fnn); // debug
+    copy_elimination(fnn); // optional
     //copy(fnn);
-    filluse(fnn);
+    filluse(fnn); // !
     //printfn(fnn, debugf[]);
-    fold(fnn);
+    fold(fnn); // optional
     {qbe_globals[].target.abi1}(fnn);
     simplify(fnn);
     //simpl(fnn);
@@ -94,8 +109,8 @@ run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
     fill_liveness(fnn);
     //filllive(fnn);
     //printfn(fnn, debugf[]);
-    fillloop(fnn);
-    fillcost(fnn);
+    fillloop(fnn); // optional
+    fillcost(fnn); // optional
     spill(fnn);
     rega(fnn);
     fillrpo(fnn);
@@ -106,12 +121,17 @@ run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
     assert_eq(Qbe.Blk.int_from_ptr(fnn.rpo[]), Qbe.Blk.int_from_ptr(fnn.start));
     ::ptr_utils(*Qbe.Blk);
     // We have a linear array but want a linked list for some reason. 
+    // :LinkIsNowRpo
     range(0, fnn.nblk.zext() - 1) { n |
         fnn.rpo.offset(n)[].link = fnn.rpo.offset(n + 1)[];
     };
     fnn.rpo.offset(fnn.nblk.zext() - 1)[].link = Qbe.Blk.ptr_from_int(0);
     
-    {qbe_globals[].target.emitfn}(fnn, outf[]);
+    if true {
+        m.emit_func_arm64(fnn, outf[]);
+    } else {
+        {qbe_globals[].target.emitfn}(fnn, outf[]);
+    };
     //printfn(fnn, debugf[]);
     // TODO: do this but then have to reset up the type table
     //freeall();  

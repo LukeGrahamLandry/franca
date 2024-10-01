@@ -1034,7 +1034,24 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
             @check(self.compile_quote(expr, requested)) return;
         }
         fn Slice(arg) => {
-            @check(self.compile_expr(arg[], .None)) return;
+            @match(arg.expr&) {
+                fn Tuple(parts) => {
+                    fst := parts.index(0);
+                    @check(self.compile_expr(fst, .None)) return;
+                    if !fst.ty.is_unknown() {
+                        hint: ResultType = (Specific = fst.ty);
+                        each parts.items().slice(1, parts.len) { e | 
+                            @check(self.compile_expr(e, hint)) return;
+                        };
+                        @check(self.compile_expr(arg[], .None)) return; // TODO: don't recompile. just poke the type in.
+                    } else {
+                        @check(self.compile_expr(arg[], .None)) return;
+                    };
+                };
+                @default => {
+                    @check(self.compile_expr(arg[], .None)) return;
+                };
+            };
             types := self.arg_types(arg.ty);
             // TODO: typecheck that all are the same!
             expr.ty = @check(self.create_slice_type(types[0], arg.loc)) return;

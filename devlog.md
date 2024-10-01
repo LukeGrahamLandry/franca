@@ -1,3 +1,17 @@
+##
+
+- (big imm, cset, 37), (float ldr/str, 35), (slot ldr/str, 34)
+- off by one in big imm loop, 31
+- much pain with sp encoding, 29
+- ugh stupid mistake where i patches the asm bytes in memory but for im still emitting the text unbuffered so all my oforward jumps were brk, 24
+
+## (Sep 30)
+
+- intermediate step so i can still use thier test scripts: do the asm myself but emit it as `.word xxxx` for an external assembler.
+  also lets me delay dealing with patching calls which is nice.
+- flipped a few of my encodings when the arg registers are interchangeable because its easier if the disassembly of mine matches what real qbe does.
+- (math/load int/copy, 50), (get global addr, 47), (load args backwards, 46), (call, 45), (cond jmp, 41)
+
 ## (Sep 29)
 
 - TODO: fix opsies when trying to match on a non-sequentual enum. fails safety check

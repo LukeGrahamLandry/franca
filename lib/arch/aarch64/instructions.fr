@@ -40,21 +40,22 @@ Cond :: @enum(u4) (
 fn JumpRel(Int: Type) = Int;  // measured in instructions, not bytes
 
 fn add_sr(sf: Bits, dest: RegO, a: RegI, b: RegI, shift: Shift, amount: u6) u32 =
-    @bits(sf, 0b0001011, shift, 0b0, a, amount, b, dest);
+    @bits(sf, 0b0001011, shift, 0b0, b, amount, a, dest);
 
 fn add_im(sf: Bits, dest: RegO, src: RegI, imm: u12, lsl_12: u1) u32 =
     @bits(sf, 0b00100010, lsl_12, imm, src, dest);
 
 fn orr(sf: Bits, dest: RegO, a: RegI, b: RegI, shift: Shift, amount: u6) u32 =
-    @bits(sf, 0b0101010, shift, 0b0, a, amount, b, dest);
+    @bits(sf, 0b0101010, shift, 0b0, b, amount, a, dest);
 
-/// dest = a | ~(b <shift> amount)  // TODO: make sure that order is right.
+/// dest = a | ~(b <shift> amount)  // TODO: make sure that order is right.   (its probably not)
 fn orn(sf: Bits, dest: RegO, a: RegI, b: RegI, shift: Shift, amount: u6) u32 =
     @bits(sf, 0b0101010, shift, 0b1, a, amount, b, dest);
 
 fn and_sr(sf: Bits, dest: RegO, a: RegI, b: RegI, shift: Shift, amount: u6) u32 =
-    @bits(sf, 0b0001010, shift, 0b0, a, amount, b, dest);
+    @bits(sf, 0b0001010, shift, 0b0, b, amount, a, dest);
 
+// can't encode sp!
 fn sub_sr(sf: Bits, dest: RegO, a: RegI, b: RegI, shift: Shift, amount: u6) u32 =
     @bits(sf, 0b1001011, shift, 0b0, b, amount, a, dest);
 
@@ -76,12 +77,15 @@ fn mov(sf: Bits, dest: RegO, src: RegI) u32 =
 /// dest = (x * y) + add
 /// This works with signed numbers, even though there's another instruction that says signed mul? i guess the difference matters for the ones that have multiple output registers.
 fn madd(sf: Bits, dest: RegO, x: RegI, y: RegI, add: RegI) u32 =
-    @bits(sf, 0b0011011000, x, 0b0, add, y, dest);
+    @bits(sf, 0b0011011000, y, 0b0, add, x, dest);
 
 /// dest = dividend / divisor
 fn sdiv(sf: Bits, dest: RegO, dividend: RegI, divisor: RegI) u32 =
     @bits(sf, 0b0011010110, divisor, 0b000011, dividend, dest);
-
+    
+fn udiv(sf: Bits, dest: RegO, dividend: RegI, divisor: RegI) u32 =
+    @bits(sf, 0b0011010110, divisor, 0b000001, dividend, dest);
+    
 fn cbz(sf: Bits, offset: JumpRel(i19), val: RegI) u32 =
     @bits(sf, 0b0110100, offset, val);
 
@@ -115,13 +119,29 @@ fn str_uo(sf: Bits, src: RegI, addr: RegI, offset_words: u12) u32 =
 fn ldr_uo(sf: Bits, dest: RegO, addr: RegI, offset_words: u12) u32 = 
     @bits(0b1, sf, 0b11100101, offset_words, addr, dest);
 
+fn str_uo_any(size: u2, src: RegI, addr: RegI, offset_words: u12) u32 = 
+    @bits(size, 0b11100100, offset_words, addr, src);
+
+fn ldr_uo_any(size: u2, dest: RegO, addr: RegI, offset_words: u12) u32 = 
+    @bits(size, 0b11100101, offset_words, addr, dest);
+
 /// Load two sequential words (addr, addr+word_size) into two registers. idk why offset can be negative in this one but not in ldr.
 fn ldp_so(sf: Bits, dest1: RegO, dest2: RegO, addr: RegI, offset_words: i7) u32 =
     @bits(sf, 0b010100101, offset_words, dest2, addr, dest1);
 
+// post index. do the load with the registers current value then update the register by the offset. 
+// `ldp dest1, dest2, [addr], #(offset_words*8)`
+fn ldp_post(sf: Bits, dest1: RegO, dest2: RegO, addr: RegI, offset_words: i7) u32 =
+    @bits(sf, 0b010100011, offset_words, dest2, addr, dest1);
+
 fn stp_so(sf: Bits, src1: RegO, src2: RegO, addr: RegI, offset_words: i7) u32 =
     @bits(sf, 0b010100100, offset_words, src2, addr, src1);
 
+// pre index. update the register by the offset then do the store to the new address.
+// `stp src1, src2, [addr, #(offset_words*8)]!`
+fn stp_pre(sf: Bits, src1: RegO, src2: RegO, addr: RegI, offset_words: i7) u32 =
+    @bits(sf, 0b010100110, offset_words, src2, addr, src1);
+    
 /// Branch to an address in a register. Maybe set link register to next pc (return address).
 fn br(addr: RegI, set_link: u1) u32 = 
     @bits(0b1101011000, set_link, 0b11111000000, addr, 0b00000);
@@ -312,3 +332,5 @@ fn bits(arg: FatExpr) FatExpr #macro = {
     
     @{ @as(u32) @[out].trunc() }
 }
+
+arm_nop :: 0b11010101000000110010000000011111;

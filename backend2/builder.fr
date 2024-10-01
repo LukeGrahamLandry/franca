@@ -75,7 +75,7 @@ fn push_temp(b: *QbeBuilder, k: Qbe.Cls) Qbe.Ref = {
     temp.nuse = 1;
     temp.ndef = 1;
     b.temporaries&.push(temp);
-    ref(.RTmp, b.temporaries.len - 1)
+    TMP(b.temporaries.len - 1)
 }
 
 // TODO: fix load/store union in emit_bc so you can just pass `get_field_type(Qbe.Con, @symbol bits)`
@@ -108,10 +108,12 @@ fn push_inst(b: *QbeBuilder, block: BbId, op: Qbe.O, k: Qbe.Cls, out: Qbe.Ref, i
     // TODO: why bother
     // if k > .Ksb {| k = .Kw; };
     @debug_assert(k == .Kl || k == .Kw || k == .Ks || k == .Kd, "size must be w/l/s/d");
-    // TODO: should be able to init array from tuple
-    inst: Qbe.Ins = (op30_cls2 = pack_op_cls(op, k), arg = init(@slice(in1, in2)), to = out);
-    b.blocks[block.id.zext()].insts&.push(inst);
+    b.blocks[block.id.zext()].insts&.push(make_ins(op, k, out, in1, in2));
 }
+
+// TODO: init array from tuple. and also real bit fields. so this doesn't suck as bad. 
+fn make_ins(op: Qbe.O, k: Qbe.Cls, out: Qbe.Ref, in1: Qbe.Ref, in2: Qbe.Ref) Qbe.Ins #inline = 
+    (op30_cls2 = pack_op_cls(op, k), arg = init(@slice(in1, in2)), to = out);
 
 // TODO: catch the mistake of calling this instead of push_inst0 for a store (it confuses the backend)
 fn push_inst(b: *QbeBuilder, block: BbId, op: Qbe.O, k: Qbe.Cls, in1: Qbe.Ref, in2: Qbe.Ref) Qbe.Ref = {
@@ -351,9 +353,6 @@ fn for_insts_forward(b: *Qbe.Blk, $body: @Fn(i: *Qbe.Ins) void) void = {
 }
 
 // :TodoPort bsiter. 
-// when i do firstbit, why not do whatever __builtin_ctzl does? x64 has an instruction for that. arm has reverse bits and then clz. wasm has it. 
-// the c version works with converting to that. clang -O2 doesn't treat the functions the same so maybe im missing something. 
-// have to add that as an Intrinsic to my language... which i guess means adding it to my new qbe. 
 fn for(bs: *Qbe.BSet, $body: @Fn(i: i64) void) void = {
     i: i32 = 0;
     while => bsiter(bs, i&) {
@@ -402,7 +401,7 @@ fn emit(f: *Qbe.Fn, op: Qbe.O, k: Qbe.Cls, to: Qbe.Ref, arg0: Qbe.Ref, arg1: Qbe
         die("emit, too many instructions".sym().c_str());
     };
     i[] = i[].offset(-1);
-    i[][] = (op30_cls2 = pack_op_cls(op, k), to = to, arg = init(@slice(arg0, arg1)));
+    i[][] = make_ins(op, k, to, arg0, arg1);
     i[]
 }
 
@@ -528,9 +527,21 @@ fn is_ext(j: Qbe.O) bool #inline =
 fn is_alloc(j: Qbe.O) bool #inline = 
     j.raw() >= Qbe.O.alloc4.raw() && j.raw() <= Qbe.O.alloc16.raw();
 
+fn is_store(j: Qbe.O) bool #inline = 
+    j.raw() >= Qbe.O.storeb.raw() && j.raw() <= Qbe.O.stored.raw();
+
+fn is_load(j: Qbe.O) bool #inline = 
+    j.raw() >= Qbe.O.loadsb.raw() && j.raw() <= Qbe.O.load.raw();
+
+fn is_flag(j: Qbe.O) bool #inline = 
+    j.raw() >= Qbe.O.flagieq.raw() && j.raw() <= Qbe.O.flagfuo.raw();
+    
 fn is_int(k: Qbe.Cls) bool #inline =
     KBASE(k) == 0;
 
+fn is_wide(k: Qbe.Cls) bool #inline =
+    (@as(i64) k.raw().zext()).bit_and(1) != 0;
+    
 //////////////////////////////////////
 
 ::enum(Qbe.ConType);

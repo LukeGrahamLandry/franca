@@ -150,7 +150,8 @@ fn selcmp(f: *Qbe.Fn, arg: Array(Qbe.Ref, 2), k: Qbe.Cls) bool = {
     // cmp can only have an immediate on the right. so we might have to swap them and invert the condition. 
     needed_swap := rtype(arg&[0]) == .RCon;
     if needed_swap {
-        @debug_assert(rtype(arg&[1]) != .RCon, "cmp of constant should already have been folded. we do handle this case below tho so its fine if you want to remove that pass and this check.");
+        // TODO: not true for function pointers i guess which is fair because we don't technically know if the symbols will resolve to the same place. 
+        //@debug_assert(rtype(arg&[1]) != .RCon, "cmp of constant should already have been folded. we do handle this case below tho so its fine if you want to remove that pass and this check.");
         arg&.items().swap(0, 1);
     };
     
@@ -178,13 +179,14 @@ fn selcmp(f: *Qbe.Fn, arg: Array(Qbe.Ref, 2), k: Qbe.Cls) bool = {
     needed_swap
 }
 
+::enum(Qbe.RegKind);
+::enum(Qbe.SymType);
 // Force the value to be in a register (if its a constant, produce it in a different reg and then move).
 fn fixarg(f: *Qbe.Fn, pr: *Qbe.Ref, k: Qbe.Cls, phi: bool) void = {
     r_original := pr[];
     @match(rtype(r_original)) {
         fn RCon() => {
             c := f.get_constant(r_original);
-            ::enum(@type c.sym.type);
             // Accessing a thread local requires an incantation. 
             if f.globals.target.apple && c.type == .CAddr && c.sym.type == .SThr {
                 r1 := f.newtmp("isel", .Kl);
@@ -192,16 +194,20 @@ fn fixarg(f: *Qbe.Fn, pr: *Qbe.Ref, k: Qbe.Cls, phi: bool) void = {
                 if c.bits.i != 0 {
                     r2 := f.newtmp("isel", .Kl);
                     cc: Qbe.Con = (type = .CBits, bits = (i = c.bits.i));
-                    r3 := f.newcon(cc&);
+                    // this is a constant arg that wont go through isel
+                    // qbe arm64/emit.c/emitf can write a literal second but doesn't check if it can take advantage of that other than here
+                    // i don't want to deal with instruction encoding for that until i extend this to apply to all instructions that have an imm varient. 
+                    r3 := f.newcon(cc&);       // v
+                    f.fixarg(r3&, .Kl, false); // v... so i recurse here.
                     f.emit(.add, .Kl, r1, r2, r3);
                     r1 = r2;
                 };
                 R0 :: Qbe.Rxxx + 1;
-                f.emit(.copy, .Kl, r1, ref(.RTmp, R0), QbeNull);
+                f.emit(.copy, .Kl, r1, TMP(R0), QbeNull);
                 r1 := f.newtmp("isel", .Kl);
                 r2 := f.newtmp("isel", .Kl);
-                f.emit(.call, .Kw, QbeNull, r1, ref(.RCall, 33));
-                f.emit(.copy, .Kl, ref(.RTmp, R0), r2, QbeNull);
+                f.emit(.call, .Kw, QbeNull, r1, CALL(33));
+                f.emit(.copy, .Kl, TMP(R0), r2, QbeNull);
                 f.emit(.load, .Kl, r1, r2, QbeNull);
                 cc := c[];
                 cc.bits.i = 0;
@@ -238,7 +244,7 @@ fn fixarg(f: *Qbe.Fn, pr: *Qbe.Ref, k: Qbe.Cls, phi: bool) void = {
             if slot_offset != -1 {
                 // This tmp holds the address of a stack slot. Produce it by offseting the frame pointer. 
                 r_slot := f.newtmp("isel", .Kl);
-                f.emit(.addr, .Kl, r_slot, ref(.RSlot, slot_offset.zext().bit_and(0x1fffffff)), QbeNull);
+                f.emit(.addr, .Kl, r_slot, SLOT(slot_offset.zext()), QbeNull);
                 pr[] = r_slot;
             }; // otherwise its already in a register
         }
@@ -287,7 +293,7 @@ fn imm(c: *Qbe.Con, k: Qbe.Cls, pn: *i64) Imm = {
     positive := true;
     if n < 0 {
         positive = false;
-        // TODO: is this the same?
+        // TODO: https://lists.sr.ht/~mpu/qbe/patches/54249 is it ub for me? decide. 
         //n = -(uint64_t)n;
         n = -n;
     };
@@ -305,7 +311,7 @@ fn imm(c: *Qbe.Con, k: Qbe.Cls, pn: *i64) Imm = {
 }
 
 // note: not tested yet, only called by emit
-fn arm64_logimm(x: u64, k: Qbe.Cls) bool = {
+fn arm64_logimm(x: i64, k: Qbe.Cls) bool = {
     if (k == .Kw) {
         x = x.bit_and(0xffffffff).bit_or(x.shift_left(32));
     };
