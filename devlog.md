@@ -1,9 +1,20 @@
-##
+## (Oct 1)
 
 - (big imm, cset, 37), (float ldr/str, 35), (slot ldr/str, 34)
 - off by one in big imm loop, 31
 - much pain with sp encoding, 29
 - ugh stupid mistake where i patches the asm bytes in memory but for im still emitting the text unbuffered so all my oforward jumps were brk, 24
+- (rem/urem, 21), (swap, 19), (int ext, 16)
+- aaahhh im so dumb. jumps were randomly off by 8 or 16 bytes sometimes because i was just emitting text for calls so the offsets in my "jit" code were off, 10.
+- sometimes objdump is ass and you have to say -D instead of -d? what? and they're the same, why doesn't mine work.
+  ohhh its ones that happened to have a format string data before the code and i wasn't putting out a `.text` directive after so it switched me to data,
+  and then objdump throught my code wasn't something it should try to disassemble, and the test failed because it wasn'tmarked executable.
+  ok thats fair, my bad ig, 7.
+  oooo! and thats also what was making most of my franca tests fail (cause main was at the end after data) so now thats 255 -> 27 too. amazing.
+- painful float cc, 5 + 27.
+- cast=fmov, 2 + 23
+- a billon d/s<->l/w s/u, 1 + 12
+- fixed emit ordering for Thr fixaddr isel, 0 + 12
 
 ## (Sep 30)
 
