@@ -1,0 +1,420 @@
+// Adapted from Qbe. MIT License. © 2015-2024 Quentin Carbonneaux <quentin@c9x.me>
+
+// We allow frontends to use mutable variables but the rest of the passes expect input in ssa form.
+// So this is where we fixup variable to be assigned once and represent conditional mutation with phi nodes.
+// This requires computing usage/liveness information which is used by some other passes as well (generally needs to be recomputed after making changes). 
+
+/* require rpo and use */
+fn convert_to_ssa(f: *Qbe.Fn) void = {
+    ::ptr_utils(QbeName);
+    nt: i64 = f.ntmp.zext();
+    stk := temp().alloc_zeroed(*QbeName, nt);
+    dbg := f.globals.debug;
+    d := dbg["L".char()];
+    dbg["L".char()] = false;
+    filldom(f);
+    out := f.globals.debug_out;
+    if dbg["N".char()] {
+        write(out, "\n> Dominators:\n");
+        for_blocks f { b1 |
+            if !b1.dom.is_null() {
+                // :SpammingNulls
+                write(out, items(@format("        %:", b1.name&.items()) temp()));
+                for_dom b1 { b |
+                    write(out, items(@format(" %", b.name&.items()) temp()));
+                };
+                write(out, "\n");
+            };
+        };
+    };
+    fillfron(f);
+    fill_liveness(f);
+    insert_phis(f);
+    renblk(f.start, stk, f);
+    range_rev(nt, 0) { nt | 
+        while => !stk[nt].is_null() {
+            n := stk[nt];
+            stk[nt] = n.up;
+            f.nfree(n);
+        };
+    };
+    dbg["L".char()] = d;
+    if dbg["N".char()] {
+        write(out, "\n> After SSA construction:\n");
+        printfn(f, out);
+    };
+}
+
+// :Explain
+fn insert_phis(f: *Qbe.Fn) void = {
+    u := init_bitset(f.nblk.zext());
+    defs := init_bitset(f.nblk.zext());
+    
+    blist := temp().alloc(*Qbe.Blk, f.nblk.zext());
+    be := blist.index_unchecked(f.nblk.zext());
+    range(Qbe.Tmp0, f.ntmp.zext()) { t |
+        continue :: local_return;
+        f.tmp[t].visit = 0;
+        if(f.tmp[t].phi != 0, => continue());
+        if f.tmp[t].ndef == 1 {
+            no_escape_block := true;
+            defb := f.tmp[t].defining_block;
+            range(0, f.tmp[t].nuse.zext()) { n | 
+                use := f.tmp[t].use[n];
+                no_escape_block = no_escape_block && use.bid == defb;
+            };
+            // :MakeATestThatFails if you just always continue() here. if there's only one def doesn't that mean we never need a phi node? 
+            if no_escape_block || defb == f.start.id {
+                continue();
+            };
+        };
+        bszero(u&);
+        k := Qbe.Cls.Kx;
+        bp := be;
+        for_blocks f { b | 
+            b.visit = 0;
+            r := QbeNull;
+            for_insts_forward b { i |
+                if r != QbeNull {
+                    if i.arg&[0] == TMP(t) {
+                        i.arg&[0] = r;
+                    };
+                    if i.arg&[1] == TMP(t) {
+                        i.arg&[1] = r;
+                    }
+                };
+                if i.to == TMP(t) {
+                    if !bshas(b.out&, t) {
+                        r = f.refindex(t);
+                        i.to = r;
+                    } else {
+                        if !bshas(u&, b.id.zext()) {
+                            bsset(u&, b.id.zext());
+                            bp = bp.offset(-1);
+                            bp[] = b;
+                        };
+                        if clsmerge(k&, i.cls()) {
+                            die("invalid input".sym().c_str());
+                        }
+                    }
+                }
+            };
+            if r != QbeNull && b.jmp.arg == TMP(t) {
+                b.jmp.arg = r;
+            };
+        };
+        bscopy(defs&, u&);
+        while => !bp.identical(be) {
+            f.tmp[t].visit = t.intcast();
+            b := bp[];
+            bp = bp.offset(1);
+            bsclr(u&, b.id.zext());
+            range(0, b.nfron.zext()) { n | 
+                a := b.fron[n];
+                if a.visit == 0 {
+                    a.visit += 1;
+                    if bshas(a.in&, t) {
+                        p := libc_allocator.box(Qbe.Phi); // :HardcodeAlloc
+                        p[] = Qbe.Phi.zeroed();
+                        p.cls = k;
+                        p.to = TMP(t);
+                        p.link = a.phi;
+                        p.arg = new(0, .PFn);
+                        p.blk = new(0, .PFn);
+                        a.phi = p;
+                        id: i64 = a.id.zext();
+                        if !bshas(defs&, id) && !bshas(u&, id) {
+                            bsset(u&, id);
+                            bp = bp.offset(-1);
+                            bp[] = a;
+                        };
+                    };
+                };
+            };
+        };
+    };
+}
+
+fn renblk(b: *Qbe.Blk, stk: []*QbeName, f: *Qbe.Fn) void = { 
+    for_phi b { p |
+        rendef(p.to&, b, stk, f);
+    };
+    for_insts_forward b { i |
+        each i.arg& { arg | 
+            t := arg[].val();
+            if rtype(arg[]) == .RTmp && f.get_temporary(t)[].visit != 0 {
+                arg[] = f.getstk(t, b, stk);
+            };
+        };
+        rendef(i.to&, b, stk, f);
+    };
+    if rtype(b.jmp.arg) == .RTmp && f.get_temporary(b.jmp.arg.val())[].visit != 0 {
+        b.jmp.arg = f.getstk(b.jmp.arg.val(), b, stk);
+    };
+    
+    body :: fn(s: *Qbe.Blk) => {
+        for_phi s { p |
+            t := f.get_temporary(p.to.val());
+            t := t.visit;
+            if t != 0 {
+                m: i64 = p.narg.zext();
+                p.narg += 1;
+                grow(p.arg&, p.narg.zext());
+                grow(p.blk&, p.narg.zext());
+                p.arg[m] = f.getstk(t.zext(), b, stk);
+                p.blk[m] = b;
+            };
+        };
+    };
+    if !b.s1.is_null() {
+        body(b.s1);
+    };
+    if !b.s2.is_null() && !b.s2.identical(b.s1) {
+        body(b.s2);
+    };
+    
+    for_dom(b, fn(s) => renblk(s, stk, f));
+}
+
+fn rendef(r: *Qbe.Ref, b: *Qbe.Blk, stk: []*QbeName, f: *Qbe.Fn) void = {
+    t := r[].val();
+    if(r[] == QbeNull || f.tmp[t].visit == 0, => return());
+    r1 := f.refindex(t);
+    f.tmp[r1.val()].visit = t.intcast();
+    stk[t] = f.nnew(r1, b, stk[t]);
+    r[] = r1;
+}
+
+fn getstk(f: *Qbe.Fn, t: i64, b: *Qbe.Blk, stk: []*QbeName) Qbe.Ref = {
+    n := stk[t];
+    while => !n.is_null() && !dom(n.b, b) {
+        n1 := n;
+        n = n.up;
+        f.nfree(n1);
+    };
+    stk[t] = n;
+    if n.is_null() { 
+        @debug_assert(false, "Couldn't find dominating definition for tmp % (i think this doesn't happen for correct programs?)", t);
+        return(QbeUndef);
+    };
+    n.r
+}
+
+QbeName :: @rec @struct(
+    r: Qbe.Ref,
+    b: *Qbe.Blk,
+    up: *QbeName,
+);
+
+fn nnew(f: *Qbe.Fn, r: Qbe.Ref, b: *Qbe.Blk, up: *QbeName) *QbeName = {
+    if f.globals.namel.is_null() { // :HardcodeAlloc
+        mem := libc_allocator.alloc(QbeName, 25); // just not spamming tiny allocs
+        each mem { m | 
+            m.up = m.offset(1);
+        };
+        mem[mem.len - 1].up = QbeName.ptr_from_int(0);
+        f.globals.namel = mem.index(0);
+    };
+    
+    n := f.globals.namel;
+    f.globals.namel = n.up;
+    n.r = r;
+    n.b = b;
+    n.up = up;
+    n
+}
+
+fn nfree(f: *Qbe.Fn, n: *QbeName) void = {
+    n.up = f.globals.namel;
+    f.globals.namel = n;
+}
+
+fn refindex(f: *Qbe.Fn, t: i64) Qbe.Ref #inline =
+    newtmp((ptr = f.tmp[t].name&.as_ptr()), f.tmp[t].cls, f);
+
+/* fill usage, width, phi, and class information
+ * must not change .visit fields
+ */
+fn fill_use(f: *Qbe.Fn) void = {
+    f.clear_usage_info(); // fill_use gets called muliple times. 
+    
+    for_blocks f { b | 
+        for_phi b { p |
+            @debug_assert(rtype(p.to) == .RTmp, "can only assign to tmp");
+            tp := p.to.val();
+            f.tmp[tp].defining_block = b.id;
+            f.tmp[tp].ndef += 1;
+            f.tmp[tp].cls = p.cls;
+            tp = phicls(tp, f.tmp);
+            range(0, p.narg.zext()) { a | 
+                if rtype(p.arg[a]) == .RTmp {
+                    t := p.arg[a].val();
+                    adduse(f.tmp.index(t), .UPhi, b, Qbe.Phi.raw_from_ptr(p));
+                    t = phicls(t, f.tmp);
+                    if t != tp {
+                        f.tmp[t].phi = tp.intcast();
+                    };
+                }
+            }
+        };
+        
+        for_insts_forward b { i |
+            if i.to != QbeNull {
+                @debug_assert(rtype(i.to) == .RTmp, "can only assign to tmp");
+                t := f.get_temporary(i.to.val());
+                t.width = i.source_width();
+                t.def = i;
+                t.defining_block = b.id;
+                t.ndef += 1;
+                t.cls = i.cls();
+            };
+            
+            for i.arg& { arg | 
+                if rtype(arg) == .RTmp {
+                    t := f.get_temporary(arg.val());
+                    adduse(t, .UIns, b, Qbe.Ins.raw_from_ptr(i));
+                };
+            };
+        };
+        
+        if rtype(b.jmp.arg) == .RTmp {
+            adduse(f.get_temporary(b.jmp.arg.val()), .UJmp, b, 0.rawptr_from_int());
+        };
+    }
+}
+
+// TODO: damn if only we had a language feature to make this look less silly... (hint: @tagged)
+fn adduse(tmp: *Qbe.Tmp, ty: Qbe.UseType, b: *Qbe.Blk, ptr: rawptr) void = { 
+    if tmp.use.first.is_null() {
+        // TODO: how would you get here?
+        return();
+    };
+    
+    n: i64 = tmp.nuse.zext();
+    tmp.nuse += 1;
+    tmp.use&.grow(n + 1);
+    u := tmp.use[n]&;
+    u.type = ty;
+    u.bid = b.id;
+    @match(ty) {
+        fn UPhi() => {
+            u.u.phi = Qbe.Phi.ptr_from_raw(ptr);
+        }
+        fn UIns() => {
+            u.u.ins = Qbe.Ins.ptr_from_raw(ptr);
+        }
+        fn UJmp() => ();
+        @default => unreachable();
+    };
+}
+
+fn clear_usage_info(f: *Qbe.Fn) void = {
+    each f.tmps() { t | 
+        t.def = Qbe.Ins.ptr_from_int(0); // this isn't an array, 
+        t.ndef = 0;
+        t.defining_block = trunc(-1);
+        t.cls = .Kw;
+        t.phi = 0;
+        t.width = .WFull;
+        t.nuse = 0;
+        if t.use.first.is_null() {
+            t.use = new(0, .PFn);
+        }; // else we can just reuse the memory 
+    };
+}
+
+// We only represent 32 or 64 bit registers, but some instructions set the high bits to something fixed (all zeros or the sign bit of thier input).
+// We use this information to remove redundant extensions during copy elimination. 
+fn source_width(i: *Qbe.Ins) Qbe.TmpType #inline = {
+    w := Qbe.TmpType.WFull;
+    fn offset_width(base: Qbe.TmpType, op: Qbe.O, op_base: Qbe.O) Qbe.TmpType => 
+        @as(Qbe.TmpType) @as(i32) base.raw() + op.raw() - op_base.raw();
+    
+    if is_parbh(i.op()) {
+        w = offset_width(.Wsb, i.op(), .parsb);
+    };
+    if is_load(i.op()) && i.op() != .load {
+        w = offset_width(.Wsb, i.op(), .loadsb);
+    };
+    if is_ext(i.op()) {
+        w = offset_width(.Wsb, i.op(), .extsb);
+    };
+    _x, _y := (Qbe.Cls.zeroed(), i32.zeroed());
+    if iscmp(i.op(), _x&, _y&) {
+        w = .Wub;
+    };
+    if i.cls() == .Kw && (w == .Wsw || w == .Wuw) { // TODO: i cant flip the order of these :FUCKED
+        w = .WFull;
+    };
+    w
+}
+
+/* require use and ssa */
+// Checks that we correctly constructed ssa form. 
+// Running this is optional, but life will be very confusing if you don't do this and get it wrong. 
+fn ssacheck(f: *Qbe.Fn) void = {
+    each f.tmps() { t |
+        if t.ndef > 1 { // :SpammingNulls
+            @panic("ssa temporary %% defined more than once", "%", t.name&.items());
+        };
+        if t.nuse > 0 && t.ndef == 0 {
+            report_error(t, f.rpo.offset(t.use[0].bid.zext())[]);
+        }
+    };
+    for_blocks f { b |
+        for_phi b { p |
+            r := p.to;
+            t := f.get_temporary(r.val());
+            each t.uses() { u |
+                bu := f.rpo.offset(u.bid.zext())[];
+                if (u.type == .UPhi) {
+                    if phicheck(u.u.phi, b, r) {
+                        report_error(t, bu);
+                    }
+                } else {
+                     if !bu.identical(b) && !sdom(b, bu) {
+                        report_error(t, bu);
+                    }
+                };
+            }
+        };
+        for_insts_forward b { i |
+            continue :: local_return;
+            if(rtype(i.to) != .RTmp, => continue());
+            r := i.to;
+            t := f.get_temporary(r.val());
+            each t.uses() { u |
+                bu := f.rpo.offset(u.bid.zext())[];
+                if (u.type == .UPhi) {
+                    if(phicheck(u.u.phi, b, r), => report_error(t, bu));
+                } else {
+                    if bu.identical(b) {
+                        if(u.type == .UIns && u.u.ins.ptr_diff(i) >= 0, => report_error(t, bu));
+                    } else {
+                        if(!sdom(b, bu), => report_error(t, bu));
+                    }
+                }
+            }
+        }
+    };
+    
+    report_error :: fn(t: *Qbe.Tmp, bu: *Qbe.Blk) void => {
+        if t.visit != 0 { // :SpammingNulls
+            @panic("%% violates ssa invariant", "%", t.name&.items());
+        } else {
+            @panic("ssa temporary %% is used undefined in @%", "%", t.name&.items(), bu.name&.items());
+        }
+    };
+}
+
+fn phicheck(p: *Qbe.Phi, b: *Qbe.Blk, t: Qbe.Ref) bool = {
+    range(0, p.narg.zext()) { n |
+        if p.arg[n] == t {
+            b1 := p.blk[n];
+            if !b1.identical(b) && !sdom(b, b1) {
+                return(true);
+            }
+        }
+    };
+    false
+}

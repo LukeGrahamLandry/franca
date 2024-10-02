@@ -1,5 +1,4 @@
-//! https://c9x.me/git/qbe.git/tree/all.h?id=626f0b278137ff6f8b7d910d9b3fc3cbdfbb39fc 
-//! MIT License. © 2015-2024 Quentin Carbonneaux <quentin@c9x.me>
+// Adapted from Qbe. MIT License. © 2015-2024 Quentin Carbonneaux <quentin@c9x.me>
 
 Qbe :: @rec @struct(
     Tmp0 :: 64, // first non-reg temporary
@@ -23,6 +22,7 @@ Qbe :: @rec @struct(
         // These we need to track but Qbe doesn't use internally. 
         number_of_types := 0, // ntyp. only used by parser
         debug_out: *FILE,
+        namel := QbeName.ptr_from_int(0), // for reusing memory in opt/ssa.fr between functions. no information shared. 
     ),
     DebugKey :: @enum(i64) (
         Parsing = "P".ascii(),
@@ -136,7 +136,7 @@ Qbe :: @rec @struct(
         link: *Qbe.Blk,
         
         id: u32,
-        visit: u32,
+        visit: i32,
         
         idom: *Qbe.Blk,
         dom: *Qbe.Blk,
@@ -153,13 +153,14 @@ Qbe :: @rec @struct(
         loop: i32,
         name: Array(u8, 32),
     ),
+    UseType :: @rec @enum(i32) (
+        UXXX,
+        UPhi,
+        UIns,
+        UJmp,
+    ),
     Use :: @rec @struct(
-        type: @enum(i32) (
-            UXXX,
-            UPhi,
-            UIns,
-            UJmp,
-        ),
+        type: Qbe.UseType,
         bid: u32,
         u: @union(ins: *Qbe.Ins, phi: *Qbe.Phi),
     ),
@@ -209,9 +210,9 @@ Qbe :: @rec @struct(
     ),
     Tmp :: @rec @struct(
         name: Array(u8, 80),
-        def: *Qbe.Ins,
+        def: *Qbe.Ins, // TODO: nullable
         use: InsaneVec(Qbe.Use),
-        ndef: u32,
+        ndef: u32,  // once in ssa form this will always be 0 or 1, but we use this field while constructing ssa form.
         nuse: u32,
         defining_block: u32,
         cost: u32,
@@ -224,7 +225,7 @@ Qbe :: @rec @struct(
         ),
         phi: i32,
         alias: Qbe.Alias,
-        width: Qbe.TmpType,
+        width: Qbe.TmpType, // from fill_uses, used by copy elimination
         visit: i32,
     ),
     ConType :: @rec @enum(i32) (
@@ -598,8 +599,6 @@ fn idup(_0: **Qbe.Ins, _1: *Qbe.Ins, _2: u64) void #import("qbe");
 fn icpy(_0: *Qbe.Ins, _1: *Qbe.Ins, _2: i64) *Qbe.Ins #import("qbe");
 fn cmpop(cc: i32) i32 #import("qbe");
 fn cmpneg(cc: i32) i32 #import("qbe");
-fn clsmerge(_0: *i16, _1: i16) i32 #import("qbe");
-fn phicls(_0: i32, _1: *Qbe.Tmp) i32 #import("qbe");
 fn newtmp(_0: CStr, _1: Qbe.Cls, _2: *Qbe.Fn) Qbe.Ref #import("qbe");
 fn chuse(_0: Qbe.Ref, _1: i32, _2: *Qbe.Fn) void #import("qbe");
 fn symeq(_0: Qbe.Sym, _1: Qbe.Sym) i32 #import("qbe");
@@ -629,7 +628,7 @@ fn edgedel(_0: *Qbe.Blk, _1: **Qbe.Blk) void #import("qbe");
 fn fillpreds(_0: *Qbe.Fn) void #import("qbe");
 fn fillrpo(_0: *Qbe.Fn) void #import("qbe");
 fn filldom(_0: *Qbe.Fn) void #import("qbe");
-fn sdom(_0: *Qbe.Blk, _1: *Qbe.Blk) i32 #import("qbe");
+fn sdom(_0: *Qbe.Blk, _1: *Qbe.Blk) bool #import("qbe");
 fn dom(_0: *Qbe.Blk, _1: *Qbe.Blk) bool #import("qbe");
 fn fillfron(_0: *Qbe.Fn) void #import("qbe");
 fn loopiter(_0: *Qbe.Fn, _1: @FnPtr(*Blk, *Blk) void) void #import("qbe");
@@ -646,7 +645,6 @@ fn storesz(_0: *Qbe.Ins) i32 #import("qbe");
 fn loadopt(_0: *Qbe.Fn) void #import("qbe");
 fn filluse(_0: *Qbe.Fn) void #import("qbe");
 fn ssa(_0: *Qbe.Fn) void #import("qbe");
-fn ssacheck(_0: *Qbe.Fn) void #import("qbe");
 fn fold(_0: *Qbe.Fn) void #import("qbe");
 fn fillcost(_0: *Qbe.Fn) void #import("qbe");
 fn spill(_0: *Qbe.Fn) void #import("qbe");
@@ -672,6 +670,7 @@ fn header();
 fn grow();
 fn new_copy();
 
+// TODO: move to util
 fn InsaneVec($T: Type) Type = {
     Self :: @struct(first: *T);
     ::ptr_utils(T);
@@ -729,5 +728,3 @@ QbeVec :: @struct(
     // I don't have unsized types. lets hope thats not a big deal
        // union { long long ll; long double ld; void *ptr; } align[];
 );
-
-

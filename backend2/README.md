@@ -4,6 +4,10 @@ The passes in `opt` are ported directly from Qbe, with some light editing to use
 In my brief profiling (with -O2), Qbe spends ~45% of its time parsing the input text and another ~15% outputting the assembly text.
 Then clang takes as long to assemble that text as the whole Qbe part (or somehow 10x as long on aarch64).
 However I want to use this as a JIT for comptime execution, which will only be practical if I remove those serialization steps.
+You can still print out the ir as human readable text between passes and modify it for testing.
+
+> When trying to understand what phi instructions do, remember that they're totally isomorphic to block arguments and then it's suddenly super simple.
+> It's just a choice to represent it as the callee knowing which value to use for each argument for each caller.
 
 ## Qbe License
 

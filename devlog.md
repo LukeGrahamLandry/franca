@@ -15,6 +15,9 @@
 - cast=fmov, 2 + 23
 - a billon d/s<->l/w s/u, 1 + 12
 - fixed emit ordering for Thr fixaddr isel, 0 + 12
+- sltof, 0 + 10
+- 0 + 8
+- filluse first try.
 
 ## (Sep 30)
 

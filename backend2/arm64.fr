@@ -1,4 +1,5 @@
 // Unlike Qbe, we don't rely on a seperate assembler. We just put the bytes in memory and jump there. 
+//    >>> (but for now we just put the bytes in a text file for a seperate assembler...)
 // This means we also have to handle updating forward references to functions that haven't been compiled yet. 
 // TODO: don't setup stack frame for leaf like amd64?
 // TODO: make sure i have .ssa tests for every instruction. rn there are some that just fail the franca tests. 
@@ -52,7 +53,8 @@ fn do_jit_relocations(self: *QbeModule, id: u32, segment: SegmentType, offset: i
                 dest := u8.int_from_ptr(self.segments&[segment].mmapped.ptr) + offset;
                 distance := dest - patch_start;
                 assert(distance.abs() < i32_MAX, "can't jump >4GB"); // TODO: wrong but good enough
-                low12 := distance.bit_and(1.shift_left(12) - 1); // for adr
+                // todo: adr gives you 1mb
+                low12 := distance.bit_and(1.shift_left(12) - 1); // for add
                 high20 := distance.shift_right_arithmetic(12).bit_and(1.shift_left(20) - 1);  // for adrp (TODO: will need to split off high bits for encoding)
                 panic("TODO: do relocation"); // emit the instructions
             };
@@ -281,7 +283,7 @@ fn epilogue_shrink_stack(self: *ArmState) void = {
     self.inst(add_sr(Bits.X64, sp, sp, x16, Shift.LSL, 0b000000));
 }
 
-// TODO: remove. we don't need this
+// TODO: remove. we won't need this once we do our own calls/globals.
 fn rname(r: i64, k: Qbe.Cls) CStr #import("qbe");
 
 fn slot(self: *ArmState, r: Qbe.Ref) i64 = {
@@ -299,9 +301,8 @@ fn slot(self: *ArmState, r: Qbe.Ref) i64 = {
 }
 
 fn loadaddr(self: *ArmState, c: *Qbe.Con, dest: i64, reg_name: CStr) void = {
-    @assert(c.bits.i == 0, "TODO: loadaddr with offset");
-
     symbol_name := str(c.sym.id);
+
     //p = l[0] == '"' ? "" : T.assym;
     @match(c.sym.type) {
         fn SGlo() => {
@@ -326,7 +327,12 @@ fn loadaddr(self: *ArmState, c: *Qbe.Con, dest: i64, reg_name: CStr) void = {
                 self.inst_bytes_only(brk(1111)); // TODO: patch
                 @fmt(self.buf&, "\tmrs\t%, tpidr_el0\n\tadd\t%, %, #:tprel_hi12:%, lsl #12\n\tadd\t%, %, #:tprel_lo12_nc:%\n", reg_name, reg_name, reg_name, symbol_name, reg_name, reg_name, symbol_name);
             };
-        }
+        };
+    };
+    if c.bits.i != 0 {
+        // TODO: you can do this as part of the thing above. 
+        @assert(c.bits.i < 4096 && c.bits.i > 0, "TODO: loadaddr of % with offset %", symbol_name, c.bits.i);
+        self.inst(add_im(Bits.X64, @as(u5) dest, @as(u5) dest, @as(u12) c.bits.i, 0));
     };
 }
 
@@ -443,6 +449,8 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
                 @default => {
                     @debug_assert(i.to.val() != Arm64Reg.R18.raw(), "please do not the platform register. thank you.");
                     if i.cls().is_int() {
+                        // 10101010   0001 |0011| 0000 |0011 11101000|
+                        //    @bits(sf, 0b0101010, Shift.LSL, 0b0, 0b11111, 0b000000, src, dest);
                         self.inst(mov(si, i.to.int_reg(), i.arg&[0].int_reg())); // they can't refer to SP so its fine
                     } else {
                         self.inst(fmov(sf, i.to.float_reg(), i.arg&[0].float_reg()));  
@@ -457,14 +465,11 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
             if (s <= 4095) {
                 self.inst(add_im(Bits.X64, reg, fp, @as(u12) s, 0));
             } else {
-                panic("TODO: addr");
                 if (s <= 65535) {
-                    fprintf(e.f,
-                        "\tmov\t%s, #%\n",
-                        "\tadd\t%s, x29, %s\n",
-                        rn, s, rn, rn
-                    );
+                    self.inst(movz(Bits.X64, reg, s.trunc(), .Left0));
+                    self.inst(add_sr(Bits.X64, reg, fp, reg, .LSL, 0));
                 } else {
+                    panic("TODO: addr");
                     fprintf(e.f,
                         "\tmov\t%s, #%\n",
                         "\tmovk\t%s, #%, lsl #16\n",
@@ -686,9 +691,10 @@ fn emitins2(self: *ArmState, i: *Qbe.Ins) void = {
         fn ultof() => self.inst(@bits(Bits.X64, 0b0011110, sf, 0b100011000000, i.arg&[0].int_reg(), i.to.float_reg())); // ucvtf
         fn stoui() => self.inst(@bits(si,  0b0011110, FType.S32, 0b111001000000, i.arg&[0].float_reg(), i.to.int_reg())); // fcvtzu
         fn dtoui() => self.inst(@bits(si,  0b0011110, FType.D64, 0b111001000000, i.arg&[0].float_reg(), i.to.int_reg())); // fcvtzu
+        fn sltof() => self.inst(scvtf(Bits.X64, sf, i.to.float_reg(), i.arg&[0].int_reg()));
+        fn ultof() => self.inst(@bits(Bits.X64, 0b0011110, sf, 0b100011000000, i.arg&[0].int_reg(), i.to.float_reg())); // ucvtf
         @default => @panic("TODO: op encoding %", inst_name);
     };
-    
 }
 
 // TODO: ctz intrinsic
