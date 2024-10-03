@@ -1,9 +1,21 @@
 ##
 
+- setup default_driver test and its always failing the third one it tries.
+  heck it was just getting confused by compiling twice becuase i pasted wrong in run_tests, 15.
+  and then i can just recreate the module every test in default_driver too for now and that works.
+  and after that i can add back the redeclared symbol check and it doesn't fire.
+- from_bc gives me the inline asm, 8. and that's just as many as passed with aot.
+  but in 4 seconds instead of 11 seconds. there's gotta be something wrong with clang's assembler.
+  (and thats still with the new backend running jitted on the old unoptimising backend so it should get faster with release mode).
+- fixed minimal_inline_bc not setting arg_prims on its block
+
+## (Oct 2)
+
 - you can't ask the linker to adrp you to a dynamic import? that makes sense, the loader puts it somewhere random and you have to look it up in a table.
 - had adr encoding high low flipped
 - ok that worked much better than expected. franca tests are failing 57/289. and i can still run in text mode that mostly works.
 - put jit addr for constants in the table, 45
+- started doing emit constant properly and poking in references, 33
 
 ## (Oct 1)
 

@@ -6,6 +6,7 @@ QbeModule :: @struct(
     symbols: HashMap(u32, SymbolInfo), 
     gpa: Alloc,
     start_of_writable_code: *u8,
+    globals: *Qbe.Globals,
 );
 
 SegmentCursor :: @struct(
@@ -32,7 +33,7 @@ SymbolInfo :: @tagged(
 );
 
 RelocationType :: @tagged(
-    InReg: @struct(r: i64, offset: i64),
+    InReg: @struct(r: i64, increment: i64),
     Call,
 );
 
@@ -41,13 +42,13 @@ Relocation :: @struct(
     type: RelocationType,
 );
 
-fn init(segment_size: i64, gpa: Alloc, code_alloc: Alloc) QbeModule = {
+fn init(segment_size: i64, gpa: Alloc, code_alloc: Alloc, globals: *Qbe.Globals) QbeModule = {
     s := EnumMap(SegmentType, SegmentCursor).zeroed();
     mem := code_alloc.alloc(u8, segment_size * 3); // TODO: ask for the alignment we need.
     s&.insert(.Code, (mmapped = mem.slice(0, segment_size), next = mem.index(0)));
     s&.insert(.MutableData, (mmapped = mem.slice(segment_size, segment_size*2), next = mem.index(segment_size)));
     s&.insert(.ConstantData, (mmapped = mem.slice(segment_size*2, segment_size*3), next = mem.index(segment_size*2)));
-    (segments = s, symbols = init(gpa), gpa = gpa, start_of_writable_code = mem.ptr)
+    (segments = s, symbols = init(gpa), gpa = gpa, start_of_writable_code = mem.ptr, globals = globals)
 }
 
 fn make_exec(self: *QbeModule) void = {
@@ -66,6 +67,10 @@ fn make_exec(self: *QbeModule) void = {
 
 fn get_addr(self: *QbeModule, name: Str) ?rawptr = {
     name := name.maybe_borrow_cstr(temp());
+    self.get_addr(name)
+}
+
+fn get_addr(self: *QbeModule, name: CStr) ?rawptr = {
     id := intern(name);
     if self.symbols&.get_ptr(id) { s | 
         @match(s) {
@@ -78,6 +83,71 @@ fn get_addr(self: *QbeModule, name: Str) ?rawptr = {
         };
     };
     .None
+}
+
+// TODO: be able to specify mutable or constant
+fn new_emit_data(self: *QbeModule, dat: *Qbe.Dat) void = {
+    ::enum(@type dat.type);
+    segment := self.segments&[.MutableData]&;
+    next := segment.next&;
+    @match(dat.type) {
+        fn DStart() => {
+            extra := u8.int_from_ptr(next[]).mod(8);
+            if extra != 0 {
+                next[] = next[].offset(8 - extra); // align to 8 bytes.
+            };
+            id := intern(dat.name);
+            self.do_jit_relocations(id, .MutableData, segment.mmapped.ptr.ptr_diff(next[]));
+        }
+        fn DEnd() => ();
+        fn DZ() => {
+            range(0, dat.u.num) { _ |
+                next[][] = 0;
+                next[] = next[].offset(1);
+            };
+        }
+        fn DB() => {
+            @debug_assert(!dat.isref, "can't have a byte sized pointer");
+            next[][] = dat.u.num.trunc();
+            next[] = next[].offset(1);
+        }
+        fn DL() => {
+            @assert_eq(u8.int_from_ptr(next[]).mod(8), 0, "sorry can't do unaligned constants yet");
+            ptr := ptr_cast_unchecked(u8, i64, next[]);
+            if dat.isref {
+                @assert(dat.u.ref.off == 0, "sorry can't do offset refs yet");
+                name := dat.u.ref.name;
+                value := or self.get_addr(name) {
+                    panic("TODO: data relocations")
+                };
+                ptr[] = int_from_rawptr(value); // TODO: we have to record that we did this somewhere for aot.
+            } else {
+                ptr[] = dat.u.num;
+            };
+            next[] = next[].offset(8);
+        }
+        fn DW() => @panic("sorry DW constants are not supported yet");
+        fn DH() => @panic("sorry DH constants are not supported yet");
+    }
+}
+
+// TODO: have this emit to text too so you don't have to do both
+fn add_code_bytes(self: *QbeModule, name: CStr, bytes: []u8) void = {
+    name_id := intern(name);
+    code := self.segments&[.Code]&;
+    code.align_to(4);
+    start_offset := ptr_diff(code.mmapped.ptr, code.next);
+    self.do_jit_relocations(name_id, .Code, start_offset);
+    dest := slice(code.next, bytes.len);
+    dest.copy_from(bytes);
+    code.next = code.next.offset(bytes.len);
+}
+
+fn align_to(s: *SegmentCursor, align: i64) void = {
+    extra := u8.int_from_ptr(s.next).mod(align);
+    if extra != 0 {
+        s.next = s.next.offset(align - extra); 
+    };
 }
 
 fn put_jit_addr(self: *QbeModule, name: CStr, addr: rawptr) void = {
@@ -96,11 +166,15 @@ fn put_jit_addr(self: *QbeModule, name: CStr, addr: rawptr) void = {
 fn fill_pending_dynamic_imports(self: *QbeModule, lib: DlHandle) void = {
     each self.symbols& { id, it | 
         if it.is(.Dynamic) || it.is(.Pending) {
-            found := lib.dlsym(str(id));
+            name := str(id);
+            found := lib.dlsym(name);
             if !found.is_null() {
                 // :SameFieldOffset
                 self.put_jit_addr_in_table(it.Dynamic.jit_lookup_offset, u8.ptr_from_raw(found));
-            };
+            } else {
+                // TODO: remove this and report at the end.
+                @eprintln("jit missing symbol %", name); // wrong once they add multiple dylibs
+            }
         };
     };
 }

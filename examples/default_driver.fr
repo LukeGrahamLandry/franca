@@ -4,6 +4,8 @@
 //! However, for smaller programs where you just want to try something out, 
 //! its a pain to have to write an extra program just to build it, so you can use this one instead. 
 
+// - TODO: this is an insane mess because its always the boring part of adding a new backend. clean it up. 
+//
 // - TODO: make llvm main function return 0 at the end so it doesn't make my terminal red. 
 // - TODO: think about how to make cli args less painful cause if you run a jit thing, it gets all the args for the driver too,
 //         and it seems kinda annoying to make you deal with that in every program. 
@@ -90,9 +92,21 @@ fn driver(vtable: *ImportVTable) void = {
             assert(!cmd.cfg.wasm, "cannot run wasm");
             if cmd.cfg.jit {
                 assert(!cmd.cfg.show_asm, "TODO: -S with jit");
-                ptr := c.get_jitted(fid);
-                f := assume_types_fn(Arg = void, Ret = void, ptr = ptr);
                 // TODO: how to pass cli args
+                ptr := if cmd.cfg.qbe {
+                    global_module[] = init(1.shift_left(18), page_allocator, page_allocator, qbe_globals);
+                    env: TargetEnv = (arch = arch, os = os);
+                    _ := emit_qbe_included(c, @slice(fid), .ExportWithNames, env&);
+                    global_module.make_exec();
+                    global_module.fill_from_libc();
+                    qbe_globals; // ugh
+                    or global_module.get_addr("main") {
+                        panic("couldn't find main")
+                    }
+                } else {
+                    c.get_jitted(fid)
+                };
+                f := assume_types_fn(Arg = void, Ret = void, ptr = ptr);
                 f();
             } else {
                 if cmd.cfg.llvm {
@@ -100,7 +114,6 @@ fn driver(vtable: *ImportVTable) void = {
                 } else {
                     assert(!cmd.cfg.show_asm, "TODO: -S with qbe");
                     assert(cmd.cfg.qbe, "rn only two backends. update me as needed!");
-                    //panic("TODO: impl swit ch on qbe");
                     c.compile_with_qbe(fid, .ExportWithNames, arch, os);
                 };
                 if cmd.cfg.blink {
@@ -120,13 +133,27 @@ fn driver(vtable: *ImportVTable) void = {
             c := load_file(cmd.file, vtable, build_options);
             
             tests := c.get_tagged("test");
+            env: TargetEnv = (arch = arch, os = os);
             passed := 0;
             for tests { fid |
                 @eprintln("[compile %]", c.get_string(c.get_function_name(fid)));
                 if cmd.cfg.jit {
-                    ptr := c.get_jitted(fid);
+                    // would be faster if you could share the module between runs
+                    global_module[] = init(1.shift_left(18), page_allocator, page_allocator, qbe_globals);
+                    name := c.get_string(c.get_function_name(fid));
+                    ptr := if cmd.cfg.qbe {
+                        _ := emit_qbe_included(c, @slice(fid), .ExportWithNames, env&);
+                        global_module.make_exec();
+                        global_module.fill_from_libc();
+                        qbe_globals; // ugh
+                        or global_module.get_addr(name) {
+                            panic("couldn't find main")
+                        }
+                    } else {
+                        c.get_jitted(fid)
+                    };
                     f := assume_types_fn(Arg = void, Ret = void, ptr = ptr);
-                    @eprintln("[run     %]", c.get_string(c.get_function_name(fid)));
+                    @eprintln("[run     %]", name);
                     f();
                     // TODO: do the fork stuff to report all even when some fail. 
                     passed += 1;
@@ -261,7 +288,7 @@ fn compile_with_qbe(c: CompCtx, fid: FuncId, entry: ProgramEntry, arch: Arch, os
 }
 
 fn compile_with_included_qbe(c: CompCtx, fid: FuncId, entry: ProgramEntry, arch: Arch, os: Os) void = {
-    global_module[] = init(1.shift_left(20), page_allocator, page_allocator);
+    global_module[] = init(1.shift_left(20), page_allocator, page_allocator, qbe_globals);
     
     env: TargetEnv = (arch = arch, os = os);
     asm_text := emit_qbe_included(c, @slice(fid), entry, env&);
@@ -339,6 +366,10 @@ fn parse_cli_args() Command = {
             };
             @case("-aot=qbe") => {
                 cfg.jit = false; cfg.qbe = true;
+                assert(!cfg.llvm, "choose one backend");
+            };
+            @case("-jit=qbe") => {
+                cfg.jit = true; cfg.qbe = true;
                 assert(!cfg.llvm, "choose one backend");
             };
             @case("-jit=cranelift") => {
