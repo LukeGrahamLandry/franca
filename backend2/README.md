@@ -9,6 +9,16 @@ You can still print out the ir as human readable text between passes and modify 
 > When trying to understand what phi instructions do, remember that they're totally isomorphic to block arguments and then it's suddenly super simple.
 > It's just a choice to represent it as the callee knowing which value to use for each argument for each caller.
 
+## Changes from Qbe
+
+- Moved a bunch of static variables to a data structure we pass around explicitly.
+  Eventually you will be able to compile multiple modules on parallel threads (not yet tho, there's still more unported).
+- Removed several codegen optimisations until we have a solid foundation (but I want to bring them back eventually).
+  - arm: loading float constants from memory
+  - arm: logimm single instruction load int more constants
+  - arm: use of bl for calling a constant (instead of blr)
+  - arm: constant immediate without an extra register when accessing thread locals
+
 ## Qbe License
 
 © 2015-2024 Quentin Carbonneaux <quentin@c9x.me>

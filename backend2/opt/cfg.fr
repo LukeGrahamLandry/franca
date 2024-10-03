@@ -1,0 +1,300 @@
+// Adapted from Qbe. MIT License. © 2015-2024 Quentin Carbonneaux <quentin@c9x.me>
+
+//! Various computations about a function's control flow graph.
+
+fn newblk() *Qbe.Blk #import("qbe");
+fn _newblk() void = {
+    static Blk z;
+    Blk *b;
+
+    b = alloc(sizeof *b);
+    *b = z;
+    return b;
+}
+
+fn edgedel(_0: *Qbe.Blk, _1: **Qbe.Blk) void #import("qbe");
+fn _edgedel(bs: *Qbe.Blk, pbd: **Qbe.Blk) void = {
+    Blk *bd;
+    Phi *p;
+    uint a;
+    int mult;
+
+    bd = *pbd;
+    mult = 1 + (bs.s1 == bs.s2);
+    *pbd = 0;
+    if (!bd || mult > 1)
+        return;
+    for (p=bd.phi; p; p=p.link) {
+        for (a=0; p.blk[a]!=bs; a++)
+            assert(a+1<p.narg);
+        p.narg--;
+        memmove(&p.blk[a], &p.blk[a+1],
+            sizeof p.blk[0] * (p.narg-a));
+        memmove(&p.arg[a], &p.arg[a+1],
+            sizeof p.arg[0] * (p.narg-a));
+    }
+    if (bd.npred != 0) {
+        for (a=0; bd.pred[a]!=bs; a++)
+            assert(a+1<bd.npred);
+        bd.npred--;
+        memmove(&bd.pred[a], &bd.pred[a+1],
+            sizeof bd.pred[0] * (bd.npred-a));
+    }
+}
+
+fn addpred(bp: *Qbe.Blk, bc: *Qbe.Blk) void #import("qbe");
+fn _addpred(bp: *Qbe.Blk, bc: *Qbe.Blk) void = {
+    if (!bc.pred) {
+        bc.pred = alloc(bc.npred * sizeof bc.pred[0]);
+        bc.visit = 0;
+    }
+    bc.pred[bc.visit++] = bp;
+}
+
+fn fillpreds(_0: *Qbe.Fn) void #import("qbe");
+/* fill predecessors information in blocks */
+fn _fillpreds(f: *Qbe.Fn) void = {
+    Blk *b;
+
+    for (b=f.start; b; b=b.link) {
+        b.npred = 0;
+        b.pred = 0;
+    }
+    for (b=f.start; b; b=b.link) {
+        if (b.s1)
+            b.s1.npred++;
+        if (b.s2 && b.s2 != b.s1)
+            b.s2.npred++;
+    }
+    for (b=f.start; b; b=b.link) {
+        if (b.s1)
+            addpred(b, b.s1);
+        if (b.s2 && b.s2 != b.s1)
+            addpred(b, b.s2);
+    }
+}
+
+fn rporec(b: void, x: i32) i32 = {
+    if b.is_null() || b.id != -1 {
+        return(x);
+    };
+    b.id = 1;
+    s1 := b.s1;
+    s2 := b.s2;
+    if !s1.is_null() && !s2.is_null() && s1.loop > s2.loop {
+        s1 = b.s2;
+        s2 = b.s1;
+    };
+    x = rporec(s1, x);
+    x = rporec(s2, x);
+    b.id = x;
+    @debug_assert(x != -1);
+    x - 1
+}
+
+fn fillrpo(_0: *Qbe.Fn) void #import("qbe");
+/* fill the rpo information */
+fn _fillrpo(f: *Qbe.Fn) void = {
+    uint n;
+    Blk *b, **p;
+
+    for (b=f.start; b; b=b.link)
+        b.id = -1u;
+    n = 1 + rporec(f.start, f.nblk-1);
+    f.nblk -= n;
+    f.rpo = alloc(f.nblk * sizeof f.rpo[0]);
+    for (p=&f.start; (b=*p);) {
+        if (b.id == -1u) {
+            edgedel(b, &b.s1);
+            edgedel(b, &b.s2);
+            *p = b.link;
+        } else {
+            b.id -= n;
+            f.rpo[b.id] = b;
+            p = &b.link;
+        }
+    }
+}
+
+/* for dominators computation, read
+ * "A Simple, Fast Dominance Algorithm"
+ * by K. Cooper, T. Harvey, and K. Kennedy.
+ */
+
+fn inter(b1: *Qbe.Blk, b2: *Qbe.Blk) *Qbe.Blk = {
+    if(b1.is_null(), => return(b2));
+    while => !b1.identical(b2) {
+        if b1.id < b2.id {
+            bt := b1;
+            b1 = b2;
+            b2 = bt;
+        };
+        while => b1.id > b2.id {
+            b1 = b1.idom;
+            @debug_assert(!b1.is_null(), "null idom");
+        }
+    };
+    b1
+}
+
+fn filldom(f: *Qbe.Fn) void = {
+    for_blocks f { b |
+        b.idom = Qbe.Blk.ptr_from_int(0);
+        b.dom = Qbe.Blk.ptr_from_int(0);
+        b.dlink = Qbe.Blk.ptr_from_int(0);
+    };
+    dowhile {
+        changed := false;
+        range(1, f.nblk.zext()) { n |
+            b := f.rpo.offset(n)[];
+            d := Qbe.Blk.ptr_from_int(0);
+            for_pred b { p |
+                if !p.idom.is_null() || p.identical(f.start) {
+                    d = inter(d, p);
+                }
+            };
+            if !d.identical(b.idom) {
+                changed = true;
+                b.idom = d;
+            }
+        };
+        changed
+    };
+    
+    for_blocks f { b | 
+        d := b.idom;
+        if !d.is_null() {
+            @debug_assert(!d.identical(b), "can't idom youself");
+            b.dlink = d.dom;
+            d.dom = b;
+        };
+    };
+}
+
+fn sdom(b1: *Qbe.Blk, b2: *Qbe.Blk) bool = {
+    @debug_assert(!b1.is_null() && !b2.is_null(), "sdom null");
+    if(b1.identical(b2), => return(false));
+    while => b2.id > b1.id {
+        b2 = b2.idom;
+    };
+    b1.identical(b2)
+}
+
+fn dom(b1: *Qbe.Blk, b2: *Qbe.Blk) bool #inline = 
+    b1.identical(b2) || sdom(b1, b2);
+
+fn addfron(a: *Qbe.Blk, b: *Qbe.Blk) void = {
+    range(0, a.nfron.zext()) { n | 
+        if a.fron[n].identical(b) {
+            return();
+        }
+    };
+    if a.nfron == 0 {
+        a.nfron += 1;
+        a.fron = new(1, .PFn);
+    } else {
+        a.nfron += 1;
+        a.fron&.grow(a.nfron.zext());
+    };
+    a.fron[a.nfron.zext() - 1] = b;
+}
+
+/* fill the dominance frontier */
+fn fillfron(f: *Qbe.Fn) void = {
+    for_blocks f { b | 
+        b.nfron = 0;
+    };
+    for_blocks f { b |
+        for_jump_targets b { s | 
+            a := b;
+            while => !sdom(a, s) {
+                addfron(a, s);
+                a = a.idom;
+            };
+        };
+    }
+}
+
+LoopMark :: @FnPtr(hd: *Qbe.Blk, b: *Qbe.Blk) void;
+
+fn loopmark(hd: *Qbe.Blk, b: *Qbe.Blk, func: LoopMark) void = {
+    if b.id < hd.id || b.visit == hd.id {
+        return();
+    };
+    b.visit = hd.id;
+    func(hd, b);
+    for_pred(b, fn(p) => loopmark(hd, p, func));
+}
+
+fn loopiter(f: *Qbe.Fn, func: LoopMark) void = {
+    for_blocks f { b | 
+        b.visit = bitcast(@as(i32) -1);
+    };
+    range(0, f.nblk.zext()) { n | 
+        b := f.rpo.offset(n)[];
+        for_pred b { pred | 
+            if pred.id.zext() >= n {
+                loopmark(b, pred, func);
+            }
+        };
+    };
+}
+
+// :Explain (used for spilling huristic)
+fn fillloop(f: *Qbe.Fn) void = {
+    for_blocks f { b | 
+        b.loop = 1;
+    };
+
+    // TODO: should allow infering type for non '=>' functions when used like this. 
+    //       tho this syntax is suposed to be the same as a '=>' so maybe this is sketchy. 
+    //       but its so obvious that this does what you expect its probably not a big deal. 
+    loopiter f { _: *Qbe.Blk, b: *Qbe.Blk | 
+        b.loop = intcast(b.loop.zext() * 10);
+    };
+}
+
+/* requires rpo and no phis, breaks cfg */
+// - Replaces returns with jumps to a single new block so the codegen only needs to emit one epilogue. 
+// - Replaces chains of unconditional jumps through empty blocks with just jumping directly to the end.  
+// - Replaces conditional jumps that go to the same place (perhaps created by the above) with unconditional jumps.
+fn simplify_jump_chains(f: *Qbe.Fn) void = {
+    epilogue := newblk();
+    epilogue.id = f.nblk;
+    f.nblk += 1;
+    epilogue.jmp.type = .Jret0;
+    direct_jumps := temp().alloc_zeroed(*Qbe.Blk, f.nblk.zext());
+    for_blocks f { b | 
+        @debug_assert(b.phi.is_null(), "simpljmp requires no phis");
+        if b.jmp.type == .Jret0 {
+            b.jmp.type = .Jjmp;
+            b.s1 = epilogue;
+        };
+        if b.nins == 0 && b.jmp.type == .Jjmp {
+            update_target(b.s1&, direct_jumps);
+            if !b.s1.identical(b) { // avoids infinite loop while processing single block infinite loop
+                direct_jumps[b.id.zext()] = b.s1;
+            }
+        }
+    };
+    last_link := ptr_from_int(*Qbe.Blk, 0);
+    for_blocks f { b |
+        last_link = b.link&;
+        if(!b.s1.is_null(), => update_target(b.s1&, direct_jumps));
+        if(!b.s2.is_null(), => update_target(b.s2&, direct_jumps));
+        if !b.s1.is_null() && b.s1.identical(b.s2) {
+            b.jmp.type = .Jjmp;
+            b.s2 = Qbe.Blk.ptr_from_int(0);
+        }
+    };
+    @debug_assert(!last_link.is_null() && last_link[].is_null(), "invarient: f->start exists and b->link doesn't loop");
+    last_link[] = epilogue; // append our new block to the linked list. 
+}
+
+fn update_target(pb: **Qbe.Blk, uf: []*Qbe.Blk) void = {
+    old_entry := uf[pb[].id.zext()]&;
+    if !old_entry[].is_null() {
+        update_target(old_entry, uf);
+        pb[] = old_entry[];
+    }
+}

@@ -5,6 +5,7 @@ QbeModule :: @struct(
     //       when we'll get new code that references an old symbol. 
     symbols: HashMap(u32, SymbolInfo), 
     gpa: Alloc,
+    start_of_writable_code: *u8,
 );
 
 SegmentCursor :: @struct(
@@ -19,14 +20,25 @@ SegmentType :: @enum(i64) (
 );
 
 SymbolInfo :: @tagged(
-    Known: @struct(segment: SegmentType, offset: i64),
-    PendingRelocations: RsVec(Relocation),
+    // We haven't compiled this yet so we've emitted references as lookups into a table in the data section. 
+    Pending: @struct(fixups: RsVec(Relocation), jit_lookup_offset: i64),  // :SameFieldOffset
+    // We've already compiled this and we know its close to the code and addressable by a static offset. 
+    Local:   @struct(segment: SegmentType, offset: i64),
+    // This is a dynamic import. 
+    // - For jit, references still go through the table because that means we didn't have to make the code memory writeable again if it already started executing. 
+    // - For aot, you may want to go through the fixups again and translate them to use a GOT section. 
+    //   That way you don't make the loader waste time patching two tables. 
+    Dynamic: @struct(fixups: RsVec(Relocation), jit_lookup_offset: i64, aot_lookup_offset: i64),  // :SameFieldOffset
 );
 
-// for now patch_at is always adrp+adr. TODO: im immediately going to need data patches too.
+RelocationType :: @tagged(
+    InReg: @struct(r: i64, offset: i64),
+    Call,
+);
+
 Relocation :: @struct(
-    patch_at: []u8,
-    increment := 0,
+    patch_at: *u8,
+    type: RelocationType,
 );
 
 fn init(segment_size: i64, gpa: Alloc, code_alloc: Alloc) QbeModule = {
@@ -35,11 +47,21 @@ fn init(segment_size: i64, gpa: Alloc, code_alloc: Alloc) QbeModule = {
     s&.insert(.Code, (mmapped = mem.slice(0, segment_size), next = mem.index(0)));
     s&.insert(.MutableData, (mmapped = mem.slice(segment_size, segment_size*2), next = mem.index(segment_size)));
     s&.insert(.ConstantData, (mmapped = mem.slice(segment_size*2, segment_size*3), next = mem.index(segment_size*2)));
-    (segments = s, symbols = init(gpa), gpa = gpa)
+    (segments = s, symbols = init(gpa), gpa = gpa, start_of_writable_code = mem.ptr)
 }
 
 fn make_exec(self: *QbeModule) void = {
-    panic("TODO: make exec");
+    prot := bit_or(@as(i64) MapProt.Exec, @as(i64) MapProt.Read);
+    end := self.segments&[.Code].next&;
+    len := self.start_of_writable_code.ptr_diff(end[]);
+    res := mprotect(u8.raw_from_ptr(self.start_of_writable_code), len, prot); 
+    assert(res.value.eq(0), "mprotect failed");
+    clear_instruction_cache(u8.raw_from_ptr(self.start_of_writable_code), u8.raw_from_ptr(end[]));
+        
+    PAGE_SIZE :: 16384; // TODO: ask the os for this. we're wasting hella memory on linux. 
+    page_start := u8.int_from_ptr(end[]) / PAGE_SIZE * PAGE_SIZE;
+    end[] = u8.ptr_from_int(page_start + PAGE_SIZE);
+    self.start_of_writable_code = end[];
 }
 
 fn get_addr(self: *QbeModule, name: Str) ?rawptr = {
@@ -47,13 +69,47 @@ fn get_addr(self: *QbeModule, name: Str) ?rawptr = {
     id := intern(name);
     if self.symbols&.get_ptr(id) { s | 
         @match(s) {
-            fn Known(s) => {
+            fn Local(s) => {
                 segment := self.segments&[s.segment];
                 addr := segment.mmapped.ptr.offset(s.offset);
                 return(Some = u8.raw_from_ptr(addr));
             }
-            fn PendingRelocations() => ();
+            @default => ();
         };
     };
     .None
+}
+
+fn put_jit_addr(self: *QbeModule, name: CStr, addr: rawptr) void = {
+    // TODO: insert if not already there. 
+    if self.symbols&.get_ptr(intern(name)) { it | 
+        if it.is(.Dynamic) || it.is(.Pending) {
+            self.put_jit_addr_in_table(it.Dynamic.jit_lookup_offset, u8.ptr_from_raw(addr));
+            // TODO: if pending make it dynamic. 
+            // TODO: error if local
+        };
+    };
+}
+
+// :SLOW insanely inefficient way of doing this. especially when someone tries to add multiple libs. 
+// TODO: keep track of which need to be filled
+fn fill_pending_dynamic_imports(self: *QbeModule, lib: DlHandle) void = {
+    each self.symbols& { id, it | 
+        if it.is(.Dynamic) || it.is(.Pending) {
+            found := lib.dlsym(str(id));
+            if !found.is_null() {
+                // :SameFieldOffset
+                self.put_jit_addr_in_table(it.Dynamic.jit_lookup_offset, u8.ptr_from_raw(found));
+            };
+        };
+    };
+}
+
+fn fill_from_libc(self: *QbeModule) void = {
+    if find_os_libc_dylib() { libc_path | 
+        libc := dlopen(libc_path, .Lazy);
+        if !libc.lib.is_null() { 
+            self.fill_pending_dynamic_imports(libc);
+        };
+    };
 }

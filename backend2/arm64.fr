@@ -31,40 +31,65 @@ fn emit_func_arm64(m: *QbeModule, f: *Qbe.Fn, text: *FILE) []u8 = {
     
     self&.emit_the_code();
     write(text, self.buf.items());
-    end_offset := self&.next_inst_offset();
-    code_bytes := code.mmapped.slice(start_offset, end_offset);
+    code_bytes := code.mmapped.slice(start_offset, start_offset + self&.next_inst_offset());
+    
+    if false {
+        asm := code_bytes;
+        @println("% bytes.", asm.len());
+        hex: List(u8) = list(asm.len * 5, temp());
+        for asm { byte |
+            hex&.push_prefixed_hex_byte(byte);
+            hex&.push_all(" ");
+        };
+        arch := "--arch=aarch64";
+        out := open_temp_file();
+        out.fd&.write(hex.items());
+        // TODO: have the caller pass in anything like this, 
+        //       but this is just for debugging the compiler so its not a big deal. :driver_io
+        // varient 1 means intel syntax. ignored when doing arm. 
+        success := run_cmd_blocking("llvm-mc", @slice(arch, "--disassemble", "-output-asm-variant=1", "--show-encoding", out&.s_name()));
+        if(!success, => eprintln("ICE(debugging): couldn't disassemble"));
+        out.remove();
+    };
     code_bytes
+}
+
+fn segment_address(self: *QbeModule, segment: SegmentType, offset_in_segment: i64) *u8 = {
+    data := self.segments&[segment]&;
+    data.mmapped.ptr.offset(offset_in_segment)
 }
 
 // TODO: when doing aot we just have to ask for our segments to have the same spacing as they did now and then relative addressing will just work out. 
 //       but for data constants with pointers we'll need to remember what relocations to ask the loader to do at runtime. 
 //       would be great if my language had nice relative pointers and then you wouldn't have to deal with that as much
 //
-fn do_jit_relocations(self: *QbeModule, id: u32, segment: SegmentType, offset: i64) void = {
+fn do_jit_relocations(self: *QbeModule, id: u32, segment: SegmentType, final_offset: i64) void = {
     slot := self.symbols&.get_ptr(id);
-    if slot { slot | 
-        @if_let(slot) fn PendingRelocations(relocations) => {
-            for relocations { r | 
-                // TODO: this is RelocationType.CodeAdrAdrp. data relocations should be the same for both arches. 
-                
-                @debug_assert_eq(r.patch_at.len, 8, "expected to patch adrp+adr");
-                patch_start := u8.int_from_ptr(r.patch_at.ptr);
-                @debug_assert_eq(patch_start.mod(4), 0, "arm instructions are aligned");
-                dest := u8.int_from_ptr(self.segments&[segment].mmapped.ptr) + offset;
-                distance := dest - patch_start;
-                assert(distance.abs() < i32_MAX, "can't jump >4GB"); // TODO: wrong but good enough
-                // todo: adr gives you 1mb
-                low12 := distance.bit_and(1.shift_left(12) - 1); // for add
-                high20 := distance.shift_right_arithmetic(12).bit_and(1.shift_left(20) - 1);  // for adrp (TODO: will need to split off high bits for encoding)
-                panic("TODO: do relocation"); // emit the instructions
-            };
-        };
-        
-        slot[] = (Known = (segment = segment, offset = offset));
-        return();
+    new: SymbolInfo = (Local = (segment = segment, offset = final_offset));
+    slot := or slot {
+        self.symbols&.insert(id, new);
+        return()
     };
-    self.symbols&.insert(id, (Known = (segment = segment, offset = offset)));
+    old := slot[];
+    slot[] = new;
+    @match(old) {
+        fn Pending(it) => {
+            self.put_jit_addr_in_table(it.jit_lookup_offset, self.segment_address(segment, final_offset));
+            // TODO: do patches so olds calls aren't indirect
+        };
+        @default => (); // TODO: thats probably bad. @panic("Redeclared symbol %", str(id));
+    };  
 }
+
+fn put_jit_addr_in_table(self: *QbeModule, jit_lookup_offset: i64, addr_value: *u8) void = {
+    data := self.segments&[.ConstantData]&;
+    lookup_addr := data.mmapped.ptr.offset(jit_lookup_offset);
+    ptr_cast_unchecked(u8, *u8, lookup_addr)[] = addr_value;
+}
+
+tried_to_call_uncompiled :: @as(rawptr) fn() void = {
+    @panic("TODO: backend2 jitted code tried to call uncompiled function");
+};
 
 fn emit_the_code(self: *ArmState) void #once = {
     // TODO: what is this? is it the control flow integrety shit? 
@@ -109,7 +134,7 @@ fn emit_the_code(self: *ArmState) void #once = {
         @match(b.jmp.type) {
             fn Jhlt() => self.inst(brk(1000));
             fn Jret0() => {
-                // invarient: multiple returns are translated to multiple jumps to a single new return block.
+                // if you run the simplify_jump_chains pass, you'll only need to emit this epilogue once. 
                 offset_to_callee_saved = (self.frame - self.padding) / 4;
                 for arm64_rclob { r |
                     if self.f.reg.bit_and(BIT(r.raw())) != 0 {
@@ -300,22 +325,68 @@ fn slot(self: *ArmState, r: Qbe.Ref) i64 = {
     16 + self.padding + 4 * s
 }
 
-fn loadaddr(self: *ArmState, c: *Qbe.Con, dest: i64, reg_name: CStr) void = {
+fn encode_adr(distance: i64, dest_reg: u5) u32 = {
+    @assert(distance.abs() < 1.shift_left(21), "cant reference that far % (TODO: can just use more insts)", distance);
+    high := distance.shift_right_arithmetic(2).bit_and(1.shift_left(19) - 1);
+    low := distance.bit_and(0b11);
+    adr(high, low, dest_reg)
+}
+
+fn maybe_load_from_table(self: *ArmState, c: *Qbe.Con, dest_reg: i64) void = {
+    call_through_table :: fn(fixups: *RsVec(Relocation), table_offset_in_data: i64) void => { 
+        patch_addr := self.m.segment_address(.Code, self.next_inst_offset() + self.start_of_function); // stupid
+        fixups.push((patch_at = patch_addr, type = (InReg = (r = dest_reg, offset = 0))), self.m.gpa);
+        table_addr := self.m.segment_address(.ConstantData, table_offset_in_data);
+        distance   := ptr_diff(patch_addr, table_addr);
+        dest_reg: u5 = dest_reg;
+        self.inst_bytes_only(encode_adr(distance, dest_reg));
+        self.inst_bytes_only(ldr_uo(Bits.X64, dest_reg, dest_reg, 0)); // TODO: this can add the extra u12 you need for adrp so can still do it in 3 instructions.
+    };
+    slot := or self.m.symbols&.get(c.sym.id) {
+        // This is the first time we've seen this symbol. so we allocate a slot in the indirect call table. 
+        data := self.m.segments&[.ConstantData]&; // TODO: really this should be in a seperate jit only segment. 
+        data.next = data.next.offset(u8.int_from_ptr(data.next).mod(8)); // align to 8 bytes.
+        next_offset := data.mmapped.ptr.ptr_diff(data.next);
+        fixups: RsVec(Relocation) = empty();
+        call_through_table(fixups&, next_offset);
+        self.m.put_jit_addr_in_table(next_offset, u8.ptr_from_raw(tried_to_call_uncompiled));
+        data.next = data.next.offset(8);
+        self.m.symbols&.insert(c.sym.id, (Pending = (fixups = fixups, jit_lookup_offset = next_offset)));
+        return()
+    };
+    @match(slot) {
+        fn Local(it) => {
+            assert(it.segment == .Code, "can only call into the code segment");
+            // we've already compiled it so just compute its address directly.
+            distance := (it.offset - self.next_inst_offset() - self.start_of_function);
+            @debug_assert(distance < 0, "we must be jumping backwards");
+            self.inst_bytes_only(arm_nop); // TODO: make this adrp if needed
+            self.inst_bytes_only(encode_adr(distance, @as(u5) dest_reg));
+        }
+        fn Dynamic(it) => call_through_table(it.fixups&, it.jit_lookup_offset);
+        fn Pending(it) => call_through_table(it.fixups&, it.jit_lookup_offset);
+    };
+}
+
+fn loadaddr(self: *ArmState, c: *Qbe.Con, dest: i64, reg_name: CStr, do_text: bool) void = {
     symbol_name := str(c.sym.id);
 
     //p = l[0] == '"' ? "" : T.assym;
     @match(c.sym.type) {
         fn SGlo() => {
-            self.inst_bytes_only(brk(1111)); // TODO: patch
-            self.inst_bytes_only(brk(1111)); // TODO: patch
-            // :TempAsmText
-            if self.f.globals.target.apple {
-                @fmt(self.buf&, "\tadrp\t%, _%@page\n\tadd\t%, %, _%@pageoff\n", reg_name, symbol_name, reg_name, reg_name, symbol_name);
-            } else {
-                @fmt(self.buf&, "\tadrp\t%, %\n\tadd\t%, %, #:lo12:%\n", reg_name, symbol_name, reg_name, reg_name, symbol_name);
+            self.maybe_load_from_table(c, dest);
+            if do_text {
+                // :TempAsmText
+                // when outputting text we just let the linker deal with it. 
+                if self.f.globals.target.apple {
+                    @fmt(self.buf&, "\tadrp\t%, _%@page\n\tadd\t%, %, _%@pageoff\n", reg_name, symbol_name, reg_name, reg_name, symbol_name);
+                } else {
+                    @fmt(self.buf&, "\tadrp\t%, %\n\tadd\t%, %, #:lo12:%\n", reg_name, symbol_name, reg_name, reg_name, symbol_name);
+                };
             };
         }
         fn SThr() => {
+            assert(do_text, "no thread local jit yet");
             // :TempAsmText
             s := if self.f.globals.target.apple {
                 self.inst_bytes_only(brk(1111)); // TODO: patch
@@ -336,12 +407,12 @@ fn loadaddr(self: *ArmState, c: *Qbe.Con, dest: i64, reg_name: CStr) void = {
     };
 }
 
-fn loadcon(self: *ArmState, c: *Qbe.Con, r: i64, k: Qbe.Cls) void = {
+fn loadcon(self: *ArmState, c: *Qbe.Con, r: i64, k: Qbe.Cls, do_text: bool) void = {
     w := is_wide(k);
     rn := rname(r + 1, k); // HACK
     n := c.bits.i;
     if (c.type == .CAddr) {
-        self.loadaddr(c, r, rn);
+        self.loadaddr(c, r, rn, do_text);
         return();
     };
     @debug_assert(c.type == .CBits, "bad constant");
@@ -440,7 +511,7 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
             @match(rtype(i.arg&[0])) {
                 fn RCon() => {
                     c := self.f.get_constant(i.arg&[0]);
-                    self.loadcon(c, i.to.int_reg(), i.cls());
+                    self.loadcon(c, i.to.int_reg(), i.cls(), true);
                 }
                 fn RSlot() => {
                     i.set_op(.load);
@@ -481,24 +552,28 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
         }
         fn call() => {
             callee := i.arg&[0];
-            if (rtype(callee) != .RCon) {
+            if rtype(callee) == .RCon {
+                // TODO: to start with, we always call through a register so i can deal with fewer cases. 
+                //       for better code gen should bring back use of bl instruction. 
+                c := self.f.get_constant(i.arg&[0]);
+                if c.type != .CAddr || c.sym.type != .SGlo || c.bits.i != 0 {
+                    die("invalid call argument".sym().c_str());
+                };
+                callee = TMP(Arm64Reg.IP0.raw()); // x16 can never be live at a call. 
+                self.loadcon(c, callee.int_reg(), .Kl, false);
+                
+                // dynamic link things it wont let you adrp to? you can only bl
+                l := str(c.sym.id);
+                p := self.f.globals.target.assym&.as_ptr();
+                p: CStr = (ptr = p);
+                p := str(p);
+                p := if(l.ptr[] == "\"".ascii(), => "", => p);
+                @fmt(self.buf&, "\tbl %%\n", p, l);
+                @fmt(self.buf&, "\tnop\n\tnop\n");
+                self.inst_bytes_only(br(callee.int_reg(), 1));
+            } else {
                 self.inst(br(callee.int_reg(), 1));
-                return();
             };
-            c := self.f.get_constant(i.arg&[0]);
-            if c.type != .CAddr || c.sym.type != .SGlo || c.bits.i != 0 {
-                die("invalid call argument".sym().c_str());
-            };
-            
-            self.inst_bytes_only(brk(1111)); // TODO: patch
-            // :TempAsmText
-            l := str(c.sym.id);
-            p := self.f.globals.target.assym&.as_ptr();
-            p: CStr = (ptr = p);
-            p := str(p);
-            p := if(l.ptr[] == "\"".ascii(), => "", => p);
-            @fmt(self.buf&, "\tbl %%\n", p, l);
-            
         }
         fn salloc() => {
             xxx := i.arg&[0].int_reg();

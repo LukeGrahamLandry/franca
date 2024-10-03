@@ -1,3 +1,10 @@
+##
+
+- you can't ask the linker to adrp you to a dynamic import? that makes sense, the loader puts it somewhere random and you have to look it up in a table.
+- had adr encoding high low flipped
+- ok that worked much better than expected. franca tests are failing 57/289. and i can still run in text mode that mostly works.
+- put jit addr for constants in the table, 45
+
 ## (Oct 1)
 
 - (big imm, cset, 37), (float ldr/str, 35), (slot ldr/str, 34)
