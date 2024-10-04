@@ -1,80 +1,74 @@
 // Adapted from Qbe. MIT License. © 2015-2024 Quentin Carbonneaux <quentin@c9x.me>
 
 //! Various computations about a function's control flow graph.
+// :Explain
 
-fn newblk() *Qbe.Blk #import("qbe");
-fn _newblk() void = {
-    static Blk z;
-    Blk *b;
-
-    b = alloc(sizeof *b);
-    *b = z;
-    return b;
+fn edgedel(source: *Qbe.Blk, dest_p: **Qbe.Blk) void = {
+    dest := dest_p[];
+    multiplicity := 1 + if(source.s1.identical(source.s2), => 1, => 0);
+    dest_p[] = Qbe.Blk.ptr_from_int(0);
+    if dest.is_null() || multiplicity > 1 {
+        return();
+    };
+    
+    // remove the phis along this edge.
+    // this would happen for free if we used block arguments instead of phis, but phis are more convient in other passes. 
+    for_phi dest { p |
+        // find the phi's value in dest when coming from source.
+        a := 0;
+        while => !p.blk[a].identical(source) {
+            @debug_assert(a + 1 < p.narg.zext(), "tried to remove nonexistant edge (a phi has no value in % when coming from %)", dest.name(), source.name());
+            a += 1;
+        };
+        
+        // and remove that option from the array
+        p.narg -= 1;
+        memmove(raw_from_ptr(*Qbe.Blk, p.blk.first.offset(a)), raw_from_ptr(*Qbe.Blk, p.blk.first.offset(a + 1)), size_of(*Qbe.Blk) * (p.narg.zext() - a));
+        memmove(raw_from_ptr(Qbe.Ref, p.arg.first.offset(a)), raw_from_ptr(Qbe.Ref, p.arg.first.offset(a + 1)), size_of(Qbe.Ref) * (p.narg.zext() - a));
+    };
+    
+    if dest.npred != 0 {
+        // record that source is no longer a predecessor of dest. 
+        a := 0;
+        while => !dest.pred.offset(a)[].identical(source) {
+            @debug_assert(a + 1 < dest.npred.zext(), "tried to remove nonexistant edge (% not a predecessor of %)", source.name(), dest.name());
+            a += 1;
+        };
+        dest.npred -= 1;
+        memmove(raw_from_ptr(*Qbe.Blk, dest.pred.offset(a)), raw_from_ptr(*Qbe.Blk, dest.pred.offset(a + 1)), size_of(*Qbe.Blk) * (dest.npred.zext() - a));
+    };
 }
 
-fn edgedel(_0: *Qbe.Blk, _1: **Qbe.Blk) void #import("qbe");
-fn _edgedel(bs: *Qbe.Blk, pbd: **Qbe.Blk) void = {
-    Blk *bd;
-    Phi *p;
-    uint a;
-    int mult;
-
-    bd = *pbd;
-    mult = 1 + (bs.s1 == bs.s2);
-    *pbd = 0;
-    if (!bd || mult > 1)
-        return;
-    for (p=bd.phi; p; p=p.link) {
-        for (a=0; p.blk[a]!=bs; a++)
-            assert(a+1<p.narg);
-        p.narg--;
-        memmove(&p.blk[a], &p.blk[a+1],
-            sizeof p.blk[0] * (p.narg-a));
-        memmove(&p.arg[a], &p.arg[a+1],
-            sizeof p.arg[0] * (p.narg-a));
-    }
-    if (bd.npred != 0) {
-        for (a=0; bd.pred[a]!=bs; a++)
-            assert(a+1<bd.npred);
-        bd.npred--;
-        memmove(&bd.pred[a], &bd.pred[a+1],
-            sizeof bd.pred[0] * (bd.npred-a));
-    }
-}
-
-fn addpred(bp: *Qbe.Blk, bc: *Qbe.Blk) void #import("qbe");
-fn _addpred(bp: *Qbe.Blk, bc: *Qbe.Blk) void = {
-    if (!bc.pred) {
-        bc.pred = alloc(bc.npred * sizeof bc.pred[0]);
+fn addpred(bp: *Qbe.Blk, bc: *Qbe.Blk) void = {
+    if bc.pred.is_null() {
+        mem := libc_allocator.alloc(@type bc.pred[], bc.npred.zext()); // :HardcodeAlloc :Leak have an arena like qbe's pool
+        bc.pred = mem.ptr;
         bc.visit = 0;
-    }
-    bc.pred[bc.visit++] = bp;
+    };
+    bc.pred.offset(bc.visit.zext())[] = bp;
+    bc.visit += 1;
 }
 
-fn fillpreds(_0: *Qbe.Fn) void #import("qbe");
 /* fill predecessors information in blocks */
-fn _fillpreds(f: *Qbe.Fn) void = {
-    Blk *b;
-
-    for (b=f.start; b; b=b.link) {
+fn fillpreds(f: *Qbe.Fn) void = {
+    for_blocks f { b |
         b.npred = 0;
-        b.pred = 0;
-    }
-    for (b=f.start; b; b=b.link) {
-        if (b.s1)
-            b.s1.npred++;
-        if (b.s2 && b.s2 != b.s1)
-            b.s2.npred++;
-    }
-    for (b=f.start; b; b=b.link) {
-        if (b.s1)
-            addpred(b, b.s1);
-        if (b.s2 && b.s2 != b.s1)
-            addpred(b, b.s2);
+        b.pred = ptr_from_int(*Qbe.Blk, 0);
+    };
+    // count first so we don't have to resize the array
+    for_blocks f { b |
+        for_jump_targets b { s | 
+            s.npred += 1;
+        };
+    };
+    for_blocks f { b |
+        for_jump_targets b { s | 
+            addpred(b, s);
+        };
     }
 }
 
-fn rporec(b: void, x: i32) i32 = {
+fn rporec(b: *Qbe.Blk, x: i32) i32 = {
     if b.is_null() || b.id != -1 {
         return(x);
     };
@@ -92,26 +86,27 @@ fn rporec(b: void, x: i32) i32 = {
     x - 1
 }
 
-fn fillrpo(_0: *Qbe.Fn) void #import("qbe");
 /* fill the rpo information */
-fn _fillrpo(f: *Qbe.Fn) void = {
-    uint n;
-    Blk *b, **p;
-
-    for (b=f.start; b; b=b.link)
-        b.id = -1u;
-    n = 1 + rporec(f.start, f.nblk-1);
-    f.nblk -= n;
-    f.rpo = alloc(f.nblk * sizeof f.rpo[0]);
-    for (p=&f.start; (b=*p);) {
-        if (b.id == -1u) {
-            edgedel(b, &b.s1);
-            edgedel(b, &b.s2);
-            *p = b.link;
+fn fillrpo(f: *Qbe.Fn) void = {
+    for_blocks f { b | 
+        b.id = bitcast(@as(i32) -1);
+    };
+    xxx: i32 = f.nblk.bitcast() - 1;
+    n := rporec(f.start, xxx) + 1;
+    f.nblk = f.nblk - n;
+    mem := libc_allocator.alloc(*Qbe.Blk, f.nblk.zext()); // :HardcodeAlloc
+    f.rpo = mem.ptr;
+    p := f.start&;
+    while => !p[].is_null() {
+        b := p[];
+        if b.id == -1 {
+            edgedel(b, b.s1&);
+            edgedel(b, b.s2&);
+            p[] = b.link;
         } else {
             b.id -= n;
-            f.rpo[b.id] = b;
-            p = &b.link;
+            f.rpo.offset(b.id.zext())[] = b;
+            p = b.link&;
         }
     }
 }
@@ -297,4 +292,10 @@ fn update_target(pb: **Qbe.Blk, uf: []*Qbe.Blk) void = {
         update_target(old_entry, uf);
         pb[] = old_entry[];
     }
+}
+
+fn newblk() *Qbe.Blk = {
+    b := libc_allocator.box(Qbe.Blk); // :HardcodeAlloc
+    b[] = Qbe.Blk.zeroed();
+    b
 }

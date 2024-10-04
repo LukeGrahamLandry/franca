@@ -1,9 +1,11 @@
-// Unlike Qbe, we don't rely on a seperate assembler. We just put the bytes in memory and jump there. 
-//    >>> (but for now we just put the bytes in a text file for a seperate assembler...)
-// This means we also have to handle updating forward references to functions that haven't been compiled yet. 
+//! Unlike Qbe, we don't rely on a seperate assembler. We just put the bytes in memory and jump there. 
+//! This means we also have to handle updating forward references to functions that haven't been compiled yet. 
+
 // TODO: don't setup stack frame for leaf like amd64?
 // TODO: make sure i have .ssa tests for every instruction. rn there are some that just fail the franca tests. 
 //       addr slot >4095, sltof, loadaddr with offset, 
+// TODO: a function you can call to emit forwarding shims for uncompiled functions. 
+//       so it in emit with the arch independent ir. i guess that means the front end could just do it. 
 
 ArmState :: @struct(
     m: *QbeModule,
@@ -168,7 +170,7 @@ fn emit_the_code(self: *ArmState) void #once = {
                         // we haven't made this block yet.
                         patches&.push(offset_from_start = here, cond = .None, target_bid = b.s1.id.zext(), text_offset = self.buf.len);
                         self.inst(brk(0xabba));
-                        @fmt(self.buf&, "             "); // :TempAsmText HACK
+                        @if(self.m.want_text_asm) @fmt(self.buf&, "             "); // :TempAsmText HACK
                     };
                 }; // else we can just fall through becuase we're about to emit the target block
             }
@@ -197,7 +199,7 @@ fn emit_the_code(self: *ArmState) void #once = {
                     // we haven't made this block yet.
                     patches&.push(offset_from_start = here, cond = (Some = cond), target_bid = b.s2.id.zext(), text_offset = self.buf.len);
                     self.inst(brk(0xabba)); // so the offsets for the below work out
-                    @fmt(self.buf&, "             "); // :TempAsmText HACK
+                    @if(self.m.want_text_asm) @fmt(self.buf&, "             "); // :TempAsmText HACK
                 };
                 // :GotoJmp
                 if !b.s1.identical(b.link) {
@@ -210,7 +212,7 @@ fn emit_the_code(self: *ArmState) void #once = {
                         // we haven't made this block yet.
                         patches&.push(offset_from_start = here, cond = .None, target_bid = b.s1.id.zext(), text_offset = self.buf.len);
                         self.inst(brk(0xabba));
-                        @fmt(self.buf&, "             "); // :TempAsmText HACK
+                        @if(self.m.want_text_asm) @fmt(self.buf&, "             "); // :TempAsmText HACK
                     };
                 }; // else we can just fall through becuase we're about to emit the target block
             };
@@ -235,9 +237,11 @@ fn emit_the_code(self: *ArmState) void #once = {
                 patch[] = branch(s_trunc(distance, 26), 0);
             };
         };
-        // :TempAsmText HACK
-        patch_buf: List(u8) = (maybe_uninit = self.buf.items().slice(p.text_offset, p.text_offset + 25), len = 0, gpa = panicking_allocator);
-        @fmt(patch_buf&, "\t.word %;     \n", patch[]);
+        @if(self.m.want_text_asm) {
+            // :TempAsmText HACK
+            patch_buf: List(u8) = (maybe_uninit = self.buf.items().slice(p.text_offset, p.text_offset + 25), len = 0, gpa = panicking_allocator);
+            @fmt(patch_buf&, "\t.word %;     \n", patch[]);
+        } 
     };
 }
 
@@ -391,7 +395,7 @@ fn loadaddr(self: *ArmState, c: *Qbe.Con, dest: i64, reg_name: CStr, do_text: bo
     @match(c.sym.type) {
         fn SGlo() => {
             self.maybe_load_from_table(c, dest);
-            if do_text {
+            if do_text && self.m.want_text_asm {
                 // :TempAsmText
                 // when outputting text we just let the linker deal with it. 
                 if self.f.globals.target.apple {
@@ -402,7 +406,7 @@ fn loadaddr(self: *ArmState, c: *Qbe.Con, dest: i64, reg_name: CStr, do_text: bo
             };
         }
         fn SThr() => {
-            assert(do_text, "no thread local jit yet");
+            assert(do_text && self.m.want_text_asm, "no thread local jit yet");
             // :TempAsmText
             s := if self.f.globals.target.apple {
                 self.inst_bytes_only(brk(1111)); // TODO: patch
@@ -578,14 +582,16 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
                 callee = TMP(Arm64Reg.IP0.raw()); // x16 can never be live at a call. 
                 self.loadcon(c, callee.int_reg(), .Kl, false);
                 
-                // dynamic link things it wont let you adrp to? you can only bl
-                l := str(c.sym.id);
-                p := self.f.globals.target.assym&.as_ptr();
-                p: CStr = (ptr = p);
-                p := str(p);
-                p := if(l.ptr[] == "\"".ascii(), => "", => p);
-                @fmt(self.buf&, "\tbl %%\n", p, l);
-                @fmt(self.buf&, "\tnop\n\tnop\n");
+                if self.m.want_text_asm {
+                    // dynamic link things it wont let you adrp to? you can only bl
+                    l := str(c.sym.id);
+                    p := self.f.globals.target.assym&.as_ptr();
+                    p: CStr = (ptr = p);
+                    p := str(p);
+                    p := if(l.ptr[] == "\"".ascii(), => "", => p);
+                    @fmt(self.buf&, "\tbl %%\n", p, l);
+                    @fmt(self.buf&, "\tnop\n\tnop\n");
+                };
                 self.inst_bytes_only(br(callee.int_reg(), 1));
             } else {
                 self.inst(br(callee.int_reg(), 1));
@@ -829,7 +835,9 @@ fn inst(self: *ArmState, opcode: u32) void = {
     ptr_cast_unchecked(u8, u32, code.next)[] = opcode;  // SAFETY: aligned becuase we're always emitting arm instructions
     code.next = code.next.offset(4);
     // :TempAsmText
-    @fmt(self.buf&, "\t.word %\n", opcode);
+    @if(self.m.want_text_asm) {
+        @fmt(self.buf&, "\t.word %\n", opcode);
+    };
 }
 
 fn next_inst_offset(self: *ArmState) i64 = {

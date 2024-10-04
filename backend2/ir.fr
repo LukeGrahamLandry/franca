@@ -22,7 +22,8 @@ Qbe :: @rec @struct(
         // These we need to track but Qbe doesn't use internally. 
         number_of_types := 0, // ntyp. only used by parser
         debug_out: *FILE,
-        namel := QbeName.ptr_from_int(0), // for reusing memory in opt/ssa.fr between functions. no information shared. 
+        namel := QbeName.ptr_from_int(0), // for reusing memory in opt/ssa.fr between functions. no information shared.
+        spill_limit_buf: []i32 = empty()  // " opt/spill.fr 
     ),
     DebugKey :: @enum(i64) (
         Parsing = "P".ascii(),
@@ -88,7 +89,7 @@ Qbe :: @rec @struct(
         nrsave: Array(i32, 2),
         retregs: @FnPtr(r: Qbe.Ref, p: *Array(i32, 2)) u64,
         argregs: @FnPtr(r: Qbe.Ref, p: *Array(i32, 2)) u64,
-        memargs: @FnPtr(i32) i32,
+        memargs: @FnPtr(Qbe.O) i32,
         abi0: @FnPtr(*Qbe.Fn) void,
         abi1: @FnPtr(*Qbe.Fn) void,
         isel: @FnPtr(*Qbe.Fn) void,
@@ -137,8 +138,8 @@ Qbe :: @rec @struct(
         s2: *Qbe.Blk, // nullable
         link: *Qbe.Blk,
         
-        id: u32,
-        visit: u32,
+        id: i32,
+        visit: i32,
         
         idom: *Qbe.Blk,
         dom: *Qbe.Blk,
@@ -163,7 +164,7 @@ Qbe :: @rec @struct(
     ),
     Use :: @rec @struct(
         type: Qbe.UseType,
-        bid: u32,
+        bid: i32,
         u: @union(ins: *Qbe.Ins, phi: *Qbe.Phi),
     ),
     SymType :: @rec @enum(i32) (
@@ -216,7 +217,7 @@ Qbe :: @rec @struct(
         use: InsaneVec(Qbe.Use),
         ndef: u32,  // once in ssa form this will always be 0 or 1, but we use this field while constructing ssa form.
         nuse: u32,
-        defining_block: u32,
+        defining_block: i32,
         cost: u32,
         slot: i32,  /* -1 for unset */
         cls: Qbe.Cls,  // :QbeClsi16
@@ -263,7 +264,7 @@ Qbe :: @rec @struct(
         ntmp: i32,
         ncon: i32,
         nmem: i32,
-        nblk: u32,
+        nblk: i32,
         retty: i32,  /* index in typ[], -1 if no aggregate return */
         retr: Qbe.Ref,
         rpo: **Qbe.Blk,
@@ -636,10 +637,7 @@ fn loadsz(_0: *Qbe.Ins) i32 #import("qbe");
 fn storesz(_0: *Qbe.Ins) i32 #import("qbe");
 fn loadopt(_0: *Qbe.Fn) void #import("qbe");
 fn filluse(_0: *Qbe.Fn) void #import("qbe");
-fn ssa(_0: *Qbe.Fn) void #import("qbe");
 fn fold(_0: *Qbe.Fn) void #import("qbe");
-fn fillcost(_0: *Qbe.Fn) void #import("qbe");
-fn spill(_0: *Qbe.Fn) void #import("qbe");
 fn rega(_0: *Qbe.Fn) void #import("qbe");
 fn emitfnlnk(_0: CStr, _1: *Qbe.Lnk, _2: *FILE) void #import("qbe");
 fn emitdat(_0: *Qbe.Dat, _1: *FILE) void #import("qbe");
@@ -654,6 +652,7 @@ fn macho_emitfin(_0: *FILE) void #import("qbe");
 fn copy(_0: *Qbe.Fn) void #import("qbe");
 fn filllive(_0: *Qbe.Fn) void #import("qbe");
 fn simpl(_0: *Qbe.Fn) void #import("qbe");
+fn ssa(_0: *Qbe.Fn) void #import("qbe");
 
 // Note: you have to make this not `static` in qbe/parse.fr
 fn typecheck(_0: *Qbe.Fn) void #import("qbe");
@@ -720,3 +719,7 @@ QbeVec :: @struct(
     // I don't have unsized types. lets hope thats not a big deal
        // union { long long ll; long double ld; void *ptr; } align[];
 );
+
+fn name(s: *Qbe.Tmp) CStr = (ptr = s.name&.as_ptr());
+fn name(s: *Qbe.Blk) CStr = (ptr = s.name&.as_ptr());
+fn name(s: *Qbe.Fn) CStr  = (ptr = s.name&.as_ptr());

@@ -18,10 +18,9 @@ fn convert_to_ssa(f: *Qbe.Fn) void = {
         write(out, "\n> Dominators:\n");
         for_blocks f { b1 |
             if !b1.dom.is_null() {
-                // :SpammingNulls
-                write(out, items(@format("        %:", b1.name&.items()) temp()));
+                @fmt_write(out, "%:", f_pad(b1.name(), 10, .Before));
                 for_dom b1 { b |
-                    write(out, items(@format(" %", b.name&.items()) temp()));
+                    @fmt_write(out, " %", b.name());
                 };
                 write(out, "\n");
             };
@@ -30,7 +29,7 @@ fn convert_to_ssa(f: *Qbe.Fn) void = {
     fillfron(f);
     fill_liveness(f);
     insert_phis(f);
-    renblk(f.start, stk, f);
+    renumber_block(f.start, stk, f);
     range_rev(nt, 0) { nt | 
         while => !stk[nt].is_null() {
             n := stk[nt];
@@ -135,9 +134,9 @@ fn insert_phis(f: *Qbe.Fn) void = {
     };
 }
 
-fn renblk(b: *Qbe.Blk, stk: []*QbeName, f: *Qbe.Fn) void = { 
+fn renumber_block(b: *Qbe.Blk, stk: []*QbeName, f: *Qbe.Fn) void = { 
     for_phi b { p |
-        rendef(p.to&, b, stk, f);
+        renumber_definition(p.to&, b, stk, f);
     };
     for_insts_forward b { i |
         each i.arg& { arg | 
@@ -146,13 +145,13 @@ fn renblk(b: *Qbe.Blk, stk: []*QbeName, f: *Qbe.Fn) void = {
                 arg[] = f.getstk(t, b, stk);
             };
         };
-        rendef(i.to&, b, stk, f);
+        renumber_definition(i.to&, b, stk, f);
     };
     if rtype(b.jmp.arg) == .RTmp && f.get_temporary(b.jmp.arg.val())[].visit != 0 {
         b.jmp.arg = f.getstk(b.jmp.arg.val(), b, stk);
     };
     
-    body :: fn(s: *Qbe.Blk) => {
+    for_jump_targets b { s |
         for_phi s { p |
             t := f.get_temporary(p.to.val());
             t := t.visit;
@@ -166,17 +165,11 @@ fn renblk(b: *Qbe.Blk, stk: []*QbeName, f: *Qbe.Fn) void = {
             };
         };
     };
-    if !b.s1.is_null() {
-        body(b.s1);
-    };
-    if !b.s2.is_null() && !b.s2.identical(b.s1) {
-        body(b.s2);
-    };
     
-    for_dom(b, fn(s) => renblk(s, stk, f));
+    for_dom(b, fn(s) => renumber_block(s, stk, f));
 }
 
-fn rendef(r: *Qbe.Ref, b: *Qbe.Blk, stk: []*QbeName, f: *Qbe.Fn) void = {
+fn renumber_definition(r: *Qbe.Ref, b: *Qbe.Blk, stk: []*QbeName, f: *Qbe.Fn) void = {
     t := r[].val();
     if(r[] == QbeNull || f.tmp[t].visit == 0, => return());
     r1 := f.refindex(t);
@@ -312,7 +305,7 @@ fn clear_usage_info(f: *Qbe.Fn) void = {
     each f.tmps() { t | 
         t.def = Qbe.Ins.ptr_from_int(0); // this isn't an array, 
         t.ndef = 0;
-        t.defining_block = trunc(-1);
+        t.defining_block = -1;
         t.cls = .Kw;
         t.phi = 0;
         t.width = .WFull;
@@ -354,8 +347,8 @@ fn source_width(i: *Qbe.Ins) Qbe.TmpType #inline = {
 // Running this is optional, but life will be very confusing if you don't do this and get it wrong. 
 fn ssacheck(f: *Qbe.Fn) void = {
     each f.tmps() { t |
-        if t.ndef > 1 { // :SpammingNulls
-            @panic("ssa temporary %% defined more than once", "%", t.name&.items());
+        if t.ndef > 1 {
+            @panic("ssa temporary %% defined more than once", "%", t.name());
         };
         if t.nuse > 0 && t.ndef == 0 {
             report_error(t, f.rpo.offset(t.use[0].bid.zext())[]);
@@ -399,8 +392,8 @@ fn ssacheck(f: *Qbe.Fn) void = {
     };
     
     report_error :: fn(t: *Qbe.Tmp, bu: *Qbe.Blk) void => {
-        if t.visit != 0 { // :SpammingNulls
-            @panic("%% violates ssa invariant", "%", t.name&.items());
+        if t.visit != 0 {
+            @panic("%% violates ssa invariant", "%", t.name());
         } else {
             @panic("ssa temporary %% is used undefined in @%", "%", t.name&.items(), bu.name&.items());
         }

@@ -1,6 +1,7 @@
 - make logical not an intrinsic
 - bring back lex error for unterminated comment.
 - being back pad with spaces when debug logging ir
+- `Illegal place expression: GetNamed` is not as helpful as "tried to assign to undeclared variable %"
 
 ##
 

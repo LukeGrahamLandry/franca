@@ -9,8 +9,15 @@ You can still print out the ir as human readable text between passes and modify 
 > When trying to understand what phi instructions do, remember that they're totally isomorphic to block arguments and then it's suddenly super simple.
 > It's just a choice to represent it as the callee knowing which value to use for each argument for each caller.
 
+If you use llvm you don't get full c-abi compatibility for free.
+For example, here's where rustc does it in the frontend https://github.com/rust-lang/rust/blob/master/compiler/rustc_target/src/abi/call/mod.rs
+
 ## Changes from Qbe
 
+- Generate machine code directly without depending on an external assembler.
+  Your program will contain only the finest organic bit patterns lovingly transcribed from the Arm Architecture Reference Manual.
+- Jit compile your program and run it in memory without needing to emit/link an executable.
+  You can freely call between jit and aot code (even extern-c code from other compilers) because they follow the same standard abi.
 - Moved a bunch of static variables to a data structure we pass around explicitly.
   Eventually you will be able to compile multiple modules on parallel threads (not yet tho, there's still more unported).
 - Removed several codegen optimisations until we have a solid foundation (but I want to bring them back eventually).
@@ -18,6 +25,7 @@ You can still print out the ir as human readable text between passes and modify 
   - arm: logimm single instruction load int more constants
   - arm: use of bl for calling a constant (instead of blr)
   - arm: constant immediate without an extra register when accessing thread locals
+- Removed the RISC-V target for now because I haven't done thier instruction encoding yet.
 
 ## Qbe License
 

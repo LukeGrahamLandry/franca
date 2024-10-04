@@ -7,6 +7,7 @@ QbeModule :: @struct(
     gpa: Alloc,
     start_of_writable_code: *u8,
     globals: *Qbe.Globals,
+    want_text_asm := false,
 );
 
 SegmentCursor :: @struct(
@@ -51,10 +52,12 @@ fn init(segment_size: i64, gpa: Alloc, code_alloc: Alloc, globals: *Qbe.Globals)
     (segments = s, symbols = init(gpa), gpa = gpa, start_of_writable_code = mem.ptr, globals = globals)
 }
 
+// TODO: i dont trust calling this multiple times on the same module... thats important to fix. 
 fn make_exec(self: *QbeModule) void = {
     prot := bit_or(@as(i64) MapProt.Exec, @as(i64) MapProt.Read);
     end := self.segments&[.Code].next&;
     len := self.start_of_writable_code.ptr_diff(end[]);
+    if(len == 0, => return());
     res := mprotect(u8.raw_from_ptr(self.start_of_writable_code), len, prot); 
     assert(res.value.eq(0), "mprotect failed");
     clear_instruction_cache(u8.raw_from_ptr(self.start_of_writable_code), u8.raw_from_ptr(end[]));
@@ -92,10 +95,7 @@ fn new_emit_data(self: *QbeModule, dat: *Qbe.Dat) void = {
     next := segment.next&;
     @match(dat.type) {
         fn DStart() => {
-            extra := u8.int_from_ptr(next[]).mod(8);
-            if extra != 0 {
-                next[] = next[].offset(8 - extra); // align to 8 bytes.
-            };
+            segment.align_to(8);
             id := intern(dat.name);
             self.do_jit_relocations(id, .MutableData, segment.mmapped.ptr.ptr_diff(next[]));
         }
@@ -126,8 +126,18 @@ fn new_emit_data(self: *QbeModule, dat: *Qbe.Dat) void = {
             };
             next[] = next[].offset(8);
         }
-        fn DW() => @panic("sorry DW constants are not supported yet");
-        fn DH() => @panic("sorry DH constants are not supported yet");
+        fn DW() =>  {
+            @debug_assert(!dat.isref, "can't have a w sized pointer");
+            @assert_eq(u8.int_from_ptr(next[]).mod(4), 0, "sorry can't do unaligned constants yet");
+            ptr_cast_unchecked(u8, u32, next[])[] = dat.u.num.trunc();
+            next[] = next[].offset(4);
+        }
+        fn DH() =>  {
+            @debug_assert(!dat.isref, "can't have a h sized pointer");
+            @assert_eq(u8.int_from_ptr(next[]).mod(2), 0, "sorry can't do unaligned constants yet");
+            ptr_cast_unchecked(u8, u16, next[])[] = dat.u.num.trunc();
+            next[] = next[].offset(2);
+        }
     }
 }
 

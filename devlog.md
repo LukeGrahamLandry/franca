@@ -7,7 +7,10 @@
 - from_bc gives me the inline asm, 8. and that's just as many as passed with aot.
   but in 4 seconds instead of 11 seconds. there's gotta be something wrong with clang's assembler.
   (and thats still with the new backend running jitted on the old unoptimising backend so it should get faster with release mode).
+  ~200ms of that was emitting the unneeded asm text.
 - fixed minimal_inline_bc not setting arg_prims on its block
+- the loop cost stuff is creepy because the program still works if you get it wrong. its purely an optimisation.
+  so finally did shitty padding for formatting so i can make exactly the same output as qbe when it does `%s-10` and check it that way.
 
 ## (Oct 2)
 
