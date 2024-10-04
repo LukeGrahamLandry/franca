@@ -1,5 +1,11 @@
 // Adapted from Qbe. MIT License. © 2015-2024 Quentin Carbonneaux <quentin@c9x.me>
 
+//! The ISA gives us a limited number of registers to work with but programs can use an arbitrary number of temporaries. 
+//! This pass limits the number of values live at any moment to the number of registers allowed,
+//! by inserting loads and stores to stack slots as needed. Ensuring that a value is live when needed by an instruction. 
+//! We also try to be smart about not spilling things that are used a bunch in a loop. 
+//! After this pass we know which tmps will be in registers but not which registers they'll be in.  
+
 fn aggreg(hd: *Qbe.Blk, b: *Qbe.Blk) void = {
     /* aggregate looping information at
      * loop headers */
@@ -63,7 +69,7 @@ fn fillcost(f: *Qbe.Fn) void = {
     
     for_blocks f { b |
         for_phi b { p |
-            t := f.get_temporary(p.to.val());
+            t := f.get_temporary(p.to);
             f.tmpuse(p.to, false, 0);
             range(0, p.narg.zext()) { a | 
                 n := p.blk[a].loop;
@@ -96,9 +102,12 @@ SpillPass :: @struct(
     locs: i32,                 /* stack size used by locals */
     slot4: i32,                /* next slot of 4 bytes */
     slot8: i32,                /* ditto, 8 bytes */
-    mask: Array(Qbe.BSet, 2),  /* class masks */
+    class_mask: Array(Qbe.BSet, 2), 
+    limit_buf: []i32 = empty(),
 );
 
+// Get the stack slot assigned for spilling t. 
+// Reserving a new one if this is the first time we've spilled t.
 fn slot(pass: *SpillPass, t: i64) Qbe.Ref = {
     @debug_assert(t >= Qbe.Tmp0, "cannot spill register");
     s := pass.f.tmp[t].slot;
@@ -110,7 +119,6 @@ fn slot(pass: *SpillPass, t: i64) Qbe.Ref = {
          *
          * invariant: slot4 <= slot8
          */
-        s: i32 = 0;
         if (is_wide(pass.f.tmp[t].cls)) {
             s = pass.slot8;
             if (pass.slot4 == pass.slot8) {
@@ -137,24 +145,24 @@ fn slot(pass: *SpillPass, t: i64) Qbe.Ref = {
  * present in `prioritize` (if given), then
  * those with the largest spill cost.
  */
-fn limit(pass: *SpillPass, b: *Qbe.BSet, k: i32, prioritize: ?*Qbe.BSet) void = {
+fn limit(pass: *SpillPass, in_reg: *Qbe.BSet, max_in_reg: i32, prioritize: ?*Qbe.BSet) void = {
     f := pass.f;
     // Setup the list of tmps live right now,
-    buf := f.globals.spill_limit_buf&; // reuse memory because we really spam this function. 
-    nt: i64 = bscount(b).zext();
-    if nt <= k.intcast() {
+    buf := pass.limit_buf&; // reuse memory because we really spam this function. 
+    live_count: i64 = bscount(in_reg).zext();
+    if live_count <= max_in_reg.intcast() {
         // easy, we have enough registers for everyone so we're done.
         return(); 
     };
-    if nt > buf.len { // :HardcodeAlloc
+    if live_count > buf.len { // :HardcodeAlloc
         libc_allocator.dealloc(i32, buf[]);
-        buf[] = libc_allocator.alloc(i32, nt);
+        buf[] = libc_allocator.alloc(i32, live_count);
     };
-    tarr := buf[].slice(0, nt);
+    live_tmps := buf[].slice(0, live_count);
     i := 0;
-    for b { t |
-        bsclr(b, t);
-        tarr[i] = t.intcast();
+    for in_reg { t |
+        bsclr(in_reg, t);
+        live_tmps[i] = t.intcast();
         i += 1;
     };
     
@@ -162,7 +170,7 @@ fn limit(pass: *SpillPass, b: *Qbe.BSet, k: i32, prioritize: ?*Qbe.BSet) void = 
     tcmp0 :: fn(pa: *i32, pb: *i32, f: *Qbe.Fn) bool = {
         ca := f.tmp[pa[].zext()].cost;
         cb := f.tmp[pb[].zext()].cost;
-        cb < ca // TODO: flipped?
+        cb <= ca 
     };
     tcmp1 :: fn(pa: *i32, pb: *i32, ctx: SContext) bool = {
         bb := bshas(ctx.prioritize, pb[].zext());
@@ -170,25 +178,26 @@ fn limit(pass: *SpillPass, b: *Qbe.BSet, k: i32, prioritize: ?*Qbe.BSet) void = 
         if aa == bb {
             tcmp0(pa, pb, ctx.f)
         } else {
-            bb.int() < aa.int() // TODO: flipped?
+            bb.int() <= aa.int()
         }
     };
 
     // then sort them by priority.
-    if tarr.len > 1 {
+    if live_tmps.len > 1 {
+        // TODO: none of the .ssa tests get here :MakeATestThatFails
         if prioritize { prioritize |
             sort :: quicksort(SContext, i32, tcmp1);
-            tarr.sort(f = f, prioritize = prioritize);
+            live_tmps.sort(f = f, prioritize = prioritize);
         } else {
             sort :: quicksort(*Qbe.Fn, i32, tcmp0);
-            tarr.sort(f);
+            live_tmps.sort(f);
         };
     };
-    pivot := min(tarr.len, k.zext());
-    for tarr.slice(0, pivot) { t |
-        bsset(b, t.zext());
+    in_reg_count := min(live_tmps.len, max_in_reg.zext());
+    for live_tmps.slice(0, in_reg_count) { t |
+        bsset(in_reg, t.zext());
     };
-    for tarr.slice(pivot, tarr.len) { t |
+    for live_tmps.slice(in_reg_count, live_tmps.len) { t |
         pass.slot(t.zext());
     };
 }
@@ -197,17 +206,24 @@ fn limit(pass: *SpillPass, b: *Qbe.BSet, k: i32, prioritize: ?*Qbe.BSet) void = 
  * target limits using the same
  * preferences as limit(); 
  */
-fn limit2(pass: *SpillPass, b1: *Qbe.BSet, live_int_count: i32, live_float_count: i32, prioritize: ?*Qbe.BSet) void = {
-    b2 := init_bitset(pass.f.ntmp.zext()); /* todo, free those */
-    bscopy(b2&, b1);
-    bsinter(b1, pass.mask&.index(0));
-    bsinter(b2&, pass.mask&.index(1));
-    pass.limit(b1, pass.f.globals.target.ngpr - live_int_count, prioritize);
-    pass.limit(b2&, pass.f.globals.target.nfpr - live_float_count, prioritize);
-    bsunion(b1, b2&);
+fn limit_in_reg(pass: *SpillPass, in_reg: *Qbe.BSet, is_for_call: bool, prioritize: ?*Qbe.BSet) void = {
+    allowed_ints, allowed_floats := (pass.f.globals.target.ngpr, pass.f.globals.target.nfpr);
+    if is_for_call { 
+        // at the call we're allowed to have ((total - caller saved) = callee saved) registers live
+        T := pass.f.globals.target;
+        allowed_ints -= T.nrsave&[0];
+        allowed_floats -= T.nrsave&[1];
+    };
+    floats := init_bitset(pass.f.ntmp.zext()); /* todo, free those */
+    bscopy(floats&, in_reg);
+    bsinter(in_reg, pass.class_mask&.index(0)); // now in_reg is just ints
+    bsinter(floats&, pass.class_mask&.index(1));
+    pass.limit(in_reg, allowed_ints, prioritize);
+    pass.limit(floats&, allowed_floats, prioritize);
+    bsunion(in_reg, floats&); // return both to the caller
 }
 
-fn sethint(f: *Qbe.Fn, u: *Qbe.BSet, r: u64) void = {
+fn hint_to_avoid(f: *Qbe.Fn, u: *Qbe.BSet, r: u64) void = {
     for(u, Qbe.Tmp0) { t |
         idx := phicls(t, f.tmp); 
         hint := f.tmp[idx].hint.m&;
@@ -215,20 +231,20 @@ fn sethint(f: *Qbe.Fn, u: *Qbe.BSet, r: u64) void = {
     };
 }
 
-/* reloads temporaries in u that are
- * not in v from their slots
+/* reloads temporaries in `required_in_reg` that are
+ * not in `already_in_reg` from their slots
  */
-fn reloads(pass: *SpillPass, u: *Qbe.BSet, v: *Qbe.BSet) void = {
-    for(u, Qbe.Tmp0) { t | 
-        if !bshas(v&, t) {
+fn reload_spilled(pass: *SpillPass, required_in_reg: *Qbe.BSet, already_in_reg: *Qbe.BSet) void = {
+    for(required_in_reg, Qbe.Tmp0) { t | 
+        if !bshas(already_in_reg, t) {
             pass.f.emit(.load, pass.f.tmp[t].cls, TMP(t), pass.slot(t), QbeNull);
         }
     };
 }
 
-fn store(f: *Qbe.Fn, r: Qbe.Ref, slot: i32) void = {
+fn maybe_store(f: *Qbe.Fn, r: Qbe.Ref, slot: i32) void = {
     if slot != -1 {
-        op := Qbe.O.storew.raw().zext() + f.get_temporary(r.val())[].cls.raw().zext();
+        op := Qbe.O.storew.raw().zext() + f.get_temporary(r)[].cls.raw().zext();
         op := @as(Qbe.O) @as(i32) op.intcast();
         f.emit(op, .Kw, QbeNull, r, SLOT(slot.zext()));
     };
@@ -237,11 +253,9 @@ fn store(f: *Qbe.Fn, r: Qbe.Ref, slot: i32) void = {
 fn regcpy(i: *Qbe.Ins) bool #inline = 
     i.op() == .copy && isreg(i.arg&[0]);
 
-fn dopm(pass: *SpillPass, b: *Qbe.Blk, i: *Qbe.Ins, v: *Qbe.BSet) *Qbe.Ins = {
+fn do_parallel_moves(pass: *SpillPass, b: *Qbe.Blk, last_copy: *Qbe.Ins, in_reg: *Qbe.BSet) *Qbe.Ins = {
     f := pass.f;
     T := f.globals.target;
-    u := init_bitset(f.ntmp.zext()); /* todo, free those */
-    // TODO: why? i guess they all spawned from a call at the same time. 
     /* consecutive copies from
      * registers need to be handled
      * as one large instruction
@@ -252,44 +266,51 @@ fn dopm(pass: *SpillPass, b: *Qbe.Blk, i: *Qbe.Ins, v: *Qbe.BSet) *Qbe.Ins = {
      * might not be true if previous
      * passes change
      */
-    i1 := i.offset(1);
-    dowhile {
-        i = i.offset(-1);
-        t := i.to.val();
-        if i.to != QbeNull && bshas(v&, t) {
-            bsclr(v, t);
-            f.store(i.to, f.tmp[t].slot);
+     
+    // Scan backwards to find the first in the group of consecutive copies.
+    first_copy := {
+        i := last_copy.offset(1);
+        dowhile {
+            i = i.offset(-1);
+            t := i.to.val();
+            if i.to != QbeNull && bshas(in_reg, t) {
+                bsclr(in_reg, t);
+                f.maybe_store(i.to, f.tmp[t].slot);
+            };
+            //bsset(v&, i.arg&[0].val()); // :ShitTypeCheck
+            bsset(in_reg, i.arg&[0].val());
+            !i.identical(b.ins) && regcpy(i.offset(-1))
         };
-        bsset(v&, i.arg&[0].val());
-        !i.identical(b.ins) && regcpy(i.offset(-1))
+        i
     };
-    bscopy(u&, v);
-    r: u64 = 0; 
-    if !i.identical(b.ins) && i.offset(-1).op() == .call {
-        dont_care := Array(i32, 2).ptr_from_int(0);
-        not_retreg := {T.retregs}(i.offset(-1)[].arg&[1], dont_care).bit_not();
-        v.t[] = v.t[].bit_and(not_retreg);
-        pass.limit2(v, T.nrsave&[0], T.nrsave&[1], .None);
-        n := 0;
-        while => T.caller_saved.offset(n)[] >= 0 {
-            idx: i64 = T.caller_saved.offset(n)[].zext();
-            r = r.bit_or(BIT(idx));
-            n += 1;
-        };
-        arg_reg := {T.argregs}(i.offset(-1)[].arg&[1], dont_care);
-        v.t[] = v.t[].bit_or(arg_reg);
+    
+    final_in_reg := init_bitset(f.ntmp.zext()); /* todo, free those */
+    bscopy(final_in_reg&, in_reg);
+    is_after_call := !first_copy.identical(b.ins) && first_copy.offset(-1).op() == .call;
+    avoid_registers := if is_after_call {
+        discard := Array(i32, 2).ptr_from_int(0);
+        retreg := ({T.retregs}(first_copy.offset(-1)[].arg&[1], discard));
+        @debug_assert(in_reg.t[].bit_and(retreg) == retreg, "we should already know returns are live");
+        in_reg.t[] = in_reg.t[].bit_and(bit_not(retreg)); // retregs arn't live before the call becuase we're making them now
+        pass.limit_in_reg(in_reg, true, .None);
+        arg_reg := {T.argregs}(first_copy.offset(-1)[].arg&[1], discard);
+        in_reg.t[] = in_reg.t[].bit_or(arg_reg); // the arguments are live before because we need them at the call
+        T.caller_saved_bits()
     } else {
-        pass.limit2(v, 0, 0, .None);
-        r = v.t[];
+        pass.limit_in_reg(in_reg, false, .None);
+        in_reg.t[]
     };
-    f.sethint(v, r);
-    pass.reloads(u&, v);
+    f.hint_to_avoid(in_reg, avoid_registers);
+    pass.reload_spilled(final_in_reg&, in_reg);
+    
+    // Now emit all those copies
+    i1 := last_copy.offset(1);
     dowhile {
         i1 = i1.offset(-1);
         pass.f.emit(i1[]);
-        !i1.identical(i)
+        !i1.identical(first_copy)
     };
-    i
+    first_copy
 }
 
 fn merge(f: *Qbe.Fn, u: *Qbe.BSet, bu: *Qbe.Blk, v: *Qbe.BSet, bv: *Qbe.Blk) void = {
@@ -316,18 +337,14 @@ fn merge(f: *Qbe.Fn, u: *Qbe.BSet, bu: *Qbe.Blk, v: *Qbe.BSet, bv: *Qbe.Blk) voi
  * - Ocopy instructions to ensure register
  *   constraints
  */
-fn spill(_0: *Qbe.Fn) void #import("qbe"); 
-fn _spill(f: *Qbe.Fn) void = {
+
+fn spill(f: *Qbe.Fn) void = {
     T := f.globals.target;
 
     // TODO: are we copying these because we might resize the array or can i inline them?
     tmp := f.tmp;
     ntmp: i64 = f.ntmp.zext();
-    u := init_bitset(ntmp);
-    v := init_bitset(ntmp);
-    w := init_bitset(ntmp);
-    lvarg := Array(bool, 2).zeroed();
-    pass: SpillPass = (f = f, locs = f.slot, slot4 = 0, slot8 = 0, mask = init(@slice(init_bitset(ntmp), init_bitset(ntmp))));
+    pass: SpillPass = (f = f, locs = f.slot, slot4 = 0, slot8 = 0, class_mask = init(@slice(init_bitset(ntmp), init_bitset(ntmp))));
     range(0, ntmp) { t | 
         k := 0;
         if t >= T.fpr0.zext() && t < T.fpr0.zext() + T.nfpr.zext() {
@@ -336,9 +353,14 @@ fn _spill(f: *Qbe.Fn) void = {
         if t >= Qbe.Tmp0 {
             k = KBASE(tmp[t].cls);
         };
-        bsset(pass.mask&.index(k), t);
+        bsset(pass.class_mask&.index(k), t);
     };
 
+    // These are not used between blocks, we just want to reuse the memory. 
+    all_needed_later := init_bitset(ntmp);
+    in_reg := init_bitset(ntmp);
+    prioritize := init_bitset(ntmp);
+    
     bp := f.rpo.offset(f.nblk.zext());
     while => !bp.identical(f.rpo) {
         bp = bp.offset(-1);
@@ -348,104 +370,107 @@ fn _spill(f: *Qbe.Fn) void = {
          * their in,out updated. */
 
         /* 1. find temporaries in registers at
-         * the end of the block (put them in v) */
+         * the end of the block (put them in `in_reg`) */
         f.globals.curi[] = Qbe.Ins.ptr_from_int(0); // i guess this is just asserting that we don't try to emit until we reset it below?
         s1 := b.s1;
         s2 := b.s2;
-        hd := Qbe.Blk.ptr_from_int(0);
+        backwards: ?*Qbe.Blk = .None;
         if !s1.is_null() && s1.id <= b.id {
-            hd = s1;
+            backwards = (Some = s1);
         };
         if !s2.is_null() && s2.id <= b.id {
-            if hd.is_null() || s2.id >= hd.id {
-                hd = s2;
+            if backwards.is_none() || s2.id >= backwards.Some.id {
+                backwards = (Some = s2);
             }
         };
-        if !hd.is_null() {
+        if backwards { backwards | 
             /* back-edge */
-            bszero(v&);
-            hd.gen.t[] = hd.gen.t[].bit_or(T.rglob); /* don't spill registers */
+            bszero(in_reg&);
+            backwards.gen.t[] = backwards.gen.t[].bit_or(T.rglob); /* don't spill registers */
             range(0, 2) { k |
                 n := if(k == 0, => T.ngpr, => T.nfpr);
-                bscopy(u&, b.out&);
-                bsinter(u&, pass.mask&.index(k));
-                bscopy(w&, u&);
-                bsinter(u&, hd.gen&);
-                bsdiff(w&, hd.gen&);
-                if bscount(u&).bitcast() < n {
-                    j: i32 = bscount(w&).bitcast(); /* live through */
-                    l := hd.nlive&[k];
-                    pass&.limit(w&, n - (l - j), .None);
-                    bsunion(u&, w&);
+                bscopy(all_needed_later&, b.out&);
+                bsinter(all_needed_later&, pass.class_mask&.index(k));
+                bscopy(prioritize&, all_needed_later&);
+                bsinter(all_needed_later&, backwards.gen&);
+                bsdiff(prioritize&, backwards.gen&);
+                if bscount(all_needed_later&).bitcast() < n {
+                    j: i32 = bscount(prioritize&).bitcast(); /* live through */
+                    l := backwards.nlive&[k];
+                    pass&.limit(prioritize&, n - (l - j), .None);
+                    bsunion(all_needed_later&, prioritize&);
                 } else {
-                    pass&.limit(u&, n, .None);
+                    pass&.limit(all_needed_later&, n, .None);
                 };
-                bsunion(v&, u&);
+                bsunion(in_reg&, all_needed_later&);
             }
         } else {
             if !s1.is_null() {
                 /* avoid reloading temporaries
                 * in the middle of loops */
-                bszero(v&);
-                liveon(w&, b, s1);
-                f.merge(v&, b, w&, s1);
+                bszero(in_reg&);
+                live_on_edge(prioritize&, b, s1);
+                f.merge(in_reg&, b, prioritize&, s1);
                 if !s2.is_null() {
-                    liveon(u&, b, s2);
-                    f.merge(v&, b, u&, s2);
-                    bsinter(w&, u&);
+                    live_on_edge(all_needed_later&, b, s2);
+                    f.merge(in_reg&, b, all_needed_later&, s2);
+                    bsinter(prioritize&, all_needed_later&);
                 };
-                pass&.limit2(v&, 0, 0, (Some = w&));
+                pass&.limit_in_reg(in_reg&, false, (Some = prioritize&));
             } else {
-                bscopy(v&, b.out&);
+                bscopy(in_reg&, b.out&);
                 if rtype(b.jmp.arg) == .RCall {
+                    @debug_assert(b.jmp.type == .Jret0, "expected return");
                     return_registers := {T.retregs}(b.jmp.arg, Array(i32, 2).ptr_from_int(0));
-                    v.t[] = v.t[].bit_or(return_registers);
+                    in_reg.t[] = in_reg.t[].bit_or(return_registers);
                 };
             };
         };
-        // TODO: ugh this shouldn't need overloading help
+        
         for(b.out&, Qbe.Tmp0) { t | 
-            if !bshas(b, t) {
+            //if !bshas(b, t) {  // TODO: oh shit this shouldn't type check. thats a crippling problem :FUCKED :ShitTypeCheck
+            if !bshas(in_reg&, t) {
                 pass&.slot(t);
             };
         };
-        bscopy(b.out&, v&);
-
+        bscopy(b.out&, in_reg&);
+        
         /* 2. process the block instructions */
         if rtype(b.jmp.arg) == .RTmp {
             t := b.jmp.arg.val();
             @debug_assert(tmp[t].cls.is_int(), "can only jump on int (previous pass removed ret with value)");
-            lvarg&[0] = bshas(v&, t);
-            bsset(v&, t);
-            bscopy(u&, v&);
-            pass&.limit2(v&, 0, 0, .None);
-            if !bshas(v&, t) {
-                if !lvarg&[0] {
-                    bsclr(u&, t);
+            arg_used_again := bshas(in_reg&, t);
+            bsset(in_reg&, t);
+            bscopy(all_needed_later&, in_reg&);
+            pass&.limit_in_reg(in_reg&, false, .None);
+            if !bshas(in_reg&, t) {
+                if !arg_used_again {
+                    bsclr(all_needed_later&, t);
                 };
                 b.jmp.arg = pass&.slot(t);
             };
-            pass&.reloads(u&, v&);
+            pass&.reload_spilled(all_needed_later&, in_reg&);
         };
         f.globals.curi[] = f.scratch_start();
         for_insts_rev b { i |
             continue :: local_return;
             if regcpy(i[]) {
-                i[] = pass&.dopm(b, i[], v&);
+                i[] = pass&.do_parallel_moves(b, i[], in_reg&);
                 continue();
             };
-            bszero(w&);
+            bszero(prioritize&);
             if i.to != QbeNull {
                 @debug_assert(rtype(i.to) == .RTmp, "can only assign tmp");
                 t := i.to.val();
-                if bshas(v&, t) {
-                    bsclr(v&, t);
+                if bshas(in_reg&, t) {
+                    // we know we had t in a register after this, and we're creating t now, so its not in a register before this. 
+                    bsclr(in_reg&, t);
                 } else {
                     /* make sure we have a reg
                      * for the result */
                     @debug_assert_ge(t, Qbe.Tmp0, "dead reg");
-                    bsset(v&, t);
-                    bsset(w&, t);
+                    bsset(in_reg&, t);
+                    bsset(prioritize&, t);
                 };
             };
             j := {T.memargs}(i[].op());
@@ -454,77 +479,78 @@ fn _spill(f: *Qbe.Fn) void = {
                     j -= 1;
                 };
             };
+            
+            arg_used_again := Array(bool, 2).zeroed();
             range(0, 2) { n | 
                 @match(rtype(i.arg&[n])) {
                     fn RMem() => {
                         t := i.arg&[n].val();
                         m := f.mem[t]&;
                         if rtype(m.base) == .RTmp {
-                            bsset(v&, m.base.val());
-                            bsset(w&, m.base.val());
+                            bsset(in_reg&, m.base.val());
+                            bsset(prioritize&, m.base.val());
                         };
                         if rtype(m.index) == .RTmp {
-                            bsset(v&, m.index.val());
-                            bsset(w&, m.index.val());
+                            bsset(in_reg&, m.index.val());
+                            bsset(prioritize&, m.index.val());
                         };
                     }
                     fn RTmp() => {
                         t := i.arg&[n].val();
-                        lvarg&[n] = bshas(v&, t);
-                        bsset(v&, t);
+                        arg_used_again&[n] = bshas(in_reg&, t);
+                        bsset(in_reg&, t); // instructions want arguments in registers
                         if j <= 0 {
-                            bsset(w&, t);
+                            bsset(prioritize&, t);
                         };
                         j -= 1;
                     }
                     @default => ();
                 };
             };
-            bscopy(u&, v&);
-            pass&.limit2(v&, 0, 0, (Some = w&));
+            bscopy(all_needed_later&, in_reg&);
+            pass&.limit_in_reg(in_reg&, false, (Some = prioritize&));
             range(0, 2) { n | 
                 if rtype(i.arg&[n]) == .RTmp {
                     t := i.arg&[n].val();
-                    if !bshas(v&, t) {
+                    if !bshas(in_reg&, t) {
                         /* do not reload if the
                          * argument is dead
                          */
-                        if !lvarg&[n] {
-                            bsclr(u&, t);
+                        if !arg_used_again&[n] {
+                            bsclr(all_needed_later&, t);
                         };
                         i.arg&[n] = pass&.slot(t);
                     }
                 }
             };
-            pass&.reloads(u&, v&);
+            pass&.reload_spilled(all_needed_later&, in_reg&);
             if i.to != QbeNull {
                 t := i.to.val();
-                f.store(i.to, f.tmp[t].slot);
+                f.maybe_store(i.to, f.tmp[t].slot);
                 if t >= Qbe.Tmp0 {
                     /* in case i.to was a
                      * dead temporary */
-                    bsclr(v&, t);
+                    bsclr(in_reg&, t);
                 }
             };
             f.emit(i[][]);
-            r := v.t[]; /* Tmp0 is NBit */
+            r := in_reg.t[]; /* Tmp0 is NBit */
             if r != 0 {
-                f.sethint(v&, r);
+                f.hint_to_avoid(in_reg&, r);
             };
         };
-        
         if b.identical(f.start) {
-            @debug_assert_eq(v.t[], T.rglob.bit_or(f.reg), "global + callee saved");
+            @debug_assert_eq(in_reg.t[], T.rglob.bit_or(f.reg), "global + callee saved");
         } else {
-            @debug_assert_eq(v.t[], T.rglob, "just global");
+            @debug_assert_eq(in_reg.t[], T.rglob, "just global");
         };
 
         for_phi b { p |
             @debug_assert(rtype(p.to) == .RTmp, "can only assign tmp");
             t := p.to.val();
-            if bshas(v&, t) {
-                bsclr(v&, t);
-                f.store(p.to, f.tmp[t].slot);
+            if bshas(in_reg&, t) {
+                bsclr(in_reg&, t);
+                f.maybe_store(p.to, f.tmp[t].slot);
             } else {
                 if bshas(b.in&, t) {
                     /* only if the phi is live */
@@ -532,7 +558,7 @@ fn _spill(f: *Qbe.Fn) void = {
                 }
             }
         };
-        bscopy(b.in&, v&);
+        bscopy(b.in&, in_reg&);
         f.copy_instructions_from_scratch(b);
     };
 
@@ -545,10 +571,27 @@ fn _spill(f: *Qbe.Fn) void = {
         out := f.globals.debug_out;
         write(out, "\n> Block information:\n");
         for_blocks f { b |
-            @fmt_write(out, "\t% (%) ", f_pad(b.name(), 10, .Before), f_pad(b.loop, 5, .Before));
+            @fmt_write(out, "\t% (%) ", f_pad(b.name(), 10, .After), f_pad(b.loop, 5, .Before));
             dumpts(b.out&, f.tmp, out);
         };
         write(out, "\n> After spilling:\n");
         printfn(f, out);
     };
+}
+
+fn for_caller_saved(target: *Qbe.Target, $body: @Fn(r: i64) void) void = {
+    n := 0;
+    while => target.caller_saved.offset(n)[] >= 0 {
+        idx: i64 = target.caller_saved.offset(n)[].zext();
+        body(idx);
+        n += 1;
+    };
+}
+
+fn caller_saved_bits(target: *Qbe.Target) u64 = {   
+    r: u64 = 0; 
+    for_caller_saved target { reg | 
+        r = r.bit_or(BIT(reg));
+    };
+    r
 }

@@ -11,6 +11,14 @@
 - fixed minimal_inline_bc not setting arg_prims on its block
 - the loop cost stuff is creepy because the program still works if you get it wrong. its purely an optimisation.
   so finally did shitty padding for formatting so i can make exactly the same output as qbe when it does `%s-10` and check it that way.
+- spill mistakes:
+  - typoed extra & of a pointer passed to a function and apparently i don't typecheck that sometimes, thats a massive problem.
+  - wrongly redeclared a variable
+  - translated i++ to i+1
+    // bf_interp fails with mine! tho not different answers. it segfaults in the compiler.
+    // and thats the only one. so thats strongly in favour of going and finding more tests.
+    // and not getting rid of the old backend, just turning it into an example so i have it as an extra test because its such a large proportion of the code i have.
+  - problem was le vs lt in sort.
 
 ## (Oct 2)
 

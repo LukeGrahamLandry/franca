@@ -1,0 +1,122 @@
+#!/usr/bin/env franca
+//! This is just for running Qbe's test files. 
+//! As a convinence you can pass -r to run directly (if the qbe ir has a main() function and doesn't require a driver c program).
+//! For Franca's normal interaction with the backend we just generate the ir in memory. 
+// TODO: Should try to get Hare to compile with this instead of Qbe as a source of more tests. 
+//       I'm a bit worried that there might be some shapes of programs that Franca never generates but I can't articulate an example.        
+
+#include_std("backend2/lib.fr");
+fn main() void = {
+    outpath := "-";
+    inpath := "-";
+    global_module[] = init(1.shift_left(18), page_allocator, page_allocator, qbe_globals);
+    run := false;
+    debug := false;
+    global_module[].want_text_asm = true;
+    args := cli_args();
+    pop :: fn() => {
+        args.ptr = args.ptr.offset(1);
+        args.len -= 1;
+    };
+    while => args.len > 0 {
+        a := args[0].str();
+        @switch(a) {
+            @case("-t?") => exit(0); // TODO
+            @case("-t") => { // TODO
+                pop();
+                pop();
+            };
+            @case("franca") => pop();
+            @case("-o") => {
+                pop();
+                outpath = args[0].str();
+                pop();
+            };
+            @case("-d") => {
+                debug = true;
+                pop();
+                for args[0].str() { c |     
+                    found := false;
+                    for_enum Qbe.DebugKey { key | 
+                        if key.raw() == c.zext() {
+                            found = true;
+                        }
+                    };
+                    @assert(found, "invalid -d flag %", c);
+                    qbe_globals[].debug.items()[c.zext()] = true;
+                };
+                pop();
+            };
+            @case("-r") => {
+                run = true;
+                pop();
+            };
+            @case("-h") => {
+                print(HELP);
+                exit(0);
+            };
+            @default => {
+                if a.ends_with(".fr") {// TODO: ugh don't care about the file extension 
+                    pop();
+                } else {
+                    if a.starts_with("-") && a != "-" {
+                        @panic("Unknown option %", a);
+                    };
+                    inpath = a;
+                    pop();
+                }
+            };
+        };
+    };
+    
+    ::if(*FILE);
+    ::ptr_utils(FILE);
+    //@eprintln(";% -> %", inpath, outpath);
+    outfile := if debug || run {
+        global_module[].want_text_asm = false;
+        fopen("/dev/null".sym().c_str(), "w".sym().c_str())
+    } else {
+        if outpath == "-" {
+            fdopen(STD_OUT, "a".sym().c_str())
+        } else {
+            fopen(outpath.maybe_borrow_cstr(temp()), "w".sym().c_str())
+        }
+    };
+    !outfile.is_null(); // TODO: compiler bug. tried to call uncompiled if you do it first in the macro. :FUCKED
+    @assert(!outfile.is_null(), "failed to open outpu '%'", outpath);
+    infile := if inpath == "-" {
+        fdopen(STD_IN, "r".sym().c_str())
+    } else {
+        fopen(inpath.maybe_borrow_cstr(temp()), "r".sym().c_str())
+    };
+    @assert(!infile.is_null(), "failed to open input '%'", inpath);
+    
+    INFILE :: @static(*FILE);
+    INFILE[] = infile;
+    outf[] = outfile;
+    
+    handle_dbg :: fn(s: CStr) void = ();
+    
+    parse(infile, "<file>".sym().c_str(), handle_dbg, emit_data, run_qbe_passes);
+    {qbe_globals[].target.emitfin}(outf[]);
+    fclose(infile);
+    if run {
+        global_module.make_exec();
+        global_module.fill_from_libc();
+        f := or global_module.get_addr("main") {
+            panic("couldn't find main()")
+        };
+        f := assume_types_fn(Arg = void, Ret = i64, ptr = f);
+        status := f();
+        exit(status);
+    };
+    exit(0);
+}
+
+HELP :: """qbe_frontend [OPTIONS] {file.ssa, -}
+	-h          prints this help
+	-o file     output to file
+	-d <flags>  dump debug information
+	-r          jit and run main() without outputting asm.
+	            can call functions from libc.
+""";
