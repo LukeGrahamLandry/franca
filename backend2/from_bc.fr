@@ -39,25 +39,25 @@ fn write(stream: *FILE, bytes: []u8) voidResult = {
 }
 
 // this returns asm text
-emit_qbe_included :: fn(comp: CompCtx, fns: [] FuncId, entry: ProgramEntry, target: *TargetEnv) BucketArray(u8) = {
+emit_qbe_included :: fn(comp: CompCtx, fns: [] FuncId, entry: ProgramEntry, target: *TargetEnv, want_llvm: bool) BucketArray(u8) = {    
+    global_module[].want_llvm = want_llvm;
     out_fd := open_temp_file();
     outf_local := fdopen(out_fd.fd, "a".sym().c_str());
     ::ptr_utils(FILE);
     assert(!outf_local.is_null(), "failed to open temp file");
     @println("Output asm to %", out_fd&.s_name());
     aaaa_out[] = out_fd;
-    outf[] = outf_local;
+    global_module[].outf = outf_local;
     
     ir_text := {CodeGen(EmitQbe2).emit}(comp, fns, entry, target);
     inline_asm_functions := ir_text&.pop_current_bucket().unwrap();
     
-    ir_out := open_temp_file();
-    ir_file := fopen(ir_out&.c_name(), "r".sym().c_str());
-    ::ptr_utils(FILE);
-    assert(!ir_file.is_null(), "failed to open ir_file");
+    ::ptr_utils(FILE);;
     
-    write(outf[], inline_asm_functions.items()).unwrap();
-    fclose(outf[]).unwrap();
+    if !want_llvm {
+        write(global_module[].outf, inline_asm_functions.items()).unwrap();
+    };
+    fclose(global_module[].outf).unwrap();
     
     asm := temp().read_to_string(aaaa_out.s_name());
     aaa: BucketArray(u8) = init(0, temp());
@@ -67,7 +67,6 @@ emit_qbe_included :: fn(comp: CompCtx, fns: [] FuncId, entry: ProgramEntry, targ
 };
 
 emit_data :: fn(d: *Qbe.Dat) void = {
-    emitdat(d, outf[]);
     global_module.new_emit_data(d);
     //if (d->type == DEnd) {
     //  fputs("/* end data */\n\n", outf);
@@ -125,7 +124,9 @@ fn emit_entry_points_and_debug_info(gen: *CodeGen(EmitQbe2), comp: CompCtx, fns:
     self := gen.backend&;
     
     // give it a chance to spit out the constants it wanted to add (like when it loads to get a double literal)
-    {qbe_globals[].target.emitfin}(outf[]);
+    if global_module[].want_text_asm {
+        {qbe_globals[].target.emitfin}(global_module[].outf);
+    };
 
     @match(entry) {
         fn TestRunnerMain() => {

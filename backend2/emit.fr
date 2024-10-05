@@ -7,7 +7,10 @@ QbeModule :: @struct(
     gpa: Alloc,
     start_of_writable_code: *u8,
     globals: *Qbe.Globals,
+    // TODO: everything that touches these needs to be rewritten eventually. 
     want_text_asm := false,
+    want_llvm := false,
+    outf := zeroed(*FILE),
 );
 
 SegmentCursor :: @struct(
@@ -90,6 +93,18 @@ fn get_addr(self: *QbeModule, name: CStr) ?rawptr = {
 
 // TODO: be able to specify mutable or constant
 fn new_emit_data(self: *QbeModule, dat: *Qbe.Dat) void = {
+    self.emit_data_to_segment(dat);
+    if self.want_text_asm {
+        fn emitdat(_0: *Qbe.Dat, _1: *FILE) void #import("qbe"); // :TodoPort
+        emitdat(dat, global_module[].outf);
+    };
+    if self.want_llvm {
+        self.emit_llvm(dat);
+    };
+}
+
+// Used when doing our own bytes. Not needed for emitting text asm/llvm. 
+fn emit_data_to_segment(self: *QbeModule, dat: *Qbe.Dat) void = {
     ::enum(@type dat.type);
     segment := self.segments&[.MutableData]&;
     next := segment.next&;
@@ -118,7 +133,7 @@ fn new_emit_data(self: *QbeModule, dat: *Qbe.Dat) void = {
                 @assert(dat.u.ref.off == 0, "sorry can't do offset refs yet");
                 name := dat.u.ref.name;
                 value := or self.get_addr(name) {
-                    panic("TODO: data relocations")
+                    panic("TODO: data relocations (data containing pointer to data/func declared later)")
                 };
                 ptr[] = int_from_rawptr(value); // TODO: we have to record that we did this somewhere for aot.
             } else {

@@ -12,6 +12,7 @@ fn main() void = {
     global_module[] = init(1.shift_left(18), page_allocator, page_allocator, qbe_globals);
     run := false;
     debug := false;
+    llvm := false;
     global_module[].want_text_asm = true;
     args := cli_args();
     pop :: fn() => {
@@ -51,6 +52,10 @@ fn main() void = {
                 run = true;
                 pop();
             };
+            @case("-l") => {
+                llvm = true;
+                pop();
+            };
             @case("-h") => {
                 print(HELP);
                 exit(0);
@@ -68,11 +73,14 @@ fn main() void = {
             };
         };
     };
+    assert(!run || !llvm, "can't jit run with llvm");
+    global_module[].want_llvm = llvm;
     
     ::if(*FILE);
     ::ptr_utils(FILE);
     //@eprintln(";% -> %", inpath, outpath);
-    outfile := if debug || run {
+    outfile := if debug || run {    
+        assert(outpath == "-", "not yet implemented: output the debug dump to the -o arg.");
         global_module[].want_text_asm = false;
         fopen("/dev/null".sym().c_str(), "w".sym().c_str())
     } else {
@@ -93,12 +101,12 @@ fn main() void = {
     
     INFILE :: @static(*FILE);
     INFILE[] = infile;
-    outf[] = outfile;
+    global_module[].outf = outfile;
     
     handle_dbg :: fn(s: CStr) void = ();
     
     parse(infile, "<file>".sym().c_str(), handle_dbg, emit_data, run_qbe_passes);
-    {qbe_globals[].target.emitfin}(outf[]);
+    {qbe_globals[].target.emitfin}(global_module[].outf);
     fclose(infile);
     if run {
         global_module.make_exec();
@@ -114,9 +122,10 @@ fn main() void = {
 }
 
 HELP :: """qbe_frontend [OPTIONS] {file.ssa, -}
-	-h          prints this help
-	-o file     output to file
-	-d <flags>  dump debug information
+	-h          prints this help.
+	-o file     output to file.
+	-d <flags>  dump debug information.
 	-r          jit and run main() without outputting asm.
 	            can call functions from libc.
+	-l          output llvm ir instead of assembly.
 """;

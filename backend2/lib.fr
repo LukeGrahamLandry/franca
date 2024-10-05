@@ -11,6 +11,8 @@
 #include_std("backend2/opt/ssa.fr");
 #include_std("backend2/opt/cfg.fr");
 #include_std("backend2/opt/spill.fr");
+//#include_std("backend2/opt/rega.fr");
+#include_std("backend2/llvm.fr");
 
 // easy-ish (?) things to try to get used to making changes. 
 // TODO: if they don't do it already: 
@@ -38,6 +40,7 @@ clang -dynamiclib -o qbe_merged.dylib main.o util.o parse.o abi.o cfg.o mem.o ss
 // TODO: this has to change when i do static aot.
 qbe_globals :: @static(Qbe.Globals) {  
     :: { // this only runs if you reference qbe_globals but it as to run before you try to compile the rest of this initializer. 
+        eprintln("Loading Qbe dylib!");
         c := current_compiler_context();
         handle := dlopen("./bindings/qbe/qbe_merged.dylib".sym().c_str(), DlFlag.Lazy);
         assert(!handle.lib.is_null(), "failed to open qbe dylib");
@@ -58,7 +61,7 @@ qbe_globals :: @static(Qbe.Globals) {
     //g.debug[Qbe.DebugKey.Disassemble.raw()] = true;
     //g.debug[Qbe.DebugKey.TableRefs.raw()] = true;
     //g.debug[Qbe.DebugKey.RegAlloc.raw()] = true;
-    g.debug[Qbe.DebugKey.Spill.raw()] = true;
+    //g.debug[Qbe.DebugKey.Spill.raw()] = true;
     g.target[] = get_qbe_dylib_variable(Qbe.Target, "T_arm64_apple")[]; // TODO: choose arch!
     g.target.isel = arm64_isel;
     g.types[] = new(0, Qbe.Pool.PHeap); // TODO: check the magic in QbeBuilder.init to make sure you remember to do this. 
@@ -68,7 +71,6 @@ qbe_globals :: @static(Qbe.Globals) {
 global_module :: @static(QbeModule); // TODO: aaaaaaaa
 
 // TODO: this changes for aot!!
-outf :: @static(*FILE);
 aaaa_out :: @static(TmpFile);
 debugf :: @static(*FILE) {    
     //name :: "target/franca_debug.txt";
@@ -85,8 +87,9 @@ run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
     filluse :: fill_use;
     
     if fnn.globals.debug["P".char()] {
-        write(debugf[], "\n> After parsing:\n");
-        printfn(fnn, debugf[]);
+        out := fnn.globals.debug_out;
+        write(out, "\n> After parsing:\n");
+        printfn(fnn, out);
     };
     
 	// TODO: make sure nothing requires the extra call to fillpreds and then disable this in release mode. 
@@ -94,13 +97,11 @@ run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
 	//       but always have to option to run this to make peoples lives easier! (ie if a user wants to use #bc)
 	//       same for ssacheck
     typecheck(fnn); // debug. but it calls clsmerge which does mutate sometimes so maybe not.
-    //printfn(fnn, debugf[]);
     {qbe_globals[].target.abi0}(fnn);
     fillrpo(fnn);
     fillpreds(fnn);
     filluse(fnn);
     promote(fnn); // optional
-    //printfn(fnn, debugf[]);
     filluse(fnn);
     //ssa(fnn);
     convert_to_ssa(fnn);
@@ -116,8 +117,18 @@ run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
     copy_elimination(fnn); // optional
     //copy(fnn);
     filluse(fnn);
-    //printfn(fnn, debugf[]);
     fold(fnn); // optional
+    
+    // TODO: factor this out
+    // TODO: you still need to run some of the abi passes to put the right attributes on stuff. 
+    if m.want_llvm {
+        // TODO: time which passes help llvm be faster and which hurt it. like maybe coalescing forces it to do extra work do dealias memory?
+        //       or maybe the whole theory is bad and its better at mem2reg-ing than i am and there's no point in trying to help. only one way to find out. 
+        //       but i assume anything we can do to give it more sane input is better. 
+        m.emit_llvm(fnn);
+        return();
+    };
+    
     {qbe_globals[].target.abi1}(fnn);
     simplify(fnn);
     //simpl(fnn);
@@ -127,7 +138,6 @@ run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
     fillrpo(fnn);
     fill_liveness(fnn);
     //filllive(fnn);
-    //printfn(fnn, debugf[]);
     fillloop(fnn); // optional
     fillcost(fnn); // optional
     spill(fnn);
@@ -147,11 +157,10 @@ run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
     fnn.rpo.offset(fnn.nblk.zext() - 1)[].link = Qbe.Blk.ptr_from_int(0);
     
     if true {
-        m.emit_func_arm64(fnn, outf[]);
+        m.emit_func_arm64(fnn, global_module[].outf);
     } else {
-        {qbe_globals[].target.emitfn}(fnn, outf[]);
+        {qbe_globals[].target.emitfn}(fnn, global_module[].outf);
     };
-    //printfn(fnn, debugf[]);
     // TODO: do this but then have to reset up the type table
     //freeall();  
 };
