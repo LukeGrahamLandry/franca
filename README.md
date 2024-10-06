@@ -18,7 +18,7 @@ If you just want to see what the syntax looks like, click on examples or compile
 - lazy analysis, functions/constants that are statically unreachable may contain invalid code (like zig)
 - nonlocal returns from inline lambdas (like kotlin/ruby)
 - manual memory management with explicit allocators (like zig)
-- no seperate build system. write a program that builds your program (like jai)
+- no seperate build system language. write a program that builds your program (like zig/jai)
 - custom asm backend for quick debug builds, optional llvm backend for optimised release builds (like zig/jai)
 - ships with [sokol](https://github.com/floooh/sokol) bindings so its not a research exercise if you just want to put a triangle on the screen.
 - cross compilation and reproducible builds. all supported targets produce identical llvm-ir for all supported targets.
