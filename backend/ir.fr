@@ -14,7 +14,7 @@ Qbe :: @rec @struct(
     // so they're always in order in the blocks but you always process them backwards. 
     Globals :: @rec @struct(
         // These have to be pointers to the symbols Qbe externs because it uses them. 
-        types: *InsaneVec(Qbe.Typ), // typ
+        types: *QList(Qbe.Typ), // typ
         insb: *Array(Qbe.Ins, 1.shift_left(20)), // MaxInstructions
         curi: **Qbe.Ins,
         target: *Qbe.Target,
@@ -119,8 +119,8 @@ Qbe :: @rec @struct(
     ),
     Phi :: @rec @struct(
         to: Qbe.Ref,
-        arg: InsaneVec(Qbe.Ref),
-        blk: InsaneVec(*Qbe.Blk), 
+        arg: QList(Qbe.Ref),
+        blk: QList(*Qbe.Blk), 
         narg: u32,
         cls: Qbe.Cls, // size changed but alignment padding makes it the same (TODO: remove comment when dont need to match abi with old version)
         link: *Qbe.Phi,
@@ -143,7 +143,7 @@ Qbe :: @rec @struct(
         idom: *Qbe.Blk,
         dom: *Qbe.Blk,
         dlink: *Qbe.Blk,
-        fron: InsaneVec(*Qbe.Blk),
+        fron: QList(*Qbe.Blk),
         nfron: u32,
     
         pred: **Qbe.Blk,
@@ -213,7 +213,7 @@ Qbe :: @rec @struct(
     Tmp :: @rec @struct(
         name: Array(u8, 80),
         def: *Qbe.Ins, // TODO: nullable
-        use: InsaneVec(Qbe.Use),
+        use: QList(Qbe.Use),
         ndef: u32,  // once in ssa form this will always be 0 or 1, but we use this field while constructing ssa form.
         nuse: u32,
         defining_block: i32,
@@ -257,9 +257,9 @@ Qbe :: @rec @struct(
     ),
     Fn :: @rec @struct(
         start: *Qbe.Blk,
-        tmp: InsaneVec(Qbe.Tmp),  
-        con: InsaneVec(Qbe.Con),
-        mem: InsaneVec(Qbe.Addr),
+        tmp: QList(Qbe.Tmp),  
+        con: QList(Qbe.Con),
+        mem: QList(Qbe.Addr),
         ntmp: i32,
         ncon: i32,
         nmem: i32,
@@ -304,7 +304,7 @@ Qbe :: @rec @struct(
         // In a union, there are `nunion` structs in a row. 
         // TODO: is_union redundant? same as nunion == 1. or is there an edge case where the abi treats a 1 case union differently.  
         nunion: u32,
-        fields: InsaneVec(Qbe.Field), 
+        fields: QList(Qbe.Field), 
     ),
     Dat :: @rec @struct(
         type: @enum(i32) (
@@ -587,9 +587,7 @@ QbeConZero :: ref(.RCon, 1);
 
 fn die(msg: CStr) void #import("qbe");
 fn freeall() void #import("qbe");
-fn vnew(len: i64, element_size: i64, pool: Qbe.Pool) rawptr #import("qbe");
-fn vfree(_0: rawptr) void #import("qbe");
-fn vgrow(_0: rawptr, _1: i64) void #import("qbe");
+
 fn strf(_0: CStr, _1: CStr) void #import("qbe");
 fn intern(_0: CStr) u32 #import("qbe");
 fn str(_0: u32) CStr #import("qbe");
@@ -607,18 +605,9 @@ fn newcon(_0: *Qbe.Con, _1: *Qbe.Fn) Qbe.Ref #import("qbe");
 fn getcon(_0: i64, _1: *Qbe.Fn) Qbe.Ref #import("qbe");
 fn addcon(_0: *Qbe.Con, _1: *Qbe.Con, _2: i32) i32 #import("qbe");
 fn salloc(_0: Qbe.Ref, _1: Qbe.Ref, _2: *Qbe.Fn) void #import("qbe");
-fn dumpts(_0: *Qbe.BSet, _1: InsaneVec(Qbe.Tmp), _2: *FILE) void #import("qbe");
+fn dumpts(_0: *Qbe.BSet, _1: QList(Qbe.Tmp), _2: *FILE) void #import("qbe");
 fn runmatch(_0: *Uchar, _1: *Num, _2: Ref, _3: *Ref) void #import("qbe");
-fn bsinit(_0: *Qbe.BSet, _1: i64) void #import("qbe");
-fn bszero(_0: *Qbe.BSet) void #import("qbe");
-fn bscount(_0: *Qbe.BSet) u32 #import("qbe");
-fn bsclr(_0: *Qbe.BSet, _1: i64) void #import("qbe");
-fn bscopy(_0: *Qbe.BSet, _1: *Qbe.BSet) void #import("qbe");
-fn bsunion(_0: *Qbe.BSet, _1: *Qbe.BSet) void #import("qbe");
-fn bsinter(_0: *Qbe.BSet, _1: *Qbe.BSet) void #import("qbe");
-fn bsdiff(_0: *Qbe.BSet, _1: *Qbe.BSet) void #import("qbe");
-fn bsequal(_0: *Qbe.BSet, _1: *Qbe.BSet) bool #import("qbe");
-fn bsiter(_0: *Qbe.BSet, _1: *i32) bool #import("qbe");
+
 fn parse(_0: *FILE, _1: CStr, _2: @FnPtr(CStr) void, _3: @FnPtr(*Qbe.Dat) void, _4: @FnPtr(*Qbe.Fn) void) void #import("qbe");
 fn printfn(_0: *Qbe.Fn, _1: *FILE) void #import("qbe");
 fn printref(_0: Qbe.Ref, _1: *Qbe.Fn, _2: *FILE) void #import("qbe");
@@ -653,69 +642,6 @@ fn ssa(_0: *Qbe.Fn) void #import("qbe");
 
 // Note: you have to make this not `static` in qbe/parse.fr
 fn typecheck(_0: *Qbe.Fn) void #import("qbe");
-
-fn header();
-fn grow();
-fn new_copy();
-
-// TODO: move to util
-fn InsaneVec($T: Type) Type = {
-    Self :: @struct(first: *T);
-    ::ptr_utils(T);
-    
-    fn new(len: i64, pool: Qbe.Pool) Self = {
-        (first = T.ptr_from_raw(vnew(len, T.size_of(), pool)))
-    }
-    
-    fn new_copy(items: []T, pool: Qbe.Pool) Self = {
-        self: Self = new(items.len, pool);
-        self.slice(0, items.len).copy_from(items);
-        self
-    }
-    
-    // ensure capacity is >= len
-    fn grow(s: *Self, len: i64) void = {
-        v := Self.raw_from_ptr(s);
-        vgrow(v, len);
-    }
-    
-    fn free(s: Self) void = {
-        v := T.raw_from_ptr(s.first);
-        vfree(v);
-    }
-    
-    // TODO: bounds checking but its hard as long as i have to keep qbe's memory layout because the fields aren't together. 
-    //       and anyway it would be sad to add alignment padding just for bounds checks. 
-    
-    fn index(s: Self, i: i64) *T = 
-        s.first.offset(i);
-    
-    fn index(s: *Self, i: i64) *T = 
-        s.first.offset(i);
-    
-    fn slice(self: Self, start: i64, end: i64) []T = {
-        (ptr = self.first.offset(start), len = end - start)
-    }
-    
-    fn header(s: Self) *QbeVec = {
-        v := ptr_cast_unchecked(T, Vec, self.first);
-        v.offset(-1)
-    }
-    
-    Self
-}
-
-// Used with [vnew, vfree, vgrow]
-// This is a header that goes before the allocated memory for the array. 
-// When a field is an InsaneVec it points to the first entry of one of these and you offset backwards to get the header. 
-QbeVec :: @struct(
-       mag: u64,
-       pool: Qbe.Pool,
-       esz: i64,
-       cap: u64,
-    // I don't have unsized types. lets hope thats not a big deal
-       // union { long long ll; long double ld; void *ptr; } align[];
-);
 
 fn name(s: *Qbe.Tmp) CStr = (ptr = s.name&.as_ptr());
 fn name(s: *Qbe.Blk) CStr = (ptr = s.name&.as_ptr());

@@ -1,18 +1,18 @@
-#include_std("backend2/ir.fr");
-#include_std("backend2/from_bc.fr");
-#include_std("backend2/builder.fr");
-#include_std("backend2/opt/simplify.fr");
-#include_std("backend2/opt/live.fr");
-#include_std("backend2/opt/util.fr");
-#include_std("backend2/opt/copy.fr");
-#include_std("backend2/opt/arm64/isel.fr");
-#include_std("backend2/arm64.fr");
-#include_std("backend2/emit.fr");
-#include_std("backend2/opt/ssa.fr");
-#include_std("backend2/opt/cfg.fr");
-#include_std("backend2/opt/spill.fr");
-//#include_std("backend2/opt/rega.fr");
-#include_std("backend2/llvm.fr");
+#include_std("backend/ir.fr");
+#include_std("backend/from_bc.fr");
+#include_std("backend/builder.fr");
+#include_std("backend/opt/simplify.fr");
+#include_std("backend/opt/live.fr");
+#include_std("backend/util.fr");
+#include_std("backend/opt/copy.fr");
+#include_std("backend/opt/arm64/isel.fr");
+#include_std("backend/arm64.fr");
+#include_std("backend/emit.fr");
+#include_std("backend/opt/ssa.fr");
+#include_std("backend/opt/cfg.fr");
+#include_std("backend/opt/spill.fr");
+#include_std("backend/opt/rega.fr");
+#include_std("backend/llvm.fr");
 
 // easy-ish (?) things to try to get used to making changes. 
 // TODO: if they don't do it already: 
@@ -30,6 +30,7 @@
 //       :Explain
 //
 // TODO: the trick of having a `BitSet w[1]` so it auto decays to a pointer is cute. it's kinda a shame i can't do that. 
+// TODO: fix panic on overflow block name in rega
 /*
 (i assume you need this thing for static link)
 ar rvs qbe_merged.o util.o parse.o abi.o cfg.o mem.o ssa.o alias.o load.o copy.o fold.o simpl.o live.o spill.o rega.o emit.o amd64/targ.o amd64/sysv.o amd64/isel.o amd64/emit.o arm64/targ.o arm64/abi.o arm64/isel.o arm64/emit.o rv64/targ.o rv64/abi.o rv64/isel.o rv64/emit.o
@@ -40,7 +41,7 @@ clang -dynamiclib -o qbe_merged.dylib main.o util.o parse.o abi.o cfg.o mem.o ss
 // TODO: this has to change when i do static aot.
 qbe_globals :: @static(Qbe.Globals) {  
     :: { // this only runs if you reference qbe_globals but it as to run before you try to compile the rest of this initializer. 
-        eprintln("Loading Qbe dylib!");
+        //eprintln("Loading Qbe dylib!");
         c := current_compiler_context();
         handle := dlopen("./bindings/qbe/qbe_merged.dylib".sym().c_str(), DlFlag.Lazy);
         assert(!handle.lib.is_null(), "failed to open qbe dylib");
@@ -48,7 +49,7 @@ qbe_globals :: @static(Qbe.Globals) {
     };
     
     g: Qbe.Globals = (
-        types = get_qbe_dylib_variable(InsaneVec(Qbe.Typ), "typ"),
+        types = get_qbe_dylib_variable(QList(Qbe.Typ), "typ"),
         insb = get_qbe_dylib_variable(Array(Qbe.Ins, 1.shift_left(20)), "insb"),
         curi = get_qbe_dylib_variable(*Qbe.Ins, "curi"),
         target = get_qbe_dylib_variable(Qbe.Target, "T"),
@@ -142,6 +143,7 @@ run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
     fillcost(fnn); // optional
     spill(fnn);
     rega(fnn);
+    //register_allocation(fnn);
     fillrpo(fnn);
     simplify_jump_chains(fnn); // optional
     fillpreds(fnn);
