@@ -1,5 +1,5 @@
 An optimising compiler backend based on [Qbe](https://c9x.me/compile/).
-The passes in `opt` are ported directly from Qbe, with some light editing to use a style I find less confusing.
+Almost everything (ir design, opt passes, isel/abi) is ported directly from Qbe, with some light editing to use a style I find less confusing.
 
 In my brief profiling (with -O2), Qbe spends ~45% of its time parsing the input text and another ~15% outputting the assembly text.
 Then clang takes as long to assemble that text as the whole Qbe part (or somehow 10x as long on aarch64).

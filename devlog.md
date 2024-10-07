@@ -1,3 +1,7 @@
+## (Oct 6)
+
+- pretty ironic to not be able to incrementally port abi.c because functions pass structs by value and my old backend doesn't follow the abi correctly.
+
 ##
 
 - setup default_driver test and its always failing the third one it tries.

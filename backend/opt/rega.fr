@@ -13,65 +13,70 @@
 //! Similar for lowering phi nodes.
 //!
 
-RMap :: @struct(
-    t: Array(i32, Qbe.Tmp0),
-    r: Array(i32, Qbe.Tmp0),
-    w: Array(i32, Qbe.Tmp0), /* wait list, for unmatched hints */
-    b: Qbe.BSet,
-    n: i64,
-);
+// TODO: this doesn't get identical results to Qbe. 
 
+RMap :: @struct(
+    // parallel arrays. the tmp value t[i] is in register r[i]
+    tmps: Array(i32, Qbe.Tmp0),
+    regs: Array(i32, Qbe.Tmp0),
+    wait_list: Array(i32, Qbe.Tmp0), /* for unmatched hints */ // [register] = temp that wants to be there.
+    live: Qbe.BSet,
+    len: i64,  // numbers of registers used so far
+);
+  
 RegaCtx :: @struct(
     f: *Qbe.Fn,
     regu: u64,          /* registers used */
     pm: Array(@struct(
         src:  Qbe.Ref, 
         dest: Qbe.Ref, 
-        cls:  Qbe.Cls
+        cls:  Qbe.Cls, 
     ), Qbe.Tmp0),       /* parallel move constructed */
     npm:   i64,         /* size of pm */
     loop:  i32,         /* current loop level */
-    stmov: u32,         /* stats: added moves */
-    stblk: u32,         /* stats: added blocks */
+    added_moves:  u32, 
+    added_blocks: u32,
 );
 
 fn hint(c: *RegaCtx, t: i64) *i32 #inline = 
-    c.f.tmp[phicls(t, c.f.tmp)].hint.r&;
+    c.f.tmp[phi_dest(t, c.f.tmp)].hint.register&;
 
 fn sethint(c: *RegaCtx, t: i64, r: i64) void = {
-    p := c.f.tmp[phicls(t, c.f.tmp)]&;
-    if p.hint.r == -1 || p.hint.w > c.loop {
-        p.hint.r = r.intcast();
-        p.hint.w = c.loop;
+    p := c.f.tmp[phi_dest(t, c.f.tmp)]&;
+    if p.hint.register == -1 || p.hint.weight > c.loop {
+        p.hint.register = r.intcast();
+        p.hint.weight = c.loop;
         c.f.tmp[t].visit = -1;
     }
 }
 
 fn rcopy(dest: *RMap, src: *RMap) void = {
-    dest.t&.items().copy_from(src.t&.items());
-    dest.r&.items().copy_from(src.r&.items());
-    dest.w&.items().copy_from(src.w&.items());
-    bscopy(dest.b&, src.b&);
-    dest.n = src.n;
+    dest.tmps&.items().copy_from(src.tmps&.items());
+    dest.regs&.items().copy_from(src.regs&.items());
+    dest.wait_list&.items().copy_from(src.wait_list&.items());
+    bscopy(dest.live&, src.live&);
+    dest.len = src.len;
 }
 
-fn rfind(m: *RMap, t: i64) i32 = {
-    range(0, m.n) { i | 
-        if m.t&[i] == t.intcast() {
-            return(m.r&[i]);
+fn rfind(m: *RMap, t: i64) ?i32 = {  
+    range(0, m.len) { i | 
+        if m.tmps&[i] == t.intcast() {
+            r := m.regs&[i];
+            @debug_assert(t >= Qbe.Tmp0 || r.intcast() == t, "not allocated to itself");
+            return(Some = r);
         }
     };
-    -1
+    .None
 }
 
+::if_opt(i32, Qbe.Ref);
 fn rref(c: *RegaCtx, m: *RMap, t: i64) Qbe.Ref = {
-    r := rfind(m, t);
-    if r == -1 {
+    if rfind(m, t) { r |
+        TMP(r)
+    } else {
         s := c.f.tmp[t].slot;
         @debug_assert(s != -1, "should have spilled");
         SLOT(s)
-    } else {
-        TMP(r)
     }
 }
 
@@ -81,107 +86,103 @@ fn radd(c: *RegaCtx, m: *RMap, t: i64, r: i64) void = {
     is_int   := T.gpr0.intcast() <= r && r.intcast() < T.gpr0 + T.ngpr;
     is_float := T.fpr0.intcast() <= r && r.intcast() < T.fpr0 + T.nfpr;
     @debug_assert(is_int || is_float, "invalid register");
-    @debug_assert(!bshas(m.b&, t), "temporary has mapping");
-    @debug_assert(!bshas(m.b&, r), "register already allocated");
-    @debug_assert(m.n.intcast() <= T.ngpr+T.nfpr, "too many mappings");
+    @debug_assert(!bshas(m.live&, t), "temporary has mapping");
+    @debug_assert(!bshas(m.live&, r), "register already allocated");
+    @debug_assert(m.len.intcast() <= T.ngpr+T.nfpr, "too many mappings");
     
-    bsset(m.b&, t);
-    bsset(m.b&, r);
-    m.t&[m.n] = t.intcast();
-    m.r&[m.n] = r.intcast();
-    m.n += 1;
+    bsset(m.live&, t);
+    bsset(m.live&, r);
+    m.tmps&[m.len] = t.intcast();
+    m.regs&[m.len] = r.intcast();
+    m.len += 1;
     c.regu = c.regu.bit_or(BIT(r));
 }
 
 fn ralloctry(c: *RegaCtx, m: *RMap, t: i32, try: bool) Qbe.Ref = {
-    if t < Qbe.Tmp0 {
-        @debug_assert(bshas(m.b&, t.zext()));
+    t := t.intcast();
+    if t < Qbe.Tmp0 {   // this is a register
+        @debug_assert(bshas(m.live&, t), "reg must be allocated to itself");
         return(TMP(t));
     };
-    if bshas(m.b&, t.intcast()) {
-        r := rfind(m, t.intcast());
-        @debug_assert(r != -1);
+    if bshas(m.live&, t) {  // we're already in a register
+        r := rfind(m, t).expect("thought we allocated but don't know where");
         return(TMP(r));
     };
-    r := c.f.tmp[t.intcast()].visit;
-    if r == -1 || bshas(m.b&, r.intcast()) {
-        r = c.hint(t.zext())[];
+    r_hinted := c.f.tmp[t].visit;
+    if r_hinted == -1 || bshas(m.live&, r_hinted.intcast()) {
+        r_hinted = c.hint(t)[];
     };
     T := c.f.globals.target;
-    found := if(r != -1 && !bshas(m.b&, r.zext()), => true) {
+    r_allocated := if r_hinted != -1 && !bshas(m.live&, r_hinted.zext()) {
+        r_hinted.intcast()
+    } else {
         found :: local_return;
         if try {
             return(QbeNull);
         };
-        regs := c.f.tmp[phicls(t.intcast(), c.f.tmp)].hint.m;
-        regs = regs.bit_or(m.b.t[]);
+        to_avoid := c.f.tmp[phi_dest(t, c.f.tmp)].hint.avoid;
+        to_avoid  = to_avoid.bit_or(m.live.t[]); // include those already allocated
         
         ::if(Ty(i32, i32));
-        r0, r1 := if KBASE(c.f.tmp[t.intcast()].cls) == 0 {
-            (T.gpr0, T.ngpr)
-        } else {
-            (T.fpr0, T.nfpr)
+        r0, count   := if(KBASE(c.f.tmp[t].cls) == 0, => (T.gpr0, T.ngpr), => (T.fpr0, T.nfpr));
+        first, last := (r0.intcast(), intcast(r0 + count));
+        
+        // at least try not to get a bad place
+        range(first, last) { r |
+            if(!to_avoid.bit_is_set(r), => found(r));
         };
-        r1 += r0;
-        r = r0;
-        while => r < r1 {
-            if regs.bit_and(BIT(r.intcast())) == 0 {
-                found(true);
-            };
-            r += 1;
+        // ok fine, anything will do
+        range(first, last) { r |
+            if(!bshas(m.live&, r), => found(r));
         };
-        r = r0;
-        while => r < r1 {
-            if !bshas(m.b&, r.intcast()) {
-                found(true);
-            };
-            r += 1;
-        };
-        false
+        @panic("no more registers. this should be unreachable becuase of the spill pass");
     };
-    @assert(found, "no more regs");
-    c.radd(m, t.intcast(), r.intcast());
-    c.sethint(t.intcast(), r.intcast());
-    c.f.tmp[t.intcast()].visit = r;
-    h := c.hint(t.zext())[];
-    if h != -1 && h != r {
-        m.w&[h.intcast()] = t;
+    c.radd(m, t, r_allocated);
+    c.sethint(t, r_allocated);
+    c.f.tmp[t].visit = r_allocated.intcast(); // remember that we were allocated this register for later. 
+    r_hinted := c.hint(t)[].intcast();
+    if r_hinted != -1 && r_hinted != r_allocated {
+        // if we didn't get where we wanted, remember that we should be swapped in if r_hinted frees up. 
+        m.wait_list&[r_hinted] = t.intcast();
     };
-    TMP(r)
+    TMP(r_allocated)
 }
 
 fn ralloc(c: *RegaCtx, m: *RMap, t: i32) Qbe.Ref #inline = 
     c.ralloctry(m, t, false);
 
+fn bit_is_set(s: u64, i: i64) bool #inline = 
+    s.bit_and(BIT(i)) != 0;
+
 fn rfree(c: *RegaCtx, m: *RMap, t: i64) i64 = {
     T := c.f.globals.target;
-    @debug_assert(t >= Qbe.Tmp0 || BIT(t).bit_and(T.rglob) == 0);
-    if !bshas(m.b&, t) {
+    @debug_assert(t >= Qbe.Tmp0 || !T.rglob.bit_is_set(t));
+    if !bshas(m.live&, t) {
         return(-1);
     };
     i := 0;
-    while => m.t&[i].intcast() != t {
-        @debug_assert(i+1 < m.n);
+    while => m.tmps&[i].intcast() != t {
+        @debug_assert(i+1 < m.len);
         i += 1;
     };
-    r := m.r&[i].intcast();
-    bsclr(m.b&, t);
-    bsclr(m.b&, r);
-    m.n -= 1;
-    m.t&.items().copy_overlapping(i, i + 1, m.n - i); // TODO: makes sure these offsets are right
-    m.r&.items().copy_overlapping(i, i + 1, m.n - i);
+    r := m.regs&[i].intcast();
+    bsclr(m.live&, t);
+    bsclr(m.live&, r);
+    m.len -= 1;
+    m.tmps&.items().copy_overlapping(i, i + 1, m.len - i); // TODO: makes sure these offsets are right
+    m.regs&.items().copy_overlapping(i, i + 1, m.len - i);
     @debug_assert(t >= Qbe.Tmp0 || t == r);
     r
 }
 
-fn mdump(c: *RegaCtx, m: *RMap) void = {
-    range(0, m.n) { i |
-        if m.t&[i] >= Qbe.Tmp0 {
-            name := c.f.tmp.index(m.t&[i].intcast()).name();
-            @fmt_write(c.f.globals.debug_out, " (%, R%)", name, m.r&[i]);
+fn debug_dump(f: *Qbe.Fn, m: *RMap) void = {
+    range(0, m.len) { i |
+        if m.tmps&[i] >= Qbe.Tmp0 {
+            name := f.tmp.index(m.tmps&[i].intcast()).name();
+            @fmt_write(f.globals.debug_out, " (%, R%)", name, m.regs&[i]);
         }
     };
-    write(c.f.globals.debug_out, "\n");
+    write(f.globals.debug_out, "\n");
 }
 
 fn pmadd(c: *RegaCtx, src: Qbe.Ref, dst: Qbe.Ref, k: Qbe.Cls) void = {
@@ -195,6 +196,7 @@ fn pmadd(c: *RegaCtx, src: Qbe.Ref, dst: Qbe.Ref, k: Qbe.Cls) void = {
 
 PMStat :: @enum(i64) (ToMove, Moving, Moved);
 
+// :Explain
 // note: k is a pointer. we mutate back up through levels of recursion. 
 fn pmrec(c: *RegaCtx, status: []PMStat, i: i64, k: *Qbe.Cls) i64 = {
     /* note, this routine might emit
@@ -256,72 +258,79 @@ fn pmgen(c: *RegaCtx) void = {
 
 fn move(c: *RegaCtx, r: i64, to: Qbe.Ref, m: *RMap) void = {
     r1 := if(to == QbeNull, => -1, => c.rfree(m, to.val()));
-    if bshas(m.b&, r) {
+    if bshas(m.live&, r) {
         /* r is used and not by to */
         @debug_assert(r1 != r);
         n := 0;
-        while => m.r&[n].intcast() != r {
-            @debug_assert(n+1 < m.n);
+        while => m.regs&[n].intcast() != r {
+            @debug_assert(n+1 < m.len);
             n += 1;
         };
-        t := m.t&[n];
+        t := m.tmps&[n];
         c.rfree(m, t.intcast());
-        bsset(m.b&, r);
+        bsset(m.live&, r);
         c.ralloc(m, t);
-        bsclr(m.b&, r);
+        bsclr(m.live&, r);
     };
     t := if(to == QbeNull, => r, => to.val());
     c.radd(m, t, r);
 }
 
-fn dopm(c: *RegaCtx, b: *Qbe.Blk, i: *Qbe.Ins, m: *RMap) *Qbe.Ins = {
+// when you have a group of copies from registers to tmps, 
+// you need to make sure none of the dest tmps are allocated to registers later used as a src.
+// it has to execute as though all the moves happened at the same time, without letting any stomp eachother. 
+fn do_parallel_moves(c: *RegaCtx, b: *Qbe.Blk, last_move: *Qbe.Ins, m: *RMap) *Qbe.Ins = {
     T := c.f.globals.target;
     m0 := m[]; /* okay since we don't use m0.b */
-    m0.b.t = u64.ptr_from_int(0); // assert ^
-    i = i.offset(1);
-    i1 := i;
-    dowhile {
-        i = i.offset(-1);
-        c.move(i.arg&[0].val(), i.to, m);
-        !i.identical(b.ins) && regcpy(i.offset(-1))
+    m0.live.t = u64.ptr_from_int(0); // assert ^
+    past_last_move := last_move.offset(1);
+    first_move := {
+        i := past_last_move;
+        dowhile {
+            i = i.offset(-1);
+            c.move(i.arg&[0].val(), i.to, m);
+            !i.identical(b.ins) && is_copy_from_reg(i.offset(-1))
+        };
+        i
     };
-    @debug_assert(m0.n <= m.n);
-    if !i.identical(b.ins) && i.offset(-1).op() == .call {
+    @debug_assert(m0.len <= m.len);
+    is_after_call := !first_move.identical(b.ins) && first_move.offset(-1).op() == .call;
+    if is_after_call {
         discard := Array(i32, 2).ptr_from_int(0); // TODO: helper for this 
-        def := {T.retregs}(i.offset(-1)[].arg&[1], discard).bit_or(T.rglob);
+        call_abi_info := first_move.offset(-1)[].arg&[1];
+        def := {T.retregs}(call_abi_info, discard).bit_or(T.rglob);
         for_caller_saved T { r | 
-            if BIT(r).bit_and(def) == 0 {
+            if !def.bit_is_set(r) {
                 c.move(r, QbeNull, m);
             }
         }
     };
     c.npm = 0;
-    range(0, m.n) { n |
-        t  := m.t&[n].intcast();
-        s  := c.f.tmp[t].slot;
-        r1 := m.r&[n];
-        r  := rfind(m0&, t);
-        if r != -1 {
+    range(0, m.len) { n |
+        t  := m.tmps&[n].intcast();
+        spill_slot  := c.f.tmp[t].slot;
+        r1 := m.regs&[n];
+        if rfind(m0&, t) { r |
             c.pmadd(TMP(r1), TMP(r), c.f.tmp[t].cls);
         } else {
-            if s != -1 {
-                c.pmadd(TMP(r1), SLOT(s), c.f.tmp[t].cls);
+            if spill_slot != -1 {
+                c.pmadd(TMP(r1), SLOT(spill_slot), c.f.tmp[t].cls);
             }
         }
     };
-    ip := i;
-    while => Qbe.Ins.int_from_ptr(ip) < Qbe.Ins.int_from_ptr(i1) {
+    ip := first_move;
+    while => Qbe.Ins.int_from_ptr(ip) < Qbe.Ins.int_from_ptr(past_last_move) {
         if ip.to != QbeNull {
             c.rfree(m, ip.to.val());
         };
         r := ip.arg&[0].val();
-        if rfind(m, r) == -1 {
+        if rfind(m, r).is_none() {
             c.radd(m, r, r);
         };
         ip = ip.offset(1);
     };
     c.pmgen();
-    i
+    first_move
 }
 
 fn prio1(c: *RegaCtx, r1: Qbe.Ref, r2: Qbe.Ref) bool = {
@@ -342,116 +351,114 @@ fn insert(c: *RegaCtx, r: *Qbe.Ref, rs: *Array(*Qbe.Ref, 4), p: i64) void = {
     }
 }
 
-fn doblk(c: *RegaCtx, b: *Qbe.Blk, cur: *RMap) void = {
+fn do_block_instructions(c: *RegaCtx, b: *Qbe.Blk, cur: *RMap) void = {
     T := c.f.globals.target;
-    ra := Array(*Qbe.Ref, 4).zeroed(); ra := ra&;
+    reg_args := Array(*Qbe.Ref, 4).zeroed(); reg_args := reg_args&;
 
     if rtype(b.jmp.arg) == .RTmp {
-        b.jmp.arg = c.ralloc(cur, b.jmp.arg.val());
+        b.jmp.arg = c.ralloc(cur, b.jmp.arg.val().intcast());
     };
     c.f.reset_scratch();
-    curi := c.f.globals.curi;
+    curi := c.f.globals.curi; // :LookAtLastInst (but just to pop off dead code)
     for_insts_rev b { i1 |
         continue :: local_return;
         i := c.f.emit(i1[][]);
-        rf := -1;
+        just_freed := -1;
         other :: fn() => {
             if i.to != QbeNull  {
                 @debug_assert(rtype(i.to) == .RTmp, "can only assign tmp");
                 r := i.to.val();
-                if !(r < Qbe.Tmp0 && bit_and(BIT(r), T.rglob) != 0) {
-                    rf = c.rfree(cur, r);
-                    if rf == -1 {
+                if r >= Qbe.Tmp0 || !T.rglob.bit_is_set(r) {
+                    just_freed = c.rfree(cur, r);
+                    if just_freed == -1 {
+                        // if we didn't need the value later, we don't need the instruction that creates it. 
                         @debug_assert(!isreg(i.to));
-                        curi[] = curi[].offset(1);
+                        curi[] = curi[].offset(1); // pop off the emit() from this iteration
                         continue();
                     };
-                    i.to = TMP(rf);
+                    i.to = TMP(just_freed);
                 };
             };
         };
         @match(i.op()) {
-            fn call() => {
+            fn call() => { 
                 discard := Array(i32, 2).ptr_from_int(0);
-                rs := {T.argregs}(i.arg&[1], discard).bit_or(T.rglob);
+                needed_at_call := {T.argregs}(i.arg&[1], discard).bit_or(T.rglob);
                 for_caller_saved T { r |
-                    if BIT(r).bit_and(rs) == 0 {
+                    if !needed_at_call.bit_is_set(r) {
                         c.rfree(cur, r);
                     }
                 };
             }
             fn copy() => {
-                if regcpy(i) {
-                    curi[] = curi[].offset(1);
-                    i1[] = c.dopm(b, i1[], cur);
-                    c.stmov += curi[].ptr_diff(i.offset(1)).trunc();
+                if is_copy_from_reg(i) {
+                    // consecutive copies from registers are handled seperatly. 
+                    curi[] = curi[].offset(1);  // pop off the emit() from this iteration
+                    i1[] = c.do_parallel_moves(b, i1[], cur);
+                    c.added_moves += curi[].ptr_diff(i.offset(1)).trunc();
                     continue();
                 };
                 if isreg(i.to) && rtype(i.arg&[0]) == .RTmp {
-                    c.sethint(i.arg&[0].val(), i.to.val());
+                    c.sethint(i.arg&[0].val(), i.to.val());  // try to arrange so this copy is a nop.
                 };
                 other();
             }
             @default => other();
         };
-        nr := 0;
+        reg_args_count := 0;
         each i.arg& { arg | 
             @match(rtype(arg[])) {
                 fn RMem() => {
                     m := c.f.mem.get_memory(arg[]);
                     if rtype(m.base) == .RTmp {
-                        c.insert(m.base&, ra, nr);
-                        nr += 1;
+                        c.insert(m.base&, reg_args, reg_args_count);
+                        reg_args_count += 1;
                     };
                     if rtype(m.index) == .RTmp {
-                        c.insert(m.index&, ra, nr);
-                        nr += 1;
+                        c.insert(m.index&, reg_args, reg_args_count);
+                        reg_args_count += 1;
                     };
                 }
                 fn RTmp() => {
-                    c.insert(arg, ra, nr);
-                    nr += 1;
+                    c.insert(arg, reg_args, reg_args_count);
+                    reg_args_count += 1;
                 }
                 @default => ();
             };
         };
-        range(0, nr) { r |
-            ra[r][] = c.ralloc(cur, ra[r][].val());
+        range(0, reg_args_count) { r |
+            reg_args[r][] = c.ralloc(cur, reg_args[r][].val().intcast());
         };
-        if i.op() == .copy && i.to == i.arg&[0] { // :Explain
-            c.f.globals.curi[] = c.f.globals.curi[].offset(1);
+        was_nop_copy := i.op() == .copy && i.to == i.arg&[0];
+        if was_nop_copy { 
+            c.f.globals.curi[] = c.f.globals.curi[].offset(1); // pop off the emit() from this iteration
         };
 
         /* try to change the register of a hinted
-         * temporary if rf is available */
-        cond := rf != -1;
-        t: i32 = -1;
-        if cond {
-            t = cur.w&[rf];
-            cond = t != 0;
+         * temporary if `just_freed` is available */
+        if(just_freed == -1, => continue());
+        t := cur.wait_list&[just_freed];
+        if(t == 0, => continue());
+        if(bshas(cur.live&, just_freed), => continue());
+        r_hint := c.hint(t.intcast())[].intcast();
+        if(r_hint != just_freed, => continue());
+        rt := c.rfree(cur, t.intcast()).intcast();
+        if(rt == -1, => continue());
+        
+        c.f.tmp[t.intcast()].visit = -1;
+        c.ralloc(cur, t);
+        @debug_assert(bshas(cur.live&, just_freed));
+        c.f.emit(.copy, c.f.tmp[t.intcast()].cls, TMP(rt), TMP(just_freed), QbeNull);
+        c.added_moves += 1;
+        cur.wait_list&[just_freed] = 0;
+        range(0, reg_args_count) { r | 
+            if reg_args[r][] == TMP(rt) { // rT // TODO: rename. 
+                reg_args[r][] = TMP(just_freed); 
+            }
         };
-        cond = cond && !bshas(cur.b&, rf) && c.hint(t.intcast())[].intcast() == rf;
-        rt: i32 = -1;
-        if cond {
-            rt = c.rfree(cur, t.intcast()).intcast();
-            cond = rt != -1;
-        };
-        if cond {
-            c.f.tmp[t.intcast()].visit = -1;
-            c.ralloc(cur, t);
-            @debug_assert(bshas(cur.b&, rf));
-            c.f.emit(.copy, c.f.tmp[t.intcast()].cls, TMP(rt), TMP(rf), QbeNull);
-            c.stmov += 1;
-            cur.w&[rf] = 0;
-            range(0, nr) { r | 
-                if ra[r][] == TMP(rt) { // rT // TODO: rename. 
-                    ra[r][] = TMP(rf);  // rF
-                }
-            };
-            /* one could iterate this logic with
-             * the newly freed rt, but in this case
-             * the above loop must be changed */
-        };
+        /* one could iterate this logic with
+            * the newly freed rt, but in this case
+            * the above loop must be changed */
     };
     c.f.copy_instructions_from_scratch(b);
 }
@@ -486,20 +493,20 @@ carve :: fn(ba: *Qbe.Blk, bb: *Qbe.Blk, _: i64) bool = { // :VoidSortContext
  */
 fn register_allocation(f: *Qbe.Fn) void = {
     /* 1. setup */
-    c: RegaCtx = (f = f, regu = 0, pm = get_field_type(RegaCtx, @symbol pm).zeroed(), npm = 0, loop = i32_MAX, stmov = 0, stblk = 0); c := c&;
+    c: RegaCtx = (f = f, regu = 0, pm = get_field_type(RegaCtx, @symbol pm).zeroed(), npm = 0, loop = i32_MAX, added_moves = 0, added_blocks = 0); c := c&;
     rl := Array(i32, Qbe.Tmp0).zeroed(); rl := rl&.items();
     blk := temp().alloc_zeroed(*Qbe.Blk, f.nblk.zext());
     end := temp().alloc_zeroed(RMap, f.nblk.zext());
     beg := temp().alloc_zeroed(RMap, f.nblk.zext());
-    each(end, fn(it) => bsinit(it.b&, f.ntmp.zext()));
-    each(beg, fn(it) => bsinit(it.b&, f.ntmp.zext()));
+    each(end, fn(it) => bsinit(it.live&, f.ntmp.zext()));
+    each(beg, fn(it) => bsinit(it.live&, f.ntmp.zext()));
     cur := temp().alloc_zeroed(RMap, 1).as_ptr(); // TODO: these could go on the stack but my old backend can't do big stack frames
     old := temp().alloc_zeroed(RMap, 1).as_ptr();
-    bsinit(cur.b&, f.ntmp.zext());
-    bsinit(old.b&, f.ntmp.zext());
+    bsinit(cur.live&, f.ntmp.zext());
+    bsinit(old.live&, f.ntmp.zext());
     enumerate f.tmps() { t, it |
-        it.hint.r = if(t < Qbe.Tmp0, => t.intcast(), => -1);
-        it.hint.w = c.loop;
+        it.hint.register = if(t < Qbe.Tmp0, => t.intcast(), => -1);
+        it.hint.weight = c.loop;
         it.visit = -1;
     };
     n := 0;
@@ -515,13 +522,15 @@ fn register_allocation(f: *Qbe.Fn) void = {
     for blk { b | 
         n: i64 = b.id.zext();
         loop := b.loop;
-        cur.n = 0;
-        bszero(cur.b&);
-        cur.w&.set_zeroed();
-        x := 0;
+        cur.len = 0;
+        bszero(cur.live&);
+        cur.wait_list&.set_zeroed();
+        
+        // From spill pass, we know which tmps need to be in registers at the end of this block. 
+        live_at_end_count := 0;
         for(b.out&, Qbe.Tmp0) { t | 
-            j := x;
-            x += 1;
+            j := live_at_end_count;
+            live_at_end_count += 1;
             rl[j] = t.intcast();
             while => j > 0 && c.prio2(t, rl[j-1]) > 0 {
                 j -= 1;
@@ -529,6 +538,8 @@ fn register_allocation(f: *Qbe.Fn) void = {
                 rl[j] = t.intcast();
             };
         };
+        T := f.globals.target;
+        @debug_assert(live_at_end_count.intcast() <= T.ngpr + T.nfpr, "too many live tmps");
         if true {
             break :: local_return; // TODO: this pattern is a language failing. 
             for b.out& { r | 
@@ -536,15 +547,17 @@ fn register_allocation(f: *Qbe.Fn) void = {
                 c.radd(cur, r, r);
             };
         };
-        range(0, x) { j |
+        // First give everyone a chance to get thier hinted register
+        range(0, live_at_end_count) { j |
             c.ralloctry(cur, rl[j], true);
         };
-        range(0, x) { j |
+        // Then the rest just get forced somewhere. 
+        range(0, live_at_end_count) { j |
             c.ralloc(cur, rl[j]);
         };
         rcopy(end[n]&, cur);
-        c.doblk(b, cur);
-        bscopy(b.in&, cur.b&);
+        c.do_block_instructions(b, cur); 
+        bscopy(b.in&, cur.live&);
         for_phi b { p | 
             if rtype(p.to) == .RTmp {
                 bsclr(b.in&, p.to.val());
@@ -553,6 +566,7 @@ fn register_allocation(f: *Qbe.Fn) void = {
         rcopy(beg.index(n), cur);
     };
 
+    // :Explain
     /* 3. emit copies shared by multiple edges
      * to the same block */
     for_blocks f { s |
@@ -571,15 +585,16 @@ fn register_allocation(f: *Qbe.Fn) void = {
         for_phi s { p |
             continue :: local_return;
             if(rtype(p.to) != .RTmp, => continue());
-            r := rfind(m, p.to.val()).intcast();
-            if(r == -1, => continue());
+            r := rfind(m, p.to.val()).or(=> continue());
+            r := r.intcast();
             range(0, p.narg.zext()) { u |
                 continue :: local_return;
                 b := p.blk[u];
                 src := p.arg[u];
                 if(rtype(src) != .RTmp, => continue());
-                x := rfind(end.index(b.id.zext()), src.val());
-                if(x == -1, => continue()); /* spilled */
+                x := or rfind(end.index(b.id.zext()), src.val()) {
+                    continue() /* spilled */
+                };
                 rl[r] = if(rl[r] == 0 || rl[r] == x, => x, => -1);
             };
             if rl[r] == 0 {
@@ -587,17 +602,18 @@ fn register_allocation(f: *Qbe.Fn) void = {
             };
         };
         /* process non-phis temporaries */
-        range(0, m.n) { j | 
+        range(0, m.len) { j | 
             continue :: local_return;
-            t := m.t&[j];
-            r := m.r&[j].intcast();
+            t := m.tmps&[j];
+            r := m.regs&[j].intcast();
             if rl[r] != 0 || t < Qbe.Tmp0 /* todo, remove this */ {
                 continue();
             };
             for_pred s { bp |
                 continue :: local_return;
-                x := rfind(end.index(bp.id.zext()), t.intcast());
-                if(x == -1, => continue());/* spilled */
+                x := or rfind(end.index(bp.id.zext()), t.intcast()) {
+                    continue() /* spilled */
+                };
                 rl[r] = if(rl[r] == 0 || rl[r] == x, => x, => -1);
             };
             if rl[r] == 0 {
@@ -606,25 +622,25 @@ fn register_allocation(f: *Qbe.Fn) void = {
         };
 
         c.npm = 0;
-        range(0, m.n) { j |
-            t := m.t&[j].intcast();
-            r := m.r&[j].intcast();
+        range(0, m.len) { j |
+            t := m.tmps&[j].intcast();
+            r := m.regs&[j].intcast();
             x := rl[r].intcast();
             @debug_assert(x != 0 || t < Qbe.Tmp0 /* todo, ditto */);
-            if x > 0 && !bshas(m.b&, x) {
+            if x > 0 && !bshas(m.live&, x) {
                 c.pmadd(TMP(x), TMP(r), f.tmp[t].cls);
-                m.r&[j] = x.intcast();
-                bsset(m.b&, x);
+                m.regs&[j] = x.intcast();
+                bsset(m.live&, x);
             }
         };
         f.reset_scratch();
         c.pmgen();
         moves_inserted := f.len_scratch();
         if moves_inserted != 0 {
-            c.stmov += moves_inserted.trunc();
+            c.added_moves += moves_inserted.trunc();
             s.nins += moves_inserted.trunc();
             i := libc_allocator.alloc(Qbe.Ins, s.nins.zext()).as_ptr(); // :HardcodeAlloc
-            icpy(icpy(i, f.globals.curi[], moves_inserted), s.ins, s.nins.zext()-moves_inserted);
+            icpy(icpy(i, f.globals.curi[], moves_inserted), s.ins, s.nins.zext()-moves_inserted); // :LookAtLastInst
             s.ins = i;
         };
     };
@@ -635,19 +651,21 @@ fn register_allocation(f: *Qbe.Fn) void = {
         range(0, f.nblk.zext()) { n |
             b := f.rpo.offset(n)[];
             @fmt_write(out, "\t% beg", f_pad(b.name(), 10, .After));
-            c.mdump(beg.index(n));
+            f.debug_dump(beg.index(n));
             write(out, "\t           end");
-            c.mdump(end.index(n));
+            f.debug_dump(end.index(n));
         };
         write(out, "\n");
     };
+    
+    // :Explain
     /* 4. emit remaining copies in new blocks */
     blist := Qbe.Blk.ptr_from_int(0);
     if true {
         break :: local_return; // TODO: ugh. i should really make this less painful.
         for_blocks f { b | 
             // TODO
-            //@debug_assert(!b.s1.identical(b.s2), "i think these are removed and my behaviour here differs if not");
+            //@debug_assert(!b.s1.identical(b.s2), "i think these are removed and my behaviour here differs if not"); // :SketchyIterTargets
             for_jump_targets_mut b { ps |
                 s := ps[];
                 c.npm = 0;
@@ -656,8 +674,9 @@ fn register_allocation(f: *Qbe.Fn) void = {
                     dst := p.to;
                     @debug_assert(rtype(dst) == .RSlot || rtype(dst) == .RTmp);
                     if rtype(dst) == .RTmp {
-                        r := rfind(beg.index(s.id.zext()), dst.val());
-                        if(r == -1, => continue());
+                        r := or rfind(beg.index(s.id.zext()), dst.val()) {
+                            continue()
+                        };
                         dst = TMP(r);
                     };
                     u := 0;
@@ -681,16 +700,16 @@ fn register_allocation(f: *Qbe.Fn) void = {
                 moves_inserted := f.len_scratch();
                 if moves_inserted != 0 {
                     b1 := newblk();
-                    b1.loop = (b.loop+s.loop) / 2;
+                    b1.loop = (b.loop + s.loop) / 2;
                     b1.link = blist;
                     blist = b1;
                     f.nblk += 1;
                     // TODO: ugh. garbage. you just want to truncate if not enough space in the buffer.
-                    l: List(u8) = (maybe_uninit = b1.name&.items(), len = 0, gpa = panicking_allocator);
+                    l: List(u8) = (maybe_uninit = b1.name&.items(), len = 0, gpa = panicking_allocator); // :UnacceptablePanic
                     @fmt(l&, "%_%", b.name(), s.name());
                     b1.nins = moves_inserted.trunc();
-                    c.stmov += b1.nins;
-                    c.stblk += 1;
+                    c.added_moves += b1.nins;
+                    c.added_blocks += 1;
                     f.copy_instructions_from_scratch(b1);
                     b1.jmp.type = .Jjmp;
                     b1.s1 = s;
@@ -703,7 +722,8 @@ fn register_allocation(f: *Qbe.Fn) void = {
             }
         };
     };
-    // phis have been lowered to moves
+    
+    // phis have been lowered to moves so sanity assert that nobody tries to look at them after this pass. 
     for_blocks f { b |
         b.phi = Qbe.Phi.ptr_from_int(0);
     };
@@ -711,8 +731,8 @@ fn register_allocation(f: *Qbe.Fn) void = {
 
     if f.globals.debug["R".char()] {
         write(out, "\n> Register allocation statistics:\n");
-        @fmt_write(out, "\tnew moves:  %\n", c.stmov);
-        @fmt_write(out, "\tnew blocks: %\n", c.stblk);
+        @fmt_write(out, "\tnew moves:  %\n", c.added_moves);
+        @fmt_write(out, "\tnew blocks: %\n", c.added_blocks);
         write(out, "\n> After register allocation:\n");
         printfn(f, out);
     };
@@ -725,6 +745,7 @@ fn set_param_copy_hints(c: *RegaCtx) void = {
             return();
         };
         @debug_assert(rtype(i.to) == .RTmp, "can only copy to tmp");
-        c.sethint(i.to.val(), i.arg&[0].val());
+        abi_reg := i.arg&[0].val();
+        c.sethint(i.to.val(), abi_reg);
     };
 }

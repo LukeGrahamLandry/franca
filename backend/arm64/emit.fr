@@ -6,6 +6,7 @@
 //       addr slot >4095, sltof, loadaddr with offset, 
 // TODO: a function you can call to emit forwarding shims for uncompiled functions. 
 //       so it in emit with the arch independent ir. i guess that means the front end could just do it. 
+// TODO: (when i want to do my own aot) have the addr lookup table in a seperate segment before the functions and then don't include it in the aot binrary, just patch instead. 
 
 ArmState :: @struct(
     m: *QbeModule,
@@ -476,16 +477,20 @@ fn fixarg(self: *ArmState, pr: *Qbe.Ref, sz: i64) void = {
     }
 }
 
+// TODO: fix non-i64 fn ordinal
+fn get_name(o: Qbe.O) Str = {
+    names :: Qbe.O.get_enum_names();
+    idx := @as(i64) intcast(@as(i32) o.raw());
+    names[idx]
+}
+
 fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
     ::if(Bits);
     ::if(u32);
     ::if(FType);
     F :: @Fn(s: FType, dest: u5, a: u5, b: u5) u32;
     I :: @Fn(s: Bits, dest: u5, a: u5, b: u5) u32;
-    
-    names :: Qbe.O.get_enum_names();
-    idx := @as(i64) intcast(@as(i32) i.op().raw());
-    inst_name := names[idx];
+    inst_name := i.op().get_name();
     si := if(i.cls().is_wide(), => Bits.X64, => Bits.W32);
     sf := if(i.cls().is_wide(), => FType.D64, => FType.S32);
     
@@ -513,11 +518,11 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
         fn nop()    => ();
         fn dbgloc() => (); // we don't do debug info yet.
         fn copy() => {
-            if (i.to == i.arg&[0], => return());
+            if (i.to == i.arg&[0], => return()); 
             if (rtype(i.to) == .RSlot) {
                 r := i.to;
                 if !isreg(i.arg&[0]) {
-                    i.to = TMP(Arm64Reg.R18.raw());
+                    i.to = TMP(Arm64Reg.R18.raw()); // :SketchPlatformRegister
                     self.emitins(i);
                     i.arg&[0] = i.to;
                 };
@@ -616,7 +621,7 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
         fn xor()  => int_bin(fn(s, d, a, b) => eor(s, d, a, b, .LSL, 0));
         fn and()  => int_bin(fn(s, d, a, b) => and_sr(s, d, a, b, .LSL, 0));
         fn rem() => {
-            // TODO: qbe uses x18 for this but i feel like you're not allowed to do that. 
+            // TODO: qbe uses x18 for this but i feel like you're not allowed to do that. :SketchPlatformRegister
             a, b := (i.arg&[0].int_reg(), i.arg&[1].int_reg());
             self.inst(sdiv(si, x18, a, b));
             self.inst(msub(si, i.to.int_reg(), x18, b, a));
@@ -637,9 +642,9 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
         fn truncd() => self.inst(fcnv(.D64, .S32, i.to.float_reg(), i.arg&[0].float_reg()));
         fn swap() => {
             if i.cls().is_int() {
-                // TODO: qbe uses x18 for this but i feel like you're not allowed to do that. 
+                // TODO: qbe uses x18 for this but i feel like you're not allowed to do that. :SketchPlatformRegister
                 a, b := (i.arg&[0].int_reg(), i.arg&[1].int_reg());
-                self.inst(mov(si, x18, a));
+                self.inst(mov(si, x18, a)); 
                 self.inst(mov(si, a, b));
                 self.inst(mov(si, b, x18));
             } else {
@@ -883,11 +888,11 @@ fn float_reg(r: Qbe.Ref) u5 =
     @as(i64) float_id(@as(Arm64Reg) r.val());
 
 // Note: these numbers are NOT the ones you encode in the instructions. ints are of by 1, floats are off by 1+32
-// TODO: do i really care that much about catching zero init? 
+//        it's nice to be able to zero init stuff and have that as a sentinal value. (tmp.phi, arrays in rega)
 Arm64Reg :: @enum(i64) (
     RXX,
      R0,  R1,  R2,  R3,  R4,  R5,  R6,  R7,  
-     R8, R10,  R9, R11, R12, R13, R14, R15, 
+     R8,  R9, R10, R11, R12, R13, R14, R15, 
     IP0, IP1, R18, R19, R20, R21, R22, R23,
     R24, R25, R26, R27, R28,  FP,  LR,  SP,
     

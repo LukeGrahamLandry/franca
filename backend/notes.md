@@ -1,5 +1,6 @@
 - We're very often iterating backwards so `emit` inserts into the block buffer backwards!
   For now we use the buffer in Qbe.Globals but that will move out eventually.
+- When looking at the debug dumps, register numbers are off by one. ie. first argument on arm (x0) is in R1.
 
 ## Words
 

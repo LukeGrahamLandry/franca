@@ -1,0 +1,202 @@
+
+// TODO: these broke on llvm but work jitted. 
+// pass -no-deduplication to make this test fail.
+//
+// There's also now a distinction between
+// - a: rawptr : func;
+// - a := @as(rawptr) func;
+// because when you imm_eval a function pointer for the constant you always get a shim,
+// but if you GetNativeFnPtr (even in comptime jit) you might get the real one. 
+// so these tests do the latter so it has a chance to deduplicate. 
+//
+#test fn deduplicate_functions() = {
+    // TODO: this one broke when i started doing jitshims for fn ptrs
+    //{   
+    //    // You just need to check the tag and offset the pointer over it, so the size of the inner type doesn't matter. 
+    //    ::as_ref(i64);
+    //    ::as_ref(Str);
+    //    a: @FnPtr(s: *?i64) ?*i64 : as_ref;
+    //    b: @FnPtr(s: *?Str) ?*Str : as_ref;
+    //    aa := @as(rawptr) a;
+    //    bb := @as(rawptr) b;
+    //    assert_eq(true, aa == bb);
+    //};
+    //// :FuckedDedupAndAlsoFuckedConst
+    //// TODO: i broke this with len=0 special case (see fn alloc comment)
+    ////{
+    ////    // pointers are the same size and alignment which are the only thing the list cares about.
+    ////    a: @FnPtr(s: *List(*i64), e: *i64) void : push;
+    ////    b: @FnPtr(s: *List(*Str), e: *Str) void : push;
+    ////    aa: rawptr : a;
+    ////    bb: rawptr : b;
+    ////    assert_eq(true, aa == bb);
+    ////};
+    {
+        // They don't even have to be instantiations of the same generic. 
+        // They just have to generate the same IR. 
+        // This is much less useful than the above but still kinda cool. 
+        add_one_a :: fn(i: i64) i64 = {
+            a := 1;
+            i + a
+        };
+        add_one_b :: fn (i: i64) i64 = {
+            b := 1;  // Note: different variable name doesn't matter!
+            i + b
+        };
+        
+        aa := @as(rawptr) add_one_a;
+        bb := @as(rawptr) add_one_b;
+        assert_eq(true, aa == bb);
+        
+        // But this is different because it happens in the front end before optimisation (currently)
+        // so it doesn't realize these have the same behaviour. 
+        add_one_c :: fn (i: i64) i64 = {
+            c := i;
+            c + 1
+        };
+        cc := @as(rawptr) add_one_c;
+        assert_eq(false, aa == cc);
+        
+        // But this generates the same code as the first examples because structs are passed by value. 
+        Holder :: @struct(value: i64);
+        add_one_d :: fn (i: Holder) i64 = {
+            d := 1;
+            i.value + d
+        };
+        dd := @as(rawptr) add_one_d;
+        assert_eq(true, aa == dd);
+    };
+    {
+        // Here the things are different sizes so need to generate different code.
+        a: @FnPtr(s: ?i64) i64 : unwrap;
+        b: @FnPtr(s: ?Str) Str : unwrap;
+        aa := @as(rawptr) a;
+        bb := @as(rawptr) b;
+        assert_eq(false, aa == bb);
+    };
+    
+}
+
+#test fn deduplicate_checks_switch_payloads() = {  // :deduplicate_checks_switch_payloads
+    // These functions are identical except for the switch jump mapping. 
+    // So if you deduplicate them without checking that it wont work!
+    A :: @enum(a, b); ::enum(A);
+    first :: fn(a: A) bool = @match(a) {
+        fn a() => true;
+        fn b() => false;
+    };
+    second :: fn(a: A) bool = @match(a) {
+        // flipped!
+        fn b() => true;
+        fn a() => false;
+    };
+    a := A.a;
+    assert(first(a), "first");
+    assert(!second(a), "second");
+    aa := @as(rawptr) first;
+    bb := @as(rawptr) second;
+    assert_eq(false, aa == bb);
+    
+    // These ones are the same tho and must be deduplicated as normal.
+    third :: fn(a: A) bool = @match(a) {
+        fn a() => true;
+        fn b() => false;
+    };
+    fourth :: fn(a: A) bool = @match(a) {
+        fn a() => true;
+        fn b() => false;
+    };
+    assert(third(a), "third");
+    assert(fourth(a), "fourth");
+    cc := @as(rawptr) third;
+    dd := @as(rawptr) fourth;
+    assert_eq(true, cc == dd);
+}
+
+
+/////////////////
+// don't work new qbe. if lucky if a from_bc problem
+ 
+#test fn rec_type_const() = {
+    L :: @rec @struct(next: ?*L, data: i64);
+    
+    value :: {
+        make :: fn(i: i64, old: ?*L) *L = {
+            v: L = (next = old, data = i);
+            libc_allocator.boxed(L, v)
+        }; 
+        a := make(1, .None);
+        b := make(2, (Some = a));
+        c := make(3, (Some = b));
+        c
+    };
+    
+    // TODO: go through Named on dot fields 
+    assert_eq(value[].data, 3);
+    assert_eq(value[].next.unwrap()[].data, 2);
+}
+
+/////////////////
+// don't work anywhere
+
+#test fn compile_once() = {
+    shared :: @static(i64) 0;
+    a :: fn() void => {
+        :: {
+            shared[] += 1;
+        };
+    };
+    
+    a();
+    a();
+    
+    assert_eq(shared[], 1);
+}
+
+// TODO: this needs to be a type error instad of a segfault
+fn switch_type_error() #test = {
+    c: u8 = 0;
+    b := @switch(c) {
+        @case("a".ascii()) => 1;
+        @case("0") => 2;  // oops, missing .ascii()
+        @case(0) => 3;
+        @default => 4;
+    };
+}
+
+#test fn index_type_error() = {
+    a := @slice(1, 2, 3);
+    b: u32 = 2;
+    // if you don't .zext() here it should be a type error. 
+    // right now it just loads 8 bytes and tries to use that as an index. if you're lucky it fails the bounds check. 
+    // i think it works on my old backend because i always waste 8 bytes on the stack slot. 
+    assert_eq(a[b], 3);  
+}
+
+/////////////////
+// don't work jitted
+
+// TODO: tried to call uncompiled!
+//       should also update that error message to say we're confused about how you got that function pointer. 
+#test fn call_const_fid_from_bc() = {
+    ::enable_inline_bc(); // TODO: this is a pain
+    
+    get_one :: fn() i64 = 1;
+    
+    fn call_get_one() i64 #asm #bc = (fn(body) = {
+        body.push_block(ast_alloc());
+        code := body.blocks[0].insts&;
+        sig: PrimSig = (
+            args = empty(),
+            ret1 = (Some = .I64),
+            ret2 = .None,
+        );
+        get_one_sig: u32 = body.sig_payloads.len.trunc();
+        body.sig_payloads&.push(sig, ast_alloc());
+        fid: FuncId = get_one; // Somehow we need to know that this becomes live!
+        code.push((CallDirect = (sig = get_one_sig, f = fid, tail = false)), ast_alloc());
+        code.push((Ret1 = .I64), ast_alloc());
+    });
+    
+    assert_eq(call_get_one(), 1);
+}
