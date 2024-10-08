@@ -49,6 +49,7 @@ store :: items(@list(Qbe.O.storew, .storel, .stores, .stored) ast_alloc()); // :
  *        | ` indirect result register x8 used  (0..1)
  *        ` env pointer passed in x9            (0..1)
  */
+ // TODO: go through and use named constants for the magic offsets. 
 
 ::enum(Qbe.FieldType);
 ::ptr_utils(Qbe.Typ);
@@ -94,7 +95,7 @@ fn typclass(c: *Class, t: *Qbe.Typ, gp: []Arm64Reg, fp: []Arm64Reg, globals: *Qb
         /* large structs are replaced by a
          * pointer to some caller-allocated
          * memory */
-        c.class = @as(ArgClass) @as(u8) bit_or(c.class.raw(), ArgClass.Cptr.raw());
+        c.class&.with(.Cptr);
         c.size = 8;
         c.ngp = 1;
         c.reg&[0] = gp.index_unchecked(0)[];
@@ -141,55 +142,51 @@ fn sttmps(tmp: *Qbe.Ref, cls: []Qbe.Cls, nreg: u32, mem: Qbe.Ref, f: *Qbe.Fn) vo
 }
 
 /* todo, may read out of bounds */
-fn ldregs(reg: []i32, cls: []Qbe.Cls, mem: Qbe.Ref, f: *Qbe.Fn) void = {
-    int i;
-    uint64_t off;
-    Ref r;
-
-    off = 0;
-    for (i=0; i<n; i++) {
-        r = newtmp("abi", .Kl, f);
-        f.emit(.load, cls[i], TMP(reg[i]), r, QbeNull);
+fn ldregs(reg: *Arm64Reg, cls: *Qbe.Cls, n: u8, mem: Qbe.Ref, f: *Qbe.Fn) void = {
+    off := 0;
+    range(0, n.zext()) { i |
+        r := newtmp("abi", .Kl, f);
+        f.emit(.load, cls.offset(i)[], TMP(reg.offset(i)[].raw()), r, QbeNull);
         f.emit(.add, .Kl, r, mem, getcon(off, f));
-        off += KWIDE(cls[i]) ? 8 : 4;
+        off += if(is_wide(cls.offset(i)[]), => 8, => 4);
     }
 }
 
-fn selret(b: *Qbe.Blk, f: *Qbe.Fn) void #import("qbe");
-fn _selret(b: *Qbe.Blk, f: *Qbe.Fn) void = {
-    int j, k, cty;
-    Ref r;
-    Class cr;
+fn selret(b: *Qbe.Blk, f: *Qbe.Fn) void = {
+    j := b.jmp.type;
 
-    j = b.jmp.type;
+    if !is_ret(j) || j == .Jret0 {
+        return();
+    };
 
-    if (!isret(j) || j == Jret0)
-        return;
+    r := b.jmp.arg;
+    b.jmp.type = .Jret0;
 
-    r = b.jmp.arg;
-    b.jmp.type = Jret0;
-
-    if (j == Jretc) {
-        typclass(&cr, &typ[fn.retty], gpreg, fpreg, f.globals);
-        if (cr.class & Cptr) {
-            assert(rtype(fn.retr) == RTmp);
-            f.emit(.blit1, 0, QbeNull, INT(cr.t.size), QbeNull);
-            f.emit(.blit0, 0, QbeNull, r, fn.retr);
+    cty := -1;
+    if j == .Jretc {
+        @debug_assert(f.retty >= 0, "retc without type");
+        type := f.globals.types[][f.retty.zext()]&;
+        cr := Class.zeroed();
+        typclass(cr&, type, gpreg, fpreg, f.globals);
+        if cr.class.has(.Cptr) {
+            @debug_assert(rtype(f.retr) == .RTmp, "see // :SetRetr");
+            f.emit(.blit1, .Kw, QbeNull, INT(cr.t.size), QbeNull);
+            f.emit(.blit0, .Kw, QbeNull, r, f.retr);
             cty = 0;
         } else {
-            ldregs(cr.reg, cr.cls, cr.nreg, r, f);
-            cty = (cr.nfp << 2) | cr.ngp;
-        }
+            ldregs(cr.reg&.as_ptr(), cr.cls&.as_ptr(), cr.nreg, r, f);
+            cty = cr.nfp.zext().shift_left(2).bit_or(cr.ngp.zext());
+        };
     } else {
-        k = j - Jretw;
+        k := @as(Qbe.Cls) @as(i32) (j.raw() - Qbe.J.Jretw.raw()).zext();
         if (KBASE(k) == 0) {
-            f.emit(.copy, k, TMP(R0), r, QbeNull);
+            f.emit(.copy, k, TMP(Arm64Reg.R0), r, QbeNull);
             cty = 1;
         } else {
-            f.emit(.copy, k, TMP(V0), r, QbeNull);
-            cty = 1 << 2;
+            f.emit(.copy, k, TMP(Arm64Reg.V0), r, QbeNull);
+            cty = 1.shift_left(2);
         }
-    }
+    };
 
     b.jmp.arg = CALL(cty);
 }
@@ -201,10 +198,10 @@ fn argsclass(i0: *Qbe.Ins, i1: *Qbe.Ins, carg: *Class, globals: *Qbe.Globals) i3
     fp   := fpreg;
     ngp  := 8;
     nfp  := 8;
+    c := carg.offset(-1);
     for(i0, i1) { i |
         next :: local_return;
-        c := carg;
-        carg = carg.offset(1);
+        c = c.offset(1);
         
         // TODO: i should really add fallthrough @match. this is painful. s
         o := i.op();
@@ -348,110 +345,120 @@ fn stkblob(r: Qbe.Ref, c: *Class, f: *Qbe.Fn, ilp: **Insl) void = {
 fn align(x: i32, al: i32) i32 #inline = 
     (x + al - 1).bit_and(-al);
 
-fn selcall(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins, ilp: **Insl) void #import("qbe");
-fn _selcall(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins, ilp: **Insl) void = {
-    Ins *i;
-    Class *ca, *c, cr;
-    int op, cty;
-    uint n, stk, off;;
-    Ref r, rstk, tmp[4];
-
-    ca = alloc((i1-i0) * sizeof ca[0]);
-    cty = argsclass(i0, i1, ca. f.globals.target);
+fn selcall(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins, ilp: **Insl) void = {
+    tmp := Array(Qbe.Ref, 4).zeroed();
+    ca := temp().alloc_zeroed(Class, ptr_diff(i0, i1));
+    cty := argsclass(i0, i1, ca.ptr, f.globals);
 
     stk: i32 = 0;
-    for (i=i0, c=ca; i<i1; i++, c++) {
-        if (c.class & Cptr) {
+    c := ca.ptr;
+    for(i0, i1) { i |
+        if c.class.has(.Cptr) {
             i.arg&[0] = newtmp("abi", .Kl, f);
             stkblob(i.arg&[0], c, f, ilp);
-            i.op = Oarg;
-        }
-        if (c.class & Cstk) {
+            i.set_op(.arg);
+        };
+        if c.class.has(.Cstk) {
             stk = align(stk, c.align);
             stk += c.size;
-        }
-    }
+        };
+        c = c.offset(1);
+    };
     stk = align(stk, 16);
-    rstk = getcon(stk, f);
-    if (stk)
-        f.emit(.add, .Kl, TMP(SP), TMP(SP), rstk);
+    rstk := getcon(stk.intcast(), f);
+    if stk != 0 {
+        f.emit(.add, .Kl, TMP(Arm64Reg.SP), TMP(Arm64Reg.SP), rstk);
+    };
 
-    if (!req(i1.arg&[1], QbeNull)) {
-        typclass(&cr, &typ[i1.arg&[1].val], gpreg, fpreg, f.globals);
-        stkblob(i1.to, &cr, f, ilp);
-        cty |= (cr.nfp << 2) | cr.ngp;
-        if (cr.class & Cptr) {
+    if i1.arg&[1] != QbeNull {
+        type := f.globals.types[].index(i1.arg&[1].val());
+        cr := Class.zeroed();
+        typclass(cr&, type, gpreg, fpreg, f.globals);
+        stkblob(i1.to, cr&, f, ilp);
+        cty = cty.bit_or(cr.nfp.zext().shift_left(2)).bit_or(cr.ngp.zext());
+        if cr.class.has(.Cptr) {
             /* spill & rega expect calls to be
              * followed by copies from regs,
              * so we emit a dummy
              */
-            cty |= 1 << 13 | 1;
-            f.emit(.copy, .Kw, QbeNull, TMP(R0), QbeNull);
+            cty = cty.bit_or(1.shift_left(13)).bit_or(1);
+            f.emit(.copy, .Kw, QbeNull, TMP(Arm64Reg.R0), QbeNull);
         } else {
-            sttmps(tmp, cr.cls, cr.nreg, i1.to, f);
-            for (n=0; n<cr.nreg; n++) {
-                r = TMP(cr.reg[n]);
-                f.emit(.copy, cr.cls[n], tmp[n], r, QbeNull);
-            }
-        }
+            sttmps(tmp&.as_ptr(), cr.cls&.items(), cr.nreg.zext(), i1.to, f);
+            range(0, cr.nreg.zext()) { n |
+                r := TMP(cr.reg&[n].raw());
+                f.emit(.copy, cr.cls&[n], tmp&[n], r, QbeNull);
+            };
+        };
     } else {
-        if (KBASE(i1.cls) == 0) {
-            f.emit(.copy, i1.cls, i1.to, TMP(R0), QbeNull);
-            cty |= 1;
+        if KBASE(i1.cls()) == 0 {
+            f.emit(.copy, i1.cls(), i1.to, TMP(Arm64Reg.R0), QbeNull);
+            cty = cty.bit_or(1);
         } else {
-            f.emit(.copy, i1.cls, i1.to, TMP(V0), QbeNull);
-            cty |= 1 << 2;
-        }
-    }
+            f.emit(.copy, i1.cls(), i1.to, TMP(Arm64Reg.V0), QbeNull);
+            cty = cty.bit_or(1.shift_left(2));
+        };
+    };
 
-    f.emit(.call, 0, QbeNull, i1.arg&[0], CALL(cty));
+    f.emit(.call, .Kw, QbeNull, i1.arg&[0], CALL(cty.zext()));
 
-    // TODO: where the fuck did we get 13 from
-    if (cty & (1 << 13))
+    if cty.bit_and(1.shift_left(13)) != 0 {
         /* struct return argument */
-        f.emit(.copy, .Kl, TMP(R8), i1.to, QbeNull);
+        f.emit(.copy, .Kl, TMP(Arm64Reg.R8), i1.to, QbeNull);
+    };
 
-    for (i=i0, c=ca; i<i1; i++, c++) {
-        if ((c.class & Cstk) != 0)
-            continue;
-        if (i.op == Oarg || i.op == Oarge)
-            f.emit(.copy, *c.cls, TMP(*c.reg), i.arg&[0], QbeNull);
-        if (i.op == Oargc)
-            ldregs(c.reg, c.cls, c.nreg, i.arg&[1], f);
-    }
+    c := ca.ptr;
+    for(i0, i1) { i | 
+        if !c.class.has(.Cstk) {
+            if i.op() == .arg || i.op() == .arge {
+                f.emit(.copy, c.cls&[0], TMP(c.reg&[0]), i.arg&[0], QbeNull);
+            };
+            if i.op() == .argc {
+                ldregs(c.reg&.as_ptr(), c.cls&.as_ptr(), c.nreg, i.arg&[1], f);
+            };
+        };
+        c = c.offset(1);
+    };
 
     /* populate the stack */
     off: i32 = 0;
-    for (i=i0, c=ca; i<i1; i++, c++) {
-        if ((c.class & Cstk) == 0)
-            continue;
-        off = align(off, c.align);
-        r = newtmp("abi", .Kl, f);
-        if (i.op == Oarg || isargbh(i.op)) {
-            switch (c.size) {
-            case 1: op = Ostoreb; break;
-            case 2: op = Ostoreh; break;
-            case 4:
-            case 8: op = store[*c.cls]; break;
-            default: die("unreachable");
-            }
-            f.emit(op, 0, QbeNull, i.arg&[0], r);
-        } else {
-            assert(i.op == Oargc);
-            f.emit(.blit1, 0, QbeNull, INT(c.size), QbeNull);
-            f.emit(.blit0, 0, QbeNull, i.arg&[1], r);
-        }
-        f.emit(.add, .Kl, r, TMP(SP), getcon(off, f));
-        off += c.size;
-    }
-    if (stk)
-        f.emit(.sub, .Kl, TMP(SP), TMP(SP), rstk);
+    c := ca.ptr;
+    for(i0, i1) { i | 
+        if c.class.has(.Cstk) {
+            off = align(off, c.align);
+            r := newtmp("abi", .Kl, f);
+            if i.op() == .arg || is_argbh(i.op()) {
+                o := @switch(c.size) {
+                    @case(1) => Qbe.O.storeb;
+                    @case(2) => Qbe.O.storeh;
+                    @case(4) => store[c.cls&[0].raw().zext()];
+                    @case(8) => store[c.cls&[0].raw().zext()];
+                    @default => panic("unreachable stack size");
+                };
+                f.emit(o, .Kw, QbeNull, i.arg&[0], r);
+            } else {
+                @debug_assert(i.op() == .argc, "bad arg op");
+                f.emit(.blit1, .Kw, QbeNull, INT(c.size.intcast()), QbeNull);
+                f.emit(.blit0, .Kw, QbeNull, i.arg&[1], r);
+            };
+            f.emit(.add, .Kl, r, TMP(Arm64Reg.SP), getcon(off.intcast(), f));
+            off += c.size;
+        };
+        c = c.offset(1);
+    };
+    
+    if stk != 0 {
+        f.emit(.sub, .Kl, TMP(Arm64Reg.SP), TMP(Arm64Reg.SP), rstk);
+    };
 
-    for (i=i0, c=ca; i<i1; i++, c++)
-        if (c.class & Cptr) {
-            f.emit(.blit1, 0, QbeNull, INT(c.t.size), QbeNull);
-            f.emit(.blit0, 0, QbeNull, i.arg&[1], i.arg&[0]);
-        }
+    c := ca.ptr;
+    for(i0, i1) { i | 
+        if c.class.has(.Cptr) {
+            f.emit(.blit1, .Kw, QbeNull, INT(c.t.size), QbeNull);
+            f.emit(.blit0, .Kw, QbeNull, i.arg&[1], i.arg&[0]);
+        };
+        c = c.offset(1);
+    }
 }
 
 fn selpar(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins) Params = {
@@ -484,7 +491,7 @@ fn selpar(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins) Params = {
         type := f.globals.types[].index(f.retty.zext());
         typclass(cr&, type, gpreg, fpreg, f.globals);
         if cr.class.has(.Cptr) {
-            f.retr = newtmp("abi", .Kl, f);
+            f.retr = newtmp("abi", .Kl, f);  // :SetRetr
             r8 := Arm64Reg.R8.raw();
             f.emit(.copy, .Kl, f.retr, TMP(r8), QbeNull);
             f.reg = f.reg.bit_or(BIT(r8));
@@ -502,7 +509,7 @@ fn selpar(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins) Params = {
                 off += c.size;
             } else {
                 range(0, c.nreg.zext()) { n |
-                    r := TMP(c.reg&[n].raw());
+                    r := TMP(c.reg&[n]);
                     f.emit(.copy, c.cls&[n], t[], r, QbeNull);
                     t = t.offset(1);
                 };
@@ -844,5 +851,7 @@ fn has(a: ArgClass, b: ArgClass) bool #inline =
     (@as(i64) a.raw().zext()).bit_and(b.raw().zext()) != 0;
 
 fn with(a: *ArgClass, b: ArgClass) void #inline = {
-    a[] = @as(ArgClass) @as(i64) (@as(i64) a[].raw().zext()).bit_or(b.raw().zext());
+    a[] = @as(ArgClass) @as(u8) (@as(i64) a[].raw().zext()).bit_or(b.raw().zext()).trunc();
 }
+
+fn TMP(r: Arm64Reg) Qbe.Ref #redirect(i64, Qbe.Ref);

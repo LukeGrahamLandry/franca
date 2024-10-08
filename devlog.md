@@ -1,3 +1,7 @@
+##
+
+- so long on a `:=` vs `=` in a loop. perhaps i was wrong.
+
 ## (Oct 6)
 
 - pretty ironic to not be able to incrementally port abi.c because functions pass structs by value and my old backend doesn't follow the abi correctly.
