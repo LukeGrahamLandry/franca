@@ -1,5 +1,18 @@
 ##
 
+- side tangent of i'm stupid. lets play can you spot the mistake...
+
+```
+fn println(i: i64) void = {
+    mem: List(u8) = list(i.div(10).abs().add(2), temp());
+    i.display(mem&);
+    mem&.push_all("\n");
+    print(mem&.items());
+}
+```
+
+##
+
 - so long on a `:=` vs `=` in a loop. perhaps i was wrong.
 
 ## (Oct 6)

@@ -6,24 +6,7 @@ Qbe :: @rec @struct(
     NBit :: 64,
     Rxxx :: 0,
     NCmp :: 18, 
-    
-    // it uses insb/curi as a buffer for emitting new instructions and then copies them out to a newly allocated array at the end of the block. 
-    // the parser starts at the beginning but the passes start at the end and `emit` in reverse. 
-    // so i think they scan block backwards. like isel will iterate backwards, adding some instructions, and copying out those it likes,
-    // and then at the end, copy from the buffer and update the block with that pointer. 
-    // so they're always in order in the blocks but you always process them backwards. 
-    Globals :: @rec @struct(
-        // These have to be pointers to the symbols Qbe externs because it uses them. 
-        types: *QList(Qbe.Typ), // typ
-        insb: *Array(Qbe.Ins, 1.shift_left(20)), // MaxInstructions
-        curi: **Qbe.Ins,
-        target: *Qbe.Target,
-        debug: *Array(bool, "Z".char() + 1),
-        // These we need to track but Qbe doesn't use internally. 
-        number_of_types := 0, // ntyp. only used by parser
-        debug_out: *FILE,
-        namel := QbeName.ptr_from_int(0), // for reusing memory in opt/ssa.fr between functions. no information shared.
-    ),
+
     DebugKey :: @enum(i64) (
         Parsing = "P".ascii(),
         Memory = "M".ascii(),
@@ -40,7 +23,7 @@ Qbe :: @rec @struct(
     ),
     Cls :: @enum(i16) (  // :QbeClsi16
         Kx = -1, /* "top" class (see usecheck() and clsmerge()) */
-        Kw = 0, // :JretOrder
+        Kw = 0, // :JretOrder :StoreOrder
         Kl = 1,
         Ks = 2,
         Kd = 3,
@@ -84,7 +67,7 @@ Qbe :: @rec @struct(
         nfpr: i32,
         rglob: u64, /* globally live regs (e.g., sp, fp) */
         nrglob: u32,
-        caller_saved: *i32, // rsaved.  array of nrsave[0] int registers then nrsave[2] float registers
+        caller_saved: *i32, // rsave.  array of nrsave[0] int registers then nrsave[1] float registers
         nrsave: Array(i32, 2),
         retregs: @FnPtr(r: Qbe.Ref, p: *Array(i32, 2)) u64,
         argregs: @FnPtr(r: Qbe.Ref, p: *Array(i32, 2)) u64,
@@ -97,7 +80,13 @@ Qbe :: @rec @struct(
         asloc: Array(u8, 4),
         assym: Array(u8, 4),
     ),
-    
+    TargetAbi :: @enum(i64) (
+        amd64_sysv,
+        amd64_apple,
+        arm64,
+        arm64_apple,
+        rv64,
+    ),
     BSet :: @rec @struct(
         nt: u32,
         t: *u64,
@@ -277,7 +266,7 @@ Qbe :: @rec @struct(
         lnk: Qbe.Lnk,
         
         // Qbe never stores arrays of functions (it goes one at a time), so adding our own extra fields is fine.
-        globals: *Qbe.Globals,
+        globals: *QbeModule,
     ),
     FieldType :: @enum(i32) (
         FEnd,
@@ -337,10 +326,11 @@ Qbe :: @rec @struct(
     ),
     Bucket :: @struct(
         nstr: u32,
-        str: *CStr,
+        str: QList(CStr),
     ),
-    // order matters for cmp table in emit
-    CmpI :: @enum(i32) (
+    // order matters for cmp table in emit :CmpOrder
+    Cmp :: @enum(i32) (
+        // CmpI
         Cieq,
         Cine,
         Cisge,
@@ -351,22 +341,18 @@ Qbe :: @rec @struct(
         Ciugt,
         Ciule,
         Ciult,
-        NCmpI,
+        // CmpF
+        Cfeq,
+        Cfge,
+        Cfgt,
+        Cfle,
+        Cflt,
+        Cfne,
+        Cfo,
+        Cfuo,
     ),
-    // TODO: mixed by name and infered value    
-    // order matters for cmp table in emit
-    CmpF :: @enum(i32) (
-        Cfeq = 0,
-        Cfge = 1,
-        Cfgt = 2,
-        Cfle = 3,
-        Cflt = 4,
-        Cfne = 5,
-        Cfo = 6,
-        Cfuo = 7,
-        NCmpF = 8,
-        NCmp = 18,
-    ),
+    CmpICount :: 10,
+    CmpFCount :: 8,
     O :: @enum(i32) (
         // vvv BEWARE: order matters for op_identities_table vvv
         Oxxx,
@@ -588,30 +574,8 @@ QbeConZero :: ref(.RCon, 1);
 fn die(msg: CStr) void #import("qbe");
 fn freeall() void #import("qbe");
 
-fn intern(_0: CStr) u32 #import("qbe");
-fn str(_0: u32) CStr #import("qbe");
-fn argcls(_0: *Qbe.Ins, _1: i64) Qbe.Cls #import("qbe");
-// TODO: use multiple returns
-fn iscmp(op: Qbe.O, cls_out: *Qbe.Cls, cc_out: *i32) bool #import("qbe");
-fn idup(_0: **Qbe.Ins, _1: *Qbe.Ins, _2: u64) void #import("qbe");
-fn icpy(_0: *Qbe.Ins, _1: *Qbe.Ins, _2: i64) *Qbe.Ins #import("qbe");
-fn cmpop(cc: i32) i32 #import("qbe");
-fn cmpneg(cc: i32) i32 #import("qbe");
-fn newtmp(_0: CStr, _1: Qbe.Cls, _2: *Qbe.Fn) Qbe.Ref #import("qbe");
-fn chuse(_0: Qbe.Ref, _1: i32, _2: *Qbe.Fn) void #import("qbe");
-fn symeq(_0: Qbe.Sym, _1: Qbe.Sym) i32 #import("qbe");
-fn newcon(_0: *Qbe.Con, _1: *Qbe.Fn) Qbe.Ref #import("qbe");
-fn getcon(_0: i64, _1: *Qbe.Fn) Qbe.Ref #import("qbe");
-fn addcon(_0: *Qbe.Con, _1: *Qbe.Con, _2: i32) i32 #import("qbe");
-fn salloc(_0: Qbe.Ref, _1: Qbe.Ref, _2: *Qbe.Fn) void #import("qbe");
-fn dumpts(_0: *Qbe.BSet, _1: QList(Qbe.Tmp), _2: *FILE) void #import("qbe");
-fn runmatch(_0: *Uchar, _1: *Num, _2: Ref, _3: *Ref) void #import("qbe");
-
 fn parse(_0: *FILE, _1: CStr, _2: @FnPtr(CStr) void, _3: @FnPtr(*Qbe.Dat) void, _4: @FnPtr(*Qbe.Fn) void) void #import("qbe");
-fn printfn(_0: *Qbe.Fn, _1: *FILE) void #import("qbe");
-fn printref(_0: Qbe.Ref, _1: *Qbe.Fn, _2: *FILE) void #import("qbe");
 fn err(_0: CStr) void #import("qbe");
-fn elimsb(_0: *Qbe.Fn) void #import("qbe");
 
 fn promote(_0: *Qbe.Fn) void #import("qbe");
 fn coalesce(_0: *Qbe.Fn) void #import("qbe");
@@ -619,21 +583,16 @@ fn fillalias(_0: *Qbe.Fn) void #import("qbe");
 fn getalias(_0: *Alias, _1: Qbe.Ref, _2: *Qbe.Fn) void #import("qbe");
 fn alias(_0: Qbe.Ref, _1: i32, _2: i32, _3: Qbe.Ref, _4: i32, _5: *i32, _6: *Qbe.Fn) i32 #import("qbe");
 fn escapes(_0: Qbe.Ref, _1: *Qbe.Fn) i32 #import("qbe");
-fn loadsz(_0: *Qbe.Ins) i32 #import("qbe");
-fn storesz(_0: *Qbe.Ins) i32 #import("qbe");
-fn loadopt(_0: *Qbe.Fn) void #import("qbe");
 fn fold(_0: *Qbe.Fn) void #import("qbe");
-fn emitfnlnk(_0: CStr, _1: *Qbe.Lnk, _2: *FILE) void #import("qbe");
 fn emitdbgfile(_0: CStr, _1: *FILE) void #import("qbe");
 fn emitdbgloc(_0: u32, _1: u32, _2: *FILE) void #import("qbe");
 fn stashbits(_0: rawptr, _1: i32) i32 #import("qbe");
-fn elf_emitfnfin(_0: CStr, _1: *FILE) void #import("qbe");
-fn elf_emitfin(_0: *FILE) void #import("qbe");
-fn macho_emitfin(_0: *FILE) void #import("qbe");
-
 // Note: you have to make this not `static` in qbe/parse.fr
 fn typecheck(_0: *Qbe.Fn) void #import("qbe");
 
 fn name(s: *Qbe.Tmp) CStr = (ptr = s.name&.as_ptr());
 fn name(s: *Qbe.Blk) CStr = (ptr = s.name&.as_ptr());
 fn name(s: *Qbe.Fn) CStr  = (ptr = s.name&.as_ptr());
+
+::enum(Qbe.DebugKey);
+::enum(Qbe.TargetAbi);

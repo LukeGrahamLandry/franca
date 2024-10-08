@@ -7,6 +7,8 @@
 //! Also just for fun apple has slightly different rules. 
 //! - https://developer.apple.com/documentation/xcode/writing-arm64-code-for-apple-platforms
 //! It's crazy to me that this is more code than register allocation. 
+// TODO: i haven't tested the non-apple versions. 
+// :Explain but this stuff isn't super subtle, it's just tedius. 
 
 ArgClass :: @enum(u8) (
     CNone = 0,
@@ -54,7 +56,7 @@ store :: items(@list(Qbe.O.storew, .storel, .stores, .stored) ast_alloc()); // :
 ::enum(Qbe.FieldType);
 ::ptr_utils(Qbe.Typ);
 
-fn isfloatv(t: *Qbe.Typ, cls: *Qbe.Cls, globals: *Qbe.Globals) bool = {
+fn isfloatv(t: *Qbe.Typ, cls: *Qbe.Cls, globals: *QbeModule) bool = {
     range(0, t.nunion.zext()) { n |
         f := t.fields[n]&;  
         while => f.type != .FEnd { 
@@ -81,7 +83,7 @@ fn isfloatv(t: *Qbe.Typ, cls: *Qbe.Cls, globals: *Qbe.Globals) bool = {
     true
 }
 
-fn typclass(c: *Class, t: *Qbe.Typ, gp: []Arm64Reg, fp: []Arm64Reg, globals: *Qbe.Globals) void = {
+fn typclass(c: *Class, t: *Qbe.Typ, gp: []Arm64Reg, fp: []Arm64Reg, globals: *QbeModule) void = {
     sz := (t.size + 7).bit_and(-8); // :Explain
     c.t = t;
     c.class = .CNone;
@@ -131,12 +133,12 @@ fn sttmps(tmp: *Qbe.Ref, cls: []Qbe.Cls, nreg: u32, mem: Qbe.Ref, f: *Qbe.Fn) vo
     @debug_assert(nreg <= 4);
     off := 0;
     range(0, nreg.zext()) { n | 
-        tmp.offset(n)[] = newtmp("abi", cls[n], f);
-        r := newtmp("abi", .Kl, f);
+        tmp.offset(n)[] = f.newtmp("abi", cls[n]);
+        r := f.newtmp("abi", .Kl);
         store_idx: i64 = cls[n].raw().zext();
         xx := store[store_idx];
         f.emit(xx, .Kl, QbeNull, tmp.offset(n)[], r);
-        f.emit(.add, .Kl, r, mem, getcon(off, f));
+        f.emit(.add, .Kl, r, mem, f.getcon(off));
         off += if(is_wide(cls[n]), => 8, => 4);
     };
 }
@@ -145,9 +147,9 @@ fn sttmps(tmp: *Qbe.Ref, cls: []Qbe.Cls, nreg: u32, mem: Qbe.Ref, f: *Qbe.Fn) vo
 fn ldregs(reg: *Arm64Reg, cls: *Qbe.Cls, n: u8, mem: Qbe.Ref, f: *Qbe.Fn) void = {
     off := 0;
     range(0, n.zext()) { i |
-        r := newtmp("abi", .Kl, f);
+        r := f.newtmp("abi", .Kl);
         f.emit(.load, cls.offset(i)[], TMP(reg.offset(i)[].raw()), r, QbeNull);
-        f.emit(.add, .Kl, r, mem, getcon(off, f));
+        f.emit(.add, .Kl, r, mem, f.getcon(off));
         off += if(is_wide(cls.offset(i)[]), => 8, => 4);
     }
 }
@@ -191,7 +193,7 @@ fn selret(b: *Qbe.Blk, f: *Qbe.Fn) void = {
     b.jmp.arg = CALL(cty);
 }
 
-fn argsclass(i0: *Qbe.Ins, i1: *Qbe.Ins, carg: *Class, globals: *Qbe.Globals) i32 = {
+fn argsclass(i0: *Qbe.Ins, i1: *Qbe.Ins, carg: *Class, globals: *QbeModule) i32 = {
     va   := false;
     envc := 0;
     gp   := gpreg;
@@ -337,7 +339,7 @@ fn stkblob(r: Qbe.Ref, c: *Class, f: *Qbe.Fn, ilp: **Insl) void = {
         al = 0;
     };
     sz := if(c.class.has(.Cptr), => c.t.size, => c.size.intcast());
-    il.i = make_ins(@as(Qbe.O) @as(i32) Qbe.O.alloc4.raw() + al, .Kl, r, getcon(sz, f), QbeNull);
+    il.i = make_ins(@as(Qbe.O) @as(i32) Qbe.O.alloc4.raw() + al, .Kl, r, f.getcon(sz), QbeNull);
     il.link = ilp[];
     ilp[] = il;
 }
@@ -354,7 +356,7 @@ fn selcall(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins, ilp: **Insl) void = {
     c := ca.ptr;
     for(i0, i1) { i |
         if c.class.has(.Cptr) {
-            i.arg&[0] = newtmp("abi", .Kl, f);
+            i.arg&[0] = f.newtmp("abi", .Kl);
             stkblob(i.arg&[0], c, f, ilp);
             i.set_op(.arg);
         };
@@ -365,7 +367,7 @@ fn selcall(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins, ilp: **Insl) void = {
         c = c.offset(1);
     };
     stk = align(stk, 16);
-    rstk := getcon(stk.intcast(), f);
+    rstk := f.getcon(stk.intcast());
     if stk != 0 {
         f.emit(.add, .Kl, TMP(Arm64Reg.SP), TMP(Arm64Reg.SP), rstk);
     };
@@ -426,7 +428,7 @@ fn selcall(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins, ilp: **Insl) void = {
     for(i0, i1) { i | 
         if c.class.has(.Cstk) {
             off = align(off, c.align);
-            r := newtmp("abi", .Kl, f);
+            r := f.newtmp("abi", .Kl);
             if i.op() == .arg || is_argbh(i.op()) {
                 o := @switch(c.size) {
                     @case(1) => Qbe.O.storeb;
@@ -441,7 +443,7 @@ fn selcall(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins, ilp: **Insl) void = {
                 f.emit(.blit1, .Kw, QbeNull, INT(c.size.intcast()), QbeNull);
                 f.emit(.blit0, .Kw, QbeNull, i.arg&[1], r);
             };
-            f.emit(.add, .Kl, r, TMP(Arm64Reg.SP), getcon(off.intcast(), f));
+            f.emit(.add, .Kl, r, TMP(Arm64Reg.SP), f.getcon(off.intcast()));
             off += c.size;
         };
         c = c.offset(1);
@@ -491,7 +493,7 @@ fn selpar(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins) Params = {
         type := f.globals.types[].index(f.retty.zext());
         typclass(cr&, type, gpreg, fpreg, f.globals);
         if cr.class.has(.Cptr) {
-            f.retr = newtmp("abi", .Kl, f);  // :SetRetr
+            f.retr = f.newtmp("abi", .Kl);  // :SetRetr
             r8 := Arm64Reg.R8.raw();
             f.emit(.copy, .Kl, f.retr, TMP(r8), QbeNull);
             f.reg = f.reg.bit_or(BIT(r8));
@@ -563,10 +565,10 @@ fn chpred(b: *Qbe.Blk, bp: *Qbe.Blk, bp1: *Qbe.Blk) void = {
 }
 
 fn apple_selvaarg(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) void = {
-    c8   := getcon(8, f);
+    c8   := f.getcon(8);
     ap   := i.arg&[0];
-    stk8 := newtmp("abi", .Kl, f);
-    stk  := newtmp("abi", .Kl, f);
+    stk8 := f.newtmp("abi", .Kl);
+    stk  := f.newtmp("abi", .Kl);
 
     f.emit(.storel, .Kw, QbeNull, stk8, ap);
     f.emit(.add, .Kl, stk8, stk, c8);
@@ -575,10 +577,10 @@ fn apple_selvaarg(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) void = {
 }
 
 fn arm64_selvaarg(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) void = {
-    c8   := getcon(8, f);
-    c16  := getcon(16, f);
-    c24  := getcon(24, f);
-    c28  := getcon(28, f);
+    c8   := f.getcon(8);
+    c16  := f.getcon(16);
+    c24  := f.getcon(24);
+    c28  := f.getcon(28);
     ap   := i.arg&[0];
     isgp := KBASE(i.cls()) == 0;
 
@@ -603,7 +605,7 @@ fn arm64_selvaarg(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) void = {
            i.to =(i.cls) load %loc
     */
 
-    loc := newtmp("abi", .Kl, f);
+    loc := f.newtmp("abi", .Kl);
     f.emit(.load, i.cls(), i.to, loc, QbeNull);
     b0 := split(f, b);
     b0.jmp = b.jmp;
@@ -616,15 +618,15 @@ fn arm64_selvaarg(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) void = {
         chpred(b.s2, b, b0);
     };
 
-    lreg := newtmp("abi", .Kl, f);
-    nr := newtmp("abi", .Kl, f);
-    r0 := newtmp("abi", .Kw, f);
-    r1 := newtmp("abi", .Kl, f);
+    lreg := f.newtmp("abi", .Kl);
+    nr := f.newtmp("abi", .Kl);
+    r0 := f.newtmp("abi", .Kw);
+    r1 := f.newtmp("abi", .Kl);
     f.emit(.storew, .Kw, QbeNull, r0, r1);
     f.emit(.add, .Kl, r1, ap, if(isgp, => c24, => c28));
     f.emit(.add, .Kw, r0, nr, if(isgp, => c8, => c16));
-    r0 := newtmp("abi", .Kl, f);
-    r1 := newtmp("abi", .Kl, f);
+    r0 := f.newtmp("abi", .Kl);
+    r1 := f.newtmp("abi", .Kl);
     f.emit(.add, .Kl, lreg, r1, nr);
     f.emit(.load, .Kl, r1, r0, QbeNull);
     f.emit(.add, .Kl, r0, ap, if(isgp, => c8, => c16));
@@ -632,8 +634,8 @@ fn arm64_selvaarg(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) void = {
     breg.jmp.type = .Jjmp;
     breg.s1 = b0;
 
-    lstk := newtmp("abi", .Kl, f);
-    r0 := newtmp("abi", .Kl, f);
+    lstk := f.newtmp("abi", .Kl);
+    r0 := f.newtmp("abi", .Kl);
     f.emit(.storel, .Kw, QbeNull, r0, ap);
     f.emit(.add, .Kl, r0, lstk, c8);
     f.emit(.load, .Kl, lstk, ap, QbeNull);
@@ -654,8 +656,8 @@ fn arm64_selvaarg(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) void = {
     b0.phi.blk[1] = breg;
     b0.phi.arg&[0] = lstk;
     b0.phi.arg&[1] = lreg;
-    r0 := newtmp("abi", .Kl, f);
-    r1 := newtmp("abi", .Kw, f);
+    r0 := f.newtmp("abi", .Kl);
+    r1 := f.newtmp("abi", .Kw);
     b.jmp.type = .Jjnz;
     b.jmp.arg = r1;
     b.s1 = breg;
@@ -666,9 +668,9 @@ fn arm64_selvaarg(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) void = {
 }
 
 fn apple_selvastart(f: *Qbe.Fn, p: Params, ap: Qbe.Ref) void = {
-    off := getcon(p.stk.zext(), f);
-    stk := newtmp("abi", .Kl, f);
-    arg := newtmp("abi", .Kl, f);
+    off := f.getcon(p.stk.zext());
+    stk := f.newtmp("abi", .Kl);
+    arg := f.newtmp("abi", .Kl);
 
     f.emit(.storel, .Kw, QbeNull, arg, ap);
     f.emit(.add, .Kl, arg, stk, off);
@@ -676,32 +678,32 @@ fn apple_selvastart(f: *Qbe.Fn, p: Params, ap: Qbe.Ref) void = {
 }
 
 fn arm64_selvastart(f: *Qbe.Fn, p: Params, ap: Qbe.Ref) void = {
-    rsave := newtmp("abi", .Kl, f);
+    rsave := f.newtmp("abi", .Kl);
 
-    r0 := newtmp("abi", .Kl, f);
+    r0 := f.newtmp("abi", .Kl);
     f.emit(.storel, .Kw, QbeNull, r0, ap);
-    f.emit(.add, .Kl, r0, rsave, getcon(p.stk.zext() + 192, f));
+    f.emit(.add, .Kl, r0, rsave, f.getcon(p.stk.zext() + 192));
 
-    r0 := newtmp("abi", .Kl, f);
-    r1 := newtmp("abi", .Kl, f);
+    r0 := f.newtmp("abi", .Kl);
+    r1 := f.newtmp("abi", .Kl);
     f.emit(.storel, .Kw, QbeNull, r1, r0);
-    f.emit(.add, .Kl, r1, rsave, getcon(64, f));
-    f.emit(.add, .Kl, r0, ap, getcon(8, f));
+    f.emit(.add, .Kl, r1, rsave, f.getcon(64));
+    f.emit(.add, .Kl, r0, ap, f.getcon(8));
 
-    r0 := newtmp("abi", .Kl, f);
-    r1 := newtmp("abi", .Kl, f);
+    r0 := f.newtmp("abi", .Kl);
+    r1 := f.newtmp("abi", .Kl);
     f.emit(.storel, .Kw, QbeNull, r1, r0);
-    f.emit(.add, .Kl, r1, rsave, getcon(192, f));
+    f.emit(.add, .Kl, r1, rsave, f.getcon(192,));
     f.emit(.addr, .Kl, rsave, SLOT(-1), QbeNull);
-    f.emit(.add, .Kl, r0, ap, getcon(16, f));
+    f.emit(.add, .Kl, r0, ap, f.getcon(16));
 
-    r0 := newtmp("abi", .Kl, f);
-    f.emit(.storew, .Kw, QbeNull, getcon((p.ngp.zext()-8)*8, f), r0);
-    f.emit(.add, .Kl, r0, ap, getcon(24, f));
+    r0 := f.newtmp("abi", .Kl);
+    f.emit(.storew, .Kw, QbeNull, f.getcon((p.ngp.zext()-8)*8), r0);
+    f.emit(.add, .Kl, r0, ap, f.getcon(24));
     
-    r0 := newtmp("abi", .Kl, f);
-    f.emit(.storew, .Kw, QbeNull, getcon((p.nfp.zext()-8)*16, f), r0);
-    f.emit(.add, .Kl, r0, ap, getcon(28, f));
+    r0 := f.newtmp("abi", .Kl);
+    f.emit(.storew, .Kw, QbeNull, f.getcon((p.nfp.zext()-8)*16), r0);
+    f.emit(.add, .Kl, r0, ap, f.getcon(28));
 }
 
 fn arm64_abi(f: *Qbe.Fn) void = {
@@ -761,7 +763,7 @@ fn arm64_abi(f: *Qbe.Fn) void = {
             };
         };
         if b.identical(f.start) {
-            while => !il.is_null() {
+            while => !il.is_null() { // :Explain it's becuase emit is backwards 
                 f.emit(il.i);
                 il = il.link;
             };
@@ -786,7 +788,7 @@ fn apple_extsb(f: *Qbe.Fn) void = {
         f.reset_scratch();
         j := b.jmp.type;
         if is_retbh(j) {
-            r := newtmp("abi", .Kw, f);
+            r := f.newtmp("abi", .Kw);
             o := @as(Qbe.O) @as(i32) Qbe.O.extsb.raw() + (j.raw() - Qbe.J.Jretsb.raw()).zext();
             f.emit(o, .Kw, r, b.jmp.arg, QbeNull);
             b.jmp.arg = r;
@@ -802,7 +804,7 @@ fn apple_extsb(f: *Qbe.Fn) void = {
                     i[] = i[].offset(-1);
                     prev := f.emit(i[][]);
                     if is_argbh(i[].op()) {
-                        i.to = newtmp("abi", .Kl, f);
+                        i.to = f.newtmp("abi", .Kl);
                         prev.arg&[0] = i.to;
                     }
                 };

@@ -24,7 +24,7 @@ fn emit_func_arm64(m: *QbeModule, f: *Qbe.Fn, text: *FILE) []u8 = {
     write(text, s);
     
     // We know we're emitting the function right here so we can do old relocations now. 
-    name_id := intern(@as(CStr) (ptr = f.name&.as_ptr()));
+    name_id := m.intern(@as(CStr) (ptr = f.name&.as_ptr()));
     
     code := m.segments&[.Code]&;
     code.align_to(4); // should never be unaligned anyway but we live in fear
@@ -78,13 +78,13 @@ fn do_jit_relocations(self: *QbeModule, id: u32, segment: SegmentType, final_off
     slot[] = new;
     @match(old) {
         fn Pending(it) => {
-            if self.globals.debug["T".char()] {
-                write(self.globals.debug_out, items(@format("# patch '%' -> %[%]\n", str(id), segment, final_offset) temp()));
+            if self.debug["T".char()] {
+                write(self.debug_out, items(@format("# patch '%' -> %[%]\n", self.str(id), segment, final_offset) temp()));
             };
             self.put_jit_addr_in_table(it.jit_lookup_offset, self.segment_address(segment, final_offset));
             // TODO: do patches so old calls aren't indirect
         };
-        @default => @panic("Redeclared symbol %", str(id));
+        @default => @panic("Redeclared symbol %", self.str(id));
     };  
 }
 
@@ -317,8 +317,12 @@ fn epilogue_shrink_stack(self: *ArmState) void = {
     self.inst(add_sr(Bits.X64, sp, sp, x16, Shift.LSL, 0b000000));
 }
 
-// TODO: remove. we won't need this once we do our own calls/globals.
-fn rname(r: i64, k: Qbe.Cls) CStr #import("qbe");
+// can remove this if i decide to fully give up emitting text. 
+fn rname(r: i64, k: Qbe.Cls) Str = {
+    @debug_assert(k == .Kl, "I only use this for loading symbol addresses. float/32 bit doesn't make sense.");
+    @debug_assert(r != Arm64Reg.SP.raw(), "stomp sp?");
+    items(@format("x%", r - Arm64Reg.R0.raw()) temp())
+}
 
 fn slot(self: *ArmState, r: Qbe.Ref) i64 = {
     s := rsval(r).intcast();
@@ -347,8 +351,8 @@ fn maybe_load_from_table(self: *ArmState, c: *Qbe.Con, dest_reg: i64) void = {
         fixups.push((patch_at = patch_addr, type = (InReg = (r = dest_reg, increment = 0))), self.m.gpa);
         table_addr := self.m.segment_address(.ConstantData, table_offset_in_data);
         distance   := ptr_diff(patch_addr, table_addr);
-        if self.m.globals.debug["T".char()] {
-            write(self.m.globals.debug_out, items(@format("# ref table %, offset % for '%'\n", table_offset_in_data, distance, str(c.sym.id)) temp()));
+        if self.m.debug["T".char()] {
+            write(self.m.debug_out, items(@format("# ref table %, offset % for '%'\n", table_offset_in_data, distance, self.m.str(c.sym.id)) temp()));
         };
         dest_reg: u5 = dest_reg;
         self.inst_bytes_only(encode_adr(distance, dest_reg));
@@ -365,7 +369,7 @@ fn maybe_load_from_table(self: *ArmState, c: *Qbe.Con, dest_reg: i64) void = {
         data.next = data.next.offset(8);
         self.m.symbols&.insert(c.sym.id, (Pending = (fixups = fixups, jit_lookup_offset = next_offset)));
         if self.f.globals.debug["T".char()] {
-            write(self.f.globals.debug_out, items(@format("# table % is '%'\n", next_offset, str(c.sym.id)) temp()));
+            write(self.f.globals.debug_out, items(@format("# table % is '%'\n", next_offset, self.m.str(c.sym.id)) temp()));
         };
         return()
     };
@@ -376,7 +380,7 @@ fn maybe_load_from_table(self: *ArmState, c: *Qbe.Con, dest_reg: i64) void = {
             goal := u8.int_from_ptr(self.m.segment_address(it.segment, it.offset));
             distance := goal - here;
             if self.f.globals.debug["T".char()] {
-                write(self.m.globals.debug_out, items(@format("# direct offset % for '%' %[%]\n", distance, str(c.sym.id), it.segment, it.offset) temp()));
+                write(self.m.debug_out, items(@format("# direct offset % for '%' %[%]\n", distance, self.m.str(c.sym.id), it.segment, it.offset) temp()));
             };
             xxx := it.segment != .Code;
             @debug_assert(xxx || distance < 0, "we must be jumping backwards");
@@ -388,8 +392,8 @@ fn maybe_load_from_table(self: *ArmState, c: *Qbe.Con, dest_reg: i64) void = {
     };
 }
 
-fn loadaddr(self: *ArmState, c: *Qbe.Con, dest: i64, reg_name: CStr, do_text: bool) void = {
-    symbol_name := str(c.sym.id);
+fn loadaddr(self: *ArmState, c: *Qbe.Con, dest: i64, reg_name: Str, do_text: bool) void = {
+    symbol_name := self.m.str(c.sym.id);
 
     //p = l[0] == '"' ? "" : T.assym;
     @match(c.sym.type) {
@@ -429,9 +433,9 @@ fn loadaddr(self: *ArmState, c: *Qbe.Con, dest: i64, reg_name: CStr, do_text: bo
 
 fn loadcon(self: *ArmState, c: *Qbe.Con, r: i64, k: Qbe.Cls, do_text: bool) void = {
     w := is_wide(k);
-    rn := rname(r + 1, k); // HACK
     n := c.bits.i;
     if (c.type == .CAddr) {
+        rn := rname(r + 1, k); // HACK
         self.loadaddr(c, r, rn, do_text);
         return();
     };
@@ -588,7 +592,7 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
                 
                 if self.m.want_text_asm {
                     // dynamic link things it wont let you adrp to? you can only bl
-                    l := str(c.sym.id);
+                    l := self.m.str(c.sym.id);
                     p := self.f.globals.target.assym&.as_ptr();
                     p: CStr = (ptr = p);
                     p := str(p);
@@ -715,7 +719,7 @@ fn emitins2(self: *ArmState, i: *Qbe.Ins) void = {
         };
         // TODO: u/s h/b
         if i.cls().is_int() { // TODO: is this wrong?
-            s := @as(i64) firstbit(size).zext();
+            s := firstbit(size.zext().bitcast());
             si_inv := if(i.cls().is_wide(), => Bits.W32, => Bits.X64);
             @match(i.op()) {
                 fn loadsw() => {
@@ -751,7 +755,7 @@ fn emitins2(self: *ArmState, i: *Qbe.Ins) void = {
             self.inst(f_str_uo(Bits.X64, @as(u5) i.arg&[0].float_reg(), addr, @as(u12) offset));
             return();
         };
-        s := @as(i64) firstbit(size).zext();
+        s := firstbit(size.zext().bitcast());
         self.inst(@bits(@as(u2) s, 0b11100100, @as(u12) offset, @as(u5) addr, @as(u5) i.arg&[0].int_reg()));
         return();
     };
@@ -797,9 +801,6 @@ fn emitins2(self: *ArmState, i: *Qbe.Ins) void = {
         @default => @panic("TODO: op encoding %", inst_name);
     };
 }
-
-// TODO: ctz intrinsic
-fn firstbit(b: i32) u32 #import("qbe");
 
 /*
 
@@ -848,70 +849,6 @@ fn next_inst_offset(self: *ArmState) i64 = {
     code := self.m.segments&[.Code]&;
     ptr_diff(code.mmapped.ptr, code.next) - self.start_of_function
 }
-
-
-// TODO: factor out arm64/target.fr
-
-::List(Arm64Reg);
-
-// note: can't give these lists to the c code becuase they're i64 instead of i32
-arm64_rsave :: items(@list(
-    Arm64Reg.R0,  .R1,  .R2,  .R3,  .R4,  .R5,  .R6,  .R7,
-               .R8,  .R9,  .R10, .R11, .R12, .R13, .R14, .R15,
-               .IP0, .IP1, .R18, .LR,
-               .V0,  .V1,  .V2,  .V3,  .V4,  .V5,  .V6,  .V7,
-               .V16, .V17, .V18, .V19, .V20, .V21, .V22, .V23,
-               .V24, .V25, .V26, .V27, .V28, .V29, .V30,
-) ast_alloc());
-
-arm64_rclob :: items(@list(
-    Arm64Reg.R19, .R20, .R21, .R22, .R23, .R24, .R25, .R26,
-               .R27, .R28,
-               .V8,  .V9,  .V10, .V11, .V12, .V13, .V14, .V15,
-) ast_alloc());
-
-fn is_float(r: Arm64Reg) bool #inline = 
-    r.raw() >= Arm64Reg.V0.raw();
-
-fn int_id(r: Arm64Reg) u5 #inline = 
-    @as(i64) r.raw() - Arm64Reg.R0.raw();
-
-fn float_id(r: Arm64Reg) u5 #inline = 
-    @as(i64) r.raw() - Arm64Reg.V0.raw();
-
-// TODO: debug_assert tmp and in range
-// TODO: you lose the type hint for @bits if you inline this
-fn int_reg(r: Qbe.Ref) u5 = 
-    @as(i64) int_id(@as(Arm64Reg) r.val());
-    
-fn float_reg(r: Qbe.Ref) u5 = 
-    @as(i64) float_id(@as(Arm64Reg) r.val());
-
-// Note: these numbers are NOT the ones you encode in the instructions. ints are of by 1, floats are off by 1+32
-//        it's nice to be able to zero init stuff and have that as a sentinal value. (tmp.phi, arrays in rega)
-Arm64Reg :: @enum(i64) (
-    RXX,
-     R0,  R1,  R2,  R3,  R4,  R5,  R6,  R7,  
-     R8,  R9, R10, R11, R12, R13, R14, R15, 
-    IP0, IP1, R18, R19, R20, R21, R22, R23,
-    R24, R25, R26, R27, R28,  FP,  LR,  SP,
-    
-     V0,  V1,  V2,  V3,  V4,  V5,  V6,  V7,
-     V8,  V9, V10, V11, V12, V13, V14, V15,
-    V16, V17, V18, V19, V20, V21, V22, V23,
-    V24, V25, V26, V27, V28, V29, V30, /* V31, // we wasted a bit so don't have space :V31 */
-);
-
-::List(Cond);
-arm_condition_codes :: items(@list(
-    // Cieq Cine Cisge Cisgt Cisle Cislt Ciuge Ciugt Ciule Ciult
-    Cond.EQ, .NE,  .GE,  .GT,  .LE,  .LT,  .HS,  .HI,  .LS,  .LO,
-    // Cfeq Cfge Cfgt Cfle Cflt Cfne  Cfo Cfuo
-        .EQ, .PL, .HI, .LE, .LT, .NE, .VC, .VS
-        //.EQ, .GE, .GT, .LS, .MI, .NE, .VC, .VS
-) ast_alloc());
-
-::enum(Arm64Reg);
 
 fn sub_er(sf: Bits, dest: RegO, a: RegI, b: RegI) u32 =
     @bits(sf, 0b1001011001, b, 0b011 /*option*/, 0b000 /*imm3*/, a, dest);

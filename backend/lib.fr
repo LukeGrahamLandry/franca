@@ -14,9 +14,12 @@
 #include_std("backend/opt/rega.fr");
 #include_std("backend/llvm.fr");
 #include_std("backend/arm64/abi.fr");
+#include_std("backend/dump.fr");
+#include_std("backend/arm64/target.fr");
+#include_std("backend/opt/load.fr");
 
-ENABLE_INTERNAL_QBE :: false;  // until i want to enable it on github actions
-LINK_QBE_C :: true;
+ENABLE_INTERNAL_QBE :: true;  // until i want to enable it on github actions
+LINK_QBE_C :: false;
 
 // easy-ish (?) things to try to get used to making changes. 
 // TODO: if they don't do it already: 
@@ -28,13 +31,17 @@ LINK_QBE_C :: true;
 //          the c version works with converting to that. clang -O2 doesn't treat the functions the same so maybe im missing something. 
 //          have to add that as an Intrinsic to my language... which i guess means adding it to my new qbe. 
 // TODO: don't bother emitting nops (when copying with emiti() anyway)? is avoiding a branch worth your blocks using extra memory
-// TODO: :HardcodeAlloc :Explain :UnacceptablePanic :SketchyIterTargets :TodoPort :SketchPlatformRegister
+// TODO: :Explain :UnacceptablePanic :SketchyIterTargets :TodoPort :SketchPlatformRegister
 //       :MakeATestThatFails places where i don't know why qbe did something and all my current tests work if you change it. 
 //                           so try to make a test case that requires qbe's behaviour or remove the extra code. 
+//       :HardcodeAlloc i think it can just always be an arena reset after function and then when want to keep around for inlining, 
+//                      need to do a copy anyway and that can be in a seperate allocator. 
+//                      so i want to bother with resetting temp between passes or just say fuck it you should ahve enough memory to compile one function all at once? 
 //
 // TODO: fix tests/broken/todo.fr
 // TODO: the trick of having a `BitSet w[1]` so it auto decays to a pointer is cute. it's kinda a shame i can't do that. 
 // TODO: fix panic on overflow block name in rega
+// TODO: have a flag on module to turn off formatting name strings when we're not going to be debug printing. 
 /*
 (i assume you need this thing for static link)
 ar rvs qbe_merged.o util.o parse.o abi.o cfg.o mem.o ssa.o alias.o load.o copy.o fold.o simpl.o live.o spill.o rega.o emit.o amd64/targ.o amd64/sysv.o amd64/isel.o amd64/emit.o arm64/targ.o arm64/abi.o arm64/isel.o arm64/emit.o rv64/targ.o rv64/abi.o rv64/isel.o rv64/emit.o
@@ -42,49 +49,108 @@ ar rvs qbe_merged.o util.o parse.o abi.o cfg.o mem.o ssa.o alias.o load.o copy.o
 clang -dynamiclib -o qbe_merged.dylib main.o util.o parse.o abi.o cfg.o mem.o ssa.o alias.o load.o copy.o fold.o simpl.o live.o spill.o rega.o emit.o amd64/targ.o amd64/sysv.o amd64/isel.o amd64/emit.o arm64/targ.o arm64/abi.o arm64/isel.o arm64/emit.o rv64/targ.o rv64/abi.o rv64/isel.o rv64/emit.o
 */
 
-// TODO: this has to change when i do static aot.
-qbe_globals :: @static(Qbe.Globals) {  
-    :: { // this only runs if you reference qbe_globals but it as to run before you try to compile the rest of this initializer. 
+global_module :: @static(QbeModule); // TODO: aaaaaaaa
+
+QbeModule :: @rec @struct(
+    // These have to be pointers to the symbols Qbe externs because it uses them. 
+    types: *QList(Qbe.Typ), // typ
+    insb: *Array(Qbe.Ins, 1.shift_left(20)), // MaxInstructions
+    curi: **Qbe.Ins,
+    target: *Qbe.Target,
+    debug: *Array(bool, "Z".char() + 1),
+    
+    // These we need to track but Qbe doesn't use internally. 
+    number_of_types := 0, // ntyp. only used by parser
+    debug_out: *FILE,
+    namel := QbeName.ptr_from_int(0), // for reusing memory in opt/ssa.fr between functions. no information shared.
+    next_tmp_id = 0,
+    string_table: []Qbe.Bucket,
+    
+    // stuff for emitting code.
+    segments: EnumMap(SegmentType, SegmentCursor),
+    symbols: HashMap(u32, SymbolInfo),  // TODO: i think the high bits of qbe ids are sequential. make this a bucket array. they have to live forever anyway
+    gpa: Alloc,
+    start_of_writable_code: *u8,
+    
+    // TODO: everything that touches these needs to be rewritten eventually. 
+    want_text_asm := false,
+    want_llvm := false,
+    outf := zeroed(*FILE),
+);
+
+fn init_default_module() QbeModule = 
+    init(1.shift_left(18), page_allocator, page_allocator);
+
+:: {
+    @if(LINK_QBE_C) {
         //eprintln("Loading Qbe dylib!");
         c := current_compiler_context();
         handle := dlopen("./bindings/qbe/qbe_merged.dylib".sym().c_str(), DlFlag.Lazy);
         assert(!handle.lib.is_null(), "failed to open qbe dylib");
         c.add_comptime_library(@symbol "qbe", handle);
     };
-    
-    g: Qbe.Globals = (
-        types = get_qbe_dylib_variable(QList(Qbe.Typ), "typ"),
-        insb = get_qbe_dylib_variable(Array(Qbe.Ins, 1.shift_left(20)), "insb"),
-        curi = get_qbe_dylib_variable(*Qbe.Ins, "curi"),
-        target = get_qbe_dylib_variable(Qbe.Target, "T"),
-        debug = get_qbe_dylib_variable(Array(bool, "Z".char() + 1), "debug"),
-        debug_out = fdopen(STD_ERR, "a".sym().c_str()),
-    );
-    ::enum(Qbe.DebugKey);
-    //g.debug[Qbe.DebugKey.Parsing.raw()] = true;
-    //g.debug[Qbe.DebugKey.Ssa.raw()] = true;
-    //g.debug[Qbe.DebugKey.Disassemble.raw()] = true;
-    //g.debug[Qbe.DebugKey.TableRefs.raw()] = true;
-    //g.debug[Qbe.DebugKey.RegAlloc.raw()] = true;
-    //g.debug[Qbe.DebugKey.Abi.raw()] = true;
-    g.target[] = get_qbe_dylib_variable(Qbe.Target, "T_arm64_apple")[]; // TODO: choose arch!
-    g.target.isel = arm64_isel;
-    g.target.abi1 = arm64_abi;
-    g.target.argregs = arm64_argregs;
-    g.target.retregs = arm64_retregs;
-    g.target.abi0 = apple_extsb;
-    g.types[] = new(0, Qbe.Pool.PHeap); // TODO: check the magic in QbeBuilder.init to make sure you remember to do this. 
-    g
 };
 
-global_module :: @static(QbeModule); // TODO: aaaaaaaa
+fn init(segment_size: i64, gpa: Alloc, code_alloc: Alloc) QbeModule = {
+    m := QbeModule.zeroed();
+    m.segments = EnumMap(SegmentType, SegmentCursor).zeroed();
+    mem := code_alloc.alloc(u8, segment_size * 3); // TODO: ask for the alignment we need.
+    m.segments&.insert(.Code, (mmapped = mem.slice(0, segment_size), next = mem.index(0)));
+    m.segments&.insert(.MutableData, (mmapped = mem.slice(segment_size, segment_size*2), next = mem.index(segment_size)));
+    m.segments&.insert(.ConstantData, (mmapped = mem.slice(segment_size*2, segment_size*3), next = mem.index(segment_size*2)));
+    m.symbols = init(gpa);
+    m.gpa = gpa;
+    m.start_of_writable_code = mem.ptr;
+    
+    m.debug_out = fdopen(STD_ERR, "a".sym().c_str());
+    @if(LINK_QBE_C, {
+        m.types  = get_qbe_dylib_variable(QList(Qbe.Typ), "typ");
+        m.insb   = get_qbe_dylib_variable(Array(Qbe.Ins, 1.shift_left(20)), "insb");
+        m.curi   = get_qbe_dylib_variable(*Qbe.Ins, "curi");
+        m.debug  = get_qbe_dylib_variable(Array(bool, "Z".char() + 1), "debug");
+        m.target = get_qbe_dylib_variable(Qbe.Target, "T");
+        // note: not doing this. using fill_target_info instead. 
+        // m.target[] = get_qbe_dylib_variable(Qbe.Target, "T_arm64_apple")[]; 
+    }, {
+        m.string_table = gpa.alloc(Qbe.Bucket, IMask + 1);
+        m.types  = gpa.box(@type m.types[]);
+        
+        //m.insb   = gpa.box(@type m.insb[]); // :FUCKED i overflow the size becuase i figured 65k bytes aught to be enough for everyone. -- Oct 8  
+        mem := gpa.alloc(Qbe.Ins, Qbe.MaxInstructions);
+        ::?*Array(Qbe.Ins, Qbe.MaxInstructions);
+        m.insb = mem.as_array().unwrap();
+        
+        m.curi   = gpa.box(@type m.curi[]); // TODO: megadumb if its the page allocaotr
+        m.debug  = gpa.box_zeroed(@type m.debug[]);
+        m.target = gpa.box(@type m.target[]);
+    });
+    //m.debug[Qbe.DebugKey.Abi.raw()] = true;
+    m.target.fill_target_info(.arm64_apple);
+    m.types[] = new(0, Qbe.Pool.PHeap); // TODO: check the magic in QbeBuilder.init to make sure you remember to do this. 
+    m.curi[] = m.insb.index_unchecked(Qbe.MaxInstructions);
+    m
+}
+
+fn fill_target_info(t: *Qbe.Target, target: Qbe.TargetAbi) void = {
+    @assert_eq(target, .arm64_apple, "TODO: support other abis");
+    t.fill_target_arm(true);
+}
+
+fn get_qbe_dylib_variable($T: Type, $name: Str) *T #generic = {
+    lib := dlopen("./bindings/qbe/qbe_merged.dylib".sym().c_str(), DlFlag.Lazy);
+    assert(!lib.lib.is_null(), "failed to open qbe dylib");
+    ref := dlsym(lib, name.sym().c_str());
+    if(ref.is_null(), => @panic("failed to get '%'", name));
+    T.ptr_from_raw(ref)
+}
 
 // TODO: this changes for aot!! remove this! garbage.
 aaaa_out :: @static(TmpFile);
 
 run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
+    mark := __temp_alloc.mark();
     m := global_module;
-    fnn.globals = m.globals;  // if you got it from qbe's parser it doesn't set this. 
+    fnn.globals = m;  // if you got it from qbe's parser it doesn't set this. 
     filluse :: fill_use;
     
     if fnn.globals.debug["P".char()] {
@@ -97,8 +163,11 @@ run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
 	//       if the frontend generates valid code it will always type check. 
 	//       but always have to option to run this to make peoples lives easier! (ie if a user wants to use #bc)
 	//       same for ssacheck
-    typecheck(fnn); // debug. but it calls clsmerge which does mutate sometimes so maybe not.
-    {m.globals.target.abi0}(fnn);
+    
+    @if(LINK_QBE_C) {
+        typecheck(fnn); // debug. but it calls clsmerge which does mutate sometimes so maybe not.
+    };
+    {m.target.abi0}(fnn);
     fillrpo(fnn);
     fillpreds(fnn);
     @if(LINK_QBE_C) {
@@ -110,7 +179,7 @@ run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
     convert_to_ssa(fnn);
     filluse(fnn);
     ssacheck(fnn); // debug
-        
+    
     @if(LINK_QBE_C) {
         fillalias(fnn); // !
         loadopt(fnn); // optional
@@ -119,6 +188,7 @@ run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
         coalesce(fnn); // optional
         filluse(fnn); 
     };
+    
     ssacheck(fnn); // debug
     copy_elimination(fnn); // optional
     //copy(fnn);
@@ -137,12 +207,12 @@ run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
         return();
     };
     
-    {m.globals.target.abi1}(fnn);
+    {m.target.abi1}(fnn);
     simplify(fnn);
     //simpl(fnn);
     fillpreds(fnn);
     filluse(fnn);
-    {m.globals.target.isel}(fnn);
+    {m.target.isel}(fnn);
     fillrpo(fnn);
     fill_liveness(fnn);
     //filllive(fnn);
@@ -168,10 +238,11 @@ run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
     if true {
         m.emit_func_arm64(fnn, global_module[].outf);
     } else {
-        {m.globals.target.emitfn}(fnn, global_module[].outf);
+        {m.target.emitfn}(fnn, global_module[].outf);
     };
     // TODO: do this but then have to reset up the type table
     //freeall();  
+    __temp_alloc.reset_retaining_capacity(mark);
 };
 
 // all computers know these days is fill memory and branch

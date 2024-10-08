@@ -6,6 +6,7 @@ fn BIT(n: i64) u64 #inline = 1.shift_left(n);
 fn SLOT(i: i64) Qbe.Ref #inline = ref(.RSlot, i.bit_and(0x1fffffff));
 fn TMP(i: i64)  Qbe.Ref #inline = ref(.RTmp, i);
 fn CALL(i: i64) Qbe.Ref #inline = ref(.RCall, i);
+fn CON(i: i64) Qbe.Ref #inline = ref(.RCon, i);
 fn INT(i: i64) Qbe.Ref #inline = ref(.RInt, i.bit_and(0x1fffffff));
 
 fn TMP(i: i32) Qbe.Ref #inline = TMP(i.intcast());
@@ -59,12 +60,17 @@ fn reset_scratch(f: *Qbe.Fn) void #inline = {
 fn len_scratch(f: *Qbe.Fn) i64 #inline = 
     f.scratch_next().ptr_diff(f.scratch_start()); 
 
-
+// it uses insb/curi as a buffer for emitting new instructions and then copies them out to a newly allocated array at the end of the block. 
+// the parser starts at the beginning but the passes start at the end and `emit` in reverse. 
+// so i think they scan block backwards. like isel will iterate backwards, adding some instructions, and copying out those it likes,
+// and then at the end, copy from the buffer and update the block with that pointer. 
+// so they're always in order in the blocks but you always process them backwards. 
+//
 // TODO: we rely on globals.curi pointing to the last inst we emitted (in isel) :LookAtLastInst
 fn emit(f: *Qbe.Fn, op: Qbe.O, k: Qbe.Cls, to: Qbe.Ref, arg0: Qbe.Ref, arg1: Qbe.Ref) *Qbe.Ins = {
     i := f.globals.curi;
     if i[].identical(f.globals.insb.as_ptr()) {
-        die("emit, too many instructions".sym().c_str());
+        @panic("emit, too many instructions");
     };
     i[] = i[].offset(-1);
     i[][] = make_ins(op, k, to, arg0, arg1);
@@ -74,39 +80,223 @@ fn emit(f: *Qbe.Fn, op: Qbe.O, k: Qbe.Cls, to: Qbe.Ref, arg0: Qbe.Ref, arg1: Qbe
 fn emit(f: *Qbe.Fn, i: Qbe.Ins) *Qbe.Ins #inline = 
     f.emit(i&.op(), i&.cls(), i.to, i.arg&[0], i.arg&[1]);
 
-// :TodoPort
-fn newtmp(f: *Qbe.Fn, $debug_hint: Str, k: Qbe.Cls) Qbe.Ref #inline = {
-    newtmp(debug_hint.sym().c_str(), k, f)
+fn newtmp(f: *Qbe.Fn, debug_hint: Str, k: Qbe.Cls) Qbe.Ref = {
+    n := f.globals.next_tmp_id&;
+    t: i64 = f.ntmp.zext();
+    f.ntmp += 1;
+    f.tmp&.grow(t + 1);
+    f.tmp.slice(t, t + 1).set_zeroed();
+    tmp := f.tmp.index(t);
+    if debug_hint.len != 0 {
+        l: List(u8) = (maybe_uninit = tmp.name&.items(), len = 0, gpa = panicking_allocator); // :UnacceptablePanic
+        @fmt(l&, "%.%", debug_hint, n[]);
+    };
+    n[] += 1;
+    tmp.cls = k;
+    tmp.slot = -1;
+    tmp.nuse = 1;
+    tmp.ndef = 1;
+    TMP(t)
 }
 
-fn newtmp($debug_hint: Str, k: Qbe.Cls, f: *Qbe.Fn) Qbe.Ref #inline = {
-    newtmp(debug_hint.sym().c_str(), k, f)
+fn newcon(f: *Qbe.Fn, c0: *Qbe.Con) Qbe.Ref = {
+    fn eq(a: Qbe.Sym, b: Qbe.Sym) bool #inline = 
+        a.type == b.type && a.id == b.id;
+    
+    // deduplicate
+    range(1, f.ncon.zext()) { i |
+        c1 := f.con.index(i);
+        if c0.type == c1.type && c0.sym == c1.sym && c0.bits.i == c1.bits.i {
+            return(CON(i));
+        };
+    };
+    
+    // push
+    f.con&.grow(f.ncon.zext() + 1);
+    f.con[f.ncon.zext()] = c0[];
+    f.ncon += 1;
+    CON(f.ncon.zext() - 1)
 }
 
-// :TodoPort
-fn newcon(f: *Qbe.Fn, c0: *Qbe.Con) Qbe.Ref #inline =
-    newcon(c0, f);
-
-
-// :TodoPort
 fn getcon(f: *Qbe.Fn, val: i64) Qbe.Ref #inline = {
-    getcon(val, f)
+    // deduplicate
+    range(1, f.ncon.zext()) { c |
+        if f.con[c].type == .CBits && f.con[c].bits.i == val {
+            return(CON(c));
+        };
+    };
+    
+    // push
+    c := f.ncon.zext();
+    f.ncon += 1;
+    f.con&.grow(f.ncon.zext());
+    f.con[c] = (type = .CBits, bits = (i = val));
+    CON(c)
+}
+
+fn chuse(_0: Qbe.Ref, _1: i32, _2: *Qbe.Fn) void #import("qbe");
+fn newcon(_0: *Qbe.Con, _1: *Qbe.Fn) Qbe.Ref #import("qbe");
+fn addcon(_0: *Qbe.Con, _1: *Qbe.Con, _2: i32) i32 #import("qbe");
+fn dumpts(_0: *Qbe.BSet, _1: QList(Qbe.Tmp), _2: *FILE) void #import("qbe");
+fn runmatch(_0: *Uchar, _1: *Num, _2: Ref, _3: *Ref) void #import("qbe");
+
+// TODO: use slices 
+
+fn idup(pd: **Qbe.Ins, src: *Qbe.Ins, n: i64) void = {
+    if(n == 0, => return());
+    mem := libc_allocator.alloc(Qbe.Ins, n); // :HardcodeAlloc
+    mem.copy_from(ptr = src, len = n);
+    pd[] = mem.ptr;
+}
+
+fn icpy(dest: *Qbe.Ins, src: *Qbe.Ins, n: i64) *Qbe.Ins = {
+    if(n == 0, => return(dest));
+    (@as([]Qbe.Ins)(ptr = dest, len = n)).copy_from(ptr = src, len = n); // TODO: ugly
+    dest.offset(n)
+}
+
+fn salloc(rt: Qbe.Ref, rs: Qbe.Ref, f: *Qbe.Fn) void = {
+    /* we need to make sure
+    * the stack remains aligned
+    * (rsp = 0) mod 16
+    */
+    f.dynalloc = true;
+    if rtype(rs) == .RCon {
+        sz := f.con[rs.val()].bits.i;
+        if sz < 0 || sz >= i32_MAX - 15 {
+            @panic("invalid alloc size %", sz);
+        };
+        sz = (sz + 15).bit_and(-16);
+        f.emit(.salloc, .Kl, rt, f.getcon(sz), QbeNull);
+    } else {
+        /* r0 = (r + 15) & -16 */
+        r0 := f.newtmp("isel", .Kl);
+        r1 := f.newtmp("isel", .Kl);
+        f.emit(.salloc, .Kl, rt, r0, QbeNull);
+        f.emit(.and, .Kl, r0, r1, f.getcon(-16));
+        f.emit(.add, .Kl, r1, rs, f.getcon(15));
+        if f.tmp[rs.val()].slot != -1 {
+            @panic("unlikely alloc argument % for %", f.tmp[rs.val()]&.name(), f.tmp[rt.val()]&.name());
+        }
+    }
+}
+
+fn between(o: Qbe.O, fst: Qbe.O, lst: Qbe.O) bool = {
+    fst.raw() <= o.raw() && o.raw() <= lst.raw()
+}
+
+///////////////////////
+/// Condition Codes ///
+///////////////////////
+
+// TODO: use multiple returns
+fn iscmp(op: Qbe.O, pk: *Qbe.Cls, pc: *i32) bool = { // :CmpOrder
+    if op.between(.ceqw, .cultw) {
+        pc[] = op.raw() - Qbe.O.ceqw.raw();
+        pk[] = .Kw;
+        return(true);
+    };
+    if op.between(.ceql, .cultl) {
+        pc[] = op.raw() - Qbe.O.ceql.raw();
+        pk[] = .Kl;
+        return(true);
+    };
+    
+    ::@assert_eq(Qbe.Cmp.enum_count(), Qbe.CmpICount + Qbe.CmpFCount, "cmp counts don't add up");
+    if op.between(.ceqs, .cuos) {
+        pc[] = Qbe.CmpICount.intcast() + op.raw() - Qbe.O.ceqs.raw();
+        pk[] = .Ks;
+        return(true);
+    }; 
+    if op.between(.ceqd, .cuod) {
+        pc[] = Qbe.CmpICount.intcast() + op.raw() - Qbe.O.ceqd.raw();
+        pk[] = .Kd;
+        return(true);
+    };
+    
+    false
+}
+
+// TODO: this is dumb. i should arrange the numbers so its just flipping a bit. 
+//       don't forget to change the order of jmps/flags/ops, iscmp ranges. :CmpOrder
+//       but have to wait until i'm not calling into qbe anymore.  -- Oct 8 
+
+::List(Qbe.Cmp);
+::enum(Qbe.Cmp);
+
+fn cmpneg(cc: i32) i32 = {
+    negate_cc :: items(@list( // :CmpOrder
+        // Cieq   Cine   Cisge   Cisgt   Cisle   Cislt   Ciuge   Ciugt   Ciule   Ciult
+   Qbe.Cmp.Cine, .Cieq, .Cislt, .Cisle, .Cisgt, .Cisge, .Ciult, .Ciule, .Ciugt, .Ciuge,
+        // Cfeq   Cfge   Cfgt   Cfle   Cflt   Cfne   Cfo   Cfuo
+          .Cfne, .Cflt, .Cfle, .Cfgt, .Cfge, .Cfeq, .Cfuo, .Cfo
+    ) ast_alloc());
+
+    @debug_assert(cc >= 0 && cc < Qbe.Cmp.enum_count().intcast(), "bad cc");
+    negate_cc[cc.zext()].raw()
+}
+
+fn cmpop(cc: i32) i32 = {
+    swap_cc :: items(@list( // :CmpOrder
+        // Cieq   Cine   Cisge   Cisgt   Cisle   Cislt   Ciuge   Ciugt   Ciule   Ciult
+   Qbe.Cmp.Cieq, .Cine, .Cisle, .Cislt, .Cisge, .Cisgt, .Ciule, .Ciult, .Ciuge, .Ciugt,
+        // Cfeq   Cfge   Cfgt   Cfle   Cflt   Cfne   Cfo   Cfuo
+          .Cfeq, .Cfle, .Cflt, .Cfge, .Cfgt, .Cfne, .Cfo, .Cfuo
+    ) ast_alloc());
+
+    @debug_assert(cc >= 0 && cc < Qbe.Cmp.enum_count().intcast(), "bad cc");
+    swap_cc[cc.zext()].raw()
 }
 
 ////////////////
 /// Bit Sets ///
 ////////////////
+// TODO: use unsigned division can be shifts (if negative you truncate towards 0 not -inifinity which a shift gives you)
 
-fn bsinit(_0: *Qbe.BSet, _1: i64) void #import("qbe");
-fn bszero(_0: *Qbe.BSet) void #import("qbe");
-fn bscount(_0: *Qbe.BSet) u32 #import("qbe");
-fn bsclr(_0: *Qbe.BSet, _1: i64) void #import("qbe");
-fn bscopy(_0: *Qbe.BSet, _1: *Qbe.BSet) void #import("qbe");
-fn bsunion(_0: *Qbe.BSet, _1: *Qbe.BSet) void #import("qbe");
-fn bsinter(_0: *Qbe.BSet, _1: *Qbe.BSet) void #import("qbe");
-fn bsdiff(_0: *Qbe.BSet, _1: *Qbe.BSet) void #import("qbe");
-fn bsequal(_0: *Qbe.BSet, _1: *Qbe.BSet) bool #import("qbe");
-fn bsiter(_0: *Qbe.BSet, _1: *i32) bool #import("qbe");
+fn bsinit(bs: *Qbe.BSet, n: i64) void = {
+    n := (n + Qbe.NBit - 1) / Qbe.NBit;
+    bs.nt = n.trunc();
+    bs.t = libc_allocator.alloc(u64, n).as_ptr(); // :HardcodeAlloc qbe put it in an arena cleared at end of function. 
+}
+
+// use `for` which calls this. 
+fn bsiter(bs: *Qbe.BSet, elt: *i32) bool = {
+    i: i64 = elt[].zext();
+    t := i / Qbe.NBit;
+    if(t >= bs.nt.zext(), => return(false));
+    b := bs.t.offset(t)[];
+    b = b.bit_and(bit_not(BIT(i.mod(Qbe.NBit)) - 1));
+    while => b == 0 {
+        t += 1;
+        if(t >= bs.nt.zext(), => return(false));
+        b = bs.t.offset(t)[];
+    };
+    elt[] = intcast(Qbe.NBit * t + firstbit(b));
+    true
+}
+
+fn bsequal(a: *Qbe.BSet, b: *Qbe.BSet) bool = {
+    @debug_assert(a.nt == b.nt, "BSet mismatch");
+    range(0, a.nt.zext()) { i |
+        if a.t.offset(i)[] != b.t.offset(i)[] {
+            return(false);
+        }
+    };
+    true
+}
+
+fn bszero(bs: *Qbe.BSet) void = {
+    mem: []u64 = (ptr = bs.t, len = bs.nt.zext());
+    mem.set_zeroed();
+}
+
+fn bscount(bs: *Qbe.BSet) u32 = {
+    n: u32 = 0;
+    range(0, bs.nt.zext()) { i |
+        n += popcnt(bs.t.offset(i)[]);
+    };
+    n
+}
 
 // TODO: make elt unsigned to the division is free
 fn bshas(bs: *Qbe.BSet, elt: i64) bool #inline = {
@@ -122,10 +312,15 @@ fn bsset(bs: *Qbe.BSet, elt: i64) void #inline = {
     slot[] = slot[].bit_or(BIT(elt.mod(Qbe.NBit)));
 }
 
+fn bsclr(bs: *Qbe.BSet, elt: i64) void #inline = {
+    @debug_assert(elt < bsmax(bs), "bs oob");
+    slot := bs.t.offset(elt / Qbe.NBit);
+    slot[] = slot[].bit_and(bit_not(BIT(elt.mod(Qbe.NBit))));
+}
+
 fn bsmax(bs: *Qbe.BSet) i64 #inline =
     bs.nt.zext() * Qbe.NBit;
 
-// :TodoPort
 fn init_bitset(size: i64) Qbe.BSet #inline = {
     // this puts it in the pool thing that freeall deals with. i can just stick an arena allocator somewhere i guess and clear it at the end of the function. 
     // is it worth resetting temp() between passes or should i just do it at the end and not deal with it? 
@@ -134,19 +329,85 @@ fn init_bitset(size: i64) Qbe.BSet #inline = {
     s
 }
 
+fn bscopy( a: *Qbe.BSet, b: *Qbe.BSet) void = BSOP(a, b, fn(a, b) => b);
+fn bsunion(a: *Qbe.BSet, b: *Qbe.BSet) void = BSOP(a, b, fn(a, b) => a.bit_or(b));
+fn bsinter(a: *Qbe.BSet, b: *Qbe.BSet) void = BSOP(a, b, fn(a, b) => a.bit_and(b));
+fn bsdiff( a: *Qbe.BSet, b: *Qbe.BSet) void = BSOP(a, b, fn(a, b) => a.bit_and(b.bit_not()));
+
+fn BSOP(a: *Qbe.BSet, b: *Qbe.BSet, $fuse: @Fn(a: u64, b: u64) u64) void #inline = {
+    @debug_assert(a.nt == b.nt, "BSet mismatch");
+    range(0, a.nt.zext()) { i |
+        a.t.offset(i)[] = fuse(a.t.offset(i)[], b.t.offset(i)[]);
+    };
+}
+
 /////////////
 /// Lists ///
 /////////////
+// TODO: use my allocators for this. 
 
-fn vnew(len: i64, element_size: i64, pool: Qbe.Pool) rawptr #import("qbe");
-fn vfree(_0: rawptr) void #import("qbe");
-fn vgrow(_0: rawptr, _1: i64) void #import("qbe");
+VMag :: 0xcabba9e;  // random number chosen by fair die roll
+
+::ptr_utils(QListHeader);
+::ptr_utils(*QListHeader);
+
+fn calloc(nitems: i64, size: i64) rawptr #libc;
+
+fn vnew(len: i64, esz: i64, pool: Qbe.Pool) rawptr = {
+    // qbe had .PFn for auto free when done all passes and .PHeap for manually free. 
+    
+    cap := 2;
+    while => cap < len {
+        cap *= 2;
+    };
+    v := calloc(cap * esz + QListHeader.size_of(), 1);  // :HardcodeAlloc
+    v := QListHeader.ptr_from_raw(v);
+    v.mag = VMag;
+    v.cap = cap;
+    v.esz = esz;
+    v.pool = pool;
+    QListHeader.raw_from_ptr(v.offset(1))
+}
+
+fn vgrow(vp: rawptr, len: i64) void = {
+    vp := ptr_from_raw(*QListHeader, vp);
+    v := vp[].offset(-1);
+    xxx := !v.offset(1).is_null(); // TODO: compiler bug
+    @debug_assert(xxx, "ugh");
+    @debug_assert(v.mag == VMag);
+    if(v.cap >= len, => return());
+    v1 := vnew(len, v.esz, v.pool);
+    memcpy(v1, QListHeader.raw_from_ptr(v.offset(1)), v.cap * v.esz);
+    vfree(QListHeader.raw_from_ptr(v.offset(1)));
+    vp[] = ptr_from_raw(QListHeader, v1);
+}
+
+::enum(Qbe.Pool);
+
+fn vfree(p: rawptr) void = {
+    v := QListHeader.ptr_from_raw(p).offset(-1);
+    @debug_assert(v.mag == VMag);
+    if v.pool == .PHeap {
+        v.mag = 0;
+        free(QListHeader.raw_from_ptr(v));
+    };
+}
+
+// This is a header that goes before the allocated memory for the array. 
+// When a field is an QList it points to the first entry of one of these and you offset backwards to get the header. 
+QListHeader :: @struct(
+    mag: u64,
+    pool: Qbe.Pool,
+    esz: i64,
+    cap: i64,
+    // I don't have unsized types. lets hope thats not a big deal
+    // union { long long ll; long double ld; void *ptr; } align[];
+);
 
 fn header();
 fn grow();
 fn new_copy();
 
-// TODO: move to util
 fn QList($T: Type) Type = {
     Self :: @struct(first: *T);
     ::ptr_utils(T);
@@ -185,25 +446,113 @@ fn QList($T: Type) Type = {
         (ptr = self.first.offset(start), len = end - start)
     }
     
-    fn header(s: Self) *QbeVec = {
-        v := ptr_cast_unchecked(T, Vec, self.first);
-        v.offset(-1)
-    }
-    
     Self
 }
 
-// Used with [vnew, vfree, vgrow]
-// This is a header that goes before the allocated memory for the array. 
-// When a field is an QList it points to the first entry of one of these and you offset backwards to get the header. 
-QListHeader :: @struct(
-    mag: u64,
-    pool: Qbe.Pool,
-    esz: i64,
-    cap: u64,
-    // I don't have unsized types. lets hope thats not a big deal
-    // union { long long ll; long double ld; void *ptr; } align[];
-);
+///////////////////
+/// String Pool ///
+///////////////////
+// TODO: less messing with c strings but for now i want to provide exactly the same interface as real qbe. 
+
+IBits :: 12;
+IMask :: 1.shift_left(IBits) - 1;
+
+fn intern(m: *QbeModule, s: CStr) u32 = {
+    @if(LINK_QBE_C) {
+        intern :: fn(_0: CStr) u32 #import("qbe");
+        return(intern(s));
+    };
+    
+    h := hash(s).bit_and(IMask.trunc());
+    b := m.string_table.index(h.zext());
+    n := b.nstr;
+    strcmp :: fn(a: CStr, b: CStr) i64 #libc;
+    range(0, n.zext()) { i |
+        if strcmp(s, b.str[i]) == 0 {
+            return(h + i.trunc().shift_left(IBits));
+        }
+    };
+    
+    if n == 1.shift_left(32 - IBits) { 
+        @panic("interning table overflow");
+    };
+    if n == 0 {
+        b.str = new(1, .PHeap);
+    } else {
+        if n.bit_and(n - 1) == 0 {
+            b.str&.grow(zext(n + n));
+        }
+    };
+    
+    s   := s.str();
+    mem := m.gpa.alloc(u8, s.len + 1);
+    mem.slice(0, s.len).copy_from(s);
+    mem[s.len] = 0;
+    b.str[n.zext()] = (ptr = mem.ptr);
+    
+    b.nstr = n + 1;
+    h + n.shift_left(IBits)
+}
+
+fn str(m: *QbeModule, id: u32) CStr = {
+    @if(LINK_QBE_C) {
+        str :: fn(_0: u32) CStr #import("qbe");
+        return(str(id));
+    };
+    bucket := m.string_table[id.bit_and(IMask).zext()];
+    idx := id.shift_right_logical(IBits);
+    @debug_assert(idx < bucket.nstr);
+    bucket.str[idx.zext()]
+}
+
+fn hash(s: CStr) u32 = {
+    h: u32 = 0;
+    for s { s |
+        h = s.zext() + 17 * h;
+    };
+    h
+}
+
+////////////////////////
+/// TODO: Intrinsics ///
+////////////////////////
+// I'm sure release mode llvm figures out what we're doing but there's no need to punish my own backend more than necessary.
+// and it feels prettier to be to not have to paste these around.  
+// Add these functions to a test for comparison. 
+
+fn popcnt(b: u64) u32 = {
+    b = b.bit_and(0x5555555555555555) + b.shift_right_logical(1).bit_and(0x5555555555555555);
+    b = b.bit_and(0x3333333333333333) + b.shift_right_logical(2).bit_and(0x3333333333333333);
+    b = b.bit_and(0x0f0f0f0f0f0f0f0f) + b.shift_right_logical(4).bit_and(0x0f0f0f0f0f0f0f0f);
+    b += b.shift_right_logical(8);
+    b += b.shift_right_logical(16);
+    b += b.shift_right_logical(32);
+    b.bit_and(0xff).trunc()
+}
+
+// pretty sure this is ctz
+fn firstbit(b: u64) i64 = {
+    n := 0;
+    if b.bit_and(0xffffffff) == 0 {
+        n += 32;
+        b = b.shift_right_logical(32);
+    }; 
+    if b.bit_and(0xffff) == 0 {
+        n += 16;
+        b = b.shift_right_logical(16);
+    };
+    if b.bit_and(0xff) == 0 {
+        n += 8;
+        b = b.shift_right_logical(8);
+    };
+    if b.bit_and(0xf) == 0 {
+        n += 4;
+        b = b.shift_right_logical(4);
+    };
+    table :: items(@list(@as(u8) 4, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0) ast_alloc());
+    n += table[b.bit_and(0xf).bitcast()].zext();
+    n
+}
 
 /////////////////
 /// Iterators ///
@@ -310,4 +659,99 @@ fn for_jump_targets_mut(b: *Qbe.Blk, $body: @Fn(s: **Qbe.Blk) void) void = {
     if !b.s2.is_null() && !b.s1.identical(b.s2) {
         body(b.s2&);
     };
+}
+
+//////////////////
+/// Ugly Table ///
+//////////////////
+
+// TODO: generate the table at comptime cause being branchy has gotta be worse.
+//       (on old unoptimizing, its something like 4680ms -> 4730ms vs calling the c one)
+// I'm not totally sure this is a better way to represet this information than just pasting the table. but i really hate pasting tables. so here we are. 
+fn argcls(i: *Qbe.Ins, argument_index: i64) Qbe.Cls = {
+    n := argument_index;
+    o := i.op();
+    k := i.cls();
+    int := k.is_int();
+    
+    if(o.between(.ceqw, .cultw), => return(if(int, => .Kw, => .Ke)));
+    if(o.between(.ceql, .cultl), => return(if(int, => .Kl, => .Ke)));
+    if(o.between(.ceqs, .cuos),  => return(if(int, => .Ks, => .Ke)));
+    if(o.between(.ceqd, .cuod),  => return(if(int, => .Kd, => .Ke)));
+    
+    if(o.between(.flagieq, .flagfuo), => return(if(int, => .Kx, => .Ke)));
+    if o == .neg || o == .copy || o == .arg {
+        return(if(n == 0, => k, => .Kx));
+    };
+    
+    if o == .add || o == .sub || o == .div || o == .mul || o == .xcmp || o == .swap {
+        return(k);
+    };
+    if o == .sar || o == .shr || o == .shl {
+        if(!int, => return(.Ke));  
+        return(if(n == 0, => k, => .Kw));
+    };
+    if o == .xtest || o == .acmp || o == .acmn || o == .udiv || o == .urem || o == .or || o == .and || o == .xor || o == .rem {
+        return(if(int, => k, => .Ke));  
+    };
+    if o.between(.par, .paruh) || o == .nop || o == .argv {
+        return(.Kx);
+    };
+    if o == .load || o == .vaarg || o == .call {
+        return(if(n == 0, => .Kl, => .Kx));
+    };
+    if o.between(.alloc4, .alloc16) {
+        if(k != .Kl, => return(.Ke));
+        return(if(n == 0, => .Kl, => .Kx));
+    };
+    if o == .sign || o == .xidiv || o == .xdiv || o == .reqz || o == .rnez {
+        if(!int, => return(.Ke));
+        return(if(n == 0, => k, => .Kx));
+    };
+    if o.between(.argsb, .arguh) {
+        if(n == 1, => return(.Kx));
+        return(if(k == .Kw, => k, => .Ke));
+    };
+    if o.between(.loadsb, .loaduw) || o == .addr {
+        if(!int, => return(.Ke));
+        return(if(n == 0, => .Kl, => .Kx));
+    };
+    if o.between(.extsb, .extuh) {
+        if(!int, => return(.Ke));
+        return(if(n == 0, => .Kw, => .Kx));
+    };
+    
+    int_c :: fn(kk: Qbe.Cls) => return(if(int, => if(n == 0, => k, => .Kx), => .Ke));
+    if(o == .stosi || o == .stoui, => int_c(.Ks));
+    if(o == .dtosi || o == .dtoui, => int_c(.Ks));
+    float_c :: fn(kk: Qbe.Cls) => return(if(!int, => if(n == 0, => k, => .Kx), => .Ke));
+    if(o == .swtof || o == .uwtof, => int_c(.Kw));
+    if(o == .sltof || o == .ultof, => int_c(.Kl));
+    if o.between(.storeb, .stored) {
+        if(k != .Kw, => return(.Ke));
+        if(n == 1, => return(.Kl));
+        w: i64 = Qbe.O.storew.raw().zext();
+        k := o.raw().zext().max(w) - w; // :StoreOrder
+        return(@as(Qbe.Cls) k);
+    };
+    
+    want_w :: fn(fst: Qbe.Cls, snd: Qbe.Cls) => return(if(k == .Kw, => if(n == 0, => fst, => snd), => .Ke));
+    if(o == .vastart, => want_w(.Kl, .Kx));
+    if(o == .dbgloc,  => want_w(.Kw, .Kw));
+    if(o == .blit0,   => want_w(.Kl, .Kl));
+    if(o == .blit1,   => want_w(.Kw, .Kx));
+    want_l :: fn(fst: Qbe.Cls, snd: Qbe.Cls) => return(if(k == .Kl, => if(n == 0, => fst, => snd), => .Ke));
+    if(o == .extsw || o == .extuw, => want_l(.Kw, .Kx));
+    if(o == .parc || o == .pare, => want_l(.Kx, .Kx));
+    if(o == .argc, => want_l(.Kx, .Kl));
+    if(o == .arge || o == .salloc, => want_l(.Kl, .Kx));
+    if(o == .exts, => return(if(k == .Kd, => if(n == 0, => .Ks, => .Kx), => .Ke)));
+    if(o == .truncd, => return(if(k == .Ks, => if(n == 0, => .Kd, => .Kx), => .Ke)));
+    if(o == .afcmp, => return(if(!int, => k, => .Ke)));
+    if o == .cast {
+        if(n == 1, => return(.Kx));
+        return(@as(Qbe.Cls) @as(i64) k.raw().zext().bit_xor(2));
+    };
+
+    @panic("invalid op number for argcls")
 }
