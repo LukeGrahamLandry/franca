@@ -18,25 +18,22 @@ CastCtx :: @struct(
 );
 
 LlvmTmp :: @struct(
-    type: LlvmExtraType,
-    cast: Qbe.Ref, // TODO: do i ever need it as both ptr and bool?
+    casts: Array(Qbe.Ref, MAX_CASTS),
+    types: Array(Qbe.TmpType, MAX_CASTS),
 );
+MAX_CASTS :: 5;
 
 LlvmCast :: @enum(i64) (
     None,
     IntToPtr,
     PtrToInt,
-    ExtendI8,
+    ExtendI1,
     CmpZero,
 );
 ::if(LlvmCast);
 
-LlvmExtraType :: @enum(u8) (
-    None,
-    Pointer,
-    Bool,
-);
-
+// TODO: i must be able to do this in fewer passes but I just want it to work first. :SLOW
+// TODO: be better about unifying phi types. its fine if they're ptr/bool as long as all args are the same. 
 fn insert_redundant_casts(f: *Qbe.Fn) void = {
     c: CastCtx = (
         f = f, 
@@ -47,25 +44,80 @@ fn insert_redundant_casts(f: *Qbe.Fn) void = {
     };
     f.reset_scratch();
     
+    // Note the types of all created tmps
     for_blocks f { b |
-        for_insts_forward b { i |
-            out, _ := i.op().llvm_types();
-            if i.to != QbeNull {
-                c.tmps[i.to.val()].type = out;
+        for_phi b { p | 
+            if p.to != QbeNull {
+                //c.f.tmp[p.to.val()].width = .WFull;
             };
         };
-    };
+        for_insts_forward b { i |
+            out, _ := i.llvm_types();
+            if i.to != QbeNull {
+                c.f.tmp[i.to.val()].width = out;
+            };
+        };
+    }; 
     
+    // note the types of all usages
+    for_blocks f { b |
+        for_insts_forward b { i |
+            _, args := i.llvm_types();
+            range(0, 2) { a |
+                continue :: local_return;
+                if rtype(i.arg&[a]) == .RTmp {
+                    c&.request_cast(i.arg&[a], args&[a]);
+                };
+            };
+        };
+        for_phi b { p | 
+            range(0, p.narg.zext()) { a |
+                c&.request_cast(p.arg&.index(a)[], .WFull);
+            };
+        };
+        if b.jmp.type == .Jjnz {
+            c&.request_cast(b.jmp.arg, .LBool);
+        };  
+        if is_ret(b.jmp.type) {
+            c&.request_cast(b.jmp.arg, .WFull);
+        };  
+    };  
+    
+    // emit instructions. inserting casts after creations as needed. 
     for_blocks f { b |
         if b.jmp.type == .Jjnz {
-            c&.fix_arg(b.jmp.arg&, .Bool);
+            c&.fix_arg(b.jmp.arg&, .LBool);
         };  
+        if is_ret(b.jmp.type) {
+            c&.fix_arg(b.jmp.arg&, .WFull);
+        };
+        for_phi b { p | 
+            range(0, p.narg.zext()) { a |
+                if p.blk[a].id == b.id {
+                    c&.fix_arg(p.arg&.index(a), .WFull);
+                };
+            };
+        };
         for_insts_rev b { i |
-            out, args := i[].op().llvm_types();
+            out, args := i[].llvm_types();
+            c&.emit_requested_casts(i.to);
+            
+            if i[].op().is_load() && i[].op() != .load {
+                no_extend := (i[].op() == .loadsw || i[].op() == .loadsw) && i[].cls() == .Kw;
+                if !no_extend {
+                    r := f.newtmp("isel", i[].cls());
+                    ext_op := @as(Qbe.O) @as(i32) i[].op().raw() - Qbe.O.loadsb.raw() + Qbe.O.extsb.raw();
+                    f.emit(ext_op, i[].cls(), i.to, r, QbeNull);
+                    i.to = r;
+                };
+            };
             x := f.emit(i[][]);
             range(0, 2) { a |
                 c&.fix_arg(x.arg&.index(a), args&[a]);
             };
+        };
+        for_phi b { p | 
+            c&.emit_requested_casts(p.to);
         };
         f.copy_instructions_from_scratch(b);
     };
@@ -75,112 +127,111 @@ fn insert_redundant_casts(f: *Qbe.Fn) void = {
     };
 }
 
-fn emit_cast(c: *CastCtx, dest: Qbe.Ref, src: Qbe.Ref, dest_ty: LlvmExtraType, src_ty: LlvmExtraType) void = {
+fn request_cast(c: *CastCtx, r: Qbe.Ref, want: Qbe.TmpType) void = {
+    if(rtype(r) != .RTmp, => return()); // TODO
+    id := r.val();
+    info := c.tmps[id]&;
+    range(0, MAX_CASTS) { i | 
+        if info.casts&[i] != QbeNull {
+            if info.types&[i] == want {
+                return();
+            };
+        } else {
+            info.types&[i] = want;
+            if want == c.f.tmp[id].width {
+                info.casts&[i] = r;
+            } else {
+                info.casts&[i] = c.f.newtmp("isel", .Kl);
+            };
+            return();
+        };
+    };
+    panic("raise MAX_CASTS!");
+}
+
+::enum_basic(Qbe.UseType);
+::enum_basic(Qbe.TmpType);
+::if(Qbe.TmpType);
+
+fn fix_arg(c: *CastCtx, arg: *Qbe.Ref, want: Qbe.TmpType) void = {
+    if rtype(arg[]) == .RCon {
+        con := c.f.get_constant(arg[]);
+        if want != .LPtr && con.type == .CAddr {
+            r := c.f.newtmp("isel", .Kl);
+            c.emit_cast(r, arg[], want, .LPtr);
+            arg[] = r;
+        };
+        return();
+    };
+    if(rtype(arg[]) != .RTmp, => return());
+    id := arg[].val();
+    original := c.f.tmp[id].width;
+    if original != want {
+        info := c.tmps[id]&;
+        range(0, MAX_CASTS) { i | 
+            //@assert(info.casts&[i] != QbeNull, "cast not found");
+            if(info.casts&[i] == QbeNull, => return()); // TODO
+            if info.types&[i] == want {
+                arg[] = info.casts&[i];
+                return();
+            };
+        };
+        panic("raise MAX_CASTS");
+    };
+}
+
+fn emit_requested_casts(c: *CastCtx, r: Qbe.Ref) void = {
+    if(rtype(r) != .RTmp, => return());
+    id := r.val();
+    info := c.tmps[id]&;
+    original := c.f.tmp[id].width;
+    range(0, MAX_CASTS) { i | 
+        dest := info.casts&[i];
+        if(dest == QbeNull, => return());
+        if dest != r {
+            c.emit_cast(dest, r, info.types&[i], original);
+        };
+    };
+    panic("raise MAX_CASTS");
+}
+
+fn emit_cast(c: *CastCtx, dest: Qbe.Ref, src: Qbe.Ref, dest_ty: Qbe.TmpType, src_ty: Qbe.TmpType) void = {
     c.tmps&.grow(c.f.ntmp.zext());
     cast := cast_type(dest_ty, src_ty).raw();
     c.f.emit(.llcast, .Kl, dest, src, INT(cast));
     if rtype(dest) == .RTmp {
-        c.tmps[dest.val()].type = dest_ty;
-        c.tmps[dest.val()].cast = src;
-    };
-    if rtype(src) == .RTmp {
-        c.tmps[src.val()].type = src_ty;
-        c.tmps[src.val()].cast = dest;
+        c.f.tmp[dest.val()].width = dest_ty;
+        c.tmps[dest.val()].types&[0] = src_ty;
+        c.tmps[dest.val()].casts&[0] = src;
     };
 }
 
-::enum_basic(Qbe.UseType);
-::enum_basic(LlvmExtraType);
-::if(LlvmExtraType);
-fn find_best_type(c: *CastCtx, r: Qbe.Ref, original: ?LlvmExtraType) LlvmExtraType = {
-    t := c.f.get_temporary(r);
-    if t.visit == 1 {
-        return(c.tmps[r.val()].type);
-    };
-    t.visit = 1;  // avoid recursing on phis.
-    int_uses  := 0;
-    bool_uses := 0;
-    pointer_uses := 0;
-    tally :: fn(ty: LlvmExtraType) => {
-        slot := @match(ty) {
-            fn None() => int_uses&;
-            fn Bool() => bool_uses&;
-            fn Pointer() => pointer_uses&;
-        };
-        slot[] += 1;
-    };
-    if(original, tally);
-    each t.uses() { use | 
-        type := @match(use.type) {
-            fn UXXX() => unreachable();
-            fn UIns() => {
-                i := use.u.ins;
-                @debug_assert(i.arg&[0] == r || i.arg&[1] == r, "invalid usage info");
-                _, args := i.op().llvm_types();
-                if(i.arg&[0] == r, => args&[0], => args&[1])
-            }
-            fn UPhi() => {
-                // TODO: really you want to count all the other things incoming to the phi?
-                p := use.u.phi;
-                c.find_best_type(p.to, .None)
-            }
-            fn UJmp() => {
-                b := c.f.rpo.offset(use.bid.zext())[];
-                if b.jmp.type == .Jjnz {
-                    LlvmExtraType.Bool
-                } else {
-                    .None
-                }
-            }
-        };
-        tally(type);
-    };
-    
-    best := LlvmExtraType.None;
-    if pointer_uses > int_uses && pointer_uses > bool_uses {
-        best = .Pointer;
-    };
-    if bool_uses > int_uses && bool_uses > pointer_uses {
-        best = .Bool;
-    };
-    if c.f.globals.debug["I".char()] && (bool_uses != 0 || pointer_uses != 0) {
-        ::FmtPad(i64);
-        @fmt_write(c.f.globals.debug_out, "(%% I:%, P:%, B:%)\n", "%", f_pad(t.name(), 10, .After), f_pad(int_uses, 3, .Before), f_pad(pointer_uses, 3, .Before), f_pad(bool_uses, 3, .Before));
-    };
-    best
-}
-
-fn fix_arg(c: *CastCtx, arg: *Qbe.Ref, want: LlvmExtraType) void = {
-    if(rtype(arg[]) != .RTmp, => return());
-    id := arg[].val();
-    t := c.tmps[id]&;
-    if t.type != want {
-        if t.cast == QbeNull {
-            r := c.f.newtmp("isel", .Kl);
-            c.emit_cast(r, arg[], want, t.type);
-        };
-        arg[] = t.cast;
-    };
-}
-
-fn cast_type(dest: LlvmExtraType, src: LlvmExtraType) LlvmCast = {
+fn cast_type(dest: Qbe.TmpType, src: Qbe.TmpType) LlvmCast = {
+    @debug_assert(dest != src, "dont need a cast");
+        
     @match(dest) {
-        fn None() => if(src == .Bool, => .ExtendI8, => .PtrToInt);
-        fn Pointer() => .IntToPtr;
-        fn Bool() => .CmpZero;
+        fn WFull() => if(src == .LBool, => .ExtendI1, => .PtrToInt);
+        fn LPtr() => .IntToPtr;
+        fn LBool() => .CmpZero;
+        @default => panic("tmp.width not set to an llvm type");
     }
 }
 
 // (to, arg)
-fn llvm_types(o: Qbe.O) Ty(LlvmExtraType, Array(LlvmExtraType, 2)) = {
-    yield :: fn(to: LlvmExtraType, a0: LlvmExtraType, a1: LlvmExtraType) => return(to, init(@slice(a0, a1)));
-    if(o == .call || o.is_load() || o == .vastart || o == .vaarg, => yield(.None, .Pointer, .None));
-    if(o.is_store(), => yield(.None, .None, .Pointer)); // TODO: could store ptr if thats what you have tho
-    if(o == .blit0, => yield(.None, .Pointer, .Pointer));
-    if(o.between(.alloc4, .alloc16), => yield(.Pointer, .None, .None));
-    if(o.between(.ceqw, .cuod), => yield(.Bool, .None, .None));
-    yield(.None, .None, .None)
+fn llvm_types(i: *Qbe.Ins) Ty(Qbe.TmpType, Array(Qbe.TmpType, 2)) = {
+    o := i.op();
+    yield :: fn(to: Qbe.TmpType, a0: Qbe.TmpType, a1: Qbe.TmpType) => {
+        xxx := Array(Qbe.TmpType, 2).uninitialized(); // TODO: why can't i call init :FUCKED
+        xxx&.index(0)[] = a0;
+        xxx&.index(1)[] = a1;
+        return(to, xxx)
+    };
+    if(o == .call || o.is_load() || o == .vastart || o == .vaarg, => yield(.WFull, .LPtr, .WFull));
+    if(o.is_store(), => yield(.WFull, .WFull, .LPtr)); // TODO: could store ptr if thats what you have tho
+    if(o == .blit0, => yield(.WFull, .LPtr, .LPtr));
+    if(o.between(.alloc4, .alloc16), => yield(.LPtr, .WFull, .WFull));
+    if(o.between(.ceqw, .cuod), => yield(.LBool, .WFull, .WFull));
+    yield(.WFull, .WFull, .WFull)
 }
 
 ::enum_basic(LlvmCast);
-::enum_basic(LlvmExtraType);

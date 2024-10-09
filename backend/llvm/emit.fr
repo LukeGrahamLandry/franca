@@ -67,10 +67,12 @@ fn emit_block(self: *LlvmEmit, b: *Qbe.Blk) void = {
     };
     
     arg_count := 0;
+    has_va := false;
     for_insts_forward b { i |   
         @match(i.op()) {
             fn par() => ();  // part of function definition
-            fn arg() => { arg_count += 1; };  // part of call
+            fn arg()  => { arg_count += 1; };  // part of call
+            fn argv() => { arg_count += 1; has_va = true; };  // this means following args are variadic. 
             fn nop() => ();  // just added to avoid shuffling instructions around
             fn call() => {
                 if i.to != QbeNull  {
@@ -80,21 +82,23 @@ fn emit_block(self: *LlvmEmit, b: *Qbe.Blk) void = {
                 } else {
                     @fmt(self.out&, "\tcall void ");
                 };
+                if has_va {
+                    self.write_non_va_types(i, arg_count);
+                };
                 callee := i.arg&[0];
                 if rtype(callee) == .RCon {
                     c := self.f.get_constant(callee);
                     @assert(c.type == .CAddr, "can only call CAddr (or a non constant)");
-                    @fmt(self.out&, "@%", self.f.globals.str(c.sym.id));
                     imports := self.f.globals.llvm_needs_import&;
                     if imports.get(c.sym.id).is_none() {
                         imports.insert(c.sym.id, true);
                     };
-                } else {
-                    self.write_ref(callee, .Kl);
                 };
+                self.write_ref(callee, .Kl);
                 @fmt(self.out&, "(");
                 self.write_args(i, arg_count);
                 arg_count = 0;
+                has_va = false;
                 @fmt(self.out&, ")\n");
             };
             @default => self.emit_ins(i);
@@ -149,6 +153,12 @@ fn emit_ins(self: *LlvmEmit, i: *Qbe.Ins) void = {
     if i.to != QbeNull {
         @fmt(self.out&, "%% = ", "%", self.f.get_temporary(i.to).name());
     };
+    cast :: fn(fst: Str, snd: Str) => {
+        @fmt(o, "% ", fst);
+        self.write_ref(i.arg&[0], .Kl);
+        @fmt(o, " %", snd);
+        o.push_all("\n");
+    };
     
     @match(i.op()) {
         fn add()  => bin("add", "fadd");
@@ -165,14 +175,27 @@ fn emit_ins(self: *LlvmEmit, i: *Qbe.Ins) void = {
         fn sar()   => int_bin("ashr");
         fn shr()   => int_bin("lshr");
         fn shl()   => int_bin("shl");
+        fn extsw() => cast("sext i32", "to i64");
+        fn extuw() => cast("zext i32", "to i64");
+        fn extub() => cast("zext i8", "to i64"); // TODO
+        fn load() => {
+            types :: items(@list("i32", "i64", "float", "double") ast_alloc());
+            @fmt(o, "load %, ptr ", types[i.cls().raw().zext()]);
+            self.write_ref(i.arg&[0], .Kl);
+            o.push_all("\n");
+        }
         fn llcast() => {
             @debug_assert(rtype(i.arg&[1]) == .RInt, "llcast second arg must be cast index");
-            cast := @as(LlvmCast) i.arg&[1].val();
-            @match(cast) {
+            c := @as(LlvmCast) i.arg&[1].val();
+            @match(c) {
                 fn None() => panic("no cast");
-                fn IntToPtr() => o.push_all("IntToPointer\n");
-                fn PtrToInt() => o.push_all("PointerToInt\n");
-                fn ExtendI8() => o.push_all("ExtendI8\n");
+                fn IntToPtr() => cast("inttoptr i64", "to ptr");
+                fn PtrToInt() => cast("ptrtoint ptr", "to i64");
+                fn ExtendI1() => {
+                    @fmt(o, "zext i1 ");
+                    self.write_ref(i.arg&[0], .Kl);
+                    @fmt(o, " to i32\n");
+                }
                 fn CmpZero() => {   
                     int_type := "i64";
                     if rtype(i.arg&[0]) == .RTmp && self.f.tmp[i.arg&[0].val()].cls == .Kw {
@@ -208,6 +231,15 @@ fn emit_ins(self: *LlvmEmit, i: *Qbe.Ins) void = {
                 o.push_all("\n");
                 return();
             };
+            if i.op().is_load() {
+                store_offset := i.op().raw() - Qbe.O.storeb.raw();
+                types :: items(@list("i8", "i16", "i32") ast_alloc());
+                size := loadsz(i).intcast().bitcast().firstbit();
+                @fmt(o, "load %, ptr ", types[size]);
+                self.write_ref(i.arg&[0], argcls(i, 0));
+                o.push_all("\n");
+                return();
+            };
             
             if i.op().between(.alloc4, .alloc16) {
                 align_log2 := i.op().raw() - Qbe.O.alloc4.raw();
@@ -218,14 +250,13 @@ fn emit_ins(self: *LlvmEmit, i: *Qbe.Ins) void = {
                 return();
             };
             
-            @fmt(o, "TODO:%\n", Qbe.O.get_enum_names().index(@as(i64) intcast(@as(i32) i.op().raw())));
+            @fmt(o, "TODO:% ", Qbe.O.get_enum_names().index(@as(i64) intcast(@as(i32) i.op().raw())));
+            self.write_ref(i.arg&[0], .Kl);
+            o.push_all("\n");
+            
         };
     }
 } 
-
-fn emit_llvm(m: *QbeModule, dat: *Qbe.Dat) void = {
-    text := m.outf;   
-}
 
 // TODO: we need to include abi information in attributes so we need to run some subset of the abi passes before getting here. 
 fn write_params(e: *LlvmEmit) void = {
@@ -244,12 +275,30 @@ fn write_args(e: *LlvmEmit, call: *Qbe.Ins, arg_count: i64) void = {
     comma := "";
     start := call.offset(-arg_count);
     for(start, call) { i |
-        e.out&.push_all(comma);
-        e.write_type(i.cls());
-        e.out&.push_all(" ");
-        e.write_ref(i.arg&[0], i.cls());
-        comma = ", ";
+        if i.op() != .argv {
+            e.out&.push_all(comma);
+            e.write_type(i.cls());
+            e.out&.push_all(" ");
+            e.write_ref(i.arg&[0], i.cls());
+            comma = ", ";
+        }
     };
+}
+
+fn write_non_va_types(e: *LlvmEmit, call: *Qbe.Ins, arg_count: i64) void = {
+    comma := "";
+    start := call.offset(-arg_count);
+    e.out&.push_all("(");
+    for(start, call) { i |
+        e.out&.push_all(comma);
+        comma = ", ";
+        if i.op() == .argv {
+            e.out&.push_all("...) ");
+            return();
+        };
+        e.write_type(i.cls());
+    };
+    panic("write_non_va_types for non-va call");
 }
 
 fn write_ref(self: *LlvmEmit, r: Qbe.Ref, k: Qbe.Cls) void = {
@@ -261,8 +310,9 @@ fn write_ref(self: *LlvmEmit, r: Qbe.Ref, k: Qbe.Cls) void = {
             c := self.f.get_constant(r);
             @match(c.type) {
                 fn CUndef() => @fmt(self.out&, "TODO:undef");
-                fn CAddr() => { // :LlvmCasts
-                    @fmt(self.out&, "ptrtoint (ptr @% to i64)", self.f.globals.str(c.sym.id));
+                fn CAddr() => {
+                    //@fmt(self.out&, "ptrtoint (ptr @% to i64)", self.f.globals.str(c.sym.id));
+                    @fmt(self.out&, " @%", self.f.globals.str(c.sym.id));
                 };
                 fn CBits() => {
                     if k == .Ks || k == .Kd {
@@ -279,7 +329,7 @@ fn write_ref(self: *LlvmEmit, r: Qbe.Ref, k: Qbe.Cls) void = {
         @default => {
             @fmt(self.out&, "TODO:reftype");
         };
-    }
+    };
 }
 
 fn write_type(self: *LlvmEmit, k: Qbe.Cls) void = {
@@ -297,7 +347,8 @@ llvm_condition_codes :: items(@list( // :CmpOrder
      // Cieq Cine  Cisge  Cisgt  Cisle  Cislt  Ciuge  Ciugt  Ciule  Ciult
         "eq", "ne", "sge", "sgt", "sle", "slt", "uge", "ugt", "ule", "ult",
     // Cfeq   Cfge   Cfgt   Cfle   Cflt   Cfne    Cfo   Cfuo
-       "oeq", "oge", "ogt", "ole", "olt", "one", "ord", "uno",
+       "oeq", "oge", "ogt", "ole", "olt", "une", "ord", "uno",
+                                    // ne unordered because nan!=nan 
 ) ast_alloc());
 
 fn find_scalar_return_type(f: *Qbe.Fn) ?Qbe.Cls = {
@@ -313,4 +364,63 @@ fn find_scalar_return_type(f: *Qbe.Fn) ?Qbe.Cls = {
         };
     };
     .None // i guess its fine if all paths hlt. 
+}
+
+fn emit_llvm(m: *QbeModule, dat: *Qbe.Dat) void = {
+    type := m.llvm_global_type_buf&;
+    value := m.llvm_global_value_buf&;
+    
+    @match(dat.type) {
+        fn DStart() => {
+            type[] = list(temp());
+            value[] = list(temp());
+            @fmt(type, "@% = private unnamed_addr global { ", dat.name);
+        }
+        fn DEnd() => {
+            if type.items().ends_with(",") {
+                type.len -= 1;
+            };
+            if value.items().ends_with(",") {
+                value.len -= 1;
+            };
+            @fmt_write(m.outf, "% } { % }\n", type.items(), value.items());
+        };
+        fn DZ() => {
+            @fmt(type, "[% x i8],", dat.u.num);
+            @fmt(value, "[% x i8] zeroinitializer,", dat.u.num);
+        }
+        fn DB() => {
+            @debug_assert(!dat.isref, "can't have a byte sized pointer");
+            if dat.isstr {
+                s := dat.u.str.str();
+                // TODO: have to process escapes. (-2 is for quotes)
+                @fmt(type, "[% x i8],", s.len - 2);
+                @fmt(value, "[% x i8] c%,", s.len - 2, s);
+            } else {
+                @fmt(type, "i8,");
+                @fmt(value, "i8 %,", dat.u.num);
+            };
+        }
+        fn DL() => {
+            if dat.isref {
+                @assert(dat.u.ref.off == 0, "sorry can't do offset refs yet");
+                name := dat.u.ref.name;
+                @fmt(type, "ptr,");
+                @fmt(value, "ptr @%,", name);
+            } else {
+                @fmt(type, "i64,");
+                @fmt(value, "i64 %,", dat.u.num);
+            };
+        }
+        fn DW() =>  {
+            @debug_assert(!dat.isref, "can't have a w sized pointer");
+            @fmt(type, "i32,");
+            @fmt(value, "i32 %,", dat.u.num);
+        }
+        fn DH() =>  {
+            @debug_assert(!dat.isref, "can't have a h sized pointer");
+            @fmt(type, "i16,");
+            @fmt(value, "i16 %,", dat.u.num);
+        }
+    };
 }
