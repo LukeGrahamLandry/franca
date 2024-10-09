@@ -6,6 +6,8 @@
 //! - Reduce variable usage to register sized loads/stores.
 //! - Convert large arguments/returns to references and remap signatures to use only register sized types.
 
+ENABLE_DEDUPLICATION :: false;
+
 // note: bc structs are in lib/driver_api.fr
 
 //
@@ -112,31 +114,32 @@ fn emit_bc(comp: *SelfHosted, f: FuncId, when: ExecStyle) Res(*FnBody) = {
         return(Err = res.Err)
     };
     
-    if body.hash != 0 && self.program.get_build_options()[].deduplicate_bytecode {
-        if self.program.saved_bytecodes&.get_key(body&) { check | 
-            if check.func.as_index() != f.as_index() {|  // TODO: this shouldn't happen?
-                // TODO: this is sketchy... maybe? had to think of a test that would hurt it tho. 
-                func.body = (Redirect = check.func); 
-                
-                //old := check.func;
-                //old_func := comp[old]&;
-                
-                //size := 0;
-                //each check.blocks { b |
-                //    size += b.insts.len;
-                //};
-                
-                //@println("% ops saved. % F%_% <- F%_%", size, when,
-                //    old.as_index(), comp.pool.get(old_func.name),
-                //    f.as_index(), comp.pool.get(func.name), 
-                //);
+    @if(ENABLE_DEDUPLICATION) {
+        if body.hash != 0 && self.program.get_build_options()[].deduplicate_bytecode {
+            if self.program.saved_bytecodes&.get_key(body&) { check | 
+                if check.func.as_index() != f.as_index() {|  // TODO: this shouldn't happen?
+                    // TODO: this is sketchy... maybe? had to think of a test that would hurt it tho. 
+                    func.body = (Redirect = check.func); 
+                    
+                    //old := check.func;
+                    //old_func := comp[old]&;
+                    
+                    //size := 0;
+                    //each check.blocks { b |
+                    //    size += b.insts.len;
+                    //};
+                    
+                    //@println("% ops saved. % F%_% <- F%_%", size, when,
+                    //    old.as_index(), comp.pool.get(old_func.name),
+                    //    f.as_index(), comp.pool.get(func.name), 
+                    //);
+                };
+                return(Ok = check);
             };
-            return(Ok = check);
+            
+            self.program.saved_bytecodes&.insert(body, when);
         };
-        
-        self.program.saved_bytecodes&.insert(body, when);
     };
-    
     func.finished_bytecode_pointer = (Some = FnBody.int_from_ptr(body)); 
     (Ok = body)
 }
@@ -201,8 +204,8 @@ fn bind_args(self: *EmitBc, arguments: *Pattern) Res(i64) #once = {
                 @case(2) => {
                     types := self.program.flat_tuple_types(ty);
                     offset_2 := align_to(
-                        self.program.get_info(types[0]).stride_bytes().zext(),
-                        self.program.get_info(types[1]).align_bytes().zext(),
+                        self.program.get_info(types[0]).stride_bytes(),
+                        self.program.get_info(types[1]).align_bytes(),
                     );
                     p0 := self.program.prim(types[0]).expect("ret1 prim");
                     p1 := self.program.prim(types[1]).expect("ret2 prim");
@@ -314,8 +317,8 @@ fn store_pre(self: *EmitBc, ty: Type) void = {
         @case(2) => {
             types := self.program.flat_tuple_types(ty);
             offset_2 := align_to(
-                self.program.get_info(types[0]).stride_bytes().zext(),
-                self.program.get_info(types[1]).align_bytes().zext(),
+                self.program.get_info(types[0]).stride_bytes(),
+                self.program.get_info(types[1]).align_bytes(),
             );
             self.push(PeekDup = 2); // grab the pointer
             self.inc_ptr_bytes(offset_2.trunc());
@@ -338,8 +341,8 @@ fn load(self: *EmitBc, ty: Type) void = {
         @case(2) => {
             types := self.program.flat_tuple_types(ty);
             offset_2 := align_to(
-                self.program.get_info(types[0]).stride_bytes().zext(),
-                self.program.get_info(types[1]).align_bytes().zext(),
+                self.program.get_info(types[0]).stride_bytes(),
+                self.program.get_info(types[1]).align_bytes(),
             );
             self.push(PeekDup = 0);
             self.push(Load = self.program.prim(types[0]).expect("load prim!"));
@@ -1860,6 +1863,8 @@ fn align_to(offset: i64, align: i64) i64 = {
     }
 }
 
+fn align_to(offset: u16, align: u16) i64 #redirect(Ty(i64, i64), i64);
+
 // TODO: this is a dumb hack to make it less painful that i can't access fields on a value (because you need a pointer to offset)
 //       fix in the compiler and remove this! -- Jul 7
 //       now the problem is you can't access fields on a pointer if its not a dereference of it 
@@ -1904,29 +1909,32 @@ fn hash(h: *TrivialHasher, s: **FnBody) void = {
 }
 
 :: {
-    fn eq(a: *BasicBlock, b: *BasicBlock) bool = {
-        // not comparing debug info, who cares. 
-        a.insts& == b.insts& && a.arg_prims& == b.arg_prims& && a.incoming_jumps == b.incoming_jumps && a.clock == b.clock
-    }
-    AutoEq(Bc);
-    AutoEq(PrimSig);
-    DerefEq(Prim);
-    DerefEq(Intrinsic);
-    AutoEq(?Prim);
-    AutoEq(SwitchPayload);
-    AutoEq(BbId);
-    AutoEq(BakedVarId);
-    AutoEq(VarSlotType);
-    DerefEq(FuncId);
     fn eq(a: FuncId, b: FuncId) bool #redirect(Ty(u32, u32), bool);
-    AutoEq(get_variant_type(Bc, Bc.Tag().CallDirect));
-    AutoEq(get_variant_type(Bc, Bc.Tag().CallFnPtr));
-    AutoEq(get_variant_type(Bc, Bc.Tag().PushConstant));
-    AutoEq(get_variant_type(Bc, Bc.Tag().JumpIf));
-    AutoEq(get_variant_type(Bc, Bc.Tag().Goto));
-    AutoEq(get_variant_type(Bc, Bc.Tag().AddrVar));
-    AutoEq(get_variant_type(Bc, Bc.Tag().SaveSsa));
-    AutoEq(get_variant_type(Bc, Bc.Tag().LoadSsa));
-    AutoEq(get_variant_type(Bc, Bc.Tag().LastUse));
-    AutoEq(get_variant_type(Bc, Bc.Tag().Ret2));
+    DerefEq(FuncId);
+    
+    @if(ENABLE_DEDUPLICATION) {
+        fn eq(a: *BasicBlock, b: *BasicBlock) bool = {
+            // not comparing debug info, who cares. 
+            a.insts& == b.insts& && a.arg_prims& == b.arg_prims& && a.incoming_jumps == b.incoming_jumps && a.clock == b.clock
+        }
+        AutoEq(Bc);
+        AutoEq(PrimSig);
+        DerefEq(Prim);
+        DerefEq(Intrinsic);
+        AutoEq(?Prim);
+        AutoEq(SwitchPayload);
+        AutoEq(BbId);
+        AutoEq(BakedVarId);
+        AutoEq(VarSlotType);
+        AutoEq(get_variant_type(Bc, Bc.Tag().CallDirect));
+        AutoEq(get_variant_type(Bc, Bc.Tag().CallFnPtr));
+        AutoEq(get_variant_type(Bc, Bc.Tag().PushConstant));
+        AutoEq(get_variant_type(Bc, Bc.Tag().JumpIf));
+        AutoEq(get_variant_type(Bc, Bc.Tag().Goto));
+        AutoEq(get_variant_type(Bc, Bc.Tag().AddrVar));
+        AutoEq(get_variant_type(Bc, Bc.Tag().SaveSsa));
+        AutoEq(get_variant_type(Bc, Bc.Tag().LoadSsa));
+        AutoEq(get_variant_type(Bc, Bc.Tag().LastUse));
+        AutoEq(get_variant_type(Bc, Bc.Tag().Ret2));
+    };
 };

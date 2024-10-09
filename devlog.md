@@ -11,6 +11,19 @@ fn println(i: i64) void = {
 }
 ```
 
+ok we're doing some printf(A) driven development.
+that's where i decide the resolve_overload loops are too slow so i put a println("a") in there and count the lines, and then change something.
+its like a sampling profiler but instead of being good it's inconvient and slow as fuck.
+note also that I have to redirect the output to a file because my terminal clamps the output to 100k lines.
+
+- when i infer_type on each arg of the pattern i wasn't savingthe finished tpye even if all were successful.
+  so if an overload was never taken i'd try to reinfer it every single time you look in that overload set.
+  so now save it in finished_arg if all were known.
+  before 5000k, after: 23k. amazing. 470ms -> 440ms
+- comptime zeroed() gets to ~430ms but can't do that until i can do float comptime calls more reliably.
+  ah but i can cheat and do it by pointer.
+  saved half the samples in coerce_const_expr (in real profiler)
+
 ##
 
 - so long on a `:=` vs `=` in a loop. perhaps i was wrong.

@@ -1351,7 +1351,6 @@ fn contextual_field(self: *SelfHosted, name: Symbol, expr_out: *FatExpr, type: T
                 };
             };
             @err("const field $% not found for %", self.pool.get(name), self.log_type(type))
-        
         }
         fn Tagged(f) => {
             enumerate f.cases { i, f | 
@@ -2310,6 +2309,7 @@ fn adjust_named_arguments(self: *SelfHosted, fid: FuncId, arg_expr: *FatExpr) Re
     .Ok
 }
 
+// TODO: this is very non-linear with number of overloads. 
 fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *OverloadAttempt) Maybe(FuncId) #once = {
     overloads := self.dispatch.overloads&.nested_index(attempt.os.as_index());
     // this does catch some but doesn't help much. TODO: maybe remove
@@ -2328,8 +2328,9 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
         attempt.state = 0;
         new := overloads.ready.items().slice(attempt.last_ready_count, overloads.ready.len);
         attempt.options&.reserve(new.len);
+        want_arity := self.arity(arg_expr);
         for new { option | 
-            if self.filter_overload_sync(arg_expr, option) {
+            if self.filter_overload_sync(arg_expr, want_arity, option) {
                 @check(self.ensure_resolved_sign(option)) return; // TODO: dont let this suspend cause it cant
                 attempt.options&.push(option);
             };
@@ -2341,7 +2342,6 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
     ::if([]FatExpr);
     parts := if(arg_expr.expr&.is(.Tuple), => arg_expr.expr.Tuple.items(), => (ptr = arg_expr, len = 1));
     are_we_done_yet();
-    
     
     are_we_done_yet :: fn() => {
         if attempt.options.len == 1 {
@@ -2373,11 +2373,16 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
             f_i -= 1;
             fid := attempt.options[f_i];
             func := self.get_function(fid);
-            if !func.get_flag(.Generic) {
-                // its slower to call infer type on the whole Pattern because that needs to create the full tuple type. 
+            if !func.get_flag(.Generic) && func.finished_arg.is_none() {
+                all_known := true;
                 each func.arg.bindings& { b |
-                    @check(self.infer_type(b.ty&)) return;
+                    res := @check(self.infer_type(b.ty&)) return;
+                    all_known = all_known && res.is_some();
                 };
+                if all_known {
+                    @check(self.infer_arguments(fid)) return;
+                };
+                
             };
         };
         attempt.state = 1;
@@ -2448,7 +2453,7 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
                 };
                 fid := attempt.options[f_i];
                 func := self.get_function(fid);
-                if !func.get_flag(.Generic) {
+                if !func.get_flag(.Generic) && func.finished_ret.is_none() {
                     @check(self.infer_return(fid)) return;
                 };
                 
@@ -2607,8 +2612,7 @@ fn check_promote_id_to_func(self: *SelfHosted, fid: FuncId, f_ty: FnType) Maybe(
     .Ok
 }
 
-fn filter_overload_sync(self: *SelfHosted, arg_expr: *FatExpr, fid: FuncId) bool #once = {
-    want_arity := self.arity(arg_expr);
+fn filter_overload_sync(self: *SelfHosted, arg_expr: *FatExpr, arg_expr_arity: i64, fid: FuncId) bool #once = {
     func := self.get_function(fid);
     
     if func.body&.is(.Empty) && func.annotations.len == 0 {
@@ -2616,7 +2620,7 @@ fn filter_overload_sync(self: *SelfHosted, arg_expr: *FatExpr, fid: FuncId) bool
         return(false);
     };
     
-    if func.arg.bindings.len != want_arity {
+    if func.arg.bindings.len != arg_expr_arity {
         if !arg_expr.expr&.is(.StructLiteralP) {
             return(false);
         };
@@ -2627,7 +2631,7 @@ fn filter_overload_sync(self: *SelfHosted, arg_expr: *FatExpr, fid: FuncId) bool
             return(false);
         };
         
-        // :SLOW
+        // :SLOW but you get here so rarely it's fine (ie. once for self-compiling).
         each want_parts { want_b | 
             next :: local_return;
             want_name := want_b.ident().or(=> return(false)); // idk if this ever happens but it sure can't be named argument

@@ -12,14 +12,15 @@
 #include_std("backend/opt/cfg.fr");
 #include_std("backend/opt/spill.fr");
 #include_std("backend/opt/rega.fr");
-#include_std("backend/llvm.fr");
+#include_std("backend/llvm/emit.fr");
+#include_std("backend/llvm/isel.fr");
 #include_std("backend/arm64/abi.fr");
 #include_std("backend/dump.fr");
 #include_std("backend/arm64/target.fr");
 #include_std("backend/opt/load.fr");
 
 ENABLE_INTERNAL_QBE :: true;  // until i want to enable it on github actions
-LINK_QBE_C :: false;
+LINK_QBE_C :: true;
 
 // easy-ish (?) things to try to get used to making changes. 
 // TODO: if they don't do it already: 
@@ -66,6 +67,7 @@ QbeModule :: @rec @struct(
     next_tmp_id = 0,
     string_table: []Qbe.Bucket,
     
+    llvm_needs_import: HashMap(u32, bool),
     // stuff for emitting code.
     segments: EnumMap(SegmentType, SegmentCursor),
     symbols: HashMap(u32, SymbolInfo),  // TODO: i think the high bits of qbe ids are sequential. make this a bucket array. they have to live forever anyway
@@ -99,6 +101,7 @@ fn init(segment_size: i64, gpa: Alloc, code_alloc: Alloc) QbeModule = {
     m.segments&.insert(.MutableData, (mmapped = mem.slice(segment_size, segment_size*2), next = mem.index(segment_size)));
     m.segments&.insert(.ConstantData, (mmapped = mem.slice(segment_size*2, segment_size*3), next = mem.index(segment_size*2)));
     m.symbols = init(gpa);
+    m.llvm_needs_import = init(gpa);
     m.gpa = gpa;
     m.start_of_writable_code = mem.ptr;
     
@@ -203,6 +206,7 @@ run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
         // TODO: time which passes help llvm be faster and which hurt it. like maybe coalescing forces it to do extra work do dealias memory?
         //       or maybe the whole theory is bad and its better at mem2reg-ing than i am and there's no point in trying to help. only one way to find out. 
         //       but i assume anything we can do to give it more sane input is better. 
+        insert_redundant_casts(fnn);
         m.emit_llvm(fnn);
         return();
     };
