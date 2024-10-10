@@ -1,0 +1,519 @@
+#!/usr/bin/env franca
+//! I think writing a pretty printer for a file format is good practice for trying to emit them myself. 
+//! https://en.wikipedia.org/wiki/Mach-O
+//! note: if you're ever tempted to use this code for something don't forget to use buffered printing. :SLOW
+
+fn main() void = {
+    // TODO: use cli arg
+    path := "a.o";
+    //path := "target/franca/aarch64-apple-darwin/franca2";
+    //path := "bindings/qbe/qbe_merged.dylib";
+    
+    bytes := temp().read_to_string(path).items(); // :panic
+    full_bytes := bytes;
+    @println("Read % bytes from %", bytes.len, path);
+    header := bytes&.pop_type(MachoHeader);
+    @println("[Header] %", header);
+    if header.magic != macho_magic {
+        eprintln("bad magic");
+    };
+    total := 0;
+    start := bytes.ptr;
+    unknown := 0;
+    range(0, header.commands_count.zext()) { i |
+        beginning_len := bytes.len;
+        header := bytes&.pop_type(LoadCommandHeader);
+        @println("  [Load Command %] %", i, header);
+        @switch(header.type) {
+            @case(LoadCommand.SegmentLoad.raw()) => {
+                header := bytes&.pop_type(SegmentLoad);
+                @println("        [Segment Load] %", header);
+                name: []u8 = (ptr = ptr_cast_unchecked(u128, u8, header.name&), len = 16);
+                @println("      name: %", name);
+                
+                // note: its fine if there's no sections. like __LINKEDIT.
+                range(0, header.section_count.zext()) { i |
+                    header := bytes&.pop_type(SegmentSection);
+                    @println("      [Section %] %", i, header);  // this index is misleading. really it should include the preceding ones. 
+                    name: []u8 = (ptr = ptr_cast_unchecked(u128, u8, header.section_name&), len = 16);
+                    @println("          section_name: %", name);
+                    name: []u8 = (ptr = ptr_cast_unchecked(u128, u8, header.segment_name&), len = 16);
+                    @println("          segment_name: %", name);
+                };
+                //@println("current offset is %", ptr_diff(start, bytes.ptr));
+            };
+            @case(LoadCommand.LinkEditSymbolInfo.raw()) => {
+                command := bytes&.pop_type(LinkEditSymbolInfo);
+                @println("    [__LINKEDIT Symbol Info] %", command);
+                // Offset from the beginning of the file. (the data will be after all the load commands).
+                // (index in __stubs = index in LinkEditSymbolTable)
+                if command.indirect_symbol_count > 0 {
+                    println("        Indirect Symbols:");
+                };
+                indirect_bytes := full_bytes.slice(command.indirect_symbol_offset.zext(), full_bytes.len);
+                range(0, command.indirect_symbol_count.zext()) { i | 
+                    if i.mod(10) == 0 {
+                        if(i != 0, => print("\n"));
+                        print("        ");
+                    };
+                    symbol_index := indirect_bytes&.pop_type(u32);
+                    ::FmtPad(i64);
+                    ::FmtPad(u32);
+                    @print("(% = %), ", f_pad(i, 3, .After), f_pad(symbol_index[], 3, .Before));
+                };
+                print("\n");
+            };
+            @case(LoadCommand.LinkEditSymbolTable.raw()) => {
+                command := bytes&.pop_type(LinkEditSymbolTable);
+                if 24 != (@as(i64) header.size.zext()) {
+                    eprintln("bad fixed command size");
+                };
+                @println("    [__LINKEDIT Symbol Table] %", command);
+                // Offsets from the beginning of the file. (the data will be after all the load commands).
+                symbols_bytes := full_bytes.slice(command.symbols_offset.zext(), full_bytes.len);
+                strings_bytes := full_bytes.slice(command.strings_offset.zext(), full_bytes.len);
+                
+                range(0, command.symbol_count.zext()) { i | 
+                    command := symbols_bytes&.pop_type(SymbolEntry);
+                    @println("      [Symbol %] %", i, command);
+                    name: CStr = (ptr = strings_bytes.ptr.offset(command.name_offset.zext()));
+                    name := name.str();
+                    if name.len + command.name_offset.zext() < strings_bytes.len {
+                        @println("          name: %", name);
+                    } else {
+                        eprintln("string goes out of bounds of string table");
+                    };
+                };
+            };
+            @case(LoadCommand.MinimumOsVersion.raw()) => {
+                command := bytes&.pop_type(MinimumOsVersion);
+                @println("    [Minimum Os Version] %", command);
+                range(0, command.number_of_tools_used.zext()) { i |
+                    @println("        [Tool %] %", i, bytes&.pop_type(ToolType));
+                };
+            };
+            @case(LoadCommand.LinkLibrary.raw()) => 
+                with_trailing_string(bytes&, header, LinkLibrary, "Link Library");
+            @case(LoadCommand.LoadDynamicLinker.raw()) => 
+                with_trailing_string(bytes&, header, LoadDynamicLinker, "Load Dynamic Linker");
+            @case(LoadCommand.LinkLibrarySelf.raw()) => 
+                with_trailing_string(bytes&, header, LinkLibrary, "Link Library Self");
+            @case(LoadCommand.MainEntryPoint.raw()) => {
+                command := bytes&.pop_type(MainEntryPoint);
+                @println("    [Main Entry Point] %", command);
+            };
+            @case(LoadCommand.SourceVersion.raw()) => {
+                command := bytes&.pop_type(SourceVersion);
+                @println("    [Source Version] %", command);
+            };
+            @case(LoadCommand.FunctionStarts.raw()) => {
+                command := bytes&.pop_type(LinkEditBlob);
+                @println("    [Function Starts] %", command);
+                // first number is offset from start of __TEXT to first function. the rest are delta to next function. 
+                function_starts := full_bytes.slice(command.offset.zext(), command.offset.zext() + command.size.zext());
+                i := 0;
+                while => !function_starts.is_empty() {
+                    if i.mod(20) == 0 {
+                        if(i != 0, => print("\n"));
+                        print("        ");
+                    };
+                    value, rest, ok := read_leb128_unsigned(function_starts);
+                    assert(ok, "failed to read a leb128");
+                    @print("%, ", value);
+                    function_starts = rest;
+                    i += 1;
+                };
+                println("");
+            };
+            @case(LoadCommand.DataInCode.raw()) => {
+                command := bytes&.pop_type(LinkEditBlob);
+                @println("    [Data In Code] %", command);
+                data := full_bytes.slice(command.offset.zext(), command.offset.zext() + command.size.zext());
+                count := data.len / DataInCodeEntry.size_of();
+                range(0, count) { i |
+                    @println("      [%] %", i, data&.pop_type(DataInCodeEntry));
+                };
+            };
+            @case(LoadCommand.CodeSigneture.raw()) => {
+                command := bytes&.pop_type(LinkEditBlob);
+                @println("    [Code Signeture] %", command);
+                data := full_bytes.slice(command.offset.zext(), command.offset.zext() + command.size.zext());
+            };
+            @case(LoadCommand.ApplicationUuid.raw()) => {
+                command := bytes&.pop_type(ApplicationUuid);
+                @println("    [Application UUID] %", command);
+            };
+            @case(LoadCommand.ChainedFixups.raw()) => {
+                // https://github.com/qyang-nj/llios/blob/main/dynamic_linking/chained_fixups.md
+                command := bytes&.pop_type(LinkEditBlob);
+                @println("    [Chained Fixups] %", command);
+                full_data := full_bytes.slice(command.offset.zext(), command.offset.zext() + command.size.zext());
+                data := full_data;
+                header := data&.pop_type(ChainedFixupsHeader);
+                @println("        %", header);
+                seg_count := data&.pop_type(u32);
+                @println("           chained_starts_in_image.seg_count %", seg_count);
+                range(0, seg_count[].zext()) { _ |
+                    @println("           %", data&.pop_type(u32)); // TODO: untested
+                };
+                starts := data&.pop_type(ChainedStartsInSegment);
+                @println("           ChainedStartsInSegment: %", starts);
+                imports_data := full_data.slice(header.imports_offset.zext(), full_data.len);
+                symbols_data := full_data.slice(header.symbols_offset.zext(), full_data.len);
+                
+                
+                println("           Imports:");
+                range(0, header.imports_count.zext()) { i |
+                    if header.imports_format == 1 {
+                        // TODO: add bitfields to the language.
+                        import := imports_data&.pop_type(u32)[];
+                        lib_ordinal := import.bit_and(0xFF);
+                        weak := import.shift_right_logical(8).bit_and(0x01) == 1;
+                        name_offset := import.shift_right_logical(9);
+                        name := "";
+                        if header.symbols_format == 0 { 
+                            n: CStr = (ptr = symbols_data.ptr.offset(name_offset.zext()));
+                            name = n.str();
+                            if name.len + (@as(i64) header.symbols_offset.zext()) > full_data.len {
+                                name = "";
+                                eprintln("name of out bounds");
+                            };
+                        };
+                        @println("           [%] (lib_ordinal = %, weak = %, name_offset = %) %", i, lib_ordinal, weak, name_offset, name);
+                    } else {
+                        @print("(% = %]), ", i, data&.pop_type(u64));
+                    };
+                };
+            };
+            @case(LoadCommand.ExportsTrie.raw()) => {
+                command := bytes&.pop_type(LinkEditBlob);
+                @println("    [Exports Trie] %", command);
+                data := full_bytes.slice(command.offset.zext(), command.offset.zext() + command.size.zext());
+                // https://github.com/qyang-nj/llios/blob/main/exported_symbol/README.md#export-trie
+                S :: @struct(string: Str, ptr: *u8, depth: i64);
+                nodes := list(S, temp());
+                nodes&.push(string = "", ptr = data.ptr, depth = 0);
+                first := true;
+                while => nodes&.pop() { node |
+                    bytes: []u8 = (ptr = node.ptr, len = data.len - ptr_diff(data.ptr, node.ptr));
+                    terminal_size, rest, ok := read_leb128_unsigned(bytes);
+                    assert(ok, "failed read leb128");
+                    if !first {
+                        range(0, node.depth * 3) { _ |
+                            print("=");
+                        };
+                        @print(" |%| ", node.string);
+                    };
+                    range(0, terminal_size.bitcast()) { i |
+                        b := rest&.pop_type(u8)[];
+                        t := u8.list(temp());
+                        t&.push_prefixed_hex_byte(b);
+                        @print("% ", t.items());
+                    };
+                    println("");
+                    first = false;
+                    child_count := rest&.pop_type(u8)[];
+                    range(0, child_count.zext()) { i |
+                        s: CStr = (ptr = rest.ptr);
+                        s := s.str();
+                        rest.ptr = rest.ptr.offset(s.len + 1);
+                        child_offset, rest2, ok := read_leb128_unsigned(rest);
+                        assert(ok, "failed read leb128");
+                        rest = rest2;
+                        nodes&.push(string = s, ptr = data.ptr.offset(child_offset.bitcast()), depth = node.depth + 1);
+                    };
+                };
+            };
+            @default => {
+                unknown += 1;
+                // -8 because we already ate the header
+                bytes.ptr = bytes.ptr.offset(header.size.zext() - 8);
+                bytes.len -= header.size.zext() - 8;
+                @println("    [dont know what that is yet]");
+            };
+        };
+        size_taken := beginning_len - bytes.len;
+        total += size_taken;
+        if size_taken != header.size.zext() {
+            @eprintln("      bad command size (cmd said %, we read %)", @as(i64) header.size.zext(), size_taken);
+            diff := (@as(i64) header.size.zext()) - size_taken;
+            bytes.ptr = bytes.ptr.offset(diff);
+            bytes.len -= diff;
+        };
+    };
+    println("Finished file");
+    if total != header.commands_size.zext() {
+        @eprintln("load commands size mismatch. header said % bytes but we counted %", header.commands_size, total);
+    };
+    if unknown != 0 {
+        @println("     % unknown load commands. (probably a problem with this tool, not your macho file)", unknown);
+    };
+}
+
+fn with_trailing_string(bytes: *[]u8, header: *LoadCommandHeader, $Command: Type, command_name: Str) void = {
+    command := bytes.pop_type(Command);
+    @println("    [%] %", command_name, command);
+    header_size :: LoadCommandHeader.size_of() + Command.size_of();
+    @assert_eq(command.string_offset, header_size, "expected % string here", command_name);
+    string_size: i64 = header.size.zext() - header_size;
+    name: CStr = (ptr = bytes.ptr);
+    name := name.str();
+    assert(name.len <= string_size, "name too long");
+    @println("      filepath: %", name);
+    // Skip the extra zero padding (added for alignment, i assume, thats nice of them).
+    bytes.ptr = bytes.ptr.offset(string_size);
+    bytes.len -= string_size;
+}
+
+fn pop_type(bytes: *[]u8, $T: Type) *T #generic = {
+    @debug_assert(bytes.len >= T.size_of(), "pop_type: not enough bytes");
+    @debug_assert(u8.int_from_ptr(bytes.ptr).mod(T.align_of()) == 0, "pop_type: unaligned");
+    start := bytes.ptr;
+    bytes.ptr = bytes.ptr.offset(T.size_of());
+    bytes.len -= T.size_of();
+    ptr_cast_unchecked(u8, T, start)
+}
+
+::enum_basic(LoadCommand);
+::DeriveFmt(MachoHeader);
+::DeriveFmt(LoadCommandHeader);
+::DeriveFmt(SegmentLoad);
+::DeriveFmt(LoadCommand);
+::DeriveFmt(SegmentSection);
+::DeriveFmt(LinkEditSymbolTable);
+::DeriveFmt(SymbolEntry);
+::DeriveFmt(LinkEditSymbolInfo);
+::DeriveFmt(MinimumOsVersion);
+::DeriveFmt(ToolType);
+::DeriveFmt(LinkLibrary);
+::DeriveFmt(LoadDynamicLinker);
+::DeriveFmt(MainEntryPoint);
+::DeriveFmt(SourceVersion);
+::DeriveFmt(LinkEditBlob);
+::DeriveFmt(DataInCodeEntry);
+::DeriveFmt(ApplicationUuid);
+::DeriveFmt(ChainedFixupsHeader);
+::DeriveFmt(ChainedStartsInSegment);
+::DeriveFmt(u128);
+
+fn display(a: *u64, out: *List(u8)) void = a[].display(out);
+fn display(a: *u16, out: *List(u8)) void = a[].display(out);
+fn display(a: *u8, out: *List(u8)) void = a[].display(out);
+
+macho_magic :: 0xfeedfacf;
+MachoHeader :: @struct(
+    magic: u32 = macho_magic,
+    cpu_type: u32,
+    cpu_subtype: u32,
+    file_type: u32,
+    commands_count: u32,
+    commands_size: u32,
+    flags: u32,
+    _reserved: u32 = 0x00000000,
+);
+
+// "If a load command starts with 0x80000000 bit set that means the load command is necessary in order to be able to load or run the binary."" 
+LoadCommand :: @enum(u32) (
+    SegmentLoad = 0x00000019,
+    LinkLibrary = 0x0000000C,  // will have full file path to the dynamically linked shared library.
+    LinkLibrarySelf = 0x0000000D,
+    LinkEditSymbolInfo  = 0x0000000B,
+    LoadDynamicLinker  = 0x0000000E,  // just a c string
+    LinkEditSymbolTable = 0x00000002,
+    MinimumOsVersion    = 0x00000032,
+    FunctionStarts      = 0x00000026,
+    MainEntryPoint      = 0x80000028,
+    SourceVersion       = 0x0000002A,
+    DataInCode          = 0x00000029,
+    CodeSigneture       = 0x0000001D,
+    ApplicationUuid     = 0x0000001B,
+    ChainedFixups       = 0x80000034,
+    ExportsTrie         = 0x80000033,
+);
+
+LoadCommandHeader :: @struct(
+    type: u32,
+    size: u32,
+);
+
+SegmentLoad :: @struct(
+    name: u128, 
+    address: u64,      // offset from base address? 
+    address_size: u64, // so how many bytes we want this segment to take up. 
+    file_offset: u64,  // where in the file does the data start. 
+    size: u64,         // if this is smaller than address size, the extra is filled in with zeros.
+    max_prot: u32,     // MemPerm "Maximum virtual memory protections"
+    init_prot: u32,    // MemPerm "Initial virtual memory protections"
+    section_count: u32, 
+    flag: u32,
+); // Followed by <section_count> of SegmentSection
+
+// TODO: have a FlagSet(MemPerm) type. 
+MemPerm :: @enum(u32) (
+    Read    = 0b00000000000000000000000000000001,
+    Write   = 0b00000000000000000000000000000010,
+    Execute = 0b00000000000000000000000000000100,
+);
+
+SegmentSection :: @struct(
+    section_name: u128, 
+    segment_name: u128,  // must match SegmentLoad64.name
+    address: u64,     
+    size: u64, 
+    file_offset: u32, 
+    alignment: u32,   
+    relocations_file_offset: u32,
+    relocations_count: u32,
+    flag: u32,
+    _reserved1 := 0x00000000,
+    _reserved2 := 0x00000000,
+    _reserved3 := 0x00000000,
+);
+
+LinkLibrary :: @struct(
+    string_offset: u32 = 24,
+    time_date_stamp: u32,
+    current_version: u32,
+    compatible_version: u32,
+    // then a CStr. size of this load command includes the length of the string.
+);
+
+LoadDynamicLinker :: @struct(
+    string_offset: u32 = 12,
+    // then a CStr. size of this load command includes the length of the string.
+);
+
+LinkEditSymbolTable :: @struct(
+    // symbol table is a list of SymbolEntry
+    symbols_offset: u32, // from start of file
+    symbol_count: u32,
+    // strings table is a blob of null terminated strings
+    strings_offset: u32, // from start of file
+    strings_size: u32, // total size in bytes, NOT number of strings
+);
+
+SymbolEntry :: @struct(
+    name_offset: u32,
+    symbol_type: u8,
+    section_number: u8,
+    data_info: u16, // library ordinal number
+    symbol_address: u64,
+);
+
+LinkEditSymbolInfo :: @struct(
+    local_symbol_index: u32,
+    local_symbol_count: u32,
+    external_symbol_index: u32,
+    external_symbol_count: u32,
+    undefined_symbol_index: u32,
+    undefined_symbol_count: u32,
+    content_table_offset: u32,
+    content_table_count: u32,
+    module_table_offset: u32,
+    module_table_count: u32,
+    referenced_symbol_offset: u32,
+    referenced_symbol_count: u32,
+    indirect_symbol_offset: u32,
+    indirect_symbol_count: u32,
+    external_relocation_offset: u32,
+    external_relocation_count: u32,
+    local_relocation_offset: u32,
+    local_relocation_count: u32,
+);
+
+MinimumOsVersion :: @struct(
+    platform_type: u32,
+    minimum_os_version: u32,
+    sdk_version: u32,
+    number_of_tools_used: u32,
+); // followed by number_of_tools_used of ToolType
+
+ToolType :: @struct(
+    type: u32,
+    version: u32,
+);
+
+MainEntryPoint :: @struct(
+    entry_offset: u64,  // in __TEXT?
+    stack_size: u64, // or zero
+);
+
+SourceVersion :: @struct(
+    version: u64, 
+);
+
+// There are a bunch of these: FunctionStarts, DataInCode, CodeSigneture, ChainedFixups, ExportsTrie
+LinkEditBlob :: @struct(
+    offset: u32, // will be in __LINKEDIT but the offset measures from start of file. 
+    size: u32,
+);
+
+// DataInCode's LinkEditBlob points to a list of these
+DataInCodeEntry :: @struct(
+    offset: u32,
+    length: u16,
+    kind: u16,
+);
+
+ApplicationUuid :: @struct(
+    uuid: u128,
+);
+
+ChainedFixupsHeader :: @struct(
+    version: u32,
+    starts_offset: u32,
+    imports_offset: u32,
+    symbols_offset: u32,
+    imports_count: u32,
+    imports_format: u32, // (_=1, _addend=2, _addend64=3)
+    symbols_format: u32, // 0 means uncompressed?
+);
+
+ChainedStartsInSegment :: @struct(
+    size: u32,
+    page_size: u16,
+    pointer_format: u16,
+    segment_offset: u64,
+    max_valid_pointer: u32,
+    page_count: u16,
+    // followed by Array(u16, page_count) offset to first fixup on the page
+);
+ 
+
+u128 :: @struct(low: u64, high: u64);
+fn str_to_16_byte_value(s: Str) u128 = {
+    assert(name.len.le(16), "A segment name cannot be larger than 16 text characters in bytes");
+    low := 0;
+    high := 0;
+    enumerate s { (i: i64, c: u8) |
+        c := @as(i64) c;
+        if(i.lt(8)) {
+            high = high.bit_or(c.left_shift(i));
+        } {
+            low = low.bit_or(c.sub(8).left_shift(i));
+        };
+    };
+    (low = low, high = high)
+}
+
+// TODO: which endianness?? 
+
+// TODO: check if aligned and be less dumb. 
+fn push(self: *List(u8), v: u32) void = {
+    self.push((@as(i64) v).bit_and(@as(i64) 0xFF000000));
+    self.push((@as(i64) v).bit_and(@as(i64) 0x00FF0000));
+    self.push((@as(i64) v).bit_and(@as(i64) 0x0000FF00));
+    self.push((@as(i64) v).bit_and(@as(i64) 0x000000FF));
+}
+
+// TODO: check if aligned and be less dumb. 
+fn push(self: *List(u8), v: u64) void = {
+    self.push((@as(i64) v).bit_and(@as(i64) 0xFF00000000000000));
+    self.push((@as(i64) v).bit_and(@as(i64) 0x00FF000000000000));
+    self.push((@as(i64) v).bit_and(@as(i64) 0x0000FF0000000000));
+    self.push((@as(i64) v).bit_and(@as(i64) 0x000000FF00000000));
+    self.push((@as(i64) v).bit_and(@as(i64) 0x00000000FF000000));
+    self.push((@as(i64) v).bit_and(@as(i64) 0x0000000000FF0000));
+    self.push((@as(i64) v).bit_and(@as(i64) 0x000000000000FF00));
+    self.push((@as(i64) v).bit_and(@as(i64) 0x00000000000000FF));
+}

@@ -86,14 +86,6 @@ fn emit_block(self: *LlvmEmit, b: *Qbe.Blk) void = {
                     self.write_non_va_types(i, arg_count);
                 };
                 callee := i.arg&[0];
-                if rtype(callee) == .RCon {
-                    c := self.f.get_constant(callee);
-                    @assert(c.type == .CAddr, "can only call CAddr (or a non constant)");
-                    imports := self.f.globals.llvm_needs_import&;
-                    if imports.get(c.sym.id).is_none() {
-                        imports.insert(c.sym.id, true);
-                    };
-                };
                 self.write_ref(callee, .Kl);
                 @fmt(self.out&, "(");
                 self.write_args(i, arg_count);
@@ -160,6 +152,7 @@ fn emit_ins(self: *LlvmEmit, i: *Qbe.Ins) void = {
         o.push_all("\n");
     };
     
+    types :: items(@list("i32", "i64", "float", "double") ast_alloc());
     @match(i.op()) {
         fn add()  => bin("add", "fadd");
         fn sub()  => bin("sub", "fsub");
@@ -177,9 +170,15 @@ fn emit_ins(self: *LlvmEmit, i: *Qbe.Ins) void = {
         fn shl()   => int_bin("shl");
         fn extsw() => cast("sext i32", "to i64");
         fn extuw() => cast("zext i32", "to i64");
-        fn extub() => cast("zext i8", "to i64"); // TODO
+        fn extub() => cast("zext i8", if(i.cls() == .Kw, => "to i32", => "to i64"));
+        fn cast() => {
+            dest := types[i.cls().raw().zext()];
+            src := types[argcls(i, 0).raw().zext()];
+            @fmt(o, "bitcast % ", src);
+            self.write_ref(i.arg&[0], .Kl);
+            @fmt(o, " to %\n", dest);
+        }
         fn load() => {
-            types :: items(@list("i32", "i64", "float", "double") ast_alloc());
             @fmt(o, "load %, ptr ", types[i.cls().raw().zext()]);
             self.write_ref(i.arg&[0], .Kl);
             o.push_all("\n");
@@ -191,6 +190,7 @@ fn emit_ins(self: *LlvmEmit, i: *Qbe.Ins) void = {
                 fn None() => panic("no cast");
                 fn IntToPtr() => cast("inttoptr i64", "to ptr");
                 fn PtrToInt() => cast("ptrtoint ptr", "to i64");
+                fn TruncLtoW() => cast("trunc i64", "to i32");
                 fn ExtendI1() => {
                     @fmt(o, "zext i1 ");
                     self.write_ref(i.arg&[0], .Kl);
@@ -311,6 +311,10 @@ fn write_ref(self: *LlvmEmit, r: Qbe.Ref, k: Qbe.Cls) void = {
             @match(c.type) {
                 fn CUndef() => @fmt(self.out&, "TODO:undef");
                 fn CAddr() => {
+                    imports := self.f.globals.llvm_needs_import&;
+                    if imports.get(c.sym.id).is_none() {
+                        imports.insert(c.sym.id, true);
+                    };
                     //@fmt(self.out&, "ptrtoint (ptr @% to i64)", self.f.globals.str(c.sym.id));
                     @fmt(self.out&, " @%", self.f.globals.str(c.sym.id));
                 };
@@ -375,6 +379,7 @@ fn emit_llvm(m: *QbeModule, dat: *Qbe.Dat) void = {
             type[] = list(temp());
             value[] = list(temp());
             @fmt(type, "@% = private unnamed_addr global { ", dat.name);
+            m.llvm_needs_import&.insert(m.intern(dat.name), false);
         }
         fn DEnd() => {
             if type.items().ends_with(",") {

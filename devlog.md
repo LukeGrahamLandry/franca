@@ -1,3 +1,9 @@
+## (Oct 9)
+
+- ported test runner script
+- working on inserting casts for llvm backend
+-
+
 ##
 
 - side tangent of i'm stupid. lets play can you spot the mistake...
