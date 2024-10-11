@@ -19,10 +19,11 @@
 #include_std("backend/arm64/target.fr");
 #include_std("backend/opt/load.fr");
 #include_std("backend/opt/alias.fr");
-//#include_std("backend/opt/inline.fr");
+#include_std("backend/opt/inline.fr");
 
 ENABLE_INTERNAL_QBE :: true;  // until i want to enable it on github actions
 LINK_QBE_C :: true;
+DO_INLINING :: true; // TODO: make this a runtime toggle so you can make sure you're actually testing calls
 
 // easy-ish (?) things to try to get used to making changes. 
 // TODO: if they don't do it already: 
@@ -67,7 +68,7 @@ QbeModule :: @rec @struct(
     number_of_types := 0, // ntyp. only used by parser
     debug_out: *FILE,
     namel := QbeName.ptr_from_int(0), // for reusing memory in opt/ssa.fr between functions. no information shared.
-    next_tmp_id = 0,
+    next_tmp_id = 1,
     symbols: []SymbolBucket,
     
     // stuff for llvm
@@ -86,7 +87,7 @@ QbeModule :: @rec @struct(
 );
 
 fn init_default_module() QbeModule = 
-    init(1.shift_left(18), page_allocator, page_allocator);
+    init(1.shift_left(18), libc_allocator, page_allocator);
 
 :: {
     @if(LINK_QBE_C) {
@@ -130,7 +131,7 @@ fn init(segment_size: i64, gpa: Alloc, code_alloc: Alloc) QbeModule = {
         m.debug  = gpa.box_zeroed(@type m.debug[]);
         m.target = gpa.box(@type m.target[]);
     });
-    //m.debug[Qbe.DebugKey.Memory.raw()] = true;
+    //m.debug[Qbe.DebugKey.Copy.raw()] = true;
     m.target.fill_target_info(.arm64_apple);
     m.types[] = new(0, Qbe.Pool.PHeap); // TODO: check the magic in QbeBuilder.init to make sure you remember to do this. 
     m.curi[] = m.insb.index_unchecked(Qbe.MaxInstructions);
@@ -152,9 +153,6 @@ fn get_qbe_dylib_variable($T: Type, $name: Str) *T #generic = {
 
 // TODO: this changes for aot!! remove this! garbage.
 aaaa_out :: @static(TmpFile);
-
-fn inlsave(f: *Qbe.Fn) void #import("qbe");
-fn inlcalls(f: *Qbe.Fn) void #import("qbe");
 
 run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
     mark := __temp_alloc.mark();
@@ -198,7 +196,7 @@ run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
         filluse(fnn); 
         filldom(fnn); 
         ssacheck(fnn); // debug
-        if !m.want_llvm { // TODO: check if this would help it somehow
+        if !m.want_llvm && DO_INLINING { // TODO: check if this would help it somehow
             inlcalls(fnn);
             filluse(fnn); 
         };
@@ -223,7 +221,9 @@ run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
         return();
     };
     
-    inlsave(fnn);
+    if DO_INLINING { 
+        inlsave(fnn);
+    };
     {m.target.abi1}(fnn);
     simplify(fnn);
     //simpl(fnn);

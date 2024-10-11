@@ -283,7 +283,7 @@ fn simplify_jump_chains(f: *Qbe.Fn) void = {
             b.s2 = Qbe.Blk.ptr_from_int(0);
         }
     };
-    @debug_assert(!last_link.is_null() && last_link[].is_null(), "invarient: f->start exists and b->link doesn't loop");
+    @debug_assert(!last_link.is_null() && last_link[].is_null(), "invarient: f.start exists and b.link doesn't loop");
     last_link[] = epilogue; // append our new block to the linked list. 
 }
 
@@ -300,3 +300,81 @@ fn newblk() *Qbe.Blk = {
     b[] = Qbe.Blk.zeroed();
     b
 }
+
+fn replacepred(blks: **Qbe.Blk, nblk: i64, to: *Qbe.Blk, from: *Qbe.Blk) void = {
+    range(0, nblk) { n | 
+        if blks.offset(n)[].identical(from) {
+            blks.offset(n)[] = to;
+            return();
+        };
+    };
+    @panic("pred not found for % -> %", from.name(), to.name());
+}
+
+/* replace b.pred[] and p.blk[] entries */
+fn replacepreds(s: *Qbe.Blk, to: *Qbe.Blk, from: *Qbe.Blk) void = {
+    if(s.is_null(), => return());
+    @debug_assert(s.npred != 0);
+    replacepred(s.pred, s.npred.zext(), to, from);
+    for_phi s { p |
+        @debug_assert(p.narg == s.npred);
+        replacepred(p.blk.first, p.narg.zext(), to, from);
+    };
+}
+
+/* remove marked-dead blks - marked as fn.rpo[id] == 0 */
+fn killblks(f: *Qbe.Fn) void = {
+    pb := f.start&;
+    while => !pb[].is_null() {
+        if !f.rpo.offset(pb.id.zext())[].is_null() {
+            pb = pb.link&;
+        } else {
+            pb[] = pb.link;
+        };
+    };
+}
+
+/* merge linear jmp chains */
+/* requires rpo pred, breaks cfg use */
+fn blkmerge(f: *Qbe.Fn) void = {
+    if f.globals.debug["B".char()] {
+        write(f.globals.debug_out, "\n> Block merge:\n");
+    };
+    
+    vins: QList(Qbe.Ins) = new(0, .PFn);
+    /* linear jmp chains will be consecutive in rpo */
+    curb := ptr_from_int(Qbe.Blk, 0);
+    bid := 0;
+    nins := 0;
+    while => bid < f.nblk.zext() { 
+        b := f.rpo.offset(bid)[];
+        if curb.is_null() {
+            curb = b;
+            nins = 0;
+        } else {
+            f.rpo.offset(bid)[] = ptr_from_int(Qbe.Blk, 0);
+        };
+        addbins(b, vins&, nins&);
+        if b.jmp.type != .Jjmp || b.s1.npred != 1 || !b.s1.phi.is_null() {
+            idup(curb.ins&, vins.first, nins);
+            curb.nins = nins.trunc();
+            curb.jmp = b.jmp;
+            replacepreds(b.s1, curb, b);
+            if !b.s1.identical(b.s2) {
+                replacepreds(b.s2, curb, b);
+            };
+            curb.s1 = b.s1;
+            curb.s2 = b.s2;
+            curb = ptr_from_int(Qbe.Blk, 0);
+        } else {
+            @debug_assert(b.s1.id.zext() == bid + 1, "rpo not in order");
+            if f.globals.debug["B".char()] {
+                @fmt_write(f.globals.debug_out, "    merging blocks @% -> @%\n", b.name(), b.s1.name());
+            };
+        };
+        bid += 1;
+    };
+    @debug_assert(curb.is_null());
+    killblks(f);
+}
+

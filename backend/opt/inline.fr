@@ -1,0 +1,232 @@
+// Adapted from Qbe. MIT License. © 2015-2024 Quentin Carbonneaux <quentin@c9x.me>
+// This is from a patch on the qbe mailing list by Roland Paterson-Jones: https://lists.sr.ht/~mpu/qbe/patches/54822
+
+MAX_INL_COST :: 4;
+
+fn bgood4inl(b: *Qbe.Blk) bool = {
+    if(b.jmp.type == .Jhlt, => return(false));
+    npar := 0;
+    nins := 0;
+    for_insts_forward b { i |
+        continue :: local_return;
+        if(i.op() == .nop || i.op() == .dbgloc, => continue());
+        /* double checking here for variadic and dynalloc */
+        if(i.op() == .vastart || is_alloc(i.op()) || i.op() == .parc, => return(false));
+        if(is_par(i.op()), => npar&, => nins&)[] += 1;
+    };
+    cost := nins - 2 * (npar + int(b.jmp.type != .Jret0)) - 1 /*Ocall*/;
+    cost <= MAX_INL_COST
+}
+::if(*i64);
+
+fn good4inl(f: *Qbe.Fn) bool = {
+    fillrpo(f);
+    fillpreds(f);
+    blkmerge(f);
+    fillrpo(f);
+    fillpreds(f);
+    fill_use(f);
+    f.nblk == 1 
+    && f.retty == -1 /* no aggregate returns */
+    && !f.vararg 
+    && !f.dynalloc
+    && bgood4inl(f.start)
+}
+
+fn cloneblk(b: *Qbe.Blk) *Qbe.Blk = {
+    inlb := libc_allocator.box(Qbe.Blk); // :HardcodeAlloc
+    inlb[] = b[];
+    
+    @debug_assert(inlb.phi.is_null(),  "don't know how to inline that");
+    @debug_assert(inlb.s1.is_null(),   "don't know how to inline that");
+    @debug_assert(inlb.s2.is_null(),   "don't know how to inline that");
+    @debug_assert(inlb.link.is_null(), "don't know how to inline that");
+    
+    mem := libc_allocator.alloc(Qbe.Ins, inlb.nins.zext()); // :HardcodeAlloc
+    inlb.ins = mem.ptr; 
+    mem.copy_from(ptr = b.ins, len = mem.len);
+    inlb
+}
+
+fn clone(f: *Qbe.Fn) *Qbe.Fn = {
+    inlfn := libc_allocator.box(Qbe.Fn); // :HardcodeAlloc
+    inlfn[] = f[];
+    inlfn.tmp = new(inlfn.ntmp.zext(), .PHeap);
+    inlfn.tmp.slice(0, f.ntmp.zext()).copy_from(f.tmp.slice(0, f.ntmp.zext()));
+    inlfn.con = new(inlfn.ncon.zext(), .PHeap);
+    inlfn.con.slice(0, f.ncon.zext()).copy_from(f.con.slice(0, f.ncon.zext()));
+    @debug_assert(f.nblk == 1, "don't know how to inline that");
+    inlfn.start = cloneblk(f.start);
+    inlfn
+}
+
+::ptr_utils(Qbe.Fn);
+
+fn inlsave(f: *Qbe.Fn) void = {
+    if(!good4inl(f), => return());
+    inlfn  := clone(f);
+    m      := f.globals;
+    id     := m.intern(f.name());
+    symbol := m.get_symbol_info(id);
+    @debug_assert(symbol.inline.is_null(), "how have we been here before");
+    symbol.inline = inlfn;
+}
+
+fn inlfind(f: *Qbe.Fn, r: Qbe.Ref) ?*Qbe.Fn = {
+    if(rtype(r) != .RCon, => return(.None));
+    c := f.get_constant(r); // :FUCKED it shouldn't typecheck if you do .val()
+    if(c.type != .CAddr, => return(.None));
+    if(c.sym.type != .SGlo, => return(.None));
+    symbol := f.globals.get_symbol_info(c.sym.id);
+    if !symbol.inline.is_null() {
+        return(Some = symbol.inline);
+    };
+    .None
+}
+
+RefMap :: @struct(inlr: Qbe.Ref, r: Qbe.Ref);
+
+fn findinlref(inlr: Qbe.Ref, rmap: QList(RefMap), nrmap: i64) Qbe.Ref = {
+    each rmap.slice(0, nrmap) { e | 
+        if(e.inlr == inlr, => return(e.r));
+    };
+    QbeNull
+}
+
+fn newinlref(inlfn: *Qbe.Fn, inlr: Qbe.Ref, f: *Qbe.Fn, prmap: *QList(RefMap), pnrmap: *i64) Qbe.Ref = {
+    r := @match(rtype(inlr)) {
+        fn RTmp() => {
+            t := inlfn.tmp[inlr.val()]&;
+            f.newtmp(t.name().str() /*:SLOW*/, t.cls)
+        }
+        fn RCon() => newcon(inlfn.get_constant(inlr), f);
+        @default => panic("bad inline ref");
+    };
+    pnrmap[] += 1;
+    prmap.grow(pnrmap[]);
+    prmap[][pnrmap[] - 1] = (inlr = inlr, r = r);
+    r
+}
+
+fn getinlref(inlfn: *Qbe.Fn, inlr: Qbe.Ref, f: *Qbe.Fn, prmap: *QList(RefMap), pnrmap: *i64) Qbe.Ref = {
+    if inlr == QbeNull || rtype(inlr) == .RInt || rtype(inlr) == .RType {
+        return(inlr);
+    };
+    r := findinlref(inlr, prmap[], pnrmap[]);
+    if(r != QbeNull, => return(r));
+    newinlref(inlfn, inlr, f, prmap, pnrmap)
+}
+
+fn inlargs(inlfn: *Qbe.Fn, f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins, prmap: *QList(RefMap), pnrmap: *i64) void = {
+    /* go back to start of args */
+    while => ptr_diff(b.ins, i) > 0 && is_arg(i.offset(-1).op()) {
+        i = i.offset(-1);
+    };
+    /* replace args with copies to par tmps */
+    @debug_assert(inlfn.nblk == 1);
+    i1 := inlfn.start.ins;
+    if i.op() == .arge {
+        if i1.op() != .pare {
+            /* drop env arg cos fn does not take one */
+            i[] = Qbe.Ins.zeroed();
+            i.set_op(.nop);
+            i = i.offset(1);
+        };
+    } else {
+        @debug_assert(inlfn.start.nins == 0 || i1.op() != .pare, "don't know how to inline that");
+    };
+    while => i.op() != .call {
+        @debug_assert(is_arg(i.op()));
+        @debug_assert(is_par(i1.op()));
+        @debug_assert(i.cls() == i1.cls());
+        @debug_assert(rtype(i1.to) == .RTmp);
+        i.set_op(.copy);
+        i.to = getinlref(inlfn, i1.to, f, prmap, pnrmap);
+        i = i.offset(1);
+        i1 = i1.offset(1);
+    };
+}
+
+fn inlbins(inlfn: *Qbe.Fn, inlb: *Qbe.Blk, f: *Qbe.Fn, prmap: *QList(RefMap), pnrmap: *i64, pvins: *QList(Qbe.Ins), pnins: *i64) void = {
+    /* skip par instructions */
+    i := inlb.ins;
+    last := inlb.ins.offset(inlb.nins.zext());
+    while => ptr_diff(i, last) > 0 && is_par(i.op()) {
+        i = i.offset(1);
+    };
+    /* copy remaining instructions, translating refs to current fn */
+    for(i, last) { i |
+        addins(pvins, pnins, i);
+        i1 := pvins[].index(pnins[] - 1);
+        i1.to = getinlref(inlfn, i1.to, f, prmap, pnrmap);
+        i1.arg&[0] = getinlref(inlfn, i1.arg&[0], f, prmap, pnrmap);
+        i1.arg&[1] = getinlref(inlfn, i1.arg&[1], f, prmap, pnrmap);
+    };
+}
+
+/* return index of first instruction after inlining */
+fn inlcall(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) i64 = {
+    @debug_assert(ptr_diff(b.ins, i) >= 0 && ptr_diff(i, b.ins.offset(b.nins.zext())) >= 0);
+    @debug_assert(i.op() == .call);
+    inlfn := or inlfind(f, i.arg&[0]) { _ |
+        return(ptr_diff(b.ins, i))
+    };
+    
+    if f.globals.debug["G".char()] {
+        @fmt_write(f.globals.debug_out, "    inlining call at @% ins % to simple function $%\n", b.name(), ptr_diff(b.ins, i), inlfn.name());
+    };
+    
+    nrmap := 0;
+    rmap: QList(RefMap) = new(nrmap, .PFn);
+    
+    /* replace arg ins with copy to inline fn par tmps */
+    inlargs(inlfn, f, b, i, rmap&, nrmap&);
+    
+    nins := 0;
+    vins: QList(Qbe.Ins) = new(nins, .PFn);
+    
+    for(b.ins, i) { i1 |
+        addins(vins&, nins&, i1);
+    };
+    
+    @debug_assert(inlfn.nblk == 1, "don't know how to inline that");
+    /* splice inlined fn instructions */
+    inlbins(inlfn, inlfn.start, f, rmap&, nrmap&, vins&, nins&);
+    
+    /* replace call ins with copy for non-void fn's */
+    if inlfn.start.jmp.type != .Jret0 {
+        addins(vins&, nins&, i);
+        i1 := vins[nins - 1]&;
+        i1.set_op(.copy);
+        i1.arg&[0] = getinlref(inlfn, inlfn.start.jmp.arg, f, rmap&, nrmap&);
+        @debug_assert(i1.arg&[1] == QbeNull, "expected inline before abi and we don't inline aggragates yet");
+    };
+    nret := nins;
+    
+    for(i.offset(1), b.ins.offset(b.nins.zext())) { i |
+        addins(vins&, nins&, i);
+    };
+    
+    idup(b.ins&, vins.first, nins);
+    b.nins = nins.trunc();
+    nret
+}
+
+fn inlcalls(f: *Qbe.Fn) void = {
+    for_blocks f { b | 
+        n := 0;
+        while => n < b.nins.zext() {
+            i := b.ins.offset(n);
+            if i.op() == .call {
+                /* careful, this rewrites b.ins */
+                n = inlcall(f, b, i); // TODO - off by one if call is inlined...
+            };
+            n += 1;
+        };
+    };
+    
+    if f.globals.debug["G".char()] {
+        write(f.globals.debug_out, "\nAfter inlining calls:\n\n");
+        printfn(f, f.globals.debug_out);
+    };
+}
