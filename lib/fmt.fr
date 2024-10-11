@@ -47,7 +47,7 @@ fn display(self: Str, writer: *List(u8)) void = writer.write(self);
 /// 'fmt_spec_str' must be a const string value. '%' characters will be replaced (like printf, you just don't need the type hint).
 // TODO: double '%%' to actually put a literal '%' 
 #macro 
-fn fmt(arg: AstExpr) AstExpr = {
+fn fmt(arg: FatExpr) FatExpr = {
     arg := compile_ast(arg);
     assert(arg.expr&.is(.Tuple), "fmt expected tuple");
     args := arg.expr.Tuple.items();
@@ -78,10 +78,10 @@ fn format_into(writer: FatExpr, args: Slice(FatExpr), loc: Span) FatExpr = {
     if(parts.len != params.len + 1, => compile_error("Fmt specifier count mismatch", loc));
     count := parts.len().add(params.len());
     x := ast_alloc();
-    actions: List(AstExpr) = list(count, x);  // TODO: with_capacity_exact or shrink_to_fit at the end or have AstExpr.Tuple expose that its a Vec not a Slice 
+    actions: List(FatExpr) = list(count, x);  // TODO: with_capacity_exact or shrink_to_fit at the end or have FatExpr.Tuple expose that its a Vec not a Slice 
     
     // TODO: reserve space for known length args. 
-    emit :: fn(msg: AstExpr) void => {
+    emit :: fn(msg: FatExpr) void => {
         fmt_display :: display; // just renamed to see in the ast for debugging
         action: FatExpr = @{ fmt_display(@[msg], @[writer]) };
         actions&.push(action);
@@ -99,9 +99,9 @@ fn format_into(writer: FatExpr, args: Slice(FatExpr), loc: Span) FatExpr = {
 }
 
 #macro 
-fn concat(arg: AstExpr, rt_alloc: AstExpr) AstExpr = {
+fn concat(arg: FatExpr, rt_alloc: FatExpr) FatExpr = {
     args := arg.expr.Tuple.items();
-    actions: List(AstExpr) = list(args.len(), ast_alloc());
+    actions: List(FatExpr) = list(args.len(), ast_alloc());
     
     @{
         // TODO: caller needs to pass allocator since this is at runtime. 
@@ -121,12 +121,12 @@ fn concat(arg: AstExpr, rt_alloc: AstExpr) AstExpr = {
 }
 
 #macro 
-fn prepend_tuple(arg: AstExpr, target: AstExpr) AstExpr = {
+fn prepend_tuple(arg: FatExpr, target: FatExpr) FatExpr = {
     target := compile_ast(target);
     // TODO: now that i dont double track types, this will break everything if you do it to an int literal. -- May 1
     if target.expr&.is(.Tuple) {
         original := target.expr.Tuple.items();
-        tuple: List(AstExpr) = list(original.len.add(1), ast_alloc()); 
+        tuple: List(FatExpr) = list(original.len.add(1), ast_alloc()); 
         tuple&.push(arg);
         tuple&.push_all(original);
         target.expr.Tuple = tuple.rs();
@@ -145,7 +145,7 @@ fn prepend_tuple(arg: AstExpr, target: AstExpr) AstExpr = {
 }
 
 #macro 
-fn println(arg: AstExpr) AstExpr = @{
+fn println(arg: FatExpr) FatExpr = @{
     out: List(u8) = list(0, temp());
     @fmt(@prepend_tuple(out&) @[arg]);
     println(out&.items());
@@ -153,7 +153,7 @@ fn println(arg: AstExpr) AstExpr = @{
 };
 
 #macro 
-fn eprintln(arg: AstExpr) AstExpr = @{
+fn eprintln(arg: FatExpr) FatExpr = @{
     out: List(u8) = list(0, temp());
     @fmt(@prepend_tuple(out&) @[arg]);
     eprintln(out&.items());
@@ -161,7 +161,7 @@ fn eprintln(arg: AstExpr) AstExpr = @{
 };
 
 #macro 
-fn print(arg: AstExpr) AstExpr = @{
+fn print(arg: FatExpr) FatExpr = @{
     out: List(u8) = list(0, temp());
     @fmt(@prepend_tuple(out&) @[arg]);
     print(out&.items());
@@ -169,7 +169,7 @@ fn print(arg: AstExpr) AstExpr = @{
 };
 
 #macro 
-fn eprint(arg: AstExpr) AstExpr = @{
+fn eprint(arg: FatExpr) FatExpr = @{
     out: List(u8) = list(0, temp());
     @fmt(@prepend_tuple(out&) @[arg]);
     eprint(out&.items());
@@ -177,14 +177,14 @@ fn eprint(arg: AstExpr) AstExpr = @{
 };
 
 #macro 
-fn format(arg: AstExpr, alloc: AstExpr) AstExpr = @{
+fn format(arg: FatExpr, alloc: FatExpr) FatExpr = @{
     out: List(u8) = list(0, @[alloc]);
     @fmt(@prepend_tuple(out&) @[arg]);
     out
 };
 
 #macro 
-fn panic(arg: AstExpr) AstExpr = {
+fn panic(arg: FatExpr) FatExpr = {
     if !safety_check_enabled(.KeepPanicMessages) {
         arg = @{ "panicked" };
     };
@@ -517,7 +517,7 @@ fn trim(s: Str) Str = {
     s
 }
 
-fn fmt_write(arg: AstExpr) AstExpr #macro = {
+fn fmt_write(arg: FatExpr) FatExpr #macro = {
     assert(arg.expr&.is(.Tuple), "fmt expected tuple");
     args := arg.expr.Tuple.items();
     @{
@@ -549,4 +549,9 @@ fn fmt_cstr(fmt_args: FatExpr) FatExpr #macro = @{
     msg := @format(@[fmt_args]) temp();
     msg&.push(0);
     @as(CStr) (ptr = msg.maybe_uninit.ptr)
+}
+
+fn display(v: f32, out: *List(u8)) void = {
+    v: f64 = v.cast();
+    display(v, out);
 }

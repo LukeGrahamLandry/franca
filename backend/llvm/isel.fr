@@ -30,6 +30,8 @@ LlvmCast :: @enum(i64) (
     ExtendI1,
     CmpZero,
     TruncLtoW,
+    TruncWtoB,
+    TruncWtoH,
 );
 ::if(LlvmCast);
 
@@ -80,8 +82,13 @@ fn insert_redundant_casts(f: *Qbe.Fn) void = {
         if b.jmp.type == .Jjnz {
             c&.request_cast(b.jmp.arg, .LBool);
         };  
+        
         if is_ret(b.jmp.type) {
-            c&.request_cast(b.jmp.arg, if(b.jmp.type == .Jretw, => .Wuw, => .WFull));
+            if b.jmp.type == .Jretc {
+                c&.request_cast(b.jmp.arg, .LPtr);
+            } else {
+                c&.request_cast(b.jmp.arg, if(b.jmp.type == .Jretw, => .Wuw, => .WFull));
+            };
         };  
     };  
     
@@ -91,13 +98,10 @@ fn insert_redundant_casts(f: *Qbe.Fn) void = {
             c&.fix_arg(b.jmp.arg&, .LBool);
         };  
         if is_ret(b.jmp.type) {
-            c&.fix_arg(b.jmp.arg&, if(b.jmp.type == .Jretw, => .Wuw, => .WFull));
-        };
-        for_phi b { p | 
-            range(0, p.narg.zext()) { a |
-                if p.blk[a].id == b.id {
-                    c&.fix_arg(p.arg&.index(a), if(p.cls == .Kw, => .Wuw, => .WFull));
-                };
+            if b.jmp.type == .Jretc {
+                c&.fix_arg(b.jmp.arg&, .LPtr);
+            } else {
+                c&.fix_arg(b.jmp.arg&, if(b.jmp.type == .Jretw, => .Wuw, => .WFull));
             };
         };
         for_insts_rev b { i |
@@ -113,6 +117,18 @@ fn insert_redundant_casts(f: *Qbe.Fn) void = {
                     i.to = r;
                 };
             };
+            if i[].op() == .vastart {
+                a := i.arg&[0];
+                i[].set_op(.call);
+                con := Qbe.Con.zeroed();
+                con.type =. CAddr;
+                con.sym.id = f.globals.intern("llvm.va_start.p0".sym().c_str());
+                i.arg&[0] = f.newcon(con&);
+                f.emit(i[][]);
+                i[].set_op(.arg);
+                //i[].set_cls(.Wl);
+                i.arg&[0] = a;
+            };
             x := f.emit(i[][]);
             range(0, 2) { a |
                 c&.fix_arg(x.arg&.index(a), args&[a]);
@@ -120,6 +136,10 @@ fn insert_redundant_casts(f: *Qbe.Fn) void = {
         };
         for_phi b { p | 
             c&.emit_requested_casts(p.to);
+            range(0, p.narg.zext()) { a |
+                // TODO: i think this is wrong if the arg is a constant so it ends up emitting insts here instead of at end of source block?
+                c&.fix_arg(p.arg&.index(a), if(p.cls == .Kw, => .Wuw, => .WFull));
+            };
         };
         f.copy_instructions_from_scratch(b);
     };
@@ -180,7 +200,7 @@ fn fix_arg(c: *CastCtx, arg: *Qbe.Ref, want: Qbe.TmpType) void = {
     if original != want {
         info := c.tmps[id]&;
         range(0, MAX_CASTS) { i | 
-            //@assert(info.casts&[i] != QbeNull, "cast not found");
+            @assert(info.casts&[i] != QbeNull, "cast not found");
             if(info.casts&[i] == QbeNull, => return()); // TODO
             if info.types&[i] == want {
                 arg[] = info.casts&[i];
@@ -233,7 +253,24 @@ fn cast_type(dest: Qbe.TmpType, src: Qbe.TmpType) LlvmCast = {
                 if src == .LBool {
                     return(.ExtendI1);
                 };
+                panic("TODO: to wrod");
             };
+            if (dest == .Wub || dest == .Wsb) {   
+                if (src == .Wuw || src == .Wsw)  {
+                    return(.TruncWtoB);
+                };
+                if src == .WFull {
+                    panic("TODO: TruncLtoB");
+                };
+                panic("TODO: to byte");
+            };
+            if (dest == .Wuh || dest == .Wsh) {   
+                if (src == .Wuw || src == .Wsw)  {
+                    return(.TruncWtoH);
+                };
+                panic("TODO: to hlaf");
+            };
+            
             @panic("tmp.width not set to an llvm type. %", @as(i64) dest);
         };
     }
@@ -257,11 +294,18 @@ fn llvm_types(i: *Qbe.Ins) Ty(Qbe.TmpType, Array(Qbe.TmpType, 2)) = {
         xxx&.index(1)[] = a1;
         return(to, xxx)
     };
-    if(o == .call || o.is_load() || o == .vastart || o == .vaarg, => yield(.WFull, .LPtr, .WFull));
+    if o == .call {
+        yield(if(i.arg&[1] == QbeNull, => .WFull, => .LPtr), .LPtr, .WFull);
+    };
+    if(o.is_load() || o == .vastart || o == .vaarg, => yield(.WFull, .LPtr, .WFull));
+    if(o == .storeb, => yield(.WFull, .Wub, .LPtr));
+    if(o == .storeh, => yield(.WFull, .Wuh, .LPtr));
+    if(o == .argc, => yield(.WFull, .WFull, .LPtr));
     if(o.is_store(), => yield(.WFull, .WFull, .LPtr)); // TODO: could store ptr if thats what you have tho
     if(o == .blit0, => yield(.WFull, .LPtr, .LPtr));
     if(o.between(.alloc4, .alloc16), => yield(.LPtr, .WFull, .WFull));
     if(o.between(.ceqw, .cuod), => yield(.LBool, .WFull, .WFull));
+    if(o == .extub || o == .extsb, => yield(.WFull, .Wub, .WFull));
     yield(.WFull, .WFull, .WFull)
 }
 

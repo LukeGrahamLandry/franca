@@ -1,8 +1,5 @@
 // Adapted from Qbe. MIT License. © 2015-2024 Quentin Carbonneaux <quentin@c9x.me>
 
-fn printfn(_0: *Qbe.Fn, _1: *FILE) void #import("qbe");
-fn printref(_0: Qbe.Ref, _1: *Qbe.Fn, _2: *FILE) void #import("qbe");
-
 fn debug_dump_copy(f: *Qbe.Fn, copy_of: []Qbe.Ref) void = {
     out := f.globals.debug_out;
     write(out, "\n> Copy information:");
@@ -43,4 +40,180 @@ fn debug_dump(f: *Qbe.Fn, m: *RMap) void = {
         }
     };
     write(f.globals.debug_out, "\n");
+}
+
+fn printcon(m: *QbeModule, c: *Qbe.Con, out: *FILE) void ={
+    @match(c.type) {
+        fn CUndef() => ();
+        fn CAddr() => {
+            if c.sym.type == .SThr {
+                write(out, "thread ");
+            };
+            @fmt_write(out, "%", m.str(c.sym.id));
+            if c.bits.i != 0 {
+                @fmt_write(out, "+%", c.bits.i);
+            };
+        }
+        fn CBits() => {
+            if c.flt == 1 {
+                @fmt_write(out, "s_%", c.bits.s);
+                return();
+            };
+            if c.flt == 2 {
+                @fmt_write(out, "d_%", c.bits.d);
+                return();
+            };
+            @fmt_write(out, "%", c.bits.i);
+        }
+    };
+}
+
+fn printref(r: Qbe.Ref, f: *Qbe.Fn, out: *FILE) void = {
+    @match(rtype(r)) {
+        fn RTmp() => {
+            if r.val() < Qbe.Tmp0 {
+                @fmt_write(out, "R%", r.val());
+            } else {
+                @fmt_write(out, "%%", "%", f.tmp[r.val()]&.name());
+            }
+        }
+        fn RCon() => {
+            if r == QbeUndef {
+                write(out, "UNDEF");
+            } else {
+                f.globals.printcon(f.get_constant(r), out);
+            }
+        }
+        fn RSlot() => {
+            @fmt_write(out, "S%", rsval(r));
+        }
+        fn RCall() => {
+            // TODO: fprintf(f, "%04x", r.val);
+            @fmt_write(out, "%", r.val());
+        }
+        fn RType() => {
+            @fmt_write(out, ":%", f.globals.types[r.val()]&.name());
+        }
+        fn RMem() => {
+            i := 0;
+            m := f.mem[r.val()]&;
+            write(out, "[");
+            if m.offset.type != .CUndef {
+                f.globals.printcon(m.offset&, out);
+                i = 1;
+            };
+            if m.base != QbeNull {
+                if i != 0 {
+                    write(out, " + ");
+                };
+                printref(m.base, f, out);
+                i = 1;
+            };
+            if m.index != QbeNull {
+                if i != 0 {
+                    write(out, " + ");
+                };
+                @fmt_write(out, "% * ", m.scale);
+                printref(m.index, f, out);
+            };
+            write(out, "]");
+        }
+        fn RInt() => {
+            @fmt_write(out, "%", r.val());
+        }
+        fn RNull() => {
+            write(out, "R");
+        }
+    }
+}
+
+fn printfn(f: *Qbe.Fn, out: *FILE) void = {
+    fn kname(k: Qbe.Cls) Str = {
+        ktoc := "wlsd";
+        ki: i64 = k.raw().zext();
+        ktoc.slice(ki, ki + 1)
+    }
+
+    @fmt_write(out, "function $%() {\n", f.name());
+    for_blocks f { b | 
+        continue :: local_return;
+        @fmt_write(out, "@%\n", b.name());
+        for_phi b { p | 
+            write(out, "\t");
+            printref(p.to, f, out);
+            @fmt_write(out, " =%c phi ", kname(p.cls));
+            assert(p.narg > 0, "phi with no args");
+            range(0, p.narg.zext()) { n | 
+                @fmt_write(out, "@% ", p.blk[n].name());
+                printref(p.arg&[n], f, out);
+                if (n == p.narg.zext() - 1) {
+                    write(out, "\n");
+                } else {
+                    write(out, ", ");
+                };
+            };
+        };
+        for_insts_forward b { i | 
+            write(out, "\t");
+            if i.to != QbeNull {
+                printref(i.to, f, out);
+                @fmt_write(out, " =% ", kname(i.cls()));
+            };
+            names :: Qbe.O.get_enum_names();
+            id: i64 = i.op().raw().zext();
+            assert(id < names.len(), "invalid opcode number");
+            write(out, names[id]);
+            if i.to == QbeNull {
+                o := i.op();
+                if o == .arg || o == .swap || o == .xcmp || o == .acmp || o == .acmn || o == .afcmp || o == .xtest || o == .xdiv || o == .xidiv {
+                    write(out, kname(i.cls()));
+                };
+            };
+            if i.arg&[0] != QbeNull {
+                write(out, " ");
+                printref(i.arg&[0], f, out);
+            };
+            if i.arg&[1] != QbeNull {
+                write(out, ", ");
+                printref(i.arg&[1], f, out);
+            };
+            write(out, "\n");
+        };
+        
+        jnames :: Qbe.J.get_enum_names();
+        n := jnames[b.jmp.type.raw().zext()];
+        n := n.slice(1, n.len);
+        if is_ret(b.jmp.type) {
+            @fmt_write(out, "\t%", n);
+            if b.jmp.type != .Jret0 || b.jmp.arg != QbeNull {
+                write(out, " ");
+                printref(b.jmp.arg, f, out);
+            };
+            if b.jmp.type == .Jretc {
+                @fmt_write(out, ", :%", f.globals.types.index(f.retty.zext()).name());
+            };
+            write(out, "\n");
+            continue();
+        };
+        
+        if b.jmp.type == .Jhlt {
+            write(out, "\thlt\n");
+            continue();
+        };
+        if b.jmp.type == .Jjmp {
+            if !b.s1.identical(b.link) {
+                @fmt_write(out, "\tjmp @%\n", b.s1.name());
+            };
+            continue();
+        };
+        
+        @fmt_write(out, "\t% ", n);
+        if b.jmp.type == .Jjnz {
+            printref(b.jmp.arg, f, out);
+            write(out, ", ");
+        };
+        assert(!b.s1.is_null() && !b.s2.is_null(), "missing branch target");
+        @fmt_write(out, "@%, @%\n", b.s1.name(), b.s2.name());
+    };
+    write(out, "}\n");
 }

@@ -1,0 +1,215 @@
+// Adapted from Qbe. MIT License. © 2015-2024 Quentin Carbonneaux <quentin@c9x.me>
+
+Aliasing :: @enum(i64) (NoAlias, MayAlias, MustAlias);
+
+fn getalias(a: *Qbe.Alias, r: Qbe.Ref, f: *Qbe.Fn) void = {
+    @match(rtype(r)) {
+        fn RTmp() => {
+            a[] = f.tmp[r.val()].alias;
+            if astack(a.type) {
+                a.type = a.slot.type;
+            };
+            @debug_assert(a.type != .ABot);
+        }
+        fn RCon() => {
+            c := f.con[r.val()]&;
+            if c.type == .CAddr {
+                a.type = .ASym;
+                a.u.sym = c.sym;
+            } else {
+                a.type = .ACon;
+            };
+            a.offset = c.bits.i;
+            a.slot = Qbe.Alias.ptr_from_int(0);
+        }
+        @default => panic("getalias bad ref");
+    };
+}
+
+// note: nothing calls this until port load.c
+fn alias(p: Qbe.Ref, op: i32, sp: i32, q: Qbe.Ref, sq: i32, delta: *i32, f: *Qbe.Fn) Aliasing = {
+    ap := Qbe.Alias.zeroed();
+    aq := Qbe.Alias.zeroed();
+
+    getalias(&ap, p, fn);
+    getalias(&aq, q, fn);
+    ap.offset += op;
+    /* when delta is meaningful (ovlap == 1),
+     * we do not overflow int because sp and
+     * sq are bounded by 2^28 */
+    delta[] = ap.offset - aq.offset;
+    ovlap := ap.offset < aq.offset + sq && aq.offset < ap.offset + sp;
+
+    if astack(ap.type) && astack(aq.type) {
+        /* if both are offsets of the same
+         * stack slot, they alias iif they
+         * overlap */
+        if(ap.base == aq.base && ovlap, return(.MustAlias));
+        return(.NoAlias);
+    };
+
+    if (ap.type == ASym && aq.type == ASym) {
+        /* they conservatively alias if the
+         * symbols are different, or they
+         * alias for sure if they overlap */
+        if(!symeq(ap.u.sym, aq.u.sym), => return(.MayAlias));
+        if(ovlap, => return(.MustAlias));
+        return(.NoAlias);
+    };
+
+    if ((ap.type == .ACon && aq.type == .ACon)
+    || (ap.type == aq.type && ap.base == aq.base)) {
+        @debug_assert(ap.type == .ACon || ap.type == .AUnk);
+        /* if they have the same base, we
+         * can rely on the offsets only */
+        if(ovlap, => return(.MustAlias));
+        return(.NoAlias);
+    };
+
+    /* if one of the two is unknown
+     * there may be aliasing unless
+     * the other is provably local */
+    if (ap.type == .AUnk && aq.type != .ALoc, => return(.MayAlias));
+    if(aq.type == .AUnk && ap.type != .ALoc, => return(.MayAlias));
+
+    .NoAlias
+}
+
+fn escapes(r: Qbe.Ref, f: *Qbe.Fn) bool = {
+    if(rtype(r) != .RTmp, => return(true));
+    a = f.tmp[r.val()].alias&;
+    !astack(a.type) || a.slot.type == .AEsc
+}
+
+fn astack(t: Qbe.AliasType) bool #inline = 
+    t.raw().bit_and(1) == 1; // :OddMeansStack
+
+fn esc(r: Qbe.Ref, f: *Qbe.Fn) void = {
+    @debug_assert(r == QbeNull || rtype(r).raw() <= Qbe.RegKind.RType.raw(), "bad esc");
+    if rtype(r) == .RTmp {
+        a := f.tmp[r.val()].alias&;
+        if astack(a.type) {
+            a.slot.type = .AEsc;
+        };
+    };
+}
+
+// TODO: better error message if you try to conflict the name of this overload set with a constant. 
+
+fn store(r: Qbe.Ref, sz: i32, f: *Qbe.Fn) void = {
+    if rtype(r) == .RTmp {
+        a := f.tmp[r.val()].alias&;
+        if !a.slot.is_null() {
+            @debug_assert(astack(a.type));
+            off := a.offset;
+            m: u64 = if sz >= Qbe.Tmp0 || (off < 0 || off >= Qbe.Tmp0) {
+                (-1).bitcast()
+            } else {
+                (BIT(sz.intcast()) - 1).shift_left(off)
+            };
+            a.slot.u.loc.m = a.slot.u.loc.m.bit_or(m);
+        }
+    }
+}
+
+fn fillalias(f: *Qbe.Fn) void = {
+    each f.tmps() { t |
+        t.alias.type = .ABot;
+    };
+    
+    for_blocks_rpo_forward f { b |
+        for_phi b { p |
+            @debug_assert(rtype(p.to) == .RTmp);
+            a := f.tmp[p.to.val()].alias&;
+            @debug_assert(a.type == .ABot);
+            a.type = .AUnk;
+            a.base = p.to.val().intcast();
+            a.offset = 0;
+            a.slot = Qbe.Alias.ptr_from_int(0);
+        };
+        for_insts_forward b { i |
+            continue :: local_return;
+            if i.op() == .blit1 { // TODO: just skip when handling blit0
+                continue();
+            };
+            
+            a := Qbe.Alias.ptr_from_int(0);
+            if i.to != QbeNull {
+                @debug_assert(rtype(i.to) == .RTmp);
+                a = f.tmp[i.to.val()].alias&;
+                @debug_assert(a.type == .ABot);
+                if i.op().between(.alloc4, .alloc16) {
+                    a.type = .ALoc;
+                    a.slot = a;
+                    a.u.loc.sz = -1;
+                    if rtype(i.arg&[0]) == .RCon {
+                        c := f.get_constant(i.arg&[0]);
+                        x := c.bits.i;
+                        if c.type == .CBits && 0 <= x && x <= Qbe.Tmp0 {
+                            a.u.loc.sz = x.intcast();
+                        };
+                    };
+                } else {
+                    a.type = .AUnk;
+                    a.slot = Qbe.Alias.ptr_from_int(0);
+                };
+                a.base = i.to.val().intcast();
+                a.offset = 0;
+            };
+            if i.op() == .copy {
+                xxx := !a.is_null();
+                @debug_assert(xxx);
+                getalias(a, i.arg&[0], f);
+            };
+            if i.op() == .add {
+                a0 := Qbe.Alias.zeroed();
+                a1 := Qbe.Alias.zeroed();
+                getalias(a0&, i.arg&[0], f);
+                getalias(a1&, i.arg&[1], f);
+                if a0.type == .ACon {
+                    a[] = a1;
+                    a.offset += a0.offset;
+                } else {
+                    if a1.type == .ACon {
+                        a[] = a0;
+                        a.offset += a1.offset;
+                    };
+                };
+            };
+            if i.op() != .blit0 && (i.to == QbeNull || a.type == .AUnk) {
+                if !is_load(i.op()) {
+                    esc(i.arg&[0], f);
+                };
+                if !is_store(i.op()) && i.op() != .argc {
+                    esc(i.arg&[1], f);
+                };
+            };
+            if i.op() == .blit0 {
+                i0 := i;
+                i1 := i.offset(1);
+                @debug_assert(i1.op() == .blit1);
+                @debug_assert(rtype(i1.arg&[0]) == .RInt);
+                sz := abs(rsval(i1.arg&[0]));
+                store(i0.arg&[1], sz, f);
+                // TODO: qbe bumped i here, does that matter or do we just waste a loop iteration.
+                continue();
+            };
+            if is_store(i.op()) {
+                store(i.arg&[1], storesz(i), f);
+            };
+        };
+        if b.jmp.type != .Jretc { // the stack slot's gone when you return so that's not really a meaningful escape
+            esc(b.jmp.arg, f);
+        };
+    };
+    for_blocks f { b |
+        for_phi b { p |
+            range(0, p.narg.zext()) { n |
+                esc(p.arg&[n], f);
+            };
+        };
+    };
+}
+
+::enum_basic(Qbe.AliasType);
+::ptr_utils(Qbe.Alias);

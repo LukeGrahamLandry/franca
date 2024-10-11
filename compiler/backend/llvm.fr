@@ -17,6 +17,7 @@
 // https://discourse.llvm.org/t/rfc-instruction-api-changes-needed-to-eliminate-debug-intrinsics-from-ir/68939/11
 // tho this implies they should be able to parse it
 // https://github.com/llvm/llvm-project/pull/79818
+#include_std("compiler/backend/walk_bc.fr");
 
 // TODO: better error mwssage if you use @enum instead of @tagged. -- Jun 14
 LlvmVal :: @struct(
@@ -25,7 +26,7 @@ LlvmVal :: @struct(
 );
 
 EmitLlvm :: @struct(
-    program: *SelfHosted,
+    comp: CompCtx,
     out: BucketArray(u8),
     current: BbId,
     next_var: i64 = 0,
@@ -43,11 +44,21 @@ EmitLlvm :: @struct(
 );
 
 emit_llvm_impl :: { T :: CodeGen(EmitLlvm); T.emit };
-    
+
+// :TooManyArgsX64
+// TODO: hah, since then ive fixed 8 arg functions on x64 but this has grown and my arm can't do >8 args. 
+fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId), entry: ProgramEntry, arch: Arch, os: Os) BucketArray(u8) #inline = {
+    _ := alloc;  // TODO
+    target: TargetEnv = (arch = arch, os = os);
+    // remember that comptime vtable.emit_llvm = emit_llvm_impl and go_build_yo_self still includes this code regardless.
+    //emit_llvm_impl(comp, fns, entry, target&) // you can use this to not use the precompiled verison but then its really slow.
+    {comp.vtable.emit_llvm}(comp, fns, entry, target&)
+}
+
 // TODO: dependency problem so can't call this `init`
 fn new(comp: CompCtx, alloc: Alloc, arch: Arch, os: Os) EmitLlvm #inline = {
     s: EmitLlvm = (
-        program = comp.data.cast()[][], 
+        comp = comp,
         out = init(12, alloc), 
         current = BbId.zeroed(), 
         debug_info = list(alloc), 
@@ -66,7 +77,7 @@ fn new(comp: CompCtx, alloc: Alloc, arch: Arch, os: Os) EmitLlvm #inline = {
         s.out&.push_all("module asm \".intel_syntax noprefix\"\n");
     };
     
-    if s.program.get_build_options()[].debug_info {
+    if s.comp.get_build_options()[].debug_info {
         s.debug_unit = s&.next_debug();
         s.debug_file = s&.next_debug();
         s.debug_func_type = s&.next_debug();
@@ -111,22 +122,22 @@ fn debug_scope_for_file(self: *EmitLlvm, filename: Str) i64 = {
 fn emit_function_husk(self: *EmitLlvm, fid: FuncId, signeture: PrimSig, $emit_body: @Fn() void) void = {
     start_bucket_index := self.out.i;
     start_index := self.out&.current().len();
-    func := self.program.get_function(fid);
+    func := self.comp.get_function(fid);
     name: List(u8) = list(temp());
     self.fmt_fn_name(fid, name&);
     
     // this has to happen before emit_body because that calls setup which wants to emit debug info for variables. 
-    if self.program.get_build_options()[].debug_info {
+    if self.comp.get_build_options()[].debug_info {
         self.current_debug_info = self.next_debug();
-        place := self.program.codemap.get_whole_line(func.loc);
+        place := self.comp.get_whole_line(func.loc);
         file_scope := self.debug_scope_for_file(place.filename);
-        source_name := self.program.pool.get(func.name); 
+        source_name := self.comp.get_string(func.name); 
         // lldb says <stdin> instead of the filename if you don't have the `file` field. so whats the scope field for then???
         template :: "!% = distinct !DISubprogram(name: \"%\", linkageName: \"%\", unit: !%, scope: !%, file: !%, type: !%, spFlags: DISPFlagDefinition)\n";
         @fmt(self.out&.current(), template, self.current_debug_info, source_name, name.items(), self.debug_unit, file_scope, file_scope, self.debug_func_type);
     };
     
-    if self.program.get_build_options()[].retain_function_names {
+    if self.comp.get_build_options()[].retain_function_names {
         self.out&.push_all("define ccc ");
     } else {
         self.out&.push_all("define private ccc ");
@@ -145,7 +156,7 @@ fn emit_function_husk(self: *EmitLlvm, fid: FuncId, signeture: PrimSig, $emit_bo
         };
     };
     self.out&.current().push_all(" \"frame-pointer\"=\"all\" "); // must be before debug info!
-    if self.program.get_build_options()[].debug_info {
+    if self.comp.get_build_options()[].debug_info {
         @fmt(self.out&.current(), "!dbg !%", self.current_debug_info);
     };
    
@@ -155,7 +166,7 @@ fn emit_function_husk(self: *EmitLlvm, fid: FuncId, signeture: PrimSig, $emit_bo
     
     
     if func.get_flag(.LogIr) {
-        @println("[#log_ir % %]", fid, self.program.pool.get(func.name));
+        @println("[#log_ir % %]", fid, self.comp.get_string(func.name));
         end_bucket_index := self.out.i;
         end_index := self.out&.current().len();
         
@@ -168,7 +179,6 @@ fn emit_function_husk(self: *EmitLlvm, fid: FuncId, signeture: PrimSig, $emit_bo
 };
 
 fn emit_entry_points_and_debug_info(gen: *CodeGen(EmitLlvm), comp: CompCtx, fns: []FuncId, entry: ProgramEntry) void = {
-    program := gen.backend.program;
     @match(entry) {
         fn TestRunnerMain() => {
             gen.backend.out&.push_all("define ccc i64 @main(){\n");
@@ -177,8 +187,8 @@ fn emit_entry_points_and_debug_info(gen: *CodeGen(EmitLlvm), comp: CompCtx, fns:
             // TODO: warn if fns has duplicates
             for fns { f |
                 gen.backend.out&.reserve(100);
-                f = program.follow_redirects(f);
-                func := program.get_function(f);
+                f = comp.follow_redirects(f);
+                func := comp.get_function(f);
                 // note: this only works because void has a fixed typeid value
                 if func.finished_arg.unwrap() == void {
                     @fmt(gen.backend.out&.current(), "   call void @%()\n", (gen.backend&, f));
@@ -199,7 +209,7 @@ fn emit_entry_points_and_debug_info(gen: *CodeGen(EmitLlvm), comp: CompCtx, fns:
     };
 
     self := gen.backend&;
-    if self.program.get_build_options()[].debug_info {
+    if self.comp.get_build_options()[].debug_info {
         version := self.next_debug();
         d_version := self.next_debug();
         level := self.next_debug();
@@ -251,20 +261,18 @@ fn emit_bounce_fn(self: *EmitLlvm, impl_name_callee: Str, fake_decl_name: Str, s
 // TODO: copy-paste from DynamicImport but reversed so its a pain. 
 fn write_export_bounce(self: *EmitLlvm, fid: FuncId) void = {
     self.current_debug_info = 0;
-    func := self.program.get_function(fid);
-    export_name := self.program.pool.get(func.name);
+    func := self.comp.get_function(fid);
+    export_name := self.comp.get_string(func.name);
     internal_name: List(u8) = list(temp()); 
     self.fmt_fn_name(fid, internal_name&);
     
-    f_ty := func.finished_ty().unwrap();
-    cc := func.cc.unwrap();
-    sig := self.program.prim_sig(f_ty, cc).unwrap();
+    sig := {self.comp.vtable.prim_sig}(self.comp.data, func).unwrap();
     self.emit_bounce_fn(internal_name.items(), export_name, sig, false);
 }
 
 fn emit_constant(self: *EmitLlvm, id: BakedVarId) void = {
     self.out&.reserve(100);
-    value := self.program.get_baked(id)[]._1;
+    value := self.comp.get_baked(id)[]._1;
     idx: i64 = id.id.zext();
     
     // :build_options_wasm
@@ -276,7 +284,7 @@ fn emit_constant(self: *EmitLlvm, id: BakedVarId) void = {
     // One extra disadvantage is that the host JavaScript code gets pointer arguments as BigNum instead of Number becuase a double doesn't fit an i64. 
     // Note that constexpr zext doesn't exist anymore so we do a weird dance with bitcasting a vector. 
     // -- Aug 19
-    wasm32 := self.program.get_build_options()[].wasm32;
+    wasm32 := self.comp.get_build_options()[].wasm32;
     
     @match(value&) {
         (fn Zeros(len) => {
@@ -297,7 +305,7 @@ fn emit_constant(self: *EmitLlvm, id: BakedVarId) void = {
                 self.out&.reserve(20);
                 @match(inner) {
                     (fn FnPtr(f) => {
-                        f = self.program.follow_redirects(f);  // TODO: hack because of new deduplication
+                        f = self.comp.follow_redirects(f);  // TODO: hack because of new deduplication
                         if wasm32 {
                             @fmt(self.out&.current(), "i64 bitcast (<2 x i32> <i32 ptrtoint (ptr @% to i32), i32 0> to i64),", (self, f));
                         } else {
@@ -356,14 +364,14 @@ fn emit_special(self: *EmitLlvm, f_id: FuncId, body: *FuncImpl, func: *Func, bc:
                 arg: LinkRenameArg = (
                     target = (arch = self.arch, os = self.os),
                     out = out&,
-                    old_name = self.program.pool.get(name[]),
+                    old_name = self.comp.get_string(name[]),
                 );
                 addr := rawptr_from_int(func.nullable_link_rename_func);
                 addr := assume_types_fn(*LinkRenameArg, void, addr);
                 addr(arg&);
                 out.items()
             } else {
-                self.program.pool.get(name[])
+                self.comp.get_string(name[])
             };
             
             self.forward_declare(bc.signeture, false, import_name);
@@ -373,13 +381,13 @@ fn emit_special(self: *EmitLlvm, f_id: FuncId, body: *FuncImpl, func: *Func, bc:
         }
         fn LlvmIr(code) => { 
             self.next_var = 0;
-            ir := self.program.pool.get(code[]);
+            ir := self.comp.get_string(code[]);
             self.out&.push_all("define private ccc ");
             name := @format("%", (self, bc.func)) temp();
             self.write_header(bc.signeture, name.items()) {arg_index|
                 args := func.arg.bindings.items();
                 arg := args[arg_index].name.Var.name;
-                arg := self.program.pool.get(arg);
+                arg := self.comp.get_string(arg);
                 arg := @format("%%", "%", arg) temp();
                 self.next_var += 1;
                 arg.items()
@@ -446,7 +454,7 @@ fn emit_special_asm(self: *EmitLlvm, body: *FuncImpl, func: *Func, bc: *FnBody, 
             
             prefix := if(self.os == .linux, => "", => "_");
             @fmt(self.out&.current(), "module asm \"%%:\"\n", prefix, (self, bc.func));
-            code := self.program.pool.get(code[]);
+            code := self.comp.get_string(code[]);
             code := code.split_lines(temp());
             for code { inst |
                 @fmt(self.out&.current(), "module asm \"%\"\n", inst);
@@ -509,12 +517,12 @@ fn setup(self: *EmitLlvm, body: *FnBody, vars_out: *List(EmitLlvm.Val)) void = {
     self.next_var = 0;
     // TODO: waste for ssa vars, they just get set to the value. -- Jun 14
     vars := body.vars.items();
-    do_debug := self.program.get_build_options()[].debug_info;
+    do_debug := self.comp.get_build_options()[].debug_info;
     
     file_scope := 0;
     if do_debug {
-        func := self.program.get_function(body.func);
-        place := self.program.codemap.get_whole_line(func.loc);
+        func := self.comp.get_function(body.func);
+        place := self.comp.get_whole_line(func.loc);
         file_scope = self.debug_scope_for_file(place.filename);
     };
     enumerate(vars) {i, ty|
@@ -524,8 +532,8 @@ fn setup(self: *EmitLlvm, body: *FnBody, vars_out: *List(EmitLlvm.Val)) void = {
         @fmt(self.out&.current(), "   % = alloca i8, i32 %, align %\n", v, @as(i64) ty.size.zext(), @as(i64) ty.align.zext()); // uhg % was a bad choice. 
         if do_debug && body.var_names.len > i {
             name := body.var_names[i];
-            if !(name == Flag.UN_NAMED.ident()) {
-                name := self.program.pool.get(name);
+            if !(name.raw() == 0) {
+                name := self.comp.get_string(name);
                 local := self.next_debug();
                 location := self.next_debug();
                 scope := self.current_debug_info;
@@ -561,12 +569,14 @@ fn setup(self: *EmitLlvm, body: *FnBody, vars_out: *List(EmitLlvm.Val)) void = {
     self.out&.push_all("   br label %b0\n"); 
 }
 
+fn raw(a: Symbol) u32 #unsafe_noop_cast;
+
 fn fmt_fn_name(self: *EmitLlvm, f: FuncId, out: *List(u8)) void = {
-    retain_function_names := self.program.get_build_options()[].retain_function_names;
+    retain_function_names := self.comp.get_build_options()[].retain_function_names;
     
     if retain_function_names {
-        func := self.program.get_function(f);
-        real_name := self.program.pool.get(func.name);
+        func := self.comp.get_function(f);
+        real_name := self.comp.get_string(func.name);
         @fmt(out, "%__%", real_name, f.to_index());
     } else {
         @fmt(out, "F%", f.to_index());
@@ -710,14 +720,14 @@ fn inst_call(self: *EmitLlvm, args: Slice(LlvmVal), sig: PrimSig, loc: ?Span, $d
     self.out&.current().push_all(")");
     
     if self.current_debug_info != 0 {
-        // we know self.program.get_build_options()[].debug_info is true. 
+        // we know self.comp.get_build_options()[].debug_info is true. 
         // Fixes "inlinable function call in a function with debug info must have a !dbg location"
         location := self.next_debug();
         line := 1;
         column := 1;
         if loc { loc |
             // TODO: we should track line numbers instead of byte indexes if that's always what we want. -- Sep 24
-            place := self.program.codemap.get_whole_line(loc); // :SLOW
+            place := self.comp.get_whole_line(loc); // :SLOW
             line = place.line;
             column = place.col;
             // TODO: if this is from a macro / inlined something the location could be wrong because current_debug_info uses the file containing the outer function, 
@@ -944,4 +954,8 @@ fn llvm_type(ty: Prim) Str = @match(ty) {
 fn llvm_pair_type(a: Prim, b: Prim) Str = {
     s := @format("{ %, % }", a.llvm_type(), b.llvm_type()) temp();
     s.items()
+}
+
+fn get_whole_line(c: CompCtx, loc: Span) FrancaCodeLine = {
+    {c.vtable.get_whole_line}(c.data, loc)
 }

@@ -2,8 +2,6 @@ fn rs();
 fn assume_owned();
 fn to_index();
 
-// TODO: make these come from some fancy ffi meta program thing -- Apr 25
-AstExpr :: FatExpr;
 UnknownType :: @builtin UnknownType;
 // TODO: HACK: -- May 27
 //      The compiler can't expose this directly because the argument is an enum which is hard to cope with for my current c_call,
@@ -73,6 +71,7 @@ fn ident(self: *Binding) ?Symbol = {
 fn ne(a: FuncId, b: FuncId) bool #redirect(Ty(u32, u32), bool);
 
 fn from_index();
+fn as_index();
 
 fn TypedIndex($T: Type) void = {
     fn as_index(f: T) i64 = f.to_index().zext();
@@ -93,10 +92,12 @@ fn TypedIndex($T: Type) void = {
 fn decode_sig(self: *FnBody, i: u32) *PrimSig = { // Note: not stable if you push again!!
     self.sig_payloads&.index(i.zext())
 } 
+
 // This includes the indirect ret pointer!!
 fn arg_slots(self: *PrimSig) i64 = {
     if(self.first_arg_is_indirect_return, => self.args.len + 1, => self.args.len)
 }
+
 fn decode_switch(cases: *RsVec(SwitchPayload)) Ty([]SwitchPayload, ?BbId) = {
     has_default := cases.last().unwrap()[].value == -1;
     ::if(Ty([]SwitchPayload, ?BbId));
@@ -105,4 +106,54 @@ fn decode_switch(cases: *RsVec(SwitchPayload)) Ty([]SwitchPayload, ?BbId) = {
     } else {
         (cases.items(), .None)
     }
+}
+
+fn get_info(c: CompCtx, type: Type) *TypeMeta = {
+    {c.vtable.get_type_meta}(c.data, type)
+}
+
+fn get_type(c: CompCtx, type: Type) *TypeInfo = {
+    {c.vtable.get_type_info}(c.data, type)
+}
+
+fn get_baked(c: CompCtx, id: BakedVarId) *Ty(rawptr, BakedVar) = {
+    {c.vtable.get_baked}(c.data, id)
+}
+
+fn get_build_options(c: CompCtx) *BuildOptions = {
+    {c.vtable.get_build_options}(c.data)
+}
+
+fn follow_redirects(program: CompCtx, f_id: FuncId) FuncId = {
+    dowhile() {
+        @match(program.get_function(f_id)[].body&) {
+            fn Redirect(target) => {
+                f_id = target[];
+                true
+            }
+            @default => false;
+        }
+    };
+    f_id
+}
+
+FrancaCodeLine :: @struct(filename: Str, line: i64, col: i64, line_text: Span);
+
+// TODO: prepending all this shit to every program is getting a bit dumb. 
+
+fn display(self: *FuncId, out: *List(u8)) void = {
+    @fmt(out, "F%", self[].as_index());
+}
+fn display(self: FuncId, out: *List(u8)) void = {
+    @fmt(out, "F%", self.as_index());
+}
+
+
+fn finished_ty(self: *Func) ?FnType = {
+    if self.finished_arg { arg |
+        if self.finished_ret { ret |
+            return(Some = (arg = arg, ret = ret, arity = @as(u16) self.arg.bindings.len().max(1).trunc()));
+        };
+    };
+    .None
 }

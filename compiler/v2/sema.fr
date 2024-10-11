@@ -685,10 +685,9 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
                             args&.push(ir_ptr);
                             ::RsVec(i64);
                             args := args.rs();
-                            hack := self&;
                             needs_ct := func.cc.expect("known cc!!!") == .CCallRegCt;
                             f_ty: FnType = (arg = i64, ret = void, arity = 1);
-                            @try(hack&.call_dynamic_inner(fn_ptr.int_from_rawptr(), f_ty&, args&, needs_ct)) return;
+                            @try(self.legacy_indirection.cast().call_dynamic_inner(fn_ptr.int_from_rawptr(), f_ty&, args&, needs_ct)) return;
                             
                             func.body = (X86AsmBytes = ir.rs());
                             good = true;
@@ -713,10 +712,9 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
                             args: List(i64) = list(1, temp());
                             args&.push(FnBody.int_from_ptr(body));
                             args := args.rs();
-                            hack := self&;
                             needs_ct := func.cc.expect("known cc!!!") == .CCallRegCt;
                             f_ty: FnType = (arg = i64, ret = void, arity = 1);
-                            @try(hack&.call_dynamic_inner(fn_ptr.int_from_rawptr(), f_ty&, args&, needs_ct)) return;
+                            @try(self.legacy_indirection.cast().call_dynamic_inner(fn_ptr.int_from_rawptr(), f_ty&, args&, needs_ct)) return;
                             
                             if func.get_flag(.LogBc) {
                                 out: List(u8) = list(temp());
@@ -1524,8 +1522,6 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
         @check(self.infer_return(fid)) return;
         ret_ty := func.finished_ret.expect("known ret");
         @log_event("UnsafeNoopCast % -> %", self.log_type(arg_ty), self.log_type(ret_ty)) self;
-        // TODO
-        // assert_eq!(self.program.slot_count(arg_expr.ty), self.program.slot_count(ret_ty));
         expr.expr = (Cast = arg_expr);
         expr.ty = ret_ty;
         expr.done = arg_expr.done;
@@ -3680,11 +3676,8 @@ fn check_quick_eval(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) ?Values = {
                             return(.None);
                         };
                         f_ptr := i64.assume_cast(it.f.expr.Value.bytes&)[];
-                        // SAFETY: we're passing comp_ctx=false so it won't try to use the pointer as a real CompilerRs.
-                        evil_hack := self;
-                        evil_hack := self&;
                         self.finish_layout_deep(it.f.ty);
-                        res := evil_hack&.call_dynamic_values(f_ptr, f.ty&, arg_value&.bytes(), false);
+                        res := self.legacy_indirection.cast().call_dynamic_values(f_ptr, f.ty&, arg_value&.bytes(), false);
                         @match(res) {
                             fn Ok(res) => {
                                 expr.set(res&.clone(self.get_alloc()), f.ty.ret);
@@ -3707,10 +3700,8 @@ fn check_quick_eval(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) ?Values = {
                         if self.get_fn_callable(f_id) { f_ptr |
                             func := self.get_function(f_id);
                             comp_ctx := func.cc.expect("known cc!") == .CCallRegCt;
-                            evil_hack := self;
-                            evil_hack := self&; 
                             self.finish_layout_deep(it.f.ty);
-                            res := evil_hack&.call_dynamic_values(f_ptr.int_from_rawptr(), f, arg_value&.bytes(), comp_ctx);
+                            res := self.legacy_indirection.cast().call_dynamic_values(f_ptr.int_from_rawptr(), f, arg_value&.bytes(), comp_ctx);
                             @match(res) {
                                 fn Ok(res) => {
                                     expr.set(res&.clone(self.get_alloc()), f.ret);
@@ -3815,14 +3806,13 @@ fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
     args&.push(FatExpr.int_from_ptr(invocation.target));
     args := args.rs();
     
-    hack := self&;
     needs_ct := func.cc.expect("known cc!!") == .CCallRegCt;
     self.last_loc = expr.loc;
     f_ty := func.finished_ty().expect("known type once compiled");
     assert(f_ty.ret == fat_expr_type, "tried to call macro with bad ret type. missing overload? \nresolve_in_overloadset assumes someone later will typecheck so giving a garabge match is fine");
     assert(f_ty.arg.eq(fat_expr_type).or(f_ty.arg == pair), "tried to call macro with bad arg type. missing overload? \nresolve_in_overloadset assumes someone later will typecheck so giving a garabge match is fine");
     expr.expr = (Poison = .InProgressMacro);  // they call me RefCell<FatExpr> because im always refing cells 
-    result := @try(hack&.call_dynamic_inner(fn_ptr.int_from_rawptr(), f_ty&, args&, needs_ct)) return;
+    result := @try(self.legacy_indirection.cast().call_dynamic_inner(fn_ptr.int_from_rawptr(), f_ty&, args&, needs_ct)) return;
     expr[] = FatExpr.assume_cast(result&)[];
     @log_event("macro output: %", expr.log(self)) self;
     //walk: MarkNotDone = ();
@@ -3833,11 +3823,11 @@ fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
 // If we're early in bootstrapping and haven't compiled the FatExpr type yet, so some special handling.
 fn early_builtin_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
     invocation := expr.expr.PrefixMacro&;
-    if !invocation.handler.expr&.is(.GetVar) {
-        return(@err("macro calls must be GetVar while bootstrapping. tried to run something too compilicated too soon: %: %", invocation.handler.expr&.tag(), invocation.handler.log(self)));
+    name := @match(invocation.handler.expr&) {
+        fn GetVar(v) => v.name;
+        fn GetNamed(v) => v[];
+        @default => return(@err("macro calls must be GetVar while bootstrapping. tried to run something too compilicated too soon: %: %", invocation.handler.expr&.tag(), invocation.handler.log(self)));
     };
-    
-    name := invocation.handler.expr.GetVar.name;
     @switch(name) {
         @case(Flag.builtin.ident()) => {
             expr[] = @try(self.builtin_macro(invocation.arg[])) return;
