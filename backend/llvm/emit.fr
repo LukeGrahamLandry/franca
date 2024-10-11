@@ -10,10 +10,9 @@ LlvmEmit :: @struct(
 // I think they don't need to know the signeture for the same reason I don't need to know the signeture. 
 fn finish_llvm(m: *QbeModule) void = {
     out: List(u8) = list(temp());
-    each m.llvm_needs_import& { id, need_import | 
-        if need_import[] {
-            name := m.str(id);
-            @fmt(out&, "declare ccc void @%();\n", name);
+    for_symbols m { symbol |
+        if symbol.kind == .Pending {
+            @fmt(out&, "declare ccc void @%();\n", symbol.name);
         };
     };
     write(m.outf, out.items());
@@ -24,7 +23,8 @@ fn emit_llvm(m: *QbeModule, f: *Qbe.Fn) void = {
     self: LlvmEmit = (f = f, out = list(temp()));
     
     n := m.intern(@as(CStr) (ptr = f.name&.as_ptr()));
-    m.llvm_needs_import&.insert(n, false);
+    symbol := m.get_symbol_info(n);
+    symbol.kind = .Local;
     
     private := if(f.lnk.export, => "", => "private ");
     @fmt(self.out&, "define %ccc ", private);
@@ -364,11 +364,6 @@ fn write_ref(self: *LlvmEmit, r: Qbe.Ref, k: Qbe.Cls) void = {
             @match(c.type) {
                 fn CUndef() => @fmt(self.out&, "TODO:undef");
                 fn CAddr() => {
-                    imports := self.f.globals.llvm_needs_import&;
-                    if imports.get(c.sym.id).is_none() {
-                        imports.insert(c.sym.id, true);
-                    };
-                    //@fmt(self.out&, "ptrtoint (ptr @% to i64)", self.f.globals.str(c.sym.id));
                     @fmt(self.out&, " @%", self.f.globals.str(c.sym.id));
                 };
                 fn CBits() => {
@@ -474,7 +469,8 @@ fn emit_llvm(m: *QbeModule, dat: *Qbe.Dat) void = {
             type[] = list(temp());
             value[] = list(temp());
             @fmt(type, "@% = private unnamed_addr global { ", dat.name);
-            m.llvm_needs_import&.insert(m.intern(dat.name), false);
+            symbol := m.get_symbol_info(m.intern(dat.name));
+            symbol.kind = .Local;
         }
         fn DEnd() => {
             if type.items().ends_with(",") {

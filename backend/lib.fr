@@ -19,6 +19,7 @@
 #include_std("backend/arm64/target.fr");
 #include_std("backend/opt/load.fr");
 #include_std("backend/opt/alias.fr");
+//#include_std("backend/opt/inline.fr");
 
 ENABLE_INTERNAL_QBE :: true;  // until i want to enable it on github actions
 LINK_QBE_C :: true;
@@ -67,16 +68,14 @@ QbeModule :: @rec @struct(
     debug_out: *FILE,
     namel := QbeName.ptr_from_int(0), // for reusing memory in opt/ssa.fr between functions. no information shared.
     next_tmp_id = 0,
-    string_table: []Qbe.Bucket,
+    symbols: []SymbolBucket,
     
     // stuff for llvm
-    llvm_needs_import: HashMap(u32, bool),
     llvm_global_value_buf := List(u8).zeroed(),
     llvm_global_type_buf := List(u8).zeroed(),
     
     // stuff for emitting code.
     segments: EnumMap(SegmentType, SegmentCursor),
-    symbols: HashMap(u32, SymbolInfo),  // TODO: i think the high bits of qbe ids are sequential. make this a bucket array. they have to live forever anyway
     gpa: Alloc,
     start_of_writable_code: *u8,
     
@@ -106,10 +105,9 @@ fn init(segment_size: i64, gpa: Alloc, code_alloc: Alloc) QbeModule = {
     m.segments&.insert(.Code, (mmapped = mem.slice(0, segment_size), next = mem.index(0)));
     m.segments&.insert(.MutableData, (mmapped = mem.slice(segment_size, segment_size*2), next = mem.index(segment_size)));
     m.segments&.insert(.ConstantData, (mmapped = mem.slice(segment_size*2, segment_size*3), next = mem.index(segment_size*2)));
-    m.symbols = init(gpa);
-    m.llvm_needs_import = init(gpa);
     m.gpa = gpa;
     m.start_of_writable_code = mem.ptr;
+    m.symbols = gpa.alloc(SymbolBucket, IMask + 1);
     
     m.debug_out = fdopen(STD_ERR, "a".sym().c_str());
     @if(LINK_QBE_C, {
@@ -121,7 +119,6 @@ fn init(segment_size: i64, gpa: Alloc, code_alloc: Alloc) QbeModule = {
         // note: not doing this. using fill_target_info instead. 
         // m.target[] = get_qbe_dylib_variable(Qbe.Target, "T_arm64_apple")[]; 
     }, {
-        m.string_table = gpa.alloc(Qbe.Bucket, IMask + 1);
         m.types  = gpa.box(@type m.types[]);
         
         //m.insb   = gpa.box(@type m.insb[]); // :FUCKED i overflow the size becuase i figured 65k bytes aught to be enough for everyone. -- Oct 8  
@@ -155,6 +152,9 @@ fn get_qbe_dylib_variable($T: Type, $name: Str) *T #generic = {
 
 // TODO: this changes for aot!! remove this! garbage.
 aaaa_out :: @static(TmpFile);
+
+fn inlsave(f: *Qbe.Fn) void #import("qbe");
+fn inlcalls(f: *Qbe.Fn) void #import("qbe");
 
 run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
     mark := __temp_alloc.mark();
@@ -196,9 +196,14 @@ run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
         fillalias(fnn); // for coalesce
         coalesce(fnn); // optional
         filluse(fnn); 
+        filldom(fnn); 
+        ssacheck(fnn); // debug
+        if !m.want_llvm { // TODO: check if this would help it somehow
+            inlcalls(fnn);
+            filluse(fnn); 
+        };
     };
     
-    ssacheck(fnn); // debug
     copy_elimination(fnn); // optional
     //copy(fnn);
     filluse(fnn);
@@ -218,6 +223,7 @@ run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
         return();
     };
     
+    inlsave(fnn);
     {m.target.abi1}(fnn);
     simplify(fnn);
     //simpl(fnn);

@@ -458,17 +458,13 @@ IBits :: 12;
 IMask :: 1.shift_left(IBits) - 1;
 
 fn intern(m: *QbeModule, s: CStr) u32 = {
-    @if(LINK_QBE_C) {
-        intern :: fn(_0: CStr) u32 #import("qbe");
-        return(intern(s));
-    };
     
     h := hash(s).bit_and(IMask.trunc());
-    b := m.string_table.index(h.zext());
-    n := b.nstr;
+    b := m.symbols.index(h.zext());
+    n := b.n;
     strcmp :: fn(a: CStr, b: CStr) i64 #libc;
     range(0, n.zext()) { i |
-        if strcmp(s, b.str[i]) == 0 {
+        if strcmp(s, b.data[i].name) == 0 {
             return(h + i.trunc().shift_left(IBits));
         }
     };
@@ -477,38 +473,56 @@ fn intern(m: *QbeModule, s: CStr) u32 = {
         @panic("interning table overflow");
     };
     if n == 0 {
-        b.str = new(1, .PHeap);
+        b.data = new(1, .PHeap);
     } else {
         if n.bit_and(n - 1) == 0 {
-            b.str&.grow(zext(n + n));
+            b.data&.grow(zext(n + n));
         }
     };
     
-    s   := s.str();
-    mem := m.gpa.alloc(u8, s.len + 1);
-    mem.slice(0, s.len).copy_from(s);
-    mem[s.len] = 0;
-    b.str[n.zext()] = (ptr = mem.ptr);
+    string   := s.str();
+    mem := m.gpa.alloc(u8, string.len + 1);
+    mem.slice(0, string.len).copy_from(string);
+    mem[string.len] = 0;
+    data := b.data.index(n.zext());
+    data[] = SymbolInfo.zeroed();
+    data.name = (ptr = mem.ptr);
+    data.jit_lookup_offset = -1;
     
-    b.nstr = n + 1;
-    h + n.shift_left(IBits)
+    b.n = n + 1;
+    id := h + n.shift_left(IBits);
+    
+    @if(LINK_QBE_C) {
+        // TODO: this is a waste of time that lets me easily use thier parser. 
+        intern :: fn(_0: CStr) u32 #import("qbe");
+        return(intern(s));
+    };
+    
+    id
+}
+
+// unstable!
+fn get_symbol_info(m: *QbeModule, id: u32) *SymbolInfo = {
+    @if(LINK_QBE_C) {
+        // TODO: this is a waste of time that lets me easily use thier parser. 
+        str :: fn(_0: u32) CStr #import("qbe");
+        s := str(id);
+        id = m.intern(s);
+    };
+    bid: i64 = id.bit_and(IMask).zext();
+    bucket := m.symbols[bid];
+    idx := id.shift_right_logical(IBits);
+    bucket.data.index(idx.zext())
 }
 
 fn str(m: *QbeModule, id: u32) CStr = {
-    @if(LINK_QBE_C) {
-        str :: fn(_0: u32) CStr #import("qbe");
-        return(str(id));
-    };
-    bucket := m.string_table[id.bit_and(IMask).zext()];
-    idx := id.shift_right_logical(IBits);
-    @debug_assert(idx < bucket.nstr);
-    bucket.str[idx.zext()]
+    m.get_symbol_info(id)[].name
 }
 
 fn hash(s: CStr) u32 = {
     h: u32 = 0;
     for s { s |
-        h = s.zext() + 17 * h;
+        h = s.zext() + 17 * h; // prime number chosen by fair die roll 
     };
     h
 }

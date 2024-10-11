@@ -1,3 +1,13 @@
+## (Oct 11)
+
+- i think my adding indirection for direct calls really hurt. `c_bindgen sokol` on mine is 330ms instead of 260 with real qbe.
+  but adding inlining of tiny functions gets it to 200ms on both. which supports the theory that i added call overhead.
+- had to add RType as a pass through getinlref for when you inline something that contains another aggragate call.
+- inlining fixes walk_dir and breaks bus_error_baking_constant/baked_constant_tagged_padding.
+- TODO: mine messes up string constants. the word struct in c_bindgen is random gargbage.
+  but that happened without inlining and doesn't for real qbe so its a problem with my asm emit.
+  but perhaps thats also causing the new breaks in tests related to constants and the inlining just revealed a problem there.
+
 ## (Oct 9)
 
 - ported test runner script

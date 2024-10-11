@@ -68,24 +68,18 @@ fn segment_address(self: *QbeModule, segment: SegmentType, offset_in_segment: i6
 //
 fn do_jit_relocations(self: *QbeModule, id: u32, segment: SegmentType, final_offset: i64) void = {
     @assert(final_offset >= 0 && final_offset < self.segments&[segment].mmapped.len, "thats not in the segment");
-    slot := self.symbols&.get_ptr(id);
-    new: SymbolInfo = (Local = (segment = segment, offset = final_offset));
-    slot := or slot {
-        self.symbols&.insert(id, new);
-        return()
-    };
-    old := slot[];
-    slot[] = new;
-    @match(old) {
-        fn Pending(it) => {
-            if self.debug["T".char()] {
-                write(self.debug_out, items(@format("# patch '%' -> %[%]\n", self.str(id), segment, final_offset) temp()));
-            };
-            self.put_jit_addr_in_table(it.jit_lookup_offset, self.segment_address(segment, final_offset));
-            // TODO: do patches so old calls aren't indirect
+    symbol := self.get_symbol_info(id);
+    @assert(symbol.kind != .Local, "Redeclared symbol %", symbol.name);
+    symbol.segment = segment;
+    symbol.offset = final_offset;
+    symbol.kind = .Local;
+    if symbol.jit_lookup_offset != -1 {
+        if self.debug["T".char()] {
+            write(self.debug_out, items(@format("# patch '%' -> %[%]\n", symbol.name, segment, final_offset) temp()));
         };
-        @default => @panic("Redeclared symbol %", self.str(id));
-    };  
+        self.put_jit_addr_in_table(symbol.jit_lookup_offset, self.segment_address(segment, final_offset));
+        // TODO: do patches so old calls aren't indirect
+    };
 }
 
 fn put_jit_addr_in_table(self: *QbeModule, jit_lookup_offset: i64, addr_value: *u8) void = {
@@ -358,37 +352,40 @@ fn maybe_load_from_table(self: *ArmState, c: *Qbe.Con, dest_reg: i64) void = {
         self.inst_bytes_only(encode_adr(distance, dest_reg));
         self.inst_bytes_only(ldr_uo(Bits.X64, dest_reg, dest_reg, 0)); // TODO: this can add the extra u12 you need for adrp so can still do it in 3 instructions.
     };
-    slot := or self.m.symbols&.get(c.sym.id) {
-        // This is the first time we've seen this symbol. so we allocate a slot in the indirect call table. 
-        data := self.m.segments&[.ConstantData]&; // TODO: really this should be in a seperate jit only segment. 
-        data.align_to(8);
-        next_offset := data.mmapped.ptr.ptr_diff(data.next);
-        fixups: RsVec(Relocation) = empty();
-        load_from_table(fixups&, next_offset);
-        self.m.put_jit_addr_in_table(next_offset, u8.ptr_from_raw(tried_to_call_uncompiled));
-        data.next = data.next.offset(8);
-        self.m.symbols&.insert(c.sym.id, (Pending = (fixups = fixups, jit_lookup_offset = next_offset)));
-        if self.f.globals.debug["T".char()] {
-            write(self.f.globals.debug_out, items(@format("# table % is '%'\n", next_offset, self.m.str(c.sym.id)) temp()));
-        };
-        return()
-    };
-    @match(slot) {
-        fn Local(it) => {
+    symbol := self.m.get_symbol_info(c.sym.id);
+    
+    @match(symbol.kind) {
+        fn Local() => {
             // we've already compiled it so just compute its address directly.
             here := u8.int_from_ptr(self.m.segments&[.Code].next);
-            goal := u8.int_from_ptr(self.m.segment_address(it.segment, it.offset));
+            goal := u8.int_from_ptr(self.m.segment_address(symbol.segment, symbol.offset));
             distance := goal - here;
             if self.f.globals.debug["T".char()] {
-                write(self.m.debug_out, items(@format("# direct offset % for '%' %[%]\n", distance, self.m.str(c.sym.id), it.segment, it.offset) temp()));
+                write(self.m.debug_out, items(@format("# direct offset % for '%' %[%]\n", distance, self.m.str(c.sym.id), symbol.segment, symbol.offset) temp()));
             };
-            xxx := it.segment != .Code;
+            xxx := symbol.segment != .Code;
             @debug_assert(xxx || distance < 0, "we must be jumping backwards");
             self.inst_bytes_only(arm_nop); // TODO: make this adrp if needed
             self.inst_bytes_only(encode_adr(distance, @as(u5) dest_reg));
         }
-        fn Dynamic(it) => load_from_table(it.fixups&, it.jit_lookup_offset);
-        fn Pending(it) => load_from_table(it.fixups&, it.jit_lookup_offset);
+        fn Pending() => {
+            if symbol.jit_lookup_offset == -1 {
+                // This is the first time we've seen this symbol. so we allocate a slot in the indirect call table. 
+                data := self.m.segments&[.ConstantData]&; // TODO: really this should be in a seperate jit only segment. 
+                data.align_to(8);
+                next_offset := data.mmapped.ptr.ptr_diff(data.next);
+                symbol.jit_lookup_offset = next_offset;
+                fixups: RsVec(Relocation) = empty();
+                load_from_table(fixups&, next_offset);
+                self.m.put_jit_addr_in_table(next_offset, u8.ptr_from_raw(tried_to_call_uncompiled));
+                data.next = data.next.offset(8);
+                if self.f.globals.debug["T".char()] {
+                    write(self.f.globals.debug_out, items(@format("# table % is '%'\n", next_offset, self.m.str(c.sym.id)) temp()));
+                };
+            } else {
+                load_from_table(symbol.fixups&, symbol.jit_lookup_offset);
+            };
+        }
     };
 }
 

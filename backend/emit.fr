@@ -9,16 +9,36 @@ SegmentType :: @enum(i64) (
     ConstantData,
 );
 
-SymbolInfo :: @tagged(
+SymbolBucket :: @struct(
+    n: u32,
+    data: QList(SymbolInfo),
+);
+    
+SymbolInfo :: @struct(
+    name: CStr,
+    inline: *Qbe.Fn, // nullable
+    fixups: RsVec(Relocation),
+    jit_lookup_offset: i64, // or -1 if not referenced yet 
+    segment: SegmentType, // only valid when kind == Local
+    offset: i64,
+    kind: SymbolKind,
+);
+
+::enum_basic(SymbolKind);
+
+SymbolKind :: @enum(i64) (
     // We haven't compiled this yet so we've emitted references as lookups into a table in the data section. 
-    Pending: @struct(fixups: RsVec(Relocation), jit_lookup_offset: i64),  // :SameFieldOffset
-    // We've already compiled this and we know its close to the code and addressable by a static offset. 
-    Local:   @struct(segment: SegmentType, offset: i64),
-    // This is a dynamic import. 
+    // 
+    // It might also be a dynamic import. 
     // - For jit, references still go through the table because that means we didn't have to make the code memory writeable again if it already started executing. 
     // - For aot, you may want to go through the fixups again and translate them to use a GOT section. 
     //   That way you don't make the loader waste time patching two tables. 
-    Dynamic: @struct(fixups: RsVec(Relocation), jit_lookup_offset: i64, aot_lookup_offset: i64),  // :SameFieldOffset
+    //
+    // For llvm we still track this and emit forward declarations for anything that's still Pending at the end. 
+    //
+    Pending,
+    // We've already compiled this and we know its close to the code and addressable by a static offset. 
+    Local,
 );
 
 RelocationType :: @tagged(
@@ -54,15 +74,11 @@ fn get_addr(self: *QbeModule, name: Str) ?rawptr = {
 
 fn get_addr(self: *QbeModule, name: CStr) ?rawptr = {
     id := self.intern(name);
-    if self.symbols&.get_ptr(id) { s | 
-        @match(s) {
-            fn Local(s) => {
-                segment := self.segments&[s.segment];
-                addr := segment.mmapped.ptr.offset(s.offset);
-                return(Some = u8.raw_from_ptr(addr));
-            }
-            @default => ();
-        };
+    symbol := self.get_symbol_info(id);
+    if symbol.kind == .Local {
+        segment := self.segments&[symbol.segment];
+        addr := segment.mmapped.ptr.offset(symbol.offset);
+        return(Some = u8.raw_from_ptr(addr));
     };
     .None
 }
@@ -161,30 +177,36 @@ fn align_to(s: *SegmentCursor, align: i64) void = {
 }
 
 fn put_jit_addr(self: *QbeModule, name: CStr, addr: rawptr) void = {
-    // TODO: insert if not already there. 
-    if self.symbols&.get_ptr(self.intern(name)) { it | 
-        if it.is(.Dynamic) || it.is(.Pending) {
-            self.put_jit_addr_in_table(it.Dynamic.jit_lookup_offset, u8.ptr_from_raw(addr));
-            // TODO: if pending make it dynamic. 
-            // TODO: error if local
-        };
+    symbol := self.get_symbol_info(self.intern(name));
+    if symbol.kind == .Pending && it.jit_lookup_offset != -1 {
+        // TODO: record even if we haven't referenced it yet so frontend can do this at the beginning. 
+        self.put_jit_addr_in_table(it.jit_lookup_offset, u8.ptr_from_raw(addr));
+        // TODO: do we want to record that its dynamic somewhere? 
     };
 }
 
 // :SLOW insanely inefficient way of doing this. especially when someone tries to add multiple libs. 
 // TODO: keep track of which need to be filled
 fn fill_pending_dynamic_imports(self: *QbeModule, lib: DlHandle) void = {
-    each self.symbols& { id, it | 
-        if it.is(.Dynamic) || it.is(.Pending) {
-            name := self.str(id);
-            found := lib.dlsym(name);
+    for_symbols self { symbol | 
+        if symbol.kind == .Pending && symbol.jit_lookup_offset != -1 {
+            found := lib.dlsym(symbol.name);
             if !found.is_null() {
-                // :SameFieldOffset
-                self.put_jit_addr_in_table(it.Dynamic.jit_lookup_offset, u8.ptr_from_raw(found));
+                self.put_jit_addr_in_table(symbol.jit_lookup_offset, u8.ptr_from_raw(found));
             } else {
                 // TODO: remove this and report at the end.
-                @eprintln("jit missing symbol %", name); // wrong once they add multiple dylibs
-            }
+                @eprintln("jit missing symbol %", symbol.name); // wrong once they add multiple dylibs
+            };
+        };
+    };
+}
+
+// note: don't push symbols in the body!
+fn for_symbols(m: *QbeModule, $body: @Fn(s: *SymbolInfo) void) void = {
+    each m.symbols& { bucket | 
+        bucket := bucket.data.slice(0, bucket.n.zext());
+        each bucket { symbol | 
+            body(symbol);
         };
     };
 }
