@@ -1,3 +1,14 @@
+## (Oct 12)
+
+- can trivially recreate the c_bindgen problem with enum_names_constant.
+  but it works if i use old emit_qbe to make the text and then parse that so its not my emit asm.
+  it's the way i produce the constants in from_bc.
+  unlike the other baked constant tests it still fails when run one at a time.
+  ugh, in AddrOf i was putting its own id instead of the target id.
+- the parser_doesnt_crash safety check fail is during compilation.
+  in emit_func_arm64 on parse_block_until_squiggle.
+  oh interesting, it's just more code for that test than fits in my 256k segment.
+
 ## (Oct 11)
 
 - i think my adding indirection for direct calls really hurt. `c_bindgen sokol` on mine is 330ms instead of 260 with real qbe.
