@@ -330,15 +330,6 @@ fn emit_special_asm(self: *EmitQbe2, body: *FuncImpl, func: *Func, bc: *FnBody, 
             if(arch.ne(Arch.aarch64), => { return(false); });
             fuck := @format("%\0", (self, bc.func)) temp();
             global_module.add_code_bytes(@as(CStr) (ptr = fuck.maybe_uninit.ptr), @as([]u8) (ptr = ptr_cast_unchecked(u32, u8, code.ptr), len = code.len * 4));
-            // qbe spits out asm so we need to add this to that somehow
-            name := @format("%", (self, bc.func)) temp();
-            @fmt(self.inline_asm&, ".text\n.balign 4\n_%:", name.items());
-            
-            for code { inst |
-                v := @as(i64) inst.zext();
-                @fmt(self.inline_asm&, "   .word %\n", v);
-            };
-            
             return(true);
         });
         fn X86AsmText(code) => {
@@ -363,7 +354,7 @@ fn emit_special_asm(self: *EmitQbe2, body: *FuncImpl, func: *Func, bc: *FnBody, 
             };
             name := @format("%", (self, bc.func)) temp();
             self.forward_declare(bc.signeture, false, name.items());
-            
+            // TODO: add_code_bytes like for arm
             prefix := if(self.os == .linux, => "", => "_");
             @fmt(self.inline_asm&, "%%:", prefix, (self, bc.func));
             for code { inst |
@@ -577,7 +568,7 @@ fn inst_call(self: *EmitQbe2, args: Slice(Qbe.Ref), sig: PrimSig, callee: Qbe.Re
     };
     
     shift := if(sig.first_arg_is_indirect_return, => 1, => 0);
-    @debug_assert_eq(args.len, sig.args.len.add(shift));
+    @debug_assert_eq(args.len, sig.args.len.add(shift), "mismatch args");
     
     range(0, sig.args.len) {i|
         ty := sig.args[i];
@@ -655,12 +646,19 @@ fn inst_jump(self: *EmitQbe2, always: BbId, args: Slice(EmitQbe2.Val)) void = {
 }
 
 fn inst_switch(self: *EmitQbe2, info: *RsVec(SwitchPayload), inspected: Qbe.Ref, uid: i64) void = {
+    cmp_op := Qbe.O.ceql;
+    if rtype(inspected) == .RTmp {
+        t := self.b.temporaries.index(inspected.val())[].cls;
+        if t == .Kw {
+            cmp_op = .ceqw;
+        };
+    };
     // :AllOurBlocksUpFront
     normal_branches, default := info.decode_switch();
     next_block := self.b&.push_block();
     for normal_branches { case | 
         value := self.b&.push_literal(case.value);
-        ok := self.b&.push_inst(self.current, .ceql, .Kw, inspected, value);
+        ok := self.b&.push_inst(self.current, cmp_op, .Kw, inspected, value);
         self.b&.end_block(self.current, (type = .Jjnz, arg = ok, target1 = (id = case.block.id + 1), target2 = next_block));
         self.current = next_block;
         next_block = self.b&.push_block();

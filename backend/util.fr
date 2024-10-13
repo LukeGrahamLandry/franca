@@ -276,11 +276,10 @@ fn bsinit(bs: *Qbe.BSet, n: i64) void = {
 
 // use `for` which calls this. 
 fn bsiter(bs: *Qbe.BSet, elt: *i32) bool = {
-    i: i64 = elt[].zext();
-    t := i / Qbe.NBit;
+    t, j := elt[].zext().div_mod(Qbe.NBit);
     if(t >= bs.nt.zext(), => return(false));
     b := bs.t.offset(t)[];
-    b = b.bit_and(bit_not(BIT(i.mod(Qbe.NBit)) - 1));
+    b = b.bit_and(bit_not(BIT(j) - 1));
     while => b == 0 {
         t += 1;
         if(t >= bs.nt.zext(), => return(false));
@@ -316,21 +315,24 @@ fn bscount(bs: *Qbe.BSet) u32 = {
 // TODO: make elt unsigned to the division is free
 fn bshas(bs: *Qbe.BSet, elt: i64) bool #inline = {
     @debug_assert(elt < bs.nt.zext() * Qbe.NBit, "bs oob");
-    slot := bs.t.offset(elt / Qbe.NBit);
-    mask := BIT(elt.mod(Qbe.NBit));
+    i, j := elt.div_mod(Qbe.NBit);
+    slot := bs.t.offset(i);
+    mask := BIT(j);
     slot[].bit_and(mask) != 0
 }
 
 fn bsset(bs: *Qbe.BSet, elt: i64) void #inline = {
     @debug_assert(elt < bsmax(bs), "bs oob");
-    slot := bs.t.offset(elt / Qbe.NBit);
-    slot[] = slot[].bit_or(BIT(elt.mod(Qbe.NBit)));
+    i, j := elt.div_mod(Qbe.NBit);
+    slot := bs.t.offset(i);
+    slot[] = slot[].bit_or(BIT(j));
 }
 
 fn bsclr(bs: *Qbe.BSet, elt: i64) void #inline = {
     @debug_assert(elt < bsmax(bs), "bs oob");
-    slot := bs.t.offset(elt / Qbe.NBit);
-    slot[] = slot[].bit_and(bit_not(BIT(elt.mod(Qbe.NBit))));
+    i, j := elt.div_mod(Qbe.NBit);
+    slot := bs.t.offset(i);
+    slot[] = slot[].bit_and(bit_not(BIT(j)));
 }
 
 fn bsmax(bs: *Qbe.BSet) i64 #inline =
@@ -473,7 +475,17 @@ IBits :: 12;
 IMask :: 1.shift_left(IBits) - 1;
 
 fn intern(m: *QbeModule, s: CStr) u32 = {
+    id := m.my_intern(s);
+    @if(LINK_QBE_C) {
+        // TODO: this is a waste of time that lets me easily use thier parser. 
+        intern :: fn(_0: CStr) u32 #import("qbe");
+        return(intern(s));
+    };
     
+    id
+}
+
+fn my_intern(m: *QbeModule, s: CStr) u32 = {
     h := hash(s).bit_and(IMask.trunc());
     b := m.symbols.index(h.zext());
     n := b.n;
@@ -506,13 +518,6 @@ fn intern(m: *QbeModule, s: CStr) u32 = {
     
     b.n = n + 1;
     id := h + n.shift_left(IBits);
-    
-    @if(LINK_QBE_C) {
-        // TODO: this is a waste of time that lets me easily use thier parser. 
-        intern :: fn(_0: CStr) u32 #import("qbe");
-        return(intern(s));
-    };
-    
     id
 }
 
@@ -522,7 +527,7 @@ fn get_symbol_info(m: *QbeModule, id: u32) *SymbolInfo = {
         // TODO: this is a waste of time that lets me easily use thier parser. 
         str :: fn(_0: u32) CStr #import("qbe");
         s := str(id);
-        id = m.intern(s);
+        id = m.my_intern(s);
     };
     bid: i64 = id.bit_and(IMask).zext();
     bucket := m.symbols[bid];
@@ -531,7 +536,9 @@ fn get_symbol_info(m: *QbeModule, id: u32) *SymbolInfo = {
 }
 
 fn str(m: *QbeModule, id: u32) CStr = {
-    m.get_symbol_info(id)[].name
+    s := m.get_symbol_info(id);
+    @debug_assert(!s.name.ptr.is_null(), "null name for symbol %", id);
+    s.name
 }
 
 fn hash(s: CStr) u32 = {

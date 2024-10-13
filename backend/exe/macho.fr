@@ -1,20 +1,48 @@
 fn output_macho(m: *QbeModule) List([]u8) = {  
-    chunks := list([]u8, temp());
-    bytes := u8.list(temp());
+    chunks := list([]u8, 10, temp());
+    add_data_file_offset := list(*u32, 10, temp());
+    commands := u8.list(16000, temp());
+    command_count := 0;
     
-    header := bytes&.reserve(MachoHeader);
+    header := commands&.reserve(MachoHeader);
     header[] = (
         cpu_type = 0x0100000C, // arm 64bit
         cpu_subtype = 0x00000000,
         file_type = 0x00000002, // Demand paged executable file. (idk, thats what rust uses ¯\_(ツ)_/¯ )
-        commands_count = 0, // TODO: patch
-        commands_size = 0, // TODO: patch
+        commands_count = 0, 
+        commands_size = 0, 
         flags = 0b00000000101000000000000010000101, // (idc, thats what rust uses ¯\_(ツ)_/¯ )
     );
     
-    chunks&.push(bytes.items());
+    ::enum_basic(LoadCommand);
+    // I guess this is to make sure you segfault on low addresses. 
+    // TODO: probably don't do this if we're making a linkable .o file. 
+    {
+        start := commands.len;
+        h := commands&.reserve(LoadCommandHeader);
+        h.type = LoadCommand.SegmentLoad.raw();
+        command_count += 1;
+        cmd := commands&.reserve(SegmentLoad);
+        cmd.name = str_to_16_byte_value("__ZEROPAGE");
+        cmd.address_size = 0x100000000;
+        h.size = trunc(commands.len - start);
+    };
+    
+    
+    header.commands_size = (commands.len - MachoHeader.size_of()).trunc();
+    header.commands_count = command_count.trunc();
+    for add_data_file_offset& { offset | 
+        offset[] += commands.len.trunc();
+    };
+    chunks&.push(commands.items());
+    //chunks&.push(m.segments&[.Code]);
+    //chunks&.push(m.segments&[.MutableData]);
+    //chunks&.push(m.segments&[.ConstantData]);
+    //chunks&.push(m.segments&[.Stubs]);
     chunks
 }
+
+// TODO: do we want to put these helpers in a different file so other people can use them less painfully? 
 
 fn reserve(bytes: *List(u8), $T: Type) *T #generic = {
     bytes.reserve(T.size_of());
@@ -35,4 +63,19 @@ fn zero_pad_to_align(bytes: *List(u8), align: i64) void = {
             bytes.push(0);
         };
     };
+}
+
+fn str_to_16_byte_value(s: Str) u128 = {
+    assert(s.len.le(16), "A segment name cannot be larger than 16 text characters in bytes");
+    low: u64 = 0;
+    high: u64 = 0;
+    enumerate s { i, c |
+        c: u64 = c[].zext();
+        if i < 8 {
+            low = low.bit_or(c.shift_left(i * 8));
+        } else {
+            high = high.bit_or(c.shift_left((i - 8) * 8));
+        };
+    };
+    (low = low, high = high)
 }

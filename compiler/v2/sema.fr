@@ -2257,6 +2257,7 @@ fn type_of(self: *SelfHosted, expr: *FatExpr) Maybe(Type) = {
         }
         fn GetVar(name) => {
             val_ty := or self.scopes.get_var_type(name[]) { 
+                ::if(Type);
                 if name.kind == .Const {
                     v, type := @check(self.find_const(name[], .None)) return;
                     type
@@ -2553,6 +2554,41 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
         attempt.state = 6;
     };
     are_we_done_yet();
+    
+    // this is garbage
+    {
+        enumerate parts { arg_index, arg_expr | 
+            continue :: local_return;
+            @check(self.compile_expr(arg_expr, .None)) return;
+            type := arg_expr.ty;
+            
+            f_i := attempt.options.len;
+            while => f_i > 0 {
+                continue :: local_return;
+                f_i -= 1;
+                reject :: fn() void => {
+                    attempt.options&.unordered_remove(f_i);
+                    continue();
+                };
+                fid := attempt.options[f_i];
+                func := self.get_function(fid);
+                if func.arg.bindings.len != want_arity {
+                    continue();
+                };
+                
+                fn ne(a: bool, b: bool) bool = !(a == b);
+                b := func.arg.bindings.index(arg_index);
+                if b.ty&.ty() { param | 
+                    type := self.get_type(type);
+                    param := self.get_type(param);
+                    if type.is(.Int) && param.is(.Int) && type.Int.signed != param.Int.signed {
+                        reject();
+                    };
+                };
+            };
+            are_we_done_yet();
+        };
+    };
     
     self.last_loc = arg_expr.loc;
     @println("% matching options", attempt.options.len);

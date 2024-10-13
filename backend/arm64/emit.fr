@@ -7,6 +7,7 @@
 // TODO: a function you can call to emit forwarding shims for uncompiled functions. 
 //       so it in emit with the arch independent ir. i guess that means the front end could just do it. 
 // TODO: (when i want to do my own aot) have the addr lookup table in a seperate segment before the functions and then don't include it in the aot binrary, just patch instead. 
+// TODO: take out the internal jump distance checks because we check at the end that the function fits in the segment (jsut also check that its within i19 because why not)
 
 ArmState :: @struct(
     m: *QbeModule,
@@ -193,8 +194,9 @@ fn emit_the_code(self: *ArmState) void #once = {
                     target := local_labels[b.s1.id.zext()];
                     here := self.next_inst_offset();
                     if target != 0 {
-                        // TODO: bounds check
-                        self.inst(branch(s_trunc((target - here) / 4, 26), 0));
+                        distance := (target - here) / 4;
+                        assert(distance.abs() < 1.shift_left(26), "can't jump that far");
+                        self.inst(branch(s_trunc(distance, 26), 0));
                     } else {
                         // we haven't made this block yet.
                         patches&.push(offset_from_start = here, cond = .None, target_bid = b.s1.id.zext(), text_offset = self.buf.len);
@@ -222,8 +224,10 @@ fn emit_the_code(self: *ArmState) void #once = {
                 here := self.next_inst_offset();
                 target := local_labels[b.s2.id.zext()]; // TODO: wrong index if you forget .zext() but it still typechecks. :FUCKED
                 if target != 0 {
+                    distance := (target - here) / 4;
+                    assert(distance.abs() < 1.shift_left(19), "can't jump that far");
                     // TODO: bounds check
-                    self.inst(b_cond(s_trunc((target - here) / 4, 19), cond));
+                    self.inst(b_cond(s_trunc(distance, 19), cond));
                 } else {
                     // we haven't made this block yet.
                     patches&.push(offset_from_start = here, cond = (Some = cond), target_bid = b.s2.id.zext(), text_offset = self.buf.len);
@@ -235,9 +239,9 @@ fn emit_the_code(self: *ArmState) void #once = {
                     target := local_labels[b.s1.id.zext()];
                     here := self.next_inst_offset();
                     if target != 0 {
-                        @assert(target - here < 1.shift_left(28) - 1, "how is your function so big");
-                        // TODO: bounds check
-                        self.inst(branch(s_trunc((target - here) / 4 - 1, 26), 0));
+                        distance := (target - here) / 4 - 1;
+                        @assert(distance.abs() < 1.shift_left(28) - 1, "how is your function so big");
+                        self.inst(branch(s_trunc(distance, 26), 0));
                     } else {
                         // we haven't made this block yet.
                         patches&.push(offset_from_start = here, cond = .None, target_bid = b.s1.id.zext(), text_offset = self.buf.len);
@@ -262,8 +266,10 @@ fn emit_the_code(self: *ArmState) void #once = {
             patch[] = arm_nop;
         } else {
             if p.cond { cc | 
+                assert(distance.abs() < 1.shift_left(19), "cant jump that far");
                 patch[] = b_cond(s_trunc(distance, 19), cc);
             } else {
+                assert(distance.abs() < 1.shift_left(26), "cant jump that far");
                 patch[] = branch(s_trunc(distance, 26), 0);
             };
         };
@@ -335,7 +341,7 @@ fn epilogue_shrink_stack(self: *ArmState) void = {
     if o - 16 <= 65535 {
         self.inst(ldp_post(Bits.X64, fp, lr, sp, @as(i7) 2)); // 16 encoded as imm7/8
         self.inst(movz(Bits.X64, x16, o.trunc() - 16, .Left0));
-        self.inst(add_sr(Bits.X64, sp, sp, x16, Shift.LSL, 0b000000));
+        self.inst(add_er(Bits.X64, sp, sp, x16));
         return();
     };
     
@@ -344,7 +350,7 @@ fn epilogue_shrink_stack(self: *ArmState) void = {
     self.inst(ldp_post(Bits.X64, fp, lr, sp, @as(i7) 2)); // 16 encoded as imm7/8
     self.inst(movz(Bits.X64, x16, bottom, .Left0));
     self.inst(movk(Bits.X64, x16, top, .Left16));
-    self.inst(add_sr(Bits.X64, sp, sp, x16, Shift.LSL, 0b000000));
+    self.inst(add_er(Bits.X64, sp, sp, x16));
 }
 
 // can remove this if i decide to fully give up emitting text. 
@@ -582,7 +588,7 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
             } else {
                 if (s <= 65535) {
                     self.inst(movz(Bits.X64, reg, s.trunc(), .Left0));
-                    self.inst(add_sr(Bits.X64, reg, fp, reg, .LSL, 0));
+                    self.inst(add_er(Bits.X64, reg, fp, reg));
                 } else {
                     panic("TODO: addr");
                     fprintf(e.f,
@@ -644,8 +650,8 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
             }
         }
         // TODO: these could kinda be data, the encodings are the same for many of them.
-        fn add()  => bin(@as(F) fadd, fn(s, d, a, b) => if(a == sp, => add_er(s, d, a, b), => add_sr(s, d, a, b, .LSL, 0))); // :SpEncoding
-        fn sub()  => bin(@as(F) fsub, fn(s, d, a, b) => if(a == sp, => sub_er(s, d, a, b), => sub_sr(s, d, a, b, .LSL, 0))); // :SpEncoding
+        fn add()  => bin(@as(F) fadd, fn(s, d, a, b) => if(a == sp, => add_er(s, d, a, b), => add_sr(s, d, a, b, .LSL, 0))); // could always use *_er but then the disassembly looks dumb
+        fn sub()  => bin(@as(F) fsub, fn(s, d, a, b) => if(a == sp, => sub_er(s, d, a, b), => sub_sr(s, d, a, b, .LSL, 0))); // ^
         fn mul()  => bin(@as(F) fmul, fn(s, d, a, b) => madd(s, d, a, b, xzr));
         fn div()  => bin(@as(F) fdiv, fn(s, d, a, b) => sdiv(s, d, a, b)); // TODO: if you pass it here you force all calls to be inline :FUCKED
         fn udiv() => int_bin(fn(s, d, a, b) => udiv(s, d, a, b));
@@ -894,8 +900,9 @@ fn encode_adrp_add(dest: *u8, src: *u8, reg: u5) Ty(u32, u32) = {
     
     distance := dest - src;
     adr_range :: 1.shift_left(21);
-    if dest.abs() < adr_range { // TODO: untested because i have such big segments
-        return(encode_adr(distance, reg), arm_nop);
+    if dest.abs() < adr_range {  // TODO: untested because i have such big segments
+        // if its an import, you need the extra nop so you take up the right amount of space for the relocation when doing AOT. 
+        return(encode_adr(distance, reg), arm_nop); 
     };
     
     page_offset := dest.shift_right_logical(12) - src.shift_right_logical(12);

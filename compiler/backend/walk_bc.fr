@@ -72,7 +72,6 @@ fn CodeGen($B: Type) Type = {
             continue :: local_return;
             fid := gen.pending&.pop().unwrap();
             if(gen.funcs_done&.get(fid.to_index().zext()), => continue()); // might have been added multiple times
-            gen.funcs_done&.set(fid.to_index().zext(), temp());
             
             func := comp.get_function(fid);
             // Note: compile before checking callees! // TODO: return error instead
@@ -81,7 +80,25 @@ fn CodeGen($B: Type) Type = {
                 @println("failed compile %", comp.get_string(func.name));
                 comp.report_error(err)
             };  // TODO: return error instead
-            gen&.add_pending_callees(func);
+            
+            // sort the functions to make sure we can inline calls to intrinsics
+            if func.mutual_callees.len == 0 {
+                not_done_count := 0;
+                for func.callees { f |  
+                    if !gen.funcs_done&.get(f.to_index().zext()) && !gen.pending.items().contains(f&) {
+                        not_done_count += 1;
+                        gen.pending&.push(f);
+                    }
+                };
+                if not_done_count > 0 {
+                    gen.pending&.insert(gen.pending.len - not_done_count, fid);
+                    continue();
+                };
+            } else {
+                gen&.add_pending_callees(func);
+            };
+            
+            gen.funcs_done&.set(fid.to_index().zext(), temp());
             
             xx := {comp.vtable.emit_bc}(comp.data, fid, .Aot);    // TODO: fix parsing to allow this as a quick expr
             body := or xx { err |
@@ -152,7 +169,8 @@ fn CodeGen($B: Type) Type = {
         for func.callees { c |
             if !self.funcs_done&.get(c.to_index().zext()) {
                 self.pending&.push(c);
-                @debug_assert(!self.program.get_function(c).get_flag(.ComptimeOnly), "AOT calls .ComptimeOnly function");
+                func := self.program.get_function(c);
+                @debug_assert(!func.get_flag(.ComptimeOnly), "AOT calls .ComptimeOnly function %", self.program.get_string(func.name));
             };
         };
         for func.mutual_callees { c |
@@ -401,3 +419,8 @@ fn get_debug_loc(block: *BasicBlock, inst_index: i64) ?Span = {
     if(loc.low == 0 && loc.high == 0, => return(.None));
     (Some = loc)
 }
+
+:: {
+    fn eq(a: FuncId, b: FuncId) bool #redirect(Ty(u32, u32), bool);
+    DerefEq(FuncId);
+};
