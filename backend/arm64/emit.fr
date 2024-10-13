@@ -20,16 +20,18 @@ ArmState :: @struct(
 fn emit_func_arm64(m: *QbeModule, f: *Qbe.Fn, text: *FILE) []u8 = {
     // :TempAsmText :SLOW
     name: CStr = (ptr = f.name&.as_ptr());
-    s := items(@format(".text\n.balign 4\n.globl _%\n_%:\n", name, name) temp());
-    write(text, s);
+    if m.want_text_asm {
+        s := items(@format(".text\n.balign 4\n.globl _%\n_%:\n", name, name) temp());
+        write(text, s);
+    };
     
-    // We know we're emitting the function right here so we can do old relocations now. 
+    // We know we're emitting the function right here so we can do old fixups now. 
     name_id := m.intern(@as(CStr) (ptr = f.name&.as_ptr()));
     
     m.align_to(.Code, 4);  // should never be unaligned anyway but we live in fear
     start_offset := m.current_offset(.Code);
     self: ArmState = (m = m, f = f, frame = 0, padding = 0, start_of_function = start_offset, buf = list(temp()));
-    m.do_jit_relocations(name_id, .Code, start_offset);
+    m.do_jit_fixups(name_id, .Code, start_offset);
     
     self&.emit_the_code();
     write(text, self.buf.items());
@@ -67,35 +69,60 @@ fn segment_address(self: *QbeModule, segment: SegmentType, offset_in_segment: i6
 //       but for data constants with pointers we'll need to remember what relocations to ask the loader to do at runtime. 
 //       would be great if my language had nice relative pointers and then you wouldn't have to deal with that as much
 //
-fn do_jit_relocations(self: *QbeModule, id: u32, segment: SegmentType, final_offset: i64) void = {
+fn do_jit_fixups(self: *QbeModule, id: u32, segment: SegmentType, final_offset: i64) void = {
     @assert(final_offset >= 0 && final_offset < self.segments&[segment].mmapped.len, "thats not in the segment");
     symbol := self.get_symbol_info(id);
     @assert(symbol.kind != .Local, "Redeclared symbol %", symbol.name);
     symbol.segment = segment;
     symbol.offset = final_offset;
     symbol.kind = .Local;
-    if symbol.jit_lookup_offset != -1 {
-        if self.debug["T".char()] {
-            write(self.debug_out, items(@format("# patch '%' -> %[%]\n", symbol.name, segment, final_offset) temp()));
-        };
-        self.put_jit_addr_in_table(symbol.jit_lookup_offset, self.segment_address(segment, final_offset));
-        // TODO: do patches so old calls aren't indirect
+    dest := self.segment_address(symbol.segment, symbol.offset);
+    self.do_fixups(dest, symbol.fixups.items());
+    // Since it's a local symbol, we don't care about the relocations anymore. The linker never needs to know. 
+    symbol.fixups&.drop(self.gpa);
+}
+
+fn do_fixups(self: *QbeModule, address: *u8, fixups: []Fixup) void = {
+    each fixups { fixup | 
+        @match(fixup.type) {
+            fn Call() => {
+                if self.debug["T".char()] {
+                    @fmt_write(self.debug_out, "# patch call % calls %\n", u8.int_from_ptr(fixup.patch_at), u8.int_from_ptr(address));
+                };
+                distance := ptr_diff(fixup.patch_at, address) / 4;
+                in_range := distance.abs() < 1.shift_left(26);
+                if !in_range { 
+                    // This happens when it's an imported function so its not in our reserved block of memory.
+                    // For AOT we'll tell the loader to put the right offset here. 
+                    stubs := self.segments&.index(.Stubs);
+                    distance = ptr_diff(fixup.patch_at, stubs.next) / 4;
+                    trampoline: []u32 = (ptr = ptr_cast_unchecked(u8, u32, stubs.next), len = 3);
+                    reg := Arm64Reg.IP0.raw();
+                    i_page, i_off := encode_adrp_add(address, stubs.next, @as(u5) reg);
+                    trampoline[0] = i_page;
+                    trampoline[1] = i_off;
+                    trampoline[2] = br(reg, 0);
+                    stubs.next = stubs.next.offset(trampoline.len * 4);
+                };
+                assert(distance.abs() < 1.shift_left(26), "can't even jump to trampoline, thats bad.");
+                inst := ptr_cast_unchecked(u8, u32, fixup.patch_at);
+                inst[] = b(s_trunc(distance, 26), 1);
+            }
+            fn InReg(it) => {
+                if self.debug["T".char()] {
+                    @fmt_write(self.debug_out, "# patch addr % refs %\n", u8.int_from_ptr(fixup.patch_at), u8.int_from_ptr(address));
+                };
+                assert(it.increment == 0, "TODO: offset symbols");
+                i_page, i_off := encode_adrp_add(address, fixup.patch_at, @as(u5) it.r);
+                inst: []u32 = (ptr = ptr_cast_unchecked(u8, u32, fixup.patch_at), len = 2);
+                inst[0] = i_page;
+                inst[1] = i_off;
+            }
+        }
     };
 }
 
-fn put_jit_addr_in_table(self: *QbeModule, jit_lookup_offset: i64, addr_value: *u8) void = {
-    data := self.segments&[.ConstantData]&;
-    lookup_addr := data.mmapped.ptr.offset(jit_lookup_offset);
-    ptr_cast_unchecked(u8, *u8, lookup_addr)[] = addr_value;
-    if self.debug["T".char()] {
-        if addr_value.identical(u8.ptr_from_raw(tried_to_call_uncompiled)) {
-            write(self.debug_out, items(@format("# reserve table % -> %\n", jit_lookup_offset, u8.int_from_ptr(addr_value)) temp()));
-        } else {
-            write(self.debug_out, items(@format("# save table % -> %\n", jit_lookup_offset, u8.int_from_ptr(addr_value)) temp()));
-        };
-    };
-}
-
+// TODO: is this better than brk? 
 tried_to_call_uncompiled :: @as(rawptr) fn() void = {
     @panic("TODO: backend jitted code tried to call uncompiled function");
 };
@@ -354,10 +381,12 @@ fn align_to(m: *QbeModule, segment: SegmentType, align: i64) void = {
     m.segments&.index(segment).align_to(align);
 }
 
-fn maybe_load_from_table(self: *ArmState, c: *Qbe.Con, dest_reg: i64) void = {
+// TODO: rename this. 
+fn loadaddr_bits(self: *ArmState, c: *Qbe.Con, dest_reg: i64) void = {
     symbol := self.m.get_symbol_info(c.sym.id);
     
     @match(symbol.kind) {
+        fn DynamicPatched() => panic("TODO: handle predeclared import");
         fn Local() => {
             // we've already compiled it so just compute its address directly.
             distance := self.m.distance_between(.Code, self.m.current_offset(.Code), symbol.segment, symbol.offset);
@@ -366,74 +395,17 @@ fn maybe_load_from_table(self: *ArmState, c: *Qbe.Con, dest_reg: i64) void = {
             };
             xxx := symbol.segment != .Code;
             @debug_assert(xxx || distance < 0, "we must be jumping backwards");
-            //self.inst_bytes_only(encode_adr(distance, dest_reg));
-            //self.inst_bytes_only(arm_nop);
-            //self.inst_bytes_only(arm_nop);
-            
-            //hi19, lo2, bottom12 := split_adrp(distance);
-            dest := u8.int_from_ptr(self.m.segment_address(symbol.segment, symbol.offset));
-            src := u8.int_from_ptr(self.m.segment_address(.Code, self.m.current_offset(.Code)));
-            page_offset := dest.shift_right_logical(12) - src.shift_right_logical(12);
-            high := page_offset.shift_right_logical(2).bit_and(1.shift_left(19) - 1);
-            low := page_offset.bit_and(0b11);
-            bottom12 := @as(u12) @as(i64) dest.bit_and(1.shift_left(12) - 1);
-            self.inst_bytes_only(adrp(high, low, dest_reg));
-            self.inst_bytes_only(add_im(Bits.X64, dest_reg, dest_reg, bottom12, 0));
-            self.inst_bytes_only(arm_nop);
+            i_page, i_off := encode_adrp_add(self.m.segment_address(symbol.segment, symbol.offset), self.m.segment_address(.Code, self.m.current_offset(.Code)), @as(u5) dest_reg);
+            self.inst_bytes_only(i_page);
+            self.inst_bytes_only(i_off);
         }
         fn Pending() => {
-            if symbol.jit_lookup_offset == -1 {
-                // This is the first time we've seen this symbol. so we allocate a slot in the indirect call table. 
-                self.m.align_to(.ConstantData, 8);// TODO: really this should be in a seperate jit only segment. 
-                next_offset := self.m.current_offset(.ConstantData);
-                symbol.jit_lookup_offset = next_offset;
-                fixups: RsVec(Relocation) = empty();
-                self.m.put_jit_addr_in_table(next_offset, u8.ptr_from_raw(tried_to_call_uncompiled));
-                data := self.m.segments&[.ConstantData]&;
-                data.next = data.next.offset(8);
-                if self.f.globals.debug["T".char()] {
-                    write(self.f.globals.debug_out, items(@format("# table % is '%'\n", next_offset, self.m.str(c.sym.id)) temp()));
-                };
-            };
             patch_addr := self.m.segment_address(.Code, self.m.current_offset(.Code));
             symbol.fixups&.push((patch_at = patch_addr, type = (InReg = (r = dest_reg, increment = 0))), self.m.gpa);
-            distance := self.m.distance_between(.Code, self.m.current_offset(.Code), .ConstantData, symbol.jit_lookup_offset);
-            if self.m.debug["T".char()] {
-                write(self.m.debug_out, items(@format("# ref table %, offset % for '%'\n", symbol.jit_lookup_offset, distance, self.m.str(c.sym.id)) temp()));
-            };
-            dest_reg: u5 = dest_reg;
-            
-            //self.inst_bytes_only(encode_adr(distance, dest_reg));
-            //self.inst_bytes_only(ldr_uo(Bits.X64, dest_reg, dest_reg, 0));
-            //self.inst_bytes_only(arm_nop);
-            
-            dest := u8.int_from_ptr(self.m.segment_address(.ConstantData, symbol.jit_lookup_offset));
-            src := u8.int_from_ptr(self.m.segment_address(.Code, self.m.current_offset(.Code)));
-            page_offset := dest.shift_right_logical(12) - src.shift_right_logical(12);
-            high := page_offset.shift_right_logical(2).bit_and(1.shift_left(19) - 1);
-            low := page_offset.bit_and(0b11);
-            bottom12 := @as(u12) @as(i64) dest.bit_and(1.shift_left(12) - 1);
-            self.inst_bytes_only(adrp(high, low, dest_reg));
-            self.inst_bytes_only(add_im(Bits.X64, dest_reg, dest_reg, bottom12, 0));
-            self.inst_bytes_only(ldr_uo(Bits.X64, dest_reg, dest_reg, 0)); // TODO: use this guy's immediate
+            self.inst_bytes_only(brk(0x0123));
+            self.inst_bytes_only(brk(0x0456));
         }
     };
-}
-
-fn encode_adr(distance: i64, dest_reg: u5) u32 = {
-    @assert(distance.abs() < 1.shift_left(21), "cant reference that far % (TODO: can just use more insts)", distance);
-    high := distance.shift_right_arithmetic(2).bit_and(1.shift_left(19) - 1);
-    low := distance.bit_and(0b11);
-    adr(high, low, dest_reg)
-}
-
-fn split_adrp(distance: i64) Ty(u19, u2, u12) = {
-    bottom12 := distance.bit_and(1.shift_left(12) - 1);
-    page := distance.shift_right_logical(12);
-    high := page.shift_right_logical(2).bit_and(1.shift_left(19) - 1);
-    low := page.bit_and(0b11);
-    
-    (high, low, bottom12)
 }
 
 fn loadaddr(self: *ArmState, c: *Qbe.Con, dest: i64, reg_name: Str, do_text: bool) void = {
@@ -442,7 +414,7 @@ fn loadaddr(self: *ArmState, c: *Qbe.Con, dest: i64, reg_name: Str, do_text: boo
     //p = l[0] == '"' ? "" : T.assym;
     @match(c.sym.type) {
         fn SGlo() => {
-            self.maybe_load_from_table(c, dest);
+            self.loadaddr_bits(c, dest);
             if do_text && self.m.want_text_asm {
                 // :TempAsmText
                 // when outputting text we just let the linker deal with it. 
@@ -451,7 +423,6 @@ fn loadaddr(self: *ArmState, c: *Qbe.Con, dest: i64, reg_name: Str, do_text: boo
                 } else {
                     @fmt(self.buf&, "\tadrp\t%, %\n\tadd\t%, %, #:lo12:%\n", reg_name, symbol_name, reg_name, reg_name, symbol_name);
                 };
-                @fmt(self.buf&, "\tnop\n");
             };
         }
         fn SThr() => {
@@ -634,22 +605,24 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
                 };
                 
                 symbol := self.m.get_symbol_info(c.sym.id);
-                can_go_direct := symbol.kind == .Local;
-                
-                if can_go_direct {  
-                    distance := self.m.distance_between(.Code, self.m.current_offset(.Code), symbol.segment, symbol.offset) / 4;
-                    can_go_direct = distance.abs() < 1.shift_left(26);
-                    if can_go_direct {
+                @match(symbol.kind) {
+                    fn DynamicPatched() => panic("TODO: handle predeclared import");
+                    fn Local() => {
+                        // already compiled it so branch there directly
+                        distance := self.m.distance_between(.Code, self.m.current_offset(.Code), symbol.segment, symbol.offset) / 4;
+                        assert(distance.abs() < 1.shift_left(26), "can't call that far but I don't let modules be that big yet.");
                         self.inst_bytes_only(b(s_trunc(distance, 26), 1));
                     };
+                    fn Pending() => {
+                        // haven't compiled it yet so will need a patch. 
+                        patch_at := self.m.segments&[.Code].next;
+                        symbol.fixups&.push((patch_at = patch_at, type = .Call), self.m.gpa);
+                        self.inst_bytes_only(brk(0x0789));
+                        if self.m.debug["T".char()] {
+                            @fmt_write(self.m.debug_out, "# pending call % calls %\n", u8.int_from_ptr(patch_at), symbol.name);
+                        };
+                    }
                 };
-                
-                if !can_go_direct { 
-                    callee = TMP(Arm64Reg.IP0.raw()); // x16 can never be live at a call. 
-                    self.loadcon(c, callee.int_reg(), .Kl, false);
-                    self.inst_bytes_only(br(callee.int_reg(), 1));
-                };
-                
                 if self.m.want_text_asm {
                     // dynamic link things it wont let you adrp to? you can only bl
                     l := self.m.str(c.sym.id);
@@ -658,9 +631,6 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
                     p := str(p);
                     p := if(l.ptr[] == "\"".ascii(), => "", => p);
                     @fmt(self.buf&, "\tbl %%\n", p, l);
-                    if !can_go_direct { // padding so the offsets match
-                        @fmt(self.buf&, "\tnop\n\tnop\n\tnop\n");
-                    };
                 };
             } else {
                 self.inst(br(callee.int_reg(), 1));
@@ -909,6 +879,30 @@ fn inst(self: *ArmState, opcode: u32) void = {
 fn next_inst_offset(self: *ArmState) i64 = {
     code := self.m.segments&[.Code]&;
     ptr_diff(code.mmapped.ptr, code.next) - self.start_of_function
+}
+
+fn encode_adr(distance: i64, dest_reg: u5) u32 = {
+    @assert(distance.abs() < 1.shift_left(21), "cant reference that far % (TODO: can just use more insts)", distance);
+    high := distance.shift_right_arithmetic(2).bit_and(1.shift_left(19) - 1);
+    low := distance.bit_and(0b11);
+    adr(high, low, dest_reg)
+}
+
+fn encode_adrp_add(dest: *u8, src: *u8, reg: u5) Ty(u32, u32) = {
+    dest := u8.int_from_ptr(dest);
+    src := u8.int_from_ptr(src);
+    
+    distance := dest - src;
+    adr_range :: 1.shift_left(21);
+    if dest.abs() < adr_range { // TODO: untested because i have such big segments
+        return(encode_adr(distance, reg), arm_nop);
+    };
+    
+    page_offset := dest.shift_right_logical(12) - src.shift_right_logical(12);
+    high := page_offset.shift_right_logical(2).bit_and(1.shift_left(19) - 1);
+    low := page_offset.bit_and(0b11);
+    bottom12 := @as(u12) @as(i64) dest.bit_and(1.shift_left(12) - 1);
+    (adrp(high, low, reg), add_im(Bits.X64, reg, reg, bottom12, 0))
 }
 
 fn sub_er(sf: Bits, dest: RegO, a: RegI, b: RegI) u32 =

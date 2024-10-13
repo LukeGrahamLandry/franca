@@ -3,9 +3,10 @@
 //! https://en.wikipedia.org/wiki/Mach-O
 //! note: if you're ever tempted to use this code for something don't forget to use buffered printing. :SLOW
 
+#include_std("backend/bits/macho.fr");
 fn main() void = {
     // TODO: use cli arg
-    path := "a.o";
+    path := "a.out";
     //path := "target/franca/aarch64-apple-darwin/franca2";
     //path := "bindings/qbe/qbe_merged.dylib";
     
@@ -39,6 +40,20 @@ fn main() void = {
                     @println("          section_name: %", name);
                     name: []u8 = (ptr = ptr_cast_unchecked(u128, u8, header.segment_name&), len = 16);
                     @println("          segment_name: %", name);
+                    
+                    if header.relocations_count != 0 {
+                        @println("          % relocations:", header.relocations_count);
+                        relocations := ptr_cast_unchecked(u8, RelocationEntry, full_bytes.ptr.offset(header.relocations_file_offset.zext()));
+                        relocations: []RelocationEntry = (ptr = relocations, len = header.relocations_count.zext());
+                        for relocations { r | 
+                            symbol := r.packed_fields.bit_and(1.shift_left(24) - 1); // index in __LINKEDIT Symbol Table (when extern=true?) 
+                            relative := r.packed_fields.shift_right_logical(24).bit_and(0b1) == 1;
+                            length := r.packed_fields.shift_right_logical(25).bit_and(0b11); // (byte, word, long, quad)
+                            extern := r.packed_fields.shift_right_logical(27).bit_and(0b1) == 1;
+                            type := r.packed_fields.shift_right_logical(28).bit_and(0b1111); // 4=ARM64_RELOC_PAGEOFF12, 3=ARM64_RELOC_PAGE21
+                            @println("          - (offset = %, symbol = %, relative = %, length = %, extern = %, type = %)", r.offset, symbol, relative, length, extern, type);
+                        };
+                    };
                 };
                 //@println("current offset is %", ptr_diff(start, bytes.ptr));
             };
@@ -299,221 +314,3 @@ fn pop_type(bytes: *[]u8, $T: Type) *T #generic = {
 fn display(a: *u64, out: *List(u8)) void = a[].display(out);
 fn display(a: *u16, out: *List(u8)) void = a[].display(out);
 fn display(a: *u8, out: *List(u8)) void = a[].display(out);
-
-macho_magic :: 0xfeedfacf;
-MachoHeader :: @struct(
-    magic: u32 = macho_magic,
-    cpu_type: u32,
-    cpu_subtype: u32,
-    file_type: u32,
-    commands_count: u32,
-    commands_size: u32,
-    flags: u32,
-    _reserved: u32 = 0x00000000,
-);
-
-// "If a load command starts with 0x80000000 bit set that means the load command is necessary in order to be able to load or run the binary."" 
-LoadCommand :: @enum(u32) (
-    SegmentLoad = 0x00000019,
-    LinkLibrary = 0x0000000C,  // will have full file path to the dynamically linked shared library.
-    LinkLibrarySelf = 0x0000000D,
-    LinkEditSymbolInfo  = 0x0000000B,
-    LoadDynamicLinker  = 0x0000000E,  // just a c string
-    LinkEditSymbolTable = 0x00000002,
-    MinimumOsVersion    = 0x00000032,
-    FunctionStarts      = 0x00000026,
-    MainEntryPoint      = 0x80000028,
-    SourceVersion       = 0x0000002A,
-    DataInCode          = 0x00000029,
-    CodeSigneture       = 0x0000001D,
-    ApplicationUuid     = 0x0000001B,
-    ChainedFixups       = 0x80000034,
-    ExportsTrie         = 0x80000033,
-);
-
-LoadCommandHeader :: @struct(
-    type: u32,
-    size: u32,
-);
-
-SegmentLoad :: @struct(
-    name: u128, 
-    address: u64,      // offset from base address? 
-    address_size: u64, // so how many bytes we want this segment to take up. 
-    file_offset: u64,  // where in the file does the data start. 
-    size: u64,         // if this is smaller than address size, the extra is filled in with zeros.
-    max_prot: u32,     // MemPerm "Maximum virtual memory protections"
-    init_prot: u32,    // MemPerm "Initial virtual memory protections"
-    section_count: u32, 
-    flag: u32,
-); // Followed by <section_count> of SegmentSection
-
-// TODO: have a FlagSet(MemPerm) type. 
-MemPerm :: @enum(u32) (
-    Read    = 0b00000000000000000000000000000001,
-    Write   = 0b00000000000000000000000000000010,
-    Execute = 0b00000000000000000000000000000100,
-);
-
-SegmentSection :: @struct(
-    section_name: u128, 
-    segment_name: u128,  // must match SegmentLoad64.name
-    address: u64,     
-    size: u64, 
-    file_offset: u32, 
-    alignment: u32,   
-    relocations_file_offset: u32,
-    relocations_count: u32,
-    flag: u32,
-    _reserved1 := 0x00000000,
-    _reserved2 := 0x00000000,
-    _reserved3 := 0x00000000,
-);
-
-LinkLibrary :: @struct(
-    string_offset: u32 = 24,
-    time_date_stamp: u32,
-    current_version: u32,
-    compatible_version: u32,
-    // then a CStr. size of this load command includes the length of the string.
-);
-
-LoadDynamicLinker :: @struct(
-    string_offset: u32 = 12,
-    // then a CStr. size of this load command includes the length of the string.
-);
-
-LinkEditSymbolTable :: @struct(
-    // symbol table is a list of SymbolEntry
-    symbols_offset: u32, // from start of file
-    symbol_count: u32,
-    // strings table is a blob of null terminated strings
-    strings_offset: u32, // from start of file
-    strings_size: u32, // total size in bytes, NOT number of strings
-);
-
-SymbolEntry :: @struct(
-    name_offset: u32,
-    symbol_type: u8,
-    section_number: u8,
-    data_info: u16, // library ordinal number
-    symbol_address: u64,
-);
-
-LinkEditSymbolInfo :: @struct(
-    local_symbol_index: u32,
-    local_symbol_count: u32,
-    external_symbol_index: u32,
-    external_symbol_count: u32,
-    undefined_symbol_index: u32,
-    undefined_symbol_count: u32,
-    content_table_offset: u32,
-    content_table_count: u32,
-    module_table_offset: u32,
-    module_table_count: u32,
-    referenced_symbol_offset: u32,
-    referenced_symbol_count: u32,
-    indirect_symbol_offset: u32,
-    indirect_symbol_count: u32,
-    external_relocation_offset: u32,
-    external_relocation_count: u32,
-    local_relocation_offset: u32,
-    local_relocation_count: u32,
-);
-
-MinimumOsVersion :: @struct(
-    platform_type: u32,
-    minimum_os_version: u32,
-    sdk_version: u32,
-    number_of_tools_used: u32,
-); // followed by number_of_tools_used of ToolType
-
-ToolType :: @struct(
-    type: u32,
-    version: u32,
-);
-
-MainEntryPoint :: @struct(
-    entry_offset: u64,  // in __TEXT?
-    stack_size: u64, // or zero
-);
-
-SourceVersion :: @struct(
-    version: u64, 
-);
-
-// There are a bunch of these: FunctionStarts, DataInCode, CodeSigneture, ChainedFixups, ExportsTrie
-LinkEditBlob :: @struct(
-    offset: u32, // will be in __LINKEDIT but the offset measures from start of file. 
-    size: u32,
-);
-
-// DataInCode's LinkEditBlob points to a list of these
-DataInCodeEntry :: @struct(
-    offset: u32,
-    length: u16,
-    kind: u16,
-);
-
-ApplicationUuid :: @struct(
-    uuid: u128,
-);
-
-ChainedFixupsHeader :: @struct(
-    version: u32,
-    starts_offset: u32,
-    imports_offset: u32,
-    symbols_offset: u32,
-    imports_count: u32,
-    imports_format: u32, // (_=1, _addend=2, _addend64=3)
-    symbols_format: u32, // 0 means uncompressed?
-);
-
-ChainedStartsInSegment :: @struct(
-    size: u32,
-    page_size: u16,
-    pointer_format: u16,
-    segment_offset: u64,
-    max_valid_pointer: u32,
-    page_count: u16,
-    // followed by Array(u16, page_count) offset to first fixup on the page
-);
- 
-
-u128 :: @struct(low: u64, high: u64);
-fn str_to_16_byte_value(s: Str) u128 = {
-    assert(name.len.le(16), "A segment name cannot be larger than 16 text characters in bytes");
-    low := 0;
-    high := 0;
-    enumerate s { (i: i64, c: u8) |
-        c := @as(i64) c;
-        if(i.lt(8)) {
-            high = high.bit_or(c.left_shift(i));
-        } {
-            low = low.bit_or(c.sub(8).left_shift(i));
-        };
-    };
-    (low = low, high = high)
-}
-
-// TODO: which endianness?? 
-
-// TODO: check if aligned and be less dumb. 
-fn push(self: *List(u8), v: u32) void = {
-    self.push((@as(i64) v).bit_and(@as(i64) 0xFF000000));
-    self.push((@as(i64) v).bit_and(@as(i64) 0x00FF0000));
-    self.push((@as(i64) v).bit_and(@as(i64) 0x0000FF00));
-    self.push((@as(i64) v).bit_and(@as(i64) 0x000000FF));
-}
-
-// TODO: check if aligned and be less dumb. 
-fn push(self: *List(u8), v: u64) void = {
-    self.push((@as(i64) v).bit_and(@as(i64) 0xFF00000000000000));
-    self.push((@as(i64) v).bit_and(@as(i64) 0x00FF000000000000));
-    self.push((@as(i64) v).bit_and(@as(i64) 0x0000FF0000000000));
-    self.push((@as(i64) v).bit_and(@as(i64) 0x000000FF00000000));
-    self.push((@as(i64) v).bit_and(@as(i64) 0x00000000FF000000));
-    self.push((@as(i64) v).bit_and(@as(i64) 0x0000000000FF0000));
-    self.push((@as(i64) v).bit_and(@as(i64) 0x000000000000FF00));
-    self.push((@as(i64) v).bit_and(@as(i64) 0x00000000000000FF));
-}

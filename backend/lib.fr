@@ -20,6 +20,8 @@
 #include_std("backend/opt/load.fr");
 #include_std("backend/opt/alias.fr");
 #include_std("backend/opt/inline.fr");
+#include_std("backend/exe/macho.fr");
+#include_std("backend/bits/macho.fr");
 
 ENABLE_INTERNAL_QBE :: true;  // until i want to enable it on github actions
 LINK_QBE_C :: true;
@@ -78,7 +80,6 @@ QbeModule :: @rec @struct(
     // stuff for emitting code.
     segments: EnumMap(SegmentType, SegmentCursor),
     gpa: Alloc,
-    start_of_writable_code: *u8,
     
     // TODO: everything that touches these needs to be rewritten eventually. 
     want_text_asm := false,
@@ -102,12 +103,15 @@ fn init_default_module() QbeModule =
 fn init(segment_size: i64, gpa: Alloc, code_alloc: Alloc) QbeModule = {
     m := QbeModule.zeroed();
     m.segments = EnumMap(SegmentType, SegmentCursor).zeroed();
-    mem := code_alloc.alloc(u8, segment_size * 3); // TODO: ask for the alignment we need.
-    m.segments&.insert(.Code, (mmapped = mem.slice(0, segment_size), next = mem.index(0)));
-    m.segments&.insert(.MutableData, (mmapped = mem.slice(segment_size, segment_size*2), next = mem.index(segment_size)));
-    m.segments&.insert(.ConstantData, (mmapped = mem.slice(segment_size*2, segment_size*3), next = mem.index(segment_size*2)));
+    mem := code_alloc.alloc(u8, segment_size * 4); // TODO: ask for the alignment we need.
+    make_segment :: fn(s: SegmentType, start: i64, end: i64) void => {
+        m.segments&.insert(s, (mmapped = mem.slice(start, end), next = mem.index(start), start_of_writable_code = mem.index(start)));
+    };
+    make_segment(.Code, 0, segment_size);
+    make_segment(.MutableData, segment_size, segment_size*2);
+    make_segment(.ConstantData, segment_size*2, segment_size*3);
+    make_segment(.Stubs, segment_size*3, segment_size*4);
     m.gpa = gpa;
-    m.start_of_writable_code = mem.ptr;
     m.symbols = gpa.alloc(SymbolBucket, IMask + 1);
     
     m.debug_out = fdopen(STD_ERR, "a".sym().c_str());

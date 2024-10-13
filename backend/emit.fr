@@ -1,12 +1,14 @@
 SegmentCursor :: @struct(
     mmapped: []u8,
     next: *u8,
+    start_of_writable_code: *u8,
 );
 
 SegmentType :: @enum(i64) (
     Code,
     MutableData,
     ConstantData,
+    Stubs,
 );
 
 SymbolBucket :: @struct(
@@ -17,7 +19,7 @@ SymbolBucket :: @struct(
 SymbolInfo :: @struct(
     name: CStr,
     inline: *Qbe.Fn, // nullable
-    fixups: RsVec(Relocation),
+    fixups: RsVec(Fixup),
     jit_lookup_offset: i64, // or -1 if not referenced yet 
     segment: SegmentType, // only valid when kind == Local
     offset: i64,
@@ -39,32 +41,40 @@ SymbolKind :: @enum(i64) (
     Pending,
     // We've already compiled this and we know its close to the code and addressable by a static offset. 
     Local,
+    // This is an import and we've already patched it in the jitted code. 
+    DynamicPatched,
 );
 
-RelocationType :: @tagged(
+FixupType :: @tagged(
     InReg: @struct(r: i64, increment: i64),
     Call,
 );
 
-Relocation :: @struct(
+Fixup :: @struct(
     patch_at: *u8,
-    type: RelocationType,
+    type: FixupType,
 );
 
 // TODO: i dont trust calling this multiple times on the same module... thats important to fix. 
 fn make_exec(self: *QbeModule) void = {
+    self.bump_exec_segment(.Code);
+    self.bump_exec_segment(.Stubs);
+}
+
+fn bump_exec_segment(self: *QbeModule, segment: SegmentType) void = {
     prot := bit_or(@as(i64) MapProt.Exec, @as(i64) MapProt.Read);
-    end := self.segments&[.Code].next&;
-    len := self.start_of_writable_code.ptr_diff(end[]);
+    segment := self.segments&.index(segment);
+    end := segment.next&;
+    len := segment.start_of_writable_code.ptr_diff(end[]);
     if(len == 0, => return());
-    res := mprotect(u8.raw_from_ptr(self.start_of_writable_code), len, prot); 
+    res := mprotect(u8.raw_from_ptr(segment.start_of_writable_code), len, prot); 
     assert(res.value.eq(0), "mprotect failed");
-    clear_instruction_cache(u8.raw_from_ptr(self.start_of_writable_code), u8.raw_from_ptr(end[]));
+    clear_instruction_cache(u8.raw_from_ptr(segment.start_of_writable_code), u8.raw_from_ptr(end[]));
         
     PAGE_SIZE :: 16384; // TODO: ask the os for this. we're wasting hella memory on linux. 
     page_start := u8.int_from_ptr(end[]) / PAGE_SIZE * PAGE_SIZE;
     end[] = u8.ptr_from_int(page_start + PAGE_SIZE);
-    self.start_of_writable_code = end[];
+    segment.start_of_writable_code = end[];
 }
 
 fn get_addr(self: *QbeModule, name: Str) ?rawptr = {
@@ -110,7 +120,7 @@ fn emit_data_to_segment(self: *QbeModule, dat: *Qbe.Dat) void = {
         fn DStart() => {
             segment.align_to(8);
             id := self.intern(dat.name);
-            self.do_jit_relocations(id, .MutableData, segment.mmapped.ptr.ptr_diff(next[]));
+            self.do_jit_fixups(id, .MutableData, segment.mmapped.ptr.ptr_diff(next[]));
         }
         fn DEnd() => {
             @assert(ptr_diff(segment.mmapped.ptr, next[]) < segment.mmapped.len, "too much data");  
@@ -167,10 +177,11 @@ fn emit_data_to_segment(self: *QbeModule, dat: *Qbe.Dat) void = {
 // TODO: have this emit to text too so you don't have to do both
 fn add_code_bytes(self: *QbeModule, name: CStr, bytes: []u8) void = {
     name_id := self.intern(name);
+    symbol := self.get_symbol_info(name_id);
     code := self.segments&[.Code]&;
     code.align_to(4);
     start_offset := ptr_diff(code.mmapped.ptr, code.next);
-    self.do_jit_relocations(name_id, .Code, start_offset);
+    self.do_jit_fixups(name_id, .Code, start_offset);
     dest := slice(code.next, bytes.len);
     dest.copy_from(bytes);
     code.next = code.next.offset(bytes.len);
@@ -185,21 +196,20 @@ fn align_to(s: *SegmentCursor, align: i64) void = {
 
 fn put_jit_addr(self: *QbeModule, name: CStr, addr: rawptr) void = {
     symbol := self.get_symbol_info(self.intern(name));
-    if symbol.kind == .Pending && it.jit_lookup_offset != -1 {
-        // TODO: record even if we haven't referenced it yet so frontend can do this at the beginning. 
-        self.put_jit_addr_in_table(it.jit_lookup_offset, u8.ptr_from_raw(addr));
-        // TODO: do we want to record that its dynamic somewhere? 
-    };
+    @assert(symbol.kind == .Pending, "Redeclared symbol %", name);
+    symbol.kind = .DynamicPatched;
+    self.do_fixups(u8.ptr_from_raw(addr), symbol.fixups.items());
 }
 
 // :SLOW insanely inefficient way of doing this. especially when someone tries to add multiple libs. 
-// TODO: keep track of which need to be filled
+// TODO: store a list of the pending ones so don't have to iterate them all. 
 fn fill_pending_dynamic_imports(self: *QbeModule, lib: DlHandle) void = {
     for_symbols self { symbol | 
-        if symbol.kind == .Pending && symbol.jit_lookup_offset != -1 {
+        if symbol.kind == .Pending {
             found := lib.dlsym(symbol.name);
             if !found.is_null() {
-                self.put_jit_addr_in_table(symbol.jit_lookup_offset, u8.ptr_from_raw(found));
+                symbol.kind = .DynamicPatched;
+                self.do_fixups(u8.ptr_from_raw(found), symbol.fixups.items());
             } else {
                 // TODO: remove this and report at the end.
                 @eprintln("jit missing symbol %", symbol.name); // wrong once they add multiple dylibs

@@ -13,6 +13,7 @@ fn main() void = {
     run := false;
     debug := false;
     llvm := false;
+    want_exe := false;
     global_module[].want_text_asm = true;
     args := cli_args();
     pop :: fn() => {
@@ -61,6 +62,11 @@ fn main() void = {
                 print(HELP);
                 exit(0);
             };
+            @case("-e") => {
+                want_exe = true;
+                global_module[].want_text_asm = false;
+                pop();
+            };
             @default => {
                 if a.ends_with(".fr") {// TODO: ugh don't care about the file extension 
                     pop();
@@ -107,14 +113,24 @@ fn main() void = {
     handle_dbg :: fn(s: CStr) void = ();
     
     parse(infile, "<file>".sym().c_str(), handle_dbg, emit_data, run_qbe_passes);
-    {global_module[].target.emitfin}(global_module[].outf);
+    if want_exe {
+        // TODO: just stick this in emitfin?
+        chunks := output_macho(global_module);
+        for chunks { chunk | 
+            write(outfile, chunk);
+        };
+        fclose(outfile);
+    } else {
+        {global_module[].target.emitfin}(global_module[].outf);
+    };
     if llvm {
         global_module.finish_llvm(); // TODO: this should just be in emitfin
     };
+    
     fclose(infile);
     if run {
-        global_module.make_exec();
         global_module.fill_from_libc();
+        global_module.make_exec();
         f := or global_module.get_addr("main") {
             panic("couldn't find main()")
         };

@@ -8,6 +8,11 @@
 - the parser_doesnt_crash safety check fail is during compilation.
   in emit_func_arm64 on parse_block_until_squiggle.
   oh interesting, it's just more code for that test than fits in my 256k segment.
+- using adrp for stuff and bigger segments also fixed the broken constants tests.
+  so i was probably fucking up the offseting math with adr and in my too many hours fixing it got it right.
+- did patching instead of the indirect table. its a lot faster (only noticable without inlining).
+  trampolines if its too far because its imported from a dylib, which nicely matches what you have to do with \_\_stubs for aot.
+  its just a bit of a pain for jitting becuase now that has to be executable so you can't just poke an address in like with the data table.
 
 ## (Oct 11)
 
