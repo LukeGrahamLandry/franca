@@ -2,7 +2,13 @@
 
 - improve tracy zones so you can actually see the dependency hierarchy.
   previously it was just flat because of how i unroll the recursion.
-- add comptime resolve_overload and use it in format_into. 435->410
+- add comptime resolve_overload and use it in format_into. 435->410.
+- don't care enough to figure out what's making cranelift flaky.
+  My own x64 supports the whole language now so i don't rely on it anymore.
+  And somehow it's 730ms to run c_bindgen vs 530 for my old unoptimising and 120 for new qbe.
+  so there's no point if its worse than doing nothing. (might just be heavily punished by not inlining anything but my old one doesn't either so that seems fair).
+  tho calling franca_comptime_cranelift_flush less often gets it to 650ms so maybe im just forcing a lot of indirect jumps and being unfair.
+  but thats still slower. i want to like it but it seems more trouble than its worth for me.
 
 ## (Oct 13)
 

@@ -60,24 +60,12 @@ fn emit_bc_and_jit(program: *SelfHosted, f: FuncId) PRes #once = {
     
     opts := program.get_build_options();
     
-    call_cranelift :: fn() => {
-        @if(INCLUDE_COMPTIME_CRANELIFT, {
-            data := program.cranelift.expect("cranelift backend to be initilized");
-            log_ir := func.get_flag(.LogIr);
-            log_asm := func.get_flag(.LogAsm);
-            franca_comptime_cranelift_emit(data, f, body, program.legacy_indirection.cast(), log_ir, log_asm);
-        }, panic("unreachable: cranelift not included"));
-    };
-    
     @match(opts.comptime_jit) {
         fn CompilerJit() => {
             addr := program.do_self_jit(body);
             program.put_jitted_function(f, addr);
         }
-        fn Cranelift() => {
-            call_cranelift();
-            program.flush_cranelift();
-        }
+        fn New() => panic("TODO: new backend");
     };
     func.set_flag(.RealAsmDone);
     
@@ -231,29 +219,6 @@ fn print_llvm_mc_dis(arch: Str, hex: Str) void = {
     if(!success, => eprintln("ICE(debugging): couldn't disassemble"));
     out.remove();
 } 
-
-fn get_backend_vtable() *BackendImportVTable = {
-    vtable := @static(BackendImportVTable);
-    vtable.get_jitted_function = fn(self: *SelfHosted, f: FuncId) ?rawptr = {
-        x := self.get_fn_old(f);
-        if x.is_some() { // needed now with mixed backend
-            self.jitted&.bump_dirty();
-        };
-        x
-    };
-    vtable.put_jitted_function = put_jitted_function;
-    vtable.get_jit_addr = fn(self: *SelfHosted, id: BakedVarId) rawptr = {
-        val := self.get_baked(id); 
-        val._0
-    };
-    vtable
-}
-
-BackendImportVTable :: @struct(
-    get_jitted_function: @FnPtr(self: *SelfHosted, f: FuncId) ?rawptr,
-    put_jitted_function: @FnPtr(self: *SelfHosted, f: FuncId, addr: rawptr) void,
-    get_jit_addr: @FnPtr(self: *SelfHosted, id: BakedVarId) rawptr,
-);
 
 PAGE_SIZE :: 16384; // TODO: ask the os for this
 

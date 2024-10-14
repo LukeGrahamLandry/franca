@@ -1,9 +1,9 @@
 #include_std("compiler/build.fr");
 #include_std("compiler/backend/llvm.fr");
 
-fn load_src(vtable: *ImportVTable, include_cranelift: bool) Ty(CompCtx, *ComptimeLibs) = {
+fn load_src(vtable: *ImportVTable) Ty(CompCtx, *ComptimeLibs) = {
     src := temp().read_to_string("compiler/main.fr");
-    cfg: CompilerBuildOptions = (include_cranelift = include_cranelift);
+    cfg: CompilerBuildOptions = ();
     opts := vtable.default_build_options();
     opts.deduplicate_bytecode = true;
     opts.retain_function_names = false;
@@ -21,10 +21,6 @@ fn load_src(vtable: *ImportVTable, include_cranelift: bool) Ty(CompCtx, *Comptim
         };
         if extra.str() == "-spam" {
             cfg.spam_debug = true;
-        };
-        if extra.str() == "-x86" {
-            // you don't need this just to target x86, only when running on it. 
-            // opts.comptime_jit = .Cranelift;
         };
         if extra.str() == "-x64" {
             panic("for now use -x86 instead of -x64 (yes i know thats dumb sorry)");
@@ -75,7 +71,6 @@ fn driver(vtable: *ImportVTable) void = {
     x86 := false;
     arch := Arch.aarch64;
     os := Os.macos;
-    include_cranelift := false;
     slow := false;
     keep_ir := false;
     trace := false;
@@ -99,9 +94,6 @@ fn driver(vtable: *ImportVTable) void = {
             linux = true;
             os = .linux;
         };
-        if arg.str() == "-include-cranelift" {
-            include_cranelift = true;
-        };
         if arg.str() == "-opt=none" {
             slow = true;
         };
@@ -112,7 +104,7 @@ fn driver(vtable: *ImportVTable) void = {
             trace = true;
         };
     };
-    c, libs := load_src(vtable, include_cranelift);
+    c, libs := load_src(vtable);
     
     new_main := c.get_unique_named("main").unwrap();
     exports := (@list(new_main) temp()).items();
@@ -152,7 +144,7 @@ fn driver(vtable: *ImportVTable) void = {
         } else {
             args&.push("-Os");
         };
-        // if not linking cranelift_comptime or tracy could just not `-c` and do it in one step but meh. 
+        // if not linkin tracy could just not `-c` and do it in one step but meh. 
         args&.push_all(@slice ("-o", @fmt_str("%/franca2.o", out_dir), "-c", "-g"));
         target_triple := "aarch64-apple-darwin";
         if static {
@@ -203,14 +195,6 @@ fn driver(vtable: *ImportVTable) void = {
                 args&.push_all(@slice(
                     "-o", compiler_exe_path, @fmt_str("%/franca2.o", out_dir), 
                     "-target", target_triple));
-                if include_cranelift {
-                    assert(!static && x86, "TODO: cranelift");
-                    args&.push("crates/comptime_cranelift/target/x86_64-unknown-linux-gnu/release/libcomptime_cranelift.a");
-                    // this fixes undefined symbol: _Unwind_Backtrace <more spew of garbage omitted>
-                    // https://github.com/rust-lang/rust/issues/47493
-                    // you'd think panic=abort or build-std=std,panic_abort would fix it too but no. 
-                    args&.push_all(@slice("-l", "gcc_s"));
-                };
                 if static {
                     args&.push("-Wl,-z,common-page-size=65536,-z,max-page-size=65536"); // TODO: dont have this? its for blink
                     args&.push("-static");
@@ -222,13 +206,6 @@ fn driver(vtable: *ImportVTable) void = {
         
             args := libs.get_aot_objects();
             args&.push_all(@slice ("-o", compiler_exe_path, @fmt_str("%/franca2.o", out_dir)));
-            if include_cranelift {
-                cl_path := if(x86, 
-                    => "crates/comptime_cranelift/target/x86_64-apple-darwin/release/libcomptime_cranelift.a", 
-                    => "crates/comptime_cranelift/target/release/libcomptime_cranelift.a");
-                @println("Inluding %", cl_path);
-                args&.push(cl_path);
-            };
             if x86 {
                 args&.push_all(@slice("-target", target_triple));
             };
