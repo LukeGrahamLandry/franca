@@ -140,10 +140,9 @@ fn Slice($T: Type) Type = {
         memmove(dest, src, size_of(T) * len);
     }
     
-    // TODO: do this myself without calling into libc. like copy_aligned. 
     // note: you can't call T.zeroed() here because it wants to comptime call us. 
     fn set_zeroed(self: Self) void #inline = 
-        memset(T.raw_from_ptr(self.ptr), 0, self.len * size_of(T));
+        set_zero_aligned(T.raw_from_ptr(self.ptr), self.len * size_of(T), align_of(T));
   
     // TODO: sad to JIT compile this for all types when emitting AOT, not just needed. :SLOW
     //       can outline this because it can't call bake_relocatable_value(T) directly anyway. but should fix the actual problem anyway.
@@ -530,5 +529,15 @@ fn copy_aligned(dest: rawptr, src: rawptr, count_bytes: i64, $align: i64) void =
         dest[] = src[];
         dest = dest.offset(1); // units are T not bytes!
         src = src.offset(1);
+    };
+}
+
+fn set_zero_aligned(dest: rawptr, count_bytes: i64, $align: i64) void = {
+    @if(@run align == 0) return();
+    T :: UInt(align * 8); ::ptr_utils(T);
+    dest := T.ptr_from_raw(dest); 
+    range(0, count_bytes / T.size_of()) { _ |
+        dest[] = 0;
+        dest = dest.offset(1); // units are T not bytes!
     };
 }

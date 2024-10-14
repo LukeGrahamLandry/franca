@@ -1,3 +1,22 @@
+## (Oct 14)
+
+- improve tracy zones so you can actually see the dependency hierarchy.
+  previously it was just flat because of how i unroll the recursion.
+- add comptime resolve_overload and use it in format_into. 435->410
+
+## (Oct 13)
+
+- so long on wrong sp encoding for epiloge with large stack frame.
+  should have been obvious because it was bus-error-ing between the last line of a function and the next line in the caller.
+  (still cant run the frontend on new backend but it gets farther)
+- get backend to compile itself. had to fix #redirects of i64->i32 because it treats those as different types.
+- made walk_bc do callees first so it can inline intrinsics more reliably (and qbe gets things in a better order).
+  that gets c_bindgen to 120ms. so thats like 30% slower than llvm, thats pretty damn good. with -unsafe tho llvm goes 90->40 but mine only gets to 110.
+  so still a long way to go. maybe inlining things with branches would make a big difference. if just single block functions was a 115% improvement.
+  presumably im also generating pathologically stupid but slightly bigger functions.
+
+- renumber doesn't work if you have out of order constants because it just assumes they're from an upper scope.
+
 ## (Oct 12)
 
 - can trivially recreate the c_bindgen problem with enum_names_constant.

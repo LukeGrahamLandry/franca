@@ -67,12 +67,18 @@ fn CodeGen($B: Type) Type = {
             backend = new(comp, alloc, target.arch, target.os),
         );
         
+        work_stack := FuncId.list(libc_allocator);
+        work_stack&.push_all(fns);
         emitted_functions := 0;
-        while(=> gen.pending.len.ne(0)){
+        while(=> work_stack.len.ne(0)){
             continue :: local_return;
-            fid := gen.pending&.pop().unwrap();
-            if(gen.funcs_done&.get(fid.to_index().zext()), => continue()); // might have been added multiple times
+            fid := work_stack&.last().unwrap()[];
+            if gen.funcs_done&.get(fid.to_index().zext()) {
+                work_stack&.pop();
+                continue();
+            }; // might have been added multiple times
             
+            {comp.vtable.report_aot_progress}(comp.data, fid, true);
             func := comp.get_function(fid);
             // Note: compile before checking callees! // TODO: return error instead
             xx := {comp.vtable.compile_func}(comp.data, fid, .Aot);  // TODO: fix parsing to allow this as a quick expr
@@ -82,23 +88,17 @@ fn CodeGen($B: Type) Type = {
             };  // TODO: return error instead
             
             // sort the functions to make sure we can inline calls to intrinsics
-            if func.mutual_callees.len == 0 {
-                not_done_count := 0;
-                for func.callees { f |  
-                    if !gen.funcs_done&.get(f.to_index().zext()) && !gen.pending.items().contains(f&) {
-                        not_done_count += 1;
-                        gen.pending&.push(f);
-                    }
-                };
-                if not_done_count > 0 {
-                    gen.pending&.insert(gen.pending.len - not_done_count, fid);
-                    continue();
-                };
-            } else {
-                gen&.add_pending_callees(func);
+            not_done_count := 0;
+            for func.callees { f |  
+                if !gen.funcs_done&.get(f.to_index().zext()) && !work_stack.items().contains(f&) {
+                    not_done_count += 1;
+                    work_stack&.push(f);
+                }
             };
-            
-            gen.funcs_done&.set(fid.to_index().zext(), temp());
+            if not_done_count > 0 {
+                // no pop
+                continue();
+            };
             
             xx := {comp.vtable.emit_bc}(comp.data, fid, .Aot);    // TODO: fix parsing to allow this as a quick expr
             body := or xx { err |
@@ -110,9 +110,10 @@ fn CodeGen($B: Type) Type = {
                 body = FnBody.ptr_from_int(b);
             };
             
+            
             if body.func != fid {
                 // We just noticed its a duplicate.
-                gen.pending&.push(body.func);
+                //work_stack&.push(body.func);
                 // TODO: it would be nice if we could just skip and always emit calls to the target, 
                 //       but i think we might have already generated some so make a forwarding shim. 
                 //       also now i don't call follow_redirects all the time because i have to rewrite that to use vtable.  -- Sep 21
@@ -120,14 +121,8 @@ fn CodeGen($B: Type) Type = {
                 ::tagged(FuncImpl);
                 @debug_assert(func.body&.is(.Redirect), "expected redirect");
             };
-        
-            // TODO: bring this back. but its a pain because i want to allow drivers to use this file. :TraceEmitAot
-            //zone := zone_begin(.EmitAot); // TODO: defer
-            //@if(ENABLE_TRACY) {
-            //    real_name := comp.get_string(func.name);
-            //    ___tracy_emit_zone_name(zone, real_name);
-            //};
             
+            gen.body = body;
             if body.blocks.len.eq(0) || func.body&.is(.Redirect) {
                 success := gen.backend&.emit_special(fid, func.body&, func, body, gen.pending&); 
                 if !success {
@@ -139,16 +134,34 @@ fn CodeGen($B: Type) Type = {
                     @eprintln("!!!! failed to emit speciai function: %", real_name);
                 };
                 //assert(success, "failed to emit speciai function");
-                //zone_end(zone);  :TraceEmitAot
-                continue();
+            } else {
+                gen.backend&.emit_function_husk(fid, body.signeture) {
+                    gen&.emit_current_function();
+                };
+                emitted_functions += 1;
             };
-            gen.body = body;
-            gen.backend&.emit_function_husk(fid, body.signeture) {
-                gen&.emit_current_function();
-            };
-            emitted_functions += 1;
             
-            //zone_end(zone);  :TraceEmitAot
+            {comp.vtable.report_aot_progress}(comp.data, fid, false);
+            current := work_stack&.pop().unwrap();
+            @assert_eq(current, fid, "order messed up");
+            gen.funcs_done&.set(fid.to_index().zext(), temp());
+            for func.mutual_callees { c |
+                if !gen.funcs_done&.get(c.to_index().zext()) && !work_stack.items().contains(c&)  {
+                    work_stack&.push(c);
+                };
+            };
+            if body.func != fid {
+                // We just noticed its a duplicate.
+                work_stack&.push(body.func);
+            };
+            if gen.pending.len != 0 {
+                for gen.pending& { c | 
+                    if !gen.funcs_done&.get(c.to_index().zext()) && !work_stack.items().contains(c&) {
+                        work_stack&.push(c);
+                    };
+                };
+                gen.pending&.clear();
+            }
         };
         
         constants := 0;
@@ -164,21 +177,6 @@ fn CodeGen($B: Type) Type = {
         // TODO: if alloc != temp { temp.reset(mark ? no but that wouldn't catch if they derived a new one from temp
         gen.backend.out
     };
-
-    fn add_pending_callees(self: *Self, func: *Func) void = {
-        for func.callees { c |
-            if !self.funcs_done&.get(c.to_index().zext()) {
-                self.pending&.push(c);
-                func := self.program.get_function(c);
-                @debug_assert(!func.get_flag(.ComptimeOnly), "AOT calls .ComptimeOnly function %", self.program.get_string(func.name));
-            };
-        };
-        for func.mutual_callees { c |
-            if !self.funcs_done&.get(c.to_index().zext()) {
-                self.pending&.push(c);
-            };
-        };
-    }
    
     fn emit_current_function(self: *Self) void = {
         s := self.body.blocks.items();

@@ -105,9 +105,6 @@ fn do_self_jit(program: *SelfHosted, body: *FnBody) rawptr = {
 fn create_jit_shim(self: *SelfHosted, fid: FuncId) Res(void) = {
     opts := self.get_build_options();
     if(!opts.do_jit_shims, => return(.Ok));
-    if opts.comptime_jit == .Cranelift {  // TODO: just check this at the beginning
-        panic("TODO: impl rotatecallptr on cranelift");
-    };
     func := self.get_function(fid);
     if func.get_flag(.AlreadyHasShim) || func.get_flag(.RealAsmDone) { 
         return(.Ok);
@@ -148,7 +145,7 @@ fn create_jit_shim(self: *SelfHosted, fid: FuncId) Res(void) = {
     @try(emit&.emit_return(func.finished_ret.unwrap())) return;
     
     self.jitted&.extend_blanks(fid);
-    @debug_assert_eq(self.jitted.dispatch[fid.as_index()], uncompiled_function_placeholder(), "already compiled? why are we making a shim? %", func.log(self));
+    @debug_assert_eq(self.jitted.dispatch_table[fid.as_index()], uncompiled_function_placeholder(), "already compiled? why are we making a shim? %", func.log(self));
     addr := self.do_self_jit(fake_body);
     self.put_jitted_function(fid, addr);
     @debug_assert(!func.get_flag(.RealAsmDone), "we didn't actually compile it why do we think we did??"); 
@@ -262,7 +259,7 @@ PAGE_SIZE :: 16384; // TODO: ask the os for this
 
 Jitted :: @struct(
     mmapped: []u32,
-    dispatch: List(rawptr),
+    dispatch_table: List(rawptr),
     // aarch64 instructions are always 4 bytes. 
     current_start: *u32,
     next: *u32,
@@ -273,7 +270,7 @@ fn new(bytes: i64) Jitted #once = {
     mmapped := page_allocator.alloc(u32, bytes / 4);
     (
         mmapped = mmapped,
-        dispatch = list(99999, page_allocator), // Dont ever resize!
+        dispatch_table = list(99999, page_allocator), // Dont ever resize!
         current_start = mmapped.ptr,
         next = mmapped.ptr,
         old = mmapped.ptr,
@@ -292,16 +289,16 @@ fn uncompiled_function_placeholder() rawptr = {
 }
 
 fn get_dispatch(self: *Jitted) i64 = {
-    rawptr.int_from_ptr(self.dispatch.maybe_uninit.ptr)
+    rawptr.int_from_ptr(self.dispatch_table.maybe_uninit.ptr)
 }
 
 fn get_fn_old(self: *SelfHosted, f: FuncId) ?rawptr = {
-    if(f.as_index() >= self.jitted.dispatch.len, => return(.None));
+    if(f.as_index() >= self.jitted.dispatch_table.len, => return(.None));
     func := self.get_function(f);
     if !func.get_flag(.AsmDone) {
         return(.None);
     };
-    addr := self.jitted.dispatch[f.as_index()];
+    addr := self.jitted.dispatch_table[f.as_index()];
     (Some = addr)
 }
 
@@ -348,13 +345,13 @@ fn push_bytes_x86(self: *Jitted, insts: []u8) void = {
 fn mark_start(self: *Jitted, f: FuncId) void = {
     addr := u32.int_from_ptr(self.current_start);
     self.extend_blanks(f);
-    self.dispatch[f.as_index()] = addr.rawptr_from_int();
+    self.dispatch_table[f.as_index()] = addr.rawptr_from_int();
 }
 
 fn extend_blanks(self: *Jitted, f: FuncId) void = {
-    assert(self.dispatch.maybe_uninit.len > f.as_index(), "cannot resize dispatch table");
-    while => self.dispatch.len() < f.to_index().zext() + 1 {
-        self.dispatch&.push(uncompiled_function_placeholder());
+    assert(self.dispatch_table.maybe_uninit.len > f.as_index(), "cannot resize dispatch table");
+    while => self.dispatch_table.len() < f.to_index().zext() + 1 {
+        self.dispatch_table&.push(uncompiled_function_placeholder());
     };
 }
 

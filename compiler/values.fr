@@ -141,7 +141,7 @@ fn emit_relocatable_constant_body(
             };
             
             // This is super slow but its only the error path so its fine. 
-            enumerate c.jitted.dispatch { i, check | 
+            enumerate c.jitted.dispatch_table { i, check | 
                 check := int_from_rawptr(check[]);
                 if check == ptr {
                     fid: FuncId = from_index(i);
@@ -675,6 +675,15 @@ fn call_dynamic_inner(program: CompilerRs, ptr: i64, f_ty: *FnType, args: *RsVec
     
     //@println("call with %", args.items());
 
+    zone := zone_begin(.CallDynamic);
+    @if(ENABLE_TRACY) {
+        if program.baked.functions&.get(ptr) { fid | 
+            func := program[][].get_function(fid);
+            real_name := program.pool.get(func.name);
+            ___tracy_emit_zone_name(zone, real_name);
+        };
+    };
+    
     :: if(Res(Values));
     result: Res(Values) = if ret.size_slots <= 1 {
         r := if arg.float_mask == 0 && ret.float_mask == 0 {
@@ -714,6 +723,7 @@ fn call_dynamic_inner(program: CompilerRs, ptr: i64, f_ty: *FnType, args: *RsVec
             (Ok = (Big = mem))
         }
     };
+    zone_end(zone);
     @if(TRACE_CALLS) {
         if result&.is(.Ok) {
             @println("[returned from %] %", ptr, result.Ok&.log(program[][], f_ty.ret));  

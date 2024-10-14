@@ -460,11 +460,16 @@ fn handle_target_split(self: *SelfHosted, func: *Func) Maybe(void) #once = {
     
     os_ty := @unwrap(self.env.os_type, "#target_os before bootstrap") return;
     if func.body&.is(.Normal) {
-        @debug_assert(func.return_var.is_none(), "should be before resolve");
+        //@debug_assert(func.return_var.is_none(), "should be before resolve");
         // TODO: typecheck now? 
         merged: List(FuncImpl) = list(self.get_alloc());
         for_enum(Os) { os |
             new_func := func.deep_clone(self.get_alloc());
+            @if(!LAZY_SCOPE) {
+                mapping: HashMap(Var, Var) = init(temp());
+                renumber: RenumberVars = (scope = self.scopes, mapping = mapping&);
+                renumber&.walk_func(new_func&);
+            };
             new_func&.unset_flag(.TargetSplit); // very important to not loop!
             factory := self.box(new_func.body.Normal);
             os_value := self.to_values(Os, os);
@@ -1499,7 +1504,10 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
         @check(self.ensure_resolved_sign(fid)) return;
         
         // This creates a new function with only runtime args, and updates the arg_expr accordingly. 
-        fid = @check(self.curry_const_args(fid, f_expr, arg_expr)) return;
+        zone := zone_begin(.BakeConstArgs);
+        res := self.curry_const_args(fid, f_expr, arg_expr);
+        zone_end(zone);
+        fid = @check(res) return;
         func = self.get_function(fid);
         // Since we may have just made a new function, make sure we know its types,
         // and then sanity check that our types still match. 
@@ -1902,14 +1910,28 @@ fn curry_const_args(self: *SelfHosted, original_f: FuncId, f_expr: *FatExpr, arg
     func := self.get_function(original_f);
     @err_assert(!func.get_flag(.TargetSplit), "Functions with const arguments cannot be #target_os.\nThis could be made to work for non-capturing args but i'm not ready to deal with it yet.") return;
     @debug_assert(func.get_flag(.AnyConstArgs), "baking const args but none are there");
-    @debug_assert_eq(func.get_flag(.AllowRtCapture), func.get_flag(.ResolvedBody));
+    
+    if LAZY_SCOPE {
+        @debug_assert_eq(func.get_flag(.AllowRtCapture), func.get_flag(.ResolvedBody));
+    } else {
+        @check(self.ensure_resolved_sign(original_f)) return;
+        @check(self.ensure_resolved_body(original_f)) return;
+    };
+    
     // Some part of the argument must be known at comptime.
     new_func := func.deep_clone(self.get_alloc());
-    self.maybe_renumber_and_dup_scope(new_func&);
+    if LAZY_SCOPE {
+        self.maybe_renumber_and_dup_scope(new_func&);
+    } else {
+        mapping: HashMap(Var, Var) = init(temp());
+        renumber: RenumberVars = (scope = self.scopes, mapping = mapping&);
+        renumber&.walk_func(new_func&);
+    };
     new_fid := self.add_function(new_func);
     @log_event("bake const args % -> %", original_f, new_fid) self;
     @check(self.ensure_resolved_sign(new_fid)) return;
     @check(self.ensure_resolved_body(new_fid)) return;
+    //@println("%", self.get_function(new_fid).log(self));
     // TODO: mark func as in progress somehow so nobody can yield on it. 
     //       tho really i feel like you want to make this whole operation yield-able,
     //       currently you could get into a situation with a lot of redundant work i think.  
@@ -1921,6 +1943,7 @@ fn curry_const_args(self: *SelfHosted, original_f: FuncId, f_expr: *FatExpr, arg
     self.curry_const_args_inner(original_f, new_fid, f_expr, arg_expr, 0)
 }
 
+LAZY_SCOPE :: true;
 fn maybe_renumber_and_dup_scope(self: *SelfHosted, new_func: *Func) void #once = {
     // Closures always resolve up front, so they need to renumber the clone.
     // TODO: HACK but closures get renumbered when inlined anyway, so its just the const args that matter. im just being lazy and doing the whole thing redundantly -- May 9
@@ -3214,6 +3237,7 @@ fn save_const(self: *SelfHosted, name: Var, val_expr: Expr, final_ty: Type, loc:
         // eventually should remove the ? so its smaller and just do this there instead. 
         ptr := self.scopes.constants&.nested_index(name.id.zext());
         ptr[] = (Some = ((expr = (Poison = .Unknown), loc = loc, ty = UnknownType, done = false), .Infer));
+        ::as_ref(@type ptr[].unwrap());
         ptr.as_ref().unwrap()
     };
     
@@ -3523,7 +3547,14 @@ fn resolve_by_type(self: *SelfHosted, os: OverloadSet, f_ty: FnType, loc: Span) 
     if data.inline_cache._0& == key& {
         return(Ok = data.inline_cache._1);
     };
-    fid := @check(self.resolve_in_overload_set(f_ty, os, loc)) return;
+    zone := zone_begin(.SemaOverloads); // TODO: defer
+    @if(ENABLE_TRACY) {
+        real_name := self.pool.get(data.name);
+        ___tracy_emit_zone_name(zone, real_name);
+    };
+    res := self.resolve_in_overload_set(f_ty, os, loc);
+    zone_end(zone);
+    fid := @check(res) return;
     data.inline_cache = (key, fid);
     (Ok = fid)
 }
@@ -3840,6 +3871,7 @@ fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
     args: List(i64) = list(2, temp());
     args&.push(FatExpr.int_from_ptr(invocation.arg));
     args&.push(FatExpr.int_from_ptr(invocation.target));
+    ::RsVec(i64);
     args := args.rs();
     
     needs_ct := func.cc.expect("known cc!!") == .CCallRegCt;

@@ -29,27 +29,27 @@ fn resolve_root(compiler: *SelfHosted, func: *Func, scope: ScopeId) PRes #once =
     r: ResolveScope = new(compiler, scope, func.loc);
     
     zone := zone_begin(.Scope); // TODO: defer
-    @try(r&.resolve_func(func)) return;
+    res := r&.resolve_func(func);
     zone_end(zone);
-    .Ok
+    res
 }
 
 fn resolve_sign(compiler: *SelfHosted, func: *Func) PRes #once = {
     r: ResolveScope = new(compiler, func.scope.expect("function to have scope"), func.loc);
     
     zone := zone_begin(.Scope); // TODO: defer
-    @try(r&.resolve_func_args(func)) return;
+    res := r&.resolve_func_args(func);
     zone_end(zone);
-    .Ok
+    res
 }
 
 fn resolve_body(compiler: *SelfHosted, func: *Func) PRes #once = {
     r: ResolveScope = new(compiler, func.scope.expect("function to have scope"), func.loc);
     
     zone := zone_begin(.Scope); // TODO: defer
-    @try(r&.resolve_func_body(func)) return;
+    res := r&.resolve_func_body(func);
     zone_end(zone);
-    .Ok
+    res
 }
 
 /// Renumbering interface ///
@@ -564,6 +564,10 @@ fn handle_func(self: *ResolveScope, func: *Func) Result(DoMore, *CompileError) #
     };
     
     @try(self.resolve_func(func)) return;
+    @if(!LAZY_SCOPE) {
+        @try(self.resolve_func_args(func)) return;
+        @try(self.resolve_func_body(func)) return;
+    };
     (Ok = .Break)
 }
 
@@ -590,14 +594,30 @@ fn update(self: *RenumberVars, name: *Var) void = {
 :: WalkAst(RenumberVars, void);
 
 fn handle_expr(self: *RenumberVars, expr: *FatExpr) Result(DoMore, void) #once = {
-    @if_let(expr.expr&) 
+    @match(expr.expr&) {
         fn GetVar(name) => self.update(name);
+        fn Block(f) => {
+            each f.body { stmt |
+              @if_let(stmt.stmt&) 
+                fn DeclVar(f) => {
+                    if f.name.kind == .Const {
+                        self.decl(f.name&);
+                    };
+                };
+            }; 
+        };
+        @default => ();
+    };
     (Ok = DoMore.Continue)
 }
 
 fn handle_stmt(self: *RenumberVars, stmt: *FatStmt) Result(DoMore, void) #once = {
     @if_let(stmt.stmt&) 
-        fn DeclVar(f) => self.decl(f.name&);
+        fn DeclVar(f) => {
+            if f.name.kind != .Const {
+                self.decl(f.name&);
+            };
+        };
 
     (Ok = .Continue)
 }

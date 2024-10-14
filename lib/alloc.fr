@@ -48,11 +48,10 @@ fn alloc(allocator: Alloc, $Element: Type, count: i64) Slice(Element) #generic =
 fn alloc_zeroed(allocator: Alloc, $T: Type, len: i64) []T #generic = {
     // TODO: be able to ask the allocator for zeroed memory since it might already have that (page_allocator?)
     mem := temp().alloc(T, len);
-    // TODO: do like i did for copy_aligned
-    memset(T.raw_from_ptr(mem.ptr), 0, mem.len * size_of(T));
+    mem.set_zeroed();
     mem
 }
-    
+
 fn box(allocator: Alloc, $T: Type) *T #generic = {
     mem := allocator.alloc(T, 1);
     mem.ptr
@@ -63,8 +62,7 @@ fn box_zeroed(allocator: Alloc, $T: Type) *T #generic = {
     mem.ptr
 }
 
-// TODO: this should work as an overload set but overloading.rs doesn't handle generic args correctly yet. -- May 30. 
-dealloc :: fn(allocator: Alloc, $Element: Type, mem: Slice(Element)) void #generic = {
+fn dealloc(allocator: Alloc, $Element: Type, mem: Slice(Element)) void #generic = {
     bytes := (:: Element.size_of()).mul(mem.len);
     if bytes == 0 {
         return();
@@ -72,7 +70,7 @@ dealloc :: fn(allocator: Alloc, $Element: Type, mem: Slice(Element)) void #gener
     // TODO: calling through a field is ass
     xx := Element.raw_from_ptr(mem.ptr);
     {allocator.vptr}(allocator.data, .Deallocate, xx, bytes, 4); // TODO: alignment
-};
+}
 
 // This is provided on a best effort basis! Not all allocators will support it (may just return .Maybe).
 // Implimentations should not return .No for internal pointers (ie, we're not just asking its ptr is the start of a segment returned from alloc).
@@ -100,7 +98,7 @@ libc_allocator_fn :: fn(_: rawptr, action: AllocatorAction, ptr: rawptr, count: 
 };
 
 // TODO: :sema_regression switch to match when i fix v2 `early return before ret type infered (could try more aggressivly in handle_compile_body)`
-// TODO: respect alignment. but im pretty sure malloc always gives you 16 bits and that's almost always good enough. 
+// TODO: respect alignment. but im pretty sure malloc always gives you 16 bytes and that's almost always good enough. 
 page_allocator_fn :: fn(_: rawptr, action: AllocatorAction, ptr: rawptr, size: i64, align: i64) rawptr = {
     action := @as(i64) action;
     ::if(rawptr);

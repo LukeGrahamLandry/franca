@@ -17,6 +17,7 @@ Task :: @rec @struct(
     parent: ?*Task,
     id: i64, // TODO: remove
     done: bool = false,
+    trace: ?TraceCtx,
 );
 
 TaskId :: @struct(id: i64);
@@ -67,15 +68,20 @@ poll_in_place :: fn(self: *SelfHosted, $T: Type, $f: @Fn() Maybe(T)) Res(T) #gen
             fn Ok(it)  => return(Ok = it[]);
             fn Err(it) => return(Err = it[]);
             fn Suspend(new_dep) => {
-                new_task := self.get_alloc().alloc(Task, 1);
-                new_task := new_task.ptr;
-                new_task[] = (action = new_dep[][], waiting_for = .None, parent = .None, id = self.dispatch.next_task_id);
-                self.dispatch.next_task_id += 1;
-                @try(self.poll_until_finished(new_task)) return;
+                t := self.new_task(new_dep[][], .None, .None);
+                @try(self.poll_until_finished(t)) return;
             };
         };
     }
 };
+
+fn new_task(self: *SelfHosted, action: Action, waiting_for: ?*Task, parent: ?*Task) *Task = {
+    new_task := self.get_alloc().alloc(Task, 1);
+    new_task := new_task.ptr;
+    new_task[] = (action = action, waiting_for = waiting_for, parent = parent, id = self.dispatch.next_task_id, trace = .None);
+    self.dispatch.next_task_id += 1;
+    new_task
+}
 
 fn poll_until_finished(self: *SelfHosted, task: *Task) Result(void, *CompileError) = {
     root_len := self.dispatch.root_tasks.len;
@@ -101,7 +107,6 @@ fn poll_loop_body(self: *SelfHosted, task_in: **Task, out: *Result(void, *Compil
         task_in[] = task;
         return(false)
     };
-    
     if task.waiting_for { next | 
         task = next;
         continue();
@@ -131,7 +136,7 @@ fn poll_loop_body(self: *SelfHosted, task_in: **Task, out: *Result(void, *Compil
         fn All(tasks) => {
             while => tasks.len != 0 {
                 xx := tasks.items().last();
-                next := xx.expect("non0 so has last")[];
+                next := xx.expect("none so has last")[];
                 if next.done {
                     tasks.pop().expect("pop last");
                 } else {
@@ -145,7 +150,24 @@ fn poll_loop_body(self: *SelfHosted, task_in: **Task, out: *Result(void, *Compil
         @default => ();
     };
     
-    @match(self.exec_task(task)) {
+    
+    if task.trace.is_none() {
+        task.trace = (Some = zone_begin(.Task));
+        @if(ENABLE_TRACY) {
+            out := u8.list(temp());  // it seems to make a copy so this is fine
+            log(task.action&, self, out&);
+            out&.push(0);
+            ___tracy_emit_zone_name(task.trace.Some, out.items());
+        };
+    };
+    res := self.exec_task(task);
+    if !res&.is(.Suspend) {
+        zone := task.trace.unwrap();
+        zone_end(zone);
+        task.trace = .None;
+    };
+    
+    @match(res) {
         fn Err(e) => {
             self.dispatch.root_tasks&.pop();
             //@debug_assert_eq(root_len, self.dispatch.root_tasks.len, "book keeping?");  // TODO: pass in
@@ -155,11 +177,8 @@ fn poll_loop_body(self: *SelfHosted, task_in: **Task, out: *Result(void, *Compil
         fn Ok() => finished();
         fn Suspend(next) => {
             @debug_assert(task.waiting_for.is_none(), "already waiting??");
-            new_task := self.get_alloc().alloc(Task, 1);
-            new_task := new_task.ptr;
-            new_task[] = (action = next[], waiting_for = .None, parent = (Some = task), id = self.dispatch.next_task_id);
-            self.dispatch.next_task_id += 1;
-            task = new_task;
+            t := self.new_task(next[], .None, (Some = task));
+            task = t;
             continue();
         }
     };
@@ -180,7 +199,7 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
     
     @match(task.action&) {
         fn EvalConstant(v) => {
-            @log_event("[TRY TASK] %: %", task.action&.tag(), self.pool.get(v.name.name)) self;
+            @log_event("[TRY TASK] %: %%%", task.action&.tag(), self.pool.get(v.name.name), "%", v.name.id) self;
             name := v.name;
             var  := self.scopes.get_constant(name);
             var  := var.expect("var should always be known");
@@ -229,11 +248,8 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
                         // TODO: make sure all mutual_callees are compiled somewhere. but rn this only decides mutual if we see that we're already working on it.
                         //       (easy direct cases are added in sema tho)
                     } else {
-                        new_task := self.get_alloc().alloc(Task, 1);
-                        new_task := new_task.ptr;
-                        new_task[] = (action = (Jit = callee), waiting_for = .None, parent = .None, id = self.dispatch.next_task_id);
-                        self.dispatch.next_task_id += 1;
-                        waiting&.push(new_task);
+                        t := self.new_task((Jit = callee), .None, .None);
+                        waiting&.push(t);
                     };
                 } else {
                     func := self.get_function(callee);
@@ -343,11 +359,8 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
                 @log_event("% mutual calls %", fid.as_index(), callee.as_index()) self;
                 callee_func := self.get_function(callee);
                 if !callee_func.get_flag(.AsmDone) {
-                    new_task := self.get_alloc().alloc(Task, 1);
-                    new_task := new_task.ptr;
-                    new_task[] = (action = (Jit = callee), waiting_for = .None, parent = .None, id = self.dispatch.next_task_id);
-                    self.dispatch.next_task_id += 1;
-                    waiting&.push(new_task);
+                    t := self.new_task((Jit = callee), .None, .None);
+                    waiting&.push(t);
                 } else {
                     @debug_assert(callee_func.get_flag(.EnsuredCompiled), "callee should be compiled");
                 };
@@ -393,10 +406,10 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
 // TODO: factor out the dispatch table from the aarch64 backend. 
 put_jitted_function :: fn(self: *SelfHosted, f: FuncId, addr: rawptr) void = {
     self.jitted&.extend_blanks(f);
-    self.jitted.dispatch[f.as_index()] = addr;
+    self.jitted.dispatch_table[f.as_index()] = addr;
     func := self.get_function(f);
     func.set_flag(.AsmDone);
-    if func.get_flag(.TookPointerValue) {
+    if func.get_flag(.TookPointerValue) || ENABLE_TRACY {
         self.created_jit_fn_ptr_value(f, addr.int_from_rawptr());
     };
 };

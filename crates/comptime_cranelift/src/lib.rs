@@ -230,7 +230,7 @@ impl<'z, M: Module> Emit<'z, M> {
             debug_assert_eq!(sig.arg_slots(), block.arg_prims.len());
         }
 
-        for inst in &block.insts {
+        for (i, inst) in block.insts.iter().enumerate() {
             match *inst {
                 Bc::Nop => {}
                 Bc::SaveSsa { id, .. } => {
@@ -630,7 +630,14 @@ impl<'z, M: Module> Emit<'z, M> {
                     break;
                 }
                 Bc::RotateForImmediateCallPtr => {
-                    panic!("TODO: implement RotateForImmediateCallPtr on cranelift")
+                    let next = &block.insts[i + 1];
+                    let &Bc::CallFnPtr { sig } = next else {
+                        panic!("expected CallFnPtr")
+                    };
+                    let sig = self.body.sig_payloads[sig as usize];
+                    let callee = self.stack.pop().unwrap();
+                    self.stack
+                        .insert(self.stack.len() - sig.arg_slots(), callee);
                 }
             }
         }

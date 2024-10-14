@@ -123,6 +123,30 @@ fn init_driver_vtable() *ImportVTable = {
     vtable.get_whole_line = fn(c: Compiler, span: Span) FrancaCodeLine = {
         c.cast()[][].codemap.get_whole_line(span)
     };
+    vtable.report_aot_progress = fn(c: Compiler, fid: FuncId, is_start: bool) void = {
+        @if(ENABLE_TRACY) {
+            self := c.cast()[][];
+            mem :: @static(?HashMap(FuncId, TraceCtx)) (.None);
+            if mem.is(.None) {
+                mem[] = (Some = init(libc_allocator));
+            };
+            m := mem[].Some&;
+            if is_start {
+                if m.get(fid).is_none() {
+                    zone := zone_begin(.EmitAot);
+                    func := self.get_function(fid);
+                    real_name := self.pool.get(func.name);
+                    ___tracy_emit_zone_name(zone, real_name);
+                    m.insert(fid, zone);
+                };
+            } else {
+                if m.get(fid) { zone | 
+                    zone_end(zone);
+                };
+            };
+        };
+    };
+    
     
     the_vtable
 }
@@ -535,7 +559,7 @@ fn fill_export_ffi(out: *List(u8)) void = {
     
     @fmt(out, "fn debug_log_type(type: Type) void #ct #comptime_addr(%);\n", debug_log_type);
     debug_log_type: rawptr : fn(c: CompilerRs, type: Type) void = {
-        @println("[debug_log_type] %", c[][].log_type(type));
+        @println("[debug_log_type %] %", type.as_index(), c[][].log_type(type));
     };
     
     @fmt(out, "fn intern_type_ref(info: *TypeInfo) Type #ct #comptime_addr(%);\n", intern_type_ref);
@@ -642,6 +666,15 @@ fn fill_export_ffi(out: *List(u8)) void = {
     get_cc: rawptr : fn(c: CompilerRs) CompCtx = {
         vtable := init_driver_vtable(); // TODO: don't allocate every time :SLOW
         (data = c.cast(), vtable = vtable)
+    };
+    
+    @fmt(out, "fn resolve_overload(os: OverloadSet, arg: Type, ret: Type, loc: Span) FuncId #fold #ct #comptime_addr(%);\n", @as(rawptr) resolve_os);
+    resolve_os :: fn(c: CompilerRs, os: OverloadSet, arg: Type, ret: Type, loc: Span) FuncId = {
+        self := c[][];
+        args := self.arg_types(arg); // TODO: dont allocate just to count
+        f_ty: FnType = (arg = arg, ret = ret, arity = args.len.trunc());
+        res := self.poll_in_place(FuncId, => self.resolve_by_type(os, f_ty, loc));
+        self.unwrap_report_error(FuncId, res)
     };
 }
 
