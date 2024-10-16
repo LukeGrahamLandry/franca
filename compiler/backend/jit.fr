@@ -44,7 +44,7 @@ fn emit_bc_and_jit(program: *SelfHosted, f: FuncId) PRes #once = {
     // We might have noticed that this function was a duplicate while generating bytecode.
     // So it was Normal before but now its a Redirect. 
     if body.func != f {
-        if program.get_fn_callable(body.func) { old |
+        if program.get_fn_old(body.func) { old |
             program.put_jitted_function(f, old);
         };
         
@@ -138,7 +138,7 @@ fn create_jit_shim(self: *SelfHosted, fid: FuncId) Res(void) = {
     self.put_jitted_function(fid, addr);
     @debug_assert(!func.get_flag(.RealAsmDone), "we didn't actually compile it why do we think we did??"); 
     func.set_flag(.AlreadyHasShim);
-    self.jitted&.bump_dirty(); // TODO: you want to batch them
+    //self.jitted&.bump_dirty(); // TODO: you want to batch them
     __temp_alloc.reset_retaining_capacity(mark);
     .Ok
 }
@@ -424,6 +424,7 @@ fn emit_block();
 fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $negative_slots: bool) Type = {
     Emit :: @struct(
         program: CompilerRs,
+        comp: CompCtx,
         asm: *Jitted,
         vars: List(?SpOffset),
         next_slot: SpOffset,
@@ -438,6 +439,7 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $negative_slots: bool) Type =
     fn new(compile: CompilerRs, body: *FnBody) Emit = {
         (
             program = compile,
+            comp = compile[][].comp(),
             asm = compile.jitted&,
             vars = list(temp()),
             next_slot = (id = 0),
@@ -452,7 +454,7 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $negative_slots: bool) Type =
     
     // Note: you can only use Self once because this doesn't reset fields.
     fn compile(self: *Emit, f: FuncId) rawptr = {
-        func := self.program[][].get_function(f);
+        func := self.comp.get_function(f);
         @assert(!func.body&.is(.JittedAarch64) && !func.body&.is(.ComptimeAddr), "func want body");
     
         self.bc_to_asm(f);
@@ -465,18 +467,16 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $negative_slots: bool) Type =
         //       when doing instantiations like `::tagged(T);`. should get deduplicated in bytecode or earlier. 
         // TODO: this is kinda dumb, I could just be a bit more abstract about how im emitting instructions and then also emit text assembler.
         if TRACE_ASM || func.get_flag(.LogAsm) || self.backend.interesting {
-            self.program[][].codemap.show_error_line(func.loc);
             addr := u32.int_from_ptr(asm.ptr);
-            @println("% is at addr=%", self.program.pool.get(func.name), addr);
+            @println("% is at addr=%", self.comp.get_string(func.name), addr);
             @if(USE_LLVM_DIS) self.print_llvm_mc_dis(asm);
         };
         u32.raw_from_ptr(asm.ptr)
     }
     
     fn bc_to_asm(self: *Emit, f: FuncId) void = {
-        ff := self.program[][].get_function(f);
-        @if(TRACE_ASM) @println("=== F% % ===", f.as_index(), self.program.pool.get(ff.name));
-        //debugln!("{}", self.program[f].body.log(self.program));
+        ff := self.comp.get_function(f);
+        @if(TRACE_ASM) @println("=== F% % ===", f.as_index(), self.comp.get_string(ff.name));
     
         func := self.body;
         self.next_slot = (id = 0);
@@ -572,7 +572,7 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $negative_slots: bool) Type =
                 };
             }
             fn GetCompCtx() => {
-                addr := (**SelfHosted).int_from_ptr(self.program);
+                addr := ptr_cast_unchecked(Compiler, i64, self.comp.data&)[];
                 self.state.stack&.push(Literal = addr);
             }
             fn LastUse(f) => {
@@ -582,10 +582,13 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $negative_slots: bool) Type =
                     self.drop_slot(slot, ty.size);
                 };
             }
-            fn NoCompile() => @panic("tried to compile unreachable block in %", self.program[][].log_name(self.body.func));
+            fn NoCompile() => {
+                func := self.comp.get_function(self.body.func);
+                @panic("tried to compile unreachable block in %", self.comp.get_string(func.name));
+            }
             fn PushConstant(f) => self.state.stack&.push(Literal = f.value);
             fn PushGlobalAddr(id) => {
-                ptr, _ := self.program[][].get_baked(id)[];
+                ptr, _ := self.comp.get_baked(id)[];
                 self.state.stack&.push(Literal = ptr.int_from_rawptr());
             }
             fn GetNativeFnPtr(fid) => {
@@ -605,7 +608,7 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $negative_slots: bool) Type =
                 block := self.body.blocks[idx]&;
                 
                 // TODO: fix ending with unreachable() :block_arg_count_wrong_unreachable
-                //debug_assert_eq!(slots, block.arg_slots, "goto {ip:?} {}", self.body.log(self.program));
+                //debug_assert_eq!(slots, block.arg_slots);
                 if block.incoming_jumps == 1 {
                     @debug_assert(self.block_ips[idx].is_none());
                     self.emit_block(idx, false);

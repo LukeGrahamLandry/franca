@@ -1,3 +1,7 @@
+## (Oct 15)
+
+- stop being lazy and make a macro to make else-if chains less painful.
+
 ## (Oct 14)
 
 - improve tracy zones so you can actually see the dependency hierarchy.

@@ -1,4 +1,400 @@
-fn loadopt(_0: *Qbe.Fn) void #import("qbe");
+fn MASK(w: i32) u64 = (BIT(8*(w.intcast())-1)*2-1); /* must work when w==8 */
+
+Loc :: @struct(
+    type : @enum(u32) (
+        LRoot,   /* right above the original load */
+        LLoad,   /* inserting a load is allowed */
+        LNoLoad, /* only scalar operations allowed */
+    ),
+    off: u32,
+    blk: *Qbe.Blk,
+);
+::enum_basic(get_field_type(Loc, @symbol type));
+::enum_basic(Aliasing);
+
+MSlice :: @struct(
+    ref: Qbe.Ref,
+    off: i32,
+    sz : i16,
+    cls: Qbe.Cls, /* load class */
+);
+
+Insert :: @struct(
+    is_phi: bool, // Qbe had this as a bit field in `num` but that doesn't save space because of alignment padding for the pointer in `new`
+    num: u32,
+    bid: u32,
+    off: u32,
+    new: @union(
+        ins: Qbe.Ins,
+        phi: @struct (
+            m: MSlice,
+            p: *Qbe.Phi,
+        ),
+    ),
+);
+
+LoadCtx :: @struct(
+    f: *Qbe.Fn,
+    inum: u32,            /* current insertion number */
+    ilog: QList(Insert),  /* global insertion log */
+    nlog: i64,            /* number of entries in the log */
+);
+
+fn iins(c: *LoadCtx, cls: Qbe.Cls, op: Qbe.O, a0: Qbe.Ref, a1: Qbe.Ref, l: *Loc) Qbe.Ref = {
+    c.nlog += 1;
+    c.ilog&.grow(c.nlog);
+    ist := c.ilog.index(c.nlog - 1);
+    ist.is_phi = false;
+    ist.num = c.inum;
+    c.inum += 1;
+    ist.bid = l.blk.id.bitcast();
+    ist.off = l.off;
+    r := c.f.newtmp("ld", cls);
+    ist.new.ins = make_ins(op, cls, r, a0, a1);
+    r
+}
+
+fn cast(c: *LoadCtx, r: *Qbe.Ref, cls: Qbe.Cls, l: *Loc) void = {
+    if(rtype(r[]) == .RCon, => return());
+    @debug_assert(rtype(r[]) == .RTmp);
+    cls0 := c.f.tmp[r[].val()].cls;
+    if(cls0 == cls || (cls == .Kw && cls0 == .Kl), => return());
+    if !is_wide(cls0) && is_wide(cls) {
+        if cls0 == .Ks {
+            r[] = c.iins(.Kw, .cast, r[], QbeNull, l);
+        };
+        r[] = c.iins(.Kl, .extuw, r[], QbeNull, l);
+        if cls == .Kd {
+            r[] = c.iins(.Kd, .cast, r[], QbeNull, l);
+        }
+    } else {
+        if cls0 == .Kd && cls != .Kl {
+            r[] = c.iins(.Kl, .cast, r[], QbeNull, l);
+        };
+        if cls0 != .Kd || cls != .Kw { 
+            r[] = c.iins(cls, .cast, r[], QbeNull, l);
+        }
+    }
+}
+
+fn mask(c: *LoadCtx, cls: Qbe.Cls, r: *Qbe.Ref, msk: u64, l: *Loc) void ={
+    c.cast(r, cls, l);
+    con := getcon(c.f, msk); // :FUCKED typechecks if you swap args
+    r[] = c.iins(cls, .and, r[], con, l);
+}
+
+fn load(c: *LoadCtx, sl: MSlice, msk: u64, l: *Loc) Qbe.Ref = {
+    loads_by_size :: {
+        m := ast_alloc().alloc_zeroed(Qbe.O, 9);
+        m[1] = .loadub;
+        m[2] = .loaduh;
+        m[4] = .loaduw;
+        m[8] = .load;
+        m
+    };
+
+    ld  := loads_by_size[sl.sz.int()];
+    all := msk == MASK(sl.sz.ext_16());
+    cls := if(all, => sl.cls, => if(sl.sz > 4, => .Kl, => .Kw));
+    r   := sl.ref;
+    /* sl.ref might not be live here,
+     * but its alias base ref will be
+     * (see killsl() below) */
+    if rtype(r) == .RTmp {
+        a := c.f.get_temporary(r)[].alias;
+        if a.type == .ACon || a.type == .ASym {
+            con := Qbe.Con.zeroed();
+            con.type = .CAddr;
+            con.sym = a.u.sym;
+            con.bits.i = a.offset;
+            r = c.f.newcon(con&);
+        } else {
+            @debug_assert(a.type != .ABot);
+            r = TMP(a.base);
+            if a.offset != 0 {
+                r1 := c.f.getcon(a.offset);
+                r = c.iins(.Kl, .add, r, r1, l);
+            };
+        };
+    };
+    r = c.iins(cls, ld, r, QbeNull, l);
+    if(!all, => c.mask(cls, r&, msk, l));
+    r
+}
+
+fn killsl(c: *LoadCtx, r: Qbe.Ref, sl: MSlice) bool = {
+    if(rtype(sl.ref) != .RTmp, => return(false));
+    a := c.f.get_temporary(sl.ref)[].alias&;
+    if a.type == .ACon || a.type == .ASym {
+        false
+    } else {
+        @debug_assert(a.type != .ABot);
+        TMP(a.base) == r
+    }
+}
+
+/* returns a ref containing the contents of the slice
+ * passed as argument, all the bits set to 0 in the
+ * mask argument are zeroed in the result;
+ * the returned ref has an integer class when the
+ * mask does not cover all the bits of the slice,
+ * otherwise, it has class sl.cls
+ * the procedure returns R when it fails */
+fn def(c: *LoadCtx, sl: MSlice, msk: u64, b: *Qbe.Blk, i: ?*Qbe.Ins, il: *Loc) Qbe.Ref = {
+    /* invariants:
+     * -1- b dominates il.blk; so we can use
+     *     temporaries of b in il.blk
+     * -2- if il.type != LNoLoad, then il.blk
+     *     postdominates the original load; so it
+     *     is safe to load in il.blk
+     * -3- if il.type != LNoLoad, then b
+     *     postdominates il.blk (and by 2, the
+     *     original load)
+     */
+    @debug_assert(dom(b, il.blk));
+    oldl := c.nlog;
+    oldt := c.f.ntmp;
+    Load :: fn() Never => {
+        c.f.ntmp = oldt;
+        c.nlog = oldl;
+        if(il.type != .LLoad, => return(QbeNull));
+        return(c.load(sl, msk, il))
+    };
+    i    := i || b.ins.offset(b.nins.zext());
+    cls  := if(sl.sz > 4, => Qbe.Cls.Kl, => .Kw);
+    msks := MASK(sl.sz.ext_16());
+
+    while => ptr_diff(b.ins, i) > 0 {
+        continue :: local_return;
+        i = i.offset(-1);
+        if(c.killsl(i.to, sl), Load);
+        if(i.op() == .call && escapes(sl.ref, c.f), Load);
+        ld := is_load(i.op()); // used later
+        r, r1, sz := @if_else {
+            @if(ld)               => (i.to,      i.arg&[0],  loadsz(i));
+            @if(is_store(i.op())) => (i.arg&[0], i.arg&[1], storesz(i));
+            @if(i.op() == .blit1) => {
+                @debug_assert(rtype(i.arg&[0]) == .RInt, "blit needs const arg");
+                sz := abs(rsval(i.arg&[0]));
+                @debug_assert(ptr_diff(b.ins, i) > 0, "malformed blit");
+                i = i.offset(-1);
+                @debug_assert(i.op() == .blit0, "malformed blit");
+                (QbeNull, i.arg&[1], sz)
+            };
+            @else => continue();
+        };
+        off: i32 = 0;
+        @match(alias(sl.ref, sl.off, sl.sz.ext_16(), r1, sz, off&, c.f)) {
+            fn MayAlias() => if(ld, => continue(), Load);
+            fn NoAlias()  => continue();
+            fn MustAlias() => {
+                sl1 := MSlice.zeroed();
+                if i.op() == .blit0 {
+                    sl1 = sl;
+                    sl1.ref = i.arg&[0];
+                    if off >= 0 {
+                        @debug_assert(off < sz);
+                        sl1.off = off;
+                        sz -= off;
+                        off = 0;
+                    } else {
+                        sl1.off = 0;
+                        sl1.sz += off.trunc_16();
+                    };
+                    if sz.trunc_16() > sl1.sz {
+                        sz = sl1.sz.ext_16();
+                    };
+                    @debug_assert(sz <= 8);
+                    sl1.sz = sz.trunc_16();
+                };
+                ::if(Ty(Qbe.O, u64));
+                o, msk1 := if off < 0 {
+                    off = -off;
+                    (Qbe.O.shl, MASK(sz).shift_left(8*off.intcast()).bit_and(msks))
+                } else {
+                    (.shr, MASK(sz).shift_right_logical(8*off.intcast()).bit_and(msks))
+                };
+                if(msk1.bit_and(msk) == 0, => continue());
+                if i.op() == .blit0 {
+                    r = c.def(sl1, MASK(sz), b, (Some = i), il);
+                    if(r == QbeNull, Load);
+                };
+                if off != 0 {
+                    cls1 := cls;
+                    if o == .shr && off + sl.sz.ext_16() > 4 {
+                        cls1 = .Kl;
+                    };
+                    c.cast(r&, cls1, il);
+                    r1 := c.f.getcon(8 * off.intcast());
+                    r = c.iins(cls1, o, r, r1, il);
+                };
+                if msk1.bit_and(msk) != msk1 || off + sz < sl.sz.ext_16() {
+                    c.mask(cls, r&, msk1.bit_and(msk), il);
+                };
+                
+                if msk.bit_and(bit_not(msk1)) != 0 {
+                    r1 := c.def(sl, msk.bit_and(bit_not(msk1)), b, (Some = i), il);
+                    if(r1 == QbeNull, Load);
+                    r = c.iins(cls, .or, r, r1, il);
+                };
+                if msk == msks {
+                    c.cast(r&, sl.cls, il);
+                };
+                return(r);
+            };
+        };
+    };
+
+    each c.ilog.slice(0, c.nlog) { ist | 
+        m := ist.new.phi.m;
+        if ist.is_phi
+        && ist.bid == b.id.bitcast()
+        && m.ref == sl.ref
+        && m.off == sl.off
+        && m.sz  == sl.sz {
+            r := ist.new.phi.p.to;
+            if msk != msks {
+                c.mask(cls, r&, msk, il);
+            } else {
+                c.cast(r&, sl.cls, il);
+            };
+            return(r);
+        };
+    };
+
+    for_phi b { p |
+        if c.killsl(p.to, sl) {
+            /* scanning predecessors in that
+             * case would be unsafe */
+            Load();
+        };
+    };
+
+    if(b.npred == 0, Load);
+    if b.npred == 1 {
+        bp := b.pred.offset(0)[];
+        @debug_assert(bp.loop >= il.blk.loop);
+        l := il[];
+        if !bp.s2.is_null() {
+            l.type = .LNoLoad;
+        };
+        r1 := c.def(sl, msk, bp, .None, l&);
+        if(r1 == QbeNull, Load);
+        return(r1);
+    };
+
+    r := c.f.newtmp("ld", sl.cls);
+    p := libc_allocator.box_zeroed(Qbe.Phi); // :HardcodeAlloc
+    c.nlog += 1;
+    c.ilog&.grow(c.nlog);
+    ist := c.ilog[c.nlog - 1]&;
+    ist.is_phi = true;
+    ist.bid = b.id.bitcast();
+    ist.new.phi.m = sl;
+    ist.new.phi.p = p;
+    p.to = r;
+    p.cls = sl.cls;
+    p.narg = b.npred;
+    p.arg = new(p.narg.zext(), .PFn);
+    p.blk = new(p.narg.zext(), .PFn);
+    range(0, b.npred.zext()) { np |
+        bp    := b.pred.offset(np)[];
+        load  := bp.s2.is_null() && il.type != .LNoLoad && bp.loop < il.blk.loop;
+        l := Loc.zeroed();
+        ::if(get_field_type(Loc, @symbol type));
+        l.type = if(load, => .LLoad, => .LNoLoad);
+        l.blk  = bp;
+        l.off  = bp.nins;
+        r1    := c.def(sl, msks, bp, .None, l&);
+        if(r1 == QbeNull, Load);
+        p.arg[np] = r1;
+        p.blk[np] = bp;
+    };
+    if msk != msks {
+        c.mask(cls, r&, msk, il);
+    };
+    r
+}
+x
+icmp :: fn(a: *Insert, b: *Insert) bool = {
+    if(a.bid != b.bid, => return(a.bid < b.bid));
+    if(a.is_phi && b.is_phi, => return(true));
+    if(a.is_phi, => return(true));
+    if(b.is_phi, => return(false));
+    if(a.off != b.off, => return(a.off < b.off));
+    a.num <= b.num
+}; // TODO: should be able to pass this as an argument when its an overload set and do the resolve. 
+
+//fn loadopt(_0: *Qbe.Fn) void #import("qbe");
+/* require rpo ssa alias */
+fn loadopt(f: *Qbe.Fn) void = {
+    c: LoadCtx = (f = f, ilog = new(0, .PHeap), nlog = 0, inum = 0); c := c&;
+    for_blocks f { b |
+        for_insts_forward b { i |
+            if is_load(i.op()) {
+                sz := loadsz(i);
+                sl: MSlice = (ref = i.arg&[0], off = 0, sz = sz.trunc(), cls = i.cls());
+                l: Loc = (type = .LRoot, off = ptr_diff(b.ins, i).trunc(), blk = b);
+                i.arg&[1] = c.def(sl, MASK(sz), b, (Some = i), l&);
+            }
+        }
+    };
+    sort :: quicksort(Insert, icmp);
+    sort(c.ilog.slice(0, c.nlog));
+    c.ilog&.grow(c.nlog + 1);
+    c.ilog[c.nlog].bid = f.nblk.bitcast(); /* add a sentinel */
+    ib: QList(Qbe.Ins) = new(0, .PHeap);
+    ist := c.ilog.first;
+    range(0, f.nblk.zext()) { n | 
+        b := f.rpo.offset(n)[];
+        while => ist.bid == n.trunc() && ist.is_phi {
+            ist.new.phi.p.link = b.phi;
+            b.phi = ist.new.phi.p;
+            ist = ist.offset(1);
+        };
+        ni := 0;
+        nt := 0;
+        if true { // TODO: ugh
+            break :: local_return;
+            loop {
+                ::if(*Qbe.Ins);
+                i := if ist.bid == n.trunc() && ist.off == ni.trunc() {
+                    i := ist.new.ins&;
+                    ist = ist.offset(1);
+                    i
+                } else {
+                    if(b.nins == ni.trunc(), => break());
+                    i := b.ins.offset(ni);
+                    ni += 1;
+                    if is_load(i.op()) && i.arg&[1] != QbeNull {
+                        ext := @as(Qbe.O) @as(i32) Qbe.O.extsb.raw() + i.op().raw() - Qbe.O.loadsb.raw();
+                        o := @if_else {
+                            @if(i.op() == .load) => Qbe.O.copy;
+                            @if(i.op() == .loadsw || i.op() == .loaduw) => 
+                                if(i.cls() == .Kl, => ext, => .copy);
+                            @else => ext;
+                        };
+                        i.set_op(o);
+                        i.arg&[0] = i.arg&[1];
+                        i.arg&[1] = QbeNull;
+                    };
+                    i
+                };
+                nt += 1;
+                ib&.grow(nt);
+                ib[nt - 1] = i[];
+            };
+        };
+        b.nins = nt.trunc();
+        idup(b.ins&, ib.first, nt);
+    };
+    free(ib);
+    free(c.ilog);
+    if f.globals.debug["M".char()] {
+        write(f.globals.debug_out, "\n> After load elimination:\n");
+        printfn(f, f.globals.debug_out);
+    };
+}
 
 fn storesz(i: *Qbe.Ins) i32 = {
     @match(i.op()) {
@@ -24,3 +420,8 @@ fn loadsz(i: *Qbe.Ins) i32 = {
         @default => panic("invalid op for loadsz");
     }
 }
+
+// TODO: wrong
+fn trunc_16(v: i32) i16 #unsafe_noop_cast;
+fn ext_16(v: i16) i32 #unsafe_noop_cast;
+

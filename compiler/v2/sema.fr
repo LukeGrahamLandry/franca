@@ -464,7 +464,7 @@ fn handle_target_split(self: *SelfHosted, func: *Func) Maybe(void) #once = {
         // TODO: typecheck now? 
         merged: List(FuncImpl) = list(self.get_alloc());
         for_enum(Os) { os |
-            new_func := func.deep_clone(self.get_alloc());
+            new_func := func.deep_clone(self.get_alloc()); // :SLOW redundantly clones dead code if you immediatly @match on the arg
             @if(!LAZY_SCOPE) {
                 mapping: HashMap(Var, Var) = init(temp());
                 renumber: RenumberVars = (scope = self.scopes, mapping = mapping&);
@@ -1426,6 +1426,10 @@ fn compile_call(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
         @default => .None;
     };
     
+    if arg.is_raw_unit() && f.expr&.is(.Closure) && f.expr.Closure.get_flag(.AllowRtCapture) {
+        f.expr.Closure.set_flag(.Once);
+    };
+    
     @check(self.compile_expr(f, req_fn)) return;
     
     if f.ty == self.get_or_create_type(OverloadSet) {
@@ -1713,6 +1717,7 @@ fn emit_capturing_call(self: *SelfHosted, f: FuncId, expr_out: *FatExpr, request
         // TODO: decide what #once with const args should mean. 
         temp := aliased_body[];
         aliased_body.expr = (Poison = .OnceUsed);
+        func.set_flag(.OnceConsumed);
         temp
     } else {
         aliased_body.deep_clone(self.get_alloc())

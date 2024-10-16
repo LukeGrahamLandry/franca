@@ -124,20 +124,15 @@ fn Slice($T: Type) Type = {
         (ptr = ptr, len = self.len * :: T.size_of())
     }
    
-    fn copy_from(dest: Self, src: Self) void = {
+    fn copy_from(dest: Self, src: Self) void #inline = {
         @safety(.Bounds) dest.len == src.len;
-        // Last I checked these compile the compiler at the same speed. 
-        // It was slower to write a dumb loop and also slower to pass stride as a const arg to copy_aligned instead of doing the multiply here,
-        // I assume both were just becuase they caused more specializations so we compiled the same code more times. 
-        // There's also a lot of personal joy in not needing to dlopen libc for this.    -- Sep 17 
-        // memcpy(T.raw_from_ptr(dest.ptr), T.raw_from_ptr(src.ptr), dest.len * @run T.size_of());
         copy_aligned(T.raw_from_ptr(dest.ptr), T.raw_from_ptr(src.ptr), dest.len * T.size_of(), T.align_of());
     }
     
     fn copy_overlapping(self: Self, dest: i64, src: i64, len: i64) void = {
-        dest := T.raw_from_ptr(self.ptr.offset(dest));
-        src  := T.raw_from_ptr(self.ptr.offset(src));
-        memmove(dest, src, size_of(T) * len);
+        dest := self.slice(dest, dest + len);
+        src  := self.slice(src,  src  + len);
+        dest.copy_from(src);
     }
     
     // note: you can't call T.zeroed() here because it wants to comptime call us. 
@@ -520,18 +515,31 @@ fn starts_with(haystack: Str, needle: Str) bool =
         eq(start, needle)
     };
 
+// TODO: this is dumb. if you want to copy a billion bytes but they're 1 aligned, you should just fix the start/end. 
 fn copy_aligned(dest: rawptr, src: rawptr, count_bytes: i64, $align: i64) void = {
     @if(@run align == 0) return();
     T :: UInt(align * 8); ::ptr_utils(T);
     src  := T.ptr_from_raw(src); 
     dest := T.ptr_from_raw(dest); 
-    range(0, count_bytes / T.size_of()) { _ |
-        dest[] = src[];
-        dest = dest.offset(1); // units are T not bytes!
-        src = src.offset(1);
-    };
+    chunks := count_bytes / T.size_of();
+    if ptr_diff(src, dest) > 0 {  // TODO: is llvm offended by comparing pointers? 
+        src = src.offset(chunks-1);
+        dest = dest.offset(chunks-1);
+        range(0, chunks) { _ |
+            dest[] = src[];
+            dest = dest.offset(-1); // units are T not bytes!
+            src = src.offset(-1);
+        };
+    } else {
+        range(0, chunks) { _ |
+            dest[] = src[];
+            dest = dest.offset(1); // units are T not bytes!
+            src = src.offset(1);
+        };
+    }
 }
 
+// TODO: this is dumb. if you want to zero a billion bytes but they're 1 aligned, you should just fix the start/end. 
 fn set_zero_aligned(dest: rawptr, count_bytes: i64, $align: i64) void = {
     @if(@run align == 0) return();
     T :: UInt(align * 8); ::ptr_utils(T);

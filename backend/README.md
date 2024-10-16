@@ -6,9 +6,6 @@ Then clang takes as long to assemble that text as the whole Qbe part (or somehow
 However I want to use this as a JIT for comptime execution, which will only be practical if I remove those serialization steps.
 You can still print out the ir as human readable text between passes and modify it for testing.
 
-If you use llvm you don't get full c-abi compatibility for free.
-For example, here's where rustc does it in the frontend https://github.com/rust-lang/rust/blob/master/compiler/rustc_target/src/abi/call/mod.rs
-
 ## Changes from Qbe
 
 - Generate machine code directly without depending on an external assembler.
@@ -20,7 +17,6 @@ For example, here's where rustc does it in the frontend https://github.com/rust-
 - Removed several codegen optimisations until we have a solid foundation (but I want to bring them back eventually).
   - arm: loading float constants from memory
   - arm: logimm single instruction load int more constants
-  - arm: use of bl for calling a constant (instead of blr)
   - arm: constant immediate without an extra register when accessing thread locals
 - Removed the RISC-V target for now because I haven't done thier instruction encoding yet.
 

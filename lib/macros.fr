@@ -738,3 +738,51 @@ fn safety(kind: FatExpr, code: FatExpr) FatExpr #macro = {
 fn safety_check_failed() Never #cold = {
     panic("Safety Check Failed.")
 }
+
+fn if_else(handlers: FatExpr) FatExpr #macro  = {
+    @ct_assert(handlers.expr&.is(.Block), handlers.loc, "@if_else expected block"); // TODO: add this check to @match
+    handlers := handlers.expr.Block.body.items();
+    
+    no_else :: "@if_else must have @else as last branch";
+    want_if :: "Expected `@if(cond) => value`";
+    
+    while => handlers.last().expect(no_else)[].stmt&.is(.Noop) {
+        handlers.len -= 1;
+    };
+    
+    else := handlers.last().expect(no_else);
+    @ct_assert(else.stmt&.is(.Eval), else.loc, no_else);
+    else := else.stmt.Eval&;
+    @ct_assert(else.expr&.is(.PrefixMacro), else.loc, no_else);
+    else := else.expr.PrefixMacro&;
+    ::AutoEq(?Symbol); ::RefEq(?Symbol);
+    @ct_assert(else.handler.ident() == (Some = @symbol else), else.handler.loc, no_else);
+    body := @{ @[else.target[]]() }; // TODO: this will get confusing if compiler swaps unit target with arg sooner. 
+    handlers.len -= 1;
+    
+    i := handlers.len - 1;
+    while => i >= 0 {
+        stmt: *FatStmt = handlers.index(i); 
+        if stmt.stmt&.is(.Eval) {
+            handler_body := stmt.stmt.Eval&;
+            branch := handler_body.expr.PrefixMacro&;
+            name := branch.handler.ident() || compile_error(want_if, branch.handler.loc);
+            @ct_assert(name == (@symbol if), branch.handler.loc, want_if);
+            body = @{ @if(@[branch.arg[]], @[branch.target[]](), @[body]) };
+        } else {
+            @ct_assert(stmt.stmt&.is(.Noop), stmt.loc, "bad stmt in @if_else");
+        };
+        i = i.sub(1);
+    };
+    body
+}
+
+// TODO: use this in @match/@switch
+fn ident(self: *FatExpr) ?Symbol = {
+    @match(self.expr&) {
+        fn GetVar(v) => (Some = v.name);
+        fn GetNamed(v)  => (Some = v[]);
+        fn String(v) => (Some = v[]);
+        @default => .None;
+    }
+}
