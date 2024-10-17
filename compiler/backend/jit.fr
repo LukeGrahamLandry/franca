@@ -77,17 +77,23 @@ fn emit_bc_and_jit(program: *SelfHosted, f: FuncId) PRes #once = {
 fn do_self_jit(program: *SelfHosted, body: *FnBody) rawptr = {
     old := program.legacy_indirection.cast();
     f := body.func;
-    @match(program.env.comptime_arch) {
+    addr, forward_calls := @match(program.env.comptime_arch) {
         fn aarch64() => {
             a: EmitArm64 = new(old, body);
-            a&.compile(f)
+            (a&.compile(f), a.forward_calls.items())
         }
         fn x86_64() => {
             a: EmitX64 = new(old, body);
-            a&.compile(f)
+            (a&.compile(f), a.forward_calls.items())
         }
         fn wasm32() => panic("unreachable: compiler doesn't support wasm yet");
-    }
+    };
+    // TODO: this changes behaviour for programs that would have worked anyway.
+    //       later functions that try to forward call this will jump directly to the shim instead of using the table. -- Oct 16 
+    for forward_calls { f |
+        program.create_jit_shim(f);
+    };
+    addr
 }
 
 fn create_jit_shim(self: *SelfHosted, fid: FuncId) Res(void) = {
@@ -433,6 +439,7 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $negative_slots: bool) Type =
         block_ips: List(?*InstUnit),
         clock: u16,
         body: *FnBody,
+        forward_calls: List(FuncId),
         backend: B,
     );
     
@@ -448,6 +455,7 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $negative_slots: bool) Type =
             block_ips = list(temp()),
             clock = 0,
             body = body,
+            forward_calls = list(temp()),
             backend = new(compile),
         )
     }
@@ -483,7 +491,8 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $negative_slots: bool) Type =
         self.vars = .None.repeated(func.vars.len, temp());
         self.block_ips = .None.repeated(self.body.blocks.len, temp());
     
-        self.asm.mark_start(f);
+        self.asm.mark_start(f); // this puts currenet address in table so recursion can be direct
+        ff.set_flag(.AsmDone);  // this tells us to check the table. TODO: better to just compare table to tried_to_call_uncompiled instead of checking this flag?
         reserve_stack := self.emit_header();
     
         // TODO: assert int_count <= 8 && float_count <= 8 or impl pass on stack.

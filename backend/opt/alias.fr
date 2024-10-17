@@ -26,7 +26,6 @@ fn getalias(a: *Qbe.Alias, r: Qbe.Ref, f: *Qbe.Fn) void = {
     };
 }
 
-// note: nothing calls this until port load.c
 fn alias(p: Qbe.Ref, op: i32, sp: i32, q: Qbe.Ref, sq: i32, delta: *i32, f: *Qbe.Fn) Aliasing = {
     ap := Qbe.Alias.zeroed();
     aq := Qbe.Alias.zeroed();
@@ -42,7 +41,7 @@ fn alias(p: Qbe.Ref, op: i32, sp: i32, q: Qbe.Ref, sq: i32, delta: *i32, f: *Qbe
 
     if astack(ap.type) && astack(aq.type) {
         /* if both are offsets of the same
-         * stack slot, they alias iif they
+         * stack slot, they alias iff they
          * overlap */
         if(ap.base == aq.base && ovlap, => return(.MustAlias));
         return(.NoAlias);
@@ -69,7 +68,7 @@ fn alias(p: Qbe.Ref, op: i32, sp: i32, q: Qbe.Ref, sq: i32, delta: *i32, f: *Qbe
     /* if one of the two is unknown
      * there may be aliasing unless
      * the other is provably local */
-    if (ap.type == .AUnk && aq.type != .ALoc, => return(.MayAlias));
+    if(ap.type == .AUnk && aq.type != .ALoc, => return(.MayAlias));
     if(aq.type == .AUnk && ap.type != .ALoc, => return(.MayAlias));
 
     .NoAlias
@@ -129,10 +128,6 @@ fn fillalias(f: *Qbe.Fn) void = {
         };
         for_insts_forward b { i |
             continue :: local_return;
-            if i.op() == .blit1 { // TODO: just skip when handling blit0
-                continue();
-            };
-            
             a := Qbe.Alias.ptr_from_int(0);
             if i.to != QbeNull {
                 @debug_assert(rtype(i.to) == .RTmp);
@@ -156,11 +151,14 @@ fn fillalias(f: *Qbe.Fn) void = {
                 a.base = i.to.val().intcast();
                 a.offset = 0;
             };
+            
+            // copy so same alias info. 
             if i.op() == .copy {
                 xxx := !a.is_null();
                 @debug_assert(xxx);
                 getalias(a, i.arg&[0], f);
             };
+            // if we're offseting by a constant, the new value has the same base as the other argument. just a different offset. 
             if i.op() == .add {
                 a0 := Qbe.Alias.zeroed();
                 a1 := Qbe.Alias.zeroed();
@@ -175,15 +173,19 @@ fn fillalias(f: *Qbe.Fn) void = {
                         a.offset += a1.offset;
                     };
                 };
-            };
+            }; // TODO: what about sub?
+            
+            // If its not a memory op and not something simple we understand, treat the args as escaping. 
+            // A derived value might get passed to a call and later passes need to assume they can no longer reason about it. 
             if i.op() != .blit0 && (i.to == QbeNull || a.type == .AUnk) {
                 if !is_load(i.op()) {
                     esc(i.arg&[0], f);
                 };
-                if !is_store(i.op()) && i.op() != .argc {
+                if !is_store(i.op()) && i.op() != .argc {  // argc abi inserts a copy so the memory doesn't really escape
                     esc(i.arg&[1], f);
                 };
             };
+            
             if i.op() == .blit0 {
                 i0 := i;
                 i1 := i.offset(1);
@@ -195,7 +197,7 @@ fn fillalias(f: *Qbe.Fn) void = {
                 continue();
             };
             if is_store(i.op()) {
-                store(i.arg&[1], storesz(i), f);
+                store(i.arg&[1], size_of_store(i), f);
             };
         };
         if b.jmp.type != .Jretc { // the stack slot's gone when you return so that's not really a meaningful escape

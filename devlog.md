@@ -1,3 +1,7 @@
+## (Oct 16)
+
+- emit: for extuw, need to `mov	w0, w0` (with Bits.W32) to clear the top bits. even tho the class of the instruction is Kl because thats the output.
+
 ## (Oct 15)
 
 - stop being lazy and make a macro to make else-if chains less painful.
