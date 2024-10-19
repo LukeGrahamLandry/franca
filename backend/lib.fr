@@ -22,9 +22,10 @@
 #include_std("backend/opt/inline.fr");
 #include_std("backend/exe/macho.fr");
 #include_std("backend/bits/macho.fr");
+#include_std("backend/opt/mem.fr");
 
 ENABLE_INTERNAL_QBE :: true;  // until i want to enable it on github actions
-LINK_QBE_C :: false;
+LINK_QBE_C :: true;
 DO_INLINING :: true; // TODO: make this a runtime toggle so you can make sure you're actually testing calls
 
 // easy-ish (?) things to try to get used to making changes. 
@@ -50,7 +51,8 @@ DO_INLINING :: true; // TODO: make this a runtime toggle so you can make sure yo
 // TODO: have a flag on module to turn off formatting name strings when we're not going to be debug printing. 
 // TODO: don't use libc file structs all over the place. have my own non-painful buffered io. 
 // TODO: look at the asm and make sure im not uxtb before every cmp #0 on a bool. have to fix the ir i generate.
-//       do i need to be able to express that a function returns exactly 0 or 1? 
+//       do i need to be able to express that a function returns exactly 0 or 1?
+// TODO: dead store elimination would make small examples generate tighter code.  
 /*
 (i assume you need this thing for static link)
 ar rvs qbe_merged.o util.o parse.o abi.o cfg.o mem.o ssa.o alias.o load.o copy.o fold.o simpl.o live.o spill.o rega.o emit.o amd64/targ.o amd64/sysv.o amd64/isel.o amd64/emit.o arm64/targ.o arm64/abi.o arm64/isel.o arm64/emit.o rv64/targ.o rv64/abi.o rv64/isel.o rv64/emit.o
@@ -137,7 +139,7 @@ fn init(segment_size: i64, gpa: Alloc, code_alloc: Alloc) QbeModule = {
         m.debug  = gpa.box_zeroed(@type m.debug[]);
         m.target = gpa.box(@type m.target[]);
     });
-    //m.debug[Qbe.DebugKey.Copy.raw()] = true;
+    //m.debug[Qbe.DebugKey.Memory.raw()] = true;
     m.target.fill_target_info(.arm64_apple);
     m.types[] = new(0, Qbe.Pool.PHeap); // TODO: check the magic in QbeBuilder.init to make sure you remember to do this. 
     m.curi[] = m.insb.index_unchecked(Qbe.MaxInstructions);
@@ -192,19 +194,20 @@ run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
     convert_to_ssa(fnn);
     filluse(fnn);
     ssacheck(fnn); // debug
+    fillalias(fnn); // !
+    loadopt(fnn); // optional
+    filluse(fnn);
+    fillalias(fnn); // for coalesce
     @if(LINK_QBE_C) {
-        fillalias(fnn); // !
-        loadopt(fnn); // optional
-        filluse(fnn);
-        fillalias(fnn); // for coalesce
         coalesce(fnn); // optional
+    };
+    filluse(fnn); 
+    filldom(fnn); 
+    ssacheck(fnn); // debug
+    
+    if !m.want_llvm && DO_INLINING { // TODO: check if this would help it somehow
+        inlcalls(fnn);
         filluse(fnn); 
-        filldom(fnn); 
-        ssacheck(fnn); // debug
-        if !m.want_llvm && DO_INLINING { // TODO: check if this would help it somehow
-            inlcalls(fnn);
-            filluse(fnn); 
-        };
     };
     
     copy_elimination(fnn); // optional

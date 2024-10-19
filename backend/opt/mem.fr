@@ -1,0 +1,480 @@
+// Adapted from Qbe. MIT License. © 2015-2024 Quentin Carbonneaux <quentin@c9x.me>
+
+/* require use, maintains use counts */
+fn promote(f: *Qbe.Fn) void = {
+    /* promote uniform stack slots to temporaries */
+    b := f.start;
+    
+    if f.globals.debug["M".char()] {
+        @fmt_write(f.globals.debug_out, "\n# promotions: (");
+    };
+    for_insts_forward b { i |
+        skip :: local_return;
+        if(!is_alloc(i.op()), => skip());
+        /* specific to NAlign == 3 */
+        @debug_assert(rtype(i.to) == .RTmp);
+        t := f.get_temporary(i.to);
+        if(t.ndef != 1, => skip());
+        k: ?Qbe.Cls = .None;
+        s: ?i32 = .None;
+        each t.uses() { u |
+            if u.type != .UIns || !is_uniform_access(u.u.ins, k&, s&, i.to) {
+                skip();
+            };
+        };
+        /* get rid of the alloc and replace uses */
+        i.set_nop();
+        t.ndef -= 1;
+        k := or k {
+            @assert(t.nuse == 0, "slot % is read but never stored to", t.name());
+            skip()
+        };
+        each t.uses() { u |
+            replace_access_with_copy(t, u.u.ins, k)
+        };
+        if f.globals.debug["M".char()] {
+            @fmt_write(f.globals.debug_out, "%%, ", "%", t.name());
+        };
+    };
+    if f.globals.debug["M".char()] {
+        write(f.globals.debug_out, ")\n> After slot promotion:\n");
+        printfn(f, f.globals.debug_out);
+    };
+}
+
+fn is_uniform_access(l: *Qbe.Ins, k: *?Qbe.Cls, s: *?i32, address: Qbe.Ref) bool #once = {
+    if is_load(l.op())
+    && none_or(s[], fn(s) => s == size_of_load(l)) {
+        s[] = (Some = size_of_load(l));
+        return(true);
+    };
+    if is_store(l.op())
+    && (address == l.arg&[1] && address != l.arg&[0])
+    && none_or(s[], fn(s) => s == size_of_store(l))
+    && none_or(k[], fn(k) => k == argcls(l, 0)) {
+        s[] = (Some = size_of_store(l));
+        k[] = (Some = argcls(l, 0));
+        return(true);
+    };
+    false
+}
+
+fn replace_access_with_copy(t: *Qbe.Tmp, l: *Qbe.Ins, k: Qbe.Cls) void #once = {  
+    if is_store(l.op()) {
+        l[] = make_ins(.copy, k, l.arg&[1], l.arg&[0], QbeNull);
+        t.nuse -= 1;
+        t.ndef += 1;
+        return();
+    };
+    /* try to turn loads into copies so we
+     * can eliminate them later */
+    ext_op := @as(Qbe.O) @as(i32) Qbe.O.extsb.raw() + (l.op().raw() - Qbe.O.loadsb.raw());
+    if l.op() == .loadsw || l.op() == .loaduw {
+        if k == .Kl {
+            l.set_op(ext_op);
+            return();
+        };
+    } else {
+        if l.op() != .load {
+            l.set_op(ext_op);
+            return();
+        };
+    };
+    l.set_op(if(KBASE(k) != KBASE(l.cls()), => .cast, => .copy));
+}
+
+/* [a, b) with 0 <= a */
+Range :: @struct(a: i32, b: i32);
+Store :: @struct(ip: i32, i: *Qbe.Ins);
+Slot  :: @rec @struct(
+    t: i32,
+    sz: i32,
+    m: u64,
+    l: u64,
+    r: Range,
+    s: *Slot,
+    st: QList(Store),
+    nst: i32,
+);
+
+fn rin(r: Range, n: i32) bool #inline =
+    r.a <= n && n < r.b;
+
+fn rovlap(r0: Range, r1: Range) bool #inline =
+    r0.b != 0 && r1.b != 0 && r0.a < r1.b && r1.a < r0.b;
+
+fn radd(r: *Range, n: i32) void = {
+    @if_else {
+        @if(r.b == 0) => {
+            r[] = (a = n, b = n + 1);
+        };
+        @if(n < r.a) => {
+            r.a = n;
+        };
+        @if(n >= r.b) => {
+            r.b = n + 1;
+        };
+        @else => ();
+    };
+}
+
+fn slot(ps: **Slot, off: *i64, r: Qbe.Ref, f: *Qbe.Fn, sl: QList(Slot)) bool = {
+    a := Qbe.Alias.zeroed();
+    getalias(a&, r, f);
+    if a.type != .ALoc {
+        return(false);
+    };
+    t := f.get_temporary(a.base.zext());
+    if t.visit < 0 {
+        return(false);
+    };
+    off[] = a.offset;
+    ps[]  = sl.index(t.visit.zext());
+    true
+}
+
+fn load(r: Qbe.Ref, x: u64, ip: i32, f: *Qbe.Fn, sl: QList(Slot)) void = {
+    off := 0;
+    s   := Slot.ptr_from_int(0);
+    if slot(s&, off&, r, f, sl) {
+        s.l = s.l.bit_or(x.shift_left(off));
+        s.l = s.l.bit_and(s.m);
+        if s.l != 0 {
+            radd(s.r&, ip);
+        }
+    };
+}
+
+fn store(r: Qbe.Ref, x: u64, ip: i32, i: *Qbe.Ins, f: *Qbe.Fn, sl: QList(Slot)) void = {
+    off := 0;
+    s   := Slot.ptr_from_int(0);
+    if slot(s&, off&, r, f, sl) {
+        if s.l != 0 {
+            radd(s.r&, ip);
+            s.l = s.l.bit_and(bit_not(x.shift_left(off)));
+        } else {
+            s.nst += 1;
+            grow(s.st&, s.nst.intcast());
+            s.st[intcast(s.nst-1)].ip = ip;
+            s.st[intcast(s.nst-1)].i = i;
+        };
+    };
+}
+
+fn coalesce(f: *Qbe.Fn) void = {
+    /* minimize the stack usage
+     * by coalescing slots
+     */
+    nsl := 0;
+    sl: QList(Slot) = new(0, .PHeap); 
+    range(Qbe.Tmp0, f.ntmp.zext()) { n |
+        t := f.get_temporary(n);
+        t.visit = -1;
+        if t.alias.type == .ALoc
+        && t.alias.slot.identical(t.alias&)
+        && t.defining_block == f.start.id
+        && t.alias.u.loc.sz != -1 {
+            t.visit = nsl.intcast();
+            nsl += 1;
+            grow(sl&, nsl);
+            s := sl.index(nsl-1);
+            s.t = n.intcast();
+            s.sz = t.alias.u.loc.sz;
+            s.m = t.alias.u.loc.m;
+            s.s = Slot.ptr_from_int(0);
+            s.st = new(0, .PHeap);
+            s.nst = 0;
+        }
+    };
+
+    /* one-pass liveness analysis */
+    for_blocks f { b |
+        b.loop = -1;
+    };
+    loopiter f { (hd: *Qbe.Blk, b: *Qbe.Blk) | 
+        if hd.loop < b.id.bitcast() {
+            hd.loop = b.id;
+        };
+    };
+    nbl := 0;
+    bl: QList(*Qbe.Ins) = new(0, .PHeap);
+    br := temp().alloc_zeroed(Range, f.nblk.zext());
+    ip := MAX_i32 - 1;
+    range_rev(0, f.nblk.zext()) { n |
+        b := f.rpo.offset(n)[];
+        br[n].b = ip.intcast();
+        ip -= 1;
+        each sl.slice(0, nsl) { s | 
+            s.l = 0;
+            for_jump_targets b { ps | // :SketchyIterTargets
+                m := ps.id;
+                if m.intcast() > n && rin(s.r, br[m.intcast()].a) {
+                    s.l = s.m;
+                    radd(s.r&, ip.intcast());
+                };
+            };
+        };
+        if b.jmp.type == .Jretc {
+            ip -= 1;
+            load(b.jmp.arg, bitcast(-1), ip.intcast(), f, sl);
+        };
+        for_insts_rev b { i |
+            i := i[];
+            arg := i.arg&;
+            if i.op() == .argc {
+                ip -= 1;
+                load(arg[1], bitcast(-1), ip.intcast(), f, sl);
+            };
+            if is_load(i.op()) {
+                x := BIT(size_of_load(i).intcast()) - 1;
+                ip -= 1;
+                load(arg[0], x, ip.intcast(), f, sl);
+            };
+            if is_store(i.op()) {
+                x := BIT(size_of_store(i).intcast()) - 1;
+                store(arg[1], x, ip.intcast(), i, f, sl);
+                ip -= 1;
+            };
+            if i.op() == .blit0 {
+                @debug_assert(i.offset(1).op() == .blit1);
+                sz := i.offset(1)[].arg&[0];
+                @debug_assert(rtype(sz) == .RInt);
+                sz := abs(rsval(sz));
+                x: u64 = if(sz >= 64, => bitcast(@as(i64) -1), => BIT(sz.intcast()) - 1);
+                store(arg[1], x, ip.intcast(), i, f, sl);
+                ip -= 1;
+                load(arg[0], x, ip.intcast(), f, sl);
+                nbl += 1;
+                grow(bl&, nbl);
+                bl[nbl-1] = i;
+            };
+        };
+        each sl.slice(0, nsl) { s |
+            if s.l != 0 {
+                radd(s.r&, ip.intcast());
+                if b.loop != -1 {
+                    @debug_assert(b.loop.intcast() >= n);
+                    radd(s.r&, br[b.loop.zext()].b - 1);
+                };
+            };
+        };
+        br[n].a = ip.intcast();
+    };
+
+    /* kill dead stores */
+    each sl.slice(0, nsl) { s |
+        range(0, s.nst.intcast()) { n |
+            if !rin(s.r, s.st[n].ip) {
+                i := s.st[n].i;
+                if i.op() == .blit0 {
+                    i.offset(1).set_nop();
+                };
+                i.set_nop();
+            };
+        };
+    };
+
+    /* kill slots with an empty live range */
+    total: i32 = 0;
+    freed: i32 = 0;
+    stk: QList(i32) = new(0, .PHeap);
+    n := 0;
+    s0 := sl.first;
+    each sl.slice(0, nsl) { s |
+        total += s.sz;
+        if s.r.b == 0 {
+            free(s.st);
+            n += 1;
+            grow(stk&, n);
+            stk[n-1] = s.t;
+            freed += s.sz;
+        } else {
+            s0[] = s[];
+            s0 = s0.offset(1);
+        };
+    };
+    nsl := ptr_diff(sl.first, s0);
+    if f.globals.debug["M".char()] {
+        out := f.globals.debug_out;
+        write(out, "\n> Slot coalescing:\n");
+        if n != 0 {
+            write(out, "\tkill [");
+            range(0, n) { m |
+                @fmt_write(out, " %%", "%", f.tmp.index(stk[m].zext()).name());
+            };
+            write(out, " ]\n");
+        };
+    };
+    while => n > 0 {
+        continue :: local_return;
+        n -= 1;
+        t := f.tmp.index(stk[n].zext());
+        @debug_assert(t.ndef == 1 && !t.def.is_null());
+        i := t.def;
+        if is_load(i.op()) {
+            i.set_op(.copy);
+            i.arg&[0] = QbeUndef;
+            continue();
+        };
+        i.set_nop();
+        each t.uses() { u | 
+            continue :: local_return;
+            if u.type == .UJmp {
+                b := f.rpo.offset(u.bid.zext())[];
+                @debug_assert(is_ret(b.jmp.type));
+                b.jmp.type = .Jret0;
+                b.jmp.arg = QbeNull;
+                continue();
+            };
+            @debug_assert(u.type == .UIns);
+            i := u.u.ins;
+            @if_else {
+                @if(i.to != QbeNull) => {
+                    @debug_assert(rtype(i.to) == .RTmp);
+                    n += 1;
+                    grow(stk&, n);
+                    stk[n-1] = i.to.val().intcast();
+                };
+                @if(is_arg(i.op())) => {
+                    @debug_assert(i.op() == .argc);
+                    i.arg&[1] = QbeConZero;  /* crash */
+                    // TODO: what? why is this ok?
+                };
+                @else => {
+                    if i.op() == .blit0 {
+                        i.offset(1).set_nop();
+                    };
+                    i.set_nop();
+                };
+            };
+        };
+    };
+    free(stk);
+
+    /* fuse slots by decreasing size */
+    scmp :: fn(a: *Slot, b: *Slot) bool = {
+        if a.sz != b.sz {
+            b.sz <= a.sz
+        } else {
+            a.r.a <= b.r.a
+        }
+    };
+    sort :: quicksort(Slot, scmp);
+    sort(sl.slice(0, nsl));
+    fused: i32 = 0;
+    range(0, nsl) { n |
+        continue :: local_return;
+        s0 := sl.index(n);
+        if(!s0.s.is_null(), => continue());
+        s0.s = s0;
+        r := s0.r;
+        range(n+1, nsl) { si |
+            skip :: local_return;
+            s := sl.index(si);
+            if(!s.s.is_null() || s.r.b == 0, => skip());
+            if rovlap(r, s.r) {
+                /* O(n); can be approximated
+                 * by 'goto Skip;' if need be
+                 */
+                range(n, si) { m |
+                    if sl[m].s.identical(s0) && rovlap(sl[m].r, s.r) {
+                        skip();
+                    };
+                };
+            };
+            radd(r&, s.r.a);
+            radd(r&, s.r.b - 1);
+            s.s = s0;
+            fused += s.sz;
+        }
+    };
+
+    /* substitute fused slots */
+    enumerate sl.slice(0, nsl) { idx, s |
+        continue :: local_return;
+        t := f.tmp.index(s.t.intcast());
+        /* the visit link is stale,
+         * reset it before the slot()
+         * calls below
+         */
+        t.visit = idx.intcast();
+        @debug_assert(t.ndef == 1 && !t.def.is_null());
+        if(s.s.identical(s), => continue());
+        t.def.set_nop();
+        ts := f.tmp.index(s.s.t.intcast());
+        @debug_assert(t.defining_block == ts.defining_block);
+        if ts.def.in_memory_after(t.def) {
+            /* make sure the slot we
+             * selected has a def that
+             * dominates its new uses
+             */
+            t.def[] = ts.def[];
+            ts.def.set_nop();
+            ts.def = t.def;
+        };
+        for t.uses() { u | 
+            continue :: local_return;
+            if u.type == .UJmp {
+                b := f.rpo.offset(u.bid.zext())[];
+                b.jmp.arg = TMP(s.s.t);
+                continue();
+            };
+            @debug_assert(u.type == .UIns);
+            each u.u.ins.arg& { a | 
+                if a[] == TMP(s.t) {
+                    a[] = TMP(s.s.t);
+                }
+            };
+        };
+    };
+
+    /* fix newly overlapping blits */
+    for bl.slice(0, nbl) { i |
+        off0, off1 := (0, 0);
+        s, s0 := (Slot.ptr_from_int(0), Slot.ptr_from_int(0));
+        if i.op() == .blit0
+        && slot(s&, off0&, i.arg&[0], f, sl)
+        && slot(s0&, off1&, i.arg&[1], f, sl)
+        && s.s.identical(s0.s) {
+            size_i := i.offset(1);
+            if off0 < off1 {
+                size_arg := size_i.arg&.index(0);
+                sz := rsval(size_arg[]);
+                @debug_assert(sz >= 0);
+                size_arg[] = INT(-sz.intcast());
+            };
+            if off0 == off1 {
+                i.set_nop();
+                size_i.set_nop();
+            };
+        };
+    };
+    free(bl);
+
+    if f.globals.debug["M".char()] {
+        out := f.globals.debug_out;
+        each sl.slice(0, nsl) { s0 |
+            continue :: local_return;
+            if(!s0.s.identical(s0), => continue());
+            @fmt_write(out, "\tfuse (%b) [", f_pad(s0.sz, 3, .Before));
+            for(s0, sl.index(nsl)) { s |
+                continue :: local_return;
+                if(!s.s.identical(s0), => continue());
+                @fmt_write(out, " %%", "%", f.tmp[s.t.zext()]&.name());
+                if s.r.b != 0 {
+                    @fmt_write(out, "[%,%)", s.r.a - ip.intcast(), s.r.b - ip.intcast());
+                } else {
+                    write(out, "{}");
+                };
+            };
+            write(out, " ]\n");
+        };
+        @fmt_write(out, "\tsums %/%/% (killed/fused/total)\n\n", freed, fused, total);
+        printfn(f, out);
+    };
+
+    each sl.slice(0, nsl) { s | 
+        free(s.st);
+    };
+    free(sl);
+}
