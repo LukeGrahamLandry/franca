@@ -1,3 +1,7 @@
+## (Oct 20)
+
+- caching the `primitives` slices doesn't make it faster so don't bother.
+
 ## (Oct 16)
 
 - emit: for extuw, need to `mov	w0, w0` (with Bits.W32) to clear the top bits. even tho the class of the instruction is Kl because thats the output.

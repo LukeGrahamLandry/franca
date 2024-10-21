@@ -31,86 +31,15 @@ fn clone(self: *BlockState) BlockState = {
     (stack = self.stack&.clone(), free_reg = self.free_reg, free_reg_float = self.free_reg_float, open_slots = self.open_slots&.clone())
 }
 
-fn emit_bc_and_jit(program: *SelfHosted, f: FuncId) PRes #once = {
-    when := ExecStyle.Jit;
-    func := program.get_function(f);
-    @debug_assert(!func.get_flag(.RealAsmDone), "double compile");
-    @debug_assert(program.get_fn_old(f).is_none(), "ICE: not .AsmDone but have pointer");
-    
-    mark := __temp_alloc.mark();
-    body := @try(program.emit_bc(f, when)) return;
-    program.jitted&.extend_blanks(f);
-    
-    // We might have noticed that this function was a duplicate while generating bytecode.
-    // So it was Normal before but now its a Redirect. 
-    if body.func != f {
-        if program.get_fn_old(body.func) { old |
-            program.put_jitted_function(f, old);
-        };
-        
-        __temp_alloc.reset_retaining_capacity(mark);
-        return(.Ok);
-    };
-    
-    zone := zone_begin(.EmitJit); // TODO: defer
-    @if(ENABLE_TRACY) {
-        real_name := program.pool.get(func.name);
-        ___tracy_emit_zone_name(zone, real_name);
-    };
-    
-    opts := program.get_build_options();
-    
-    @match(opts.comptime_jit) {
-        fn CompilerJit() => {
-            addr := program.do_self_jit(body);
-            program.put_jitted_function(f, addr);
-        }
-        fn New() => panic("TODO: new backend");
-    };
-    func.set_flag(.RealAsmDone);
-    
-    zone_end(zone);
-    __temp_alloc.reset_retaining_capacity(mark);
-    .Ok
-}
-
-fn do_self_jit(program: *SelfHosted, body: *FnBody) rawptr = {
-    old := program.legacy_indirection.cast();
-    f := body.func;
-    addr, forward_calls := @match(program.env.comptime_arch) {
-        fn aarch64() => {
-            a: EmitArm64 = new(old, body);
-            (a&.compile(f), a.forward_calls.items())
-        }
-        fn x86_64() => {
-            a: EmitX64 = new(old, body);
-            (a&.compile(f), a.forward_calls.items())
-        }
-        fn wasm32() => panic("unreachable: compiler doesn't support wasm yet");
-    };
-    // TODO: this changes behaviour for programs that would have worked anyway.
-    //       later functions that try to forward call this will jump directly to the shim instead of using the table. -- Oct 16 
-    for forward_calls { f |
-        program.create_jit_shim(f);
-    };
-    addr
-}
-
-fn create_jit_shim(self: *SelfHosted, fid: FuncId) Res(void) = {
-    opts := self.get_build_options();
-    if(!opts.do_jit_shims, => return(.Ok));
+fn create_jit_shim(self: CompCtx, bc: *BcBackend, fid: FuncId, handler_callee_address: rawptr) Res(*FnBody) = {
     func := self.get_function(fid);
-    if func.get_flag(.AlreadyHasShim) || func.get_flag(.RealAsmDone) { 
-        return(.Ok);
-    };
     mark := __temp_alloc.mark();
     //@println("create shim for %", func.log(self));
-    fake_body := @try(self.empty_fn_body(fid, .Jit)) return;
+    fake_body := @try(self.empty_fn_body(bc, fid, .Jit)) return;
     
     // TODO: copy-paste 
     emit: EmitBc = (
         result = fake_body, 
-        program = self, 
         last_loc = func.loc,
         locals = list(temp()),
         var_lookup = init(temp()),
@@ -121,15 +50,16 @@ fn create_jit_shim(self: *SelfHosted, fid: FuncId) Res(void) = {
         clock = 0,
         want_log = false,
         debug = false,
-        comp = self.vtable.with(self.legacy_indirection),
+        program = self,
     );
     
     entry_block := emit&.push_block(empty());
-    arg_type := self.tuple_of(@slice(self.get_or_create_type(rawptr), self.get_or_create_type(FuncId)));
-    f_ty: FnType = (arg = arg_type, ret = self.get_or_create_type(rawptr), arity = 2);
-    sig := @try(self.comp().prim_sig(f_ty, .CCallReg)) return;
-    emit&.push(PushConstant = (value = report_called_uncompiled_or_just_fix_the_problem.int_from_rawptr(), ty = .P64));
-    emit&.push(PushConstant = (value = SelfHosted.int_from_ptr(self), ty = .P64));
+    c := self.data.cast()[][];
+    arg_type := c.tuple_of(@slice(c.get_or_create_type(rawptr), c.get_or_create_type(FuncId)));
+    f_ty: FnType = (arg = arg_type, ret = c.get_or_create_type(rawptr), arity = 2);
+    sig := @try(self.prim_sig(f_ty, .CCallReg)) return;
+    emit&.push(PushConstant = (value = handler_callee_address.int_from_rawptr(), ty = .P64));
+    emit&.push(PushConstant = (value = SelfHosted.int_from_ptr(c), ty = .P64));
     emit&.push(PushConstant = (value = fid.as_index(), ty = .I32));
     emit&.push(CallFnPtr = (sig = emit&.push_sig(sig)));
     // All our arguments are still v-stacked so if we've found a pointer to call by now, we can just do that.
@@ -137,16 +67,9 @@ fn create_jit_shim(self: *SelfHosted, fid: FuncId) Res(void) = {
     emit&.push(.RotateForImmediateCallPtr);
     emit&.push(CallFnPtr = (sig = emit&.push_sig(emit.result.signeture)));
     @try(emit&.emit_return(func.finished_ret.unwrap())) return;
-    
-    self.jitted&.extend_blanks(fid);
-    @debug_assert_eq(self.jitted.dispatch_table[fid.as_index()], uncompiled_function_placeholder(), "already compiled? why are we making a shim? %", func.log(self));
-    addr := self.do_self_jit(fake_body);
-    self.put_jitted_function(fid, addr);
-    @debug_assert(!func.get_flag(.RealAsmDone), "we didn't actually compile it why do we think we did??"); 
-    func.set_flag(.AlreadyHasShim);
-    //self.jitted&.bump_dirty(); // TODO: you want to batch them
-    __temp_alloc.reset_retaining_capacity(mark);
-    .Ok
+    bc.jitted&.extend_blanks(fid);
+    @debug_assert_eq(bc.jitted.dispatch_table[fid.as_index()], uncompiled_function_placeholder(), "already compiled? why are we making a shim? %", self.log(func));
+    (Ok = fake_body)
 }
 
 // TODO: it would be nice if i had the arguments here for reporting what call you actually tried to make. 
@@ -187,7 +110,7 @@ report_called_uncompiled_or_just_fix_the_problem :: @as(rawptr) fn(self: *SelfHo
         unreachable()
     };
     addr := self.unwrap_report_error(rawptr, addr);
-    self.jitted&.bump_dirty();
+    //bc.jitted&.bump_dirty();
     addr
 };
    
@@ -263,12 +186,11 @@ fn get_dispatch(self: *Jitted) i64 = {
     rawptr.int_from_ptr(self.dispatch_table.maybe_uninit.ptr)
 }
 
-fn get_fn_old(self: *SelfHosted, f: FuncId) ?rawptr = {
+
+fn get_already_jitted(self: *BcBackend, c: CompCtx, f: FuncId) ?rawptr = {
     if(f.as_index() >= self.jitted.dispatch_table.len, => return(.None));
-    func := self.get_function(f);
-    if !func.get_flag(.AsmDone) {
-        return(.None);
-    };
+    func := c.get_function(f);
+    if(!func.get_flag(.AsmDone), => return(.None));
     addr := self.jitted.dispatch_table[f.as_index()];
     (Some = addr)
 }
@@ -295,7 +217,8 @@ fn push(self: *Jitted, inst: u32) void = {
     self.next[] = inst;
     self.next = self.next.offset(1);
 }
-fn push_bytes_x86(self: *Jitted, insts: []u8) void = {  
+
+fn push_bytes_asm(self: *Jitted, insts: []u8) void #once = {  
     byte := u32.raw_from_ptr(self.next);
     byte := u8.ptr_from_raw(byte);
     for insts { op |
@@ -394,7 +317,7 @@ fn bump_dirty(self: *Jitted) void = {
     fn patch_reserve_stack(self: *CGJ, reserve_stack: *u8) void;
     fn emit_header(self: *CGJ) *InstUnit;
     fn next_inst(self: *CGJ) *InstUnit;
-    fn new(compile: CompilerRs) B;
+    fn new(compile: CompilerRs, bc: *BcBackend) B;
     fn jump_to(self: *CGJ, to_ip: *InstUnit) void;
     // fn Load(ty) => {
     // fn JumpIf(f) => {
@@ -431,6 +354,7 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $negative_slots: bool) Type =
     Emit :: @struct(
         program: CompilerRs,
         comp: CompCtx,
+        bc: *BcBackend,
         asm: *Jitted,
         vars: List(?SpOffset),
         next_slot: SpOffset,
@@ -443,11 +367,12 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $negative_slots: bool) Type =
         backend: B,
     );
     
-    fn new(compile: CompilerRs, body: *FnBody) Emit = {
+    fn new(compile: CompilerRs, bc: *BcBackend, body: *FnBody) Emit = {
         (
             program = compile,
             comp = compile[][].comp(),
-            asm = compile.jitted&,
+            bc = bc,
+            asm = bc.jitted&,
             vars = list(temp()),
             next_slot = (id = 0),
             release_stack = list(temp()),
@@ -456,7 +381,7 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $negative_slots: bool) Type =
             clock = 0,
             body = body,
             forward_calls = list(temp()),
-            backend = new(compile),
+            backend = new(compile, bc),
         )
     }
     

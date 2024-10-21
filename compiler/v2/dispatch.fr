@@ -278,7 +278,7 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
                     @err_assert(!arg_ty.is_unknown() && !ret_ty.is_unknown(), "unknown fn types!!") return;
                     @try(self.emit_bc_and_jit(fid)) return;
                     // TODO: not true for rediurects????
-                    //@debug_assert(self.jitted&.get_fn(fid).is_some(), "we just emitted but no pointer?? %", func.log(self));
+                    //@debug_assert(self.bc.jitted&.get_fn(fid).is_some(), "we just emitted but no pointer?? %", func.log(self));
                     
                     @log_event("done codegen % %", fid, self.log_name(fid)) self;
                     if body.is(.Normal).or(body.is(.Intrinsic)) {
@@ -300,12 +300,9 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
                         if self.env.comptime_arch != .aarch64 {
                             return(Ok = false);
                         };
-                        self.jitted&.mark_start(fid);
-                        for insts { op |
-                            self.jitted&.push(op);
-                        };
-                        code := self.jitted&.save_current(fid);
-                        addr := u32.raw_from_ptr(code.ptr);
+                        insts: []u8 = (ptr = ptr_cast_unchecked(u32, u8, insts.ptr), len = insts.len * 4);
+                        opts := self.get_build_options();
+                        addr := {opts.comptime_jit_vptr.asm_bytes}(opts.comptime_jit_data, self.comp(), fid, insts);
                         self.put_jitted_function(fid, addr);
                         func.set_flag(.RealAsmDone);
                     }
@@ -313,10 +310,8 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
                         if self.env.comptime_arch != .x86_64 {
                             return(Ok = false);
                         };
-                        self.jitted&.mark_start(fid);
-                        self.jitted&.push_bytes_x86(insts.items());
-                        code := self.jitted&.save_current(fid);
-                        addr := u32.raw_from_ptr(code.ptr);
+                        opts := self.get_build_options();
+                        addr := {opts.comptime_jit_vptr.asm_bytes}(opts.comptime_jit_data, self.comp(), fid, insts.items());
                         self.put_jitted_function(fid, addr);
                         func.set_flag(.RealAsmDone);
                     }
@@ -340,10 +335,11 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
                     fn Bytecode(body) => {
                         body := FnBody.ptr_from_int(body[]);
                         opts := self.get_build_options();
-                        addr := self.do_self_jit(body);
+                        assert(THERE_IS_ONLY_ONE_BACKEND, "a");
+                        addr := self.do_self_jit(FnBody.raw_from_ptr(body), fid);
                         self.put_jitted_function(fid, addr);
                         func.set_flag(.RealAsmDone);
-                        //self.jitted&.bump_dirty();
+                        //self.bc.jitted&.bump_dirty();
                     }
                     @default => return(Ok = false);
                 };
@@ -399,27 +395,6 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
     .Ok
 }
 
-// TODO: factor out the dispatch table from the aarch64 backend. 
-put_jitted_function :: fn(self: *SelfHosted, f: FuncId, addr: rawptr) void = {
-    self.jitted&.extend_blanks(f);
-    self.jitted.dispatch_table[f.as_index()] = addr;
-    func := self.get_function(f);
-    func.set_flag(.AsmDone);
-    if func.get_flag(.TookPointerValue) || ENABLE_TRACY {
-        self.created_jit_fn_ptr_value(f, addr.int_from_rawptr());
-    };
-};
-
-// If you're about to actually call the pointer, we need to mark the memory as executable.
-fn get_fn_callable(self: *SelfHosted, fid: FuncId) ?rawptr = {
-    if self.get_fn_old(fid) { ptr |
-        self.jitted&.bump_dirty();
-        return(Some = ptr);
-    };
-    
-    .None
-}
-        
 fn is_mutually_recursive(task: *Task, callee: FuncId) bool = {
     //while => task.waiting_for.is_some() {
     //    task = task.waiting_for.unwrap();
@@ -474,4 +449,131 @@ fn wait_for(s: *SelfHosted, t: Action) *Action = {
     mem := s.get_alloc().alloc(Action, 1);
     mem.ptr[] = t;
     mem.ptr
+}
+
+////////////////////
+/// Comptime Jit ///
+////////////////////
+
+// TODO: factor out the dispatch table from the aarch64 backend. 
+put_jitted_function :: fn(self: *SelfHosted, f: FuncId, addr: rawptr) void = {
+    bc := self.todo_get_bc();
+    bc.jitted&.extend_blanks(f);
+    bc.jitted.dispatch_table[f.as_index()] = addr;
+    func := self.get_function(f);
+    func.set_flag(.AsmDone);
+    if func.get_flag(.TookPointerValue) || ENABLE_TRACY {
+        self.created_jit_fn_ptr_value(f, addr.int_from_rawptr());
+    };
+};
+
+fn todo_get_bc(self: *SelfHosted) *BcBackend = {
+    assert(THERE_IS_ONLY_ONE_BACKEND, "TODO: abstract more stuff");
+    BcBackend.ptr_from_raw(self.get_build_options()[].comptime_jit_data)
+}
+
+// If you're about to actually call the pointer, we need to mark the memory as executable.
+fn get_fn_callable(self: *SelfHosted, fid: FuncId) ?rawptr = {
+    opts := self.get_build_options();
+    {opts.comptime_jit_vptr.get_jitted}(opts.comptime_jit_data, self.comp(), fid, true)
+}
+
+fn get_fn_old(self: *SelfHosted, f: FuncId) ?rawptr = {
+    opts := self.get_build_options();
+    {opts.comptime_jit_vptr.get_jitted}(opts.comptime_jit_data, self.comp(), f, false)
+}
+
+fn create_jit_shim(self: *SelfHosted, fid: FuncId) Res(void) = {
+    opts := self.get_build_options();
+    if(!opts.do_jit_shims, => return(.Ok));
+    func := self.get_function(fid);
+    if func.get_flag(.AlreadyHasShim) || func.get_flag(.RealAsmDone) { 
+        return(.Ok);
+    };
+    
+    h    := report_called_uncompiled_or_just_fix_the_problem;
+    body := @try({opts.comptime_jit_vptr.jit_shim}(opts.comptime_jit_data, self.comp(), fid, h)) return;
+    addr := self.do_self_jit(body, fid);
+    self.put_jitted_function(fid, addr);
+    @debug_assert(!func.get_flag(.RealAsmDone), "we didn't actually compile it why do we think we did??"); 
+    func.set_flag(.AlreadyHasShim);
+    
+    .Ok
+}
+
+fn emit_bc_and_jit(program: *SelfHosted, f: FuncId) PRes #once = {
+    opts := program.get_build_options();
+    when := ExecStyle.Jit;
+    func := program.get_function(f);
+    @debug_assert(!func.get_flag(.RealAsmDone), "double compile");
+    @debug_assert(program.get_fn_old(f).is_none(), "ICE: not .AsmDone but have pointer");
+    
+    mark := __temp_alloc.mark();
+    if func.get_flag(.LogAst) {
+        @println("[#log_ast %] %", f, func.log(program));
+        program.codemap.show_error_line(func.loc);
+    };
+    body := @try({opts.comptime_jit_vptr.emit_bc}(opts.comptime_jit_data, program.comp(), f, when)) return;
+    
+    // We might have noticed that this function was a duplicate while generating bytecode.
+    // So it was Normal before but now its a Redirect. 
+    @if_let(func.body&) fn Redirect(target) => {
+        if program.get_fn_old(target[]) { old |
+            program.put_jitted_function(f, old);
+        };
+        
+        __temp_alloc.reset_retaining_capacity(mark);
+        return(.Ok);
+    };
+    
+    zone := zone_begin(.EmitJit); // TODO: defer
+    @if(ENABLE_TRACY) {
+        real_name := program.pool.get(func.name);
+        ___tracy_emit_zone_name(zone, real_name);
+    };
+    
+    addr := program.do_self_jit(body, f);
+    program.put_jitted_function(f, addr);
+    func.set_flag(.RealAsmDone);
+    
+    zone_end(zone);
+    __temp_alloc.reset_retaining_capacity(mark);
+    .Ok
+}
+
+fn do_self_jit(program: *SelfHosted, body: rawptr, f: FuncId) rawptr = {
+    opts := program.get_build_options();
+    addr, forward_calls := or ({opts.comptime_jit_vptr.jit_asm}(opts.comptime_jit_data, program.comp(), f, body, program.env.comptime_arch)) {
+        panic("TODO: jit")
+    };
+    // TODO: this changes behaviour for programs that would have worked anyway.
+    //       later functions that try to forward call this will jump directly to the shim instead of using the table. -- Oct 16 
+    for forward_calls { f |
+        program.create_jit_shim(f);
+    };
+    addr
+}
+
+fn emit_bc(c: *SelfHosted, f: FuncId, when: ExecStyle) Res(rawptr) = {
+    if when == .Aot {
+        // :bake_relocatable_value
+        @try(c.check_for_new_aot_bake_overloads()) return; 
+    };
+    func := c.get_function(f);
+    if func.get_flag(.LogAst) {
+        @println("[#log_ast %] %", f, func.log(c));
+        c.codemap.show_error_line(func.loc);
+    };
+    
+    zone := zone_begin(.EmitBc); // TODO: defer
+    @if(ENABLE_TRACY) {
+        real_name := c.pool.get(func.name);
+        ___tracy_emit_zone_name(zone, real_name);
+    };
+    
+    opts := c.get_build_options();
+    res := {opts.comptime_jit_vptr.emit_bc}(opts.comptime_jit_data, c.comp(), f, when);
+    
+    zone_end(zone);
+    res
 }

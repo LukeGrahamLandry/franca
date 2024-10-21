@@ -2,21 +2,18 @@
 #include_std("compiler/lex.fr");
 #include_std("compiler/pool.fr");
 #include_std("compiler/parse.fr");
-#include_std("compiler/backend/llvm.fr");
-#include_std("compiler/backend/aarch64.fr");
 #include_std("compiler/error_reporting.fr");
 #include_std("compiler/scope.fr");
 #include_std("compiler/walk_ast.fr");
 #include_std("compiler/comptime.fr");
 #include_std("compiler/values.fr");
-#include_std("compiler/emit_bc.fr");
 #include_std("compiler/profile.fr");
 #include_std("compiler/v2/dispatch.fr"); 
 #include_std("compiler/v2/sema.fr"); 
 #include_std("compiler/v2/ast_boring.fr");
-#include_std("compiler/backend/x64.fr");  
-#include_std("compiler/backend/jit.fr");  
 #include_std("compiler/driver_io.fr");  
+#include_std("compiler/ast_external.fr");  
+#include_std("compiler/backend/lib.fr");  
 
 //#include_std("backend/lib.fr");
 
@@ -32,15 +29,8 @@ SelfHosted :: @rec @struct(
     baked: *Baked,
     last_loc: Span,
     env: *ComptimeEnvironment,
-    // :ConfusingPrims These slices always have (P64, P64) before them so you can offset backwards for #ct and indirect returns. 
-    primitives: HashMap(Type, []Prim),
     index: ProgramIndex,
     functions: BucketArray(Func),  // TODO: have a version of this type that doesn't add gaps if you push_all because that will break the indexing
-    jitted: Jitted,
-    bytecodes: BucketArray(FnBody),
-    // TODO: just always use .Aot and make this a set?
-    saved_bytecodes: HashMap(*FnBody, ExecStyle),
-    free_bytecodes: List(*FnBody),
     types: BucketArray(TypeInfo),
     // TODO: decide if these are generally accessed at the same time so should be stored together.
     // TODO: have a OptionalBucketArray that stores a bit set at the beginning of each bucket? 
@@ -52,7 +42,6 @@ SelfHosted :: @rec @struct(
     legacy_indirection: Compiler = Compiler.zeroed(),
     vtable: *ImportVTable,
     stack_base: i64,
-    bc_count := 0,
     comptime_libraries: HashMap(Symbol, DlHandle),
 );
 
@@ -313,13 +302,8 @@ fn init_self_hosted(build_options: *BuildOptions) *SelfHosted = {
         baked = b,
         last_loc = (low = 0, high = 0),
         env = env,
-        primitives = init(a),
         index = init(a),
         functions = init(10, a),
-        jitted = new(1.shift_left(28)), // Its just virtual memory right? I really don't want to ever run out of space and need to change the address.
-        bytecodes = init(10, a),
-        saved_bytecodes = init(a),
-        free_bytecodes = list(a),
         types = init(10, a),
         type_extra = init(10, a), 
         type_lookup = init(a),
@@ -350,7 +334,20 @@ fn init_self_hosted(build_options: *BuildOptions) *SelfHosted = {
         compiler.ptr
     };
     self.legacy_indirection = self.stable_compiler_context();
-   
+    
+    ::ptr_utils(BackendVTable);
+    opts := self.get_build_options();
+    if opts.comptime_jit_vptr.is_null() {
+        // fall back to our built in default.
+        m := a.box(BackendVTable);
+        m[] = fill_bc_vtable();
+        opts.comptime_jit_vptr = m;
+    };
+    if opts.comptime_jit_data.is_null() {
+        // if you do not have a data pointer one will be appointed to you.
+        opts.comptime_jit_data = {opts.comptime_jit_vptr.create}(self.comp());
+    };
+    
     self
 }
 

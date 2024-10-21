@@ -1,8 +1,13 @@
-- make logical not an intrinsic
+- make (logical not) an intrinsic
 - bring back lex error for unterminated comment.
-- being back pad with spaces when debug logging ir
 - `Illegal place expression: GetNamed` is not as helpful as "tried to assign to undeclared variable %"
 - precompiled driver programs
+- think about sharing temp allocator between driver, compiler, and comptime. or is it better that they can't mess with eachother.
+- αcτµαlly pδrταblε εxεcµταblε
+- finish porting qbe: fold and amd64
+- probably want to port the build stuff. https://github.com/jart/cosmopolitan/blob/master/tool/build/apelink.c
+  i assume i can make it less complicated since i'm the one generating the thing in the first place?
+  and i only care about linux and xnu. windows can just use wsl.
 
 ##
 
@@ -15,17 +20,13 @@
 - wasm's totally broken.
 - i still think wasi's kinda dumb but running the compiler in a browser would be very pleasing.
   tho i could just use blink https://trungnt2910.com/blink/blink.html
-- the compiler shouldn't know about cranelift.
-  let driver supply comptime jit vtable (and support loading driver from a dylib becuase you can't load the driver without a jit).
+- support loading driver from a dylib becuase you can't load the driver without a jit
 - more type safety in int vs float registers in jit backends would be nice.
   also arm vs x86 register constants (they both have an sp but they're different numbers).
 - automated test that builds are still reproducible
 - default function arguments and mixed named/positional.
-- shims! the easy version is just a better error message for "tried to call uncompiled <...>",
-  that would let me get rid of the "WARNING: <...> libc" and just give a useful error message if you actually make the mistake.
-  advanced version is don't comptime jit until the first time you call something. can't decide if thats too creepy.
+- shims advanced version: don't comptime jit until the first time you call something. can't decide if thats too creepy.
 - finish getting run_tests to run on blink
-- finish >6 arg functions on x64
 - make github actions fail if a test fails (currently it only requires examples to work).
 - try to give llvm less work to do. clean up first call to intrinsic/redirect (it hurts deduplication! i have a billon fn alloc now).
   would it help if i did less dumb inttoptr and add 0 for int constants?

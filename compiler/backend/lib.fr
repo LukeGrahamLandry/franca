@@ -1,0 +1,77 @@
+#include_std("compiler/emit_bc.fr");
+#include_std("compiler/ast_external.fr");  
+#include_std("compiler/backend/llvm.fr");
+#include_std("compiler/backend/aarch64.fr");
+#include_std("compiler/backend/x64.fr");  
+#include_std("compiler/backend/jit.fr");  
+
+THERE_IS_ONLY_ONE_BACKEND :: true;
+
+BcBackend :: @struct(
+    jitted: Jitted,
+    bytecodes: BucketArray(FnBody),
+    // TODO: just always use .Aot and make this a set?
+    saved_bytecodes: HashMap(*FnBody, ExecStyle),
+    free_bytecodes: List(*FnBody),
+);
+
+fn fill_bc_vtable() BackendVTable = {
+    v := BackendVTable.zeroed();
+    v.create = fn(c) = {
+        a := c.get_alloc();
+        b := a.box(BcBackend);
+        b[] = (
+            // TODO: inline Jitted.new() here once this is the only place we call it. 
+            jitted = new(1.shift_left(28)), // Its just virtual memory right? I really don't want to ever run out of space and need to change the address.
+            bytecodes = init(10, a),
+            saved_bytecodes = init(a),
+            free_bytecodes = list(a),
+        );
+        BcBackend.raw_from_ptr(b)
+    };
+    v.destroy = fn(self, c) = {
+        self := BcBackend.ptr_from_raw(self);
+        page_allocator.dealloc(u32, self.jitted.mmapped);
+    };
+    v.emit_bc = fn(self, c, fid, when) = {
+        self := BcBackend.ptr_from_raw(self);
+        body := @try(emit_bc(c, self, fid, when)) return;
+        (Ok = FnBody.raw_from_ptr(body))
+    };
+    v.jit_asm = fn(self, c, f, body, comptime_arch) = {
+        self := BcBackend.ptr_from_raw(self);
+        body := FnBody.ptr_from_raw(body);
+        (Ok = @match(comptime_arch) {
+            fn aarch64() => {
+                a: EmitArm64 = new(c.data.cast(), self, body);
+                (a&.compile(f), a.forward_calls.items())
+            }
+            fn x86_64() => {
+                a: EmitX64 = new(c.data.cast(), self, body);
+                (a&.compile(f), a.forward_calls.items())
+            }
+            fn wasm32() => panic("unreachable: compiler doesn't support wasm yet");
+        })
+    };
+    v.jit_shim = fn(self, c, fid, handler) = {
+        self := BcBackend.ptr_from_raw(self);
+        body := @try(create_jit_shim(c, self, fid, handler)) return;
+        (Ok = FnBody.raw_from_ptr(body))
+    };
+    // get_fn_callable, get_fn_old
+    v.get_jitted = fn(self, c, f, callable) = {
+        self := BcBackend.ptr_from_raw(self);
+        addr := get_already_jitted(self, c, f);
+        if(callable && addr.is_some(), => self.jitted&.bump_dirty());
+        addr
+    };
+    v.asm_bytes = fn(bc, c, fid, bytes) = {
+        bc := BcBackend.ptr_from_raw(bc);
+        bc.jitted&.mark_start(fid);
+        bc.jitted&.push_bytes_asm(bytes);
+        code := bc.jitted&.save_current(fid);
+        u32.raw_from_ptr(code.ptr)
+    };
+    
+    v
+}

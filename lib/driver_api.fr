@@ -49,7 +49,26 @@ ImportVTable :: @rec @struct(
     get_type_info: @FnPtr(c: Compiler, type: Type) *TypeInfo,
     get_whole_line: @FnPtr(c: Compiler, span: Span) FrancaCodeLine, // :SLOW
     report_aot_progress: @FnPtr(c: Compiler, fid: FuncId, is_start: bool) void, // for profiling
+    emit_relocatable_constant: @FnPtr(c: Compiler, ty: Type, value: *Values) CRes(BakedVarId),
+    log_expr: @FnPtr(c: Compiler, e: *FatExpr) Str,
+    log_stmt: @FnPtr(c: Compiler, e: *FatStmt) Str,
+    log_type: @FnPtr(c: Compiler, e: Type) Str,
+    log_func: @FnPtr(c: Compiler, e: *Func) Str,
+    emit_relocatable_constant_body: @FnPtr(c: Compiler, bytes: []u8, ty: Type, force_default_handling: bool) CRes(Slice(BakedEntry)),
 );
+
+// TODO: don't be lazy. have @struct(repr: rawptr) for stuff. 
+BackendVTable :: @struct(
+    create:      @FnPtr(c: CompCtx) rawptr,
+    destroy:     @FnPtr(self: rawptr, c: CompCtx) void,
+    emit_bc:     @FnPtr(self: rawptr, c: CompCtx, fid: FuncId, when: ExecStyle) CRes(rawptr), // -> ir
+    jit_asm:     @FnPtr(self: rawptr, c: CompCtx, fid: FuncId, bytecode: rawptr, comptime_arch: Arch) CRes(Ty(rawptr, []FuncId)), // ir -> fn
+    jit_shim:    @FnPtr(self: rawptr, c: CompCtx, fid: FuncId, handler_callback: rawptr) CRes(rawptr), // -> ir
+    get_jitted:  @FnPtr(self: rawptr, c: CompCtx, fid: FuncId, make_exec: bool) ?rawptr, // -> fn
+    asm_bytes:   @FnPtr(self: rawptr, c: CompCtx, fid: FuncId, machine_code: []u8) rawptr, // -> fn
+);
+
+FrancaCodeLine :: @struct(filename: Str, line: i64, col: i64, line_text: Span);
 
 // TODO: better error for @FnPtr if you forget return type. 
 
@@ -116,7 +135,7 @@ BuildOptions :: @struct(
     deduplicate_bytecode: bool = true,
     debug_info: bool = false,
     wasm32: bool = false,  // :build_options_wasm
-    comptime_jit: Backend = .CompilerJit,
+    comptime_jit: Backend = .CompilerJit, // TODO: remove this field
     driver_vtable_ptr: *ExportVTable,
     driver_vtable_user_data: rawptr = 0.rawptr_from_int(),
     // This effects what emit_bc does for the @uninitilized ast node. 
@@ -126,6 +145,8 @@ BuildOptions :: @struct(
     // This makes compile speed a bit slower but lets you get sane error messages instead of just "Tried to call uncompiled function".
     // Soon I want to jit lazily and rely on that for creating function pointer values so this might stop being optional at some point. 
     do_jit_shims := true, 
+    comptime_jit_vptr := ptr_from_int(BackendVTable, 0),
+    comptime_jit_data := rawptr_from_int(0),
 );
 
 SAFE_MODE :: true; // TODO: default driver program with this as a cli argument 

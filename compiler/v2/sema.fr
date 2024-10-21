@@ -705,6 +705,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
                             }; 
                         };
                         @case(Flag.bc.ident()) => {
+                            return(@err("TODO: deal with #bc. need to make drivers more powerful? this has to work to prove my point."));
                             @err_assert(!good, "found multiple arches for #asm") return;
                             type := @unwrap(self.env.inline_bc_fn_type, "#bc needs you to call `::enable_inline_bc();` first for now. (or tried to use before bootstrap)") return;
                             callee := @check(self.immediate_eval_expr(asm, type)) return;
@@ -712,7 +713,9 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
                             fn_ptr := or self.get_fn_callable(callee) {| 
                                 return(Suspend = self.wait_for(Jit = callee))
                             };
-                            body := @try(self.empty_fn_body(fid, .Aot)) return;
+                            
+                            bc := self.todo_get_bc();
+                            body := @try(self.comp().empty_fn_body(bc, fid, .Aot)) return;
                             
                             args: List(i64) = list(1, temp());
                             args&.push(FnBody.int_from_ptr(body));
@@ -723,7 +726,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
                             
                             if func.get_flag(.LogBc) {
                                 out: List(u8) = list(temp());
-                                self.log_bc(func, body, out&);
+                                self.comp().log_bc(func, body, out&);
                                 println(out.items());
                             };
                             
@@ -971,18 +974,31 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
             
             // this avoids `function arguments must have type annotation (cannot be inferred)` on `=` functions with hint. 
             // you want it so you don't have to type `: *List(u8)` on every #x86_bytes inline asm
-            // TODO: handle multiple/partial args. 
             // TODO: unify with inference for '=>' functions?
-            if func.arg.bindings.len == 1 {
-                arg := func.arg.bindings.index(0);
-                if arg.ty&.is(.Infer) {
-                    @if_let(requested) fn Specific(ty) => {
-                        info := self.get_type(ty);
-                        @if_let(info) fn Fn(ty) => {
-                            arg.ty = (Finished = ty.arg);
+            if !func.get_flag(.AllowRtCapture) {
+                unhelpful :: local_return;
+                @if_let(requested) fn Specific(ty) => {
+                    f_ty := @match(self.get_type(ty)) {
+                        fn Fn(f_ty) => f_ty[];
+                        fn FnPtr(f) => f.ty;
+                        @default => unhelpful();
+                    };
+                    types := self.arg_types(f_ty.arg);
+                    if(func.arg.bindings.len != types.len, => unhelpful());
+                    enumerate func.arg.bindings& { i, arg |
+                        if arg.ty&.is(.Infer) {
+                            arg.ty = (Finished = types[i]);
                         };
                     };
+                    if func.ret&.is(.Infer) {
+                        func.ret = (Finished = f_ty.ret);
+                        func.finished_ret = (Some = f_ty.ret);
+                    };
                 };
+            };
+            
+            if func.arg.bindings.len == 1 {
+                arg := func.arg.bindings.index(0);
             };
             
             if func.ret&.is(.Infer) {
@@ -1224,7 +1240,6 @@ fn compile_fn_ptr(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
     if self.dispatch.enclosing_function { current_f |
         current := self.get_function(current_f);
         current.mutual_callees&.add_unique(fid, self.get_alloc());
-        self.jitted&.extend_blanks(fid);
         @log_event("added % mutual calls %", current_f, fid) self;
         record_function_call(c = self, caller = current_f, callee = fid);
     };
@@ -1635,7 +1650,6 @@ fn add_callee(self: *SelfHosted, fid: FuncId) bool = {
         } else {
             current.callees&.add_unique(fid, self.get_alloc());
         };
-        self.jitted&.extend_blanks(fid);
         @log_event("added % calls %", current_f, fid) self;
         record_function_call(c = self, caller = current_f, callee = fid);
     };
@@ -2250,22 +2264,6 @@ fn infer_return(self: *SelfHosted, fid: FuncId) Maybe(Type) = {
     (Ok = ty)
 }
 
-fn arity(self: *SelfHosted, expr: *FatExpr) i64 = {
-    @match(expr.expr&) {
-        fn Tuple(parts) => parts.len;
-        // I think this isn't really what you want. 
-        //fn As(f) => {
-        //    value := self.poll_in_place(Values, => self.immediate_eval_expr(f.type, Type));
-        //    value := value.unwrap();
-        //    type := Type.assume_cast(value&)[];
-        //    count := self.arg_types(type).len();
-        //    println(count);
-        //    count
-        //}
-        @default => 1;
-    }
-} 
-
 fn type_of(self: *SelfHosted, expr: *FatExpr) Maybe(Type) = {
     if(!expr.ty.is_unknown(), => return(Ok = expr.ty));
     @match(expr.expr&) {
@@ -2353,7 +2351,7 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
         attempt.state = 0;
         new := overloads.ready.items().slice(attempt.last_ready_count, overloads.ready.len);
         attempt.options&.reserve(new.len);
-        want_arity := self.arity(arg_expr);
+        want_arity := arity(arg_expr);
         for new { option | 
             if self.filter_overload_sync(arg_expr, want_arity, option) {
                 @check(self.ensure_resolved_sign(option)) return; // TODO: dont let this suspend cause it cant
@@ -2363,7 +2361,7 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
         attempt.last_ready_count = overloads.ready.len;
     };
     @log_event("checking %/% options", attempt.options.len, overloads.ready.len) self;
-    want_arity := self.arity(arg_expr);
+    want_arity := arity(arg_expr);
     ::if([]FatExpr);
     parts := if(arg_expr.expr&.is(.Tuple), => arg_expr.expr.Tuple.items(), => (ptr = arg_expr, len = 1));
     are_we_done_yet();

@@ -79,7 +79,8 @@ fn init_driver_vtable() *ImportVTable = {
     };
     vtable.destroy_compiler = fn(c: Compiler) void = {
         c := c.cast()[][];
-        page_allocator.dealloc(u32, c.jitted.mmapped);
+        opts := c.get_build_options();
+        {opts.comptime_jit_vptr.destroy}(opts.comptime_jit_data, c.comp());
         arena := c.ast_alloc[];  // copy because the areana is inside itself!
         arena&.deinit();
     };
@@ -105,7 +106,10 @@ fn init_driver_vtable() *ImportVTable = {
     };
     
     vtable.emit_bc = fn(c: Compiler, f: FuncId, when: ExecStyle) Res(*FnBody) = {
-        c.cast()[][].emit_bc(f, when)
+        c := c.cast()[][];
+        body := @try(c.emit_bc(f, when)) return;
+        assert(THERE_IS_ONLY_ONE_BACKEND, "driver vtable");
+        (Ok = FnBody.ptr_from_raw(body))
     };
     vtable.fmt_error = fn(c: Compiler, err: *CompileError, out: *List(u8)) void = {
         c.cast()[][].fmt_error(err, out);
@@ -147,6 +151,25 @@ fn init_driver_vtable() *ImportVTable = {
         };
     };
     
+    vtable.emit_relocatable_constant = fn(c: Compiler, ty: Type, value: *Values) Res(BakedVarId) = {
+        c.cast()[][].emit_relocatable_constant(ty, value)
+    };
+    vtable.log_expr = fn(c: Compiler, e: *FatExpr) Str = {
+        log(e, c.cast()[][])
+    };
+    vtable.log_stmt = fn(c: Compiler, e: *FatStmt) Str = {
+        log(e, c.cast()[][])
+    };
+    vtable.log_type = fn(c: Compiler, e: Type) Str = {
+        log_type(c.cast()[][], e)
+    };
+    vtable.log_func = fn(c: Compiler, e: *Func) Str = {
+        log(e, c.cast()[][])
+    };
+    
+    vtable.emit_relocatable_constant_body = fn(c: Compiler, bytes: []u8, ty: Type, force_default_handling: bool) Res(Slice(BakedEntry)) = {
+        c.cast()[][].emit_relocatable_constant_body(bytes, ty, force_default_handling)
+    };
     
     the_vtable
 }

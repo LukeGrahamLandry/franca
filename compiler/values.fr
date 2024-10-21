@@ -56,7 +56,7 @@ BakeHandler :: @FnPtr(self: rawptr) Slice(BakedEntry);
 // TODO: be careful about the same string being baked as CStr and Str.
 // TODO: i should have constant pointers as a concept in my language.
 //       right now i could check if its in the constant data arena for a hint that should catch a few of them.
-fn emit_relocatable_constant(c: *SelfHosted, ty: Type, value: *Values) Res(BakedVarId) #inline = { // :EmitBcNewQbe TODO: don't force inline this
+fn emit_relocatable_constant(c: *SelfHosted, ty: Type, value: *Values) Res(BakedVarId) = { 
     to_zero: ReadBytes = (bytes = value.bytes(), i = 0);
     c.zero_padding(ty, to_zero&);  // Needed for reproducible builds!
     
@@ -140,20 +140,21 @@ fn emit_relocatable_constant_body(
                 return(.Ok);
             };
             
+            // TODO: bring this back. need to add it to BackendVTable. -- Oct 20
             // This is super slow but its only the error path so its fine. 
-            enumerate c.jitted.dispatch_table { i, check | 
-                check := int_from_rawptr(check[]);
-                if check == ptr {
-                    fid: FuncId = from_index(i);
-                    return(@err(
-                        "function not found for constant\naddr=% fid=% name=% \n(ICE: we should have noticed that we took its address)", 
-                        ptr, fid, c.log_name(fid),
-                    ));
-                };
-            };
+            //enumerate c.bc.jitted.dispatch_table { i, check | 
+            //    check := int_from_rawptr(check[]);
+            //    if check == ptr {
+            //        fid: FuncId = from_index(i);
+            //        return(@err(
+            //            "function not found for constant\naddr=% fid=% name=% \n(ICE: we should have noticed that we took its address)", 
+            //            ptr, fid, c.log_name(fid),
+            //        ));
+            //    };
+            //};
             
             return(@err(
-                "function not found for constant\naddr=% type=%. \nwe can't even find it if we scan all jitted functions. maybe we're confused about its type?",
+                "function not found for constant\naddr=% type=%.", // \nwe can't even find it if we scan all jitted functions. maybe we're confused about its type?",
                 ptr, c.log_type(ty),
             ));
         });
@@ -399,7 +400,7 @@ fn as_const(self: *FatExpr) ?Values = {
 // TODO: :const_field_fix
 // TODO: if you move the ffi dynamic abi call to this language you can remove the rust version of this function. 
 /// Take some opaque bytes and split them into ints. So (u8, u8) becomes a vec of two i64 but u16 becomes just one.
-fn deconstruct_values(program: *SelfHosted, ty: Type, bytes: *ReadBytes, out: *List(i64), offsets: ?*List(Ty(Prim, u16))) PRes = {
+fn deconstruct_values(program: CompCtx, ty: Type, bytes: *ReadBytes, out: *List(i64), offsets: ?*List(Ty(Prim, u16))) PRes = {
     info := program.get_info(ty);
 
     @debug_assert_eq(bytes.i.mod(info.align_bytes.zext()), 0);
@@ -407,7 +408,7 @@ fn deconstruct_values(program: *SelfHosted, ty: Type, bytes: *ReadBytes, out: *L
     @debug_assert(
         found_len >= info.stride_bytes.zext(),
         "deconstruct_values of % wants % bytes but found %: %",
-        program.log_type(ty), info.stride_bytes, found_len, {
+        program.data.cast()[][].log_type(ty), info.stride_bytes, found_len, {
             bytes := bytes.bytes.slice(bytes.i, bytes.bytes.len);
             out: List(u8) = list(temp());
             for bytes{ b | 
@@ -460,7 +461,7 @@ fn deconstruct_values(program: *SelfHosted, ty: Type, bytes: *ReadBytes, out: *L
             //          i64.single(.I64);
             //      };
             //      otherwise reduce the copy-paste of the 3 versions of this. 
-            types := program.comp().flat_tuple_types(ty);
+            types := program.flat_tuple_types(ty);
             types := types.items().slice_last(padding_slots);
             types := types.unwrap();
             // now types is just padding
@@ -619,7 +620,7 @@ fn take(self: *ReadBytes, size: i64) ?[]u8 = {
 fn call_dynamic_values(program: CompilerRs, f_ptr: i64, f_ty: *FnType, args_value: []u8, comp_ctx: bool) Res(Values) = {
     parts: List(i64) = list(temp());
     reader: ReadBytes = (bytes = args_value, i = 0);
-    @try(program[][].deconstruct_values(f_ty.arg, reader&, parts&, .None)) return;
+    @try(program[][].comp().deconstruct_values(f_ty.arg, reader&, parts&, .None)) return;
     parts: RsVec(i64) = parts.rs();
     program.call_dynamic(f_ptr, f_ty, parts&, comp_ctx)
 }
@@ -1142,7 +1143,10 @@ fn get_info(self: *SelfHosted, ty: Type) *TypeMeta = {
     old
 }
 
-fn raw_type(c: *SelfHosted, ty: Type) Type = {
+fn raw_type(c: *SelfHosted, ty: Type) Type = 
+    c.comp().raw_type(ty);
+
+fn raw_type(c: CompCtx, ty: Type) Type = {
     loop {
         @match(c.get_type(ty)) {
             fn Named(f) => {
