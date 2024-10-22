@@ -85,12 +85,12 @@ fn replace_access_with_copy(t: *Qbe.Tmp, l: *Qbe.Ins, k: Qbe.Cls) void #once = {
 
 /* [a, b) with 0 <= a */
 Range :: @struct(a: i32, b: i32);
-Store :: @struct(ip: i32, i: *Qbe.Ins);
+Store :: @struct(clock: i32, i: *Qbe.Ins);
 Slot  :: @rec @struct(
     t: i32,
     sz: i32,
-    m: u64,
-    l: u64,
+    ever_written_bits: u64,
+    unknown_bits: u64,
     live_range: Range,
     replacement: *Slot,
     stores: QList(Store),
@@ -131,29 +131,8 @@ fn slot(r: Qbe.Ref, f: *Qbe.Fn, sl: []Slot) ?Ty(*Slot, i64) = {
     if t.visit < 0 {
         return(.None);  // skipped by collect_local_slots for some other reason. 
     };
+    @debug_assert(a.offset < 64); // i think? otherwise the shifting doesn't work. TODO: find where its clamped -- Oct 21
     (Some = (sl.index(t.visit.zext()), a.offset))
-}
-
-fn load(r: Qbe.Ref, affected_bits: u64, ip: i32, f: *Qbe.Fn, sl: []Slot) void = {
-    s, off := slot(r, f, sl) || return(); 
-    s.l = s.l.bit_or(affected_bits.shift_left(off));
-    s.l = s.l.bit_and(s.m);
-    if s.l != 0 {
-        radd(s.live_range&, ip);
-    };
-}
-
-fn store(r: Qbe.Ref, affected_bits: u64, ip: i32, i: *Qbe.Ins, f: *Qbe.Fn, sl: []Slot) void = {
-    s, off := slot(r, f, sl) || return();
-    if s.l != 0 {
-        radd(s.live_range&, ip);
-        s.l = s.l.bit_and(bit_not(affected_bits.shift_left(off)));
-    } else {
-        s.n_stores += 1;
-        grow(s.stores&, s.n_stores.intcast());
-        s.stores[intcast(s.n_stores-1)].ip = ip;
-        s.stores[intcast(s.n_stores-1)].i = i;
-    };
 }
 
 fn coalesce(f: *Qbe.Fn) void = {
@@ -171,42 +150,44 @@ fn coalesce(f: *Qbe.Fn) void = {
             hd.loop = b.id;
         };
     };
-    blit_instructions := list(*Qbe.Ins, temp()); 
+    blit_instructions := list(*Qbe.Ins, temp());
     block_ranges := temp().alloc_zeroed(Range, f.nblk.zext());
-    ip := MAX_i32 - 1;
+    clock := MAX_i32 - 1;
     range_rev(0, f.nblk.zext()) { n |
         b := f.rpo.offset(n)[];
-        block_ranges[n].b = ip.intcast();
-        ip -= 1;
+        block_ranges[n].b = clock.intcast();
+        clock -= 1;
         each sl { s | 
-            s.l = 0;
+            s.unknown_bits = 0;
             for_jump_targets b { ps | // :SketchyIterTargets
-                m := ps.id;
-                if m.intcast() > n && rin(s.live_range, block_ranges[m.intcast()].a) {
-                    s.l = s.m;
-                    radd(s.live_range&, ip.intcast());
+                m: i64 = ps.id.intcast();
+                if m > n && rin(s.live_range, block_ranges[m].a) {
+                    // this slot is live in `ps` so we care about its value at the end of `b`
+                    s.unknown_bits = s.ever_written_bits;
+                    radd(s.live_range&, clock.intcast());
                 };
             };
         };
         if b.jmp.type == .Jretc {
-            ip -= 1;
-            load(b.jmp.arg, bitcast(-1), ip.intcast(), f, sl);
+            clock -= 1;
+            load(b.jmp.arg, bitcast(-1), clock.intcast(), f, sl);
         };
         for_insts_rev b { i |
-            if record_memory_liveness(f, i[], sl, ip.intcast(), blit_instructions&) {
-                ip -= 1;
+            if record_memory_liveness(f, i[], sl, clock.intcast(), blit_instructions&) {
+                clock -= 1;
             };
         };
         each sl { s |
-            if s.l != 0 {
-                radd(s.live_range&, ip.intcast());
+            if s.unknown_bits != 0 {
+                // we care about bits that were set outside this block so its live at the beginning of the block
+                radd(s.live_range&, clock.intcast());
                 if b.loop != -1 {
                     @debug_assert(b.loop.intcast() >= n);
                     radd(s.live_range&, block_ranges[b.loop.zext()].b - 1);
                 };
             };
         };
-        block_ranges[n].a = ip.intcast();
+        block_ranges[n].a = clock.intcast();
     };
 
     kill_dead_stores(sl);
@@ -219,7 +200,7 @@ fn coalesce(f: *Qbe.Fn) void = {
     each sl { s |
         total += s.sz;
         if s.live_range.b == 0 {
-            free(s.stores);
+            //free(s.stores);
             dead_slot_stack&.push(s.t);
             freed += s.sz;
         } else {
@@ -258,7 +239,7 @@ fn coalesce(f: *Qbe.Fn) void = {
             if(!s.replacement.is_null() || s.live_range.b == 0, => skip());
             if rovlap(r, s.live_range) {
                 /* O(n); can be approximated
-                 * by 'goto Skip;' if need be
+                 * by 'goto skip;' if need be
                  */
                 range(n, si) { m |
                     if sl[m].replacement.identical(s0) && rovlap(sl[m].live_range, s.live_range) {
@@ -275,7 +256,6 @@ fn coalesce(f: *Qbe.Fn) void = {
 
     /* substitute fused slots */
     enumerate sl { idx, s |
-        continue :: local_return;
         t := f.tmp.index(s.t.intcast());
         /* the visit link is stale,
          * reset it before the slot()
@@ -296,7 +276,7 @@ fn coalesce(f: *Qbe.Fn) void = {
     };
 
     if f.globals.debug["M".char()] {
-        debug_dump_fused_slots(f, sl, ip);
+        debug_dump_fused_slots(f, sl, clock);
         out := f.globals.debug_out;
         @fmt_write(out, "\tsums %/%/% (killed/fused/total)\n\n", freed, fused, total);
         printfn(f, out);
@@ -320,33 +300,34 @@ fn collect_local_slots(f: *Qbe.Fn) []Slot #once = {
             sl&.push(
                 t = n.intcast(),
                 sz = t.alias.u.loc.sz,
-                m = t.alias.u.loc.m,
+                ever_written_bits = t.alias.u.loc.m,
                 replacement = Slot.ptr_from_int(0),
                 stores = new(0, .PHeap),
                 n_stores = 0,
                 live_range = (a = 0, b = 0),
-                l = 0,
+                unknown_bits = 0,
             );
         };
     };
     sl.items()
 }
 
-fn record_memory_liveness(f: *Qbe.Fn, i: *Qbe.Ins, sl: []Slot, ip: i32, blit_instructions: *List(*Qbe.Ins)) bool #once = {
+fn record_memory_liveness(f: *Qbe.Fn, i: *Qbe.Ins, sl: []Slot, clock: i32, blit_instructions: *List(*Qbe.Ins)) bool #once = {
     arg := i.arg&;
     if i.op() == .argc {
         // passing a memory argument is like the callee loading it. 
-        load(arg[1], bitcast(-1), ip - 1, f, sl);
+        @debug_assert(rtype(arg[0]) == .RType);
+        load(arg[1], bitcast(-1), clock - 1, f, sl);
         return(true);
     };
     if is_load(i.op()) {
         x := BIT(size_of_load(i).intcast()) - 1;
-        load(arg[0], x, ip - 1, f, sl);
+        load(arg[0], x, clock - 1, f, sl);
         return(true);
     };
     if is_store(i.op()) {
         x := BIT(size_of_store(i).intcast()) - 1;
-        store(arg[1], x, ip, i, f, sl);
+        store(arg[1], x, clock, i, f, sl);
         return(true);
     };
     if i.op() == .blit0 {
@@ -356,18 +337,42 @@ fn record_memory_liveness(f: *Qbe.Fn, i: *Qbe.Ins, sl: []Slot, ip: i32, blit_ins
         @debug_assert(rtype(sz) == .RInt);
         sz := abs(rsval(sz));
         x: u64 = if(sz >= 64, => bitcast(@as(i64) -1), => BIT(sz.intcast()) - 1);
-        store(arg[1], x, ip, i, f, sl);
-        load(arg[0], x, ip - 1, f, sl);
+        store(arg[1], x, clock, i, f, sl);
+        load(arg[0], x, clock - 1, f, sl);
         blit_instructions.push(i);
         return(true);
     };
     false
 }
 
+fn load(r: Qbe.Ref, affected_bits: u64, clock: i32, f: *Qbe.Fn, sl: []Slot) void = {
+    s, off := slot(r, f, sl) || return();  // if not local we don't care
+    // now as we continue backwards in the block, we know we care about this section of memory. 
+    s.unknown_bits = s.unknown_bits.bit_or(affected_bits.shift_left(off));
+    s.unknown_bits = s.unknown_bits.bit_and(s.ever_written_bits);
+    if s.unknown_bits != 0 {
+        radd(s.live_range&, clock);
+    };
+}
+
+fn store(r: Qbe.Ref, affected_bits: u64, clock: i32, i: *Qbe.Ins, f: *Qbe.Fn, sl: []Slot) void = {
+    s, off := slot(r, f, sl) || return(); // if not local we don't care
+    if s.unknown_bits != 0 {
+        radd(s.live_range&, clock);
+        // since we're writing these bits now, we don't care about thier value earlier in the block.
+        s.unknown_bits = s.unknown_bits.bit_and(bit_not(affected_bits.shift_left(off)));
+    } else {
+        s.n_stores += 1;
+        grow(s.stores&, s.n_stores.intcast());
+        s.stores[intcast(s.n_stores-1)].clock = clock;
+        s.stores[intcast(s.n_stores-1)].i = i;
+    };
+}
+
 fn kill_dead_stores(sl: []Slot) void #once = {
     each sl { s |
         range(0, s.n_stores.intcast()) { n |
-            if !rin(s.live_range, s.stores[n].ip) {
+            if !rin(s.live_range, s.stores[n].clock) {
                 i := s.stores[n].i;
                 if i.op() == .blit0 {
                     i.offset(1).set_nop();
@@ -406,6 +411,7 @@ fn kill_slot_uses(f: *Qbe.Fn, dead_slot_tmp_index: i64, dead_slot_stack: *List(i
                 dead_slot_stack.push(i.to.val().intcast());
             };
             @if(is_arg(i.op())) => {
+                // TODO: this confuses me and i don't have a test that gets here
                 @debug_assert(i.op() == .argc);
                 i.arg&[1] = QbeConZero;  /* crash */
             };

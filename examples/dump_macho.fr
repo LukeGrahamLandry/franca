@@ -3,14 +3,13 @@
 //! https://en.wikipedia.org/wiki/Mach-O
 //! note: if you're ever tempted to use this code for something don't forget to use buffered printing. :SLOW
 
-#include_std("backend/bits/macho.fr");
+#include_std("backend/macho/bits.fr");
 fn main() void = {
-    // TODO: use cli arg
-    path := "a.out";
-    //path := "target/franca/aarch64-apple-darwin/franca2";
-    //path := "bindings/qbe/qbe_merged.dylib";
-    
+    args := cli_args();
+    assert(args.len > 1, "Last argument is path to macho file");
+    path := args[args.len - 1].str(); 
     bytes := temp().read_to_string(path).items(); // :panic
+    
     full_bytes := bytes;
     @println("Read % bytes from %", bytes.len, path);
     header := bytes&.pop_type(MachoHeader);
@@ -176,25 +175,20 @@ fn main() void = {
                 imports_data := full_data.slice(header.imports_offset.zext(), full_data.len);
                 symbols_data := full_data.slice(header.symbols_offset.zext(), full_data.len);
                 
-                
                 println("           Imports:");
                 range(0, header.imports_count.zext()) { i |
                     if header.imports_format == 1 {
-                        // TODO: add bitfields to the language.
-                        import := imports_data&.pop_type(u32)[];
-                        lib_ordinal := import.bit_and(0xFF);
-                        weak := import.shift_right_logical(8).bit_and(0x01) == 1;
-                        name_offset := import.shift_right_logical(9);
+                        import := decode_import(imports_data&.pop_type(u32)[]);
                         name := "";
                         if header.symbols_format == 0 { 
-                            n: CStr = (ptr = symbols_data.ptr.offset(name_offset.zext()));
+                            n: CStr = (ptr = symbols_data.ptr.offset(import.name_offset.zext()));
                             name = n.str();
                             if name.len + (@as(i64) header.symbols_offset.zext()) > full_data.len {
                                 name = "";
                                 eprintln("name of out bounds");
                             };
                         };
-                        @println("           [%] (lib_ordinal = %, weak = %, name_offset = %) %", i, lib_ordinal, weak, name_offset, name);
+                        @println("           [%] % %", i, import&, name);
                     } else {
                         @print("(% = %]), ", i, data&.pop_type(u64));
                     };
@@ -309,6 +303,7 @@ fn pop_type(bytes: *[]u8, $T: Type) *T #generic = {
 ::DeriveFmt(ApplicationUuid);
 ::DeriveFmt(ChainedFixupsHeader);
 ::DeriveFmt(ChainedStartsInSegment);
+::DeriveFmt(DecodedImport);
 ::DeriveFmt(u128);
 
 fn display(a: *u64, out: *List(u8)) void = a[].display(out);

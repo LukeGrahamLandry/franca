@@ -1,3 +1,8 @@
+## (Oct 21)
+
+- since im doing import patch in place before moving, the offset i calculated for adrp is wrong.
+  then also had to make sure the fns array was close enough to the code that it could reference that far so mmap them together.
+
 ## (Oct 20)
 
 - caching the `primitives` slices doesn't make it faster so don't bother.

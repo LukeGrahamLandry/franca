@@ -1,0 +1,224 @@
+#!/usr/bin/env franca
+
+#include_std("backend/macho/bits.fr");
+fn main() void = {
+    args := cli_args();
+    assert(args.len > 1, "Last argument is path to macho file");
+    path_c := args[args.len - 1];
+    path := path_c.str(); 
+    @eprintln("loading: %", path);
+    // TODO: this is silly? just mmap the file. 
+    bytes := temp().read_to_string(path).items(); // :panic
+    full_bytes := bytes;
+    header := bytes&.pop_type(MachoHeader);
+    @assert_eq(header.magic, macho_magic, "bad magic! expected a 64-bit mach-o executable.");
+    virtual_size := count_virtual_size(full_bytes);
+    virtual := page_allocator.alloc(u8, virtual_size.to_signed() + MAC_PAGE_SIZE);
+    some_extra_memory := virtual.ptr.offset(virtual.len - MAC_PAGE_SIZE);
+    apply_imports(full_bytes, virtual.ptr, some_extra_memory);
+    load_sections(full_bytes, virtual);
+    main_header := find_unique_load_command(full_bytes, .MainEntryPoint).expect("to find MainEntryPoint so we can call it");
+    main_header := main_header&.pop_type(MainEntryPoint);
+    // offset is in virtual memory. TODO: how do i know this magic number tho. maybe its always relative to first writable section? 
+    main := virtual.ptr.offset(main_header.entry_offset.to_signed() + 0x0000000100000000); 
+    main := u8.raw_from_ptr(main);
+    main := assume_types_fn(Ty(i64, *CStr), i64, main);
+    args := @slice(path_c, CStr.zeroed());
+    ::display_slice(CStr);
+    fn display(s: *CStr, o: *List(*u8)) void = display(s[], o);
+    @eprintln("calling main with %", args);
+    
+    status := main(args.len, args.ptr);
+    @eprintln("main returned %", status);
+    exit(status);
+}
+
+MAC_PAGE_SIZE :: 1.shift_left(14);
+
+fn load_sections(macho_bytes: []u8, virtual: []u8) void = {
+    for_sections(macho_bytes) { type, bytes |
+        if type == LoadCommand.SegmentLoad.raw() {
+            header := bytes&.pop_type(SegmentLoad);
+            // TODO: this is confusing to me. 
+            //        do i have to do the inner sections seperatly for some reason? 
+            //        __TEXT has file_offset=0, does that really mean it includes the macho header?
+            src: []u8 = macho_bytes.subslice(header.file_offset.to_signed(), header.size.to_signed());
+            dest: []u8 = virtual.subslice(header.address.to_signed(), header.size.to_signed());
+            dest.copy_from(src);
+            mprotect(u8.raw_from_ptr(dest.ptr), dest.len, header.init_prot.zext()); 
+            range(0, header.section_count.zext()) { i |
+                inner := bytes&.pop_type(SegmentSection);
+                @assert_eq(inner.relocations_count, 0, "TODO: relocations. (%, %)", inner.section_name&.str(), inner.segment_name&.str());
+            };
+            /*
+            range(0, header.section_count.zext()) { i |
+                inner := bytes&.pop_type(SegmentSection);
+                
+                src: []u8 = macho_bytes.subslice(inner.file_offset.zext(), inner.size.to_signed());
+                dest: []u8 = virtual.subslice(inner.address.to_signed(), inner.size.to_signed());
+                dest.copy_from(src);
+                mprotect(u8.raw_from_ptr(dest.ptr), dest.len, header.init_prot.zext()); 
+            };
+            */
+        };
+    };
+}
+
+// TODO: am i supposed to use __got for something? 
+// this modifies the __stubs section in place. it needs to be called before load_sections.
+fn apply_imports(full_bytes: []u8, virtual_base_address: *u8, some_extra_memory: *u8) void = {
+    fixups := find_unique_load_command(full_bytes, .ChainedFixups) || return();
+    
+    command := fixups&.pop_type(LinkEditBlob);
+    full_data := full_bytes.slice(command.offset.zext(), command.offset.zext() + command.size.zext());
+    data := full_data;
+    header := data&.pop_type(ChainedFixupsHeader);
+    seg_count := data&.pop_type(u32)[];
+    @assert_eq(seg_count, 0, "TODO: handle chained_starts_in_image");
+    starts := data&.pop_type(ChainedStartsInSegment);
+    imports_data := full_data.slice(header.imports_offset.zext(), full_data.len);
+    symbols_data := full_data.slice(header.symbols_offset.zext(), full_data.len);
+    @assert(header.imports_count == 0 || header.imports_format == 1, "TODO: handle compressed imports");
+    @assert(header.symbols_format == 0, "TODO: handle compressed symbols");
+    
+    // This has to start at a page boundery or i have to change the offset in the ldr after adrp. 
+    @assert(header.imports_count * 8 <= MAC_PAGE_SIZE.trunc());
+    list_of_function_pointers: []rawptr = (ptr = ptr_cast_unchecked(u8, rawptr, some_extra_memory), len = header.imports_count.zext());
+    @assert_eq(rawptr.int_from_ptr(list_of_function_pointers.ptr).mod(1.shift_left(14)), 0, "that doesn't look like a page boundary");
+    
+    // TODO: don't just assume we want /usr/lib/libSystem.B.dylib
+    libc_path := find_os_libc_dylib().expect("to be able to find libc. TODO: don't assume you want this but you normally do.");
+    libc := dlopen(libc_path, .Lazy);
+    @assert(!libc.lib.is_null(), "failed to find libc. TODO: don't assume you want this but you normally do.");
+    
+    range(0, header.imports_count.zext()) { i |
+        import := decode_import(imports_data&.pop_type(u32)[]);
+        n: CStr = (ptr = symbols_data.ptr.offset(import.name_offset.zext()));
+        name := n.str();
+        @assert_eq(import.lib_ordinal, 1, "TODO: where is the list of libraries? multiple of Link Library commands?");
+        if n.ptr[] == "_".ascii() {
+            // apple likes to waste my time. 
+            n.ptr = n.ptr.offset(1);
+        };
+        addr := libc.dlsym(n);
+        @assert(!addr.is_null(), "Couldn't find % in libc (TODO: allow non-libc imports).");
+        list_of_function_pointers[i] = addr;
+    };
+    
+    //
+    // now we need to update __stubs to point to our list_of_function_pointers
+    //
+    list_of_function_pointers := ptr_cast_unchecked(rawptr, u8, list_of_function_pointers.ptr);
+    stubs := find_unique_section(full_bytes, "__TEXT", "__stubs").expect("to find __stubs since we have dynamic imports");
+    @assert_eq(stubs.size, header.imports_count.zext() * 4 * 3, "__stubs should have 3 instructions per import, 4 bytes per arm instruction");
+    range(0, header.imports_count.zext()) { i |
+        offset_in_stubs := i * 3 * 4;
+        inst_byte := full_bytes.ptr.offset(stubs.file_offset.zext() + offset_in_stubs);
+        inst := ptr_cast_unchecked(u8, u32, inst_byte);
+        // TODO: starts with d instead of b for franca tho. 
+        //@assert_eq(inst[], adrp(0, 1, x16), "TODO: idk why imlo is 1 but it always is (in the programs i've checked). expected adrp targetting x16");
+        // We trust that the load has the right offset for the index. TODO: assert that here. 
+        virtual_inst_byte := virtual_base_address.offset(stubs.address.to_signed() + offset_in_stubs);
+        inst[] = encode_adrp(list_of_function_pointers, virtual_inst_byte, x16);
+    };
+}
+
+// :copy-paste from backend/arm64/emit.fr
+fn encode_adrp(dest: *u8, src: *u8, reg: u5) u32 = {
+    dest := u8.int_from_ptr(dest);
+    src := u8.int_from_ptr(src);
+    page_offset := dest.shift_right_logical(12) - src.shift_right_logical(12);
+    assert(page_offset.abs() < 1.shift_left(21), "cant reference that far");
+    high := page_offset.shift_right_logical(2).bit_and(1.shift_left(19) - 1);
+    low := page_offset.bit_and(0b11);
+    adrp(high, low, reg)
+}
+
+fn str(s: *u128) Str = {
+    s: []u8 = (ptr = ptr_cast_unchecked(u128, u8, s), len = 16);
+    while => s.len > 0 && s[s.len - 1] == 0 {
+        s.len -= 1;
+    };
+    s
+}
+
+fn count_virtual_size(macho_bytes: []u8) u64 = {
+    virtual_size: u64 = 0;
+    for_sections(macho_bytes) { type, bytes |
+        if type == LoadCommand.SegmentLoad.raw() { // TODO: why is it the wrong type
+            header := bytes&.pop_type(SegmentLoad);
+            high := header.address + header.address_size;
+            virtual_size = virtual_size.max(high);
+            
+            @assert(header.size <= header.address_size, "not enough space");
+            range(0, header.section_count.zext()) { i |
+                inner := bytes&.pop_type(SegmentSection);
+                @assert(inner.address >= header.address, "starts before");
+                @assert(inner.address + inner.size <= high, "ends after");
+            };
+        };
+    };
+    virtual_size
+}
+
+fn find_unique_section(macho_bytes: []u8, segment_name: []u8, section_name: []u8) ?*SegmentSection = {
+    found: ?*SegmentSection = .None;
+    for_sections(macho_bytes) { type, bytes |
+        continue :: local_return;
+        if type == LoadCommand.SegmentLoad.raw() { // TODO: why is it the wrong type
+            header := bytes&.pop_type(SegmentLoad);
+            if(header.name&.str() != segment_name, => continue());
+            range(0, header.section_count.zext()) { i |
+                continue :: local_return;
+                header := bytes&.pop_type(SegmentSection);
+                if(header.section_name&.str() != section_name, => continue());
+                if found.is_some() {
+                    @eprintln("expected section (%, %) once but found multiple", segment_name, section_name);
+                    return(.None);
+                };
+                found = (Some = header);
+            };
+        };
+    };
+    found
+}
+
+// returns bytes_without_command_header
+fn find_unique_load_command(macho_bytes: []u8, want: LoadCommand) ?[]u8 = {
+    found: ?[]u8 = .None;
+    for_sections(macho_bytes) { ty, bytes | 
+        if ty == want.raw() { // TODO: why is it the wrong type
+            if found.is_some() {
+                @eprintln("expected command % once but found multiple", want.raw());
+                return(.None);
+            };
+            found = (Some = bytes);
+        };
+    };
+    found
+}
+
+fn for_sections(macho_bytes: []u8, $body: @Fn(type: LoadCommand, bytes_without_command_header: []u8) void) void = {
+    header := macho_bytes&.pop_type(MachoHeader);
+    range(0, header.commands_count.zext()) { i |
+        bytes := macho_bytes;
+        header := bytes&.pop_type(LoadCommandHeader);
+        body(header.type, bytes.subslice(0, header.size.zext()));
+        macho_bytes.ptr  = macho_bytes.ptr.offset(header.size.zext());
+        macho_bytes.len -= header.size.zext();
+    };
+}
+
+// TODO: move this to meta.fr or slice.fr?
+fn pop_type(bytes: *[]u8, $T: Type) *T #generic = {
+    @debug_assert(bytes.len >= T.size_of(), "pop_type: not enough bytes");
+    @debug_assert(u8.int_from_ptr(bytes.ptr).mod(T.align_of()) == 0, "pop_type: unaligned");
+    start := bytes.ptr;
+    bytes.ptr = bytes.ptr.offset(T.size_of());
+    bytes.len -= T.size_of();
+    ptr_cast_unchecked(u8, T, start)
+}
+
+::enum(LoadCommand);
+
+fn to_signed(x: u64) i64 = x.bitcast(); // TODO: safety check
