@@ -167,18 +167,49 @@ ChainedFixupsHeader :: @struct(
     symbols_format: u32, // 0 means uncompressed?
 );
 
-DecodedImport :: @struct(
+// needs to be decoded because i don't have bit fields!
+ChainedImport :: @struct(
     lib_ordinal: u32,
     weak: bool,
     name_offset: u32,
 );
 
 // TODO: add bitfields to the language.
-fn decode_import(import: u32) DecodedImport = (
+fn decode_import(import: u32) ChainedImport = (
     lib_ordinal = import.bit_and(0xFF),
     weak        = import.shift_right_logical(8).bit_and(0x01) == 1,
     name_offset = import.shift_right_logical(9),
 );
+
+// needs to be decoded because i don't have bit fields!
+ChainedReloc :: @struct(
+    payload: @tagged(
+        Bind: @struct(ordinal: u32, addend: u32),
+        Rebase: @struct(target: u32, high8: u32),
+    ),
+    reserved: u32, 
+    next: u32
+);
+
+fn decode_chained(data: i64) ChainedReloc = {
+    bind := data.shift_right_logical(64-1) == 1;
+    next := data.shift_right_logical(64-1-12).bit_and(1.shift_left(12) - 1);
+    @if(bind, (
+        payload = (Bind = (
+            ordinal = data.bit_and(1.shift_left(24) - 1).trunc(),
+            addend = data.shift_right_logical(24).bit_and(1.shift_left(8) - 1).trunc(),
+        )), 
+        reserved = data.shift_right_logical(32).bit_and(1.shift_left(19) - 1).trunc(), 
+        next = next.trunc(),
+    ), (
+        payload = (Rebase = (
+            target = data.bit_and(1.shift_left(36) - 1).trunc(),
+            high8 = data.shift_right_logical(36).bit_and(1.shift_left(8) - 1).trunc(),
+        )), 
+        reserved = data.shift_right_logical(36+8).bit_and(1.shift_left(7) - 1).trunc(), 
+        next = next.trunc(),
+    ))
+}
 
 ChainedStartsInSegment :: @struct(
     size: u32,
@@ -188,6 +219,8 @@ ChainedStartsInSegment :: @struct(
     max_valid_pointer: u32,
     page_count: u16,
     // followed by Array(u16, page_count) offset to first fixup on the page
+    first_starts_data: u16, // here is the first one that would be eaten by the alignment padding of the struct
+    // now there are page_count-1 more of them
 );
 
 RelocationEntry :: @struct(

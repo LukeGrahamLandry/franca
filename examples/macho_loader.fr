@@ -6,30 +6,32 @@ fn main() void = {
     assert(args.len > 1, "Last argument is path to macho file");
     path_c := args[args.len - 1];
     path := path_c.str(); 
-    @eprintln("loading: %", path);
+    @eprintln(">>> loading: %", path);
     // TODO: this is silly? just mmap the file. 
-    bytes := temp().read_to_string(path).items(); // :panic
+    bytes := libc_allocator.read_to_string(path).items(); // :panic
     full_bytes := bytes;
     header := bytes&.pop_type(MachoHeader);
     @assert_eq(header.magic, macho_magic, "bad magic! expected a 64-bit mach-o executable.");
     virtual_size := count_virtual_size(full_bytes);
     virtual := page_allocator.alloc(u8, virtual_size.to_signed() + MAC_PAGE_SIZE);
     some_extra_memory := virtual.ptr.offset(virtual.len - MAC_PAGE_SIZE);
-    apply_imports(full_bytes, virtual.ptr, some_extra_memory);
+    import_pointers := apply_imports(full_bytes, virtual.ptr, some_extra_memory);
+    apply_fixups(full_bytes, virtual.ptr, import_pointers);
     load_sections(full_bytes, virtual);
     main_header := find_unique_load_command(full_bytes, .MainEntryPoint).expect("to find MainEntryPoint so we can call it");
     main_header := main_header&.pop_type(MainEntryPoint);
     // offset is in virtual memory. TODO: how do i know this magic number tho. maybe its always relative to first writable section? 
-    main := virtual.ptr.offset(main_header.entry_offset.to_signed() + 0x0000000100000000); 
+    main := virtual.ptr.offset(main_header.entry_offset.to_signed() + 0x0000000100000000); // :magicoffset
     main := u8.raw_from_ptr(main);
     main := assume_types_fn(Ty(i64, *CStr), i64, main);
+    // TODO: franca programs use the _NS functions instead of args to main. 
     args := @slice(path_c, CStr.zeroed());
     ::display_slice(CStr);
     fn display(s: *CStr, o: *List(*u8)) void = display(s[], o);
-    @eprintln("calling main with %", args);
+    @eprintln(">>> calling main with %", args);
     
     status := main(args.len, args.ptr);
-    @eprintln("main returned %", status);
+    @eprintln(">>> main returned %", status);
     exit(status);
 }
 
@@ -48,26 +50,69 @@ fn load_sections(macho_bytes: []u8, virtual: []u8) void = {
             mprotect(u8.raw_from_ptr(dest.ptr), dest.len, header.init_prot.zext()); 
             range(0, header.section_count.zext()) { i |
                 inner := bytes&.pop_type(SegmentSection);
-                @assert_eq(inner.relocations_count, 0, "TODO: relocations. (%, %)", inner.section_name&.str(), inner.segment_name&.str());
+                @assert_eq(inner.relocations_count, 0, "TODO: old style relocations. (%, %)", inner.section_name&.str(), inner.segment_name&.str());
             };
-            /*
-            range(0, header.section_count.zext()) { i |
-                inner := bytes&.pop_type(SegmentSection);
-                
-                src: []u8 = macho_bytes.subslice(inner.file_offset.zext(), inner.size.to_signed());
-                dest: []u8 = virtual.subslice(inner.address.to_signed(), inner.size.to_signed());
-                dest.copy_from(src);
-                mprotect(u8.raw_from_ptr(dest.ptr), dest.len, header.init_prot.zext()); 
-            };
-            */
         };
     };
 }
 
-// TODO: am i supposed to use __got for something? 
+fn apply_fixups(full_bytes: []u8, virtual_base_address: *u8, import_pointers: []rawptr) void = {
+    full_fixups_data := find_unique_load_command(full_bytes, .ChainedFixups) || return();
+    bytes := full_fixups_data;
+    command := bytes&.pop_type(LinkEditBlob);
+    full_data := full_bytes.slice(command.offset.zext(), command.offset.zext() + command.size.zext());
+    data := full_data;
+    header := data&.pop_type(ChainedFixupsHeader);
+    starts_data := full_data.slice(header.starts_offset.zext(), full_data.len);
+    full_starts_data := starts_data;
+    seg_count := starts_data&.pop_type(u32)[];
+    range(0, seg_count.zext()) { _ |
+        offset_to_csis := starts_data&.pop_type(u32)[];
+        if offset_to_csis != 0 {
+            starts_data := full_starts_data;
+            starts_data.ptr = starts_data.ptr.offset(offset_to_csis.zext());
+            starts_data.len -= offset_to_csis.zext();
+            starts := starts_data&.pop_type(ChainedStartsInSegment);
+            if starts.page_count != 0 {
+                // the struct has alignment padding that eats the first entry of the variable length array. 
+                starts_data.ptr = starts_data.ptr.offset(-2); // take it back now yall
+                range(0, starts.page_count.zext()) { i | 
+                    offset_to_fixup := starts_data&.pop_type(u16)[];
+                    page_offset: i64 = starts.segment_offset.to_signed() + (starts.page_size.zext() * i);
+                    page_data := full_bytes.slice(page_offset, page_offset + starts.page_size.zext());
+                    next_offset: i64 = offset_to_fixup.zext();
+                    dowhile {
+                        page_data.ptr = page_data.ptr.offset(next_offset);
+                        page_data.len -= next_offset;
+                        reloc_ref := ptr_cast_unchecked(u8, rawptr, page_data.ptr);
+                        reloc := decode_chained(int_from_rawptr(reloc_ref[]));
+                        @match(reloc.payload) {
+                            fn Rebase(it) => {
+                                // :magicoffset
+                                @assert_eq(it.high8, 0, "TODO: what is high8 for?");
+                                reloc_ref[] = u8.raw_from_ptr(virtual_base_address.offset(0x0000000100000000).offset(it.target.zext()));
+                            }
+                            fn Bind(it) => {
+                                reloc_ref[] = import_pointers[it.ordinal.zext()];
+                            }
+                        };
+                        next_offset = reloc.next.zext() * 4;
+                        next_offset != 0
+                    };
+                };
+            };
+        };
+    };
+}
+
+// TODO: i think this patching is redundant and __got is guaranteed have sequential chained fixups for all the imports,
+//       and these adrps already reference __got. i just got confused by the output of objdump. 
+//       it says its to __stubs but 0x10000c000 is the address of __got in that binary. 
+//       so instead of doing all this work, should just have this function just collect the array of imports. fn collect_imports.
+//       
 // this modifies the __stubs section in place. it needs to be called before load_sections.
-fn apply_imports(full_bytes: []u8, virtual_base_address: *u8, some_extra_memory: *u8) void = {
-    fixups := find_unique_load_command(full_bytes, .ChainedFixups) || return();
+fn apply_imports(full_bytes: []u8, virtual_base_address: *u8, some_extra_memory: *u8) []rawptr = {
+    fixups := find_unique_load_command(full_bytes, .ChainedFixups) || return(empty());
     
     command := fixups&.pop_type(LinkEditBlob);
     full_data := full_bytes.slice(command.offset.zext(), command.offset.zext() + command.size.zext());
@@ -108,7 +153,7 @@ fn apply_imports(full_bytes: []u8, virtual_base_address: *u8, some_extra_memory:
     //
     // now we need to update __stubs to point to our list_of_function_pointers
     //
-    list_of_function_pointers := ptr_cast_unchecked(rawptr, u8, list_of_function_pointers.ptr);
+    list_of_function_pointers_b := ptr_cast_unchecked(rawptr, u8, list_of_function_pointers.ptr);
     stubs := find_unique_section(full_bytes, "__TEXT", "__stubs").expect("to find __stubs since we have dynamic imports");
     @assert_eq(stubs.size, header.imports_count.zext() * 4 * 3, "__stubs should have 3 instructions per import, 4 bytes per arm instruction");
     range(0, header.imports_count.zext()) { i |
@@ -118,9 +163,12 @@ fn apply_imports(full_bytes: []u8, virtual_base_address: *u8, some_extra_memory:
         // TODO: starts with d instead of b for franca tho. 
         //@assert_eq(inst[], adrp(0, 1, x16), "TODO: idk why imlo is 1 but it always is (in the programs i've checked). expected adrp targetting x16");
         // We trust that the load has the right offset for the index. TODO: assert that here. 
+        @assert_eq(inst[].bit_and(0b11111), x16, "expected %th import adrp to use x16", i); // gambling on not saying 2th/3th and getting shot by the attention to detail police. 
         virtual_inst_byte := virtual_base_address.offset(stubs.address.to_signed() + offset_in_stubs);
-        inst[] = encode_adrp(list_of_function_pointers, virtual_inst_byte, x16);
+        inst[] = encode_adrp(list_of_function_pointers_b, virtual_inst_byte, x16);
     };
+    @eprintln(">>> patching % dynamic function imports", header.imports_count);
+    list_of_function_pointers
 }
 
 // :copy-paste from backend/arm64/emit.fr

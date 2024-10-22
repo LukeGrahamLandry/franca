@@ -1,7 +1,30 @@
+## (Oct 22)
+
+is `__got` guaranteed have sequential chained fixups for all the imports?
+maybe you're supposed to use that instead of doing the hacky some_extra_memory thing.
+but if that were the case, you'd think they'd pre-setup `__stubs` to load from there instead of
+needing to patch them which i think you do unless im misinterpreting.
+oh yeah, i just got confused by the output of objdump.
+example:
+
+```
+000000010000be2c <__stubs>:
+10000be2c: b0000010    	adrp	x16, 0x10000c000 <__stubs+0x4>
+10000be30: f9400210    	ldr	x16, [x16]
+10000be34: d61f0200    	br	x16
+```
+
+it says its to `__stubs` but 0x10000c000 is the address of `__got` in that binary.
+
 ## (Oct 21)
 
 - since im doing import patch in place before moving, the offset i calculated for adrp is wrong.
   then also had to make sure the fns array was close enough to the code that it could reference that far so mmap them together.
+- whatever version of objdump is on my computer, -r doesn't show the entries in ChainedStartsInSegment.
+  and i cant find an argument that does. `objdump --chained-fixups --macho` sure doesn't.
+  i can only assume their goal is to make life as confusing as possible to reduce the competition.
+  ah different program for some reason: `otool -fixup_chains`,
+  or `dyld_info -fixups` also works.
 
 ## (Oct 20)
 

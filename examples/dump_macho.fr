@@ -165,13 +165,47 @@ fn main() void = {
                 data := full_data;
                 header := data&.pop_type(ChainedFixupsHeader);
                 @println("        %", header);
-                seg_count := data&.pop_type(u32);
+                starts_data := full_data.slice(header.starts_offset.zext(), full_data.len);
+                full_starts_data := starts_data;
+                seg_count := starts_data&.pop_type(u32)[];
                 @println("           chained_starts_in_image.seg_count %", seg_count);
-                range(0, seg_count[].zext()) { _ |
-                    @println("           %", data&.pop_type(u32)); // TODO: untested
+                range(0, seg_count.zext()) { i |
+                    offset_to_csis := starts_data&.pop_type(u32)[];
+                    if offset_to_csis != 0 {
+                        starts_data := full_starts_data;
+                        starts_data.ptr = starts_data.ptr.offset(offset_to_csis.zext());
+                        starts_data.len -= offset_to_csis.zext();
+                        starts := starts_data&.pop_type(ChainedStartsInSegment);
+                        @println("           %. off=% ChainedStartsInSegment: %", i, offset_to_csis, starts);
+                        if starts.page_count != 0 {
+                            // the struct has alignment padding that eats the first entry of the variable length array. 
+                            starts_data.ptr = starts_data.ptr.offset(-2); // take it back now yall
+                            range(0, starts.page_count.zext()) { i | 
+                                offset_to_fixup := starts_data&.pop_type(u16)[];
+                                @println("               - %. page_start: %", i, offset_to_fixup);
+                                if offset_to_fixup >= starts.page_size {
+                                    @eprintln("fixup outside page, thats probably not good.");
+                                };
+                                // now we have a fun linked list to traverse.
+                                // TODO: check pointer format on the header before doing this 
+                                page_offset: i64 = starts.segment_offset.to_signed() + (starts.page_size.zext() * i);
+                                page_data := full_bytes.slice(page_offset, page_offset + starts.page_size.zext());
+                                next_offset: i64 = offset_to_fixup.zext();
+                                dowhile {
+                                    page_data.ptr = page_data.ptr.offset(next_offset);
+                                    page_data.len -= next_offset;
+                                    reloc := ptr_cast_unchecked(u8, i64, page_data.ptr)[];
+                                    reloc := decode_chained(reloc);
+                                    @println("                  - %", reloc&);
+                                    next_offset = reloc.next.zext() * 4;
+                                    next_offset != 0
+                                };
+                            };
+                        };
+                    } else {
+                        @println("           %. ---", i);
+                    };
                 };
-                starts := data&.pop_type(ChainedStartsInSegment);
-                @println("           ChainedStartsInSegment: %", starts);
                 imports_data := full_data.slice(header.imports_offset.zext(), full_data.len);
                 symbols_data := full_data.slice(header.symbols_offset.zext(), full_data.len);
                 
@@ -257,6 +291,7 @@ fn main() void = {
     if unknown != 0 {
         @println("     % unknown load commands. (probably a problem with this tool, not your macho file)", unknown);
     };
+    exit(0);
 }
 
 fn with_trailing_string(bytes: *[]u8, header: *LoadCommandHeader, $Command: Type, command_name: Str) void = {
@@ -303,9 +338,17 @@ fn pop_type(bytes: *[]u8, $T: Type) *T #generic = {
 ::DeriveFmt(ApplicationUuid);
 ::DeriveFmt(ChainedFixupsHeader);
 ::DeriveFmt(ChainedStartsInSegment);
-::DeriveFmt(DecodedImport);
+::DeriveFmt(ChainedImport);
+::DeriveFmt(ChainedReloc);
+XXX :: get_field_type(ChainedReloc, @symbol payload);
+::DeriveFmt(XXX);
+::tagged(XXX);
+::DeriveFmt(get_variant_type(XXX, XXX.Tag().Rebase));
+::DeriveFmt(get_variant_type(XXX, XXX.Tag().Bind));
 ::DeriveFmt(u128);
 
 fn display(a: *u64, out: *List(u8)) void = a[].display(out);
 fn display(a: *u16, out: *List(u8)) void = a[].display(out);
 fn display(a: *u8, out: *List(u8)) void = a[].display(out);
+
+fn to_signed(x: u64) i64 = x.bitcast(); // TODO: safety check
