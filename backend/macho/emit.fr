@@ -1,3 +1,9 @@
+// this feels like a massive pain and i must be making it more complicated than it needs to be...
+// but consider that the Zig has ~18000 lines of dealing with mach-o files: 
+//  - https://github.com/ziglang/zig/tree/master/src/link/MachO
+//  - https://github.com/ziglang/zig/blob/master/src/link/MachO.zig
+// not at all a fair comparison, they do far more stuff, but the point remains. 
+
 // life is better if you're always 8 byte aligned. 
 
 fn output_macho(m: *QbeModule) List([]u8) = {  
@@ -49,6 +55,7 @@ fn output_macho(m: *QbeModule) List([]u8) = {
     };
     file_offset := 0;
     base_file_offset := @slice(0, 0, 0, 0, 0); // you always need to use add_data_file_offset with this. 
+    virtual_segment_offset := @slice(0, 0, 0, 0, 0);
     {
         segment_index := 0; // 0 is __ZEROPAGE
         names := @slice("", "__TEXT", "__STUBSHACK", "__DATA", "__DATA_CONST");
@@ -69,6 +76,7 @@ fn output_macho(m: *QbeModule) List([]u8) = {
             vlen := m.segments&[s].mmapped.len;
             flen := chunks[segment_index].len;
             cmd.address_size = vlen.bitcast();
+            virtual_segment_offset[segment_index] = virtual_offset;
             virtual_offset += vlen;
             cmd.file_offset = file_offset.bitcast();
             base_file_offset[segment_index] = file_offset;
@@ -194,7 +202,10 @@ fn output_macho(m: *QbeModule) List([]u8) = {
                 @debug_assert(fix._0.got_lookup_offset >= 0 && fix._0.got_lookup_offset < import_count, "bad ordinal");
                 (Bind = (addend = 0, ordinal = fix._0.got_lookup_offset.trunc()))
             }, {
-                (Rebase = (high8 = 0, target = csis.segment_offset.trunc() + off_in_segment.trunc()))
+                dest_segment := fix._0.segment.raw() + 1; // :MySegmentsStartAt1
+                target := virtual_segment_offset[dest_segment] - zero_page_size + fix._0.offset;
+                @assert_lt(target, 1.shift_left(36), "rebase > 36 bits");
+                (Rebase = (high8 = 0, target = target))
             })
         );
         ptr_cast_unchecked(u8, i64, fix._1.patch_at)[] = encoded;

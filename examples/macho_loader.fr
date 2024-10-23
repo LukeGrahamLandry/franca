@@ -36,9 +36,6 @@ fn main() void = {
     // offset is in virtual memory. 
     main := virtual.ptr.offset(main_header.entry_offset.to_signed() + first_interesting); 
     
-    //print_llvm_mc_dis(virtual.subslice(main_header.entry_offset.to_signed() + first_interesting - 100, 400));
-    //print_llvm_mc_dis(virtual.subslice(4303355904, 12));
-    
     main := u8.raw_from_ptr(main);
     main := assume_types_fn(Ty(i64, *CStr), i64, main);
     // TODO: franca programs use the _NS functions instead of args to main. 
@@ -126,7 +123,7 @@ fn apply_fixups(full_bytes: []u8, virtual_base_address: *u8, first_interesting: 
                         @match(reloc.payload) {
                             fn Rebase(it) => {
                                 @assert_eq(it.high8, 0, "TODO: what is high8 for?");
-                                reloc_ref[] = u8.raw_from_ptr(virtual_base_address.offset(first_interesting).offset(it.target.zext()));
+                                reloc_ref[] = u8.raw_from_ptr(virtual_base_address.offset(first_interesting).offset(it.target));
                                 rebase_count += 1;
                             }
                             fn Bind(it) => {
@@ -244,22 +241,3 @@ fn pop_type(bytes: *[]u8, $T: Type) *T #generic = {
 ::enum(LoadCommand);
 
 fn to_signed(x: u64) i64 = x.bitcast(); // TODO: safety check
-
-fn print_llvm_mc_dis(asm: []u8) void = {
-    @println("% bytes.", asm.len());
-    hex: List(u8) = list(asm.len * 5, temp());
-    for asm { byte |
-        hex&.push_prefixed_hex_byte(byte);
-        hex&.push_all(" ");
-    };
-    arch := "--arch=aarch64";
-    hex  := hex.items();
-    out := open_temp_file();
-    out.fd&.write(hex);
-    // TODO: have the caller pass in anything like this, 
-    //       but this is just for debugging the compiler so its not a big deal. :driver_io
-    // varient 1 means intel syntax. ignored when doing arm. 
-    success := run_cmd_blocking("llvm-mc", @slice(arch, "--disassemble", "-output-asm-variant=1", "--show-encoding", out&.s_name()));
-    if(!success, => eprintln("ICE(debugging): couldn't disassemble"));
-    out.remove();
-} 

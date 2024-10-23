@@ -104,13 +104,23 @@ fn do_fixups(self: *QbeModule, address: *u8, symbol: *SymbolInfo) void = {
                 if !local {
                     // For AOT we'll tell the loader to put the right offset in the __got for us. 
                     // For jitting we could reference directly but this indirection makes it consistant. 
-                    stubs := self.segments&.index(.Stubs);
-                    distance = ptr_diff(fixup.patch_at, stubs.next) / 4;
-                    trampoline: []u32 = (ptr = ptr_cast_unchecked(u8, u32, stubs.next), len = 3);
-                    reg := Arm64Reg.IP0.raw() - 1; // x16
-                    new_got_reloc = load_from_got(self, symbol, reg, trampoline.slice(0, 2), address).or_else(=> new_got_reloc);
-                    trampoline[2] = br(reg, 0);
-                    stubs.next = stubs.next.offset(trampoline.len * 4);
+                    // bl from the caller to the trampoline, then the trampoline loads from __got and calls that. 
+                    // means you always reserve one instruction for a call before knowing if its local. 
+                    // > my understanding is that in the old days you could have a shim 
+                    // > that checked the return address and patched it to not need the extra indirection after the first call, 
+                    // > but i we care too much about security to do that any more. 
+                    if symbol.offset == -1 {
+                        // create a new trampoline in the __stubs section. 
+                        stubs := self.segments&.index(.Stubs);
+                        symbol.offset = ptr_diff(stubs.mmapped.ptr, stubs.next);
+                        trampoline: []u32 = (ptr = ptr_cast_unchecked(u8, u32, stubs.next), len = 3);
+                        reg := Arm64Reg.IP0.raw() - 1; // x16
+                        new_got_reloc = load_from_got(self, symbol, reg, trampoline.slice(0, 2), address).or_else(=> new_got_reloc);
+                        trampoline[2] = br(reg, 0);
+                        stubs.next = stubs.next.offset(trampoline.len * 4);
+                    };
+                    stub_trampoline := self.segment_address(.Stubs, symbol.offset);
+                    distance = ptr_diff(fixup.patch_at, stub_trampoline) / 4;
                 };
                 assert(distance.abs() < 1.shift_left(26), "can't even jump to trampoline, thats bad.");
                 inst := ptr_cast_unchecked(u8, u32, fixup.patch_at);

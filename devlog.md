@@ -1,3 +1,12 @@
+## (Oct 23)
+
+- damn. solved that in like 30 seconds this morning.
+  each bl to an import was a different place. each getting thier own stub.
+  that wasn't actually the problem yet but it would have been confusing.
+  mistake was in init, i was make_segment in the wrong order (constant and mutable data flipped).
+  so that makes mandelbrot work.
+- for f_vtable, needed to fix rebase. target was using file offset to patch instead of virtual offset to target.
+
 ## mach-o loader (Oct 22)
 
 is `__got` guaranteed have sequential chained fixups for all the imports?
