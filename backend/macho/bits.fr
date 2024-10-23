@@ -1,4 +1,5 @@
-macho_magic :: 0xfeedfacf;
+macho_magic     :: 0xfeedfacf;
+macos_page_size :: 16384;
 MachoHeader :: @struct(
     magic: u32 = macho_magic,
     cpu_type: u32,
@@ -181,6 +182,13 @@ fn decode_import(import: u32) ChainedImport = (
     name_offset = import.shift_right_logical(9),
 );
 
+// TODO: add bitfields to the language.
+fn encode_import(import: ChainedImport) u32 = {
+    import.lib_ordinal.bit_and(0xFF)
+    .bit_or(@if(import.weak, 1.shift_left(8), 0))
+    .bit_or(import.name_offset.shift_left(9))
+}
+
 // needs to be decoded because i don't have bit fields!
 ChainedReloc :: @struct(
     payload: @tagged(
@@ -191,6 +199,7 @@ ChainedReloc :: @struct(
     next: u32
 );
 
+// TODO: add bitfields to the language.
 fn decode_chained(data: i64) ChainedReloc = {
     bind := data.shift_right_logical(64-1) == 1;
     next := data.shift_right_logical(64-1-12).bit_and(1.shift_left(12) - 1);
@@ -209,6 +218,24 @@ fn decode_chained(data: i64) ChainedReloc = {
         reserved = data.shift_right_logical(36+8).bit_and(1.shift_left(7) - 1).trunc(), 
         next = next.trunc(),
     ))
+}
+
+fn encode_chained(r: ChainedReloc) i64 = {
+    data: i64 = r.next.zext().bit_and(1.shift_left(12) - 1).shift_left(64-1-12);
+    @debug_assert_eq(r.reserved, 0, "TODO: reserved");
+    @match(r.payload) {
+        fn Bind(it) => {
+            data = data.bit_or(1.shift_left(63));
+            data = data.bit_or(it.ordinal.zext().bit_and(1.shift_left(24) - 1).shift_left(0));
+            data = data.bit_or(it.addend.zext().bit_and(1.shift_left(8) - 1).shift_left(24));
+        }
+        fn Rebase(it) => {
+            data = data.bit_or(0.shift_left(63));
+            data = data.bit_or(it.target.zext().bit_and(1.shift_left(36) - 1).shift_left(0));
+            data = data.bit_or(it.high8.zext().bit_and(1.shift_left(8) - 1).shift_left(36));
+        }
+    };
+    data
 }
 
 ChainedStartsInSegment :: @struct(

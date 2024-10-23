@@ -78,30 +78,37 @@ fn do_jit_fixups(self: *QbeModule, id: u32, segment: SegmentType, final_offset: 
     symbol.offset = final_offset;
     symbol.kind = .Local;
     dest := self.segment_address(symbol.segment, symbol.offset);
-    self.do_fixups(dest, symbol.fixups.items());
+    fixups := symbol.fixups&;
+    self.do_fixups(dest, symbol);
     // Since it's a local symbol, we don't care about the relocations anymore. The linker never needs to know. 
-    symbol.fixups&.drop(self.gpa);
+    // TODO: actually thats also true for imports becuase calls go through __got. 
+    unordered_retain(fixups, fn(it) => it.type&.is(.DataAbsolute));
+    if(fixups.len == 0, => fixups.drop(self.gpa));
 }
+::tagged(FixupType);
 
-fn do_fixups(self: *QbeModule, address: *u8, fixups: []Fixup) void = {
+fn do_fixups(self: *QbeModule, address: *u8, symbol: *SymbolInfo) void = {
+    fixups := symbol.fixups.items();
+    local := symbol.kind == .Local;
+    assert(!self.fixups_locked, "you cannot add more fixups after emitting for aot");
+    new_got_reloc: ?Fixup = .None;
     each fixups { fixup | 
         @match(fixup.type) {
             fn Call() => {
                 if self.debug["T".char()] {
-                    @fmt_write(self.debug_out, "# patch call % calls %\n", u8.int_from_ptr(fixup.patch_at), u8.int_from_ptr(address));
+                    @fmt_write(self.debug_out, "# patch call % calls %\n", u8.int_from_ptr(fixup.patch_at), symbol.name);
                 };
                 distance := ptr_diff(fixup.patch_at, address) / 4;
                 in_range := distance.abs() < 1.shift_left(26);
-                if !in_range { 
-                    // This happens when it's an imported function so its not in our reserved block of memory.
-                    // For AOT we'll tell the loader to put the right offset here. 
+                assert(!local || in_range, "local symbol too far away");
+                if !local {
+                    // For AOT we'll tell the loader to put the right offset in the __got for us. 
+                    // For jitting we could reference directly but this indirection makes it consistant. 
                     stubs := self.segments&.index(.Stubs);
                     distance = ptr_diff(fixup.patch_at, stubs.next) / 4;
                     trampoline: []u32 = (ptr = ptr_cast_unchecked(u8, u32, stubs.next), len = 3);
-                    reg := Arm64Reg.IP0.raw();
-                    i_page, i_off := encode_adrp_add(address, stubs.next, @as(u5) reg);
-                    trampoline[0] = i_page;
-                    trampoline[1] = i_off;
+                    reg := Arm64Reg.IP0.raw() - 1; // x16
+                    new_got_reloc = load_from_got(self, symbol, reg, trampoline.slice(0, 2), address).or_else(=> new_got_reloc);
                     trampoline[2] = br(reg, 0);
                     stubs.next = stubs.next.offset(trampoline.len * 4);
                 };
@@ -114,13 +121,51 @@ fn do_fixups(self: *QbeModule, address: *u8, fixups: []Fixup) void = {
                     @fmt_write(self.debug_out, "# patch addr % refs %\n", u8.int_from_ptr(fixup.patch_at), u8.int_from_ptr(address));
                 };
                 assert(it.increment == 0, "TODO: offset symbols");
-                i_page, i_off := encode_adrp_add(address, fixup.patch_at, @as(u5) it.r);
                 inst: []u32 = (ptr = ptr_cast_unchecked(u8, u32, fixup.patch_at), len = 2);
-                inst[0] = i_page;
-                inst[1] = i_off;
+                if local {
+                    i_page, i_off := encode_adrp_add(address, fixup.patch_at, @as(u5) it.r);
+                    inst[0] = i_page;
+                    inst[1] = i_off;
+                } else {
+                    // TODO: untested
+                    new_got_reloc = load_from_got(self, symbol, it.r, inst, address).or_else(=> new_got_reloc);
+                };
+            }
+            fn DataAbsolute() => {
+                reloc := ptr_cast_unchecked(u8, *u8, fixup.patch_at);
+                reloc[] = address;
             }
         }
     };
+    if new_got_reloc { it | // avoided reallocating while iterating. rustc would be proud.
+        symbol.fixups&.push(it, self.gpa);
+    };
+}
+
+// do not push to symbol.fixups here!
+fn load_from_got(self: *QbeModule, symbol: *SymbolInfo, reg_encoding: i64, insts: []u32, jit_address: *u8) ?Fixup = {
+    @debug_assert(!self.fixups_locked);
+    assert(!self.fixups_locked, "got_lookup_offset is stomped by emitting for aot");
+    new_got_reloc: ?Fixup = .None;
+    if symbol.got_lookup_offset == -1 {
+        // need to reserve a new __got entry. 
+        assert(self.got_cursor < MAX_GOT_SIZE, "TODO: too many __got imports");
+        got := self.segment_address(.ConstantData, self.got_cursor);  // :GotAtConstantDataBase 
+        if self.debug["T".char()] {
+            @fmt_write(self.debug_out, "# reserve __got[%] = %\n", self.got_cursor / 8, symbol.name);
+        };
+        symbol.got_lookup_offset = self.got_cursor;
+        new_got_reloc = (Some = (patch_at = got, type = .DataAbsolute));
+        self.got_cursor += 8;
+        ptr_cast_unchecked(u8, *u8, got)[] = jit_address; // because we don't loop again to handle `new_got_reloc`
+    };
+    got := self.segment_address(.ConstantData, symbol.got_lookup_offset);  // :GotAtConstantDataBase 
+    @debug_assert_eq(ptr_cast_unchecked(u8, i64, got)[], u8.int_from_ptr(jit_address));
+    
+    i_page, i_off := encode_adrp_load(got, ptr_cast_unchecked(u32, u8, insts.ptr), @as(u5) reg_encoding);
+    insts[0] = i_page;
+    insts[1] = i_off; 
+    new_got_reloc
 }
 
 // TODO: is this better than brk? 
@@ -910,6 +955,17 @@ fn encode_adrp_add(dest: *u8, src: *u8, reg: u5) Ty(u32, u32) = {
     low := page_offset.bit_and(0b11);
     bottom12 := @as(u12) @as(i64) dest.bit_and(1.shift_left(12) - 1);
     (adrp(high, low, reg), add_im(Bits.X64, reg, reg, bottom12, 0))
+}
+
+fn encode_adrp_load(dest: *u8, src: *u8, reg: u5) Ty(u32, u32) = {
+    dest := u8.int_from_ptr(dest);
+    src := u8.int_from_ptr(src);
+    
+    page_offset := dest.shift_right_logical(12) - src.shift_right_logical(12);
+    high := page_offset.shift_right_logical(2).bit_and(1.shift_left(19) - 1);
+    low := page_offset.bit_and(0b11);
+    bottom12 := @as(u12) @as(i64) dest.bit_and(1.shift_left(12) - 1) / 8;
+    (adrp(high, low, reg), ldr_uo(Bits.X64, reg, reg, bottom12))
 }
 
 fn sub_er(sf: Bits, dest: RegO, a: RegI, b: RegI) u32 =

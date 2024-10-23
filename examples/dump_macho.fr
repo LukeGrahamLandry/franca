@@ -15,7 +15,7 @@ fn main() void = {
     header := bytes&.pop_type(MachoHeader);
     @println("[Header] %", header);
     if header.magic != macho_magic {
-        eprintln("bad magic");
+        eprintln("WARN: bad magic");
     };
     total := 0;
     start := bytes.ptr;
@@ -24,6 +24,9 @@ fn main() void = {
         beginning_len := bytes.len;
         header := bytes&.pop_type(LoadCommandHeader);
         @println("  [Load Command %] %", i, header);
+        if header.size.mod(8) != 0 {
+            @eprintln("WARN: this load command's size is not a multple of 8 bytes. thats probably bad for business");
+        };
         @switch(header.type) {
             @case(LoadCommand.SegmentLoad.raw()) => {
                 header := bytes&.pop_type(SegmentLoad);
@@ -80,7 +83,7 @@ fn main() void = {
             @case(LoadCommand.LinkEditSymbolTable.raw()) => {
                 command := bytes&.pop_type(LinkEditSymbolTable);
                 if 24 != (@as(i64) header.size.zext()) {
-                    eprintln("bad fixed command size");
+                    eprintln("WARN: bad fixed command size");
                 };
                 @println("    [__LINKEDIT Symbol Table] %", command);
                 // Offsets from the beginning of the file. (the data will be after all the load commands).
@@ -95,7 +98,7 @@ fn main() void = {
                     if name.len + command.name_offset.zext() < strings_bytes.len {
                         @println("          name: %", name);
                     } else {
-                        eprintln("string goes out of bounds of string table");
+                        eprintln("WARN: string goes out of bounds of string table");
                     };
                 };
             };
@@ -173,18 +176,26 @@ fn main() void = {
                     offset_to_csis := starts_data&.pop_type(u32)[];
                     if offset_to_csis != 0 {
                         starts_data := full_starts_data;
+                        if full_data.len < offset_to_csis.zext() {
+                            @eprintln("WARN: offset_to_csis = %", offset_to_csis);
+                        };
                         starts_data.ptr = starts_data.ptr.offset(offset_to_csis.zext());
                         starts_data.len -= offset_to_csis.zext();
+                        @print("           %. off=% ", i, offset_to_csis);
                         starts := starts_data&.pop_type(ChainedStartsInSegment);
-                        @println("           %. off=% ChainedStartsInSegment: %", i, offset_to_csis, starts);
+                        @println("ChainedStartsInSegment: %", starts);
+                        if starts.size >= command.size {
+                            @eprintln("WARN: starts size is greater than while chained fixups section...");
+                        };
                         if starts.page_count != 0 {
                             // the struct has alignment padding that eats the first entry of the variable length array. 
                             starts_data.ptr = starts_data.ptr.offset(-2); // take it back now yall
+                            starts_data.len += 2;
                             range(0, starts.page_count.zext()) { i | 
                                 offset_to_fixup := starts_data&.pop_type(u16)[];
                                 @println("               - %. page_start: %", i, offset_to_fixup);
                                 if offset_to_fixup >= starts.page_size {
-                                    @eprintln("fixup outside page, thats probably not good.");
+                                    @eprintln("WARN: fixup outside page, thats probably not good.");
                                 };
                                 // now we have a fun linked list to traverse.
                                 // TODO: check pointer format on the header before doing this 
@@ -219,7 +230,7 @@ fn main() void = {
                             name = n.str();
                             if name.len + (@as(i64) header.symbols_offset.zext()) > full_data.len {
                                 name = "";
-                                eprintln("name of out bounds");
+                                eprintln("WARN: name of out bounds");
                             };
                         };
                         @println("           [%] % %", i, import&, name);
@@ -278,7 +289,7 @@ fn main() void = {
         size_taken := beginning_len - bytes.len;
         total += size_taken;
         if size_taken != header.size.zext() {
-            @eprintln("      bad command size (cmd said %, we read %)", @as(i64) header.size.zext(), size_taken);
+            @eprintln("WARN:       bad command size (cmd said %, we read %)", @as(i64) header.size.zext(), size_taken);
             diff := (@as(i64) header.size.zext()) - size_taken;
             bytes.ptr = bytes.ptr.offset(diff);
             bytes.len -= diff;

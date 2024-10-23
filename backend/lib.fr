@@ -84,12 +84,16 @@ QbeModule :: @rec @struct(
     // stuff for emitting code.
     segments: EnumMap(SegmentType, SegmentCursor),
     gpa: Alloc,
+    fixups_locked := false,
+    got_cursor := 0,
     
     // TODO: everything that touches these needs to be rewritten eventually. 
     want_text_asm := false,
     want_llvm := false,
     outf := zeroed(*FILE),
 );
+
+MAX_GOT_SIZE :: 1.shift_left(15);
 
 fn init_default_module() QbeModule = 
     init(1.shift_left(23), libc_allocator, page_allocator);
@@ -111,12 +115,17 @@ fn init(segment_size: i64, gpa: Alloc, code_alloc: Alloc) QbeModule = {
     make_segment :: fn(s: SegmentType, start: i64, end: i64) void => {
         m.segments&.insert(s, (mmapped = mem.slice(start, end), next = mem.index(start), start_of_writable_code = mem.index(start)));
     };
-    make_segment(.Code, 0, segment_size);
-    make_segment(.MutableData, segment_size, segment_size*2);
+    make_segment(.Code, 0, segment_size);  // :CodeIsFirst
+    make_segment(.Stubs, segment_size, segment_size*2);
     make_segment(.ConstantData, segment_size*2, segment_size*3);
-    make_segment(.Stubs, segment_size*3, segment_size*4);
+    make_segment(.MutableData, segment_size*3, segment_size*4);
     m.gpa = gpa;
     m.symbols = gpa.alloc(SymbolBucket, IMask + 1);
+    {   // TODO: this is kinda ass
+        // :GotAtConstantDataBase
+        next := m.segments&[.ConstantData].next&;
+        next[] = next[].offset(MAX_GOT_SIZE); 
+    };
     
     m.debug_out = fdopen(STD_ERR, "a".sym().c_str());
     @if(LINK_QBE_C, {

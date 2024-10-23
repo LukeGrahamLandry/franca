@@ -1,4 +1,4 @@
-## (Oct 22)
+## mach-o loader (Oct 22)
 
 is `__got` guaranteed have sequential chained fixups for all the imports?
 maybe you're supposed to use that instead of doing the hacky some_extra_memory thing.
@@ -16,7 +16,9 @@ example:
 
 it says its to `__stubs` but 0x10000c000 is the address of `__got` in that binary.
 
-## (Oct 21)
+so now the loader it good enough to run itself and the compiler.
+
+## mach-o loader (Oct 21)
 
 - since im doing import patch in place before moving, the offset i calculated for adrp is wrong.
   then also had to make sure the fns array was close enough to the code that it could reference that far so mmap them together.

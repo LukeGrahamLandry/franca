@@ -6,21 +6,21 @@ SegmentCursor :: @struct(
 
 SegmentType :: @enum(i64) (
     Code,
+    Stubs,
     MutableData,
     ConstantData,
-    Stubs,
 );
 
 SymbolBucket :: @struct(
     n: u32,
     data: QList(SymbolInfo),
 );
-    
+
 SymbolInfo :: @struct(
     name: CStr,
     inline: *Qbe.Fn, // nullable
     fixups: RsVec(Fixup),
-    jit_lookup_offset: i64, // or -1 if not referenced yet 
+    got_lookup_offset: i64, // or -1 if not referenced yet. only relevant for imported functions. 
     segment: SegmentType, // only valid when kind == Local
     offset: i64,
     kind: SymbolKind,
@@ -46,8 +46,18 @@ SymbolKind :: @enum(i64) (
 );
 
 FixupType :: @tagged(
+    //  local: adrp,add to the address directly
+    // import: ??
     InReg: @struct(r: i64, increment: i64),
+    //  local: bl to the address
+    // import: bl to a trampoline in __stubs which adrp,ldr,br from __got
+    //         but currently its adrp,add,br to the address directly
     Call,
+    //  local: rebase.
+    //         It's a local symbol but since we want its absolute address in memory, we need the loader to add our base address.  
+    // import: bind.
+    //         We want the absolute address of an import to be in memory. ie. __got uses this. 
+    DataAbsolute,
 );
 
 Fixup :: @struct(
@@ -83,14 +93,17 @@ fn get_addr(self: *QbeModule, name: Str) ?rawptr = {
 }
 
 fn get_addr(self: *QbeModule, name: CStr) ?rawptr = {
+    assert(!self.fixups_locked, "you can't get a jit pointer after emitting for aot becuase it stomps data with relocation info.");
     id := self.intern(name);
     symbol := self.get_symbol_info(id);
-    if symbol.kind == .Local {
-        segment := self.segments&[symbol.segment];
-        addr := segment.mmapped.ptr.offset(symbol.offset);
-        return(Some = u8.raw_from_ptr(addr));
-    };
-    .None
+    get_addr(self, symbol)
+}
+
+fn get_addr(self: *QbeModule, symbol: *SymbolInfo) ?rawptr = {
+    if(symbol.kind != .Local, => return(.None));
+    segment := self.segments&[symbol.segment];
+    addr    := segment.mmapped.ptr.offset(symbol.offset);
+    (Some = u8.raw_from_ptr(addr))
 }
 
 // TODO: be able to specify mutable or constant
@@ -115,6 +128,7 @@ fn new_emit_data(self: *QbeModule, dat: *Qbe.Dat) void = {
 
 // Used when doing our own bytes. Not needed for emitting text asm/llvm. 
 fn emit_data_to_segment(self: *QbeModule, dat: *Qbe.Dat) void = {
+    assert(!self.fixups_locked, "you cannot add more data after emitting for aot");
     segment := self.segments&[.MutableData]&;
     next := segment.next&;
     @match(dat.type) {
@@ -149,12 +163,17 @@ fn emit_data_to_segment(self: *QbeModule, dat: *Qbe.Dat) void = {
             @assert_eq(u8.int_from_ptr(next[]).mod(8), 0, "sorry can't do unaligned constants yet");
             ptr := ptr_cast_unchecked(u8, i64, next[]);
             if dat.isref {
+                // TODO: need to record this location and request a rebase reloc for AOT
                 @assert(dat.u.ref.off == 0, "sorry can't do offset refs yet");
                 name := dat.u.ref.name;
-                value := or self.get_addr(name) {
-                    panic("TODO: data relocations (data containing pointer to data/func declared later)")
+                
+                id     := self.intern(name);
+                symbol := self.get_symbol_info(id);
+                if self.get_addr(symbol) { value |
+                    ptr[] = int_from_rawptr(value);
                 };
-                ptr[] = int_from_rawptr(value); // TODO: we have to record that we did this somewhere for aot.
+                // Since we need the absolute address in memory, even local symbols need a relocation. 
+                symbol.fixups&.push((patch_at = next[], type = .DataAbsolute), self.gpa);
             } else {
                 ptr[] = dat.u.num;
             };
@@ -217,7 +236,7 @@ fn put_jit_addr(self: *QbeModule, name: CStr, addr: rawptr) void = {
     symbol := self.get_symbol_info(self.intern(name));
     @assert(symbol.kind == .Pending, "Redeclared symbol %", name);
     symbol.kind = .DynamicPatched;
-    self.do_fixups(u8.ptr_from_raw(addr), symbol.fixups.items());
+    self.do_fixups(u8.ptr_from_raw(addr), symbol);
 }
 
 // :SLOW insanely inefficient way of doing this. especially when someone tries to add multiple libs. 
@@ -228,7 +247,7 @@ fn fill_pending_dynamic_imports(self: *QbeModule, lib: DlHandle) void = {
             found := lib.dlsym(symbol.name);
             if !found.is_null() {
                 symbol.kind = .DynamicPatched;
-                self.do_fixups(u8.ptr_from_raw(found), symbol.fixups.items());
+                self.do_fixups(u8.ptr_from_raw(found), symbol);
             } else {
                 // TODO: remove this and report at the end.
                 @eprintln("jit missing symbol %", symbol.name); // wrong once they add multiple dylibs
