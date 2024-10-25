@@ -1,3 +1,40 @@
+## (Oct 24)
+
+- i was hoping i could use `https://lief.re/doc/latest/formats/macho/python.html`
+  to start with a working exe and remove parts until it broke.
+  but just doing nothing:
+  ```
+  import lief
+  import sys
+  path = sys.argv[1]
+  app = lief.parse(path)
+  app.write(path)
+  ```
+  breaks the exe. so either im stupid or they're stupid but either way it doesn't help me.
+  it seems they unset the N_EXT bit in LC_SYMTAB entries?
+  ahaaaa im dumb! its because they're signed so i have to run codesign -s on it after changing any bytes.
+  which means by previous experiments with editing the flags of a section to be zero and that breaking the exe,
+  didn't mean i need to have sections, it just means changing bytes invalidates the signeture.
+  codesign still isn't enough to make my program work tho.
+  `codesign -s "Luke Graham Landry" hello.o -f`
+  i hate this so much.
+  i know more than i ever have before. not a meaningful statement but makes me feel better. its fun because its always true.
+
+// TODO: real ones have the file offset of `__TEXT` being 0 so it contains all the load commands too?
+// and then section `__text` is just the code. do we need to do that? (we dont now). why would that be the case?
+// ooooo maybe its becuase you want to declare a symbol `__mh_execute_header` so your program can
+// reference that and read its own exe file like for debug info, etc.
+ok so doing that ^ (without `__mh_execute_header`, just making `__TEXT` have file_offset 0 and include commands),
+made it go from `killed` to `main executable failed strict validation` which is slightly better i guess.
+and that was just becuase i was still doing the add_data_file_offset thing and redundantly adding the size of commands again
+to all the offsets but now since its in TEXT its accounted for automatically. so thats an improvement i guess.
+now its `bus error`. which suggests that its actually running.
+yeah, i can run it in lldb now and it crashes trying to load from `__got` in a stub.
+
+aaaaaa problem was you're not allowed to have a segment's address_size different from size???
+that can't be true but it sure breaks when i change that.
+maybe you're supposed to explicitly have a section that says the rest is zero filled?
+
 ## (Oct 23)
 
 - damn. solved that in like 30 seconds this morning.
@@ -6,6 +43,9 @@
   mistake was in init, i was make_segment in the wrong order (constant and mutable data flipped).
   so that makes mandelbrot work.
 - for f_vtable, needed to fix rebase. target was using file offset to patch instead of virtual offset to target.
+- cant run normally tho. killed.
+  lldb helpfully tells me `error: Malformed Mach-o file`.
+  i tried to open it in xcode's debuger incase thats different and can't even select the file which is funny. it knows its broken.
 
 ## mach-o loader (Oct 22)
 

@@ -6,23 +6,42 @@
 
 // life is better if you're always 8 byte aligned. 
 
+
+WipSegment :: @struct(
+    name: Str,
+    prot: u32,
+    virtual_size := 0,
+    file_size := 0,
+    sections: []WipSection = empty(),
+);
+
+WipSection :: @struct(
+    name: Str,
+    flag: u32,
+    offset_in_segment: i64,
+    size: i64,
+    reserved2: u32 = 0,
+);
+
 fn output_macho(m: *QbeModule) List([]u8) = {  
     global_module.fill_from_libc(); // TODO: don't waste time doing this just to bump reloc state. 
     for_enum SegmentType { s | 
-        m.align_to(s, 8);  // forgeting this manifested as getting fucked on __LINKEDIT (when reading not writing because you're writting into a new allocation)
+        //m.align_to(s, 8);  // forgeting this manifested as getting fucked on __LINKEDIT (when reading not writing because you're writting into a new allocation)
+        // but do we need to do this? it makes it look more like clang does. 
+        m.align_to(s, macos_page_size);
     };
-    
     m.fixups_locked = true; // we're going to stomp the data section with relocation info so you can run it jitted anymore after this. 
     chunks := list([]u8, 10, temp());
-    chunks&.push(empty()); // commands
+    chunks&.push(empty()); // this used to be for commands but now thats part of .Code which is stupid. :commandsispartofcodenow
+    // TODO: waste. dead zone Code[stubs_cursor..SIZE_OF_STUBS]
     chunks&.push(live_segment_part(m, .Code));  // :MySegmentsStartAt1 :CodeIsFirst
-    chunks&.push(live_segment_part(m, .Stubs));
-    chunks&.push(live_segment_part(m, .MutableData));
     chunks&.push(live_segment_part(m, .ConstantData));  // TODO: waste. dead zone ConstantData[got_cursor..MAX_GOT_SIZE]
+    chunks&.push(live_segment_part(m, .MutableData));
     
-    add_data_file_offset := list(*u32, 10, temp());
-    COMMANDS_SIZE_GUESS := 16000;
-    commands := u8.list(COMMANDS_SIZE_GUESS, temp());
+    //add_data_file_offset := list(*u32, 10, temp());
+    // :leak
+    //commands := u8.list(COMMANDS_SIZE_GUESS, page_allocator); // temp()); :SLOW want to use temp but life is confusing if not aligned. need to support passing greater alignment than the type requires. 
+    commands: List(u8) = (maybe_uninit = (ptr = m.segment_address(.Code, 0), len = COMMANDS_SIZE_GUESS), len = 0, gpa = page_allocator); // :cantreallocatebutgivegooderrormessage
     command_count := 0;
     segment_file_offsets := temp().alloc_zeroed(i64, m.segments.data&.len());
     
@@ -33,8 +52,7 @@ fn output_macho(m: *QbeModule) List([]u8) = {
         file_type = 0x00000002, // Demand paged executable file. (idk, thats what rust uses ¯\_(ツ)_/¯ )
         commands_count = 0, 
         commands_size = 0, 
-        // TODO: probably need to steal this from something else because I don't HAS_TLV_DESCRIPTORS
-        flags = 0b00000000101000000000000010000101, // (idc, thats what rust uses ¯\_(ツ)_/¯ )
+        flags = 0b00000000001000000000000010000101, // ¯\_(ツ)_/¯  what rust uses except I don't HAS_TLV_DESCRIPTORS
     );
     
     ::enum_basic(LoadCommand);
@@ -42,88 +60,86 @@ fn output_macho(m: *QbeModule) List([]u8) = {
     // But it can't guarentee my base address is zero right? so what's the point? clearly im missing something. 
     // TODO: probably don't do this if we're making a linkable .o file. 
     zero_page_size :: 0x100000000;
-    {
-        start := commands.len;
-        h := commands&.reserve_type(LoadCommandHeader);
-        h.type = LoadCommand.SegmentLoad.raw();
-        command_count += 1;
-        cmd := commands&.reserve_type(SegmentLoad);
-        cmd[] = SegmentLoad.zeroed();
-        cmd.name = str_to_16_byte_value("__ZEROPAGE");
-        cmd.address_size = zero_page_size;
-        h.size = trunc(commands.len - start);
+    
+    segments := WipSegment.list(6, temp());
+    segments&.push(prot = 5, name = "__TEXT");
+    segments&.push(prot = 3, name = "__DATA_CONST");
+    segments&.push(prot = 3, name = "__DATA");
+    enumerate segments& { i, s |
+        s.virtual_size = m.segments&[@as(SegmentType) i].mmapped.len;
+        s.file_size = chunks[i + 1].len;
     };
+    segments&.insert(0, (prot = 0, name = "__PAGEZERO", virtual_size = zero_page_size)); // ???? some insane compiler bug... -- Oct 24
+    
+    code_flag := ATTR_PURE_INSTRUCTIONS.bit_or(ATTR_SOME_INSTRUCTIONS);
+    segments[1].sections = @slice(@as(WipSection) (name = "__text", flag = code_flag, offset_in_segment = COMMANDS_SIZE_GUESS + SIZE_OF_STUBS, size = chunks[1].len - SIZE_OF_STUBS));
+    // 12 is the size of each stub (adrp, ldr, br)
+    segments[1].sections = @slice(@as(WipSection) (name = "__stubs", size = SIZE_OF_STUBS, reserved2 = 12, flag = code_flag.bit_or(S_SYMBOL_STUBS), offset_in_segment = COMMANDS_SIZE_GUESS));
+    // TODO: do i need reserved1 set to something? maybe thats an offset into LC_SYMTAB? or maybe undefined_symbol_count, that seems more consistant in the binraries i checked. 
+    segments[2].sections = @slice(@as(WipSection) (name = "__got", size = chunks[2].len, flag = S_NON_LAZY_SYMBOL_POINTERS, offset_in_segment = 0));
+    segments[3].sections = @slice(@as(WipSection) (name = "__data", size = chunks[3].len, flag = 0, offset_in_segment = 0));
+   
     file_offset := 0;
-    base_file_offset := @slice(0, 0, 0, 0, 0); // you always need to use add_data_file_offset with this. 
-    virtual_segment_offset := @slice(0, 0, 0, 0, 0);
+    base_file_offset := @slice(0, 0, 0, 0); // you always need to use add_data_file_offset with this. --- but not anymore
+    virtual_segment_offset := @slice(0, 0, 0, 0);
+    virtual_offset := 0;
     {
-        segment_index := 0; // 0 is __ZEROPAGE
-        names := @slice("", "__TEXT", "__STUBSHACK", "__DATA", "__DATA_CONST");
-        prot := @slice(@as(u32) 0, 5, 5, 3, 3);
-        virtual_offset := zero_page_size;
-        for_enum SegmentType { s |
-            segment_index += 1;
-            start := commands.len;
-            h := commands&.reserve_type(LoadCommandHeader);
-            h.type = LoadCommand.SegmentLoad.raw();
-            command_count += 1;
-            cmd := commands&.reserve_type(SegmentLoad);
-            cmd[] = SegmentLoad.zeroed();
-            cmd.max_prot = prot[segment_index];
-            cmd.init_prot = prot[segment_index];
-            cmd.name = str_to_16_byte_value(names[segment_index]);
-            cmd.address = virtual_offset.bitcast();
-            vlen := m.segments&[s].mmapped.len;
-            flen := chunks[segment_index].len;
-            cmd.address_size = vlen.bitcast();
-            virtual_segment_offset[segment_index] = virtual_offset;
-            virtual_offset += vlen;
-            cmd.file_offset = file_offset.bitcast();
-            base_file_offset[segment_index] = file_offset;
-            file_offset += flen;
-            add_data_file_offset&.push(ptr_cast_unchecked(u64, u32, cmd.file_offset&)); // :overflow
-            cmd.size = flen.bitcast(); // :MySegmentsStartAt1
-            h.size = trunc(commands.len - start);
+        enumerate segments& { segment_index, s | 
+            // no! you cant skip segments because then the offsets are wrong below when doing chianed fixups. 
+            //if segment_index == 0 || s.file_size != 0 {
+                start := commands.len;
+                h := commands&.reserve_type(LoadCommandHeader);
+                h.type = LoadCommand.SegmentLoad.raw();
+                command_count += 1;
+                cmd := commands&.reserve_type(SegmentLoad);
+                cmd[] = SegmentLoad.zeroed();
+                // you do need this tho or you crash in dyld`dyld4::fixupPage64(void*, mwl_info_hdr const*, dyld_chained_starts_in_segment const*, unsigned int, bool) 
+                if s.name == "__DATA_CONST" {
+                    cmd.flag = 16; // TODO: why :HACK
+                };
+                cmd.max_prot = s.prot;
+                cmd.init_prot = s.prot;
+                cmd.name = str_to_16_byte_value(s.name);
+                cmd.address = virtual_offset.bitcast();
+                cmd.address_size = s.virtual_size.bitcast();
+                virtual_segment_offset[segment_index] = virtual_offset;
+                cmd.file_offset = if(s.file_size != 0, => file_offset.bitcast(), => 0);
+                base_file_offset[segment_index] = cmd.file_offset.bitcast();
+                if s.file_size != 0 {
+                    //add_data_file_offset&.push(ptr_cast_unchecked(u64, u32, cmd.file_offset&)); // :overflow
+                };
+                cmd.size = s.file_size.bitcast(); 
+                /*
+                cmd.section_count = s.sections.len.trunc();
+                each s.sections { sec | 
+                    c  := commands&.reserve_type(SegmentSection);
+                    c[] = SegmentSection.zeroed();
+                    c.segment_name = cmd.name;
+                    c.section_name = str_to_16_byte_value(sec.name);
+                    c.address      = cmd.address + sec.offset_in_segment.bitcast();
+                    c.file_offset  = cmd.file_offset.trunc() + sec.offset_in_segment.trunc(); // :overflow
+                    //add_data_file_offset&.push(c.file_offset&);
+                    c.alignment    = 3; // TODO
+                    c.flag         = sec.flag;
+                    c.size         = sec.size.bitcast();
+                    c._reserved2   = sec.reserved2;
+                };
+                */
+                h.size = trunc(commands.len - start);
+            //};
+            virtual_offset += s.virtual_size;
+            file_offset += s.file_size;
         };
     };
     
-    // TODO: don't assume you want libc. but on macos you always do. 
-    {  // LC_LOAD_DYLIB
-        start := commands.len;
-        h := commands&.reserve_type(LoadCommandHeader);
-        h.type = LoadCommand.LinkLibrary.raw();
-        command_count += 1;
-        cmd := commands&.reserve_type(LinkLibrary);
-        // TODO: where does one get these numbers? this is just what clang does. 
-        cmd[] = (
-            time_date_stamp = 2,
-            current_version = 86467587,
-            compatible_version = 65536,
-        );
-        append_padded_cstr(commands&, "/usr/lib/libSystem.B.dylib", 8);
-        h.size = trunc(commands.len - start);
-    };
-    {  // LC_LOAD_DYLINKER
-        start := commands.len;
-        h := commands&.reserve_type(LoadCommandHeader);
-        h.type = LoadCommand.LoadDynamicLinker.raw();
-        command_count += 1;
-        commands&.reserve_type(u32)[] = 12;
-        append_padded_cstr(commands&, "/usr/lib/dyld", 8);
-        h.size = trunc(commands.len - start);
-    };
-    {
-        start := commands.len;
-        h := commands&.reserve_type(LoadCommandHeader);
-        h.type = LoadCommand.MainEntryPoint.raw();
-        command_count += 1;
-        cmd := commands&.reserve_type(MainEntryPoint);
-        symbol := m.get_symbol_info(m.intern("main".sym().c_str()));
-        assert(symbol.kind == .Local, "no main function?");
-        // offset is from the start of interesting virtual memory? 
-        cmd[] = (entry_offset = symbol.offset.bitcast(), stack_size = 0);  // :CodeIsFirst its fine to change this, you just have to do the math here. 
-        h.size = trunc(commands.len - start);
-    };
+    start := commands.len;
+    linkedit_load_header := commands&.reserve_type(LoadCommandHeader);
+    linkedit_load_header.type = LoadCommand.SegmentLoad.raw();
+    command_count += 1;
+    link_edit_load_command := commands&.reserve_type(SegmentLoad);
+    linkedit_load_header.size = trunc(commands.len - start);
+    
+    
     {
         CHAINED_SIZE_GUESS :: 16000;
         chained := u8.list(CHAINED_SIZE_GUESS, temp());
@@ -153,7 +169,8 @@ fn output_macho(m: *QbeModule) List([]u8) = {
             if s.kind != .Local {
                 n: u32 = trunc(chained.len - symbols_offset);
                 imports_bytes[s.got_lookup_offset] = encode_import(lib_ordinal = 1, weak = false, name_offset = n); // TODO: don't assume libc
-                append_padded_cstr(chained&, s.name.str(), 1);
+                mangled := items(@format("_%", s.name) temp()); // :slow don't do an extra copy
+                append_padded_cstr(chained&, mangled, 1);
             };
         };
         zero_pad_to_align(chained&, 4);
@@ -194,7 +211,7 @@ fn output_macho(m: *QbeModule) List([]u8) = {
             panic("TODO: multiple fixups");
         };
         csis.segment_offset = base_file_offset[segment_index].bitcast(); // this is the offset into the file to the first page in this segment. 
-        add_data_file_offset&.push(ptr_cast_unchecked(u64, u32, csis.segment_offset&)); // :overflow
+        //add_data_file_offset&.push(ptr_cast_unchecked(u64, u32, csis.segment_offset&)); // :overflow
         encoded := encode_chained(
             next = 0,  // TODO
             reserved = 0,
@@ -239,30 +256,141 @@ fn output_macho(m: *QbeModule) List([]u8) = {
             imports_offset = imports_offset.trunc(), 
             symbols_offset = symbols_offset.trunc(),
         );
-        chunks&.push(chained.items());
+        chained_size := chained.len;
+        /*
+        //
+        // now there's still more stuff that goes in __linkedit 
+        //
+        
+        // for now we're only recording the symbols we're trying to dynamic import. 
+        {
+            start := commands.len;
+            h := commands&.reserve_type(LoadCommandHeader);
+            h.type = LoadCommand.LinkEditSymbolInfo.raw();
+            command_count += 1;
+            cmd := commands&.reserve_type(LinkEditSymbolInfo);
+            cmd[] = LinkEditSymbolInfo.zeroed();
+            cmd.undefined_symbol_index = 0;
+            cmd.undefined_symbol_count = symbols.len.trunc();
+            h.size = trunc(commands.len - start);
+            
+            // TODO: are you supposed to put those in (indirect_symbol_offset, indirect_symbol_count) too?
+            
+            start := commands.len;
+            h := commands&.reserve_type(LoadCommandHeader);
+            h.type = LoadCommand.LinkEditSymbolTable.raw();
+            command_count += 1;
+            cmd := commands&.reserve_type(LinkEditSymbolTable);
+            cmd[] = LinkEditSymbolTable.zeroed();
+            cmd.symbol_count = symbols.len.trunc();
+            //add_data_file_offset&.push(cmd.strings_offset&);
+            //add_data_file_offset&.push(cmd.symbols_offset&);
+            // the data for those goes in __LINKEDIT
+            // TODO: using file_offset way down here feels a bit fragile. 
+            cmd.symbols_offset = trunc(file_offset + chained.len);
+            size_of_symbols := symbols.len * size_of(SymbolEntry);
+            cmd.strings_offset = cmd.symbols_offset + trunc(size_of_symbols);
+            h.size = trunc(commands.len - start);
+            
+            symbols_bytes: []SymbolEntry = (ptr = ptr_cast_unchecked(u8, SymbolEntry, chained.maybe_uninit.ptr.offset(chained.len)), len = symbols.len);
+            chained.len += size_of_symbols; @debug_assert(chained.len <= chained.maybe_uninit.len);
+            strings_start := chained.len;
+            symbols_bytes.set_zeroed();
+            enumerate symbols { i, s |
+                entry := symbols_bytes.index(i);
+                entry.symbol_type = 1;
+                entry.data_info = 256; // ordinal 1. we assume libc. TODO
+                entry.name_offset = trunc(chained.len - strings_start);
+                append_padded_cstr(chained&, s.name.str(), 1);
+            };
+            cmd.strings_size = trunc(chained.len - strings_start);
+            
+        };
+        */
+        
+        @assert_le(chained.len, CHAINED_SIZE_GUESS, "resized and now the header pointer is junk"); 
+        
+        // this must include the part before symbol table or llvm-objcopy complains bout them overlapping
         start := commands.len;
         h := commands&.reserve_type(LoadCommandHeader);
         h.type = LoadCommand.ChainedFixups.raw();
         command_count += 1;
         cmd := commands&.reserve_type(LinkEditBlob);
-        add_data_file_offset&.push(cmd.offset&);
+        //add_data_file_offset&.push(cmd.offset&);
         // TODO: using file_offset way down here feels a bit fragile. 
-        cmd[] = (offset = file_offset.trunc(), size = chained.len.trunc());  // :CodeIsFirst its fine to change this, you just have to do the math here. 
+        cmd[] = (offset = file_offset.trunc(), size = chained_size.trunc());  // :CodeIsFirst its fine to change this, you just have to do the math here. 
+        h.size = trunc(commands.len - start);
+        
+        chunks&.push(chained.items()); // TODO: is it the rules that this be the last thing in the file? 
+        
+        // TODO: do i really need to have it load __LINKEDIT? its not used except by other commands that reference it. 
+        // TODO: can i just reserve_type here or do they all have to be at the beginning?
+        //       theres no reason it would matter by lief.parse doesn't like it: "Can't find the segment associated with the LC_DYLD_CHAINED_FIXUPS payload"
+        cmd := link_edit_load_command;
+        cmd[] = SegmentLoad.zeroed();
+        cmd.name = str_to_16_byte_value("__LINKEDIT");
+        cmd.address_size = chained.len.bitcast();
+        cmd.size = chained.len.bitcast();
+        cmd.max_prot = 1;
+        cmd.init_prot = 1;
+        cmd.file_offset = file_offset.bitcast();
+        //add_data_file_offset&.push(ptr_cast_unchecked(u64, u32, cmd.file_offset&)); // :overflow
+        cmd.address = virtual_offset.bitcast();
+    };
+    
+    {  // LC_LOAD_DYLINKER
+        start := commands.len;
+        h := commands&.reserve_type(LoadCommandHeader);
+        h.type = LoadCommand.LoadDynamicLinker.raw();
+        command_count += 1;
+        commands&.reserve_type(u32)[] = 12;
+        append_padded_cstr(commands&, "/usr/lib/dyld", 8);
+        h.size = trunc(commands.len - start);
+    };
+    {
+        start := commands.len;
+        h := commands&.reserve_type(LoadCommandHeader);
+        h.type = LoadCommand.MainEntryPoint.raw();
+        command_count += 1;
+        cmd := commands&.reserve_type(MainEntryPoint);
+        symbol := m.get_symbol_info(m.intern("main".sym().c_str()));
+        assert(symbol.kind == .Local, "no main function?");
+        // offset is from the start of interesting virtual memory? 
+        cmd[] = (entry_offset = symbol.offset.bitcast(), stack_size = 0);  // :CodeIsFirst its fine to change this, you just have to do the math here. 
+        h.size = trunc(commands.len - start);
+        @debug_assert_ge(symbol.offset, COMMANDS_SIZE_GUESS + SIZE_OF_STUBS);
+        
+        // TODO: this can't be right now. but if i really have to make __TEXT start at file offset 0, you'll need this. 
+        //add_data_file_offset&.push(ptr_cast_unchecked(u64, u32, cmd.entry_offset&)); // :overflow
+    };
+    // TODO: don't assume you want libc. but on macos you always do. 
+    {  // LC_LOAD_DYLIB
+        start := commands.len;
+        h := commands&.reserve_type(LoadCommandHeader);
+        h.type = LoadCommand.LinkLibrary.raw();
+        command_count += 1;
+        cmd := commands&.reserve_type(LinkLibrary);
+        // TODO: where does one get these numbers? this is just what clang does. 
+        cmd[] = (
+            time_date_stamp = 2,
+            current_version = 86467587,
+            compatible_version = 65536,
+        );
+        append_padded_cstr(commands&, "/usr/lib/libSystem.B.dylib", 8);
         h.size = trunc(commands.len - start);
     };
     
-    // - imports list and symbol table in __LINKEDIT
-    // - insert chained fixups in data
-    // - reference chained fixups start in __LINKEDIT
-    
-    zero_pad_to_align(commands&, 8);
-    @assert_le(commands.len, COMMANDS_SIZE_GUESS, "we guessed wrong so the array resized and all the pointers are junk");
     macho_header.commands_size = (commands.len - MachoHeader.size_of()).trunc();
+    //zero_pad_to_align(commands&, 8);
+    commands&.zero_pad_to_align(macos_page_size);
+    // :cantreallocatebutgivegooderrormessage
+    // now we want exact match because we put it on the front of the text section for some reason who knows idk man. 
+    @assert_eq(commands.len, COMMANDS_SIZE_GUESS, "we guessed wrong so the array resized and all the pointers are junk");
     macho_header.commands_count = command_count.trunc();
-    for add_data_file_offset& { offset | 
-        offset[] += commands.len.trunc();
-    };
-    chunks[0] = commands.items();
+    //for add_data_file_offset& { offset | 
+    //    offset[] += commands.len.trunc();
+    //};
+    //chunks[0] = commands.items(); :commandsispartofcodenow
     
     chunks
 }
@@ -342,6 +470,7 @@ fn zero_pad_to_align(bytes: *List(u8), align: i64) void = {
             bytes.push(0);
         };
     };
+    @debug_assert_eq(bytes.len.mod(align), 0, "alignment confusion. allocation aligned differently from our length.");
 }
 
 fn str_to_16_byte_value(s: Str) u128 = {

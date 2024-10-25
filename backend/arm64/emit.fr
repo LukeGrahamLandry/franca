@@ -111,15 +111,16 @@ fn do_fixups(self: *QbeModule, address: *u8, symbol: *SymbolInfo) void = {
                     // > but i we care too much about security to do that any more. 
                     if symbol.offset == -1 {
                         // create a new trampoline in the __stubs section. 
-                        stubs := self.segments&.index(.Stubs);
-                        symbol.offset = ptr_diff(stubs.mmapped.ptr, stubs.next);
-                        trampoline: []u32 = (ptr = ptr_cast_unchecked(u8, u32, stubs.next), len = 3);
+                        code := self.segments&.index(.Code);
+                        symbol.offset = self.stubs_cursor + COMMANDS_SIZE_GUESS;
+                        trampoline: []u32 = (ptr = ptr_cast_unchecked(u8, u32, code.mmapped.ptr.offset(symbol.offset)), len = 3);
                         reg := Arm64Reg.IP0.raw() - 1; // x16
                         new_got_reloc = load_from_got(self, symbol, reg, trampoline.slice(0, 2), address).or_else(=> new_got_reloc);
                         trampoline[2] = br(reg, 0);
-                        stubs.next = stubs.next.offset(trampoline.len * 4);
+                        self.stubs_cursor += trampoline.len * 4;
+                        @assert_lt(self.stubs_cursor, SIZE_OF_STUBS + COMMANDS_SIZE_GUESS, "out of space for stubs");
                     };
-                    stub_trampoline := self.segment_address(.Stubs, symbol.offset);
+                    stub_trampoline := self.segment_address(.Code, symbol.offset);
                     distance = ptr_diff(fixup.patch_at, stub_trampoline) / 4;
                 };
                 assert(distance.abs() < 1.shift_left(26), "can't even jump to trampoline, thats bad.");

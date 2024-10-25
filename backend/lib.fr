@@ -85,7 +85,8 @@ QbeModule :: @rec @struct(
     segments: EnumMap(SegmentType, SegmentCursor),
     gpa: Alloc,
     fixups_locked := false,
-    got_cursor := 0,
+    got_cursor  := 0,
+    stubs_cursor := 0,
     
     // TODO: everything that touches these needs to be rewritten eventually. 
     want_text_asm := false,
@@ -93,10 +94,13 @@ QbeModule :: @rec @struct(
     outf := zeroed(*FILE),
 );
 
-MAX_GOT_SIZE :: 1.shift_left(15);
+MAX_GOT_SIZE :: 1.shift_left(13); // 15 :dontforget
+SIZE_OF_STUBS :: 1.shift_left(10); // TODO: not this :explain
+COMMANDS_SIZE_GUESS :: macos_page_size; // :explain
 
 fn init_default_module() QbeModule = 
-    init(1.shift_left(23), libc_allocator, page_allocator);
+    init(1.shift_left(15), libc_allocator, page_allocator);
+    // 23 :dontforget
 
 :: {
     @if(LINK_QBE_C) {
@@ -111,21 +115,24 @@ fn init_default_module() QbeModule =
 fn init(segment_size: i64, gpa: Alloc, code_alloc: Alloc) QbeModule = {
     m := QbeModule.zeroed();
     m.segments = EnumMap(SegmentType, SegmentCursor).zeroed();
-    mem := code_alloc.alloc(u8, segment_size * 4); // TODO: ask for the alignment we need.
+    mem := code_alloc.alloc(u8, segment_size * 3); // TODO: ask for the alignment we need.
     make_segment :: fn(s: SegmentType, start: i64, end: i64) void => {
         m.segments&.insert(s, (mmapped = mem.slice(start, end), next = mem.index(start), start_of_writable_code = mem.index(start)));
     };
     // order matters!
     make_segment(.Code, 0, segment_size);  // :CodeIsFirst
-    make_segment(.Stubs, segment_size, segment_size*2);
+    make_segment(.ConstantData, segment_size*1, segment_size*2);
     make_segment(.MutableData, segment_size*2, segment_size*3);
-    make_segment(.ConstantData, segment_size*3, segment_size*4);
     m.gpa = gpa;
     m.symbols = gpa.alloc(SymbolBucket, IMask + 1);
     {   // TODO: this is kinda ass
         // :GotAtConstantDataBase
         next := m.segments&[.ConstantData].next&;
         next[] = next[].offset(MAX_GOT_SIZE); 
+        next := m.segments&[.Code].next&;
+        next[] = next[].offset(COMMANDS_SIZE_GUESS); 
+        next[] = next[].offset(SIZE_OF_STUBS); 
+        
     };
     
     m.debug_out = fdopen(STD_ERR, "a".sym().c_str());
