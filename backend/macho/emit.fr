@@ -30,6 +30,7 @@ fn output_macho(m: *QbeModule) List([]u8) = {
         // but do we need to do this? it makes it look more like clang does. 
         m.align_to(s, macos_page_size);
     };
+    //m.align_to(.Code, macos_page_size);
     m.fixups_locked = true; // we're going to stomp the data section with relocation info so you can run it jitted anymore after this. 
     chunks := list([]u8, 10, temp());
     chunks&.push(empty()); // this used to be for commands but now thats part of .Code which is stupid. :commandsispartofcodenow
@@ -69,15 +70,18 @@ fn output_macho(m: *QbeModule) List([]u8) = {
         s.virtual_size = m.segments&[@as(SegmentType) i].mmapped.len;
         s.file_size = chunks[i + 1].len;
     };
-    segments&.insert(0, (prot = 0, name = "__PAGEZERO", virtual_size = zero_page_size)); // ???? some insane compiler bug... -- Oct 24
+    segments&.insert(0, (prot = 0, name = "__PAGEZERO", virtual_size = zero_page_size)); 
     
     code_flag := ATTR_PURE_INSTRUCTIONS.bit_or(ATTR_SOME_INSTRUCTIONS);
-    segments[1].sections = @slice(@as(WipSection) (name = "__text", flag = code_flag, offset_in_segment = COMMANDS_SIZE_GUESS + SIZE_OF_STUBS, size = chunks[1].len - SIZE_OF_STUBS));
+    xx: WipSection = (name = "__text", flag = code_flag, offset_in_segment = COMMANDS_SIZE_GUESS + SIZE_OF_STUBS, size = chunks[1].len - SIZE_OF_STUBS - COMMANDS_SIZE_GUESS);
     // 12 is the size of each stub (adrp, ldr, br)
-    segments[1].sections = @slice(@as(WipSection) (name = "__stubs", size = SIZE_OF_STUBS, reserved2 = 12, flag = code_flag.bit_or(S_SYMBOL_STUBS), offset_in_segment = COMMANDS_SIZE_GUESS));
+    yy: WipSection = (name = "__stubs", size = SIZE_OF_STUBS, reserved2 = 12, flag = code_flag.bit_or(S_SYMBOL_STUBS), offset_in_segment = COMMANDS_SIZE_GUESS);
+    segments[1].sections = @slice(xx, yy);
     // TODO: do i need reserved1 set to something? maybe thats an offset into LC_SYMTAB? or maybe undefined_symbol_count, that seems more consistant in the binraries i checked. 
-    segments[2].sections = @slice(@as(WipSection) (name = "__got", size = chunks[2].len, flag = S_NON_LAZY_SYMBOL_POINTERS, offset_in_segment = 0));
-    segments[3].sections = @slice(@as(WipSection) (name = "__data", size = chunks[3].len, flag = 0, offset_in_segment = 0));
+    xx: WipSection = (name = "__got", size = chunks[2].len, flag = S_NON_LAZY_SYMBOL_POINTERS, offset_in_segment = 0);
+    segments[2].sections = @slice(xx);
+    xx: WipSection = (name = "__data", size = chunks[3].len, flag = 0, offset_in_segment = 0);
+    segments[3].sections = @slice(xx);
    
     file_offset := 0;
     base_file_offset := @slice(0, 0, 0, 0); // you always need to use add_data_file_offset with this. --- but not anymore
@@ -101,15 +105,11 @@ fn output_macho(m: *QbeModule) List([]u8) = {
                 cmd.init_prot = s.prot;
                 cmd.name = str_to_16_byte_value(s.name);
                 cmd.address = virtual_offset.bitcast();
-                cmd.address_size = s.virtual_size.bitcast();
+                cmd.address_size = if(s.file_size != 0, => s.file_size.bitcast(), => s.virtual_size.bitcast());
                 virtual_segment_offset[segment_index] = virtual_offset;
                 cmd.file_offset = if(s.file_size != 0, => file_offset.bitcast(), => 0);
                 base_file_offset[segment_index] = cmd.file_offset.bitcast();
-                if s.file_size != 0 {
-                    //add_data_file_offset&.push(ptr_cast_unchecked(u64, u32, cmd.file_offset&)); // :overflow
-                };
                 cmd.size = s.file_size.bitcast(); 
-                /*
                 cmd.section_count = s.sections.len.trunc();
                 each s.sections { sec | 
                     c  := commands&.reserve_type(SegmentSection);
@@ -124,7 +124,6 @@ fn output_macho(m: *QbeModule) List([]u8) = {
                     c.size         = sec.size.bitcast();
                     c._reserved2   = sec.reserved2;
                 };
-                */
                 h.size = trunc(commands.len - start);
             //};
             virtual_offset += s.virtual_size;
@@ -138,7 +137,6 @@ fn output_macho(m: *QbeModule) List([]u8) = {
     command_count += 1;
     link_edit_load_command := commands&.reserve_type(SegmentLoad);
     linkedit_load_header.size = trunc(commands.len - start);
-    
     
     {
         CHAINED_SIZE_GUESS :: 16000;
@@ -210,17 +208,23 @@ fn output_macho(m: *QbeModule) List([]u8) = {
         } else {
             panic("TODO: multiple fixups");
         };
-        csis.segment_offset = base_file_offset[segment_index].bitcast(); // this is the offset into the file to the first page in this segment. 
+        // WRONG: this is the offset into the file to the first page in this segment. 
+        // actually its virtual offset from interesting. 
+        // coincententially those are the same number for binaries made by clang...
+        csis.segment_offset = virtual_segment_offset[segment_index].bitcast() - zero_page_size;
+        //csis.segment_offset = base_file_offset[segment_index].bitcast();
         //add_data_file_offset&.push(ptr_cast_unchecked(u64, u32, csis.segment_offset&)); // :overflow
         encoded := encode_chained(
             next = 0,  // TODO
             reserved = 0,
             payload = @if(fix._0.kind != .Local, {
-                @debug_assert(fix._0.got_lookup_offset >= 0 && fix._0.got_lookup_offset < import_count, "bad ordinal");
-                (Bind = (addend = 0, ordinal = fix._0.got_lookup_offset.trunc()))
+                got_index := fix._0.got_lookup_offset / 8;
+                @debug_assert(got_index >= 0 && got_index < import_count && got_index * 8 == fix._0.got_lookup_offset, "bad ordinal");
+                (Bind = (addend = 0, ordinal = got_index.trunc()))
             }, {
+                // untested!
                 dest_segment := fix._0.segment.raw() + 1; // :MySegmentsStartAt1
-                target := virtual_segment_offset[dest_segment] - zero_page_size + fix._0.offset;
+                target := virtual_segment_offset[dest_segment] - zero_page_size + fix._0.offset; // TODO: make sure its not supposed to be file offset. 
                 @assert_lt(target, 1.shift_left(36), "rebase > 36 bits");
                 (Rebase = (high8 = 0, target = target))
             })
@@ -394,7 +398,7 @@ fn output_macho(m: *QbeModule) List([]u8) = {
     
     chunks
 }
-
+    
 fn compiler_address_to_segment_offset(m: *QbeModule, address: *u8) Ty(SegmentType, i64) = {
     low  := MAX_i64;
     high := 0;

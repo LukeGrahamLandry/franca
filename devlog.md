@@ -34,6 +34,29 @@ yeah, i can run it in lldb now and it crashes trying to load from `__got` in a s
 aaaaaa problem was you're not allowed to have a segment's address_size different from size???
 that can't be true but it sure breaks when i change that.
 maybe you're supposed to explicitly have a section that says the rest is zero filled?
+no that doesnt work.
+clearly im wrong because linkedit doesn't have page multiple size and doesn't have size==vmsize.
+
+ok one mystery solved.
+chained_starts_in_offset.segment_offset is actually the offset in virtual memory from the first intersting segment (end of `__PAGEZERO`).
+before i thought it was the offset in the file.
+its just a fun coincidence that normal binaries made by clang have thier segments packed together in virtual memory so those numbers are the same.
+and this dump to text thingy (which i was using because i couldn't get objdump to give me the information i want)
+`https://github.com/qyang-nj/llios/blob/main/macho_parser/sources/chained_fixups.cpp#L126` gets it wrong too,
+and segfaults if you have your sections spaced out (unless you use segment_offset incorrectly).
+however, `llvm-objdump --chained-fixups --macho` doesn't bother tryingto give you that information and doesn't crash
+(it just tells you the imports table and shows you the page_starts without showing the rest of the chain).
+oh and look at that they even have a comment with the information i needed: `https://github.com/llvm/llvm-project/blob/main/llvm/include/llvm/BinaryFormat/MachO.h#L1086`
+if only i saw that 8 hours ago.
+
+so recap of things we learned:
+
+- `__TEXT` is required to have file offset zero (even if you don't define/reference `__mh_execute_header`)
+- you need to run codesign.
+- you cant have segment virtual size greater than file size unless file size is zero. you can space things out with gaps in between tho.
+- segment size needs to be a multiple of a page, except for linkedit?
+- you don't need sections except to make objdump disassemble the right places.
+- you don't need LC_SYMTAB, LC_DYSYMTAB, UUID, min os version
 
 ## (Oct 23)
 
