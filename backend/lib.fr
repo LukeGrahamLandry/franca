@@ -12,8 +12,6 @@
 #include_std("backend/opt/cfg.fr");
 #include_std("backend/opt/spill.fr");
 #include_std("backend/opt/rega.fr");
-#include_std("backend/llvm/emit.fr");
-#include_std("backend/llvm/isel.fr");
 #include_std("backend/arm64/abi.fr");
 #include_std("backend/dump.fr");
 #include_std("backend/arm64/target.fr");
@@ -77,10 +75,6 @@ QbeModule :: @rec @struct(
     next_tmp_id = 1,
     symbols: []SymbolBucket,
     
-    // stuff for llvm
-    llvm_global_value_buf := List(u8).zeroed(),
-    llvm_global_type_buf := List(u8).zeroed(),
-    
     // stuff for emitting code.
     segments: EnumMap(SegmentType, SegmentCursor),
     gpa: Alloc,
@@ -90,7 +84,6 @@ QbeModule :: @rec @struct(
     
     // TODO: everything that touches these needs to be rewritten eventually. 
     want_text_asm := false,
-    want_llvm := false,
     outf := zeroed(*FILE),
 );
 
@@ -217,7 +210,7 @@ run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
     filldom(fnn); 
     ssacheck(fnn); // debug
     
-    if !m.want_llvm && DO_INLINING { // TODO: check if this would help it somehow
+    if DO_INLINING { 
         inlcalls(fnn);
         filluse(fnn); 
     };
@@ -227,19 +220,6 @@ run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
     filluse(fnn);
     @if(LINK_QBE_C) {
         fold(fnn); // optional
-    };
-    
-    // TODO: factor this out
-    // TODO: you still need to run some of the abi passes to put the right attributes on stuff. 
-    if m.want_llvm {
-        // TODO: time which passes help llvm be faster and which hurt it. like maybe coalescing forces it to do extra work do dealias memory?
-        //       or maybe the whole theory is bad and its better at mem2reg-ing than i am and there's no point in trying to help. only one way to find out. 
-        //       but i assume anything we can do to give it more sane input is better. 
-        simplify(fnn);
-        insert_redundant_casts(fnn);
-        m.emit_llvm(fnn);
-        __temp_alloc.reset_retaining_capacity(mark);
-        return();
     };
     
     if DO_INLINING { 

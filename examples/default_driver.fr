@@ -77,7 +77,7 @@ fn driver(vtable: *ImportVTable) void = {
             } else {
                 if cmd.cfg.qbe {
                     assert(!cmd.cfg.show_asm, "TODO: -S with qbe");
-                    c.compile_with_included_qbe(fid, .ExportWithNames, arch, os, cmd.cfg.llvm);
+                    c.compile_with_included_qbe(fid, .ExportWithNames, arch, os);
                 } else {
                     assert(cmd.cfg.llvm, "rn only two backends. update me as needed!");
                     c.compile_with_llvm(fid, .ExportWithNames, cmd.cfg.debug_info, arch, os, cmd.cfg.show_asm, cmd.cfg.slow);
@@ -100,7 +100,7 @@ fn driver(vtable: *ImportVTable) void = {
                     @if(ENABLE_INTERNAL_QBE, {
                         global_module[] = init_default_module();
                         env: TargetEnv = (arch = arch, os = os);
-                        _ := emit_qbe_included(c, @slice(fid), .ExportWithNames, env&, false);
+                        _ := emit_qbe_included(c, @slice(fid), .ExportWithNames, env&);
                         global_module.fill_from_libc();
                         global_module.make_exec();
                         or global_module.get_addr("main") {
@@ -148,7 +148,7 @@ fn driver(vtable: *ImportVTable) void = {
                         @if(ENABLE_INTERNAL_QBE, {
                             // would be faster if you could share the module between runs
                             global_module[] = init_default_module();
-                            _ := emit_qbe_included(c, @slice(fid), .ExportWithNames, env&, false);
+                            _ := emit_qbe_included(c, @slice(fid), .ExportWithNames, env&);
                             global_module.fill_from_libc();
                             global_module.make_exec();
                             or global_module.get_addr(name) {
@@ -166,7 +166,7 @@ fn driver(vtable: *ImportVTable) void = {
                 } else {
                     if cmd.cfg.qbe {
                         assert(!cmd.cfg.show_asm, "TODO: -S with qbe");
-                        c.compile_with_included_qbe(fid, .TestRunnerMain, arch, os, cmd.cfg.llvm);
+                        c.compile_with_included_qbe(fid, .TestRunnerMain, arch, os);
                     } else {
                         assert(cmd.cfg.llvm, "rn only two backends. update me as needed!");
                         c.compile_with_llvm(fid, .TestRunnerMain, cmd.cfg.debug_info, arch, os, cmd.cfg.show_asm, cmd.cfg.slow);
@@ -293,14 +293,14 @@ fn compile_with_qbe(c: CompCtx, fid: FuncId, entry: ProgramEntry, arch: Arch, os
     //ir_out.remove();   
 }
 
-fn compile_with_included_qbe(c: CompCtx, fid: FuncId, entry: ProgramEntry, arch: Arch, os: Os, llvm: bool) void = {
+fn compile_with_included_qbe(c: CompCtx, fid: FuncId, entry: ProgramEntry, arch: Arch, os: Os) void = {
     @if(ENABLE_INTERNAL_QBE, {
         global_module[] = init_default_module();
         global_module[].want_text_asm = true;
         
         env: TargetEnv = (arch = arch, os = os);
-        asm_text := emit_qbe_included(c, @slice(fid), entry, env&, llvm);
-        asm_out := if(llvm, => "target/franca_qbe_temp.ll", => "target/franca_qbe_temp.s"); // TODO: the version of tmp file that lets you have an extension because it wants the .s
+        asm_text := emit_qbe_included(c, @slice(fid), entry, env&);
+        asm_out := "target/franca_qbe_temp.s"; // TODO: the version of tmp file that lets you have an extension because it wants the .s
         
         ir_out := open_trunc(asm_out.sym().c_str()).unwrap(); // TODO: sane error message if you forget to unwrap this
         for(asm_text&){bucket|
@@ -309,10 +309,6 @@ fn compile_with_included_qbe(c: CompCtx, fid: FuncId, entry: ProgramEntry, arch:
         
         args: List(Str) = list(temp());
         args&.clear();
-        if llvm {
-            args&.push("-x");
-            args&.push("ir");
-        };
         args&.push(asm_out);
         args&.push("-o");
         args&.push("a.out");
@@ -377,9 +373,6 @@ fn parse_cli_args() Command = {
                 cfg.jit = false; cfg.llvm = true; cfg.wasm = true;
                 assert(!cfg.qbe, "choose one backend");
             };
-            @case("-aot=qbe-llvm") => {
-                cfg.jit = false; cfg.llvm = true; cfg.qbe = true;
-            };
             @case("-aot=qbe") => {
                 cfg.jit = false; cfg.qbe = true;
                 assert(!cfg.llvm, "choose one backend");
@@ -388,7 +381,6 @@ fn parse_cli_args() Command = {
                 cfg.jit = true; cfg.qbe = true;
                 assert(!cfg.llvm, "choose one backend");
             };
-
             @case("-keep-names") => {
                 cfg.keep_names = true;
             };
