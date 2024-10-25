@@ -27,7 +27,7 @@ Any function arguments declared as `const` must be known at comptime. Calling a 
 Generics are implemented as functions that take constant types as arguments and return types. You often need a sad amount of type annotations when declaring variables with generic types.
 
 ```
-Pair :: fn(const T: Type) Type = @struct(fst: T, snd: T);
+Pair :: fn($T: Type) Type = @struct(fst: T, snd: T);
 ints: Pair(i64) = (fst = 123, snd = 456);
 assert_eq(Pair(i64), Pair(i64)); // identical types.
 ```
@@ -36,7 +36,7 @@ Const type arguments can be used in types later in the argument list (if the fun
 
 ```
 // Requires overloads for `fn zero() T` and `fn add(T, T) T`
-sum :: fn(const T: Type, lst: Slice(T)) T #generic = {
+sum :: fn($T: Type, lst: Slice(T)) T #generic = {
     n: T = zero();
     for(lst, fn(x) => { n += x; });
     n
@@ -66,7 +66,6 @@ There are several contexts that force an expression to be evaulated at comptime.
 - Any macro might choose to force evaluate an argument.
   - The default value of a struct field.
   - The value of an enum.
-  - The expression before `!asm` or `!fn_ptr`
 
 ## Driver Program
 

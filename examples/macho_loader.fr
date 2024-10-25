@@ -13,9 +13,6 @@
 //!
 //! But it doesn't matter, the purpose of this is just understanding how the format works well enough to produce it.
 //!
-// TODO: 
-//      - csis.segment_offset is actually virtual offset from first interesting section not file offset. 
-//        write a nice test for this
 
 #include_std("backend/macho/bits.fr");
 fn main() void = {
@@ -32,8 +29,8 @@ fn main() void = {
     virtual_size := count_virtual_size(full_bytes);
     virtual := page_allocator.alloc(u8, virtual_size.to_signed());
     first_interesting := find_first_interesting(full_bytes);
-    apply_fixups(full_bytes, virtual.ptr, first_interesting);
     load_sections(full_bytes, virtual);
+    apply_fixups(full_bytes, virtual, first_interesting);
     main_header := find_unique_load_command(full_bytes, .MainEntryPoint).expect("to find MainEntryPoint so we can call it");
     main_header := main_header&.pop_type(MainEntryPoint);
     // offset is in virtual memory. 
@@ -86,8 +83,7 @@ fn load_sections(macho_bytes: []u8, virtual: []u8) void = {
     };
 }
 
-// we're applying the fixups to the bytes loaded from the file before spreading out segments and copying them to thier virtual destination. 
-fn apply_fixups(full_bytes: []u8, virtual_base_address: *u8, first_interesting: i64) void = {
+fn apply_fixups(full_bytes: []u8, virtual: []u8, first_interesting: i64) void = {
     fixups_header_data := or find_unique_load_command(full_bytes, .ChainedFixups) {
         eprintln("Didn't find the chained fixups command. That's probably not a good sign. \n(maybe you're using LC_DYLD_INFO_ONLY which we don't support)");
         return();
@@ -115,8 +111,11 @@ fn apply_fixups(full_bytes: []u8, virtual_base_address: *u8, first_interesting: 
                 rebase_count, bind_count := (0, 0);
                 range(0, starts.page_count.zext()) { i | 
                     offset_to_fixup := starts_data&.pop_type(u16)[];
-                    page_offset: i64 = starts.segment_offset.to_signed() + (starts.page_size.zext() * i);
-                    page_data := full_bytes.slice(page_offset, page_offset + starts.page_size.zext());
+                    // note: segment_offset is distance in virtual memory from first interesting segment. NOT a file offset!
+                    // TODO: write a nice test for this (for when segments are not packed in vm)
+                    // TODO: give a friendly warning if this page is not inside the correct segment
+                    page_offset: i64 = first_interesting + starts.segment_offset.to_signed() + (starts.page_size.zext() * i);
+                    page_data := virtual.slice(page_offset, page_offset + starts.page_size.zext());
                     next_offset: i64 = offset_to_fixup.zext();
                     dowhile {
                         page_data.ptr = page_data.ptr.offset(next_offset);
@@ -126,12 +125,12 @@ fn apply_fixups(full_bytes: []u8, virtual_base_address: *u8, first_interesting: 
                         @match(reloc.payload) {
                             fn Rebase(it) => {
                                 @assert_eq(it.high8, 0, "TODO: what is high8 for?");
-                                reloc_ref[] = u8.raw_from_ptr(virtual_base_address.offset(first_interesting).offset(it.target));
+                                reloc_ref[] = u8.raw_from_ptr(virtual.ptr.offset(first_interesting).offset(it.target));
                                 rebase_count += 1;
                             }
                             fn Bind(it) => {
                                 reloc_ref[] = import_pointers[it.ordinal.zext()];
-                                @println(">>> bind at file offset % to %", starts.segment_offset.to_signed() + (starts.page_size.zext() * i) + offset_to_fixup.zext(), int_from_rawptr(import_pointers[it.ordinal.zext()]));
+                                @println(">>> bind at % to %", starts.segment_offset.to_signed() + (starts.page_size.zext() * i) + offset_to_fixup.zext(), int_from_rawptr(import_pointers[it.ordinal.zext()]));
                                 bind_count += 1;
                             }
                         };
@@ -220,17 +219,6 @@ fn find_unique_load_command(macho_bytes: []u8, want: LoadCommand) ?[]u8 = {
         };
     };
     found
-}
-
-fn for_sections(macho_bytes: []u8, $body: @Fn(type: LoadCommand, bytes_without_command_header: []u8) void) void = {
-    header := macho_bytes&.pop_type(MachoHeader);
-    range(0, header.commands_count.zext()) { i |
-        bytes := macho_bytes;
-        header := bytes&.pop_type(LoadCommandHeader);
-        body(header.type, bytes.subslice(0, header.size.zext()));
-        macho_bytes.ptr  = macho_bytes.ptr.offset(header.size.zext());
-        macho_bytes.len -= header.size.zext();
-    };
 }
 
 // TODO: move this to meta.fr or slice.fr?

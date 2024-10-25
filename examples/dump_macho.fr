@@ -176,7 +176,7 @@ fn main() void = {
                 full_starts_data := starts_data;
                 seg_count := starts_data&.pop_type(u32)[];
                 @println("           chained_starts_in_image.seg_count %", seg_count);
-                range(0, seg_count.zext()) { i |
+                range(0, seg_count.zext()) { segment_index |
                     offset_to_csis := starts_data&.pop_type(u32)[];
                     if offset_to_csis != 0 {
                         starts_data := full_starts_data;
@@ -185,9 +185,9 @@ fn main() void = {
                         };
                         starts_data.ptr = starts_data.ptr.offset(offset_to_csis.zext());
                         starts_data.len -= offset_to_csis.zext();
-                        @print("           %. off=% ", i, offset_to_csis);
+                        @print("           %. off=% ", segment_index, offset_to_csis);
                         starts := starts_data&.pop_type(ChainedStartsInSegment);
-                        @println("ChainedStartsInSegment: %", starts);
+                        @print("ChainedStartsInSegment: %", starts);
                         if starts.size >= command.size {
                             @eprintln("WARN: starts size is greater than while chained fixups section...");
                         };
@@ -195,6 +195,8 @@ fn main() void = {
                             // the struct has alignment padding that eats the first entry of the variable length array. 
                             starts_data.ptr = starts_data.ptr.offset(-2); // take it back now yall
                             starts_data.len += 2;
+                            base_file_offset := get_virtual_page(full_bytes, starts.segment_offset.to_signed(), segment_index); 
+                            @println(" [segment_offset -> file offset %]", base_file_offset);
                             range(0, starts.page_count.zext()) { i | 
                                 offset_to_fixup := starts_data&.pop_type(u16)[];
                                 @println("               - %. page_start: %", i, offset_to_fixup);
@@ -204,8 +206,8 @@ fn main() void = {
                                 // now we have a fun linked list to traverse.
                                 // TODO: check pointer format on the header before doing this 
                                 // TODO: this is wrong! segment_offset is virtual offset from first interesting segment
-                                page_offset: i64 = starts.segment_offset.to_signed() + (starts.page_size.zext() * i);
-                                page_data := full_bytes.slice(page_offset, page_offset + starts.page_size.zext());
+                                page_offset: i64 = base_file_offset + (starts.page_size.zext() * i);
+                                page_data: []u8 = (ptr = full_bytes.ptr.offset(page_offset), len = starts.page_size.zext());
                                 next_offset: i64 = offset_to_fixup.zext();
                                 dowhile {
                                     page_data.ptr = page_data.ptr.offset(next_offset);
@@ -219,7 +221,7 @@ fn main() void = {
                             };
                         };
                     } else {
-                        @println("           %. ---", i);
+                        @println("           %. ---", segment_index);
                     };
                 };
                 imports_data := full_data.slice(header.imports_offset.zext(), full_data.len);
@@ -308,6 +310,30 @@ fn main() void = {
         @println("     % unknown load commands. (probably a problem with this tool, not your macho file)", unknown);
     };
     exit(0);
+}
+
+// :slow but this is only called once per segment in a program we never run
+fn get_virtual_page(full_bytes: []u8, page_offset: i64, expected_segment_index: i64) i64 = {
+    original := page_offset;
+    current_segment_index := 0;
+    for_sections full_bytes { type, data | 
+        if type == LoadCommand.SegmentLoad.raw() {  // TODO: why is this raw?
+            cmd := data&.pop_type(SegmentLoad);
+            if current_segment_index == 0 && cmd.size == 0 && cmd.init_prot == 0 {  // __PAGEZERO
+                page_offset += cmd.address_size.to_signed();
+            } else {
+                if page_offset >= cmd.address.to_signed() && page_offset < to_signed(cmd.address + cmd.address_size) {
+                    if current_segment_index != expected_segment_index {
+                        @eprintln("WARN: found page offset % in wrong segment % instead of %", original, current_segment_index, expected_segment_index);
+                    };
+                    off := page_offset - cmd.address.to_signed();
+                    return(cmd.file_offset.to_signed() + off);
+                };
+            };
+            current_segment_index += 1;
+        };
+    };
+    @panic("didnt find in bounds page for virtual offset % (expected in segment %)", original, expected_segment_index)
 }
 
 fn with_trailing_string(bytes: *[]u8, header: *LoadCommandHeader, $Command: Type, command_name: Str) void = {
