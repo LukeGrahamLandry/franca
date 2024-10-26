@@ -11,6 +11,7 @@ fn main() void = {
     
     to_run := Str.list(temp());
     args := cli_args().slice_pop_first();
+    do_my_own_exes := false;
     verbose := false;
     for args { arg |
         continue :: local_return;
@@ -18,7 +19,8 @@ fn main() void = {
         if arg == "franca" || arg.ends_with(".fr") {
             continue();
         };
-        if arg == "-l" {
+        if arg == "-e" {
+            do_my_own_exes = true;
             continue();
         };
         if arg == "-v" {
@@ -45,7 +47,7 @@ fn main() void = {
     passed := 0;
     failed := 0;
     for to_run { file |
-        pass := run_one(qbe_bin, file, verbose);
+        pass := run_one(qbe_bin, file, verbose, do_my_own_exes);
         (@if(pass, passed&, failed&))[] += 1;
     };
     if failed == 0 {
@@ -59,7 +61,7 @@ fn main() void = {
     exit((failed != 0).int());
 }
 
-fn run_one(qbe_path: Str, file_path: Str, verbose: bool) bool = {
+fn run_one(qbe_path: Str, file_path: Str, verbose: bool, do_my_own_exes: bool) bool = {
     ::FmtPad(Str);
     mark := __temp_alloc.mark();
     src := temp().read_to_string(file_path).items(); // :panic
@@ -71,11 +73,20 @@ fn run_one(qbe_path: Str, file_path: Str, verbose: bool) bool = {
     @print("%", f_pad(file_path, 40, .After));
     
     driver := extract_section(src, "driver");
+    
+    if do_my_own_exes && driver.is_some() {
+        @println("[skip]");
+        return(true);  
+    };
     expected := extract_section(src, "output");
     
+    
     args := Str.list(temp());
+    if do_my_own_exes {
+        args&.push("-e");
+    };
     args&.push("-o");
-    args&.push(ir_path);
+    args&.push(if(do_my_own_exes, => exe_path, => ir_path));
     args&.push(file_path);
     run(qbe_path, "gen ir");
     
@@ -103,22 +114,30 @@ fn run_one(qbe_path: Str, file_path: Str, verbose: bool) bool = {
         run("clang", "driver");
     };
     
-    args&.clear();
-    args&.push(ir_path);
-    args&.push("-c");
-    args&.push("-o");
-    args&.push(obj_path_mine);
-    run("clang", "compile ir");
-    
-    args&.clear();
-    args&.push(obj_path_mine);
-    if driver { _ |
-        args&.push(obj_path_driver);
+    if !do_my_own_exes {
+        args&.clear();
+        args&.push(ir_path);
+        args&.push("-c");
+        args&.push("-o");
+        args&.push(obj_path_mine);
+        run("clang", "compile ir");
+        
+        args&.clear();
+        args&.push(obj_path_mine);
+        if driver { _ |
+            args&.push(obj_path_driver);
+        };
+        args&.push("-o");
+        args&.push(exe_path);
+        run("clang", "link");
+    } else {
+        // Tim Apple likes to waste my time. 
+        args&.clear();
+        args&.push("-s");
+        args&.push("-");
+        args&.push(exe_path);
+        run("codesign", "compile ir");
     };
-    args&.push("-o");
-    args&.push(exe_path);
-    run("clang", "link");
-    
     args&.clear();
     args&.push_all(@slice("a", "b", "c"));
     ok, out, err := fork_and_catch(temp()) {

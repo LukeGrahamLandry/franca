@@ -12,6 +12,8 @@ You can still print out the ir as human readable text between passes and modify 
   Your program will contain only the finest organic bit patterns lovingly transcribed from the Arm Architecture Reference Manual.
 - Jit compile your program and run it in memory without needing to emit/link an executable.
   You can freely call between jit and aot code (even extern-c code from other compilers) because they follow the same standard abi.
+- Emit Mach-O executables directly without depending on an external linker.
+  (cannot yet make relocatable objects or dynamic libraries)
 - Moved a bunch of static variables to a data structure we pass around explicitly.
   Eventually you will be able to compile multiple modules on parallel threads (not yet tho, there's still more unported).
 - Removed several codegen optimisations until we have a solid foundation (but I want to bring them back eventually).

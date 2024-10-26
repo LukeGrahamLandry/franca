@@ -56,7 +56,7 @@ fn main() void = {
                             relative := r.packed_fields.shift_right_logical(24).bit_and(0b1) == 1;
                             length := r.packed_fields.shift_right_logical(25).bit_and(0b11); // (byte, word, long, quad)
                             extern := r.packed_fields.shift_right_logical(27).bit_and(0b1) == 1;
-                            type := r.packed_fields.shift_right_logical(28).bit_and(0b1111); // 4=ARM64_RELOC_PAGEOFF12, 3=ARM64_RELOC_PAGE21
+                            type := r.packed_fields.shift_right_logical(28).bit_and(0b1111); // 4=ARM64_RELOC_PAGEOFF12, 3=ARM64_RELOC_PAGE21, 2=bl?
                             @println("          - (offset = %, symbol = %, relative = %, length = %, extern = %, type = %)", r.offset, symbol, relative, length, extern, type);
                         };
                     };
@@ -199,25 +199,29 @@ fn main() void = {
                             @println(" [segment_offset -> file offset %]", base_file_offset);
                             range(0, starts.page_count.zext()) { i | 
                                 offset_to_fixup := starts_data&.pop_type(u16)[];
-                                @println("               - %. page_start: %", i, offset_to_fixup);
-                                if offset_to_fixup >= starts.page_size {
-                                    @eprintln("WARN: fixup outside page, thats probably not good.");
-                                };
-                                // now we have a fun linked list to traverse.
-                                // TODO: check pointer format on the header before doing this 
-                                // TODO: this is wrong! segment_offset is virtual offset from first interesting segment
-                                page_offset: i64 = base_file_offset + (starts.page_size.zext() * i);
-                                page_data: []u8 = (ptr = full_bytes.ptr.offset(page_offset), len = starts.page_size.zext());
-                                next_offset: i64 = offset_to_fixup.zext();
-                                dowhile {
-                                    page_data.ptr = page_data.ptr.offset(next_offset);
-                                    page_data.len -= next_offset;
-                                    reloc := ptr_cast_unchecked(u8, i64, page_data.ptr)[];
-                                    reloc := decode_chained(reloc);
-                                    @println("                  - %", reloc&);
-                                    next_offset = reloc.next.zext() * 4;
-                                    next_offset != 0
-                                };
+                                if offset_to_fixup == page_start_no_fixups {
+                                    // no fixups on this page
+                                    @println("               - %. ---", i);
+                                } else {
+                                    @println("               - %. page_start: %", i, offset_to_fixup);
+                                    if offset_to_fixup >= starts.page_size {
+                                        @eprintln("WARN: fixup outside page, thats probably not good.");
+                                    };
+                                    // now we have a fun linked list to traverse.
+                                    // TODO: check pointer format on the header before doing this 
+                                    page_offset: i64 = base_file_offset + (starts.page_size.zext() * i);
+                                    page_data: []u8 = (ptr = full_bytes.ptr.offset(page_offset), len = starts.page_size.zext());
+                                    next_offset: i64 = offset_to_fixup.zext();
+                                    dowhile {
+                                        page_data.ptr = page_data.ptr.offset(next_offset);
+                                        page_data.len -= next_offset;
+                                        reloc := ptr_cast_unchecked(u8, i64, page_data.ptr)[];
+                                        reloc := decode_chained(reloc);
+                                        @println("                  - %", reloc&);
+                                        next_offset = reloc.next.zext() * 4;
+                                        next_offset != 0
+                                    };
+                                }
                             };
                         };
                     } else {

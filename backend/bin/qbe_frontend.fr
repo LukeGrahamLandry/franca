@@ -6,19 +6,21 @@
 //       I'm a bit worried that there might be some shapes of programs that Franca never generates but I can't articulate an example.        
 
 #include_std("backend/lib.fr");
-fn main() void = {
+fn main() void = {    
+    global_module :: @static(QbeModule); // TODO: aaaaaaaa
+
     outpath := "-";
     inpath := "-";
-    global_module[] = init_default_module();
     run := false;
     debug := false;
     want_exe := false;
-    global_module[].want_text_asm = true;
     args := cli_args();
     pop :: fn() => {
         args.ptr = args.ptr.offset(1);
         args.len -= 1;
     };
+    flags := i64.list(temp());
+    goal := QbeOutputFormat.AsmText;
     while => args.len > 0 {
         a := args[0].str();
         @switch(a) {
@@ -45,12 +47,13 @@ fn main() void = {
                         }
                     };
                     @assert(found, "invalid -d flag %", c);
-                    global_module[].debug.items()[c.zext()] = true;
+                    flags&.push(c.zext());
                 };
                 pop();
             };
             @case("-r") => {
                 run = true;
+                goal = .JitOnly;
                 pop();
             };
             @case("-h") => {
@@ -59,7 +62,7 @@ fn main() void = {
             };
             @case("-e") => {
                 want_exe = true;
-                global_module[].want_text_asm = false;
+                goal = .MachoExe;
                 pop();
             };
             @default => {
@@ -74,6 +77,10 @@ fn main() void = {
                 }
             };
         };
+    };
+    global_module[] = init_default_module(goal);
+    for flags { d | 
+        global_module[].debug.items()[d] = true;
     };
     
     ::if(*FILE);
@@ -105,7 +112,15 @@ fn main() void = {
     
     handle_dbg :: fn(s: CStr) void = ();
     
-    parse(infile, "<file>".sym().c_str(), handle_dbg, emit_data, run_qbe_passes);
+    handle_fn :: fn(fnn: *Qbe.Fn) void = {
+        fnn.globals = global_module;  // if you got it from qbe's parser it doesn't set this. 
+        run_qbe_passes(fnn);
+    };
+    handle_data :: fn(d: *Qbe.Dat) void = {
+        global_module.new_emit_data(d);
+    };
+    
+    parse(infile, "<file>".sym().c_str(), handle_dbg, handle_data, handle_fn);
     if want_exe {
         // TODO: just stick this in emitfin?
         chunks := output_macho(global_module);

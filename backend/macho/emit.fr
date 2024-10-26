@@ -24,7 +24,7 @@ WipSection :: @struct(
 );
 
 fn output_macho(m: *QbeModule) List([]u8) = {  
-    global_module.fill_from_libc(); // TODO: don't waste time doing this just to bump reloc state. 
+    m.fill_from_libc(); // TODO: don't waste time doing this just to bump reloc state. 
     for_enum SegmentType { s | 
         //m.align_to(s, 8);  // forgeting this manifested as getting fucked on __LINKEDIT (when reading not writing because you're writting into a new allocation)
         // but do we need to do this? it makes it look more like clang does. 
@@ -239,24 +239,32 @@ fn output_macho(m: *QbeModule) List([]u8) = {
                 // coincententially those are the same number for binaries made by clang...
                 csis.segment_offset = virtual_segment_offset[segment_index].bitcast() - zero_page_size;
                 
-                @assert_eq(page_index, 0, "TODO: how do we skip pages without fixups?");
                 offset_to_csis[segment_index] = csis_off.trunc();
-                chained&.reserve_type(u16)[] = offset_in_page.trunc();
-                
-                csis.page_size = macos_page_size;
-                csis.pointer_format = 6; // who knows man, i just work here. TODO
-                
-                csis.size = trunc(chained.len - start_of_csis);
-                csis.max_valid_pointer = 0; // TODO: what does this mean?
                 
                 csis.page_count = 1;
+                range(0, page_index) { _ |
+                    // TODO: a test that gets here
+                    csis.page_count += 1;  // :calcsizeatend
+                    chained&.reserve_type(u16)[] = page_start_no_fixups;
+                };
+                chained&.reserve_type(u16)[] = offset_in_page.trunc(); // :calcsizeatend
+                
+                csis.pointer_format = 6; // who knows man, i just work here. TODO
+                csis.page_size = macos_page_size;
+                csis.max_valid_pointer = 0; // TODO: what does this mean?
+                csis.size = trunc(chained.len - start_of_csis); // :calcsizeatend
             };
             if prev_fixup& { prev | 
                 // will always be the same segment as before or we would have flushed the fixup above. 
                 next_offset := if(prev.page_index == page_index, => (offset_in_page - prev.offset_in_page) / 4) {
                     // we've moved on to a different page in the same section. 
                     // so add another entry to the csis.page_start array.
-                    @assert_eq(prev.page_index + 1, page_index, "TODO: how do we skip pages");
+                    while => prev.page_index + 1 != page_index {    
+                        prev.page_index += 1;
+                        csis_by_segment[segment_index].page_count += 1;
+                        csis_by_segment[segment_index].size += 2;
+                        chained&.reserve_type(u16)[] = page_start_no_fixups;
+                    };
                     csis_by_segment[segment_index].page_count += 1;
                     csis_by_segment[segment_index].size += 2;
                     chained&.reserve_type(u16)[] = offset_in_page.trunc();

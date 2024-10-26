@@ -1,3 +1,8 @@
+- print the most negative number
+- emit constant of a null CStr
+- switch on u32
+- aaa global_module is a different variable between the precompiled and the normal.
+
 ## (Oct 24)
 
 - i was hoping i could use `https://lief.re/doc/latest/formats/macho/python.html`

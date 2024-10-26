@@ -8,6 +8,7 @@
 - probably want to port the build stuff. https://github.com/jart/cosmopolitan/blob/master/tool/build/apelink.c
   i assume i can make it less complicated since i'm the one generating the thing in the first place?
   and i only care about linux and xnu. windows can just use wsl.
+- catch multiple branches with the same switch value.
 
 ##
 

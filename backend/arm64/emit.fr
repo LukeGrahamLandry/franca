@@ -538,7 +538,10 @@ fn loadcon(self: *ArmState, c: *Qbe.Con, r: i64, k: Qbe.Cls, do_text: bool) void
         shift_encode := 1;
         n = n.shift_right_logical(16);
         while => n != 0 {
-            self.inst(movk(s, @as(u5) r, n.bit_and(0xffff).trunc(), @as(Hw) shift_encode));
+            part: u16 = n.bit_and(0xffff).trunc();
+            if part != 0 {
+                self.inst(movk(s, @as(u5) r, part, @as(Hw) shift_encode));
+            };
             shift_encode += 1;
             n = n.shift_right_logical(16);
         };
@@ -803,12 +806,13 @@ fn emitins2(self: *ArmState, i: *Qbe.Ins) void = {
     
     if is_load(i.op()) {
         self.fixarg(i.arg&.index(0), size_of_load(i).intcast());
-        addr := i.arg&[0].int_reg();
         offset := 0;
         size := size_of_load(i);
-        if rtype(i.arg&[0]) == .RSlot {
-            addr = fp;
+        addr := if rtype(i.arg&[0]) == .RSlot {
             offset = self.slot(i.arg&[0]) / size.zext();
+            fp
+        } else {
+            i.arg&[0].int_reg()
         };
         // TODO: u/s h/b
         if i.cls().is_int() { // TODO: is this wrong?
@@ -833,12 +837,13 @@ fn emitins2(self: *ArmState, i: *Qbe.Ins) void = {
     };
     if is_store(i.op()) {
         self.fixarg(i.arg&.index(1), size_of_store(i).intcast());
-        addr := i.arg&[1].int_reg();
         offset := 0;
         size := size_of_store(i);
-        if rtype(i.arg&[1]) == .RSlot {
-            addr = fp;
+        addr := if rtype(i.arg&[1]) == .RSlot {
             offset = self.slot(i.arg&[1]) / size.zext();
+            fp
+        } else {
+            i.arg&[1].int_reg()
         };
         if i.op() == .stores {
             self.inst(f_str_uo(Bits.W32, @as(u5) i.arg&[0].float_reg(), addr, @as(u12) offset));
@@ -890,7 +895,6 @@ fn emitins2(self: *ArmState, i: *Qbe.Ins) void = {
         fn stoui() => self.inst(@bits(si,  0b0011110, FType.S32, 0b111001000000, i.arg&[0].float_reg(), i.to.int_reg())); // fcvtzu
         fn dtoui() => self.inst(@bits(si,  0b0011110, FType.D64, 0b111001000000, i.arg&[0].float_reg(), i.to.int_reg())); // fcvtzu
         fn sltof() => self.inst(scvtf(Bits.X64, sf, i.to.float_reg(), i.arg&[0].int_reg()));
-        fn ultof() => self.inst(@bits(Bits.X64, 0b0011110, sf, 0b100011000000, i.arg&[0].int_reg(), i.to.float_reg())); // ucvtf
         @default => @panic("TODO: op encoding %", inst_name);
     };
 }

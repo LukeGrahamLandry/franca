@@ -35,8 +35,9 @@ fn driver(vtable: *ImportVTable) void = {
                 println("=== Aarch64 Jit ===");
                 run_jit(vtable, .CompilerJit);
             };
-            @case("qbe")      => run_qbe_included(vtable, true);
-            @case("qbe-asm")  => run_qbe_included(vtable, false);
+            @case("qbe-jit")  => run_qbe_included(vtable, true, false);
+            @case("qbe-asm")  => run_qbe_included(vtable, false, false);
+            @case("qbe-exe")  => run_qbe_included(vtable, false, true);
             @case("llvm") => run_llvm(vtable, false);
             @case("llvm-wasm") => run_llvm(vtable, true);
             @case("blink") => run_llvm_blink(vtable);
@@ -53,7 +54,7 @@ fn driver(vtable: *ImportVTable) void = {
     };
     
     if(did <= 1, => println(HELP));
-    HELP :: "start with \"-- \" to seperate from compiler args, then any of [arm, llvm, qbe, examples]";
+    HELP :: "start with \"-- \" to seperate from compiler args, then any of [arm, llvm, qbe-jit, qbe-asm, qbe-exe, examples]";
 
     // TODO: do this in the loop
     //__temp_alloc.reset_retaining_capacity();
@@ -446,50 +447,64 @@ fn jit_from_source(vtable: *ImportVTable, src: Str, function_name: Str) rawptr #
 }
 
 #include_std("backend/lib.fr");
-fn run_qbe_included(vtable: *ImportVTable, jit: bool) void = {
+fn run_qbe_included(vtable: *ImportVTable, jit: bool, own_exe: bool) void = {
     @if(ENABLE_INTERNAL_QBE, {
-        @println("=== Qbe % ===", if(jit, => "jit", => "asm aot"));
+        @println("=== Qbe % ===", if(own_exe, => "exe aot", => if(jit, => "jit", => "asm aot")));
         opts := vtable.default_build_options();
         opts.retain_function_names = true;
         comp := {vtable.init_compiler}(opts);
         c := vtable.with(comp);
         load_lang_tests(c);
         env: TargetEnv = (arch = get_comptime_arch(), os = .macos); // :HardcodeOs
+        args: List(Str) = list(temp());
+        global_module :: @static(QbeModule); // TODO: aaaaaaaa
         run_sequential(c) {c, tests|
-            global_module[] = init_default_module();
-            if jit {
-                asm_text := emit_qbe_included(c, tests, .TestRunnerMain, env&);
-                global_module.fill_from_libc();
-                global_module.make_exec();
-                
-                f := or global_module.get_addr("main") {
-                    panic("couldn't find main")
-                };
-                f := assume_types_fn(Arg = void, Ret = i64, ptr = f);
-                status := f();
-                @assert_eq(status, 0, "bad exit status");
-            } else {    
-                global_module[].want_text_asm = true;
-                asm_text := emit_qbe_included(c, tests, .TestRunnerMain, env&);
-                asm_out := "target/franca_qbe_temp.s"; // TODO: the version of tmp file that lets you have an extension because it wants the .s
-                ir_out := open_trunc(asm_out.sym().c_str()).unwrap(); // TODO: sane error message if you forget to unwrap this
+            global_module[] = init_default_module(@if(jit, .JitOnly, @if(own_exe, .MachoExe, .AsmText)));
+            asm_text := emit_qbe_included_dyn(global_module, c&, tests, .TestRunnerMain, env&);
+            if own_exe {
+                ir_out := open_trunc("a.out".sym().c_str()).unwrap();
                 for(asm_text&){bucket|
                     ir_out&.write(bucket).unwrap();
                 };
                 
-                args: List(Str) = list(temp());
+                ir_out.close();
                 args&.clear();
-                args&.push(asm_out);
-                args&.push("-o");
+                args&.push("-s");
+                args&.push("-");
                 args&.push("a.out");
-                triple := target_triple(env.arch, env.os);
-                args&.push_all(@slice("-target", triple));
-                start := timestamp();
-                success := run_cmd_blocking("clang", args.items()); 
-                assert(success, "as failed");
-                args: List(Str) = list(temp());
-                success := run_cmd_blocking("./a.out", args.items());
-                assert(success, "test failed");
+                success := run_cmd_blocking("codesign", args.items()); 
+                assert(success, "sign failed");
+            } else {
+                if jit {
+                    global_module.fill_from_libc();
+                    global_module.make_exec();
+                    
+                    f := or global_module.get_addr("main") {
+                        panic("couldn't find main")
+                    };
+                    f := assume_types_fn(Arg = void, Ret = i64, ptr = f);
+                    status := f();
+                    @assert_eq(status, 0, "bad exit status");
+                } else {    
+                    asm_out :: "target/franca_qbe_temp.s"; // TODO: the version of tmp file that lets you have an extension because it wants the .s
+                    ir_out := open_trunc(asm_out.sym().c_str()).unwrap(); // TODO: sane error message if you forget to unwrap this
+                    for(asm_text&){bucket|
+                        ir_out&.write(bucket).unwrap();
+                    };
+                    
+                    args&.clear();
+                    args&.push(asm_out);
+                    args&.push("-o");
+                    args&.push("a.out");
+                    triple := target_triple(env.arch, env.os);
+                    args&.push_all(@slice("-target", triple));
+                    start := timestamp();
+                    success := run_cmd_blocking("clang", args.items()); 
+                    assert(success, "as failed");
+                    args: List(Str) = list(temp());
+                    success := run_cmd_blocking("./a.out", args.items());
+                    assert(success, "test failed");
+                };
             };
         };
     },  panic("internal qbe is disabled"));

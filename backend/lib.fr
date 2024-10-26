@@ -23,7 +23,7 @@
 #include_std("backend/opt/mem.fr");
 
 ENABLE_INTERNAL_QBE :: true;  // until i want to enable it on github actions
-LINK_QBE_C :: true;
+LINK_QBE_C :: false;
 DO_INLINING :: true; // TODO: make this a runtime toggle so you can make sure you're actually testing calls
 
 // easy-ish (?) things to try to get used to making changes. 
@@ -58,7 +58,6 @@ ar rvs qbe_merged.o util.o parse.o abi.o cfg.o mem.o ssa.o alias.o load.o copy.o
 clang -dynamiclib -o qbe_merged.dylib main.o util.o parse.o abi.o cfg.o mem.o ssa.o alias.o load.o copy.o fold.o simpl.o live.o spill.o rega.o emit.o amd64/targ.o amd64/sysv.o amd64/isel.o amd64/emit.o arm64/targ.o arm64/abi.o arm64/isel.o arm64/emit.o rv64/targ.o rv64/abi.o rv64/isel.o rv64/emit.o
 */
 
-global_module :: @static(QbeModule); // TODO: aaaaaaaa
 
 QbeModule :: @rec @struct(
     // These have to be pointers to the symbols Qbe externs because it uses them. 
@@ -81,18 +80,22 @@ QbeModule :: @rec @struct(
     fixups_locked := false,
     got_cursor  := 0,
     stubs_cursor := 0,
+    goal: QbeOutputFormat,
     
     // TODO: everything that touches these needs to be rewritten eventually. 
     want_text_asm := false,
     outf := zeroed(*FILE),
 );
 
+QbeOutputFormat :: @enum(i64) (AsmText, JitOnly, MachoExe);
+::enum(QbeOutputFormat);
+
 MAX_GOT_SIZE :: 1.shift_left(13); // 15 :dontforget
 SIZE_OF_STUBS :: 1.shift_left(10); // TODO: not this :explain
 COMMANDS_SIZE_GUESS :: macos_page_size; // :explain
 
-fn init_default_module() QbeModule = 
-    init(1.shift_left(23), libc_allocator, page_allocator);
+fn init_default_module(goal: QbeOutputFormat) QbeModule = 
+    init(1.shift_left(23), libc_allocator, page_allocator, goal);
 
 :: {
     @if(LINK_QBE_C) {
@@ -104,7 +107,7 @@ fn init_default_module() QbeModule =
     };
 };
 
-fn init(segment_size: i64, gpa: Alloc, code_alloc: Alloc) QbeModule = {
+fn init(segment_size: i64, gpa: Alloc, code_alloc: Alloc, goal: QbeOutputFormat) QbeModule = {
     m := QbeModule.zeroed();
     m.segments = EnumMap(SegmentType, SegmentCursor).zeroed();
     mem := code_alloc.alloc(u8, segment_size * 3); // TODO: ask for the alignment we need.
@@ -116,6 +119,8 @@ fn init(segment_size: i64, gpa: Alloc, code_alloc: Alloc) QbeModule = {
     make_segment(.ConstantData, segment_size*1, segment_size*2);
     make_segment(.MutableData, segment_size*2, segment_size*3);
     m.gpa = gpa;
+    m.goal = goal;
+    m.want_text_asm = goal == .AsmText;
     m.symbols = gpa.alloc(SymbolBucket, IMask + 1);
     {   // TODO: this is kinda ass
         // :GotAtConstantDataBase
@@ -124,7 +129,6 @@ fn init(segment_size: i64, gpa: Alloc, code_alloc: Alloc) QbeModule = {
         next := m.segments&[.Code].next&;
         next[] = next[].offset(COMMANDS_SIZE_GUESS); 
         next[] = next[].offset(SIZE_OF_STUBS); 
-        
     };
     
     m.debug_out = fdopen(STD_ERR, "a".sym().c_str());
@@ -149,6 +153,9 @@ fn init(segment_size: i64, gpa: Alloc, code_alloc: Alloc) QbeModule = {
         m.target = gpa.box(@type m.target[]);
     });
     //m.debug[Qbe.DebugKey.Memory.raw()] = true;
+    //m.debug[Qbe.DebugKey.RegAlloc.raw()] = true;
+    //m.debug[Qbe.DebugKey.Parsing.raw()] = true;
+    //m.debug[Qbe.DebugKey.InstSelect.raw()] = true;
     m.target.fill_target_info(.arm64_apple);
     m.types[] = new(0, Qbe.Pool.PHeap); // TODO: check the magic in QbeBuilder.init to make sure you remember to do this. 
     m.curi[] = m.insb.index_unchecked(Qbe.MaxInstructions);
@@ -173,8 +180,9 @@ aaaa_out :: @static(TmpFile);
 
 run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
     mark := __temp_alloc.mark();
-    m := global_module;
-    fnn.globals = m;  // if you got it from qbe's parser it doesn't set this. 
+    m := fnn.globals;
+    ::ptr_utils(QbeModule);
+    @debug_assert(!m.is_null(), "function module not set");
     filluse :: fill_use;
     
     if fnn.globals.debug["P".char()] {
@@ -255,9 +263,9 @@ run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
     fnn.rpo.offset(fnn.nblk.zext() - 1)[].link = Qbe.Blk.ptr_from_int(0);
     
     if true {
-        m.emit_func_arm64(fnn, global_module[].outf);
+        m.emit_func_arm64(fnn, m[].outf);
     } else {
-        {m.target.emitfn}(fnn, global_module[].outf);
+        {m.target.emitfn}(fnn, m[].outf);
     };
     __temp_alloc.reset_retaining_capacity(mark);
 };
