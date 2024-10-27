@@ -9,6 +9,8 @@
 // TODO: (when i want to do my own aot) have the addr lookup table in a seperate segment before the functions and then don't include it in the aot binrary, just patch instead. 
 // TODO: take out the internal jump distance checks because we check at the end that the function fits in the segment (jsut also check that its within i19 because why not)
 
+// TODO: need to replace all the .goal checks when we want to support ELF
+
 ArmState :: @struct(
     m: *QbeModule,
     f: *Qbe.Fn,
@@ -82,10 +84,12 @@ fn do_jit_fixups(self: *QbeModule, id: u32, segment: SegmentType, final_offset: 
     dest := self.segment_address(symbol.segment, symbol.offset);
     fixups := symbol.fixups&;
     self.do_fixups(dest, symbol);
-    // Since it's a local symbol, we don't care about the relocations anymore. The linker never needs to know. 
-    // TODO: actually thats also true for imports becuase calls go through __got. 
-    unordered_retain(fixups, fn(it) => it.type&.is(.DataAbsolute));
-    if(fixups.len == 0, => fixups.drop(self.gpa));
+    if self.goal != .MachoRelocatable || symbol.segment == .Code {
+        // Since it's a local symbol, we don't care about the relocations anymore. The linker never needs to know. 
+        // TODO: actually thats also true for imports becuase calls go through __got. 
+        unordered_retain(fixups, fn(it) => it.type&.is(.DataAbsolute));
+        if(fixups.len == 0, => fixups.drop(self.gpa));
+    };  // else you still care because the static linker wants to move things around. :track_got_reloc
 }
 ::tagged(FixupType);
 
@@ -448,12 +452,21 @@ fn align_to(m: *QbeModule, segment: SegmentType, align: i64) void = {
 // TODO: rename this. 
 fn loadaddr_bits(self: *ArmState, c: *Qbe.Con, dest_reg: i64) void = {
     symbol := self.m.get_symbol_info(c.sym.id);
+    patch_addr := self.m.segment_address(.Code, self.m.current_offset(.Code));
     
     @match(symbol.kind) {
         fn DynamicPatched() => panic("TODO: handle predeclared import");
         fn Local() => {
             // we've already compiled it so just compute its address directly.
             distance := self.m.distance_between(.Code, self.m.current_offset(.Code), symbol.segment, symbol.offset);
+            if self.m.goal == .MachoRelocatable && symbol.segment != .Code {
+                // we're creating input for a static linker and we want it to be able to move shit around. 
+                symbol.fixups&.push((patch_at = patch_addr, type = (InReg = (r = dest_reg, increment = 0))), self.m.gpa);
+                if !symbol.local_but_marked_for_relocation {
+                    self.m.local_needs_reloc&.push(c.sym.id);
+                    symbol.local_but_marked_for_relocation = true;
+                };
+            };
             if self.f.globals.debug["T".char()] {
                 write(self.m.debug_out, items(@format("# direct offset % for '%' %[%]\n", distance, self.m.str(c.sym.id), symbol.segment, symbol.offset) temp()));
             };
@@ -464,7 +477,6 @@ fn loadaddr_bits(self: *ArmState, c: *Qbe.Con, dest_reg: i64) void = {
             self.inst_bytes_only(i_off);
         }
         fn Pending() => {
-            patch_addr := self.m.segment_address(.Code, self.m.current_offset(.Code));
             symbol.fixups&.push((patch_at = patch_addr, type = (InReg = (r = dest_reg, increment = 0))), self.m.gpa);
             self.inst_bytes_only(brk(0x0123));
             self.inst_bytes_only(brk(0x0456));

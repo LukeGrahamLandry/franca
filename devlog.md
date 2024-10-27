@@ -4,6 +4,11 @@
 - `ld: Assertion failed: (addr >= lastAddr && "function addresses not sorted"), function FunctionStarts`
   means your `__text` offset was high like it has to be when you include the load commands.
 - single func relocatable. fail 28/58
+- use correct offset, 23
+- adrp+add import reloc, 13
+- call reloc, 10
+- skip `__got` data relocs because you just emit for each use instead, 8
+- data segment and reloc when code references data, 5
 
 ## (Oct 25)
 

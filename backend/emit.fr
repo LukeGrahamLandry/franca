@@ -27,6 +27,7 @@ SymbolInfo :: @struct(
     // import: offset in stubs to trampoline (if function)
     offset: i64,
     kind: SymbolKind,
+    local_but_marked_for_relocation := false,
 );
 
 ::enum_basic(SymbolKind);
@@ -255,26 +256,25 @@ fn put_jit_addr(self: *QbeModule, name: CStr, addr: rawptr) void = {
 // :SLOW insanely inefficient way of doing this. especially when someone tries to add multiple libs. 
 // TODO: store a list of the pending ones so don't have to iterate them all. 
 fn fill_pending_dynamic_imports(self: *QbeModule, lib: DlHandle) void = {
-    for_symbols self { symbol | 
+    for_symbols self { id, symbol |  // :SLOW  just keep list of pending symbols instead
         if symbol.kind == .Pending {
+            self.imports&.push(id); 
             found := lib.dlsym(symbol.name);
             if !found.is_null() {
                 symbol.kind = .DynamicPatched;
                 self.do_fixups(u8.ptr_from_raw(found), symbol);
-            } else {
-                // TODO: remove this and report at the end.
-                @eprintln("jit missing symbol %", symbol.name); // wrong once they add multiple dylibs
             };
         };
     };
 }
 
 // note: don't push symbols in the body!
-fn for_symbols(m: *QbeModule, $body: @Fn(s: *SymbolInfo) void) void = {
-    each m.symbols& { bucket | 
+fn for_symbols(m: *QbeModule, $body: @Fn(id: u32, s: *SymbolInfo) void) void = {
+    enumerate m.symbols& { h, bucket | 
         bucket := bucket.data.slice(0, bucket.n.zext());
-        each bucket { symbol | 
-            body(symbol);
+        enumerate bucket { i, symbol | 
+            id := h + i.shift_left(IBits);
+            body(trunc(id), symbol);
         };
     };
 }

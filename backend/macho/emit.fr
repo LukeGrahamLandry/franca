@@ -6,7 +6,22 @@
 
 // life is better if you're always 8 byte aligned. 
 
+//!
+//! Mach-O is the object file format used by the XNU kernal (so macOS and iOS). 
+//! There are 3 types of Mach-O files we care about. 
+//! Executable: a program the operating system can run
+//!     - dynamic imports and pointers in data are in ChainedFixups
+//!     - empty __PAGEZERO, __TEXT contains the Mach-O header and load commands, __LINKEDIT must have a load command
+//!     - must have a CodeSigneture 
+//! Relocatable Object: input for static linking with another program
+//! 
+//! Dynamic Library: not supported yet... 
+//! 
+
 // TODO: run non-driver tests with no-op relocatable as well as direct to exe
+// TODO: generate some tests with big numbers and ranges of relocations, etc to make sure we don't overflow the fields (or at least give an error). 
+// TODO: add to isel to only produce addresses one in a block to have fewer relocations at the cost of register pressure. 
+// TODO: make this less ugly.
 
 WipSegment :: @struct(
     name: Str,
@@ -87,24 +102,48 @@ fn output_macho(m: *QbeModule) List([]u8) = {
         xx: WipSection = (name = "__data", size = chunks[3].len, flag = 0, offset_in_segment = 0);
         segments[3].sections = @slice(xx);
     };
+    text_padding :: SIZE_OF_STUBS + COMMANDS_SIZE_GUESS;
     if m.goal == .MachoRelocatable {
-        // TODO: add back DATA
-        chunks&.push(live_segment_part(m, .Code));
-        padding := SIZE_OF_STUBS + COMMANDS_SIZE_GUESS;
-        segments&.push(prot = 7, name = "__TEXT", extra_file_offset = padding);
-        enumerate segments& { i, s |
-            s.virtual_size = m.segments&[@as(SegmentType) i].mmapped.len;
-            s.file_size = chunks[i + 1].len - padding;
+        s := m.segments&[.ConstantData]&;
+        align_to :: fn(offset: i64, align: i64) i64 = {
+            extra := offset.mod(align);
+            if extra == 0 {
+                offset
+            } else {
+                offset + align - extra
+            }
         };
+
+        xx := align_to(MAX_GOT_SIZE, macos_page_size);
+        @assert(ptr_diff(s.mmapped.ptr, s.next) == xx, "TODO: const data segment");
+        
+        chunks&.push(live_segment_part(m, .Code));
+        segments&.push(prot = 7, name = "__TEXT", extra_file_offset = text_padding);
+        segments[0].virtual_size = m.segments&[.Code].mmapped.len;
+        segments[0].file_size = chunks[1].len - text_padding;
         code_flag := ATTR_PURE_INSTRUCTIONS.bit_or(ATTR_SOME_INSTRUCTIONS);
-        xx: WipSection = (name = "__text", flag = code_flag, offset_in_segment = 0, size = chunks[1].len - padding);
+        xx: WipSection = (name = "__text", flag = code_flag, offset_in_segment = 0, size = chunks[1].len - text_padding);
         segments[0].sections = @slice(xx);
+        
+        s := m.segments&[.MutableData]&;
+        has_mutable_data := ptr_diff(s.mmapped.ptr, s.next) != 0;
+        if has_mutable_data {
+            chunks&.push(live_segment_part(m, .MutableData));
+            segments&.push(prot = 7, name = "__DATA");
+            segments[1].virtual_size = m.segments&[.MutableData].mmapped.len;
+            segments[1].file_size = chunks[2].len;
+            xx: WipSection = (name = "__data", flag = 0, offset_in_segment = 0, size = chunks[2].len);
+            segments[1].sections = @slice(xx);
+        };
     };
-   
+    
     file_offset := 0;
     base_file_offset := @slice(0, 0, 0, 0); 
     virtual_segment_offset := @slice(0, 0, 0, 0);
     virtual_offset := 0;
+    relocations := temp().alloc_zeroed(List(u8), SegmentType.enum_count() + 4);
+    load_commands := temp().alloc(*SegmentSection, SegmentType.enum_count() + 4);
+    n_sections := 0;
     {
         enumerate segments& { segment_index, s | 
             start := commands.len;
@@ -139,6 +178,10 @@ fn output_macho(m: *QbeModule) List([]u8) = {
                 c.flag         = sec.flag;
                 c.size         = sec.size.bitcast();
                 c._reserved2   = sec.reserved2;
+                @assert(n_sections < load_commands.len, "TODO: too many sections");
+                load_commands[n_sections] = c;
+                relocations[n_sections] = list(temp());
+                n_sections += 1;
             };
             h.size = trunc(commands.len - start);
             virtual_offset += s.virtual_size;
@@ -351,10 +394,11 @@ fn output_macho(m: *QbeModule) List([]u8) = {
             cmd := commands&.reserve_type(LinkEditSymbolInfo);
             cmd[] = LinkEditSymbolInfo.zeroed();
             // TODO: output local symbols for debugging (in exes as well). 
-            cmd.local_symbol_count = 1; // I think you always need index 0 to be junk.
+            cmd.local_symbol_count = trunc(1 + m.local_needs_reloc.len); // I think you always need index 0 to be junk.
             cmd.external_symbol_index = cmd.local_symbol_index + cmd.local_symbol_count;  // for consistancy
             cmd.external_symbol_count = m.exports.len.trunc();
-            cmd.undefined_symbol_index = cmd.external_symbol_index + cmd.external_symbol_count; // this is dumb if count is zero but lld complains otherwise
+            cmd.undefined_symbol_index = cmd.external_symbol_index + cmd.external_symbol_count; // must be set even if count is zero or lld complains 
+            cmd.undefined_symbol_count = m.imports.len.trunc();
             // TODO: we are going to need undefined symbols for imports but haven't got that far yet. 
             h.size = trunc(commands.len - start);
             
@@ -381,24 +425,134 @@ fn output_macho(m: *QbeModule) List([]u8) = {
             symbols_bytes[0].name_offset = trunc(chained.len - strings_start);
             append_padded_cstr(chained&, "_junk", 1);
             
+            append_relocations :: fn(symbol_table_index: i64, id: u32, m: *QbeModule, relocations: []List(u8), load_commands: []*SegmentSection, ) void = {
+                s := m.get_symbol_info(id);
+                each s.fixups { fix | 
+                    continue :: local_return;
+                    patch_segment, patch_segment_offset := compiler_address_to_segment_offset(m, fix.patch_at);
+                    if patch_segment == .ConstantData && patch_segment_offset < m.got_cursor {
+                        // :track_got_reloc
+                        // We bound this symbol for jitting and reserved a __got slot for it.
+                        // However, we want to let static linker move stuff around and pack its own __got.
+                        // So we skip this relocation and instead emit one for each place we accessed that __got slot. 
+                        //
+                        @debug_assert(fix.type&.tag() == .DataAbsolute && s.kind != .Local, "__got reloc must be data");
+                        continue();
+                    };
+                    @assert(patch_segment == .Code, "TODO: non-text relocations");
+                    my_section_index := 0;
+                    segment_padding := if(patch_segment == .Code, => text_padding, => 0); // :HACK
+                    r: RelocationFields = (
+                        offset = patch_segment_offset - segment_padding, 
+                        symbol = trunc(symbol_table_index),
+                        length = 2,   // one instruction
+                        type = 0,  // patch
+                        extern = true, //s.kind != .Local,
+                        relative = true,  // patch
+                    );
+                    rs := relocations[my_section_index]&;
+                            
+                    @match(fix.type) {
+                        fn InReg(it) => {
+                            // in the instruction we tell it: which register to use
+                            inst: []u32 = (ptr = ptr_cast_unchecked(u8, u32, fix.patch_at), len = 2);
+                            inst[0] = adrp(0, 0, @as(u5) it.r);
+                            inst[1] = add_im(Bits.X64, @as(u5) it.r, @as(u5) it.r, 0, 0);
+                            
+                            r.relative = true;
+                            r.type = 3;  // ARM64_RELOC_PAGE21
+                            rs.reserve_type(i64)[] = encode_reloc(r);
+                            r.offset += 4;
+                            r.type = 4; // ARM64_RELOC_PAGEOFF12
+                            r.relative = false;
+                            rs.reserve_type(i64)[] = encode_reloc(r);
+                        }
+                        fn Call() => {
+                            // in the instruction we tell it: set link bit
+                            inst: []u32 = (ptr = ptr_cast_unchecked(u8, u32, fix.patch_at), len = 1);
+                            inst[0] = b(0, 1);
+                            
+                            r.relative = true;
+                            r.type = 2;  // ARM64_RELOC_BRANCH26
+                            rs.reserve_type(i64)[] = encode_reloc(r);
+                        }
+                        fn DataAbsolute() => {
+                            panic("TODO: data reloc");
+                            r.relative = false;
+                            r.type = 0;   // ARM64_RELOC_UNSIGNED
+                            r.length = 3; // one pointer
+                            rs.reserve_type(i64)[] = encode_reloc(r);
+                        }
+                    };
+                };
+            };
+            fn which_section(s: SegmentType) u8 = @match(s) {
+                fn Code() => 1;
+                fn MutableData() => 2;
+                fn ConstantData() => panic("TODO: we don't use constant data yet");
+            };
+            
+            base := 1;
+            enumerate m.local_needs_reloc { i, id | 
+                s := m.get_symbol_info(id[]);
+                entry := symbols_bytes.index(i + base);
+                entry.symbol_type = 14;  // 14 means defined in section.
+                // note: 1 indexed. 
+                entry.section_number = which_section(s.segment);
+                entry.desc = 0; // i think exports don't use this.     for imports, 256 ordinal 1.
+                entry.name_offset = trunc(chained.len - strings_start);
+                segment_padding := if(s.segment == .Code, => text_padding, => 0); // :HACK
+                @debug_assert(s.offset >= segment_padding, "what are you smoking");
+                // note: symbol_address is the address in virtual memory. not the section offset. 
+                // this math relies on there being one section per segment
+                start: i64 = bitcast(load_commands[entry.section_number.zext() - 1].address);
+                entry.symbol_address = bitcast(s.offset - segment_padding + start);
+                ugh := items(@format("_%", s.name) temp());
+                append_padded_cstr(chained&, ugh, 1);
+                append_relocations(i + base, id[], m, relocations, load_commands);
+                // TODO: assert they're all DataAbsolute becuse functions are in the same segment and you could just call them. 
+            };
+            base += m.local_needs_reloc.len;
             enumerate m.exports { i, id |
                 s := m.get_symbol_info(id[]);
-                entry := symbols_bytes.index(i + 1);
+                entry := symbols_bytes.index(i + base);
                 // this only works for exports!
                 entry.symbol_type = 15;  // bottom bit means external. 14 means defined in section.
+                // note: 1 indexed. 
                 entry.section_number = 1;   @assert(s.segment == .Code, "TODO: export data");
                 entry.desc = 0; // i think exports don't use this.     for imports, 256 ordinal 1.
                 entry.name_offset = trunc(chained.len - strings_start);
-                entry.symbol_address = 0; // TODO
+                @debug_assert(s.offset >= text_padding, "what are you smoking");
+                entry.symbol_address = bitcast(s.offset - text_padding);      @assert(s.segment == .Code, "TODO: export data");
                 ugh := items(@format("_%", s.name) temp());
                 append_padded_cstr(chained&, ugh, 1);
+                // TODO: we probably don't want it to appear twice in the symbol table if it's a data export and also has local relocations
+            };
+            base += m.exports.len;
+            enumerate m.imports { i, id |
+                s := m.get_symbol_info(id[]);
+                entry := symbols_bytes.index(i + base);
+                entry.symbol_type = 1; // undef ext
+                entry.section_number = symbol_no_section; 
+                entry.desc = 0; // TODO: for dynamic imports, 256 is ordinal 1.
+                entry.name_offset = trunc(chained.len - strings_start);
+                ugh := items(@format("_%", s.name) temp());
+                append_padded_cstr(chained&, ugh, 1);
+                append_relocations(i + base, id[], m, relocations, load_commands);
             };
             syms_cmd.strings_size = trunc(chained.len - strings_start);
+            
+            // :SLOW just debugging until this works
+            for_symbols m { id, s | 
+                if !m.imports&.contains(id&) {
+                    each s.fixups { f | 
+                        assert(f.type&.tag() != .DataAbsolute, "TODO: data relocs");
+                    };  
+                };
+            };
         };
         
         @assert_le(chained.len, CHAINED_SIZE_GUESS, "resized and now the header pointer is junk"); 
-        
-        chunks&.push(chained.items()); // TODO: is it the rules that this be the last thing in the file? 
         
         
         if m.goal == .MachoExe { 
@@ -415,6 +569,8 @@ fn output_macho(m: *QbeModule) List([]u8) = {
             cmd.file_offset = file_offset.bitcast();
             cmd.address = virtual_offset.bitcast();
         };
+        chunks&.push(chained.items()); // TODO: is it the rules that this be the last thing in the file?
+        file_offset += chained.len;
     };
     
     if m.goal == .MachoExe { 
@@ -422,6 +578,15 @@ fn output_macho(m: *QbeModule) List([]u8) = {
         macho_main_entry_point(m, commands&, command_count&);
         // TODO: don't assume you want libc. but on macos you always do. 
         macho_load_dylib(commands&, command_count&, "/usr/lib/libSystem.B.dylib");
+    };
+    
+    enumerate relocations { i, r | 
+        if r.len != 0 {
+            load_commands[i].relocations_count = trunc(r.len / size_of_one_relocation);
+            load_commands[i].relocations_file_offset = file_offset.trunc();
+            chunks&.push(r.items());
+            file_offset += r.len;
+        }
     };
     
     macho_header.commands_size = (commands.len - MachoHeader.size_of()).trunc();
@@ -499,7 +664,7 @@ fn collect_aot_fixups(m: *QbeModule) Ty([]FixP, []*SymbolInfo) = {
     symbols := list(*SymbolInfo, temp());
     
     symbol_count := 0;
-    for_symbols m { s | 
+    for_symbols m { _, s | 
         first := true;
         each s.fixups& { f | 
             if f.type&.is(.DataAbsolute) {

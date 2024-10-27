@@ -79,7 +79,10 @@ QbeModule :: @rec @struct(
     got_cursor  := 0,
     stubs_cursor := 0,
     goal: QbeOutputFormat,
+    
     exports: List(u32),
+    imports: List(u32),
+    local_needs_reloc: List(u32),
     
     // TODO: everything that touches these needs to be rewritten eventually. 
     want_text_asm := false,
@@ -123,6 +126,8 @@ fn init(segment_size: i64, gpa: Alloc, code_alloc: Alloc, goal: QbeOutputFormat)
     m.gpa = gpa;
     m.goal = goal;
     m.exports = list(gpa);
+    m.imports = list(gpa);
+    m.local_needs_reloc = list(gpa);
     m.want_text_asm = goal == .AsmText;
     m.symbols = forever.alloc_zeroed(SymbolBucket, IMask + 1);
     {   // TODO: this is kinda ass
@@ -169,7 +174,7 @@ fn drop(m: *QbeModule, slowly_free_from_gpa: bool) void = {
     fst := m.segments.data&[0].mmapped;
     page_allocator.dealloc(u8, (ptr = fst.ptr, len = fst.len * m.segments.data&.len()));
     if slowly_free_from_gpa {
-        for_symbols m { s |
+        for_symbols m { _, s |
             s.fixups&.drop(m.gpa);
         };
         each m.symbols { bucket | 
