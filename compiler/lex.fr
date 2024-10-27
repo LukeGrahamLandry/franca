@@ -33,6 +33,7 @@ LexErr :: @tagged(
     TooManyBits,
     UnterminatedComment,
     IdentifiersCannotUseUnicodeSorry,
+    TodoEscapesInRawIdent,
     // TODO: ThatsNotANormalQuoteDidYouCopyPasteFromAPdf,
 );
 
@@ -92,7 +93,24 @@ fn pop(self: *Lexer) *Token = {
             };
             self.one(found)
         };
-        @case("@".ascii()) => self.one(.At);
+        @case("@".ascii()) => {
+            self.current += 1;
+            if self.peek_c() == "\"".ascii() {
+                self.start += 1;  // lex_string will skip the " but we have to skip the @
+                if self.lex_string() {
+                    s := self.token.type&;
+                    if s.Quoted.escapes {
+                        // TODO: expand_string_escapes
+                        self.error(.TodoEscapesInRawIdent);
+                    } else {
+                        s[] = (Symbol = s.Quoted.s);
+                    };
+                };
+                self.token.span.low -= 1;
+            } else {
+                self.put_token(.At);
+            };
+        };
         @case("&".ascii()) => self.pair("&".ascii(), .Amp, (Op = .AmpAmp));
         @case("#".ascii()) => {
             if self.peek_c(1) == "!".ascii() {
@@ -108,7 +126,7 @@ fn pop(self: *Lexer) *Token = {
         @case("|".ascii()) => self.pair("|".ascii(), .Pipe, (Op = .PipePipe));
         @case("[".ascii()) => self.pair("]".ascii(), .LeftSquare, .DoubleSquare);
         @case("]".ascii()) => self.one(.RightSquare);
-        @case("\"".ascii()) => self.lex_string();
+        @case("\"".ascii()) => { self.lex_string(); };
         @case("0".ascii()) => {
             @switch(self.peek_c(1)) {
                 @case("x".ascii()) => self.lex_hex();
@@ -217,12 +235,13 @@ fn skip_string(self: *Lexer) Ty(Str, bool, bool) = {
     (text, escapes, true)
 }
 
-fn lex_string(self: *Lexer) void #once = {
+fn lex_string(self: *Lexer) bool = {
     // TODO: destructuring 
     text, escapes, success := self.skip_string();
     if success {
         self.put_token((Quoted = (s = self.pool.insert_owned(text), escapes = escapes)));
     };
+    success
 }
 
 fn lex_num(self: *Lexer) void = {

@@ -1,3 +1,15 @@
+## (Oct 27)
+
+- string escapes, 1
+  and that last failing qbe test is for thread locals which i haven't got to yet.
+- pretty embarassing that in run_tests for qbe-exe i forgot to actually run the resulting binary...
+  but they did still all pass so thats a good sign for the qbe tests being comprehensive at least.
+- the my language tests are all exes that don't link something else,
+  but i can still have them output a relocatable object and link it against nothing to test that i get the relocations right.
+  failing 250/287.
+- DataAbsolute relocs and track when data contains a local pointer, 52.
+- add to local_needs_reloc in do_jit_fixups so you handle when code references data, 34.
+
 ## (Oct 26)
 
 - for relocatable object you can't have headers included in `__TEXT`?

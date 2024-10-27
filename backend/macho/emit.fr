@@ -42,10 +42,11 @@ WipSection :: @struct(
 
 fn output_macho(m: *QbeModule) List([]u8) = {  
     m.fill_from_libc(); // TODO: don't waste time doing this just to bump reloc state. 
+    alignment := if(m.goal == .MachoRelocatable, => 8, => macos_page_size);
     for_enum SegmentType { s | 
         //m.align_to(s, 8);  // forgeting this manifested as getting fucked on __LINKEDIT (when reading not writing because you're writting into a new allocation)
         // but do we need to do this? it makes it look more like clang does. 
-        m.align_to(s, macos_page_size);
+        m.align_to(s, alignment);
     };
     //m.align_to(.Code, macos_page_size);
     m.fixups_locked = true; // we're going to stomp the data section with relocation info so you can run it jitted anymore after this. 
@@ -114,8 +115,7 @@ fn output_macho(m: *QbeModule) List([]u8) = {
             }
         };
 
-        xx := align_to(MAX_GOT_SIZE, macos_page_size);
-        @assert(ptr_diff(s.mmapped.ptr, s.next) == xx, "TODO: const data segment");
+        @assert(ptr_diff(s.mmapped.ptr, s.next) == MAX_GOT_SIZE, "TODO: const data segment");
         
         chunks&.push(live_segment_part(m, .Code));
         segments&.push(prot = 7, name = "__TEXT", extra_file_offset = text_padding);
@@ -200,7 +200,7 @@ fn output_macho(m: *QbeModule) List([]u8) = {
     }, zeroed(*SegmentLoad));
         
     {
-        CHAINED_SIZE_GUESS :: 16000;
+        CHAINED_SIZE_GUESS :: 50000;
         chained := u8.list(CHAINED_SIZE_GUESS, temp());
         // note: virtual_segment_offset is only good when MachoExe because we skip segments for MachoRelocatable. 
         if m.goal == .MachoExe {
@@ -439,8 +439,8 @@ fn output_macho(m: *QbeModule) List([]u8) = {
                         @debug_assert(fix.type&.tag() == .DataAbsolute && s.kind != .Local, "__got reloc must be data");
                         continue();
                     };
-                    @assert(patch_segment == .Code, "TODO: non-text relocations");
-                    my_section_index := 0;
+                    sec: i64 = which_section(patch_segment).zext();
+                    rs := relocations[sec - 1]&;
                     segment_padding := if(patch_segment == .Code, => text_padding, => 0); // :HACK
                     r: RelocationFields = (
                         offset = patch_segment_offset - segment_padding, 
@@ -450,8 +450,7 @@ fn output_macho(m: *QbeModule) List([]u8) = {
                         extern = true, //s.kind != .Local,
                         relative = true,  // patch
                     );
-                    rs := relocations[my_section_index]&;
-                            
+                    
                     @match(fix.type) {
                         fn InReg(it) => {
                             // in the instruction we tell it: which register to use
@@ -477,11 +476,11 @@ fn output_macho(m: *QbeModule) List([]u8) = {
                             rs.reserve_type(i64)[] = encode_reloc(r);
                         }
                         fn DataAbsolute() => {
-                            panic("TODO: data reloc");
                             r.relative = false;
                             r.type = 0;   // ARM64_RELOC_UNSIGNED
                             r.length = 3; // one pointer
                             rs.reserve_type(i64)[] = encode_reloc(r);
+                            ptr_cast_unchecked(u8, i64, fix.patch_at)[] = 0;
                         }
                     };
                 };
@@ -491,6 +490,8 @@ fn output_macho(m: *QbeModule) List([]u8) = {
                 fn MutableData() => 2;
                 fn ConstantData() => panic("TODO: we don't use constant data yet");
             };
+            
+            // TODO: deal with things being both local_needs_reloc and export
             
             base := 1;
             enumerate m.local_needs_reloc { i, id | 
@@ -540,20 +541,11 @@ fn output_macho(m: *QbeModule) List([]u8) = {
                 append_padded_cstr(chained&, ugh, 1);
                 append_relocations(i + base, id[], m, relocations, load_commands);
             };
+            base += m.imports.len;
             syms_cmd.strings_size = trunc(chained.len - strings_start);
-            
-            // :SLOW just debugging until this works
-            for_symbols m { id, s | 
-                if !m.imports&.contains(id&) {
-                    each s.fixups { f | 
-                        assert(f.type&.tag() != .DataAbsolute, "TODO: data relocs");
-                    };  
-                };
-            };
         };
         
         @assert_le(chained.len, CHAINED_SIZE_GUESS, "resized and now the header pointer is junk"); 
-        
         
         if m.goal == .MachoExe { 
             // TODO: do i really need to have it load __LINKEDIT? its not used except by other commands that reference it. 

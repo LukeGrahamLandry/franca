@@ -33,6 +33,7 @@ Options :: @struct(
     slow := false,
     unsafe := false,
     own_exe := false,
+    relocatable := false,
 );
 
 Action  :: @enum(i64) (run, build, test); ::enum(Action);
@@ -81,10 +82,10 @@ fn driver(vtable: *ImportVTable) void = {
             } else {
                 if cmd.cfg.qbe {
                     assert(!cmd.cfg.show_asm, "TODO: -S with qbe");
-                    c.compile_with_included_qbe(fid, .ExportWithNames, arch, os, cmd.cfg.own_exe);
+                    c.compile_with_included_qbe(fid, .ExportWithNames, arch, os, @if(cmd.cfg.own_exe, @if(cmd.cfg.relocatable, .MachoRelocatable, .MachoExe), .AsmText));
                 } else {
                     assert(cmd.cfg.llvm, "rn only two backends. update me as needed!");
-                    c.compile_with_llvm(fid, .ExportWithNames, cmd.cfg.debug_info, arch, os, cmd.cfg.show_asm, cmd.cfg.slow);
+                    c.compile_with_llvm(fid, .ExportWithNames, cmd.cfg.debug_info, arch, os, cmd.cfg.show_asm, cmd.cfg.slow, cmd.cfg.relocatable);
                 };
                 println("[built a.out]");  // TODO: say the right path if its wasm
             };
@@ -92,6 +93,7 @@ fn driver(vtable: *ImportVTable) void = {
         };
         fn run() => {
             if(cmd.file == "", => @panic(usage_msg, "run", "runs the function called 'main'"));
+            assert(!cmd.cfg.relocatable, "use `build` to make linkable object (-c)");
             assert(!cmd.cfg.show_asm, "can't run with -S, use build instead");
             c := load_file(cmd.file, vtable, build_options);
             fid := c.get_unique_named("main");
@@ -117,7 +119,7 @@ fn driver(vtable: *ImportVTable) void = {
                 f();
             } else {
                 if cmd.cfg.llvm {
-                    c.compile_with_llvm(fid, .ExportWithNames, cmd.cfg.debug_info, arch, os, false, cmd.cfg.slow);
+                    c.compile_with_llvm(fid, .ExportWithNames, cmd.cfg.debug_info, arch, os, false, cmd.cfg.slow, false);
                 } else {
                     assert(!cmd.cfg.show_asm, "TODO: -S with qbe");
                     assert(cmd.cfg.qbe, "rn only two backends. update me as needed!");
@@ -135,9 +137,10 @@ fn driver(vtable: *ImportVTable) void = {
             exit(0);
         };
         fn test() => {
+            if(cmd.file == "", => @panic(usage_msg, "test", "runs all functions marked '#test'"));
+            assert(!cmd.cfg.relocatable, "use `build` to make linkable object (-c)");
             assert(!cmd.cfg.show_asm, "TODO: test with -S");
             assert(!cmd.cfg.wasm, "cannot run wasm");
-            if(cmd.file == "", => @panic(usage_msg, "test", "runs all functions marked '#test'"));
             c := load_file(cmd.file, vtable, build_options);
             
             tests := c.get_tagged("test");
@@ -168,10 +171,10 @@ fn driver(vtable: *ImportVTable) void = {
                 } else {
                     if cmd.cfg.qbe {
                         assert(!cmd.cfg.show_asm, "TODO: -S with qbe");
-                        c.compile_with_included_qbe(fid, .TestRunnerMain, arch, os, cmd.cfg.own_exe);
+                        c.compile_with_included_qbe(fid, .TestRunnerMain, arch, os, @if(cmd.cfg.own_exe, .MachoExe, .AsmText));
                     } else {
                         assert(cmd.cfg.llvm, "rn only two backends. update me as needed!");
-                        c.compile_with_llvm(fid, .TestRunnerMain, cmd.cfg.debug_info, arch, os, cmd.cfg.show_asm, cmd.cfg.slow);
+                        c.compile_with_llvm(fid, .TestRunnerMain, cmd.cfg.debug_info, arch, os, cmd.cfg.show_asm, cmd.cfg.slow, false);
                     };
                     @eprintln("[run     %]", c.get_string(c.get_function_name(fid)));
                     success := if cmd.cfg.blink {
@@ -193,7 +196,7 @@ fn driver(vtable: *ImportVTable) void = {
 }
 
 // TODO: too many args
-fn compile_with_llvm(c: CompCtx, fid: FuncId, entry: ProgramEntry, debug_info: bool, arch: Arch, os: Os, show_asm: bool, slow: bool) void #inline = {
+fn compile_with_llvm(c: CompCtx, fid: FuncId, entry: ProgramEntry, debug_info: bool, arch: Arch, os: Os, show_asm: bool, slow: bool, link: bool) void #inline = {
     ::if(Arch);
     ir_text := c.emit_llvm(temp(), @slice (fid), entry, arch, os);
     out := open_temp_file();
@@ -221,6 +224,9 @@ fn compile_with_llvm(c: CompCtx, fid: FuncId, entry: ProgramEntry, debug_info: b
     };
     if debug_info {
         args&.push("-g");
+    };
+    if link {
+        args&.push("-c");
     };
     if debug_info || slow {
         args&.push("-O0");
@@ -295,14 +301,14 @@ fn compile_with_qbe(c: CompCtx, fid: FuncId, entry: ProgramEntry, arch: Arch, os
     //ir_out.remove();   
 }
 
-fn compile_with_included_qbe(c: CompCtx, fid: FuncId, entry: ProgramEntry, arch: Arch, os: Os, own_exe: bool) void = {
+fn compile_with_included_qbe(c: CompCtx, fid: FuncId, entry: ProgramEntry, arch: Arch, os: Os, goal: QbeOutputFormat) void = {
     @if(ENABLE_INTERNAL_QBE, {
-        m := init_default_module(@if(own_exe, .MachoExe, .AsmText));
+        m := init_default_module(goal);
         
         env: TargetEnv = (arch = arch, os = os);
         asm_text := emit_qbe_included_dyn(m&, c&, @slice(fid), entry, env&);
         
-        asm_out := if(own_exe, => "a.out", => "target/franca_qbe_temp.s"); // TODO: the version of tmp file that lets you have an extension because it wants the .s
+        asm_out := if(goal != .AsmText, => "a.out", => "target/franca_qbe_temp.s"); // TODO: the version of tmp file that lets you have an extension because it wants the .s
         
         ir_out := open_trunc(asm_out.sym().c_str()).unwrap(); // TODO: sane error message if you forget to unwrap this
         for(asm_text&){bucket|
@@ -310,27 +316,31 @@ fn compile_with_included_qbe(c: CompCtx, fid: FuncId, entry: ProgramEntry, arch:
         };
         
         args: List(Str) = list(temp());
-        if own_exe {
-            ir_out.close();
-            args&.push("-s");
-            args&.push("-");
-            args&.push("a.out");
-            success := run_cmd_blocking("codesign", args.items()); 
-            assert(success, "sign failed");
-        } else {
-            args&.push(asm_out);
-            args&.push("-o");
-            args&.push("a.out");
-            triple := target_triple(arch, os);
-            args&.push_all(@slice("-target", triple));
-            @println("Run assembler %", args.items());
-            start := timestamp();
-            success := run_cmd_blocking("clang", args.items()); 
-            assert(success, "as failed");
-            end := timestamp();
-            @println("[assembler time: %ms]", end - start);
-        };
-        
+        @match(goal) {
+            fn MachoExe() => {
+                ir_out.close();
+                args&.push("-s");
+                args&.push("-");
+                args&.push("a.out");
+                success := run_cmd_blocking("codesign", args.items()); 
+                assert(success, "sign failed");
+            }
+            fn AsmText() => {
+                args&.push(asm_out);
+                args&.push("-o");
+                args&.push("a.out");
+                triple := target_triple(arch, os);
+                args&.push_all(@slice("-target", triple));
+                @println("Run assembler %", args.items());
+                start := timestamp();
+                success := run_cmd_blocking("clang", args.items()); 
+                assert(success, "as failed");
+                end := timestamp();
+                @println("[assembler time: %ms]", end - start);
+            }
+            fn MachoRelocatable() => ();
+            @default => panic("unhandled QbeOutputType");
+        }
         //ir_out.remove();   
     }, panic("internal qbe is disabled"));
 }
@@ -422,6 +432,9 @@ fn parse_cli_args() Command = {
             };
             @case("-aot=qbe-jit") => panic("invalid backend: -aot=qbe-jit");
             @case("-aot=qbe-asm") => panic("invalid backend: -aot=qbe-asm");
+            @case("-c") => {
+                cfg.relocatable = true;
+            };
             @default => {
                 extra_args&.push(arg);
             };

@@ -67,20 +67,31 @@ fn assignment_operator(place: FatExpr, value: FatExpr, f: OverloadSet) FatExpr =
 }
 
 /// Like rust, not c. hex escapes eat exactly two chars. no octal escapes except \0. 
-// Note: you can't use the string escapes in the body of this function, or any it calls, because there's no bootstrapping step. 
 // :blessed: the compiler generates comptime calls to this function when you use backslashes in a string literal. 
 fn __string_escapes(raw: Str) Str #fold = {
+    out := u8.list(raw.len, ast_alloc());
+    i := expand_string_escapes(raw, out&);
+    if i != -1 {
+        panic("Unknown escape character");  // TODO: compile_error. better message. show line. 
+    };
+    // TODO: should put in the string pool. 
+    //       maybe this should be a macro that works on idents so compiler knows they're still just a string literal.
+    //       but that kinda feels less elegant. 
+    out.items() 
+}
+
+// Note: you can't use the string escapes in the body of this function, or any it calls, because there's no bootstrapping step. 
+// returns -1 on success or index of error.
+fn expand_string_escapes(raw: Str, out: *List(u8)) i64 = {
     backslash       : u8 : 92.trunc();
     doublequote     : u8 : 34.trunc();
     horizontal_tab  : u8 :  9.trunc();
     carriage_return : u8 : 13.trunc();
     new_line        : u8 : 0x0A;
-
-    out : List(u8) = list(raw.len, ast_alloc());
     i := 0;
-    while(=> i.lt(raw.len)){
+    while => i < raw.len {
         c := raw[i]; i += 1;
-        if(c.eq(backslash)){
+        if c == backslash {
             c = raw[i]; i += 1;
             c = @switch(c) {
                 @case("n".ascii()) => new_line;
@@ -91,17 +102,17 @@ fn __string_escapes(raw: Str) Str #fold = {
                 @case("'".ascii()) => "'".ascii();  // rust has this one because of single quoted char literals. 
                 @case("0".ascii()) => @as(u8) 0.trunc();
                 @case("x".ascii()) => {
+                    if raw.len < i + 2 {
+                        return(i - 1); // not enough space
+                    };
                     s := raw.subslice(i, 2); i += 2;
+                    // TODO: hex() should return an error!
                     @as(u8) hex(s).trunc()
                 };
-                @default fn(_: u8) => panic("Unknown escape character"); // TODO: compile_error. better message. show line. 
+                @default fn(c) => return(i - 1);
             };
         };
-        out&.push(c);
+        out.push(c);
     };
-    
-    // TODO: should put in the string pool. 
-    //       maybe this should be a macro that works on idents so compiler knows they're still just a string literal.
-    //       but that kinda feels less elegant. 
-    out.items() 
+    -1
 }

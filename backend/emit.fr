@@ -158,20 +158,28 @@ fn emit_data_to_segment(self: *QbeModule, dat: *Qbe.Dat) void = {
         }
         fn DB() => {
             @debug_assert(!dat.isref, "can't have a byte sized pointer");
-            if dat.isstr {
-                // TODO: this is wrong. I have to handle escapes. 
-                s := dat.u.str.str();
-                q :: "\"".ascii();
-                @debug_assert(s[0] == q && s[s.len - 1] == q, "strings are quoted");
-                s = s.slice(1, s.len - 1); // quotes
-                
-                (@as([]u8) (ptr = next[], len = s.len)).copy_from(s);
-                next[].offset(s.len)[] = 0;
-                next[] = next[].offset(s.len + 1);
+            len := if dat.isstr {
+                s := dat.u.str;
+                if dat.has_quotes_and_escapes {
+                    // When building ir manually you'll probably just give us the raw bytes.
+                    // But this makes it easy to run Qbe's text based tests. Really the parser should handle this. 
+                    q :: "\"".ascii();
+                    @debug_assert(s[0] == q && s[s.len - 1] == q, "strings are quoted");
+                    s = s.slice(1, s.len - 1); // quotes
+                    space_left := segment.mmapped.len - ptr_diff(segment.mmapped.ptr, next[]);
+                    @assert(space_left > 0, "data segment full");
+                    dest: List(u8) = (maybe_uninit = (ptr = next[], len = space_left), len = 0, gpa = panicking_allocator);
+                    expand_string_escapes(s, dest&);
+                    dest.len
+                } else {
+                    (@as([]u8) (ptr = next[], len = s.len)).copy_from(s);
+                    s.len
+                }
             } else {
                 next[][] = dat.u.num.trunc();
-                next[] = next[].offset(1);
+                1
             };
+            next[] = next[].offset(len);
         }
         fn DL() => {
             @assert_eq(u8.int_from_ptr(next[]).mod(8), 0, "sorry can't do unaligned constants yet");
@@ -188,6 +196,10 @@ fn emit_data_to_segment(self: *QbeModule, dat: *Qbe.Dat) void = {
                 };
                 // Since we need the absolute address in memory, even local symbols need a relocation. 
                 symbol.fixups&.push((patch_at = next[], type = .DataAbsolute), self.gpa);
+                if self.goal == .MachoRelocatable && !symbol.local_but_marked_for_relocation {
+                    self.local_needs_reloc&.push(id);
+                    symbol.local_but_marked_for_relocation = true;
+                };
             } else {
                 ptr[] = dat.u.num;
             };
