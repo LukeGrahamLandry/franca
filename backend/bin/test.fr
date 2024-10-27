@@ -73,20 +73,14 @@ fn run_one(qbe_path: Str, file_path: Str, verbose: bool, do_my_own_exes: bool) b
     @print("%", f_pad(file_path, 40, .After));
     
     driver := extract_section(src, "driver");
-    
-    if do_my_own_exes && driver.is_some() {
-        @println("[skip]");
-        return(true);  
-    };
     expected := extract_section(src, "output");
-    
     
     args := Str.list(temp());
     if do_my_own_exes {
-        args&.push("-e");
+        args&.push(if(driver.is_some(), => "-c", => "-e"));
     };
     args&.push("-o");
-    args&.push(if(do_my_own_exes, => exe_path, => ir_path));
+    args&.push(if(do_my_own_exes, => if(driver.is_some(), => obj_path_mine, => exe_path), => ir_path));
     args&.push(file_path);
     run(qbe_path, "gen ir");
     
@@ -114,13 +108,22 @@ fn run_one(qbe_path: Str, file_path: Str, verbose: bool, do_my_own_exes: bool) b
         run("clang", "driver");
     };
     
-    if !do_my_own_exes {
+    if do_my_own_exes && driver.is_none() {
+        // Tim Apple likes to waste my time. 
         args&.clear();
-        args&.push(ir_path);
-        args&.push("-c");
-        args&.push("-o");
-        args&.push(obj_path_mine);
-        run("clang", "compile ir");
+        args&.push("-s");
+        args&.push("-");
+        args&.push(exe_path);
+        run("codesign", "compile ir");
+    } else {
+        if !do_my_own_exes {
+            args&.clear();
+            args&.push(ir_path);
+            args&.push("-c");
+            args&.push("-o");
+            args&.push(obj_path_mine);
+            run("clang", "compile ir");
+        };
         
         args&.clear();
         args&.push(obj_path_mine);
@@ -130,13 +133,6 @@ fn run_one(qbe_path: Str, file_path: Str, verbose: bool, do_my_own_exes: bool) b
         args&.push("-o");
         args&.push(exe_path);
         run("clang", "link");
-    } else {
-        // Tim Apple likes to waste my time. 
-        args&.clear();
-        args&.push("-s");
-        args&.push("-");
-        args&.push(exe_path);
-        run("codesign", "compile ir");
     };
     args&.clear();
     args&.push_all(@slice("a", "b", "c"));

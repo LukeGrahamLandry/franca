@@ -23,7 +23,6 @@
 #include_std("backend/opt/mem.fr");
 
 ENABLE_INTERNAL_QBE :: true;  // until i want to enable it on github actions
-LINK_QBE_C :: false;
 DO_INLINING :: true; // TODO: make this a runtime toggle so you can make sure you're actually testing calls
 
 // easy-ish (?) things to try to get used to making changes. 
@@ -58,7 +57,6 @@ ar rvs qbe_merged.o util.o parse.o abi.o cfg.o mem.o ssa.o alias.o load.o copy.o
 clang -dynamiclib -o qbe_merged.dylib main.o util.o parse.o abi.o cfg.o mem.o ssa.o alias.o load.o copy.o fold.o simpl.o live.o spill.o rega.o emit.o amd64/targ.o amd64/sysv.o amd64/isel.o amd64/emit.o arm64/targ.o arm64/abi.o arm64/isel.o arm64/emit.o rv64/targ.o rv64/abi.o rv64/isel.o rv64/emit.o
 */
 
-
 QbeModule :: @rec @struct(
     // These have to be pointers to the symbols Qbe externs because it uses them. 
     types: *QList(Qbe.Typ), // typ
@@ -81,13 +79,15 @@ QbeModule :: @rec @struct(
     got_cursor  := 0,
     stubs_cursor := 0,
     goal: QbeOutputFormat,
+    exports: List(u32),
     
     // TODO: everything that touches these needs to be rewritten eventually. 
     want_text_asm := false,
     outf := zeroed(*FILE),
+    forever: ArenaAlloc,
 );
 
-QbeOutputFormat :: @enum(i64) (AsmText, JitOnly, MachoExe);
+QbeOutputFormat :: @enum(i64) (AsmText, JitOnly, MachoExe, MachoRelocatable);
 ::enum(QbeOutputFormat);
 
 MAX_GOT_SIZE :: 1.shift_left(13); // 15 :dontforget
@@ -109,6 +109,8 @@ fn init_default_module(goal: QbeOutputFormat) QbeModule =
 
 fn init(segment_size: i64, gpa: Alloc, code_alloc: Alloc, goal: QbeOutputFormat) QbeModule = {
     m := QbeModule.zeroed();
+    m.forever = init(gpa, size_of(Qbe.Ins) * 1.shift_left(20) + size_of(SymbolBucket) * IMask + 1.shift_left(10));
+    forever := m.forever&.borrow();
     m.segments = EnumMap(SegmentType, SegmentCursor).zeroed();
     mem := code_alloc.alloc(u8, segment_size * 3); // TODO: ask for the alignment we need.
     make_segment :: fn(s: SegmentType, start: i64, end: i64) void => {
@@ -120,8 +122,9 @@ fn init(segment_size: i64, gpa: Alloc, code_alloc: Alloc, goal: QbeOutputFormat)
     make_segment(.MutableData, segment_size*2, segment_size*3);
     m.gpa = gpa;
     m.goal = goal;
+    m.exports = list(gpa);
     m.want_text_asm = goal == .AsmText;
-    m.symbols = gpa.alloc(SymbolBucket, IMask + 1);
+    m.symbols = forever.alloc_zeroed(SymbolBucket, IMask + 1);
     {   // TODO: this is kinda ass
         // :GotAtConstantDataBase
         next := m.segments&[.ConstantData].next&;
@@ -141,16 +144,16 @@ fn init(segment_size: i64, gpa: Alloc, code_alloc: Alloc, goal: QbeOutputFormat)
         // note: not doing this. using fill_target_info instead. 
         // m.target[] = get_qbe_dylib_variable(Qbe.Target, "T_arm64_apple")[]; 
     }, {
-        m.types  = gpa.box(@type m.types[]);
+        m.types  = forever.box(@type m.types[]);
         
-        //m.insb   = gpa.box(@type m.insb[]); // :FUCKED i overflow the size becuase i figured 65k bytes aught to be enough for everyone. -- Oct 8  
-        mem := gpa.alloc(Qbe.Ins, Qbe.MaxInstructions);
+        //m.insb   = forever.box(@type m.insb[]); // :FUCKED i overflow the size becuase i figured 65k bytes aught to be enough for everyone. -- Oct 8  
+        mem := forever.alloc(Qbe.Ins, Qbe.MaxInstructions);
         ::?*Array(Qbe.Ins, Qbe.MaxInstructions);
         m.insb = mem.as_array().unwrap();
         
-        m.curi   = gpa.box(@type m.curi[]); // TODO: megadumb if its the page allocaotr
-        m.debug  = gpa.box_zeroed(@type m.debug[]);
-        m.target = gpa.box(@type m.target[]);
+        m.curi   = forever.box(@type m.curi[]); // TODO: megadumb if its the page allocaotr
+        m.debug  = forever.box_zeroed(@type m.debug[]);
+        m.target = forever.box(@type m.target[]);
     });
     //m.debug[Qbe.DebugKey.Memory.raw()] = true;
     //m.debug[Qbe.DebugKey.RegAlloc.raw()] = true;
@@ -160,6 +163,23 @@ fn init(segment_size: i64, gpa: Alloc, code_alloc: Alloc, goal: QbeOutputFormat)
     m.types[] = new(0, Qbe.Pool.PHeap); // TODO: check the magic in QbeBuilder.init to make sure you remember to do this. 
     m.curi[] = m.insb.index_unchecked(Qbe.MaxInstructions);
     m
+}
+
+fn drop(m: *QbeModule, slowly_free_from_gpa: bool) void = {
+    fst := m.segments.data&[0].mmapped;
+    page_allocator.dealloc(u8, (ptr = fst.ptr, len = fst.len * m.segments.data&.len()));
+    if slowly_free_from_gpa {
+        for_symbols m { s |
+            s.fixups&.drop(m.gpa);
+        };
+        each m.symbols { bucket | 
+            if bucket.n != 0 {
+                bucket.data.free();
+            };
+        };
+    };
+    m.forever&.deinit();
+    m[] = zeroed(@type m[]);  // just to make sure you crash if you try to use it again. 
 }
 
 fn fill_target_info(t: *Qbe.Target, target: Qbe.TargetAbi) void = {

@@ -1,3 +1,12 @@
+## (Oct 26)
+
+- for relocatable object you can't have headers included in `__TEXT`?
+- `ld: Assertion failed: (addr >= lastAddr && "function addresses not sorted"), function FunctionStarts`
+  means your `__text` offset was high like it has to be when you include the load commands.
+- single func relocatable. fail 28/58
+
+## (Oct 25)
+
 - print the most negative number
 - emit constant of a null CStr
 - switch on u32

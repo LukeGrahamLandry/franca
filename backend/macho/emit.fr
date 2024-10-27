@@ -6,6 +6,7 @@
 
 // life is better if you're always 8 byte aligned. 
 
+// TODO: run non-driver tests with no-op relocatable as well as direct to exe
 
 WipSegment :: @struct(
     name: Str,
@@ -13,6 +14,7 @@ WipSegment :: @struct(
     virtual_size := 0,
     file_size := 0,
     sections: []WipSection = empty(),
+    extra_file_offset := 0, // HACK __TEXT doesn't include the headers for a relocatable objdect but it does for an exe. 
 );
 
 WipSection :: @struct(
@@ -34,10 +36,6 @@ fn output_macho(m: *QbeModule) List([]u8) = {
     m.fixups_locked = true; // we're going to stomp the data section with relocation info so you can run it jitted anymore after this. 
     chunks := list([]u8, 10, temp());
     chunks&.push(empty()); // this used to be for commands but now thats part of .Code which is stupid. :commandsispartofcodenow
-    // TODO: waste. dead zone Code[stubs_cursor..SIZE_OF_STUBS]
-    chunks&.push(live_segment_part(m, .Code));  // :MySegmentsStartAt1 :CodeIsFirst
-    chunks&.push(live_segment_part(m, .ConstantData));  // TODO: waste. dead zone ConstantData[got_cursor..MAX_GOT_SIZE]
-    chunks&.push(live_segment_part(m, .MutableData));
     
     commands: List(u8) = (maybe_uninit = (ptr = m.segment_address(.Code, 0), len = COMMANDS_SIZE_GUESS), len = 0, gpa = page_allocator); // :cantreallocatebutgivegooderrormessage
     command_count := 0;
@@ -47,11 +45,14 @@ fn output_macho(m: *QbeModule) List([]u8) = {
     macho_header[] = (
         cpu_type = 0x0100000C, // arm 64bit
         cpu_subtype = 0x00000000,
-        file_type = 0x00000002, // Demand paged executable file. (idk, thats what rust uses ¯\_(ツ)_/¯ )
+        file_type = @if(m.goal == .MachoExe, .Executable, .Object),
         commands_count = 0, 
         commands_size = 0, 
         flags = 0b00000000001000000000000010000101, // ¯\_(ツ)_/¯  what rust uses except I don't HAS_TLV_DESCRIPTORS
     );
+    if m.goal == .MachoRelocatable {
+        macho_header.flags = 0;  // dont claim no_undefs
+    };
     
     ::enum_basic(LoadCommand);
     // I guess this is to make sure you segfault on low addresses. 
@@ -60,25 +61,45 @@ fn output_macho(m: *QbeModule) List([]u8) = {
     zero_page_size :: 0x100000000;
     
     segments := WipSegment.list(6, temp());
-    segments&.push(prot = 5, name = "__TEXT");
-    segments&.push(prot = 3, name = "__DATA_CONST");
-    segments&.push(prot = 3, name = "__DATA");
-    enumerate segments& { i, s |
-        s.virtual_size = m.segments&[@as(SegmentType) i].mmapped.len;
-        s.file_size = chunks[i + 1].len;
+    if m.goal == .MachoExe {
+        // TODO: waste. dead zone Code[stubs_cursor..SIZE_OF_STUBS]
+        chunks&.push(live_segment_part(m, .Code));  // :MySegmentsStartAt1 :CodeIsFirst
+        chunks&.push(live_segment_part(m, .ConstantData));  // TODO: waste. dead zone ConstantData[got_cursor..MAX_GOT_SIZE]
+        chunks&.push(live_segment_part(m, .MutableData));
+        
+        segments&.push(prot = 5, name = "__TEXT");
+        segments&.push(prot = 3, name = "__DATA_CONST");
+        segments&.push(prot = 3, name = "__DATA");
+        enumerate segments& { i, s |
+            s.virtual_size = m.segments&[@as(SegmentType) i].mmapped.len;
+            s.file_size = chunks[i + 1].len;
+        };
+        segments&.insert(0, (prot = 0, name = "__PAGEZERO", virtual_size = zero_page_size)); 
+        
+        code_flag := ATTR_PURE_INSTRUCTIONS.bit_or(ATTR_SOME_INSTRUCTIONS);
+        xx: WipSection = (name = "__text", flag = code_flag, offset_in_segment = COMMANDS_SIZE_GUESS + SIZE_OF_STUBS, size = chunks[1].len - SIZE_OF_STUBS - COMMANDS_SIZE_GUESS);
+        // 12 is the size of each stub (adrp, ldr, br)
+        yy: WipSection = (name = "__stubs", size = SIZE_OF_STUBS, reserved2 = 12, flag = code_flag.bit_or(S_SYMBOL_STUBS), offset_in_segment = COMMANDS_SIZE_GUESS);
+        segments[1].sections = @slice(xx, yy);
+        // TODO: do i need reserved1 set to something? maybe thats an offset into LC_SYMTAB? or maybe undefined_symbol_count, that seems more consistant in the binraries i checked. 
+        xx: WipSection = (name = "__got", size = chunks[2].len, flag = S_NON_LAZY_SYMBOL_POINTERS, offset_in_segment = 0);
+        segments[2].sections = @slice(xx);
+        xx: WipSection = (name = "__data", size = chunks[3].len, flag = 0, offset_in_segment = 0);
+        segments[3].sections = @slice(xx);
     };
-    segments&.insert(0, (prot = 0, name = "__PAGEZERO", virtual_size = zero_page_size)); 
-    
-    code_flag := ATTR_PURE_INSTRUCTIONS.bit_or(ATTR_SOME_INSTRUCTIONS);
-    xx: WipSection = (name = "__text", flag = code_flag, offset_in_segment = COMMANDS_SIZE_GUESS + SIZE_OF_STUBS, size = chunks[1].len - SIZE_OF_STUBS - COMMANDS_SIZE_GUESS);
-    // 12 is the size of each stub (adrp, ldr, br)
-    yy: WipSection = (name = "__stubs", size = SIZE_OF_STUBS, reserved2 = 12, flag = code_flag.bit_or(S_SYMBOL_STUBS), offset_in_segment = COMMANDS_SIZE_GUESS);
-    segments[1].sections = @slice(xx, yy);
-    // TODO: do i need reserved1 set to something? maybe thats an offset into LC_SYMTAB? or maybe undefined_symbol_count, that seems more consistant in the binraries i checked. 
-    xx: WipSection = (name = "__got", size = chunks[2].len, flag = S_NON_LAZY_SYMBOL_POINTERS, offset_in_segment = 0);
-    segments[2].sections = @slice(xx);
-    xx: WipSection = (name = "__data", size = chunks[3].len, flag = 0, offset_in_segment = 0);
-    segments[3].sections = @slice(xx);
+    if m.goal == .MachoRelocatable {
+        // TODO: add back DATA
+        chunks&.push(live_segment_part(m, .Code));
+        padding := SIZE_OF_STUBS + COMMANDS_SIZE_GUESS;
+        segments&.push(prot = 7, name = "__TEXT", extra_file_offset = padding);
+        enumerate segments& { i, s |
+            s.virtual_size = m.segments&[@as(SegmentType) i].mmapped.len;
+            s.file_size = chunks[i + 1].len - padding;
+        };
+        code_flag := ATTR_PURE_INSTRUCTIONS.bit_or(ATTR_SOME_INSTRUCTIONS);
+        xx: WipSection = (name = "__text", flag = code_flag, offset_in_segment = 0, size = chunks[1].len - padding);
+        segments[0].sections = @slice(xx);
+    };
    
     file_offset := 0;
     base_file_offset := @slice(0, 0, 0, 0); 
@@ -102,6 +123,7 @@ fn output_macho(m: *QbeModule) List([]u8) = {
             cmd.address = virtual_offset.bitcast();
             cmd.address_size = if(s.file_size != 0, => s.file_size.bitcast(), => s.virtual_size.bitcast());
             virtual_segment_offset[segment_index] = virtual_offset;
+            file_offset += s.extra_file_offset;
             cmd.file_offset = if(s.file_size != 0, => file_offset.bitcast(), => 0);
             base_file_offset[segment_index] = cmd.file_offset.bitcast();
             cmd.size = s.file_size.bitcast(); 
@@ -124,296 +146,282 @@ fn output_macho(m: *QbeModule) List([]u8) = {
         };
     };
     
-    start := commands.len;
-    linkedit_load_header := commands&.reserve_type(LoadCommandHeader);
-    linkedit_load_header.type = LoadCommand.SegmentLoad.raw();
-    command_count += 1;
-    link_edit_load_command := commands&.reserve_type(SegmentLoad);
-    linkedit_load_header.size = trunc(commands.len - start);
-    
+    link_edit_load_command := @if(m.goal == .MachoExe, { 
+        start := commands.len;
+        linkedit_load_header := commands&.reserve_type(LoadCommandHeader);
+        linkedit_load_header.type = LoadCommand.SegmentLoad.raw();
+        command_count += 1;
+        link_edit_load_command := commands&.reserve_type(SegmentLoad);
+        linkedit_load_header.size = trunc(commands.len - start);
+        link_edit_load_command
+    }, zeroed(*SegmentLoad));
+        
     {
         CHAINED_SIZE_GUESS :: 16000;
         chained := u8.list(CHAINED_SIZE_GUESS, temp());
-        chain_header := chained&.reserve_type(ChainedFixupsHeader);
-        
-        fixups, symbols := collect_aot_fixups(m);
-        @debug_assert_ge(fixups.len, m.got_cursor / 8, "at least each __got entry needs a fixup");
-        sort :: quicksort(FixP, fn(a, b) => ptr_diff(a.fix.patch_at, b.fix.patch_at) >= 0);
-        sort(fixups);
-        // at this point, `fixups` is in the order of the patch targets in virtual memory which is the order we need to emit the fixup chains. 
-        import_count := 0;
-        for symbols { s |
-            if s.kind != .Local {
-                s.got_lookup_offset = import_count;
-                import_count += 1;
-            };
-        };
-        // imports are fixed size. so we can reserve that early
-        imports_len_b := import_count * 4;
-        imports_offset := chained.len; // TODO: is this right?
-        chained&.reserve(imports_len_b);
-        chained.len += imports_len_b;
-        symbols_offset := chained.len; // TODO: is this right?
-        imports_bytes := chained.items().slice(chained.len - imports_len_b, chained.len);
-        imports_bytes: []u32 = (ptr = ptr_cast_unchecked(u8, u32, imports_bytes.ptr), len = import_count);
-        for symbols { s |
-            if s.kind != .Local {
-                n: u32 = trunc(chained.len - symbols_offset);
-                imports_bytes[s.got_lookup_offset] = encode_import(lib_ordinal = 1, weak = false, name_offset = n); // TODO: don't assume libc
-                mangled := items(@format("_%", s.name) temp()); // :slow don't do an extra copy
-                append_padded_cstr(chained&, mangled, 1);
-            };
-        };
-        zero_pad_to_align(chained&, 4);
-        
-        //
-        // Now we have to do the fixup chain page starts. 
-        // This is how we tell it where it has to do relocations. 
-        //
-        starts_offset := chained.len;
-        // TODO: uncomment the real number when ready
-        seg_count :: 2 + enum_count(SegmentType);  // __zeropage, <the rest>, __linkedit
-        chained&.reserve_type(u32)[] = seg_count.trunc();
-        // indexed by segment index
-        offset_to_csis: []u32 = (ptr = ptr_cast_unchecked(u8, u32, chained.maybe_uninit.ptr.offset(chained.len)), len = seg_count); // from chained[starts_offset]
-        csis_by_segment := temp().alloc_zeroed(*ChainedStartsInSegment, seg_count); // :last2bytesalias
-        unprocessed_sentinal :: 0;
-        range(0, seg_count) { i |
-            o := chained&.reserve_type(u32);
-            o[] = unprocessed_sentinal;
-        };
-        
-        chained&.zero_pad_to_align(8);
-        WipFixup :: @struct(
-            page_index: i64,
-            offset_in_page: i64,
-            fix: *FixP,
-        );
-        
-        emplace_fixup :: fn(fix: *FixP, next_encoded: i64) void => {
-            @debug_assert_ge(next_encoded, 0, "fixups cant go backwards. we sorted them so this can't happen.");
-            encoded := encode_chained(
-                next = next_encoded.trunc(),
-                reserved = 0,
-                payload = @if(fix.symbol.kind == .Local, {
-                    dest_segment := fix.symbol.segment.raw() + 1; // :MySegmentsStartAt1
-                    target := virtual_segment_offset[dest_segment] - zero_page_size + fix.symbol.offset;
-                    @assert_lt(target, 1.shift_left(36), "rebase > 36 bits");
-                    (Rebase = (high8 = 0, target = target))
-                }, {
-                    // got_lookup_offset has been converted to an ordinal already. 
-                    o := fix.symbol.got_lookup_offset;
-                    @debug_assert(o >= 0 && o < import_count, "bad ordinal %", o);
-                    (Bind = (addend = 0, ordinal = o.trunc()))
-                })
-            );
-            ref := ptr_cast_unchecked(u8, i64, fix.fix.patch_at);
-            ref[] = encoded;
-        };
-        
-        prev_fixup: ?WipFixup = .None;
-        each fixups { fix |
-            // TODO: what if there's a page in the middle with no relocations? 
-            seg, off_in_segment := compiler_address_to_segment_offset(m, fix.fix.patch_at);
-            segment_index := seg.raw() + 1;  // :MySegmentsStartAt1
-            page_index, offset_in_page := off_in_segment.div_mod(macos_page_size);
-            if offset_to_csis[segment_index] == unprocessed_sentinal.trunc() {
-                // This is our first time seeing this segment. 
-                
-                // Flush the last entry of the previous segment. 
-                if prev_fixup& { prev | 
-                    emplace_fixup(prev.fix, 0);
-                    prev_fixup = .None;
-                };
-                
-                start_of_csis := chained.len;
-                csis_off := chained.len - starts_offset;
-                @debug_assert_ne(csis_off, 0);
-                csis := chained&.reserve_type(ChainedStartsInSegment);  // one of these per segment.  
-                chained.len -= 2; // take it back now yall :last2bytesalias
-                csis[] = ChainedStartsInSegment.zeroed();
-                csis_by_segment[segment_index] = csis;
+        // note: virtual_segment_offset is only good when MachoExe because we skip segments for MachoRelocatable. 
+        if m.goal == .MachoExe {
+            chain_header := chained&.reserve_type(ChainedFixupsHeader);
             
-                // offset to the first page in this segment. 
-                // not a file offset! its virtual offset from first interesting segment. 
-                // coincententially those are the same number for binaries made by clang...
-                csis.segment_offset = virtual_segment_offset[segment_index].bitcast() - zero_page_size;
-                
-                offset_to_csis[segment_index] = csis_off.trunc();
-                
-                csis.page_count = 1;
-                range(0, page_index) { _ |
-                    // TODO: a test that gets here
-                    csis.page_count += 1;  // :calcsizeatend
-                    chained&.reserve_type(u16)[] = page_start_no_fixups;
+            fixups, symbols := collect_aot_fixups(m);
+            @debug_assert_ge(fixups.len, m.got_cursor / 8, "at least each __got entry needs a fixup");
+            sort :: quicksort(FixP, fn(a, b) => ptr_diff(a.fix.patch_at, b.fix.patch_at) >= 0);
+            sort(fixups);
+            // at this point, `fixups` is in the order of the patch targets in virtual memory which is the order we need to emit the fixup chains. 
+            import_count := 0;
+            for symbols { s |
+                if s.kind != .Local {
+                    s.got_lookup_offset = import_count;
+                    import_count += 1;
                 };
-                chained&.reserve_type(u16)[] = offset_in_page.trunc(); // :calcsizeatend
-                
-                csis.pointer_format = 6; // who knows man, i just work here. TODO
-                csis.page_size = macos_page_size;
-                csis.max_valid_pointer = 0; // TODO: what does this mean?
-                csis.size = trunc(chained.len - start_of_csis); // :calcsizeatend
             };
-            if prev_fixup& { prev | 
-                // will always be the same segment as before or we would have flushed the fixup above. 
-                next_offset := if(prev.page_index == page_index, => (offset_in_page - prev.offset_in_page) / 4) {
-                    // we've moved on to a different page in the same section. 
-                    // so add another entry to the csis.page_start array.
-                    while => prev.page_index + 1 != page_index {    
-                        prev.page_index += 1;
-                        csis_by_segment[segment_index].page_count += 1;
-                        csis_by_segment[segment_index].size += 2;
+            // imports are fixed size. so we can reserve that early
+            imports_len_b := import_count * 4;
+            imports_offset := chained.len; // TODO: is this right?
+            chained&.reserve(imports_len_b);
+            chained.len += imports_len_b;
+            symbols_offset := chained.len; // TODO: is this right?
+            imports_bytes := chained.items().slice(chained.len - imports_len_b, chained.len);
+            imports_bytes: []u32 = (ptr = ptr_cast_unchecked(u8, u32, imports_bytes.ptr), len = import_count);
+            for symbols { s |
+                if s.kind != .Local {
+                    n: u32 = trunc(chained.len - symbols_offset);
+                    imports_bytes[s.got_lookup_offset] = encode_import(lib_ordinal = 1, weak = false, name_offset = n); // TODO: don't assume libc
+                    mangled := items(@format("_%", s.name) temp()); // :slow don't do an extra copy
+                    append_padded_cstr(chained&, mangled, 1);
+                };
+            };
+            zero_pad_to_align(chained&, 4);
+            
+            //
+            // Now we have to do the fixup chain page starts. 
+            // This is how we tell it where it has to do relocations. 
+            //
+            starts_offset := chained.len;
+            // TODO: uncomment the real number when ready
+            seg_count :: 2 + enum_count(SegmentType);  // __zeropage, <the rest>, __linkedit
+            chained&.reserve_type(u32)[] = seg_count.trunc();
+            // indexed by segment index
+            offset_to_csis: []u32 = (ptr = ptr_cast_unchecked(u8, u32, chained.maybe_uninit.ptr.offset(chained.len)), len = seg_count); // from chained[starts_offset]
+            csis_by_segment := temp().alloc_zeroed(*ChainedStartsInSegment, seg_count); // :last2bytesalias
+            unprocessed_sentinal :: 0;
+            range(0, seg_count) { i |
+                o := chained&.reserve_type(u32);
+                o[] = unprocessed_sentinal;
+            };
+            
+            chained&.zero_pad_to_align(8);
+            WipFixup :: @struct(
+                page_index: i64,
+                offset_in_page: i64,
+                fix: *FixP,
+            );
+            
+            emplace_fixup :: fn(fix: *FixP, next_encoded: i64) void => {
+                @debug_assert_ge(next_encoded, 0, "fixups cant go backwards. we sorted them so this can't happen.");
+                encoded := encode_chained(
+                    next = next_encoded.trunc(),
+                    reserved = 0,
+                    payload = @if(fix.symbol.kind == .Local, {
+                        dest_segment := fix.symbol.segment.raw() + 1; // :MySegmentsStartAt1
+                        target := virtual_segment_offset[dest_segment] - zero_page_size + fix.symbol.offset;
+                        @assert_lt(target, 1.shift_left(36), "rebase > 36 bits");
+                        (Rebase = (high8 = 0, target = target))
+                    }, {
+                        // got_lookup_offset has been converted to an ordinal already. 
+                        o := fix.symbol.got_lookup_offset;
+                        @debug_assert(o >= 0 && o < import_count, "bad ordinal %", o);
+                        (Bind = (addend = 0, ordinal = o.trunc()))
+                    })
+                );
+                ref := ptr_cast_unchecked(u8, i64, fix.fix.patch_at);
+                ref[] = encoded;
+            };
+            
+            prev_fixup: ?WipFixup = .None;
+            each fixups { fix |
+                // TODO: what if there's a page in the middle with no relocations? 
+                seg, off_in_segment := compiler_address_to_segment_offset(m, fix.fix.patch_at);
+                segment_index := seg.raw() + 1;  // :MySegmentsStartAt1
+                page_index, offset_in_page := off_in_segment.div_mod(macos_page_size);
+                if offset_to_csis[segment_index] == unprocessed_sentinal.trunc() {
+                    // This is our first time seeing this segment. 
+                    
+                    // Flush the last entry of the previous segment. 
+                    if prev_fixup& { prev | 
+                        emplace_fixup(prev.fix, 0);
+                        prev_fixup = .None;
+                    };
+                    
+                    start_of_csis := chained.len;
+                    csis_off := chained.len - starts_offset;
+                    @debug_assert_ne(csis_off, 0);
+                    csis := chained&.reserve_type(ChainedStartsInSegment);  // one of these per segment.  
+                    chained.len -= 2; // take it back now yall :last2bytesalias
+                    csis[] = ChainedStartsInSegment.zeroed();
+                    csis_by_segment[segment_index] = csis;
+                
+                    // offset to the first page in this segment. 
+                    // not a file offset! its virtual offset from first interesting segment. 
+                    // coincententially those are the same number for binaries made by clang...
+                    csis.segment_offset = virtual_segment_offset[segment_index].bitcast() - zero_page_size;
+                    
+                    offset_to_csis[segment_index] = csis_off.trunc();
+                    
+                    csis.page_count = 1;
+                    range(0, page_index) { _ |
+                        // TODO: a test that gets here
+                        csis.page_count += 1;  // :calcsizeatend
                         chained&.reserve_type(u16)[] = page_start_no_fixups;
                     };
-                    csis_by_segment[segment_index].page_count += 1;
-                    csis_by_segment[segment_index].size += 2;
-                    chained&.reserve_type(u16)[] = offset_in_page.trunc();
-                    0
+                    chained&.reserve_type(u16)[] = offset_in_page.trunc(); // :calcsizeatend
+                    
+                    csis.pointer_format = 6; // who knows man, i just work here. TODO
+                    csis.page_size = macos_page_size;
+                    csis.max_valid_pointer = 0; // TODO: what does this mean?
+                    csis.size = trunc(chained.len - start_of_csis); // :calcsizeatend
                 };
-                emplace_fixup(prev.fix, next_offset);
+                if prev_fixup& { prev | 
+                    // will always be the same segment as before or we would have flushed the fixup above. 
+                    next_offset := if(prev.page_index == page_index, => (offset_in_page - prev.offset_in_page) / 4) {
+                        // we've moved on to a different page in the same section. 
+                        // so add another entry to the csis.page_start array.
+                        while => prev.page_index + 1 != page_index {    
+                            prev.page_index += 1;
+                            csis_by_segment[segment_index].page_count += 1;
+                            csis_by_segment[segment_index].size += 2;
+                            chained&.reserve_type(u16)[] = page_start_no_fixups;
+                        };
+                        csis_by_segment[segment_index].page_count += 1;
+                        csis_by_segment[segment_index].size += 2;
+                        chained&.reserve_type(u16)[] = offset_in_page.trunc();
+                        0
+                    };
+                    emplace_fixup(prev.fix, next_offset);
+                    prev_fixup = .None;
+                };
+                prev_fixup = (Some = (page_index = page_index, offset_in_page = offset_in_page, fix = fix));
+            };
+            
+            // Flush the final entry of the final segment. 
+            if prev_fixup& { prev | 
+                emplace_fixup(prev.fix, 0);
                 prev_fixup = .None;
             };
-            prev_fixup = (Some = (page_index = page_index, offset_in_page = offset_in_page, fix = fix));
+    
+            enumerate offset_to_csis { i, it |
+                @debug_assert(u32.int_from_ptr(it) == u8.int_from_ptr(chained.maybe_uninit.ptr) + starts_offset + 4 + i * 4, "miscounted offset_to_csis");
+            };
+            
+            @debug_assert(offset_to_csis[0] == 0 && offset_to_csis[offset_to_csis.len - 1] == 0, "__PAGEZERO and __LINKEDIT shouldn't have fixups.");
+            
+            chained&.zero_pad_to_align(8);
+            @assert_le(chained.len, CHAINED_SIZE_GUESS, "resized and now the header pointer is junk");
+            chain_header[] = (
+                imports_count = import_count.trunc(), 
+                imports_format = 1, 
+                symbols_format = 0, 
+                version = 0, 
+                starts_offset = starts_offset.trunc(), 
+                imports_offset = imports_offset.trunc(), 
+                symbols_offset = symbols_offset.trunc(),
+            );
+            chained_size := chained.len;
+            
+            // this must include the part before symbol table or llvm-objcopy complains bout them overlapping
+            start := commands.len;
+            h := commands&.reserve_type(LoadCommandHeader);
+            h.type = LoadCommand.ChainedFixups.raw();
+            command_count += 1;
+            cmd := commands&.reserve_type(LinkEditBlob);
+            // TODO: using file_offset way down here feels a bit fragile. 
+            cmd[] = (offset = file_offset.trunc(), size = chained_size.trunc());  // :CodeIsFirst its fine to change this, you just have to do the math here. 
+            h.size = trunc(commands.len - start);
         };
         
-        // Flush the final entry of the final segment. 
-        if prev_fixup& { prev | 
-            emplace_fixup(prev.fix, 0);
-            prev_fixup = .None;
-        };
-
-        enumerate offset_to_csis { i, it |
-            @debug_assert(u32.int_from_ptr(it) == u8.int_from_ptr(chained.maybe_uninit.ptr) + starts_offset + 4 + i * 4, "miscounted offset_to_csis");
-        };
-        
-        @debug_assert(offset_to_csis[0] == 0 && offset_to_csis[offset_to_csis.len - 1] == 0, "__PAGEZERO and __LINKEDIT shouldn't have fixups.");
-        
-        chained&.zero_pad_to_align(8);
-        @assert_le(chained.len, CHAINED_SIZE_GUESS, "resized and now the header pointer is junk");
-        chain_header[] = (
-            imports_count = import_count.trunc(), 
-            imports_format = 1, 
-            symbols_format = 0, 
-            version = 0, 
-            starts_offset = starts_offset.trunc(), 
-            imports_offset = imports_offset.trunc(), 
-            symbols_offset = symbols_offset.trunc(),
-        );
-        chained_size := chained.len;
-        /*
         //
         // now there's still more stuff that goes in __linkedit 
         //
         
-        // for now we're only recording the symbols we're trying to dynamic import. 
-        {
+        if m.goal == .MachoRelocatable {
             start := commands.len;
             h := commands&.reserve_type(LoadCommandHeader);
             h.type = LoadCommand.LinkEditSymbolInfo.raw();
             command_count += 1;
             cmd := commands&.reserve_type(LinkEditSymbolInfo);
             cmd[] = LinkEditSymbolInfo.zeroed();
-            cmd.undefined_symbol_index = 0;
-            cmd.undefined_symbol_count = symbols.len.trunc();
+            // TODO: output local symbols for debugging (in exes as well). 
+            cmd.local_symbol_count = 1; // I think you always need index 0 to be junk.
+            cmd.external_symbol_index = cmd.local_symbol_index + cmd.local_symbol_count;  // for consistancy
+            cmd.external_symbol_count = m.exports.len.trunc();
+            cmd.undefined_symbol_index = cmd.external_symbol_index + cmd.external_symbol_count; // this is dumb if count is zero but lld complains otherwise
+            // TODO: we are going to need undefined symbols for imports but haven't got that far yet. 
             h.size = trunc(commands.len - start);
-            
-            // TODO: are you supposed to put those in (indirect_symbol_offset, indirect_symbol_count) too?
             
             start := commands.len;
             h := commands&.reserve_type(LoadCommandHeader);
             h.type = LoadCommand.LinkEditSymbolTable.raw();
             command_count += 1;
-            cmd := commands&.reserve_type(LinkEditSymbolTable);
-            cmd[] = LinkEditSymbolTable.zeroed();
-            cmd.symbol_count = symbols.len.trunc();
+            syms_cmd := commands&.reserve_type(LinkEditSymbolTable);
+            syms_cmd[] = LinkEditSymbolTable.zeroed();
+            syms_cmd.symbol_count = cmd.external_symbol_count + cmd.local_symbol_count + cmd.undefined_symbol_count;
             // the data for those goes in __LINKEDIT
             // TODO: using file_offset way down here feels a bit fragile. 
-            cmd.symbols_offset = trunc(file_offset + chained.len);
-            size_of_symbols := symbols.len * size_of(SymbolEntry);
-            cmd.strings_offset = cmd.symbols_offset + trunc(size_of_symbols);
+            syms_cmd.symbols_offset = trunc(file_offset + chained.len);
+            size_of_symbols: i64 = syms_cmd.symbol_count.zext() * size_of(SymbolEntry);
+            syms_cmd.strings_offset = syms_cmd.symbols_offset + trunc(size_of_symbols);
             h.size = trunc(commands.len - start);
             
-            symbols_bytes: []SymbolEntry = (ptr = ptr_cast_unchecked(u8, SymbolEntry, chained.maybe_uninit.ptr.offset(chained.len)), len = symbols.len);
+            symbols_bytes: []SymbolEntry = (ptr = ptr_cast_unchecked(u8, SymbolEntry, chained.maybe_uninit.ptr.offset(chained.len)), len = syms_cmd.symbol_count.zext());
             chained.len += size_of_symbols; @debug_assert(chained.len <= chained.maybe_uninit.len);
             strings_start := chained.len;
             symbols_bytes.set_zeroed();
-            enumerate symbols { i, s |
-                entry := symbols_bytes.index(i);
-                entry.symbol_type = 1;
-                entry.data_info = 256; // ordinal 1. we assume libc. TODO
-                entry.name_offset = trunc(chained.len - strings_start);
-                append_padded_cstr(chained&, s.name.str(), 1);
-            };
-            cmd.strings_size = trunc(chained.len - strings_start);
+            symbols_bytes[0].section_number = 1; // junk
+            symbols_bytes[0].symbol_type    = 14; // junk
+            symbols_bytes[0].name_offset = trunc(chained.len - strings_start);
+            append_padded_cstr(chained&, "_junk", 1);
             
+            enumerate m.exports { i, id |
+                s := m.get_symbol_info(id[]);
+                entry := symbols_bytes.index(i + 1);
+                // this only works for exports!
+                entry.symbol_type = 15;  // bottom bit means external. 14 means defined in section.
+                entry.section_number = 1;   @assert(s.segment == .Code, "TODO: export data");
+                entry.desc = 0; // i think exports don't use this.     for imports, 256 ordinal 1.
+                entry.name_offset = trunc(chained.len - strings_start);
+                entry.symbol_address = 0; // TODO
+                ugh := items(@format("_%", s.name) temp());
+                append_padded_cstr(chained&, ugh, 1);
+            };
+            syms_cmd.strings_size = trunc(chained.len - strings_start);
         };
-        */
         
         @assert_le(chained.len, CHAINED_SIZE_GUESS, "resized and now the header pointer is junk"); 
         
-        // this must include the part before symbol table or llvm-objcopy complains bout them overlapping
-        start := commands.len;
-        h := commands&.reserve_type(LoadCommandHeader);
-        h.type = LoadCommand.ChainedFixups.raw();
-        command_count += 1;
-        cmd := commands&.reserve_type(LinkEditBlob);
-        // TODO: using file_offset way down here feels a bit fragile. 
-        cmd[] = (offset = file_offset.trunc(), size = chained_size.trunc());  // :CodeIsFirst its fine to change this, you just have to do the math here. 
-        h.size = trunc(commands.len - start);
-        
         chunks&.push(chained.items()); // TODO: is it the rules that this be the last thing in the file? 
         
-        // TODO: do i really need to have it load __LINKEDIT? its not used except by other commands that reference it. 
-        // TODO: can i just reserve_type here or do they all have to be at the beginning?
-        //       theres no reason it would matter by lief.parse doesn't like it: "Can't find the segment associated with the LC_DYLD_CHAINED_FIXUPS payload"
-        cmd := link_edit_load_command;
-        cmd[] = SegmentLoad.zeroed();
-        cmd.name = str_to_16_byte_value("__LINKEDIT");
-        cmd.address_size = chained.len.bitcast();
-        cmd.size = chained.len.bitcast();
-        cmd.max_prot = 1;
-        cmd.init_prot = 1;
-        cmd.file_offset = file_offset.bitcast();
-        cmd.address = virtual_offset.bitcast();
+        
+        if m.goal == .MachoExe { 
+            // TODO: do i really need to have it load __LINKEDIT? its not used except by other commands that reference it. 
+            // TODO: can i just reserve_type here or do they all have to be at the beginning?
+            //       theres no reason it would matter by lief.parse doesn't like it: "Can't find the segment associated with the LC_DYLD_CHAINED_FIXUPS payload"
+            cmd := link_edit_load_command;
+            cmd[] = SegmentLoad.zeroed();
+            cmd.name = str_to_16_byte_value("__LINKEDIT");
+            cmd.address_size = chained.len.bitcast();
+            cmd.size = chained.len.bitcast();
+            cmd.max_prot = 1;
+            cmd.init_prot = 1;
+            cmd.file_offset = file_offset.bitcast();
+            cmd.address = virtual_offset.bitcast();
+        };
     };
     
-    {  // LC_LOAD_DYLINKER
-        start := commands.len;
-        h := commands&.reserve_type(LoadCommandHeader);
-        h.type = LoadCommand.LoadDynamicLinker.raw();
-        command_count += 1;
-        commands&.reserve_type(u32)[] = 12;
-        append_padded_cstr(commands&, "/usr/lib/dyld", 8);
-        h.size = trunc(commands.len - start);
-    };
-    {
-        start := commands.len;
-        h := commands&.reserve_type(LoadCommandHeader);
-        h.type = LoadCommand.MainEntryPoint.raw();
-        command_count += 1;
-        cmd := commands&.reserve_type(MainEntryPoint);
-        symbol := m.get_symbol_info(m.intern("main".sym().c_str()));
-        assert(symbol.kind == .Local, "no main function?");
-        // offset is from the start of interesting virtual memory? 
-        cmd[] = (entry_offset = symbol.offset.bitcast(), stack_size = 0);  // :CodeIsFirst its fine to change this, you just have to do the math here. 
-        h.size = trunc(commands.len - start);
-        @debug_assert_ge(symbol.offset, COMMANDS_SIZE_GUESS + SIZE_OF_STUBS);
-    };
-    // TODO: don't assume you want libc. but on macos you always do. 
-    {  // LC_LOAD_DYLIB
-        start := commands.len;
-        h := commands&.reserve_type(LoadCommandHeader);
-        h.type = LoadCommand.LinkLibrary.raw();
-        command_count += 1;
-        cmd := commands&.reserve_type(LinkLibrary);
-        // TODO: where does one get these numbers? this is just what clang does. 
-        cmd[] = (
-            time_date_stamp = 2,
-            current_version = 86467587,
-            compatible_version = 65536,
-        );
-        append_padded_cstr(commands&, "/usr/lib/libSystem.B.dylib", 8);
-        h.size = trunc(commands.len - start);
+    if m.goal == .MachoExe { 
+        macho_load_dylinker(commands&, command_count&, "/usr/lib/dyld");
+        macho_main_entry_point(m, commands&, command_count&);
+        // TODO: don't assume you want libc. but on macos you always do. 
+        macho_load_dylib(commands&, command_count&, "/usr/lib/libSystem.B.dylib");
     };
     
     macho_header.commands_size = (commands.len - MachoHeader.size_of()).trunc();
@@ -425,7 +433,47 @@ fn output_macho(m: *QbeModule) List([]u8) = {
     
     chunks
 }
-    
+
+fn macho_load_dylib(commands: *List(u8), command_count: *i64, name: Str) void = {
+    start := commands.len;
+    h := commands.reserve_type(LoadCommandHeader);
+    h.type = LoadCommand.LinkLibrary.raw();
+    command_count[] += 1;
+    cmd := commands.reserve_type(LinkLibrary);
+    // TODO: where does one get these numbers? i used to just do paste clang used but 0s seem fine
+    cmd[] = (
+        time_date_stamp = 0,
+        current_version = 0,
+        compatible_version = 0,
+    );
+    append_padded_cstr(commands, name, 8);
+    h.size = trunc(commands.len - start);
+}
+
+fn macho_load_dylinker(commands: *List(u8), command_count: *i64, name: Str) void #once = {
+    start := commands.len;
+    h := commands.reserve_type(LoadCommandHeader);
+    h.type = LoadCommand.LoadDynamicLinker.raw();
+    command_count[] += 1;
+    commands.reserve_type(u32)[] = 12;
+    append_padded_cstr(commands, name, 8);
+    h.size = trunc(commands.len - start);
+}
+
+fn macho_main_entry_point(m: *QbeModule, commands: *List(u8), command_count: *i64) void #once = {
+    start := commands.len;
+    h := commands.reserve_type(LoadCommandHeader);
+    h.type = LoadCommand.MainEntryPoint.raw();
+    command_count[] += 1;
+    cmd := commands.reserve_type(MainEntryPoint);
+    symbol := m.get_symbol_info(m.intern("main".sym().c_str()));
+    assert(symbol.kind == .Local, "no main function?");
+    // offset is from the start of interesting virtual memory? 
+    cmd[] = (entry_offset = symbol.offset.bitcast(), stack_size = 0);  // :CodeIsFirst its fine to change this, you just have to do the math here. 
+    h.size = trunc(commands.len - start);
+    @debug_assert_ge(symbol.offset, COMMANDS_SIZE_GUESS + SIZE_OF_STUBS);
+}
+
 fn compiler_address_to_segment_offset(m: *QbeModule, address: *u8) Ty(SegmentType, i64) = {
     low  := MAX_i64;
     high := 0;

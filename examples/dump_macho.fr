@@ -49,15 +49,11 @@ fn main() void = {
                     
                     if header.relocations_count != 0 {
                         @println("          % relocations:", header.relocations_count);
-                        relocations := ptr_cast_unchecked(u8, RelocationEntry, full_bytes.ptr.offset(header.relocations_file_offset.zext()));
-                        relocations: []RelocationEntry = (ptr = relocations, len = header.relocations_count.zext());
+                        relocations := ptr_cast_unchecked(u8, i64, full_bytes.ptr.offset(header.relocations_file_offset.zext()));
+                        relocations: []i64 = (ptr = relocations, len = header.relocations_count.zext());
                         for relocations { r | 
-                            symbol := r.packed_fields.bit_and(1.shift_left(24) - 1); // index in __LINKEDIT Symbol Table (when extern=true?) 
-                            relative := r.packed_fields.shift_right_logical(24).bit_and(0b1) == 1;
-                            length := r.packed_fields.shift_right_logical(25).bit_and(0b11); // (byte, word, long, quad)
-                            extern := r.packed_fields.shift_right_logical(27).bit_and(0b1) == 1;
-                            type := r.packed_fields.shift_right_logical(28).bit_and(0b1111); // 4=ARM64_RELOC_PAGEOFF12, 3=ARM64_RELOC_PAGE21, 2=bl?
-                            @println("          - (offset = %, symbol = %, relative = %, length = %, extern = %, type = %)", r.offset, symbol, relative, length, extern, type);
+                            fields := decode_reloc(r);
+                            @println("          - %", fields&);
                         };
                     };
                 };
@@ -269,6 +265,7 @@ fn main() void = {
                         };
                         @print(" |%| ", node.string);
                     };
+                    // TODO: print the encoded value (its an address i think)
                     range(0, terminal_size.bitcast()) { i |
                         b := rest&.pop_type(u8)[];
                         t := u8.list(temp());
@@ -365,6 +362,7 @@ fn pop_type(bytes: *[]u8, $T: Type) *T #generic = {
 }
 
 ::enum_basic(LoadCommand);
+::enum(MachOFileType);
 ::DeriveFmt(MachoHeader);
 ::DeriveFmt(LoadCommandHeader);
 ::DeriveFmt(SegmentLoad);
@@ -392,6 +390,7 @@ XXX :: get_field_type(ChainedReloc, @symbol payload);
 ::DeriveFmt(get_variant_type(XXX, XXX.Tag().Rebase));
 ::DeriveFmt(get_variant_type(XXX, XXX.Tag().Bind));
 ::DeriveFmt(u128);
+::DeriveFmt(RelocationFields);
 
 fn display(a: *u64, out: *List(u8)) void = a[].display(out);
 fn display(a: *u16, out: *List(u8)) void = a[].display(out);

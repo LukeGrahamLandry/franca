@@ -4,11 +4,17 @@ MachoHeader :: @struct(
     magic: u32 = macho_magic,
     cpu_type: u32,
     cpu_subtype: u32,
-    file_type: u32,
+    file_type: MachOFileType,
     commands_count: u32,
     commands_size: u32,
     flags: u32,
     _reserved: u32 = 0x00000000,
+);
+
+MachOFileType :: @enum(u32) (
+    _Invalid = 0,
+    Object = 1,
+    Executable = 2,
 );
 
 // "If a load command starts with 0x80000000 bit set that means the load command is necessary in order to be able to load or run the binary."" 
@@ -92,19 +98,24 @@ LinkEditSymbolTable :: @struct(
     strings_size: u32, // total size in bytes, NOT number of strings
 );
 
+
+// nlist
 SymbolEntry :: @struct(
     name_offset: u32,
     symbol_type: u8,
     section_number: u8,
-    data_info: u16, // n_desc. high 8 bits are library ordinal number?
+    desc: u16, // n_desc. high 8 bits are library ordinal number?
     symbol_address: u64,
 );
 
 LinkEditSymbolInfo :: @struct(
+    // local means private. only used for debugging?
     local_symbol_index: u32,
     local_symbol_count: u32,
+    // external means public symbols that we export
     external_symbol_index: u32,
     external_symbol_count: u32,
+    // undefined means we import them. 
     undefined_symbol_index: u32,
     undefined_symbol_count: u32,
     content_table_offset: u32,
@@ -221,6 +232,7 @@ fn decode_chained(data: i64) ChainedReloc = {
     ))
 }
 
+// TODO: add bitfields to the language.
 fn encode_chained(r: ChainedReloc) i64 = {
     data: i64 = r.next.zext().bit_and(1.shift_left(12) - 1).shift_left(64-1-12);
     @debug_assert_eq(r.reserved, 0, "TODO: reserved");
@@ -253,10 +265,38 @@ ChainedStartsInSegment :: @struct(
 
 page_start_no_fixups :: 65535;
 
-RelocationEntry :: @struct(
-    offset: i32,
-    packed_fields: u32,
+RelocationFields :: @struct(
+    offset: i64,
+    symbol: u32,  // index in __LINKEDIT Symbol Table (when extern=true?) 
+    length: u8,   // (byte, word, long, quad)
+    type: u8,     // 4=ARM64_RELOC_PAGEOFF12, 3=ARM64_RELOC_PAGE21, 2=bl?
+    extern: bool,
+    relative: bool,
 );
+
+// TODO: add bitfields to the language.
+fn decode_reloc(relocation_entry: i64) RelocationFields = {
+    offset: u32 = relocation_entry.bit_and(1.shift_left(32) - 1).trunc();
+    packed_fields := relocation_entry.shift_right_logical(32);
+    (
+        offset   = (@as(i32) offset.bitcast()).intcast(),
+        symbol   = packed_fields.bit_and(1.shift_left(24) - 1).trunc(), 
+        relative = packed_fields.shift_right_logical(24).bit_and(0b1) == 1,
+        length   = packed_fields.shift_right_logical(25).bit_and(0b11).trunc(), 
+        extern   = packed_fields.shift_right_logical(27).bit_and(0b1) == 1,
+        type     = packed_fields.shift_right_logical(28).bit_and(0b1111).trunc(),
+    )
+}
+
+fn encode_reloc(r: RelocationFields) i64  = {
+    d: i64 = r.symbol.zext().bit_and(1.shift_left(24) - 1);
+    d = d.bit_or(r.relative.int().shift_left(24));
+    d = d.bit_or(r.extern.int().shift_left(27));
+    d = d.bit_or(r.length.zext().shift_left(25).bit_and(0b11));
+    d = d.bit_or(r.type.zext().shift_left(28).bit_and(0b1111));
+    d = (@as(i32) offset.intcast()).zext().bit_or(d.shift_left(32));
+    d
+}
 
 u128 :: @struct(low: u64, high: u64);
 
