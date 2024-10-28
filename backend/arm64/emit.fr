@@ -463,13 +463,11 @@ fn loadaddr_bits(self: *ArmState, c: *Qbe.Con, dest_reg: i64) void = {
     @match(symbol.kind) {
         fn DynamicPatched() => panic("TODO: handle predeclared import");
         fn Local() => {
-            if self.m.goal == .MachoRelocatable  { // && symbol.segment != .Code // :canireallynothavecodeberelative
+            // :canireallynothavecodeberelative
+            // TODO: is there some way to have it not move around my functions so i can use relative calls within this one segment?
+            if self.m.goal == .MachoRelocatable  { // && symbol.segment != .Code 
                 // we're creating input for a static linker and we want it to be able to move shit around. 
                 symbol.fixups&.push((patch_at = patch_addr, type = (InReg = (r = dest_reg, increment = 0))), self.m.gpa);
-                if !symbol.local_but_marked_for_relocation {
-                    self.m.local_needs_reloc&.push(c.sym.id);
-                    symbol.local_but_marked_for_relocation = true;
-                };
             };
             
             // we've already compiled it so just compute its address directly.
@@ -700,12 +698,10 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
                         assert(distance.abs() < 1.shift_left(26), "can't call that far but I don't let modules be that big yet.");
                         self.inst_bytes_only(b(s_trunc(distance, 26), 1));
                         // :canireallynothavecodeberelative
+                        // TODO: I don't have a test that requires this 
+                        //       but i think you do because you need the other ones?
                         if self.m.goal == .MachoRelocatable { 
                             symbol.fixups&.push((patch_at = patch_at, type = .Call), self.m.gpa);
-                            if !symbol.local_but_marked_for_relocation {
-                                self.m.local_needs_reloc&.push(c.sym.id);
-                                symbol.local_but_marked_for_relocation = true;
-                            };
                         }; 
                     };
                     fn Pending() => {
@@ -792,10 +788,13 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
             } else {
                 c := self.f.get_constant(b);
                 @debug_assert(c.type == .CBits, "cmp to addr");
-                if c.bits.i < 1.shift_left(12) - 1 {
+                // TODO: write a test that fails if you put `c.bits.i < 1.shift_left(12) - 1` here
+                if c.bits.i.bit_and(1.shift_left(12) - 1) == c.bits.i {
                     self.inst(cmp_im(si, a.int_reg(), @as(u12) c.bits.i, 0));
                 } else {
-                    self.inst(cmp_im(si, a.int_reg(), @as(u12) @as(i64) c.bits.i.shift_right_logical(12), 1));
+                    encoded := c.bits.i.shift_right_logical(12);
+                    @assert_eq(encoded.shift_left(12), c.bits.i, "bad cmp const");
+                    self.inst(cmp_im(si, a.int_reg(), @as(u12) @as(i64) encoded, 1));
                 };
             }
         }
@@ -808,7 +807,8 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
             } else {
                 c := self.f.get_constant(b);
                 @debug_assert(c.type == .CBits, "cmp to addr");
-                if c.bits.i < 1.shift_left(12) - 1 {
+                // TODO: write a test that fails if you put `c.bits.i < 1.shift_left(12) - 1` here
+                if c.bits.i.bit_and(1.shift_left(12) - 1) == c.bits.i {
                     self.inst(cmn_im(si, a.int_reg(), @as(u12) c.bits.i, 0));
                 } else {
                     self.inst(cmn_im(si, a.int_reg(), @as(u12) @as(i64) c.bits.i.shift_right_logical(12), 1));

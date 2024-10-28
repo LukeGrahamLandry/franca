@@ -1,4 +1,38 @@
-## (Oct 27)
+## (Oct 28)
+
+- `farm_game` doesn't work with new backend. asserts on `_start_canary` being nonzero after calling sglue_environment.
+  i can't recreate the problem with just my language so its either we disagree with clang about size of the struct or its a calling convention thing somehow.
+  oh heck, thats crippling. in from_bc:emit_bounce_fn i was treating the indirect ret addr as first arg (link it is inside a bc block),
+  but it actually has to be a blit to a qbe return instruction. so it was just using whatever junk happened to be in x0 instead of x8,
+  which i was the address of the whole SgDesc.  
+  but on the plus side the compiler now works on new backend now!
+  at least for hello world.
+- ok this is getting confusing. we need some notation.
+  f_l = the normal one compiled by llvm.  
+  f_lq = compiled by f_l with the new backend
+  f_lqq = compiled by f_lq with the new backend
+  f_lql = compiled by f_lq with llvm
+- the take away i think is that the new backend cannot compile itself but it can compile the old backend.
+  but luckily for me the broken f_lq also fails tests. ie. `push_it`.
+  so now i have two binaries for that test that should be the same and one segfaults, and i can diff them?
+  thats creepy.
+  the new one does
+
+  - `cmp XX, #0, lsl #12` instead of `cmp XX, #0` for cbz
+  - `mov XX, #YY; add	XX, x29, XX, uxtx` instead of `add XX, x29, #YY` for addr of slot
+
+  which is interesting because f_lq is clearly broken since its different,
+  but those instruction sequences do the same thing.
+  ok thats still too big tho lets try something smaller.
+  only one of the qbe tests fails with the broken compiler.
+  oh shit which one changes tho. was collatz then rega1.
+  so we've produced UB. thats fun.
+  cry.
+  `c.bits.i < 1.shift_left(12) - 1` is not at all the same thing as
+  `c.bits.i.bit_and(1.shift_left(12) - 1) == c.bits.i`.
+  and that was the only problem.
+
+## emit mach-o reloc (Oct 27)
 
 - string escapes, 1
   and that last failing qbe test is for thread locals which i haven't got to yet.
@@ -9,8 +43,10 @@
   failing 250/287.
 - DataAbsolute relocs and track when data contains a local pointer, 52.
 - add to local_needs_reloc in do_jit_fixups so you handle when code references data, 34.
+- for data pointer reloc, the value in the data is added to the symbol address so it needs to be 0. all run_tests pass!
+  that took so long to figure out.
 
-## (Oct 26)
+## emit mach-o reloc (Oct 26)
 
 - for relocatable object you can't have headers included in `__TEXT`?
 - `ld: Assertion failed: (addr >= lastAddr && "function addresses not sorted"), function FunctionStarts`
@@ -29,7 +65,7 @@
 - switch on u32
 - aaa global_module is a different variable between the precompiled and the normal.
 
-## (Oct 24)
+## emit mach-o exe (Oct 24)
 
 - i was hoping i could use `https://lief.re/doc/latest/formats/macho/python.html`
   to start with a working exe and remove parts until it broke.
