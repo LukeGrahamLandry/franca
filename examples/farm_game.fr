@@ -428,34 +428,33 @@ fn driver(vtable: *ImportVTable) void #export = {
     main_f := {vtable.find_unique_func}(comp, main_sym).unwrap();
     {vtable.compile_func}(comp, main_f, .Jit).unwrap();
 
-    ptr := {vtable.get_jitted_ptr}(comp, main_f).unwrap();
-    f := assume_types_fn(Arg = void, Ret = void, ptr = ptr);
-    f();
-    exit(0);
+    //ptr := {vtable.get_jitted_ptr}(comp, main_f).unwrap();
+    //f := assume_types_fn(Arg = void, Ret = void, ptr = ptr);
+    //f();
+    //exit(0);
     //print_stacktrace_on_panic();
     
     c: CompCtx = (data = comp, vtable = vtable);
-    ir_text := c.emit_llvm(temp(), @slice (main_f), .ExportWithNames, get_comptime_arch(), .macos); // :HardcodeOs
-    out := open_temp_file();
+    env: TargetEnv = (arch = get_comptime_arch(), os = .macos);   // :HardcodeOs
+    m := init_default_module(.MachoRelocatable);
+    ir_text := emit_qbe_included_dyn(m&, c&, @slice(main_f), .ExportWithNames, env&);
+    
+    out := open_trunc("farm.o".sym().c_str()).unwrap();
     for(ir_text&){bucket|
-        out.fd&.write(bucket);
+        out&.write(bucket);
     };
-    @println("Write llvm ir to %", out&.s_name());
+    out.close();
     // TODO: get these from the lib. 
     a := SOKOL_MACOS_LINK_ARGS;
     args := libs&.get_aot_objects();
     args&.push_all(a&.items());
-    args&.push_all(@slice ("-x", "ir", out&.s_name(), "-o", "farm.out"));    
+    args&.push_all(@slice ("farm.o", "-o", "farm.out"));    
     //args&.push("-O2");
     @println("building aot exe: %", args.items());
     success := run_cmd_blocking("clang", args.items());
     assert(success, "clang failed");
-    
-    out.remove(); // TODO: defer 
 }
 
-fn driver_hook(ctx: CompCtx, aot_object_files: *List(Str)) void = {
-    
-}
-
-#include_std("compiler/backend/llvm.fr");
+LINK_QBE_C :: false;
+#include_std("backend/lib.fr");
+#include_std("compiler/ast_external.fr");  

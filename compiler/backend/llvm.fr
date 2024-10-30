@@ -793,13 +793,13 @@ MAX_I32 :: 1.shift_left(32).sub(1);
 fn inst_literal(self: *EmitLlvm, value: i64, ty: Prim) EmitLlvm.Val = {
     v := self.get_var(ty);
     self.out&.reserve(100);
-    // TODO: use @switch here. 
-    if(ty.eq(.F64)){
-        // for f64, llvm wants the bits as hex. 
-        h := fmt_hex(value);
-        @fmt(self.out&.current(), "   % = fadd double %, 0.0\n", v, h); 
-    } {
-        if(ty.eq(.F32)){
+    @match(ty) {
+        fn F64() => {
+            // for f64, llvm wants the bits as hex. 
+            h := fmt_hex(value);
+            @fmt(self.out&.current(), "   % = fadd double %, 0.0\n", v, h); 
+        }
+        fn F32() => {
             // for f32, llvm wants an f64 as hex that happens to be exactly representable as f32. 
             // but we store it as an f32 on the bottom with the high bits zeroed. 
             assert(value.lt(MAX_I32), "ICE: too many bits for f32");
@@ -810,15 +810,15 @@ fn inst_literal(self: *EmitLlvm, value: i64, ty: Prim) EmitLlvm.Val = {
             // TODO: does it change if you try to print here??????
             h := fmt_hex(value);
             @fmt(self.out&.current(), "   % = fadd float %, 0.0\n", v, h); 
-        } {
-            if(ty.eq(.P64)) {
-                @assert_eq(value, 0); // a literal pointer that isn't null doesn't make sense for AOT.
-                @fmt(self.out&.current(), "   % = inttoptr i64 % to ptr\n", v, value); 
-            } {
-                // TODO: better error message if you forget an argument
-                // TODO: just track constants myself in Val? you can't just assign to a constsant int. 
-                @fmt(self.out&.current(), "   % = add % %, 0\n", v, ty.llvm_type(), value); 
-            }
+        }
+        fn P64() => {
+            @assert_eq(value, 0); // a literal pointer that isn't null doesn't make sense for AOT.
+            @fmt(self.out&.current(), "   % = inttoptr i64 % to ptr\n", v, value); 
+        }
+        @default => {
+            // TODO: better error message if you forget an argument
+            // TODO: just track constants myself in Val? you can't just assign to a constsant int. 
+            @fmt(self.out&.current(), "   % = add % %, 0\n", v, ty.llvm_type(), value); 
         };
     };
     v

@@ -1,5 +1,5 @@
-echo "### franca -> f_l"
-franca examples/default_driver.fr build compiler/other_main.fr -aot=llvm || exit
+echo "### ./boot -> f_l"
+./boot/aarch64-apple-darwin/franca2 examples/default_driver.fr build compiler/other_main.fr -aot=llvm || exit
 cp a.out target/f_l
 
 echo "### f_l -> f_ll"
@@ -26,8 +26,6 @@ echo "### f_lq -> f_lqq"
 ./target/f_lq examples/default_driver.fr build compiler/other_main.fr -aot=qbe-exe || exit
 cp a.out target/f_lqq
 
-# this wont work
 echo "### f_lq == f_lqq ?"
 diff target/f_lq target/f_lqq || exit
 echo "### f_lq has a working q-backend"
-

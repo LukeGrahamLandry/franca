@@ -124,13 +124,11 @@ fn do_fixups(self: *QbeModule, address: *u8, symbol: *SymbolInfo) void = {
                     if symbol.offset == -1 {
                         // create a new trampoline in the __stubs section. 
                         code := self.segments&.index(.Code);
-                        symbol.offset = self.stubs_cursor + COMMANDS_SIZE_GUESS;
-                        trampoline: []u32 = (ptr = ptr_cast_unchecked(u8, u32, code.mmapped.ptr.offset(symbol.offset)), len = 3);
+                        symbol.offset = self.stubs&.len() + COMMANDS_SIZE_GUESS;
+                        trampoline := self.stubs&.reserve(Array(u32, 3));
                         reg := Arm64Reg.IP0.raw() - 1; // x16
-                        new_got_reloc = load_from_got(self, symbol, reg, trampoline.slice(0, 2), address).or_else(=> new_got_reloc);
+                        new_got_reloc = load_from_got(self, symbol, reg, trampoline.items().slice(0, 2), address).or_else(=> new_got_reloc);
                         trampoline[2] = br(reg, 0);
-                        self.stubs_cursor += trampoline.len * 4;
-                        @assert_lt(self.stubs_cursor, SIZE_OF_STUBS + COMMANDS_SIZE_GUESS, "out of space for stubs");
                     };
                     stub_trampoline := self.segment_address(.Code, symbol.offset);
                     distance = ptr_diff(fixup.patch_at, stub_trampoline) / 4;
@@ -158,6 +156,7 @@ fn do_fixups(self: *QbeModule, address: *u8, symbol: *SymbolInfo) void = {
                 reloc := ptr_cast_unchecked(u8, *u8, fixup.patch_at);
                 reloc[] = address;
             }
+            fn InRegThreadLocal(it) => panic("TODO: InRegThreadLocal");
         }
     };
     if new_got_reloc { it | // avoided reallocating while iterating. rustc would be proud.
@@ -171,16 +170,14 @@ fn load_from_got(self: *QbeModule, symbol: *SymbolInfo, reg_encoding: i64, insts
     assert(!self.fixups_locked, "got_lookup_offset is stomped by emitting for aot");
     new_got_reloc: ?Fixup = .None;
     if symbol.got_lookup_offset == -1 {
-        // need to reserve a new __got entry. 
-        assert(self.got_cursor < MAX_GOT_SIZE, "TODO: too many __got imports");
-        got := self.segment_address(.ConstantData, self.got_cursor);  // :GotAtConstantDataBase 
+        // need to reserve a new __got entry.  :GotAtConstantDataBase 
+        symbol.got_lookup_offset = self.got&.len();
+        got := self.got&.reserve(*u8);  // :TodoErrorMessage
         if self.debug["T".char()] {
-            @fmt_write(self.debug_out, "# reserve __got[%] = %\n", self.got_cursor / 8, symbol.name);
+            @fmt_write(self.debug_out, "# reserve __got[%] = %\n", symbol.got_lookup_offset / 8, symbol.name);
         };
-        symbol.got_lookup_offset = self.got_cursor;
-        new_got_reloc = (Some = (patch_at = got, type = .DataAbsolute));
-        self.got_cursor += 8;
-        ptr_cast_unchecked(u8, *u8, got)[] = jit_address; // because we don't loop again to handle `new_got_reloc`
+        new_got_reloc = (Some = (patch_at = ptr_cast_unchecked(*u8, u8, got), type = .DataAbsolute));
+        got[] = jit_address; // because we don't loop again to handle `new_got_reloc`
     };
     got := self.segment_address(.ConstantData, symbol.got_lookup_offset);  // :GotAtConstantDataBase 
     @debug_assert_eq(ptr_cast_unchecked(u8, i64, got)[], u8.int_from_ptr(jit_address));
@@ -330,7 +327,7 @@ fn emit_the_code(self: *ArmState) void #once = {
         patch := ptr_cast_unchecked(u8, u32, patch);
         @debug_assert_eq(brk(0xabba), patch[], "not expecting patch");
         if distance == 0 {
-            // this shouldn't happen because we'd know to fall through without waiting for a patch
+            @debug_assert(false, "this shouldn't happen because we'd know to fall through without waiting for a patch");
             patch[] = arm_nop;
         } else {
             if p.cond { cc | 
@@ -456,10 +453,14 @@ fn align_to(m: *QbeModule, segment: SegmentType, align: i64) void = {
 }
 
 // TODO: rename this. 
-fn loadaddr_bits(self: *ArmState, c: *Qbe.Con, dest_reg: i64) void = {
+fn loadaddr_bits(self: *ArmState, c: *Qbe.Con, dest_reg: i64, thread_local: bool) void = {
     symbol := self.m.get_symbol_info(c.sym.id);
     patch_addr := self.m.segment_address(.Code, self.m.current_offset(.Code));
     
+    patch: Fixup = (patch_at = patch_addr, type = (InReg = (r = dest_reg, increment = 0)));
+    if thread_local {
+        patch.type&.tag_ptr()[] = .InRegThreadLocal;
+    };
     @match(symbol.kind) {
         fn DynamicPatched() => panic("TODO: handle predeclared import");
         fn Local() => {
@@ -467,7 +468,7 @@ fn loadaddr_bits(self: *ArmState, c: *Qbe.Con, dest_reg: i64) void = {
             // TODO: is there some way to have it not move around my functions so i can use relative calls within this one segment?
             if self.m.goal == .MachoRelocatable  { // && symbol.segment != .Code 
                 // we're creating input for a static linker and we want it to be able to move shit around. 
-                symbol.fixups&.push((patch_at = patch_addr, type = (InReg = (r = dest_reg, increment = 0))), self.m.gpa);
+                symbol.fixups&.push(patch, self.m.gpa);
             };
             
             // we've already compiled it so just compute its address directly.
@@ -477,12 +478,15 @@ fn loadaddr_bits(self: *ArmState, c: *Qbe.Con, dest_reg: i64) void = {
             };
             xxx := symbol.segment != .Code;
             @debug_assert(xxx || distance < 0, "we must be jumping backwards");
-            i_page, i_off := encode_adrp_add(self.m.segment_address(symbol.segment, symbol.offset), patch_addr, @as(u5) dest_reg);
+            i_page, i_off := @if(thread_local, 
+                encode_adrp_load(self.m.segment_address(symbol.segment, symbol.offset), patch_addr, @as(u5) dest_reg), 
+                encode_adrp_add(self.m.segment_address(symbol.segment, symbol.offset), patch_addr, @as(u5) dest_reg), 
+            );
             self.inst_bytes_only(i_page);
             self.inst_bytes_only(i_off);
         }
         fn Pending() => {
-            symbol.fixups&.push((patch_at = patch_addr, type = (InReg = (r = dest_reg, increment = 0))), self.m.gpa);
+            symbol.fixups&.push(patch, self.m.gpa);
             self.inst_bytes_only(brk(0x0123));
             self.inst_bytes_only(brk(0x0456));
         }
@@ -493,31 +497,29 @@ fn loadaddr(self: *ArmState, c: *Qbe.Con, dest: i64, reg_name: Str, do_text: boo
     symbol_name := self.m.str(c.sym.id);
 
     //p = l[0] == '"' ? "" : T.assym;
-    @match(c.sym.type) {
-        fn SGlo() => {
-            self.loadaddr_bits(c, dest);
-            if do_text && self.m.want_text_asm {
+    
+    self.loadaddr_bits(c, dest, c.sym.type == .SThr);
+    apple := self.f.globals.target.apple;
+    if do_text && self.m.want_text_asm {
+        @match(c.sym.type) {
+            fn SGlo() => {
                 // :TempAsmText
                 // when outputting text we just let the linker deal with it. 
-                if self.f.globals.target.apple {
+                if apple {
                     @fmt(self.buf&, "\tadrp\t%, _%@page\n\tadd\t%, %, _%@pageoff\n", reg_name, symbol_name, reg_name, reg_name, symbol_name);
                 } else {
                     @fmt(self.buf&, "\tadrp\t%, %\n\tadd\t%, %, #:lo12:%\n", reg_name, symbol_name, reg_name, reg_name, symbol_name);
                 };
-            };
-        }
-        fn SThr() => {
-            assert(do_text && self.m.want_text_asm, "no thread local jit yet");
-            // :TempAsmText
-            s := if self.f.globals.target.apple {
-                self.inst_bytes_only(brk(1111)); // TODO: patch
-                self.inst_bytes_only(brk(1111)); // TODO: patch
-                @fmt(self.buf&, "\tadrp\t%, _%@tlvppage\n\tldr\t%, [%, _%@tlvppageoff]\n", reg_name, symbol_name, reg_name, reg_name, symbol_name);
-            } else {
-                self.inst_bytes_only(brk(1111)); // TODO: patch
-                self.inst_bytes_only(brk(1111)); // TODO: patch
-                self.inst_bytes_only(brk(1111)); // TODO: patch
-                @fmt(self.buf&, "\tmrs\t%, tpidr_el0\n\tadd\t%, %, #:tprel_hi12:%, lsl #12\n\tadd\t%, %, #:tprel_lo12_nc:%\n", reg_name, reg_name, reg_name, symbol_name, reg_name, reg_name, symbol_name);
+            }
+            fn SThr() => {
+                // :TempAsmText
+                if apple {
+                    @fmt(self.buf&, "\tadrp\t%, _%@tlvppage\n\tldr\t%, [%, _%@tlvppageoff]\n", reg_name, symbol_name, reg_name, reg_name, symbol_name);
+                } else {
+                    assert(do_text && self.m.want_text_asm, "TODO: non-apple thread locals");
+                    self.inst_bytes_only(brk(1111)); // TODO: patch
+                    @fmt(self.buf&, "\tmrs\t%, tpidr_el0\n\tadd\t%, %, #:tprel_hi12:%, lsl #12\n\tadd\t%, %, #:tprel_lo12_nc:%\n", reg_name, reg_name, reg_name, symbol_name, reg_name, reg_name, symbol_name);
+                };
             };
         };
     };
@@ -661,6 +663,7 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
             @debug_assert(rtype(i.arg&[0]) == .RSlot, "can only addr of a stack slot");
             reg := i.to.int_reg();
             s := self.slot(i.arg&[0]);
+            //@debug_assert(s >= 0, "slot must be positive");
             if (s <= 4095) {
                 self.inst(add_im(Bits.X64, reg, fp, @as(u12) s, 0));
             } else {
@@ -793,8 +796,8 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
                     self.inst(cmp_im(si, a.int_reg(), @as(u12) c.bits.i, 0));
                 } else {
                     encoded := c.bits.i.shift_right_logical(12);
-                    @assert_eq(encoded.shift_left(12), c.bits.i, "bad cmp const");
-                    self.inst(cmp_im(si, a.int_reg(), @as(u12) @as(i64) encoded, 1));
+                    //@debug_assert_eq(encoded.bit_and(1.shift_left(12) - 1).shift_left(12), c.bits.i, "bad cmp const");
+                    self.inst(cmp_im(si, a.int_reg(), @as(u12) encoded, 1));
                 };
             }
         }
@@ -811,7 +814,9 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
                 if c.bits.i.bit_and(1.shift_left(12) - 1) == c.bits.i {
                     self.inst(cmn_im(si, a.int_reg(), @as(u12) c.bits.i, 0));
                 } else {
-                    self.inst(cmn_im(si, a.int_reg(), @as(u12) @as(i64) c.bits.i.shift_right_logical(12), 1));
+                    encoded := c.bits.i.shift_right_logical(12);
+                    //@debug_assert_eq(encoded.bit_and(1.shift_left(12) - 1).shift_left(12), c.bits.i, "bad cmp const");
+                    self.inst(cmn_im(si, a.int_reg(), @as(u12) encoded, 1));
                 };
             }
         }

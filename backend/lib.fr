@@ -53,6 +53,9 @@ DO_INLINING :: true; // TODO: make this a runtime toggle so you can make sure yo
 // TODO: use add/ldr/str immediates in isel. add new instructions? or i guess can just put something in the extra slot for ldr.  
 // TODO: don't do extra copies of arg/ret when just passing through to another call. 
 
+DONT_FORGET_TO_UPDATE_CALL_ARG_FOR_X64 :: true;
+DONT_FORGET_OTHER_TLS_ARCH :: true;
+
 /*
 (i assume you need this thing for static link)
 ar rvs qbe_merged.o util.o parse.o abi.o cfg.o mem.o ssa.o alias.o load.o copy.o fold.o simpl.o live.o spill.o rega.o emit.o amd64/targ.o amd64/sysv.o amd64/isel.o amd64/emit.o arm64/targ.o arm64/abi.o arm64/isel.o arm64/emit.o rv64/targ.o rv64/abi.o rv64/isel.o rv64/emit.o
@@ -79,9 +82,14 @@ QbeModule :: @rec @struct(
     segments: EnumMap(SegmentType, SegmentCursor),
     gpa: Alloc,
     fixups_locked := false,
-    got_cursor  := 0,
-    stubs_cursor := 0,
     goal: QbeOutputFormat,
+    start_of_writable_code: *u8,
+    // these are special sections that live inside the main segments. 
+    got: SegmentCursor,
+    commands: SegmentCursor,
+    stubs: SegmentCursor,
+    tls_vars: SegmentCursor,
+    tls_init: SegmentCursor,
     
     exports: List(u32),
     imports: List(u32),
@@ -99,6 +107,8 @@ QbeOutputFormat :: @enum(i64) (AsmText, JitOnly, MachoExe, MachoRelocatable);
 MAX_GOT_SIZE :: 1.shift_left(13); // 15 :dontforget
 SIZE_OF_STUBS :: 1.shift_left(10); // TODO: not this :explain
 COMMANDS_SIZE_GUESS :: macos_page_size; // :explain
+MAX_TLS_VARS_SIZE :: macos_page_size;
+MAX_TLS_INIT_SIZE   :: macos_page_size;
 
 fn init_default_module(goal: QbeOutputFormat) QbeModule = 
     init(1.shift_left(23), libc_allocator, page_allocator, goal);
@@ -119,8 +129,9 @@ fn init(segment_size: i64, gpa: Alloc, code_alloc: Alloc, goal: QbeOutputFormat)
     forever := m.forever&.borrow();
     m.segments = EnumMap(SegmentType, SegmentCursor).zeroed();
     mem := code_alloc.alloc(u8, segment_size * 3); // TODO: ask for the alignment we need.
+    m.start_of_writable_code = mem.ptr;
     make_segment :: fn(s: SegmentType, start: i64, end: i64) void => {
-        m.segments&.insert(s, (mmapped = mem.slice(start, end), next = mem.index(start), start_of_writable_code = mem.index(start)));
+        m.segments&.insert(s, (mmapped = mem.slice(start, end), next = mem.index(start)));
     };
     // order matters!
     make_segment(.Code, 0, segment_size);  // :CodeIsFirst
@@ -136,10 +147,20 @@ fn init(segment_size: i64, gpa: Alloc, code_alloc: Alloc, goal: QbeOutputFormat)
     {   // TODO: this is kinda ass
         // :GotAtConstantDataBase
         next := m.segments&[.ConstantData].next&;
+        m.got = (mmapped = (ptr = next[], len = MAX_GOT_SIZE), next = next[]);
         next[] = next[].offset(MAX_GOT_SIZE); 
+        
         next := m.segments&[.Code].next&;
+        m.commands = (mmapped = (ptr = next[], len = COMMANDS_SIZE_GUESS), next = next[]);
         next[] = next[].offset(COMMANDS_SIZE_GUESS); 
+        m.stubs = (mmapped = (ptr = next[], len = SIZE_OF_STUBS), next = next[]);
         next[] = next[].offset(SIZE_OF_STUBS); 
+        
+        next := m.segments&[.MutableData].next&;
+        m.tls_vars = (mmapped = (ptr = next[], len = MAX_TLS_VARS_SIZE), next = next[]);
+        next[] = next[].offset(MAX_TLS_VARS_SIZE); 
+        m.tls_init = (mmapped = (ptr = next[], len = MAX_TLS_INIT_SIZE), next = next[]);
+        next[] = next[].offset(MAX_TLS_INIT_SIZE); 
     };
     
     m.debug_out = fdopen(STD_ERR, "a".sym().c_str());
@@ -172,7 +193,6 @@ fn init(segment_size: i64, gpa: Alloc, code_alloc: Alloc, goal: QbeOutputFormat)
     m.curi[] = m.insb.index_unchecked(Qbe.MaxInstructions);
     m
 }
-DONT_FORGET_TO_UPDATE_CALL_ARG_FOR_X64 :: true;
 
 fn drop(m: *QbeModule, slowly_free_from_gpa: bool) void = {
     fst := m.segments.data&[0].mmapped;
