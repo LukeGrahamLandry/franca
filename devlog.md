@@ -1,3 +1,47 @@
+
+## (Oct 30)
+
+Found someone on the internet to tell me how Mach-O does thread locals: https://stackoverflow.com/a/75297331
+
+So debugging why it works when I let clang handle the offsets instead of doing everything myself.
+
+```
+_xaddr:
+	.word 3573752927
+	.word 2847898621
+	.word 2432697341                ; 910003FD
+	adrp	x0, _x@tlvppage
+	ldr	x0, [x0, _x@tlvppageoff]
+	.word 4181721089                ; F9400001
+	.word 3594453024
+	.word 2831252477
+	.word 3596551104
+```
+
+assembles to this:
+
+```
+0000000100003ebc <_xaddr>:
+100003ebc: d503245f    	bti	c
+100003ec0: a9bf7bfd    	stp	x29, x30, [sp, #-16]!
+100003ec4: 910003fd    	mov	x29, sp
+100003ec8: b0000020    	adrp	x0, 0x100008000 <_xaddr+0x20>
+100003ecc: 9100c000    	add	x0, x0, #48
+100003ed0: f9400001    	ldr	x1, [x0]
+100003ed4: d63f0020    	blr	x1
+100003ed8: a8c17bfd    	ldp	x29, x30, [sp], #16
+100003edc: d65f03c0    	ret
+```
+
+the important thing is that (3 words, adrp, ldr, 4 words) assembled to (3 words, adrp, add, 4 words).
+becuase we just know that the `@tlv` means do something totally different from what the instructions say.
+So my blindly doing the instruction encoding for ldr when its a thread local was wrong.
+So when qbe outputs assembler text, it has a special case to use ldr instead of add if its a thread local,
+and then the assembler has a special case to treat ldr as add if a thread local.
+this all seems very sane and normal to me.
+
+That's enough to pass the one qbe thread local test when outputting exe. still have to deal with relocatable obj.
+
 ## (Oct 28)
 
 - `farm_game` doesn't work with new backend. asserts on `_start_canary` being nonzero after calling sglue_environment.

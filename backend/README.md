@@ -1,3 +1,7 @@
+> just for the record this doesn't work yet.  
+> most of the time it can compile itself tho.  
+> the main backends are in `../compiler`
+
 An optimising compiler backend based on [Qbe](https://c9x.me/compile/).
 Almost everything (ir design, opt passes, isel/abi) is ported directly from Qbe, with some light editing to use a style I find less confusing.
 
@@ -12,8 +16,8 @@ You can still print out the ir as human readable text between passes and modify 
   Your program will contain only the finest organic bit patterns lovingly transcribed from the Arm Architecture Reference Manual.
 - Jit compile your program and run it in memory without needing to emit/link an executable.
   You can freely call between jit and aot code (even extern-c code from other compilers) because they follow the same standard abi.
-- Emit Mach-O executables directly without depending on an external linker.
-  (cannot yet make relocatable objects or dynamic libraries)
+- Emit Mach-O executables directly without depending on an external linker or make relocatable objects for linking with other languages.
+  (cannot yet make my own dynamic libraries)
 - Moved a bunch of static variables to a data structure we pass around explicitly.
   Eventually you will be able to compile multiple modules on parallel threads (not yet tho, there's still more unported).
 - Removed several codegen optimisations until we have a solid foundation (but I want to bring them back eventually).

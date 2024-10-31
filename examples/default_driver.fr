@@ -67,6 +67,14 @@ fn driver(vtable: *ImportVTable) void = {
     
     env: TargetEnv = (arch = arch, os = os);
     m := QbeModule.uninitialized();
+    goal := QbeOutputPurpose.JitOnly;
+    if !cmd.cfg.jit {
+        if cmd.cfg.own_exe {
+            goal = @if(cmd.cfg.relocatable, .Relocatable, .Exe);
+        } else {
+            goal = .AsmText;
+        };
+    };
     usage_msg :: "USAGE: franca examples/default_driver.fr % [filepath.fr]\n       %";
     @match(cmd.action) {
         fn build() => {
@@ -82,7 +90,7 @@ fn driver(vtable: *ImportVTable) void = {
             } else {
                 if cmd.cfg.qbe {
                     assert(!cmd.cfg.show_asm, "TODO: -S with qbe");
-                    c.compile_with_included_qbe(fid, .ExportWithNames, arch, os, @if(cmd.cfg.own_exe, @if(cmd.cfg.relocatable, .MachoRelocatable, .MachoExe), .AsmText));
+                    c.compile_with_included_qbe(fid, .ExportWithNames, arch, os, goal);
                 } else {
                     assert(cmd.cfg.llvm, "rn only two backends. update me as needed!");
                     c.compile_with_llvm(fid, .ExportWithNames, cmd.cfg.debug_info, arch, os, cmd.cfg.show_asm, cmd.cfg.slow, cmd.cfg.relocatable);
@@ -104,8 +112,8 @@ fn driver(vtable: *ImportVTable) void = {
                 // TODO: how to pass cli args
                 ptr := if cmd.cfg.qbe {
                     @if(ENABLE_INTERNAL_QBE, {
-                        m = init_default_module(.JitOnly);
-                        _ := emit_qbe_included_dyn(m&, c&, @slice(fid), .ExportWithNames, env&);
+                        m = init_default_module(os = os, arch = arch, type = goal);
+                        _ := emit_qbe_included_dyn(m&, c&, @slice(fid), .ExportWithNames);
                         m&.fill_from_libc();
                         m&.make_exec();
                         or m&.get_addr("main") {
@@ -152,8 +160,8 @@ fn driver(vtable: *ImportVTable) void = {
                     ptr := if cmd.cfg.qbe {
                         @if(ENABLE_INTERNAL_QBE, {
                             // would be faster if you could share the module between runs
-                            m = init_default_module(.JitOnly);
-                            _ := emit_qbe_included_dyn(m&, c&, @slice(fid), .ExportWithNames, env&);
+                            m = init_default_module(os = os, arch = arch, type = goal);
+                            _ := emit_qbe_included_dyn(m&, c&, @slice(fid), .ExportWithNames);
                             m&.fill_from_libc();
                             m&.make_exec();
                             or m&.get_addr(name) {
@@ -171,7 +179,7 @@ fn driver(vtable: *ImportVTable) void = {
                 } else {
                     if cmd.cfg.qbe {
                         assert(!cmd.cfg.show_asm, "TODO: -S with qbe");
-                        c.compile_with_included_qbe(fid, .TestRunnerMain, arch, os, @if(cmd.cfg.own_exe, .MachoExe, .AsmText));
+                        c.compile_with_included_qbe(fid, .TestRunnerMain, arch, os, goal);
                     } else {
                         assert(cmd.cfg.llvm, "rn only two backends. update me as needed!");
                         c.compile_with_llvm(fid, .TestRunnerMain, cmd.cfg.debug_info, arch, os, cmd.cfg.show_asm, cmd.cfg.slow, false);
@@ -262,7 +270,9 @@ fn compile_with_qbe(c: CompCtx, fid: FuncId, entry: ProgramEntry, arch: Arch, os
     
     ir_out := open_temp_file();
     for(ir_text&){bucket|
-        ir_out.fd&.write(bucket).unwrap();
+        if !ir_out.fd&.write(bucket) {
+            panic("write failed");
+        }
     };
     ir_out.fd.close(); // ?
     asm_out :: "target/franca_qbe_temp.s"; // TODO: the version of tmp file that lets you have an extension because it wants the .s
@@ -301,23 +311,25 @@ fn compile_with_qbe(c: CompCtx, fid: FuncId, entry: ProgramEntry, arch: Arch, os
     //ir_out.remove();   
 }
 
-fn compile_with_included_qbe(c: CompCtx, fid: FuncId, entry: ProgramEntry, arch: Arch, os: Os, goal: QbeOutputFormat) void = {
+fn compile_with_included_qbe(c: CompCtx, fid: FuncId, entry: ProgramEntry, arch: Arch, os: Os, goal: QbeOutputPurpose) void = {
     @if(ENABLE_INTERNAL_QBE, {
-        m := init_default_module(goal);
+        m := init_default_module(os = os, arch = arch, type = goal);
         
         env: TargetEnv = (arch = arch, os = os);
-        asm_text := emit_qbe_included_dyn(m&, c&, @slice(fid), entry, env&);
+        asm_text := emit_qbe_included_dyn(m&, c&, @slice(fid), entry);
         
         asm_out := if(goal != .AsmText, => "a.out", => "target/franca_qbe_temp.s"); // TODO: the version of tmp file that lets you have an extension because it wants the .s
         
         ir_out := open_trunc(asm_out.sym().c_str()).unwrap(); // TODO: sane error message if you forget to unwrap this
         for(asm_text&){bucket|
-            ir_out&.write(bucket).unwrap();
+            if !ir_out&.write(bucket) {
+                panic("write failed");
+            }
         };
         
         args: List(Str) = list(temp());
         @match(goal) {
-            fn MachoExe() => {
+            fn Exe() => {
                 ir_out.close();
                 args&.push("-s");
                 args&.push("-");
@@ -338,7 +350,7 @@ fn compile_with_included_qbe(c: CompCtx, fid: FuncId, entry: ProgramEntry, arch:
                 end := timestamp();
                 @println("[assembler time: %ms]", end - start);
             }
-            fn MachoRelocatable() => ();
+            fn Relocatable() => ();
             @default => panic("unhandled QbeOutputType");
         }
         //ir_out.remove();   

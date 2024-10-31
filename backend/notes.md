@@ -6,6 +6,8 @@
 
 - When trying to understand what phi instructions do, remember that they're totally isomorphic to block arguments and then it's suddenly super simple.
   It's just a choice to represent it as the callee knowing which value to use for each argument for each caller.
+- amd64, x86_64, and x64 are the same thing. x86 means the 32 bit one but nobody cares about that anymore so sometimes that's the same thing too.
+- arm64 and aarch64 are the same thing. the latter is what arm calls it but that's such an annoying word.
 
 ##
 

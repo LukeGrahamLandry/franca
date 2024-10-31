@@ -30,3 +30,4 @@ Individual files have license headers that reference thier original authors.
 - <https://github.com/qyang-nj/llios/tree/main/macho_parser/docs> (and main/dynamic_linking/chained_fixups.md)
 - <https://llvm.org/doxygen/BinaryFormat_2MachO_8h_source.html>
 - <https://github.com/apple-oss-distributions/xnu/blob/main/EXTERNAL_HEADERS/mach-o/loader.h>
+- <https://github.com/horsicq/XMachOViewer> a gui that lets you poke around in memory

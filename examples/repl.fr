@@ -2,7 +2,15 @@
 #include_std("compiler/lib.fr");
 #include_std("compiler/build.fr");
 
+BOOTSTRAP_ONLY_MODE :: false;
+DEBUG_SPAM_LOG :: false;
+ENABLE_TRACY :: false;
+ENABLE_LOGGING_CALLBACKS :: false;
+DO_TERMINAL_COLOURS :: true;
+
 allocator :: libc_allocator;
+
+::eprintln("note: this program embeds a copy of the compiler. \nit can't run in the old jit backend, you have to use examples/default_driver.fr\nif you did that wrong you'll find out real soon!");
 
 fn main() void = {
     // TODO: call functions directly instead of through the vtable and then we don't have to compile the llvm backend
@@ -139,60 +147,3 @@ fn handle_stmt(self: *ReplState, stmt: *FatStmt) Result(DoMore, void) #once = (O
 fn handle_func(self: *ReplState, func: *Func) Result(DoMore, void) #once = (Ok = .Continue);
 fn handle_type(self: *ReplState, ty: *LazyType) Result(DoMore, void) #once = (Ok = .Continue);
 fn handle_pattern(self: *ReplState, p: *Pattern) Result(DoMore, void) #once = (Ok = .Continue);
-
-
-//////////////////////////////////////////////
-// Driver
-//
-
-fn driver(vtable: *ImportVTable) void = {
-    if !file_exists("compiler/main.fr") {
-        panic("Working directory must be top level of the franca repository");
-    };
-    start := timestamp();
-    src: List(u8) = temp().read_to_string("examples/repl.fr");
-    cfg: CompilerBuildOptions = ();
-    get_compiler_source(cfg, src&);
-    opts := vtable.default_build_options();
-    comp := vtable.new_with_src(src.items(), opts);
-    c := vtable.with(comp);
-    
-    new_main := c.get_unique_named("main").unwrap();
-    
-    // TODO: make this work! we should be able to run on the comptime jit.
-    //       it tries to call uncompiled function. -- Sep 3
-    //callee := c.get_jitted(new_main);
-    //callee := assume_types_fn(Arg = void, Ret = void, ptr = callee);
-    //callee();
-    
-    exports := (@list(new_main) temp()).items();
-    ir_text := c.emit_llvm(temp(), exports, .ExportWithNames, .aarch64, .macos); // :HardcodeOs
-    @println("Emitted % bytes of llvm ir.", ir_text.len);  // useful to see when i start trying to deduplicate bytecode. 
-    end := timestamp();
-
-    start := timestamp();
-    args := @list ("-o", "target/franca/franca2repl", "-g", "-Os") temp();
-    
-    build_llvm(ir_text, args.items());
-    end := timestamp();
-    @println("LLVM time: % ms.", end.sub(start));
-    exit(0);
-    
-    // TODO: return result
-    fn build_llvm(ir: BucketArray(u8), args: Slice(Str)) void = {
-        out := open_temp_file();
-        for(ir&){bucket|
-            out.fd&.write(bucket);
-        };
-        @println("Write llvm ir to %", out&.s_name());   
-        args: List(Str) = args.clone(temp());
-        args&.push("-x"); // don't check the file extension of source files that follow. 
-        args&.push("ir"); 
-        args&.push("-g"); 
-        args&.push(out&.s_name());
-        @println("%", args.items());
-        success := run_cmd_blocking("clang", args.items());
-        assert(success, "ICE: generated invalid llvm ir");
-        out.remove();
-    }
-}

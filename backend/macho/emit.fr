@@ -6,13 +6,14 @@
 
 // life is better if you're always 8 byte aligned. 
 
-//!
+//! 
 //! Mach-O is the object file format used by the XNU kernal (so macOS and iOS). 
 //! There are 3 types of Mach-O files we care about. 
 //! Executable: a program the operating system can run
 //!     - dynamic imports and pointers in data are in ChainedFixups
 //!     - empty __PAGEZERO, __TEXT contains the Mach-O header and load commands, __LINKEDIT must have a load command
-//!     - must have a CodeSigneture 
+//!     - must have a CodeSigneture
+//!     - segments must be page aligned 
 //! Relocatable Object: input for static linking with another program
 //! 
 //! Dynamic Library: not supported yet... 
@@ -23,6 +24,9 @@
 // TODO: add to isel to only produce addresses one in a block to have fewer relocations at the cost of register pressure. 
 // TODO: make this less ugly.
 // TODO: fix `ld: warning: no platform load command found in ` for relocatable.  
+// TODO: emit the local symbols even for exe so you can see them in a debugger. 
+//       do other debug info stuff. 
+// TODO: thread locals for .Relocatable. not a huge deal until the language front end exposes the ability to create them. 
 
 WipSegment :: @struct(
     name: Str,
@@ -38,12 +42,14 @@ WipSection :: @struct(
     flag: u32,
     offset_in_segment: i64,
     size: i64,
-    reserved2: u32 = 0,
 );
 
-fn output_macho(m: *QbeModule) List([]u8) = {  
+fn output_macho(m: *QbeModule) List([]u8) = {
+    // TODO: remove
+    @eprintln("; % bytes of code", m.segments&[.Code]&.len() - COMMANDS_SIZE_GUESS - SIZE_OF_STUBS);
+
     m.fill_from_libc(); // TODO: don't waste time doing this just to bump reloc state. 
-    alignment := if(m.goal == .MachoRelocatable, => 8, => macos_page_size);
+    alignment := if(m.goal.type == .Relocatable, => 8, => macos_page_size);
     for_enum SegmentType { s | 
         //m.align_to(s, 8);  // forgeting this manifested as getting fucked on __LINKEDIT (when reading not writing because you're writting into a new allocation)
         // but do we need to do this? it makes it look more like clang does. 
@@ -62,13 +68,17 @@ fn output_macho(m: *QbeModule) List([]u8) = {
     macho_header[] = (
         cpu_type = 0x0100000C, // arm 64bit
         cpu_subtype = 0x00000000,
-        file_type = @if(m.goal == .MachoExe, .Executable, .Object),
+        file_type = @if(m.goal.type == .Exe, .Executable, .Object),
         commands_count = 0, 
         commands_size = 0, 
-        flags = 0b00000000001000000000000010000101, // ¯\_(ツ)_/¯  what rust uses except I don't HAS_TLV_DESCRIPTORS
+        flags = 0b00000000001000000000000010000101, // ¯\_(ツ)_/¯ 
     );
-    if m.goal == .MachoRelocatable {
+    if m.goal.type == .Relocatable {
         macho_header.flags = 0;  // dont claim no_undefs
+    };
+    has_thread_locals := m.tls_vars&.len() != 0;
+    if has_thread_locals {
+        macho_header.flags = macho_header.flags.bit_or(MH_HAS_TLV_DESCRIPTORS);
     };
     
     ::enum_basic(LoadCommand);
@@ -78,7 +88,7 @@ fn output_macho(m: *QbeModule) List([]u8) = {
     zero_page_size :: 0x100000000;
     
     segments := WipSegment.list(6, temp());
-    if m.goal == .MachoExe {
+    if m.goal.type == .Exe {
         // TODO: waste. dead zone Code[stubs_cursor..SIZE_OF_STUBS]
         chunks&.push(live_segment_part(m, .Code));  // :MySegmentsStartAt1 :CodeIsFirst
         chunks&.push(live_segment_part(m, .ConstantData));  // TODO: waste. dead zone ConstantData[got_cursor..MAX_GOT_SIZE]
@@ -95,17 +105,21 @@ fn output_macho(m: *QbeModule) List([]u8) = {
         
         code_flag := ATTR_PURE_INSTRUCTIONS.bit_or(ATTR_SOME_INSTRUCTIONS);
         xx: WipSection = (name = "__text", flag = code_flag, offset_in_segment = COMMANDS_SIZE_GUESS + SIZE_OF_STUBS, size = chunks[1].len - SIZE_OF_STUBS - COMMANDS_SIZE_GUESS);
-        // 12 is the size of each stub (adrp, ldr, br)
-        yy: WipSection = (name = "__stubs", size = SIZE_OF_STUBS, reserved2 = 12, flag = code_flag.bit_or(S_SYMBOL_STUBS), offset_in_segment = COMMANDS_SIZE_GUESS);
+        // apparently you're supposed to do reserved2 = 12 is the size of each stub (adrp, ldr, br). but it seems you don't need to.
+        yy: WipSection = (name = "__stubs", size = SIZE_OF_STUBS, flag = code_flag.bit_or(S_SYMBOL_STUBS), offset_in_segment = COMMANDS_SIZE_GUESS);
         segments[1].sections = @slice(xx, yy);
         // TODO: do i need reserved1 set to something? maybe thats an offset into LC_SYMTAB? or maybe undefined_symbol_count, that seems more consistant in the binraries i checked. 
         xx: WipSection = (name = "__got", size = chunks[2].len, flag = S_NON_LAZY_SYMBOL_POINTERS, offset_in_segment = 0);
         segments[2].sections = @slice(xx);
-        xx: WipSection = (name = "__data", size = chunks[3].len, flag = 0, offset_in_segment = 0);
-        segments[3].sections = @slice(xx);
+        xx: WipSection = (name = "__data", size = chunks[3].len - m.tls_vars&.cap() - m.tls_init&.cap(), flag = 0, offset_in_segment = m.tls_vars&.cap() + m.tls_init&.cap());
+        yy: WipSection = (name = "__thread_vars", size = m.tls_vars&.len(), flag = S_THREAD_LOCAL_VARIABLES, offset_in_segment = 0);
+        zz: WipSection = (name = "__thread_data", size = m.tls_init&.len(), flag = S_THREAD_LOCAL_REGULAR, offset_in_segment = m.tls_vars&.cap());
+        segments[3].sections = @slice(xx, yy, zz);
+
+        // TODO: S_THREAD_LOCAL_VARIABLES
     };
     text_padding :: SIZE_OF_STUBS + COMMANDS_SIZE_GUESS;
-    if m.goal == .MachoRelocatable {
+    if m.goal.type == .Relocatable {
         s := m.segments&[.ConstantData]&;
         align_to :: fn(offset: i64, align: i64) i64 = {
             extra := offset.mod(align);
@@ -125,7 +139,7 @@ fn output_macho(m: *QbeModule) List([]u8) = {
         code_flag := ATTR_PURE_INSTRUCTIONS.bit_or(ATTR_SOME_INSTRUCTIONS);
         xx: WipSection = (name = "__text", flag = code_flag, offset_in_segment = 0, size = chunks[1].len - text_padding);
         segments[0].sections = @slice(xx);
-        
+        assert(!has_thread_locals, "TODO: -c tls");
         s := m.segments&[.MutableData]&;
         has_mutable_data := ptr_diff(s.mmapped.ptr, s.next) != 0;
         if has_mutable_data {
@@ -178,7 +192,6 @@ fn output_macho(m: *QbeModule) List([]u8) = {
                 c.alignment    = 3; // TODO
                 c.flag         = sec.flag;
                 c.size         = sec.size.bitcast();
-                c._reserved2   = sec.reserved2;
                 @assert(n_sections < load_commands.len, "TODO: too many sections");
                 load_commands[n_sections] = c;
                 relocations[n_sections] = list(temp());
@@ -190,7 +203,7 @@ fn output_macho(m: *QbeModule) List([]u8) = {
         };
     };
     
-    link_edit_load_command := @if(m.goal == .MachoExe, { 
+    link_edit_load_command := @if(m.goal.type == .Exe, { 
         start := commands.len;
         linkedit_load_header := commands&.reserve_type(LoadCommandHeader);
         linkedit_load_header.type = LoadCommand.SegmentLoad.raw();
@@ -204,11 +217,11 @@ fn output_macho(m: *QbeModule) List([]u8) = {
         CHAINED_SIZE_GUESS :: 2000000;  // TODO: prescan to caluclate?
         chained := u8.list(CHAINED_SIZE_GUESS, temp());
         // note: virtual_segment_offset is only good when MachoExe because we skip segments for MachoRelocatable. 
-        if m.goal == .MachoExe {
+        if m.goal.type == .Exe {
             chain_header := chained&.reserve_type(ChainedFixupsHeader);
             
             fixups, symbols := collect_aot_fixups(m);
-            @debug_assert_ge(fixups.len, m.got_cursor / 8, "at least each __got entry needs a fixup");
+            @debug_assert_ge(fixups.len, m.got&.len() / 8, "at least each __got entry needs a fixup");
             sort :: quicksort(FixP, fn(a, b) => ptr_diff(a.fix.patch_at, b.fix.patch_at) >= 0);
             sort(fixups);
             // at this point, `fixups` is in the order of the patch targets in virtual memory which is the order we need to emit the fixup chains. 
@@ -284,7 +297,6 @@ fn output_macho(m: *QbeModule) List([]u8) = {
             
             prev_fixup: ?WipFixup = .None;
             each fixups { fix |
-                // TODO: what if there's a page in the middle with no relocations? 
                 seg, off_in_segment := compiler_address_to_segment_offset(m, fix.fix.patch_at);
                 segment_index := seg.raw() + 1;  // :MySegmentsStartAt1
                 page_index, offset_in_page := off_in_segment.div_mod(macos_page_size);
@@ -387,7 +399,7 @@ fn output_macho(m: *QbeModule) List([]u8) = {
         // now there's still more stuff that goes in __linkedit 
         //
         
-        if m.goal == .MachoRelocatable {
+        if m.goal.type == .Relocatable {
             start := commands.len;
             h := commands&.reserve_type(LoadCommandHeader);
             h.type = LoadCommand.LinkEditSymbolInfo.raw();
@@ -431,7 +443,7 @@ fn output_macho(m: *QbeModule) List([]u8) = {
                 each s.fixups { fix | 
                     continue :: local_return;
                     patch_segment, patch_segment_offset := compiler_address_to_segment_offset(m, fix.patch_at);
-                    if patch_segment == .ConstantData && patch_segment_offset < m.got_cursor {
+                    if patch_segment == .ConstantData && patch_segment_offset < m.got&.len() {
                         // :track_got_reloc
                         // We bound this symbol for jitting and reserved a __got slot for it.
                         // However, we want to let static linker move stuff around and pack its own __got.
@@ -548,7 +560,7 @@ fn output_macho(m: *QbeModule) List([]u8) = {
         
         @assert_le(chained.len, CHAINED_SIZE_GUESS, "resized and now the header pointer is junk"); 
         
-        if m.goal == .MachoExe { 
+        if m.goal.type == .Exe {
             // TODO: do i really need to have it load __LINKEDIT? its not used except by other commands that reference it. 
             // TODO: can i just reserve_type here or do they all have to be at the beginning?
             //       theres no reason it would matter by lief.parse doesn't like it: "Can't find the segment associated with the LC_DYLD_CHAINED_FIXUPS payload"
@@ -566,7 +578,7 @@ fn output_macho(m: *QbeModule) List([]u8) = {
         file_offset += chained.len;
     };
     
-    if m.goal == .MachoExe { 
+    if m.goal.type == .Exe {
         macho_load_dylinker(commands&, command_count&, "/usr/lib/dyld");
         macho_main_entry_point(m, commands&, command_count&);
         // TODO: don't assume you want libc. but on macos you always do. 

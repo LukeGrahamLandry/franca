@@ -20,7 +20,8 @@ ArmState :: @struct(
     buf: List(u8),
 );
 
-fn emit_func_arm64(m: *QbeModule, f: *Qbe.Fn, text: *FILE) []u8 = {
+fn emit_func_arm64(m: *QbeModule, f: *Qbe.Fn, text: *FILE) void = {
+    @debug_assert_eq(m.goal.arch, .aarch64, "how did we get here?");
     // :TempAsmText :SLOW
     name: CStr = (ptr = f.name&.as_ptr());
     if m.want_text_asm {
@@ -62,7 +63,6 @@ fn emit_func_arm64(m: *QbeModule, f: *Qbe.Fn, text: *FILE) []u8 = {
         if(!success, => eprintln("ICE(debugging): couldn't disassemble"));
         out.remove();
     };
-    code_bytes
 }
 
 fn segment_address(self: *QbeModule, segment: SegmentType, offset_in_segment: i64) *u8 = {
@@ -84,7 +84,7 @@ fn do_jit_fixups(self: *QbeModule, id: u32, segment: SegmentType, final_offset: 
     dest := self.segment_address(symbol.segment, symbol.offset);
     fixups := symbol.fixups&;
     self.do_fixups(dest, symbol);
-    if self.goal != .MachoRelocatable { //  || symbol.segment == .Code // :canireallynothavecodeberelative
+    if self.goal.type == .Exe { //  || symbol.segment == .Code // :canireallynothavecodeberelative
         // Since it's a local symbol, we don't care about the relocations anymore. The linker never needs to know. 
         // TODO: actually thats also true for imports becuase calls go through __got. 
         unordered_retain(fixups, fn(it) => it.type&.is(.DataAbsolute));
@@ -156,7 +156,6 @@ fn do_fixups(self: *QbeModule, address: *u8, symbol: *SymbolInfo) void = {
                 reloc := ptr_cast_unchecked(u8, *u8, fixup.patch_at);
                 reloc[] = address;
             }
-            fn InRegThreadLocal(it) => panic("TODO: InRegThreadLocal");
         }
     };
     if new_got_reloc { it | // avoided reallocating while iterating. rustc would be proud.
@@ -458,15 +457,14 @@ fn loadaddr_bits(self: *ArmState, c: *Qbe.Con, dest_reg: i64, thread_local: bool
     patch_addr := self.m.segment_address(.Code, self.m.current_offset(.Code));
     
     patch: Fixup = (patch_at = patch_addr, type = (InReg = (r = dest_reg, increment = 0)));
-    if thread_local {
-        patch.type&.tag_ptr()[] = .InRegThreadLocal;
-    };
+    // i think i don't need a different relocation type for thread locals? 
+    // TODO: but makes sture that's still true for relocatable objects.
     @match(symbol.kind) {
         fn DynamicPatched() => panic("TODO: handle predeclared import");
         fn Local() => {
             // :canireallynothavecodeberelative
             // TODO: is there some way to have it not move around my functions so i can use relative calls within this one segment?
-            if self.m.goal == .MachoRelocatable  { // && symbol.segment != .Code 
+            if self.m.goal.type == .Relocatable  { // && symbol.segment != .Code 
                 // we're creating input for a static linker and we want it to be able to move shit around. 
                 symbol.fixups&.push(patch, self.m.gpa);
             };
@@ -478,10 +476,11 @@ fn loadaddr_bits(self: *ArmState, c: *Qbe.Con, dest_reg: i64, thread_local: bool
             };
             xxx := symbol.segment != .Code;
             @debug_assert(xxx || distance < 0, "we must be jumping backwards");
-            i_page, i_off := @if(thread_local, 
-                encode_adrp_load(self.m.segment_address(symbol.segment, symbol.offset), patch_addr, @as(u5) dest_reg), 
-                encode_adrp_add(self.m.segment_address(symbol.segment, symbol.offset), patch_addr, @as(u5) dest_reg), 
-            );
+            //i_page, i_off := @if(thread_local, 
+            //    encode_adrp_load(self.m.segment_address(symbol.segment, symbol.offset), patch_addr, @as(u5) dest_reg), 
+            //    encode_adrp_add(self.m.segment_address(symbol.segment, symbol.offset), patch_addr, @as(u5) dest_reg), 
+            //);
+            i_page, i_off := encode_adrp_add(self.m.segment_address(symbol.segment, symbol.offset), patch_addr, @as(u5) dest_reg);
             self.inst_bytes_only(i_page);
             self.inst_bytes_only(i_off);
         }
@@ -703,7 +702,7 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
                         // :canireallynothavecodeberelative
                         // TODO: I don't have a test that requires this 
                         //       but i think you do because you need the other ones?
-                        if self.m.goal == .MachoRelocatable { 
+                        if self.m.goal.type == .Relocatable { 
                             symbol.fixups&.push((patch_at = patch_at, type = .Call), self.m.gpa);
                         }; 
                     };
@@ -765,6 +764,7 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
         fn extsh()  => int_un(fn(s, d, a) => bmf(s, 0b0, 0b000000, 0b001111, d, a)); // sxth
         fn extuh()  => int_un(fn(s, d, a) => bmf(s, 0b1, 0b000000, 0b001111, d, a)); // uxth
         fn extsw()  => int_un(fn(s, d, a) => bmf(s, 0b0, 0b000000, 0b011111, d, a)); // sxtw
+        // note: mov w0, w0 is not a nop! it zeros the high bits. 
         fn extuw()  => int_un(fn(s, d, a) => mov(.W32, d, a));
         fn exts()   => self.inst(fcnv(.S32, .D64, i.to.float_reg(), i.arg&[0].float_reg()));
         fn truncd() => self.inst(fcnv(.D64, .S32, i.to.float_reg(), i.arg&[0].float_reg()));
@@ -791,7 +791,6 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
             } else {
                 c := self.f.get_constant(b);
                 @debug_assert(c.type == .CBits, "cmp to addr");
-                // TODO: write a test that fails if you put `c.bits.i < 1.shift_left(12) - 1` here
                 if c.bits.i.bit_and(1.shift_left(12) - 1) == c.bits.i {
                     self.inst(cmp_im(si, a.int_reg(), @as(u12) c.bits.i, 0));
                 } else {
@@ -828,7 +827,6 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
         @default => self.emitins2(i);
     } // early returns
 }
-
 
 // FUCK not enough bits to refer to all slots. if only this backend worked already and i could kill my old one. 
 fn emitins2(self: *ArmState, i: *Qbe.Ins) void = {

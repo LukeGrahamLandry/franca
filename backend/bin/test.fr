@@ -6,6 +6,8 @@
 //!     -v    show output on failure.  
 
 fn main() void = {
+    eprintln("note: this is slow because it recompiles the backend from scratch for each test and runs it in the old unoptimising JIT.");
+    eprintln("====");
     tests_folder := "bindings/qbe/test";
     qbe_bin := "backend/bin/qbe_frontend.fr";
     
@@ -13,18 +15,27 @@ fn main() void = {
     args := cli_args().slice_pop_first();
     do_my_own_exes := false;
     verbose := false;
+    arch := query_current_arch().unwrap();
     for args { arg |
         continue :: local_return;
         arg := arg.str();
         if arg == "franca" || arg.ends_with(".fr") {
             continue();
         };
-        if arg == "-e" {
-            do_my_own_exes = true;
-            continue();
-        };
-        if arg == "-v" {
-            verbose = true;
+        if arg.starts_with("-") {
+            @switch(arg) {
+                @case("-x86") => panic("did you mean -x64?");
+                @case("-x64") => {
+                    arch = .x86_64;  
+                };
+                @case("-e") => {
+                    do_my_own_exes = true;
+                };
+                @case("-v") => {
+                    verbose = true;
+                };
+                @default => @panic("unhandled flag '%'", arg);
+            };
             continue();
         };
         if arg == "all" {
@@ -47,7 +58,7 @@ fn main() void = {
     passed := 0;
     failed := 0;
     for to_run { file |
-        pass := run_one(qbe_bin, file, verbose, do_my_own_exes);
+        pass := run_one(qbe_bin, file, verbose, do_my_own_exes, arch);
         (@if(pass, passed&, failed&))[] += 1;
     };
     if failed == 0 {
@@ -61,7 +72,7 @@ fn main() void = {
     exit((failed != 0).int());
 }
 
-fn run_one(qbe_path: Str, file_path: Str, verbose: bool, do_my_own_exes: bool) bool = {
+fn run_one(qbe_path: Str, file_path: Str, verbose: bool, do_my_own_exes: bool, arch: Arch) bool = {
     ::FmtPad(Str);
     mark := __temp_alloc.mark();
     src := temp().read_to_string(file_path).items(); // :panic
@@ -79,11 +90,18 @@ fn run_one(qbe_path: Str, file_path: Str, verbose: bool, do_my_own_exes: bool) b
     if do_my_own_exes {
         args&.push(if(driver.is_some(), => "-c", => "-e"));
     };
+    args&.push("-t");
+    assert(query_current_os() == .macos, "TODO: flip the switch on linux abi");
+    args&.push(if(arch == .aarch64, => "arm64_apple", => "amd64_apple"));
     args&.push("-o");
     args&.push(if(do_my_own_exes, => if(driver.is_some(), => obj_path_mine, => exe_path), => ir_path));
     args&.push(file_path);
     run(qbe_path, "gen ir");
     
+        
+    assert(query_current_os() == .macos, "TODO: flip the switch on linux abi");
+    clang_triple := if(arch == .aarch64, => "aarch64-apple-darwin", => "x86_64-apple-darwin");
+
     run :: fn(exe: Str, what: Str) => {
         ok, out, err := fork_and_catch(temp()) {
             exec_cmd(exe, args.items()) 
@@ -101,37 +119,27 @@ fn run_one(qbe_path: Str, file_path: Str, verbose: bool, do_my_own_exes: bool) b
     if driver { driver_src | 
         write_entire_file(driver_path, driver_src);
         args&.clear();
-        args&.push("-c");
-        args&.push("-o");
-        args&.push(obj_path_driver);
-        args&.push(driver_path);
+        args&.push_all(@slice("-target", clang_triple, "-c", "-o", obj_path_driver, driver_path));
         run("clang", "driver");
     };
     
     if do_my_own_exes && driver.is_none() {
         // Tim Apple likes to waste my time. 
         args&.clear();
-        args&.push("-s");
-        args&.push("-");
-        args&.push(exe_path);
+        args&.push_all(@slice("-s", "-", exe_path));
         run("codesign", "compile ir");
     } else {
         if !do_my_own_exes {
             args&.clear();
-            args&.push(ir_path);
-            args&.push("-c");
-            args&.push("-o");
-            args&.push(obj_path_mine);
+            args&.push_all(@slice(ir_path, "-target", clang_triple, "-c", "-o", obj_path_mine));
             run("clang", "compile ir");
         };
         
         args&.clear();
-        args&.push(obj_path_mine);
         if driver { _ |
             args&.push(obj_path_driver);
         };
-        args&.push("-o");
-        args&.push(exe_path);
+        args&.push_all(@slice(obj_path_mine, "-o", exe_path, "-target", clang_triple));
         run("clang", "link");
     };
     args&.clear();

@@ -7,9 +7,10 @@
 
 LINK_QBE_C :: true;
 #include_std("backend/lib.fr");
-fn main() void = {    
-    global_module :: @static(QbeModule); // TODO: aaaaaaaa
-
+fn main() void = { 
+    // Have to smuggle this through qbe's parser callback that doesn't let you pass a data pointer.
+    global_module :: @static(QbeModule);
+    
     outpath := "-";
     inpath := "-";
     run := false;
@@ -21,14 +22,22 @@ fn main() void = {
         args.len -= 1;
     };
     flags := i64.list(temp());
-    goal := QbeOutputFormat.AsmText;
+    goal := QbeOutputPurpose.AsmText;
+    arch := query_current_arch().unwrap();
     while => args.len > 0 {
         a := args[0].str();
         @switch(a) {
-            @case("-t?") => exit(0); // TODO
+            @case("-t?") => exit(0); // TODO: qbe prints the name of default target
             @case("-t") => { 
                 pop();
                 target := args[0].str(); // TODO
+                @switch(target) {
+                    @case("arm64_apple") => { arch = .aarch64; };
+                    @case("amd64_apple") => { arch = .x86_64; };
+                    @case("amd64_sysv")  => panic("TODO: flip the switch on linux abi");
+                    @case("arm64")       => panic("TODO: flip the switch on linux abi");
+                    @default => @panic("unsupported target option '%'", target);
+                };
                 pop();
             };
             @case("franca") => pop();
@@ -63,12 +72,12 @@ fn main() void = {
             };
             @case("-e") => {
                 want_exe = true;
-                goal = .MachoExe;
+                goal = .Exe;
                 pop();
             };
             @case("-c") => {
                 want_exe = true;
-                goal = .MachoRelocatable;
+                goal = .Relocatable;
                 pop();
             };
             @default => {
@@ -84,7 +93,7 @@ fn main() void = {
             };
         };
     };
-    global_module[] = init_default_module(goal);
+    global_module[] = init_default_module(type = goal, os = query_current_os(), arch = arch);
     for flags { d | 
         global_module[].debug.items()[d] = true;
     };
@@ -156,6 +165,6 @@ HELP :: """qbe_frontend [OPTIONS] {file.ssa, -}
 	-h          prints this help.
 	-o file     output to file.
 	-d <flags>  dump debug information.
-	-r          jit and run main() without outputting asm.
+	-r          jit and run main() without outputting asglobal_module.
 	            can call functions from libc.
 """;

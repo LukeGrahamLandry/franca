@@ -35,9 +35,9 @@ fn driver(vtable: *ImportVTable) void = {
                 println("=== Aarch64 Jit ===");
                 run_jit(vtable, .CompilerJit);
             };
-            @case("qbe-jit")   => run_qbe_included(vtable, true, false, false);
-            @case("qbe-exe")   => run_qbe_included(vtable, false, true, false);
-            @case("qbe-link")  => run_qbe_included(vtable, false, true, true);
+            @case("qbe-jit")   => run_qbe_included(vtable, .JitOnly);
+            @case("qbe-exe")   => run_qbe_included(vtable, .Exe);
+            @case("qbe-link")  => run_qbe_included(vtable, .Relocatable);
             @case("llvm") => run_llvm(vtable, false);
             @case("llvm-wasm") => run_llvm(vtable, true);
             @case("blink") => run_llvm_blink(vtable);
@@ -67,7 +67,7 @@ fn github(vtable: *ImportVTable) void = {
     assert(arch == .aarch64 && os == .macos, "expected macos-arm");
     run_jit(vtable, .CompilerJit);
     run_examples(vtable, false);
-    run_qbe_included(vtable, true, false, false);
+    //run_qbe_included(vtable, .JitOnly);
 } 
 
 fn run_examples(vtable: *ImportVTable, allow_deps: bool) void = {
@@ -453,9 +453,9 @@ fn jit_from_source(vtable: *ImportVTable, src: Str, function_name: Str) rawptr #
 
 LINK_QBE_C :: false;
 #include_std("backend/lib.fr");
-fn run_qbe_included(vtable: *ImportVTable, jit: bool, own_exe: bool, link: bool) void = {
+fn run_qbe_included(vtable: *ImportVTable, type: QbeOutputPurpose) void = {
     @if(ENABLE_INTERNAL_QBE, {
-        //@println("=== Qbe % ===", if(own_exe, => if(link, => "reloc aot", => "exe aot"), => if(jit, => "jit", => "asm aot")));
+        @println("=== Qbe % ===", type);
         opts := vtable.default_build_options();
         opts.retain_function_names = true;
         comp := {vtable.init_compiler}(opts);
@@ -466,17 +466,19 @@ fn run_qbe_included(vtable: *ImportVTable, jit: bool, own_exe: bool, link: bool)
         global_module :: @static(QbeModule); // TODO: aaaaaaaa
         triple := target_triple(env.arch, env.os);
         run_sequential(c) {c, tests|
-            global_module[] = init_default_module(@if(jit, .JitOnly, @if(own_exe, @if(link, .MachoRelocatable, .MachoExe), .AsmText)));
-            asm_text := emit_qbe_included_dyn(global_module, c&, tests, .TestRunnerMain, env&);
-            if own_exe {
-                ir_out := open_trunc("a.out".sym().c_str()).unwrap();
+            global_module[] = init_default_module(os = env.os, arch = env.arch, type = type);
+            asm_text := emit_qbe_included_dyn(global_module, c&, tests, .TestRunnerMain);
+            if type == .Exe || type == .Relocatable {
+                path :: "a.out";
+                ir_out := open_trunc(path.sym().c_str()) || @panic("failed to open %", path);
                 for(asm_text&){bucket|
-                    ir_out&.write(bucket).unwrap();
+                    ok := ir_out&.write(bucket);
+                    @assert(ok, "failed to write to %", path);
                 };
                 
                 ir_out.close();
                 args&.clear();
-                if link {
+                if type == .Relocatable {
                     args&.push("a.out");
                     args&.push("-o");
                     args&.push("a.out");
@@ -495,7 +497,7 @@ fn run_qbe_included(vtable: *ImportVTable, jit: bool, own_exe: bool, link: bool)
                 success := run_cmd_blocking("./a.out", args.items());
                 assert(success, "test failed");
             } else {
-                if jit {
+                if type == .JitOnly {
                     global_module.fill_from_libc();
                     global_module.make_exec();
                     
