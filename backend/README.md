@@ -20,6 +20,8 @@ You can still print out the ir as human readable text between passes and modify 
   (cannot yet make my own dynamic libraries)
 - Moved a bunch of static variables to a data structure we pass around explicitly.
   Eventually you will be able to compile multiple modules on parallel threads (not yet tho, there's still more unported).
+- Added some optimisations.
+  - arm: use of u12 immediate for add and ldr instructions.
 - Removed several codegen optimisations until we have a solid foundation (but I want to bring them back eventually).
   - arm: loading float constants from memory
   - arm: logimm single instruction load int more constants

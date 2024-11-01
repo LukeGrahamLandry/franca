@@ -1,3 +1,18 @@
+## (Oct 31)
+
+made the arm isel for the add instruction use an immediate when the right hand side is constant that fits in 12 bits
+(instead of an extra register).
+this alone makes the compiler go from 2,485,100 -> 2,089,352 bytes of code. thats insane.
+runtime (safe) goes 4.52 -> 4.13 (but again some of that is just because the new version does less work, unfortunate that my only big program is the compiler itself.
+it looks branchy but it generates so much less code that its faster even before accounting for it generating better code for itself.
+
+in testing that, found confusing behaviour where it updates to my changes
+without recompiling even when default_driver is using emit_qbe_included_dyn
+instead of emit_qbe_included_sta so it should be using the version in the compiler.
+oh! its because I'm setting function pointers in the target vtable in fill_target_arm
+which gets called from the module initilizer in the driver program instead of within the precompiled part.
+which is fantastic news because it also explains why there was a chunk of the backend code in the profiler that didn't have symbol names
+(because they were getting jitted every time) and that chunk is ~11% of the total time which perhaps is about to get 5x faster by precompiling correctly.
 
 ## (Oct 30)
 

@@ -8,6 +8,7 @@
 //       so it in emit with the arch independent ir. i guess that means the front end could just do it. 
 // TODO: (when i want to do my own aot) have the addr lookup table in a seperate segment before the functions and then don't include it in the aot binrary, just patch instead. 
 // TODO: take out the internal jump distance checks because we check at the end that the function fits in the segment (jsut also check that its within i19 because why not)
+// TODO: use ldp/stp for callee saved registers
 
 // TODO: need to replace all the .goal checks when we want to support ELF
 
@@ -429,7 +430,7 @@ fn slot(self: *ArmState, r: Qbe.Ref) i64 = {
     if s == -1 {
         return(16 + self.frame);
     };
-    if (s < 0) {
+    if s < 0 {
         if self.f.vararg && !self.f.globals.target.apple {
             return(16 + self.frame + 192 - (s+2));
         };
@@ -572,9 +573,15 @@ fn fixarg(self: *ArmState, pr: *Qbe.Ref, sz: i64) void = {
     r := pr[];
     if (rtype(r) == .RSlot) {
         s := self.slot(r);
-        // TODO: is this the same>
-        //if (s > sz * 4095u) {
-        if (s > sz * 4095) {  // TODO: why
+        // you're actually allowed unaligned accesses, you just can't encode them in the immediate. 
+        // qbe's stack slot allocating doesn't care about ensuring 8 byte slots are aligned,
+        // because it never folds offsets into the immediate space (ie use RSlot in .load directly)
+        // except for those inserted by reload_spilled. 
+        // maybe a better fix for this would be adding a padding slot between the 4 byte and 8 byte slot groups in isel. 
+        // but you hit the bad case exactly twice when self compiling so meh -- Oct 31. 
+        unaligned := s.mod(sz) != 0;  
+        out_of_range := s > sz * 4095;  // TODO: is this the same: s > sz * 4095
+        if out_of_range || unaligned {
             i := make_ins(.addr, .Kl, TMP(Arm64Reg.IP0.raw()), r, QbeNull);
             self.emitins(i&);
             pr[] = TMP(Arm64Reg.IP0.raw());
@@ -662,7 +669,7 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
             @debug_assert(rtype(i.arg&[0]) == .RSlot, "can only addr of a stack slot");
             reg := i.to.int_reg();
             s := self.slot(i.arg&[0]);
-            //@debug_assert(s >= 0, "slot must be positive");
+            @debug_assert(s >= 0, "slot must be positive");
             if (s <= 4095) {
                 self.inst(add_im(Bits.X64, reg, fp, @as(u12) s, 0));
             } else {
@@ -736,7 +743,15 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
             }
         }
         // TODO: these could kinda be data, the encodings are the same for many of them.
-        fn add()  => bin(@as(F) fadd, fn(s, d, a, b) => if(a == sp, => add_er(s, d, a, b), => add_sr(s, d, a, b, .LSL, 0))); // could always use *_er but then the disassembly looks dumb
+        fn add() => {
+            if rtype(i.arg&[1]) == .RCon {
+                // isel enforces that it's an int and in range for this encoding. 
+                c := self.f.get_constant(i.arg&[1]);
+                self.inst(add_im(si, i.to.int_reg(), i.arg&[0].int_reg(), @as(u12) c.bits.i, 0));
+                return();
+            };
+            bin(@as(F) fadd, fn(s, d, a, b) => if(a == sp, => add_er(s, d, a, b), => add_sr(s, d, a, b, .LSL, 0))); // could always use *_er but then the disassembly looks dumb
+        }
         fn sub()  => bin(@as(F) fsub, fn(s, d, a, b) => if(a == sp, => sub_er(s, d, a, b), => sub_sr(s, d, a, b, .LSL, 0))); // ^
         fn mul()  => bin(@as(F) fmul, fn(s, d, a, b) => madd(s, d, a, b, xzr));
         fn div()  => bin(@as(F) fdiv, fn(s, d, a, b) => sdiv(s, d, a, b)); // TODO: if you pass it here you force all calls to be inline :FUCKED
@@ -841,11 +856,19 @@ fn emitins2(self: *ArmState, i: *Qbe.Ins) void = {
         offset := 0;
         size := size_of_load(i);
         addr := if rtype(i.arg&[0]) == .RSlot {
-            offset = self.slot(i.arg&[0]) / size.zext();
+            offset += self.slot(i.arg&[0]);
+            @debug_assert(i.arg&[1] == QbeNull, "i dont think i mix offset and slot in ldr");
             fp
         } else {
+            if rtype(i.arg&[1]) == .RInt {
+                offset += zext(rsval(i.arg&[1]));
+            };
             i.arg&[0].int_reg()
         };
+        
+        @debug_assert_eq(offset.mod(size.zext()), 0);
+        offset /= size.zext();
+        @debug_assert_eq(offset.bit_and(1.shift_left(12) - 1), offset, "can't encode offset");
         // TODO: u/s h/b
         if i.cls().is_int() { // TODO: is this wrong?
             s := firstbit(size.zext().bitcast());
