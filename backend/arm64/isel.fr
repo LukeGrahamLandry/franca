@@ -86,6 +86,7 @@ fn fuse_addressing(f: *Qbe.Fn, mem: []*Qbe.Ins, b: *Qbe.Blk) void = {
     for mem& { i | 
         iarg := i.arg&;
         store := is_store(i.op());
+        addr := f.get_temporary(iarg[store.int()]);
         when_debug(f, .InstSelect) { out |
             if store {
                 @fmt_write(f.globals.debug_out, "   store ");
@@ -94,11 +95,13 @@ fn fuse_addressing(f: *Qbe.Fn, mem: []*Qbe.Ins, b: *Qbe.Blk) void = {
                 printref(i.to, f, f.globals.debug_out);
                 @fmt_write(f.globals.debug_out, " = load ");
             };
+            
+            @fmt_write(f.globals.debug_out, "[%] ", addr.name());
         };
         @debug_assert(store || iarg[1] == QbeNull);
         off := 0;
         size: i64 = if(store, => size_of_store(i).zext(), => size_of_load(i).zext());
-        new_addr := fuse_addr(f, iarg[store.int()], off&, size * 4096, b.id, size);
+        new_addr := fuse_addr(f, iarg[store.int()], off&, b.id, size, addr.nuse == 1);
         if new_addr != iarg[store.int()] && off.mod(size) == 0 {
             if new_addr == QbeNull {
                 iarg[store.int()] = SLOT(off / 4);
@@ -131,11 +134,26 @@ fn fuse_addressing(f: *Qbe.Fn, mem: []*Qbe.Ins, b: *Qbe.Blk) void = {
     };
 }
 
-fn fuse_addr(f: *Qbe.Fn, a: Qbe.Ref, total_off: *i64, max_off: i64, bid: i32, size: i64) Qbe.Ref = {
+fn fuse_addr(f: *Qbe.Fn, a: Qbe.Ref, total_off: *i64, bid: i32, size: i64, kill: bool) Qbe.Ref = {
+    max_off := size * 4096;
     addr := f.get_temporary(a);
     in_this_block := !addr.def.is_null() && addr.defining_block == bid;
     if(!in_this_block, => return(a));
     def_a := addr.def.arg&;
+    //@debug_assert(addr.nuse > 0);
+    kill_addr :: fn() => {
+        if kill {
+            //addr.nuse -= 1;
+            //if addr.nuse == 0 {
+            //    when_debug(f, .InstSelect) { out |
+            //        @fmt_write(f.globals.debug_out, "(kill %) ", addr.name());
+            //    };
+            //    addr.def.set_nop();
+            //    addr.def = Qbe.Ins.ptr_from_int(0);
+            //};
+        };
+    };
+    
     @match(addr.def.op()) {
         fn add() => {
             if(rtype(def_a[0]) != .RTmp, => return(a));
@@ -144,16 +162,13 @@ fn fuse_addr(f: *Qbe.Fn, a: Qbe.Ref, total_off: *i64, max_off: i64, bid: i32, si
                 if(off < 0 || off >= max_off || off.mod(size) != 0, => return(a));
                 base := f.get_temporary(def_a[0]);
                 when_debug(f, .InstSelect) { out |
-                    @fmt_write(f.globals.debug_out, "([% + %] -> [% + %]), ", addr.name(), total_off[], base.name(), off);
+                    @fmt_write(f.globals.debug_out, "-> [% + %] ", base.name(), off);
                 };
                 prev := total_off[];
                 total_off[] = off;
-                final := fuse_addr(f, def_a[0], total_off, max_off, bid, size);
+                final := fuse_addr(f, def_a[0], total_off, bid, size, addr.nuse == 1);
                 if final != a {
-                    //addr.nuse -= 1;
-                    //if addr.nuse == 0 {
-                    //    //addr.def.set_nop();
-                    //};
+                    kill_addr();
                 } else {
                     total_off[] = prev;
                     when_debug(f, .InstSelect) { out |
@@ -170,13 +185,10 @@ fn fuse_addr(f: *Qbe.Fn, a: Qbe.Ref, total_off: *i64, max_off: i64, bid: i32, si
             off := total_off[] + slot * 4;
             if(slot < 0 || off < 0 || off >= max_off || off.mod(size) != 0 || off.mod(4) != 0, => return(a));
             when_debug(f, .InstSelect) { out |
-                @fmt_write(f.globals.debug_out, "([% + %] -> [S% + %] -> [S%]), ", addr.name(), total_off[], slot, total_off[], off / 4);
+                @fmt_write(f.globals.debug_out, "-> [S% + %] -> [S%] ", slot, total_off[], off / 4);
             };
             total_off[] = off;
-            //addr.nuse -= 1;
-            //if addr.nuse == 0 {
-            //    //addr.def.set_nop();
-            //};
+            kill_addr();
             return(QbeNull);
         }
         @default => ();
@@ -197,10 +209,10 @@ fn sel(f: *Qbe.Fn, i: Qbe.Ins, blk: i32, mem: *List(*Qbe.Ins)) void = {
         i0 := f.emit(.flagieq, i&.cls(), i.to, QbeNull, QbeNull);
         if f.selcmp(i.arg, ck, blk) {
             x := i0.op().raw() + cmpop(cc);
-            i0.set_op(x);
+            i0.set_op(@as(Qbe.O) x);
         } else {
             x := i0.op().raw() + cc;
-            i0.set_op(x);
+            i0.set_op(@as(Qbe.O) x);
         };
         return();
     };

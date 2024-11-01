@@ -248,6 +248,10 @@ fn compile_for_arg(self: *EmitBc, arg: *FatExpr, arity: usize) Res(bool) = {
         continue :: local_return;
         ty := fields[i].ty;
         info := self.program.get_info(ty);
+        // :thiscanthappenyoudhope
+        if ty != val.ty {
+            @println("% vs %", self.program.log(ty), self.program.log(val.ty));
+        };
         if !info.pass_by_ref {
             _pushed += info.size_slots.zext();
             @try(self.compile_expr(val, .PushStack, false)) return;
@@ -257,6 +261,12 @@ fn compile_for_arg(self: *EmitBc, arg: *FatExpr, arity: usize) Res(bool) = {
         @match(val.expr&) {
             fn Deref(arg) => {
                 _pushed += 1;
+                
+                // :thiscanthappenyoudhope
+                //p := self.program.data.cast()[][].ptr_ty(ty);
+                //if p != arg.ty {
+                //    @println("% vs %", self.program.log(p), self.program.log(arg.ty));
+                //};
                 // TODO: this is probably unsound.
                 //       we're assuming that we can defer the load to be done by the callee but that might not be true.
                 @try(self.compile_expr(arg[], .PushStack, false)) return;
@@ -628,7 +638,12 @@ fn compile_expr(self: *EmitBc, expr: *FatExpr, result_location: ResultLoc, can_t
 
     expr_ty := expr.ty;
     @match(expr.expr&) {
-        fn Cast(v)  => return(self.compile_expr(v[], result_location, can_tail));
+        fn Cast(v)  => {
+            from := self.program.get_info(v.ty).stride_bytes();
+            to   := self.program.get_info(expr_ty).stride_bytes();
+            @err_assert(from == to, "@as size mismatch: % vs %", self.program.log(v.ty), self.program.log(expr_ty)) return;
+            return(self.compile_expr(v[], result_location, can_tail))
+        }
         fn Call(f)  => return(self.emit_call(f.f, f.arg, result_location, can_tail));
         fn Block(f) => return(self.emit_block_expr(expr, result_location, can_tail));
         fn Value(f) => return(self.emit_value(f.bytes&, result_location, expr.ty));
