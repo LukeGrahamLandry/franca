@@ -173,6 +173,7 @@ fn init_driver_vtable() *ImportVTable = {
     
     @if(INCLUDE_QBE_VTABLE) {
         vtable.emit_qbe_included = emit_qbe_included;
+        vtable.init_default_qbe_module = init_default_qbe_module;
     };
     
     the_vtable
@@ -261,9 +262,17 @@ fn fill_export_ffi(out: *List(u8)) void = {
         e := c[][].box(e);
         (expr = (Slice = e), loc = e.loc, ty = UnknownType, done = false)
     };
-    @fmt(out, "fn _uninitialized(e: FatExpr) FatExpr #macro #ct #comptime_addr(%);\n", uninit_node);
+    @fmt(out, "fn uninitialized(e: FatExpr) FatExpr #macro #ct #comptime_addr(%);\n", uninit_node);
     uninit_node: rawptr : fn(c: CompilerRs, e: FatExpr) FatExpr = {
-        (expr = .Uninitialized, loc = e.loc, ty = UnknownType, done = false)
+        ty := UnknownType;
+        if !e&.is_raw_unit() {
+            self := c[][];
+            res := self.poll_in_place(Type) {
+                self.eval(e&, Type)
+            };
+            ty = self.unwrap_report_error(Type, res);
+        };
+        (expr = .Uninitialized, loc = e.loc, ty = ty, done = false)
     };
     @fmt(out, "fn loop(e: FatExpr) FatExpr #macro #ct #comptime_addr(%);\n", loop_node);
     loop_node: rawptr : fn(c: CompilerRs, e: FatExpr) FatExpr = {

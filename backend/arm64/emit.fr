@@ -420,7 +420,7 @@ fn epilogue_shrink_stack(self: *ArmState) void = {
 
 // can remove this if i decide to fully give up emitting text. 
 fn rname(r: i64, k: Qbe.Cls) Str = {
-    @debug_assert(k == .Kl, "I only use this for loading symbol addresses. float/32 bit doesn't make sense.");
+    @debug_assert(k == .Kl, "I only use this for loading symbol addresses. float/32 bit doesn't make sense. %", @as(i64) k.raw().zext());
     @debug_assert(r != Arm64Reg.SP.raw(), "stomp sp?");
     items(@format("x%", r - Arm64Reg.R0.raw()) temp())
 }
@@ -534,6 +534,7 @@ fn loadcon(self: *ArmState, c: *Qbe.Con, r: i64, k: Qbe.Cls, do_text: bool) void
     w := is_wide(k);
     n := c.bits.i;
     if (c.type == .CAddr) {
+        @debug_assert(w, "can't have 32 bit addr: %", self.m.str(c.sym.id));
         rn := rname(r + 1, k); // HACK
         self.loadaddr(c, r, rn, do_text);
         return();
@@ -894,11 +895,18 @@ fn emitins2(self: *ArmState, i: *Qbe.Ins) void = {
         self.fixarg(i.arg&.index(1), size_of_store(i).intcast());
         offset := 0;
         size := size_of_store(i);
-        addr := if rtype(i.arg&[1]) == .RSlot {
-            offset = self.slot(i.arg&[1]) / size.zext();
-            fp
-        } else {
-            i.arg&[1].int_reg()
+        addr := @match(rtype(i.arg&[1])) {
+            fn RSlot() => {
+                offset = self.slot(i.arg&[1]) / size.zext();
+                fp
+            }
+            fn RTmp() => i.arg&[1].int_reg();
+            fn RMem() => {
+                m := self.f.get_memory(i.arg&[1]);
+                offset = m.offset.bits.i / size.zext();
+                m.base.int_reg()
+            }
+            @default => panic("bad str addr type");
         };
         if i.op() == .stores {
             self.inst(f_str_uo(Bits.W32, @as(u5) i.arg&[0].float_reg(), addr, @as(u12) offset));

@@ -40,7 +40,7 @@ fn arm64_isel(f: *Qbe.Fn) void = {
         align *= 2; // :break
     };
     
-    loads := list(*Qbe.Ins, temp());
+    mem := list(*Qbe.Ins, temp());
     for_blocks f { b |
         f.globals.curi[] = f.scratch_start(); // TODO: remove this once we always reset it at the end of a pass. 
         
@@ -59,11 +59,11 @@ fn arm64_isel(f: *Qbe.Fn) void = {
         f.seljmp(b);
         
         for_insts_rev b { i | 
-            f.sel(i[][], b.id, loads&);
+            f.sel(i[][], b.id, mem&);
         };
 
-        f.fuse_addressing(loads.items(), b);
-        loads&.clear();
+        f.fuse_addressing(mem.items(), b);
+        mem&.clear();
         
         f.copy_instructions_from_scratch(b);
     };
@@ -78,34 +78,52 @@ fn arm64_isel(f: *Qbe.Fn) void = {
 // This will compress a sequence like `add x1, x29, #24; add x1, x1, #8; ldr x1, [x1]` into `ldr x1, [x29, #32]`
 // It only handles chains that occur within a single becuase we have tmp.def pointers into scratch space. 
 //
-fn fuse_addressing(f: *Qbe.Fn, loads: []*Qbe.Ins, b: *Qbe.Blk) void = {
+fn fuse_addressing(f: *Qbe.Fn, mem: []*Qbe.Ins, b: *Qbe.Blk) void = {
+    if(mem.len == 0, => return());
     when_debug(f, .InstSelect) { out |
         @fmt_write(f.globals.debug_out, "%: \n", b.name());
     };
-    for loads& { i | 
+    for mem& { i | 
         iarg := i.arg&;
-        if rtype(iarg[0]) == .RTmp {
-            when_debug(f, .InstSelect) { out |
+        store := is_store(i.op());
+        when_debug(f, .InstSelect) { out |
+            if store {
+                @fmt_write(f.globals.debug_out, "   store ");
+            } else {
                 @fmt_write(f.globals.debug_out, "   ");
                 printref(i.to, f, f.globals.debug_out);
                 @fmt_write(f.globals.debug_out, " = load ");
             };
-            @debug_assert(iarg[1] == QbeNull);
-            off := 0;
-            size: i64 = size_of_load(i).zext();
-            new_addr := fuse_addr(f, iarg[0], off&, size * 4096, b.id, size);
-            if new_addr != iarg[0] && off.mod(size) == 0 {
-                if new_addr == QbeNull {
-                    iarg[0] = SLOT(off / 4);
+        };
+        @debug_assert(store || iarg[1] == QbeNull);
+        off := 0;
+        size: i64 = if(store, => size_of_store(i).zext(), => size_of_load(i).zext());
+        new_addr := fuse_addr(f, iarg[store.int()], off&, size * 4096, b.id, size);
+        if new_addr != iarg[store.int()] && off.mod(size) == 0 {
+            if new_addr == QbeNull {
+                iarg[store.int()] = SLOT(off / 4);
+            } else {
+                if store {
+                    if off == 0 {
+                        iarg[1] = new_addr;
+                    } else {
+                        m: i64 = f.nmem.zext();
+                        f.nmem += 1;
+                        iarg[1] = MEM(m);
+                        f.mem&.grow(m + 1);
+                        f.mem[m].offset.bits.i = off;
+                        f.mem[m].offset.type = .CBits;
+                        f.mem[m].base = new_addr;
+                    };
                 } else {
                     iarg[0] = new_addr;
                     iarg[1] = INT(off);
                 };
             };
-            
-            when_debug(f, .InstSelect) { out |
-                @fmt_write(f.globals.debug_out, "\n");
-            };
+        };
+        
+        when_debug(f, .InstSelect) { out |
+            @fmt_write(f.globals.debug_out, "\n");
         };
     };
     when_debug(f, .InstSelect) { out |
@@ -115,7 +133,7 @@ fn fuse_addressing(f: *Qbe.Fn, loads: []*Qbe.Ins, b: *Qbe.Blk) void = {
 
 fn fuse_addr(f: *Qbe.Fn, a: Qbe.Ref, total_off: *i64, max_off: i64, bid: i32, size: i64) Qbe.Ref = {
     addr := f.get_temporary(a);
-    in_this_block := addr.nuse == 1 && !addr.def.is_null() && addr.defining_block == bid;
+    in_this_block := !addr.def.is_null() && addr.defining_block == bid;
     if(!in_this_block, => return(a));
     def_a := addr.def.arg&;
     @match(addr.def.op()) {
@@ -132,10 +150,15 @@ fn fuse_addr(f: *Qbe.Fn, a: Qbe.Ref, total_off: *i64, max_off: i64, bid: i32, si
                 total_off[] = off;
                 final := fuse_addr(f, def_a[0], total_off, max_off, bid, size);
                 if final != a {
-                    addr.def.set_nop();
-                    addr[] = zeroed(@type addr[]);
+                    //addr.nuse -= 1;
+                    //if addr.nuse == 0 {
+                    //    //addr.def.set_nop();
+                    //};
                 } else {
                     total_off[] = prev;
+                    when_debug(f, .InstSelect) { out |
+                        @fmt_write(f.globals.debug_out, "NO!");
+                    };
                 };
                 return(final);
             };
@@ -150,8 +173,10 @@ fn fuse_addr(f: *Qbe.Fn, a: Qbe.Ref, total_off: *i64, max_off: i64, bid: i32, si
                 @fmt_write(f.globals.debug_out, "([% + %] -> [S% + %] -> [S%]), ", addr.name(), total_off[], slot, total_off[], off / 4);
             };
             total_off[] = off;
-            addr.def.set_nop();
-            addr[] = zeroed(@type addr[]);
+            //addr.nuse -= 1;
+            //if addr.nuse == 0 {
+            //    //addr.def.set_nop();
+            //};
             return(QbeNull);
         }
         @default => ();
@@ -159,7 +184,7 @@ fn fuse_addr(f: *Qbe.Fn, a: Qbe.Ref, total_off: *i64, max_off: i64, bid: i32, si
     a
 }
 
-fn sel(f: *Qbe.Fn, i: Qbe.Ins, blk: i32, loads: *List(*Qbe.Ins)) void = {
+fn sel(f: *Qbe.Fn, i: Qbe.Ins, blk: i32, mem: *List(*Qbe.Ins)) void = {
     if is_alloc(i&.op()) {
         i0 := f.globals.curi[].offset(-1); // :LookAtLastInst
         salloc(i.to, i.arg&[0], f);
@@ -187,14 +212,17 @@ fn sel(f: *Qbe.Fn, i: Qbe.Ins, blk: i32, loads: *List(*Qbe.Ins)) void = {
     o := i&.op();
     if o != .nop {
         new_ins := f.emit(i);
-        if is_load(o) {
-            loads.push(new_ins);
+        iarg := new_ins.arg&;
+        if is_load(o) && rtype(iarg[0]) == .RTmp {
+            mem.push(new_ins);
+        };
+        if is_store(o) && rtype(iarg[1]) == .RTmp {
+            mem.push(new_ins);
         };
         if rtype(i.to) == .RTmp {
             t := f.get_temporary(i.to);
             t.def = new_ins;
         };
-        iarg := new_ins.arg&;
         f.fixarg(iarg[0]&, argcls(i&, 0), false, blk);
         k := argcls(i&, 1);
         // TODO: do this for sub, etc as well. this alone makes the compiler go from 2485100 -> 2089352 bytes of code. thats insane.
