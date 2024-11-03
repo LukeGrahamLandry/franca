@@ -184,6 +184,7 @@ wait until fully self hosted so its less painful because don't have to keep both
 - hacky rust pointer ffi
 - inline asm
 - reading from uninitialized memory
+- init from small union field then read from large.
 
 ## Testing
 

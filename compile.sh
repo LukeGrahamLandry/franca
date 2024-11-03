@@ -1,5 +1,9 @@
-echo "### ./boot -> f_l"
-./boot/aarch64-apple-darwin/franca2 examples/default_driver.fr build compiler/other_main.fr -aot=llvm || exit
+# echo "### ./boot -> f_l"
+# ./boot/aarch64-apple-darwin/franca2 examples/default_driver.fr build compiler/other_main.fr -aot=llvm || exit
+# cp a.out target/f_l
+
+echo "### franca -> f_l"
+franca examples/default_driver.fr build compiler/other_main.fr -aot=llvm || exit
 cp a.out target/f_l
 
 echo "### f_l -> f_ll"

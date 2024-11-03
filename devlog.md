@@ -1,3 +1,66 @@
+## (Nov 3)
+
+hoping the compiler constants thing also shows up in one of the tests.
+setup script to diff them so its less painful.
+yes! basic_libc:catch_signal does it alone, thats much more managable.
+same symptoms: identical asm except for adrp+add offsets. one extra data symbol.
+it's like the `handled_a_signal :: @static(bool) false;` is happening twice in the qbe version.
+I guess one is IS_PANICKING and thats why it doesn't happen don't print something too.
+add_constant is only called in walk_bc (not c/b/llvm or b/from_bc) and it happens for both llvm and qbe so its miscompiling the frontend.
+oh its the deduplicating by jit_addr in emit_relocatable_constant so when its less than 8 bytes and stored inline, its deduplicating by stack slot,
+and the one compiled by llvm happened to use stack space such that they were at the same place for both constants and it deduplicated them.
+a bit alarming that it wasn't a problem for months but anyway we're back to reproducible builds of the compiler so thats good for morale.
+
+the new backend still doesn't fully work, the occasional crashes were unrelated apparently, but at least now we know its not a
+confusing miscompliation that only surfaces after multiple iterations, just a normal friendly miscompilation.
+
+## (Nov 2)
+
+farm_game is also different exes depending if using lq or lqq.
+hoping thats the same problem as the compiler but don't thing so because this changes code and i think compiler is just different in constants.
+
+```
+3f30: d2800001     	mov	x1, #0
+3f34: f2d33321     	movk	x1, #39321, lsl #32
+3f38: f2e7f921     	movk	x1, #16329, lsl #48
+3f3c: 1e270021     	fmov	s1, w1
+```
+
+vs
+
+```
+3f30: d2800001     	mov	x1, #0
+3f34: f2c00021     	movk	x1, #1, lsl #32
+3f38: 1e270021     	fmov	s1, w1
+```
+
+so its miscompiling emit:loadcon? no n is just different going in,
+but the same in from_bc:inst_literal. so lost somewhere in the middle.
+no, its different at the very beginning (`-d P`):
+
+```
+
+args 4596373777117347840
+args 4596373778182701056
+call $sdtx_pos__1050
+```
+
+vs
+
+```
+call $sdtx_color3f__1058
+args 4294967296
+args 5360320512
+```
+
+was because of setting f32 union field in push_literal and then reading back an i64 because when emitting i just care about the bytes.
+that was interesting because it did make different binaries but both were correct compilations of the program.
+because the difference was just wastefully loading the high bits of a register that you were about to truncate anyway,
+so it could never be observed.
+
+should decide what that should do.
+maybe x = (i = 123) should zero the other fields but x.i = 123 should leave them unchanged?
+
 ## (Oct 31)
 
 made the arm isel for the add instruction use an immediate when the right hand side is constant that fits in 12 bits
@@ -16,6 +79,8 @@ which is fantastic news because it also explains why there was a chunk of the ba
 
 using immediates for ldr goes 2,089k -> 1,737 and using for str goes to 1,407k.
 
+those numbers are all before including vtable.init_default_qbe_module.
+
 ## (Oct 30)
 
 Found someone on the internet to tell me how Mach-O does thread locals: https://stackoverflow.com/a/75297331
@@ -23,31 +88,35 @@ Found someone on the internet to tell me how Mach-O does thread locals: https://
 So debugging why it works when I let clang handle the offsets instead of doing everything myself.
 
 ```
+
 _xaddr:
-	.word 3573752927
-	.word 2847898621
-	.word 2432697341                ; 910003FD
-	adrp	x0, _x@tlvppage
-	ldr	x0, [x0, _x@tlvppageoff]
-	.word 4181721089                ; F9400001
-	.word 3594453024
-	.word 2831252477
-	.word 3596551104
+.word 3573752927
+.word 2847898621
+.word 2432697341 ; 910003FD
+adrp x0, _x@tlvppage
+ldr x0, [x0, _x@tlvppageoff]
+.word 4181721089 ; F9400001
+.word 3594453024
+.word 2831252477
+.word 3596551104
+
 ```
 
 assembles to this:
 
 ```
+
 0000000100003ebc <_xaddr>:
-100003ebc: d503245f    	bti	c
-100003ec0: a9bf7bfd    	stp	x29, x30, [sp, #-16]!
-100003ec4: 910003fd    	mov	x29, sp
-100003ec8: b0000020    	adrp	x0, 0x100008000 <_xaddr+0x20>
-100003ecc: 9100c000    	add	x0, x0, #48
-100003ed0: f9400001    	ldr	x1, [x0]
-100003ed4: d63f0020    	blr	x1
-100003ed8: a8c17bfd    	ldp	x29, x30, [sp], #16
-100003edc: d65f03c0    	ret
+100003ebc: d503245f bti c
+100003ec0: a9bf7bfd stp x29, x30, [sp, #-16]!
+100003ec4: 910003fd mov x29, sp
+100003ec8: b0000020 adrp x0, 0x100008000 <_xaddr+0x20>
+100003ecc: 9100c000 add x0, x0, #48
+100003ed0: f9400001 ldr x1, [x0]
+100003ed4: d63f0020 blr x1
+100003ed8: a8c17bfd ldp x29, x30, [sp], #16
+100003edc: d65f03c0 ret
+
 ```
 
 the important thing is that (3 words, adrp, ldr, 4 words) assembled to (3 words, adrp, add, 4 words).
@@ -65,11 +134,11 @@ That's enough to pass the one qbe thread local test when outputting exe. still h
   i can't recreate the problem with just my language so its either we disagree with clang about size of the struct or its a calling convention thing somehow.
   oh heck, thats crippling. in from_bc:emit_bounce_fn i was treating the indirect ret addr as first arg (link it is inside a bc block),
   but it actually has to be a blit to a qbe return instruction. so it was just using whatever junk happened to be in x0 instead of x8,
-  which i was the address of the whole SgDesc.  
+  which i was the address of the whole SgDesc.
   but on the plus side the compiler now works on new backend now!
   at least for hello world.
 - ok this is getting confusing. we need some notation.
-  f_l = the normal one compiled by llvm.  
+  f_l = the normal one compiled by llvm.
   f_lq = compiled by f_l with the new backend
   f_lqq = compiled by f_lq with the new backend
   f_lql = compiled by f_lq with llvm
@@ -90,7 +159,7 @@ That's enough to pass the one qbe thread local test when outputting exe. still h
   so we've produced UB. thats fun.
   cry.
   `c.bits.i < 1.shift_left(12) - 1` is not at all the same thing as
-  `c.bits.i.bit_and(1.shift_left(12) - 1) == c.bits.i`.
+  `c.bits.i.bit_and(1.shift_left(12) - 1) == c.bits.i`. (off by one. negatives are handled on different path anyway).
   and that was the only problem.
 
 ## emit mach-o reloc (Oct 27)
@@ -131,22 +200,26 @@ That's enough to pass the one qbe thread local test when outputting exe. still h
 - i was hoping i could use `https://lief.re/doc/latest/formats/macho/python.html`
   to start with a working exe and remove parts until it broke.
   but just doing nothing:
-  ```
-  import lief
-  import sys
-  path = sys.argv[1]
-  app = lief.parse(path)
-  app.write(path)
-  ```
-  breaks the exe. so either im stupid or they're stupid but either way it doesn't help me.
-  it seems they unset the N_EXT bit in LC_SYMTAB entries?
-  ahaaaa im dumb! its because they're signed so i have to run codesign -s on it after changing any bytes.
-  which means by previous experiments with editing the flags of a section to be zero and that breaking the exe,
-  didn't mean i need to have sections, it just means changing bytes invalidates the signeture.
-  codesign still isn't enough to make my program work tho.
-  `codesign -s "Luke Graham Landry" hello.o -f`
-  i hate this so much.
-  i know more than i ever have before. not a meaningful statement but makes me feel better. its fun because its always true.
+
+```
+
+import lief
+import sys
+path = sys.argv[1]
+app = lief.parse(path)
+app.write(path)
+
+```
+
+breaks the exe. so either im stupid or they're stupid but either way it doesn't help me.
+it seems they unset the N_EXT bit in LC_SYMTAB entries?
+ahaaaa im dumb! its because they're signed so i have to run codesign -s on it after changing any bytes.
+which means by previous experiments with editing the flags of a section to be zero and that breaking the exe,
+didn't mean i need to have sections, it just means changing bytes invalidates the signeture.
+codesign still isn't enough to make my program work tho.
+`codesign -s "Luke Graham Landry" hello.o -f`
+i hate this so much.
+i know more than i ever have before. not a meaningful statement but makes me feel better. its fun because its always true.
 
 // TODO: real ones have the file offset of `__TEXT` being 0 so it contains all the load commands too?
 // and then section `__text` is just the code. do we need to do that? (we dont now). why would that be the case?
@@ -208,10 +281,12 @@ oh yeah, i just got confused by the output of objdump.
 example:
 
 ```
-000000010000be2c <__stubs>:
-10000be2c: b0000010    	adrp	x16, 0x10000c000 <__stubs+0x4>
-10000be30: f9400210    	ldr	x16, [x16]
-10000be34: d61f0200    	br	x16
+
+000000010000be2c <**stubs>:
+10000be2c: b0000010 adrp x16, 0x10000c000 <**stubs+0x4>
+10000be30: f9400210 ldr x16, [x16]
+10000be34: d61f0200 br x16
+
 ```
 
 it says its to `__stubs` but 0x10000c000 is the address of `__got` in that binary.
@@ -302,12 +377,14 @@ so now the loader it good enough to run itself and the compiler.
 - side tangent of i'm stupid. lets play can you spot the mistake...
 
 ```
+
 fn println(i: i64) void = {
-    mem: List(u8) = list(i.div(10).abs().add(2), temp());
-    i.display(mem&);
-    mem&.push_all("\n");
-    print(mem&.items());
+mem: List(u8) = list(i.div(10).abs().add(2), temp());
+i.display(mem&);
+mem&.push_all("\n");
+print(mem&.items());
 }
+
 ```
 
 ok we're doing some printf(A) driven development.
@@ -632,7 +709,7 @@ strace says
 `mmap(NULL, 1048576, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_EXECUTABLE, -1, 0) = -1 EBADF (Bad file descriptor)`
 ooooohhh they have different numbers!!! MAP_EXECUTABLE instead of MAP_ANONYMOUS...
 how can that be i thought mmap just did a syscall?
-with musl in blink i have the number right  
+with musl in blink i have the number right
 `I2024-09-15T17:47:06.685846:blink/strace.c:778:52190 (sys) mmap(0, 0x1000000, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) -> 0x2168409d0000`
 oh but sometimes i have it right `mmap(NULL, 16777216, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7fffe63de000`
 so is that a calling convention thing or maybe that one was done by the libc not my code.
@@ -652,8 +729,10 @@ todo: it might not find dlopen because its actually `dlopen@@<some insane garbag
 there's gotta be a better way than typing
 
 ```
+
 mkdir [mount point]
 mount -t 9p -o trans=virtio share [mount point] -oversion=9p2000.L
+
 ```
 
 every time, i tried the `/etc/fstab` thing but it didn't seem to work.
@@ -836,11 +915,13 @@ started x86_64 encoding
 //! important to note that it prints normal ascii things as characters instead of in hex because we like confusion!
 
 ```
-from pwn import *
+
+from pwn import \*
 context.arch = "amd64"
 def show(s):
-  print(" ".join(("{: 8x}".format(x) for x in asm(s))))
-  print(" ".join(("{:08b}".format(x) for x in asm(s))))
+print(" ".join(("{: 8x}".format(x) for x in asm(s))))
+print(" ".join(("{:08b}".format(x) for x in asm(s))))
+
 ```
 
 - expand macros in imm_eval without function context (@FnPtr is common).
@@ -854,7 +935,7 @@ safe its still 780 tho which is sad.
 ## (Sep 2)
 
 it feels like i should be able to get cranelift passing everything on aarch64 before dealing with x86,
-but it seems super unreliable. a different subset of my tests fail every time i run.  
+but it seems super unreliable. a different subset of my tests fail every time i run.
 ocassionally all except multistack work so i suspect thats the only one that's actually broken.
 i must be doing something wrong.
 A common crash is this
@@ -927,12 +1008,14 @@ fixing .TookPointerValue (unsafe 950, safe 1300). my hashtable of integers is re
 seems you no longer need this.
 
 ```
+
 // If you don't do this at all, you loop (TODO: why? gets stuck on EvalConstant:i64).
 // But if you @check it, you'll error out on things that need a type hint.
 // We do a real typecheck after dealing with the const args so its probably fine.
 // TODO: compiling it at all here (check or not) has to be wrong tho,
-//       because you don't want things in a const arg expr to be added to runtime callees.
-_ := self.compile_expr(arg_expr, arg_expr.ty.want());
+// because you don't want things in a const arg expr to be added to runtime callees.
+\_ := self.compile_expr(arg_expr, arg_expr.ty.want());
+
 ```
 
 a couple mistakes in the compiler code that were incorrectly allowed by the old sema. thats kinda cool.
@@ -959,7 +1042,7 @@ remove some unneeded sema_regression changes.
 
 ## debugging on x86 (Aug 26)
 
-v2;  
+v2;
 so tuple2 is getting the right type args but it segfaults if i try to print types.len so comp_ctx ptr is garbage?
 yeah the hack number im passing to emit_bc_and_aarch64 is not the one i get out, but it is on arm.
 ooooooooo kkkkkkk now it seems to be working....
@@ -989,45 +1072,60 @@ oh damn if i google that string its just a thing people know,
 and if i look in my dirent.h
 
 ```
-int readdir_r(DIR *, struct dirent *, struct dirent **) __DARWIN_INODE64(readdir_r);
+
+int readdir_r(DIR _, struct dirent _, struct dirent \*\*) \_\_DARWIN_INODE64(readdir_r);
+
 ```
 
 and then in cdefs.h
 
 ```
-#define __DARWIN_INODE64(sym)           __asm("_" __STRING(sym) __DARWIN_SUF_64_BIT_INO_T)
+
+#define **DARWIN_INODE64(sym) **asm("\_" **STRING(sym) **DARWIN_SUF_64_BIT_INO_T)
+
 ```
 
 and
 
 ```
-#  if __DARWIN_64_BIT_INO_T
-#    if __DARWIN_ONLY_64_BIT_INO_T
-#      define __DARWIN_SUF_64_BIT_INO_T /* nothing */
-#    else /* !__DARWIN_ONLY_64_BIT_INO_T */
-#      define __DARWIN_SUF_64_BIT_INO_T "$INODE64"
-#    endif /* __DARWIN_ONLY_64_BIT_INO_T */
-#  else /* !__DARWIN_64_BIT_INO_T */
-#    define __DARWIN_SUF_64_BIT_INO_T   /* nothing */
-#  endif /* __DARWIN_64_BIT_INO_T */
+
+# if \_\_DARWIN_64_BIT_INO_T
+
+# if \_\_DARWIN_ONLY_64_BIT_INO_T
+
+# define \_\_DARWIN_SUF_64_BIT_INO_T /_ nothing _/
+
+# else /_ !\_\_DARWIN_ONLY_64_BIT_INO_T _/
+
+# define \_\_DARWIN_SUF_64_BIT_INO_T "$INODE64"
+
+# endif /_ \_\_DARWIN_ONLY_64_BIT_INO_T _/
+
+# else /_ !\_\_DARWIN_64_BIT_INO_T _/
+
+# define \_\_DARWIN_SUF_64_BIT_INO_T /_ nothing _/
+
+# endif /_ \_\_DARWIN_64_BIT_INO_T _/
 
 ```
 
 we need to appritiate reddit bro for a moment
 
 ```
+
 // https://github.com/peterdelevoryas/mylang/blob/master/src/llvm.rs#L52
 for func_decl in &module.func_decls {
-      let lltype = type_bld.func_type(&func_decl.ty);
-      let mut name = func_decl.name.deref().to_string();
-      name.push('\0');
-      let mut link_name = name.as_ptr() as *const i8;
-      if cfg!(target_os = "macos") && name == "readdir\0" {
-          link_name = "readdir$INODE64\0".as_ptr() as *const i8;
-      }
-      let llfunc = LLVMAddFunction(llmodule, link_name, lltype);
-      llfuncs.push(llfunc);
-  }
+let lltype = type_bld.func_type(&func_decl.ty);
+let mut name = func_decl.name.deref().to_string();
+name.push('\0');
+let mut link_name = name.as_ptr() as *const i8;
+if cfg!(target_os = "macos") && name == "readdir\0" {
+link_name = "readdir$INODE64\0".as_ptr() as *const i8;
+}
+let llfunc = LLVMAddFunction(llmodule, link_name, lltype);
+llfuncs.push(llfunc);
+}
+
 ```
 
 thats funny.
@@ -1036,7 +1134,7 @@ now i need to make a better #import that lets you set a link name.
 
 ---
 
-now back to trying to get v1 to work;  
+now back to trying to get v1 to work;
 changed the name of the self hosted lib file so it doesn't collide with the rust one and that got rid of `ld: warning: ignoring file 'target/x86_64-apple-darwin/release/libfranca.a[19](libfranca.o)': found architecture 'arm64', required architecture 'x86_64'`
 but that didn't help.
 if i compile the rust with `TRACE_CALLS = true`, it panics on `Expected function to have scope` instead.
@@ -1046,16 +1144,16 @@ maybe x86 doens't have the same field alignment rules? but sizeof(Func) is 448 o
 actually maybe that happens to be sorted to not have obvious padding.
 
 ```
-pub fn main(){
-    #[cfg(target_arch = "x86_64")]
-    println!("sizeof(A) = {}", core::mem::size_of::<A>())
-}
-#[repr(C)]
+
+pub fn main(){ #[cfg(target_arch = "x86_64")]
+println!("sizeof(A) = {}", core::mem::size_of::<A>())
+} #[repr(C)]
 struct A {
-    a: i64,
-    b: bool,
-    c: i64,
+a: i64,
+b: bool,
+c: i64,
 }
+
 ```
 
 on rust playground says 24 tho so that seems to be normal.
@@ -1093,7 +1191,7 @@ fixed runner_segfault on old.
 
 now to make it actually run on x86 i get the thrilling job of hunting down everywhere i was sketchy with abi stuff.
 
-v2 dying in tuple_of after a call_dynamic.  
+v2 dying in tuple_of after a call_dynamic.
 v1 dying in platform_mmemmove after hoist_constants
 
 - put_constant taking by value instead of ref. that didnt help but probably will eventually.
@@ -1176,7 +1274,7 @@ I think things aren't always getting added as callees correctly?
 
 > failing 32
 
-HACK.  
+HACK.
 just say no type hint for the first argument when resolving overloads.
 thats good enough to not incorrectly coerce a constant and then fail to match on a runtime second arg for the binary arithmetic which is what it all ends up being.
 eventually i'll need something more robust but its not like the old version worked super well either.
@@ -1338,6 +1436,7 @@ Older clang takes 1.5 seconds instead of 2 seconds which is interesting...
 i was hoping for actually gcc
 
 ```
+
 $ gcc --version
 Apple clang version 14.0.3 (clang-1403.0.22.14.1)
 Target: arm64-apple-darwin22.2.0
@@ -1348,16 +1447,19 @@ Homebrew clang version 18.1.6
 Target: arm64-apple-darwin22.2.0
 Thread model: posix
 InstalledDir: /opt/homebrew/opt/llvm/bin
+
 ```
 
 I also tried real gcc and thats 1.4 seconds
 
 ```
+
 $ /opt/homebrew/Cellar/gcc/14.1.0_2/bin/gcc-14 --version
 gcc-14 (Homebrew GCC 14.1.0_2) 14.1.0
 Copyright (C) 2024 Free Software Foundation, Inc.
-This is free software; see the source for copying conditions.  There is NO
+This is free software; see the source for copying conditions. There is NO
 warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+
 ```
 
 So thats enough faster that it makes qbe just slightly faster than llvm.
@@ -1376,16 +1478,17 @@ So thats enough faster that it makes qbe just slightly faster than llvm.
   that fixed it jumping to null when trying to call through alloc vtable.
 
 ```
+
 qbe bug? docs say im supposed to use fake types for calls but this loses the argument.
 making it w works. but without -NDEBUG it hits an assertion so maybe the docs are lying?
 Assertion failed: (v->t[0] == T.rglob), function spill, file spill.c, line 507.
 yeah apparently just use w for everything.
 
-  function l $trivial(){
-  @start
-  %v1 =l call $something_important(ub 123)
-  ret %v1
-  }
+function l $trivial(){
+@start
+%v1 =l call $something*important(ub 123)
+ret %v1
+}
 .text
 .balign 4
 \_trivial:
@@ -1395,7 +1498,8 @@ mov x29, sp
 bl \_something_important
 ldp x29, x30, [sp], 16
 ret
-/_ end function trivial \*/
+/* end function trivial \*/
+
 ```
 
 - hangs on test `buckets` but its something wrong with my fork_and_catch
@@ -1505,16 +1609,18 @@ fantastic.
 ##
 
 ```
+
 [
-  {
-    "label": "Franca Compiler",
-    "command": "cd /Users/luke/Documents/mods/infered/compiler && franca first.fr && clang++ /Users/luke/Documents/mods/infered/target/aarch64-apple-darwin/release/deps/libfranca.a target/libfranca.o -o ../target/release/franca_new && mv ../target/release/franca_new ../target/release/franca",
-    "description": "compiler",
-    "use_new_terminal": false,
-    "allow_concurrent_runs": false,
-    "reveal": "always"
-  }
+{
+"label": "Franca Compiler",
+"command": "cd /Users/luke/Documents/mods/infered/compiler && franca first.fr && clang++ /Users/luke/Documents/mods/infered/target/aarch64-apple-darwin/release/deps/libfranca.a target/libfranca.o -o ../target/release/franca_new && mv ../target/release/franca_new ../target/release/franca",
+"description": "compiler",
+"use_new_terminal": false,
+"allow_concurrent_runs": false,
+"reveal": "always"
+}
 ]
+
 ```
 
 ## Jul 9
@@ -1645,7 +1751,7 @@ Those are really thier own ast nodes, so perhaps I should treat them as such.
 fucking wikipedia lied to be.
 system v x86 cc does NOT replace large arguments with a pointer (which sounded reasonable cause thats what arm does),
 it just copies them onto the stack. oh an also does it right to left apparently.
-this one knows the truth https://www.uclibc.org/docs/psABI-x86_64.pdf  
+this one knows the truth https://www.uclibc.org/docs/psABI-x86_64.pdf
 and godbolt agrees.
 
 i think when farm_game x86 was working before its because i was still using flat calls for macros specifically, and sokol always passes large args by pointer.
@@ -1697,85 +1803,97 @@ i also have to start giving llvm byval attributes on args so i can do x86 ffi.
 I'm not sure i trust qbe, like ok i want to return two ints.
 
 ```
+
 type :pair = { l, l }
 export function :pair $get_two() {
 @start
-    %out =l alloc8 16
-    %snd =l add %out, 8
-    storel 123, %out
-    storel 456, %snd
-	ret %out
+%out =l alloc8 16
+%snd =l add %out, 8
+storel 123, %out
+storel 456, %snd
+ret %out
 }
+
 ```
 
 generates this:
 
 ```
+
 .text
 .balign 4
-.globl _get_two
-_get_two:
-	stp	x29, x30, [sp, -32]!
-	mov	x29, sp
-	mov	x1, #8
-	add	x0, x29, #16
-	add	x1, x0, x1
-	add	x2, x29, #16
-	mov	x0, #123
-	str	x0, [x2]
-	mov	x0, #456
-	str	x0, [x1]
-	mov	x1, #8
-	add	x0, x29, #16
-	add	x0, x0, x1
-	ldr	x1, [x0]
-	mov	x2, #0
-	add	x0, x29, #16
-	add	x0, x0, x2
-	ldr	x0, [x0]
-	ldp	x29, x30, [sp], 32
-	ret
-/* end function get_two */
+.globl \_get_two
+\_get_two:
+stp x29, x30, [sp, -32]!
+mov x29, sp
+mov x1, #8
+add x0, x29, #16
+add x1, x0, x1
+add x2, x29, #16
+mov x0, #123
+str x0, [x2]
+mov x0, #456
+str x0, [x1]
+mov x1, #8
+add x0, x29, #16
+add x0, x0, x1
+ldr x1, [x0]
+mov x2, #0
+add x0, x29, #16
+add x0, x0, x2
+ldr x0, [x0]
+ldp x29, x30, [sp], 32
+ret
+/_ end function get_two _/
+
 ```
 
 and in my language,
 
 ```
+
 fn get_two() Ty(i64, i64) #log_asm = (123, 456);
+
 ```
 
 with my current garbage asm where i do absolutly no optimisations, you get this
 
 ```
+
 === Asm for Fn2352: get_two ===
-	stp	x29, x30, [sp]
-	mov	x29, sp
-	sub	sp, sp, #0
-	mov	x0, #123                        ; =0x7b
-	mov	x1, #456                        ; =0x1c8
-	mov	sp, x29
-	ldp	x29, x30, [sp]
-	add	sp, sp, #16
-	ret
+stp x29, x30, [sp]
+mov x29, sp
+sub sp, sp, #0
+mov x0, #123 ; =0x7b
+mov x1, #456 ; =0x1c8
+mov sp, x29
+ldp x29, x30, [sp]
+add sp, sp, #16
+ret
 ===
+
 ```
 
 and the obvious correct that clang gives for this
 
 ```
+
 struct pair { long a; long b;};
 struct pair get_pair() {
-    return (struct pair) {123, 456};
+return (struct pair) {123, 456};
 }
+
 ```
 
 is
 
 ```
-get_pair:                                 // @get_pair
-  mov     w0, #123                        // =0x7b
-  mov     w1, #456                        // =0x1c8
-  ret
+
+get_pair: // @get_pair
+mov w0, #123 // =0x7b
+mov w1, #456 // =0x1c8
+ret
+
 ```
 
 ## (Jun 11/12)
@@ -1796,9 +1914,11 @@ get_pair:                                 // @get_pair
 oh shit im just not at all typechecking for generics????
 
 ```
+
 // We might have compiled the arg when resolving the call so we'd save the type but it just changed because some were baked.
 // Symptom of forgetting this was emit_bc passing extra uninit args.
 arg_expr.ty = new_arg_type;
+
 ```
 
 what the fuck am i talking about....
@@ -1865,7 +1985,7 @@ TODO: use for bindgen: `cargo +nightly rustdoc -Z unstable-options --output-form
 
 my own setjmp/longjmp was easy... for my asm backend anyway.
 
-for c,  
+for c,
 i can't just write it how i did other functions where it becomes
 a `_FnXXX` that calls the libc setjmp because you can't setjmp and then return,
 because now you're in a different place on the stack. maybe it would get inlined by luck on higher opt but that seems sketchy.
@@ -1922,7 +2042,9 @@ indirect return address for large structs instead of using flat_call.
 ## (May 31)
 
 ```
+
 RUSTFLAGS="--emit=llvm-bc" cargo build --release -Z build-std=panic_abort,std --target aarch64-apple-darwin --no-default-features
+
 ```
 
 If you don't have `panic_abort` you get `duplicate lang item in crate core: sized.`...
@@ -2177,14 +2299,18 @@ https://betterprogramming.pub/cross-compiling-rust-from-mac-to-linux-7fad5a454ab
 in `.cargo/config.toml`
 
 ```
+
 [target.x86_64-unknown-linux-musl]
 linker = "x86_64-linux-musl-gcc"
+
 ```
 
 ```
+
 rustup target add x86_64-unknown-linux-musl
 brew install FiloSottile/musl-cross/musl-cross
 cargo build --target x86_64-unknown-linux-musl
+
 ```
 
 ok that worked on my mandelbrot demo.
@@ -2320,8 +2446,10 @@ Rn I generate instruction encoding stuff so there's a sad amount of code there t
 FIXED:
 
 ```
+
 //! If you change anything here, you have to `./bootstrap.sh` again.
 // TODO: some of the argument names matter because they're hardcoded in emit_rs
+
 ```
 
 I wonder if --64fps demo would be less flashy if i did u8 properly instead of printing x8 as many nulls.
@@ -2862,7 +2990,7 @@ Feel like I need to be more rigorous in making the compiler easy to reason about
 
 ## scan ahead to resolve constants (Apr 22)
 
-(plan)  
+(plan)
 I want to change how identifier resolution works so its breadth first instead of depth first so you can have out of order constants.
 So I want the resolve pass do be done gradually as part of the compile pass.
 So you do a whole scope to get names before going into implementations and doing thier names, so you can skip resolve if the code never runs.
@@ -2875,7 +3003,7 @@ But I do the resolve pass doesn't backtrack so normal code can only refer to con
 So its the worst of both worlds.
 Also expressions that disappear because of constant folding and shouldn't even be compiled,
 still have thier constants hoisted to the function so you can't use that for platform specific stuff which is sad.
-I want `#[cfg(whatever)]` to just be a normal comptime `if`.  
+I want `#[cfg(whatever)]` to just be a normal comptime `if`.
 (end plan)
 
 - removed modules. easy. only a toy test relied on them.
@@ -2910,10 +3038,12 @@ could have the macro !if just be expressions and generally call the function if 
 now that macros are a more normal part of the language, its not that weird for an argument to not be evaluated.
 
 ```
+
 sanity ICE. Type check expected Ty2 = Unit but found Ty465 = { Some: i64, None: Unit}!enum
- --> main_file:84:71
-   │
-84 │         (self.is_some(), fn() O = then(self&.Some[]), fn() O = else())!if
+--> main_file:84:71
+│
+84 │ (self.is_some(), fn() O = then(self&.Some[]), fn() O = else())!if
+
 ```
 
 So the point I'm at now is that you can resolve to constant names in the same scope but lower down.
@@ -2976,7 +3106,7 @@ so needs to change too.
 So it would be nice to do it on the bytecode representation instead of in the backend,
 but that gets a bit sketchy because what if different abis have different rules about when to use registers vs pointers?
 Like the aarch64 one sometimes passes on the stack without passing that pointer in a register (because the caller knows where to look).
-(https://learn.microsoft.com/en-us/cpp/build/arm64-windows-abi-conventions?view=msvc-170).  
+(https://learn.microsoft.com/en-us/cpp/build/arm64-windows-abi-conventions?view=msvc-170).
 Tho following the calling convention only matters for ffi but if I have to support it anyway, why not do it all the time.
 
 ## burn it with fire (Apr 10)
@@ -3075,7 +3205,9 @@ It feels extreamly important to actually resolve overloads robustly and not just
 ## How small can it get?
 
 ```
+
 RUSTFLAGS="-Zlocation-detail=none --remap-path-prefix $HOME=~" cargo +nightly bloat -Z build-std=std,panic_abort -Z build-std-features=panic_immediate_abort --target aarch64-apple-darwin --release --no-default-features -n 50
+
 ```
 
 Surely I can do libffi in less than 30KB given I have to do it anyway for my own asm backend.
@@ -3136,20 +3268,21 @@ They need to look up the function pointer to call in the vtable, but also pass t
 Lua handles that problem with 'o:a(b)' === 'o.a(o, b)'. So you can only have the infix syntax if you're doing dynamic dispatch.
 
 ```
+
 fn log(self: Ptr(i64), important: bool) Str = str(self[]);
 fn log(self: Ptr(Str), important: bool) Str = self[];
 
 const Loggable = (
-  vtable: FnPtr(Ty(VoidPtr, bool), Str),
-  dataptr: VoidPtr
+vtable: FnPtr(Ty(VoidPtr, bool), Str),
+dataptr: VoidPtr
 )!struct;
 
 fn log(self: Loggable, important: bool) Str =
-  (self.vtable)(self.dataptr, important);
+(self.vtable)(self.dataptr, important);
 
 fn upcast(self: Ptr(i64)) Loggable = {
-  const log: Fn((Ty(VoidPtr, bool), Str)) = log;  // Somewhere to hang the type annotation to resolve the overload.
-  (dataptr: self, vtable: log)
+const log: Fn((Ty(VoidPtr, bool), Str)) = log; // Somewhere to hang the type annotation to resolve the overload.
+(dataptr: self, vtable: log)
 }
 
 var hello = "Hi";
@@ -3160,6 +3293,7 @@ var unknown: Loggable = hello!addr.upcast();
 assert_eq(true, str_eq("Hi", unknown.log(true)));
 unknown = n!addr.upcast();
 assert_eq(true, str_eq("24", unknown.log(true)));
+
 ```
 
 ## Thinking about continuations (Mar 11)
@@ -3174,12 +3308,14 @@ Really lr is a function pointer that you tail call when you return.
 I guess you have to use fp if you want to unwind multiple frames, but you want that anyway for debuggers.
 
 ```
+
 const Cont = .{
-     returnAddress: VoidPtr, // lr
-     resultAddress: VoidPtr, // x8/&x0
-     stackPointer: VoidPtr,  // fp
+returnAddress: VoidPtr, // lr
+resultAddress: VoidPtr, // x8/&x0
+stackPointer: VoidPtr, // fp
 };
 var return: Cont;
+
 ```
 
 If the return value is big, the caller wants to give you an address as an argument,
@@ -3227,9 +3363,11 @@ There's an indirect symbol table where you list the names of the functions you w
 Every time you want to call one of those dynamic functions, you jump to a stub like
 
 ```
+
 adrp x16, #0x100004000
 ldr x16, [x16, #I]
 br x16
+
 ```
 
 where I is the offset into the indirect table.
@@ -3462,3 +3600,7 @@ fixed that with a wrapper that does the unsafe deref.
 tried to make it generic over anything that was already hash+eq but couldn't figure out how to express the bound that `&T: Hash`
 actually no, thats not the problem, its that you need the `T: ?Sized` on the impl as well as the main struct generic. Similarly, you can't derive Copy/Clone
 because it implicitly adds that bound.
+
+```
+
+```

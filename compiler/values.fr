@@ -34,8 +34,7 @@ fn put_baked(c: *SelfHosted, v: BakedVar, jit_ptr: ?i64) BakedVarId = {
 
 fn emit_relocatable_constant_body(c: *SelfHosted, bytes: Slice(u8), ty: Type, force_default_handling: bool) Res(Slice(BakedEntry)) = {
     out: List(BakedEntry) = list(c.get_alloc());
-    value := bytes.to_value();
-    @try(c.emit_relocatable_constant_body(ty, value&, out&, force_default_handling)) return;
+    @try(c.emit_relocatable_constant_body(ty, bytes, out&, force_default_handling)) return;
     (Ok = out.items())
 }
 
@@ -56,31 +55,37 @@ BakeHandler :: @FnPtr(self: rawptr) Slice(BakedEntry);
 // TODO: be careful about the same string being baked as CStr and Str.
 // TODO: i should have constant pointers as a concept in my language.
 //       right now i could check if its in the constant data arena for a hint that should catch a few of them.
-fn emit_relocatable_constant(c: *SelfHosted, ty: Type, value: *Values) Res(BakedVarId) = { 
-    to_zero: ReadBytes = (bytes = value.bytes(), i = 0);
+fn emit_relocatable_constant(c: *SelfHosted, ty: Type, value: []u8) Res(BakedVarId) = { 
+    to_zero: ReadBytes = (bytes = value, i = 0);
     c.zero_padding(ty, to_zero&);  // Needed for reproducible builds!
     
-    jit_ptr := value.jit_addr();
-    // TODO: this barely does anything! cause like cstr and slice don't go through this function. they call dyn_bake_relocatable_value. -- Jun 30
-    //       this is the right idea, they just need to check thier pointers against the cache first. 
-    if c.baked.lookup&.get(jit_ptr) { v | 
-        // TODO: be careful about aliasing as different types with different custom_bake_constant? -- Jun 30 
-        return(Ok = v);
+    jit_ptr := u8.int_from_ptr(value.ptr);
+    // values <= 8 bytes are stored inline so thier jit_addr is not useful. 
+    if value.len() > 8 {
+        // TODO: this barely does anything! cause like cstr and slice don't go through this function. they call dyn_bake_relocatable_value. -- Jun 30
+        //       this is the right idea, they just need to check thier pointers against the cache first. 
+        if c.baked.lookup&.get(jit_ptr) { v | 
+            // TODO: be careful about aliasing as different types with different custom_bake_constant? -- Jun 30 
+            return(Ok = v);
+        };
     };
+    
+    // TODO: storing jit_ptr in put_baked is sketchy for small values,
+    //       but currently it's only used for jit constant access and if it were small you'd have just loaded it directly in emit_bc. -- Nov 3
     
     // TODO: is it really that helpful to tell the backend to use zeroinitilizer? could at least have a faster memcmp. 
     if true {
         break :: local_return;
-        for value.bytes() { b |
+        for value { b |
             if(b != 0, => break());
         };
-        return(Ok = c.put_baked((Zeros = value.bytes().len()), (Some = jit_ptr)));
+        return(Ok = c.put_baked((Zeros = value.len()), (Some = jit_ptr)));
     };
     
     // Eventually we'll recurse to something with no pointers. ie Str -> [u8; n]
     info := c.get_info(ty);
     if (!info.contains_pointers) {
-        v := value.bytes().clone(c.get_alloc()); // TODO: do i have to clone? 
+        v := value; // .clone(c.get_alloc()); // TODO: do i have to clone? 
         return(Ok = c.put_baked((Bytes = v.rs()), (Some = jit_ptr)));
     };
 
@@ -88,13 +93,13 @@ fn emit_relocatable_constant(c: *SelfHosted, ty: Type, value: *Values) Res(Baked
     @try(c.emit_relocatable_constant_body(ty, value, out&, false)) return;
     (Ok = c.put_baked((VoidPtrArray = out.rs()), (Some = jit_ptr)))
 }
-    
-// TODO: deduplicate small constant strings. they get stored in Values inline so can't be fixed by baked.lookup
+
 // TODO: make sure baked.lookup actually ever helps. might need to add checks in more places.
+// TODO: correctly handle a pointer that's an offset from another. 
 fn emit_relocatable_constant_body(
     c: *SelfHosted,
     ty: Type,
-    value: *Values,
+    value: []u8,
     out: *List(BakedEntry),
     force_default_handling: bool,
 ) PRes = {
@@ -110,7 +115,7 @@ fn emit_relocatable_constant_body(
     if (!force_default_handling) {
         xx := @try(c.get_custom_bake_handler(ty)) return;
         if xx { f |
-            values := f(value.jit_addr().rawptr_from_int());
+            values := f(u8.raw_from_ptr(value.ptr));
             out.push_all(values);
             return(.Ok);
         };
@@ -118,9 +123,9 @@ fn emit_relocatable_constant_body(
 
     // Eventually we'll recurse to something with no pointers. ie Str -> [u8; n]
     if (!info.contains_pointers) {
-        assert_eq(value.len().mod(8), 0); // TODO. but rust version doesn't handle this either -- Jun 30
+        @assert_eq(value.len().mod(8), 0, "TODO: non-8 mul constant"); // TODO. but rust version doesn't handle this either -- Jun 30
         
-        bytes := value.bytes();
+        bytes := value;
         ptr := ptr_cast_unchecked(u8, i64, bytes.ptr);
         ints: Slice(i64) = (ptr = ptr, len = bytes.len / 8);
         for ints { i | 
@@ -133,7 +138,7 @@ fn emit_relocatable_constant_body(
     // The rust version skipped to raw type at the top but that's kinda wrong cause there might be an overload for just some intermediate? 
     @match(c.get_type(ty)) {
         (fn FnPtr(_) => {
-            ptr := i64.assume_cast(value)[];
+            ptr := ptr_cast_unchecked(u8, i64, value.ptr)[];
             if c.baked.functions&.get(ptr) { fid |
                 // assert_eq!(*f_ty, program[f].finished_ty().unwrap()); // TODO?
                 out.push((FnPtr = fid));
@@ -159,17 +164,15 @@ fn emit_relocatable_constant_body(
             ));
         });
         (fn Ptr(inner) => {
-            // TODO: allow zero?
             inner_info := c.get_info(inner[]);
             // load the pointer and recurse.
-            addr := i64.assume_cast(value)[];
+            addr := ptr_cast_unchecked(u8, i64, value.ptr)[]; 
             
             // Eventually i want ?*T to use zero as .None but for now allow null pointers. 
             if addr == 0 {
                 out.push((Num = (value = 0, ty = .P64)));
                 return(.Ok);
             };
-            
             // emit_relocatable_constant only does it by the address of the value but pointers are small so stored inline. 
             if c.baked.lookup&.get(addr) { v | 
                 out.push((AddrOf = v));
@@ -178,8 +181,7 @@ fn emit_relocatable_constant_body(
             
             ptr := u8.ptr_from_int(addr);
             data := slice(ptr, inner_info.stride_bytes.zext());
-            inner_value := data.to_value(c.get_alloc()); // TODO: do i have to clone? 
-            id := @try(c.emit_relocatable_constant(inner[], inner_value&)) return;
+            id := @try(c.emit_relocatable_constant(inner[], data)) return;
             c.baked.lookup&.insert(addr, id);
             out.push((AddrOf = id));
         });
@@ -188,25 +190,24 @@ fn emit_relocatable_constant_body(
             // Just do all the fields.
             each f.fields { f | 
                 info := c.get_info(f.ty);
-                @assert_eq(@as(i64) info.stride_bytes.zext().mod(8), 0, "TODO: non-8-aligned fields %", c.pool.get(f.name));
-                v := value.bytes().slice(f.byte_offset, f.byte_offset + info.stride_bytes.zext());
-                v := v.to_value(c.get_alloc()); // TODO: do i have to clone? 
-                @try(c.emit_relocatable_constant_body(f.ty, v&, out, false)) return;
+                @assert_eq(@as(i64) info.stride_bytes.zext().mod(8), 0, "TODO: non-8-aligned field % in %", c.pool.get(f.name), c.log_type(ty));
+                v := value.slice(f.byte_offset, f.byte_offset + info.stride_bytes.zext());
+                @try(c.emit_relocatable_constant_body(f.ty, v, out, false)) return;
             };
         });
         (fn Tagged(f) => {
-            tag := i64.unchecked_cast(value)[]; // just read the tag
+            tag := ptr_cast_unchecked(u8, i64, value.ptr)[]; // just read the tag
             assert(f.cases.len >= tag, "invalid constant tagged union");
             name, inner := f.cases.items()[tag];
             case_info := c.get_info(inner);
             out.push((Num = (value = tag, ty = .I64)));
             payload_size: i64 = case_info.stride_bytes.zext();
-            b := value.bytes();
+            b := value;
             tag_size := 8;
-            payload := b.slice(tag_size, tag_size + payload_size).to_value();
+            payload := b.slice(tag_size, tag_size + payload_size);
             
             padding_size := b.len - payload_size - tag_size;
-            @try(c.emit_relocatable_constant_body(inner, payload&, out, false)) return;
+            @try(c.emit_relocatable_constant_body(inner, payload, out, false)) return;
             
             padding_slots, m := padding_size.div_mod(8);
             @assert_eq(m, 0, "TODO: non-8-mod enum padding");
@@ -230,7 +231,7 @@ fn emit_relocatable_constant_body(
             return(c.emit_relocatable_constant_body(f._0, value, out, force_default_handling));
         });
         (fn VoidPtr() => {
-            ptr := i64.assume_cast(value)[];
+            ptr := ptr_cast_unchecked(u8, i64, value.ptr)[]; 
             if ptr == 0 {
                 // You're allowed to have a constant null pointer (like for global allocator interface instances).
                 out.push((Num = (value = 0, ty = .P64)));
