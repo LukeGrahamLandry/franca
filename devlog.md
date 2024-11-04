@@ -5,7 +5,7 @@ setup script to diff them so its less painful.
 yes! basic_libc:catch_signal does it alone, thats much more managable.
 same symptoms: identical asm except for adrp+add offsets. one extra data symbol.
 it's like the `handled_a_signal :: @static(bool) false;` is happening twice in the qbe version.
-I guess one is IS_PANICKING and thats why it doesn't happen don't print something too.
+I guess one is IS_PANICKING and thats why it doesn't happen when i don't print something too.
 add_constant is only called in walk_bc (not c/b/llvm or b/from_bc) and it happens for both llvm and qbe so its miscompiling the frontend.
 oh its the deduplicating by jit_addr in emit_relocatable_constant so when its less than 8 bytes and stored inline, its deduplicating by stack slot,
 and the one compiled by llvm happened to use stack space such that they were at the same place for both constants and it deduplicated them.
@@ -13,6 +13,12 @@ a bit alarming that it wasn't a problem for months but anyway we're back to repr
 
 the new backend still doesn't fully work, the occasional crashes were unrelated apparently, but at least now we know its not a
 confusing miscompliation that only surfaces after multiple iterations, just a normal friendly miscompilation.
+
+- typing f.rpo.offset(i)[] is gonna drive me insane, same for f.pred.
+- with using init_default_module_dyn you finally get a speed up from fuse_addressing, around 2.45s -> 2.25s.  
+  looking good for the idea of only adding optimisations that make it compile itself faster including the extra code than the old one did without.
+- another peephole isel improvement: using madd saves ~10KB of instructions.
+  not sure its worth it speed wise.
 
 ## (Nov 2)
 
@@ -258,6 +264,36 @@ so recap of things we learned:
 - segment size needs to be a multiple of a page, except for linkedit?
 - you don't need sections except to make objdump disassemble the right places.
 - you don't need LC_SYMTAB, LC_DYSYMTAB, UUID, min os version
+
+```
+import lief
+import sys
+path = sys.argv[1]
+app = lief.parse(path)
+
+import os
+
+app.remove_symbol("__mh_execute_header")
+app.remove_symbol("_main")
+app.remove_command(5) # exports trie
+app.remove_command(8) # uuid
+app.remove_section(segname = "__TEXT", secname = "__unwind_info")
+app.remove_section(segname = "__TEXT", secname = "__cstring")
+app.remove_section(segname = "__TEXT", secname = "__stubs")
+app.remove_section(segname = "__TEXT", secname = "__text")
+app.remove_section(segname = "__DATA_CONST", secname = "__got")
+app.remove_command(12) # function starts
+app.remove_command(8) # build version
+app.remove_command(8) # source version
+app.remove_command(10) # data in code
+app.remove_command(5) # LC_DYSYMTAB
+app.remove_command(5) # LC_SYMTAB
+
+
+app.write(path)
+print("replaced exe.")
+os.system('codesign -s - "' + path + '" -f')
+```
 
 ## (Oct 23)
 

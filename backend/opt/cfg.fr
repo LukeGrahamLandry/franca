@@ -31,22 +31,22 @@ fn edgedel(source: *Qbe.Blk, dest_p: **Qbe.Blk) void = {
     if dest.npred != 0 {
         // record that source is no longer a predecessor of dest. 
         a := 0;
-        while => !dest.pred.offset(a)[].identical(source) {
+        while => !dest.pred[a].identical(source) {
             @debug_assert(a + 1 < dest.npred.zext(), "tried to remove nonexistant edge (% not a predecessor of %)", source.name(), dest.name());
             a += 1;
         };
         dest.npred -= 1;
-        dest.pred.slice(dest.npred.zext()+1).copy_overlapping(a, a + 1, dest.npred.zext() - a); // TODO: makes sure these offsets are right
+        dest.pred.slice(0, dest.npred.zext()+1).copy_overlapping(a, a + 1, dest.npred.zext() - a); // TODO: makes sure these offsets are right
     };
 }
 
 fn addpred(bp: *Qbe.Blk, bc: *Qbe.Blk) void = {
-    if bc.pred.is_null() {
-        mem := temp().alloc(@type bc.pred[], bc.npred.zext());
-        bc.pred = mem.ptr;
-        bc.visit = 0;
+    if bc.pred.first.is_null() {
+        bc.pred = new(bc.npred.zext(), .PFn);
+    } else {
+        bc.pred&.grow(bc.npred.zext());
     };
-    bc.pred.offset(bc.visit.zext())[] = bp;
+    bc.pred[bc.visit.zext()] = bp;
     bc.visit += 1;
 }
 
@@ -54,7 +54,7 @@ fn addpred(bp: *Qbe.Blk, bc: *Qbe.Blk) void = {
 fn fillpreds(f: *Qbe.Fn) void = {
     for_blocks f { b |
         b.npred = 0;
-        b.pred = ptr_from_int(*Qbe.Blk, 0);
+        b.visit = 0;
     };
     // count first so we don't have to resize the array
     for_blocks f { b |
@@ -95,8 +95,11 @@ fn fillrpo(f: *Qbe.Fn) void = {
     xxx: i32 = f.nblk.bitcast() - 1;
     n := rporec(f.start, xxx) + 1;
     f.nblk = f.nblk - n;
-    mem := temp().alloc(*Qbe.Blk, f.nblk.zext());
-    f.rpo = mem.ptr;
+    if f.rpo.first.is_null() {
+        f.rpo = new(f.nblk.zext(), .PFn);
+    } else {
+        f.rpo&.grow(f.nblk.zext());
+    };
     p := f.start&;
     while => !p[].is_null() {
         b := p[];
@@ -106,7 +109,7 @@ fn fillrpo(f: *Qbe.Fn) void = {
             p[] = b.link;
         } else {
             b.id -= n;
-            f.rpo.offset(b.id.zext())[] = b;
+            f.rpo[b.id.zext()] = b;
             p = b.link&;
         }
     }
@@ -142,7 +145,7 @@ fn filldom(f: *Qbe.Fn) void = {
     dowhile {
         changed := false;
         range(1, f.nblk.zext()) { n |
-            b := f.rpo.offset(n)[];
+            b := f.rpo[n];
             d := Qbe.Blk.ptr_from_int(0);
             for_pred b { p |
                 if !p.idom.is_null() || p.identical(f.start) {
@@ -227,7 +230,7 @@ fn loopiter(f: *Qbe.Fn, func: LoopMark) void = {
         b.visit = -1;
     };
     range(0, f.nblk.zext()) { n | 
-        b := f.rpo.offset(n)[];
+        b := f.rpo[n];
         for_pred b { pred | 
             if pred.id.zext() >= n {
                 loopmark(b, pred, func);
@@ -301,10 +304,10 @@ fn newblk() *Qbe.Blk = {
     b
 }
 
-fn replacepred(blks: **Qbe.Blk, nblk: i64, to: *Qbe.Blk, from: *Qbe.Blk) void = {
+fn replacepred(blks: QList(*Qbe.Blk), nblk: i64, to: *Qbe.Blk, from: *Qbe.Blk) void = {
     range(0, nblk) { n | 
-        if blks.offset(n)[].identical(from) {
-            blks.offset(n)[] = to;
+        if blks[n].identical(from) {
+            blks[n] = to;
             return();
         };
     };
@@ -318,7 +321,7 @@ fn replacepreds(s: *Qbe.Blk, to: *Qbe.Blk, from: *Qbe.Blk) void = {
     replacepred(s.pred, s.npred.zext(), to, from);
     for_phi s { p |
         @debug_assert(p.narg == s.npred);
-        replacepred(p.blk.first, p.narg.zext(), to, from);
+        replacepred(p.blk, p.narg.zext(), to, from);
     };
 }
 
@@ -326,7 +329,7 @@ fn replacepreds(s: *Qbe.Blk, to: *Qbe.Blk, from: *Qbe.Blk) void = {
 fn killblks(f: *Qbe.Fn) void = {
     pb := f.start&;
     while => !pb[].is_null() {
-        if !f.rpo.offset(pb.id.zext())[].is_null() {
+        if !f.rpo[pb.id.zext()].is_null() {
             pb = pb.link&;
         } else {
             pb[] = pb.link;
@@ -347,12 +350,12 @@ fn blkmerge(f: *Qbe.Fn) void = {
     bid := 0;
     nins := 0;
     while => bid < f.nblk.zext() { 
-        b := f.rpo.offset(bid)[];
+        b := f.rpo[bid];
         if curb.is_null() {
             curb = b;
             nins = 0;
         } else {
-            f.rpo.offset(bid)[] = ptr_from_int(Qbe.Blk, 0);
+            f.rpo[bid] = ptr_from_int(Qbe.Blk, 0);
         };
         addbins(b, vins&, nins&);
         if b.jmp.type != .Jjmp || b.s1.npred != 1 || !b.s1.phi.is_null() {

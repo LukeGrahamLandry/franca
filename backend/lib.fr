@@ -56,6 +56,8 @@ DO_INLINING :: true; // TODO: make this a runtime toggle so you can make sure yo
 // TODO: use add/ldr/str immediates in isel. add new instructions? or i guess can just put something in the extra slot for ldr.  
 // TODO: don't do extra copies of arg/ret when just passing through to another call.
 // TODO: another unfortunate pattern is  `add	x2, x29, #240; add	x2, x2, #8` because slot assignment happens after constant folding.  
+// TODO: arm isel can use ldp/stp for consecutive loads/stores and simplify:blit can do it in pairs to make that happen. 
+//       i do a lot of copies so that might be an easy win for code size at least. 
 
 DONT_FORGET_OTHER_TLS_ARCH :: true;
 
@@ -265,7 +267,8 @@ run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
 	//       same for ssacheck
     
     @if(LINK_QBE_C) {
-        typecheck(fnn); // debug. but it calls clsmerge which does mutate sometimes so maybe not.
+        // TODO: port. calls its own version of fillpreds but i didn't convert it to use QList
+        //typecheck(fnn); // debug. but it calls clsmerge which does mutate sometimes so maybe not.
     };
     {m.target.abi0}(fnn);
     
@@ -306,7 +309,10 @@ run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
     //simpl(fnn);
     fillpreds(fnn);
     filluse(fnn); 
+    
+    // arm isel inserts RMem (with different meaning from x64) for mul/store and RInt for load.
     {m.target.isel}(fnn);
+    
     fillrpo(fnn);
     fill_liveness(fnn);
     //filllive(fnn);
@@ -321,14 +327,14 @@ run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
     fillpreds(fnn);
     fillrpo(fnn);
     
-    assert_eq(Qbe.Blk.int_from_ptr(fnn.rpo[]), Qbe.Blk.int_from_ptr(fnn.start));
+    assert_eq(Qbe.Blk.int_from_ptr(fnn.rpo.first[]), Qbe.Blk.int_from_ptr(fnn.start));
     ::ptr_utils(*Qbe.Blk);
     // We have a linear array but want a linked list for some reason. 
     // :LinkIsNowRpo
     range(0, fnn.nblk.zext() - 1) { n |
-        fnn.rpo.offset(n)[].link = fnn.rpo.offset(n + 1)[];
+        fnn.rpo[n].link = fnn.rpo[n + 1];
     };
-    fnn.rpo.offset(fnn.nblk.zext() - 1)[].link = Qbe.Blk.ptr_from_int(0);
+    fnn.rpo[fnn.nblk.zext() - 1].link = Qbe.Blk.ptr_from_int(0);
     
     {m.target.emitfn}(m, fnn, m[].outf);
     __temp_alloc.reset_retaining_capacity(mark);

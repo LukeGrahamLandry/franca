@@ -77,6 +77,7 @@ fn arm64_isel(f: *Qbe.Fn) void = {
 //
 // This will compress a sequence like `add x1, x29, #24; add x1, x1, #8; ldr x1, [x1]` into `ldr x1, [x29, #32]`
 // It only handles chains that occur within a single becuase we have tmp.def pointers into scratch space. 
+// Also mul+add to madd. 
 //
 fn fuse_addressing(f: *Qbe.Fn, mem: []*Qbe.Ins, b: *Qbe.Blk) void = {
     if(mem.len == 0, => return());
@@ -84,7 +85,22 @@ fn fuse_addressing(f: *Qbe.Fn, mem: []*Qbe.Ins, b: *Qbe.Blk) void = {
         @fmt_write(f.globals.debug_out, "%: \n", b.name());
     };
     for mem& { i | 
+        continue :: local_return;
         iarg := i.arg&;
+        if i.op() == .add {
+            // note: not tracking use counts
+            arg1 := f.get_temporary(iarg[1]);
+            m: i64 = f.nmem.zext();
+            f.nmem += 1;
+            f.mem&.grow(m + 1);
+            f.mem[m].base  = arg1.def.arg&[0];
+            f.mem[m].index = arg1.def.arg&[1];
+            iarg[1] = MEM(m);
+            @debug_assert(arg1.def.op() == .mul && is_int(i.cls()));
+            i.set_op(.mul);
+            continue();
+        };
+        
         store := is_store(i.op());
         addr := f.get_temporary(iarg[store.int()]);
         when_debug(f, .InstSelect) { out |
@@ -141,6 +157,8 @@ fn fuse_addr(f: *Qbe.Fn, a: Qbe.Ref, total_off: *i64, bid: i32, size: i64, kill:
     if(!in_this_block, => return(a));
     def_a := addr.def.arg&;
     //@debug_assert(addr.nuse > 0);
+    // TODO: this should work but there's somewhere im not keeping track of count properly, i don't super care tho,
+    //       rega gets rid of dead code anyway, doing it here just makes it easier to see whats going on in debug output. -- Nov 3
     kill_addr :: fn() => {
         if kill {
             //addr.nuse -= 1;
@@ -178,6 +196,7 @@ fn fuse_addr(f: *Qbe.Fn, a: Qbe.Ref, total_off: *i64, bid: i32, size: i64, kill:
                 return(final);
             };
         }
+        // TODO: stop representing RSlot as divided by 4 so you don't have to skip doing this for access of a single byte 3/4 of the time. -- Nov 3
         fn addr() => {
             if(f.dynalloc, => return(a));
             @debug_assert(rtype(def_a[0]) == .RSlot, "can only addr stack slot");
@@ -225,6 +244,8 @@ fn sel(f: *Qbe.Fn, i: Qbe.Ins, blk: i32, mem: *List(*Qbe.Ins)) void = {
     if o != .nop {
         new_ins := f.emit(i);
         iarg := new_ins.arg&;
+        
+        // 610KB, amazing!
         if is_load(o) && rtype(iarg[0]) == .RTmp {
             mem.push(new_ins);
         };
@@ -239,8 +260,25 @@ fn sel(f: *Qbe.Fn, i: Qbe.Ins, blk: i32, mem: *List(*Qbe.Ins)) void = {
         k := argcls(i&, 1);
         // TODO: do this for sub, etc as well. this alone makes the compiler go from 2485100 -> 2089352 bytes of code. thats insane.
         //       this looks branchy but it generates so much less code that its faster even before accounting for it generating better code for itself. 
-        if o == .add && is_int(k) && f.is_u12(iarg[1]) && iarg[0] != TMP(Arm64Reg.SP) {
-            return();
+        if o == .add && is_int(k) {
+            // ~358KB, amazing!
+            if f.is_u12(iarg[1]) && iarg[0] != TMP(Arm64Reg.SP) {
+                return();
+            };
+            // ~10KB, meh
+            arg1 := iarg[1];
+            if rtype(arg1) == .RTmp {
+                arg1 := f.get_temporary(arg1);
+                if arg1.nuse == 1 && !arg1.def.is_null() && arg1.def.op() == .mul && arg1.defining_block == blk {
+                    mem.push(new_ins);
+                };
+            };  
+        };
+        // ~1KB, not really worth it
+        if o == .sub && is_int(k) {
+            if f.is_u12(iarg[1]) && iarg[0] != TMP(Arm64Reg.SP) {
+                return();
+            };
         };
         f.fixarg(iarg[1]&, k, false, blk);
     };

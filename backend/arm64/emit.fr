@@ -737,8 +737,7 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
             };
         }
         fn salloc() => {
-            xxx := i.arg&[0].int_reg();
-            self.inst(sub_er(Bits.X64, sp, sp, xxx));
+            self.inst(sub_er(Bits.X64, sp, sp, i.arg&[0].int_reg()));
             if i.to != QbeNull {
                 self.inst(sub_im(Bits.X64, i.to.int_reg(), sp, 0, 0)); // :SpEncoding
             }
@@ -753,8 +752,23 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
             };
             bin(@as(F) fadd, fn(s, d, a, b) => if(a == sp, => add_er(s, d, a, b), => add_sr(s, d, a, b, .LSL, 0))); // could always use *_er but then the disassembly looks dumb
         }
-        fn sub()  => bin(@as(F) fsub, fn(s, d, a, b) => if(a == sp, => sub_er(s, d, a, b), => sub_sr(s, d, a, b, .LSL, 0))); // ^
-        fn mul()  => bin(@as(F) fmul, fn(s, d, a, b) => madd(s, d, a, b, xzr));
+        fn sub()  => {
+            if rtype(i.arg&[1]) == .RCon {
+                // isel enforces that it's an int and in range for this encoding. 
+                c := self.f.get_constant(i.arg&[1]);
+                self.inst(sub_im(si, i.to.int_reg(), i.arg&[0].int_reg(), @as(u12) c.bits.i, 0));
+                return();
+            };
+            bin(@as(F) fsub, fn(s, d, a, b) => if(a == sp, => sub_er(s, d, a, b), => sub_sr(s, d, a, b, .LSL, 0))); // ^
+        }
+        fn mul()  => {
+            if rtype(i.arg&[1]) == .RMem {
+                m := self.f.get_memory(i.arg&[1]);
+                self.inst(madd(si, i.to.int_reg(), m.base.int_reg(), m.index.int_reg(), i.arg&[0].int_reg()));
+                return();
+            };
+            bin(@as(F) fmul, fn(s, d, a, b) => madd(s, d, a, b, xzr));
+        }
         fn div()  => bin(@as(F) fdiv, fn(s, d, a, b) => sdiv(s, d, a, b)); // TODO: if you pass it here you force all calls to be inline :FUCKED
         fn udiv() => int_bin(fn(s, d, a, b) => udiv(s, d, a, b));
         fn sar()  => int_bin(@as(I) asrv);
@@ -861,7 +875,7 @@ fn emitins2(self: *ArmState, i: *Qbe.Ins) void = {
             @debug_assert(i.arg&[1] == QbeNull, "i dont think i mix offset and slot in ldr");
             fp
         } else {
-            if rtype(i.arg&[1]) == .RInt {
+            if rtype(i.arg&[1]) == .RInt {   // TODO: could easily get rid of this branch. is that worth always setting it to RInt(0)?
                 offset += zext(rsval(i.arg&[1]));
             };
             i.arg&[0].int_reg()
