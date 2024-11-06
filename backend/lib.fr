@@ -21,6 +21,7 @@
 #include_std("backend/macho/bits.fr");
 #include_std("backend/macho/emit.fr");
 #include_std("backend/opt/mem.fr");
+#include_std("backend/opt/minimal.fr");
 
 ENABLE_INTERNAL_QBE :: true;  // until i want to enable it on github actions
 DO_INLINING :: true; // TODO: make this a runtime toggle so you can make sure you're actually testing calls
@@ -127,7 +128,7 @@ MAX_TLS_VARS_SIZE :: macos_page_size;
 MAX_TLS_INIT_SIZE   :: macos_page_size;
 
 fn init_default_module(goal: QbeTargetEnv) QbeModule = 
-    init(1.shift_left(23), libc_allocator, page_allocator, goal);
+    init(1.shift_left(25), libc_allocator, page_allocator, goal);
 
 :: {
     @if(LINK_QBE_C) {
@@ -245,8 +246,7 @@ fn get_qbe_dylib_variable($T: Type, $name: Str) *T #generic = {
     T.ptr_from_raw(ref)
 }
 
-// TODO: this changes for aot!! remove this! garbage.
-aaaa_out :: @static(TmpFile);
+::ptr_utils(*Qbe.Blk);
 
 run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
     mark := __temp_alloc.mark();
@@ -327,18 +327,13 @@ run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
     fillpreds(fnn);
     fillrpo(fnn);
     
-    assert_eq(Qbe.Blk.int_from_ptr(fnn.rpo.first[]), Qbe.Blk.int_from_ptr(fnn.start));
-    ::ptr_utils(*Qbe.Blk);
-    // We have a linear array but want a linked list for some reason. 
-    // :LinkIsNowRpo
-    range(0, fnn.nblk.zext() - 1) { n |
-        fnn.rpo[n].link = fnn.rpo[n + 1];
-    };
-    fnn.rpo[fnn.nblk.zext() - 1].link = Qbe.Blk.ptr_from_int(0);
+    // :LinkIsNowRpos
+    set_link_from_rpo(fnn);
     
     {m.target.emitfn}(m, fnn, m[].outf);
     __temp_alloc.reset_retaining_capacity(mark);
 };
 ::[]u64;
+
 
 // all computers know these days is fill memory and branch

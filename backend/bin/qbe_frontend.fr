@@ -16,6 +16,7 @@ fn main() void = {
     run := false;
     debug := false;
     want_exe := false;
+    slow := false;
     args := cli_args();
     pop :: fn() => {
         args.ptr = args.ptr.offset(1);
@@ -80,6 +81,10 @@ fn main() void = {
                 goal = .Relocatable;
                 pop();
             };
+            @case("-s") => {
+                slow = true;
+                pop();
+            };
             @default => {
                 if a.ends_with(".fr") {// TODO: ugh don't care about the file extension 
                     pop();
@@ -131,11 +136,18 @@ fn main() void = {
         fnn.globals = global_module;  // if you got it from qbe's parser it doesn't set this. 
         run_qbe_passes(fnn);
     };
+    handle_fn_slow :: fn(fnn: *Qbe.Fn) void = {
+        fnn.globals = global_module;  // if you got it from qbe's parser it doesn't set this.     
+        run_qbe_passes_slow(fnn);
+    };
     handle_data :: fn(d: *Qbe.Dat) void = {
         global_module.new_emit_data(d);
     };
-    
-    parse(infile, "<file>".sym().c_str(), handle_dbg, handle_data, handle_fn);
+    if slow {
+        parse(infile, "<file>".sym().c_str(), handle_dbg, handle_data, handle_fn_slow);
+    } else {
+        parse(infile, "<file>".sym().c_str(), handle_dbg, handle_data, handle_fn);
+    };
     if want_exe {
         // TODO: just stick this in emitfin?
         chunks := output_macho(global_module);
@@ -168,3 +180,38 @@ HELP :: """qbe_frontend [OPTIONS] {file.ssa, -}
 	-r          jit and run main() without outputting asglobal_module.
 	            can call functions from libc.
 """;
+
+// You probably don't want to call this one!
+run_qbe_passes_slow :: fn(fnn: *Qbe.Fn) void = {
+    mark := __temp_alloc.mark();
+    m := fnn.globals;
+    filluse :: fill_use;
+    
+    if fnn.globals.debug["P".char()] {
+        out := fnn.globals.debug_out;
+        write(out, "\n> After parsing:\n");
+        printfn(fnn, out);
+    };
+    
+    {m.target.abi0}(fnn);
+    
+    fillrpo(fnn);
+    fillpreds(fnn);
+    filluse(fnn);
+    convert_to_ssa(fnn);
+    filluse(fnn);
+    ssacheck(fnn); // debug
+    
+    {m.target.abi1}(fnn);
+    simplify(fnn);
+    filluse(fnn); 
+    
+    {m.target.isel}(fnn);
+    
+    minimal_rega(fnn);
+    fnn.fillrpo();
+    set_link_from_rpo(fnn);  // :LinkIsNowRpo
+    
+    {m.target.emitfn}(m, fnn, m[].outf);
+    __temp_alloc.reset_retaining_capacity(mark);
+};

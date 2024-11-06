@@ -23,12 +23,15 @@ fn fill_target_arm(t: *Qbe.Target, apple: bool) void = {
     t.ngpr = (Arm64Reg.SP.raw() - Arm64Reg.R0.raw() + 1).intcast();
     t.fpr0 = Arm64Reg.V0.raw().intcast();
     t.nfpr = (Arm64Reg.V30.raw() - Arm64Reg.V0.raw() + 1).intcast();
-    t.rglob = BIT(Arm64Reg.FP.raw()).bit_or(BIT(Arm64Reg.SP.raw())).bit_or(BIT(Arm64Reg.R18.raw()));
-    t.nrglob = 3;  // TODO: is popcnt really that slow? 
+    t.rglob = BIT(Arm64Reg.FP.raw()).bit_or(BIT(Arm64Reg.SP.raw())).bit_or(BIT(Arm64Reg.R18.raw())).bit_or(BIT(Arm64Reg.IP1.raw()));
+    t.nrglob = 4;  // TODO: is popcnt really that slow? 
     
-    NGPS: i32 : intcast(Arm64Reg.R18.raw() - Arm64Reg.R0.raw() + 1 /* LR */ + 1);
+    
+    // can't use x18 and reserve x17 for scratch in emit (swap, etc.)
+    NGPS: i32 : intcast(Arm64Reg.IP0.raw() - Arm64Reg.R0.raw() + 1 /* LR */ + 1);
     NFPS: i32 : intcast((Arm64Reg.V7.raw() - Arm64Reg.V0.raw() + 1) + (Arm64Reg.V30.raw() - Arm64Reg.V16.raw() + 1));
     t.nrsave = init(@slice(NGPS, NFPS));
+    assert_eq(intcast(NGPS + NFPS), arm64_rsave.len());
     t.caller_saved = arm64_rsave.convert_to_i32_and_append_minus_1().as_ptr();
     
     l: List(u8) = (maybe_uninit = t.name&.items(), len = 0, gpa = panicking_allocator);
@@ -59,17 +62,16 @@ fn convert_to_i32_and_append_minus_1(r: []Arm64Reg) []i32 #fold = {
 
 arm64_rsave :: items(@list(
     Arm64Reg.R0,  .R1,  .R2,  .R3,  .R4,  .R5,  .R6,  .R7,
-               .R8,  .R9,  .R10, .R11, .R12, .R13, .R14, .R15,
-               .IP0, .IP1, .R18, .LR,
-               .V0,  .V1,  .V2,  .V3,  .V4,  .V5,  .V6,  .V7,
-               .V16, .V17, .V18, .V19, .V20, .V21, .V22, .V23,
-               .V24, .V25, .V26, .V27, .V28, .V29, .V30,
+            .R8,  .R9,  .R10, .R11, .R12, .R13, .R14, .R15,
+            .IP0,             .LR,
+            .V0,  .V1,  .V2,  .V3,  .V4,  .V5,  .V6,  .V7,
+            .V16, .V17, .V18, .V19, .V20, .V21, .V22, .V23,
+            .V24, .V25, .V26, .V27, .V28, .V29, .V30,
 ) ast_alloc());
 
 arm64_rclob :: items(@list(
-    Arm64Reg.R19, .R20, .R21, .R22, .R23, .R24, .R25, .R26,
-               .R27, .R28,
-               .V8,  .V9,  .V10, .V11, .V12, .V13, .V14, .V15,
+          Arm64Reg.R19, .R20, .R21, .R22, .R23, .R24, .R25, .R26, .R27, .R28,
+             .V8,  .V9, .V10, .V11, .V12, .V13, .V14, .V15,
 ) ast_alloc());
 
 fn is_float(r: Arm64Reg) bool #inline = 

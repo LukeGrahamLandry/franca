@@ -635,7 +635,7 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
             if (rtype(i.to) == .RSlot) {
                 r := i.to;
                 if !isreg(i.arg&[0]) {
-                    i.to = TMP(Arm64Reg.R18.raw()); // :SketchPlatformRegister
+                    i.to = TMP(Arm64Reg.IP1.raw()); // :SketchPlatformRegister
                     self.emitins(i);
                     i.arg&[0] = i.to;
                 };
@@ -678,14 +678,11 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
                     self.inst(movz(Bits.X64, reg, s.trunc(), .Left0));
                     self.inst(add_er(Bits.X64, reg, fp, reg));
                 } else {
-                    panic("TODO: addr");
-                    fprintf(e.f,
-                        "\tmov\t%s, #%\n",
-                        "\tmovk\t%s, #%, lsl #16\n",
-                        "\tadd\t%s, x29, %s\n",
-                        rn, s.bit_and(0xFFFF), rn, s.shift_right_logical(16), rn, rn
-                    );
-                }
+                    @assert(s < 1.shift_left(32));
+                    self.inst(movz(Bits.X64, reg, s.trunc(), .Left0));
+                    self.inst(movk(Bits.X64, reg, s.shift_right_logical(16).trunc(), .Left0));
+                    self.inst(add_er(Bits.X64, reg, fp, reg));
+                };
             };
         }
         fn call() => {
@@ -780,14 +777,14 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
         fn rem() => {
             // TODO: qbe uses x18 for this but i feel like you're not allowed to do that. :SketchPlatformRegister
             a, b := (i.arg&[0].int_reg(), i.arg&[1].int_reg());
-            self.inst(sdiv(si, x18, a, b));
-            self.inst(msub(si, i.to.int_reg(), x18, b, a));
+            self.inst(sdiv(si, x17, a, b));
+            self.inst(msub(si, i.to.int_reg(), x17, b, a));
         };
         fn urem() => {
-            // TODO: qbe uses x18 for this but i feel like you're not allowed to do that. 
+            // TODO: qbe uses x18 for this but i feel like you're not allowed to do that. :SketchPlatformRegister
             a, b := (i.arg&[0].int_reg(), i.arg&[1].int_reg());
-            self.inst(udiv(si, x18, a, b));
-            self.inst(msub(si, i.to.int_reg(), x18, b, a));
+            self.inst(udiv(si, x17, a, b));
+            self.inst(msub(si, i.to.int_reg(), x17, b, a));
         };
         fn extsb()  => int_un(fn(s, d, a) => bmf(s, 0b0, 0b000000, 0b000111, d, a)); // sxtb
         fn extub()  => int_un(fn(s, d, a) => bmf(s, 0b1, 0b000000, 0b000111, d, a)); // uxtb
@@ -798,13 +795,18 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
         fn extuw()  => int_un(fn(s, d, a) => mov(.W32, d, a));
         fn exts()   => self.inst(fcnv(.S32, .D64, i.to.float_reg(), i.arg&[0].float_reg()));
         fn truncd() => self.inst(fcnv(.D64, .S32, i.to.float_reg(), i.arg&[0].float_reg()));
+        //
+        // PLEASE DO NOT THE FUCKING PLATFORM REGISTER!
+        // It gets stomped on context switch. Which can happen between arbitrary instructions. 
+        // i.e. `mov x18, XX; mov XX, YY; mov YY, x18;` is not atomic.
+        // This is not a theoretical problem. It happens frequently on m1 macos 14.6.1 at the very least.
+        //
         fn swap() => {
             if i.cls().is_int() {
-                // TODO: qbe uses x18 for this but i feel like you're not allowed to do that. :SketchPlatformRegister
                 a, b := (i.arg&[0].int_reg(), i.arg&[1].int_reg());
-                self.inst(mov(si, x18, a)); 
+                self.inst(mov(si, x17, a)); 
                 self.inst(mov(si, a, b));
-                self.inst(mov(si, b, x18));
+                self.inst(mov(si, b, x17));
             } else {
                 a, b := (i.arg&[0].float_reg(), i.arg&[1].float_reg());
                 // we can't refer to v31 because we waste a slot on 0 so this will never stomp anything // :V31

@@ -69,13 +69,15 @@ emit_qbe_included :: fn(m: rawptr, comp: *CompCtx, fns: [] FuncId, entry: Progra
     m := QbeModule.ptr_from_raw(m);
     smuggle_module_pointer[] = m;
     comp := comp[];
-    out_fd := open_temp_file();
-    outf_local := fdopen(out_fd.fd, "a".sym().c_str());
-    ::ptr_utils(FILE);
-    assert(!outf_local.is_null(), "failed to open temp file");
-    @println("Output asm to %", out_fd&.s_name());
-    aaaa_out[] = out_fd;
-    m.outf = outf_local;
+    out_fd := TmpFile.zeroed();
+    if !m.making_macho() { 
+        out_fd = open_temp_file();
+        outf_local := fdopen(out_fd.fd, "a".sym().c_str());
+        ::ptr_utils(FILE);
+        assert(!outf_local.is_null(), "failed to open temp file");
+        @println("Output asm to %", out_fd&.s_name());
+        m.outf = outf_local;
+    };
     
     target: TargetEnv = (arch = m.goal.arch, os = m.goal.os);
     ir_text := {CodeGen(EmitQbe2).emit}(comp, fns, entry, target&);
@@ -91,7 +93,7 @@ emit_qbe_included :: fn(m: rawptr, comp: *CompCtx, fns: [] FuncId, entry: Progra
         ::ptr_utils(FILE);
         write(m.outf, inline_asm_functions.items()).unwrap();
         fclose(m.outf).unwrap();
-        asm := temp().read_to_string(aaaa_out.s_name());
+        asm := temp().read_to_string(out_fd&.s_name());
         aaa&.push_bucket(asm);
     };
     aaa
@@ -638,6 +640,12 @@ fn inst_store(self: *EmitQbe2, addr: EmitQbe2.Val, value: EmitQbe2.Val, ty: Prim
 
 fn inst_copy(self: *EmitQbe2, from: EmitQbe2.Val, to: EmitQbe2.Val, bytes: u16) void = {
     self.b&.push_blit(self.current, to, from, bytes.zext()); 
+    
+    // Just an option for debugging to make sure overlapping isn't the problem. 
+    //self.b&.push_argument(self.current, .Kl, to);
+    //self.b&.push_argument(self.current, .Kl, from);
+    //self.b&.push_argument(self.current, .Kl, self.b&.push_literal(@as(i64) bytes.zext()));
+    //self.b&.push_inst(self.current, .call, .Kw, QbeNull,  self.b&.push_symbol("memmove".sym().c_str()), QbeNull);
 }
 
 fn inst_func_ref(self: *EmitQbe2, fid: FuncId) EmitQbe2.Val = {

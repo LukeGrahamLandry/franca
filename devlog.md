@@ -1,3 +1,75 @@
+## the line must be drawn here (Nov 4/5)
+
+- versions of the compiler compiled by llvm.fr, from_bc.fr with my qbe, and qbe.fr with real qbe, compiling with my qbe all produce the same binary when they work
+- versions compiled by either qbe have the bug but the llvm one (-Os and -O0) does not.
+- often it works. if not, mostly segfault but sometimes its LexError.Unexpected.
+  which suggests to me that im stomping random memory and sometimes it happens to be fine or unmapped or in the source code itself.
+- it can't be use after arena_reset because that would never be unmapped.
+  unless its using junk as a pointer. easy to check, still happens if I disable
+  reset_retaining_capacity/reset_retaining_original/deinit.
+  still happens if i disable dealloc so its not a normal use after free either.
+- i can try address sanitizer on the llvm one, maybe there's some logic bug in the frontend part that just doesnt really manifest somehow, idk, cant hurt.
+  need -fsanitize=address to clang (both compile and link) and also sanitize_address addtribute in llvm ir.
+- asan thinks im calling memcpy with overlapping args, im not calling it from my code, its inst_call for CopyBytesToFrom uses llvm's memcpy intrinsic.
+  I can use thier memmove instead and then asan stops complaining. that's promising.
+  but making my qbe call memmove for every blit still has the problem. sad.
+- i suppose asan might not be doing much because i mostly use my own areana allocators instead of malloc.
+  making get_alloc use todo_allocator doesn't change anything.
+  (tho it does make a compile error unless i change @static to zero the memory which is offputting but easy to fix and clearly not related to the main problem).
+  so thats kinda a dead end.
+- ok new tact. write a simplier version of rega and skip as many opt passes as possible and see if that still has the problem.
+  just give every tmp its own stack slot and only use 3 registers ever.
+  - special case to ignore copies to null that the other rega needs as markers after a call.
+  - mistakes around phi nodes.
+  - why does store argcls need to be Kw?
+  - swap needs to be a special case but is only inserted by other rega so don't care
+  - fold1 fails without constant folding (but it does that with normal rega too)
+- ok so this is good. minimal_rega+isel+abi+convert_to_ssa passes tests and can compile the compiler, but doesn't seem to have the bug.
+  or im just getting impatient because its slow as fuck.
+  but it got through 1000 compiles of the empty program without crashing (before i got bored because that took almost 8 minutes).
+- ok so what if i add back other passes? same as normal but this minimal_rega instead of spill+rega.
+  that also seems to not have the bug. so i guess its some subtle bug in qbe's spill or rega that I faithfully ported.
+  thats kinda painful.
+
+ohhhhhh. i did know this information.
+`// TODO: qbe uses x18 for this but i feel like you're not allowed to do that. :SketchPlatformRegister`
+whelp todays the day we todo that todo. progress.
+
+by far the most common thing that used the scratch register was swaps inserted by rega.
+and i can see how randomly when you try to swap registers and one gets zeroed it could manifest as seeming to take the wrong branch or just segfaulting.
+also suggests i wasnt going crazy when it happened way more often when trying to run in profiler, because maybe thats a context switch to take a sample?
+so the solution to all that was just to use x17 as my scratch register instead of x18.
+
+```c
+#include <stdio.h>
+#define C 10000
+
+int main() {
+  int stomps = 0;
+  for (int i = 0; i < C; i++) {
+    long x = 1;
+    for (int k = 0; k < C; k++) {
+      asm volatile("b .bbb\n"
+                   ".aaa:\n"
+                   "    ret\n"
+                   ".bbb:\n"
+                   "    mov x18, %0\n"
+                   "    bl .aaa\n"
+                   "    mov %0, x18\n"
+                   : "=r"(x)
+                   : "r"(x));
+      if (x != 1) {
+        stomps++;
+      }
+    }
+  }
+  printf("stomped %d/%d\n", stomps, C * C);
+  return 0;
+}
+```
+
+for posterity this is on an m1 with macos 14.6.1.
+
 ## (Nov 3)
 
 hoping the compiler constants thing also shows up in one of the tests.
