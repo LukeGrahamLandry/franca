@@ -77,7 +77,7 @@ fn inlsave(f: *Qbe.Fn) void = {
 
 fn inlfind(f: *Qbe.Fn, r: Qbe.Ref) ?*Qbe.Fn = {
     if(rtype(r) != .RCon, => return(.None));
-    c := f.get_constant(r); // :FUCKED it shouldn't typecheck if you do .val()
+    c := f.get_constant(r);
     if(c.type != .CAddr, => return(.None));
     if(c.sym.type != .SGlo, => return(.None));
     symbol := f.globals.get_symbol_info(c.sym.id);
@@ -166,7 +166,7 @@ fn inlbins(inlfn: *Qbe.Fn, inlb: *Qbe.Blk, f: *Qbe.Fn, prmap: *QList(RefMap), pn
     };
 }
 
-/* return index of first instruction after inlining */
+/* return index of last inlined ins */
 fn inlcall(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) i64 = {
     @debug_assert(ptr_diff(b.ins, i) >= 0 && ptr_diff(i, b.ins.offset(b.nins.zext())) >= 0);
     @debug_assert(i.op() == .call);
@@ -199,11 +199,15 @@ fn inlcall(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) i64 = {
     if inlfn.start.jmp.type != .Jret0 {
         addins(vins&, nins&, i);
         i1 := vins[nins - 1]&;
-        i1.set_op(.copy);
-        i1.arg&[0] = getinlref(inlfn, inlfn.start.jmp.arg, f, rmap&, nrmap&);
         @debug_assert(i1.arg&[1] == QbeNull, "expected inline before abi and we don't inline aggragates yet");
+        if i1.to == QbeNull {  // non-void but we discarded the return value. 
+            i1.set_nop();
+        } else {
+            i1.set_op(.copy);
+            i1.arg&[0] = getinlref(inlfn, inlfn.start.jmp.arg, f, rmap&, nrmap&);
+        };
     };
-    nret := nins;
+    nret := nins - 1;
     
     for(i.offset(1), b.ins.offset(b.nins.zext())) { i |
         addins(vins&, nins&, i);
@@ -221,7 +225,7 @@ fn inlcalls(f: *Qbe.Fn) void = {
             i := b.ins.offset(n);
             if i.op() == .call {
                 /* careful, this rewrites b.ins */
-                n = inlcall(f, b, i); // TODO - off by one if call is inlined...
+                n = inlcall(f, b, i); 
             };
             n += 1;
         };

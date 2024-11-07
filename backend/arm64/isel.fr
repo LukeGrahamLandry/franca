@@ -3,6 +3,8 @@
 //! - Assign stack slots to allocs in the start block.
 //! - Most instructions must have both operands in registers. 
 //! - Cmp can encode some immediates. But only on the right so you might have to swap and invert. 
+//! - add/ldr/str can encode some immediates.
+//! - Fuse chained memory offsets with stack slots. 
 //! - Combine cmp+jnz into jmp.cc.
 
 fn arm64_isel(f: *Qbe.Fn) void = {
@@ -78,6 +80,10 @@ fn arm64_isel(f: *Qbe.Fn) void = {
 // This will compress a sequence like `add x1, x29, #24; add x1, x1, #8; ldr x1, [x1]` into `ldr x1, [x29, #32]`
 // It only handles chains that occur within a single becuase we have tmp.def pointers into scratch space. 
 // Also mul+add to madd. 
+//
+// TODO:
+// - fold into .CAddr offset (tho maybe thats a fold thing), and maybe that conflicts with the idea of deduplicating CAddr to reduce relocations required. 
+// - fold addr+add even if we dont see the ldr/str
 //
 fn fuse_addressing(f: *Qbe.Fn, mem: []*Qbe.Ins, b: *Qbe.Blk) void = {
     if(mem.len == 0, => return());
@@ -480,6 +486,12 @@ Imm :: @enum(i64) (
 );
 ::if(Imm);  ::enum_basic(Imm);
 
+fn sign_extend_low32(x: i64) i64 = {
+    x: u32 = x.trunc();
+    x: i32 = x.bitcast();
+    x.intcast()
+}
+
 fn imm(c: *Qbe.Con, k: Qbe.Cls, pn: *i64) Imm = {
     if c.type != .CBits {
         return(.Iother);
@@ -488,9 +500,7 @@ fn imm(c: *Qbe.Con, k: Qbe.Cls, pn: *i64) Imm = {
     if k == .Kw {
         // sign extend the low 32 bits. 
         // qbe did `n = (int32_t)n;` which clang says is sxtw. 
-        x: u32 = n.trunc();
-        x: i32 = x.bitcast();
-        n = x.intcast();
+        n = sign_extend_low32(n);
     };
     positive := true;
     if n < 0 {

@@ -61,8 +61,8 @@ nets code size ~1260KB -> 1188KB, but the main thing is it's nicer to look at no
   that also seems to not have the bug. so i guess its some subtle bug in qbe's spill or rega that I faithfully ported.
   thats kinda painful.
 
-ohhhhhh. i did know this information.
-`// TODO: qbe uses x18 for this but i feel like you're not allowed to do that. :SketchPlatformRegister`
+oh hey i even noticed this before.
+`// TODO : qbe uses x18 for this but i feel like you're not allowed to do that. :SketchPlatformRegister`
 whelp todays the day we todo that todo. progress.
 
 by far the most common thing that used the scratch register was swaps inserted by rega.
@@ -114,6 +114,9 @@ add_constant is only called in walk_bc (not c/b/llvm or b/from_bc) and it happen
 oh its the deduplicating by jit_addr in emit_relocatable_constant so when its less than 8 bytes and stored inline, its deduplicating by stack slot,
 and the one compiled by llvm happened to use stack space such that they were at the same place for both constants and it deduplicated them.
 a bit alarming that it wasn't a problem for months but anyway we're back to reproducible builds of the compiler so thats good for morale.
+
+oh hey i even noticed this problem before (macro_in_const_cloned test)
+`// TODO: this doesn't work on llvm, presumably because bake value does the wrong thing? : FUCKED -- Jul 10`
 
 the new backend still doesn't fully work, the occasional crashes were unrelated apparently, but at least now we know its not a
 confusing miscompliation that only surfaces after multiple iterations, just a normal friendly miscompilation.
@@ -301,6 +304,7 @@ That's enough to pass the one qbe thread local test when outputting exe. still h
 ## (Oct 25)
 
 - print the most negative number
+  - oh hey i even noticed this before `// assert_eq(MAX_i64 + 1, MIN_i64); // TODO : llvm backend chokes on this.`
 - emit constant of a null CStr
 - switch on u32
 - aaa global_module is a different variable between the precompiled and the normal.
@@ -731,7 +735,7 @@ Really i just want to be able to have generics that don't add to overload sets u
 added ability to ask an allocator if it owns a pointer so now expr log doesn't crash on trying to print garbage
 if its not in the compiler's areana or on stack. so i can see the place where the garbage number is.
 
-// :FuckedJunkPointerExpr
+// : FuckedJunkPointerExpr
 tried run_tests with cranelift on linux but `parser_doesnt_crash` still hits the `bad expr ptr` (before the cranelift type error on that test that happens on mac).
 its definitly using cranelift because it passes the tests that `[TODO X64]` normally.
 that seems pretty conclusive that the problem isn't my x86 asm backend.
@@ -765,7 +769,7 @@ TODO: can't dlsym `dlopen` from the glib .so file, i assume they have it seperea
 
 Fixed the looping on `_NS*` functions on linux.
 
-// :FuckedJunkPointerExpr
+// : FuckedJunkPointerExpr
 now when compiling itself its segfaulting on 590072672032938 in compile_expr_inner.
 i feel thats not even a pointer becuase it doesnt change if i turn aslr back on but all the other numbers passed into
 compile_expr_inner do.
@@ -1020,7 +1024,7 @@ improving some error messages.
 - fixed losing error in resolve (missing @try) so you always hit a GetParsed in sema and reported the wrong location.
   should make driver programs powerful enough to add warnings for that sort of thing.
 - overload not found error show the types
-- fixed missing type check error for get_variant_ptr `if you pass a pointer as $t it still tpyechecks !!! :FUCKED -- Jul 16`
+- fixed missing type check error for get_variant_ptr `if you pass a pointer as $t it still tpyechecks !!! : FUCKED -- Jul 16`
   I was passing arg_ty instead of arg_expr.ty for arg_ty_found of bind_const_arg.
   // TODO: really immediate_eval_expr should do more strict type checking.
 - returning more sturctured errors so i can write tests for them, and so i can delay the slow formatting the error message until we know its actually going to be printed.

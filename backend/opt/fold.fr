@@ -1,0 +1,530 @@
+//!
+//! This is kinda tedious and doesn't help me much because my frontend has to do aggressive constant evaluation anyway. 
+//!     TODO: I think it would be much faster if the frontend just tracked what 
+//!           should be constant, and only materialized it upon seeing a 
+//!           non-arithmetic #fold, and otherwise just defer until the backend.  
+//! But it still catches a few stragglers that became constant after slot promotion, inlining, etc.
+//!
+// TODO: some are sketchy because old backends only fully implment i64/f64 while f32/i32/u32/u64 are just kinda hacked in with casts. 
+// TODO: fuse sequential add/sub with one const arg. 
+
+lat_bot :i32: -1;  /* lattice bottom */
+lat_top :i32:  0;  /* lattice top (matches UNDEF) */  // only known at runtime
+
+Edge :: @rec @struct(
+    work: *Edge,
+    dest: i32,
+    dead: bool,
+);
+
+FoldCtx :: @struct(
+    f: *Qbe.Fn,
+    val: []i32,
+    flowrk: *Edge,
+    edge: []Array(Edge, 2), 
+    nuse := 0,
+    usewrk: QList(*Qbe.Use),
+);
+
+// not memory and not special inserted later by abi/isel
+fn can_fold(o: Qbe.O) bool = 
+    o.between(.add, .cuod) || o.between(.extsb, .cast);
+
+
+/* require rpo, use, pred */
+fn fold_constants(f: *Qbe.Fn) void = {
+    // never gonna happen but if there's no constants at all, there's nothing to fold. 
+    if(f.ncon == @as(i32) FIXED_CONST_COUNT, => return());
+    
+    start := Edge.zeroed();
+    f: FoldCtx = (
+        f      = f,
+        val    = temp().alloc_zeroed(i32, f.ntmp.zext()),
+        edge   = temp().alloc(Array(Edge, 2), f.nblk.zext()),
+        usewrk = new(0, .PHeap),
+        flowrk = start&,
+    ); f := f&;
+    
+    // val = alloc_zeroed so don't have to `range(f.f.ntmp.zext()) f.val[t] = lat_top;`
+    ::assert_eq(lat_top, 0); 
+    
+    range(0, f.f.nblk.zext()) { n | 
+        b := f.f.rpo[n];
+        b.visit = 0;
+        initedge(f.edge(n, 0), b.s1);
+        initedge(f.edge(n, 1), b.s2);
+    };
+    initedge(start&, f.f.start);
+
+    /* 1. find out constants and dead cfg edges */
+    dowhile {
+        continue :: local_return;
+        e := f.flowrk;
+        if !e.is_null() {
+            f.flowrk = e.work;
+            e.work = Edge.ptr_from_int(0);
+            if e.dest == -1 || !e.dead {
+                continue(true);
+            };
+            e.dead = false;
+            n := e.dest;
+            b := f.f.rpo[n.zext()];
+            for_phi b { p | 
+                f.visitphi(p, n);
+            };
+            if b.visit == 0 {
+                for_insts_forward b { i |
+                    f.visitins(i);
+                };
+                f.visitjmp(b, n);
+            };
+            b.visit += 1;
+            @debug_assert(
+                b.jmp.type != .Jjmp
+                || !f.edge(n, 0)[].dead
+                || identical(f.flowrk, f.edge(n, 0)
+            ), "live direct jump should be queued");
+            continue(true);
+        };
+        if f.nuse != 0 {
+            f.nuse -= 1;
+            u := f.usewrk[f.nuse];
+            n := u.bid;
+            b := f.f.rpo[n.zext()];
+            if(b.visit == 0, => continue(true));
+            @match(u.type) {
+                fn UPhi() => f.visitphi(u.u.phi, u.bid);
+                fn UIns() => f.visitins(u.u.ins);
+                fn UJmp() => f.visitjmp(b, n);
+                @default => unreachable();
+            };
+            continue(true);
+        };
+        false
+    };
+    any_folded := false;
+    if f.f.globals.debug["F".char()] {
+        out := f.f.globals.debug_out;
+        write(out, "\n> SCCP findings:");  // "sparse conditional constant propagation"
+        range(Qbe.Tmp0, f.f.ntmp.zext()) { t |
+            if f.val[t] != lat_bot && f.val[t].intcast() != lat_top {
+                any_folded = true;
+                @fmt_write(out, "\n%: ", f_pad(f.f.tmp[t]&.name(), 10, .Before));
+                printref(CON(f.val[t].zext()), f.f, out);
+            };
+        };
+        if any_folded {
+            write(out, "\n> Top: ("); 
+            range(Qbe.Tmp0, f.f.ntmp.zext()) { t |
+                if f.val[t].intcast() == lat_top {
+                    @fmt_write(out, "%, ", f.f.tmp[t]&.name());
+                } 
+            };
+            write(out, ")"); 
+        } else {
+            write(out, "\n no foldable constants");
+        };
+        write(out, "\n dead code: ");
+    };
+
+    /* 2. trim dead code, replace constants */
+    any_dead_blocks := false;
+    pb := f.f.start&;
+    while => !pb[].is_null() { 
+        continue :: local_return;
+        b := pb[];
+        if b.visit == 0 {
+            any_dead_blocks = true;
+            when_debug(f.f, .Folding) { out | 
+                @fmt_write(out, "% ", b.name());
+            };
+            edgedel(b, b.s1&);
+            edgedel(b, b.s2&);
+            pb[] = b.link;
+            continue();
+        };
+        pp := b.phi&;
+        while => !pp[].is_null() { 
+            p := pp[];
+            if f.val[p.to.val()] != lat_bot {
+                pp[] = p.link;
+            } else {
+                range(0, p.narg.zext()) { a | 
+                    if !f.deadedge(p.blk[a].id, b.id) {
+                        f.renref(p.arg.index(a));
+                    }
+                };
+                pp = p.link&;
+            };
+        };
+        for_insts_forward b { i |
+            if(f.renref(i.to&), => i.set_nop()) {
+                range(0, 2) { n | 
+                    f.renref(i.arg&.index(n))
+                };
+                if is_store(i.op()) && i.arg&[0] == QbeUndef {
+                    i.set_nop();
+                }
+            }
+        };
+        f.renref(b.jmp.arg&);
+        if b.jmp.type == .Jjnz && rtype(b.jmp.arg) == .RCon {
+            if iscon(f.f.get_constant(b.jmp.arg), false, 0) {
+                edgedel(b, b.s1&);
+                b.s1 = b.s2;
+                b.s2 = Qbe.Blk.ptr_from_int(0);
+            } else {
+                edgedel(b, b.s2&);
+            };
+            b.jmp.type = .Jjmp;
+            b.jmp.arg = QbeNull;
+        };
+        pb = b.link&;
+    };
+    
+    when_debug(f.f, .Folding) { out |
+        if !any_dead_blocks {
+            write(out, "(none)");
+        };
+        if any_folded {
+            write(out, "\n\n> After constant folding:\n");
+            printfn(f.f, out);
+        };
+    };
+}
+
+fn iscon(c: *Qbe.Con, w: bool, k: u64) bool = {
+    c.type == .CBits 
+    && (!w || (@as(u64) c.bits.i.bitcast()) == k) 
+    && ( w || (@as(u32) c.bits.i.trunc())  == k.trunc())
+}
+
+fn latval(f: *FoldCtx, r: Qbe.Ref) i32 = {
+    @match(rtype(r)) {
+        fn RTmp() => f.val[r.val()];
+        fn RCon() => r.val().intcast();
+        @default => unreachable();
+    }
+}
+::if(i32);
+fn latmerge(v: i32, m: i32) i32 = {
+    if(m == lat_top, => return(v));
+    if(v == lat_top || v == m, => m, => lat_bot)
+}
+
+fn update(f: *FoldCtx, t: i32, m: i32) void = {
+    t := t.zext();
+    m := latmerge(f.val[t], m);
+    if m != f.val[t] {
+        tmp := f.f.get_temporary(t);
+        each tmp.uses() { u |
+            f.nuse += 1;
+            grow(f.usewrk&, f.nuse);
+            f.usewrk[f.nuse - 1] = u;
+        };
+        f.val[t] = m;
+    }
+}
+
+fn deadedge(f: *FoldCtx, s: i32, d: i32) bool = {
+    e := f.edge.index(s.zext());
+    !(e[0].dest == d && !e[0].dead) && 
+    !(e[1].dest == d && !e[1].dead)
+}
+
+fn visitphi(f: *FoldCtx, p: *Qbe.Phi, n: i32) void = {
+    v: i32 = lat_top;
+    range(0, p.narg.zext()) { a |
+        if !f.deadedge(p.blk[a].id, n) {
+            v = latmerge(v, f.latval(p.arg[a]));
+        };
+    };
+    f.update(p.to.val().intcast(), v);
+}
+
+fn visitins(f: *FoldCtx, i: *Qbe.Ins) void = {
+    if(rtype(i.to) != .RTmp, => return());
+    // :foldflt // TODO
+    v := if(!can_fold(i.op()) || !is_int(i.cls()), => lat_bot) {
+        l := f.latval(i.arg&[0]);
+        r := if(i.arg&[1] != QbeNull, => f.latval(i.arg&[1]), => QbeConZero.val().intcast());
+        @if_else {
+            @if(l == lat_bot || r == lat_bot) => lat_bot;
+            @if(l == lat_top || r == lat_top) => lat_top;
+            @else => f.f.opfold(i.op(), i.cls(), f.f.con.index(l.zext()), f.f.con.index(r.zext()));
+        }
+    };
+    
+    /* fprintf(stderr, "\nvisiting %s (%p)", optab[i.op].name, (void *)i); */
+    f.update(i.to.val().intcast(), v);
+}
+
+fn visitjmp(f: *FoldCtx, b: *Qbe.Blk, n: i32) void = {
+    @match(b.jmp.type) {
+        fn Jjnz() => {
+            l := f.latval(b.jmp.arg);
+            @if_else {
+                @if(l == lat_bot) => {
+                    f.edge(n, 1)[].work = f.flowrk;
+                    f.edge(n, 0)[].work = f.edge(n, 1);
+                    f.flowrk = f.edge(n, 0);
+                };
+                @if(iscon(f.f.con.index(l.zext()), false, 0)) => {
+                    @debug_assert(f.edge(n, 0)[].dead, "expect dead edge");
+                    f.edge(n, 1)[].work = f.flowrk;
+                    f.flowrk = f.edge(n, 1);
+                };
+                @else => {
+                    @debug_assert(f.edge(n, 1)[].dead, "expect dead edge");
+                    f.edge(n, 0)[].work = f.flowrk;
+                    f.flowrk = f.edge(n, 0);
+                };
+            };
+        }
+        fn Jjmp() => {
+            f.edge(n, 0)[].work = f.flowrk;
+            f.flowrk = f.edge(n, 0);
+        }
+        fn Jhlt() => ();
+        @default => @assert(is_ret(b.jmp.type), "bad block terminator for fold");
+    };
+}
+
+fn initedge(e: *Edge, s: *Qbe.Blk) void = {
+    e.dest = if(!s.is_null(), => s.id.bitcast(), => -1);
+    e.dead = true;
+    e.work = Edge.ptr_from_int(0);
+}
+
+fn renref(f: *FoldCtx, r: *Qbe.Ref) bool = {
+    if rtype(r[]) == .RTmp {
+        l := f.val[r[].val()];
+        if l != lat_bot {
+            r[] = CON(l.zext());
+            return(true);
+        }
+    };
+    false
+}
+
+/* boring folding code */
+// 
+// I could do a fancy meta-programming thing where i generate these match statements because 
+// i have to have the mapping of op to intrinsic anyway, but also that would just 
+// end up more complicated than just pasting this here and never touching it again, 
+// decisions, decisions!       -- Nov 7
+//
+
+BitcastPrim :: @union(s: i64, u: u64, fs: f32, fd: f64, sw: i32, uw: u32);
+
+fn foldint(res: *Qbe.Con, op: Qbe.O, w: bool, cl: *Qbe.Con, cr: *Qbe.Con) bool = {
+    l: BitcastPrim = (s = cl.bits.i);
+    r: BitcastPrim = (s = cr.bits.i);
+    x   := 0;
+    sym := Qbe.Sym.zeroed();
+    typ := (@type cl.type).CBits;
+    @if_else {
+        @if(op == .add) => {
+            if cl.type == .CAddr {
+                if(cr.type == .CAddr, => return(true));
+                typ = .CAddr;
+                sym = cl.sym;
+            } else {
+                if cr.type == .CAddr {
+                    typ = .CAddr;
+                    sym = cr.sym;
+                }
+            }
+        };
+        @if(op == .sub) => {
+            if cl.type == .CAddr {
+                if cr.type != .CAddr {
+                    typ = .CAddr;
+                    sym = cl.sym;
+                } else {
+                    if(!(cl.sym == cr.sym), => return(true));
+                }
+            } else {
+                if(cr.type == .CAddr, => return(true));
+            };
+        };
+        @if(cl.type == .CAddr || cr.type == .CAddr) => return(true);
+        @else => ();
+    };
+    if (@is(op, .div, .rem, .udiv, .urem)) {
+        if(iscon(cr, w, 0), => return(true));
+        if (@is(op, .div, .rem)) {
+            x = if(w, => MIN_i64, => MIN_i32);
+            if(iscon(cr, w, bitcast(-1)) && iscon(cl, w, x.bitcast()), => return(true));
+        };
+    };
+    
+    shift_mask := 31.bit_or(w.int().shift_left(5));
+    x := @match(op) {
+        // signed overflow is not undefined for me (i hope)
+        fn add()  => l.s + r.s;
+        fn sub()  => l.s - r.s;
+        fn neg()  => -l.s;
+        // for 32 bit this relies on union putting all fields starting at the beginning and numbers being little endian. 
+        // TODO: some of these must be wrong becuase the old backends don't do real 32 bit or unsigned operations. :FUCKED
+        fn div()  => if(w, => l.s / r.s, => zext(l.sw / r.sw));
+        fn rem()  => if(w, => l.s.mod(r.s), => l.sw.mod(r.sw).zext());
+        fn udiv() => if(w, => bitcast(l.u / r.u), => zext(l.uw / r.uw));
+        fn urem() => if(w, => l.u.mod(r.u).bitcast(), => l.uw.mod(r.uw).zext());
+        fn mul()  => l.s * r.s;
+        fn and()  => l.s.bit_and(r.s);
+        fn or()   => l.s.bit_or(r.s);
+        fn xor()  => l.s.bit_xor(r.s);
+        fn sar() => if(w, => l.s, => sign_extend_low32(l.s)).shift_right_arithmetic(r.s.bit_and(shift_mask));
+        fn shr() => if(w, => l.s, => bit_and(l.s, 1.shift_left(32) - 1)).shift_right_logical(r.s.bit_and(shift_mask));
+        fn shl() => l.s.shift_left(r.s.bit_and(shift_mask));
+        //fn Oextsb() => (int8_t)l.u;  
+        fn extub() => l.s.bit_and(1.shift_left(8) - 1);
+        //fn Oextsh() => (int16_t)l.u; 
+        fn extuh() => l.s.bit_and(1.shift_left(16) - 1);
+        fn extsw() => sign_extend_low32(l.s); 
+        fn extuw() => l.s.bit_and(1.shift_left(32) - 1);
+        fn stosi() => if(w, => l.fs.cast().int(), => l.fs.cast().int().sign_extend_low32());  // TODO: probably wrong rounding to just upcast. 
+        fn stoui() => if(w, => l.fs.cast().int(), => l.fs.cast().int().sign_extend_low32());  // ^+ TODO: probably unsigned has to do something different to fit bigger number?
+        //fn Ostoui() => w ? (uint64_t)cl.bits.s : (uint32_t)cl.bits.s;
+        fn dtosi() => if(w, => l.fd.int(), => l.fd.int().sign_extend_low32());
+        fn dtoui() => if(w, => l.fd.int(), => l.fd.int()); // TODO: probably unsigned has to do something different to fit bigger number?
+        //fn Odtoui() => w ? (uint64_t)cl.bits.d : (uint32_t)cl.bits.d;
+        fn cast() => {
+            if cl.type == .CAddr {
+                typ = .CAddr;
+                sym = cl.sym;
+            };
+            l.s    
+        }
+        @default => fold_cmp(op, l&, r&).int();
+    };
+    res[] = (type = typ, sym = sym, bits = (i = x));
+    return(false)
+}
+
+Ocmpw :: Qbe.O.ceqw;
+Ocmpl :: Qbe.O.ceql;
+Ocmps :: Qbe.O.ceqs;
+Ocmpd :: Qbe.O.ceqd;
+
+// TODO: can't pass @union by value
+fn fold_cmp(op: Qbe.O, l: *BitcastPrim, r: *BitcastPrim) bool = @if_else {
+    @if(op.between(Ocmpw, .cultl)) => {
+        if op.raw() <= Qbe.O.cultw.raw() {
+            l.s = sign_extend_low32(l.s);
+            r.s = sign_extend_low32(r.s);
+        } else {
+            op = @as(Qbe.O) @as(i32) op.raw() - (Ocmpl.raw() - Ocmpw.raw());
+        };
+        @match(@as(Qbe.Cmp) @as(i32) op.raw() - Ocmpw.raw()) {
+            fn Ciule() => l.u <= r.u; 
+            fn Ciult() => l.u < r.u;
+            fn Cisle() => l.s <= r.s; 
+            fn Cislt() => l.s < r.s;
+            fn Cisgt() => l.s > r.s;
+            fn Cisge() => l.s >= r.s;
+            fn Ciugt() => l.u > r.u;
+            fn Ciuge() => l.u >= r.u;
+            fn Cieq()  => l.u == r.u;
+            fn Cine()  => l.u != r.u;
+            @default => @panic("expected fold_cmp");
+        }
+    };
+    // TODO: subtly wrong! becuase i don't do 32 bit float compares correctly on old backends
+    @if(op.between(Ocmps, .cuos)) => @match(@as(Qbe.Cmp) @as(i32) op.raw() - Ocmps.raw() + Qbe.CmpICount) {
+        fn Cfle() => l.fs <= r.fs;
+        fn Cflt() => l.fs < r.fs; 
+        fn Cfgt() => l.fs > r.fs; 
+        fn Cfge() => l.fs >= r.fs;
+        fn Cfne() => l.fs != r.fs;
+        fn Cfeq() => l.fs == r.fs;
+        fn Cfo() => l.fs < r.fs || l.fs >= r.fs;
+        fn Cfuo() => !(l.fs < r.fs || l.fs >= r.fs);
+        @default => @panic("expected fold_cmp");
+    };
+    @if(op.between(Ocmpd, .cuod)) => @match(@as(Qbe.Cmp) @as(i32) op.raw() - Ocmpd.raw() + Qbe.CmpICount) {
+        fn Cfle() => l.fd <= r.fd;
+        fn Cflt() => l.fd < r.fd; 
+        fn Cfgt() => l.fd > r.fd; 
+        fn Cfge() => l.fd >= r.fd;
+        fn Cfne() => l.fd != r.fd;
+        fn Cfeq() => l.fd == r.fd;
+        fn Cfo() => l.fd < r.fd || l.fd >= r.fd;
+        fn Cfuo() => !(l.fd < r.fd || l.fd >= r.fd);
+        @default => @panic("expected fold_cmp");
+    };
+    @else => @panic("expected fold_cmp");
+}
+
+//fn foldflt(res: *Qbe.Con, op: Qbe.O, w: bool, cl: *Qbe.Con, cr: *Qbe.Con) bool #import("qbe");
+fn foldflt(res: *Qbe.Con, op: Qbe.O, w: bool, cl: *Qbe.Con, cr: *Qbe.Con) bool = {
+    float xs, ls, rs;
+    double xd, ld, rd;
+
+    if (cl.type != CBits || cr.type != CBits)
+        err("invalid address operand for '%s'", optab[op].name);
+    *res = (Con){.type = CBits};
+    memset(&res.bits, 0, sizeof(res.bits));
+    if (w)  {
+        ld = cl.bits.d;
+        rd = cr.bits.d;
+        switch (op) {
+        fn Oadd: xd = ld + rd;
+        fn Osub: xd = ld - rd;
+        fn Oneg: xd = -ld;
+        fn Odiv: xd = ld / rd;
+        fn Omul: xd = ld * rd;
+        fn Oswtof: xd = (int32_t)cl.bits.i;
+        fn Ouwtof: xd = (uint32_t)cl.bits.i;
+        fn Osltof: xd = (int64_t)cl.bits.i;
+        fn Oultof: xd = (uint64_t)cl.bits.i;
+        fn Oexts: xd = cl.bits.s;
+        fn Ocast: xd = ld;
+        default: die("unreachable");
+        }
+        res.bits.d = xd;
+        res.flt = 2;
+    } else {
+        ls = cl.bits.s;
+        rs = cr.bits.s;
+        switch (op) {
+        fn Oadd: xs = ls + rs;
+        fn Osub: xs = ls - rs;
+        fn Oneg: xs = -ls;
+        fn Odiv: xs = ls / rs;
+        fn Omul: xs = ls * rs;
+        fn Oswtof: xs = (int32_t)cl.bits.i;
+        fn Ouwtof: xs = (uint32_t)cl.bits.i;
+        fn Osltof: xs = (int64_t)cl.bits.i;
+        fn Oultof: xs = (uint64_t)cl.bits.i;
+        fn Otruncd: xs = cl.bits.d;
+        fn Ocast: xs = ls;
+        default: die("unreachable");
+        }
+        res.bits.s = xs;
+        res.flt = 1;
+    }
+}
+
+fn opfold(f: *Qbe.Fn, op: Qbe.O, cls: Qbe.Cls, cl: *Qbe.Con, cr: *Qbe.Con) i32 = {
+    c := Qbe.Con.zeroed();
+    if cls == .Kw || cls == .Kl {
+        if foldint(c&, op, cls == .Kl, cl, cr) {
+            return(lat_bot);
+        };
+    } else {
+        panic("TODO: foldflt");  // :foldflt
+        foldflt(c&, op, cls == .Kd, cl, cr);
+    };
+    if !is_wide(cls) {
+        c.bits.i = c.bits.i.bit_and(0xffffffff);
+    };
+    r := f.newcon(c&);
+    @debug_assert(!(cls == .Ks || cls == .Kd) || c.flt != 0, "wrong fold type");
+    r.val().intcast()
+}
+
+fn edge(f: *FoldCtx, i: i32, j: i64) *Edge = f.edge(i.zext(), j);
+fn edge(f: *FoldCtx, i: i64, j: i64) *Edge = 
+    f.edge.index(i).index(j);
