@@ -46,6 +46,10 @@ fn emit_func_arm64(m: *QbeModule, f: *Qbe.Fn, text: *FILE) void = {
     code := m.segments&[.Code]&;
     @assert(total_code_so_far < code.mmapped.len, "too much code (% bytes)", total_code_so_far);
     code_bytes := code.mmapped.slice(start_offset, total_code_so_far);
+    // :FuncSizeLimit 
+    // b.cond gives you 19 bits, but encoded/4, but signed so that's 20 bits.  
+    // you can remove this limit on the function but then have to add the check when emitting each branch. 
+    @assert_lt(code_bytes.len, 1.shift_left(20), "we don't allow a function larger than one instruction can jump");  
     if f.globals.debug["D".char()] {
         write(self.f.globals.debug_out, items(@format("# disassembly of '%' (% bytes)\n", name, code_bytes.len) temp()));
         asm := code_bytes;
@@ -273,9 +277,7 @@ fn emit_the_code(self: *ArmState) void #once = {
             @default => {
                 Jjf :: Qbe.J.Jjfieq; // TODO: use this everywhere
                 c: i32 = zext(b.jmp.type.raw() - Jjf.raw());
-                if c < 0 || c > Qbe.NCmp {
-                    panic("unhandled jump") // TODO: " %d", b.jmp.type);
-                };
+                @debug_assert(!(c < 0 || c > Qbe.NCmp), "unhandled jump");
                 
                 if b.link.identical(b.s2) {
                     t := b.s1;
@@ -290,9 +292,7 @@ fn emit_the_code(self: *ArmState) void #once = {
                 target := local_labels[b.s2.id.zext()]; // TODO: wrong index if you forget .zext() but it still typechecks. :FUCKED
                 if target != 0 {
                     distance := (target - here) / 4;
-                    assert(distance.abs() < 1.shift_left(19), "can't jump that far");
-                    // TODO: bounds check
-                    self.inst(b_cond(s_trunc(distance, 19), cond));
+                    self.inst(b_cond(s_trunc(distance, 19), cond));   // :FuncSizeLimit
                 } else {
                     // we haven't made this block yet.
                     patches&.push(offset_from_start = here, cond = (Some = cond), target_bid = b.s2.id.zext(), text_offset = self.buf.len);
@@ -305,8 +305,7 @@ fn emit_the_code(self: *ArmState) void #once = {
                     here := self.next_inst_offset();
                     if target != 0 {
                         distance := (target - here) / 4 - 1;
-                        @assert(distance.abs() < 1.shift_left(28) - 1, "how is your function so big");
-                        self.inst(branch(s_trunc(distance, 26), 0));
+                        self.inst(branch(s_trunc(distance, 26), 0));  // :FuncSizeLimit
                     } else {
                         // we haven't made this block yet.
                         patches&.push(offset_from_start = here, cond = .None, target_bid = b.s1.id.zext(), text_offset = self.buf.len);
@@ -319,24 +318,18 @@ fn emit_the_code(self: *ArmState) void #once = {
     };
     each patches& { p |
         target := local_labels[p.target_bid];
-        @debug_assert(target != 0, "we should have emitted the block");
+        // You never jump to the start block and theres normally a prelude anyway so 0 works as a sentinal. 
+        @debug_assert(target != 0, "we should have emitted the block");  
         distance := (target - p.offset_from_start) / 4;
         @debug_assert(distance > 0, "dont need to patch backward jumps");
-        code := self.m.segments&[.Code]&;
+        code  := self.m.segments&[.Code]&;
         patch := code.mmapped.ptr.offset(self.start_of_function + p.offset_from_start);
         patch := ptr_cast_unchecked(u8, u32, patch);
         @debug_assert_eq(brk(0xabba), patch[], "not expecting patch");
-        if distance == 0 {
-            @debug_assert(false, "this shouldn't happen because we'd know to fall through without waiting for a patch");
-            patch[] = arm_nop;
+        if p.cond { cc | 
+            patch[] = b_cond(s_trunc(distance, 19), cc);  // :FuncSizeLimit
         } else {
-            if p.cond { cc | 
-                assert(distance.abs() < 1.shift_left(19), "cant jump that far");
-                patch[] = b_cond(s_trunc(distance, 19), cc);
-            } else {
-                assert(distance.abs() < 1.shift_left(26), "cant jump that far");
-                patch[] = branch(s_trunc(distance, 26), 0);
-            };
+            patch[] = branch(s_trunc(distance, 26), 0);   // :FuncSizeLimit
         };
         @if(self.m.want_text_asm) {
             // :TempAsmText HACK
@@ -378,6 +371,11 @@ fn prelude_grow_stack(self: *ArmState) void = {
         return();
     };
     
+    // :StackSizeLimit
+    // could remove this limit and just add another case with more movks.
+    // but whatever allocated your stack for you isn't gonna give you this much either
+    @assert_lt(self.frame, 1.shift_left(32), "we don't allow >4GB stack frame"); 
+    
     top := self.frame.shift_right_logical(16);
     bottom := self.frame.bit_and(0xFFFF);    
     self.inst(movz(Bits.X64, x16, bottom.trunc(), .Left0));
@@ -410,6 +408,7 @@ fn epilogue_shrink_stack(self: *ArmState) void = {
         return();
     };
     
+    // :StackSizeLimit
     top: u16 = (o - 16).bit_and(0xFFFF).trunc();
     bottom: u16 = (o - 16).shift_right_logical(16).trunc();
     self.inst(ldp_post(Bits.X64, fp, lr, sp, @as(i7) 2)); // 16 encoded as imm7/8
@@ -581,7 +580,7 @@ fn fixarg(self: *ArmState, pr: *Qbe.Ref, sz: i64) void = {
         // maybe a better fix for this would be adding a padding slot between the 4 byte and 8 byte slot groups in isel. 
         // but you hit the bad case exactly twice when self compiling so meh -- Oct 31. 
         unaligned := s.mod(sz) != 0;  
-        out_of_range := s > sz * 4095;  // TODO: is this the same: s > sz * 4095
+        out_of_range := s > sz * 4095;
         if out_of_range || unaligned {
             i := make_ins(.addr, .Kl, TMP(Arm64Reg.IP0.raw()), r, QbeNull);
             self.emitins(i&);
@@ -597,18 +596,31 @@ fn get_name(o: Qbe.O) Str = {
     names[idx]
 }
 
+fn check_args(i: *Qbe.Ins) void = {
+    @debug_assert(rtype(i.arg&[0]) == .RTmp && rtype(i.arg&[1]) == .RTmp, "TODO: args need reg. op=%", i.op().get_name());
+}
+
+//
+// PLEASE DO NOT THE FUCKING PLATFORM REGISTER!
+// "It should not be assumed that treating the register as callee-saved will be sufficient to satisfy the requirements of the platform."
+// It gets stomped on context switch. Which can happen between arbitrary instructions. 
+// i.e. `mov x18, XX; mov XX, YY; mov YY, x18;` is not atomic.
+// This is not a theoretical problem. It happens frequently on m1 macos 14.6.1 at the very least.
+// So instead of using r18 we use r17. 
+// Which is an intra-procedure-call temporary register for the linker to use so its fine as a temporary. 
+//
+arm_scratch_int :: Arm64Reg.IP1;
+
 fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
-    ::if(Bits);
     ::if(u32);
-    ::if(FType);
     F :: @Fn(s: FType, dest: u5, a: u5, b: u5) u32;
     I :: @Fn(s: Bits, dest: u5, a: u5, b: u5) u32;
     inst_name := i.op().get_name();
-    si := if(i.cls().is_wide(), => Bits.X64, => Bits.W32);
-    sf := if(i.cls().is_wide(), => FType.D64, => FType.S32);
+    si := @if(i.cls().is_wide(),  Bits.X64,  Bits.W32);
+    sf := @if(i.cls().is_wide(),  FType.D64,  FType.S32);
     
     bin :: fn($if_float: F, $if_int: I) => {
-        @assert(rtype(i.arg&[0]) == .RTmp && rtype(i.arg&[1]) == .RTmp, "TODO: args need reg. op=%", inst_name);
+        i.check_args();
         op := if i.cls().is_int() {
             if_int(si, i.to.int_reg(), i.arg&[0].int_reg(), i.arg&[1].int_reg())
         } else {
@@ -617,12 +629,12 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
         self.inst(op);
     };
     int_bin :: fn($if_int: I) => {
-        @assert(rtype(i.arg&[0]) == .RTmp && rtype(i.arg&[1]) == .RTmp, "TODO: args need reg %", inst_name);
+        i.check_args();
         op := if_int(si, i.to.int_reg(), i.arg&[0].int_reg(), i.arg&[1].int_reg());
         self.inst(op);
     };
     int_un :: fn($int: @Fn(s: Bits, dest: u5, src: u5) u32) => {
-        @assert(rtype(i.arg&[0]) == .RTmp, "TODO: args need reg %", inst_name);
+        @debug_assert(rtype(i.arg&[0]) == .RTmp, "TODO: args need reg %", inst_name);
         op := int(si, i.to.int_reg(), i.arg&[0].int_reg());
         self.inst(op);
     };
@@ -632,10 +644,11 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
         fn dbgloc() => (); // we don't do debug info yet.
         fn copy() => {
             if (i.to == i.arg&[0], => return()); 
+            // this is kinda clunky, we let rega insert copies that reference stack slots and then lower them here. 
             if (rtype(i.to) == .RSlot) {
                 r := i.to;
                 if !isreg(i.arg&[0]) {
-                    i.to = TMP(Arm64Reg.IP1.raw()); // :SketchPlatformRegister
+                    i.to = TMP(arm_scratch_int);
                     self.emitins(i);
                     i.arg&[0] = i.to;
                 };
@@ -655,7 +668,7 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
                     self.emitins(i);
                 }
                 @default => {
-                    @debug_assert(i.to.val() != Arm64Reg.R18.raw(), "please do not the platform register. thank you.");
+                    @debug_assert(i.to.val() != Arm64Reg.PLA.raw(), "please do not the platform register. thank you.");
                     if i.cls().is_int() {
                         // 10101010   0001 |0011| 0000 |0011 11101000|
                         //    @bits(sf, 0b0101010, Shift.LSL, 0b0, 0b11111, 0b000000, src, dest);
@@ -678,7 +691,7 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
                     self.inst(movz(Bits.X64, reg, s.trunc(), .Left0));
                     self.inst(add_er(Bits.X64, reg, fp, reg));
                 } else {
-                    @assert(s < 1.shift_left(32));
+                    // :StackSizeLimit
                     self.inst(movz(Bits.X64, reg, s.trunc(), .Left0));
                     self.inst(movk(Bits.X64, reg, s.shift_right_logical(16).trunc(), .Left0));
                     self.inst(add_er(Bits.X64, reg, fp, reg));
@@ -775,38 +788,33 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
         fn xor()  => int_bin(fn(s, d, a, b) => eor(s, d, a, b, .LSL, 0));
         fn and()  => int_bin(fn(s, d, a, b) => and_sr(s, d, a, b, .LSL, 0));
         fn rem() => {
-            // TODO: qbe uses x18 for this but i feel like you're not allowed to do that. :SketchPlatformRegister
             a, b := (i.arg&[0].int_reg(), i.arg&[1].int_reg());
-            self.inst(sdiv(si, x17, a, b));
-            self.inst(msub(si, i.to.int_reg(), x17, b, a));
+            r := arm_scratch_int.int_id();
+            self.inst(sdiv(si, r, a, b));
+            self.inst(msub(si, i.to.int_reg(), r, b, a));
         };
         fn urem() => {
-            // TODO: qbe uses x18 for this but i feel like you're not allowed to do that. :SketchPlatformRegister
             a, b := (i.arg&[0].int_reg(), i.arg&[1].int_reg());
-            self.inst(udiv(si, x17, a, b));
-            self.inst(msub(si, i.to.int_reg(), x17, b, a));
+            r := arm_scratch_int.int_id();
+            self.inst(udiv(si, r, a, b));
+            self.inst(msub(si, i.to.int_reg(), r, b, a));
         };
-        fn extsb()  => int_un(fn(s, d, a) => bmf(s, 0b0, 0b000000, 0b000111, d, a)); // sxtb
-        fn extub()  => int_un(fn(s, d, a) => bmf(s, 0b1, 0b000000, 0b000111, d, a)); // uxtb
-        fn extsh()  => int_un(fn(s, d, a) => bmf(s, 0b0, 0b000000, 0b001111, d, a)); // sxth
-        fn extuh()  => int_un(fn(s, d, a) => bmf(s, 0b1, 0b000000, 0b001111, d, a)); // uxth
-        fn extsw()  => int_un(fn(s, d, a) => bmf(s, 0b0, 0b000000, 0b011111, d, a)); // sxtw
+        fn extsb()  => int_un(fn(s, d, a) => bfm(s, 0b0, 0b000000, 0b000111, d, a)); // sxtb
+        fn extub()  => int_un(fn(s, d, a) => bfm(s, 0b1, 0b000000, 0b000111, d, a)); // uxtb
+        fn extsh()  => int_un(fn(s, d, a) => bfm(s, 0b0, 0b000000, 0b001111, d, a)); // sxth
+        fn extuh()  => int_un(fn(s, d, a) => bfm(s, 0b1, 0b000000, 0b001111, d, a)); // uxth
+        fn extsw()  => int_un(fn(s, d, a) => bfm(s, 0b0, 0b000000, 0b011111, d, a)); // sxtw
         // note: mov w0, w0 is not a nop! it zeros the high bits. 
         fn extuw()  => int_un(fn(s, d, a) => mov(.W32, d, a));
         fn exts()   => self.inst(fcnv(.S32, .D64, i.to.float_reg(), i.arg&[0].float_reg()));
         fn truncd() => self.inst(fcnv(.D64, .S32, i.to.float_reg(), i.arg&[0].float_reg()));
-        //
-        // PLEASE DO NOT THE FUCKING PLATFORM REGISTER!
-        // It gets stomped on context switch. Which can happen between arbitrary instructions. 
-        // i.e. `mov x18, XX; mov XX, YY; mov YY, x18;` is not atomic.
-        // This is not a theoretical problem. It happens frequently on m1 macos 14.6.1 at the very least.
-        //
         fn swap() => {
             if i.cls().is_int() {
                 a, b := (i.arg&[0].int_reg(), i.arg&[1].int_reg());
-                self.inst(mov(si, x17, a)); 
+                r := arm_scratch_int.int_id();
+                self.inst(mov(si, r, a)); 
                 self.inst(mov(si, a, b));
-                self.inst(mov(si, b, x17));
+                self.inst(mov(si, b, r));
             } else {
                 a, b := (i.arg&[0].float_reg(), i.arg&[1].float_reg());
                 // we can't refer to v31 because we waste a slot on 0 so this will never stomp anything // :V31
@@ -863,15 +871,14 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
 // FUCK not enough bits to refer to all slots. if only this backend worked already and i could kill my old one. 
 fn emitins2(self: *ArmState, i: *Qbe.Ins) void = {
     names :: Qbe.O.get_enum_names();
-    idx := @as(i64) intcast(@as(i32) i.op().raw());
+    idx: i64 = intcast(i.op().raw());
     inst_name := names[idx];
-    si := if(i.cls().is_wide(), => Bits.X64, => Bits.W32);
-    sf := if(i.cls().is_wide(), => FType.D64, => FType.S32);
+    si := @if(i.cls().is_wide(), Bits.X64, Bits.W32);
+    sf := @if(i.cls().is_wide(), FType.D64, FType.S32);
     
-    if is_load(i.op()) {
-        self.fixarg(i.arg&.index(0), size_of_load(i).intcast());
+    if maybe_load(i) { size |
+        self.fixarg(i.arg&.index(0), size.intcast());
         offset := 0;
-        size := size_of_load(i);
         addr := if rtype(i.arg&[0]) == .RSlot {
             offset += self.slot(i.arg&[0]);
             @debug_assert(i.arg&[1] == QbeNull, "i dont think i mix offset and slot in ldr");
@@ -889,7 +896,7 @@ fn emitins2(self: *ArmState, i: *Qbe.Ins) void = {
         // TODO: u/s h/b
         if i.cls().is_int() { // TODO: is this wrong?
             s := firstbit(size.zext().bitcast());
-            si_inv := if(i.cls().is_wide(), => Bits.W32, => Bits.X64);
+            si_inv := @if(i.cls().is_wide(), Bits.W32, Bits.X64);
             @match(i.op()) {
                 fn loadsw() => {
                     if i.cls() == .Kl {
@@ -907,10 +914,9 @@ fn emitins2(self: *ArmState, i: *Qbe.Ins) void = {
         };
         return();
     };
-    if is_store(i.op()) {
-        self.fixarg(i.arg&.index(1), size_of_store(i).intcast());
+    if maybe_store(i) { size |
+        self.fixarg(i.arg&.index(1), size.intcast());
         offset := 0;
-        size := size_of_store(i);
         addr := @match(rtype(i.arg&[1])) {
             fn RSlot() => {
                 offset = self.slot(i.arg&[1]) / size.zext();
@@ -1026,13 +1032,6 @@ fn next_inst_offset(self: *ArmState) i64 = {
     ptr_diff(code.mmapped.ptr, code.next) - self.start_of_function
 }
 
-fn encode_adr(distance: i64, dest_reg: u5) u32 = {
-    @assert(distance.abs() < 1.shift_left(21), "cant reference that far % (TODO: can just use more insts)", distance);
-    high := distance.shift_right_arithmetic(2).bit_and(1.shift_left(19) - 1);
-    low := distance.bit_and(0b11);
-    adr(high, low, dest_reg)
-}
-
 fn encode_adrp_add(dest: *u8, src: *u8, reg: u5) Ty(u32, u32) = {
     dest := u8.int_from_ptr(dest);
     src := u8.int_from_ptr(src);
@@ -1041,7 +1040,9 @@ fn encode_adrp_add(dest: *u8, src: *u8, reg: u5) Ty(u32, u32) = {
     adr_range :: 1.shift_left(21);
     if dest.abs() < adr_range {  // TODO: untested because i have such big segments
         // if its an import, you need the extra nop so you take up the right amount of space for the relocation when doing AOT. 
-        return(encode_adr(distance, reg), arm_nop); 
+        high := distance.shift_right_arithmetic(2).bit_and(1.shift_left(19) - 1);
+        low := distance.bit_and(0b11);
+        return(adr(high, low, reg), arm_nop); 
     };
     
     page_offset := dest.shift_right_logical(12) - src.shift_right_logical(12);

@@ -462,13 +462,13 @@ fn QList($T: Type) Type = {
     // TODO: bounds checking but its hard as long as i have to keep qbe's memory layout because the fields aren't together. 
     //       and anyway it would be sad to add alignment padding just for bounds checks. 
     
-    fn index(s: Self, i: i64) *T = 
+    fn index(s: Self, i: i64) *T #inline = 
         s.first.offset(i);
     
-    fn index(s: *Self, i: i64) *T = 
+    fn index(s: *Self, i: i64) *T #inline = 
         s.first.offset(i);
     
-    fn slice(self: Self, start: i64, end: i64) []T = {
+    fn slice(self: Self, start: i64, end: i64) []T #inline = {
         (ptr = self.first.offset(start), len = end - start)
     }
     
@@ -713,13 +713,32 @@ fn for_jump_targets_mut(b: *Qbe.Blk, $body: @Fn(s: **Qbe.Blk) void) void = {
 /// Ugly Table ///
 //////////////////
 
-// TODO: generate the table at comptime cause being branchy has gotta be worse.
-//       (on old unoptimizing, its something like 4680ms -> 4730ms vs calling the c one)
-// I'm not totally sure this is a better way to represet this information than just pasting the table. but i really hate pasting tables. so here we are. 
 fn argcls(i: *Qbe.Ins, argument_index: i64) Qbe.Cls = {
+    argcls_index :: fn(o: Qbe.O, k: Qbe.Cls, i: i64) i64 => 
+        o.raw().int() * 8 + k.raw().int() * 2 + i;
+
+    // TODO: can store 2 per byte instead of 0.5 per byte. 
+    //       but even like this its replacing 4KB of code with 2KB of data.
+    // argcls_eval looks super branchy so we generate a table of all the options at comptime. 
+    argcls_table :: @static(Array(Qbe.Cls, Qbe.O.enum_count() * 4 * 2));
+    :: {
+        for_enum Qbe.O { o | 
+            for (@slice(Qbe.Cls.Kw, .Kl, .Ks, .Kd)) { k | 
+                range(0, 2) { i | 
+                    argcls_table[argcls_index(o, k, i)] = argcls_eval(o, k, i);
+                };
+            };
+        };
+    };
+    
+    // at runtime its just a lookup
+    argcls_table[argcls_index(i.op(), i.cls(), argument_index)]
+}
+
+// TODO: fix @is so it can be used here. 
+// I'm not totally sure this is a better way to represet this information than just pasting the table. but i really hate pasting tables. so here we are. 
+fn argcls_eval(o: Qbe.O, k: Qbe.Cls, argument_index: i64) Qbe.Cls = {
     n := argument_index;
-    o := i.op();
-    k := i.cls();
     int := k.is_int();
     
     if(o.between(.ceqw, .cultw), => return(if(int, => .Kw, => .Ke)));
@@ -735,7 +754,7 @@ fn argcls(i: *Qbe.Ins, argument_index: i64) Qbe.Cls = {
     if o == .add || o == .sub || o == .div || o == .mul || o == .xcmp || o == .swap {
         return(k);
     };
-    if o == .sar || o == .shr || o == .shl {
+    if (@is(o, .sar, .shr, .shl)) {
         if(!int, => return(.Ke));  
         return(if(n == 0, => k, => .Kw));
     };
@@ -752,7 +771,7 @@ fn argcls(i: *Qbe.Ins, argument_index: i64) Qbe.Cls = {
         if(k != .Kl, => return(.Ke));
         return(if(n == 0, => .Kl, => .Kx));
     };
-    if o == .sign || o == .xidiv || o == .xdiv || o == .reqz || o == .rnez {
+    if (@is(o, .sign, .xidiv, .xdiv, .reqz, .rnez)) {
         if(!int, => return(.Ke));
         return(if(n == 0, => k, => .Kx));
     };
@@ -802,6 +821,10 @@ fn argcls(i: *Qbe.Ins, argument_index: i64) Qbe.Cls = {
         k: i64 = k.raw().zext().bit_xor(2);
         return(@as(Qbe.Cls) @as(i16) k.intcast().trunc());
     };
+    if o == .Oxxx {
+        return(.Ke); // unreachable. this is just so it can go in the table. 
+    };
 
-    @panic("invalid op number for argcls")
+    names :: Qbe.O.get_enum_names();
+    @panic("invalid op number for argcls %", names[o.raw().zext()])
 }

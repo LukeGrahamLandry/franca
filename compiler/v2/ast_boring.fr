@@ -84,7 +84,7 @@ fn get_or_create_type(self: *SelfHosted, $T: Type) Type = {
     }
 }
 
-fn specific(self: ResultType) ?Type = {
+fn specific(self: ResultType) ?Type #inline = {
     ::if(?Type);
     @match(self) {
         fn Specific(t) => if(t == UnknownType, => .None, => (Some = t));
@@ -237,21 +237,21 @@ fn want(self: *LazyType) ResultType = {
     }
 }
 
-fn ty(self: *LazyType) ?Type = {
+fn ty(self: *LazyType) ?Type #inline = {
     @match(self) {
         fn Finished(t) => (Some = t[]);
         @default => .None;
     }
 }
 
-fn want(self: ?Type) ResultType = {
+fn want(self: ?Type) ResultType #inline = {
     @match(self) {
         fn Some(t) => (Specific = t);
         fn None() => .None;
     }
 }
 
-fn want(self: Type) ResultType = {
+fn want(self: Type) ResultType #inline = {
     if(self.is_unknown(), => return(.None));
     (Specific = self)
 }
@@ -338,10 +338,7 @@ fn arg_types(self: *SelfHosted, ty: Type) []Type = {
 
 fn remove_named(self: *Pattern, arg_name: Var, a: Alloc) void = {
     start := self.bindings.len();
-    self.bindings&.ordered_retain(fn(b: *Binding) bool => @match(b.name) {
-        fn Var(name) => !(name == arg_name);
-        @default => true;
-    });
+    self.bindings&.ordered_retain(fn(b) => !(b.name&.is(.Var) && b.name.Var == arg_name));
     @debug_assert_ne(start, self.bindings.len());
     if self.bindings.is_empty() {
         self.bindings&.push((
@@ -361,9 +358,7 @@ fn tuple_types(self: *SelfHosted, requested: ResultType, len: i64) Result([]Resu
             types := or self.tuple_types(ty) {
                 return(@err("Type Error: found tuple but requested non-tuple %", self.log_type(ty)))
             };
-            if types.len != len {| 
-                return(@err("Type Error: tuple arity mismatch. expected % but found %", types.len, len));
-            };
+            @err_assert(types.len == len, "Type Error: tuple arity mismatch. expected % but found %", types.len, len) return;
             out: List(ResultType) = list(len, temp());
             for types { ty | 
                 out&.push(Specific = ty);
@@ -371,9 +366,7 @@ fn tuple_types(self: *SelfHosted, requested: ResultType, len: i64) Result([]Resu
             out.items()
         }
         fn Tuple(types) => {
-            if types.len != len {| 
-                return(@err("Type Error: tuple arity mismatch. expected % but found %", types.len, len));
-            };
+            @err_assert(types.len == len, "Type Error: tuple arity mismatch. expected % but found %", types.len, len) return;
             types
         }
         // TODO: ResultType.None should work here. 
@@ -514,7 +507,6 @@ fn adjust_int_length(value: *Values, int: *IntTypeInfo) void = {
 
 fn is_const(self: *FatExpr) bool = {
     @match(self.expr&) {
-        fn Value() => true; 
         fn Tuple(parts) => {
             each parts { part |
                 if(!part.is_const(), => return(false));
@@ -530,27 +522,18 @@ fn is_const(self: *FatExpr) bool = {
             };
             true
         }
-        fn String() => true;
-        fn GetVar(n) => n.kind == .Const;
-        fn ContextualField() => true;
-        fn FromBitLiteral() => true;
-        fn As(f) => f.value.is_const();
-        fn FnPtr() => true;
-        fn ConstEval() => true;
-        fn Builtin() => true;
+        fn GetVar(n)   => n.kind == .Const;
+        fn As(f)       => f.value.is_const();
         fn Cast(value) => value[].is_const();
-        fn Closure() => true;
-        @default => false;
+        @default => @is(self.expr&, .Closure, .Builtin, .ConstEval, .FnPtr, .FromBitLiteral, .ContextualField, .String, .Value);
     }
 }
 
-fn get_build_options(c: *SelfHosted) *BuildOptions = {
-    BuildOptions.ptr_from_raw(c.env.build_options)
-}
+fn get_build_options(c: *SelfHosted) *BuildOptions = 
+    BuildOptions.ptr_from_raw(c.env.build_options);
 
-empty_struct_literal :: fn(loc: Span) FatExpr = {
-    (expr = (StructLiteralP = (bindings = empty(), loc = loc)), loc = loc, ty = UnknownType, done = false)
-};
+empty_struct_literal :: fn(loc: Span) FatExpr = 
+    (expr = (StructLiteralP = (bindings = empty(), loc = loc)), loc = loc, ty = UnknownType, done = false);
 
 fn ne(a: Symbol, b: Symbol) bool #redirect(Ty(u32, u32), bool);
 

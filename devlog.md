@@ -1,3 +1,33 @@
+## peaceful cleanup (Nov 6)
+
+a little strange that these generate different code.
+
+```
+fn is_load(j: Qbe.O) bool =
+    @is(j, .loadsb, .loadub, .loadsh, .loaduh, .loadsw, .loaduw, .load);
+
+fn is_load2(j: Qbe.O) bool =
+    j.raw() >= Qbe.O.loadsb.raw() && j.raw() <= Qbe.O.load.raw();
+```
+
+the latter has extra sxtw's (and some are on constants becuase I'm not running the fold pass),
+because i don't use 32-bit cmp because I didn't want to deal with it on the old backend.
+In the @is_op i extend the constants to i64 at comptime.
+
+- move inlining before memory opts just incase it can delete anything extra.
+  would help a lot more if i inlined things with aggragate arg/ret because thier abi inserts a bunch of junk copies.
+- move some @debug out of lambdas in emit
+- combine is_store+size_of_store (or load) by returning an option
+- alignment padding between 4 and 8 byte local stack slots to help fuse_addressing.
+- sprinkle #inline fairy dust on functions that look dumb in the disassembly.
+  I feel its always a win if it actually ends up making to code smaller.
+- use @is in the frontend
+- generate lookup table for argcls at comptime
+- go through some old code and use operator syntax sugar
+- Trunc64To32 becomes copy:Kw instead of extuw:Kl
+
+nets code size ~1260KB -> 1188KB, but the main thing is it's nicer to look at now.
+
 ## the line must be drawn here (Nov 4/5)
 
 - versions of the compiler compiled by llvm.fr, from_bc.fr with my qbe, and qbe.fr with real qbe, compiling with my qbe all produce the same binary when they work
@@ -39,6 +69,8 @@ by far the most common thing that used the scratch register was swaps inserted b
 and i can see how randomly when you try to swap registers and one gets zeroed it could manifest as seeming to take the wrong branch or just segfaulting.
 also suggests i wasnt going crazy when it happened way more often when trying to run in profiler, because maybe thats a context switch to take a sample?
 so the solution to all that was just to use x17 as my scratch register instead of x18.
+
+minimal reproduction without involving qbe at all:
 
 ```c
 #include <stdio.h>

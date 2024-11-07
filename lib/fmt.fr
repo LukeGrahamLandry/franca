@@ -63,9 +63,8 @@ fn fmt(arg: FatExpr) FatExpr = {
 fn format_into(writer: FatExpr, args: Slice(FatExpr), loc: Span) FatExpr = {
     fmt_string := const_eval_string(args[0]);
     if args.len == 1 {
-        // TODO: have a .contains([]T) :SLOW
-        parts := fmt_string.split("%", temp());
-        if parts.len != 1  {
+        percent := "%".ascii();
+        if fmt_string.contains(percent&)  {
             compile_error("Found place holders in fmt string but no args.", loc);
         };
         
@@ -112,11 +111,11 @@ fn concat(arg: FatExpr, rt_alloc: FatExpr) FatExpr = {
         // TODO: caller needs to pass allocator since this is at runtime. 
         join_list: List(u8) = list(@[rt_alloc]);
         @[{
-            args.enumerate(fn(i, param) => {  // TODO: zip iterators 
+            enumerate args { i, param | // TODO: zip iterators 
                 // TODO: having () in the cast instead of lit(void) stopped working when I changed some things to use the infallible imm_eval_known which is weird -- Apr 21 
                 action := @{ @as(void) push_all(join_list&, @as(Str) @[param[]]) };
                 actions&.push(action);
-            });
+            };
             
             arg.expr.Tuple = actions.rs();
             arg
@@ -131,13 +130,13 @@ fn prepend_tuple(arg: FatExpr, target: FatExpr) FatExpr = {
     // TODO: now that i dont double track types, this will break everything if you do it to an int literal. -- May 1
     if target.expr&.is(.Tuple) {
         original := target.expr.Tuple.items();
-        tuple: List(FatExpr) = list(original.len.add(1), ast_alloc()); 
+        tuple := FatExpr.list(original.len + 1, ast_alloc()); 
         tuple&.push(arg);
         tuple&.push_all(original);
         target.expr.Tuple = tuple.rs();
     } else {
         if target.ty == void {
-            compile_error("prepend_tuple on void doesnt make sense", target.loc);  
+            compile_error("prepend_tuple on void doesn't make sense", target.loc);  
         };
         e := @{ (@[arg], @[target]) };
         assert(e.expr&.is(.Block), "quote repr");
@@ -278,7 +277,7 @@ fn for(self: CStr, $f: @Fn(c: u8) void) void = {
     
     dowhile {
         c := self[0]; // this doesn't need .load() anymore because of :SmallTypes
-        if(c.eq(@as(u8) 0.trunc()), => false){
+        c != 0 && {
             f(c);  
             self = (ptr = self.ptr.offset_bytes(1));
             true
@@ -287,14 +286,13 @@ fn for(self: CStr, $f: @Fn(c: u8) void) void = {
 }
 
 /// The returned string is backed by the same memory as the original.
-fn str(self: CStr) Str = {
-    (ptr = self.ptr, len = self.slow_len())
-}
+fn str(self: CStr) Str = 
+    (ptr = self.ptr, len = self.slow_len());
 
 /// Slowly iterates the string to find the null terminator. 
 fn slow_len(self: CStr) i64 = {
     len := 0;
-    for self {_| 
+    for self { _ | 
         len += 1;
     };
     len
@@ -307,7 +305,7 @@ fn slow_len(self: CStr) i64 = {
 fn maybe_borrow_cstr(self: Str, alloc: Alloc) CStr #leak = {
     ::if(CStr);
     past_last := self.ptr.offset(self.len); // awkward because normal index functions are bounds checked. 
-    if(past_last[].eq(0.trunc()), => (ptr = self.ptr)) {
+    if(past_last[] == 0, => (ptr = self.ptr)) {
         s := self.clone(alloc);
         s&.push(@as(u8) 0.trunc());
         (ptr = s.maybe_uninit.ptr) // LEAK
@@ -369,14 +367,14 @@ fn hex(s: Str) i64 = {
     
     // This prevents overflow for tracking scale for lots of leading zeros. 
     // TODO: add a test that requires this. lol its an insane number tho so could just not bother 
-    while(=> first.lt(s.len()).and(=> eq(get(s, first), @as(u8) 48.trunc()))) {
-        first = add(first, 1) 
+    while => first < s.len && s[first] == 48 {
+        first += 1; 
     };
     
-    while(=> ge(i, first)) {
-        total = add(total, mul(scale, hex_digit(get(s, i))));
-        scale = mul(scale, 16);
-        i = sub(i, 1);
+    while => i >= first {
+        total += scale * hex_digit(s[i]);
+        scale *= 16;
+        i -= 1;
     };
     total
 }
@@ -394,13 +392,13 @@ fn push_hex_byte(hex: *List(u8), byte: u8) void = {
         aaaaa: i64 = byte.zext().bit_and(mask);
         digit := aaaaa.shift_right_logical(shift);
         ::if(u8);
-        d := if(digit.lt(10), => "0".ascii().add(digit.trunc()), => "A".ascii().add(digit.sub(10).trunc())); 
+        d := if(digit < 10, => "0".ascii() + digit.trunc(), => "A".ascii() + digit.sub(10).trunc()); 
         hex.push(d);
     };
 }
 
 fn show_hex_bytes(code: []u8) void = {
-    hex: List(u8) = list(code.len * 5, temp());
+    hex := u8.list(code.len * 5, temp());
     for code { b |
         hex&.push_prefixed_hex_byte(b);
         hex&.push_all(" ");
@@ -412,7 +410,7 @@ fn show_hex_bytes(code: []u8) void = {
 fn dec_digit(cc: u8) i64 = {
     c: i64 = cc.zext();
     //assert(c.ge("0".char()).and(c.le("9".char())), "dec OOB");
-    c.sub("0".char())
+    c - "0".char()
 }
     
 // TODO: this should return an error. 
@@ -421,11 +419,11 @@ fn float(s: Str) f64 = {
     scale := 0.1;
     seen_decimal := false;
     for(s){c|
-        if(seen_decimal) {
+        if seen_decimal {
             value += dec_digit(c).float().mul(scale);
             scale = scale.div(10.0);  // TODO: /= doesn't work??
-        } {
-            if(c.eq(".".ascii()), => { seen_decimal = true; }) {
+        } else {
+            if(c == ".".ascii(), => { seen_decimal = true; }) {
                 value *= 10.0;
                 value += dec_digit(c).float();
             }

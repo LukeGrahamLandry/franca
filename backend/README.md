@@ -1,5 +1,4 @@
-> just for the record this doesn't work yet.  
-> most of the time it can compile itself tho.  
+> this doesn't support x64 yet.  
 > the main backends are in `../compiler`
 
 An optimising compiler backend based on [Qbe](https://c9x.me/compile/).

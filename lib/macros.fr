@@ -149,9 +149,9 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
                 
                 if stmt.stmt&.is(.Eval) {|  // (1)
                     handler_body := stmt.stmt.Eval&;
-                    if handler_body.expr&.is(.Closure) {| 
+                    if handler_body.expr&.is(.Closure) {
                         expand_case_body(handler_body.expr.Closure);
-                    } {| // else
+                    } else {
                         // TODO: better error message if its a call because they forgot a semi-colon. 
                         //debug_log_ast(handler_body[]);
                         assert(handler_body.expr&.is(.PrefixMacro), "expected @default");
@@ -234,9 +234,9 @@ fn match_on_enum(arg: FatExpr, info: *TypeInfo, stmts: [] FatStmt) FatExpr = {
                 
                 if stmt.stmt&.is(.Eval) {|  // (1)
                     handler_body := stmt.stmt.Eval&;
-                    if handler_body.expr&.is(.Closure) {| 
+                    if handler_body.expr&.is(.Closure) {
                         expand_case_body(handler_body.expr.Closure);
-                    } {| // else
+                    } else {
                         // TODO: better error message if its a call because they forgot a semi-colon. 
                         //debug_log_ast(handler_body[]);
                         assert(handler_body.expr&.is(.PrefixMacro), "expected @default");
@@ -353,17 +353,17 @@ fn switch(arg: FatExpr, handlers: FatExpr) FatExpr = {
                                     body = @{ @[action](arg_var) };
                                 };
                                 
-                            }{
+                            } else {
                                 compile_error("@default must be the last handler in @switch", stmt.loc);
                             };
                         }{
-                            if(name.eq(@symbol inclusive)) {
+                            if name == @symbol inclusive {
                                 cond := @{
                                     min, max := @[as(Ty(inspected_ty, inspected_ty), arg[])];
                                     arg_var.ge(min).and(arg_var.le(max))
                                 };
                                 body = @{ @if(@[cond], @[action](), @[body]) };
-                            }{
+                            } else {
                                 // TODO: try expanding the macro, maybe its a user added one and would create valid branches. 
                                 compile_error("unhandled prefix in @switch", stmt.loc);
                             };
@@ -485,7 +485,6 @@ fn tagged($Tagged: Type) void = {
     fn tag_ptr(self: *Tagged) *T #unsafe_noop_cast;  // SAFETY: The compiler puts the tag at the front of the struct. 
     
     fn is(self: *Tagged, check: T) bool #inline = self.tag().eq(check);
-    
 }
 
 fn raw();
@@ -508,16 +507,16 @@ fn enum_basic($T: Type) void = {
     // TODO: need to do the garbage fake ints hack in the other resolve for this to work.
     //fn eq(a: T, b: T) bool #redirect(Ty(i64, i64), bool);
     //fn ne(a: T, b: T) bool #redirect(Ty(i64, i64), bool);
-    fn eq(a: T, b: T) bool = a.raw() == b.raw();
-    fn ne(a: T, b: T) bool = a.raw() != b.raw();
+    fn eq(a: T, b: T) bool #inline = a.raw() == b.raw();
+    fn ne(a: T, b: T) bool #inline = a.raw() != b.raw();
     
     RAW :: { i := get_type_info_ref(T); i.Enum.raw };
     
-    // TODO: this breaks -go-rebuild-yo-self on blink???? (it infinite loops) :fucked havent tried other linux yet.   -- Sep 20
-    // fn raw(e: T) RAW #unsafe_noop_cast;
-    fn raw(e: T) RAW = {
-        ptr_cast_unchecked(T, RAW, e&)[]
-    }
+    // TODO: this (the top one) breaks -go-rebuild-yo-self on blink???? (it infinite loops) :fucked havent tried other linux yet.   -- Sep 20
+    fn raw(e: T) RAW #unsafe_noop_cast;
+    //fn raw(e: T) RAW = {
+        //ptr_cast_unchecked(T, RAW, e&)[]
+    //}
 }
 
 fn enum($T: Type) void = {
@@ -527,7 +526,7 @@ fn enum($T: Type) void = {
     
     fn display(self: T, out: *List(u8)) void = {
         // TODO: without the extra force comptime eval, it wrongly thinks calling this function needs compctx.  -- Jul 1
-        names :: @run get_enum_names(T); // :tag_enums_are_sequential
+        names :: get_enum_names(T); // :tag_enums_are_sequential
         i := self.ordinal();
         if i < 0 || i > names.len() {
             @fmt(out, "<invalid enum:%>", i);
@@ -541,7 +540,7 @@ fn enum($T: Type) void = {
     }
     
     fn name(self: T) Symbol = {
-        names :: @run get_enum_names_symbols(T); 
+        names :: get_enum_names_symbols(T); 
         names[self.ordinal()]
     }
 }
@@ -553,15 +552,14 @@ fn from_raw($T: Type) void = {
     fn from_raw(raw: i64) ?T = {
         ::if(?T);
         // Note: this relies on it being sequentual. 
-        if(raw.lt(0).or(raw >= @run T.enum_cases().len()), => .None) {
+        if(raw < 0 || raw >= @run T.enum_cases().len(), => .None) {
             value := bit_cast_unchecked(i64, T, raw);
             (Some = value)
         }
     } 
 }
 
-
-fn enum_cases(T: Type) [] Ty(Symbol, Values) = {
+fn enum_cases(T: Type) []Ty(Symbol, Values) = {
     info := get_type_info(T);
     assert(info&.is(.Enum), "expected enum type");
     info.Enum.fields.items()
@@ -594,18 +592,14 @@ fn inline_for(container: FatExpr, body: FatExpr) FatExpr #macro = {
     };
     // TODO: dumpster fire garbage error message if you try to make a single length tuple
     //       "Expr::Tuple should have struct type"
-    if actions.len == 1 {
-        container.expr = actions[0].expr;
-    } else {
-        container.expr = (Tuple = actions.rs());
-    };
+    container.expr = @if(actions.len == 1, actions[0].expr, (Tuple = actions.rs()));
     container.ty = UnknownType; 
     container.done = false;
     container
 }
 
 fn inline_range(min_max: FatExpr, body: FatExpr) FatExpr #macro = {
-    min, max := (const_eval(Ty(i64, i64))(min_max));
+    min, max := const_eval(Ty(i64, i64))(min_max);
     
     actions: List(FatExpr) = list(ast_alloc());
     range(min, max) { i | 
@@ -639,7 +633,7 @@ fn inline_match(container: FatExpr, target: FatExpr) FatExpr #macro = {
         info = get_type_info_ref(enum_type);
         is_ptr = true;
         tag_expr = @{ :: { a := @[container]; :: tagged(@type a[]); a.tag().ordinal() } };
-    } {
+    } else {
         tag_expr = @{ :: { a := @[container]; :: tagged(@type a); a&.tag().ordinal() } };
     };
     ptr_ty := *enum_type;
@@ -660,7 +654,7 @@ fn inline_match(container: FatExpr, target: FatExpr) FatExpr #macro = {
                 continue();
             };
             
-            if(is_ptr){
+            if is_ptr {
                 p: TypeInfo = (Ptr = ty);
                 ty = intern_type(p); // TODO: should work to pass @as(TypeInfo) (Ptr = ty) directly
             };
@@ -668,11 +662,9 @@ fn inline_match(container: FatExpr, target: FatExpr) FatExpr #macro = {
             // If they didn't say the argument type, we can fill it in based on the varient name. 
             // If they don't put an argument, just ignore the value. Have to set the type because it defaults to void. 
             bindings := closure.arg.bindings.items();
-            if(bindings.len.eq(1)){
+            if bindings.len == 1 {
                 first := bindings[0]&;
-                infer := first.ty&.is(.Infer);
-                no_name := first.name&.is(.None); 
-                if  infer.or(no_name) {
+                if first.ty&.is(.Infer) || first.name&.is(.None) {
                     first.ty = (Finished = ty);
                 };
             };
@@ -680,7 +672,7 @@ fn inline_match(container: FatExpr, target: FatExpr) FatExpr #macro = {
             case_access := @{ @[container][].___ };
             case_access := case_access.expr.Block.result[];
             case_access.expr.FieldAccess.name = name;  // (3)
-            if(is_ptr){
+            if is_ptr {
                 case_access = @{ @[case_access]& };
                 // :FuckedJunkPointerExpr
                 // the need for this (in addition to normal match) when self-compiling was added in "or syntax, remove tag bits, etc"
@@ -691,15 +683,11 @@ fn inline_match(container: FatExpr, target: FatExpr) FatExpr #macro = {
         };
         
         @match(stmt.stmt&) {
-            fn DeclFunc(f) => {
-                return(expand_case_body(f[]));
-            }
+            fn DeclFunc(f) => return(expand_case_body(f[]));
             fn Eval(handler_body) => {
                 @match(handler_body.expr&) {
-                    (fn Closure(closure) => {
-                        return(expand_case_body(closure[]));
-                    });
-                    (fn PrefixMacro(branch) => {
+                    fn Closure(closure) => return(expand_case_body(closure[]));
+                    fn PrefixMacro(branch) => {
                         macro := branch.handler;
                         @ct_assert(macro.expr&.is(.GetNamed), macro.loc, "expected @default (TODO: allow GetVar?)");
                         name := macro.expr.GetNamed; 
@@ -707,7 +695,7 @@ fn inline_match(container: FatExpr, target: FatExpr) FatExpr #macro = {
                         action := branch.target[];
                         @ct_assert(name == @symbol default, macro.loc, "unhandled prefix in @inline_match");
                         return(@{ @[action]() });
-                    });
+                    }
                     @default => {
                         debug_log_ast(handler_body[]);
                         compile_error("expected @default or a closure", handler_body.loc);
@@ -741,11 +729,10 @@ fn safety(kind: FatExpr, code: FatExpr) FatExpr #macro = {
 // TODO: see if thats still true with panic marked #cold and that pass enabled
 // For now this is a kinda cool that you can see #cold doing something, it moves this function to the end with the other things in jail like _OUTLINED_FUNCTION
 // i'm not convinced its measurably faster I just think it's neat. 
-fn safety_check_failed() Never #cold = {
-    panic("Safety Check Failed.")
-}
+fn safety_check_failed() Never #cold = 
+    panic("Safety Check Failed.");
 
-fn if_else(handlers: FatExpr) FatExpr #macro  = {
+fn if_else(handlers: FatExpr) FatExpr #macro = {
     @ct_assert(handlers.expr&.is(.Block), handlers.loc, "@if_else expected block"); // TODO: add this check to @match
     handlers := handlers.expr.Block.body.items();
     
@@ -786,9 +773,77 @@ fn if_else(handlers: FatExpr) FatExpr #macro  = {
 // TODO: use this in @match/@switch
 fn ident(self: *FatExpr) ?Symbol = {
     @match(self.expr&) {
-        fn GetVar(v) => (Some = v.name);
-        fn GetNamed(v)  => (Some = v[]);
-        fn String(v) => (Some = v[]);
+        fn GetVar(v)   => (Some = v.name);
+        fn GetNamed(v) => (Some = v[]);
+        fn String(v)   => (Some = v[]);
         @default => .None;
+    }
+}
+
+// build a bit mask to check if an enum(int) or tagged is in a comptime known set. 
+// if the options are sequential it uses <=&&=> instead.
+fn is(arg: FatExpr) FatExpr #macro #outputs(bool) = {
+    USAGE :: "expected @is(inspected, O1, O2, ..., On)";
+    @ct_assert(arg.expr&.is(.Tuple), arg.loc, USAGE);
+    opts := arg.expr.Tuple&.items();
+    @ct_assert(opts.len >= 2, arg.loc, USAGE);
+    
+    inspect  := compile_ast(opts[0]);
+    type     := inspect.ty;
+    
+    info := get_type_info_ref(type);
+    needs_deref := false;  // enum.raw doesn't want a pointer but tagged.tag does. 
+    @if_let(info) fn Ptr(it) => {
+        needs_deref = true;
+        type = it[];
+        info = get_type_info_ref(type);
+    };
+    @if_let(info) fn Tagged(it) => {
+        needs_deref = false;
+        type = it.tag;
+        inspect = @{ @[inspect].tag() };
+        info = get_type_info_ref(type);
+    };
+    if needs_deref {
+        inspect = @{ @[inspect][] };
+    };
+    @ct_assert(info.is(.Enum), arg.loc, "@is only works on @enum or @tagged");
+    @ct_assert(get_type_info_ref(info.Enum.raw).is(.Int), arg.loc, "@is requires integer as backing type");
+    if opts.len == 2 {
+        return(@{ @[inspect] == @[opts[1]]});
+    };
+    type_ast := @literal type;
+    
+    values := i64.list(opts.len - 1, temp());
+    count  := enum_count(type);
+    low    := count;
+    high   := -1;
+    for opts.slice(1, opts.len) { o | 
+        o   := const_eval(i64)(@{ (@as(@[type_ast])@[o]).raw().int() });  // :slow don't resolve these overloads every time
+        values&.add_unique(o);
+        high = high.max(o);
+        low  = low.min(o);
+    };
+    @ct_assert(values.len == opts.len - 1, arg.loc, "redundant entry in @is");
+    @ct_assert(low >= 0, arg.loc, "@is doesn't handle negative numbers");
+    if high - low == values.len - 1 {  // they're tightly packed
+        return(@{
+            k: i64 = @[inspect].raw().int();
+            k >= @[@literal low] && k <= @[@literal high]
+        });
+    };
+    @ct_assert(high - low < 64, arg.loc, "@is args do not fit in a 64-bit mask");
+    mask := 0;
+    for values { o | 
+        mask = mask.bit_or(1.shift_left(o - low));
+    };
+    // the problem is when value > high and value - low >= 64, then what if a bit of key>>8 collides with one in the mask.
+    // TODO: can detect that possiblility more precisely than this assert because we know the mask
+    @ct_assert(low > count - 64, arg.loc, "TODO: make sure the case where low is <64 is handled");
+    @{ 
+        key: i64 = @[inspect].raw().int() - @[@literal low];
+        k := 1.shift_left(key);
+        // if key<0 then key>>8 has a bunch of high bits set. else if key<64, then key>>8 is 0 and or-ing it will do nothing. 
+        bit_and(k, @[@literal mask]).bit_or(key.shift_right_arithmetic(8)) == k
     }
 }

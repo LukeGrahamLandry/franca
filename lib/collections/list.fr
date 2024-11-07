@@ -30,10 +30,8 @@ fn list($T: Type, cap: i64, a: Alloc) List(T) #generic = {
 
 fn List($T: Type) Type = {
     Self :: @struct(maybe_uninit: Slice(T), len: i64, gpa: Alloc);
-    fn list(cap: i64, gpa: Alloc) Self = { 
-        maybe_uninit := gpa.alloc(T, cap);
-        (maybe_uninit = maybe_uninit, len = 0, gpa = gpa)  // todo: no alloc if len 0 since i dont free
-    }
+    fn list(cap: i64, gpa: Alloc) Self #inline = 
+        (maybe_uninit = gpa.alloc(T, cap), len = 0, gpa = gpa);  // todo: no alloc if len 0 since i dont free
     fn list(gpa: Alloc) Self #inline = list(0, gpa);
     
     fn assume_owned(self: []T, by: Alloc) Self = 
@@ -73,25 +71,25 @@ fn List($T: Type) Type = {
         })
     }
     
-    fn items(self: *Self) Slice(T) = {
+    fn items(self: *Self) Slice(T) #inline = {
         self.maybe_uninit.slice(0, self.len)
     }
-    fn items(self: Self) Slice(T) = self&.items();
+    fn items(self: Self) Slice(T) #inline = self&.items();
     
     // A pointer to the first element of the list. 
     // SAFETY: dont use the pointer if the list is empty. invalidated by resize. 
     fn as_ptr(self: *Self) *T = self.maybe_uninit.ptr;
     
     #inline
-    fn index(self: *Self, i: i64) *T = {
+    fn index(self: *Self, i: i64) *T #inline = {
         @safety(.Bounds) i < self.len;
-        self.maybe_uninit.index(i)
+        self.maybe_uninit.index_unchecked(i)
     }
     
     // TODO: hack because auto deref doesn't work through function calls
-    fn index(self: Self, i: i64) *T = {
+    fn index(self: Self, i: i64) *T #inline = {
         @safety(.Bounds) i < self.len;
-        self.maybe_uninit.index(i)
+        self.maybe_uninit.index_unchecked(i)
     }
     
     fn len(self: Self) i64 #inline #fold = self.len;
@@ -100,7 +98,7 @@ fn List($T: Type) Type = {
     ::DeriveIndexable(Self, T);
     ::DeriveIndexable(*Self, T);
 
-    fn reserve(self: *Self, extra: i64) void = {
+    fn reserve(self: *Self, extra: i64) void #inline = {
         if self.maybe_uninit.len < self.len + extra {
             self.reserve_expand(extra);
         };
@@ -161,7 +159,7 @@ fn List($T: Type) Type = {
     }
     
     // just swap in the last thing so you don't have to shift all the later elements.
-    fn unordered_remove(self: *Self, index: i64) ?T = {
+    fn unordered_remove(self: *Self, index: i64) ?T #inline = {
         ::if(?T);
         if(index.ge(self.len), => .None) {
             out := self[index];
@@ -262,10 +260,10 @@ fn List($T: Type) Type = {
 fn RsVec($T: Type) Type = {
     Self :: @struct(cap: i64, ptr: *T, len: i64);
     
-    fn items(self: Self) Slice(T) = (ptr = self.ptr, len = self.len);
-    fn items(self: *Self) Slice(T) = (ptr = self.ptr, len = self.len);
+    fn items(self: Self) Slice(T) #inline = (ptr = self.ptr, len = self.len);
+    fn items(self: *Self) Slice(T) #inline = (ptr = self.ptr, len = self.len);
     // TODO: UNSAFE. needs to be allocated by rust if rust is going to free it. needs to follow rust aliasing rules. 
-    fn rs(self: List(T)) Self = {
+    fn rs(self: List(T)) Self #inline = {
         ::if(Self);
         if self.maybe_uninit.len == 0 {
             // "unsafe precondition(s) violated: slice::from_raw_parts requires the pointer to be aligned and non-null, and the total size of the slice not to exceed `isize::MAX`"
@@ -275,7 +273,7 @@ fn RsVec($T: Type) Type = {
         }
     }
     // TODO: name this assume_owned too? 
-    fn rs(self: Slice(T)) Self = {
+    fn rs(self: Slice(T)) Self #inline = {
         ::if(Self);
         if self.len == 0 {
             empty()
@@ -289,7 +287,7 @@ fn RsVec($T: Type) Type = {
         nonnull := T.ptr_from_int(T.size_of());
         (cap = 0, ptr = nonnull, len = 0)
     }
-    fn assume_owned(self: Self, by: Alloc) List(T) = (maybe_uninit = (ptr = self.ptr, len = self.cap), len = self.len, gpa = by);
+    fn assume_owned(self: Self, by: Alloc) List(T) #inline = (maybe_uninit = (ptr = self.ptr, len = self.cap), len = self.len, gpa = by);
     fn clear(self: *Self) void = {
         self.len = 0;
     }
@@ -297,8 +295,8 @@ fn RsVec($T: Type) Type = {
     fn len(self: Self) i64 #fold = self.len;
     fn len(self: *Self) i64 = self.len;
     
-    fn index(self: Self, i: i64) *T = self.items().index(i);
-    fn index(self: *Self, i: i64) *T = self[].items().index(i);
+    fn index(self: Self, i: i64) *T #inline = self.items().index(i);
+    fn index(self: *Self, i: i64) *T #inline = self[].items().index(i);
     
     ::DeriveIndexable(Self, T);
     ::DeriveIndexable(*Self, T);

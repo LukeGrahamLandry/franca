@@ -55,8 +55,7 @@ fn loadopt(f: *Qbe.Fn) void = {
     c: LoadCtx = (f = f, ilog = new(0, .PHeap), nlog = 0, inum = 0); c := c&;
     for_blocks f { b |
         for_insts_forward b { i |
-            if is_load(i.op()) {
-                size := size_of_load(i);
+            if maybe_load(i) { size |
                 sl: MSlice = (ref = i.arg&[0], off = 0, size = size, cls = i.cls());
                 l: Loc = (type = .LRoot, index_in_block = ptr_diff(b.ins, i).trunc(), blk = b);
                 @debug_assert(i.arg&[1] == QbeNull, "load pass runs after isel so my arm thingy wont mess with it");
@@ -463,19 +462,23 @@ fn killsl(c: *LoadCtx, r: Qbe.Ref, sl: MSlice) bool = {
 fn ones_mask_of_size(bytes: i32) u64 = (BIT(8*(bytes.intcast())-1)*2-1); /* must work when bytes==8 */
 
 fn size_of_store(i: *Qbe.Ins) i32 = {
-    @match(i.op()) {
+    i.maybe_store().expect("valid op for size_of_store")
+}
+
+fn maybe_store(i: *Qbe.Ins) ?i32 = {
+    (Some = @match(i.op()) {
         fn storeb() => 1;
         fn storeh() => 2;
         fn storew() => 4;
         fn stores() => 4;
         fn storel() => 8;
         fn stored() => 8;
-        @default => panic("invalid op for size_of_store");
-    }
+        @default => return(.None);
+    })
 }
 
-fn size_of_load(i: *Qbe.Ins) i32 = {
-    @match(i.op()) {
+fn maybe_load(i: *Qbe.Ins) ?i32 = {
+    (Some = @match(i.op()) {
         fn loadsb() => 1;
         fn loadub() => 1;
         fn loadsh() => 2;
@@ -483,6 +486,10 @@ fn size_of_load(i: *Qbe.Ins) i32 = {
         fn loadsw() => 4;
         fn loaduw() => 4;
         fn load() => if(i.cls().is_wide(), => 8, => 4);
-        @default => panic("invalid op for size_of_load");
-    }
+        @default => return(.None);
+    })
+}
+
+fn size_of_load(i: *Qbe.Ins) i32 = {
+    i.maybe_load().expect("valid op for size_of_load")
 }
