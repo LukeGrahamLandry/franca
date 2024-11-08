@@ -670,28 +670,65 @@ fn inst_jump(self: *EmitQbe2, always: BbId, args: Slice(EmitQbe2.Val)) void = {
     self.b&.end_block(self.current, (type = .Jjmp, target1 = (id = always.id + 1)));
 }
 
-fn inst_switch(self: *EmitQbe2, info: *RsVec(SwitchPayload), inspected: Qbe.Ref, uid: i64) void = {
-    cmp_op := Qbe.O.ceql;
-    if rtype(inspected) == .RTmp {
-        t := self.b.temporaries.index(inspected.val())[].cls;
+fn is_kw_tmp(self:  *EmitQbe2, r: Qbe.Ref) bool = {
+   if rtype(r) == .RTmp {
+        t := self.b.temporaries.index(r.val())[].cls;
         if t == .Kw {
-            cmp_op = .ceqw;
+            return(true);
         };
     };
+    false
+}
+
+fn inst_switch(self: *EmitQbe2, info: *RsVec(SwitchPayload), inspected: Qbe.Ref, uid: i64) void = {
+    cmp_op := @if(is_kw_tmp(self, inspected), Qbe.O.ceqw, Qbe.O.ceql);
     // :AllOurBlocksUpFront
     normal_branches, default := info.decode_switch();
+    default := default.expect("switch node has default");
+    if normal_branches.len > 4 {
+        sort :: quicksort(SwitchPayload, fn(a, b) => a.value > b.value);
+        sort(normal_branches);
+        binary_search_switch(self, normal_branches, inspected, default);
+        return();
+    };
+    linear_search_switch(self, normal_branches, inspected, default);
+    self.current.id = 999;
+}
+
+fn binary_search_switch(self: *EmitQbe2, cases: []SwitchPayload, inspected: Qbe.Ref, default: BbId) void = {
+    if cases.len < 3 {
+        linear_search_switch(self, cases, inspected, default);
+        return();
+    };
+    mid := cases.len/2;
+    high_block := self.b&.push_block();
+    low_block  := self.b&.push_block();
+    case := cases[mid];
+    
+    value := self.b&.push_literal(case.value);
+    cmp_op := @if(is_kw_tmp(self, inspected), Qbe.O.cslew, Qbe.O.cslel);
+    ok := self.b&.push_inst(self.current, cmp_op, .Kw, inspected, value);
+    self.b&.end_block(self.current, (type = .Jjnz, arg = ok, target1 = low_block, target2 = high_block));
+    
+    self.current = high_block;
+    binary_search_switch(self, cases.slice(0, mid), inspected, default);
+    
+    // include mid
+    self.current = low_block;
+    binary_search_switch(self, cases.slice(mid, cases.len), inspected, default);
+}
+
+fn linear_search_switch(self: *EmitQbe2, cases: []SwitchPayload, inspected: Qbe.Ref, default: BbId) void = {
+    cmp_op := @if(is_kw_tmp(self, inspected), Qbe.O.ceqw, Qbe.O.ceql);
     next_block := self.b&.push_block();
-    for normal_branches { case | 
+    for cases { case | 
         value := self.b&.push_literal(case.value);
         ok := self.b&.push_inst(self.current, cmp_op, .Kw, inspected, value);
         self.b&.end_block(self.current, (type = .Jjnz, arg = ok, target1 = (id = case.block.id + 1), target2 = next_block));
         self.current = next_block;
         next_block = self.b&.push_block();
     };
-    if default { default |
-        self.b&.end_block(self.current, (type = .Jjmp, target1 = (id = default.id + 1)));
-    };
-    self.current.id = 999;
+    self.b&.end_block(self.current, (type = .Jjmp, target1 = (id = default.id + 1)));
 }
 
 fn inst_return(self: *EmitQbe2, args: Slice(EmitQbe2.Val)) void = {

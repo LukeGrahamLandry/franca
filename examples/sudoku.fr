@@ -1,0 +1,267 @@
+//! stolen from https://norvig.com/sudoku.html
+//! they list several people's ports to other languages so I assume they're not offended by borrowing. 
+
+fn main() void = {
+    count := 0;
+    for cli_args() { s | 
+        s := s.str();
+        if s.len == 81 {
+            @assert(solve_print(s).is_some(), "unsolvable!");
+            count += 1;
+        };
+    };
+    @assert(count > 0, "pass sudokus as command line arguments (each is a 81 long string of numbers).\nHere's an example: %", grid1);
+    @println("ran % sudoku%", count, if(count == 1, => "", => "s")); // TODO: what's the plural of sudoku
+    exit(0);
+}
+
+fn search(values: *Grid) bool = {
+    """Using depth-first search and propagation, try all possible values.""";
+    
+    "Chose the unfilled square s with the fewest possibilities";
+    solved := true;
+    best_count := 10;
+    best_s := 0;
+    range(0, 81) { s |
+        l := len(values, s);
+        solved = solved && l == 1;
+        if l > 1 && l < best_count {
+            best_count = l;
+            best_s = s;
+        };
+    };
+    if(solved, => return(true));
+    for values[best_s] { d |
+        values2 := values[];
+        if assign(values2&, best_s, d) && search(values2&) {
+            values[] = values2;
+            return(true);
+        };
+    };
+    false
+}
+
+fn parse_grid(g: *Grid, s: Str) bool = {
+    @assert_eq(s.len, 81, "bad sudoku board");
+    enumerate g { i, c | 
+        c[] = 0b111111111;  // anything is possible
+    };
+    enumerate s { i, c | 
+        c: i64 = c[].zext();
+        d := c - "1".char();
+        if d >= 0 && d <= 8 { 
+            assign(g, i, d) || return(false);
+        };
+    };
+    true
+}
+
+fn assign(values: *Grid, s: i64, d: i64) bool = {
+    """Eliminate all the other values (except d) from values[s] and propagate.
+    Return False if a contradiction is detected.""";
+    for values.rest(s, d) { d2 |
+        eliminate(values, s, d2) || return(false);
+    };
+    true
+}
+
+fn eliminate(values: *Grid, s: i64, d: i64) bool = {
+    """Eliminate d from values[s]; propagate when values or places <= 2.
+    Return False if a contradiction is detected.""";
+    if(!values.has(s, d), => return(true)); "Already eliminated";
+    values[s] = values.rest(s, d);
+    
+    "(1) If a square s is reduced to one value d2, then eliminate d2 from the peers.";
+    @switch(len(values, s)) {
+        @case(0) => return(false); // "Contradiction: removed last value"
+        @case(1) => {
+            d2 := values[s].zext().trailing_zeros();
+            for_peers s { s2 |
+                eliminate(values, s2, d2) || return(false);
+            };
+        };
+        @default => ();
+    };
+    
+    "(2) If a unit u is reduced to only one place for a value d, then put it there.";
+    dplace := 0;
+    count := 0;
+    for_units s { 
+        count != 0 || return(false);  "Contradiction: no place for this value";
+        if count == 1 {
+            "d can only be in one place in unit; assign it there";
+            assign(values, dplace, d) || return(false);
+        };
+        count = 0;
+    } each_square { s | 
+        if values.has(s, d) {
+            dplace = s;
+            count += 1;
+        };
+    };
+    
+    true
+}
+
+fn solve(s: Str) Str = {
+    g := @uninitialized Grid;
+    parse_grid(g&, s);
+    search(g&);
+    out := u8.list(temp());
+    print_small(g&, out&);
+    out.items()
+}
+
+fn solve_print(s: Str) ?Str = {
+    g := @uninitialized Grid;
+    parse_grid(g&, s) || return(.None);
+    search(g&);
+    
+    out := u8.list(temp());
+    @fmt(out&, "%\n", s);
+    print_small(g&, out&) == 81 || return(.None);
+    out&.push_all("\n");
+    print_big(g&, out&);
+    println(out.items());
+    (Some = out.items().slice(out.len - 81, out.len))
+}
+
+// bit set board representation
+Grid :: Array(u16, 81);
+
+fn has(g: *Grid, s: i64, d: i64) bool = 
+    (@as(i64) g[s].zext()).bit_and(1.shift_left(d)) != 0;
+
+fn rest(g: *Grid, s: i64, d: i64) u16 = 
+    (@as(i64) g[s].zext()).bit_and(1.shift_left(d).bit_not()).trunc();
+
+fn len(g: *Grid, s: i64) i64 = 
+    g[s].count_ones();
+
+fn print_big(g: *Grid, out: *List(u8)) void = {
+    width := 0;
+    for g { s | 
+        width = max(width, s.count_ones());
+    };
+    width += 2;
+    
+    range(0, 81) { s |
+        w := g[s].count_ones();
+        pad := width - w;
+        push_rep(out, " ", pad / 2);
+        for g[s] { i |
+            out.push(@as(u8) trunc("1".char() + i));
+        };
+        push_rep(out, " ", pad / 2 + pad.bit_and(1));
+        if mod(s + 1, 3) == 0 {
+            out.push_all("|");
+            if mod(s + 1, 9) == 0 {
+                out.push_all("\n");
+                if mod((s + 1) / 9, 3) == 0 {
+                    w := 3 * (width);
+                    @fmt(out, "%+%+%-\n", f_rep("-", w), f_rep("-", w), f_rep("-", w)); 
+                };
+            };
+        };
+    };
+}
+
+fn print_small(g: *Grid, out: *List(u8)) i64 = {
+    count := 0;
+    range(0, 81) { s |
+        for g[s] { i |
+            out.push(@as(u8) trunc("1".char() + i));
+            count += 1;
+        };
+    };
+    count
+}
+
+fn for(opts: u16, $body: @Fn(i64) void) void = {
+    s: i64 = opts.zext();
+    if(s == 0, => return());
+    // TODO: benchmark if this is sparse enough for ctz to be worth it. can't be until i have an intrinsic for it. 
+    range(0, 9) { i | 
+        if s.bit_and(1.shift_left(i)) != 0 {
+            body(i);
+        };
+    };
+}
+
+// row, col, box
+fn for_peers(s: i64, $body: @Fn(i64) void) void = {
+    r, c := row_col(s);
+    
+    x := 0;
+    rr := r / 3 * 3;
+    cc := c / 3 * 3;
+    range(0, 3) { rrr | 
+        range(0, 3) { ccc | 
+            if(x != c, => body(square(r, x))); // -
+            if(x != r, => body(square(x, c))); // |
+            x += 1;
+            
+            cc := cc + ccc;
+            rr := rr + rrr;
+            if cc != c && rr != r {
+                body(square(rr, cc));
+            };
+        };
+    };
+}
+
+fn for_units(s: i64, $end_unit: @Fn() void, $body: @Fn(i64) void) void = {
+    r, c := row_col(s);
+    
+    range(0, 9, fn(x) => body(square(r, x)));
+    end_unit();
+    range(0, 9, fn(x) => body(square(x, c)));
+    end_unit();
+    
+    rr := r / 3 * 3;
+    cc := c / 3 * 3;
+    range(0, 3) { rrr | 
+        range(0, 3) { ccc | 
+            body(square(rr + rrr, cc + ccc));
+        };
+    };
+    end_unit();
+}
+
+fn row_col(s: i64) Ty(i64, i64) = {
+    c, r := s.div_mod(9);
+    (r, c)
+}
+
+fn square(r: i64, c: i64) i64 = 
+    c * 9 + r;
+    
+
+FmtRep :: @struct(s: Str, count: i64);
+fn f_rep(s: Str, count: i64) FmtRep = 
+    (s = s, count = count);
+
+fn display(self: FmtRep, out: *List(u8)) void = 
+    push_rep(out, self.s, self.count);
+
+fn push_rep(out: *List(u8), s: Str, count: i64) void = 
+    range(0, count) { _ |
+        out.push_all(s);
+    };
+
+fn count_ones(x: u16) i64 = 
+    (@as(u64) x.zext()).count_ones().zext();
+
+////////
+// tests
+
+grid1 :: "003020600900305001001806400008102900700000008006708200002609500800203009005010300";
+grid2 :: "4.....8.5.3..........7......2.....6.....8.4......1.......6.3.7.5..2.....1.4......";
+// i don't run this one because it takes a second
+// im 188 (qbe) or 605 (llvm) times faster than the guy in 2006 
+// that's a lot worse than the 4096x Moore's Law would suggest in 18 years :(
+hard1 :: ".....6....59.....82....8....45........3........6..3.54...325..6.................."; 
+:: {
+   assert_eq(solve(grid1), "483921657967345821251876493548132976729564138136798245372689514814253769695417382");
+   assert_eq(solve(grid2), "417369825632158947958724316825437169791586432346912758289643571573291684164875293");
+};

@@ -546,27 +546,35 @@ fn loadcon(self: *ArmState, c: *Qbe.Con, r: i64, k: Qbe.Cls, do_text: bool) void
         //n = (int32_t)n;
         n = n.bit_and(1.shift_left(32) - 1);
     };
-    
+   
+    // fast path for small positive
     if n.bit_and(0xffff) == n { 
         self.inst(movz(s, r, n.trunc(), .Left0));
         return();
     };
-    // TODO: some have better encoding
-    //if n.bit_or(0xffff) == -1 || arm64_logimm(n, k) {
-    //    fprintf(e.f, "\tmov\t%s, #%\n", rn, n);
-    //} else {
-        self.inst(movz(s, r, n.bit_and(0xffff).trunc(), .Left0));
-        shift_encode := 1;
+    // fast path for small negative
+    if n.bit_or(0xffff) == -1 { // high bits are all ones
+        self.inst(movn(s, r, n.bit_not().trunc(), .Left0));
+        return();
+    };
+    // TODO: qbe uses arm64_logimm to get more cases (but we need more instruction encoding logic for that).
+    // TODO: choose best instruction to start with movz/movn instead of assuming movz
+
+    // this uses movz for the first chunk and then movk for the rest. 
+    first := true;
+    for_enum Hw { shift_encode | 
+        part: u16 = n.bit_and(0xffff).trunc();
         n = n.shift_right_logical(16);
-        while => n != 0 {
-            part: u16 = n.bit_and(0xffff).trunc();
-            if part != 0 {
-                self.inst(movk(s, @as(u5) r, part, @as(Hw) shift_encode));
+        if part != 0 {
+            op := if first {
+                first = false;
+                movz(s, r, part, shift_encode)
+            } else {
+                movk(s, r, part, shift_encode)
             };
-            shift_encode += 1;
-            n = n.shift_right_logical(16);
+            self.inst(op);
         };
-    //};
+    };
 }
 
 fn fixarg(self: *ArmState, pr: *Qbe.Ref, sz: i64) void = {
@@ -895,7 +903,7 @@ fn emitins2(self: *ArmState, i: *Qbe.Ins) void = {
         @debug_assert_eq(offset.bit_and(1.shift_left(12) - 1), offset, "can't encode offset");
         // TODO: u/s h/b
         if i.cls().is_int() { // TODO: is this wrong?
-            s := firstbit(size.zext().bitcast());
+            s := trailing_zeros(size.zext().bitcast());
             si_inv := @if(i.cls().is_wide(), Bits.W32, Bits.X64);
             @match(i.op()) {
                 fn loadsw() => {
@@ -938,7 +946,7 @@ fn emitins2(self: *ArmState, i: *Qbe.Ins) void = {
             self.inst(f_str_uo(Bits.X64, @as(u5) i.arg&[0].float_reg(), addr, @as(u12) offset));
             return();
         };
-        s := firstbit(size.zext().bitcast());
+        s := trailing_zeros(size.zext().bitcast());
         self.inst(@bits(@as(u2) s, 0b11100100, @as(u12) offset, @as(u5) addr, @as(u5) i.arg&[0].int_reg()));
         return();
     };
