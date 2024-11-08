@@ -8,6 +8,7 @@ ArenaAlloc :: @struct(
 
 ArenaHeader :: @rec @struct(
     size: i64,
+    used := 0, // for debugging but should use in arena_owns as well for more precision. probably worth the 8 bytes, especially since we're wasting 16 on tags anyway. 
     prev: ?*ArenaHeader,
     next: ?*ArenaHeader,
 );
@@ -104,6 +105,7 @@ arena_alloc :: fn(raw_self: rawptr, size: i64, log_align: i64) rawptr = {
     };
     
     if(chunk.next) {(next) void|
+        chunk.used = self.start;
         self.chunk = (Some = next);
         self.start = ArenaHeader.size_of();
         self.end = next.size;
@@ -137,7 +139,39 @@ fn reset_retaining_capacity(self: *ArenaAlloc, mark: ArenaMarker) void = {
     self.start = mark.start;
     self.end = chunk.size;
     self.chunk = (Some = chunk);
+    chunk.used = self.start;
 }
+
+// set all the memory after a mark to 0xABABABA in the hopes of crashing you if you try to use it accidentally.
+// you can call this at the top of reset_retaining_capacity to reveal use-after-reset bugs more quickly,
+// at the cost of some performance. this should not change the behaviour of correct programs. 
+fn debug_stomp_after(self: *ArenaAlloc, mark: ArenaMarker) void = {
+    JUNK :: 0xAB;
+    stomp_all :: fn(chunk) => stomp_some(chunk, ArenaHeader.size_of());
+    stomp_some :: fn(chunk, clear_after) => {
+        clear_after = max(clear_after, ArenaHeader.size_of());
+        if chunk.used > clear_after {
+            memset(ArenaHeader.raw_from_ptr(chunk).offset(clear_after), JUNK, chunk.used - clear_after);
+            chunk.used = clear_after;
+        };
+    };
+    if mark.chunk { chunk | 
+        ::ptr_utils(ArenaHeader);
+        if chunk.identical(self.chunk.unwrap()) {
+            chunk.used = self.start;
+        };
+        stomp_some(chunk, mark.start);
+        while => chunk.next { c | 
+            chunk = c;
+            stomp_all(chunk);
+        };
+    } else {
+        if self.chunk { chunk | 
+            chunk.used = self.start;
+            stomp_all(chunk);
+        };
+    }
+};
 
 // # Safety: This invalidates all allocations in self!
 // Memory is NOT returned to the backing allocator. 
@@ -145,10 +179,12 @@ fn reset_retaining_capacity(self: *ArenaAlloc) void = {
     if self.chunk { chunk |
         while => chunk.prev { c | 
             chunk = c;
+            chunk.used = ArenaHeader.size_of();
         };
         self.start = ArenaHeader.size_of();
         self.end = chunk.size;
         self.chunk = (Some = chunk);
+        chunk.used = self.start;
     }
 }
 
@@ -214,6 +250,20 @@ fn current_allocated_size(self: *ArenaAlloc) i64 = {
             chunk = chunk.next.unwrap();
         };
         size += chunk.size;
+    };
+    size
+}
+
+// doesn't count those after the current chunk (that were allocated before the last reset).
+fn current_used_size(self: *ArenaAlloc) i64 = {
+    size := 0;
+    if self.chunk { chunk |
+        size += self.start;
+        while => chunk.prev.is_some() {
+            chunk = chunk.prev.unwrap();
+            size += chunk.used;
+        };
+        size += chunk.used;
     };
     size
 }

@@ -40,12 +40,8 @@ DO_INLINING :: true; // TODO: make this a runtime toggle so you can make sure yo
 // TODO: :Explain :UnacceptablePanic :SketchyIterTargets :TodoPort :SketchPlatformRegister :nullable
 //       :MakeATestThatFails places where i don't know why qbe did something and all my current tests work if you change it. 
 //                           so try to make a test case that requires qbe's behaviour or remove the extra code. 
-//       :HardcodeAlloc i think it can just always be an arena reset after function and then when want to keep around for inlining, 
-//                      need to do a copy anyway and that can be in a seperate allocator. 
-//                      so i want to bother with resetting temp between passes or just say fuck it you should ahve enough memory to compile one function all at once? 
+//       :HardcodeAlloc 
 //       :force_dep_on_memmove_hack
-// TODO: I leak hella memory because i dont do equivilent of qbe's freeall. 
-//       waiting until don't need to ever link thier c code before switching to my allocators.
 // TODO: fix tests/broken/todo.fr
 // TODO: the trick of having a `BitSet w[1]` so it auto decays to a pointer is cute. it's kinda a shame i can't do that. 
 // TODO: fix panic on overflow block name in rega
@@ -81,7 +77,7 @@ QbeModule :: @rec @struct(
     // These we need to track but Qbe doesn't use internally. 
     number_of_types := 0, // ntyp. only used by parser
     debug_out: *FILE,
-    namel := QbeName.ptr_from_int(0), // for reusing memory in opt/ssa.fr between functions. no information shared.
+    namel := QbeName.ptr_from_int(0), // TODO: this is just lazy, should manually pass it around now that im using temp() and resetting between functions. 
     next_tmp_id = 1,
     symbols: []SymbolBucket,
     
@@ -125,7 +121,7 @@ fn making_macho(m: *QbeModule) bool =
 MAX_GOT_SIZE :: 1.shift_left(13); // 15 :dontforget
 SIZE_OF_STUBS :: 1.shift_left(10); // TODO: not this :explain
 COMMANDS_SIZE_GUESS :: macos_page_size; // :explain
-MAX_TLS_VARS_SIZE :: macos_page_size;
+MAX_TLS_VARS_SIZE   :: macos_page_size;
 MAX_TLS_INIT_SIZE   :: macos_page_size;
 
 fn init_default_module(goal: QbeTargetEnv) QbeModule = 
@@ -141,7 +137,15 @@ fn init_default_module(goal: QbeTargetEnv) QbeModule =
     };
 };
 
+// the allocators need to not be temp() because we reset temp()
 fn init(segment_size: i64, gpa: Alloc, code_alloc: Alloc, goal: QbeTargetEnv) QbeModule = {
+    // this wont help if you use an allocator derived from temp indirectly but its better than nothing. 
+    @assert(
+        int_from_rawptr(gpa.data) != ArenaAlloc.int_from_ptr(__temp_alloc) &&
+        int_from_rawptr(code_alloc.data) != ArenaAlloc.int_from_ptr(__temp_alloc),
+        "don't use temp() as backend allocator"
+    );
+    
     m := QbeModule.zeroed();
     m.forever = init(gpa, size_of(Qbe.Ins) * 1.shift_left(20) + size_of(SymbolBucket) * IMask + 1.shift_left(10));
     forever := m.forever&.borrow();
@@ -212,7 +216,7 @@ fn init(segment_size: i64, gpa: Alloc, code_alloc: Alloc, goal: QbeTargetEnv) Qb
     if m.goal.arch == .aarch64 {
         m.target.fill_target_info(.arm64_apple);
     };
-    m.types[] = new(0, Qbe.Pool.PHeap); // TODO: check the magic in QbeBuilder.init to make sure you remember to do this. 
+    m.types[] = new(0, Qbe.Pool.PLong); // TODO: check the magic in QbeBuilder.init to make sure you remember to do this. 
     m.curi[] = m.insb.index_unchecked(Qbe.MaxInstructions);
     m
 }
@@ -328,6 +332,5 @@ run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
     __temp_alloc.reset_retaining_capacity(mark);
 };
 ::[]u64;
-
 
 // all computers know these days is fill memory and branch

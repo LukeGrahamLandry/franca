@@ -3,6 +3,7 @@
 // Also this always calls through the vtable because I want you to be able to load this in your driver and write your own backends.
 // So it shouldn't directly access compiler internals. See examples/qbe.fr + examples/default_driver.fr for usage. 
 
+// IMPORTANT: your setup+inst+finished run inside a temp allocator reset after each function. 
 // TODO: traits
 /*
 Backend :: @trait fn($B: Type) = {
@@ -57,16 +58,16 @@ fn CodeGen($B: Type) Type = {
     
     // :TooManyArgsX64
     emit_program :: fn(comp: CompCtx, fns: [] FuncId, entry: ProgramEntry, target: *TargetEnv) BucketArray(u8) = {
-        alloc := todo_allocator; // TODO!
+        alloc := libc_allocator; // TODO!
         gen: Self = (
             program = comp,
             body = zeroed(*FnBody), // EVIL
-            vars = list(20, temp()),
-            stack = list(20, temp()),
-            pending = fns.clone(temp()),
+            vars = list(temp()),
+            stack = list(temp()),
+            pending = fns.clone(libc_allocator),
             backend = new(comp, alloc, target.arch, target.os),
         );
-        work_stack := FuncId.list(libc_allocator);
+        work_stack := FuncId.list(temp());
         work_stack&.push_all(fns);
         emitted_functions := 0;
         while(=> work_stack.len.ne(0)){
@@ -110,7 +111,6 @@ fn CodeGen($B: Type) Type = {
                 body = FnBody.ptr_from_int(b);
             };
             
-            
             if body.func != fid {
                 // We just noticed its a duplicate.
                 //work_stack&.push(body.func);
@@ -144,7 +144,7 @@ fn CodeGen($B: Type) Type = {
             {comp.vtable.report_aot_progress}(comp.data, fid, false);
             current := work_stack&.pop().unwrap();
             @assert_eq(current, fid, "order messed up");
-            gen.funcs_done&.set(fid.to_index().zext(), temp());
+            gen.funcs_done&.set(fid.to_index().zext(), alloc);
             for func.mutual_callees { c |
                 if !gen.funcs_done&.get(c.to_index().zext()) && !work_stack.items().contains(c&)  {
                     work_stack&.push(c);
@@ -174,18 +174,23 @@ fn CodeGen($B: Type) Type = {
         
         gen&.emit_entry_points_and_debug_info(comp, fns, entry); // note: qbe hack needs this to be last
        
+        gen.constants_needed&.drop();
+        gen.funcs_done&.drop();
+        gen.pending&.drop();
         // TODO: if alloc != temp { temp.reset(mark ? no but that wouldn't catch if they derived a new one from temp
         gen.backend.out
     };
    
     fn emit_current_function(self: *Self) void = {
+        mark := __temp_alloc.mark();
         s := self.body.blocks.items();
+        self.vars = list(temp());
+        self.stack = list(temp());
+        self.blocks_done = empty();
         self.backend&.setup(self.body, self.vars&);
         self.walk_block((id = 0));
         self.backend&.finished(self.body.func);
-        self.vars&.clear();
-        self.stack&.clear();
-        self.blocks_done&.clear();
+        __temp_alloc.reset_retaining_capacity(mark);
     }
     
     fn walk_block(self: *Self, b: BbId) void = {
@@ -386,7 +391,7 @@ fn CodeGen($B: Type) Type = {
         index: i64 = id.id.zext();
         if(self.constants_needed&.get(index), => return());
         
-        self.constants_needed&.set(index, temp());
+        self.constants_needed&.set(index, libc_allocator);
         self.max_const_id = self.max_const_id.max(index);
         value := {self.program.vtable.get_baked}(self.program.data, id)[]._1&;
         
