@@ -49,22 +49,26 @@ fn emit_func_arm64(m: *QbeModule, f: *Qbe.Fn, text: *FILE) void = {
     // :FuncSizeLimit 
     // b.cond gives you 19 bits, but encoded/4, but signed so that's 20 bits.  
     // you can remove this limit on the function but then have to add the check when emitting each branch. 
-    @assert_lt(code_bytes.len, 1.shift_left(20), "we don't allow a function larger than one instruction can jump");  
+    @assert_lt(code_bytes.len, 1.shift_left(20), "we don't allow a function larger than one instruction can jump");
+    maybe_llvm_dis(f, code_bytes, "--arch=aarch64");
+}
+
+fn maybe_llvm_dis(f: *Qbe.Fn, code_bytes: []u8, arch_name: Str) void = {
     if f.globals.debug["D".char()] {
-        write(self.f.globals.debug_out, items(@format("# disassembly of '%' (% bytes)\n", name, code_bytes.len) temp()));
+        @fmt_write(f.globals.debug_out, "# disassembly of '%' (% bytes)\n", f.name(), code_bytes.len);
         asm := code_bytes;
         hex: List(u8) = list(asm.len * 5, temp());
         for asm { byte |
             hex&.push_prefixed_hex_byte(byte);
             hex&.push_all(" ");
         };
-        arch := "--arch=aarch64";
         out := open_temp_file();
         out.fd&.write(hex.items());
+        DIS :: "llvm-mc";
         // TODO: have the caller pass in anything like this, 
         //       but this is just for debugging the compiler so its not a big deal. :driver_io
         // varient 1 means intel syntax. ignored when doing arm. 
-        success := run_cmd_blocking("llvm-mc", @slice(arch, "--disassemble", "-output-asm-variant=1", "--show-encoding", out&.s_name()));
+        success := run_cmd_blocking(DIS, @slice(arch_name, "--disassemble", "-output-asm-variant=1", "--show-encoding", out&.s_name()));
         if(!success, => eprintln("ICE(debugging): couldn't disassemble"));
         out.remove();
     };
@@ -75,39 +79,10 @@ fn segment_address(self: *QbeModule, segment: SegmentType, offset_in_segment: i6
     data.mmapped.ptr.offset(offset_in_segment)
 }
 
-// TODO: when doing aot we just have to ask for our segments to have the same spacing as they did now and then relative addressing will just work out. 
-//       but for data constants with pointers we'll need to remember what relocations to ask the loader to do at runtime. 
-//       would be great if my language had nice relative pointers and then you wouldn't have to deal with that as much
-//
-fn do_jit_fixups(self: *QbeModule, id: u32, segment: SegmentType, final_offset: i64) void = {
-    @assert(final_offset >= 0 && final_offset < self.segments&[segment].mmapped.len, "thats not in the segment");
-    symbol := self.get_symbol_info(id);
-    @assert(symbol.kind != .Local, "Redeclared symbol %", symbol.name);
-    symbol.segment = segment;
-    symbol.offset = final_offset;
-    symbol.kind = .Local;
-    dest := self.segment_address(symbol.segment, symbol.offset);
-    fixups := symbol.fixups&;
-    self.do_fixups(dest, symbol);
-    if self.goal.type == .Exe { //  || symbol.segment == .Code // :canireallynothavecodeberelative
-        // Since it's a local symbol, we don't care about the relocations anymore. The linker never needs to know. 
-        // TODO: actually thats also true for imports becuase calls go through __got. 
-        unordered_retain(fixups, fn(it) => it.type&.is(.DataAbsolute));
-        if(fixups.len == 0, => fixups.drop(self.gpa));
-    } else {
-        // you still care because the static linker wants to move things around. :track_got_reloc
-        if !symbol.local_but_marked_for_relocation {
-            self.local_needs_reloc&.push(id);
-            symbol.local_but_marked_for_relocation = true;
-        };
-    }; 
-}
-::tagged(FixupType);
 
-fn do_fixups(self: *QbeModule, address: *u8, symbol: *SymbolInfo) void = {
+fn do_fixups_arm64(self: *QbeModule, address: *u8, symbol: *SymbolInfo) void = {
     fixups := symbol.fixups.items();
     local := symbol.kind == .Local;
-    assert(!self.fixups_locked, "you cannot add more fixups after emitting for aot");
     new_got_reloc: ?Fixup = .None;
     each fixups { fixup | 
         @match(fixup.type) {
@@ -197,6 +172,8 @@ tried_to_call_uncompiled :: @as(rawptr) fn() void = {
     @panic("TODO: backend jitted code tried to call uncompiled function");
 };
 
+Patch :: @struct(offset_from_start: i64, cond: ?i64, target_bid: i64, text_offset := 0);
+
 fn emit_the_code(self: *ArmState) void #once = {
     // TODO: what is this? is it the control flow integrety shit? 
     // ("\thint\t#34\n");
@@ -226,7 +203,6 @@ fn emit_the_code(self: *ArmState) void #once = {
     
     // TODO: make sure b.id is sequential
     local_labels := temp().alloc_zeroed(i64, self.f.nblk.zext());
-    Patch :: @struct(offset_from_start: i64, cond: ?Cond, target_bid: i64, text_offset: i64);
     patches: List(Patch) = list(temp());
     
     branch :: b;
@@ -287,15 +263,15 @@ fn emit_the_code(self: *ArmState) void #once = {
                     // we jump to s2 when condition c is true, so flip the condition. 
                     c = cmpneg(c);
                 };
-                cond := arm_condition_codes[c.zext()];
                 here := self.next_inst_offset();
                 target := local_labels[b.s2.id.zext()];
                 if target != 0 {
+                    cond := arm_condition_codes[c.zext()];
                     distance := (target - here) / 4;
                     self.inst(b_cond(s_trunc(distance, 19), cond));   // :FuncSizeLimit
                 } else {
                     // we haven't made this block yet.
-                    patches&.push(offset_from_start = here, cond = (Some = cond), target_bid = b.s2.id.zext(), text_offset = self.buf.len);
+                    patches&.push(offset_from_start = here, cond = (Some = c.zext()), target_bid = b.s2.id.zext(), text_offset = self.buf.len);
                     self.inst(brk(0xabba)); // so the offsets for the below work out
                     @if(self.m.want_text_asm) @fmt(self.buf&, "             "); // :TempAsmText HACK
                 };
@@ -327,6 +303,7 @@ fn emit_the_code(self: *ArmState) void #once = {
         patch := ptr_cast_unchecked(u8, u32, patch);
         @debug_assert_eq(brk(0xabba), patch[], "not expecting patch");
         if p.cond { cc | 
+            cc := arm_condition_codes[cc];
             patch[] = b_cond(s_trunc(distance, 19), cc);  // :FuncSizeLimit
         } else {
             patch[] = branch(s_trunc(distance, 26), 0);   // :FuncSizeLimit

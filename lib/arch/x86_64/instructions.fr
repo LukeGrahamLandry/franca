@@ -1,5 +1,53 @@
 //! https://wiki.osdev.org/X86-64_Instruction_Encoding
-//! http://ref.x86asm.net/coder64.html
+//! http://ref.x86asm.net/coder64.html     (ref)
+//! https://www.felixcloutier.com/x86/     (fel)
+
+/*
+
+an instruction has several slots for information:
+[prefixes] [mandatory prefix] [REX byte] [opcode] [modR/M byte] [SIB byte] [displacement] [immediate] 
+not all instructions will have all those parts (and some are just opcode).
+
+opcode (ref[po]) selects the instruction. [byte] or [0x0F] [byte]          (some are 3 byte but i dont need them yet)
+sometimes the same opcode has multiple meanings
+    - opcode extension (ref[o]) stored in reg field of modR/M.
+       ref[o] can be 0-7 or r means it encodes a register. fel notation is /0, /1, etc or /r
+    - mandetory prefix (ref[pf]) 
+sometimes operand register is stored in the opcode number, (like pop is 50+r with r being register number 0-7).
+    with extension bit in REX to encode the high 8 registers (TODO: which bits of rex? all?).
+for ones with a condition code thats often in the opcode number as well. (like 70+X86cc for jump short). 
+
+An instruction can have zero or one arguments that reference memory (perhaps using SIB encoding). 
+The opcode decides which arg is memory. (ie. 0x29 is sub with memory on the left and 0x2B has memory on the right).
+- since every instruction is a load or a store, you suddenly care about the difference between operand sizes more than on arm. 
+  like 32 bit and 64 bit or are not interchangeable because they stomp different amounts of memory. 
+- most instructions are 2-address where the left input is also the output.
+
+modR/M has 3 fields: mod:2, reg:3, rm:3.
+the meanings of the fields change based on mod and rm. see fn table_modrm.
+- mod=00,rm=BP/R13 means RIP+displacement.                                                             <-| note: these both leave reg free
+- mod!=11,rm=SP/R12 means use the SIB byte. with difference sizes of displacement depending on mod.    <-| as another argument (or op ext).
+- mod=11 tends to mean direct use of the registers and the others mean indirect: one arg is in memory
+note: you can never have 4 registers encoded because you have to waste a slot to enable SIB. 
+
+SIB has 3 fields: scale:2, index:3, base:3
+again, the meanings change based on mod, index, and base. see fn table_sib.
+but they're all computing an address (maybe base) + (maybe index * decoded scale) + (maybe displacement)
+
+some observations:
+- LEA instruction is special because it lets you materialize the value computed by the convoluted SIB encoding instead of dereferencing it. 
+- The modrm+sib combination chooses the size of the [displacement] slot (none/8/16/32 bytes).
+- modR/M + SIB is mostly orthogonal to opcode (except for the extension in reg). 
+
+REX byte has 4 fields: 0b0100, W:1, R:1, X:1, B:1
+W changes the operand size of some instructions. fel has `REX.W` in the opcode column.
+The others are extensions to change 3 bit fields to 4 bit. (R=reg, X=index, B=rm or base).
+- note that when you select sib, the 0 and 1 extended rm mean the same thing so you don't need B for that and its used for base instead. 
+
+The important take away is that you can't just encode whatever registers you want, because some are magic placeholders 
+that change the meaning of the fields, so you can't express all combinations of registers used + meanings. 
+
+*/
 
 PrimaryOp :: @enum(u8) (
     AddReg = 0x01,
@@ -8,7 +56,7 @@ PrimaryOp :: @enum(u8) (
     SubReg = 0x29,
     XorReg = 0x31,
     CmpReg = 0x39,
-    AddImm32 = 0x81, // opcode extension 0 (i think) 
+    AddImm32 = 0x81, // opcode extension (0 = add, 5 = sub) 
     MovReg = 0x89, // also store. 
     MovRegLoad = 0x8b, // flip 
     Ret = 0xc3,  // pop return address from the stack and then jump there. 
@@ -27,6 +75,9 @@ PrimaryOp :: @enum(u8) (
     MovByteLoad = 0x8A,
     SignExtendAxToDxAx = 0x99,  // cqo
     ShiftBase = 0xd3,
+    Leave = 0xc9, // mov RSP, RBP; pop RBP; 
+    // Load Effective Address: do the computation for a memory argument but don't dereference it. 
+    Lea = 0x8d,
 );
 
 // (AddReg, OrReg, AndReg, SubReg, XorReg, CmpReg, MovReg)
@@ -142,7 +193,7 @@ fn table_sib(mode: ModrmMode, index: X86Reg, base: X86Reg) SibMeaning #fold = {
 
 ModrmMode :: @enum(u2) (
     Indirect00 = 0b00, // one operand is an address
-    Indirect01 = 0b10,
+    Indirect01 = 0b01,
     Indirect10 = 0b10,
     Direct     = 0b11, // both operands are register values
 ); ::enum(ModrmMode);
@@ -246,6 +297,7 @@ fn encode_cmp_imm32(code: *List(u8), r: X86Reg, value: i64) void = {
 }
 
 // TODO: extension should be u3? is it allowed to be extended by rex? 
+/// when the table says `F7 /2` they mean `encode_extended_op(opcode = 0xF7, extension = 2)`
 fn encode_extended_op(code: *List(u8), mode: ModrmMode, opcode: u8, extension: u4, reg: X86Reg) void = {
     opcode_extension := @as(X86Reg) extension;
     code.push(pack_rex(reg, opcode_extension));

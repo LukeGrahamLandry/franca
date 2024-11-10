@@ -23,6 +23,9 @@
 #include_std("backend/opt/mem.fr");
 #include_std("backend/opt/minimal.fr");
 #include_std("backend/opt/fold.fr");
+#include_std("backend/amd64/target.fr");
+#include_std("backend/amd64/emit.fr");
+#include_std("backend/amd64/sysv.fr");
 
 ENABLE_INTERNAL_QBE :: true;  // until i want to enable it on github actions
 DO_INLINING :: true; // TODO: make this a runtime toggle so you can make sure you're actually testing calls
@@ -207,14 +210,25 @@ fn init(segment_size: i64, gpa: Alloc, code_alloc: Alloc, goal: QbeTargetEnv) Qb
         m.curi   = forever.box(@type m.curi[]); // TODO: megadumb if its the page allocaotr
         m.debug  = forever.box_zeroed(@type m.debug[]);
         m.target = forever.box(@type m.target[]);
+        
+        if m.goal.arch == .x86_64 {
+            panic("TODO: x86_64 without LINK_QBE_C");
+        };
     });
     //m.debug[Qbe.DebugKey.Memory.raw()] = true;
     //m.debug[Qbe.DebugKey.RegAlloc.raw()] = true;
     //m.debug[Qbe.DebugKey.Parsing.raw()] = true;
     //m.debug[Qbe.DebugKey.Abi.raw()] = true;
     //m.debug[Qbe.DebugKey.InstSelect.raw()] = true;
+    // TODO: ask for linux abi
     if m.goal.arch == .aarch64 {
         m.target.fill_target_info(.arm64_apple);
+    } else {
+        prev := m.target.emitfn;
+        m.target.fill_target_info(.amd64_apple);
+        if m.goal.type == .AsmText {
+            m.target.emitfn = prev;
+        };
     };
     m.types[] = new(0, Qbe.Pool.PLong); // TODO: check the magic in QbeBuilder.init to make sure you remember to do this. 
     m.curi[] = m.insb.index_unchecked(Qbe.MaxInstructions);
@@ -239,8 +253,13 @@ fn drop(m: *QbeModule, slowly_free_from_gpa: bool) void = {
 }
 
 fn fill_target_info(t: *Qbe.Target, target: Qbe.TargetAbi) void = {
-    @assert_eq(target, .arm64_apple, "TODO: support other abis");
-    t.fill_target_arm(true);
+    apple := @is(target, .arm64_apple, .amd64_apple);
+    arm := @is(target, .arm64_apple, .arm64);
+    if arm {
+        t.fill_target_arm(apple);
+    } else {
+        t.fill_target_amd(apple);
+    }
 }
 
 fn get_qbe_dylib_variable($T: Type, $name: Str) *T #generic = {

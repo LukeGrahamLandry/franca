@@ -344,3 +344,43 @@ fn fill_from_libc(self: *QbeModule) void = {
         };
     };
 }
+
+// TODO: when doing aot we just have to ask for our segments to have the same spacing as they did now and then relative addressing will just work out. 
+//       but for data constants with pointers we'll need to remember what relocations to ask the loader to do at runtime. 
+//       would be great if my language had nice relative pointers and then you wouldn't have to deal with that as much
+//
+fn do_jit_fixups(self: *QbeModule, id: u32, segment: SegmentType, final_offset: i64) void = {
+    @assert(final_offset >= 0 && final_offset < self.segments&[segment].mmapped.len, "thats not in the segment");
+    symbol := self.get_symbol_info(id);
+    @assert(symbol.kind != .Local, "Redeclared symbol %", symbol.name);
+    symbol.segment = segment;
+    symbol.offset = final_offset;
+    symbol.kind = .Local;
+    dest := self.segment_address(symbol.segment, symbol.offset);
+    fixups := symbol.fixups&;
+    self.do_fixups(dest, symbol);
+    if self.goal.type == .Exe { //  || symbol.segment == .Code // :canireallynothavecodeberelative
+        // Since it's a local symbol, we don't care about the relocations anymore. The linker never needs to know. 
+        // TODO: actually thats also true for imports becuase calls go through __got. 
+        unordered_retain(fixups, fn(it) => it.type&.is(.DataAbsolute));
+        if(fixups.len == 0, => fixups.drop(self.gpa));
+    } else {
+        // you still care because the static linker wants to move things around. :track_got_reloc
+        if !symbol.local_but_marked_for_relocation {
+            self.local_needs_reloc&.push(id);
+            symbol.local_but_marked_for_relocation = true;
+        };
+    }; 
+}
+::tagged(FixupType);
+
+// TODO: stick this in the target vtable 
+fn do_fixups(self: *QbeModule, address: *u8, symbol: *SymbolInfo) void = {
+    assert(!self.fixups_locked, "you cannot add more fixups after emitting for aot");
+    
+    @match(self.goal.arch) {
+        fn aarch64() => do_fixups_arm64(self, address, symbol);
+        fn x86_64()  => do_fixups_amd64(self, address, symbol);
+        fn wasm32() => unreachable();
+    }
+}

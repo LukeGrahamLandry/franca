@@ -1,3 +1,5 @@
+- spent so long on typoing `Indirect01 = 0b10`
+
 ## peaceful cleanup (Nov 6)
 
 a little strange that these generate different code.
