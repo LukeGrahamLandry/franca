@@ -52,6 +52,8 @@ there must be proportional terrible things or I'm probably just lying.
 - Sadly I don't have incremental builds. every time you run a program, you recompile the standard library for comptime. (...but its so fast it doesn't matter yet).
 - Sadly my implementation of the C ABI is buggy. It's good enough for the example programs tho.
   - arm: obvious problems are passing struct(u32, u32) in 2 registers instead of 1 and passing struct(f64, f64, f64, f64) in memory instead of 4 registers.
+  - x64: i don't pass structs in xmm registers
+  - (this will be fixed when the new backend is ready)
 - Sadly I don't have a nice debug mode that detects undefined behaviour (overflow, wrong tagged field, etc).
 - Sadly I don't have good modules / namespace management.
 - I've only tried arm/x64 macos and x64 linux. Only arm mac works fully but all three can build the self hosted compiler.
@@ -59,5 +61,6 @@ there must be proportional terrible things or I'm probably just lying.
   Like sometimes it reparses and re-resolves names for each specialization of a generic.
   There just happens to only be ~25k lines of code ever written in this langauge so its not a big deal yet.
   See examples/60fps.fr judging its performace.
-- I can't emit my own macho/elf files and i don't have my own linker.
-  You need to have clang if you want AOT.
+- I can't emit my own elf files and i don't have my own linker.
+  You need to have clang if you want AOT builds that interface with other languages.
+  (however, franca only mach-o arm works and x64 is wip)

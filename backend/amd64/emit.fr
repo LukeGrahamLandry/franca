@@ -14,9 +14,11 @@ AmdState :: @struct(
     last_saved_offset := 0,
 );
 
-fn emit_func_amd64(m: *QbeModule, f: *Qbe.Fn, file: *FILE) void = {
+// TODO: something here fails a safety check at comptime :FUCKED
 
+fn emit_func_amd64(m: *QbeModule, f: *Qbe.Fn, file: *FILE) void = {
     @debug_assert_eq(m.goal.arch, .x86_64, "how did we get here?");
+    @debug_assert(m.goal.type != .AsmText, "how did we get here?");
     code := m.segments&[.Code]&;
     name_id := m.intern(@as(CStr) (ptr = f.name&.as_ptr()));
     maybe_add_export(m, name_id, f.lnk.export);
@@ -40,20 +42,28 @@ fn do_fixups_amd64(self: *QbeModule, address: *u8, symbol: *SymbolInfo) void = {
     new_got_reloc: ?Fixup = .None;
     each fixups { fixup | 
         @match(fixup.type) {
-            fn Call() => {
-               panic("TODO: amd64 fixup call");
-            }
-            fn InReg(it) => {
-               panic("TODO: amd64 reg call");
-            }
             fn DataAbsolute() => {
                 reloc := ptr_cast_unchecked(u8, *u8, fixup.patch_at);
                 reloc[] = address;
             }
+            fn RipDisp32() => {
+                if local {
+                    distance := ptr_diff(fixup.patch_at, address);
+                    @assert_lt(distance.abs(), MAX_i32, "can't reference that far");
+                    ptr_cast_unchecked(u8, u32, fixup.patch_at)[] = distance.trunc();
+                } else {
+                    if self.goal.type == .Relocatable || self.goal.type == .Exe {   
+                        // let the linker deal with got stuff
+                        // TODO: but for .Exe we have to do stuff here
+                    } else {
+                        @panic("TODO: amd64 reloc import");
+                    }
+                }
+            }
+            @default => panic("amd64 unexpected fixup type");
         }
     };
 }
-
 
 fn framesz(e: *AmdState) void = {
     /* specific to NAlign == 3 */
@@ -76,12 +86,17 @@ fn framesz(e: *AmdState) void = {
 fn next_inst_offset(self: *AmdState) i64 = self.a.len;
 
 fn emit_the_code(e: *AmdState) void = {
-    // TODO: endbr64
+    // It seems you need this to allow being called through a function pointer, that's such a pain in the ass bro... 
+    // It stops people from doing evil ROP stuff or whatever. 
+    // The magic words to google are "Control-Flow Enforcement Technology"
+    // TODO: This is extra incentive to keep track of which things are allowed to be called indirectly 
+    //       (which would also be nice for removing functions if all calls are inlined). 
+    e.a&.push_u32(0xfa1e0ff3); // endbr64
     
     f := e.f;
     if !f.leaf || f.vararg || f.dynalloc {
         e.fp = .RBP;
-        e.a&.encode_op_reg(PrimaryOp.PushBase, X86Reg.rsp);
+        e.a&.encode_op_reg(PrimaryOp.PushBase, X86Reg.rbp);
         e.a&.encode_bin(PrimaryOp.MovReg, X86Reg.rbp, X86Reg.rsp);
     } else {
         e.fp = .RSP;
@@ -222,27 +237,12 @@ fn slot(r: Qbe.Ref, e: *AmdState) i64 = {
     -4 * (fslot - s)
 }
 
-fn emitcon(con: *Qbe.Con, e: *AmdState) void = {
-    @match(con.type) {
-        fn CAddr() => {
-            info := e.m.get_symbol_info(con.sym.id);
-            @assert(con.sym.type != .SThr, "TODO: amd64 thread locals");
-                fprintf(e.f, "%s%s", p, l);
-            
-            @assert(con.bits.i == 0, "TODO: amd64 symbol offset");
-        }
-        fn CBits() => {
-            fprintf(e.f, "%"PRId64, con.bits.i);
-        }
-        fn CUndef() => panic("emitcon Undef");
-    };
-}
-
 fn emitcopy(r1: Qbe.Ref, r2: Qbe.Ref, k: Qbe.Cls, e: *AmdState) void = {
     i := make_ins(.copy, k, r1, r2, QbeNull);
     emitins(i, e);
 }
 
+// for floats
 //static void *negmask[4] = {
 //    [Ks] = (uint32_t[4]){ 0x80000000 },
 //    [Kd] = (uint64_t[2]){ 0x8000000000000000 },
@@ -250,39 +250,31 @@ fn emitcopy(r1: Qbe.Ref, r2: Qbe.Ref, k: Qbe.Cls, e: *AmdState) void = {
 
 amd64_xmm_scratch :: TMP(Amd64Reg.XMM0.raw() + 15);
 
-fn convert_to_2address(e: *AmdState, i: *Qbe.Ins, commutative: bool) void = {
+fn convert_to_2address(e: *AmdState, i: *Qbe.Ins) void = {
     if(i.to == QbeNull, => return());
+    if i.arg&[1] == QbeNull {
+        i.arg&[1] = i.to;
+        i.arg&.items().swap(0, 1);
+        return();
+    };
+    o := i.op();
+    commutative := o == .add || o == .and || o == .xor || o == .or;
     if commutative && i.arg&[1] == i.to {
         i.arg&.items().swap(0, 1);
     };
-    @assert(i.arg&[1] != i.to || i.arg&[0] == i.to, "cannot convert to 2-address");
-    emitcopy(i.to, i.arg&[0], i.cls(), e);
-}
-
-fn simple(e: *AmdState, i: *Qbe.Ins, o: PrimaryOp, extended: u4) void = {
-    convert_to_2address(e, i, i.op() != .sub);
-    @debug_assert(i.to == i.arg&[0]);
-    a1 := i.arg&[1];
-    
-    if rtype(i.to) == .RTmp && rtype(a1) == .RTmp {
-        e.a&.encode_bin(o, i.to.int_reg_d(), a1.int_reg_d());
-        return();
+    if i.arg&[0] != i.to {
+        @debug_assert(i.arg&[1] != i.to, "cannot convert to 2-address");
+        emitcopy(i.to, i.arg&[0], i.cls(), e);
+        i.arg&[0] = i.to;
     };
-    if rtype(i.to) == .RTmp && rtype(a1) == .RCon {
-        c := e.f.get_constant(a1);
-        if c.type == .CBits && is_int(i.cls()) {
-            @debug_assert(MAX_i32 > c.bits.i && c.bits.i > MIN_i32, "simple imm doesn't fit");
-            encode_extended_op(e.a&, ModrmMode.Direct, @as(u8) PrimaryOp.AddImm32, extended, i.to.int_reg_d());
-            e.a&.push_u32(signed_truncate(c.bits.i, 32));
-            return();
-        };
-    };
-    
-    panic("TODO: simple encoding");
 }
 
 fn emitins(i: Qbe.Ins, e: *AmdState) void = {
-    println("---");
+    if i&.op() == .storeh { // TODO: move this into the @match
+        e.a&.push(operand_16bit_prefix);
+    };
+    
+    assert(is_int(i&.cls()), "TODO: output float");
     t0 := rtype(i.arg&[0]);
     t1 := rtype(i.arg&[1]);
     
@@ -291,28 +283,28 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
     fix_memarg_slot(e, i.to&);  // TODO: this will break when we try to check for equality
             
     @match(i&.op()) {
-        fn add() => e.simple(i&, .AddReg, 0);
-        fn or()  => e.simple(i&, .OrReg, 1);
-        fn and() => e.simple(i&, .AndReg, 4);
-        fn xor() => e.simple(i&, .XorReg, 6);
-        fn xcmp() => assemble(e, i&);
         /* just do nothing for nops, they are inserted
-        * by some passes */
+         * by some passes */
         fn nop() => ();
         fn mul() => {
-            panic("mul");
             /* here, we try to use the 3-addresss form
             * of multiplication when possible */
             if rtype(i.arg&[1]) == .RCon {
                 i.arg&.items().swap(0, 1);
             };
-            if KBASE(i.cls())   == 0 /* only available for ints */
+            if KBASE(i&.cls())   == 0 /* only available for ints */
             && rtype(i.arg&[0]) == .RCon
             && rtype(i.arg&[1]) == .RTmp {
-                todo();
-                //emitf("imul%k %0, %1, %=", &i, e);
+                c := e.f.get_constant(i.arg&[0]);
+                r0, r1 := (i.to.int_reg_d(), i.arg&[1].int_reg_d());
+                e.a&.push(pack_rex_si(i&.cls() == .Kl, r0, r1, DONT_CARE_REG));  // TODO: elide
+                e.a&.push(0x69);
+                e.a&.push(pack_modrm(ModrmMode.Direct, r0, r1));
+                e.push_imm(c.bits.i, 4);
                 return();
             };
+            convert_to_2address(e, i&);
+            assemble(e, i&);
         }
         fn sub() => {
             /* we have to use the negation trick to handle
@@ -326,7 +318,8 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
                 return();
             };
             
-            e.simple(i&, .SubReg, 5);
+            convert_to_2address(e, i&);
+            assemble(e, i&);
         }
         fn sign() => e.a&.push(@as(u8) PrimaryOp.SignExtendAxToDxAx); // CQO
         fn neg() => {
@@ -387,13 +380,11 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
                     };
                     if c.type == .CBits && is_int(i&.cls()) {
                         value := c.bits.i;
+                        // TODO: i think `B8+ rd id	MOV r32, imm32	OI	Valid	Valid	Move imm32 to r32.` zeros the high bytes so we can do more in the small instruction. 
                         if value < MIN_i32 || value > MAX_i32 {
                             encode_imm64(e.a&, i.to.int_reg_d(), value.bitcast());
-                        } else {
-                            // TODO: are we sure this is doing the whole 64 bits?
-                            encode_imm(e.a&, i.to.int_reg_d(), value);
-                        };
-                        return();
+                            return();
+                        }; // else fallthrough to assemble
                     }
                 };
             };
@@ -406,12 +397,9 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
                 return();
             };
             
-            if rtype(i.to) == t0 && t0 == .RTmp && i&.cls().is_int(){
-                e.a&.encode_bin(PrimaryOp.MovReg, i.to.int_reg_d(), i.arg&[0].int_reg_d());
-                return();
-            };
-            
-            panic("copy!");
+            i.arg&[1] = i.to;
+            i.arg&.swap(0, 1);
+            assemble(e, i&);
         }
         fn addr() => {
             if !e.m.target.apple
@@ -434,31 +422,29 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
                 //    regtoa(i.to.val, SLong));
             };
             
-            fix_memarg_slot(e, i.arg&.index(0));
-            if rtype(i.arg&[0]) == .RMem {
-                b := encode(e, i&, true);
-                push(e, b, @slice(@as(u8) PrimaryOp.Lea));
-                return();
-            };
-            
-            panic("addr");
+            // note: LEA interprets RMem differently than other instructions
+            i.arg&[1] = i.to;
+            i.arg&.swap(0, 1);
+            assemble(e, i&);
         }
         fn call() => {
-            panic("call");
-            ///* calls simply have a weird syntax in AT&T
-            //* assembly... */
-            //switch (rtype(i.arg&[0])) {
-            //case RCon:
-            //    fprintf(e.f, "\tcallq ");
-            //    emitcon(&e.f.con[i.arg&[0].val], e);
-            //    fprintf(e.f, "\n");
-            //    break;
-            //case RTmp:
-            //    emitf("callq *%L0", &i, e);
-            //    break;
-            //default:
-            //    die("invalid call argument");
-            //}
+            @match(rtype(i.arg&[0])) {
+                fn RCon() => {
+                    c := e.f.get_constant(i.arg&[0]);
+                    symbol := e.m.get_symbol_info(c.sym.id);
+                    e.a&.push(@as(u8) PrimaryOp.CallImm32);
+                    assert(symbol.kind != .Local || e.m.goal.type != .Relocatable, "// TODO: disp += offset to the constant if we already know it");
+                    @debug_assert_eq(c.bits.i, 0, "call to offset from symbol seems like a mistake?");
+                    patch_at := e.a.maybe_uninit.ptr.offset(e.a.len);
+                    symbol.fixups&.push((patch_at = patch_at, type = (RipDisp32 = 0)), e.m.gpa);
+                    off := 0; 
+                    assert(e.m.goal.type != .JitOnly, "TODO: jitted local call");
+                    e.a&.push_u32(signed_truncate(off, 32));
+                }
+                fn RTmp() => encode_call_reg(e.a&, ModrmMode.Direct, int_reg_d(i.arg&[0]));  
+                // TODO: we could allow memory argument? 
+                @default => panic("invalid call argument");
+            }
         }
         fn salloc() => {
             panic("salloc");
@@ -484,30 +470,45 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
             emitcopy(i.arg&[1], amd64_xmm_scratch, i&.cls(), e);
         }
         fn dbgloc() => (); // TODO: we don't do debug info yet
-        fn storew() => assemble(e, i&);
         @default => {
             o := i&.op();
-            if maybe_load(i&) { load_size |
-                @debug_assert(rtype(i.to) != .RMem, "load TO memory bro? hell no!");
-                @assert(i&.op() == .load, "TODO: load extension");
-                @assert(is_int(i&.cls()), "TODO: float register encoding");
-                fix_memarg_slot(e, i.arg&.index(0));
-                // Here the RMem is the address we're loading from.
-                if t0 == .RMem && rtype(i.to) == .RTmp {
-                    printins(e.f, i&, e.f.globals.debug_out);
-                    b := encode(e, i&, i&.cls() == .Kl);
-                    push(e, b, @slice(0x8B));
-                    return();
+            if is_flag(i&.op()) {  // Reading a bit from the flags register
+                cc := @as(i32) i&.op().raw() - Qbe.O.flagieq.raw();
+                cc := amd_condition_codes[cc.zext()];
+                @debug_assert(rtype(i.to) == .RTmp, "we don't allow mem arg for setcc"); // because then the zero extending is even more painful. 
+                r0 := int_reg_d(i.to);
+                e.a&.encode_setcc(r0, cc);
+                // setcc doesn't zero the upper bits, so we zero extend as an extra instruction. 
+                // we could get complicated and keep track of known bits but I suspect that's well into deminishing returns territory. 
+                if i&.cls() == .Kl { // TODO: also need rex if high register
+                    @assert(!@is(r0, .rax, .rbx, .rcx, .rdx), "TODO: felix says you can't encode movzx for this flag op");  // https://www.felixcloutier.com/x86/movzx
+                    e.a&.push(pack_rex_si(true, r0, DONT_CARE_REG, DONT_CARE_REG));
                 };
+                e.a&.push(TWO_BYTE_OP_PREFIX);
+                e.a&.push(@as(u8) TwoByteOp.MovZX);
+                e.a&.push(pack_modrm(ModrmMode.Direct, r0, DONT_CARE_REG));
+                return();
             };
-            @panic("TODO: emitins %", i&.op().get_name());
+            
+            if is_load(o) {
+                // this is wasteful allocation just to smuggle one bit of information on which modrm mode to use. 
+                if t0 == .RTmp {
+                    i.arg&[0] = e.f.new_mem(i.arg&[0], QbeNull, 0, 0);
+                };
+                if o != .load {
+                    // convert to extXX and let the memory argument express the load. 
+                    o = rebase(o, .extsb, .loadsb);
+                    i&.set_op(o);
+                };
+                i.arg&[1] = i.to;
+                i.arg&.swap(0, 1);
+            } else {
+                convert_to_2address(e, i&);
+            };
+            assemble(e, i&);
         };
     }; // early returns
 }
-
-//fn choose_opcode(i: *Qbe.Ins) EncodedOp = {
-    
-//}
 
 fn push_imm(e: *AmdState, value: i64, byte_count: i64) void = {
     bytes: []u8 = (ptr = ptr_cast_unchecked(i64, u8, value&), len = byte_count); // little endian
@@ -517,6 +518,7 @@ fn push_imm(e: *AmdState, value: i64, byte_count: i64) void = {
 fn push(e: *AmdState, b: EncodedArgs, ops: []u8) void = {
     // before: prefix
     // TODO: i think some instructions need to not have REX at all but then you can't get half the registers?
+    // If we're not using 64 bit operand size and not using the high 8 registers, don't emit a wasted byte. 
     if b.rex != 0b01000000 {
         e.a&.push(b.rex);
     };
@@ -526,6 +528,17 @@ fn push(e: *AmdState, b: EncodedArgs, ops: []u8) void = {
         e.a&.push(sib);
     };
     if b.disp_size != .D0 {
+        if b.patch { p | 
+            off, sym := p;
+            symbol := e.m.get_symbol_info(sym);
+            if symbol.kind == .Local {
+                @debug_assert(b.disp == 0);
+                b.disp = distance_between(e.m, .Code, e.start_of_function + e.a.len, symbol.segment, symbol.offset);
+                @debug_assert(b.disp.abs() < 1.shift_left(b.disp_size.bits()));
+            };
+            patch_at := e.a.maybe_uninit.ptr.offset(e.a.len);
+            symbol.fixups&.push((patch_at = patch_at, type = (RipDisp32 = off)), e.m.gpa);
+        };
         e.push_imm(b.disp, b.disp_size.bits() / 8);
     };
     // after: immediate
@@ -534,21 +547,11 @@ fn push(e: *AmdState, b: EncodedArgs, ops: []u8) void = {
 // this invalidates f.mem pointers!
 fn fix_memarg_slot(e: *AmdState, r: *Qbe.Ref) void = {
     if rtype(r[]) == .RSlot {
-        println("slot -> mem");
-        f := e.f;
-        m := f.nmem.zext();
-        f.nmem += 1;
-        f.mem&.grow(m + 1);
-        f.mem[m].base = r[];
-        f.mem[m].index = QbeNull;
-        f.mem[m].offset.type = .CUndef;
-        f.mem[m].scale = 0;
-        r[] = MEM(m);
+        r[] = e.f.new_mem(r[], QbeNull, 0, 0);
     };
     if(rtype(r[]) != .RMem, => return());
     m := e.f.get_memory(r[]);
     if rtype(m.base) == .RSlot {
-        println("m.base==slot -> fp");
         @debug_assert(@is(m.offset.type, .CBits, .CUndef), "bits"); 
         if m.offset.type == .CUndef {
             m.offset.bits.i = 0;
@@ -572,44 +575,22 @@ EncodedArgs :: @struct(
     rex: u8,
     disp: i64 = 0,
     disp_size := Displacement.D0,
+    patch: ?Ty(i64, u32) = .None,
 );
 
-// TODO: is it ok that this fucks with the Mem values or are they deduplicated?
 fn encode(e: *AmdState, i: *Qbe.Ins, w: bool) EncodedArgs = {
-    printins(e.f, i, e.f.globals.debug_out);
-    
     r0, r1 := (i.arg&[0], i.arg&[1]);
     t0, t1 := (rtype(r0), rtype(r1));
-    @debug_assert(r0 == i.to || i.to == QbeNull || r1 == QbeNull, "expected 2-address");
-    if r1 == QbeNull {
-        println("r1 <- to");
-        r1 = i.to;
-        t1 = rtype(r1);
-    };
+    @debug_assert(r0 != QbeNull && r1 != QbeNull, "we only look at the arg slots becuase x64 is 2-address");
     if t0 == t1 && t0 == .RTmp {  // both in registers, thats easy!
-        println("tmp, tmp");
         rr0, rr1 := (r0.int_reg_d(), r1.int_reg_d());
-        return(modrm = pack_modrm(ModrmMode.Direct, rr1, rr0), rex = pack_rex_si(w, rr1, rr0, DONT_CARE_REG), sib = .None);
-    };
-    if t0 == .RMem || (t1 != .RMem && t0 == .RCon) {
-        println("swap!");
-        // which direction it goes doesn't matter becuase the memory always has to be in SIB
-        swap(t0&, t1&);
-        swap(r0&, r1&);
+        return(modrm = pack_modrm(ModrmMode.Direct, rr1, rr0), rex = pack_rex_si(w, rr0, rr1, DONT_CARE_REG), sib = .None);
     };
     
-    if t0 == .RTmp && t1 == .RCon { 
-        rr0 := r0.int_reg_d();
-        return(modrm = pack_modrm(ModrmMode.Direct, rr0, DONT_CARE_REG), rex = pack_rex_si(w, DONT_CARE_REG, rr0, DONT_CARE_REG), sib = .None);
-    }; 
-    
-    swap :: fn(a, b) => { x := a[]; a[] = b[]; b[] = x; };
-    
-    disp_size := Displacement.D0;
     if t1 == .RMem {
-        @println("memory n = %", r1.val());
-        // don't use i.arg because we mught have swapped!
-        m := e.f.get_memory(r1);
+        @debug_assert(t0 != .RMem, "cannot encode two memory arguments");
+        disp_size := Displacement.D0;
+        m := e.f.get_memory(r1)[]; // copy!
         @debug_assert(m.index != TMP(Amd64Reg.RSP), "cannot encode index");
         if m.index == QbeNull {
             m.index = TMP(Amd64Reg.RSP); // sentinal for just base+disp
@@ -617,26 +598,39 @@ fn encode(e: *AmdState, i: *Qbe.Ins, w: bool) EncodedArgs = {
         @debug_assert(m.offset.type != .CAddr, "TODO: cannot encode const SIB");
         @debug_assert(m.base != QbeNull, "TODO: no base register");
         
-        // TODO: don't waste a byte by never using mod=00 but for now its fine 
         if m.offset.type == .CUndef {
             m.offset.bits.i = 0;
         };
-        println(m.offset.bits.i);
+        
         @debug_assert(m.offset.bits.i >= MIN_i32 && m.offset.bits.i <= MAX_i32, "cannot encode offset"); 
         small := m.offset.bits.i <= 127 && m.offset.bits.i >= -128;
-        disp_size = @if(m.offset.bits.i == 0, .D0, @if(small, .D8, .D32)); // more - than +!
+        no_disp := m.offset.bits.i == 0 && m.index != TMP(Amd64Reg.RBP) && m.index != TMP(Amd64Reg.R13);
+        disp_size = @if(no_disp, .D0, @if(small, .D8, .D32)); // more - than +!
         
-        disp := m.offset.bits.i; // .bit_and(1.shift_left(disp_size.bits()) - 1); // if -, clear extra sign bits
+        disp := m.offset.bits.i;
         mode: ModrmMode = @match(disp_size) {
             fn D0()  => .Indirect00;
             fn D8()  => .Indirect01;
             fn D32() => .Indirect10;
         };
-        @println("disp = % -> %", m.offset.bits.i, disp);
-        
         ri, rb, rr0 := (m.index.int_reg_d(), m.base.int_reg_d(), r0.int_reg_d());
-        @println("w = %", w);
-        return(disp_size = disp_size, disp = disp, modrm = pack_modrm(mode, .rsp, rr0), rex = pack_rex_si(w, rr0, ri, rb), sib = (Some = pack_sib(m.scale.to_scale(), ri, rb)));
+        dont_need_sib := no_disp && m.index == TMP(Amd64Reg.RSP) && m.base != TMP(Amd64Reg.RSP) && m.base != TMP(Amd64Reg.R12);
+        if dont_need_sib {
+            // this is a lot of hassle to save one byte
+            return(modrm = pack_modrm(mode, rb, rr0), rex = pack_rex_si(w, rr0, rb, DONT_CARE_REG), sib = .None);
+        };
+       
+        return(disp_size = disp_size, disp = disp, modrm = pack_modrm(mode, .rsp, rr0), rex = pack_rex_si(w, rr0, rb, ri), sib = (Some = pack_sib(m.scale.to_scale(), ri, rb)));
+    };
+    
+    if t1 == .RCon {
+        c := e.f.get_constant(i.arg&[1]);
+        if c.type == .CAddr {
+            rr0 := r0.int_reg_d();
+            disp := c.bits.i;
+            @debug_assert(c.sym.type == .SGlo, "TODO: tls");
+            return(patch = (Some = (c.bits.i, c.sym.id)), disp_size = .D32, disp = disp, modrm = pack_modrm(.Indirect00, .rbp, rr0), rex = pack_rex_si(w, rr0, DONT_CARE_REG, DONT_CARE_REG), sib = .None);
+        };
     };
     
     @panic("TODO: we can't encode that yet")
@@ -650,6 +644,7 @@ fn to_scale(s: i32) SibScale = @switch(s) {
     @case(8) => .Eight;
     @default => @panic("Invalid sib scale %", s);
 }
+
 fn bits(d: Displacement) i64 = @match(d) {
     fn D0() => 0;
     fn D8() => 8;
@@ -659,44 +654,23 @@ fn bits(d: Displacement) i64 = @match(d) {
 fn int_reg_d(r: Qbe.Ref) X86Reg = 
     int_id(@as(Amd64Reg) @as(i32) r.val().trunc());
 
-
 // TODO: convert my instruction encoding to use Amd64Reg instead of X64Reg. having both is mega dumb. 
 //       but also qbe puts them in the wrong order so i have to commit to not sharing target struct 
 //       if i want the numbers to match thier encoding so its less painful. ugh. -- Nov 8
 
 // TODO: losing my mind!
-fn int_id(r: Amd64Reg) X86Reg = @match(r) {
-    fn RAX() => .rax;
-    fn RCX() => .rcx
-    fn RDX() => .rdx;
-    fn RSI() => .rsi;
-    fn RDI() => .rdi;
-    fn R8()  => .r8;
-    fn R9()  => .r9;
-    fn R10() => .r10;
-    fn R11() => .r11;
-    fn RBX() => .rbx;
-    fn R12() => .r12;
-    fn R13() => .r13;
-    fn R14() => .r14;
-    fn R15() => .r15;
-    fn RBP() => .rbp;
-    fn RSP() => .rsp;
-    @default => panic("non-int");
-};
+fn int_id(r: Amd64Reg) X86Reg = {
+    ::List(X86Reg);
+    table :: items(@list(X86Reg.zeroed(), .rax, .rcx, .rdx, .rsi, .rdi, .r8, .r9, .r10, .r11, .rbx, .r12, .r13, .r14, .r15, .rbp, .rsp) ast_alloc());
+    table[r.raw().zext()]
+}
+
 // i need an air tag on my mind. 
 // so i don't lose it. 
-fn reg_for_extension(v: u8) Amd64Reg = @switch(v) {
-    @case(0) => .RAX;
-    @case(1) => .RCX;
-    @case(2) => .RDX;
-    @case(3) => .RBX;
-    @case(4) => .RSP;
-    @case(5) => .RBP;
-    @case(6) => .RSI;
-    @case(7) => .RDI;
-    @default => panic("non 0-7");
-};
+fn reg_for_extension(v: u8) Amd64Reg = {
+    table :: items(@list(Amd64Reg.RAX, .RCX, .RDX, .RBX, .RSP, .RBP, .RSI, .RDI) ast_alloc());
+    table[v.zext()]
+}
 
 fn items(e: *FatExpr) []FatExpr = {
     if e.expr&.is(.Tuple) {
@@ -705,89 +679,122 @@ fn items(e: *FatExpr) []FatExpr = {
     (ptr = e, len = 1)
 }
 
+AmdArgType :: @enum(i64) (M, R, imm32, imm8, none);    ::enum(AmdArgType);
+    
+fn arg_t(e: *AmdState, r: Qbe.Ref) AmdArgType = @match(rtype(r)) {
+    fn RTmp() => .R;
+    fn RMem() => .M;
+    fn RCon() => {
+        c := e.f.get_constant(r);
+        @match(c.type) {
+            fn CBits() => @if(c.bits.i <= 127 && c.bits.i >= -128, .imm8, .imm32);
+            fn CAddr() => .M; // rel
+            @default => unreachable();
+        }
+    }
+    @default => .none;
+};
+
+fn matches(w: AmdArgType, h: AmdArgType) bool = 
+    w == h || (w == .imm32 && h == .imm8) || (w == .M && h == .R);
+
+fn assemble(e: *AmdState, i: *Qbe.Ins) void = {
+    //printins(e.f, i, e.f.globals.debug_out);
+    if i.op() == .xcmp {  // // HACK. TODO: move this to the outer match in emitins
+        i.arg&.items().swap(0, 1);
+    };
+    a0_old, a1_old := (i.arg&[0], i.arg&[1]);
+    w := i.cls() == .Kl;
+    ext_index := int((i.arg&[1] == QbeNull || (rtype(i.arg&[1]) == .RCon && e.f.get_constant(i.arg&[1])[].type == .CBits)));
+    opcode, a0, a1, ext := amd64_encoding_lookup(e, i); 
+    
+    if ext != QbeNull {
+        // one argument is an immediate or fixed register and its slot in modrm holds an opcode extension instead. 
+        i.arg&[ext_index] = ext; 
+        i.arg&.items().swap(0, 1); // HACK
+    };
+    
+    if rtype(i.arg&[0]) == .RMem || (rtype(i.arg&[1]) != .RMem && rtype(i.arg&[0]) == .RCon) {
+        @debug_assert(rtype(i.arg&[0]) == .RMem || e.f.get_constant(i.arg&[0])[].type == .CAddr);
+        // which direction it goes doesn't matter because the memory always has to be in SIB
+        i.arg&.items().swap(0, 1); // HACK
+    };
+    b := encode(e, i, w);
+    push(e, b, opcode);
+    if a0 == .imm8 {
+        push_imm(e, e.f.get_constant(a0_old)[].bits.i, 1);
+    };
+    if a1 == .imm8 {
+        push_imm(e, e.f.get_constant(a1_old)[].bits.i, 1);
+    };
+    if a0 == .imm32 {
+        imm := e.f.get_constant(a0_old)[].bits.i;
+        push_imm(e, imm, 4);
+    };
+    if a1 == .imm32 {
+        imm := e.f.get_constant(a1_old)[].bits.i;
+        push_imm(e, imm, 4);
+    };
+}
+
+fn lookup_fail(a0: AmdArgType, a1: AmdArgType) Ty([]u8, Qbe.Ref) = 
+    @as(Ty([]u8, Qbe.Ref)) @panic("bad op arg types % %", a0, a1);
+
 // TODO:
 // Alas this is a super convoluted way of doing this, i just want to see if it works. 
 // It's unfortunate that I'm incentivized to exercise fun language features. 
 //
 
 fn amd64_encoding_data(runtime_args: FatExpr, e: FatExpr) FatExpr #macro = {
-    ArgType :: @enum(i64) (M, R, imm32, imm8);    ::enum(ArgType);
-    arg_t :: fn(e: *AmdState, r: Qbe.Ref) ArgType = @match(rtype(r)) {
-        fn RTmp() => .R;
-        fn RMem() => .M;
-        fn RCon() => {
-            c := e.f.get_constant(r);
-            @debug_assert(c.type == .CBits);
-            @if(c.bits.i <= 127 && c.bits.i >= -128, .imm8, .imm32)
-        }
-        @default => panic("bad arg type");
-    };
-    matches :: fn(w: ArgType, h: ArgType) bool = w == h || (w == .imm32 && h == .imm8) || (w == .M && h == .R);
+    ArgType :: AmdArgType;
     T :: Ty(i64, FatExpr);
     ops := e&.items();
     cases := T.list(ops.len, ast_alloc());
     @{
         e, i := @[runtime_args];
-        printins(e.f, i, e.f.globals.debug_out);
-        w := i.cls() == .Kl;
-        printins(e.f, i, e.f.globals.debug_out);
         a0, a1 := (arg_t(e, i.arg&[0]), arg_t(e, i.arg&[1]));
-        a1_old := i.arg&[1];
-        a0_old := i.arg&[0];
         @[{
             each ops { full_op | 
                 full_op := full_op.items();
-                op := const_eval(Qbe.O)(full_op[0]);
+                qbe_o := const_eval(Qbe.O)(full_op[0]);
                 
-                handler := @{ @panic("bad op arg types % %", a0, a1); };
-                each full_op.slice(1, full_op.len) { components | 
+                handler := @{ lookup_fail(a0, a1) };
+                each_rev full_op.slice(1, full_op.len) { components | 
                     components := components.items();
                     arg0 := const_eval(ArgType)(components[0]);
                     arg1 := const_eval(ArgType)(components[1]);
                     
-                    opcode := u8.list(ast_alloc());
+                    o := u8.list(ast_alloc());
                     each components.index(2).items() { b | 
-                        opcode&.push(const_eval(u8)(b[]));
+                        o&.push(const_eval(u8)(b[]));
                     };
-                    opcode := opcode.items();
-                    ext: ?u8 = .None;
+                    o := o.items();
+                    ext := QbeNull;
                     if components.len > 3 {
-                        ext = (Some = const_eval(u8)(components[3]));
+                        e := const_eval(u8)(components[3]);
+                        ext = TMP(reg_for_extension(e));
                     };
                     handler = @{ 
-                        if(!matches(@[@literal arg0], a0) || !matches(@[@literal arg1], a1), => @[handler]) {
-                            a0 = @[@literal arg0];
-                            a1 = @[@literal arg1];
-                            @[if ext.is_some() {
-                                @{ i.arg&[int(rtype(a0_old) == .RMem)] = @[@literal TMP(reg_for_extension(ext.unwrap()))]; }
+                        @if(!matches(@[@literal arg0], a0) || !matches(@[@literal arg1], a1), @[handler], {
+                            @[if (@is(arg0, .imm8, .imm32)) {
+                                @{ a0 = @[@literal arg0]; }
                             } else {
                                 @{}
                             }];
-                            b := encode(e, i, w);
-                            push(e, b, @[@literal opcode]);
-                        };
+                            @[if (@is(arg1, .imm8, .imm32)) {
+                                @{ a1 = @[@literal arg1]; }
+                            } else {
+                                @{}
+                            }];
+                            (@[@literal o], @[@literal ext])
+                        })
                     };
                 };
-                cases&.push(@as(T) (op.raw().zext(), handler));
+                cases&.push(@as(T) (qbe_o.raw().zext(), handler));
             };
             @{
-                @[make_switch(@{ i.op() }, @{ panic("unknown op encoding") }, cases)];
-                if a0 == .imm8 {
-                    push_imm(e, e.f.get_constant(a0_old)[].bits.i, 1);
-                };
-                if a1 == .imm8 {
-                    push_imm(e, e.f.get_constant(a1_old)[].bits.i, 1);
-                };
-                if a0 == .imm32 {
-                    imm := e.f.get_constant(a0_old)[].bits.i;
-                    println(imm);
-                    push_imm(e, imm, 4);
-                };
-                if a1 == .imm32 {
-                    imm := e.f.get_constant(a1_old)[].bits.i;
-                    println(imm);
-                    push_imm(e, imm, 4);
-                };
+                opcode_bytes, ext := @[make_switch(@{ i.op() }, @{ panic("unknown op encoding") }, cases)];
+                (opcode_bytes, a0, a1, ext)
             }
         }]
     }
@@ -796,22 +803,23 @@ fn amd64_encoding_data(runtime_args: FatExpr, e: FatExpr) FatExpr #macro = {
 // We assume prefix REX.W changes 32 to 64.
 // .(OP, .(arg1, arg2, (opcode), ext?))
 // Shift arg2 is always CL (ensured by isel), and it uses its extension slot. 
-// You can always do (.R, .R, ...) by just using ModrmMode.Direct00     (i think)
+// You can always do (.R, .R, ...) by just using ModrmMode.Direct00 
+//     note: that means the order of rules (.R, .M) and (.M, .R) matters (evan if the instruction commutes because one arg is also output)
 // imm args are sign extended to the operation size. 
 // Magic numbers transcribed from https://www.felixcloutier.com/x86
 // Always put the imm8 before imm32 since imm32 will match smaller numbers too for store
-fn assemble(e: *AmdState, i: *Qbe.Ins) void = @amd64_encoding_data(e, i) (
+fn amd64_encoding_lookup(e: *AmdState, i: *Qbe.Ins) Ty([]u8, AmdArgType, AmdArgType, Qbe.Ref) = @amd64_encoding_data(e, i) (
     (.add, 
         (.M, .imm8, (0x83), 0),
         (.M, .imm32, (0x81), 0),
-        (.M, .R, (0x01)),
         (.R, .M, (0x03)),
+        (.M, .R, (0x01)),
     ),
     (.xcmp, 
-        (.imm8, .M, (0x83), 7),
-        (.imm32, .M, (0x81), 7),
-        (.M, .R, (0x39)),
+        (.M, .imm8, (0x83), 7),
+        (.M, .imm32, (0x81), 7),
         (.R, .M, (0x3B)),
+        (.M, .R, (0x39)),
     ),
     (.shr, 
         (.M, .imm8, (0xC1), 5),
@@ -828,18 +836,73 @@ fn assemble(e: *AmdState, i: *Qbe.Ins) void = @amd64_encoding_data(e, i) (
     (.and, 
         (.M, .imm8, (0x83), 4),
         (.M, .imm32, (0x81), 4),
-        (.M, .R, (0x21)),
         (.R, .M, (0x23)),
+        (.M, .R, (0x21)),
     ),
     (.or, 
-        (.M, .imm32, (0x81), 1),
         (.M, .imm8, (0x83), 1),
-        (.M, .R, (0x09)),
+        (.M, .imm32, (0x81), 1),
         (.R, .M, (0x0B)),
+        (.M, .R, (0x09)),
     ),
-    (.storew,   
+    (.storew,
         // note: the imm8 version would only store 1 byte! there's no `Move imm8 to r/m32.`
         (.imm32, .M, (0xC7), 0),
         (.R, .M, (0x89)),
+    ),
+    (.storel,
+        (.imm32, .M, (0xC7), 0),
+        (.R, .M, (0x89)),
+    ),
+    (.storeb, 
+        (.R, .M, (0x88)),
+        // TODO: " In 64-bit mode, r/m8 can not be encoded to access the following byte registers if a REX prefix is used: AH, BH, CH, DH."
+        //(.imm8, .M, (0xC6), 0), but also this doesn't sign extend so need to change .imm8 filtering
+    ),
+    (.storeh, // needs prefix
+        (.R, .M, (0x88)),
+    ),
+    (.xidiv,
+        (.M, .none, (0xF7), 7),
+    ),
+    (.xor, 
+        (.M, .imm8, (0x83), 6),
+        (.M, .imm32, (0x81), 6),
+        (.R, .M, (0x33)),
+        (.M, .R, (0x33)),
+    ),
+    (.sub, 
+        (.M, .imm8, (0x83), 5),
+        (.M, .imm32, (0x81), 5),
+        (.R, .M, (0x2B)),
+        (.M, .R, (0x29)),
+    ),
+    (.xtest, 
+        (.imm8, .M, (0xF7), 0),
+        (.imm32, .M, (0xF7), 0),
+        (.M, .R, (0x85)),
+    ),
+    (.load, 
+        (.R, .M, (0x8B)), 
+    ),
+    (.extsw, 
+        (.R, .M, (0x63)), // MOVSXD
+    ),
+    // TODO: "1. In 64-bit mode, r/m8 can not be encoded to access the following byte registers if the REX prefix is used: AH, BH, CH, DH."
+    (.extub, 
+        (.R, .M, (0x0F, 0xB6)), // MOVZX
+    ),
+    (.extuh, 
+        (.R, .M, (0x0F, 0xB7)), // MOVZX
+    ),
+    (.addr, 
+        (.R, .M, (0x8D)), // lea
+    ),
+    (.mul, 
+        (.R, .M, (0x0F, 0xAF)),
+    ),
+    (.copy, 
+        (.M, .imm32, (0xC7), 0), // "Move imm32 sign extended to 64-bits to r/m64."
+        (.R, .M, (0x8B)),
     ),
 );

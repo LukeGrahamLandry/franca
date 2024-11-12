@@ -528,12 +528,9 @@ fn selpar(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins) Params = {
             };
         } else {
             if c.class.has(.Cstk) {
+                // convert to a load from the stack slot
                 off = align(off, c.align);
-                o := if is_parbh(i.op()) {
-                    @as(Qbe.O) @as(i32) Qbe.O.loadsb.raw() + (i.op().raw() - Qbe.O.parsb.raw())
-                } else {
-                    Qbe.O.load
-                };
+                o := if(is_parbh(i.op()), => rebase(i.op(), .loadsb, .parsb), => Qbe.O.load);
                 f.emit(o, c.cls&[0], i.to, SLOT(-(off+2)), QbeNull);
                 off += c.size;
             } else {
@@ -687,6 +684,23 @@ fn apple_selvastart(f: *Qbe.Fn, p: Params, ap: Qbe.Ref) void = {
     f.emit(.addr, .Kl, stk, SLOT(-1), QbeNull);
 }
 
+// TODO: port the parser and generate the code for these because the backwards calls are completely unintelligible. 
+/*
+(f.getcon((p.nfp.zext()-8)*16), f.getcon((p.ngp.zext()-8)*8), f.getcon(p.stk.zext() + 192))
+    %r0 =l add %ap, 28
+    storew %ARG0, %r0
+    %r0 =l add %ap, 24
+    storew %ARG1, %r0
+    %r0 =l add %ap, 16
+    %rsave =l addr S-1
+    %r1 =l add %rsave, 192
+    storel %r1, %r0
+    %r0 =l add %ap, 8
+    %r1 =l add %rsave, 64
+    storel %r1, %r0
+    %r0 =l add %rsave, %ARG3
+    storel %r0, %ap
+*/
 fn arm64_selvastart(f: *Qbe.Fn, p: Params, ap: Qbe.Ref) void = {
     rsave := f.newtmp("abi", .Kl);
 
@@ -822,7 +836,7 @@ fn apple_extsb(f: *Qbe.Fn) void = {
                 while => Qbe.Ins.int_from_ptr(i[]) > Qbe.Ins.int_from_ptr(i0) {
                     i[] = i[].offset(-1);
                     if is_argbh(i[].op()) {
-                        o := @as(Qbe.O) @as(i32) Qbe.O.extsb.raw() + (i[].op().raw() - Qbe.O.argsb.raw());
+                        o := rebase(i[].op(), .extsb, .argsb);
                         f.emit(o, .Kw, i.to, i.arg&[0], QbeNull);
                     }
                 };
