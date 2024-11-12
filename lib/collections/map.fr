@@ -27,7 +27,8 @@ fn capacity();
 /// TODO: take hasher as param once i have default args? 
 /// TODO: api for getting the real len (not including tombstones)
 fn HashMap($K: Type, $V: Type) Type = {
-    Self :: @struct(raw: RawHashMap(K, V), alloc: Alloc);
+    R :: RawHashMap(K, V);
+    Self :: @struct(raw: R, alloc: Alloc, $Raw := R);
     fn init(gpa: Alloc) Self = (raw = init(), alloc = gpa);
     
     fn insert(self: *Self, key: K, value: V) ?V #inline = self.raw&.insert(key, value, self.alloc);
@@ -52,6 +53,8 @@ fn HashMap($K: Type, $V: Type) Type = {
     
     Self
 }
+
+fn zero_unused_slots();
 
 fn RawHashMap($K: Type, $V: Type) Type = {
     Hasher :: TrivialHasher;
@@ -186,6 +189,16 @@ fn RawHashMap($K: Type, $V: Type) Type = {
         self.len_including_tombstones = real_len;
         
         gpa.dealloc(Entry, old_arr);
+    }
+    
+    // TODO: have a bake_relocatable_value that calls this to help reproducible builds. 
+    fn zero_unused_slots(self: *Self) void = {
+        each self.arr { slot |
+            if slot.hash == 0 || slot.hash == 1 {
+                slot.key = K.zeroed();
+                slot.value = V.zeroed();
+            };
+        };
     }
     
     fn for_keys(self: *Self, $body: @Fn(key: K) void) void = {

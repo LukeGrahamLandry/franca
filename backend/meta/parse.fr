@@ -1,0 +1,458 @@
+//!
+//! This parses the text format used by QBE (https://c9x.me/compile/doc/il-v1.2.html).
+//! The Franca compiler does not use this! It generates the IR in memory. Instead this is used for,
+//! - Loading small IR test programs without involving the franca front end.
+//! - At comptime to generate code when large substitutions are needed. (See meta/template.fr).
+//!   This is common for isel/abi stuff and is much more readable than building it up backwards with `emit` calls.
+//!   This use case requires being more permisive than Qbe's parser: allowing constructs only added in later passes (like RSlot).
+//! So while it's embrassing that it's slow, it's not a huge deal yet since it mostly runs on programs that are <<< 100 lines long. 
+//! If I have to write many more of these, maybe I should reconsider doing something about parser generators. 
+//!
+
+Replacement :: @struct(key: i64, r: Qbe.Ref);
+
+QParseCtx :: @struct(
+    blocks: HashMap(Str, Qbe.Blk),
+    tmps: HashMap(Str, Qbe.Ref),
+    replacements: List(Replacement),
+    error: List(u8),
+    input: Str,
+    cursor := 0,
+    f: *Qbe.Fn,
+    line := 0,
+    out: Alloc,
+    blk := Qbe.Blk.ptr_from_int(0),
+    ret := Qbe.J.Jxxx,
+);
+
+// TODO: this is more useful if you let them pass a userdata pointer but for now i want to match the qbe interface. 
+fn parse_top_level(m: *QbeModule, src: Str, yield_data: @FnPtr(*Qbe.Dat) void, yield_func: @FnPtr(*Qbe.Fn) void) Result(void, Str) = {
+    self: QParseCtx = init(m, src); 
+    self := self&;
+    self.f.globals = m;
+    self.f.default_init();
+    
+    loop {
+        continue :: local_return;
+        self.skip_blanks();
+        
+        export := self.eat("export");
+        
+        if self.eat("function") {
+            self.f.reset_scratch();
+            parse_header(self, export);
+            if self.error.len != 0 {
+                return(Err = self.error.items());
+            };
+            if !self.eat("{") {
+                return(Err = "expected '{' before function body");
+            };
+            f, replacements := @try(parse_body(self)) return;
+            if replacements.len != 0 {
+                return(Err = "numeric cls placeholder is only allowed for function fragment templates (ie =0 instead of =w)");
+            };
+            if !self.eat("}") {
+                return(Err = "expected '}' after function body");
+            };
+            yield_func(f);  // might reset temp
+            self.blocks = init(temp());
+            self.tmps = init(temp());
+            self.f[] = Qbe.Fn.zeroed();
+            self.f.globals = m;
+            self.f.default_init();
+            self.blk = Qbe.Blk.ptr_from_int(0);
+            continue();
+        };
+        if self.eat("type") {
+            panic("TODO: parse type");
+        };
+        thread := self.eat("thread");
+        if self.eat("data") {
+            panic("TODO: parse data");
+        };
+        
+        if self.skip_lines() == 1 {
+            return(Err = "expected new line");
+        };
+        if self.cursor >= self.input.len {
+            return(.Ok);
+        };
+    };
+    unreachable()
+}
+
+fn skip_lines(self: *QParseCtx) i64 = {
+    self.skip_blanks();
+    n := 0;
+    dowhile {
+        n += 1;
+        self.skip_blanks();
+        if self.eat("#") {  // comment
+            while => !self.check("\n") && self.cursor < self.input.len {
+                self.cursor += 1;
+            };
+        };
+        self.eat("\n") && self.cursor < self.input.len
+    };
+    self.line += n - 1;
+    self.skip_blanks();
+    n
+}
+
+fn init(m: *QbeModule, src: Str) QParseCtx = (
+    blocks = init(temp()),
+    tmps = init(temp()),
+    input = src,
+    error = list(temp()),
+    replacements = list(m.gpa), // only need this for cls
+    f = m.gpa.box_zeroed(Qbe.Fn),
+    out = m.gpa,
+);
+
+fn parse_body(self: *QParseCtx) Result(Ty(*Qbe.Fn, []Replacement), Str) = {
+    @debug_assert_eq(self.f.ntmp.zext(), Qbe.Tmp0);
+    while => self.parse_line() {
+        self.skip_lines();
+    };
+    self.end_block();
+    if self.error.len != 0 {
+        return(Err = self.error.items());
+    };
+    (Ok = (self.f, self.replacements.items()))
+}
+
+fn parse_header(self: *QParseCtx, export: bool) void = {
+    self.skip_blanks();
+    if self.check(":") {
+        type := self.parse_ref();
+        panic("TODO: type for function");
+        self.ret = .retc;
+        self.f.retty = type.val();
+    } else {
+        if !self.check("$") {
+            k := or cls_from_char(self.input[self.cursor]) {
+                @fmt(self.error&, "invalid cls char");
+                return()
+            };
+            self.cursor += 1;
+            self.ret = @as(Qbe.J) @as(i16) Qbe.J.retw.raw() + k.raw(); // TODO: is this right? also sb,etc.
+        } else {
+            self.ret = .ret0;
+        };
+        self.f.retty = -1;
+    };
+    self.skip_blanks();
+    if !self.eat("$") {
+        @fmt(self.error&, "expected function name");
+        return()
+    };
+    name := self.eat_word();
+    self.f.name&.items().slice(0, name.len).copy_from(name);  // :UnacceptablePanic
+    self.f.lnk.export = export;
+    self.parse_args(true);
+}
+
+fn parse_args(self: *QParseCtx, is_par: bool) void = {
+    self.skip_blanks();
+    o := if(is_par, => Qbe.O.par, => .arg);
+    if !self.eat("(") {
+        @fmt(self.error&, "expected '(' before function args");
+        return()
+    };
+    if(self.eat(")"), => return()); // no args
+    panic("TODO: parse args");
+    if !self.eat(")") {
+        @fmt(self.error&, "expected ')' after function args");
+        return()
+    };
+}
+
+fn parse_line(self: *QParseCtx) bool = {
+    self.skip_lines();
+    if self.check("}") {
+        return(false);
+    };
+    if self.eat("@") {
+        name := self.eat_word();
+        blk := self.out.box_zeroed(Qbe.Blk);
+        blk.name&.items().slice(0, name.len).copy_from(name);  // :UnacceptablePanic
+        if self.f.nblk == 0 {
+            if name != "start" {
+                @fmt(self.error&, "first block must be @start");
+                return(false);
+            };
+            self.f.start = blk;
+        } else {
+            self.end_block();
+        };
+        blk.link = self.blk;
+        self.blk = blk;
+        self.f.nblk += 1;
+        self.skip_lines();
+    };
+    self.parse_inst();
+    if self.error.len != 0 {
+        @fmt(self.error&, " on line %", self.line);
+        return(false);
+    };
+    true
+}
+
+fn end_block(self: *QParseCtx) void = {
+    if self.blk.jmp.type == .Jxxx {
+        @fmt(self.error&, "block % has not been terminated", self.blk.name());
+        return()
+    };
+    self.f.copy_instructions_from_scratch(self.blk);
+    ins: []Qbe.Ins = (ptr = self.blk.ins, len = self.blk.nins.zext()); // TODO: why isn't this a QList? -- Nov 12
+    ins.reverse(); // emit() spits out instructions backwards
+}
+
+fn parse_inst(self: *QParseCtx) void = {
+    to := QbeNull;
+    k := "w".ascii();
+    if self.check("%") {
+        to = self.parse_ref();
+        if !self.eat("=") {
+            @fmt(self.error&, "Missing equals sign");
+            return();
+        };
+        k = self.input[self.cursor];
+        self.cursor += 1;
+        // in addition to wlsd we allow numbers (used as argument indices, see meta/template.fr).
+        if !"wlsd".contains(k&) && !k.is_ascii_digit() {
+            @fmt(self.error&, "Missing operation class character after '='");
+            return();
+        };
+    };
+    self.skip_blanks();
+    n := self.eat_word();
+    if n == "call" {
+        panic("TODO: special syntax");
+    };
+    if n == "blit" {
+        panic("TODO: special syntax");
+    };
+    if n == "phi" {
+        panic("TODO: special syntax");
+    };
+    
+    arg0 := self.parse_ref();
+    if from_name(Qbe.O, n) { o | 
+        arg1 := if(self.eat(","), => self.parse_ref(), => QbeNull);
+        k := or cls_from_char(k) {
+            self.replacements&.push(key = k.zext() - "0".char(), r = to);
+            .Kw
+        };
+        if to != QbeNull {
+            self.f.get_temporary(to)[].cls = k;  // :PatchCls
+        };
+        self.f.emit(o, k, to, arg0, arg1);
+        return();
+    };
+    
+    ::if(Qbe.J);
+    j: Qbe.J = if n == "ret" {
+        self.ret
+    } else {
+        ::?Qbe.J;
+        or from_name(Qbe.J, n) {
+            @fmt(self.error&, "unknown operation keyword '%'", n);
+            return()
+        }
+    };
+    if self.blk.jmp.type != .Jxxx {
+        @fmt(self.error&, "block % has already been terminated", self.blk.name());
+        return()
+    };
+    self.blk.jmp.type = j;
+    self.blk.jmp.arg = arg0;
+    if self.eat("@") {
+        panic("TODO: terminator");
+    };
+    if self.eat(",") && self.eat("@") {
+        panic("TODO: terminator");
+    };
+}
+
+// TODO: sb,ub,sh,uh for apple abi
+fn cls_from_char(c: u8) ?Qbe.Cls = 
+    (Some = @switch(c) {
+        @case("w".ascii()) => .Kw;
+        @case("l".ascii()) => .Kl;
+        @case("s".ascii()) => .Ks;
+        @case("d".ascii()) => .Kd;
+        @default => return(.None)
+    });
+
+fn parse_ref(self: *QParseCtx) Qbe.Ref = {
+    self.skip_blanks();
+    if self.eat("%") {  // tmp
+        name := if self.input[self.cursor].is_ascii_digit() {
+            // we allow integer names for referncing template arguments
+            self.cursor += 1;
+            self.input.slice(self.cursor - 1, self.cursor)
+        } else {
+            self.eat_word()
+        };
+        if self.tmps&.get(name) { t |
+            return(t);
+        };
+        t := self.f.newtmp(name, .Kw);  // :PatchCls
+        self.tmps&.insert(name, t);
+        return(t);
+    };
+    // TODO: 'thread'
+    if self.eat("$") {  // global
+        name := self.eat_word(); 
+        name := maybe_borrow_cstr(name, temp()); // :SLOW
+        con: Qbe.Con = (sym = (id = self.f.globals.intern(name), type = .SGlo), type = .CAddr, bits = (i = 0));
+        return(self.f.newcon(con&));
+    };
+    
+    if self.eat(":") {  // type
+        name := self.eat_word(); 
+        panic("TODO: parse type");
+    };
+    if self.eat("[") { 
+        panic("TODO: memory");
+    };
+    
+    is_float := self.eat("f_");
+    double := self.eat("d_");
+    slot := self.eat("S");
+    int := self.eat("I");
+    negative := self.eat("-");
+    if !self.input[self.cursor].is_ascii_digit() {
+        if int || is_float || double || slot || negative {
+            @fmt(self.error&, "expected a number because of the prefix");
+            return(QbeNull);
+        };
+        // This may or may not be an error depending on the context
+        return(QbeNull);
+    };
+    
+    i := self.parse_number();
+    if self.eat(".") {
+        if slot || int {
+            @fmt(self.error&, "found '.' in number with prefix '%' (expected integer for %)", 
+                if(int, => "I", => "S"), if(int, => "RInt", => "RSlot"));
+            return(QbeNull);
+        };
+        if !is_float && !double {
+            @fmt(self.error&, "found '.' in number without prefix 'd_' or 's_'");
+            return(QbeNull);
+        };
+        if is_float == double {
+            @fmt(self.error&, "both prefixes 'd_' and 's_'");
+            return(QbeNull);
+        };
+        i := i.float();
+        fraction := self.parse_number();
+        panic("TODO: combine number");
+        if negative {
+            i = -i;
+        };
+        // create con
+        // early return
+    };
+    if negative {
+        i = -i;
+    };
+    if slot {
+        if is_float || double || int {
+            @fmt(self.error&, "found 'S' in number with other prefix");
+            return(QbeNull);
+        };
+        return(SLOT(i)); // note: you have to do the /4 yourself
+    };
+    if int {
+        if is_float || double || slot {
+            @fmt(self.error&, "found 'I' in number with other prefix");
+            return(QbeNull);
+        };
+        return(INT(i)); 
+    };
+    
+    self.f.getcon(i)
+}
+
+fn parse_number(self: *QParseCtx) i64 = {
+    v := 0;
+    while => self.input[self.cursor].is_ascii_digit() {
+        v *= 10;
+        v += self.input[self.cursor].zext() - "0".char();
+        self.cursor += 1;
+    };
+    v
+}
+
+fn skip_blanks(self: *QParseCtx) void = {
+    while => self.cursor < self.input.len && self.input[self.cursor].is_ascii_whitespace() && self.input[self.cursor] != "\n".ascii() {
+        self.cursor += 1;
+    };
+}
+
+// we have a little self respect and fold away the loop at comptime when the string is one long.
+fn eat(self: *QParseCtx, $s: Str) bool = {
+    self.skip_blanks();
+    if(self.cursor + s.len() >= self.input.len, => return(false));
+    @if(@run s.len() == 1, {
+        c := self.input[self.cursor] == @run s[0];
+        self.cursor += c.int();
+        c
+    }, {
+        cursor := self.cursor;
+        for s { c | 
+            if(c != self.input[cursor], => return(false));
+            cursor += 1;
+        };
+        self.cursor = cursor;
+        true
+    })
+}
+
+fn check(self: *QParseCtx, s: Str) bool = {
+    self.skip_blanks();
+    if(self.cursor + s.len >= self.input.len, => return(false));
+    cursor := self.cursor;
+    for s { c | 
+        if(c != self.input[cursor], => return(false));
+        cursor += 1;
+    };
+    true
+}
+
+fn allow_in_identifier(c: u8) bool = {
+    c.is_ascii_alpha() || c.is_ascii_digit() || c == "_".ascii() || c == ".".ascii() 
+}
+
+// TODO: bounds
+fn eat_word(self: *QParseCtx) Str = {
+    self.skip_blanks();
+    start := self.cursor;
+    while => self.input[self.cursor].allow_in_identifier() {
+        self.cursor += 1;
+    };
+    self.input.slice(start, self.cursor)
+}
+
+fn default_init(f: *Qbe.Fn) void = {
+    f.tmp = new(Qbe.Tmp0, .PFn);
+    f.con = new(FIXED_CONST_COUNT, .PFn);
+    f.mem = new(0, .PFn);
+    f.retty = -1;
+    ::assert_eq(Qbe.Ref);
+    assert_eq(f.getcon(0xdeaddead), QbeUndef);
+    assert_eq(f.getcon(0), QbeConZero);
+    assert_eq(f.ncon.zext(), FIXED_CONST_COUNT);
+    // Add temporaries representing physical registers.
+    // For the comptime usecase, the is_float will be wrong for some targets but that's fine becuase register numbers will just be moved to the real function, 
+    
+    t := f.globals.target;
+    range(0, Qbe.Tmp0) { i |
+        is_float := t.fpr0 <= i.intcast() && i.intcast() < (t.fpr0 + t.nfpr);
+   	    assert_eq(f.newtmp("r", if(is_float, => .Kd, => .Kl)), TMP(i));
+    };
+    assert_eq(f.ntmp.zext(), Qbe.Tmp0);
+}

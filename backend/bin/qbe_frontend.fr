@@ -25,6 +25,7 @@ fn main() void = {
     flags := i64.list(temp());
     goal := QbeOutputPurpose.AsmText;
     arch := query_current_arch().unwrap();
+    own_parser := false;
     while => args.len > 0 {
         a := args[0].str();
         @switch(a) {
@@ -85,6 +86,10 @@ fn main() void = {
                 slow = true;
                 pop();
             };
+            @case("-p") => {
+                own_parser = true;
+                pop();
+            };
             @default => {
                 if a.ends_with(".fr") {// TODO: ugh don't care about the file extension 
                     pop();
@@ -126,8 +131,6 @@ fn main() void = {
     };
     @assert(!infile.is_null(), "failed to open input '%'", inpath);
     
-    INFILE :: @static(*FILE);
-    INFILE[] = infile;
     global_module[].outf = outfile;
     
     handle_dbg :: fn(s: CStr) void = ();
@@ -143,10 +146,20 @@ fn main() void = {
     handle_data :: fn(d: *Qbe.Dat) void = {
         global_module.new_emit_data(d);
     };
-    if slow {
-        parse(infile, "<file>".sym().c_str(), handle_dbg, handle_data, handle_fn_slow);
+    if own_parser {
+        src := libc_allocator.read_to_string(inpath).items();
+        res := @if(slow, 
+            parse_top_level(global_module, src, handle_data, handle_fn_slow),
+            parse_top_level(global_module, src, handle_data, handle_fn));
+        if res&.is_err() {
+            panic(res.Err);
+        };
     } else {
-        parse(infile, "<file>".sym().c_str(), handle_dbg, handle_data, handle_fn);
+        if slow {
+            parse(infile, "<file>".sym().c_str(), handle_dbg, handle_data, handle_fn_slow);
+        } else {
+            parse(infile, "<file>".sym().c_str(), handle_dbg, handle_data, handle_fn);
+        };
     };
     if want_exe {
         // TODO: just stick this in emitfin?

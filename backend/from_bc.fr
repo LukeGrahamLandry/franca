@@ -157,7 +157,7 @@ fn emit_entry_points_and_debug_info(gen: *CodeGen(EmitQbe2), comp: CompCtx, fns:
                 callee := self.inst_func_ref(f);
                 self.b&.push_inst0(self.current, .call, .Kw, callee, QbeNull);
             };
-            self.b&.end_block(self.current, (type = .Jretl, arg = self.b&.push_literal(0)));
+            self.b&.end_block(self.current, (type = .retl, arg = self.b&.push_literal(0)));
             fake_decl_name := @format("main\0") temp();
             fnn := self.b&.build(fake_decl_name.items());
             run_qbe_passes(fnn&);
@@ -444,7 +444,7 @@ fn setup(self: *EmitQbe2, body: *FnBody, vars_out: *List(Qbe.Ref)) void = {
     };
     
     // It's crimes to jump to the start block so don't use that as our entry block. 
-    self.b&.end_block(entry, (type = .Jjmp, target1 = (id = 1)));
+    self.b&.end_block(entry, (type = .jmp, target1 = (id = 1)));
     
     // :AllOurBlocksUpFront
     // The backend might not go to blocks in order but we want BbIds to match. 
@@ -612,7 +612,7 @@ fn inst_call(self: *EmitQbe2, args: Slice(Qbe.Ref), sig: PrimSig, callee: Qbe.Re
 }
 
 fn inst_trap(self: *EmitQbe2) void = {
-    self.b&.end_block(self.current, (type = .Jhlt));
+    self.b&.end_block(self.current, (type = .hlt));
 }
 
 fn inst_call_ptr(self: *EmitQbe2, args: Slice(Qbe.Ref), sig: PrimSig, ptr: EmitQbe2.Val, _loc: ?Span) Slice(EmitQbe2.Val) = {
@@ -653,7 +653,7 @@ fn inst_func_ref(self: *EmitQbe2, fid: FuncId) EmitQbe2.Val = {
 
 fn inst_jump_if(self: *EmitQbe2, cond: EmitQbe2.Val, true: BbId, false: BbId, args: Slice(EmitQbe2.Val)) void = {
     assert(args.len.eq(0), "i dont use this yet");
-    self.b&.end_block(self.current, (type = .Jjnz, arg = cond, target1 = (id = true.id + 1), target2 = (id = false.id + 1)));
+    self.b&.end_block(self.current, (type = .jnz, arg = cond, target1 = (id = true.id + 1), target2 = (id = false.id + 1)));
 }
 
 fn inst_jump(self: *EmitQbe2, always: BbId, args: Slice(EmitQbe2.Val)) void = {
@@ -667,7 +667,7 @@ fn inst_jump(self: *EmitQbe2, always: BbId, args: Slice(EmitQbe2.Val)) void = {
         };
         self.b&.push_inst0(self.current, store_op, .Kw, r, self.block_args[i]);
     };
-    self.b&.end_block(self.current, (type = .Jjmp, target1 = (id = always.id + 1)));
+    self.b&.end_block(self.current, (type = .jmp, target1 = (id = always.id + 1)));
 }
 
 fn is_kw_tmp(self:  *EmitQbe2, r: Qbe.Ref) bool = {
@@ -708,7 +708,7 @@ fn binary_search_switch(self: *EmitQbe2, cases: []SwitchPayload, inspected: Qbe.
     value := self.b&.push_literal(case.value);
     cmp_op := @if(is_kw_tmp(self, inspected), Qbe.O.cslew, Qbe.O.cslel);
     ok := self.b&.push_inst(self.current, cmp_op, .Kw, inspected, value);
-    self.b&.end_block(self.current, (type = .Jjnz, arg = ok, target1 = low_block, target2 = high_block));
+    self.b&.end_block(self.current, (type = .jnz, arg = ok, target1 = low_block, target2 = high_block));
     
     self.current = high_block;
     binary_search_switch(self, cases.slice(0, mid), inspected, default);
@@ -724,27 +724,27 @@ fn linear_search_switch(self: *EmitQbe2, cases: []SwitchPayload, inspected: Qbe.
     for cases { case | 
         value := self.b&.push_literal(case.value);
         ok := self.b&.push_inst(self.current, cmp_op, .Kw, inspected, value);
-        self.b&.end_block(self.current, (type = .Jjnz, arg = ok, target1 = (id = case.block.id + 1), target2 = next_block));
+        self.b&.end_block(self.current, (type = .jnz, arg = ok, target1 = (id = case.block.id + 1), target2 = next_block));
         self.current = next_block;
         next_block = self.b&.push_block();
     };
-    self.b&.end_block(self.current, (type = .Jjmp, target1 = (id = default.id + 1)));
+    self.b&.end_block(self.current, (type = .jmp, target1 = (id = default.id + 1)));
 }
 
 fn inst_return(self: *EmitQbe2, args: Slice(EmitQbe2.Val)) void = {
     @switch(args.len){
         @case(0) => {
             if self.current_has_indirect_return {
-                self.b&.end_block(self.current, (type = .Jretc, arg = self.indirect_return_slot));
+                self.b&.end_block(self.current, (type = .retc, arg = self.indirect_return_slot));
                 // :set_aggragate_return_index
             } else {
-                self.b&.end_block(self.current, (type = .Jret0));
+                self.b&.end_block(self.current, (type = .ret0));
             };
         };
         @case(1) => {
             // TODO: this should be the same? does llvm mess with it somehow? 
             //k := qbe_real_class(self.signeture.ret1.unwrap());
-            //op: Qbe.J = @as(Qbe.J) @as(i64) Qbe.J.Jxxx.raw().zext() + k.raw().zext() + 1;
+            //op: Qbe.J = @as(Qbe.J) @as(i64) Qbe.J.xxx.raw().zext() + k.raw().zext() + 1;
             op := qbe_ret(self.signeture.ret1.unwrap());
             self.b&.end_block(self.current, (type = op, arg = args[0]));
         };
@@ -756,7 +756,7 @@ fn inst_return(self: *EmitQbe2, args: Slice(EmitQbe2.Val)) void = {
             offset_to_second_field := self.b&.push_literal(@as(i64) 8);
             struct_out_2 := self.b&.push_inst(self.current, .add, .Kl, self.indirect_return_slot, offset_to_second_field);
             self.b&.push_inst0(self.current, qbe_store(t2), .Kw, args[1], struct_out_2);
-            self.b&.end_block(self.current, (type = .Jretc, arg = self.indirect_return_slot));
+            self.b&.end_block(self.current, (type = .retc, arg = self.indirect_return_slot));
             self.b.aggragate_return_index = (Some = self.pair_type_id);
         };
         @default fn() => unreachable();
@@ -810,13 +810,13 @@ fn qbe_real_class(ty: Prim) Qbe.Cls = {
 
 fn qbe_ret(ty: Prim) Qbe.J = {
     @match(ty) {
-        fn P64() => .Jretl;
-        fn I64() => .Jretl;
-        fn I32() => .Jretw;
-        fn I16() => .Jretw;
-        fn I8() =>  .Jretw;
-        fn F64() => .Jretd;
-        fn F32() => .Jrets;
+        fn P64() => .retl;
+        fn I64() => .retl;
+        fn I32() => .retw;
+        fn I16() => .retw;
+        fn I8() =>  .retw;
+        fn F64() => .retd;
+        fn F32() => .rets;
     }
 }
 

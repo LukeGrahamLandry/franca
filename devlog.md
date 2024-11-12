@@ -1,3 +1,9 @@
+## (Nov 12)
+
+- made sequential enum use the right value size based on its declared type so const_eval_any doesn't fail debug check.
+
+## (Nov 10)
+
 - spent so long on typoing `Indirect01 = 0b10`
 
 ## peaceful cleanup (Nov 6)

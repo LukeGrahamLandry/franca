@@ -3619,6 +3619,12 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
         @default => ();
     };
     
+    // this makes size match for int literals that get down casted in const_eval_any
+    // TODO: this should work on non-int types but it seems to get confused by Never.  -- Nov 12
+    if expr.expr&.is(.Value) && expr.ty != ret_ty && self.get_type(ret_ty).is(.Int) {
+        @check(self.coerce_const_expr(expr, (Specific = ret_ty), false)) return;
+    };
+    
     if self.check_quick_eval(expr, ret_ty) { val |
         self.dispatch.enclosing_function = old_func;
         return(Ok = val);
@@ -4106,10 +4112,13 @@ fn enum_macro(self: *SelfHosted, arg: *FatExpr, target: *FatExpr) Maybe(FatExpr)
         }
         fn Tuple(names) => {
             @err_assert(sequential, "@enum on tuple of names must be of int type") return;
+            as_int := as_int.unwrap();
+            repr := if(as_int.bit_count == 8 || as_int.bit_count == 16 || as_int.bit_count == 32, => as_int.bit_count / 8, => 8);
             //@err_assert(type == i64, "TODO: @enum(other-int-types)(Tuple)") return;
             enumerate names { i, name |
                 name := @unwrap(name.ident(), "@enum expected ident") return;
                 value := self.to_values(i64, i);
+                value.Small._1 = repr.trunc();
                 fields&.push(@as(F) (name, value));
             };
         }

@@ -538,14 +538,19 @@ fn fill_export_ffi(out: *List(u8)) void = {
     
     @fmt(out, "fn const_eval(expr: FatExpr, ty: Type, result: rawptr) void #ct #comptime_addr(%);\n", @as(rawptr) const_eval_any);
     
-    const_eval_any:: fn(c: CompilerRs, expr: FatExpr, ty: Type, addr: *u8) void = {
-        len: i64 = c[][].get_info(ty)[].stride_bytes.zext();
-        out := slice(addr, len);
+    const_eval_any :: fn(c: CompilerRs, expr: FatExpr, ty: Type, addr: *u8) void = {
+        size: i64 = c[][].get_info(ty)[].stride_bytes.zext();
+        out := slice(addr, size);
         
         res := c[][].poll_in_place(void) {()Maybe(void)|
             value := @check(c[][].immediate_eval_expr(expr&, ty)) local_return;
-            out.copy_from(value&.bytes());
-            .Ok
+            b := value&.bytes();
+            if b.len == size {
+                out.copy_from(b);
+                .Ok
+            } else {
+                @err("ICE: const_eval_any(%) size mismatch for value %", c[][].log_type(ty), log(value&, c[][], ty))
+            }
         };
         c[][].unwrap_report_error(void, res);
     };
@@ -642,8 +647,8 @@ fn fill_export_ffi(out: *List(u8)) void = {
                 };
                 enumerate it.fields { i, it | 
                     if it._0 == name {
-                        i := i64.assume_cast(it._1&)[];
-                        return(i);
+                        @debug_assert(it._1&.is(.Small), "called tag_value but value was .Big");
+                        return(it._1.Small._0);
                     };
                 };
                 @panic("bad enum case name % for %", self.pool.get(name), self.log_type(enum_ty))
@@ -713,7 +718,3 @@ fn fill_export_ffi(out: *List(u8)) void = {
         self.unwrap_report_error(FuncId, res)
     };
 }
-
-//////////////////////////////////////////////////////////////////////////////
-// these are just stupid helpers to deal with the awquard multiple compiler types for calling into the rust code. 
-
