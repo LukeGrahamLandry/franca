@@ -1,6 +1,9 @@
 ## (Nov 12)
 
 - made sequential enum use the right value size based on its declared type so const_eval_any doesn't fail debug check.
+- start of ir parser so i can run tests without LINK_QBE_C
+- (minimal, 58), (loadw alas + predeclare blocks + jumps, 54), (phi, 47), (header par, 35), (fix off by one on lines, 33),
+  (call arg, 29), (blit, 27), (float literals, 25), (data, 21), (vararg, 18), (env, thread, fix export\n, fix cstr, 12)
 
 ## (Nov 10)
 

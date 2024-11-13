@@ -12,7 +12,7 @@
 Replacement :: @struct(key: i64, r: Qbe.Ref);
 
 QParseCtx :: @struct(
-    blocks: HashMap(Str, Qbe.Blk),
+    blocks: HashMap(Str, *Qbe.Blk),
     tmps: HashMap(Str, Qbe.Ref),
     replacements: List(Replacement),
     error: List(u8),
@@ -30,20 +30,24 @@ fn parse_top_level(m: *QbeModule, src: Str, yield_data: @FnPtr(*Qbe.Dat) void, y
     self: QParseCtx = init(m, src); 
     self := self&;
     self.f.globals = m;
-    self.f.default_init();
+    self.f.default_init();  // :NeedFunctionInitForData
     
     loop {
         continue :: local_return;
         self.skip_blanks();
+        self.skip_lines();
         
         export := self.eat("export");
+        self.skip_lines();
         
         if self.eat("function") {
+            self.skip_lines();
             self.f.reset_scratch();
             parse_header(self, export);
             if self.error.len != 0 {
                 return(Err = self.error.items());
             };
+            self.skip_lines();
             if !self.eat("{") {
                 return(Err = "expected '{' before function body");
             };
@@ -68,14 +72,16 @@ fn parse_top_level(m: *QbeModule, src: Str, yield_data: @FnPtr(*Qbe.Dat) void, y
         };
         thread := self.eat("thread");
         if self.eat("data") {
-            panic("TODO: parse data");
+            @try(self.parse_data(export, thread, yield_data)) return;
+            continue();
         };
         
-        if self.skip_lines() == 1 {
-            return(Err = "expected new line");
-        };
         if self.cursor >= self.input.len {
             return(.Ok);
+        };
+        self.skip_blanks();
+        if self.skip_lines() == 1 && self.cursor < self.input.len {
+            return(Err = "expected new line");
         };
     };
     unreachable()
@@ -110,11 +116,10 @@ fn init(m: *QbeModule, src: Str) QParseCtx = (
 );
 
 fn parse_body(self: *QParseCtx) Result(Ty(*Qbe.Fn, []Replacement), Str) = {
-    @debug_assert_eq(self.f.ntmp.zext(), Qbe.Tmp0);
     while => self.parse_line() {
         self.skip_lines();
     };
-    self.end_block();
+    self.end_block(.None);
     if self.error.len != 0 {
         return(Err = self.error.items());
     };
@@ -149,18 +154,74 @@ fn parse_header(self: *QParseCtx, export: bool) void = {
     name := self.eat_word();
     self.f.name&.items().slice(0, name.len).copy_from(name);  // :UnacceptablePanic
     self.f.lnk.export = export;
+    self.f.leaf = true;
     self.parse_args(true);
 }
 
 fn parse_args(self: *QParseCtx, is_par: bool) void = {
     self.skip_blanks();
-    o := if(is_par, => Qbe.O.par, => .arg);
+    base_op := if(is_par, => Qbe.O.par,  => .arg);
+    abi_op  := if(is_par, => Qbe.O.parc, => .argc);
     if !self.eat("(") {
         @fmt(self.error&, "expected '(' before function args");
         return()
     };
     if(self.eat(")"), => return()); // no args
-    panic("TODO: parse args");
+    
+    while => !self.check(")") && self.cursor < self.input.len {
+        continue :: local_return;
+        k := Qbe.Cls.Kw;
+        type_ref := QbeNull;
+        r := QbeNull;
+        o := if self.check(":") {
+            panic("TODO: arg type");
+            type_ref = QbeNull; // TODO
+            r = self.parse_ref();
+            abi_op
+        } else {
+            kk := self.input[self.cursor];
+            self.cursor += 1;
+            r = self.parse_ref();
+            o := base_op;
+            k = or cls_from_char(kk) {
+                if kk == ".".ascii() && self.eat("..") {
+                    @debug_assert(r == QbeNull);
+                    if is_par {
+                        self.f.vararg = true;
+                    } else {
+                        self.f.emit(.argv, .Kw, QbeNull, QbeNull, QbeNull);
+                    };
+                    self.eat(",");
+                    continue();
+                };
+                if kk == "e".ascii() && self.eat("nv") {
+                    @debug_assert(r == QbeNull, "should have tried to parse_ref('nv')");
+                    r = self.parse_ref();
+                    o = if(is_par, => .pare, => .arge);
+                    .Kl
+                } else {
+                    if !kk.is_ascii_digit() {
+                        @fmt(self.error&, "invalid ref cls char=%", kk);
+                        return();
+                    };
+                    self.replacements&.push(key = kk.zext() - "0".char(), r = r);
+                    .Kw
+                }
+            };
+            o
+        };
+        if r == QbeNull {
+            @fmt(self.error&, "args expected (:type or cls)(ref)");
+            return();
+        };
+        self.eat(",");
+        if is_par {
+            self.f.emit(o, k, r, type_ref, QbeNull);
+        } else {
+            self.f.emit(o, k, QbeNull, r, type_ref);
+        };
+    };
+    
     if !self.eat(")") {
         @fmt(self.error&, "expected ')' after function args");
         return()
@@ -172,36 +233,41 @@ fn parse_line(self: *QParseCtx) bool = {
     if self.check("}") {
         return(false);
     };
-    if self.eat("@") {
-        name := self.eat_word();
-        blk := self.out.box_zeroed(Qbe.Blk);
-        blk.name&.items().slice(0, name.len).copy_from(name);  // :UnacceptablePanic
+    if self.parse_blk() { blk | 
         if self.f.nblk == 0 {
-            if name != "start" {
-                @fmt(self.error&, "first block must be @start");
-                return(false);
-            };
             self.f.start = blk;
         } else {
-            self.end_block();
+            self.end_block(Some = blk);
         };
-        blk.link = self.blk;
         self.blk = blk;
         self.f.nblk += 1;
-        self.skip_lines();
+        self.parse_line();
     };
     self.parse_inst();
     if self.error.len != 0 {
-        @fmt(self.error&, " on line %", self.line);
+        @fmt(self.error&, " on line %\n", self.line);
         return(false);
     };
     true
 }
 
-fn end_block(self: *QParseCtx) void = {
-    if self.blk.jmp.type == .Jxxx {
-        @fmt(self.error&, "block % has not been terminated", self.blk.name());
+fn end_block(self: *QParseCtx, new_blk: ?*Qbe.Blk) void = {
+    if self.blk.is_null() {
+        @fmt(self.error&, "function % has no blocks", self.f.name());
         return()
+    };
+    if self.blk.jmp.type == .Jxxx {
+        if new_blk { blk |
+            // fallthrough to the next block
+            self.blk.jmp.type = .jmp;
+            self.blk.s1 = blk;
+        } else { 
+            @fmt(self.error&, "block % has not been terminated", self.blk.name());
+            return()
+        };
+    };
+    if new_blk { bb | 
+        self.blk.link = bb;  // direction matters!
     };
     self.f.copy_instructions_from_scratch(self.blk);
     ins: []Qbe.Ins = (ptr = self.blk.ins, len = self.blk.nins.zext()); // TODO: why isn't this a QList? -- Nov 12
@@ -227,17 +293,41 @@ fn parse_inst(self: *QParseCtx) void = {
     };
     self.skip_blanks();
     n := self.eat_word();
-    if n == "call" {
-        panic("TODO: special syntax");
-    };
-    if n == "blit" {
-        panic("TODO: special syntax");
-    };
-    if n == "phi" {
-        panic("TODO: special syntax");
+    arg0 := self.parse_ref();
+    n = @switch(n) {
+        @case("call") => {
+            self.f.leaf = false;
+            if self.check("(") { // syntax sugar for call
+                self.parse_args(false);
+            }; // else we allow you to specify a placeholder for the RCall
+            "call"  
+        };
+        @case("blit") => {
+            self.eat(",");
+            arg1 := self.parse_ref();
+            self.eat(",");
+            arg2 := self.parse_ref();
+            self.f.emit(.blit0, .Kw, QbeNull, arg0, arg1);
+            if self.f.get_int(arg2) { size |
+                self.f.emit(.blit1, .Kw, QbeNull, INT(size), QbeNull);
+            } else {
+                @fmt(self.error&, "blit third argument must be interger literal");  
+            };
+            return()
+        };
+        @case("phi") => return(self.parse_phi(to, k));
+        @case("loadw") => "loadsw";
+        @case("loadl") => "load";
+        @case("loads") => "load";
+        @case("loadd") => "load";
+        @case("") => {
+            // TODO: this feels loopy on invalid input
+            self.skip_lines();
+            return()
+        };
+        @default => n;
     };
     
-    arg0 := self.parse_ref();
     if from_name(Qbe.O, n) { o | 
         arg1 := if(self.eat(","), => self.parse_ref(), => QbeNull);
         k := or cls_from_char(k) {
@@ -246,6 +336,9 @@ fn parse_inst(self: *QParseCtx) void = {
         };
         if to != QbeNull {
             self.f.get_temporary(to)[].cls = k;  // :PatchCls
+        };
+        if is_alloc(o) && rtype(arg0) != .RCon {
+            self.f.dynalloc = true;
         };
         self.f.emit(o, k, to, arg0, arg1);
         return();
@@ -267,23 +360,55 @@ fn parse_inst(self: *QParseCtx) void = {
     };
     self.blk.jmp.type = j;
     self.blk.jmp.arg = arg0;
-    if self.eat("@") {
-        panic("TODO: terminator");
-    };
-    if self.eat(",") && self.eat("@") {
-        panic("TODO: terminator");
+    self.eat(",");
+    if self.parse_blk() { b | 
+        self.blk.s1 = b;
+        self.eat(",");
+        if self.parse_blk() { b | 
+            self.blk.s2 = b;
+        };
     };
 }
 
+fn parse_phi(self: *QParseCtx, to: Qbe.Ref, k: u8) void = {
+    // example: `%s  =w phi @start 0, @loop %s1`
+    phi := self.out.box_zeroed(Qbe.Phi);
+    phi.arg = new(0, .PFn);
+    phi.blk = new(0, .PFn);
+    phi.to = to; // TODO: require non-null;
+    ::?Qbe.Cls;
+    phi.cls = or cls_from_char(k) {
+        self.replacements&.push(key = k.zext() - "0".char(), r = to);
+        .Kw
+    };
+    while => self.parse_blk() { blk | 
+        phi.narg += 1;
+        phi.arg&.grow(phi.narg.zext());
+        phi.blk&.grow(phi.narg.zext());
+        arg := self.parse_ref();
+        if arg == QbeNull {
+            @fmt(self.error&, "phi instruction requires argument for block '%'", blk.name());
+            return();
+        };
+        phi.arg[phi.narg.zext() - 1] = arg;
+        phi.blk[phi.narg.zext() - 1] = blk;
+        self.eat(",");
+    };
+    phi.link = self.blk.phi;
+    self.blk.phi = phi;
+    return();
+}
+
 // TODO: sb,ub,sh,uh for apple abi
-fn cls_from_char(c: u8) ?Qbe.Cls = 
+fn cls_from_char(c: u8) ?Qbe.Cls = {
     (Some = @switch(c) {
         @case("w".ascii()) => .Kw;
         @case("l".ascii()) => .Kl;
         @case("s".ascii()) => .Ks;
         @case("d".ascii()) => .Kd;
-        @default => return(.None)
-    });
+        @default => return(.None);
+    })
+}
 
 fn parse_ref(self: *QParseCtx) Qbe.Ref = {
     self.skip_blanks();
@@ -298,16 +423,21 @@ fn parse_ref(self: *QParseCtx) Qbe.Ref = {
         if self.tmps&.get(name) { t |
             return(t);
         };
+        // TODO: don't add the number suffix.
         t := self.f.newtmp(name, .Kw);  // :PatchCls
         self.tmps&.insert(name, t);
         return(t);
     };
-    // TODO: 'thread'
+    thread := self.eat("thread");
     if self.eat("$") {  // global
         name := self.eat_word(); 
         name := maybe_borrow_cstr(name, temp()); // :SLOW
-        con: Qbe.Con = (sym = (id = self.f.globals.intern(name), type = .SGlo), type = .CAddr, bits = (i = 0));
+        con: Qbe.Con = (sym = (id = self.f.globals.intern(name), type = @if(thread, .SThr, .SGlo)), type = .CAddr, bits = (i = 0));
         return(self.f.newcon(con&));
+    };
+    if thread {
+        @fmt(self.error&, "prefix 'thread' can only be used on an $address");
+        return(QbeNull);
     };
     
     if self.eat(":") {  // type
@@ -326,6 +456,9 @@ fn parse_ref(self: *QParseCtx) Qbe.Ref = {
     if !self.input[self.cursor].is_ascii_digit() {
         if int || is_float || double || slot || negative {
             @fmt(self.error&, "expected a number because of the prefix");
+            if self.eat(".") {
+                @fmt(self.error&, ". TODO: does qbe allow leading dot?");
+            };
             return(QbeNull);
         };
         // This may or may not be an error depending on the context
@@ -333,14 +466,9 @@ fn parse_ref(self: *QParseCtx) Qbe.Ref = {
     };
     
     i := self.parse_number();
-    if self.eat(".") {
-        if slot || int {
-            @fmt(self.error&, "found '.' in number with prefix '%' (expected integer for %)", 
-                if(int, => "I", => "S"), if(int, => "RInt", => "RSlot"));
-            return(QbeNull);
-        };
-        if !is_float && !double {
-            @fmt(self.error&, "found '.' in number without prefix 'd_' or 's_'");
+    if is_float || double {
+        if int || slot {
+            @fmt(self.error&, "cannot have I/S prefix with d_/s_");
             return(QbeNull);
         };
         if is_float == double {
@@ -348,33 +476,42 @@ fn parse_ref(self: *QParseCtx) Qbe.Ref = {
             return(QbeNull);
         };
         i := i.float();
-        fraction := self.parse_number();
-        panic("TODO: combine number");
-        if negative {
-            i = -i;
+        if self.eat(".") {
+            start := self.cursor;
+            fraction := self.parse_number();
+            i += fraction.float() / pow(10, self.cursor - start).float();
         };
-        // create con
-        // early return
+        i *= @if(negative, -1.0, 1.0);
+        i: i64 = if(is_float, => i.cast().bitcast().zext(), => i.bitcast());
+        c := self.f.getcon(i);
+        self.f.get_constant(c)[].flt = if(is_float, => 1, => 2);
+        return(c);
     };
-    if negative {
-        i = -i;
+    if self.eat(".") {
+        @fmt(self.error&, "found '.' in number without prefix d_ or s_");
+        return(QbeNull);
     };
-    if slot {
-        if is_float || double || int {
-            @fmt(self.error&, "found 'S' in number with other prefix");
-            return(QbeNull);
-        };
-        return(SLOT(i)); // note: you have to do the /4 yourself
+    i *= @if(negative, -1, 1);
+    if int && int == slot {
+        @fmt(self.error&, "number with both prefix S and I");
+        return(QbeNull);
     };
-    if int {
-        if is_float || double || slot {
-            @fmt(self.error&, "found 'I' in number with other prefix");
-            return(QbeNull);
-        };
-        return(INT(i)); 
-    };
-    
+    if(slot, => return(SLOT(i)));  // note: you have to do the /4 yourself
+    if(int, => return(INT(i)));
     self.f.getcon(i)
+}
+
+fn parse_blk(self: *QParseCtx) ?*Qbe.Blk = {
+    if(!self.eat("@"), => return(.None));
+    name := self.eat_word();
+    if self.blocks&.get(name) { b | 
+        return(Some = b);
+    };
+    // TODO: check that all referenced blocks get defined.
+    b := self.out.box_zeroed(Qbe.Blk);
+    b.name&.items().slice(0, name.len).copy_from(name);  // :UnacceptablePanic
+    self.blocks&.insert(name, b);
+    (Some = b)
 }
 
 fn parse_number(self: *QParseCtx) i64 = {
@@ -387,6 +524,103 @@ fn parse_number(self: *QParseCtx) i64 = {
     v
 }
 
+// example: `data $s = { l $pointer, b "hello", b 0 }`
+fn parse_data(self: *QParseCtx, export: bool, thread: bool, yield: @FnPtr(*Qbe.Dat) void) Result(void, Str) = {
+    if !self.eat("$") {
+        return(Err = "expected '$name' after 'data'");
+    };
+    name := self.eat_word();
+    if !self.eat("=") {
+        return(Err = "expected '=' after 'data $name'");
+    };
+    dat := Qbe.Dat.zeroed();
+    lnk: Qbe.Lnk = (export = export, thread = thread);
+    if self.eat("align") {
+        // :NeedFunctionInitForData
+        c := self.parse_ref();
+        if rtype(c) != .RCon {
+            return(Err = "expect number after 'data $name = align'");
+        };
+        c := self.f.get_constant(c);
+        if c.type != .CBits {
+            return(Err = "expect number after 'data $name = align'");
+        };
+        lnk.align = c.bits.i.trunc();
+    };
+    dat.type = .DStart;
+    dat.name = maybe_borrow_cstr(name, temp()); // :SLOW
+    dat.lnk = lnk&;
+    yield(dat&);
+    self.skip_lines();
+    if !self.eat("{") {
+        return(Err = "expected '{' to begin data");
+    };
+    self.skip_lines();
+    while => self.cursor < self.input.len && !self.check("}") {
+        dat.is_ref = false;
+        dat.is_str = false;
+        dat.has_quotes_and_escapes = false;
+        dat.u.str = Str.zeroed();
+        dat.type = @switch(self.input[self.cursor]) {
+            @case("b".ascii()) => .DB;
+            @case("l".ascii()) => .DL;
+            @case("z".ascii()) => .DZ;
+            @case("h".ascii()) => .DH;
+            @case("w".ascii()) => .DW;
+            @default => return(Err = "expected b/h/w/l/z prefix for data entry.");
+        };
+        self.cursor += 1;
+        self.skip_blanks();
+        if self.input[self.cursor] == "\"".ascii() {
+            start := self.cursor;
+            self.cursor += 1;
+            // TODO: bounds
+            while => self.input[self.cursor] != "\"".ascii() {
+                if self.input[self.cursor] == "\\".ascii() {
+                    self.cursor += 1;
+                };
+                self.cursor += 1;
+            };
+            self.cursor += 1;
+            dat.u.str = self.input.slice(start, self.cursor);
+            // TODO: remove this when I'm fully done using qbe's text asm output
+            dat.u.str.ptr = { x := maybe_borrow_cstr(dat.u.str, temp()); x.ptr };
+            dat.is_str = true;
+            dat.has_quotes_and_escapes = true;
+        } else {
+            // :NeedFunctionInitForData
+            r := self.parse_ref();
+            if rtype(r) != .RCon {
+                return(Err = "expected \"string\" or $variable or numeric constant for data entry");
+            };
+            c := self.f.get_constant(r);
+            @match(c.type) {
+                fn CBits() => {
+                    dat.u.num = c.bits.i;
+                }
+                fn CAddr() => {
+                    dat.is_ref = true;
+                    info := self.f.globals.get_symbol_info(c.sym.id);
+                    dat.u.ref.name = info.name;
+                    dat.u.ref.off = c.bits.i;
+                }
+                @default => return(Err = "unreachable constant");
+            };
+        };
+        yield(dat&);
+        self.eat(","); // TODO: require
+        self.skip_lines();
+    };
+    self.eat(",");
+    dat.type = .DEnd;
+    yield(dat&);
+    if !self.eat("}") {
+        return(Err = "expected '}' to end data");
+    };
+    
+    .Ok
+}
+
 fn skip_blanks(self: *QParseCtx) void = {
     while => self.cursor < self.input.len && self.input[self.cursor].is_ascii_whitespace() && self.input[self.cursor] != "\n".ascii() {
         self.cursor += 1;
@@ -396,7 +630,7 @@ fn skip_blanks(self: *QParseCtx) void = {
 // we have a little self respect and fold away the loop at comptime when the string is one long.
 fn eat(self: *QParseCtx, $s: Str) bool = {
     self.skip_blanks();
-    if(self.cursor + s.len() >= self.input.len, => return(false));
+    if(self.cursor + s.len() > self.input.len, => return(false));
     @if(@run s.len() == 1, {
         c := self.input[self.cursor] == @run s[0];
         self.cursor += c.int();
