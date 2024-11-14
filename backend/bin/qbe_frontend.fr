@@ -15,7 +15,6 @@ fn main() void = {
     inpath := "-";
     run := false;
     debug := false;
-    want_exe := false;
     slow := false;
     args := cli_args();
     pop :: fn() => {
@@ -23,9 +22,9 @@ fn main() void = {
         args.len -= 1;
     };
     flags := i64.list(temp());
-    goal := QbeOutputPurpose.AsmText;
+    goal: QbeOutputPurpose = .AsmText;
     arch := query_current_arch().unwrap();
-    own_parser := false;
+    own_parser := !LINK_QBE_C;
     while => args.len > 0 {
         a := args[0].str();
         @switch(a) {
@@ -73,12 +72,10 @@ fn main() void = {
                 exit(0);
             };
             @case("-e") => {
-                want_exe = true;
                 goal = .Exe;
                 pop();
             };
             @case("-c") => {
-                want_exe = true;
                 goal = .Relocatable;
                 pop();
             };
@@ -103,6 +100,7 @@ fn main() void = {
             };
         };
     };
+    @assert(LINK_QBE_C || goal != .AsmText, "cannot do .AsmText without linking qbe-c, using -e, -c, -r to change goal");
     global_module[] = init_default_module(type = goal, os = query_current_os(), arch = arch);
     for flags { d | 
         global_module[].debug.items()[d] = true;
@@ -161,7 +159,7 @@ fn main() void = {
             parse(infile, "<file>".sym().c_str(), handle_dbg, handle_data, handle_fn);
         };
     };
-    if want_exe {
+    if (@is(goal, .Exe, .Relocatable)) {
         // TODO: just stick this in emitfin?
         chunks := output_macho(global_module);
         for chunks { chunk | 

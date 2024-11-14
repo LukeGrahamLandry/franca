@@ -9,6 +9,9 @@
 //! If I have to write many more of these, maybe I should reconsider doing something about parser generators. 
 //!
 
+// TODO: support opaque types
+// TODO: be stricter about checking for invalid input
+
 Replacement :: @struct(key: i64, r: Qbe.Ref);
 
 QParseCtx :: @struct(
@@ -68,7 +71,8 @@ fn parse_top_level(m: *QbeModule, src: Str, yield_data: @FnPtr(*Qbe.Dat) void, y
             continue();
         };
         if self.eat("type") {
-            panic("TODO: parse type");
+            @try(self.parse_type()) return;
+            continue();
         };
         thread := self.eat("thread");
         if self.eat("data") {
@@ -128,11 +132,14 @@ fn parse_body(self: *QParseCtx) Result(Ty(*Qbe.Fn, []Replacement), Str) = {
 
 fn parse_header(self: *QParseCtx, export: bool) void = {
     self.skip_blanks();
-    if self.check(":") {
-        type := self.parse_ref();
-        panic("TODO: type for function");
+    if self.eat(":") {
+        name := self.eat_word();
+        type := or self.find_type(name) {
+            @fmt(self.error&, "type '%' must be declared before use as function return class", name);
+            return()
+        };
         self.ret = .retc;
-        self.f.retty = type.val();
+        self.f.retty = type.intcast();
     } else {
         if !self.check("$") {
             k := or cls_from_char(self.input[self.cursor]) {
@@ -167,25 +174,27 @@ fn parse_args(self: *QParseCtx, is_par: bool) void = {
         return()
     };
     if(self.eat(")"), => return()); // no args
-    
     while => !self.check(")") && self.cursor < self.input.len {
         continue :: local_return;
-        k := Qbe.Cls.Kw;
-        type_ref := QbeNull;
-        r := QbeNull;
-        o := if self.check(":") {
-            panic("TODO: arg type");
-            type_ref = QbeNull; // TODO
-            r = self.parse_ref();
+        k := Qbe.Cls.Kl;
+        type := QbeNull;
+        variable := QbeNull;
+        o := if self.eat(":") {
+            name := self.eat_word();
+            type = TYPE(or self.find_type(name) {
+                @fmt(self.error&, "type '%' must be declared before use as arg/par", name);
+                return();
+            });
+            variable = self.parse_ref();
             abi_op
         } else {
             kk := self.input[self.cursor];
             self.cursor += 1;
-            r = self.parse_ref();
+            variable = self.parse_ref();
             o := base_op;
             k = or cls_from_char(kk) {
                 if kk == ".".ascii() && self.eat("..") {
-                    @debug_assert(r == QbeNull);
+                    @debug_assert(variable == QbeNull);
                     if is_par {
                         self.f.vararg = true;
                     } else {
@@ -195,8 +204,8 @@ fn parse_args(self: *QParseCtx, is_par: bool) void = {
                     continue();
                 };
                 if kk == "e".ascii() && self.eat("nv") {
-                    @debug_assert(r == QbeNull, "should have tried to parse_ref('nv')");
-                    r = self.parse_ref();
+                    @debug_assert(variable == QbeNull, "should have tried to parse_ref('nv')");
+                    variable = self.parse_ref();
                     o = if(is_par, => .pare, => .arge);
                     .Kl
                 } else {
@@ -204,21 +213,24 @@ fn parse_args(self: *QParseCtx, is_par: bool) void = {
                         @fmt(self.error&, "invalid ref cls char=%", kk);
                         return();
                     };
-                    self.replacements&.push(key = kk.zext() - "0".char(), r = r);
+                    self.replacements&.push(key = kk.zext() - "0".char(), r = variable);
                     .Kw
                 }
             };
             o
         };
-        if r == QbeNull {
+        if variable == QbeNull {
             @fmt(self.error&, "args expected (:type or cls)(ref)");
             return();
         };
         self.eat(",");
         if is_par {
-            self.f.emit(o, k, r, type_ref, QbeNull);
+            self.f.emit(o, k, variable, type, QbeNull);
         } else {
-            self.f.emit(o, k, QbeNull, r, type_ref);
+            if type == QbeNull {
+                type = variable;
+            };
+            self.f.emit(o, k, QbeNull, type, variable);
         };
     };
     
@@ -277,6 +289,7 @@ fn end_block(self: *QParseCtx, new_blk: ?*Qbe.Blk) void = {
 fn parse_inst(self: *QParseCtx) void = {
     to := QbeNull;
     k := "w".ascii();
+    return_type_for_call := QbeNull;
     if self.check("%") {
         to = self.parse_ref();
         if !self.eat("=") {
@@ -285,11 +298,20 @@ fn parse_inst(self: *QParseCtx) void = {
         };
         k = self.input[self.cursor];
         self.cursor += 1;
-        // in addition to wlsd we allow numbers (used as argument indices, see meta/template.fr).
-        if !"wlsd".contains(k&) && !k.is_ascii_digit() {
-            @fmt(self.error&, "Missing operation class character after '='");
-            return();
-        };
+        if k == ":".ascii() {
+            name := self.eat_word();
+            return_type_for_call = TYPE(or self.find_type(name) {
+                @fmt(self.error&, "type '%' must be declared before use as call return class", name);
+                return();
+            });
+            k = "l".ascii();
+        } else {
+            // in addition to wlsd we allow numbers (used as argument indices, see meta/template.fr).
+            if !"wlsd".contains(k&) && !k.is_ascii_digit() {
+                @fmt(self.error&, "Missing operation class character after '='");
+                return();
+            };
+        }
     };
     self.skip_blanks();
     n := self.eat_word();
@@ -339,6 +361,12 @@ fn parse_inst(self: *QParseCtx) void = {
         };
         if is_alloc(o) && rtype(arg0) != .RCon {
             self.f.dynalloc = true;
+        };
+        if return_type_for_call != QbeNull {
+            if o != .call {
+                @fmt(self.error&, "ref =:TypeName can only be used with call instruction but found '%'", o.get_name());
+            };
+            arg1 = return_type_for_call;
         };
         self.f.emit(o, k, to, arg0, arg1);
         return();
@@ -440,15 +468,16 @@ fn parse_ref(self: *QParseCtx) Qbe.Ref = {
         return(QbeNull);
     };
     
-    if self.eat(":") {  // type
+    if self.eat(":") {
         name := self.eat_word(); 
-        panic("TODO: parse type");
+        @fmt(self.error&, "expected ref but found type :%", name);
+        return(QbeNull);
     };
     if self.eat("[") { 
         panic("TODO: memory");
     };
     
-    is_float := self.eat("f_");
+    is_float := self.eat("s_");
     double := self.eat("d_");
     slot := self.eat("S");
     int := self.eat("I");
@@ -619,6 +648,139 @@ fn parse_data(self: *QParseCtx, export: bool, thread: bool, yield: @FnPtr(*Qbe.D
     };
     
     .Ok
+}
+
+fn parse_type(self: *QParseCtx) Result(void, Str) = {
+    if !self.eat(":") {
+        return(Err = "expected ':' before type name");
+    };
+    name := self.eat_word();
+    if !self.eat("=") {
+        return(Err = "expected '=' after :TypeName");
+    };
+    
+    m := self.f.globals;
+    t := m.number_of_types;
+    m.number_of_types += 1;
+    m.types.grow(m.number_of_types);
+    typ := m.types.index(t);
+    typ[] = Qbe.Typ.zeroed();  // :nulltermminator
+    
+    typ.align_log2 = -1;
+    if self.eat("align") {
+        self.skip_blanks();
+        i := self.parse_number().abs();
+        while => i != 0 {
+            i /= 2;
+            typ.align_log2 += 1;
+        };
+    };
+    typ.fields = new(0, .PLong);
+    if !self.eat("{") {
+        println(self.input.slice(self.cursor, self.cursor + 1));
+        return(Err = "expected '{' to begin type declaration");
+    };
+    if self.check("{") {
+        typ.is_union = true;
+        while => !self.eat("}") { // TODO: bounds
+            self.eat("{");
+            @try(self.parse_type_fields(typ)) return;
+            self.eat(",");
+        };
+    } else {
+        @try(self.parse_type_fields(typ)) return;
+    };
+    
+    @debug_assert_eq(t + 1, m.number_of_types, "array can't resize because types cannot be nested");
+    // write the name at the end so types can't refer to themselves
+    typ.name&.items().slice(0, name.len).copy_from(name);  // :UnacceptablePanic :nulltermminator
+    // TODO: bounds for null terminator
+    .Ok
+}
+
+fn parse_type_fields(self: *QParseCtx, typ: *Qbe.Typ) Result(void, Str) = {
+    self.skip_blanks();
+    if self.input[self.cursor].is_ascii_digit() { // TODO: this can only go at the top level i think
+        panic("TODO: opaque type");
+    };
+    
+    m := self.f.globals;
+    field_count := 0;
+    my_align: i64 = typ.align_log2.intcast();
+    my_size := 0;
+    while => self.cursor < self.input.len && !self.check("}") {
+        typ.fields&.grow(field_count + 1);
+        f := typ.fields.index(field_count);
+        
+        c := self.input[self.cursor];
+        self.cursor += 1;
+        (tag: Qbe.FieldType, size: i64, align: i64) := @switch(c) {
+            @case(":".ascii()) => {
+                n := self.eat_word();
+                f.len = trunc(or self.find_type(n) {
+                    return(Err = "type name must be declared before useas field type")
+                });
+                inner := m.types.index(f.len.zext());
+                (.FTyp, inner.size, inner.align_log2.intcast())
+            };
+            @case("{".ascii()) => return(Err = "types cannot be nested inline. \nuse seperate declarations and refer to them by name. \nsorry that this is a waste of your time.");
+            @case("l".ascii()) => (.Fl, 8, 3);
+            @case("w".ascii()) => (.Fw, 4, 2);
+            @case("h".ascii()) => (.Fh, 2, 1);
+            @case("b".ascii()) => (.Fb, 1, 0);
+            @case("d".ascii()) => (.Fd, 8, 3);
+            @case("s".ascii()) => (.Fs, 4, 2);
+            @default => return(Err = "invalid character to begin field type");
+        };
+        f.type = tag;
+        
+        my_align = my_align.max(align);
+        align = 1.shift_left(align) - 1;
+        align = bit_and(my_size + align, align.bit_not()) - my_size;
+        if align != 0 {
+            /* padding */
+            field_count += 1;
+            typ.fields&.grow(field_count);
+            f := typ.fields.index(field_count - 1);
+            f.type = .FPad;
+            f.len = align.trunc();
+        };
+        self.skip_blanks();
+        count := if(self.input[self.cursor].is_ascii_digit(), => self.parse_number(), => 1);
+        my_size += align + count * size;
+        if tag == .FTyp {
+            size = f.len.zext();
+        };
+        typ.fields&.grow(field_count + count);
+        range(0, count) { _ |
+            f2 := typ.fields.index(field_count);
+            field_count += 1;
+            f2.len = size.trunc();
+            f2.type = tag;
+        };
+        self.eat(",");
+    };
+    if !self.eat("}") {
+        return(Err = "expected '}' to end type declaration");
+    };
+    align := 1.shift_left(my_align);
+    my_size = my_size.max(typ.size);
+    typ.size = bit_and(my_size + align - 1, -align);;
+    typ.align_log2 = my_align.intcast();
+    typ.fields&.grow(field_count + 1);
+    typ.fields[field_count].type = .FEnd;
+    typ.nunion += 1;
+    
+    .Ok
+}
+
+fn find_type(self: *QParseCtx, n: Str) ?i64 = {
+    // TODO: use hashtable
+    m := self.f.globals;  // :NeedFunctionInitForData
+    enumerate m.types[].slice(0, m.number_of_types) { i, t |
+        if(t.name() == n, => return(Some = i));
+    };
+    .None
 }
 
 fn skip_blanks(self: *QParseCtx) void = {
