@@ -119,7 +119,7 @@ fn do_fixups_arm64(self: *QbeModule, address: *u8, symbol: *SymbolInfo) void = {
             }
             fn InReg(it) => {
                 if self.debug["T".char()] {
-                    @fmt_write(self.debug_out, "# patch addr % refs %\n", u8.int_from_ptr(fixup.patch_at), u8.int_from_ptr(address));
+                    @fmt_write(self.debug_out, "# patch addr % refs %=%\n", u8.int_from_ptr(fixup.patch_at), u8.int_from_ptr(address), symbol.name);
                 };
                 assert(it.increment == 0, "TODO: offset symbols");
                 inst: []u32 = (ptr = ptr_cast_unchecked(u8, u32, fixup.patch_at), len = 2);
@@ -146,19 +146,7 @@ fn do_fixups_arm64(self: *QbeModule, address: *u8, symbol: *SymbolInfo) void = {
 
 // do not push to symbol.fixups here!
 fn load_from_got(self: *QbeModule, symbol: *SymbolInfo, reg_encoding: i64, insts: []u32, jit_address: *u8) ?Fixup = {
-    @debug_assert(!self.fixups_locked);
-    assert(!self.fixups_locked, "got_lookup_offset is stomped by emitting for aot");
-    new_got_reloc: ?Fixup = .None;
-    if symbol.got_lookup_offset == -1 {
-        // need to reserve a new __got entry.  :GotAtConstantDataBase 
-        symbol.got_lookup_offset = self.got&.len();
-        got := self.got&.reserve(*u8);  // :TodoErrorMessage
-        if self.debug["T".char()] {
-            @fmt_write(self.debug_out, "# reserve __got[%] = %\n", symbol.got_lookup_offset / 8, symbol.name);
-        };
-        new_got_reloc = (Some = (patch_at = ptr_cast_unchecked(*u8, u8, got), type = .DataAbsolute));
-        got[] = jit_address; // because we don't loop again to handle `new_got_reloc`
-    };
+    new_got_reloc := ensure_got_slot(self, symbol, jit_address);
     got := self.segment_address(.ConstantData, symbol.got_lookup_offset);  // :GotAtConstantDataBase 
     @debug_assert_eq(ptr_cast_unchecked(u8, i64, got)[], u8.int_from_ptr(jit_address));
     

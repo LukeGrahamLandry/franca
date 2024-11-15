@@ -72,6 +72,8 @@ fn interpret(self: *Vm, chunk: *Chunk, $print: Fn(Value, void)) InterpretResult 
     }
 }
 
+is_falsy :: fn(v: Value) bool = v.is_bool().and(=> v.to_bool().not()).or(v.is_nil()); 
+                
 fn run(self: *Vm) InterpretResult = {
     out := InterpretResult.RuntimeError;
     debug: List(u8) = list(lox_alloc);
@@ -88,12 +90,13 @@ fn run(self: *Vm) InterpretResult = {
             each self.globals& { k, v |
                 @fmt(debug&, "[ % = % ]", k.data, v);
             };
-            println(debug&.items());
         
+            @fmt(debug&, "\n"); 
             p := self.chunk[].code&.as_ptr();
             i := p.ptr_diff(self.ip);
-            println(i);  // TODO: do these into the buffer as well 
-            self.chunk.dis_inst(i);
+            self.chunk.dis_inst(debug&, i);
+            
+            print(debug&.items());
         }, ());
         
         instruction := self.read_byte();
@@ -107,6 +110,7 @@ fn run(self: *Vm) InterpretResult = {
             @case(OpCode.Return) => {
                 value := self.pop();
                 self.last_return = value;
+                self.stack_top = self.stack.maybe_uninit.ptr; // TODO: this will change when we have functions.
                 @println("RET: %", value);
                 return(.Ok);
             };
@@ -160,7 +164,6 @@ fn run(self: *Vm) InterpretResult = {
             @case(OpCode.Nil)      => self.push(nil_value);  
             @case(OpCode.Not) => {
                 val := self.pop();
-                is_falsy :: fn(v: Value) bool = v.is_bool().and(=> v.to_bool().not()).or(v.is_nil()); 
                 self.push(val.is_falsy().to_value());
             };
             @case(OpCode.Equal) => {
@@ -214,6 +217,20 @@ fn run(self: *Vm) InterpretResult = {
                 idx: i64 = self.read_byte().zext();
                 self.push(self.stack[idx]);
             };
+            @case(OpCode.JumpIfFalse) => {
+                distance := self.read_u16();
+                if self.pop().is_falsy() {
+                    self.ip = self.ip.offset(distance);
+                };
+            };
+            @case(OpCode.Jump) => {
+                distance := self.read_u16();
+                self.ip = self.ip.offset(distance);
+            };
+            @case(OpCode.Loop) => {
+                distance := -self.read_u16();
+                self.ip = self.ip.offset(distance);
+            };
             @default => {
                 println("bad opcode");
                 return(.RuntimeError);
@@ -241,6 +258,13 @@ fn run(self: *Vm) InterpretResult = {
     b := self.ip[];
     self.ip = self.ip.offset(1);
     b
+}
+
+#inline fn read_u16(self: *Vm) i64 = {
+    a: i64= self.ip[].zext();
+    b: i64 = self.ip.offset(1)[].zext();
+    self.ip = self.ip.offset(2);
+    a.bit_or(b.shift_left(8))
 }
 
 #inline fn read_constant(self: *Vm) Value = {

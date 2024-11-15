@@ -1,3 +1,9 @@
+- relative addressing is from the start of the next instruction but i was getting the current location before encoding the displacement.
+- xtest needs extra swap like cmp. need to figure out whats going on there.
+- conaddr.ssa test wants to encode an absolute address in sib. TODO: does this ever happen in a non-contrived situation?
+- for stubs to got, jmp not call because you don't re-push addr (its like b without l),
+  and i keep forgeting that offsets are from the end of the instruction not the start of the patch like they are on arm.
+
 ## (Nov 12)
 
 - made sequential enum use the right value size based on its declared type so const_eval_any doesn't fail debug check.

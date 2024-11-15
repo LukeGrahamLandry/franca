@@ -35,7 +35,7 @@ null_rule : ParseFn : {
 
 ::{ // HACK -- May 19
     ::enum(TokenType);
-    len := @as(i64) TokenType._Count;
+    len := TokenType.enum_count();
     table := libc_allocator.alloc(ParseRule, len);
     range(0, table.len) {i|
         table.set(i, (prefix = null_rule, infix = null_rule, prec = .None));
@@ -107,10 +107,48 @@ fn statement(self: *Parser, may_declare: bool) void = {
                 self.statement(true);
                 if(self.panic_mode, => self.syncronize());
             };
+            // TODO: this will emit extra pops if the block ended with a return. (don't just check last op becuase of jumps)
             self.end_scope();
             self.consume(.RightBrace, "Expected '}' to close block");
             return(); // no semicolon required after a block. 
         }
+        fn If() => {
+            self.advance();
+            self.consume(.LeftParen, "Expected '(' before condition");
+            self.expression();
+            self.consume(.RightParen, "Expected ')' after condition");
+            self.emit(OpCode.JumpIfFalse);
+            self.emit(0, 0); // patch
+            start := self.chunk.code.len;
+            self.statement(false);
+            end_then := self.chunk.code.len;
+            distance := end_then - start;
+            
+            if self.current.type == .Else {
+                distance += 3; // the jump from if start has to skip this landing pad. 
+                self.advance();
+                self.emit(OpCode.Jump);
+                self.emit(0, 0); // patch
+                start_else := self.chunk.code.len;
+                
+                self.statement(false);
+                
+                end_else := self.chunk.code.len;
+                distance := end_else - start_else;
+                if distance > 0xFFFF {
+                    self.error_at(self.current, "statement too large: cannot jump more than 0xFFFF");
+                };
+                self.chunk.code[start_else - 2] = distance.bit_and(0xFF).trunc();
+                self.chunk.code[start_else - 1] = distance.shift_right_logical(8).bit_and(0xFF).trunc();
+            };
+            if distance > 0xFFFF {
+                self.error_at(self.current, "statement too large: cannot jump more than 0xFFFF");
+            };
+            self.chunk.code[start - 2] = distance.bit_and(0xFF).trunc();
+            self.chunk.code[start - 1] = distance.shift_right_logical(8).bit_and(0xFF).trunc();
+            
+            return(); // no need for extra ; after if
+        };
         @default => {
             self.expression();
             self.emit(OpCode.Pop);
@@ -121,10 +159,10 @@ fn statement(self: *Parser, may_declare: bool) void = {
 
 fn end_scope(self: *Parser) void = {
     self.scope_depth -= 1;
-    cond :: => !self.vm.compiler_locals.is_empty()
-               && self.vm.compiler_locals[self.vm.compiler_locals.len - 1].depth > self.scope_depth;
+    locals := self.vm.compiler_locals&;
+    cond   :: => !locals.is_empty() && locals[locals.len - 1].depth > self.scope_depth;
     while cond {
-        self.vm.compiler_locals.len -= 1;
+        locals.len -= 1;
         self.emit(OpCode.Pop); // TODO: EXTRA: PopN
     };
 }

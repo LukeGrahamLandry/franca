@@ -2,7 +2,11 @@
 > the main backends are in `../compiler`
 
 An optimising compiler backend based on [Qbe](https://c9x.me/compile/).
+Generated code is much better than llvm -O0 and much worse than llvm -O2 (not the most specific range i realize).
+It also compiles much faster than even llvm -O0.
 Almost everything (ir design, opt passes, isel/abi) is ported directly from Qbe, with some light editing to use a style I find less confusing.
+The main changes are working towards being more usable as a standalone library
+by removing dependencies on external assemblers/linkers and removing serialization steps to/from text files.
 
 In my brief profiling (with -O2), Qbe spends ~45% of its time parsing the input text and another ~15% outputting the assembly text.
 Then clang takes as long to assemble that text as the whole Qbe part (or somehow 10x as long on aarch64).
