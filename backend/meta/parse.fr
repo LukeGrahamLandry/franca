@@ -283,7 +283,7 @@ fn end_block(self: *QParseCtx, new_blk: ?*Qbe.Blk) void = {
     };
     self.f.copy_instructions_from_scratch(self.blk);
     ins: []Qbe.Ins = (ptr = self.blk.ins, len = self.blk.nins.zext()); // TODO: why isn't this a QList? -- Nov 12
-    ins.reverse(); // emit() spits out instructions backwards
+    ins.reverse(); // emit() spits out instructions backwards      :SLOW just do it during copy
 }
 
 fn parse_inst(self: *QParseCtx) void = {
@@ -677,18 +677,18 @@ fn parse_type(self: *QParseCtx) Result(void, Str) = {
     };
     typ.fields = new(0, .PLong);
     if !self.eat("{") {
-        println(self.input.slice(self.cursor, self.cursor + 1));
         return(Err = "expected '{' to begin type declaration");
     };
+    field_count := 0;
     if self.check("{") {
         typ.is_union = true;
         while => !self.eat("}") { // TODO: bounds
             self.eat("{");
-            @try(self.parse_type_fields(typ)) return;
+            @try(self.parse_type_fields(typ, field_count&)) return;
             self.eat(",");
         };
     } else {
-        @try(self.parse_type_fields(typ)) return;
+        @try(self.parse_type_fields(typ, field_count&)) return;
     };
     
     @debug_assert_eq(t + 1, m.number_of_types, "array can't resize because types cannot be nested");
@@ -698,29 +698,26 @@ fn parse_type(self: *QParseCtx) Result(void, Str) = {
     .Ok
 }
 
-fn parse_type_fields(self: *QParseCtx, typ: *Qbe.Typ) Result(void, Str) = {
+fn parse_type_fields(self: *QParseCtx, typ: *Qbe.Typ, field_count: *i64) Result(void, Str) = {
     self.skip_blanks();
     if self.input[self.cursor].is_ascii_digit() { // TODO: this can only go at the top level i think
         panic("TODO: opaque type");
     };
     
     m := self.f.globals;
-    field_count := 0;
     my_align: i64 = typ.align_log2.intcast();
     my_size := 0;
     while => self.cursor < self.input.len && !self.check("}") {
-        typ.fields&.grow(field_count + 1);
-        f := typ.fields.index(field_count);
-        
+        value_to_put_in_len_field := -1;
         c := self.input[self.cursor];
         self.cursor += 1;
         (tag: Qbe.FieldType, size: i64, align: i64) := @switch(c) {
             @case(":".ascii()) => {
                 n := self.eat_word();
-                f.len = trunc(or self.find_type(n) {
+                value_to_put_in_len_field = (or self.find_type(n) {
                     return(Err = "type name must be declared before useas field type")
                 });
-                inner := m.types.index(f.len.zext());
+                inner := m.types.index(value_to_put_in_len_field);
                 (.FTyp, inner.size, inner.align_log2.intcast())
             };
             @case("{".ascii()) => return(Err = "types cannot be nested inline. \nuse seperate declarations and refer to them by name. \nsorry that this is a waste of your time.");
@@ -732,16 +729,15 @@ fn parse_type_fields(self: *QParseCtx, typ: *Qbe.Typ) Result(void, Str) = {
             @case("s".ascii()) => (.Fs, 4, 2);
             @default => return(Err = "invalid character to begin field type");
         };
-        f.type = tag;
         
         my_align = my_align.max(align);
         align = 1.shift_left(align) - 1;
         align = bit_and(my_size + align, align.bit_not()) - my_size;
         if align != 0 {
             /* padding */
-            field_count += 1;
-            typ.fields&.grow(field_count);
-            f := typ.fields.index(field_count - 1);
+            field_count[] += 1;
+            typ.fields&.grow(field_count[]);
+            f := typ.fields.index(field_count[] - 1);
             f.type = .FPad;
             f.len = align.trunc();
         };
@@ -749,12 +745,12 @@ fn parse_type_fields(self: *QParseCtx, typ: *Qbe.Typ) Result(void, Str) = {
         count := if(self.input[self.cursor].is_ascii_digit(), => self.parse_number(), => 1);
         my_size += align + count * size;
         if tag == .FTyp {
-            size = f.len.zext();
+            size = value_to_put_in_len_field;
         };
-        typ.fields&.grow(field_count + count);
+        typ.fields&.grow(field_count[] + count);
         range(0, count) { _ |
-            f2 := typ.fields.index(field_count);
-            field_count += 1;
+            f2 := typ.fields.index(field_count[]);
+            field_count[] += 1;
             f2.len = size.trunc();
             f2.type = tag;
         };
@@ -767,8 +763,8 @@ fn parse_type_fields(self: *QParseCtx, typ: *Qbe.Typ) Result(void, Str) = {
     my_size = my_size.max(typ.size);
     typ.size = bit_and(my_size + align - 1, -align);;
     typ.align_log2 = my_align.intcast();
-    typ.fields&.grow(field_count + 1);
-    typ.fields[field_count].type = .FEnd;
+    typ.fields&.grow(field_count[] + 1);
+    typ.fields[field_count[]].type = .FEnd;
     typ.nunion += 1;
     
     .Ok
@@ -827,7 +823,7 @@ fn allow_in_identifier(c: u8) bool = {
 fn eat_word(self: *QParseCtx) Str = {
     self.skip_blanks();
     start := self.cursor;
-    while => self.input[self.cursor].allow_in_identifier() {
+    while => self.cursor < self.input.len && self.input[self.cursor].allow_in_identifier() {
         self.cursor += 1;
     };
     self.input.slice(start, self.cursor)

@@ -1,11 +1,27 @@
 fn fill_target_amd(t: *Qbe.Target, apple: bool) void = {
-    t.apple = apple;
+    //t.isel = amd64_isel;
+    //t.abi0 = elimsb, 
+    t.abi1 = amd64_sysv_abi;
+    t.argregs = amd64_sysv_argregs;
+    t.retregs = amd64_sysv_retregs;
     // TODO: we have emitfn and emitfin. that's confusing.
     t.emitfn = emit_func_amd64;
     
-    //::assert(LINK_QBE_C, "TODO: fill in the other fields instead of relying on qbe");
+    ::enum(Amd64Reg);
+    
+    t.apple = apple;
+    t.gpr0 = Amd64Reg.RAX.raw();
+    t.ngpr = Amd64Reg.RSP.raw() - Amd64Reg.RAX.raw() + 1; 
+    t.fpr0 = Amd64Reg.XMM0.raw();
+    t.nfpr = Amd64Reg.XMM14.raw() - Amd64Reg.XMM0.raw() + 1 /* reserve XMM15 */;
+    t.rglob = BIT(Amd64Reg.RBP).bit_or(BIT(Amd64Reg.RSP));
+    t.nrglob = 2;
+    t.caller_saved = convert_to_i32_and_append_minus_1(Amd64Reg, amd64_sysv_rsave).as_ptr();
+    t.nrsave&[0] = Amd64Reg.R11.raw() - Amd64Reg.RAX.raw() + 1;
+    t.nrsave&[1] = t.nfpr;
 }
 
+    
 // you can't reorder these to not be insane until you never share the target struct with qbe c. 
 Amd64Reg :: @enum(i32) (
     RXX, // reserve zero for QbeNull
@@ -22,21 +38,15 @@ Amd64Reg :: @enum(i32) (
     /* sse */
     XMM0, XMM1, XMM2,  XMM3,  XMM4,  XMM5,  XMM6,  XMM7,
     XMM8, XMM9, XMM10, XMM11, XMM12, XMM13, XMM14, XMM15,
-    
-    //NFPR = XMM14 - XMM0 + 1, /* reserve XMM15 */
-    //NGPR = RSP - RAX + 1,
-    //NGPS = R11 - RAX + 1,
-    //NFPS = NFPR,
-    //NCLR = R15 - RBX + 1,
 );
 
 ::List(X86cc);
-amd_condition_codes :: items(@list( // :CmpOrder
+amd_condition_codes :: @const_slice( // :CmpOrder
     // Cieq Cine Cisge Cisgt Cisle Cislt Ciuge Ciugt Ciule Ciult
     X86cc.e, .ne,  .ge,  .g,  .le,  .l,  .ae,  .a,  .be,  .b,
     // Cfeq Cfge Cfgt Cfle Cflt Cfne Cfo  Cfuo
          .e, .ae, .a, .be, .b,  .ne, .np, .p
-) ast_alloc());
+);
 
 fn TMP(r: Amd64Reg) Qbe.Ref = TMP(r.raw().zext());
 fn BIT(r: Amd64Reg) u64 = BIT(r.raw().zext());

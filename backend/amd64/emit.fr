@@ -255,7 +255,7 @@ fn emit_the_code(e: *AmdState) void = {
                     };
                 };
             };
-        }
+        };
     };
     
     each patches { p |
@@ -332,14 +332,15 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
     if i&.op() == .storeh { // TODO: move this into the @match
         e.a&.push(operand_16bit_prefix);
     };
-    assert(is_int(i&.cls()), "TODO: output float");
     t0 := rtype(i.arg&[0]);
     t1 := rtype(i.arg&[1]);
     
     fix_memarg_slot(e, i.arg&.index(0));
     fix_memarg_slot(e, i.arg&.index(1));
-    fix_memarg_slot(e, i.to&);  // TODO: this will break when we try to check for equality
-            
+    if i&.op() != .copy {
+        fix_memarg_slot(e, i.to&);  // TODO: this will break when we try to check for equality
+    };
+    
     @match(i&.op()) {
         /* just do nothing for nops, they are inserted
          * by some passes */
@@ -417,6 +418,7 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
             @debug_assert(rtype(i.to) != .RMem);
             if(i.to == QbeNull || i.arg&[0] == QbeNull, => return());
             if(i.to == i.arg&[0], => return());
+            //printins(e.f, i&, e.f.globals.debug_out);
             
             is_long_const := i&.cls() == .Kl && t0 == .RCon && e.f.get_constant(i.arg&[0])[].type == .CBits;
             if is_long_const {
@@ -454,6 +456,8 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
                 //emitf("mov%k %1, %=", &i, e);
                 return();
             };
+            
+            fix_memarg_slot(e, i.to&);
             
             i.arg&[1] = i.to;
             i.arg&.swap(0, 1);
@@ -545,6 +549,30 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
             emitcopy(i.arg&[0], i.arg&[1], i&.cls(), e);
             emitcopy(i.arg&[1], amd64_xmm_scratch, i&.cls(), e);
         }
+        fn storeb() => {
+            // TODO: has RTmp already been converted to RMem for all stores?
+            
+            // TODO: same for all r8 instructions? like for the flag reading ops? 
+            // This seems insane? Am I missunderstanding something? Seems to work tho so who knows. 
+            // "When any REX prefix is used, SPL, BPL, SIL and DIL are used. Otherwise, without any REX prefix AH, CH, DH and BH are used."
+            // TODO: this feels super fragile, like what if when encoding the address we need the extend base/index?
+            if t0 == .RTmp && (@is(i.arg&[0].int_reg_d(), .rsp, .rbp, .rsi, .rdi)) {
+                e.a&.push(0b01000000);
+            };
+            
+            // this is painful because everywhere else the range of a byte immediate is signed but here its unsigned. 
+            if e.f.get_int(i.arg&[0]) { c |
+                if c >= 0 && c <= 255 {
+                    i.arg&[0] = TMP(reg_for_extension(0));
+                    b := encode(e, i&, false, 1);
+                    push(e, b, @slice(0xC6));
+                    e.a&.push(@as(u8) c.trunc());
+                    return();
+                };
+            };
+        
+            assemble(e, i&);
+        }
         fn dbgloc() => (); // TODO: we don't do debug info yet
         @default => {
             o := i&.op();
@@ -566,7 +594,6 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
                 return();
             };
             
-            
             if is_load(o) {
                 // this is wasteful allocation just to smuggle one bit of information on which modrm mode to use. 
                 if t0 == .RTmp {
@@ -585,6 +612,11 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
             } else {
                 convert_to_2address(e, i&);
             };
+            // because we choose arg size based on output size, without this is does a 64 bit mov which doesn't zero the top bytes.
+            if o == .extuw {
+                i&.set_cls(.Kw);
+            };
+            
             assemble(e, i&);
         };
     }; // early returns
@@ -667,7 +699,7 @@ EncodedArgs :: @struct(
     patch: ?Ty(i64, u32) = .None,
 );
 
-fn encode(e: *AmdState, i: *Qbe.Ins, w: bool) EncodedArgs = {
+fn encode(e: *AmdState, i: *Qbe.Ins, w: bool, immediate_size: i64) EncodedArgs = {
     r0, r1 := (i.arg&[0], i.arg&[1]);
     t0, t1 := (rtype(r0), rtype(r1));
     @debug_assert(r0 != QbeNull && r1 != QbeNull, "we only look at the arg slots becuase x64 is 2-address");
@@ -717,10 +749,16 @@ fn encode(e: *AmdState, i: *Qbe.Ins, w: bool) EncodedArgs = {
         if c.type == .CAddr {
             rr0 := r0.int_reg_d();
             @debug_assert(c.sym.type == .SGlo, "TODO: tls");
+            // The distance is relative to the end of the instruction, 
+            // so if we have another immediate after the displacement, we have to account for its size. 
+            // becuase the linker doesn't give a shit about what instructions we're using, 
+            // its just gonna plonk in the distance from the patch to the symbol. 
+            // TODO: maybe it would be better if we also did the -4 for the displacement here but that requires removing it everywhere else. 
+            off := c.bits.i - immediate_size;
             return(
-                patch = (Some = (c.bits.i, c.sym.id)), 
+                patch = (Some = (off, c.sym.id)), 
                 disp_size = .D32,
-                disp = c.bits.i,
+                disp = off,
                 modrm = pack_modrm(.Indirect00, .rbp, rr0),  // disp is RIP relative
                 rex = pack_rex_si(w, rr0, DONT_CARE_REG, DONT_CARE_REG), 
                 sib = .None,
@@ -770,7 +808,7 @@ fn int_reg_d(r: Qbe.Ref) X86Reg =
 // TODO: losing my mind!
 fn int_id(r: Amd64Reg) X86Reg = {
     ::List(X86Reg);
-    table :: items(@list(X86Reg.zeroed(), .rax, .rcx, .rdx, .rsi, .rdi, .r8, .r9, .r10, .r11, .rbx, .r12, .r13, .r14, .r15, .rbp, .rsp) ast_alloc());
+    table :: @const_slice(X86Reg.zeroed(), .rax, .rcx, .rdx, .rsi, .rdi, .r8, .r9, .r10, .r11, .rbx, .r12, .r13, .r14, .r15, .rbp, .rsp);
     @debug_assert(r.raw().zext() < table.len(), "expected integer register");
     table[r.raw().zext()]
 }
@@ -778,7 +816,7 @@ fn int_id(r: Amd64Reg) X86Reg = {
 // i need an air tag on my mind. 
 // so i don't lose it. 
 fn reg_for_extension(v: u8) Amd64Reg = {
-    table :: items(@list(Amd64Reg.RAX, .RCX, .RDX, .RBX, .RSP, .RBP, .RSI, .RDI) ast_alloc());
+    table :: @const_slice(Amd64Reg.RAX, .RCX, .RDX, .RBX, .RSP, .RBP, .RSI, .RDI);
     table[v.zext()]
 }
 
@@ -789,10 +827,10 @@ fn items(e: *FatExpr) []FatExpr = {
     (ptr = e, len = 1)
 }
 
-AmdArgType :: @enum(i64) (M, R, imm32, imm8, none);    ::enum(AmdArgType);
+AmdArgType :: @enum(i64) (M, R, imm32, imm8, none, F);    ::enum(AmdArgType);
     
 fn arg_t(e: *AmdState, r: Qbe.Ref) AmdArgType = @match(rtype(r)) {
-    fn RTmp() => .R;
+    fn RTmp() => @if(r.val() < Amd64Reg.XMM0.raw().zext(), .R, .F);
     fn RMem() => .M;
     fn RCon() => {
         c := e.f.get_constant(r);
@@ -830,7 +868,12 @@ fn assemble(e: *AmdState, i: *Qbe.Ins) void = {
         // which direction it goes doesn't matter because the memory always has to be in SIB
         i.arg&.items().swap(0, 1); // HACK
     };
-    b := encode(e, i, w);
+    immediate_size := @if_else {
+        @if(a0 == .imm8 || a1 == .imm8) => 1;
+        @if(a0 == .imm32 || a1 == .imm32) => 4;
+        @else => 0;
+    };
+    b := encode(e, i, w, immediate_size);
     push(e, b, opcode);
     if a0 == .imm8 {
         push_imm(e, e.f.get_constant(a0_old)[].bits.i, 1);
@@ -968,11 +1011,9 @@ fn amd64_encoding_lookup(e: *AmdState, i: *Qbe.Ins) Ty([]u8, AmdArgType, AmdArgT
     ),
     (.storeb, 
         (.R, .M, (0x88)),
-        // TODO: " In 64-bit mode, r/m8 can not be encoded to access the following byte registers if a REX prefix is used: AH, BH, CH, DH."
-        //(.imm8, .M, (0xC6), 0), but also this doesn't sign extend so need to change .imm8 filtering
     ),
     (.storeh, // needs prefix
-        (.R, .M, (0x88)),
+        (.R, .M, (0x89)),
     ),
     (.xidiv,
         (.M, .none, (0xF7), 7),
@@ -1021,6 +1062,10 @@ fn amd64_encoding_lookup(e: *AmdState, i: *Qbe.Ins) Ty([]u8, AmdArgType, AmdArgT
     (.copy, 
         (.M, .imm32, (0xC7), 0), // "Move imm32 sign extended to 64-bits to r/m64."
         (.R, .M, (0x8B)),
+        (.M, .R, (0x89)), // TODO: is this right? 
+        // TODO: isel first to not load constants from memory. 
+        //(.F, .M, (0x0F, 0x10)),
+        //(.M, .F, (0x0F, 0x11)),
     ),
     (.swap, // TODO: confirm RMem order if we ever generate it for those (or RSlot)
         (.R, .M, (0x87)), // xchg

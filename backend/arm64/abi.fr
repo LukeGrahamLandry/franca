@@ -35,9 +35,9 @@ Insl   :: @rec @struct(i: Qbe.Ins, link: *Insl);
 Params :: @struct(ngp: i32, nfp: i32, stk: i32);
 
 ::List(Qbe.O);
-gpreg :: items(@list(Arm64Reg.R0, .R1, .R2, .R3, .R4, .R5, .R6, .R7) ast_alloc());
-fpreg :: items(@list(Arm64Reg.V0, .V1, .V2, .V3, .V4, .V5, .V6, .V7) ast_alloc());
-store_ops :: items(@list(Qbe.O.storew, .storel, .stores, .stored) ast_alloc()); // :QbeClsi16 order matters
+gpreg     :: @const_slice(Arm64Reg.R0, .R1, .R2, .R3, .R4, .R5, .R6, .R7);
+fpreg     :: @const_slice(Arm64Reg.V0, .V1, .V2, .V3, .V4, .V5, .V6, .V7);
+store_ops :: @const_slice(Qbe.O.storew, .storel, .stores, .stored); // :QbeClsi16 order matters
 
 /* layout of call's second argument (RCall)
  *
@@ -58,8 +58,8 @@ store_ops :: items(@list(Qbe.O.storew, .storel, .stores, .stored) ast_alloc()); 
 ::ptr_utils(Qbe.Typ);
 
 fn isfloatv(t: *Qbe.Typ, cls: *Qbe.Cls, globals: *QbeModule) bool = {
+    f := t.fields[0]&;  
     range(0, t.nunion.zext()) { n |
-        f := t.fields[n]&;  
         while => f.type != .FEnd { 
             @match(f.type) {
                 fn Fs() => {
@@ -79,7 +79,8 @@ fn isfloatv(t: *Qbe.Typ, cls: *Qbe.Cls, globals: *QbeModule) bool = {
                 @default => return(false);
             };
             f = f.offset(1);
-        }
+        };
+        f = f.offset(1);
     };
     true
 }
@@ -730,6 +731,18 @@ fn arm64_selvastart(f: *Qbe.Fn, p: Params, ap: Qbe.Ref) void = {
     f.emit(.add, .Kl, r0, ap, f.getcon(28));
 }
 
+fn realloc_for_params(f: *Qbe.Fn, i: *Qbe.Ins) void = {
+    // TODO: avoid useless reallocation if we have no params? 
+    b := f.start;
+    n: i64 = b.nins.zext() - ptr_diff(b.ins, i) + f.len_scratch();
+    i0 := temp().alloc(Qbe.Ins, n).as_ptr();
+    ip := i0;
+    ip = icpy(ip, f.globals.curi[], f.len_scratch());
+    ip = icpy(ip, i, ptr_diff(i, b.ins.offset(b.nins.zext())));  
+    b.nins = n.trunc();
+    b.ins = i0;
+}
+
 fn arm64_abi(f: *Qbe.Fn) void = {
     T := f.globals.target;
     for_blocks f { b | 
@@ -738,16 +751,8 @@ fn arm64_abi(f: *Qbe.Fn) void = {
     
     /* lower parameters */
     i := f.find_past_last_param();
-    b := f.start;
-    p := selpar(f, b.ins, i);
-    // TODO: avoid useless reallocation if we have no params? 
-    n: i64 = b.nins.zext() - ptr_diff(b.ins, i) + f.len_scratch();
-    i0 := temp().alloc(Qbe.Ins, n).as_ptr();
-    ip := i0;
-    ip = icpy(ip, f.globals.curi[], f.len_scratch());
-    ip = icpy(ip, i, ptr_diff(i, b.ins.offset(b.nins.zext())));  
-    b.nins = n.trunc();
-    b.ins = i0;
+    p := selpar(f, f.start.ins, i);
+    f.realloc_for_params(i);
 
     /* lower calls, returns, and vararg instructions */
     ::ptr_utils(Insl);

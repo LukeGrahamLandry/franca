@@ -1,14 +1,676 @@
+// Adapted from Qbe. MIT License. © 2015-2024 Quentin Carbonneaux <quentin@c9x.me>
+
+//! The System V ABI is used by linux/macOS on amd64.
+
+// TODO: move split() and chpred() somewhere its more clear that they're shared between here and arm/abi.fr
+// TODO: move find_past_last_param, realloc_for_params, and find_first_arg so its more clear they're shared between both abis
 
 ::List(Amd64Reg);
 
-amd64_sysv_rsave :: items(@list(
-	Amd64Reg.RDI, .RSI, .RDX, .RCX, .R8, .R9, .R10, .R11, .RAX,
-           	.XMM0, .XMM1, .XMM2, .XMM3, .XMM4, .XMM5, .XMM6, .XMM7,
-           	.XMM8, .XMM9, .XMM10, .XMM11, .XMM12, .XMM13, .XMM14,
-) ast_alloc());
+amd64_sysv_rsave :: @const_slice(
+    Amd64Reg.RDI, .RSI, .RDX, .RCX, .R8, .R9, .R10, .R11, .RAX,
+               .XMM0, .XMM1, .XMM2, .XMM3, .XMM4, .XMM5, .XMM6, .XMM7,
+               .XMM8, .XMM9, .XMM10, .XMM11, .XMM12, .XMM13, .XMM14,
+);
 
-amd64_sysv_rclob :: items(@list(
-          Amd64Reg.RBX, .R12, .R13, .R14, .R15,
-) ast_alloc());
+amd64_sysv_rclob :: @const_slice(
+    Amd64Reg.RBX, .R12, .R13, .R14, .R15,
+);
 
-// TODO: draw the rest of the fucking owl.
+AClass :: @struct(
+    type: *Qbe.Typ,
+    inmem: i32,
+    align: i32,
+    size: u32,
+    cls: Array(Qbe.Cls, 2),
+    ref: Array(Qbe.Ref, 2),
+);
+
+RAlloc :: @rec @struct(
+    i: Qbe.Ins,
+    link: *RAlloc,
+);
+
+/* layout of call's second argument (RCall)
+ *
+ *  29     12    8    4  3  0
+ *  |0...00|x|xxxx|xxxx|xx|xx|                  range
+ *          |    |    |  |  ` gp regs returned (0..2)
+ *          |    |    |  ` sse regs returned   (0..2)
+ *          |    |    ` gp regs passed         (0..6)
+ *          |    ` sse regs passed             (0..8)
+ *          ` 1 if rax is used to pass data    (0..1)
+ */
+
+fn amd64_sysv_retregs(r: Qbe.Ref, p: *Array(i32, 2)) u64 = {
+    uint :: fn(b: bool) u64 = b.int().bitcast();
+    
+    @debug_assert(rtype(r) == .RCall, "retregs expected RCall");
+    b: u64 = 0;
+    ni := r.val().bit_and(3);
+    nf := r.val().shift_right_logical(2).bit_and(3); 
+    b = b.bit_or(uint(ni >= 1) * BIT(Amd64Reg.RAX));
+    b = b.bit_or(uint(ni >= 2) * BIT(Amd64Reg.RDX));
+    b = b.bit_or(uint(nf >= 1) * BIT(Amd64Reg.XMM0));
+    b = b.bit_or(uint(nf >= 2) * BIT(Amd64Reg.XMM1));
+    if !p.is_null() {
+        p[0] = ni.intcast();
+        p[1] = nf.intcast();
+    };
+    b
+}
+
+fn amd64_sysv_argregs(r: Qbe.Ref, p: *Array(i32, 2)) u64 = {
+    @debug_assert(rtype(r) == .RCall, "argregs expected .RCall");
+    b: u64 = 0;
+    ni := r.val().shift_right_logical(4).bit_and(15);
+    nf := r.val().shift_right_logical(8).bit_and(15);
+    ra := r.val().shift_right_logical(12).bit_and(1);
+    range(0, ni) { j | 
+        b = b.bit_or(BIT(amd64_sysv_rsave[j]));
+    };
+    range(0, nf) { j | 
+        b = b.bit_or(BIT(j + Amd64Reg.XMM0.raw().zext()));
+    };
+    if !p.is_null() {
+        p[0] = intcast(ni + ra);
+        p[1] = nf.intcast();
+    };
+    b.bit_or(ra.bitcast() * BIT(Amd64Reg.RAX))
+}
+
+fn amd64_sysv_abi(f: *Qbe.Fn) void = {
+    for_blocks f { b | 
+        b.visit = 0;
+    };
+    
+    /* lower parameters */
+    b := f.start;
+    i := f.find_past_last_param();
+    fa := selpar_amd64(f, f.start.ins, i);
+    f.realloc_for_params(i);
+
+    /* lower calls, returns, and vararg instructions */
+    ral := zeroed(*RAlloc);
+    b   := f.start;
+    dowhile {
+        continue :: local_return;
+        b = b.link;
+        if b.is_null() {
+            b = f.start;  /* do it last */
+        };
+        if(b.visit != 0, => continue(!b.identical(f.start)));
+        f.reset_scratch();
+        selret_amd64(b, f);
+        for_insts_rev b { i |
+            @match(i[].op()) {
+                fn call() => {
+                    i0 := b.find_first_arg(i[]);
+                    selcall(f, i0, i[], ral&);
+                    i[] = i0;
+                }
+                fn vastart() => selvastart(f, fa, i.arg&[0]);
+                fn vaarg()   => selvaarg(f, b, i[]);
+                fn arg()  => unreachable();
+                fn argc() => unreachable();
+                @default => {f.emit(i[][]);};
+            };
+        };
+        ::ptr_utils(RAlloc);
+        if b.identical(f.start) {
+            while => !ral.is_null() {
+                f.emit(ral.i);
+                ral = ral.link;
+            };
+        };
+        f.copy_instructions_from_scratch(b);
+        !b.identical(f.start)
+    };
+    
+    when_debug(f, .Abi) { out | 
+        write(out, "\n> After ABI lowering:\n");
+        printfn(f, out);
+    }
+}
+
+fn classify(a: *AClass, t: *Qbe.Typ, s: u32, m: *QbeModule) void = {
+    @debug_assert(t.nunion > 0, "type '%' has no cases", t.name());
+    s1 := s;
+    ff := t.fields.index(0);
+    range(0, t.nunion.zext()) { n |
+        s  := s1;
+        while => ff.type != .FEnd {
+            @debug_assert(s <= 16, "too big?");
+            cls := a.cls&.index(s.zext() / 8);
+        @println("%", ff.type.raw());
+            @match(ff.type) {
+                fn FEnd() => unreachable();
+                fn FPad() => {
+                    /* don't change anything */
+                    s += ff.len;
+                }
+                fn FTyp() => {
+                    inner := m.get_type(ff.len.zext());
+                    classify(a, inner, s, m);
+                    s += inner.size.trunc();
+                }
+                @default => {
+                    if (@is(ff.type, .Fs, .Fd)) {
+                        if cls[] == .Kx {
+                            cls[] = .Kd;
+                        }
+                    } else {
+                        cls[] = .Kl;
+                    };
+                    s += ff.len;
+                };
+            };
+            ff = ff.offset(1);
+        };
+        ff = ff.offset(1);
+    };
+}
+
+fn typclass(a: *AClass, t: *Qbe.Typ, m: *QbeModule) void = {
+    sz := t.size;
+    al := 1.shift_left(t.align_log2.zext());
+
+    /* the ABI requires sizes to be rounded
+     * up to the nearest multiple of 8, moreover
+     * it makes it easy load and store structures
+     * in registers
+     */
+    al := al.max(8);
+    sz := (sz + al-1).bit_and(-al);
+
+    a.type = t;
+    a.size = sz.trunc();
+    a.align = t.align_log2;
+
+    if t.is_dark || sz > 16 || sz == 0 {
+        /* large or unaligned structures are
+         * required to be passed in memory
+         */
+        a.inmem = 1;
+        return();
+    };
+
+    a.cls&[0] = .Kx;
+    a.cls&[1] = .Kx;
+    a.inmem = 0;
+    classify(a, t, 0, m);
+}
+
+fn retr(reg: *Array(Qbe.Ref, 2), aret: *AClass) i64 = {
+    ::List([]Amd64Reg);
+    retreg :: @const_slice(@const_slice(Amd64Reg.RAX, .RDX), @const_slice(Amd64Reg.XMM0, .XMM1));
+    nr := @slice(0, 0);
+    ca := 0;
+    n  := 0;
+    while => n*8 < aret.size.zext() {
+        k := KBASE(aret.cls&[n]);
+        j := nr[k];
+        nr[k] += 1;
+        reg[n] = TMP(retreg[k][j]);
+        ca += 1.shift_left(2 * k);
+        n += 1;
+    };
+    ca
+}
+
+fn selret_amd64(b: *Qbe.Blk, f: *Qbe.Fn) void = {
+    reg := Array(Qbe.Ref, 2).zeroed();
+    j := b.jmp.type;
+    if(!is_ret(j) || j == .ret0, => return());
+
+    r0 := b.jmp.arg;
+    b.jmp.type = .ret0;
+
+    ca := if j == .retc {
+        @debug_assert(f.retty != -1);
+        aret := AClass.zeroed();
+        typclass(aret&, f.globals.get_type(f.retty.zext()), f.globals);
+        if aret.inmem != 0 {
+            @debug_assert(rtype(f.retr) == .RTmp);
+            f.emit(.copy, .Kl, TMP(Amd64Reg.RAX), f.retr, QbeNull);
+            f.emit(.blit1, .Kw, QbeNull, INT(aret.type.size), QbeNull);
+            f.emit(.blit0, .Kw, QbeNull, r0, f.retr);
+            1
+        } else {
+            ca := retr(reg&, aret&);
+            if aret.size > 8 {
+                r := f.newtmp("abi", .Kl);
+                f.emit(.load, .Kl, reg&[1], r, QbeNull);
+                f.emit(.add, .Kl, r, r0, f.getcon(8));
+            };
+            f.emit(.load, .Kl, reg&[0], r0, QbeNull);
+            ca
+        }
+    } else {
+        k := @as(Qbe.Cls) @as(i16) j.raw() - Qbe.J.retw.raw();
+        if is_int(k) {
+            f.emit(.copy, k, TMP(Amd64Reg.RAX), r0, QbeNull);
+            1
+        } else {
+            f.emit(.copy, k, TMP(Amd64Reg.XMM0), r0, QbeNull);
+            1.shift_left(2)
+        }
+    };
+
+    b.jmp.arg = CALL(ca);
+}
+
+// TODO: pass ac as a slice so you get bounds checks
+fn argsclass(i0: *Qbe.Ins, i1: *Qbe.Ins, ac: *AClass, op_in: Qbe.O, aret: *AClass, env: *Qbe.Ref, m: *QbeModule) i64 = {
+    nint := if(!aret.is_null() && aret.inmem != 0, => 5 /* hidden argument */, => 6);
+    nsse := 8;
+    varc := false;
+    envc := false;
+    zip_args(i0, i1, ac) { i, a, $continue |
+        // TODO: i.op - op + Oarg   same?
+        o := rebase(i.op(), .arg, op_in);  // convert par to arg because we don't care here. 
+        @match(o) {
+            fn arg() => {
+                pn := if(is_int(i.cls()), => nint&, => nsse&);
+                if pn[] > 0 {
+                    pn[] -= 1;
+                    a.inmem = 0;
+                } else {
+                    a.inmem = 2;
+                };
+                a.align = 3;
+                a.size = 8;
+                a.cls&[0] = i.cls();
+            }
+            fn argc() => {
+                @debug_assert(rtype(i.arg&[0]) == .RType, ".argc expected arg0 .RType");
+                n := i.arg&[0].val();
+                typclass(a, m.get_type(n), m);
+                if(a.inmem != 0, => continue());
+                ni, ns := (0, 0);
+                n := 0;
+                while => n * 8 < a.size.zext() {
+                    ni += int(a.cls&[n].is_int());
+                    ns += int(!a.cls&[n].is_int());
+                    n += 1;
+                };
+                if nint >= ni && nsse >= ns {
+                    nint -= ni;
+                    nsse -= ns;
+                } else {
+                    a.inmem = 1;
+                };
+            }
+            fn arge() => {
+                envc = true;
+                env[] = if(op_in == .par, => i.to, => i.arg&[0]);
+            }
+            fn argv() => {
+                varc = true;
+            };
+            @default => unreachable();
+        }
+    };
+    
+    @assert(!varc || !envc, "sysv abi does not support variadic env calls");
+    
+    int(varc || envc).shift_left(12).bit_or((6 - nint).shift_left(4)).bit_or((8 - nsse).shift_left(8))
+}
+
+fn rarg(ty: Qbe.Cls, ni: *i64, ns: *i64) Qbe.Ref = {
+    if is_int(ty) {
+        ni[] += 1;
+        TMP(amd64_sysv_rsave[ni[] - 1])
+    } else {
+        ns[] += 1;
+        TMP(Amd64Reg.XMM0.raw().zext() + ns[] - 1)
+    }
+}
+
+fn selcall(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins, rap: **RAlloc) void = {
+    count := ptr_diff(i0, i1);
+    reg := Array(Qbe.Ref, 2).zeroed();
+    env := QbeNull;
+    ac  := temp().alloc_zeroed(AClass, count);
+
+    m := f.globals;
+    a1 := i1.arg&[1];
+    aggregate := a1 != QbeNull;
+    aret := AClass.zeroed();
+    ca := if aggregate {
+        @debug_assert(rtype(a1) == .RType, "second argument to call must be a type");
+        typclass(aret&, m.get_type(a1.val()), m);
+        argsclass(i0, i1, ac.as_ptr(), .arg, aret&, env&, m)
+    } else {
+        argsclass(i0, i1, ac.as_ptr(), .arg, zeroed(*AClass), env&, m)
+    };
+    
+    stk := 0;
+    for_rev ac { a |
+        if a.inmem != 0 {
+            @assert(a.align <= 4, "sysv abi requires alignments of 16 or less");
+            stk += a.size.zext();
+            stk += int(a.align == 4) * stk.bit_and(15);
+        }
+    };
+    stk += stk.bit_and(15);
+    if stk != 0 {
+        r := f.getcon(-stk);
+        f.emit(.salloc, .Kl, QbeNull, r, QbeNull);
+    };
+    
+    ::if(*RAlloc);
+    ra := if aggregate {
+        r1 := if aret.inmem != 0 {
+            /* get the return location from eax
+             * it saves one callee-save reg */
+            r1 := f.newtmp("abi", .Kl);
+            f.emit(.copy, .Kl, i1.to, TMP(Amd64Reg.RAX), QbeNull);
+            ca += 1;
+            r1
+        } else {
+            /* todo, may read out of bounds.
+             * gcc did this up until 5.2, but
+             * this should still be fixed.
+             */
+            if aret.size > 8 {
+                r := f.newtmp("abi", .Kl);
+                aret.ref&[1] = f.newtmp("abi", aret.cls&[1]);
+                f.emit(.storel, .Kw, QbeNull, aret.ref&[1], r);
+                f.emit(.add, .Kl, r, i1.to, f.getcon(8));
+            };
+            aret.ref&[0] = f.newtmp("abi", aret.cls&[0]);
+            f.emit(.storel, .Kw, QbeNull, aret.ref&[0], i1.to);
+            ca += retr(reg&, aret&);
+            if aret.size > 8 {
+                f.emit(.copy, aret.cls&[1], aret.ref&[1], reg&[1], QbeNull);
+            };
+            f.emit(.copy, aret.cls&[0], aret.ref&[0], reg&[0], QbeNull);
+            i1.to
+        };
+        /* allocate return pad */
+        ra := temp().box(RAlloc);
+        ra.i = make_ins(alloc_op(aret.align), .Kl, r1, f.getcon(aret.size.zext()), QbeNull);
+        ra.link = rap[];
+        rap[] = ra;
+        ra
+    } else {
+        if is_int(i1.cls()) {
+            f.emit(.copy, i1.cls(), i1.to, TMP(Amd64Reg.RAX), QbeNull);
+            ca += 1;
+        } else {
+            f.emit(.copy, i1.cls(), i1.to, TMP(Amd64Reg.XMM0), QbeNull);
+            ca += 1.shift_left(2);
+        };
+        zeroed(*RAlloc)
+    };
+
+    f.emit(.call, i1.cls(), QbeNull, i1.arg&[0], CALL(ca));
+
+    if env != QbeNull {
+        f.emit(.copy, .Kl, TMP(Amd64Reg.RAX), env, QbeNull);
+    } else {
+        vararg_call := ca.shift_right_logical(12).bit_and(1) != 0;
+        if vararg_call {
+            c := f.getcon(ca.shift_right_logical(8).bit_and(15));
+            f.emit(.copy, .Kw, TMP(Amd64Reg.RAX), c, QbeNull);
+        }
+    };
+
+    ni, ns := (0, 0);
+    if !ra.is_null() && aret.inmem != 0 {
+        @debug_assert(aggregate);
+        f.emit(.copy, .Kl, rarg(.Kl, ni&, ns&), ra.i.to, QbeNull); /* pass hidden argument */
+    };
+
+    zip_args(i0, i1, ac.as_ptr()) { i, a, $continue |
+        if(i.op().raw() >= Qbe.O.arge.raw() || a.inmem != 0, => continue());
+        r1 := rarg(a.cls&[0], ni&, ns&);
+        if i.op() == .argc {
+            if a.size > 8 {
+                r2 := rarg(a.cls&[1], ni&, ns&);
+                r := f.newtmp("abi", .Kl);
+                f.emit(.load, a.cls&[1], r2, r, QbeNull);
+                f.emit(.add, .Kl, r, i.arg&[1], f.getcon(8));
+            };
+            f.emit(.load, a.cls&[0], r1, i.arg&[1], QbeNull);
+        } else {
+            f.emit(.copy, i.cls(), r1, i.arg&[0], QbeNull);
+        }
+    };
+
+    if(stk == 0, => return());
+
+    r := f.newtmp("abi", .Kl);
+    off := 0;
+    zip_args(i0, i1, ac.as_ptr()) { i, a, $continue |
+        if(i.op().raw() >= Qbe.O.arge.raw() || a.inmem == 0, => continue());
+        r1 := f.newtmp("abi", .Kl);
+        if i.op() == .argc {
+            off += int(a.align == 4) * off.bit_and(15);
+            f.emit(.blit1, .Kw, QbeNull, INT(a.type.size), QbeNull);
+            f.emit(.blit0, .Kw, QbeNull, i.arg&[1], r1);
+        } else {
+            f.emit(.storel, .Kw, QbeNull, i.arg&[0], r1);
+        };
+        f.emit(.add, .Kl, r1, r, f.getcon(off));
+        off += a.size.zext();
+    };
+    f.emit(.salloc, .Kl, r, f.getcon(stk), QbeNull);
+}
+
+fn alloc_op(align_log2: i32) Qbe.O = {
+    /* specific to NAlign == 3 */
+    al := if(align_log2 >= 2, => align_log2 - 2, => 0);
+    @as(Qbe.O) @as(i32) Qbe.O.alloc4.raw() + al
+}
+
+// TODO: really need better error messages if you have mismatched {}'s
+
+fn get_type(m: *QbeModule, i: i64) *Qbe.Typ = {
+    @debug_assert(i < m.number_of_types, "type index out of bounds");
+    m.types.index(i)
+}
+
+fn selpar_amd64(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins) i64 = {
+    env := QbeNull;
+    ac := temp().alloc(AClass, ptr_diff(i0, i1)).as_ptr();
+    f.reset_scratch();
+    ni, ns := (0, 0);
+
+    m := f.globals;
+    aggregate := f.retty >= 0;
+    aret := @uninitialized AClass;
+    fa := if aggregate {
+        typclass(aret&, m.get_type(f.retty.zext()), m);
+        argsclass(i0, i1, ac, .par, aret&, env&, f.globals)
+    } else {
+        argsclass(i0, i1, ac, .par, zeroed(*AClass), env&, m)
+    };
+    
+    discard := Array(i32, 2).ptr_from_int(0);
+    f.reg = amd64_sysv_argregs(CALL(fa), discard);
+
+
+    zip_args(i0, i1, ac) { i, a, $continue |
+        if(i.op() != .parc || a.inmem != 0, => continue());
+        if a.size > 8 {
+            r := f.newtmp("abi", .Kl);
+            a.ref&[1] = f.newtmp("abi", .Kl);
+            f.emit(.storel, .Kw, QbeNull, a.ref&[1], r);
+            f.emit(.add, .Kl, r, i.to, f.getcon(8));
+        };
+        a.ref&[0] = f.newtmp("abi", .Kl);
+        f.emit(.storel, .Kw, QbeNull, a.ref&[0], i.to);
+        f.emit(alloc_op(a.align), .Kl, i.to, f.getcon(a.size.zext()), QbeNull);
+    };
+
+    if aggregate && aret.inmem != 0 {
+        r := f.newtmp("abi", .Kl);
+        f.emit(.copy, .Kl, r, rarg(.Kl, ni&, ns&), QbeNull);
+        f.retr = r;
+    };
+
+    s := 4;
+    zip_args(i0, i1, ac) { i, a, $continue |
+        @switch(a.inmem) {
+            @case(1) => {
+                @assert(a.align <= 4, "sysv abi requires alignments of 16 or less");
+                if a.align == 4 {
+                    s = (s+3).bit_and(-4);
+                };
+                f.tmp[i.to.val()].slot = -s.intcast();
+                s += a.size.zext() / 4;
+                continue();
+            };
+            @case(2) => {
+                f.emit(.load, i.cls(), i.to, SLOT(-s), QbeNull);
+                s += 2;
+                continue();
+            };
+            @default => ();
+        };
+        if(i.op() == .pare, => continue());
+        r := rarg(a.cls&[0], ni&, ns&);
+        if i.op() == .parc {
+            f.emit(.copy, a.cls&[0], a.ref&[0], r, QbeNull);
+            if a.size > 8 {
+                r := rarg(a.cls&[1], ni&, ns&);
+                f.emit(.copy, a.cls&[1], a.ref&[1], r, QbeNull);
+            };
+        } else {
+            f.emit(.copy, i.cls(), i.to, r, QbeNull);
+        };
+    };
+
+    if env != QbeNull {
+        f.emit(.copy, .Kl, env, TMP(Amd64Reg.RAX), QbeNull);
+    };
+    
+    fa.bit_or(shift_left(s * 4, 12))
+}
+
+fn selvaarg(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) void = {
+    c4    := f.getcon(4);
+    c8    := f.getcon(8);
+    c16   := f.getcon(16);
+    ap    := i.arg&[0];
+    isint := is_int(i.cls());
+
+    /* @b [...]
+           r0 =l add ap, (0 or 4)
+           nr =l loadsw r0
+           r1 =w cultw nr, (48 or 176)
+           jnz r1, @breg, @bstk
+       @breg
+           r0 =l add ap, 16
+           r1 =l loadl r0
+           lreg =l add r1, nr
+           r0 =w add nr, (8 or 16)
+           r1 =l add ap, (0 or 4)
+           storew r0, r1
+       @bstk
+           r0 =l add ap, 8
+           lstk =l loadl r0
+           r1 =l add lstk, 8
+           storel r1, r0
+       @b0
+           %loc =l phi @breg %lreg, @bstk %lstk
+           i.to =(i.cls) load %loc
+    */
+
+    loc := f.newtmp("abi", .Kl);
+    f.emit(.load, i.cls(), i.to, loc, QbeNull);
+    b0 := split(f, b);
+    b0.jmp = b.jmp;
+    b0.s1 = b.s1;
+    b0.s2 = b.s2;
+    for_jump_targets b { s | 
+        chpred(s, b, b0);
+    };
+
+    lreg := f.newtmp("abi", .Kl);
+    nr   := f.newtmp("abi", .Kl);
+    r0   := f.newtmp("abi", .Kw);
+    r1   := f.newtmp("abi", .Kl);
+    f.emit(.storew, .Kw, QbeNull, r0, r1);
+    f.emit(.add, .Kl, r1, ap, if(isint, => QbeConZero, => c4));
+    f.emit(.add, .Kw, r0, nr, if(isint, => c8, => c16));
+    r0 := f.newtmp("abi", .Kl);
+    r1 := f.newtmp("abi", .Kl);
+    f.emit(.add, .Kl, lreg, r1, nr);
+    f.emit(.load, .Kl, r1, r0, QbeNull);
+    f.emit(.add, .Kl, r0, ap, c16);
+    breg := split(f, b);
+    breg.jmp.type = .jmp;
+    breg.s1 = b0;
+
+    lstk := f.newtmp("abi", .Kl);
+    r0   := f.newtmp("abi", .Kl);
+    r1   := f.newtmp("abi", .Kl);
+    f.emit(.storel, .Kw, QbeNull, r1, r0);
+    f.emit(.add, .Kl, r1, lstk, c8);
+    f.emit(.load, .Kl, lstk, r0, QbeNull);
+    f.emit(.add, .Kl, r0, ap, c8);
+    bstk := split(f, b);
+    bstk.jmp.type = .jmp;
+    bstk.s1 = b0;
+
+    b0.phi = temp().box(Qbe.Phi); 
+    b0.phi[] = (
+        cls = .Kl, 
+        to = loc,
+        narg = 2,
+        blk = new(2, .PFn),
+        arg = new(2, .PFn),
+        link := Qbe.Phi.ptr_from_int(0),
+    );
+    b0.phi.blk[0] = bstk;
+    b0.phi.blk[1] = breg;
+    b0.phi.arg[0] = lstk;
+    b0.phi.arg[1] = lreg;
+    r0 := f.newtmp("abi", .Kl);
+    r1 := f.newtmp("abi", .Kw);
+    b.jmp.type = .jnz;
+    b.jmp.arg = r1;
+    b.s1 = breg;
+    b.s2 = bstk;
+    c := f.getcon(if(isint, => 48, => 176));
+    
+    // .cmpw+Ciult same?
+    f.emit(.cultw, .Kw, r1, nr, c);
+    f.emit(.loadsw, .Kl, nr, r0, QbeNull);
+    f.emit(.add, .Kl, r0, ap, if(isint, => QbeConZero, => c4));
+}
+
+fn selvastart(f: *Qbe.Fn, fa: i64, ap: Qbe.Ref) void = {
+    gp := fa.shift_right_logical(4).bit_and(15) * 8;
+    fp := 48 + fa.shift_right_logical(8).bit_and(15) * 16;
+    sp := fa.shift_right_logical(12);
+    r0 := f.newtmp("abi", .Kl);
+    r1 := f.newtmp("abi", .Kl);
+    f.emit(.storel, .Kw, QbeNull, r1, r0);
+    f.emit(.add, .Kl, r1, TMP(Amd64Reg.RBP), f.getcon(-176));
+    f.emit(.add, .Kl, r0, ap, f.getcon(16));
+    r0 = f.newtmp("abi", .Kl);
+    r1 = f.newtmp("abi", .Kl);
+    f.emit(.storel, .Kw, QbeNull, r1, r0);
+    f.emit(.add, .Kl, r1, TMP(Amd64Reg.RBP), f.getcon(sp));
+    f.emit(.add, .Kl, r0, ap, f.getcon(8));
+    r0 := f.newtmp("abi", .Kl);
+    f.emit(.storew, .Kw, QbeNull, f.getcon(fp), r0);
+    f.emit(.add, .Kl, r0, ap, f.getcon(4));
+    f.emit(.storew, .Kw, QbeNull, f.getcon(gp), ap);
+}
+
+
+fn zip_args(i0: *Qbe.Ins, i1: *Qbe.Ins, ac: *AClass, $body: @Fn(i: *Qbe.Ins, a: *AClass, $c: LabelId) void) void = {
+    i := i0.offset(-1);
+    a := ac.offset(-1);
+    while => i1.in_memory_after(i.offset(1)) {
+        continue :: local_return;
+        a = a.offset(1);
+        i = i.offset(1);
+        body(i, a, continue);
+    };
+}
