@@ -548,116 +548,57 @@ fn selpar_amd64(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins) i64 = {
 }
 
 fn selvaarg(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) void = {
-    c4    := f.getcon(4);
-    c8    := f.getcon(8);
-    c16   := f.getcon(16);
-    ap    := i.arg&[0];
-    isint := is_int(i.cls());
-
-    /* @b [...]
-           r0 =l add ap, (0 or 4)
-           nr =l loadsw r0
-           r1 =w cultw nr, (48 or 176)
-           jnz r1, @breg, @bstk
-       @breg
-           r0 =l add ap, 16
-           r1 =l loadl r0
-           lreg =l add r1, nr
-           r0 =w add nr, (8 or 16)
-           r1 =l add ap, (0 or 4)
-           storew r0, r1
-       @bstk
-           r0 =l add ap, 8
-           lstk =l loadl r0
-           r1 =l add lstk, 8
-           storel r1, r0
-       @b0
-           %loc =l phi @breg %lreg, @bstk %lstk
-           i.to =(i.cls) load %loc
-    */
-
-    loc := f.newtmp("abi", .Kl);
-    f.emit(.load, i.cls(), i.to, loc, QbeNull);
-    b0 := split(f, b);
-    b0.jmp = b.jmp;
-    b0.s1 = b.s1;
-    b0.s2 = b.s2;
-    for_jump_targets b { s | 
-        chpred(s, b, b0);
-    };
-
-    lreg := f.newtmp("abi", .Kl);
-    nr   := f.newtmp("abi", .Kl);
-    r0   := f.newtmp("abi", .Kw);
-    r1   := f.newtmp("abi", .Kl);
-    f.emit(.storew, .Kw, QbeNull, r0, r1);
-    f.emit(.add, .Kl, r1, ap, if(isint, => QbeConZero, => c4));
-    f.emit(.add, .Kw, r0, nr, if(isint, => c8, => c16));
-    r0 := f.newtmp("abi", .Kl);
-    r1 := f.newtmp("abi", .Kl);
-    f.emit(.add, .Kl, lreg, r1, nr);
-    f.emit(.load, .Kl, r1, r0, QbeNull);
-    f.emit(.add, .Kl, r0, ap, c16);
-    breg := split(f, b);
-    breg.jmp.type = .jmp;
-    breg.s1 = b0;
-
-    lstk := f.newtmp("abi", .Kl);
-    r0   := f.newtmp("abi", .Kl);
-    r1   := f.newtmp("abi", .Kl);
-    f.emit(.storel, .Kw, QbeNull, r1, r0);
-    f.emit(.add, .Kl, r1, lstk, c8);
-    f.emit(.load, .Kl, lstk, r0, QbeNull);
-    f.emit(.add, .Kl, r0, ap, c8);
-    bstk := split(f, b);
-    bstk.jmp.type = .jmp;
-    bstk.s1 = b0;
-
-    b0.phi = temp().box(Qbe.Phi); 
-    b0.phi[] = (
-        cls = .Kl, 
-        to = loc,
-        narg = 2,
-        blk = new(2, .PFn),
-        arg = new(2, .PFn),
-        link := Qbe.Phi.ptr_from_int(0),
-    );
-    b0.phi.blk[0] = bstk;
-    b0.phi.blk[1] = breg;
-    b0.phi.arg[0] = lstk;
-    b0.phi.arg[1] = lreg;
-    r0 := f.newtmp("abi", .Kl);
-    r1 := f.newtmp("abi", .Kw);
-    b.jmp.type = .jnz;
-    b.jmp.arg = r1;
-    b.s1 = breg;
-    b.s2 = bstk;
-    c := f.getcon(if(isint, => 48, => 176));
+    isint     := is_int(i.cls());
+    if_0_4    := f.getcon(if(isint, => 0, => 4));
+    if_8_16   := f.getcon(if(isint, => 8, => 16));
+    if_48_176 := f.getcon(if(isint, => 48, => 176));
     
-    // .cmpw+Ciult same?
-    f.emit(.cultw, .Kw, r1, nr, c);
-    f.emit(.loadsw, .Kl, nr, r0, QbeNull);
-    f.emit(.add, .Kl, r0, ap, if(isint, => QbeConZero, => c4));
+    @emit_instructions((f, b), i.arg&[0], if_0_4, if_8_16, if_48_176, i.to, i.cls(), """
+    @b
+        # as we continue in the outer loop, remaining code will be inserted here
+        %r0a =l add %0, %1
+        %nr =l loadsw %r0a
+        %r1a =w cultw %nr, %3
+        jnz %r1a, @breg, @bstk    # this will replace the current terminator of `b` and the old will be moved down to @b0
+    @breg
+        %r0b =l add %0, 16
+        %r1b =l loadl %r0b
+        %lreg =l add %r1b, %nr
+        %r0c =w add %nr, %2
+        %r1c =l add %0, %1
+        storew %r0c, %r1c
+        jmp @b0
+    @bstk
+        %r0d =l add %0, 8
+        %lstk =l loadl %r0d
+        %r1d =l add %lstk, 8
+        storel %r1d, %r0d
+        jmp @b0
+    @b0
+        %loc =l phi @breg %lreg, @bstk %lstk
+        %4 =5 load %loc
+        # code we've already emitted in the outer loop will be inserted here
+        # terminator of `b` goes here
+    """);
 }
 
 fn selvastart(f: *Qbe.Fn, fa: i64, ap: Qbe.Ref) void = {
     gp := fa.shift_right_logical(4).bit_and(15) * 8;
     fp := 48 + fa.shift_right_logical(8).bit_and(15) * 16;
     sp := fa.shift_right_logical(12);
-    r0 := f.newtmp("abi", .Kl);
-    r1 := f.newtmp("abi", .Kl);
-    f.emit(.storel, .Kw, QbeNull, r1, r0);
-    f.emit(.add, .Kl, r1, TMP(Amd64Reg.RBP), f.getcon(-176));
-    f.emit(.add, .Kl, r0, ap, f.getcon(16));
-    r0 = f.newtmp("abi", .Kl);
-    r1 = f.newtmp("abi", .Kl);
-    f.emit(.storel, .Kw, QbeNull, r1, r0);
-    f.emit(.add, .Kl, r1, TMP(Amd64Reg.RBP), f.getcon(sp));
-    f.emit(.add, .Kl, r0, ap, f.getcon(8));
-    r0 := f.newtmp("abi", .Kl);
-    f.emit(.storew, .Kw, QbeNull, f.getcon(fp), r0);
-    f.emit(.add, .Kl, r0, ap, f.getcon(4));
-    f.emit(.storew, .Kw, QbeNull, f.getcon(gp), ap);
+    
+    @emit_instructions(f, ap, f.getcon(gp), f.getcon(fp), f.getcon(sp), TMP(Amd64Reg.RBP), """
+    @start
+        storew %1, %0 
+        %ap4 =l add %0, 4
+        storew %2, %ap4
+        %ap8 =l add %0, 8
+        %rbp_sp =l add %4, %3
+        storel %rbp_sp, %ap8
+        %ap16 =l add %0, 16
+        %rbp_n176 =l add %4, -176
+        storel %rbp_n176, %ap16
+    """);
 }
 
 fn zip_args(i0: *Qbe.Ins, i1: *Qbe.Ins, ac: *AClass, $body: @Fn(i: *Qbe.Ins, a: *AClass, $c: LabelId) void) void = {

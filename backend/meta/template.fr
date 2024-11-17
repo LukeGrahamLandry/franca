@@ -5,12 +5,12 @@
 //! Importantly all the parsing happens at comptime, the code executed at runtime 
 //! (of the ir compiler) should be about the same you would have written manually. 
 //!
-//! Usage: `@emit_instructions(f: *Qbe.Fn, ...args, src: Str);`
+//! Usage: 
+//! - single block: `@emit_instructions( f: *Qbe.Fn,              ...args, src: Str);`
+//! -  multi block: `@emit_instructions((f: *Qbe.Fn, b: *Qbe.Fn), ...args, src: Str);`
 //! It's intended to be used in the middle of a pass where you eventually call copy_instructions_from_scratch().
 //! - The ir text can reference the `args` you pass in (which can be Qbe.Ref or Qbe.Cls) by index.
 //!   i.e. `@emit_instructions(f, output, second_input, .Kl, "%0 =2 add 10, %1");`
-//! - Multiple blocks and block terminators are not supported yet. 
-//!   The input source must begin with an `@label` (which is ignored).
 //! - RSlot/RInt are integers prefixed by S/I respectively.
 //! - Parsing RType/RMem/RCall is not supported yet, but they can be passed in as arguments.
 //!
@@ -18,20 +18,34 @@
 fn emit_instructions(in: FatExpr) FatExpr #macro = {
     e := in&.items();
     rt_f := compile_ast(e[0]);
+    rt_block := @{};
+    args0 := rt_f&.items();
+    expect_multiple_blocks := args0.len != 1;
+    if expect_multiple_blocks {
+        rt_f = args0[0];
+        rt_block = args0[1];
+    };
     src_node := e[e.len - 1];
     src := const_eval(Str)(src_node);
     args := e.slice(1, e.len - 1);
-    m :: @static(QbeModule) init_default_module(type = .JitOnly, os = query_current_os(), arch = query_current_arch().unwrap());
+    // Tiny code allocation because we're not going to output any code.
+    m :: @static(QbeModule);
+    // TODO: shouldn't need to reset this every time?
+    //       hopefully the problem is just that LINK_QBE_C means its fighting with the real one. 
+    m[] = init(1, todo_allocator, todo_allocator, (type = .JitOnly, os = query_current_os(), arch = query_current_arch().unwrap()));
+    
     p := temp().box(QParseCtx); // TODO: this is dumb. old backend has limited stack space. -- Nov 16
     p[] = init(m, src);  
     p.f.globals = m;
+    p.f.reset_scratch();
     p.f.default_init();  // :NeedFunctionInitForData
     p.allow_unterminated_block = true;
     f, replacements := or parse_body(p) { err | 
         compile_error(err, src_node.loc)
     };
+    @ct_assert(expect_multiple_blocks == (f.nblk != 1), src_node.loc, "iff creating multiple blocks, you must pass in the starting block.");
     
-    @ct_assert(f.nblk == 1, src_node.loc, "TODO: multiple blocks");
+    //@ct_assert(f.nblk == 1, src_node.loc, "TODO: multiple blocks");
     map  := Qbe.Ref.list(temp());
     ref_count := f.ntmp.zext() - Qbe.Tmp0 + f.ncon.zext() - 2;
     rt_map := FatExpr.list(ref_count, ast_alloc());
@@ -57,6 +71,8 @@ fn emit_instructions(in: FatExpr) FatExpr #macro = {
     };
     @{
         rt_f := @[rt_f];
+        rt_block_start := @[rt_block];
+        rt_block := Qbe.Blk.ptr_from_int(0);
         @[{
             enumerate f.tmp.slice(Qbe.Tmp0, f.ntmp.zext()) { i, t |
                 n := t.name().str();
@@ -64,6 +80,11 @@ fn emit_instructions(in: FatExpr) FatExpr #macro = {
                     arg_index: i64 = n[0].zext() - "0".char();
                     rt_map&.push(args[arg_index]);
                 } else {
+                    while => n.len > 1 && n[n.len - 1].is_ascii_digit() {
+                        n.len -= 1;
+                    };
+                    @debug_assert(n[n.len - 1] == ".".ascii(), "removing the .abc added in preparse");
+                    n.len -= 1;
                     rt_map&.push(@{ newtmp(rt_f, @[@literal n], @[@literal t.cls]) });
                 };
                 map&.push(TMP(Qbe.Tmp0 + i));
@@ -83,10 +104,11 @@ fn emit_instructions(in: FatExpr) FatExpr #macro = {
             @{
                 refs := @slice(@[in]);
                 k := @[classes];
+                rt_block_map := @uninitialized Array(*Qbe.Blk, @[@literal @as(i64) f.nblk.zext()]);
                 @[{
-                    body := @{ };
+                    body := @{};
                     
-                    translate_ref :: fn(map: *List(Qbe.Ref), r: Qbe.Ref, loc: Span) FatExpr = {
+                    fn translate_ref(map: *List(Qbe.Ref), r: Qbe.Ref, loc: Span) FatExpr = {
                         ::assert_eq(Qbe.RegKind.enum_count(), 8);
                         t := rtype(r);
                         needs_remap := t == .RCon || (t == .RTmp && r.val() >= Qbe.Tmp0);
@@ -99,25 +121,138 @@ fn emit_instructions(in: FatExpr) FatExpr #macro = {
                         } else {  // RInt, RSlot, RCall, RNull
                             @literal r 
                         }
-                    };
+                    }
                     
-                    @ct_assert(f.start.jmp.type == .Jxxx, src_node.loc, "TODO: support terminated blocks");
-                    for_insts_rev f.start { i | 
-                        i := i[];
-                        ct_k := @literal i.cls();
-                        to := translate_ref(map&, i.to, src_node.loc);
-                        each replacements { rep |
-                            if i.to == rep.r {
-                                ct_k = @{ k[@[@literal rep.key]] };
+                    fn get_rt_block(i: i64) FatExpr = {
+                        @{ rt_block_map&[@[@literal i]] }
+                    }
+                    
+                    fn get_blocks(f: *Qbe.Fn) []*Qbe.Blk = {
+                        blocks := list(*Qbe.Blk, temp());
+                        for_blocks f { b | 
+                            blocks&.push(b);
+                        };
+                        blocks.items()
+                    }
+                    
+                    do_bodies(body&, replacements, f, src_node.loc, map&);
+                    fn do_bodies(body: *FatExpr, reps: [](Replacement), f: *Qbe.Fn, loc: Span, map: *List(Qbe.Ref)) void = {
+                        has_multiple_blocks := f.nblk != 1;
+                        blocks := get_blocks(f);
+                        block_index: i64 = f.nblk.zext();
+                        for_rev blocks { b |
+                            block_index -= 1;
+                            for_insts_rev b { i | 
+                                i := i[];
+                                ct_k := @literal i.cls();
+                                to := translate_ref(map, i.to, loc);
+                                each reps { rep |
+                                    if i.to == rep.r {
+                                        ct_k = @{ k[@[@literal rep.key]] };
+                                    };
+                                };
+                                a0 := translate_ref(map, i.arg&[0], loc);
+                                a1 := translate_ref(map, i.arg&[1], loc);
+                                body[] = @{ 
+                                    @[body[]]; 
+                                    emit(rt_f, @[@literal i.op()], @[ct_k], @[to], @[a0], @[a1]); 
+                                };
+                            };
+                            if has_multiple_blocks {
+                                body[] = @{ 
+                                    @[body[]]; 
+                                    @[get_rt_block(block_index)] = @[if block_index != 0 {
+                                        @{ split(rt_f, rt_block_start) }    
+                                    } else {
+                                        @{ rt_block_start }
+                                    }];
+                                };
+                            } else {
+                                @ct_assert(b.jmp.type == .Jxxx, loc, "single block template cannot have terminators");
                             };
                         };
-                        a0 := translate_ref(map&, i.arg&[0], src_node.loc);
-                        a1 := translate_ref(map&, i.arg&[1], src_node.loc);
-                        body = @{ 
-                            @[body]; 
-                            emit(rt_f, @[@literal i.op()], @[ct_k], @[to], @[a0], @[a1]); 
-                        };
+                    }
+                    
+                    if f.nblk != 1 {
+                        do_terminators(body&, replacements, f, src_node.loc, map&);
+                    } else {
+                        @ct_assert(f.start.phi.is_null(), src_node.loc, "cannot use phi nodes when creating only a single block");
                     };
+                    fn do_terminators(body: *FatExpr, reps: []Replacement, f: *Qbe.Fn, loc: Span, map: *List(Qbe.Ref)) void = {
+                        translate_block :: fn(f: *Qbe.Fn, b: *Qbe.Blk) FatExpr = {
+                            if b.is_null() {
+                                return(@{ Qbe.Blk.ptr_from_int(0) });
+                            };
+                            i := 0;
+                            for_blocks f { check | 
+                                if b.identical(check) {
+                                    return(get_rt_block(i));
+                                };
+                                i += 1;
+                            };
+                            panic("block not found")
+                        };
+                        
+                        block_index := -1;
+                        body[] = @{
+                            @[body[]];
+                            b := @[get_rt_block(0)];
+                            b0 := @[get_rt_block(f.nblk.zext() - 1)];
+                            b0.jmp = b.jmp;
+                            b0.s1 = b.s1;
+                            b0.s2 = b.s2;
+                            for_jump_targets b { s | 
+                                chpred(s, b, b0);
+                            };
+                        };
+                        for_blocks f { b |
+                            block_index += 1;
+                            
+                            body[] = @{
+                                @[body[]];
+                                rt_block = @[get_rt_block(block_index)];
+                            };
+                            
+                            for_phi b { p | 
+                                arg_count := @literal @as(i64) p.narg.zext();
+                                body[] = @{
+                                    @[body[]];
+                                    prev := rt_block.phi;
+                                    rt_block.phi = temp().box(Qbe.Phi); 
+                                    rt_block.phi[] = (
+                                        cls = .Kl, 
+                                        to = @[translate_ref(map, p.to, loc)],
+                                        narg = 2,
+                                        blk = new(@[arg_count], .PFn),
+                                        arg = new(@[arg_count], .PFn),
+                                        link = prev,
+                                    );
+                                };
+                                range(0, p.narg.zext()) { a |
+                                    rt_a := @literal a;
+                                    body[] = @{
+                                        @[body[]];
+                                        rt_block.phi.arg[@[rt_a]] = @[translate_ref(map, p.arg[a], loc)];
+                                        rt_block.phi.blk[@[rt_a]] = @[translate_block(f, p.blk[a])];
+                                    };
+                                };
+                            };
+                            
+                            if b.jmp.type != .Jxxx {
+                                @debug_assert(block_index != f.nblk.zext() - 1);
+                                body[] = @{
+                                    @[body[]];
+                                    rt_block.jmp.type = @[@literal b.jmp.type];
+                                    rt_block.jmp.arg = @[translate_ref(map, b.jmp.arg, loc)];
+                                    rt_block.s1 = @[translate_block(f, b.s1)];
+                                    rt_block.s2 = @[translate_block(f, b.s2)];
+                                };
+                            } else {
+                                @debug_assert(block_index == f.nblk.zext() - 1);
+                            }
+                        };
+                    }
+                    
                     //debug_log_ast(body);
                     body
                 }]
