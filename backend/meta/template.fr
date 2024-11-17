@@ -1,0 +1,127 @@
+//!
+//! Parse a string of Qbe IR and generate code for the corresponding sequence of emit() calls.
+//! This avoids large blocks of code that need to be read backwards. 
+//! You can tell it's a problem because the qbe c code has the ir text in a comment near a few particularly large chunks of emit() calls.
+//! Importantly all the parsing happens at comptime, the code executed at runtime 
+//! (of the ir compiler) should be about the same you would have written manually. 
+//!
+//! Usage: `@emit_instructions(f: *Qbe.Fn, ...args, src: Str);`
+//! It's intended to be used in the middle of a pass where you eventually call copy_instructions_from_scratch().
+//! - The ir text can reference the `args` you pass in (which can be Qbe.Ref or Qbe.Cls) by index.
+//!   i.e. `@emit_instructions(f, output, second_input, .Kl, "%0 =2 add 10, %1");`
+//! - Multiple blocks and block terminators are not supported yet. 
+//!   The input source must begin with an `@label` (which is ignored).
+//! - RSlot/RInt are integers prefixed by S/I respectively.
+//! - Parsing RType/RMem/RCall is not supported yet, but they can be passed in as arguments.
+//!
+
+fn emit_instructions(in: FatExpr) FatExpr #macro = {
+    e := in&.items();
+    rt_f := compile_ast(e[0]);
+    src_node := e[e.len - 1];
+    src := const_eval(Str)(src_node);
+    args := e.slice(1, e.len - 1);
+    m :: @static(QbeModule) init_default_module(type = .JitOnly, os = query_current_os(), arch = query_current_arch().unwrap());
+    p := temp().box(QParseCtx); // TODO: this is dumb. old backend has limited stack space. -- Nov 16
+    p[] = init(m, src);  
+    p.f.globals = m;
+    p.f.default_init();  // :NeedFunctionInitForData
+    p.allow_unterminated_block = true;
+    f, replacements := or parse_body(p) { err | 
+        compile_error(err, src_node.loc)
+    };
+    
+    @ct_assert(f.nblk == 1, src_node.loc, "TODO: multiple blocks");
+    map  := Qbe.Ref.list(temp());
+    ref_count := f.ntmp.zext() - Qbe.Tmp0 + f.ncon.zext() - 2;
+    rt_map := FatExpr.list(ref_count, ast_alloc());
+    rt_cls := repeated(@{Qbe.Cls.Kw}, 10, ast_alloc());
+    find :: fn(map: *List(Qbe.Ref), r: Qbe.Ref) ?i64 = {
+        // TODO: don't iterate, we know exactly where it is
+        enumerate map { i, old |
+            if old[] == r {
+                return(Some = i);
+            };
+        };
+        .None
+    };
+    any_cls_args := false;
+    enumerate args { i, a | 
+        a[] = compile_ast(a[]);
+        if a.ty == Qbe.Cls {
+            rt_cls[i] = a[];
+            any_cls_args = true;
+        } else {
+            @ct_assert(a.ty == Qbe.Ref, a.loc, "template arg must be Ref or Cls");
+        };
+    };
+    @{
+        rt_f := @[rt_f];
+        @[{
+            enumerate f.tmp.slice(Qbe.Tmp0, f.ntmp.zext()) { i, t |
+                n := t.name().str();
+                if n.len > 0 && n[0].is_ascii_digit() {
+                    arg_index: i64 = n[0].zext() - "0".char();
+                    rt_map&.push(args[arg_index]);
+                } else {
+                    rt_map&.push(@{ newtmp(rt_f, @[@literal n], @[@literal t.cls]) });
+                };
+                map&.push(TMP(Qbe.Tmp0 + i));
+            };
+            enumerate f.con.slice(0, f.ncon.zext()) { i, c |
+                rt_map&.push(@{ c := @[@literal c[]]; newcon(rt_f, c&) });
+                map&.push(CON(i));
+            };
+            
+            refs := in;
+            in.expr.Tuple = rt_map.rs();
+            in.ty = UnknownType;
+            classes := in;
+            classes.expr.Tuple = rt_cls.rs();
+            classes.ty = UnknownType;
+            classes = if(any_cls_args, => @{ @slice(@[classes]) }, => @{});
+            @{
+                refs := @slice(@[in]);
+                k := @[classes];
+                @[{
+                    body := @{ };
+                    
+                    translate_ref :: fn(map: *List(Qbe.Ref), r: Qbe.Ref, loc: Span) FatExpr = {
+                        ::assert_eq(Qbe.RegKind.enum_count(), 8);
+                        t := rtype(r);
+                        needs_remap := t == .RCon || (t == .RTmp && r.val() >= Qbe.Tmp0);
+                        @ct_assert(!@is(t, .RType, .RMem), loc, "TODO: unhandled ref type in template. pass RType/RMem as argument instead for now.");
+                        if needs_remap {
+                            i := or find(map, r) {
+                                compile_error("unbound ref", loc)
+                            };
+                            @{ refs[@[@literal i]] }
+                        } else {  // RInt, RSlot, RCall, RNull
+                            @literal r 
+                        }
+                    };
+                    
+                    @ct_assert(f.start.jmp.type == .Jxxx, src_node.loc, "TODO: support terminated blocks");
+                    for_insts_rev f.start { i | 
+                        i := i[];
+                        ct_k := @literal i.cls();
+                        to := translate_ref(map&, i.to, src_node.loc);
+                        each replacements { rep |
+                            if i.to == rep.r {
+                                ct_k = @{ k[@[@literal rep.key]] };
+                            };
+                        };
+                        a0 := translate_ref(map&, i.arg&[0], src_node.loc);
+                        a1 := translate_ref(map&, i.arg&[1], src_node.loc);
+                        body = @{ 
+                            @[body]; 
+                            emit(rt_f, @[@literal i.op()], @[ct_k], @[to], @[a0], @[a1]); 
+                        };
+                    };
+                    //debug_log_ast(body);
+                    body
+                }]
+            }
+        }]
+    }
+}

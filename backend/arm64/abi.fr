@@ -547,42 +547,14 @@ fn selpar(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins) Params = {
     );
 }
 
-fn split(f: *Qbe.Fn, b: *Qbe.Blk) *Qbe.Blk = {
-    f.nblk += 1;
-    bn := newblk();
-    f.copy_instructions_from_scratch(bn);
-    b.visit += 1;
-    bn.visit = b.visit;
-    l: List(u8) = (maybe_uninit = bn.name&.items(), len = 0, gpa = panicking_allocator); // :UnacceptablePanic
-    @fmt(l&, "%.%", b.name(), @as(i64) b.visit.zext());
-    bn.loop = b.loop;
-    bn.link = b.link;
-    b.link = bn;
-    bn
-}
-
-fn chpred(b: *Qbe.Blk, bp: *Qbe.Blk, bp1: *Qbe.Blk) void = {
-    for_phi b { p |
-        a := 0;
-        while => !p.blk[a].identical(bp) {
-            @debug_assert(a + 1 < p.narg.zext(), "didn't find phi for block");
-            a += 1;
-        };
-        p.blk[a] = bp1;
-    }
-}
-
-fn apple_selvaarg(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) void = {
-    c8   := f.getcon(8);
-    ap   := i.arg&[0];
-    stk8 := f.newtmp("abi", .Kl);
-    stk  := f.newtmp("abi", .Kl);
-
-    f.emit(.storel, .Kw, QbeNull, stk8, ap);
-    f.emit(.add, .Kl, stk8, stk, c8);
-    f.emit(.load, i.cls(), i.to, stk, QbeNull);
-    f.emit(.load, .Kl, stk, ap, QbeNull);
-}
+fn apple_selvaarg(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) void = 
+    @emit_instructions(f, i.to, i.arg&[0], i.cls(), """
+    @start
+        %stk =l load %1
+        %0 =2 load %stk
+        %stk8 =l add %stk, 8
+        storel %stk8, %1
+    """);
 
 fn arm64_selvaarg(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) void = {
     c8   := f.getcon(8);
@@ -675,73 +647,32 @@ fn arm64_selvaarg(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) void = {
     f.emit(.add, .Kl, r0, ap, if(isgp, => c24, => c28));
 }
 
-fn apple_selvastart(f: *Qbe.Fn, p: Params, ap: Qbe.Ref) void = {
-    off := f.getcon(p.stk.zext());
-    stk := f.newtmp("abi", .Kl);
-    arg := f.newtmp("abi", .Kl);
+fn apple_selvastart(f: *Qbe.Fn, p: Params, ap: Qbe.Ref) void = 
+    @emit_instructions(f, f.getcon(p.stk.zext()), ap, """
+    @start
+        %stk =l addr S-1
+        %arg =l add %stk, %0
+        storel %arg, %1
+    """);
 
-    f.emit(.storel, .Kw, QbeNull, arg, ap);
-    f.emit(.add, .Kl, arg, stk, off);
-    f.emit(.addr, .Kl, stk, SLOT(-1), QbeNull);
-}
-
-// TODO: port the parser and generate the code for these because the backwards calls are completely unintelligible. 
-/*
-(f.getcon((p.nfp.zext()-8)*16), f.getcon((p.ngp.zext()-8)*8), f.getcon(p.stk.zext() + 192))
-    %r0 =l add %ap, 28
-    storew %ARG0, %r0
-    %r0 =l add %ap, 24
-    storew %ARG1, %r0
-    %r0 =l add %ap, 16
-    %rsave =l addr S-1
-    %r1 =l add %rsave, 192
-    storel %r1, %r0
-    %r0 =l add %ap, 8
-    %r1 =l add %rsave, 64
-    storel %r1, %r0
-    %r0 =l add %rsave, %ARG3
-    storel %r0, %ap
-*/
-fn arm64_selvastart(f: *Qbe.Fn, p: Params, ap: Qbe.Ref) void = {
-    rsave := f.newtmp("abi", .Kl);
-
-    r0 := f.newtmp("abi", .Kl);
-    f.emit(.storel, .Kw, QbeNull, r0, ap);
-    f.emit(.add, .Kl, r0, rsave, f.getcon(p.stk.zext() + 192));
-
-    r0 := f.newtmp("abi", .Kl);
-    r1 := f.newtmp("abi", .Kl);
-    f.emit(.storel, .Kw, QbeNull, r1, r0);
-    f.emit(.add, .Kl, r1, rsave, f.getcon(64));
-    f.emit(.add, .Kl, r0, ap, f.getcon(8));
-
-    r0 := f.newtmp("abi", .Kl);
-    r1 := f.newtmp("abi", .Kl);
-    f.emit(.storel, .Kw, QbeNull, r1, r0);
-    f.emit(.add, .Kl, r1, rsave, f.getcon(192));
-    f.emit(.addr, .Kl, rsave, SLOT(-1), QbeNull);
-    f.emit(.add, .Kl, r0, ap, f.getcon(16));
-
-    r0 := f.newtmp("abi", .Kl);
-    f.emit(.storew, .Kw, QbeNull, f.getcon((p.ngp.zext()-8)*8), r0);
-    f.emit(.add, .Kl, r0, ap, f.getcon(24));
-    
-    r0 := f.newtmp("abi", .Kl);
-    f.emit(.storew, .Kw, QbeNull, f.getcon((p.nfp.zext()-8)*16), r0);
-    f.emit(.add, .Kl, r0, ap, f.getcon(28));
-}
-
-fn realloc_for_params(f: *Qbe.Fn, i: *Qbe.Ins) void = {
-    // TODO: avoid useless reallocation if we have no params? 
-    b := f.start;
-    n: i64 = b.nins.zext() - ptr_diff(b.ins, i) + f.len_scratch();
-    i0 := temp().alloc(Qbe.Ins, n).as_ptr();
-    ip := i0;
-    ip = icpy(ip, f.globals.curi[], f.len_scratch());
-    ip = icpy(ip, i, ptr_diff(i, b.ins.offset(b.nins.zext())));  
-    b.nins = n.trunc();
-    b.ins = i0;
-}
+// TODO: untested
+fn arm64_selvastart(f: *Qbe.Fn, p: Params, ap: Qbe.Ref) void = 
+    @emit_instructions(f, f.getcon((p.nfp.zext()-8)*16), f.getcon((p.ngp.zext()-8)*8), f.getcon(p.stk.zext() + 192), """
+    @start
+        %r0 =l add %ap, 28
+        storew %0, %r0
+        %r0 =l add %ap, 24
+        storew %1, %r0
+        %r0 =l add %ap, 16
+        %rsave =l addr S-1
+        %r1 =l add %rsave, 192
+        storel %r1, %r0
+        %r0 =l add %ap, 8
+        %r1 =l add %rsave, 64
+        storel %r1, %r0
+        %r0 =l add %rsave, %2
+        storel %r0, %ap
+    """);
 
 fn arm64_abi(f: *Qbe.Fn) void = {
     T := f.globals.target;
@@ -855,26 +786,6 @@ fn apple_extsb(f: *Qbe.Fn) void = {
         write(out, "\n> After Apple pre-ABI:\n");
         printfn(f, out);
     }
-}
-
-fn find_past_last_param(f: *Qbe.Fn) *Qbe.Ins = {
-    for_insts_forward f.start { i | 
-        if !is_par(i.op()) {
-            return(i);
-        }
-    };
-    f.start.ins.offset(f.start.nins.zext())
-}
-
-fn find_first_arg(b: *Qbe.Blk, call: *Qbe.Ins) *Qbe.Ins = {
-    i := call;
-    while => Qbe.Ins.int_from_ptr(i) > Qbe.Ins.int_from_ptr(b.ins) {
-        if !is_arg(i.offset(-1).op()) {
-            return(i);
-        };
-        i = i.offset(-1);
-    };
-    i
 }
 
 ::enum_basic(ArgClass);

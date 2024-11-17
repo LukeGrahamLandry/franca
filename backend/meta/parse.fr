@@ -26,6 +26,8 @@ QParseCtx :: @struct(
     out: Alloc,
     blk := Qbe.Blk.ptr_from_int(0),
     ret := Qbe.J.Jxxx,
+    // TODO: use this for reporting more errors that are only allowed when used as a template. 
+    allow_unterminated_block := false, // for comptime templates
 );
 
 // TODO: this is more useful if you let them pass a userdata pointer but for now i want to match the qbe interface. 
@@ -242,9 +244,10 @@ fn parse_args(self: *QParseCtx, is_par: bool) void = {
 
 fn parse_line(self: *QParseCtx) bool = {
     self.skip_lines();
-    if self.check("}") {
+    if self.check("}") || self.cursor >= self.input.len {
         return(false);
     };
+    
     if self.parse_blk() { blk | 
         if self.f.nblk == 0 {
             self.f.start = blk;
@@ -274,8 +277,10 @@ fn end_block(self: *QParseCtx, new_blk: ?*Qbe.Blk) void = {
             self.blk.jmp.type = .jmp;
             self.blk.s1 = blk;
         } else { 
-            @fmt(self.error&, "block % has not been terminated", self.blk.name());
-            return()
+            if !self.allow_unterminated_block {
+                @fmt(self.error&, "block % has not been terminated", self.blk.name());
+                return()
+            };
         };
     };
     if new_blk { bb | 
