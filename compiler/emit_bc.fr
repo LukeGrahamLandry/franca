@@ -323,7 +323,7 @@ fn store_pre(self: *EmitBc, ty: Type) void = {
     }
 }
 
-fn load(self: *EmitBc, ty: Type) void = {
+fn load(self: *EmitBc, ty: Type) PRes = {
     if(ty.is_never(), => self.push(.Unreachable));
     slots := self.slot_count(ty);
     @switch(slots) {
@@ -345,8 +345,9 @@ fn load(self: *EmitBc, ty: Type) void = {
             self.push(Load = self.program.prim(types[1]).expect("load prim!"));
             self.push(Snipe = 2);
         };
-        @default => panic("ICE: Tried to load big value.");
-    }
+        @default => return(@err("ICE: Tried to load big value of type % (% slots)", self.program.log(ty), slots));
+    };
+    .Ok
 }
 
 fn emit_body(self: *EmitBc, f: FuncId) PRes #once = {
@@ -495,7 +496,7 @@ fn emit_runtime_call(
     tail := can_tail && !self.program.get_info(f_ty.arg).contains_pointers() && !any_by_ref;
     
     do_call(sig&, tail);
-    
+    self.last_loc = arg_expr.loc;
     slots := self.slot_count(f_ty.ret);
     if slots > 0 {
         @match(result_location) {
@@ -504,7 +505,7 @@ fn emit_runtime_call(
                     if result_var { id |
                         self.addr_var(id);
                     };
-                    self.load(f_ty.ret);
+                    @try(self.load(f_ty.ret)) return;
                 }
             }
             fn ResAddr() => if(!sig.first_arg_is_indirect_return, => self.store_pre(f_ty.ret));
@@ -700,8 +701,9 @@ fn compile_expr(self: *EmitBc, expr: *FatExpr, result_location: ResultLoc, can_t
                     @default     => self.push(Snipe = 0);
                 };
             } else {
+                self.last_loc = expr.loc;
                 @match(result_location) {
-                    fn PushStack() => self.load(value_type);
+                    fn PushStack() => @try(self.load(value_type)) return;
                     fn ResAddr() => {
                         info := self.program.get_info(expr_ty);
 

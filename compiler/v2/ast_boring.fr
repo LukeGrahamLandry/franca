@@ -122,8 +122,9 @@ fn tuple_of(self: *SelfHosted, types: []Type) Type = {
         @case(0) => void;
         @case(1) => types[0];
         @default => {
+            // :hacky_type_compression
             // TODO: always. would need to change how you go arg_ty -> prim_sig.
-            if types.len > 50 {
+            if types.len > max_homogeneous_tuple {
                 first := types[0];
                 cond :: fn(t: *Type) bool => t[] != first;
                 if !types.contains(cond) {
@@ -311,10 +312,12 @@ fn tuple_types(self: *SelfHosted, ty: Type) ?[]Type = {
     @match(self.get_type(ty)) {
         fn Struct(f) => {
             out: List(Type) = list(f.fields.len, temp());
+            // :const_args_are_not_const_in_tuple
+            @debug_assert(f.is_tuple, "called tuple_types on a struct, which might be fine but i don't think happens");
+            @debug_assert(f.const_field_count == 0, "tuples don't have constant fields");
             each f.fields { f |
-                if f.kind != .Const {
-                    out&.push(f.ty);
-                };
+                @debug_assert(f.kind != .Const); // we don't know what the caller's expecting
+                out&.push(f.ty);
             };
             (Some = out.items())
         }
@@ -324,16 +327,52 @@ fn tuple_types(self: *SelfHosted, ty: Type) ?[]Type = {
     }
 }
 
+max_homogeneous_tuple :: 50;
 fn arg_types(self: *SelfHosted, ty: Type) []Type = {
-    @if_let(self.get_type(ty)) 
+    @match(self.get_type(ty)) {
         fn Struct(f) => {
             if f.is_tuple {
                 types := self.tuple_types(ty);
                 return(types.unwrap());
             };
+            (@list(ty) temp()).items()
         };
-    ::List(Type);
-    (@list(ty) temp()).items()
+        // :hacky_type_compression
+        // this is a :HACK to fix @slice(>50 elements)
+        // TODO: but does this miscompile `fn foo(a: Array(Bar, 51)) void;`? 
+        //       or do we makes sure it's wrapped in an extra tuple? if so then we don't need the second case maybe? -- Nov 18
+        fn Array(it) => {
+            if it.len.zext() > max_homogeneous_tuple {
+                return(it.inner.repeated(it.len.zext(), temp()).items()); // TODO: aaa :SLOW
+            } else {
+                return((@list(ty) temp()).items());
+            };
+            unreachable()
+        }
+        @default => (@list(ty) temp()).items();
+    }
+}
+
+// this is only used for FnType.arity right now 
+// and thats kinda hacky in the first place so this should probably go away. 
+// and we should just be more strict about representing fn foo(a: i64, b: i64) void; vs fn foo(ab: Ty(i64, i64)) void; are those conflicting overloads? 
+// -- Nov 18
+fn len_arg_types(self: *SelfHosted, ty: Type) i64 = {
+    @match(self.get_type(ty)) {
+        fn Struct(f) => {
+            if f.is_tuple {
+                @debug_assert(f.const_field_count == 0, "tuples don't have constant fields.");
+                // if that changes, we're not sure what the caller is expecting here. 
+                // but its also kinda dumb because function args are tuples and functions can have constant arguments. 
+                return(f.fields.len);
+            };
+            1
+        };
+        // :hacky_type_compression
+        fn Array(it) => 
+            if(it.len.zext() > max_homogeneous_tuple, => it.len.zext(), => 1);
+        @default => 1;
+    }
 }
 
 fn remove_named(self: *Pattern, arg_name: Var, a: Alloc) void = {

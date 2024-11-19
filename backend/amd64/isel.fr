@@ -1,0 +1,868 @@
+// Adapted from Qbe. MIT License. © 2015-2024 Quentin Carbonneaux <quentin@c9x.me>
+
+/* For x86_64, do the following:
+ *
+ * - check that constants are used only in
+ *   places allowed
+ * - ensure immediates always fit in 32b
+ * - expose machine register contraints
+ *   on instructions like division.
+ * - implement fast locals (the streak of
+ *   constant allocX in the first basic block)
+ * - recognize complex addressing modes
+ *
+ * Invariant: the use counts that are used
+ *            in sel() must be sound.  This
+ *            is not so trivial, maybe the
+ *            dce should be moved out...
+ */
+
+fn noimm(r: Qbe.Ref, f: *Qbe.Fn) bool = {
+    if(rtype(r) != .RCon, => return(false));
+    c := f.get_constant(r);
+    @match(c.type) {
+        /* we only support the 'small'
+         * code model of the ABI, this
+         * means that we can always
+         * address data with 32bits
+         */
+        fn CAddr() => false;
+        fn CBits() => c.bits.i < MIN_i32 || c.bits.i > MAX_i32;
+        @default => panic("invalid constant");
+    }
+}
+
+fn rslot(r: Qbe.Ref, f: *Qbe.Fn) i32 = {
+    if(rtype(r) != .RTmp, => return(-1));
+    f.get_temporary(r)[].slot
+}
+
+// unstable!
+fn hascon(r: Qbe.Ref, pc: **Qbe.Con, f: *Qbe.Fn) bool = @match(rtype(r)) {
+    fn RCon() => {
+        pc[] = f.get_constant(r);
+        true
+    }
+    fn RMem() => {
+        pc[] = f.get_memory(r)[].offset&;
+        true
+    }
+    @default => false;
+};
+
+fn fixarg(r: *Qbe.Ref, k: Qbe.Cls, i: *Qbe.Ins, f: *Qbe.Fn) void = {
+    T := f.globals.target;
+    
+    c := Qbe.Con.ptr_from_int(0);
+    r1, r0 := (r[], r[]);
+    s := rslot(r0, f);
+    o := if(i.is_null(), => Qbe.O.copy, => i.op());
+    @if_else {
+        @if(!is_int(k) && rtype(r0) == .RCon) => {
+            // Floats cannot be used as immediates. 
+            // TODO: Qbe loads floats from memory instead. 
+            //       clang does too so presumably its the correct choice. 
+            //       but this is less of a pain for now. 
+            
+            if k == .Kd { // see i64 case below
+                r[] = f.newtmp("isel", .Kl);
+                f.emit(.copy, .Kl, r[], r0, QbeNull);
+            };
+            r1 = f.newtmp("isel", k);
+            f.emit(.cast, k, r1, r[], QbeNull);
+        };
+        @if(o != .copy && k ==. Kl && noimm(r0, f)) => {
+            /* load constants that do not fit in
+            * a 32bit signed integer into a
+            * long temporary
+            */
+            r1 = f.newtmp("isel", .Kl);
+            f.emit(.copy, .Kl, r1, r0, QbeNull);
+        };
+        @if(s != -1) => {
+            /* load fast locals' addresses into
+            * temporaries right before the
+            * instruction
+            */
+            r1 = f.newtmp("isel", .Kl);
+            f.emit(.addr, .Kl, r1, SLOT(s), QbeNull);
+        };
+        @if(T.apple && hascon(r0, c&, f)
+        && c.type == .CAddr && c.sym.type == .SThr) => {
+            r1 = f.newtmp("isel", .Kl);
+            r2 := r1;
+            if c.bits.i != 0 {
+                r2 = f.newtmp("isel", .Kl);
+                r3 := f.getcon(c.bits.i);
+                f.emit(.add, .Kl, r1, r2, r3);
+            };
+            f.emit(.copy, .Kl, r2, TMP(Amd64Reg.RAX), QbeNull);
+            r2 := f.newtmp("isel", .Kl);
+            r3 := f.newtmp("isel", .Kl);
+            f.emit(.call, .Kw, QbeNull, r3, CALL(17));
+            f.emit(.copy, .Kl, TMP(Amd64Reg.RDI), r2, QbeNull);
+            f.emit(.load, .Kl, r3, r2, QbeNull);
+            cc := c[];
+            cc.bits.i = 0;
+            r3 := f.newcon(cc&);
+            f.emit(.load, .Kl, r2, r3, QbeNull);
+            if rtype(r0) == .RMem {
+                m := f.get_memory(r0);
+                m.offset.type = .CUndef;
+                m.base = r1;
+                r1 = r0;
+            };
+        };
+        @if(!(is_store(o) && r.identical(i.arg&.index(1))) // TODO: is it important that the comparison is by reference?
+        && !is_load(o) && o != .call && rtype(r0) == .RCon
+        && f.get_constant(r0)[].type == .CAddr) => {
+            // TODO: remove this when i stop outputting text.
+            //       but also maybe its dumb for me to complicate the emit code. 
+            //       since sane programs won't do this anyway. 
+            /* apple as does not support 32-bit
+            * absolute addressing, use a rip-
+            * relative leaq instead
+            */
+            r1 = f.newtmp("isel", .Kl);
+            f.emit(.addr, .Kl, r1, r0, QbeNull);
+        };
+        @if(rtype(r0) == .RMem) => {
+            // TODO: I don't understand this condition. you should be allowed (type=CAddr, base=R, index=R) or (type=CBits, base=?, index=?)
+            /* eliminate memory operands of
+            * the form $foo(%rip, ...)
+            */
+            m := f.get_memory(r0);
+            if m.base == QbeNull && m.offset.type == .CAddr {
+                r0 = f.newtmp("isel", .Kl);
+                f.emit(.addr, .Kl, r0, f.newcon(m.offset&), QbeNull);
+                m.offset.type = .CUndef;
+                m.base = r0;
+            };
+        };
+        @else => ();
+    };
+    r[] = r1;
+}
+
+fn seladdr(r: *Qbe.Ref, tn: []Qbe.Num, f: *Qbe.Fn) void = {
+    r0 := r[];
+    if rtype(r0) == .RTmp {
+        a := Qbe.Addr.zeroed();
+        if(!amatch(a&, tn, r0, f), => return());
+        if a.base != QbeNull && a.offset.type == .CAddr {
+            /* apple as does not support
+             * $foo(%r0, %r1, M); try to
+             * rewrite it or bail out if
+             * impossible
+             */
+            if a.index != QbeNull || rtype(a.base) != .RTmp {
+                return();
+            } else {
+                a.index = a.base;
+                a.scale = 1;
+                a.base = QbeNull;
+            };
+        };
+        chuse(r0, -1, f);
+        m: i64 = f.nmem.zext();
+        f.nmem += 1;
+        f.mem&.grow(m + 1);
+        f.mem[m] = a;
+        chuse(a.base, 1, f);
+        chuse(a.index, 1, f);
+        r[] = MEM(m);
+    };
+}
+
+fn cmpswap(arg: *Array(Qbe.Ref, 2), cmp: i32) bool = {
+    cmp := @as(Qbe.Cmp) cmp;
+    @match(cmp) {
+        fn Cflt() => true;
+        fn Cfle() => true;
+        fn Cfgt() => false;
+        fn Cfge() => false;
+        @default => rtype(arg[0]) == .RCon;
+    }
+}
+
+fn selcmp(arg: []Qbe.Ref, k: Qbe.Cls, swap: bool, f: *Qbe.Fn) void = {
+    if swap {
+        r := arg[1];
+        arg[1] = arg[0];
+        arg[0] = r;
+    };
+    icmp := f.emit(.xcmp, k, QbeNull, arg[1], arg[0]);
+    
+    if rtype(arg[0]) == .RCon {
+        @debug_assert(k != .Kw);
+        icmp.arg&[1] = f.newtmp("isel", k);
+        new := f.emit(.copy, k, icmp.arg&[1], arg[0], QbeNull);
+        fixarg(new.arg&.index(0), k, new, f);
+    };
+    fixarg(icmp.arg&.index(0), k, icmp, f);
+    fixarg(icmp.arg&.index(1), k, icmp, f);
+}
+
+fn sel(i: Qbe.Ins, tn: []Qbe.Num, f: *Qbe.Fn) void = {
+    // DCE
+    if rtype(i.to) == .RTmp
+    && !isreg(i.to) && !isreg(i.arg&[0]) && !isreg(i.arg&[1])
+    && f.get_temporary(i.to)[].nuse == 0 {
+        chuse(i.arg&[0], -1, f);
+        chuse(i.arg&[1], -1, f);
+        return();
+    };
+    
+    i0 := f.globals.curi[]; // :LookAtLastInst
+    sel_inner(i&, tn, f);
+    i1 := f.globals.curi[];
+    
+    while => i0.in_memory_after(i1) {
+        @debug_assert(rslot(i0.arg&[0], f) == -1);
+        @debug_assert(rslot(i0.arg&[1], f) == -1);
+        i0 = i0.offset(-1);
+    };
+}
+
+fn sel_inner(i: *Qbe.Ins, tn: []Qbe.Num, f: *Qbe.Fn) void = {
+    k := i.cls();
+    @match(i.op()) {
+        fn div()  => f.sel_div(i);
+        fn rem()  => f.sel_div(i);
+        fn udiv() => f.sel_div(i);
+        fn urem() => f.sel_div(i);
+        fn sar()  => f.sel_shift(i);
+        fn shr()  => f.sel_shift(i);
+        fn shl()  => f.sel_shift(i);
+        fn uwtof() => {
+            r0 := f.newtmp("utof", .Kl);
+            f.emit(.sltof, k, i.to, r0, QbeNull);
+            ins := f.emit(.extuw, .Kl, r0, i.arg&[0], QbeNull);
+            fixarg(ins.arg&.index(0), k, ins, f);
+        }
+        fn ultof() => {
+            /* %mask =l and %arg.0, 1
+            * %isbig =l shr %arg.0, 63
+            * %divided =l shr %arg.0, %isbig
+            * %or =l or %mask, %divided
+            * %float =d sltof %or
+            * %cast =l cast %float
+            * %addend =l shl %isbig, 52
+            * %sum =l add %cast, %addend
+            * %result =d cast %sum
+            */
+            
+            tmp := @uninitialized Array(Qbe.Ref, 7);
+            tmp := tmp&;
+            r0 := f.newtmp("utof", k);
+            kc, sh := @if(k == .Ks, (Qbe.Cls.Kw, 23), (Qbe.Cls.Kl, 52));
+            range(0, 4) { j | 
+                tmp[j] = f.newtmp("utof", .Kl);
+            };
+            range(4, 7) { j | 
+                tmp[j] = f.newtmp("utof", kc);
+            };
+            f.emit(.cast, k, i.to, tmp[6], QbeNull);
+            f.emit(.add, kc, tmp[6], tmp[4], tmp[5]);
+            f.emit(.shl, kc, tmp[5], tmp[1], f.getcon(sh));
+            f.emit(.cast, kc, tmp[4], r0, QbeNull);
+            f.emit(.sltof, k, r0, tmp[3], QbeNull);
+            f.emit(.or, .Kl, tmp[3], tmp[0], tmp[2]);
+            ins := make_ins(.shr, .Kl, tmp[2], i.arg&[0], tmp[1]);
+            sel(ins, tn, f); // TODO: make sure this is right!      was ^ emit instead if make_ins and <-  *curi++ instead ins   
+            ins := f.emit(.shr, .Kl, tmp[1], i.arg&[0], f.getcon(63));
+            fixarg(ins.arg&.index(0), .Kl, ins, f);
+            ins := f.emit(.and, .Kl, tmp[0], i.arg&[0], f.getcon(1));
+            fixarg(ins.arg&.index(0), .Kl, ins, f);
+        }
+        fn stoui()  => f.sel_ftoi(i, .Ks, .stosi, 0xdf000000);
+        fn dtoui()  => f.sel_ftoi(i, .Kd, .dtosi, 0xc3e0000000000000);
+        fn nop()    => ();
+        fn dbgloc() => f.sel_emit(i);
+        fn call()   => f.sel_emit(i);
+        fn salloc() => f.sel_emit(i);
+        fn copy()   => f.sel_emit(i);
+        fn add()    => f.sel_emit(i);
+        fn sub()    => f.sel_emit(i);
+        fn neg()    => f.sel_emit(i);
+        fn mul()    => f.sel_emit(i);
+        fn and()    => f.sel_emit(i);
+        fn or()     => f.sel_emit(i);
+        fn xor()    => f.sel_emit(i);
+        fn xtest()  => f.sel_emit(i);
+        fn stosi()  => f.sel_emit(i);
+        fn dtosi()  => f.sel_emit(i);
+        fn swtof()  => f.sel_emit(i);
+        fn sltof()  => f.sel_emit(i);
+        fn exts()   => f.sel_emit(i);
+        fn truncd() => f.sel_emit(i);
+        fn cast()   => f.sel_emit(i);
+        @default => {
+            if is_alloc(i.op()) {
+                salloc(i.to, i.arg&[0], f);
+                return();
+            };
+            if is_ext(i.op()) {
+                f.sel_emit(i);
+                return();
+            };
+            if is_load(i.op()) {
+                seladdr(i.arg&.index(0), tn, f);
+                f.sel_emit(i);
+                return();
+            };
+            if is_store(i.op()) {
+                if rtype(i.arg&[0]) == .RCon {
+                    // doesn't matter that it's a float. store the bytes with an instruction that can have an immediate. 
+                    if(i.op() == .stored, => i.set_op(.storel));
+                    if(i.op() == .stores, => i.set_op(.storew));
+                };
+                seladdr(i.arg&.index(1), tn, f);
+                f.sel_emit(i);
+                return();
+            };
+            
+            kc := Qbe.Cls.Kw;
+            x: i32 = 0;
+            if iscmp(i.op(), kc&, x&) {
+                xx := @as(Qbe.Cmp) x;
+                @match(xx) {
+                    fn Cfeq() => {
+                        /* zf is set when operands are
+                        * unordered, so we may have to
+                        * check pf
+                        */
+                        r0 := f.newtmp("isel", .Kw);
+                        r1 := f.newtmp("isel", .Kw);
+                        f.emit(.and, .Kw, i.to, r0, r1);
+                        f.emit(.flagfo, k, r1, QbeNull, QbeNull);
+                        i.to = r0;
+                    }
+                    fn Cfne() => {
+                        r0 := f.newtmp("isel", .Kw);
+                        r1 := f.newtmp("isel", .Kw);
+                        f.emit(.or, .Kw, i.to, r0, r1);
+                        f.emit(.flagfuo, k, r1, QbeNull, QbeNull);
+                        i.to = r0;
+                    }
+                    @default => ();
+                };
+                swap := cmpswap(i.arg&, x);
+                if swap {
+                    x = cmpop(x);
+                };
+                flag_op := @as(Qbe.O) @as(i32) Qbe.O.flagieq.raw() + x;
+                f.emit(flag_op, k, i.to, QbeNull, QbeNull);
+                selcmp(i.arg&.items(), kc, swap, f);
+                return();
+            };
+            @panic("unknown instruction %", i.op().get_name());
+        };
+    }
+}
+
+fn sel_emit(f: *Qbe.Fn, i: *Qbe.Ins) void = {
+    i1 := f.emit(i[]); 
+    fixarg(i1.arg&.index(0), argcls(i, 0), i1, f);
+    fixarg(i1.arg&.index(1), argcls(i, 1), i1, f);
+}
+
+fn sel_div(f: *Qbe.Fn, i: *Qbe.Ins) void = {
+    k := i.cls();
+    if(!is_int(k), => return(f.sel_emit(i)));
+    rax, rdx := (TMP(Amd64Reg.RAX), TMP(Amd64Reg.RDX));
+    r0, r1 := @if(@is(i.op(), .div, .udiv), (rax, rdx), (rdx, rax));
+    f.emit(.copy, k, i.to, r0, QbeNull);
+    f.emit(.copy, k, QbeNull, r1, QbeNull);
+
+    /* immediates not allowed for
+    * divisions in x86
+    */
+    r0 := if(rtype(i.arg&[1]) == .RCon, => f.newtmp("isel", k), => i.arg&[1]);
+    
+    t := f.get_temporary(r0);
+    if t.slot != -1 { // TODO: why
+        @panic("unlikely argument % in %", t.name(), i.op().get_name());
+    };
+    if (@is(i.op(), .div, .rem)) {
+        f.emit(.xidiv, k, QbeNull, r0, QbeNull);
+        f.emit(.sign, k, rdx, rax, QbeNull);
+    } else { // unsigned
+        f.emit(.xdiv, k, QbeNull, r0, QbeNull);
+        f.emit(.copy, k, rdx, QbeConZero, QbeNull);
+    };
+    ins := f.emit(.copy, k, rax, i.arg&[0], QbeNull);
+    fixarg(ins.arg&.index(0), k, ins, f);
+    if rtype(i.arg&[1]) == .RCon {
+        f.emit(.copy, k, r0, i.arg&[1], QbeNull);
+    };
+}
+
+fn sel_shift(f: *Qbe.Fn, i: *Qbe.Ins) void = {
+    r0 := i.arg&[1];
+    if(rtype(r0) == .RCon, => return(f.sel_emit(i))); // TODO: unless you try to shift by an address by mistake
+    t := f.get_temporary(r0);
+    if t.slot != -1 { // TODO: why
+        @panic("unlikely argument % in %", t.name(), i.op().get_name());
+    };
+    rcx := TMP(Amd64Reg.RCX);
+    i.arg&[1] = rcx;
+    f.emit(.copy, .Kw, QbeNull, rcx, QbeNull);
+    i1 := f.emit(i[]);
+    f.emit(.copy, .Kw, rcx, r0, QbeNull);
+    fixarg(i1.arg&.index(0), argcls(i, 0), i1, f);
+}
+
+fn flagi(i0: *Qbe.Ins, i: *Qbe.Ins) *Qbe.Ins = {
+    null := Qbe.Ins.ptr_from_int(0);
+    while => i.in_memory_after(i0) {
+        i = i.offset(-1);
+        zflag, lflag := amd64_flag_table(i.op());
+        if(zflag, => return(i));
+        if(!lflag, => return(null));
+    };
+    null
+}
+
+// returns (SetsZeroFlag, LeavesFlags)
+fn amd64_flag_table(o: Qbe.O) Ty(bool, bool) = {
+    b :: fn($o1: Qbe.O, $o2: Qbe.O) => o.between(o1, o2);
+    if b(.ceqw, .cuod) || b(.add, .neg) || b(.and, .shl) || b(.blit0, .blit1) || b(.xcmp, .xtest) {
+        return(true, false)
+    };
+    if b(.storeb, .cast) || o.between(.flagieq, .flagfuo) || o == .copy || o == .dbgloc || b(.nop, .addr) {
+        return(false, true)
+    };
+    if b(.acmp, .call) || b(.div, .mul) || b(.swap, .xdiv) {
+        return(false, false)
+    };
+    
+    panic("TODO: unhandled op for amd64_flag_table()")
+}
+
+fn sel_ftoi(f: *Qbe.Fn, i: *Qbe.Ins, kc: Qbe.Cls, o: Qbe.O, t4: u64) void = {
+    tmp := @uninitialized Array(Qbe.Ref, 7);
+    tmp := tmp&;
+    tmp[4] = f.getcon(t4.bitcast());
+    i.set_op(o);
+    k := i.cls();
+    if k == .Kw {
+        r0 := f.newtmp("ftou", .Kl);
+        f.emit(.copy, .Kw, i.to, r0, QbeNull);
+        i.set_cls(.Kl);
+        i.to = r0;
+        f.sel_emit(i);
+        return();
+    };
+    /* %try0 =l {s,d}tosi %fp
+    * %mask =l sar %try0, 63
+    *
+    *    mask is all ones if the first
+    *    try was oob, all zeroes o.w.
+    *
+    * %fps ={s,d} sub %fp, (1<<63)
+    * %try1 =l {s,d}tosi %fps
+    *
+    * %tmp =l and %mask, %try1
+    * %res =l or %tmp, %try0
+    */
+    r0 := f.newtmp("ftou", kc);
+    range(0, 4) { j |
+        tmp[j] = f.newtmp("ftou", .Kl);
+    }; 
+    f.emit(.or, .Kl, i.to, tmp[0], tmp[3]);
+    f.emit(.and, .Kl, tmp[3], tmp[2], tmp[1]);
+    f.emit(i.op(), .Kl, tmp[2], r0, QbeNull);
+    i1 := f.emit(.add, kc, r0, tmp[4], i.arg&[0]);
+    fixarg(i1.arg&.index(0), kc, i1, f);
+    fixarg(i1.arg&.index(1), kc, i1, f);
+    f.emit(.sar, .Kl, tmp[1], tmp[0], f.getcon(63));
+    ins := f.emit(i.op(), .Kl, tmp[0], i.arg&[0], QbeNull);
+    fixarg(ins.arg&.index(0), .Kl, ins, f);
+}
+
+fn seljmp(b: *Qbe.Blk, f: *Qbe.Fn) void = {
+    if(@is(b.jmp.type, .ret0, .jmp, .hlt), => return()); // these already have a trivial single instruction implementation
+    
+    @debug_assert(b.jmp.type == .jnz);
+    r := b.jmp.arg;
+    @debug_assert(rtype(r) == .RTmp, "we shouldn't be jumping on a constant");
+    t := f.get_temporary(r);
+    b.jmp.arg = QbeNull;
+    if b.s1.identical(b.s2) {
+        chuse(r, -1, f);
+        b.jmp.type = .jmp;
+        b.s2 = Qbe.Blk.ptr_from_int(0);
+        return();
+    };
+    fi := flagi(b.ins, b.ins.offset(b.nins.zext()));
+    k := Qbe.Cls.Kw;
+    c: i32 = 0;
+    @if_else {
+        @if(fi.is_null() || fi.to != r) => {
+            // The last flag setting op wasn't the comparison that created our argument. 
+            // So we have to actually emit the compare to zero. 
+            selcmp(@slice(r, QbeConZero), .Kw, false, f);
+            b.jmp.type = .jfine;
+        };
+        @if(iscmp(fi.op(), k&, c&)
+            && c != Qbe.Cmp.Cfeq.raw() /* see sel() */
+            && c != Qbe.Cmp.Cfne.raw()) => {
+            swap := cmpswap(fi.arg&, c);
+            if swap {
+                c = cmpop(c);
+            };
+            if t.nuse == 1 {
+                selcmp(fi.arg&.items(), k, swap, f);
+                fi.set_nop();
+            };
+            b.jmp.type = @as(Qbe.J) @as(i16) Qbe.J.jfieq.raw() + c.trunc();
+        };
+        @if(fi.op() == .and && t.nuse == 1
+            && (rtype(fi.arg&[0]) == .RTmp ||
+                rtype(fi.arg&[1]) == .RTmp)) => {
+            fi.set_op(.xtest);
+            fi.to = QbeNull;
+            b.jmp.type = .jfine;
+            if rtype(fi.arg&[1]) == .RCon {
+                r := fi.arg&[1];
+                fi.arg&[1] = fi.arg&[0];
+                fi.arg&[0] = r;
+            };
+        }; 
+        @else => {
+            /* since flags are not tracked in liveness,
+            * the result of the flag-setting instruction
+            * has to be marked as live
+            */
+            if t.nuse == 1 {
+                f.emit(.copy, .Kw, QbeNull, r, QbeNull);
+            };
+            b.jmp.type = .jfine;
+        };
+    }
+}
+
+AddrRuleName :: @enum(i64) (
+    Pob,
+    Pbis,
+    Pois,
+    Pobis,
+    Pbi1,
+    Pobi1,
+);
+
+/* mgen generated code
+ *
+ * (with-vars (o b i s)
+ *   (patterns
+ *     (ob   (add (con o) (tmp b)))
+ *     (bis  (add (tmp b) (mul (tmp i) (con s 1 2 4 8))))
+ *     (ois  (add (con o) (mul (tmp i) (con s 1 2 4 8))))
+ *     (obis (add (con o) (tmp b) (mul (tmp i) (con s 1 2 4 8))))
+ *     (bi1  (add (tmp b) (tmp i)))
+ *     (obi1 (add (con o) (tmp b) (tmp i)))
+ * ))
+ */
+ // alas i manually converted this, 
+ // eventually i want to finish meta/match.fr
+
+fn opn(op: Qbe.O, l: i32, r: i32) i32 = {
+    Oaddtbl :: @const_slice(@as(u8)
+        2,
+        2,2,
+        4,4,5,
+        6,6,8,8,
+        4,4,9,10,9,
+        7,7,5,8,9,5,
+        4,4,12,10,12,12,12,
+        4,4,9,10,9,9,12,9,
+        11,11,5,8,9,5,12,9,5,
+        7,7,5,8,9,5,12,9,5,5,
+        11,11,5,8,9,5,12,9,5,5,5,
+        4,4,9,10,9,9,12,9,9,9,9,9,
+        7,7,5,8,9,5,12,9,5,5,5,9,5,
+    );
+    if l < r {
+        t := l;
+        l = r;
+        r = t;
+    };
+    @match(op) {
+        fn mul() => if(2 <= l && r == 0, => 3, => 2);
+        fn add() => Oaddtbl[zext((l + l*l)/2 + r)].zext(); // TODO: this typechecks without the second zext if you assign the table to a local first. 
+        @default => 2;
+    }
+}
+
+fn refn(r: Qbe.Ref, tn: []Qbe.Num, con: []Qbe.Con) i32 = {
+    @match(rtype(r)) {
+        fn RTmp() => {
+            if tn[r.val()].n == 0 {
+                tn[r.val()].n = 2;
+            };
+            tn[r.val()].n
+        }
+        fn RCon() => {
+            if(con[r.val()].type != .CBits, => return(1));
+            n := con[r.val()].bits.i;
+            if(n == 8 || n == 4 || n == 2 || n == 1, => return(0));
+            1
+        }
+        @default => MIN_i32.intcast();
+    }
+}
+
+::enum(AddrRuleName);
+MBIT :: fn(b: AddrRuleName) i64 = BIT(b.raw()).bitcast();
+match_masks :: @const_slice(
+    0,
+    0,
+    0,
+    0,
+    MBIT(.Pob), // [4]
+    MBIT(.Pbi1),
+    MBIT(.Pob).bit_or(MBIT(.Pois)),
+    MBIT(.Pob).bit_or(MBIT(.Pobi1)),
+    MBIT(.Pbi1).bit_or(MBIT(.Pbis)),
+    MBIT(.Pbi1).bit_or(MBIT(.Pobi1)),
+    MBIT(.Pbi1).bit_or(MBIT(.Pbis)).bit_or(MBIT(.Pobi1)).bit_or(MBIT(.Pobis)),
+    MBIT(.Pob).bit_or(MBIT(.Pobi1)).bit_or(MBIT(.Pobis)),
+    MBIT(.Pbi1).bit_or(MBIT(.Pobi1)).bit_or(MBIT(.Pobis)), // [12]
+);
+
+matcher_ops :: @const_slice(
+    @const_slice(@as(u8) // Pob
+        1,3,0,3,1,0
+    ),
+    @const_slice(@as(u8) // Pbis
+        5,1,8,5,27,1,5,1,2,5,13,3,1,1,3,3,3,2,0,1,
+        3,3,3,2,3,1,0,1,29
+    ),
+    @const_slice(@as(u8) // Pois
+        1,3,0,1,3,3,3,2,0
+    ),
+    @const_slice(@as(u8) // Pobis
+        5,2,10,7,11,19,49,1,1,3,3,3,2,1,3,0,3,1,0,
+        1,3,0,5,1,8,5,25,1,5,1,2,5,13,3,1,1,3,3,3,
+        2,0,1,3,3,3,2,26,1,51,1,5,1,6,5,9,1,3,0,51,
+        3,1,1,3,0,45
+    ),
+    @const_slice(@as(u8) // Pbi1
+        1,3,1,3,2,0
+    ),
+    @const_slice(@as(u8) // Pobi1
+        5,3,9,9,10,33,12,35,45,1,5,3,11,9,7,9,4,9,
+        17,1,3,0,3,1,3,2,0,3,1,1,3,0,34,1,37,1,5,2,
+        5,7,2,7,8,37,29,1,3,0,1,32
+    ),
+);
+
+/* end of generated code */
+
+fn anumber(tn: []Qbe.Num, b: *Qbe.Blk, con: []Qbe.Con) void = {
+    for_insts_forward b { i |
+        if rtype(i.to) == .RTmp {
+            n := tn.index(i.to.val());
+            n.l = i.arg&[0];
+            n.r = i.arg&[1];
+            n.nl = refn(n.l, tn, con).intcast().trunc();
+            n.nr = refn(n.r, tn, con).intcast().trunc();
+            n.n = opn(i.op(), n.nl.zext(), n.nr.zext()).intcast().trunc();
+        }
+    };
+}
+
+fn adisp(c: *Qbe.Con, tn: []Qbe.Num, r: Qbe.Ref, f: *Qbe.Fn, s: i32) Qbe.Ref = {
+    v := @slice(QbeNull, QbeNull);
+    while => r != QbeNull {
+        @debug_assert(rtype(r) == .RTmp);
+        n := refn(r, tn, f.con.slice(0, f.ncon.zext()));
+        if match_masks[n.zext()].bit_and(MBIT(.Pob)) == 0 {
+            return(r);
+        };
+        code := matcher_ops[AddrRuleName.Pob.raw()];
+        runmatch(code.ptr, tn, r, v);
+        @debug_assert(rtype(v[0]) == .RCon);
+        addcon(c, f.get_constant(v[0]), s.intcast());
+        r = v[1];
+    };
+    r
+}
+
+fn amatch(a: *Qbe.Addr, tn: []Qbe.Num, r: Qbe.Ref, f: *Qbe.Fn) bool = {
+    ::List(AddrRuleName);
+    pat :: @const_slice(AddrRuleName.Pobis, .Pobi1, .Pbis, .Pois, .Pbi1);
+    if(rtype(r) != .RTmp, => return(false));
+
+    n := refn(r, tn, f.con.slice(0, f.ncon.zext()));
+    v := Array(Qbe.Ref, 4).zeroed();
+    count := 0;
+    found_match := false;
+    for pat { p |
+        if !found_match && match_masks[n.zext()].bit_and(MBIT(p)) != 0 {
+            runmatch(matcher_ops[p.raw()].as_ptr(), tn, r, v&.items());
+            found_match = true;
+        };
+    };
+    if !found_match {
+        v&[1] = r;
+    };
+
+    co := Qbe.Con.zeroed();
+    ro := v&[0];
+    rb := adisp(co&, tn, v&[1], f, 1);
+    ri := v&[2];
+    rs := v&[3];
+    s := 1;
+
+    if !found_match && co.type != .CUndef && amatch(a, tn, rb, f) {
+        return(addcon(a.offset&, co&, 1));
+    };
+    if ro != QbeNull {
+        @debug_assert(rtype(ro) == .RCon);
+        c := f.get_constant(ro);
+        if !addcon(co&, c, 1) {
+            return(false);
+        };
+    };
+    if rs != QbeNull {
+        @debug_assert(rtype(rs) == .RCon);
+        c := f.get_constant(rs);
+        @debug_assert(c.type == .CBits);
+        s = c.bits.i;
+    };
+    ri = adisp(co&, tn, ri, f, s.intcast());
+    a[] = (offset = co, base = rb, index = ri, scale = s.intcast());
+
+    if rtype(ri) == .RTmp && f.get_temporary(ri)[].slot != -1 {
+        if a.scale != 1 || f.get_temporary(rb)[].slot != -1 {
+            return(false);
+        };
+        a.base = ri;
+        a.index = rb;
+    };
+    if a.base != QbeNull {
+        @debug_assert(rtype(a.base) == .RTmp);
+        s := f.get_temporary(a.base)[].slot;
+        if s != -1 {
+            a.base = SLOT(s);
+        };
+    };
+    true
+}
+
+fn addcon(c0: *Qbe.Con, c1: *Qbe.Con, m: i64) bool = {
+    if(m != 1 && c1.type == .CAddr, => return(false));
+    if (c0.type == .CUndef) {
+        c0[] = c1[];
+        c0.bits.i *= m;
+    } else {
+        if c1.type == .CAddr {
+            if(c0.type == .CAddr, => return(false));
+            c0.type = .CAddr;
+            c0.sym = c1.sym;
+        };
+        c0.bits.i += c1.bits.i * m;
+    };
+    true
+}
+
+fn runmatch(code: *u8, tn: []Qbe.Num, ref: Qbe.Ref, var: []Qbe.Ref) void = {
+    stkbuf := @uninitialized Array(Qbe.Ref, 20);
+    @debug_assert(rtype(ref) == .RTmp);
+    stk := stkbuf&.as_ptr();
+    pc  := code;
+    stk_end := stkbuf&.index(20);
+    stk_start := stk;
+    while => pc[] != 0 {
+        bc := pc[];
+        @switch(bc) {
+            @inclusive(1, 2) => { /* pushsym, push */
+                @debug_assert(stk_end.in_memory_after(stk));
+                @debug_assert(rtype(ref) == .RTmp);
+                nl := tn[ref.val()].nl;
+                nr := tn[ref.val()].nr;
+                if bc == 1 && nl > nr {
+                    stk[] = tn[ref.val()].l;
+                    stk = stk.offset(1);
+                    ref = tn[ref.val()].r;
+                } else {
+                    stk[] = tn[ref.val()].r;
+                    stk = stk.offset(1);
+                    ref = tn[ref.val()].l;
+                };
+                pc = pc.offset(1);
+            };
+            @case(3) => { /* set */
+                pc = pc.offset(1);
+                var[pc[].zext()] = ref;
+                if(pc.offset(1)[] == 0, => return());
+                @debug_assert(stk.in_memory_after(stk_start));
+                stk = stk.offset(-1);
+                ref = stk[];
+                pc = pc.offset(1);
+            };
+            @case(4) => { /* pop */
+                @debug_assert(stk.in_memory_after(stk_start));
+                stk = stk.offset(-1);
+                ref = stk[];
+                pc = pc.offset(1);
+            };
+            @case(5) => { /* switch */
+                @debug_assert(rtype(ref) == .RTmp);
+                n := tn[ref.val()].n;
+                s := pc.offset(1);
+                i := s[];
+                s = s.offset(1);
+                while => i > 0 && { c := n != s[]; s = s.offset(1); c } {
+                    i -= 1;
+                    s = s.offset(1);
+                };
+                pc = pc.offset(s[].zext());
+            };
+            @default => { /* jump */
+                @debug_assert(bc >= 10);
+                pc = code.offset(zext(bc - 10));
+            };
+        };
+    };
+}
+
+/* instruction selection
+ * requires use counts (as given by parsing)
+ */
+fn amd64_isel(f: *Qbe.Fn) void = {
+    f.assign_alloc_slots();
+
+    /* process basic blocks */
+    num := temp().alloc(Qbe.Num, f.ntmp.zext());
+    for_blocks f { b | 
+        f.reset_scratch();
+        for_jump_targets b { sb | 
+            for_phi sb { p |
+                a := index_in_phi(b, p);
+                fixarg(p.arg.index(a), p.cls, Qbe.Ins.ptr_from_int(0), f);
+            };
+        };
+        num.set_zeroed();
+        anumber(num, b, f.con.slice(0, f.ncon.zext()));
+        seljmp(b, f);
+        for_insts_rev b { i |
+            sel(i[][], num, f);
+        };
+        f.copy_instructions_from_scratch(b);
+    };
+
+    when_debug(f, .InstSelect) { out | 
+        write(out, "\n> After instruction selection:\n");
+        printfn(f, out);
+    };
+}
+
+fn chuse(r: Qbe.Ref, du: i64, f: *Qbe.Fn) void = {
+    if rtype(r) == .RTmp {
+        nuse := f.get_temporary(r)[].nuse&;
+        nuse[] = trunc(nuse[].zext() + du);
+    }
+}

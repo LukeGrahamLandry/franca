@@ -75,3 +75,47 @@ fn find_first_arg(b: *Qbe.Blk, call: *Qbe.Ins) *Qbe.Ins = {
     };
     i
 }
+
+// used by arm64/amd64 isel       TODO: worth a new file? 
+// Any alloc with constant size gets assigned a fixed slot that we know as a constant offset into the stack frame. 
+// Then the instruction for the alloc is removed. 
+// So any remaining alloc instructions after this must be a dynamic alloca.  
+// Note: We only do this for allocs in the start block. 
+//       I guess if you conditionally do a large but constant size alloc, you don't want to always use the stack space. 
+fn assign_alloc_slots(f: *Qbe.Fn) void = {
+    allocs := @slice(Qbe.O.alloc4, Qbe.O.alloc8, Qbe.O.alloc16); // TODO: for_enum_range (these are sequentual)
+    /* specific to NAlign == 3 */ /* or change align=4 and size /= 4 below */
+    align := 4;
+    for allocs { alloc_type |
+        break :: local_return; // TODO: make break less of a pain in this language
+        for_insts_forward f.start { i |
+            if i.op() == alloc_type {
+                if rtype(i.arg&[0]) != .RCon {
+                    panic("TODO: none of my tests get here (alloca a dynamically sized stack slot)");
+                    align *= 2; // :break
+                    break(); 
+                };
+                size := f.get_constant(i.arg&[0])[].bits.i;
+                if size < 0 || size >= MAX_i32 - 15 {
+                    @panic("invalid alloc size %", size);
+                };
+                size = size.add(align - 1).bit_and(-align);
+                size /= 4;
+                t := f.get_temporary(i.to);
+                t.slot = f.slot;
+                f.slot += size.intcast();
+                f.salign = 2 + alloc_type.raw() - Qbe.O.alloc4.raw();
+                i.set_nop();
+            }
+        };
+        align *= 2; // :break
+        
+        // on arm: ~23KB -- Nov 6
+        //         It's actually fine if they're unaligned, you just can't use the immediate in ldr/str,
+        //         so doing it this way lets fuse_addressing catch a few more cases at the cost of wasting 4 bytes of stack half the time. 
+        // TODO: change f.salign for x64? 
+        if align == 8 && f.slot.intcast().mod(align / 4) != 0 {
+            f.slot += 1;
+        };
+    };
+};

@@ -9,6 +9,9 @@
   i assume i can make it less complicated since i'm the one generating the thing in the first place?
   and i only care about linux and xnu. windows can just use wsl.
 - catch multiple branches with the same switch value.
+- unpack `a, b, c = call()` without declaring new variables
+- check that the keyword between block arguments is correct (ie `if a {| b } else {| c }` should require `else` not some other identifier),
+  and use that as an argument name for overloading.
 
 ##
 
