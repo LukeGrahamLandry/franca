@@ -64,14 +64,12 @@ fn fixarg(r: *Qbe.Ref, k: Qbe.Cls, i: *Qbe.Ins, f: *Qbe.Fn) void = {
             //       clang does too so presumably its the correct choice. 
             //       but this is less of a pain for now. 
             
-            if k == .Kd { // see i64 case below
-                r[] = f.newtmp("isel", .Kl);
-                f.emit(.copy, .Kl, r[], r0, QbeNull);
-            };
             r1 = f.newtmp("isel", k);
-            f.emit(.cast, k, r1, r[], QbeNull);
+            r2 := f.newtmp("isel", .Kl);
+            f.emit(.cast, k, r1, r2, QbeNull);
+            f.emit(.copy, .Kl, r2, r0, QbeNull);
         };
-        @if(o != .copy && k ==. Kl && noimm(r0, f)) => {
+        @if(o != .copy && k == .Kl && noimm(r0, f)) => {
             /* load constants that do not fit in
             * a 32bit signed integer into a
             * long temporary
@@ -567,7 +565,7 @@ AddrRuleName :: @enum(i64) (
  // alas i manually converted this, 
  // eventually i want to finish meta/match.fr
 
-fn opn(op: Qbe.O, l: i32, r: i32) i32 = {
+fn opn(op: Qbe.O, l: i32, r: i32) i64 = {
     Oaddtbl :: @const_slice(@as(u8)
         2,
         2,2,
@@ -590,7 +588,10 @@ fn opn(op: Qbe.O, l: i32, r: i32) i32 = {
     };
     @match(op) {
         fn mul() => if(2 <= l && r == 0, => 3, => 2);
-        fn add() => Oaddtbl[zext((l + l*l)/2 + r)].zext(); // TODO: this typechecks without the second zext if you assign the table to a local first. 
+        fn add() => {
+            i: i64 = zext((l + l*l)/2 + r);
+            Oaddtbl[i].zext()
+        }; // TODO: this typechecks without the second zext if you assign the table to a local first. 
         @default => 2;
     }
 }
@@ -598,10 +599,11 @@ fn opn(op: Qbe.O, l: i32, r: i32) i32 = {
 fn refn(r: Qbe.Ref, tn: []Qbe.Num, con: []Qbe.Con) i32 = {
     @match(rtype(r)) {
         fn RTmp() => {
-            if tn[r.val()].n == 0 {
-                tn[r.val()].n = 2;
+            n := tn[r.val()].n&;
+            if n[] == 0 {
+                n[] = 2;
             };
-            tn[r.val()].n
+            n[]
         }
         fn RCon() => {
             if(con[r.val()].type != .CBits, => return(1));
@@ -644,7 +646,7 @@ matcher_ops :: @const_slice(
     ),
     @const_slice(@as(u8) // Pobis
         5,2,10,7,11,19,49,1,1,3,3,3,2,1,3,0,3,1,0,
-        1,3,0,5,1,8,5,25,1,5,1,2,5,13,3,1,1,3,3,3,
+        1,3,0,5,1,8,5,25,1,5,1,2,5,13,3,1,1,3,3,3, // TODO: this is probably miscompiled
         2,0,1,3,3,3,2,26,1,51,1,5,1,6,5,9,1,3,0,51,
         3,1,1,3,0,45
     ),
@@ -668,12 +670,12 @@ fn anumber(tn: []Qbe.Num, b: *Qbe.Blk, con: []Qbe.Con) void = {
             n.r = i.arg&[1];
             n.nl = refn(n.l, tn, con).intcast().trunc();
             n.nr = refn(n.r, tn, con).intcast().trunc();
-            n.n = opn(i.op(), n.nl.zext(), n.nr.zext()).intcast().trunc();
+            n.n = opn(i.op(), n.nl.zext(), n.nr.zext()).trunc();
         }
     };
 }
 
-fn adisp(c: *Qbe.Con, tn: []Qbe.Num, r: Qbe.Ref, f: *Qbe.Fn, s: i32) Qbe.Ref = {
+fn adisp(c: *Qbe.Con, tn: []Qbe.Num, r: Qbe.Ref, f: *Qbe.Fn, s: i64) Qbe.Ref = {
     v := @slice(QbeNull, QbeNull);
     while => r != QbeNull {
         @debug_assert(rtype(r) == .RTmp);
@@ -684,7 +686,7 @@ fn adisp(c: *Qbe.Con, tn: []Qbe.Num, r: Qbe.Ref, f: *Qbe.Fn, s: i32) Qbe.Ref = {
         code := matcher_ops[AddrRuleName.Pob.raw()];
         runmatch(code.ptr, tn, r, v);
         @debug_assert(rtype(v[0]) == .RCon);
-        addcon(c, f.get_constant(v[0]), s.intcast());
+        addcon(c, f.get_constant(v[0]), s);
         r = v[1];
     };
     r
@@ -697,7 +699,6 @@ fn amatch(a: *Qbe.Addr, tn: []Qbe.Num, r: Qbe.Ref, f: *Qbe.Fn) bool = {
 
     n := refn(r, tn, f.con.slice(0, f.ncon.zext()));
     v := Array(Qbe.Ref, 4).zeroed();
-    count := 0;
     found_match := false;
     for pat { p |
         if !found_match && match_masks[n.zext()].bit_and(MBIT(p)) != 0 {
@@ -732,7 +733,7 @@ fn amatch(a: *Qbe.Addr, tn: []Qbe.Num, r: Qbe.Ref, f: *Qbe.Fn) bool = {
         @debug_assert(c.type == .CBits);
         s = c.bits.i;
     };
-    ri = adisp(co&, tn, ri, f, s.intcast());
+    ri = adisp(co&, tn, ri, f, s);
     a[] = (offset = co, base = rb, index = ri, scale = s.intcast());
 
     if rtype(ri) == .RTmp && f.get_temporary(ri)[].slot != -1 {
@@ -752,14 +753,16 @@ fn amatch(a: *Qbe.Addr, tn: []Qbe.Num, r: Qbe.Ref, f: *Qbe.Fn) bool = {
     true
 }
 
+// c0 += c1 * m;
+// returns false if this cannot be done. 
 fn addcon(c0: *Qbe.Con, c1: *Qbe.Con, m: i64) bool = {
-    if(m != 1 && c1.type == .CAddr, => return(false));
+    if(m != 1 && c1.type == .CAddr, => return(false));  // can't scale a symbol
     if (c0.type == .CUndef) {
         c0[] = c1[];
         c0.bits.i *= m;
     } else {
         if c1.type == .CAddr {
-            if(c0.type == .CAddr, => return(false));
+            if(c0.type == .CAddr, => return(false));  // can't have two symbols
             c0.type = .CAddr;
             c0.sym = c1.sym;
         };
@@ -768,12 +771,13 @@ fn addcon(c0: *Qbe.Con, c1: *Qbe.Con, m: i64) bool = {
     true
 }
 
+// TODO: it would be very cool if i compiled these little bytecode programs to my ir instead. need to bring back #bc. 
 fn runmatch(code: *u8, tn: []Qbe.Num, ref: Qbe.Ref, var: []Qbe.Ref) void = {
     stkbuf := @uninitialized Array(Qbe.Ref, 20);
     @debug_assert(rtype(ref) == .RTmp);
     stk := stkbuf&.as_ptr();
     pc  := code;
-    stk_end := stkbuf&.index(20);
+    stk_end := stkbuf&.index_unchecked(20);
     stk_start := stk;
     while => pc[] != 0 {
         bc := pc[];
@@ -781,16 +785,17 @@ fn runmatch(code: *u8, tn: []Qbe.Num, ref: Qbe.Ref, var: []Qbe.Ref) void = {
             @inclusive(1, 2) => { /* pushsym, push */
                 @debug_assert(stk_end.in_memory_after(stk));
                 @debug_assert(rtype(ref) == .RTmp);
-                nl := tn[ref.val()].nl;
-                nr := tn[ref.val()].nr;
+                i := ref.val();
+                nl := tn[i].nl;
+                nr := tn[i].nr;
                 if bc == 1 && nl > nr {
-                    stk[] = tn[ref.val()].l;
+                    stk[] = tn[i].l;
                     stk = stk.offset(1);
-                    ref = tn[ref.val()].r;
+                    ref = tn[i].r;
                 } else {
-                    stk[] = tn[ref.val()].r;
+                    stk[] = tn[i].r;
                     stk = stk.offset(1);
-                    ref = tn[ref.val()].l;
+                    ref = tn[i].l;
                 };
                 pc = pc.offset(1);
             };
@@ -815,9 +820,17 @@ fn runmatch(code: *u8, tn: []Qbe.Num, ref: Qbe.Ref, var: []Qbe.Ref) void = {
                 s := pc.offset(1);
                 i := s[];
                 s = s.offset(1);
-                while => i > 0 && { c := n != s[]; s = s.offset(1); c } {
-                    i -= 1;
-                    s = s.offset(1);
+                if true {
+                    break :: local_return;
+                    while => i > 0 {
+                        c := n == s[];
+                        s = s.offset(1);
+                        if c {
+                            break();
+                        };
+                        i -= 1;
+                        s = s.offset(1);
+                    };
                 };
                 pc = pc.offset(s[].zext());
             };

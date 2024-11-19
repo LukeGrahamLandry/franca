@@ -168,14 +168,16 @@ fn emit_the_code(e: *AmdState) void = {
     if f.vararg {
         o := -176;
         for amd64_sysv_rsave.slice(0, 6) { r | 
-            e.a&.encode_non_sp_offset(false, PrimaryOp.MovReg, r.int_id(), .rbp, o);
-            //fprintf(f, "\tmovq %%%s, %d(%%rbp)\n", rname[*r][0], o);  // TODO: make sure i translated correctly
+            e.a&.encode_non_sp_offset(true, PrimaryOp.MovReg, r.int_id(), .rbp, o);
             o += 8;
         };
         range(0, 8) { n |
             e.a&.push(0x0F);
-            e.a&.encode_non_sp_offset(false, @as(PrimaryOp) 0x28, @as(X86Reg) n, .rbp, o);
-            //fprintf(f, "\tmovaps %%xmm%d, %d(%%rbp)\n", n, o);  // TODO: make sure i translated correctly
+            e.a&.push(0x29);
+            reg := @as(X86Reg) n;
+            e.a&.push(pack_modrm(ModrmMode.Indirect00, X86Reg.rsp, reg)); // mod=0, rm=sp means use sib
+            e.a&.push(pack_sib(SibScale.One, X86Reg.rbp, X86Reg.rbp));
+            e.a&.push_u32(o.trunc());
             o += 16;
         };
     };
@@ -283,9 +285,10 @@ fn apply_patch(e: *AmdState, labels: []i64, patch: *Patch) void = {
     };
 }
 
+// note: you can have negative offsets!
 fn slot(r: Qbe.Ref, e: *AmdState) i64 = {
-    s: i64 = rsval(r).zext();
-    fslot := e.f.slot.zext();
+    s: i64 = rsval(r).intcast();
+    fslot := e.f.slot.intcast();
     @debug_assert_le(s, fslot);
     /* specific to NAlign == 3 */
     if s < 0 {
@@ -318,7 +321,7 @@ fn convert_to_2address(e: *AmdState, i: *Qbe.Ins) void = {
         return();
     };
     o := i.op();
-    commutative := o == .add || o == .and || o == .xor || o == .or;
+    commutative := o == .add || o == .and || o == .xor || o == .or || o == .mul;
     if commutative && i.arg&[1] == i.to {
         i.arg&.items().swap(0, 1);
     };
@@ -809,8 +812,11 @@ fn int_reg_d(r: Qbe.Ref) X86Reg =
 // TODO: losing my mind!
 fn int_id(r: Amd64Reg) X86Reg = {
     ::List(X86Reg);
-    table :: @const_slice(X86Reg.zeroed(), .rax, .rcx, .rdx, .rsi, .rdi, .r8, .r9, .r10, .r11, .rbx, .r12, .r13, .r14, .r15, .rbp, .rsp);
-    @debug_assert(r.raw().zext() < table.len(), "expected integer register");
+    table :: @const_slice(X86Reg.zeroed(), 
+        .rax, .rcx, .rdx, .rsi, .rdi, .r8, .r9, .r10, .r11, .rbx, .r12, .r13, .r14, .r15, .rbp, .rsp, // integers
+        .rax, .rcx, .rdx, .rbx, .rsp, .rbp, .rsi, .rdi, .r8, .r9, .r10, .r11, .r12, .r13, .r14, .r15, // floats are in order
+    );
+    @debug_assert(r.raw().zext() < table.len(), "expected register");
     table[r.raw().zext()]
 }
 
@@ -819,13 +825,6 @@ fn int_id(r: Amd64Reg) X86Reg = {
 fn reg_for_extension(v: u8) Amd64Reg = {
     table :: @const_slice(Amd64Reg.RAX, .RCX, .RDX, .RBX, .RSP, .RBP, .RSI, .RDI);
     table[v.zext()]
-}
-
-fn items(e: *FatExpr) []FatExpr = {
-    if e.expr&.is(.Tuple) {
-        return(e.expr.Tuple.items());
-    };
-    (ptr = e, len = 1)
 }
 
 AmdArgType :: @enum(i64) (M, R, imm32, imm8, none, F);    ::enum(AmdArgType);
@@ -854,9 +853,17 @@ fn assemble(e: *AmdState, i: *Qbe.Ins) void = {
         i.arg&.items().swap(0, 1);
     };
     a0_old, a1_old := (i.arg&[0], i.arg&[1]);
-    w := i.cls() == .Kl || i.op() == .storel;
+    // TODO: Kd needs to be more complicated because sometimes you need a different prefix?
+    w := i.cls() == .Kl || i.cls() == .Kd || i.op() == .storel || i.op() == .stored;
     ext_index := int((i.arg&[1] == QbeNull || (rtype(i.arg&[1]) == .RCon && e.f.get_constant(i.arg&[1])[].type == .CBits)));
-    opcode, a0, a1, ext := amd64_encoding_lookup(e, i); 
+    opcode, a0, a1, ext, prefix := amd64_encoding_lookup(e, i); 
+    
+    if prefix.len != 0 {
+        if prefix[0] == 0xF2 && !w {
+            prefix[0] = 0xF3; // this seems like the easiest way to do this to me
+        };
+        e.a&.push_all(prefix);
+    };
     
     if ext != QbeNull {
         // one argument is an immediate or fixed register and its slot in modrm holds an opcode extension instead. 
@@ -892,8 +899,8 @@ fn assemble(e: *AmdState, i: *Qbe.Ins) void = {
     };
 }
 
-fn lookup_fail(o: Qbe.O, a0: AmdArgType, a1: AmdArgType) Ty([]u8, Qbe.Ref) = 
-    @as(Ty([]u8, Qbe.Ref)) @panic("bad op arg types % % for %", a0, a1, o.get_name());
+fn lookup_fail(o: Qbe.O, a0: AmdArgType, a1: AmdArgType) Ty([]u8, Qbe.Ref, []u8) = 
+    @as(Ty([]u8, Qbe.Ref, []u8)) @panic("bad op arg types % % for %", a0, a1, o.get_name());
 
 // TODO:
 // Alas this is a super convoluted way of doing this, i just want to see if it works. 
@@ -919,15 +926,26 @@ fn amd64_encoding_data(runtime_args: FatExpr, e: FatExpr) FatExpr #macro = {
                     arg0 := const_eval(ArgType)(components[0]);
                     arg1 := const_eval(ArgType)(components[1]);
                     
-                    o := u8.list(ast_alloc());
-                    each components.index(2).items() { b | 
-                        o&.push(const_eval(u8)(b[]));
-                    };
-                    o := o.items();
+                    fn compile_bytes(e: *FatExpr) []u8 = {
+                        o := u8.list(ast_alloc());
+                        each e.items() { b | 
+                            o&.push(const_eval(u8)(b[]));
+                        };
+                        o.items()
+                    }
+                    
+                    o := compile_bytes(components.index(2));
                     ext := QbeNull;
+                    prefix := "";
                     if components.len > 3 {
-                        e := const_eval(u8)(components[3]);
-                        ext = TMP(reg_for_extension(e));
+                        e := compile_ast(components[3]);
+                        if e.ty == void {
+                            @ct_assert(components.len > 4, runtime_args.loc, "explicit () extension implies prefix follows");
+                            prefix = compile_bytes(components.index(4));
+                        } else {
+                            e := const_eval(u8)(e);
+                            ext = TMP(reg_for_extension(e));
+                        };
                     };
                     handler = @{ 
                         @if(!matches(@[@literal arg0], a0) || !matches(@[@literal arg1], a1), @[handler], {
@@ -941,15 +959,15 @@ fn amd64_encoding_data(runtime_args: FatExpr, e: FatExpr) FatExpr #macro = {
                             } else {
                                 @{}
                             }];
-                            (@[@literal o], @[@literal ext])
+                            (@[@literal o], @[@literal ext], @[@literal prefix])
                         })
                     };
                 };
                 cases&.push(@as(T) (qbe_o.raw().zext(), handler));
             };
             @{
-                opcode_bytes, ext := @[make_switch(@{ i.op() }, @{ @panic("unknown op encoding %", i.op().get_name()) }, cases)];
-                (opcode_bytes, a0, a1, ext)
+                opcode_bytes, ext, prefix := @[make_switch(@{ i.op() }, @{ @panic("unknown op encoding %", i.op().get_name()) }, cases)];
+                (opcode_bytes, a0, a1, ext, prefix)
             }
         }]
     }
@@ -963,18 +981,22 @@ fn amd64_encoding_data(runtime_args: FatExpr, e: FatExpr) FatExpr #macro = {
 // imm args are sign extended to the operation size. 
 // Magic numbers transcribed from https://www.felixcloutier.com/x86
 // Always put the imm8 before imm32 since imm32 will match smaller numbers too for store
-fn amd64_encoding_lookup(e: *AmdState, i: *Qbe.Ins) Ty([]u8, AmdArgType, AmdArgType, Qbe.Ref) = @amd64_encoding_data(e, i) (
+fn amd64_encoding_lookup(e: *AmdState, i: *Qbe.Ins) Ty([]u8, AmdArgType, AmdArgType, Qbe.Ref, []u8) = @amd64_encoding_data(e, i) (
     (.add, 
         (.M, .imm8, (0x83), 0),
         (.M, .imm32, (0x81), 0),
         (.R, .M, (0x03)),
         (.M, .R, (0x01)),
+        // TODO: need different instructions for wide
+        (.F, .F, (0x0F, 0x58), (), (0xF2)), // addsd
     ),
     (.xcmp, 
         (.M, .imm8, (0x83), 7),
         (.M, .imm32, (0x81), 7),
         (.R, .M, (0x3B)),
         (.M, .R, (0x39)),
+        // TODO: need different instructions for wide
+        (.F, .F, (0x0F, 0x2E), (), (0x66)), // ucomisd
     ),
     (.shr, 
         (.M, .imm8, (0xC1), 5),
@@ -1009,12 +1031,21 @@ fn amd64_encoding_lookup(e: *AmdState, i: *Qbe.Ins) Ty([]u8, AmdArgType, AmdArgT
         (.imm32, .M, (0xC7), 0),
         (.R, .M, (0x89)),
         (.imm32, .imm32, (0xC7), 0),  // TODO: this is stupid. the only time this would ever happen is when writting a test that stores to a constant and catches a segsev
+        // TODO: why does abi stuff insert these working with floats??
+        (.F, .M, (0x0F, 0x11), (), (0xF2)), // movsd
     ),
     (.storeb, 
         (.R, .M, (0x88)),
     ),
     (.storeh, // needs prefix
         (.R, .M, (0x89)),
+    ),
+    // TODO: whats the difference between movsd and movq? 
+    (.stored,
+        (.F, .M, (0x0F, 0x11), (), (0xF2)), // movsd
+    ),
+    (.stores,
+        (.F, .M, (0x0F, 0x11), (), (0xF3)), // movss
     ),
     (.xidiv,
         (.M, .none, (0xF7), 7),
@@ -1030,6 +1061,8 @@ fn amd64_encoding_lookup(e: *AmdState, i: *Qbe.Ins) Ty([]u8, AmdArgType, AmdArgT
         (.M, .imm32, (0x81), 5),
         (.R, .M, (0x2B)),
         (.M, .R, (0x29)),
+        // TODO: need different instructions for wide
+        (.F, .F, (0x0F, 0x5C), (), (0xF2)), // subsd
     ),
     (.xtest, 
         (.M, .imm32, (0xF7), 0),
@@ -1037,6 +1070,7 @@ fn amd64_encoding_lookup(e: *AmdState, i: *Qbe.Ins) Ty([]u8, AmdArgType, AmdArgT
     ),
     (.load, 
         (.R, .M, (0x8B)), 
+        (.F, .M, (0x0F, 0x10), (), (0xF2)), // movsd
     ),
     (.extsw, 
         (.R, .M, (0x63)), // MOVSXD
@@ -1059,16 +1093,22 @@ fn amd64_encoding_lookup(e: *AmdState, i: *Qbe.Ins) Ty([]u8, AmdArgType, AmdArgT
     ),
     (.mul, 
         (.R, .M, (0x0F, 0xAF)),
+        // TODO: need different instructions for wide
+        (.F, .F, (0x0F, 0x59), (), (0xF2)), // mulsd
     ),
     (.copy, 
         (.M, .imm32, (0xC7), 0), // "Move imm32 sign extended to 64-bits to r/m64."
         (.R, .M, (0x8B)),
         (.M, .R, (0x89)), // TODO: is this right? 
-        // TODO: isel first to not load constants from memory. 
-        //(.F, .M, (0x0F, 0x10)),
-        //(.M, .F, (0x0F, 0x11)),
+        (.F, .F, (0x0F, 0x10), (), (0xF2)), // movsd
+        (.F, .M, (0x0F, 0x10), (), (0xF2)),
+        (.M, .F, (0x0F, 0x11), (), (0xF2)),
     ),
     (.swap, // TODO: confirm RMem order if we ever generate it for those (or RSlot)
         (.R, .M, (0x87)), // xchg
+    ),
+    (.cast, 
+        (.F, .M, (0x0F, 0x6E), (), (0x66)), // movq
+        (.M, .F, (0x0F, 0x7E), (), (0x66)), // movq
     ),
 );

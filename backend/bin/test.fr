@@ -2,15 +2,21 @@
 //! You want the test runner external to the program being tested so you don't have to think about crashes. 
 //! TODO: Maybe I should make it a goal to make this sort of script like thing less painful. 
 //!
-//! [test.fr] [options] ['all' or list of .ssa files]
-//!     -v    show output on failure.  
+HELP :: """
+[test.fr] [options] ['all' or list of .ssa files]
+    -v           show output on failure.  
+    -bin=./foo   test the executable './foo' instead of the default ('./backend/bin/qbe_frontend.fr')
+    -e           emit exe directly instead of using Qbe's asm text
+    -p           use my parser instead of Qbe's
+    -s           use the minimal register allocator instead of the good one 
+    -x64         target x64 instead of your native arch (useful for Rosetta 2) 
+    -h           show this help text
+""";
 
 fn main() void = {
-    eprintln("note: this is slow because it recompiles the backend from scratch for each test and runs it in the old unoptimising JIT.");
-    eprintln("====");
     // TODO: cli args for these too
     tests_folder := "bindings/qbe/test";
-    qbe_bin := "backend/bin/qbe_frontend.fr";
+    qbe_bin := "./backend/bin/qbe_frontend.fr";
     //qbe_bin := "./a.out";
     
     to_run := Str.list(temp());
@@ -23,6 +29,10 @@ fn main() void = {
     for args { arg |
         continue :: local_return;
         arg := arg.str();
+        if arg.starts_with("-bin=") {  // before the ends_with(".fr") check
+            qbe_bin = arg.slice(5, arg.len);
+            continue();
+        };
         if arg == "franca" || arg.ends_with(".fr") {
             continue();
         };
@@ -44,6 +54,10 @@ fn main() void = {
                 @case("-p") => {
                     own_parse = true;
                 };
+                @case("-h") => {
+                    print(HELP);
+                    exit(0);
+                };
                 @default => @panic("unhandled flag '%'", arg);
             };
             continue();
@@ -61,12 +75,20 @@ fn main() void = {
             continue();
         };
         
+        println(HELP);
         @panic("unknown argument %\n", arg);
     };
     
-    @assert(!to_run.is_empty(), "nothing to run. pass filepaths or 'all'");
+    if to_run.is_empty() {
+        eprintln(HELP);
+        panic("nothing to run. pass filepaths or 'all'");
+    };
     passed := 0;
     failed := 0;
+    @eprintln("Testing '%'", qbe_bin);
+    if qbe_bin.ends_with(".fr") {
+        eprintln("note: this is slow because it recompiles the backend from scratch for each test and runs it in the old unoptimising JIT.");
+    };
     for to_run { file |
         pass := run_one(qbe_bin, file, verbose, do_my_own_exes, arch, slow, own_parse);
         (@if(pass, passed&, failed&))[] += 1;

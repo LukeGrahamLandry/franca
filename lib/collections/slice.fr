@@ -153,10 +153,10 @@ fn Slice($T: Type) Type = {
         
         // TODO: StructName.(initilizer) so you're not forced to use @as or put the type on the other side? 
         len: BakedEntry = (Num = (value = self.len, ty = .I64));
-        ptr: BakedEntry = if self.len.eq(0) {
+        ptr: BakedEntry = if self.len == 0 {
             // TODO: should we make this non-zero so you can pass them to rust? 
             (Num = (value = 0, ty = .P64))
-        } {
+        } else {
             addr := T.int_from_ptr(self.ptr);
             BIG :: 104857600;
             if self.len > BIG && addr < BIG {
@@ -181,7 +181,7 @@ fn Slice($T: Type) Type = {
                     };
                     // TODO: without cast
                     bake_value(@as(BakedVar) (VoidPtrArray = parts.rs()))
-                }{
+                } else {
                     bytes := self[].interpret_as_bytes(); // TODO: decide if i need to clone. 
                     bake_value(@as(BakedVar) (Bytes = bytes.rs())) // TODO: this should take jit_ptr param? even tho its sad if you had to do work just for me to throw away. and then would want to warn if conflicting handlers or it could be super confusing.  -- Jun 30
                 };
@@ -199,40 +199,56 @@ fn Slice($T: Type) Type = {
     Self
 }
 
-// TODO: single element if arg isn't a tuple.
-#macro fn slice(elements: FatExpr, allocator: FatExpr) FatExpr = @{
-    src  := @[slice(elements)];
-    dest := @[allocator].alloc(@type src[0], src.len);
-    dest.copy_from(src);
-    dest
-};
+// Create a slice containing `elements` in memory provided by `allocator`.  
+// The first element is used for type inference. TODO: let macros access the expression's result location type. 
+// 
+// this is better than making an @slice on the stack and then copying. 
+// but also @slice on the stack miscompiles if the length is > 50. 
+//
+#macro fn slice(elements: FatExpr, allocator: FatExpr) FatExpr = {
+    elements := elements&.items();
+    elements[0] = compile_ast(elements[0]);
+    @{
+        mem := @[allocator].alloc(@[@literal elements[0].ty], @[@literal elements.len]);
+        @[{
+            // TODO: make it easier to build up a sequence of expresions as a block/tuple instead of doing this linked list of tiny blocks. just need a helper function fn([]FatExpr) -> FatExpr.
+            body := @{};
+            enumerate elements { i, e |
+                body = @{ @[body]; mem[@[@literal i]] = @[e[]]; };
+            };
+            body
+        }];
+        mem
+    }
+}
 
 #macro fn list(elements: FatExpr, allocator: FatExpr) FatExpr = @{
-    s := @slice @[elements];
-    ss := clone(s, @[allocator]);
-    ss
+    a := @[allocator];
+    s := @slice(@[elements]) a;
+    s: List(@type s[0]) = (maybe_uninit = s, len = s.len, gpa = a);
+    s
 };
 
-#macro fn const_slice(elements: FatExpr) FatExpr = 
-    slice(elements, @{ ast_alloc() });
-
+#macro fn const_slice(elements: FatExpr) FatExpr = @{
+    :: @slice(@[elements]) ast_alloc()
+};
 
 // TODO: can't do this in fn Slice because it tries to deal with all the overloads too soon? 
 //       oh no its cause it conflicts with Slice(u8)
 fn display_slice($T: Type) void = {
     fn display(self: Slice(T), writer: *List(u8)) void = {
         "[".display(writer);
-        // TODO: use each? but then need better error if its defined for T but not *T. 
         prefix := "";
-        each(self) { (e: *T) void | 
-            prefix.display(writer);
-            e.display(writer);
+        each self { e | 
+            display(prefix, writer);
+            display(e, writer);
             prefix = ", ";
         };
         "]".display(writer);
     }
     
-    fn display(self: *Slice(T), writer: *List(u8)) void = self[].display(writer);
+    fn display(self: *Slice(T), writer: *List(u8)) void = 
+        self[].display(writer);
 }
 
 /// A null terminated sequence of bytes.
@@ -264,10 +280,6 @@ fn bake_relocatable_value(self: *CStr) Slice(BakedEntry) = {
     ptr.repeated(1, temp()).items()
 }
 
-:: {
-   
-};
-
 Str :: Slice(u8);
 
 fn as_array();
@@ -279,6 +291,8 @@ fn Array($T: Type, $count: i64) Type = {
         info: TypeInfo = (Array = (inner = T, len = count.trunc()));
         intern_type_ref(info&)
     };
+    
+    // TODO: these inits where it returns by value are dumb. have an @array instead. 
     
     fn init(elements: Slice(T)) Self #no_tail = {
         @assert_eq(elements.len, count, "arrays have fixed length"); // TODO: better message 
@@ -518,7 +532,7 @@ fn ends_with(haystack: Str, needle: Str) bool =
 fn starts_with(haystack: Str, needle: Str) bool = 
     if(haystack.len < needle.len, => false) {
         start := subslice(haystack, 0, len(needle)); 
-        eq(start, needle)
+        start == needle
     };
 
 // TODO: this is dumb. if you want to copy a billion bytes but they're 1 aligned, you should just fix the start/end. 

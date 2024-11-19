@@ -1,3 +1,12 @@
+## (Nov 18)
+
+isel mistakes:
+
+- initial port, 20
+- emit() call ordering for float immediates, 17
+- safety check getting index past the end to do bounds checks in runmatch, 9
+- hacked around miscomplication because of max_homogeneous_tuple, 3
+
 ## (Nov 14)
 
 - relative addressing is from the start of the next instruction but i was getting the current location before encoding the displacement.
