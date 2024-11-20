@@ -1,13 +1,7 @@
 //! A growable collection similar to a List, however, 
 //! it stores entries in seperate chunks, instead of doing a copying resize when it runs out of memory. 
-//! So you lose the ability to elements as one contiguous slice but in return get stable addresses, 
+//! So you lose the ability to access elements as one contiguous slice but in return get stable addresses, 
 //! so you can safely hold internal pointers (until you call drop or clear). 
-
-/// This implementation does not guarentee that all buckets are full, so you can't index the collection. 
-/// But when you push_all a whole slice at once, it is guarenteeed to be stored contiguously 
-/// (allocating a new bucket if out of space, which may be bigger than bucket_size), so you get back a slice to it.
-/// TODO: will probably want a version that makes the opposite trade off eventually.
-///       should have a const args that disable the functions that let you break nested_index.  
 fn BucketArray($T: Type) Type = {
     // TODO: buckets should probably be stored in a linked list but I can't do self referential types yet :( -- May 28
     Self :: @struct(buckets: List(List(T)), len: i64, b: i64, bucket_size: i64, gpa: Alloc, i: i64);
@@ -40,16 +34,31 @@ fn BucketArray($T: Type) Type = {
     
     /// The returned pointer is stable (it can be held until drop is called on the collection).
     fn push(self: *Self, v: T) *T = {
-        ::?*T;
         reserve(self, 1);
         self.len += 1;
         bucket := self.current();
         bucket.push(v);
-        bucket.last().unwrap()
+        bucket.index(bucket.len - 1)
     }
     
-    /// The returned slice is stable (it can be held until drop is called on the collection).
-    fn push_all(self: *Self, new: Slice(T)) Slice(T) = {
+    // The slice might be split across buckets.
+    fn push_all(self: *Self, new: []T) void = {
+        self.len += new.len;
+        bucket := self.current();
+        space := bucket.maybe_uninit.len - bucket.len;
+        if space >= new.len {
+            bucket.push_all(new);
+        } else {
+            if space > 0 {
+                bucket.push_all(new.slice(0, space));
+                new = new.slice(space, new.len);
+            };
+            reserve(self, new.len);
+            self.current().push_all(new);
+        };
+    }
+    
+    fn push_all_contiguous(self: *Self, new: Slice(T)) Slice(T) = {
         reserve(self, new.len);
         self.len += new.len;
         bucket := self.current();
@@ -113,3 +122,4 @@ fn pop_current_bucket();
 fn current();
 fn nested_index();
 fn push_bucket();
+fn push_all_contiguous();

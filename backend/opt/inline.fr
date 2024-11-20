@@ -62,19 +62,24 @@ fn clone(f: *Qbe.Fn) *Qbe.Fn = {
     @debug_assert(f.nmem == 0, "shouldn't need to inline clone f.mem");
     @debug_assert(f.nblk == 1, "don't know how to inline that");
     inlfn.start = cloneblk(f.start);
+    inlfn.name&.items().copy_from(f.name&.items()); // useless, just lazy way to make the debug logging better
     inlfn
 }
 
 ::ptr_utils(Qbe.Fn);
 
-fn inlsave(f: *Qbe.Fn) void = {
-    if(!good4inl(f), => return());
+fn inlsave(f: *Qbe.Fn) bool = {
+    if(!good4inl(f), => return(false));
     inlfn  := clone(f);
     m      := f.globals;
     id     := m.intern(f.name());
     symbol := m.get_symbol_info(id);
+    if f.lnk.export {
+        symbol.referenced = true;
+    };
     @debug_assert(symbol.inline.is_null(), "how have we been here before");
     symbol.inline = inlfn;
+    !symbol.referenced
 }
 
 fn inlfind(f: *Qbe.Fn, r: Qbe.Ref) ?*Qbe.Fn = {
@@ -82,10 +87,12 @@ fn inlfind(f: *Qbe.Fn, r: Qbe.Ref) ?*Qbe.Fn = {
     c := f.get_constant(r);
     if(c.type != .CAddr, => return(.None));
     if(c.sym.type != .SGlo, => return(.None));
-    symbol := f.globals.get_symbol_info(c.sym.id);
+    m := f.globals;
+    symbol := m.get_symbol_info(c.sym.id);
     if !symbol.inline.is_null() {
         return(Some = symbol.inline);
     };
+    mark_referenced(m, c.sym.id, symbol);
     .None
 }
 
@@ -227,6 +234,16 @@ fn inlcalls(f: *Qbe.Fn) void = {
             if i.op() == .call {
                 /* careful, this rewrites b.ins */
                 n = inlcall(f, b, i); 
+            } else {
+                // This is unfortunate extra work I need to do becuase I want to skip emitting functions when all uses are inlined. 
+                for i.arg&.items() { r | 
+                    continue :: local_return;
+                    if(rtype(r) != .RCon, => continue());
+                    c := f.get_constant(r);
+                    if(c.type != .CAddr, => continue());
+                    s := f.globals.get_symbol_info(c.sym.id);
+                    mark_referenced(f.globals, c.sym.id, s);
+                };
             };
             n += 1;
         };
@@ -236,4 +253,42 @@ fn inlcalls(f: *Qbe.Fn) void = {
         write(f.globals.debug_out, "\nAfter inlining calls:\n\n");
         printfn(f, f.globals.debug_out);
     };
+}
+
+fn mark_referenced(m: *QbeModule, id: u32, symbol: *SymbolInfo) void #inline = {
+    if !symbol.inline.is_null() && !symbol.referenced {
+        m.inlinable_but_referenced_later&.push(id);
+    };
+    symbol.referenced = true;
+}
+
+//
+// This gets called at the end of compilation, 
+// to emit all the functions that were,
+// - declared before thier first use
+// - and small enough to inline
+// - but referenced by pointer later
+//
+fn emit_suspended_inlinables(m: *QbeModule) void = {
+    log := m.debug["G".char()];
+    for m.inlinable_but_referenced_later { id | 
+        s := m.get_symbol_info(id);
+        mark := __temp_alloc.mark();
+        if log {
+            @fmt_write(m.debug_out, "\nFinishing suspended function: %\n", s.name);
+        };
+        f := s.inline[]; // we stomp arrays to point at temp, but it would probably be fine because everyone's already gone through inlining. 
+        
+        f.globals = m;
+        
+        // we don't bother storing these in the inlining cache so recompute them
+        // for now, its single block functions only so this is trivial. 
+        fillrpo(f&);
+        fillpreds(f&);
+        fill_use(f&);
+        
+        finish_qbe_passes(f&);
+        __temp_alloc.reset_retaining_capacity(mark);
+    };
+    m.inlinable_but_referenced_later&.clear();
 }

@@ -27,11 +27,7 @@ fn main(argc: i64, argv: *CStr) void = {
     //        exit(0);
     //    }, panic("argument '-lsp' not supported by this build of the compiler"));
     //};
-    
-    if filename == "-go-build-yo-self" {
-        go_build_yo_self(vtable, args);
-        exit(0);
-    };
+    ::?Arch;
     
     @match(run_franca_file(vtable, filename)) {
         (fn Ok(_) => exit(0));
@@ -48,57 +44,3 @@ fn main(argc: i64, argv: *CStr) void = {
         });
     };
 }
-
-// This is a simplified copy-paste of first.fr/driver. 
-// It exists so we have a precompiled version of the compiler's build script, 
-// which allows making breaking abi changes to the driver program system (like the allocator vtable change). 
-// note: passing args instead of calling cli_args becuase i want it to work on blink emulator without /proc/self/cmdline
-fn go_build_yo_self(vtable: *ImportVTable, args: [] CStr) void = {
-    fn load_src(vtable: *ImportVTable,  args: [] CStr) CompCtx = {
-        src := temp().read_to_string("compiler/main.fr");
-        @fmt(src&, """;ENABLE_TRACY :: false; ENABLE_LSP :: false; 
-        ENABLE_LOGGING_CALLBACKS :: false; 
-        DO_TERMINAL_COLOURS :: true; 
-        DEBUG_SPAM_LOG :: false; BOOTSTRAP_ONLY_MODE :: false;
-        """);
-        opts := vtable.default_build_options();
-        opts.deduplicate_bytecode = true;
-        opts.retain_function_names = false;
-        opts.debug_info = false;
-        for args { extra |
-            if extra.str() == "-no-deduplication" {
-                opts.deduplicate_bytecode = false;
-            };
-            if extra.str() == "-keep-names" {
-                opts.retain_function_names = true;
-            };
-            if extra.str() == "-debug-info" {
-                opts.debug_info = true;
-            };
-        };
-        
-        comp := vtable.new_with_src(src.items(), opts);
-        c := vtable.with(comp);
-        c
-    }
-
-    if !file_exists("compiler/main.fr") {
-        panic("Working directory must be top level of the franca repository");
-    };
-    start := timestamp();
-    c := load_src(vtable, args);
-    
-    new_main := c.get_unique_named("main").unwrap();
-    exports := (@list(new_main) temp()).items();
-    aa := query_current_arch();
-    os := query_current_os();
-    arch := aa.unwrap();
-    ir := c.emit_llvm(temp(), exports, .ExportWithNames, arch, os);
-    
-    for(ir&){bucket|
-        print(bucket);
-    };
-    @eprintln("Generated llvm ir for native target (%, %).", arch, os);   
-    eprintln("Good luck. May your pointers be relocated and your redundancies elided.");
-}
-

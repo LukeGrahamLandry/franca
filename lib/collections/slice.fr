@@ -144,59 +144,63 @@ fn Slice($T: Type) Type = {
         memset(T.raw_from_ptr(self.ptr), 0, self.len * size_of(T));
     }
   
-    // TODO: sad to JIT compile this for all types when emitting AOT, not just needed. :SLOW
-    //       can outline this because it can't call bake_relocatable_value(T) directly anyway. but should fix the actual problem anyway.
     // TODO: this api involves hella copying. caller should pass in a list of BakedEntry. :SLOW
-    // This looks kinda ugly but it used to be 35 lines of rust (instead of 31 here) and was a magic special case that assumed anything with ptr,len field names was a slice. 
-    fn bake_relocatable_value(self: *Self) Slice(BakedEntry) = {
-        ::List(BakedEntry); ::if(BakedEntry); ::if(BakedVarId);
-        
-        // TODO: StructName.(initilizer) so you're not forced to use @as or put the type on the other side? 
-        len: BakedEntry = (Num = (value = self.len, ty = .I64));
-        ptr: BakedEntry = if self.len == 0 {
-            // TODO: should we make this non-zero so you can pass them to rust? 
-            (Num = (value = 0, ty = .P64))
-        } else {
-            addr := T.int_from_ptr(self.ptr);
-            BIG :: 104857600;
-            if self.len > BIG && addr < BIG {
-                @println("(ptr = %, len = %) is a really weird slice. are you sure you don't have the components flipped?", addr, self.len); 
-            };
-            :: ?BakedVarId;
-            // TODO: this is wrong because what if someone previously baked a smaller new into the same memory.   :FUCKED -- Jul 16
-            //       we need to still emit and compare to make sure we would have baked the same thing? 
-            //       should that be a compile error or just have two? what if someone was relying on them being aliased? 
-            id := or lookup_baked(addr) { () BakedVarId |
-                info := ::get_meta(T);
-                // TODO: assert alignment
-                // TODO: assert len isnt big enough to be a pointer?
-                // TODO: need to check against c.baked.lookup (the first ptr not each individual element) :BLOAT
-                v: BakedVarId = if info.contains_pointers {
-                    parts: List(BakedEntry) = list(ast_alloc());
-                    each self { v | 
-                        bytes := T.cast_to_bytes(v);
-                        // TODO: its a bit un-intuative that you can't just call bake_relocatable_value(v), the dyn version uses the compiler auto implementation if none exists. 
-                        entries := dyn_bake_relocatable_value(bytes, T, false); // TODO: default arg. TTODO: explain somewhere
-                        parts&.push_all(entries);
-                    };
-                    // TODO: without cast
-                    bake_value(@as(BakedVar) (VoidPtrArray = parts.rs()))
-                } else {
-                    bytes := self[].interpret_as_bytes(); // TODO: decide if i need to clone. 
-                    bake_value(@as(BakedVar) (Bytes = bytes.rs())) // TODO: this should take jit_ptr param? even tho its sad if you had to do work just for me to throw away. and then would want to warn if conflicting handlers or it could be super confusing.  -- Jun 30
-                };
-                
-                cache_baked(addr, v);
-                v
-            };
-    
-            (AddrOf = id)
-        };
-        
-        @slice(ptr, len) ast_alloc()
-    }
+    fn bake_relocatable_value(self: *Self) Slice(BakedEntry) = 
+        bake_relocatable_slice_erased(T.raw_from_ptr(self.ptr), self.len, T);
     
     Self
+}
+
+// TODO: make compile error here show the right location. 
+fn bake_relocatable_slice_erased(addr: rawptr, length: i64, T: Type) []BakedEntry = {
+    ::List(BakedEntry); ::if(BakedEntry); ::if(BakedVarId);
+    
+    // TODO: StructName.(initilizer) so you're not forced to use @as or put the type on the other side? 
+    len: BakedEntry = (Num = (value = length, ty = .I64));
+    ptr: BakedEntry = if length == 0 {
+        // TODO: should we make this non-zero so you can pass them to rust? 
+        (Num = (value = 0, ty = .P64))
+    } else {
+        BIG :: 104857600;
+        addr := int_from_rawptr(addr);
+        if length > BIG && addr < BIG {
+            @println("(ptr = %, len = %) is a really weird slice. are you sure you don't have the components flipped?", addr, length); 
+        };
+        :: ?BakedVarId;
+        // TODO: this is wrong because what if someone previously baked a smaller new into the same memory.   :FUCKED -- Jul 16
+        //       we need to still emit and compare to make sure we would have baked the same thing? 
+        //       should that be a compile error or just have two? what if someone was relying on them being aliased? 
+        id := or lookup_baked(addr) { () BakedVarId |
+            info := get_meta(T);
+            size_of: i64 = info.stride_bytes.zext();
+            // TODO: assert alignment
+            // TODO: assert len isnt big enough to be a pointer?
+            // TODO: need to check against c.baked.lookup (the first ptr not each individual element) :BLOAT
+            bytes: []u8 = (ptr = u8.ptr_from_int(addr), len = length * size_of); // TODO: decide if i need to clone. 
+            v: BakedVarId = if info.contains_pointers {
+                parts: List(BakedEntry) = list(ast_alloc());
+                off := 0;
+                range(0, length) { _ | 
+                    bytes := bytes.slice(off, off + size_of);
+                    // TODO: its a bit un-intuative that you can't just call bake_relocatable_value(v), the dyn version uses the compiler auto implementation if none exists. 
+                    entries := dyn_bake_relocatable_value(bytes, T, false); // TODO: default arg. TTODO: explain somewhere
+                    parts&.push_all(entries);
+                    off += size_of;
+                };
+                // TODO: without cast
+                bake_value(@as(BakedVar) (VoidPtrArray = parts.rs()))
+            } else {
+                bake_value(@as(BakedVar) (Bytes = bytes.rs())) // TODO: this should take jit_ptr param? even tho its sad if you had to do work just for me to throw away. and then would want to warn if conflicting handlers or it could be super confusing.  -- Jun 30
+            };
+            
+            cache_baked(addr, v);
+            v
+        };
+
+        (AddrOf = id)
+    };
+    
+    @slice(ptr, len) ast_alloc()
 }
 
 // Create a slice containing `elements` in memory provided by `allocator`.  
@@ -206,14 +210,16 @@ fn Slice($T: Type) Type = {
 // but also @slice on the stack miscompiles if the length is > 50. 
 //
 #macro fn slice(elements: FatExpr, allocator: FatExpr) FatExpr = {
-    elements := elements&.items();
-    elements[0] = compile_ast(elements[0]);
+    e := elements&.items();
+    e[0] = compile_ast(e[0]);
     @{
-        mem := @[allocator].alloc(@[@literal elements[0].ty], @[@literal elements.len]);
+        T :: @[@literal e[0].ty];
+        mem := @[allocator].alloc(T, @[@literal e.len]);
+        indexer :: resolve_overload(index, Ty([]T, i64), *T, @[@literal elements.loc]);
         @[{
-            stmts := FatStmt.list(elements.len, ast_alloc());
-            enumerate elements { i, e |
-                stmts&.push(loc = e.loc, stmt = (Set = (place = @{ mem[@[@literal i]] }, value = e[])));
+            stmts := FatStmt.list(e.len, ast_alloc());
+            enumerate e { i, e |
+                stmts&.push(loc = e.loc, stmt = (Set = (place = @{ indexer(mem, @[@literal i])[] }, value = e[])));
             };
             make_block(stmts, @{mem})
         }]

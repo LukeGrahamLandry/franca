@@ -105,6 +105,7 @@ QbeModule :: @rec @struct(
     exports: List(u32),
     imports: List(u32),
     local_needs_reloc: List(u32),
+    inlinable_but_referenced_later: List(u32),
     
     // TODO: everything that touches these needs to be rewritten eventually. 
     want_text_asm := false,
@@ -173,6 +174,7 @@ fn init(segment_size: i64, gpa: Alloc, code_alloc: Alloc, goal: QbeTargetEnv) Qb
     m.exports = list(gpa);
     m.imports = list(gpa);
     m.local_needs_reloc = list(gpa);
+    m.inlinable_but_referenced_later = list(gpa);
     m.want_text_asm = goal.type == .AsmText;
     m.symbols = forever.alloc_zeroed(SymbolBucket, IMask + 1);
     {   // TODO: this is kinda ass
@@ -186,7 +188,7 @@ fn init(segment_size: i64, gpa: Alloc, code_alloc: Alloc, goal: QbeTargetEnv) Qb
         next[] = next[].offset(COMMANDS_SIZE_GUESS); 
         m.stubs = (mmapped = (ptr = next[], len = SIZE_OF_STUBS), next = next[]);
         next[] = next[].offset(SIZE_OF_STUBS); 
-        
+       
         next := m.segments&[.MutableData].next&;
         m.tls_vars = (mmapped = (ptr = next[], len = MAX_TLS_VARS_SIZE), next = next[]);
         next[] = next[].offset(MAX_TLS_VARS_SIZE); 
@@ -281,7 +283,6 @@ run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
     m := fnn.globals;
     ::ptr_utils(QbeModule);
     @debug_assert(!m.is_null(), "function module not set");
-    filluse :: fill_use;
     
     if fnn.globals.debug["P".char()] {
         out := fnn.globals.debug_out;
@@ -306,31 +307,44 @@ run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
     
     fillrpo(fnn);
     fillpreds(fnn);
-    filluse(fnn);
+    fill_use(fnn);
     promote(fnn); // optional
-    filluse(fnn);
+    fill_use(fnn);
     convert_to_ssa(fnn);
-    filluse(fnn);
+    fill_use(fnn);
     ssacheck(fnn); // debug
     fillalias(fnn); // !
     loadopt(fnn); // optional
-    filluse(fnn);
+    fill_use(fnn);
     fillalias(fnn); // for coalesce
     coalesce(fnn); // optional
-    filluse(fnn); 
+    fill_use(fnn); 
     filldom(fnn);  // TODO: do we need this here? i dont think anything breaks it after convert_to_ssa does it
     ssacheck(fnn); // debug
     
     copy_elimination(fnn); // optional
-    filluse(fnn);
+    fill_use(fnn);
     fold_constants(fnn);
     if DO_INLINING { 
-        inlsave(fnn);
+        if inlsave(fnn) {
+            // all uses might be inlined so we suspend processing until we know you took a function pointer later. 
+            if m.debug["G".char()] {
+                @fmt_write(m.debug_out, "\nSuspending inlinable function: %\n", fnn.name());
+            };
+            return();
+        };
     };
+    finish_qbe_passes(fnn);
+    __temp_alloc.reset_retaining_capacity(mark);
+};
+::[]u64;
+
+fn finish_qbe_passes(fnn: *Qbe.Fn) void = {
+    m := fnn.globals;
     {m.target.abi1}(fnn);
     simplify(fnn);
     fillpreds(fnn);
-    filluse(fnn); 
+    fill_use(fnn); 
     
     // arm isel inserts RMem (with different meaning from x64) for mul/store and RInt for load.
     {m.target.isel}(fnn);
@@ -351,9 +365,7 @@ run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
     set_link_from_rpo(fnn);
     
     {m.target.emitfn}(m, fnn, m[].outf);
-    __temp_alloc.reset_retaining_capacity(mark);
-};
-::[]u64;
+}
 
 /*
 // TODO: finish port
