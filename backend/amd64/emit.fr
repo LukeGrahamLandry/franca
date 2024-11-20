@@ -829,7 +829,7 @@ fn reg_for_extension(v: u8) Amd64Reg = {
     table[v.zext()]
 }
 
-AmdArgType :: @enum(i64) (M, R, imm32, imm8, none, F);    ::enum(AmdArgType);
+AmdArgType :: @enum(u8) (M, R, imm32, imm8, none, F);    ::enum(AmdArgType);
     
 fn arg_t(e: *AmdState, r: Qbe.Ref) AmdArgType = @match(rtype(r)) {
     fn RTmp() => @if(r.val() < Amd64Reg.XMM0.raw().zext(), .R, .F);
@@ -845,9 +845,6 @@ fn arg_t(e: *AmdState, r: Qbe.Ref) AmdArgType = @match(rtype(r)) {
     @default => .none;
 };
 
-fn matches(w: AmdArgType, h: AmdArgType) bool = 
-    w == h || (w == .imm32 && h == .imm8) || (w == .M && h == .R);
-
 fn assemble(e: *AmdState, i: *Qbe.Ins) void = {
     //printins(e.f, i, e.f.globals.debug_out);
     // aaaa that test only exists for registers in the other direction is such a hack! fix this properly please! -- Nov 14 :FUCKED
@@ -858,18 +855,38 @@ fn assemble(e: *AmdState, i: *Qbe.Ins) void = {
     // TODO: Kd needs to be more complicated because sometimes you need a different prefix?
     w := i.cls() == .Kl || i.cls() == .Kd || i.op() == .storel || i.op() == .stored;
     ext_index := int((i.arg&[1] == QbeNull || (rtype(i.arg&[1]) == .RCon && e.f.get_constant(i.arg&[1])[].type == .CBits)));
-    opcode, a0, a1, ext, prefix := amd64_encoding_lookup(e, i); 
     
-    if prefix.len != 0 {
-        if prefix[0] == 0xF2 && !w {
-            prefix[0] = 0xF3; // this seems like the easiest way to do this to me
+    a0, a1 := (arg_t(e, i.arg&[0]), arg_t(e, i.arg&[1]));
+    
+    xxx :: amd64_encoding_table();
+    table, offsets := xxx;
+    idx: i64 = offsets[i.op().raw().zext()].zext();
+    entry := table.index(idx);
+    dowhile {
+        matches :: fn(w: AmdArgType, h: AmdArgType) bool =>
+            w == h || (w == .imm32 && h == .imm8) || (w == .M && h == .R);
+        @debug_assert(entry.qbe_op == i.op().raw().intcast().trunc(), "didn't find encoding for %", i.op().get_name());
+        bad := !matches(entry.a0, a0) || !matches(entry.a1, a1);
+        if bad {
+            idx += 1;
+            entry = table.index(idx);
         };
-        e.a&.push_all(prefix);
+        bad
     };
     
-    if ext != QbeNull {
+    opcode: []u8 = (ptr = entry.opcode&.as_ptr(), len = entry.opcode_len.zext());
+    
+    prefix := entry.prefix;
+    if prefix != 0 {
+        if prefix == 0xF2 && !w {
+            prefix = 0xF3; // this seems like the easiest way to do this to me
+        };
+        e.a&.push(prefix);
+    };
+    
+    if entry.ext != 0 {
         // one argument is an immediate or fixed register and its slot in modrm holds an opcode extension instead. 
-        i.arg&[ext_index] = ext; 
+        i.arg&[ext_index] = TMP(@as(i64) entry.ext.zext()); 
         i.arg&.items().swap(0, 1); // HACK
     };
     
@@ -879,101 +896,99 @@ fn assemble(e: *AmdState, i: *Qbe.Ins) void = {
         i.arg&.items().swap(0, 1); // HACK
     };
     immediate_size := @if_else {
-        @if(a0 == .imm8 || a1 == .imm8) => 1;
-        @if(a0 == .imm32 || a1 == .imm32) => 4;
+        @if(entry.a0 == .imm8 || entry.a1 == .imm8) => 1;
+        @if(entry.a0 == .imm32 || entry.a1 == .imm32) => 4;
         @else => 0;
     };
     b := encode(e, i, w, immediate_size);
     push(e, b, opcode);
-    if a0 == .imm8 {
+    if entry.a0 == .imm8 {
         push_imm(e, e.f.get_constant(a0_old)[].bits.i, 1);
     };
-    if a1 == .imm8 {
+    if entry.a1 == .imm8 {
         push_imm(e, e.f.get_constant(a1_old)[].bits.i, 1);
     };
-    if a0 == .imm32 {
+    if entry.a0 == .imm32 {
         imm := e.f.get_constant(a0_old)[].bits.i;
         push_imm(e, imm, 4);
     };
-    if a1 == .imm32 {
+    if entry.a1 == .imm32 {
         imm := e.f.get_constant(a1_old)[].bits.i;
         push_imm(e, imm, 4);
     };
 }
 
-fn lookup_fail(o: Qbe.O, a0: AmdArgType, a1: AmdArgType) Ty([]u8, Qbe.Ref, []u8) = 
-    @as(Ty([]u8, Qbe.Ref, []u8)) @panic("bad op arg types % % for %", a0, a1, o.get_name());
-
-// TODO:
-// Alas this is a super convoluted way of doing this, i just want to see if it works. 
-// It's unfortunate that I'm incentivized to exercise fun language features. 
-//
-
-fn amd64_encoding_data(runtime_args: FatExpr, e: FatExpr) FatExpr #macro = {
+fn amd64_encoding_data(e: FatExpr) FatExpr #macro = {
     ArgType :: AmdArgType;
-    T :: Ty(i64, FatExpr);
     ops := e&.items();
-    cases := T.list(ops.len, ast_alloc());
-    @{
-        e, i := @[runtime_args];
-        a0, a1 := (arg_t(e, i.arg&[0]), arg_t(e, i.arg&[1]));
-        @[{
-            each ops { full_op | 
-                full_op := full_op.items();
-                qbe_o := const_eval(Qbe.O)(full_op[0]);
-                
-                handler := @{ lookup_fail(@[@literal qbe_o], a0, a1) };
-                each_rev full_op.slice(1, full_op.len) { components | 
-                    components := components.items();
-                    arg0 := const_eval(ArgType)(components[0]);
-                    arg1 := const_eval(ArgType)(components[1]);
-                    
-                    fn compile_bytes(e: *FatExpr) []u8 = {
-                        o := u8.list(ast_alloc());
-                        each e.items() { b | 
-                            o&.push(const_eval(u8)(b[]));
-                        };
-                        o.items()
-                    }
-                    
-                    o := compile_bytes(components.index(2));
-                    ext := QbeNull;
-                    prefix := "";
-                    if components.len > 3 {
-                        e := compile_ast(components[3]);
-                        if e.ty == void {
-                            @ct_assert(components.len > 4, runtime_args.loc, "explicit () extension implies prefix follows");
-                            prefix = compile_bytes(components.index(4));
-                        } else {
-                            e := const_eval(u8)(e);
-                            ext = TMP(reg_for_extension(e));
-                        };
-                    };
-                    handler = @{ 
-                        @if(!matches(@[@literal arg0], a0) || !matches(@[@literal arg1], a1), @[handler], {
-                            @[if (@is(arg0, .imm8, .imm32)) {
-                                @{ a0 = @[@literal arg0]; }
-                            } else {
-                                @{}
-                            }];
-                            @[if (@is(arg1, .imm8, .imm32)) {
-                                @{ a1 = @[@literal arg1]; }
-                            } else {
-                                @{}
-                            }];
-                            (@[@literal o], @[@literal ext], @[@literal prefix])
-                        })
-                    };
+    offset_by_op := ast_alloc().alloc_zeroed(u16, Qbe.O.enum_count());
+    lookup_table := AmdEncodingEntry.list(ops.len, ast_alloc());
+    each ops { full_op | 
+        loc := full_op.loc;
+        full_op := full_op.items();
+        qbe_o := const_eval(Qbe.O)(full_op[0]);
+        @ct_assert(offset_by_op[qbe_o.raw().zext()] == 0, loc, "repeated op in table");
+        offset_by_op[qbe_o.raw().zext()] = lookup_table.len.trunc();
+        
+        each full_op.slice(1, full_op.len) { components | 
+            entry := AmdEncodingEntry.zeroed();
+            entry.qbe_op = qbe_o.raw().intcast().trunc(); // overflow is doesn't matter, we just use the change as safety check
+            components := components.items();
+            entry.a0 = const_eval(ArgType)(components[0]);
+            entry.a1 = const_eval(ArgType)(components[1]);
+            
+            fn compile_bytes(e: *FatExpr) []u8 = {
+                o := u8.list(ast_alloc());
+                each e.items() { b | 
+                    o&.push(const_eval(u8)(b[]));
                 };
-                cases&.push(@as(T) (qbe_o.raw().zext(), handler));
-            };
-            @{
-                opcode_bytes, ext, prefix := @[make_switch(@{ i.op() }, @{ @panic("unknown op encoding %", i.op().get_name()) }, cases)];
-                (opcode_bytes, a0, a1, ext, prefix)
+                o.items()
             }
-        }]
-    }
+            
+            e := components.index(2);
+            o := compile_bytes(e);
+            @switch(o.len) {
+                @case(1) => {
+                    entry.opcode&[0] = o[0];
+                };
+                @case(2) => {
+                    entry.opcode&[0] = o[0];
+                    entry.opcode&[1] = o[1];
+                };
+                @default => compile_error("bad opcode length", e.loc);
+            };
+            entry.opcode_len = o.len.trunc();
+            entry.ext = 0;
+            if components.len > 3 {
+                e := compile_ast(components[3]);
+                if e.ty == void {
+                    @ct_assert(components.len > 4, e.loc, "explicit () extension implies prefix follows");
+                    prefix := compile_bytes(components.index(4));
+                    @ct_assert(prefix.len == 1, e.loc, "expected one prefix byte");
+                    entry.prefix = prefix[0];
+                } else {
+                    e := const_eval(u8)(e);
+                    entry.ext = TMP(reg_for_extension(e)).val().trunc();
+                    @debug_assert(entry.ext != 0);
+                };
+            };
+            lookup_table&.push(entry);
+        };
+    };
+    
+    lookup_table&.push(zeroed(@type lookup_table[0]));  // sentinal for safety check
+    @literal (lookup_table.items(), offset_by_op)
 }
+
+AmdEncodingEntry :: @struct(
+    opcode: Array(u8, 2),
+    ext: u8,
+    qbe_op: u8,
+    a0: AmdArgType,
+    a1: AmdArgType,
+    prefix: u8,  // 0 if none
+    opcode_len: u8,
+);
 
 // We assume prefix REX.W changes 32 to 64.
 // .(OP, .(arg1, arg2, (opcode), ext?))
@@ -983,7 +998,7 @@ fn amd64_encoding_data(runtime_args: FatExpr, e: FatExpr) FatExpr #macro = {
 // imm args are sign extended to the operation size. 
 // Magic numbers transcribed from https://www.felixcloutier.com/x86
 // Always put the imm8 before imm32 since imm32 will match smaller numbers too for store
-fn amd64_encoding_lookup(e: *AmdState, i: *Qbe.Ins) Ty([]u8, AmdArgType, AmdArgType, Qbe.Ref, []u8) = @amd64_encoding_data(e, i) (
+fn amd64_encoding_table() Ty([]AmdEncodingEntry, []u16) = @amd64_encoding_data (
     (.add, 
         (.M, .imm8, (0x83), 0),
         (.M, .imm32, (0x81), 0),
