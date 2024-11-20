@@ -115,6 +115,7 @@ fn fuse_addr(f: *Qbe.Fn, a: Qbe.Ref, total_off: *i64, bid: i32, size: i64, kill:
     //@debug_assert(addr.nuse > 0);
     // TODO: this should work but there's somewhere im not keeping track of count properly, i don't super care tho,
     //       rega gets rid of dead code anyway, doing it here just makes it easier to see whats going on in debug output. -- Nov 3
+    //       tho seljmp looks at use counts so its a bit sketchy that we're fucking with them. 
     kill_addr :: fn() => {
         if kill {
             //addr.nuse -= 1;
@@ -244,6 +245,11 @@ fn sel(f: *Qbe.Fn, i: Qbe.Ins, blk: i32, mem: *List(*Qbe.Ins)) void = {
         // ~1KB, not really worth it
         if o == .sub && is_int(k1) {
             if f.is_u12(iarg[1]) && iarg[0] != TMP(Arm64Reg.SP) {
+                return();
+            };
+        };
+        if o == .shl || o == .shr || o == .sar {
+            if f.get_int(iarg[1]) { _ |
                 return();
             };
         };
@@ -479,6 +485,36 @@ fn imm(c: *Qbe.Con, k: Qbe.Cls, pn: *i64) Imm = {
         return(if(positive, => .PosLow24, => .NegLow24));
     };
     .Iother
+}
+
+//
+// https://dinfuehr.github.io/blog/encoding-of-immediate-values-on-aarch64/
+// and/orr/eor take bit mask immediates which can encode a small subset of values. 
+// - The value must be a pattern of e=2/4/8/16/32/64 bits repeated for the whole register (ie. if e=4 it will be repeated 16 times). 
+// - The repeated thing must have all its one bits together or all its zero bits together. 
+//   ie. e=8 cannot have 10011101, but it can have 00111000 or 11000111.
+//   (equivalently: all ones must be together but you're allowed to rotate and wrap around). 
+// - The value cannot be all zeros or all ones. 
+//
+//   immr = how much to rotate
+// N:imms = (variable width fixed bit pattern encoding e):(number of consecutive ones at the end of the pre-rotation mask - 1)
+//
+// trailing zeros are filled in with 1s count. 
+// 2  = 0b0111110
+// 4  = 0b0111100
+// 8  = 0b0111000
+// 16 = 0b0110000
+// 32 = 0b0100000
+// 64 = 0b1000000
+//
+
+fn repeat_pattern(x: i64, pattern_size: i64) i64 = {
+    core := x.bit_and(1.shift_left(pattern_size) - 1);
+    x := 0;
+    range(0, 64 / pattern_size) { _ |
+        x = x.bit_or(core);
+        core = core.shift_left(pattern_size);
+    };
 }
 
 // note: not tested yet, only called by emit

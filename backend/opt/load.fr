@@ -51,12 +51,12 @@ LoadCtx :: @struct(
 
 /* require rpo ssa alias */
 fn loadopt(f: *Qbe.Fn) void = {
-    c: LoadCtx = (f = f, ilog = new(0, .PHeap), nlog = 0, inum = 0); c := c&;
+    c: LoadCtx = (f = f, ilog = new(0), nlog = 0, inum = 0); c := c&;
     for_blocks f { b |
         for_insts_forward b { i |
             if maybe_load(i) { size |
                 sl: MSlice = (ref = i.arg&[0], off = 0, size = size, cls = i.cls());
-                l: Loc = (type = .LRoot, index_in_block = ptr_diff(b.ins, i).trunc(), blk = b);
+                l: Loc = (type = .LRoot, index_in_block = ptr_diff(b.ins.first, i).trunc(), blk = b);
                 @debug_assert(i.arg&[1] == QbeNull, "load pass runs after isel so my arm thingy wont mess with it");
                 i.arg&[1] = c.def(sl, ones_mask_of_size(size), b, (Some = i), l&);
             }
@@ -88,7 +88,7 @@ fn emit_insertions(f: *Qbe.Fn, ilog: QList(Insert), nlog: i64) void = {
     ilog&.grow(nlog + 1);
     ilog[nlog].bid = f.nblk.bitcast(); /* add a sentinel */
     
-    ib: QList(Qbe.Ins) = new(0, .PHeap);
+    ib: QList(Qbe.Ins) = new(0);
     next_insertion := ilog.first;
     range(0, f.nblk.zext()) { current_bid |
         move_to_next_block :: local_return; 
@@ -111,14 +111,13 @@ fn emit_insertions(f: *Qbe.Fn, ilog: QList(Insert), nlog: i64) void = {
             } else {
                 if b.nins == index_in_old_block.trunc() {
                     if changed {
-                        b.nins = total.trunc();
-                        idup(b.ins&, ib.first, total);
+                        idup(b, ib.first, total);
                     } else {
                         @debug_assert_eq(b.nins, total.trunc());
                     };
                     move_to_next_block();
                 };
-                i := b.ins.offset(index_in_old_block);
+                i := b.ins.index(index_in_old_block);
                 index_in_old_block += 1;
                 if is_load(i.op()) && i.arg&[1] != QbeNull {
                     convert_load_to_move(i);
@@ -177,13 +176,13 @@ fn def(c: *LoadCtx, sl: MSlice, requested_bits: u64, b: *Qbe.Blk, i: ?*Qbe.Ins, 
         if(il.type != .LLoad, => return(QbeNull));
         return(c.load_masked(sl, requested_bits, il))
     };
-    i    := i || b.ins.offset(b.nins.zext());
+    i    := i || b.ins.index(b.nins.zext());
     out_int_cls  := if(sl.size > 4, => Qbe.Cls.Kl, => .Kw);
     bits_of_slice := ones_mask_of_size(sl.size);
 
     // First scan through the instructions in the block before the load being replaced. 
     // 
-    while => ptr_diff(b.ins, i) > 0 {
+    while => ptr_diff(b.ins.first, i) > 0 {
         continue :: local_return;
         i = i.offset(-1);
         if c.killsl(i.to, sl) {
@@ -205,7 +204,7 @@ fn def(c: *LoadCtx, sl: MSlice, requested_bits: u64, b: *Qbe.Blk, i: ?*Qbe.Ins, 
             @if(i.op() == .blit1) => {
                 @debug_assert(rtype(i.arg&[0]) == .RInt, "blit needs const arg");
                 size := abs(rsval(i.arg&[0]));
-                @debug_assert(ptr_diff(b.ins, i) > 0, "malformed blit");
+                @debug_assert(ptr_diff(b.ins.first, i) > 0, "malformed blit");
                 i = i.offset(-1);
                 @debug_assert(i.op() == .blit0, "malformed blit");
                 (QbeNull, i.arg&[1], size)
@@ -347,8 +346,8 @@ fn def(c: *LoadCtx, sl: MSlice, requested_bits: u64, b: *Qbe.Blk, i: ?*Qbe.Ins, 
     p.to = final_value;
     p.cls = sl.cls;
     p.narg = b.npred;
-    p.arg = new(p.narg.zext(), .PFn);
-    p.blk = new(p.narg.zext(), .PFn);
+    p.arg = new(p.narg.zext());
+    p.blk = new(p.narg.zext());
     range(0, b.npred.zext()) { np |
         bp    := b.pred[np];
         can_insert_load  := bp.s2.is_null() && il.type != .LNoLoad && bp.loop < il.blk.loop;

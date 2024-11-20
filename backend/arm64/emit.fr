@@ -18,30 +18,25 @@ ArmState :: @struct(
     frame: i64,
     padding: i64,
     start_of_function: i64,
-    buf: List(u8),
 );
 
-fn emit_func_arm64(m: *QbeModule, f: *Qbe.Fn, text: *FILE) void = {
+// TODO: remove the *FILE param, it was for when we were matching qbe's interface and outputting text. 
+fn emit_func_arm64(m: *QbeModule, f: *Qbe.Fn, _: *FILE) void = {
     @debug_assert_eq(m.goal.arch, .aarch64, "how did we get here?");
-    // :TempAsmText :SLOW
+    @assert(!m.want_text_asm, "we don't output text anymore. pass -e or whatever");
     name: CStr = (ptr = f.name&.as_ptr());
-    if m.want_text_asm {
-        s := items(@format(".text\n.balign 4\n.globl _%\n_%:\n", name, name) temp());
-        write(text, s);
-    };
     
     // We know we're emitting the function right here so we can do old fixups now. 
-    name_id := m.intern(@as(CStr) (ptr = f.name&.as_ptr()));
+    name_id := m.intern(name);
     
     m.align_to(.Code, 4);  // should never be unaligned anyway but we live in fear
     start_offset := m.current_offset(.Code);
-    self: ArmState = (m = m, f = f, frame = 0, padding = 0, start_of_function = start_offset, buf = list(temp()));
+    self: ArmState = (m = m, f = f, frame = 0, padding = 0, start_of_function = start_offset);
     
     maybe_add_export(m, name_id, f.lnk.export);
     m.do_jit_fixups(name_id, .Code, start_offset);
     
     self&.emit_the_code();
-    write(text, self.buf.items());
     total_code_so_far := start_offset + self&.next_inst_offset();
     code := m.segments&[.Code]&;
     @assert(total_code_so_far < code.mmapped.len, "too much code (% bytes)", total_code_so_far);
@@ -78,7 +73,6 @@ fn segment_address(self: *QbeModule, segment: SegmentType, offset_in_segment: i6
     data := self.segments&[segment]&;
     data.mmapped.ptr.offset(offset_in_segment)
 }
-
 
 fn do_fixups_arm64(self: *QbeModule, address: *u8, symbol: *SymbolInfo) void = {
     fixups := symbol.fixups.items();
@@ -161,7 +155,7 @@ tried_to_call_uncompiled :: @as(rawptr) fn() void = {
     @panic("TODO: backend jitted code tried to call uncompiled function");
 };
 
-Patch :: @struct(offset_from_start: i64, cond: ?i64, target_bid: i64, text_offset := 0);
+Patch :: @struct(offset_from_start: i64, cond: ?i64, target_bid: i64);
 
 fn emit_the_code(self: *ArmState) void #once = {
     // TODO: what is this? is it the control flow integrety shit? 
@@ -233,9 +227,8 @@ fn emit_the_code(self: *ArmState) void #once = {
                         self.inst(branch(s_trunc(distance, 26), 0));
                     } else {
                         // we haven't made this block yet.
-                        patches&.push(offset_from_start = here, cond = .None, target_bid = b.s1.id.zext(), text_offset = self.buf.len);
+                        patches&.push(offset_from_start = here, cond = .None, target_bid = b.s1.id.zext());
                         self.inst(brk(0xabba));
-                        @if(self.m.want_text_asm) @fmt(self.buf&, "             "); // :TempAsmText HACK
                     };
                 }; // else we can just fall through becuase we're about to emit the target block
             }
@@ -260,9 +253,8 @@ fn emit_the_code(self: *ArmState) void #once = {
                     self.inst(b_cond(s_trunc(distance, 19), cond));   // :FuncSizeLimit
                 } else {
                     // we haven't made this block yet.
-                    patches&.push(offset_from_start = here, cond = (Some = c.zext()), target_bid = b.s2.id.zext(), text_offset = self.buf.len);
+                    patches&.push(offset_from_start = here, cond = (Some = c.zext()), target_bid = b.s2.id.zext());
                     self.inst(brk(0xabba)); // so the offsets for the below work out
-                    @if(self.m.want_text_asm) @fmt(self.buf&, "             "); // :TempAsmText HACK
                 };
                 // :GotoJmp
                 if !b.s1.identical(b.link) {
@@ -273,9 +265,8 @@ fn emit_the_code(self: *ArmState) void #once = {
                         self.inst(branch(s_trunc(distance, 26), 0));  // :FuncSizeLimit
                     } else {
                         // we haven't made this block yet.
-                        patches&.push(offset_from_start = here, cond = .None, target_bid = b.s1.id.zext(), text_offset = self.buf.len);
+                        patches&.push(offset_from_start = here, cond = .None, target_bid = b.s1.id.zext());
                         self.inst(brk(0xabba));
-                        @if(self.m.want_text_asm) @fmt(self.buf&, "             "); // :TempAsmText HACK
                     };
                 }; // else we can just fall through becuase we're about to emit the target block
             };
@@ -297,11 +288,6 @@ fn emit_the_code(self: *ArmState) void #once = {
         } else {
             patch[] = branch(s_trunc(distance, 26), 0);   // :FuncSizeLimit
         };
-        @if(self.m.want_text_asm) {
-            // :TempAsmText HACK
-            patch_buf: List(u8) = (maybe_uninit = self.buf.items().slice(p.text_offset, p.text_offset + 25), len = 0, gpa = panicking_allocator);
-            @fmt(patch_buf&, "\t.word %;     \n", patch[]);
-        } 
     };
 }
 
@@ -383,13 +369,6 @@ fn epilogue_shrink_stack(self: *ArmState) void = {
     self.inst(add_er(Bits.X64, sp, sp, x16));
 }
 
-// can remove this if i decide to fully give up emitting text. 
-fn rname(r: i64, k: Qbe.Cls) Str = {
-    @debug_assert(k == .Kl, "I only use this for loading symbol addresses. float/32 bit doesn't make sense. %", @as(i64) k.raw().zext());
-    @debug_assert(r != Arm64Reg.SP.raw(), "stomp sp?");
-    items(@format("x%", r - Arm64Reg.R0.raw()) temp())
-}
-
 fn slot(self: *ArmState, r: Qbe.Ref) i64 = {
     s := rsval(r).intcast();
     if s == -1 {
@@ -447,69 +426,39 @@ fn loadaddr_bits(self: *ArmState, c: *Qbe.Con, dest_reg: i64, thread_local: bool
             //    encode_adrp_add(self.m.segment_address(symbol.segment, symbol.offset), patch_addr, @as(u5) dest_reg), 
             //);
             i_page, i_off := encode_adrp_add(self.m.segment_address(symbol.segment, symbol.offset), patch_addr, @as(u5) dest_reg);
-            self.inst_bytes_only(i_page);
-            self.inst_bytes_only(i_off);
+            self.inst(i_page);
+            self.inst(i_off);
         }
         fn Pending() => {
             symbol.fixups&.push(patch, self.m.gpa);
-            self.inst_bytes_only(brk(0x0123));
-            self.inst_bytes_only(brk(0x0456));
+            self.inst(brk(0x0123));
+            self.inst(brk(0x0456));
         }
     };
 }
 
-fn loadaddr(self: *ArmState, c: *Qbe.Con, dest: i64, reg_name: Str, do_text: bool) void = {
-    symbol_name := self.m.str(c.sym.id);
-
-    //p = l[0] == '"' ? "" : T.assym;
-    
-    self.loadaddr_bits(c, dest, c.sym.type == .SThr);
-    apple := self.f.globals.target.apple;
-    if do_text && self.m.want_text_asm {
-        @match(c.sym.type) {
-            fn SGlo() => {
-                // :TempAsmText
-                // when outputting text we just let the linker deal with it. 
-                if apple {
-                    @fmt(self.buf&, "\tadrp\t%, _%@page\n\tadd\t%, %, _%@pageoff\n", reg_name, symbol_name, reg_name, reg_name, symbol_name);
-                } else {
-                    @fmt(self.buf&, "\tadrp\t%, %\n\tadd\t%, %, #:lo12:%\n", reg_name, symbol_name, reg_name, reg_name, symbol_name);
-                };
-            }
-            fn SThr() => {
-                // :TempAsmText
-                if apple {
-                    @fmt(self.buf&, "\tadrp\t%, _%@tlvppage\n\tldr\t%, [%, _%@tlvppageoff]\n", reg_name, symbol_name, reg_name, reg_name, symbol_name);
-                } else {
-                    assert(do_text && self.m.want_text_asm, "TODO: non-apple thread locals");
-                    self.inst_bytes_only(brk(1111)); // TODO: patch
-                    @fmt(self.buf&, "\tmrs\t%, tpidr_el0\n\tadd\t%, %, #:tprel_hi12:%, lsl #12\n\tadd\t%, %, #:tprel_lo12_nc:%\n", reg_name, reg_name, reg_name, symbol_name, reg_name, reg_name, symbol_name);
-                };
-            };
-        };
-    };
-    if c.bits.i != 0 {
-        // TODO: you can do this as part of the thing above. 
-        @assert(c.bits.i < 4096 && c.bits.i > 0, "TODO: loadaddr of % with offset %", symbol_name, c.bits.i);
-        self.inst(add_im(Bits.X64, @as(u5) dest, @as(u5) dest, @as(u12) c.bits.i, 0));
-    };
-}
-
-fn loadcon(self: *ArmState, c: *Qbe.Con, r: i64, k: Qbe.Cls, do_text: bool) void = {
+fn loadcon(self: *ArmState, c: *Qbe.Con, r: i64, k: Qbe.Cls) void = {
     w := is_wide(k);
     n := c.bits.i;
-    if (c.type == .CAddr) {
-        @debug_assert(w, "can't have 32 bit addr: %", self.m.str(c.sym.id));
-        rn := rname(r + 1, k); // HACK
-        self.loadaddr(c, r, rn, do_text);
+    if c.type == .CAddr {
+        self.loadaddr_bits(c, r, c.sym.type == .SThr);
+        if c.bits.i != 0 {
+            // TODO: you can do this as part of the thing above. 
+            @assert(c.bits.i < 4096 && c.bits.i > 0, "TODO: loadaddr of % with offset %", self.m.str(c.sym.id), c.bits.i);
+            self.inst(add_im(Bits.X64, @as(u5) r, @as(u5) r, @as(u12) c.bits.i, 0));
+        };
+        if !w {
+            @eprintln("# Taking the low 32 bits of the symbol '%', you can do that but it's an odd choice so perhaps was a mistake.", self.m.str(c.sym.id));
+            // we could warn on this if we were feeling friendly. 
+            i := make_ins(.extuw, .Kw, TMP(r+1), TMP(r+1), QbeNull);
+            self.emitins(i&);
+        };
         return();
     };
     @debug_assert(c.type == .CBits, "bad constant");
     s := Bits.X64;
     if !w {
         s = .W32;
-        // TODO: is this the same?
-        //n = (int32_t)n;
         n = n.bit_and(1.shift_left(32) - 1);
     };
    
@@ -545,7 +494,7 @@ fn loadcon(self: *ArmState, c: *Qbe.Con, r: i64, k: Qbe.Cls, do_text: bool) void
 
 fn fixarg(self: *ArmState, pr: *Qbe.Ref, sz: i64) void = {
     r := pr[];
-    if (rtype(r) == .RSlot) {
+    if rtype(r) == .RSlot {
         s := self.slot(r);
         // you're actually allowed unaligned accesses, you just can't encode them in the immediate. 
         // qbe's stack slot allocating doesn't care about ensuring 8 byte slots are aligned,
@@ -590,8 +539,9 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
     F :: @Fn(s: FType, dest: u5, a: u5, b: u5) u32;
     I :: @Fn(s: Bits, dest: u5, a: u5, b: u5) u32;
     inst_name := i.op().get_name();
-    si := @if(i.cls().is_wide(),  Bits.X64,  Bits.W32);
-    sf := @if(i.cls().is_wide(),  FType.D64,  FType.S32);
+    w := i.cls().is_wide();
+    si := @if(w, Bits.X64,  Bits.W32);
+    sf := @if(w, FType.D64,  FType.S32);
     
     bin :: fn($if_float: F, $if_int: I) => {
         i.check_args();
@@ -635,7 +585,7 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
             @match(rtype(i.arg&[0])) {
                 fn RCon() => {
                     c := self.f.get_constant(i.arg&[0]);
-                    self.loadcon(c, i.to.int_reg(), i.cls(), true);
+                    self.loadcon(c, i.to.int_reg(), i.cls());
                 }
                 fn RSlot() => {
                     i.set_op(.load);
@@ -690,7 +640,7 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
                         // already compiled it so branch there directly
                         distance := self.m.distance_between(.Code, self.m.current_offset(.Code), symbol.segment, symbol.offset) / 4;
                         assert(distance.abs() < 1.shift_left(26), "can't call that far but I don't let modules be that big yet.");
-                        self.inst_bytes_only(b(s_trunc(distance, 26), 1));
+                        self.inst(b(s_trunc(distance, 26), 1));
                         // :canireallynothavecodeberelative
                         // TODO: I don't have a test that requires this 
                         //       but i think you do because you need the other ones?
@@ -701,20 +651,11 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
                     fn Pending() => {
                         // haven't compiled it yet so will need a patch. 
                         symbol.fixups&.push((patch_at = patch_at, type = .Call), self.m.gpa);
-                        self.inst_bytes_only(brk(0x0789));
+                        self.inst(brk(0x0789));
                         if self.m.debug["T".char()] {
                             @fmt_write(self.m.debug_out, "# pending call % calls %\n", u8.int_from_ptr(patch_at), symbol.name);
                         };
                     }
-                };
-                if self.m.want_text_asm {
-                    // dynamic link things it wont let you adrp to? you can only bl
-                    l := self.m.str(c.sym.id);
-                    p := self.f.globals.target.assym&.as_ptr();
-                    p: CStr = (ptr = p);
-                    p := str(p);
-                    p := if(l.ptr[] == "\"".ascii(), => "", => p);
-                    @fmt(self.buf&, "\tbl %%\n", p, l);
                 };
             } else {
                 self.inst(br(callee.int_reg(), 1));
@@ -728,19 +669,17 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
         }
         // TODO: these could kinda be data, the encodings are the same for many of them.
         fn add() => {
-            if rtype(i.arg&[1]) == .RCon {
+            if self.f.get_int(i.arg&[1]) { imm |
                 // isel enforces that it's an int and in range for this encoding. 
-                c := self.f.get_constant(i.arg&[1]);
-                self.inst(add_im(si, i.to.int_reg(), i.arg&[0].int_reg(), @as(u12) c.bits.i, 0));
+                self.inst(add_im(si, i.to.int_reg(), i.arg&[0].int_reg(), @as(u12) imm, 0));
                 return();
             };
             bin(@as(F) fadd, fn(s, d, a, b) => if(a == sp, => add_er(s, d, a, b), => add_sr(s, d, a, b, .LSL, 0))); // could always use *_er but then the disassembly looks dumb
         }
         fn sub()  => {
-            if rtype(i.arg&[1]) == .RCon {
+            if self.f.get_int(i.arg&[1]) { imm |
                 // isel enforces that it's an int and in range for this encoding. 
-                c := self.f.get_constant(i.arg&[1]);
-                self.inst(sub_im(si, i.to.int_reg(), i.arg&[0].int_reg(), @as(u12) c.bits.i, 0));
+                self.inst(sub_im(si, i.to.int_reg(), i.arg&[0].int_reg(), @as(u12) imm, 0));
                 return();
             };
             bin(@as(F) fsub, fn(s, d, a, b) => if(a == sp, => sub_er(s, d, a, b), => sub_sr(s, d, a, b, .LSL, 0))); // ^
@@ -755,9 +694,50 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
         }
         fn div()  => bin(@as(F) fdiv, fn(s, d, a, b) => sdiv(s, d, a, b)); // TODO: if you pass it here you force all calls to be inline :FUCKED
         fn udiv() => int_bin(fn(s, d, a, b) => udiv(s, d, a, b));
-        fn sar()  => int_bin(@as(I) asrv);
-        fn shr()  => int_bin(@as(I) lsrv);
-        fn shl()  => int_bin(@as(I) lslv);
+        fn sar()  => {
+            if self.f.get_int(i.arg&[1]) { imm |
+                mask := 1.shift_left(5 + w.int()) - 1;
+                imm := imm.bit_and(mask);
+                d, a := (i.to.int_reg(), i.arg&[0].int_reg());
+                if imm == 0 {
+                    self.inst(mov(si, d, a)); 
+                } else {
+                    self.inst(bfm(si, 0b0, imm, mask, d, a));
+                };
+            } else {
+                int_bin(@as(I) asrv);
+            };
+        }
+        fn shr()  => {
+            if self.f.get_int(i.arg&[1]) { imm |
+                mask := 1.shift_left(5 + w.int()) - 1;
+                imm := imm.bit_and(mask);
+                d, a := (i.to.int_reg(), i.arg&[0].int_reg());
+                if imm == 0 {
+                    self.inst(mov(si, d, a)); 
+                } else {
+                    self.inst(bfm(si, 0b1, imm, mask, d, a));
+                };
+            } else {
+                int_bin(@as(I) lsrv);
+            };
+        }
+        fn shl()  => {
+            if self.f.get_int(i.arg&[1]) { imm |
+                mask := 1.shift_left(5 + w.int()) - 1;
+                imm := imm.bit_and(mask);
+                d, a := (i.to.int_reg(), i.arg&[0].int_reg());
+                if imm == 0 {
+                    self.inst(mov(si, d, a)); 
+                } else {
+                    imms := mask - imm;
+                    immr := mask + 1 - imm;
+                    self.inst(bfm(si, 0b1, immr, imms, d, a));
+                };
+            } else {
+                int_bin(@as(I) lslv);
+            };
+        }
         fn or()   => int_bin(fn(s, d, a, b) => orr(s, d, a, b, .LSL, 0));
         fn xor()  => int_bin(fn(s, d, a, b) => eor(s, d, a, b, .LSL, 0));
         fn and()  => int_bin(fn(s, d, a, b) => and_sr(s, d, a, b, .LSL, 0));
@@ -958,6 +938,7 @@ fn emitins2(self: *ArmState, i: *Qbe.Ins) void = {
     };
 }
 
+// same as qbe
 /*
 
   Stack-frame layout:
@@ -985,20 +966,10 @@ fn emitins2(self: *ArmState, i: *Qbe.Ins) void = {
 
 */
 
-fn inst_bytes_only(self: *ArmState, opcode: u32) void = {
-    code := self.m.segments&[.Code]&;
-    ptr_cast_unchecked(u8, u32, code.next)[] = opcode;  // SAFETY: aligned becuase we're always emitting arm instructions
-    code.next = code.next.offset(4);
-}
-
 fn inst(self: *ArmState, opcode: u32) void = {
     code := self.m.segments&[.Code]&;
     ptr_cast_unchecked(u8, u32, code.next)[] = opcode;  // SAFETY: aligned becuase we're always emitting arm instructions
     code.next = code.next.offset(4);
-    // :TempAsmText
-    @if(self.m.want_text_asm) {
-        @fmt(self.buf&, "\t.word %\n", opcode);
-    };
 }
 
 fn next_inst_offset(self: *ArmState) i64 = {

@@ -49,8 +49,7 @@ fn slice_pending_scratch(f: *Qbe.Fn) []Qbe.Ins = {
 }
 
 fn copy_instructions_from_scratch(f: *Qbe.Fn, b: *Qbe.Blk) void = {
-    b.nins = f.len_scratch().trunc();
-	idup(b.ins&, f.scratch_next(), b.nins.zext());
+	idup(b, f.scratch_next(), f.len_scratch());
 	f.globals.curi[] = f.scratch_start(); // TODO: make sure this is right. qbe didn't do it where i'd expect in simpl
 }
 
@@ -161,11 +160,17 @@ fn new_mem(f: *Qbe.Fn, base: Qbe.Ref, index: Qbe.Ref, offset: i64, scale: i32) Q
 
 // TODO: use slices 
 
-fn idup(pd: **Qbe.Ins, src: *Qbe.Ins, n: i64) void = {
+fn idup(b: *Qbe.Blk, src: *Qbe.Ins, n: i64) void = {
+    b.nins = n.trunc();
     if(n == 0, => return());
-    mem := temp().alloc(Qbe.Ins, n);
+    if b.ins.first.is_null() {
+        b.ins = new(n);  // caller better not be trying to put this in the inlining cache
+    } else {
+        @debug_assert(!src.identical(b.ins.first));
+        b.ins&.grow(n);
+    };
+    mem := b.ins.slice(0, n);
     mem.copy_from(ptr = src, len = n);
-    pd[] = mem.ptr;
 }
 
 fn icpy(dest: *Qbe.Ins, src: *Qbe.Ins, n: i64) *Qbe.Ins = {
@@ -214,7 +219,7 @@ fn addins(pvins: *QList(Qbe.Ins), pnins: *i64, i: *Qbe.Ins) void = {
 }
 
 fn addbins(b: *Qbe.Blk, pvins: *QList(Qbe.Ins), pnins: *i64) void = {
-    for(b.ins, b.ins.offset(b.nins.zext())) { i | 
+    for(b.ins.first, b.ins.index(b.nins.zext())) { i | 
         addins(pvins, pnins, i);
     };
 }
@@ -450,17 +455,21 @@ QListHeader :: @struct(
 fn header();
 fn grow();
 fn new_copy();
+fn new_long_life();
 
 fn QList($T: Type) Type = {
     Self :: @struct(first: *T);
     ::ptr_utils(T);
     
-    fn new(len: i64, pool: Qbe.Pool) Self = {
-        (first = T.ptr_from_raw(vnew(len, T.size_of(), pool)))
+    fn new(len: i64) Self = {
+        (first = T.ptr_from_raw(vnew(len, T.size_of(), .PHeap)))
     }
     
-    fn new_copy(items: []T, pool: Qbe.Pool) Self = {
-        self: Self = new(items.len, pool);
+    fn new_long_life(len: i64) Self = 
+        (first = T.ptr_from_raw(vnew(len, T.size_of(), .PLong)));
+    
+    fn new_copy(items: []T) Self = {
+        self: Self = new(items.len);
         self.slice(0, items.len).copy_from(items);
         self
     }
@@ -526,7 +535,7 @@ fn my_intern(m: *QbeModule, s: CStr) u32 = {
         @panic("interning table overflow");
     };
     if n == 0 {
-        b.data = new(1, .PLong);
+        b.data = new_long_life(1);
     } else {
         if n.bit_and(n - 1) == 0 {
             b.data&.grow(zext(n + n));
@@ -633,8 +642,8 @@ fn for_blocks_rpo_forward(f: *Qbe.Fn, $body: @Fn(b: *Qbe.Blk) void) void = {
 // because the body is allowed to consume multiple instructions by offsetting the pointer. 
 // This is needed because the ir uses a vairable length encoding (for blit, call, args).
 fn for_insts_rev(b: *Qbe.Blk, $body: @Fn(i: **Qbe.Ins) void) void = {
-    i := b.ins.offset(b.nins.zext());
-    while => !i.identical(b.ins) {
+    i := b.ins.index(b.nins.zext());
+    while => !i.identical(b.ins.first) {
         i = i.offset(-1);
         body(i&);
         // TODO: @debug_assert() `i` is still in range
@@ -642,8 +651,8 @@ fn for_insts_rev(b: *Qbe.Blk, $body: @Fn(i: **Qbe.Ins) void) void = {
 }
 
 fn for_insts_forward(b: *Qbe.Blk, $body: @Fn(i: *Qbe.Ins) void) void = {
-    i := b.ins;
-    while => !i.identical(b.ins.offset(b.nins.zext())) {
+    i := b.ins.first;
+    while => !i.identical(b.ins.index(b.nins.zext())) {
         body(i);
         i = i.offset(1);
     };

@@ -17,6 +17,7 @@ OverloadSetData :: @struct(
     name: Symbol,
     pending: RsVec(FuncId),
     inline_cache: Ty(OverloadKey, FuncId),
+    table: ?HashMap(OverloadKey, FuncId) = .None,
 );
 
 fn compile_stmt(self: *SelfHosted, stmt: *FatStmt) Maybe(Ty(bool, bool)) #once = {
@@ -1738,7 +1739,9 @@ fn emit_capturing_call(self: *SelfHosted, f: FuncId, expr_out: *FatExpr, request
     };
     @err_assert(func.mutual_callees.is_empty(), "TODO: you can't really refer to inlined things so how'd you make it recursive?") return;
 
-    if(!func.body&.is(.Normal), => return(@err("'=>' function must have body expression.")));
+    if !func.body&.is(.Normal) {
+        return(@err("emit_capturing_call: '=>' function '%' must have body expression.", self.pool.get(func.name)));
+    };
     aliased_body := func.body.Normal&;
     may_have_early_return := !aliased_body.expr&.is(.Value);
     pattern := func.arg&.deep_clone(self.get_alloc());
@@ -2158,13 +2161,19 @@ fn bind_const_arg(self: *SelfHosted, o_f: FuncId, arg_name: Var, arg_value: Valu
     is_function := !(!self.get_type(arg_ty).is(.Fn) && arg_ty != FuncId);
     // TODO: not sure if i actually need this but it seems like i should.
     if is_function {
-        @err_assert(!func.get_flag(.NoInline), "functions with constant lambda arguments are always inlined") return;
         arg_func := FuncId.assume_cast(arg_value&)[];
-        // :ChainedCaptures
-        // TODO: HACK: captures aren't tracked properly.
-        func.set_flag(.MayHaveAquiredCaptures);
-        self[o_f].cc = (Some = .Inline); // just this is enough to fix chained_captures
-        self[arg_func].cc = (Some = .Inline); // but this is needed too for others (perhaps just when there's a longer chain than that simple example).
+        arg_func_obj := self.get_function(arg_func);
+        
+        // you want to allow passing a normal function as a const arg without forcing everything to be inlined. 
+        may_have_aquired_captures := arg_func_obj.get_flag(.AllowRtCapture) || arg_func_obj.get_flag(.MayHaveAquiredCaptures);
+        if may_have_aquired_captures {
+            @err_assert(!func.get_flag(.NoInline), "functions with constant lambda arguments are always inlined") return;
+            // :ChainedCaptures
+            // TODO: HACK: captures aren't tracked properly.
+            func.set_flag(.MayHaveAquiredCaptures);
+            self[o_f].cc = (Some = .Inline); // just this is enough to fix chained_captures
+            self[arg_func].cc = (Some = .Inline); // but this is needed too for others (perhaps just when there's a longer chain than that simple example).
+        };
         
         // If we're passing a lambda arg, infer its return type based on the param's hint (not just the callsite). 
         //      f :: fn(x: @Fn() @enum(a, b)) void = { x(); } // callsite doesn't give a hint because statement discards value. 
@@ -2355,9 +2364,52 @@ fn adjust_named_arguments(self: *SelfHosted, fid: FuncId, arg_expr: *FatExpr) Re
     .Ok
 }
 
-// TODO: this is very non-linear with number of overloads. 
+fn easy_check_type(self: *SelfHosted, e: *FatExpr) ?Type = {
+    if e.ty != UnknownType {
+        return(Some = e.ty);
+    };
+    @match(e.expr&) {
+        fn GetVar(name) => {
+            return(self.scopes.get_var_type(name[]));
+        }
+        fn Deref(inner) => {
+            if self.easy_check_type(inner[]) { inner | 
+                return(self.unptr_ty(inner));
+            };
+        }
+        fn Addr(inner) => {
+            if self.easy_check_type(inner[]) { inner | 
+                return(Some = self.ptr_ty(inner));
+            };
+        }
+        @default => ();
+    };
+    
+    .None
+}
+
+// TODO: this is very non-linear with number of overloads. :SLOW :SLOW :SLOW
 fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *OverloadAttempt) Maybe(FuncId) #once = {
     overloads := self.dispatch.overloads&.nested_index(attempt.os.as_index());
+    
+    // this + the hash table helps a bit ~2300 -> ~2220, but it's really not enough. 
+    if overloads.ready.len > 6 && arg_expr.ty.is_unknown() {
+        bail :: local_return;
+        args := arg_expr.items();
+        types := Type.list(temp());
+        each args { a | 
+            if is_const(a) {
+                bail();
+            };
+            if self.easy_check_type(a) { ty |
+                types&.push(ty);
+            } else {
+                bail();
+            }
+        };
+        arg_expr.ty = self.tuple_of(types.items());
+    };
+    
     // this does catch some but doesn't help much. TODO: maybe remove
     if !arg_expr.ty.is_unknown() {
         req := UnknownType;
@@ -2368,7 +2420,13 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
         if overloads.inline_cache._0& == key& {
             return(Ok = overloads.inline_cache._1);
         };
+        if overloads.table& { t | 
+            if t.get(key&) { f |
+                return(Ok = f);
+            };
+        };
     };
+    
     self.compute_new_overloads(overloads);
     if overloads.ready.len > attempt.last_ready_count {
         attempt.state = 0;
@@ -2391,18 +2449,7 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
     
     are_we_done_yet :: fn() => {
         if attempt.options.len == 1 {
-            fid := attempt.options[0];
-            @log_event("selected % from '%'", fid, self.pool.get(overloads.name)) self;
-            
-            if !arg_expr.ty.is_unknown() {
-                req := UnknownType;
-                @if_let(attempt.call.requested) fn Specific(t) => {
-                    req = t;
-                };
-                key: OverloadKey = (arg = arg_expr.ty, req = req);
-                overloads.inline_cache = (key, fid);
-            };
-            return(Ok = fid);
+            return(Ok = self.done_resolving_overload(attempt, overloads, arg_expr));
         };
         if attempt.options.len == 0 {
             self.last_loc = arg_expr.loc;
@@ -2423,7 +2470,7 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
                 all_known := true;
                 each func.arg.bindings& { b |
                     res := @check(self.infer_type(b.ty&)) return;
-                    all_known = all_known && res.is_some();
+                    all_known = all_known && res&.is_some();
                 };
                 if all_known {
                     @check(self.infer_arguments(fid)) return;
@@ -2440,7 +2487,7 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
         enumerate parts { arg_index, arg_expr | 
             continue :: local_return;
             type := self.type_of(arg_expr);
-            if type&.is(.Err).or(type&.is(.Suspend)) {
+            if !type&.is(.Ok) {
                 continue();
             };
             type := type.Ok;
@@ -2454,7 +2501,7 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
                 continue :: local_return;
                 f_i -= 1;
                 reject :: fn() void => {
-                    attempt.options&.unordered_remove(f_i);
+                    attempt.options&.unordered_remove_discard(f_i);
                     continue();
                 };
                 fid := attempt.options[f_i];
@@ -2470,15 +2517,16 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
                         if arg_expr.is_const() { // this helps with :type_through_field
                             res := self.coerce_const_expr(arg_expr, (Specific = param), true);
                             if res&.is(.Ok) {
+                                @log_event("% [%] allow coerce arg % <- %", fid, arg_index, self.log_type(param), self.log_type(type)) self;
                                 continue();
                             };
                         };
                         
-                        //@println("[%] reject arg % <- %", arg_index, self.log_type(param), self.log_type(type));
+                        @log_event("% [%] reject arg % <- %", fid, arg_index, self.log_type(param), self.log_type(type)) self;
                         reject();
                     };
                     
-                    //@println("[%] allow arg % <- %", arg_index, self.log_type(param), self.log_type(type));
+                    @log_event("% [%] allow arg % <- %", fid, arg_index, self.log_type(param), self.log_type(type)) self;
                 };
             };
             are_we_done_yet();
@@ -2494,7 +2542,7 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
                 continue :: local_return;
                 f_i -= 1;
                 reject :: fn() void => {
-                    attempt.options&.unordered_remove(f_i);
+                    attempt.options&.unordered_remove_discard(f_i);
                     continue();
                 };
                 fid := attempt.options[f_i];
@@ -2527,7 +2575,7 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
                 continue :: local_return;
                 f_i -= 1;
                 reject :: fn() void => {
-                    attempt.options&.unordered_remove(f_i);
+                    attempt.options&.unordered_remove_discard(f_i);
                     continue();
                 };
                 fid := attempt.options[f_i];
@@ -2556,7 +2604,7 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
         enumerate parts { arg_index, arg_expr | 
             continue :: local_return;
             
-            arg_fid := if arg_expr.is_const() && arg_expr.ty.eq(FuncId).or(=> self.get_type(arg_expr.ty).is(.Fn)) {
+            arg_fid := if arg_expr.is_const() && (arg_expr.ty.eq(FuncId) || self.get_type(arg_expr.ty).is(.Fn)) {
                 @check(self.immediate_eval_expr(arg_expr, arg_expr.ty)) return
             } else {
                 continue()
@@ -2568,7 +2616,7 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
                 continue :: local_return;
                 f_i -= 1;
                 reject :: fn() void => {
-                    attempt.options&.unordered_remove(f_i);
+                    attempt.options&.unordered_remove_discard(f_i);
                     continue();
                 };
                 fid := attempt.options[f_i];
@@ -2616,7 +2664,7 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
                 continue :: local_return;
                 f_i -= 1;
                 reject :: fn() void => {
-                    attempt.options&.unordered_remove(f_i);
+                    attempt.options&.unordered_remove_discard(f_i);
                     continue();
                 };
                 fid := attempt.options[f_i];
@@ -2663,6 +2711,24 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
     @err("TODO: end of loop. still too many options for '%'", self.pool.get(overloads.name))
 }
     
+fn done_resolving_overload(self: *SelfHosted, attempt: *OverloadAttempt, overloads: *OverloadSetData, arg_expr: *FatExpr) FuncId = {
+    fid := attempt.options[0];
+    @log_event("selected % from '%'", fid, self.pool.get(overloads.name)) self;
+    
+    if !arg_expr.ty.is_unknown() {
+        req := UnknownType;
+        @if_let(attempt.call.requested) fn Specific(t) => {
+            req = t;
+        };
+        key: OverloadKey = (arg = arg_expr.ty, req = req);
+        overloads.inline_cache = (key, fid);
+        if overloads.table& { t |
+            t.insert(key, fid); 
+        };
+    };
+    fid
+}
+
 fn check_promote_id_to_func(self: *SelfHosted, fid: FuncId, f_ty: FnType) Maybe(void) = {
     func := self.get_function(fid);
     //@println("check_promote_id_to_func func <- funcid %", self.log_type(self.intern_type(Fn = f_ty)));
@@ -2887,7 +2953,7 @@ fn do_merges(self: *SelfHosted, attempt: *OverloadAttempt) Maybe(void) = {
                 if !other_func.body&.is(.Redirect) {  // TODO: i'd rather not get here a billion times
                     merged&.push(other_func.body);
                     other_func.body = (Redirect = fid);
-                    attempt.options&.unordered_remove(f_j);
+                    attempt.options&.unordered_remove_discard(f_j);
                     if f_j < f_i {
                         f_i -= 1;
                     };
@@ -2913,6 +2979,9 @@ fn log_type(self: *SelfHosted, ty: ?Type) Str = {
 
 fn compute_new_overloads(self: *SelfHosted, overloads: *OverloadSetData) void = {
     overloads.ready&.push_all(overloads.pending&.items(), self.get_alloc());
+    if overloads.table.is_none() && overloads.ready.len > 6 {
+        overloads.table = (Some = init(self.get_alloc()));
+    };
     overloads.pending.len = 0;
 }
 
@@ -3169,11 +3238,15 @@ fn find_const_non_blocking(self: *SelfHosted, name: Var) ?Ty(Values, Type) #once
     .None
 }
 
+fn is_rec_hack(value: *FatExpr) bool = {
+    ::AutoEq(?Symbol); ::RefEq(?Symbol);
+    value.expr&.is(.PrefixMacro) && value.expr.PrefixMacro.handler.ident() == (Some = Flag.rec.ident())
+}
+
 fn handle_declare_constant(self: *SelfHosted, name: Var, ty: *LazyType, value: *FatExpr) Maybe(void) #once = {
     @debug_assert(self.dispatch.enclosing_function.is_none(), "ICE: handle_declare_constant should have no enclosing function");
     
-    ::AutoEq(?Symbol); ::RefEq(?Symbol);
-    is_rec := value.expr&.is(.PrefixMacro) && value.expr.PrefixMacro.handler.ident() == (Some = Flag.rec.ident());
+    is_rec := is_rec_hack(value);
     
     // infer the more useful name when you do `foo :: fn() = { ... };`
     @if_let(value.expr) fn Closure(func) => {

@@ -37,16 +37,14 @@ fn good4inl(f: *Qbe.Fn) bool = {
 fn cloneblk(b: *Qbe.Blk) *Qbe.Blk = {
     inlb := libc_allocator.box_zeroed(Qbe.Blk); // :HardcodeAlloc
     inlb.jmp = b.jmp;
-    inlb.nins = b.nins;
     
     @debug_assert(inlb.phi.is_null(),  "don't know how to inline that");
     @debug_assert(inlb.s1.is_null(),   "don't know how to inline that");
     @debug_assert(inlb.s2.is_null(),   "don't know how to inline that");
     @debug_assert(inlb.link.is_null(), "don't know how to inline that");
     
-    mem := libc_allocator.alloc(Qbe.Ins, inlb.nins.zext()); // :HardcodeAlloc
-    inlb.ins = mem.ptr; 
-    mem.copy_from(ptr = b.ins, len = mem.len);
+    inlb.ins = new_long_life(b.nins.zext());
+    idup(inlb, b.ins.first, b.nins.zext());
     inlb
 }
 
@@ -57,9 +55,9 @@ fn clone(f: *Qbe.Fn) *Qbe.Fn = {
     inlfn.ntmp = f.ntmp;
     inlfn.ncon = f.ncon;
     inlfn.nblk = f.nblk;
-    inlfn.tmp = new(inlfn.ntmp.zext(), .PLong);
+    inlfn.tmp = new_long_life(inlfn.ntmp.zext());
     inlfn.tmp.slice(0, f.ntmp.zext()).copy_from(f.tmp.slice(0, f.ntmp.zext()));
-    inlfn.con = new(inlfn.ncon.zext(), .PLong);
+    inlfn.con = new_long_life(inlfn.ncon.zext());
     inlfn.con.slice(0, f.ncon.zext()).copy_from(f.con.slice(0, f.ncon.zext()));
     @debug_assert(f.nmem == 0, "shouldn't need to inline clone f.mem");
     @debug_assert(f.nblk == 1, "don't know how to inline that");
@@ -126,12 +124,12 @@ fn getinlref(inlfn: *Qbe.Fn, inlr: Qbe.Ref, f: *Qbe.Fn, prmap: *QList(RefMap), p
 
 fn inlargs(inlfn: *Qbe.Fn, f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins, prmap: *QList(RefMap), pnrmap: *i64) void = {
     /* go back to start of args */
-    while => ptr_diff(b.ins, i) > 0 && is_arg(i.offset(-1).op()) {
+    while => ptr_diff(b.ins.first, i) > 0 && is_arg(i.offset(-1).op()) {
         i = i.offset(-1);
     };
     /* replace args with copies to par tmps */
     @debug_assert(inlfn.nblk == 1);
-    i1 := inlfn.start.ins;
+    i1 := inlfn.start.ins.first;
     if i.op() == .arge {
         if i1.op() != .pare {
             /* drop env arg cos fn does not take one */
@@ -155,8 +153,8 @@ fn inlargs(inlfn: *Qbe.Fn, f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins, prmap: *QList(R
 
 fn inlbins(inlfn: *Qbe.Fn, inlb: *Qbe.Blk, f: *Qbe.Fn, prmap: *QList(RefMap), pnrmap: *i64, pvins: *QList(Qbe.Ins), pnins: *i64) void = {
     /* skip par instructions */
-    i := inlb.ins;
-    last := inlb.ins.offset(inlb.nins.zext());
+    i := inlb.ins.first;
+    last := inlb.ins.index(inlb.nins.zext());
     while => ptr_diff(i, last) > 0 && is_par(i.op()) {
         i = i.offset(1);
     };
@@ -172,26 +170,26 @@ fn inlbins(inlfn: *Qbe.Fn, inlb: *Qbe.Blk, f: *Qbe.Fn, prmap: *QList(RefMap), pn
 
 /* return index of last inlined ins */
 fn inlcall(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) i64 = {
-    @debug_assert(ptr_diff(b.ins, i) >= 0 && ptr_diff(i, b.ins.offset(b.nins.zext())) >= 0);
+    @debug_assert(ptr_diff(b.ins.first, i) >= 0 && ptr_diff(i, b.ins.index(b.nins.zext())) >= 0);
     @debug_assert(i.op() == .call);
     inlfn := or inlfind(f, i.arg&[0]) { _ |
-        return(ptr_diff(b.ins, i))
+        return(ptr_diff(b.ins.first, i))
     };
     
     if f.globals.debug["G".char()] {
-        @fmt_write(f.globals.debug_out, "    inlining call at @% ins % to simple function $%\n", b.name(), ptr_diff(b.ins, i), inlfn.name());
+        @fmt_write(f.globals.debug_out, "    inlining call at @% ins % to simple function $%\n", b.name(), ptr_diff(b.ins.first, i), inlfn.name());
     };
     
     nrmap := 0;
-    rmap: QList(RefMap) = new(nrmap, .PFn);
+    rmap: QList(RefMap) = new(nrmap);
     
     /* replace arg ins with copy to inline fn par tmps */
     inlargs(inlfn, f, b, i, rmap&, nrmap&);
     
     nins := 0;
-    vins: QList(Qbe.Ins) = new(nins, .PFn);
+    vins: QList(Qbe.Ins) = new(nins);
     
-    for(b.ins, i) { i1 |
+    for(b.ins.first, i) { i1 |
         addins(vins&, nins&, i1);
     };
     
@@ -213,12 +211,11 @@ fn inlcall(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) i64 = {
     };
     nret := nins - 1;
     
-    for(i.offset(1), b.ins.offset(b.nins.zext())) { i |
+    for(i.offset(1), b.ins.index(b.nins.zext())) { i |
         addins(vins&, nins&, i);
     };
     
-    idup(b.ins&, vins.first, nins);
-    b.nins = nins.trunc();
+    idup(b, vins.first, nins);
     nret
 }
 
@@ -226,7 +223,7 @@ fn inlcalls(f: *Qbe.Fn) void = {
     for_blocks f { b | 
         n := 0;
         while => n < b.nins.zext() {
-            i := b.ins.offset(n);
+            i := b.ins.index(n);
             if i.op() == .call {
                 /* careful, this rewrites b.ins */
                 n = inlcall(f, b, i); 

@@ -1,0 +1,87 @@
+
+// 
+// makes sure we're encoding arm shift immediates correctly.  
+// you should see `lsl x, #i` for each value of i if you look in the assembly for const_shifts.
+// 
+// also caught a bug where i was forcing const arg functions to always be inlined, 
+// but you can't in this situation because its an intrinsic (that has to be inlined by that backend anyway). 
+//
+fn const_arithmetic() #test = {
+    t(shift_left);
+    t(shift_right_logical);
+    t(shift_right_arithmetic);
+    
+    COUNT :: 64;  // TODO: this doesn't work on the llvm backend if you let it overflow. 
+    F :: @Fn(i64, i64) i64;
+    
+    t :: fn($op: F) void = {
+        values := @slice(12345, 52623, -12, 30917230);
+        for values { x | 
+            a := const_shifts(op, x);
+            b := runtime_shifts(op, x);
+            @assert_eq(a, b);
+        };
+    };
+    
+    fn const_shifts($op: F, x: i64) []i64 = {
+        out := temp().alloc(i64, COUNT);
+        inline_range(0, COUNT) { $i |
+            out[i] = op(x, i);  
+        };
+        out
+    }
+    
+    fn runtime_shifts($op: F, x: i64) []i64 = {
+        out := temp().alloc(i64, COUNT);
+        range(0, COUNT) { i |
+            out[i] = op(x, i);  
+        };
+        out
+    }
+}
+
+fn const_division() #test = {
+    n := @slice(123, 456, 789, 234, 567, 890, 345, 678, 901, 456); // random numbers chosen by fair die roll (lie)
+    sum := do_division(n);
+    assert_eq(sum, 1211);
+    
+    range(0, 3) { i | 
+        n[0] += 1;  // you can't cheat by inlining the numerators if they change every time. 
+        n := do_division(n);
+        assert(n != 0, "experimentally this doesnt happen but im hoping you can't optimise out the check so you have to do the work.");
+    };
+    
+    fn do_division(numbers: []i64) i64 #noinline = {
+        sum := 0;
+        inline_range(0, 10) { $i |
+            sum += numbers.index_unchecked(i)[] / (i + 1);
+        };
+        sum
+    }
+}
+
+fn auto_fold_in_frontend() #test = {
+    assert_constant(123);
+    assert_constant(123 + 456);
+    assert_constant(123 + assert_constant(456));
+
+    // this works because you can't call `ast_alloc` at runtime. 
+    // so the program won't compile if the compiler didn't notice that the argument was constant. 
+    #fold #noinline 
+    fn assert_constant(x: i64) i64 = {
+        mem := ast_alloc().alloc(i64, 1);
+        mem[0] = x;
+        mem[0]
+    }
+}
+
+fn intrinsic_as_const_arg() #test = {
+    fn apply(a: i64, b: i64, $o: OverloadSet) i64 =
+        o(a, b);
+    
+    fn apply2(a: i64, b: i64, $o2: @Fn(i64, i64) i64) i64 =
+        o2(a, b);
+    
+    assert_eq(apply(1, 2, add), 3);
+    assert_eq(apply2(1, 2, add), 3);
+}

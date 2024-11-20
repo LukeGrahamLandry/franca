@@ -9,7 +9,6 @@
 //! If I have to write many more of these, maybe I should reconsider doing something about parser generators. 
 //!
 
-// TODO: support opaque types
 // TODO: be stricter about checking for invalid input
 // TODO: `%.6 =s mul s_0x1p-1, s_0x1.fffffe091ff3dp+127`
 
@@ -288,7 +287,7 @@ fn end_block(self: *QParseCtx, new_blk: ?*Qbe.Blk) void = {
         self.blk.link = bb;  // direction matters!
     };
     self.f.copy_instructions_from_scratch(self.blk);
-    ins: []Qbe.Ins = (ptr = self.blk.ins, len = self.blk.nins.zext()); // TODO: why isn't this a QList? -- Nov 12
+    ins: []Qbe.Ins = (ptr = self.blk.ins.first, len = self.blk.nins.zext()); // TODO: why isn't this a QList? -- Nov 12
     ins.reverse(); // emit() spits out instructions backwards      :SLOW just do it during copy
 }
 
@@ -407,8 +406,8 @@ fn parse_inst(self: *QParseCtx) void = {
 fn parse_phi(self: *QParseCtx, to: Qbe.Ref, k: u8) void = {
     // example: `%s  =w phi @start 0, @loop %s1`
     phi := self.out.box_zeroed(Qbe.Phi);
-    phi.arg = new(0, .PFn);
-    phi.blk = new(0, .PFn);
+    phi.arg = new(0);
+    phi.blk = new(0);
     phi.to = to; // TODO: require non-null;
     ::?Qbe.Cls;
     phi.cls = or cls_from_char(k) {
@@ -591,21 +590,25 @@ fn parse_data(self: *QParseCtx, export: bool, thread: bool, yield: @FnPtr(*Qbe.D
         return(Err = "expected '{' to begin data");
     };
     self.skip_lines();
+    had_comma := true;
     // TODO: this gets confused if the file doesn't end in a new line. 
     while => self.cursor < self.input.len && !self.check("}") {
         dat.is_ref = false;
         dat.is_str = false;
         dat.has_quotes_and_escapes = false;
         dat.u.str = Str.zeroed();
-        dat.type = @switch(self.input[self.cursor]) {
-            @case("b".ascii()) => .DB;
-            @case("l".ascii()) => .DL;
-            @case("z".ascii()) => .DZ;
-            @case("h".ascii()) => .DH;
-            @case("w".ascii()) => .DW;
-            @default => return(Err = "expected b/h/w/l/z prefix for data entry.");
+        // allow { b 1 2 3 } instead of { b 1, b 2, b 3 }
+        if had_comma {
+            dat.type = @switch(self.input[self.cursor]) {
+                @case("b".ascii()) => .DB;
+                @case("l".ascii()) => .DL;
+                @case("z".ascii()) => .DZ;
+                @case("h".ascii()) => .DH;
+                @case("w".ascii()) => .DW;
+                @default => return(Err = items(@format("expected b/h/w/l/z prefix for data entry in %", name) temp()));
+            };
+            self.cursor += 1;
         };
-        self.cursor += 1;
         self.skip_blanks();
         if self.input[self.cursor] == "\"".ascii() {
             start := self.cursor;
@@ -644,7 +647,7 @@ fn parse_data(self: *QParseCtx, export: bool, thread: bool, yield: @FnPtr(*Qbe.D
             };
         };
         yield(dat&);
-        self.eat(","); // TODO: require
+        had_comma = self.eat(",");
         self.skip_lines();
     };
     self.eat(",");
@@ -682,20 +685,30 @@ fn parse_type(self: *QParseCtx) Result(void, Str) = {
             typ.align_log2 += 1;
         };
     };
-    typ.fields = new(0, .PLong);
+    typ.fields = new_long_life(0);
     if !self.eat("{") {
         return(Err = "expected '{' to begin type declaration");
     };
-    field_count := 0;
-    if self.check("{") {
-        typ.is_union = true;
-        while => !self.eat("}") { // TODO: bounds
-            self.eat("{");
-            @try(self.parse_type_fields(typ, field_count&)) return;
-            self.eat(",");
+    self.skip_blanks();
+    if self.input[self.cursor].is_ascii_digit() { // TODO: this can only go at the top level i think
+        size := self.parse_number(); // TODO: allow hex, etc. 
+        if !self.eat("}") {
+            return(Err = "expected '}' to end type declaration");
         };
+        typ.is_dark = true;
+        typ.size = size;
     } else {
-        @try(self.parse_type_fields(typ, field_count&)) return;
+        field_count := 0;
+        if self.check("{") {
+            typ.is_union = true;
+            while => !self.eat("}") { // TODO: bounds
+                self.eat("{");
+                @try(self.parse_type_fields(typ, field_count&)) return;
+                self.eat(",");
+            };
+        } else {
+            @try(self.parse_type_fields(typ, field_count&)) return;
+        };
     };
     
     @debug_assert_eq(t + 1, m.number_of_types, "array can't resize because types cannot be nested");
@@ -707,9 +720,6 @@ fn parse_type(self: *QParseCtx) Result(void, Str) = {
 
 fn parse_type_fields(self: *QParseCtx, typ: *Qbe.Typ, field_count: *i64) Result(void, Str) = {
     self.skip_blanks();
-    if self.input[self.cursor].is_ascii_digit() { // TODO: this can only go at the top level i think
-        panic("TODO: opaque type");
-    };
     
     m := self.f.globals;
     my_align: i64 = typ.align_log2.intcast();
@@ -837,9 +847,9 @@ fn eat_word(self: *QParseCtx) Str = {
 }
 
 fn default_init(f: *Qbe.Fn) void = {
-    f.tmp = new(Qbe.Tmp0, .PFn);
-    f.con = new(FIXED_CONST_COUNT, .PFn);
-    f.mem = new(0, .PFn);
+    f.tmp = new(Qbe.Tmp0);
+    f.con = new(FIXED_CONST_COUNT);
+    f.mem = new(0);
     f.retty = -1;
     ::assert_eq(Qbe.Ref);
     assert_eq(f.getcon(0xdeaddead), QbeUndef);

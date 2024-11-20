@@ -19,6 +19,7 @@ fn ordered_retain();
 fn unordered_retain();
 fn truncate();
 fn deep_clone();
+fn unordered_remove_discard();
 
 fn list($T: Type, a: Alloc) List(T) #generic = {
     list(a)
@@ -100,24 +101,10 @@ fn List($T: Type) Type = {
 
     fn reserve(self: *Self, extra: i64) void #inline = {
         if self.maybe_uninit.len < self.len + extra {
-            self.reserve_expand(extra);
+            reserve_expand_erased(Self.raw_from_ptr(self), extra, T.size_of());
         };
     }
-    
-    // The rust stdlib Vec does this thing where you manually outline the slow path, so it probably helps a bit. 
-    fn reserve_expand(self: *Self, extra: i64) void #cold = {
-        old_cap := self.maybe_uninit.len;
-        cap := 4.max(old_cap.add(extra).max(old_cap.mul(2)));
-        new: Self = list(cap, self.gpa);
-        if(self.len.gt(0)) {|  // TODO: it doesnt let you create a zero length slice in items()
-            dest: Slice(T) = new.maybe_uninit.subslice(0, self.len);
-            dest.copy_from(items(self));
-            new.len = self.len;
-        };
-        drop(self);
-        self[] = new; 
-    }
-    
+
     fn push(self: *Self, v: T) void = {
         reserve(self, 1);
         last := self.maybe_uninit.index_unchecked(self.len); 
@@ -136,7 +123,7 @@ fn List($T: Type) Type = {
             (Some = self.maybe_uninit.get(i))
         }
     }
-    fn pop(self: *Self) ?T = self.pop_last();
+    fn pop(self: *Self) ?T #inline = self.pop_last();
     
     fn ordered_remove(self: *Self, index: i64) ?T = {
         ::if(?T);
@@ -174,6 +161,14 @@ fn List($T: Type) Type = {
         }
     }
     
+    fn unordered_remove_discard(self: *Self, i: i64) void #inline = {
+        @debug_assert(i < self.len);
+        if i != self.len - 1 {
+            self[i] = self[self.len - 1];
+        };
+        self.len -= 1;
+    }
+    
     fn insert(self: *Self, idx: i64, e: T) void = {
         self.reserve(1);
         i := self.len;
@@ -192,14 +187,9 @@ fn List($T: Type) Type = {
         self.len += new.len;
     }
     
-    // TODO: this doesn't drop the entries. 
+    // note: this doesn't drop the entries. 
     fn drop(self: *Self) void = {
         if self.maybe_uninit.len != 0 {
-            // TODO: calling this makes fmt.fr fail when runtime target is aarch64,
-            //       but it fails in the comptime interp still which is scary. 
-            //       its a poison on taking args of a SplitFunc. 
-            //       but its fine when collections.fr calls drop and that targets both too tho maybe doesnt cause a split because simpler comptime. 
-            //       
             self.gpa.dealloc(T, self.maybe_uninit);
             self.maybe_uninit.len = 0;
             self.len = 0;
@@ -245,13 +235,28 @@ fn List($T: Type) Type = {
             if should_keep(self.index(i)) {
                 i += 1;
             } else {
-                self.unordered_remove(i);
+                self.unordered_remove_discard(i);
                 // don't increment i, check this slot again. 
             };
         };
     }
     
     Self
+}
+
+// The rust stdlib Vec does this thing where you manually outline the slow path, so it probably helps a bit. 
+// this is more aggressive and not generating it for every single type.
+fn reserve_expand_erased(list: rawptr, extra: i64, size_of: i64) void = {
+    ListHeader :: @struct(ptr: rawptr, cap: i64, len: i64, gpa: Alloc);
+    list := ListHeader.ptr_from_raw(list);
+    cap := 4.max(list.cap.add(extra).max(list.cap.mul(2)));
+    new_memory := {list.gpa.vptr}(list.gpa.data, .Allocate, rawptr_from_int(0), cap * size_of, 4); // TODO: alignment
+    memcpy(new_memory, list.ptr, list.len * size_of);
+    if list.cap != 0 {
+        {list.gpa.vptr}(list.gpa.data, .Deallocate, list.ptr, list.cap * size_of, 4); // TODO: alignment
+    };
+    list.ptr = new_memory;
+    list.cap = cap;
 }
 
 // For now this has to match the rust's Vec repr (experimentally determined for whatever rustc version i have).
@@ -435,5 +440,6 @@ fn ascii($s: Str) u8 = {
 }
 
 // TODO
-fn push(self: *List(u8), v: i64) void = self.push(@as(u8) v.trunc());
+fn push(self: *List(u8), v: i64) void = 
+    self.push(@as(u8) v.trunc());
 
