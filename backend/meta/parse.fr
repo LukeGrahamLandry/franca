@@ -35,8 +35,7 @@ QParseCtx :: @struct(
 fn parse_top_level(m: *QbeModule, src: Str, yield_data: @FnPtr(*Qbe.Dat) void, yield_func: @FnPtr(*Qbe.Fn) void) Result(void, Str) = {
     self: QParseCtx = init(m, src); 
     self := self&;
-    self.f.globals = m;
-    self.f.default_init();  // :NeedFunctionInitForData
+    self.f.default_init(m);  // :NeedFunctionInitForData
     
     loop {
         continue :: local_return;
@@ -68,8 +67,7 @@ fn parse_top_level(m: *QbeModule, src: Str, yield_data: @FnPtr(*Qbe.Dat) void, y
             self.blocks = init(temp());
             self.tmps = init(temp());
             self.f[] = Qbe.Fn.zeroed();
-            self.f.globals = m;
-            self.f.default_init();
+            self.f.default_init(m);
             self.blk = Qbe.Blk.ptr_from_int(0);
             continue();
         };
@@ -287,9 +285,7 @@ fn end_block(self: *QParseCtx, new_blk: ?*Qbe.Blk) void = {
     if new_blk { bb | 
         self.blk.link = bb;  // direction matters!
     };
-    self.f.copy_instructions_from_scratch(self.blk);
-    ins: []Qbe.Ins = (ptr = self.blk.ins.first, len = self.blk.nins.zext()); // TODO: why isn't this a QList? -- Nov 12
-    ins.reverse(); // emit() spits out instructions backwards      :SLOW just do it during copy
+    self.f.copy_instructions_from_scratch_reversed_which_means_forwards(self.blk);
 }
 
 fn parse_inst(self: *QParseCtx) void = {
@@ -847,7 +843,8 @@ fn eat_word(self: *QParseCtx) Str = {
     self.input.slice(start, self.cursor)
 }
 
-fn default_init(f: *Qbe.Fn) void = {
+fn default_init(f: *Qbe.Fn, m: *QbeModule) void = {
+    f.globals = m;
     f.tmp = new(Qbe.Tmp0);
     f.con = new(FIXED_CONST_COUNT);
     f.mem = new(0);

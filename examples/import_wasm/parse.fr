@@ -1,0 +1,219 @@
+
+fn cls(t: WasmValType) Qbe.Cls = @switch(t.repr) {
+    @case(0x7F) => .Kw;  
+    @case(0x7E) => .Kl;  
+    @case(0x7D) => .Ks;  
+    @case(0x7C) => .Kd;  
+    @default    => .Ke;
+};
+
+ParseWasm :: @struct(w: *WasmModule, src: []u8, cursor := 0);
+fn parse_wasm(self: *ParseWasm) Result(void, Str) = {
+    magic_version := @const_slice(0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00);
+    if !self.src.starts_with(magic_version) {
+        return(Err = "bad magic");
+    };
+    self.cursor += 8;
+    
+    section_count := 0;
+    while => self.cursor < self.src.len {
+        section_index := @try(self.read_byte_enum(Section)) return;
+        byte_size := @try(self.read_u()) return;
+        end_of_section := self.cursor + byte_size;
+        @match(section_index) {
+            fn Type() => {
+                count := @try(self.read_u()) return;
+                self.w.types&.reserve(count);
+                range(0, count) { i |
+                    b := @try(self.pop()) return;
+                    if b != 0x60 {
+                        return(Err = "Expected 0x60 to start function type");
+                    };
+                    arg_len := @try(self.read_u()) return;
+                    arg_bytes := self.src.subslice(self.cursor, arg_len);
+                    self.cursor += arg_len;
+                    ret_len := @try(self.read_u()) return;
+                    ret_bytes := self.src.subslice(self.cursor, ret_len);
+                    self.cursor += ret_len;
+                    if self.cursor > end_of_section {
+                        return(Err = @tfmt("Parsed past declared section size. (section index % in module)", section_count));
+                    };
+                    argp := ptr_cast_unchecked(u8, WasmValType, arg_bytes.ptr);
+                    retp := ptr_cast_unchecked(u8, WasmValType, ret_bytes.ptr);
+                    self.w.types&.push(arg = (ptr = argp, len = arg_len, cap = arg_len), ret = (ptr = retp, len = ret_len, cap = ret_len));
+                };
+            }
+            fn Function() => {
+                count := @try(self.read_u()) return;
+                self.w.functions&.reserve(count);
+                range(0, count) { i |
+                    type_index := @try(self.read_u()) return;
+                    @println("function % has type %", i, type_index);
+                    self.w.functions&.push(id = type_index.trunc());
+                };
+            }
+            fn Import() => {
+                count := @try(self.read_u()) return;
+                self.w.imports&.reserve(count);
+                range(0, count) { i |
+                    mod := @try(self.read_str()) return;
+                    name := @try(self.read_str()) return;
+                    desc: WasmImportDesc = @switch(@try(self.pop()) return) {
+                        @case(0) => {
+                            self.w.imported_function_count += 1;
+                            (Function = (id = trunc(@try(self.read_u()) return)))
+                        };
+                        @case(1) => {
+                            panic("TODO: import table")  
+                        };
+                        @case(2) => (Memory = @try(self.read_limits()) return);
+                        @case(3) => {
+                            panic("TODO: import global")  
+                        };
+                        @default => return(Err = "Invalid import type byte");
+                    };
+                    self.w.imports&.push(module = mod, name = name, desc = desc);
+                };
+            }
+            fn Export() => {
+                count := @try(self.read_u()) return;
+                self.w.exports&.reserve(count);
+                range(0, count) { i |
+                    name := @try(self.read_str()) return;
+                    desc: WasmExportDesc = @switch(@try(self.pop()) return) {
+                        @case(0) => (Function = (id = trunc(@try(self.read_u()) return)));
+                        @case(1) => {
+                            panic("TODO: export table")  
+                        };
+                        @case(2) => {
+                            panic("TODO: export memory")  
+                        };
+                        @case(3) => {
+                            panic("TODO: export global")  
+                        };
+                        @default => return(Err = "Invalid export type byte");
+                    };
+                    self.w.exports&.push(name = name, desc = desc);
+                };
+            }
+            fn Code() => {
+                count := @try(self.read_u()) return;
+                self.w.code&.reserve(count);
+                range(0, count) { i |
+                    total_code_bytes := @try(self.read_u()) return;
+                    start := self.cursor;
+                    local_count := @try(self.read_u()) return;
+                    locals := WasmLocal.list(local_count, self.w.code.gpa);
+                    total := 0;
+                    range(0, local_count) { j |
+                        num := @try(self.read_u()) return;
+                        total += num;
+                        type := @try(self.pop()) return;
+                        if self.cursor > start + total_code_bytes {
+                            return(Err = @tfmt("Locals overflowed declared function size (func index %, local index %)", i, j));
+                        };
+                        locals&.push(ty = (repr = type), count = num);
+                    };
+                    code_len := total_code_bytes - (self.cursor - start);
+                    code: RsVec(u8) = (ptr = self.src.index(self.cursor), len = code_len, cap = code_len);
+                    self.cursor += code_len;
+                    self.w.code&.push(locals = locals.rs(), insts = code, total_local_count = total);
+                };
+            }
+            fn Data() => {
+                count := @try(self.read_u()) return;
+                self.w.data&.reserve(count);
+                range(0, count) { i |
+                    flags := @try(self.read_u()) return;
+                    data := WasmData.zeroed();
+                    if flags.bit_and(0b10) == 0b10 {
+                        data.active_mem = (id = trunc(@try(self.read_u()) return));
+                    };
+                    if flags.bit_and(0b1) == 0b0 {
+                        // TODO: this is wrong because you're allowed nesting but you're such an asshole if you do that in this context. 
+                        start := self.cursor;
+                        while => (@try(self.pop()) return) != 0x0B {
+                            // spin
+                        };
+                        e := self.cursor - start;
+                        data.active_offset_expr = (ptr = self.src.index(self.cursor), len = e, cap = e);
+                    };
+                    data.bytes = @try(self.read_str()) return;
+                    self.w.data&.push(data);
+                };
+            }
+            @default => return(Err = @tfmt("Unhandled section type % (section index % in module)", section_index, section_count));
+        };
+        if self.cursor != end_of_section {
+            return(Err = @tfmt("Did not consume declared section size. (section index % in module)", section_count));
+        };
+        section_count += 1;
+    };
+    .Ok
+}
+
+fn read_byte_enum(self: *ParseWasm, $T: Type) Result(T, Str) #generic = {
+    b := @try(self.pop()) return;
+    if b >= T.enum_count() {
+        return(Err = @tfmt("Invalid enum byte %", b));
+    };
+    (Ok = @as(T) b)
+}
+
+fn read_limits(self: *ParseWasm) Result(WasmLimits, Str) = {
+    has_max := @try(self.pop()) return;
+    if has_max != 0 && has_max != 1 {
+        return(Err = @tfmt("expected has_max 0/1 not %", has_max));
+    };
+    min := @try(self.read_u()) return;
+    max: u32 = @if(has_max == 1, trunc(@try(self.read_u()) return), 0xFFFFFFFF);
+    (Ok = (min = min.trunc(), max = max))
+}
+
+fn read_str(self: *ParseWasm) Result(RsVec(u8), Str) = {
+    len := @try(self.read_u()) return;
+    ptr := self.src.index(self.cursor);
+    self.cursor += len;
+    (Ok = (ptr = ptr, len = len, cap = len))
+}
+
+fn read_u(self: *ParseWasm) Result(i64, Str) = {
+    bytes := self.src.slice(self.cursor, self.src.len);
+    value, rest, ok := read_leb128_unsigned(bytes);
+    if !ok {
+        return(Err = "Invalid leb128 number");
+    };
+    self.cursor += bytes.len - rest.len;
+    (Ok = value.bitcast())
+}
+
+//fn read_u32(self: *ParseWasm) Result(i64, Str) = {
+//    if self.cursor + 4 > self.src.len {
+//        return(Err = "eof");
+//    };
+//    a, b, c, d := (self.src[self.cursor], self.src[self.cursor + 1], self.src[self.cursor + 2], self.src[self.cursor + 3]);
+//    value: i64 = a.zext().bit_or(b.zext().shift_left(8)).bit_or(c.zext().shift_left(16)).bit_or(d.zext().shift_left(24));
+//    self.cursor += 4;
+//    (Ok = value)
+//}
+
+fn pop(self: *ParseWasm) Result(u8, Str) = {
+    if self.cursor >= self.src.len {
+        return(Err = "eof");
+    };
+    b := self.src[self.cursor];
+    self.cursor += 1;
+    (Ok = b)
+}
+
+fn read_u(self: *LoadWasm) u64 = {
+    bytes := self.src.slice(self.cursor, self.src.len);
+    value, rest, ok := read_leb128_unsigned(bytes);
+    @assert(ok, "Invalid leb128 number");
+    self.cursor += bytes.len - rest.len;
+    value
+}
+
+fn read_index(self: *LoadWasm, $T: Type) T #generic = {
+    (id = self.read_u().trunc())
+}

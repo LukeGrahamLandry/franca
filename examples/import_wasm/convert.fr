@@ -1,0 +1,271 @@
+LINK_QBE_C :: false;
+#include_std("backend/lib.fr");
+#include_std("examples/import_wasm/parse.fr");
+
+// TODO: this could be hella faster: 
+//       - there's a wasteful prepass that splits up bits of the module into a big data structure. 
+//       - the parser+wasm->ir could be on a different thread from the ir->asm + you could compile multiple functions in parallel,
+//         but that requires more careful use of temp() which will be easier once i implement thread locals in Franca. 
+//       - the number of bounds checks the parser does per byte is a bit sad. 
+//       - the way i deal with adjusting indexes for imports is silly. 
+
+fn main() void = {
+    args := cli_args();
+    for args { arg | 
+        arg := arg.str();
+        if arg.ends_with(".wasm") {
+            @eprint("Loading '%'", arg);
+            bytes := temp().read_to_string(arg).items(); // :panic
+            @eprintln(" (% bytes).", bytes.len);
+            xx := query_current_arch();
+            module := init_default_module(type = .JitOnly, os = query_current_os(), arch = xx.unwrap());
+            a := libc_allocator;
+            wasm: LoadWasm = (
+                m = module&,
+                w = empty(a),
+                stack = list(a),
+                locals = empty(),
+                referenced_globals = init(temp()),
+            );
+            p: ParseWasm = (w = wasm.w&, src = bytes);
+            or parse_wasm(p&) { e |
+                @panic("% (at byte index %)", e, p.cursor);
+            };
+            wasm&.load_module();
+            
+            module&.emit_suspended_inlinables();
+            module&.make_exec();
+            f := or module&.get_addr("module_f2") {
+                panic("couldn't find module_f2()")
+            };
+            f := assume_types_fn(Arg = Ty(i64, i32, i32), Ret = i32, ptr = f);
+            wasm_context_pointer := 0;
+            result := f(wasm_context_pointer, 1, 2);
+            @println("1 + 2 = %", result);
+        };
+    };
+}
+
+LoadWasm :: @struct(
+    m: *QbeModule,
+    w: WasmModule,
+    stack: List(Qbe.Ref),
+    locals: []Qbe.Ref,  // TODO: we can't store a 128 bit vector in a temporary 
+    f := zeroed(*Qbe.Fn),
+    src := "",
+    cursor := 0,
+    referenced_globals: HashMap(i64, Qbe.Ref), 
+    module_name := "module",
+    global_store := QbeNull,
+    data_symbol: []u32 = empty(),
+    blk := zeroed(*Qbe.Blk),
+);
+
+fn create_init_func(self: *LoadWasm) void = {
+    //f := Qbe.Fn.zeroed();
+    //self.f = f&;
+    //self.f.default_init(self.m);
+    //self.f.start = newblk();
+    //self.stack&.clear();
+    //self.datas = libc_allocator.alloc(u32, self.w.data.len);
+    //enumerate self.w.data { i, it |
+    //    name := @tfmt("%_f%", self.module_name, local_func_i);    // :WasmNameMangling
+    //    self.data_symbol[i] = 
+    //};
+    //self.f.copy_instructions_from_scratch_reversed_which_means_forwards(self.f.start);
+    //self.f.start.jmp.type = .ret0;
+    //self.f.nblk = 1;
+    //printfn(self.f, self.f.globals.debug_out);
+}
+
+fn load_module(self: *LoadWasm) void = {
+    self.create_init_func();
+
+    enumerate self.w.code& { local_func_i, code | 
+        local_func_i += self.w.imported_function_count;
+        mark := __temp_alloc.mark();
+        f := Qbe.Fn.zeroed();
+        self.f = f&;
+        self.f.default_init(self.m);
+        
+        name := @tfmt("%_f%", self.module_name, local_func_i);    // :WasmNameMangling
+        self.f.name&.items().slice(0, name.len).copy_from(name);  // :UnacceptablePanic
+        
+        local_func_type := self.w.types[local_func_i]&;
+        self.stack&.clear();
+        self.locals = temp().alloc(Qbe.Ref, code.total_local_count + local_func_type.arg.len);
+        self.referenced_globals = init(temp());
+        self.global_store = self.f.newtmp("wasm_globals", .Kl);
+        self.f.emit(.par, .Kl, self.global_store, QbeNull, QbeNull);
+        
+        // parameters come in as locals not on the stack
+        range(0, local_func_type.arg.len) { i |
+            k := local_func_type.arg[i].cls();
+            self.locals[i] = self.f.newtmp("param", k);
+            self.f.emit(.par, k, self.locals[i], QbeNull, QbeNull);
+        };
+        
+        {
+            @println("% locals", code.total_local_count);
+            i := local_func_type.arg.len;
+            for code.locals& { local |
+                k := local.ty.cls();
+                range(0, local.count) { _ |
+                    self.locals[i] = self.f.newtmp("local", k);
+                    i += 1;
+                };
+            };
+        };
+        
+        self.src = code.insts.items();
+        self.cursor = 0;
+        while => self.cursor < self.src.len {
+            @println("inst %", self.src[self.cursor]);
+            inst := @as(WasmInst) @as(u8) self.src[self.cursor];
+            self.cursor += 1;
+            ::enum(WasmInst);
+            @switch(inst) {
+                @case(.I32_Const) => {
+                    value := self.read_u();
+                    self.stack&.push(self.f.getcon(value.bitcast()));
+                };
+                @case(.LocalGet) => {
+                    i := self.read_u();
+                    self.stack&.push(self.locals[i.bitcast()]);
+                };
+                @case(.I32_Add) => self.emit_bin(.add, .Kw);
+                @case(.Call) => {
+                    callee := self.read_index(FuncIdx);
+                    @println("% func", callee.id);
+                    import := self.w&.find_import_index(0, callee.id.zext());
+                    ::if(TypeIdx);
+                    type_index :TypeIdx= if import.is_some() {
+                        import := self.w.imports&.index(import.Some);
+                        import.desc.Function
+                    } else {
+                        self.w.functions[callee.id.zext() - self.w.imported_function_count]
+                    };
+                    callee := self.remap_global(0, callee.id.zext());
+                    self.emit_call_from_stack(callee, type_index);
+                    println("call!");
+                };
+                @case(.Return) => {
+                    println("return!");
+                };
+                @case(.End) => {
+                    println("end!");
+                };
+                @default => {
+                    @println("unhandled unstruction %", self.src[self.cursor - 1]);
+                };
+            }
+        };
+        self.f.lnk.export = true; // TODO
+        self.f.start = newblk();
+        self.blk = self.f.start;
+        self.f.copy_instructions_from_scratch_reversed_which_means_forwards(self.f.start);
+        self.emit_return(local_func_type.ret.items());
+        self.f.nblk = 1;
+        printfn(self.f, self.f.globals.debug_out);
+        //each self.f.globals.debug { d | 
+        //    d[] = true;
+        //};
+        run_qbe_passes(self.f);
+        __temp_alloc.reset_retaining_capacity(mark);
+    };
+}
+
+fn emit_bin(self: *LoadWasm, o: Qbe.O, k: Qbe.Cls) void = {
+    a := self.stack[self.stack.len - 1];
+    b := self.stack[self.stack.len - 2]&;
+    r := self.f.newtmp("wasm", k);
+    self.f.emit(o, k, r, a, b[]);
+    b[] = r;
+    self.stack.len -= 1;
+}
+
+fn emit_return(self: *LoadWasm, return_types: []WasmValType) void = {
+    @debug_assert(self.blk.jmp.type == .Jxxx, "tried to return from terminated block");
+    @switch(return_types.len) {
+        @case(0) => {
+            self.blk.jmp.type = .ret0;
+        };
+        @case(1) => {
+            @assert(return_types[0].cls() == .Kw, "// TODO: correct cls");
+            self.blk.jmp = (type = .retw, arg = self.stack[self.stack.len - 1]);
+            self.stack.len -= 1;
+        };
+        @default => panic("TODO: handle multiple returns");
+    };
+}
+
+fn emit_call_from_stack(self: *LoadWasm, callee: Qbe.Ref, type: TypeIdx) void = {
+    @println("% type", type.id);
+    type := self.w.types[type.id.zext()]&;
+    @assert_le(type.arg.len, self.stack.len, "not enough stack for call");
+    
+    self.f.emit(.arg, .Kl, QbeNull, self.global_store, QbeNull);
+    range(0, type.arg.len) { i |
+        ref := self.stack[self.stack.len - type.arg.len + i];
+        k := type.arg[i].cls();
+        self.f.emit(.arg, k, QbeNull, ref, QbeNull);
+    };
+    self.stack.len -= type.arg.len;
+    @switch(type.ret.len) {
+        @case(0) => {
+            self.f.emit(.call, .Kw, QbeNull, callee, QbeNull);
+        };
+        @case(1) => {
+            ref := self.f.newtmp("ret", type.ret[0].cls());
+            self.f.emit(.call, .Kw, ref, callee, QbeNull);
+            self.stack&.push(ref);
+        };
+        @default => panic("TODO: handle multiple returns");
+    };
+}
+
+fn remap_global(self: *LoadWasm, kind: i64, id: i64) Qbe.Ref = {
+    @debug_assert(kind < 4, "remap_global");
+    key := kind.shift_left(32).bit_or(id);
+    if self.referenced_globals&.get(key) { local | 
+        return(local);
+    };
+    ref: Qbe.Ref = @switch(key) {
+        @case(0) => { // func 
+            import := self.w&.find_import_index(kind, id);
+            name := if import.is_some() {
+                // TODO: no this doesn't make any since, the binding of names should happen separately. 
+                import := self.w.imports&.index(import.Some);
+                @tfmt("%_f%", import.module.items(), import.name.items())
+            } else {
+                // :WasmNameMangling
+                @tfmt("%_f%", self.module_name, id)
+            };
+            id := self.m.intern(name);
+            self.f.unique_named_con(id, 0)
+        };
+        @default => panic("TODO: remap global to local ref");
+    };
+    self.referenced_globals&.insert(key, ref);
+    ref
+}
+
+// TODO: this is stupid. store them in seperate arrays. surely you never need to refer to them by an untyped import index. 
+fn find_import_index(self: *WasmModule, kind: i64, id: i64) ?i64 = {
+    i := 0;
+    each self.imports& { check | 
+        ::tagged(@type check.desc);
+        if check.desc&.tag().raw() == kind {
+            if i == id {
+                return(Some = i);
+            };
+            i += 1;
+        };
+    };
+    .None
+}
+
+// (dest_offset, src_offset_in_data, size_to_copy)  // TODO: make sure those arguments are right
+fn emit_memory_init(self: *WasmModule, data_id: i64) void = {
+
+}

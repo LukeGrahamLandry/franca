@@ -50,7 +50,27 @@ fn slice_pending_scratch(f: *Qbe.Fn) []Qbe.Ins = {
 
 fn copy_instructions_from_scratch(f: *Qbe.Fn, b: *Qbe.Blk) void = {
 	idup(b, f.scratch_next(), f.len_scratch());
-	f.globals.curi[] = f.scratch_start(); // TODO: make sure this is right. qbe didn't do it where i'd expect in simpl
+	f.globals.curi[] = f.scratch_start(); 
+}
+
+// TODO: i should really just use a different version of emit() so this part could just be a memcpy
+// hey i heard you like long function names...
+fn copy_instructions_from_scratch_reversed_which_means_forwards(f: *Qbe.Fn, b: *Qbe.Blk) void = {
+    n := f.len_scratch();
+    b.nins = n.trunc();
+    if(n == 0, => return());
+    if b.ins.first.is_null() {
+        b.ins = new(n);  // caller better not be trying to put this in the inlining cache
+    } else {
+        b.ins&.grow(n);
+    };
+    i := 0;
+    for(f.scratch_next(), f.scratch_start()) { ins |
+        b.ins[n - i - 1] = ins[];
+        i += 1;
+    };
+    
+	f.globals.curi[] = f.scratch_start();
 }
 
 fn scratch_start(f: *Qbe.Fn) *Qbe.Ins #inline =
@@ -129,7 +149,7 @@ fn newcon(f: *Qbe.Fn, c0: *Qbe.Con) Qbe.Ref = {
 }
 
 // TODO: is it worth the copy paste instead of calling newcon to avoid comparing .sym everytime?
-fn getcon(f: *Qbe.Fn, val: i64) Qbe.Ref #inline = {
+fn getcon(f: *Qbe.Fn, val: i64) Qbe.Ref = {
     // deduplicate
     range(1, f.ncon.zext()) { c |
         cc := f.con[c]&;
@@ -142,6 +162,14 @@ fn getcon(f: *Qbe.Fn, val: i64) Qbe.Ref #inline = {
     f.ncon += 1;
     f.con&.grow(f.ncon.zext());
     f.con[c] = (type = .CBits, bits = (i = val));
+    CON(c)
+}
+
+fn unique_named_con(f: *Qbe.Fn, sym: u32, off: i64) Qbe.Ref = {
+    c := f.ncon.zext();
+    f.ncon += 1;
+    f.con&.grow(f.ncon.zext());
+    f.con[c] = (type = .CAddr, bits = (i = off), sym = (id = sym, type = .SGlo));
     CON(c)
 }
 
@@ -527,6 +555,11 @@ fn QList($T: Type) Type = {
 IBits :: 12;
 IMask :: 1.shift_left(IBits) - 1;
 
+fn intern(m: *QbeModule, s: Str) u32 = {
+    // :SLOW stop using shitty c strings!
+    slow := @tfmt("%\0", s);
+    m.intern(@as(CStr) (ptr = slow.ptr))
+}
 fn intern(m: *QbeModule, s: CStr) u32 = {
     id := m.my_intern(s);
     @if(LINK_QBE_C) {

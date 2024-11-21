@@ -27,7 +27,7 @@ If you just want to see what the syntax looks like, click on examples or compile
 
 - **aarch64 machine code**: i put the bytes in memory, i mark it executable, and i jump there. no assembler, no linker, no problems.
   no optimisation but compiles fast. only JIT, cannot output an AOT executable.
-- **x64 machine code**: (WIP) same as the above but for different computers.
+- **x64 machine code**: same as the above but for different computers.
 - **llvm ir text**: you can feed it to clang to produce an AOT optimised build or integrate with projects written in other languages.
 
 ## Tradeoffs
@@ -35,7 +35,7 @@ If you just want to see what the syntax looks like, click on examples or compile
 I strongly believe in conservation of misery so if there's a bunch of stuff I like about this language
 there must be proportional terrible things or I'm probably just lying.
 
-- DO NOT COMPILE PROGRAMS YOU DONT TRUST. comptime code is arbitrary code execution!
+- Don't compile programs you don't trust. comptime code is arbitrary code execution!
   it can use inline assembly! it can dlopen libc and `system("curl | bash")`!
   treat compiling a program with the same discretion as running it!
 - Stability is not a core tenet. If it was worth writing once, it's probably worth writing twice.

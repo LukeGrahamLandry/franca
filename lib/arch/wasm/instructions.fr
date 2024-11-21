@@ -38,9 +38,12 @@ WasmInst :: @enum(u8) (
     F64_Load = 0x2B,
     I64_Store = 0x37,
     F64_Store = 0x39,
+    I32_Const = 0x41,
     I64_Const = 0x42,
+    F32_Const = 0x43,
     F64_Const = 0x44,
     I64_Eq = 0x46,
+    I32_Add = 0x6A,
     I64_Add = 0x7C,
 );
 
@@ -92,22 +95,34 @@ WasmModule :: @struct(
     functions: List(TypeIdx),  // [FuncIdx]
     exports: List(WasmExport),
     code: List(WasmFunc),      // [FuncIdx]
+    imports: List(WasmImport),
+    data: List(WasmData),
+    imported_function_count := 0,
 );
 
 fn empty(a: Alloc) WasmModule = {
-    (types = list(a), functions = list(a), exports = list(a), code = list(a))
+    (types = list(a), functions = list(a), exports = list(a), code = list(a), imports = list(a), data = list(a))
 } 
 
 // "Value types can occur in contexts where type indices are also allowed, such as in the case of block types. Thus, the binary format for types corresponds to the signed LEB128 encoding of small negative 
 // values, so that they can coexist with (positive) type indices in the future."
 WasmValType :: @struct(repr: u8);
 WasmFuncType :: @struct(arg: RsVec(WasmValType), ret: RsVec(WasmValType));
-WasmFunc :: @struct(locals: RsVec(WasmLocal), insts: RsVec(u8));
+WasmFunc :: @struct(locals: RsVec(WasmLocal), insts: RsVec(u8), total_local_count := -1);
 WasmLocal :: @struct(ty: WasmValType, count: i64);
 // It's tempting to store 4 seperate arrays so you don't need the tag except that you have to refer to them by index. 
 WasmExport :: @struct(name: RsVec(u8), desc: WasmExportDesc);
 WasmExportDesc :: @tagged(Function: FuncIdx, Table: TableIdx, Memory: MemIdx, Global: GlobalIdx);
 :: tagged(WasmExportDesc);
+WasmImport :: @struct(module: RsVec(u8), name: RsVec(u8), desc: WasmImportDesc);
+WasmImportDesc :: @tagged(
+    Function: TypeIdx, 
+    Table: @struct(ref_type: WasmValType, lim: WasmLimits), 
+    Memory: WasmLimits, 
+    Global: @struct(ref_type: WasmValType, mutable: bool),
+);
+WasmLimits :: @struct(min: u32, max: u32);
+WasmData   :: @struct(bytes: RsVec(u8), active_offset_expr: RsVec(u8), active_mem: MemIdx);
 
 //
 // After the magic + version, the thing is a list of sections. 
@@ -119,6 +134,8 @@ WasmExportDesc :: @tagged(Function: FuncIdx, Table: TableIdx, Memory: MemIdx, Gl
 // 
 // TODO: use bucket arrays for less copying? 
 fn dump(self: *WasmModule, out: *List(u8)) void = {
+    @debug_assert(self.imports.len == 0, "TODO: dump wasm imports");
+    @debug_assert(self.data.len == 0, "TODO: dump wasm data");
     out.push_all(@slice(0x00, 0x61, 0x73, 0x6D));  // magic
     out.push_all(@slice(0x01, 0x00, 0x00, 0x00));  // version
     buf: List(u8) = list(temp());
@@ -245,6 +262,5 @@ fn read_leb128_unsigned(bytes: []u8) Ty(u64, []u8, bool) = {
         if b.zext().bit_and(LEB_MORE) == 0 {
             return(result, bytes, true);
         };
-
     }
 }
