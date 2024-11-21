@@ -55,9 +55,9 @@ fn cloneblk(b: *Qbe.Blk) *Qbe.Blk = {
     inlb.jmp = b.jmp;
     
     msg :: "can only inline functions with one block";
-    @debug_assert(inlb.phi.is_null(), msg);
-    @debug_assert(inlb.s1.is_null(), msg);
-    @debug_assert(inlb.s2.is_null(), msg);
+    @debug_assert(inlb.phi.is_null(),  msg);
+    @debug_assert(inlb.s1.is_null(),   msg);
+    @debug_assert(inlb.s2.is_null(),   msg);
     @debug_assert(inlb.link.is_null(), msg);
     
     inlb.ins = new_long_life(b.nins.zext());
@@ -76,6 +76,9 @@ fn clone(f: *Qbe.Fn) *Qbe.Fn = {
     inlfn.globals = f.globals;
     inlfn.tmp = new_long_life(inlfn.ntmp.zext());
     inlfn.tmp.slice(0, f.ntmp.zext()).copy_from(f.tmp.slice(0, f.ntmp.zext()));
+    range(Qbe.Tmp0, inlfn.ntmp.zext()) { i |
+        inlfn.tmp[i].visit = -1;
+    };
     inlfn.con = new_long_life(inlfn.ncon.zext());
     inlfn.con.slice(0, f.ncon.zext()).copy_from(f.con.slice(0, f.ncon.zext()));
     @debug_assert(f.nmem == 0, "shouldn't need to inline clone f.mem");
@@ -122,35 +125,36 @@ fn inlfind(f: *Qbe.Fn, r: Qbe.Ref) ?*Qbe.Fn = {
 
 RefMap :: @struct(inlr: Qbe.Ref, r: Qbe.Ref);
 
-fn findinlref(inlr: Qbe.Ref, c: *InlineCtx) Qbe.Ref = {
-    each c.rmap.slice(0, c.nrmap) { e | 
-        if(e.inlr == inlr, => return(e.r));
-    };
-    QbeNull
-}
-
-fn newinlref(inlfn: *Qbe.Fn, inlr: Qbe.Ref, f: *Qbe.Fn, c: *InlineCtx) Qbe.Ref = {
-    r := @match(rtype(inlr)) {
-        fn RTmp() => {
-            t := inlfn.tmp[inlr.val()]&;
-            f.newtmp(t.name().str() /*:SLOW*/, t.cls)
-        }
-        fn RCon() => f.newcon(inlfn.get_constant(inlr));
-        @default => panic("bad inline ref");
-    };
-    c.nrmap += 1;
-    c.rmap&.grow(c.nrmap);
-    c.rmap[c.nrmap - 1] = (inlr = inlr, r = r);
-    r
-}
-
 fn getinlref(inlfn: *Qbe.Fn, inlr: Qbe.Ref, f: *Qbe.Fn, c: *InlineCtx) Qbe.Ref = {
     if inlr == QbeNull || rtype(inlr) == .RInt || rtype(inlr) == .RType {
+        // some ref types are global
         return(inlr);
     };
-    r := findinlref(inlr, c);
-    if(r != QbeNull, => return(r));
-    newinlref(inlfn, inlr, f, c)
+    
+    // it's a Tmp/Con, have we seen it before? 
+    
+    @match(rtype(inlr)) {
+        fn RTmp() => {
+            t := inlfn.tmp[inlr.val()]&;
+            if t.visit == -1 {
+                // first time seeing this ref: need to create an equivalent in the caller.  
+                t.visit = f.newtmp(t.name().str() /*:SLOW*/, t.cls).val().intcast();
+                c.to_clear&.push(t);  // after inlining this call, reset visit to -1 for next time we inline this function. 
+            };
+            TMP(t.visit)
+        }
+        fn RCon() => {
+            i := inlr.val();
+            r := c.remapped_consts[i];
+            if r == QbeNull {
+                // first time seeing this ref: need to create an equivalent in the caller.  
+                r = f.newcon(inlfn.get_constant(inlr));
+                c.remapped_consts[i] = r;
+            };
+            r
+        }
+        @default => panic("bad inline ref kind. RSlot/RMem are created by later passes.");
+    }
 }
 
 fn inlargs(inlfn: *Qbe.Fn, f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins, c: *InlineCtx) void = {
@@ -210,8 +214,7 @@ fn insert_blit(f: *Qbe.Fn, rty: Qbe.Ref, rty1: Qbe.Ref, r: Qbe.Ref, c: *InlineCt
 
     ral := f.newtmp("inl", .Kl);
 
-    ins := make_ins(alloc_op(ty.align_log2), .Kl, ral, f.getcon(sz), QbeNull);
-    addins(c.vins0&, c.nins0&, ins&);
+    f.emit(alloc_op(ty.align_log2), .Kl, ral, f.getcon(sz), QbeNull);
     ins := make_ins(.blit0, .Kw, QbeNull, r, ral);
     addins(c.vins&, c.nins&, ins&);
     ins := make_ins(.blit1, .Kw, QbeNull, INT(ty.size), QbeNull);
@@ -219,13 +222,11 @@ fn insert_blit(f: *Qbe.Fn, rty: Qbe.Ref, rty1: Qbe.Ref, r: Qbe.Ref, c: *InlineCt
     ral
 }
 
-fn inlbins(inlfn: *Qbe.Fn, inlb: *Qbe.Blk, f: *Qbe.Fn, c: *InlineCtx) void = {
+fn inlbins(inlfn: *Qbe.Fn, f: *Qbe.Fn, c: *InlineCtx) void = {
+    inlb := inlfn.start;
     /* skip par instructions */
-    i := inlb.ins.first;
+    i := inlfn.find_past_last_param();
     last := inlb.ins.index(inlb.nins.zext());
-    while => ptr_diff(i, last) > 0 && is_par(i.op()) {
-        i = i.offset(1);
-    };
     /* copy remaining instructions, translating refs to current fn */
     for(i, last) { i |
         addins(c.vins&, c.nins&, i);
@@ -235,26 +236,27 @@ fn inlbins(inlfn: *Qbe.Fn, inlb: *Qbe.Blk, f: *Qbe.Fn, c: *InlineCtx) void = {
         i1.arg&[1] = getinlref(inlfn, i1.arg&[1], f, c);
         
         /* hoist inlfn allocs to fn->start */
+        // this lets them become fast locals (in $arch/isel) or be promoted to temporaries (in mem/promote).
         if is_alloc(i1.op()) {
-            addins(c.vins0&, c.nins0&, i1);
-            i1.set_nop();
+            f.emit(i1[]);
+            c.nins -= 1;  // i1.set_nop();
         } else {
             if i1.op() == .blit1 {
                 @debug_assert(rtype(i1.arg&[0]) == .RInt);
                 /* TODO - deeply dubious/overlapping */
-                i1.arg&[0] = INT(abs(rsval(i1.arg&[0]).intcast()));
+                i1.arg&[0] = INT(abs(rsval(i1.arg&[0]).intcast())); // :FUCKED
             };
         };
     };
 }
 
 InlineCtx :: @struct(
-    rmap: QList(RefMap),
-    nrmap := 0, 
+    // for RCon this stores: [val() in callee] -> ref in caller. (QbeNull means not remapped yet).
+    // for RTmp the mapping is in Tmp.visit field of the callee.      (-1 means not remapped yet).
+    remapped_consts: []Qbe.Ref,
     vins: QList(Qbe.Ins), 
     nins := 0, 
-    vins0: QList(Qbe.Ins), 
-    nins0 := 0,
+    to_clear: List(*Qbe.Tmp),
 );
 
 /* return index of last inlined ins */
@@ -272,9 +274,9 @@ fn inlcall(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) i64 = {
     };
     
     c: InlineCtx = (
-        rmap  = new(0),
-        vins  = new(0),
-        vins0 = new(0),
+        remapped_consts = temp().alloc_zeroed(Qbe.Ref, inlfn.ncon.zext()),
+        vins  = new(b.nins.zext() + inlfn.start.nins.zext()),
+        to_clear = list(inlfn.ntmp.zext().shift_right_logical(4), temp()),
     );
     
     /* go back to start of args */
@@ -283,9 +285,7 @@ fn inlcall(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) i64 = {
         i1 = i1.offset(-1);
     };
     
-    for(b.ins.first, i1) { i1 |
-        addins(c.vins&, c.nins&, i1);
-    };
+    append(c.vins&, c.nins&, b.ins.first, i1);
     
     /* replace arg ins with copy to inline fn par tmps */
     inlargs(inlfn, f, b, i1, c&);
@@ -294,7 +294,7 @@ fn inlcall(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) i64 = {
     @debug_assert(is_ret(inlfn.start.jmp.type));
     
     /* splice inlined fn instructions */
-    inlbins(inlfn, inlfn.start, f, c&);
+    inlbins(inlfn, f, c&);
     
     /* replace call ins with copy for non-void fn's */
     if i.to == QbeNull {
@@ -320,29 +320,14 @@ fn inlcall(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) i64 = {
     };
     nret := c.nins - 1;
     
-    for(i.offset(1), b.ins.index(b.nins.zext())) { i |
-        addins(c.vins&, c.nins&, i);
-    };
-    
+    // TODO: copy chunks as we go so you don't recopy the end of the block for every inlined call :SLOW
+    append(c.vins&, c.nins&, i.offset(1), b.ins.index(b.nins.zext()));
     idup(b, c.vins.first, c.nins);
     
-    /* some new allocs in fn->start for retc, parc etc. */
-    if c.nins0 != 0 {
-        c.nins = 0;
-
-        i := f.find_past_last_param();
-        
-        for(f.start.ins.first, i) { i |
-            addins(c.vins&, c.nins&, i);
-        };
-        for(c.vins0.first, c.vins0.index(c.nins0)) { i |
-            addins(c.vins&, c.nins&, i);
-        };
-        for(i, f.start.ins.index(f.start.nins.zext())) { i |
-            addins(c.vins&, c.nins&, i);
-        };
-        
-        idup(f.start, c.vins.first, c.nins);
+    // tmps are sparse after being eliminated by other passes (61346/1150101 = 5% average for the compiler -- Nov 20). 
+    // so only reset the ones that we actually messed with. 
+    for c.to_clear& { t | 
+        t.visit = -1;
     };
     
     nret
@@ -352,6 +337,10 @@ fn inlcalls(f: *Qbe.Fn) void = {
     if f.globals.debug["G".char()] {
         @fmt_write(f.globals.debug_out, "\nProcessing function $%:\n", f.name());
     };
+    
+    // during this pass we collect allocas for inlined arg/ret in the scratch buffer 
+    // and splice them into f.start at the end. 
+    f.reset_scratch();
     
     f.leaf = true;  // updated in inlcall()
     for_blocks f { b | 
@@ -377,6 +366,20 @@ fn inlcalls(f: *Qbe.Fn) void = {
             };
             n += 1;
         };
+    };
+    
+    /* some new allocs in fn->start for retc, parc etc. */
+    alloc_ins := f.slice_pending_scratch();
+    if alloc_ins.len != 0 {
+        // ins = ins[..<past_param] ++ alloc_ins ++ ins[past_param..<ins.end]
+        i := f.find_past_last_param();
+        vins: QList(Qbe.Ins) = new(f.start.nins.zext() + alloc_ins.len);
+        nins := 0;
+        append(vins&, nins&, f.start.ins.first, i);
+        append(vins&, nins&, alloc_ins.ptr, alloc_ins.index_unchecked(alloc_ins.len));
+        append(vins&, nins&, i, f.start.ins.index(f.start.nins.zext()));
+        f.start.ins = vins;
+        f.start.nins = nins.trunc();
     };
     
     if f.globals.debug["G".char()] {

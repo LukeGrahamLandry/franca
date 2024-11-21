@@ -35,9 +35,11 @@ fn driver(vtable: *ImportVTable) void = {
                 println("=== Aarch64 Jit ===");
                 run_jit(vtable, .CompilerJit);
             };
-            @case("qbe-jit")   => run_qbe_included(vtable, .JitOnly);
-            @case("qbe-exe")   => run_qbe_included(vtable, .Exe);
-            @case("qbe-link")  => run_qbe_included(vtable, .Relocatable);
+            @case("qbe-jit")   => run_qbe_included(vtable, .JitOnly, .None);
+            @case("qbe-exe")   => run_qbe_included(vtable, .Exe, .None);
+            @case("qbe-link")  => run_qbe_included(vtable, .Relocatable, .None);
+            @case("qbe-exe-x64")   => run_qbe_included(vtable, .Exe, (Some = .x86_64));
+            @case("qbe-link-x64")  => run_qbe_included(vtable, .Relocatable, (Some = .x86_64));
             @case("llvm") => run_llvm(vtable, false);
             @case("llvm-wasm") => run_llvm(vtable, true);
             @case("blink") => run_llvm_blink(vtable);
@@ -62,13 +64,33 @@ fn driver(vtable: *ImportVTable) void = {
 }
 
 fn github(vtable: *ImportVTable) void = {
-    // TODO: rebuild boot.
     arch, os := {vtable.comptime_arch}();
     assert(arch == .aarch64 && os == .macos, "expected macos-arm");
-    run_jit(vtable, .CompilerJit);
-    run_examples(vtable, false);
-    //run_qbe_included(vtable, .JitOnly);
-} 
+    
+    sh(@slice("touch", "a.out"));
+    sh(@slice("chmod", "+x", "a.out"));
+    sh(@slice("./boot/aarch64-apple-darwin/franca2", "examples/default_driver.fr", "build", "compiler/other_main.fr", "-aot=qbe-exe", "-unsafe", "-boot-only"));
+    sh(@slice("cp", "a.out", "b.out"));
+    sh(@slice("./b.out", "examples/default_driver.fr", "build", "compiler/other_main.fr", "-aot=qbe-exe"));
+    sh(@slice("cp", "a.out", "b.out"));
+    sh(@slice("./b.out", "run_tests.fr", "--", "arm", "qbe-exe")); // "examples-no-deps", 
+    sh(@slice("./b.out", "examples/default_driver.fr", "build", "backend/meta/qbe_frontend.fr", "-aot=qbe-exe"));
+    sh(@slice("mkdir", "-p", "target/out"));
+    sh(@slice("touch", "target/out/driver.c"));
+    sh(@slice("./b.out", "backend/meta/test.fr", "all", "-p", "-e", "-v", "-bin=./a.out"));
+}
+
+fn sh(a: []Str) void = {
+    ok, out, err := fork_and_catch(temp()) {
+        exec_cmd(a[0], a.slice(1, a.len)) 
+    };
+    print(out.items());
+    print(err.items());
+    if !ok {
+        @println("Failed to run: %", a);
+        exit(1);
+    };    
+}
 
 fn run_examples(vtable: *ImportVTable, allow_deps: bool) void = {
     fork_run_main(vtable, "examples/toy/bf.fr");
@@ -453,15 +475,18 @@ fn jit_from_source(vtable: *ImportVTable, src: Str, function_name: Str) rawptr #
 
 LINK_QBE_C :: false;
 #include_std("backend/lib.fr");
-fn run_qbe_included(vtable: *ImportVTable, type: QbeOutputPurpose) void = {
+fn run_qbe_included(vtable: *ImportVTable, type: QbeOutputPurpose, force_arch: ?Arch) void = {
     @if(ENABLE_INTERNAL_QBE, {
         @println("=== Qbe % ===", type);
         opts := vtable.default_build_options();
         opts.retain_function_names = true;
+        env: TargetEnv = (arch = get_comptime_arch(), os = .macos); // :HardcodeOs
+        if force_arch { force_arch |
+            env.arch = force_arch;
+        };
         comp := {vtable.init_compiler}(opts);
         c := vtable.with(comp);
         load_lang_tests(c);
-        env: TargetEnv = (arch = get_comptime_arch(), os = .macos); // :HardcodeOs
         args: List(Str) = list(temp());
         global_module :: @static(QbeModule); // TODO: aaaaaaaa
         triple := target_triple(env.arch, env.os);

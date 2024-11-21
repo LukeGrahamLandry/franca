@@ -40,6 +40,7 @@ fn do_fixups_amd64(self: *QbeModule, address: *u8, symbol: *SymbolInfo) void = {
     local := symbol.kind == .Local;
     new_got_reloc: ?Fixup = .None;
     each fixups { fixup | 
+        continue :: local_return;
         @match(fixup.type) {
             fn DataAbsolute() => {
                 reloc := ptr_cast_unchecked(u8, *u8, fixup.patch_at);
@@ -49,8 +50,8 @@ fn do_fixups_amd64(self: *QbeModule, address: *u8, symbol: *SymbolInfo) void = {
                 distance := ptr_diff(fixup.patch_at, address); // :size_of_displacement
                 if !local {
                     @match(self.goal.type) {
-                        fn Relocatable() => (); // that's not my department
-                        fn AsmText()     => (); // that's not my department
+                        fn Relocatable() => continue(); // that's not my department
+                        fn AsmText()     => continue(); // that's not my department
                         fn Exe() => {
                             if !it.call {
                                 if self.debug["T".char()] {
@@ -89,7 +90,7 @@ fn do_fixups_amd64(self: *QbeModule, address: *u8, symbol: *SymbolInfo) void = {
                             @fmt_write(self.debug_out, "# patch addr % refs '%' = %[%]\n", u8.int_from_ptr(fixup.patch_at), symbol.name, symbol.segment, symbol.offset);
                         };
                     };
-                };
+                };// early returns
                 
                 size_of_displacement :: 4;
                 distance -= size_of_displacement;
@@ -430,7 +431,7 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
             if is_long_const {
                 value := e.f.con[i.arg&[0].val()].bits.i;
                 if rtype(i.to) == .RSlot && (value < MIN_i32 || value > MAX_i32) {
-                    todo();
+                    panic("TODO: set slot");
                     //emitf("movl %0, %=", &i, e);
                     //emitf("movl %0>>32, 4+%=", &i, e);
                     return();
@@ -440,7 +441,7 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
                 c := e.f.get_constant(i.arg&[0]);
                 if isreg(i.to) {
                     if c.type == .CAddr {
-                        todo();
+                        panic("TODO: lea copy");
                         //emitf("lea%k %M0, %=", &i, e);
                         return();
                     };
@@ -455,11 +456,14 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
                 };
             };
             if rtype(i.to) == .RSlot && (t0 == .RSlot || t0 == .RMem) {
-                i&.set_cls(@if(is_wide(i&.cls()), Qbe.Cls.Kd, .Ks));
-                i.arg&[1] = amd64_xmm_scratch;
-                todo();
-                //emitf("mov%k %0, %1", &i, e);
-                //emitf("mov%k %1, %=", &i, e);
+                // rega does this shit when there's a lot of register pressure i guess?
+                // TODO: lower it better so it's not a sepecial case here. 
+                k := @if(is_wide(i&.cls()), Qbe.Cls.Kd, .Ks);
+                str := @if(is_wide(i&.cls()), Qbe.O.stored, .stores);
+                ins := make_ins(.load, k, amd64_xmm_scratch, i.arg&[0], QbeNull);
+                emitins(ins, e);
+                ins := make_ins(str, .Kw, QbeNull, amd64_xmm_scratch, i.to);
+                emitins(ins, e);
                 return();
             };
             
@@ -865,7 +869,7 @@ fn assemble(e: *AmdState, i: *Qbe.Ins) void = {
     dowhile {
         matches :: fn(w: AmdArgType, h: AmdArgType) bool =>
             w == h || (w == .imm32 && h == .imm8) || (w == .M && h == .R);
-        @debug_assert(entry.qbe_op == i.op().raw().intcast().trunc(), "didn't find encoding for %", i.op().get_name());
+        @debug_assert(entry.qbe_op == i.op().raw().intcast().trunc(), "didn't find encoding for % % %", i.op().get_name(), a0, a1);
         bad := !matches(entry.a0, a0) || !matches(entry.a1, a1);
         if bad {
             idx += 1;
@@ -1125,4 +1129,24 @@ fn amd64_encoding_table() Ty([]AmdEncodingEntry, []u16) = @amd64_encoding_data (
         (.F, .M, (0x0F, 0x6E), (), (0x66)), // movq
         (.M, .F, (0x0F, 0x7E), (), (0x66)), // movq
     ),
+    // TODO: i have low faith that i correctly transcribed the numbers
+    (.exts,
+        (.F, .F, (0x0F, 0x5A), (), (0xF3)), // cvtss2sd  
+    ),
+    (.dtosi,
+        (.R, .F, (0x0F, 0x2C), (), (0xF2)), // cvttsd2si  
+    ),
+    (.swtof,
+        (.F, .R, (0x0F, 0x2A), (), (0xF2)), // cvtsi2sd  
+    ),
+    (.sltof,
+        (.F, .R, (0x0F, 0x2A), (), (0xF2)), // cvtsi2sd  
+    ),
+    (.stosi,
+        (.R, .F, (0x0F, 0x2C), (), (0xF2)), // cvttss2si  
+    ),
+    // _wtos `cvtsi2ss	%rax, %xmm0` vs `cvtsi2ss	%eax, %xmm0`
+    // ltos `shrq	%cl, %rsi` vs `rorq	%cl, %rbp`
+    // fptrunc `cvtsi2sd	%eax, %xmm0` vs `cvtsi2sd	%rax, %xmm0` and `	cvttsd2si` vs `cvttss2si`
+    // fpneg `	movq	%xmm0, %rax` vs `movd	%xmm0, %eax`
 );
