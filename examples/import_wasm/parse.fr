@@ -1,5 +1,5 @@
 
-fn cls(t: WasmValType) Qbe.Cls = @switch(t.repr) {
+fn cls(t: Wasm.ValType) Qbe.Cls = @switch(t.repr) {
     @case(0x7F) => .Kw;  
     @case(0x7E) => .Kl;  
     @case(0x7D) => .Ks;  
@@ -7,7 +7,7 @@ fn cls(t: WasmValType) Qbe.Cls = @switch(t.repr) {
     @default    => .Ke;
 };
 
-ParseWasm :: @struct(w: *WasmModule, src: []u8, cursor := 0);
+ParseWasm :: @struct(w: *Wasm.Module, src: []u8, cursor := 0);
 fn parse_wasm(self: *ParseWasm) Result(void, Str) = {
     magic_version := @const_slice(0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00);
     if !self.src.starts_with(magic_version) {
@@ -17,7 +17,7 @@ fn parse_wasm(self: *ParseWasm) Result(void, Str) = {
     
     section_count := 0;
     while => self.cursor < self.src.len {
-        section_index := @try(self.read_byte_enum(Section)) return;
+        section_index := @try(self.read_byte_enum(Wasm.Section)) return;
         byte_size := @try(self.read_u()) return;
         end_of_section := self.cursor + byte_size;
         @match(section_index) {
@@ -38,8 +38,8 @@ fn parse_wasm(self: *ParseWasm) Result(void, Str) = {
                     if self.cursor > end_of_section {
                         return(Err = @tfmt("Parsed past declared section size. (section index % in module)", section_count));
                     };
-                    argp := ptr_cast_unchecked(u8, WasmValType, arg_bytes.ptr);
-                    retp := ptr_cast_unchecked(u8, WasmValType, ret_bytes.ptr);
+                    argp := ptr_cast_unchecked(u8, Wasm.ValType, arg_bytes.ptr);
+                    retp := ptr_cast_unchecked(u8, Wasm.ValType, ret_bytes.ptr);
                     self.w.types&.push(arg = (ptr = argp, len = arg_len, cap = arg_len), ret = (ptr = retp, len = ret_len, cap = ret_len));
                 };
             }
@@ -48,7 +48,6 @@ fn parse_wasm(self: *ParseWasm) Result(void, Str) = {
                 self.w.functions&.reserve(count);
                 range(0, count) { i |
                     type_index := @try(self.read_u()) return;
-                    @println("function % has type %", i, type_index);
                     self.w.functions&.push(id = type_index.trunc());
                 };
             }
@@ -58,7 +57,7 @@ fn parse_wasm(self: *ParseWasm) Result(void, Str) = {
                 range(0, count) { i |
                     mod := @try(self.read_str()) return;
                     name := @try(self.read_str()) return;
-                    desc: WasmImportDesc = @switch(@try(self.pop()) return) {
+                    desc: Wasm.ImportDesc = @switch(@try(self.pop()) return) {
                         @case(0) => {
                             self.w.imported_function_count += 1;
                             (Function = (id = trunc(@try(self.read_u()) return)))
@@ -80,70 +79,82 @@ fn parse_wasm(self: *ParseWasm) Result(void, Str) = {
                 self.w.exports&.reserve(count);
                 range(0, count) { i |
                     name := @try(self.read_str()) return;
-                    desc: WasmExportDesc = @switch(@try(self.pop()) return) {
-                        @case(0) => (Function = (id = trunc(@try(self.read_u()) return)));
-                        @case(1) => {
-                            panic("TODO: export table")  
-                        };
-                        @case(2) => {
-                            panic("TODO: export memory")  
-                        };
-                        @case(3) => {
-                            panic("TODO: export global")  
-                        };
-                        @default => return(Err = "Invalid export type byte");
+                    desc_tag := @try(self.pop()) return;
+                    desc: Wasm.ExportDesc = (Function = (id = trunc(@try(self.read_u()) return)));
+                    if desc_tag > Wasm.ExportDesc.Tag().enum_count() {
+                        return(Err = "Invalid export type byte");
                     };
                     self.w.exports&.push(name = name, desc = desc);
                 };
             }
-            fn Code() => {
-                count := @try(self.read_u()) return;
-                self.w.code&.reserve(count);
-                range(0, count) { i |
-                    total_code_bytes := @try(self.read_u()) return;
-                    start := self.cursor;
-                    local_count := @try(self.read_u()) return;
-                    locals := WasmLocal.list(local_count, self.w.code.gpa);
-                    total := 0;
-                    range(0, local_count) { j |
-                        num := @try(self.read_u()) return;
-                        total += num;
-                        type := @try(self.pop()) return;
-                        if self.cursor > start + total_code_bytes {
-                            return(Err = @tfmt("Locals overflowed declared function size (func index %, local index %)", i, j));
-                        };
-                        locals&.push(ty = (repr = type), count = num);
-                    };
-                    code_len := total_code_bytes - (self.cursor - start);
-                    code: RsVec(u8) = (ptr = self.src.index(self.cursor), len = code_len, cap = code_len);
-                    self.cursor += code_len;
-                    self.w.code&.push(locals = locals.rs(), insts = code, total_local_count = total);
-                };
-            }
+            fn Code() => @try(self.read_code_section()) return;
             fn Data() => {
                 count := @try(self.read_u()) return;
                 self.w.data&.reserve(count);
                 range(0, count) { i |
                     flags := @try(self.read_u()) return;
-                    data := WasmData.zeroed();
+                    data := Wasm.Data.zeroed();
                     if flags.bit_and(0b10) == 0b10 {
                         data.active_mem = (id = trunc(@try(self.read_u()) return));
                     };
                     if flags.bit_and(0b1) == 0b0 {
-                        // TODO: this is wrong because you're allowed nesting but you're such an asshole if you do that in this context. 
-                        start := self.cursor;
-                        while => (@try(self.pop()) return) != 0x0B {
-                            // spin
-                        };
-                        e := self.cursor - start;
-                        data.active_offset_expr = (ptr = self.src.index(self.cursor), len = e, cap = e);
+                        data.active_offset_expr = @try(self.read_expr()) return;
                     };
                     data.bytes = @try(self.read_str()) return;
                     self.w.data&.push(data);
                 };
             }
+            fn Table() => {
+                count := @try(self.read_u()) return;
+                self.w.tables&.reserve(count);
+                range(0, count) { i |
+                    type := @try(self.pop()) return;
+                    lim := @try(self.read_limits()) return;
+                    self.w.tables&.push(type = (repr = type), limits = lim);
+                };
+            }
+            fn Memory() => {
+                count := @try(self.read_u()) return;
+                self.w.memories&.reserve(count);
+                range(0, count) { i |
+                    lim := @try(self.read_limits()) return;
+                    self.w.memories&.push(lim);
+                };
+            }
+            fn Global() => {
+                count := @try(self.read_u()) return;
+                self.w.globals&.reserve(count);
+                range(0, count) { i |
+                    type := @try(self.pop()) return;
+                    mutable := @try(self.pop()) return;
+                    init := @try(self.read_expr()) return;
+                    self.w.globals&.push(type = (repr = type), mutable = mutable == 1, init_expr = init);
+                };
+            }
+            fn Element() => {
+                count := @try(self.read_u()) return;
+                self.w.elements&.reserve(count);
+                range(0, count) { i |
+                    flags := @try(self.read_u()) return;
+                    if flags != 0 {
+                        return(Err = "TODO: parse more Element kinds. currently only flags=0 is supported.");
+                    };
+                    off := @try(self.read_expr()) return;
+                    func_count := @try(self.read_u()) return;
+                    funcs := FuncIdx.list(func_count, self.w.elements.gpa);
+                    range(0, func_count) { i |
+                        idx := @try(self.read_u()) return;
+                        funcs&.push(id = idx.trunc());
+                    };
+                    self.w.elements&.push(active = true, table = (id = 0), offset_expr = off, funcs = funcs.rs());
+                };
+            }
+            fn DataCount() => {
+                _ := @try(self.read_u()) return;
+            }
             @default => return(Err = @tfmt("Unhandled section type % (section index % in module)", section_index, section_count));
         };
+        
         if self.cursor != end_of_section {
             return(Err = @tfmt("Did not consume declared section size. (section index % in module)", section_count));
         };
@@ -151,6 +162,46 @@ fn parse_wasm(self: *ParseWasm) Result(void, Str) = {
     };
     .Ok
 }
+
+fn read_code_section(self: *ParseWasm) Result(void, Str) = {
+    count := @try(self.read_u()) return;
+    self.w.code&.reserve(count);
+    range(0, count) { i |
+        total_code_bytes := @try(self.read_u()) return;
+        start := self.cursor;
+        local_count := @try(self.read_u()) return;
+        locals := Wasm.Local.list(local_count, self.w.code.gpa);
+        total := 0;
+        range(0, local_count) { j |
+            num := @try(self.read_u()) return;
+            total += num;
+            type := @try(self.pop()) return;
+            if self.cursor > start + total_code_bytes {
+                return(Err = @tfmt("Locals overflowed declared function size (func index %, local index %)", i, j));
+            };
+            locals&.push(ty = (repr = type), count = num);
+        };
+        code_len := total_code_bytes - (self.cursor - start);
+        code: RsVec(u8) = (ptr = self.src.index(self.cursor), len = code_len, cap = code_len);
+        self.cursor += code_len;
+        self.w.code&.push(locals = locals.rs(), insts = code, total_local_count = total);
+    };
+    .Ok
+}
+
+// use for constants like data size / global init.
+// TODO: this is wrong because you're allowed nesting but you're such an asshole if you do that in this context. 
+fn read_expr(self: *ParseWasm) Result(RsVec(u8), Str) = {
+    start := self.cursor;
+    while => (@try(self.pop()) return) != 0x0B {
+        // spin
+    };
+    e := self.cursor - start;
+    (Ok = (ptr = self.src.index(self.cursor), len = e, cap = e))
+}
+
+:: tagged(Wasm.ExportDesc);
+:: enum(Wasm.Section);
 
 fn read_byte_enum(self: *ParseWasm, $T: Type) Result(T, Str) #generic = {
     b := @try(self.pop()) return;
@@ -160,7 +211,7 @@ fn read_byte_enum(self: *ParseWasm, $T: Type) Result(T, Str) #generic = {
     (Ok = @as(T) b)
 }
 
-fn read_limits(self: *ParseWasm) Result(WasmLimits, Str) = {
+fn read_limits(self: *ParseWasm) Result(Wasm.Limits, Str) = {
     has_max := @try(self.pop()) return;
     if has_max != 0 && has_max != 1 {
         return(Err = @tfmt("expected has_max 0/1 not %", has_max));

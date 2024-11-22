@@ -2,6 +2,12 @@
 //! Magic numbers from https://webassembly.github.io/spec/core/binary/index.html
 //! Abstraction will continue until moral improves. 
 
+// Note: 
+// "Every import defines an index in the respective index space. 
+// In each index space, the indices of imports go before the first 
+// index of any definition contained in the module itself."
+//
+
 FuncIdx :: @struct(id: u32);
 TypeIdx :: @struct(id: u32);
 TableIdx :: @struct(id: u32);
@@ -15,114 +21,104 @@ NumType        :: @enum(u8) (I32 = 0x7F, I64 = 0x7E, F32 = 0x7D, F64 = 0x7C);
 BlockType      :: @tagged(Empty: void, Value: u8, Index: i33);
 MemArg         :: @struct(offset: u32, align: u32);
 
-WasmInst :: @enum(u8) (
-    Unreachable = 0x00,
-    Nop = 0x01,
-    Block = 0x02,
-    Loop = 0x03,
-    If = 0x04,
-    Else = 0x05,
-    End = 0x0B,
-    Br = 0x0C,
-    BrIf = 0x0D,
-    Return = 0x0F,
-    Call = 0x10,
-    CallIndirect = 0x11,
-    Drop = 0x1A,
-    LocalGet = 0x20,
-    LocalSet = 0x21,
-    LocalTee = 0x22,
-    GlobalGet = 0x23,
-    GlobalSet = 0x24,
-    I64_Load = 0x29,
-    F64_Load = 0x2B,
-    I64_Store = 0x37,
-    F64_Store = 0x39,
-    I32_Const = 0x41,
-    I64_Const = 0x42,
-    F32_Const = 0x43,
-    F64_Const = 0x44,
-    I64_Eq = 0x46,
-    I32_Add = 0x6A,
-    I64_Add = 0x7C,
-);
-
-fn raw(s: WasmInst) u8 #unsafe_noop_cast;
+fn raw(s: Wasm.Inst) u8 #unsafe_noop_cast;
 fn raw(s: NumType) u8 #unsafe_noop_cast;
 
-// TODO: better error message if you use '=' instead of ':'. 
-Op :: @tagged(
-    Call: FuncIdx,
-    CallIndirect: (TypeIdx, TableIdx),
-    Br: LabelIdx,
-    BrIf: LabelIdx,
-    LocalGet: LocalIdx,
-    LocalSet: LocalIdx,
-    LocalTee: LocalIdx,  // same as local set but returns the value as well
-    GlobalGet: GlobalIdx,
-    GlobalSet: GlobalIdx,
-    I64_Const: i64,
-    F64_Const: f64,
-    I64_Load: MemArg,
+// TODO: have a version of @struct that takes a block and lets you have semicolons at the end of things, 
+//       so its less of a waste of time when you decide to stop being lazy and manually namespace everything. 
+
+Wasm :: @rec @struct(
+    Module :: @rec @struct(
+        types: List(Wasm.FuncType), // [TypeIdx] function types
+        // Functions are split into two parts. the types are seperate from the code. 
+        functions: List(TypeIdx),  // [FuncIdx]
+        exports: List(Wasm.Export),
+        code: List(Wasm.Func),      // [FuncIdx]
+        imports: List(Wasm.Import),
+        data: List(Wasm.Data),
+        tables: List(Wasm.Table),
+        memories: List(Wasm.Limits),
+        globals: List(Wasm.Global),
+        elements: List(Wasm.Element),
+        imported_function_count := 0,
+    ),
+
+    // "Value types can occur in contexts where type indices are also allowed, such as in the case of block types. Thus, the binary format for types corresponds to the signed LEB128 encoding of small negative 
+    // values, so that they can coexist with (positive) type indices in the future."
+    ValType :: @rec @struct(repr: u8),
+    FuncType :: @rec @struct(arg: RsVec(Wasm.ValType), ret: RsVec(Wasm.ValType)),
+    Func :: @rec @struct(locals: RsVec(Wasm.Local), insts: RsVec(u8), total_local_count := -1),
+    Local :: @rec @struct(ty: Wasm.ValType, count: i64),
+    // It's tempting to store 4 seperate arrays so you don't need the tag except that you have to refer to them by index. 
+    Export :: @rec @struct(name: RsVec(u8), desc: Wasm.ExportDesc),
+    ExportDesc :: @rec @tagged(Function: FuncIdx, Table: TableIdx, Memory: MemIdx, Global: GlobalIdx),
+    Import :: @rec @struct(module: RsVec(u8), name: RsVec(u8), desc: Wasm.ImportDesc),
+    ImportDesc :: @rec @tagged(
+        Function: TypeIdx, 
+        Table: @struct(ref_type: Wasm.ValType, lim: Wasm.Limits), 
+        Memory: Wasm.Limits, 
+        Global: @struct(ref_type: Wasm.ValType, mutable: bool),
+    ),
+    Limits :: @rec @struct(min: u32, max: u32),
+    Data :: @rec @struct(bytes: RsVec(u8), active_offset_expr: RsVec(u8), active_mem: MemIdx),
+    Table :: @rec @struct(type: Wasm.ValType, limits: Wasm.Limits),
+    Global :: @rec @struct(init_expr: RsVec(u8), type: Wasm.ValType, mutable: bool),
+    Element :: @rec @struct(active: bool, table: TableIdx, offset_expr: RsVec(u8), funcs: RsVec(FuncIdx)),
+    Section :: @rec @enum(u8) (
+        Custom = 0,
+        Type = 1,
+        Import = 2,
+        Function = 3,
+        Table = 4,
+        Memory = 5,
+        Global = 6,
+        Export = 7,
+        Start = 8,
+        Element = 9,
+        Code = 10,
+        Data = 11,
+        DataCount = 12, 
+    ),
+    Inst :: @enum(u8) (
+        Unreachable = 0x00,
+        Nop = 0x01,
+        Block = 0x02,
+        Loop = 0x03,
+        If = 0x04,
+        Else = 0x05,
+        End = 0x0B,
+        Br = 0x0C,
+        BrIf = 0x0D,
+        Return = 0x0F,
+        Call = 0x10,
+        CallIndirect = 0x11,
+        Drop = 0x1A,
+        LocalGet = 0x20,
+        LocalSet = 0x21,
+        LocalTee = 0x22,  // same as local set but returns the value as well
+        GlobalGet = 0x23,
+        GlobalSet = 0x24,
+        I64_Load = 0x29,
+        F64_Load = 0x2B,
+        I64_Store = 0x37,
+        F64_Store = 0x39,
+        I32_Const = 0x41,
+        I64_Const = 0x42,
+        F32_Const = 0x43,
+        F64_Const = 0x44,
+        I64_Eq = 0x46,
+        I32_Add = 0x6A,
+        I64_Add = 0x7C,
+        VectorPrefix = 0xFD,
+    ),
 );
 
-Section :: @enum(u8) (
-    Custom = 0,
-    Type = 1,
-    Import = 2,
-    Function = 3,
-    Table = 4,
-    Memory = 5,
-    Global = 6,
-    Export = 7,
-    Start = 8,
-    Element = 9,
-    Code = 10,
-    Data = 11,
-    DataCount = 12, 
-);
-:: enum(Section);
-
-// Note: 
-// "Every import defines an index in the respective index space. 
-// In each index space, the indices of imports go before the first 
-// index of any definition contained in the module itself."
-//
-
-WasmModule :: @struct(
-    types: List(WasmFuncType), // [TypeIdx] function types
-    // Functions are split into two parts. the types are seperate from the code. 
-    functions: List(TypeIdx),  // [FuncIdx]
-    exports: List(WasmExport),
-    code: List(WasmFunc),      // [FuncIdx]
-    imports: List(WasmImport),
-    data: List(WasmData),
-    imported_function_count := 0,
-);
-
-fn empty(a: Alloc) WasmModule = {
-    (types = list(a), functions = list(a), exports = list(a), code = list(a), imports = list(a), data = list(a))
+fn empty(a: Alloc) Wasm.Module = {
+    (types = list(a), functions = list(a), exports = list(a), 
+    code = list(a), imports = list(a), data = list(a), 
+    tables = list(a), memories = list(a), globals = list(a),
+    elements = list(a))
 } 
-
-// "Value types can occur in contexts where type indices are also allowed, such as in the case of block types. Thus, the binary format for types corresponds to the signed LEB128 encoding of small negative 
-// values, so that they can coexist with (positive) type indices in the future."
-WasmValType :: @struct(repr: u8);
-WasmFuncType :: @struct(arg: RsVec(WasmValType), ret: RsVec(WasmValType));
-WasmFunc :: @struct(locals: RsVec(WasmLocal), insts: RsVec(u8), total_local_count := -1);
-WasmLocal :: @struct(ty: WasmValType, count: i64);
-// It's tempting to store 4 seperate arrays so you don't need the tag except that you have to refer to them by index. 
-WasmExport :: @struct(name: RsVec(u8), desc: WasmExportDesc);
-WasmExportDesc :: @tagged(Function: FuncIdx, Table: TableIdx, Memory: MemIdx, Global: GlobalIdx);
-:: tagged(WasmExportDesc);
-WasmImport :: @struct(module: RsVec(u8), name: RsVec(u8), desc: WasmImportDesc);
-WasmImportDesc :: @tagged(
-    Function: TypeIdx, 
-    Table: @struct(ref_type: WasmValType, lim: WasmLimits), 
-    Memory: WasmLimits, 
-    Global: @struct(ref_type: WasmValType, mutable: bool),
-);
-WasmLimits :: @struct(min: u32, max: u32);
-WasmData   :: @struct(bytes: RsVec(u8), active_offset_expr: RsVec(u8), active_mem: MemIdx);
 
 //
 // After the magic + version, the thing is a list of sections. 
@@ -133,9 +129,14 @@ WasmData   :: @struct(bytes: RsVec(u8), active_offset_expr: RsVec(u8), active_me
 // you still use the leb128 stuff. The type is just a range restriction. 
 // 
 // TODO: use bucket arrays for less copying? 
-fn dump(self: *WasmModule, out: *List(u8)) void = {
+fn dump(self: *Wasm.Module, out: *List(u8)) void = {
+    :: enum(Wasm.Section);
     @debug_assert(self.imports.len == 0, "TODO: dump wasm imports");
     @debug_assert(self.data.len == 0, "TODO: dump wasm data");
+    @debug_assert(self.memories.len == 0, "TODO: dump wasm");
+    @debug_assert(self.tables.len == 0, "TODO: dump wasm");
+    @debug_assert(self.globals.len == 0, "TODO: dump wasm");
+    @debug_assert(self.elements.len == 0, "TODO: dump wasm");
     out.push_all(@slice(0x00, 0x61, 0x73, 0x6D));  // magic
     out.push_all(@slice(0x01, 0x00, 0x00, 0x00));  // version
     buf: List(u8) = list(temp());
@@ -200,7 +201,7 @@ fn dump(self: *WasmModule, out: *List(u8)) void = {
         inner_buf.push_all(it.insts.items());
         ::?*u8;
         end := it.insts.items().last().unwrap()[];
-        @assert_eq(end, WasmInst.End.raw()); // TODO: move @debug_assert_eq to lib
+        @assert_eq(end, Wasm.Inst.End.raw()); // TODO: move @debug_assert_eq to lib
         
         buf.leb128_unsigned(inner_buf.len);
         buf.push_all(inner_buf.items());
