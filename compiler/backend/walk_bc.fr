@@ -13,7 +13,7 @@ Backend :: @trait fn($B: Type) = {
     fn new(comp: CompCtx, alloc: Alloc, arch: Arch, os: Os) B; 
     fn inst_call(self: *B, args: Slice(B.Val), sig: PrimSig, f: FuncId, tail: bool, loc: ?Span) Slice(B.Val);
     fn inst_trap(self: *B) void;
-    fn inst_call_ptr(self: *B, args: Slice(B.Val), sig: PrimSig, ptr: B.Val, loc: ?Span) Slice(B.Val);
+    fn inst_call_ptr(self: *B, args: Slice(B.Val), sig: PrimSig, ptr: B.Val, loc: ?Span, context: bool) Slice(B.Val);
     fn inst_offset(self: *B, ptr: B.Val, bytes: i64) B.Val;
     fn inst_literal(self: *B, value: i64, ty: Prim) B.Val;
     fn inst_load(self: *B, addr: B.Val, ty: Prim) B.Val;
@@ -68,6 +68,10 @@ fn CodeGen($B: Type) Type = {
             backend = new(comp, alloc, target.arch, target.os),
         );
         work_stack := FuncId.list(temp());
+        if entry == .WrapMain {
+            env := comp.get_comptime_env();
+            work_stack&.push(env.runtime_init.expect("declaration of franca_runtime_init"));
+        };
         work_stack&.push_all(fns);
         emitted_functions := 0;
         while(=> work_stack.len.ne(0)){
@@ -93,7 +97,7 @@ fn CodeGen($B: Type) Type = {
                 if !gen.funcs_done&.get(f.to_index().zext()) && !work_stack.items().contains(f&) {
                     not_done_count += 1;
                     work_stack&.push(f);
-                }
+                };
             };
             if not_done_count > 0 {
                 // no pop
@@ -182,7 +186,7 @@ fn CodeGen($B: Type) Type = {
     };
    
     fn emit_current_function(self: *Self) void = {
-        mark := __temp_alloc.mark();
+        mark := mark_temporary_storage();
         s := self.body.blocks.items();
         self.vars = list(temp());
         self.stack = list(temp());
@@ -190,7 +194,7 @@ fn CodeGen($B: Type) Type = {
         self.backend&.setup(self.body, self.vars&);
         self.walk_block((id = 0));
         self.backend&.finished(self.body.func);
-        __temp_alloc.reset_retaining_capacity(mark);
+        reset_temporary_storage(mark);
     }
     
     fn walk_block(self: *Self, b: BbId) void = {
@@ -239,7 +243,7 @@ fn CodeGen($B: Type) Type = {
                     args := self.stack.items().slice_last(arg_count).expect("enough args on stack for call");
                     
                     loc := block.get_debug_loc(i);
-                    ret := self.backend&.inst_call(args, sig[], f, call.tail, loc);
+                    ret := self.backend&.inst_call(args, sig[], f, call.tail, loc, call.context);
                     self.stack.len -= arg_count;
                     if sig.no_return {
                         self.backend&.inst_trap();
@@ -259,7 +263,7 @@ fn CodeGen($B: Type) Type = {
                     ptr := self.stack.items()[self.stack.len.sub(arg_count).sub(1)];
                     args := self.stack.items().slice_last(arg_count).expect("enough args on stack for call");
                     loc := block.get_debug_loc(i);
-                    ret := self.backend&.inst_call_ptr(args, sig[], ptr, loc);
+                    ret := self.backend&.inst_call_ptr(args, sig[], ptr, loc, call.context);
                     self.stack.len -= arg_count;
                     self.stack.len -= 1;
                     self.stack&.push_all(ret);

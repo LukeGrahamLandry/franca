@@ -34,6 +34,7 @@ EmitBc :: @struct(
     clock: u16,
     want_log: bool,
     debug: bool,
+    dyn_call_context: bool,
 );
 
 fn hash(s: *LabelId) i64 #redirect(*u32, i64);
@@ -55,6 +56,8 @@ fn emit_bc(comp: CompCtx, bc: *BcBackend, f: FuncId, when: ExecStyle) Res(*FnBod
     bc.jitted&.extend_blanks(f);
     func := comp.get_function(f); // TODO: you can't do this inline with a call (if comp[f]) that needs a *Func. it looks for an overload for **Func. -- Jul 5
     
+    c := comp.data.cast()[][];
+    opts := comp.get_build_options();
     self: EmitBc = (
         result = FnBody.ptr_from_int(0), // EVIL. filled in soon! 
         program = comp,
@@ -67,7 +70,8 @@ fn emit_bc(comp: CompCtx, bc: *BcBackend, f: FuncId, when: ExecStyle) Res(*FnBod
         current_block = (id = 0),
         clock = 0,
         want_log = func.get_flag(.LogBc),
-        debug = comp.get_build_options()[].debug_info,
+        debug = opts.debug_info,
+        dyn_call_context = if(when == .Aot, => opts.implicit_context_runtime, => opts.implicit_context_comptime),
     );
     //@println("emit_bc % % %", when, f, comp.pool.get(func.name));
     @debug_assert(func.get_flag(.EnsuredCompiled), "fn not compiled?");
@@ -126,6 +130,10 @@ fn emit_bc(comp: CompCtx, bc: *BcBackend, f: FuncId, when: ExecStyle) Res(*FnBod
         };
     };
     func.finished_bytecode_pointer = (Some = FnBody.int_from_ptr(body)); 
+    body.context = func.get_flag(.YesContext);
+    if !body.context {
+        func.set_flag(.NoContext);
+    };
     (Ok = body)
 }
 
@@ -889,6 +897,7 @@ fn zero_memory_at_top_of_stack(self: *EmitBc, expr_ty: Type) void = {
 //}
 
 fn emit_call(self: *EmitBc, f: *FatExpr, arg: *FatExpr, result_location: ResultLoc, can_tail: bool) PRes #once = {
+    caller := self.program.get_function(self.result.func);
     @match(self.program.get_type(f.ty)) {
         fn Fn(f_ty) => {
             f_id := @unwrap(f.as_const(), "ice: tried to call non-const fn %", self.program.log(f)) return;
@@ -909,23 +918,30 @@ fn emit_call(self: *EmitBc, f: *FatExpr, arg: *FatExpr, result_location: ResultL
             
             self.emit_runtime_call(f_ty, cc, arg, result_location, can_tail) { sig, tail |
                 self.result.mix_hash(f_id.as_index(), 436265);
-                if self.program.get_function(f_id)[].body&.is(.Intrinsic) {
-                    op := self.program.get_function(f_id)[].body.Intrinsic;
+                callee := self.program.get_function(f_id);
+                if callee.body&.is(.Intrinsic) {
+                    op := callee.body.Intrinsic;
                     self.push(Intrinsic = op);
+                    // TODO: you might have setcontext for yourself
+                    if op == .GetContext {
+                        caller.set_flag(.YesContext);
+                    };
                     if tail {
                         @debug_assert(sig.ret2.is_none(), "So far all intrinsics return one thing.");
                         self.push(Ret1 = sig.ret1.unwrap());
                     };
                 } else {
-                    callee := self.program.get_function(f_id);
-                    caller := self.program.get_function(self.result.func);
                     if !caller.get_flag(.ComptimeOnly) && original_f_id == f_id {
                         // TODO: it would be nice if this was at the beginning and you never tried to emit anything that was comptimeonly
                         //       that requires never adding them to callees and then later realizing you can inline them, which would make sense. -- Aug 29
                         @debug_assert(!(self.result.when == .Aot && callee.get_flag(.ComptimeOnly)), "cannot .Aot .ComptimeOnly % %", f_id, self.program.log(callee));
                     };
+                    context := callee.get_flag(.YesContext) || !callee.get_flag(.NoContext);
+                    if context {
+                        caller.set_flag(.YesContext);
+                    };
                     
-                    self.push(CallDirect = (sig = self.push_sig(sig[]), f = f_id, tail = tail));
+                    self.push(CallDirect = (sig = self.push_sig(sig[]), f = f_id, tail = tail, context = context));
                     if self.debug {
                         self.debug_location_for_last_op(f.loc);
                     };
@@ -933,6 +949,7 @@ fn emit_call(self: *EmitBc, f: *FatExpr, arg: *FatExpr, result_location: ResultL
             }
         }
         fn FnPtr(f_ty) => {
+            caller.set_flag(.YesContext);
             @try(self.compile_expr(f, .PushStack, false)) return;
             will_use_indirect_ret := self.slot_count(f_ty.ty.ret) > 2; // TODO: get this from sig
             if result_location == .ResAddr && will_use_indirect_ret {
@@ -942,7 +959,7 @@ fn emit_call(self: *EmitBc, f: *FatExpr, arg: *FatExpr, result_location: ResultL
             };
             // TODO: allow tail calling through pointer depending on the calling convention 
             @try(self.emit_runtime_call(f_ty.ty, f_ty.cc, arg, result_location, can_tail) { sig, _tail |
-                self.push(CallFnPtr = (sig = self.push_sig(sig[])));
+                self.push(CallFnPtr = (sig = self.push_sig(sig[]), context = self.dyn_call_context));
                 if self.debug {
                     self.debug_location_for_last_op(f.loc);
                 };

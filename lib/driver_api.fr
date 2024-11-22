@@ -84,6 +84,7 @@ ProgramEntry :: @enum(i64) (
     GiveMeTheCodeAndGiveItToMeRaw,  
     // create a main function that calls all the <fns>
     TestRunnerMain,  
+    WrapMain, 
     // create named wrappers for all the <fns>. if one of them is called "main", that will be the program entry point.
     // it is an error to have a name collission. 
     ExportWithNames, 
@@ -118,6 +119,11 @@ ComptimeEnvironment :: @struct(
     // TODO: I should be able to tell you the target arch... because i need to know it when choosing which inline asm for llvm. 
     comptime_arch: Arch,
     inline_bc_fn_type: ?Type,
+    // This may or may not be used depending on build settings + compiler internals. 
+    static_context_pointer_ref: *rawptr, // pointer to the context pointer. context(0) == static_context_pointer_ref[]
+    dynamic_context_type := UnknownType,
+    runtime_init: ?FuncId,
+    static_context_var: ?BakedVarId,
 );
 
 // Note: changing these default values requires rebuilding the compiler! (if your driver program is using ImportVTable.default_build_options). 
@@ -147,8 +153,12 @@ BuildOptions :: @struct(
     // This makes compile speed a bit slower but lets you get sane error messages instead of just "Tried to call uncompiled function".
     // Soon I want to jit lazily and rely on that for creating function pointer values so this might stop being optional at some point. 
     do_jit_shims := true, 
+    // At comptime, context passing convention must match whatever the compiler was compiled with. 
+    implicit_context_comptime := true, // This value is ignored! Set later by the compiler. 
+    implicit_context_runtime := true, // This you can choose in the driver program (false is not thread safe)
     comptime_jit_vptr := ptr_from_int(BackendVTable, 0),
     comptime_jit_data := rawptr_from_int(0),
+    env := rawptr_from_int(0),
 );
 
 SAFE_MODE :: true; // TODO: default driver program with this as a cli argument 
@@ -307,6 +317,8 @@ FnFlag :: @enum(i64) (
     TargetSplit,
     AlreadyHasShim,
     RealAsmDone,
+    NoContext,
+    YesContext,
 );
 
 Annotation :: @struct(
@@ -501,6 +513,7 @@ FnBody :: @struct(
     signeture: PrimSig,
     func: FuncId,
     name: Symbol,
+    context := true,
     switch_payloads: RsVec(RsVec(SwitchPayload)),  // indexed by Bc.Switch
     sig_payloads: RsVec(PrimSig),  // indexed by `sig` field of Bc.CallDirect and Bc.CallFnPtr
 );
@@ -509,8 +522,8 @@ SwitchPayload :: @struct(value: i64, block: BbId);
 
 // TODO: this would fit in 16 bytes instead of 24
 Bc :: @tagged(
-    CallDirect: @struct(sig: u32, f: FuncId, tail: bool),         // <args:m> -> <ret:n>
-    CallFnPtr: @struct(sig: u32),                                 // <ptr:1> <args:m> -> <ret:n>
+    CallDirect: @struct(sig: u32, f: FuncId, tail: bool, context: bool),         // <args:m> -> <ret:n>
+    CallFnPtr: @struct(sig: u32, context: bool),                                 // <ptr:1> <args:m> -> <ret:n>
     PushConstant: @struct(value: i64, ty: Prim),                  // _ -> <v:1>
     JumpIf: @struct(true_ip: BbId, false_ip: BbId, slots: u16),   // <args:slots> <cond:1> -> !
     Goto: @struct(ip: BbId, slots: u16),                          // <args:slots> -> !

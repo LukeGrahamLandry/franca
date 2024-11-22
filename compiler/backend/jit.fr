@@ -33,7 +33,7 @@ fn clone(self: *BlockState) BlockState = {
 
 fn create_jit_shim(self: CompCtx, bc: *BcBackend, fid: FuncId, handler_callee_address: rawptr) Res(*FnBody) = {
     func := self.get_function(fid);
-    mark := __temp_alloc.mark();
+    mark := mark_temporary_storage();
     //@println("create shim for %", func.log(self));
     fake_body := @try(self.empty_fn_body(bc, fid, .Jit)) return;
     
@@ -51,25 +51,27 @@ fn create_jit_shim(self: CompCtx, bc: *BcBackend, fid: FuncId, handler_callee_ad
         want_log = false,
         debug = false,
         program = self,
+        dyn_call_context = false, // don't matter. we diy below
     );
     
     entry_block := emit&.push_block(empty());
     c := self.data.cast()[][];
+    opts := self.get_build_options();
     arg_type := c.tuple_of(@slice(c.get_or_create_type(rawptr), c.get_or_create_type(FuncId)));
     f_ty: FnType = (arg = arg_type, ret = c.get_or_create_type(rawptr), arity = 2);
     sig := @try(self.prim_sig(f_ty, .CCallReg)) return;
     emit&.push(PushConstant = (value = handler_callee_address.int_from_rawptr(), ty = .P64));
     emit&.push(PushConstant = (value = SelfHosted.int_from_ptr(c), ty = .P64));
     emit&.push(PushConstant = (value = fid.as_index(), ty = .I32));
-    emit&.push(CallFnPtr = (sig = emit&.push_sig(sig)));
+    emit&.push(CallFnPtr = (sig = emit&.push_sig(sig), context = opts.implicit_context_comptime));
     // All our arguments are still v-stacked so if we've found a pointer to call by now, we can just do that.
     // Otherwise the compiler would have panicked.  
     emit&.push(.RotateForImmediateCallPtr);
-    emit&.push(CallFnPtr = (sig = emit&.push_sig(emit.result.signeture)));
+    emit&.push(CallFnPtr = (sig = emit&.push_sig(emit.result.signeture), context = opts.implicit_context_comptime));
     @try(emit&.emit_return(func.finished_ret.unwrap())) return;
     bc.jitted&.extend_blanks(fid);
     @debug_assert_eq(bc.jitted.dispatch_table[fid.as_index()], uncompiled_function_placeholder(), "already compiled? why are we making a shim? %", self.log(func));
-    __temp_alloc.reset_retaining_capacity(mark);
+    reset_temporary_storage(mark);
     (Ok = fake_body)
 }
 
@@ -349,7 +351,8 @@ fn emit_block();
 // i wonder if i just dont like it because it goes against my brainwashing
 
 // important: be careful not to use the wrong arch's register constants in here. 
-fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $negative_slots: bool) Type = {
+// ContextReg must match ../../backend
+fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $ContextReg: i64, $negative_slots: bool) Type = {
     Emit :: @struct(
         program: CompilerRs,
         comp: CompCtx,
@@ -363,13 +366,17 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $negative_slots: bool) Type =
         clock: u16,
         body: *FnBody,
         forward_calls: List(FuncId),
+        context_slot: ?SpOffset = .None,
+        static_context: ?*rawptr,
         backend: B,
     );
     
     fn new(compile: CompilerRs, bc: *BcBackend, body: *FnBody) Emit = {
+        c := compile[][].comp();
+        opts := c.get_build_options();
         (
             program = compile,
-            comp = compile[][].comp(),
+            comp = c,
             bc = bc,
             asm = bc.jitted&,
             vars = list(temp()),
@@ -381,6 +388,9 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $negative_slots: bool) Type =
             body = body,
             forward_calls = list(temp()),
             backend = new(compile, bc),
+            static_context = @if(opts.implicit_context_comptime, .None, {
+                (Some = compile.env.static_context_pointer_ref)
+            }),
         )
     }
     
@@ -414,7 +424,8 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $negative_slots: bool) Type =
         self.next_slot = (id = 0);
         self.vars = .None.repeated(func.vars.len, temp());
         self.block_ips = .None.repeated(self.body.blocks.len, temp());
-    
+        
+        @debug_assert(func.when != .Aot, "cannot jit for aot");
         self.asm.mark_start(f); // this puts currenet address in table so recursion can be direct
         ff.set_flag(.AsmDone);  // this tells us to check the table. TODO: better to just compare table to tried_to_call_uncompiled instead of checking this flag?
         reserve_stack := self.emit_header();
@@ -424,6 +435,13 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $negative_slots: bool) Type =
         int_count, float_count := self.ccall_reg_to_stack(sig.args, sig.first_arg_is_indirect_return);
         // Any registers not containing args can be used.
         self.add_free_args(int_count, float_count);
+        
+        if self.body.context && self.static_context.is_none() {
+            // TODO: on x64 free reg might be rax? if we decide to waste one to create the address during the store. :FUCKED
+            context := self.create_slots(8);
+            self.context_slot = (Some = context);
+            self.store_u64(ContextReg, SP, context.id);
+        };
     
         @if(TRACE_ASM) @println("entry: (%)", self.state.stack.items());
         self.emit_block(0, false);
@@ -563,13 +581,55 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $negative_slots: bool) Type =
                 sig := self.body.decode_sig(f.sig);
                 // TODO: use with_link for tail calls. need to "Leave holes for stack fixup code." like below
                 // TODO: if you already know the stack height of the callee, you could just fixup to that and jump in past the setup code. but lets start simple.
-                self.dyn_c_call(sig) {
+                self.dyn_c_call(sig, f.context) {
                     if(f.tail, => self.emit_stack_fixup());
                     self.branch_func(f.f, !f.tail)
                 };
                 return(f.tail);
             }
-            fn Intrinsic(op) => self.inst_intrinsic(op);
+            fn Intrinsic(op) => {
+                @match(op) {
+                    fn GetContext() => {
+                        stacked := self.state.stack[self.state.stack.len - 1]&;
+                        // HACK: i don't have 0 arg intrinsics. 
+                        @debug_assert(!stacked.is(.FloatReg));
+                        r := if(stacked.is(.Increment), => stacked.Increment.reg, => self.get_free_reg()); 
+                        if self.static_context { ref | 
+                            ref := rawptr.int_from_ptr(ref);
+                            @debug_assert(ref != 0);
+                            // the ref is fixed, but we don't do the load now, we generate code to do the load. 
+                            self.load_imm(r, ref);
+                            self.load_u64(r, r, 0);
+                        } else {
+                            context := self.context_slot.expect("used GetContext in a function without context");
+                            // can't just push the spill slot because they might use SetContext while its still v-stacked.
+                            self.load_u64(r, SP, context.id);
+                        };
+                        stacked[] = (Increment = (reg = r, offset_bytes = 0));
+                    }
+                    fn SetContext() => {
+                        new_context: u5 = self.pop_to_reg();
+                            
+                        if self.static_context { ref | 
+                            r := self.get_free_reg();
+                            self.load_imm(r, rawptr.int_from_ptr(ref));
+                            self.store_u64(new_context, r, 0);
+                            self.drop_reg(r);
+                        } else {
+                            slot := or self.context_slot {
+                                // It's fine to create a context from thin air if you have a pointer to give us. 
+                                s := self.create_slots(8);
+                                self.context_slot = (Some = s);
+                                s
+                            };
+                            self.store_u64(new_context, SP, slot.id);
+                        };
+                        self.state.stack&.push(Literal = 0);
+                        self.drop_reg(new_context);
+                    }
+                    @default => self.inst_intrinsic(op);
+                };
+            }
             fn Ret0()     => return(self.emit_return(empty()));
             fn Ret1(prim) => return(self.emit_return(@slice(prim)));
             fn Ret2(f)    => return(self.emit_return(@slice(f._0, f._1)));
@@ -752,9 +812,13 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $negative_slots: bool) Type =
 
     // Note: comp_ctx doesn't push the ctx here, bc needs to do that. this it just does the call with an extra argument.
     /// <arg:n> -> <ret:m>
-    fn dyn_c_call(self: *Emit, sig: *PrimSig, $do_call: @Fn() void) void = {
+    fn dyn_c_call(self: *Emit, sig: *PrimSig, context: bool, $do_call: @Fn() void) void = {
         amount_stacked := self.stack_to_ccall_reg(sig.args, sig.first_arg_is_indirect_return);
         self.spill_abi_stompable();
+        if context && self.static_context.is_none() {
+            context := self.context_slot.expect("Tried to do call with context in function without context");
+            self.load_u64(ContextReg, SP, context.id);
+        };
         self.state.free_reg&.clear();
         self.state.free_reg_float&.clear();
         do_call();

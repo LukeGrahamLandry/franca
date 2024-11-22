@@ -14,11 +14,13 @@
 //! note: the franca front end sorts based on callgraph so increase chances of things being inlined. 
 //!
 
-MAX_INL_COST :: 4;
+MAX_INL_COST :: 4;  // remember zero is not the minimum if you want to disable inlining. 
 
 ::if(*i64);
+// TODO: this is broken when inlining mismatching env
 
 fn good4inl(f: *Qbe.Fn) bool = {
+    //return(false);
     fillrpo(f);
     fillpreds(f);
     blkmerge(f);
@@ -36,11 +38,12 @@ fn good4inl(f: *Qbe.Fn) bool = {
     write := false;
     for_insts_forward b { i |
         continue :: local_return;
-        if(i.op() == .nop || i.op() == .dbgloc, => continue());
-        if i.op() == .blit0 || is_store(i.op()) || i.op() == .call {    
+        o := i.op();
+        if(@is(o, .nop, .dbgloc), => continue());
+        if o == .blit0 || is_store(i.op()) || i.op() == .call {    
             write = true;
         };
-        @debug_assert(i.op() != .vastart);
+        @debug_assert(o != .vastart);
         if(is_par(i.op()), => npar&, => nins&)[] += 1;
     };
     cost := nins - 2 * (npar + int(b.jmp.type != .ret0)) - 1 /*Ocall*/;
@@ -160,25 +163,32 @@ fn inlargs(inlfn: *Qbe.Fn, f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins, c: *InlineCtx) 
     @debug_assert(inlfn.nblk == 1);
     i1 := inlfn.start.ins.first;
     if i.op() == .arge {
-        if i1.op() != .pare {
+        if inlfn.start.nins == 0 || i1.op() != .pare {
             /* drop env arg because the callee does not take one */
             i.set_nop();
             i = i.offset(1);
         };
     } else {
-        @debug_assert(inlfn.start.nins == 0 || i1.op() != .pare, "don't know how to inline that");
+        if inlfn.start.nins > 0 && i1.op() == .pare {
+            @debug_assert(rtype(i1.to) == .RTmp, "pare target must be tmp");
+            // callee wants an env arg but caller does not provide one. they get 0.
+            rto := getinlref(inlfn, i1.to, f, c);
+    		ins := make_ins(.copy, i1.cls(), rto, QbeConZero, QbeNull);
+    		addins(c.vins&, c.nins&, ins&);
+            i1 = i1.offset(1);
+        };
     };
     while => i.op() != .call {
         @debug_assert(is_arg(i.op()), "expected 'argX' instructions before call. did we start in the wrong place somehow?");
         @debug_assert(is_par(i1.op()), "expected 'parX' instructions at beginning of function. did we start in the wrong place somehow?");
         @assert(i.cls() == i1.cls(), "cant inline call with wrong argument type. (callee = %, caller = %)", inlfn.name(), f.name());
-        @debug_assert(rtype(i1.to) == .RTmp, "");
+        @debug_assert(rtype(i1.to) == .RTmp, "par target must be tmp");
         
         r := i.arg&[int(i.op() == .argc)];
 		rto := getinlref(inlfn, i1.to, f, c);
 
 		if i.op() == .argc {
-			@debug_assert(i1.op() == .parc);
+			@debug_assert(i1.op() == .parc, "expected parc for argc");
 			// If a function makes absolutely no writes to memory (or calls that might do so), 
 			// we don't need to bother copying the argument because it can't be mutated in the callee. 
 			// TODO: this could take advantage of the more sophisticated alias analysis stuff we do in other passes.
@@ -259,8 +269,8 @@ InlineCtx :: @struct(
 
 /* return index of last inlined ins */
 fn inlcall(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) i64 = {
-    @debug_assert(ptr_diff(b.ins.first, i) >= 0 && ptr_diff(i, b.ins.index(b.nins.zext())) >= 0);
-    @debug_assert(i.op() == .call);
+    @debug_assert(ptr_diff(b.ins.first, i) >= 0 && ptr_diff(i, b.ins.index(b.nins.zext())) >= 0, "bad size for inlining");
+    @debug_assert(i.op() == .call, "expected to be inlining call");
     inlfn := or inlfind(f, i.arg&[0]) {
         f.leaf = false;
         return(ptr_diff(b.ins.first, i))
@@ -404,7 +414,7 @@ fn emit_suspended_inlinables(m: *QbeModule) void = {
     log := m.debug["G".char()];
     for m.inlinable_but_referenced_later { id | 
         s := m.get_symbol_info(id);
-        mark := __temp_alloc.mark();
+        mark := mark_temporary_storage();
         if log {
             @fmt_write(m.debug_out, "\nFinishing suspended function: %\n", s.name);
         };
@@ -419,7 +429,7 @@ fn emit_suspended_inlinables(m: *QbeModule) void = {
         fill_use(f&);
         
         finish_qbe_passes(f&);
-        __temp_alloc.reset_retaining_capacity(mark);
+        reset_temporary_storage(mark);
     };
     m.inlinable_but_referenced_later&.clear();
 }

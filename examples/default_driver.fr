@@ -35,6 +35,7 @@ Options :: @struct(
     unsafe := false,
     own_exe := false,
     relocatable := false,
+    implicit_context := true,
 );
 
 Action  :: @enum(i64) (run, build, test); ::enum(Action);
@@ -52,6 +53,7 @@ fn driver(vtable: *ImportVTable) void = {
         build_options.safety_checks&.insert(SafetyCheck.DebugAssertions, false);
         build_options.safety_checks&.insert(SafetyCheck.InvalidTag, false);
     };
+    build_options.implicit_context_runtime = cmd.cfg.implicit_context;
     os := Os.macos; // TODO
     comptime_arch := query_current_arch().expect("known arch");
     arch := comptime_arch;
@@ -91,10 +93,10 @@ fn driver(vtable: *ImportVTable) void = {
             } else {
                 if cmd.cfg.qbe {
                     assert(!cmd.cfg.show_asm, "TODO: -S with qbe");
-                    c.compile_with_included_qbe(fid, .ExportWithNames, arch, os, m.goal.type);
+                    c.compile_with_included_qbe(fid, .WrapMain, arch, os, m.goal.type);
                 } else {
                     assert(cmd.cfg.llvm, "rn only two backends. update me as needed!");
-                    c.compile_with_llvm(fid, .ExportWithNames, cmd.cfg.debug_info, arch, os, cmd.cfg.show_asm, cmd.cfg.slow, cmd.cfg.relocatable);
+                    c.compile_with_llvm(fid, .WrapMain, cmd.cfg.debug_info, arch, os, cmd.cfg.show_asm, cmd.cfg.slow, cmd.cfg.relocatable);
                 };
                 @println("[built %]", if(cmd.cfg.wasm, => "a.wasm", => "a.out"));
             };
@@ -114,7 +116,7 @@ fn driver(vtable: *ImportVTable) void = {
                 ptr := if cmd.cfg.qbe {
                     @if(ENABLE_INTERNAL_QBE, {
                         m = init_default_module_dyn(vtable, (os = os, arch = arch, type = m.goal.type));
-                        emit_qbe_included_dyn(m&, c&, @slice(fid), .ExportWithNames);
+                        emit_qbe_included_dyn(m&, c&, @slice(fid), .WrapMain);
                         m&.fill_from_libc();
                         m&.make_exec();
                         or m&.get_addr("main") {
@@ -128,12 +130,12 @@ fn driver(vtable: *ImportVTable) void = {
                 f();
             } else {
                 if cmd.cfg.llvm {
-                    c.compile_with_llvm(fid, .ExportWithNames, cmd.cfg.debug_info, arch, os, false, cmd.cfg.slow, false);
+                    c.compile_with_llvm(fid, .WrapMain, cmd.cfg.debug_info, arch, os, false, cmd.cfg.slow, false);
                 } else {
                     assert(!cmd.cfg.show_asm, "TODO: -S with qbe");
                     assert(cmd.cfg.qbe, "rn only two backends. update me as needed!");
                     // note: not the internal one for now
-                    c.compile_with_qbe(fid, .ExportWithNames, arch, os);
+                    c.compile_with_qbe(fid, .WrapMain, arch, os);
                 };
                 if cmd.cfg.blink {
                     args := cmd.child_args.clone(temp());
@@ -162,7 +164,7 @@ fn driver(vtable: *ImportVTable) void = {
                         @if(ENABLE_INTERNAL_QBE, {
                             // would be faster if you could share the module between runs
                             m = init_default_module_dyn(vtable, (os = os, arch = arch, type = m.goal.type));
-                            _ := emit_qbe_included_dyn(m&, c&, @slice(fid), .ExportWithNames);
+                            _ := emit_qbe_included_dyn(m&, c&, @slice(fid), .WrapMain);
                             m&.fill_from_libc();
                             m&.make_exec();
                             or m&.get_addr(name) {
@@ -449,7 +451,20 @@ fn parse_cli_args() Command = {
             @case("-c") => {
                 cfg.relocatable = true;
             };
+            @case("-ctx=static") => {
+                cfg.relocatable = true;
+            };
+            @case("-c") => {
+                cfg.relocatable = true;
+            };
             @default => {
+                if arg.starts_with("-ctx=") {
+                    @switch(arg) {
+                        @case("-ctx=static") => { cfg.implicit_context = false; };
+                        @case("-ctx=implicit") => { cfg.implicit_context = true; };
+                        @default => @panic("invalid argument %", arg);
+                    };
+                };
                 extra_args&.push(arg);
             };
         };

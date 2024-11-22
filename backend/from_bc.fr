@@ -21,6 +21,7 @@ fn finished(self: *EmitQbe2, fid: FuncId) void = {
     fnn := self.b&.build(name.items());
     run_qbe_passes(fnn&);
     self.body = zeroed(*FnBody); // :EVIL     but just avoiding confusion. 
+    self.context = QbeNull;
 }; 
 
 #include_std("compiler/backend/walk_bc.fr");
@@ -118,12 +119,25 @@ EmitQbe2 :: @struct(
     signeture := PrimSig.zeroed(), // TODO: HACK   also now redundant except that you don't always have a body. 
     body := zeroed(*FnBody), // :EVIL
     pair_type_id := 99999999, // filled by init
+    context := QbeNull,
+    implicit_context: bool,
+    
     $Val := Qbe.Ref, // TODO: const can't be first (doesn't parse).  -- Jun 14
 );
 
 // TODO: dependency problem so can't call this `init`
 fn new(comp: CompCtx, alloc: Alloc, arch: Arch, os: Os) EmitQbe2 #inline = {
-    s: EmitQbe2 = (comp = comp, b = init(libc_allocator, smuggle_module_pointer[]), block_args = list(temp()), out = init(12, alloc), current = BbId.zeroed(), return_value_type_sizes = empty(), inline_asm = list(alloc), os = os);
+    s: EmitQbe2 = (
+        comp = comp, 
+        b = init(libc_allocator, smuggle_module_pointer[]), 
+        block_args = list(temp()), 
+        out = init(12, alloc), 
+        current = BbId.zeroed(), 
+        return_value_type_sizes = empty(), 
+        inline_asm = list(alloc), 
+        os = os,
+        implicit_context = comp.get_build_options()[].implicit_context_runtime,
+    );
     smuggle_module_pointer[] = zeroed(*QbeModule);
     
     f: []Qbe.Field = @slice(@as(Qbe.Field) (type = .Fl, len = 1.trunc()), @as(Qbe.Field) (type = .Fl, len = 1.trunc()));
@@ -171,6 +185,28 @@ fn emit_entry_points_and_debug_info(gen: *CodeGen(EmitQbe2), comp: CompCtx, fns:
                 gen.backend&.write_export_bounce(fid);
             };
         };
+        fn WrapMain() => {
+            @assert(fns.len == 1, ".WrapMain expected a single entry point");
+            env := comp.get_comptime_env();
+            runtime_init := env.runtime_init.expect("declaration of franca_runtime_init");
+            
+            self.b.lnk.export = true;
+            entry := self.b&.push_block();
+            self.current = entry;
+    
+            argc := self.b&.push_inst(self.current, .par, .Kl, QbeNull, QbeNull);
+            argv := self.b&.push_inst(self.current, .par, .Kl, QbeNull, QbeNull);
+            user_main := self.inst_func_ref(fns[0]);
+            runtime_init := self.inst_func_ref(runtime_init);
+            self.b&.push_inst0(self.current, .arg, .Kl, argc, QbeNull);
+            self.b&.push_inst0(self.current, .arg, .Kl, argv, QbeNull);
+            self.b&.push_inst0(self.current, .arg, .Kl, user_main, QbeNull);
+            self.b&.push_inst0(self.current, .call, .Kw, runtime_init, QbeNull);
+            self.b&.end_block(self.current, (type = .ret0, arg = QbeNull));
+            fake_decl_name := @format("main\0") temp();
+            fnn := self.b&.build(fake_decl_name.items());
+            run_qbe_passes(fnn&);
+        }
     };
     
     // HACK we rely on this being called at the very end for our secret returning inline asm
@@ -182,6 +218,7 @@ fn emit_entry_points_and_debug_info(gen: *CodeGen(EmitQbe2), comp: CompCtx, fns:
 fn emit_bounce_fn(self: *EmitQbe2, impl_name_callee: Str, fake_decl_name: Str, signeture: PrimSig, private: bool) void = {
     //@println("emit_bounce_fn %", fake_decl_name);
     self.b.lnk.export = !private;
+    self.context = QbeNull;
     
     entry := self.b&.push_block();
     self.current = entry;
@@ -207,7 +244,7 @@ fn emit_bounce_fn(self: *EmitQbe2, impl_name_callee: Str, fake_decl_name: Str, s
     fuck := @format("%\0", impl_name_callee) temp();
     callee := self.b&.push_symbol(ptr = fuck.maybe_uninit.ptr);
     self.signeture = signeture;
-    ret := self.inst_call(params.items(), signeture, callee);
+    ret := self.inst_call(params.items(), signeture, callee, true); // TODO: :Context?
     
     self.inst_return(ret);
     fnn := self.b&.build(fake_decl_name);
@@ -374,6 +411,10 @@ fn setup(self: *EmitQbe2, body: *FnBody, vars_out: *List(Qbe.Ref)) void = {
     self.signeture = body.signeture;
     self.body = body;
     params: List(Qbe.Ref) = list(temp());
+    self.context = QbeNull;
+    if body.context {
+        self.context = self.b&.push_inst((id = 0), .pare, .Kl, QbeNull, QbeNull);
+    };
     for body.signeture.args { prim | 
         params&.push(self.b&.push_parameter(qbe_real_class(prim)));
     };
@@ -526,16 +567,32 @@ fn inst_intrinsic(self: *EmitQbe2, args: []Qbe.Ref, op: Intrinsic) []Qbe.Ref = {
             a.ptr[] = self.b&.push_inst(self.current, .xor, .Kl, args[0], self.b&.push_literal(-1));
             a
         }
+        fn GetContext() => {
+            @debug_assert(self.context != QbeNull, "Cannot used GetContext in function without context.");
+            args[0] = self.b&.push_inst(self.current, .copy, .Kl, self.context, QbeNull); 
+            args
+        }
+        fn SetContext() => {
+            if self.context == QbeNull {
+                self.context = self.b&.push_inst(self.current, .copy, .Kl, args[0], QbeNull); 
+            } else {
+                self.b&.push_inst(self.current, .copy, .Kl, self.context, args[0], QbeNull); 
+            };
+            args[0] = QbeConZero;
+            args
+        }
         @default => @panic("ICE: unhandled qbe inst_intrinsic %", op);
     }
 }
 
-fn inst_call(self: *EmitQbe2, args: Slice(Qbe.Ref), sig: PrimSig, f: FuncId, tail: bool, _loc: ?Span) Slice(EmitQbe2.Val) = {
-    callee := self.b&.push_symbol(self.fn_name_cstr(f));
-    self.inst_call(args, sig, callee)
+fn inst_call(self: *EmitQbe2, args: Slice(Qbe.Ref), sig: PrimSig, f: FuncId, tail: bool, _loc: ?Span, context: bool) Slice(EmitQbe2.Val) = {
+    name := self.fn_name_cstr(f);
+    callee := self.b&.push_symbol(name);
+    //@println("% %", name, context);
+    self.inst_call(args, sig, callee, context)
 }
 
-fn inst_call(self: *EmitQbe2, args: Slice(Qbe.Ref), sig: PrimSig, callee: Qbe.Ref) Slice(EmitQbe2.Val) = {
+fn inst_call(self: *EmitQbe2, args: Slice(Qbe.Ref), sig: PrimSig, callee: Qbe.Ref, context: bool) Slice(EmitQbe2.Val) = {
     self.b.leaf = false;
     out_vals: List(Qbe.Ref) = list(temp());
     return_value := Qbe.Ref.zeroed();
@@ -567,6 +624,13 @@ fn inst_call(self: *EmitQbe2, args: Slice(Qbe.Ref), sig: PrimSig, callee: Qbe.Re
     shift := if(sig.first_arg_is_indirect_return, => 1, => 0);
     @debug_assert_eq(args.len, sig.args.len.add(shift), "mismatch args");
     
+    //// TODO
+    //each self.b.globals.debug { b |
+    //    b[] = true; 
+    //};
+    if self.context != QbeNull && context {
+        self.b&.push_inst0(self.current, .arge, .Kl, self.context, QbeNull);
+    };
     range(0, sig.args.len) {i|
         ty := sig.args[i];
         v := args[i + shift];
@@ -593,8 +657,8 @@ fn inst_trap(self: *EmitQbe2) void = {
     self.b&.end_block(self.current, (type = .hlt));
 }
 
-fn inst_call_ptr(self: *EmitQbe2, args: Slice(Qbe.Ref), sig: PrimSig, ptr: EmitQbe2.Val, _loc: ?Span) Slice(EmitQbe2.Val) = {
-    self.inst_call(args, sig, ptr)
+fn inst_call_ptr(self: *EmitQbe2, args: Slice(Qbe.Ref), sig: PrimSig, ptr: EmitQbe2.Val, _loc: ?Span, context: bool) Slice(EmitQbe2.Val) = {
+    self.inst_call(args, sig, ptr, context)
 }
 
 fn inst_offset(self: *EmitQbe2, ptr: EmitQbe2.Val, bytes: i64) EmitQbe2.Val = {

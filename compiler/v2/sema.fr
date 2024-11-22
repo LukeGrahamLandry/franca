@@ -553,6 +553,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
                 done :: local_return;
                 func.cc = (Some = .CCallReg);
                 good = true;
+                func.set_flag(.NoContext);
                 
                 if !find_import(Flag.libc.ident()) {
                     if get_smuggled_libc_function(self.env.comptime_arch, func.name) { addr |
@@ -586,6 +587,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
                 ptr := ptr.rawptr_from_int();
                 self.put_jitted_function(fid, ptr);
                 func.set_flag(.RealAsmDone);    
+                func.set_flag(.YesContext);
             };
             @case(Flag.intrinsic.ident()) => {
                 good = true;
@@ -594,6 +596,12 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
                 op := @check(self.immediate_eval_expr(value, intrinsic_ty)) return;
                 op := Intrinsic.assume_cast(op&)[];
                 func.body = (Intrinsic = op);
+                // TODO: redundant with emit_bc
+                if op != .GetContext {
+                    func.set_flag(.NoContext);
+                } else { 
+                    func.set_flag(.YesContext);
+                };
             };
             @case(Flag.redirect.ident()) => {
                 good = true;
@@ -1739,7 +1747,11 @@ fn emit_capturing_call(self: *SelfHosted, f: FuncId, expr_out: *FatExpr, request
         self.add_callee(callee);
     };
     @err_assert(func.mutual_callees.is_empty(), "TODO: you can't really refer to inlined things so how'd you make it recursive?") return;
-
+    if self.dispatch.enclosing_function { caller | 
+        if func.get_flag(.YesContext) {
+            self.get_function(caller).set_flag(.YesContext);
+        };
+    };
     if !func.body&.is(.Normal) {
         return(@err("emit_capturing_call: '=>' function '%' must have body expression.", self.pool.get(func.name)));
     };
@@ -2174,7 +2186,12 @@ fn bind_const_arg(self: *SelfHosted, o_f: FuncId, arg_name: Var, arg_value: Valu
             func.set_flag(.MayHaveAquiredCaptures);
             self[o_f].cc = (Some = .Inline); // just this is enough to fix chained_captures
             self[arg_func].cc = (Some = .Inline); // but this is needed too for others (perhaps just when there's a longer chain than that simple example).
+            
+            if arg_func_obj.get_flag(.YesContext) {
+                func.set_flag(.YesContext);
+            };
         };
+        
         
         // If we're passing a lambda arg, infer its return type based on the param's hint (not just the callsite). 
         //      f :: fn(x: @Fn() @enum(a, b)) void = { x(); } // callsite doesn't give a hint because statement discards value. 
@@ -3065,6 +3082,8 @@ fn update_function_metadata(self: *SelfHosted, func: *Func, os: ?OverloadSet) Re
                 func.set_flag(.ComptimeOnly);
             };
             @case(Flag.noinline.ident()) => func.set_flag(.NoInline);
+            @case(Flag.no_context.ident()) => func.set_flag(.NoContext);
+            @case(Flag.yes_context.ident()) => func.set_flag(.YesContext);
             // TODO: generic+unsafe_noop_cast+cold are done in scope for old sema but i want to move them here. -- Jul 30
             @case(Flag.generic.ident())  => func.set_flag(.Generic);
             @case(Flag.cold.ident())     => func.set_flag(.Cold);

@@ -21,8 +21,9 @@ INCLUDE_QBE_VTABLE :: true;
 
 ::?[]Prim; // TODO: why do i need this extra when lsp????? order of exports changed maybe??
 
-// TODO: don't individually allocate all these. it just makes it easier to do rust ffi while not fully self hosted. 
+// TODO: don't individually allocate all these. 
 SelfHosted :: @rec @struct(
+    env: *ComptimeEnvironment,
     pool: *StringPool,
     codemap: *CodeMap,
     parser: *Parser,
@@ -30,7 +31,6 @@ SelfHosted :: @rec @struct(
     scopes: *Scopes,
     baked: *Baked,
     last_loc: Span,
-    env: *ComptimeEnvironment,
     index: ProgramIndex,
     functions: BucketArray(Func),  // TODO: have a version of this type that doesn't add gaps if you push_all because that will break the indexing
     types: BucketArray(TypeInfo),
@@ -243,6 +243,7 @@ fn find_std_lib(a: Alloc) ?Str = {
 
 // TODO: pass requested type through generic args so this isn't so clunky. -- Jun 23
 fn init_self_hosted(build_options: *BuildOptions) *SelfHosted = {
+    build_options.implicit_context_comptime = query_context_is_implicit();
     stack_base := 0;
     a: ArenaAlloc = init(page_allocator, 1.shift_left(23));
     arena := a&.borrow().boxed(ArenaAlloc, a);
@@ -293,8 +294,12 @@ fn init_self_hosted(build_options: *BuildOptions) *SelfHosted = {
         compile_error_pointer = .None,
         comptime_arch = arch,
         inline_bc_fn_type = .None,
+        static_context_pointer_ref = zeroed(*rawptr),
+        runtime_init = .None,
+        static_context_var = .None, 
     );
     env := a.boxed(ComptimeEnvironment, env);
+    build_options.env = ComptimeEnvironment.raw_from_ptr(env);
     self: SelfHosted = (
         pool = pool,
         codemap = codemap,
@@ -315,6 +320,25 @@ fn init_self_hosted(build_options: *BuildOptions) *SelfHosted = {
         comptime_libraries = init(a),
         vtable = init_driver_vtable(),
     );
+    if !build_options.implicit_context_comptime {
+        env.static_context_pointer_ref = ptr_cast_unchecked(*DefaultContext, rawptr, single_threaded_context);
+        // We're going to need this but we don't know how much space it will need yet. 
+        // It can't really be an @static because we can't compile anything until we have a place to stick the context. 
+        // TODO: but actually it has to be the compiler's own context... that's hard to think about... baby steps... -- Nov 22
+       ;
+        if env.static_context_pointer_ref[].is_null() {
+            scary_log("compiler had null context!");
+        };
+        if env.static_context_pointer_ref[] != get_dynamic_context() {
+            scary_log("confused about where to find context!");
+        };
+        scary_log("compiler using static context!");
+    } else {
+        if get_dynamic_context().is_null() {
+            scary_log("compiler had null context!");
+        };
+        scary_log("compiler using implicit context!");
+    };
     self&.init_fixed_types();
     self.pool.fill_fixed_flags();
     
