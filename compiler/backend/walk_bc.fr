@@ -52,6 +52,7 @@ fn CodeGen($B: Type) Type = {
         constants_needed: BitSet = empty(),
         max_const_id: i64 = 0,
         pending: List(FuncId),
+        static_context_var: ?BakedVarId,
         backend: B,
         $emit := emit_program,
     );
@@ -59,16 +60,19 @@ fn CodeGen($B: Type) Type = {
     // :TooManyArgsX64
     emit_program :: fn(comp: CompCtx, fns: [] FuncId, entry: ProgramEntry, target: *TargetEnv) BucketArray(u8) = {
         alloc := libc_allocator; // TODO!
+        env := comp.get_comptime_env();
         gen: Self = (
             program = comp,
             body = zeroed(*FnBody), // EVIL
             vars = list(temp()),
             stack = list(temp()),
             pending = fns.clone(libc_allocator),
+            static_context_var = env.static_context_var,
             backend = new(comp, alloc, target.arch, target.os),
         );
+        @assert(comp.get_build_options()[].implicit_context_runtime == gen.static_context_var.is_none(), "should have baked the static context location already iff no implicit context");
         work_stack := FuncId.list(temp());
-        if entry == .WrapMain {
+        if entry == .WrapMain || entry == .TestRunnerMain {
             env := comp.get_comptime_env();
             work_stack&.push(env.runtime_init.expect("declaration of franca_runtime_init"));
         };
@@ -168,6 +172,9 @@ fn CodeGen($B: Type) Type = {
             }
         };
         
+        if env.static_context_var { context | 
+            gen&.add_constant(context);
+        };
         constants := 0;
         range(0, gen.max_const_id + 1) {i|
             if gen.constants_needed&.get(i) {
@@ -184,7 +191,7 @@ fn CodeGen($B: Type) Type = {
         // TODO: if alloc != temp { temp.reset(mark ? no but that wouldn't catch if they derived a new one from temp
         gen.backend.out
     };
-   
+
     fn emit_current_function(self: *Self) void = {
         mark := mark_temporary_storage();
         s := self.body.blocks.items();
@@ -209,7 +216,8 @@ fn CodeGen($B: Type) Type = {
         args := self.backend&.move_to_block(block, b);
         assert(args.len.ge(block.arg_prims.len), "missing block args");
         self.stack&.push_all(args);
-        enumerate (block.insts.items()){ i, inst |
+        enumerate (block.insts.items()){ i, inst |  
+            continue :: local_return;
             inst := inst[];
             @match(inst){
                 (fn Nop() => ());
@@ -229,6 +237,26 @@ fn CodeGen($B: Type) Type = {
                 (fn Intrinsic(op) => {
                     arg_count := op.arg_count();
                     args := self.stack.items().slice_last(arg_count).expect("enough args on stack for intrinsic");
+                    
+                    @match(op) {
+                        fn GetContext() => {
+                            if self.static_context_var { context | 
+                                context := self.backend&.inst_global(context);
+                                args[0] = self.backend&.inst_load(context, .P64);
+                                continue();
+                            };
+                        }
+                        fn SetContext() => {
+                            if self.static_context_var { context | 
+                                context := self.backend&.inst_global(context);
+                                self.backend&.inst_store(context, args[0], .P64);
+                                args[0] = self.backend&.inst_literal(0, .I64);
+                                continue();
+                            };
+                        }
+                        @default => ();
+                    };
+                    
                     ret := self.backend&.inst_intrinsic(args, op);
                     self.stack.len -= arg_count;
                     self.stack&.push_all(ret);
@@ -386,7 +414,7 @@ fn CodeGen($B: Type) Type = {
                     };
                     break();
                 }
-            };
+            }; // continues
         };
     }
     

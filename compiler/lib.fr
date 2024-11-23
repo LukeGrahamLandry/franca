@@ -242,8 +242,8 @@ fn find_std_lib(a: Alloc) ?Str = {
 }
 
 // TODO: pass requested type through generic args so this isn't so clunky. -- Jun 23
-fn init_self_hosted(build_options: *BuildOptions) *SelfHosted = {
-    build_options.implicit_context_comptime = query_context_is_implicit();
+fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
+    opts.implicit_context_comptime = query_context_is_implicit();
     stack_base := 0;
     a: ArenaAlloc = init(page_allocator, 1.shift_left(23));
     arena := a&.borrow().boxed(ArenaAlloc, a);
@@ -285,7 +285,7 @@ fn init_self_hosted(build_options: *BuildOptions) *SelfHosted = {
         bake_os = .None,
         fat_expr_type = .None,
         intrinsic_type = .None,
-        build_options = BuildOptions.raw_from_ptr(build_options),
+        build_options = BuildOptions.raw_from_ptr(opts),
         unquote_placeholders = .None,
         comptime_os = query_current_os(),
         os_type = .None,
@@ -294,12 +294,11 @@ fn init_self_hosted(build_options: *BuildOptions) *SelfHosted = {
         compile_error_pointer = .None,
         comptime_arch = arch,
         inline_bc_fn_type = .None,
-        static_context_pointer_ref = zeroed(*rawptr),
         runtime_init = .None,
         static_context_var = .None, 
     );
     env := a.boxed(ComptimeEnvironment, env);
-    build_options.env = ComptimeEnvironment.raw_from_ptr(env);
+    opts.env = ComptimeEnvironment.raw_from_ptr(env);
     self: SelfHosted = (
         pool = pool,
         codemap = codemap,
@@ -320,28 +319,32 @@ fn init_self_hosted(build_options: *BuildOptions) *SelfHosted = {
         comptime_libraries = init(a),
         vtable = init_driver_vtable(),
     );
-    if !build_options.implicit_context_comptime {
-        env.static_context_pointer_ref = ptr_cast_unchecked(*DefaultContext, rawptr, single_threaded_context);
+    
+    if get_dynamic_context().is_null() {
+        scary_log("compiler had null context!");
+    };
+    if !opts.implicit_context_comptime {
         // We're going to need this but we don't know how much space it will need yet. 
         // It can't really be an @static because we can't compile anything until we have a place to stick the context. 
         // TODO: but actually it has to be the compiler's own context... that's hard to think about... baby steps... -- Nov 22
-       ;
-        if env.static_context_pointer_ref[].is_null() {
-            scary_log("compiler had null context!");
-        };
-        if env.static_context_pointer_ref[] != get_dynamic_context() {
-            scary_log("confused about where to find context!");
-        };
-        scary_log("compiler using static context!");
+        
+        scary_log("compiler using static context!\n");
     } else {
-        if get_dynamic_context().is_null() {
-            scary_log("compiler had null context!");
-        };
-        scary_log("compiler using implicit context!");
+        scary_log("compiler using implicit context!\n");
     };
     self&.init_fixed_types();
     self.pool.fill_fixed_flags();
     
+    // Only needed if targetting AOT but its so cheap so who cares. 
+    if !opts.implicit_context_runtime {
+        // Reserve a global slot to store the context pointer. 
+        // The program can only access this with GetContext and SetContext. 
+        out: List(BakedEntry) = list(a);
+        out&.push((Num = (value = 0, ty = .I64)));
+        id := self&.put_baked((VoidPtrArray = out.rs()), .None);
+        env.static_context_var = (Some = id); 
+    };
+
     if find_os_libc_dylib() { libc_path | 
         libc := dlopen(libc_path, .Lazy);
         if !libc.lib.is_null() { 

@@ -367,7 +367,7 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $ContextReg: i64, $negative_s
         body: *FnBody,
         forward_calls: List(FuncId),
         context_slot: ?SpOffset = .None,
-        static_context: ?*rawptr,
+        implicit_context: bool,
         backend: B,
     );
     
@@ -388,9 +388,7 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $ContextReg: i64, $negative_s
             body = body,
             forward_calls = list(temp()),
             backend = new(compile, bc),
-            static_context = @if(opts.implicit_context_comptime, .None, {
-                (Some = compile.env.static_context_pointer_ref)
-            }),
+            implicit_context = opts.implicit_context_comptime,
         )
     }
     
@@ -436,7 +434,7 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $ContextReg: i64, $negative_s
         // Any registers not containing args can be used.
         self.add_free_args(int_count, float_count);
         
-        if self.body.context && self.static_context.is_none() {
+        if self.body.context && self.implicit_context {
             // TODO: on x64 free reg might be rax? if we decide to waste one to create the address during the store. :FUCKED
             context := self.create_slots(8);
             self.context_slot = (Some = context);
@@ -590,32 +588,27 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $ContextReg: i64, $negative_s
             fn Intrinsic(op) => {
                 @match(op) {
                     fn GetContext() => {
-                        stacked := self.state.stack[self.state.stack.len - 1]&;
-                        // HACK: i don't have 0 arg intrinsics. 
-                        @debug_assert(!stacked.is(.FloatReg));
-                        r := if(stacked.is(.Increment), => stacked.Increment.reg, => self.get_free_reg()); 
-                        if self.static_context { ref | 
-                            ref := rawptr.int_from_ptr(ref);
-                            @debug_assert(ref != 0);
-                            // the ref is fixed, but we don't do the load now, we generate code to do the load. 
-                            self.load_imm(r, ref);
-                            self.load_u64(r, r, 0);
-                        } else {
+                        if self.implicit_context {
+                            // HACK: i don't have 0 arg intrinsics. 
+                            stacked := self.state.stack[self.state.stack.len - 1]&;
+                            @debug_assert(!stacked.is(.FloatReg));
+                            r := if(stacked.is(.Increment), => stacked.Increment.reg, => self.get_free_reg()); 
                             context := self.context_slot.expect("used GetContext in a function without context");
                             // can't just push the spill slot because they might use SetContext while its still v-stacked.
                             self.load_u64(r, SP, context.id);
-                        };
-                        stacked[] = (Increment = (reg = r, offset_bytes = 0));
+                            stacked[] = (Increment = (reg = r, offset_bytes = 0));
+                        } else {
+                            // We want the jitted program to share the context with the compiler, 
+                            // but we can't access the address of the compiler's static context slot, 
+                            // so we just patch in a call to the compiler's own GetContext. 
+                            // It would be correct to do it this way when using implicit_context, 
+                            // but it's sad to be so wasteful when we could just read the register directly.  -- Nov 23
+                            self.call_1to1(@as(rawptr) builtin_get_dynamic_context);
+                        }
                     }
                     fn SetContext() => {
-                        new_context: u5 = self.pop_to_reg();
-                            
-                        if self.static_context { ref | 
-                            r := self.get_free_reg();
-                            self.load_imm(r, rawptr.int_from_ptr(ref));
-                            self.store_u64(new_context, r, 0);
-                            self.drop_reg(r);
-                        } else {
+                        if self.implicit_context {
+                            new_context: u5 = self.pop_to_reg();
                             slot := or self.context_slot {
                                 // It's fine to create a context from thin air if you have a pointer to give us. 
                                 s := self.create_slots(8);
@@ -623,9 +616,12 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $ContextReg: i64, $negative_s
                                 s
                             };
                             self.store_u64(new_context, SP, slot.id);
-                        };
-                        self.state.stack&.push(Literal = 0);
-                        self.drop_reg(new_context);
+                            self.state.stack&.push(Literal = 0);
+                            self.drop_reg(new_context);
+                        } else {
+                            // see GetContext case
+                            self.call_1to1(@as(rawptr) set_dynamic_context);
+                        }
                     }
                     @default => self.inst_intrinsic(op);
                 };
@@ -694,6 +690,16 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $ContextReg: i64, $negative_s
         };
     
         false
+    }
+    
+    // I don't think its worth the pain to thread through the context as a symbol you can actually reference. 
+    // So instead we just call the compiler's own versions of set/get when we need to jit without abi=implicit. 
+    // The jitted code doesn't have its own memory allocated for the context slot. 
+    fn call_1to1(self: *Emit, callee: rawptr) void = {
+        val := self.state.stack&.pop().unwrap();
+        self.state.stack&.push(Literal = int_from_rawptr(callee));
+        self.state.stack&.push(val);
+        self.emit_other_inst(CallFnPtr = (sig = reserved_1to1_sig, context = false));
     }
     
     fn restore_all_registers(self: *Emit) void = 
@@ -815,7 +821,7 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $ContextReg: i64, $negative_s
     fn dyn_c_call(self: *Emit, sig: *PrimSig, context: bool, $do_call: @Fn() void) void = {
         amount_stacked := self.stack_to_ccall_reg(sig.args, sig.first_arg_is_indirect_return);
         self.spill_abi_stompable();
-        if context && self.static_context.is_none() {
+        if context && self.implicit_context {
             context := self.context_slot.expect("Tried to do call with context in function without context");
             self.load_u64(ContextReg, SP, context.id);
         };

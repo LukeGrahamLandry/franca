@@ -9,19 +9,18 @@ DefaultContext :: @struct(
     reserved: Array(i64, 7),
     cli_arguments: []CStr,
     temporary_allocator: *ArenaAlloc,
-    implicit_context_abi: bool,
-    reserved2: Array(i64, 8),
-    //panic_hook: @FnPtr(msg: Str) Never,
+    reserved2: Array(i64, 9),
+    panic_hook: @FnPtr(msg: Str) Never,
 );
 
-// The compiler generates a call to this as your program's main entry point. 
+// For AOT builds, the compiler generates a call to this as your program's main entry point. 
 franca_runtime_init :: fn(argc: i64, argv: *CStr, user_main: @FnPtr(argc: i64, argv: *CStr) void) i64 = {
     push_zeroed_dynamic_context { 
         c := context(DefaultContext);
         temporary_allocator: ArenaAlloc = init(page_allocator, 1.shift_left(20));
         c.temporary_allocator = temporary_allocator&;
         c.cli_arguments = (ptr = argv, len = argc);
-        temp().alloc(u8, 1); // coconut.jpg // TODO
+        c.panic_hook = print_and_abort;
         user_main(argc, argv);
     };
     0
@@ -45,19 +44,13 @@ fn query_context_is_implicit() bool = {
     implicit
 }
 
-use_single_threaded_context :: false; // @builtin use_single_threaded_context;
-size_of_dynamic_context     :: DefaultContext.size_of(); // @builtin size_of_dynamic_context;
-single_threaded_context     :: @static(*DefaultContext);
+size_of_dynamic_context :: DefaultContext.size_of(); // @builtin size_of_dynamic_context;
 
-fn get_dynamic_context() rawptr = {
-    fn builtin_get_dynamic_context(_: i64) rawptr #intrinsic(.GetContext);
-    builtin_get_dynamic_context(0)
-}
+fn get_dynamic_context() rawptr = 
+    builtin_get_dynamic_context(0);
 
-fn set_dynamic_context(context: rawptr) void #inline = {
-    fn builtin_set_dynamic_context(context: rawptr) i64 #intrinsic(.SetContext);
-    builtin_set_dynamic_context(context);
-}
+builtin_get_dynamic_context :: fn(_: i64) rawptr #intrinsic(.GetContext);
+set_dynamic_context :: fn(context: rawptr) i64 #intrinsic(.SetContext);
 
 fn push_zeroed_dynamic_context($body: @Fn() void) void = {
     new_context := @uninitialized Array(u8, size_of_dynamic_context);
@@ -88,6 +81,7 @@ fn push_dynamic_context($body: @Fn() void) void = {
     };
 }
 
+// TODO: let the driver program add new fields. 
 fn get_offset_to_dynamic_context_field(T: Type) i64 = {
     if T == DefaultContext {
         0
@@ -96,39 +90,18 @@ fn get_offset_to_dynamic_context_field(T: Type) i64 = {
     }
 }
 
-fn context($T: Type) *T #generic #inline = {
+fn context($T: Type) *T #generic = {
     off :: {
         env := get_comptime_environment();
         get_offset_to_dynamic_context_field(T)  
     };
-    T.ptr_from_raw(get_dynamic_context().offset(off))
+    c := get_dynamic_context().offset(off);
+    T.ptr_from_raw(c)
 }
 
-//:: init_dynamic_context();
 ::if(rawptr);
-fn scary_log(s: Str) void #inline = {
+fn scary_log(s: Str) void = {
     write(@as(Fd) (fd = 0), s.ptr, s.len);
-}
-
-fn init_dynamic_context() void = {
-    if get_dynamic_context().is_null() {
-        scary_log("comptime init_dynamic_context found null context but expected to inherit from the compiler.");
-    };
-    fill_first_context();
-}
-
-fn fill_first_context() void #inline = {
-    // this is not what you want
-    //new_context_ :: @static(Array(u8, size_of_dynamic_context));
-    //new_context := raw_from_ptr(@type new_context_[], new_context_);
-    //set_local_dynamic_context(new_context);
-    
-    context := context(DefaultContext);
-    context.thread_index = 0;
-    context.temporary_allocator = init(page_allocator, 1.shift_left(20));
-    //context.panic_hook = print_and_abort;
-    // TODO: crippling problem with this type of seperate init, comptime code before us can reference the variable 
-    //       and cause its declaration early but that won't make this code run early.  
 }
 
 fn temp() Alloc #inline = 

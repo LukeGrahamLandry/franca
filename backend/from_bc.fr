@@ -136,6 +136,7 @@ fn new(comp: CompCtx, alloc: Alloc, arch: Arch, os: Os) EmitQbe2 #inline = {
         return_value_type_sizes = empty(), 
         inline_asm = list(alloc), 
         os = os,
+        // TODO: this will get more complicated when we want to support comptime execution with this backend. 
         implicit_context = comp.get_build_options()[].implicit_context_runtime,
     );
     smuggle_module_pointer[] = zeroed(*QbeModule);
@@ -161,22 +162,31 @@ fn emit_entry_points_and_debug_info(gen: *CodeGen(EmitQbe2), comp: CompCtx, fns:
     if self.b.globals.want_text_asm {
         {self.b.globals.target.emitfin}(self.b.globals.outf);
     };
+    //self.b.globals.debug_out = fdopen(STD_ERR, "a".sym().c_str());
+    //each self.b.globals.debug { b | 
+    //    b[] = true;
+    //};
 
     @match(entry) {
         fn TestRunnerMain() => {
-            self.b.lnk.export = true;
+            fake_decl_name := @format("test_runner_main\0") temp();
             entry := self.b&.push_block();
             self.current = entry;
-    
+            env := self.b&.push_inst(self.current, .pare, .Kl, QbeNull, QbeNull);
+            _ := self.b&.push_inst(self.current, .par, .Kl, QbeNull, QbeNull);
+            _ := self.b&.push_inst(self.current, .par, .Kl, QbeNull, QbeNull);
             // TODO: warn if fns has duplicates
-            for (fns) {f|
+            for fns {f|
                 callee := self.inst_func_ref(f);
+                self.b&.push_inst0(self.current, .arge, .Kl, env, QbeNull);
                 self.b&.push_inst0(self.current, .call, .Kw, callee, QbeNull);
             };
             self.b&.end_block(self.current, (type = .retl, arg = self.b&.push_literal(0)));
-            fake_decl_name := @format("main\0") temp();
             fnn := self.b&.build(fake_decl_name.items());
             run_qbe_passes(fnn&);
+            
+            // now actually call it
+            self.init_runtime_entry_point(ptr = fake_decl_name.maybe_uninit.ptr);
         };
         fn GiveMeTheCodeAndGiveItToMeRaw() => ();
         fn ExportWithNames() => {
@@ -187,25 +197,7 @@ fn emit_entry_points_and_debug_info(gen: *CodeGen(EmitQbe2), comp: CompCtx, fns:
         };
         fn WrapMain() => {
             @assert(fns.len == 1, ".WrapMain expected a single entry point");
-            env := comp.get_comptime_env();
-            runtime_init := env.runtime_init.expect("declaration of franca_runtime_init");
-            
-            self.b.lnk.export = true;
-            entry := self.b&.push_block();
-            self.current = entry;
-    
-            argc := self.b&.push_inst(self.current, .par, .Kl, QbeNull, QbeNull);
-            argv := self.b&.push_inst(self.current, .par, .Kl, QbeNull, QbeNull);
-            user_main := self.inst_func_ref(fns[0]);
-            runtime_init := self.inst_func_ref(runtime_init);
-            self.b&.push_inst0(self.current, .arg, .Kl, argc, QbeNull);
-            self.b&.push_inst0(self.current, .arg, .Kl, argv, QbeNull);
-            self.b&.push_inst0(self.current, .arg, .Kl, user_main, QbeNull);
-            self.b&.push_inst0(self.current, .call, .Kw, runtime_init, QbeNull);
-            self.b&.end_block(self.current, (type = .ret0, arg = QbeNull));
-            fake_decl_name := @format("main\0") temp();
-            fnn := self.b&.build(fake_decl_name.items());
-            run_qbe_passes(fnn&);
+            self.init_runtime_entry_point(self.fn_name_cstr(fns[0]));
         }
     };
     
@@ -213,6 +205,28 @@ fn emit_entry_points_and_debug_info(gen: *CodeGen(EmitQbe2), comp: CompCtx, fns:
     // TODO: clean this up and just return a struct
     gen.backend.out&.push_bucket(gen.backend.inline_asm);
     gen.backend.inline_asm = List(u8).zeroed();
+}
+
+fn init_runtime_entry_point(self: *EmitQbe2, usermain_name: CStr) void = {
+    env := self.comp.get_comptime_env();
+    runtime_init := env.runtime_init.expect("declaration of franca_runtime_init");
+    
+    self.b.lnk.export = true;
+    entry := self.b&.push_block();
+    self.current = entry;
+
+    argc := self.b&.push_inst(self.current, .par, .Kl, QbeNull, QbeNull);
+    argv := self.b&.push_inst(self.current, .par, .Kl, QbeNull, QbeNull);
+    user_main := self.b&.push_symbol(usermain_name);
+    runtime_init := self.inst_func_ref(runtime_init);
+    self.b&.push_inst0(self.current, .arg, .Kl, argc, QbeNull);
+    self.b&.push_inst0(self.current, .arg, .Kl, argv, QbeNull);
+    self.b&.push_inst0(self.current, .arg, .Kl, user_main, QbeNull);
+    self.b&.push_inst0(self.current, .call, .Kw, runtime_init, QbeNull);
+    self.b&.end_block(self.current, (type = .ret0, arg = QbeNull));
+    fake_decl_name := @format("main\0") temp();
+    fnn := self.b&.build(fake_decl_name.items());
+    run_qbe_passes(fnn&);
 }
 
 fn emit_bounce_fn(self: *EmitQbe2, impl_name_callee: Str, fake_decl_name: Str, signeture: PrimSig, private: bool) void = {
@@ -412,7 +426,7 @@ fn setup(self: *EmitQbe2, body: *FnBody, vars_out: *List(Qbe.Ref)) void = {
     self.body = body;
     params: List(Qbe.Ref) = list(temp());
     self.context = QbeNull;
-    if body.context {
+    if body.context && self.implicit_context {
         self.context = self.b&.push_inst((id = 0), .pare, .Kl, QbeNull, QbeNull);
     };
     for body.signeture.args { prim | 
@@ -568,11 +582,13 @@ fn inst_intrinsic(self: *EmitQbe2, args: []Qbe.Ref, op: Intrinsic) []Qbe.Ref = {
             a
         }
         fn GetContext() => {
+            @debug_assert(self.implicit_context);
             @debug_assert(self.context != QbeNull, "Cannot used GetContext in function without context.");
-            args[0] = self.b&.push_inst(self.current, .copy, .Kl, self.context, QbeNull); 
+            args[0] = self.b&.push_inst(self.current, .copy, .Kl, self.context, QbeNull);
             args
         }
         fn SetContext() => {
+            @debug_assert(self.implicit_context);
             if self.context == QbeNull {
                 self.context = self.b&.push_inst(self.current, .copy, .Kl, args[0], QbeNull); 
             } else {
@@ -624,10 +640,6 @@ fn inst_call(self: *EmitQbe2, args: Slice(Qbe.Ref), sig: PrimSig, callee: Qbe.Re
     shift := if(sig.first_arg_is_indirect_return, => 1, => 0);
     @debug_assert_eq(args.len, sig.args.len.add(shift), "mismatch args");
     
-    //// TODO
-    //each self.b.globals.debug { b |
-    //    b[] = true; 
-    //};
     if self.context != QbeNull && context {
         self.b&.push_inst0(self.current, .arge, .Kl, self.context, QbeNull);
     };
