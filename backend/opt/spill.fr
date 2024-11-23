@@ -460,7 +460,9 @@ fn spill(f: *Qbe.Fn) void = {
                 i[] = pass&.do_parallel_moves(b, i[], in_reg&);
                 continue();
             };
-            bszero(prioritize&);
+            
+            bszero(prioritize&); // :SLOW don't do this on the codepath where dead=true so we just continue() 
+                                 // but can't do it after this block because we set something in the other case
             if i.to != QbeNull {
                 @debug_assert(rtype(i.to) == .RTmp, "can only assign tmp");
                 t := i.to.val();
@@ -468,6 +470,31 @@ fn spill(f: *Qbe.Fn) void = {
                     // we know we had t in a register after this, and we're creating t now, so its not in a register before this. 
                     bsclr(in_reg&, t);
                 } else {
+                    // Either not used later in the block (but maybe in another block) or spilled later in the block.
+                    dead := pass.f.tmp[t].slot == -1 && !b.out&.bshas(t);
+                    if dead {
+                        // my fuse_addressing in arm isel doesn't update usage counts correctly so i end up with a lot of dead pointer arithmetic. 
+                        // rega would remove the dead code anyway but we can skip doing some work and reduce false register pressure. 
+                        // A less hacky solution would be to fix it in fuse_addressing instead. that would prevent us from incorrectly thinking the args are live until getting here. 
+                        // saves ~70ms. This happens 150k times with fuse_addressing on and 6k times with it off which mostly reassures me that i understand how we get here. -- Nov 23
+                        // TODO: are there other bitsets im supposed to update?
+                        
+                        // :clear_dead_args
+                        range(0, 2) { n | 
+                            if rtype(i.arg&[n]) == .RTmp {
+                                t := i.arg&[n].val();
+                                if !bshas(in_reg&, t) {
+                                    // if this instruction was the reason we though we cared about this argument, we don't anymore. 
+                                    bsclr(all_needed_later&, t);
+                                }
+                            }
+                        };
+                        
+                        // invariant: instructions that have outputs do not have side effects. 
+                        @debug_assert(!is_store(i[].op()) && i[].op() != .call);
+                        // don't emit() this instruction 
+                        continue();
+                    };
                     /* make sure we have a reg
                      * for the result */
                     @debug_assert_ge(t, Qbe.Tmp0, "dead reg");
@@ -511,6 +538,7 @@ fn spill(f: *Qbe.Fn) void = {
             };
             bscopy(all_needed_later&, in_reg&);
             pass&.limit_in_reg(in_reg&, false, (Some = prioritize&));
+            // :clear_dead_args
             range(0, 2) { n | 
                 if rtype(i.arg&[n]) == .RTmp {
                     t := i.arg&[n].val();

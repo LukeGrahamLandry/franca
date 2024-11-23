@@ -741,15 +741,19 @@ fn arm64_abi(f: *Qbe.Fn) void = {
     };
 }
 
+
+// TODO: my move_end_of_block_to_scratch here is not super well tested because i don't use b/h in from_bc 
 /* abi0 for apple target; introduces
  * necessary sign extensions in calls
  * and returns
  */
 fn apple_extsb(f: *Qbe.Fn) void = {
-    for_blocks f { b | 
+    for_blocks f { b |
+        changed := false; 
         f.reset_scratch();
         j := b.jmp.type;
         if is_retbh(j) {
+            changed = true;
             r := f.newtmp("abi", .Kw);
             o := @as(Qbe.O) @as(i32) Qbe.O.extsb.raw() + (j.raw() - Qbe.J.retsb.raw()).zext();
             f.emit(o, .Kw, r, b.jmp.arg, QbeNull);
@@ -757,30 +761,40 @@ fn apple_extsb(f: *Qbe.Fn) void = {
             b.jmp.type = .retw;
         };
         for_insts_rev b { i | 
-            f.emit(i[][]);
+            if changed {
+                f.emit(i[][]);
+            };
             if i[].op() == .call {
                 i1 := i[];
                 i0 := b.find_first_arg(i[]); 
                 i[] = i1;
                 while => Qbe.Ins.int_from_ptr(i[]) > Qbe.Ins.int_from_ptr(i0) {
                     i[] = i[].offset(-1);
-                    prev := f.emit(i[][]);
                     if is_argbh(i[].op()) {
+                        f.move_end_of_block_to_scratch(b, i[], changed&);
+                        prev := f.emit(i[][]);
                         i.to = f.newtmp("abi", .Kl);
                         prev.arg&[0] = i.to;
+                    } else {
+                        if changed {
+                            f.emit(i[][]);
+                        };
                     }
                 };
                 i[] = i1;
                 while => Qbe.Ins.int_from_ptr(i[]) > Qbe.Ins.int_from_ptr(i0) {
                     i[] = i[].offset(-1);
                     if is_argbh(i[].op()) {
+                        f.move_end_of_block_to_scratch(b, i[], changed&);
                         o := rebase(i[].op(), .extsb, .argsb);
                         f.emit(o, .Kw, i.to, i.arg&[0], QbeNull);
                     }
                 };
             };
         };
-        f.copy_instructions_from_scratch(b); // TODO: don't bother if we didn't have any? 
+        if changed {
+            f.copy_instructions_from_scratch(b); 
+        };
     };
 
     if f.globals.debug["A".char()] {

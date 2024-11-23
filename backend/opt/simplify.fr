@@ -31,13 +31,7 @@ fn ins(f: *Qbe.Fn, iter: **Qbe.Ins, moved_to_new_memory: *bool, b: *Qbe.Blk) voi
             // So if a block does not contain blits, the other simplifications can just update the instructions in place.
             // The first time we see a blit, we need to copy the instructions we've already seen into the scratch buffer (since we might have changed then).
             // And the at the end of the block, we'll replace the block with the contents of the scratch buffer. 
-            if !moved_to_new_memory[] {
-                f.globals.curi[] = f.scratch_start();
-                ni := ptr_diff(i.offset(1), b.ins.index(b.nins.zext()));
-                f.globals.curi[] = f.globals.curi[].offset(-ni);
-                icpy(f.globals.curi[], i.offset(1), ni);
-                moved_to_new_memory[] = true;
-            };
+            f.move_end_of_block_to_scratch(b, i, moved_to_new_memory);
       
             f.expand_blit(start_blit.arg&[1], start_blit.arg&[0], rsval(i.arg&[0]).intcast());
             iter[] = i.offset(-1);  // deal with the variable length encoding (blit0, blit1). 
@@ -51,6 +45,17 @@ fn ins(f: *Qbe.Fn, iter: **Qbe.Ins, moved_to_new_memory: *bool, b: *Qbe.Blk) voi
     if moved_to_new_memory[] {
        f.emit(i[]);
     };
+}
+
+// TODO: afraid of off by one
+fn move_end_of_block_to_scratch(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins, changed: *bool) void #inline = {
+    if !changed[] {
+        f.globals.curi[] = f.scratch_start();
+        ni := ptr_diff(i.offset(1), b.ins.index(b.nins.zext()));
+        f.globals.curi[] = f.globals.curi[].offset(-ni);
+        icpy(f.globals.curi[], i.offset(1), ni);
+        changed[] = true;
+    }
 }
 
 fn simplify_div_like(f: *Qbe.Fn, i: *Qbe.Ins) void = {

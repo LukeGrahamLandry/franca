@@ -9,7 +9,6 @@
 // - Have to expose it to user comptime code for #bc (examples/bf2bc.fr)
 //   maybe add optional function argument type checking to catch basic mistakes.
 // - Have to make easy to build static + dynamic.
-// - expose the pass debug logging with #log_ir("AF") or something
 // - be able to run thier .ssa tests
 //
 // TODO: at the end i should make the math stuff not #fold becuase its probably faster to let the backend do it. 
@@ -19,10 +18,42 @@ fn finished(self: *EmitQbe2, fid: FuncId) void = {
     name: List(u8) = list(temp()); 
     self.fmt_fn_name(fid, name&);
     fnn := self.b&.build(name.items());
+    s := self.get_log_types(fid);
+    m := self.b.globals;
+    m.set_debug_types(s, true);
     run_qbe_passes(fnn&);
+    m.set_debug_types(s, false);
     self.body = zeroed(*FnBody); // :EVIL     but just avoiding confusion. 
     self.context = QbeNull;
 }; 
+
+fn set_debug_types(m: *QbeModule, s: Str, value: bool) void = {
+    for s { s | 
+        m.debug[s.zext()] = value;
+    };
+}
+
+// #log_ir("RSI") 
+fn get_log_types(self: *EmitQbe2, fid: FuncId) Str = {
+    func := self.comp.get_function(fid);
+    if func.get_flag(.LogIr) {
+        each func.annotations& { n | 
+            if n.name == Flag.log_ir.ident() {
+                if n.args& { arg |
+                    return(@match(arg.expr&) {
+                        fn String(arg) => self.comp.get_string(arg[]);
+                        @default => {
+                            @eprintln("TODO: non string literal #log_ir arg for %", self.comp.get_string(func.name));
+                            "P"
+                        };
+                    });
+                };
+                return("P");
+            };
+        };
+    };
+    ""
+}
 
 #include_std("compiler/backend/walk_bc.fr");
 
@@ -432,6 +463,7 @@ fn setup(self: *EmitQbe2, body: *FnBody, vars_out: *List(Qbe.Ref)) void = {
     for body.signeture.args { prim | 
         params&.push(self.b&.push_parameter(qbe_real_class(prim)));
     };
+    do_debug := self.comp.get_build_options()[].debug_info;
     
     // TODO: waste for ssa vars, they just get set to the value. -- Jun 14
     enumerate body.vars.items() { i, ty |
@@ -441,7 +473,17 @@ fn setup(self: *EmitQbe2, body: *FnBody, vars_out: *List(Qbe.Ref)) void = {
         if(ty.align > align.trunc(), => { align = 16; op = .alloc16; });
         
         size := self.b&.push_literal(@as(i64) ty.size.zext());
-        v := self.b&.push_inst(entry, op, .Kl, size, QbeNull);
+        
+        prefix := "v";
+        if do_debug && body.var_names.len > i {
+            name := body.var_names[i];
+            if !(name.raw() == 0) {
+                prefix = self.comp.get_string(name);
+            };
+        };
+        
+        v := self.b&.push_temp(.Kl, prefix);
+        self.b&.push_inst(entry, op, .Kl, v, size, QbeNull);
         vars_out.push(v);
     };
     // TODO: use phi nodes cause this is stupid but that's such a pain in the ass. 
@@ -847,7 +889,7 @@ fn inst_global(self: *EmitQbe2, id: BakedVarId) EmitQbe2.Val = {
 }
 
 fn get_var(self: *EmitQbe2, ty: Prim) Qbe.Ref = {
-    self.b&.push_temp(qbe_real_class(ty))
+    self.b&.push_temp(qbe_real_class(ty), "v")
 }
 
 fn qbe_real_class(ty: Prim) Qbe.Cls = {
