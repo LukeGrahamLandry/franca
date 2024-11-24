@@ -29,7 +29,7 @@ fn build_current(self: *EmitQbe2, name: Str, logging: Str) void = {
     @assert(old_entry.identical(entry), "wtf!>");
     push_dynamic_context {
         context(DefaultContext)[].temporary_allocator = entry.arena&;
-        fnn := entry.f&;
+        fnn := entry.f;
         m.set_debug_types(logging, true);
         run_qbe_passes(fnn);
         entry.release(false);
@@ -296,11 +296,7 @@ fn emit_bounce_fn(self: *EmitQbe2, impl_name_callee: Str, fake_decl_name: Str, s
     
     self.inst_return(ret);
     
-    //self.build_current(fake_decl_name, "");
-    entry := self.b&.build(fake_decl_name);  // :ThreadSafety
-    entry.state = .UsedByBouba;
-    run_qbe_passes(entry.f&);
-    entry.state = .WaitingForBouba;
+    self.build_current(fake_decl_name, "");
 }
 
 // TODO: copy-paste from DynamicImport but reversed so its a pain. 
@@ -759,7 +755,8 @@ fn inst_jump(self: *EmitQbe2, always: BbId, args: Slice(EmitQbe2.Val)) void = {
         r := arg[];
         store_op := qbe_store(ty);
         if rtype(r) == .RTmp {
-            t := self.b.temporaries.index(r.val())[].cls;
+            @debug_assert(r.val() >= Qbe.Tmp0, "why do you think you have a register?");
+            t := self.b.temporaries.index(r.val() - Qbe.Tmp0)[].cls;
             store_op = store_ops[t.raw().zext()];
         };
         self.b&.push_inst0(self.current, store_op, .Kw, r, self.block_args[i]);
@@ -769,7 +766,8 @@ fn inst_jump(self: *EmitQbe2, always: BbId, args: Slice(EmitQbe2.Val)) void = {
 
 fn is_kw_tmp(self:  *EmitQbe2, r: Qbe.Ref) bool = {
    if rtype(r) == .RTmp {
-        t := self.b.temporaries.index(r.val())[].cls;
+        @debug_assert(r.val() >= Qbe.Tmp0, "why do you think you have a register?");
+        t := self.b.temporaries.index(r.val() - Qbe.Tmp0)[].cls;
         if t == .Kw {
             return(true);
         };

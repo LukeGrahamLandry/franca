@@ -1,3 +1,21 @@
+## (Nov 23)
+
+- static dynamic_context on llvm (oxymoronic)
+- `#log_ir("RC")` so you can see ir without it being super spammy.
+- apple_extsb only copy blocks if something changed (like simplify.fr does)
+- panic handler use context so different threads can have thier own
+- treat extuw after loaduw as a copy. can't always do it because you're allowed to use extuw to clear the high bits.
+  maybe loaduw should always output a long?
+- in spill: `dead := pass.f.tmp[t].slot == -1 && !b.out&.bshas(t);`
+  // my fuse_addressing in arm isel doesn't update usage counts correctly so i end up with a lot of dead pointer arithmetic.
+  // rega would remove the dead code anyway but we can skip doing some work and reduce false register pressure.
+  // A less hacky solution would be to fix it in fuse_addressing instead. that would prevent us from incorrectly thinking the args are live until getting here.
+  // saves ~70ms. This happens 150k times with fuse_addressing on and 6k times with it off which mostly reassures me that i understand how we get here. -- Nov 23
+- lock buckets while you access symbol info to prep for threads.
+- less CStr when working with symbols
+- list of functions with seperate arenas so threads can pass them around.
+- clear `tmp.use` before going in inline cache so you don't try to reuse memory if it gets suspended.
+
 ## (Nov 18)
 
 isel mistakes:

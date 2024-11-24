@@ -81,7 +81,8 @@ fn clone(f: *Qbe.Fn) *Qbe.Fn = {
     inlfn.tmp = new_long_life(inlfn.ntmp.zext());
     inlfn.tmp.slice(0, f.ntmp.zext()).copy_from(f.tmp.slice(0, f.ntmp.zext()));
     range(Qbe.Tmp0, inlfn.ntmp.zext()) { i |
-        inlfn.tmp[i].visit = -1;
+        inlfn.tmp[i].visit = -1; // used when remapping 
+        inlfn.tmp[i].use.first = Qbe.Use.ptr_from_int(0);  // don't try to reuse memory in clear_usage_info if this function is suspended. 
     };
     inlfn.con = new_long_life(inlfn.ncon.zext());
     inlfn.con.slice(0, f.ncon.zext()).copy_from(f.con.slice(0, f.ncon.zext()));
@@ -102,14 +103,15 @@ fn inlsave(f: *Qbe.Fn) bool = {
         @fmt_write(f.globals.debug_out, "\nSave for inlining:\n");
         printfn(inlfn, f.globals.debug_out);
     };
-    m      := f.globals;
+    m := f.globals;
     
     result := false;
     use_symbol(f.globals, f.lnk.id) { symbol |
         if f.lnk.export {
             symbol.referenced = true;
         };
-        @debug_assert(symbol.inline.is_null(), "how have we been here before");
+        //@debug_assert(symbol.name.len > 0, "function with empty string as name. was that a mistake?");
+        @debug_assert(symbol.inline.is_null(), "'%' already has an entry in the inline cache.", symbol.name);
         symbol.inline = inlfn;
         result = !symbol.referenced;
     };
@@ -426,12 +428,13 @@ fn emit_suspended_inlinables(m: *QbeModule) void = {
         mark := mark_temporary_storage();
         f := @uninitialized Qbe.Fn;
         use_symbol(m, id) { s | 
+            f = s.inline[]; // we stomp arrays to point at temp, but it would probably be fine because everyone's already gone through inlining. 
+            f.globals = m;
             if log {
                 @fmt_write(m.debug_out, "\nFinishing suspended function: %\n", s.name);
+                printfn(f&, f.globals.debug_out);
             };
-            f = s.inline[]; // we stomp arrays to point at temp, but it would probably be fine because everyone's already gone through inlining. 
         };
-        f.globals = m;
         
         // we don't bother storing these in the inlining cache so recompute them
         // for now, its single block functions only so this is trivial. 

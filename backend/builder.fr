@@ -19,9 +19,8 @@ CodegenState :: @enum(i64) (WaitingForBouba, UsedByBouba, WaitingForKiki, UsedBy
 
 CodegenEntry :: @struct(
     arena: ArenaAlloc, 
-    f: Qbe.Fn,
+    f: *Qbe.Fn,
     state: CodegenState,  // :ThreadSafety use cas or whatever
-    id: i64,
 );
 
 QbeTerminator :: @struct(
@@ -48,9 +47,8 @@ fn init(gpa: Alloc, globals: *QbeModule) QbeBuilder = {
         entry = q.index(0),
     );
     // TODO: one allocation for all the initial slices.
-    enumerate b.queue { i, entry |
-        entry.arena = init(libc_allocator, macos_page_size);
-        entry.id = i;
+    each b.queue { entry |
+        entry.arena = init(gpa, macos_page_size);
     };
     b&.clear();
     b
@@ -61,9 +59,8 @@ fn clear(b: *QbeBuilder) void = {
     b.entry = b.acquire(true);
     b.entry.arena&.reset_retaining_capacity();
     a := b.entry.arena&.borrow();
-    b.entry.f = Qbe.Fn.zeroed();
+    b.entry.f = Qbe.Fn.ptr_from_int(0);
     
-    // :ClearOkBecauseCopied
     b.constants = list(a);
     b.temporaries = list(a);
     b.blocks = list(a);
@@ -72,17 +69,6 @@ fn clear(b: *QbeBuilder) void = {
     b.constants&.push(type = .CBits, bits = (i = 0xdeaddead)); // QbeUndef
     b.constants&.push(type = .CBits, bits = (i = 0));          // QbeConZero
     ::assert_eq(FIXED_CONST_COUNT, 2);
-    
-    // Add temporaries representing physical registers.
-    // TODO: is it required to pad out fake ones up to 64? maybe they're ignored and its just to make the indices work out. -- Sep 25
-    range(0, Qbe.Tmp0) { i |
-        is_float := b.globals.target.fpr0 <= i.intcast() && i.intcast() < (b.globals.target.fpr0 + b.globals.target.nfpr);
-		if is_float {
-		    b.push_temp(.Kd, "");
-		} else {
-		    b.push_temp(.Kl, "");
-		};
-    };
 }
 
 fn acquire(self: *QbeBuilder, i_am_bouba: bool) *CodegenEntry = {
@@ -110,17 +96,15 @@ fn release(entry: *CodegenEntry, i_am_bouba: bool) void = {
 // TODO: make the Qbe.Fn sooner and just call the functions in util.fr
 fn push_temp(b: *QbeBuilder, k: Qbe.Cls, prefix: Str) Qbe.Ref = {
     temp := Qbe.Tmp.zeroed();
-    if b.temporaries.len >= Qbe.Tmp0 {
-        // TODO: don't be fucking with strings, only do this in debug mode.
-        name: List(u8) = (maybe_uninit = temp.name&.items(), len = 0, gpa = panicking_allocator);
-        @fmt(name&, "%%", prefix, b.temporaries.len - Qbe.Tmp0);
-    };
+    // TODO: don't be fucking with strings, only do this in debug mode.
+    name: List(u8) = (maybe_uninit = temp.name&.items(), len = 0, gpa = panicking_allocator);
+    @fmt(name&, "%%", prefix, b.temporaries.len);
     temp.cls = k;
     temp.slot = -1;
     temp.nuse = 1;
     temp.ndef = 1;
     b.temporaries&.push(temp);
-    TMP(b.temporaries.len - 1)
+    TMP(b.temporaries.len - 1 + Qbe.Tmp0)
 }
 
 // TODO: fix load/store union in emit_bc so you can just pass `get_field_type(Qbe.Con, @symbol bits)`
@@ -280,17 +264,20 @@ fn end_block(b: *QbeBuilder, bb: BbId, jmp: QbeTerminator) void = {
 }
 
 fn build(b: *QbeBuilder, name: Str) *CodegenEntry = {
-    curf := b.entry.f&;
+	m := b.globals;
     old := context(DefaultContext)[].temporary_allocator;
     context(DefaultContext)[].temporary_allocator = b.entry.arena&;
     a := b.entry.arena&.borrow();
-    curf.globals = b.globals;
+    b.entry.f = a.box_zeroed(Qbe.Fn);
+    curf := b.entry.f;
+    curf.default_init(m); 
 	// curf.rpo = 0; filled in by later pass
 	// curf.vararg = false; // TODO
-    
-    // :ClearOkBecauseCopied
-    curf.ntmp = b.temporaries.len.intcast();
-    curf.tmp = new_copy(b.temporaries.items());
+    // TODO: dont copy :SLOW
+    curf.ntmp += b.temporaries.len.intcast();
+    curf.tmp&.grow(curf.ntmp.zext());
+    dest := curf.tmp.slice(Qbe.Tmp0, b.temporaries.len + Qbe.Tmp0);
+    dest.copy_from(b.temporaries.items());
     curf.ncon = b.constants.len.intcast();
     curf.con = new_copy(b.constants.items());
     @debug_assert_eq(curf.nmem, 0);
@@ -322,6 +309,7 @@ fn build(b: *QbeBuilder, name: Str) *CodegenEntry = {
         block := qbe_blocks[i]&;
         block.id = i.intcast(); // TODO: probably don't need this because cfg sets it? but qbe parser does it so just being safe for now.  
     
+        // TODO: dont copy :SLOW
         idup(block, wip.insts.maybe_uninit.ptr, wip.insts.len);
         if i == b.blocks.len - 1 {
             block.link = Qbe.Blk.ptr_from_int(0);

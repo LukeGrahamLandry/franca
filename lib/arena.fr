@@ -4,6 +4,7 @@ ArenaAlloc :: @struct(
     start: i64,
     end: i64,
     base_size: i64,
+    making_new_chunk: bool,
 );
 
 ArenaHeader :: @rec @struct(
@@ -14,11 +15,17 @@ ArenaHeader :: @rec @struct(
 );
 
 fn init(parent: Alloc, base_size: i64) ArenaAlloc = {
-    (parent = parent, chunk = .None, start = 0, end = 0, base_size = base_size)
+    (parent = parent, chunk = .None, start = 0, end = 0, base_size = base_size, making_new_chunk = false)
 }
 
-fn new_arena_chunk(allocator: Alloc, size: i64, prev: ?*ArenaHeader) *ArenaHeader = {
+fn new_arena_chunk(allocator: Alloc, size: i64, prev: ?*ArenaHeader, making_new_chunk: *bool) *ArenaHeader = {
+    if making_new_chunk[] {
+        scary_log("recursing in new_arena_chunk");
+        abort();
+    };
+    making_new_chunk[] = true;
     buf := allocator.alloc(u8, size.max(ArenaHeader.size_of())); // TODO: align
+    making_new_chunk[] = false;
     chunk := ptr_cast_unchecked(From = u8, To = ArenaHeader, ptr = buf.ptr);
     chunk[] = (size = buf.len, prev = prev, next = .None);
     chunk
@@ -83,7 +90,7 @@ arena_alloc :: fn(raw_self: rawptr, size: i64, log_align: i64) rawptr = {
     self := ArenaAlloc.ptr_from_raw(raw_self);
     
     chunk := self.chunk.or() {
-        next := new_arena_chunk(self.parent, self.base_size, .None);
+        next := new_arena_chunk(self.parent, self.base_size, .None, self.making_new_chunk&);
         self.start = ArenaHeader.size_of();
         self.end = next.size;
         self.chunk = (Some = next);
@@ -92,9 +99,10 @@ arena_alloc :: fn(raw_self: rawptr, size: i64, log_align: i64) rawptr = {
     chunk := self.chunk.unwrap();
     
     end  := self.start.add(size);
-    extra := end.mod(8); // TODO: use log_align
+    extra := self.start.mod(8); // TODO: use log_align
     if extra != 0 {
-        end += extra;
+        end += 8 - extra;
+        self.start += 8 - extra;
     };
     
     if(end.le(self.end)) {
@@ -112,8 +120,10 @@ arena_alloc :: fn(raw_self: rawptr, size: i64, log_align: i64) rawptr = {
         return(arena_alloc(raw_self, size, log_align));
     };
     
-    next_size := size.add(8).max(chunk.size.mul(2)).min(1.shift_left(26));
-    new := new_arena_chunk(self.parent, next_size, (Some = chunk));
+    @debug_assert(size < MAX_ARENA_BUCKET, "allocating so many bytes bro");
+    MAX_ARENA_BUCKET :: 1.shift_left(26);
+    next_size := size.add(8).max(chunk.size.mul(2)).min(MAX_ARENA_BUCKET);
+    new := new_arena_chunk(self.parent, next_size, (Some = chunk), self.making_new_chunk&);
     chunk.next = (Some = new);
     self.chunk = (Some = new);
     self.start = ArenaHeader.size_of();
@@ -131,6 +141,7 @@ fn mark(self: *ArenaAlloc) ArenaMarker #inline = (chunk = self.chunk, start = se
 // Memory is NOT returned to the backing allocator. 
 // TODO: safety check mode that writes over with garbage. 
 fn reset_retaining_capacity(self: *ArenaAlloc, mark: ArenaMarker) void = {
+    //self.debug_stomp_after(mark);
     if mark.chunk.is_none() {
         self.reset_retaining_capacity();
         return();  
