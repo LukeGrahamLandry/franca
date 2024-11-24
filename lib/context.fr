@@ -4,16 +4,17 @@
 // A pointer to this struct is passed as a hidden parameter to (almost) every function. 
 // (Soon you will be able to add your own things, to use this as tls).
 DefaultContext :: @struct(
-    comptime: rawptr,  // This will be null at runtime. It's impossible to forget because the compiler can't bake a non-null rawptr. 
+    comptime: rawptr, 
     thread_index: i64,
     reserved: Array(i64, 7),
     cli_arguments: []CStr,
     temporary_allocator: *ArenaAlloc,
-    reserved2: Array(i64, 9),
     panic_hook: @FnPtr(msg: Str) Never,
 );
 
 // For AOT builds, the compiler generates a call to this as your program's main entry point. 
+// note: whatever you had in the context at comptime is NOT baked into your program (unlike all other reachable memory).
+// For jitted code, you inherit the compiler's context. (TODO: maybe that should only be for comptime/drivers)
 franca_runtime_init :: fn(argc: i64, argv: *CStr, user_main: @FnPtr(argc: i64, argv: *CStr) void) i64 = {
     push_zeroed_dynamic_context { 
         c := context(DefaultContext);
@@ -57,28 +58,23 @@ fn push_zeroed_dynamic_context($body: @Fn() void) void = {
     new_context := raw_from_ptr(@type new_context, new_context&);
     memset(new_context, 0, size_of_dynamic_context);
     old_context := get_dynamic_context();
-    //if !old_context.is_null() {
-    //memcpy(new_context, old_context, size_of_dynamic_context);
-    //};
     set_dynamic_context(new_context);
     body();
-    //if get_dynamic_context() != new_context {
-    //    scary_log("Context leak. Do not early return from push_zeroed_dynamic_context. Do not call set_dynamic_context directly.");
-    //};
     set_dynamic_context(old_context);
 }
 
 fn push_dynamic_context($body: @Fn() void) void = {
     old_context := get_dynamic_context();
-    push_zeroed_dynamic_context {
-        new_context := get_dynamic_context();
-        if !old_context.is_null() {
-            memcpy(new_context, old_context, size_of_dynamic_context);  // :slow don't bother zeroing before 
-        } else {
-            scary_log("Tried to inherit null context.");
-        };
-        body();
+    new_context := @uninitialized Array(u8, size_of_dynamic_context);
+    new_context := raw_from_ptr(@type new_context, new_context&);
+    if !old_context.is_null() {
+        memcpy(new_context, old_context, size_of_dynamic_context); 
+    } else {
+        scary_log("Tried to inherit null context.");
     };
+    set_dynamic_context(new_context);
+    body();
+    set_dynamic_context(old_context);
 }
 
 // TODO: let the driver program add new fields. 

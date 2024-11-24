@@ -19,7 +19,7 @@ fn emit_func_amd64(m: *QbeModule, f: *Qbe.Fn, file: *FILE) void = {
     @debug_assert_eq(m.goal.arch, .x86_64, "how did we get here?");
     @debug_assert(m.goal.type != .AsmText, "how did we get here?");
     code := m.segments&[.Code]&;
-    name_id := m.intern(@as(CStr) (ptr = f.name&.as_ptr()));
+    name_id := f.lnk.id;
     maybe_add_export(m, name_id, f.lnk.export);
     m.do_jit_fixups(name_id, .Code, code.len());
     
@@ -503,26 +503,26 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
             @match(rtype(i.arg&[0])) {
                 fn RCon() => {
                     c := e.f.get_constant(i.arg&[0]);
-                    symbol := e.m.get_symbol_info(c.sym.id);
                     e.a&.push(@as(u8) PrimaryOp.CallImm32);
-                    
                     @debug_assert_eq(c.bits.i, 0, "call to offset from symbol seems like a mistake?");
                     off := c.bits.i;
-                    if symbol.kind == .Local {
-                        // +4 for the size of the encoded displacement. address is relatitive to the start of the next instruction
-                        // TODO: make sure this is right
-                        off += distance_between(e.m, .Code, e.start_of_function + e.a.len + 4, symbol.segment, symbol.offset);
-                        if e.m.debug["T".char()] {
-                            write(e.m.debug_out, items(@format("# call offset % for '%' %[%]\n", off, symbol.name, symbol.segment, symbol.offset) temp()));
+                    use_symbol(e.m, c.sym.id) { symbol |
+                        if symbol.kind == .Local {
+                            // +4 for the size of the encoded displacement. address is relatitive to the start of the next instruction
+                            // TODO: make sure this is right
+                            off += distance_between(e.m, .Code, e.start_of_function + e.a.len + 4, symbol.segment, symbol.offset);
+                            if e.m.debug["T".char()] {
+                                write(e.m.debug_out, items(@format("# call offset % for '%' %[%]\n", off, symbol.name, symbol.segment, symbol.offset) temp()));
+                            };
+                        } else {
+                            if e.m.debug["T".char()] {
+                                write(e.m.debug_out, items(@format("# pending call to %\n", symbol.name) temp()));
+                            };
                         };
-                    } else {
-                        if e.m.debug["T".char()] {
-                            write(e.m.debug_out, items(@format("# pending call to %\n", symbol.name) temp()));
+                        patch_at := e.a.maybe_uninit.ptr.offset(e.a.len);
+                        if symbol.kind != .Local || e.m.goal.type != .Exe {
+                            symbol.fixups&.push((patch_at = patch_at, type = (RipDisp32 = (increment = c.bits.i.trunc(), call = true))), e.m.gpa);
                         };
-                    };
-                    patch_at := e.a.maybe_uninit.ptr.offset(e.a.len);
-                    if symbol.kind != .Local || e.m.goal.type != .Exe {
-                        symbol.fixups&.push((patch_at = patch_at, type = (RipDisp32 = (increment = c.bits.i.trunc(), call = true))), e.m.gpa);
                     };
                     e.a&.push_u32(signed_truncate(off, 32));
                 }
@@ -652,22 +652,23 @@ fn push(e: *AmdState, b: EncodedArgs, ops: []u8) void = {
     if b.disp_size != .D0 {
         if b.patch { p | 
             off, sym := p;
-            symbol := e.m.get_symbol_info(sym);
-            if symbol.kind == .Local {
-                // +4 for the size of the encoded displacement. address is relatitive to the start of the next instruction
-                b.disp += distance_between(e.m, .Code, e.start_of_function + e.a.len + 4, symbol.segment, symbol.offset);
-                @debug_assert(b.disp.abs() < 1.shift_left(b.disp_size.bits()));
-                if e.m.debug["T".char()] {
-                    write(e.m.debug_out, items(@format("# direct offset % for '%' %[%]\n", b.disp, symbol.name, symbol.segment, symbol.offset) temp()));
+            use_symbol(e.m, sym) { symbol |
+                if symbol.kind == .Local {
+                    // +4 for the size of the encoded displacement. address is relatitive to the start of the next instruction
+                    b.disp += distance_between(e.m, .Code, e.start_of_function + e.a.len + 4, symbol.segment, symbol.offset);
+                    @debug_assert(b.disp.abs() < 1.shift_left(b.disp_size.bits()));
+                    if e.m.debug["T".char()] {
+                        write(e.m.debug_out, items(@format("# direct offset % for '%' %[%]\n", b.disp, symbol.name, symbol.segment, symbol.offset) temp()));
+                    };
+                } else {
+                    if e.m.debug["T".char()] {
+                        write(e.m.debug_out, items(@format("# pending ref to '%'\n", symbol.name) temp()));
+                    };
                 };
-            } else {
-                if e.m.debug["T".char()] {
-                    write(e.m.debug_out, items(@format("# pending ref to '%'\n", symbol.name) temp()));
+                patch_at := e.a.maybe_uninit.ptr.offset(e.a.len);
+                if symbol.kind != .Local || e.m.goal.type != .Exe {
+                    symbol.fixups&.push((patch_at = patch_at, type = (RipDisp32 = (increment = off.trunc(), call = false))), e.m.gpa);
                 };
-            };
-            patch_at := e.a.maybe_uninit.ptr.offset(e.a.len);
-            if symbol.kind != .Local || e.m.goal.type != .Exe {
-                symbol.fixups&.push((patch_at = patch_at, type = (RipDisp32 = (increment = off.trunc(), call = false))), e.m.gpa);
             };
         };
         e.push_imm(b.disp, b.disp_size.bits() / 8);

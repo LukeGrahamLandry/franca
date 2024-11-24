@@ -86,7 +86,7 @@ QbeModule :: @rec @struct(
     number_of_types := 0, // ntyp. only used by parser
     debug_out: *FILE,
     namel := QbeName.ptr_from_int(0), // TODO: this is just lazy, should manually pass it around now that im using temp() and resetting between functions. 
-    _ := 1,
+    _ := 0,
     symbols: []SymbolBucket,
     
     // stuff for emitting code.
@@ -112,6 +112,7 @@ QbeModule :: @rec @struct(
     outf := zeroed(*FILE),
     
     forever: ArenaAlloc,
+    symbol_memmove: u32,
 );
 
 QbeTargetEnv :: @struct(
@@ -231,6 +232,7 @@ fn init(segment_size: i64, gpa: Alloc, code_alloc: Alloc, goal: QbeTargetEnv) Qb
     };
     m.types[] = new_long_life(0); // TODO: check the magic in QbeBuilder.init to make sure you remember to do this. 
     m.curi[] = m.insb.index_unchecked(Qbe.MaxInstructions);
+    m.symbol_memmove = m&.intern("memmove");
     m
 }
 
@@ -277,6 +279,9 @@ run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
     ::ptr_utils(QbeModule);
     @debug_assert(!m.is_null(), "function module not set");
     
+    if fnn.lnk.id == 0 {
+        @println("intern = 0: %", fnn.name());  // TODO: remove me
+    };
     if fnn.globals.debug["P".char()] {
         out := fnn.globals.debug_out;
         write(out, "\n> After parsing:\n");
@@ -333,6 +338,9 @@ run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
 ::[]u64;
 
 fn finish_qbe_passes(fnn: *Qbe.Fn) void = {
+    if fnn.mem.first.is_null() {
+        fnn.mem = new(0);
+    };
     m := fnn.globals;
     {m.target.abi1}(fnn);
     simplify(fnn);

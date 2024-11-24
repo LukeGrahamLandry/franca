@@ -188,7 +188,7 @@ fn new_mem(f: *Qbe.Fn, base: Qbe.Ref, index: Qbe.Ref, offset: i64, scale: i32) Q
 
 fn idup(b: *Qbe.Blk, src: *Qbe.Ins, n: i64) void = {
     b.nins = n.trunc();
-    if(n == 0, => return());
+    //if n == 0, => return()); // TODO
     if b.ins.first.is_null() {
         b.ins = new(n);  // caller better not be trying to put this in the inlining cache
     } else {
@@ -451,7 +451,8 @@ fn vnew(len: i64, esz: i64, pool: Qbe.Pool) rawptr = {
     };
     a := @if(pool == .PLong, libc_allocator, temp());
     v := a.alloc_zeroed(i64, (cap * esz + QListHeader.size_of() + 7) / 8);  // :HardcodeAlloc
-    @debug_assert(!v.ptr.is_null(), "alloc failed?????");
+    //compilerbug := !v.ptr.is_null();
+    //@debug_assert(compilerbug, "alloc failed?????");
     v := ptr_cast_unchecked(i64, QListHeader, v.ptr);
     v.mag = VMag;
     v.cap = cap;
@@ -460,12 +461,12 @@ fn vnew(len: i64, esz: i64, pool: Qbe.Pool) rawptr = {
     QListHeader.raw_from_ptr(v.offset(1))
 }
 
-fn vgrow(vp: rawptr, len: i64) void = {
-    vp := ptr_from_raw(*QListHeader, vp);
+fn vgrow(vpr: rawptr, len: i64) void = {
+    vp := ptr_from_raw(*QListHeader, vpr);
     v := vp[].offset(-1);
-    xxx := !v.offset(1).is_null(); // TODO: compiler bug
-    @debug_assert(xxx, "ugh");
-    @debug_assert(v.mag == VMag, "QList bad magic");
+    xxx := !v.offset(1).is_null() && !v.is_null();
+    //@debug_assert(xxx, "ugh");
+    //@debug_assert_eq(v.mag, VMag, "QList bad magic growing % to %", vpr, len);
     if(v.cap >= len, => return());
     v1 := vnew(len, v.esz, v.pool);
     memcpy(v1, QListHeader.raw_from_ptr(v.offset(1)), v.cap * v.esz);
@@ -477,9 +478,9 @@ fn vgrow(vp: rawptr, len: i64) void = {
 
 fn vfree(p: rawptr) void = {
     v := QListHeader.ptr_from_raw(p).offset(-1);
-    @debug_assert(v.mag == VMag);
+    //@debug_assert_eq(v.mag, VMag);
+    v.mag = QLIST_DOUBLE_FREE;
     if v.pool == .PLong {
-        v.mag = 0;
         a := libc_allocator;
         free(QListHeader.raw_from_ptr(v));
     };
@@ -499,6 +500,7 @@ QListHeader :: @struct(
 fn header();
 fn grow();
 fn new_copy();
+fn new_copy_long_life();
 fn new_long_life();
 
 fn QList($T: Type) Type = {
@@ -514,6 +516,12 @@ fn QList($T: Type) Type = {
     
     fn new_copy(items: []T) Self = {
         self: Self = new(items.len);
+        self.slice(0, items.len).copy_from(items);
+        self
+    }
+    
+    fn new_copy_long_life(items: []T) Self = {
+        self: Self = new_long_life(items.len);
         self.slice(0, items.len).copy_from(items);
         self
     }
@@ -554,28 +562,30 @@ IBits :: 12;
 IMask :: 1.shift_left(IBits) - 1;
 
 fn intern(m: *QbeModule, s: Str) u32 = {
-    // :SLOW stop using shitty c strings!
-    slow := @tfmt("%\0", s);
-    m.intern(@as(CStr) (ptr = slow.ptr))
-}
-fn intern(m: *QbeModule, s: CStr) u32 = {
-    id := m.my_intern(s);
     @if(LINK_QBE_C) {
-        // TODO: this is a waste of time that lets me easily use thier parser. 
+        _ := m.my_intern(s);
+        slow := if s.len != 0 && s[s.len - 1] == 0 {
+            s
+        } else {
+            @tfmt("%\0", s)  // :SLOW stop using shitty c strings!
+        };
         intern :: fn(_0: CStr) u32 #import("qbe");
+        // TODO: this is a waste of time that lets me easily use thier parser. 
         return(intern(s));
     };
     
-    id
+    m.my_intern(s)
 }
+QLIST_DOUBLE_FREE :: 0x69696969;
 
-fn my_intern(m: *QbeModule, s: CStr) u32 = {
+fn my_intern(m: *QbeModule, s: Str) u32 = {
     h := hash(s).bit_and(IMask.trunc());
     b := m.symbols.index(h.zext());
     n := b.n;
-    strcmp :: fn(a: CStr, b: CStr) i64 #libc;
+    ok := n.bit_and(LOCKED_BASE) == 0;
+    @debug_assert(ok, "Tried to intern to locked bucket");  // TODO: spin once we have threads.
     range(0, n.zext()) { i |
-        if strcmp(s, b.data[i].name) == 0 {
+        if s == b.data[i].name {
             return(h + i.trunc().shift_left(IBits));
         }
     };
@@ -591,13 +601,11 @@ fn my_intern(m: *QbeModule, s: CStr) u32 = {
         }
     };
     
-    string   := s.str();
-    mem := m.forever&.borrow().alloc(u8, string.len + 1);
-    mem.slice(0, string.len).copy_from(string);
-    mem[string.len] = 0;
+    mem := m.forever&.borrow().alloc(u8, s.len);
+    mem.copy_from(s);
     data := b.data.index(n.zext());
     data[] = SymbolInfo.zeroed();
-    data.name = (ptr = mem.ptr);
+    data.name = mem;
     data.got_lookup_offset = -1;
     data.offset = -1;
     
@@ -606,8 +614,11 @@ fn my_intern(m: *QbeModule, s: CStr) u32 = {
     id
 }
 
-// unstable!
-fn get_symbol_info(m: *QbeModule, id: u32) *SymbolInfo = {
+LOCKED_BASE :: 0xF0000000;
+    
+// TODO: this is garbage i need a way to defer something to run if body early exits. 
+// :ThreadSafety need to use cas or whatever
+fn use_symbol(m: *QbeModule, id: u32, $body: @Fn(s: *SymbolInfo) void) void = {
     @if(LINK_QBE_C) {
         // TODO: this is a waste of time that lets me easily use thier parser. 
         str :: fn(_0: u32) CStr #import("qbe");
@@ -617,23 +628,47 @@ fn get_symbol_info(m: *QbeModule, id: u32) *SymbolInfo = {
     ::ptr_utils(QbeModule);
     @debug_assert(!m.is_null(), "null module???");
     bid: i64 = id.bit_and(IMask).zext();
-    bucket := m.symbols[bid];
+    bucket := m.symbols[bid]&;
+    old := bucket.n;
+    locked_by_me := LOCKED_BASE.bit_or(context(DefaultContext)[].thread_index.trunc());
+    bucket.n = locked_by_me;
+    ok := old == locked_by_me || old.bit_and(LOCKED_BASE) == 0;
+    @debug_assert(ok, "Tried to access locked bucket");  // TODO: spin once we have threads.
+    idx := id.shift_right_logical(IBits);
+    symbol := bucket.data.index(idx.zext());
+    body(symbol);
+    bucket.n = old;
+}
+
+// :ThreadSafety you can't call this one
+fn get_symbol_info(m: *QbeModule, id: u32) *SymbolInfo = {
+    @if(LINK_QBE_C) {
+        // TODO: this is a waste of time that lets me easily use thier parser. 
+        str :: fn(_0: u32) CStr #import("qbe");
+        s := str(id);
+        id = m.my_intern(s);
+    };
+    bid: i64 = id.bit_and(IMask).zext();
+    bucket := m.symbols[bid]&;
     idx := id.shift_right_logical(IBits);
     bucket.data.index(idx.zext())
 }
 
-fn str(m: *QbeModule, id: u32) CStr = {
-    s := m.get_symbol_info(id);
-    @debug_assert(!s.name.ptr.is_null(), "null name for symbol %", id);
-    s.name
+fn str(m: *QbeModule, id: u32) Str = {
+    name := "";
+    use_symbol(m, id) { s |
+        name = s.name;
+    };
+    @debug_assert(!name.ptr.is_null(), "null name for symbol %", id);
+    name
 }
 
-fn hash(s: CStr) u32 = {
-    h: u32 = 0;
+fn hash(s: Str) u32 = {
+    h: i64 = 1;
     for s { s |
         h = s.zext() + 17 * h; // prime number chosen by fair die roll 
     };
-    h
+    h.trunc()
 }
 
 /////////////////

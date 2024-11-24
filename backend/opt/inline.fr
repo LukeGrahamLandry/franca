@@ -77,6 +77,7 @@ fn clone(f: *Qbe.Fn) *Qbe.Fn = {
     inlfn.nblk = f.nblk;
     inlfn.leaf = f.leaf;
     inlfn.globals = f.globals;
+    inlfn.lnk.id = f.lnk.id;
     inlfn.tmp = new_long_life(inlfn.ntmp.zext());
     inlfn.tmp.slice(0, f.ntmp.zext()).copy_from(f.tmp.slice(0, f.ntmp.zext()));
     range(Qbe.Tmp0, inlfn.ntmp.zext()) { i |
@@ -102,28 +103,36 @@ fn inlsave(f: *Qbe.Fn) bool = {
         printfn(inlfn, f.globals.debug_out);
     };
     m      := f.globals;
-    id     := m.intern(f.name());
-    symbol := m.get_symbol_info(id);
-    if f.lnk.export {
-        symbol.referenced = true;
+    
+    result := false;
+    use_symbol(f.globals, f.lnk.id) { symbol |
+        if f.lnk.export {
+            symbol.referenced = true;
+        };
+        @debug_assert(symbol.inline.is_null(), "how have we been here before");
+        symbol.inline = inlfn;
+        result = !symbol.referenced;
     };
-    @debug_assert(symbol.inline.is_null(), "how have we been here before");
-    symbol.inline = inlfn;
-    !symbol.referenced
+    result
+    
 }
 
+// TODO: if you want to have multiple threads compiling together can't use the visit field of the cached tmps. 
 fn inlfind(f: *Qbe.Fn, r: Qbe.Ref) ?*Qbe.Fn = {
     if(rtype(r) != .RCon, => return(.None));
     c := f.get_constant(r);
     if(c.type != .CAddr, => return(.None));
     if(c.sym.type != .SGlo, => return(.None));
     m := f.globals;
-    symbol := m.get_symbol_info(c.sym.id);
-    if !symbol.inline.is_null() {
-        return(Some = symbol.inline);
+    result: ?*Qbe.Fn = .None;
+    use_symbol(f.globals, c.sym.id) { symbol |
+        if !symbol.inline.is_null() {
+            result = (Some = symbol.inline);
+        } else {
+            mark_referenced(m, c.sym.id, symbol);
+        };
     };
-    mark_referenced(m, c.sym.id, symbol);
-    .None
+    result
 }
 
 fn getinlref(inlfn: *Qbe.Fn, inlr: Qbe.Ref, f: *Qbe.Fn, c: *InlineCtx) Qbe.Ref = {
@@ -368,8 +377,9 @@ fn inlcalls(f: *Qbe.Fn) void = {
                     if(rtype(r) != .RCon, => continue());
                     c := f.get_constant(r);
                     if(c.type != .CAddr, => continue());
-                    s := f.globals.get_symbol_info(c.sym.id);
-                    mark_referenced(f.globals, c.sym.id, s);
+                    use_symbol(f.globals, c.sym.id) { s | 
+                        mark_referenced(f.globals, c.sym.id, s);
+                    };
                 };
             };
             n += 1;
@@ -413,13 +423,14 @@ fn mark_referenced(m: *QbeModule, id: u32, symbol: *SymbolInfo) void #inline = {
 fn emit_suspended_inlinables(m: *QbeModule) void = {
     log := m.debug["G".char()];
     for m.inlinable_but_referenced_later { id | 
-        s := m.get_symbol_info(id);
         mark := mark_temporary_storage();
-        if log {
-            @fmt_write(m.debug_out, "\nFinishing suspended function: %\n", s.name);
+        f := @uninitialized Qbe.Fn;
+        use_symbol(m, id) { s | 
+            if log {
+                @fmt_write(m.debug_out, "\nFinishing suspended function: %\n", s.name);
+            };
+            f = s.inline[]; // we stomp arrays to point at temp, but it would probably be fine because everyone's already gone through inlining. 
         };
-        f := s.inline[]; // we stomp arrays to point at temp, but it would probably be fine because everyone's already gone through inlining. 
-        
         f.globals = m;
         
         // we don't bother storing these in the inlining cache so recompute them

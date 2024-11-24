@@ -15,7 +15,7 @@ SymbolBucket :: @struct(
 );
 
 SymbolInfo :: @struct(
-    name: CStr,
+    name: Str,
     inline: *Qbe.Fn, // nullable
     fixups: RsVec(Fixup),
     // or -1 if not referenced yet. only relevant for imported functions. 
@@ -109,16 +109,14 @@ fn make_exec(self: *QbeModule) void = {
 }
 
 fn get_addr(self: *QbeModule, name: Str) ?rawptr = {
-    name := name.maybe_borrow_cstr(temp());
-    self.get_addr(name)
-}
-
-fn get_addr(self: *QbeModule, name: CStr) ?rawptr = {
     assert(!self.fixups_locked, "you can't get a jit pointer after emitting for aot becuase it stomps data with relocation info.");
     assert(self.tls_vars&.len() == 0, "we don't handle thread locals while jitting.");
     id := self.intern(name);
-    symbol := self.get_symbol_info(id);
-    get_addr(self, symbol)
+    result: ?rawptr = .None;
+    use_symbol(self, id) { symbol | 
+        result =get_addr(self, symbol);
+    };
+    result
 }
 
 fn get_addr(self: *QbeModule, symbol: *SymbolInfo) ?rawptr = {
@@ -138,6 +136,10 @@ fn new_emit_data(self: *QbeModule, dat: *Qbe.Dat) void = {
     
     if self.want_text_asm {
         @if(LINK_QBE_C, {
+            if dat.name.ptr.is_null() {
+                s := self.get_symbol_info(dat.lnk.id);
+                dat.name.ptr = @tfmt("%\0", s);
+            };
             fn emitdat(_0: *Qbe.Dat, _1: *FILE) void #import("qbe"); // :TodoPort
             emitdat(dat, self.outf);
         }, panic("LINK_QBE_C disabled: cannot emitdat for want_text_asm"));
@@ -163,7 +165,7 @@ fn emit_data_to_segment(self: *QbeModule, dat: *Qbe.Dat) void = {
     @match(dat.type) {
         fn DStart() => {
             segment.align_to(8);
-            id := self.intern(dat.name);
+            id := dat.lnk.id;
             maybe_add_export(self, id, dat.lnk.export);
             off := if dat.lnk.thread {
                 @match(self.goal.type) {
@@ -181,9 +183,10 @@ fn emit_data_to_segment(self: *QbeModule, dat: *Qbe.Dat) void = {
                         
                         // fixup for the thunk
                         patch := ptr_cast_unchecked(TlsDescriptor, u8, descriptor);
-                        desc_sym := self.intern("_tlv_bootstrap".sym().c_str());  // one underscore because we put an extra one.
-                        desc_sym := self.get_symbol_info(desc_sym);
-                        desc_sym.fixups&.push((patch_at = patch, type = .DataAbsolute), self.gpa);
+                        desc_sym := self.intern("_tlv_bootstrap");  // one underscore because we put an extra one.
+                        use_symbol(self, desc_sym) { desc_sym |
+                            desc_sym.fixups&.push((patch_at = patch, type = .DataAbsolute), self.gpa);
+                        };
                         
                         // NOT offset in data segment or distance between desc and init. 
                         // the section has as magic flag so it knows where to look. 
@@ -239,17 +242,18 @@ fn emit_data_to_segment(self: *QbeModule, dat: *Qbe.Dat) void = {
                 @assert(dat.u.ref.off == 0, "sorry can't do offset refs yet");
                 name := dat.u.ref.name;
                 
-                id     := self.intern(name);
-                symbol := self.get_symbol_info(id);
-                mark_referenced(self, id, symbol);
-                if self.get_addr(symbol) { value |
-                    ptr[] = int_from_rawptr(value);
-                };
-                // Since we need the absolute address in memory, even local symbols need a relocation. 
-                symbol.fixups&.push((patch_at = next[], type = .DataAbsolute), self.gpa);
-                if self.goal.type == .Relocatable && !symbol.local_but_marked_for_relocation {
-                    self.local_needs_reloc&.push(id);
-                    symbol.local_but_marked_for_relocation = true;
+                id     := self.intern(name.str()); // TODO: have them just pass us the id
+                use_symbol(self, id) { symbol | 
+                    mark_referenced(self, id, symbol);
+                    if self.get_addr(symbol) { value |
+                        ptr[] = int_from_rawptr(value);
+                    };
+                    // Since we need the absolute address in memory, even local symbols need a relocation. 
+                    symbol.fixups&.push((patch_at = next[], type = .DataAbsolute), self.gpa);
+                    if self.goal.type == .Relocatable && !symbol.local_but_marked_for_relocation {
+                        self.local_needs_reloc&.push(id);
+                        symbol.local_but_marked_for_relocation = true;
+                    };
                 };
             } else {
                 ptr[] = dat.u.num;
@@ -271,13 +275,17 @@ fn emit_data_to_segment(self: *QbeModule, dat: *Qbe.Dat) void = {
     } // returns
 }
 
-fn add_code_bytes(self: *QbeModule, name: CStr, bytes: []u8) void = {
-    name_id := self.intern(name);
-    symbol := self.get_symbol_info(name_id);
+// :ThreadSafety we can't have both threads fucking with self.segments
+fn add_code_bytes(self: *QbeModule, name: Str, bytes: []u8) void = {
     code := self.segments&[.Code]&;
     code.align_to(4);  // todo: only for arm
     start_offset := ptr_diff(code.mmapped.ptr, code.next);
-    self.do_jit_fixups(name_id, .Code, start_offset);
+    
+    name_id := self.intern(name);
+    use_symbol(self, name_id) { symbol | 
+        self.do_jit_fixups(name_id, .Code, start_offset);
+    };
+    
     dest := slice(code.next, bytes.len);
     dest.copy_from(bytes);
     code.next = code.next.offset(bytes.len);
@@ -309,20 +317,27 @@ fn align_to(s: *SegmentCursor, align: i64) void = {
     };
 }
 
+// :ThreadSafety
 fn put_jit_addr(self: *QbeModule, name: CStr, addr: rawptr) void = {
-    symbol := self.get_symbol_info(self.intern(name));
-    @assert(symbol.kind == .Pending, "Redeclared symbol %", name);
-    symbol.kind = .DynamicPatched;
-    self.do_fixups(u8.ptr_from_raw(addr), symbol);
+    use_symbol(self, self.intern(name)) { symbol |
+        @assert(symbol.kind == .Pending, "Redeclared symbol %", name);
+        symbol.kind = .DynamicPatched;
+        self.do_fixups(u8.ptr_from_raw(addr), symbol);
+    };
 }
 
 // :SLOW insanely inefficient way of doing this. especially when someone tries to add multiple libs. 
 // TODO: store a list of the pending ones so don't have to iterate them all. 
 fn fill_pending_dynamic_imports(self: *QbeModule, lib: DlHandle) void = {
+    buf := u8.list(temp());
     for_symbols self { id, symbol |  // :SLOW  just keep list of pending symbols instead
         if symbol.kind == .Pending {
             self.imports&.push(id); 
-            found := lib.dlsym(symbol.name);
+            buf&.clear();
+            buf&.push_all(symbol.name);
+            buf&.push(0);
+            s: CStr = (ptr = buf.maybe_uninit.ptr);
+            found := lib.dlsym(s);
             if !found.is_null() {
                 symbol.kind = .DynamicPatched;
                 self.do_fixups(u8.ptr_from_raw(found), symbol);
@@ -357,26 +372,27 @@ fn fill_from_libc(self: *QbeModule) void = {
 //
 fn do_jit_fixups(self: *QbeModule, id: u32, segment: SegmentType, final_offset: i64) void = {
     @assert(final_offset >= 0 && final_offset < self.segments&[segment].mmapped.len, "thats not in the segment");
-    symbol := self.get_symbol_info(id);
-    @assert(symbol.kind != .Local, "Redeclared symbol %", symbol.name);
-    symbol.segment = segment;
-    symbol.offset = final_offset;
-    symbol.kind = .Local;
-    dest := self.segment_address(symbol.segment, symbol.offset);
-    fixups := symbol.fixups&;
-    self.do_fixups(dest, symbol);
-    if self.goal.type == .Exe { //  || symbol.segment == .Code // :canireallynothavecodeberelative
-        // Since it's a local symbol, we don't care about the relocations anymore. The linker never needs to know. 
-        // TODO: actually thats also true for imports becuase calls go through __got. 
-        unordered_retain(fixups, fn(it) => it.type&.is(.DataAbsolute));
-        if(fixups.len == 0, => fixups.drop(self.gpa));
-    } else {
-        // you still care because the static linker wants to move things around. :track_got_reloc
-        if !symbol.local_but_marked_for_relocation {
-            self.local_needs_reloc&.push(id);
-            symbol.local_but_marked_for_relocation = true;
-        };
-    }; 
+    use_symbol(self, id) { symbol | 
+        @assert(symbol.kind != .Local, "Redeclared symbol %", symbol.name);
+        symbol.segment = segment;
+        symbol.offset = final_offset;
+        symbol.kind = .Local;
+        dest := self.segment_address(symbol.segment, symbol.offset);
+        fixups := symbol.fixups&;
+        self.do_fixups(dest, symbol);
+        if self.goal.type == .Exe { //  || symbol.segment == .Code // :canireallynothavecodeberelative
+            // Since it's a local symbol, we don't care about the relocations anymore. The linker never needs to know. 
+            // TODO: actually thats also true for imports becuase calls go through __got. 
+            unordered_retain(fixups, fn(it) => it.type&.is(.DataAbsolute));
+            if(fixups.len == 0, => fixups.drop(self.gpa));
+        } else {
+            // you still care because the static linker wants to move things around. :track_got_reloc
+            if !symbol.local_but_marked_for_relocation {
+                self.local_needs_reloc&.push(id);
+                symbol.local_but_marked_for_relocation = true;
+            };
+        }; 
+    };
 }
 ::tagged(FixupType);
 

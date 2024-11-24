@@ -27,7 +27,7 @@ fn emit_func_arm64(m: *QbeModule, f: *Qbe.Fn, _: *FILE) void = {
     name: CStr = (ptr = f.name&.as_ptr());
     
     // We know we're emitting the function right here so we can do old fixups now. 
-    name_id := m.intern(name);
+    name_id := f.lnk.id;
     
     m.align_to(.Code, 4);  // should never be unaligned anyway but we live in fear
     start_offset := m.current_offset(.Code);
@@ -398,42 +398,43 @@ fn align_to(m: *QbeModule, segment: SegmentType, align: i64) void = {
 
 // TODO: rename this. 
 fn loadaddr_bits(self: *ArmState, c: *Qbe.Con, dest_reg: i64, thread_local: bool) void = {
-    symbol := self.m.get_symbol_info(c.sym.id);
-    patch_addr := self.m.segment_address(.Code, self.m.current_offset(.Code));
-    
-    patch: Fixup = (patch_at = patch_addr, type = (InReg = (r = dest_reg, increment = 0)));
-    // i think i don't need a different relocation type for thread locals? 
-    // TODO: but makes sture that's still true for relocatable objects.
-    @match(symbol.kind) {
-        fn DynamicPatched() => panic("TODO: handle predeclared import");
-        fn Local() => {
-            // :canireallynothavecodeberelative
-            // TODO: is there some way to have it not move around my functions so i can use relative calls within this one segment?
-            if self.m.goal.type == .Relocatable  { // && symbol.segment != .Code 
-                // we're creating input for a static linker and we want it to be able to move shit around. 
+    use_symbol(self.m, c.sym.id) { symbol |
+        patch_addr := self.m.segment_address(.Code, self.m.current_offset(.Code));
+        
+        patch: Fixup = (patch_at = patch_addr, type = (InReg = (r = dest_reg, increment = 0)));
+        // i think i don't need a different relocation type for thread locals? 
+        // TODO: but makes sture that's still true for relocatable objects.
+        @match(symbol.kind) {
+            fn DynamicPatched() => panic("TODO: handle predeclared import");
+            fn Local() => {
+                // :canireallynothavecodeberelative
+                // TODO: is there some way to have it not move around my functions so i can use relative calls within this one segment?
+                if self.m.goal.type == .Relocatable  { // && symbol.segment != .Code 
+                    // we're creating input for a static linker and we want it to be able to move shit around. 
+                    symbol.fixups&.push(patch, self.m.gpa);
+                };
+                
+                // we've already compiled it so just compute its address directly.
+                distance := self.m.distance_between(.Code, self.m.current_offset(.Code), symbol.segment, symbol.offset);
+                if self.f.globals.debug["T".char()] {
+                    write(self.m.debug_out, items(@format("# direct offset % for '%' %[%]\n", distance, self.m.str(c.sym.id), symbol.segment, symbol.offset) temp()));
+                };
+                xxx := symbol.segment != .Code;
+                @debug_assert(xxx || distance < 0, "we must be jumping backwards");
+                //i_page, i_off := @if(thread_local, 
+                //    encode_adrp_load(self.m.segment_address(symbol.segment, symbol.offset), patch_addr, @as(u5) dest_reg), 
+                //    encode_adrp_add(self.m.segment_address(symbol.segment, symbol.offset), patch_addr, @as(u5) dest_reg), 
+                //);
+                i_page, i_off := encode_adrp_add(self.m.segment_address(symbol.segment, symbol.offset), patch_addr, @as(u5) dest_reg);
+                self.inst(i_page);
+                self.inst(i_off);
+            }
+            fn Pending() => {
                 symbol.fixups&.push(patch, self.m.gpa);
-            };
-            
-            // we've already compiled it so just compute its address directly.
-            distance := self.m.distance_between(.Code, self.m.current_offset(.Code), symbol.segment, symbol.offset);
-            if self.f.globals.debug["T".char()] {
-                write(self.m.debug_out, items(@format("# direct offset % for '%' %[%]\n", distance, self.m.str(c.sym.id), symbol.segment, symbol.offset) temp()));
-            };
-            xxx := symbol.segment != .Code;
-            @debug_assert(xxx || distance < 0, "we must be jumping backwards");
-            //i_page, i_off := @if(thread_local, 
-            //    encode_adrp_load(self.m.segment_address(symbol.segment, symbol.offset), patch_addr, @as(u5) dest_reg), 
-            //    encode_adrp_add(self.m.segment_address(symbol.segment, symbol.offset), patch_addr, @as(u5) dest_reg), 
-            //);
-            i_page, i_off := encode_adrp_add(self.m.segment_address(symbol.segment, symbol.offset), patch_addr, @as(u5) dest_reg);
-            self.inst(i_page);
-            self.inst(i_off);
-        }
-        fn Pending() => {
-            symbol.fixups&.push(patch, self.m.gpa);
-            self.inst(brk(0x0123));
-            self.inst(brk(0x0456));
-        }
+                self.inst(brk(0x0123));
+                self.inst(brk(0x0456));
+            }
+        };
     };
 }
 
@@ -632,30 +633,31 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
                     panic("invalid call argument");
                 };
                 
-                symbol := self.m.get_symbol_info(c.sym.id);
-                patch_at := self.m.segments&[.Code].next;
-                @match(symbol.kind) {
-                    fn DynamicPatched() => panic("TODO: handle predeclared import");
-                    fn Local() => {
-                        // already compiled it so branch there directly
-                        distance := self.m.distance_between(.Code, self.m.current_offset(.Code), symbol.segment, symbol.offset) / 4;
-                        assert(distance.abs() < 1.shift_left(26), "can't call that far but I don't let modules be that big yet.");
-                        self.inst(b(s_trunc(distance, 26), 1));
-                        // :canireallynothavecodeberelative
-                        // TODO: I don't have a test that requires this 
-                        //       but i think you do because you need the other ones?
-                        if self.m.goal.type == .Relocatable { 
-                            symbol.fixups&.push((patch_at = patch_at, type = .Call), self.m.gpa);
-                        }; 
-                    };
-                    fn Pending() => {
-                        // haven't compiled it yet so will need a patch. 
-                        symbol.fixups&.push((patch_at = patch_at, type = .Call), self.m.gpa);
-                        self.inst(brk(0x0789));
-                        if self.m.debug["T".char()] {
-                            @fmt_write(self.m.debug_out, "# pending call % calls %\n", u8.int_from_ptr(patch_at), symbol.name);
+                use_symbol(self.m, c.sym.id) { symbol |
+                    patch_at := self.m.segments&[.Code].next;
+                    @match(symbol.kind) {
+                        fn DynamicPatched() => panic("TODO: handle predeclared import");
+                        fn Local() => {
+                            // already compiled it so branch there directly
+                            distance := self.m.distance_between(.Code, self.m.current_offset(.Code), symbol.segment, symbol.offset) / 4;
+                            assert(distance.abs() < 1.shift_left(26), "can't call that far but I don't let modules be that big yet.");
+                            self.inst(b(s_trunc(distance, 26), 1));
+                            // :canireallynothavecodeberelative
+                            // TODO: I don't have a test that requires this 
+                            //       but i think you do because you need the other ones?
+                            if self.m.goal.type == .Relocatable { 
+                                symbol.fixups&.push((patch_at = patch_at, type = .Call), self.m.gpa);
+                            }; 
                         };
-                    }
+                        fn Pending() => {
+                            // haven't compiled it yet so will need a patch. 
+                            symbol.fixups&.push((patch_at = patch_at, type = .Call), self.m.gpa);
+                            self.inst(brk(0x0789));
+                            if self.m.debug["T".char()] {
+                                @fmt_write(self.m.debug_out, "# pending call % calls %\n", u8.int_from_ptr(patch_at), symbol.name);
+                            };
+                        }
+                    };
                 };
             } else {
                 self.inst(br(callee.int_reg(), 1));

@@ -14,6 +14,7 @@
 #include <sys/signal.h>
 // #include <sys/syslimits.h>
 // #include <sys/unistd.h>
+#include <pthread.h>
 #include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>

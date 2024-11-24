@@ -1,15 +1,10 @@
 // This is a temporary measure. The plan is for the frontend to generate the qbe-style ir directly. 
 // But before I start ripping stuff apart I need to make sure this is better in every way than what i had before. 
-// - I have to be able to understand the qbe passes enough to port them to Franca and make the variable names less obfuscated. 
-// - I have to be able to replace thier backends with generating machine code directly.
-//   Both for aot and jitting into an mmap-exec-ed buffer for comptime execution. 
-// - It has to be faster than llvm debug mode (it already runs faster, i think it will compile faster by not needing to parse + emit text).
-// - It has to be able to generate llvm-ir for release or debug-info builds.
-//   I'm sure that will involve painfully inserting casts. Also have to be able to track debug source locations through the passes (i think Odbgloc already does that). 
 // - Have to expose it to user comptime code for #bc (examples/bf2bc.fr)
 //   maybe add optional function argument type checking to catch basic mistakes.
-// - Have to make easy to build static + dynamic.
-// - be able to run thier .ssa tests
+// - Finished amd64 codegen
+// - be able to use it for comptime execution
+// - elf
 //
 // TODO: at the end i should make the math stuff not #fold becuase its probably faster to let the backend do it. 
 //       but then the front end wouldn't see those expressions as constant for other #fold calls.
@@ -17,15 +12,30 @@
 fn finished(self: *EmitQbe2, fid: FuncId) void = {
     name: List(u8) = list(temp()); 
     self.fmt_fn_name(fid, name&);
-    fnn := self.b&.build(name.items());
-    s := self.get_log_types(fid);
-    m := self.b.globals;
-    m.set_debug_types(s, true);
-    run_qbe_passes(fnn&);
-    m.set_debug_types(s, false);
+    self.build_current(name.items(), self.get_log_types(fid));
     self.body = zeroed(*FnBody); // :EVIL     but just avoiding confusion. 
     self.context = QbeNull;
 }; 
+
+fn build_current(self: *EmitQbe2, name: Str, logging: Str) void = {
+    ::ptr_utils(*CodegenEntry);
+    old_entry := self.b&.build(name);
+    m := self.b.globals;
+    
+    // This is going to run on another thread soon.
+    // TODO: Need to be careful about locking the backend's interning table and make sure the fnn stuff is not in temp().
+    compiler_temp := context(DefaultContext)[].temporary_allocator;
+    entry := self.b&.acquire(false);
+    @assert(old_entry.identical(entry), "wtf!>");
+    push_dynamic_context {
+        context(DefaultContext)[].temporary_allocator = entry.arena&;
+        fnn := entry.f&;
+        m.set_debug_types(logging, true);
+        run_qbe_passes(fnn);
+        entry.release(false);
+        m.set_debug_types(logging, false);
+    };
+}
 
 fn set_debug_types(m: *QbeModule, s: Str, value: bool) void = {
     for s { s | 
@@ -33,26 +43,24 @@ fn set_debug_types(m: *QbeModule, s: Str, value: bool) void = {
     };
 }
 
-// #log_ir("RSI") 
 fn get_log_types(self: *EmitQbe2, fid: FuncId) Str = {
     func := self.comp.get_function(fid);
-    if func.get_flag(.LogIr) {
-        each func.annotations& { n | 
-            if n.name == Flag.log_ir.ident() {
-                if n.args& { arg |
-                    return(@match(arg.expr&) {
-                        fn String(arg) => self.comp.get_string(arg[]);
-                        @default => {
-                            @eprintln("TODO: non string literal #log_ir arg for %", self.comp.get_string(func.name));
-                            "P"
-                        };
-                    });
-                };
-                return("P");
+    if(!func.get_flag(.LogIr), => return(""));
+    each func.annotations& { n | 
+        if n.name == Flag.log_ir.ident() {
+            if n.args& { arg |
+                return(@match(arg.expr&) {
+                    fn String(arg) => self.comp.get_string(arg[]);
+                    @default => {
+                        @eprintln("TODO: non string literal #log_ir arg for %", self.comp.get_string(func.name));
+                        "P"
+                    };
+                });
             };
+            return("P");
         };
     };
-    ""
+    panic("ICE: #log_ir was set but did not find tag on the function")
 }
 
 #include_std("compiler/backend/walk_bc.fr");
@@ -171,7 +179,6 @@ fn new(comp: CompCtx, alloc: Alloc, arch: Arch, os: Os) EmitQbe2 #inline = {
         implicit_context = comp.get_build_options()[].implicit_context_runtime,
     );
     smuggle_module_pointer[] = zeroed(*QbeModule);
-    
     f: []Qbe.Field = @slice(@as(Qbe.Field) (type = .Fl, len = 1.trunc()), @as(Qbe.Field) (type = .Fl, len = 1.trunc()));
     s.pair_type_id = s.b&.struct_type(f, 16, 3);
     
@@ -200,7 +207,7 @@ fn emit_entry_points_and_debug_info(gen: *CodeGen(EmitQbe2), comp: CompCtx, fns:
 
     @match(entry) {
         fn TestRunnerMain() => {
-            fake_decl_name := @format("test_runner_main\0") temp();
+            fake_decl_name := "test_runner_main";
             entry := self.b&.push_block();
             self.current = entry;
             env := self.b&.push_inst(self.current, .pare, .Kl, QbeNull, QbeNull);
@@ -213,11 +220,10 @@ fn emit_entry_points_and_debug_info(gen: *CodeGen(EmitQbe2), comp: CompCtx, fns:
                 self.b&.push_inst0(self.current, .call, .Kw, callee, QbeNull);
             };
             self.b&.end_block(self.current, (type = .retl, arg = self.b&.push_literal(0)));
-            fnn := self.b&.build(fake_decl_name.items());
-            run_qbe_passes(fnn&);
+            self.build_current(fake_decl_name, "");
             
             // now actually call it
-            self.init_runtime_entry_point(ptr = fake_decl_name.maybe_uninit.ptr);
+            self.init_runtime_entry_point(fake_decl_name);
         };
         fn GiveMeTheCodeAndGiveItToMeRaw() => ();
         fn ExportWithNames() => {
@@ -228,7 +234,7 @@ fn emit_entry_points_and_debug_info(gen: *CodeGen(EmitQbe2), comp: CompCtx, fns:
         };
         fn WrapMain() => {
             @assert(fns.len == 1, ".WrapMain expected a single entry point");
-            self.init_runtime_entry_point(self.fn_name_cstr(fns[0]));
+            self.init_runtime_entry_point(self.fn_name_str(fns[0]));
         }
     };
     
@@ -238,7 +244,7 @@ fn emit_entry_points_and_debug_info(gen: *CodeGen(EmitQbe2), comp: CompCtx, fns:
     gen.backend.inline_asm = List(u8).zeroed();
 }
 
-fn init_runtime_entry_point(self: *EmitQbe2, usermain_name: CStr) void = {
+fn init_runtime_entry_point(self: *EmitQbe2, usermain_name: Str) void = {
     env := self.comp.get_comptime_env();
     runtime_init := env.runtime_init.expect("declaration of franca_runtime_init");
     
@@ -255,9 +261,7 @@ fn init_runtime_entry_point(self: *EmitQbe2, usermain_name: CStr) void = {
     self.b&.push_inst0(self.current, .arg, .Kl, user_main, QbeNull);
     self.b&.push_inst0(self.current, .call, .Kw, runtime_init, QbeNull);
     self.b&.end_block(self.current, (type = .ret0, arg = QbeNull));
-    fake_decl_name := @format("main\0") temp();
-    fnn := self.b&.build(fake_decl_name.items());
-    run_qbe_passes(fnn&);
+    self.build_current("main", "");
 }
 
 fn emit_bounce_fn(self: *EmitQbe2, impl_name_callee: Str, fake_decl_name: Str, signeture: PrimSig, private: bool) void = {
@@ -286,14 +290,17 @@ fn emit_bounce_fn(self: *EmitQbe2, impl_name_callee: Str, fake_decl_name: Str, s
         self.indirect_return_slot = self.b&.push_inst(entry, .alloc8, .Kl, self.b&.push_literal(16), QbeNull);
     };
     
-    fuck := @format("%\0", impl_name_callee) temp();
-    callee := self.b&.push_symbol(ptr = fuck.maybe_uninit.ptr);
+    callee := self.b&.push_symbol(impl_name_callee);
     self.signeture = signeture;
     ret := self.inst_call(params.items(), signeture, callee, true); // TODO: :Context?
     
     self.inst_return(ret);
-    fnn := self.b&.build(fake_decl_name);
-    run_qbe_passes(fnn&);
+    
+    //self.build_current(fake_decl_name, "");
+    entry := self.b&.build(fake_decl_name);  // :ThreadSafety
+    entry.state = .UsedByBouba;
+    run_qbe_passes(entry.f&);
+    entry.state = .WaitingForBouba;
 }
 
 // TODO: copy-paste from DynamicImport but reversed so its a pain. 
@@ -312,9 +319,7 @@ fn emit_constant(self: *EmitQbe2, id: BakedVarId) void = {
     idx: i64 = id.id.zext();
     
     dat := Qbe.Dat.zeroed();
-    lnk: Qbe.Lnk = ();
-    fuck := @format("g%\0", idx) temp();
-    dat.name = (ptr = fuck.maybe_uninit.ptr);
+    lnk: Qbe.Lnk = (id = self.b.globals.intern(@tfmt("g%", idx)));
     dat.lnk = lnk&;
     
     emit_data :: fn(d) => self.b.globals.new_emit_data(d);
@@ -434,16 +439,14 @@ fn emit_special_asm(self: *EmitQbe2, body: *FuncImpl, func: *Func, bc: *FnBody, 
         });
         (fn JittedAarch64(code) => { 
             if(arch.ne(Arch.aarch64), => { return(false); });
-            fuck := @format("%\0", (self, bc.func)) temp();
-            self.b.globals.add_code_bytes(@as(CStr) (ptr = fuck.maybe_uninit.ptr), @as([]u8) (ptr = ptr_cast_unchecked(u32, u8, code.ptr), len = code.len * 4));
+            self.b.globals.add_code_bytes(self.fn_name_str(bc.func), @as([]u8) (ptr = ptr_cast_unchecked(u32, u8, code.ptr), len = code.len * 4));
             return(true);
         });
         fn X86AsmBytes(code) => { // :copy-paste
             if target.arch != .x86_64 { 
                 return(false); 
             };
-            fuck := @format("%\0", (self, bc.func)) temp();
-            self.b.globals.add_code_bytes(@as(CStr) (ptr = fuck.maybe_uninit.ptr), code.items());
+            self.b.globals.add_code_bytes(self.fn_name_str(bc.func), code.items());
             return(true);
         }
         @default fn() void => return(false);
@@ -540,11 +543,10 @@ fn fmt_fn_name(self: *EmitQbe2, f: FuncId, out: *List(u8)) void = {
     }
 }
 
-fn fn_name_cstr(self: *EmitQbe2, f: FuncId) CStr = {
+fn fn_name_str(self: *EmitQbe2, f: FuncId) Str = {
     name: List(u8) = list(temp()); 
     self.fmt_fn_name(f, name&);
-    name&.push(0);
-    (ptr = name.maybe_uninit.ptr)
+    name.items()
 }
 
 fn display(self: Ty(*EmitQbe2, FuncId), out: *List(u8)) void = {
@@ -644,9 +646,8 @@ fn inst_intrinsic(self: *EmitQbe2, args: []Qbe.Ref, op: Intrinsic) []Qbe.Ref = {
 }
 
 fn inst_call(self: *EmitQbe2, args: Slice(Qbe.Ref), sig: PrimSig, f: FuncId, tail: bool, _loc: ?Span, context: bool) Slice(EmitQbe2.Val) = {
-    name := self.fn_name_cstr(f);
+    name := self.fn_name_str(f);
     callee := self.b&.push_symbol(name);
-    //@println("% %", name, context);
     self.inst_call(args, sig, callee, context)
 }
 
@@ -744,7 +745,7 @@ fn inst_copy(self: *EmitQbe2, from: EmitQbe2.Val, to: EmitQbe2.Val, bytes: u16) 
 }
 
 fn inst_func_ref(self: *EmitQbe2, fid: FuncId) EmitQbe2.Val = {
-    self.b&.push_symbol(self.fn_name_cstr(fid))
+    self.b&.push_symbol(self.fn_name_str(fid))
 }
 
 fn inst_jump_if(self: *EmitQbe2, cond: EmitQbe2.Val, true: BbId, false: BbId, args: Slice(EmitQbe2.Val)) void = {
@@ -883,9 +884,7 @@ fn inst_load(self: *EmitQbe2, addr: EmitQbe2.Val, ty: Prim) EmitQbe2.Val = {
 }
 
 fn inst_global(self: *EmitQbe2, id: BakedVarId) EmitQbe2.Val = {
-    name := @format("g%", @as(i64) id.id.zext()) temp();
-    name&.push(0);
-    self.b&.push_symbol(ptr = name.maybe_uninit.ptr)
+    self.b&.push_symbol(@tfmt("g%", id.id))
 }
 
 fn get_var(self: *EmitQbe2, ty: Prim) Qbe.Ref = {
