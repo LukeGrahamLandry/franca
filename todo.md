@@ -13,6 +13,7 @@
 - check that the keyword between block arguments is correct (ie `if a {| b } else {| c }` should require `else` not some other identifier),
   and use that as an argument name for overloading.
 - have string literals coerce to c strings instead of `.sym().c_str()`?
+- have a test where you force inline everything that's not recursive to stress test the backend dealing with large functions.
 
 ##
 

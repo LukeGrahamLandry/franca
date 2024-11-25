@@ -17,6 +17,38 @@
  *            dce should be moved out...
  */
 
+/* instruction selection
+ * requires use counts (as given by parsing)
+ */
+fn amd64_isel(f: *Qbe.Fn) void = {
+    f.assign_alloc_slots();
+    // In this pass, if `t.slot != -1` then `TMP(t) == addr SLOT(t.slot)`
+
+    /* process basic blocks */
+    num := temp().alloc(Qbe.Num, f.ntmp.zext());
+    for_blocks f { b | 
+        f.reset_scratch();
+        for_jump_targets b { sb | 
+            for_phi sb { p |
+                a := index_in_phi(b, p);
+                fixarg(p.arg.index(a), p.cls, Qbe.Ins.ptr_from_int(0), f);
+            };
+        };
+        num.set_zeroed();
+        anumber(num, b, f.con.slice(0, f.ncon.zext()));
+        seljmp(b, f);
+        for_insts_rev b { i |
+            sel(i[][], num, f);
+        };
+        f.copy_instructions_from_scratch(b);
+    };
+
+    when_debug(f, .InstSelect) { out | 
+        write(out, "\n> After instruction selection:\n");
+        printfn(f, out);
+    };
+}
+
 fn noimm(r: Qbe.Ref, f: *Qbe.Fn) bool = {
     if(rtype(r) != .RCon, => return(false));
     c := f.get_constant(r);
@@ -111,16 +143,8 @@ fn fixarg(r: *Qbe.Ref, k: Qbe.Cls, i: *Qbe.Ins, f: *Qbe.Fn) void = {
                 r1 = r0;
             };
         };
-        @if(!(is_store(o) && r.identical(i.arg&.index(1))) // TODO: is it important that the comparison is by reference?
-        && !is_load(o) && o != .call && rtype(r0) == .RCon
-        && f.get_constant(r0)[].type == .CAddr) => {
-            // TODO: remove this when i stop outputting text.
-            //       but also maybe its dumb for me to complicate the emit code. 
-            //       since sane programs won't do this anyway. 
-            /* apple as does not support 32-bit
-            * absolute addressing, use a rip-
-            * relative leaq instead
-            */
+        @if(!(is_store(o) && r.identical(i.arg&.index(1)))
+        && !is_load(o) && o != .call && f.is_symbol(r0)) => {
             r1 = f.newtmp("isel", .Kl);
             f.emit(.addr, .Kl, r1, r0, QbeNull);
         };
@@ -129,7 +153,8 @@ fn fixarg(r: *Qbe.Ref, k: Qbe.Cls, i: *Qbe.Ins, f: *Qbe.Fn) void = {
             * the form $foo(%rip, ...)
             */
             m := f.get_memory(r0);
-            if m.base == QbeNull && m.offset.type == .CAddr {
+            needs_fix := !SIMPLE_ADDR[] && m.base == QbeNull && m.offset.type == .CAddr;
+            if needs_fix {
                 r0 = f.newtmp("isel", .Kl);
                 f.emit(.addr, .Kl, r0, f.newcon(m.offset&), QbeNull);
                 m.offset.type = .CUndef;
@@ -141,149 +166,160 @@ fn fixarg(r: *Qbe.Ref, k: Qbe.Cls, i: *Qbe.Ins, f: *Qbe.Fn) void = {
     r[] = r1;
 }
 
+// TODO: this would be better if you did it in the other order and converted everything to lea as a way of memoizing for future uses of the same address. 
 fn merge_amd_addr(f: *Qbe.Fn, mem: *Qbe.Addr) void = {
-    when_debug(f, .InstSelect) { out |
-        printmem(mem, f, out);
-    };
-    if rtype(mem.base) == .RTmp && !isreg(mem.base) {
-        goto_index :: local_return;
-        t := f.get_temporary(mem.base);
-        if t.slot != -1 {
-            mem.base = SLOT(t.slot);
-            return(f.merge_amd_addr(mem));
+    n := 0;
+    loop {
+        continue :: local_return;
+        n += 1;
+        @assert(n < 1000, "probably infinite looping in merge_amd_addr of %", f.name());
+        
+        when_debug(f, .InstSelect) { out |
+            printmem(mem, f, out);
         };
-        if t.def.is_null() {
-            goto_index();
+        if rtype(mem.base) == .RTmp && !isreg(mem.base) {
+            goto_index :: local_return;
+            t := f.get_temporary(mem.base);
+            if t.slot != -1 {
+                mem.base = SLOT(t.slot);
+                continue();
+            };
+            if t.def.is_null() {
+                goto_index();
+            };
+            a0 := t.def.arg&[0];
+            a1 := t.def.arg&[1];
+            if a0 == mem.base || a1 == mem.base || t.def.to != mem.base {
+                goto_index();
+            };
+            @match(t.def.op()) {
+                fn add() => {
+                    swap := false;
+                    if rtype(a0) == .RTmp {
+                        t := a0; a0 = a1; a1 = t; 
+                        swap = true;
+                    };
+                    if f.is_symbol(a0) {
+                        if mem.index == QbeNull && mem.offset.type != .CAddr {
+                            if f.get_int(a1) { off |
+                                mem.base = QbeNull;
+                                x := addcon(mem.offset&, f.get_constant(a0), 1);
+                                y := addcon(mem.offset&, f.get_constant(a1), 1);
+                                @debug_assert(x && y, "failed to merge constants");
+                                return();
+                            };
+                            // will get fixed-up later.
+                            // it could be that both are CAddr but lea-lea-deref is better than lea-lea-add-deref
+                            // tho we should really make sure to reuse the lea of con
+                            mem.index = a1;
+                            mem.base = a0;
+                            continue();
+                        };
+                        return();
+                    };
+                    if f.get_int(a0) { off |
+                        chuse(a1, 1, f);
+                        chuse(mem.base, -1, f);
+                        mem.offset.bits.i += off;
+                        mem.base = a1;
+                        continue();
+                    };
+                    if mem.index == QbeNull && !f.is_symbol(a0) {
+                        chuse(a0, 1, f);
+                        chuse(a1, 1, f);
+                        chuse(mem.base, -1, f);
+                        @debug_assert(mem.scale == 1);
+                        mem.index = a1;
+                        mem.base = a0;
+                        continue();
+                    };
+                }
+                fn mul() => {
+                    if mem.scale == 1 {
+                        t := mem.base; mem.base = mem.index; mem.index = t;
+                        goto_index();
+                    };
+                }
+                @default => ();
+            };
         };
         
-        a0 := t.def.arg&[0];
-        a1 := t.def.arg&[1];
-        if a0 == mem.base || a1 == mem.base {
-            goto_index();
-        };
-        @match(t.def.op()) {
-            fn add() => {
-                swap := false;
-                if rtype(a0) == .RTmp {
-                    t := a0; a0 = a1; a1 = t; 
-                    swap = true;
-                };
-                if f.is_symbol(a0) {
-                    // TODO
-                    //if mem.index == QbeNull && mem.offset.type != .CAddr {
-                    //    if f.get_int(a1) { off |
-                    //        mem.base = QbeNull;
-                    //        x := addcon(mem.offset&, f.get_constant(a0), 1);
-                    //        y := addcon(mem.offset&, f.get_constant(a1), 1);
-                    //        @debug_assert(x && y, "failed to merge constants");
-                    //        return();
-                    //    };  
-                    //};
-                    goto_index();
-                    // this doesn't work because you might be creating in the wrong order
-                    //r := f.newtmp("isel", .Kl);
-                    //f.emit(.addr, .Kl, r, a0, QbeNull);
-                    //t.def.arg&[int(swap)] = r;
-                    //return(f.merge_amd_addr(mem));
-                };
-                if f.get_int(a0) { off |
-                    chuse(a1, 1, f);
-                    chuse(mem.base, -1, f);
-                    mem.offset.bits.i += off;
-                    mem.base = a1;
-                    return(f.merge_amd_addr(mem));
-                };
-                if mem.index == QbeNull && !f.is_symbol(a0) {
-                    chuse(a0, 1, f);
-                    chuse(a1, 1, f);
-                    chuse(mem.base, -1, f);
-                    @debug_assert(mem.scale == 1);
-                    mem.index = a1;
-                    mem.base = a0;
-                    return(f.merge_amd_addr(mem));
-                };
-            }
-            fn mul() => {
-                if mem.scale == 1 {
-                    t := mem.base; mem.base = mem.index; mem.index = t;
-                    goto_index();
-                };
-            }
-            @default => ();
-        };
-    };
-    
-    if rtype(mem.base) == .RCon {
-        if addcon(mem.offset&, f.get_constant(mem.base), 1) {
+        if mem.index == QbeNull && rtype(mem.base) == .RCon && addcon(mem.offset&, f.get_constant(mem.base), 1) {
             mem.base = QbeNull;
-            return(f.merge_amd_addr(mem));
-        }; // TODO: else is bad
-    };
-    s: i64 = mem.scale.intcast();
-    if rtype(mem.index) == .RTmp && !isreg(mem.index) {
-        goto_done :: local_return;
-        index_t := f.get_temporary(mem.index);
-        if index_t.slot != -1 {
-            if mem.scale != 1 {
-                goto_done();  // panic?
-            };
-            if rtype(mem.base) == .RTmp {
-                base_t := f.get_temporary(mem.base);
-                if base_t.slot != -1 {
+            return();
+        };
+        s: i64 = mem.scale.intcast();
+        if rtype(mem.index) == .RTmp && !isreg(mem.index) {
+            goto_done :: local_return;
+            index_t := f.get_temporary(mem.index);
+            if index_t.slot != -1 {
+                if mem.scale != 1 {
+                    @eprintln("scaling a stack addresses: %", index_t.name());
                     goto_done();  // panic?
                 };
-            };
-            t := mem.base; mem.base = mem.index; mem.index = t;
-            return(f.merge_amd_addr(mem));
-        };
-        if index_t.def.is_null() {
-            goto_done();
-        };
-        a0 := index_t.def.arg&[0];
-        a1 := index_t.def.arg&[1];
-        if a0 == mem.index || a1 == mem.index {
-            goto_done();
-        };
-        @match(index_t.def.op()) {
-            fn add() => {
-                if rtype(a0) == .RTmp {
-                    t := a0; a0 = a1; a1 = t; 
-                };
-                if f.get_int(a0) { off |
-                    //println("A");
-                    chuse(mem.index, -1, f);
-                    chuse(a1, 1, f);
-                    mem.offset.bits.i += off * s;
-                    mem.index = a1;
-                    return(f.merge_amd_addr(mem));
-                };
-            }
-            fn mul() => {
-                if rtype(a0) == .RTmp {
-                    t := a0; a0 = a1; a1 = t; 
-                };
-                if f.get_int(a0) { arg |
-                    if s == 1 && (arg == 1 || arg == 2 || arg == 4 || arg == 8) {
-                        chuse(a1, 1, f);
-                        chuse(mem.index, -1, f);
-                        mem.scale = arg.intcast();
-                        mem.index = a1;
-                        return(f.merge_amd_addr(mem));
+                if rtype(mem.base) == .RTmp {
+                    base_t := f.get_temporary(mem.base);
+                    if base_t.slot != -1 {
+                        @eprintln("adding two stack addresses: % %", index_t.name(), base_t.name());
+                        goto_done();  // panic?
                     };
                 };
-            }
-            @default => ();
+                t := mem.base; mem.base = mem.index; mem.index = t;
+                continue();
+            };
+            if index_t.def.is_null() {
+                goto_done();
+            };
+            a0 := index_t.def.arg&[0];
+            a1 := index_t.def.arg&[1];
+            if a0 == mem.index || a1 == mem.index || index_t.def.to != mem.index {
+                goto_done();
+            };
+            @match(index_t.def.op()) {
+                fn add() => {
+                    if rtype(a0) == .RTmp {
+                        t := a0; a0 = a1; a1 = t; 
+                    };
+                    if f.get_int(a0) { off |
+                        chuse(mem.index, -1, f);
+                        chuse(a1, 1, f);
+                        mem.offset.bits.i += off * s;
+                        mem.index = a1;
+                        continue();
+                    };
+                }
+                fn mul() => {
+                    if rtype(a0) == .RTmp {
+                        t := a0; a0 = a1; a1 = t; 
+                    };
+                    if f.get_int(a0) { arg |
+                        if s == 1 && (arg == 1 || arg == 2 || arg == 4 || arg == 8) {
+                            chuse(a1, 1, f);
+                            chuse(mem.index, -1, f);
+                            mem.scale = arg.intcast();
+                            mem.index = a1;
+                            continue();
+                        };
+                    };
+                }
+                @default => ();
+            };
         };
-    };
+        return();
+    }
 }
 
 fn is_symbol(f: *Qbe.Fn, r: Qbe.Ref) bool = 
     rtype(r) == .RCon && f.get_constant(r)[].type == .CAddr;
 
-SIMPLE_ADDR :: true;
+// 1613379 true
+// 1624746 false
+// qbe's super complicated thing generates more code than mine. 
+// this is a static so it doesn't get optimised away and we always emit both code paths for testing. 
+SIMPLE_ADDR :: @static(bool) true;
 
 fn seladdr(r: *Qbe.Ref, tn: []Qbe.Num, f: *Qbe.Fn) void = {
-    if SIMPLE_ADDR {
+    if SIMPLE_ADDR[] {
         if rtype(r[]) == .RCon {  
             return();
         };
@@ -293,6 +329,15 @@ fn seladdr(r: *Qbe.Ref, tn: []Qbe.Num, f: *Qbe.Fn) void = {
         mem.index = QbeNull;
         mem.offset.type = .CBits;
         f.merge_amd_addr(mem&);
+        @debug_assert(mem.offset.type != .CAddr || (mem.index == QbeNull && mem.base == QbeNull), "generated illegal addressing mode");
+        
+        for (@slice(mem.index&, mem.base&)) { a |
+            if f.is_symbol(a[]) {
+                r0 := f.newtmp("isel", .Kl);
+                f.emit(.addr, .Kl, r0, a[], QbeNull);
+                a[] = r0;
+            };
+        };
             
         when_debug(f, .InstSelect) { out |
             write(out, "\n");
@@ -1010,37 +1055,6 @@ fn runmatch(code: *u8, tn: []Qbe.Num, ref: Qbe.Ref, var: []Qbe.Ref) void = {
                 pc = code.offset(zext(bc - 10));
             };
         };
-    };
-}
-
-/* instruction selection
- * requires use counts (as given by parsing)
- */
-fn amd64_isel(f: *Qbe.Fn) void = {
-    f.assign_alloc_slots();
-
-    /* process basic blocks */
-    num := temp().alloc(Qbe.Num, f.ntmp.zext());
-    for_blocks f { b | 
-        f.reset_scratch();
-        for_jump_targets b { sb | 
-            for_phi sb { p |
-                a := index_in_phi(b, p);
-                fixarg(p.arg.index(a), p.cls, Qbe.Ins.ptr_from_int(0), f);
-            };
-        };
-        num.set_zeroed();
-        anumber(num, b, f.con.slice(0, f.ncon.zext()));
-        seljmp(b, f);
-        for_insts_rev b { i |
-            sel(i[][], num, f);
-        };
-        f.copy_instructions_from_scratch(b);
-    };
-
-    when_debug(f, .InstSelect) { out | 
-        write(out, "\n> After instruction selection:\n");
-        printfn(f, out);
     };
 }
 

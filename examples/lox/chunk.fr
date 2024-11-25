@@ -4,30 +4,33 @@ Chunk  :: @struct(
     lines: List(i64),
 );
 
-// TODO: auto inc with specific type. 
 // TODO: EXTRA: seperate ne/le/ge opcodes. 
 OpCode :: @enum(u8) (
-    Return = 0,
-    Constant = 1,
-    Negate = 2,
-    Add = 3,
-    Subtract = 4,
-    Multiply = 5,
-    Divide = 6,
-    True = 7,
-    False = 8, 
-    Nil = 9,
-    Not = 10,
-    Equal = 11,
-    Less = 12,
-    Greater = 13,
-    Print = 14,
-    Pop = 15,
-    DefineGlobal = 16,
-    GetGlobal = 17,
-    SetGlobal = 18,
-    GetLocal = 19,
-    SetLocal = 20,
+    Return,
+    Constant,
+    Negate,
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    True,
+    False, 
+    Nil,
+    Not,
+    Equal,
+    Less,
+    Greater,
+    Print,
+    Pop,
+    DefineGlobal,
+    GetGlobal,
+    SetGlobal,
+    GetLocal,
+    SetLocal,
+    // followed by 2 byte offset. applied to the ip after decoding this instruction.
+    Jump, // forwards
+    JumpIfFalse, // forwards
+    Loop, // backwards
 );
 
 fn init() Chunk = (code = list(lox_alloc), constants = list(lox_alloc), lines = list(lox_alloc));
@@ -38,97 +41,74 @@ fn push(self: *Chunk, b: i64, line: i64) void = {
 }
 
 fn push(self: *Chunk, b: Value) i64 = {
-    self[].constants&.push(b);
+    self.constants&.push(b);
     // EXTRA(1): add OP_CONSTANT_LONG that uses two byte index when len > 256. 
-    self[].constants.len.sub(1)
+    self.constants.len.sub(1)
 }
 
 fn drop(self: *Chunk) void = {
-    self[].code&.drop(); 
-    self[].constants&.drop(); 
-    self[].lines&.drop();
+    self.code&.drop(); 
+    self.constants&.drop(); 
+    self.lines&.drop();
 }
 
 fn disassemble(self: *Chunk, name: Str) void = {
-    @println("=== % ===", name);
+    out := u8.list(temp());
+    @fmt(out&, "=== % ===\n", name);
     offset := 0;
     dowhile {
-        offset = offset.add(self.dis_inst(offset));
+        offset = offset.add(self.dis_inst(out&, offset));
         offset.lt(self[].code.len)
     };   
-    println("===");
+    @fmt(out&, "===\n");
+    print(out.items());
 }
 
-fn display(self: OpCode, out: *List(u8)) void = {
-    names :: @run get_enum_names(OpCode);
-    idx: i64 = (@as(u8) self).zext();
-    out.push_all(names[idx]);
-}
-
-// TODO: buffer this. need to make it easier to @fmt new line. do escape codes. 
-fn dis_inst(self: *Chunk, i: i64) i64 = {
-    // TODO: why doesn't this work as a closure that captures 'i'
-    //       probably cause its through a macro and result doesnt work out? 
-    simple :: fn(i: i64) i64 => {
-        @println("  - %: %", i, @as(OpCode) @as(u8) self.code.get(i));  // TODO: format with align like printf can. 
-        1
+fn dis_inst(self: *Chunk, out: *List(u8), i: i64) i64 = {
+    offset16 :: fn(direction: i64) i64 => {
+        a: i64 = self.code[i + 1].zext();
+        b: i64 = self.code[i + 2].zext();
+        distance := a.bit_or(b.shift_left(8));
+        op := @as(OpCode) @as(u8) self.code.get(i);
+        @fmt(out, "  - %: % % (to %)\n", i, op, distance, 3 + i + distance * direction);
+        3
     };
     
-    line := self[].lines.get(i); // TODO: print line info and leave blank if it didn't change from the last time. 
-    changed := i.gt(0).and(fn() bool => self[].lines.get(i.sub(1)).ne(line));
+    line := self.lines[i]; // TODO: print line info and leave blank if it didn't change from the last time. 
+    changed := i > 0 && self[].lines.get(i - 1) != line;
     
-    @switch(self.code.get(i)) {
-        @case(OpCode.Return)   => simple(i);
-        @case(OpCode.Negate)   => simple(i);
-        @case(OpCode.Add)      => simple(i);
-        @case(OpCode.Subtract) => simple(i);
-        @case(OpCode.Multiply) => simple(i);
-        @case(OpCode.Divide)   => simple(i);
-        @case(OpCode.Constant) => {
-            val_i := self.code.get(i.add(1));
+    if self.code[i] >= OpCode.enum_count() {
+        @fmt(out, "  - %: ???\n", i);  // TODO: format with align like printf can. 
+        return(1)
+    };
+    ::enum(OpCode);
+    op := @as(OpCode) @as(u8) self.code[i];
+    
+    if (@is(op, .SetGlobal, .GetGlobal, .DefineGlobal)) {
+        val_i := self.code[i + 1];
+        val := self.constants.get(val_i.zext());
+        @fmt(out, "  - %: % %         %\n", i, op, val_i, val&);
+        return(2)
+    };
+    
+    if (@is(op, .SetLocal, .GetLocal)) {
+        val_i := self.code[i + 1];
+        @fmt(out, "  - %: % %\n", i, op, val_i);
+        return(2)
+    };
+    
+    @match(op) {
+        fn Constant() => {
+            val_i := self.code[i + 1];
             val := self.constants.get(val_i.zext());
-            @println("  - %: % %         %", i, "Constant", val_i, val&);
+            @fmt(out, "  - %: % %         %\n", i, "Constant", val_i, val&);
             2
         };
-        @case(OpCode.True)    => simple(i);
-        @case(OpCode.False)   => simple(i);
-        @case(OpCode.Nil)     => simple(i);
-        @case(OpCode.Not)     => simple(i);
-        @case(OpCode.Equal)   => simple(i);
-        @case(OpCode.Less)    => simple(i);
-        @case(OpCode.Greater) => simple(i);
-        @case(OpCode.Print)   => simple(i);
-        @case(OpCode.Pop)     => simple(i);
-        @case(OpCode.DefineGlobal) => {
-            val_i := self.code.get(i.add(1));
-            val := self.constants.get(val_i.zext());
-            @println("  - %: % %         %", i, "DefineGlobal", val_i, val&);
-            2
-        };
-        @case(OpCode.GetGlobal) => {
-            val_i := self.code.get(i.add(1));
-            val := self.constants.get(val_i.zext());
-            @println("  - %: % %         %", i, "GetGlobal", val_i, val&);
-            2
-        };
-        @case(OpCode.SetGlobal) => {
-            val_i := self.code.get(i.add(1));
-            val := self.constants.get(val_i.zext());
-            @println("  - %: % %         %", i, "SetGlobal", val_i, val&);
-            2
-        };
-        @case(OpCode.SetLocal) => {
-            val_i := self.code.get(i.add(1));
-            @println("  - %: % %", i, "SetLocal", val_i);
-            2
-        };
-        @case(OpCode.GetLocal) => {
-            val_i := self.code.get(i.add(1));
-            @println("  - %: % %", i, "GetLocal", val_i);
-            2
-        };
-        @default              => {
-            @println("  - %: ???", i);  // TODO: format with align like printf can. 
+        fn Jump()        => offset16(1);
+        fn JumpIfFalse() => offset16(1);
+        fn Loop()        => offset16(-1);
+        @default => {
+            @fmt(out, "  - %: %\n", i, op);  // TODO: format with align like printf can. 
             1
         };
     }

@@ -15,6 +15,7 @@ fn finished(self: *EmitQbe2, fid: FuncId) void = {
     self.build_current(name.items(), self.get_log_types(fid));
     self.body = zeroed(*FnBody); // :EVIL     but just avoiding confusion. 
     self.context = QbeNull;
+    self.my_node = QbeNull;
 }; 
 
 fn build_current(self: *EmitQbe2, name: Str, logging: Str) void = {
@@ -161,6 +162,8 @@ EmitQbe2 :: @struct(
     pair_type_id := 99999999, // filled by init
     context := QbeNull,
     implicit_context: bool,
+    my_node := QbeNull,
+    env_node := QbeNull,
     
     $Val := Qbe.Ref, // TODO: const can't be first (doesn't parse).  -- Jun 14
 );
@@ -269,6 +272,7 @@ fn emit_bounce_fn(self: *EmitQbe2, impl_name_callee: Str, fake_decl_name: Str, s
     //@println("emit_bounce_fn %", fake_decl_name);
     self.b.lnk.export = !private;
     self.context = QbeNull;
+    self.my_node = QbeNull;
     
     entry := self.b&.push_block();
     self.current = entry;
@@ -453,10 +457,12 @@ fn emit_special_asm(self: *EmitQbe2, body: *FuncImpl, func: *Func, bc: *FnBody, 
 
 fn setup(self: *EmitQbe2, body: *FnBody, vars_out: *List(Qbe.Ref)) void = {
     entry := self.b&.push_block();
+    opts := self.comp.get_build_options();
     self.signeture = body.signeture;
     self.body = body;
     params: List(Qbe.Ref) = list(temp());
     self.context = QbeNull;
+    self.my_node = QbeNull;
     if body.context && self.implicit_context {
         self.context = self.b&.push_inst((id = 0), .pare, .Kl, QbeNull, QbeNull);
     };
@@ -497,6 +503,22 @@ fn setup(self: *EmitQbe2, body: *FnBody, vars_out: *List(Qbe.Ref)) void = {
     range(0, max_args) {i|
         v := self.b&.push_inst(entry, .alloc8, .Kl, self.b&.push_literal(8), QbeNull);
         self.block_args&.push(v);
+    };
+    
+    block_count := 0;
+    each body.blocks { b |
+        block_count += int(!b.insts[0]&.is(.NoCompile));
+    };
+    
+    // >5 so don't trace tiny functions (like say... get_dynamic_context which you have to call in init before you've setup the first node)
+    if opts.runtime_stack_trace && self.context != QbeNull && body.vars.len > 5 && block_count > 1 {
+        self.my_node = self.b&.push_inst(entry, .alloc8, .Kl, self.b&.push_literal(12), QbeNull);
+        env_node_ref := self.b&.push_inst(entry, .add, .Kl, self.context, self.b&.push_literal(8));
+        self.env_node = self.b&.push_inst(entry, .load, .Kl, env_node_ref, QbeNull);
+        self.b&.push_inst0(entry, .storel, .Kw, self.env_node, self.my_node);  // store prev
+        self.b&.push_inst0(entry, .storel, .Kw, self.my_node, env_node_ref);  // update ctx
+        func_id := self.b&.push_inst(entry, .add, .Kl, self.my_node, self.b&.push_literal(8));
+        self.b&.push_inst0(entry, .storew, .Kw, self.b&.push_literal(body.func.as_index()), func_id);
     };
     
     self.current_has_indirect_return = body.signeture.first_arg_is_indirect_return;
@@ -828,6 +850,11 @@ fn linear_search_switch(self: *EmitQbe2, cases: []SwitchPayload, inspected: Qbe.
 }
 
 fn inst_return(self: *EmitQbe2, args: Slice(EmitQbe2.Val)) void = {
+    if self.context != QbeNull && self.my_node != QbeNull {
+        env_node_ref := self.b&.push_inst(self.current, .add, .Kl, self.context, self.b&.push_literal(8));
+        self.b&.push_inst0(self.current, .storel, .Kl, self.env_node, env_node_ref);  // reset prev
+    };
+    
     @switch(args.len){
         @case(0) => {
             if self.current_has_indirect_return {

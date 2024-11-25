@@ -22,7 +22,6 @@ fn emit_func_amd64(m: *QbeModule, f: *Qbe.Fn, file: *FILE) void = {
     name_id := f.lnk.id;
     maybe_add_export(m, name_id, f.lnk.export);
     m.do_jit_fixups(name_id, .Code, code.len());
-    println(m.str(name_id));
     
     e: AmdState = (
         f = f,
@@ -155,6 +154,7 @@ fn emit_the_code(e: *AmdState) void = {
     e.a&.push_u32(0xfa1e0ff3); // endbr64
     
     f := e.f;
+    f.leaf = false; // :dontforget // TODO
     if !f.leaf || f.vararg || f.dynalloc {
         e.fp = .RBP;
         e.a&.encode_op_reg(PrimaryOp.PushBase, X86Reg.rbp);
@@ -337,9 +337,6 @@ fn convert_to_2address(e: *AmdState, i: *Qbe.Ins) void = {
 }
 
 fn emitins(i: Qbe.Ins, e: *AmdState) void = {
-    if i&.op() == .storeh { // TODO: move this into the @match
-        e.a&.push(operand_16bit_prefix);
-    };
     t0 := rtype(i.arg&[0]);
     t1 := rtype(i.arg&[1]);
     
@@ -450,8 +447,8 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
                 c := e.f.get_constant(i.arg&[0]);
                 if isreg(i.to) {
                     if c.type == .CAddr {
-                        panic("TODO: lea copy");
-                        //emitf("lea%k %M0, %=", &i, e);
+                        ins := make_ins(.addr, i&.cls(), i.to, i.arg&[0], QbeNull);
+                        emitins(ins, e);
                         return();
                     };
                     if c.type == .CBits && is_int(i&.cls()) {
@@ -470,8 +467,10 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
                 k := @if(is_wide(i&.cls()), Qbe.Cls.Kd, .Ks);
                 str := @if(is_wide(i&.cls()), Qbe.O.stored, .stores);
                 ins := make_ins(.load, k, amd64_xmm_scratch, i.arg&[0], QbeNull);
+                fix_memarg_slot(e, ins.arg&.index(0)); // TODO: do i need this?
                 emitins(ins, e);
                 ins := make_ins(str, .Kw, QbeNull, amd64_xmm_scratch, i.to);
+                fix_memarg_slot(e, ins.arg&.index(1)); // TODO: do i need this?
                 emitins(ins, e);
                 return();
             };
@@ -581,13 +580,28 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
             
             // this is painful because everywhere else the range of a byte immediate is signed but here its unsigned. 
             if e.f.get_int(i.arg&[0]) { c |
-                if c >= 0 && c <= 255 {
-                    i.arg&[0] = TMP(reg_for_extension(0));
-                    b := encode(e, i&, false, 1);
-                    push(e, b, @slice(0xC6));
-                    e.a&.push(@as(u8) c.trunc());
-                    return();
-                };
+                c = c.bit_and(1.shift_left(8) - 1);
+                i.arg&[0] = TMP(reg_for_extension(0));
+                b := encode(e, i&, false, 1);
+                push(e, b, @slice(0xC6));
+                e.a&.push(@as(u8) c.trunc());
+                return();
+            };
+        
+            assemble(e, i&);
+        }
+        fn storeh() => {
+            e.a&.push(operand_16bit_prefix);
+            // TODO: has RTmp already been converted to RMem for all stores?
+            
+            // this is painful because everywhere else the range of a byte immediate is signed but here its unsigned. 
+            if e.f.get_int(i.arg&[0]) { c |
+                c = c.bit_and(1.shift_left(16) - 1);
+                i.arg&[0] = TMP(reg_for_extension(0));
+                b := encode(e, i&, false, 2);
+                push(e, b, @slice(0xC7));
+                e.a&.push(@as(u8) c.trunc());
+                return();
             };
         
             assemble(e, i&);
@@ -603,11 +617,10 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
                 e.a&.encode_setcc(r0, cc);
                 // setcc doesn't zero the upper bits, so we zero extend as an extra instruction. 
                 // we could get complicated and keep track of known bits but I suspect that's well into deminishing returns territory. 
-                if i&.cls() == .Kl || r0.raw() > 8 {
-                    if (!@is(r0, .rax, .rbx, .rcx, .rdx)) {
-                        eprintln("TODO: felix says you can't encode movzx for this flag op");  // https://www.felixcloutier.com/x86/movzx
-                    };
-                    e.a&.push(pack_rex_si(i&.cls() == .Kl, r0, r0, DONT_CARE_REG));
+                if r0.raw() > 8 {
+                    // MOVZX r64, r/m8 can't encode a/b/c/d, but you auto zero extend if you use MOVZX r32, r/m8, so why would you ever have w=true?
+                    w := false;
+                    e.a&.push(pack_rex_si(w, r0, r0, DONT_CARE_REG));
                 };
                 e.a&.push(TWO_BYTE_OP_PREFIX);
                 e.a&.push(@as(u8) TwoByteOp.MovZX);
@@ -618,6 +631,7 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
             if is_load(o) {
                 // this is wasteful allocation just to smuggle one bit of information on which modrm mode to use. 
                 if t0 == .RTmp {
+                    println("F");
                     i.arg&[0] = e.f.new_mem(i.arg&[0], QbeNull, 0, 0);
                 };
                 if o != .load {
@@ -734,7 +748,24 @@ fn encode(e: *AmdState, i: *Qbe.Ins, w: bool, immediate_size: i64) EncodedArgs =
         @debug_assert(t0 != .RMem, "cannot encode two memory arguments");
         m := e.f.get_memory(r1)[]; // copy!
         
-        @debug_assert(m.offset.type != .CAddr, "TODO: cannot encode const SIB");
+        if m.offset.type == .CAddr {
+            @debug_assert(m.base == QbeNull && m.index == QbeNull, "cannot encode const SIB");
+            c := m.offset&;
+            @debug_assert(t0 != .RCon, "TODO: con + disp?");
+            // :copy_paste_con_addr
+            rr0 := r0.int_reg_d();
+            @debug_assert(c.sym.type == .SGlo, "TODO: tls");
+            off := c.bits.i - immediate_size;
+            return(
+                patch = (Some = (off, c.sym.id)), 
+                disp_size = .D32,
+                disp = off,
+                modrm = pack_modrm(.Indirect00, .rbp, rr0),  // disp is RIP relative
+                rex = pack_rex_si(w, rr0, DONT_CARE_REG, DONT_CARE_REG), 
+                sib = .None,
+            );
+        };
+        
         @debug_assert(m.offset.bits.i >= MIN_i32 && m.offset.bits.i <= MAX_i32, "cannot encode offset"); 
         small := m.offset.bits.i <= 127 && m.offset.bits.i >= -128;
         no_disp := m.offset.bits.i == 0 && m.index != TMP(Amd64Reg.RBP) && m.index != TMP(Amd64Reg.R13);
@@ -782,6 +813,7 @@ fn encode(e: *AmdState, i: *Qbe.Ins, w: bool, immediate_size: i64) EncodedArgs =
     if t1 == .RCon {
         c := e.f.get_constant(i.arg&[1]);
         if c.type == .CAddr {
+            // :copy_paste_con_addr
             rr0 := r0.int_reg_d();
             @debug_assert(c.sym.type == .SGlo, "TODO: tls");
             // The distance is relative to the end of the instruction, 
@@ -878,6 +910,10 @@ fn assemble(e: *AmdState, i: *Qbe.Ins) void = {
     //printins(e.f, i, e.f.globals.debug_out);
     // aaaa that test only exists for registers in the other direction is such a hack! fix this properly please! -- Nov 14 :FUCKED
     if i.op() == .xcmp || (i.op() == .xtest && rtype(i.arg&[0]) == .RCon) {  // // HACK. TODO: at least move this to the outer match in emitins
+        i.arg&.items().swap(0, 1);
+    };
+    // TODO: this seems to make it a bit better
+    if i.op() == .cast && is_int(i.cls()) {
         i.arg&.items().swap(0, 1);
     };
     a0_old, a1_old := (i.arg&[0], i.arg&[1]);
@@ -1156,8 +1192,8 @@ fn amd64_encoding_table() Ty([]AmdEncodingEntry, []u16) = @amd64_encoding_data (
         (.R, .M, (0x87)), // xchg
     ),
     (.cast, 
-        (.F, .M, (0x0F, 0x6E), (), (0x66)), // movq
-        (.M, .F, (0x0F, 0x7E), (), (0x66)), // movq
+        (.F, .M, (0x0F, 0x6E), (), (0x66)), // movd:movq
+        (.M, .F, (0x0F, 0x7E), (), (0x66)), // movd:movq
     ),
     // TODO: i have low faith that i correctly transcribed the numbers
     (.exts,

@@ -5,23 +5,26 @@
 // (Soon you will be able to add your own things, to use this as tls).
 DefaultContext :: @struct(
     comptime: rawptr, 
+    caller: *CallStackNode,
     thread_index: i64,
-    reserved: Array(i64, 7),
+    reserved: Array(i64, 6),
     cli_arguments: []CStr,
     temporary_allocator: *ArenaAlloc,
     panic_hook: @FnPtr(msg: Str) Never,
 );
 
+CallStackNode :: @rec @struct(prev: *CallStackNode, id: u32);
+
 // For AOT builds, the compiler generates a call to this as your program's main entry point. 
 // note: whatever you had in the context at comptime is NOT baked into your program (unlike all other reachable memory).
 // For jitted code, you inherit the compiler's context. (TODO: maybe that should only be for comptime/drivers)
-franca_runtime_init :: fn(argc: i64, argv: *CStr, user_main: @FnPtr(argc: i64, argv: *CStr) void) i64 = {
+franca_runtime_init :: fn(argc: i64, argv: *CStr, user_main: @FnPtr(argc: i64, argv: *CStr) void) i64 #no_context = {
     push_zeroed_dynamic_context { 
         c := context(DefaultContext);
         temporary_allocator: ArenaAlloc = init(page_allocator, 1.shift_left(20));
         c.temporary_allocator = temporary_allocator&;
         c.cli_arguments = (ptr = argv, len = argc);
-        c.panic_hook = print_and_abort;
+        c.panic_hook = print_trace_and_abort; // print_and_abort;
         user_main(argc, argv);
     };
     0
@@ -47,6 +50,7 @@ fn query_context_is_implicit() bool = {
 
 size_of_dynamic_context :: DefaultContext.size_of(); // @builtin size_of_dynamic_context;
 
+// TODO: why can't this be inlined?
 fn get_dynamic_context() rawptr = 
     builtin_get_dynamic_context(0);
 
@@ -59,6 +63,8 @@ fn push_zeroed_dynamic_context($body: @Fn() void) void = {
     memset(new_context, 0, size_of_dynamic_context);
     old_context := get_dynamic_context();
     set_dynamic_context(new_context);
+    node := CallStackNode.zeroed();
+    context(DefaultContext)[].caller = node&; // don't crash when we try to do stack trace
     body();
     set_dynamic_context(old_context);
 }

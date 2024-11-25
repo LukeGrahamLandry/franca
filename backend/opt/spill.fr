@@ -147,6 +147,7 @@ fn slot(pass: *SpillPass, t: i64) Qbe.Ref = {
  * those with the largest spill cost.
  */
 fn limit(pass: *SpillPass, in_reg: *Qbe.BSet, max_in_reg: i32, prioritize: ?*Qbe.BSet) void = {
+    @debug_assert(max_in_reg >= 0, "negative allowed in registers??");
     f := pass.f;
     // Setup the list of tmps live right now,
     buf := pass.limit_buf&; // reuse memory because we really spam this function. 
@@ -193,7 +194,7 @@ fn limit(pass: *SpillPass, in_reg: *Qbe.BSet, max_in_reg: i32, prioritize: ?*Qbe
             live_tmps.sort(f);
         };
     };
-    in_reg_count := min(live_tmps.len, max_in_reg.zext());
+    in_reg_count := max_in_reg.intcast();
     for live_tmps.slice(0, in_reg_count) { t |
         bsset(in_reg, t.zext());
     };
@@ -348,14 +349,14 @@ fn spill(f: *Qbe.Fn) void = {
     ntmp: i64 = f.ntmp.zext();
     pass: SpillPass = (f = f, locs = f.slot, slot4 = 0, slot8 = 0, class_mask = init(@slice(init_bitset(ntmp), init_bitset(ntmp))));
     range(0, ntmp) { t | 
-        k := 0;
-        if t >= T.fpr0.zext() && t < T.fpr0.zext() + T.nfpr.zext() {
-            k = 1;
+        f.tmp[t].slot = -1; // TODO: remove. should be fine. just making sure.
+        
+        is_float := if t >= Qbe.Tmp0 {
+            !is_int(tmp[t].cls)
+        } else {
+            t >= T.fpr0.zext() && t < T.fpr0.zext() + T.nfpr.zext()
         };
-        if t >= Qbe.Tmp0 {
-            k = KBASE(tmp[t].cls);
-        };
-        bsset(pass.class_mask&.index(k), t);
+        bsset(pass.class_mask&.index(int(is_float)), t);
     };
 
     // These are not used between blocks, we just want to reuse the memory. 
@@ -399,7 +400,12 @@ fn spill(f: *Qbe.Fn) void = {
                 if bscount(all_needed_later&).bitcast() < n {
                     j: i32 = bscount(prioritize&).bitcast(); /* live through */
                     l := backwards.nlive&[k];
-                    pass&.limit(prioritize&, n - (l - j), .None);
+                    //TODO: this is super fucking sketchy?
+                    //i must be making a mistake elsewhere
+                    //this is what made it think it was out of registers -- Nov 25
+                    //but qbe seems to pass negative here as well it just doesn't choke on it as hard
+                    //because its for loop just ends immediately as tho it was 0. 
+                    pass&.limit(prioritize&, max(0, n - (l - j)), .None);
                     bsunion(all_needed_later&, prioritize&);
                 } else {
                     pass&.limit(all_needed_later&, n, .None);
@@ -472,10 +478,7 @@ fn spill(f: *Qbe.Fn) void = {
                 } else {
                     // Either not used later in the block (but maybe in another block) or spilled later in the block.
                     dead := pass.f.tmp[t].slot == -1 && !b.out&.bshas(t);
-                    if dead && i[].op() != .salloc {
-                        if pass.f.globals.goal.arch == .x86_64 {
-                            println("foo");  // TODO
-                        };
+                    if dead && i[].op() != .salloc { 
                         // my fuse_addressing in arm isel doesn't update usage counts correctly so i end up with a lot of dead pointer arithmetic. 
                         // rega would remove the dead code anyway but we can skip doing some work and reduce false register pressure. 
                         // A less hacky solution would be to fix it in fuse_addressing instead. that would prevent us from incorrectly thinking the args are live until getting here. 

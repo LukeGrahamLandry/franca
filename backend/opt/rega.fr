@@ -135,8 +135,9 @@ fn ralloctry(c: *RegaCtx, m: *RMap, t: i32, try: bool) Qbe.Ref = {
         range(first, last) { r |
             if(!bshas(m.live&, r), => found(r));
         };
-        printfn(c.f, c.f.globals.debug_out);
-        @panic("no more registers in %. this should be unreachable becuase of the spill pass.", c.f.name());
+        c.f.debug_dump(m);
+        //printfn(c.f, c.f.globals.debug_out);
+        @panic("no register free for % in %. this should be unreachable becuase of the spill pass.", c.f.tmp.index(t).name(), c.f.name());
     };
     c.radd(m, t, r_allocated);
     c.sethint(t, r_allocated);
@@ -548,6 +549,7 @@ fn register_allocation(f: *Qbe.Fn) void = {
             c.ralloc(cur, rl[j]);
         };
         rcopy(end[n]&, cur);
+    
         c.do_block_instructions(b, cur); 
         bscopy(b.in&, cur.live&);
         for_phi b { p | 
@@ -652,68 +654,7 @@ fn register_allocation(f: *Qbe.Fn) void = {
     
     // :Explain
     /* 4. emit remaining copies in new blocks */
-    blist := Qbe.Blk.ptr_from_int(0);
-    if true {
-        break :: local_return; // TODO: ugh. i should really make this less painful.
-        for_blocks f { b | 
-            // TODO
-            //@debug_assert(!b.s1.identical(b.s2), "i think these are removed and my behaviour here differs if not"); // :SketchyIterTargets
-            for_jump_targets_mut b { ps |
-                s := ps[];
-                c.npm = 0;
-                for_phi s { p |
-                    continue :: local_return;
-                    dst := p.to;
-                    @debug_assert(rtype(dst) == .RSlot || rtype(dst) == .RTmp);
-                    if rtype(dst) == .RTmp {
-                        r := or rfind(beg.index(s.id.zext()), dst.val()) {
-                            continue()
-                        };
-                        dst = TMP(r);
-                    };
-                    u := 0;
-                    while => !p.blk[u].identical(b) {
-                        @debug_assert(u+1 < p.narg.zext());
-                        u += 1;
-                    };
-                    src := p.arg[u];
-                    if rtype(src) == .RTmp {
-                        src = c.rref(end.index(b.id.zext()), src.val());
-                    };
-                    c.pmadd(src, dst, p.cls);
-                };
-                for(s.in&, Qbe.Tmp0) { t |
-                    src := c.rref(end.index(b.id.zext()), t);
-                    dst := c.rref(beg.index(s.id.zext()), t);
-                    c.pmadd(src, dst, f.tmp[t].cls);
-                };
-                f.reset_scratch();
-                c.pmgen();
-                moves_inserted := f.len_scratch();
-                if moves_inserted != 0 {
-                    b1 := newblk();
-                    b1.loop = (b.loop + s.loop) / 2;
-                    b1.link = blist;
-                    blist = b1;
-                    f.nblk += 1;
-                    // TODO: ugh. garbage. you just want to truncate if not enough space in the buffer.
-                    l: List(u8) = (maybe_uninit = b1.name&.items(), len = 0, gpa = panicking_allocator); // :UnacceptablePanic
-                    @fmt(l&, "%_%", b.name(), s.name());
-                    b1.nins = moves_inserted.trunc();
-                    c.added_moves += b1.nins;
-                    c.added_blocks += 1;
-                    f.copy_instructions_from_scratch(b1);
-                    b1.jmp.type = .jmp;
-                    b1.s1 = s;
-                    ps[] = b1;
-                };
-            };
-            if b.link.is_null() {
-                b.link = blist;
-                break();
-            }
-        };
-    };
+    emit_phi_blocks(c, beg, end);
     
     // phis have been lowered to moves so sanity assert that nobody tries to look at them after this pass. 
     for_blocks f { b |
@@ -729,6 +670,69 @@ fn register_allocation(f: *Qbe.Fn) void = {
         printfn(f, out);
     };
 }
+
+fn emit_phi_blocks(c: *RegaCtx, beg: []RMap, end: []RMap) void = {
+    blist := Qbe.Blk.ptr_from_int(0);
+    f := c.f;
+    for_blocks f { b | 
+        // TODO
+        //@debug_assert(!b.s1.identical(b.s2), "i think these are removed and my behaviour here differs if not"); // :SketchyIterTargets
+        for_jump_targets_mut b { ps |
+            s := ps[];
+            c.npm = 0;
+            for_phi s { p |
+                continue :: local_return;
+                dst := p.to;
+                @debug_assert(rtype(dst) == .RSlot || rtype(dst) == .RTmp);
+                if rtype(dst) == .RTmp {
+                    r := or rfind(beg.index(s.id.zext()), dst.val()) {
+                        continue()
+                    };
+                    dst = TMP(r);
+                };
+                u := 0;
+                while => !p.blk[u].identical(b) {
+                    @debug_assert(u+1 < p.narg.zext());
+                    u += 1;
+                };
+                src := p.arg[u];
+                if rtype(src) == .RTmp {
+                    src = c.rref(end.index(b.id.zext()), src.val());
+                };
+                c.pmadd(src, dst, p.cls);
+            };
+            for(s.in&, Qbe.Tmp0) { t |
+                src := c.rref(end.index(b.id.zext()), t);
+                dst := c.rref(beg.index(s.id.zext()), t);
+                c.pmadd(src, dst, f.tmp[t].cls);
+            };
+            f.reset_scratch();
+            c.pmgen();
+            moves_inserted := f.len_scratch();
+            if moves_inserted != 0 {
+                b1 := newblk();
+                b1.loop = (b.loop + s.loop) / 2;
+                b1.link = blist;
+                blist = b1;
+                f.nblk += 1;
+                // TODO: ugh. garbage. you just want to truncate if not enough space in the buffer.
+                l: List(u8) = (maybe_uninit = b1.name&.items(), len = 0, gpa = panicking_allocator); // :UnacceptablePanic
+                @fmt(l&, "%_%", b.name(), s.name());
+                b1.nins = moves_inserted.trunc();
+                c.added_moves += b1.nins;
+                c.added_blocks += 1;
+                f.copy_instructions_from_scratch(b1);
+                b1.jmp.type = .jmp;
+                b1.s1 = s;
+                ps[] = b1;
+            };
+        };
+        if b.link.is_null() {
+            b.link = blist;
+            return();
+        }
+    };
+};
 
 // we want our parameters to be assgned to thier abi registers so we don't actually have to do a copy. 
 fn set_param_copy_hints(c: *RegaCtx) void = {
