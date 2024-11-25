@@ -22,6 +22,7 @@ fn emit_func_amd64(m: *QbeModule, f: *Qbe.Fn, file: *FILE) void = {
     name_id := f.lnk.id;
     maybe_add_export(m, name_id, f.lnk.export);
     m.do_jit_fixups(name_id, .Code, code.len());
+    println(m.str(name_id));
     
     e: AmdState = (
         f = f,
@@ -234,7 +235,7 @@ fn emit_the_code(e: *AmdState) void = {
                         b.s1 = b.s2;
                         b.s2 = s;
                     } else {
-                        c = cmpneg(c.zext()).trunc();
+                        c = cmpneg(c);
                     };
                     // :copypaste
                     id: i64 = b.s2.id.zext();
@@ -376,8 +377,8 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
             /* we have to use the negation trick to handle
             * some 3-address subtractions */
             if i.to == i.arg&[1] && i.arg&[0] != i.to {
-                panic("TODO: make a test that gets here.");
-                ineg := make_ins(.neg, i.cls(), i.to, i.to, QbeNull);
+                // TODO: make a .ssa test that gets here
+                ineg := make_ins(.neg, i&.cls(), i.to, i.to, QbeNull);
                 emitins(ineg, e);
                 i&.set_op(.add);
                 emitins(i, e);
@@ -389,13 +390,19 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
         }
         fn sign() => e.a&.push(@as(u8) PrimaryOp.SignExtendAxToDxAx); // CQO
         fn neg() => {
-            panic("neg");
+            // TODO: make a .ssa test that gets here
             if i.to != i.arg&[0] {
+                ins := make_ins(.copy, i&.cls(), i.to, i.arg&[0], QbeNull);
+                emitins(ins, e);
                 //emitf("mov%k %0, %=", &i, e);
             };
-            if is_int(i.cls()) {
+            if is_int(i&.cls()) {
+                i.arg&[0] = i.to;
+                assemble(e, i&);
+                
                 //emitf("neg%k %=", &i, e);
             } else {
+                panic("neg");
                 //fprintf(e.f,
                 //    "\txorp%c %sfp%d(%%rip), %%%s\n",
                 //    "xxsd"[i.cls],
@@ -406,16 +413,18 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
             };
         }
         fn div() => {
-            panic("div");
+            // TODO: .ssa test that gets here
             /* use xmm15 to adjust the instruction when the
             * conversion to 2-address in emitf() would fail */
             if i.to == i.arg&[1] {
+                panic("TODO: fix div");
                 //i.arg&[1] = TMP(XMM0+15);
                 //emitf("mov%k %=, %1", &i, e);
                 //emitf("mov%k %0, %=", &i, e);
                 i.arg&[0] = i.to;
-            }
-            //goto Table;
+            };
+            convert_to_2address(e, i&);
+            assemble(e, i&);
         }
         // TODO: kinda garbage that this is a weird super instruction that's copy+load+store+addr
         fn copy() => {
@@ -595,7 +604,9 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
                 // setcc doesn't zero the upper bits, so we zero extend as an extra instruction. 
                 // we could get complicated and keep track of known bits but I suspect that's well into deminishing returns territory. 
                 if i&.cls() == .Kl || r0.raw() > 8 {
-                    @assert(!@is(r0, .rax, .rbx, .rcx, .rdx), "TODO: felix says you can't encode movzx for this flag op");  // https://www.felixcloutier.com/x86/movzx
+                    if (!@is(r0, .rax, .rbx, .rcx, .rdx)) {
+                        eprintln("TODO: felix says you can't encode movzx for this flag op");  // https://www.felixcloutier.com/x86/movzx
+                    };
                     e.a&.push(pack_rex_si(i&.cls() == .Kl, r0, r0, DONT_CARE_REG));
                 };
                 e.a&.push(TWO_BYTE_OP_PREFIX);
@@ -721,23 +732,24 @@ fn encode(e: *AmdState, i: *Qbe.Ins, w: bool, immediate_size: i64) EncodedArgs =
     
     if t1 == .RMem {
         @debug_assert(t0 != .RMem, "cannot encode two memory arguments");
-        disp_size := Displacement.D0;
         m := e.f.get_memory(r1)[]; // copy!
+        
+        @debug_assert(m.offset.type != .CAddr, "TODO: cannot encode const SIB");
+        @debug_assert(m.offset.bits.i >= MIN_i32 && m.offset.bits.i <= MAX_i32, "cannot encode offset"); 
+        small := m.offset.bits.i <= 127 && m.offset.bits.i >= -128;
+        no_disp := m.offset.bits.i == 0 && m.index != TMP(Amd64Reg.RBP) && m.index != TMP(Amd64Reg.R13);
+        disp_size: Displacement = @if(no_disp, .D0, @if(small, .D8, .D32)); // more - than +!
+        
+        special_base := m.base == TMP(Amd64Reg.RBP) || m.base == TMP(Amd64Reg.R13);
+        if special_base && disp_size == .D0 {
+            disp_size = .D8;
+            no_disp = false;
+        };
+        
         @debug_assert(m.index != TMP(Amd64Reg.RSP), "cannot encode index");
         if m.index == QbeNull {
             m.index = TMP(Amd64Reg.RSP); // sentinal for just base+disp
         };
-        @debug_assert(m.offset.type != .CAddr, "TODO: cannot encode const SIB");
-        @debug_assert(m.base != QbeNull, "TODO: no base register");
-        
-        if m.offset.type == .CUndef {
-            m.offset.bits.i = 0;
-        };
-        
-        @debug_assert(m.offset.bits.i >= MIN_i32 && m.offset.bits.i <= MAX_i32, "cannot encode offset"); 
-        small := m.offset.bits.i <= 127 && m.offset.bits.i >= -128;
-        no_disp := m.offset.bits.i == 0 && m.index != TMP(Amd64Reg.RBP) && m.index != TMP(Amd64Reg.R13);
-        disp_size = @if(no_disp, .D0, @if(small, .D8, .D32)); // more - than +!
         
         disp := m.offset.bits.i;
         mode: ModrmMode = @match(disp_size) {
@@ -745,6 +757,18 @@ fn encode(e: *AmdState, i: *Qbe.Ins, w: bool, immediate_size: i64) EncodedArgs =
             fn D8()  => .Indirect01;
             fn D32() => .Indirect10;
         };
+        
+        if m.base == QbeNull {
+            @debug_assert(m.index != TMP(Amd64Reg.RSP), "no base and no index makes x64 a dull boy");
+            m.base = TMP(Amd64Reg.RBP); // sentinal for just (index*s)+disp32
+            mode = .Indirect00;
+            disp_size = .D32;
+            no_disp = false;
+        };
+        if m.offset.type == .CUndef {
+            m.offset.bits.i = 0;
+        };
+        
         ri, rb, rr0 := (m.index.int_reg_d(), m.base.int_reg_d(), r0.int_reg_d());
         dont_need_sib := no_disp && m.index == TMP(Amd64Reg.RSP) && m.base != TMP(Amd64Reg.RSP) && m.base != TMP(Amd64Reg.R12);
         if dont_need_sib {
@@ -1110,10 +1134,15 @@ fn amd64_encoding_table() Ty([]AmdEncodingEntry, []u16) = @amd64_encoding_data (
     (.addr, 
         (.R, .M, (0x8D)), // lea
     ),
+    (.neg, 
+        (.M, .none, (0xF7), 3),
+    ),
     (.mul, 
         (.R, .M, (0x0F, 0xAF)),
-        // TODO: need different instructions for wide
         (.F, .F, (0x0F, 0x59), (), (0xF2)), // mulsd
+    ),
+    (.div, 
+        (.F, .F, (0x0F, 0x5E), (), (0xF2)), // divsd
     ),
     (.copy, 
         (.M, .imm32, (0xC7), 0), // "Move imm32 sign extended to 64-bits to r/m64."

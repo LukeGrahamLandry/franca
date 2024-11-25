@@ -125,7 +125,6 @@ fn fixarg(r: *Qbe.Ref, k: Qbe.Cls, i: *Qbe.Ins, f: *Qbe.Fn) void = {
             f.emit(.addr, .Kl, r1, r0, QbeNull);
         };
         @if(rtype(r0) == .RMem) => {
-            // TODO: I don't understand this condition. you should be allowed (type=CAddr, base=R, index=R) or (type=CBits, base=?, index=?)
             /* eliminate memory operands of
             * the form $foo(%rip, ...)
             */
@@ -142,7 +141,173 @@ fn fixarg(r: *Qbe.Ref, k: Qbe.Cls, i: *Qbe.Ins, f: *Qbe.Fn) void = {
     r[] = r1;
 }
 
+fn merge_amd_addr(f: *Qbe.Fn, mem: *Qbe.Addr) void = {
+    when_debug(f, .InstSelect) { out |
+        printmem(mem, f, out);
+    };
+    if rtype(mem.base) == .RTmp && !isreg(mem.base) {
+        goto_index :: local_return;
+        t := f.get_temporary(mem.base);
+        if t.slot != -1 {
+            mem.base = SLOT(t.slot);
+            return(f.merge_amd_addr(mem));
+        };
+        if t.def.is_null() {
+            goto_index();
+        };
+        
+        a0 := t.def.arg&[0];
+        a1 := t.def.arg&[1];
+        if a0 == mem.base || a1 == mem.base {
+            goto_index();
+        };
+        @match(t.def.op()) {
+            fn add() => {
+                swap := false;
+                if rtype(a0) == .RTmp {
+                    t := a0; a0 = a1; a1 = t; 
+                    swap = true;
+                };
+                if f.is_symbol(a0) {
+                    // TODO
+                    //if mem.index == QbeNull && mem.offset.type != .CAddr {
+                    //    if f.get_int(a1) { off |
+                    //        mem.base = QbeNull;
+                    //        x := addcon(mem.offset&, f.get_constant(a0), 1);
+                    //        y := addcon(mem.offset&, f.get_constant(a1), 1);
+                    //        @debug_assert(x && y, "failed to merge constants");
+                    //        return();
+                    //    };  
+                    //};
+                    goto_index();
+                    // this doesn't work because you might be creating in the wrong order
+                    //r := f.newtmp("isel", .Kl);
+                    //f.emit(.addr, .Kl, r, a0, QbeNull);
+                    //t.def.arg&[int(swap)] = r;
+                    //return(f.merge_amd_addr(mem));
+                };
+                if f.get_int(a0) { off |
+                    chuse(a1, 1, f);
+                    chuse(mem.base, -1, f);
+                    mem.offset.bits.i += off;
+                    mem.base = a1;
+                    return(f.merge_amd_addr(mem));
+                };
+                if mem.index == QbeNull && !f.is_symbol(a0) {
+                    chuse(a0, 1, f);
+                    chuse(a1, 1, f);
+                    chuse(mem.base, -1, f);
+                    @debug_assert(mem.scale == 1);
+                    mem.index = a1;
+                    mem.base = a0;
+                    return(f.merge_amd_addr(mem));
+                };
+            }
+            fn mul() => {
+                if mem.scale == 1 {
+                    t := mem.base; mem.base = mem.index; mem.index = t;
+                    goto_index();
+                };
+            }
+            @default => ();
+        };
+    };
+    
+    if rtype(mem.base) == .RCon {
+        if addcon(mem.offset&, f.get_constant(mem.base), 1) {
+            mem.base = QbeNull;
+            return(f.merge_amd_addr(mem));
+        }; // TODO: else is bad
+    };
+    s: i64 = mem.scale.intcast();
+    if rtype(mem.index) == .RTmp && !isreg(mem.index) {
+        goto_done :: local_return;
+        index_t := f.get_temporary(mem.index);
+        if index_t.slot != -1 {
+            if mem.scale != 1 {
+                goto_done();  // panic?
+            };
+            if rtype(mem.base) == .RTmp {
+                base_t := f.get_temporary(mem.base);
+                if base_t.slot != -1 {
+                    goto_done();  // panic?
+                };
+            };
+            t := mem.base; mem.base = mem.index; mem.index = t;
+            return(f.merge_amd_addr(mem));
+        };
+        if index_t.def.is_null() {
+            goto_done();
+        };
+        a0 := index_t.def.arg&[0];
+        a1 := index_t.def.arg&[1];
+        if a0 == mem.index || a1 == mem.index {
+            goto_done();
+        };
+        @match(index_t.def.op()) {
+            fn add() => {
+                if rtype(a0) == .RTmp {
+                    t := a0; a0 = a1; a1 = t; 
+                };
+                if f.get_int(a0) { off |
+                    //println("A");
+                    chuse(mem.index, -1, f);
+                    chuse(a1, 1, f);
+                    mem.offset.bits.i += off * s;
+                    mem.index = a1;
+                    return(f.merge_amd_addr(mem));
+                };
+            }
+            fn mul() => {
+                if rtype(a0) == .RTmp {
+                    t := a0; a0 = a1; a1 = t; 
+                };
+                if f.get_int(a0) { arg |
+                    if s == 1 && (arg == 1 || arg == 2 || arg == 4 || arg == 8) {
+                        chuse(a1, 1, f);
+                        chuse(mem.index, -1, f);
+                        mem.scale = arg.intcast();
+                        mem.index = a1;
+                        return(f.merge_amd_addr(mem));
+                    };
+                };
+            }
+            @default => ();
+        };
+    };
+}
+
+fn is_symbol(f: *Qbe.Fn, r: Qbe.Ref) bool = 
+    rtype(r) == .RCon && f.get_constant(r)[].type == .CAddr;
+
+SIMPLE_ADDR :: true;
+
 fn seladdr(r: *Qbe.Ref, tn: []Qbe.Num, f: *Qbe.Fn) void = {
+    if SIMPLE_ADDR {
+        if rtype(r[]) == .RCon {  
+            return();
+        };
+        mem := Qbe.Addr.zeroed();
+        mem.base = r[];
+        mem.scale = 1;
+        mem.index = QbeNull;
+        mem.offset.type = .CBits;
+        f.merge_amd_addr(mem&);
+            
+        when_debug(f, .InstSelect) { out |
+            write(out, "\n");
+        };
+        ty := mem.offset.type&;
+        if mem.offset.bits.i == 0 && ty[] == .CBits {
+            ty[] = .CUndef;
+        };
+        m: i64 = f.nmem.zext();
+        f.nmem += 1;
+        f.mem&.grow(m + 1);
+        f.mem[m] = mem;
+        r[] = MEM(m);
+        return();
+    };
     r0 := r[];
     if rtype(r0) == .RTmp {
         a := Qbe.Addr.zeroed();
@@ -304,8 +469,9 @@ fn sel_inner(i: *Qbe.Ins, tn: []Qbe.Num, f: *Qbe.Fn) void = {
                 return();
             };
             if is_load(i.op()) {
-                seladdr(i.arg&.index(0), tn, f);
-                f.sel_emit(i);
+                i1 := f.emit(i[]);
+                seladdr(i1.arg&.index(0), tn, f);
+                f.fixargs(i1);
                 return();
             };
             if is_store(i.op()) {
@@ -314,8 +480,9 @@ fn sel_inner(i: *Qbe.Ins, tn: []Qbe.Num, f: *Qbe.Fn) void = {
                     if(i.op() == .stored, => i.set_op(.storel));
                     if(i.op() == .stores, => i.set_op(.storew));
                 };
-                seladdr(i.arg&.index(1), tn, f);
-                f.sel_emit(i);
+                i1 := f.emit(i[]);
+                seladdr(i1.arg&.index(1), tn, f);
+                f.fixargs(i1);
                 return();
             };
             
@@ -359,9 +526,14 @@ fn sel_inner(i: *Qbe.Ins, tn: []Qbe.Num, f: *Qbe.Fn) void = {
 }
 
 fn sel_emit(f: *Qbe.Fn, i: *Qbe.Ins) void = {
-    i1 := f.emit(i[]); 
-    fixarg(i1.arg&.index(0), argcls(i, 0), i1, f);
-    fixarg(i1.arg&.index(1), argcls(i, 1), i1, f);
+    i1 := f.emit(i[]);
+    f.fixargs(i1); 
+}
+
+fn fixargs(f: *Qbe.Fn, i1: *Qbe.Ins) void = {
+    k0, k1 := (argcls(i1, 0), argcls(i1, 1));
+    fixarg(i1.arg&.index(0), k0, i1, f);
+    fixarg(i1.arg&.index(1), k1, i1, f);
 }
 
 fn sel_div(f: *Qbe.Fn, i: *Qbe.Ins) void = {
@@ -513,7 +685,7 @@ fn seljmp(b: *Qbe.Blk, f: *Qbe.Fn) void = {
                 selcmp(fi.arg&.items(), k, swap, f);
                 fi.set_nop();
             };
-            b.jmp.type = @as(Qbe.J) @as(i16) Qbe.J.jfieq.raw() + c.trunc();
+            b.jmp.type = @as(Qbe.J) @as(i32) Qbe.J.jfieq.raw() + c;
         };
         @if(fi.op() == .and && t.nuse == 1
             && (rtype(fi.arg&[0]) == .RTmp ||

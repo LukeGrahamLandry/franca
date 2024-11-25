@@ -472,13 +472,17 @@ fn spill(f: *Qbe.Fn) void = {
                 } else {
                     // Either not used later in the block (but maybe in another block) or spilled later in the block.
                     dead := pass.f.tmp[t].slot == -1 && !b.out&.bshas(t);
-                    if dead {
+                    if dead && i[].op() != .salloc {
+                        if pass.f.globals.goal.arch == .x86_64 {
+                            println("foo");  // TODO
+                        };
                         // my fuse_addressing in arm isel doesn't update usage counts correctly so i end up with a lot of dead pointer arithmetic. 
                         // rega would remove the dead code anyway but we can skip doing some work and reduce false register pressure. 
                         // A less hacky solution would be to fix it in fuse_addressing instead. that would prevent us from incorrectly thinking the args are live until getting here. 
                         // saves ~70ms. This happens 150k times with fuse_addressing on and 6k times with it off which mostly reassures me that i understand how we get here. -- Nov 23
                         // TODO: are there other bitsets im supposed to update?
                         
+                        // TODO: need to do more if mem arg?
                         // :clear_dead_args
                         range(0, 2) { n | 
                             if rtype(i.arg&[n]) == .RTmp {
@@ -490,7 +494,7 @@ fn spill(f: *Qbe.Fn) void = {
                             }
                         };
                         
-                        // invariant: instructions that have outputs do not have side effects. 
+                        // invariant: instructions that have outputs do not have side effects. (not salloc tho) 
                         @debug_assert(!is_store(i[].op()) && i[].op() != .call);
                         // don't emit() this instruction 
                         continue();
