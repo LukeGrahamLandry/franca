@@ -59,8 +59,8 @@ there must be proportional terrible things or I'm probably just lying.
 - I've only tried arm/x64 macos and x64 linux. Only arm mac works fully but all three can build the self hosted compiler.
 - The compiler does an insane amount of redundant work.
   Like sometimes it reparses and re-resolves names for each specialization of a generic.
-  There just happens to only be ~25k lines of code ever written in this langauge so its not a big deal yet.
-  See examples/60fps.fr judging its performace.
+  There just happens to only be ~40k lines of code ever written in this langauge so its not a big deal yet.
+  See examples/60fps.fr before judging its performace.
 - I can't emit my own elf files and i don't have my own linker.
   You need to have clang if you want AOT builds that interface with other languages.
   (however, franca only mach-o arm works and x64 is wip)

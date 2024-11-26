@@ -701,9 +701,8 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
                             args&.push(ir_ptr);
                             ::RsVec(i64);
                             args := args.rs();
-                            needs_ct := func.cc.expect("known cc!!!") == .CCallRegCt;
                             f_ty: FnType = (arg = i64, ret = void, arity = 1);
-                            @try(self.legacy_indirection.cast().call_dynamic_inner(fn_ptr.int_from_rawptr(), f_ty&, args&, needs_ct)) return;
+                            @try(self.call_dynamic(fn_ptr.int_from_rawptr(), f_ty&, args&)) return;
                             
                             func.body = (X86AsmBytes = ir.rs());
                             good = true;
@@ -731,9 +730,8 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
                             args: List(i64) = list(1, temp());
                             args&.push(FnBody.int_from_ptr(body));
                             args := args.rs();
-                            needs_ct := func.cc.expect("known cc!!!") == .CCallRegCt;
                             f_ty: FnType = (arg = i64, ret = void, arity = 1);
-                            @try(self.legacy_indirection.cast().call_dynamic_inner(fn_ptr.int_from_rawptr(), f_ty&, args&, needs_ct)) return;
+                            @try(self.call_dynamic(fn_ptr.int_from_rawptr(), f_ty&, args&)) return;
                             
                             if func.get_flag(.LogBc) {
                                 out: List(u8) = list(temp());
@@ -3132,10 +3130,7 @@ fn update_function_metadata(self: *SelfHosted, func: *Func, os: ?OverloadSet) Re
                 // TODO: error on conflicting annotations. 
                 func.cc = (Some = .Inline);
             };
-            // :ContextChange
             @case(Flag.ct.ident()) => {
-                // TODO: error on conflicting annotations. 
-                func.cc = (Some = .CCallRegCt);
                 func.set_flag(.ComptimeOnly);
                 func.set_flag(.YesContext);
             };
@@ -3157,25 +3152,6 @@ fn compile_get_var(self: *SelfHosted, expr: *FatExpr, requested: ResultType) May
     if var.kind == .Const {
         value, ty := @check(self.find_const(var, requested)) return;
         expr.set(value, ty);
-        
-        // :fn_addr_const_hack
-        // TODO: THIS IS A HACK. for the general case we need shims. 
-        @if_let(requested) fn Specific(requested) => {
-            if ty != requested && ty == FuncId {
-                want_info := self.get_type(requested);
-                if want_info.is(.FnPtr).or(requested == rawptr) { 
-                    expr.done = false;
-                    fid := self.box(expr[]);
-                    expr.expr = (FnPtr = fid);
-                    expr.ty = requested;
-                    expr.done = false;
-                    @check(self.compile_fn_ptr(expr)) return;
-                    expr.done = true;
-                    return(.Ok);
-                };
-            };
-        };
-        
         @check(self.coerce_const_expr(expr, requested, false)) return;
         .Ok
     } else {
@@ -3870,7 +3846,7 @@ fn check_quick_eval(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) ?Values = {
                         };
                         f_ptr := i64.assume_cast(it.f.expr.Value.bytes&)[];
                         self.finish_layout_deep(it.f.ty);
-                        res := self.legacy_indirection.cast().call_dynamic_values(f_ptr, f.ty&, arg_value&.bytes(), false);
+                        res := self.call_dynamic_values(f_ptr, f.ty&, arg_value&.bytes());
                         @match(res) {
                             fn Ok(res) => {
                                 expr.set(res&.clone(self.get_alloc()), f.ty.ret);
@@ -3892,9 +3868,8 @@ fn check_quick_eval(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) ?Values = {
                         f_id := FuncId.assume_cast(it.f.expr.Value.bytes&)[];
                         if self.get_fn_callable(f_id) { f_ptr |
                             func := self.get_function(f_id);
-                            comp_ctx := func.cc.expect("known cc!") == .CCallRegCt;
                             self.finish_layout_deep(it.f.ty);
-                            res := self.legacy_indirection.cast().call_dynamic_values(f_ptr.int_from_rawptr(), f, arg_value&.bytes(), comp_ctx);
+                            res := self.call_dynamic_values(f_ptr.int_from_rawptr(), f, arg_value&.bytes());
                             @match(res) {
                                 fn Ok(res) => {
                                     expr.set(res&.clone(self.get_alloc()), f.ret);
@@ -4000,13 +3975,12 @@ fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
     ::RsVec(i64);
     args := args.rs();
     
-    needs_ct := func.cc.expect("known cc!!") == .CCallRegCt;
     self.last_loc = expr.loc;
     f_ty := func.finished_ty().expect("known type once compiled");
     assert(f_ty.ret == fat_expr_type, "tried to call macro with bad ret type. missing overload? \nresolve_in_overloadset assumes someone later will typecheck so giving a garabge match is fine");
     assert(f_ty.arg.eq(fat_expr_type).or(f_ty.arg == pair), "tried to call macro with bad arg type. missing overload? \nresolve_in_overloadset assumes someone later will typecheck so giving a garabge match is fine");
     expr.expr = (Poison = .InProgressMacro);  // they call me RefCell<FatExpr> because im always refing cells 
-    result := @try(self.legacy_indirection.cast().call_dynamic_inner(fn_ptr.int_from_rawptr(), f_ty&, args&, needs_ct)) return;
+    result := @try(self.call_dynamic(fn_ptr.int_from_rawptr(), f_ty&, args&)) return;
     expr[] = FatExpr.assume_cast(result&)[];
     @log_event("macro output: %", expr.log(self)) self;
     //walk: MarkNotDone = ();

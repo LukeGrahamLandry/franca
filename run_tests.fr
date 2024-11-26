@@ -44,8 +44,6 @@ fn driver(vtable: *ImportVTable) void = {
                 @case("llvm") => run_llvm(vtable, false);
                 @case("llvm-wasm") => run_llvm(vtable, true);
                 @case("blink") => run_llvm_blink(vtable);
-                // TODO: fix switch
-                //@case("qbe-bin") => run_qbe(vtable);
                 @case("examples") => run_examples(vtable, true);
                 @case("examples-no-deps") => run_examples(vtable, false);
                 @case("github") => github(vtable);
@@ -65,6 +63,7 @@ fn driver(vtable: *ImportVTable) void = {
     // TODO: see if it breaks if you run new ones in thier own namespaces in the same compiler instance as ^ 
 }
 
+// TODO: add test for repro-builds. broken rn for the compiler itself -- Nov 25
 fn github(vtable: *ImportVTable) void = {
     arch, os := {vtable.comptime_arch}();
     assert(arch == .aarch64 && os == .macos, "expected macos-arm");
@@ -75,7 +74,7 @@ fn github(vtable: *ImportVTable) void = {
     sh(@slice("cp", "a.out", "b.out"));
     sh(@slice("./b.out", "examples/default_driver.fr", "build", "compiler/other_main.fr", "-aot=qbe-exe"));
     sh(@slice("cp", "a.out", "b.out"));
-    sh(@slice("./b.out", "run_tests.fr", "--", "arm", "qbe-exe")); // "examples-no-deps", 
+    sh(@slice("./b.out", "run_tests.fr", "--", "arm", "qbe-exe", "examples-no-deps")); 
     sh(@slice("./b.out", "examples/default_driver.fr", "build", "backend/meta/qbe_frontend.fr", "-aot=qbe-exe"));
     sh(@slice("mkdir", "-p", "target/out"));
     sh(@slice("touch", "target/out/driver.c"));
@@ -121,25 +120,7 @@ fn run_examples(vtable: *ImportVTable, allow_deps: bool) void = {
         check_main_compiles(vtable, "tests/need_llvm/x64_encoding.fr");
     };
     
-    //reset_temporary_storage();
-     
-    // TODO: #import_std uses relative paths. 
     check_driver_compiles(vtable, "compiler/first.fr");
-    // TODO: can't do this because it needs to inject ENABLE_TRACY, etc. TODO: do that here
-    //ok, out, err := fork_and_catch(temp()) {
-    //    src := "#include_std(\"lib/core.fr\");".clone(temp());
-    //    src&.read_and_push("main.fr");
-    //    comp := vtable.new_with_src(src.items(), TARGET);
-    //    run_tests(vtable, comp);
-    //};
-    //// TODO: @assert
-    //if !ok {
-    //    println(out.items());
-    //    println(err.items());
-    //};
-    //assert(ok, "compiler tests failed");
-    //println("- ran compiler tests");
-    
     mandelbrot(vtable, allow_deps);
     
     fork_run_main(vtable, "examples/lox/lox_main.fr");
@@ -245,58 +226,6 @@ fn run_llvm_blink(vtable: *ImportVTable) void = {
         assert(success, "test failed");
         
         out.remove();
-    };
-}
-
-QBE_PATH :: "/Users/luke/Documents/mods/infered/bindings/qbe/qbe";
-AS_PATH :: "/opt/homebrew/opt/llvm/bin/llvm-as";
-
-fn run_qbe(vtable: *ImportVTable) void = {
-    println("=== Qbe Aot ===");
-    c := vtable.with({vtable.init_compiler}(vtable.default_build_options()));
-    load_lang_tests(c);
-    run_sequential(c) {c, tests|
-        ir_text := {c.vtable.emit_qbe}(c, temp(), tests, .TestRunnerMain);
-        // TODO: clean up this hack for inline asm
-        ::?List(u8);
-        inline_asm_functions := ir_text&.pop_current_bucket().unwrap();
-        
-        ir_out := open_temp_file();
-        for(ir_text&){bucket|
-            ir_out.fd&.write(bucket).unwrap();
-        };
-        @println("Write qbe ir to %", ir_out&.s_name());
-        
-        asm_out :: "target/franca_test_temp.s"; // TODO: the version of tmp file that lets you have an extension because it wants the .s
-        
-        args: List(Str) = list(temp());
-        args&.push("-o");
-        args&.push(asm_out);
-        args&.push(ir_out&.s_name());
-        success := run_cmd_blocking(QBE_PATH, args.items()); 
-        
-        // TODO: it would be easier if i could use exec_and_catch but it hangs forever waiting on a few tests???
-        append_to_file(asm_out, inline_asm_functions.items());
-        
-        assemble_and_run :: fn() void = {
-            asm_out :: "target/franca_test_temp.s"; // TODO: shouldb't need two
-            args: List(Str) = list(temp());
-            args&.clear();
-            args&.push(asm_out);
-            args&.push("-o");
-            args&.push("./a.out");
-            // this isn't actually gcc for me, its an older clang but its 25% faster
-            println("Run assembler");
-            success := run_cmd_blocking("gcc", args.items()); 
-            assert(success, "as failed");
-            
-            args: List(Str) = list(temp());
-            success := run_cmd_blocking("./a.out", args.items()); 
-            assert(success, "test failed");
-        };
-        assemble_and_run();
-        
-        ir_out.remove();
     };
 }
 
@@ -471,11 +400,14 @@ fn check_driver_compiles(vtable: *ImportVTable, filepath: Str) rawptr = {
     f
 }
 
-fn jit_from_source(vtable: *ImportVTable, src: Str, function_name: Str) rawptr #leak = {
-    comp := vtable.new_with_src(src, vtable.default_build_options());
-    name := {vtable.intern_string}(comp, function_name);
-    fid := {vtable.find_unique_func}(comp, name).unwrap();
-    ptr := vtable.with(comp).get_jitted(fid);
+fn jit_from_source(vtable: *ImportVTable, src: Str, function_name: Str) rawptr = {
+    ptr := rawptr_from_int(0);
+    push_dynamic_context {
+        comp := vtable.new_with_src(src, vtable.default_build_options());
+        name := {vtable.intern_string}(comp, function_name);
+        fid := {vtable.find_unique_func}(comp, name).unwrap();
+        ptr = vtable.with(comp).get_jitted(fid);
+    };
     ptr
 }
 

@@ -2,9 +2,7 @@
 - bring back lex error for unterminated comment.
 - `Illegal place expression: GetNamed` is not as helpful as "tried to assign to undeclared variable %"
 - precompiled driver programs
-- think about sharing temp allocator between driver, compiler, and comptime. or is it better that they can't mess with eachother.
 - αcτµαlly pδrταblε εxεcµταblε
-- finish porting qbe: fold and amd64
 - probably want to port the build stuff. https://github.com/jart/cosmopolitan/blob/master/tool/build/apelink.c
   i assume i can make it less complicated since i'm the one generating the thing in the first place?
   and i only care about linux and xnu. windows can just use wsl.
@@ -52,7 +50,6 @@
 - there's a few places `defer` would be really nice to have
 - do i want to expose the idea of different libcs? musl vs glibc vs cosmo
 - would be cool to transcribe my own linux syscalls
-- can i use address sanitizer with llvm ir? presumably that's how rust's `-Z sanitizer=address` works.
 - have it download stuff for you (ask first!) like qbe, sokol, llvm?
   at least make the error messages for missing stuff more helpful.
 
@@ -102,8 +99,6 @@ wait until fully self hosted so its less painful because don't have to keep both
 - can't write a macro that expands to statements
 - errors don't show multiple locations (like conflicting overloads should show the problem)
 
-// TODO: fix new constant shadowing old constant of same name. or at least give error -- Apr 22
-
 ## Feature Ideas
 
 - should make a derivable (fn arbitrary(rng) T) for testing hashes or stuff on psudorandom valid values of a type.
@@ -127,7 +122,6 @@ wait until fully self hosted so its less painful because don't have to keep both
 - anon structs for named return values. maybe commit to no !struct but what if you want an enum maybe its better to have no blessed default case
 - maybe anon struct literals with inferred type should be fine.
 - !defer
-- Box(T) and box(t) for quick allocations
 - fix impl generics now that public vars work
 - const SafetyCheck = @flagset(Bounds, Overflow, DivByZero, UnreachableCode, WrongEnumTag, CastBounds, Align, FfiNull, UseUninitCanary);
   safety(Bounds, fn= lt(i, len(self));
@@ -194,17 +188,6 @@ wait until fully self hosted so its less painful because don't have to keep both
 ## Testing
 
 - be able to write a thing in my language that says which backend combinations to test on each snippet
-
-## QBE
-
-- https://c9x.me/compile/
-- need to expose a function that I can call on a string of ir instead of using them as an executable that reads a file
-- make sure the reason they don't expose a lib isn't because they never free anything
-- they emit assembly not code so I have to write an assembler
-  - which would be nice to have anyway because then I could have clang output asm for other libs and link them into my stuff that way
-- setup benchmarking system so I can make sure its dramatically faster than my own shitty asm
-- does it make sense to put all thier statics in a thread local and hope that makes it thread safe?
-- figure out how to make a memory backed \*FILE
 
 ## Lsp
 

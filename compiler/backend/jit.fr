@@ -59,7 +59,7 @@ fn create_jit_shim(self: CompCtx, bc: *BcBackend, fid: FuncId, handler_callee_ad
     opts := self.get_build_options();
     arg_type := c.tuple_of(@slice(c.get_or_create_type(rawptr), c.get_or_create_type(FuncId)));
     f_ty: FnType = (arg = arg_type, ret = c.get_or_create_type(rawptr), arity = 2);
-    sig := @try(self.prim_sig(f_ty, .CCallReg)) return;
+    sig := @try(self.prim_sig(f_ty)) return;
     emit&.push(PushConstant = (value = handler_callee_address.int_from_rawptr(), ty = .P64));
     emit&.push(PushConstant = (value = SelfHosted.int_from_ptr(c), ty = .P64));
     emit&.push(PushConstant = (value = fid.as_index(), ty = .I32));
@@ -402,25 +402,22 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $ContextReg: i64, $negative_s
     }
     
     // Note: you can only use Self once because this doesn't reset fields.
-    fn compile(self: *Emit, f: FuncId) rawptr = {
+    fn compile(self: *Emit, f: FuncId) []u8 = {
         func := self.comp.get_function(f);
         @assert(!func.body&.is(.JittedAarch64) && !func.body&.is(.ComptimeAddr), "func want body");
     
         self.bc_to_asm(f);
-        if !self.backend.valid {
-            return(rawptr.zeroed());
-        };
         asm := self.asm.save_current(f);
         
         // TODO: assert that we don't generate code for a bunch of empty functions (just the size of prolouge + epiloge)
         //       when doing instantiations like `::tagged(T);`. should get deduplicated in bytecode or earlier. 
         // TODO: this is kinda dumb, I could just be a bit more abstract about how im emitting instructions and then also emit text assembler.
-        if TRACE_ASM || func.get_flag(.LogAsm) || self.backend.interesting {
+        if TRACE_ASM || func.get_flag(.LogAsm) {
             addr := u32.int_from_ptr(asm.ptr);
             @println("% is at addr=%", self.comp.get_string(func.name), addr);
             @if(USE_LLVM_DIS) self.print_llvm_mc_dis(asm);
         };
-        u32.raw_from_ptr(asm.ptr)
+        (ptr = ptr_cast_unchecked(u32, u8, asm.ptr), len = asm.len / 4)
     }
     
     fn bc_to_asm(self: *Emit, f: FuncId) void = {
@@ -452,16 +449,10 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $ContextReg: i64, $negative_s
     
         @if(TRACE_ASM) @println("entry: (%)", self.state.stack.items());
         self.emit_block(0, false);
-        if !self.backend.valid {
-            return();
-        };
         self.patch_reserve_stack(reserve_stack);
     }
     
     fn emit_block(self: *Emit, b: i64, args_not_vstacked: bool) void = {
-        if !self.backend.valid {
-            return();
-        };
         if(self.block_ips[b].is_some(), => return());
         self.block_ips[b] = (Some = self.next_inst());
         block := self.body.blocks[b]&;
@@ -488,9 +479,6 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $ContextReg: i64, $negative_s
     }
     
     fn emit_inst(self: *Emit, b_idx: i64, inst: Bc, i: usize) bool = {
-        if !self.backend.valid {
-            return (true);  // TODO: remove
-        };
         // TODO: bring this back 
         //if TRACE_ASM.or(self.log_asm_bc) {
         //    ins := self.asm.offset_words(self.asm.current_start, self.asm.next) - 1;
@@ -528,10 +516,6 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $ContextReg: i64, $negative_s
                         offset_bytes = slot.id,
                     ));
                 };
-            }
-            fn GetCompCtx() => {
-                // This is passed in DefaultContext now. TODO: shift the argument positions so i can remove this instruction and calling convention. -- Nov 25
-                self.state.stack&.push(Literal = 0);
             }
             fn LastUse(f) => {
                 slot := self.vars[f.id.zext()]; 
@@ -726,12 +710,7 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $ContextReg: i64, $negative_s
             while => i < self.state.stack.len && !self.try_spill(i, true, false) {
                 i += 1;
             };
-            if i == self.state.stack.len {
-                if !self.backend.valid {
-                    return(0);
-                };
-                panic("ICE: spill to stack failed");
-            };
+            @debug_assert(i < self.state.stack.len, "ICE: spill to stack failed");
             self.state.free_reg&.pop().expect("to have registers (too many args?)")
         }
     }
@@ -742,18 +721,13 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $ContextReg: i64, $negative_s
             while => i < self.state.stack.len && !self.try_spill(i, false, true) {
                 i += 1;
             };
-            if i == self.state.stack.len {
-                if !self.backend.valid {
-                    return(0);
-                };
-                panic("ICE: spill to stack failed!");
-            };
+            @debug_assert(i < self.state.stack.len, "ICE: spill to stack failed!");
             self.state.free_reg_float&.pop().expect("to have registers (too many args?)")
         } 
     }
     
     fn drop_reg(self: *Emit, reg: i64) void = {
-        if !self.is_special_reg(reg) && self.backend.valid {
+        if !self.is_special_reg(reg) {
             @debug_assert(!self.state.free_reg&.contains(reg&), "drop r%", reg); // TODO: print bitset
             self.state.free_reg&.set(reg);
             if ZERO_DROPPED_REG {

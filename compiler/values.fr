@@ -626,40 +626,31 @@ fn take(self: *ReadBytes, size: i64) ?[]u8 = {
 ////////////////////
 /// Dynamic Call ///
 
-fn call_dynamic_values(program: CompilerRs, f_ptr: i64, f_ty: *FnType, args_value: []u8, comp_ctx: bool) Res(Values) = {
+fn call_dynamic_values(program: *SelfHosted, f_ptr: i64, f_ty: *FnType, args_value: []u8) Res(Values) = {
     parts: List(i64) = list(temp());
     reader: ReadBytes = (bytes = args_value, i = 0);
-    @try(program[][].comp().deconstruct_values(f_ty.arg, reader&, parts&, .None)) return;
+    @try(program.comp().deconstruct_values(f_ty.arg, reader&, parts&, .None)) return;
     parts: RsVec(i64) = parts.rs();
-    program.call_dynamic(f_ptr, f_ty, parts&, comp_ctx)
-}
-
-fn call_dynamic(program: CompilerRs, ptr: i64, f_ty: *FnType, args: *RsVec(i64), comp_ctx: bool) Res(Values) = {
-    program.call_dynamic_inner(ptr, f_ty, args, comp_ctx)
+    program.call_dynamic(f_ptr, f_ty, parts&)
 }
 
 // TODO: this is the only place I still use float_mask.
 //       i could get rid of it if i switch to using PrimSig.
 //       then the next step is to lazily jit shims so i don't have to implement the calling convention twice. 
 // Note: FnType by ptr because i think i do (u32, u32) calling convention wrong. 
-fn call_dynamic_inner(program: CompilerRs, ptr: i64, f_ty: *FnType, args: *RsVec(i64), comp_ctx: bool) Res(Values) = {
+fn call_dynamic(program: *SelfHosted, ptr: i64, f_ty: *FnType, args: *RsVec(i64)) Res(Values) = {
     @if(TRACE_CALLS) @println("[call dynamic at addr=%] args=%", ptr, args.items());
     
-    arg := program[][].get_info(f_ty.arg);
-    ret := program[][].get_info(f_ty.ret);
+    arg := program.get_info(f_ty.arg);
+    ret := program.get_info(f_ty.ret);
     if arg.float_mask == 0 && ret.float_mask == 0 {
     } else {
         @err_assert(ret.size_slots <= 1, "TODO: float call with multiple returns at comptime") return;
     };
 
-    // :ContextChange
-    if comp_ctx {
-        // This is passed in DefaultContext now. TODO: shift the arguments so this can go away
-        //args.insert(0, 0, temp());
-    };
     :: if(?RsVec(u8));
     indirect_ret: ?RsVec(u8) = if ret.size_slots > 2 {
-        mem: List(u8) = 0.repeated(@as(i64) ret.stride_bytes.zext(), program[][].get_alloc());
+        mem: List(u8) = 0.repeated(@as(i64) ret.stride_bytes.zext(), program.get_alloc());
         mem: RsVec(u8) = mem.rs();
         ret_addr := u8.int_from_ptr(mem.ptr);
         args.insert(0, ret_addr, temp());
@@ -688,7 +679,7 @@ fn call_dynamic_inner(program: CompilerRs, ptr: i64, f_ty: *FnType, args: *RsVec
     zone := zone_begin(.CallDynamic);
     @if(ENABLE_TRACY) {
         if program.baked.functions&.get(ptr) { fid | 
-            func := program[][].get_function(fid);
+            func := program.get_function(fid);
             real_name := program.pool.get(func.name);
             ___tracy_emit_zone_name(zone, real_name);
         };
@@ -711,20 +702,20 @@ fn call_dynamic_inner(program: CompilerRs, ptr: i64, f_ty: *FnType, args: *RsVec
         yield :: local_return;
         if ret.size_slots == 2 {
             ::Res(Ty(Prim, Prim));
-            (f, s) := program[][].comp().prim_pair(f_ty.ret).unwrap();
+            (f, s) := program.comp().prim_pair(f_ty.ret).unwrap();
             r := arg8ret2(ptr, args.ptr, context);
             // TODO: floats!
             if f.eq(.I64).or(f.eq(.P64)) {
                 if s.eq(.I64).or(s.eq(.P64)) {
-                    yield(Ok = to_values(program[][], Ty(i64, i64), (r.fst, r.snd)));
+                    yield(Ok = to_values(program, Ty(i64, i64), (r.fst, r.snd)));
                 };
                 if s.eq(.I8) {
-                    yield(Ok = to_values(program[][], Ty(i64, u8), (r.fst, @as(u8) r.snd.trunc())));
+                    yield(Ok = to_values(program, Ty(i64, u8), (r.fst, @as(u8) r.snd.trunc())));
                 };
             };
             if f.eq(.I32) {
                 if s.eq(.I32) {
-                    yield(Ok = to_values(program[][], Ty(u32, u32), (@as(u32) r.fst.trunc(), @as(u32) r.snd.trunc())));
+                    yield(Ok = to_values(program, Ty(u32, u32), (@as(u32) r.fst.trunc(), @as(u32) r.snd.trunc())));
                 };
             };
             @err("TODO: unhandled prim pair for comptime call")
@@ -737,7 +728,7 @@ fn call_dynamic_inner(program: CompilerRs, ptr: i64, f_ty: *FnType, args: *RsVec
     zone_end(zone);
     @if(TRACE_CALLS) {
         if result&.is(.Ok) {
-            @println("[returned from %] %", ptr, result.Ok&.log(program[][], f_ty.ret));  
+            @println("[returned from %] %", ptr, result.Ok&.log(program, f_ty.ret));  
         };
     };
     result

@@ -107,7 +107,7 @@ fn unptr_ty(c: CompCtx, ty: Type) ?Type = {
 // But the current implementation is more complicated than it needs to be because I wasn't sure what was important at the time. 
 // 
 
-// This (prim_sig implementation) is insane. Caching all the variations of compctx/indirect is painful. 
+// This (prim_sig implementation) is painful. 
 // At least the interface is fairly thin. ~almost~ only emit_bc needs to deal with creating prim_sigs.
 // but every backend needs to remember to handle indirect returns specially every time they touch one. 
 //
@@ -116,9 +116,9 @@ fn unptr_ty(c: CompCtx, ty: Type) ?Type = {
 // And then compctx is weird because the front end doesn't want to insert it into the arguments, 
 // so its not as part of the function type, its in the calling convention. -- Jul 5
 //
-// :ConfusingPrims These slices always have (P64, P64) before them so you can offset backwards for #ct and indirect returns. 
+// :ConfusingPrims These slices always have (P64) before them so you can offset backwards for indirect returns. 
 //
-fn prim_sig(program: CompCtx, f_ty: FnType, cc: CallConv) Res(PrimSig) = {
+fn prim_sig(program: CompCtx, f_ty: FnType) Res(PrimSig) = {
     @err_assert(!f_ty.arg.is_unknown() && !f_ty.ret.is_unknown(), "unknown fn types") return;
     ret := program.get_info(f_ty.ret);
 
@@ -148,10 +148,6 @@ fn prim_sig(program: CompCtx, f_ty: FnType, cc: CallConv) Res(PrimSig) = {
     args: List(Prim) = list(program.get_alloc());
     // :ConfusingPrims
     args&.push(.P64); // for ret
-    args&.push(.P64); // for #ct
-
-    :: enum(CallConv);
-    comp_ctx := cc == .CCallRegCt;
 
     found_arity := 0;
     // TODO: compiler bug? what push_arg am i possibly shadowing?????? -- Jul 6
@@ -191,17 +187,11 @@ fn prim_sig(program: CompCtx, f_ty: FnType, cc: CallConv) Res(PrimSig) = {
     
     // :ConfusingPrims
     prims := args.items();
-    prims.ptr = prims.ptr.offset(2);
-    prims.len -= 2;
+    prims.ptr = prims.ptr.offset(1);
+    prims.len -= 1;
     
     sig.args = prims;
     
-    // :ContextChange
-    if comp_ctx {
-        //sig.args.ptr = sig.args.ptr.offset(-1);
-        //sig.args.len += 1;
-    };
-
     sig.arg_int_count = 0;
     for sig.args { p |
         if !p.is_float() {

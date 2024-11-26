@@ -146,6 +146,7 @@ fn classify(a: *AClass, t: *Qbe.Typ, s: u32, m: *QbeModule) void = {
                     s += ff.len;
                 }
                 fn FTyp() => {
+                    @debug_assert_ge(ff.len, 0);
                     inner := m.get_type(ff.len.zext());
                     classify(a, inner, s, m);
                     s += inner.size.trunc();
@@ -225,7 +226,7 @@ fn selret_amd64(b: *Qbe.Blk, f: *Qbe.Fn) void = {
     ca := if j == .retc {
         @debug_assert(f.retty != -1);
         aret := AClass.zeroed();
-        typclass(aret&, f.globals.get_type(f.retty.zext()), f.globals);
+        typclass(aret&, f.globals.get_type(f.retty.intcast()), f.globals);
         if aret.inmem != 0 {
             @debug_assert(rtype(f.retr) == .RTmp);
             f.emit(.copy, .Kl, TMP(Amd64Reg.RAX), f.retr, QbeNull);
@@ -281,6 +282,7 @@ fn argsclass(i0: *Qbe.Ins, i1: *Qbe.Ins, ac: *AClass, op_in: Qbe.O, aret: *AClas
             fn argc() => {
                 @debug_assert(rtype(i.arg&[0]) == .RType, ".argc expected arg0 .RType");
                 n := i.arg&[0].val();
+                @debug_assert_ge(n, 0);
                 typclass(a, m.get_type(n), m);
                 if(a.inmem != 0, => continue());
                 ni, ns := (0, 0);
@@ -464,7 +466,8 @@ fn alloc_op(align_log2: i32) Qbe.O = {
 // TODO: really need better error messages if you have mismatched {}'s
 
 fn get_type(m: *QbeModule, i: i64) *Qbe.Typ = {
-    @debug_assert(i < m.number_of_types, "type index out of bounds");
+    @debug_assert_lt(i, m.number_of_types, "type index out of bounds");
+    @debug_assert_ge(i, 0, "type index negative");
     m.types.index(i)
 }
 
@@ -478,7 +481,7 @@ fn selpar_amd64(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins) i64 = {
     aggregate := f.retty >= 0;
     aret := @uninitialized AClass;
     fa := if aggregate {
-        typclass(aret&, m.get_type(f.retty.zext()), m);
+        typclass(aret&, m.get_type(f.retty.intcast()), m);
         argsclass(i0, i1, ac, .par, aret&, env&, f.globals)
     } else {
         argsclass(i0, i1, ac, .par, zeroed(*AClass), env&, m)

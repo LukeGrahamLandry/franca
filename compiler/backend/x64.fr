@@ -1,7 +1,7 @@
 // TODO: im not following the calling convention for structs correctly. 
 
 EmitX64    :: CodeGenJit(X64AsmData, u8, @as(i64) X86Reg.rbp, @as(i64) X86Reg.rax, true);
-X64AsmData :: @struct(asm_out: List(u8), valid := true, interesting := false);
+X64AsmData :: @struct(asm_out: List(u8));
 
 fn new(compile: CompilerRs, bc: *BcBackend) X64AsmData #once = (
     asm_out = (
@@ -105,9 +105,7 @@ fn emit_other_inst(self: *EmitX64, inst: Bc) bool #once = {
                     } else {
                         new := self.get_free_reg();
                         dest := @as(X86Reg) new;
-                        if self.backend.valid {
-                            @debug_assert_ne(reg, dest, "shouldn't have been free"); // TODO
-                        };
+                        @debug_assert_ne(reg, dest, "shouldn't have been free"); // TODO
                         self.out().encode_bin(PrimaryOp.MovReg, dest, reg);
                         self.state.stack&.push(Increment = (reg = new, offset_bytes = f.offset_bytes));
                     };
@@ -211,16 +209,10 @@ fn emit_other_inst(self: *EmitX64, inst: Bc) bool #once = {
             self.drop_reg(cond);
             state := self.state&.clone();
             self.emit_block(f.true_ip.id.zext(), true);
-            if !self.backend.valid {
-                return(true);
-            };
             self.state = state;
             false_index := self.backend.asm_out.len;
             @debug_assert(self.block_ips[f.false_ip.id.zext()].is_none());
             self.emit_block(f.false_ip.id.zext(), true);
-            if !self.backend.valid {
-                return(true);
-            };
             
             offset := false_index - jump_index;
             @debug_assert(offset.abs() < 1.shift_left(31), "cant jump that far");
@@ -270,9 +262,6 @@ fn emit_switch(self: *EmitX64, cases: *RsVec(SwitchPayload)) void = {
         state := self.state&.clone();
         self.drop_reg(inspect); // Inside the new block
         self.emit_block(option.block.id.zext(), true);
-        if !self.backend.valid {
-            return();
-        };
         self.state = state;
         
         offset := self.backend.asm_out.len - jump_ip;
@@ -630,11 +619,7 @@ fn load_u64(self: *EmitX64, dest_reg: i64, src_addr_reg: i64, offset_bytes: i64)
 fn encode_non_sp_offset(self: *EmitX64, op: PrimaryOp, reg: i64, addr: i64, offset_bytes: i64) void = { 
     reg := @as(X86Reg) reg;
     addr := @as(X86Reg) addr;
-    if addr == X86Reg.rsp {
-        self.backend.valid = false; 
-        @eprintln("[TODO X64] cant encode");
-        return();
-    };
+    @debug_assert(addr != X86Reg.rsp, "X64 cant encode");
     if addr == X86Reg.rbp {
         @debug_assert(offset_bytes != 0, "shouldn't be using raw frame pointer");
     };
@@ -881,8 +866,11 @@ fn inst_intrinsic(self: *EmitX64, op: Intrinsic) void = {
         fn Trunc32To16() => dumb_trunc(16);
         fn Trunc32To8()  => dumb_trunc(8);
         fn Trunc16To8()  => dumb_trunc(8);
-        // TODO: this about how signed numbers are represented. 
-        fn SignExtend32To64() => (); // TODO: WRITE A TEST THAT FAILS BECAUSE OF THIS
+        fn SignExtend32To64() => {
+            fst := self.pop_to_reg();
+            self.out().encode_bin(@as(PrimaryOp) 0x63, @as(X86Reg) fst, @as(X86Reg) fst);
+            self.state.stack&.push(Increment = (reg = fst, offset_bytes = 0));
+        };
         fn ZeroExtend32To64() => (); // no-op
         fn ZeroExtend16To64() => (); // no-op
         fn ZeroExtend8To64()  => (); // no-op

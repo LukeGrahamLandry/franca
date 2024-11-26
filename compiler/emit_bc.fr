@@ -146,7 +146,7 @@ fn empty_fn_body(program: CompCtx, bc: *BcBackend, func: FuncId, when: ExecStyle
     {
         rp := program.data.cast()[][].get_or_create_type(rawptr);
         f_ty: FnType = (arg = rp, ret = rp, arity = 1);
-        sig_data := program.prim_sig(f_ty, .CCallReg).unwrap();
+        sig_data := program.prim_sig(f_ty).unwrap();
         @debug_assert_eq(sigs.len, reserved_1to1_sig);
         sigs&.push(sig_data);
     };
@@ -155,7 +155,7 @@ fn empty_fn_body(program: CompCtx, bc: *BcBackend, func: FuncId, when: ExecStyle
         vars = empty(),
         var_names = empty(),
         when = when,
-        signeture = @try(program.prim_sig(f_ty, f.cc.expect("known cc."))) return,
+        signeture = @try(program.prim_sig(f_ty)) return,
         func = func,
         name = f.name,
         switch_payloads = empty(),
@@ -484,13 +484,12 @@ fn log_bc(self: CompCtx, func: *Func, result: *FnBody, out: *List(u8)) void = {
 fn emit_runtime_call(
     self: *EmitBc,
     f_ty: FnType,
-    cc: CallConv,
     arg_expr: *FatExpr,
     result_location: ResultLoc,
     can_tail: bool,
     $do_call: @Fn(sig: *PrimSig, tail: bool) void,
-) PRes = {
-    sig := @try(prim_sig(self.program, f_ty, cc)) return;
+) PRes = { 
+    sig := @try(prim_sig(self.program, f_ty)) return;
 
     :: if(?u16);
     result_var: ?u16 = if sig.first_arg_is_indirect_return && result_location != .ResAddr {
@@ -502,12 +501,6 @@ fn emit_runtime_call(
         .None
     };
 
-    
-    // :ContextChange
-    if cc == .CCallRegCt {
-        //self.push(.GetCompCtx);
-    };
-    
     any_by_ref := @try(self.compile_for_arg(arg_expr, f_ty.arity.zext())) return;
     // if any args are pointers, they might be to the stack and then you probably can't tail call.
     // TODO: can do better than this without getting too fancy, function pointers are fine, and anything in constant data is fine (we know if the arg is a Values).
@@ -927,7 +920,7 @@ fn emit_call(self: *EmitBc, f: *FatExpr, arg: *FatExpr, result_location: ResultL
 
             if(func.get_flag(.NoTail), => { can_tail = false; });
             
-            self.emit_runtime_call(f_ty, cc, arg, result_location, can_tail) { sig, tail |
+            self.emit_runtime_call(f_ty, arg, result_location, can_tail) { sig, tail |
                 self.result.mix_hash(f_id.as_index(), 436265);
                 callee := self.program.get_function(f_id);
                 if callee.body&.is(.Intrinsic) {
@@ -969,7 +962,7 @@ fn emit_call(self: *EmitBc, f: *FatExpr, arg: *FatExpr, result_location: ResultL
                 self.push(PeekDup = 1);
             };
             // TODO: allow tail calling through pointer depending on the calling convention 
-            @try(self.emit_runtime_call(f_ty.ty, f_ty.cc, arg, result_location, can_tail) { sig, _tail |
+            @try(self.emit_runtime_call(f_ty.ty, arg, result_location, can_tail) { sig, _tail |
                 self.push(CallFnPtr = (sig = self.push_sig(sig[]), context = self.dyn_call_context));
                 if self.debug {
                     self.debug_location_for_last_op(f.loc);

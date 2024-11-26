@@ -13,6 +13,8 @@
 //! Compiling an llvm release build of the mandelbrot program takes closer to 185ms, well outside our 16ms frame budget. 
 //! In llvm's defence, this demo wouldn't be impressive without an optimised build of the self hosted compiler. 
 //!
+//! (llvm backend can get 60fps on my machine, fully self hosted is only 40fps so far).
+//!
 
 // TODO: can i make the flicker better? it works in Terminal.app but looks like garabge in Warp.
 // TODO: still leaks memory. comptime ast_alloc is todo_allocator. 
@@ -27,16 +29,28 @@ fn driver(vtable: *ImportVTable) void = {
     src1 := src_parts[0];
     src2 := src_parts[1];
 
+    // Don't fill the terminal with junk. 
     println(start_other_terminal);
     start_raw_terminal(STD_IN);
 
     start := timestamp();
+    frame_count := loop_draw_frames(vtable, src1, src2);
+    end := timestamp();
+    
+    // TODO: panic hooks because this really fucks you up if the program crashes. 
+    end_raw_terminal(STD_IN);
+    println(end_other_terminal);
+    
+    s := end - start;
+    @println("% frames in %ms: %fps", frame_count, s, frame_count.float() / s.float() * 1000.0);
+}
+
+fn loop_draw_frames(vtable: *ImportVTable, src1: Str, src2: Str) i64 = {
     frames := 0;
     x := -1.5;
     y := -1.0;
-    (fn() => {
-        break :: local_return;
-        loop {
+    loop {
+        push_dynamic_context {
             start := timestamp();
             temp_mark := mark_temporary_storage();
             
@@ -55,10 +69,9 @@ fn driver(vtable: *ImportVTable) void = {
             f();
     
             // Check if the user pressed a key so we can update the position for next frame. 
-            ::?u8;
             if get_input() { c |
                 @switch(c) {
-                    @case("q".ascii()) => { break(); };
+                    @case("q".ascii()) => return(frames);
                     @case("a".ascii()) => { x += 0.1; };
                     @case("d".ascii()) => { x -= 0.1; };
                     @case("s".ascii()) => { y -= 0.1; };
@@ -69,23 +82,18 @@ fn driver(vtable: *ImportVTable) void = {
             frames += 1;
             
             // Release all memory used by this frame's compiler instance. 
-            {vtable.destroy_compiler}(c.data);
+            {vtable.destroy_compiler}(c.data);  // :leak still im sure but its clearly not a big deal
+            
             end := timestamp();
             @println("compile + run frame time: %ms\nuse wasd to move around. q to quit", end - start);
             reset_temporary_storage(temp_mark);
         };
-    })();
-    end := timestamp();
-    s := end - start;
-    // TODO: panic hooks because this really fucks you up if the program crashes. 
-    end_raw_terminal(STD_IN);
-    println(end_other_terminal);
-    @println("% frames in % ms: %fps", frames, s, frames.float() / s.float() * 1000.0);
+    };
+}
 
-    fn get_input() ?u8 = {
-        c: u8 = 0;
-        len := read(STD_IN, c&, 1).unwrap();
-        ::if(?u8);
-        if(len > 0, => (Some = c), => .None)
-    }
+fn get_input() ?u8 = {
+    c: u8 = 0;
+    len := read(STD_IN, c&, 1).unwrap();
+    ::if(?u8);
+    if(len > 0, => (Some = c), => .None)
 }
