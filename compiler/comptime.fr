@@ -180,7 +180,6 @@ fn init_driver_vtable() *ImportVTable = {
 
 CompilerRs :: ***SelfHosted;  // TODO: really this should be a new type so you can't accidently implement call functions by just adding extra indirection. hopefully the number of pointers makes it clear something's weird. 
 fn cast(c: Compiler) CompilerRs #unsafe_noop_cast;
-fn cast(c: CompilerRs) Compiler #unsafe_noop_cast;
 
 fn add_file(c: Compiler, name: Str, content: Str) Span = {
     c := c.cast();
@@ -233,39 +232,44 @@ fn get_fns_with_tag(c: Compiler, tag: Symbol) [] FuncId = {
 
 /////////////////////////////////////////////////////////////////////////////////
 
+fn current_comptime() *SelfHosted =
+    SelfHosted.ptr_from_raw(context(DefaultContext)[].comptime);
+
 // :sema_regression :fn_addr_const_hack the places that are @as(rawptr) should be able to just have that hint on the constant. 
 fn fill_export_ffi(out: *List(u8)) void = {
     // TODO: fix error message if you forget a semi-colon in the string. 
     @fmt(out, "fn lookup_baked(addr: i64) ?BakedVarId #ct #comptime_addr(%);\n", lookup_baked);
-    lookup_baked: rawptr : fn(c: CompilerRs, addr: i64) ?BakedVarId = c.baked.lookup&.get(addr);
+    lookup_baked: rawptr : fn(addr: i64) ?BakedVarId = current_comptime()[].baked.lookup&.get(addr);
     
     @fmt(out, "fn cache_baked(addr: i64, id: BakedVarId) ?BakedVarId #ct #comptime_addr(%);\n", cache_baked);
-    cache_baked: rawptr : fn(c: CompilerRs, addr: i64, id: BakedVarId) void = {
-        c.baked.lookup&.insert(addr, id); // TODO: error if collide? 
+    cache_baked: rawptr : fn(addr: i64, id: BakedVarId) void = {
+        current_comptime()[].baked.lookup&.insert(addr, id); // TODO: error if collide? 
     };
     
     @fmt(out, "fn dyn_bake_relocatable_value(raw_bytes: Slice(u8), ty: Type, force_default_handling: bool) Slice(BakedEntry) #ct #comptime_addr(%);\n", @as(rawptr) dyn_bake_value);
-    dyn_bake_value :: fn(c: CompilerRs, bytes: Slice(u8), ty: Type, force_default_handling: bool) Slice(BakedEntry) = {
-        r := c[][].emit_relocatable_constant_body(bytes, ty, force_default_handling); // TODO: sad extra binding forces it to instantiate the type. 
-        c[][].unwrap_report_error(Slice(BakedEntry), r)
+    dyn_bake_value :: fn(bytes: Slice(u8), ty: Type, force_default_handling: bool) Slice(BakedEntry) = {
+        c := current_comptime();
+        r := c.emit_relocatable_constant_body(bytes, ty, force_default_handling); // TODO: sad extra binding forces it to instantiate the type. 
+        c.unwrap_report_error(Slice(BakedEntry), r)
     };
     
     @fmt(out, "fn if(e: FatExpr) FatExpr #macro #ct #comptime_addr(%);\n", if_node);
-    if_node: rawptr : fn(c: CompilerRs, e: FatExpr) FatExpr = {
+    if_node: rawptr : fn(e: FatExpr) FatExpr = {
         assert(e.expr&.is(.Tuple), "@if expected tuple");
         parts := e.expr.Tuple&;
         (expr = (If = (cond = parts.index(0), if_true = parts.index(1), if_false = parts.index(2))), loc = e.loc, ty = UnknownType, done = false)
     };
     @fmt(out, "fn slice(e: FatExpr) FatExpr #macro #ct #comptime_addr(%);\n", slice_node);
-    slice_node: rawptr : fn(c: CompilerRs, e: FatExpr) FatExpr = {
-        e := c[][].box(e);
+    slice_node: rawptr : fn(e: FatExpr) FatExpr = {
+        c := current_comptime();
+        e := c.box(e);
         (expr = (Slice = e), loc = e.loc, ty = UnknownType, done = false)
     };
     @fmt(out, "fn uninitialized(e: FatExpr) FatExpr #macro #ct #comptime_addr(%);\n", uninit_node);
-    uninit_node: rawptr : fn(c: CompilerRs, e: FatExpr) FatExpr = {
+    uninit_node: rawptr : fn(e: FatExpr) FatExpr = {
+        self := current_comptime();
         ty := UnknownType;
         if !e&.is_raw_unit() {
-            self := c[][];
             res := self.poll_in_place(Type) {
                 self.eval(e&, Type)
             };
@@ -274,19 +278,22 @@ fn fill_export_ffi(out: *List(u8)) void = {
         (expr = .Uninitialized, loc = e.loc, ty = ty, done = false)
     };
     @fmt(out, "fn loop(e: FatExpr) FatExpr #macro #ct #comptime_addr(%);\n", loop_node);
-    loop_node: rawptr : fn(c: CompilerRs, e: FatExpr) FatExpr = {
-        e := c[][].box(e);
+    loop_node: rawptr : fn(e: FatExpr) FatExpr = {
+        self := current_comptime();
+        e := self.box(e);
         (expr = (Loop = e), loc = e.loc, ty = Never, done = false)
     };
     
     // TODO it saves ~60/990 ms to have this be a constant instead of an overload set. 
     @fmt(out, "operator_star_prefix :: fn(T: Type) Type #fold #ct #comptime_addr(%);\n", ptr);
-    ptr: rawptr : fn(c: Compiler, inner: Type) Type = {
-        c.cast()[][].intern_type((Ptr = inner))
+    ptr: rawptr : fn(inner: Type) Type = {
+        self := current_comptime();
+        self.intern_type((Ptr = inner))
     };
     @fmt(out, "fn Label(Ret: Type) Type #fold #ct #comptime_addr(%);\n", label);
-    label: rawptr : fn(c: Compiler, inner: Type) Type = {
-        c.cast()[][].intern_type(Label = inner)
+    label: rawptr : fn(inner: Type) Type = {
+        self := current_comptime();
+        self.intern_type(Label = inner)
     };
     
     // These only exist for debugging the compiler when everything's broken so can't even compile the one defined in the language.
@@ -294,129 +301,123 @@ fn fill_export_ffi(out: *List(u8)) void = {
     @fmt(out, "fn debug_log_str(i: Str) void #comptime_addr(%);\n", @as(rawptr) :: (fn(i: Str) void = println(i)));
     
     @fmt(out, "fn str(i: Symbol) Str #ct #fold #comptime_addr(%);\n", str);
-    str: rawptr : fn(c: CompilerRs, i: Symbol) Str = {
-        c.pool.get(i)
+    str: rawptr : fn(i: Symbol) Str = {
+        current_comptime()[].pool.get(i)
     };
     
     @fmt(out, "fn sym(i: Str) Symbol #ct #fold #comptime_addr(%);\n", sym);
-    sym: rawptr : fn(c: CompilerRs, i: Str) Symbol = {
-        c.pool.insert_owned(i)
+    sym: rawptr : fn(i: Str) Symbol = {
+        current_comptime()[].pool.insert_owned(i)
     };
     
     @fmt(out, "fn get_comptime_environment() *ComptimeEnvironment #ct #comptime_addr(%);\n", env);
-    env: rawptr : fn(c: CompilerRs) *ComptimeEnvironment = {
-        c[][].env
+    env: rawptr : fn() *ComptimeEnvironment = {
+        current_comptime()[].env
     };
     
     @fmt(out, "fn by_the_way_you_are_compiling_the_compiler_right_now_just_a_helpful_hint() void #ct #comptime_addr(%);\n", note);
-    note: rawptr : fn(c: CompilerRs) void = {
+    note: rawptr : fn() void = {
         // This just gives a place to assert we haven't got any weird feature flags turned on while porting stuff over from rust. 
         // It gets a bit scary if the first thing you try to compile is accidentally the compiler so if it miscompiles you're fucked now. 
         // It's philosophically important that we don't actually change behaviour based on this information tho.
     };
     
     @fmt(out, "fn compile_error(msg: Str, loc: Span) Never #ct #comptime_addr(%);\n", report_err);
-    report_err: rawptr : fn(c: CompilerRs, msg: Str, loc: Span) Never = {
+    report_err: rawptr : fn(msg: Str, loc: Span) Never = {
         // TODO: command line arg to show more context? 
         println("=== ERROR ===");
         println(msg);
-        c[][].codemap.show_error_line(loc);
+        current_comptime()[].codemap.show_error_line(loc);
         panic("Comptime reported error.")
     };
-    
-    // TODO: this should work but "unsafe precondition violated". -- Jul 6
-    //@fmt(out, "fn ast_alloc() Alloc #ct #comptime_addr(%);\n", the_allloc);
-    //the_allloc: rawptr : fn(c: CompilerRs) Alloc = {
-    //    c[][].get_alloc()
-    //};
-    
+  
     // TODO: version of this that allows caching? but have to think more about when you're allowed to deduplicate.
     @fmt(out, "fn bake_value(v: BakedVar) BakedVarId #ct #comptime_addr(%);\n", bake_var);
-    bake_var: rawptr : fn(c: CompilerRs, v: BakedVar) BakedVarId = {
-        c[][].put_baked(v, .None)
+    bake_var: rawptr : fn(v: BakedVar) BakedVarId = {
+        current_comptime().put_baked(v, .None)
     };
     
     @fmt(out, "fn safety_check_enabled(check: SafetyCheck) bool #ct #comptime_addr(%);\n", safe);
-    safe: rawptr : fn(c: CompilerRs, check: SafetyCheck) bool = {
-        build_options := c[][].get_build_options();
+    safe: rawptr : fn(check: SafetyCheck) bool = {
+        build_options := current_comptime().get_build_options();
         if(check.raw() >= build_options.safety_checks&.len(), => return(true)); // allow adding new safety checks and then bootstrapping. 
         build_options.safety_checks&.index(check)[]
     };
     
     // TODO: if you name the thing something that collides, the error message is wrong. 
     @fmt(out, "fn get_type_info_ref(T: Type) *TypeInfo #fold #ct #comptime_addr(%);\n", ty_info_r);
-    ty_info_r: rawptr : fn(c: CompilerRs, ty: Type) *TypeInfo = {
-        info := c[][].get_type(ty);
+    ty_info_r: rawptr : fn(ty: Type) *TypeInfo = {
+        info := current_comptime().get_type(ty);
         while => info.is(.Named) {
-            info = c[][].get_type(info.Named._0);
+            info = current_comptime().get_type(info.Named._0);
         };
         info
     };
     
     // TODO: redundant with get_type_info_ref. just impl this in the language.
     @fmt(out, "fn get_type_info(T: Type) TypeInfo #fold #ct #comptime_addr(%);\n", ty_info);
-    ty_info: rawptr : fn(c: CompilerRs, ty: Type) TypeInfo = {
-        info := c[][].get_type(ty);
+    ty_info: rawptr : fn(ty: Type) TypeInfo = {
+        c := current_comptime();
+        info := c.get_type(ty);
         while => info.is(.Named) {
-            info = c[][].get_type(info.Named._0);
+            info = c.get_type(info.Named._0);
         };
         info[]
     };
     
     @fmt(out, "fn Ty(fst: Type, snd: Type) Type #fold #ct #comptime_addr(%);\n", tuple2);
-    tuple2: rawptr : fn(c: CompilerRs, fst: Type, snd: Type) Type = {
-        //addr := (**SelfHosted).int_from_ptr(c);
-        //@println("called tuple2 % %; %", fst.as_index(), snd.as_index(), addr);
-        
-        c[][].tuple_of(@slice(fst, snd))
+    tuple2: rawptr : fn(fst: Type, snd: Type) Type = {
+        current_comptime().tuple_of(@slice(fst, snd))
     };
     @fmt(out, "fn Ty(fst: Type, snd: Type, trd: Type) Type #fold #ct #comptime_addr(%);\n", tuple3);
-    tuple3: rawptr : fn(c: CompilerRs, fst: Type, snd: Type, trd: Type) Type = {
-        c[][].tuple_of(@slice(fst, snd, trd))
+    tuple3: rawptr : fn(fst: Type, snd: Type, trd: Type) Type = {
+        current_comptime().tuple_of(@slice(fst, snd, trd))
     };
     @fmt(out, "fn Ty(fst: Type, snd: Type, trd: Type, frt: Type) Type #fold #ct #comptime_addr(%);\n", tuple4);
-    tuple4: rawptr : fn(c: CompilerRs, fst: Type, snd: Type, trd: Type, frt: Type) Type = {
-        c[][].tuple_of(@slice(fst, snd, trd, frt))
+    tuple4: rawptr : fn(fst: Type, snd: Type, trd: Type, frt: Type) Type = {
+        current_comptime().tuple_of(@slice(fst, snd, trd, frt))
     };
     @fmt(out, "fn Ty(types: []Type) Type  #fold #ct #comptime_addr(%);\n", tuplen);
-    tuplen: rawptr : fn(c: CompilerRs, types: []Type) Type = {
-        c[][].tuple_of(types)
+    tuplen: rawptr : fn(types: []Type) Type = {
+        current_comptime().tuple_of(types)
     };
    
     @fmt(out, "fn rawptr_from_value(value: *Values) rawptr #comptime_addr(%);\n", rawptr_from_value);
     rawptr_from_value: rawptr : fn(value: *Values) i64 = value.jit_addr();
     
     @fmt(out, "fn Tag(tagged: Type) Type #fold #ct #comptime_addr(%);\n", get_tag);
-    get_tag: rawptr : fn(c: CompilerRs, tagged: Type) Type = {
-        raw := c[][].raw_type(tagged);
-        @if_let(c[][].get_type(raw)) fn Tagged(f) => {
+    get_tag: rawptr : fn(tagged: Type) Type = {
+        c := current_comptime();
+        raw := c.raw_type(tagged);
+        @if_let(c.get_type(raw)) fn Tagged(f) => {
             return(f.tag);
         };
-        @panic("Expected @tagged found %", c[][].log_type(tagged));
+        @panic("Expected @tagged found %", c.log_type(tagged));
         void
     };
     
     @fmt(out, "fn Fn(Arg: Type, Ret: Type) Type #fold #ct #comptime_addr(%);\n", fn_type);
-    fn_type: rawptr : fn(c: CompilerRs, arg: Type, ret: Type) Type = {
-        c[][].intern_type(Fn = (arg = arg, ret = ret, arity = c[][].arg_types(arg).len().trunc()))
+    fn_type: rawptr : fn(arg: Type, ret: Type) Type = {
+        c := current_comptime();
+        c.intern_type(Fn = (arg = arg, ret = ret, arity = c.arg_types(arg).len().trunc()))
     };
     
    
     @fmt(out, "fn IntType(bits: i64, signed: bool) Type #fold #ct #comptime_addr(%);\n", make_int_type);
-    make_int_type: rawptr : fn(c: CompilerRs, bit_count: i64, signed: bool) Type = {
-        c[][].intern_type(Int = (bit_count = bit_count, signed = signed))
+    make_int_type: rawptr : fn(bit_count: i64, signed: bool) Type = {
+        current_comptime().intern_type(Int = (bit_count = bit_count, signed = signed))
     };
     
     @fmt(out, "fn builtin(t: FatExpr) FatExpr #macro #ct #comptime_addr(%);\n", builtin);
-    builtin: rawptr : fn(c: CompilerRs, arg: FatExpr) FatExpr = {
-        self := c[][];
+    builtin: rawptr : fn(arg: FatExpr) FatExpr = {
+        self := current_comptime();
         res := self.builtin_macro(arg);
         self.unwrap_report_error(FatExpr, res)
     };
     
     @fmt(out, "fn unquote_macro_apply_placeholders(t: Slice(FatExpr)) FatExpr #ct #comptime_addr(%);\n", unquote_placeholders);
-    unquote_placeholders: rawptr : fn(c: CompilerRs, args: []FatExpr) FatExpr = {
-        self := c[][];
+    unquote_placeholders: rawptr : fn(args: []FatExpr) FatExpr = {
+        self := current_comptime();
         args := args.assume_owned(temp());
         template := args&.pop().expect("ICE: unquote_placeholders always needs template arg");
         // Since we're probably going to call this with different values for the placeholders (like invoking the same macro multiple times),
@@ -444,8 +445,7 @@ fn fill_export_ffi(out: *List(u8)) void = {
     @fmt(out, "fn Fn(Ret: FatExpr) FatExpr #outputs(Type) #macro #ct #comptime_addr(%);\n",  @as(rawptr) fn_type_macro_single);
     @fmt(out, "fn FnPtr(Ret: FatExpr) FatExpr #outputs(Type) #macro #ct #comptime_addr(%);\n",  @as(rawptr) fn_ptr_type_macro_single);
    
-    make_fn_type :: fn(c: CompilerRs, arg: FatExpr, ret: FatExpr) FnType = {
-        self := c[][];
+    make_fn_type :: fn(self: *SelfHosted, arg: FatExpr, ret: FatExpr) FnType = {
         inner :: fn() Maybe(FnType) => {
             return :: local_return;
             types: []Type = @match(arg.expr&) {
@@ -483,34 +483,37 @@ fn fill_export_ffi(out: *List(u8)) void = {
     };
     
     fn_type_macro_erase:: fn_type_macro;
-    fn_type_macro :: fn(c: CompilerRs, arg: FatExpr, ret: FatExpr) FatExpr = {
+    fn_type_macro :: fn(arg: FatExpr, ret: FatExpr) FatExpr = {
+        c := current_comptime();
         f_ty := make_fn_type(c, arg, ret);
-        ty := c[][].intern_type(Fn = f_ty);
-        value := c[][].to_values(Type, ty); 
-        arg&.set(value, c[][].get_or_create_type(Type));
+        ty := c.intern_type(Fn = f_ty);
+        value := c.to_values(Type, ty); 
+        arg&.set(value, c.get_or_create_type(Type));
         arg
     };
     
     fn_ptr_type_macro_erase:: fn_ptr_type_macro;
-    fn_ptr_type_macro :: fn(c: CompilerRs, arg: FatExpr, ret: FatExpr) FatExpr = {
+    fn_ptr_type_macro :: fn(arg: FatExpr, ret: FatExpr) FatExpr = {
+        c := current_comptime();
         f_ty := make_fn_type(c, arg, ret);
-        ty := c[][].intern_type(FnPtr = (ty = f_ty, cc = .CCallReg));
-        value := c[][].to_values(Type, ty); 
-        arg&.set(value, c[][].get_or_create_type(Type));
+        ty := c.intern_type(FnPtr = (ty = f_ty, cc = .CCallReg));
+        value := c.to_values(Type, ty); 
+        arg&.set(value, c.get_or_create_type(Type));
         arg
     };
     
-    fn_ptr_type_macro_single:: fn(c: CompilerRs, ret: FatExpr) FatExpr = 
-        c.fn_ptr_type_macro(empty_struct_literal(ret.loc), ret);
+    fn_ptr_type_macro_single:: fn(ret: FatExpr) FatExpr = 
+        fn_ptr_type_macro(empty_struct_literal(ret.loc), ret);
     
-    fn_type_macro_single:: fn(c: CompilerRs, ret: FatExpr) FatExpr = 
-        c.fn_type_macro(empty_struct_literal(ret.loc), ret);
+    fn_type_macro_single:: fn(ret: FatExpr) FatExpr = 
+        fn_type_macro(empty_struct_literal(ret.loc), ret);
     
     @fmt(out, "fn literal_ast(ty: Type, ptr: rawptr) FatExpr #ct #comptime_addr(%);\n", literal_ast);
-    literal_ast: rawptr : fn(c: CompilerRs, ty: Type, ptr: *u8) FatExpr = {
-        bytes: i64 = c[][].get_info(ty)[].stride_bytes.zext();
+    literal_ast: rawptr : fn(ty: Type, ptr: *u8) FatExpr = {
+        c := current_comptime();
+        bytes: i64 = c.get_info(ty)[].stride_bytes.zext();
         value := slice(ptr, bytes);
-        value := c[][].from_bytes(value);
+        value := c.from_bytes(value);
         
         // TODO: zero_padding?
         // TODO: caller should pass in loc?
@@ -518,8 +521,8 @@ fn fill_export_ffi(out: *List(u8)) void = {
     };
     
     @fmt(out, "fn type(e: FatExpr) FatExpr #outputs(Type) #macro #ct #comptime_addr(%);\n", @as(rawptr) type_macro);
-    type_macro:: fn(c: CompilerRs, e: FatExpr) FatExpr = {
-        self := c[][];
+    type_macro:: fn(e: FatExpr) FatExpr = {
+        self := current_comptime();
         old := self.dispatch.enclosing_function;
         self.dispatch.enclosing_function = .None;
         //e = self.clone(e&); // TODO: do i need to do this? :SLOW
@@ -531,87 +534,89 @@ fn fill_export_ffi(out: *List(u8)) void = {
         ty := self.unwrap_report_error(Type, ty);
         value := self.to_values(Type, ty); 
         e&.set(value, self.get_or_create_type(Type));
-        @log_event("we know the type! %", e&.log(c[][])) self;
+        @log_event("we know the type! %", e&.log(self)) self;
         e
     };
     
     @fmt(out, "fn const_eval(expr: FatExpr, ty: Type, result: rawptr) void #ct #comptime_addr(%);\n", @as(rawptr) const_eval_any);
     
-    const_eval_any :: fn(c: CompilerRs, expr: FatExpr, ty: Type, addr: *u8) void = {
-        size: i64 = c[][].get_info(ty)[].stride_bytes.zext();
+    const_eval_any :: fn(expr: FatExpr, ty: Type, addr: *u8) void = {
+        c := current_comptime();
+        size: i64 = c.get_info(ty)[].stride_bytes.zext();
         out := slice(addr, size);
         
-        res := c[][].poll_in_place(void) {()Maybe(void)|
-            value := @check(c[][].immediate_eval_expr(expr&, ty)) local_return;
+        res := c.poll_in_place(void) {()Maybe(void)|
+            value := @check(c.immediate_eval_expr(expr&, ty)) local_return;
             b := value&.bytes();
             if b.len == size {
                 out.copy_from(b);
                 .Ok
             } else {
-                @err("ICE: const_eval_any(%) size mismatch for value %", c[][].log_type(ty), log(value&, c[][], ty))
+                @err("ICE: const_eval_any(%) size mismatch for value %", c.log_type(ty), log(value&, c, ty))
             }
         };
-        c[][].unwrap_report_error(void, res);
+        c.unwrap_report_error(void, res);
     };
     
     @fmt(out, "fn struct(arg: FatExpr) FatExpr #outputs(Type) #macro #ct #comptime_addr(%);\n", @as(rawptr) struct_macro_wrap);
-    struct_macro_wrap:: fn(c: CompilerRs, expr: FatExpr) FatExpr = {
-        self := c[][];
+    struct_macro_wrap:: fn(expr: FatExpr) FatExpr = {
+        self := current_comptime();
         res := self.poll_in_place(FatExpr, => self.struct_macro(expr&));
         self.unwrap_report_error(FatExpr, res)
     }; 
     @fmt(out, "fn union(arg: FatExpr) FatExpr #outputs(Type) #macro #ct #comptime_addr(%);\n", @as(rawptr) union_macro_wrap);
-    union_macro_wrap:: fn(c: CompilerRs, expr: FatExpr) FatExpr = {
-        self := c[][];
+    union_macro_wrap:: fn(expr: FatExpr) FatExpr = {
+        self := current_comptime();
         res := self.poll_in_place(FatExpr, => self.union_macro(expr&));
         self.unwrap_report_error(FatExpr, res)
     }; 
     @fmt(out, "fn tagged(arg: FatExpr) FatExpr #outputs(Type) #macro #ct #comptime_addr(%);\n", @as(rawptr) tagged_macro_wrap);
-    tagged_macro_wrap:: fn(c: CompilerRs, expr: FatExpr) FatExpr = {
-        self := c[][];
+    tagged_macro_wrap:: fn(expr: FatExpr) FatExpr = {
+        self := current_comptime();
         res := self.poll_in_place(FatExpr, => self.tagged_macro(expr&));
         self.unwrap_report_error(FatExpr, res)
     };
     @fmt(out, "fn enum(arg: FatExpr, target: FatExpr) FatExpr #outputs(Type) #macro #ct #comptime_addr(%);\n", @as(rawptr) enum_macro_wrap);
-    enum_macro_wrap:: fn(c: CompilerRs, arg: FatExpr, target: FatExpr) FatExpr = {
-        self := c[][];
+    enum_macro_wrap:: fn(arg: FatExpr, target: FatExpr) FatExpr = {
+        self := current_comptime();
         res := self.poll_in_place(FatExpr, => self.enum_macro(arg&, target&));
         self.unwrap_report_error(FatExpr, res)
     };
     // note: the old verion didn't even use this ast node, it just did the work here like @struct, et al.
     //       maybe thats better, idk, lets see if i still need the name based hack this way. -- Aug 5s
     @fmt(out, "fn as(T: FatExpr, e: FatExpr) FatExpr #macro #ct #comptime_addr(%);\n", as_node);
-    as_node: rawptr : fn(c: CompilerRs, type: FatExpr, value: FatExpr) FatExpr = {
-        value := c[][].box(value);
-        type := c[][].box(type);
+    as_node: rawptr : fn(type: FatExpr, value: FatExpr) FatExpr = {
+        c := current_comptime();
+        value := c.box(value);
+        type := c.box(type);
         (expr = (As = (type = type, value = value)), loc = value.loc, ty = UnknownType, done = false)
     };
     
     // TODO: redundant with get_type_info_ref. just impl this in the language.
     @fmt(out, "fn size_of(T: Type) i64 #fold #ct #comptime_addr(%);\n", size_of);
-    size_of: rawptr : fn(c: CompilerRs, type: Type) i64 =
-        c[][].get_info(type)[].stride_bytes.zext();
+    size_of: rawptr : fn(type: Type) i64 =
+        current_comptime().get_info(type)[].stride_bytes.zext();
     
     @fmt(out, "fn debug_log_ast(expr: FatExpr) void #ct #comptime_addr(%);\n", debug_log_ast);
-    debug_log_ast: rawptr : fn(c: CompilerRs, e: FatExpr) void = {
-        @println("[debug_log_ast] %; %", e.expr&.tag(), e&.log(c[][]));
+    debug_log_ast: rawptr : fn(e: FatExpr) void = {
+        @println("[debug_log_ast] %; %", e.expr&.tag(), e&.log(current_comptime()));
     };
     
     @fmt(out, "fn debug_log_type(type: Type) void #ct #comptime_addr(%);\n", debug_log_type);
-    debug_log_type: rawptr : fn(c: CompilerRs, type: Type) void = {
-        @println("[debug_log_type %] %", type.as_index(), c[][].log_type(type));
+    debug_log_type: rawptr : fn(type: Type) void = {
+        @println("[debug_log_type %] %", type.as_index(), current_comptime().log_type(type));
     };
     
     @fmt(out, "fn intern_type_ref(info: *TypeInfo) Type #ct #comptime_addr(%);\n", intern_type_ref);
-    intern_type_ref: rawptr : fn(c: CompilerRs, info: *TypeInfo) Type = {
-        c[][].intern_type(info[]) // TODO: probably more useful if i make a deep copy, why else are you calling this. 
+    intern_type_ref: rawptr : fn(info: *TypeInfo) Type = {
+        current_comptime().intern_type(info[]) // TODO: probably more useful if i make a deep copy, why else are you calling this. 
     };
     
     // Infers the type and avoids some redundant work if you duplicate the ast node in a bunch of places after calling this.
     // TODO: should take by reference so its clear that it mutates the deep structure of the node (not a copy)
     @fmt(out, "fn compile_ast(e: FatExpr) FatExpr #ct #comptime_addr(%);\n", @as(rawptr) compile_ast);
-    compile_ast:: fn(c: CompilerRs, expr: FatExpr) FatExpr = {
-        self := c[][];
+    compile_ast:: fn(expr: FatExpr) FatExpr = {
+        self := current_comptime();
         old := self.dispatch.enclosing_function;
         self.dispatch.enclosing_function = .None;
         //expr = self.clone(expr&); // TODO: do i need to do this? :SLOW
@@ -622,8 +627,8 @@ fn fill_export_ffi(out: *List(u8)) void = {
     };
     
     @fmt(out, "fn symbol(e: FatExpr) FatExpr #outputs(Symbol) #macro #ct #comptime_addr(%);\n", symbol_macro);
-    symbol_macro: rawptr : fn(c: CompilerRs, expr: FatExpr) FatExpr = {
-        self := c[][];
+    symbol_macro: rawptr : fn(expr: FatExpr) FatExpr = {
+        self := current_comptime();
         if expr&.ident() { sym |
             sym := self.to_values(Symbol, sym);
             expr&.set(sym, self.get_or_create_type(Symbol));
@@ -636,8 +641,8 @@ fn fill_export_ffi(out: *List(u8)) void = {
     // TODO: is this made redundant by the meta.fr enum helpers or do we need to use this too early? [
     @fmt(out, "fn tag_value(E: Type, case_name: Symbol) i64 #fold #ct #comptime_addr(%);", tag_value_erase);
     tag_value_erase: rawptr : tag_value;
-    tag_value :: fn(c: CompilerRs, enum_ty: Type, name: Symbol) i64 = {
-        self := c[][];
+    tag_value :: fn(enum_ty: Type, name: Symbol) i64 = {
+        self := current_comptime();
         @match(self.get_type(enum_ty)) {
             fn Enum(it) => {
                 // TODO: this is kinda dumb, could be in meta.fr but this us just easier right now. -- Jul 8
@@ -658,7 +663,7 @@ fn fill_export_ffi(out: *List(u8)) void = {
                 };
                 @panic("bad tagged case name % for %", self.pool.get(name), self.log_type(enum_ty))
             }
-            fn Named(it) => tag_value(c, it._0, name);
+            fn Named(it) => tag_value(it._0, name);
             @default => @panic("% is not enum. (tried tag_value of %)",
                 self.log_type(enum_ty),
                 self.pool.get(name)
@@ -667,12 +672,12 @@ fn fill_export_ffi(out: *List(u8)) void = {
     };
     
     @fmt(out, "fn c_str(s: Symbol) CStr #fold #ct #comptime_addr(%);\n", symbol_to_cstr);
-    symbol_to_cstr: rawptr : fn(c: CompilerRs, s: Symbol) CStr = 
-        c.pool.get_c_str(s);
+    symbol_to_cstr: rawptr : fn(s: Symbol) CStr = 
+        current_comptime()[].pool.get_c_str(s);
         
     @fmt(out, "fn assert_compile_error(e: FatExpr) FatExpr #fold #ct #macro #outputs(*CompileError) #comptime_addr(%);\n", @as(rawptr) assert_compile_error);
-    assert_compile_error:: fn(c: CompilerRs, e: FatExpr) FatExpr = {
-        self := c[][];
+    assert_compile_error:: fn(e: FatExpr) FatExpr = {
+        self := current_comptime();
         res := self.poll_in_place(void, => self.compile_expr(e&, .None));
         if !res&.is(.Err) {
             self.report_error2(ExpectedCompileError = e.loc);
@@ -684,32 +689,32 @@ fn fill_export_ffi(out: *List(u8)) void = {
     };
     
     @fmt(out, "fn FnPtr(arg: Type, ret: Type) Type #fold #ct #comptime_addr(%);\n", fn_ptr);
-    fn_ptr: rawptr : fn(c: CompilerRs, arg: Type, ret: Type) Type = {
-        self := c[][];
+    fn_ptr: rawptr : fn(arg: Type, ret: Type) Type = {
+        self := current_comptime();
         arity := self.arg_types(arg).len();
         self.intern_type(FnPtr = (ty = (arg = arg, ret = ret, arity = arity.trunc()), cc = .CCallReg))
     };
     
     @fmt(out, "fn get_meta(s: Type) TypeMeta #fold #ct #comptime_addr(%);\n", get_m);
-    get_m: rawptr : fn(c: CompilerRs, s: Type) TypeMeta = {
-        c[][].get_info(s)[]
+    get_m: rawptr : fn(s: Type) TypeMeta = {
+        current_comptime().get_info(s)[]
     };
     
     
     @fmt(out, "fn ast_alloc() Alloc #ct #comptime_addr(%);\n", get_aa);
-    get_aa: rawptr : fn(c: CompilerRs) Alloc = {
-        c[][].get_alloc()
+    get_aa: rawptr : fn() Alloc = {
+        current_comptime().get_alloc()
     };
     
     @fmt(out, "fn current_compiler_context() CompCtx #ct #comptime_addr(%);\n", get_cc);
-    get_cc: rawptr : fn(c: CompilerRs) CompCtx = {
+    get_cc: rawptr : fn() CompCtx = {
         vtable := init_driver_vtable(); // TODO: don't allocate every time :SLOW
-        (data = c.cast(), vtable = vtable)
+        (data = current_comptime()[].legacy_indirection, vtable = vtable)
     };
     
     @fmt(out, "fn resolve_overload(os: OverloadSet, arg: Type, ret: Type, loc: Span) FuncId #fold #ct #comptime_addr(%);\n", @as(rawptr) resolve_os);
-    resolve_os :: fn(c: CompilerRs, os: OverloadSet, arg: Type, ret: Type, loc: Span) FuncId = {
-        self := c[][];
+    resolve_os :: fn(os: OverloadSet, arg: Type, ret: Type, loc: Span) FuncId = {
+        self := current_comptime();
         f_ty: FnType = (arg = arg, ret = ret, arity = self.len_arg_types(arg).trunc());
         res := self.poll_in_place(FuncId, => self.resolve_by_type(os, f_ty, loc));
         self.unwrap_report_error(FuncId, res)

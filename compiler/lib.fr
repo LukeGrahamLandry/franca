@@ -111,27 +111,25 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
     opts := vtable.default_build_options(); 
     c := @try(vtable.load_file_in_compiler(path, opts)) return;
     
-    mem_stats :: fn() => {
-        bytes_per_mb :: 1024 * 1024;
-        cc := c.data.cast()[][];
-        @println("Compiler Memory Usage: %MB + %MB", cc.ast_alloc.current_allocated_size() / bytes_per_mb, __temp_alloc.current_allocated_size() / bytes_per_mb);
-    };
-    
     if c.get_unique_named("driver") {f|
         start := timestamp();
         callee := c.get_jitted(f);
         @eprintln(">>> Loaded driver in %ms.", timestamp() - start);
         callee := assume_types_fn(Arg = *ImportVTable, Ret = void, ptr = callee);
-        callee(vtable);
-        //mem_stats();
+        push_dynamic_context {
+            context(DefaultContext)[].comptime = rawptr_from_int(0);
+            callee(vtable);
+        };
         exit(0);
     };
     
     if c.get_unique_named("main") {f|
         callee := c.get_jitted(f);
         callee := assume_types_fn(Arg = void, Ret = void, ptr = callee);
-        callee();
-        //mem_stats();
+        push_dynamic_context {
+            context(DefaultContext)[].comptime = rawptr_from_int(0);
+            callee();
+        };
         exit(0);
     };
     
@@ -141,7 +139,10 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
         @println("===== [%] =====", c.get_string(c.get_function_name(f)));
         callee := c.get_jitted(f);
         callee := assume_types_fn(Arg = void, Ret = void, ptr = callee);
-        callee();
+        push_dynamic_context {
+            context(DefaultContext)[].comptime = rawptr_from_int(0);
+            callee();
+        };
     };
     
     // TODO: remove this logging
@@ -243,6 +244,13 @@ fn find_std_lib(a: Alloc) ?Str = {
 
 // TODO: pass requested type through generic args so this isn't so clunky. -- Jun 23
 fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
+    // i was hoping this would help when zed shits itself and pegs a core on a language server because i accidentally searched all the files,
+    // but no such luck. why does one guy using 100% mean my thing gets slower :( TODO
+    //QOS_CLASS_USER_INTERACTIVE :: 0x21;
+   	//QOS_CLASS_USER_INITIATED :: 0x19;
+    //fn pthread_set_qos_class_self_np(qos: i32, base: i32) i32 #libc;
+    //pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+    
     opts.implicit_context_comptime = query_context_is_implicit();
     stack_base := 0;
     a: ArenaAlloc = init(page_allocator, 1.shift_left(23));
@@ -322,6 +330,7 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
     
     if get_dynamic_context().is_null() {
         scary_log("compiler had null context!");
+        abort();
     };
     self&.init_fixed_types();
     self.pool.fill_fixed_flags();
@@ -344,6 +353,10 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
     };
     
     self := a.boxed(SelfHosted, self);
+    
+    c := context(DefaultContext)[].comptime&;
+    @assert(c[].is_null(), "Cannot call init_self_hosted inside another compiler. push_context with comptime=null first.");
+    c[] = SelfHosted.raw_from_ptr(self);
     
     stable_compiler_context :: fn(self: *SelfHosted) Compiler = {
         mem1 := libc_allocator.alloc(*SelfHosted, 1);
