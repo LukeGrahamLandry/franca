@@ -154,7 +154,6 @@ fn emit_the_code(e: *AmdState) void = {
     e.a&.push_u32(0xfa1e0ff3); // endbr64
     
     f := e.f;
-    f.leaf = false; // :dontforget // TODO
     if !f.leaf || f.vararg || f.dynalloc {
         e.fp = .RBP;
         e.a&.encode_op_reg(PrimaryOp.PushBase, X86Reg.rbp);
@@ -568,27 +567,19 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
             emitcopy(i.arg&[1], amd64_xmm_scratch, i&.cls(), e);
         }
         fn storeb() => {
-            // TODO: has RTmp already been converted to RMem for all stores?
-            
-            // TODO: same for all r8 instructions? like for the flag reading ops? 
-            // This seems insane? Am I missunderstanding something? Seems to work tho so who knows. 
-            // "When any REX prefix is used, SPL, BPL, SIL and DIL are used. Otherwise, without any REX prefix AH, CH, DH and BH are used."
-            // TODO: this feels super fragile, like what if when encoding the address we need the extend base/index?
-            if t0 == .RTmp && (@is(i.arg&[0].int_reg_d(), .rsp, .rbp, .rsi, .rdi)) {
-                e.a&.push(0b01000000);
-            };
-            
+            @debug_assert(rtype(i.arg&[1]) != .RTmp);
             // this is painful because everywhere else the range of a byte immediate is signed but here its unsigned. 
             if e.f.get_int(i.arg&[0]) { c |
                 c = c.bit_and(1.shift_left(8) - 1);
                 i.arg&[0] = TMP(reg_for_extension(0));
                 b := encode(e, i&, false, 1);
+                @debug_assert(b.force_rex);
                 push(e, b, @slice(0xC6));
                 e.a&.push(@as(u8) c.trunc());
                 return();
             };
         
-            assemble(e, i&);
+            assemble(e, i&); 
         }
         fn storeh() => {
             e.a&.push(operand_16bit_prefix);
@@ -614,14 +605,14 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
                 cc := amd_condition_codes[cc.zext()];
                 @debug_assert(rtype(i.to) == .RTmp, "we don't allow mem arg for setcc"); // because then the zero extending is even more painful. 
                 r0 := int_reg_d(i.to);
-                e.a&.encode_setcc(r0, cc);
+                
+                e.a&.push(pack_rex_si(false, r0, r0, DONT_CARE_REG));  // Don't elide. See EncodedArgs.force_rex
+                e.a&.encode_2cc(TwoByteOp.SetCC, cc);
+                e.a&.push(pack_modrm(ModrmMode.Direct, r0, DONT_CARE_REG));
+                
                 // setcc doesn't zero the upper bits, so we zero extend as an extra instruction. 
                 // we could get complicated and keep track of known bits but I suspect that's well into deminishing returns territory. 
-                if r0.raw() > 8 {
-                    // MOVZX r64, r/m8 can't encode a/b/c/d, but you auto zero extend if you use MOVZX r32, r/m8, so why would you ever have w=true?
-                    w := false;
-                    e.a&.push(pack_rex_si(w, r0, r0, DONT_CARE_REG));
-                };
+                e.a&.push(pack_rex_si(false, r0, r0, DONT_CARE_REG));  // Don't elide. See EncodedArgs.force_rex
                 e.a&.push(TWO_BYTE_OP_PREFIX);
                 e.a&.push(@as(u8) TwoByteOp.MovZX);
                 e.a&.push(pack_modrm(ModrmMode.Direct, r0, r0));
@@ -629,11 +620,9 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
             };
             
             if is_load(o) {
-                // this is wasteful allocation just to smuggle one bit of information on which modrm mode to use. 
-                if t0 == .RTmp {
-                    println("F");
-                    i.arg&[0] = e.f.new_mem(i.arg&[0], QbeNull, 0, 0);
-                };
+                // TODO: this is wasteful allocation just to smuggle one bit of information on which modrm mode to use. 
+                @debug_assert(rtype(i.arg&[0]) != .RTmp);
+                
                 if o != .load {
                     // convert to extXX and let the memory argument express the load. 
                     o = rebase(o, .extsb, .loadsb);
@@ -664,9 +653,11 @@ fn push_imm(e: *AmdState, value: i64, byte_count: i64) void = {
 
 fn push(e: *AmdState, b: EncodedArgs, ops: []u8) void = {
     // before: prefix
-    // TODO: i think some instructions need to not have REX at all but then you can't get half the registers?
-    // If we're not using 64 bit operand size and not using the high 8 registers, don't emit a wasted byte. 
-    if b.rex != 0b01000000 {
+    
+    // If we're not using 64 bit operand size and don't need a register extension, don't emit a wasted byte. 
+    // However, when using the low byte of RAX/RCX/RDX/RBX, missing rex gives you bits 8-16 instead 
+    // which maybe is cool you're on an 8086 or whatever but is never what we want so here we are. 
+    if b.rex != 0b01000000 || b.force_rex {
         e.a&.push(b.rex);
     };
     e.a&.push_all(ops);
@@ -730,18 +721,20 @@ EncodedArgs :: @struct(
     modrm: u8,
     sib: ?u8,
     rex: u8,
+    force_rex: bool,
     disp: i64 = 0,
     disp_size := Displacement.D0,
     patch: ?Ty(i64, u32) = .None,
 );
 
 fn encode(e: *AmdState, i: *Qbe.Ins, w: bool, immediate_size: i64) EncodedArgs = {
+    force_rex := @is(i.op(), .extub, .extsb, .loadub, .loadsb, .storeb);
     r0, r1 := (i.arg&[0], i.arg&[1]);
     t0, t1 := (rtype(r0), rtype(r1));
     @debug_assert(r0 != QbeNull && r1 != QbeNull, "we only look at the arg slots becuase x64 is 2-address");
     if t0 == t1 && t0 == .RTmp {  // both in registers, thats easy!
         rr0, rr1 := (r0.int_reg_d(), r1.int_reg_d());
-        return(modrm = pack_modrm(ModrmMode.Direct, rr1, rr0), rex = pack_rex_si(w, rr0, rr1, DONT_CARE_REG), sib = .None);
+        return(modrm = pack_modrm(ModrmMode.Direct, rr1, rr0), rex = pack_rex_si(w, rr0, rr1, DONT_CARE_REG), sib = .None, force_rex = force_rex);
     };
     
     if t1 == .RMem {
@@ -762,7 +755,8 @@ fn encode(e: *AmdState, i: *Qbe.Ins, w: bool, immediate_size: i64) EncodedArgs =
                 disp = off,
                 modrm = pack_modrm(.Indirect00, .rbp, rr0),  // disp is RIP relative
                 rex = pack_rex_si(w, rr0, DONT_CARE_REG, DONT_CARE_REG), 
-                sib = .None,
+                sib = .None, 
+                force_rex = force_rex,
             );
         };
         
@@ -804,10 +798,10 @@ fn encode(e: *AmdState, i: *Qbe.Ins, w: bool, immediate_size: i64) EncodedArgs =
         dont_need_sib := no_disp && m.index == TMP(Amd64Reg.RSP) && m.base != TMP(Amd64Reg.RSP) && m.base != TMP(Amd64Reg.R12);
         if dont_need_sib {
             // this is a lot of hassle to save one byte
-            return(modrm = pack_modrm(mode, rb, rr0), rex = pack_rex_si(w, rr0, rb, DONT_CARE_REG), sib = .None);
+            return(modrm = pack_modrm(mode, rb, rr0), rex = pack_rex_si(w, rr0, rb, DONT_CARE_REG), sib = .None, force_rex = force_rex);
         };
        
-        return(disp_size = disp_size, disp = disp, modrm = pack_modrm(mode, .rsp, rr0), rex = pack_rex_si(w, rr0, rb, ri), sib = (Some = pack_sib(m.scale.to_scale(), ri, rb)));
+        return(disp_size = disp_size, disp = disp, modrm = pack_modrm(mode, .rsp, rr0), rex = pack_rex_si(w, rr0, rb, ri), sib = (Some = pack_sib(m.scale.to_scale(), ri, rb)), force_rex = force_rex);
     };
     
     if t1 == .RCon {
@@ -829,6 +823,7 @@ fn encode(e: *AmdState, i: *Qbe.Ins, w: bool, immediate_size: i64) EncodedArgs =
                 modrm = pack_modrm(.Indirect00, .rbp, rr0),  // disp is RIP relative
                 rex = pack_rex_si(w, rr0, DONT_CARE_REG, DONT_CARE_REG), 
                 sib = .None,
+                force_rex = force_rex,
             );
         };
         
@@ -843,6 +838,7 @@ fn encode(e: *AmdState, i: *Qbe.Ins, w: bool, immediate_size: i64) EncodedArgs =
                 modrm = pack_modrm(.Indirect00, .rsp, rr0),  // absolute address in disp
                 rex = pack_rex_si(w, rr0, .rbp, .rsp),             // ^
                 sib = (Some = pack_sib(1.to_scale(), .rsp, .rbp)), // ^
+                force_rex = force_rex,
             );
         };
     };
@@ -917,11 +913,10 @@ fn assemble(e: *AmdState, i: *Qbe.Ins) void = {
         i.arg&.items().swap(0, 1);
     };
     a0_old, a1_old := (i.arg&[0], i.arg&[1]);
-    // TODO: Kd needs to be more complicated because sometimes you need a different prefix?
-    w := i.cls() == .Kl || i.cls() == .Kd || i.op() == .storel || i.op() == .stored;
-    ext_index := int((i.arg&[1] == QbeNull || (rtype(i.arg&[1]) == .RCon && e.f.get_constant(i.arg&[1])[].type == .CBits)));
-    
     a0, a1 := (arg_t(e, i.arg&[0]), arg_t(e, i.arg&[1]));
+    
+    w := i.cls() == .Kl || i.cls() == .Kd || i.op() == .storel || i.op() == .stored;
+    ext_index := int((i.arg&[1] == QbeNull || (rtype(i.arg&[1]) == .RCon && e.f.get_constant(i.arg&[1])[].type == .CBits)));  
     
     xxx :: amd64_encoding_table();
     table, offsets := xxx;
@@ -949,7 +944,13 @@ fn assemble(e: *AmdState, i: *Qbe.Ins) void = {
         e.a&.push(prefix);
     };
     
-    if entry.ext != 0 {
+    if entry.ext != 0 {  // encoded as TMP number so ext=0 is RXX not RAX
+        // hack because it thinks the con is redundant but rcx is fixed
+        shift := i.op() == .shl || i.op() == .sar || i.op() == .shr;
+        if shift && rtype(i.arg&[ext_index]) == .RTmp && i.arg&[int(ext_index == 0)] == TMP(Amd64Reg.RCX) {
+            ext_index = int(ext_index == 0);
+            //i.arg&.items().swap(0, 1); // HACK
+        };
         // one argument is an immediate or fixed register and its slot in modrm holds an opcode extension instead. 
         i.arg&[ext_index] = TMP(@as(i64) entry.ext.zext()); 
         i.arg&.items().swap(0, 1); // HACK
@@ -1157,7 +1158,6 @@ fn amd64_encoding_table() Ty([]AmdEncodingEntry, []u16) = @amd64_encoding_data (
     (.extsb, 
         (.R, .M, (0x0F, 0xBE)), // MOVSX
     ),
-    // TODO: "1. In 64-bit mode, r/m8 can not be encoded to access the following byte registers if the REX prefix is used: AH, BH, CH, DH."
     (.extub, 
         (.R, .M, (0x0F, 0xB6)), // MOVZX
     ),

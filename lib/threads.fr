@@ -1,11 +1,25 @@
 
 // TODO: check size on linux
-PThread :: @struct(opaque: rawptr);
-PThreadAttr :: @struct(sig: i64, opaque: Array(56, u8));
+Thread :: @struct(opaque: rawptr);
+ThreadAttr :: @struct(sig: i64, opaque: Array(u8, 56));
+PMutex :: @struct(sig: i64, opaque: Array(u8, 56));
+PCond :: @struct(sig: i64, opaque: Array(u8, 40));
 
-fn start_thread(stack: []u8, callee: @FnPtr(userdata: rawptr) void, userdata: rawptr) Result(PThread, void) = {
-    out := PThread.zeroed();
-    attr := @uninitialized PThreadAttr;
+NEXT_THREAD_ID :: @static(i64) 1; // TODO: of all the things you'd want to be thread safe...
+
+fn start_thread($T: Type, callee: @FnPtr(userdata: *T) void, userdata: *T) Thread #generic = {
+    stack := page_allocator.alloc(u8, 1.shift_left(23));
+    callee := ptr_cast_unchecked(@type callee, @FnPtr(rawptr) void, callee&)[]; // TODO: make this less painful
+    xx := start_thread(stack, callee, T.raw_from_ptr(userdata));
+    or xx {
+        panic("failed to start thread")
+    }
+}
+
+fn start_thread(stack: []u8, callee: @FnPtr(userdata: rawptr) void, userdata: rawptr) Result(Thread, void) = {
+    @assert(query_context_is_implicit(), "tried to start thread but compiled using static context which is not thread safe.");
+    out := Thread.zeroed();
+    attr := @uninitialized ThreadAttr;
     
     // TODO: put it at the end and offset forward to give the thread less memory so the stack grows left away from the context. instead of left towards the context. 
     // TODO: do we trust it to not stomp in my stuff in between? 
@@ -13,26 +27,45 @@ fn start_thread(stack: []u8, callee: @FnPtr(userdata: rawptr) void, userdata: ra
     context_dest := stack.slice(16, 16 + size_of_dynamic_context);
     context_dest.copy_from(context_src);
     ptr_cast_unchecked(u8, rawptr, stack.ptr)[] = userdata;
-    ptr_cast_unchecked(u8, @type callee, stack.ptr).offset(1)[] = callee;
+    ptr_cast_unchecked(u8, @type callee, stack.ptr.offset(8))[] = callee;
+    reserved := 16 + size_of_dynamic_context;
+    stack_low := stack.ptr.offset(reserved);
+    @assert_eq(u8.int_from_ptr(stack_low).mod(16), 0, "start_thread unaligned stack");
+    
+    new_context := u8.raw_from_ptr(stack.ptr.offset(16));
+    // TODO: cas
+    DefaultContext.ptr_from_raw(new_context)[].thread_index = NEXT_THREAD_ID[];
+    NEXT_THREAD_ID[] += 1;
     
     // TODO: check PTHREAD_STACK_MIN
     pthread_attr_init(attr&); // TODO: check result
-    panic("TODO: i think it wants the lowest addr. ie. the one to set as the stack pointer");
-    pthread_attr_setstack(addr&, stack);
-    ok := pthread_create(out&, attr&, callee, u8.raw_from_ptr(stack.ptr.offset(16)));
+    pthread_attr_setstack(attr&, stack_low, stack.len - reserved);  // TODO: check result
+    ok := pthread_create(out&, attr&, franca_runtime_init_thread, new_context);
     if ok.is_ok() {
-        return(Ok = outp);
+        return(Ok = out);
     };
     .Err
 }
 
 franca_runtime_init_thread :: fn(franca_userdata: rawptr) void = {
-    userdata := ptr_cast_unchecked(u8, rawptr, stack.ptr).offset(-2)[];
-    callee := ptr_cast_unchecked(u8, @FnPtr(userdata: rawptr) void, stack.ptr).offset(-1)[];
+    if(!query_context_is_implicit(), => abort());
+    userdata := ptr_cast_unchecked(u8, rawptr, franca_userdata.offset(-16))[];
+    callee := ptr_cast_unchecked(u8, @FnPtr(userdata: rawptr) void, franca_userdata.offset(-8))[];
     set_dynamic_context(franca_userdata);
+    t: ArenaAlloc = init(page_allocator, 1.shift_left(20));
+    c := context(DefaultContext);
+    c.temporary_allocator = t&;
     callee(userdata);
+    t&.deinit();
+    // TODO: should we have them pass us the allocator so we can free our stack? 
 };
 
 fn pthread_attr_init(out: *ThreadAttr) voidResult #libc;
 fn pthread_create(out: *Thread, attr: *ThreadAttr, callee: @FnPtr(userdata: rawptr) void, userdata: rawptr) voidResult #libc #threads;
-fn pthread_attr_setstack(attr: *ThreadAttr, stack: []u8) voidResult #libc;
+fn pthread_attr_setstack(attr: *ThreadAttr, ptr: *u8, len: i64) voidResult #libc;
+fn pthread_mutex_init(mutex: *PMutex, todo_attr_pass_zero_for_now: i64) void #libc;
+fn pthread_cond_signal(c: *PCond) void #libc;
+fn pthread_cond_wait(c: *PCond, mutex: *PMutex) void #libc;
+fn pthread_cond_init(c: *PCond, todo_attr_pass_zero_for_now: i64) void #libc;
+fn pthread_mutex_unlock(m: *PMutex) void #libc;
+fn pthread_mutex_lock(m: *PMutex) void #libc;

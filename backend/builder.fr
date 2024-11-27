@@ -12,7 +12,16 @@ QbeBuilder :: @struct(
     leaf := true,  // TODO: debug assert somewhere that you don't do a call in a leaf. for now we trust the frontend to remember to unset this. 
     aggragate_return_index: ?i64,
     entry: *CodegenEntry,
+    shared: *CodegenShared,
+    idx := 0,
+);
+
+CodegenShared :: @struct(
     queue: []CodegenEntry,
+    no_more_functions := false,
+    no_more_codegen := false,
+    cond: PCond,
+    mutex: PMutex,
 );
 
 CodegenState :: @enum(i64) (WaitingForBouba, UsedByBouba, WaitingForKiki, UsedByKiki);
@@ -21,6 +30,8 @@ CodegenEntry :: @struct(
     arena: ArenaAlloc, 
     f: *Qbe.Fn,
     state: CodegenState,  // :ThreadSafety use cas or whatever
+    logging := "",
+    id: i64,
 );
 
 QbeTerminator :: @struct(
@@ -36,19 +47,26 @@ WipBlock :: @struct(
 );
 
 fn init(gpa: Alloc, globals: *QbeModule) QbeBuilder = {
-    q := gpa.alloc(CodegenEntry, 15); // :Leak
+    q := gpa.alloc(CodegenEntry, codegen_queue_size); // :Leak
+    shared := gpa.box(CodegenShared);  // :leak
+    shared.queue = q;
+    @if(use_threads) {
+        pthread_mutex_init(shared.mutex&, 0);
+        pthread_cond_init(shared.cond&, 0);
+    };
     b: QbeBuilder = (
         globals = globals,
         temporaries = list(gpa),
         constants = list(gpa),
         blocks = list(gpa),
         aggragate_return_index = .None,
-        queue = q, // :leak
+        shared = shared, 
         entry = q.index(0),
     );
     // TODO: one allocation for all the initial slices.
-    each b.queue { entry |
+    enumerate b.shared.queue { i, entry |
         entry.arena = init(gpa, macos_page_size);
+        entry.id = i;
     };
     b&.clear();
     b
@@ -56,10 +74,21 @@ fn init(gpa: Alloc, globals: *QbeModule) QbeBuilder = {
 
 FIXED_CONST_COUNT :: 2;
 fn clear(b: *QbeBuilder) void = {
-    b.entry = b.acquire(true);
+    if true {
+        break :: local_return;
+        loop {
+            if b.shared.queue.acquire(true, b.idx&) { entry |
+                b.entry = entry;
+                break();
+            };
+            usleep(1000);  // most of the time the backend is not the bottle neck (because my frontend is so dumb). 
+                           // currently it falls behind ~11 times during self compile. -- Nov 26
+        };
+    };
+    
     b.entry.arena&.reset_retaining_capacity();
     a := b.entry.arena&.borrow();
-    b.entry.f = Qbe.Fn.ptr_from_int(0);
+    @debug_assert(b.entry.f.is_null(), "f is set");
     
     b.constants = list(a);
     b.temporaries = list(a);
@@ -71,20 +100,20 @@ fn clear(b: *QbeBuilder) void = {
     ::assert_eq(FIXED_CONST_COUNT, 2);
 }
 
-fn acquire(self: *QbeBuilder, i_am_bouba: bool) *CodegenEntry = {
+fn acquire(queue: []CodegenEntry, i_am_bouba: bool, idx: *i64) ?*CodegenEntry = {
     ::enum(CodegenState);
     waiting: CodegenState = @if(i_am_bouba, .WaitingForBouba, .WaitingForKiki);
     used: CodegenState = @if(i_am_bouba, .UsedByBouba, .UsedByKiki);
-    loop {
-        each self.queue { entry | 
-            if entry.state == waiting {
-                entry.state = used;
-                // don't reset the arena here, the other guy might want it.
-                return(entry);
-            };
+    range(0, codegen_queue_size) { _ |
+        idx[] = idx[].add(1).mod(codegen_queue_size);
+        entry := queue.index(idx[]);
+        if entry.state == waiting {
+            entry.state = used;
+            // don't reset the arena here, the other guy might want it.
+            return(Some = entry);
         };
-        panic("not found!");
-    }
+    };
+    .None
 }
 
 fn release(entry: *CodegenEntry, i_am_bouba: bool) void = {
@@ -264,80 +293,80 @@ fn end_block(b: *QbeBuilder, bb: BbId, jmp: QbeTerminator) void = {
 }
 
 fn build(b: *QbeBuilder, name: Str) *CodegenEntry = {
-	m := b.globals;
-    old := context(DefaultContext)[].temporary_allocator;
-    context(DefaultContext)[].temporary_allocator = b.entry.arena&;
-    a := b.entry.arena&.borrow();
-    b.entry.f = a.box_zeroed(Qbe.Fn);
-    curf := b.entry.f;
-    curf.default_init(m); 
-	// curf.rpo = 0; filled in by later pass
-	// curf.vararg = false; // TODO
-    // TODO: dont copy :SLOW
-    curf.ntmp += b.temporaries.len.intcast();
-    curf.tmp&.grow(curf.ntmp.zext());
-    dest := curf.tmp.slice(Qbe.Tmp0, b.temporaries.len + Qbe.Tmp0);
-    dest.copy_from(b.temporaries.items());
-    curf.ncon = b.constants.len.intcast();
-    curf.con = new_copy(b.constants.items());
-    @debug_assert_eq(curf.nmem, 0);
-    //@println("% temps. % blocks.", curf.ntmp.zext() - Qbe.Tmp0, b.blocks.len);
-    
-	curf.leaf = b.leaf;
-    curf.lnk = b.lnk;
-    curf.lnk.id = b.globals.intern(name);
-	curf.retty = (b.aggragate_return_index || @as(i64) -1).intcast();
-	
-    if b.blocks.len == 0 {
-        panic("empty function");
-    };
-    if name.len > 80 {
-        panic("TODO: function name cannot be longer than 80 characters");
-    };
-    name_dest := curf.name&.items().slice(0, name.len);
-    name_dest.copy_from(name);
-    
-    qbe_blocks: List(Qbe.Blk) = list(b.blocks.len, a); // stable!
-	curf.nblk = b.blocks.len.intcast();
-	
-    curf.start = qbe_blocks.index_unchecked(0);
-    enumerate b.blocks { i, wip |
-        if wip.jmp.type == .Jxxx {
-            wip.jmp.type = .hlt;  // TODO: report error and force the front end to be precise and not have empty blocks. 
-        };
-        qbe_blocks&.push(Qbe.Blk.zeroed());
-        block := qbe_blocks[i]&;
-        block.id = i.intcast(); // TODO: probably don't need this because cfg sets it? but qbe parser does it so just being safe for now.  
-    
+    entry := zeroed(*CodegenEntry);
+    push_dynamic_context {
+    	m := b.globals;
+        context(DefaultContext)[].temporary_allocator = b.entry.arena&;
+        a := b.entry.arena&.borrow();
+        b.entry.f = a.box_zeroed(Qbe.Fn);
+        curf := b.entry.f;
+        curf.default_init(m); 
+    	// curf.rpo = 0; filled in by later pass
+    	// curf.vararg = false; // TODO
         // TODO: dont copy :SLOW
-        idup(block, wip.insts.maybe_uninit.ptr, wip.insts.len);
-        if i == b.blocks.len - 1 {
-            block.link = Qbe.Blk.ptr_from_int(0);
-        } else {
-            block.link = qbe_blocks.index_unchecked(i + 1);
+        curf.ntmp += b.temporaries.len.intcast();
+        curf.tmp&.grow(curf.ntmp.zext());
+        dest := curf.tmp.slice(Qbe.Tmp0, b.temporaries.len + Qbe.Tmp0);
+        dest.copy_from(b.temporaries.items());
+        curf.ncon = b.constants.len.intcast();
+        curf.con = new_copy(b.constants.items());
+        @debug_assert_eq(curf.nmem, 0);
+        //@println("% temps. % blocks.", curf.ntmp.zext() - Qbe.Tmp0, b.blocks.len);
+        
+    	curf.leaf = b.leaf;
+        curf.lnk = b.lnk;
+        curf.lnk.id = b.globals.intern(name);
+    	curf.retty = (b.aggragate_return_index || @as(i64) -1).intcast();
+    	
+        if b.blocks.len == 0 {
+            panic("empty function");
         };
-        block.jmp.type = wip.jmp.type;
-        block.jmp.arg = wip.jmp.arg;
-        if wip.jmp.target1.id != 0 {
-            block.s1 = qbe_blocks.index_unchecked(wip.jmp.target1.id.zext());
+        if name.len > 80 {
+            panic("TODO: function name cannot be longer than 80 characters");
         };
-        if wip.jmp.target2.id != 0 {
-            block.s2 = qbe_blocks.index_unchecked(wip.jmp.target2.id.zext());
+        name_dest := curf.name&.items().slice(0, name.len);
+        name_dest.copy_from(name);
+        
+        qbe_blocks: List(Qbe.Blk) = list(b.blocks.len, a); // stable!
+    	curf.nblk = b.blocks.len.intcast();
+    	
+        curf.start = qbe_blocks.index_unchecked(0);
+        enumerate b.blocks { i, wip |
+            if wip.jmp.type == .Jxxx {
+                wip.jmp.type = .hlt;  // TODO: report error and force the front end to be precise and not have empty blocks. 
+            };
+            qbe_blocks&.push(Qbe.Blk.zeroed());
+            block := qbe_blocks[i]&;
+            block.id = i.intcast(); // TODO: probably don't need this because cfg sets it? but qbe parser does it so just being safe for now.  
+        
+            // TODO: dont copy :SLOW
+            idup(block, wip.insts.maybe_uninit.ptr, wip.insts.len);
+            if i == b.blocks.len - 1 {
+                block.link = Qbe.Blk.ptr_from_int(0);
+            } else {
+                block.link = qbe_blocks.index_unchecked(i + 1);
+            };
+            block.jmp.type = wip.jmp.type;
+            block.jmp.arg = wip.jmp.arg;
+            if wip.jmp.target1.id != 0 {
+                block.s1 = qbe_blocks.index_unchecked(wip.jmp.target1.id.zext());
+            };
+            if wip.jmp.target2.id != 0 {
+                block.s2 = qbe_blocks.index_unchecked(wip.jmp.target2.id.zext());
+            };
+            
+            // TODO: don't be fucking with strings, only do this in debug mode.
+            name: List(u8) = (maybe_uninit = block.name&.items(), len = 0, gpa = panicking_allocator);
+            @fmt(name&, "b%", i);
         };
         
-        // TODO: don't be fucking with strings, only do this in debug mode.
-        name: List(u8) = (maybe_uninit = block.name&.items(), len = 0, gpa = panicking_allocator);
-        @fmt(name&, "b%", i);
+        if b.globals.debug["P".char()] {
+            write(b.globals.debug_out, "\n> After parsing:\n");
+            printfn(curf, b.globals.debug_out);
+        };
+        entry = b.entry;
+        b.clear();
     };
-    
-    if b.globals.debug["P".char()] {
-        write(b.globals.debug_out, "\n> After parsing:\n");
-        printfn(curf, b.globals.debug_out);
-    };
-    context(DefaultContext)[].temporary_allocator = old;
-    entry := b.entry;
-	b.entry.release(true);
-    b.clear();
     entry
 }
 

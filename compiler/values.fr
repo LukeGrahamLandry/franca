@@ -863,7 +863,7 @@ simple_x86 :: """
     mov rax, rdx  // env
     
     push 0 // for stack alignment (it doesnt matter on mac (?) but targetting linux it decides to use 128bit loads) tho maybe mac cares a little bit cause there was confusion with needing to save rbp... 
-    mov rax, rdi
+    mov r10, rdi  // callee
     mov r11, rsi
     mov rdi, [r11]
     mov rsi, [r11 + 8]
@@ -874,13 +874,49 @@ simple_x86 :: """
     push [r11 + 48]
     push [r11 + 56]
     push [r11 + 64] // want to always allow 8 args but we might have a struct return pointer as a fake first arg. 
-    call rax
+    call r10
     // add sp, 32 // if not saving in rbp, i have to fix the stack pointer
     
     mov rsp, rbp
     pop rbp
     ret
 """;
+
+fn arg8ret1(fnptr: i64, first_of_eight_args: *i64, env: rawptr) i64 #asm #x86_bytes #c_call = simple_x86_bytes;
+fn arg8ret2(fnptr: i64, first_of_eight_args: *i64, env: rawptr) IntPair #asm #x86_bytes #c_call = simple_x86_bytes;
+fn arg8ret_struct(fnptr: i64, first_of_eight_args: *i64, env: rawptr) void #asm #x86_bytes #c_call = simple_x86_bytes;
+
+fn arg8ret1_all_floats(fnptr: i64, first_of_eight_args: *i64, env: rawptr) i64 #asm #x86_bytes #c_call = (fn(out) = @asm_x64(
+    PrimaryOp.Int3,  PrimaryOp.Int3, // TODO
+) out);
+
+fn simple_x86_bytes(out: *List(u8)) void = {
+    @asm_x64(
+        encode_op_reg(PrimaryOp.PushBase, X86Reg.rbp),
+        encode_bin(PrimaryOp.MovReg, X86Reg.rbp, X86Reg.rsp),
+        encode_bin(PrimaryOp.MovReg, X86Reg.rax, X86Reg.rdx),  // env
+        
+        encode_op_reg(PrimaryOp.PushBase, X86Reg.rax), // junk
+        encode_bin(PrimaryOp.MovReg, X86Reg.r10, X86Reg.rdi),
+        encode_bin(PrimaryOp.MovReg, X86Reg.r11, X86Reg.rsi),
+        encode_non_sp_offset(PrimaryOp.MovRegLoad, X86Reg.rdi, X86Reg.r11, 0),
+        encode_non_sp_offset(PrimaryOp.MovRegLoad, X86Reg.rsi, X86Reg.r11, 8),
+        encode_non_sp_offset(PrimaryOp.MovRegLoad, X86Reg.rdx, X86Reg.r11, 16),
+        encode_non_sp_offset(PrimaryOp.MovRegLoad, X86Reg.rcx, X86Reg.r11, 24),
+        encode_non_sp_offset(PrimaryOp.MovRegLoad, X86Reg.r8, X86Reg.r11, 32),
+        encode_non_sp_offset(PrimaryOp.MovRegLoad, X86Reg.r9, X86Reg.r11, 40),
+        
+        // push [r11 + 48]     FF /6	PUSH r/m64
+        encode_non_sp_offset(@as(PrimaryOp) 0xFF, X86Reg.r11, @as(X86Reg) 0b0110, 48),
+        encode_non_sp_offset(@as(PrimaryOp) 0xFF, X86Reg.r11, @as(X86Reg) 0b0110, 56),
+        encode_non_sp_offset(@as(PrimaryOp) 0xFF, X86Reg.r11, @as(X86Reg) 0b0110, 64),
+        encode_call_reg(ModrmMode.Direct, X86Reg.r10),
+        
+        encode_bin(PrimaryOp.MovReg, X86Reg.rsp, X86Reg.rbp),
+        encode_op_reg(PrimaryOp.PopBase, X86Reg.rbp),
+        PrimaryOp.Ret,
+    ) out;
+}
 
 // TODO: decide if I need to bring back zero_padding. 
 //       I used to do it on from_values/to_values because i blindly use the bytes of Values as hashmap keys for deduplicating 

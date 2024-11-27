@@ -1,3 +1,40 @@
+## (Nov 26)
+
+yikes, this was gonna suck when i got around to trying ctx=implicit.
+
+```
+// [snip]
+mov rax, rdx  // env
+// [snip]
+mov rax, rdi  // callee
+// [snip]
+call rax
+```
+
+using arm compiler to run qbe-exe-x64
+
+- fail 78
+- lots of Safety Check Failed, comparisons messed up? fixed w=true on the setcc of xtest becuase you can't encode some registers that way. 73.
+- w=false extub, 72
+
+ahh i have reading comprehension problems. i saw:
+
+```
+1. In 64-bit mode, r/m8 can not be encoded to access the following byte registers if the REX prefix is used: AH, BH, CH, DH.
+```
+
+and interpreted that as "don't use the REX prefix when accessing a/b/c/d as a byte",
+but it means the opposite: "if you don't use the REX prefix, you get bits 8-16 which is never what you want."
+AH means bits 8-16 of RAX, AL means bits 0-8 of RAX.
+
+better phrasing elsewhere:
+
+```
+1: When any REX prefix is used, SPL, BPL, SIL and DIL are used. Otherwise, without any REX prefix AH, CH, DH and BH are used.
+```
+
+- fail 17
+
 ## (Nov 23)
 
 - static dynamic_context on llvm (oxymoronic)

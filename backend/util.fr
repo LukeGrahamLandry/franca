@@ -449,7 +449,6 @@ fn vnew(len: i64, esz: i64, pool: Qbe.Pool) rawptr = {
     while => cap < len {
         cap *= 2;
     };
-    //@println("% %", cap, esz);
     a := @if(pool == .PLong, libc_allocator, temp());
     v := a.alloc_zeroed(i64, (cap * esz + QListHeader.size_of() + 7) / 8);  // :HardcodeAlloc
     @debug_assert(!v.ptr.is_null(), "alloc failed?????");
@@ -571,7 +570,7 @@ fn intern(m: *QbeModule, s: Str) u32 = {
         };
         intern :: fn(_0: CStr) u32 #import("qbe");
         // TODO: this is a waste of time that lets me easily use thier parser. 
-        return(intern(s));
+        return(intern(@as(CStr) (ptr = slow.ptr)));
     };
     
     m.my_intern(s)
@@ -581,11 +580,20 @@ QLIST_DOUBLE_FREE :: 0x69696969;
 fn my_intern(m: *QbeModule, s: Str) u32 = {
     h := hash(s).bit_and(IMask.trunc());
     b := m.symbols.index(h.zext());
+    // :ThreadSafety
     n := b.n;
-    ok := n.bit_and(LOCKED_BASE) == 0;
-    @debug_assert(ok, "Tried to intern to locked bucket");  // TODO: spin once we have threads.
+    @if(use_threads) {
+        locked_by_me := LOCKED_BASE.bit_or(context(DefaultContext)[].thread_index.trunc());
+        @debug_assert(n != locked_by_me, "already locked by this thread");
+        while => n.bit_and(LOCKED_BASE) != 0 {
+            usleep(1);
+            n = b.n;
+        };
+        b.n = locked_by_me;
+    };
     range(0, n.zext()) { i |
         if s == b.data[i].name {
+            b.n = n;
             return(h + i.trunc().shift_left(IBits));
         }
     };
@@ -621,19 +629,27 @@ LOCKED_BASE :: 0xF0000000;
 fn use_symbol(m: *QbeModule, id: u32, $body: @Fn(s: *SymbolInfo) void) void = {
     @if(LINK_QBE_C) {
         // TODO: this is a waste of time that lets me easily use thier parser. 
-        str :: fn(_0: u32) CStr #import("qbe");
-        s := str(id);
-        id = m.my_intern(s);
+        
+        s := { str :: fn(_0: u32) CStr #import("qbe"); str(id) };
+        id = m.my_intern(@as(Str) (ptr = s.ptr, len = s.slow_len()));
     };
     ::ptr_utils(QbeModule);
     @debug_assert(!m.is_null(), "null module???");
     bid: i64 = id.bit_and(IMask).zext();
     bucket := m.symbols[bid]&;
+    
     old := bucket.n;
-    locked_by_me := LOCKED_BASE.bit_or(context(DefaultContext)[].thread_index.trunc());
-    bucket.n = locked_by_me;
-    ok := old == locked_by_me || old.bit_and(LOCKED_BASE) == 0;
-    @debug_assert(ok, "Tried to access locked bucket");  // TODO: spin once we have threads.
+    @if(use_threads) {
+        // :ThreadSafety
+        thread := context(DefaultContext)[].thread_index;
+        locked_by_me := LOCKED_BASE.bit_or(thread.trunc());
+        @debug_assert(old != locked_by_me, "use_symbol but already locked by this thread id=%, thread=%", id, thread);
+        while => old.bit_and(LOCKED_BASE) != 0 {
+            usleep(1);
+            old = bucket.n;
+        };
+        bucket.n = locked_by_me;
+    };
     idx := id.shift_right_logical(IBits);
     symbol := bucket.data.index(idx.zext());
     body(symbol);
@@ -644,9 +660,8 @@ fn use_symbol(m: *QbeModule, id: u32, $body: @Fn(s: *SymbolInfo) void) void = {
 fn get_symbol_info(m: *QbeModule, id: u32) *SymbolInfo = {
     @if(LINK_QBE_C) {
         // TODO: this is a waste of time that lets me easily use thier parser. 
-        str :: fn(_0: u32) CStr #import("qbe");
-        s := str(id);
-        id = m.my_intern(s);
+        s := { str :: fn(_0: u32) CStr #import("qbe"); str(id) };
+        id = m.my_intern(@as(Str) (ptr = s.ptr, len = s.slow_len()));
     };
     bid: i64 = id.bit_and(IMask).zext();
     bucket := m.symbols[bid]&;
