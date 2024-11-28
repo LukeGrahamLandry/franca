@@ -216,38 +216,123 @@ fn output_macho(m: *QbeModule) List([]u8) = {
         };
     };
     
-    chained := emit_linkedit(e&);
-    chunks&.push(chained); // TODO: is it the rules that this be the last thing in the file?
-
     if e.m.goal.type == .Exe {
         macho_load_dylinker(e.commands&, e.command_count&, "/usr/lib/dyld");
-        macho_main_entry_point(m, e.commands&, e.command_count&);
+        
+        // Ask it to call us!
+        cmd := load_command(e&, .MainEntryPoint, MainEntryPoint);
+        symbol := m.get_symbol_info(m.intern("main"));
+        assert(symbol.kind == .Local, "no exported main function?");
+        // offset is from the start of interesting virtual memory? 
+        cmd[] = (entry_offset = symbol.offset.bitcast(), stack_size = 0);  // :CodeIsFirst its fine to change this, you just have to do the math here. 
+        @debug_assert_ge(symbol.offset, COMMANDS_SIZE_GUESS + SIZE_OF_STUBS);
     };
     if e.m.goal.type == .Dynamic {
         macho_load_dylib(e.commands&, e.command_count&, .LinkLibrarySelf, "foo");
     };
-    if e.m.goal.type == .Exe || e.m.goal.type == .Dynamic {
+    chained := u8.list(CHAINED_SIZE_GUESS, temp());
+    
+    // layout is [commands, waste, sections, chained, relocations?]
+    // only relinkable needs relocations and only loadable needs a signeture at the end of chained. 
+    
+    m := e.m;
+    // note: virtual_segment_offset is only good when MachoExe because we skip segments for MachoRelocatable. 
+    if e.m.goal.type == .Exe || m.goal.type == .Dynamic {
         // TODO: don't assume you want libc. but on macos you always do. 
         macho_load_dylib(e.commands&, e.command_count&, .LinkLibrary, "/usr/lib/libSystem.B.dylib");
+        
+        emit_exe_fixups(e&, chained&);
+        zero_pad_len_to_align(chained&, 16);
+        
+        // this is a bit painful because the thing you're signing includes the offset + size of the signeture itself. 
+        // so we need to reserve this space up front and fill it in later. 
+        
+        // We want this to be the last thing in the file so the signeture can go at the end? is this the rules? 
+        //zero_pad_len_to_align(chained&, macos_page_size);  // WASTE
+        
+        
+        load_codesign := load_command(e&, .CodeSigneture, LinkEditBlob);
+        
+        codesign_ident := "foo";  // TODO: does need to be something specific?
+        signeture_size := CodeDirectory.size_of() + (32 * (e.file_offset + chained.len) / macos_page_size) + codesign_ident.len + 1 + 8 + SuperBlob.size_of();
+        chained&.reserve(signeture_size);
+        codesign_output_bytes := chained.maybe_uninit.subslice(chained.len, signeture_size);
+        load_codesign.offset = trunc(e.file_offset + chained.len);
+        load_codesign.size = codesign_output_bytes.len.trunc();
+        
+        chunks&.push(chained.items());
+        
+        chained.len += codesign_output_bytes.len;
+        
+        // You are required to tell it to load __LINKEDIT even tho we don't use it for anything directly. 
+        load_command(e&, .SegmentLoad, SegmentLoad)[] = (
+            name = str_to_16_byte_value("__LINKEDIT"),
+            address_size = chained.len.bitcast(),
+            size = chained.len.bitcast(),
+            max_prot = 1,
+            init_prot = 1,
+            file_offset = e.file_offset.bitcast(),
+            address = e.virtual_offset.bitcast(),
+            section_count = 0,
+            flag = 0,
+        );
+        
+        e.file_offset += chained.len;
+        seal_load_commands(e&, macho_header);
+        
+        write_adhoc_signature(
+            exec_seg_base = base_file_offset[1],
+            exec_seg_limit = segments[0].file_size,
+            file_size = e.file_offset + chained.len - signeture_size, // :unsure
+            input_chunks = chunks.items(),
+            dylib = m.goal.type == .Dynamic,
+            ident = codesign_ident,
+            output_buf = codesign_output_bytes,
+        );
+        chunks&.push(codesign_output_bytes);
+        
+        
+    } else {
+        @debug_assert(e.m.goal.type == .Relocatable);
+        emit_reloc_symbols(e&, chained&);
+        
+        seal_load_commands(e&, macho_header);
+            
+        e.file_offset += chained.len;
+        chunks&.push(chained.items());
+        
+        enumerate e.relocations { i, r | 
+            if r.len != 0 {
+                e.load_commands[i].relocations_count = trunc(r.len / size_of_one_relocation);
+                e.load_commands[i].relocations_file_offset = e.file_offset.trunc();
+                chunks&.push(r.items());
+                e.file_offset += r.len;
+            }
+        };
     };
     
-    enumerate e.relocations { i, r | 
-        if r.len != 0 {
-            e.load_commands[i].relocations_count = trunc(r.len / size_of_one_relocation);
-            e.load_commands[i].relocations_file_offset = e.file_offset.trunc();
-            chunks&.push(r.items());
-            e.file_offset += r.len;
-        }
-    };
-    
+    @assert_le(chained.len, CHAINED_SIZE_GUESS, "resized and now the header pointer is junk"); 
+    @debug_assert_eq(e.commands.len, COMMANDS_SIZE_GUESS);
+    chunks
+}
+
+fn seal_load_commands(e: *EmitMacho, macho_header: *MachoHeader) void = {
     macho_header.commands_size = (e.commands.len - MachoHeader.size_of()).trunc();
+    macho_header.commands_count = e.command_count.trunc();
     e.commands&.zero_pad_to_align(macos_page_size);
     // :cantreallocatebutgivegooderrormessage
     // now we want exact match because we put it on the front of the text section for some reason who knows idk man. 
     @assert_eq(e.commands.len, COMMANDS_SIZE_GUESS, "we guessed wrong so the array resized and all the pointers are junk");
-    macho_header.commands_count = e.command_count.trunc();
-    
-    chunks
+}
+
+fn load_command(e: *EmitMacho, cmd: LoadCommand, $T: Type) *T #generic = {
+    start := e.commands.len;
+    h := e.commands&.reserve_type(LoadCommandHeader);
+    h.type = cmd.raw();
+    e.command_count += 1;
+    cmd := e.commands&.reserve_type(T);
+    h.size = trunc(e.commands.len - start);
+    cmd
 }
 
 EmitMacho :: @struct(
@@ -261,56 +346,10 @@ EmitMacho :: @struct(
     virtual_offset := 0,
     offset_to_csis: []u32 = empty(),
     csis_by_segment: []*ChainedStartsInSegment = empty(),
-    starts_offset := 0
+    starts_offset := 0,
 );
 
 CHAINED_SIZE_GUESS :: 2000000;  // TODO: prescan to caluclate?
-
-fn emit_linkedit(e: *EmitMacho) []u8 #inline = {
-    m := e.m;
-    link_edit_load_command := @if(e.m.goal.type == .Exe || m.goal.type == .Dynamic , { 
-        start := e.commands.len;
-        linkedit_load_header := e.commands&.reserve_type(LoadCommandHeader);
-        linkedit_load_header.type = LoadCommand.SegmentLoad.raw();
-        e.command_count += 1;
-        link_edit_load_command := e.commands&.reserve_type(SegmentLoad);
-        linkedit_load_header.size = trunc(e.commands.len - start);
-        link_edit_load_command
-    }, zeroed(*SegmentLoad));
-    
-    chained := u8.list(CHAINED_SIZE_GUESS, temp());
-    // note: virtual_segment_offset is only good when MachoExe because we skip segments for MachoRelocatable. 
-    if e.m.goal.type == .Exe || m.goal.type == .Dynamic {
-        emit_exe_fixups(e, chained&);
-    };
-    
-    //
-    // now there's still more stuff that goes in __linkedit 
-    //
-    
-    if e.m.goal.type == .Relocatable {
-        emit_reloc_symbols(e, chained&);
-    };
-    
-    @assert_le(chained.len, CHAINED_SIZE_GUESS, "resized and now the header pointer is junk"); 
-    
-    if e.m.goal.type == .Exe || m.goal.type == .Dynamic {
-        // TODO: do i really need to have it load __LINKEDIT? its not used except by other commands that reference it. 
-        // TODO: can i just reserve_type here or do they all have to be at the beginning?
-        //       theres no reason it would matter by lief.parse doesn't like it: "Can't find the segment associated with the LC_DYLD_CHAINED_FIXUPS payload"
-        cmd := link_edit_load_command;
-        cmd[] = SegmentLoad.zeroed();
-        cmd.name = str_to_16_byte_value("__LINKEDIT");
-        cmd.address_size = chained.len.bitcast();
-        cmd.size = chained.len.bitcast();
-        cmd.max_prot = 1;
-        cmd.init_prot = 1;
-        cmd.file_offset = e.file_offset.bitcast();
-        cmd.address = e.virtual_offset.bitcast();
-    };
-    e.file_offset += chained.len;
-    chained.items()
-};
 
 fn emit_exe_fixups(e: *EmitMacho, chained: *List(u8)) void #inline = {
     m := e.m;
@@ -395,31 +434,22 @@ fn emit_exe_fixups(e: *EmitMacho, chained: *List(u8)) void #inline = {
     chained_size := chained.len;
     
     // this must include the part before symbol table or llvm-objcopy complains bout them overlapping
-    start := e.commands.len;
-    h := e.commands&.reserve_type(LoadCommandHeader);
-    h.type = LoadCommand.ChainedFixups.raw();
-    e.command_count += 1;
-    cmd := e.commands&.reserve_type(LinkEditBlob);
+    cmd := load_command(e, .ChainedFixups, LinkEditBlob);
     // TODO: using file_offset way down here feels a bit fragile. 
     cmd[] = (offset = e.file_offset.trunc(), size = chained_size.trunc());  // :CodeIsFirst its fine to change this, you just have to do the math here. 
-    h.size = trunc(e.commands.len - start);
-    
+
     if e.m.goal.type == .Dynamic {
+        panic("TODO: dylib export");
         new_file_offset := e.file_offset + chained_size;
         // Now we need to tell it about our exports
         // TODO: do i need to give it linkeditsymboltable? rn i only do that for relocatable objects. 
         
         for e.m.exports { export_id | 
-            // TODO
+            panic("TODO: dylib export");
         };
         
-        start := e.commands.len;
-        h := e.commands&.reserve_type(LoadCommandHeader);
-        h.type = LoadCommand.ChainedFixups.raw();
-        e.command_count += 1;
-        cmd := e.commands&.reserve_type(LinkEditBlob);
+        cmd := load_command(e, .ExportsTrie, LinkEditBlob);
         cmd[] = (offset = new_file_offset.trunc(), size = (chained.len - chained_size).trunc());  // :CodeIsFirst its fine to change this, you just have to do the math here. 
-        h.size = trunc(e.commands.len - start);
     };
 }
 
@@ -519,11 +549,7 @@ fn emplace_fixup(e: *EmitMacho, fix: *FixP, next_encoded: i64, import_count: i64
     
 fn emit_reloc_symbols(e: *EmitMacho, chained: *List(u8)) void #inline = {
     m := e.m;
-    start := e.commands.len;
-    h := e.commands&.reserve_type(LoadCommandHeader);
-    h.type = LoadCommand.LinkEditSymbolInfo.raw();
-    e.command_count += 1;
-    cmd := e.commands&.reserve_type(LinkEditSymbolInfo);
+    cmd := load_command(e, .LinkEditSymbolInfo, LinkEditSymbolInfo);
     cmd[] = LinkEditSymbolInfo.zeroed();
     // TODO: output local symbols for debugging (in exes as well). 
     cmd.local_symbol_count = trunc(1 + e.m.local_needs_reloc.len); // I think you always need index 0 to be junk.
@@ -532,13 +558,8 @@ fn emit_reloc_symbols(e: *EmitMacho, chained: *List(u8)) void #inline = {
     cmd.undefined_symbol_index = cmd.external_symbol_index + cmd.external_symbol_count; // must be set even if count is zero or lld complains 
     cmd.undefined_symbol_count = e.m.imports.len.trunc();
     // TODO: we are going to need undefined symbols for imports but haven't got that far yet. 
-    h.size = trunc(e.commands.len - start);
     
-    start := e.commands.len;
-    h := e.commands&.reserve_type(LoadCommandHeader);
-    h.type = LoadCommand.LinkEditSymbolTable.raw();
-    e.command_count += 1;
-    syms_cmd := e.commands&.reserve_type(LinkEditSymbolTable);
+    syms_cmd := load_command(e, .LinkEditSymbolTable, LinkEditSymbolTable);
     syms_cmd[] = LinkEditSymbolTable.zeroed();
     syms_cmd.symbol_count = cmd.external_symbol_count + cmd.local_symbol_count + cmd.undefined_symbol_count;
     // the data for those goes in __LINKEDIT
@@ -546,7 +567,6 @@ fn emit_reloc_symbols(e: *EmitMacho, chained: *List(u8)) void #inline = {
     syms_cmd.symbols_offset = trunc(e.file_offset + chained.len);
     size_of_symbols: i64 = syms_cmd.symbol_count.zext() * size_of(SymbolEntry);
     syms_cmd.strings_offset = syms_cmd.symbols_offset + trunc(size_of_symbols);
-    h.size = trunc(e.commands.len - start);
     
     symbols_bytes: []SymbolEntry = (ptr = ptr_cast_unchecked(u8, SymbolEntry, chained.maybe_uninit.ptr.offset(chained.len)), len = syms_cmd.symbol_count.zext());
     chained.len += size_of_symbols; @debug_assert(chained.len <= chained.maybe_uninit.len);
@@ -713,20 +733,6 @@ fn macho_load_dylinker(commands: *List(u8), command_count: *i64, name: Str) void
     h.size = trunc(commands.len - start);
 }
 
-fn macho_main_entry_point(m: *QbeModule, commands: *List(u8), command_count: *i64) void #once = {
-    start := commands.len;
-    h := commands.reserve_type(LoadCommandHeader);
-    h.type = LoadCommand.MainEntryPoint.raw();
-    command_count[] += 1;
-    cmd := commands.reserve_type(MainEntryPoint);
-    symbol := m.get_symbol_info(m.intern("main"));
-    assert(symbol.kind == .Local, "no exported main function?");
-    // offset is from the start of interesting virtual memory? 
-    cmd[] = (entry_offset = symbol.offset.bitcast(), stack_size = 0);  // :CodeIsFirst its fine to change this, you just have to do the math here. 
-    h.size = trunc(commands.len - start);
-    @debug_assert_ge(symbol.offset, COMMANDS_SIZE_GUESS + SIZE_OF_STUBS);
-}
-
 fn compiler_address_to_segment_offset(m: *QbeModule, address: *u8) Ty(SegmentType, i64) = {
     low  := MAX_i64;
     high := 0;
@@ -805,6 +811,18 @@ fn zero_pad_to_align(bytes: *List(u8), align: i64) void = {
     @debug_assert_eq(bytes.len.mod(align), 0, "alignment confusion. allocation aligned differently from our length.");
 }
 
+fn zero_pad_len_to_align(bytes: *List(u8), align: i64) void = {
+    extra := bytes.len.mod(align);
+    if extra != 0 {
+        extra := align - extra;
+        bytes.reserve(extra);
+        range(0, extra) { _ |
+            bytes.push(0);
+        };
+    };
+}
+
+
 fn str_to_16_byte_value(s: Str) u128 = {
     assert(s.len.le(16), "A segment name cannot be larger than 16 text characters in bytes");
     low: u64 = 0;
@@ -818,4 +836,104 @@ fn str_to_16_byte_value(s: Str) u128 = {
         };
     };
     (low = low, high = high)
+}
+
+//
+// Adapted from Zig. MIT License. Copyright (c) Zig contributors.
+// https://github.com/ziglang/zig/blob/3ce6de87657e67da358e9c7869a87c61cc9f1305/src/link/MachO/CodeSignature.zig
+//
+// This replaces running `codesign -s - a.out` so you can cross compile targetting macos. 
+//
+// TODO: do we need this on x64? if so is page size is 4k instead of 16k?
+fn write_adhoc_signature(
+    exec_seg_base: i64,
+    exec_seg_limit: i64,
+    file_size: i64,
+    input_chunks: [][]u8,
+    dylib: bool,
+    ident: []u8,
+    output_buf: []u8,
+) void = {
+    total_pages := file_size / macos_page_size;
+    hash_size   := 32;
+    all_hashes_size := hash_size * total_pages;
+    code_dir_size := CodeDirectory.size_of() + all_hashes_size + ident.len + 1;
+    
+    CS_ADHOC :: 2;
+    CS_LINKER_SIGNED :: 0x20000;
+    CSSLOT_CODEDIRECTORY :: 0;  // TODO: move to bits.fr
+    header: SuperBlob = (
+        magic = CSMAGIC_EMBEDDED_SIGNATURE,
+        total_length = trunc(SuperBlob.size_of() + code_dir_size + 8), // :remove_fake_sig_blob?
+        blob_count = 2,
+        type1 = CSSLOT_CODEDIRECTORY,
+        offset1 = SuperBlob.size_of(),
+        type2 = CSSLOT_SIGNATURESLOT,
+        offset2 = trunc(SuperBlob.size_of() + code_dir_size),
+    );
+    
+    c := CodeDirectory.zeroed();
+    c.execSegBase = exec_seg_base.bitcast();
+    c.execSegLimit = exec_seg_limit.bitcast();
+    c.execSegFlags = int(!dylib).bitcast();
+    c.codeLimit = file_size.trunc();
+    c.magic = CSMAGIC_CODEDIRECTORY;
+    c.length = code_dir_size.trunc();
+    c.version = CS_SUPPORTSEXECSEG;
+    c.flags = CS_ADHOC.bit_or(CS_LINKER_SIGNED);
+    c.identOffset = size_of(CodeDirectory);
+    c.hashSize = hash_size.trunc();
+    c.hashType = CS_HASHTYPE_SHA256;
+    c.pageSize = 14;
+    c.nCodeSlots = total_pages.trunc();
+    c.hashOffset = trunc(code_dir_size - all_hashes_size);
+    
+    // TODO: write directly into output buffer. 
+    //       but maybe you can't because you're supposed to include the hash of all the zeros?  :unsure
+    code_slots := temp().alloc(Array(u32, 8), total_pages);
+    i := 0;
+    last_page := false;
+    for input_chunks { chunk | 
+        //@assert_eq(chunk.len.mod(macos_page_size), 0, "codesign chunk needs whole pages");
+        while => chunk.len > 0 {
+            @println("% %", i, chunk.len);
+            @assert(!last_page, "TODO: deal with page spread across chunks");
+            if chunk.len < macos_page_size {
+                last_page = true;
+            };
+            code_slots[i] = sha256(chunk.slice(0, macos_page_size.min(chunk.len)));
+            i += 1;
+            chunk.ptr = chunk.ptr.offset(macos_page_size);
+            chunk.len -= macos_page_size;
+        };
+    };
+    //@assert_eq(i * macos_page_size, file_size, "codesigned chunks amount did not match file_size");
+    
+    out: List(u8) = (maybe_uninit = output_buf, len = 0, gpa = panicking_allocator); out := out&;
+    
+    // wait until all fields done
+    SuperBlob.byte_swap_fields(header&);
+    out.reserve_type(SuperBlob)[] = header;
+    
+    // code directory first
+    CodeDirectory.byte_swap_fields(c&);
+    out.reserve_type(CodeDirectory)[] = c;
+    out.push_all(ident);
+    out.push(0);
+    out.push_all(code_slots.interpret_as_bytes()); // TODO: output these in place. 
+    
+    // :remove_fake_sig_blob? not sure if we need this fake signeture blob since we're not actually signing 
+    out.reserve_type(u32)[] = CSMAGIC_BLOBWRAPPER.byte_swap();
+    out.reserve_type(u32)[] = 8.byte_swap();
+    
+    @debug_assert_eq(out.len, out.maybe_uninit.len, "wrong signeture size");
+}
+
+fn byte_swap_fields($T: Type, self: *T) void #generic = {
+    inline_for T.get_fields() { $f | 
+        @if(:: (f[].ty == u32 || f[].ty == u64)) {
+            inner := T.get_field_ptr(self, f);
+            inner[] = byte_swap(inner[]);
+        };
+    };
 }

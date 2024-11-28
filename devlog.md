@@ -1,3 +1,9 @@
+## (Nov 28)
+
+ahahahaha i've defeated apple.
+ive produced a binary signed so incorrectly that when you try to run it the computer freezes for ~20 seconds
+and then the screen goes purple, it shuts down and restarts. garbage. i love it.
+
 ## (Nov 27)
 
 - sha256 for codesign
