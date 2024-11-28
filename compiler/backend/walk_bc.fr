@@ -38,6 +38,7 @@ fn walk_block();
 fn emit_current_function();
 fn add_pending_callees();
 fn finished();
+fn loop_emit_constants();
 
 // Note: B.Val is the example usecase for const struct fields. 
 fn CodeGen($B: Type) Type = {
@@ -53,6 +54,7 @@ fn CodeGen($B: Type) Type = {
         max_const_id: i64 = 0,
         pending: List(FuncId),
         static_context_var: ?BakedVarId,
+        did_constants := false,
         backend: B,
         $emit := emit_program,
     );
@@ -175,15 +177,9 @@ fn CodeGen($B: Type) Type = {
         if env.static_context_var { context | 
             gen&.add_constant(context);
         };
-        constants := 0;
-        range(0, gen.max_const_id + 1) {i|
-            if gen.constants_needed&.get(i) {
-                gen.backend&.emit_constant((id = i.trunc()));
-                constants += 1;
-            };
-        };    
         
         gen&.emit_entry_points_and_debug_info(comp, fns, entry); // note: qbe hack needs this to be last
+        @debug_assert(gen.did_constants, "forgot to call loop_emit_constants");
        
         gen.constants_needed&.drop();
         gen.funcs_done&.drop();
@@ -191,6 +187,17 @@ fn CodeGen($B: Type) Type = {
         // TODO: if alloc != temp { temp.reset(mark ? no but that wouldn't catch if they derived a new one from temp
         gen.backend.out
     };
+    
+    fn loop_emit_constants(gen: *Self) void = {
+        constants := 0;
+        range(0, gen.max_const_id + 1) {i|
+            if gen.constants_needed&.get(i) {
+                gen.backend&.emit_constant((id = i.trunc()));
+                constants += 1;
+            };
+        };
+        gen.did_constants = true;
+    }
 
     fn emit_current_function(self: *Self) void = {
         mark := mark_temporary_storage();

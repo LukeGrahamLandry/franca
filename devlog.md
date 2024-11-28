@@ -1,4 +1,4 @@
-## (Nov 28)
+## codesign (Nov 28)
 
 ahahahaha i've defeated apple.
 ive produced a binary signed so incorrectly that when you try to run it the computer freezes for ~20 seconds
@@ -58,8 +58,50 @@ maybe pageSize needs to be 4096?
 no it doesn't matter, i just did the math wrong and was missing the hash for the last page or got the file size wrong and had extra hashes depending which mistake canceled out.
 that seems like a slight over reaction.
 
+pleasingly mine is faster than using `codesign` because i don't have to write out the file, exec something, have it read it, finally do the work, and then write it back again.
+20ish ms that comes out of the 160 mysterious system part reported by time.
+
+---
+
 i think ive started triggering a thread safety problem more reliably.
 hopefully its not something insane about code signing wrong and just one of the many shortcuts i took.
+in the objdump diff between a good one and one that hangs, it starts with a bunch of just offsets being different,
+and then the first real change is missing
+
+```
+< 100050814: 13805800    	ror	w0, w0, #22
+< 100050818: d65f03c0    	ret
+```
+
+and then the infinite garbage of all the addresses on the left being different
+(i should really remember to use --no-addresses, it just annoyed be cause it doesn't take out jump targets).
+
+but anyway thats reassuring because i think its just because when you declare an asm function
+it calls add_code_bytes on the frontend thread directly, which then fights with emit_func_arm64 over `m.segments[.Code]`.
+yep, seems to be fixed by adding those to the queue.
+I guess adding codesign stuff just make it more likely to happen because i added rotr/bswap that i haven't bothered to make intrinsics for yet.
+Seems to have also fixed the rare reproducibility problem i noticed before, so thats's good.
+
+just to be safe also delaying emitting constants until after rejoining thread instead of just near the end randomly.
+but better would be doing them in the queue because then you wouldn't need as many fixups.
+acutally it would have been fine until i started trying to use DataConst instead of only DataMutable becuase that's what GOT entries use.
+
+---
+
+TODO:  
+llvm backend repro has regressed tho which is odd cause you'd think thats the easier one.
+but i don't think "llvm" and "easy" have every been used together in a sentance not containing the word "not".
+
+```
+523217c523217
+< @g821 = private unnamed_addr global [3 x i8] c"\C8D\B0"
+---
+> @g821 = private unnamed_addr global [3 x i8] c"\C8\04\DE"
+523223c523223
+< @g827 = private unnamed_addr global [3 x i8] c"\00\00\DA"
+---
+> @g827 = private unnamed_addr global [3 x i8] c"\00\00\92"
+```
 
 ## (Nov 27)
 

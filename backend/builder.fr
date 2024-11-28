@@ -22,14 +22,22 @@ CodegenShared :: @struct(
     no_more_codegen := false,
     cond: PCond,
     mutex: PMutex,
+    m: *QbeModule,
     codegen_time := 0,
 );
 
 CodegenState :: @enum(i64) (WaitingForBouba, UsedByBouba, WaitingForKiki, UsedByKiki);
 
+::tagged(CodegenTask);
+CodegenTask :: @tagged(
+    Dead: void,
+    Func: *Qbe.Fn,
+    Asm: @struct(lnk: *Qbe.Lnk, bytes: []u8),
+);
+
 CodegenEntry :: @struct(
     arena: ArenaAlloc, 
-    f: *Qbe.Fn,
+    task: CodegenTask,
     state: CodegenState,  // :ThreadSafety use cas or whatever
     logging := "",
     id: i64,
@@ -51,6 +59,7 @@ fn init(gpa: Alloc, globals: *QbeModule) QbeBuilder = {
     q := gpa.alloc(CodegenEntry, codegen_queue_size); // :Leak
     shared := gpa.box(CodegenShared);  // :leak
     shared.queue = q;
+    shared.m = globals;
     @if(use_threads) {
         pthread_mutex_init(shared.mutex&, 0).unwrap();
         pthread_cond_init(shared.cond&, 0).unwrap();
@@ -73,23 +82,22 @@ fn init(gpa: Alloc, globals: *QbeModule) QbeBuilder = {
     b
 }
 
+fn bouba_acquire(b: *QbeBuilder) *CodegenEntry = {
+    loop {
+        if b.shared.queue.acquire(true, b.idx&) { entry |
+            return(entry);
+        };
+        usleep(1000);  // most of the time the backend is not the bottle neck (because my frontend is so dumb). 
+                        // currently it falls behind ~11 times during self compile. -- Nov 26
+    };
+}
+
 FIXED_CONST_COUNT :: 2;
 fn clear(b: *QbeBuilder) void = {
-    if true {
-        break :: local_return;
-        loop {
-            if b.shared.queue.acquire(true, b.idx&) { entry |
-                b.entry = entry;
-                break();
-            };
-            usleep(1000);  // most of the time the backend is not the bottle neck (because my frontend is so dumb). 
-                           // currently it falls behind ~11 times during self compile. -- Nov 26
-        };
-    };
-    
+    b.entry = b.bouba_acquire();
     b.entry.arena&.reset_retaining_capacity();
     a := b.entry.arena&.borrow();
-    @debug_assert(b.entry.f.is_null(), "f is set");
+    @debug_assert(b.entry.task&.is(.Dead), "f is set");
     
     b.constants = list(a);
     b.temporaries = list(a);
@@ -299,8 +307,8 @@ fn build(b: *QbeBuilder, name: Str) *CodegenEntry = {
     	m := b.globals;
         context(DefaultContext)[].temporary_allocator = b.entry.arena&;
         a := b.entry.arena&.borrow();
-        b.entry.f = a.box_zeroed(Qbe.Fn);
-        curf := b.entry.f;
+        curf := a.box_zeroed(Qbe.Fn);
+        b.entry.task = (Func = curf);
         curf.default_init(m); 
     	// curf.rpo = 0; filled in by later pass
     	// curf.vararg = false; // TODO

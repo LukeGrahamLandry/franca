@@ -14,7 +14,8 @@ use_threads :: {
     env.implicit_context_runtime && true
 };
 
-codegen_queue_size :: if(use_threads, => 128, => 1);  // (this is not the number of threads! just the amount of backlog we allow). 
+// TODO: single threaded needing 2 because i of when i call clear is silly. 
+codegen_queue_size :: if(use_threads, => 128, => 2);  // (this is not the number of threads! just the amount of backlog we allow). 
 
 smuggle_module_pointer :: @static(*QbeModule);
 EmitQbe2 :: @struct(
@@ -26,7 +27,6 @@ EmitQbe2 :: @struct(
     current: BbId,
     next_var: i64 = 0,
     return_value_type_sizes: BitSet,
-    inline_asm: List(u8),
     current_has_indirect_return := false,
     os: Os,
     signeture := PrimSig.zeroed(), // TODO: HACK   also now redundant except that you don't always have a body. 
@@ -52,7 +52,6 @@ fn new(comp: CompCtx, alloc: Alloc, arch: Arch, os: Os) EmitQbe2 = {
         out = init(12, alloc), 
         current = BbId.zeroed(), 
         return_value_type_sizes = empty(), 
-        inline_asm = list(alloc), 
         os = os,
         // TODO: this will get more complicated when we want to support comptime execution with this backend. 
         implicit_context = comp.get_build_options()[].implicit_context_runtime,
@@ -61,10 +60,6 @@ fn new(comp: CompCtx, alloc: Alloc, arch: Arch, os: Os) EmitQbe2 = {
     smuggle_module_pointer[] = zeroed(*QbeModule);
     f: []Qbe.Field = @slice(@as(Qbe.Field) (type = .Fl, len = 8.trunc()), @as(Qbe.Field) (type = .Fl, len = 8.trunc()));
     s.pair_type_id = s.b&.struct_type(f, 16, 3);
-    
-    if arch == .x86_64 {
-        s.inline_asm&.push_all(".intel_syntax noprefix\n");
-    };
     s
 }
 
@@ -78,22 +73,33 @@ fn finished(self: *EmitQbe2, fid: FuncId) void = {
 }; 
 
 fn build_current(self: *EmitQbe2, n: Str, logging: Str) void = {
-    ::ptr_utils(*CodegenEntry);
-    old_entry := self.b&.build(n);
-    old_entry.logging = logging;
-    //@println("queue % %", old_entry.id, old_entry.f.name());
+    entry := self.b&.build(n);
+    entry.logging = logging;
+    self.enqueue_task(entry);
+    self.b&.clear();
+}
+
+fn enqueue_task(self: *EmitQbe2, old_entry: *CodegenEntry) void = {
     old_entry.release(true);
     @if(use_threads, {
         pthread_cond_signal(self.b.shared.cond&);
     }, {
+        ::ptr_utils(*CodegenEntry);
         idx := 0;
         entry := self.b.shared.queue.acquire(false, idx&).unwrap();
         @debug_assert(old_entry.identical(entry));
         push_dynamic_context {
-            do_codegen(entry);
+            do_codegen(self.b.shared.m, entry);
         };
     });
-    self.b&.clear();
+}
+
+fn add_code_bytes(self: *EmitQbe2, name: Str, bytes: []u8) void = {
+    entry := self.b&.bouba_acquire();
+    lnk := entry.arena&.borrow().box_zeroed(Qbe.Lnk);
+    entry.task = (Asm = (lnk = lnk, bytes = bytes));
+    lnk.id = self.b.shared.m.intern(name);
+    self.enqueue_task(entry);
 }
 
 codegen_thread_main :: fn(shared: *CodegenShared) void = {
@@ -101,7 +107,7 @@ codegen_thread_main :: fn(shared: *CodegenShared) void = {
     @debug_assert(use_threads);
     loop {
         if acquire(shared.queue, false, idx&) { entry |
-            do_codegen(entry);
+            do_codegen(shared.m, entry);
         } else {
             if shared.no_more_functions {
                 // pthread_getcpuclockid doesn't exist? so we have to do this here
@@ -116,13 +122,22 @@ codegen_thread_main :: fn(shared: *CodegenShared) void = {
     };
 };
 
-fn do_codegen(entry: *CodegenEntry) void = {
+fn do_codegen(m: *QbeModule, entry: *CodegenEntry) void = {
     context(DefaultContext)[].temporary_allocator = entry.arena&;
-    //@println("codegen %", entry.f.name());
-    entry.f.globals.set_debug_types(entry.logging, true);
-    run_qbe_passes(entry.f);
-    entry.f.globals.set_debug_types(entry.logging, false);
-    entry.f = Qbe.Fn.ptr_from_int(0);
+    @match(entry.task) {
+        fn Dead() => unreachable();
+        fn Func(f) => {
+            f.globals.set_debug_types(entry.logging, true);
+            run_qbe_passes(f);
+            f.globals.set_debug_types(entry.logging, false);
+        }
+        fn Asm(it) => {
+            // This is trivial but we want to do it without threads fighting. 
+            // TODO: support it being exported, etc. 
+            m.add_code_bytes(it.lnk.id, it.bytes);  
+        }
+    };
+    entry.task = .Dead; 
     entry.release(false);
 }
 
@@ -237,13 +252,6 @@ emit_qbe_included :: fn(m: rawptr, comp: *CompCtx, fns: [] FuncId, entry: Progra
         for chunks { c |
             aaa&.push_bucket(maybe_uninit = c, len = c.len, gpa = temp());
         };
-    } else {
-        inline_asm_functions := ir_text&.pop_current_bucket().unwrap();
-        ::ptr_utils(FILE);
-        write(m.outf, inline_asm_functions.items()).unwrap();
-        fclose(m.outf).unwrap();
-        asm := temp().read_to_string(out_fd&.s_name());
-        aaa&.push_bucket(asm);
     };
     aaa
 };
@@ -255,7 +263,8 @@ fn emit_function_husk(self: *EmitQbe2, fid: FuncId, signeture: PrimSig, $emit_bo
 
 fn emit_entry_points_and_debug_info(gen: *CodeGen(EmitQbe2), comp: CompCtx, fns: []FuncId, entry: ProgramEntry) void = {
     self := gen.backend&;
-    
+
+    // TODO: remove this we do it more at the end now 
     // give it a chance to spit out the constants it wanted to add (like when it loads to get a double literal)
     if self.b.globals.want_text_asm {
         {self.b.globals.target.emitfin}(self.b.globals.outf);
@@ -298,12 +307,11 @@ fn emit_entry_points_and_debug_info(gen: *CodeGen(EmitQbe2), comp: CompCtx, fns:
         }
     };
     
-    // HACK we rely on this being called at the very end for our secret returning inline asm
-    // TODO: clean this up and just return a struct
-    gen.backend.out&.push_bucket(gen.backend.inline_asm);
-    gen.backend.inline_asm = List(u8).zeroed();
     @if(use_threads) {
         gen.backend&.join_codegen_thread();
+    };
+    gen.loop_emit_constants();
+    @if(use_threads) {
         // TODO: this doesn't count emit_suspended_inlinables / output_macho / codesign
         frontend := clock_ms(CLOCK_THREAD_CPUTIME_ID);
         @eprintln(">>> [CPU Time] frontend: %ms, codegen: %ms", frontend, self.b.shared.codegen_time);
@@ -377,6 +385,9 @@ fn write_export_bounce(self: *EmitQbe2, fid: FuncId) void = {
     self.emit_bounce_fn(internal_name.items(), export_name, sig, false);
 }
 
+// TODO: we'd rather do constants gradually instead of all at the end?
+//     current system is garbage because you always have to build up a bunch of fixups when generating code. 
+//     but maybe it's worth waiting for nwe emit_ir instead of caring about fixing it now.  -- Nov 28
 fn emit_constant(self: *EmitQbe2, id: BakedVarId) void = {
     _, value := {self.comp.vtable.get_baked}(self.comp.data, id)[];
     idx: i64 = id.id.zext();
@@ -440,12 +451,18 @@ fn emit_constant(self: *EmitQbe2, id: BakedVarId) void = {
     emit_data(dat&);
 }
 
-// :ThreadSafety
+// :DumbNameAlias
+// TODO: we do it this way because we don't know if we've already emitted a reference to the __1234 name.
+//       For our own backend here at least, it would be easy to add support for aliases where you just let it deal with resolving
+//       the symbols to the same thing. or fix it properly but like meh.  
+
 fn emit_special(self: *EmitQbe2, f_id: FuncId, body: *FuncImpl, func: *Func, bc: *FnBody, pending: *List(FuncId)) bool = {
     comp := self.comp;
     @match(body) {
         fn Normal(_) => { panic("ICE: empty body but expr"); };
         fn Redirect(f) => {
+            // :DumbNameAlias
+            // TODO: this is fucking stupid :SLOW
             // TODO: assert that 'f' is flagged for being emitted?
             //       currently just trusting that emit_bc replaced all actual uses. 
             //       could also just have the front end check if body is redirect before adding to callees list. -- Jun 27
@@ -465,6 +482,8 @@ fn emit_special(self: *EmitQbe2, f_id: FuncId, body: *FuncImpl, func: *Func, bc:
             };
         }
         fn DynamicImport(name) => { 
+            // :DumbNameAlias
+            // TODO: this is fucking stupid :SLOW
             // TODO: do i need to hackily do the same for ComptimeAddr and hope for the best? ideally the forntend would handle that instead. 
             import_name := comp.get_string(name[]);
             self.forward_declare(bc.signeture, false, import_name);
@@ -473,6 +492,7 @@ fn emit_special(self: *EmitQbe2, f_id: FuncId, body: *FuncImpl, func: *Func, bc:
             return(true);
         }
         fn TargetOsSplit(it) => {
+            // :DumbNameAlias
             if it.os == self.os {
                 // TODO: :copy-paste from emit_special:redirect
                 pending.push(it.fid);
@@ -503,14 +523,14 @@ fn emit_special_asm(self: *EmitQbe2, body: *FuncImpl, func: *Func, bc: *FnBody, 
         });
         (fn JittedAarch64(code) => { 
             if(arch.ne(Arch.aarch64), => { return(false); });
-            self.b.globals.add_code_bytes(self.fn_name_str(bc.func), @as([]u8) (ptr = ptr_cast_unchecked(u32, u8, code.ptr), len = code.len * 4));
+            self.add_code_bytes(self.fn_name_str(bc.func), @as([]u8) (ptr = ptr_cast_unchecked(u32, u8, code.ptr), len = code.len * 4));
             return(true);
         });
         fn X86AsmBytes(code) => { // :copy-paste
             if target.arch != .x86_64 { 
                 return(false); 
             };
-            self.b.globals.add_code_bytes(self.fn_name_str(bc.func), code.items());
+            self.add_code_bytes(self.fn_name_str(bc.func), code.items());
             return(true);
         }
         @default fn() void => return(false);

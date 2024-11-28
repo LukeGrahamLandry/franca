@@ -21,17 +21,18 @@ You can still print out the ir as human readable text between passes and modify 
   You can freely call between jit and aot code (even extern-c code from other compilers) because they follow the same standard abi.
 - Emit Mach-O executables directly without depending on an external linker or make relocatable objects for linking with other languages.
   (cannot yet make my own dynamic libraries)
-- Moved a bunch of static variables to a data structure we pass around explicitly.
-  Eventually you will be able to compile multiple modules on parallel threads (not yet tho, there's still more unported).
+- Ad-hoc signetures for Mach-O binaries so you can target macOS without depending on Apple's `codesign` program.
+- Moved a bunch of static variables to a data structure we pass around explicitly
+  so you can compile multiple modules on separate threads in parallel.
 - Inline small (single block) functions.
 - added peephole optimisations for arm isel: ~40% code size reduction vs Qbe on the franca compiler.
   - use of u12 immediate for add, ldr, and store instructions.
   - use immediates for shifts.
   - fuse mul followed by add into 3 arg madd.
+- arm: respect the platform register (it gets zeroed when you context switch on macos).
 - Removed several codegen optimisations until we have a solid foundation (but I want to bring them back eventually).
-  - loading float constants from memory
-  - arm: logimm single instruction load int more constants
-  - arm: constant immediate without an extra register when accessing thread locals
+  - all: load float constants from memory (instead of using int immediate + fmov)
+  - arm: bit field immediate to load int more constants in a single instruction
 - Removed the RISC-V target for now because I haven't done thier instruction encoding yet.
 
 ## Qbe License

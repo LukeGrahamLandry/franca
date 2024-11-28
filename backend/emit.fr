@@ -135,6 +135,7 @@ fn new_emit_data(self: *QbeModule, dat: *Qbe.Dat) void = {
     };
     
     if self.want_text_asm {
+        // TODO: this branch is gone as soon as i trust my x64. looking forward to it :)
         @if(LINK_QBE_C, {
             if dat.name.ptr.is_null() {
                 s := self.get_symbol_info(dat.lnk.id);
@@ -271,36 +272,18 @@ fn emit_data_to_segment(self: *QbeModule, dat: *Qbe.Dat) void = {
 }
 
 // :ThreadSafety we can't have both threads fucking with self.segments
-fn add_code_bytes(self: *QbeModule, name: Str, bytes: []u8) void = {
+fn add_code_bytes(self: *QbeModule, name_id: u32, bytes: []u8) void = {
     code := self.segments&[.Code]&;
     code.align_to(4);  // todo: only for arm
     start_offset := ptr_diff(code.mmapped.ptr, code.next);
     
-    name_id := self.intern(name);
     self.do_jit_fixups(name_id, .Code, start_offset);
     
     dest := slice(code.next, bytes.len);
     dest.copy_from(bytes);
     code.next = code.next.offset(bytes.len);
     
-    if self.want_text_asm {
-        // TODO: the align4 is only required for arm
-        @fmt_write(self.outf, ".text\n.balign 4\n.globl _%\n_%:\n", name, name);
-        if bytes.len.mod(4) == 0 && u8.int_from_ptr(bytes.ptr).mod(4) == 0 { 
-            // will always be true for arm.
-            // doing it as bytes would still work, lets just make it a bit easier for the assembler because why not. 
-            words: []u32 = (ptr = ptr_cast_unchecked(u8, u32, bytes.ptr), len = bytes.len / 4);
-            for words { inst |
-                v := @as(i64) inst.zext();
-                @fmt_write(self.outf, "   .word %\n", v);
-            };
-        } else {
-            for bytes { inst |
-                v := @as(i64) inst.zext();
-                @fmt_write(self.outf, "   .byte %\n", v);
-            };
-        }
-    };
+    @debug_assert(!self.want_text_asm, "we don't emit text!");
 }
 
 fn align_to(s: *SegmentCursor, align: i64) void = {
