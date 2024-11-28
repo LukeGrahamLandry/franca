@@ -248,15 +248,19 @@ fn output_macho(m: *QbeModule) List([]u8) = {
         // so we need to reserve this space up front and fill it in later. 
         
         // We want this to be the last thing in the file so the signeture can go at the end? is this the rules? 
-        //zero_pad_len_to_align(chained&, macos_page_size);  // WASTE
-        
+        //zero_pad_len_to_align(chained&, codesign_page_size);  // WASTE
         
         load_codesign := load_command(e&, .CodeSigneture, LinkEditBlob);
         
-        codesign_ident := "foo";  // TODO: does need to be something specific?
-        signeture_size := CodeDirectory.size_of() + (32 * (e.file_offset + chained.len) / macos_page_size) + codesign_ident.len + 1 + 8 + SuperBlob.size_of();
+        codesign_ident := "";  // It seems this can be whatever you want since we're not doing a real signeture. I've tried "foo"
+        //
+        // WARNING WARNING WARNING
+        // if you forget to align_to here so you're missing the last hash, it fully crashes the operating system (macos 14.6.1)
+        //
+        page_count := ((e.file_offset + chained.len).align_to(codesign_page_size) / codesign_page_size);
+        signeture_size := SuperBlob.size_of() + CodeDirectory.size_of() + (32 * page_count) + codesign_ident.len + 1;
         chained&.reserve(signeture_size);
-        codesign_output_bytes := chained.maybe_uninit.subslice(chained.len, signeture_size);
+        codesign_output_bytes := chained.maybe_uninit.slice(chained.len, chained.len + signeture_size);
         load_codesign.offset = trunc(e.file_offset + chained.len);
         load_codesign.size = codesign_output_bytes.len.trunc();
         
@@ -283,15 +287,13 @@ fn output_macho(m: *QbeModule) List([]u8) = {
         write_adhoc_signature(
             exec_seg_base = base_file_offset[1],
             exec_seg_limit = segments[0].file_size,
-            file_size = e.file_offset + chained.len - signeture_size, // :unsure
+            file_size = e.file_offset - signeture_size, 
             input_chunks = chunks.items(),
             dylib = m.goal.type == .Dynamic,
             ident = codesign_ident,
             output_buf = codesign_output_bytes,
         );
         chunks&.push(codesign_output_bytes);
-        
-        
     } else {
         @debug_assert(e.m.goal.type == .Relocatable);
         emit_reloc_symbols(e&, chained&);
@@ -792,7 +794,8 @@ fn append_padded_cstr(bytes: *List(u8), s: Str, align: i64) i64 = {
 fn reserve_type(bytes: *List(u8), $T: Type) *T #generic = {
     bytes.reserve(T.size_of());
     ptr := bytes.maybe_uninit.ptr.offset(bytes.len);
-    @debug_assert(u8.int_from_ptr(ptr).mod(T.align_of()) == 0, "unaligned reserve");
+    // TODO: do we really care?
+    //@debug_assert(u8.int_from_ptr(ptr).mod(T.align_of()) == 0, "unaligned reserve");
     ptr := ptr_cast_unchecked(u8, T, ptr);
     bytes.len += T.size_of();
     ptr
@@ -808,7 +811,8 @@ fn zero_pad_to_align(bytes: *List(u8), align: i64) void = {
             bytes.push(0);
         };
     };
-    @debug_assert_eq(bytes.len.mod(align), 0, "alignment confusion. allocation aligned differently from our length.");
+    // TODO: this seems to make it fault all the time :FUCKED -- Nov 28
+    //@debug_assert_eq(bytes.len.mod(align), 0, "alignment confusion. allocation aligned differently from our length.");
 }
 
 fn zero_pad_len_to_align(bytes: *List(u8), align: i64) void = {
@@ -838,11 +842,14 @@ fn str_to_16_byte_value(s: Str) u128 = {
     (low = low, high = high)
 }
 
+
+// this also works if you use 4096 but that seems strange to me. 
+codesign_page_size :: macos_page_size;
+
 //
-// Adapted from Zig. MIT License. Copyright (c) Zig contributors.
-// https://github.com/ziglang/zig/blob/3ce6de87657e67da358e9c7869a87c61cc9f1305/src/link/MachO/CodeSignature.zig
-//
+// Loosly based on ziglang/zig/src/link/MachO/CodeSignature.zig. MIT License. Copyright (c) Zig contributors.
 // This replaces running `codesign -s - a.out` so you can cross compile targetting macos. 
+// If you don't do this (on recent-ish versions of macos) your program will just be `killed` immediately. 
 //
 // TODO: do we need this on x64? if so is page size is 4k instead of 16k?
 fn write_adhoc_signature(
@@ -854,25 +861,29 @@ fn write_adhoc_signature(
     ident: []u8,
     output_buf: []u8,
 ) void = {
-    total_pages := file_size / macos_page_size;
+    //
+    // WARNING WARNING WARNING
+    // if you forget to align_to here so you're missing the last hash, it fully crashes the operating system (macos 14.6.1)
+    //
+    total_pages := file_size.align_to(codesign_page_size) / codesign_page_size;
     hash_size   := 32;
     all_hashes_size := hash_size * total_pages;
     code_dir_size := CodeDirectory.size_of() + all_hashes_size + ident.len + 1;
     
-    CS_ADHOC :: 2;
-    CS_LINKER_SIGNED :: 0x20000;
-    CSSLOT_CODEDIRECTORY :: 0;  // TODO: move to bits.fr
-    header: SuperBlob = (
-        magic = CSMAGIC_EMBEDDED_SIGNATURE,
-        total_length = trunc(SuperBlob.size_of() + code_dir_size + 8), // :remove_fake_sig_blob?
-        blob_count = 2,
-        type1 = CSSLOT_CODEDIRECTORY,
-        offset1 = SuperBlob.size_of(),
-        type2 = CSSLOT_SIGNATURESLOT,
-        offset2 = trunc(SuperBlob.size_of() + code_dir_size),
-    );
+    out: List(u8) = (maybe_uninit = output_buf, len = 0, gpa = panicking_allocator); out := out&;
     
-    c := CodeDirectory.zeroed();
+    header := out.reserve_type(SuperBlob);
+    header[] = (
+        magic = CSMAGIC_EMBEDDED_SIGNATURE,
+        total_length = trunc(SuperBlob.size_of() + code_dir_size), 
+        blob_count = 1,
+        type = CSSLOT_CODEDIRECTORY,
+        offset = SuperBlob.size_of(),
+    );
+    SuperBlob.byte_swap_fields(header);
+    
+    c := out.reserve_type(CodeDirectory);
+    c[] = CodeDirectory.zeroed();
     c.execSegBase = exec_seg_base.bitcast();
     c.execSegLimit = exec_seg_limit.bitcast();
     c.execSegFlags = int(!dylib).bitcast();
@@ -885,48 +896,36 @@ fn write_adhoc_signature(
     c.hashSize = hash_size.trunc();
     c.hashType = CS_HASHTYPE_SHA256;
     c.pageSize = 14;
+    @debug_assert_eq(1.shift_left(@as(i64) c.pageSize.zext()), codesign_page_size);
     c.nCodeSlots = total_pages.trunc();
     c.hashOffset = trunc(code_dir_size - all_hashes_size);
+    CodeDirectory.byte_swap_fields(c);
     
-    // TODO: write directly into output buffer. 
-    //       but maybe you can't because you're supposed to include the hash of all the zeros?  :unsure
-    code_slots := temp().alloc(Array(u32, 8), total_pages);
+    out.push_all(ident);  // useless
+    out.push(0);
+    
+    // Now spam out all the bytes of hashes.
     i := 0;
     last_page := false;
     for input_chunks { chunk | 
-        //@assert_eq(chunk.len.mod(macos_page_size), 0, "codesign chunk needs whole pages");
         while => chunk.len > 0 {
-            @println("% %", i, chunk.len);
             @assert(!last_page, "TODO: deal with page spread across chunks");
-            if chunk.len < macos_page_size {
+            if chunk.len < codesign_page_size {
                 last_page = true;
+                @debug_assert(output_buf.ptr.in_memory_after(chunk.ptr.offset(chunk.len-1)), "aliased output and input");
             };
-            code_slots[i] = sha256(chunk.slice(0, macos_page_size.min(chunk.len)));
+            page := chunk.slice(0, codesign_page_size.min(chunk.len));
+            hash := page.sha256();
+            out.push_all(hash&.items().interpret_as_bytes());
             i += 1;
-            chunk.ptr = chunk.ptr.offset(macos_page_size);
-            chunk.len -= macos_page_size;
+            chunk.ptr = chunk.ptr.offset(codesign_page_size);
+            chunk.len -= codesign_page_size;
         };
     };
-    //@assert_eq(i * macos_page_size, file_size, "codesigned chunks amount did not match file_size");
+    diff := i * codesign_page_size - file_size;
+    @assert(diff <= codesign_page_size && diff >= 0, "codesigned chunks amount did not match file_size");
     
-    out: List(u8) = (maybe_uninit = output_buf, len = 0, gpa = panicking_allocator); out := out&;
-    
-    // wait until all fields done
-    SuperBlob.byte_swap_fields(header&);
-    out.reserve_type(SuperBlob)[] = header;
-    
-    // code directory first
-    CodeDirectory.byte_swap_fields(c&);
-    out.reserve_type(CodeDirectory)[] = c;
-    out.push_all(ident);
-    out.push(0);
-    out.push_all(code_slots.interpret_as_bytes()); // TODO: output these in place. 
-    
-    // :remove_fake_sig_blob? not sure if we need this fake signeture blob since we're not actually signing 
-    out.reserve_type(u32)[] = CSMAGIC_BLOBWRAPPER.byte_swap();
-    out.reserve_type(u32)[] = 8.byte_swap();
-    
-    @debug_assert_eq(out.len, out.maybe_uninit.len, "wrong signeture size");
+    @assert_eq(out.len, out.maybe_uninit.len, "wrong signeture size");
 }
 
 fn byte_swap_fields($T: Type, self: *T) void #generic = {

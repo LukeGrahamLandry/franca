@@ -4,6 +4,63 @@ ahahahaha i've defeated apple.
 ive produced a binary signed so incorrectly that when you try to run it the computer freezes for ~20 seconds
 and then the screen goes purple, it shuts down and restarts. garbage. i love it.
 
+```
+codesign -d -vvvvvvv a.out
+a.out: code object is not signed at all
+```
+
+hmmmm, why your os crashing then friendo... me thinks thou dost protest too much.
+
+```
+objdump  --all-headers  a.out
+
+a.out:	file format mach-o arm64
+/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/objdump: error: 'a.out': Invalid/Unsupported object file format
+```
+
+this thing can parse it...
+
+```
+/Users/luke/Downloads/llios-main/macho_parser/macho_parser --cd a.out
+LC_CODE_SIGNATURE    cmdsize: 16     dataoff: 0x128210 (1212944)   datasize: 2497
+SuperBlob: magic: CSMAGIC_EMBEDDED_SIGNATURE, length: 2496, count: 2
+Blob 0: type: 0000000, offset: 28, magic: CSMAGIC_CODEDIRECTORY, length: 2460
+  version      : 0x20400
+  flags        : 0x20002
+  hashOffset   : 92
+  identOffset  : 88
+  nSpecialSlots: 0
+  nCodeSlots   : 74
+  codeLimit    : 1215969
+  hashSize     : 32
+  hashType     : SHA256
+  platform     : 0
+  pageSize     : 16384
+  identity     : foo
+  CDHash       : Unavailable. Use 'build.sh --openssl' and run again.
+
+  Slot[  0] : 29a5508ca386f6b14cca312d782f5504d78dd3acd26ae7a6ae4e9ab569ed3556
+  Slot[  1] : 15ca388192bb891e2a8b6bcdd3c1249dca923824737513e53920f530cd666bfd
+  Slot[  2] : 0409137b727cedb66f23b0fe974bf0caf2d8d343f70d93f2f8ae8f64942f2fed
+  Slot[  3] : 6d6540fef7e20424468235786621f9b3287aa51b3b67ae51601eb8fb35c8fbd9
+  Slot[  4] : a9f2009ecda80a18ec61a65356e65fab08139396338c3ca18d4bd33353d00e97
+  Slot[  5] : 7b2ffc6c5bee282f59bf6961b25a4eec9b09dfcf76b400c46d7caaaabaa0b9aa
+  Slot[  6] : d1ad3a340641ca99a94e26d80323625e17025254c7079da30d474af642d2f0df
+  Slot[  7] : 681da381a6ef15659b872354acfae545814fd7a18166c31f6ec9cb0248ab81fd
+  Slot[  8] : 0eb5903bf534fc4777184400dcae9f5dea819e657412b0261711c11c7409ca64
+  Slot[  9] : a8ce78769ede445625c03e8a16d3ecd0a82588feb2337149a782c797e14cd171
+      ... 64 more ...
+
+Blob 1: type: 0x10000, offset: 2488, magic: CSMAGIC_BLOBWRAPPER, length: 8
+```
+
+maybe pageSize needs to be 4096?
+no it doesn't matter, i just did the math wrong and was missing the hash for the last page or got the file size wrong and had extra hashes depending which mistake canceled out.
+that seems like a slight over reaction.
+
+i think ive started triggering a thread safety problem more reliably.
+hopefully its not something insane about code signing wrong and just one of the many shortcuts i took.
+
 ## (Nov 27)
 
 - sha256 for codesign
