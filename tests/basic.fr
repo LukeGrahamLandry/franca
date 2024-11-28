@@ -266,13 +266,14 @@ assert_eq(6, n.adds(2, 3));
 _: void = @if(true, (), 123);
 @if(false, "hello".add(5), ());
 @if(true, (), this_var_does_not_exist);
-compute_true :: 1.gt(0);  // Currently you must explicitly declare more complex expressions const. 
+compute_true :: 1.gt(0);  // (in the old compiler) you must explicitly declare more complex expressions const. 
 @if(compute_true, (), no_compile_this_branch_pls);
+// but now this works too
+@if(1.gt(0), (), no_compile_this_branch_pls);
 
 // Ifs stay constant if body is constant
-// TODO: this broke when i changed block reducing to expr when ret_label.is_some() -- May 29
-//@if(@if(true, => false, => no_compile_me),
-//     fn() void => no_compile_me2, =>());
+@if(@if(true, false, no_compile_me),
+     no_compile_me2, ());
 
 fn ret_1() i64 = 1;
 v := @if(true, ret_1(), no_compile_me()); // TODO: make this work without the type binding
@@ -284,12 +285,11 @@ assert_eq(1, v);
 //    what_this_this;
 //};
 
-/* // TODO: c backend chokes on this. 
 // fn call in a branch works when not const cond. 
+ret_1_not_os :: fn() i64 = 1;
 t := true;
-v := if(t, ret_1, => 123);
+v := if(t, ret_1_not_os, => 123);
 assert_eq(1, v);
-*/
 
 //////
 /// Functions called in const context are just normal functions, 
@@ -314,24 +314,20 @@ assert_eq(void, void);
 assert_eq(:: Ty(i64, bool), :: Ty(i64, bool));
 IB: Type : Ty(i64, bool);
 assert_eq(:: Ty(i64, bool), IB);
-I_B: (Type, Type) : (i64, bool);
-IB_B: (Type, Type) : (Ty(i64, bool), bool);
-// TODO: these are odd, it should probably allow flatten like this? im not sure what makes most sense. 
-//       currently flattening handled inconsistantly which is much worse than either choice
+I_B: Ty(Type, Type) = (i64, bool);
+IB_B: Ty(Type, Type) = (Ty(i64, bool), bool);
+
+// No auto flattening
 @assert_compile_error { I_B_B: Ty(Type, Type, Type) = (i64, (bool, bool)); };
 @assert_compile_error { I_B_B2: Ty(Type, Type, Type) = ((i64, bool), bool); };
-
-// TODO: auto compress tuple type?
-// TODO: can't even assert_compile_error these because it hits debug size check. 
-// IB_B2: (Type, Type) : ((i64, bool), bool); 
-// I_BB: (Type, Type) : (i64, (bool, bool));
+@assert_compile_error { IB_B2: Ty(Type, Type) = ((i64, bool), bool); };
+@assert_compile_error { I_BB: Ty(Type, Type) = (i64, (bool, bool)); };
 
 //////
 /// Basic type checking. 
 @assert_compile_error { a: i64 = "Hello"; };
 
-// TODO: this is correctly an error but can't be caught anymore since '@as' moved to flat_call which doesn't have a graceful error handling story.  -- Apr 21
-// @assert_compile_error { a: i64 = @as(Str) 1; };  
+@assert_compile_error { a: i64 = @as(Str) 1; };  
 
 /// There's an eq for types, not just special compiler assert_eq
 assert_eq(true, eq(void, void));
@@ -519,4 +515,14 @@ fn x64_extub_encoding(x: i64) void #test = {
             abort()
         }
     };
+}
+
+fn numbers_forbiden_by_your_current_content_settings() #test = {
+    N :: @as(i64) 0x00811d68fe0c521a.bitcast();  // 1 in bit 31
+    i := N;
+    while => i >= 10 {
+        i = i / 10;
+    };
+    
+    :: assert_eq("36342608771699226", @tfmt("%", N));
 }

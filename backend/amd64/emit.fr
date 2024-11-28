@@ -49,41 +49,38 @@ fn do_fixups_amd64(self: *QbeModule, address: *u8, symbol: *SymbolInfo) void = {
             fn RipDisp32(it) => {
                 distance := ptr_diff(fixup.patch_at, address); // :size_of_displacement
                 if !local {
-                    @match(self.goal.type) {
-                        fn Relocatable() => continue(); // that's not my department
-                        fn AsmText()     => continue(); // that's not my department
-                        fn Exe() => {
-                            if !it.call {
-                                if self.debug["T".char()] {
-                                    @fmt_write(self.debug_out, "# patch addr % refs %=%\n", u8.int_from_ptr(fixup.patch_at), u8.int_from_ptr(address), symbol.name);
-                                };
-                            };
-                            @assert(it.call, "TODO: have to convert to load from got somehow. does that mean every forward reference needs nop padding?");
-                            
-                            if self.debug["T".char()] {
-                                @fmt_write(self.debug_out, "# patch call % calls %\n", u8.int_from_ptr(fixup.patch_at), symbol.name);
-                            };
-                            if symbol.offset == -1 {
-                                // create a new trampoline in the __stubs section. 
-                                code := self.segments&.index(.Code);
-                                symbol.offset = self.stubs&.len() + COMMANDS_SIZE_GUESS;
-                                size_of_jmp_encoding :: 6;
-                                trampoline := self.stubs&.reserve(Array(u8, size_of_jmp_encoding));
-                                new_got_reloc = ensure_got_slot(self, symbol, address).or_else(=> new_got_reloc);
-                                distance := self.distance_between(.Code, symbol.offset + size_of_jmp_encoding, .ConstantData, symbol.got_lookup_offset);
-                                trampoline: List(u8) = (maybe_uninit = trampoline.items(), len = 0, gpa = panicking_allocator);
-                                
-                                // jmp near [rip + distance]
-                                dyn_jmp_extension := @as(X86Reg) 0b0100; // not call!
-                                trampoline&.push(0xff);
-                                trampoline&.push(pack_modrm(.Indirect00, .rbp, dyn_jmp_extension));   // disp is RIP relative
-                                trampoline&.push_u32(distance.trunc());
-                            };
-                            stub_trampoline := self.segment_address(.Code, symbol.offset);
-                            distance = ptr_diff(fixup.patch_at, stub_trampoline); // :size_of_displacement
-                        }
-                        fn JitOnly() => panic("TODO: jit got on amd64");
+                    if (@is(self.goal.type, .Relocatable, .AsmText)) {
+                        continue(); // that's not my department
                     };
+                    @assert(self.goal.type != .JitOnly, "TODO: jit got on amd64");
+                    if !it.call {
+                        if self.debug["T".char()] {
+                            @fmt_write(self.debug_out, "# patch addr % refs %=%\n", u8.int_from_ptr(fixup.patch_at), u8.int_from_ptr(address), symbol.name);
+                        };
+                    };
+                    @assert(it.call, "TODO: have to convert to load from got somehow. does that mean every forward reference needs nop padding?");
+                    
+                    if self.debug["T".char()] {
+                        @fmt_write(self.debug_out, "# patch call % calls %\n", u8.int_from_ptr(fixup.patch_at), symbol.name);
+                    };
+                    if symbol.offset == -1 {
+                        // create a new trampoline in the __stubs section. 
+                        code := self.segments&.index(.Code);
+                        symbol.offset = self.stubs&.len() + COMMANDS_SIZE_GUESS;
+                        size_of_jmp_encoding :: 6;
+                        trampoline := self.stubs&.reserve(Array(u8, size_of_jmp_encoding));
+                        new_got_reloc = ensure_got_slot(self, symbol, address).or_else(=> new_got_reloc);
+                        distance := self.distance_between(.Code, symbol.offset + size_of_jmp_encoding, .ConstantData, symbol.got_lookup_offset);
+                        trampoline: List(u8) = (maybe_uninit = trampoline.items(), len = 0, gpa = panicking_allocator);
+                        
+                        // jmp near [rip + distance]
+                        dyn_jmp_extension := @as(X86Reg) 0b0100; // not call!
+                        trampoline&.push(0xff);
+                        trampoline&.push(pack_modrm(.Indirect00, .rbp, dyn_jmp_extension));   // disp is RIP relative
+                        trampoline&.push_u32(distance.trunc());
+                    };
+                    stub_trampoline := self.segment_address(.Code, symbol.offset);
+                    distance = ptr_diff(fixup.patch_at, stub_trampoline); // :size_of_displacement
                 } else {
                     if !it.call {
                         if self.debug["T".char()] {
@@ -384,7 +381,12 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
             convert_to_2address(e, i&);
             assemble(e, i&);
         }
-        fn sign() => e.a&.push(@as(u8) PrimaryOp.SignExtendAxToDxAx); // CQO
+        fn sign() => {
+            if i&.cls() == .Kl {    
+                e.a&.push(0b01001000);  // w=true
+            };
+            e.a&.push(@as(u8) PrimaryOp.SignExtendAxToDxAx); // CQO
+        }
         fn neg() => {
             // TODO: make a .ssa test that gets here
             if i.to != i.arg&[0] {
@@ -452,7 +454,6 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
                     };
                     if c.type == .CBits && is_int(i&.cls()) {
                         value := c.bits.i;
-                        // TODO: i think `B8+ rd id	MOV r32, imm32	OI	Valid	Valid	Move imm32 to r32.` zeros the high bytes so we can do more in the small instruction. 
                         if value < MIN_i32 || value > MAX_i32 {
                             encode_imm64(e.a&, i.to.int_reg_d(), value.bitcast());
                             return();
@@ -527,7 +528,7 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
                             };
                         };
                         patch_at := e.a.maybe_uninit.ptr.offset(e.a.len);
-                        if symbol.kind != .Local || e.m.goal.type != .Exe {
+                        if symbol.kind != .Local || e.m.goal.type == .Relocatable {
                             symbol.fixups&.push((patch_at = patch_at, type = (RipDisp32 = (increment = c.bits.i.trunc(), call = true))), e.m.gpa);
                         };
                     };
@@ -682,7 +683,7 @@ fn push(e: *AmdState, b: EncodedArgs, ops: []u8) void = {
                     };
                 };
                 patch_at := e.a.maybe_uninit.ptr.offset(e.a.len);
-                if symbol.kind != .Local || e.m.goal.type != .Exe {
+                if symbol.kind != .Local || e.m.goal.type == .Relocatable {
                     symbol.fixups&.push((patch_at = patch_at, type = (RipDisp32 = (increment = off.trunc(), call = false))), e.m.gpa);
                 };
             };

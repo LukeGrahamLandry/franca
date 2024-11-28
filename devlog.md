@@ -1,3 +1,8 @@
+## (Nov 27)
+
+- sha256 for codesign
+- started stealing exports-trie from zig for dynamic libraries
+
 ## (Nov 26)
 
 yikes, this was gonna suck when i got around to trying ctx=implicit.
@@ -35,6 +40,26 @@ better phrasing elsewhere:
 
 - fail 17
 
+---
+
+Running the backend on its own thread goes from (1850-implicit or 1780-static) to 1390-implicit (all numbers unsafe).
+Profiler says ~25% of the time was in the backend so that's pretty close to purely parallel. We only stall waiting on the backend 11 times when self compiling.
+dynamic context pays for itself now (unless i do thread locals but maybe they're slow too, who knows, probably not cause i wouldn't have to generate code for saving the register).
+Notably, because of how the queuing works, threaded builds are (mostly?) reproducible.
+would get harder if i wanted more backend threads.
+which is funny because single threaded builds didn't reproduce recently and i just now revealed problem was not calling push_dynamic_context enough.
+sadly they're not reproducible between threaded and not threaded (both building the same program).
+can print names in codegen and they're doing things in the same order tho, so not sure what the difference is.
+seems threaded occasionally doesn't repro itself tho, perhaps i spoke too soon, farther investigation required.
+
+now the flat 90ms spent loading the driver before getting to the threaded part looks more attackable,
+so i could bring back loading from dylib but that means i have to make my own dylibs.
+damn hard to pick which is more soul sucking between mach-o and x64 encoding.
+
+---
+
+- rex prefix for long sign extend beforev division. 12
+
 ## (Nov 23)
 
 - static dynamic_context on llvm (oxymoronic)
@@ -52,6 +77,10 @@ better phrasing elsewhere:
 - less CStr when working with symbols
 - list of functions with seperate arenas so threads can pass them around.
 - clear `tmp.use` before going in inline cache so you don't try to reuse memory if it gets suspended.
+
+##
+
+before i did some manual outlining in list and context stuff, the worst the time got was around 2250.
 
 ## (Nov 18)
 

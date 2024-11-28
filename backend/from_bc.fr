@@ -9,7 +9,12 @@
 // TODO: at the end i should make the math stuff not #fold becuase its probably faster to let the backend do it. 
 //       but then the front end wouldn't see those expressions as constant for other #fold calls.
 
-use_threads :: true;
+use_threads :: {
+    env := BuildOptions.ptr_from_raw(get_comptime_environment()[].build_options);
+    env.implicit_context_runtime && true
+};
+
+codegen_queue_size :: if(use_threads, => 128, => 1);  // (this is not the number of threads! just the amount of backlog we allow). 
 
 smuggle_module_pointer :: @static(*QbeModule);
 EmitQbe2 :: @struct(
@@ -57,11 +62,6 @@ fn new(comp: CompCtx, alloc: Alloc, arch: Arch, os: Os) EmitQbe2 = {
     f: []Qbe.Field = @slice(@as(Qbe.Field) (type = .Fl, len = 8.trunc()), @as(Qbe.Field) (type = .Fl, len = 8.trunc()));
     s.pair_type_id = s.b&.struct_type(f, 16, 3);
     
-    :: {
-        env := BuildOptions.ptr_from_raw(get_comptime_environment()[].build_options);
-        assert(!use_threads || env.implicit_context_runtime, "can't use threads with static context");
-    };
-
     if arch == .x86_64 {
         s.inline_asm&.push_all(".intel_syntax noprefix\n");
     };
@@ -78,9 +78,9 @@ fn finished(self: *EmitQbe2, fid: FuncId) void = {
 }; 
 
 fn build_current(self: *EmitQbe2, n: Str, logging: Str) void = {
-    //logging = "IAMRLCIGP";
     ::ptr_utils(*CodegenEntry);
     old_entry := self.b&.build(n);
+    old_entry.logging = logging;
     //@println("queue % %", old_entry.id, old_entry.f.name());
     old_entry.release(true);
     @if(use_threads, {
@@ -88,11 +88,12 @@ fn build_current(self: *EmitQbe2, n: Str, logging: Str) void = {
     }, {
         idx := 0;
         entry := self.b.shared.queue.acquire(false, idx&).unwrap();
-        @assert(old_entry.identical(entry), "wtf!>");
+        @debug_assert(old_entry.identical(entry));
         push_dynamic_context {
-            do_codegen(old_entry);
+            do_codegen(entry);
         };
     });
+    self.b&.clear();
 }
 
 codegen_thread_main :: fn(shared: *CodegenShared) void = {
@@ -103,19 +104,21 @@ codegen_thread_main :: fn(shared: *CodegenShared) void = {
             do_codegen(entry);
         } else {
             if shared.no_more_functions {
+                // pthread_getcpuclockid doesn't exist? so we have to do this here
+                shared.codegen_time = clock_ms(CLOCK_THREAD_CPUTIME_ID);
                 shared.no_more_codegen = true;
                 return();
             };
-            pthread_mutex_lock(shared.mutex&);
-            pthread_cond_wait(shared.cond&, shared.mutex&);
-            pthread_mutex_unlock(shared.mutex&);
+            pthread_mutex_lock(shared.mutex&).unwrap();
+            pthread_cond_wait(shared.cond&, shared.mutex&).unwrap();
+            pthread_mutex_unlock(shared.mutex&).unwrap();
         };
     };
 };
 
 fn do_codegen(entry: *CodegenEntry) void = {
     context(DefaultContext)[].temporary_allocator = entry.arena&;
-    //@println("codegen % %", entry.id, entry.f.name());
+    //@println("codegen %", entry.f.name());
     entry.f.globals.set_debug_types(entry.logging, true);
     run_qbe_passes(entry.f);
     entry.f.globals.set_debug_types(entry.logging, false);
@@ -123,7 +126,6 @@ fn do_codegen(entry: *CodegenEntry) void = {
     entry.release(false);
 }
 
-codegen_queue_size :: if(use_threads, => 100, => 2);  // (this is not the number of threads! just the amount of backlog we allow). 
 fn join_codegen_thread(self: *EmitQbe2) void = {
     self.b.shared.no_more_functions = true;
     while => !self.b.shared.no_more_codegen {
@@ -131,11 +133,22 @@ fn join_codegen_thread(self: *EmitQbe2) void = {
     };
 }
 
+fn clock_ms(clock_id: i64) i64 = {
+    time_spec: TimeSpec = (seconds = 0, nanoseconds = 0);
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, time_spec&);
+    time_spec.ms()
+}
+
+fn ms(t: TimeSpec) i64 =
+    t.seconds * 1000 + t.nanoseconds / NS_TO_MS;
+        
 fn set_debug_types(m: *QbeModule, s: Str, value: bool) void = {
     for s { s | 
         m.debug[s.zext()] = value;
     };
 }
+
+#include_std("compiler/pool.fr");
 
 fn get_log_types(self: *EmitQbe2, fid: FuncId) Str = {
     func := self.comp.get_function(fid);
@@ -291,6 +304,9 @@ fn emit_entry_points_and_debug_info(gen: *CodeGen(EmitQbe2), comp: CompCtx, fns:
     gen.backend.inline_asm = List(u8).zeroed();
     @if(use_threads) {
         gen.backend&.join_codegen_thread();
+        // TODO: this doesn't count emit_suspended_inlinables / output_macho / codesign
+        frontend := clock_ms(CLOCK_THREAD_CPUTIME_ID);
+        @eprintln(">>> [CPU Time] frontend: %ms, codegen: %ms", frontend, self.b.shared.codegen_time);
     };
 }
 
@@ -1026,7 +1042,6 @@ fn qbe_load(ty: Prim) Qbe.O = {
         fn F32() => .load;
     }
 }
-
 
 fn display(self: Qbe.Ref, out: *List(u8)) void = {
     out.push_all("TODO:Qbe.Ref");

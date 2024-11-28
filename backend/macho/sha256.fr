@@ -1,0 +1,173 @@
+// Adapted from https://en.wikipedia.org/wiki/SHA-2
+// Creative Commons Attribution-ShareAlike 4.0 License.
+
+// TODO: asm for x64 byte_swap and rotate_right
+
+fn sha256_hex(message: []u8) []u8 = {
+    digest := sha256(message);
+    digest := digest&.items().interpret_as_bytes();
+    s := u8.list(128, temp());
+    for digest { b | 
+        push_hex_byte(s&, b, false);
+    };
+    s.items()
+}
+
+// TODO: there's special instructions for the round loop in both amd64 and arm64
+fn sha256(message: []u8) Array(u32, 8) = {
+    h: Array(u32, 8) = :: u32.map_in_place(eratosthenes(20), 
+        fn(x) => x.float().sqrt().fraction32())
+        .init();
+    
+    length_in_bits := message.len * 8;
+    chunk_count := message.len / 64;
+    range(0, chunk_count) { _ | 
+        chunk := ptr_cast_unchecked(u8, Array(u8, 64), message.ptr);
+        sha256_update(h&, chunk);
+        message.ptr = message.ptr.offset(64);
+    };
+    message.len -= chunk_count * 64;
+    
+    chunk := @uninitialized Array(u8, 64); 
+    extra := chunk&.items();
+    extra.slice(0, message.len).copy_from(message);  // the unaligned end of the input
+    extra[message.len] = 128;  // set first bit after the message to 1. 
+    message.len += 1;
+    if message.len + 8 <= 64 {
+        // We have space for just one chunk of padding. 
+    } else {
+        extra.rest(message.len).set_zeroed();
+        sha256_update(h&, chunk&);
+        message.len = 0;
+    };
+    extra.rest(message.len).set_zeroed();
+    // TODO: is the alignment thing real?
+    ptr_cast_unchecked(u8, i64, extra.ptr.offset(64-8))[] = byte_swap(length_in_bits);
+    sha256_update(h&, chunk&);
+    
+    u32.map_in_place(h&.items(), fn(x) => byte_swap(x));
+    h
+}
+
+fn sha256_update(h: *Array(u32, 8), chunk: *Array(u8, 64)) void = {
+    round_constants :: u32.map_in_place(eratosthenes(312), 
+        fn(x) => x.float().cbrt().fraction32());
+    
+    w := @uninitialized Array(u32, 64); w := w&;
+    
+    initial := w.items().slice(0, 16);
+    initial.interpret_as_bytes().copy_from(chunk.items());
+    u32.map_in_place(initial, fn(x) => byte_swap(x));  // because we work at the confusion factory
+    
+    range(16, 64) { i |
+        s0  := w[i - 15].rotr(7).bit_xor(w[i - 15].rotr(18)).bit_xor(w[i - 15].shift_right_logical(3));
+        s1  := w[i - 2].rotr(17).bit_xor(w[i - 2].rotr(19)).bit_xor(w[i - 2].shift_right_logical(10));
+        w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+    };
+    v := h[]; v := v&;
+    range(0, 64) { i |
+        S1    := v[4].rotr(6).bit_xor(v[4].rotr(11)).bit_xor(v[4].rotr(25));
+        ch    := v[4].bit_and(v[5]).bit_xor(bit_not(v[4]).bit_and(v[6]));
+        temp1 := v[7] + S1 + ch + round_constants[i] + w[i];
+        S0    := v[0].rotr(2).bit_xor(v[0].rotr(13)).bit_xor(v[0].rotr(22));
+        maj   := v[0].bit_and(v[1]).bit_xor(v[0].bit_and(v[2])).bit_xor(v[1].bit_and(v[2]));
+        temp2 := S0 + maj;
+
+        // TODO: this seems like a lot of shuffling.
+        //       can i use inline_range as ~register renaming?
+        v[7] = v[6];
+        v[6] = v[5];
+        v[5] = v[4];
+        v[4] = v[3] + temp1;
+        v[3] = v[2];
+        v[2] = v[1];
+        v[1] = v[0];
+        v[0] = temp1 + temp2;
+    };
+    range(0, 8) { i |
+        h[i] += v[i];
+    };
+}
+
+// TODO: something broken with ::assert_eq(a, b) outside a block at top level :fucked
+
+fn sha256_examples() #test = {
+    ::assert_eq(u32);
+    assert_eq(0x78563412, byte_swap(0x12345678));
+    assert_eq(0x78123456, rotr(0x12345678, 8));
+    
+    // python3 -c "import hashlib; m = hashlib.sha256(); m.update(bytearray(64)); print(m.hexdigest());"
+    assert_eq("f5a5fd42d16a20302798ef6ed309979b43003d2320d9f0e8ea9831a92759fb4b", sha256_hex(temp().alloc_zeroed(u8, 64)));
+    assert_eq("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", sha256_hex(""));
+    assert_eq("b15875a8710ab7ac96fb5b5623041fa46a3acd015ddf05c71b6b98f847f944b8", sha256_hex("SHA-2 (Secure Hash Algorithm 2) is a set of cryptographic hash functions designed by the United States National Security Agency (NSA) and first published in 2001.[3][4] They are built using the Merkle–Damgård construction, from a one-way compression function itself built using the Davies–Meyer structure from a specialized block cipher."));
+};
+
+// Stuff for computing the constants because I hate just pasting tables. 
+
+fn map_in_place($T: Type, arr: []T, $f: @Fn(x: T) T) []T #generic = {
+    each(arr, fn(x) => { x[] = f(x[]); });
+    arr
+}
+
+// First 32 bits of the fractional component of x. 
+// Used for generating magic numbers for some hashing algorithms. 
+fn fraction32(x: f64) u32 = {
+    x := x - floor(x);
+    x := int(x * float(1.shift_left(32)));
+    x.trunc()
+}
+
+// calculate the prime numbers below n
+fn eratosthenes($n: i64) []u32 #fold = {
+    unprime: StaticBitSet(n) = empty();
+    out := u32.list(ast_alloc());
+    high := n.float().sqrt().int() + 1;
+    range(2, high) { i |
+        if !unprime&.get(i) {
+            out&.push(i.trunc());
+            j := i * i;
+            while => j < n {
+                unprime&.set(j);
+                j += i;
+            };
+        };
+    };
+    range(high, n) { i |
+        if !unprime&.get(i) {
+            out&.push(i.trunc());
+        };
+    };
+    
+    out.items()
+}
+
+// If you wish to write a hashing algorithm in Franca you must first invent the universe. 
+
+// TODO: make this an #intrinsic instead so we can get better register allocation. 
+fn byte_swap(x: u32) u32 #asm #aarch64 = (
+    rev(Bits.W32, x0, x0),
+    ret(),  
+);
+    
+fn byte_swap(x: i64) i64 #asm #aarch64 = (
+    rev(Bits.X64, x0, x0),
+    ret(),  
+);
+
+fn rev(sf: Bits, dest: RegO, src: RegI) u32 = 
+    @bits(sf, 0b10110101100000000001, sf, src, dest);
+
+// TODO: make this an #intrinsic instead so we can get better register allocation. 
+fn rotr(x: u32, $amount: u5) u32 #asm #aarch64 = (
+    @bits(Bits.W32, 0b00100111, Bits.W32, 0b0, @as(u5) x0, 0b0, amount, @as(u5) x0, @as(u5) x0),
+    ret(),
+);
+
+// TODO: real support for u32 once new backend is ready. 
+fn bit_xor(a: u32, b: u32) u32 #fold = 
+    (@as(i64) a.zext()).bit_xor(b.zext()).trunc();  // :slow
+fn bit_not(a: u32) u32 #fold = 
+    (@as(i64) a.zext()).bit_not().trunc();
+
+fn float(x: u32) f64 = 
+    float(@as(i64) x.zext()); 

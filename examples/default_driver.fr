@@ -36,6 +36,7 @@ Options :: @struct(
     own_exe := false,
     relocatable := false,
     implicit_context := true,
+    dynamiclib := false,
 );
 
 Action  :: @enum(i64) (run, build, test); ::enum(Action);
@@ -73,11 +74,16 @@ fn driver(vtable: *ImportVTable) void = {
     m.goal.type = QbeOutputPurpose.JitOnly;
     if !cmd.cfg.jit {
         if cmd.cfg.own_exe {
+            @assert(!cmd.cfg.relocatable || !cmd.cfg.dynamiclib, "cannot have both -dynamiclib and -c");
             m.goal.type = @if(cmd.cfg.relocatable, .Relocatable, .Exe);
+            if cmd.cfg.dynamiclib {
+                m.goal.type = .Dynamic;
+            };
         } else {
             m.goal.type = .AsmText;
         };
     };
+    assert(cmd.action == .build || !cmd.cfg.dynamiclib, "use 'build' with -dynamiclib");
     usage_msg :: "USAGE: franca examples/default_driver.fr % [filepath.fr]\n       %";
     @match(cmd.action) {
         fn build() => {
@@ -86,21 +92,40 @@ fn driver(vtable: *ImportVTable) void = {
                 build_options.wasm32 = true;
             };
             c := load_file(cmd.file, vtable, build_options);
-            fid := c.get_unique_named("main");
-            fid := fid.expect("did not find exactly one function called 'main'");
+            
             if cmd.cfg.jit {
                 panic("Selected jit backend so no artifact was produced for build.");
             } else {
+                // TODO: why doesnt this work
+                //fid, kind := @if(cmd.cfg.dynamiclib, {
+                //    (c.get_tagged("export"), ProgramEntry.ExportWithNames)
+                //}, {
+                //    fidd := c.get_unique_named("main");
+                //    fidd := fidd.expect("did not find exactly one function called 'main'");
+                //    fid, kind := (@slice(fidd), ProgramEntry.WrapMain);
+                //    (fid, kind)
+                //});
+                fid: []FuncId = empty();
+                kind := ProgramEntry.WrapMain;
+                if cmd.cfg.dynamiclib {
+                    fid = c.get_tagged("export");
+                    kind = .ExportWithNames;
+                } else {
+                    fidd := c.get_unique_named("main");
+                    fidd := fidd.expect("did not find exactly one function called 'main'");
+                    fid = @slice(fidd);
+                };
                 if cmd.cfg.qbe {
                     assert(!cmd.cfg.show_asm, "TODO: -S with qbe");
-                    c.compile_with_included_qbe(fid, .WrapMain, arch, os, m.goal.type);
+                    c.compile_with_included_qbe(fid, kind, arch, os, m.goal.type);
                 } else {
                     assert(cmd.cfg.llvm, "rn only two backends. update me as needed!");
-                    c.compile_with_llvm(fid, .WrapMain, cmd.cfg.debug_info, arch, os, cmd.cfg.show_asm, cmd.cfg.slow, cmd.cfg.relocatable);
+                    assert(!cmd.cfg.dynamiclib, "TODO: -dynamiclib only works with qbe");
+                    c.compile_with_llvm(fid[0], kind, cmd.cfg.debug_info, arch, os, cmd.cfg.show_asm, cmd.cfg.slow, cmd.cfg.relocatable);
                 };
                 @println("[built %]", if(cmd.cfg.wasm, => "a.wasm", => "a.out"));
             };
-            exit(0);
+            return();
         };
         fn run() => {
             if(cmd.file == "", => @panic(usage_msg, "run", "runs the function called 'main'"));
@@ -145,7 +170,7 @@ fn driver(vtable: *ImportVTable) void = {
                     run_cmd_blocking("./a.out", cmd.child_args);
                 };
             };
-            exit(0);
+            return();
         };
         fn test() => {
             if(cmd.file == "", => @panic(usage_msg, "test", "runs all functions marked '#test'"));
@@ -182,7 +207,7 @@ fn driver(vtable: *ImportVTable) void = {
                 } else {
                     if cmd.cfg.qbe {
                         assert(!cmd.cfg.show_asm, "TODO: -S with qbe");
-                        c.compile_with_included_qbe(fid, .TestRunnerMain, arch, os, m.goal.type);
+                        c.compile_with_included_qbe(@slice(fid), .TestRunnerMain, arch, os, m.goal.type);
                     } else {
                         assert(cmd.cfg.llvm, "rn only two backends. update me as needed!");
                         c.compile_with_llvm(fid, .TestRunnerMain, cmd.cfg.debug_info, arch, os, cmd.cfg.show_asm, cmd.cfg.slow, false);
@@ -314,12 +339,12 @@ fn compile_with_qbe(c: CompCtx, fid: FuncId, entry: ProgramEntry, arch: Arch, os
     //ir_out.remove();   
 }
 
-fn compile_with_included_qbe(c: CompCtx, fid: FuncId, entry: ProgramEntry, arch: Arch, os: Os, goal: QbeOutputPurpose) void = {
+fn compile_with_included_qbe(c: CompCtx, fid: []FuncId, entry: ProgramEntry, arch: Arch, os: Os, goal: QbeOutputPurpose) void = {
     @if(ENABLE_INTERNAL_QBE, {
         m := init_default_module_dyn(c.vtable, (os = os, arch = arch, type = goal));
         
         env: TargetEnv = (arch = arch, os = os);
-        asm_text := emit_qbe_included_dyn(m&, c&, @slice(fid), entry);
+        asm_text := emit_qbe_included_dyn(m&, c&, fid, entry);
         
         asm_out := if(goal != .AsmText, => "a.out", => "target/franca_qbe_temp.s"); // TODO: the version of tmp file that lets you have an extension because it wants the .s
         // TODO: new footgun, you'll get the wrong compiler in the context if you try to call sym/c_str at runtime of the driver now.  
@@ -355,7 +380,13 @@ fn compile_with_included_qbe(c: CompCtx, fid: FuncId, entry: ProgramEntry, arch:
                 end := timestamp();
                 @println("[assembler time: %ms]", end - start);
             }
-            fn Relocatable() => ();
+            fn Relocatable() => {
+                ir_out.close();
+            }
+            fn Dynamic() => {
+                ir_out.close();
+                println("made dynamic");
+            }
             @default => panic("unhandled QbeOutputType");
         }
         //ir_out.remove();   
@@ -455,6 +486,9 @@ fn parse_cli_args() Command = {
             };
             @case("-c") => {
                 cfg.relocatable = true;
+            };
+            @case("-dynamiclib") => {
+                cfg.dynamiclib = true;
             };
             @default => {
                 if arg.starts_with("-ctx=") {

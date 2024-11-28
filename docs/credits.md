@@ -1,4 +1,5 @@
-> If I have seen further, it is by standing on the shoulders of giants
+> If I have seen further, it is by standing on the shoulders of giants,
+> But I have not seen further, I mostly just fall off thier shoulders.
 
 ## Code
 
@@ -11,6 +12,13 @@ Individual files have license headers that reference thier original authors.
   - <https://c9x.me/git/qbe.git/tree/?id=626f0b278137ff6f8b7d910d9b3fc3cbdfbb39fc>
   - <https://lists.sr.ht/~mpu/qbe/patches/54822>
   - see `backend/README.md`
+- Zig: a general-purpose programming language and toolchain for maintaining robust, optimal and reusable software.
+  - <https://ziglang.org>
+  - MIT License. Copyright (c) Zig contributors.
+  - Mach-O: packing an export trie.
+- Wikipedia: the free encyclopedia
+  - Great for when you want to waste your time with lies about calling conventions
+  - sha256
 
 ## Resources
 

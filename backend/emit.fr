@@ -28,7 +28,7 @@ SymbolInfo :: @struct(
     kind: SymbolKind,
     local_but_marked_for_relocation: bool,
     is_thread_local: bool,  
-    referenced: bool,  // took address or called before knowing it was inlinable so you must actually emit the function. 
+    referenced: bool,  // took address or called before knowing it was inlinable so you must actually emit the function.
 );
 
 ::enum_basic(SymbolKind);
@@ -168,33 +168,28 @@ fn emit_data_to_segment(self: *QbeModule, dat: *Qbe.Dat) void = {
             id := dat.lnk.id;
             maybe_add_export(self, id, dat.lnk.export);
             off := if dat.lnk.thread {
-                @match(self.goal.type) {
-                    fn JitOnly() => panic("TODO: jit tls");
-                    fn AsmText() => panic("how did we get here?");
-                    @default => {
-                        assert(self.goal.os == .macos, "TODO: we only handle apple abi for now");
-                        // reserve a tls descriptor for this variable. 
-                        // the symbol references this descriptor instead of the initialization data. 
-                        // arm-apple-isel knows to convert addr to a load and call of the thunk. 
-                        ::assert(DONT_FORGET_OTHER_TLS_ARCH, "DONT_FORGET_OTHER_TLS_ARCH");
-                        desc_off := data_segment.mmapped.ptr.ptr_diff(self.tls_vars.next);
-                        descriptor := self.tls_vars&.reserve(TlsDescriptor);
-                        TlsDescriptor :: @struct(thunk: i64, key: i64, offset_in_thread_data: i64);
-                        
-                        // fixup for the thunk
-                        patch := ptr_cast_unchecked(TlsDescriptor, u8, descriptor);
-                        desc_sym := self.intern("_tlv_bootstrap");  // one underscore because we put an extra one.
-                        use_symbol(self, desc_sym) { desc_sym |
-                            desc_sym.fixups&.push((patch_at = patch, type = .DataAbsolute), self.gpa);
-                        };
-                        
-                        // NOT offset in data segment or distance between desc and init. 
-                        // the section has as magic flag so it knows where to look. 
-                        descriptor.offset_in_thread_data = self.tls_init&.len();
-                        
-                        desc_off
-                    };
-                }
+                @assert(@is(self.goal.type, .Relocatable, .Exe, .Dynamic), "TODO: jit tls");
+                assert(self.goal.os == .macos, "TODO: we only handle apple abi for now");
+                // reserve a tls descriptor for this variable. 
+                // the symbol references this descriptor instead of the initialization data. 
+                // arm-apple-isel knows to convert addr to a load and call of the thunk. 
+                ::assert(DONT_FORGET_OTHER_TLS_ARCH, "DONT_FORGET_OTHER_TLS_ARCH");
+                desc_off := data_segment.mmapped.ptr.ptr_diff(self.tls_vars.next);
+                descriptor := self.tls_vars&.reserve(TlsDescriptor);
+                TlsDescriptor :: @struct(thunk: i64, key: i64, offset_in_thread_data: i64);
+                
+                // fixup for the thunk
+                patch := ptr_cast_unchecked(TlsDescriptor, u8, descriptor);
+                desc_sym := self.intern("_tlv_bootstrap");  // one underscore because we put an extra one.
+                use_symbol(self, desc_sym) { desc_sym |
+                    desc_sym.fixups&.push((patch_at = patch, type = .DataAbsolute), self.gpa);
+                };
+                
+                // NOT offset in data segment or distance between desc and init. 
+                // the section has as magic flag so it knows where to look. 
+                descriptor.offset_in_thread_data = self.tls_init&.len();
+                
+                desc_off
             } else {
                 segment.mmapped.ptr.ptr_diff(next[])
             };
@@ -378,7 +373,7 @@ fn do_jit_fixups(self: *QbeModule, id: u32, segment: SegmentType, final_offset: 
         dest := self.segment_address(symbol.segment, symbol.offset);
         fixups := symbol.fixups&;
         self.do_fixups(dest, symbol);
-        if self.goal.type == .Exe { //  || symbol.segment == .Code // :canireallynothavecodeberelative
+        if self.goal.type == .Exe || self.goal.type == .Dynamic { //  || symbol.segment == .Code // :canireallynothavecodeberelative
             // Since it's a local symbol, we don't care about the relocations anymore. The linker never needs to know. 
             // TODO: actually thats also true for imports becuase calls go through __got. 
             unordered_retain(fixups, fn(it) => it.type&.is(.DataAbsolute));

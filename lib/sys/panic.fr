@@ -75,26 +75,23 @@ fn assert(cond: bool, $msg: Fn(void, List(u8))) void = {
     }
 }
 
-fn assert(cond: bool, msg: Str) void = {
-    if(cond.not()) {
+// inlining this but not panic so you don't spill everything for a tiny check helps debug assertion builds quite a bit -- Nov 26.
+fn assert(cond: bool, msg: Str) void #inline = {
+    if !cond {
         panic(msg); // TODO: fix overload resolution so this doesn't need the semi colon to turn Never to void
     }
 }
 
-// This gets propagated so it doesn't have to compile all the formatting stuff if its false which makes the tiny tests compile faster. 
-VERBOSE_ASSERT :: true; 
-
 // TODO: maybe call this expect_eq to distinguish from a normal assert_eq that isn;t limmited to one call per lexical occurance in a test. 
 fn assert_eq($T: Type) void = {
     // TODO: unhelpful error message when there's no fn eq for T. -- Apr 27
-    fn assert_eq(lhs: T, rhs: T) void = {
-        @if(::VERBOSE_ASSERT, assert(lhs.eq(rhs)) { ()List(u8) |
-            out: List(u8) = list(40, temp());
-            @fmt(out&, "Assertion Failed. Expected (% == %)", lhs, rhs);  // TODO: version of @fmt that makes the list for you and returns it. 
-            out
-        }, {
-            assert(lhs.eq(rhs), "assertion failed");
-        });
+    fn assert_eq(lhs: T, rhs: T) void = {  // TODO: why can't we #inline this? -- Nov 26
+        if !lhs.eq(rhs) {
+            assertion_failed :: fn(lhs: T, rhs: T) Never #noinline = {
+                @panic("Assertion Failed. Expected (% == %)", lhs, rhs)
+            };
+            assertion_failed(lhs, rhs);
+        };
     }
 }
 
@@ -105,9 +102,8 @@ fn assert_eq($T: Type) void = {
 ::assert_eq(f64);
 ::assert_eq(Str);
 
-/// Stupid question, but I guess it's wierd if I don't let you ask.
-fn assert_eq(_: void, __: void) void = ();
-
+// TODO: would be much faster if i could reliably outline the cold path here
+//       it's just a bit painful to get the nice printing. -- Nov 26
 // @assert(true);
 // @assert(true, "info %", 123);
 fn assert(arg: FatExpr) FatExpr #macro = {
@@ -163,10 +159,7 @@ fn assert_cond($overload_set: OverloadSet, op: Str, arg: FatExpr) FatExpr = {
                 format_into(@{ out& }, parts.rest(2), arg.loc)
             }, => @{()} )];
             
-            // TODO: you can't '@h(a)' because it starts parsing a trailing expr after and theres no closing '
-            @[if(VERBOSE_ASSERT, => @{
-                @fmt(out&, "\n   Expected (% % %). ", lhs, @[@literal op], rhs);
-            }, => @{()} )];
+            @fmt(out&, "\n   Expected (% % %). ", lhs, @[@literal op], rhs);
             
             panic(out.items());
         };
