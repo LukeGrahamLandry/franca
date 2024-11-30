@@ -14,6 +14,8 @@
 #include_std("compiler/driver_io.fr");  
 #include_std("compiler/ast_external.fr");  
 #include_std("compiler/backend/lib.fr");  
+#include_std("compiler/emit_ir.fr");  
+#include_std("compiler/worker.fr");  
 
 LINK_QBE_C :: false;
 #include_std("backend/lib.fr");
@@ -45,6 +47,7 @@ SelfHosted :: @rec @struct(
     vtable: *ImportVTable,
     stack_base: i64,
     comptime_libraries: HashMap(Symbol, DlHandle),
+    shared: ?*CodegenShared = .None,
 );
 
 OverloadKey :: @struct(arg: Type, req: Type);
@@ -108,53 +111,39 @@ fn load_file_in_compiler(vtable: *ImportVTable, path: Str, opts: *BuildOptions) 
 }
 
 fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
+    start := timestamp();
     opts := vtable.default_build_options(); 
     c := @try(vtable.load_file_in_compiler(path, opts)) return;
     
-    if c.get_unique_named("driver") {f|
-        start := timestamp();
-        callee := c.get_jitted(f);
-        safe :: safety_check_enabled(.DebugAssertions);
-        @eprintln(">>> compiler configuration: context=%, threads=%, debug_assertions=%.", if(query_context_is_implicit(), => "implicit", => "static"), use_threads, safe);
-        @eprintln(">>> Loaded driver in %ms.", timestamp() - start);
-        callee := assume_types_fn(Arg = *ImportVTable, Ret = void, ptr = callee);
-        push_dynamic_context {
-            context(DefaultContext)[].comptime = rawptr_from_int(0);
-            callee(vtable);
-        };
-        exit(0);
+    self := c.data.cast()[][];
+    
+    // TODO: remove this soon!
+    fn getenv(name: CStr) CStr #libc;
+    var := getenv("FRANCA_NEW".sym().c_str());
+    use_new_backend := !var.ptr.is_null() && var.str() == "true";
+    if use_new_backend {
+        m := self.get_alloc().box(QbeModule);
+        m[] = init_default_module(arch = .aarch64, os = .macos, type = .JitOnly); // TODO: :hardcode_os
+        self.shared = (Some = (init(m, @as(CodegenWorker) codegen_thread_main)));
     };
     
-    if c.get_unique_named("main") {f|
-        callee := c.get_jitted(f);
-        callee := assume_types_fn(Arg = void, Ret = void, ptr = callee);
-        push_dynamic_context {
-            context(DefaultContext)[].comptime = rawptr_from_int(0);
-            callee();
-        };
-        exit(0);
+    f := c.get_unique_named("driver") || c.get_unique_named("main") || panic("expected a function called main or driver.");
+
+    callee := if use_new_backend {
+        main_thread_pump(self, @slice(f), .Jit);
+        rawptr.zeroed()
+    } else {
+        c.get_jitted(f)
     };
     
-    sym_test := c.intern_string("test");
-    tests := c.data.get_fns_with_tag(sym_test);
-    for tests { f |
-        @println("===== [%] =====", c.get_string(c.get_function_name(f)));
-        callee := c.get_jitted(f);
-        callee := assume_types_fn(Arg = void, Ret = void, ptr = callee);
-        push_dynamic_context {
-            context(DefaultContext)[].comptime = rawptr_from_int(0);
-            callee();
-        };
+    safe :: safety_check_enabled(.DebugAssertions);
+    @eprintln(">>> compiler configuration: context=%, threads=%, debug_assertions=%.", if(query_context_is_implicit(), => "implicit", => "static"), use_threads, safe);
+    @eprintln(">>> compiled driver in %ms.", timestamp() - start);
+    callee := assume_types_fn(Arg = *ImportVTable, Ret = void, ptr = callee);
+    push_dynamic_context {
+        context(DefaultContext)[].comptime = rawptr_from_int(0);
+        callee(vtable);
     };
-    
-    // TODO: remove this logging
-    c := c.data.cast()[][];
-    yield_count := c.dispatch.yield_count;
-    if yield_count != 0 {
-        @eprintln("[yield_count = %; all_functions = %; lit_fns = %]", 
-                yield_count, c.functions.len, c.dispatch.lit_fn_count);
-    };
-    
     .Ok
 }
 
@@ -302,6 +291,7 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
     );
     env := a.boxed(ComptimeEnvironment, env);
     opts.env = ComptimeEnvironment.raw_from_ptr(env);
+    
     self: SelfHosted = (
         pool = pool,
         codemap = codemap,

@@ -591,17 +591,31 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
             };
             @case(Flag.intrinsic.ident()) => {
                 good = true;
-                value := @unwrap(tag.args&.as_ref(), "#redirect requires arg") return;
+                value := @unwrap(tag.args&.as_ref(), "#intrinsic requires arg") return;
                 intrinsic_ty := @unwrap(self.env.intrinsic_type, "used #intrinsic during boot") return;
                 op := @check(self.immediate_eval_expr(value, intrinsic_ty)) return;
                 op := Intrinsic.assume_cast(op&)[];
-                func.body = (Intrinsic = op);
+                get_intrinsic(func.body&, self.get_alloc())[].bc = op;
                 // TODO: redundant with emit_bc
                 if op != .GetContext {
                     func.set_flag(.NoContext);
                 } else { 
                     func.set_flag(.YesContext);
                 };
+            };
+            // TODO: im afraid this is slow :( its especially dumb because i do it for a billion int_from_ptr instantiations that do nothing
+            @case(Flag.ir.ident()) => {
+                good = true;
+                value := @unwrap(tag.args&.as_ref(), "#ir requires arg") return;
+                args  := value.items();
+                @err_assert(args.len == 2, "expected #ir(.op, .cls)") return;
+                op_name  := @unwrap(args[0]&.ident(), "#ir(X, _) expected symbol") return;
+                cls_name := @unwrap(args[1]&.ident(), "#ir(_, X) expected symbol") return;
+                o := @unwrap(Qbe.O.from_name(self.pool.get(op_name)), "#ir invalid op name") return;
+                k := @unwrap(Qbe.Cls.from_name(self.pool.get(cls_name)), "#ir invalid op name") return;
+                i := get_intrinsic(func.body&, self.get_alloc());
+                i.ir_op  = @as(i32) o;
+                i.ir_cls = @as(i32) k;
             };
             @case(Flag.redirect.ident()) => {
                 good = true;

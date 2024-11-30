@@ -12,6 +12,7 @@
   and use that as an argument name for overloading.
 - have string literals coerce to c strings instead of `.sym().c_str()`?
 - have a test where you force inline everything that's not recursive to stress test the backend dealing with large functions.
+- broke repro again. is there a certain size of program is doesn't like?
 
 ##
 

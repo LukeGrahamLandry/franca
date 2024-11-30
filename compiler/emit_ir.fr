@@ -1,0 +1,1013 @@
+
+EmitIr :: @struct(
+    f: *Qbe.Fn,
+    program: CompCtx,
+    last_loc: Span,
+    var_lookup: HashMap(Var, Qbe.Ref),  // TODO: just var id
+    inlined_return_addr: HashMap(LabelId, ReturnTarget),
+    out_alloc: Alloc,
+    blk: *Qbe.Blk, 
+    debug: bool,
+    context: Qbe.Ref,
+    dyn_context: bool,
+    blocks: List(*Qbe.Blk),
+);
+
+ReturnTarget :: @struct(
+    block: *Qbe.Blk,
+    p: Placement,
+    used: bool,
+);
+
+Placement :: @tagged(Assign: Qbe.Ref, Scalar, Blit: Qbe.Ref, NewMemory, Discard);
+
+// TODO: this somehow breaks repro
+//::tagged(Placement);
+
+// TODO: CodegenEntry could be part of ast_external for now. 
+fn emit_ir(comp: CompCtx, m: *QbeModule, f: FuncId, when: ExecStyle, out: *CodegenEntry) Res(void) = {
+    result: Res(void) = .Ok;
+    push_dynamic_context {
+        context(DefaultContext)[].temporary_allocator = entry.arena&;
+        bc.jitted&.extend_blanks(f);
+        func := comp.get_function(f); 
+        c := comp.data.cast()[][];
+        opts := comp.get_build_options();
+        self: EmitIr = (
+            program = comp,
+            last_loc = func.loc,
+            var_lookup = init(temp()),
+            inlined_return_addr = init(temp()),
+            is_ssa_var = empty(),
+            debug = opts.debug_info || func.get_flag(.LogIr),
+            dyn_context = if(when == .Aot, => opts.implicit_context_runtime, => opts.implicit_context_comptime),
+        );
+        @debug_assert(func.get_flag(.EnsuredCompiled), "fn not compiled?");
+        
+        res := self&.emit_body(f);
+        @debug_assert(body.vars.len <= MAX_u16.zext() && body.blocks.len <= MAX_u16.zext(), "program too big for my tiny brain");
+        
+        if res&.is_err() {
+            res.Err.update_main_span(self.last_loc);
+            result = (Err = res.Err)
+        } else {
+            body.context = func.get_flag(.YesContext) && !func.get_flag(.NoContext);
+            if !body.context {
+                func.set_flag(.NoContext);
+            };
+        };
+    };
+    result
+}
+
+// TODO: this is going to change the calling convention for small strange aggragates maybe (to match c). 
+//       hopefully i don't use any of those for something important. 
+
+// TODO: if you have an unclosed string it randomly decides later top level vars are undeclared? -- Jul 7 
+// note: mirrors compile_for_arg
+fn bind_args(self: *EmitIr, arguments: *Pattern) Res(void) #once = {
+    ArgInfo :: @struct(r: Qbe.Ref, ty: Type, name: Var, scalar: bool);
+    args := ArgInfo.list(arguments.bindings.len, temp());
+    
+    func := self.program.get_function(self.result.func);
+    arg_ty := func.finished_arg.unwrap();
+    
+    // Need to emit all the `arg` instructions at the beginning of the start block before doing any allocas. 
+    each arguments.bindings { binding |
+        continue :: local_return;
+        @debug_assert(bindings.kind != .Const, "tried to emit function with $const parameter");
+        ty := binding.unwrap_ty();
+        info := self.program.get_info(ty);
+        name := binding.var().expect("function arg always has name i think?");
+        if info.stride_bytes == 0 {
+            // TODO: make sure that we don't emit any uses of types with no runtime storage. 
+            self.var_lookup&.insert(name, QbeConZero);
+            continue();
+        };
+        
+        _, k := self.load_op(ty);
+        scalar := k != .Ke;
+        
+        op, k, a0 := @if(scalar, 
+            (Qbe.O.par, k, QbeNull),
+            (Qbe.O.parc, Qbe.Cls.Kl, self.get_aggregate(ty))
+        );
+        r := self.f.newtmp("a", k)
+        self.emit(op, k, r, a0, QbeNull)
+        args&.push(r = r, ty = ty, name = name, scalar = scalar);
+    };
+    
+    // only arg instructions and allocas in the start block. 
+    self.blk = self.new_block();
+    
+    each args { a | 
+        mem := if(!a.scalar, => a.r) {
+            // TODO: use mutable variables if they don't take the address of the argument. 
+            mem := self.alloca(a.type);
+            self.emit(self.store_op(a.type), .Kw, QbeNull, a.r, mem);
+            mem
+        };
+        self.declare_var(a.name, mem);
+    };
+    .Ok
+}
+
+// note: mirrors bind_args
+fn compile_for_arg(self: *EmitIr, arg: *FatExpr) Res([]Qbe.Ins) = {
+    out := Qbe.Ins.list(parts.len, temp());
+    parts := arg.items();
+    info := self.program.get_type(arg.ty);
+    f := info.Struct.fields;
+    @debug_assert(info.is(.Struct) && f.is_tuple && f.len == parts.len, "ICE: compile_for_arg expected tuple with size matching type.");
+    
+    enumerate parts { i, val |
+        _, k := self.store_op(f[i].ty);
+        ins := if k != .Ke {  // scalar
+            r := @try(self.compile_expr(val, .Scalar)) return;
+            make_ins(.arg, k, QbeNull, r, QbeNull)
+        } else {  // aggregate
+            // TODO: you really want to do `fn Deref(ref) => @try(self.compile_expr(ref, .Scalar)) return;`
+            //       to skip an extra blit that the abi stuff will do for you. 
+            //       but we don't know if a later argument expression will modify that memory. 
+            r      := @try(self.compile_expr(val, .NewMemory)) return;
+            r_type := self.get_aggregate(ty);
+            make_ins(.argc, .Kl, QbeNull, r_type, r)
+        };
+        out&.push(ins);
+    };
+    (Ok = out.items())
+}
+
+fn context_par_e(self: *EmitIr) void = {
+    if self.dyn_context {
+        // We might remove this instruction at the end if we decide this function can be #no_context. 
+        self.context = self.f.newtmp("context", .Kl);
+        self.emit(.pare, .Kl, self.context, QbeNull, QbeNull);
+    } else {
+        self.context = QbeNull;
+    };
+}
+
+fn finalize_blocks(self: *EmitIr) void = {
+    todo()
+}
+
+fn emit_body(self: *EmitIr, f: FuncId) PRes #once = {
+    func := self.program.get_function(f);
+    
+    self.f.start = self.new_block();
+    self.blk = self.f.start;
+
+    body: *FatExpr = @match(func.body&) {
+        fn Normal(body) => body;
+        fn Intrinsic(op) => {
+            // Direct calls will be inlined in emit_bc but someone might be trying to call through a function pointer. 
+            // TODO: don't add to callees for direct calls. -- Jul 24
+            
+            if op.bc == .GetContext {
+                self.context_par_e();
+            };
+            arg := arg.items();
+            @debug_assert(arg.len == 1 || arg.len == 2);
+            
+            f_ty := func.f_ty.finished_ty().unwrap();
+            arg_ty := self.program.data.cast()[][].arg_types(f_ty.arg);
+            
+            _, k0 := self.load_op(arg_ty[0]);
+            a0 := self.f.newtmp("a", k_0);
+            self.emit(.par, k0, a0, QbeNull, QbeNull);
+            a1 := QbeNull;
+            if arg.len == 2 {
+                _, k1 := self.load_op(arg_ty[1]);
+                a1 = self.f.newtmp("a", k_1);
+                self.emit(.par, k1, a1, QbeNull, QbeNull);
+            };
+            
+            self.f.retty = -1;
+            _, kr := self.load_op(f_ty.ret);
+            self.blk.jmp.arg = @try(self.emit_intrinsic(op, .Scalar, @slice(a0, a1), caller, f_ty)) return;
+            self.blk.jmp.type = ret_op(kr);
+            self.finalize_blocks();
+            return(.Ok)
+        }
+        // You should never actually try to run this code, the caller should have just done the call,
+        // so there isn't an extra indirection and I don't have to deal with two bodies for comptime vs runtime,
+        // just two ways of emitting the call.
+        @default => return(.Ok);
+    };
+    
+    self.context_par_e();
+    // note: this rewrites self.blk
+    @try(self.bind_args(func.arg&)) return;
+    
+    self.f.start.jmp.type = .Jmp;
+    self.f.start.s1 = self.blk;
+    result := @try(self.compile_expr(body, p)) return;
+    
+    // Note: this is different from the body expr type because of early returns.
+    ret := self.program.get_function(f)[].finished_ret.unwrap();
+    _, k := self.load_op(ret); 
+    scalar := k != .Ke;
+    p: Placement = @if(scalar, .Scalar, .NewMemory);
+    if ret == void || ret.is_never() {  // :get_or_create_type
+        p = .Discard;
+    };
+
+    self.blk.jmp.arg := result;
+    @if_else {
+        @if(ret.is_never()) => {
+            self.blk.jmp.type = .hlt;
+        };
+        @if(scalar) => {
+            self.f.retty = -1;
+            // TODO: tell it about b/h so we can fully follow the c abi :FUCKED but the old one didn't do it either. 
+            self.blk.jmp.type = ret_op(k);
+        };
+        @else => {
+            self.f.retty = self.get_aggregate(ret).val();
+            self.blk.jmp.type = .retc;
+        };
+    };
+    self.finalize_blocks();
+    
+    // TODO: remove first instruction of start if we think we're #no_context. 
+    //       but actually then you have to readjust everything because the args need to be first. 
+    .Ok
+}
+
+fn ret_op(k: Qbe.Cls) Qbe.J = 
+    @as(Qbe.J) @as(i32) Qbe.J.retw.raw() + k.raw()
+
+fn emit_runtime_call(
+    self: *EmitIr,
+    f_ty: FnType,
+    args: []Qbe.Ins,
+    p: Placement,
+    callee: Qbe.Ref,
+    dyn_context: bool,
+) Res(Qbe.Ref) = { 
+    if dyn_context && self.context != QbeNull {
+        self.emit(.arge, .Kl, QbeNull, self.context, QbeNull);
+    };
+    append(self.blk.ins&, self.blk.nins&, args.ptr, args.ptr.offset(args.len));
+    _, k := self.store_op(f_ty.ret);
+    scalar := k != .Ke;
+    type_r := QbeNull;
+    info := self.program.get_info(f_ty.ret);
+    result_r := if f_ty.ret == void || (scalar && p == .Discard) {  // :get_or_create_type
+        QbeNull
+    } else {
+        if !scalar {
+            k = .Kl;
+            type_r = self.get_aggregate(f_ty.ret);
+        };
+        self.scalar_dest(p, k)
+    };
+    self.emit(.call, k, result_r, callee, type_r);
+    
+    if(result_r == QbeNull, => return(Ok = result_r));
+    if scalar { 
+        return(Ok = self.scalar_result(p, result_r, f_ty.ret));
+    };
+    (Ok = @match(p) {
+        fn NewMemory() => result_r;
+        fn Discard()   => QbeNull;
+        fn Blit(dest) {
+            self.blit(dest, result_r, info.stride_bytes);
+            dest
+        }
+        @default => return(@err("ICE: tried to assign aggragate call to scalar placement"));
+    })
+}
+
+fn compile_stmt(self: *EmitIr, stmt: *FatStmt) PRes = {
+    self.last_loc = stmt.loc;
+    @match(stmt.stmt&) {
+        fn Eval(expr) => {
+            @try(self.compile_expr(expr, .Discard)) return;
+            .Ok
+        }
+        fn DeclVar(f) => {
+            @debug_assert_ne(f.name.kind, VarType.Const);
+            @debug_assert(f.ty&.is(.Finished), "variable not typechecked");
+            ptr  := @try(self.compile_expr(f.value&, .NewMemory)) return;
+            self.declare_var(f.name, ptr);
+        }
+        fn Set(f) => {   // :PlaceExpr
+            // we care about the type of the pointer, not the value because there might be a cast.
+            @match(f.place.expr&) {
+                // TODO: take advantage of mutable variables to generate less noisy code. 
+                fn GetVar(_) => panic("ICE: var set should be converted to place expr");
+                fn Deref(arg) => {
+                    dest := @try(self.compile_expr(arg[], .Scalar)) return;
+                    @try(self.compile_expr(f.value&, (Blit = dest))) return;
+                    .Ok
+                }
+                @default => return(@err("TODO: other `place=e;` :("));
+            }
+        }
+        fn DeclVarPattern(f) => {
+            simple := f.binding.bindings.len == 1 || f.value.expr&.is(.Tuple);
+            if simple { 
+                // This is the pattern we generate for capturing calls. 
+                parts := f.value&.items();
+                @err_assert(parts.len(), f.binding.bindings.len(), "ICE: DeclVarPattern tuple size mismatch") return;
+                enumerate parts { i, value |
+                    b   := f.binding.bindings[i]&;
+                    ptr := @try(self.compile_expr(value, .NewMemory)) return;
+                    if b.var() { name |
+                        self.declare_var(name, ptr);
+                    };
+                };
+            } else {
+                // it's a destructuring (not inlined args)
+                // We store the whole value in a stack slot and then save pointers into different offsets of it as thier own variables.
+                
+                base := @try(self.compile_expr(f.value&, .NewMemory, false)) return;
+                info := self.program.get_type(f.value.ty);
+                @err_assert(info.is(.Struct), "destructure must be tuple") return;
+                fields := info.Struct.fields&;
+                @debug_assert_eq(fields.len, f.binding.bindings.len, "destructure size mismatch");
+                enumerate f.binding.bindings.items() { i, b |
+                    f       := fields[i]&;
+                    @err_assert(f.kind != .Const, "TODO: destructuring skip const fields") return;
+                    name    := @unwrap(b.var(), "tuple binding requires name") return;
+                    element := self.offset(base, self.f.getcon(f.byte_offset));
+                    self.declare_var(name, element);
+                };
+            };
+            .Ok
+        };
+        fn Noop() => .Ok;
+        // Can't hit DoneDeclFunc because we don't re-eval constants.
+        @default => @err("ICE: stmt not desugared");
+    }
+}
+
+// This section looks like we could just use WalkAst, 
+// but this operation is subtble enough that making control flow more indirect would probably make it more confusing. 
+//
+// If p == .ResAddr, the top of the stack on entry to this function has the pointer where the result should be stored.
+fn compile_expr(self: *EmitIr, expr: *FatExpr, p: Placement) PRes = {
+    @debug_assert(!expr.ty.is_unknown(), "Not typechecked: %", self.program.log(expr));
+    @debug_assert(self.slot_count(expr.ty).lt(16).or(p != .PushStack), "% %", self.program.log(expr), self.program.log(expr.ty));
+    self.last_loc = expr.loc;
+
+    expr_ty := expr.ty;
+    (Ok = @match(expr.expr&) {
+        fn Cast(v)  => {
+            // TODO: bleh, make the front end check this? 
+            from := self.program.get_info(v.ty).stride_bytes();
+            to   := self.program.get_info(expr_ty).stride_bytes();
+            @err_assert(from == to, "@as size mismatch: % vs %", self.program.log(v.ty), self.program.log(expr_ty)) return;
+            return(self.compile_expr(v[], p))
+        }
+        fn Call(f)    => return(self.emit_call(f.f, f.arg, p));
+        fn Block(f)   => return(self.emit_block_expr(expr, p));
+        fn Value(f)   => return(self.emit_value(f.bytes&, p, expr.ty));
+        fn If(_)      => return(self.emit_call_if(expr, p));
+        fn Loop(arg)  => return(self.emit_call_loop(arg[]));
+        fn Addr(arg)  => return(self.addr_macro(arg[], p));
+        fn StructLiteralP(pattern) => return(self.construct_aggregate(pattern, expr.ty, p));
+        fn Slice(arg) => {
+            if(p == .Discard, => return(self.compile_expr(arg[], .Discard));
+            
+            container_ty := arg.ty;
+            // Note: number of elements, not size of the whole array value.
+            ty, count := @match(arg.expr) {
+                fn Tuple(parts) Ty(Type, i64) => { 
+                    fst := parts[0];
+                    (fst.ty, parts.len) 
+                };
+                @default => (arg.ty, 1);
+            };
+            ptr  := @try(self.compile_expr(arg[], .NewMemory)) return;
+            dest := self.get_memory(p, expr_ty);
+            self.emit(.storel, .Kw, QbeNull, ptr, dest);
+            self.emit(.storel, .Kw, QbeNull, self.f.getcon(count), self.offset(dest, 8));
+            dest
+        };
+        fn Deref(arg) => {
+            src := @try(self.compile_expr(arg[], @if(p == .Discard, .Discard, .Scalar))) return; // get the pointer
+            // we care about the type of the pointer, not the value because there might be a cast. (// TODO: that shouldn't be true anymore because of ::Cast)
+            value_type := self.program.unptr_ty(arg.ty).unwrap();
+            self.hlt_if_never(expr_ty);
+            size := self.program.get_info(value_type).stride_bytes();
+            if(p == .Discard || size == 0, => return(QbeNull));
+            if p == .Scalar {
+                @debug_assert(size <= 8);
+                return(self.load(src));
+            };
+            dest := self.get_memory(p, value_type);
+            self.blit(dest, src, size);
+            dest
+        };
+        fn FnPtr(arg) => {
+            f := @unwrap(arg[].as_const(), "expected fn for ptr") return;
+            f := FuncId.assume_cast(f&)[];
+            f = self.program.follow_redirects(f);
+            callee_r := self.func_ref(f);
+            self.scalar_result(p, callee_r, i64)  // :get_or_create_type
+        };
+        fn Unreachable() => {
+            self.hlt_if_never(Never); // :get_or_create_type
+            QbeNull
+        }
+        fn Uninitialized() => {
+            @err_assert(!expr_ty.is_never(), "call exit() to produce a value of type 'Never'") return;
+            // Wierd special case I have mixed feelings about. should at least set to sentinal value in debug mode.
+            // TODO: if(opts.zero_init_memory, => self.zero_memory_at_top_of_stack(expr_ty));
+            @match(p) {
+                fn Scalar() => QbeConZero;
+                fn Blit(it) => it;
+                fn NewMemory() => self.alloca(expr_ty);
+                fn Discard() => QbeNull;
+            }
+        };
+        fn Tuple(values) => {
+            raw := self.program.raw_type(expr.ty); // TODO: do i need this? 
+            @match(self.program.get_type(raw)) {
+               fn Struct(f) => {
+                    @err_assert(f.layout_done, "ICE: struct layout not ready.") return;
+                    @assert_eq(f.fields.len, values.len);
+                    @err_assert(f.is_tuple, "Expr::Tuple can only create tuple type") return;
+                    if p == .Scalar {
+                        @err_assert(f.fields.len == 1, "ICE: non single field struct as scalar");
+                        // TODO: assert that the type is actually a scalar.
+                        return(self.compile_expr(values[0]&, (Blit = dest));
+                    };
+                    base := self.get_memory(p, expr_ty);
+                    range(0, f.fields.len) { i |
+                        dest := self.offset(base, f.fields[i].byte_offset);
+                        @try(self.compile_expr(values[i]&, (Blit = dest))) return;
+                    };
+                    base
+                }
+                fn Array(f) => {
+                    @debug_assert_eq(values.len(), f.len.zext());
+                    element_size := self.program.get_info(f.inner).stride_bytes();
+                    base := self.get_memory(p, expr_ty);
+                    mem  := base;
+                    each values { value |
+                        @try(self.compile_expr(value, (Blit = mem))) return;
+                        mem = self.offset(mem, element_size);
+                    };
+                    mem
+                }
+                @default => return(@err("Expr::Tuple should have struct type not %. (0/1 element tuple maybe?)", self.program.log(raw)));
+            }
+        }
+        fn PtrOffset(f) => {
+            // TODO: compiler has to emit tagchecks for enums now! but it does not!
+            base  := @try(self.compile_expr(f.ptr, .Scalar)) return;
+            field := self.offset(base, f.bytes.trunc());
+            self.scalar_result(field, i64) // :get_or_create_type
+        }
+        fn Switch(f) => return(self.emit_switch(expr, p));
+        @default => @panic("ICE: didn't desugar: %", self.program.log(expr));
+    })
+}
+
+fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) Res(Qbe.Ref) #once = {
+    caller := self.program.get_function(self.result.func);
+    @match(self.program.get_type(f.ty)) {
+        fn Fn(f_ty) => {
+            f_id := @unwrap(f.as_const(), "ice: tried to call non-const fn %", self.program.log(f)) return;
+            f_id := FuncId.assume_cast(f_id&)[];
+            func := self.program.get_function(f_id);
+            cc := func.cc.unwrap();
+            @err_assert(!func.get_flag(.Generic), "tried to emit call to unlowered #generic") return;
+            @debug_assert(!func.get_flag(.MayHaveAquiredCaptures), "tried to emit call to unlowered maybe '=>'");
+            @assert(cc != .Inline, "ICE: tried to call inlined %", self.program.get_string(func.name));
+
+            // TODO: ideally the redirect should just be stored in the overloadset so you don't have to have the big Func thing every time.
+            // TODO: audit: is this f_ty different from the one we just got from the expression type? -- Jul 8
+            f_ty := func.finished_ty().unwrap(); // kinda HACK to fix unaligned store? 
+            original_f_id := f_id;
+            f_id = self.program.follow_redirects(f_id);
+            
+            // TODO: allow Merged with intrinsic
+            if callee.body&.is(.Intrinsic) {
+                op := callee.body.Intrinsic&;
+                arg := arg.items();
+                a0 := @try(self.compile_expr(arg[0]&, .Scalar)) return;
+                a1 := if(arg.len == 1, => QbeNull, => @try(self.compile_expr(arg[1]&, .Scalar)) return;
+                return(self.emit_intrinsic(op, p, @slice(a0, a1), caller, f_ty.ret));
+            };
+            callee := self.program.get_function(f_id);
+            if !caller.get_flag(.ComptimeOnly) && original_f_id == f_id {
+                // TODO: it would be nice if this was at the beginning and you never tried to emit anything that was comptimeonly
+                //       that requires never adding them to callees and then later realizing you can inline them, which would make sense. -- Aug 29
+                @debug_assert(!(self.result.when == .Aot && callee.get_flag(.ComptimeOnly)), "cannot .Aot .ComptimeOnly % %", f_id, self.program.log(callee));
+            };
+            context := !callee.get_flag(.NoContext);
+            if context {
+                caller.set_flag(.YesContext);
+            };
+            if self.debug {
+                // TODO: O.dbgloc would be nice
+            };
+            
+            callee_r := self.func_ref(f_id);
+            arg := @try(self.compile_for_arg(arg)) return;
+            self.emit_runtime_call(f_ty, arg, p, callee_r, context)
+        }
+        fn FnPtr(f_ty) => {
+            if self.dyn_call_context { 
+                caller.set_flag(.YesContext);
+            };
+            callee := @try(self.compile_expr(f, .Scalar)) return;
+            arg    := @try(self.compile_for_arg(arg)) return;
+            self.emit_runtime_call(f_ty.ty, arg, p, callee, self.dyn_call_context)
+        }
+        fn Label(_) => {
+            label := @unwrap(f.as_const(), "called label must be const") return;
+            label := LabelId.assume_cast(label&)[];
+
+            ret := self.inlined_return_addr&.get_ptr(label);
+            ret := @unwrap(ret, "missing return label. forgot '=>' on function?") return;
+            ret.used = true;  // note: updating the one in the map! not a copy
+            
+            result := @try(self.compile_expr(arg, ret.p)) return;
+            if self.blk.jmp.type == .Jxxx {  // TODO: can this ever not be true? @loop? return(return(x))?
+                self.blk.jmp.type = .jmp;
+                self.blk.s1 = ret.blk;
+            };
+            (Ok = result)
+        }
+        @default => @panic("ICE: non callable: %", self.program.log(f));
+    }
+}
+
+fn emit_intrinsic(self: *EmitIr, op: *IntrinsicPayload, p: Placement, arg: []Qbe.Ref, caller: *Func, expr_ty: Type) Res(Qbe.Ref) = {
+    (Ok = @match(op.bc) {
+        fn GetContext() => {
+            @assert(self.dyn_context, "TODO: support static context");
+            caller.set_flag(.YesContext);  // TODO: you might have setcontext for yourself
+            self.unify(p); // because we don't know if they'll set again before using. meh. 
+            self.context
+        }
+        fn SetContext() => {
+            @assert(self.dyn_context, "TODO: support static context");
+            if self.context != QbeNull {
+                self.context = self.f.newtmp("context", .Kl);
+            };
+            self.emit(.copy, .Kl, self.context, arg[0], QbeNull);
+            QbeConZero
+        }
+        @default => {
+            k := @as(Qbe.Cls) op.ir_cls;
+            r := self.scalar_dest(p, k); 
+            self.emit(@as(Qbe.O) op.ir_op, k, r, a0, a1);
+        };
+    })
+    Ok = self.scalar_result(p, r, expr_ty))
+}
+
+fn func_ref(self: *EmitIr, f_id: FuncId) Qbe.Ref #inline = {
+    name := self.fmt_fn_name(f_id);
+    con: Qbe.Con = (type = .CAddr, bits = (i = 0));
+    con.sym.id = self.f.globals.intern(name);
+    self.f.getcon(con&)
+}
+
+fn emit_block_expr(self: *EmitIr, expr: *FatExpr, p: Placement) PRes #once = {
+    block   := expr.expr.Block&;
+    ret_var := or block.ret_label {
+        // Simple case: its just grouping some statements into an expression. 
+        each block.body& { stmt |
+            @try(self.compile_stmt(stmt)) return;
+        };
+        return(self.compile_expr(block.result, p))
+    };
+    
+    // :block_never_unify_early_return_type
+    // Note: block_ty can be different from value.ty if the fall through is a Never but there's an early return to the block. 
+    block_ty := expr.ty;
+    
+    // It might have an early return so we want to unify that up here and then the Placement system can deal with it. 
+    dest := self.unify_placement(p, block_ty);
+    out  := self.program.get_info(block_ty);
+
+    return_block_index := self.blocks.len;
+    ret: ReturnTarget = (
+        block = self.new_block(),
+        p = p,
+        used = true,
+    );
+    prev := self.inlined_return_addr&.insert(ret_var, ret);
+    @debug_assert(prev.is_none(), "stomped ret var");
+
+    each block.body& { stmt | 
+        // Note: these are allowed to do a local_return targeting `ret`
+        @try(self.compile_stmt(stmt)) return;
+    };
+    result := @try(self.compile_expr(block.result, p)) return;
+    @debug_assert(dest == result);
+
+    ret := self.inlined_return_addr&.remove(ret_var).unwrap();
+    if ret.used {
+        // They did a local_return, so our extra block was useful. 
+        if self.blk.jmp.type == .Jxxx {
+            // There was also a fallthough expression which we convert to a local_return.
+            self.blk.s1 = ret.blk;
+            self.blk.jmp.type = .jmp;
+        };
+        self.blk = ret.blk;
+    } else {
+        // They didn't actually use a local_return so we can discard this useless block. 
+        self.blocks&.unordered_remove(return_block_index); 
+        // We did generate slightly more noisy code by `unify_placement` earlier than necessary. 
+    };
+    (Ok = result)
+}
+
+fn emit_value(self: *EmitIr, value: *Values, p: Placement, expr_ty: Type) Res(Qbe.Ref) #once = {
+    if(p == .Discard, => return(.Ok));  // TODO: bake_relocatable_value side effect? 
+    src := @match(self.result.when) {
+        fn Aot() => {
+            if value&.is(.Small) && !self.program.get_info(expr_ty).contains_pointers() {
+                v := self.f.getcon(value.Small._0);
+                return(self.scalar_result(p, v, expr_ty));
+            };
+            // TODO: this generates garbage code for const slices, etc. 
+            id := @try(self.program.emit_relocatable_constant(expr_ty, value.bytes())) return;
+            panic("TODO: g_id");
+            
+            // TODO: this will generate better code when its small (like a slice)
+            //out := @try({self.program.vtable.emit_relocatable_constant_body}(self.program.data, value.bytes(), expr_ty, false)) return;
+            //for out { part | 
+            //    @match(part) {
+            //        // TODO: now you can't have non-i64 in top level constant struct -- Jun 18
+            //        fn Num(f)     => {
+            //            self.push(PushConstant = (value = f.value, ty = f.ty));
+            //            self.result.mix_hash(f.value, 123);
+            //        }
+            //        fn FnPtr(f)   => {
+            //            f = self.program.follow_redirects(f);
+            //            self.push(GetNativeFnPtr = f);
+            //            self.result.mix_hash(f.as_index(), 1237);
+            //        }
+            //        fn AddrOf(id) => {
+            //            self.push(PushGlobalAddr = id);
+            //            self.result.mix_hash(id.id.zext(), 9765);
+            //        }
+            //    };
+            //};
+        }
+        fn Jit() => {
+            if value&.is(.Small) {
+                v := self.f.getcon(value.Small._0);
+                return(self.scalar_result(p, v, expr_ty));
+            };
+            self.f.getcon(value.jit_ptr())
+        }
+    };
+    @err_assert(!p&.is(.Scalar), "ICE: tried to load large constant as scalar (TODO: .Aot ptr)") return;
+    // TODO: this generates garbage code for single pointers. 
+    dest := self.get_memory(p, expr_ty);
+    self.blit(dest, src);
+    (Ok = dest)
+}
+
+// :PlaceExpr
+fn addr_macro(self: *EmitIr, arg: *FatExpr, p: Placement) PRes #once = {
+    self.last_loc = arg.loc;
+    // field accesses should have been desugared.
+    @err_assert(arg.expr&.is(.GetVar), "took address of r-value") return;
+    var := arg.expr.GetVar;
+    @assert_ne(var.kind, .Const, "Cannot take address of constant % \n(use @static if you want to create a non-threadsafe mutable global)", var&.log(self.program));
+    ref := @unwrap(self.var_lookup&.get(var), "Missing var % (in !addr) \n(missing $ when used in const context or missing '=>'? TODO: better error message)", var&.log(self.program)) return;
+    (Ok = self.scalar_result(p, ref, i64))
+}
+
+// TODO: be careful about when one branch is Never
+fn emit_call_if(self: *EmitIr, arg: *FatExpr, p: Placement) Res(Qbe.Ref) #once = {
+    @debug_assert(arg.expr&.is(.If));
+    parts := arg.expr.If&;
+    
+    cond := @try(self.compile_expr(parts.cond, .Scalar)) return;
+    t_expr, f_expr := (parts.if_true, parts.if_false);
+    f_blk, f_blk, join_blk := (self.new_block(), self.new_block(), self.new_block());
+    start := self.blk;
+    
+    // force both branches to output to the same place. 
+    join_val := self.unify_placement(p&, arg.ty);
+    
+    self.blk = t_blk;
+    t_val := @try(self.compile_expr(t_expr, p)) return;
+    t_end := self.blk;
+    @debug_assert(t_end.jmp.type == .Jxxx, "TODO: terminated if block");
+    f_val := @try(self.compile_expr(f_expr, p)) return;
+    f_end := self.blk;
+    @debug_assert(f_end.jmp.type == .Jxxx, "TODO: terminated if block");
+    
+    self.blk = join_blk;
+    start.jmp = (type = .jnz, arg = cond);
+    start.s1 = t_blk;
+    start.s2 = f_blk;
+    t_end.jmp.type = .jmp;
+    t_end.s1 = join_blk;
+    f_end.jmp.type = .jmp;
+    f_end.s1 = join_blk;
+    (Ok = join_val)
+}
+
+// TODO: use phi for scalars. 
+// TODO: binary search or jump table or something. this is kinda sad. 
+fn emit_switch(self: *EmitIr, arg: *FatExpr, p: Placement) Res(Qbe.Ref) #once = {
+    @debug_assert(arg.expr&.is(.Switch));
+    parts := arg.expr.Switch;
+    if parts.cases.len == 0 {
+        // There's only a default; that's not really a switch bro but ok... 
+         _ := @try(self.compile_expr(parts.value, .Discard)) return;
+        return(self.compile_expr(parts.default, p));
+    };
+    
+    inspect := @try(self.compile_expr(parts.value, .Scalar)) return; 
+    // TODO: maybe i have to zero extend b/h if other since trunc assumes other people only look at the lower part. 
+    
+    result := self.unify(p&, arg.ty);
+    
+    entry_block := self.current_block; 
+   
+    // This is where we rejoin with the value of the whole switch expression. 
+    out := self.program.get_info(arg.ty);
+    @assert(out.size_slots.lt(4).or(p != .PushStack), "ICE: 'switch' result too big to go on stack"); // now its the callers problem to deal with this case
+    block_slots := if(p == .PushStack, => out.size_slots, => 0);
+    prims := if(p == .PushStack, => self.get_primatives(arg.ty), => empty());
+    end_blk   := self.new_blk();
+    
+    each parts.cases { f |
+        value := f._0;
+        body := f._1;
+        
+        @err_assert(value >= 0 && value <= MAX_i32, "TODO: Expr::Switch only supports low positive integers.") return;
+        case_block     := self.new_blk();
+        next_chain_blk := self.new_blk();
+        
+        matches := self.f.newtmp(.Kw);
+        self.emit(.ceql, .Kw, matches, inspect, self.f.newcon(value)); // TODO: extend or use the right size compare
+        self.blk.s1 = case_block;
+        self.blk.s2 = next_chain_blk;
+        self.blk.jmp.type = .jnz;
+        self.blk.jmp.arg = matches;
+        
+        self.blk = case_block; 
+        _ := @try(self.compile_expr(body, p)) return;
+        if self.blk.jmp.type != .Jxxx {  // TODO: is this ever not true? 
+            self.blk.jmp.type = .jmp;
+            self.blk.s1 = end_blk;
+        };
+        self.blk = next_chain_block;
+    };
+    
+    // TODO: would it be nicer to have default branch just be the last thing in the ast node too so you could handle them uniformly? -- Jul 26
+    _ := @try(self.compile_expr(parts.default, p)) return;
+    
+    if self.blk.jmp.type != .Jxxx {  // TODO: is this ever not true? 
+        self.blk.s1 = end_blk;
+        self.blk.jmp.type = .jmp;
+    };
+    self.blk = end_blk;
+    (Ok = result)
+}
+
+fn emit_call_loop(self: *EmitIr, arg: *FatExpr) Res(Qbe.Ref) #once = {
+    @debug_assert_eq(arg.ty, void);
+    start := self.new_block();
+    self.blk.jmp.type = .jmp;
+    self.blk.s1 = start;
+    self.blk    = start;
+    @try(self.compile_expr(arg, .Discard)) return;
+    @debug_assert(self.blk.jmp.type == .Jxxx, "TODO: loop ended early");
+    self.blk.jmp.type = .Jmp;
+    self.blk.s1 = start;
+    (Ok = QbeNull)
+}
+
+fn construct_aggregate(self: *EmitIr, pattern: *Pattern, requested: Type, p: Placement) Res(Qbe.Ref) #once = {
+    if p == .Discard {
+        each pattern.bindings& { b | 
+            @try(self.compile_expr(b.default&.unwrap(), .Discard)) return;
+        };
+        return(Ok = QbeNull);
+    };
+    raw_container_ty := self.program.raw_type(requested);
+    (Ok = @match(self.program.get_type(raw_container_ty)) {
+        fn Struct(f) => {
+            expected := f.fields.len - f.const_field_count.zext();
+            if f.is_union {
+                @debug_assert_eq(pattern.bindings.len, 1, "union must have exactly one active field");
+            } else {
+                @debug_assert_eq(expected, pattern.bindings.len, "Cannot assign to type % with wrong field count", self.program.log(requested));
+                if expected == 1 {
+                    expr := pattern.bindings[0].default&.unwrap();
+                    return(self.compile_expr(expr&, p));
+                };
+            };
+            base := self.get_memory(p, raw_container_ty);
+            each pattern.bindings& { b | 
+                name := @unwrap(b.ident(), "map literal entry needs name (while initilizing %)", self.program.log(requested)) return;
+                field := or find_struct_field(f, name, i - 1) {
+                    return(@err("field name mismatch (ICE: should be checked by sema)"))
+                };
+                @debug_assert(field.kind != .Const, "cannot assign to const field");
+                expr := b.default&.unwrap();
+                dest := self.offset(base, field.byte_offset);
+                @try(self.compile_expr(expr, (Blit = dest)))) return;
+            };
+            base
+        }
+        fn Tagged(f) => {
+            @debug_assert_eq(pattern.bindings.len, 1, "@tagged must have one active varient");
+            value := pattern.bindings[0].default&.unwrap();
+            @match(p) {
+                fn Discard() => return(self.compile_expr(value, .Discard)); // just for side effects
+                fn Scalar()  => return(@err("ICE: tagged union is never a scalar."));
+                @default     => ();
+            };
+            base := self.get_memory(p, raw_container_ty);
+            name := pattern.bindings[0].name.unwrap();
+            i    := f.cases.position(fn(f) => f._0 == name).expect("case name to exist in type");
+            self.emit(.storel, .Kw, QbeNull, self.f.getcon(i), base);  // tag :get_or_create_type // TODO: smaller tag sizes than 64 bits 
+            @try(self.compile_expr(value, (Blit = self.offset(base, 8))) return;
+            base
+        }
+        @default => return(@err("struct literal for non-(struct/tagged)"));
+    })
+}
+
+// For now ptr is always the address of the variable's stack slot. 
+// TODO: generate less dumb code for non-escaping scalars. 
+fn declare_var(self: *EmitIr, name: Var, ptr: Qbe.Ref) void #inline = {
+    @debug_assert(rtype(ptr) == .RTmp);
+    prev := self.var_lookup&.insert(f.name, ptr);
+    @debug_assert(prev.is_none(), "shadow is still new var");
+    
+    if (self.want_log || self.debug) && name.name != Flag.SYMBOL_ZERO.ident() {
+        name := self.program.get_string(name.name);
+        name.len = name.len.min(20);
+        t := self.f.get_temporary(ptr);
+        l: List(u8) = (maybe_uninit = t.name&.items(), len = 0, gpa = panicking_allocator);
+        @fmt(l&, "%.%", name, ptr.val());
+    };
+}
+
+fn emit(self: *EmitIr, o: Qbe.Op, k: Qbe.Cls, dest: Qbe.Ref, a0: Qbe.Ref, a1: Qbe.Ref) void #inline = {
+    i := make_ins(o, k, dest, a0, a1); 
+    addins(self.blk.ins&, self.blk.nins&, i&);
+}
+
+fn blit(self: *EmitIr, dest: Qbe.Ref, src: Qbe.Ref, ty: Type) void #inline = {
+    bytes := self.program.get_info(ty).stride_bytes;
+    self.emit(.blit0, .Kw, QbeNull, src, dest);
+    self.emit(.blit1, .Kw, QbeNull, INT(bytes), QbeNull);
+}
+
+fn alloca(self: *EmitIr, ty: Type) Qbe.Ref = {
+    info := self.comp.get_info(ty);
+    t := self.f.newtmp("s", .Kl);
+    @debug_assert(info.align_bytes <= 8, "i don't support high alignments yet");
+    o: Qbe.O = @if(info.align_bytes <= 4, .alloc4, .alloc8);
+    s := self.f.getcon(info.stride_bytes);
+    i := make_ins(o, .Kl, t, s, QbeNull); 
+    addins(self.f.start.ins&, self.f.start.nins&, i&);
+    t
+}
+
+fn offset(self: *EmitIr, ptr: Qbe.Ref, bytes: i64) Qbe.Ref #inline = {
+    if(bytes == 0, => return(ptr));
+    new := self.f.tmp("f", .Kl);
+    self.emit(.add, .Kl, new, ptr, self.f.getcon(bytes));
+    new
+}
+
+fn unify_placement(self: *EmitIr, p: *Placement, ty: Type) Qbe.Ref = @match(p[]) {
+    fn Blit(it) => it;
+    fn Discard() => QbeNull;
+    fn NewMemory() => {
+        ref := self.alloca(arg.ty);
+        p[] = (Blit = ref);
+        ref
+    }
+    fn Scalar() => {   // TODO: use phi instead
+        _, k := self.load_op(arg.ty);
+        @debug_assert(k != .Ke, "ICE: attempted scalar placement of aggragate type");
+        dest := self.f.newtmp("unify", k);
+        p[] = (Assign = dest);
+        dest
+    }
+    fn Assign(it) => it;
+};
+
+fn get_memory(self: *EmitIr, r: Placement, ty: Type) Qbe.Ref = {
+    @match(r) {
+        fn NewMemory() => self.alloca(ty);
+        fn Blit(it) => it;
+        fn Discard() => self.alloca(ty);  // TODO: maybe force the caller to early out? 
+        @default => panic("invalid Placement type for get_memory");
+    }
+}
+
+// This exists to save a copy with Placement.Assign, 
+// otherwise it just creates a new tmp for you to use. 
+// Caller has to pass the result to scalar_result after copying in the value. 
+fn scalar_dest(self: *EmitIr, r: Placement, k: Qbe.Cls) Qbe.Ref = @match(p) {
+    fn Discard() => QbeNull;
+    fn Assign(dest) => dest;
+    @default => {
+        @debug_assert(k != .Ke);
+        self.newtmp("v", k)
+    };
+};
+
+fn scalar_result(self: *EmitIr, p: Placement, r: Qbe.Ref, ty: Type) Qbe.Ref = @match(p) {
+    fn NewMemory() => self.scalar_result((Blit = self.alloca(ty)), r);
+    fn Blit(dest)  => {
+        self.emit(self.store_op(ty), .Kw, QbeNull, r, dest);
+        dest
+    }
+    fn Scalar()  => r;
+    fn Discard() => QbeNull;
+    fn Assign(dest) => {
+        if dest != r {
+            t := self.f.get_temporary(dest);
+            self.emit(.copy, t.cls, dest, r, QbeNull);
+        };
+        dest
+    }
+};
+
+fn get_aggregate(self: *EmitIr, ty: Type) Qbe.Ref = {
+    info := self.program.get_info(ty);
+    // TODO: doing it this way is gonna be a nightmare when i want seperate jit and aot module for comptime/runtime. 
+    @assert(info.ir_index != -1, "TODO: convert type representation") return;
+    TYPE(info.ir_index)
+}
+
+fn hlt_if_never(self: *EmitIr, ty: Type) void = {
+    if ty.is_never() {
+        self.blk.jmp.type = .hlt;
+    };
+}
+
+// TODO: single field struct/array
+
+// returns .Ke for aggregates
+fn load_op(self: *EmitIr, ty: Type) Ty(Qbe.O, Qbe.Cls) = @match(self.comp.get_type(ty)) {
+    fn Int(it)   => @switch(it.bit_count) {
+        @case(8)  => (@if(it.signed, .loadsb, .loadub), .Kw);
+        @case(16) => (@if(it.signed, .loadsh, .loaduh), .Kw);
+        @case(32) => (@if(it.signed, .loadsw, .loaduw), .Kw);
+        @default  => (.load, .Kl);
+    }
+    fn F32()     => (.load, .Ks);
+    fn F64()     => (.load, .Kd);
+    fn Ptr(_)    => (.load, .Kl);
+    fn FnPtr(_)  => (.load, .Kl);
+    fn VoidPtr() => (.load, .Kl);
+    fn Label(_)  => (.loaduw, .Kw);
+    fn Fn(_)     => (.loaduw, .Kw);
+    fn Named(it) => self.load_op(it._0);
+    fn Enum(it)  => self.load_op(it.raw);
+    @default     => (.nop, .Ke)
+};
+
+fn store_op(self: *EmitIr, ty: Type) Qbe.O = @match(self.comp.get_type(ty)) {
+    fn Int(it)   => @switch(it.bit_count) {
+        @case(8)  => .storeb;
+        @case(16) => .storeh;
+        @case(32) => .storew;
+        @default  => .storel;
+    }
+    fn F32()     => .stores;
+    fn F64()     => .stored;
+    fn Ptr(_)    => .storel;
+    fn FnPtr(_)  => .storel;
+    fn VoidPtr() => .storel;
+    fn Label(_)  => .storew;
+    fn Fn(_)     => .storew;
+    fn Named(it) => self.store_op(it._0);
+    fn Enum(it)  => self.store_op(it.raw);
+    @default     => @panic("% does not have a backing integer", self.log(ty));
+};
+
+fn new_block(self: *EmitIr) *Qbe.Blk = {   
+    b := temp().box_zeroed(Qbe.Blk);
+    l: List(u8) = (maybe_uninit = bn.name&.items(), len = 0, gpa = panicking_allocator); // :UnacceptablePanic
+    @fmt(l&, "b%", self.blocks.len);
+    self.blocks&.push(b);
+    b
+}
+
+fn fmt_fn_name(self: *EmitIr, f: FuncId) []u8 = {
+    opts := self.comp.get_build_options();
+    if opts.retain_function_names {
+        func := self.comp.get_function(f);
+        real_name := self.comp.get_string(func.name);
+        @tfmt("%__%", real_name, f.to_index())
+    } else {
+        @tfmt("F%", f.to_index())
+    }
+}

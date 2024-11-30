@@ -1,0 +1,234 @@
+
+fn main_thread_pump(self: *SelfHosted, fns: []FuncId, when: ExecStyle) void = {
+    comp   := self.comp();
+    shared := self.shared.expect("new codegen to be enabled");
+    a      := self.get_alloc(); 
+    env    := comp.get_comptime_env();
+    @assert(comp.get_build_options()[].implicit_context_runtime == env.static_context_var.is_none(), "should have baked the static context location already iff no implicit context");
+    
+    funcs_done: BitSet = empty();
+    work_stack := FuncId.list(a);
+    work_stack&.push_all(fns);
+    pending := FuncId.list(a);
+    
+    while => work_stack.len != 0 {
+        continue :: local_return;
+        fid := work_stack&.last().unwrap()[];
+        if funcs_done&.get(fid.to_index().zext()) {
+            work_stack&.pop();
+            continue();
+        }; // might have been added multiple times
+        
+        {comp.vtable.report_aot_progress}(comp.data, fid, true);
+        func := comp.get_function(fid);
+        // Note: compile before checking callees! // TODO: return error instead
+        xx := {comp.vtable.compile_func}(comp.data, fid, .Aot);  // TODO: fix parsing to allow this as a quick expr
+        or xx { err | 
+            @println("failed compile %", comp.get_string(func.name));
+            comp.report_error(err)
+        };  // TODO: return error instead
+        
+        // sort the functions to make sure we can inline calls to intrinsics
+        not_done_count := 0;
+        for func.callees { f |  
+            if !funcs_done&.get(f.to_index().zext()) && !work_stack.items().contains(f&) {
+                not_done_count += 1;
+                work_stack&.push(f);
+            };
+        };
+        if not_done_count > 0 {
+            // no pop
+            continue();
+        };
+        
+        @println("emit %", self.log_name(fid));
+        
+        // note: this needs to go through the compiler's vtable so it can call check_for_new_aot_bake_overloads 
+        xx := {comp.vtable.emit_bc}(comp.data, fid, when);    // TODO: fix parsing to allow this as a quick expr
+        body := or xx { err |
+            @println("failed emit_bc for %", comp.get_string(func.name));
+            comp.report_error(err)
+        }; // TODO: return error instead
+        
+        panic("TODO: do the needful");
+        //if body.blocks.len.eq(0) || func.body&.is(.Redirect) {
+        //    success := gen.backend&.emit_special(fid, func.body&, func, body, gen.pending&); 
+        //    if !success {
+        //        success = gen.backend&.emit_special_asm(func.body&, func, body, target); 
+        //    };
+        //    if !success {
+        //        // TODO: should assert but debug_tag_corruption is confused. -- Jun 27
+        //        real_name := comp.get_string(func.name);
+        //        @eprintln("!!!! failed to emit speciai function: %", real_name);
+        //    };
+        //} else {
+        //    gen.backend&.emit_function_husk(fid, body.signeture) {
+        //        gen&.emit_current_function();
+        //    };
+        //};
+        
+        {comp.vtable.report_aot_progress}(comp.data, fid, false);
+        current := work_stack&.pop().unwrap();
+        @assert_eq(current, fid, "order messed up");
+        funcs_done&.set(fid.to_index().zext(), alloc);
+        for func.mutual_callees { c |
+            if !funcs_done&.get(c.to_index().zext()) && !work_stack.items().contains(c&)  {
+                work_stack&.push(c);
+            };
+        };
+        if body.func != fid {
+            // We just noticed its a duplicate.
+            work_stack&.push(body.func);
+        };
+        if pending.len != 0 {
+            for pending& { c | 
+                if !funcs_done&.get(c.to_index().zext()) && !work_stack.items().contains(c&) {
+                    work_stack&.push(c);
+                };
+            };
+            pending&.clear();
+        };
+    };
+    
+    if when == .Aot {
+        if env.static_context_var { context | 
+            todo()
+        };
+    };
+}
+
+use_threads :: {
+    env := BuildOptions.ptr_from_raw(get_comptime_environment()[].build_options);
+    env.implicit_context_runtime && true
+};
+
+// TODO: single threaded needing 2 because i of when i call clear is silly. 
+codegen_queue_size :: if(use_threads, => 128, => 2);  // (this is not the number of threads! just the amount of backlog we allow). 
+
+codegen_thread_main :: fn(shared: *CodegenShared) void = {
+    idx := 0;
+    @debug_assert(use_threads);
+    loop {
+        if acquire(shared.queue, false, idx&) { entry |
+            do_codegen(shared.m, entry);
+        } else {
+            if shared.no_more_functions {
+                // pthread_getcpuclockid doesn't exist? so we have to do this here
+                shared.codegen_time = clock_ms(CLOCK_THREAD_CPUTIME_ID);
+                shared.no_more_codegen = true;
+                return();
+            };
+            pthread_mutex_lock(shared.mutex&).unwrap();
+            pthread_cond_wait(shared.cond&, shared.mutex&).unwrap();
+            pthread_mutex_unlock(shared.mutex&).unwrap();
+        };
+    };
+};
+
+fn do_codegen(m: *QbeModule, entry: *CodegenEntry) void = {
+    context(DefaultContext)[].temporary_allocator = entry.arena&;
+    @match(entry.task) {
+        fn Dead() => unreachable();
+        fn Func(f) => {
+            f.globals.set_debug_types(entry.logging, true);
+            run_qbe_passes(f);
+            f.globals.set_debug_types(entry.logging, false);
+        }
+        fn Asm(it) => {
+            // This is trivial but we want to do it without threads fighting. 
+            // TODO: support it being exported, etc. 
+            m.add_code_bytes(it.lnk.id, it.bytes);  
+        }
+        fn JitImport(it) => {
+            todo()
+        }
+    };
+    entry.task = .Dead; 
+    entry.release(false);
+}
+
+CodegenShared :: @struct(
+    queue: []CodegenEntry,
+    no_more_functions := false,
+    no_more_codegen := false,
+    cond: PCond,
+    mutex: PMutex,
+    m: *QbeModule,
+    codegen_time := 0,
+    thread: Thread,
+);
+
+CodegenState :: @enum(i64) (WaitingForBouba, UsedByBouba, WaitingForKiki, UsedByKiki);
+
+::tagged(CodegenTask);
+CodegenTask :: @tagged(
+    Dead: void,
+    Func: *Qbe.Fn,
+    Asm: @struct(lnk: *Qbe.Lnk, bytes: []u8),
+    JitImport: @struct(lnk: *Qbe.Lnk, addr: rawptr),
+);
+
+CodegenEntry :: @struct(
+    arena: ArenaAlloc, 
+    task: CodegenTask,
+    state: CodegenState,  // :ThreadSafety use cas or whatever
+    logging := "",
+    id: i64,
+);
+
+QbeTerminator :: @struct(
+    arg := QbeNull,
+    target1 := BbId.zeroed(),
+    target2 := BbId.zeroed(),
+    type: Qbe.J,
+);
+
+WipBlock :: @struct(
+    insts: List(Qbe.Ins),
+    jmp: QbeTerminator,
+);
+
+CodegenWorker :: @FnPtr(s: *CodegenShared) void;
+fn init(m: *QbeModule, worker: CodegenWorker) *CodegenShared = {
+    a := libc_allocator;
+    q := a.alloc(CodegenEntry, codegen_queue_size); // :Leak
+    shared := a.box(CodegenShared);  // :leak
+    shared.queue = q;
+    shared.m = m;
+    @if(use_threads) {
+        pthread_mutex_init(shared.mutex&, 0).unwrap();
+        pthread_cond_init(shared.cond&, 0).unwrap();
+    };
+    // TODO: one allocation for all the initial slices.
+    enumerate shared.queue { i, entry |
+        entry.arena = init(a, macos_page_size);
+        entry.id = i;
+    };
+    @if(use_threads) {
+        shared.thread = start_thread(CodegenShared, worker, shared);
+    };
+    
+    shared
+}
+
+fn acquire(queue: []CodegenEntry, i_am_bouba: bool, idx: *i64) ?*CodegenEntry = {
+    ::enum(CodegenState);
+    waiting: CodegenState = @if(i_am_bouba, .WaitingForBouba, .WaitingForKiki);
+    used: CodegenState = @if(i_am_bouba, .UsedByBouba, .UsedByKiki);
+    range(0, codegen_queue_size) { _ |
+        idx[] = idx[].add(1).mod(codegen_queue_size);
+        entry := queue.index(idx[]);
+        if entry.state == waiting {
+            entry.state = used;
+            // don't reset the arena here, the other guy might want it.
+            return(Some = entry);
+        };
+    };
+    .None
+}
+
+fn release(entry: *CodegenEntry, i_am_bouba: bool) void = {
+    waiting_inv: CodegenState = @if(i_am_bouba, .WaitingForKiki, .WaitingForBouba);
+    entry.state = waiting_inv;
+    // don't reset the arena here, the other guy might want it.
+}

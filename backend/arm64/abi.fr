@@ -19,7 +19,7 @@ ArgClass :: @enum(u8) (
 
 Class :: @struct(
     class: ArgClass,
-    ishfa: bool, // Homogeneous Floating-point Aggregate
+    ishfa: bool, // Homogeneous Floating-point Aggregate: <= 4 fields, all the same float type. 
     hfa: @struct(base: Qbe.Cls, size: u8),
     size: i32,
     align: i32,
@@ -57,7 +57,7 @@ store_ops :: @const_slice(Qbe.O.storew, .storel, .stores, .stored); // :QbeClsi1
 ::enum_basic(Qbe.FieldType);
 ::ptr_utils(Qbe.Typ);
 
-fn isfloatv(t: *Qbe.Typ, cls: *Qbe.Cls, globals: *QbeModule) bool = {
+fn isfloatv(t: *Qbe.Typ, cls: *Qbe.Cls, count: *u8, globals: *QbeModule) bool = {
     f := t.fields[0]&;  
     range(0, t.nunion.zext()) { n |
         while => f.type != .FEnd { 
@@ -65,14 +65,16 @@ fn isfloatv(t: *Qbe.Typ, cls: *Qbe.Cls, globals: *QbeModule) bool = {
                 fn Fs() => {
                     if(cls[] == .Kd, => return(false));
                     cls[] = .Ks;
+                    count[] += 1;
                 }
                 fn Fd() => {
                     if(cls[] == .Ks, => return(false));
                     cls[] = .Kd;
+                    count[] += 1;
                 }
                 fn FTyp() => {
                     type := globals.types[].index(f.len.zext());
-                    if !isfloatv(type, cls, globals) {
+                    if !isfloatv(type, cls, count, globals) {
                         return(false);
                     }
                 }
@@ -82,11 +84,12 @@ fn isfloatv(t: *Qbe.Typ, cls: *Qbe.Cls, globals: *QbeModule) bool = {
         };
         f = f.offset(1);
     };
-    true
+    
+    count[] <= 4
 }
 
 fn typclass(c: *Class, t: *Qbe.Typ, gp: []Arm64Reg, fp: []Arm64Reg, globals: *QbeModule) void = {
-    sz := (t.size + 7).bit_and(-8); // :Explain
+    sz := (t.size + 7).bit_and(-8);  // round up to a 8 byte alignment
     c.t = t;
     c.class = .CNone;
     c.ngp = 0;
@@ -95,10 +98,16 @@ fn typclass(c: *Class, t: *Qbe.Typ, gp: []Arm64Reg, fp: []Arm64Reg, globals: *Qb
 
     @assert(t.align_log2 <= 3, "alignments larger than 8 are not supported");
 
-    if t.is_dark || sz > 16 || sz == 0 {
+    c.hfa.base = .Kx;
+    c.hfa.size = 0;
+    unsized := t.is_dark || sz == 0;
+    c.ishfa = !unsized && isfloatv(t, c.hfa.base&, c.hfa.size&, globals);
+    
+    if !c.ishfa && (unsized || sz > 16) {
         /* large structs are replaced by a
          * pointer to some caller-allocated
          * memory */
+        c.hfa.size = 0;
         c.class&.with(.Cptr);
         c.size = 8;
         c.ngp = 1;
@@ -108,11 +117,9 @@ fn typclass(c: *Class, t: *Qbe.Typ, gp: []Arm64Reg, fp: []Arm64Reg, globals: *Qb
     };
 
     c.size = sz.intcast();
-    c.hfa.base = .Kx;
-    c.ishfa = isfloatv(t, c.hfa.base&, globals);
-    c.hfa.size = t.size.trunc() / if(is_wide(c.hfa.base), => 8, => 4);
 
     if c.ishfa {
+        @debug_assert_eq(@as(i64) c.hfa.size.zext(), t.size / if(is_wide(c.hfa.base), => 8, => 4));
         range(0, c.hfa.size.zext()) { n |
             c.reg&[n] = fp.index_unchecked(0)[];
             fp = fp.slice_pop_first();
@@ -121,6 +128,7 @@ fn typclass(c: *Class, t: *Qbe.Typ, gp: []Arm64Reg, fp: []Arm64Reg, globals: *Qb
         };
         c.nreg = c.nfp;
     } else {
+        c.hfa.size = 0;
         range(0, sz / 8) { n |
             c.reg&[n] = gp.index_unchecked(0)[];
             gp = gp.slice_pop_first();
@@ -149,7 +157,10 @@ fn sttmps(tmp: *Qbe.Ref, cls: []Qbe.Cls, nreg: u32, mem: Qbe.Ref, f: *Qbe.Fn) vo
     };
 }
 
-/* todo, may read out of bounds */
+/* todo, may read out of bounds: 
+ * If the size of the struct is not a multiple of 8, the actual struct
+ * size may be different from the size reserved on the stack.
+*/
 fn ldregs(reg: *Arm64Reg, cls: *Qbe.Cls, n: u8, mem: Qbe.Ref, f: *Qbe.Fn) void = {
     off := 0;
     range(0, n.zext()) { i |
@@ -174,8 +185,7 @@ fn selret(b: *Qbe.Blk, f: *Qbe.Fn) void = {
     r := b.jmp.arg;
     b.jmp.type = .ret0;
 
-    cty := -1;
-    if j == .retc {
+    cty := if j == .retc {
         @debug_assert(f.retty >= 0, "retc without type");
         type := f.globals.types[][f.retty.zext()]&;
         cr := Class.zeroed();
@@ -184,19 +194,19 @@ fn selret(b: *Qbe.Blk, f: *Qbe.Fn) void = {
             @debug_assert(rtype(f.retr) == .RTmp, "see // :SetRetr");
             f.emit(.blit1, .Kw, QbeNull, INT(cr.t.size), QbeNull);
             f.emit(.blit0, .Kw, QbeNull, r, f.retr);
-            cty = 0;
+            0
         } else {
             ldregs(cr.reg&.as_ptr(), cr.cls&.as_ptr(), cr.nreg, r, f);
-            cty = cr.nfp.zext().shift_left(2).bit_or(cr.ngp.zext());
-        };
+            cr.nfp.zext().shift_left(2).bit_or(cr.ngp.zext())
+        }
     } else {
         k := @as(Qbe.Cls) @as(i32) (j.raw() - Qbe.J.retw.raw());
         if (KBASE(k) == 0) {
             f.emit(.copy, k, TMP(Arm64Reg.R0), r, QbeNull);
-            cty = 1;
+            1
         } else {
             f.emit(.copy, k, TMP(Arm64Reg.V0), r, QbeNull);
-            cty = 1.shift_left(2);
+            1.shift_left(2)
         }
     };
 
@@ -349,7 +359,9 @@ fn stkblob(r: Qbe.Ref, c: *Class, f: *Qbe.Fn, ilp: **Insl) void = {
     if al < 0 {
         al = 0;
     };
+    // If we're pulling the struct out of registers, use the rounded size computed in typclass. 
     sz := if(c.class.has(.Cptr), => c.t.size, => c.size.intcast());
+    
     il.i = make_ins(@as(Qbe.O) @as(i32) Qbe.O.alloc4.raw() + al, .Kl, r, f.getcon(sz), QbeNull);
     il.link = ilp[];
     ilp[] = il;

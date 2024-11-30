@@ -29,7 +29,9 @@ You can still print out the ir as human readable text between passes and modify 
   - use of u12 immediate for add, ldr, and store instructions.
   - use immediates for shifts.
   - fuse mul followed by add into 3 arg madd.
-- arm: respect the platform register (it gets zeroed when you context switch on macos).
+- arm abi fixes
+  - respect the platform register (it gets zeroed when you context switch on macos).
+  - large FHA (ie. struct of 4 doubles)
 - Removed several codegen optimisations until we have a solid foundation (but I want to bring them back eventually).
   - all: load float constants from memory (instead of using int immediate + fmov)
   - arm: bit field immediate to load int more constants in a single instruction

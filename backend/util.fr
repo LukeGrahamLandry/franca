@@ -236,7 +236,7 @@ fn between(o: Qbe.O, $fst: Qbe.O, $lst: Qbe.O) bool #inline = {
     fst.raw() <= o.raw() && o.raw() <= lst.raw()
 }
 
-fn addins(pvins: *QList(Qbe.Ins), pnins: *i64, i: *Qbe.Ins) void = {
+fn addins(pvins: *QList(Qbe.Ins), pnins: *i64, i: *Qbe.Ins) void #inline = {
     if i.op() != .nop {
         pnins[] += 1;
         pvins.grow(pnins[]);
@@ -912,3 +912,170 @@ fn argcls_eval(o: Qbe.O, k: Qbe.Cls, argument_index: i64) Qbe.Cls = {
     names :: Qbe.O.get_enum_names();
     @panic("invalid op number for argcls %", names[o.raw().zext()])
 }
+
+///////////////////////////////////////////////////////////////////////////////
+
+fn pack_op_cls(op: Qbe.O, k: Qbe.Cls) u32 #inline = {
+    (@as(i64) k.raw().zext()).shift_left(30).bit_or(op.raw().zext()).trunc()
+}
+
+// TODO: ugh. garbage setter, i need to add real bit fields to my language!
+fn set_op(i: *Qbe.Ins, op: Qbe.O) void #inline = {
+    i.op30_cls2 = pack_op_cls(op, i.cls());
+}
+
+fn set_cls(i: *Qbe.Ins, k: Qbe.Cls) void #inline = {
+    i.op30_cls2 = pack_op_cls(i.op(), k);
+}
+
+fn set_nop(i: *Qbe.Ins) void #inline = {
+    i[] = Qbe.Ins.zeroed();
+    i.set_op(.nop);
+}
+
+fn op(i: *Qbe.Ins) Qbe.O #inline = {
+    @as(Qbe.O) @as(i32) bitcast(@as(u32) i.op30_cls2.bit_and(1.shift_left(30) - 1))
+}
+
+fn cls(i: *Qbe.Ins) Qbe.Cls #inline = {
+    x := i.op30_cls2.shift_right_logical(30).bit_and(0b11);
+    @as(Qbe.Cls) @as(i32) x.bitcast()
+}
+
+// 0 for int, 1 for float. 
+fn KBASE(k: Qbe.Cls) i64 #inline = {
+    x: i64 = k.raw().shift_right_logical(1).zext();
+    @debug_assert(x.bit_and(1) == x, "bad KBASE. Kx=% Ke=%", k == .Kx, k == .Ke);
+    x
+}
+
+// TODO: compiler bug. this shouldn't need to be in a block. this just delays adding it to the overload set so it doesn't get confused.
+:: {
+    fn eq(a: Qbe.Ref, b: Qbe.Ref) bool #inline = 
+        a.type3_val29 == b.type3_val29;
+        
+    fn ne(a: Qbe.Ref, b: Qbe.Ref) bool #inline = 
+        a.type3_val29 != b.type3_val29;
+};
+
+fn rtype(r: Qbe.Ref) Qbe.RegKind #inline = {
+    r != QbeNull || return(.RNull);
+    @as(Qbe.RegKind) @as(u32) r.type3_val29.bit_and(1.shift_left(3) - 1)
+}
+
+fn get_constant(f: *Qbe.Fn, r: Qbe.Ref) *Qbe.Con #inline = {
+    @debug_assert(rtype(r) == .RCon, "tried to get constant of non constant");
+    i := r.val();
+    //@safety(.Bounds) i < f.ncon.zext();
+    @debug_assert(i < f.ncon.zext(), "con oob");
+    f.con.index(i)
+}
+
+fn get_memory(f: *Qbe.Fn, r: Qbe.Ref) *Qbe.Addr #inline = {
+    @debug_assert(rtype(r) == .RMem, "tried to get memory of non memory");
+    i := r.val();
+    //@safety(.Bounds) i < f.nmem.zext();
+    @debug_assert(i < f.nmem.zext(), "mem oob");
+    f.mem.index(i)
+}
+
+fn get_temporary(f: *Qbe.Fn, i: i64) *Qbe.Tmp #inline = {
+    //@safety(.Bounds) i < f.ntmp.zext();
+    @debug_assert(i < f.ntmp.zext(), "tmp oob");
+    f.tmp.index(i)
+}
+
+fn get_temporary(f: *Qbe.Fn, r: Qbe.Ref) *Qbe.Tmp #inline = {
+    @debug_assert(rtype(r) == .RTmp, "tried to get tmp of non-tmp");
+    i := r.val();
+    @safety(.Bounds) i < f.ntmp.zext();
+    f.tmp.index(i)
+}
+
+fn trunc(x: u32) i16 #redirect(u32, u16); // TODO
+fn shift_right_logical(v: i16, shift_amount: i64) i16 = v.int().shift_right_logical(shift_amount).intcast().trunc();
+
+fn ref(cls: Qbe.RegKind, id: i64) Qbe.Ref #inline = {
+    (type3_val29 = cls.raw().bitcast().bit_or(id.shift_left(3).trunc()))
+}
+
+fn val(r: Qbe.Ref) i64 #inline = {
+   x := @as(u32) r.type3_val29.shift_right_logical(3).bit_and(1.shift_left(29) - 1);
+   x.zext()
+}
+
+fn rsval(r: Qbe.Ref) i32 #inline = {    
+   intcast(r.val().bit_xor(0x10000000) - 0x10000000)
+}
+
+// TODO: can we use this instead of making a constant for small integer literals? 
+//       qbe only uses this for blit but CBits for all constants.
+fn small_int_for_blit(x: i64) Qbe.Ref #inline = {
+    ref(.RInt, x.bit_and(0x1fffffff))
+}
+
+// these are carefully arranged to be packed in ir/Qbe.O,
+// so ie. `@is(j, .alloc4, .alloc8, .alloc16)` is the same as manually writing `j.raw() >= Qbe.O.alloc4.raw() && j.raw() <= Qbe.O.alloc16.raw()`,
+// I just think its easier to read when i can see all the values spelled out. 
+
+fn is_ret(j: Qbe.J) bool =  // TODO: tried to call uncompiled if #inline :FUCKED
+    j.raw() >= Qbe.J.retw.raw() && j.raw() <= Qbe.J.ret0.raw();
+
+fn is_alloc(j: Qbe.O) bool #inline = 
+    @is(j, .alloc4, .alloc8, .alloc16);
+
+fn is_ext(j: Qbe.O) bool #inline = 
+    @is(j, .extsb, .extub, .extsh, .extuh, .extsw, .extuw);
+
+fn is_store(j: Qbe.O) bool #inline = 
+    @is(j, .storeb, .storeh, .storew, .storel, .stores, .stored);
+    
+fn is_load(j: Qbe.O) bool #inline = 
+    @is(j, .loadsb, .loadub, .loadsh, .loaduh, .loadsw, .loaduw, .load);
+
+fn is_flag(j: Qbe.O) bool #inline = 
+    j.raw() >= Qbe.O.flagieq.raw() && j.raw() <= Qbe.O.flagfuo.raw();
+
+fn is_parbh(j: Qbe.O) bool #inline = 
+    @is(j, .parsb, .parub, .parsh, .paruh);
+
+fn is_par(j: Qbe.O) bool #inline = 
+    j.raw() >= Qbe.O.par.raw() && j.raw() <= Qbe.O.pare.raw();
+
+fn is_arg(j: Qbe.O) bool #inline = 
+    j.raw() >= Qbe.O.arg.raw() && j.raw() <= Qbe.O.argv.raw();
+
+fn is_retbh(j: Qbe.J) bool #inline = 
+    j.raw() >= Qbe.J.retsb.raw() && j.raw() <= Qbe.J.retuh.raw();
+    
+fn is_argbh(j: Qbe.O) bool #inline = 
+    @is(j, .argsb, .argub, .argsh, .arguh);
+
+// TODO: is it a mistake when amd64/isel calls this with .Kx? nowhere else does that. 
+fn is_int(k: Qbe.Cls) bool #inline =
+    k != .Kx && KBASE(k) == 0;
+
+fn is_wide(k: Qbe.Cls) bool #inline =
+    (@as(i64) k.raw().zext()).bit_and(1) != 0;
+    
+///////////////////////////////////////////////////////////////////////////////
+
+::enum_basic(Qbe.ConType);
+
+::enum_basic(Qbe.Cls);
+::enum_basic(Qbe.J);
+::enum_basic(Qbe.RegKind);
+::if(Qbe.Cls);
+::if(Qbe.O);
+::enum_basic(Qbe.O);
+::ptr_utils(Qbe.Blk);
+
+::if(i32);
+
+fn bit_or(a: i16, b: i16) i16 #redirect(Ty(i32, i32), i32);
+fn bit_or(a: i32, b: i32) i32 #ir(.or, .Kw) = a.int().bit_or(b.int()).intcast();
+fn shift_left(a: i32, b: i64) i32 #ir(.shl, .Kw) = a.int().shift_left(b).intcast();
+fn zext(v: u8) i32 #intrinsic(.ZeroExtend8To32) #ir(.extub, .Kw) #fold;
+
+fn ge(a: Qbe.Cls, b: Qbe.Cls) bool = a.raw().int() >= b.raw().int();
+fn gt(a: Qbe.Cls, b: Qbe.Cls) bool = a.raw().int() > b.raw().int();

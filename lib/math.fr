@@ -4,17 +4,22 @@ fn div_mod(big: i64, divisor: i64) Ty(i64, i64) #inline = {
     (d, big - d * divisor)
 }
 
-fn mod(big: i64, divisor: i64) i64 = sub(big, mul(div(big, divisor), divisor));
-fn mod(big: u64, divisor: u64) u64 = sub(big, mul(div(big, divisor), divisor));
+fn mod(big: i64, divisor: i64) i64 #ir(.rem, .Kl) = 
+    sub(big, mul(div(big, divisor), divisor));
+fn mod(big: u64, divisor: u64) u64 #ir(.urem, .Kl) =
+    sub(big, mul(div(big, divisor), divisor));
 fn max(a: i64, b: i64) i64 #inline = if(lt(a, b), =>b, =>a);
 fn min(a: i64, b: i64) i64 #inline = if(gt(a, b), =>b, =>a);
 fn max(a: u64, b: u64) u64 = {
     @debug_assert(a >= 0 && b >= 0, "TODO: remove this with new backend that does proper unsigned compares");
     @if(a < b, b, a)
 }
-fn neg(a: i64) i64 #fold = sub(0, a);
+fn neg(a: i64) i64 #fold #ir(.neg, .Kl) = 
+    sub(0, a);
 fn neg(a: i16) i16 #fold #redirect(i64, i64); // TODO: sign extension?
-fn neg(a: i32) i32 #fold = sub(@as(i32)0, a);
+fn neg(a: i32) i32 #fold #ir(.neg, .Kw) = 
+    sub(@as(i32)0, a);
+
 fn abs(val: i64) i64 = {
     all_sign_bit := val.shift_right_arithmetic(63);
     // +) nop 
@@ -23,14 +28,17 @@ fn abs(val: i64) i64 = {
 }
 fn abs(val: i32) i32 = if(val.ge(0), => val, => val.neg()); // TODO: wait for new backend where im consistant about int repr
 fn eq(lhs: Symbol, rhs: Symbol) bool #redirect(Ty(u32, u32), bool);
-fn to_bool(b: i64) bool = b != 0;
+fn to_bool(b: i64) bool #ir(.copy, .Kw) = 
+    b != 0;
 
 // TODO: this gets a bit silly if I have to define this stuff all again but with different types. 
 //       it would be cool if it could be done with traits. like anything with an ordering could have a fn max (bad example for floats i guess)
-fn neg(a: f64) f64 #fold = sub(0.0, a); // TODO: there's an instruction for this. which would be better because there's no zero register for floats. 
+fn neg(a: f64) f64 #fold #ir(.neg, .Kd) = 
+    sub(0.0, a);
 
 /// Yes, really...
-fn is_nan(a: f64) bool = a.eq(a).not();  // TODO: this could be fewer instructions but this is more fun. 
+fn is_nan(a: f64) bool = 
+    a != a;  // TODO: this could be fewer instructions but this is more fun. 
 
 // Convert an i64 to an i<bit_count> with the leading bits 0.
 // so the mask takes care of negative numbers. 
@@ -61,20 +69,27 @@ fn if($T: Type) void = {
 ::if(i64); ::if(void); ::if(bool); ::if(u8); 
 
 // TODO: i generate super dumb code for this!
-fn eq(a: bool, b: bool) bool = a.int().eq(b.int());
-fn not(b: bool) bool #fold = b.int() == 0;
-// TODO: you really want this to be ZeroExtend32To64 for my backend but not for llvm
-fn int(val: bool) i64 #intrinsic(.ZeroExtend8To64) #fold; // bool is always 0 or 1
+fn eq(a: bool, b: bool) bool #ir(.ceqw, .Kw) = 
+    a.int().eq(b.int());
+fn not(b: bool) bool #fold = 
+    b.int() == 0;
+
+fn int(val: bool) i64 #intrinsic(.ZeroExtend8To64) #fold #ir(.extuw, .Kl); // bool is always 0 or 1
 
 // TODO: i generate super dumb code for this!
 // Note: these are not short circuiting because arguments are always evaluated. 
-fn and(a: bool, b: bool) bool = a.if(=> b, => false);
-fn or(a: bool, b: bool) bool = a.if(=> true, => b);
-fn xor(a: bool, b: bool) bool = a.if(=> !b, => b);
+fn and(a: bool, b: bool) bool #ir(.and, .Kw) = 
+    a.if(=> b, => false);
+fn or(a: bool, b: bool) bool #ir(.or, .Kw) = 
+    a.if(=> true, => b);
+fn xor(a: bool, b: bool) bool #ir(.xor, .Kw) = 
+    a.if(=> !b, => b);
 
 // Note: these are short circuiting. The closure will only be called if necessary. 
-fn and(a: bool, $b: @Fn() bool) bool = @if(a, b(), false); // operator &&
-fn or(a: bool, $b: @Fn() bool) bool = @if(a, true, b());   // operator ||
+fn and(a: bool, $b: @Fn() bool) bool = 
+    @if(a, b(), false);  // operator &&
+fn or(a: bool, $b: @Fn() bool) bool = 
+    @if(a, true, b());   // operator ||
 // TODO: those should go in sugar.fr
 
 /////////////////
