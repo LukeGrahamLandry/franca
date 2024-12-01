@@ -29,6 +29,7 @@ QParseCtx :: @struct(
     ret := Qbe.J.Jxxx,
     // TODO: use this for reporting more errors that are only allowed when used as a template. 
     allow_unterminated_block := false, // for comptime templates
+    types: HashMap(Str, i64),
 );
 
 // TODO: this is more useful if you let them pass a userdata pointer but for now i want to match the qbe interface. 
@@ -118,6 +119,7 @@ fn init(m: *QbeModule, src: Str) QParseCtx = (
     replacements = list(m.gpa), // only need this for cls
     f = m.gpa.box_zeroed(Qbe.Fn),
     out = m.gpa,
+    types = init(temp()),
 );
 
 fn parse_body(self: *QParseCtx) Result(Ty(*Qbe.Fn, []Replacement), Str) = {
@@ -160,7 +162,7 @@ fn parse_header(self: *QParseCtx, export: bool) void = {
         return()
     };
     name := self.eat_word();
-    self.f.name&.items().slice(0, name.len).copy_from(name);  // :UnacceptablePanic
+    @if(TRACK_IR_NAMES) self.f.name&.items().slice(0, name.len).copy_from(name);  // :UnacceptablePanic
     self.f.lnk.export = export;
     self.f.lnk.id = self.f.globals.intern(name);
     self.f.leaf = true;
@@ -540,7 +542,7 @@ fn parse_blk(self: *QParseCtx) ?*Qbe.Blk = {
     };
     // TODO: check that all referenced blocks get defined.
     b := self.out.box_zeroed(Qbe.Blk);
-    b.name&.items().slice(0, name.len).copy_from(name);  // :UnacceptablePanic
+    @if(TRACK_IR_NAMES) b.name&.items().slice(0, name.len).copy_from(name);  // :UnacceptablePanic
     self.blocks&.insert(name, b);
     (Some = b)
 }
@@ -710,7 +712,8 @@ fn parse_type(self: *QParseCtx) Result(void, Str) = {
     
     @debug_assert_eq(t + 1, m.number_of_types, "array can't resize because types cannot be nested");
     // write the name at the end so types can't refer to themselves
-    typ.name&.items().slice(0, name.len).copy_from(name);  // :UnacceptablePanic :nulltermminator
+    @if(TRACK_IR_NAMES) typ.name&.items().slice(0, name.len).copy_from(name);  // :UnacceptablePanic :nulltermminator
+    self.types&.insert(name, t);
     // TODO: bounds for null terminator
     .Ok
 }
@@ -785,12 +788,7 @@ fn parse_type_fields(self: *QParseCtx, typ: *Qbe.Typ, field_count: *i64) Result(
 }
 
 fn find_type(self: *QParseCtx, n: Str) ?i64 = {
-    // TODO: use hashtable
-    m := self.f.globals;  // :NeedFunctionInitForData
-    enumerate m.types[].slice(0, m.number_of_types) { i, t |
-        if(t.name() == n, => return(Some = i));
-    };
-    .None
+    self.types&.get(n)
 }
 
 fn skip_blanks(self: *QParseCtx) void = {

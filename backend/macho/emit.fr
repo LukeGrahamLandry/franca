@@ -12,12 +12,14 @@
 //! Executable: a program the operating system can run
 //!     - dynamic imports and pointers in data are in ChainedFixups
 //!     - empty __PAGEZERO, __TEXT contains the Mach-O header and load commands, __LINKEDIT must have a load command
-//!     - must have a CodeSigneture
+//!     - must have a CodeSigneture (sha256 of each appended to the file)
 //!     - segments must be page aligned 
 //! Relocatable Object: input for static linking with another program
 //!     - relocations listed for each section (instead of ChainedFixups)
 //! Dynamic Library: 
 //!     - exports trie lists your functions that people can call
+//!     - needs a LC_ID_DYLIB
+//!     - otherwise same as Exe
 //! 
 
 // TODO: run non-driver tests with no-op relocatable as well as direct to exe
@@ -27,9 +29,9 @@
 // TODO: fix `ld: warning: no platform load command found in ` for relocatable.  
 // TODO: emit the local symbols even for exe so you can see them in a debugger. 
 //       do other debug info stuff. 
-// TODO: thread locals for .Relocatable. not a huge deal until the language front end exposes the ability to create them. 
+// TODO: i haven't checked if .Dynamic needs zero_page
 
-#include_std("backend/macho/sections.fr");
+#include_std("backend/macho/exports.fr");
 #include_std("backend/macho/sha256.fr");
 
 WipSegment :: @struct(
@@ -55,6 +57,7 @@ text_padding :: SIZE_OF_STUBS + COMMANDS_SIZE_GUESS;
 // TODO: probably don't do this if we're making a linkable .o file. 
 zero_page_size :: 0x100000000;
 
+// results are in temp()
 fn output_macho(m: *QbeModule) List([]u8) = {
     // TODO: remove
     code_count := m.segments&[.Code]&.len() - COMMANDS_SIZE_GUESS - SIZE_OF_STUBS;
@@ -228,6 +231,7 @@ fn output_macho(m: *QbeModule) List([]u8) = {
         @debug_assert_ge(symbol.offset, COMMANDS_SIZE_GUESS + SIZE_OF_STUBS);
     };
     if e.m.goal.type == .Dynamic {
+        // LC_ID_DYLIB, it seems the name doesn't matter? 
         macho_load_dylib(e.commands&, e.command_count&, .LinkLibrarySelf, "foo");
     };
     chained := u8.list(CHAINED_SIZE_GUESS, temp());
@@ -443,14 +447,17 @@ fn emit_exe_fixups(e: *EmitMacho, chained: *List(u8)) void #inline = {
     cmd[] = (offset = e.file_offset.trunc(), size = chained_size.trunc());  // :CodeIsFirst its fine to change this, you just have to do the math here. 
 
     if e.m.goal.type == .Dynamic {
-        panic("TODO: dylib export");
         new_file_offset := e.file_offset + chained_size;
         // Now we need to tell it about our exports
         // TODO: do i need to give it linkeditsymboltable? rn i only do that for relocatable objects. 
         
+        trie: ExportsTrie.T = init();
         for e.m.exports { export_id | 
-            panic("TODO: dylib export");
+            s := e.m.get_symbol_info(export_id);
+            @debug_assert(s.kind == .Local, "can only export local symbols");
+            trie&.put(@tfmt("_%", s.name), s.offset);
         };
+        trie&.write(chained);
         
         cmd := load_command(e, .ExportsTrie, LinkEditBlob);
         cmd[] = (offset = new_file_offset.trunc(), size = (chained.len - chained_size).trunc());  // :CodeIsFirst its fine to change this, you just have to do the math here. 
@@ -669,7 +676,7 @@ fn append_relocations(symbol_table_index: i64, id: u32, m: *QbeModule, relocatio
         
         @match(fix.type) {
             fn InReg(it) => {
-                assert(it.increment == 0, "TODO: offset symbols");
+                @debug_assert(it.increment == 0, "TODO: offset symbols"); // :ArmAddendReloc
                 
                 // in the instruction we tell it: which register to use
                 inst: []u32 = (ptr = ptr_cast_unchecked(u8, u32, fix.patch_at), len = 2);

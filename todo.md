@@ -13,6 +13,10 @@
 - have string literals coerce to c strings instead of `.sym().c_str()`?
 - have a test where you force inline everything that's not recursive to stress test the backend dealing with large functions.
 - broke repro again. is there a certain size of program is doesn't like?
+- fix run_tests/qbe-jit and add that to CI
+- make macros more similar to functions. it's weird that the syntax is slightly different.
+  you should be able to overload off some argument types and have others be a symbolic ast node?
+  but that would make overload resolution even more fragile which might be a bad idea.
 
 ##
 

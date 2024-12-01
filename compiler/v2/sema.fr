@@ -595,6 +595,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
                 intrinsic_ty := @unwrap(self.env.intrinsic_type, "used #intrinsic during boot") return;
                 op := @check(self.immediate_eval_expr(value, intrinsic_ty)) return;
                 op := Intrinsic.assume_cast(op&)[];
+                func.set_flag(.Intrinsic);
                 get_intrinsic(func.body&, self.get_alloc())[].bc = op;
                 // TODO: redundant with emit_bc
                 if op != .GetContext {
@@ -613,6 +614,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
                 cls_name := @unwrap(args[1]&.ident(), "#ir(_, X) expected symbol") return;
                 o := @unwrap(Qbe.O.from_name(self.pool.get(op_name)), "#ir invalid op name") return;
                 k := @unwrap(Qbe.Cls.from_name(self.pool.get(cls_name)), "#ir invalid op name") return;
+                func.set_flag(.Intrinsic);
                 i := get_intrinsic(func.body&, self.get_alloc());
                 i.ir_op  = @as(i32) o;
                 i.ir_cls = @as(i32) k;
@@ -1656,7 +1658,7 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
         };
     };
     
-    if !expr.expr&.is(.Value) {
+    if !expr.expr&.is(.Value) && !func.get_flag(.Intrinsic) {
         if func.get_flag(.ComptimeOnly) {
             if self.dispatch.enclosing_function { current_f |
                 outer := self.get_function(current_f);
@@ -3104,7 +3106,6 @@ fn update_function_metadata(self: *SelfHosted, func: *Func, os: ?OverloadSet) Re
             @case(Flag.log_asm.ident())  => func.set_flag(.LogAsm);
             @case(Flag.log_ir.ident())     => func.set_flag(.LogIr);
             @case(Flag.log_ast.ident())    => func.set_flag(.LogAst);
-            @case(Flag.no_tail.ident())    => func.set_flag(.NoTail);
             @case(Flag.unsafe_noop_cast.ident()) => {
                 func.set_flag(.UnsafeNoopCast);
                 func.set_flag(.BodyIsSpecial);

@@ -21,11 +21,9 @@ ReturnTarget :: @struct(
 
 Placement :: @tagged(Assign: Qbe.Ref, Scalar, Blit: Qbe.Ref, NewMemory, Discard);
 
-// TODO: this somehow breaks repro
-//::tagged(Placement);
-
 // TODO: CodegenEntry could be part of ast_external for now. 
 fn emit_ir(comp: CompCtx, m: *QbeModule, f: FuncId, when: ExecStyle, out: *CodegenEntry) Res(void) = {
+    ::tagged(Placement);
     result: Res(void) = .Ok;
     push_dynamic_context {
         context(DefaultContext)[].temporary_allocator = entry.arena&;
@@ -160,6 +158,7 @@ fn emit_body(self: *EmitIr, f: FuncId) PRes #once = {
 
     body: *FatExpr = @match(func.body&) {
         fn Normal(body) => body;
+        // TODO: use flag.Intrinsic instead and handle Merged because we want to allow things that are intrinsics on some backends but not others. 
         fn Intrinsic(op) => {
             // Direct calls will be inlined in emit_bc but someone might be trying to call through a function pointer. 
             // TODO: don't add to callees for direct calls. -- Jul 24
@@ -849,8 +848,10 @@ fn declare_var(self: *EmitIr, name: Var, ptr: Qbe.Ref) void #inline = {
         name := self.program.get_string(name.name);
         name.len = name.len.min(20);
         t := self.f.get_temporary(ptr);
-        l: List(u8) = (maybe_uninit = t.name&.items(), len = 0, gpa = panicking_allocator);
-        @fmt(l&, "%.%", name, ptr.val());
+        @if(TRACK_IR_NAMES) {
+            l: List(u8) = (maybe_uninit = t.name&.items(), len = 0, gpa = panicking_allocator);
+            @fmt(l&, "%.%", name, ptr.val());
+        };
     };
 }
 
@@ -995,8 +996,10 @@ fn store_op(self: *EmitIr, ty: Type) Qbe.O = @match(self.comp.get_type(ty)) {
 
 fn new_block(self: *EmitIr) *Qbe.Blk = {   
     b := temp().box_zeroed(Qbe.Blk);
-    l: List(u8) = (maybe_uninit = bn.name&.items(), len = 0, gpa = panicking_allocator); // :UnacceptablePanic
-    @fmt(l&, "b%", self.blocks.len);
+    @if(TRACK_IR_NAMES) {
+        l: List(u8) = (maybe_uninit = bn.name&.items(), len = 0, gpa = panicking_allocator); // :UnacceptablePanic
+        @fmt(l&, "b%", self.blocks.len);
+    };
     self.blocks&.push(b);
     b
 }
