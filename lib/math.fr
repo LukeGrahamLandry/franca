@@ -212,48 +212,38 @@ fn ge(a: f32, b: f32) bool = (ge(@as(f64) a.cast(), b.cast()));
 fn lt(a: f32, b: f32) bool = (lt(@as(f64) a.cast(), b.cast()));
 fn gt(a: f32, b: f32) bool = (gt(@as(f64) a.cast(), b.cast()));
 
+// TODO: do this properly. i cheated with `int count_ones(long *x) { return __builtin_popcountll(*x); }`
+// the software one below was 30/560 samples, this one is 6. 
+// too bad it has to spill everything for it. would be better if i had real inline asm. 
+fn count_ones(b: *u64) u32 #asm #aarch64 = (
+    0xfd400000, // ldr d0, [x0]
+    0x0e205800, // cnt.8b v0, v0
+    0x2e303800, // uaddlv.8b h0, v0
+    0x1e260000, // fmov w0, s0
+    ret()
+);
 
-////////////////////////
-/// TODO: Intrinsics ///
-////////////////////////
-// I'm sure release mode llvm figures out what we're doing but there's no need to punish my own backend more than necessary.
-// and it feels prettier to be to not have to paste these around.  
-// Add these functions to a test for comparison. 
+fn count_ones(b: *u64) u32 #asm #x86_bytes = (fn(out) = {
+    out.push_all(@slice(0xf3, 0x48, 0x0f, 0xb8, 0x07)); // popcntq	(%rdi), %rax
+    out.push(@as(u8) PrimaryOp.Ret);
+});
 
-// popcnt from https://c9x.me/compile/
-fn count_ones(b: u64) u32 = {
-    b = b.bit_and(0x5555555555555555) + b.shift_right_logical(1).bit_and(0x5555555555555555);
-    b = b.bit_and(0x3333333333333333) + b.shift_right_logical(2).bit_and(0x3333333333333333);
-    b = b.bit_and(0x0f0f0f0f0f0f0f0f) + b.shift_right_logical(4).bit_and(0x0f0f0f0f0f0f0f0f);
-    b += b.shift_right_logical(8);
-    b += b.shift_right_logical(16);
-    b += b.shift_right_logical(32);
-    b.bit_and(0xff).trunc()
-}
+fn count_ones(b: u64) u32 = 
+    count_ones(b&);
 
-// ctz from https://c9x.me/compile/
-fn trailing_zeros(b: u64) i64 = {
-    n := 0;
-    if b.bit_and(0xffffffff) == 0 {
-        n += 32;
-        b = b.shift_right_logical(32);
-    }; 
-    if b.bit_and(0xffff) == 0 {
-        n += 16;
-        b = b.shift_right_logical(16);
-    };
-    if b.bit_and(0xff) == 0 {
-        n += 8;
-        b = b.shift_right_logical(8);
-    };
-    if b.bit_and(0xf) == 0 {
-        n += 4;
-        b = b.shift_right_logical(4);
-    };
-    table :: items(@list(@as(u8) 4, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0) ast_alloc());
-    n += table[b.bit_and(0xf).bitcast()].zext();
-    n
-}
+fn trailing_zeros(b: i64) i64 #asm #aarch64 = (
+    // 0b101101011000000000110 is ctz... but it doesn't exist? I guess i don't have FEAT_CSSC?
+    @bits(Bits.X64, 0b101101011000000000000, @as(u5) x0, @as(u5) x0),  // rbit
+    @bits(Bits.X64, 0b101101011000000000100, @as(u5) x0, @as(u5) x0),  // clz
+    ret()
+);
+
+// TODO: this returns 0 if b is 0 which is unfortunate but i never call it that way yet. should be fixed anyway tho. 
+// I cheated with `int trailing_zeroes(long x) { return __builtin_ctzl(x); }`, needs -msse4.2
+fn trailing_zeros(b: i64) i64 #asm #x86_bytes = (fn(out) = {
+    out.push_all(@slice(0x48, 0x0f, 0xbc, 0xc7)); // bsfq	%rdi, %rax
+    out.push(@as(u8) PrimaryOp.Ret);
+});
 
 NS_TO_MS :: 1000 * 1000;
 

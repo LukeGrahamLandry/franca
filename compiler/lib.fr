@@ -111,35 +111,50 @@ fn load_file_in_compiler(vtable: *ImportVTable, path: Str, opts: *BuildOptions) 
 }
 
 fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
-    start := timestamp();
-    opts := vtable.default_build_options(); 
-    c := @try(vtable.load_file_in_compiler(path, opts)) return;
-    
-    self := c.data.cast()[][];
-    
-    // TODO: remove this soon!
-    fn getenv(name: CStr) CStr #libc;
-    var := getenv("FRANCA_NEW".sym().c_str());
-    use_new_backend := !var.ptr.is_null() && var.str() == "true";
-    if use_new_backend {
-        m := self.get_alloc().box(QbeModule);
-        m[] = init_default_module(arch = .aarch64, os = .macos, type = .JitOnly); // TODO: :hardcode_os
-        self.shared = (Some = (init(m, @as(CodegenWorker) codegen_thread_main)));
+    F :: @FnPtr(*ImportVTable) void;
+    callee: ?F = .None;
+    if !path.ends_with(".fr") {
+        handle := dlopen(maybe_borrow_cstr(path, temp()), .Lazy); 
+        if !handle.lib.is_null() {
+            ref := dlsym(handle, "driver".sym().c_str());
+            @assert(!ref.is_null(), "opened '%' as shared library but failed to get symbol 'driver'", path);
+            @println("Loaded precompiled driver '%'", path);
+            callee = (Some = ptr_cast_unchecked(rawptr, F, ref&)[]);
+        };
     };
-    
-    f := c.get_unique_named("driver") || c.get_unique_named("main") || panic("expected a function called main or driver.");
 
-    callee := if use_new_backend {
-        main_thread_pump(self, @slice(f), .Jit);
-        rawptr.zeroed()
-    } else {
-        c.get_jitted(f)
+    if callee.is_none() {
+        safe :: safety_check_enabled(.DebugAssertions);
+        @eprintln(">>> compiler configuration: context=%, threads=%, debug_assertions=%.", if(query_context_is_implicit(), => "implicit", => "static"), use_threads, safe);
+        start := timestamp();
+        opts := vtable.default_build_options(); 
+        c := @try(vtable.load_file_in_compiler(path, opts)) return;
+        
+        self := c.data.cast()[][];
+        
+        // TODO: remove this soon!
+        fn getenv(name: CStr) CStr #libc;
+        var := getenv("FRANCA_NEW".sym().c_str());
+        use_new_backend := !var.ptr.is_null() && var.str() == "true";
+        if use_new_backend {
+            m := self.get_alloc().box(QbeModule);
+            m[] = init_default_module(arch = .aarch64, os = .macos, type = .JitOnly); // TODO: :hardcode_os
+            self.shared = (Some = (init(m, @as(CodegenWorker) codegen_thread_main)));
+        };
+        
+        f := c.get_unique_named("driver") || c.get_unique_named("main") || panic("expected a function called main or driver.");
+    
+        cc := if use_new_backend {
+            main_thread_pump(self, @slice(f), .Jit);
+            rawptr.zeroed()
+        } else {
+            c.get_jitted(f)
+        };
+        callee = (Some = assume_types_fn(Arg = *ImportVTable, Ret = void, ptr = cc));
+        @eprintln(">>> compiled driver in %ms.", timestamp() - start);
     };
     
-    safe :: safety_check_enabled(.DebugAssertions);
-    @eprintln(">>> compiler configuration: context=%, threads=%, debug_assertions=%.", if(query_context_is_implicit(), => "implicit", => "static"), use_threads, safe);
-    @eprintln(">>> compiled driver in %ms.", timestamp() - start);
-    callee := assume_types_fn(Arg = *ImportVTable, Ret = void, ptr = callee);
+    callee := callee.unwrap();
     push_dynamic_context {
         context(DefaultContext)[].comptime = rawptr_from_int(0);
         callee(vtable);

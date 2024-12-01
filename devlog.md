@@ -1,9 +1,22 @@
+- finish emit for shared libraries
+- support loading driver from a dylib instead of recompiling it everytime.
+  - confusion about a `.sym().c_str()` on a runtime value that was relying on being jitted.
+  - need to improve error detection for calling a #comptime_addr at runtime
+    now that i don't detect it when trying to compile Bc.GetCompCtx (since that doesn't exist anymore).
+    right now its just an int3/brk which is not super helpful.
+  - saves 170 for default_driver.fr and now i don't need to feel bad about taking backends out of the core compiler,
+    because they don't always run in the slow jit anymore.
+    for example, `-aot=llvm -S` takes 1800 to jit and run or 1240 when precompiled.
+- for bscopy, just calling memcpy instead of `BSOP(a, b, fn(a, b) => b);` makes codegen thread go 600 -> 550.
+  im sure llvm would have noticed but i certainly don't do idiom recognition.
+- asm for count_ones and trailing_zeros cause i don't like seeing them near the top of the profile.
+
 ## (Nov 29/30)
 
 - frontend: slow progress on new emit_ir from ast instead of going through old Bc.
-- arm: fixed HFA abi. it was always passing >16 byte structs in memory which i learned was wrong a from soft_draw example a while ago.
+- arm: fixealways run in the slow jit anymore. d HFA abi. it was always passing >16 byte structs in memory which i learned was wrong a from soft_draw example a while ago.
 - arm: fixed incorrectly transcribed udiv bits. only manifested on fold test with fold turned off which is strange.
-  didn't mess up franca because i only use signed math currently.
+  always run in the slow jit anymore.always run in the slow jit anymore. didn't mess up franca because i only use signed math currently.
 - amd: temporary rort/byte_swap #asm impl. revealed bug with const arg + FuncImpl.Merged that im going to ignore for now.
   that gets sha256_examples working on x64 (but only with linker, not my exe... odd).
 - incantation to get sane disassembler: in `~/.lldbinit`: `settings set target.x86-disassembly-flavor intel`

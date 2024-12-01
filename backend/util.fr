@@ -347,21 +347,6 @@ fn bsinit(bs: *Qbe.BSet, n: i64) void = {
     bs.t = temp().alloc_zeroed(u64, n).as_ptr(); 
 }
 
-// use `for` which calls this. 
-fn bsiter(bs: *Qbe.BSet, elt: *i32) bool = {
-    t, j := elt[].zext().div_mod(Qbe.NBit);
-    if(t >= bs.nt.zext(), => return(false));
-    b := bs.t.offset(t)[];
-    b = b.bit_and(bit_not(BIT(j) - 1));
-    while => b == 0 {
-        t += 1;
-        if(t >= bs.nt.zext(), => return(false));
-        b = bs.t.offset(t)[];
-    };
-    elt[] = intcast(Qbe.NBit * t + trailing_zeros(b));
-    true
-}
-
 fn bsequal(a: *Qbe.BSet, b: *Qbe.BSet) bool = {
     @debug_assert(a.nt == b.nt, "BSet mismatch");
     range(0, a.nt.zext()) { i |
@@ -377,10 +362,11 @@ fn bszero(bs: *Qbe.BSet) void = {
     mem.set_zeroed();
 }
 
+// it's sad how well this would vectorize
 fn bscount(bs: *Qbe.BSet) u32 = {
     n: u32 = 0;
     range(0, bs.nt.zext()) { i |
-        n += count_ones(bs.t.offset(i)[]);
+        n += count_ones(bs.t.offset(i));
     };
     n
 }
@@ -419,7 +405,9 @@ fn init_bitset(size: i64) Qbe.BSet #inline = {
     s
 }
 
-fn bscopy( a: *Qbe.BSet, b: *Qbe.BSet) void = BSOP(a, b, fn(a, b) => b);
+fn bscopy(a: *Qbe.BSet, b: *Qbe.BSet) void = 
+    memcpy(u64.raw_from_ptr(a.t), u64.raw_from_ptr(b.t), a.nt.zext() * 8);
+
 fn bsunion(a: *Qbe.BSet, b: *Qbe.BSet) void = BSOP(a, b, fn(a, b) => a.bit_or(b));
 fn bsinter(a: *Qbe.BSet, b: *Qbe.BSet) void = BSOP(a, b, fn(a, b) => a.bit_and(b));
 fn bsdiff( a: *Qbe.BSet, b: *Qbe.BSet) void = BSOP(a, b, fn(a, b) => a.bit_and(b.bit_not()));
@@ -427,7 +415,8 @@ fn bsdiff( a: *Qbe.BSet, b: *Qbe.BSet) void = BSOP(a, b, fn(a, b) => a.bit_and(b
 fn BSOP(a: *Qbe.BSet, b: *Qbe.BSet, $fuse: @Fn(a: u64, b: u64) u64) void #inline = {
     @debug_assert(a.nt == b.nt, "BSet mismatch");
     range(0, a.nt.zext()) { i |
-        a.t.offset(i)[] = fuse(a.t.offset(i)[], b.t.offset(i)[]);
+        a := a.t.offset(i);
+        a[] = fuse(a[], b.t.offset(i)[]);
     };
 }
 
@@ -758,16 +747,19 @@ fn for_insts_forward(b: *Qbe.Blk, $body: @Fn(i: *Qbe.Ins) void) void = {
     };
 }
 
-// :TodoPort bsiter. 
 fn for(bs: *Qbe.BSet, $body: @Fn(i: i64) void) void = {
     for(bs, 0, fn(i) => body(i))
 }
 
 fn for(bs: *Qbe.BSet, start: i64, $body: @Fn(i: i64) void) void = {
-    i: i32 = start.intcast();
-    while => bsiter(bs, i&) {
-        body(i.zext());
-        i += 1;
+    t := start.shift_right_logical(6);
+    range(t, bs.nt.zext()) { k |
+        b := bs.t.offset(k)[].bitcast();
+        while => b != 0 {
+            body(k * 64 + trailing_zeros(b));
+            bit := b.bit_and(-b);  // pick out the least significant bit
+            b = b.bit_xor(bit);    // unset that bit
+        };
     };
 }
 
