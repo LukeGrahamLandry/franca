@@ -34,8 +34,10 @@ fn amd64_isel(f: *Qbe.Fn) void = {
                 fixarg(p.arg.index(a), p.cls, Qbe.Ins.ptr_from_int(0), f);
             };
         };
-        num.set_zeroed();
-        anumber(num, b, f.con.slice(0, f.ncon.zext()));
+        if !SIMPLE_ADDR[]{
+            num.set_zeroed();
+            anumber(num, b, f.con.slice(0, f.ncon.zext()));
+        };
         seljmp(b, f);
         for_insts_rev b { i |
             sel(i[][], num, f);
@@ -216,6 +218,15 @@ fn merge_amd_addr(f: *Qbe.Fn, mem: *Qbe.Addr) void = {
                             mem.base = a0;
                             continue();
                         };
+                        
+                        s := rslot(mem.index, f);
+                        if s != -1 {
+                            if mem.scale == 1 {
+                                mem.index = SLOT(s);  // address of a stack slot
+                            } else {
+                                @eprintln("scaling stack slot");
+                            };
+                        };
                         return();
                     };
                     if f.get_int(a0) { off |
@@ -306,6 +317,11 @@ fn merge_amd_addr(f: *Qbe.Fn, mem: *Qbe.Addr) void = {
                 @default => ();
             };
         };
+        
+        s := rslot(mem.base, f);
+        if s != -1 {
+            mem.base = SLOT(s);
+        };
         return();
     }
 }
@@ -338,6 +354,8 @@ fn seladdr(r: *Qbe.Ref, tn: []Qbe.Num, f: *Qbe.Fn) void = {
                 f.emit(.addr, .Kl, r0, a[], QbeNull);
                 a[] = r0;
             };
+            
+            @debug_assert_eq(rslot(a[], f), -1, "unfixed stack slot after address matching");
         };
             
         when_debug(f, .InstSelect) { out |

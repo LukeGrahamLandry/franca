@@ -1,6 +1,7 @@
 //! This is a worse alternative to the spill+rega passes. 
 //! You probably never want to use it but it's a useful source of truth for debugging miscompilations. 
 //! It's super dumb: never holds values in registers, inserts redundant load-store pairs, etc. 
+//! IT ALSO DOES NOT WORK, its really just for niche testing!
 
 // do this after abi+isel
 fn minimal_rega(f: *Qbe.Fn) void = {
@@ -36,22 +37,12 @@ fn minimal_rega(f: *Qbe.Fn) void = {
     };
 }
 
-// TODO: isel inserts RMem
 fn lower(f: *Qbe.Fn, i: *Qbe.Ins) void = {
     if i.op() == .copy && i.to == QbeNull {  // hacky fake one after a call for other rega 
         return();
     };
     assert(i.op() != .swap, "TODO: swap");
-    
-    assert(rtype(i.arg&[0]) != .RMem, "for now i only do arm where arg0 can't be RMem");
-    
-    //Arg :: @struct(use: *Qbe.Ref, slot: ?Qbe.Ref = .None, reg := QbeNull);
-    //args := @uninitialized Array(Arg, 4); args := args&;
-    //args[0] = (use = i.arg&.index(0));
-    //args[0] = (use = i.arg&.index(1));
-    //args[0] = (use = i.arg&.index(0));
-    //args[0] = (use = i.arg&.index(0));
-    
+   
     sa := f.assign_slot(i.arg&[0]);
     sb := f.assign_slot(i.arg&[1]);
     sc := f.assign_slot(i.to);
@@ -60,6 +51,12 @@ fn lower(f: *Qbe.Fn, i: *Qbe.Ins) void = {
     m  := Qbe.Addr.ptr_from_int(0);
     if rtype(i.arg&[1]) == .RMem {
         m = f.get_memory(i.arg&[1]);
+        sd = f.assign_slot(m.base);
+        se = f.assign_slot(m.index);
+    };
+    if rtype(i.arg&[0]) == .RMem {
+        @debug_assert(rtype(i.arg&[1]) != .RMem);
+        m = f.get_memory(i.arg&[0]);
         sd = f.assign_slot(m.base);
         se = f.assign_slot(m.index);
     };
@@ -137,6 +134,7 @@ fn insert_phi_copies(f: *Qbe.Fn) void = {
                 if(s.phi.is_null(), => continue());
                 blk := newblk();
                 
+                // TODO: this is wrong. you need parallel moves i think. :moves
                 for_phi s { p | 
                     n := index_in_phi(b, p);
                     f.emit(.copy, p.cls, p.to, p.arg&.index(n)[], QbeNull);
@@ -150,7 +148,10 @@ fn insert_phi_copies(f: *Qbe.Fn) void = {
                 blk.jmp.type = .jmp;
                 blk.s1 = s;
                 sp[] = blk;
-                f.copy_instructions_from_scratch(blk);
+                // TODO: order shoudn't matter. this is just a HACK that makes the simple tests pass for now. :moves
+                //       its not a huge deal this codepath isn't used for real programs so its not a huge deal. 
+                //       just a sanity check that lets you turn off the compilicated register allocator. 
+                f.copy_instructions_from_scratch_reversed_which_means_forwards(blk);
                 l: List(u8) = (maybe_uninit = blk.name&.items(), len = 0, gpa = panicking_allocator); // :UnacceptablePanic
                 @fmt(l&, "%_%", b.name(), s.name());
             };

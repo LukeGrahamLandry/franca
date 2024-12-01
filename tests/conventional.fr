@@ -154,3 +154,31 @@ fn large_struct_arg_actually_by_ref() = {
     };
 }
 
+
+#test 
+fn sysv_return_result_addr() = {
+    if query_current_arch().unwrap() != .x86_64 {
+        println("skip!");
+        return();
+    };
+    
+    // new backend relies on you returning your result address but the old backend didn't do that originally. 
+    // 
+    // as a fun bonus, this is UB on llvm? this test works with -O0 but not with -Os.
+    // (im telling it first arg is sret ptr of some size)
+    // it compiles foo correctly but even with noinline it "knows" a function can't be returning an address in the callers own stack frame?
+    // so it helpfully gets rid of that branch for you. 
+    // or its just that you're never allowed to compare pointers, who knows.
+    // 
+    
+    Big :: @struct(a: i64, b: i64, c: i64, d: i64);
+    foo :: fn() Big #noinline = (a = 1, b = 2, c = 3, d = 4);
+    
+    foo2: @FnPtr() Big = foo;
+    i_know_the_calling_convention := ptr_cast_unchecked(@type foo2, @FnPtr(i64) i64, foo2&)[];
+    result := Big.zeroed();
+    addr := Big.int_from_ptr(result&);
+    addr2 := i_know_the_calling_convention(addr);
+    assert_eq(addr, addr2);
+    assert(result.a == 1 && result.b == 2 && result.c == 3 && result.d == 4, "bad ret");
+}

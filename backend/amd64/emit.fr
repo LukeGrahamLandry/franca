@@ -92,7 +92,7 @@ fn do_fixups_amd64(self: *QbeModule, address: *u8, symbol: *SymbolInfo) void = {
                 size_of_displacement :: 4;
                 distance -= size_of_displacement;
                 @assert_lt(distance.abs(), MAX_i32, "can't reference that far");
-                ptr_cast_unchecked(u8, u32, fixup.patch_at)[] = distance.trunc();
+                ptr_cast_unchecked(u8, u32, fixup.patch_at)[] = distance.trunc() + it.increment;
             }
             @default => panic("amd64 unexpected fixup type");
         }
@@ -304,13 +304,6 @@ fn emitcopy(r1: Qbe.Ref, r2: Qbe.Ref, k: Qbe.Cls, e: *AmdState) void = {
     emitins(i, e);
 }
 
-// TODO: use this!
-// for floats
-//static void *negmask[4] = {
-//    [Ks] = (uint32_t[4]){ 0x80000000 },
-//    [Kd] = (uint64_t[2]){ 0x8000000000000000 },
-//};
-
 amd64_xmm_scratch :: TMP(Amd64Reg.XMM0.raw() + 15);
 
 fn convert_to_2address(e: *AmdState, i: *Qbe.Ins) void = {
@@ -352,7 +345,7 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
             if rtype(i.arg&[1]) == .RCon {
                 i.arg&.items().swap(0, 1);
             };
-            if KBASE(i&.cls())   == 0 /* only available for ints */
+            if is_int(i&.cls())
             && rtype(i.arg&[0]) == .RCon
             && rtype(i.arg&[1]) == .RTmp {
                 c := e.f.get_constant(i.arg&[0]);
@@ -369,6 +362,7 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
         fn sub() => {
             /* we have to use the negation trick to handle
             * some 3-address subtractions */
+            // because it's not commutative 
             if i.to == i.arg&[1] && i.arg&[0] != i.to {
                 // TODO: make a .ssa test that gets here
                 ineg := make_ins(.neg, i&.cls(), i.to, i.to, QbeNull);
@@ -388,26 +382,32 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
             e.a&.push(@as(u8) PrimaryOp.SignExtendAxToDxAx); // CQO
         }
         fn neg() => {
-            // TODO: make a .ssa test that gets here
-            if i.to != i.arg&[0] {
-                ins := make_ins(.copy, i&.cls(), i.to, i.arg&[0], QbeNull);
-                emitins(ins, e);
-                //emitf("mov%k %0, %=", &i, e);
-            };
             if is_int(i&.cls()) {
-                i.arg&[0] = i.to;
+                if i.to != i.arg&[0] {
+                    ins := make_ins(.copy, i&.cls(), i.to, i.arg&[0], QbeNull);
+                    emitins(ins, e);
+                };
                 assemble(e, i&);
-                
-                //emitf("neg%k %=", &i, e);
             } else {
-                panic("neg");
-                //fprintf(e.f,
-                //    "\txorp%c %sfp%d(%%rip), %%%s\n",
-                //    "xxsd"[i.cls],
-                //    T.asloc,
-                //    stashbits(negmask[i.cls], 16),
-                //    regtoa(i.to.val, SLong)
-                //);
+                // You can't just lower these in isel because we insert new ones to handle 3-address subtract. 
+                // TODO: this is so garbage. im doing extra work just to do a worse job. should just do what qbe does. 
+                
+                @debug_assert(amd64_xmm_scratch != i.arg&[0]);
+                
+                // xmm15 = 0 
+                xmm15 :: int_reg_d(amd64_xmm_scratch);  // TODO: compiler hangs if you typo `xmm15 :: int_reg_d(xmm15);`
+                e.a&.push(0x66);
+                e.a&.push(pack_rex_si(true, xmm15, xmm15, DONT_CARE_REG));
+                e.a&.push_all(@slice(0x0F, 0xEF)); // PXOR
+                e.a&.push(pack_modrm(.Direct, xmm15, xmm15));
+                
+                // xmm15 = 0 - a0
+                ins := make_ins(.sub, i&.cls(), amd64_xmm_scratch, amd64_xmm_scratch, i.arg&[0]);
+                emitins(ins, e);
+                
+                // to = xmm15
+                ins := make_ins(.copy, i&.cls(), i.to, amd64_xmm_scratch, QbeNull);
+                emitins(ins, e);
             };
         }
         fn div() => {
@@ -432,7 +432,6 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
             @debug_assert(rtype(i.to) != .RMem);
             if(i.to == QbeNull || i.arg&[0] == QbeNull, => return());
             if(i.to == i.arg&[0], => return());
-            //printins(e.f, i&, e.f.globals.debug_out);
             
             is_long_const := i&.cls() == .Kl && t0 == .RCon && e.f.get_constant(i.arg&[0])[].type == .CBits;
             if is_long_const {
@@ -586,13 +585,12 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
             e.a&.push(operand_16bit_prefix);
             // TODO: has RTmp already been converted to RMem for all stores?
             
-            // this is painful because everywhere else the range of a byte immediate is signed but here its unsigned. 
             if e.f.get_int(i.arg&[0]) { c |
                 c = c.bit_and(1.shift_left(16) - 1);
                 i.arg&[0] = TMP(reg_for_extension(0));
                 b := encode(e, i&, false, 2);
                 push(e, b, @slice(0xC7));
-                e.a&.push(@as(u8) c.trunc());
+                e.a&.reserve_type(u16)[] = c.trunc();
                 return();
             };
         
@@ -1078,6 +1076,7 @@ fn amd64_encoding_table() Ty([]AmdEncodingEntry, []u16) = @amd64_encoding_data (
         (.M, .imm32, (0x81), 7),
         (.R, .M, (0x3B)),
         (.M, .R, (0x39)),
+        // TODO: f32?
         (.F, .F, (0x0F, 0x2E), (), (0x66)), // ucomisd
     ),
     (.shr, 

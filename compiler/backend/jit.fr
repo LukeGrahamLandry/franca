@@ -319,7 +319,7 @@ fn bump_dirty(self: *Jitted) void = {
     fn branch_func(self: *CGJ, f: FuncId, with_link: bool) void ;
     fn load_fnptr_from_dispatch(self: *CGJ, f: FuncId, reg: i64) void;
     fn emit_stack_fixup(self: *CGJ) void;
-    fn emit_return(self: *CGJ, sig: [] Prim) void;
+    fn emit_return(self: *CGJ, sig: [] Prim, special: bool) void;
     fn inst_intrinsic(self: *CGJ, op: Intrinsic) void;
     fn is_special_reg(self: *CGJ, reg: i64) bool;
     // do_floats:false if you're just trying to free up a gpr, not saving for a call.
@@ -377,6 +377,7 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $ContextReg: i64, $negative_s
         forward_calls: List(FuncId),
         context_slot: ?SpOffset = .None,
         implicit_context: bool,
+        special_return := false,
         backend: B,
     );
     
@@ -436,6 +437,7 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $ContextReg: i64, $negative_s
     
         // TODO: assert int_count <= 8 && float_count <= 8 or impl pass on stack.
         sig := func.signeture&;
+        self.special_return = sig.first_arg_is_indirect_return;
         int_count, float_count := self.ccall_reg_to_stack(sig.args, sig.first_arg_is_indirect_return);
         // Any registers not containing args can be used.
         self.add_free_args(int_count, float_count);
@@ -619,9 +621,9 @@ fn CodeGenJit($B: Type, $InstUnit: Type, $SP: i64, $ContextReg: i64, $negative_s
                     @default => self.inst_intrinsic(op);
                 };
             }
-            fn Ret0()     => return(self.emit_return(empty()));
-            fn Ret1(prim) => return(self.emit_return(@slice(prim)));
-            fn Ret2(f)    => return(self.emit_return(@slice(f._0, f._1)));
+            fn Ret0()     => return(self.emit_return(empty(), self.special_return));
+            fn Ret1(prim) => return(self.emit_return(@slice(prim), false));
+            fn Ret2(f)    => return(self.emit_return(@slice(f._0, f._1), false));
             // Note: we do this statically, it wont get actually applied to a register until its needed because loads/stores have an offset immediate.
             fn IncPtrBytes(bytes) => {
                 val := self.state.stack&.index(self.state.stack.len - 1);

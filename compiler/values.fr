@@ -720,7 +720,11 @@ fn call_dynamic(program: *SelfHosted, ptr: i64, f_ty: *FnType, args: *RsVec(i64)
             };
             @err("TODO: unhandled prim pair for comptime call")
         } else {
-            arg8ret_struct(ptr, args.ptr, context);
+            ptr_if_x64 := arg8ret_struct(ptr, args.ptr, context);
+            if program.env.comptime_arch == .x86_64 {  // TODO: make this const known
+                @debug_assert_eq(ptr_if_x64, args[0], "sys-v abi expects you to return indirect pointer in rax");
+            };
+            
             mem := indirect_ret.unwrap();
             (Ok = (Big = mem))
         }
@@ -792,7 +796,7 @@ fn arg8ret2(fnptr: i64, first_of_eight_args: *i64, env: rawptr) IntPair #asm #aa
     br(x16, 0), // tail call
 );
 
-fn arg8ret_struct(fnptr: i64, first_of_eight_args: *i64, env: rawptr) void #asm #aarch64 #c_call = (
+fn arg8ret_struct(fnptr: i64, first_of_eight_args: *i64, env: rawptr) i64 #asm #aarch64 #c_call = (
     mov(Bits.X64, x9, x2),
     ldr_uo(Bits.X64, x8, x1, 0),  // arm cc has return address in x8 but we want to represent it as first argument. 
     add_im(Bits.X64, x17, x1, 8, 0),
@@ -835,7 +839,7 @@ fn arg8ret1_all_floats(fnptr: i64, first_of_eight_args: *i64, env: rawptr) i64 #
 // floats: xmm0 - xmm7
 fn arg8ret1(fnptr: i64, first_of_eight_args: *i64, env: rawptr) i64 #asm #x86 #c_call = simple_x86;
 fn arg8ret2(fnptr: i64, first_of_eight_args: *i64, env: rawptr) IntPair #asm #x86 #c_call = simple_x86;
-fn arg8ret_struct(fnptr: i64, first_of_eight_args: *i64, env: rawptr) void #asm #x86 #c_call = simple_x86;
+fn arg8ret_struct(fnptr: i64, first_of_eight_args: *i64, env: rawptr) i64 #asm #x86 #c_call = simple_x86;
 fn arg8ret1_all_floats(fnptr: i64, first_of_eight_args: *i64, env: rawptr) i64 #asm #x86 #c_call = """
     push rbp  // this lets debuggers give you a stack trace through a comptime call
     push 0    // keep stack 16 byte aligned before the call instruction  
@@ -884,7 +888,7 @@ simple_x86 :: """
 
 fn arg8ret1(fnptr: i64, first_of_eight_args: *i64, env: rawptr) i64 #asm #x86_bytes #c_call = simple_x86_bytes;
 fn arg8ret2(fnptr: i64, first_of_eight_args: *i64, env: rawptr) IntPair #asm #x86_bytes #c_call = simple_x86_bytes;
-fn arg8ret_struct(fnptr: i64, first_of_eight_args: *i64, env: rawptr) void #asm #x86_bytes #c_call = simple_x86_bytes;
+fn arg8ret_struct(fnptr: i64, first_of_eight_args: *i64, env: rawptr) i64 #asm #x86_bytes #c_call = simple_x86_bytes;
 
 fn simple_x86_bytes(out: *List(u8)) void = {
     @asm_x64(

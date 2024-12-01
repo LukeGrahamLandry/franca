@@ -1,3 +1,25 @@
+## (Nov 29/30)
+
+- frontend: slow progress on new emit_ir from ast instead of going through old Bc.
+- arm: fixed HFA abi. it was always passing >16 byte structs in memory which i learned was wrong a from soft_draw example a while ago.
+- arm: fixed incorrectly transcribed udiv bits. only manifested on fold test with fold turned off which is strange.
+  didn't mess up franca because i only use signed math currently.
+- amd: temporary rort/byte_swap #asm impl. revealed bug with const arg + FuncImpl.Merged that im going to ignore for now.
+  that gets sha256_examples working on x64 (but only with linker, not my exe... odd).
+- incantation to get sane disassembler: in `~/.lldbinit`: `settings set target.x86-disassembly-flavor intel`
+- amd: embarasing amount of time on storeh being an incorrect copy paste of storeb `e.a&.push(@as(u8) c.trunc());`
+  instead of `e.a&.reserve_type(u16)[] = c.trunc();` so putting out one byte of immediate instead of two,
+  so all the instructions later get decoded wrong, because variable width instructions are garbage.
+- amd: found some only work with linker. `unexpectedly need to EmulateForward on a synchronous exception`, ive seen that before,
+  odd way to spell stack overflow but go off i guess.
+  do_fixups_amd64:RipDisp32 wasn't including increment when an offset got folded into the constant reference.
+- amd: simple_addr wasn't always converting fast-allocs to RSlot. 7.
+- amd: make old jit return result pointer in rax because new backend relies on it.
+  added new test for that which llvm-aot fails but its because it optimises away the pointer comparison when the caller checks if it worked,
+  it does however follow the abi correctly for the callee.
+- amd: painful float negate
+- arm: neg even though franca doesn't use it
+
 ## codesign (Nov 28)
 
 ahahahaha i've defeated apple.

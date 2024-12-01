@@ -1,7 +1,7 @@
 // TODO: im not following the calling convention for structs correctly. 
 
 EmitX64    :: CodeGenJit(X64AsmData, u8, @as(i64) X86Reg.rbp, @as(i64) X86Reg.rax, true);
-X64AsmData :: @struct(asm_out: List(u8));
+X64AsmData :: @struct(asm_out: List(u8), result_slot := SpOffset.zeroed());
 
 fn new(compile: CompilerRs, bc: *BcBackend) X64AsmData #once = (
     asm_out = (
@@ -22,7 +22,14 @@ fn emit_header(self: *EmitX64) *u8 #once = {
     self.next_slot.id -= x64_prelude_reserved_space;
     self.out().encode_op_reg(PrimaryOp.PushBase, X86Reg.rbp);
     self.out().encode_bin(PrimaryOp.MovReg, X86Reg.rbp, X86Reg.rsp);
-    self.blank_patch(x64_reserve_stack_encoding_size)
+    patch := self.blank_patch(x64_reserve_stack_encoding_size);
+    
+    // :SLOW you only need to do this if this function has an indirect return. 
+    //       i just don't super care about this backend's code quality right now since its being replaced anyway. 
+    self.backend.result_slot = self.create_slots(8);
+    self.store_u64(@as(i64) X86Reg.rdi, @as(i64) X86Reg.rbp, self.backend.result_slot.id);
+    
+    patch
 }
 
 // :StackX64
@@ -310,7 +317,7 @@ fn branch_func(self: *EmitX64, f: FuncId, with_link: bool) void #once = {
 }
 
 
-fn emit_return(self: *EmitX64, sig: [] Prim) bool = {
+fn emit_return(self: *EmitX64, sig: [] Prim, special: bool) bool = {
     int_count := 0;
     float_count := 0;
     enumerate sig { i, ty |
@@ -326,6 +333,9 @@ fn emit_return(self: *EmitX64, sig: [] Prim) bool = {
         };
     };
     self.state.stack.len -= int_count + float_count;
+    if special {
+        self.load_u64(@as(i64) X86Reg.rax, @as(i64) X86Reg.rbp, self.backend.result_slot.id);
+    };
     self.emit_stack_fixup();
     self.out().push(@as(u8) PrimaryOp.Ret);
     true

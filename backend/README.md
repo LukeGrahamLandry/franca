@@ -35,6 +35,7 @@ You can still print out the ir as human readable text between passes and modify 
 - Removed several codegen optimisations until we have a solid foundation (but I want to bring them back eventually).
   - all: load float constants from memory (instead of using int immediate + fmov)
   - arm: bit field immediate to load int more constants in a single instruction
+  - amd: negating floats by xoring from memory
 - Removed the RISC-V target for now because I haven't done thier instruction encoding yet.
 
 ## Qbe License

@@ -5,6 +5,10 @@ export function w $main() {
 @start
     call $assert_one(l 1)
     call $idiv_stuff(l 36342608771699226)  # 64 bit number with 1 in bit 31
+    call $storeh_imm()
+    call $fixup_addend()
+    call $F872()
+    call $fneg(d d_1, s s_1)
     ret 0
 }
 
@@ -22,7 +26,7 @@ function $assert_one(l %x) {
 @no
 	hlt
 @yes
-	ret0
+	ret
 }
 
 # rex prefix for CQO when Kl 
@@ -39,4 +43,79 @@ function l $idiv_stuff(l %x) {
 	jmp @b5
 @b4
 	ret %v5
+}
+
+function w $storeh_imm() {
+@b0
+	%v0 =l alloc4 2
+	storeh 123, %v0
+	%v3 =w call $ok__4897(l %v0)
+	ret %v3
+}
+
+function w $ok__4897(l %v0) {
+@b1
+	%v10 =w loaduh %v0
+	ret %v10
+}
+
+# todo: report when you use an undeclared global / make them tell you valid imports
+
+# linker-ish bug not assembler-ish bug
+function $fixup_addend() {
+@b1
+    %a =l add $g2, 8  # forward reference to $a so we need a fixup
+	%v12 =l load %a   # folded to load [$a + 8]
+	%v19 =l cnel %v12, 5
+	jnz %v19, @b7, @b9
+@b7
+	hlt
+@b9
+	ret
+}
+
+data $g2 = { l 0, l 5 }  # declared later 
+
+data $g0 = { b 123 } 
+
+# this was a simple_addr isel bug
+function $F872() {
+@b0
+	%arr =l alloc8 16
+@b1
+	storel $g0, %arr
+	jmp @b8
+@b7
+	ret
+@b8
+	%index =l phi @b1 0, @b22 %v62
+	%v36 =l csltl %index, 1
+	jnz %v36, @b10, @b7
+@b10
+	%slot  =l mul %index, 16
+	%p_ptr =l add %arr, %slot
+	%ptr   =l load %p_ptr  # this becomes load [%arr + %slot] and %arr needs to be converted to an RSlot
+	%char  =w loaduw %ptr
+	%cond  =l cnew %char, 123
+	jnz %cond, @b19, @b22
+@b19
+	call $abort()
+	hlt
+@b22
+	%v62 =l add %index, 1
+	jmp @b8
+}
+
+function $fneg(d %a, s %c) {
+@start
+    %a =d neg %a
+	%first =l ceqd %a, d_-1
+    %c =s neg %c
+	%second =l ceqd %c, s_-1
+	%cond =l and %first, %second
+	jnz %cond, @yes, @no
+@yes
+    ret
+@no
+	hlt
 }

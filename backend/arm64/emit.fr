@@ -9,6 +9,7 @@
 // TODO: (when i want to do my own aot) have the addr lookup table in a seperate segment before the functions and then don't include it in the aot binrary, just patch instead. 
 // TODO: take out the internal jump distance checks because we check at the end that the function fits in the segment (jsut also check that its within i19 because why not)
 // TODO: use ldp/stp for callee saved registers
+// TODO: fold symbol offsets into the adrp+add instead of wasting an extra instruction :SLOW
 
 // TODO: need to replace all the .goal checks when we want to support ELF
 
@@ -445,6 +446,7 @@ fn loadcon(self: *ArmState, c: *Qbe.Con, r: i64, k: Qbe.Cls) void  = {
         self.loadaddr_bits(c, r, c.sym.type == .SThr);
         if c.bits.i != 0 {
             // TODO: you can do this as part of the thing above. 
+            //       just need to thread it through InReg and make sure to handle it for local fixups + emit relocations. 
             @assert(c.bits.i < 4096 && c.bits.i > 0, "TODO: loadaddr of % with offset %", self.m.str(c.sym.id), c.bits.i);
             self.inst(add_im(Bits.X64, @as(u5) r, @as(u5) r, @as(u12) c.bits.i, 0));
         };
@@ -936,6 +938,14 @@ fn emitins2(self: *ArmState, i: *Qbe.Ins) void = {
         fn stoui() => self.inst(@bits(si,  0b0011110, FType.S32, 0b111001000000, a0.float_reg(), i.to.int_reg())); // fcvtzu
         fn dtoui() => self.inst(@bits(si,  0b0011110, FType.D64, 0b111001000000, a0.float_reg(), i.to.int_reg())); // fcvtzu
         fn sltof() => self.inst(scvtf(Bits.X64, sf, i.to.float_reg(), a0.int_reg()));
+        fn neg() => {
+            if i.cls().is_int() {
+                panic("TODO: arm int neg is untested. should be fine tho");
+                self.inst(@bits(si, 0b1001011000, a0.int_reg(), 0b000000, 0b11111, i.to.int_reg()));
+            } else {
+                self.inst(@bits(0b00011110, sf, 0b100001010000, a0.float_reg(), i.to.float_reg()));  // fneg
+            };
+        }
         @default => @panic("TODO: op encoding %", inst_name);
     };
 }
