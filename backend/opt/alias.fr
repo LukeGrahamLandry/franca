@@ -5,6 +5,10 @@ Aliasing :: @enum(i64) (NoAlias, MayAlias, MustAlias);
 fn getalias(a: *Qbe.Alias, r: Qbe.Ref, f: *Qbe.Fn) void = {
     @match(rtype(r)) {
         fn RTmp() => {
+            if isreg(r) { // :ExprLevelAsm
+                a.type = .AUnk;
+                return();
+            };
             a[] = f.tmp[r.val()].alias;
             if astack(a.type) {
                 a.type = a.slot.type;
@@ -130,7 +134,8 @@ fn fillalias(f: *Qbe.Fn) void = {
         for_insts_forward b { i |
             continue :: local_return;
             a := Qbe.Alias.ptr_from_int(0);
-            if i.to != QbeNull {
+            has_dest :=  i.to != QbeNull && !isreg(i.to);  // :ExprLevelAsm
+            if has_dest {
                 @debug_assert(rtype(i.to) == .RTmp);
                 a = f.tmp[i.to.val()].alias&;
                 @debug_assert(a.type == .ABot);
@@ -151,34 +156,33 @@ fn fillalias(f: *Qbe.Fn) void = {
                 };
                 a.base = i.to.val().intcast();
                 a.offset = 0;
-            };
-            
-            // copy so same alias info. 
-            if i.op() == .copy {
-                xxx := !a.is_null();
-                @debug_assert(xxx);
-                getalias(a, i.arg&[0], f);
-            };
-            // if we're offseting by a constant, the new value has the same base as the other argument. just a different offset. 
-            if i.op() == .add {
-                a0 := Qbe.Alias.zeroed();
-                a1 := Qbe.Alias.zeroed();
-                getalias(a0&, i.arg&[0], f);
-                getalias(a1&, i.arg&[1], f);
-                if a0.type == .ACon {
-                    a[] = a1;
-                    a.offset += a0.offset;
-                } else {
-                    if a1.type == .ACon {
-                        a[] = a0;
-                        a.offset += a1.offset;
-                    };
+                
+                // copy so same alias info. 
+                if i.op() == .copy {
+                    xxx := !a.is_null();
+                    @debug_assert(xxx);
+                    getalias(a, i.arg&[0], f);
                 };
-            }; // TODO: what about sub?
-            
+                // if we're offseting by a constant, the new value has the same base as the other argument. just a different offset. 
+                if i.op() == .add {
+                    a0 := Qbe.Alias.zeroed();
+                    a1 := Qbe.Alias.zeroed();
+                    getalias(a0&, i.arg&[0], f);
+                    getalias(a1&, i.arg&[1], f);
+                    if a0.type == .ACon {
+                        a[] = a1;
+                        a.offset += a0.offset;
+                    } else {
+                        if a1.type == .ACon {
+                            a[] = a0;
+                            a.offset += a1.offset;
+                        };
+                    };
+                }; // TODO: what about sub?
+            };
             // If its not a memory op and not something simple we understand, treat the args as escaping. 
             // A derived value might get passed to a call and later passes need to assume they can no longer reason about it. 
-            if i.op() != .blit0 && (i.to == QbeNull || a.type == .AUnk) {
+            if i.op() != .blit0 && (!has_dest || a.type == .AUnk) {
                 if !is_load(i.op()) {
                     esc(i.arg&[0], f);
                 };

@@ -1,3 +1,5 @@
+## (Dec 1)
+
 - finish emit for shared libraries
 - support loading driver from a dylib instead of recompiling it everytime.
   - confusion about a `.sym().c_str()` on a runtime value that was relying on being jitted.
