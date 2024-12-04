@@ -128,6 +128,7 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
         @eprintln(">>> compiler configuration: context=%, threads=%, debug_assertions=%.", if(query_context_is_implicit(), => "implicit", => "static"), use_threads, safe);
         start := timestamp();
         opts := vtable.default_build_options(); 
+        opts.retain_function_names = true;
         c := @try(vtable.load_file_in_compiler(path, opts)) return;
         
         self := c.data.cast()[][];
@@ -146,7 +147,18 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
     
         cc := if use_new_backend {
             main_thread_pump(self, @slice(f), .Jit);
-            rawptr.zeroed()
+            m := self.shared.Some.m;
+            for_symbols m { id, s | 
+                if s.referenced && s.kind == .Pending {
+                    @eprintln("Symbol % is referenced but not defined", s.name);
+                };
+            };
+            m.make_exec();
+            name := c.fmt_fn_name(f);
+            @println("looking for %", name);
+            or m.get_addr(name) {
+                panic("ICE: lost our compiled driver")
+            }
         } else {
             c.get_jitted(f)
         };

@@ -527,16 +527,20 @@ fn log_type(self: *SelfHosted, ty: Type) Str = {
 // TODO: allow people to ask for the giant description instead of just name in debug_log_type
 fn log_type_inner(self: *SelfHosted, safe_rec: *DynamicBitSet, out: *List(u8), ty: Type) void = {
     @if(BOOTSTRAP_ONLY_MODE) return();
+    info := self.get_info(ty);
+    
+    // TODO: this needs to not do it when it has generic parameters because it hides information. 
     if self.get_info_is_ready(ty) {
-        info := self.get_info(ty);
-        
         n := info.inferred_name.id();
         min := Flag.first_dumb_type_name.ident().id();
         max := Flag.last_dumb_type_name.ident().id();
         // TODO: probably better is to not stomp the name if its a dumb one? 
         if info.inferred_name != Flag.SYMBOL_ZERO.ident() && (n < min || n > max) {
-            @fmt(out, "%", self.pool.get(info.inferred_name));
-            return();
+            s := self.pool.get(info.inferred_name);
+            if s.len > 1 { // HACK, unhelpful generics are often T. TODO: track more information about where stuff came from.
+                @fmt(out, "%", s);
+                return();
+            };
         };
     };
     if safe_rec.get(ty.as_index()) {
@@ -721,6 +725,26 @@ fn fmt_error(self: *SelfHosted, err: *CompileError, out: *List(u8)) void = {
             //       for all tuples i guess since we know they're structural. 
             //       bring back the nicer detailed printing i had for a bit in rust. 
             self.codemap.fmt_error_line(it.span, out);
+            want := self.get_type(it.wanted);
+            found := self.get_type(it.found);
+            if want.is(.Struct) && found.is(.Struct) {
+                want := want.Struct&;
+                found := found.Struct&;
+                if want.fields.len == found.fields.len && want.is_tuple && found.is_tuple {
+                    @fmt(out, "Type Error:\n");
+                    range(0, want.fields.len) { i | 
+                        w, f := (want.fields[i].ty, found.fields[i].ty);
+                        if w == f {
+                            @fmt(out, "[%] identical: %\n", i, self.log_type(w));
+                        } else {
+                            @fmt(out, "[%] % vs %\n", i, self.log_type(w), self.log_type(f));
+                        };
+                    };
+                    @fmt(out, "Or we selected totally the wrong overload.\n");
+                    return();
+                };
+                // fallthrough
+            };
             @fmt(out, "Type Error: expected % but found %", self.log_type(it.wanted), self.log_type(it.found));
         }
         fn CoerceConst(it) => {

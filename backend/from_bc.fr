@@ -57,7 +57,7 @@ fn new(comp: CompCtx, alloc: Alloc, arch: Arch, os: Os) EmitQbe2 = {
 fn finished(self: *EmitQbe2, fid: FuncId) void = {
     name: List(u8) = list(temp()); 
     self.fmt_fn_name(fid, name&);
-    self.build_current(name.items(), self.get_log_types(fid));
+    self.build_current(name.items(), self.comp.get_log_types(fid));
     self.body = zeroed(*FnBody); // :EVIL     but just avoiding confusion. 
     self.context = QbeNull;
     self.my_node = QbeNull;
@@ -93,13 +93,6 @@ fn add_code_bytes(self: *EmitQbe2, name: Str, bytes: []u8) void = {
     self.enqueue_task(entry);
 }
 
-fn join_codegen_thread(self: *EmitQbe2) void = {
-    self.b.shared.no_more_functions = true;
-    while => !self.b.shared.no_more_codegen {
-        usleep(100);
-    };
-}
-
 fn clock_ms(clock_id: i64) i64 = {
     time_spec: TimeSpec = (seconds = 0, nanoseconds = 0);
     clock_gettime(CLOCK_THREAD_CPUTIME_ID, time_spec&);
@@ -116,26 +109,6 @@ fn set_debug_types(m: *QbeModule, s: Str, value: bool) void = {
 }
 
 #include_std("compiler/pool.fr");
-
-fn get_log_types(self: *EmitQbe2, fid: FuncId) Str = {
-    func := self.comp.get_function(fid);
-    if(!func.get_flag(.LogIr), => return(""));
-    each func.annotations& { n | 
-        if n.name == Flag.log_ir.ident() {
-            if n.args& { arg |
-                return(@match(arg.expr&) {
-                    fn String(arg) => self.comp.get_string(arg[]);
-                    @default => {
-                        @eprintln("TODO: non string literal #log_ir arg for %", self.comp.get_string(func.name));
-                        "P"
-                    };
-                });
-            };
-            return("P");
-        };
-    };
-    panic("ICE: #log_ir was set but did not find tag on the function")
-}
 
 #include_std("compiler/backend/walk_bc.fr");
 
@@ -260,7 +233,7 @@ fn emit_entry_points_and_debug_info(gen: *CodeGen(EmitQbe2), comp: CompCtx, fns:
     };
     
     @if(use_threads) {
-        gen.backend&.join_codegen_thread();
+        gen.backend.b.shared.join_codegen_thread();
     };
     gen.loop_emit_constants();
     @if(use_threads) {
@@ -1053,15 +1026,8 @@ fn init(gpa: Alloc, globals: *QbeModule) QbeBuilder = {
     b
 }
 
-fn bouba_acquire(b: *QbeBuilder) *CodegenEntry = {
-    loop {
-        if b.shared.queue.acquire(true, b.idx&) { entry |
-            return(entry);
-        };
-        usleep(1000);  // most of the time the backend is not the bottle neck (because my frontend is so dumb). 
-                        // currently it falls behind ~11 times during self compile. -- Nov 26
-    };
-}
+fn bouba_acquire(b: *QbeBuilder) *CodegenEntry = 
+    bouba_acquire(b.shared, b.idx&);
 
 FIXED_CONST_COUNT :: 2;
 fn clear(b: *QbeBuilder) void = {

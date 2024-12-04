@@ -17,6 +17,8 @@
 - make macros more similar to functions. it's weird that the syntax is slightly different.
   you should be able to overload off some argument types and have others be a symbolic ast node?
   but that would make overload resolution even more fragile which might be a bad idea.
+- `Type Error` should tell you where the difference is! and use the right names for enums, etc.
+- `place expression expected pointer dereference` when you forget a `[]` after a call and field access should tell you that.
 
 ##
 

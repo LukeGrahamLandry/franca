@@ -1,5 +1,6 @@
 
 fn main_thread_pump(self: *SelfHosted, fns: []FuncId, when: ExecStyle) void = {
+    idx := 0;
     comp   := self.comp();
     shared := self.shared.expect("new codegen to be enabled");
     a      := self.get_alloc(); 
@@ -42,43 +43,25 @@ fn main_thread_pump(self: *SelfHosted, fns: []FuncId, when: ExecStyle) void = {
         };
         
         @println("emit %", self.log_name(fid));
+        entry := bouba_acquire(shared, idx&);
         
-        // note: this needs to go through the compiler's vtable so it can call check_for_new_aot_bake_overloads 
-        xx := {comp.vtable.emit_bc}(comp.data, fid, when);    // TODO: fix parsing to allow this as a quick expr
-        body := or xx { err |
-            @println("failed emit_bc for %", comp.get_string(func.name));
-            comp.report_error(err)
-        }; // TODO: return error instead
-        
-        panic("TODO: do the needful");
-        //if body.blocks.len.eq(0) || func.body&.is(.Redirect) {
-        //    success := gen.backend&.emit_special(fid, func.body&, func, body, gen.pending&); 
-        //    if !success {
-        //        success = gen.backend&.emit_special_asm(func.body&, func, body, target); 
-        //    };
-        //    if !success {
-        //        // TODO: should assert but debug_tag_corruption is confused. -- Jun 27
-        //        real_name := comp.get_string(func.name);
-        //        @eprintln("!!!! failed to emit speciai function: %", real_name);
-        //    };
-        //} else {
-        //    gen.backend&.emit_function_husk(fid, body.signeture) {
-        //        gen&.emit_current_function();
-        //    };
-        //};
+        // TODO: deal with redirects/asm/imports.
+        // TODO: deal with constants
+        res := emit_ir(comp, shared.m, fid, .Jit, entry);
+        if res&.err() { err | 
+            comp.report_error(err[]);
+            panic("emir_ir failed!");
+        };
+        enqueue_task(shared, entry);
         
         {comp.vtable.report_aot_progress}(comp.data, fid, false);
         current := work_stack&.pop().unwrap();
         @assert_eq(current, fid, "order messed up");
-        funcs_done&.set(fid.to_index().zext(), alloc);
+        funcs_done&.set(fid.to_index().zext(), a);
         for func.mutual_callees { c |
             if !funcs_done&.get(c.to_index().zext()) && !work_stack.items().contains(c&)  {
                 work_stack&.push(c);
             };
-        };
-        if body.func != fid {
-            // We just noticed its a duplicate.
-            work_stack&.push(body.func);
         };
         if pending.len != 0 {
             for pending& { c | 
@@ -90,6 +73,8 @@ fn main_thread_pump(self: *SelfHosted, fns: []FuncId, when: ExecStyle) void = {
         };
     };
     
+    shared.join_codegen_thread();
+    shared.m.emit_suspended_inlinables();
     if when == .Aot {
         if env.static_context_var { context | 
             todo()
@@ -125,11 +110,39 @@ codegen_thread_main :: fn(shared: *CodegenShared) void = {
     };
 };
 
+fn bouba_acquire(shared: *CodegenShared, idx: *i64) *CodegenEntry = {
+    loop {
+        if shared.queue.acquire(true, idx) { entry |
+            return(entry);
+        };
+        usleep(1000);  // most of the time the backend is not the bottle neck (because my frontend is so dumb). 
+                       // currently it falls behind ~11 times during self compile. -- Nov 26
+    };
+}
+
+fn enqueue_task(shared: *CodegenShared, old_entry: *CodegenEntry) void = {
+    old_entry.release(true);
+    @if(use_threads, {
+        pthread_cond_signal(shared.cond&);
+    }, {
+        ::ptr_utils(*CodegenEntry);
+        idx := 0;
+        entry := shared.queue.acquire(false, idx&).unwrap();
+        @debug_assert(old_entry.identical(entry));
+        push_dynamic_context {
+            do_codegen(shared.m, entry);
+        };
+    });
+}
+
 fn do_codegen(m: *QbeModule, entry: *CodegenEntry) void = {
     context(DefaultContext)[].temporary_allocator = entry.arena&;
     @match(entry.task) {
         fn Dead() => unreachable();
         fn Func(f) => {
+            //use_symbol(f.globals, f.lnk.id) { s | 
+                //@println("codegen %", s.name);
+            //};
             f.globals.set_debug_types(entry.logging, true);
             run_qbe_passes(f);
             f.globals.set_debug_types(entry.logging, false);
@@ -140,7 +153,22 @@ fn do_codegen(m: *QbeModule, entry: *CodegenEntry) void = {
             m.add_code_bytes(it.lnk.id, it.bytes);  
         }
         fn JitImport(it) => {
-            todo()
+            m.put_jit_addr(it.lnk.id, it.addr);
+        }
+        fn Bounce(it) => {
+            f := temp().box_zeroed(Qbe.Fn);
+            f.nblk = 1;
+            f.globals = m;
+            f.lnk = it.lnk[];
+            f.start = newblk();
+            con: Qbe.Con = (sym = (id = it.target, type = .SGlo), type = .CAddr, bits = (i = 0));
+            f.con = new(0);
+            callee := f.newcon(con&);
+            f.reset_scratch();
+            f.emit(.call, .Kw, QbeNull, callee, QbeNull);
+            f.copy_instructions_from_scratch(f.start);
+            f.start.jmp.type = .jmp;
+            {m.target.emitfn}(m, f, m[].outf);
         }
     };
     entry.task = .Dead; 
@@ -166,6 +194,7 @@ CodegenTask :: @tagged(
     Func: *Qbe.Fn,
     Asm: @struct(lnk: *Qbe.Lnk, bytes: []u8),
     JitImport: @struct(lnk: *Qbe.Lnk, addr: rawptr),
+    Bounce: @struct(lnk: *Qbe.Lnk, target: u32),
 );
 
 CodegenEntry :: @struct(
@@ -231,4 +260,31 @@ fn release(entry: *CodegenEntry, i_am_bouba: bool) void = {
     waiting_inv: CodegenState = @if(i_am_bouba, .WaitingForKiki, .WaitingForBouba);
     entry.state = waiting_inv;
     // don't reset the arena here, the other guy might want it.
+}
+
+fn get_log_types(comp: CompCtx, fid: FuncId) Str = {
+    func := comp.get_function(fid);
+    if(!func.get_flag(.LogIr), => return(""));
+    each func.annotations& { n | 
+        if n.name == Flag.log_ir.ident() {
+            if n.args& { arg |
+                return(@match(arg.expr&) {
+                    fn String(arg) => comp.get_string(arg[]);
+                    @default => {
+                        @eprintln("TODO: non string literal #log_ir arg for %", comp.get_string(func.name));
+                        "P"
+                    };
+                });
+            };
+            return("P");
+        };
+    };
+    panic("ICE: #log_ir was set but did not find tag on the function")
+}
+
+fn join_codegen_thread(shared: *CodegenShared) void = {
+    shared.no_more_functions = true;
+    while => !shared.no_more_codegen {
+        usleep(100);
+    };
 }

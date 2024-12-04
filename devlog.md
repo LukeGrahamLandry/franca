@@ -1,3 +1,6 @@
+- make slot promotion treat 1/2/4/8 byte blit as a load+store.
+  kinda silly cause the frontend just shouldn't generate those but while prototyping its nice to not care and still get nice output.
+
 ## (Dec 1)
 
 - finish emit for shared libraries
@@ -11,7 +14,19 @@
     for example, `-aot=llvm -S` takes 1800 to jit and run or 1240 when precompiled.
 - for bscopy, just calling memcpy instead of `BSOP(a, b, fn(a, b) => b);` makes codegen thread go 600 -> 550.
   im sure llvm would have noticed but i certainly don't do idiom recognition.
+  backend isn't the bottleneck currently tho so it doesn't actually make it compile faster.
 - asm for count_ones and trailing_zeros cause i don't like seeing them near the top of the profile.
+
+it's sad that my asm functions have to be done through a call with the c abi where i spill all the locals first.
+i can't decide if i should try to commit to making intrinsics for everything you could ever want,
+or try to make real inline asm that can exist as an expression inside a function so good that it's not painful to do everything with inline asm.
+
+letting the backend have asm inside functions might actually be easy, because rega already doesn't know very much about calling conventions,
+the abi/isel stuff expresses register constraints as copies, so if i let you just have an opaque blob of asm bytes
+that uses specific inputs/output registers as though it was a call. just need to have the frontend passes that expect only tmps
+to leave references to registers alone. tiny change to alias, copy, fold.
+that's not quite as good as c's inline asm where you can have template registers that get picked by the compiler,
+but it's pretty pleasing for so little work.
 
 ## (Nov 29/30)
 

@@ -35,90 +35,82 @@ fn emit_func_amd64(m: *QbeModule, f: *Qbe.Fn, file: *FILE) void = {
     maybe_llvm_dis(f, e.a.items(), "--arch=x86-64");
 }
 
-fn do_fixups_amd64(self: *QbeModule, address: *u8, symbol: *SymbolInfo) void = {
-    fixups := symbol.fixups.items();
-    local := symbol.kind == .Local;
-    new_got_reloc: ?Fixup = .None;
-    each fixups { fixup | 
-        continue :: local_return;
-        @match(fixup.type) {
-            fn DataAbsolute() => {
-                reloc := ptr_cast_unchecked(u8, *u8, fixup.patch_at);
-                reloc[] = address;
-            }
-            fn RipDisp32(it) => {
-                distance := ptr_diff(fixup.patch_at, address); // :size_of_displacement
-                if !local {
-                    if (@is(self.goal.type, .Relocatable, .AsmText)) {
-                        continue(); // that's not my department
-                    };
-                    @assert(self.goal.type != .JitOnly, "TODO: jit got on amd64");
-                    if !it.call {
-                        if self.debug["T".char()] {
-                            @fmt_write(self.debug_out, "# patch addr % refs %=%\n", u8.int_from_ptr(fixup.patch_at), u8.int_from_ptr(address), symbol.name);
-                        };
-                    };
-                    @assert(it.call, "TODO: have to convert to load from got somehow. does that mean every forward reference needs nop padding?");
-                    
-                    if self.debug["T".char()] {
-                        @fmt_write(self.debug_out, "# patch call % calls %\n", u8.int_from_ptr(fixup.patch_at), symbol.name);
-                    };
-                    if symbol.offset == -1 {
-                        // create a new trampoline in the __stubs section. 
-                        code := self.segments&.index(.Code);
-                        symbol.offset = self.stubs&.len() + COMMANDS_SIZE_GUESS;
-                        size_of_jmp_encoding :: 6;
-                        trampoline := self.stubs&.reserve(Array(u8, size_of_jmp_encoding));
-                        new_got_reloc = ensure_got_slot(self, symbol, address).or_else(=> new_got_reloc);
-                        distance := self.distance_between(.Code, symbol.offset + size_of_jmp_encoding, .ConstantData, symbol.got_lookup_offset);
-                        trampoline: List(u8) = (maybe_uninit = trampoline.items(), len = 0, gpa = panicking_allocator);
-                        
-                        // jmp near [rip + distance]
-                        dyn_jmp_extension := @as(X86Reg) 0b0100; // not call!
-                        trampoline&.push(0xff);
-                        trampoline&.push(pack_modrm(.Indirect00, .rbp, dyn_jmp_extension));   // disp is RIP relative
-                        trampoline&.push_u32(distance.trunc());
-                    };
-                    stub_trampoline := self.segment_address(.Code, symbol.offset);
-                    distance = ptr_diff(fixup.patch_at, stub_trampoline); // :size_of_displacement
-                } else {
-                    if !it.call {
-                        if self.debug["T".char()] {
-                            @fmt_write(self.debug_out, "# patch addr % refs '%' = %[%]\n", u8.int_from_ptr(fixup.patch_at), symbol.name, symbol.segment, symbol.offset);
-                        };
-                    };
-                };// early returns
-                
-                size_of_displacement :: 4;
-                distance -= size_of_displacement;
-                @assert_lt(distance.abs(), MAX_i32, "can't reference that far");
-                ptr_cast_unchecked(u8, u32, fixup.patch_at)[] = distance.trunc() + it.increment;
-            }
-            @default => panic("amd64 unexpected fixup type");
+fn fixup_amd64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_reloc: *?Fixup) void = {
+    address := symbol.jit_addr;
+    local  := symbol.kind == .Local;
+    @match(fixup.type) {
+        fn DataAbsolute() => {
+            reloc := ptr_cast_unchecked(u8, rawptr, fixup.patch_at);
+            reloc[] = address;
         }
-    };
-    
-    if new_got_reloc { it |  // look ma, no lifetimes!
-        symbol.fixups&.push(it, self.gpa);
-    };
+        fn RipDisp32(it) => {
+            distance := ptr_diff(u8.raw_from_ptr(fixup.patch_at), address); // :size_of_displacement
+            if !local {
+                if (@is(self.goal.type, .Relocatable, .AsmText)) {
+                    return(); // that's not my department
+                };
+                @assert(self.goal.type != .JitOnly, "TODO: jit got on amd64");
+                if !it.call {
+                    if self.debug["T".char()] {
+                        @fmt_write(self.debug_out, "# patch addr % refs %=%\n", u8.int_from_ptr(fixup.patch_at), address, symbol.name);
+                    };
+                };
+                @assert(it.call, "TODO: have to convert to load from got somehow. does that mean every forward reference needs nop padding?");
+                
+                if self.debug["T".char()] {
+                    @fmt_write(self.debug_out, "# patch call % calls %\n", u8.int_from_ptr(fixup.patch_at), symbol.name);
+                };
+                if symbol.offset == -1 {
+                    // create a new trampoline in the __stubs section. 
+                    code := self.segments&.index(.Code);
+                    symbol.offset = self.stubs&.len() + COMMANDS_SIZE_GUESS;
+                    size_of_jmp_encoding :: 6;
+                    trampoline := self.stubs&.reserve(Array(u8, size_of_jmp_encoding));
+                    new_got_reloc[] = ensure_got_slot(self, symbol, address).or_else(=> new_got_reloc[]);
+                    distance := self.distance_between(.Code, symbol.offset + size_of_jmp_encoding, .ConstantData, symbol.got_lookup_offset);
+                    trampoline: List(u8) = (maybe_uninit = trampoline.items(), len = 0, gpa = panicking_allocator);
+                    
+                    // jmp near [rip + distance]
+                    dyn_jmp_extension := @as(X86Reg) 0b0100; // not call!
+                    trampoline&.push(0xff);
+                    trampoline&.push(pack_modrm(.Indirect00, .rbp, dyn_jmp_extension));   // disp is RIP relative
+                    trampoline&.push_u32(distance.trunc());
+                };
+                stub_trampoline := self.segment_address(.Code, symbol.offset);
+                distance = ptr_diff(fixup.patch_at, stub_trampoline); // :size_of_displacement
+            } else {
+                if !it.call {
+                    if self.debug["T".char()] {
+                        @fmt_write(self.debug_out, "# patch addr % refs '%' = %[%]\n", u8.int_from_ptr(fixup.patch_at), symbol.name, symbol.segment, symbol.offset);
+                    };
+                };
+            };// early returns
+            
+            size_of_displacement :: 4;
+            distance -= size_of_displacement;
+            @assert_lt(distance.abs(), MAX_i32, "can't reference that far");
+            ptr_cast_unchecked(u8, u32, fixup.patch_at)[] = distance.trunc() + it.increment;
+        }
+        @default => panic("amd64 unexpected fixup type");
+    }
 }
 
 // TODO: move this to ../emit.fr
-fn ensure_got_slot(self: *QbeModule, symbol: *SymbolInfo, jit_address: *u8) ?Fixup = {
+fn ensure_got_slot(self: *QbeModule, symbol: *SymbolInfo, jit_address: rawptr) ?Fixup = {
     @debug_assert(!self.fixups_locked);
     new_got_reloc: ?Fixup = .None;
     if symbol.got_lookup_offset == -1 {
         // need to reserve a new __got entry.  :GotAtConstantDataBase 
         symbol.got_lookup_offset = self.got&.len();
-        got := self.got&.reserve(*u8);  // :TodoErrorMessage
+        got := self.got&.reserve(rawptr);  // :TodoErrorMessage
         if self.debug["T".char()] {
             @fmt_write(self.debug_out, "# reserve __got[%] = %\n", symbol.got_lookup_offset / 8, symbol.name);
         };
-        new_got_reloc = (Some = (patch_at = ptr_cast_unchecked(*u8, u8, got), type = .DataAbsolute));
+        new_got_reloc = (Some = (patch_at = ptr_cast_unchecked(rawptr, u8, got), type = .DataAbsolute));
         got[] = jit_address; // because we don't loop again to handle `new_got_reloc`
     };
     got := self.segment_address(.ConstantData, symbol.got_lookup_offset);  // :GotAtConstantDataBase 
-    @debug_assert_eq(ptr_cast_unchecked(u8, i64, got)[], u8.int_from_ptr(jit_address));
+    @debug_assert_eq(ptr_cast_unchecked(u8, rawptr, got)[], jit_address);
     new_got_reloc
 }
 

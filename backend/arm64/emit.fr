@@ -49,7 +49,7 @@ fn emit_func_arm64(m: *QbeModule, f: *Qbe.Fn, _: *FILE) void = {
 
 fn maybe_llvm_dis(f: *Qbe.Fn, code_bytes: []u8, arch_name: Str) void = {
     if f.globals.debug["D".char()] {
-        @fmt_write(f.globals.debug_out, "# disassembly of '%' (% bytes)\n", f.name(), code_bytes.len);
+        @fmt_write(f.globals.debug_out, "# disassembly of '%' (% bytes)\n", f.globals.str(f.lnk.id), code_bytes.len);
         asm := code_bytes;
         hex: List(u8) = list(asm.len * 5, temp());
         for asm { byte |
@@ -73,74 +73,68 @@ fn segment_address(self: *QbeModule, segment: SegmentType, offset_in_segment: i6
     data.mmapped.ptr.offset(offset_in_segment)
 }
 
-fn do_fixups_arm64(self: *QbeModule, address: *u8, symbol: *SymbolInfo) void = {
-    fixups := symbol.fixups.items();
-    local := symbol.kind == .Local;
-    new_got_reloc: ?Fixup = .None;
-    each fixups { fixup | 
-        @match(fixup.type) {
-            fn Call() => {
-                if self.debug["T".char()] {
-                    @fmt_write(self.debug_out, "# patch call % calls %\n", u8.int_from_ptr(fixup.patch_at), symbol.name);
+fn fixup_arm64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_reloc: *?Fixup) void = {
+    address := symbol.jit_addr;
+    local  := symbol.kind == .Local;
+    @match(fixup.type) {
+        fn Call() => {
+            if self.debug["T".char()] {
+                @fmt_write(self.debug_out, "# patch call % calls %\n", u8.int_from_ptr(fixup.patch_at), symbol.name);
+            };
+            distance := ptr_diff(fixup.patch_at, u8.ptr_from_raw(address)) / 4;
+            in_range := distance.abs() < 1.shift_left(26);
+            assert(!local || in_range, "local symbol too far away");
+            if !local {
+                // For AOT we'll tell the loader to put the right offset in the __got for us. 
+                // For jitting we could reference directly but this indirection makes it consistant. 
+                // bl from the caller to the trampoline, then the trampoline loads from __got and calls that. 
+                // means you always reserve one instruction for a call before knowing if its local. 
+                // > my understanding is that in the old days you could have a shim 
+                // > that checked the return address and patched it to not need the extra indirection after the first call, 
+                // > but i we care too much about security to do that any more. 
+                if symbol.offset == -1 {
+                    // create a new trampoline in the __stubs section. 
+                    code := self.segments&.index(.Code);
+                    symbol.offset = self.stubs&.len() + COMMANDS_SIZE_GUESS;
+                    trampoline := self.stubs&.reserve(Array(u32, 3));
+                    reg := Arm64Reg.IP0.raw() - 1; // x16
+                    new_got_reloc[] = load_from_got(self, symbol, reg, trampoline.items().slice(0, 2), address).or_else(=> new_got_reloc[]);
+                    trampoline[2] = br(reg, 0);
                 };
-                distance := ptr_diff(fixup.patch_at, address) / 4;
-                in_range := distance.abs() < 1.shift_left(26);
-                assert(!local || in_range, "local symbol too far away");
-                if !local {
-                    // For AOT we'll tell the loader to put the right offset in the __got for us. 
-                    // For jitting we could reference directly but this indirection makes it consistant. 
-                    // bl from the caller to the trampoline, then the trampoline loads from __got and calls that. 
-                    // means you always reserve one instruction for a call before knowing if its local. 
-                    // > my understanding is that in the old days you could have a shim 
-                    // > that checked the return address and patched it to not need the extra indirection after the first call, 
-                    // > but i we care too much about security to do that any more. 
-                    if symbol.offset == -1 {
-                        // create a new trampoline in the __stubs section. 
-                        code := self.segments&.index(.Code);
-                        symbol.offset = self.stubs&.len() + COMMANDS_SIZE_GUESS;
-                        trampoline := self.stubs&.reserve(Array(u32, 3));
-                        reg := Arm64Reg.IP0.raw() - 1; // x16
-                        new_got_reloc = load_from_got(self, symbol, reg, trampoline.items().slice(0, 2), address).or_else(=> new_got_reloc);
-                        trampoline[2] = br(reg, 0);
-                    };
-                    stub_trampoline := self.segment_address(.Code, symbol.offset);
-                    distance = ptr_diff(fixup.patch_at, stub_trampoline) / 4;
-                };
-                assert(distance.abs() < 1.shift_left(26), "can't even jump to trampoline, thats bad.");
-                inst := ptr_cast_unchecked(u8, u32, fixup.patch_at);
-                inst[] = b(s_trunc(distance, 26), 1);
-            }
-            fn InReg(it) => {
-                if self.debug["T".char()] {
-                    @fmt_write(self.debug_out, "# patch addr % refs %=%\n", u8.int_from_ptr(fixup.patch_at), u8.int_from_ptr(address), symbol.name);
-                };
-                inst: []u32 = (ptr = ptr_cast_unchecked(u8, u32, fixup.patch_at), len = 2);
-                if local {
-                    i_page, i_off := encode_adrp_add(address.offset(it.increment.zext()), fixup.patch_at, @as(u5) it.r);
-                    inst[0] = i_page;
-                    inst[1] = i_off;
-                } else {
-                    // TODO: untested
-                    new_got_reloc = load_from_got(self, symbol, it.r, inst, address).or_else(=> new_got_reloc);
-                };
-            }
-            fn DataAbsolute() => {
-                reloc := ptr_cast_unchecked(u8, *u8, fixup.patch_at);
-                reloc[] = address;
-            }
-            @default => panic("arm64 unexpected fixup type");
+                stub_trampoline := self.segment_address(.Code, symbol.offset);
+                distance = ptr_diff(fixup.patch_at, stub_trampoline) / 4;
+            };
+            assert(distance.abs() < 1.shift_left(26), "can't even jump to trampoline, thats bad.");
+            inst := ptr_cast_unchecked(u8, u32, fixup.patch_at);
+            inst[] = b(s_trunc(distance, 26), 1);
         }
-    };
-    if new_got_reloc { it | // avoided reallocating while iterating. rustc would be proud.
-        symbol.fixups&.push(it, self.gpa);
-    };
+        fn InReg(it) => {
+            if self.debug["T".char()] {
+                @fmt_write(self.debug_out, "# patch addr % refs %=%\n", u8.int_from_ptr(fixup.patch_at), address, symbol.name);
+            };
+            inst: []u32 = (ptr = ptr_cast_unchecked(u8, u32, fixup.patch_at), len = 2);
+            if local {
+                i_page, i_off := encode_adrp_add(address.offset(it.increment.zext()), fixup.patch_at, @as(u5) it.r);
+                inst[0] = i_page;
+                inst[1] = i_off;
+            } else {
+                // TODO: untested
+                new_got_reloc[] = load_from_got(self, symbol, it.r, inst, address).or_else(=> new_got_reloc[]);
+            };
+        }
+        fn DataAbsolute() => {
+            reloc := ptr_cast_unchecked(u8, rawptr, fixup.patch_at);
+            reloc[] = address;
+        }
+        @default => panic("arm64 unexpected fixup type");
+    }
 }
 
 // do not push to symbol.fixups here!
-fn load_from_got(self: *QbeModule, symbol: *SymbolInfo, reg_encoding: i64, insts: []u32, jit_address: *u8) ?Fixup = {
+fn load_from_got(self: *QbeModule, symbol: *SymbolInfo, reg_encoding: i64, insts: []u32, jit_address: rawptr) ?Fixup = {
     new_got_reloc := ensure_got_slot(self, symbol, jit_address);
     got := self.segment_address(.ConstantData, symbol.got_lookup_offset);  // :GotAtConstantDataBase 
-    @debug_assert_eq(ptr_cast_unchecked(u8, i64, got)[], u8.int_from_ptr(jit_address));
+    @debug_assert_eq(ptr_cast_unchecked(u8, rawptr, got)[], jit_address);
     
     i_page, i_off := encode_adrp_load(got, ptr_cast_unchecked(u32, u8, insts.ptr), @as(u5) reg_encoding);
     insts[0] = i_page;
@@ -189,6 +183,7 @@ fn emit_the_code(self: *ArmState) void #once = {
     branch :: b;
     // :LinkIsNowRpo TODO: why are we iterating to set links instead of just iterating the rpo array. (don't forget to update the comparisons to .link below). 
     for_blocks self.f { b |
+        @debug_assert_lt(b.id, self.f.nblk, "invalid block id!");
         @debug_assert(local_labels[b.id.zext()] == 0, "block ids must be unique");
         local_labels[b.id.zext()] = self.next_inst_offset();
         for_insts_forward b { i |
@@ -416,7 +411,8 @@ fn loadaddr_bits(self: *ArmState, c: *Qbe.Con, dest_reg: i64, thread_local: bool
                 };
                 xxx := symbol.segment != .Code;
                 @debug_assert(xxx || distance < 0, "we must be jumping backwards");
-                i_page, i_off := encode_adrp_add(self.m.segment_address(symbol.segment, symbol.offset + inc), patch_addr, @as(u5) dest_reg);
+                dest := self.m.segment_address(symbol.segment, symbol.offset + inc);
+                i_page, i_off := encode_adrp_add(u8.raw_from_ptr(dest), patch_addr, @as(u5) dest_reg);
                 self.inst(i_page);
                 self.inst(i_off);
                 
@@ -633,7 +629,16 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
                 use_symbol(self.m, c.sym.id) { symbol |
                     patch_at := self.m.segments&[.Code].next;
                     @match(symbol.kind) {
-                        fn DynamicPatched() => @panic("call(todo): handle predeclared import %", symbol.name);
+                        fn DynamicPatched() => {
+                            patch: Fixup = (patch_at = patch_at, type = .Call);
+                            symbol.fixups&.push(patch, self.m.gpa);  // for aot
+                            self.inst(brk(0x0789));
+                            new_got_slot: ?Fixup = .None;
+                            fixup_arm64(self.m, symbol, patch&, new_got_slot&);
+                            if new_got_slot { it |
+                                symbol.fixups&.push(it, self.m.gpa);
+                            };
+                        }
                         fn Local() => {
                             // already compiled it so branch there directly
                             distance := self.m.distance_between(.Code, self.m.current_offset(.Code), symbol.segment, symbol.offset) / 4;
@@ -880,7 +885,7 @@ fn emitins2(self: *ArmState, i: *Qbe.Ins) void = {
                 offset = m.offset.bits.i / size.zext();
                 m.base.int_reg()
             }
-            @default => panic("bad str addr type");
+            @default => panic("bad address type for store");
         };
         if i.op() == .stores {
             self.inst(f_str_uo(Bits.W32, @as(u5) a0.float_reg(), addr, @as(u12) offset));
@@ -987,8 +992,8 @@ fn next_inst_offset(self: *ArmState) i64 = {
     ptr_diff(code.mmapped.ptr, code.next) - self.start_of_function
 }
 
-fn encode_adrp_add(dest: *u8, src: *u8, reg: u5) Ty(u32, u32) = {
-    dest := u8.int_from_ptr(dest);
+fn encode_adrp_add(dest: rawptr, src: *u8, reg: u5) Ty(u32, u32) = {
+    dest := int_from_rawptr(dest);
     src := u8.int_from_ptr(src);
     
     distance := dest - src;

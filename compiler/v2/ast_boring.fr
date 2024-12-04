@@ -40,22 +40,33 @@ fn func_type(self: *SelfHosted, id: FuncId) ?Type = {
     (Some = self.intern_type(Fn = ty))
 }
 
-:: tagged(FuncImpl);
-fn jitted_aarch64(self: *FuncImpl) ?[]u32 = {
-    @match(self) {
-        fn JittedAarch64(code) => {
-            return(Some = code.items());
-        }
-        fn Merged(parts) => {
-            each parts { p |
-                @if_let(p) fn JittedAarch64(code) => {
-                    return(Some = code.items());
+fn choose_impl(self: *FuncImpl, prio: []FuncImpl.Tag()) ?*FuncImpl = {
+    @if_let(self) fn Merged(parts) => {
+        // :SLOW make prio $ and have a lookup table for value and just find max in one pass, but N is like 3 so meh.
+        for prio { p | 
+            each parts { check | 
+                if check.tag() == p {
+                    return(Some = check);
                 };
             };
-        }
-        @default => ();
+        };
+        return(.None);
     };
     
+    for prio { p |
+        if self.tag() == p {
+            return(Some = self);
+        };
+    };
+    .None
+} 
+
+
+:: tagged(FuncImpl);
+fn jitted_aarch64(self: *FuncImpl) ?[]u32 = {
+    if choose_impl(self, @slice(FuncImpl.Tag.JittedAarch64)) { it |
+        return(it.JittedAarch64);
+    };
     .None
 }
 
@@ -349,7 +360,10 @@ fn arg_types(self: *SelfHosted, ty: Type) []Type = {
             };
             unreachable()
         }
-        @default => (@list(ty) temp()).items();
+        @default => {
+            xx := @list(ty) temp();
+            xx.items()  
+        };
     }
 }
 

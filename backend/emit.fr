@@ -14,6 +14,7 @@ SymbolBucket :: @struct(
     data: QList(SymbolInfo),
 );
 
+// TODO: make this less chunky
 SymbolInfo :: @struct(
     name: Str,
     inline: *Qbe.Fn, // nullable
@@ -153,7 +154,6 @@ fn maybe_add_export(self: *QbeModule, id: u32, export: bool) void = {
     };
 }
 
-// Used when doing our own bytes. Not needed for emitting text asm/llvm. 
 fn emit_data_to_segment(self: *QbeModule, dat: *Qbe.Dat) void = {
     assert(!self.fixups_locked, "you cannot add more data after emitting for aot");
     @assert(!dat.lnk.common, "i don't handle `common` symbols");
@@ -291,11 +291,11 @@ fn align_to(s: *SegmentCursor, align: i64) void = {
     };
 }
 
-// :ThreadSafety
-fn put_jit_addr(self: *QbeModule, name: CStr, addr: rawptr) void = {
-    use_symbol(self, self.intern(name)) { symbol |
+fn put_jit_addr(self: *QbeModule, name: u32, addr: rawptr) void = {
+    use_symbol(self, name) { symbol |
         @assert(symbol.kind == .Pending, "Redeclared symbol %", name);
         symbol.kind = .DynamicPatched;
+        symbol.jit_addr = addr;
         self.do_fixups(u8.ptr_from_raw(addr), symbol);
     };
 }
@@ -347,6 +347,7 @@ fn fill_from_libc(self: *QbeModule) void = {
 fn do_jit_fixups(self: *QbeModule, id: u32, segment: SegmentType, final_offset: i64) void = {
     @assert(final_offset >= 0 && final_offset < self.segments&[segment].mmapped.len, "thats not in the segment");
     use_symbol(self, id) { symbol | 
+        @debug_assert(int_from_ptr(@type symbol[], symbol) != 0, "fixups for a null symbol! (forgot to set Fn.lnk.id?)"); // only catches it if you haven't had something hash to 0 yet. 
         @assert(symbol.kind != .Local, "Redeclared symbol %", symbol.name);
         symbol.segment = segment;
         symbol.offset = final_offset;
@@ -370,13 +371,17 @@ fn do_jit_fixups(self: *QbeModule, id: u32, segment: SegmentType, final_offset: 
 }
 ::tagged(FixupType);
 
-// TODO: stick this in the target vtable 
 fn do_fixups(self: *QbeModule, address: *u8, symbol: *SymbolInfo) void = {
     assert(!self.fixups_locked, "you cannot add more fixups after emitting for aot");
+    symbol.jit_addr = u8.raw_from_ptr(address);
     
-    @match(self.goal.arch) {
-        fn aarch64() => do_fixups_arm64(self, address, symbol);
-        fn x86_64()  => do_fixups_amd64(self, address, symbol);
-        fn wasm32() => unreachable();
-    }
+    fixups := symbol.fixups.items();
+    new_got_reloc: ?Fixup = .None;
+    fix := self.target.fixup;
+    each fixups { fixup | 
+        fix(self, symbol, fixup, new_got_reloc&);
+    };
+    if new_got_reloc { it | // avoided reallocating while iterating. rustc would be proud.
+        symbol.fixups&.push(it, self.gpa);
+    };
 }

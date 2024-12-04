@@ -7,14 +7,12 @@ It also compiles much faster than even llvm -O0.
 Almost everything (ir design, opt passes, isel/abi) is ported directly from Qbe, with some light editing to use a style I find less confusing.
 The main changes are working towards being more usable as a standalone library
 by removing dependencies on external assemblers/linkers and removing serialization steps to/from text files.
-
-In my brief profiling (with -O2), Qbe spends ~45% of its time parsing the input text and another ~15% outputting the assembly text.
-Then clang takes as long to assemble that text as the whole Qbe part (or somehow 10x as long on aarch64).
-However I want to use this as a JIT for comptime execution, which will only be practical if I remove those serialization steps.
 You can still print out the ir as human readable text between passes and modify it for testing.
 
 ## Changes from Qbe
 
+- A library interface for producing and compiling ir in memory instead of outputting text and exec-ing a seperate program to process it.
+  (in my brief profiling qbe -O2, it spends 40% of its time parsing the input text. i don't know how that's possible, maybe apple's fgetc is slow).
 - Generate machine code directly without depending on an external assembler (arm clang is so slow!).
   Your program will contain only the finest organic bit patterns lovingly transcribed from the Arm Architecture Reference Manual.
 - Jit compile your program and run it in memory without needing to emit/link an executable.
@@ -32,6 +30,11 @@ You can still print out the ir as human readable text between passes and modify 
 - arm abi fixes
   - respect the platform register (it gets zeroed when you context switch on macos).
   - large FHA (ie. struct of 4 doubles)
+- Insert raw asm bytes in function bodies with arbitrary input/output/clobber register lists.
+  > currently very limited: you pick specific registers, do your own assembling, can't reference symbols.  
+  > but it lets you access instructions that we don't know about without calling convention spilling overhead.  
+  > example use case: a c compiler implementing `__builtin_clzl` as a single instruction.
+  > (not well tested because franca doesn't use it yet but it will likely be converted eventually).
 - Removed several codegen optimisations until we have a solid foundation (but I want to bring them back eventually).
   - all: load float constants from memory (instead of using int immediate + fmov)
   - arm: bit field immediate to load int more constants in a single instruction
