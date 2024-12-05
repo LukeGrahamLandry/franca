@@ -1,13 +1,15 @@
 
-fn main_thread_pump(comp: CompCtx, shared: *CodegenShared, fns: []FuncId, when: ExecStyle) void = {
+fn main_thread_pump(comp: CompCtx, shared: *CodegenShared, fns: []FuncId) void = {
     idx := 0;
     a      := comp.get_alloc();
     env    := comp.get_comptime_env();
     @assert(comp.get_build_options()[].implicit_context_runtime == env.static_context_var.is_none(), "should have baked the static context location already iff no implicit context");
-    
+    when := @if(shared.m.goal.type == .JitOnly, ExecStyle.Jit, .Aot);
     // TODO: really you want to mark them export
     for fns { f |
         shared.m.get_symbol_info(shared.m.intern(comp.fmt_fn_name(f)))[].referenced = true;
+        // TODO
+        //comp.get_function(f).set_flag(.Export);
     };
     
     funcs_done: BitSet = empty();
@@ -167,6 +169,7 @@ fn bouba_acquire(shared: *CodegenShared, idx: *i64) *CodegenEntry = {
 }
 
 fn enqueue_task(shared: *CodegenShared, old_entry: *CodegenEntry) void = {
+    @debug_assert(!old_entry.task&.is(.Dead), "tried to enqueue dead task");
     old_entry.release(true);
     @if(use_threads, {
         pthread_cond_signal(shared.cond&);
@@ -184,7 +187,7 @@ fn enqueue_task(shared: *CodegenShared, old_entry: *CodegenEntry) void = {
 fn do_codegen(m: *QbeModule, entry: *CodegenEntry) void = {
     context(DefaultContext)[].temporary_allocator = entry.arena&;
     @match(entry.task) {
-        fn Dead() => unreachable();
+        fn Dead() => panic("dead codegen task");
         fn Func(f) => {
             //use_symbol(f.globals, f.lnk.id) { s | 
                 //@println("codegen %", s.name);

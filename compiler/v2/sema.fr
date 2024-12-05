@@ -526,6 +526,9 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
         impls: List(FuncImpl) = list(2, self.get_alloc());
         impls&.push(ComptimeAddr = addr.int_from_rawptr());
         impls&.push(DynamicImport = func.name);
+        
+        
+        //func.set_flag(.NoMangle);
         func.body = (Merged = impls.rs());
     };
        
@@ -1601,6 +1604,11 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
     deny_inline := func.get_flag(.NoInline);
     if(will_inline && deny_inline, => return(@err("must inline a function marked #noinline")));
     
+    allow_fold := self.dispatch.enclosing_function.is_some() && {
+        func := self.get_function(self.dispatch.enclosing_function.unwrap());
+        !func.get_flag(.SyntheticImmEval)
+    };
+    
     if will_inline {
         if capturing {
             // We want to allow for polymorphic arguments, but its better if we can infer the annotated ones before duplicating.
@@ -1618,7 +1626,17 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
         };
         
         // TODO: check that you're calling from the same place as the definition.
-        return(self.emit_capturing_call(fid, expr, requested));
+        foldable := @check(self.emit_capturing_call(fid, expr, requested)) return;
+        if func.get_flag(.TryConstantFold) && allow_fold && foldable {
+            // we've already inlined the call so it won't just be a call_dynamic_values, 
+            // and we'll have to suspend on compiling a stub to get the value, 
+            // so we make a ConstEval to remember that this needs to be folded. 
+            // don't need to worry about recursing because the call node is gone. 
+            e := self.box(expr[]);
+            expr[] = (ty = expr.ty, done = false, expr = (ConstEval = e), loc = expr.loc);
+            return(self.compile_expr(expr, requested));
+        };
+        return(.Ok);
     };
     
     arg_ty = @check(self.infer_arguments(fid)) return;
@@ -1640,10 +1658,6 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
     
     if !f_expr.expr&.is(.Value) {
         _ := @check(self.immediate_eval_expr(f_expr, f_expr.ty)) return;
-    };
-    allow_fold := self.dispatch.enclosing_function.is_some() && {
-        func := self.get_function(self.dispatch.enclosing_function.unwrap());
-        !func.get_flag(.SyntheticImmEval)
     };
     if func.get_flag(.TryConstantFold) && allow_fold && arg_expr.is_const() {
         @log_event("TryConstantFold %", expr.log(self)) self;
@@ -1711,7 +1725,7 @@ fn quick_guess_type(self: *SelfHosted, expr: *FatExpr) ?Type = {
 }
 
 // Replace a call expr with the body of the target function.
-fn emit_capturing_call(self: *SelfHosted, f: FuncId, expr_out: *FatExpr, requested: ResultType) Maybe(void) #once = {
+fn emit_capturing_call(self: *SelfHosted, f: FuncId, expr_out: *FatExpr, requested: ResultType) Maybe(bool) #once = {
     @log_event("emit_capturing_call %", f) self;
     @check(self.ensure_resolved_body(f)) return; // it might not be a closure. it might be an inlined thing.
     @debug_assert(expr_out.expr&.is(.Call));
@@ -1725,9 +1739,11 @@ fn emit_capturing_call(self: *SelfHosted, f: FuncId, expr_out: *FatExpr, request
     if !func.get_flag(.AllowRtCapture) {
         t := @check(self.infer_arguments(f)) return;
     };
+    foldable := false;
     if func.finished_arg { arg | 
         @check(self.compile_expr(arg_expr, (Specific = arg))) return;
         @check(self.can_assign(arg, arg_expr.ty)) return;
+        foldable = arg_expr.is_const();
     };
     
     // This is complicated to allow `fn() => .a` to stay polymorphic and have different inferred types at different callsites. 
@@ -1779,7 +1795,6 @@ fn emit_capturing_call(self: *SelfHosted, f: FuncId, expr_out: *FatExpr, request
     new_ret_var := self.scopes.dup_var(old_ret_var);
     ret_label: LabelId = from_index(self.dispatch.return_labels.len);
     self.dispatch.return_labels&.push(f);
-    
     owned_body: FatExpr = if func.get_flag(.Once) {
         // TODO: better error message if they try to call it again. 
         // TODO: decide what #once with const args should mean. 
@@ -1820,7 +1835,7 @@ fn emit_capturing_call(self: *SelfHosted, f: FuncId, expr_out: *FatExpr, request
         @check(self.can_assign(ret_ty, expr_out.ty)) return;
         expr_out.ty = ret_ty;
     };
-    .Ok
+    (Ok = foldable)
 }
 
 // TODO: this still has the problem of disallowing const args that require type hint of previous const args. 
@@ -2982,7 +2997,6 @@ fn do_merges(self: *SelfHosted, attempt: *OverloadAttempt) Maybe(void) = {
             
             other_f_ty := other_func.finished_ty().expect("types to be infered");
             if f_ty.arg == other_f_ty.arg && f_ty.ret == other_f_ty.ret {
-                //if
                 if !other_func.body&.is(.Redirect) {  // TODO: i'd rather not get here a billion times
                     merged&.push(other_func.body);
                     other_func.body = (Redirect = fid);
@@ -3113,8 +3127,14 @@ fn update_function_metadata(self: *SelfHosted, func: *Func, os: ?OverloadSet) Re
                 func.set_flag(.TargetSplit);
             };
             @case(Flag.bc.ident())       => func.set_flag(.BodyIsSpecial);
-            @case(Flag.import.ident())   => func.set_flag(.BodyIsSpecial);
-            @case(Flag.libc.ident())     => func.set_flag(.BodyIsSpecial);
+            @case(Flag.import.ident())   => {
+                func.set_flag(.BodyIsSpecial);
+                //func.set_flag(.NoMangle);
+            };
+            @case(Flag.libc.ident())     => {
+                func.set_flag(.BodyIsSpecial);
+                //func.set_flag(.NoMangle);
+            };
             @case(Flag.redirect.ident()) => {
                 os := @unwrap(os, "#redirect function only makes sense as part of an overload set") return;
                 os := self.to_values(OverloadSet, os);
@@ -3998,8 +4018,19 @@ fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
     result := @try(self.call_dynamic(fn_ptr.int_from_rawptr(), f_ty&, args&)) return;
     expr[] = FatExpr.assume_cast(result&)[];
     @log_event("macro output: %", expr.log(self)) self;
-    //walk: MarkNotDone = ();
-    //walk&.walk_expr(expr); // TODO: might not need this :SLOW
+    // :InlineFoldHack
+    // TODO: garbage garbage garbage HACK. 
+    //       i want `not` to be #inline and also #fold, but something about @debug_assert gets confused. 
+    //       tho also ive occasionally had to move conditions out of @debug_assert before so really ive just revealed a problem,
+    //       but how can that be the only one. 
+    //       if could do it for all macros that would be fine (but sad because slower), 
+    //       but it doesn't work because some type checking stuff. 
+    //       maybe it would be easier to fix that than this. 
+    //       -- Dec 5
+    if self.log_name(fid).starts_with("debug_assert") {
+        walk: MarkNotDone = ();
+        walk&.walk_expr(expr); // TODO: might not need this :SLOW
+    };
     .Ok
 }
 

@@ -347,8 +347,9 @@ fn source_width(i: *Qbe.Ins) Qbe.TmpType #inline = {
 // Checks that we correctly constructed ssa form. 
 // Running this is optional, but life will be very confusing if you don't do this and get it wrong. 
 fn ssacheck(f: *Qbe.Fn) void = {
-    return();
-    each f.tmps() { t |
+    @if(!::safety_check_enabled(.DebugAssertions)) return();
+    tmps := f.tmps();
+    each tmps.slice(Qbe.Tmp0, tmps.len) { t |
         if t.ndef > 1 {
             @panic("ssa temporary %% defined more than once", "%", t.name());
         };
@@ -360,6 +361,7 @@ fn ssacheck(f: *Qbe.Fn) void = {
         for_phi b { p |
             r := p.to;
             t := f.get_temporary(r);
+            @debug_assert(!isreg(r));
             each t.uses() { u |
                 bu := f.rpo[u.bid.zext()];
                 if (u.type == .UPhi) {
@@ -375,7 +377,7 @@ fn ssacheck(f: *Qbe.Fn) void = {
         };
         for_insts_forward b { i |
             continue :: local_return;
-            if(rtype(i.to) != .RTmp, => continue());
+            if(rtype(i.to) != .RTmp || isreg(i.to), => continue());  // :ExprLevelAsm
             r := i.to;
             t := f.get_temporary(r);
             each t.uses() { u |

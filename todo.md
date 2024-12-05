@@ -1,3 +1,8 @@
+- things that should be cleaned up next time i replace `boot`
+  - :DumbNameAlias NoMangle
+  - AbiHackSpan
+  - :InlineFoldHack `@if(::!T.has_pointers()`
+- more calling convention tests between jitted code and c.
 - make (logical not) an intrinsic
 - bring back lex error for unterminated comment.
 - `Illegal place expression: GetNamed` is not as helpful as "tried to assign to undeclared variable %"

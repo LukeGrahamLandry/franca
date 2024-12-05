@@ -19,6 +19,20 @@
   got lucky for old backend because i used opaque types cached by size instead of trying to follow the calling convention.
   also wrap_with_runtime_init can't use module.scratch.
   fail 5.
+- back to the old one for a moment, time's bloated cause i have an extra ~2k lines.
+  finally doing #inline not makes codegen thread 650 -> 610.
+  it's annoying because #inline happens before #fold so you have to manually `::` for conditional compilation.
+  kinda fixed it but :InlineFoldHack.
+  really should just do the special case and make sure `if !` just swaps the branches/cmp.k
+- add BakedEntry.FnPtr to pending. fail 3.
+- aha i remember this when i was ffi-ing with the bootstrap rust compiler.
+  Span:(u32, u32) my old jit wants to pass in 2 registers but that's not what the abi says to do.
+
+> i really need to write my own terminal thingy.
+> i like that warp lets me click the mouse to move my cursor.
+> i don't like that they give you a shitty banner ad until you update
+> and then as free bonus with your update change the colour of the suggestions background and the boldness of the text.
+> like bro please just let me run the program
 
 ## (Dec 1)
 

@@ -21,6 +21,7 @@ EmitIr :: @struct(
     new_constants: List(BakedVarId),
     shared: *CodegenShared,
     pending: *List(FuncId), // TODO: you wouldn't need this if sema tracked callees correctly. 
+    idx: *i64,
 );
 
 ReturnTarget :: @struct(
@@ -63,6 +64,7 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, id
             new_constants = list(temp()),
             shared = shared,
             pending = pending,
+            idx = idx,
         );
         @debug_assert(func.get_flag(.EnsuredCompiled), "fn not compiled?");
         self.f.default_init(m);
@@ -71,16 +73,16 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, id
         entry.task = (Func = self.f);
         
         res := self&.emit_body(f);
+        entry := self.entry; // HACK because of how im doing imports below. 
         
         if res&.is_err() {
             res.Err.update_main_span(self.last_loc);
             result = (Err = res.Err)
         } else {
-            has_context := func.get_flag(.YesContext) && !func.get_flag(.NoContext);
+            has_context := func.get_flag(.YesContext) && !func.get_flag(.NoContext);  // :copy-pastrae
             if !has_context {
                 func.set_flag(.NoContext);
             };
-            entry.logging = self.program.get_log_types(f);
             
             // This is a bit painful, you want consistant order and to be working on the function on the other thread while we're setting up the constants. 
             // you want to do new_constants on this thread so the other one never has to touch the CompCtx. 
@@ -268,11 +270,27 @@ fn emit_body(self: *EmitIr, f: FuncId) Res(void) #once = {
             return(.Ok)
         }
         fn ComptimeAddr(it) => {
-            if self.when == .Aot {
-                func.set_flag(.NoMangle);
+            if self.when == .Jit {
+                self.entry.task = (JitImport = (lnk = self.f.lnk&, addr = rawptr_from_int(it[])));
+                return(.Ok)
             };
-            // TODO: name will be wrong if targetting aot. should change prio with dynamicimport. 
-            self.entry.task = (JitImport = (lnk = self.f.lnk&, addr = rawptr_from_int(it[])));
+            
+            // :DumbNameAlias
+            // TODO: use FnFlag.NoMangle instead but that doesn't work with the old backends calling the same 
+            //       fmt_fn_name until they also don't try to make bounce functions.
+            
+            real_name := self.program.get_string(func.name);
+            real_name := self.m.intern(real_name);
+            self.entry.task = (Bounce = (lnk = self.f.lnk&, target = real_name));
+            enqueue_task(self.shared, self.entry);
+            
+            e := bouba_acquire(self.shared, self.idx);
+            lnk := e.arena&.borrow().box_zeroed(Qbe.Lnk);
+            lnk.id = real_name;
+            e.task = (JitImport = (lnk = lnk, addr = rawptr_from_int(0))); // AOT
+            self.entry = e;
+            // no enqueue_task here, caller does it
+            
             return(.Ok)
         }
         fn TargetOsSplit(_) => {
@@ -306,6 +324,7 @@ fn emit_body(self: *EmitIr, f: FuncId) Res(void) #once = {
         @default => panic("TODO: unhandled FuncImpl");
     };
     
+    self.entry.logging = self.program.get_log_types(f);
     self.context_par_e();
     // note: this rewrites self.blk
     @try(self.bind_args(func.arg&)) return;
@@ -346,6 +365,17 @@ fn emit_body(self: *EmitIr, f: FuncId) Res(void) #once = {
             self.blk.jmp.type = .retc;
         };
     };
+    
+    has_context := func.get_flag(.YesContext) && !func.get_flag(.NoContext);  // :copy-pastrae
+    if !has_context && self.dyn_context {
+        // :SLOW
+        self.f.start.ins.slice(0, self.f.start.nins.zext() - 1).copy_from(self.f.start.ins.slice(1, self.f.start.nins.zext()));
+        if self.context != QbeNull {
+            self.f.start.ins[self.f.start.nins.zext() - 1] = make_ins(.copy, .Kl, self.context, QbeConZero, QbeNull);  // TODO: why?
+        } else {
+            self.f.start.nins -= 1;
+        };
+    };
     self.finalize_blocks();
     
     // TODO: decide if i care enough to fix old from_bc.
@@ -354,8 +384,6 @@ fn emit_body(self: *EmitIr, f: FuncId) Res(void) #once = {
         panic(err);
     };
     
-    // TODO: remove first instruction of start if we think we're #no_context. 
-    //       but actually then you have to readjust everything because the args need to be first. 
     
     .Ok
 }
@@ -684,6 +712,7 @@ fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) Res(Qbe.Re
         @default => @panic("ICE: non callable: %", self.program.log(f));
     }
 }
+::enum(ExecStyle);
 
 fn emit_intrinsic(self: *EmitIr, op: *IntrinsicPayload, p: Placement, arg: []Qbe.Ref, caller: *Func, expr_ty: Type) Res(Qbe.Ref) = {
     r := @match(op.bc) {
@@ -702,12 +731,14 @@ fn emit_intrinsic(self: *EmitIr, op: *IntrinsicPayload, p: Placement, arg: []Qbe
             QbeConZero
         }
         fn BitNot() => {
+            if(p&.is(.Discard), => return(Ok = QbeNull));
             // TODO: .Kw
             r := self.scalar_dest(p, .Kl);
             self.emit(.xor, .Kl, r, arg[0], self.f.getcon(-1));
             r
         }
         @default => {
+            if(p&.is(.Discard), => return(Ok = QbeNull));
             k := @as(Qbe.Cls) op.ir_cls;
             r := self.scalar_dest(p, k); 
             @debug_assert(op.ir_op != 0, "no ir op for %", op.bc);
@@ -782,10 +813,26 @@ fn emit_value(self: *EmitIr, value: *Values, p: Placement, expr_ty: Type) Res(Qb
     if(p&.is(.Discard), => return(Ok = QbeNull));  // TODO: bake_relocatable_value side effect? 
     info := self.program.get_info(expr_ty);
     
-    use_int_literal := value.is(.Small) && (!info.contains_pointers() || self.when == .Jit);
+    // :SLOW all_zeroes is redundant with emit_relocatable_constant but for now we can't emit_relocatable_constant_body on something
+    // with small fields + pointers, but its fine to emit as bytes if all zeros. 
+    all_zero := value.all_zeroes();
+    
+    use_int_literal := value.is(.Small) && (!info.contains_pointers() || self.when == .Jit || all_zero);
     if use_int_literal {
         v := self.f.getcon(value.Small._0);
         return(Ok = self.scalar_result(p, v, expr_ty));
+    };
+    
+    // TODO: zeroed(T) doesn't get here because it's a runtime load not a comptime one. 
+    //      need to fix sema stuff to make that work.  -- Dec 5
+    if all_zero {
+        dest := self.get_memory(p, expr_ty);
+        count := value.len() / 8;
+        @err_assert(count * 8 == value.len(), "TODO: non*8 constant") return;
+        range(0, count) { i |
+            self.emit(.storel, .Kw, QbeNull, QbeConZero, self.offset(dest, i * 8));
+        };
+        return(Ok = dest);
     };
     
     @match(self.when) {
@@ -822,17 +869,20 @@ fn emit_value(self: *EmitIr, value: *Values, p: Placement, expr_ty: Type) Res(Qb
     }
 }
 
+fn all_zeroes(value: *Values) bool = 
+    (value.is(.Small) && value.Small._0 == 0) || value.bytes().all_zeroes();
+
 fn reference_constant(self: *EmitIr, id: BakedVarId) void = {
     shared := self.shared;
     seen := shared.constants_used&;
     if !seen.get(id.id.zext()) {
         seen.set(id.id.zext());
         _, value := {self.program.vtable.get_baked}(self.program.data, id)[];
-        @if_let(value) fn VoidPtrArray(it) => {
-            each it { it | 
-                @if_let(it) fn AddrOf(it) => {
-                    self.reference_constant(it[]);
-                };
+        @if_let(value) fn VoidPtrArray(it) => each it { it | 
+            @match(it) {
+                fn AddrOf(it) => self.reference_constant(it[]);
+                fn FnPtr(it) => self.pending.push(it[]);  // HACK
+                @default => ();
             };
         };
         self.new_constants&.push(id);

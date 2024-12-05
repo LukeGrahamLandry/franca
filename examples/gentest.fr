@@ -1,0 +1,42 @@
+
+fn driver(vtable: *ImportVTable) void = {
+    path := "tests".maybe_borrow_cstr(temp());
+    ::List(FatStmt);
+    
+    src := u8.list(temp());
+    src&.push_all("#include_std(\"lib/core.fr\");\n");
+    walk_directory(path) {entry|
+        // TODO: recurse with another list if .Directory
+        is_file := (eq(@as(u8) entry.type, @as(u8) DirEntType.File));
+        if is_file && entry.name.ends_with(".fr") {
+            @fmt(src&, "#include_std(\"%/%\");\n", path, entry.name);
+        };
+    };
+    
+    src1 := src.items().clone(temp()).items();
+    opts := vtable.default_build_options();
+    c := new_with_src(vtable, src1, opts);
+    c := vtable.with(c);
+    
+    tests := c.get_tagged("test");
+    push_all(src&, """
+        TestCase :: @struct(name: Str, f: @FnPtr() void);
+        fn main() void = {
+            each tests { t | 
+                @println("[run %]...", t.name);
+                {t.f}();
+            };
+            @println("% tests", tests.len());
+        }
+        
+        tests :: @const_slice(@as(TestCase)
+    """);
+    for tests { f | 
+        func := c.get_function(f);
+        name := c.get_string(func.name);
+        @fmt(src&, "    (name = \"%\", f = (fn() = { %(@uninitialized); })),\n", name, name);
+    };
+    @fmt(src&, ");\n");
+    
+    println(src.items());
+}
