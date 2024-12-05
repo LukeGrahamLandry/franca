@@ -10,6 +10,7 @@
 // TODO: take out the internal jump distance checks because we check at the end that the function fits in the segment (jsut also check that its within i19 because why not)
 // TODO: use ldp/stp for callee saved registers
 // TODO: relocation to fold symbol offsets into the adrp+add instead of wasting an extra instruction :SLOW
+// TODO: when jitting, check if constant ints are close enough to load with adr instead of several movk
 
 // TODO: need to replace all the .goal checks when we want to support ELF
 
@@ -402,7 +403,18 @@ fn loadaddr_bits(self: *ArmState, c: *Qbe.Con, dest_reg: i64, thread_local: bool
         inc := if(self.m.goal.type == .Relocatable, => 0, => c.bits.i);
         patch: Fixup = (patch_at = patch_addr, type = (InReg = (r = dest_reg, increment = inc.trunc())));
         @match(symbol.kind) {
-            fn DynamicPatched() => @panic("loadaddr_bits(todo): handle predeclared import %", symbol.name);
+            fn DynamicPatched() => {
+                if self.m.goal.type != .JitOnly { 
+                    symbol.fixups&.push(patch, self.m.gpa); 
+                };
+                self.inst(brk(0x111));
+                self.inst(brk(0x222));
+                new_got_slot: ?Fixup = .None;
+                fixup_arm64(self.m, symbol, patch&, new_got_slot&);
+                if new_got_slot { it |
+                    symbol.fixups&.push(it, self.m.gpa);
+                };
+            }
             fn Local() => {
                 // we've already compiled it so just compute its address directly.
                 distance := self.m.distance_between(.Code, self.m.current_offset(.Code), symbol.segment, symbol.offset + inc);
@@ -631,8 +643,10 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
                     @match(symbol.kind) {
                         fn DynamicPatched() => {
                             patch: Fixup = (patch_at = patch_at, type = .Call);
-                            symbol.fixups&.push(patch, self.m.gpa);  // for aot
-                            self.inst(brk(0x0789));
+                            if self.m.goal.type != .JitOnly { 
+                                symbol.fixups&.push(patch, self.m.gpa); 
+                            };
+                            self.inst(brk(0x987));
                             new_got_slot: ?Fixup = .None;
                             fixup_arm64(self.m, symbol, patch&, new_got_slot&);
                             if new_got_slot { it |
@@ -654,7 +668,7 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
                         fn Pending() => {
                             // haven't compiled it yet so will need a patch. 
                             symbol.fixups&.push((patch_at = patch_at, type = .Call), self.m.gpa);
-                            self.inst(brk(0x0789));
+                            self.inst(brk(0x789));
                             if self.m.debug["T".char()] {
                                 @fmt_write(self.m.debug_out, "# pending call % calls %\n", u8.int_from_ptr(patch_at), symbol.name);
                             };

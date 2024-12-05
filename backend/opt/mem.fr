@@ -11,6 +11,8 @@ fn promote(f: *Qbe.Fn) void = {
     for_insts_forward b { i |
         skip :: local_return;
         if(!is_alloc(i.op()), => skip());
+        // Could skip anything with size>8 but this way lets us promote if you ask for a large slot but only use one word at the beginning. meh. 
+        
         /* specific to NAlign == 3 */
         r := i.to;
         @debug_assert(rtype(r) == .RTmp);
@@ -19,7 +21,7 @@ fn promote(f: *Qbe.Fn) void = {
         k: ?Qbe.Cls = .None;
         s: ?i32 = .None;
         each t.uses() { u |
-            if u.type != .UIns || !is_uniform_access(u.u.ins, k&, s&, r) {
+            if u.type != .UIns || !is_uniform_access(f, u.u.ins, k&, s&, r) {
                 skip();
             };
         };
@@ -43,7 +45,7 @@ fn promote(f: *Qbe.Fn) void = {
     };
 }
 
-fn is_uniform_access(l: *Qbe.Ins, k: *?Qbe.Cls, s: *?i32, address: Qbe.Ref) bool #once = {
+fn is_uniform_access(f: *Qbe.Fn, l: *Qbe.Ins, k: *?Qbe.Cls, s: *?i32, address: Qbe.Ref) bool #once = {
     if maybe_load(l) { size |
         if none_or(s[], fn(s) => s == size) {
             s[] = (Some = size);
@@ -74,7 +76,7 @@ fn is_uniform_access(l: *Qbe.Ins, k: *?Qbe.Cls, s: *?i32, address: Qbe.Ref) bool
             s[] = (Some = size);
             if k.is_none() {
                 // we don't care about the class but if you only access with blits we don't want to crash so assume int, 
-                // but that maens that if something could have been promoted as afloat but first use was a blit we won't see it.
+                // but that maens that if something could have been promoted as a float but first use was a blit we won't see it.
                 k[] = (Some = @if(size == 8, .Kl, .Kw));
             };
             return(true);
@@ -83,6 +85,8 @@ fn is_uniform_access(l: *Qbe.Ins, k: *?Qbe.Cls, s: *?i32, address: Qbe.Ref) bool
     
     false
 }
+
+store_by_size :: @const_slice(Qbe.O.Oxxx, .storeb, .storeh, .Oxxx, .storew, .Oxxx, .Oxxx, .Oxxx, .storel);
 
 fn replace_access_with_copy(t: *Qbe.Tmp, l: *Qbe.Ins, k: Qbe.Cls, address: Qbe.Ref) void #once = {  
     if is_store(l.op()) {
@@ -99,11 +103,16 @@ fn replace_access_with_copy(t: *Qbe.Tmp, l: *Qbe.Ins, k: Qbe.Cls, address: Qbe.R
         size: i64 = blit1.arg&[0].rsval().intcast().abs();
         // l needs to be the one converted to memory access so usable info stays valid when we try to replace it later.
         if src == address {
-            ops := @const_slice(Qbe.O.Oxxx, .storeb, .storeh, .Oxxx, .storew, .Oxxx, .Oxxx, .Oxxx, .storel);
-            l[] = make_ins(ops[size], .Kw, QbeNull, src, dest);
+            o := @match(k) {
+                fn Kd() => .stored;
+                fn Ks() => .stores;
+                @default => store_by_size[size];
+            };
+            l[] = make_ins(o, .Kw, QbeNull, src, dest);
         } else {
             ops := @const_slice(Qbe.O.Oxxx, .loadub, .loaduh, .Oxxx, .loaduw, .Oxxx, .Oxxx, .Oxxx, .load);
-            l[] = make_ins(ops[size], k, dest, src, QbeNull);
+            o := @if(k == .Ks, Qbe.O.load, ops[size]);
+            l[] = make_ins(o, k, dest, src, QbeNull);
             t.nuse -= 1;
             t.ndef += 1;
         };

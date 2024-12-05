@@ -288,15 +288,6 @@ run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
         printfn(fnn, out);
     };
     
-	// TODO: make sure nothing requires the extra call to fillpreds and then disable this in release mode. 
-	//       if the frontend generates valid code it will always type check. 
-	//       but always have to option to run this to make peoples lives easier! (ie if a user wants to use #bc)
-	//       same for ssacheck
-    
-    @if(LINK_QBE_C) {
-        // TODO: port. calls its own version of fillpreds but i didn't convert it to use QList
-        //typecheck(fnn); // debug. but it calls clsmerge which does mutate sometimes so maybe not.
-    };
     {m.target.abi0}(fnn);
     
     if DO_INLINING { 
@@ -368,91 +359,98 @@ fn finish_qbe_passes(fnn: *Qbe.Fn) void = {
     {m.target.emitfn}(m, fnn, m[].outf);
 }
 
-/*
-// TODO: finish port
-fn typecheck(f: *Qbe.Fn) void = {
+// debug. but it calls clsmerge which does mutate sometimes so maybe not.
+fn fails_typecheck(f: *Qbe.Fn) ?Str = {
+    return(.None);
     fillpreds(f);
-    pb := init_bitset(f.nblk.zext());
+    pb  := init_bitset(f.nblk.zext());
     ppb := init_bitset(f.nblk.zext());
     for_blocks f { b | 
         for_phi b { p |
-            fn.tmp[p.to.val].cls = p.cls;
+            f.get_temporary(p.to)[].cls = p.cls; // TODO: creepy. i want this to be optional debug check?
         };
-        for (i = b.ins; i < &b.ins[b.nins]; i++)
         for_insts_forward b { i | 
             if rtype(i.to) == .RTmp {
-                t = &fn.tmp[i.to.val];
-                if (clsmerge(&t.cls, i.cls))
-                err("temporary %%%s is assigned with"
-                    " multiple types",
-                    t.name);
+                t := f.get_temporary(i.to);
+                if clsmerge(t.cls&, i.cls()) {          // ^
+                    return(Some = @tfmt("temporary %% is assigned with multiple types", "%", t.name()));
+                };
             };
         };
     };
     for_blocks f { b |
-        bszero(pb);
-        for (n = 0; n < b.npred; n++){
-            bsset(pb, b.pred[n].id);
+        bszero(pb&);
+        range(0, b.npred.zext()) { n |
+            bsset(pb&, b.pred[n].id.zext());
         };
         for_phi b { p |
-            bszero(ppb);
-            t = f.get_temporary(p.to);
-            for (n = 0; n < p.narg; n++) {
-                k = t.cls;
-                if (bshas(ppb, p.blk[n].id))
-                err("multiple entries for @%s in phi %%%s", p.blk[n].name, t.name);
-                if (!usecheck(p.arg[n], k, fn))
-                err("invalid type (%d) for operand %%%s in phi %%%s", k,
-                    fn.tmp[p.arg[n].val].name, t.name);
-                bsset(ppb, p.blk[n].id);
-            }
-            if (!bsequal(pb, ppb)) {
-                err("predecessors not matched in phi %%%s", t.name);
-            }
-        }
-        for_insts_forward b { i 
-            for (n = 0; n < 2; n++) {
-                k = optab[i.op].argcls[n][i.cls];
-                r = i.arg[n];
-                t = &fn.tmp[r.val];
-                if (k == Ke)
-                err("invalid instruction type %d in %s", i.cls, optab[i.op].name);
-                if (rtype(r) == RType)
-                continue;
-                if (rtype(r) != -1 && k == Kx)
-                err("no %s operand expected in %s", n == 1 ? "second" : "first",
-                    optab[i.op].name);
-                if (rtype(r) == -1 && k != Kx)
-                err("missing %s operand in %s", n == 1 ? "second" : "first",
-                    optab[i.op].name);
-                if (!usecheck(r, k, fn))
-                err("invalid type for %s operand %%%s in %s (in %s)",
-                    n == 1 ? "second" : "first", t.name, optab[i.op].name,
-                    fn.name);
-            }
+            bszero(ppb&);
+            t := f.get_temporary(p.to);
+            range(0, p.narg.zext()) { n |
+                k := t.cls;
+                if bshas(ppb&, p.blk[n].id.zext()) {
+                    return(Some = @tfmt("multiple entries for @% in phi %%", p.blk[n].name(), "%", t.name()));
+                };
+                if !usecheck(p.arg[n], k, f) {
+                    return(Some = @tfmt("invalid type (%) for operand %% in phi %%", k.raw(), "%", f.get_temporary(p.arg[n]).name(), "%", t.name()));
+                };
+                bsset(ppb&, p.blk[n].id.zext());
+            };
+            if !bsequal(pb&, ppb&) {
+                return(Some = @tfmt("predecessors not matched in phi %%", "%", t.name()));
+            };
+        };
+        for_insts_forward b { i |
+            range(0, 2) { n |
+                continue :: local_return;
+                k := argcls(i, n);
+                r := i.arg&[n];
+                t := f.get_temporary(r);
+                if k == .Ke {
+                    return(Some = @tfmt("invalid instruction output type % in %", i.cls(), i.op()));
+                };
+                if(rtype(r) == .RType, => continue());
+                word :: fn() => if(n == 1, => "second", => "first");
+                if (rtype(r) != .RNull && k == .Kx) {
+                    return(Some = @tfmt("no %s operand expected in %s", word(), i.op()));
+                };
+                if (rtype(r) == .RNull && k != .Kx) {
+                    return(Some = @tfmt("missing % operand in %", word(), i.op()));
+                };
+                if !usecheck(r, k, f) {
+                    return(Some = @tfmt("invalid type for %s operand %% in %s", word(), "%", t.name(), i.op()));
+                };
+            };
         };
     
         r := b.jmp.arg;
-        if (isret(b.jmp.type)) {
-        if (b.jmp.type == Jretc)
-            k = Kl;
-        else if (b.jmp.type >= Jretsb)
-            k = Kw;
-        else
-            k = b.jmp.type - Jretw;
-        if (!usecheck(r, k, fn))
-            goto JErr;
-        }
-        if (b.jmp.type == Jjnz && !usecheck(r, Kw, fn))
-        JErr:
-        err("invalid type for jump argument %%%s in block @%s",
-            fn.tmp[r.val].name, b.name);
-        if (b.s1 && b.s1.jmp.type == Jxxx)
-        err("block @%s is used undefined", b.s1.name);
-        if (b.s2 && b.s2.jmp.type == Jxxx)
-        err("block @%s is used undefined", b.s2.name);
+        jump_error := false;
+        if is_ret(b.jmp.type) {
+            k: Qbe.Cls = @if(b.jmp.type == .retc, .Kl, @if(b.jmp.type.raw() >= Qbe.J.retsb.raw(), .Kw, @as(Qbe.Cls) @as(i32) b.jmp.type.raw() - Qbe.J.retw.raw()));
+            jump_error = !usecheck(r, k, f);
         };
-    }
+        if b.jmp.type == .jnz {
+            jump_error = !usecheck(r, .Kw, f);
+        };
+        if jump_error {
+            return(Some = @tfmt("invalid type for jump argument in block @%", b.name()));
+        };
+        
+        if (!b.s1.is_null() && b.s1.jmp.type == .Jxxx) {   
+            return(Some = @tfmt("block @% is used undefined", b.s1.name()));
+        };
+        if (!b.s2.is_null() && b.s2.jmp.type == .Jxxx) {
+            return(Some = @tfmt("block @% is used undefined", b.s2.name()));
+        };
+    };
+    .None
 }
-*/
+
+
+fn usecheck(r: Qbe.Ref, k: Qbe.Cls, f: *Qbe.Fn) bool = {
+    rtype(r) == .RTmp || return(true);
+    t := f.get_temporary(r);
+    t.cls == k || (t.cls == .Kl && k == .Kw)
+}
+
 // all computers know these days is fill memory and branch

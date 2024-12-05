@@ -60,6 +60,7 @@ OverloadKey :: @struct(arg: Type, req: Type);
 PRes :: Result(void, *CompileError);
 
 make_top_level :: fn(c: *SelfHosted, body: Slice(FatStmt)) Res(FuncId) = {
+    @assert(body.len != 0, "tried to make_top_level with no statements");
     name := c.pool.insert_owned("@toplevel@");
     loc := body[0].loc;
     result := c.box(synthetic_ty((Value = (bytes = unit_value, coerced = false)), loc, void));
@@ -124,19 +125,18 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
     };
 
     if callee.is_none() {
+        use_new_backend := temp_env_flag_enabled("FRANCA_NEW");
+        
         safe :: safety_check_enabled(.DebugAssertions);
-        @eprintln(">>> compiler configuration: context=%, threads=%, debug_assertions=%.", if(query_context_is_implicit(), => "implicit", => "static"), use_threads, safe);
+        @eprintln(">>> compiler configuration: context=%, threads=%, debug_assertions=%, new=%.", if(query_context_is_implicit(), => "implicit", => "static"), use_threads, safe, use_new_backend);
         start := timestamp();
         opts := vtable.default_build_options(); 
         opts.retain_function_names = true;
+        opts.implicit_context_runtime = query_context_is_implicit();
         c := @try(vtable.load_file_in_compiler(path, opts)) return;
         
         self := c.data.cast()[][];
         
-        // TODO: remove this soon!
-        fn getenv(name: CStr) CStr #libc;
-        var := getenv("FRANCA_NEW".sym().c_str());
-        use_new_backend := !var.ptr.is_null() && var.str() == "true";
         if use_new_backend {
             m := self.get_alloc().box(QbeModule);
             m[] = init_default_module(arch = .aarch64, os = .macos, type = .JitOnly); // TODO: :hardcode_os
@@ -146,7 +146,7 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
         f := c.get_unique_named("driver") || c.get_unique_named("main") || panic("expected a function called main or driver.");
     
         cc := if use_new_backend {
-            main_thread_pump(self, @slice(f), .Jit);
+            main_thread_pump(self.comp(), self.shared.unwrap(), @slice(f), .Jit);
             m := self.shared.Some.m;
             for_symbols m { id, s | 
                 if s.referenced && s.kind == .Pending {
@@ -155,15 +155,14 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
             };
             m.make_exec();
             name := c.fmt_fn_name(f);
-            @println("looking for %", name);
             or m.get_addr(name) {
-                panic("ICE: lost our compiled driver")
+                @panic("ICE: lost %", name)
             }
         } else {
             c.get_jitted(f)
         };
         callee = (Some = assume_types_fn(Arg = *ImportVTable, Ret = void, ptr = cc));
-        @eprintln(">>> compiled driver in %ms.", timestamp() - start);
+        @eprintln(">>> compiled % in %ms.", self.log_name(f), timestamp() - start);
     };
     
     callee := callee.unwrap();
@@ -401,8 +400,8 @@ fn get_function(self: *SelfHosted, fid: FuncId) *Func #inline = {
 }
 
 fn add_function(self: *SelfHosted, f: Func) FuncId = {
+    i := self.functions.len;
     self.functions&.push(f);
-    i := self.functions.len - 1;
     from_index(i)
 }
 

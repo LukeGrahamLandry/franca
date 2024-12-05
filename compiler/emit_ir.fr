@@ -1,4 +1,5 @@
 // TODO: less stupid code for accessing constant values!
+// TODO: always check for zero sized type instead of == void
 
 EmitIr :: @struct(
     f: *Qbe.Fn,
@@ -16,6 +17,9 @@ EmitIr :: @struct(
     m: *QbeModule,
     entry: *CodegenEntry,
     next_block_name := 0,
+    last_line := -1,
+    new_constants: List(BakedVarId),
+    shared: *CodegenShared,
 );
 
 ReturnTarget :: @struct(
@@ -26,13 +30,15 @@ ReturnTarget :: @struct(
 
 Placement :: @tagged(Assign: Qbe.Ref, Scalar, Blit: Qbe.Ref, NewMemory, Discard);
 
-fn emit_ir(comp: CompCtx, m: *QbeModule, f: FuncId, when: ExecStyle, entry: *CodegenEntry) Res(void) = {
-    ::tagged(Placement);
-    result: Res(void) = .Ok;
+fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, idx: *i64) Res(?FuncId) = {
+    //@if(f.as_index() == 56053, panic("foo")); // TODO: this fails safety check here. 
+    entry := bouba_acquire(shared, idx);
+    m := shared.m;
+    result: Res(?FuncId) = (Ok = .None);
     push_dynamic_context {
         context(DefaultContext)[].temporary_allocator = entry.arena&;
+        ::tagged(Placement);
         func := comp.get_function(f); 
-        c := comp.data.cast()[][];
         opts := comp.get_build_options();
         self: EmitIr = (
             f = temp().box_zeroed(Qbe.Fn),
@@ -43,14 +49,17 @@ fn emit_ir(comp: CompCtx, m: *QbeModule, f: FuncId, when: ExecStyle, entry: *Cod
             inlined_return_addr = init(temp()),
             blk = zeroed(*Qbe.Blk),
             blocks = list(temp()),
-            debug = opts.debug_info || func.get_flag(.LogIr) || true, // TODO: remove
+            debug = opts.debug_info || func.get_flag(.LogIr),
             dyn_context = if(when == .Aot, => opts.implicit_context_runtime, => opts.implicit_context_comptime),
             when = when,
             m = m,
             entry = entry,
+            new_constants = list(temp()),
+            shared = shared,
         );
         @debug_assert(func.get_flag(.EnsuredCompiled), "fn not compiled?");
         self.f.default_init(m);
+        self.f.leaf = true;
         self.f.lnk.id = m.intern(self&.fmt_fn_name(f));  // TODO: set export
         entry.task = (Func = self.f);
         
@@ -64,7 +73,15 @@ fn emit_ir(comp: CompCtx, m: *QbeModule, f: FuncId, when: ExecStyle, entry: *Cod
             if !context {
                 func.set_flag(.NoContext);
             };
+            result.Ok = res.Ok;  // TODO: doing it this way is stupid. just add it to callees list in the frontend. 
             entry.logging = self.program.get_log_types(f);
+            enqueue_task(shared, entry);
+            if self.new_constants.len != 0 {
+                entry := bouba_acquire(shared, idx);
+                ids := self.new_constants.items().clone(entry.arena&.borrow()).items();
+                entry.task = (AotVar = (c = comp, ids = ids));
+                enqueue_task(shared, entry);
+            };
         };
     };
     result
@@ -89,8 +106,7 @@ fn bind_args(self: *EmitIr, arguments: *Pattern) Res(void) #once = {
         ty := binding.unwrap_ty();
         info := self.program.get_info(ty);
         name := binding.var();
-        if info.stride_bytes == 0 {
-            // TODO: make sure that we don't emit any uses of types with no runtime storage. 
+        if info.stride_bytes == 0 {  // :NoRuntimeRepr
             if name { name | 
                 self.var_lookup&.insert(name, QbeConZero);
             };
@@ -130,7 +146,7 @@ fn bind_args(self: *EmitIr, arguments: *Pattern) Res(void) #once = {
 fn compile_for_arg(self: *EmitIr, arg: *FatExpr) Res([]Qbe.Ins) = {
     parts := arg.items();
     out := Qbe.Ins.list(parts.len, temp());
-    if self.program.get_info(arg.ty)[].stride_bytes == 0 {  // void/neveer
+    if self.program.get_info(arg.ty)[].stride_bytes == 0 {  // :NoRuntimeRepr
         _ := @try(self.compile_expr(arg, .Discard)) return;
         return(Ok = empty());
     };
@@ -187,22 +203,23 @@ fn finalize_blocks(self: *EmitIr) void = {
     @debug_assert(ok, "ICE: unterminated block");
 }
 
-fn emit_body(self: *EmitIr, f: FuncId) PRes #once = {
+fn emit_body(self: *EmitIr, f: FuncId) Res(?FuncId) #once = {
     func := self.program.get_function(f);
     
     self.f.start = self.new_block("start");
     self.blk = self.f.start;
     
     T :: FuncImpl.Tag();
-    prio :: @const_slice(T.Intrinsic, T.Normal, T.ComptimeAddr, T.Redirect, T.TargetOsSplit);
-    impl := or choose_impl(func.body&, prio) {
+    prio_amd :: @const_slice(T.Intrinsic, T.Normal, T.ComptimeAddr, T.TargetOsSplit, T.X86AsmBytes, T.Redirect);
+    prio_arm :: @const_slice(T.Intrinsic, T.Normal, T.ComptimeAddr, T.TargetOsSplit, T.JittedAarch64, T.Redirect);
+    impl := or choose_impl(func.body&, @if(self.m.goal.arch == .aarch64, prio_arm, prio_amd)) {
         return(@err("no acceptable impl"))
     };
-
+    
     body: *FatExpr = @match(impl) {
         fn Normal(body) => body;
         fn Intrinsic(op) => {
-            // Direct calls will be inlined in emit_bc but someone might be trying to call through a function pointer. 
+            // Direct calls will be inlined but someone might be trying to call through a function pointer. 
             // TODO: don't add to callees for direct calls. -- Jul 24
             
             if op.bc == .GetContext {
@@ -210,13 +227,9 @@ fn emit_body(self: *EmitIr, f: FuncId) PRes #once = {
             };
             arg := func.arg.bindings.items();
             @debug_assert(arg.len == 1 || arg.len == 2);
-            if op.bc != .GetContext && op.bc != .SetContext && op.ir_op == 0 {
-                return(@err("missing ir op for intrinsic %", op.bc));
-            };
             
             f_ty := func.finished_ty().unwrap();
-            c: *SelfHosted = self.program.data.cast()[][];
-            arg_ty := c.arg_types(f_ty.arg);
+            arg_ty := self.program.arg_types(f_ty.arg);
             
             _, k0 := self.load_op(arg_ty[0]);
             a0 := self.f.newtmp("a", k0);
@@ -233,12 +246,12 @@ fn emit_body(self: *EmitIr, f: FuncId) PRes #once = {
             self.blk.jmp.arg = @try(self.emit_intrinsic(op, .Scalar, @slice(a0, a1), func, f_ty.ret)) return;
             self.blk.jmp.type = ret_op(kr);
             self.finalize_blocks();
-            return(.Ok)
+            return(Ok = .None)
         }
         fn ComptimeAddr(it) => {
             // TODO: name will be wrong if targetting aot. should change prio with dynamicimport. 
             self.entry.task = (JitImport = (lnk = self.f.lnk&, addr = rawptr_from_int(it[])));
-            return(.Ok)
+            return(Ok = .None)
         }
         fn TargetOsSplit(_) => {
             @debug_assert(func.body&.is(.Merged), "ICE: #target_os split expected multiple");
@@ -246,18 +259,26 @@ fn emit_body(self: *EmitIr, f: FuncId) PRes #once = {
                 if it.is(.TargetOsSplit) && it.TargetOsSplit.os == self.m.goal.os {
                     fid := it.TargetOsSplit.fid;
                     self.entry.task = (Bounce = (lnk = self.f.lnk&, target = self.m.intern(self.fmt_fn_name(fid))));
-                    return(.Ok)
+                    return(Ok = (Some = fid))
                 };
             };
             return(@err("#target_os missing implementation"))
         }
         fn Redirect(fid) => {
             self.entry.task = (Bounce = (lnk = self.f.lnk&, target = self.m.intern(self.fmt_fn_name(fid[]))));
-            return(.Ok)
+            return(Ok = (Some = fid[]))
         } 
-        // You should never actually try to run this code, the caller should have just done the call,
-        // so there isn't an extra indirection and I don't have to deal with two bodies for comptime vs runtime,
-        // just two ways of emitting the call.
+        // TODO: use :ExprLevelAsm so you don't have to spill everything, 
+        //       but that requires letting people annotate register usage.  -- Dec 3
+        fn JittedAarch64(code) => { // TODO: just store this as bytes
+            bytes := @as([]u8) (ptr = ptr_cast_unchecked(u32, u8, code.ptr), len = code.len * 4);
+            self.entry.task = (Asm = (lnk = self.f.lnk&, bytes = bytes));
+            return(Ok = .None)
+        }
+        fn X86AsmBytes(bytes) => {
+            self.entry.task = (Asm = (lnk = self.f.lnk&, bytes = bytes.items()));
+            return(Ok = .None)
+        }
         @default => panic("TODO: unhandled FuncImpl");
     };
     
@@ -276,7 +297,7 @@ fn emit_body(self: *EmitIr, f: FuncId) PRes #once = {
     result := @try(self.compile_expr(body, p)) return;
     
     p: Placement = @if(scalar, .Scalar, .NewMemory);
-    if ret == void || ret.is_never() {  // :get_or_create_type
+    if self.program.get_info(ret)[].stride_bytes == 0 {  // :NoRuntimeRepr
         p = .Discard;
     };
 
@@ -303,9 +324,16 @@ fn emit_body(self: *EmitIr, f: FuncId) PRes #once = {
     };
     self.finalize_blocks();
     
+    // TODO: decide if i care enough to fix old from_bc.
+    if fails_typecheck(self.f) { err | 
+        printfn(self.f, self.f.globals.debug_out);
+        panic(err);
+    };
+    
+    
     // TODO: remove first instruction of start if we think we're #no_context. 
     //       but actually then you have to readjust everything because the args need to be first. 
-    .Ok
+    (Ok = .None)
 }
 
 fn ret_op(k: Qbe.Cls) Qbe.J = 
@@ -319,6 +347,7 @@ fn emit_runtime_call(
     callee: Qbe.Ref,
     dyn_context: bool,
 ) Res(Qbe.Ref) = { 
+    self.f.leaf = false;
     if dyn_context && self.context != QbeNull {
         self.emit(.arge, .Kl, QbeNull, self.context, QbeNull);
     };
@@ -329,7 +358,7 @@ fn emit_runtime_call(
     scalar := k != .Ke;
     type_r := QbeNull;
     info := self.program.get_info(f_ty.ret);
-    result_r := if f_ty.ret == void || f_ty.ret == Never || (scalar && p&.is(.Discard)) {  // :get_or_create_type
+    result_r := if info.stride_bytes == 0 || (scalar && p&.is(.Discard)) {  // :get_or_create_type
         k = .Kw;
         QbeNull
     } else {
@@ -345,13 +374,13 @@ fn emit_runtime_call(
     self.emit(.call, k, result_r, callee, type_r);
     self.hlt_if_never(f_ty.ret);
     
-    if(result_r == QbeNull, => return(Ok = QbeConZero));
+    if(result_r == QbeNull, => return(Ok = QbeNull));
     if scalar { 
         return(Ok = self.scalar_result(p, result_r, f_ty.ret));
     };
     (Ok = @match(p) {
         fn NewMemory() => result_r;
-        fn Discard()   => QbeConZero;
+        fn Discard()   => QbeNull;
         fn Blit(dest) => {
             self.blit(dest, result_r, info.stride_bytes);
             dest
@@ -361,6 +390,16 @@ fn emit_runtime_call(
 }
 
 fn compile_stmt(self: *EmitIr, stmt: *FatStmt) PRes = {
+    if self.debug && !(stmt.stmt&.is(.Eval) && stmt.stmt.Eval.expr&.is(.Block)) {
+        place := self.program.get_whole_line(stmt.loc); // :SLOW
+        if self.last_line != place.line {
+            // TODO: dbgfile too because it might be something inlined from elsewhere. 
+            // TODO: have the backend remove consecutive dbgloc instructions and just keep the last one 
+            //       when all the stuff between them was optimised out. 
+            self.emit(.dbgloc, .Kw, QbeNull, INT(place.line), INT(0));  
+            self.last_line = place.line;
+        };
+    };
     self.last_loc = stmt.loc;
     @match(stmt.stmt&) {
         fn Eval(expr) => {
@@ -427,13 +466,12 @@ fn compile_stmt(self: *EmitIr, stmt: *FatStmt) PRes = {
     }
 }
 
-// This section looks like we could just use WalkAst, 
-// but this operation is subtble enough that making control flow more indirect would probably make it more confusing. 
-//
-// If p == .ResAddr, the top of the stack on entry to this function has the pointer where the result should be stored.
 fn compile_expr(self: *EmitIr, expr: *FatExpr, p: Placement) Res(Qbe.Ref) = {
     @debug_assert(!expr.ty.is_unknown(), "Not typechecked: %", self.program.log(expr));
     self.last_loc = expr.loc;
+    if self.blk.jmp.type == .hlt {  // TODO: do we need this or do we trust sema to always get rid of things after a Never? 
+        return(Ok = QbeNull);
+    };
 
     expr_ty := expr.ty;
     (Ok = @match(expr.expr&) {
@@ -475,7 +513,7 @@ fn compile_expr(self: *EmitIr, expr: *FatExpr, p: Placement) Res(Qbe.Ref) = {
             value_type := self.program.unptr_ty(arg.ty).unwrap();
             self.hlt_if_never(expr_ty);
             size := self.program.get_info(value_type).stride_bytes();
-            if(p&.is(.Discard) || size == 0, => return(Ok = QbeConZero));
+            if(p&.is(.Discard) || size == 0, => return(Ok = QbeConZero)); // :NoRuntimeRepr
             if p&.is(.Scalar) || p&.is(.Assign) {
                 @debug_assert(size <= 8);
                 o, k := self.load_op(expr_ty);
@@ -490,7 +528,6 @@ fn compile_expr(self: *EmitIr, expr: *FatExpr, p: Placement) Res(Qbe.Ref) = {
         fn FnPtr(arg) => {
             f := @unwrap(arg[].as_const(), "expected fn for ptr") return;
             f := FuncId.assume_cast(f&)[];
-            f = self.program.follow_redirects(f);
             callee_r := self.func_ref(f);
             self.scalar_result(p, callee_r, i64)  // :get_or_create_type
         };
@@ -506,22 +543,21 @@ fn compile_expr(self: *EmitIr, expr: *FatExpr, p: Placement) Res(Qbe.Ref) = {
                 fn Scalar()    => QbeConZero;
                 fn Blit(it)    => it;
                 fn NewMemory() => self.alloca(expr_ty);
-                fn Discard()   => QbeConZero;
+                fn Discard()   => QbeNull;
                 fn Assign(it)  => it;
             }
         };
         fn Tuple(values) => {
+            if values.len == 1 {
+                return(self.compile_expr(values[0]&, p));
+            };
+            @err_assert(!(p&.is(.Scalar) || p&.is(.Assign)), "ICE: non single field struct as scalar") return;
             raw := self.program.raw_type(expr.ty); // TODO: do i need this? 
             @match(self.program.get_type(raw)) {
                fn Struct(f) => {
                     @err_assert(f.layout_done, "ICE: struct layout not ready.") return;
                     @assert_eq(f.fields.len, values.len);
                     @err_assert(f.is_tuple, "Expr::Tuple can only create tuple type") return;
-                    if p&.is(.Scalar) || p&.is(.Assign) {
-                        @err_assert(f.fields.len == 1, "ICE: non single field struct as scalar") return;
-                        // TODO: assert that the type is actually a scalar.
-                        return(self.compile_expr(values[0]&, p));
-                    };
                     base := self.get_memory(p, expr_ty);
                     range(0, f.fields.len) { i |
                         dest := self.offset(base, f.fields[i].byte_offset);
@@ -615,11 +651,11 @@ fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) Res(Qbe.Re
             ret.used = true;  // note: updating the one in the map! not a copy
             
             result := @try(self.compile_expr(arg, ret.p)) return;
-            if self.blk.jmp.type == .Jxxx {  // TODO: can this ever not be true? @loop? return(return(x))?
-                self.blk.jmp.type = .jmp;
-                self.blk.s1 = ret.blk;
+            seal self { b |
+                b.jmp.type = .jmp;
+                b.s1 = ret.blk;
             };
-            (Ok = result)
+            (Ok = QbeNull)
         }
         @default => @panic("ICE: non callable: %", self.program.log(f));
     }
@@ -635,11 +671,17 @@ fn emit_intrinsic(self: *EmitIr, op: *IntrinsicPayload, p: Placement, arg: []Qbe
         }
         fn SetContext() => {
             @assert(self.dyn_context, "TODO: support static context");
-            if self.context != QbeNull {
+            if self.context == QbeNull {
                 self.context = self.f.newtmp("context", .Kl);
             };
             self.emit(.copy, .Kl, self.context, arg[0], QbeNull);
             QbeConZero
+        }
+        fn BitNot() => {
+            // TODO: .Kw
+            r := self.scalar_dest(p, .Kl);
+            self.emit(.xor, .Kl, r, arg[0], self.f.getcon(-1));
+            r
         }
         @default => {
             k := @as(Qbe.Cls) op.ir_cls;
@@ -653,11 +695,10 @@ fn emit_intrinsic(self: *EmitIr, op: *IntrinsicPayload, p: Placement, arg: []Qbe
 }
 
 fn func_ref(self: *EmitIr, f_id: FuncId) Qbe.Ref #inline = {
-    name := self.fmt_fn_name(f_id);
-    con: Qbe.Con = (type = .CAddr, bits = (i = 0));
-    con.sym.id = self.f.globals.intern(name);
-    self.f.newcon(con&)
+    f_id := self.program.follow_redirects(f_id);
+    self.f.symcon(self.fmt_fn_name(f_id))
 }
+
 
 fn emit_block_expr(self: *EmitIr, expr: *FatExpr, p: Placement) Res(Qbe.Ref) #once = {
     block   := expr.expr.Block&;
@@ -690,15 +731,15 @@ fn emit_block_expr(self: *EmitIr, expr: *FatExpr, p: Placement) Res(Qbe.Ref) #on
         // Note: these are allowed to do a local_return targeting `ret`
         @try(self.compile_stmt(stmt)) return;
     };
-    result := @try(self.compile_expr(block.result, p)) return;
+    _ := @try(self.compile_expr(block.result, p)) return;
 
     ret := self.inlined_return_addr&.remove(ret_var).unwrap();
     if ret.used {
         // They did a local_return, so our extra block was useful. 
-        if self.blk.jmp.type == .Jxxx {
+        seal self { b |
             // There was also a fallthough expression which we convert to a local_return.
-            self.blk.s1 = ret.blk;
-            self.blk.jmp.type = .jmp;
+            b.s1 = ret.blk;
+            b.jmp.type = .jmp;
         };
         self.blk = ret.blk;
     } else {
@@ -709,40 +750,71 @@ fn emit_block_expr(self: *EmitIr, expr: *FatExpr, p: Placement) Res(Qbe.Ref) #on
         ret.blk.jmp.type = .hlt;
         // We did generate slightly more noisy code by `unify_placement` earlier than necessary. 
     };
-    (Ok = result)
+    (Ok = dest)
 }
 
 fn emit_value(self: *EmitIr, value: *Values, p: Placement, expr_ty: Type) Res(Qbe.Ref) #once = {
-    if(p&.is(.Discard), => return(Ok = QbeConZero));  // TODO: bake_relocatable_value side effect? 
+    if(p&.is(.Discard), => return(Ok = QbeNull));  // TODO: bake_relocatable_value side effect? 
     info := self.program.get_info(expr_ty);
-    src := @match(self.when) {
+    
+    use_int_literal := value.is(.Small) && (!info.contains_pointers() || self.when == .Jit);
+    if use_int_literal {
+        v := self.f.getcon(value.Small._0);
+        return(Ok = self.scalar_result(p, v, expr_ty));
+    };
+    
+    @match(self.when) {
         fn Aot() => {
-            if value.is(.Small) && !info.contains_pointers() {
-                v := self.f.getcon(value.Small._0);
+            if !info.contains_pointers() {
+                id := @try(self.program.emit_relocatable_constant(expr_ty, value.bytes())) return;
+                self.reference_constant(id);
+                dest := self.get_memory(p, expr_ty);
+                src := self.as_ref(AddrOf = id);
+                self.blit(dest, src, info.stride_bytes);
+                return(Ok = dest);
+            };
+            
+            out  := @try({self.program.vtable.emit_relocatable_constant_body}(self.program.data, value.bytes(), expr_ty, false)) return;
+            if out.len == 1 {
+                v := self.as_ref(out[0]);
                 return(Ok = self.scalar_result(p, v, expr_ty));
             };
-            // TODO: this generates garbage code for const slices, etc. 
-            id := @try(self.program.emit_relocatable_constant(expr_ty, value.bytes())) return;
-            panic("TODO: g_id");
-            
-            // TODO: this will generate better code when its small (like a slice)
-            //out := @try({self.program.vtable.emit_relocatable_constant_body}(self.program.data, value.bytes(), expr_ty, false)) return;
-            //for out { part | ...
+            dest := self.get_memory(p, expr_ty); 
+            enumerate out { i, part | 
+                r := self.as_ref(part[]);
+                self.emit(.storel, .Kw, QbeNull, r, self.offset(dest, i * 8));
+            };
+            (Ok = dest)
         }
         fn Jit() => {
-            @if_let(value) fn Small(v) => {
-                v := self.f.getcon(v._0);
-                return(Ok = self.scalar_result(p, v, expr_ty));
-            };
-            self.f.getcon(value.jit_addr())
+            // TODO: this will generate garbage code for slices
+            src := self.f.getcon(value.jit_addr());
+            dest := self.get_memory(p, expr_ty);
+            @debug_assert_eq(value.len(), info.stride_bytes.zext(), "value size mismatch");
+            self.blit(dest, src, info.stride_bytes);
+            (Ok = dest)
         }
-    };
-    @err_assert(!p&.is(.Scalar), "ICE: tried to load large constant as scalar (TODO: .Aot ptr)") return;
-    // TODO: this generates garbage code for single pointers, strings, etc.
-    dest := self.get_memory(p, expr_ty);
-    self.blit(dest, src, info.stride_bytes);
-    (Ok = dest)
+    }
 }
+
+fn reference_constant(self: *EmitIr, id: BakedVarId) void = {
+    shared := self.shared;
+    seen := shared.constants_used&;
+    if !seen.get(id.id.zext()) {
+        seen.set(id.id.zext());
+        self.new_constants&.push(id);
+    };
+}
+
+fn as_ref(self: *EmitIr, part: BakedEntry) Qbe.Ref = @match(part) {
+    // TODO: non-8 byte fields
+    fn Num(f) => self.f.getcon(f.value);
+    fn FnPtr(f)   => self.func_ref(f);
+    fn AddrOf(id) => {
+        self.reference_constant(id);
+        self.f.symcon(@tfmt("g%", id.id))
+    }
+};
 
 // :PlaceExpr
 fn addr_macro(self: *EmitIr, arg: *FatExpr, p: Placement) Res(Qbe.Ref) #once = {
@@ -755,7 +827,6 @@ fn addr_macro(self: *EmitIr, arg: *FatExpr, p: Placement) Res(Qbe.Ref) #once = {
     (Ok = self.scalar_result(p, ref, i64))
 }
 
-// TODO: be careful about when one branch is Never
 fn emit_call_if(self: *EmitIr, arg: *FatExpr, p: Placement) Res(Qbe.Ref) #once = {
     @debug_assert(arg.expr&.is(.If));
     parts := arg.expr.If&;
@@ -763,35 +834,38 @@ fn emit_call_if(self: *EmitIr, arg: *FatExpr, p: Placement) Res(Qbe.Ref) #once =
     cond := @try(self.compile_expr(parts.cond, .Scalar)) return;
     t_expr, f_expr := (parts.if_true, parts.if_false);
     t_blk, f_blk, join_blk := (self.new_block("yes"), self.new_block("no"), self.new_block("join"));
-    start := self.blk;
+    seal self { b |
+        b.jmp = (type = .jnz, arg = cond);
+        b.s1 = t_blk;
+        b.s2 = f_blk;
+    };
     
     // force both branches to output to the same place. 
     join_val := self.unify_placement(p&, arg.ty);
+    joined := false;
     
     self.blk = t_blk;
     t_val := @try(self.compile_expr(t_expr, p)) return;
     self.hlt_if_never(t_expr.ty);
-    t_end := self.blk;
+    seal self { b |
+        b.jmp.type = .jmp;
+        b.s1 = join_blk;
+        joined = true;
+    };
+    
     self.blk = f_blk;
     f_val := @try(self.compile_expr(f_expr, p)) return;
     self.hlt_if_never(f_expr.ty);
-    f_end := self.blk;
+    seal self { b |
+        b.jmp.type = .jmp;
+        b.s1 = join_blk;
+        joined = true;
+    };
     
     self.blk = join_blk;
-    start.jmp = (type = .jnz, arg = cond);
-    start.s1 = t_blk;
-    start.s2 = f_blk;
-    if t_end.jmp.type != .Jxxx &&  f_end.jmp.type != .Jxxx {
+    if !joined {
         // both branches diverged. 
-        join_blk.jmp.type = .hlt; // TODO: remove the useless block  
-    };
-    if t_end.jmp.type == .Jxxx {
-        t_end.jmp.type = .jmp;
-        t_end.s1 = join_blk;
-    };
-    if f_end.jmp.type == .Jxxx {
-        f_end.jmp.type = .jmp;
-        f_end.s1 = join_blk;
+        join_blk.jmp.type = .hlt; // TODO: remove the useless block 
     };
     (Ok = join_val)
 }
@@ -835,9 +909,9 @@ fn emit_switch(self: *EmitIr, arg: *FatExpr, p: Placement) Res(Qbe.Ref) #once = 
         
         self.blk = case_block; 
         _ := @try(self.compile_expr(body, p)) return;
-        if self.blk.jmp.type == .Jxxx {  // TODO: is this ever not true? 
-            self.blk.jmp.type = .jmp;
-            self.blk.s1 = end_blk;
+        seal self { b |
+            b.jmp.type = .jmp;
+            b.s1 = end_blk;
             rejoined = true;
         };
         self.blk = next_chain_blk;
@@ -845,10 +919,9 @@ fn emit_switch(self: *EmitIr, arg: *FatExpr, p: Placement) Res(Qbe.Ref) #once = 
     
     // TODO: would it be nicer to have default branch just be the last thing in the ast node too so you could handle them uniformly? -- Jul 26
     _ := @try(self.compile_expr(parts.default, p)) return;
-    
-    if self.blk.jmp.type == .Jxxx {  // TODO: is this ever not true? 
-        self.blk.s1 = end_blk;
-        self.blk.jmp.type = .jmp;
+    seal self { b |
+        b.s1 = end_blk;
+        b.jmp.type = .jmp;
         rejoined = true;
     };
     if !rejoined {
@@ -865,11 +938,11 @@ fn emit_call_loop(self: *EmitIr, arg: *FatExpr) Res(Qbe.Ref) #once = {
     self.blk.s1 = start;
     self.blk    = start;
     @try(self.compile_expr(arg, .Discard)) return;
-    if self.blk.jmp.type == .Jxxx {
-        self.blk.jmp.type = .jmp;
-        self.blk.s1 = start;
+    seal self { b |
+        b.jmp.type = .jmp;
+        b.s1 = start;
     };
-    (Ok = QbeConZero)
+    (Ok = QbeNull)
 }
 
 fn construct_aggregate(self: *EmitIr, pattern: *Pattern, requested: Type, p: Placement) Res(Qbe.Ref) #once = {
@@ -877,7 +950,7 @@ fn construct_aggregate(self: *EmitIr, pattern: *Pattern, requested: Type, p: Pla
         each pattern.bindings& { b | 
             @try(self.compile_expr(b.default&.unwrap(), .Discard)) return;
         };
-        return(Ok = QbeConZero);
+        return(Ok = QbeNull);
     };
     raw_container_ty := self.program.raw_type(requested);
     (Ok = @match(self.program.get_type(raw_container_ty)) {
@@ -885,12 +958,16 @@ fn construct_aggregate(self: *EmitIr, pattern: *Pattern, requested: Type, p: Pla
             expected := f.fields.len - f.const_field_count.zext();
             if f.is_union {
                 @debug_assert_eq(pattern.bindings.len, 1, "union must have exactly one active field");
+                expected = 1;
             } else {
                 @debug_assert_eq(expected, pattern.bindings.len, "Cannot assign to type % with wrong field count", self.program.log(requested));
                 if expected == 1 {
                     expr := pattern.bindings[0].default&.unwrap();
                     return(self.compile_expr(expr, p));
                 };
+            };
+            if expected == 1 {
+                return(self.compile_expr(pattern.bindings[0].default&.unwrap(), p));
             };
             base := self.get_memory(p, raw_container_ty);
             enumerate pattern.bindings& { i, b | 
@@ -901,23 +978,27 @@ fn construct_aggregate(self: *EmitIr, pattern: *Pattern, requested: Type, p: Pla
                 @debug_assert(field.kind != .Const, "cannot assign to const field");
                 expr := b.default&.unwrap();
                 dest := self.offset(base, field.byte_offset);
-                @try(self.compile_expr(expr, (Blit = dest))) return;
+                _ := @try(self.compile_expr(expr, (Blit = dest))) return;
             };
             base
         }
         fn Tagged(f) => {
             @debug_assert_eq(pattern.bindings.len, 1, "@tagged must have one active varient");
             value := pattern.bindings[0].default&.unwrap();
+            name := pattern.bindings[0].name.unwrap();
+            i    := f.cases.position(fn(f) => f._0 == name).expect("case name to exist in type");
+            if value.ty == void {  // :get_or_create_type
+                _ := @try(self.compile_expr(value, .Discard)) return;
+                return(Ok = self.scalar_result(p, self.f.getcon(i), i64));
+            };
             @match(p) {
                 fn Discard() => return(self.compile_expr(value, .Discard)); // just for side effects
-                fn Scalar()  => return(@err("ICE: tagged union is never a scalar."));
+                fn Scalar()  => return(@err("ICE: tagged union is not a scalar."));
                 @default     => ();
             };
             base := self.get_memory(p, raw_container_ty);
-            name := pattern.bindings[0].name.unwrap();
-            i    := f.cases.position(fn(f) => f._0 == name).expect("case name to exist in type");
             self.emit(.storel, .Kw, QbeNull, self.f.getcon(i), base);  // tag :get_or_create_type // TODO: smaller tag sizes than 64 bits 
-            @try(self.compile_expr(value, (Blit = self.offset(base, 8)))) return;
+            _ := @try(self.compile_expr(value, (Blit = self.offset(base, 8)))) return;
             base
         }
         @default => return(@err("struct literal for non-(struct/tagged)"));
@@ -928,6 +1009,10 @@ fn construct_aggregate(self: *EmitIr, pattern: *Pattern, requested: Type, p: Pla
 // TODO: generate less dumb code for non-escaping scalars. 
 fn declare_var(self: *EmitIr, name: Var, ptr: Qbe.Ref, type: Type) void #inline = {
     if self.program.get_info(type)[].stride_bytes == 0 {
+        // :NoRuntimeRepr
+        // It's nice to let macros/generics operate over types uniformly.
+        // Some types have no runtime representation, so any attempt to use them should compile to nothing. 
+        // TODO: maybe sema should try to strip these out so we don't have to keep checking here. 
         self.var_lookup&.insert(name, QbeConZero);
         return()  
     };
@@ -981,6 +1066,9 @@ fn blit(self: *EmitIr, dest: Qbe.Ref, src: Qbe.Ref, bytes: u16) void #inline = {
 
 fn alloca(self: *EmitIr, ty: Type) Qbe.Ref = {
     info := self.program.get_info(ty);
+    if info.stride_bytes == 0 { // :NoRuntimeRepr 
+        return(QbeConZero);
+    };
     t := self.f.newtmp("s", .Kl);
     @debug_assert(info.align_bytes <= 8, "i don't support high alignments yet");
     o: Qbe.O = @if(info.align_bytes <= 4, .alloc4, .alloc8);
@@ -1041,10 +1129,19 @@ fn scalar_dest(self: *EmitIr, p: Placement, k: Qbe.Cls) Qbe.Ref = @match(p) {
 fn scalar_result(self: *EmitIr, p: Placement, r: Qbe.Ref, ty: Type) Qbe.Ref = @match(p) {
     fn NewMemory() => self.scalar_result((Blit = self.alloca(ty)), r, ty);
     fn Blit(dest)  => {
-        if self.program.get_info(ty)[].stride_bytes == 0 {
-            return(QbeConZero);
+        size := self.program.get_info(ty)[].stride_bytes;
+        if size == 0 {
+            return(QbeConZero);  // :NoRuntimeRepr
         };
-        self.emit(self.store_op(ty), .Kw, QbeNull, r, dest);
+        o := self.store_op(ty);
+        if o == .Oxxx {
+            // It's convinent to emit constants as a literal even if we want a struct with multiple fields. 
+            // TODO: is alignment real?
+            @debug_assert(size <= 8, "tried to use scalar result for large aggragate");
+            o = store_by_size[size.zext()];
+            @debug_assert(o != .Oxxx, "tried to store strange size");
+        };
+        self.emit(o, .Kw, QbeNull, r, dest);
         dest
     }
     fn Scalar()  => r;
@@ -1065,35 +1162,63 @@ fn get_aggregate(self: *EmitIr, ty: Type) Qbe.Ref = {
         type := self.program.get_type(ty);
         result := Qbe.Typ.zeroed();
         result.size = info.stride_bytes.zext();
-        @debug_assert(result.size != 0, "ICE: treating zero size type as an aggragate");
+        @debug_assert(result.size != 0, "ICE: treating zero size type % as an aggragate", self.program.log(ty));
         result.align_log2 = (@as(i64) info.align_bytes.zext()).trailing_zeros().intcast(); // TODO: thats dumb
         l: List(u8) = (maybe_uninit = result.name&.items(), len = 0, gpa = panicking_allocator);
         @fmt(l&, "T%", ty.as_index());
-        n := 0;
         i := @match(type) {
             fn Named(it)  => self.get_aggregate(it._0).val();
             fn Enum(it)   => self.get_aggregate(it.raw).val();
             fn Struct(it) => {
+                yield :: local_return;
+                if repr_transparent(it) { repr |
+                    yield(self.get_aggregate(repr).val());
+                };
+                n := 0;
                 rt_count: i64 = it.fields.len - it.const_field_count.zext();
                 result.fields = new_long_life(rt_count + 1);
                 result.nunion = @if(it.is_union, rt_count.trunc(), 1);
                 result.is_union = it.is_union;
-                @assert(!it.is_union, "TODO: get_aggregate of union %", self.program.log(ty));
                 @assert(it.layout_done, "tried to get_aggregate before layout %", self.program.log(ty));
-                each it.fields { f | 
-                    if f.kind != .Const {
-                        result.fields&.grow(n);
-                        result.fields[n] = self.as_field(f.ty);  // TODO: padding
-                        n += 1;
+                if it.is_union {
+                    each it.fields { f | 
+                        if f.kind != .Const {
+                            field_size := self.program.get_info(f.ty)[].stride_bytes;
+                            @debug_assert(field_size != 0, "TODO: allow void union?");
+                            @debug_assert(f.byte_offset == 0, "union field must have offset 0");
+                            result.fields[n] = self.as_field(f.ty);      n += 1;
+                            result.fields[n] = (type = .FEnd, len = 0);  n += 1;
+                        };
                     };
+                } else {
+                    off := 0;
+                    each it.fields { f | 
+                        if f.kind != .Const {
+                            field_size := self.program.get_info(f.ty)[].stride_bytes;
+                            if field_size != 0 {
+                                add_padding(result.fields&, n&, off&, f.byte_offset);
+                                result.fields&.grow(n);
+                                result.fields[n] = self.as_field(f.ty);
+                                n += 1;
+                                off += field_size.zext();
+                            }; // else :NoRuntimeRepr
+                        };
+                    };
+                    add_padding(result.fields&, n&, off&, info.stride_bytes.zext());
+                    result.fields&.grow(n);
+                    result.fields[n] = (type = .FEnd, len = 0);
                 };
-                result.fields&.grow(n);
-                result.fields[n] = (type = .FEnd, len = 0);
                 // TODO: name
                 self.m.new_type(result)
             }
-            fn Array(it) => {
-                result.fields = new_long_life(it.len.zext() + 1);
+            fn Array(it) => if it.len == 1 {
+                self.get_aggregate(it.inner).val()
+            } else {
+                inner_size: i64 = self.program.get_info(it.inner)[].stride_bytes.zext();
+                @debug_assert_eq(inner_size * it.len.zext(), info.stride_bytes.zext(), "size calc wrong!");
+                outer_size: i64 = info.stride_bytes.zext();
+                field_count := 1 + it.len.zext();
+                result.fields = new_long_life(field_count);
                 result.nunion = 1;
                 field := self.as_field(it.inner);
                 range(0, it.len.zext()) { i |
@@ -1104,17 +1229,21 @@ fn get_aggregate(self: *EmitIr, ty: Type) Qbe.Ref = {
                 self.m.new_type(result)
             }
             fn Tagged(it) => {
+                n := 0;
                 result.fields = new_long_life(it.cases.len * 3);
                 result.nunion = it.cases.len.trunc();
-                result.is_union = true;
                 each it.cases { case | 
-                    result.fields[n]     = (type = .Fl, len = 8);  n += 1;
                     if case._1 != void { // :get_or_create_type 
+                        result.fields[n] = (type = .Fl, len = 8);      n += 1;
                         result.fields[n] = self.as_field(case._1);     n += 1;
+                        result.fields[n] = (type = .FEnd, len = 0);    n += 1;
+                        // TODO: do i need to pad them to the same size?
+                    } else {
+                        result.nunion -= 1;
                     };
-                    result.fields[n] = (type = .FEnd, len = 0);    n += 1;
-                    // TODO: do i need to pad them to the same size?
                 };
+                result.is_union = result.nunion > 1;
+                @debug_assert(result.nunion != 0, "ICE: get_aggregate of scalar @tagged");
                 // TODO: name
                 self.m.new_type(result)
             }
@@ -1124,6 +1253,16 @@ fn get_aggregate(self: *EmitIr, ty: Type) Qbe.Ref = {
     };
     
     TYPE(info.ir_index.intcast())
+}
+
+fn add_padding(fields: *QList(Qbe.Field), nfield: *i64, current_size: *i64, target_size: i64) void = {
+    pad := target_size - current_size[];
+    @debug_assert(pad >= 0, "trying to pad struct to smaller size");
+    if pad > 0 {
+        fields.grow(nfield[]);
+        fields[][nfield[]] = (type = .FPad, len = pad.trunc());
+        nfield[] += 1;
+    };
 }
 
 // TODO: use this elsewhere. 
@@ -1136,6 +1275,7 @@ fn new_type(m: *QbeModule, type: Qbe.Typ) i64 = {
 }
 
 fn as_field(self: *EmitIr, ty: Type) Qbe.Field = {
+    ::if(Qbe.Field);
     type := self.program.get_type(ty);
     @match(type) {
         fn F64()      => (type = .Fd, len = 8);
@@ -1160,8 +1300,17 @@ fn as_field(self: *EmitIr, ty: Type) Qbe.Field = {
             };
             (type = .FTyp, len = self.get_aggregate(ty).val().trunc())
         }
-        fn Struct(_) => (type = .FTyp, len = self.get_aggregate(ty).val().trunc());
-        fn Array(_) => (type = .FTyp, len = self.get_aggregate(ty).val().trunc());
+        fn Struct(it) => {
+            if repr_transparent(it) { inner |
+                return(self.as_field(inner))
+            };
+            (type = .FTyp, len = self.get_aggregate(ty).val().trunc())
+        }
+        fn Array(it) => if it.len == 1 {
+            self.as_field(it.inner)
+        } else {
+            (type = .FTyp, len = self.get_aggregate(ty).val().trunc())
+        };
         @default => @panic("tried to as_field of unhandled %", self.program.log(ty));
     }
 }
@@ -1190,7 +1339,7 @@ fn repr_transparent(it: *TypeInfo.get_variant_type(.Struct)) ?Type = {
     }
 }
 
-fn hlt_if_never(self: *EmitIr, ty: Type) void = {
+fn hlt_if_never(self: *EmitIr, ty: Type) void #inline = {
     if ty.is_never() && self.blk.jmp.type == .Jxxx {
         self.blk.jmp.type = .hlt;
     };
@@ -1225,6 +1374,7 @@ fn load_op(self: *EmitIr, ty: Type) Ty(Qbe.O, Qbe.Cls) = @match(self.program.get
     fn Struct(it) => self.load_op(or repr_transparent(it) {
         return(.nop, .Ke)
     });
+    fn Array(it) => @if(it.len == 1, self.load_op(it.inner), (.nop, .Ke));
     @default     => (.nop, .Ke);
 };
 
@@ -1246,11 +1396,13 @@ fn store_op(self: *EmitIr, ty: Type) Qbe.O = @match(self.program.get_type(ty)) {
     fn Enum(it)  => self.store_op(it.raw);
     fn Bool()    => .storeb;
     fn Tagged(it) => {
-        @assert(self.program.is_tag_only(it), "ICE: store_op of multi-field @tagged");
+        if !self.program.is_tag_only(it) {
+            return(.Oxxx);
+        };
         .storel
     }
-    fn Struct(it) => self.store_op(repr_transparent(it).expect("scalar struct for store_op"));
-    @default     => @panic("% does not have a backing integer (store)", self.program.log(ty));
+    fn Struct(it) => self.store_op(repr_transparent(it) || return(.Oxxx));
+    @default     => .Oxxx;
 };
 
 fn new_block(self: *EmitIr, debug: Str) *Qbe.Blk = {   
@@ -1266,17 +1418,11 @@ fn new_block(self: *EmitIr, debug: Str) *Qbe.Blk = {
     b
 }
 
-// TODO: move this and call it from other aot backends.
 fn fmt_fn_name(self: *EmitIr, f: FuncId) []u8 = 
     self.program.fmt_fn_name(f);
 
-fn fmt_fn_name(program: CompCtx, f: FuncId) []u8 = {
-    opts := program.get_build_options();
-    if opts.retain_function_names {
-        func := program.get_function(f);
-        real_name := program.get_string(func.name);
-        @tfmt("%__%", real_name, f.to_index())
-    } else {
-        @tfmt("F%", f.to_index())
-    }
+fn seal(self: *EmitIr, $body: @Fn(b: *Qbe.Blk) void) void = {
+    if self.blk.jmp.type == .Jxxx { 
+        body(self.blk);
+    };
 }

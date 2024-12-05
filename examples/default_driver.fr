@@ -18,6 +18,8 @@ LINK_QBE_C :: false; // note: this only applies if you call the sta version inst
 #include_std("backend/lib.fr"); 
 #include_std("compiler/ast_external.fr");  
 #include_std("compiler/backend/llvm.fr");  // note: we re-jit the llvm backend every time. 
+#include_std("compiler/emit_ir.fr");  
+#include_std("compiler/worker.fr");  
 
 Options :: @struct(
     use_v2 := false,
@@ -148,7 +150,7 @@ fn driver(vtable: *ImportVTable) void #export = {
                 ptr := if cmd.cfg.qbe {
                     @if(ENABLE_INTERNAL_QBE, {
                         m = init_default_module_dyn(vtable, (os = os, arch = arch, type = m.goal.type));
-                        emit_qbe_included_dyn(m&, c&, @slice(fid), .WrapMain);
+                        emit_qbe_included_dyn(m&, c&, @slice(fid), .WrapMain, NEW);
                         m&.fill_from_libc();
                         m&.make_exec();
                         or m&.get_addr("main") {
@@ -196,7 +198,7 @@ fn driver(vtable: *ImportVTable) void #export = {
                         @if(ENABLE_INTERNAL_QBE, {
                             // would be faster if you could share the module between runs
                             m = init_default_module_dyn(vtable, (os = os, arch = arch, type = m.goal.type));
-                            _ := emit_qbe_included_dyn(m&, c&, @slice(fid), .WrapMain);
+                            _ := emit_qbe_included_dyn(m&, c&, @slice(fid), .WrapMain, NEW);
                             m&.fill_from_libc();
                             m&.make_exec();
                             or m&.get_addr(name) {
@@ -346,12 +348,14 @@ fn compile_with_qbe(c: CompCtx, fid: FuncId, entry: ProgramEntry, arch: Arch, os
     //ir_out.remove();   
 }
 
+NEW :: true;
+
 fn compile_with_included_qbe(c: CompCtx, fid: []FuncId, entry: ProgramEntry, arch: Arch, os: Os, goal: QbeOutputPurpose) void = {
     @if(ENABLE_INTERNAL_QBE, {
         m := init_default_module_dyn(c.vtable, (os = os, arch = arch, type = goal));
         
         env: TargetEnv = (arch = arch, os = os);
-        asm_text := emit_qbe_included_dyn(m&, c&, fid, entry);
+        asm_text := emit_qbe_included_dyn(m&, c&, fid, entry, NEW);
         
         asm_out := "a.out".sym().c_str(); // TODO: the version of tmp file that lets you have an extension because it wants the .s
         // TODO: new footgun, you'll get the wrong compiler in the context if you try to call sym/c_str at runtime of the driver now.  
@@ -405,7 +409,7 @@ fn compile_with_included_qbe(c: CompCtx, fid: []FuncId, entry: ProgramEntry, arc
 
 fn load_file(path: Str, vtable: *ImportVTable, build_options: *BuildOptions) CompCtx = {
     the_code := temp().read_to_string(path);
-    src := "#include_std(\"lib/core.fr\");".clone(forever);
+    src := "\n#include_std(\"lib/core.fr\");".clone(forever);
     src&.push_all(the_code.items());
     comp := vtable.new_with_src(src.items(), path, build_options);
     // TODO: libs

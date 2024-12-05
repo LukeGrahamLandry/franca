@@ -73,6 +73,14 @@ fn debug_dump(f: *Qbe.Fn, beg: []RMap, end: []RMap) void = {
     };
 }
 
+fn display(k: Qbe.Cls, out: *List(u8)) void = {
+    @fmt(out, "%", k.kname());
+}
+
+fn display(k: Qbe.O, out: *List(u8)) void = {
+    @fmt(out, "%", k.get_name());
+}
+
 fn printcon(m: *QbeModule, c: *Qbe.Con, out: *FILE) void = {
     @debug_assert(!c.is_null(), "null con");
     @match(c.type) {
@@ -169,12 +177,8 @@ fn printref(r: Qbe.Ref, f: *Qbe.Fn, out: *FILE) void = {
 }
 
 fn kname(k: Qbe.Cls) Str = {
-    ktoc := "wlsd";
-    ki: i64 = k.raw().zext();
-    if ki < 0 || ki > 3 {
-        return("?");
-    };
-    ktoc.slice(ki, ki + 1)
+    N :: Qbe.Cls.get_enum_names();
+    N[k.raw().zext()].slice(1, 2)
 }
 
 fn printins(f: *Qbe.Fn, i: *Qbe.Ins, out: *FILE) void = {
@@ -360,4 +364,49 @@ fn dumpts(bs: *Qbe.BSet, tmp: QList(Qbe.Tmp), f: *FILE) void = {
         @fmt_write(f, " %", tmp[t]&.name());
     };
     write(f, "]\n");
+}
+
+fn print_type(m: *QbeModule, ty_index: i64, out: *FILE) void = {
+    t := m.types.index(ty_index); // TODO: bounds
+    @fmt_write(out, "type :% = ", @if(TRACK_IR_NAMES, t.name(), ty_index));
+    if t.is_dark {
+        @fmt_write(out, "% { % }", 1.shift_left(t.align_log2.zext()), t.size);
+        return();
+    };
+    if t.is_union {
+        @fmt_write(out, "{ ");
+    };
+    f := t.fields[0]&;  
+    if f.type == .FEnd {
+        @fmt_write(out, "EMPTY");
+    };
+    range(0, t.nunion.zext()) { n |
+        while => f.type != .FEnd { 
+            @fmt_write(out, "{ ");
+            // TODO: would be more readable if this used array syntax
+            @match(f.type) {
+                fn Fb() => @fmt_write(out, "b, ");
+                fn Fh() => @fmt_write(out, "h, ");
+                fn Fw() => @fmt_write(out, "w, ");
+                fn Fl() => @fmt_write(out, "l, ");
+                fn Fs() => @fmt_write(out, "s, ");
+                fn Fd() => @fmt_write(out, "d, ");
+                fn FTyp() => {
+                    type := m.types[].index(f.len.zext());
+                    @fmt_write(out, ":%, ", @if(TRACK_IR_NAMES, type.name(), f.len));
+                }
+                fn FPad() => {
+                    @fmt_write(out, "PAD %, ", f.len);
+                }
+                fn FEnd() => unreachable();
+            };
+            @fmt_write(out, "}");
+            f = f.offset(1);
+        };
+        f = f.offset(1);
+    };
+    if t.is_union {
+        @fmt_write(out, " }");
+    };
+    @fmt_write(out, "\n");
 }

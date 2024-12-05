@@ -1,5 +1,11 @@
 - make slot promotion treat 1/2/4/8 byte blit as a load+store.
   kinda silly cause the frontend just shouldn't generate those but while prototyping its nice to not care and still get nice output.
+- mistake making arena_alloc always return 0 was Block using the result ref from compile_expr instead of pulling it out of the placement.
+- i bet the problem with default_driver is that im trying to use the real calling convention now.
+- when a constant is Value.Small it might still be an aggragate like (u32, u32) so scalar_result should allow storing that from an int literal.
+- trying to run other_main its trying to jump to 0s when calling into jitted code by the old backend.
+  which looks a lot like the not calling clear_cache problem but the address is wrong.
+- for macho_loader, it seems to think MAX_i64 is -1? oh cry, i said cgew instead of cgel so it was only looking at the low 32 bits and comparing as i32.
 
 ## (Dec 1)
 

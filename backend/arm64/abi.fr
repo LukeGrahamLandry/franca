@@ -59,22 +59,24 @@ store_ops :: @const_slice(Qbe.O.storew, .storel, .stores, .stored); // :QbeClsi1
 
 fn isfloatv(t: *Qbe.Typ, cls: *Qbe.Cls, count: *u8, globals: *QbeModule) bool = {
     f := t.fields[0]&;  
+    biggest := 0;
     range(0, t.nunion.zext()) { n |
+        case: u8 = 0;
         while => f.type != .FEnd { 
             @match(f.type) {
                 fn Fs() => {
                     if(cls[] == .Kd, => return(false));
                     cls[] = .Ks;
-                    count[] += 1;
+                    case += 1;
                 }
                 fn Fd() => {
                     if(cls[] == .Ks, => return(false));
                     cls[] = .Kd;
-                    count[] += 1;
+                    case += 1;
                 }
                 fn FTyp() => {
                     type := globals.types[].index(f.len.zext());
-                    if !isfloatv(type, cls, count, globals) {
+                    if !isfloatv(type, cls, case&, globals) {
                         return(false);
                     }
                 }
@@ -82,9 +84,10 @@ fn isfloatv(t: *Qbe.Typ, cls: *Qbe.Cls, count: *u8, globals: *QbeModule) bool = 
             };
             f = f.offset(1);
         };
+        biggest = biggest.max(case.zext());
         f = f.offset(1);
     };
-    
+    count[] += biggest.trunc();  // TODO: overflow
     count[] <= 4
 }
 
@@ -119,7 +122,11 @@ fn typclass(c: *Class, t: *Qbe.Typ, gp: []Arm64Reg, fp: []Arm64Reg, globals: *Qb
     c.size = sz.intcast();
 
     if c.ishfa {
-        @debug_assert_eq(@as(i64) c.hfa.size.zext(), t.size / if(is_wide(c.hfa.base), => 8, => 4));
+        if ((@as(i64) c.hfa.size.zext()) != t.size / if(is_wide(c.hfa.base), => 8, => 4)) {
+            type_index := ptr_diff(globals.types.first, t);
+            print_type(globals, type_index, globals.debug_out);
+            @panic("hfa size wrong!");
+        };
         range(0, c.hfa.size.zext()) { n |
             c.reg&[n] = fp.index_unchecked(0)[];
             fp = fp.slice_pop_first();
