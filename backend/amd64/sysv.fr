@@ -77,6 +77,7 @@ fn amd64_sysv_argregs(r: Qbe.Ref, p: *Array(i32, 2)) u64 = {
 }
 
 fn amd64_sysv_abi(f: *Qbe.Fn) void = {
+    m := f.globals;
     for_blocks f { b | 
         b.visit = 0;
     };
@@ -84,7 +85,9 @@ fn amd64_sysv_abi(f: *Qbe.Fn) void = {
     /* lower parameters */
     b := f.start;
     i := f.find_past_last_param();
+    @if(use_threads) pthread_mutex_lock(m.types_mutex&).unwrap();
     fa := selpar_amd64(f, f.start.ins.first, i);
+    @if(use_threads) pthread_mutex_unlock(m.types_mutex&).unwrap();
     f.realloc_for_params(i);
 
     /* lower calls, returns, and vararg instructions */
@@ -98,12 +101,16 @@ fn amd64_sysv_abi(f: *Qbe.Fn) void = {
         };
         if(b.visit != 0, => continue(!b.identical(f.start)));
         f.reset_scratch();
+        @if(use_threads) pthread_mutex_lock(m.types_mutex&).unwrap();
         selret_amd64(b, f);
+        @if(use_threads) pthread_mutex_unlock(m.types_mutex&).unwrap();
         for_insts_rev b { i |
             @match(i[].op()) {
                 fn call() => {
                     i0 := b.find_first_arg(i[]);
+                    @if(use_threads) pthread_mutex_lock(m.types_mutex&).unwrap();
                     selcall(f, i0, i[], ral&);
+                    @if(use_threads) pthread_mutex_unlock(m.types_mutex&).unwrap();
                     i[] = i0;
                 }
                 fn vastart() => selvastart(f, fa, i.arg&[0]);
@@ -226,6 +233,7 @@ fn selret_amd64(b: *Qbe.Blk, f: *Qbe.Fn) void = {
     ca := if j == .retc {
         @debug_assert(f.retty != -1);
         aret := AClass.zeroed();
+        m := f.globals;
         typclass(aret&, f.globals.get_type(f.retty.intcast()), f.globals);
         if aret.inmem != 0 {
             @debug_assert(rtype(f.retr) == .RTmp);
@@ -469,7 +477,7 @@ fn alloc_op(align_log2: i32) Qbe.O = {
 
 // TODO: really need better error messages if you have mismatched {}'s
 
-fn get_type(m: *QbeModule, i: i64) *Qbe.Typ = {
+fn get_type(m: *QbeModule, i: i64) *Qbe.Typ = { // :ThreadSafety you have to be in the mutex. todo: make this less error prone
     @debug_assert_lt(i, m.number_of_types, "type index out of bounds");
     @debug_assert_ge(i, 0, "type index negative");
     m.types.index(i)

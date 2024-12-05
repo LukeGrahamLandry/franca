@@ -194,6 +194,7 @@ fn selret(b: *Qbe.Blk, f: *Qbe.Fn) void = {
 
     cty := if j == .retc {
         @debug_assert(f.retty >= 0, "retc without type");
+        m := f.globals;
         type := f.globals.types[][f.retty.zext()]&;
         cr := Class.zeroed();
         typclass(cr&, type, gpreg, fpreg, f.globals);
@@ -381,6 +382,7 @@ fn align(x: i32, al: i32) i32 #inline =
 fn selcall(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins, ilp: **Insl) void = {
     tmp := Array(Qbe.Ref, 4).zeroed();
     ca := temp().alloc_zeroed(Class, ptr_diff(i0, i1));
+    m := f.globals;
     cty := argsclass(i0, i1, ca.ptr, f.globals);
 
     stk: i32 = 0;
@@ -705,7 +707,10 @@ fn arm64_abi(f: *Qbe.Fn) void = {
     
     /* lower parameters */
     i := f.find_past_last_param();
+    m := f.globals;
+    @if(use_threads) pthread_mutex_lock(m.types_mutex&).unwrap();
     p := selpar(f, f.start.ins.first, i);
+    @if(use_threads) pthread_mutex_unlock(m.types_mutex&).unwrap();
     f.realloc_for_params(i);
 
     /* lower calls, returns, and vararg instructions */
@@ -720,13 +725,17 @@ fn arm64_abi(f: *Qbe.Fn) void = {
         };
         if(b.visit != 0, => continue(!b.identical(f.start))); // TODO: is this right? continue in a do-while is clunky
         f.reset_scratch();
+        @if(use_threads) pthread_mutex_unlock(m.types_mutex&).unwrap();
         selret(b, f);
+        @if(use_threads) pthread_mutex_unlock(m.types_mutex&).unwrap();
         for_insts_rev b { i |
             @match(i[].op()) {
                 fn call() => {
+                    @if(use_threads) pthread_mutex_unlock(m.types_mutex&).unwrap();
                     i0 := b.find_first_arg(i[]);
                     selcall(f, i0, i[], il&);
                     i[] = i0;
+                    @if(use_threads) pthread_mutex_unlock(m.types_mutex&).unwrap();
                 }
                 fn vastart() => if T.apple {
                     apple_selvastart(f, p, i.arg&[0]);

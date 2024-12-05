@@ -12,6 +12,9 @@ fn main_thread_pump(comp: CompCtx, shared: *CodegenShared, fns: []FuncId, when: 
     
     funcs_done: BitSet = empty();
     work_stack := FuncId.list(a);
+    if when == .Aot {  // TODO: not for dynamic
+        work_stack&.push(env.runtime_init.expect("declaration of franca_runtime_init"));
+    };
     work_stack&.push_all(fns);
     pending := FuncId.list(a);
     
@@ -45,7 +48,7 @@ fn main_thread_pump(comp: CompCtx, shared: *CodegenShared, fns: []FuncId, when: 
             continue();
         };
         
-        res := emit_ir(comp, shared, fid, when, idx&);
+        res := emit_ir(comp, shared, fid, when, idx&, pending&);
         if res&.err() { err | 
             comp.report_error(err[]);
             panic("emir_ir failed!");
@@ -54,9 +57,12 @@ fn main_thread_pump(comp: CompCtx, shared: *CodegenShared, fns: []FuncId, when: 
         {comp.vtable.report_aot_progress}(comp.data, fid, false);
         current := work_stack&.pop().unwrap();
         @assert_eq(current, fid, "order messed up");
-        if res.Ok { target | 
-            work_stack&.push(target);
+        for pending { c |  // HACK
+            if !funcs_done&.get(c.to_index().zext()) && !work_stack.items().contains(c&) {  // :SLOW
+                work_stack&.push(c);
+            };
         };
+        pending&.clear();
         funcs_done&.set(fid.to_index().zext(), a);
         for func.mutual_callees { c |
             if !funcs_done&.get(c.to_index().zext()) && !work_stack.items().contains(c&)  {
@@ -75,13 +81,10 @@ fn main_thread_pump(comp: CompCtx, shared: *CodegenShared, fns: []FuncId, when: 
     
     // TODO: not for dynamic
     if when == .Aot && fns.len == 1 {
-        wrap_with_runtime_init(comp, shared, fns[0]);
+        wrap_with_runtime_init(comp, shared, fns[0], idx&);
     };
     
     shared.join_codegen_thread();
-    //for fns { f | 
-    //    shared.m.get_symbol_info().
-    //};
     shared.m.emit_suspended_inlinables();
     if when == .Aot {
         if env.static_context_var { context | 
@@ -91,11 +94,10 @@ fn main_thread_pump(comp: CompCtx, shared: *CodegenShared, fns: []FuncId, when: 
 }
 
 // TODO: factor out this so the other one can call it.  
-fn wrap_with_runtime_init(comp: CompCtx, shared: *CodegenShared, user_main: FuncId) void = {
-    i := 0;
+fn wrap_with_runtime_init(comp: CompCtx, shared: *CodegenShared, user_main: FuncId, idx: *i64) void = {
     env := comp.get_comptime_env();
     runtime_init := env.runtime_init.expect("declaration of franca_runtime_init");
-    entry := shared.bouba_acquire(i&);
+    entry := shared.bouba_acquire(idx);
     
     push_dynamic_context {
         context(DefaultContext)[].temporary_allocator = entry.arena&;
@@ -108,16 +110,19 @@ fn wrap_with_runtime_init(comp: CompCtx, shared: *CodegenShared, user_main: Func
         f.nblk = 1;
         argc := f.newtmp("argc", .Kl);
         argv := f.newtmp("argv", .Kl);
-        f.reset_scratch();
-        f.emit(.par, .Kl, argc, QbeNull, QbeNull);
-        f.emit(.par, .Kl, argv, QbeNull, QbeNull);
+        // IMPORTANT: you can't use f.emit because threads. 
+        N :: 6;
+        ins: QList(Qbe.Ins) = new(N);
+        ins[0] = make_ins(.par, .Kl, argc, QbeNull, QbeNull);
+        ins[1] = make_ins(.par, .Kl, argv, QbeNull, QbeNull);
         runtime_init := f.symcon(comp.fmt_fn_name(runtime_init));
-        f.emit(.arg, .Kl, QbeNull, argc, QbeNull);
-        f.emit(.arg, .Kl, QbeNull, argv, QbeNull);
-        f.emit(.arg, .Kl, QbeNull, f.symcon(name), QbeNull);
-        f.emit(.call, .Kw, QbeNull, runtime_init, QbeNull);
+        ins[2] = make_ins(.arg, .Kl, QbeNull, argc, QbeNull);
+        ins[3] = make_ins(.arg, .Kl, QbeNull, argv, QbeNull);
+        ins[4] = make_ins(.arg, .Kl, QbeNull, f.symcon(name), QbeNull);
+        ins[5] = make_ins(.call, .Kw, QbeNull, runtime_init, QbeNull);
         f.start.jmp.type = .ret0;
-        f.copy_instructions_from_scratch_reversed_which_means_forwards(f.start);
+        f.start.nins = N;
+        f.start.ins = ins;
         entry.task = (Func = f);
     };
     enqueue_task(shared, entry);
@@ -219,8 +224,8 @@ fn do_codegen(m: *QbeModule, entry: *CodegenEntry) void = {
             {m.target.emitfn}(m, f, m[].outf);
         }
         fn AotVar(it) => {
-            for it.ids { id |
-                emit_constant(it.c, m, id);
+            each it { d |
+                m.new_emit_data(d);
             };
         }
     };
@@ -249,9 +254,7 @@ CodegenTask :: @tagged(
     Asm: @struct(lnk: *Qbe.Lnk, bytes: []u8),
     JitImport: @struct(lnk: *Qbe.Lnk, addr: rawptr),
     Bounce: @struct(lnk: *Qbe.Lnk, target: u32),
-    // TODO: exposing the CompCtx here is really not what you want. this is trash. 
-    //       but it's also trash to wait until the end to do any of these.
-    AotVar: @struct(c: CompCtx, ids: []BakedVarId),
+    AotVar: []Qbe.Dat,
 );
 
 CodegenEntry :: @struct(
@@ -348,35 +351,39 @@ fn join_codegen_thread(shared: *CodegenShared) void = {
     };
 }
 
-fn emit_constant(comp: CompCtx, m: *QbeModule, id: BakedVarId) void = {
-    // Baked.values is a BucketArray so its almost fine to do this on another thread, 
-    // TODO: but you could get super unlucky and hit it during a resize of the list of buckets. :ThreadSafety :FUCKED
+// this puts a bunch of stuff in temp(), it's expected to be used in the context of a CodegenEntry. 
+fn emit_constant(comp: CompCtx, m: *QbeModule, id: BakedVarId, out: *List(Qbe.Dat)) void = {
     _, value := {comp.vtable.get_baked}(comp.data, id)[];
     idx: i64 = id.id.zext();
     
-    dat := Qbe.Dat.zeroed();
-    lnk: Qbe.Lnk = (id = m.intern(@tfmt("g%", idx)));
-    dat.lnk = lnk&;
+    lnk := temp().box(Qbe.Lnk);
+    lnk[] = (id = m.intern(@tfmt("g%", idx)));  // TODO: allow exporting vars
+    next_dat :: fn() => {
+        out.push(Qbe.Dat.zeroed());
+        dat := out.index(out.len - 1);
+        dat.lnk = lnk;
+        dat
+    };
     
-    emit_data :: fn(d) => m.new_emit_data(d);
-    
-    dat.type = .DStart;
-    emit_data(dat&);
+    {
+        dat := next_dat();
+        dat.type = .DStart;
+    };
     @match(value&) {
-        (fn Zeros(len) => {
+        fn Zeros(len) => {
+            dat := next_dat();
             dat.type = .DZ;
             dat.u.num = len[];
-            emit_data(dat&);
-        });
-        (fn Bytes(bytes) => {
+        }
+        fn Bytes(bytes) => {
+            dat := next_dat();
             dat.type = .DB;
             dat.is_str = true;
             dat.u.str = bytes[].items();
-            emit_data(dat&);
-            dat.is_str = false;
-        });
-        (fn VoidPtrArray(parts) => {
+        }
+        fn VoidPtrArray(parts) => {
             for(parts[].items()){inner|
+                dat := next_dat();
                 @match(inner) {
                     (fn FnPtr(f) => {
                         dat.type = .DL;
@@ -388,8 +395,6 @@ fn emit_constant(comp: CompCtx, m: *QbeModule, id: BakedVarId) void = {
                         dat.is_ref = true;
                         fuck := @tfmt("%\0", comp.fmt_fn_name(f));
                         dat.u.ref = (name = (ptr = fuck.ptr), off = 0);
-                        emit_data(dat&);
-                        dat.is_ref = false;
                         // TODO: make sure we emitted the function. 
                     });
                     (fn AddrOf(id) => {
@@ -397,20 +402,17 @@ fn emit_constant(comp: CompCtx, m: *QbeModule, id: BakedVarId) void = {
                         dat.is_ref = true;
                         fuck := @format("g%\0", @as(i64) id.id.zext()) temp();
                         dat.u.ref = (name = (ptr = fuck.maybe_uninit.ptr), off = 0);
-                        emit_data(dat&);
-                        dat.is_ref = false;
                     });
                     (fn Num(v) => {
                         dat.type = .DL; // TODO: small prims
                         dat.u.num = v.value;
-                        emit_data(dat&);
                     });
                 };
             };
-        });
+        }
     };
+    dat := next_dat();
     dat.type = .DEnd;
-    emit_data(dat&);
 }
 
 fn temp_env_flag_enabled($s: Str) bool = {

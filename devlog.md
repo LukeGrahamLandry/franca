@@ -6,6 +6,19 @@
 - trying to run other_main its trying to jump to 0s when calling into jitted code by the old backend.
   which looks a lot like the not calling clear_cache problem but the address is wrong.
 - for macho_loader, it seems to think MAX_i64 is -1? oh cry, i said cgew instead of cgel so it was only looking at the low 32 bits and comparing as i32.
+- trying to make it work for aot. its trying to import vars. oh im not calling reference_constant recursively.
+  and same for mangling imported symbol names. on the plus side, this is the most helpful error message i've ever seen from the machO stuff `dyld[3164]: Symbol not found: _memmove__231`
+- got run_tests to allow using the new stuff. fail 201/309.
+- forgot to call check_for_new_aot_bake_overload. sympom was strings only being the first character because it thought it was just a \*u8,
+  and then you'd print whatever other garbage bytes which were often invisible because unprintable.
+  fail 151... fluctuates tho which is creepy.
+- replace emit_constant with creating a data structure so codegen thread doesn't need to access compctx and frontend thread doesn't need to access the segments.
+- randomly fails sometimes, but at least now i can look at the exe. mandelbrot is pretty small and still has the problem which is nice.
+  lowering abi types wrong sometimes, less if i spam print so you know its a threads thing.
+  mutex for module.types, frontend needs it the first time you reference a type, backend needs it during abi and inlining.
+  got lucky for old backend because i used opaque types cached by size instead of trying to follow the calling convention.
+  also wrap_with_runtime_init can't use module.scratch.
+  fail 5.
 
 ## (Dec 1)
 

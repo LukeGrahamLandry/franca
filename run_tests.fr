@@ -36,11 +36,15 @@ fn driver(vtable: *ImportVTable) void = {
                     println("=== Aarch64 Jit ===");
                     run_jit(vtable, .CompilerJit);
                 };
-                @case("qbe-jit")   => run_qbe_included(vtable, .JitOnly, .None);
-                @case("qbe-exe")   => run_qbe_included(vtable, .Exe, .None);
-                @case("qbe-link")  => run_qbe_included(vtable, .Relocatable, .None);
-                @case("qbe-exe-x64")   => run_qbe_included(vtable, .Exe, (Some = .x86_64));
-                @case("qbe-link-x64")  => run_qbe_included(vtable, .Relocatable, (Some = .x86_64));
+                // :UGLY
+                @case("qbe-jit")   => run_qbe_included(vtable, .JitOnly, .None, false);
+                @case("qbe-jit-new")   => run_qbe_included(vtable, .JitOnly, .None, true);
+                @case("qbe-exe")   => run_qbe_included(vtable, .Exe, .None, false);
+                @case("qbe-exe-new")   => run_qbe_included(vtable, .Exe, .None, true);
+                @case("qbe-link")  => run_qbe_included(vtable, .Relocatable, .None, false);
+                @case("qbe-link-new")  => run_qbe_included(vtable, .Relocatable, .None, true);
+                @case("qbe-exe-x64")   => run_qbe_included(vtable, .Exe, (Some = .x86_64), false);
+                @case("qbe-link-x64")  => run_qbe_included(vtable, .Relocatable, (Some = .x86_64), false);
                 @case("llvm") => run_llvm(vtable, false);
                 @case("llvm-wasm") => run_llvm(vtable, true);
                 @case("blink") => run_llvm_blink(vtable);
@@ -416,14 +420,14 @@ fn jit_from_source(vtable: *ImportVTable, src: Str, function_name: Str) rawptr =
 
 LINK_QBE_C :: false;
 #include_std("backend/lib.fr");
-fn run_qbe_included(vtable: *ImportVTable, type: QbeOutputPurpose, force_arch: ?Arch) void = {
+fn run_qbe_included(vtable: *ImportVTable, type: QbeOutputPurpose, force_arch: ?Arch, new_lowering: bool) void = {
     @if(ENABLE_INTERNAL_QBE, {
         @println("=== Qbe % ===", type);
         opts := vtable.default_build_options();
         opts.retain_function_names = true;
-        if type != .JitOnly {
+        //if type != .JitOnly {
             opts.implicit_context_runtime = true;
-        };
+        //}; //TODO
         env: TargetEnv = (arch = get_comptime_arch(), os = .macos); // :HardcodeOs
         if force_arch { force_arch |
             env.arch = force_arch;
@@ -436,7 +440,7 @@ fn run_qbe_included(vtable: *ImportVTable, type: QbeOutputPurpose, force_arch: ?
         triple := target_triple(env.arch, env.os);
         run_sequential(c) {c, tests|
             global_module[] = init_default_module_dyn(vtable, (os = env.os, arch = env.arch, type = type));
-            asm_text := emit_qbe_included_dyn(global_module, c&, tests, .TestRunnerMain, false);
+            asm_text := emit_qbe_included_dyn(global_module, c&, tests, .TestRunnerMain, new_lowering); // TODO
             if type == .Exe || type == .Relocatable {
                 path :: "a.out";
                 ir_out := open_trunc(path.sym().c_str()) || {

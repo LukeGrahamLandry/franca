@@ -298,8 +298,15 @@ fn write_export_bounce(self: *EmitQbe2, fid: FuncId) void = {
 // TODO: we'd rather do constants gradually instead of all at the end?
 //     current system is garbage because you always have to build up a bunch of fixups when generating code. 
 //     but maybe it's worth waiting for nwe emit_ir instead of caring about fixing it now.  -- Nov 28
-fn emit_constant(self: *EmitQbe2, id: BakedVarId) void = 
-    self.comp.emit_constant(self.b.globals, id)
+fn emit_constant(self: *EmitQbe2, id: BakedVarId) void = {
+    mark := mark_temporary_storage();
+    out := Qbe.Dat.list(temp());
+    self.comp.emit_constant(self.b.globals, id, out&);
+    each out { it |
+        self.b.globals.new_emit_data(it);
+    };
+    reset_temporary_storage(mark);
+}
 
 // :DumbNameAlias
 // TODO: we do it this way because we don't know if we've already emitted a reference to the __1234 name.
@@ -1077,7 +1084,7 @@ fn offset_by_class(op: Qbe.O, k: Qbe.Cls) Qbe.O = {
 fn opaque_type_slow(b: *QbeBuilder, size: i64, align_log2: i64) i64 = {
     // :SLOW
     n := b.globals.number_of_types;
-    enumerate b.globals.types[].slice(0, n) { i, type | 
+    enumerate b.globals.types[].slice(0, n) { i, type |  // :ThreadSafety
         if type.is_dark && type.size == size && type.align_log2.zext() == align_log2 {
             return(i);
         };
@@ -1099,7 +1106,7 @@ fn opaque_type_slow(b: *QbeBuilder, size: i64, align_log2: i64) i64 = {
 
 // TODO: could do the size+align calc here but my front end already does it for now.  that means you have to put FPad in too!!!
 //       but i barely use this for now. TODO: ill need to improve that when i want to follow the abi better. 
-fn struct_type(b: *QbeBuilder, fields: []Qbe.Field, size: i64, align_log2: i64) i64 = {
+fn struct_type(b: *QbeBuilder, fields: []Qbe.Field, size: i64, align_log2: i64) i64 = { // :ThreadSafety
     n := b.globals.number_of_types;
     b.globals.types.grow(n + 1);
     type := b.globals.types[n]&;

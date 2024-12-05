@@ -20,6 +20,7 @@ EmitIr :: @struct(
     last_line := -1,
     new_constants: List(BakedVarId),
     shared: *CodegenShared,
+    pending: *List(FuncId), // TODO: you wouldn't need this if sema tracked callees correctly. 
 );
 
 ReturnTarget :: @struct(
@@ -30,11 +31,16 @@ ReturnTarget :: @struct(
 
 Placement :: @tagged(Assign: Qbe.Ref, Scalar, Blit: Qbe.Ref, NewMemory, Discard);
 
-fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, idx: *i64) Res(?FuncId) = {
+fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, idx: *i64, pending: *List(FuncId)) Res(void) = {
+    if when == .Aot {
+        // :bake_relocatable_value
+        {comp.vtable.check_for_new_aot_bake_overloads}(comp.data); 
+    };
+    
     //@if(f.as_index() == 56053, panic("foo")); // TODO: this fails safety check here. 
     entry := bouba_acquire(shared, idx);
     m := shared.m;
-    result: Res(?FuncId) = (Ok = .None);
+    result: Res(void) = .Ok;
     push_dynamic_context {
         context(DefaultContext)[].temporary_allocator = entry.arena&;
         ::tagged(Placement);
@@ -56,6 +62,7 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, id
             entry = entry,
             new_constants = list(temp()),
             shared = shared,
+            pending = pending,
         );
         @debug_assert(func.get_flag(.EnsuredCompiled), "fn not compiled?");
         self.f.default_init(m);
@@ -69,18 +76,30 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, id
             res.Err.update_main_span(self.last_loc);
             result = (Err = res.Err)
         } else {
-            context := func.get_flag(.YesContext) && !func.get_flag(.NoContext);
-            if !context {
+            has_context := func.get_flag(.YesContext) && !func.get_flag(.NoContext);
+            if !has_context {
                 func.set_flag(.NoContext);
             };
-            result.Ok = res.Ok;  // TODO: doing it this way is stupid. just add it to callees list in the frontend. 
             entry.logging = self.program.get_log_types(f);
+            
+            // This is a bit painful, you want consistant order and to be working on the function on the other thread while we're setting up the constants. 
+            // you want to do new_constants on this thread so the other one never has to touch the CompCtx. 
+            entry2 := zeroed(*CodegenEntry);
+            if self.new_constants.len != 0 {
+                entry2 = bouba_acquire(shared, idx);
+                self.new_constants = self.new_constants.items().clone(entry2.arena&.borrow());
+            };
             enqueue_task(shared, entry);
             if self.new_constants.len != 0 {
-                entry := bouba_acquire(shared, idx);
-                ids := self.new_constants.items().clone(entry.arena&.borrow()).items();
-                entry.task = (AotVar = (c = comp, ids = ids));
-                enqueue_task(shared, entry);
+                push_dynamic_context {
+                    context(DefaultContext)[].temporary_allocator = entry2.arena&;
+                    out := Qbe.Dat.list(self.new_constants.len * 4, temp());
+                    for self.new_constants { id |
+                        emit_constant(comp, m, id, out&);
+                    };
+                    entry2.task = (AotVar = out.items());
+                };
+                enqueue_task(shared, entry2);
             };
         };
     };
@@ -203,7 +222,7 @@ fn finalize_blocks(self: *EmitIr) void = {
     @debug_assert(ok, "ICE: unterminated block");
 }
 
-fn emit_body(self: *EmitIr, f: FuncId) Res(?FuncId) #once = {
+fn emit_body(self: *EmitIr, f: FuncId) Res(void) #once = {
     func := self.program.get_function(f);
     
     self.f.start = self.new_block("start");
@@ -246,12 +265,15 @@ fn emit_body(self: *EmitIr, f: FuncId) Res(?FuncId) #once = {
             self.blk.jmp.arg = @try(self.emit_intrinsic(op, .Scalar, @slice(a0, a1), func, f_ty.ret)) return;
             self.blk.jmp.type = ret_op(kr);
             self.finalize_blocks();
-            return(Ok = .None)
+            return(.Ok)
         }
         fn ComptimeAddr(it) => {
+            if self.when == .Aot {
+                func.set_flag(.NoMangle);
+            };
             // TODO: name will be wrong if targetting aot. should change prio with dynamicimport. 
             self.entry.task = (JitImport = (lnk = self.f.lnk&, addr = rawptr_from_int(it[])));
-            return(Ok = .None)
+            return(.Ok)
         }
         fn TargetOsSplit(_) => {
             @debug_assert(func.body&.is(.Merged), "ICE: #target_os split expected multiple");
@@ -259,25 +281,27 @@ fn emit_body(self: *EmitIr, f: FuncId) Res(?FuncId) #once = {
                 if it.is(.TargetOsSplit) && it.TargetOsSplit.os == self.m.goal.os {
                     fid := it.TargetOsSplit.fid;
                     self.entry.task = (Bounce = (lnk = self.f.lnk&, target = self.m.intern(self.fmt_fn_name(fid))));
-                    return(Ok = (Some = fid))
+                    self.pending.push(fid);
+                    return(.Ok)
                 };
             };
             return(@err("#target_os missing implementation"))
         }
         fn Redirect(fid) => {
             self.entry.task = (Bounce = (lnk = self.f.lnk&, target = self.m.intern(self.fmt_fn_name(fid[]))));
-            return(Ok = (Some = fid[]))
+            self.pending.push(fid[]);
+            return(.Ok)
         } 
         // TODO: use :ExprLevelAsm so you don't have to spill everything, 
         //       but that requires letting people annotate register usage.  -- Dec 3
         fn JittedAarch64(code) => { // TODO: just store this as bytes
             bytes := @as([]u8) (ptr = ptr_cast_unchecked(u32, u8, code.ptr), len = code.len * 4);
             self.entry.task = (Asm = (lnk = self.f.lnk&, bytes = bytes));
-            return(Ok = .None)
+            return(.Ok)
         }
         fn X86AsmBytes(bytes) => {
             self.entry.task = (Asm = (lnk = self.f.lnk&, bytes = bytes.items()));
-            return(Ok = .None)
+            return(.Ok)
         }
         @default => panic("TODO: unhandled FuncImpl");
     };
@@ -330,10 +354,10 @@ fn emit_body(self: *EmitIr, f: FuncId) Res(?FuncId) #once = {
         panic(err);
     };
     
-    
     // TODO: remove first instruction of start if we think we're #no_context. 
     //       but actually then you have to readjust everything because the args need to be first. 
-    (Ok = .None)
+    
+    .Ok
 }
 
 fn ret_op(k: Qbe.Cls) Qbe.J = 
@@ -696,6 +720,7 @@ fn emit_intrinsic(self: *EmitIr, op: *IntrinsicPayload, p: Placement, arg: []Qbe
 
 fn func_ref(self: *EmitIr, f_id: FuncId) Qbe.Ref #inline = {
     f_id := self.program.follow_redirects(f_id);
+    self.pending.push(f_id); // HACK
     self.f.symcon(self.fmt_fn_name(f_id))
 }
 
@@ -802,6 +827,14 @@ fn reference_constant(self: *EmitIr, id: BakedVarId) void = {
     seen := shared.constants_used&;
     if !seen.get(id.id.zext()) {
         seen.set(id.id.zext());
+        _, value := {self.program.vtable.get_baked}(self.program.data, id)[];
+        @if_let(value) fn VoidPtrArray(it) => {
+            each it { it | 
+                @if_let(it) fn AddrOf(it) => {
+                    self.reference_constant(it[]);
+                };
+            };
+        };
         self.new_constants&.push(id);
     };
 }
@@ -1032,6 +1065,7 @@ fn declare_var(self: *EmitIr, name: Var, ptr: Qbe.Ref, type: Type) void #inline 
     };
 }
 
+// IMPORTANT: you can't use f.emit because threads. 
 fn emit(self: *EmitIr, o: Qbe.O, k: Qbe.Cls, dest: Qbe.Ref, a0: Qbe.Ref, a1: Qbe.Ref) void #inline = {
     @debug_assert(k.raw() < 4, "ICE: invalid base in emit_ir:emit %", o.get_name());
     @debug_assert(o != .Oxxx, "ICE: null inst emit_ir:emit");
@@ -1267,10 +1301,12 @@ fn add_padding(fields: *QList(Qbe.Field), nfield: *i64, current_size: *i64, targ
 
 // TODO: use this elsewhere. 
 fn new_type(m: *QbeModule, type: Qbe.Typ) i64 = {
+    @if(use_threads) pthread_mutex_lock(m.types_mutex&).unwrap();
     i := m.number_of_types;
     m.number_of_types += 1;
     m.types.grow(m.number_of_types);
     m.types[i] = type;
+    @if(use_threads) pthread_mutex_unlock(m.types_mutex&).unwrap();
     i
 }
 
