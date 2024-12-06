@@ -231,8 +231,8 @@ fn emit_body(self: *EmitIr, f: FuncId) Res(void) #once = {
     self.blk = self.f.start;
     
     T :: FuncImpl.Tag();
-    prio_amd :: @const_slice(T.Intrinsic, T.Normal, T.ComptimeAddr, T.TargetOsSplit, T.X86AsmBytes, T.Redirect);
-    prio_arm :: @const_slice(T.Intrinsic, T.Normal, T.ComptimeAddr, T.TargetOsSplit, T.JittedAarch64, T.Redirect);
+    prio_amd :: @const_slice(T.NewIntrinsic, T.Normal, T.Intrinsic, T.ComptimeAddr, T.TargetOsSplit, T.X86AsmBytes, T.Redirect);
+    prio_arm :: @const_slice(T.NewIntrinsic, T.Normal, T.Intrinsic, T.ComptimeAddr, T.TargetOsSplit, T.JittedAarch64, T.Redirect);
     impl := or choose_impl(func.body&, @if(self.m.goal.arch == .aarch64, prio_arm, prio_amd)) {
         return(@err("no acceptable impl"))
     };
@@ -242,30 +242,17 @@ fn emit_body(self: *EmitIr, f: FuncId) Res(void) #once = {
         fn Intrinsic(op) => {
             // Direct calls will be inlined but someone might be trying to call through a function pointer. 
             // TODO: don't add to callees for direct calls. -- Jul 24
-            
             if op.bc == .GetContext {
                 self.context_par_e();
             };
-            arg := func.arg.bindings.items();
-            @debug_assert(arg.len == 1 || arg.len == 2);
-            
-            f_ty := func.finished_ty().unwrap();
-            arg_ty := self.program.arg_types(f_ty.arg);
-            
-            _, k0 := self.load_op(arg_ty[0]);
-            a0 := self.f.newtmp("a", k0);
-            self.emit(.par, k0, a0, QbeNull, QbeNull);
-            a1 := QbeNull;
-            if arg.len == 2 {
-                _, k1 := self.load_op(arg_ty[1]);
-                a1 = self.f.newtmp("a", k1);
-                self.emit(.par, k1, a1, QbeNull, QbeNull);
-            };
-            
-            self.f.retty = -1;
-            _, kr := self.load_op(f_ty.ret);
-            self.blk.jmp.arg = @try(self.emit_intrinsic(op, .Scalar, @slice(a0, a1), func, f_ty.ret)) return;
-            self.blk.jmp.type = ret_op(kr);
+            a0, a1, ret := self.intrinsic_shim(func);
+            self.blk.jmp.arg = @try(self.emit_intrinsic_old(op, .Scalar, @slice(a0, a1), func, ret)) return;
+            self.finalize_blocks();
+            return(.Ok)
+        }
+        fn NewIntrinsic(op) => {
+            a0, a1, ret := self.intrinsic_shim(func);
+            self.blk.jmp.arg = @try(self.emit_intrinsic_new(op, .Scalar, @slice(a0, a1), func, ret)) return;
             self.finalize_blocks();
             return(.Ok)
         }
@@ -386,6 +373,28 @@ fn emit_body(self: *EmitIr, f: FuncId) Res(void) #once = {
     
     
     .Ok
+}
+
+fn intrinsic_shim(self: *EmitIr, func: *Func) Ty(Qbe.Ref, Qbe.Ref, Type) = {
+    arg := func.arg.bindings.items();
+    @debug_assert(arg.len == 1 || arg.len == 2);
+    
+    f_ty := func.finished_ty().unwrap();
+    arg_ty := self.program.arg_types(f_ty.arg);
+    
+    _, k0 := self.load_op(arg_ty[0]);
+    a0 := self.f.newtmp("a", k0);
+    self.emit(.par, k0, a0, QbeNull, QbeNull);
+    a1 := QbeNull;
+    if arg.len == 2 {
+        _, k1 := self.load_op(arg_ty[1]);
+        a1 = self.f.newtmp("a", k1);
+        self.emit(.par, k1, a1, QbeNull, QbeNull);
+    };
+    self.f.retty = -1;
+    _, kr := self.load_op(f_ty.ret);
+    self.blk.jmp.type = ret_op(kr);
+    (a0, a1, f_ty.ret)
 }
 
 fn ret_op(k: Qbe.Cls) Qbe.J = 
@@ -661,14 +670,19 @@ fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) Res(Qbe.Re
             f_id = self.program.follow_redirects(f_id);
             callee := self.program.get_function(f_id);  // fid might have changed. 
             
-            // TODO: allow Merged with intrinsic
-            if callee.body&.is(.Intrinsic) {
-                op := callee.body.Intrinsic&;
+            if find_impl(func.body&, .NewIntrinsic) { op |
                 arg := arg.items();
                 a0 := @try(self.compile_expr(arg[0]&, .Scalar)) return;
                 a1 := if(arg.len == 1, => QbeNull, => @try(self.compile_expr(arg[1]&, .Scalar)) return);
-                return(self.emit_intrinsic(op, p, @slice(a0, a1), caller, f_ty.ret));
+                return(self.emit_intrinsic_new(op, p, @slice(a0, a1), caller, f_ty.ret));
             };
+            if find_impl(func.body&, .Intrinsic) { op |
+                arg := arg.items();
+                a0 := @try(self.compile_expr(arg[0]&, .Scalar)) return;
+                a1 := if(arg.len == 1, => QbeNull, => @try(self.compile_expr(arg[1]&, .Scalar)) return);
+                return(self.emit_intrinsic_old(op, p, @slice(a0, a1), caller, f_ty.ret));
+            };
+            
             if !caller.get_flag(.ComptimeOnly) && original_f_id == f_id {
                 // TODO: it would be nice if this was at the beginning and you never tried to emit anything that was comptimeonly
                 //       that requires never adding them to callees and then later realizing you can inline them, which would make sense. -- Aug 29
@@ -714,7 +728,16 @@ fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) Res(Qbe.Re
 }
 ::enum(ExecStyle);
 
-fn emit_intrinsic(self: *EmitIr, op: *IntrinsicPayload, p: Placement, arg: []Qbe.Ref, caller: *Func, expr_ty: Type) Res(Qbe.Ref) = {
+fn emit_intrinsic_new(self: *EmitIr, op: *NewIntrinsicPayload, p: Placement, arg: []Qbe.Ref, caller: *Func, expr_ty: Type) Res(Qbe.Ref) = {
+    if(p&.is(.Discard), => return(Ok = QbeNull));
+    k := @as(Qbe.Cls) op.ir_cls;
+    r := self.scalar_dest(p, k); 
+    @debug_assert(op.ir_op != 0, "no ir op");
+    self.emit(@as(Qbe.O) op.ir_op, k, r, arg[0], arg[1]);
+    (Ok = self.scalar_result(p, r, expr_ty))
+}
+
+fn emit_intrinsic_old(self: *EmitIr, op: *IntrinsicPayload, p: Placement, arg: []Qbe.Ref, caller: *Func, expr_ty: Type) Res(Qbe.Ref) = {
     r := @match(op.bc) {
         fn GetContext() => {
             @assert(self.dyn_context, "TODO: support static context");
@@ -737,14 +760,7 @@ fn emit_intrinsic(self: *EmitIr, op: *IntrinsicPayload, p: Placement, arg: []Qbe
             self.emit(.xor, .Kl, r, arg[0], self.f.getcon(-1));
             r
         }
-        @default => {
-            if(p&.is(.Discard), => return(Ok = QbeNull));
-            k := @as(Qbe.Cls) op.ir_cls;
-            r := self.scalar_dest(p, k); 
-            @debug_assert(op.ir_op != 0, "no ir op for %", op.bc);
-            self.emit(@as(Qbe.O) op.ir_op, k, r, arg[0], arg[1]);
-            r
-        };
+        @default => panic("unchandled old intrinsic");
     };
     (Ok = self.scalar_result(p, r, expr_ty))
 }
@@ -1247,7 +1263,8 @@ fn get_aggregate(self: *EmitIr, ty: Type) Qbe.Ref = {
         result := Qbe.Typ.zeroed();
         result.size = info.stride_bytes.zext();
         @debug_assert(result.size != 0, "ICE: treating zero size type % as an aggragate", self.program.log(ty));
-        result.align_log2 = (@as(i64) info.align_bytes.zext()).trailing_zeros().intcast(); // TODO: thats dumb
+        result.align_log2 = (@as(i64) info.align_bytes.zext()).trailing_zeros().intcast(); // TODO: do this faster
+        //@println("%", )
         l: List(u8) = (maybe_uninit = result.name&.items(), len = 0, gpa = panicking_allocator);
         @fmt(l&, "T%", ty.as_index());
         i := @match(type) {

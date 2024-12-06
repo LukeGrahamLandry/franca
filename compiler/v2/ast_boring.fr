@@ -61,6 +61,51 @@ fn choose_impl(self: *FuncImpl, prio: []FuncImpl.Tag()) ?*FuncImpl = {
     .None
 } 
 
+fn find_impl(self: *FuncImpl, $p: FuncImpl.Tag()) ?*get_variant_type(FuncImpl, p) #generic = {
+    if self.tag() == p {
+        return(Some = get_variant_ptr(FuncImpl, self, p));
+    };
+    @if_let(self) fn Merged(parts) => {
+        each parts { check | 
+            if check.tag() == p {
+                return(Some =  get_variant_ptr(FuncImpl, check, p));
+            };
+        };
+    };
+    .None
+} 
+
+fn find_or_create_impl(body: *FuncImpl, a: Alloc, $p: FuncImpl.Tag()) *get_variant_type(FuncImpl, p) #generic = {
+    if find_impl(body, p) { it |
+        return(it);
+    };
+    
+    make :: fn() => {
+        new := FuncImpl.zeroed();
+        new&.tag_ptr()[] = p;
+        new
+    };
+    
+    @match(body) {
+        fn Empty() => {
+            body[] = make();
+            get_variant_ptr(FuncImpl, body, p) // TODO: there's no typecheck if you just return body here :FUCKED
+        }
+        fn Merged(it) => {
+            it.push(make(), a);
+            get_variant_ptr(FuncImpl, it[it.len - 1]&, p)
+        }
+        @default => {
+            l := a.alloc(FuncImpl, 2);
+            l[0] = body[];
+            l[1] = make();
+            
+            body[] = (Merged = (ptr = l.ptr, len = 2, cap = 2));
+            get_variant_ptr(FuncImpl, l[1]&, p)
+        };
+    }
+} 
+
 
 :: tagged(FuncImpl);
 fn jitted_aarch64(self: *FuncImpl) ?[]u32 = {
@@ -579,22 +624,3 @@ fn require_unique_fields(self: *SelfHosted, pattern: *Pattern) Res(void) = {
     };
     .Ok
 }
-
-fn get_intrinsic(body: *FuncImpl, a: Alloc) *IntrinsicPayload = @match(body) {
-    fn Empty() => {
-        body[] = (Intrinsic = IntrinsicPayload.zeroed());
-        body.Intrinsic&
-    }
-    fn Intrinsic(it) => it;
-    fn Merged(it) => {
-        each it { it |
-            @if_let(it) fn Intrinsic(it) => return(it);
-        };
-        it.push((Intrinsic = IntrinsicPayload.zeroed()), a);
-        it[it.len - 1].Intrinsic&
-    }
-    @default => {
-        body[] = (Merged = (ptr = body, len = 1, cap = 1)); // This is too clever. it works because we know we're about to reallocate. 
-        get_intrinsic(body, a)
-    };
-};

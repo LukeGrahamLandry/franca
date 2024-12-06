@@ -145,24 +145,29 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
         
         f := c.get_unique_named("driver") || c.get_unique_named("main") || panic("expected a function called main or driver.");
     
+        name := c.fmt_fn_name(f);
         cc := if use_new_backend {
-            main_thread_pump(self.comp(), self.shared.unwrap(), @slice(f));
-            m := self.shared.Some.m;
+            shared := self.shared.unwrap();
+            main_thread_pump(self.comp(), shared, @slice(f));
+            m := shared.m;
             for_symbols m { id, s | 
                 if s.referenced && s.kind == .Pending {
                     @eprintln("Symbol % is referenced but not defined", s.name);
                 };
             };
             m.make_exec();
-            name := c.fmt_fn_name(f);
+            frontend := clock_ms(CLOCK_THREAD_CPUTIME_ID);
+            @eprintln(">>> compiled % in [CPU Time] frontend: %ms, codegen: %ms", name, frontend, shared.codegen_time);
             or m.get_addr(name) {
                 @panic("ICE: lost %", name)
             }
         } else {
-            c.get_jitted(f)
+            j := c.get_jitted(f);
+            frontend := clock_ms(CLOCK_THREAD_CPUTIME_ID);
+            @eprintln(">>> compiled % in %ms", name, frontend);
+            j
         };
         callee = (Some = assume_types_fn(Arg = *ImportVTable, Ret = void, ptr = cc));
-        @eprintln(">>> compiled % in %ms.", self.log_name(f), timestamp() - start);
     };
     
     callee := callee.unwrap();

@@ -27,6 +27,12 @@
 - add BakedEntry.FnPtr to pending. fail 3.
 - aha i remember this when i was ffi-ing with the bootstrap rust compiler.
   Span:(u32, u32) my old jit wants to pass in 2 registers but that's not what the abi says to do.
+- changed a bunch of stuff in the frontend to let things be intrinsic on one backend or another with normal body otherwise.
+  thought it might get slower but seems the same-ish.
+- i think my current thesus is that the emit_ir is about the same speed but generates much shittier code so slower when self compiled.
+  the new one compiles faster if it was itself compiled by the old one, 1450->1400.
+  but then compiling itself is 1700. backend time is more similar for all 590 vs 615.
+  i bet its because im actually using the abi passes now and they generate really dumb loads+stores because they happen after mem opt.
 
 > i really need to write my own terminal thingy.
 > i like that warp lets me click the mouse to move my cursor.

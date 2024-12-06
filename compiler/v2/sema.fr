@@ -396,59 +396,63 @@ fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = 
         };
         func.set_flag(.MadeVarsForRuntimeArgs);
     };
+    ok := false;
+    
+    check_body := true;
     if func.get_flag(.BodyIsSpecial) {
-        @check(self.emit_special_body(fid)) return;
-    } else {
-        @match(func.body&) {
-            fn Normal(expr) => {
-                old_func := self.dispatch.enclosing_function;
-                self.dispatch.enclosing_function = (Some = fid);
-                
-                if !func.ret&.is(.Infer) {
-                    @check(self.infer_return(fid)) return;
-                };
-                    
-                if func.return_var { return_var |
-                    // TODO: this means you cant early return from non-block functions but the error message will be useless -- Jul 9 
-                    @if_let(expr.expr&) fn Block(f) => {
-                        if f.ret_label.is_none() {|  // we might have already tried to compile this function. 
-                            ret: LabelId = from_index(self.dispatch.return_labels.len);
-                            self.dispatch.return_labels&.push(fid);
-                            label_ty := self.get_or_create_type(LabelId);
-                            if func.finished_ret { ret_ty | 
-                                label_ty = self.intern_type(Label = ret_ty);
-                            };
-                            val := self.to_values(LabelId, ret);
-                            @check(self.save_const_values(return_var, val, label_ty, func.loc)) return;
-                            f.ret_label = (Some = ret);
-                        };
+        check_body = @check(self.emit_special_body(fid)) return;
+        ok = true;
+    };
+    
+    @if(check_body)
+    if find_impl(func.body&, .Normal) { expr |
+        ok = true;
+        old_func := self.dispatch.enclosing_function;
+        self.dispatch.enclosing_function = (Some = fid);
+        
+        if !func.ret&.is(.Infer) {
+            @check(self.infer_return(fid)) return;
+        };
+            
+        if func.return_var { return_var |
+            // TODO: this means you cant early return from non-block functions but the error message will be useless -- Jul 9 
+            @if_let(expr.expr&) fn Block(f) => {
+                if f.ret_label.is_none() {|  // we might have already tried to compile this function. 
+                    ret: LabelId = from_index(self.dispatch.return_labels.len);
+                    self.dispatch.return_labels&.push(fid);
+                    label_ty := self.get_or_create_type(LabelId);
+                    if func.finished_ret { ret_ty | 
+                        label_ty = self.intern_type(Label = ret_ty);
                     };
+                    val := self.to_values(LabelId, ret);
+                    @check(self.save_const_values(return_var, val, label_ty, func.loc)) return;
+                    f.ret_label = (Some = ret);
                 };
-                
-                @check(self.compile_expr(expr, func.finished_ret.want())) return;
-                //@debug_assert(self.dispatch.enclosing_function.is_some() && self.dispatch.enclosing_function.unwrap() == fid, "lost enclosing");
-                
-                if func.ret&.is(.Infer) {
-                    func.finished_ret = (Some = expr.ty);
-                } else {
-                    wanted := @check(self.infer_return(fid)) return;
-                    if expr.is_const() {
-                        @check(self.coerce_const_expr(expr, (Specific = wanted), false)) return;
-                    };
-                    self.last_loc = expr.loc;
-                    @check(self.can_assign(wanted, expr.ty)) return;
-                };
-                self.dispatch.enclosing_function = old_func;
-            }
-            @default => {
-                self.last_loc = func.loc;
-                return(@err(
-                    "non special function '%' must have body not %. (or ICE: double compiled function?)", 
-                    self.pool.get(func.name),
-                    func.body&.tag(),
-                ))
             };
         };
+        
+        @check(self.compile_expr(expr, func.finished_ret.want())) return;
+        //@debug_assert(self.dispatch.enclosing_function.is_some() && self.dispatch.enclosing_function.unwrap() == fid, "lost enclosing");
+        
+        if func.ret&.is(.Infer) {
+            func.finished_ret = (Some = expr.ty);
+        } else {
+            wanted := @check(self.infer_return(fid)) return;
+            if expr.is_const() {
+                @check(self.coerce_const_expr(expr, (Specific = wanted), false)) return;
+            };
+            self.last_loc = expr.loc;
+            @check(self.can_assign(wanted, expr.ty)) return;
+        };
+        self.dispatch.enclosing_function = old_func;
+    };
+    if !ok {
+        self.last_loc = func.loc;
+        return(@err(
+            "non special function '%' must have body not %. (or ICE: double compiled function?)", 
+            self.pool.get(func.name),
+            func.body&.tag(),
+        ));
     };
     
     @log_event("body compiled: % %", fid.as_index(), self.log_name(fid)) self;
@@ -505,11 +509,11 @@ fn handle_target_split(self: *SelfHosted, func: *Func) Maybe(void) #once = {
     .Ok
 }
 
-fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
+fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
     @check(self.infer_return(fid)) return;
     func := self.get_function(fid);
     if func.get_flag(.EnsuredCompiled) {
-        return(.Ok);
+        return(Ok = false);
     };
     good := false;
     fn eval_str(self: *SelfHosted, e: *FatExpr) Maybe(Symbol) = {
@@ -550,6 +554,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
         false
     };
     
+    check_body := true;
     each func.annotations { tag | 
         @switch(tag.name) {
             @case(Flag.libc.ident()) => {
@@ -599,7 +604,8 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
                 op := @check(self.immediate_eval_expr(value, intrinsic_ty)) return;
                 op := Intrinsic.assume_cast(op&)[];
                 func.set_flag(.Intrinsic);
-                get_intrinsic(func.body&, self.get_alloc())[].bc = op;
+                impl := find_or_create_impl(func.body&, self.get_alloc(), .Intrinsic);
+                impl.bc = op;
                 // TODO: redundant with emit_bc
                 if op != .GetContext {
                     func.set_flag(.NoContext);
@@ -618,7 +624,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
                 o := @unwrap(Qbe.O.from_name(self.pool.get(op_name)), "#ir invalid op name") return;
                 k := @unwrap(Qbe.Cls.from_name(self.pool.get(cls_name)), "#ir invalid op name") return;
                 func.set_flag(.Intrinsic);
-                i := get_intrinsic(func.body&, self.get_alloc());
+                i := find_or_create_impl(func.body&, self.get_alloc(), .NewIntrinsic);
                 i.ir_op  = @as(i32) o;
                 i.ir_cls = @as(i32) k;
             };
@@ -643,6 +649,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
                 // - anything else, comptime eval expecting Slice(u32) -> aarch64 asm ops
                 @debug_assert(func.body&.is(.Normal), "we already checked that #asm has body");
                 @debug_assert(!func.get_flag(.AnyConstArgs), "#asm const args should already have been bound");
+                check_body = false;
                 
                 asm := func.body.Normal&;
                 
@@ -786,7 +793,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
         };
     };
     @err_assert(good, "Function has no implementation %", func.log(self)) return;
-    .Ok
+    (Ok = check_body)
 }
 
 // :link_rename
@@ -1666,8 +1673,10 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
     } else {
         // this fixes functions with all const args the reduce to just a value emitting useless calls to like get the number 65 or whatever if you do ascii("A"). 
         if !deny_inline && arg_expr.is_raw_unit() {
-            if func.body&.is(.Normal) && func.body.Normal.expr&.is(.Value) {
-                expr.set(func.body.Normal.expr.Value.bytes&.deep_clone(self.get_alloc()), ret_ty);
+            if find_impl(func.body&, .Normal) { value |
+                if value.expr&.is(.Value) {
+                    expr.set(value.expr.Value.bytes&.deep_clone(self.get_alloc()), ret_ty);
+                };
             };
         };
     };
@@ -1746,6 +1755,10 @@ fn emit_capturing_call(self: *SelfHosted, f: FuncId, expr_out: *FatExpr, request
         foldable = arg_expr.is_const();
     };
     
+    // TODO: scary to hold this reference accross doing so much shit. 
+    aliased_body := find_impl(func.body&, .Normal) 
+        || return(@err("emit_capturing_call: '=>' function '%' must have body expression.", self.pool.get(func.name)));
+    
     // This is complicated to allow `fn() => .a` to stay polymorphic and have different inferred types at different callsites. 
     // Maybe a more robust version of this would be treating the result type like a const arg and duplicating the function? -- Aug 2
     ret_ty := or_else func.finished_ret {
@@ -1753,8 +1766,7 @@ fn emit_capturing_call(self: *SelfHosted, f: FuncId, expr_out: *FatExpr, request
             if requested&.is(.Specific) {
                 (Some = requested.Specific)
             } else {
-                body := func.body.Normal&;
-                known := self.quick_guess_type(body);
+                known := self.quick_guess_type(aliased_body);
                 known
             }
         } else {
@@ -1783,10 +1795,6 @@ fn emit_capturing_call(self: *SelfHosted, f: FuncId, expr_out: *FatExpr, request
             self.get_function(caller).set_flag(.YesContext);
         };
     };
-    if !func.body&.is(.Normal) {
-        return(@err("emit_capturing_call: '=>' function '%' must have body expression.", self.pool.get(func.name)));
-    };
-    aliased_body := func.body.Normal&;
     may_have_early_return := !aliased_body.expr&.is(.Value);
     pattern := func.arg&.deep_clone(self.get_alloc());
     
@@ -3136,6 +3144,7 @@ fn update_function_metadata(self: *SelfHosted, func: *Func, os: ?OverloadSet) Re
                 //func.set_flag(.NoMangle);
             };
             @case(Flag.redirect.ident()) => {
+                @err_assert(func.body&.is(.Empty), "#redirect conflicts with body expression") return;
                 os := @unwrap(os, "#redirect function only makes sense as part of an overload set") return;
                 os := self.to_values(OverloadSet, os);
                 expr := @unwrap(tag.args&.as_ref(), "#redirect requires argument") return;
@@ -3154,7 +3163,9 @@ fn update_function_metadata(self: *SelfHosted, func: *Func, os: ?OverloadSet) Re
                 //func.set_flag(.ComptimeOnly);
             };
             @case(Flag.intrinsic.ident()) => {
-                @err_assert(func.body&.is(.Empty), "#intrinsic conflicts with body expression") return;
+                func.set_flag(.BodyIsSpecial);
+            };
+            @case(Flag.ir.ident()) => {
                 func.set_flag(.BodyIsSpecial);
             };
             @case(Flag.asm.ident()) => {

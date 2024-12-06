@@ -368,24 +368,21 @@ fn load(self: *EmitBc, ty: Type) PRes = {
 
 fn emit_body(self: *EmitBc, f: FuncId) PRes #once = {
     func := self.program.get_function(f);
-
-    body: *FatExpr = @match(func.body&) {
-        fn Normal(body) => body;
-        fn Intrinsic(op) => {
-            // Direct calls will be inlined in emit_bc but someone might be trying to call through a function pointer. 
-            // TODO: don't add to callees for direct calls. -- Jul 24
-            entry_block := self.push_block(self.result.signeture.args);
-            self.push(Intrinsic = op.bc);
-            @debug_assert(self.result.signeture.ret2.is_none(), "So far all intrinsics return one thing.");
-            self.push(Ret1 = self.result.signeture.ret1.unwrap());
-            self.result.hash = 0;
-            return(.Ok)
-        }
-        // You should never actually try to run this code, the caller should have just done the call,
-        // so there isn't an extra indirection and I don't have to deal with two bodies for comptime vs runtime,
-        // just two ways of emitting the call.
-        @default => return(.Ok);
+    
+    // TODO: use choose_impl
+    
+    if find_impl(func.body&, .Intrinsic) { op |
+        // Direct calls will be inlined in emit_bc but someone might be trying to call through a function pointer. 
+        // TODO: don't add to callees for direct calls. -- Jul 24
+        entry_block := self.push_block(self.result.signeture.args);
+        self.push(Intrinsic = op.bc);
+        @debug_assert(self.result.signeture.ret2.is_none(), "So far all intrinsics return one thing.");
+        self.push(Ret1 = self.result.signeture.ret1.unwrap());
+        self.result.hash = 0;
+        return(.Ok)
     };
+    
+    body := find_impl(func.body&, .Normal) || return(.Ok);
 
     entry_block := self.push_block(empty());
     args_pushed := @try(self.bind_args(func.arg&)) return;
@@ -919,11 +916,10 @@ fn emit_call(self: *EmitBc, f: *FatExpr, arg: *FatExpr, result_location: ResultL
             self.emit_runtime_call(f_ty, arg, result_location, can_tail) { sig, tail |
                 self.result.mix_hash(f_id.as_index(), 436265);
                 callee := self.program.get_function(f_id);
-                if callee.body&.is(.Intrinsic) {
-                    op := callee.body.Intrinsic.bc;
-                    self.push(Intrinsic = op);
+                if find_impl(func.body&, .Intrinsic) { op |
+                    self.push(Intrinsic = op.bc);
                     // TODO: you might have setcontext for yourself
-                    if op == .GetContext {
+                    if op.bc == .GetContext {
                         caller.set_flag(.YesContext);
                     };
                     if tail {
