@@ -68,20 +68,19 @@ fn if($T: Type) void = {
 // TODO: auto impl generics
 ::if(i64); ::if(void); ::if(bool); ::if(u8); 
 
-// TODO: i generate super dumb code for this!
-fn eq(a: bool, b: bool) bool #ir(.ceqw, .Kw) #inline #fold = 
+// don't #inline this or not() gets confusing. alternatively revert not to `b.int() == 0`
+fn eq(a: bool, b: bool) bool #ir(.ceqw, .Kw) #fold = 
     a.int().eq(b.int());
 
 fn not(b: bool) bool #inline #fold =
-    b.int() == 0;
+    b == false;
 
 fn int(val: bool) i64 #intrinsic(.ZeroExtend8To64) #fold #ir(.extuw, .Kl); // bool is always 0 or 1
 
-// TODO: i generate super dumb code for this!
 // Note: these are not short circuiting because arguments are always evaluated. 
 fn and(a: bool, b: bool) bool #ir(.and, .Kw) = 
     a.if(=> b, => false);
-fn or(a: bool, b: bool) bool #ir(.or, .Kw) = 
+fn or(a: bool, b: bool)  bool #ir(.or, .Kw) = 
     a.if(=> true, => b);
 fn xor(a: bool, b: bool) bool #ir(.xor, .Kw) = 
     a.if(=> !b, => b);
@@ -125,6 +124,8 @@ i33 :: SInt(33);
 /// Redirects ///
 /////////////////
 
+// TODO: new backend has real unsigned cmp, use them here.
+
 fn Ord($T: Type) void = {
     fn eq(lhs: T, rhs: T) bool = lhs.int().eq(rhs.int());
     fn ne(lhs: T, rhs: T) bool = lhs.int().ne(rhs.int());
@@ -141,6 +142,9 @@ fn int(i: u64) i64 #inline = i.bitcast(); ::Ord(u64); // TODO: wrong!!! signed
 fn int(i: i32) i64 #inline = i.intcast(); ::Ord(i32);
 fn int(i: u16) i64 #inline = i.zext();    ::Ord(u16);
 fn int(i: i16) i64 #inline = i.zext();    ::Ord(i16);// TODO: wrong!!! signed
+
+
+// TODO: new backend has single instruction 32 bit math. use them here.
 
 ::{
     UNum :: fn($T: Type) void = {
@@ -169,18 +173,24 @@ fn int(i: i16) i64 #inline = i.zext();    ::Ord(i16);// TODO: wrong!!! signed
 // TODO: wrong! signed
 #redirect(Ty(i64, i64), i64)  fn div(lhs: u64, rhs: u64) u64;
 
-// TODO: dumb
-fn bit_or(lhs: u32, rhs: u32) u32 #inline = bit_or(@as(i64) lhs.zext(), @as(i64) rhs.zext()).trunc();
-fn bit_and(lhs: u32, rhs: u32) u32 #inline = bit_and(@as(i64) lhs.zext(), @as(i64) rhs.zext()).trunc();
-fn shift_left(value: u32, shift_amount: i64) u32 #fold = shift_left(@as(i64) value.zext(), shift_amount).trunc();
-fn bit_or(lhs: u8, rhs: u8) u8 = lhs.int().bit_or(rhs.int()).trunc();
+fn bit_or(lhs: u32, rhs: u32) u32 #ir(.or, .Kw) = 
+    bit_or(@as(i64) lhs.zext(), @as(i64) rhs.zext()).trunc();
+    
+fn bit_and(lhs: u32, rhs: u32) u32 #ir(.and, .Kw) = 
+    bit_and(@as(i64) lhs.zext(), @as(i64) rhs.zext()).trunc();
+
+fn shift_left(value: u32, shift_amount: i64) u32 #ir(.shl, .Kw) #fold = 
+    shift_left(@as(i64) value.zext(), shift_amount).trunc();
+
+fn bit_or(lhs: u8, rhs: u8) u8 #ir(.or, .Kw) = 
+    lhs.int().bit_or(rhs.int()).trunc();
 // TODO: bit_not can't just redirect because that would flip the leading zeros too. 
 
-fn shift_right_logical(value: u32, shift_amount: i64) u32 #inline = 
+fn shift_right_logical(value: u32, shift_amount: i64) u32 #ir(.shr, .Kw) = 
     shift_right_logical(@as(i64) value.zext(), shift_amount).trunc();
-fn shift_right_logical(value: u64, shift_amount: i64) u64 #inline = 
+fn shift_right_logical(value: u64, shift_amount: i64) u64 #ir(.shr, .Kl) = 
     shift_right_logical(@as(i64) value.bitcast(), shift_amount).bitcast();
-fn shift_right_logical(value: i32, shift_amount: i64) i32 #inline = 
+fn shift_right_logical(value: i32, shift_amount: i64) i32 #ir(.shr, .Kw) = 
     shift_right_logical(value.intcast(), shift_amount).intcast();
 
 fn bit_and(a: i32, b: i32) i32 #redirect(Ty(u32, u32), u32);
@@ -205,13 +215,13 @@ MIN_i64 :: -MAX_i64 - 1;  // -9223372036854775808 but it feels fragile to parse 
 MANTISSA_DIGITS_f64 :: 53;
 MANTISSA_DIGITS_f32 :: 24;
 
-// TODO: subtly wrong! becuase i don't do 32 bit float compares correctly on old backends
-fn eq(a: f32, b: f32) bool = (eq(@as(f64) a.cast(), b.cast()));
-fn ne(a: f32, b: f32) bool = (ne(@as(f64) a.cast(), b.cast()));
-fn le(a: f32, b: f32) bool = (le(@as(f64) a.cast(), b.cast()));
-fn ge(a: f32, b: f32) bool = (ge(@as(f64) a.cast(), b.cast()));
-fn lt(a: f32, b: f32) bool = (lt(@as(f64) a.cast(), b.cast()));
-fn gt(a: f32, b: f32) bool = (gt(@as(f64) a.cast(), b.cast()));
+// note: subtly wrong on old backends!
+fn eq(a: f32, b: f32) bool #ir(.ceqs, .Kl) = (eq(@as(f64) a.cast(), b.cast()));
+fn ne(a: f32, b: f32) bool #ir(.cnes, .Kl) = (ne(@as(f64) a.cast(), b.cast()));
+fn le(a: f32, b: f32) bool #ir(.cles, .Kl) = (le(@as(f64) a.cast(), b.cast()));
+fn ge(a: f32, b: f32) bool #ir(.cges, .Kl) = (ge(@as(f64) a.cast(), b.cast()));
+fn lt(a: f32, b: f32) bool #ir(.clts, .Kl) = (lt(@as(f64) a.cast(), b.cast()));
+fn gt(a: f32, b: f32) bool #ir(.cgts, .Kl) = (gt(@as(f64) a.cast(), b.cast()));
 
 // TODO: do this properly. i cheated with `int count_ones(long *x) { return __builtin_popcountll(*x); }`
 // the software one below was 30/560 samples, this one is 6. 
