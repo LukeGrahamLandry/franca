@@ -1,0 +1,139 @@
+//
+// We do the first mem/load opts before lowering abi, 
+// so you end up with redundant store to a stack slot and immediately load it back again
+// when an aggragate arg/ret is passed in registers. 
+// after isel, load/store can reference RSlot directly, and we know which stack slots don't escape.
+// so just scan though each block and convert redundant load-store pairs to copies. 
+//
+
+fn elide_abi_slots(f: *Qbe.Fn) void = {
+    if f.globals.goal.arch == .x86_64 {
+        return(); // TODO
+    };
+    
+    SlotEntry :: @struct(value: Qbe.Ref, size: i32, k: Qbe.Cls);
+    slot_contains: HashMap(i64, SlotEntry) = init(temp());
+    StoreEntry :: @struct(ins: QList(*Qbe.Ins), nins: i64);
+    stores: HashMap(i64, StoreEntry) = init(temp());
+    live_stack := init_bitset(f.slot.zext());
+    bscopy(live_stack&, f.escaping_slots&);
+    constants: HashMap(u32, Qbe.Ref) = init(temp());
+    
+    for_blocks f { b |
+        for_insts_forward b { i |
+            continue :: local_return;
+            
+            if maybe_load(i) { size |
+                @debug_assert(rtype(i.arg&[0]) != .RMem, "TODO: x64");
+                if local_slot(f, i.arg&[0]) { slot | 
+                    @debug_assert(i.arg&[1] == QbeNull, "need to deal with this if i want to allow slot + offset");
+                    if slot_contains&.get(slot) { entry | 
+                        if entry.size == size && entry.k == i.cls() {
+                            i[] = make_ins(.copy, i.cls(), i.to, entry.value, QbeNull);
+                            continue();
+                        };
+                    };
+                    range(0, max(size.zext() / 4, 1)) { i |
+                        bsset(live_stack&, slot + i); // TODO: bounds
+                    };
+                };
+                continue();
+            };
+            
+            if maybe_store(i) { size |
+                a := i.arg&[1];
+                slot := local_slot(f, a) || {
+                    rtype(a) == .RMem || continue();
+                    m := f.get_memory(a);
+                    @debug_assert(m.index == QbeNull && m.scale == 1, "TODO: x64");
+                    slot := local_slot(f, m.base) || continue();
+                    @debug_assert(m.offset.bits.i == 0, "need to deal with this if i want to allow slot + offset");
+                    slot
+                };
+                if size != 4 && size != 8 {
+                    // only tracking 4 byte granularity so we can't tell if you store twice to adjacent bytes which one you're trying to read. 
+                    bsset(live_stack&, slot);
+                    slot_contains&.remove(slot);
+                    continue();
+                };
+                slot_contains&.insert(slot, (value = i.arg&[0], size = size, k = argcls(i, 0)));
+                
+                // TODO: get_or_insert
+                if !bshas(live_stack&, slot) {
+                    entry := stores&.get_ptr(slot) || {
+                        stores&.insert(slot, (ins = new(1), nins = 0));
+                        stores&.get_ptr(slot).unwrap()
+                    };
+                    entry.nins += 1;
+                    grow(entry.ins&, entry.nins);
+                    entry.ins[entry.nins - 1] = i;
+                };
+                continue();
+            };
+            
+            // TODO: copy is wrong if you use the same bit pattern as int and float?
+            // Now you'd hope rega would put both sides of the copy in the same register so it disappears.
+            // its not super reliable at the moment, but this is still a codesize improvement. 
+            if i.op() == .addr || (i.op() == .copy && rtype(i.arg&[0]) == .RCon) {
+                a0 := i.arg&[0];
+                if constants&.get(a0.type3_val29) { prev |
+                    chuse(prev, 1, f);
+                    i[] = make_ins(.copy, i.cls(), i.to, prev, QbeNull);
+                } else {
+                    if i.op() == .addr {
+                        if local_slot(f, a0) { slot |
+                            // TODO: this is bad. either we should already know about the escape or we should have eliminated the .addr
+                            bsset(f.escaping_slots&, slot);
+                            slot_contains&.remove(slot);
+                        };
+                    };
+                    
+                    if !isreg(i.to) {
+                        constants&.insert(a0.type3_val29, i.to);
+                    };
+                };
+            };
+            
+            if i.op() == .call {
+                // don't increase register pressure by making locals to save values that are cheap to reproduce. 
+                slot_contains&.clear();
+                constants&.clear();
+            };
+            
+            @debug_assert(i.op() != .blit0, "no blits!");
+        };
+        
+        // TODO: We know block dominators so we could do something across blocks maybe?
+        slot_contains&.clear();
+        constants&.clear();
+    };
+    
+    // TODO
+    //each stores& { slot, e |
+    //    valid := true;
+    //    for e.ins.slice(0, e.nins) { i |
+    //        size := i.maybe_store().unwrap();
+    //        range(0, max(size.zext() / 4, 1)) { i |
+    //            if bshas(live_stack&, slot + i) {  // TODO: bounds
+    //                valid = false;
+    //            };
+    //        };
+    //        if valid {
+    //            i.set_nop();
+    //        };
+    //    };
+    //};
+    
+    when_debug(f, .Memory) { out | 
+        write(out, "\n> After late slot promotion:\n");
+        printfn(f, out);
+    };
+}
+
+fn local_slot(f: *Qbe.Fn, a: Qbe.Ref) ?i64 = {
+    rtype(a) == .RSlot                  || return(.None);
+    slot := rsval(a).intcast();
+    (slot >= 0 && slot < f.slot.zext()) || return(.None);
+    !bshas(f.escaping_slots&, slot)     || return(.None);
+    (Some = slot)
+}

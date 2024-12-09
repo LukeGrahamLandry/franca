@@ -89,29 +89,48 @@ fn find_first_arg(b: *Qbe.Blk, call: *Qbe.Ins) *Qbe.Ins = {
 // Note: We only do this for allocs in the start block. 
 //       I guess if you conditionally do a large but constant size alloc, you don't want to always use the stack space. 
 fn assign_alloc_slots(f: *Qbe.Fn) void = {
+    approx := 0;
+    for_insts_forward f.start { i |
+        if is_alloc(i.op()) {
+            if f.get_int(i.arg&[0]) { size |
+                align := 16; // 1.shift_left(zext(@as(i32)i.op().raw() - Qbe.O.alloc4.raw()));
+                size = size.add(align - 1).bit_and(-align);
+                approx += size / 4;
+            };
+        }
+    };
+    f.escaping_slots = init_bitset(approx);
+    
     allocs := @slice(Qbe.O.alloc4, Qbe.O.alloc8, Qbe.O.alloc16); // TODO: for_enum_range (these are sequentual)
+    
     /* specific to NAlign == 3 */ /* or change align=4 and size /= 4 below */
     align := 4;
     for allocs { alloc_type |
         break :: local_return; // TODO: make break less of a pain in this language
         for_insts_forward f.start { i |
             if i.op() == alloc_type {
-                if rtype(i.arg&[0]) != .RCon {
+                if f.get_int(i.arg&[0]) { size |
+                    if size < 0 || size >= MAX_i32 - 15 {
+                        @panic("invalid alloc size %", size);
+                    };
+                    size = size.add(align - 1).bit_and(-align);
+                    size /= 4;
+                    t := f.get_temporary(i.to);
+                    t.slot = f.slot;
+                    f.slot += size.intcast();
+                    f.salign = 2 + alloc_type.raw() - Qbe.O.alloc4.raw();
+                    
+                    if escapes(i.to, f) { 
+                        range(0, size) { i |
+                            bsset(f.escaping_slots&, t.slot.intcast() + i);
+                        };
+                    };
+                    i.set_nop();
+                } else {
                     panic("TODO: none of my tests get here (alloca a dynamically sized stack slot)");
                     align *= 2; // :break
                     break(); 
                 };
-                size := f.get_constant(i.arg&[0])[].bits.i;
-                if size < 0 || size >= MAX_i32 - 15 {
-                    @panic("invalid alloc size %", size);
-                };
-                size = size.add(align - 1).bit_and(-align);
-                size /= 4;
-                t := f.get_temporary(i.to);
-                t.slot = f.slot;
-                f.slot += size.intcast();
-                f.salign = 2 + alloc_type.raw() - Qbe.O.alloc4.raw();
-                i.set_nop();
             }
         };
         align *= 2; // :break
@@ -119,9 +138,29 @@ fn assign_alloc_slots(f: *Qbe.Fn) void = {
         // on arm: ~23KB -- Nov 6
         //         It's actually fine if they're unaligned, you just can't use the immediate in ldr/str,
         //         so doing it this way lets fuse_addressing catch a few more cases at the cost of wasting 4 bytes of stack half the time. 
-        // TODO: change f.salign for x64? 
         if align == 8 && f.slot.intcast().mod(align / 4) != 0 {
             f.slot += 1;
+            f.salign = 3;
         };
     };
+    
+    @debug_assert(approx >= f.slot.zext(), "failed at guessing stack size");
 };
+
+fn chuse(r: Qbe.Ref, du: i64, f: *Qbe.Fn) void #inline = {
+    if rtype(r) == .RTmp {
+        nuse := f.get_temporary(r)[].nuse&;
+        nuse[] = trunc(nuse[].zext() + du);
+    }
+}
+
+fn try_kill_inst(f: *Qbe.Fn, i: *Qbe.Ins) bool #inline = {
+    if rtype(i.to) == .RTmp
+    && !isreg(i.to) && !isreg(i.arg&[0]) && !isreg(i.arg&[1])
+    && f.get_temporary(i.to)[].nuse == 0 {
+        chuse(i.arg&[0], -1, f);
+        chuse(i.arg&[1], -1, f);
+        return(true);
+    };
+    false
+}

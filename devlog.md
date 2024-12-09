@@ -1,3 +1,21 @@
+- in arm isel, instead of doing fixarg and then going back later to fold address computation into the immediate of load/store,
+  do a prepass. this way you don't create a bunch of extra temps that are just going to disappear later.
+
+trying to do elide_abi_slots.
+
+stats are -unsafe, compiling itself.
+
+```
+before:
+>>> [CPU Time] frontend: 1692ms, codegen: 595ms
+>>> 1420472 bytes of code, 86384 bytes of data.
+removing loads:
+>>> [CPU Time] frontend: 1569ms, codegen: 598ms
+>>> 1311064 bytes of code, 86496 bytes of data.
+```
+
+##
+
 - make slot promotion treat 1/2/4/8 byte blit as a load+store.
   kinda silly cause the frontend just shouldn't generate those but while prototyping its nice to not care and still get nice output.
 - mistake making arena_alloc always return 0 was Block using the result ref from compile_expr instead of pulling it out of the placement.

@@ -9,11 +9,18 @@ fn getalias(a: *Qbe.Alias, r: Qbe.Ref, f: *Qbe.Fn) void = {
                 a.type = .AUnk;
                 return();
             };
-            a[] = f.tmp[r.val()].alias;
+            t := f.tmp[r.val()];
+            a[] = t.alias;
             if astack(a.type) {
                 a.type = a.slot.type;
             };
-            @debug_assert(a.type != .ABot, "wanted alias");
+            if a.type == .ABot {
+                // if you run fillalias after abi (for either target), 
+                // parc passed on the stack will have a Tmp.slot before our frame and no alloc instruction.  
+                is_from_parc := t.slot != -1 && t.slot < -1;
+                @debug_assert(is_from_parc, "wanted alias");
+                a.type = .ALoc; // TODO: should this be .AEsc?
+            };
         }
         fn RCon() => {
             c := f.con[r.val()]&;
@@ -88,8 +95,7 @@ fn astack(t: Qbe.AliasType) bool #inline =
     t.raw().bit_and(1) == 1; // :OddMeansStack
 
 fn esc(r: Qbe.Ref, f: *Qbe.Fn) void = {
-    @debug_assert(r == QbeNull || rtype(r).raw() <= Qbe.RegKind.RType.raw(), "bad esc");
-    if rtype(r) == .RTmp {
+    if rtype(r) == .RTmp && !isreg(r) {
         a := f.tmp[r.val()].alias&;
         if astack(a.type) {
             a.slot.type = .AEsc;
@@ -120,8 +126,8 @@ fn fillalias(f: *Qbe.Fn) void = {
     each f.tmps() { t |
         t.alias.type = .ABot;
     };
-    
     for_blocks_rpo_forward f { b |
+        @debug_assert(!is_null(b), "bad rpo");
         for_phi b { p |
             @debug_assert(rtype(p.to) == .RTmp);
             a := f.tmp[p.to.val()].alias&;
@@ -134,7 +140,7 @@ fn fillalias(f: *Qbe.Fn) void = {
         for_insts_forward b { i |
             continue :: local_return;
             a := Qbe.Alias.ptr_from_int(0);
-            has_dest :=  i.to != QbeNull && !isreg(i.to);  // :ExprLevelAsm
+            has_dest := i.to != QbeNull && !isreg(i.to);  // :ExprLevelAsm
             if has_dest {
                 @debug_assert(rtype(i.to) == .RTmp);
                 a = f.tmp[i.to.val()].alias&;
@@ -198,7 +204,6 @@ fn fillalias(f: *Qbe.Fn) void = {
                 @debug_assert(rtype(i1.arg&[0]) == .RInt);
                 sz := abs(rsval(i1.arg&[0]));
                 store(i0.arg&[1], sz, f);
-                // TODO: qbe bumped i here, does that matter or do we just waste a loop iteration.
                 continue();
             };
             if maybe_store(i) { size |

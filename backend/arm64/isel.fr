@@ -11,7 +11,12 @@ fn arm64_isel(f: *Qbe.Fn) void = {
     f.assign_alloc_slots();
     // In this pass, if `t.slot != -1` then `TMP(t) == addr SLOT(t.slot)`
     
-    mem := list(*Qbe.Ins, temp());
+    for_blocks f { b |
+        for_insts_forward b { i |
+            collapse_op(f, i, b.id);
+        };
+    };
+    
     for_blocks f { b |
         f.globals.curi[] = f.scratch_start(); // TODO: remove this once we always reset it at the end of a pass. 
         
@@ -24,12 +29,9 @@ fn arm64_isel(f: *Qbe.Fn) void = {
         f.seljmp(b);
         
         for_insts_rev b { i | 
-            f.sel(i[][], b.id, mem&);
+            f.sel(i[][], b.id);
         };
 
-        f.fuse_addressing(mem.items(), b);
-        mem&.clear();
-        
         f.copy_instructions_from_scratch(b);
     };
     if f.globals.debug["I".char()] {
@@ -38,141 +40,148 @@ fn arm64_isel(f: *Qbe.Fn) void = {
     };
 }
 
-//
-// This will compress a sequence like `add x1, x29, #24; add x1, x1, #8; ldr x1, [x1]` into `ldr x1, [x29, #32]`
-// It only handles chains that occur within a single becuase we have tmp.def pointers into scratch space. 
-// Also mul+add to madd. 
-//
-// TODO:
-// - fold into .CAddr offset (tho maybe thats a fold thing), and maybe that conflicts with the idea of deduplicating CAddr to reduce relocations required. 
-// - fold addr+add even if we dont see the ldr/str
-//
-fn fuse_addressing(f: *Qbe.Fn, mem: []*Qbe.Ins, b: *Qbe.Blk) void = {
-    if(mem.len == 0, => return());
-    when_debug(f, .InstSelect) { out |
-        @fmt_write(f.globals.debug_out, "%: \n", b.name());
-    };
-    for mem& { i | 
-        continue :: local_return;
-        iarg := i.arg&;
-        if i.op() == .add {
-            // note: not tracking use counts
-            def := f.get_temporary(iarg[1])[].def;
-            iarg[1] = f.new_mem(def.arg&[0], def.arg&[1], 0, 255);
-            @debug_assert(def.op() == .mul && is_int(i.cls()), "not int mul");
-            continue();
-        };
-        
-        store := is_store(i.op());
-        addr := f.get_temporary(iarg[store.int()]);
-        when_debug(f, .InstSelect) { out |
-            if store {
-                @fmt_write(f.globals.debug_out, "   store ");
-            } else {
-                @fmt_write(f.globals.debug_out, "   ");
-                printref(i.to, f, f.globals.debug_out);
-                @fmt_write(f.globals.debug_out, " = load ");
-            };
-            
-            @fmt_write(f.globals.debug_out, "[%]", addr.name());
-        };
-        @debug_assert(store || iarg[1] == QbeNull, "load already has second arg");
-        off := 0;
-        size: i64 = if(store, => size_of_store(i).zext(), => size_of_load(i).zext());
-        new_addr := fuse_addr(f, iarg[store.int()], off&, b.id, size, addr.nuse == 1);
-        if new_addr != iarg[store.int()] && off.mod(size) == 0 {
-            if new_addr == QbeNull {
-                iarg[store.int()] = SLOT(off / 4);
-            } else {
-                if store {
-                    if off == 0 {
-                        iarg[1] = new_addr;
-                    } else {
-                        iarg[1] = f.new_mem(new_addr, QbeNull, off, 1);
-                    };
-                } else {
-                    iarg[0] = new_addr;
-                    iarg[1] = INT(off);
-                };
-            };
-        };
-        
-        when_debug(f, .InstSelect) { out |
-            @fmt_write(f.globals.debug_out, "\n");
-        };
-    };
-    when_debug(f, .InstSelect) { out |
-        @fmt_write(f.globals.debug_out, "\n");
-    };
-}
-
-fn fuse_addr(f: *Qbe.Fn, a: Qbe.Ref, total_off: *i64, bid: i32, size: i64, kill: bool) Qbe.Ref  = {
-    max_off := size * 4096;
-    addr := f.get_temporary(a);
-    in_this_block := !addr.def.is_null() && addr.defining_block == bid;
-    if(!in_this_block, => return(a));
-    def_a := addr.def.arg&;
-    //@debug_assert(addr.nuse > 0);
-    // TODO: this should work but there's somewhere im not keeping track of count properly, i don't super care tho,
-    //       rega gets rid of dead code anyway, doing it here just makes it easier to see whats going on in debug output. -- Nov 3
-    //       tho seljmp looks at use counts so its a bit sketchy that we're fucking with them. 
-    kill_addr :: fn() => {
-        if kill {
-            //addr.nuse -= 1;
-            //if addr.nuse == 0 {
-            //    when_debug(f, .InstSelect) { out |
-            //        @fmt_write(f.globals.debug_out, "(kill %) ", addr.name());
-            //    };
-            //    addr.def.set_nop();
-            //    addr.def = Qbe.Ins.ptr_from_int(0);
-            //};
-        };
-    };
-    
-    @match(addr.def.op()) {
+fn collapse_op(f: *Qbe.Fn, i: *Qbe.Ins, bid: i32) void = {
+    @if(is_int(i.cls()))
+    @match(i.op()) {
         fn add() => {
-            if(rtype(def_a[0]) != .RTmp, => return(a));
-            if f.get_int(def_a[1]) { off | 
-                off := total_off[] + off;
-                if(off < 0 || off >= max_off || off.mod(size) != 0, => return(a));
-                base := f.get_temporary(def_a[0]);
-                when_debug(f, .InstSelect) { out |
-                    @fmt_write(f.globals.debug_out, "[% + %]", base.name(), off);
+            if f.get_int(i.arg&[0]).is_some() {
+                i.arg&.items().swap(0, 1);
+            };
+            if f.get_int(i.arg&[1]) { off | 
+                if f.is_symbol(i.arg&[0]) {
+                    // TODO: make sure this is an improvement. 
+                    //       my idea is it it means you never need to recursive more than once to fixarg for a load/store address, 
+                    //       so then you can do fix_memarg in place without worrying about where to insert an emit().
+                    c := f.get_constant(i.arg&[0])[];
+                    c.bits.i += off;
+                    i[] = make_ins(.copy, .Kl, i.to, f.newcon(c&), QbeNull);
+                    return();
                 };
-                prev := total_off[];
-                total_off[] = off;
-                final := fuse_addr(f, def_a[0], total_off, bid, size, addr.nuse == 1);
-                if final != a {
-                    kill_addr();
-                } else {
-                    total_off[] = prev;
-                    when_debug(f, .InstSelect) { out |
-                        @fmt_write(f.globals.debug_out, "NO!");
+                slot := f.get_slot(i.arg&[0]) || { 
+                    r := i.arg&[0];
+                    if(rtype(r) != .RTmp || isreg(r), => return()); 
+                    t := f.get_temporary(r);
+                    if(t.def.is_null(), => return());
+                    if t.defining_block != bid {
+                        // we might not have got there yet.
+                        collapse_op(f, t.def, t.defining_block);
+                    };
+                    @match(t.def.op()) {
+                        fn addr() => f.get_slot(t.def.arg&[0]).expect("this happens before other isel so only RSlot can be addr");
+                        fn copy() => f.get_slot(t.def.arg&[0]) || return();
+                        fn add()  => {
+                            if f.get_int(t.def.arg&[1]) { off2 | 
+                                if off + off2 < 4096 {
+                                    chuse(t.def.arg&[0], 1, f);
+                                    chuse(r, -1, f);
+                                    i.arg&[0] = t.def.arg&[0];
+                                    i.arg&[1] = f.getcon(off + off2);
+                                    return(collapse_op(f, i, bid));
+                                };
+                            };
+                            return()
+                        }
+                        @default => return();
+                    }
+                };
+                // negative slots are abi push stuff
+                if slot >= 0 && off.mod(4) == 0 {
+                    new := slot + off / 4;
+                    if new >= 0 {
+                        chuse(i.arg&[0], -1, f);
+                        i[] = make_ins(.addr, .Kl, i.to, SLOT(new), QbeNull);
                     };
                 };
-                return(final);
             };
-        }
-        // TODO: stop representing RSlot as divided by 4 so you don't have to skip doing this for access of a single byte 3/4 of the time. -- Nov 3
-        fn addr() => {
-            if(f.dynalloc, => return(a));
-            @debug_assert(rtype(def_a[0]) == .RSlot, "can only addr stack slot");
-            slot := rsval(def_a[0]).intcast();
-            off := total_off[] + slot * 4;
-            if(slot < 0 || off < 0 || off >= max_off || off.mod(size) != 0 || off.mod(4) != 0, => return(a));
-            when_debug(f, .InstSelect) { out |
-                @fmt_write(f.globals.debug_out, "[S% + %][S%]", slot, total_off[], off / 4);
-            };
-            total_off[] = off;
-            kill_addr();
-            return(QbeNull);
         }
         @default => ();
     };
-    a
 }
 
-fn sel(f: *Qbe.Fn, i: Qbe.Ins, blk: i32, mem: *List(*Qbe.Ins)) void = {
+fn get_slot(f: *Qbe.Fn, r: Qbe.Ref) ?i64 = {
+    @match(rtype(r)) {
+        fn RSlot() => return(Some = rsval(r).intcast());
+        fn RTmp() => {
+            slot := f.get_temporary(r)[].slot;
+            if slot != -1 {
+                return(Some = slot.intcast());
+            };
+        }
+        @default => ();
+    };
+    .None
+}
+
+//
+// This will compress a sequence like `add x1, x29, #24; add x1, x1, #8; ldr x1, [x1]` into `ldr x1, [x29, #32]`
+// (doesn't need to recurse because of the prepass of collapse_op)
+
+fn fix_memarg(f: *Qbe.Fn, i: *Qbe.Ins, bid: i32) *Qbe.Ref = {
+    iarg := i.arg&;
+    store := is_store(i.op());
+    @debug_assert(store || is_load(i.op()), "bad mem op");
+    @debug_assert(store || iarg[1] == QbeNull, "load already has second arg");
+    size: i64 = if(store, => size_of_store(i).zext(), => size_of_load(i).zext());
+    r := iarg[store.int()]&;
+    new_addr, off := fuse_addr(f, r[], bid, size);
+    
+    max_off := size * 4096;
+    if(off < 0 || off >= max_off || off.mod(size) != 0, => return(r));
+    if(new_addr == QbeNull && off.mod(4) != 0, => return(r));
+    
+    chuse(new_addr, 1, f);
+    chuse(r[], -1, f);
+    
+    @debug_assert(off.mod(size) == 0);
+    if new_addr != r[] {
+        if new_addr == QbeNull {
+            @debug_assert(off.mod(4) == 0);
+            r[] = SLOT(off / 4);
+        } else {
+            if store {
+                if off == 0 {
+                    iarg[1] = new_addr;
+                } else {
+                    m := f.new_mem(new_addr, QbeNull, off, 1);
+                    iarg[1] = m;
+                    r = f.get_memory(m)[].base&;
+                };
+            } else {
+                iarg[0] = new_addr;
+                iarg[1] = INT(off);
+            };
+        };
+    };
+    r
+}
+
+fn fuse_addr(f: *Qbe.Fn, a: Qbe.Ref, bid: i32, size: i64) Ty(Qbe.Ref, i64) = {
+    max_off := size * 4096;
+    if f.get_slot(a) { slot |
+        return(QbeNull, slot * 4);
+    };
+    addr := f.get_temporary(a);
+    if(addr.def.is_null() || addr.defining_block != bid, => return(a, 0));
+    def_a := addr.def.arg&;
+    @debug_assert(addr.nuse > 0);
+    @match(addr.def.op()) {
+        fn add() => if f.get_int(def_a[1]) { off | 
+            @debug_assert(def_a[0] != QbeNull, "add missing arg");
+            return(def_a[0], off);
+        };
+        // TODO: stop representing RSlot as divided by 4 so you don't have to skip doing this for access of a single byte 3/4 of the time. -- Nov 3
+        fn addr() => {
+            slot := f.get_slot(def_a[0]).expect("can only addr stack slot");
+            return(QbeNull, slot * 4);
+        }
+        @default => ();
+    };
+    (a, 0)
+}
+
+fn sel(f: *Qbe.Fn, i: Qbe.Ins, blk: i32) void = {
+    if(try_kill_inst(f, i&), => return());
+    
     if is_alloc(i&.op()) {
         // note: i0 is what we're about to emit not what we just emitted
         i0 := f.globals.curi[].offset(-1); // :LookAtLastInst
@@ -203,27 +212,30 @@ fn sel(f: *Qbe.Fn, i: Qbe.Ins, blk: i32, mem: *List(*Qbe.Ins)) void = {
         new_ins := f.emit(i);
         iarg := new_ins.arg&;
         
-        // 610KB, amazing!
-        if is_load(o) && rtype(iarg[0]) == .RTmp {
-            mem.push(new_ins);
-        };
-        if is_store(o) && rtype(iarg[1]) == .RTmp {
-            mem.push(new_ins);
-        };
         if rtype(i.to) == .RTmp {
             t := f.get_temporary(i.to);
             t.def = new_ins;
         };
+        if is_load(o) && rtype(iarg[0]) == .RTmp {
+            r := fix_memarg(f, new_ins, blk);
+            if rtype(r[]) != .RSlot {
+                f.fixarg(r, .Kl, false, blk);
+            };
+            return();
+        };
         k0 := argcls(i&, 0);
         k1 := argcls(i&, 1);
-        // this isn't really worth it
-        if o == .add && is_int(k0) {
-            if f.get_int(iarg[0]) { off |
-                iarg.items().swap(0, 1);
-                @debug_assert(k0 == k1);
-            };
+        copy_from_con := i&.op() == .copy && rtype(iarg[0]) == .RCon && !isreg(i.to);
+        if !copy_from_con {
+            f.fixarg(iarg[0]&, k0, false, blk);
         };
-        f.fixarg(iarg[0]&, k0, false, blk);
+        if is_store(o) && rtype(iarg[1]) == .RTmp {
+            r := fix_memarg(f, new_ins, blk);
+            if rtype(r[]) != .RSlot {
+                f.fixarg(r, .Kl, false, blk);
+            };
+            return();
+        };
         // TODO: do this for sub, etc as well. this alone makes the compiler go from 2485100 -> 2089352 bytes of code. thats insane.
         //       this looks branchy but it generates so much less code that its faster even before accounting for it generating better code for itself. 
         if o == .add && is_int(k1) {
@@ -237,8 +249,13 @@ fn sel(f: *Qbe.Fn, i: Qbe.Ins, blk: i32, mem: *List(*Qbe.Ins)) void = {
             arg1 := iarg[1];
             if rtype(arg1) == .RTmp {
                 arg1 := f.get_temporary(arg1);
-                if arg1.nuse == 1 && !arg1.def.is_null() && arg1.def.op() == .mul && arg1.defining_block == blk {
-                    mem.push(new_ins);
+                def := arg1.def;
+                if arg1.nuse == 1 && !def.is_null() && def.op() == .mul && arg1.defining_block == blk {
+                    f.fixarg(def.arg&.index(0), .Kl, false, blk);
+                    f.fixarg(def.arg&.index(1), .Kl, false, blk);
+                    iarg[1] = f.new_mem(def.arg&[0], def.arg&[1], 0, 255);
+                    def.set_nop();
+                    return();
                 };
             };  
         };

@@ -30,6 +30,7 @@
 #include_std("backend/abi.fr");
 #include_std("backend/meta/template.fr");
 #include_std("backend/amd64/isel.fr");
+#include_std("backend/opt/slots.fr");
 
 ENABLE_INTERNAL_QBE :: true;  // until i want to enable it on github actions
 DO_INLINING :: true; // TODO: make this a runtime toggle so you can make sure you're actually testing calls
@@ -342,8 +343,14 @@ fn finish_qbe_passes(fnn: *Qbe.Fn) void = {
     fillpreds(fnn);
     fill_use(fnn); 
     
+    // TODO: don't always need extra fillrpo? only if vararg or any_dead_blocks in fold_constants
+    fillrpo(fnn);   // for fillalias. 
+    fillalias(fnn); // for late slots mem opt, escaping slots are tracked at the beginning of isel. 
+    
     // arm isel inserts RMem (with different meaning from x64) for mul/store and RInt for load.
-    {m.target.isel}(fnn);
+    {m.target.isel}(fnn);  // writes tmp.visit
+                           // ^^^^^^^^^^^^^^^^
+    elide_abi_slots(fnn);  // reads  tmp.visit
     
     fillrpo(fnn);
     fill_liveness(fnn);

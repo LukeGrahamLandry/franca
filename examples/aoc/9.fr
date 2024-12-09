@@ -1,0 +1,129 @@
+
+fn main() = {
+    input := read_file_from_last_arg();
+    disk := temp().alloc(u32, input.len * 9);
+    
+    right     := 0;
+    parity    := true;
+    id        := 0;
+    for input { c |
+        size  := -"0".char() + c.zext();
+        value := if(parity, => id, => EMPTY);
+        range(0, size) { i |
+            disk[right + i] = value.trunc();
+        };
+        right += size;
+        id    += int(parity);
+        parity = !parity;
+    };
+    disk1 := disk.slice(0, right);
+    disk2 := disk1.clone(temp()).items();
+    
+    do_part1(disk1);
+    do_part2(disk2); 
+    
+    println(checksum(disk1));
+    println(checksum(disk2));
+}
+
+EMPTY :: 0xFFFFFFFF;
+fn checksum(disk: []u32) i64 = {
+    total := 0;
+    enumerate disk { i, v |
+        if disk[i] != EMPTY {
+            total += i * v[].zext();
+        };
+    };
+    total
+}
+
+fn do_part1(disk: []u32) void = {
+    total := 0;
+    left  := 0;
+    right := disk.len - 1;
+    while => left < right {
+        while => disk[left] != EMPTY {
+            left += 1;
+        };
+        walk(right&, => disk[right] == EMPTY);
+        if left < right {
+            disk[left] = disk[right];
+            disk[right] = EMPTY;
+            left  += 1;
+            right -= 1;
+        };
+    };
+}
+
+fn do_part2(disk: []u32) void = {
+    free_list := temp().alloc(List(i64), 10);
+    each free_list { it |
+        it[] = list(temp());
+    };
+    
+    // find all the empty slots
+    right := disk.len - 1;
+    dowhile {
+        walk(right&, => disk[right] != EMPTY);
+        empty_end   := right + 1;
+        walk(right&, => disk[right] == EMPTY);
+        empty_start := right + 1;
+        size := empty_end - empty_start;
+        free_list[size]&.push(empty_start);
+        right > 0
+    };
+    
+    right := disk.len - 1;
+    prev_id: u32 = disk.len.trunc();
+    dowhile {
+        // find the next file
+        walk(right&, => (disk[right] == EMPTY || disk[right] > prev_id));
+        file_end := right + 1;
+        file_id := disk[right];
+        prev_id = file_id;
+        walk(right&, => disk[right] == prev_id);
+        file_start := right + 1;
+        file := disk.slice(file_start, file_end);
+        
+        // find the left most empty slot that fits this file
+        best_size  := 0;
+        best_index := file_start;
+        range(file.len, 10) { check_size | 
+            slots := free_list[check_size]&;
+            walk(slots.len&, => slots[slots.len - 1] > file_start);  // discard invalid slots
+            if slots.len > 0 {
+                slot_start    := slots[slots.len - 1];
+                if slot_start < best_index {
+                    best_index = slot_start;
+                    best_size  = check_size;
+                };
+            };
+        };
+        
+        if best_size != 0 {
+            // move it into the slot
+            slot_start := free_list[best_size]&.pop().unwrap();
+            disk.copy_overlapping(slot_start, file_start, file.len);
+            each file { v |
+                v[] = EMPTY;
+            };
+            
+            // if we didn't fill the whole slot, track the smaller empty space we created.
+            if best_size != file.len {
+                new_start := slot_start + file.len;
+                slots := free_list[best_size - file.len]&;
+                i := slots.len;
+                walk(i&, => slots[i - 1] < new_start);  // keep the list sorted
+                slots.insert(i, new_start);
+            };
+        };
+        
+        right > 0
+    };
+}
+
+fn walk(i: *i64, $cond: @Fn() bool) void = {
+    while => i[] >= 0 && cond() {
+        i[] -= 1;
+    };
+}
