@@ -78,7 +78,8 @@ fn parse_top_level(m: *QbeModule, src: Str, yield_data: @FnPtr(*Qbe.Dat) void, y
         };
         thread := self.eat("thread");
         if self.eat("data") {
-            @try(self.parse_data(export, thread, yield_data)) return;
+            @assert(!thread, "I don't support thread locals. use real qbe instead. sorry");
+            @try(self.parse_data(export, yield_data)) return;
             continue();
         };
         
@@ -481,8 +482,9 @@ fn parse_ref(self: *QParseCtx) Qbe.Ref = {
     };
     thread := self.eat("thread");
     if self.eat("$") {  // global
+        @assert(!thread, "I don't support thread locals. use real qbe instead. sorry");
         name := self.eat_word(); 
-        con: Qbe.Con = (sym = (id = self.f.globals.intern(name), type = @if(thread, .SThr, .SGlo)), type = .CAddr, bits = (i = 0));
+        con: Qbe.Con = (sym = (id = self.f.globals.intern(name)), type = .CAddr, bits = (i = 0));
         return(self.f.newcon(con&));
     };
     if thread {
@@ -591,7 +593,7 @@ fn parse_number(self: *QParseCtx) i64 = {
 }
 
 // example: `data $s = { l $pointer, b "hello", b 0 }`
-fn parse_data(self: *QParseCtx, export: bool, thread: bool, yield: @FnPtr(*Qbe.Dat) void) Result(void, Str) = {
+fn parse_data(self: *QParseCtx, export: bool, yield: @FnPtr(*Qbe.Dat) void) Result(void, Str) = {
     if !self.eat("$") {
         return(Err = "expected '$name' after 'data'");
     };
@@ -600,7 +602,7 @@ fn parse_data(self: *QParseCtx, export: bool, thread: bool, yield: @FnPtr(*Qbe.D
         return(Err = "expected '=' after 'data $name'");
     };
     dat := Qbe.Dat.zeroed();
-    lnk: Qbe.Lnk = (export = export, thread = thread, id = self.f.globals.intern(name));
+    lnk: Qbe.Lnk = (export = export, id = self.f.globals.intern(name));
     if self.eat("align") {
         // :NeedFunctionInitForData
         c := self.parse_ref();

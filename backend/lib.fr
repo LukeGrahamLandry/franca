@@ -26,7 +26,6 @@
 #include_std("backend/amd64/emit.fr");
 #include_std("backend/amd64/sysv.fr");
 #include_std("backend/meta/parse.fr");
-#include_std("backend/meta/match.fr");
 #include_std("backend/abi.fr");
 #include_std("backend/meta/template.fr");
 #include_std("backend/amd64/isel.fr");
@@ -65,15 +64,6 @@ DO_INLINING :: true; // TODO: make this a runtime toggle so you can make sure yo
 // TODO: stop using c strings all over the place. 
 // TODO: ir test that uses opaque types
 
-DONT_FORGET_OTHER_TLS_ARCH :: true;
-
-/*
-(i assume you need this thing for static link)
-ar rvs qbe_merged.o util.o parse.o abi.o cfg.o mem.o ssa.o alias.o load.o copy.o fold.o simpl.o live.o spill.o rega.o emit.o amd64/targ.o amd64/sysv.o amd64/isel.o amd64/emit.o arm64/targ.o arm64/abi.o arm64/isel.o arm64/emit.o rv64/targ.o rv64/abi.o rv64/isel.o rv64/emit.o
-(for comptime dynamic link this works, you need main for the symbols _T/_debug)
-clang -dynamiclib -o qbe_merged.dylib inline.o main.o util.o parse.o abi.o cfg.o mem.o ssa.o alias.o load.o copy.o fold.o simpl.o live.o spill.o rega.o emit.o amd64/targ.o amd64/sysv.o amd64/isel.o amd64/emit.o arm64/targ.o arm64/abi.o arm64/isel.o arm64/emit.o rv64/targ.o rv64/abi.o rv64/isel.o rv64/emit.o
-*/
-
 QbeModule :: @rec @struct(
     // These have to be pointers to the symbols Qbe externs because it uses them. 
     types: *QList(Qbe.Typ), // typ
@@ -100,8 +90,8 @@ QbeModule :: @rec @struct(
     got: SegmentCursor,
     commands: SegmentCursor,
     stubs: SegmentCursor,
-    tls_vars: SegmentCursor,
-    tls_init: SegmentCursor,
+    __: SegmentCursor,
+    ___: SegmentCursor,
     
     exports: List(u32),
     imports: List(u32),
@@ -109,7 +99,7 @@ QbeModule :: @rec @struct(
     inlinable_but_referenced_later: List(u32),
     
     // TODO: everything that touches these needs to be rewritten eventually. 
-    want_text_asm := false,
+    ____ := false,
     supports_self_sign: bool,  // this was in zeroed padding before so the old version in ../boot will have false and current default_driver will use codesign binary like it used to -- Nov 28
     outf := zeroed(*FILE),
     
@@ -126,6 +116,7 @@ QbeTargetEnv :: @struct(
     type: QbeOutputPurpose,
 );
 
+// TODO: remove AsmText
 QbeOutputPurpose :: @enum(i64) (AsmText, JitOnly, Exe, Relocatable, Dynamic);
 ::enum(QbeOutputPurpose);
 
@@ -135,21 +126,9 @@ fn making_macho(m: *QbeModule) bool =
 MAX_GOT_SIZE :: 1.shift_left(15);
 SIZE_OF_STUBS :: 1.shift_left(10); // TODO: not this :explain
 COMMANDS_SIZE_GUESS :: macos_page_size; // :explain
-MAX_TLS_VARS_SIZE   :: macos_page_size;
-MAX_TLS_INIT_SIZE   :: macos_page_size;
 
 fn init_default_module(goal: QbeTargetEnv) QbeModule = 
     init(1.shift_left(25), libc_allocator, page_allocator, goal);
-
-:: {
-    @if(LINK_QBE_C) {
-        //eprintln("Loading Qbe dylib!");
-        c := current_compiler_context();
-        handle := dlopen("./bindings/qbe/qbe_merged.dylib".sym().c_str(), DlFlag.Lazy);
-        assert(!handle.lib.is_null(), "failed to open qbe dylib");
-        c.add_comptime_library(@symbol "qbe", handle);
-    };
-};
 
 // the allocators need to not be temp() because we reset temp()
 fn init(segment_size: i64, gpa: Alloc, code_alloc: Alloc, goal: QbeTargetEnv) QbeModule = {
@@ -174,7 +153,6 @@ fn init(segment_size: i64, gpa: Alloc, code_alloc: Alloc, goal: QbeTargetEnv) Qb
     m.imports = list(gpa);
     m.local_needs_reloc = list(gpa);
     m.inlinable_but_referenced_later = list(gpa);
-    m.want_text_asm = goal.type == .AsmText;
     m.symbols = forever.alloc_zeroed(SymbolBucket, IMask + 1);
     {   // TODO: this is kinda ass
         // :GotAtConstantDataBase
@@ -187,53 +165,26 @@ fn init(segment_size: i64, gpa: Alloc, code_alloc: Alloc, goal: QbeTargetEnv) Qb
         next[] = next[].offset(COMMANDS_SIZE_GUESS); 
         m.stubs = (mmapped = (ptr = next[], len = SIZE_OF_STUBS), next = next[]);
         next[] = next[].offset(SIZE_OF_STUBS); 
-       
-        next := m.segments&[.MutableData].next&;
-        m.tls_vars = (mmapped = (ptr = next[], len = MAX_TLS_VARS_SIZE), next = next[]);
-        next[] = next[].offset(MAX_TLS_VARS_SIZE); 
-        m.tls_init = (mmapped = (ptr = next[], len = MAX_TLS_INIT_SIZE), next = next[]);
-        next[] = next[].offset(MAX_TLS_INIT_SIZE); 
     };
     
     m.debug_out = fdopen(STD_ERR, "a".sym().c_str());
     assert(m.goal.os == .macos, "TODO: flip the switch on linux abi");
-    @if(LINK_QBE_C, {
-        // TODO: this is very very wrong because i represent union cases differently! but its going away soon...
-        m.types  = get_qbe_dylib_variable(QList(Qbe.Typ), "typ"); 
-        m.insb   = get_qbe_dylib_variable(Array(Qbe.Ins, 1.shift_left(20)), "insb");
-        m.curi   = get_qbe_dylib_variable(*Qbe.Ins, "curi");
-        m.debug  = get_qbe_dylib_variable(Array(bool, "Z".char() + 1), "debug");
-        m.target = get_qbe_dylib_variable(Qbe.Target, "T");
-        if m.goal.arch == .x86_64 {
-            m.target[] = get_qbe_dylib_variable(Qbe.Target, "T_amd64_apple")[]; 
-        }; // else, not doing this. using fill_target_info instead. 
-    }, {
-        m.types  = forever.box(@type m.types[]);
+    m.types  = forever.box(@type m.types[]);
+    
+    //m.insb   = forever.box(@type m.insb[]); // :FUCKED i overflow the size becuase i figured 65k bytes aught to be enough for everyone. -- Oct 8  
+    mem := forever.alloc(Qbe.Ins, Qbe.MaxInstructions);
+    ::?*Array(Qbe.Ins, Qbe.MaxInstructions);
+    m.insb = mem.as_array().unwrap();
+    
+    m.curi   = forever.box(@type m.curi[]); // TODO: megadumb if its the page allocaotr
+    m.debug  = forever.box_zeroed(@type m.debug[]);
+    m.target = forever.box(@type m.target[]);
         
-        //m.insb   = forever.box(@type m.insb[]); // :FUCKED i overflow the size becuase i figured 65k bytes aught to be enough for everyone. -- Oct 8  
-        mem := forever.alloc(Qbe.Ins, Qbe.MaxInstructions);
-        ::?*Array(Qbe.Ins, Qbe.MaxInstructions);
-        m.insb = mem.as_array().unwrap();
-        
-        m.curi   = forever.box(@type m.curi[]); // TODO: megadumb if its the page allocaotr
-        m.debug  = forever.box_zeroed(@type m.debug[]);
-        m.target = forever.box(@type m.target[]);
-        
-    });
-    //m.debug[Qbe.DebugKey.Memory.raw()] = true;
-    //m.debug[Qbe.DebugKey.RegAlloc.raw()] = true;
-    //m.debug[Qbe.DebugKey.Parsing.raw()] = true;
-    //m.debug[Qbe.DebugKey.Abi.raw()] = true;
-    //m.debug[Qbe.DebugKey.InstSelect.raw()] = true;
     // TODO: ask for linux abi
     if m.goal.arch == .aarch64 {
         m.target.fill_target_info(.arm64_apple);
     } else {
-        prev := m.target.emitfn;
         m.target.fill_target_info(.amd64_apple);
-        if m.goal.type == .AsmText {
-            m.target.emitfn = prev;
-        };
     };
     m.types[] = new_long_life(0); // TODO: check the magic in QbeBuilder.init to make sure you remember to do this. 
     m.curi[] = m.insb.index_unchecked(Qbe.MaxInstructions);

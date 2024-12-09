@@ -5,7 +5,6 @@
 // TODO: Should try to get Hare to compile with this instead of Qbe as a source of more tests. 
 //       I'm a bit worried that there might be some shapes of programs that Franca never generates but I can't articulate an example.        
 
-LINK_QBE_C :: false;
 #include_std("backend/lib.fr");
 fn main() void = { 
     // Have to smuggle this through qbe's parser callback that doesn't let you pass a data pointer.
@@ -22,9 +21,8 @@ fn main() void = {
         args.len -= 1;
     };
     flags := i64.list(temp());
-    goal: QbeOutputPurpose = .AsmText;
+    goal: QbeOutputPurpose = .Exe;
     arch := query_current_arch().unwrap();
-    own_parser := !LINK_QBE_C;
     while => args.len > 0 {
         a := args[0].str();
         @switch(a) {
@@ -71,20 +69,12 @@ fn main() void = {
                 print(HELP);
                 exit(0);
             };
-            @case("-e") => {
-                goal = .Exe;
-                pop();
-            };
             @case("-c") => {
                 goal = .Relocatable;
                 pop();
             };
             @case("-s") => {
                 slow = true;
-                pop();
-            };
-            @case("-p") => {
-                own_parser = true;
                 pop();
             };
             @default => {
@@ -100,7 +90,6 @@ fn main() void = {
             };
         };
     };
-    @assert(LINK_QBE_C || goal != .AsmText, "cannot do .AsmText without linking qbe-c, using -e, -c, -r to change goal");
     global_module[] = init_default_module(type = goal, os = query_current_os(), arch = arch);
     for flags { d | 
         global_module[].debug.items()[d] = true;
@@ -111,7 +100,6 @@ fn main() void = {
     //@eprintln(";% -> %", inpath, outpath);
     outfile := if debug || run {    
         assert(outpath == "-", "not yet implemented: output the debug dump to the -o arg.");
-        global_module[].want_text_asm = false;
         fopen("/dev/null".sym().c_str(), "w".sym().c_str())
     } else {
         if outpath == "-" {
@@ -147,24 +135,14 @@ fn main() void = {
         };
         global_module.new_emit_data(d);
     };
-    if own_parser {
-        src := libc_allocator.read_to_string(inpath);
-        src&.push_all("\n"); // HACK
-        src := src.items();
-        res := @if(slow, 
-            parse_top_level(global_module, src, handle_data, handle_fn_slow),
-            parse_top_level(global_module, src, handle_data, handle_fn));
-        if res&.is_err() {
-            panic(res.Err);
-        };
-    } else {
-        @if(!LINK_QBE_C) panic("use -p");
-        parse :: fn(_0: *FILE, _1: CStr, _2: @FnPtr(CStr) void, _3: @FnPtr(*Qbe.Dat) void, _4: @FnPtr(*Qbe.Fn) void) void #import("qbe");
-        if slow {
-            parse(infile, "<file>".sym().c_str(), handle_dbg, handle_data, handle_fn_slow);
-        } else {
-            parse(infile, "<file>".sym().c_str(), handle_dbg, handle_data, handle_fn);
-        };
+    src := libc_allocator.read_to_string(inpath);
+    src&.push_all("\n"); // HACK
+    src := src.items();
+    res := @if(slow, 
+        parse_top_level(global_module, src, handle_data, handle_fn_slow),
+        parse_top_level(global_module, src, handle_data, handle_fn));
+    if res&.is_err() {
+        panic(res.Err);
     };
     
     global_module.emit_suspended_inlinables();

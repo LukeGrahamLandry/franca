@@ -126,7 +126,7 @@ fn newtmp(f: *Qbe.Fn, debug_hint: Str, k: Qbe.Cls) Qbe.Ref = {
 
 :: {
     fn eq(a: Qbe.Sym, b: Qbe.Sym) bool #inline = 
-        a.type == b.type && a.id == b.id;
+        a.id == b.id;
     fn ne(a: Qbe.Sym, b: Qbe.Sym) bool #inline = !(a == b);
 };
 
@@ -556,24 +556,9 @@ fn QList($T: Type) Type = {
 IBits :: 12;
 IMask :: 1.shift_left(IBits) - 1;
 
-fn intern(m: *QbeModule, s: Str) u32 = {
-    @if(LINK_QBE_C) {
-        _ := m.my_intern(s);
-        slow := if s.len != 0 && s[s.len - 1] == 0 {
-            s
-        } else {
-            @tfmt("%\0", s)  // :SLOW stop using shitty c strings!
-        };
-        intern :: fn(_0: CStr) u32 #import("qbe");
-        // TODO: this is a waste of time that lets me easily use thier parser. 
-        return(intern(@as(CStr) (ptr = slow.ptr)));
-    };
-    
-    m.my_intern(s)
-}
 QLIST_DOUBLE_FREE :: 0x69696969;
 
-fn my_intern(m: *QbeModule, s: Str) u32 = {
+fn intern(m: *QbeModule, s: Str) u32 = {
     h := hash(s).bit_and(IMask.trunc());
     b := m.symbols.index(h.zext());
     // :ThreadSafety
@@ -623,12 +608,6 @@ LOCKED_BASE :: 0xF0000000;
 // TODO: this is garbage i need a way to defer something to run if body early exits. 
 // :ThreadSafety need to use cas or whatever
 fn use_symbol(m: *QbeModule, id: u32, $body: @Fn(s: *SymbolInfo) void) void = {
-    @if(LINK_QBE_C) {
-        // TODO: this is a waste of time that lets me easily use thier parser. 
-        
-        s := { str :: fn(_0: u32) CStr #import("qbe"); str(id) };
-        id = m.my_intern(@as(Str) (ptr = s.ptr, len = s.slow_len()));
-    };
     ::ptr_utils(QbeModule);
     @debug_assert(!m.is_null(), "null module???");
     bid: i64 = id.bit_and(IMask).zext();
@@ -654,11 +633,6 @@ fn use_symbol(m: *QbeModule, id: u32, $body: @Fn(s: *SymbolInfo) void) void = {
 
 // :ThreadSafety you can't call this one
 fn get_symbol_info(m: *QbeModule, id: u32) *SymbolInfo = {
-    @if(LINK_QBE_C) {
-        // TODO: this is a waste of time that lets me easily use thier parser. 
-        s := { str :: fn(_0: u32) CStr #import("qbe"); str(id) };
-        id = m.my_intern(@as(Str) (ptr = s.ptr, len = s.slow_len()));
-    };
     bid: i64 = id.bit_and(IMask).zext();
     bucket := m.symbols[bid]&;
     idx := id.shift_right_logical(IBits);

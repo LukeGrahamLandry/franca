@@ -109,7 +109,6 @@ fn make_exec(self: *QbeModule) void = {
 
 fn get_addr(self: *QbeModule, name: Str) ?rawptr = {
     assert(!self.fixups_locked, "you can't get a jit pointer after emitting for aot becuase it stomps data with relocation info.");
-    assert(self.tls_vars&.len() == 0, "we don't handle thread locals while jitting.");
     id := self.intern(name);
     result: ?rawptr = .None;
     use_symbol(self, id) { symbol | 
@@ -132,20 +131,7 @@ fn new_emit_data(self: *QbeModule, dat: *Qbe.Dat) void = {
     if self.debug["P".char()] {
         print_dat(dat, self.debug_out);
     };
-    
-    if self.want_text_asm {
-        // TODO: this branch is gone as soon as i trust my x64. looking forward to it :)
-        @if(LINK_QBE_C, {
-            if dat.name.ptr.is_null() {
-                s := self.get_symbol_info(dat.lnk.id);
-                dat.name.ptr = as_ptr(@tfmt("%\0", s.name));
-            };
-            fn emitdat(_0: *Qbe.Dat, _1: *FILE) void #import("qbe"); // :TodoPort
-            emitdat(dat, self.outf);
-        }, panic("LINK_QBE_C disabled: cannot emitdat for want_text_asm"));
-    } else {
-        self.emit_data_to_segment(dat);
-    };
+    self.emit_data_to_segment(dat);
 }
 
 fn maybe_add_export(self: *QbeModule, id: u32, export: bool) void = {
@@ -156,42 +142,15 @@ fn maybe_add_export(self: *QbeModule, id: u32, export: bool) void = {
 
 fn emit_data_to_segment(self: *QbeModule, dat: *Qbe.Dat) void = {
     assert(!self.fixups_locked, "you cannot add more data after emitting for aot");
-    @assert(!dat.lnk.common, "i don't handle `common` symbols");
-    @assert(dat.lnk.sec.ptr.is_null() && dat.lnk.secf.ptr.is_null(), "i don't handle custom sections");
     data_segment := self.segments&.index(.MutableData);
-    segment := @if(dat.lnk.thread, self.tls_init&, data_segment);
+    segment := data_segment;
     next := segment.next&;
     @match(dat.type) {
         fn DStart() => {
             segment.align_to(8);
             id := dat.lnk.id;
             maybe_add_export(self, id, dat.lnk.export);
-            off := if dat.lnk.thread {
-                @assert(@is(self.goal.type, .Relocatable, .Exe, .Dynamic), "TODO: jit tls");
-                assert(self.goal.os == .macos, "TODO: we only handle apple abi for now");
-                // reserve a tls descriptor for this variable. 
-                // the symbol references this descriptor instead of the initialization data. 
-                // arm-apple-isel knows to convert addr to a load and call of the thunk. 
-                ::assert(DONT_FORGET_OTHER_TLS_ARCH, "DONT_FORGET_OTHER_TLS_ARCH");
-                desc_off := data_segment.mmapped.ptr.ptr_diff(self.tls_vars.next);
-                descriptor := self.tls_vars&.reserve(TlsDescriptor);
-                TlsDescriptor :: @struct(thunk: i64, key: i64, offset_in_thread_data: i64);
-                
-                // fixup for the thunk
-                patch := ptr_cast_unchecked(TlsDescriptor, u8, descriptor);
-                desc_sym := self.intern("_tlv_bootstrap");  // one underscore because we put an extra one.
-                use_symbol(self, desc_sym) { desc_sym |
-                    desc_sym.fixups&.push((patch_at = patch, type = .DataAbsolute), self.gpa);
-                };
-                
-                // NOT offset in data segment or distance between desc and init. 
-                // the section has as magic flag so it knows where to look. 
-                descriptor.offset_in_thread_data = self.tls_init&.len();
-                
-                desc_off
-            } else {
-                segment.mmapped.ptr.ptr_diff(next[])
-            };
+            off := segment.mmapped.ptr.ptr_diff(next[]);
             self.do_jit_fixups(id, .MutableData, off);
         }
         fn DEnd() => {
@@ -280,8 +239,6 @@ fn add_code_bytes(self: *QbeModule, name_id: u32, bytes: []u8) void = {
     dest := slice(code.next, bytes.len);
     dest.copy_from(bytes);
     code.next = code.next.offset(bytes.len);
-    
-    @debug_assert(!self.want_text_asm, "we don't emit text!");
 }
 
 fn align_to(s: *SegmentCursor, align: i64) void = {

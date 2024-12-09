@@ -17,7 +17,6 @@ AmdState :: @struct(
 
 fn emit_func_amd64(m: *QbeModule, f: *Qbe.Fn, file: *FILE) void = {
     @debug_assert_eq(m.goal.arch, .x86_64, "how did we get here?");
-    @debug_assert(m.goal.type != .AsmText, "how did we get here?");
     code := m.segments&[.Code]&;
     name_id := f.lnk.id;
     maybe_add_export(m, name_id, f.lnk.export);
@@ -46,7 +45,7 @@ fn fixup_amd64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_rel
         fn RipDisp32(it) => {
             distance := ptr_diff(u8.raw_from_ptr(fixup.patch_at), address); // :size_of_displacement
             if !local {
-                if (@is(self.goal.type, .Relocatable, .AsmText)) {
+                if (@is(self.goal.type, .Relocatable)) {
                     return(); // that's not my department
                 };
                 @assert(self.goal.type != .JitOnly, "TODO: jit got on amd64");
@@ -473,26 +472,6 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
             assemble(e, i&);
         }
         fn addr() => {
-            if !e.m.target.apple
-            && rtype(i.arg&[0]) == .RCon
-            && e.f.con[i.arg&[0].val()].sym.type == .SThr {
-                panic("addr");
-                /* derive the symbol address from the TCB
-                * address at offset 0 of %fs */
-                //assert(isreg(i.to));
-                //con = &e.f.con[i.arg&[0].val];
-                //sym = str(con.sym.id);
-                //emitf("movq %%fs:0, %L=", &i, e);
-                //fprintf(e.f, "\tleaq %s%s@tpoff",
-                //    sym[0] == '"' ? "" : T.assym, sym);
-                //if (con.bits.i)
-                //    fprintf(e.f, "%+"PRId64,
-                //        con.bits.i);
-                //fprintf(e.f, "(%%%s), %%%s\n",
-                //    regtoa(i.to.val, SLong),
-                //    regtoa(i.to.val, SLong));
-            };
-            
             // note: LEA interprets RMem differently than other instructions
             i.arg&[1] = i.to;
             i.arg&.swap(0, 1);
@@ -743,7 +722,6 @@ fn encode(e: *AmdState, i: *Qbe.Ins, w: bool, immediate_size: i64) EncodedArgs =
             @debug_assert(t0 != .RCon, "TODO: con + disp?");
             // :copy_paste_con_addr
             rr0 := r0.int_reg_d();
-            @debug_assert(c.sym.type == .SGlo, "TODO: tls");
             off := c.bits.i - immediate_size;
             return(
                 patch = (Some = (off, c.sym.id)), 
@@ -805,7 +783,6 @@ fn encode(e: *AmdState, i: *Qbe.Ins, w: bool, immediate_size: i64) EncodedArgs =
         if c.type == .CAddr {
             // :copy_paste_con_addr
             rr0 := r0.int_reg_d();
-            @debug_assert(c.sym.type == .SGlo, "TODO: tls");
             // The distance is relative to the end of the instruction, 
             // so if we have another immediate after the displacement, we have to account for its size. 
             // becuase the linker doesn't give a shit about what instructions we're using, 

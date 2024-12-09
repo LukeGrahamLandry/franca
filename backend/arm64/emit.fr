@@ -25,7 +25,6 @@ ArmState :: @struct(
 // TODO: remove the *FILE param, it was for when we were matching qbe's interface and outputting text. 
 fn emit_func_arm64(m: *QbeModule, f: *Qbe.Fn, _: *FILE) void = {
     @debug_assert_eq(m.goal.arch, .aarch64, "how did we get here?");
-    @assert(!m.want_text_asm, "we don't output text anymore. pass -e or whatever");
     // We know we're emitting the function right here so we can do old fixups now. 
     name_id := f.lnk.id;
     
@@ -391,7 +390,7 @@ fn align_to(m: *QbeModule, segment: SegmentType, align: i64) void = {
 }
 
 // TODO: rename this. 
-fn loadaddr_bits(self: *ArmState, c: *Qbe.Con, dest_reg: i64, thread_local: bool) void = {
+fn loadaddr_bits(self: *ArmState, c: *Qbe.Con, dest_reg: i64) void = {
     use_symbol(self.m, c.sym.id) { symbol |
         patch_addr := self.m.segment_address(.Code, self.m.current_offset(.Code));
         
@@ -452,7 +451,7 @@ fn loadcon(self: *ArmState, c: *Qbe.Con, r: i64, k: Qbe.Cls) void  = {
     w := is_wide(k);
     n := c.bits.i;
     if c.type == .CAddr {
-        self.loadaddr_bits(c, r, c.sym.type == .SThr);
+        self.loadaddr_bits(c, r);
         if !w {
             @eprintln("# Taking the low 32 bits of the symbol '%', you can do that but it's an odd choice so perhaps was a mistake.", self.m.str(c.sym.id));
             // we could warn on this if we were feeling friendly. 
@@ -634,7 +633,7 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
             callee := a0;
             if rtype(callee) == .RCon {
                 c := self.f.get_constant(a0);
-                if c.type != .CAddr || c.sym.type != .SGlo || c.bits.i != 0 {
+                if c.type != .CAddr || c.bits.i != 0 {
                     panic("invalid call argument");
                 };
                 

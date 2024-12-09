@@ -6,8 +6,6 @@ HELP :: """
 [test.fr] [options] ['all' or list of .ssa files]
     -v           show output on failure.  
     -bin=./foo   test the executable './foo' instead of the default ('./backend/meta/qbe_frontend.fr')
-    -e           emit exe directly instead of using Qbe's asm text
-    -p           use my parser instead of Qbe's
     -s           use the minimal register allocator instead of the good one 
     -x64         target x64 instead of your native arch (useful for Rosetta 2) 
     -h           show this help text
@@ -20,11 +18,9 @@ fn main() void = {
     
     to_run := Str.list(temp());
     args := cli_args().slice_pop_first();
-    do_my_own_exes := false;
     verbose := false;
     slow := false;
     arch := query_current_arch().unwrap();
-    own_parse := false;
     for args { arg |
         continue :: local_return;
         arg := arg.str();
@@ -41,18 +37,13 @@ fn main() void = {
                 @case("-x64") => {
                     arch = .x86_64;  
                 };
-                @case("-e") => {
-                    do_my_own_exes = true;
-                };
                 @case("-v") => {
                     verbose = true;
                 };
                 @case("-s") => {
                     slow = true;
                 };
-                @case("-p") => {
-                    own_parse = true;
-                };
+
                 @case("-h") => {
                     print(HELP);
                     exit(0);
@@ -92,7 +83,7 @@ fn main() void = {
         skip := arch != .aarch64 && file.ends_with("-arm.ssa");
         skip := skip || (arch != .x86_64 && file.ends_with("-amd.ssa"));
         if !skip {
-            pass := run_one(qbe_bin, file, verbose, do_my_own_exes, arch, slow, own_parse);
+            pass := run_one(qbe_bin, file, verbose, arch, slow);
             (@if(pass, passed&, failed&))[] += 1;
         } else {
             @println("%[skip]", f_pad(file, 40, .After));
@@ -109,11 +100,10 @@ fn main() void = {
     exit((failed != 0).int());
 }
 
-fn run_one(qbe_path: Str, file_path: Str, verbose: bool, do_my_own_exes: bool, arch: Arch, slow: bool, own_parse: bool) bool #inline = {
+fn run_one(qbe_path: Str, file_path: Str, verbose: bool, arch: Arch, slow: bool) bool #inline = {
     ::FmtPad(Str);
     mark := mark_temporary_storage();
     src := temp().read_to_string(file_path).items(); // :panic
-    ir_path := "target/out/q.s";
     driver_path := "target/out/driver.c";
     obj_path_mine := "target/out/q.o";
     obj_path_driver := "target/out/d.o";
@@ -125,20 +115,17 @@ fn run_one(qbe_path: Str, file_path: Str, verbose: bool, do_my_own_exes: bool, a
     expected := extract_section(src, "output");
     
     args := Str.list(temp());
-    if do_my_own_exes {
-        args&.push(if(driver.is_some(), => "-c", => "-e"));
+    if driver.is_some() {
+        args&.push("-c");
     };
     args&.push("-t");
     assert(query_current_os() == .macos, "TODO: flip the switch on linux abi");
     args&.push(if(arch == .aarch64, => "arm64_apple", => "amd64_apple"));
     args&.push("-o");
-    args&.push(if(do_my_own_exes, => if(driver.is_some(), => obj_path_mine, => exe_path), => ir_path));
+    args&.push(if(driver.is_some(), => obj_path_mine, => exe_path));
     args&.push(file_path);
     if slow {
         args&.push("-s");
-    };
-    if own_parse {
-        args&.push("-p");
     };
     a := timestamp();
     run(qbe_path, "gen ir");
@@ -168,22 +155,14 @@ fn run_one(qbe_path: Str, file_path: Str, verbose: bool, do_my_own_exes: bool, a
         run("clang", "driver");
     };
     
-    if do_my_own_exes && driver.is_none() {
-        // we have our own codesign implementation so we're done
-    } else {
-        if !do_my_own_exes {
-            args&.clear();
-            args&.push_all(@slice(ir_path, "-target", clang_triple, "-c", "-o", obj_path_mine));
-            run("clang", "compile ir");
-        };
-        
+    if driver.is_some() {
         args&.clear();
         if driver { _ |
             args&.push(obj_path_driver);
         };
         args&.push_all(@slice(obj_path_mine, "-o", exe_path, "-target", clang_triple));
         run("clang", "link");
-    };
+    }; // else we have our own codesign implementation so we're done
     args&.clear();
     args&.push_all(@slice("a", "b", "c"));
     ok, out, err := fork_and_catch(temp()) {

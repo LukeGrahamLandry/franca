@@ -61,7 +61,7 @@ zero_page_size :: 0x100000000;
 fn output_macho(m: *QbeModule) List([]u8) = {
     // TODO: remove
     code_count := m.segments&[.Code]&.len() - COMMANDS_SIZE_GUESS - SIZE_OF_STUBS;
-    data_count := m.segments&[.MutableData]&.len() - MAX_TLS_INIT_SIZE - MAX_TLS_VARS_SIZE;
+    data_count := m.segments&[.MutableData]&.len();
     @eprintln(">>> % bytes of code, % bytes of data.", code_count, data_count);
 
     m.fill_from_libc(); // TODO: don't waste time doing this just to bump reloc state. 
@@ -99,10 +99,6 @@ fn output_macho(m: *QbeModule) List([]u8) = {
     if m.goal.type == .Relocatable {
         macho_header.flags = 0;  // dont claim no_undefs
     };
-    has_thread_locals := m.tls_vars&.len() != 0;
-    if has_thread_locals {
-        macho_header.flags = macho_header.flags.bit_or(MH_HAS_TLV_DESCRIPTORS);
-    };
     
     ::enum_basic(LoadCommand);
     
@@ -130,10 +126,8 @@ fn output_macho(m: *QbeModule) List([]u8) = {
         // TODO: do i need reserved1 set to something? maybe thats an offset into LC_SYMTAB? or maybe undefined_symbol_count, that seems more consistant in the binraries i checked. 
         xx: WipSection = (name = "__got", size = chunks[2].len, flag = S_NON_LAZY_SYMBOL_POINTERS, offset_in_segment = 0);
         segments[2].sections = @slice(xx);
-        xx: WipSection = (name = "__data", size = chunks[3].len - m.tls_vars&.cap() - m.tls_init&.cap(), flag = 0, offset_in_segment = m.tls_vars&.cap() + m.tls_init&.cap());
-        yy: WipSection = (name = "__thread_vars", size = m.tls_vars&.len(), flag = S_THREAD_LOCAL_VARIABLES, offset_in_segment = 0);
-        zz: WipSection = (name = "__thread_data", size = m.tls_init&.len(), flag = S_THREAD_LOCAL_REGULAR, offset_in_segment = m.tls_vars&.cap());
-        segments[3].sections = @slice(xx, yy, zz);
+        xx: WipSection = (name = "__data", size = chunks[3].len, flag = 0, offset_in_segment = 0);
+        segments[3].sections = @slice(xx);
 
         // TODO: S_THREAD_LOCAL_VARIABLES
     };
@@ -157,7 +151,6 @@ fn output_macho(m: *QbeModule) List([]u8) = {
         code_flag := ATTR_PURE_INSTRUCTIONS.bit_or(ATTR_SOME_INSTRUCTIONS);
         xx: WipSection = (name = "__text", flag = code_flag, offset_in_segment = 0, size = chunks[1].len - text_padding);
         segments[0].sections = @slice(xx);
-        assert(!has_thread_locals, "TODO: -c tls");
         s := m.segments&[.MutableData]&;
         has_mutable_data := ptr_diff(s.mmapped.ptr, s.next) != 0;
         if has_mutable_data {
