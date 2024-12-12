@@ -525,7 +525,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
     }
     
     found_comptime_import :: fn(addr: rawptr) => {
-        self.put_jitted_function(fid, addr);
+        self.put_jitted_import(fid, addr);
         func.set_flag(.RealAsmDone);
         impls: List(FuncImpl) = list(2, self.get_alloc());
         impls&.push(ComptimeAddr = addr.int_from_rawptr());
@@ -593,7 +593,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
                 ptr := @check(self.eval(value, i64)) return;
                 func.body = (ComptimeAddr = ptr);
                 ptr := ptr.rawptr_from_int();
-                self.put_jitted_function(fid, ptr);
+                self.put_jitted_import(fid, ptr);
                 func.set_flag(.RealAsmDone);    
                 func.set_flag(.YesContext);
             };
@@ -723,13 +723,8 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
                             };
     
                             ir: List(u8) = list(self.get_alloc());
-                            ir_ptr := List(u8).int_from_ptr(ir&);
-                            args: List(i64) = list(1, temp());
-                            args&.push(ir_ptr);
-                            ::RsVec(i64);
-                            args := args.rs();
-                            f_ty: FnType = (arg = i64, ret = void, arity = 1);
-                            @try(self.call_dynamic(fn_ptr.int_from_rawptr(), f_ty&, args&)) return;
+                            callee := assume_types_fn(Arg = *List(u8), Ret = void, ptr = fn_ptr);
+                            callee(ir&);  // :call_dynamic_values
                             
                             func.body = (X86AsmBytes = ir.rs());
                             good = true;
@@ -753,12 +748,8 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
                             
                             bc := self.todo_get_bc();
                             body := @try(self.comp().empty_fn_body(bc, fid, .Aot)) return;
-                            
-                            args: List(i64) = list(1, temp());
-                            args&.push(FnBody.int_from_ptr(body));
-                            args := args.rs();
-                            f_ty: FnType = (arg = i64, ret = void, arity = 1);
-                            @try(self.call_dynamic(fn_ptr.int_from_rawptr(), f_ty&, args&)) return;
+                            callee := assume_types_fn(Arg = *FnBody, Ret = void, ptr = fn_ptr);
+                            callee(body);  // :call_dynamic_values
                             
                             if func.get_flag(.LogBc) {
                                 out: List(u8) = list(temp());
@@ -3228,10 +3219,11 @@ fn compile_get_var(self: *SelfHosted, expr: *FatExpr, requested: ResultType) May
 
 fn took_pointer_value(self: *SelfHosted, fid: FuncId) void = {
     func := self.get_function(fid);
-    // Note: else is not `Suspend = self.wait_for(Jit = fid)` because of cycles, we defer to the backend to deal with finializing it. 
-    //       a better system would be to generate a shim right now so we'd always have an address? 
-    if self.get_fn_old(fid) { ptr |
-        if !func.get_flag(.TookPointerValue) {
+    if !func.get_flag(.TookPointerValue) { // TODO: only if already compiled?
+        old := @if(NEW_COMPTIME_JIT, self.comptime_codegen.m.get_addr(self.comp().fmt_fn_name(fid)), self.get_fn_old(fid));
+        // Note: else is not `Suspend = self.wait_for(Jit = fid)` because of cycles, we defer to the backend to deal with finializing it. 
+        //       a better system would be to generate a shim right now so we'd always have an address? 
+        if old { ptr |
             // We already compiled the function but didn't know we'd need to remember its address. (ie. #test fn large_struct_ret_return).
             self.created_jit_fn_ptr_value(fid, ptr.int_from_rawptr())
         };
@@ -3689,7 +3681,7 @@ fn ask_can_assign(self: *SelfHosted, want: Type, found: Type) bool = {
 
 fn resolve_by_type(self: *SelfHosted, os: OverloadSet, f_ty: FnType, loc: Span) Maybe(FuncId) = {
     // This is mostly used for macros so its a big win to not spin up a whole operation just to notice that @match still goes to the same place. 
-    // saves ~10% of the time Aug 30. 
+    // saves ~10% of the time Aug 30.
     data := self.dispatch.overloads&.nested_index(os.as_index());
     key: OverloadKey = (arg = f_ty.arg, req = f_ty.ret);
     if data.inline_cache._0& == key& {
@@ -3766,7 +3758,8 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
         //       i could just get rid of it and always generate a function that passes the arguments.    -- Jul 31
         if expr.expr&.is(.Call) && f.arg.is_raw_unit() && f.f.expr&.is(.Value) && self.get_type(f.f.ty).is(.Fn).or(f.f.ty == FuncId) {
             fid := FuncId.assume_cast(f.f.expr.Value.bytes&)[];
-            assert(self.get_fn_callable(fid).is_none(), "ICE: i expect it to never be ready by now? otherwise we would have done the call in check_quick_eval?");
+            // TODO: now with threads it might be ready by now
+            assert(NEW_COMPTIME_JIT || self.get_fn_callable(fid).is_none(), "ICE: i expect it to never be ready by now? otherwise we would have done the call in check_quick_eval?");
             self.dispatch.enclosing_function = old_func;
             return(Suspend = self.wait_for(Jit = fid));
         };
@@ -3841,6 +3834,10 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
     fake_func&.set_flag(.TryConstantFold);
     fake_func.finished_arg = (Some = void);
     fake_func.finished_ret = (Some = ret_ty);
+    
+    @if(TRACE_CALLS) {  
+        fake_func.name = self.pool.insert_owned(expr.log(self).clone(self.get_alloc()).items());
+    };
     fake_func.cc = (Some = .CCallReg);    
     fid := self.add_function(fake_func);
     @log_event("imm eval wait for lit %: %", fid, expr.log(self)) self;
@@ -4021,19 +4018,13 @@ fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
         return(Suspend = self.wait_for(Jit = fid))
     };
     
-    args: List(i64) = list(2, temp());
-    args&.push(FatExpr.int_from_ptr(invocation.arg));
-    args&.push(FatExpr.int_from_ptr(invocation.target));
-    ::RsVec(i64);
-    args := args.rs();
-    
     self.last_loc = expr.loc;
     f_ty := func.finished_ty().expect("known type once compiled");
     assert(f_ty.ret == fat_expr_type, "tried to call macro with bad ret type. missing overload? \nresolve_in_overloadset assumes someone later will typecheck so giving a garabge match is fine");
     assert(f_ty.arg.eq(fat_expr_type).or(f_ty.arg == pair), "tried to call macro with bad arg type. missing overload? \nresolve_in_overloadset assumes someone later will typecheck so giving a garabge match is fine");
     expr.expr = (Poison = .InProgressMacro);  // they call me RefCell<FatExpr> because im always refing cells 
-    result := @try(self.call_dynamic(fn_ptr.int_from_rawptr(), f_ty&, args&)) return;
-    expr[] = FatExpr.assume_cast(result&)[];
+    callee := assume_types_fn(Arg = Ty(FatExpr, FatExpr), Ret = FatExpr, ptr = fn_ptr);
+    expr[] = callee(invocation.arg[], invocation.target[]);  // :call_dynamic_values
     @log_event("macro output: %", expr.log(self)) self;
     // :InlineFoldHack
     // TODO: garbage garbage garbage HACK. 

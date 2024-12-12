@@ -19,10 +19,10 @@ SymbolInfo :: @struct(
     name: Str,
     inline: *Qbe.Fn, // nullable
     fixups: RsVec(Fixup),
-    // or -1 if not referenced yet. only relevant for imported functions. 
+    // or -1 if not referenced yet. valid: DynamicPatched
     // this gets repurposed when fixups_locked. 
     got_lookup_offset: i64,
-    segment: SegmentType, // only valid when kind == Local
+    segment: SegmentType, // valid: Local
     //  local: offset in the segment
     // import: offset in stubs to trampoline (if function)
     offset: i64,
@@ -30,7 +30,9 @@ SymbolInfo :: @struct(
     local_but_marked_for_relocation: bool,
     is_thread_local: bool,  
     referenced: bool,  // took address or called before knowing it was inlinable so you must actually emit the function.
+    weak: bool,
     jit_addr: rawptr, // valid when kind == .DynamicPatched and goal == .JitOnly
+    size: i64,  // only set for functions currently. 
 );
 
 ::enum_basic(SymbolKind);
@@ -99,7 +101,7 @@ fn make_exec(self: *QbeModule) void = {
     if(len == 0, => return());
     res := mprotect(u8.raw_from_ptr(self.start_of_writable_code), len, prot); 
     assert(res.value.eq(0), "mprotect failed");
-    clear_instruction_cache(u8.raw_from_ptr(self.start_of_writable_code), u8.raw_from_ptr(end[]));
+    clear_instruction_cache(u8.raw_from_ptr(self.start_of_writable_code), u8.raw_from_ptr(end[]));  // IMPORTANT
         
     PAGE_SIZE :: 16384; // TODO: ask the os for this. we're wasting hella memory on linux. 
     page_start := u8.int_from_ptr(end[]) / PAGE_SIZE * PAGE_SIZE;
@@ -107,21 +109,27 @@ fn make_exec(self: *QbeModule) void = {
     self.start_of_writable_code = end[];
 }
 
-fn get_addr(self: *QbeModule, name: Str) ?rawptr = {
+fn get_addr(self: *QbeModule, id: u32) ?Ty(rawptr, i64) = {
     assert(!self.fixups_locked, "you can't get a jit pointer after emitting for aot becuase it stomps data with relocation info.");
-    id := self.intern(name);
-    result: ?rawptr = .None;
+    result: ?Ty(rawptr, i64) = .None;
     use_symbol(self, id) { symbol | 
         result = get_addr(self, symbol);
     };
     result
 }
 
-fn get_addr(self: *QbeModule, symbol: *SymbolInfo) ?rawptr = {
+fn get_addr(self: *QbeModule, name: Str) ?rawptr = {
+    if get_addr(self, self.intern(name)) { a |
+        return(Some = a._0);
+    };
+    .None
+}
+
+fn get_addr(self: *QbeModule, symbol: *SymbolInfo) ?Ty(rawptr, i64) = {
     if(symbol.kind != .Local, => return(.None));
     segment := self.segments&[symbol.segment];
     addr    := segment.mmapped.ptr.offset(symbol.offset);
-    (Some = u8.raw_from_ptr(addr))
+    (Some = (u8.raw_from_ptr(addr), symbol.size))
 }
 
 // TODO: be able to specify mutable or constant
@@ -199,7 +207,7 @@ fn emit_data_to_segment(self: *QbeModule, dat: *Qbe.Dat) void = {
                 use_symbol(self, id) { symbol | 
                     mark_referenced(self, id, symbol);
                     if self.get_addr(symbol) { value |
-                        ptr[] = int_from_rawptr(value);
+                        ptr[] = int_from_rawptr(value._0);
                     };
                     // Since we need the absolute address in memory, even local symbols need a relocation. 
                     symbol.fixups&.push((patch_at = next[], type = .DataAbsolute), self.gpa);
@@ -250,7 +258,7 @@ fn align_to(s: *SegmentCursor, align: i64) void = {
 
 fn put_jit_addr(self: *QbeModule, name: u32, addr: rawptr) void = {
     use_symbol(self, name) { symbol |
-        @assert(symbol.kind == .Pending, "Redeclared symbol %", name);
+        @assert(symbol.kind == .Pending, "(put_jit_addr) redeclared symbol %: %", name, symbol.name);
         symbol.kind = .DynamicPatched;
         symbol.jit_addr = addr;
         self.do_fixups(u8.ptr_from_raw(addr), symbol);
@@ -305,16 +313,17 @@ fn do_jit_fixups(self: *QbeModule, id: u32, segment: SegmentType, final_offset: 
     @assert(final_offset >= 0 && final_offset < self.segments&[segment].mmapped.len, "thats not in the segment");
     use_symbol(self, id) { symbol | 
         @debug_assert(int_from_ptr(@type symbol[], symbol) != 0, "fixups for a null symbol! (forgot to set Fn.lnk.id?)"); // only catches it if you haven't had something hash to 0 yet. 
-        @assert(symbol.kind != .Local, "Redeclared symbol %", symbol.name);
+        @assert(symbol.weak || symbol.kind != .Local, "(do_jit_fixups) redeclared symbol %: %", name, symbol.name);
         symbol.segment = segment;
         symbol.offset = final_offset;
         symbol.kind = .Local;
         dest := self.segment_address(symbol.segment, symbol.offset);
         fixups := symbol.fixups&;
         self.do_fixups(dest, symbol);
-        if self.goal.type == .Exe || self.goal.type == .Dynamic { //  || symbol.segment == .Code // :canireallynothavecodeberelative
+        if self.goal.type == .JitOnly || self.goal.type == .Exe || self.goal.type == .Dynamic { //  || symbol.segment == .Code // :canireallynothavecodeberelative
             // Since it's a local symbol, we don't care about the relocations anymore. The linker never needs to know. 
             // TODO: actually thats also true for imports becuase calls go through __got. 
+            // TODO: for jitonly you do need to keep __got for weak. 
             unordered_retain(fixups, fn(it) => it.type&.is(.DataAbsolute));
             if(fixups.len == 0, => fixups.drop(self.gpa));
         } else {
@@ -341,4 +350,13 @@ fn do_fixups(self: *QbeModule, address: *u8, symbol: *SymbolInfo) void = {
     if new_got_reloc { it | // avoided reallocating while iterating. rustc would be proud.
         symbol.fixups&.push(it, self.gpa);
     };
+}
+
+// :ThreadSafety use cas?
+fn symbol_is_ready(m: *QbeModule, s: u32) bool = {
+    r := false;
+    use_symbol(m, s) { s |
+        r = s.size != 0 || (s.kind != .Local && !s.jit_addr.is_null());
+    };
+    r
 }

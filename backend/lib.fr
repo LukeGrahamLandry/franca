@@ -31,9 +31,6 @@
 #include_std("backend/amd64/isel.fr");
 #include_std("backend/opt/slots.fr");
 
-ENABLE_INTERNAL_QBE :: true;  // until i want to enable it on github actions
-DO_INLINING :: true; // TODO: make this a runtime toggle so you can make sure you're actually testing calls
-
 // easy-ish (?) things to try to get used to making changes. 
 // TODO: if they don't do it already: 
 //       - track known truthyness per block (based on jumps in dominators)
@@ -61,7 +58,6 @@ DO_INLINING :: true; // TODO: make this a runtime toggle so you can make sure yo
 // TODO: don't do extra copies of arg/ret when just passing through to another call.
 // TODO: arm isel can use ldp/stp for consecutive loads/stores and simplify:blit can do it in pairs to make that happen. 
 //       i do a lot of copies so that might be an easy win for code size at least. 
-// TODO: stop using c strings all over the place. 
 // TODO: ir test that uses opaque types
 
 QbeModule :: @rec @struct(
@@ -98,9 +94,29 @@ QbeModule :: @rec @struct(
     local_needs_reloc: List(u32),
     inlinable_but_referenced_later: List(u32),
     
-    // TODO: everything that touches these needs to be rewritten eventually. 
-    ____ := false,
+    ____: bool,
     supports_self_sign: bool,  // this was in zeroed padding before so the old version in ../boot will have false and current default_driver will use codesign binary like it used to -- Nov 28
+    initialized := false,
+    
+    // When this is set, forward references to symbols always emit an inline load from the global 
+    // offset table instead of using an instruction with a direct offset that must be patched later.
+    // this is useful for jitting without needing to go back and modify code. 
+    got_indirection_instead_of_patches := false,
+    
+    // :JitMemProtect the length of the name is proportional to how much they are intent on wasting my time.  
+    //
+    // They won't let you have RWX pages, but if you call pthread_jit_write_protect_np, you can have pages that 
+    // are writable on one thread but executable on another by passing MAP_JIT to mmap, which would be great, 
+    // except that you control the protection for ~every~ MAP_JIT page together per thread. So you can't 
+    // have a jitted program create a new MAP_JIT area and write code into it. A work around would be having the 
+    // jitted code write into other memory and then call a fully AOT function that toggles protection and copies 
+    // the into the MAP_JIT memory. This also isn't a problem if there's a clear boundery between when you're creating 
+    // code and executing it because you can just call mprotect at the end when you're done. 
+    //
+    // The main take away is the franca compiler wants to use this so comptime franca code cannot set this to true on aarch64 macos. 
+    //
+    use_map_jit_on_apple_silicon: bool, 
+    
     outf := zeroed(*FILE),
     
     forever: ArenaAlloc,
@@ -127,26 +143,56 @@ MAX_GOT_SIZE :: 1.shift_left(15);
 SIZE_OF_STUBS :: 1.shift_left(10); // TODO: not this :explain
 COMMANDS_SIZE_GUESS :: macos_page_size; // :explain
 
-fn init_default_module(goal: QbeTargetEnv) QbeModule = 
-    init(1.shift_left(25), libc_allocator, page_allocator, goal);
+fn init_default_module(goal: QbeTargetEnv, expecting_rwx: bool) QbeModule = 
+    init(1.shift_left(25), libc_allocator, page_allocator, goal, expecting_rwx);
 
-// the allocators need to not be temp() because we reset temp()
-fn init(segment_size: i64, gpa: Alloc, code_alloc: Alloc, goal: QbeTargetEnv) QbeModule = {
+// - the allocators need to not be temp() because we reset temp()
+// - expecting_rwx only matters when jitting. See the comment on use_map_jit_on_apple_silicon if running on macos. 
+//   if you jit with expecting_rwx=false, you have to call make_exec before trying to run the code. 
+//   Regardless, be careful of cache coherency on aarch64, see comment on lib/sys/process.fr/clear_instruction_cache().
+fn init(segment_size: i64, gpa: Alloc, code_alloc: Alloc, goal: QbeTargetEnv, expecting_rwx: bool) QbeModule = {
     gpa = todo_allocator;
     m := QbeModule.zeroed();
     m.supports_self_sign = true;
     m.forever = init(gpa, size_of(Qbe.Ins) * 1.shift_left(20) + size_of(SymbolBucket) * IMask + 1.shift_left(10));
     forever := m.forever&.borrow();
     m.segments = EnumMap(SegmentType, SegmentCursor).zeroed();
-    mem := code_alloc.alloc(u8, segment_size * 3); // TODO: ask for the alignment we need.
-    m.start_of_writable_code = mem.ptr;
-    make_segment :: fn(s: SegmentType, start: i64, end: i64) void => {
+    m.use_map_jit_on_apple_silicon = expecting_rwx && goal.type == .JitOnly && goal.arch == .aarch64 && goal.os == .macos;
+    
+    if m.use_map_jit_on_apple_silicon {
+        // :JitMemProtect 
+        prot := bit_or(@as(i64) MapProt.Exec, @as(i64) MapProt.Write);
+        n1   := 1.neg();
+        addr := 0.rawptr_from_int();
+        ptr  := mmap_jit(addr, segment_size * 3, prot, 0);
+        code_mem: []u8 = (ptr = u8.ptr_from_raw(ptr), len = segment_size * 3);
+        
+        // The data segments we don't want to be executable. 
+        data_mem := code_alloc.alloc(u8, segment_size * 2); // TODO: ask for the alignment we need.
+        
+        // order matters!
+        m.start_of_writable_code = code_mem.ptr;
+        make_segment(code_mem, .Code, 0, segment_size);  // :CodeIsFirst
+        make_segment(data_mem, .ConstantData, 0, segment_size);
+        make_segment(data_mem, .MutableData, segment_size, segment_size*2);
+    } else {
+        @assert(!expecting_rwx, "TODO: linux jit support (i haven't done the arm varargs abi yet either i think)");
+        // TODO: im pretty sure linux lets me just have RWX pages without all apple's hoops.
+        //       so do that if they want. 
+        
+        mem := code_alloc.alloc(u8, segment_size * 3); // TODO: ask for the alignment we need.
+        
+        // order matters!
+        m.start_of_writable_code = mem.ptr;
+        make_segment(mem, .Code, 0, segment_size);  // :CodeIsFirst
+        make_segment(mem, .ConstantData, segment_size*1, segment_size*2);
+        make_segment(mem, .MutableData, segment_size*2, segment_size*3);
+    };
+    make_segment :: fn(mem: []u8, s: SegmentType, start: i64, end: i64) void => {
         m.segments&.insert(s, (mmapped = mem.slice(start, end), next = mem.index(start)));
     };
-    // order matters!
-    make_segment(.Code, 0, segment_size);  // :CodeIsFirst
-    make_segment(.ConstantData, segment_size*1, segment_size*2);
-    make_segment(.MutableData, segment_size*2, segment_size*3);
+    
+    m.initialized = true;
     m.gpa = gpa;
     m.goal = goal;
     m.exports = list(gpa);
@@ -190,6 +236,27 @@ fn init(segment_size: i64, gpa: Alloc, code_alloc: Alloc, goal: QbeTargetEnv) Qb
     m.curi[] = m.insb.index_unchecked(Qbe.MaxInstructions);
     m.symbol_memmove = m&.intern("memmove");
     
+    @if(use_threads) pthread_mutex_init(m.types_mutex&, 0).unwrap();
+    m
+}
+
+fn init_empty_for_template_only(gpa: Alloc) QbeModule = {
+    m := QbeModule.zeroed();
+    m.initialized = true;
+    m.forever = init(gpa, size_of(Qbe.Ins) * 1.shift_left(20) + size_of(SymbolBucket) * IMask + 1.shift_left(10));
+    forever := m.forever&.borrow();
+    m.gpa = gpa;
+    m.symbols = forever.alloc_zeroed(SymbolBucket, IMask + 1);
+    //m.debug_out = fdopen(STD_ERR, "a".sym().c_str());
+    m.types  = forever.box(@type m.types[]);
+    mem := forever.alloc(Qbe.Ins, Qbe.MaxInstructions);
+    ::?*Array(Qbe.Ins, Qbe.MaxInstructions);
+    m.insb = mem.as_array().unwrap();
+    m.curi   = forever.box(@type m.curi[]); // TODO: megadumb if its the page allocaotr
+    m.debug  = forever.box_zeroed(@type m.debug[]);
+    m.target = forever.box_zeroed(@type m.target[]);
+    m.types[] = new_long_life(0); // TODO: check the magic in QbeBuilder.init to make sure you remember to do this. 
+    m.curi[] = m.insb.index_unchecked(Qbe.MaxInstructions);
     @if(use_threads) pthread_mutex_init(m.types_mutex&, 0).unwrap();
     m
 }
@@ -245,10 +312,8 @@ run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
     
     {m.target.abi0}(fnn);
     
-    if DO_INLINING { 
-        inlcalls(fnn);
-    };
-    
+    inlcalls(fnn);
+
     fillrpo(fnn);
     fillpreds(fnn);
     fill_use(fnn);
@@ -269,14 +334,12 @@ run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
     copy_elimination(fnn); // optional
     fill_use(fnn);
     fold_constants(fnn);
-    if DO_INLINING { 
-        if inlsave(fnn) {
-            // all uses might be inlined so we suspend processing until we know you took a function pointer later. 
-            if m.debug["G".char()] {
-                @fmt_write(m.debug_out, "\nSuspending inlinable function: %\n", fnn.name());
-            };
-            return();
+    if inlsave(fnn) {
+        // all uses might be inlined so we suspend processing until we know you took a function pointer later. 
+        if m.debug["G".char()] {
+            @fmt_write(m.debug_out, "\nSuspending inlinable function: %\n", fnn.name());
         };
+        return();
     };
     finish_qbe_passes(fnn);
     reset_temporary_storage(mark);

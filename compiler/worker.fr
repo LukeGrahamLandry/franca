@@ -87,13 +87,8 @@ fn main_thread_pump(comp: CompCtx, shared: *CodegenShared, fns: []FuncId) void =
         wrap_with_runtime_init(comp, shared, fns[0], idx&);
     };
     
-    shared.join_codegen_thread();
-    shared.m.emit_suspended_inlinables();
-    if when == .Aot {
-        if env.static_context_var { context | 
-            todo()
-        };
-    };
+    @if(use_threads) shared.join_codegen_thread();
+    @if(!use_threads) shared.m.emit_suspended_inlinables();  // when using apple's jit bullshit this has to happen on the other thread!
 }
 
 // TODO: factor out this so the other one can call it.  
@@ -140,6 +135,9 @@ use_threads :: {
 codegen_queue_size :: if(use_threads, => 128, => 2);  // (this is not the number of threads! just the amount of backlog we allow). 
 
 codegen_thread_main :: fn(shared: *CodegenShared) void = {
+    @debug_assert(use_threads);
+    pthread_jit_write_protect_np(false);  // :JitMemProtect this thread wants to write
+    
     idx := 0;
     @debug_assert(use_threads);
     loop {
@@ -147,6 +145,8 @@ codegen_thread_main :: fn(shared: *CodegenShared) void = {
             do_codegen(shared.m, entry);
         } else {
             if shared.no_more_functions {
+                emit_suspended_inlinables(shared.m); // needs to happen on codegen thread for apple's jit shit.
+            
                 // pthread_getcpuclockid doesn't exist? so we have to do this here
                 shared.codegen_time = clock_ms(CLOCK_THREAD_CPUTIME_ID);
                 shared.no_more_codegen = true;
@@ -196,6 +196,9 @@ fn do_codegen(m: *QbeModule, entry: *CodegenEntry) void = {
             f.globals.set_debug_types(entry.logging, true);
             run_qbe_passes(f);
             f.globals.set_debug_types(entry.logging, false);
+            if f.globals.got_indirection_instead_of_patches {
+                
+            };
         }
         fn Asm(it) => {
             // This is trivial but we want to do it without threads fighting. 
@@ -205,6 +208,8 @@ fn do_codegen(m: *QbeModule, entry: *CodegenEntry) void = {
         fn JitImport(it) => {
             m.put_jit_addr(it.lnk.id, it.addr);
         }
+        // TODO: is this still right if some args are passed on the stack? 
+        //       i feel like we'll be off by one to look over saved rbp + return address. :FUCKED
         fn Bounce(it) => {
             // TODO: set SymbolInfo.inline if we've already compile the target. 
             f := temp().box_zeroed(Qbe.Fn);
@@ -247,6 +252,7 @@ CodegenShared :: @struct(
     codegen_time := 0,
     thread: Thread,
     constants_used: DynamicBitSet,
+    type_indices: HashMap(Type, i64),
 );
 
 CodegenState :: @enum(i64) (WaitingForBouba, UsedByBouba, WaitingForKiki, UsedByKiki);
@@ -285,7 +291,7 @@ CodegenWorker :: @FnPtr(s: *CodegenShared) void;
 fn init(m: *QbeModule, worker: CodegenWorker) *CodegenShared = {
     a := libc_allocator;
     q := a.alloc(CodegenEntry, codegen_queue_size); // :Leak
-    shared := a.box(CodegenShared);  // :leak
+    shared := a.box_zeroed(CodegenShared);  // :leak
     shared.queue = q;
     shared.m = m;
     shared.constants_used = empty(a);
@@ -301,6 +307,7 @@ fn init(m: *QbeModule, worker: CodegenWorker) *CodegenShared = {
     @if(use_threads) {
         shared.thread = start_thread(CodegenShared, worker, shared);
     };
+    shared.type_indices = init(a); 
     
     shared
 }
@@ -344,7 +351,8 @@ fn get_log_types(comp: CompCtx, fid: FuncId) Str = {
             return("P");
         };
     };
-    panic("ICE: #log_ir was set but did not find tag on the function")
+    //panic("ICE: #log_ir was set but did not find tag on the function")
+    "P"  // HACK for @if(TRACE_SHIMS)
 }
 
 fn join_codegen_thread(shared: *CodegenShared) void = {
@@ -417,9 +425,4 @@ fn emit_constant(comp: CompCtx, m: *QbeModule, id: BakedVarId, out: *List(Qbe.Da
     };
     dat := next_dat();
     dat.type = .DEnd;
-}
-
-fn temp_env_flag_enabled($s: Str) bool = {
-    var := getenv("FRANCA_NEW".sym().c_str());
-    !var.ptr.is_null() && var.str() == "true"
 }

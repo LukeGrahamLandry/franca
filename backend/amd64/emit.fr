@@ -17,6 +17,7 @@ AmdState :: @struct(
 
 fn emit_func_amd64(m: *QbeModule, f: *Qbe.Fn, file: *FILE) void = {
     @debug_assert_eq(m.goal.arch, .x86_64, "how did we get here?");
+    @debug_assert(!m.got_indirection_instead_of_patches, "TODO: got_indirection_instead_of_patches impl in amd64 call");
     code := m.segments&[.Code]&;
     name_id := f.lnk.id;
     maybe_add_export(m, name_id, f.lnk.export);
@@ -31,6 +32,11 @@ fn emit_func_amd64(m: *QbeModule, f: *Qbe.Fn, file: *FILE) void = {
     
     emit_the_code(e&);
     code.next = code.next.offset(e.a.len() - e.last_saved_offset);
+    use_symbol(m, name_id) { s | 
+        s.size = e.a.len();
+        s.weak = s.weak || f.lnk.weak;
+        @debug_assert(s.size != 0, "zero size function?");
+    };
     maybe_llvm_dis(f, e.a.items(), "--arch=x86-64");
 }
 
@@ -485,16 +491,19 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
                     @debug_assert_eq(c.bits.i, 0, "call to offset from symbol seems like a mistake?");
                     off := c.bits.i;
                     use_symbol(e.m, c.sym.id) { symbol |
-                        if symbol.kind == .Local {
-                            // +4 for the size of the encoded displacement. address is relatitive to the start of the next instruction
-                            // TODO: make sure this is right
-                            off += distance_between(e.m, .Code, e.start_of_function + e.a.len + 4, symbol.segment, symbol.offset);
-                            if e.m.debug["T".char()] {
-                                write(e.m.debug_out, items(@format("# call offset % for '%' %[%]\n", off, symbol.name, symbol.segment, symbol.offset) temp()));
-                            };
-                        } else {
-                            if e.m.debug["T".char()] {
-                                write(e.m.debug_out, items(@format("# pending call to %\n", symbol.name) temp()));
+                        @match(symbol.kind) {
+                            fn Local() => {
+                                // +4 for the size of the encoded displacement. address is relatitive to the start of the next instruction
+                                // TODO: make sure this is right
+                                off += distance_between(e.m, .Code, e.start_of_function + e.a.len + 4, symbol.segment, symbol.offset);
+                                if e.m.debug["T".char()] {
+                                    write(e.m.debug_out, items(@format("# call offset % for '%' %[%]\n", off, symbol.name, symbol.segment, symbol.offset) temp()));
+                                };
+                            }
+                            @default => {
+                                if e.m.debug["T".char()] {
+                                    write(e.m.debug_out, items(@format("# pending call to %\n", symbol.name) temp()));
+                                };
                             };
                         };
                         patch_at := e.a.maybe_uninit.ptr.offset(e.a.len);

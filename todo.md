@@ -24,6 +24,7 @@
   but that would make overload resolution even more fragile which might be a bad idea.
 - `Type Error` should tell you where the difference is! and use the right names for enums, etc.
 - `place expression expected pointer dereference` when you forget a `[]` after a call and field access should tell you that.
+- either fix new emit_ir run_tests naming or just change run_tests to generate a big file and compile it as its own thing.
 
 ##
 

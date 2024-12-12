@@ -45,8 +45,8 @@ Command :: @struct(cfg: Options, action: Action, file: Str, child_args: []Str);
 
 forever :: todo_allocator;
 fn driver(vtable: *ImportVTable) void #export = {
-    @eprintln("driver NEW=%", NEW);
     cmd := parse_cli_args();
+    @eprintln("driver NEW=%", NEW[]);
     build_options := vtable.default_build_options();
     build_options.retain_function_names = cmd.cfg.keep_names;
     build_options.deduplicate_bytecode = cmd.cfg.deduplicate;
@@ -146,15 +146,13 @@ fn driver(vtable: *ImportVTable) void #export = {
                 assert(!cmd.cfg.show_asm, "TODO: -S with jit");
                 // TODO: how to pass cli args
                 ptr := if cmd.cfg.qbe {
-                    @if(ENABLE_INTERNAL_QBE, {
-                        m = init_default_module_dyn(vtable, (os = os, arch = arch, type = m.goal.type));
-                        emit_qbe_included_dyn(m&, c&, @slice(fid), .WrapMain, NEW);
-                        m&.fill_from_libc();
-                        m&.make_exec();
-                        or m&.get_addr("main") {
-                            panic("couldn't find main")
-                        }
-                    }, @as(rawptr) panic("internal qbe is disabled"))
+                    m = init_default_module_dyn(vtable, (os = os, arch = arch, type = m.goal.type));
+                    emit_qbe_included_dyn(m&, c&, @slice(fid), .WrapMain, NEW[]);
+                    m&.fill_from_libc();
+                    m&.make_exec();
+                    or m&.get_addr("main") {
+                        panic("couldn't find main")
+                    }
                 } else {
                     c.get_jitted(fid)
                 };
@@ -193,16 +191,14 @@ fn driver(vtable: *ImportVTable) void #export = {
                 if cmd.cfg.jit {
                     name := c.get_string(c.get_function_name(fid));
                     ptr := if cmd.cfg.jit {
-                        @if(ENABLE_INTERNAL_QBE, {
-                            // would be faster if you could share the module between runs
-                            m = init_default_module_dyn(vtable, (os = os, arch = arch, type = m.goal.type));
-                            _ := emit_qbe_included_dyn(m&, c&, @slice(fid), .WrapMain, NEW);
-                            m&.fill_from_libc();
-                            m&.make_exec();
-                            or m&.get_addr(name) {
-                                panic("couldn't find main")
-                            }
-                        }, @as(rawptr) panic("internal qbe is disabled"))
+                        // would be faster if you could share the module between runs
+                        m = init_default_module_dyn(vtable, (os = os, arch = arch, type = m.goal.type));
+                        _ := emit_qbe_included_dyn(m&, c&, @slice(fid), .WrapMain, NEW[]);
+                        m&.fill_from_libc();
+                        m&.make_exec();
+                        or m&.get_addr(name) {
+                            panic("couldn't find main")
+                        }
                     } else {
                         c.get_jitted(fid)
                     };
@@ -346,53 +342,50 @@ fn compile_with_qbe(c: CompCtx, fid: FuncId, entry: ProgramEntry, arch: Arch, os
     //ir_out.remove();   
 }
 
-NEW :: true;
+NEW :: @static(bool) true; // set by cli flag
 
 fn compile_with_included_qbe(c: CompCtx, fid: []FuncId, entry: ProgramEntry, arch: Arch, os: Os, goal: QbeOutputPurpose) void = {
-    @if(ENABLE_INTERNAL_QBE, {
-        m := init_default_module_dyn(c.vtable, (os = os, arch = arch, type = goal));
-        
-        env: TargetEnv = (arch = arch, os = os);
-        asm_text := emit_qbe_included_dyn(m&, c&, fid, entry, NEW);
-        
-        asm_out := "a.out".sym().c_str(); // TODO: the version of tmp file that lets you have an extension because it wants the .s
-        // TODO: new footgun, you'll get the wrong compiler in the context if you try to call sym/c_str at runtime of the driver now.  
-        //       only a problem before both got the compiler from the same place.
-        //       now the old idiom would work but it feels weird still, idk. 
-        ir_out := open_trunc(asm_out).unwrap(); // TODO: sane error message if you forget to unwrap this
-        for(asm_text&){bucket|
-            if !ir_out&.write(bucket) {
-                panic("write failed");
-            }
-        };
-        
-        args: List(Str) = list(temp());
-        @match(goal) {
-            fn Exe() => {
-                ir_out.close();
-                // keep the old path around for now so i don't have to update ../boot/<> -- Nov 28
-                if !m.supports_self_sign {
-                    println("exec codesign");
-                    args&.push("-s");
-                    args&.push("-");
-                    args&.push("a.out");
-                    success := run_cmd_blocking("codesign", args.items()); 
-                    assert(success, "sign failed");
-                };
-            }
-            fn AsmText() => {
-                panic("we don't do asm text anymore");
-            }
-            fn Relocatable() => {
-                ir_out.close();
-            }
-            fn Dynamic() => {
-                ir_out.close();
-            }
-            @default => panic("unhandled QbeOutputType");
+    m := init_default_module_dyn(c.vtable, (os = os, arch = arch, type = goal));
+    
+    env: TargetEnv = (arch = arch, os = os);
+    bytes := emit_qbe_included_dyn(m&, c&, fid, entry, NEW[]);
+    
+    asm_out := "a.out".sym().c_str(); // TODO: the version of tmp file that lets you have an extension because it wants the .s
+    // TODO: new footgun, you'll get the wrong compiler in the context if you try to call sym/c_str at runtime of the driver now.  
+    //       only a problem before both got the compiler from the same place.
+    //       now the old idiom would work but it feels weird still, idk. 
+    ir_out := open_trunc(asm_out).unwrap(); // TODO: sane error message if you forget to unwrap this
+    for(bytes&){bucket|
+        if !ir_out&.write(bucket) {
+            panic("write failed");
         }
-        //ir_out.remove();   
-    }, panic("internal qbe is disabled"));
+    };
+    
+    args: List(Str) = list(temp());
+    @match(goal) {
+        fn Exe() => {
+            ir_out.close();
+            // keep the old path around for now so i don't have to update ../boot/<> -- Nov 28
+            if !m.supports_self_sign {
+                println("exec codesign");
+                args&.push("-s");
+                args&.push("-");
+                args&.push("a.out");
+                success := run_cmd_blocking("codesign", args.items()); 
+                assert(success, "sign failed");
+            };
+        }
+        fn AsmText() => {
+            panic("we don't do asm text anymore");
+        }
+        fn Relocatable() => {
+            ir_out.close();
+        }
+        fn Dynamic() => {
+            ir_out.close();
+        }
+        @default => panic("unhandled QbeOutputType");
+    };
 }
 
 fn load_file(path: Str, vtable: *ImportVTable, build_options: *BuildOptions) CompCtx = {
@@ -491,6 +484,9 @@ fn parse_cli_args() Command = {
             };
             @case("-dynamiclib") => {
                 cfg.dynamiclib = true;
+            };
+            @case("-legacy") => {  // garbage! remove me! :HACK
+                NEW[] = false;
             };
             @default => {
                 if arg.starts_with("-ctx=") {

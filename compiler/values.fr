@@ -630,18 +630,21 @@ fn take(self: *ReadBytes, size: i64) ?[]u8 = {
 /// Dynamic Call ///
 
 fn call_dynamic_values(program: *SelfHosted, f_ptr: i64, f_ty: *FnType, args_value: []u8) Res(Values) = {
+    if NEW_COMPTIME_JIT {
+        return(Ok = call_dynamic_values(program, f_ptr, f_ty[], args_value));
+    };
     parts: List(i64) = list(temp());
     reader: ReadBytes = (bytes = args_value, i = 0);
     @try(program.comp().deconstruct_values(f_ty.arg, reader&, parts&, .None)) return;
-    parts: RsVec(i64) = parts.rs();
-    program.call_dynamic(f_ptr, f_ty, parts&)
-}
+    args: RsVec(i64) = parts.rs();
+    args := args&;
+    ptr := f_ptr;
+    
+    // TODO: this is the only place I still use float_mask.
+    //       i could get rid of it if i switch to using PrimSig.
+    //       then the next step is to lazily jit shims so i don't have to implement the calling convention twice. 
+    // Note: FnType by ptr because i think i do (u32, u32) calling convention wrong. 
 
-// TODO: this is the only place I still use float_mask.
-//       i could get rid of it if i switch to using PrimSig.
-//       then the next step is to lazily jit shims so i don't have to implement the calling convention twice. 
-// Note: FnType by ptr because i think i do (u32, u32) calling convention wrong. 
-fn call_dynamic(program: *SelfHosted, ptr: i64, f_ty: *FnType, args: *RsVec(i64)) Res(Values) = {
     @if(TRACE_CALLS) @println("[call dynamic at addr=%] args=%", ptr, args.items());
     
     arg := program.get_info(f_ty.arg);

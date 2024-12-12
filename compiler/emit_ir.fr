@@ -10,6 +10,7 @@ EmitIr :: @struct(
     blk: *Qbe.Blk, 
     debug: bool,
     context := QbeNull,
+    static_context_var: ?BakedVarId,
     dyn_context: bool,
     func: FuncId,
     blocks: List(*Qbe.Blk),
@@ -47,6 +48,7 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, id
         ::tagged(Placement);
         func := comp.get_function(f); 
         opts := comp.get_build_options();
+        env := comp.get_comptime_env();
         self: EmitIr = (
             f = temp().box_zeroed(Qbe.Fn),
             program = comp,
@@ -58,6 +60,7 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, id
             blocks = list(temp()),
             debug = opts.debug_info || func.get_flag(.LogIr),
             dyn_context = if(when == .Aot, => opts.implicit_context_runtime, => opts.implicit_context_comptime),
+            static_context_var = env.static_context_var,
             when = when,
             m = m,
             entry = entry,
@@ -66,10 +69,10 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, id
             pending = pending,
             idx = idx,
         );
+        if self.dyn_context {
+            @debug_assert(self.static_context_var.is_none());
+        };
         @debug_assert(func.get_flag(.EnsuredCompiled), "fn not compiled?");
-        self.f.default_init(m);
-        self.f.leaf = true;
-        self.f.lnk.id = m.intern(self&.fmt_fn_name(f));  // TODO: set export
         entry.task = (Func = self.f);
         
         res := self&.emit_body(f);
@@ -111,44 +114,50 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, id
 // TODO: this is going to change the calling convention for small strange aggragates maybe (to match c). 
 //       hopefully i don't use any of those for something important. 
 
+ArgInfo :: @struct(r: Qbe.Ref, type: Type, name: ?Var, scalar: bool, void: bool, k: Qbe.Cls);
+
 // TODO: if you have an unclosed string it randomly decides later top level vars are undeclared? -- Jul 7 
+// :EmitIrCall
 // note: mirrors compile_for_arg
-fn bind_args(self: *EmitIr, arguments: *Pattern) Res(void) #once = {
-    ArgInfo :: @struct(r: Qbe.Ref, type: Type, name: ?Var, scalar: bool);
-    args := ArgInfo.list(arguments.bindings.len, temp());
-    
-    func := self.program.get_function(self.func);
-    arg_ty := func.finished_arg.unwrap();
+// appends par/parc instructions to f.start
+fn emit_par_instructions(program: CompCtx, shared: *CodegenShared, arguments: *Pattern, arg_ty: Type, f: *Qbe.Fn) []ArgInfo = {
+    count := arguments.bindings.len;
+    args := ArgInfo.list(count, temp());
+    grow(f.start.ins&, f.start.nins.zext() + count);
     
     // Need to emit all the `arg` instructions at the beginning of the start block before doing any allocas. 
     each arguments.bindings { binding |
         continue :: local_return;
         @debug_assert(binding.kind != .Const, "tried to emit function with $const parameter");
         ty := binding.unwrap_ty();
-        info := self.program.get_info(ty);
+        info := program.get_info(ty);
         name := binding.var();
         if info.stride_bytes == 0 {  // :NoRuntimeRepr
-            if name { name | 
-                self.var_lookup&.insert(name, QbeConZero);
-            };
+            args&.push(r = QbeConZero, type = ty, name = name, scalar = false, void = true, k = .Ke);
             continue();
         };
         
-        _, kk := self.load_op(ty);
+        _, kk := load_op(program, ty);
         scalar := kk != .Ke;
         
         op, k, a0 := @if(scalar, 
             (Qbe.O.par, kk, QbeNull),
-            (Qbe.O.parc, Qbe.Cls.Kl, self.get_aggregate(ty))
+            (Qbe.O.parc, Qbe.Cls.Kl, get_aggregate(program, shared, ty))
         );
-        r := self.f.newtmp("a", k);
-        self.emit(op, k, r, a0, QbeNull);
-        args&.push(r = r, type = ty, name = name, scalar = scalar);
+        r := f.newtmp("a", k);
+        push(f.start, make_ins(op, k, r, a0, QbeNull));
+        args&.push(r = r, type = ty, name = name, scalar = scalar, void = false, k = k);
     };
+    args.items()
+}
+
+fn bind_args(self: *EmitIr) Res(void) #once = {
+    func := self.program.get_function(self.func);
+    arg_ty := func.finished_arg.unwrap();
+    args := emit_par_instructions(self.program, self.shared, func.arg&, arg_ty, self.f);
     
     // only arg instructions and allocas in the start block. 
     self.blk = self.new_block("body");
-    
     each args { a | 
         mem := if(!a.scalar, => a.r) {
             // TODO: use mutable variables if they don't take the address of the argument. 
@@ -157,12 +166,17 @@ fn bind_args(self: *EmitIr, arguments: *Pattern) Res(void) #once = {
             mem
         };
         if a.name { name | 
-            self.declare_var(name, mem, a.type);
+            if a.void {
+                self.var_lookup&.insert(name, QbeConZero);
+            } else {
+                self.declare_var(name, mem, a.type);
+            };
         };
     };
     .Ok
 }
 
+// :EmitIrCall
 // note: mirrors bind_args
 fn compile_for_arg(self: *EmitIr, arg: *FatExpr) Res([]Qbe.Ins) = {
     parts := arg.items();
@@ -226,6 +240,11 @@ fn finalize_blocks(self: *EmitIr) void = {
 
 fn emit_body(self: *EmitIr, f: FuncId) Res(void) #once = { // #log_ir("AIR") 
     func := self.program.get_function(f);
+    m := self.shared.m;
+    self.f.default_init(m);
+    self.f.leaf = true;
+    self.f.lnk.no_inline = func.get_flag(.NoInline);
+    self.f.lnk.id = m.intern(self.fmt_fn_name(f));  // TODO: set export
     
     self.f.start = self.new_block("start");
     self.blk = self.f.start;
@@ -314,7 +333,7 @@ fn emit_body(self: *EmitIr, f: FuncId) Res(void) #once = { // #log_ir("AIR")
     self.entry.logging = self.program.get_log_types(f);
     self.context_par_e();
     // note: this rewrites self.blk
-    @try(self.bind_args(func.arg&)) return;
+    @try(self.bind_args()) return;
     
     // Note: this is different from the body expr type because of early returns.
     ret := self.program.get_function(f)[].finished_ret.unwrap();
@@ -371,7 +390,6 @@ fn emit_body(self: *EmitIr, f: FuncId) Res(void) #once = { // #log_ir("AIR")
         panic(err);
     };
     
-    
     .Ok
 }
 
@@ -400,6 +418,7 @@ fn intrinsic_shim(self: *EmitIr, func: *Func) Ty(Qbe.Ref, Qbe.Ref, Type) = {
 fn ret_op(k: Qbe.Cls) Qbe.J = 
     @as(Qbe.J) @as(i32) Qbe.J.retw.raw() + k.raw()
 
+// :EmitIrCall TODO: it would be nice if i didn't need to repeat so many variations of the par/arg/call/ret logic. 
 fn emit_runtime_call(
     self: *EmitIr,
     f_ty: FnType,
@@ -410,6 +429,7 @@ fn emit_runtime_call(
 ) Res(Qbe.Ref) = { 
     self.f.leaf = false;
     if dyn_context && self.context != QbeNull {
+        @debug_assert(self.dyn_context && self.dyn_context, "tried to dyn context with static context");
         self.emit(.arge, .Kl, QbeNull, self.context, QbeNull);
     };
     cast: i64 = self.blk.nins.zext();  // TODO: ugh
@@ -701,12 +721,10 @@ fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) Res(Qbe.Re
             self.emit_runtime_call(f_ty, arg, p, callee_r, context)
         }
         fn FnPtr(f_ty) => {
-            if self.dyn_context { 
-                caller.set_flag(.YesContext);
-            };
+            caller.set_flag(.YesContext);
             callee := @try(self.compile_expr(f, .Scalar)) return;
             arg    := @try(self.compile_for_arg(arg)) return;
-            self.emit_runtime_call(f_ty.ty, arg, p, callee, self.dyn_context)
+            self.emit_runtime_call(f_ty.ty, arg, p, callee, true)
         }
         fn Label(_) => {
             label := @unwrap(f.as_const(), "called label must be const") return;
@@ -740,18 +758,47 @@ fn emit_intrinsic_new(self: *EmitIr, op: *NewIntrinsicPayload, p: Placement, arg
 fn emit_intrinsic_old(self: *EmitIr, op: *IntrinsicPayload, p: Placement, arg: []Qbe.Ref, caller: *Func, expr_ty: Type) Res(Qbe.Ref) = {
     r := @match(op.bc) {
         fn GetContext() => {
-            @assert(self.dyn_context, "TODO: support static context");
-            caller.set_flag(.YesContext);  // TODO: you might have setcontext for yourself
-            self.unify_placement(p&, expr_ty); // because we don't know if they'll set again before using. meh. 
-            self.context
+            if self.dyn_context {
+                caller.set_flag(.YesContext);  // TODO: you might have setcontext for yourself
+                self.unify_placement(p&, expr_ty); // because we don't know if they'll set again before using. meh. 
+                self.context
+            } else {
+                if self.when == .Jit {
+                    // We want the jitted program to share the context with the compiler, 
+                    // but we can't access the address of the compiler's static context slot, 
+                    // so we just patch in a call to the compiler's own GetContext. 
+                    // It would be correct to do it this way when using implicit_context, 
+                    // but it's sad to be so wasteful when we could just read the register directly.  -- Nov 23
+                    self.jit_call_1to1(@as(rawptr) builtin_get_dynamic_context, arg[0])
+                } else {
+                    context_var := self.static_context_var.expect("have static_context_var for aot");
+                    self.reference_constant(context_var);
+                    ref := self.f.symcon(@tfmt("g%", context_var.id));
+                    context_val := self.f.newtmp("context", .Kl);
+                    self.emit(.load, .Kl, context_val, ref, QbeNull);
+                    context_val
+                }
+            }
         }
         fn SetContext() => {
-            @assert(self.dyn_context, "TODO: support static context");
-            if self.context == QbeNull {
-                self.context = self.f.newtmp("context", .Kl);
-            };
-            self.emit(.copy, .Kl, self.context, arg[0], QbeNull);
-            QbeConZero
+            if self.dyn_context {
+                if self.context == QbeNull {
+                    self.context = self.f.newtmp("context", .Kl);
+                };
+                self.emit(.copy, .Kl, self.context, arg[0], QbeNull);
+                QbeConZero
+            } else {
+                if self.when == .Jit {
+                    // see GetContext case
+                    self.jit_call_1to1(@as(rawptr) set_dynamic_context, arg[0])
+                } else {
+                    context_var := self.static_context_var.expect("have static_context_var for aot");
+                    self.reference_constant(context_var);
+                    ref := self.f.symcon(@tfmt("g%", context_var.id));
+                    self.emit(.storel, .Kw, QbeNull, arg[0], ref);
+                    QbeConZero
+                }
+            }
         }
         fn BitNot() => {
             if(p&.is(.Discard), => return(Ok = QbeNull));
@@ -765,12 +812,19 @@ fn emit_intrinsic_old(self: *EmitIr, op: *IntrinsicPayload, p: Placement, arg: [
     (Ok = self.scalar_result(p, r, expr_ty))
 }
 
+fn jit_call_1to1(self: *EmitIr, callee: rawptr, arg: Qbe.Ref) Qbe.Ref = {
+    result := self.f.newtmp("c", .Kl);
+    callee := self.f.getcon(callee.int_from_rawptr());
+    self.emit(.arg, .Kl, QbeNull, arg, QbeNull);
+    self.emit(.call, .Kl, result, callee, QbeNull);
+    result
+}
+
 fn func_ref(self: *EmitIr, f_id: FuncId) Qbe.Ref #inline = {
     f_id := self.program.follow_redirects(f_id);
     self.pending.push(f_id); // HACK
     self.f.symcon(self.fmt_fn_name(f_id))
 }
-
 
 fn emit_block_expr(self: *EmitIr, expr: *FatExpr, p: Placement) Res(Qbe.Ref) #once = {
     block   := expr.expr.Block&;
@@ -911,7 +965,7 @@ fn as_ref(self: *EmitIr, part: BakedEntry) Qbe.Ref = @match(part) {
     fn FnPtr(f)   => self.func_ref(f);
     fn AddrOf(id) => {
         self.reference_constant(id);
-        self.f.symcon(@tfmt("g%", id.id))
+        self.f.symcon(@tfmt("g%", id.id))  // change intrinsic.context as well if you change this
     }
 };
 
@@ -1135,11 +1189,7 @@ fn declare_var(self: *EmitIr, name: Var, ptr: Qbe.Ref, type: Type) void #inline 
 fn emit(self: *EmitIr, o: Qbe.O, k: Qbe.Cls, dest: Qbe.Ref, a0: Qbe.Ref, a1: Qbe.Ref) void #inline = {
     @debug_assert(k.raw() < 4, "ICE: invalid base in emit_ir:emit %", o.get_name());
     @debug_assert(o != .Oxxx, "ICE: null inst emit_ir:emit");
-    i := make_ins(o, k, dest, a0, a1); 
-    //printins(self.f, i&, self.f.globals.debug_out);
-    nins: i64 = self.blk.nins.zext();  // TODO: ugh
-    addins(self.blk.ins&, nins&, i&);
-    self.blk.nins = nins.trunc();
+    push(self.blk, make_ins(o, k, dest, a0, a1));
 }
 
 // TODO: types larger than 2^16 bytes but you probably don't want to copy those anyway
@@ -1173,10 +1223,7 @@ fn alloca(self: *EmitIr, ty: Type) Qbe.Ref = {
     @debug_assert(info.align_bytes <= 8, "i don't support high alignments yet");
     o: Qbe.O = @if(info.align_bytes <= 4, .alloc4, .alloc8);
     s := self.f.getcon(info.stride_bytes.zext());
-    i := make_ins(o, .Kl, t, s, QbeNull);
-    nins: i64 = self.f.start.nins.zext();  // TODO: ugh
-    addins(self.f.start.ins&, nins&, i&);
-    self.f.start.nins = nins.trunc();
+    push(self.f.start, make_ins(o, .Kl, t, s, QbeNull));
     t
 }
 
@@ -1255,39 +1302,42 @@ fn scalar_result(self: *EmitIr, p: Placement, r: Qbe.Ref, ty: Type) Qbe.Ref = @m
     }
 };
 
-fn get_aggregate(self: *EmitIr, ty: Type) Qbe.Ref = {
-    info := self.program.get_info(ty);
-    // TODO: doing it this way is gonna be a nightmare when i want seperate jit and aot module for comptime/runtime. 
-    if info.ir_index == -1 {
-        type := self.program.get_type(ty);
+fn get_aggregate(self: *EmitIr, ty: Type) Qbe.Ref #inline = 
+    get_aggregate(self.program, self.shared, ty);
+
+// TODO: reuse types for different nominal types with the same repr?
+fn get_aggregate(self: CompCtx, m: *CodegenShared, ty: Type) Qbe.Ref = {
+    info := self.get_info(ty);
+    ir_index := m.type_indices&.get(ty) || {
+        type := self.get_type(ty);
         result := Qbe.Typ.zeroed();
         result.size = info.stride_bytes.zext();
-        @debug_assert(result.size != 0, "ICE: treating zero size type % as an aggragate", self.program.log(ty));
+        @debug_assert(result.size != 0, "ICE: treating zero size type % as an aggragate", self.log(ty));
         result.align_log2 = (@as(i64) info.align_bytes.zext()).trailing_zeros().intcast(); // TODO: do this faster
         //@println("%", )
         l: List(u8) = (maybe_uninit = result.name&.items(), len = 0, gpa = panicking_allocator);
         @fmt(l&, "T%", ty.as_index());
         i := @match(type) {
-            fn Named(it)  => self.get_aggregate(it._0).val();
-            fn Enum(it)   => self.get_aggregate(it.raw).val();
+            fn Named(it)  => self.get_aggregate(m, it._0).val();
+            fn Enum(it)   => self.get_aggregate(m, it.raw).val();
             fn Struct(it) => {
                 yield :: local_return;
                 if repr_transparent(it) { repr |
-                    yield(self.get_aggregate(repr).val());
+                    yield(self.get_aggregate(m, repr).val());
                 };
                 n := 0;
                 rt_count: i64 = it.fields.len - it.const_field_count.zext();
                 result.fields = new_long_life(rt_count + 1);
                 result.nunion = @if(it.is_union, rt_count.trunc(), 1);
                 result.is_union = it.is_union;
-                @assert(it.layout_done, "tried to get_aggregate before layout %", self.program.log(ty));
+                @assert(it.layout_done, "tried to get_aggregate before layout %", self.log(ty));
                 if it.is_union {
                     each it.fields { f | 
                         if f.kind != .Const {
-                            field_size := self.program.get_info(f.ty)[].stride_bytes;
+                            field_size := self.get_info(f.ty)[].stride_bytes;
                             @debug_assert(field_size != 0, "TODO: allow void union?");
                             @debug_assert(f.byte_offset == 0, "union field must have offset 0");
-                            result.fields[n] = self.as_field(f.ty);      n += 1;
+                            result.fields[n] = self.as_field(m, f.ty);      n += 1;
                             result.fields[n] = (type = .FEnd, len = 0);  n += 1;
                         };
                     };
@@ -1295,11 +1345,11 @@ fn get_aggregate(self: *EmitIr, ty: Type) Qbe.Ref = {
                     off := 0;
                     each it.fields { f | 
                         if f.kind != .Const {
-                            field_size := self.program.get_info(f.ty)[].stride_bytes;
+                            field_size := self.get_info(f.ty)[].stride_bytes;
                             if field_size != 0 {
                                 add_padding(result.fields&, n&, off&, f.byte_offset);
                                 result.fields&.grow(n);
-                                result.fields[n] = self.as_field(f.ty);
+                                result.fields[n] = self.as_field(m, f.ty);
                                 n += 1;
                                 off += field_size.zext();
                             }; // else :NoRuntimeRepr
@@ -1310,24 +1360,24 @@ fn get_aggregate(self: *EmitIr, ty: Type) Qbe.Ref = {
                     result.fields[n] = (type = .FEnd, len = 0);
                 };
                 // TODO: name
-                self.m.new_type(result)
+                m.m.new_type(result)
             }
             fn Array(it) => if it.len == 1 {
-                self.get_aggregate(it.inner).val()
+                self.get_aggregate(m, it.inner).val()
             } else {
-                inner_size: i64 = self.program.get_info(it.inner)[].stride_bytes.zext();
+                inner_size: i64 = self.get_info(it.inner)[].stride_bytes.zext();
                 @debug_assert_eq(inner_size * it.len.zext(), info.stride_bytes.zext(), "size calc wrong!");
                 outer_size: i64 = info.stride_bytes.zext();
                 field_count := 1 + it.len.zext();
                 result.fields = new_long_life(field_count);
                 result.nunion = 1;
-                field := self.as_field(it.inner);
+                field := self.as_field(m, it.inner);
                 range(0, it.len.zext()) { i |
                     result.fields[i] = field;
                 };
                 result.fields[it.len.zext()] = (type = .FEnd, len = 0);
                 // TODO: name
-                self.m.new_type(result)
+                m.m.new_type(result)
             }
             fn Tagged(it) => {
                 n := 0;
@@ -1336,7 +1386,7 @@ fn get_aggregate(self: *EmitIr, ty: Type) Qbe.Ref = {
                 each it.cases { case | 
                     if case._1 != void { // :get_or_create_type 
                         result.fields[n] = (type = .Fl, len = 8);      n += 1;
-                        result.fields[n] = self.as_field(case._1);     n += 1;
+                        result.fields[n] = self.as_field(m, case._1);     n += 1;
                         result.fields[n] = (type = .FEnd, len = 0);    n += 1;
                         // TODO: do i need to pad them to the same size?
                     } else {
@@ -1346,14 +1396,15 @@ fn get_aggregate(self: *EmitIr, ty: Type) Qbe.Ref = {
                 result.is_union = result.nunion > 1;
                 @debug_assert(result.nunion != 0, "ICE: get_aggregate of scalar @tagged");
                 // TODO: name
-                self.m.new_type(result)
+                m.m.new_type(result)
             }
-            @default => @panic("tried to get_aggregate of scalar %", self.program.log(ty));
+            @default => @panic("tried to get_aggregate of scalar %", self.log(ty));
         }; 
-        info.ir_index = i.intcast();
+        m.type_indices&.insert(ty, i);
+        i
     };
     
-    TYPE(info.ir_index.intcast())
+    TYPE(ir_index)
 }
 
 fn add_padding(fields: *QList(Qbe.Field), nfield: *i64, current_size: *i64, target_size: i64) void = {
@@ -1377,9 +1428,12 @@ fn new_type(m: *QbeModule, type: Qbe.Typ) i64 = {
     i
 }
 
-fn as_field(self: *EmitIr, ty: Type) Qbe.Field = {
+fn as_field(self: *EmitIr, ty: Type) Qbe.Field #inline = 
+    as_field(self.program, self.shared, ty);
+
+fn as_field(self: CompCtx, m: *CodegenShared, ty: Type) Qbe.Field = {
     ::if(Qbe.Field);
-    type := self.program.get_type(ty);
+    type := self.get_type(ty);
     @match(type) {
         fn F64()      => (type = .Fd, len = 8);
         fn F32()      => (type = .Fd, len = 4);
@@ -1389,8 +1443,8 @@ fn as_field(self: *EmitIr, ty: Type) Qbe.Field = {
         fn Label(_)   => (type = .Fw, len = 4);
         fn Fn(_)      => (type = .Fw, len = 4);
         fn Bool()     => (type = .Fb, len = 1);
-        fn Named(it)  => self.as_field(it._0);
-        fn Enum(it)   => self.as_field(it.raw);
+        fn Named(it)  => self.as_field(m, it._0);
+        fn Enum(it)   => self.as_field(m, it.raw);
         fn Int(it)    => @switch(it.bit_count) {
             @case(8)  => (type = .Fb, len = 1);
             @case(16) => (type = .Fh, len = 2);
@@ -1398,23 +1452,23 @@ fn as_field(self: *EmitIr, ty: Type) Qbe.Field = {
             @default  => (type = .Fl, len = 8);
         }
         fn Tagged(it) => {
-            if self.program.is_tag_only(it) {
+            if self.is_tag_only(it) {
                 return(type = .Fl, len = 8);
             };
-            (type = .FTyp, len = self.get_aggregate(ty).val().trunc())
+            (type = .FTyp, len = self.get_aggregate(m, ty).val().trunc())
         }
         fn Struct(it) => {
             if repr_transparent(it) { inner |
-                return(self.as_field(inner))
+                return(self.as_field(m, inner))
             };
-            (type = .FTyp, len = self.get_aggregate(ty).val().trunc())
+            (type = .FTyp, len = self.get_aggregate(m, ty).val().trunc())
         }
         fn Array(it) => if it.len == 1 {
-            self.as_field(it.inner)
+            self.as_field(m, it.inner)
         } else {
-            (type = .FTyp, len = self.get_aggregate(ty).val().trunc())
+            (type = .FTyp, len = self.get_aggregate(m, ty).val().trunc())
         };
-        @default => @panic("tried to as_field of unhandled %", self.program.log(ty));
+        @default => @panic("tried to as_field of unhandled %", self.log(ty));
     }
 }
 
@@ -1451,7 +1505,10 @@ fn hlt_if_never(self: *EmitIr, ty: Type) void #inline = {
 // TODO: single field array
 
 // returns .Ke for aggregates
-fn load_op(self: *EmitIr, ty: Type) Ty(Qbe.O, Qbe.Cls) = @match(self.program.get_type(ty)) {
+fn load_op(self: *EmitIr, ty: Type) Ty(Qbe.O, Qbe.Cls) #inline = 
+    load_op(self.program, ty);
+
+fn load_op(self: CompCtx, ty: Type) Ty(Qbe.O, Qbe.Cls) = @match(self.get_type(ty)) {
     fn Int(it)   => @switch(it.bit_count) {
         @case(8)  => (@if(it.signed, .loadsb, .loadub), .Kw);
         @case(16) => (@if(it.signed, .loadsh, .loaduh), .Kw);
@@ -1469,7 +1526,7 @@ fn load_op(self: *EmitIr, ty: Type) Ty(Qbe.O, Qbe.Cls) = @match(self.program.get
     fn Enum(it)  => self.load_op(it.raw);
     fn Bool()    => (.loadub, .Kw);
     fn Tagged(it) => {
-        if self.program.is_tag_only(it) {
+        if self.is_tag_only(it) {
             return(.load, .Kl);
         };
         (.nop, .Ke)
@@ -1481,7 +1538,10 @@ fn load_op(self: *EmitIr, ty: Type) Ty(Qbe.O, Qbe.Cls) = @match(self.program.get
     @default     => (.nop, .Ke);
 };
 
-fn store_op(self: *EmitIr, ty: Type) Qbe.O = @match(self.program.get_type(ty)) {
+fn store_op(self: *EmitIr, ty: Type) Qbe.O #inline = 
+    store_op(self.program, ty);
+
+fn store_op(self: CompCtx, ty: Type) Qbe.O = @match(self.get_type(ty)) {
     fn Int(it)   => @switch(it.bit_count) {
         @case(8)  => .storeb;
         @case(16) => .storeh;
@@ -1499,7 +1559,7 @@ fn store_op(self: *EmitIr, ty: Type) Qbe.O = @match(self.program.get_type(ty)) {
     fn Enum(it)  => self.store_op(it.raw);
     fn Bool()    => .storeb;
     fn Tagged(it) => {
-        if !self.program.is_tag_only(it) {
+        if !self.is_tag_only(it) {
             return(.Oxxx);
         };
         .storel

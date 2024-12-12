@@ -45,6 +45,12 @@ fn emit_func_arm64(m: *QbeModule, f: *Qbe.Fn, _: *FILE) void = {
     // you can remove this limit on the function but then have to add the check when emitting each branch. 
     @assert_lt(code_bytes.len, 1.shift_left(20), "we don't allow a function larger than one instruction can jump");
     maybe_llvm_dis(f, code_bytes, "--arch=aarch64");
+    
+    use_symbol(self.m, f.lnk.id) { s |
+        s.size = code_bytes.len;
+        s.weak = f.lnk.weak;
+        @debug_assert(s.size != 0, "zero size function?");
+    };
 }
 
 fn maybe_llvm_dis(f: *Qbe.Fn, code_bytes: []u8, arch_name: Str) void = {
@@ -402,18 +408,7 @@ fn loadaddr_bits(self: *ArmState, c: *Qbe.Con, dest_reg: i64) void = {
         inc := if(self.m.goal.type == .Relocatable, => 0, => c.bits.i);
         patch: Fixup = (patch_at = patch_addr, type = (InReg = (r = dest_reg, increment = inc.trunc())));
         @match(symbol.kind) {
-            fn DynamicPatched() => {
-                if self.m.goal.type != .JitOnly { 
-                    symbol.fixups&.push(patch, self.m.gpa); 
-                };
-                self.inst(brk(0x111));
-                self.inst(brk(0x222));
-                new_got_slot: ?Fixup = .None;
-                fixup_arm64(self.m, symbol, patch&, new_got_slot&);
-                if new_got_slot { it |
-                    symbol.fixups&.push(it, self.m.gpa);
-                };
-            }
+            fn DynamicPatched() => self.immediate_fixup_got(patch, symbol);
             fn Local() => {
                 // we've already compiled it so just compute its address directly.
                 distance := self.m.distance_between(.Code, self.m.current_offset(.Code), symbol.segment, symbol.offset + inc);
@@ -435,15 +430,33 @@ fn loadaddr_bits(self: *ArmState, c: *Qbe.Con, dest_reg: i64) void = {
                 };
             }
             fn Pending() => {
-                symbol.fixups&.push(patch, self.m.gpa);
-                self.inst(brk(0x0123));
-                self.inst(brk(0x0456));
+                if self.m.got_indirection_instead_of_patches {
+                    self.immediate_fixup_got(patch, symbol);
+                } else {
+                    symbol.fixups&.push(patch, self.m.gpa);
+                    self.inst(brk(0x0123));
+                    self.inst(brk(0x0456));
+                }
             }
         };
     };
     if self.m.goal.type == .Relocatable && c.bits.i != 0 { // :ArmAddendReloc
         @assert(c.bits.i < 4096 && c.bits.i > 0, "TODO: loadaddr of % with offset %", self.m.str(c.sym.id), c.bits.i);
         self.inst(add_im(Bits.X64, @as(u5) dest_reg, @as(u5) dest_reg, @as(u12) c.bits.i, 0));
+    };
+}
+
+fn immediate_fixup_got(self: *ArmState, patch: Fixup, symbol: *SymbolInfo) void = {
+    if self.m.goal.type != .JitOnly { 
+        symbol.fixups&.push(patch, self.m.gpa); 
+    };
+    // this is correct for got_indirection_instead_of_patches too, InReg never references a stub. 
+    self.inst(brk(0x111));
+    self.inst(brk(0x222));
+    new_got_slot: ?Fixup = .None;
+    fixup_arm64(self.m, symbol, patch&, new_got_slot&);
+    if new_got_slot { it |
+        symbol.fixups&.push(it, self.m.gpa);
     };
 }
 
@@ -641,12 +654,12 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
                     patch_at := self.m.segments&[.Code].next;
                     @match(symbol.kind) {
                         fn DynamicPatched() => {
+                            new_got_slot: ?Fixup = .None;
                             patch: Fixup = (patch_at = patch_at, type = .Call);
+                            self.inst(brk(0x987));
                             if self.m.goal.type != .JitOnly { 
                                 symbol.fixups&.push(patch, self.m.gpa); 
                             };
-                            self.inst(brk(0x987));
-                            new_got_slot: ?Fixup = .None;
                             fixup_arm64(self.m, symbol, patch&, new_got_slot&);
                             if new_got_slot { it |
                                 symbol.fixups&.push(it, self.m.gpa);
@@ -665,11 +678,18 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
                             }; 
                         };
                         fn Pending() => {
-                            // haven't compiled it yet so will need a patch. 
-                            symbol.fixups&.push((patch_at = patch_at, type = .Call), self.m.gpa);
-                            self.inst(brk(0x789));
-                            if self.m.debug["T".char()] {
-                                @fmt_write(self.m.debug_out, "# pending call % calls %\n", u8.int_from_ptr(patch_at), symbol.name);
+                            if self.m.got_indirection_instead_of_patches {
+                                dest_reg := TMP(arm_scratch_int).int_reg();
+                                patch: Fixup = (patch_at = patch_at, type = (InReg = (r = dest_reg, increment = 0)));
+                                self.immediate_fixup_got(patch, symbol);
+                                self.inst(br(dest_reg, 1));
+                            } else {
+                                // haven't compiled it yet so will need a patch. 
+                                symbol.fixups&.push((patch_at = patch_at, type = .Call), self.m.gpa);
+                                self.inst(brk(0x789));
+                                if self.m.debug["T".char()] {
+                                    @fmt_write(self.m.debug_out, "# pending call % calls %\n", u8.int_from_ptr(patch_at), symbol.name);
+                                };
                             };
                         }
                     };

@@ -264,19 +264,34 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
             arg_ty := @check(self.infer_arguments(fid)) return;
             ret_ty := @check(self.infer_return(fid)) return;
             
-            // TODO: assert found? but :AssumeDone
-            found := @check(self.fill_in_jit_pointer(fid, func.body&)) return;
+            arg_ty := func.finished_arg.expect("fill arg");
+            ret_ty := func.finished_ret.expect("fill ret");
+            @err_assert(!arg_ty.is_unknown() && !ret_ty.is_unknown(), "unknown fn types!!") return;
+            
+            //@if(TRACE_SHIMS) @println("dispatch:jit F%: %", fid.as_index(), self.log_name(fid));
+            if NEW_COMPTIME_JIT {
+                // :FUCKED why can't i put these constants outside and share for here and fill_in_jit_pointer
+                TTT :: FuncImpl.Tag();
+                normal_or_intrinsic :: @const_slice(TTT.Normal, TTT.Intrinsic); // ,i T.NewIntrinsic); we don't use emit_ir for comptime yet. 
+                
+                func := self.get_function(fid);
+                if !choose_impl(func.body&, normal_or_intrinsic).is_some() || !func.get_flag(.AsmDone) {
+                    shallow_jit_func(self, fid);
+                };
+            } else {
+                // TODO: assert found? but :AssumeDone
+                @check(self.fill_in_jit_pointer(fid, func.body&)) return;
+            };
             
             fn fill_in_jit_pointer(self: *SelfHosted, fid: FuncId, body: *FuncImpl) Maybe(bool) = {
                 func := self.get_function(fid);
                 if(func.get_flag(.AsmDone), => return(Ok = true));
-                arg_ty := func.finished_arg.expect("fill arg");
-                ret_ty := func.finished_ret.expect("fill ret");
-                T :: FuncImpl.Tag();
-                normal_or_intrinsic :: @const_slice(T.Normal, T.Intrinsic); // , T.NewIntrinsic); we don't use emit_ir for comptime yet. 
+            
+                TTT :: FuncImpl.Tag();
+                normal_or_intrinsic :: @const_slice(TTT.Normal, TTT.Intrinsic); // ,i T.NewIntrinsic); we don't use emit_ir for comptime yet. 
+                
                 if choose_impl(body, normal_or_intrinsic).is_some() {
                     @log_event("codegen % %", fid, self.log_name(fid)) self;
-                    @err_assert(!arg_ty.is_unknown() && !ret_ty.is_unknown(), "unknown fn types!!") return;
                     @try(self.emit_bc_and_jit(fid)) return;
                     // TODO: not true for rediurects????
                     //@debug_assert(self.bc.jitted&.get_fn(fid).is_some(), "we just emitted but no pointer?? %", func.log(self));
@@ -334,9 +349,9 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
                         };
                     }
                     fn Bytecode(body) => {
+                        panic("TODO: fix #bc");
                         body := FnBody.ptr_from_int(body[]);
                         opts := self.get_build_options();
-                        assert(THERE_IS_ONLY_ONE_BACKEND, "a");
                         addr := self.do_self_jit(FnBody.raw_from_ptr(body), fid);
                         self.put_jitted_function(fid, addr);
                         func.set_flag(.RealAsmDone);
@@ -344,6 +359,7 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
                     }
                     @default => return(Ok = false);
                 };
+                
                 (Ok = true)
             };
             
@@ -457,30 +473,81 @@ fn wait_for(s: *SelfHosted, t: Action) *Action = {
 /// Comptime Jit ///
 ////////////////////
 
-// TODO: factor out the dispatch table from the aarch64 backend. 
 put_jitted_function :: fn(self: *SelfHosted, f: FuncId, addr: rawptr) void = {
+    @assert(!NEW_COMPTIME_JIT, "use put_jitted_import instead");
     bc := self.todo_get_bc();
     bc.jitted&.extend_blanks(f);
     bc.jitted.dispatch_table[f.as_index()] = addr;
     func := self.get_function(f);
     func.set_flag(.AsmDone);
-    if func.get_flag(.TookPointerValue) || ENABLE_TRACY {
+    if func.get_flag(.TookPointerValue) || ENABLE_TRACY || TRACE_CALLS {
         self.created_jit_fn_ptr_value(f, addr.int_from_rawptr());
     };
 };
 
+put_jitted_import :: fn(self: *SelfHosted, f: FuncId, addr: rawptr) void = {
+    if NEW_COMPTIME_JIT {
+        //idx   := 0;
+        //entry := self.comptime_codegen.bouba_acquire(idx&);
+        //lnk := entry.arena&.borrow().box_zeroed(Qbe.Lnk);
+        //lnk.id = self.comptime_codegen.m.intern(self.comp().fmt_fn_name(f));
+        //entry.task = (JitImport = (lnk = lnk, addr = addr));
+        //entry.release(true);
+        
+        func := self.get_function(f);
+        //func.set_flag(.AsmDone);
+        //func.set_flag(.RealAsmDone);
+        if func.get_flag(.TookPointerValue) || ENABLE_TRACY || TRACE_CALLS {
+            self.created_jit_fn_ptr_value(f, addr.int_from_rawptr());
+        };
+    } else {
+        put_jitted_function(self, f, addr);
+    };
+};
+
 fn todo_get_bc(self: *SelfHosted) *BcBackend = {
-    assert(THERE_IS_ONLY_ONE_BACKEND, "TODO: abstract more stuff");
+    assert(!NEW_COMPTIME_JIT, "TODO: abstract more stuff");
     BcBackend.ptr_from_raw(self.get_build_options()[].comptime_jit_data)
 }
 
 // If you're about to actually call the pointer, we need to mark the memory as executable.
 fn get_fn_callable(self: *SelfHosted, fid: FuncId) ?rawptr = {
-    opts := self.get_build_options();
-    {opts.comptime_jit_vptr.get_jitted}(opts.comptime_jit_data, self.comp(), fid, true)
+    @if(NEW_COMPTIME_JIT, {
+        m := self.comptime_codegen.m;
+        id := m.intern(self.comp().fmt_fn_name(fid));
+        result: ?rawptr = .None;
+        func := self.get_function(fid);
+        if use_threads && func.get_flag(.RealAsmDone) {
+            while => !symbol_is_ready(m, id) {
+                usleep(10);
+            }; 
+        };
+        use_symbol(m, id) { s| 
+            // TODO: sometimes we actually want to spin and wait for it to be ready. 
+            //       also something something how big is a cache line. 
+            if !s.jit_addr.is_null() && (s.kind != .Local || s.size != 0) {
+                if s.size != 0 {
+                    // :ThreadSafety this is very bad no good. 
+                    m := self.comptime_codegen.m;
+                    seg := m.segments&[.Code]&;
+                    next := seg.next;
+                    if !next.identical(m.start_of_writable_code) {
+                        clear_instruction_cache(u8.raw_from_ptr(m.start_of_writable_code), u8.raw_from_ptr(next));
+                        m.start_of_writable_code = next;
+                    };
+                };
+                result = (Some = s.jit_addr);
+            };
+        };
+        result
+    }, {
+        opts := self.get_build_options();
+        {opts.comptime_jit_vptr.get_jitted}(opts.comptime_jit_data, self.comp(), fid, true)
+    })
 }
 
 fn get_fn_old(self: *SelfHosted, f: FuncId) ?rawptr = {
+    @assert(!NEW_COMPTIME_JIT, "get_fn_old");
     opts := self.get_build_options();
     {opts.comptime_jit_vptr.get_jitted}(opts.comptime_jit_data, self.comp(), f, false)
 }
@@ -493,10 +560,14 @@ fn create_jit_shim(self: *SelfHosted, fid: FuncId) Res(void) = {
         return(.Ok);
     };
     
-    h    := report_called_uncompiled_or_just_fix_the_problem;
-    body := @try({opts.comptime_jit_vptr.jit_shim}(opts.comptime_jit_data, self.comp(), fid, h)) return;
-    addr := self.do_self_jit(body, fid);
-    self.put_jitted_function(fid, addr);
+    h := report_called_uncompiled_or_just_fix_the_problem;
+    if NEW_COMPTIME_JIT {
+        create_jit_shim(self.comp(), self.comptime_codegen, fid, h);
+    } else {
+        body := @try({opts.comptime_jit_vptr.jit_shim}(opts.comptime_jit_data, self.comp(), fid, h)) return;
+        addr := self.do_self_jit(body, fid);
+        self.put_jitted_function(fid, addr);
+    };
     @debug_assert(!func.get_flag(.RealAsmDone), "we didn't actually compile it why do we think we did??"); 
     func.set_flag(.AlreadyHasShim);
     

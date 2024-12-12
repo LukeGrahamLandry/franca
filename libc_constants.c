@@ -31,8 +31,8 @@ int main() {
          O_RDONLY, O_WRONLY, O_RDWR, O_CREAT, O_TRUNC, O_APPEND);
   printf("MapProt :: @enum(i64) (Exec = %d, Read = %d, Write = %d);\n",
          PROT_EXEC, PROT_READ, PROT_WRITE);
-  printf("MapFlag :: @enum(i64) (Private = %d, Anonymous = %d);\n", MAP_PRIVATE,
-         MAP_ANONYMOUS);
+  printf("MapFlag :: @enum(i64) (Private = %d, Anonymous = %d, Jit = %d);\n",
+         MAP_PRIVATE, MAP_ANONYMOUS, MAP_JIT);
   printf("Whence :: @enum(i64) (Set = %d, Cur = %d, End = %d);\n", SEEK_SET,
          SEEK_CUR, SEEK_END);
   printf("DlFlag :: @enum(i64) (Lazy = %d, Now = %d);\n", RTLD_LAZY, RTLD_NOW);

@@ -1,0 +1,252 @@
+// UNUSED. 
+// until the comptime jit can be switched to emit_ir because the old one didn't follow the platform abis correctly. 
+
+//! - Call a function pointer with a dynamically known type on an array of bytes.
+//! - Create a shim around an uncompiled function that redirects into the compiler and then forwards to the real callee. 
+//! - Compile a single function and create shims for any uncompiled callees.
+
+NEW_COMPTIME_JIT :: false;
+TRACE_SHIMS :: NEW_COMPTIME_JIT;
+TRACE_CALLS :: NEW_COMPTIME_JIT; 
+
+DynCallShim :: @tagged(Pending: u32, Ready: rawptr);
+
+fn call_dynamic_values(self: *SelfHosted, f_ptr: i64, f_ty: FnType, args_value: []u8) Values = {
+    callee := self.dyncalls&.get_ptr(f_ty&) || {
+        self.create_dyncall_shim(f_ty);
+        self.dyncalls&.get_ptr(f_ty&).unwrap()
+    };
+    callee := @match(callee) {
+        fn Ready(it)   => it[];
+        fn Pending(it) => {
+            m := self.comptime_codegen.m;
+            @if(use_threads)
+            dowhile {
+                usleep(10);
+                !symbol_is_ready(m, it[])
+            };
+            c, size := get_addr(m, it[]).unwrap();
+            clear_instruction_cache(c, c.offset(size));
+            callee[] = (Ready = c);
+            c
+        }
+    };
+    callee := assume_types_fn(Arg = Ty(*u8, *u8, i64), Ret = void, ptr = callee);
+    
+    @if(TRACE_CALLS) {
+        @print("Calling ");
+        if self.baked.functions&.get(f_ptr) { fid |
+            @print("% ", self.log_name(fid));
+        };
+        @println("%: % -> %", f_ptr, self.log_type(f_ty.arg), self.log_type(f_ty.ret));
+    };
+    // TODO: canary?
+    ret_size: i64 = self.get_info(f_ty.ret)[].stride_bytes.zext();
+    ret_buf := temp().alloc_zeroed(u8, ret_size);  // TODO: alignment?
+    @if(TRACE_CALLS) {
+        @print("input: ");
+        input := self.from_bytes(args_value);
+        println(log(input&, self, f_ty.arg));
+    };
+    callee(args_value.ptr, ret_buf.ptr, f_ptr);
+    result := self.from_bytes(ret_buf);
+    @if(TRACE_CALLS) {
+        @print("result: ");
+        println(log(result&, self, f_ty.ret));
+    }; 
+    result
+}
+
+// Creates a function with the signeture (arg_array: *u8, ret_array: *u8, callee: fnptr) -> void.
+// It starts compiling on self.comptime_codegen and you have to get the result out of self.dyncalls when it's ready. 
+// TODO: reuse functions when they have different nominal types but the same repr. 
+fn create_dyncall_shim(self: *SelfHosted, f_ty: FnType) void = {
+    shared := self.comptime_codegen;
+    idx := 0;
+    ins: QList(Qbe.Ins) = new(0);
+    nins := 0;
+    @if(TRACE_SHIMS) @println("create dyncall % -> %", self.log_type(f_ty.arg), self.log_type(f_ty.ret));
+    entry := bouba_acquire(shared, idx&);
+    @if(TRACE_SHIMS) {entry.logging = "P"};
+    id: u32 = 0; 
+    push_dynamic_context {
+        context(DefaultContext)[].temporary_allocator = entry.arena&;
+        f := temp().box_zeroed(Qbe.Fn);
+        m := shared.m;
+        f.default_init(m);
+        f.leaf = false;
+        f.lnk.no_inline = true;
+        id = shared.m.intern(@tfmt("dyncall%_%_%", f_ty.arg.as_index(), f_ty.ret.as_index(), f_ty.arity));
+        f.lnk.id = id;
+        entry.task = (Func = f);
+        
+        // accept parameters from the compiler
+        arg_p  := f.newtmp("arg", .Kl);
+        ret_p  := f.newtmp("ret", .Kl);
+        callee := f.newtmp("call", .Kl);
+        env    := f.newtmp("context", .Kl);
+        addins(ins&, nins&, make_ins(.pare, .Kl, env, QbeNull, QbeNull));
+        addins(ins&, nins&, make_ins(.par, .Kl, arg_p, QbeNull, QbeNull));
+        addins(ins&, nins&, make_ins(.par, .Kl, ret_p, QbeNull, QbeNull));
+        addins(ins&, nins&, make_ins(.par, .Kl, callee, QbeNull, QbeNull));
+        
+        // :EmitIrCall
+        // arg instructions that read from arg_p
+        scratch: List(Qbe.Ins) = list(temp());
+        push_arg :: fn(ty: Type, offset: i64) => {
+            if self.get_info(ty)[].stride_bytes != 0 {
+                ref := f.newtmp("a", .Kl);
+                addins(ins&, nins&, make_ins(.add, .Kl, ref, arg_p, f.getcon(offset)));
+                load, k := self.comp().load_op(ty);
+                ins := if k != .Ke {  // scalar
+                    r := f.newtmp("a", .Kl);
+                    addins(ins&, nins&, make_ins(load, k, r, ref, QbeNull));
+                    make_ins(.arg, k, QbeNull, r, QbeNull)
+                } else {  // aggregate
+                    r_type := self.comp().get_aggregate(shared, ty);
+                    make_ins(.argc, .Kl, QbeNull, r_type, ref)
+                };
+                scratch&.push(ins);
+            };
+        };
+        info := self.get_type(f_ty.arg);
+        @assert(self.get_info(f_ty.arg)[].is_sized, "comptime call with unsized argument");
+        if info.is(.Struct) && info.Struct.is_tuple {
+            each info.Struct.fields { it | 
+                push_arg(it.ty, it.byte_offset);
+            };
+        } else {
+            push_arg(f_ty.arg, 0);
+        };
+        addins(ins&, nins&, make_ins(.arge, .Kl, QbeNull, env, QbeNull));
+        append(ins&, nins&, scratch.index_unchecked(0), scratch.index_unchecked(scratch.len));
+        scratch&.clear();
+        
+        // do the call and write the results to ret_p
+        _, k0 := self.comp().load_op(f_ty.ret);
+        info := self.get_info(f_ty.ret);
+        ret_size: i64 = info.stride_bytes.zext();
+        @assert(info.is_sized, "comptime call with unsized argument");
+        result_r, k, type_r := @if_else{
+            @if(ret_size == 0) => (QbeNull, Qbe.Cls.Kw, QbeNull);
+            @if(k0 != .Ke) => {  // scalar
+                r := f.newtmp("result", k0);
+                o := self.comp().store_op(f_ty.ret);
+                scratch&.push(make_ins(o, .Kw, QbeNull, r, ret_p));
+                (r, k0, QbeNull)
+            };
+            @else => {
+                r := f.newtmp("result", .Kl);
+                scratch&.push(make_ins(.blit0, .Kw, QbeNull, r, ret_p));
+                scratch&.push(make_ins(.blit1, .Kw, QbeNull, INT(ret_size), QbeNull));
+                (r, Qbe.Cls.Kl, self.comp().get_aggregate(shared, f_ty.ret))
+            };
+        };
+        addins(ins&, nins&, make_ins(.call, k, result_r, callee, type_r));
+        append(ins&, nins&, scratch.index_unchecked(0), scratch.index_unchecked(scratch.len));
+        scratch&.clear();
+        
+        f.start = newblk();
+        f.nblk = 1;
+        f.start.ins = ins;
+        f.start.nins = nins.trunc();
+        f.start.jmp.type = .ret0;
+    };
+    enqueue_task(shared, entry);
+    self.dyncalls&.insert(f_ty, (Pending = id));
+}
+
+// TODO: allow redeclaration in this specific case and make sure it updates the address in the got slot when it gets compiled for real.
+// TODO: calls need to keep going through the got until the real one is compiled so i guess the symbol here should have a different name.  
+fn create_jit_shim(self: CompCtx, shared: *CodegenShared, fid: FuncId, handler_callee_address: rawptr) void = {
+    // TODO: replace accesses to bc.jitted.dispatch_table[fid.as_index()]?
+    func := self.get_function(fid);
+    @if(TRACE_SHIMS) @println("create shim %", self.get_string(func.name));
+    m := shared.m;
+    idx := 0;
+    entry := bouba_acquire(shared, idx&);
+    c := self.data.cast()[][];
+    push_dynamic_context {
+        context(DefaultContext)[].temporary_allocator = entry.arena&;
+        
+        id := m.intern(self.fmt_fn_name(fid));
+        use_symbol(m, id) { s |
+            @debug_assert(s.kind != .Local, "create_jit_shim for something that has already been declared");
+        };
+        
+        // create a new function
+        f := temp().box_zeroed(Qbe.Fn);
+        f.default_init(m);
+        f.leaf = false;
+        f.lnk.no_inline = true;
+        f.lnk.weak = true;
+        f.lnk.id = id;
+        f.start = newblk();
+        f.start.ins = new(0);
+        f.nblk = 1;
+        entry.task = (Func = f);
+        
+        // collect parameters
+        env    := f.newtmp("context", .Kl);
+        push(f.start, make_ins(.pare, .Kl, env, QbeNull, QbeNull));
+        arg_ty := func.finished_arg.unwrap();
+        ret_ty := func.finished_ret.unwrap();
+        pars := emit_par_instructions(self, shared, func.arg&, arg_ty, f);
+        
+        // call into the compiler to get the real callee
+        callee := f.newtmp("callee", .Kl);
+        push(f.start, make_ins(.arge, .Kl, QbeNull, env, QbeNull));
+        push(f.start, make_ins(.arg,  .Kl, QbeNull, f.getcon(SelfHosted.int_from_ptr(c)), QbeNull));
+        push(f.start, make_ins(.arg,  .Kw, QbeNull, f.getcon(fid.as_index()), QbeNull));
+        push(f.start, make_ins(.call, .Kl, callee,  f.getcon(handler_callee_address.int_from_rawptr()), QbeNull));
+        
+        // convert to arguments
+        push(f.start, make_ins(.arge, .Kl, QbeNull, env, QbeNull));
+        each pars { p |
+            @if_else {
+                @if(p.void)   => ();
+                @if(p.scalar) => push(f.start, make_ins(.arg,  p.k, QbeNull, p.r, QbeNull));
+                @else         => push(f.start, make_ins(.argc, p.k, QbeNull, self.get_aggregate(shared, p.type), p.r));
+            };
+        };
+        
+        // do the real call to the new callee 
+        _, k0 := self.load_op(ret_ty);
+        info  := self.get_info(ret_ty);
+        @assert(info.is_sized, "comptime call with unsized argument");
+        jmp, result_r, k, type_r := @if_else{
+            @if(info.stride_bytes == 0) => (Qbe.J.ret0, QbeNull, Qbe.Cls.Kw, QbeNull);
+            @if(k0 != .Ke)     => (@as(Qbe.J) @as(i32) Qbe.J.retw.raw() + k0.raw(), f.newtmp("result", k0), k0, QbeNull);
+            @else              => (Qbe.J.retc, f.newtmp("result", .Kl), Qbe.Cls.Kl, self.get_aggregate(shared, ret_ty));
+        };
+        push(f.start, make_ins(.call, k, result_r, callee, type_r));
+        
+        // return the result to our caller
+        if type_r != QbeNull {  
+            f.retty = type_r.val().intcast();
+        };
+        f.start.jmp = (type = jmp, arg = result_r);
+    };
+    enqueue_task(shared, entry);
+}
+
+fn shallow_jit_func(self: *SelfHosted, fid: FuncId) void = {
+    idx     := 0;
+    pending := FuncId.list(temp());
+    @if(TRACE_SHIMS) @println("shallow jit F%: %", fid.as_index(), self.log_name(fid));
+    func := self.get_function(fid);
+    noinline := func.get_flag(.NoInline);
+    log_ir := func.get_flag(.LogIr);
+    @if(!noinline) func.set_flag(.NoInline); // TODO: instead just set symbol.referenced so it doesn't get suspended
+    @if(TRACE_SHIMS) @if(!log_ir) func.set_flag(.LogIr);
+    _ := self.unwrap_report_error(void, emit_ir(self.comp(), self.comptime_codegen, fid, .Jit, idx&, pending&));
+    @if(!noinline) func.unset_flag(.NoInline);
+    @if(!log_ir) func.unset_flag(.LogIr);
+    func.set_flag(.RealAsmDone);
+    func.set_flag(.AsmDone);
+    for pending& { fid |
+        if !self.get_function(fid).get_flag(.AsmDone) {
+            self.create_jit_shim(fid); 
+        };
+    };
+}
