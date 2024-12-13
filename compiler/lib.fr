@@ -49,6 +49,7 @@ SelfHosted :: @rec @struct(
     comptime_libraries: HashMap(Symbol, DlHandle),
     comptime_codegen: *CodegenShared,
     dyncalls: HashMap(FnType, DynCallShim),
+    pending_took_pointer: List(FuncId),
 );
 
 OverloadKey :: @struct(arg: Type, req: Type);
@@ -147,6 +148,7 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
         
         name := c.fmt_fn_name(f);
         main_thread_pump(self.comp(), shared, @slice(f));
+        @if(use_threads && NEW_COMPTIME_JIT) self.comptime_codegen.join_codegen_thread();
         m := shared.m;
         for_symbols m { id, s | 
             if s.referenced && s.kind == .Pending {
@@ -157,7 +159,7 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
         @if(!use_threads) m.make_exec();
         
         frontend := clock_ms(CLOCK_THREAD_CPUTIME_ID);
-        @eprintln(">>> compiled % in [CPU Time] frontend: %ms, codegen: %ms", name, frontend, shared.codegen_time);
+        @eprintln(">>> compiled % in [CPU Time] frontend: %ms, codegen: R:%ms + C:%ms", name, frontend, shared.codegen_time, self.comptime_codegen.codegen_time);
         cc := or m.get_addr(name) {
             @panic("ICE: lost %", name)
         };
@@ -343,6 +345,7 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
         vtable = init_driver_vtable(),
         comptime_codegen = init(m, @as(CodegenWorker) codegen_thread_main),
         dyncalls = init(a),
+        pending_took_pointer = list(a),
     );
     
     if get_dynamic_context().is_null() {

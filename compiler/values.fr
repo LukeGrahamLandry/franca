@@ -14,6 +14,7 @@
 // TODO: tho that means we wont find it if someone cheats somehow and gets the pointer in a way i didn't think of. 
 //       it relies on them only being created through '!fn_ptr'/const_coerce expressions. 
 fn created_jit_fn_ptr_value(self: *SelfHosted, f: FuncId, ptr: i64) void = {
+    @debug_assert(ptr != 0, "created_jit_fn_ptr_value cannot be null");
     self.baked.functions&.insert(ptr, f);
 }
 
@@ -142,16 +143,25 @@ fn emit_relocatable_constant_body(
     @match(c.get_type(ty)) {
         (fn FnPtr(_) => {
             ptr := ptr_cast_unchecked(u8, i64, value.ptr)[];
+        
+            // Eventually i want ?*T to use zero as .None but for now allow null pointers. 
+            if ptr == 0 {
+                out.push((Num = (value = 0, ty = .P64)));
+                return(.Ok);
+            };
+            
             if c.baked.functions&.get(ptr) { fid |
                 // assert_eq!(*f_ty, program[f].finished_ty().unwrap()); // TODO?
                 out.push((FnPtr = fid));
                 return(.Ok);
             };
             
-            // Eventually i want ?*T to use zero as .None but for now allow null pointers. 
-            if ptr == 0 {
-                out.push((Num = (value = 0, ty = .P64)));
-                return(.Ok);
+            @if(NEW_COMPTIME_JIT) {
+                c.update_pending_took_pointer();
+                if c.baked.functions&.get(ptr) { fid |
+                    out.push((FnPtr = fid));
+                    return(.Ok);
+                };
             };
             
             // TODO: bring this back. need to add it to BackendVTable. -- Oct 20
@@ -273,6 +283,29 @@ fn emit_relocatable_constant_body(
         };
     };
     .Ok
+}
+
+fn update_pending_took_pointer(c: *SelfHosted) void = {
+    @if(!NEW_COMPTIME_JIT) return();
+    // TODO: have it tell us when pointers are ready. :SLOW
+    found := false;
+    m := c.comptime_codegen.m;
+    unordered_retain c.pending_took_pointer& { fid |
+        fid := fid[];
+        need_more := true;
+        use_symbol(m, m.intern(c.comp().fmt_fn_name(fid))) { s | 
+            p := s.jit_addr.int_from_rawptr();
+            if p != 0 {
+                c.baked.functions&.insert(p, fid);
+            };
+            p2 := s.shim_addr.int_from_rawptr();
+            if p != p2 && p2 != 0 {
+                c.baked.functions&.insert(p2, fid);
+            };
+            need_more = p == 0 || p == p2;
+        };
+        need_more
+    };
 }
 
 // :bake_relocatable_value

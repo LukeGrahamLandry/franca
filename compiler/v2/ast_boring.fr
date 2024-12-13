@@ -44,7 +44,8 @@ fn choose_impl(self: *FuncImpl, prio: []FuncImpl.Tag()) ?*FuncImpl = {
     @if_let(self) fn Merged(parts) => {
         // :SLOW make prio $ and have a lookup table for value and just find max in one pass, but N is like 3 so meh.
         for prio { p | 
-            each parts { check | 
+            each parts { check |
+                @debug_assert(!check.is(.Merged), "nested FuncImpl.Merged");
                 if check.tag() == p {
                     return(Some = check);
                 };
@@ -67,12 +68,35 @@ fn find_impl(self: *FuncImpl, $p: FuncImpl.Tag()) ?*get_variant_type(FuncImpl, p
     };
     @if_let(self) fn Merged(parts) => {
         each parts { check | 
+            @debug_assert(!check.is(.Merged), "nested FuncImpl.Merged");
             if check.tag() == p {
                 return(Some =  get_variant_ptr(FuncImpl, check, p));
             };
         };
     };
     .None
+} 
+
+fn append_impl(body: *FuncImpl, a: Alloc, new: FuncImpl) void = {
+    @match(body) {
+        fn Empty() => {
+            body[] = new;
+        }
+        fn Merged(it) => {
+            if new&.is(.Merged) {
+                it.push_all(new.Merged.items(), a);
+            } else {
+                it.push(new, a);
+            }
+        }
+        @default => {
+            l := a.alloc(FuncImpl, 2);
+            l[0] = body[];
+            l[1] = new;
+            
+            body[] = (Merged = (ptr = l.ptr, len = 2, cap = 2));
+        };
+    }
 } 
 
 fn find_or_create_impl(body: *FuncImpl, a: Alloc, $p: FuncImpl.Tag()) *get_variant_type(FuncImpl, p) #generic = {

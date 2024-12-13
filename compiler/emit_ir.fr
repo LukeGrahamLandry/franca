@@ -33,7 +33,7 @@ ReturnTarget :: @struct(
 
 Placement :: @tagged(Assign: Qbe.Ref, Scalar, Blit: Qbe.Ref, NewMemory, Discard);
 
-fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, idx: *i64, pending: *List(FuncId)) Res(void) = {
+fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, idx: *i64, pending: *List(FuncId), export: bool) Res(void) = {
     if when == .Aot {
         // :bake_relocatable_value
         {comp.vtable.check_for_new_aot_bake_overloads}(comp.data); 
@@ -49,6 +49,7 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, id
         func := comp.get_function(f); 
         opts := comp.get_build_options();
         env := comp.get_comptime_env();
+        @if(TRACE_SHIMS) @println("emit_ir % %", f, comp.get_string(func.name));
         self: EmitIr = (
             f = temp().box_zeroed(Qbe.Fn),
             program = comp,
@@ -74,6 +75,7 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, id
         };
         @debug_assert(func.get_flag(.EnsuredCompiled), "fn not compiled?");
         entry.task = (Func = self.f);
+        self.f.lnk.export = export;
         
         res := self&.emit_body(f);
         entry := self.entry; // HACK because of how im doing imports below. 
@@ -240,6 +242,9 @@ fn finalize_blocks(self: *EmitIr) void = {
 
 fn emit_body(self: *EmitIr, f: FuncId) Res(void) #once = { // #log_ir("AIR") 
     func := self.program.get_function(f);
+    if func.get_flag(.LogAst) {
+        @println("[#log_ast %] %", f, self.program.log(func));
+    };
     m := self.shared.m;
     self.f.default_init(m);
     self.f.leaf = true;
@@ -253,7 +258,7 @@ fn emit_body(self: *EmitIr, f: FuncId) Res(void) #once = { // #log_ir("AIR")
     prio_amd :: @const_slice(T.NewIntrinsic, T.Normal, T.Intrinsic, T.ComptimeAddr, T.TargetOsSplit, T.X86AsmBytes, T.Redirect);
     prio_arm :: @const_slice(T.NewIntrinsic, T.Normal, T.Intrinsic, T.ComptimeAddr, T.TargetOsSplit, T.JittedAarch64, T.Redirect);
     impl := or choose_impl(func.body&, @if(self.m.goal.arch == .aarch64, prio_arm, prio_amd)) {
-        return(@err("no acceptable impl"))
+        return(@err("no acceptable impl %", self.program.log(func)))
     };
     
     body: *FatExpr = @match(impl) {
@@ -887,7 +892,7 @@ fn emit_value(self: *EmitIr, value: *Values, p: Placement, expr_ty: Type) Res(Qb
     // with small fields + pointers, but its fine to emit as bytes if all zeros. 
     all_zero := value.all_zeroes();
     
-    use_int_literal := value.is(.Small) && (!info.contains_pointers() || self.when == .Jit || all_zero);
+    use_int_literal := value.is(.Small) && (!info.contains_pointers() || self.when == .Jit || all_zero) && store_by_size[value.Small._1.zext()] != .Oxxx;
     if use_int_literal {
         v := self.f.getcon(value.Small._0);
         return(Ok = self.scalar_result(p, v, expr_ty));
@@ -1282,11 +1287,11 @@ fn scalar_result(self: *EmitIr, p: Placement, r: Qbe.Ref, ty: Type) Qbe.Ref = @m
         };
         o := self.store_op(ty);
         if o == .Oxxx {
+            // TODO: this only sane if called from emit_value so it should probably just deal with this instead. 
             // It's convinent to emit constants as a literal even if we want a struct with multiple fields. 
             // TODO: is alignment real?
             @debug_assert(size <= 8, "tried to use scalar result for large aggragate");
             o = store_by_size[size.zext()];
-            @debug_assert(o != .Oxxx, "tried to store strange size");
         };
         self.emit(o, .Kw, QbeNull, r, dest);
         dest

@@ -526,7 +526,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
     
     found_comptime_import :: fn(addr: rawptr) => {
         self.put_jitted_import(fid, addr);
-        func.set_flag(.RealAsmDone);
+        @if(!NEW_COMPTIME_JIT) func.set_flag(.RealAsmDone);
         impls: List(FuncImpl) = list(2, self.get_alloc());
         impls&.push(ComptimeAddr = addr.int_from_rawptr());
         impls&.push(DynamicImport = func.name);
@@ -550,6 +550,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
         // :AssumeDones
         // TODO: how to catch if it actually doesn't exist or they typo-ed the #import string.
         func.body = (DynamicImport = func.name);
+        @eprintln("TODO: maybe missing import %", self.log_name(fid));
         @try(self.create_jit_shim(fid)) return;
         false
     };
@@ -594,7 +595,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
                 func.body = (ComptimeAddr = ptr);
                 ptr := ptr.rawptr_from_int();
                 self.put_jitted_import(fid, ptr);
-                func.set_flag(.RealAsmDone);    
+                @if(!NEW_COMPTIME_JIT) func.set_flag(.RealAsmDone);    
                 func.set_flag(.YesContext);
             };
             @case(Flag.intrinsic.ident()) => {
@@ -2989,8 +2990,7 @@ fn do_merges(self: *SelfHosted, attempt: *OverloadAttempt) Maybe(void) = {
         func := self.get_function(fid);
         f_ty := func.finished_ty().expect("types to be infered");
         
-        merged: List(FuncImpl) = list(self.get_alloc());
-        merged&.push(func.body);
+        merged := func.body;
         func.body = .Empty; // this will get reset after the loop. 
         
         f_j := f_i;
@@ -3003,7 +3003,7 @@ fn do_merges(self: *SelfHosted, attempt: *OverloadAttempt) Maybe(void) = {
             other_f_ty := other_func.finished_ty().expect("types to be infered");
             if f_ty.arg == other_f_ty.arg && f_ty.ret == other_f_ty.ret {
                 if !other_func.body&.is(.Redirect) {  // TODO: i'd rather not get here a billion times
-                    merged&.push(other_func.body);
+                    append_impl(merged&, self.get_alloc(), other_func.body);
                     other_func.body = (Redirect = fid);
                     attempt.options&.unordered_remove_discard(f_j);
                     if f_j < f_i {
@@ -3015,7 +3015,7 @@ fn do_merges(self: *SelfHosted, attempt: *OverloadAttempt) Maybe(void) = {
                 };
             };
         };
-        func.body = (Merged = merged.rs());
+        func.body = merged;
     };
     // TODO: test getting here multiple times
     
@@ -3226,6 +3226,8 @@ fn took_pointer_value(self: *SelfHosted, fid: FuncId) void = {
         if old { ptr |
             // We already compiled the function but didn't know we'd need to remember its address. (ie. #test fn large_struct_ret_return).
             self.created_jit_fn_ptr_value(fid, ptr.int_from_rawptr())
+        } else {
+            self.pending_took_pointer&.push(fid);
         };
     };
     func.set_flag(.TookPointerValue);
@@ -3761,6 +3763,20 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
             // TODO: now with threads it might be ready by now
             assert(NEW_COMPTIME_JIT || self.get_fn_callable(fid).is_none(), "ICE: i expect it to never be ready by now? otherwise we would have done the call in check_quick_eval?");
             self.dispatch.enclosing_function = old_func;
+            func := self.get_function(fid);
+            if func.body&.is(.Normal) {
+                if func.get_flag(.EnsuredCompiled) {
+                    if self.check_quick_eval(func.body.Normal&, ret_ty) { val |
+                        self.dispatch.enclosing_function = old_func;
+                        return(Ok = val);
+                    };
+                    //@println("imm call %", self.get_function(fid).log(self));
+                } else {
+                    self.dispatch.function_in_progress&.set(fid.as_index());
+                    self.dispatch.enclosing_function = old_func;
+                    return(Suspend = self.wait_for(CompileBody = fid));
+                };
+            };
             return(Suspend = self.wait_for(Jit = fid));
         };
     };
@@ -3786,7 +3802,7 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
                 @check(self.infer_return(fid)) return;
                 // TODO: fixth ecases wehre you blindly return .Ok
                 @try(self.create_jit_shim(fid)) return;
-                self.get_fn_callable(fid).unwrap()
+                self.get_fn_callable(fid).expect("jit shim to be ready")
             } else {
                 self.dispatch.enclosing_function = old_func;
                 return(Suspend = self.wait_for(Jit = fid))
@@ -3794,6 +3810,7 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
         };
         
         values := self.to_values(rawptr, fn_ptr);
+        @debug_assert(values.Small._0 != 0, "Expr:FnPtr cannot return null");
         expr.expr = (Value = (bytes = values, coerced = false));
         expr.done = true;
         return(Ok = values);
@@ -3836,8 +3853,16 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
     fake_func.finished_ret = (Some = ret_ty);
     
     @if(TRACE_CALLS) {  
-        fake_func.name = self.pool.insert_owned(expr.log(self).clone(self.get_alloc()).items());
+        s := expr.log(self);
+        s.len = min(s.len, 45);
+        each s { c |
+            if c[] == "\n".ascii() {
+                c[] = "\\".ascii();
+            };
+        };
+        fake_func.name = self.pool.insert_owned(s.clone(self.get_alloc()).items());
     };
+    
     fake_func.cc = (Some = .CCallReg);    
     fid := self.add_function(fake_func);
     @log_event("imm eval wait for lit %: %", fid, expr.log(self)) self;
@@ -3845,7 +3870,8 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
     expr.expr = (Call = (f = f_expr, arg = self.make_unit_expr(expr.loc)));  // so we try this task again, we get an easy function call.
     expr.done = false;
     self.dispatch.enclosing_function = old_func;
-    (Suspend = self.wait_for(Jit = fid))
+    self.dispatch.function_in_progress&.set(fid.as_index());
+    (Suspend = self.wait_for(CompileBody = fid))
 }
 
 // TODO: decide if need to set 
@@ -3935,17 +3961,26 @@ fn check_quick_eval(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) ?Values = {
             };
             .None
         }
-        // TODO: why does this make it fail `derive_clone_rec`?  -- Sep 3
-        //       doesn't help much anyway so not a big deal but i should still understand. 
-        //fn PtrOffset(it) => {
-        //    if self.check_quick_eval(it.ptr, it.ptr.ty) { ptr |
-        //        @debug_assert(ptr&.is(.Small) && ptr.Small._1 == 8);
-        //        ptr.Small._0 += it.bytes;
-        //        expr.expr = (Value = (bytes = ptr, coerced = false));
-        //        return(Some = ptr);
-        //    };
-        //    .None
-        //}
+        fn Deref(it) => {
+            if self.check_quick_eval(it[], self.ptr_ty(ret_ty)) { ptr |
+                info := self.get_info(ret_ty);
+                if info.is_sized {
+                    @debug_assert(ptr&.is(.Small), "want inline ptr");
+                    bytes: []u8 = (ptr = u8.ptr_from_int(ptr.Small._0), len = info.stride_bytes.zext());
+                    return(Some = self.from_bytes(bytes));
+                };
+            };
+            .None
+        }
+        fn PtrOffset(it) => {
+            if self.check_quick_eval(it.ptr, it.ptr.ty) { ptr |
+                @debug_assert(ptr&.is(.Small) && ptr.Small._1 == 8);
+                ptr.Small._0 += it.bytes;
+                expr.expr = (Value = (bytes = ptr, coerced = false));
+                return(Some = ptr);
+            };
+            .None
+        }
         @default => .None;
     }
 }

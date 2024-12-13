@@ -275,7 +275,7 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
                 normal_or_intrinsic :: @const_slice(TTT.Normal, TTT.Intrinsic); // ,i T.NewIntrinsic); we don't use emit_ir for comptime yet. 
                 
                 func := self.get_function(fid);
-                if !choose_impl(func.body&, normal_or_intrinsic).is_some() || !func.get_flag(.AsmDone) {
+                if !func.get_flag(.RealAsmDone) {
                     shallow_jit_func(self, fid);
                 };
             } else {
@@ -517,24 +517,39 @@ fn get_fn_callable(self: *SelfHosted, fid: FuncId) ?rawptr = {
         id := m.intern(self.comp().fmt_fn_name(fid));
         result: ?rawptr = .None;
         func := self.get_function(fid);
-        if use_threads && func.get_flag(.RealAsmDone) {
+        if !func.get_flag(.RealAsmDone) && !func.get_flag(.AlreadyHasShim) {
+            return(.None);
+        };
+        if use_threads {
+            self.update_pending_took_pointer();
+            if TRACE_SHIMS && !symbol_is_ready(m, id) {
+                @println("waiting for %", self.log_name(fid));
+            };
             while => !symbol_is_ready(m, id) {
-                usleep(10);
+                pthread_cond_signal(self.comptime_codegen.cond&);
             }; 
         };
         use_symbol(m, id) { s| 
             // TODO: sometimes we actually want to spin and wait for it to be ready. 
             //       also something something how big is a cache line. 
             if !s.jit_addr.is_null() && (s.kind != .Local || s.size != 0) {
-                if s.size != 0 {
-                    // :ThreadSafety this is very bad no good. 
-                    m := self.comptime_codegen.m;
-                    seg := m.segments&[.Code]&;
-                    next := seg.next;
-                    if !next.identical(m.start_of_writable_code) {
-                        clear_instruction_cache(u8.raw_from_ptr(m.start_of_writable_code), u8.raw_from_ptr(next));
-                        m.start_of_writable_code = next;
-                    };
+                //if s.size != 0 {
+                //    // :ThreadSafety this is very bad no good. 
+                //    m := self.comptime_codegen.m;
+                //    first := m.start_of_writable_code;
+                //    end   := u8.ptr_from_raw(s.jit_addr.offset(s.size));
+                //    next  := m.last_function_start;
+                //    if u8.int_from_ptr(end) > u8.int_from_ptr(next) {
+                //        next = end;
+                //    };
+                //    if !first.identical(next) {
+                //        clear_instruction_cache(u8.raw_from_ptr(first), u8.raw_from_ptr(next));
+                //        m.start_of_writable_code = next;
+                //    };
+                //};
+                // TODO: only the first time :SLOW
+                if func.get_flag(.TookPointerValue) || ENABLE_TRACY || TRACE_CALLS {
+                    self.created_jit_fn_ptr_value(fid, s.jit_addr.int_from_rawptr());
                 };
                 result = (Some = s.jit_addr);
             };
@@ -545,6 +560,9 @@ fn get_fn_callable(self: *SelfHosted, fid: FuncId) ?rawptr = {
         {opts.comptime_jit_vptr.get_jitted}(opts.comptime_jit_data, self.comp(), fid, true)
     })
 }
+
+fn align_backwards(p: rawptr, align: i64) rawptr = 
+    p.int_from_rawptr().div(align).mul(align).rawptr_from_int();
 
 fn get_fn_old(self: *SelfHosted, f: FuncId) ?rawptr = {
     @assert(!NEW_COMPTIME_JIT, "get_fn_old");

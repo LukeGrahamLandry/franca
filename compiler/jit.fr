@@ -1,13 +1,12 @@
-// UNUSED. 
-// until the comptime jit can be switched to emit_ir because the old one didn't follow the platform abis correctly. 
+// WIP. not yet the default because it's slower and race-y
 
 //! - Call a function pointer with a dynamically known type on an array of bytes.
 //! - Create a shim around an uncompiled function that redirects into the compiler and then forwards to the real callee. 
 //! - Compile a single function and create shims for any uncompiled callees.
 
 NEW_COMPTIME_JIT :: false;
-TRACE_SHIMS :: NEW_COMPTIME_JIT;
-TRACE_CALLS :: NEW_COMPTIME_JIT; 
+TRACE_SHIMS :: false;
+TRACE_CALLS :: false; 
 
 DynCallShim :: @tagged(Pending: u32, Ready: rawptr);
 
@@ -21,9 +20,8 @@ fn call_dynamic_values(self: *SelfHosted, f_ptr: i64, f_ty: FnType, args_value: 
         fn Pending(it) => {
             m := self.comptime_codegen.m;
             @if(use_threads)
-            dowhile {
-                usleep(10);
-                !symbol_is_ready(m, it[])
+            while => !symbol_is_ready(m, it[]) {
+                pthread_cond_signal(self.comptime_codegen.cond&);
             };
             c, size := get_addr(m, it[]).unwrap();
             clear_instruction_cache(c, c.offset(size));
@@ -62,12 +60,10 @@ fn call_dynamic_values(self: *SelfHosted, f_ptr: i64, f_ty: FnType, args_value: 
 // TODO: reuse functions when they have different nominal types but the same repr. 
 fn create_dyncall_shim(self: *SelfHosted, f_ty: FnType) void = {
     shared := self.comptime_codegen;
-    idx := 0;
     ins: QList(Qbe.Ins) = new(0);
     nins := 0;
     @if(TRACE_SHIMS) @println("create dyncall % -> %", self.log_type(f_ty.arg), self.log_type(f_ty.ret));
-    entry := bouba_acquire(shared, idx&);
-    @if(TRACE_SHIMS) {entry.logging = "P"};
+    entry := bouba_acquire(shared, shared.bouba_idx&);
     id: u32 = 0; 
     push_dynamic_context {
         context(DefaultContext)[].temporary_allocator = entry.arena&;
@@ -161,30 +157,25 @@ fn create_dyncall_shim(self: *SelfHosted, f_ty: FnType) void = {
 fn create_jit_shim(self: CompCtx, shared: *CodegenShared, fid: FuncId, handler_callee_address: rawptr) void = {
     // TODO: replace accesses to bc.jitted.dispatch_table[fid.as_index()]?
     func := self.get_function(fid);
-    @if(TRACE_SHIMS) @println("create shim %", self.get_string(func.name));
+    @if(TRACE_SHIMS) @println("create shim %: %", fid, self.get_string(func.name));
     m := shared.m;
-    idx := 0;
-    entry := bouba_acquire(shared, idx&);
+    entry := bouba_acquire(shared, shared.bouba_idx&);
     c := self.data.cast()[][];
     push_dynamic_context {
         context(DefaultContext)[].temporary_allocator = entry.arena&;
         
-        id := m.intern(self.fmt_fn_name(fid));
-        use_symbol(m, id) { s |
-            @debug_assert(s.kind != .Local, "create_jit_shim for something that has already been declared");
-        };
+        id := m.intern(@tfmt("%__shim", fid));
         
         // create a new function
         f := temp().box_zeroed(Qbe.Fn);
         f.default_init(m);
         f.leaf = false;
         f.lnk.no_inline = true;
-        f.lnk.weak = true;
         f.lnk.id = id;
         f.start = newblk();
         f.start.ins = new(0);
         f.nblk = 1;
-        entry.task = (Func = f);
+        entry.task = (Shim = (f = f, shim_for = m.intern(self.fmt_fn_name(fid))));
         
         // collect parameters
         env    := f.newtmp("context", .Kl);
@@ -231,22 +222,30 @@ fn create_jit_shim(self: CompCtx, shared: *CodegenShared, fid: FuncId, handler_c
 }
 
 fn shallow_jit_func(self: *SelfHosted, fid: FuncId) void = {
-    idx     := 0;
     pending := FuncId.list(temp());
     @if(TRACE_SHIMS) @println("shallow jit F%: %", fid.as_index(), self.log_name(fid));
-    func := self.get_function(fid);
-    noinline := func.get_flag(.NoInline);
-    log_ir := func.get_flag(.LogIr);
-    @if(!noinline) func.set_flag(.NoInline); // TODO: instead just set symbol.referenced so it doesn't get suspended
-    @if(TRACE_SHIMS) @if(!log_ir) func.set_flag(.LogIr);
-    _ := self.unwrap_report_error(void, emit_ir(self.comp(), self.comptime_codegen, fid, .Jit, idx&, pending&));
-    @if(!noinline) func.unset_flag(.NoInline);
-    @if(!log_ir) func.unset_flag(.LogIr);
-    func.set_flag(.RealAsmDone);
-    func.set_flag(.AsmDone);
-    for pending& { fid |
+    func := self.get_function(fid);  
+    if func.body&.is(.DynamicImport) {
+        self.create_jit_shim(fid); 
+        return();
+    };
+    //for func.callees& { fid |
+    //    if !self.get_function(fid).get_flag(.AsmDone) {
+    //        self.create_jit_shim(fid); 
+    //    };
+    //};
+    // TODO: shouldn't need this? but do for trivial_data_reloc
+    for func.mutual_callees& { fid |
         if !self.get_function(fid).get_flag(.AsmDone) {
             self.create_jit_shim(fid); 
         };
+    };
+    _ := self.unwrap_report_error(void, emit_ir(self.comp(), self.comptime_codegen, fid, .Jit, self.comptime_codegen.bouba_idx&, pending&, true));
+    func.set_flag(.RealAsmDone);
+    func.set_flag(.AsmDone);
+    for pending& { fid |
+        //if !self.get_function(fid).get_flag(.AsmDone) {
+            self.create_jit_shim(fid); 
+        //};
     };
 }

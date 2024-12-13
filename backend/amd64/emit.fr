@@ -19,6 +19,7 @@ fn emit_func_amd64(m: *QbeModule, f: *Qbe.Fn, file: *FILE) void = {
     @debug_assert_eq(m.goal.arch, .x86_64, "how did we get here?");
     @debug_assert(!m.got_indirection_instead_of_patches, "TODO: got_indirection_instead_of_patches impl in amd64 call");
     code := m.segments&[.Code]&;
+    start := code.next;
     name_id := f.lnk.id;
     maybe_add_export(m, name_id, f.lnk.export);
     m.do_jit_fixups(name_id, .Code, code.len());
@@ -32,9 +33,9 @@ fn emit_func_amd64(m: *QbeModule, f: *Qbe.Fn, file: *FILE) void = {
     
     emit_the_code(e&);
     code.next = code.next.offset(e.a.len() - e.last_saved_offset);
+    m.last_function_start = start;
     use_symbol(m, name_id) { s | 
         s.size = e.a.len();
-        s.weak = s.weak || f.lnk.weak;
         @debug_assert(s.size != 0, "zero size function?");
     };
     maybe_llvm_dis(f, e.a.items(), "--arch=x86-64");
@@ -115,7 +116,16 @@ fn ensure_got_slot(self: *QbeModule, symbol: *SymbolInfo, jit_address: rawptr) ?
         got[] = jit_address; // because we don't loop again to handle `new_got_reloc`
     };
     got := self.segment_address(.ConstantData, symbol.got_lookup_offset);  // :GotAtConstantDataBase 
-    @debug_assert_eq(ptr_cast_unchecked(u8, rawptr, got)[], jit_address);
+    got := ptr_cast_unchecked(u8, rawptr, got);
+    if self.got_indirection_instead_of_patches {
+        if jit_address.is_null() {
+            //@println("missing jit import? % % %", symbol.name, symbol.jit_addr, got[]);
+        } else {
+            got[] = jit_address;
+        };
+    } else {
+        @debug_assert_eq(got[], jit_address, "ensure_got_slot with different address");
+    };
     new_got_reloc
 }
 
