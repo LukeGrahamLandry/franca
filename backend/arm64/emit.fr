@@ -41,22 +41,14 @@ fn emit_func_arm64(m: *QbeModule, f: *Qbe.Fn, _: *FILE) void = {
     code := m.segments&[.Code]&;
     @assert(total_code_so_far < code.mmapped.len, "too much code (% bytes)", total_code_so_far);
     code_bytes := code.mmapped.slice(start_offset, total_code_so_far);
+    @debug_assert(code_bytes.ptr.offset(code_bytes.len).identical(code.next));
     // :FuncSizeLimit 
     // b.cond gives you 19 bits, but encoded/4, but signed so that's 20 bits.  
     // you can remove this limit on the function but then have to add the check when emitting each branch. 
     @assert_lt(code_bytes.len, 1.shift_left(20), "we don't allow a function larger than one instruction can jump");
     maybe_llvm_dis(f, code_bytes, "--arch=aarch64");
     
-    // :SLOW
-    if m.got_indirection_instead_of_patches && m.goal.type == .JitOnly {
-        clear_instruction_cache(u8.raw_from_ptr(code_bytes.ptr), u8.raw_from_ptr(code_bytes.ptr.offset(code_bytes.len)));
-    };
-    
-    m.last_function_start = start;
-    use_symbol(self.m, f.lnk.id) { s |
-        s.size = code_bytes.len;
-        @debug_assert(s.size != 0, "zero size function?");
-    };
+    finish_function(m, code_bytes, f.lnk.id);
 }
 
 fn maybe_llvm_dis(f: *Qbe.Fn, code_bytes: []u8, arch_name: Str) void = {

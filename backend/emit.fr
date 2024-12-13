@@ -31,7 +31,7 @@ SymbolInfo :: @struct(
     is_thread_local: bool,  
     referenced: bool,  // took address or called before knowing it was inlinable so you must actually emit the function.
     jit_addr: rawptr, // valid when kind == .DynamicPatched and goal == .JitOnly
-    size: i64,  // only set for functions currently.
+    size: i64,  // only set for functions currently. 
     shim_addr: rawptr, // TODO: it would be great if i didn't need this
 );
 
@@ -237,16 +237,38 @@ fn emit_data_to_segment(self: *QbeModule, dat: *Qbe.Dat) void = {
 }
 
 // :ThreadSafety we can't have both threads fucking with self.segments
-fn add_code_bytes(self: *QbeModule, name_id: u32, bytes: []u8) void = {
-    code := self.segments&[.Code]&;
+fn add_code_bytes(m: *QbeModule, name_id: u32, bytes: []u8) void = {
+    code := m.segments&[.Code]&;
     code.align_to(4);  // todo: only for arm
     start_offset := ptr_diff(code.mmapped.ptr, code.next);
     
-    self.do_jit_fixups(name_id, .Code, start_offset);
+    m.do_jit_fixups(name_id, .Code, start_offset);
     
     dest := slice(code.next, bytes.len);
     dest.copy_from(bytes);
     code.next = code.next.offset(bytes.len);
+    
+    finish_function(m, dest, name_id);
+}
+
+fn finish_function(m: *QbeModule, dest: []u8, name_id: u32) void #inline = {
+    if m.got_indirection_instead_of_patches && m.goal.type == .JitOnly {
+        // :SLOW
+        @if(use_threads) pthread_mutex_lock(m.icache_mutex&).unwrap();
+        //sys_dcache_flush(u8.raw_from_ptr(dest.ptr), dest.len);
+        sys_icache_invalidate(u8.raw_from_ptr(dest.ptr), dest.len);
+        
+        m.last_function_end = dest.ptr.offset(dest.len);
+        use_symbol(m, name_id) { s |
+            s.size = dest.len;
+        };
+        next := m.segments&[.Code].next&;
+        @if(use_threads) pthread_mutex_unlock(m.icache_mutex&).unwrap();
+    } else {
+        use_symbol(m, name_id) { s |
+            s.size = dest.len;
+        };
+    };
 }
 
 fn align_to(s: *SegmentCursor, align: i64) void = {
@@ -319,6 +341,12 @@ fn do_jit_fixups(self: *QbeModule, id: u32, segment: SegmentType, final_offset: 
         symbol.kind = .Local;
         dest := self.segment_address(symbol.segment, symbol.offset);
         fixups := symbol.fixups&;
+        if self.goal.type == .JitOnly && self.got_indirection_instead_of_patches && !symbol.shim_addr.is_null() {
+            // :InsaneCaches
+            @assert(fixups.len == 1);
+            fixups.drop(self.gpa); 
+            // don't return here. do_fixups sets jit_addr
+        };
         self.do_fixups(dest, symbol);
         if self.goal.type == .JitOnly || self.goal.type == .Exe || self.goal.type == .Dynamic { //  || symbol.segment == .Code // :canireallynothavecodeberelative
             // Since it's a local symbol, we don't care about the relocations anymore. The linker never needs to know. 
@@ -339,7 +367,7 @@ fn do_jit_fixups(self: *QbeModule, id: u32, segment: SegmentType, final_offset: 
 
 fn do_fixups(self: *QbeModule, address: *u8, symbol: *SymbolInfo) void = {
     assert(!self.fixups_locked, "you cannot add more fixups after emitting for aot");
-    symbol.jit_addr = u8.raw_from_ptr(address);
+    symbol.jit_addr = u8.raw_from_ptr(address);  
     if self.goal.type == .JitOnly {
         @debug_assert(!address.is_null(), "do_fixups jit null symbol %", symbol.name);
     };
@@ -356,7 +384,7 @@ fn do_fixups(self: *QbeModule, address: *u8, symbol: *SymbolInfo) void = {
 }
 
 // :ThreadSafety use cas?
-fn symbol_is_ready(m: *QbeModule, s: u32) bool = {
+fn symbol_is_ready(m: *QbeModule, s: u32) bool #inline = {
     r := false;
     use_symbol(m, s) { s |
         r = s.size != 0 || (s.kind != .Local && !s.jit_addr.is_null());

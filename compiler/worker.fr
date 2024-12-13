@@ -142,6 +142,7 @@ codegen_thread_main :: fn(shared: *CodegenShared) void = {
     loop {
         if acquire(shared.queue, false, idx&) { entry |
             do_codegen(shared.m, entry);
+            pthread_cond_signal(shared.kiki_progress_c&).unwrap();
         } else {
             if shared.no_more_functions {
                 emit_suspended_inlinables(shared.m); // needs to happen on codegen thread for apple's jit shit.
@@ -149,22 +150,27 @@ codegen_thread_main :: fn(shared: *CodegenShared) void = {
                 // pthread_getcpuclockid doesn't exist? so we have to do this here
                 shared.codegen_time = clock_ms(CLOCK_THREAD_CPUTIME_ID);
                 shared.no_more_codegen = true;
+                pthread_cond_signal(shared.kiki_progress_c&).unwrap();
                 return();
             };
-            pthread_mutex_lock(shared.mutex&).unwrap();
-            pthread_cond_wait(shared.cond&, shared.mutex&).unwrap();
-            pthread_mutex_unlock(shared.mutex&).unwrap();
+            pthread_cond_signal(shared.kiki_progress_c&).unwrap();
+            wait(shared.bouba_progress_c&, shared.bouba_progress_m&)
         };
     };
 };
+
+fn wait(c: *PCond, m: *PMutex) void = {
+    pthread_mutex_lock(m).unwrap();
+    pthread_cond_wait(c, m).unwrap();
+    pthread_mutex_unlock(m).unwrap();
+}
 
 fn bouba_acquire(shared: *CodegenShared, idx: *i64) *CodegenEntry = {
     loop {
         if shared.queue.acquire(true, idx) { entry |
             return(entry);
         };
-        usleep(1000);  // most of the time the backend is not the bottle neck (because my frontend is so dumb). 
-                       // currently it falls behind ~11 times during self compile. -- Nov 26
+        wait(shared.kiki_progress_c&, shared.bouba_progress_m&);
     };
 }
 
@@ -172,7 +178,7 @@ fn enqueue_task(shared: *CodegenShared, old_entry: *CodegenEntry) void = {
     @debug_assert(!old_entry.task&.is(.Dead), "tried to enqueue dead task");
     old_entry.release(true);
     @if(use_threads, {
-        pthread_cond_signal(shared.cond&);
+        pthread_cond_signal(shared.bouba_progress_c&);
     }, {
         ::ptr_utils(*CodegenEntry);
         entry := shared.queue.acquire(false, shared.bouba_idx&).unwrap();
@@ -268,8 +274,9 @@ CodegenShared :: @struct(
     queue: []CodegenEntry,
     no_more_functions := false,
     no_more_codegen := false,
-    cond: PCond,
-    mutex: PMutex,
+    bouba_progress_c: PCond,
+    bouba_progress_m: PMutex,
+    kiki_progress_c: PCond,
     m: *QbeModule,
     codegen_time := 0,
     thread: Thread,
@@ -308,8 +315,9 @@ fn init(m: *QbeModule, worker: CodegenWorker) *CodegenShared = {
     shared.m = m;
     shared.constants_used = empty(a);
     @if(use_threads) {
-        pthread_mutex_init(shared.mutex&, 0).unwrap();
-        pthread_cond_init(shared.cond&, 0).unwrap();
+        pthread_mutex_init(shared.bouba_progress_m&, 0).unwrap();
+        pthread_cond_init(shared.bouba_progress_c&, 0).unwrap();
+        pthread_cond_init(shared.kiki_progress_c&, 0).unwrap();
     };
     // TODO: one allocation for all the initial slices.
     enumerate shared.queue { i, entry |
@@ -370,8 +378,8 @@ fn get_log_types(comp: CompCtx, fid: FuncId) Str = {
 fn join_codegen_thread(shared: *CodegenShared) void = {
     shared.no_more_functions = true;
     while => !shared.no_more_codegen {
-        usleep(100);
-        pthread_cond_signal(shared.cond&);
+        pthread_cond_signal(shared.bouba_progress_c&);
+        wait(shared.kiki_progress_c&, shared.bouba_progress_m&);
     };
 }
 

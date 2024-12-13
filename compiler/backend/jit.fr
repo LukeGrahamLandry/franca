@@ -74,11 +74,27 @@ fn create_jit_shim(self: CompCtx, bc: *BcBackend, fid: FuncId, handler_callee_ad
     (Ok = fake_body)
 }
 
+fn save_in_got(self: *SelfHosted, fid: FuncId, addr: rawptr) void = {
+    @if(NEW_COMPTIME_JIT) {
+        // :InsaneCaches
+        self.bump_dirty_new();
+        m := self.comptime_codegen.m;
+        id := m.intern(self.comp().fmt_fn_name(fid));
+        use_symbol(m, id) { s |
+            @debug_assert(s.got_lookup_offset != -1);
+            got := m.segment_address(.ConstantData, s.got_lookup_offset);  // :GotAtConstantDataBase 
+            got := ptr_cast_unchecked(u8, rawptr, got);
+            got[] = addr;
+        };
+    };
+}
+
 // TODO: this needs to get much faster because you have to call through it every time you call a function that got unlucky in compile order. 
 // TODO: it would be nice if i had the arguments here for reporting what call you actually tried to make. 
 //       but this way will be even better once i can lazily compile it and just lean on the backend to make the args flow through. 
 report_called_uncompiled_or_just_fix_the_problem :: @as(rawptr) fn(self: *SelfHosted, fid: FuncId) rawptr = {
-    @if(TRACE_SHIMS) @println("called shim for % %", fid, self.log_name(fid));
+    @if(TRACE_SHIMS)
+    @println("called shim for % %", fid, self.log_name(fid));
     
     // important: have to be careful about which comptime is in the context if the driver program gets compiled lazily. 
     func := self.get_function(fid);
@@ -89,6 +105,7 @@ report_called_uncompiled_or_just_fix_the_problem :: @as(rawptr) fn(self: *SelfHo
         //       but that's sad because most of the time its just an array lookup.  -- Nov 25
         if self.get_fn_callable(fid) { addr | 
             // It's been compiled since last we checked so just use that. 
+            save_in_got(self, fid, addr);
             return(addr);
         };
         @if(TRACE_SHIMS) @println("- wrong!");
@@ -128,6 +145,7 @@ report_called_uncompiled_or_just_fix_the_problem :: @as(rawptr) fn(self: *SelfHo
         result = self.unwrap_report_error(rawptr, addr);
     };
     //bc.jitted&.bump_dirty();
+    save_in_got(self, fid, result);
     result
 };
 
