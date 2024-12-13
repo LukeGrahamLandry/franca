@@ -251,18 +251,29 @@ fn add_code_bytes(m: *QbeModule, name_id: u32, bytes: []u8) void = {
     finish_function(m, dest, name_id);
 }
 
+// this sure does something. please run it so many times before trying to remove.
+fn fence() void #asm #aarch64 = (
+    @bits(0b11010101000000110011, 0b1111, 0b10111111),  // DMB SY
+    ret()
+);
+
+fn fence(x: i64) i64 #asm #x86_bytes = (fn(out) = @asm_x64(
+    PrimaryOp.Ret,PrimaryOp.Ret
+) out);
+
 fn finish_function(m: *QbeModule, dest: []u8, name_id: u32) void #inline = {
     if m.got_indirection_instead_of_patches && m.goal.type == .JitOnly {
         // :SLOW
         @if(use_threads) pthread_mutex_lock(m.icache_mutex&).unwrap();
-        //sys_dcache_flush(u8.raw_from_ptr(dest.ptr), dest.len);
-        sys_icache_invalidate(u8.raw_from_ptr(dest.ptr), dest.len);
         
         m.last_function_end = dest.ptr.offset(dest.len);
         use_symbol(m, name_id) { s |
             s.size = dest.len;
         };
-        next := m.segments&[.Code].next&;
+        sys_dcache_flush(u8.raw_from_ptr(dest.ptr), dest.len);
+        fence();
+        
+        //sys_icache_invalidate(u8.raw_from_ptr(dest.ptr), dest.len);
         @if(use_threads) pthread_mutex_unlock(m.icache_mutex&).unwrap();
     } else {
         use_symbol(m, name_id) { s |

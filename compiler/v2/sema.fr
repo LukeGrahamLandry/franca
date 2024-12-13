@@ -343,22 +343,30 @@ fn decl_var(self: *SelfHosted, name: Var, ty: *LazyType, value: *FatExpr) Maybe(
     .Ok
 }
 
-fn ensure_resolved_sign(self: *SelfHosted, fid: FuncId) Maybe(void) = {
+fn ensure_resolved_sign(self: *SelfHosted, fid: FuncId) Maybe(void) #inline = {
     func := self.get_function(fid);
     if(func.get_flag(.ResolvedSign), => return(.Ok));
-    @try(self.resolve_sign(func)) return;
-    @try(self.require_unique_fields(func.arg&)) return;
-    func.set_flag(.ResolvedSign);
-    .Ok
+    inners :: fn(self: *SelfHosted, func: *Func) Maybe(void) = {
+        @try(self.resolve_sign(func)) return;
+        @try(self.require_unique_fields(func.arg&)) return;
+        func.set_flag(.ResolvedSign);
+        .Ok
+    };
+    inners(self, func)
 }
 
-fn ensure_resolved_body(self: *SelfHosted, fid: FuncId) Maybe(void) = {
-    @check(self.ensure_resolved_sign(fid)) return;
+fn ensure_resolved_body(self: *SelfHosted, fid: FuncId) Maybe(void) #inline = {
     func := self.get_function(fid);
     if(func.get_flag(.ResolvedBody), => return(.Ok));
-    @try(self.resolve_body(func)) return;
-    func.set_flag(.ResolvedBody);
-    .Ok
+    innerb :: fn(self: *SelfHosted, func: *Func) Maybe(void) = {
+        @try(self.resolve_sign(func)) return;
+        @try(self.require_unique_fields(func.arg&)) return;
+        func.set_flag(.ResolvedSign);
+        @try(self.resolve_body(func)) return;
+        func.set_flag(.ResolvedBody);
+        .Ok
+    };
+    innerb(self, func)
 }
 
 fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = {
@@ -835,6 +843,9 @@ fn get_smuggled_libc_function(arch: Arch, name: Symbol) ?rawptr = {
 
 ::tagged(ResultType);
 fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(void) = {
+    if expr.done {
+        return(.Ok);
+    };
     @check(self.compile_expr_inner(expr, requested)) return;
     @if_let(requested) fn Specific(type) => {
         if expr.expr&.is(.Value) {
@@ -2265,7 +2276,7 @@ fn get_type_for_arg(self: *SelfHosted, arg: *Pattern, arg_name: Var) Maybe(Type)
     @err("missing argument %", arg_name&.log(self))
 }
     
-fn infer_type(self: *SelfHosted, b: *LazyType) Maybe(?Type) = {
+fn infer_type(self: *SelfHosted, b: *LazyType) Maybe(?Type) #inline = {
     @match(b) {
         fn PendingEval(e) => {
             ty := @check(self.eval(e, Type)) return;
@@ -2490,7 +2501,7 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
         for new { option | 
             if self.filter_overload_sync(arg_expr, want_arity, option) {
                 @check(self.ensure_resolved_sign(option)) return; // TODO: dont let this suspend cause it cant
-                attempt.options&.push(option);
+                attempt.options&.push_assume_capacity(option);
             };
         };
         attempt.last_ready_count = overloads.ready.len;
@@ -2569,8 +2580,8 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
                 if b.ty&.ty() { param | 
                     if !self.ask_can_assign(param, type) {
                         if arg_expr.is_const() { // this helps with :type_through_field
-                            res := self.coerce_const_expr(arg_expr, (Specific = param), true);
-                            if res&.is(.Ok) {
+                            res := self.ask_coerce_const_expr(arg_expr, param, true);
+                            if res&.is(.Ok) && res.Ok {
                                 @log_event("% [%] allow coerce arg % <- %", fid, arg_index, self.log_type(param), self.log_type(type)) self;
                                 continue();
                             };
@@ -2813,7 +2824,7 @@ fn check_promote_id_to_func(self: *SelfHosted, fid: FuncId, f_ty: FnType) Maybe(
     .Ok
 }
 
-fn filter_overload_sync(self: *SelfHosted, arg_expr: *FatExpr, arg_expr_arity: i64, fid: FuncId) bool #once = {
+fn filter_overload_sync(self: *SelfHosted, arg_expr: *FatExpr, arg_expr_arity: i64, fid: FuncId) bool #once #inline = {
     func := self.get_function(fid);
     
     if func.body&.is(.Empty) && func.annotations.len == 0 {
@@ -3320,7 +3331,7 @@ fn handle_declare_constant(self: *SelfHosted, name: Var, ty: *LazyType, value: *
         // This can't just fallthrough and call update_placeholder at the end of this function like the old version did,
         // because we might suspend while compiling and then next time around we'll forget this value is special. 
         // (we'll just think its already done because we'll see the placeholder).
-        return(Suspend = self.wait_for(FinishRecType = (hole = hole, name = name, value = real_value_box)))
+        return(Suspend = self.wait_for(FinishRecType = (hole = hole, name = name, value = real_value_box)));
     };
     
     @check(self.compile_expr(value, want)) return;
@@ -3400,180 +3411,192 @@ fn save_const(self: *SelfHosted, name: Var, val_expr: Expr, final_ty: Type, loc:
     .Ok
 }
 
-// TODO: you can never do this to a constant directly in case its aliased once i have const ptrs. 
-fn coerce_const_expr(self: *SelfHosted, expr: *FatExpr, req: ResultType, query: bool) Maybe(void) = {
-    if req.specific() { want | 
-        found := expr.ty;
-        if found != want {
-            // can't do this because it mightn ot be a value
-            //@assert(!expr.expr.Value.coerced, "const mismatch. % vs % but already coerced", self.log_type(found), self.log_type(want));
-            // TODO: set coereced? 
-            
-            want_info := self.get_type(want);
-            found_info := self.get_type(found);
-            if found == OverloadSet {
-                @match(want_info) {
-                    fn Fn(f_ty) => {
-                        os := @check(self.eval(expr, OverloadSet)) return;
-                        fid := @check(self.resolve_by_type(os, f_ty[], expr.loc)) return;
-                        if(query, => return(.Ok));
-                        self.set(expr, FuncId, fid); // :HERE
-                        return(.Ok);
-                    }
-                    fn FnPtr(f) => {
-                        os := @check(self.eval(expr, OverloadSet)) return;
-                        fid := @check(self.resolve_by_type(os, f.ty, expr.loc)) return;
-                        if(query, => return(.Ok));
-                        self.set(expr, FuncId, fid);
-                        expr.done = false;
-                        self.took_pointer_value(fid);
-                        e := self.box(expr[]);  // :fucked segfault if you inline this!!!!!! -- Aug 6
-                        expr.expr = (FnPtr = e);
-                        expr.ty = want;
-                        expr.done = false;
-                        return(self.compile_fn_ptr(expr));
-                    }
-                    @default => ();
-                };
+fn ask_coerce_const_expr(self: *SelfHosted, expr: *FatExpr, want: Type, query: bool) Maybe(bool) = {
+    found := expr.ty;
+    if found == want {
+        return(Ok = true);
+    };
+    // can't do this because it mightn ot be a value
+    //@assert(!expr.expr.Value.coerced, "const mismatch. % vs % but already coerced", self.log_type(found), self.log_type(want));
+    // TODO: set coereced? 
+    
+    want_info := self.get_type(want);
+    found_info := self.get_type(found);
+    if found == OverloadSet {
+        @match(want_info) {
+            fn Fn(f_ty) => {
+                os := @check(self.eval(expr, OverloadSet)) return;
+                fid := @check(self.resolve_by_type(os, f_ty[], expr.loc)) return;
+                if(query, => return(Ok = true));
+                self.set(expr, FuncId, fid); // :HERE
+                return(Ok = true);
+            }
+            fn FnPtr(f) => {
+                os := @check(self.eval(expr, OverloadSet)) return;
+                fid := @check(self.resolve_by_type(os, f.ty, expr.loc)) return;
+                if(query, => return(Ok = true));
+                self.set(expr, FuncId, fid);
+                expr.done = false;
+                self.took_pointer_value(fid);
+                e := self.box(expr[]);  // :fucked segfault if you inline this!!!!!! -- Aug 6
+                expr.expr = (FnPtr = e);
+                expr.ty = want;
+                expr.done = false;
+                @check(self.compile_fn_ptr(expr)) return;
+                return(Ok = true);
+            }
+            @default => ();
+        };
+    };
+    if want == FuncId {
+        @if_let(found_info) fn Fn() => {
+            if(query, => return(Ok = true));
+            expr.ty = FuncId;
+            return(Ok = true);
+        };
+    };
+    
+    if found == FuncId {
+        @match(want_info) {
+            fn Fn(f_ty) => {
+                fid := @check(self.eval(expr, FuncId)) return;
+                @check(self.check_promote_id_to_func(fid, f_ty[])) return;
+                if(query, => return(Ok = true));
+                
+                expr.ty = want;
+                // TODO: typecheck args
+                return(Ok = true);
+            }
+            fn FnPtr(f_ty) => {
+                expr.done = false;
+                inner := self.box(expr[]);
+                expr.expr = (FnPtr = inner);
+                expr.done = false;
+                expr.ty = UnknownType;
+                // TODO: typecheck
+                @check(self.compile_expr(expr, (Specific = want))) return;
+                return(Ok = true);
+            }
+            fn VoidPtr() => {
+                if(query, => return(Ok = true));
+                fid := @check(self.eval(expr, FuncId)) return;
+                inner := self.box(expr[]);
+                expr.expr = (FnPtr = inner);
+                expr.done = inner.done;
+                expr.ty = rawptr;
+                self.took_pointer_value(fid);
+                // TODO: could call compile_expr/compile_fn_expr instead of imm+took
+                return(Ok = true);
+            }
+            @default => ();
+        };
+    };
+
+    @match(found_info) {
+        fn FnPtr(f_ty) => {
+            if want == rawptr {
+                if(query, => return(Ok = true));
+                expr.ty = rawptr;
+                return(Ok = true);
             };
-            if want == FuncId {
-                @if_let(found_info) fn Fn() => {
-                    if(query, => return(.Ok));
-                    expr.ty = FuncId;
-                    return(.Ok);
-                };
-            };
-            
-            if found == FuncId {
-                @match(want_info) {
-                    fn Fn(f_ty) => {
-                        fid := @check(self.eval(expr, FuncId)) return;
-                        @check(self.check_promote_id_to_func(fid, f_ty[])) return;
-                        if(query, => return(.Ok));
-                        
-                        expr.ty = want;
-                        // TODO: typecheck args
-                        return(.Ok);
-                    }
-                    fn FnPtr(f_ty) => {
-                        expr.done = false;
-                        inner := self.box(expr[]);
-                        expr.expr = (FnPtr = inner);
-                        expr.done = false;
-                        expr.ty = UnknownType;
-                        // TODO: typecheck
-                        return(self.compile_expr(expr, (Specific = want)));
-                    }
-                    fn VoidPtr() => {
-                        if(query, => return(.Ok));
-                        fid := @check(self.eval(expr, FuncId)) return;
-                        inner := self.box(expr[]);
-                        expr.expr = (FnPtr = inner);
-                        expr.done = inner.done;
-                        expr.ty = rawptr;
-                        self.took_pointer_value(fid);
-                        // TODO: could call compile_expr/compile_fn_expr instead of imm+took
-                        return(.Ok);
-                    }
-                    @default => ();
-                };
-            };
-        
-            @match(found_info) {
-                fn FnPtr(f_ty) => {
-                    if want == rawptr {
-                        if(query, => return(.Ok));
-                        expr.ty = rawptr;
-                        return(.Ok);
+        }
+        fn void() => {
+            @if_let(want_info) fn Struct(f) => {
+                each f.fields { f | 
+                    if f.default.is_none() {
+                        // TODO: better error message
+                        //return(@err("had non-default fields (or if it's a call: expected function args) (or if its a block expected non-void return)"));
+                        return(Ok = false);
                     };
-                }
-                fn void() => {
-                    @if_let(want_info) fn Struct(f) => {
-                        each f.fields { f | 
-                            if f.default.is_none() {
-                                // TODO: better error message
-                                return(@err("had non-default fields (or if it's a call: expected function args) (or if its a block expected non-void return)"));
-                            };
-                        };
-                        if(query, => return(.Ok));
-                        expr[] = empty_struct_literal(expr.loc);
+                };
+                if(query, => return(Ok = true));
+                expr[] = empty_struct_literal(expr.loc);
+                expr.ty = want;
+                @check(self.construct_struct_literal(expr, (Specific = want))) return;
+                return(Ok = true);
+            };
+        }
+        fn Int(have_int) => {
+            @match(want_info) {
+                fn Int(want_int) => {
+                    min, max := want_int[].range();
+                    @err_assert(expr.expr&.is(.Value), "TODO: imm_eval const int cast") return;
+                    value := expr.expr.Value.bytes&;
+                    v := @try(value.int_value(have_int[])) return;
+                    //@println(" % % %", min, max, v);
+                    if v <= max && v >= min {
+                        if(query, => return(Ok = true));
+                        value.adjust_int_length(want_int);
                         expr.ty = want;
-                        return(self.construct_struct_literal(expr, req));
-                    };
-                }
-                fn Int(have_int) => {
-                    @match(want_info) {
-                        fn Int(want_int) => {
-                            min, max := want_int[].range();
-                            @err_assert(expr.expr&.is(.Value), "TODO: imm_eval const int cast") return;
-                            value := expr.expr.Value.bytes&;
-                            v := @try(value.int_value(have_int[])) return;
-                            //@println(" % % %", min, max, v);
-                            if v <= max && v >= min {
-                                if(query, => return(.Ok));
-                                value.adjust_int_length(want_int);
-                                expr.ty = want;
-                                return(.Ok);
-                            };
-                        }
-                        fn F64() => {
-                            max := 1.shift_left(MANTISSA_DIGITS_f64) - 1;
-                            min := -max; // TODO: is that true? 
-                            @err_assert(expr.expr&.is(.Value), "TODO: imm_eval const int cast") return;
-                            value := expr.expr.Value.bytes&;
-                            i := @try(value.int_value(have_int[])) return;
-                            if i <= max && i >= min {
-                                if(query, => return(.Ok));
-                                self.set(expr, f64, i.float());
-                                return(.Ok);
-                            };
-                        }
-                        fn F32() => { // TODO: copy paste
-                            max := 1.shift_left(MANTISSA_DIGITS_f32) - 1;
-                            min := -max; // TODO: is that true? 
-                            @err_assert(expr.expr&.is(.Value), "TODO: imm_eval const int cast") return;
-                            value := expr.expr.Value.bytes&;
-                            i := @try(value.int_value(have_int[])) return;
-                            if i <= max && i >= min {
-                                if(query, => return(.Ok));
-                                f: f32 = i.float().cast();
-                                self.set(expr, f32, f);
-                                return(.Ok);
-                            };
-                        }
-                        @default => ();
+                        return(Ok = true);
                     };
                 }
                 fn F64() => {
-                    @match(want_info) {
-                        fn Int(want_int) => {
-                            @err_assert(expr.expr&.is(.Value), "TODO: imm_eval const int cast") return;
-                            value := expr.expr.Value.bytes&;
-                            vf := f64.assume_cast(value)[];
-                            v := vf.int();
-                            if v.float() == vf {
-                                min, max := want_int[].range();
-                                if v <= max && v >= min {
-                                    if(query, => return(.Ok));
-                                    value[] = self.to_values(i64, v);
-                                    value.adjust_int_length(want_int);
-                                    expr.ty = want;
-                                    return(.Ok);
-                                };
-                            };
-                        }
-                        fn F32() => {
-                            // TODO
-                        }
-                        @default => ();
+                    max := 1.shift_left(MANTISSA_DIGITS_f64) - 1;
+                    min := -max; // TODO: is that true? 
+                    @err_assert(expr.expr&.is(.Value), "TODO: imm_eval const int cast") return;
+                    value := expr.expr.Value.bytes&;
+                    i := @try(value.int_value(have_int[])) return;
+                    if i <= max && i >= min {
+                        if(query, => return(Ok = true));
+                        self.set(expr, f64, i.float());
+                        return(Ok = true);
+                    };
+                }
+                fn F32() => { // TODO: copy paste
+                    max := 1.shift_left(MANTISSA_DIGITS_f32) - 1;
+                    min := -max; // TODO: is that true? 
+                    @err_assert(expr.expr&.is(.Value), "TODO: imm_eval const int cast") return;
+                    value := expr.expr.Value.bytes&;
+                    i := @try(value.int_value(have_int[])) return;
+                    if i <= max && i >= min {
+                        if(query, => return(Ok = true));
+                        f: f32 = i.float().cast();
+                        self.set(expr, f32, f);
+                        return(Ok = true);
                     };
                 }
                 @default => ();
             };
-            if self.ask_can_assign(want, found) {
+        }
+        fn F64() => {
+            @match(want_info) {
+                fn Int(want_int) => {
+                    @err_assert(expr.expr&.is(.Value), "TODO: imm_eval const int cast") return;
+                    value := expr.expr.Value.bytes&;
+                    vf := f64.assume_cast(value)[];
+                    v := vf.int();
+                    if v.float() == vf {
+                        min, max := want_int[].range();
+                        if v <= max && v >= min {
+                            if(query, => return(Ok = true));
+                            value[] = self.to_values(i64, v);
+                            value.adjust_int_length(want_int);
+                            expr.ty = want;
+                            return(Ok = true);
+                        };
+                    };
+                }
+                fn F32() => {
+                    // TODO
+                }
+                @default => ();
+            };
+        }
+        @default => ();
+    };
+    (Ok = false)
+}
+
+// TODO: you can never do this to a constant directly in case its aliased once i have const ptrs. 
+fn coerce_const_expr(self: *SelfHosted, expr: *FatExpr, req: ResultType, query: bool) Maybe(void) = {
+    if req.specific() { want | 
+        ok := @check(self.ask_coerce_const_expr(expr, want, query)) return;
+        if !ok {
+            if self.ask_can_assign(want, expr.ty) {
                 return(.Ok);
             };
-            return(Err = self.error(CoerceConst = (span = Span.zeroed(), wanted = want, found = found, expr = expr)));
+            return(Err = self.error(CoerceConst = (span = Span.zeroed(), wanted = want, found = expr.ty, expr = expr)));
         };
     };
     .Ok
@@ -3589,19 +3612,15 @@ fn can_assign(self: *SelfHosted, want: Type, found: Type) Maybe(void) = {
     }
 }
 
-fn ask_can_assign(self: *SelfHosted, want: Type, found: Type) bool = {
-    if(want == found, => return(true));
-    if(found == Never, => return(true));
-    // you only need this if you have fn loop($f: Fn(void, void)) Never = @loop(f()); it works if the arg type is just FuncId
-    //if(want == Never, => { @println("sketch %", self.log_type(found)); self.codemap.show_error_line(self.last_loc); return(true); }); // TODO: sketch. i think this might be a mistake in the old compiler
-    
-    // dont seem to need this
-    //if(want == UnknownType, => return(true)); // TODO: remove
+fn ask_can_assign(self: *SelfHosted, want: Type, found: Type) bool #inline = 
+    want == found || found == Never || ask_can_assign_inner(self, want, found);
+
+fn ask_can_assign_inner(self: *SelfHosted, want: Type, found: Type) bool = {
     // do need this tho sadly. TODO: fix me!
     if(found == UnknownType, => return(true)); // TODO: remove
+    
     want_info  := self.get_type(want);
     found_info := self.get_type(found);
-    
     @match(found_info) {
         fn Named(f) => {
             // TODO: hack because normally Named means @rec which should be transparent but the special id types also use it. 
@@ -3621,11 +3640,6 @@ fn ask_can_assign(self: *SelfHosted, want: Type, found: Type) bool = {
             if want == LabelId {
                 // TODO: typecheck!!
                 return(true);
-            };
-        }
-        fn Ptr(found_inner) => {
-            @if_let(want_info) fn Ptr(want_inner) => {
-                return(self.ask_can_assign(want_inner[], found_inner[]));
             };
         }
         fn Struct(found_struct) => {
@@ -4172,6 +4186,7 @@ fn struct_type(self: *SelfHosted, pattern: *Pattern, is_union: bool) Maybe(Type)
             default := @unwrap(b.default&.as_ref(), "@struct field without type requires default value.") return;
             // TODO: :HACK
             is_rec := default.expr&.is(.PrefixMacro) && default.expr.PrefixMacro.handler.ident() == (Some = Flag.rec.ident());
+            ::if(Type);
             if is_rec {
                 self.get_or_create_type(Type)
             } else {

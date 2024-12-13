@@ -154,23 +154,44 @@ codegen_thread_main :: fn(shared: *CodegenShared) void = {
                 return();
             };
             pthread_cond_signal(shared.kiki_progress_c&).unwrap();
-            wait(shared.bouba_progress_c&, shared.bouba_progress_m&)
+            wait(shared, false)
         };
     };
 };
 
-fn wait(c: *PCond, m: *PMutex) void = {
+fn wait(shared: *CodegenShared, $i_am_bouba: bool) void = {
+    c := @if(i_am_bouba, shared.kiki_progress_c&, shared.bouba_progress_c&);
+    m := shared.progress_m&;
     pthread_mutex_lock(m).unwrap();
-    pthread_cond_wait(c, m).unwrap();
+    @if(i_am_bouba, { // TODO: shouldn't need to use timed?
+        t := TimeSpec.zeroed();
+        clock_gettime(CLOCK_REALTIME, t&);
+        add_ns(t&, 20 * NS_PER_MS);
+        e := pthread_cond_timedwait(c, m, t&);
+        //if !e.is_ok() {
+        //    eprintln("that seemed slow");
+        //};
+    }, {
+        pthread_cond_wait(c, m).unwrap();
+    });
     pthread_mutex_unlock(m).unwrap();
 }
+
+fn add_ns(t: *TimeSpec, nanoseconds: i64) void = {
+    nanoseconds += t.nanoseconds;
+    s, n := nanoseconds.div_mod(NS_PER_S);
+    t.nanoseconds = n;
+    t.seconds += s;
+}
+
+// TimeSpec :: @struct(seconds: i64, nanoseconds: i64);
 
 fn bouba_acquire(shared: *CodegenShared, idx: *i64) *CodegenEntry = {
     loop {
         if shared.queue.acquire(true, idx) { entry |
             return(entry);
         };
-        wait(shared.kiki_progress_c&, shared.bouba_progress_m&);
+        wait(shared, true);
     };
 }
 
@@ -275,7 +296,7 @@ CodegenShared :: @struct(
     no_more_functions := false,
     no_more_codegen := false,
     bouba_progress_c: PCond,
-    bouba_progress_m: PMutex,
+    progress_m: PMutex,
     kiki_progress_c: PCond,
     m: *QbeModule,
     codegen_time := 0,
@@ -315,7 +336,7 @@ fn init(m: *QbeModule, worker: CodegenWorker) *CodegenShared = {
     shared.m = m;
     shared.constants_used = empty(a);
     @if(use_threads) {
-        pthread_mutex_init(shared.bouba_progress_m&, 0).unwrap();
+        pthread_mutex_init(shared.progress_m&, 0).unwrap();
         pthread_cond_init(shared.bouba_progress_c&, 0).unwrap();
         pthread_cond_init(shared.kiki_progress_c&, 0).unwrap();
     };
@@ -379,7 +400,7 @@ fn join_codegen_thread(shared: *CodegenShared) void = {
     shared.no_more_functions = true;
     while => !shared.no_more_codegen {
         pthread_cond_signal(shared.bouba_progress_c&);
-        wait(shared.kiki_progress_c&, shared.bouba_progress_m&);
+        wait(shared, true);
     };
 }
 
