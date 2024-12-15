@@ -41,10 +41,17 @@ fn compile_stmt(self: *SelfHosted, stmt: *FatStmt) Maybe(Ty(bool, bool)) #once =
             (Ok = (f.value.done, false))
         }
         fn Set(f) => {
-            // TODO: or patterns in @match would be nice here. :lang
-            tag := f.place.expr&.tag();
+            if f.place.expr&.is(.GetVar) {
+                @check(self.compile_get_var(f.place&, .None, false)) return;
+                @check(self.compile_expr(f.value&, f.place.ty.want())) return;
+                if !self.ask_can_assign(f.place.ty, f.value.ty) {
+                    //return(@err("tried to set % <- % (%)", self.log_type(f.place.ty), self.log_type(f.value.ty), f.value&.log(self)));
+                    return(Err = self.error(TypeMismatch = (span = Span.zeroed(), wanted = f.place.ty, found = f.value.ty)));
+                };
+                return(Ok = (f.value.done, false));
+            };
             // TODO: PrefixMacro is sketchy but makes []->.index work.
-            if tag.eq(.PrefixMacro).or(tag == .GetVar).or(tag == .FieldAccess).or(tag == .Deref).or(tag == .Block) {
+            if (@is(f.place.expr&, .PrefixMacro, .FieldAccess, .Deref, .Block)) {
                 @check(self.compile_place_expr(f.place&, .None, true)) return;
                 @check(self.compile_expr(f.value&, f.place.ty.want())) return;
                 if !self.ask_can_assign(f.place.ty, f.value.ty) {
@@ -53,6 +60,9 @@ fn compile_stmt(self: *SelfHosted, stmt: *FatStmt) Maybe(Ty(bool, bool)) #once =
                 };
                 // TODO: self.type_check_arg(f.place.ty, f.value.ty, "reassign var")?; /:type_check
                 return(Ok = (f.value.done && f.place.done, false));
+            };
+            @if_let(f.place.expr&) fn GetNamed(n) => {
+                return(@err("Tried to assign to undeclared variable: %", self.pool.get(n[])));
             };
             @err("Illegal place expression: %", tag)
         }
@@ -113,7 +123,8 @@ fn decl_var_pattern(self: *SelfHosted, stmt: *FatStmt) Maybe(Ty(bool, bool)) #on
         if b.var() { name | 
             prev := self.scopes.get_var_type(name); 
             self.scopes.put_var_type(name, types[i]);
-            @debug_assert(prev.is_none().or(=> prev.unwrap() == types[i]));
+            self.scopes.get_var_type(name).unwrap()[].took_address = true; // TODO: don't do this
+            @debug_assert(prev.is_none() || { t := prev.unwrap(); t.type == types[i] });
         };
         // An inlined closure might have had a polymorphic parameter, but emit_bc expects known types.
         if b.ty&.is(.Infer) {
@@ -143,11 +154,12 @@ fn compile_place_expr(self: *SelfHosted, place: *FatExpr, requested: ResultType,
             return(self.compile_place_expr(arg[], requested, want_deref));
         }
         fn GetVar(var) => {
-            val_ty := self.scopes.get_var_type(var[]);
-            val_ty := or val_ty {| 
+            info := self.scopes.get_var_type(var[]);
+            info := or info {| 
                 return(@err("var must be declared: %", var.log(self)))
             };
-            ptr_ty := self.ptr_type(val_ty);
+            info.took_address = true;
+            ptr_ty := self.ptr_type(info.type);
 
             place.done = true;
             place[] = synthetic_ty((Addr = self.box(place[])), loc, ptr_ty);
@@ -225,6 +237,10 @@ fn compile_deref_place(self: *SelfHosted, place: *FatExpr, requested: ResultType
     @debug_assert(place.expr&.is(.Deref));
     arg := place.expr.Deref;
     // When you see a !deref, treat the expression as a pointer value.
+    if arg.expr&.is(.GetVar) && !want_deref {
+        @check(self.compile_get_var(arg, requested, true)) return; // :?
+        @debug_assert(arg.expr&.is(.Deref), "compile_get_var should make &[]");
+    };
     req := requested.specific().map(fn(r) => self.ptr_type(r));
     @check(self.compile_expr(arg, req.want())) return;
     if want_deref {
@@ -284,6 +300,11 @@ fn deref_one(self: *SelfHosted, ptr: *FatExpr) Maybe(void) = {
         fn Addr(arg) => {
             // this allows auto deref to work on let ptr vars.
             if arg.expr&.is(.GetVar) {
+                if self.scopes.get_var_type(arg.expr.GetVar) { it |
+                    @debug_assert(it.took_address, "deref but not took_address");
+                } else {
+                    @debug_assert(false, "deref_one missing variable?");
+                };
                 // raw var expr is not allowed, we always refer to variables through thier address.
                 ptr[] = synthetic_ty((Deref = self.box(ptr[])), ptr.loc, inner);
             } else {
@@ -334,7 +355,7 @@ fn decl_var(self: *SelfHosted, name: Var, ty: *LazyType, value: *FatExpr) Maybe(
     self.scopes.put_var_type(name, final_ty); // TODO: this returns is_new, i want to just assert that. we shouldn't be compiling more than once -- Jul 25
     // TODO: prev should always be none?? but its not a constant and seems to always be the same so its probablby not a super huge deal? -- Apr 23
     //       maybe its just cause im not zeroing the stmt and end up compiling multiple times. -- Apr 25
-    @debug_assert(prev.is_none().or(=> prev.unwrap() == final_ty));
+    @debug_assert(prev.is_none() || { t := prev.unwrap(); t.type == final_ty });
     @err_assert(name.name != Flag.return.ident(), "naming a variable 'return' is not the best idea") return;
     @err_assert(name.name != Flag.local_return.ident(), "naming a variable 'local_return' is not the best idea") return;
     // TODO: :mark_stmt_done
@@ -966,7 +987,7 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
             @check(self.compile_prefix_macro(expr)) return;
             @check(self.compile_expr(expr, requested)) return;
         }
-        fn GetVar(var) => return(self.compile_get_var(expr, requested));
+        fn GetVar(var) => return(self.compile_get_var(expr, requested, false));
         fn GetNamed(n) => return(@err("Undeclared Identifier: %", self.pool.get(n[])));
         fn String(i) => {
             // This is only different from a Value node because the 'Str' is not a builtin so the parser is unable to create it.
@@ -2379,16 +2400,16 @@ fn type_of(self: *SelfHosted, expr: *FatExpr) Maybe(Type) = {
             (Ok = type)
         }
         fn GetVar(name) => {
-            val_ty := or self.scopes.get_var_type(name[]) { 
-                ::if(Type);
-                if name.kind == .Const {
-                    v, type := @check(self.find_const(name[], .None)) return;
-                    type
-                } else {
-                    return(@err("type_of pending var: %", self.pool.get(name.name)))
-                }
+            ::if_opt(VarInfo, void);
+            if self.scopes.get_var_type(name[]) { info |
+                return(Ok = info.type);
             };
-            (Ok = val_ty)
+            ::if(Type);
+            if name.kind == .Const {
+                v, type := @check(self.find_const(name[], .None)) return;
+                return(Ok = type);
+            };
+            return(@err("type_of pending var: %", self.pool.get(name.name)))
         }
         fn Closure(f) => {  
             @check(self.compile_expr(expr, .None)) return;
@@ -2434,9 +2455,10 @@ fn easy_check_type(self: *SelfHosted, e: *FatExpr) ?Type = {
         return(Some = e.ty);
     };
     @match(e.expr&) {
-        fn GetVar(name) => {
-            return(self.scopes.get_var_type(name[]));
-        }
+        fn GetVar(name) => 
+            if self.scopes.get_var_type(name[]) { i |
+                return(Some = i.type);
+            };
         fn Deref(inner) => {
             if self.easy_check_type(inner[]) { inner | 
                 return(self.unptr_ty(inner));
@@ -3200,7 +3222,7 @@ fn update_function_metadata(self: *SelfHosted, func: *Func, os: ?OverloadSet) Re
 
 ::if(Maybe(void));
 ::if_opt(Type, Maybe(void));
-fn compile_get_var(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(void) #once = {
+fn compile_get_var(self: *SelfHosted, expr: *FatExpr, requested: ResultType, old: bool) Maybe(void) #once = {
     @debug_assert(expr.expr&.is(.GetVar));
     var := expr.expr.GetVar;
     if var.kind == .Const {
@@ -3209,22 +3231,25 @@ fn compile_get_var(self: *SelfHosted, expr: *FatExpr, requested: ResultType) May
         @check(self.coerce_const_expr(expr, requested, false)) return;
         .Ok
     } else {
-        if self.scopes.get_var_type(var) { ty | 
-            expr.ty = ty;
+        if self.scopes.get_var_type(var) { info | 
+            expr.ty = info.type;
             expr.done = true;
             // Reading a variable. Convert it to `var&[]`. 
-            ptr_ty := self.ptr_type(ty);
-            expr[] = synthetic_ty((Addr = self.box(expr[])), expr.loc, ptr_ty);
-            expr.done = true;
-            // Note: not using deref_one, because don't want to just remove the ref, we want raw variable expressions to not exist. kinda HACK
-            expr[] = synthetic_ty((Deref = self.box(expr[])), expr.loc, ty);
-            expr.done = true;
-            .Ok
-        } else {
-            // For now runtime vars are always declared in order so we always know thier type.
-            // This might change to allow peeking into return-ed expressions when infering closure return type? -- Jul 15
-            @err("Unknown type for runtime var %", self.pool.get(var.name))
-        }
+            ptr_ty := self.ptr_type(info.type);
+            // :?
+            if old {
+                info.took_address = true;
+                expr[] = synthetic_ty((Addr = self.box(expr[])), expr.loc, ptr_ty);
+                expr.done = true;
+                // Note: not using deref_one, because don't want to just remove the ref, we want raw variable expressions to not exist. kinda HACK
+                expr[] = synthetic_ty((Deref = self.box(expr[])), expr.loc, info.type);
+                expr.done = true;
+            };
+            return(.Ok);
+        };
+        // For now runtime vars are always declared in order so we always know thier type.
+        // This might change to allow peeking into return-ed expressions when infering closure return type? -- Jul 15
+        @err("Unknown type for runtime var %", self.pool.get(var.name))
     }
 }
 
@@ -3391,9 +3416,8 @@ fn save_const(self: *SelfHosted, name: Var, val_expr: Expr, final_ty: Type, loc:
         // dup_var of return label in emit_capturing_call gets here.
         // eventually should remove the ? so its smaller and just do this there instead. 
         ptr := self.scopes.constants&.nested_index(name.id.zext());
-        ptr[] = (Some = ((expr = (Poison = .Unknown), loc = loc, ty = UnknownType, done = false), .Infer));
-        ::as_ref(@type ptr[].unwrap());
-        ptr.as_ref().unwrap()
+        ptr[] = ((expr = (Poison = .Unknown), loc = loc, ty = UnknownType, done = false), .Infer);
+        ptr
     };
     
     // TODO: this used to work before new overloading rework. -- Aug 27

@@ -5,7 +5,7 @@ EmitIr :: @struct(
     f: *Qbe.Fn,
     program: CompCtx,
     last_loc: Span,
-    var_lookup: HashMap(Var, Qbe.Ref),  // TODO: just var id
+    var_lookup: HashMap(Var, IrVar),  // TODO: just var id
     inlined_return_addr: HashMap(LabelId, ReturnTarget),
     blk: *Qbe.Blk, 
     debug: bool,
@@ -25,13 +25,16 @@ EmitIr :: @struct(
     idx: *i64,
 );
 
+IrVar :: @tagged(Alloca: Qbe.Ref, Local: Qbe.Ref);
+::tagged(IrVar);
+
 ReturnTarget :: @struct(
     blk: *Qbe.Blk,
     p: Placement,
     used: bool,
 );
 
-Placement :: @tagged(Assign: Qbe.Ref, Scalar, Blit: Qbe.Ref, NewMemory, Discard);
+Placement :: @tagged(Assign: Qbe.Ref, Scalar, Blit: Qbe.Ref, NewMemory, Discard, ScalarTransient);
 
 fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, idx: *i64, pending: *List(FuncId), export: bool) Res(void) = {
     if when == .Aot {
@@ -161,17 +164,21 @@ fn bind_args(self: *EmitIr) Res(void) #once = {
     // only arg instructions and allocas in the start block. 
     self.blk = self.new_block("body");
     each args { a | 
-        mem := if(!a.scalar, => a.r) {
-            // TODO: use mutable variables if they don't take the address of the argument. 
-            mem := self.alloca(a.type);
-            self.emit(self.store_op(a.type), .Kw, QbeNull, a.r, mem);
-            mem
-        };
         if a.name { name | 
+            mut := a.scalar && self.program.is_local_scalar(name, a.type);
+            mem := if(!a.scalar || mut, => a.r) {
+                mem := self.alloca(a.type);
+                self.emit(self.store_op(a.type), .Kw, QbeNull, a.r, mem);
+                mem
+            };
             if a.void {
-                self.var_lookup&.insert(name, QbeConZero);
+                self.var_lookup&.insert(name, (Alloca = QbeConZero));
             } else {
-                self.declare_var(name, mem, a.type);
+                if mut {
+                    self.record_var_decl(name, (Local = mem));
+                } else {
+                    self.declare_var_mem(name, mem, a.type);
+                };
             };
         };
     };
@@ -270,13 +277,13 @@ fn emit_body(self: *EmitIr, f: FuncId) Res(void) #once = { // #log_ir("AIR")
                 self.context_par_e();
             };
             a0, a1, ret := self.intrinsic_shim(func);
-            self.blk.jmp.arg = @try(self.emit_intrinsic_old(op, .Scalar, @slice(a0, a1), func, ret)) return;
+            self.blk.jmp.arg = @try(self.emit_intrinsic_old(op, .ScalarTransient, @slice(a0, a1), func, ret)) return;
             self.finalize_blocks();
             return(.Ok)
         }
         fn NewIntrinsic(op) => {
             a0, a1, ret := self.intrinsic_shim(func);
-            self.blk.jmp.arg = @try(self.emit_intrinsic_new(op, .Scalar, @slice(a0, a1), func, ret)) return;
+            self.blk.jmp.arg = @try(self.emit_intrinsic_new(op, .ScalarTransient, @slice(a0, a1), func, ret)) return;
             self.finalize_blocks();
             return(.Ok)
         }
@@ -347,13 +354,11 @@ fn emit_body(self: *EmitIr, f: FuncId) Res(void) #once = { // #log_ir("AIR")
     
     self.f.start.jmp.type = .jmp;
     self.f.start.s1 = self.blk;
-    p: Placement = @if(scalar, .Scalar, .NewMemory);
-    result := @try(self.compile_expr(body, p)) return;
-    
-    p: Placement = @if(scalar, .Scalar, .NewMemory);
+    p1: Placement = @if(scalar, .Scalar, .NewMemory);
     if self.program.get_info(ret)[].stride_bytes == 0 {  // :NoRuntimeRepr
-        p = .Discard;
+        p1 = .Discard;
     };
+    result := @try(self.compile_expr(body, p1)) return;
 
     self.blk.jmp.arg = result;
     @if_else {
@@ -363,7 +368,7 @@ fn emit_body(self: *EmitIr, f: FuncId) Res(void) #once = { // #log_ir("AIR")
         @if(ret.is_never()) => {
             self.blk.jmp.type = .hlt;
         };
-        @if(p&.is(.Discard)) => {
+        @if(p1&.is(.Discard)) => {
             self.blk.jmp.type = .ret0;
         };
         @if(scalar) => {
@@ -475,6 +480,11 @@ fn emit_runtime_call(
     })
 }
 
+fn is_local_scalar(self: CompCtx, v: Var, ty: Type) bool #inline = {
+    info := self.get_info(ty);
+    info.size_slots == 1 && info.stride_bytes <= 8 && !{self.vtable.took_address}(self.data, v&)
+}
+
 fn compile_stmt(self: *EmitIr, stmt: *FatStmt) PRes = {
     if self.debug && !(stmt.stmt&.is(.Eval) && stmt.stmt.Eval.expr&.is(.Block)) {
         place := self.program.get_whole_line(stmt.loc); // :SLOW
@@ -495,22 +505,39 @@ fn compile_stmt(self: *EmitIr, stmt: *FatStmt) PRes = {
         fn DeclVar(f) => {
             @debug_assert_ne(f.name.kind, VarType.Const);
             @debug_assert(f.ty&.is(.Finished), "variable not typechecked");
-            ptr  := @try(self.compile_expr(f.value&, .NewMemory)) return;
-            self.declare_var(f.name, ptr, f.ty.Finished);
+            type := f.ty.Finished;
+            if self.program.is_local_scalar(f.name, type) {
+                val  := @try(self.compile_expr(f.value&, .Scalar)) return;
+                if rtype(val) != .RTmp {
+                    _, k := self.load_op(type);
+                    var := self.f.newtmp("v", k);
+                    self.emit(.copy, k, var, val, QbeNull);
+                    val = var;
+                };
+                self.record_var_decl(f.name, (Local = val));
+            } else {
+                ptr  := @try(self.compile_expr(f.value&, .NewMemory)) return;
+                self.declare_var_mem(f.name, ptr, type);
+            };
             .Ok
         }
         fn Set(f) => {   // :PlaceExpr
             // we care about the type of the pointer, not the value because there might be a cast.
-            @match(f.place.expr&) {
+            dest := @match(f.place.expr&) {
                 // TODO: take advantage of mutable variables to generate less noisy code. 
-                fn GetVar(_) => panic("ICE: var set should be converted to place expr");
-                fn Deref(arg) => {
-                    dest := @try(self.compile_expr(arg[], .Scalar)) return;
-                    @try(self.compile_expr(f.value&, (Blit = dest))) return;
-                    .Ok
+                fn GetVar(it) => {
+                    info := self.var_lookup&.get_ptr(it[]) || return(@err("missing runtime var %", self.program.get_string(it.name)));
+                    @if_let(info) fn Local(dest) => {
+                        @try(self.compile_expr(f.value&, (Assign = dest[]))) return;
+                        return(.Ok);
+                    };
+                    @try(self.addr_macro(f.place&, .Scalar)) return
                 }
+                fn Deref(arg) => @try(self.compile_expr(arg[], .Scalar)) return;
                 @default => return(@err("TODO: other `place=e;` :("));
-            }
+            };
+            @try(self.compile_expr(f.value&, (Blit = dest))) return;
+            .Ok
         }
         fn DeclVarPattern(f) => {
             simple := f.binding.bindings.len == 1 || f.value.expr&.is(.Tuple);
@@ -523,7 +550,7 @@ fn compile_stmt(self: *EmitIr, stmt: *FatStmt) PRes = {
                     ptr := @try(self.compile_expr(value, .NewMemory)) return;
                     @debug_assert(b.ty&.is(.Finished), "variable not typechecked");
                     if b.var() { name |
-                        self.declare_var(name, ptr, b.ty.Finished);
+                        self.declare_var_mem(name, ptr, b.ty.Finished);
                     };
                 };
             } else {
@@ -541,7 +568,7 @@ fn compile_stmt(self: *EmitIr, stmt: *FatStmt) PRes = {
                     name    := @unwrap(b.var(), "tuple binding requires name") return;
                     element := self.offset(base, f.byte_offset);
                     @debug_assert(b.ty&.is(.Finished), "variable not typechecked");
-                    self.declare_var(name, element, b.ty.Finished);
+                    self.declare_var_mem(name, element, b.ty.Finished);
                 };
             };
             .Ok
@@ -593,23 +620,20 @@ fn compile_expr(self: *EmitIr, expr: *FatExpr, p: Placement) Res(Qbe.Ref) = {
             self.emit(.storel, .Kw, QbeNull, self.f.getcon(count), self.offset(dest, 8));
             dest
         };
+        fn GetVar(it) => {
+            info := self.var_lookup&.get_ptr(it[]) || return(@err("missing runtime var %", self.program.get_string(it.name)));
+            @if_let(info) fn Local(dest) => {
+                if !p&.is(.ScalarTransient) {  // try to avoid a bunch of redundent copies. 
+                    self.unify_placement(p&, expr_ty);
+                };
+                return(Ok = self.scalar_result(p, dest[], expr_ty));
+            };
+            src := @try(self.addr_macro(expr, .ScalarTransient)) return; // get the pointer
+            self.deref(src, p, expr_ty)
+        }
         fn Deref(arg) => {
             src := @try(self.compile_expr(arg[], @if(p&.is(.Discard), .Discard, .Scalar))) return; // get the pointer
-            // we care about the type of the pointer, not the value because there might be a cast. (// TODO: that shouldn't be true anymore because of ::Cast)
-            value_type := self.program.unptr_ty(arg.ty).unwrap();
-            self.hlt_if_never(expr_ty);
-            size := self.program.get_info(value_type).stride_bytes();
-            if(p&.is(.Discard) || size == 0, => return(Ok = QbeConZero)); // :NoRuntimeRepr
-            if p&.is(.Scalar) || p&.is(.Assign) {
-                @debug_assert(size <= 8);
-                o, k := self.load_op(expr_ty);
-                r := self.scalar_dest(p, k);
-                self.emit(o, k, r, src, QbeNull);
-                return(Ok = self.scalar_result(p, r, expr_ty));
-            };
-            dest := self.get_memory(p, value_type);
-            self.blit(dest, src, size);
-            dest
+            self.deref(src, p, expr_ty)
         };
         fn FnPtr(arg) => {
             f := @unwrap(arg[].as_const(), "expected fn for ptr") return;
@@ -626,7 +650,8 @@ fn compile_expr(self: *EmitIr, expr: *FatExpr, p: Placement) Res(Qbe.Ref) = {
             // Wierd special case I have mixed feelings about. should at least set to sentinal value in debug mode.
             // TODO: if(opts.zero_init_memory, => self.zero_memory_at_top_of_stack(expr_ty));
             @match(p) {
-                fn Scalar()    => QbeConZero;
+                fn Scalar()          => QbeConZero;
+                fn ScalarTransient() => QbeConZero;
                 fn Blit(it)    => it;
                 fn NewMemory() => self.alloca(expr_ty);
                 fn Discard()   => QbeNull;
@@ -637,7 +662,7 @@ fn compile_expr(self: *EmitIr, expr: *FatExpr, p: Placement) Res(Qbe.Ref) = {
             if values.len == 1 {
                 return(self.compile_expr(values[0]&, p));
             };
-            @err_assert(!(p&.is(.Scalar) || p&.is(.Assign)), "ICE: non single field struct as scalar") return;
+            @err_assert(!(p&.is(.ScalarTransient) || p&.is(.Scalar) || p&.is(.Assign)), "ICE: non single field struct as scalar") return;
             raw := self.program.raw_type(expr.ty); // TODO: do i need this? 
             @match(self.program.get_type(raw)) {
                fn Struct(f) => {
@@ -667,13 +692,45 @@ fn compile_expr(self: *EmitIr, expr: *FatExpr, p: Placement) Res(Qbe.Ref) = {
         }
         fn PtrOffset(f) => {
             // TODO: compiler has to emit tagchecks for enums now! but it does not!
-            base  := @try(self.compile_expr(f.ptr, .Scalar)) return;
+            base  := @try(self.compile_expr(f.ptr, .ScalarTransient)) return;
             field := self.offset(base, f.bytes);
             self.scalar_result(p, field, i64) // :get_or_create_type
         }
         fn Switch(f) => return(self.emit_switch(expr, p));
         @default => @panic("ICE: didn't desugar: %", self.program.log(expr));
     })
+}
+
+fn deref(self: *EmitIr, src: Qbe.Ref, p: Placement, expr_ty: Type) Qbe.Ref = {
+    value_type := expr_ty;
+    self.hlt_if_never(expr_ty);
+    size := self.program.get_info(value_type).stride_bytes();
+    if(p&.is(.Discard) || size == 0, => return(QbeConZero)); // :NoRuntimeRepr
+    if p&.is(.ScalarTransient) || p&.is(.Scalar) || p&.is(.Assign) {
+        @debug_assert(size <= 8);
+        o, k := self.load_op(expr_ty);
+        r := self.scalar_dest(p, k);
+        self.emit(o, k, r, src, QbeNull);
+        return(self.scalar_result(p, r, expr_ty));
+    };
+    dest := self.get_memory(p, value_type);
+    self.blit(dest, src, size);
+    dest
+}
+
+fn guess_can_assign(e: *FatExpr) bool = {
+    if (@is(e.expr&, .Value, .GetVar, .String)) {
+        return(false)
+    };
+    
+    // These all have a single inner expression as the first field. 
+    // TODO: probably a bad idea to be this fragile with repr. 
+    if (@is(e.expr&, .PtrOffset, .Cast, .Loop, .Addr, .Quote, .Slice, .Deref, .FnPtr)) {
+        return(guess_can_assign(e.expr.Deref));
+    };
+    
+    // TODO: this could recurse on call/tuple/struct, etc and get more. not sure if it's worth it. variable reads are the most offensive. 
+    true
 }
 
 fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) Res(Qbe.Ref) #once = {
@@ -697,14 +754,15 @@ fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) Res(Qbe.Re
             
             if find_impl(func.body&, .NewIntrinsic) { op |
                 arg := arg.items();
-                a0 := @try(self.compile_expr(arg[0]&, .Scalar)) return;
-                a1 := if(arg.len == 1, => QbeNull, => @try(self.compile_expr(arg[1]&, .Scalar)) return);
+                p1: Placement = @if(arg.len != 1 && guess_can_assign(arg[1]&), .Scalar, .ScalarTransient);
+                a0 := @try(self.compile_expr(arg[0]&, p1)) return;
+                a1 := if(arg.len == 1, => QbeNull, => @try(self.compile_expr(arg[1]&, .ScalarTransient)) return);
                 return(self.emit_intrinsic_new(op, p, @slice(a0, a1), caller, f_ty.ret));
             };
             if find_impl(func.body&, .Intrinsic) { op |
                 arg := arg.items();
                 a0 := @try(self.compile_expr(arg[0]&, .Scalar)) return;
-                a1 := if(arg.len == 1, => QbeNull, => @try(self.compile_expr(arg[1]&, .Scalar)) return);
+                a1 := if(arg.len == 1, => QbeNull, => @try(self.compile_expr(arg[1]&, .ScalarTransient)) return);
                 return(self.emit_intrinsic_old(op, p, @slice(a0, a1), caller, f_ty.ret));
             };
             
@@ -900,12 +958,19 @@ fn emit_value(self: *EmitIr, value: *Values, p: Placement, expr_ty: Type) Res(Qb
     
     // TODO: zeroed(T) doesn't get here because it's a runtime load not a comptime one. 
     //      need to fix sema stuff to make that work.  -- Dec 5
+    
     if all_zero {
         dest := self.get_memory(p, expr_ty);
-        count := value.len() / 8;
-        @err_assert(count * 8 == value.len(), "TODO: non*8 constant") return;
-        range(0, count) { i |
-            self.emit(.storel, .Kw, QbeNull, QbeConZero, self.offset(dest, i * 8));
+        size := value.len();
+        off := 0;
+        z := self.f.getcon(0);  // QbeConZero
+        each blit_op_table { o |
+            while => size >= o.size {
+                d := self.offset(dest, off);
+                self.emit(o.store, .Kw, QbeNull, z, d);
+                size -= o.size;
+                off  += o.size;
+            };
         };
         return(Ok = dest);
     };
@@ -981,15 +1046,16 @@ fn addr_macro(self: *EmitIr, arg: *FatExpr, p: Placement) Res(Qbe.Ref) #once = {
     @err_assert(arg.expr&.is(.GetVar), "took address of r-value") return;
     var := arg.expr.GetVar;
     @assert_ne(var.kind, .Const, "Cannot take address of constant % \n(use @static if you want to create a non-threadsafe mutable global)", var&.log(self.program));
-    ref := @unwrap(self.var_lookup&.get(var), "Missing var % (in !addr) \n(missing $ when used in const context or missing '=>'? TODO: better error message)", var&.log(self.program)) return;
-    (Ok = self.scalar_result(p, ref, i64))
+    ref := @unwrap(self.var_lookup&.get_ptr(var), "Missing var % (in !addr) \n(missing $ when used in const context or missing '=>'? TODO: better error message)", var&.log(self.program)) return;
+    @err_assert(ref.is(.Alloca), "addr_macro of scalar local `%`", self.program.get_string(var.name)) return;
+    (Ok = self.scalar_result(p, ref.Alloca, i64))
 }
 
 fn emit_call_if(self: *EmitIr, arg: *FatExpr, p: Placement) Res(Qbe.Ref) #once = {
     @debug_assert(arg.expr&.is(.If));
     parts := arg.expr.If&;
     
-    cond := @try(self.compile_expr(parts.cond, .Scalar)) return;
+    cond := @try(self.compile_expr(parts.cond, .ScalarTransient)) return;
     t_expr, f_expr := (parts.if_true, parts.if_false);
     t_blk, f_blk, join_blk := (self.new_block("yes"), self.new_block("no"), self.new_block("join"));
     seal self { b |
@@ -1039,7 +1105,7 @@ fn emit_switch(self: *EmitIr, arg: *FatExpr, p: Placement) Res(Qbe.Ref) #once = 
         return(self.compile_expr(parts.default, p));
     };
     
-    inspect := @try(self.compile_expr(parts.value, .Scalar)) return; 
+    inspect := @try(self.compile_expr(parts.value, .ScalarTransient)) return; 
     // TODO: maybe i have to zero extend b/h if other since trunc assumes other people only look at the lower part. 
     
     result := self.unify_placement(p&, arg.ty);
@@ -1152,6 +1218,7 @@ fn construct_aggregate(self: *EmitIr, pattern: *Pattern, requested: Type, p: Pla
             @match(p) {
                 fn Discard() => return(self.compile_expr(value, .Discard)); // just for side effects
                 fn Scalar()  => return(@err("ICE: tagged union is not a scalar."));
+                fn ScalarTransient() => return(@err("ICE: tagged union is not a scalar."));
                 @default     => ();
             };
             base := self.get_memory(p, raw_container_ty);
@@ -1165,30 +1232,38 @@ fn construct_aggregate(self: *EmitIr, pattern: *Pattern, requested: Type, p: Pla
 
 // For now ptr is always the address of the variable's stack slot. 
 // TODO: generate less dumb code for non-escaping scalars. 
-fn declare_var(self: *EmitIr, name: Var, ptr: Qbe.Ref, type: Type) void #inline = {
-    if self.program.get_info(type)[].stride_bytes == 0 {
+fn declare_var_mem(self: *EmitIr, name: Var, ptr: Qbe.Ref, type: Type) void #inline = {
+    info := self.program.get_info(type);
+    if info.stride_bytes == 0 {
         // :NoRuntimeRepr
         // It's nice to let macros/generics operate over types uniformly.
         // Some types have no runtime representation, so any attempt to use them should compile to nothing. 
         // TODO: maybe sema should try to strip these out so we don't have to keep checking here. 
-        self.var_lookup&.insert(name, QbeConZero);
+        self.var_lookup&.insert(name, (Alloca = QbeConZero));
         return()  
     };
 
     @debug_assert(rtype(ptr) == .RTmp);
-    prev := self.var_lookup&.insert(name, ptr);
+    self.record_var_decl(name, (Alloca = ptr));
+}
+
+fn record_var_decl(self: *EmitIr, name: Var, value: IrVar) void #inline = {
+    prev := self.var_lookup&.insert(name, value);
     @debug_assert(prev.is_none(), "shadow is still new var");
     
     if self.debug && name.name != Flag.SYMBOL_ZERO.ident() {
         name := self.program.get_string(name.name);
         name.len = name.len.min(20);
-        t := self.f.get_temporary(ptr);
+        ::@assert(IrVar.Tag().enum_count() == 2, "update IrVar repr");
+        r := value.Local;
+        t := self.f.get_temporary(r);
         @if(TRACK_IR_NAMES) {
             l: List(u8) = (maybe_uninit = t.name&.items(), len = 0, gpa = panicking_allocator);
-            @fmt(l&, "%.%", name, ptr.val());
+            @fmt(l&, "%.%", name, r.val());
         };
     };
 }
+
 
 // IMPORTANT: you can't use f.emit because threads. 
 fn emit(self: *EmitIr, o: Qbe.O, k: Qbe.Cls, dest: Qbe.Ref, a0: Qbe.Ref, a1: Qbe.Ref) void #inline = {
@@ -1254,6 +1329,13 @@ fn unify_placement(self: *EmitIr, p: *Placement, ty: Type) Qbe.Ref = @match(p[])
         p[] = (Assign = dest);
         dest
     }
+    fn ScalarTransient() => {  
+        _, k := self.load_op(ty);
+        @debug_assert(k != .Ke, "ICE: attempted scalar placement of aggragate type");
+        dest := self.f.newtmp("unify", k);
+        p[] = (Assign = dest);
+        dest
+    }
     fn Assign(it) => it;
 };
 
@@ -1292,11 +1374,13 @@ fn scalar_result(self: *EmitIr, p: Placement, r: Qbe.Ref, ty: Type) Qbe.Ref = @m
             // TODO: is alignment real?
             @debug_assert(size <= 8, "tried to use scalar result for large aggragate");
             o = store_by_size[size.zext()];
+            @debug_assert(o != .Oxxx, "tried to use scalar result for strange sized aggragate");
         };
         self.emit(o, .Kw, QbeNull, r, dest);
         dest
     }
     fn Scalar()  => r;
+    fn ScalarTransient() => r;
     fn Discard() => QbeNull;
     fn Assign(dest) => {
         if dest != r {
@@ -1320,8 +1404,10 @@ fn get_aggregate(self: CompCtx, m: *CodegenShared, ty: Type) Qbe.Ref = {
         @debug_assert(result.size != 0, "ICE: treating zero size type % as an aggragate", self.log(ty));
         result.align_log2 = (@as(i64) info.align_bytes.zext()).trailing_zeros().intcast(); // TODO: do this faster
         //@println("%", )
-        l: List(u8) = (maybe_uninit = result.name&.items(), len = 0, gpa = panicking_allocator);
-        @fmt(l&, "T%", ty.as_index());
+        @if(TRACK_IR_NAMES) {
+            l: List(u8) = (maybe_uninit = result.name&.items(), len = 0, gpa = panicking_allocator);
+            @fmt(l&, "T%", ty.as_index());
+        };
         i := @match(type) {
             fn Named(it)  => self.get_aggregate(m, it._0).val();
             fn Enum(it)   => self.get_aggregate(m, it.raw).val();
@@ -1570,6 +1656,7 @@ fn store_op(self: CompCtx, ty: Type) Qbe.O = @match(self.get_type(ty)) {
         .storel
     }
     fn Struct(it) => self.store_op(repr_transparent(it) || return(.Oxxx));
+    fn Array(it) => @if(it.len == 1, self.store_op(it.inner), .Oxxx);
     @default     => .Oxxx;
 };
 

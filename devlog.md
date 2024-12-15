@@ -1,3 +1,7 @@
+- fix ir templates to use tmp.visit for arg index so you can disable TRACK_IR_NAMES
+
+##
+
 - in arm isel, instead of doing fixarg and then going back later to fold address computation into the immediate of load/store,
   do a prepass. this way you don't create a bunch of extra temps that are just going to disappear later.
 

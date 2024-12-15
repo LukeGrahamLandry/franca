@@ -156,6 +156,7 @@ fn ralloc(c: *RegaCtx, m: *RMap, t: i32) Qbe.Ref #inline =
 fn bit_is_set(s: u64, i: i64) bool #inline = 
     s.bit_and(BIT(i)) != 0;
 
+// this changes the order in regs/tmps
 fn rfree(c: *RegaCtx, m: *RMap, t: i64) i64 = {
     T := c.f.globals.target;
     @debug_assert(t >= Qbe.Tmp0 || !T.rglob.bit_is_set(t));
@@ -167,12 +168,18 @@ fn rfree(c: *RegaCtx, m: *RMap, t: i64) i64 = {
         @debug_assert(i+1 < m.len);
         i += 1;
     };
+    rfree_at_index(c, m, t, i)
+}
+
+fn rfree_at_index(c: *RegaCtx, m: *RMap, t: i64, i: i64) i64 = {
+    T := c.f.globals.target;
+    @debug_assert(i < m.len && m.tmps&[i].intcast() == t);
     r := m.regs&[i].intcast();
     bsclr(m.live&, t);
     bsclr(m.live&, r);
     m.len -= 1;
-    m.tmps&.items().copy_overlapping(i, i + 1, m.len - i); // TODO: makes sure these offsets are right
-    m.regs&.items().copy_overlapping(i, i + 1, m.len - i);
+    m.regs&[i] = m.regs&[m.len];
+    m.tmps&[i] = m.tmps&[m.len];
     @debug_assert(t >= Qbe.Tmp0 || t == r);
     r
 }
@@ -220,7 +227,7 @@ fn pmrec(c: *RegaCtx, status: []PMStat, i: i64, k: *Qbe.Cls) i64 = {
             if cycle == i {
                 cycle = -1; /* end of cycle */
             } else {
-                if (cycle != -1) {
+                if cycle != -1 {
                     c.f.emit(.swap, k[], QbeNull, c.pm&[i].src, c.pm&[i].dest);
                 } else {
                     cycle = -1;
@@ -259,7 +266,7 @@ fn move(c: *RegaCtx, r: i64, to: Qbe.Ref, m: *RMap) void = {
             n += 1;
         };
         t := m.tmps&[n];
-        c.rfree(m, t.intcast());
+        rfree_at_index(c, m, t.intcast(), n);
         bsset(m.live&, r);
         c.ralloc(m, t);
         bsclr(m.live&, r);

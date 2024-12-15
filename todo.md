@@ -2,6 +2,7 @@
   - :DumbNameAlias NoMangle
   - AbiHackSpan
   - :InlineFoldHack `@if(::!T.has_pointers()`
+  - fn zeroed
 - more calling convention tests between jitted code and c.
 - make (logical not) an intrinsic
 - bring back lex error for unterminated comment.

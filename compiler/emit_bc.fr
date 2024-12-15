@@ -288,6 +288,13 @@ fn compile_for_arg(self: *EmitBc, arg: *FatExpr, arity: usize) Res(bool) = {
                 @try(self.compile_expr(arg[], .PushStack, false)) return;
                 continue();
             }
+            // it doesn't work if you don't do this which is scary but also i want to get rid of this whole thing soon anyway. 
+            fn GetVar(_) => {
+                // TODO: this is probably unsound.
+                //       we're assuming that we can defer the load to be done by the callee but that might not be true.
+                @try(self.addr_macro(val, .PushStack)) return;
+                continue();
+            }
             // TODO: factor out aot handling from main value handling so can use here too. -- Jun 3
             fn Value(f) => {
                 if self.result.when == .Jit {
@@ -471,7 +478,17 @@ fn log_bc(self: CompCtx, func: *Func, result: *FnBody, out: *List(u8)) void = {
         };
         @fmt(out, "  [b %] (%)\n", i, block.arg_prims);
         each block.insts { inst | 
-            @fmt(out, "    - %\n", inst);
+            @fmt(out, "    - %", inst);
+            @if_let(inst) fn AddrVar(i) => {
+                i: i64 = i.id.zext();
+                if result.var_names.len > i {
+                    name := result.var_names[i];
+                    if !(name.raw() == 0) {
+                        @fmt(out, "  // %", self.get_string(name));
+                    }
+                }
+            };
+            @fmt(out, "\n");
         };
     };
 }
@@ -657,6 +674,13 @@ fn compile_expr(self: *EmitBc, expr: *FatExpr, result_location: ResultLoc, can_t
         fn Value(f) => return(self.emit_value(f.bytes&, result_location, expr.ty));
         fn If(_)      => return(self.emit_call_if(expr, result_location, can_tail));
         fn Loop(arg)  => return(self.emit_call_loop(arg[]));
+        fn GetVar(_)  => {
+            if result_location == .Discard {
+                return(.Ok);
+            };
+            @try(self.addr_macro(expr, .PushStack)) return;
+            return(self.deref_top_of_stack(result_location, expr_ty))
+        };
         fn Addr(arg)  => return(self.addr_macro(arg[], result_location));
         fn StructLiteralP(pattern) => return(self.construct_struct(pattern, expr.ty, result_location));
         fn Slice(arg) => {
@@ -699,46 +723,9 @@ fn compile_expr(self: *EmitBc, expr: *FatExpr, result_location: ResultLoc, can_t
         };
         fn Deref(arg) => {
             @try(self.compile_expr(arg[], .PushStack, false)) return; // get the pointer
-            slots := self.slot_count(expr_ty);
-            // we care about the type of the pointer, not the value because there might be a cast. (// TODO: that shouldn't be true anymore because of ::Cast)
             value_type := self.program.unptr_ty(arg.ty).unwrap();
-            if slots == 0 {
-                @match(result_location) {
-                    fn ResAddr() => self.pop(2); // pop dest too!
-                    @default     => self.push(Snipe = 0);
-                };
-            } else {
-                self.last_loc = expr.loc;
-                @match(result_location) {
-                    fn PushStack() => @try(self.load(value_type)) return;
-                    fn ResAddr() => {
-                        info := self.program.get_info(expr_ty);
-
-                        if info.size_slots == 1 {
-                            ty := self.program.prim(value_type).expect("deref prim");
-                            self.push(Load = ty);
-                            self.push(StorePre = ty);
-                        } else {| // TODO: else if
-                            if info.size_slots == 2 && info.stride_bytes == 16 && info.align_bytes == 8 {
-                                self.push(PeekDup = 1);
-                                self.inc_ptr_bytes(8);
-                                self.push(PeekDup = 1);
-                                self.inc_ptr_bytes(8);
-                                self.push(Load = .I64);
-                                self.push(StorePre = .I64);
-                                self.push(Load = .I64);
-                                self.push(StorePre = .I64);
-                            } else {
-                                bytes := info.stride_bytes;
-                                self.push(CopyBytesToFrom = bytes);
-                            };
-                        };
-                    }
-                    fn Discard() => self.push(Snipe = 0);
-                };
-            };
-            if(expr_ty.is_never(), => self.push(.Unreachable));
-            return(.Ok)
+            @debug_assert(expr_ty == value_type, "missing pointer cast");
+            return(self.deref_top_of_stack(result_location, expr_ty));
         };
         fn FnPtr(arg) => {
             f := @unwrap(arg[].as_const(), "expected fn for ptr") return;
@@ -849,6 +836,47 @@ fn compile_expr(self: *EmitBc, expr: *FatExpr, result_location: ResultLoc, can_t
         }
         @default => @panic("ICE: didn't desugar: %", self.program.log(expr));
     }
+}
+
+fn deref_top_of_stack(self: *EmitBc, result_location: ResultLoc, value_type: Type) PRes = {
+    slots := self.slot_count(value_type);
+    if slots == 0 {
+        @match(result_location) {
+            fn ResAddr() => self.pop(2); // pop dest too!
+            @default     => self.push(Snipe = 0);
+        };
+    } else {
+        @match(result_location) {
+            fn PushStack() => @try(self.load(value_type)) return;
+            fn ResAddr() => {
+                info := self.program.get_info(value_type);
+                @debug_assert(info.is_sized, "unsized!");
+
+                if info.size_slots == 1 {
+                    ty := self.program.prim(value_type).expect("deref prim");
+                    self.push(Load = ty);
+                    self.push(StorePre = ty);
+                } else {| // TODO: else if
+                    if info.size_slots == 2 && info.stride_bytes == 16 && info.align_bytes == 8 {
+                        self.push(PeekDup = 1);
+                        self.inc_ptr_bytes(8);
+                        self.push(PeekDup = 1);
+                        self.inc_ptr_bytes(8);
+                        self.push(Load = .I64);
+                        self.push(StorePre = .I64);
+                        self.push(Load = .I64);
+                        self.push(StorePre = .I64);
+                    } else {
+                        bytes := info.stride_bytes;
+                        self.push(CopyBytesToFrom = bytes);
+                    };
+                };
+            }
+            fn Discard() => self.push(Snipe = 0);
+        };
+    };
+    if(value_type.is_never(), => self.push(.Unreachable));
+    .Ok
 }
 
 // consumes the pointer at the top of the stack.
@@ -1335,17 +1363,15 @@ fn emit_call_loop(self: *EmitBc, arg: *FatExpr) PRes #once = {
 fn set_deref(self: *EmitBc, place: *FatExpr, value: *FatExpr) PRes #once = {
     // we care about the type of the pointer, not the value because there might be a cast.
     @match(place.expr&) {
-        fn GetVar(_) => panic("ICE: var set should be converted to place expr");
-        fn Deref(arg) => {
-            // TODO: write a test for pooiinter eval oreder. left hsould come first. -- MAy 7
-            @try(self.compile_expr(arg[], .PushStack, false)) return;
-            self.result_addr_depth += 1;
-            @try(self.compile_expr(value, .ResAddr, false)) return;
-            self.result_addr_depth -= 1;
-            return(.Ok)
-        }
+        fn GetVar(_) => @try(self.addr_macro(place, .PushStack)) return;
+        // TODO: write a test for pooiinter eval oreder. left hsould come first. -- MAy 7
+        fn Deref(arg) => @try(self.compile_expr(arg[], .PushStack, false)) return;
         @default => return(@err("TODO: other `place=e;` :("));
-    }
+    };
+    self.result_addr_depth += 1;
+    @try(self.compile_expr(value, .ResAddr, false)) return;
+    self.result_addr_depth -= 1;
+    .Ok
 }
 
 fn unwrap(self: Name) Symbol = {
@@ -1511,7 +1537,9 @@ fn bump_clock(self: *EmitBc, b: BbId) void ={
 }
 
 fn slot_count(self: *EmitBc, ty: Type) u16 = {
-    self.program.get_info(ty)[].size_slots 
+    i := self.program.get_info(ty);
+    @debug_assert(i.is_sized, "unsized type");
+    i.size_slots 
 }
 
 fn push(self: *EmitBc, inst: Bc) void = {

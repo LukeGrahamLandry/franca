@@ -5,22 +5,31 @@
 fn put_constant(self: *Scopes, name: Var, value: FatExpr, ty: LazyType) void = {
     // TODO: this cant be the whole expression because then it looks for an overload returning unit. -- Jun 28
     ptr := self.constants&.nested_index(name.id.zext());
-    ptr[] = (Some = (value, ty));
+    ptr[] = (value, ty);
 }
 
-fn get_var_type(self: *Scopes, v: Var) ?Type = 
-    self.types&.nested_index(v.id.zext())[];
+fn get_var_type(self: *Scopes, v: Var) ?*VarInfo = {
+    t := self.types&.nested_index(v.id.zext());
+    if t.type == UnknownType {
+        return(.None)
+    };
+    (Some = t)
+}
 
 fn put_var_type(self: *Scopes, v: Var, ty: Type) bool = {
     slot := self.types&.nested_index(@as(i64) v.id.zext());
-    is_new := slot.is_none();
-    slot[] = (Some = ty);
+    is_new := slot.type == UnknownType;
+    slot.type = ty;
     is_new
 }
 
-fn get_constant(self: *Scopes, name: Var) ?*Ty(FatExpr, LazyType) = {
+fn get_constant(self: *Scopes, name: Var) ?*Ty(FatExpr, LazyType) #inline = {
     ::as_ref(Ty(FatExpr, LazyType));
-    self.constants&.nested_index(name.id.zext()).as_ref()
+    c := self.constants&.nested_index(name.id.zext());
+    if c._1&.is(.EvilUninit) {
+        return(.None)
+    };
+    (Some = c)
 }
 
 /// Resolver Interface. Called lazily by the compiler when it first works on a new function. /// 
@@ -35,7 +44,8 @@ fn resolve_root(compiler: *SelfHosted, func: *Func, scope: ScopeId) PRes #once =
 }
 
 fn resolve_sign(compiler: *SelfHosted, func: *Func) PRes #once = {
-    r: ResolveScope = new(compiler, func.scope.expect("function to have scope"), func.loc);
+    s := @unwrap(func.scope, "function to have scope! %", compiler.comp().log(func)) return;
+    r: ResolveScope = new(compiler, s, func.loc);
     
     zone := zone_begin(.Scope); // TODO: defer
     res := r&.resolve_func_args(func);
@@ -44,7 +54,7 @@ fn resolve_sign(compiler: *SelfHosted, func: *Func) PRes #once = {
 }
 
 fn resolve_body(compiler: *SelfHosted, func: *Func) PRes #once = {
-    r: ResolveScope = new(compiler, func.scope.expect("function to have scope"), func.loc);
+    r: ResolveScope = new(compiler, func.scope.expect("function to have scope!!"), func.loc);
     
     zone := zone_begin(.Scope); // TODO: defer
     res := r&.resolve_func_body(func);
@@ -57,8 +67,9 @@ fn resolve_body(compiler: *SelfHosted, func: *Func) PRes #once = {
 fn dup_var(self: *Scopes, old: Var) Var = {
     new := old;
     new.id = self.types.len.trunc();
-    self.types&.push(.None);
-    self.constants&.push(.None);  // TODO: bit odd that i dont have to clone if the old thing had a constant expr. 
+    self.types&.push(type = UnknownType, took_address = self.types&.nested_index(old.id.zext())[].took_address);
+    // EvilUninit
+    self.constants&.push(Ty(FatExpr, LazyType).zeroed());  // TODO: bit odd that i dont have to clone if the old thing had a constant expr. 
     new
 }
 
@@ -80,13 +91,18 @@ Scopes :: @struct(
     // Invarient: all but last bucket are full. Never push_all since that might allocate a non full bucket and then indexes will be wrong. 
     // :push_type_when_create_new_var when i start creating new vars elsewhere, need to remember to push a none here! didn't have to in the old version because it was a hashmap.
     // now its hard to forget cause i use that len instead of self.next_var too.
-    types: BucketArray(?Type), // TODO: remove? and use constants._1 = (Finished = type)
-    constants: BucketArray(?Ty(FatExpr, LazyType)),
+    types: BucketArray(VarInfo), // TODO: remove? and use constants._1 = (Finished = type)
+    constants: BucketArray(Ty(FatExpr, LazyType)),
     // Used for not redundantly #include_std-ing. 
     // TODO: This will become a HashMap(Symbol, ScopeId) when I want to allow @import-ing a namespace. 
     //       so currently Lib :: @namespace { #include_std("name"); }; doesn't work unless its the only time which is kinda dumb. 
     //       but it didn't work in the rust version and i don't want to change too much at once. 
     already_loaded: HashSet(Symbol),
+);
+
+VarInfo :: @struct(
+    type: Type,
+    took_address: bool
 );
 
 // TODO: use unmanaged List/HashMap so not storing the allocator a billon times. 
@@ -174,7 +190,7 @@ fn resolve_func(self: *ResolveScope, func: *Func) PRes = {
 fn resolve_func_args(self: *ResolveScope, func: *Func) PRes = {
     if(func.get_flag(.ResolvedSign), => return(.Ok));
     
-    self.scope = func.scope.expect("function to have scope");
+    self.scope = func.scope.expect("function to have scope!!!");
     self.block = 0;
     generic := func.get_flag(.Generic); // ret is allowed to depend on previous args.
     func.set_flag(.ResolvedSign);
@@ -195,7 +211,7 @@ fn resolve_func_args(self: *ResolveScope, func: *Func) PRes = {
 
 fn resolve_func_body(self: *ResolveScope, func: *Func) PRes = {
     if(func.get_flag(.ResolvedBody), => return(.Ok));
-    self.scope = func.scope.expect("function to have scope");
+    self.scope = func.scope.expect("function to have scope!!!!");
     generic := func.get_flag(.Generic); // args and ret are allowed to depend on previous args.
 
     self.push_scope(.None);
@@ -400,14 +416,14 @@ fn decl_var(self: *ResolveScope, name: Symbol, kind: VarType, loc: Span, placeho
     var: Var = (kind = kind, name = name, id = scopes.types.len.trunc(), scope = self.scope, block = self.block.trunc());
     if kind == .Const {
         empty: Ty(FatExpr, LazyType) = ((expr = (Poison = placeholder), loc = loc, ty = UnknownType, done = false), .Infer);
-        scopes.constants&.push((Some = empty));
+        scopes.constants&.push(empty);
         prev := scope.vars[self.block].const_lookup&.insert(name, var);
     } else {
-        scopes.constants&.push(.None);
+        scopes.constants&.push(Ty(FatExpr, LazyType).zeroed());  // EvilUninit
     };
     
     scope.vars[self.block].vars&.push(var); // includes constants!
-    scopes.types&.push(.None);
+    scopes.types&.push(type = UnknownType, took_address = false);
     self.compiler.record_var_declare(var, loc);
     (Ok = var)
 }
