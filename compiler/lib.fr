@@ -50,6 +50,8 @@ SelfHosted :: @rec @struct(
     comptime_codegen: *CodegenShared,
     dyncalls: HashMap(FnType, DynCallShim),
     pending_took_pointer: List(Ty(FuncId, u32)),  // (_, symbol)
+    call_depth := 0,
+    shim_callback_alloc: ArenaAlloc,
 );
 
 OverloadKey :: @struct(arg: Type, req: Type);
@@ -346,6 +348,7 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
         comptime_codegen = init(m, @as(CodegenWorker) codegen_thread_main),
         dyncalls = init(a),
         pending_took_pointer = list(a),
+        shim_callback_alloc = init(page_allocator, 1.shift_left(14)),
     );
     
     if get_dynamic_context().is_null() {
@@ -390,15 +393,18 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
     
     ::ptr_utils(BackendVTable);
     opts := self.get_build_options();
-    if opts.comptime_jit_vptr.is_null() {
-        // fall back to our built in default.
-        m := a.box(BackendVTable);
-        m[] = fill_bc_vtable();
-        opts.comptime_jit_vptr = m;
-    };
-    if opts.comptime_jit_data.is_null() {
-        // if you do not have a data pointer one will be appointed to you.
-        opts.comptime_jit_data = {opts.comptime_jit_vptr.create}(self.comp());
+    
+    @if(INCLUDE_OLD_BACKEND) {
+        if opts.comptime_jit_vptr.is_null() {
+            // fall back to our built in default.
+            m := a.box(BackendVTable);
+            m[] = fill_bc_vtable();
+            opts.comptime_jit_vptr = m;
+        };
+        if opts.comptime_jit_data.is_null() {
+            // if you do not have a data pointer one will be appointed to you.
+            opts.comptime_jit_data = {opts.comptime_jit_vptr.create}(self.comp());
+        };
     };
     
     self

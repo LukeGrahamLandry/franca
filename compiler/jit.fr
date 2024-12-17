@@ -6,6 +6,7 @@
 NEW_COMPTIME_JIT :: false;
 TRACE_SHIMS :: false;
 TRACE_CALLS :: false; 
+INCLUDE_OLD_BACKEND :: !NEW_COMPTIME_JIT || true; // TODO: can't do -dynamiclib without -legacy
 
 DynCallShim :: @tagged(Pending: u32, Ready: rawptr);
 
@@ -33,7 +34,9 @@ fn call_dynamic_values(self: *SelfHosted, f_ptr: i64, f_ty: FnType, args_value: 
     callee := assume_types_fn(Arg = Ty(*u8, *u8, i64), Ret = void, ptr = callee);
     
     @if(TRACE_CALLS) {
-        @print("Calling ");
+        self.call_depth += 1;
+        @println("(%) -----", self.call_depth);
+        @print("(%) Calling ", self.call_depth);
         if self.baked.functions&.get(f_ptr) { fid |
             @print("% ", self.log_name(fid));
         };
@@ -43,15 +46,17 @@ fn call_dynamic_values(self: *SelfHosted, f_ptr: i64, f_ty: FnType, args_value: 
     ret_size: i64 = self.get_info(f_ty.ret)[].stride_bytes.zext();
     ret_buf := temp().alloc_zeroed(u8, ret_size);  // TODO: alignment?
     @if(TRACE_CALLS) {
-        @print("input: ");
+        @print("(%) input: ", self.call_depth);
         input := self.from_bytes(args_value);
         println(log(input&, self, f_ty.arg));
     };
     callee(args_value.ptr, ret_buf.ptr, f_ptr);
     result := self.from_bytes(ret_buf);
     @if(TRACE_CALLS) {
-        @print("result: ");
+        @print("(%) result: ", self.call_depth);
         println(log(result&, self, f_ty.ret));
+        @println("(%) -----", self.call_depth);
+        self.call_depth -= 1;
     }; 
     result
 }
@@ -246,10 +251,19 @@ fn shallow_jit_func(self: *SelfHosted, fid: FuncId) void = {
     _ := self.unwrap_report_error(void, emit_ir(self.comp(), self.comptime_codegen, fid, .Jit, self.comptime_codegen.bouba_idx&, pending&, true));
     func.set_flag(.RealAsmDone);
     func.set_flag(.AsmDone);
-    for pending& { fid |
-        //if !self.get_function(fid).get_flag(.AsmDone) {
-            self.create_jit_shim(fid); 
-        //};
+    for pending& { callee |
+        if !self.get_function(callee).get_flag(.AsmDone) {
+            self.create_jit_shim(callee); 
+        };
+    };
+    // TODO: this isn't what you want because it bleeds into the aot stuff.
+    //       and i think you only need it for TargetOsSplit, 
+    //       so now it's going to think it needs all of those??
+    //       if you don't do this you can't run the qbe_frontend itself jitted because it chokes on mmap_anon
+    if func.get_flag(.TargetSplit) {
+        for pending& { callee |
+            func.mutual_callees&.add_unique(callee, self.get_alloc());
+        };
     };
 }
 
@@ -270,3 +284,101 @@ fn bump_dirty_new(self: *SelfHosted, lock: bool) void = {
     };
     @if(use_threads && lock) pthread_mutex_unlock(m.icache_mutex&).unwrap();
 }
+
+fn save_in_got(self: *SelfHosted, fid: FuncId, addr: rawptr) void = {
+    @if(NEW_COMPTIME_JIT) {
+        // :InsaneCaches
+        self.bump_dirty_new();
+        m := self.comptime_codegen.m;
+        id := self.comptime_jit_symbol_id(fid);
+        use_symbol(m, id) { s |
+            @debug_assert(s.got_lookup_offset != -1);
+            got := m.segment_address(.ConstantData, s.got_lookup_offset);  // :GotAtConstantDataBase 
+            got := ptr_cast_unchecked(u8, rawptr, got);
+            got[] = addr;
+        };
+    };
+}
+
+// TODO: this needs to get much faster because you have to call through it every time you call a function that got unlucky in compile order. 
+//       that shouldn't be true anymore with NEW_COMPTIME_JIT because we update the dispatch table.
+//       tho not if you put that function pointer somewhere i guess      
+// 
+// TODO: it would be nice if i had the arguments here for reporting what call you actually tried to make. 
+//       but this way will be even better once i can lazily compile it and just lean on the backend to make the args flow through. 
+report_called_uncompiled_or_just_fix_the_problem :: @as(rawptr) fn(self: *SelfHosted, fid: FuncId) rawptr = {
+    result := rawptr_from_int(0);
+    // You want to allow a shim being called from an extern function so we can't assume we have a valid context here. (ie. examples/farm_game.fr has this problem). 
+    push_zeroed_dynamic_context {
+        context(DefaultContext)[].comptime = SelfHosted.raw_from_ptr(self);
+        context(DefaultContext)[].temporary_allocator = self.shim_callback_alloc&;
+        
+        @if(TRACE_SHIMS)
+        @println("called shim for % %", fid, self.log_name(fid));
+        
+        // important: have to be careful about which comptime is in the context if the driver program gets compiled lazily. 
+        func := self.get_function(fid);
+        //@println("shim! % % %", SelfHosted.raw_from_ptr(self), context(DefaultContext)[].comptime, self.pool.get(func.name));
+        if func.get_flag(.RealAsmDone) { 
+            @if(TRACE_SHIMS) @println("- ready");
+            // TODO: this probably needs to be inside the push_context because it might hit an inner poll_in_place,
+            //       but that's sad because most of the time its just an array lookup.  -- Nov 25
+            if self.get_fn_callable(fid) { addr | 
+                m := self.comptime_codegen.m;
+                this_is_shim := false;
+                
+                id := self.comptime_jit_symbol_id(fid);
+                use_symbol(m, id) { s | 
+                    this_is_shim = s.jit_addr.identical(s.shim_addr);
+                };
+                // It's been compiled since last we checked so just use that. 
+                if !this_is_shim {
+                    save_in_got(self, fid, addr);
+                    result = addr;
+                };
+                //@println("%", self.comp().log(self.get_function(fid)));
+            };
+            @if(TRACE_SHIMS && result.is_null()) @println("- wrong!");
+        } else {
+            // TODO: maybe better to put smuggle_libc here too
+            if func.name == Flag.___this_function_is_not_real_im_just_testing_the_franca_compiler.ident() {
+                result = (fn(a: i64, b: i64, c: i64) i64 = {
+                    @println("% + % + % = %", a, b, c, a + b + c);
+                    a + b + c
+                })
+            };
+        };
+        
+        if result.is_null() {
+            mark := mark_temporary_storage();
+            @if(TRACE_SHIMS) @println("- uncompiled");
+            
+            // :ugly
+            first := true;
+            addr := self.poll_in_place(rawptr) { () Maybe(rawptr) |
+                r :: local_return;
+                if func.get_flag(.RealAsmDone) {
+                    // TODO: why can't .expect("must have pointer if done")? -- Dec 15 
+                    //       this changed when i stopped compiling in the old backend when NEW_COMPTIME_JIT
+                    if self.get_fn_callable(fid) { p |
+                        r(Ok = p);
+                    };
+                };
+                if !first {
+                    // If its an import we're never gonna make progress by trying to compile it. 
+                    if func.get_flag(.BodyIsSpecial) {
+                        @panic("Tried to call uncompiled function:\n %", self.get_function(fid).log(self));
+                    };  
+                };
+                first = false;
+                func.unset_flag(.AsmDone);
+                r(Suspend = self.wait_for(Jit = fid))
+            };
+            result = self.unwrap_report_error(rawptr, addr);
+            save_in_got(self, fid, result);
+            reset_temporary_storage(mark);
+        };
+    };
+    //bc.jitted&.bump_dirty();
+    result
+};

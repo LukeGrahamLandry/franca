@@ -128,7 +128,7 @@ fn emit_bc(comp: CompCtx, bc: *BcBackend, f: FuncId, when: ExecStyle) Res(*FnBod
             bc.saved_bytecodes&.insert(body, when);
         };
     };
-    func.finished_bytecode_pointer = (Some = FnBody.int_from_ptr(body)); 
+    func.nullable_finished_bytecode_pointer = FnBody.int_from_ptr(body); 
     body.context = func.get_flag(.YesContext) && !func.get_flag(.NoContext);
     if !body.context {
         func.set_flag(.NoContext);
@@ -548,11 +548,6 @@ fn emit_runtime_call(
     
     // :sema_regression this shouldn't need the hint
     @as(PRes) (.Ok)
-}
-
-fn unwrap_ty(self: *Binding) Type = {
-    assert(self.ty&.is(.Finished), "type not ready!");
-    self.ty.Finished
 }
 
 fn mark_variable(self: *EmitBc, name: Var, id: u16) void = {
@@ -1374,14 +1369,6 @@ fn set_deref(self: *EmitBc, place: *FatExpr, value: *FatExpr) PRes #once = {
     .Ok
 }
 
-fn unwrap(self: Name) Symbol = {
-    @match(self) {
-        fn Var(v) => v.name;
-        fn Ident(v) => v;
-        @default => panic("Expected name!");
-    }
-}
-
 // TODO: rename? also used for tagged. 
 fn construct_struct(self: *EmitBc, pattern: *Pattern, requested: Type, result_location: ResultLoc) PRes #once = {
     raw_container_ty := self.program.raw_type(requested);
@@ -1609,24 +1596,18 @@ fn add_var(ctx: *EmitBc, ty: Type) u16 = {
 fn get_primatives(self: *EmitBc, ty: Type) []Prim #inline = 
     self.program.get_primatives(ty);
 
-fn comp(self: *SelfHosted) CompCtx = {
-    self.vtable.with(self.legacy_indirection)
-}
+fn comp(self: *SelfHosted) CompCtx = 
+    self.vtable.with(self.legacy_indirection);
 
-fn prim(self: *SelfHosted, ty: Type) ?Prim = {
-    self.comp().prim(ty)
-}
+
+fn prim(self: *SelfHosted, ty: Type) ?Prim = 
+    self.comp().prim(ty);
 
 fn idx(s: FuncId) i64 = s.to_index().zext();
 
-// :get_or_create_type
-fn is_unit(t: Type) bool = t == void;
-fn is_unknown(t: Type) bool = t == UnknownType;
-fn is_never(t: Type) bool = t == Never;
-
 fn is_float(self: Prim) bool = 
     self.eq(.F64).or(self == .F32);
-    
+
 fn align_to(offset: u16, align: u16) i64 #redirect(Ty(i64, i64), i64);
 
 // TODO: this is a dumb hack to make it less painful that i can't access fields on a value (because you need a pointer to offset)
@@ -1636,7 +1617,6 @@ fn align_to(offset: u16, align: u16) i64 #redirect(Ty(i64, i64), i64);
 fn stride_bytes(s: *TypeMeta) u16 = s.stride_bytes;
 fn align_bytes(s: *TypeMeta) u16 = s.align_bytes;
 fn size_slots(s: *TypeMeta) u16 = s.size_slots;
-fn contains_pointers(s: *TypeMeta) bool = s.contains_pointers;
 
 fn slot_count(self: CompCtx, ty: Type) u16 = {
     self.get_info(ty)[].size_slots
@@ -1698,23 +1678,15 @@ fn hash(h: *TrivialHasher, s: **FnBody) void = {
         AutoEq(get_variant_type(Bc, Bc.Tag().LastUse));
         AutoEq(get_variant_type(Bc, Bc.Tag().Ret2));
     };
+    
     H :: TrivialHasher;
-    
-    fn DerefHash($T: Type) void = {
-        fn hash(hasher: *H, a: *T) void #inline = hasher.hash(a[]);
-    }
-    
-    #redirect(Ty(*H, *u32), void) fn hash(h: *H, s: *LabelId) void;    AutoHash(TypeInfo, H); AutoEq(TypeInfo);
     AutoHash(IntTypeInfo, H); AutoEq(IntTypeInfo);
     AutoHash(FnType, H); AutoEq(FnType);
     AutoHash(?Var, H); AutoEq(?Var);
-    DerefHash(*TypeInfo); DerefEq(*TypeInfo);
     AutoHash(get_variant_type(TypeInfo, TypeInfo.Tag().FnPtr), H); AutoEq(get_variant_type(TypeInfo, TypeInfo.Tag().FnPtr));
     AutoHash(get_variant_type(TypeInfo, TypeInfo.Tag().Array), H); AutoEq(get_variant_type(TypeInfo, TypeInfo.Tag().Array));
     AutoHash(get_variant_type(TypeInfo, TypeInfo.Tag().Tagged), H); AutoEq(get_variant_type(TypeInfo, TypeInfo.Tag().Tagged));
     AutoHash(get_variant_type(TypeInfo, TypeInfo.Tag().Enum), H); AutoEq(get_variant_type(TypeInfo, TypeInfo.Tag().Enum));
-    enum(CallConv); DerefEq(CallConv);
-    enum(VarType); DerefEq(VarType);
     AutoHash(Ty(Symbol, Type), H); AutoEq(Ty(Symbol, Type));
     AutoHash(Ty(Type, Symbol), H); AutoEq(Ty(Type, Symbol));
     AutoHash(Ty(Symbol, Values), H); AutoEq(Ty(Symbol, Values));
@@ -1733,19 +1705,5 @@ fn hash(h: *TrivialHasher, s: **FnBody) void = {
         hasher.hash(self.fields&);
         hasher.hash(self.is_tuple&);
     }
-    
-    fn hash(h: *H, s: *CallConv) void #redirect(Ty(*H, *i64), void);
-    fn hash(h: *H, s: *VarType) void #redirect(Ty(*H, *i64), void);
-    
-    fn hash(h: *H, s: *Var) void = {
-        h.hash(s.id&);
-    }
-    
-    fn hash(h: *H, s: *Values) void = {
-        b := s.bytes();
-        h.hash(b&);
-    }
 };
-
-fn log(v: *Var, pool: CompCtx) Str = 
-    items(@format("%%%", pool.get_string(v.name), "%", v.id) temp());
+    

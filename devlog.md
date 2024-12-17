@@ -1,4 +1,45 @@
+## (Dec 16)
+
+- examples/softdraw can successfully make a window and draw stuff now that i have a jit backend that follows the abi correctly.
+- new example: simple gui program that lets you scroll around a text file.
+- ported sokol_debugtext. it looked intimidating but most of it was tables and c macro boilerplate.
+  eventually i want to be able to compile a subset of my language into the shader languages but for now,
+  i think having a seperate binary file for the precompiled shaders is less ugly than putting it in a giant byte array in the code.
+  clicking into a file that's 450 lines long is much less unpleasent than one that's 4900 lines long.
+
+## (Dec 9-15)
+
+- my asm for call_dynamic_values is super primitive so i can't make `fn zeroed($T)` less dumb,
+  so instead of that just jit a function for each FnType, that deals with moving arguments between byte arrays,
+  and then i only have to implement the abi in one place. but i can't use that until i get rid of old comptime jit because it didn't follow the abi either.
+- want to use new backend for comptime jit as well but that's harder
+  because you need to be able to call functions in the middle of adding more to the module.
+  instead of doing patches, always have forward references go through `__got` even if they're local,
+  and then i don't have to worry about flushing modified code after doing a patch.
+- version of `create_jit_shim` that uses new backend. again, can't use it until everything does because of abi struggles.
+- new backend does more work per function so more incentive to fix how many tiny useless ones i create in `immediate_eval_expr`.
+  instead of suspending on Jit after deciding it needs to be wrapped in a function, try CompileBody first and see if it decarys to a value.
+  add PtrOffset/Deref to `check_quick_eval`
+- trivial mistake with just using `idx := 0` every time i wanted to get a new entry instead of keeping it around
+  so things didn't always get compiled in the right order. so extra confusion about which callees would be in range for a sys_invalidate_icache
+- we've learned condvar wait/signal is not the same as just sleeping in a loop until a variable changes.
+  i guess you're not guarenteed on what order you'll see changes on different cache lines even if you do both changes and check in a mutex?
+  which is fair but then why is condvar any different? do they put some magic barrier thing in there that applies to all memory?
+- forever confusion about when you have to call sys_invalidate_icache.
+  i guess it has to go on the thread that runs the code, but also surely you need to make sure the thread that writes it flushes its data cache.
+  so do you need to call the other one there too?
+  can't just have shims get filled in later because you need to make sure the new thing gets flushed even if you don't compile anything else in between?
+  memory barrier instruction seems to make it a bit better.
+- another round of sprinkling #inline around. got resolve_in_overloadset_new from 740 to 500 samples
+- take out add/sub 0 (in arm isel which is silly but convient)
 - fix ir templates to use tmp.visit for arg index so you can disable TRACK_IR_NAMES
+- use copies instead of load/store in the frontend for scalar vars that you don't take the address of.
+  doesn't make it much faster but it's easier to read the generated code. could do better with more guess_can_assign.
+- silly fix for `-c` with new emit_ir, just had to leave imports Pending.
+- #target_os has a problem with looping calling its shim when jitting because the target doesn't get added as a callee.
+  but its going to be such a pain for cross compiling if calling it when jitting puts junk in the callees list,
+  maybe it needs to be a more aggressive special case.
+  the worse thing is just how painful and confusing diagnosing that sort of problem is but I'm not sure how to make it less complicated.
 
 ##
 

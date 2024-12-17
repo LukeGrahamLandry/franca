@@ -91,12 +91,6 @@ fn emit_relocatable_constant(c: *SelfHosted, ty: Type, value: []u8) Res(BakedVar
     (Ok = c.put_baked((VoidPtrArray = out.rs()), (Some = jit_ptr)))
 }
 
-fn all_zeroes(b: []u8) bool = {
-    for b { b |
-        if(b != 0, => return(false));
-    };
-    true
-}
 
 // TODO: make sure baked.lookup actually ever helps. might need to add checks in more places.
 // TODO: correctly handle a pointer that's an offset from another. 
@@ -376,32 +370,6 @@ fn check_for_new_aot_bake_overloads(self: *SelfHosted) PRes = {
 
 fn Res($T: Type) Type = Result(T, *CompileError);
 
-fn jit_addr(v: *Values) i64 = {
-    s := v.bytes();
-    u8.int_from_ptr(s.ptr)
-}
-
-fn bytes(self: *Values) Slice(u8) = {
-    @match(self) {
-        (fn Small(v) Slice(u8) => (ptr = ptr_cast_unchecked(i64, u8, v._0&), len = v._1.zext()));
-        (fn Big(v) Slice(u8) => v.items());
-    }
-}
-
-fn len(self: *Values) i64 = {
-    @match(self) {
-        (fn Small(v) i64 => { v._1.zext() });
-        (fn Big(v) i64 => { v.len });
-    }
-}
-
-// fn from_values
-fn assume_cast($T: Type, self: *Values) *T #generic = {
-    b := self.bytes();
-    assert_eq(b.len, T.size_of());  // TODO: check alignment
-    ptr_cast_unchecked(u8, T, b.ptr)
-}
-
 fn unchecked_cast($T: Type, self: *Values) *T #generic = {
     b := self.bytes();
     ptr_cast_unchecked(u8, T, b.ptr)
@@ -429,14 +397,6 @@ fn to_value(bytes: Slice(u8), a: Alloc) Values = {
         new.copy_from(bytes);
     };
     bytes.to_value()
-}
-
-// Mote: this is weak! often you'd rather use immediate_eval_expr.
-fn as_const(self: *FatExpr) ?Values = {
-    @if_let(self.expr&)
-        fn Value(f) => { return(Some = f.bytes); };  // TODO: this should work when the branch returns never (no extra { ..; }) -- Jul 8
-    
-    .None
 }
 
 ////////////////////////
@@ -525,7 +485,7 @@ fn deconstruct_values(program: CompCtx, ty: Type, bytes: *ReadBytes, out: *List(
         fn Enum(f)   => return(deconstruct_values(program, f.raw, bytes, out, offsets));
         fn Named(f)  => return(deconstruct_values(program, f._0, bytes, out, offsets)); // TODO: make Named payload not a tuple or do destructuring here. -- Jul 8
         fn Int(_)    => {
-            @switch(program.get_info(ty).stride_bytes()) {
+            @switch(program.get_info(ty)[].stride_bytes) {
                 @case(1) => u8.single(.I8);
                 @case(2) => u16.single(.I16);
                 @case(4) => u32.single(.I32);
@@ -544,7 +504,7 @@ fn deconstruct_values(program: CompCtx, ty: Type, bytes: *ReadBytes, out: *List(
             @err_assert(f.layout_done, "ICE: layout not ready") return;
             @err_assert(!f.is_union, "You can't deconstruct_values of a union because we don't know which varient is active.") return;
             prev := 0;
-            size := program.get_info(ty).stride_bytes();
+            size: i64 = program.get_info(ty)[].stride_bytes.zext();
             start := bytes.i;
             for f.fields { t |
                 continue :: local_return;
@@ -556,7 +516,7 @@ fn deconstruct_values(program: CompCtx, ty: Type, bytes: *ReadBytes, out: *List(
                 @try(deconstruct_values(program, t.ty, bytes, out, offsets)) return;
                 prev = t.byte_offset;
             };
-            bytes.i = start + size.zext(); // eat trailing stride padding
+            bytes.i = start + size; // eat trailing stride padding
         }
     };
     .Ok
@@ -617,7 +577,7 @@ fn zero_padding(program: *SelfHosted, ty: Type, bytes: *ReadBytes) PRes = {
             @err_assert(f.layout_done, "ICE: layout not ready") return;
             @err_assert(!f.is_union, "TODO: you can't zero padding of a union because we don't know which varient is active.") return;
             prev := 0;
-            size := program.get_info(ty).stride_bytes();
+            size: i64 = program.get_info(ty)[].stride_bytes.zext();
             start := bytes.i;
             for f.fields { t |
                 continue :: local_return;
@@ -630,7 +590,7 @@ fn zero_padding(program: *SelfHosted, ty: Type, bytes: *ReadBytes) PRes = {
                 @try(zero_padding(program, t.ty, bytes)) return;
                 prev = bytes.i - start;
             };
-            set_zeros(size.zext() - prev); // eat trailing stride padding
+            set_zeros(size - prev); // eat trailing stride padding
         }
         @default => {
             // no padding
@@ -1239,23 +1199,6 @@ fn get_info(self: *SelfHosted, ty: Type) *TypeMeta = {
 
 fn raw_type(c: *SelfHosted, ty: Type) Type = 
     c.comp().raw_type(ty);
-
-fn raw_type(c: CompCtx, ty: Type) Type = {
-    loop {
-        @match(c.get_type(ty)) {
-            fn Named(f) => {
-                ty = f._0;
-            }
-            fn Enum(f) => {
-                ty = f.raw;
-            }
-            @default => {
-                return(ty);
-            };
-        };
-    };
-    ty
-}
 
 fn finish_layout_deep(self: *SelfHosted, ty: Type) void = {
     @debug_assert_le(ty.as_index(), self.types.len);

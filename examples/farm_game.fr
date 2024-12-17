@@ -8,6 +8,7 @@ State :: @struct(
     dx: f64,
     dy: f64,
     world: World,
+    env: rawptr,
 );
 
 World :: @struct(
@@ -77,6 +78,7 @@ fn load_default_world(self: *World) void = {
 
 do_init :: fn(userdata: rawptr) void = {
     state := State.ptr_from_raw(userdata);
+    set_dynamic_context(state.env);
     
     desc := SgDesc.zeroed();
     desc.environment = sglue_environment();
@@ -131,8 +133,9 @@ Rect :: @struct(pos: Pos, w: f64, h: f64);
 base_size :: 50.0;
 
 do_render :: fn(userdata: rawptr) void = {
-    mark := mark_temporary_storage();
     state := State.ptr_from_raw(userdata);
+    set_dynamic_context(state.env);
+    mark := mark_temporary_storage();
     do_update :: fn(state: *State) void = {
         state.x += state.dx;
         state.y += state.dy;
@@ -275,6 +278,7 @@ fn eqq(a: SappKeycode, b: SappKeycode) bool = (@as(i32) a).eq(@as(i32) b);
 
 do_event :: fn(event: *SappEvent, userdata: rawptr) void = {
     state := State.ptr_from_raw(userdata);
+    set_dynamic_context(state.env);
    
     if event.type.eqq(.KEY_DOWN) {
         if event.key_code.eqq(.Q) {
@@ -393,6 +397,7 @@ fn center_overlaps(me: Pos, me_size: f64, obj: Pos, obj_size: f64) bool = {
 fn main() void = {
     println("Hello World");
     state := State.zeroed();
+    state.env = get_dynamic_context();
     desc := SappDesc.zeroed();
     desc.init_userdata_cb = do_init;
     desc.frame_userdata_cb = do_render;
@@ -428,13 +433,19 @@ fn driver(vtable: *ImportVTable) void #export = {
     
     main_sym := {vtable.intern_string}(comp, "main");
     main_f := {vtable.find_unique_func}(comp, main_sym).unwrap();
-    {vtable.compile_func}(comp, main_f, .Jit).unwrap();
-
-    //ptr := {vtable.get_jitted_ptr}(comp, main_f).unwrap();
-    //f := assume_types_fn(Arg = void, Ret = void, ptr = ptr);
-    //f();
-    //exit(0);
-    //print_stacktrace_on_panic();
+    
+    want_jit := false;
+    for cli_args() { a |
+        want_jit = want_jit || a == "-jit";
+    };
+    if want_jit {
+        {vtable.compile_func}(comp, main_f, .Jit).unwrap();
+    
+        ptr := {vtable.get_jitted_ptr}(comp, main_f).unwrap();
+        f := assume_types_fn(Arg = void, Ret = void, ptr = ptr);
+        f();
+        exit(0);
+    };
     
     c: CompCtx = (data = comp, vtable = vtable);
     m := init_default_module_dyn(vtable, (arch = get_comptime_arch(), os = .macos, type = .Relocatable));  // :HardcodeOs

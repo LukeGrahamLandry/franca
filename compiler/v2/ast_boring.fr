@@ -40,43 +40,6 @@ fn func_type(self: *SelfHosted, id: FuncId) ?Type = {
     (Some = self.intern_type(Fn = ty))
 }
 
-fn choose_impl(self: *FuncImpl, prio: []FuncImpl.Tag()) ?*FuncImpl = {
-    @if_let(self) fn Merged(parts) => {
-        // :SLOW make prio $ and have a lookup table for value and just find max in one pass, but N is like 3 so meh.
-        for prio { p | 
-            each parts { check |
-                @debug_assert(!check.is(.Merged), "nested FuncImpl.Merged");
-                if check.tag() == p {
-                    return(Some = check);
-                };
-            };
-        };
-        return(.None);
-    };
-    
-    for prio { p |
-        if self.tag() == p {
-            return(Some = self);
-        };
-    };
-    .None
-} 
-
-fn find_impl(self: *FuncImpl, $p: FuncImpl.Tag()) ?*get_variant_type(FuncImpl, p) #generic = {
-    if self.tag() == p {
-        return(Some = get_variant_ptr(FuncImpl, self, p));
-    };
-    @if_let(self) fn Merged(parts) => {
-        each parts { check | 
-            @debug_assert(!check.is(.Merged), "nested FuncImpl.Merged");
-            if check.tag() == p {
-                return(Some =  get_variant_ptr(FuncImpl, check, p));
-            };
-        };
-    };
-    .None
-} 
-
 fn append_impl(body: *FuncImpl, a: Alloc, new: FuncImpl) void = {
     @match(body) {
         fn Empty() => {
@@ -262,30 +225,9 @@ fn tuple_of(self: *SelfHosted, types: []Type) Type = {
     }
 }
 
-fn err(arg: FatExpr) FatExpr #macro = {
-    @if(BOOTSTRAP_ONLY_MODE) {
-        arg = @{"---"};
-    };
-    if !arg.expr&.is(.Tuple) {
-        return(@{ (Err = make_error(@[arg])) });
-    };
-    @{
-        out: List(u8) = list(libc_allocator);
-        @[ format_into(@{ out& }, arg.expr.Tuple.items(), arg.loc) ];
-        (Err = make_error(out.items()))
-    }
-}
-
 fn error(self: *SelfHosted, arg: CompileError) *CompileError = {
     mem := self.get_alloc().alloc(CompileError, 1);
     mem.ptr[] = arg;
-    mem.ptr
-}
-
-// TODO: dont call malloc here!
-fn make_error(msg: Str) *CompileError = {
-    mem := libc_allocator.alloc(CompileError, 1);
-    mem.ptr[] = (Msg = (span = Span.zeroed(), msg = msg));
     mem.ptr
 }
 
@@ -341,13 +283,6 @@ fn unwrap(self: *LazyType) Type = {
     // TODO: compiler segfaults if you write this with @match!! -- Jul 9 :FUCKED
     assert(self.is(.Finished), "type not ready");
     self.Finished
-}
-
-fn var(self: *Binding) ?Var = {
-    @match(self.name) {
-        fn Var(v) => (Some = v);
-        @default => .None;
-    }
 }
 
 // TODO: add i128 to the language so i can represent all u64/i64 easily. 
@@ -615,20 +550,6 @@ fn get_build_options(c: *SelfHosted) *BuildOptions =
 empty_struct_literal :: fn(loc: Span) FatExpr = 
     (expr = (StructLiteralP = (bindings = empty(), loc = loc)), loc = loc, ty = UnknownType, done = false);
 
-fn ne(a: Symbol, b: Symbol) bool #redirect(Ty(u32, u32), bool);
-
-// It makes me feel better to guess that they provided the fields in order before scanning. 
-// The arrays are so short its not a measurable difference tho -- Sep 18
-fn find_struct_field(f: *get_variant_type(TypeInfo, .Struct), name: Symbol, index_guess: i64) ?*Field = {
-    field := index_guess;
-    if field >= f.fields.len || f.fields[field].name != name { 
-        miscompilation_if_you_inline_this := f.fields&.position(fn(f) => f.name == name); // :fucked // TODO: check if thats still true
-        field = or miscompilation_if_you_inline_this {
-            return(.None)
-        };
-    };
-    (Some = f.fields.index(field))
-}
 
 // :slow also ugly
 // TODO: for function args it would make sense to allow `_` multiple times to discard. 

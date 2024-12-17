@@ -1,21 +1,32 @@
-#!/usr/bin/env franca
-//! Based on https://github.com/zserge/fenster/blob/main/fenster.h 
-//! The original is `MIT License Copyright (c) 2022 Serge Zaitsev`
-//! I just do it on macos so far tho, so this is mostly an example of how to call objective c code. 
-// TODO: it doesn't work tho
-// TODO: I'm not sure if i have to manually adjust reference counts on objects. I'm probably just leaking everything in this example. 
+//!
+//! A minimal example of how to call objective c code and open a window on macOS.
+//! Calls AppKit/CoreGraphics APIs to draw a little mandelbrot set. 
+//!
+//! Adapted from https://github.com/zserge/fenster/blob/main/fenster.h 
+//! MIT License. Copyright (c) 2022 Serge Zaitsev
+//!
 
 CGSize  :: @struct(width: f64, height: f64);
 CGPoint :: @struct(x: f64, y: f64);
 CGRect  :: @struct(origin: CGPoint, size: CGSize);
 
-NSApp :: @static(ObjCId);
-buf :: @static([]u8);
+STATE :: @static(AppState);
 ::ptr_utils(ObjCObject);
 
+AppState :: @struct(
+    title: Str,
+    width: i64,
+    height: i64,
+    buf: []u32,
+    keys: []i32,  /* keys are mostly ASCII, but arrows are 17..20 */
+    mod: i32,     /* mod is 4 bits mask, ctrl=1, shift=2, alt=4, meta=8 */
+    x: i64,
+    y: i64,
+    mouse: i64,
+    wnd: ObjCId,
+);
+
 fn main() void = {
-    println("===== THIS IS NOT A WORKING EXAMPLE =====");
-    
     // TODO: have extern variables with #import just like functions. 
     //       so you can have the driver dlopen for you when jitting or have the linker ask for it when doing aot. 
     // You do have to open this dylib to have the classes exist when running at comptime (or i assume pass -framework Cocoa for aot)
@@ -23,8 +34,16 @@ fn main() void = {
     appkit := dlopen("/System/Library/Frameworks/AppKit.framework/AppKit".sym().c_str(), DlFlag.Lazy);
     @assert(!appkit.lib.is_null(), "failed to open appkit");
     
-    width := 300.0;
-    height := 300.0;
+    NSApp :: @static(ObjCId);
+    
+    f := STATE;
+    f.width  = 300.0;
+    f.height = 300.0;
+    f.buf = libc_allocator.alloc_zeroed(u32, f.width * f.height);
+    f.keys = libc_allocator.alloc_zeroed(i32, 256);
+    
+    // draw something nice once at the beginning.
+    render_mandelbrot(f.buf, f.width, f.height, 0.008);
     
     NSApplication := class("NSApplication");
     NSWindow := class("NSWindow"); 
@@ -42,23 +61,15 @@ fn main() void = {
     window := @objc_msg(ObjCId, NSWindow, "alloc");
     @assert(!window.is_null());
     
-    // TODO: pass struct of 4 floats in registers. https://godbolt.org/z/3sacKsKW6
-    //       https://student.cs.uwaterloo.ca/~cs452/docs/rpi4b/aapcs64.pdf
-    //       i really need to generate a bunch of c abi tests.  
-    //rect: CGRect = (origin = (x = 0, y = 0), size = (width = width, height = height));
-    //window = @objc_msg(ObjCId, window, (initWithContentRect = rect, styleMask = 3, backing = 2, defer = false));
-    //rect: CGRect = (origin = (x = 0, y = 0), size = (width = width, height = height));
-    // :float_struct_cc
-    ass_calling_convention_hack :: fn(a: f64, b: f64, c: f64, d: f64) void #noinline = ();
-    ass_calling_convention_hack(0, 0, width, height);
-    window = @objc_msg(ObjCId, window, (initWithContentRect = (), styleMask = 3, backing = 2, defer = false));
+    rect: CGRect = (origin = (x = 0, y = 0), size = (width = f.width.float(), height = f.height.float()));
+    window = @objc_msg(ObjCId, window, (initWithContentRect = rect, styleMask = 3, backing = 2, defer = false));
     
     // We have to give it a class with a callback
     Delegate := objc_allocateClassPair(NSObject, "SoftDrawDelegate".sym().c_str(), 0);
     class_addMethod(Delegate, "windowShouldClose:".sym().c_str().sel_getUid(), should_close_callback, "c@:@".sym().c_str());
     objc_registerClassPair(Delegate);
     should_close_callback: rawptr : fn(self: ObjCId, sel: ObjCSelector, window: ObjCId) bool = {
-        println("close");
+        println("Goodbye World!");
         @objc_msg(void, NSApp[], (terminate = NSApp[]));
         true
     };
@@ -85,8 +96,6 @@ fn main() void = {
     @objc_msg(void, window, "center");
     @objc_msg(void, NSApp[], (activateIgnoringOtherApps = true));
     
-    println("Hello World");
-    
     NSDefaultRunLoopMode := appkit.get_constant(ObjCId, "NSDefaultRunLoopMode").unwrap();
     @assert(!NSDefaultRunLoopMode.is_null(), "NSApp null");
     loop {  // TODO: do i have to do reference counting things? 
@@ -99,19 +108,44 @@ fn main() void = {
 
         if !event.is_null() {
             type := @objc_msg(i64, event, "type");
-            println(type);
             // TODO: actually handle the event
             @objc_msg(void, NSApp[], (sendEvent = event));
         };
         usleep(@as(u32) trunc(1000.mul(16)));
-        
     };
 }
+
+// TODO: don't segfault if you get a compile error inside a jit_shim. 
+
+fn CGColorSpaceCreateDeviceRGB() ObjCId #import("CoreGraphics"); // CGColorSpaceRef
+fn CGDataProviderCreateWithData(info: i64, data: *u32, size_bytes: i64, releaseData: i64) ObjCId #import("CoreGraphics"); // CGDataProviderRef
+fn CGImageCreate(width: i64, height: i64, bitsPerComponent: i64, bitsPerPixel: i64, 
+    bytesPerRow: i64, space: ObjCId, bitmapInfo: i64, provider: ObjCId, decode: i64, 
+    shouldInterpolate: bool, intent: u32) ObjCId #import("CoreGraphics"); // CGImageRef
+fn CGColorSpaceRelease(space: ObjCId) void #import("CoreGraphics");
+fn CGDataProviderRelease(img: ObjCId) void #import("CoreGraphics");
+fn CGImageRelease(provider: ObjCId) void #import("CoreGraphics");
+fn CGContextDrawImage(c: ObjCId, rect: CGRect, image: ObjCId) void #import("CoreGraphics");
+
 draw_rect_callback: rawptr : fn(self: ObjCId, sel: ObjCSelector, r: CGRect) void = {
-    println("draw");
-    // TODO: actually draw stuff, but we never get here...
+    f := STATE; // TODO: could smuggle this here with objc_getAssociatedObject
+    NSGraphicsContext := class("NSGraphicsContext");
+    context := @objc_msg(ObjCId, NSGraphicsContext, "currentContext");
+    context := @objc_msg(ObjCId, context, "graphicsPort");
+    space := CGColorSpaceCreateDeviceRGB();
+    provider := CGDataProviderCreateWithData(0, f.buf.ptr, f.width * f.height * 4, 0);
+    kCGImageAlphaNoneSkipFirst :: 6;
+    kCGBitmapByteOrder32Little :: 8192;
+    kCGRenderingIntentDefault :: 0;
+    flags :=  kCGImageAlphaNoneSkipFirst.bit_or(kCGBitmapByteOrder32Little);
+    img := CGImageCreate(f.width, f.height, 8, 32, f.width * 4, space, flags, provider, 0, false, kCGRenderingIntentDefault);
+    CGColorSpaceRelease(space);
+    CGDataProviderRelease(provider);
+    rect: CGRect = (origin = (x = 0, y = 0), size = (width = f.width.float(), height = f.height.float()));
+    CGContextDrawImage(context, rect, img);
+    CGImageRelease(img);
 };
-    
+
 fn class($name: Str) ObjCClass = {
     c := objc_getClass(name.sym().c_str());
     @assert(!c._.is_null(), name);
@@ -124,7 +158,6 @@ fn get_constant(lib: DlHandle, $T: Type, $name: Str) ?T #generic = {
     (Some = T.ptr_from_raw(ref)[])
 }
 
-// TODO: idk why i didn't use ComptimeLibs. should do that
 fn driver(vtable: *ImportVTable) void #export = {    
     src := "#include_std(\"lib/core.fr\");".clone(temp());
     the_code := temp().read_to_string("examples/soft_draw.fr");  // TODO: don't depend on cwd.
@@ -135,33 +168,52 @@ fn driver(vtable: *ImportVTable) void #export = {
     @assert(!objc.lib.is_null(), "failed to open objc");
     cg := dlopen(c_str(@symbol "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics"), DlFlag.Lazy);
     @assert(!cg.lib.is_null(), "failed to open coregraphics");
-    data := Data.raw_from_ptr(data&);
     opts := vtable.default_build_options();
     comp := vtable.new_with_src(src.items(), opts);
     ctx := vtable.with(comp);
-    ctx.add_comptime_lib(self.ctx.intern_string("objc"), objc);
-    ctx.add_comptime_lib(self.ctx.intern_string("CoreGraphics"), cg);
+    ctx.add_comptime_library(ctx.intern_string("objc"), objc);
+    ctx.add_comptime_library(ctx.intern_string("CoreGraphics"), cg);
     
     main_sym := {vtable.intern_string}(comp, "main");
     main_f := {vtable.find_unique_func}(comp, main_sym).unwrap();
-    {vtable.compile_func}(comp, main_f, .Jit).unwrap();
-
-    ptr := {vtable.get_jitted_ptr}(comp, main_f).unwrap();
+    ptr := ctx.get_jitted(main_f);
     f := assume_types_fn(Arg = void, Ret = void, ptr = ptr);
     f();
-    
-    c: CompCtx = (data = comp, vtable = vtable);
-    ir_text := c.emit_llvm(temp(), @slice (main_f), .WrapMain, get_comptime_arch(), .macos); // :HardcodeOs
-    out := open_temp_file();
-    for(ir_text&){bucket|
-        out.fd&.write(bucket);
-    };
-    @println("Write llvm ir to %", out&.s_name());
-    // TODO: get these from the lib. 
-    args := @slice ("-x", "ir", out&.s_name(), "-o", "a.out", "-framework", "Cocoa");    
-    @println("building aot exe: %", args);
-    success := run_cmd_blocking("clang", args);
-    assert(success, "clang failed");
 }
 
-#include_std("compiler/backend/llvm.fr");
+// makes this less of a minimal example but i think it's cute. 
+fn render_mandelbrot(buf: []u32, w: i64, h: i64, scale: f64) void = {
+    Pos :: @struct(x: f64, y: f64);
+    
+    fn init(x: f64, y: f64) Pos = (x = x, y = y);
+    fn add(a: Pos, b: Pos) Pos  = (x = add(a.x, b.x), y = add(a.y, b.y));
+    fn mul(a: Pos, b: Pos) Pos  = (x = mul(a.x, b.x), y = mul(a.y, b.y));
+    
+    mandelbrot :: fn(c: Pos, z: Pos, steps: i64) i64 = {
+        i   := 0;
+        zSq := z * z;
+        while => i < steps && zSq.x + zSq.y < 4.0 {
+            z.y = z.x * 2.0 * z.y;
+            z.x = zSq.x - zSq.y;
+            z += c;
+            zSq = z * z;
+            i += 1;
+        };
+        i
+    };
+
+    max_steps := 45;
+    x_start := -1.9;
+    y_start := -1.0;
+    
+    pos: Pos = init(x = x_start, y = y_start);
+    range(0, h) { y |
+        range(0, w) { x |
+            steps := mandelbrot(pos, init(x = 0.0, y = 0.0), max_steps);
+            buf[y * w + x] = @if(steps == max_steps, 0xFFFFFFFF, 0x00000000);
+            pos.x += scale;
+        };
+        pos.x = x_start;
+        pos.y += scale;
+    };
+}

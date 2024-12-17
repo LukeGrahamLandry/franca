@@ -510,13 +510,23 @@ fn todo_get_bc(self: *SelfHosted) *BcBackend = {
     BcBackend.ptr_from_raw(self.get_build_options()[].comptime_jit_data)
 }
 
+fn comptime_jit_symbol_id(self: *SelfHosted, fid: FuncId) u32 = {
+    func := self.get_function(fid);
+    if !func.has_comptime_jit_symbol_id {
+        m := self.comptime_codegen.m;
+        func.comptime_jit_symbol_id = m.intern(self.comp().fmt_fn_name(fid));
+        func.has_comptime_jit_symbol_id = true;
+    };
+    func.comptime_jit_symbol_id
+}
+
 // If you're about to actually call the pointer, we need to mark the memory as executable.
 fn get_fn_callable(self: *SelfHosted, fid: FuncId) ?rawptr = {
     @if(NEW_COMPTIME_JIT, {
         m := self.comptime_codegen.m;
-        id := m.intern(self.comp().fmt_fn_name(fid));
-        result: ?rawptr = .None;
         func := self.get_function(fid);
+        id := self.comptime_jit_symbol_id(fid);
+        result: ?rawptr = .None;
         if !func.get_flag(.RealAsmDone) && !func.get_flag(.AlreadyHasShim) {
             return(.None);
         };

@@ -33,7 +33,7 @@ fn get_build_options(c: CompCtx) *BuildOptions = {
     {c.vtable.get_build_options}(c.data)
 }
 
-fn emit_relocatable_constant(c: CompCtx, ty: Type, value: []u8) Res(BakedVarId) = {
+fn emit_relocatable_constant(c: CompCtx, ty: Type, value: []u8) CRes(BakedVarId) = {
     {c.vtable.emit_relocatable_constant}(c.data, ty, value)
 }
 
@@ -390,4 +390,279 @@ fn arg_types(self: CompCtx, ty: Type) []Type = {
             xx.items()  
         };
     }
+}
+
+///////////////////////////
+// TODO: should try to clean these up.
+
+// @err_assert(cond, "msg %", 123) return;
+fn err_assert(arg: FatExpr, ret: FatExpr) FatExpr #macro = {
+    loc := arg.loc;
+    arg := compile_ast(arg);
+    arg_err :: "@err_assert expected '(cond, fmt_string, args)'";
+    if arg.ty == bool {
+        arg = compile_ast(@{ (@[arg], "Assertion Failed") });
+    };
+    @ct_assert(arg.expr&.is(.Tuple), loc, arg_err);
+    parts := arg.expr.Tuple.items();
+    @ct_assert(parts.len >= 2, loc, arg_err);
+    @ct_assert(parts[1].ty == Str, loc, arg_err);
+    
+    if parts.len == 2 {
+        @{ 
+            if !@[parts[0]] {
+                @[ret](@err(@[parts[1]]));
+            };
+        }
+    } else {
+        @{
+            if !@[parts[0]] {
+                out: List(u8) = list(temp());
+                @[format_into(@{ out& }, parts.rest(1), arg.loc)];
+                @[ret](@err(out.items()));
+            };
+        }
+    }
+}
+
+fn unwrap(arg: FatExpr, ret: FatExpr) FatExpr #macro = {
+    loc := arg.loc;
+    arg := compile_ast(arg);
+    if arg.ty == bool {
+        arg = compile_ast(@{ (@[arg], "Assertion Failed") });
+    };
+    arg_err :: "@assert expected '(nullable, fmt_string, args)'";
+    @ct_assert(arg.expr&.is(.Tuple), loc, arg_err);
+    parts := arg.expr.Tuple.items();
+    @ct_assert(parts.len >= 2, loc, arg_err);
+    @ct_assert(parts[1].ty == Str, loc, arg_err);
+    
+    @{
+        cond := @[parts[0]];
+        if cond&.is_none() {
+            out: List(u8) = list(temp());
+            out&.push_all("Missing Value: ");
+            @[format_into(@{ out& }, parts.rest(1), arg.loc)];
+            @[ret](@err(out.items()));
+        };
+        cond.unwrap()
+    }
+}
+
+fn err(arg: FatExpr) FatExpr #macro = {
+    @if(BOOTSTRAP_ONLY_MODE) {
+        arg = @{"---"};
+    };
+    if !arg.expr&.is(.Tuple) {
+        return(@{ (Err = make_error(@[arg])) });
+    };
+    @{
+        out: List(u8) = list(libc_allocator);
+        @[ format_into(@{ out& }, arg.expr.Tuple.items(), arg.loc) ];
+        (Err = make_error(out.items()))
+    }
+}
+
+// TODO: dont call malloc here!
+fn make_error(msg: Str) *CompileError = {
+    mem := libc_allocator.alloc(CompileError, 1);
+    mem.ptr[] = (Msg = (span = Span.zeroed(), msg = msg));
+    mem.ptr
+}
+
+fn update_main_span(err: *CompileError, new_loc: Span) void = {
+    @match(err) {
+        fn Msg(it) => {
+            if it.span.low == 0 && it.span.high == 0 {
+                it.span = new_loc;
+            };
+        }
+        fn TypeMismatch(it) => {
+            if it.span.low == 0 && it.span.high == 0 {
+                it.span = new_loc;
+            };
+        }
+        fn CoerceConst(it) => {
+            if it.span.low == 0 && it.span.high == 0 {
+                it.span = new_loc;
+            };
+        }
+        fn InvalidField(it) => {
+            if it.span.low == 0 && it.span.high == 0 {
+                it.span = new_loc;
+            };
+        }
+        @default => (); // TODO
+    };
+}
+
+fn choose_impl(self: *FuncImpl, prio: []FuncImpl.Tag()) ?*FuncImpl = {
+    @if_let(self) fn Merged(parts) => {
+        // :SLOW make prio $ and have a lookup table for value and just find max in one pass, but N is like 3 so meh.
+        for prio { p | 
+            each parts { check |
+                @debug_assert(!check.is(.Merged), "nested FuncImpl.Merged");
+                if check.tag() == p {
+                    return(Some = check);
+                };
+            };
+        };
+        return(.None);
+    };
+    
+    for prio { p |
+        if self.tag() == p {
+            return(Some = self);
+        };
+    };
+    .None
+} 
+
+// :get_or_create_type
+fn is_unit(t: Type) bool = t == void;
+fn is_unknown(t: Type) bool = t == UnknownType;
+fn is_never(t: Type) bool = t == Never;
+
+fn raw_type(c: CompCtx, ty: Type) Type = {
+    loop {
+        @match(c.get_type(ty)) {
+            fn Named(f) => {
+                ty = f._0;
+            }
+            fn Enum(f) => {
+                ty = f.raw;
+            }
+            @default => {
+                return(ty);
+            };
+        };
+    };
+    ty
+}
+
+// Mote: this is weak! often you'd rather use immediate_eval_expr.
+fn as_const(self: *FatExpr) ?Values = {
+    @if_let(self.expr&)
+        fn Value(f) => { return(Some = f.bytes); };  // TODO: this should work when the branch returns never (no extra { ..; }) -- Jul 8
+    
+    .None
+}
+
+// fn from_values
+fn assume_cast($T: Type, self: *Values) *T #generic = {
+    b := self.bytes();
+    assert_eq(b.len, T.size_of());  // TODO: check alignment
+    ptr_cast_unchecked(u8, T, b.ptr)
+}
+
+::enum(CallConv);
+
+fn find_impl(self: *FuncImpl, $p: FuncImpl.Tag()) ?*get_variant_type(FuncImpl, p) #generic = {
+    if self.tag() == p {
+        return(Some = get_variant_ptr(FuncImpl, self, p));
+    };
+    @if_let(self) fn Merged(parts) => {
+        each parts { check | 
+            @debug_assert(!check.is(.Merged), "nested FuncImpl.Merged");
+            if check.tag() == p {
+                return(Some =  get_variant_ptr(FuncImpl, check, p));
+            };
+        };
+    };
+    .None
+} 
+
+:: {
+    H :: TrivialHasher;
+    
+    fn DerefHash($T: Type) void = {
+        fn hash(hasher: *H, a: *T) void #inline = hasher.hash(a[]);
+    }
+    
+    #redirect(Ty(*H, *u32), void) fn hash(h: *H, s: *LabelId) void;    AutoHash(TypeInfo, H); AutoEq(TypeInfo);
+    DerefHash(*TypeInfo); DerefEq(*TypeInfo);
+    enum(CallConv); DerefEq(CallConv);
+    enum(VarType); DerefEq(VarType);
+    
+    fn hash(h: *H, s: *CallConv) void #redirect(Ty(*H, *i64), void);
+    fn hash(h: *H, s: *VarType) void #redirect(Ty(*H, *i64), void);
+    
+    fn hash(h: *H, s: *Var) void = {
+        h.hash(s.id&);
+    }
+    
+    fn hash(h: *H, s: *Values) void = {
+        b := s.bytes();
+        h.hash(b&);
+    }
+};
+
+fn bytes(self: *Values) Slice(u8) = {
+    @match(self) {
+        (fn Small(v) Slice(u8) => (ptr = ptr_cast_unchecked(i64, u8, v._0&), len = v._1.zext()));
+        (fn Big(v) Slice(u8) => v.items());
+    }
+}
+
+fn len(self: *Values) i64 = {
+    @match(self) {
+        (fn Small(v) i64 => { v._1.zext() });
+        (fn Big(v) i64 => { v.len });
+    }
+}
+
+fn var(self: *Binding) ?Var = {
+    @match(self.name) {
+        fn Var(v) => (Some = v);
+        @default => .None;
+    }
+}
+
+fn ne(a: Symbol, b: Symbol) bool #redirect(Ty(u32, u32), bool);
+
+fn hash(i: *Var) i64 = {
+    i := (@as(i64) i.id.zext());
+    i&.hash()
+}
+fn eq(a: Var, b: Var) bool = a.id == b.id;
+fn eq(a: *Var, b: *Var) bool = a[] == b[]; // TODO: this should be automatic, or == should always look for the ref version? or i should commit to rls like zig so it doesn't matter. 
+fn hash(i: *Symbol) i64 = {
+    i := (@as(i64) i[].id().zext());
+    i&.hash()
+}
+
+fn contains_pointers(s: *TypeMeta) bool = s.contains_pointers;
+
+fn jit_addr(v: *Values) i64 = {
+    s := v.bytes();
+    u8.int_from_ptr(s.ptr)
+}
+
+fn unwrap(self: Name) Symbol = {
+    @match(self) {
+        fn Var(v) => v.name;
+        fn Ident(v) => v;
+        @default => panic("Expected name!");
+    }
+}
+
+// It makes me feel better to guess that they provided the fields in order before scanning. 
+// The arrays are so short its not a measurable difference tho -- Sep 18
+fn find_struct_field(f: *get_variant_type(TypeInfo, .Struct), name: Symbol, index_guess: i64) ?*Field = {
+    field := index_guess;
+    if field >= f.fields.len || f.fields[field].name != name { 
+        miscompilation_if_you_inline_this := f.fields&.position(fn(f) => f.name == name); // :fucked // TODO: check if thats still true
+        field = or miscompilation_if_you_inline_this {
+            return(.None)
+        };
+    };
+    (Some = f.fields.index(field))
+}
+
+fn log(v: *Var, pool: CompCtx) Str = 
+    items(@format("%%%", pool.get_string(v.name), "%", v.id) temp());
+
+fn unwrap_ty(self: *Binding) Type = {
+    assert(self.ty&.is(.Finished), "type not ready!");
+    self.ty.Finished
 }

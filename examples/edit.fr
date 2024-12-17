@@ -1,0 +1,202 @@
+#include_std("graphics/src/lib.fr");
+
+State :: @struct(
+    pipe: SglPipeline,
+    pass_action: SgPassAction,
+    text: *Sdtx.Common,
+    env: rawptr,
+    lines: List(RsVec(u8)),
+    x: f64,
+    y: f64,
+    max_x: f64,
+);
+
+allocator :: libc_allocator;
+
+do_init :: fn(userdata: rawptr) void = {
+    state := State.ptr_from_raw(userdata);
+    set_dynamic_context(state.env);
+    
+    desc := SgDesc.zeroed();
+    desc.environment = sglue_environment();
+    desc.logger.func = slog_func;
+    sg_setup(desc&);
+    
+    desc := SglDesc.zeroed();
+    desc.logger.func = slog_func;
+    sgl_setup(desc&);
+    
+    desc: Sdtx.Desc = (
+        allocator = allocator,
+        context = (),
+    );
+    desc.fonts&[0] = Sdtx.Data.font_cpc;
+    sdtx_setup(state.text, desc&);
+    
+    desc := SgPipelineDesc.zeroed();
+    // This makes transperency work
+    colour := desc.colors&[0]&;
+    colour.blend.enabled = true;
+    colour.blend.src_factor_rgb = .SRC_ALPHA;
+    colour.blend.dst_factor_rgb = .ONE_MINUS_SRC_ALPHA;
+    // I think you need this if you do z index stuff and it doesn't work without it. 
+    //desc.alpha_to_coverage_enabled = true;
+    //desc.depth.write_enabled = true;
+    //desc.depth.compare = .LESS_EQUAL;
+    
+    state.pipe = sgl_make_pipeline(desc&);
+    state.pass_action.colors&[0].load_action = .CLEAR;
+    state.pass_action.colors&[0].clear_value = (r = 0.156.cast(), g = 0.156.cast(), b = 0.156.cast(), a = 1.0.cast());
+};
+
+Colour :: @struct(r: i64, g: i64, b: i64, a := 255);
+Pos :: @struct(x: f64, y: f64);
+Rect :: @struct(pos: Pos, w: f64, h: f64);
+
+do_render :: fn(userdata: rawptr) void = {
+    state := State.ptr_from_raw(userdata);
+    set_dynamic_context(state.env);
+    mark := mark_temporary_storage();
+    
+    w := sapp_width();
+    h := sapp_height();
+    max_line_width := state.max_x - (w.intcast().float() / (80.0 / 1.75));
+    state.x = max(0, min(state.x, max_line_width));
+    state.y = max(0, min(state.y, state.lines.len.float()));
+    
+    sgl_defaults();
+    sgl_viewport(0.intcast(), 0.intcast(), w, h, true);
+    sgl_load_pipeline(state.pipe);
+    sdtx := state.text.default_context&;
+    sdtx.color = pack_rgba(235, 219, 178, 255);
+    sdtx.canvas(sapp_width().intcast().float().div(1.75).cast(), sapp_height().intcast().float().div(1.75).cast());
+    
+    // the fractional component of your scroll position is used to offset the text rendering on the screen.
+    // and the integral component chooses which range of lines we draw.
+    sdtx.pos.y = cast(-(state.y - state.y.floor()));
+    x := cast(-(state.x - state.x.floor()));
+    sdtx.pos.x = x;
+    line_count := int(h.intcast().float() / 13.0);
+    start := min(max(0, state.y.int()), state.lines.len);
+    end   := min(start + line_count, state.lines.len);
+    range(start, end) { i |
+        line := state.lines&.index(i);
+        off  := min(state.x.int(), line.len - 1);
+        sdtx.put(line.items().rest(off)); 
+        sdtx.pos.y += 1.0.cast();
+        sdtx.pos.x = x;
+    };
+    
+    desc := SgPass.zeroed();
+    desc.action = state.pass_action;
+    desc.swapchain = sglue_swapchain();
+    desc.swapchain.width = sapp_width();
+    desc.swapchain.height = sapp_height();
+    sg_begin_pass(desc&);
+    
+    sgl_draw();
+    sdtx.draw_layer(0);
+    
+    sg_end_pass();
+    sg_commit();
+    reset_temporary_storage(mark);
+};
+
+// TODO: dependency problem so can't go in the eq overload set :(
+fn eqq(a: SappEventType, b: SappEventType) bool = (@as(i32) a).eq(@as(i32) b);
+fn eqq(a: SappKeycode, b: SappKeycode) bool = (@as(i32) a).eq(@as(i32) b);
+
+scroll_speed :: -2.0;
+
+do_event :: fn(event: *SappEvent, userdata: rawptr) void = {
+    state := State.ptr_from_raw(userdata);
+    set_dynamic_context(state.env);
+   
+    if event.type.eqq(.KEY_DOWN) {
+        if event.key_code.eqq(.ESCAPE) {
+            exit(0);
+        };
+    };
+    
+    if event.type.eqq(.MOUSE_SCROLL) {
+        state.x += event.scroll_x.cast() * scroll_speed;
+        state.y += event.scroll_y.cast() * scroll_speed;
+    };
+};
+
+fn main() void = {
+    state := State.zeroed();
+    state.env = get_dynamic_context();
+    state.text = allocator.box(@type state.text[]);
+    
+    // :SLOW
+    path := "compiler/v2/sema.fr";
+    input := allocator.read_to_string(path).items(); // :panic :leak
+    input := input.split("\n", temp()).items();
+    state.lines = list(input.len, temp());
+    for input { l |
+        state.max_x = max(state.max_x, l.len.float());
+        state.lines&.push(ptr = l.ptr, len = l.len, cap = l.len);
+    };
+    
+    desc := SappDesc.zeroed();
+    desc.init_userdata_cb = do_init;
+    desc.frame_userdata_cb = do_render;
+    desc.event_userdata_cb = do_event;
+    desc.user_data = State.raw_from_ptr(state&);
+    desc.logger.func = slog_func;
+    desc.window_title = "pleasejustletmeeditthetext".maybe_borrow_cstr(temp());
+    sapp_run(desc&);
+}
+
+SOKOL_MACOS_LINK_ARGS :: @array("-framework", "Metal", "-framework", "MetalKit", "-framework", "Cocoa", "-framework", "QuartzCore");
+
+fn driver(vtable: *ImportVTable) void = {    
+    src := "#include_std(\"lib/core.fr\");".clone(temp());
+    the_code := temp().read_to_string("examples/edit.fr");  // TODO: don't depend on cwd.
+    src&.push_all(the_code.items());
+    
+    opts := vtable.default_build_options();
+    opts.retain_function_names = true;
+    comp := vtable.new_with_src(src.items(), opts);
+    ctx := vtable.with(comp);
+    
+    libs := ctx.empty_libs();
+    //libs&.intercept_imports();
+    libs&.add_lib(sokol_macos_lib);
+    
+    main_sym := {vtable.intern_string}(comp, "main");
+    main_f := {vtable.find_unique_func}(comp, main_sym).unwrap();
+    
+    want_jit := false;
+    for cli_args() { a |
+        want_jit = want_jit || a == "-jit";
+    };
+    if want_jit {
+        ptr := get_jitted(vtable.with(comp), main_f);
+        f := assume_types_fn(Arg = void, Ret = void, ptr = ptr);
+        f();
+        exit(0);
+    };
+    
+    c: CompCtx = (data = comp, vtable = vtable);
+    m := init_default_module_dyn(vtable, (arch = get_comptime_arch(), os = .macos, type = .Relocatable));  // :HardcodeOs
+    ir_text := emit_qbe_included_dyn(m&, c&, @slice(main_f), .WrapMain, true);  // note: this doesn't work on -legacy
+    
+    out := open_trunc("edit.o".sym().c_str()).unwrap();
+    for(ir_text&){bucket|
+        out&.write(bucket);
+    };
+    out.close();
+    // TODO: get these from the lib. 
+    a := SOKOL_MACOS_LINK_ARGS;
+    args := libs&.get_aot_objects();
+    args&.push_all(a&.items());
+    args&.push_all(@slice ("edit.o", "-o", "edit.out"));    
+    @println("building aot exe: %", args.items());
+    success := run_cmd_blocking("clang", args.items());
+    assert(success, "clang failed");
+}
+
+#include_std("backend/lib.fr");
+#include_std("compiler/ast_external.fr");  

@@ -26,6 +26,11 @@
 - `Type Error` should tell you where the difference is! and use the right names for enums, etc.
 - `place expression expected pointer dereference` when you forget a `[]` after a call and field access should tell you that.
 - either fix new emit_ir run_tests naming or just change run_tests to generate a big file and compile it as its own thing.
+- underscores for large number literals. 1_000_000_000.
+- improve include_bytes and namespacing with @rec structs in sokol_debugtext
+- @match/@switch should just be @inline_match/@inline_switch if the thing is constant.
+- string literal auto decay to CStr
+- `fn fmodf(f32, f32) f32 #libc;` should treat them as types not arg names
 
 ##
 

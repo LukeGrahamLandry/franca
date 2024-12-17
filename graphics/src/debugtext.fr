@@ -1,0 +1,451 @@
+//! Simple ASCII debug text rendering on top of sokol_gfx.h
+//! Adapted from sokol_debugtext.h - https://github.com/floooh/sokol
+//! zlib/libpng license. Copyright (c) 2020 Andre Weissflog.
+//! See ../docs/debugtext.md for more information. 
+
+Sdtx :: @rec @struct(
+    max_fonts   :: 8, 
+    init_cookie :: 0xACBAABCB,  // purposely different from the c version
+    
+    /* Describes the initialization parameters of a rendering context. Creating
+     * additional rendering contexts is useful if you want to render in
+     * different sokol-gfx rendering passes, or when rendering several layers
+     * of text. */
+    ContextDesc :: @rec @struct(
+        max_commands:  i32 = 4096,              // max number of draw commands, each layer transition counts as a command
+        char_buf_size: i32 = 4096,              // max number of characters rendered in one frame
+        canvas_width:  f32 = 640.0.cast(),      // the initial virtual canvas width
+        canvas_height: f32 = 400.0.cast(),      // the initial virtual canvas height
+        tab_width:     i32 = 4,                 // tab width in number of characters
+        color_format := SgPixelFormat.zeroed(), // color pixel format of target render pass
+        depth_format := SgPixelFormat.zeroed(), // depth pixel format of target render pass
+        sample_count:  i32 = 0,                 // MSAA sample count of target render pass
+    ),
+    
+    /* Describes the sokol-debugtext API initialization parameters. 
+     * Passed to the sdtx_setup() function. */
+    Desc :: @rec @struct(
+        fonts := Array([]u8, Sdtx.max_fonts).zeroed(), // up to 8 fonts descriptions. see "USING YOUR OWN FONT DATA" in docs for details. 
+        context: Sdtx.ContextDesc,                     // the default context creation parameters
+        allocator: Alloc,
+    ),
+    
+    Float2  :: @rec @struct(x: f32, y: f32),
+    Vertex  :: @rec @struct(x: f32, y: f32, u: u16, v: u16, color: u32),
+    Command :: @rec @struct(layer_id: i32, first_vertex: i32, num_vertices: i32),
+    
+    // Set pos/origin/color/font to whatever you like before calling `put` to control how those characters are drawn. 
+    Context :: @rec @struct(
+        desc: Sdtx.ContextDesc,
+        frame_id: u32,
+        update_frame_id: u32,
+        vertices: RsVec(Sdtx.Vertex),
+        commands: RsVec(Sdtx.Command),
+        vbuf: SgBuffer,
+        pip: SgPipeline,
+        font: i32,                // index into the fonts array
+        cur_layer_id: i32,        // call set_layer instead of changing this directly (it needs to do some command buffer bookkeeping). 
+        glyph_size: Sdtx.Float2,  // pixels per character grid unit
+        origin: Sdtx.Float2,      // in character grid coordinates
+        pos: Sdtx.Float2,         // in character grid coordinates
+        tab_width: f32,
+        color: u32,               // 0xAABBGGRR
+        common: *Sdtx.Common,
+        franca_dynamic_context: rawptr,
+    ),
+    Common :: @rec @struct(
+        init_cookie: u32,
+        desc:     Sdtx.Desc,
+        font_img: SgImage,
+        font_smp: SgSampler,
+        shader:   SgShader,
+        // This is not special. It's just some storage you can use to avoid an 
+        // extra allocation in the simple case where you only want a single context. 
+        default_context: Sdtx.Context,
+        font_pixels: []u8,
+    ),
+    
+    // TODO: this and `sdtx_data` should be able to go directly in the struct. 
+    Data :: @rec @struct(
+        // Builtin fonts (you can provide your own as well).
+        font_kc853 :: sdtx_data.slice(0, 2048),
+        font_kc854 :: sdtx_data.slice(2048, 4096),
+        font_z1013 :: sdtx_data.slice(4096, 6144),
+        font_cpc   :: sdtx_data.slice(6144, 8192),
+        font_c64   :: sdtx_data.slice(8192, 10240),
+        font_oric  :: sdtx_data.slice(10240, 12288),
+        
+        // Precompiled shaders for each RenderBackend. 
+        vs_source_glsl410       :: sdtx_data.slice(12288, 12631),
+        fs_source_glsl410       :: sdtx_data.slice(12631, 12855),
+        vs_source_glsl300es     :: sdtx_data.slice(12855, 13156),
+        fs_source_glsl300es     :: sdtx_data.slice(13156, 13411),
+        vs_bytecode_metal_macos :: sdtx_data.slice(13411, 16303),
+        fs_bytecode_metal_macos :: sdtx_data.slice(16303, 19336),
+        vs_bytecode_metal_ios   :: sdtx_data.slice(19336, 22212),
+        fs_bytecode_metal_ios   :: sdtx_data.slice(22212, 25245),
+        vs_source_metal_sim     :: sdtx_data.slice(25245, 25822),
+        fs_source_metal_sim     :: sdtx_data.slice(25822, 26263),
+        vs_bytecode_hlsl4       :: sdtx_data.slice(26263, 26955),
+        fs_bytecode_hlsl4       :: sdtx_data.slice(26955, 27563),
+        vs_source_wgsl          :: sdtx_data.slice(27563, 28485),
+        fs_source_wgsl          :: sdtx_data.slice(28485, 29148),
+    ),
+);
+
+sdtx_data :: include_bytes("graphics/data/debugtext.bin", 29148);
+
+// fills in an empty `ctx` based on settings from `in_desc`.
+// ERRORS: if sg_add_commit_listener fails (returns false and text will not be rendered).
+fn init_context(_sdtx: *Sdtx.Common, ctx: *Sdtx.Context, in_desc: *Sdtx.ContextDesc) bool = {
+    sg_push_debug_group("sokol-debugtext".sym().c_str());
+    ctx.desc = in_desc[];
+    ctx.common = _sdtx;
+    a := _sdtx.desc.allocator;
+    // NOTE: frame_id must be non-zero, so that updates trigger in first frame
+    ctx.frame_id = 1;
+
+    ctx.vertices = init(a, 6 * ctx.desc.char_buf_size.zext());
+    ctx.commands = init(a, ctx.desc.max_commands.zext());
+    set_layer(ctx, 0);
+
+    vbuf_desc := SgBufferDesc.zeroed();
+    vbuf_desc.size = ctx.vertices.cap * size_of(Sdtx.Vertex);
+    vbuf_desc.type = .VERTEXBUFFER;
+    vbuf_desc.usage = .STREAM;
+    vbuf_desc.label = "sdtx-vbuf".sym().c_str();
+    ctx.vbuf = sg_make_buffer(vbuf_desc&);
+    @debug_assert(ctx.vbuf.id != 0);
+
+    pip_desc := SgPipelineDesc.zeroed();
+    pip_desc.layout.buffers&[0].stride = size_of(Sdtx.Vertex);
+    pip_desc.layout.attrs&[0].format = .FLOAT2;
+    pip_desc.layout.attrs&[1].format = .USHORT2N;
+    pip_desc.layout.attrs&[2].format = .UBYTE4N;
+    pip_desc.shader = _sdtx.shader;
+    pip_desc.index_type = .NONE;
+    pip_desc.sample_count = ctx.desc.sample_count;
+    pip_desc.depth.pixel_format = ctx.desc.depth_format;
+    pip_desc.colors&[0].pixel_format = ctx.desc.color_format;
+    pip_desc.colors&[0].blend.enabled = true;
+    pip_desc.colors&[0].blend.src_factor_rgb = .SRC_ALPHA;
+    pip_desc.colors&[0].blend.dst_factor_rgb = .ONE_MINUS_SRC_ALPHA;
+    pip_desc.colors&[0].blend.src_factor_alpha = .ONE;
+    pip_desc.colors&[0].blend.dst_factor_alpha = .ZERO;
+    pip_desc.label = "sdtx-pipeline".sym().c_str();
+    ctx.pip = sg_make_pipeline(pip_desc&);
+    @debug_assert(ctx.pip.id != 0);
+
+    ctx.glyph_size.x = 8.0.cast() / ctx.desc.canvas_width;
+    ctx.glyph_size.y = 8.0.cast() / ctx.desc.canvas_height;
+    ctx.tab_width = ctx.desc.tab_width.intcast().float().cast();
+    ctx.color = 0xFF00FFFF;
+
+    ok := sg_add_commit_listener(make_commit_listener(ctx));
+    sg_pop_debug_group();
+    ok
+}
+
+// Releases the resources owned by this context. 
+// You are still responsible for cleaning up the memory holding the Context struct itself. 
+fn destroy_context(ctx: *Sdtx.Context) void = {
+    if !ctx.vertices.ptr.is_null() {
+        drop(ctx.vertices&, ctx.common.allocator);
+    };
+    if !ctx.commands.ptr.is_null() {
+        drop(ctx.vertices&, ctx.common.allocator);
+    };
+    sg_push_debug_group("sokol_debugtext".sym().c_str());
+    sg_destroy_buffer(ctx.vbuf);
+    sg_destroy_pipeline(ctx.pip);
+    sg_remove_commit_listener(sdtx_make_commit_listener(ctx));
+    sg_pop_debug_group();
+    ctx[] = Sdtx.Context.zeroed();
+}
+
+fn sdtx_setup(_sdtx: *Sdtx.Common, desc: *Sdtx.Desc) void = {
+    check_desc(desc);
+    _sdtx[] = zeroed(Sdtx.Common);
+    _sdtx.init_cookie = Sdtx.init_cookie;
+    _sdtx.desc = desc[];
+    sg_push_debug_group("sokol-debugtext".sym().c_str());
+
+    // TODO: sketchy. im using a newer version of debugtext than the rest of the stuff i have so these field names are from a different version than the shaders are. 
+    //       but it seems fine so i guess it was just name changes. 
+    
+    // common shader for all contexts
+    shd_desc := SgShaderDesc.zeroed();
+    shd_desc.label = "sokol-debugtext-shader".sym().c_str();
+    shd_desc.attrs&[0].name = "position".sym().c_str();
+    shd_desc.attrs&[1].name = "texcoord0".sym().c_str();
+    shd_desc.attrs&[2].name = "color0".sym().c_str();
+    shd_desc.attrs&[0].sem_name = "TEXCOORD".sym().c_str();
+    shd_desc.attrs&[0].sem_index = 0;
+    shd_desc.attrs&[1].sem_name = "TEXCOORD".sym().c_str();
+    shd_desc.attrs&[1].sem_index = 1;
+    shd_desc.attrs&[2].sem_name = "TEXCOORD".sym().c_str();
+    shd_desc.attrs&[2].sem_index = 2;
+    shd_desc.fs.images&[0].used = true;
+    shd_desc.fs.images&[0].image_type = ._2D;
+    shd_desc.fs.images&[0].sample_type = .FLOAT;
+    shd_desc.fs.samplers&[0].used = true;
+    shd_desc.fs.samplers&[0].sampler_type = .FILTERING;
+    shd_desc.fs.image_sampler_pairs&[0].used = true;
+    shd_desc.fs.image_sampler_pairs&[0].image_slot = 0;
+    shd_desc.fs.image_sampler_pairs&[0].sampler_slot = 0;
+    shd_desc.fs.image_sampler_pairs&[0].glsl_name = "tex_smp".sym().c_str();
+    choose_shader_impl(SOKOL_BACKEND, shd_desc&, Sdtx.Data);
+    _sdtx.shader = sg_make_shader(shd_desc&);
+    SG_INVALID_ID: u32 = 0;
+    @debug_assert(_sdtx.shader.id != SG_INVALID_ID);
+
+    // unpack font data
+    unpacked_font_size :: 256 * 8 * 8;
+    _sdtx.font_pixels = desc.allocator.alloc(u8, Sdtx.max_fonts * unpacked_font_size);
+    range(0, Sdtx.max_fonts) { i |
+        font_desc := _sdtx.desc.fonts&[i];
+        out_pixels := _sdtx.font_pixels.slice(i * unpacked_font_size, (i + 1) * unpacked_font_size);
+        if font_desc.len != 0 {
+            unpack_font(font_desc, out_pixels);
+        } else {
+            memset(u8.raw_from_ptr(out_pixels.ptr), 0xFF, out_pixels.len);
+        };
+    };
+
+    // create font texture and sampler
+    img_desc := SgImageDesc.zeroed();
+    img_desc.width = 256 * 8;
+    img_desc.height = Sdtx.max_fonts * 8;
+    img_desc.pixel_format = .R8;
+    img_desc.data.subimage&.index(0).index(0)[] = (ptr = u8.raw_from_ptr(_sdtx.font_pixels.ptr), size = _sdtx.font_pixels.len);
+    img_desc.label = "sdtx-font-texture".sym().c_str();
+    _sdtx.font_img = sg_make_image(img_desc&);
+    @debug_assert(_sdtx.font_img.id != SG_INVALID_ID);
+
+    smp_desc := SgSamplerDesc.zeroed();
+    smp_desc.min_filter = .NEAREST;
+    smp_desc.mag_filter = .NEAREST;
+    smp_desc.wrap_u = .CLAMP_TO_EDGE;
+    smp_desc.wrap_v = .CLAMP_TO_EDGE;
+    smp_desc.label = "sdtx-font-sampler".sym().c_str();
+    _sdtx.font_smp = sg_make_sampler(smp_desc&);
+    @debug_assert(SG_INVALID_ID != _sdtx.font_smp.id);
+
+    sg_pop_debug_group();
+    
+    init_context(_sdtx, _sdtx.default_context&, _sdtx.desc.context&);
+}
+
+// If you made multiple contexts, it's your job to destroy them.
+fn sdtx_shutdown(_sdtx: *Sdtx.Common) void = {
+    ::ptr_utils(Sdtx.Common);
+    @debug_assert(Sdtx.init_cookie == _sdtx.init_cookie);
+    if !_sdtx.default_context.common.is_null() {
+        destroy(_sdtx.default_context&);
+    };
+    sg_push_debug_group("sokol-debugtext");
+    sg_destroy_sampler(_sdtx.font_smp);
+    sg_destroy_image(_sdtx.font_img);
+    sg_destroy_shader(_sdtx.shader);
+    sg_pop_debug_group();
+    _sdtx.init_cookie = 0;
+}
+
+/* switch render layer */
+// ERRORS: if the command buffer is full (returns false)
+fn set_layer(ctx: *Sdtx.Context, layer_id: i32) bool = {
+    ctx.cur_layer_id = layer_id;
+    first_vertex: i32 = 0;
+    if cur_command(ctx) { cur_cmd |
+        if cur_cmd.num_vertices == 0 || cur_cmd.layer_id == layer_id {
+            // no vertices recorded in current draw command, or layer hasn't changed, can just reuse this
+            cur_cmd.layer_id = layer_id;
+            return(true);
+        };
+        // else, layer has changed, need to start a new draw command
+        first_vertex = cur_cmd.first_vertex + cur_cmd.num_vertices;
+        // fallthrough
+    }; 
+    // else, first draw command in frame
+    
+    next_cmd := next_command(ctx) || return(false);
+    next_cmd.layer_id = layer_id;
+    next_cmd.first_vertex = first_vertex;
+    next_cmd.num_vertices = 0;
+    true
+}
+
+/* (call inside sokol-gfx render pass) */
+fn draw_layer(ctx: *Sdtx.Context, layer_id: i32) void = {
+    _sdtx := ctx.common;
+    @debug_assert(Sdtx.init_cookie == _sdtx.init_cookie);
+    if(ctx.vertices.len <= 0 || ctx.commands.len <= 0, => return());
+    sg_push_debug_group("sokol-debugtext".sym().c_str());
+
+    if ctx.update_frame_id != ctx.frame_id {
+        ctx.update_frame_id = ctx.frame_id;
+        range: SgRange = (ptr = Sdtx.Vertex.raw_from_ptr(ctx.vertices.ptr), size = ctx.vertices.len * size_of(Sdtx.Vertex));
+        sg_update_buffer(ctx.vbuf, range&);
+    };
+
+    sg_apply_pipeline(ctx.pip);
+    bindings := SgBindings.zeroed();
+    bindings.vertex_buffers&[0] = ctx.vbuf;
+    bindings.fs.images&[0] = _sdtx.font_img;
+    bindings.fs.samplers&[0] = _sdtx.font_smp;
+    sg_apply_bindings(bindings&);
+    each(ctx.commands, fn(cmd) => if cmd.layer_id == layer_id {
+        @debug_assert(cmd.num_vertices.mod(6) == 0);
+        sg_draw(cmd.first_vertex, cmd.num_vertices, 1);
+    });
+    sg_pop_debug_group();
+}
+
+/* set a new virtual canvas size in screen pixels */
+fn canvas(ctx: *Sdtx.Context, w: f32, h: f32) void = {
+    @debug_assert(Sdtx.init_cookie == ctx.common.init_cookie);
+    @debug_assert(!is_nan(w));
+    @debug_assert(!is_nan(h));
+    @debug_assert(w > 0.0.cast() && h > 0.0.cast());
+    ctx.glyph_size.x = 8.0.cast() / w;
+    ctx.glyph_size.y = 8.0.cast() / h;
+    ctx.origin.x = 0.0.cast();
+    ctx.origin.y = 0.0.cast();
+    ctx.pos.x = 0.0.cast();
+    ctx.pos.y = 0.0.cast();
+}
+
+fn put(ctx: *Sdtx.Context, c: u8) void #inline =
+    if(c <= 32, => ctrl_char(ctx, c), => render_char(ctx, c));
+
+// does NOT append newline!
+fn put(ctx: *Sdtx.Context, str: CStr) void #inline = 
+    for(str, fn(chr) => put(ctx, chr));
+
+fn put(ctx: *Sdtx.Context, str: []u8) void #inline = 
+    for(str, fn(chr) => put(ctx, chr));
+
+fn pack_rgba(r: u8, g: u8, b: u8, a: u8) u32 = 
+    pack_rgba(r.zext(), g.zext(), b.zext(), a.zext());
+    
+fn pack_rgba(r: i64, g: i64, b: i64, a: i64) u32 = 
+    a.shift_left(24).bit_or(b.shift_left(16).bit_or(g.shift_left(8).bit_or(r))).trunc();
+
+fn pack_rgba(r: f64, g: f64, b: f64, a: f64) u32 = {
+    r := int(sdtx_clamp(r, 0.0, 1.0) * 255.0);
+    g := int(sdtx_clamp(g, 0.0, 1.0) * 255.0);
+    b := int(sdtx_clamp(b, 0.0, 1.0) * 255.0);
+    a := int(sdtx_clamp(a, 0.0, 1.0) * 255.0);
+    pack_rgbab(r, g, b, a)
+}
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+
+fn sdtx_clamp(v: f64, lo: f64, hi: f64) f64 #inline =
+    if(v < lo, => lo, if(v > hi, => hi, => v));
+
+// unpack linear 8x8 bits-per-pixel font data into 2D byte-per-pixel texture data
+fn unpack_font(font_desc: []u8, out_pixels: []u8) void #once = {
+    @debug_assert(256 * 8 == font_desc.len);
+    ptr := font_desc.ptr;
+    range(0, 255) { chr |
+        range(0, 8) { line |
+            bits: i64 = ptr[].zext();
+            ptr = ptr.offset(1);
+            range(0, 8) { x |
+                set := bits.shift_right_logical(7 - x).bit_and(1) == 1;
+                out_pixels[line*256*8 + chr*8 + x] = @if(set, 0xFF, 0x00);
+            };
+        };
+    };
+}
+
+
+fn ctrl_char(ctx: *Sdtx.Context, c: u8) void #once = {
+    ctx.pos.x = @switch(c) {
+        @case("\r".ascii()) => 0.0.cast();
+        @case("\n".ascii()) => {
+            ctx.pos.y += 1.0.cast();
+            0.0.cast()
+        };
+        @case("\t".ascii()) => (ctx.pos.x - fmodf(ctx.pos.x, ctx.tab_width)) + ctx.tab_width;
+        @case(" ".ascii())  => ctx.pos.x + 1.0.cast();
+        @default            => return();
+    };
+}
+
+fn next_vertex(ctx: *Sdtx.Context) ?*Sdtx.Vertex #inline = {
+    if(ctx.vertices.len + 6 > ctx.vertices.cap, => return(.None));
+    ctx.vertices.len += 6;
+    (Some = ctx.vertices.index(ctx.vertices.len - 6))
+}
+
+fn cur_command(ctx: *Sdtx.Context) ?*Sdtx.Command #inline = {
+    if(ctx.commands.len == 0, => return(.None));
+    (Some = ctx.commands.index(ctx.commands.len - 1))
+}
+
+fn next_command(ctx: *Sdtx.Context) ?*Sdtx.Command #inline = {
+    if(ctx.commands.len >= ctx.commands.cap, => return(.None));
+    ctx.commands.len += 1;
+    (Some = ctx.commands.index(ctx.commands.len - 1))
+}
+
+fn render_char(ctx: *Sdtx.Context, c: u8) void #once = {
+    if next_vertex(ctx) { vx | if cur_command(ctx) { cmd |
+        // update vertex count in current draw command
+        cmd.num_vertices += 6;
+
+        x0 := (ctx.origin.x + ctx.pos.x) * ctx.glyph_size.x;
+        y0 := (ctx.origin.y + ctx.pos.y) * ctx.glyph_size.y;
+        x1 := x0 + ctx.glyph_size.x;
+        y1 := y0 + ctx.glyph_size.y;
+
+        // glyph width and height in font texture space
+        // NOTE: the '+1' and '-2' fixes texture bleeding into the neighboring font texture cell
+        uvw: u16 = @as(i64) 0x10000 / 0x100;
+        uvh: u16 = @as(i64) 0x10000 / Sdtx.max_fonts;
+        u0: u16 = (c.zext() * uvw) + 1;
+        v0: u16 = (ctx.font.trunc() * uvh) + 1;
+        u1 := (u0 + uvw) - 2;
+        v1 := (v0 + uvh) - 2;
+        c := ctx.color;
+
+        // write 6 vertices
+        vx.x=x0; vx.y=y0; vx.u = u0; vx.v = v0; vx.color = c; vx = vx.offset(1);
+        vx.x=x1; vx.y=y0; vx.u = u1; vx.v = v0; vx.color = c; vx = vx.offset(1);
+        vx.x=x1; vx.y=y1; vx.u = u1; vx.v = v1; vx.color = c; vx = vx.offset(1);
+
+        vx.x=x0; vx.y=y0; vx.u = u0; vx.v = v0; vx.color = c; vx = vx.offset(1);
+        vx.x=x1; vx.y=y1; vx.u = u1; vx.v = v1; vx.color = c; vx = vx.offset(1);
+        vx.x=x0; vx.y=y1; vx.u = u0; vx.v = v1; vx.color = c; vx = vx.offset(1);
+    }};
+    ctx.pos.x += 1.0.cast();
+}
+
+fn check_desc(res: *Sdtx.Desc) void = {
+    c := res.context&;
+    @debug_assert(c.canvas_width > 0.0.cast());
+    @debug_assert(c.canvas_height > 0.0.cast());
+    @debug_assert(c.char_buf_size > 0);
+}
+
+fn rewind(ctx: *Sdtx.Context) void = {
+    ctx.frame_id += 1;
+    ctx.vertices.len = 0;
+    ctx.commands.len = 0;
+    set_layer(ctx, 0);
+    ctx.font = 0;
+    ctx.pos.x = 0.0.cast();
+    ctx.pos.y = 0.0.cast();
+}
+
+fn make_commit_listener(ctx: *Sdtx.Context) SgCommitListener = {
+    ctx.franca_dynamic_context = get_dynamic_context();
+    (user_data = Sdtx.Context.raw_from_ptr(ctx), func = fn(userdata: rawptr) void = {
+        if(userdata.is_null(), => return());
+        ctx := Sdtx.Context.ptr_from_raw(userdata);
+        set_dynamic_context(ctx.franca_dynamic_context);
+        rewind(ctx);
+    })
+}

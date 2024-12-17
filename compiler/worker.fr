@@ -1,6 +1,6 @@
 
 fn main_thread_pump(comp: CompCtx, shared: *CodegenShared, fns: []FuncId) void = {
-    a      := comp.get_alloc();
+    a      := libc_allocator; // TODO: comp.get_alloc();
     env    := comp.get_comptime_env();
     @assert(comp.get_build_options()[].implicit_context_runtime == env.static_context_var.is_none(), "should have baked the static context location already iff no implicit context");
     when := @if(shared.m.goal.type == .JitOnly, ExecStyle.Jit, .Aot);
@@ -135,7 +135,7 @@ codegen_queue_size :: if(use_threads, => 128, => 2);  // (this is not the number
 
 codegen_thread_main :: fn(shared: *CodegenShared) void = {
     @debug_assert(use_threads);
-    pthread_jit_write_protect_np(false);  // :JitMemProtect this thread wants to write
+    @if(shared.m.goal.type == .JitOnly) pthread_jit_write_protect_np(false);  // :JitMemProtect this thread wants to write
     
     idx := 0;
     @debug_assert(use_threads);
@@ -211,28 +211,30 @@ fn enqueue_task(shared: *CodegenShared, old_entry: *CodegenEntry) void = {
 }
 
 fn do_codegen(m: *QbeModule, entry: *CodegenEntry) void = {
+    logging := entry.logging;
+    entry.logging = "";
     context(DefaultContext)[].temporary_allocator = entry.arena&;
     @match(entry.task) {
         fn Dead() => panic("dead codegen task");
         fn Func(f) => {
-            @if(TRACE_SHIMS)
-            use_symbol(f.globals, f.lnk.id) { s | 
-                @println("codegen %", s.name);
-            };
-            f.globals.set_debug_types(entry.logging, true);
+            //@if(TRACE_SHIMS)
+            //use_symbol(f.globals, f.lnk.id) { s | 
+            //    @println("codegen %", s.name);
+            //};
+            f.globals.set_debug_types(logging, true);
             run_qbe_passes(f);
-            f.globals.set_debug_types(entry.logging, false);
+            f.globals.set_debug_types(logging, false);
         }
         fn Shim(it) => {
             m := it.f.globals;
-            @if(TRACE_SHIMS)
-            use_symbol(m, it.f.lnk.id) { s | 
-                @println("codegen(S) %", s.name);
-            };
+            //@if(TRACE_SHIMS)
+            //use_symbol(m, it.f.lnk.id) { s | 
+            //    @println("codegen(S) %", s.name);
+            //};
             
-            m.set_debug_types(entry.logging, true);
+            m.set_debug_types(logging, true);
             run_qbe_passes(it.f);
-            m.set_debug_types(entry.logging, false);
+            m.set_debug_types(logging, false);
             
             // The other guy's got slot points to us until it's ready. 
             jit_addr := rawptr.zeroed();
@@ -392,8 +394,8 @@ fn get_log_types(comp: CompCtx, fid: FuncId) Str = {
             return("P");
         };
     };
-    //panic("ICE: #log_ir was set but did not find tag on the function")
-    "P"  // HACK for @if(TRACE_SHIMS)
+    panic("ICE: #log_ir was set but did not find tag on the function")
+    //"P"  // HACK for @if(TRACE_SHIMS)
 }
 
 fn join_codegen_thread(shared: *CodegenShared) void = {
@@ -466,4 +468,10 @@ fn emit_constant(comp: CompCtx, m: *QbeModule, id: BakedVarId, out: *List(Qbe.Da
     };
     dat := next_dat();
     dat.type = .DEnd;
+}
+
+fn set_debug_types(m: *QbeModule, s: Str, value: bool) void = {
+   for s { c | 
+       m.debug[@as(i64) c.zext()] = value;
+   };
 }

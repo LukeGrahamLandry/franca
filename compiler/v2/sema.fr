@@ -237,9 +237,9 @@ fn compile_deref_place(self: *SelfHosted, place: *FatExpr, requested: ResultType
     @debug_assert(place.expr&.is(.Deref));
     arg := place.expr.Deref;
     // When you see a !deref, treat the expression as a pointer value.
-    if arg.expr&.is(.GetVar) && !want_deref {
+    if arg.expr&.is(.GetVar) && !want_deref && arg.expr.GetVar.kind != .Const {
         @check(self.compile_get_var(arg, requested, true)) return; // :?
-        @debug_assert(arg.expr&.is(.Deref), "compile_get_var should make &[]");
+        @debug_assert(arg.expr&.is(.Deref), "compile_get_var should make &[] not %", self.comp().log(arg));
     };
     req := requested.specific().map(fn(r) => self.ptr_type(r));
     @check(self.compile_expr(arg, req.want())) return;
@@ -1456,6 +1456,7 @@ fn contextual_field(self: *SelfHosted, name: Symbol, expr_out: *FatExpr, type: T
                     // We could create a StructLiteralP and let the backend deal with it, but we know the answer right now. 
                     // Note that this forces an extra case for :tagged_prims_hack
                     info := self.get_info(type);
+                    @debug_assert(info.is_sized, "unsized type for tagged contextual field");
                     size: i64 = info.stride_bytes.zext(); // TODO: allow yield on sizing here. 
                     bytes := 0x00.repeated(size, self.get_alloc());
                     assert(i <= 255, "TODO: giant ass @tagged"); 
@@ -3031,6 +3032,7 @@ fn do_merges(self: *SelfHosted, attempt: *OverloadAttempt) Maybe(void) = {
             continue :: local_return; 
             f_j -= 1;
             other_fid := attempt.options[f_j];
+            @debug_assert(other_fid != fid, "function appeared twice in overload set");
             other_func := self.get_function(other_fid);
             
             other_f_ty := other_func.finished_ty().expect("types to be infered");
@@ -3525,6 +3527,9 @@ fn ask_coerce_const_expr(self: *SelfHosted, expr: *FatExpr, want: Type, query: b
             };
         }
         fn void() => {
+            while => want_info.is(.Named) {
+                want_info = self.get_type(want_info.Named._0);
+            };
             @if_let(want_info) fn Struct(f) => {
                 each f.fields { f | 
                     if f.default.is_none() {
@@ -4208,8 +4213,7 @@ fn struct_type(self: *SelfHosted, pattern: *Pattern, is_union: bool) Maybe(Type)
         
         ty := or @check(self.infer_type(b.ty&)) return {
             default := @unwrap(b.default&.as_ref(), "@struct field without type requires default value.") return;
-            // TODO: :HACK
-            is_rec := default.expr&.is(.PrefixMacro) && default.expr.PrefixMacro.handler.ident() == (Some = Flag.rec.ident());
+            is_rec := is_rec_hack(default);
             ::if(Type);
             if is_rec {
                 self.get_or_create_type(Type)

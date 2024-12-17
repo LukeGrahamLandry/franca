@@ -466,63 +466,6 @@ fn HasLog($T: Type) void = {
     HasLog(Func);
 };
 
-///////////////////////////
-// TODO: should try to clean these up.
-
-// @err_assert(cond, "msg %", 123) return;
-fn err_assert(arg: FatExpr, ret: FatExpr) FatExpr #macro = {
-    loc := arg.loc;
-    arg := compile_ast(arg);
-    arg_err :: "@err_assert expected '(cond, fmt_string, args)'";
-    if arg.ty == bool {
-        arg = compile_ast(@{ (@[arg], "Assertion Failed") });
-    };
-    @ct_assert(arg.expr&.is(.Tuple), loc, arg_err);
-    parts := arg.expr.Tuple.items();
-    @ct_assert(parts.len >= 2, loc, arg_err);
-    @ct_assert(parts[1].ty == Str, loc, arg_err);
-    
-    if parts.len == 2 {
-        @{ 
-            if !@[parts[0]] {
-                @[ret](@err(@[parts[1]]));
-            };
-        }
-    } else {
-        @{
-            if !@[parts[0]] {
-                out: List(u8) = list(temp());
-                @[format_into(@{ out& }, parts.rest(1), arg.loc)];
-                @[ret](@err(out.items()));
-            };
-        }
-    }
-}
-
-fn unwrap(arg: FatExpr, ret: FatExpr) FatExpr #macro = {
-    loc := arg.loc;
-    arg := compile_ast(arg);
-    if arg.ty == bool {
-        arg = compile_ast(@{ (@[arg], "Assertion Failed") });
-    };
-    arg_err :: "@assert expected '(nullable, fmt_string, args)'";
-    @ct_assert(arg.expr&.is(.Tuple), loc, arg_err);
-    parts := arg.expr.Tuple.items();
-    @ct_assert(parts.len >= 2, loc, arg_err);
-    @ct_assert(parts[1].ty == Str, loc, arg_err);
-    
-    @{
-        cond := @[parts[0]];
-        if cond&.is_none() {
-            out: List(u8) = list(temp());
-            out&.push_all("Missing Value: ");
-            @[format_into(@{ out& }, parts.rest(1), arg.loc)];
-            @[ret](@err(out.items()));
-        };
-        cond.unwrap()
-    }
-}
-
 fn log_type(self: *SelfHosted, ty: Type) Str = {
     safe_rec: DynamicBitSet = empty(temp());
     out: List(u8) = list(temp()); 
@@ -783,32 +726,6 @@ fn report_error(self: *SelfHosted, err: *CompileError) Never = {
 fn has_fields(self: *SelfHosted, ty: Type) bool = {
     raw_container_ty := self.raw_type(ty);
     @is(self.get_type(raw_container_ty), .Struct, .Tagged)
-}
-
-fn update_main_span(err: *CompileError, new_loc: Span) void = {
-    @match(err) {
-        fn Msg(it) => {
-            if it.span.low == 0 && it.span.high == 0 {
-                it.span = new_loc;
-            };
-        }
-        fn TypeMismatch(it) => {
-            if it.span.low == 0 && it.span.high == 0 {
-                it.span = new_loc;
-            };
-        }
-        fn CoerceConst(it) => {
-            if it.span.low == 0 && it.span.high == 0 {
-                it.span = new_loc;
-            };
-        }
-        fn InvalidField(it) => {
-            if it.span.low == 0 && it.span.high == 0 {
-                it.span = new_loc;
-            };
-        }
-        @default => (); // TODO
-    };
 }
 
 fn show_error_line(self: *CodeMap, span: Span) void = {

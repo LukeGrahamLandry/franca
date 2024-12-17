@@ -14,11 +14,11 @@ You can still print out the ir as human readable text between passes and modify 
 - A library interface for producing and compiling ir in memory instead of outputting text and exec-ing a seperate program to process it.
   (in my brief profiling qbe -O2, it spends 40% of its time parsing the input text. i don't know how that's possible, maybe apple's fgetc is slow).
 - Generate machine code directly without depending on an external assembler (arm clang is so slow!).
-  Your program will contain only the finest organic bit patterns lovingly transcribed from the Arm Architecture Reference Manual.
+  Your program will contain only the finest organic bit patterns lovingly transcribed from the Arm Architecture Reference Manual
+  (or painfully scavenged from whatever amd tables i can find).
 - Jit compile your program and run it in memory without needing to emit/link an executable.
   You can freely call between jit and aot code (even extern-c code from other compilers) because they follow the same standard abi.
 - Emit Mach-O executables directly without depending on an external linker or make relocatable objects for linking with other languages.
-  (cannot yet make my own dynamic libraries)
 - Ad-hoc signetures for Mach-O binaries so you can target macOS without depending on Apple's `codesign` program.
 - Moved a bunch of static variables to a data structure we pass around explicitly
   so you can compile multiple modules on separate threads in parallel.
@@ -35,6 +35,9 @@ You can still print out the ir as human readable text between passes and modify 
   > but it lets you access instructions that we don't know about without calling convention spilling overhead.  
   > example use case: a c compiler implementing `__builtin_clzl` as a single instruction.
   > (not well tested because franca doesn't use it yet but it will likely be converted eventually).
+- simplified matching of amd64 addressing modes: instead of 1600 lines of ocaml implementing a dsl
+  with 150 lines of glue code to use the results, just write 150 lines of tedious code to solve the problem directly.
+- Removed support for thread locals. Franca achieves an equivilent by passing around an implicit env parameter.
 - Removed several codegen optimisations until we have a solid foundation (but I want to bring them back eventually).
   - all: load float constants from memory (instead of using int immediate + fmov)
   - arm: bit field immediate to load int more constants in a single instruction
