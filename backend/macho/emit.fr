@@ -1,11 +1,3 @@
-// this feels like a massive pain and i must be making it more complicated than it needs to be...
-// but consider that the Zig has ~18000 lines of dealing with mach-o files: 
-//  - https://github.com/ziglang/zig/tree/master/src/link/MachO
-//  - https://github.com/ziglang/zig/blob/master/src/link/MachO.zig
-// not at all a fair comparison, they do far more stuff, but the point remains. 
-
-// life is better if you're always 8 byte aligned. 
-
 //! 
 //! Mach-O is the object file format used by the XNU kernal (so macOS and iOS). 
 //! There are 3 types of Mach-O files we care about. 
@@ -48,6 +40,7 @@ WipSection :: @struct(
     flag: u32,
     offset_in_segment: i64,
     size: i64,
+    reserved2: u32 = 0,
 );
 
 text_padding :: SIZE_OF_STUBS + COMMANDS_SIZE_GUESS;
@@ -120,8 +113,12 @@ fn output_macho(m: *QbeModule) List([]u8) = {
         
         code_flag := ATTR_PURE_INSTRUCTIONS.bit_or(ATTR_SOME_INSTRUCTIONS);
         xx: WipSection = (name = "__text", flag = code_flag, offset_in_segment = COMMANDS_SIZE_GUESS + SIZE_OF_STUBS, size = chunks[1].len - SIZE_OF_STUBS - COMMANDS_SIZE_GUESS);
-        // apparently you're supposed to do reserved2 = 12 is the size of each stub (adrp, ldr, br). but it seems you don't need to.
-        yy: WipSection = (name = "__stubs", size = SIZE_OF_STUBS, flag = code_flag.bit_or(S_SYMBOL_STUBS), offset_in_segment = COMMANDS_SIZE_GUESS);
+        // apparently you're supposed to do reserved2 = 12 is the size of each stub (adrp, ldr, br). 
+        // the os doesn't care but you need it if you want to do `objdump --macho --indirect-symbols`
+        // size_of_one_stub: u32 = @if(m.goal.arch, 12, 6); //TODO: this needs to be a compile error :FUCKED
+        // ... but this still doesn't work. maybe i need to put shit in the other symbol table (that i only do for relocatable rn)? just the thing for imports is not enough.
+        size_of_one_stub: u32 = @if(m.goal.arch == .aarch64, 12, 6); 
+        yy: WipSection = (name = "__stubs", size = SIZE_OF_STUBS, flag = code_flag.bit_or(S_SYMBOL_STUBS), offset_in_segment = COMMANDS_SIZE_GUESS, reserved2 = size_of_one_stub);
         segments[1].sections = @slice(xx, yy);
         // TODO: do i need reserved1 set to something? maybe thats an offset into LC_SYMTAB? or maybe undefined_symbol_count, that seems more consistant in the binraries i checked. 
         xx: WipSection = (name = "__got", size = chunks[2].len, flag = S_NON_LAZY_SYMBOL_POINTERS, offset_in_segment = 0);
@@ -201,6 +198,7 @@ fn output_macho(m: *QbeModule) List([]u8) = {
                 c.alignment    = 3; // TODO
                 c.flag         = sec.flag;
                 c.size         = sec.size.bitcast();
+                c._reserved2   = sec.reserved2;
                 @assert(n_sections < e.load_commands.len, "TODO: too many sections");
                 e.load_commands[n_sections] = c;
                 e.relocations[n_sections] = list(temp());

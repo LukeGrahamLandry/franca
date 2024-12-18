@@ -1,4 +1,4 @@
-Detailed explanations of how to use each library is available in the `docs` folder.
+Detailed explanations of how to use each library are available in the `docs` folder.
 
 - debugtext: a simple ASCII text renderer using vintage home computer fonts
 

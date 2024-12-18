@@ -1,3 +1,16 @@
+## (Dec 17)
+
+- auto-cast float literals to f32 so you don't always need a `.cast()`
+- allow underscores in literals. `1_000_000_000` is more readable than `1000000000`
+- auto-cast string literals to CStr so you don't always need a `.sym().c_str()`
+- infer type of const fields on structs lazily so you don't need to use `@rec` as often to use them as namespaces. 
+- implement link_rename in from_bc/emit_ir for walk_dir on macos x64. works with -c + clang but segfaults with my own exe. sad day. 
+- fix x64 emit neg acting on the wrong register. that took much too long to find. ugh.
+
+> using a different computer. 
+> recall: `spctl developer-mode enable-terminal` -> Privacy Security Settings -> Developer Tools.
+> makes ./boot go from 19s to 10s.
+
 ## (Dec 16)
 
 - examples/softdraw can successfully make a window and draw stuff now that i have a jit backend that follows the abi correctly.

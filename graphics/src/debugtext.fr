@@ -1,9 +1,9 @@
 //! Simple ASCII debug text rendering on top of sokol_gfx.h
+//! See ../docs/debugtext.md for usage information. 
 //! Adapted from sokol_debugtext.h - https://github.com/floooh/sokol
 //! zlib/libpng license. Copyright (c) 2020 Andre Weissflog.
-//! See ../docs/debugtext.md for more information. 
 
-Sdtx :: @rec @struct(
+Sdtx :: @struct(
     max_fonts   :: 8, 
     init_cookie :: 0xACBAABCB,  // purposely different from the c version
     
@@ -11,11 +11,11 @@ Sdtx :: @rec @struct(
      * additional rendering contexts is useful if you want to render in
      * different sokol-gfx rendering passes, or when rendering several layers
      * of text. */
-    ContextDesc :: @rec @struct(
+    ContextDesc :: @struct(
         max_commands:  i32 = 4096,              // max number of draw commands, each layer transition counts as a command
         char_buf_size: i32 = 4096,              // max number of characters rendered in one frame
-        canvas_width:  f32 = 640.0.cast(),      // the initial virtual canvas width
-        canvas_height: f32 = 400.0.cast(),      // the initial virtual canvas height
+        canvas_width:  f32 = 640.0,             // the initial virtual canvas width
+        canvas_height: f32 = 400.0,             // the initial virtual canvas height
         tab_width:     i32 = 4,                 // tab width in number of characters
         color_format := SgPixelFormat.zeroed(), // color pixel format of target render pass
         depth_format := SgPixelFormat.zeroed(), // depth pixel format of target render pass
@@ -24,18 +24,18 @@ Sdtx :: @rec @struct(
     
     /* Describes the sokol-debugtext API initialization parameters. 
      * Passed to the sdtx_setup() function. */
-    Desc :: @rec @struct(
+    Desc :: @struct(
         fonts := Array([]u8, Sdtx.max_fonts).zeroed(), // up to 8 fonts descriptions. see "USING YOUR OWN FONT DATA" in docs for details. 
         context: Sdtx.ContextDesc,                     // the default context creation parameters
         allocator: Alloc,
     ),
     
-    Float2  :: @rec @struct(x: f32, y: f32),
-    Vertex  :: @rec @struct(x: f32, y: f32, u: u16, v: u16, color: u32),
-    Command :: @rec @struct(layer_id: i32, first_vertex: i32, num_vertices: i32),
+    Float2  :: @struct(x: f32, y: f32),
+    Vertex  :: @struct(x: f32, y: f32, u: u16, v: u16, color: u32),
+    Command :: @struct(layer_id: i32, first_vertex: i32, num_vertices: i32),
     
     // Set pos/origin/color/font to whatever you like before calling `put` to control how those characters are drawn. 
-    Context :: @rec @struct(
+    Context :: @struct(
         desc: Sdtx.ContextDesc,
         frame_id: u32,
         update_frame_id: u32,
@@ -46,6 +46,8 @@ Sdtx :: @rec @struct(
         font: i32,                // index into the fonts array
         cur_layer_id: i32,        // call set_layer instead of changing this directly (it needs to do some command buffer bookkeeping). 
         glyph_size: Sdtx.Float2,  // pixels per character grid unit
+        // origin looks useless because you could just offset all coordinates yourself, 
+        // but it allows you to control what happens when a new line or line feed control character sets pos.x = 0;
         origin: Sdtx.Float2,      // in character grid coordinates
         pos: Sdtx.Float2,         // in character grid coordinates
         tab_width: f32,
@@ -65,43 +67,40 @@ Sdtx :: @rec @struct(
         font_pixels: []u8,
     ),
     
-    // TODO: this and `sdtx_data` should be able to go directly in the struct. 
-    Data :: @rec @struct(
-        // Builtin fonts (you can provide your own as well).
-        font_kc853 :: sdtx_data.slice(0, 2048),
-        font_kc854 :: sdtx_data.slice(2048, 4096),
-        font_z1013 :: sdtx_data.slice(4096, 6144),
-        font_cpc   :: sdtx_data.slice(6144, 8192),
-        font_c64   :: sdtx_data.slice(8192, 10240),
-        font_oric  :: sdtx_data.slice(10240, 12288),
-        
-        // Precompiled shaders for each RenderBackend. 
-        vs_source_glsl410       :: sdtx_data.slice(12288, 12631),
-        fs_source_glsl410       :: sdtx_data.slice(12631, 12855),
-        vs_source_glsl300es     :: sdtx_data.slice(12855, 13156),
-        fs_source_glsl300es     :: sdtx_data.slice(13156, 13411),
-        vs_bytecode_metal_macos :: sdtx_data.slice(13411, 16303),
-        fs_bytecode_metal_macos :: sdtx_data.slice(16303, 19336),
-        vs_bytecode_metal_ios   :: sdtx_data.slice(19336, 22212),
-        fs_bytecode_metal_ios   :: sdtx_data.slice(22212, 25245),
-        vs_source_metal_sim     :: sdtx_data.slice(25245, 25822),
-        fs_source_metal_sim     :: sdtx_data.slice(25822, 26263),
-        vs_bytecode_hlsl4       :: sdtx_data.slice(26263, 26955),
-        fs_bytecode_hlsl4       :: sdtx_data.slice(26955, 27563),
-        vs_source_wgsl          :: sdtx_data.slice(27563, 28485),
-        fs_source_wgsl          :: sdtx_data.slice(28485, 29148),
-    ),
+    B :: include_bytes("graphics/data/debugtext.bin", 29148),
+    
+    // Builtin fonts (you can provide your own as well).
+    font_kc853 :: Sdtx.B.slice(0, 2048),
+    font_kc854 :: Sdtx.B.slice(2048, 4096),
+    font_z1013 :: Sdtx.B.slice(4096, 6144),
+    font_cpc   :: Sdtx.B.slice(6144, 8192),
+    font_c64   :: Sdtx.B.slice(8192, 10240),
+    font_oric  :: Sdtx.B.slice(10240, 12288),
+    
+    // Precompiled shaders for each RenderBackend. 
+    vs_source_glsl410       :: Sdtx.B.slice(12288, 12631),
+    fs_source_glsl410       :: Sdtx.B.slice(12631, 12855),
+    vs_source_glsl300es     :: Sdtx.B.slice(12855, 13156),
+    fs_source_glsl300es     :: Sdtx.B.slice(13156, 13411),
+    vs_bytecode_metal_macos :: Sdtx.B.slice(13411, 16303),
+    fs_bytecode_metal_macos :: Sdtx.B.slice(16303, 19336),
+    vs_bytecode_metal_ios   :: Sdtx.B.slice(19336, 22212),
+    fs_bytecode_metal_ios   :: Sdtx.B.slice(22212, 25245),
+    vs_source_metal_sim     :: Sdtx.B.slice(25245, 25822),
+    fs_source_metal_sim     :: Sdtx.B.slice(25822, 26263),
+    vs_bytecode_hlsl4       :: Sdtx.B.slice(26263, 26955),
+    fs_bytecode_hlsl4       :: Sdtx.B.slice(26955, 27563),
+    vs_source_wgsl          :: Sdtx.B.slice(27563, 28485),
+    fs_source_wgsl          :: Sdtx.B.slice(28485, 29148),
 );
-
-sdtx_data :: include_bytes("graphics/data/debugtext.bin", 29148);
 
 // fills in an empty `ctx` based on settings from `in_desc`.
 // ERRORS: if sg_add_commit_listener fails (returns false and text will not be rendered).
-fn init_context(_sdtx: *Sdtx.Common, ctx: *Sdtx.Context, in_desc: *Sdtx.ContextDesc) bool = {
-    sg_push_debug_group("sokol-debugtext".sym().c_str());
+fn init_context(sdtx: *Sdtx.Common, ctx: *Sdtx.Context, in_desc: *Sdtx.ContextDesc) bool = {
+    sg_push_debug_group("sokol-debugtext");
     ctx.desc = in_desc[];
-    ctx.common = _sdtx;
-    a := _sdtx.desc.allocator;
+    ctx.common = sdtx;
+    a := sdtx.desc.allocator;
     // NOTE: frame_id must be non-zero, so that updates trigger in first frame
     ctx.frame_id = 1;
 
@@ -113,7 +112,7 @@ fn init_context(_sdtx: *Sdtx.Common, ctx: *Sdtx.Context, in_desc: *Sdtx.ContextD
     vbuf_desc.size = ctx.vertices.cap * size_of(Sdtx.Vertex);
     vbuf_desc.type = .VERTEXBUFFER;
     vbuf_desc.usage = .STREAM;
-    vbuf_desc.label = "sdtx-vbuf".sym().c_str();
+    vbuf_desc.label = "sdtx-vbuf";
     ctx.vbuf = sg_make_buffer(vbuf_desc&);
     @debug_assert(ctx.vbuf.id != 0);
 
@@ -122,22 +121,26 @@ fn init_context(_sdtx: *Sdtx.Common, ctx: *Sdtx.Context, in_desc: *Sdtx.ContextD
     pip_desc.layout.attrs&[0].format = .FLOAT2;
     pip_desc.layout.attrs&[1].format = .USHORT2N;
     pip_desc.layout.attrs&[2].format = .UBYTE4N;
-    pip_desc.shader = _sdtx.shader;
+    pip_desc.shader = sdtx.shader;
     pip_desc.index_type = .NONE;
     pip_desc.sample_count = ctx.desc.sample_count;
     pip_desc.depth.pixel_format = ctx.desc.depth_format;
-    pip_desc.colors&[0].pixel_format = ctx.desc.color_format;
-    pip_desc.colors&[0].blend.enabled = true;
-    pip_desc.colors&[0].blend.src_factor_rgb = .SRC_ALPHA;
-    pip_desc.colors&[0].blend.dst_factor_rgb = .ONE_MINUS_SRC_ALPHA;
-    pip_desc.colors&[0].blend.src_factor_alpha = .ONE;
-    pip_desc.colors&[0].blend.dst_factor_alpha = .ZERO;
-    pip_desc.label = "sdtx-pipeline".sym().c_str();
+    pip_desc.colors&[0] = (
+        pixel_format = ctx.desc.color_format,
+        blend = (
+            enabled = true,
+            src_factor_rgb   = .SRC_ALPHA,
+            dst_factor_rgb   = .ONE_MINUS_SRC_ALPHA,
+            src_factor_alpha = .ONE,
+            dst_factor_alpha = .ZERO,
+        ),
+    );
+    pip_desc.label = "sdtx-pipeline";
     ctx.pip = sg_make_pipeline(pip_desc&);
     @debug_assert(ctx.pip.id != 0);
 
-    ctx.glyph_size.x = 8.0.cast() / ctx.desc.canvas_width;
-    ctx.glyph_size.y = 8.0.cast() / ctx.desc.canvas_height;
+    ctx.glyph_size.x = 8.0 / ctx.desc.canvas_width;
+    ctx.glyph_size.y = 8.0 / ctx.desc.canvas_height;
     ctx.tab_width = ctx.desc.tab_width.intcast().float().cast();
     ctx.color = 0xFF00FFFF;
 
@@ -155,7 +158,7 @@ fn destroy_context(ctx: *Sdtx.Context) void = {
     if !ctx.commands.ptr.is_null() {
         drop(ctx.vertices&, ctx.common.allocator);
     };
-    sg_push_debug_group("sokol_debugtext".sym().c_str());
+    sg_push_debug_group("sokol_debugtext");
     sg_destroy_buffer(ctx.vbuf);
     sg_destroy_pipeline(ctx.pip);
     sg_remove_commit_listener(sdtx_make_commit_listener(ctx));
@@ -163,48 +166,58 @@ fn destroy_context(ctx: *Sdtx.Context) void = {
     ctx[] = Sdtx.Context.zeroed();
 }
 
-fn sdtx_setup(_sdtx: *Sdtx.Common, desc: *Sdtx.Desc) void = {
-    check_desc(desc);
-    _sdtx[] = zeroed(Sdtx.Common);
-    _sdtx.init_cookie = Sdtx.init_cookie;
-    _sdtx.desc = desc[];
-    sg_push_debug_group("sokol-debugtext".sym().c_str());
+fn sdtx_setup(sdtx: *Sdtx.Common, desc: *Sdtx.Desc) void = {
+    c := desc.context&;
+    @debug_assert(c.canvas_width > 0.0);
+    @debug_assert(c.canvas_height > 0.0);
+    @debug_assert(c.char_buf_size > 0);
+    sdtx[] = zeroed(Sdtx.Common);
+    sdtx.init_cookie = Sdtx.init_cookie;
+    sdtx.desc = desc[];
+    sg_push_debug_group("sokol-debugtext");
 
     // TODO: sketchy. im using a newer version of debugtext than the rest of the stuff i have so these field names are from a different version than the shaders are. 
     //       but it seems fine so i guess it was just name changes. 
     
     // common shader for all contexts
     shd_desc := SgShaderDesc.zeroed();
-    shd_desc.label = "sokol-debugtext-shader".sym().c_str();
-    shd_desc.attrs&[0].name = "position".sym().c_str();
-    shd_desc.attrs&[1].name = "texcoord0".sym().c_str();
-    shd_desc.attrs&[2].name = "color0".sym().c_str();
-    shd_desc.attrs&[0].sem_name = "TEXCOORD".sym().c_str();
-    shd_desc.attrs&[0].sem_index = 0;
-    shd_desc.attrs&[1].sem_name = "TEXCOORD".sym().c_str();
-    shd_desc.attrs&[1].sem_index = 1;
-    shd_desc.attrs&[2].sem_name = "TEXCOORD".sym().c_str();
-    shd_desc.attrs&[2].sem_index = 2;
-    shd_desc.fs.images&[0].used = true;
-    shd_desc.fs.images&[0].image_type = ._2D;
-    shd_desc.fs.images&[0].sample_type = .FLOAT;
-    shd_desc.fs.samplers&[0].used = true;
-    shd_desc.fs.samplers&[0].sampler_type = .FILTERING;
-    shd_desc.fs.image_sampler_pairs&[0].used = true;
-    shd_desc.fs.image_sampler_pairs&[0].image_slot = 0;
-    shd_desc.fs.image_sampler_pairs&[0].sampler_slot = 0;
-    shd_desc.fs.image_sampler_pairs&[0].glsl_name = "tex_smp".sym().c_str();
-    choose_shader_impl(SOKOL_BACKEND, shd_desc&, Sdtx.Data);
-    _sdtx.shader = sg_make_shader(shd_desc&);
+    shd_desc.label = "sokol-debugtext-shader";
+    shd_desc.attrs&[0] = (glsl_name = "position",  hlsl_sem_name = "TEXCOORD", hlsl_sem_index = 0);
+    shd_desc.attrs&[1] = (glsl_name = "texcoord0", hlsl_sem_name = "TEXCOORD", hlsl_sem_index = 1);
+    shd_desc.attrs&[2] = (glsl_name = "color0",    hlsl_sem_name = "TEXCOORD", hlsl_sem_index = 2);
+    shd_desc.images&[0] = (
+        stage = .FRAGMENT, 
+        image_type = ._2D, 
+        sample_type = .FLOAT, 
+        hlsl_register_t_n = 0, 
+        msl_texture_n = 0, 
+        wgsl_group1_binding_n = 64,
+        multisampled = false,
+    );
+    shd_desc.samplers&[0] = (
+        stage = .FRAGMENT,
+        sampler_type = .FILTERING,
+        hlsl_register_s_n = 0,
+        msl_sampler_n = 0,
+        wgsl_group1_binding_n = 80,
+    );
+    shd_desc.image_sampler_pairs&[0] = (
+        stage = .FRAGMENT,
+        image_slot = 0,
+        sampler_slot = 0,
+        glsl_name = "tex_smp",
+    );
+    choose_shader_impl(SOKOL_BACKEND, shd_desc&, Sdtx);
+    sdtx.shader = sg_make_shader(shd_desc&);
     SG_INVALID_ID: u32 = 0;
-    @debug_assert(_sdtx.shader.id != SG_INVALID_ID);
+    @debug_assert(sdtx.shader.id != SG_INVALID_ID);
 
     // unpack font data
     unpacked_font_size :: 256 * 8 * 8;
-    _sdtx.font_pixels = desc.allocator.alloc(u8, Sdtx.max_fonts * unpacked_font_size);
+    sdtx.font_pixels = desc.allocator.alloc(u8, Sdtx.max_fonts * unpacked_font_size);
     range(0, Sdtx.max_fonts) { i |
-        font_desc := _sdtx.desc.fonts&[i];
-        out_pixels := _sdtx.font_pixels.slice(i * unpacked_font_size, (i + 1) * unpacked_font_size);
+        font_desc := sdtx.desc.fonts&[i];
+        out_pixels := sdtx.font_pixels.slice(i * unpacked_font_size, (i + 1) * unpacked_font_size);
         if font_desc.len != 0 {
             unpack_font(font_desc, out_pixels);
         } else {
@@ -217,38 +230,38 @@ fn sdtx_setup(_sdtx: *Sdtx.Common, desc: *Sdtx.Desc) void = {
     img_desc.width = 256 * 8;
     img_desc.height = Sdtx.max_fonts * 8;
     img_desc.pixel_format = .R8;
-    img_desc.data.subimage&.index(0).index(0)[] = (ptr = u8.raw_from_ptr(_sdtx.font_pixels.ptr), size = _sdtx.font_pixels.len);
-    img_desc.label = "sdtx-font-texture".sym().c_str();
-    _sdtx.font_img = sg_make_image(img_desc&);
-    @debug_assert(_sdtx.font_img.id != SG_INVALID_ID);
+    img_desc.data.subimage&.index(0).index(0)[] = (ptr = u8.raw_from_ptr(sdtx.font_pixels.ptr), size = sdtx.font_pixels.len);
+    img_desc.label = "sdtx-font-texture";
+    sdtx.font_img = sg_make_image(img_desc&);
+    @debug_assert(sdtx.font_img.id != SG_INVALID_ID);
 
     smp_desc := SgSamplerDesc.zeroed();
     smp_desc.min_filter = .NEAREST;
     smp_desc.mag_filter = .NEAREST;
     smp_desc.wrap_u = .CLAMP_TO_EDGE;
     smp_desc.wrap_v = .CLAMP_TO_EDGE;
-    smp_desc.label = "sdtx-font-sampler".sym().c_str();
-    _sdtx.font_smp = sg_make_sampler(smp_desc&);
-    @debug_assert(SG_INVALID_ID != _sdtx.font_smp.id);
+    smp_desc.label = "sdtx-font-sampler";
+    sdtx.font_smp = sg_make_sampler(smp_desc&);
+    @debug_assert(SG_INVALID_ID != sdtx.font_smp.id);
 
     sg_pop_debug_group();
     
-    init_context(_sdtx, _sdtx.default_context&, _sdtx.desc.context&);
+    init_context(sdtx, sdtx.default_context&, sdtx.desc.context&);
 }
 
 // If you made multiple contexts, it's your job to destroy them.
-fn sdtx_shutdown(_sdtx: *Sdtx.Common) void = {
+fn sdtx_shutdown(sdtx: *Sdtx.Common) void = {
     ::ptr_utils(Sdtx.Common);
-    @debug_assert(Sdtx.init_cookie == _sdtx.init_cookie);
-    if !_sdtx.default_context.common.is_null() {
-        destroy(_sdtx.default_context&);
+    @debug_assert(Sdtx.init_cookie == sdtx.init_cookie);
+    if !sdtx.default_context.common.is_null() {
+        destroy(sdtx.default_context&);
     };
     sg_push_debug_group("sokol-debugtext");
-    sg_destroy_sampler(_sdtx.font_smp);
-    sg_destroy_image(_sdtx.font_img);
-    sg_destroy_shader(_sdtx.shader);
+    sg_destroy_sampler(sdtx.font_smp);
+    sg_destroy_image(sdtx.font_img);
+    sg_destroy_shader(sdtx.shader);
     sg_pop_debug_group();
-    _sdtx.init_cookie = 0;
+    sdtx.init_cookie = 0;
 }
 
 /* switch render layer */
@@ -277,10 +290,10 @@ fn set_layer(ctx: *Sdtx.Context, layer_id: i32) bool = {
 
 /* (call inside sokol-gfx render pass) */
 fn draw_layer(ctx: *Sdtx.Context, layer_id: i32) void = {
-    _sdtx := ctx.common;
-    @debug_assert(Sdtx.init_cookie == _sdtx.init_cookie);
+    sdtx := ctx.common;
+    @debug_assert(Sdtx.init_cookie == sdtx.init_cookie);
     if(ctx.vertices.len <= 0 || ctx.commands.len <= 0, => return());
-    sg_push_debug_group("sokol-debugtext".sym().c_str());
+    sg_push_debug_group("sokol-debugtext");
 
     if ctx.update_frame_id != ctx.frame_id {
         ctx.update_frame_id = ctx.frame_id;
@@ -291,8 +304,8 @@ fn draw_layer(ctx: *Sdtx.Context, layer_id: i32) void = {
     sg_apply_pipeline(ctx.pip);
     bindings := SgBindings.zeroed();
     bindings.vertex_buffers&[0] = ctx.vbuf;
-    bindings.fs.images&[0] = _sdtx.font_img;
-    bindings.fs.samplers&[0] = _sdtx.font_smp;
+    bindings.images&[0] = sdtx.font_img;
+    bindings.samplers&[0] = sdtx.font_smp;
     sg_apply_bindings(bindings&);
     each(ctx.commands, fn(cmd) => if cmd.layer_id == layer_id {
         @debug_assert(cmd.num_vertices.mod(6) == 0);
@@ -306,13 +319,13 @@ fn canvas(ctx: *Sdtx.Context, w: f32, h: f32) void = {
     @debug_assert(Sdtx.init_cookie == ctx.common.init_cookie);
     @debug_assert(!is_nan(w));
     @debug_assert(!is_nan(h));
-    @debug_assert(w > 0.0.cast() && h > 0.0.cast());
-    ctx.glyph_size.x = 8.0.cast() / w;
-    ctx.glyph_size.y = 8.0.cast() / h;
-    ctx.origin.x = 0.0.cast();
-    ctx.origin.y = 0.0.cast();
-    ctx.pos.x = 0.0.cast();
-    ctx.pos.y = 0.0.cast();
+    @debug_assert(w > 0.0 && h > 0.0);
+    ctx.glyph_size.x = 8.0 / w;
+    ctx.glyph_size.y = 8.0 / h;
+    ctx.origin.x = 0.0;
+    ctx.origin.y = 0.0;
+    ctx.pos.x = 0.0;
+    ctx.pos.y = 0.0;
 }
 
 fn put(ctx: *Sdtx.Context, c: u8) void #inline =
@@ -336,13 +349,13 @@ fn pack_rgba(r: f64, g: f64, b: f64, a: f64) u32 = {
     g := int(sdtx_clamp(g, 0.0, 1.0) * 255.0);
     b := int(sdtx_clamp(b, 0.0, 1.0) * 255.0);
     a := int(sdtx_clamp(a, 0.0, 1.0) * 255.0);
-    pack_rgbab(r, g, b, a)
+    pack_rgba(r, g, b, a)
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////
 
 fn sdtx_clamp(v: f64, lo: f64, hi: f64) f64 #inline =
-    if(v < lo, => lo, if(v > hi, => hi, => v));
+    if(v < lo, => lo, => if(v > hi, => hi, => v));
 
 // unpack linear 8x8 bits-per-pixel font data into 2D byte-per-pixel texture data
 fn unpack_font(font_desc: []u8, out_pixels: []u8) void #once = {
@@ -360,16 +373,15 @@ fn unpack_font(font_desc: []u8, out_pixels: []u8) void #once = {
     };
 }
 
-
 fn ctrl_char(ctx: *Sdtx.Context, c: u8) void #once = {
     ctx.pos.x = @switch(c) {
-        @case("\r".ascii()) => 0.0.cast();
+        @case("\r".ascii()) => 0.0;
         @case("\n".ascii()) => {
-            ctx.pos.y += 1.0.cast();
-            0.0.cast()
+            ctx.pos.y += 1.0;
+            0.0
         };
         @case("\t".ascii()) => (ctx.pos.x - fmodf(ctx.pos.x, ctx.tab_width)) + ctx.tab_width;
-        @case(" ".ascii())  => ctx.pos.x + 1.0.cast();
+        @case(" ".ascii())  => ctx.pos.x + 1.0;
         @default            => return();
     };
 }
@@ -420,14 +432,7 @@ fn render_char(ctx: *Sdtx.Context, c: u8) void #once = {
         vx.x=x1; vx.y=y1; vx.u = u1; vx.v = v1; vx.color = c; vx = vx.offset(1);
         vx.x=x0; vx.y=y1; vx.u = u0; vx.v = v1; vx.color = c; vx = vx.offset(1);
     }};
-    ctx.pos.x += 1.0.cast();
-}
-
-fn check_desc(res: *Sdtx.Desc) void = {
-    c := res.context&;
-    @debug_assert(c.canvas_width > 0.0.cast());
-    @debug_assert(c.canvas_height > 0.0.cast());
-    @debug_assert(c.char_buf_size > 0);
+    ctx.pos.x += 1.0;
 }
 
 fn rewind(ctx: *Sdtx.Context) void = {
@@ -436,8 +441,8 @@ fn rewind(ctx: *Sdtx.Context) void = {
     ctx.commands.len = 0;
     set_layer(ctx, 0);
     ctx.font = 0;
-    ctx.pos.x = 0.0.cast();
-    ctx.pos.y = 0.0.cast();
+    ctx.pos.x = 0.0;
+    ctx.pos.y = 0.0;
 }
 
 fn make_commit_listener(ctx: *Sdtx.Context) SgCommitListener = {

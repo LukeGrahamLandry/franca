@@ -270,6 +270,7 @@ fn field_access_expr(self: *SelfHosted, container_ptr: *FatExpr, name: Symbol) M
             @debug_assert(f.layout_done);
             each f.fields { f | 
                 if f.name == name {
+                    @err_assert(f.kind != .Const, "Tried to access a const field (%) on an instance of a type instead of the type value itself.", self.pool.get(name)) return;
                     return(Ok = (f.byte_offset, f.ty));
                 };
             };
@@ -990,10 +991,23 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
         fn GetVar(var) => return(self.compile_get_var(expr, requested, false));
         fn GetNamed(n) => return(@err("Undeclared Identifier: %", self.pool.get(n[])));
         fn String(i) => {
-            // This is only different from a Value node because the 'Str' is not a builtin so the parser is unable to create it.
-            byte := self.get_or_create_type(u8);
+            // This cannot be a Value node because Str and CStr are not builtins so the parser is unable to create it.
+            // But also auto casting a random comptime known Str to a CStr would be sketchy because you don't know if it was mutable. 
+            
+            // Auto-cast to null terminated string. 
+            @if_let(requested) fn Specific(want) => {
+                env := self.env;
+                if env.c_str_type != UnknownType && env.c_str_type == want {
+                    str := self.to_values(CStr, self.pool.get_c_str(i[]));
+                    expr.set(str, env.c_str_type);
+                    return(.Ok);
+                };
+            };
+            
+            byte_type := self.get_or_create_type(u8);
+            str_type := @check(self.create_slice_type(byte_type, expr.loc)) return;
             str := self.to_values(Str, self.pool.get(i[]));
-            expr.set(str, @check(self.create_slice_type(byte, expr.loc)) return);
+            expr.set(str, str_type);
         }
         fn ConstEval(inner) => {
             // :PushConstFnCtx 
@@ -1439,6 +1453,9 @@ fn contextual_field(self: *SelfHosted, name: Symbol, expr_out: *FatExpr, type: T
                     @err_assert(f.kind == .Const, "struct contextual field must be constant. %", self.pool.get(f.name)) return;
                     default := @unwrap(f.default, "ICE: const field must have value") return;
                     value, ty := @check(self.find_const(default, f.ty.want())) return;
+                    if f.ty == UnknownType {
+                        f.ty = ty;
+                    };
                     expr_out.set(value, ty);
                     return(.Ok);
                 };
@@ -3589,11 +3606,11 @@ fn ask_coerce_const_expr(self: *SelfHosted, expr: *FatExpr, want: Type, query: b
             };
         }
         fn F64() => {
+            @err_assert(expr.expr&.is(.Value), "TODO: imm_eval const int cast") return;
+            value := expr.expr.Value.bytes&;
+            vf := f64.assume_cast(value)[];
             @match(want_info) {
                 fn Int(want_int) => {
-                    @err_assert(expr.expr&.is(.Value), "TODO: imm_eval const int cast") return;
-                    value := expr.expr.Value.bytes&;
-                    vf := f64.assume_cast(value)[];
                     v := vf.int();
                     if v.float() == vf {
                         min, max := want_int[].range();
@@ -3607,7 +3624,12 @@ fn ask_coerce_const_expr(self: *SelfHosted, expr: *FatExpr, want: Type, query: b
                     };
                 }
                 fn F32() => {
-                    // TODO
+                    v: f32 = vf.cast();
+                    // if v.cast() == vf {  // TODO: maybe you want this but it seems too strict to be usable
+                    // TODO: if vf < MAX_F32 && vf > MIN_F32 {
+                    if(query, => return(Ok = true));
+                    self.set(expr, f32, v);
+                    return(Ok = true);
                 }
                 @default => ();
             };
@@ -4212,13 +4234,16 @@ fn struct_type(self: *SelfHosted, pattern: *Pattern, is_union: bool) Maybe(Type)
         };
         
         ty := or @check(self.infer_type(b.ty&)) return {
-            default := @unwrap(b.default&.as_ref(), "@struct field without type requires default value.") return;
-            is_rec := is_rec_hack(default);
-            ::if(Type);
-            if is_rec {
-                self.get_or_create_type(Type)
+            if b.kind == .Const {
+                // When you have a field like `name :: some_complex_expression`, we don't want to force evaluate it now
+                // just to infer its type even if you don't reference it. the type doesn't matter because it has no runtime storage. 
+                UnknownType
             } else {
+                // We need to know the type before we can size the struct. 
+                default := @unwrap(b.default&.as_ref(), "@struct field without type requires default value.") return;
+                @err_assert(!is_rec_hack(default), "cannot use @rec on a non-constant value.") return;
                 @check(self.compile_expr(default, .None)) return;
+                b.ty = (Finished = default.ty);
                 default.ty
             }
         };
@@ -4226,7 +4251,7 @@ fn struct_type(self: *SelfHosted, pattern: *Pattern, is_union: bool) Maybe(Type)
         default: ?Var = .None;
         if b.default& { expr |
             v := self.unique_const(name);
-            self.scopes.put_constant(v, expr[], (Finished = ty));
+            self.scopes.put_constant(v, expr[], b.ty);
             default = (Some = v);
             expr.expr = (GetVar = v);  // Save our work because we might yield on a later field. 
         };

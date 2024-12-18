@@ -1,4 +1,4 @@
-#include_std("bindings/sokol.fr");
+#include_std("graphics/src/lib.fr");
 
 State :: @struct(
     pipe: SglPipeline,
@@ -9,6 +9,7 @@ State :: @struct(
     dy: f64,
     world: World,
     env: rawptr,
+    text: *Sdtx.Common,
 );
 
 World :: @struct(
@@ -89,10 +90,12 @@ do_init :: fn(userdata: rawptr) void = {
     desc.logger.func = slog_func;
     sgl_setup(desc&);
     
-    desc := SdtxDesc.zeroed();
-    desc.logger.func = slog_func;
-    desc.fonts&.as_ptr()[] = sdtx_font_kc854();
-    sdtx_setup(desc&);
+    desc: Sdtx.Desc = (
+        allocator = allocator,
+        context = (),
+    );
+    desc.fonts&[0] = Sdtx.font_kc854;
+    sdtx_setup(state.text, desc&);
     
     desc := SgPipelineDesc.zeroed();
     // This makes transperency work
@@ -109,7 +112,7 @@ do_init :: fn(userdata: rawptr) void = {
     
     state.pipe = sgl_make_pipeline(desc&);
     state.pass_action.colors&[0].load_action = .CLEAR;
-    state.pass_action.colors&[0].clear_value = (r = 0.3.cast(), g = 0.3.cast(), b = 0.3.cast(), a = 1.0.cast());
+    state.pass_action.colors&[0].clear_value = (r = 0.3, g = 0.3, b = 0.3, a = 1.0);
     
     state.world&.load_default_world();
     
@@ -156,19 +159,22 @@ do_render :: fn(userdata: rawptr) void = {
     sgl_defaults();
     sgl_viewport(0.intcast(), 0.intcast(), sapp_width(), sapp_height(), true);
     sgl_load_pipeline(state.pipe);
-    sdtx_color3f(0.0.cast(), 0.0.cast(), 1.0.cast());
-    sdtx_canvas(sapp_width().intcast().float().div(2.0).cast(), sapp_height().intcast().float().div(2.0).cast());
-    sdtx_pos(state.x.cast(), state.y.cast());
-    sdtx_puts("hello world".maybe_borrow_cstr(temp()));
-    sdtx_color3f(0.5.cast(), 0.5.cast(), 0.2.cast());
-    sdtx_pos(0, 0);
-    msg := @format("You have % rubles\0", state.world.money) temp();
-    sdtx_puts(@as(CStr) (ptr = msg.maybe_uninit.ptr));
+    sdtx := state.text.default_context&;
+    sdtx.color = pack_rgba(0.0, 0.0, 1.0, 1.0);
+    sdtx.canvas(sapp_width().intcast().float().div(2.0).cast(), sapp_height().intcast().float().div(2.0).cast());
+    sdtx.pos.x = state.x.cast();
+    sdtx.pos.y = state.y.cast();
+    sdtx.put("hello world");
+    sdtx.color = pack_rgba(0.5, 0.5, 0.2, 1.0);
+    sdtx.pos.x = 0.0;
+    sdtx.pos.y = 0.0;
+    sdtx.put(@tfmt("You have % rubles\0", state.world.money));
     
     if state.world.msg_timer > 0 {
-        sdtx_color3f(1.0.cast(), 0.5.cast(), 0.2.cast());
-        sdtx_pos(0, 1);
-        sdtx_puts(@as(CStr) (ptr = state.world.msg.maybe_uninit.ptr));
+        sdtx.color = pack_rgba(1.0, 0.5, 0.2, 1.0);
+        sdtx.pos.x = 0.0;
+        sdtx.pos.y = 1.0;
+        sdtx.put(state.world.msg.items());
     };
     sgl_begin_quads();
    
@@ -265,7 +271,7 @@ do_render :: fn(userdata: rawptr) void = {
     sg_begin_pass(desc&);
     
     sgl_draw();
-    sdtx_draw();
+    sdtx.draw_layer(0);
     
     sg_end_pass();
     sg_commit();
@@ -398,6 +404,7 @@ fn main() void = {
     println("Hello World");
     state := State.zeroed();
     state.env = get_dynamic_context();
+    state.text = allocator.box(@type state.text[]);
     desc := SappDesc.zeroed();
     desc.init_userdata_cb = do_init;
     desc.frame_userdata_cb = do_render;
@@ -449,9 +456,9 @@ fn driver(vtable: *ImportVTable) void #export = {
     
     c: CompCtx = (data = comp, vtable = vtable);
     m := init_default_module_dyn(vtable, (arch = get_comptime_arch(), os = .macos, type = .Relocatable));  // :HardcodeOs
-    ir_text := emit_qbe_included_dyn(m&, c&, @slice(main_f), .WrapMain, false);
+    ir_text := emit_qbe_included_dyn(m&, c&, @slice(main_f), .WrapMain, true);  // doesn't work with -legacy
     
-    out := open_trunc("farm.o".sym().c_str()).unwrap();
+    out := open_trunc("farm.o").unwrap();
     for(ir_text&){bucket|
         out&.write(bucket);
     };

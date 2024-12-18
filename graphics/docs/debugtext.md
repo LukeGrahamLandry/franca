@@ -33,12 +33,12 @@ STEP BY STEP
 
         sdtx_setup(&(sdtx_desc_t){
             .fonts = {
-                [0] = Sdtx.Data.font_kc853,
-                [1] = Sdtx.Data.font_kc854,
-                [2] = Sdtx.Data.font_z1013,
-                [3] = Sdtx.Data.font_cpc,
-                [4] = Sdtx.Data.font_c64,
-                [5] = Sdtx.Data.font_oric,
+                [0] = Sdtx.font_kc853,
+                [1] = Sdtx.font_kc854,
+                [2] = Sdtx.font_z1013,
+                [3] = Sdtx.font_cpc,
+                [4] = Sdtx.font_c64,
+                [5] = Sdtx.font_oric,
             }
         });
 
@@ -117,9 +117,9 @@ STEP BY STEP
 
         sdtx_origin(0.5f, 0.5f);
 
---- Optionally set a different font by calling:
+--- Optionally set a different font:
 
-        switch_font(ctx, font_index)
+    ctx.font = font_index;
 
     sokol-debugtext provides 8 font slots which can be populated
     with the builtin fonts or with user-provided font data, so
@@ -139,8 +139,8 @@ STEP BY STEP
         put(ctx, u8)             - output a single character
 
         put(ctx, CStr)           - output a null-terminated C string, note that
-                                    this will *not* append a newline (so it behaves
-                                    differently than the CRT's puts() function)
+                                   this will *not* append a newline (so it behaves
+                                   differently than the CRT's puts() function)
 
         put(ctx, Str)            - output a string (continuing past zero bytes)
 

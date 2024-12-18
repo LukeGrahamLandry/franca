@@ -3,11 +3,12 @@
   - AbiHackSpan
   - :InlineFoldHack `@if(::!T.has_pointers()`
   - fn zeroed
+  - .sym().c_str()
+  - `@rec` in backend/ir.fr and wasm/instructions:Wasm
 - more calling convention tests between jitted code and c.
 - make (logical not) an intrinsic
 - bring back lex error for unterminated comment.
 - `Illegal place expression: GetNamed` is not as helpful as "tried to assign to undeclared variable %"
-- precompiled driver programs
 - αcτµαlly pδrταblε εxεcµταblε
 - probably want to port the build stuff. https://github.com/jart/cosmopolitan/blob/master/tool/build/apelink.c
   i assume i can make it less complicated since i'm the one generating the thing in the first place?
@@ -16,7 +17,6 @@
 - unpack `a, b, c = call()` without declaring new variables
 - check that the keyword between block arguments is correct (ie `if a {| b } else {| c }` should require `else` not some other identifier),
   and use that as an argument name for overloading.
-- have string literals coerce to c strings instead of `.sym().c_str()`?
 - have a test where you force inline everything that's not recursive to stress test the backend dealing with large functions.
 - broke repro again. is there a certain size of program is doesn't like?
 - fix run_tests/qbe-jit and add that to CI
@@ -26,11 +26,10 @@
 - `Type Error` should tell you where the difference is! and use the right names for enums, etc.
 - `place expression expected pointer dereference` when you forget a `[]` after a call and field access should tell you that.
 - either fix new emit_ir run_tests naming or just change run_tests to generate a big file and compile it as its own thing.
-- underscores for large number literals. 1_000_000_000.
-- improve include_bytes and namespacing with @rec structs in sokol_debugtext
+- combine include_bytes and #include_std somehow
 - @match/@switch should just be @inline_match/@inline_switch if the thing is constant.
-- string literal auto decay to CStr
 - `fn fmodf(f32, f32) f32 #libc;` should treat them as types not arg names
+- try semaphores 
 
 ##
 
@@ -44,8 +43,6 @@
 - i still think wasi's kinda dumb but running the compiler in a browser would be very pleasing.
   tho i could just use blink https://trungnt2910.com/blink/blink.html
 - support loading driver from a dylib becuase you can't load the driver without a jit
-- more type safety in int vs float registers in jit backends would be nice.
-  also arm vs x86 register constants (they both have an sp but they're different numbers).
 - automated test that builds are still reproducible
 - default function arguments and mixed named/positional.
 - shims advanced version: don't comptime jit until the first time you call something. can't decide if thats too creepy.
@@ -54,14 +51,11 @@
 - try to give llvm less work to do. clean up first call to intrinsic/redirect (it hurts deduplication! i have a billon fn alloc now).
   would it help if i did less dumb inttoptr and add 0 for int constants?
 - be nicer about warning invalid arguments in examples/default_driver and compiler/first
-- think about sharing temp allocator when loading dylibs
 - clean up what goes in lib/build.fr vs lib/sys/fs.fr
 - instead of QbeIr+LlvmIr+X86AsmText, just have `IrText(type: Symbol, code: Symbol)`,
   so the compiler doesn't have to know about all backends.
   and then backends can just recognise whatever `type`s they want to support.
   have the `#asm` tag take a string argument.
-- really the compiler shouldn't know about `#test` but its convenient for debugging if i break run_tests.fr.
-  so maybe i need to be able to load driver from a dylib first.
 - parse zig headers and generate extern declarations (like examples/c_bindgen). then i could use bits of thier standard libary.
   they have a bunch of fun stuff that doesn't use use comptime in the api and im not interested in writing myself:
   http, hashing, random, zip, magic numbers for wasm/elf/dwarf/macho
@@ -100,7 +94,6 @@
 
 ## data structure changes
 
-wait until fully self hosted so its less painful because don't have to keep both sides in sync.
 (when compiling the compiler) need to seperate the ast types used for the comptime interfacing with the active compiler and the ones used internally by the new compiler.
 
 - 16 byte RsVec because address space is really 48 bits probable so 48 bit ptr and len and spread cap accross the upper 16 of each.
