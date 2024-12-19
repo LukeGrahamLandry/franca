@@ -211,7 +211,7 @@ FatExpr :: @rec @struct(
     ty: Type,
     done: bool,
 );
-PlaceholderValue :: @enum(i64) (AllZeros, Unknown, Label_DidYouReturnOutsideABlockLikeInAnExprFunction, Argument, OverloadSet, OnceUsed, PlaceholderUsed, InProgressMacro);
+PlaceholderValue :: @enum(i64) (AllZeros, Unknown, Label_DidYouReturnOutsideABlockLikeInAnExprFunction, Argument, OverloadSet, OnceUsed, PlaceholderUsed, InProgressMacro, EmptyBindingValue);
 Expr :: @tagged(
     Poison: PlaceholderValue,
     Value: @struct(bytes: Values, coerced: bool),
@@ -375,10 +375,15 @@ Pattern :: @struct(
     bindings: RsVec(Binding),
     loc: Span,
 );
+
+Annotations :: RsVec(Annotation);
+
 Binding :: @struct(
     name: Name,
     ty: LazyType,
-    default: ?FatExpr,
+    nullable_tag: *Annotations,
+    // Will be Poison.EmptyBindingValue if none was there (not the same as void value for explicit `name = ()`).    fn get_default
+    default: FatExpr,
     kind: VarType,
 );
 Name :: @tagged(
@@ -435,6 +440,14 @@ TypeInfo :: @tagged(
     void, // TODO: same as empty tuple but easier to type
     VoidPtr,
     Label: Type,
+    
+    // TODO: I'm not entirely sure this is a good idea.
+    // This has a stupid name because you shouldn't use it unless you really want it. 
+    // There's some small set of syntax that can be implemented this way while maintaining sanity. 
+    // ie. bit fields/flags, vector swizzling are convenient and I don't really want to make them language builtins. 
+    // but it's a very slippery slope into "every field access is a random function call and you can never tell what's happening SwiftUI hell".
+    // Also the more you use this, the slower your program probably compiles which is unfortunate. 
+    Swizzler: @struct(raw: Type, callback: FuncId),
 );
 
 IntTypeInfo :: @struct(
@@ -452,7 +465,9 @@ FnType :: @struct(
 Field :: @struct(
     name: Symbol,
     ty: Type,
-    default: ?Var,
+    nullable_tag: *Annotations,
+    // id will be zero if absent.     fn get_default
+    default: Var,
     byte_offset: i64, // TODO: make this optional so you can't forget to check if layout ready / field is constant? -- Jul 6
     kind: VarType,
 );
@@ -502,6 +517,13 @@ LinkRenameArg :: @struct(
     target: TargetEnv,
     out: *List(u8),
     old_name: Str,
+);
+
+SwizzlerEvent :: @struct(
+    program: CompCtx,
+    e: *FatExpr,
+    requested: *ResultType,
+    type: Type,
 );
 
 // This is the ir used by the compiler so you can write your own backends in your driver program if you want. 

@@ -1171,7 +1171,7 @@ fn emit_call_loop(self: *EmitIr, arg: *FatExpr) CRes(Qbe.Ref) #once = {
 fn construct_aggregate(self: *EmitIr, pattern: *Pattern, requested: Type, p: Placement) CRes(Qbe.Ref) #once = {
     if p&.is(.Discard) {
         each pattern.bindings& { b | 
-            @try(self.compile_expr(b.default&.unwrap(), .Discard)) return;
+            @try(self.compile_expr(b.get_default().unwrap(), .Discard)) return;
         };
         return(Ok = QbeNull);
     };
@@ -1185,12 +1185,12 @@ fn construct_aggregate(self: *EmitIr, pattern: *Pattern, requested: Type, p: Pla
             } else {
                 @debug_assert_eq(expected, pattern.bindings.len, "Cannot assign to type % with wrong field count", self.program.log(requested));
                 if expected == 1 {
-                    expr := pattern.bindings[0].default&.unwrap();
+                    expr := pattern.bindings.index(0).get_default().unwrap();
                     return(self.compile_expr(expr, p));
                 };
             };
             if expected == 1 {
-                return(self.compile_expr(pattern.bindings[0].default&.unwrap(), p));
+                return(self.compile_expr(pattern.bindings.index(0).get_default().unwrap(), p));
             };
             base := self.get_memory(p, raw_container_ty);
             enumerate pattern.bindings& { i, b | 
@@ -1199,7 +1199,7 @@ fn construct_aggregate(self: *EmitIr, pattern: *Pattern, requested: Type, p: Pla
                     return(@err("field name mismatch (ICE: should be checked by sema)"))
                 };
                 @debug_assert(field.kind != .Const, "cannot assign to const field");
-                expr := b.default&.unwrap();
+                expr := b.get_default().unwrap();
                 dest := self.offset(base, field.byte_offset);
                 _ := @try(self.compile_expr(expr, (Blit = dest))) return;
             };
@@ -1207,7 +1207,7 @@ fn construct_aggregate(self: *EmitIr, pattern: *Pattern, requested: Type, p: Pla
         }
         fn Tagged(f) => {
             @debug_assert_eq(pattern.bindings.len, 1, "@tagged must have one active varient");
-            value := pattern.bindings[0].default&.unwrap();
+            value := pattern.bindings.index(0).get_default().unwrap();
             name := pattern.bindings[0].name.unwrap();
             i    := f.cases.position(fn(f) => f._0 == name).expect("case name to exist in type");
             if value.ty == void {  // :get_or_create_type
@@ -1408,8 +1408,9 @@ fn get_aggregate(self: CompCtx, m: *CodegenShared, ty: Type) Qbe.Ref = {
             @fmt(l&, "T%", ty.as_index());
         };
         i := @match(type) {
-            fn Named(it)  => self.get_aggregate(m, it._0).val();
-            fn Enum(it)   => self.get_aggregate(m, it.raw).val();
+            fn Named(it)    => self.get_aggregate(m, it._0).val();
+            fn Enum(it)     => self.get_aggregate(m, it.raw).val();
+            fn Swizzler(it) => self.get_aggregate(m, it.raw).val();
             fn Struct(it) => {
                 yield :: local_return;
                 if repr_transparent(it) { repr |
@@ -1526,7 +1527,7 @@ fn as_field(self: CompCtx, m: *CodegenShared, ty: Type) Qbe.Field = {
     type := self.get_type(ty);
     @match(type) {
         fn F64()      => (type = .Fd, len = 8);
-        fn F32()      => (type = .Fd, len = 4);
+        fn F32()      => (type = .Fs, len = 4);
         fn Ptr(_)     => (type = .Fl, len = 8);
         fn FnPtr(_)   => (type = .Fl, len = 8);
         fn VoidPtr(_) => (type = .Fl, len = 8);
@@ -1535,6 +1536,7 @@ fn as_field(self: CompCtx, m: *CodegenShared, ty: Type) Qbe.Field = {
         fn Bool()     => (type = .Fb, len = 1);
         fn Named(it)  => self.as_field(m, it._0);
         fn Enum(it)   => self.as_field(m, it.raw);
+        fn Swizzler(it)   => self.as_field(m, it.raw);
         fn Int(it)    => @switch(it.bit_count) {
             @case(8)  => (type = .Fb, len = 1);
             @case(16) => (type = .Fh, len = 2);
@@ -1614,6 +1616,7 @@ fn load_op(self: CompCtx, ty: Type) Ty(Qbe.O, Qbe.Cls) = @match(self.get_type(ty
     fn Fn(_)     => (.loaduw, .Kw);
     fn Named(it) => self.load_op(it._0);
     fn Enum(it)  => self.load_op(it.raw);
+    fn Swizzler(it)  => self.load_op(it.raw);
     fn Bool()    => (.loadub, .Kw);
     fn Tagged(it) => {
         if self.is_tag_only(it) {
@@ -1647,6 +1650,7 @@ fn store_op(self: CompCtx, ty: Type) Qbe.O = @match(self.get_type(ty)) {
     fn Fn(_)     => .storew;
     fn Named(it) => self.store_op(it._0);
     fn Enum(it)  => self.store_op(it.raw);
+    fn Swizzler(it)  => self.store_op(it.raw);
     fn Bool()    => .storeb;
     fn Tagged(it) => {
         if !self.is_tag_only(it) {

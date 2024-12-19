@@ -1,28 +1,12 @@
-Detailed explanations of how to use each library are available in the `docs` folder.
+Franca ports of various things useful for creating cross platform graphical applications. 
 
+- Detailed explanations of how to use each library are available in the `docs` folder.
+- Some example programs can be found in the franca examples folder. 
+
+## Libraries
+
+> <https://github.com/floooh/sokol>  
+> zlib/libpng license. Copyright (c) 2018 Andre Weissflog
+
+- gl: OpenGL 1.x style immediate-mode rendering API
 - debugtext: a simple ASCII text renderer using vintage home computer fonts
-
-## Sokol License
-
-zlib/libpng license
-
-Copyright (c) 2020 Andre Weissflog
-
-This software is provided 'as-is', without any express or implied warranty.
-In no event will the authors be held liable for any damages arising from the
-use of this software.
-
-Permission is granted to anyone to use this software for any purpose,
-including commercial applications, and to alter it and redistribute it
-freely, subject to the following restrictions:
-
-1. The origin of this software must not be misrepresented; you must not
-   claim that you wrote the original software. If you use this software in a
-   product, an acknowledgment in the product documentation would be
-   appreciated but is not required.
-
-2. Altered source versions must be plainly marked as such, and must not
-   be misrepresented as being the original software.
-
-3. This notice may not be removed or altered from any source
-   distribution.

@@ -377,10 +377,10 @@ fn ensure_resolved_sign(self: *SelfHosted, fid: FuncId) Maybe(void) #inline = {
     inners(self, func)
 }
 
-fn ensure_resolved_body(self: *SelfHosted, fid: FuncId) Maybe(void) #inline = {
+fn ensure_resolved_body(self: *SelfHosted, fid: FuncId) Res(void) #inline = {
     func := self.get_function(fid);
     if(func.get_flag(.ResolvedBody), => return(.Ok));
-    innerb :: fn(self: *SelfHosted, func: *Func) Maybe(void) = {
+    innerb :: fn(self: *SelfHosted, func: *Func) Res(void) = {
         @try(self.resolve_sign(func)) return;
         @try(self.require_unique_fields(func.arg&)) return;
         func.set_flag(.ResolvedSign);
@@ -402,7 +402,7 @@ fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = 
     };
     
     @debug_assert(self.dispatch.function_in_progress&.get(fid.as_index()), "expected to do work on in progress function %", fid);
-    @check(self.ensure_resolved_body(fid)) return;
+    @try(self.ensure_resolved_body(fid)) return;
     
     // Before we can do the body, we really need to know the argument types, 
     // and it would be nice to know the return type too but that's less important. 
@@ -1365,7 +1365,7 @@ fn construct_struct_literal(self: *SelfHosted, expr: *FatExpr, requested: Result
                 field := or find_struct_field(f, name, i) {
                     return(@err("Tried to assign unknown field %", self.pool.get(name)))
                 };
-                value := or b.default&.as_ref() {
+                value := or b.get_default() {
                     return(@err("struct literal requires field value (use '=' not ':')"))
                 };
                 @err_assert(field.kind != .Const, "do not provide a value for a constant field") return;
@@ -1387,7 +1387,7 @@ fn construct_struct_literal(self: *SelfHosted, expr: *FatExpr, requested: Result
                         };
                     };
                     
-                    default := @unwrap(field.default, "Missing required field %", self.pool.get(field.name)) return;
+                    default := @unwrap(field.get_default(), "Missing required field %", self.pool.get(field.name)) return;
                     value, ty := @check(self.find_const(default, field.ty.want())) return;
                     expr := synthetic_ty((Value = (bytes = value, coerced = false)), pattern.loc, field.ty);
                     expr.done = true;
@@ -1397,8 +1397,9 @@ fn construct_struct_literal(self: *SelfHosted, expr: *FatExpr, requested: Result
                         i,
                         (
                             name = (Ident = field.name),
-                            ty = (Finished = ty),
-                            default = (Some = expr),
+                            ty = (Finished = ty), 
+                            nullable_tag = zeroed(*Annotations),
+                            default = expr,
                             kind = .Var,
                         ),
                         self.get_alloc()
@@ -1421,7 +1422,7 @@ fn construct_struct_literal(self: *SelfHosted, expr: *FatExpr, requested: Result
             each f.cases& { f |
                 if f._0 == name {
                     ::as_ref(FatExpr);
-                    value := @unwrap(b.default&.as_ref(), "struct literal needs value") return;
+                    value := @unwrap(b.get_default(), "struct literal needs value") return;
                     @check(self.compile_expr(value, (Specific = f._1))) return;
                     @check(self.can_assign(f._1, value.ty)) return;
                     expr.done = value.done;
@@ -1451,7 +1452,7 @@ fn contextual_field(self: *SelfHosted, name: Symbol, expr_out: *FatExpr, type: T
             enumerate f.fields { i, f | 
                 if f.name == name {
                     @err_assert(f.kind == .Const, "struct contextual field must be constant. %", self.pool.get(f.name)) return;
-                    default := @unwrap(f.default, "ICE: const field must have value") return;
+                    default := @unwrap(f.get_default(), "ICE: const field must have value") return;
                     value, ty := @check(self.find_const(default, f.ty.want())) return;
                     if f.ty == UnknownType {
                         f.ty = ty;
@@ -1488,6 +1489,7 @@ fn contextual_field(self: *SelfHosted, name: Symbol, expr_out: *FatExpr, type: T
             @err("contextual field % not found for %", self.pool.get(name), self.log_type(type))
         }
         fn Named(f) => self.contextual_field(name, expr_out, f._0);
+        
         @default => @err("no contextual fields for type % (wanted %)", self.log_type(type), self.pool.get(name));
     }
 }
@@ -1784,7 +1786,7 @@ fn quick_guess_type(self: *SelfHosted, expr: *FatExpr) ?Type = {
 // Replace a call expr with the body of the target function.
 fn emit_capturing_call(self: *SelfHosted, f: FuncId, expr_out: *FatExpr, requested: ResultType) Maybe(bool) #once = {
     @log_event("emit_capturing_call %", f) self;
-    @check(self.ensure_resolved_body(f)) return; // it might not be a closure. it might be an inlined thing.
+    @try(self.ensure_resolved_body(f)) return; // it might not be a closure. it might be an inlined thing.
     @debug_assert(expr_out.expr&.is(.Call));
     arg_expr := expr_out.expr.Call.arg;
     
@@ -2059,7 +2061,7 @@ fn curry_const_args(self: *SelfHosted, original_f: FuncId, f_expr: *FatExpr, arg
         @debug_assert_eq(func.get_flag(.AllowRtCapture), func.get_flag(.ResolvedBody));
     } else {
         @check(self.ensure_resolved_sign(original_f)) return;
-        @check(self.ensure_resolved_body(original_f)) return;
+        @try(self.ensure_resolved_body(original_f)) return;
     };
     
     // Some part of the argument must be known at comptime.
@@ -2074,7 +2076,7 @@ fn curry_const_args(self: *SelfHosted, original_f: FuncId, f_expr: *FatExpr, arg
     new_fid := self.add_function(new_func);
     @log_event("bake const args % -> %", original_f, new_fid) self;
     @check(self.ensure_resolved_sign(new_fid)) return;
-    @check(self.ensure_resolved_body(new_fid)) return;
+    @try(self.ensure_resolved_body(new_fid)) return;
     //@println("%", self.get_function(new_fid).log(self));
     // TODO: mark func as in progress somehow so nobody can yield on it. 
     //       tho really i feel like you want to make this whole operation yield-able,
@@ -2452,9 +2454,9 @@ fn adjust_named_arguments(self: *SelfHosted, fid: FuncId, arg_expr: *FatExpr) Re
             each f.bindings { found | 
                 found_name := @unwrap(found.ident(), "TODO: mixed named and un-named args are not supported yet") return;
                 if found_name == want_name {
-                    value := @unwrap(found.default, "use '=' not ':' for named arg") return;
+                    value := @unwrap(found.get_default(), "use '=' not ':' for named arg") return;
                     @err_assert(args.len == i, "TODO: out of order named args are not supported yet") return;
-                    args&.push(value);
+                    args&.push(value[]);
                     continue();
                 };
             };
@@ -3027,7 +3029,7 @@ fn do_merges(self: *SelfHosted, attempt: *OverloadAttempt) Maybe(void) = {
         };
         @check(self.infer_arguments(opt)) return;
         @check(self.infer_return(opt)) return;
-        @check(self.ensure_resolved_body(opt)) return;
+        @try(self.ensure_resolved_body(opt)) return;
         @check(self.emit_special_body(opt)) return;
         func.set_flag(.EnsuredCompiled);
     };
@@ -3549,7 +3551,7 @@ fn ask_coerce_const_expr(self: *SelfHosted, expr: *FatExpr, want: Type, query: b
             };
             @if_let(want_info) fn Struct(f) => {
                 each f.fields { f | 
-                    if f.default.is_none() {
+                    if f.get_default().is_none() {
                         // TODO: better error message
                         //return(@err("had non-default fields (or if it's a call: expected function args) (or if its a block expected non-void return)"));
                         return(Ok = false);
@@ -4230,7 +4232,7 @@ fn struct_type(self: *SelfHosted, pattern: *Pattern, is_union: bool) Maybe(Type)
         name := b.ident().expect("field name");
         if b.kind == .Const {
             const_field_count += 1;
-            if(b.default.is_none(), => return(@err("constant field % must have a value.", self.pool.get(name))));
+            if(b.get_default().is_none(), => return(@err("constant field % must have a value.", self.pool.get(name))));
         };
         
         ty := or @check(self.infer_type(b.ty&)) return {
@@ -4240,7 +4242,7 @@ fn struct_type(self: *SelfHosted, pattern: *Pattern, is_union: bool) Maybe(Type)
                 UnknownType
             } else {
                 // We need to know the type before we can size the struct. 
-                default := @unwrap(b.default&.as_ref(), "@struct field without type requires default value.") return;
+                default := @unwrap(b.get_default(), "@struct field without type requires default value.") return;
                 @err_assert(!is_rec_hack(default), "cannot use @rec on a non-constant value.") return;
                 @check(self.compile_expr(default, .None)) return;
                 b.ty = (Finished = default.ty);
@@ -4248,16 +4250,18 @@ fn struct_type(self: *SelfHosted, pattern: *Pattern, is_union: bool) Maybe(Type)
             }
         };
         
-        default: ?Var = .None;
-        if b.default& { expr |
+        default := if b.get_default() { expr |
             v := self.unique_const(name);
             self.scopes.put_constant(v, expr[], b.ty);
-            default = (Some = v);
             expr.expr = (GetVar = v);  // Save our work because we might yield on a later field. 
+            v
+        } else {
+            zeroed(Var)
         };
         fields&.push(
             name = name,
             ty = ty,
+            nullable_tag = b.nullable_tag,
             default = default,
             byte_offset = 99999999999,
             kind = b.kind,
@@ -4321,10 +4325,10 @@ fn enum_macro(self: *SelfHosted, arg: *FatExpr, target: *FatExpr) Maybe(FatExpr)
         fn StructLiteralP(pattern) => {
             each pattern.bindings { b | 
                 name := @unwrap(b.ident(), "@enum case requires name") return;
-                @err_assert(b.default.is_some(), "@enum expected case value") return;
+                @err_assert(b.get_default().is_some(), "@enum expected case value") return;
                 @err_assert(b.ty&.is(.Infer), "@enum case cannot have type annotation (use '=' instead of ':'") return;
 
-                expr := b.default&.as_ref().expect("enum value");
+                expr := b.get_default().expect("enum value");
                 val  := @check(self.immediate_eval_expr(expr, type)) return;
                 if sequential {
                     current := @try(val&.int_value(as_int.expect("int"))) return;
@@ -4368,7 +4372,7 @@ fn tagged_macro(self: *SelfHosted, cases_expr: *FatExpr) Maybe(FatExpr) = {
     enumerate pattern.bindings { i, b |
         // TODO: allow as default so you can use .Name like you can with void?
         //       then need to store default in TypeInfo::Tagged as well. -- Jul 5
-        @err_assert(b.default.is_none(), "use ':' not '=' with @tagged") return;
+        @err_assert(b.get_default().is_none(), "use ':' not '=' with @tagged") return;
         type := @check(self.infer_type(b.ty&)) return;
         type := or type {
             // @tagged(s: i64, n) is valid and infers n as void.

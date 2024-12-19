@@ -1,0 +1,98 @@
+//! Warning: This is extremely limited to the point of being mostly useless!
+//! Eventually I want to make this a more serious target that supports a useful subset of the language. 
+//! But for now I just need trivial math for debugtext/gl. 
+
+float4 :: @struct(xyzw: Array(f32, 4));
+float2 :: @struct(xy: Array(f32, 2));
+
+// This must be called at comptime! 
+fn compile_to_shader_source(fid: FuncId, backend: RenderBackend, is_vertex: bool) Str = {
+    ::enum(RenderBackend);
+    ::tagged(FuncImpl);
+    @assert(backend == .METAL_MACOS, "TODO: support non-metal shader languages");
+    func := get_function_ast(fid, true, true, false, false);
+    l := func.loc;
+    @ct_assert(func.body&.is(.Normal), l, "expected normal expr function body for shader");
+    expr := func.body.Normal&;
+    debug_log_func(func);
+    out_type := const_eval(Type)(func.ret.PendingEval);
+    func.ret = (Finished = out_type);
+    expr.ty = out_type;
+    debug_log_type(out_type);
+    self: Translate = (stmts = list(ast_alloc()));
+    self.stmts&.push_all("#include <metal_stdlib>\n#include <simd/simd.h>\nusing namespace metal;\n\n");
+    result := msl_expr(self&, expr);
+    @fmt(self.stmts&, "    return %;\n", result);
+    self.stmts.items()
+}
+
+Translate :: @struct(
+    stmts: List(u8),
+    next_var: i64 = 0,
+);
+
+fn msl_declare(self: *Translate, info: *TypeInfo) Str = {
+    ""
+}
+
+#include_std("compiler/ast_external.fr");
+
+fn msl_expr(self: *Translate, e: *FatExpr) Str = {
+    @match(e.expr&) {
+        fn StructLiteralP(it) => {
+            v := @tfmt("v%", self.next_var);
+            self.next_var += 1;
+            @fmt(self.stmts&, "    T % = {};\n", v);
+            each it.bindings& { b |
+                value := b.get_default().expect("value for struct literal");
+                value := self.msl_expr(value);
+                name  := b.ident().expect("field name for struct literal").str();
+                @fmt(self.stmts&, "    %.% = %;\n", v, name, value);
+            };
+            v
+        }
+        fn Value(it) => {
+            if e.ty == f64 {
+                v: f64 = bitcast(it.bytes.Small._0);
+                return(@tfmt("%.0", v));  // TODO: correct fractional part
+            };
+            "??"
+        }
+        fn GetVar(it)      => str(it.name);
+        fn GetNamed(it)    => str(it[]);
+        fn FieldAccess(it) => @tfmt("%.%", self.msl_expr(it.container), it.name.str());
+        fn Call(it) => {
+            f := self.msl_expr(it.f);
+            @switch(f) {
+                @case("neg") => @tfmt("-%", self.msl_expr(it.arg));
+                @case("add") => self.binary("+", it.arg);
+                @case("sub") => self.binary("-", it.arg);
+                @case("mul") => self.binary("*", it.arg);
+                @case("div") => self.binary("/", it.arg);
+                @default => @tfmt("%(%)", f, self.msl_expr(it.arg));
+            }
+        }
+        fn Tuple(it) => {
+            // No outer brackets. Only allowed in as outer argument to a call.
+            out := u8.list(temp());
+            prefix := "";
+            each it { it |
+                @fmt(out&, "%%", prefix, self.msl_expr(it));
+                prefix = ", ";
+            };
+            out.items()
+        }
+        @default => {
+            debug_log_ast(e[]);
+            compile_error("unhandled expression type in shader", e.loc)
+        };
+    }
+}
+
+fn binary(self: *Translate, op: Str, arg: *FatExpr) Str = {
+    parts := arg.expr.Tuple&;
+    @ct_assert(arg.expr&.is(.Tuple) && parts.len == 2, arg.loc, "operator % expected two arguments", op);
+    a0 := self.msl_expr(parts.index(0));
+    a1 := self.msl_expr(parts.index(1));
+    @tfmt("(% % %)", a0, op, a1)
+}

@@ -33,12 +33,12 @@ STEP BY STEP
 
         sdtx_setup(&(sdtx_desc_t){
             .fonts = {
-                [0] = Sdtx.font_kc853,
-                [1] = Sdtx.font_kc854,
-                [2] = Sdtx.font_z1013,
-                [3] = Sdtx.font_cpc,
-                [4] = Sdtx.font_c64,
-                [5] = Sdtx.font_oric,
+                [0] = Sdtx.font.kc853,
+                [1] = Sdtx.font.kc854,
+                [2] = Sdtx.font.z1013,
+                [3] = Sdtx.font.cpc,
+                [4] = Sdtx.font.c64,
+                [5] = Sdtx.font.oric,
             }
         });
 
@@ -102,20 +102,18 @@ STEP BY STEP
     Do *not* use integer math here, since this will not look nice
     when the render target size isn't divisible by 2.
 
---- Optionally define the origin for the character grid with:
-
-        sdtx_origin(x, y);
+--- Optionally define the origin for the character grid. 
 
     The provided coordinates are in character grid cells, not in
     virtual canvas pixels. E.g. to set the origin to 2 character tiles
     from the left and top border:
 
-        sdtx_origin(2, 2);
+        ctx.origin = (x = 2.0, y = 2.0);
 
     You can define fractions, e.g. to start rendering half
     a character tile from the top-left corner:
 
-        sdtx_origin(0.5f, 0.5f);
+        ctx.origin = (x = 0.5, y = 0.5);
 
 --- Optionally set a different font:
 
@@ -224,7 +222,7 @@ and can be used interchangeably with contexts you create later.
 
 To destroy a context, call:
 
-    destroy_context(ctx)
+    destroy(ctx)
 
 Do not attemp to use a context after destroying it. 
 
@@ -274,4 +272,24 @@ init_context and set_layer return false if an error occurred.
 LICENSE
 =======
 zlib/libpng license
+
 Copyright (c) 2020 Andre Weissflog
+
+This software is provided 'as-is', without any express or implied warranty.
+In no event will the authors be held liable for any damages arising from the
+use of this software.
+
+Permission is granted to anyone to use this software for any purpose,
+including commercial applications, and to alter it and redistribute it
+freely, subject to the following restrictions:
+
+1. The origin of this software must not be misrepresented; you must not
+   claim that you wrote the original software. If you use this software in a
+   product, an acknowledgment in the product documentation would be
+   appreciated but is not required.
+
+2. Altered source versions must be plainly marked as such, and must not
+   be misrepresented as being the original software.
+
+3. This notice may not be removed or altered from any source
+   distribution.

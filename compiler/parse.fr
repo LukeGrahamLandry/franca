@@ -1,24 +1,4 @@
-//! This is sizeable chunk of the most boring smooth brain code. 
-//! But it's easier to reason about than using some parser generator thing and doesn't involve taking a hefty dependency. 
-//! Exactly zero of the problems I've faced writing a self-hosted compiler were that the bootstrapping process was **too simple**. 
-
-// For reference, the rust one was 1100 loc (without math operators).
-
-// TODO: make the language less clunky
-// - less verbose if let/let else? think about how to express with a macro. 
-// - auto coerce payload to enum when branches aren't ambigous? maybe? thats a bit creepy. doing it for unit when you just forget to return something would be bad. 
-// - default function arguments because 'self.parse_expr(Prec.None)' and symmetry with structs. 
-// - its probably a bad thing that im choosing when to factor out functions based on "not enough bits to refer to all slots",
-//   obviously a crippling compiler bug (my asm backend only) but perhaps implies a style problem on my part.
-// - same problem i had in rust. its really annoying that you have to pass the pool to print things because it makes debugging that way more clunky.
-//   could have an implicit context system? crippling that you can't just derive print normal things. 
-// - track all the errors you hit when failing overloads. 
-//
-// - local_return and return implciitly rebinding is a bit confusing
-//
-
 // TODO: everywhere i @report_error(_)(_ self.last.span) after just peek not pop will have the error in the wrong place. -- Jun 25
-
 // TODO: :SLOW im doing so many silly copies and also need to actually enforce tailcalls on llvm (right now i might be preventing them with ccc even on internal functions!).  -- Jun 21
 
 ParseTask :: @tagged(
@@ -284,7 +264,7 @@ fn ident_list_to_pattern(self: *Parser, idents: *RsVec(FatExpr), loc: Span) Resu
     bindings: List(Binding) = list(idents.len, self.alloc);
     each idents { expr | 
         @match(expr.expr&) {
-            fn GetNamed(name) => bindings&.push((name = (Ident = name[]), ty = .Infer, default = .None, kind = .Var));
+            fn GetNamed(name) => bindings&.push((name = (Ident = name[]), ty = .Infer, nullable_tag = zeroed(*Annotations), default = binding_missing_default(), kind = .Var));
             @default => @report_error("destructuring statment requires tuple with all expressions being single identifier. ") (return, expr.loc);
         };
     };
@@ -341,7 +321,7 @@ fn parse_prefix(self: *Parser, prec: Prec) ParseRes = {
         fn LeftParen() => {
             // we're a prefix, so this is NOT a call. 
             self.pop();
-            e := @try(self.parse_tuple()) return;
+            e := @try(self.parse_tuple(.RightParen)) return;
             (Ok = e)
         }
         fn FatRightArrow() => {
@@ -513,7 +493,7 @@ fn parse_at(self: *Parser, prec: Prec) ParseRes = {
     
     ::if(*FatExpr);
     arg := if self.maybe(.LeftParen) {
-        self.box(@try(self.parse_tuple()) return)
+        self.box(@try(self.parse_tuple(.RightParen)) return)
     } else {
         self.box(self.raw_unit(loc))
     };
@@ -535,7 +515,7 @@ fn parse_infix(self: *Parser, prev: FatExpr, prec: Prec) ParseRes = {
                 @report_error("call expression cannot span multiple lines. the function and the left paren must be on the same line.") (return, self.last.span);
             };
             self.pop();
-            arg := @try(self.parse_tuple()) return;
+            arg := @try(self.parse_tuple(.RightParen)) return;
             call := self.expr_call(prev, arg);
             self.parse_infix(call, prec.with(.Suffix))
         }
@@ -569,12 +549,7 @@ fn parse_infix(self: *Parser, prev: FatExpr, prec: Prec) ParseRes = {
         fn LeftSquare() => {
             loc := self.last.span;
             self.pop();
-            index := @try(self.parse_expr(Prec_None)) return;
-            
-            closing := self.pop();
-            if !closing&.is(.RightSquare) {
-                @report_error("expected ']' after index expression ") (return, self.last.span);
-            };
+            index := @try(self.parse_tuple(.RightSquare)) return;
             
             // This was the same speed but i think its uglier. 
             // e := self.bin_named_macro(Flag.operator_index, prev, index, loc);
@@ -780,9 +755,9 @@ fn is_unit(self: Values) bool #inline = {
 // This starts out with comma seperated expressions and switches to a struct pattern if it hits a colon/equals. 
 // So you don't have to know if you're in a struct literal or if a function call uses named arguments ahead of time. 
 // TODO: allow 'const' at the beginning to quickly switch to named args cause you must be in a struct definition. 
-fn parse_tuple(self: *Parser) ParseRes = {
+fn parse_tuple(self: *Parser, terminator: TokenType.Tag()) ParseRes = {
     loc := self.last.span;
-    if self.maybe(.RightParen) {
+    if self.maybe(terminator) {
         return(Ok = self.raw_unit(loc));
     };
     parts: List(FatExpr) = list(self.alloc);
@@ -791,14 +766,11 @@ fn parse_tuple(self: *Parser) ParseRes = {
         break :: local_return;
         loop {
             parts&.push(@try(self.parse_expr(Prec_None)) return);
-            @match(self.peek()) {
-                fn RightParen() => { 
-                    self.pop(); 
-                    break();
-                }
+            t := self.peek();
+            @match(t) {
                 fn Comma() => {
                     self.pop();
-                    if(self.maybe(.RightParen), => break());
+                    if(self.maybe(terminator), => break());
                 }
                 fn Colon() => {
                     self.pop();
@@ -809,11 +781,15 @@ fn parse_tuple(self: *Parser) ParseRes = {
                             (PendingEval = e)
                         };
                     };
-                    return(self.switch_to_parsing_named(parts, ty, loc));
+                    return(self.switch_to_parsing_named(parts, ty, loc, terminator));
                 }
-                fn DoubleColon() => return(self.switch_to_parsing_named(parts, .Infer, loc));
-                fn Equals()      => return(self.switch_to_parsing_named(parts, .Infer, loc));
-                @default => @report_error("Expected ',' or ':' or '=' or ')' after tuple element % (unmached parens?)", "") (return, self.last.span);
+                fn DoubleColon() => return(self.switch_to_parsing_named(parts, .Infer, loc, terminator));
+                fn Equals()      => return(self.switch_to_parsing_named(parts, .Infer, loc, terminator));
+                @default => {
+                    if(self.maybe(terminator), => break());
+                    // TODO: fix error message
+                    @report_error("Expected ',' or ':' or '=' or ')' after tuple element % (unmached parens?)", "") (return, self.last.span);
+                };
             };
         };
     })();
@@ -837,7 +813,7 @@ fn parse_tuple(self: *Parser) ParseRes = {
 
 // TODO: allow 'name :: value' in @struct. :SYNTAX
 
-fn switch_to_parsing_named(self: *Parser, parts: List(FatExpr), ty: LazyType, loc: Span) ParseRes = {
+fn switch_to_parsing_named(self: *Parser, parts: List(FatExpr), ty: LazyType, loc: Span, terminator: TokenType.Tag()) ParseRes = {
     // Decided the last thing was actually a name for a named argument
     // TODO: let else
     ident_expr := parts&.pop().unwrap();
@@ -846,33 +822,33 @@ fn switch_to_parsing_named(self: *Parser, parts: List(FatExpr), ty: LazyType, lo
         @default => @report_error("Expected Ident before ':'/'=' in argument pattern. ") (return, ident_expr.loc);
     };
     
-    ::if(?FatExpr);
+    ::if(FatExpr);
     kind := VarType.Var;
-    default: ?FatExpr = if self.maybe(.Equals) {
-        e := @try(self.parse_expr(Prec_None)) return;
-        (Some = e)
+    default: FatExpr = if self.maybe(.Equals) {
+        @try(self.parse_expr(Prec_None)) return
     } else {
         if self.maybe(.DoubleColon) {
             kind = .Const;
-            e := @try(self.parse_expr(Prec_None)) return;
-            (Some = e)
+            @try(self.parse_expr(Prec_None)) return
         } else {
-            (None = unit)
+            binding_missing_default()
         }
     };
     
     bindings := Binding.list(parts.len + 1, self.alloc);
     for parts { e |
         // Allow mixed named and positional for function calls. 
-        anon: Binding = (name = .None, ty = .Infer, default = (Some = e), kind = .Var);
+        anon: Binding = (name = .None, ty = .Infer, nullable_tag = zeroed(*Annotations), default = e, kind = .Var);
         bindings&.push(anon);
     };
-    first_named: Binding = (name = (Ident = name), ty = ty, default = default, kind = kind);
+    
+    ann := @try(self.parse_nullable_annotations()) return;
+    first_named: Binding = (name = (Ident = name), ty = ty, nullable_tag = ann, default = default, kind = kind);
     bindings&.push(first_named);
     
     self.maybe(.Comma);
-    @try(self.parse_pattern(bindings&)) return;
-    @try(self.eat(.RightParen, "')' to end argument list")) return;
+    @try(self.parse_pattern(bindings&, terminator)) return;
+    @try(self.eat(terminator, "end of argument list")) return;
     return(Ok = self.expr((StructLiteralP = (bindings = bindings.rs(), loc = loc)), loc))
 };
 
@@ -885,7 +861,8 @@ fn empty_binding() Binding = {
     (
         name = .None,
         ty = (Finished = void),
-        default = .None,
+        nullable_tag = zeroed(*Annotations),
+        default = binding_missing_default(),
         kind = .Var,
     )
 }
@@ -893,19 +870,19 @@ fn empty_binding() Binding = {
 fn parse_args(self: *Parser) Result(Pattern, *CompileError) = {
     loc := self.last.span;
     bindings: List(Binding) = list(self.alloc);
-    @try(self.parse_pattern(bindings&)) return;
+    @try(self.parse_pattern(bindings&, .RightParen)) return;
     bindings&.if_empty_add_unit();
     (Ok = (bindings = bindings.rs(), loc = loc))
 }
 
-fn parse_pattern(self: *Parser, out: *List(Binding)) Result(void, *CompileError) = {
+fn parse_pattern(self: *Parser, out: *List(Binding), terminator: TokenType.Tag()) Result(void, *CompileError) = {
     loop {
         // TODO: no comma allowed here
         // TODO: shouldnt have to put the type annotations everywhere. 
         //       before switching nested ifs to switch, you didn't need it. -- Jul 28
         T :: Ty(Symbol, VarType);
-        name, kind := @match(self.peek()) {
-            fn RightParen() => return(.Ok);
+        t := self.peek();
+        name, kind := @match(t) {
             fn Dollar() => {
                 self.pop();
                 // TODO: better let else.
@@ -916,18 +893,20 @@ fn parse_pattern(self: *Parser, out: *List(Binding)) Result(void, *CompileError)
                 self.pop();
                 (name, VarType.Var)
             }
-            // TODO: moving this up crashes????? :FUCKED
-            //       but also we dont need this here for now. 
-            //(fn Pipe() => return(.Ok));
             fn Semicolon() => {
                 self.pop();
-                @report_error("Semicolon while parsing pattern. unmatched brackets? ") (return, self.last.span)
+                @report_error("Semicolon while parsing pattern. unmatched brackets? did you mean to use a comma?") (return, self.last.span)
             }
-            @default => @report_error("Expected Ident or '$' before pattern entry. (positional args cannot follow named) ") (return, self.last.span);
+            @default => {
+                if t&.tag() == terminator {
+                    return(.Ok);
+                };
+                @report_error("Expected Ident or '$' before pattern entry. (positional args cannot follow named) ") (return, self.last.span);
+            };
         };
         
         ::if(?FatExpr); ::if(LazyType);
-        default_: ?FatExpr = .None; // TODO: "shadows" the magic @default
+        default_: FatExpr = binding_missing_default(); // TODO: "shadows" the magic @default
         ty := LazyType.Infer;
         
         @match(self.peek()) {
@@ -939,29 +918,38 @@ fn parse_pattern(self: *Parser, out: *List(Binding)) Result(void, *CompileError)
                 };
                 if self.maybe(.Equals) {
                     e := @try(self.parse_expr(Prec_None)) return;
-                    default_ = (Some = e);
+                    default_ = e;
                 };
             }
             fn DoubleColon() => {
                 self.pop();
                 kind = .Const;
                 e := @try(self.parse_expr(Prec_None)) return;
-                default_ = (Some = e);
+                default_ = e;
             }
             fn Equals() => {
                 self.pop();
                 e := @try(self.parse_expr(Prec_None)) return;
-                default_ = (Some = e);
+                default_ = e;
             }
             @default => ();
         };
-        
-        b: Binding = (name = (Ident = name), ty = ty, default = default_, kind = kind);
+        ann := @try(self.parse_nullable_annotations()) return; 
+        b: Binding = (name = (Ident = name), ty = ty, nullable_tag = ann, default = default_, kind = kind);
         out.push(b);
         if !self.maybe(.Comma) {
             return(.Ok);
         };
     }
+}
+
+fn parse_nullable_annotations(self: *Parser) Result(*Annotations, *CompileError) #inline = {
+    ann := zeroed(*Annotations);
+    if self.peek_tag() == .Hash {
+        ann = self.alloc.box(Annotations);
+        ann[] = rs(@try(self.parse_annotations()) return);
+    };
+    (Ok = ann)
 }
 
 fn pop_name(self: *Parser, msg: Str) Result(Symbol, *CompileError) = {
@@ -993,7 +981,7 @@ fn fn_def_signeture(self: *Parser, loc: Span, allow_name: bool) Result(FnDef, *C
     ::if(Pattern);
     arg: Pattern = if self.maybe(.LeftParen) {
         a := @try(self.parse_args()) return;
-        @try(self.eat(.RightParen, "')' to end argument list")) return;
+        @try(self.eat(.RightParen, "end of argument list")) return;
         a
     } else {
         no_paren = true;
@@ -1057,7 +1045,7 @@ fn parse_annotations(self: *Parser) Result(List(Annotation), *CompileError) = {
     while => self.maybe(.Hash) {
         name := @try(self.pop_name("after '#'")) return;
         arg: ?FatExpr = if self.maybe(.LeftParen) {
-            (Some = @try(self.parse_tuple()) return)
+            (Some = @try(self.parse_tuple(.RightParen)) return)
         } {| .None };
         tags&.push((name = name, args = arg));
     };

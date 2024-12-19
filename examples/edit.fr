@@ -1,7 +1,6 @@
 #include_std("graphics/src/lib.fr");
 
 State :: @struct(
-    pipe: SglPipeline,
     pass_action: SgPassAction,
     text: *Sdtx.Common,
     env: rawptr,
@@ -22,29 +21,13 @@ do_init :: fn(userdata: rawptr) void = {
     desc.logger.func = slog_func;
     sg_setup(desc&);
     
-    desc := SglDesc.zeroed();
-    desc.logger.func = slog_func;
-    sgl_setup(desc&);
-    
     desc: Sdtx.Desc = (
         allocator = allocator,
         context = (),
     );
-    desc.fonts&[0] = Sdtx.font_cpc;
+    desc.fonts&[0] = Sdtx.font.cpc;
     sdtx_setup(state.text, desc&);
     
-    desc := SgPipelineDesc.zeroed();
-    // This makes transperency work
-    colour := desc.colors&[0]&;
-    colour.blend.enabled = true;
-    colour.blend.src_factor_rgb = .SRC_ALPHA;
-    colour.blend.dst_factor_rgb = .ONE_MINUS_SRC_ALPHA;
-    // I think you need this if you do z index stuff and it doesn't work without it. 
-    //desc.alpha_to_coverage_enabled = true;
-    //desc.depth.write_enabled = true;
-    //desc.depth.compare = .LESS_EQUAL;
-    
-    state.pipe = sgl_make_pipeline(desc&);
     state.pass_action.colors&[0].load_action = .CLEAR;
     state.pass_action.colors&[0].clear_value = (r = 0.156, g = 0.156, b = 0.156, a = 1);
 };
@@ -64,9 +47,6 @@ do_render :: fn(userdata: rawptr) void = {
     state.x = max(0, min(state.x, max_line_width));
     state.y = max(0, min(state.y, state.lines.len.float()));
     
-    sgl_defaults();
-    sgl_viewport(0.intcast(), 0.intcast(), w, h, true);
-    sgl_load_pipeline(state.pipe);
     sdtx := state.text.default_context&;
     sdtx.color = pack_rgba(235, 219, 178, 255);
     sdtx.canvas(sapp_width().intcast().float().div(1.75).cast(), sapp_height().intcast().float().div(1.75).cast());
@@ -95,7 +75,6 @@ do_render :: fn(userdata: rawptr) void = {
     desc.swapchain.height = sapp_height();
     sg_begin_pass(desc&);
     
-    sgl_draw();
     sdtx.draw_layer(0);
     
     sg_end_pass();
@@ -174,15 +153,14 @@ fn driver(vtable: *ImportVTable) void = {
         want_jit = want_jit || a == "-jit";
     };
     if want_jit {
-        ptr := get_jitted(vtable.with(comp), main_f);
+        ptr := get_jitted(ctx, main_f);
         f := assume_types_fn(Arg = void, Ret = void, ptr = ptr);
         f();
         exit(0);
     };
     
-    c: CompCtx = (data = comp, vtable = vtable);
     m := init_default_module_dyn(vtable, (arch = get_comptime_arch(), os = .macos, type = .Relocatable));  // :HardcodeOs
-    ir_text := emit_qbe_included_dyn(m&, c&, @slice(main_f), .WrapMain, true);  // note: this doesn't work on -legacy
+    ir_text := emit_qbe_included_dyn(m&, ctx&, @slice(main_f), .WrapMain, true);  // note: this doesn't work on -legacy
     
     out := open_trunc("edit.o").unwrap();
     for(ir_text&){bucket|

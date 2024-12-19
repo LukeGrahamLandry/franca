@@ -3,6 +3,8 @@
 //! Adapted from sokol_debugtext.h - https://github.com/floooh/sokol
 //! zlib/libpng license. Copyright (c) 2020 Andre Weissflog.
 
+#include_std("graphics/data/fonts.fr");
+
 Sdtx :: @struct(
     max_fonts   :: 8, 
     init_cookie :: 0xACBAABCB,  // purposely different from the c version
@@ -36,6 +38,7 @@ Sdtx :: @struct(
     
     // Set pos/origin/color/font to whatever you like before calling `put` to control how those characters are drawn. 
     Context :: @struct(
+        common: *Sdtx.Common,
         desc: Sdtx.ContextDesc,
         frame_id: u32,
         update_frame_id: u32,
@@ -52,7 +55,6 @@ Sdtx :: @struct(
         pos: Sdtx.Float2,         // in character grid coordinates
         tab_width: f32,
         color: u32,               // 0xAABBGGRR
-        common: *Sdtx.Common,
         franca_dynamic_context: rawptr,
     ),
     Common :: @rec @struct(
@@ -70,14 +72,9 @@ Sdtx :: @struct(
     B :: include_bytes("graphics/data/debugtext.bin", 29148),
     
     // Builtin fonts (you can provide your own as well).
-    font_kc853 :: Sdtx.B.slice(0, 2048),
-    font_kc854 :: Sdtx.B.slice(2048, 4096),
-    font_z1013 :: Sdtx.B.slice(4096, 6144),
-    font_cpc   :: Sdtx.B.slice(6144, 8192),
-    font_c64   :: Sdtx.B.slice(8192, 10240),
-    font_oric  :: Sdtx.B.slice(10240, 12288),
+    font :: FontDataStrings,
     
-    // Precompiled shaders for each RenderBackend. 
+    // Shaders for each RenderBackend. 
     vs_source_glsl410       :: Sdtx.B.slice(12288, 12631),
     fs_source_glsl410       :: Sdtx.B.slice(12631, 12855),
     vs_source_glsl300es     :: Sdtx.B.slice(12855, 13156),
@@ -92,7 +89,27 @@ Sdtx :: @struct(
     fs_bytecode_hlsl4       :: Sdtx.B.slice(26955, 27563),
     vs_source_wgsl          :: Sdtx.B.slice(27563, 28485),
     fs_source_wgsl          :: Sdtx.B.slice(28485, 29148),
+    
+    InV  :: @struct(position: Vec2, texcoord0: Vec2, color0: Vec4),
+    OutV :: @struct(pos: Vec4 #position, uv: Vec2, color: Vec4),
+    vs   :: fn(in: Sdtx.InV) Sdtx.OutV = (
+        pos = vec4(in.position * vec2(2.0, -2.0) + vec2(-1.0, 1.0), 0.0, 1.0),
+        uv = in.texcoord0,
+        color = in.color0,
+    ),
+    InF  :: @struct(uv: Vec2, color: Vec4),
+    OutF :: @struct(frag_color: Vec4),
+    UniF :: @struct(tex: texture2D #layout(binding = 0), sampler: smp #layout(binding = 0)),
+    fs   :: fn(in: Sdtx.InF, uni: Sdtx.UniF) Sdtx.OutF = (
+        frag_color = texture(sampler2D(uni.tex, uni.smp), in.uv).xxxx * in.color,
+    ),
 );
+
+//:: {
+//    println("Hello World");
+//    println(compile_to_shader_source(Sdtx.vs, SOKOL_BACKEND, true));
+//    println(compile_to_shader_source(Sdtx.fs, SOKOL_BACKEND, false));
+//};
 
 // fills in an empty `ctx` based on settings from `in_desc`.
 // ERRORS: if sg_add_commit_listener fails (returns false and text will not be rendered).
@@ -151,7 +168,7 @@ fn init_context(sdtx: *Sdtx.Common, ctx: *Sdtx.Context, in_desc: *Sdtx.ContextDe
 
 // Releases the resources owned by this context. 
 // You are still responsible for cleaning up the memory holding the Context struct itself. 
-fn destroy_context(ctx: *Sdtx.Context) void = {
+fn destroy(ctx: *Sdtx.Context) void = {
     if !ctx.vertices.ptr.is_null() {
         drop(ctx.vertices&, ctx.common.allocator);
     };
@@ -281,7 +298,7 @@ fn set_layer(ctx: *Sdtx.Context, layer_id: i32) bool = {
     }; 
     // else, first draw command in frame
     
-    next_cmd := next_command(ctx) || return(false);
+    next_cmd := next_uninit(ctx.commands&) || return(false);
     next_cmd.layer_id = layer_id;
     next_cmd.first_vertex = first_vertex;
     next_cmd.num_vertices = 0;
@@ -338,24 +355,7 @@ fn put(ctx: *Sdtx.Context, str: CStr) void #inline =
 fn put(ctx: *Sdtx.Context, str: []u8) void #inline = 
     for(str, fn(chr) => put(ctx, chr));
 
-fn pack_rgba(r: u8, g: u8, b: u8, a: u8) u32 = 
-    pack_rgba(r.zext(), g.zext(), b.zext(), a.zext());
-    
-fn pack_rgba(r: i64, g: i64, b: i64, a: i64) u32 = 
-    a.shift_left(24).bit_or(b.shift_left(16).bit_or(g.shift_left(8).bit_or(r))).trunc();
-
-fn pack_rgba(r: f64, g: f64, b: f64, a: f64) u32 = {
-    r := int(sdtx_clamp(r, 0.0, 1.0) * 255.0);
-    g := int(sdtx_clamp(g, 0.0, 1.0) * 255.0);
-    b := int(sdtx_clamp(b, 0.0, 1.0) * 255.0);
-    a := int(sdtx_clamp(a, 0.0, 1.0) * 255.0);
-    pack_rgba(r, g, b, a)
-}
-
 //////////////////////////////////////////////////////////////////////////////////////////////////////
-
-fn sdtx_clamp(v: f64, lo: f64, hi: f64) f64 #inline =
-    if(v < lo, => lo, => if(v > hi, => hi, => v));
 
 // unpack linear 8x8 bits-per-pixel font data into 2D byte-per-pixel texture data
 fn unpack_font(font_desc: []u8, out_pixels: []u8) void #once = {
@@ -397,12 +397,6 @@ fn cur_command(ctx: *Sdtx.Context) ?*Sdtx.Command #inline = {
     (Some = ctx.commands.index(ctx.commands.len - 1))
 }
 
-fn next_command(ctx: *Sdtx.Context) ?*Sdtx.Command #inline = {
-    if(ctx.commands.len >= ctx.commands.cap, => return(.None));
-    ctx.commands.len += 1;
-    (Some = ctx.commands.index(ctx.commands.len - 1))
-}
-
 fn render_char(ctx: *Sdtx.Context, c: u8) void #once = {
     if next_vertex(ctx) { vx | if cur_command(ctx) { cmd |
         // update vertex count in current draw command
@@ -436,6 +430,9 @@ fn render_char(ctx: *Sdtx.Context, c: u8) void #once = {
 }
 
 fn rewind(ctx: *Sdtx.Context) void = {
+    // note: this check is not quite as helpful as you'd like because if it got called from the wrong place,
+    //       we might not have a valid context setup and will fault trying to panic. 
+    @debug_assert_eq(ctx.common.init_cookie, Sdtx.init_cookie, "invalid Sdtx.rewind");
     ctx.frame_id += 1;
     ctx.vertices.len = 0;
     ctx.commands.len = 0;
@@ -448,6 +445,7 @@ fn rewind(ctx: *Sdtx.Context) void = {
 fn make_commit_listener(ctx: *Sdtx.Context) SgCommitListener = {
     ctx.franca_dynamic_context = get_dynamic_context();
     (user_data = Sdtx.Context.raw_from_ptr(ctx), func = fn(userdata: rawptr) void = {
+        // called from inside sokol-gfx sg_commit()
         if(userdata.is_null(), => return());
         ctx := Sdtx.Context.ptr_from_raw(userdata);
         set_dynamic_context(ctx.franca_dynamic_context);

@@ -1,3 +1,12 @@
+## graphics
+
+- finish updating documentation to not use c syntax 
+- translate a subset of my language into the shader languages
+- use []u8 and interpret_as_bytes instead of SgRange
+- :GfxLogging
+
+## 
+
 - things that should be cleaned up next time i replace `boot`
   - :DumbNameAlias NoMangle
   - AbiHackSpan
@@ -30,6 +39,19 @@
 - @match/@switch should just be @inline_match/@inline_switch if the thing is constant.
 - `fn fmodf(f32, f32) f32 #libc;` should treat them as types not arg names
 - try semaphores 
+- rename RsVec. vector is a stupid name for that
+- fix overflow when lexing large float literals
+- make compilation order of struct sizing less sketchy for offset_of
+- propagate types through constants. `a: u32 : 0; b := a;` b should have type u32 even though int literals default to i64.
+  (to fix `foo.id != SG_INVALID_ID.trunc()`)
+- show const fields better in log_type
+- (cap, alloc) args are swaped between list:List and init:RsVec
+
+// - less verbose if let/let else? think about how to express with a macro. 
+// - auto coerce payload to enum when branches aren't ambigous? maybe? thats a bit creepy. doing it for unit when you just forget to return something would be bad. 
+// - default function arguments because 'self.parse_expr(Prec.None)' and symmetry with structs. 
+// - track all the errors you hit when failing overloads. 
+// - local_return and return implciitly rebinding is a bit confusing
 
 ##
 

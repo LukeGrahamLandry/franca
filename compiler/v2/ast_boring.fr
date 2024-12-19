@@ -204,7 +204,8 @@ fn tuple_of(self: *SelfHosted, types: []Type) Type = {
                 fields&.push(
                     name = name,
                     ty = ty[],
-                    default = .None,
+                    nullable_tag = zeroed(*Annotations),
+                    default = zeroed(Var),
                     byte_offset = 99999999999,
                     kind = .Var,
                 );
@@ -359,7 +360,8 @@ fn remove_named(self: *Pattern, arg_name: Var, a: Alloc) void = {
         self.bindings&.push((
             name = .None,
             ty = (Finished = void),
-            default = .None,
+            nullable_tag = zeroed(*Annotations),
+            default = binding_missing_default(),
             kind = .Var,
         ), a);
     };
@@ -434,6 +436,18 @@ fn from_index(idx: i64) ScopeId = {
     AutoClone(get_variant_type(Stmt, Stmt.Tag().DeclVarPattern));
     AutoClone(get_variant_type(Stmt, Stmt.Tag().DeclNamed));
     AutoClone(get_variant_type(Stmt, Stmt.Tag().Set));
+    
+    fn deep_clone(nullable_tag: **Annotations, a: Alloc) *Annotations = {
+        ::ptr_utils(Annotations);
+        if(nullable_tag[].is_null(), => return(nullable_tag[]));
+        out := a.box(Annotations);
+        out[] = init(a, nullable_tag.len);
+        enumerate out[] { i, tag |
+            out[][i] = deep_clone(tag, a);
+        };
+        out
+    }
+    
     AutoHash(MemoKey, TrivialHasher);
     AutoEq(MemoKey);
     fn hash(h: *TrivialHasher, s: *FuncId) void = {
@@ -531,7 +545,7 @@ fn is_const(self: *FatExpr) bool = {
         // TODO: a test that breaks without these extra ones or remove it. 
         fn StructLiteralP(b) => {
             each b.bindings { b |
-                if b.default&.as_ref() { part |
+                if b.get_default() { part |
                     if(!part.is_const(), => return(false));
                 };
             };

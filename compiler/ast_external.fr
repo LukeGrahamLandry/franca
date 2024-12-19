@@ -269,6 +269,7 @@ fn prim(self: CompCtx, ty: Type) ?Prim = {
         }
         fn Named(f) => return(self.prim(f._0));
         fn Enum(f) => return(self.prim(f.raw));
+        fn Swizzler(f) => return(self.prim(f.raw));
         fn Array(f) => {
             if f.len == 1 {
                 return(self.prim(f.inner));
@@ -292,6 +293,7 @@ fn flat_tuple_types(self: CompCtx, ty: Type) List(Type) = {
             out
         }
         fn Enum(f) => self.flat_tuple_types(f.raw);
+        fn Swizzler(f) => self.flat_tuple_types(f.raw);
         fn Named(f) => self.flat_tuple_types(f._0);
         // TODO: this is sketchy
         fn Tagged(f) => {
@@ -436,7 +438,6 @@ fn unwrap(arg: FatExpr, ret: FatExpr) FatExpr #macro = {
     parts := arg.expr.Tuple.items();
     @ct_assert(parts.len >= 2, loc, arg_err);
     @ct_assert(parts[1].ty == Str, loc, arg_err);
-    
     @{
         cond := @[parts[0]];
         if cond&.is_none() {
@@ -684,3 +685,20 @@ fn check_link_rename(comp: CompCtx, base_import_name: Symbol, func: *Func, targe
         comp.get_string(base_import_name)
     }
 }
+
+fn get_default(b: *Binding) ?*FatExpr = {
+    e := b.default.expr&;
+    ::enum(@type e.Poison);
+    if e.is(.Poison) && e.Poison == .EmptyBindingValue {
+        return(.None);
+    };
+    (Some = b.default&)
+}
+
+fn binding_missing_default()  FatExpr = (expr = (Poison = .EmptyBindingValue), ty = UnknownType, done = false, loc = Span.zeroed());
+
+fn get_default(b: *Field) ?Var = {
+    if(b.default.id == 0, => return(.None));
+    (Some = b.default)
+}
+

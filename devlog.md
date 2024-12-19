@@ -1,3 +1,24 @@
+
+## (Dec 19)
+
+- allow multiple things in index expression `a[i, j]` -> `index(a, (i, j))[]`
+
+## (Dec 18)
+
+- start porting sokol_gl
+- added require_layout_ready(Type) so i can add offset_of
+- start working on translating my language to MSL for shaders. 
+- added get_function_ast so you can do more powerful reflection things at comptime without wrapping everything in a macro. 
+- allow #annotations on struct fields. 
+  they don't do anything, Binding and Field just pass them through, but comptime code can read them. 
+  so i can use them for `layout(binding=0)` / `[[position]]` / etc. 
+- shader languages have the vector swizzling thing like `v.xxxx` which would be kinda nice to have so it could be lowered directly for shader translation,
+  and still allow you to run those functions on the cpu if you just want to print out some numbers for debugging. 
+  so im tempted to let you register magic types where field accesses become macro calls, 
+  but maybe that gets super confusing quickly. 
+  did some plumbing for TypeInfo.Swizzler but the compiler doesn't call into it yet. 
+- (debugtext) parse font data from readable strings at comptime.
+
 ## (Dec 17)
 
 - auto-cast float literals to f32 so you don't always need a `.cast()`

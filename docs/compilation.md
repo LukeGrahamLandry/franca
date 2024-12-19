@@ -64,8 +64,8 @@ There are several contexts that force an expression to be evaulated at comptime.
 - The value of a constant. like `name :: e`
 - An expression after the `::` prefix operator.
 - Any macro might choose to force evaluate an argument.
-  - The default value of a struct field.
-  - The value of an enum.
+- The default value of a struct field.
+- The value of an enum.
 
 ## Driver Program
 
@@ -134,4 +134,4 @@ For example if you cast a pointer to an integer, store that in a constant, and t
 the value behind the pointer won't have been considered reachable and the number will just be a useless address in the compiler's address space.
 Its fine to do all the bit-casts you want during comptime, all that matters is the final type seen by the compiler when the executable is created.
 
--- Jun 19
+Currently `bake_relocatable_value` is only called if the type contains some type of pointer and some byte of the value is non-zero. 
