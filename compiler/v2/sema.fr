@@ -189,19 +189,21 @@ fn compile_place_expr(self: *SelfHosted, place: *FatExpr, requested: ResultType,
                     inner = self.raw_type(next_inner);
                 };
             };
-            bytes, field_val_ty := @check(self.field_access_expr(f.container, f.name)) return;
+            name := f.name;
+            bytes, field_val_ty := @check(self.field_access_expr(f.container, name)) return;
             field_ptr_ty := self.ptr_type(field_val_ty);
             @debug_assert(!f.container.expr&.is(.GetVar), "ICE: place expr can't be direct var access");
             e := self.box(f.container[]);
-            if bytes == 0 {
-                place.expr = (Cast = e);
-            } else {
+            // don't want to use Cast because graphics/src/shaders wants to know the field name after compiling. 
+            //if bytes == 0 {
+            //    place.expr = (Cast = e);
+            //} else {
                 place.expr = (PtrOffset = (
                     ptr = e,
                     bytes = bytes,
-                    name = f.name,
+                    name = name,
                 ));
-            };
+            //};
             place.done = done;
             if want_deref {
                 place.ty = field_ptr_ty;
@@ -330,12 +332,13 @@ fn decl_var(self: *SelfHosted, name: Var, ty: *LazyType, value: *FatExpr) Maybe(
     no_type := ty.is(.Infer);
     self.last_loc = value.loc;
     want := ResultType.None;
-    if @check(self.infer_type(ty)) return { known |
+    xxx := @check(self.infer_type(ty)) return;
+    if xxx { known |
         want = (Specific = known);
     };
     @check(self.compile_expr(value, want)) return;
     final_ty := value.ty;
-    @debug_assert(!final_ty.is_unknown(), "if we didn't yield, we should know the type");
+    @debug_assert(!final_ty.is_unknown(), "if we didn't yield, we should know the type %", self.comp().log(value));
     if no_type {
         // Since there was no type annotation, we don't need a type check. Whatever we got is the type of this variable now. 
         ty[] = (Finished = final_ty);
@@ -529,11 +532,7 @@ fn handle_target_split(self: *SelfHosted, func: *Func) Maybe(void) #once = {
     each func.body.Merged { impl |
         @err_assert(impl.is(.TargetOsSplit), "TODO: support do_merges + .TargetOsSplit?") return;
         fid := impl.TargetOsSplit.fid;
-        func := self.get_function(fid);
-        if !func.get_flag(.EnsuredCompiled) {
-            self.dispatch.function_in_progress&.set(fid.as_index());
-            return(Suspend = self.wait_for(CompileBody = fid));
-        };
+        @check(self.compile_body(fid)) return;
     };
     func.set_flag(.EnsuredCompiled);
     .Ok
@@ -1670,10 +1669,8 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
         // If we're just inlining for #inline, compile first so some work on the ast is only done once.
         // note: compile() checks if its ::Inline before actually generating asm so it doesn't waste its time.
         // if its a '=>' function, we can't compile it out of context, and same if it has a const arg of a '=>' function. 
-        if !capturing && !func.get_flag(.EnsuredCompiled) {
-            @assert(!self.dispatch.function_in_progress&.get(fid.as_index()), "unhanlded mutual recursion! %", self.log_name(fid));
-            self.dispatch.function_in_progress&.set(fid.as_index());
-            return(Suspend = self.wait_for(CompileBody = fid));
+        if !capturing {
+            @check(self.compile_body(fid)) return;
         };
         
         // TODO: check that you're calling from the same place as the definition.
@@ -4390,6 +4387,16 @@ fn tagged_macro(self: *SelfHosted, cases_expr: *FatExpr) Maybe(FatExpr) = {
     tagged_type := self.intern_type(Tagged = (cases = cases.rs(), tag = tag_type));
     self.set(cases_expr, Type, tagged_type);
     (Ok = cases_expr[])
+}
+
+fn compile_body(self: *SelfHosted, fid: FuncId) Maybe(void) #inline = {
+    if self.get_function(fid).get_flag(.EnsuredCompiled) {
+        .Ok
+    } else {
+        @assert(!self.dispatch.function_in_progress&.get(fid.as_index()), "unhanlded mutual recursion %", self.log_name(fid));
+        self.dispatch.function_in_progress&.set(fid.as_index());
+        (Suspend = self.wait_for(CompileBody = fid))
+    }
 }
 
 // TODO: track if we're in unquote mode or placeholder mode.

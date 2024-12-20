@@ -43,16 +43,7 @@ fn init_driver_vtable() *ImportVTable = {
     
     vtable.compile_func = fn(c: Compiler, f: FuncId, when: ExecStyle) CRes(void) = {
         self := c.cast()[][];
-        self.poll_in_place(void) { () Maybe(void) |
-            func := self.get_function(f);
-            if func.get_flag(.EnsuredCompiled) {
-                .Ok
-            } else {
-                @assert(!self.dispatch.function_in_progress&.get(f.as_index()), "unhanlded mutual recursion %", self.log_name(f));
-                self.dispatch.function_in_progress&.set(f.as_index());
-                (Suspend = self.wait_for(CompileBody = f))
-            }
-        }
+        self.poll_in_place(void, => self.compile_body(f))
     };
     
     vtable.make_and_resolve_and_compile_top_level = fn(cc: Compiler, body: Slice(FatStmt)) CRes(void) = {
@@ -751,8 +742,11 @@ fn fill_export_ffi(out: *List(u8)) void = {
             ret :: local_return;
             @if(resolve_sign) @check(self.ensure_resolved_sign(fid)) ret;
             @if(resolve_body) @try(self.ensure_resolved_body(fid)) ret;
-            //@if(infer_sign) @try(self.ensure_resolved_body(fid)) ret;
-            //@if(infer_body) @try(self.ensure_resolved_body(fid)) ret;
+            @if(infer_sign) {
+                @check(self.infer_arguments(fid)) ret;
+                @check(self.infer_return(fid)) ret;
+            };
+            @if(infer_body) @check(self.compile_body(fid)) ret;
             .Ok
         };
         self.unwrap_report_error(void, res);

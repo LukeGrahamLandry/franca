@@ -18,6 +18,20 @@ fn Vec($T: Type, $N: i64) Type = {
     fn vec(v: *Raw) *Self   #unsafe_noop_cast;
     fn array(v: *Self) *Raw #unsafe_noop_cast;
     
+    bin_op :: fn(a, b, op) => {
+        out := @uninitialized Self;
+        a, b, c := (a&.array(), b&.array(), out&.array());
+        inline_range(0, N) { $i | 
+            c[i] = op(a[i], b[i]); 
+        };
+        out
+    };
+    
+    fn mul(a: Self, b: Self) Self = bin_op(a, b, mul);
+    fn add(a: Self, b: Self) Self = bin_op(a, b, add);
+    fn sub(a: Self, b: Self) Self = bin_op(a, b, sub);
+    fn div(a: Self, b: Self) Self = bin_op(a, b, div);
+    
     fn items(v: *Self) []T =
         (ptr = ptr_cast_unchecked(Self, T, v), len = N);
     
@@ -40,3 +54,56 @@ fn vec3(x: f32, y: f32, z: f32) Vec3 =
 
 fn vec4(x: f32, y: f32, z: f32, w: f32) Vec4 = 
     vec(@slice(x, y, z));
+
+fn vec4(x: f32, y: f32, z: f32, w: f32) Vec4 = 
+    vec(@slice(x, y, z, w));
+
+//
+// TODO: this doesn't expand to something you can actually run yet. 
+//       it only works for shader translation.   
+//
+
+fn vec(args: FatExpr) FatExpr #macro = {
+    @ct_assert(args.expr&.is(.Tuple), args.loc, "@vec expected multiple arguments");
+    arity := 0;
+    parts := args.expr.Tuple&;
+    each parts { e |
+        e[] = compile_ast(e[]);
+        arity += @switch(e.ty) {
+            @case(f32) => 1;
+            @case(f64) => 1;
+            @case(Vec2) => 2;
+            @case(Vec3) => 3;
+            @case(Vec4) => 4;
+            @default => compile_error("@vec expected floats", e.loc);
+        };
+    };
+    ty, call := @switch(arity) {
+        @case(2) => (Vec2, @{ vec2 });
+        @case(3) => (Vec3, @{ vec3 });
+        @case(4) => (Vec4, @{ vec4 });
+        @default => compile_error(@tfmt("@vec invalid arity %", arity), args.loc);
+    };
+    args = @{ @[call](@[args]) };
+    args.ty = ty;
+    args.done = true;  // lie!
+    args
+}
+
+fn swizzle(args: FatExpr) FatExpr #macro = {
+    @ct_assert(args.expr&.is(.FieldAccess), args.loc, "@swizzle expected `vec.xyzw`");
+    it := args.expr.FieldAccess&;
+    value := it.container;
+    value[] = compile_ast(value[]);
+    name := it.name.str();
+    @ct_assert(name.len <= 4 && name.len >= 2, args.loc, "@swizzle 2/3/4 components, not %", name.len);
+    
+    args.ty = @switch(name.len) {
+        @case(2) => Vec2;
+        @case(3) => Vec3;
+        @case(4) => Vec4;
+        @default => unreachable();
+    };
+    args.done = true; // lie!
+    args
+}

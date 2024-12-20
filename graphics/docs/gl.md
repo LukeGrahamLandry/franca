@@ -542,47 +542,6 @@ Merging a draw command simply means that the number of vertices
 to render in the previous draw command will be incremented by the
 number of vertices in the new draw command.
 
-ERROR REPORTING AND LOGGING
-===========================
-To get any logging information at all you need to provide a logging callback in the setup call,
-the easiest way is to use sokol_log.h:
-
-    #include "sokol_log.h"
-
-    sgl_setup(&(sgl_desc_t){
-        // ...
-        .logger.func = slog_func
-    });
-
-To override logging with your own callback, first write a logging function like this:
-
-    void my_log(const char* tag,                // e.g. 'sgl'
-                uint32_t log_level,             // 0=panic, 1=error, 2=warn, 3=info
-                uint32_t log_item_id,           // SGL_LOGITEM_*
-                const char* message_or_null,    // a message string, may be nullptr in release mode
-                uint32_t line_nr,               // line number in sokol_gl.h
-                const char* filename_or_null,   // source filename, may be nullptr in release mode
-                void* user_data)
-    {
-        ...
-    }
-
-...and then setup sokol-gl like this:
-
-    sgl_setup(&(sgl_desc_t){
-        .logger = {
-            .func = my_log,
-            .user_data = my_user_data,
-        }
-    });
-
-The provided logging function must be reentrant (e.g. be callable from
-different threads).
-
-If you don't want to provide your own custom logger it is highly recommended to use
-the standard logger in sokol_log.h instead, otherwise you won't see any warnings or
-errors.
-
 LICENSE
 =======
 zlib/libpng license

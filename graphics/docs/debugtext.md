@@ -7,7 +7,7 @@ CHANGES FROM SOKOL
 - remove printf-like functions. i don't have c-style varargs. can use @fmt into a temp buffer instead.
 - remove getters/setters for ctx's pos/color.
 - remove global _sdtx and context pool. instead pass the context explicitly to every call. 
-- remove byte array clutter. embed font data and precompiled shaders from a seperate binary file. 
+- remove byte array clutter. load font data from readable string. 
 
 FEATURES AND CONCEPTS
 =====================
@@ -93,11 +93,11 @@ STEP BY STEP
 
     - to render characters at 8x8 'physical pixels':
 
-        sdtx_canvas(sapp_width(), sapp_height());
+        ctx.canvas(sapp_width(), sapp_height());
 
     - to render characters at 16x16 physical pixels:
 
-        sdtx_canvas(sapp_width()/2.0f, sapp_height()/2.0f);
+        ctx.canvas(sapp_width() /2.0, sapp_height() / 2.0);
 
     Do *not* use integer math here, since this will not look nice
     when the render target size isn't divisible by 2.
@@ -168,7 +168,7 @@ STEP BY STEP
     
         draw_layer(ctx, int layer_id)
 
-    ...to draw a specific layer, or for non-layered rendering, render only the 'default layer' 0:
+    ... for non-layered rendering, render only the 'default layer' 0:
     
         draw_layer(ctx, 0)
 
@@ -180,7 +180,6 @@ STEP BY STEP
         - the current layer id is set to 0
         - the current font is set to 0
         - the cursor position is reset
-
 
 RENDERING WITH MULTIPLE CONTEXTS
 ================================

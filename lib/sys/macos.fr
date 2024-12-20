@@ -74,24 +74,22 @@ fn objc_msg(ret_reciever_arg_pattern: FatExpr) FatExpr #macro = {
     args&.push(@{ panic("this will be replaced with the selector uid") });
     selector: List(u8) = list(ast_alloc());
     
-    @match(arg_pattern.expr&) {
-        fn StructLiteralP(p) => {
-            each p.bindings { b |
-                name := or b.ident() {
-                    compile_error("Expected param name", p.loc)
-                };
-                value := or b.default {
-                    compile_error("Expected param value", p.loc)
-                };
-                @fmt(selector&, "%:", name.str());
-                value := compile_ast(value);
-                args&.push(value);
-                args_type&.push(value.ty);
-            };
+    @ct_assert(arg_pattern.expr&.is(.StructLiteralP), arg_pattern.loc, "expected struct literal for @objc_msg. use (selector = ()) to pass no arguments.");
+    p := arg_pattern.expr.StructLiteralP&;
+    each p.bindings { b |
+        name := or b.ident() {
+            compile_error("Expected param name", p.loc)
         };
-        @default => {
-            name := const_eval_string(arg_pattern);
-            selector&.push_all(name);  
+        value := b.default;
+        ::tagged(Values);
+        is_void := value.expr&.is(.Value) && value.expr.Value.bytes&.is(.Small) && value.expr.Value.bytes.Small._1 == 0;
+        if p.bindings.len == 1 && is_void {
+            selector&.push_all(name.str());  
+        } else {
+            @fmt(selector&, "%:", name.str());
+            value := compile_ast(value);
+            args&.push(value);
+            args_type&.push(value.ty);
         };
     };
     
