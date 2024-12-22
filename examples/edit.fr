@@ -8,6 +8,7 @@ State :: @struct(
     x: f64,
     y: f64,
     max_x: f64,
+    app: *Sapp.Common,
 );
 
 allocator :: libc_allocator;
@@ -83,12 +84,12 @@ do_render :: fn(userdata: rawptr) void = {
 };
 
 // TODO: dependency problem so can't go in the eq overload set :(
-fn eqq(a: SappEventType, b: SappEventType) bool = (@as(i32) a).eq(@as(i32) b);
-fn eqq(a: SappKeycode, b: SappKeycode) bool = (@as(i32) a).eq(@as(i32) b);
+fn eqq(a: Sapp.EventType, b: Sapp.EventType) bool = (@as(i32) a).eq(@as(i32) b);
+fn eqq(a: Sapp.Keycode, b: Sapp.Keycode) bool = (@as(i32) a).eq(@as(i32) b);
 
 scroll_speed :: -2.0;
 
-do_event :: fn(event: *SappEvent, userdata: rawptr) void = {
+do_event :: fn(userdata: rawptr, event: *Sapp.Event) void = {
     state := State.ptr_from_raw(userdata);
     set_dynamic_context(state.env);
    
@@ -108,6 +109,7 @@ fn main() void = {
     state := State.zeroed();
     state.env = get_dynamic_context();
     state.text = allocator.box(@type state.text[]);
+    state.app = allocator.box(@type state.app[]);
     
     // :SLOW
     path := "compiler/v2/sema.fr";
@@ -119,14 +121,15 @@ fn main() void = {
         state.lines&.push(ptr = l.ptr, len = l.len, cap = l.len);
     };
     
-    desc := SappDesc.zeroed();
-    desc.init_userdata_cb = do_init;
-    desc.frame_userdata_cb = do_render;
-    desc.event_userdata_cb = do_event;
-    desc.user_data = State.raw_from_ptr(state&);
-    desc.logger.func = slog_func;
-    desc.window_title = "pleasejustletmeeditthetext".maybe_borrow_cstr(temp());
-    sapp_run(desc&);
+    desc: Sapp.Desc = (
+        init_cb = do_init,
+        frame_cb = do_render,
+        event_cb = do_event,
+        user_data = State.raw_from_ptr(state&),
+        window_title = "pleasejustletmeeditthetext",
+        allocator = allocator,
+    );
+    run(state.app, desc&);
 }
 
 SOKOL_MACOS_LINK_ARGS :: @array("-framework", "Metal", "-framework", "MetalKit", "-framework", "Cocoa", "-framework", "QuartzCore");
