@@ -118,7 +118,7 @@ fn unptr_ty(c: CompCtx, ty: Type) ?Type = {
 //
 // :ConfusingPrims These slices always have (P64) before them so you can offset backwards for indirect returns. 
 //
-fn prim_sig(program: CompCtx, f_ty: FnType) Res(PrimSig) = {
+fn prim_sig(program: CompCtx, f_ty: FnType) CRes(PrimSig) = {
     @err_assert(!f_ty.arg.is_unknown() && !f_ty.ret.is_unknown(), "unknown fn types") return;
     ret := program.get_info(f_ty.ret);
 
@@ -202,7 +202,7 @@ fn prim_sig(program: CompCtx, f_ty: FnType) Res(PrimSig) = {
     (Ok = sig)
 }
 
-fn prim_pair(self: CompCtx, ty: Type) Res(Ty(Prim, Prim)) = {
+fn prim_pair(self: CompCtx, ty: Type) CRes(Ty(Prim, Prim)) = {
     types := self.flat_tuple_types(ty); // TODO: don't allocate
     @debug_assert_eq(types.len(), 2);
     a : Prim = @unwrap(self.prim(types[0]), "non-prim") return;
@@ -269,7 +269,6 @@ fn prim(self: CompCtx, ty: Type) ?Prim = {
         }
         fn Named(f) => return(self.prim(f._0));
         fn Enum(f) => return(self.prim(f.raw));
-        fn Swizzler(f) => return(self.prim(f.raw));
         fn Array(f) => {
             if f.len == 1 {
                 return(self.prim(f.inner));
@@ -293,7 +292,6 @@ fn flat_tuple_types(self: CompCtx, ty: Type) List(Type) = {
             out
         }
         fn Enum(f) => self.flat_tuple_types(f.raw);
-        fn Swizzler(f) => self.flat_tuple_types(f.raw);
         fn Named(f) => self.flat_tuple_types(f._0);
         // TODO: this is sketchy
         fn Tagged(f) => {
@@ -451,9 +449,9 @@ fn unwrap(arg: FatExpr, ret: FatExpr) FatExpr #macro = {
 }
 
 fn err(arg: FatExpr) FatExpr #macro = {
-    @if(BOOTSTRAP_ONLY_MODE) {
-        arg = @{"---"};
-    };
+    //@if(BOOTSTRAP_ONLY_MODE) {
+    //    arg = @{"---"};
+    //};
     if !arg.expr&.is(.Tuple) {
         return(@{ (Err = make_error(@[arg])) });
     };
@@ -702,3 +700,82 @@ fn get_default(b: *Field) ?Var = {
     (Some = b.default)
 }
 
+fn get_alloc(self: CompCtx) Alloc = {
+    {self.vtable.get_alloc}(self.data)
+}
+
+ReadBytes :: @struct(bytes: [] u8, i: i64);
+
+fn read_next(self: *ReadBytes, $T: Type) T #generic = {
+    @debug_assert_eq(self.i.mod(T.size_of()), 0);
+    @safety(.Bounds) self.i + T.size_of() - 1 < self.bytes.len();
+    
+    ptr := self.bytes.ptr.offset(self.i);
+    self.i += T.size_of();
+    ptr_cast_unchecked(u8, T, ptr)[]
+}
+
+fn take(self: *ReadBytes, size: i64) ?[]u8 = {
+    if(self.i + size - 1 >= self.bytes.len(), => return(.None));
+    ptr := self.bytes.ptr.offset(self.i);
+    self.i += size;
+    (Some = (ptr = ptr, len = size))
+}
+
+::enum(ExecStyle);
+
+Flag :: @enum(i64) (
+    SYMBOL_ZERO,
+    toplevel,
+    include_std,
+    Anon,
+    if,
+    
+    // TODO: HACK
+    // TODO: use this
+    first_dumb_type_name, Self, RAW, last_dumb_type_name,
+    
+    // These are function #tags that the compiler knows about. 
+    log_bc, log_asm, log_ir, log_ast, 
+    cold, inline, noinline, asm, c_call, unsafe_noop_cast, 
+    import, intrinsic, libc, redirect, comptime_addr,
+    once, fold, no_trace, ct, outputs, macro, 
+    link_rename, generic, target_os, 
+    llvm, aarch64, x86, qbe, c, x86_bytes, bc,
+    ir,
+    
+    // These are variables that are automatically shadowed in new scopes. 
+    return, local_return,
+    
+    // These are macros that need to be called before we've compiled enough to evaluate the type FatExpr.
+    builtin, type, struct, tagged, enum, late,
+    
+    // This is a magic blessed macro with no implementation but recognised by name. 
+    rec, 
+    
+    // These are operators that have syntax desugaring. 
+    add, sub, mul, div, lt, gt, ge, le, eq, ne, neg, not, and, or,  
+    operator_squares_prefix, operator_star_prefix, operator_question_prefix, operator_index,
+    operator_plus_equal, operator_minus_equal, operator_star_equal, operator_slash_equal,
+    __string_escapes,
+    
+    // These can be used with @builtin.
+    OverloadSet, ScopeId, FuncId, LabelId, Symbol, i64, bool, true, false, void, Type, rawptr, Never, f64, f32, UnknownType,
+    compiler_debug_assert_eq_i64,  // this is maybe helpful for debugging the compiler when nothing works at all. 
+    
+    // These must be in order because tuple field names use them and compute by offsetting Flag._0.raw().
+     _0,  _1,  _2,  _3,  _4,  _5,  _6,  _7,  _8,  _9, 
+    _10, _11, _12, _13, _14, _15, _16, _17, _18, _19, _20,
+    
+    // These are libc functions the compiler can provide for comptime code even when it can't dlopen a libc. 
+    // These are chosen arbitrarily based on what tests i want to run in blink emulator. 
+    mmap, abort, write, read, munmap, open, close, mprotect, __clear_cache, uname, clock_gettime, malloc, free, 
+    
+    ___this_function_is_not_real_im_just_testing_the_franca_compiler,
+    no_context,
+    yes_context,
+);
+
+fn ident(name: Flag) Symbol = {
+    symbol_from_id((@as(i64) name).trunc())
+}

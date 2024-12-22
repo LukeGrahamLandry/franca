@@ -51,11 +51,22 @@ ReturnAddr :: @struct(
 ResultLoc :: @enum(i64) (PushStack, ResAddr, Discard);
 ::enum(ResultLoc);
 
-fn emit_bc(comp: CompCtx, bc: *BcBackend, f: FuncId, when: ExecStyle) Res(*FnBody) = {
+fn emit_bc(c: CompCtx, f: FuncId, when: ExecStyle) CRes(*FnBody) = {
+    if when == .Aot {
+        // :bake_relocatable_value
+        {c.vtable.check_for_new_aot_bake_overloads}(c.data); 
+    };
+    func := c.get_function(f);
+    
+    opts := c.get_build_options();
+    backend := BcBackend.ptr_from_raw(opts.comptime_jit_data);
+    emit_bc(c, backend, f, when)
+}
+
+fn emit_bc(comp: CompCtx, bc: *BcBackend, f: FuncId, when: ExecStyle) CRes(*FnBody) = {
     bc.jitted&.extend_blanks(f);
     func := comp.get_function(f); // TODO: you can't do this inline with a call (if comp[f]) that needs a *Func. it looks for an overload for **Func. -- Jul 5
     
-    c := comp.data.cast()[][];
     opts := comp.get_build_options();
     self: EmitBc = (
         result = FnBody.ptr_from_int(0), // EVIL. filled in soon! 
@@ -65,6 +76,8 @@ fn emit_bc(comp: CompCtx, bc: *BcBackend, f: FuncId, when: ExecStyle) Res(*FnBod
         var_lookup = init(temp()),
         inlined_return_addr = init(temp()),
         is_ssa_var = empty(),
+        // Note: you can't use a free-ing allocator here because of the shit i pull with :ConfusingPrims
+        // but for deduplication you want the functions to live forever anyway
         out_alloc = comp.get_alloc(),  
         current_block = (id = 0),
         clock = 0,
@@ -138,12 +151,12 @@ fn emit_bc(comp: CompCtx, bc: *BcBackend, f: FuncId, when: ExecStyle) Res(*FnBod
 
 reserved_1to1_sig :: 0;
 :: List(Symbol);
-fn empty_fn_body(program: CompCtx, bc: *BcBackend, func: FuncId, when: ExecStyle) Res(*FnBody) = {
+fn empty_fn_body(program: CompCtx, bc: *BcBackend, func: FuncId, when: ExecStyle) CRes(*FnBody) = {
     f := program.get_function(func);
     f_ty := @unwrap(f.finished_ty(), "ICE: fn type not ready") return;
     sigs := PrimSig.list(1, program.get_alloc());
     {
-        rp := program.data.cast()[][].get_or_create_type(rawptr);
+        rp := rawptr; // :get_or_create_type
         f_ty: FnType = (arg = rp, ret = rp, arity = 1);
         sig_data := program.prim_sig(f_ty).unwrap();
         @debug_assert_eq(sigs.len, reserved_1to1_sig);
@@ -165,7 +178,7 @@ fn empty_fn_body(program: CompCtx, bc: *BcBackend, func: FuncId, when: ExecStyle
 }
 
 // TODO: if you have an unclosed string it randomly decides later top level vars are undeclared? -- Jul 7 
-fn bind_args(self: *EmitBc, arguments: *Pattern) Res(i64) #once = {
+fn bind_args(self: *EmitBc, arguments: *Pattern) CRes(i64) #once = {
     arity: u16 = arguments.bindings.len.trunc();
 
     func := self.program.get_function(self.result.func);
@@ -233,7 +246,7 @@ fn bind_args(self: *EmitBc, arguments: *Pattern) Res(i64) #once = {
     (Ok = pushed)
 }
 
-fn compile_for_arg(self: *EmitBc, arg: *FatExpr, arity: usize) Res(bool) = {
+fn compile_for_arg(self: *EmitBc, arg: *FatExpr, arity: usize) CRes(bool) = {
     info := self.program.get_info(arg.ty);
     // If the whole thing is passed in registers, cool, we're done.
     if !info.pass_by_ref {
@@ -278,11 +291,6 @@ fn compile_for_arg(self: *EmitBc, arg: *FatExpr, arity: usize) Res(bool) = {
             fn Deref(arg) => {
                 _pushed += 1;
                 
-                // :thiscanthappenyoudhope
-                //p := self.program.data.cast()[][].ptr_ty(ty);
-                //if p != arg.ty {
-                //    @println("% vs %", self.program.log(p), self.program.log(arg.ty));
-                //};
                 // TODO: this is probably unsound.
                 //       we're assuming that we can defer the load to be done by the callee but that might not be true.
                 @try(self.compile_expr(arg[], .PushStack, false)) return;
@@ -346,7 +354,7 @@ fn store_pre(self: *EmitBc, ty: Type) void = {
     }
 }
 
-fn load(self: *EmitBc, ty: Type) PRes = {
+fn load(self: *EmitBc, ty: Type) CRes(void) = {
     if(ty.is_never(), => self.push(.Unreachable));
     slots := self.slot_count(ty);
     @switch(slots) {
@@ -373,7 +381,7 @@ fn load(self: *EmitBc, ty: Type) PRes = {
     .Ok
 }
 
-fn emit_body(self: *EmitBc, f: FuncId) PRes #once = {
+fn emit_body(self: *EmitBc, f: FuncId) CRes(void) #once = {
     func := self.program.get_function(f);
     
     // TODO: use choose_impl
@@ -443,7 +451,7 @@ fn emit_body(self: *EmitBc, f: FuncId) PRes #once = {
     .Ok
 }
 
-fn emit_return(self: *EmitBc, ret: Type) Res(void) = {
+fn emit_return(self: *EmitBc, ret: Type) CRes(void) = {
     if !ret.is_never() {
         slots := self.slot_count(ret); // TODO: this is in the sig so don't look it up again. 
         op: Bc = @switch(slots) {
@@ -469,7 +477,7 @@ fn emit_return(self: *EmitBc, ret: Type) Res(void) = {
 }
 
 fn log_bc(self: CompCtx, func: *Func, result: *FnBody, out: *List(u8)) void = {
-    @if(BOOTSTRAP_ONLY_MODE) return();
+    //@if(BOOTSTRAP_ONLY_MODE) return();
     @fmt(out, "[#log_bc %] %\n", self.get_string(func.name), result.signeture&);
     enumerate result.blocks { i, block | 
         continue :: local_return;
@@ -500,7 +508,7 @@ fn emit_runtime_call(
     result_location: ResultLoc,
     can_tail: bool,
     $do_call: @Fn(sig: *PrimSig, tail: bool) void,
-) PRes = { 
+) CRes(void) = { 
     sig := @try(prim_sig(self.program, f_ty)) return;
 
     :: if(?u16);
@@ -547,7 +555,7 @@ fn emit_runtime_call(
     };
     
     // :sema_regression this shouldn't need the hint
-    @as(PRes) (.Ok)
+    @as(CRes(void)) (.Ok)
 }
 
 fn mark_variable(self: *EmitBc, name: Var, id: u16) void = {
@@ -559,7 +567,7 @@ fn mark_variable(self: *EmitBc, name: Var, id: u16) void = {
     };
 }
 
-fn compile_stmt(self: *EmitBc, stmt: *FatStmt) PRes = {
+fn compile_stmt(self: *EmitBc, stmt: *FatStmt) CRes(void) = {
     self.last_loc = stmt.loc;
     @match(stmt.stmt&) {
         fn Eval(expr) void => return(self.compile_expr(expr, .Discard, false));
@@ -632,7 +640,7 @@ fn compile_stmt(self: *EmitBc, stmt: *FatStmt) PRes = {
     .Ok
 }
 
-fn do_binding(self: *EmitBc, name: ?Var, ty: Type, value: *FatExpr) PRes = {
+fn do_binding(self: *EmitBc, name: ?Var, ty: Type, value: *FatExpr) CRes(void) = {
     id := self.add_var(ty);
     self.addr_var(id);
     self.result_addr_depth += 1;
@@ -651,7 +659,7 @@ fn do_binding(self: *EmitBc, name: ?Var, ty: Type, value: *FatExpr) PRes = {
 // but this operation is subtble enough that making control flow more indirect would probably make it more confusing. 
 //
 // If result_location == .ResAddr, the top of the stack on entry to this function has the pointer where the result should be stored.
-fn compile_expr(self: *EmitBc, expr: *FatExpr, result_location: ResultLoc, can_tail: bool) PRes = {
+fn compile_expr(self: *EmitBc, expr: *FatExpr, result_location: ResultLoc, can_tail: bool) CRes(void) = {
     @debug_assert(!expr.ty.is_unknown(), "Not typechecked: %", self.program.log(expr));
     @debug_assert(self.slot_count(expr.ty).lt(16).or(result_location != .PushStack), "% %", self.program.log(expr), self.program.log(expr.ty));
     self.last_loc = expr.loc;
@@ -833,7 +841,7 @@ fn compile_expr(self: *EmitBc, expr: *FatExpr, result_location: ResultLoc, can_t
     }
 }
 
-fn deref_top_of_stack(self: *EmitBc, result_location: ResultLoc, value_type: Type) PRes = {
+fn deref_top_of_stack(self: *EmitBc, result_location: ResultLoc, value_type: Type) CRes(void) = {
     slots := self.slot_count(value_type);
     if slots == 0 {
         @match(result_location) {
@@ -918,7 +926,7 @@ fn zero_memory_at_top_of_stack(self: *EmitBc, expr_ty: Type) void = {
 //    f_id
 //}
 
-fn emit_call(self: *EmitBc, f: *FatExpr, arg: *FatExpr, result_location: ResultLoc, can_tail: bool) PRes #once = {
+fn emit_call(self: *EmitBc, f: *FatExpr, arg: *FatExpr, result_location: ResultLoc, can_tail: bool) CRes(void) #once = {
     caller := self.program.get_function(self.result.func);
     @match(self.program.get_type(f.ty)) {
         fn Fn(f_ty) => {
@@ -1041,7 +1049,7 @@ fn push_sig(self: *EmitBc, sig: PrimSig) u32 = {
     self.result.sig_payloads.len.sub(1).trunc()
 }
 
-fn emit_block_expr(self: *EmitBc, expr: *FatExpr, result_location: ResultLoc, can_tail: bool) PRes #once = {
+fn emit_block_expr(self: *EmitBc, expr: *FatExpr, result_location: ResultLoc, can_tail: bool) CRes(void) #once = {
     block := expr.expr.Block&;
     body := block.body&;
     value := block.result;
@@ -1125,7 +1133,7 @@ fn emit_block_expr(self: *EmitBc, expr: *FatExpr, result_location: ResultLoc, ca
     .Ok
 }
 
-fn emit_value(self: *EmitBc, value: *Values, result_location: ResultLoc, expr_ty: Type) PRes #once = {
+fn emit_value(self: *EmitBc, value: *Values, result_location: ResultLoc, expr_ty: Type) CRes(void) #once = {
     if(result_location == .Discard, => return(.Ok));
     want_emit_by_memcpy := value.len() > 16;  // dont change this to include small things unless you do something about values being stored inline.
     // TODO: you probably want to allow people to overload bake_relocatable_value even if !contains_pointers, but also there's no point. -- Jun 19
@@ -1223,7 +1231,7 @@ fn emit_value(self: *EmitBc, value: *Values, result_location: ResultLoc, expr_ty
 }
 
 // :PlaceExpr
-fn addr_macro(self: *EmitBc, arg: *FatExpr, result_location: ResultLoc) PRes #once = {
+fn addr_macro(self: *EmitBc, arg: *FatExpr, result_location: ResultLoc) CRes(void) #once = {
     self.last_loc = arg.loc;
     // field accesses should have been desugared.
     @err_assert(arg.expr&.is(.GetVar), "took address of r-value") return;
@@ -1242,7 +1250,7 @@ fn addr_macro(self: *EmitBc, arg: *FatExpr, result_location: ResultLoc) PRes #on
 }
 
 // we never make the temp variable. if the arg is big, caller needs to setup a result location.
-fn emit_call_if(self: *EmitBc, arg: *FatExpr, result_location: ResultLoc, can_tail: bool) PRes #once = {
+fn emit_call_if(self: *EmitBc, arg: *FatExpr, result_location: ResultLoc, can_tail: bool) CRes(void) #once = {
     @err_assert(arg.expr&.is(.If), "ICE: expected if") return;
     parts := arg.expr.If;
     
@@ -1276,7 +1284,7 @@ fn emit_call_if(self: *EmitBc, arg: *FatExpr, result_location: ResultLoc, can_ta
     .Ok
 }
 
-fn emit_switch(self: *EmitBc, arg: *FatExpr, result_location: ResultLoc, can_tail: bool) PRes #once = {
+fn emit_switch(self: *EmitBc, arg: *FatExpr, result_location: ResultLoc, can_tail: bool) CRes(void) #once = {
     @err_assert(arg.expr&.is(.Switch), "ICE: expected switch") return;
     parts := arg.expr.Switch;
     
@@ -1332,7 +1340,7 @@ fn emit_switch(self: *EmitBc, arg: *FatExpr, result_location: ResultLoc, can_tai
     .Ok
 }
 
-fn emit_call_loop(self: *EmitBc, arg: *FatExpr) PRes #once = {
+fn emit_call_loop(self: *EmitBc, arg: *FatExpr) CRes(void) #once = {
     @debug_assert_eq(arg.ty, void);
 
     prev_block := self.current_block;
@@ -1355,7 +1363,7 @@ fn emit_call_loop(self: *EmitBc, arg: *FatExpr) PRes #once = {
 }
 
 // :PlaceExpr
-fn set_deref(self: *EmitBc, place: *FatExpr, value: *FatExpr) PRes #once = {
+fn set_deref(self: *EmitBc, place: *FatExpr, value: *FatExpr) CRes(void) #once = {
     // we care about the type of the pointer, not the value because there might be a cast.
     @match(place.expr&) {
         fn GetVar(_) => @try(self.addr_macro(place, .PushStack)) return;
@@ -1370,7 +1378,7 @@ fn set_deref(self: *EmitBc, place: *FatExpr, value: *FatExpr) PRes #once = {
 }
 
 // TODO: rename? also used for tagged. 
-fn construct_struct(self: *EmitBc, pattern: *Pattern, requested: Type, result_location: ResultLoc) PRes #once = {
+fn construct_struct(self: *EmitBc, pattern: *Pattern, requested: Type, result_location: ResultLoc) CRes(void) #once = {
     raw_container_ty := self.program.raw_type(requested);
     slots := self.slot_count(raw_container_ty);
     @debug_assert(slots < 8 || result_location != .PushStack, "too big to put on stack"); 
@@ -1596,13 +1604,6 @@ fn add_var(ctx: *EmitBc, ty: Type) u16 = {
 fn get_primatives(self: *EmitBc, ty: Type) []Prim #inline = 
     self.program.get_primatives(ty);
 
-fn comp(self: *SelfHosted) CompCtx = 
-    self.vtable.with(self.legacy_indirection);
-
-
-fn prim(self: *SelfHosted, ty: Type) ?Prim = 
-    self.comp().prim(ty);
-
 fn idx(s: FuncId) i64 = s.to_index().zext();
 
 fn is_float(self: Prim) bool = 
@@ -1687,7 +1688,6 @@ fn hash(h: *TrivialHasher, s: **FnBody) void = {
     AutoHash(get_variant_type(TypeInfo, TypeInfo.Tag().Array), H); AutoEq(get_variant_type(TypeInfo, TypeInfo.Tag().Array));
     AutoHash(get_variant_type(TypeInfo, TypeInfo.Tag().Tagged), H); AutoEq(get_variant_type(TypeInfo, TypeInfo.Tag().Tagged));
     AutoHash(get_variant_type(TypeInfo, TypeInfo.Tag().Enum), H); AutoEq(get_variant_type(TypeInfo, TypeInfo.Tag().Enum));
-    AutoHash(get_variant_type(TypeInfo, TypeInfo.Tag().Swizzler), H); AutoEq(get_variant_type(TypeInfo, TypeInfo.Tag().Swizzler));
     AutoHash(Ty(Symbol, Type), H); AutoEq(Ty(Symbol, Type));
     AutoHash(Ty(Type, Symbol), H); AutoEq(Ty(Type, Symbol));
     AutoHash(Ty(Symbol, Values), H); AutoEq(Ty(Symbol, Values));
@@ -1706,5 +1706,158 @@ fn hash(h: *TrivialHasher, s: **FnBody) void = {
         hasher.hash(self.fields&);
         hasher.hash(self.is_tuple&);
     }
+    
+    DeriveFmt(Bc);
+    DeriveFmt(get_variant_type(Bc, Bc.Tag().CallDirect));
+    DeriveFmt(get_variant_type(Bc, Bc.Tag().CallFnPtr));
+    DeriveFmt(get_variant_type(Bc, Bc.Tag().PushConstant));
+    DeriveFmt(get_variant_type(Bc, Bc.Tag().JumpIf));
+    DeriveFmt(get_variant_type(Bc, Bc.Tag().AddrVar));
+    DeriveFmt(get_variant_type(Bc, Bc.Tag().SaveSsa));
+    DeriveFmt(get_variant_type(Bc, Bc.Tag().LoadSsa));
+    DeriveFmt(get_variant_type(Bc, Bc.Tag().LastUse));
+    DeriveFmt(get_variant_type(Bc, Bc.Tag().Ret2));
+    DeriveFmt(get_variant_type(Bc, Bc.Tag().Goto));
+    ::display_slice(Prim);
+    ::display_slice(BbId);
+    
+    DeriveFmt(BakedVarId);
+    
+    fn display(self: *BbId, out: *List(u8)) void = {
+        @fmt(out, "B%", self.id);
+    }
+    
+    fn display(self: *u16, out: *List(u8)) void = {
+        display(@as(i64) self[].zext(), out);
+    }
+    
+    fn display(self: *PrimSig, out: *List(u8)) void = {
+        @fmt(out, "%", self.args);
+        if self.no_return {
+            @fmt(out, " #never");
+        };
+        if self.first_arg_is_indirect_return {
+            @fmt(out, " #big");
+        };
+    }
 };
     
+// TODO: :const_field_fix
+// TODO: if you move the ffi dynamic abi call to this language you can remove the rust version of this function. 
+/// Take some opaque bytes and split them into ints. So (u8, u8) becomes a vec of two i64 but u16 becomes just one.
+fn deconstruct_values(program: CompCtx, ty: Type, bytes: *ReadBytes, out: *List(i64), offsets: ?*List(Ty(Prim, u16))) CRes(void) = {
+    info := program.get_info(ty);
+
+    @debug_assert_eq(bytes.i.mod(info.align_bytes.zext()), 0);
+    found_len := bytes.bytes.len() - bytes.i;
+    @err_assert(
+        found_len >= info.stride_bytes.zext(),
+        "deconstruct_values of % wants % bytes but found %: %",
+        program.log(ty), info.stride_bytes, found_len, {
+            bytes := bytes.bytes.slice(bytes.i, bytes.bytes.len);
+            out: List(u8) = list(temp());
+            for bytes{ b | 
+                @fmt(out&, "%, ", @as(i64) b.zext());
+            };
+            out.items()
+        }
+    ) return;
+    
+    single :: fn($T: Type, prim: Prim) void => {
+        offset := bytes.i;
+        if offsets { offsets |
+            offsets.push(@as(Ty(Prim, u16)) (prim, bytes.i.trunc()));
+        };
+        raw := bytes.read_next(T);
+        out.push(@as(i64) raw.int());
+    };
+    
+    @match(program.get_type(ty)) {
+        fn Placeholder() => { return(@err("ICE: Unfinished type")); }; // TODO: show the type
+        fn Never()       => return(@err("invalid type: Never"));
+        fn F64()     => i64.single(.F64);
+        fn FnPtr(_)  => i64.single(.P64);
+        fn Ptr(_)    => i64.single(.P64);
+        fn VoidPtr() => i64.single(.P64);
+        fn F32()     => u32.single(.F32);
+        fn Fn(_)     => u32.single(.I32);
+        fn Label(_)  => u32.single(.I32);
+        fn void()    => return(.Ok);
+        fn Bool()    => u8.single(.I8);
+        fn Tagged(f) => {
+            start := bytes.i;
+            start_count := out.len;
+            i64.single(.I64);
+            tag := out.last().unwrap()[];
+            @err_assert(tag < f.cases.len, "Invalid tag % in constant", tag) return;
+            case := f.cases.index(tag);
+            @try(deconstruct_values(program, case._1, bytes, out, offsets)) return;
+            padding := (@as(i64) info.stride_bytes.zext()) - (bytes.i - start);
+            @err_assert(padding >= 0, "ICE: confused about @tagged size.") return;
+            end_count := out.len;
+            padding_slots := (@as(i64) info.size_slots.zext()) - (end_count - start_count);
+            @err_assert(padding_slots >= 0, "ICE: too many slots????") return;
+            
+            // :tagged_prims_hack
+            // TODO: try to make a test that fails without this. 
+            //       ie just replace with 
+            //       range(0, padding_slots) { _ |
+            //          // TODO: wrong prim
+            //          i64.single(.I64);
+            //      };
+            //      otherwise reduce the copy-paste of the 3 versions of this. 
+            types := program.flat_tuple_types(ty);
+            types := types.items().slice_last(padding_slots);
+            types := types.unwrap();
+            // now types is just padding
+
+            // If this is a smaller varient, pad out the slot.
+            for types { p |
+                ty := @unwrap(program.prim(p), "not prim") return;
+                out.push(0);
+                if offsets { offsets |
+                    // TODO: do we care about the offsets?
+                    offsets.push(@as(Ty(Prim, u16)) (ty, bytes.i.trunc()));
+                };
+            };
+            bytes.i += padding;
+        }
+        fn Enum(f)   => return(deconstruct_values(program, f.raw, bytes, out, offsets));
+        fn Named(f)  => return(deconstruct_values(program, f._0, bytes, out, offsets)); // TODO: make Named payload not a tuple or do destructuring here. -- Jul 8
+        fn Int(_)    => {
+            @switch(program.get_info(ty)[].stride_bytes) {
+                @case(1) => u8.single(.I8);
+                @case(2) => u16.single(.I16);
+                @case(4) => u32.single(.I32);
+                @case(8) => i64.single(.I64);
+                @default fn(n: u16) => return(@err("ICE: bad int stride %", n));
+            };
+        }
+        fn Array(f) => {
+            inner_align := program.get_info(f.inner).align_bytes();
+            range(0, f.len.zext()) { _ |
+                @debug_assert_eq(bytes.i.mod(inner_align.zext()), 0);
+                @try(deconstruct_values(program, f.inner, bytes, out, offsets)) return;
+            };
+        }
+        fn Struct(f) => {
+            @err_assert(f.layout_done, "ICE: layout not ready") return;
+            @err_assert(!f.is_union, "You can't deconstruct_values of a union because we don't know which varient is active.") return;
+            prev := 0;
+            size: i64 = program.get_info(ty)[].stride_bytes.zext();
+            start := bytes.i;
+            for f.fields { t |
+                continue :: local_return;
+                if t.kind == .Const {
+                    continue();
+                };
+                assert(prev <= t.byte_offset, "ICE: backwards field offset");
+                bytes.i = t.byte_offset;
+                @try(deconstruct_values(program, t.ty, bytes, out, offsets)) return;
+                prev = t.byte_offset;
+            };
+            bytes.i = start + size; // eat trailing stride padding
+        }
+    };
+    .Ok
+}

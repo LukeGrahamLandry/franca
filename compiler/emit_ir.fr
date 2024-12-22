@@ -323,11 +323,13 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = { // #log_ir("AIR")
         // TODO: use :ExprLevelAsm so you don't have to spill everything, 
         //       but that requires letting people annotate register usage.  -- Dec 3
         fn JittedAarch64(code) => { // TODO: just store this as bytes
+            @debug_assert(self.m.goal.arch == .aarch64);
             bytes := @as([]u8) (ptr = ptr_cast_unchecked(u32, u8, code.ptr), len = code.len * 4);
             self.entry.task = (Asm = (lnk = self.f.lnk&, bytes = bytes));
             return(.Ok)
         }
         fn X86AsmBytes(bytes) => {
+            @debug_assert(self.m.goal.arch == .x86_64);
             self.entry.task = (Asm = (lnk = self.f.lnk&, bytes = bytes.items()));
             return(.Ok)
         }
@@ -799,7 +801,6 @@ fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) CRes(Qbe.R
         @default => @panic("ICE: non callable: %", self.program.log(f));
     }
 }
-::enum(ExecStyle);
 
 fn emit_intrinsic_new(self: *EmitIr, op: *NewIntrinsicPayload, p: Placement, arg: []Qbe.Ref, caller: *Func, expr_ty: Type) CRes(Qbe.Ref) = {
     if(p&.is(.Discard), => return(Ok = QbeNull));
@@ -938,6 +939,7 @@ fn emit_constant(self: *EmitIr, value: *Values, p: Placement, expr_ty: Type) CRe
     if(p&.is(.Discard), => return(Ok = QbeNull));  // TODO: bake_relocatable_value side effect? 
     info := self.program.get_info(expr_ty);
     
+    
     // :SLOW all_zeroes is redundant with emit_relocatable_constant but for now we can't emit_relocatable_constant_body on something
     // with small fields + pointers, but its fine to emit as bytes if all zeros. 
     all_zero := value.all_zeroes();
@@ -977,6 +979,9 @@ fn emit_constant(self: *EmitIr, value: *Values, p: Placement, expr_ty: Type) CRe
                 self.blit(dest, src, info.stride_bytes.zext());
                 return(Ok = dest);
             };
+            
+            to_zero: ReadBytes = (bytes = value.bytes(), i = 0);
+            self.program.zero_padding(expr_ty, to_zero&);  // Needed for reproducible builds!
             
             out  := @try({self.program.vtable.emit_relocatable_constant_body}(self.program.data, value.bytes(), expr_ty, false)) return;
             if out.len == 1 {
@@ -1410,7 +1415,6 @@ fn get_aggregate(self: CompCtx, m: *CodegenShared, ty: Type) Qbe.Ref = {
         i := @match(type) {
             fn Named(it)    => self.get_aggregate(m, it._0).val();
             fn Enum(it)     => self.get_aggregate(m, it.raw).val();
-            fn Swizzler(it) => self.get_aggregate(m, it.raw).val();
             fn Struct(it) => {
                 yield :: local_return;
                 if repr_transparent(it) { repr |
@@ -1536,7 +1540,6 @@ fn as_field(self: CompCtx, m: *CodegenShared, ty: Type) Qbe.Field = {
         fn Bool()     => (type = .Fb, len = 1);
         fn Named(it)  => self.as_field(m, it._0);
         fn Enum(it)   => self.as_field(m, it.raw);
-        fn Swizzler(it)   => self.as_field(m, it.raw);
         fn Int(it)    => @switch(it.bit_count) {
             @case(8)  => (type = .Fb, len = 1);
             @case(16) => (type = .Fh, len = 2);
@@ -1616,7 +1619,6 @@ fn load_op(self: CompCtx, ty: Type) Ty(Qbe.O, Qbe.Cls) = @match(self.get_type(ty
     fn Fn(_)     => (.loaduw, .Kw);
     fn Named(it) => self.load_op(it._0);
     fn Enum(it)  => self.load_op(it.raw);
-    fn Swizzler(it)  => self.load_op(it.raw);
     fn Bool()    => (.loadub, .Kw);
     fn Tagged(it) => {
         if self.is_tag_only(it) {
@@ -1650,7 +1652,6 @@ fn store_op(self: CompCtx, ty: Type) Qbe.O = @match(self.get_type(ty)) {
     fn Fn(_)     => .storew;
     fn Named(it) => self.store_op(it._0);
     fn Enum(it)  => self.store_op(it.raw);
-    fn Swizzler(it)  => self.store_op(it.raw);
     fn Bool()    => .storeb;
     fn Tagged(it) => {
         if !self.is_tag_only(it) {

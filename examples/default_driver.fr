@@ -19,7 +19,9 @@
 #include_std("compiler/backend/llvm.fr");  // note: we re-jit the llvm backend every time. 
 #include_std("compiler/emit_ir.fr");  
 #include_std("compiler/worker.fr");  
-#include_std("backend/from_bc.fr");
+#include_std("backend/from_bc.fr"); 
+#include_std("compiler/emit_bc.fr");
+#include_std("compiler/backend/lib.fr");  
 
 BOOTSTRAP_ONLY_MODE :: false;
 
@@ -297,7 +299,7 @@ fn compile_with_llvm(c: CompCtx, fid: FuncId, entry: ProgramEntry, debug_info: b
 QBE_PATH :: "bindings/qbe/qbe";
 fn compile_with_qbe(c: CompCtx, fid: FuncId, entry: ProgramEntry, arch: Arch, os: Os) void = {
     env: TargetEnv = (arch = arch, os = os);
-    ir_text := emit_qbe(c, @slice(fid), entry, env&);
+    ir_text := emit_qbe(c, @slice(fid), entry, env&, rawptr.zeroed());
     // TODO: clean up this hack for inline asm
     ::?List(u8);
     inline_asm_functions := ir_text&.pop_current_bucket().unwrap();
@@ -396,8 +398,15 @@ fn load_file(path: Str, vtable: *ImportVTable, build_options: *BuildOptions) Com
     src := "\n#include_std(\"lib/core.fr\");".clone(forever);
     src&.push_all(the_code.items());
     comp := vtable.new_with_src(src.items(), path, build_options);
+    c := vtable.with(comp);
+    
+    if build_options.comptime_jit_data.is_null() {
+        bc: *BcBackend = create(c);
+        build_options.comptime_jit_data = BcBackend.raw_from_ptr(bc);
+    };
+    
     // TODO: libs
-    vtable.with(comp)
+    c
 }
 
 fn find_first_fr_file(args: []Str) Str = {

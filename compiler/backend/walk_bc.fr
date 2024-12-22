@@ -3,6 +3,10 @@
 // Also this always calls through the vtable because I want you to be able to load this in your driver and write your own backends.
 // So it shouldn't directly access compiler internals. See examples/qbe.fr + examples/default_driver.fr for usage. 
 
+#include_std("compiler/emit_bc.fr");
+#include_std("compiler/backend/lib.fr");
+#include_std("compiler/ast_external.fr");
+
 // IMPORTANT: your setup+inst+finished run inside a temp allocator reset after each function. 
 // TODO: traits
 /*
@@ -10,7 +14,7 @@ Backend :: @trait fn($B: Type) = {
     // B.Val needs to be Copy.
     :: assert_eq(@type :: B.Val, Type); // TODO: better syntax for associated types? 
     
-    fn new(comp: CompCtx, alloc: Alloc, arch: Arch, os: Os) B; 
+    fn new(comp: CompCtx, alloc: Alloc, arch: Arch, os: Os, userdata: rawptr) B; 
     fn inst_call(self: *B, args: Slice(B.Val), sig: PrimSig, f: FuncId, tail: bool, loc: ?Span) Slice(B.Val);
     fn inst_trap(self: *B) void;
     fn inst_call_ptr(self: *B, args: Slice(B.Val), sig: PrimSig, ptr: B.Val, loc: ?Span, context: bool) Slice(B.Val);
@@ -60,8 +64,8 @@ fn CodeGen($B: Type) Type = {
     );
     
     // :TooManyArgsX64
-    emit_program :: fn(comp: CompCtx, fns: [] FuncId, entry: ProgramEntry, target: *TargetEnv) BucketArray(u8) = {
-        alloc := libc_allocator; // TODO!
+    emit_program :: fn(comp: CompCtx, fns: [] FuncId, entry: ProgramEntry, target: *TargetEnv, userdata: rawptr) BucketArray(u8) = {
+        alloc := comp.get_alloc();
         env := comp.get_comptime_env();
         gen: Self = (
             program = comp,
@@ -70,7 +74,7 @@ fn CodeGen($B: Type) Type = {
             stack = list(temp()),
             pending = fns.clone(libc_allocator),
             static_context_var = env.static_context_var,
-            backend = new(comp, alloc, target.arch, target.os),
+            backend = new(comp, alloc, target.arch, target.os, userdata),
         );
         @assert(comp.get_build_options()[].implicit_context_runtime == gen.static_context_var.is_none(), "should have baked the static context location already iff no implicit context");
         work_stack := FuncId.list(temp());
@@ -110,8 +114,7 @@ fn CodeGen($B: Type) Type = {
                 continue();
             };
             
-            // note: this needs to go through the compiler's vtable so it can call check_for_new_aot_bake_overloads 
-            xx := {comp.vtable.emit_bc}(comp.data, fid, .Aot);    // TODO: fix parsing to allow this as a quick expr
+            xx := emit_bc(comp, fid, .Aot);
             body := or xx { err |
                 @println("failed emit_bc for %", comp.get_string(func.name));
                 comp.report_error(err)

@@ -159,8 +159,10 @@ fn create_dyncall_shim(self: *SelfHosted, f_ty: FnType) void = {
     self.dyncalls&.insert(f_ty, (Pending = id));
 }
 
-// TODO: allow redeclaration in this specific case and make sure it updates the address in the got slot when it gets compiled for real.
-// TODO: calls need to keep going through the got until the real one is compiled so i guess the symbol here should have a different name.  
+// TODO: this generates shitty code. 
+//       - i save the registers used only on the slow path at entry of the function. 
+//       - it loads from the got twice on the fast path because i don't deduplicate RCon across blocks.
+//       - redundant copies of aggregates. 
 fn create_jit_shim(self: CompCtx, shared: *CodegenShared, fid: FuncId, handler_callee_address: rawptr) void = {
     // TODO: replace accesses to bc.jitted.dispatch_table[fid.as_index()]?
     func := self.get_function(fid);
@@ -179,32 +181,68 @@ fn create_jit_shim(self: CompCtx, shared: *CodegenShared, fid: FuncId, handler_c
         f.leaf = false;
         f.lnk.no_inline = true;
         f.lnk.id = id;
-        f.start = newblk();
-        f.start.ins = new(0);
-        f.nblk = 1;
-        entry.task = (Shim = (f = f, shim_for = m.intern(self.fmt_fn_name(fid))));
+        f.start = newblk(); f.start.ins = new(0);
+        do_the_call := newblk(); do_the_call.ins = new(0);
+        not_ready := newblk(); not_ready.ins = new(0);
+        
+        f.nblk = 3;
+        target_id := self.data.cast()[][].comptime_jit_symbol_id(fid);
+        entry.task = (Shim = (f = f, shim_for = target_id));
         
         // collect parameters
         env    := f.newtmp("context", .Kl);
         push(f.start, make_ins(.pare, .Kl, env, QbeNull, QbeNull));
-        arg_ty := func.finished_arg.unwrap();
-        ret_ty := func.finished_ret.unwrap();
+        arg_ty := func.finished_arg.expect("arg infered");
+        ret_ty := func.finished_ret.expect("ret infered");
         pars := emit_par_instructions(self, shared, func.arg&, arg_ty, f);
         
+        // If the entry in __got for the target symbol is not this shim, call it directly.
+        // Otherwise, call into the compiler to ask for it to be compiled. 
+        // Most calls will just go through __got directly in which case this check is wasteful,
+        // but it helps in the case where you created a function pointer to the shim and stuck it in memory somewhere,
+        // now not every single call to that has to go through the compiler and take a mutex to look at the symbol. 
+        // It seems this doesn't make each shim only call into the compiler once (TODO: why?) but it does lower the number. 
+        // -- Dec 22
+        target := f.unique_named_con(target_id, 0);
+        myself := f.unique_named_con(id, 0);
+        is_ready := f.newtmp("ready", .Kl);  // to test if this is helping, change this to f.newcon(0) and add logging in report_called_uncompiled_or_just_fix_the_problem. 
+        push(f.start, make_ins(.cnel, .Kl, is_ready, myself, target));
+        f.start.jmp = (arg = is_ready, type = .jnz);
+        f.start.s1 = do_the_call;
+        f.start.s2 = not_ready;
+        
         // call into the compiler to get the real callee
+        new_callee := f.newtmp("callee", .Kl);
+        push(not_ready, make_ins(.arge, .Kl, QbeNull, env, QbeNull));
+        push(not_ready, make_ins(.arg,  .Kl, QbeNull, f.getcon(SelfHosted.int_from_ptr(c)), QbeNull));
+        push(not_ready, make_ins(.arg,  .Kw, QbeNull, f.getcon(fid.as_index()), QbeNull));
+        push(not_ready, make_ins(.call, .Kl, new_callee,  f.getcon(handler_callee_address.int_from_rawptr()), QbeNull));
+        not_ready.jmp.type = .jmp;
+        not_ready.s1 = do_the_call;
+        
+        // Rejoin and call something
         callee := f.newtmp("callee", .Kl);
-        push(f.start, make_ins(.arge, .Kl, QbeNull, env, QbeNull));
-        push(f.start, make_ins(.arg,  .Kl, QbeNull, f.getcon(SelfHosted.int_from_ptr(c)), QbeNull));
-        push(f.start, make_ins(.arg,  .Kw, QbeNull, f.getcon(fid.as_index()), QbeNull));
-        push(f.start, make_ins(.call, .Kl, callee,  f.getcon(handler_callee_address.int_from_rawptr()), QbeNull));
+        do_the_call.phi = temp().box(Qbe.Phi);
+        do_the_call.phi[] = (
+            cls = .Kl, 
+            to = callee,
+            narg = 2,
+            blk = new(2),
+            arg = new(2),
+            link = Qbe.Phi.ptr_from_int(0),
+        );
+        do_the_call.phi.blk[0] = not_ready;
+        do_the_call.phi.arg&[0] = new_callee;
+        do_the_call.phi.blk[1] = f.start;
+        do_the_call.phi.arg&[1] = target;
         
         // convert to arguments
-        push(f.start, make_ins(.arge, .Kl, QbeNull, env, QbeNull));
+        push(do_the_call, make_ins(.arge, .Kl, QbeNull, env, QbeNull));
         each pars { p |
             @if_else {
                 @if(p.void)   => ();
-                @if(p.scalar) => push(f.start, make_ins(.arg,  p.k, QbeNull, p.r, QbeNull));
-                @else         => push(f.start, make_ins(.argc, p.k, QbeNull, self.get_aggregate(shared, p.type), p.r));
+                @if(p.scalar) => push(do_the_call, make_ins(.arg,  p.k, QbeNull, p.r, QbeNull));
+                @else         => push(do_the_call, make_ins(.argc, p.k, QbeNull, self.get_aggregate(shared, p.type), p.r));
             };
         };
         
@@ -217,13 +255,16 @@ fn create_jit_shim(self: CompCtx, shared: *CodegenShared, fid: FuncId, handler_c
             @if(k0 != .Ke)     => (@as(Qbe.J) @as(i32) Qbe.J.retw.raw() + k0.raw(), f.newtmp("result", k0), k0, QbeNull);
             @else              => (Qbe.J.retc, f.newtmp("result", .Kl), Qbe.Cls.Kl, self.get_aggregate(shared, ret_ty));
         };
-        push(f.start, make_ins(.call, k, result_r, callee, type_r));
+        push(do_the_call, make_ins(.call, k, result_r, callee, type_r));
         
         // return the result to our caller
         if type_r != QbeNull {  
             f.retty = type_r.val().intcast();
         };
-        f.start.jmp = (type = jmp, arg = result_r);
+        do_the_call.jmp = (type = jmp, arg = result_r);
+        
+        f.start.link = do_the_call;
+        do_the_call.link = not_ready;
     };
     enqueue_task(shared, entry);
 }
@@ -292,7 +333,7 @@ fn save_in_got(self: *SelfHosted, fid: FuncId, addr: rawptr) void = {
         m := self.comptime_codegen.m;
         id := self.comptime_jit_symbol_id(fid);
         use_symbol(m, id) { s |
-            @debug_assert(s.got_lookup_offset != -1);
+            @debug_assert(s.got_lookup_offset != -1, "save_in_got missing slot for %", s.name);
             got := m.segment_address(.ConstantData, s.got_lookup_offset);  // :GotAtConstantDataBase 
             got := ptr_cast_unchecked(u8, rawptr, got);
             got[] = addr;
@@ -300,10 +341,6 @@ fn save_in_got(self: *SelfHosted, fid: FuncId, addr: rawptr) void = {
     };
 }
 
-// TODO: this needs to get much faster because you have to call through it every time you call a function that got unlucky in compile order. 
-//       that shouldn't be true anymore with NEW_COMPTIME_JIT because we update the dispatch table.
-//       tho not if you put that function pointer somewhere i guess      
-// 
 // TODO: it would be nice if i had the arguments here for reporting what call you actually tried to make. 
 //       but this way will be even better once i can lazily compile it and just lean on the backend to make the args flow through. 
 report_called_uncompiled_or_just_fix_the_problem :: @as(rawptr) fn(self: *SelfHosted, fid: FuncId) rawptr = {
@@ -312,12 +349,18 @@ report_called_uncompiled_or_just_fix_the_problem :: @as(rawptr) fn(self: *SelfHo
     push_zeroed_dynamic_context {
         context(DefaultContext)[].comptime = SelfHosted.raw_from_ptr(self);
         context(DefaultContext)[].temporary_allocator = self.shim_callback_alloc&;
+        context(DefaultContext)[].panic_hook = fn(msg) = {
+            println("Panicked while handling a jit shim callback.");
+            println(msg);
+            abort()
+        };
         
         @if(TRACE_SHIMS)
         @println("called shim for % %", fid, self.log_name(fid));
         
         // important: have to be careful about which comptime is in the context if the driver program gets compiled lazily. 
         func := self.get_function(fid);
+        is_target_split := false;
         //@println("shim! % % %", SelfHosted.raw_from_ptr(self), context(DefaultContext)[].comptime, self.pool.get(func.name));
         if func.get_flag(.RealAsmDone) { 
             @if(TRACE_SHIMS) @println("- ready");
@@ -325,14 +368,16 @@ report_called_uncompiled_or_just_fix_the_problem :: @as(rawptr) fn(self: *SelfHo
             //       but that's sad because most of the time its just an array lookup.  -- Nov 25
             if self.get_fn_callable(fid) { addr | 
                 m := self.comptime_codegen.m;
-                this_is_shim := false;
+                this_is_shim := false; 
+                //@println("% % %", self.pool.get(func.name), this_is_shim, self.comp().log(func));
                 
                 id := self.comptime_jit_symbol_id(fid);
                 use_symbol(m, id) { s | 
-                    this_is_shim = s.jit_addr.identical(s.shim_addr);
+                    this_is_shim = this_is_shim || s.jit_addr.identical(s.shim_addr);
                 };
                 // It's been compiled since last we checked so just use that. 
                 if !this_is_shim {
+                    //println(self.pool.get(func.name));
                     save_in_got(self, fid, addr);
                     result = addr;
                 };

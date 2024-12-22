@@ -10,8 +10,9 @@
 //       but then the front end wouldn't see those expressions as constant for other #fold calls.
 
 #include_std("compiler/worker.fr");
+#include_std("compiler/pool.fr");
+#include_std("compiler/backend/walk_bc.fr");
 
-smuggle_module_pointer :: @static(*QbeModule);
 EmitQbe2 :: @struct(
     comp: CompCtx,
     b: QbeBuilder,
@@ -35,21 +36,25 @@ EmitQbe2 :: @struct(
 );
 
 // TODO: dependency problem so can't call this `init`
-fn new(comp: CompCtx, alloc: Alloc, arch: Arch, os: Os) EmitQbe2 = {
-    b := init(libc_allocator, smuggle_module_pointer[]);
+fn new(comp: CompCtx, alloc: Alloc, arch: Arch, os: Os, m: rawptr) EmitQbe2 = {
+    gpa := libc_allocator;
     s: EmitQbe2 = (
         comp = comp, 
-        b = b, 
+        b = (
+            globals = QbeModule.ptr_from_raw(m),
+            temporaries = list(gpa),
+            constants = list(gpa),
+            blocks = list(gpa),
+            aggragate_return_index = .None,
+        ), 
         block_args = list(temp()), 
         out = init(12, alloc), 
         current = BbId.zeroed(), 
         return_value_type_sizes = empty(), 
         os = os,
         arch = arch,
-        // TODO: this will get more complicated when we want to support comptime execution with this backend. 
         implicit_context = comp.get_build_options()[].implicit_context_runtime,
     );
-    smuggle_module_pointer[] = zeroed(*QbeModule);
     f: []Qbe.Field = @slice(@as(Qbe.Field) (type = .Fl, len = 8.trunc()), @as(Qbe.Field) (type = .Fl, len = 8.trunc()));
     s.pair_type_id = s.b&.struct_type(f, 16, 3);
     s
@@ -58,60 +63,26 @@ fn new(comp: CompCtx, alloc: Alloc, arch: Arch, os: Os) EmitQbe2 = {
 fn finished(self: *EmitQbe2, fid: FuncId) void = {
     name: List(u8) = list(temp()); 
     self.fmt_fn_name(fid, name&);
-    self.build_current(name.items(), self.comp.get_log_types(fid));
+    self.build(name.items(), self.comp.get_log_types(fid));
     self.body = zeroed(*FnBody); // :EVIL     but just avoiding confusion. 
     self.context = QbeNull;
     self.my_node = QbeNull;
 }; 
 
-fn build_current(self: *EmitQbe2, n: Str, logging: Str) void = {
-    entry := self.b&.build(n);
-    entry.logging = logging;
-    self.enqueue_task(entry);
-    self.b&.clear();
-}
-
-fn enqueue_task(self: *EmitQbe2, old_entry: *CodegenEntry) void = {
-    old_entry.release(true);
-    @if(use_threads, {
-        pthread_cond_signal(self.b.shared.bouba_progress_c&);
-    }, {
-        ::ptr_utils(*CodegenEntry);
-        idx := 0;
-        entry := self.b.shared.queue.acquire(false, idx&).unwrap();
-        @debug_assert(old_entry.identical(entry));
-        push_dynamic_context {
-            do_codegen(self.b.shared.m, entry);
-        };
-    });
-}
-
 fn add_code_bytes(self: *EmitQbe2, name: Str, bytes: []u8) void = {
-    entry := self.b&.bouba_acquire();
-    lnk := entry.arena&.borrow().box_zeroed(Qbe.Lnk);
-    entry.task = (Asm = (lnk = lnk, bytes = bytes));
-    lnk.id = self.b.shared.m.intern(name);
-    self.enqueue_task(entry);
+    id := self.b.globals.intern(name);
+    self.b.globals.add_code_bytes(id, bytes);  
 }
-
-
-#include_std("compiler/pool.fr");
-
-#include_std("compiler/backend/walk_bc.fr");
 
 emit_qbe_included_dyn :: fn(m: *QbeModule, comp: *CompCtx, fns: [] FuncId, entry: ProgramEntry, new_lowering: bool) BucketArray(u8) = {  
     @assert(ptr_cast_unchecked(@type comp.vtable.emit_qbe_included, i64, comp.vtable.emit_qbe_included&)[] != 0, "emit_qbe_included is not enabled");
+    if !new_lowering {
+        comp := comp[];
+        target: TargetEnv = (arch = m.goal.arch, os = m.goal.os);
+        return({CodeGen(EmitQbe2).emit}(comp, fns, entry, target&, QbeModule.raw_from_ptr(m)));
+    };
+
     {comp.vtable.emit_qbe_included}(QbeModule.raw_from_ptr(m), comp, fns, entry, new_lowering)
-};
-
-emit_qbe_included_sta :: fn(m: *QbeModule, comp: *CompCtx, fns: [] FuncId, entry: ProgramEntry, new_lowering: bool) BucketArray(u8) = {    
-    emit_qbe_included(QbeModule.raw_from_ptr(m), comp, fns, entry, new_lowering)
-};
-
-init_default_qbe_module :: fn(module_out: rawptr, qbe_env_goal: rawptr) void = {
-    m := QbeModule.ptr_from_raw(module_out);
-    e := QbeTargetEnv.ptr_from_raw(qbe_env_goal);
-    m[] = init_default_module(e[], false);
 };
 
 init_default_module_dyn :: fn(vtable: *ImportVTable, goal: QbeTargetEnv) QbeModule = {  
@@ -119,39 +90,6 @@ init_default_module_dyn :: fn(vtable: *ImportVTable, goal: QbeTargetEnv) QbeModu
     @assert(ptr_cast_unchecked(@type vtable.init_default_qbe_module, i64, vtable.init_default_qbe_module&)[] != 0, "init_default_qbe_module is not enabled");
     {vtable.init_default_qbe_module}(QbeModule.raw_from_ptr(m&), QbeTargetEnv.raw_from_ptr(goal&));
     m
-};
-
-init_default_module_sta :: fn(_: *ImportVTable, goal: QbeTargetEnv) QbeModule = {      // just for consistant naming
-    init_default_module(goal, false)
-};
-
-// this returns asm text or mach-o bytes depending on m.goal
-emit_qbe_included :: fn(m: rawptr, comp: *CompCtx, fns: [] FuncId, entry: ProgramEntry, new_lowering: bool) BucketArray(u8) = {    
-    m := QbeModule.ptr_from_raw(m);
-    smuggle_module_pointer[] = m;
-    comp := comp[];
-    target: TargetEnv = (arch = m.goal.arch, os = m.goal.os);
-    
-    if new_lowering {
-        shared := init(m, @as(CodegenWorker) codegen_thread_main);
-        main_thread_pump(comp, shared, fns);
-        @if(use_threads) {
-            frontend := clock_ms(CLOCK_THREAD_CPUTIME_ID);
-            @eprintln(">>> [CPU Time] frontend: %ms, codegen: %ms", frontend, shared.codegen_time);
-        };
-    } else {
-        _ := {CodeGen(EmitQbe2).emit}(comp, fns, entry, target&);
-    };
-
-    aaa: BucketArray(u8) = init(0, temp());
-    m.emit_suspended_inlinables();
-    if m.making_macho() { 
-        chunks := output_macho(m);
-        for chunks { c |
-            aaa&.push_bucket(maybe_uninit = c, len = c.len, gpa = temp());
-        };
-    };
-    aaa
 };
 
 fn emit_function_husk(self: *EmitQbe2, fid: FuncId, signeture: PrimSig, $emit_body: @Fn() void) void = {
@@ -177,7 +115,7 @@ fn emit_entry_points_and_debug_info(gen: *CodeGen(EmitQbe2), comp: CompCtx, fns:
                 self.b&.push_inst0(self.current, .call, .Kw, callee, QbeNull);
             };
             self.b&.end_block(self.current, (type = .retl, arg = self.b&.push_literal(0)));
-            self.build_current(fake_decl_name, "");
+            self.build(fake_decl_name, "");
             
             // now actually call it
             self.init_runtime_entry_point(fake_decl_name);
@@ -195,12 +133,12 @@ fn emit_entry_points_and_debug_info(gen: *CodeGen(EmitQbe2), comp: CompCtx, fns:
         }
     };
     
-    @if(use_threads) gen.backend.b.shared.join_codegen_thread();
     gen.loop_emit_constants();
-    @if(use_threads) {
-        // TODO: this doesn't count emit_suspended_inlinables / output_macho / codesign
-        frontend := clock_ms(CLOCK_THREAD_CPUTIME_ID);
-        @eprintln(">>> [CPU Time] frontend: %ms, codegen: %ms", frontend, self.b.shared.codegen_time);
+    
+    m := self.b.globals;
+    chunks := {self.comp.vtable.finish_qbe_module}(QbeModule.raw_from_ptr(m));
+    for chunks { c |
+        self.out&.push_bucket(maybe_uninit = c, len = c.len, gpa = temp());
     };
 }
 
@@ -221,7 +159,7 @@ fn init_runtime_entry_point(self: *EmitQbe2, usermain_name: Str) void = {
     self.b&.push_inst0(self.current, .arg, .Kl, user_main, QbeNull);
     self.b&.push_inst0(self.current, .call, .Kw, runtime_init, QbeNull);
     self.b&.end_block(self.current, (type = .ret0, arg = QbeNull));
-    self.build_current("main", "");
+    self.build("main", "");
 }
 
 fn emit_bounce_fn(self: *EmitQbe2, impl_name_callee: Str, fake_decl_name: Str, signeture: PrimSig, private: bool) void = {
@@ -256,7 +194,7 @@ fn emit_bounce_fn(self: *EmitQbe2, impl_name_callee: Str, fake_decl_name: Str, s
     
     self.inst_return(ret);
     
-    self.build_current(fake_decl_name, "");
+    self.build(fake_decl_name, "");
 }
 
 // TODO: copy-paste from DynamicImport but reversed so its a pain. 
@@ -902,44 +840,7 @@ QbeBuilder :: @struct(
     lnk := Qbe.Lnk.zeroed(),
     leaf := true,  // TODO: debug assert somewhere that you don't do a call in a leaf. for now we trust the frontend to remember to unset this. 
     aggragate_return_index: ?i64,
-    entry: *CodegenEntry,
-    shared: *CodegenShared,
-    idx := 0,
 );
-
-fn init(gpa: Alloc, globals: *QbeModule) QbeBuilder = {
-    shared := init(globals, @as(CodegenWorker) codegen_thread_main);
-    b: QbeBuilder = (
-        globals = globals,
-        temporaries = list(gpa),
-        constants = list(gpa),
-        blocks = list(gpa),
-        aggragate_return_index = .None,
-        shared = shared, 
-        entry = shared.queue.index(0),
-    );
-    b&.clear();
-    b
-}
-
-fn bouba_acquire(b: *QbeBuilder) *CodegenEntry = 
-    bouba_acquire(b.shared, b.idx&);
-
-fn clear(b: *QbeBuilder) void = {
-    b.entry = b.bouba_acquire();
-    b.entry.arena&.reset_retaining_capacity();
-    a := b.entry.arena&.borrow();
-    @debug_assert(b.entry.task&.is(.Dead), "f is set");
-    
-    b.constants = list(a);
-    b.temporaries = list(a);
-    b.blocks = list(a);
-    b.aggragate_return_index = .None;
-    
-    b.constants&.push(type = .CBits, bits = (i = 0xdeaddead)); // QbeUndef
-    b.constants&.push(type = .CBits, bits = (i = 0));          // QbeConZero
-    ::assert_eq(FIXED_CONST_COUNT, 2);
-}
 
 // TODO: make the Qbe.Fn sooner and just call the functions in util.fr
 fn push_temp(b: *QbeBuilder, k: Qbe.Cls, prefix: Str) Qbe.Ref = {
@@ -1106,85 +1007,91 @@ fn end_block(b: *QbeBuilder, bb: BbId, jmp: QbeTerminator) void = {
     block.jmp = jmp;
 }
 
-fn build(b: *QbeBuilder, name: Str) *CodegenEntry = {
-    entry := zeroed(*CodegenEntry);
-    push_dynamic_context {
-    	m := b.globals;
-        context(DefaultContext)[].temporary_allocator = b.entry.arena&;
-        a := b.entry.arena&.borrow();
-        curf := a.box_zeroed(Qbe.Fn);
-        b.entry.task = (Func = curf);
-        curf.default_init(m); 
-    	// curf.rpo = 0; filled in by later pass
-    	// curf.vararg = false; // TODO
-        // TODO: dont copy :SLOW
-        curf.ntmp += b.temporaries.len.intcast();
-        curf.tmp&.grow(curf.ntmp.zext());
-        dest := curf.tmp.slice(Qbe.Tmp0, b.temporaries.len + Qbe.Tmp0);
-        dest.copy_from(b.temporaries.items());
-        curf.ncon = b.constants.len.intcast();
-        curf.con = new_copy(b.constants.items());
-        @debug_assert_eq(curf.nmem, 0);
-        //@println("% temps. % blocks.", curf.ntmp.zext() - Qbe.Tmp0, b.blocks.len);
-        
-    	curf.leaf = b.leaf;
-        curf.lnk = b.lnk;
-        curf.lnk.id = b.globals.intern(name);
-    	curf.retty = (b.aggragate_return_index || @as(i64) -1).intcast();
-    	
-        if b.blocks.len == 0 {
-            panic("empty function");
-        };
-        if name.len > 80 {
-            panic("TODO: function name cannot be longer than 80 characters");
-        };
-        @if(TRACK_IR_NAMES) {
-            name_dest := curf.name&.items().slice(0, name.len);
-            name_dest.copy_from(name);
-        };
-        
-        qbe_blocks: List(Qbe.Blk) = list(b.blocks.len, a); // stable!
-    	curf.nblk = b.blocks.len.intcast();
-    	
-        curf.start = qbe_blocks.index_unchecked(0);
-        enumerate b.blocks { i, wip |
-            if wip.jmp.type == .Jxxx {
-                wip.jmp.type = .hlt;  // TODO: report error and force the front end to be precise and not have empty blocks. 
-            };
-            qbe_blocks&.push(Qbe.Blk.zeroed());
-            block := qbe_blocks[i]&;
-            block.id = i.intcast(); // TODO: probably don't need this because cfg sets it? but qbe parser does it so just being safe for now.  
-        
-            // TODO: dont copy :SLOW
-            idup(block, wip.insts.maybe_uninit.ptr, wip.insts.len);
-            if i == b.blocks.len - 1 {
-                block.link = Qbe.Blk.ptr_from_int(0);
-            } else {
-                block.link = qbe_blocks.index_unchecked(i + 1);
-            };
-            block.jmp.type = wip.jmp.type;
-            block.jmp.arg = wip.jmp.arg;
-            if wip.jmp.target1.id != 0 {
-                block.s1 = qbe_blocks.index_unchecked(wip.jmp.target1.id.zext());
-            };
-            if wip.jmp.target2.id != 0 {
-                block.s2 = qbe_blocks.index_unchecked(wip.jmp.target2.id.zext());
-            };
-            
-            @if(TRACK_IR_NAMES) {
-                name: List(u8) = (maybe_uninit = block.name&.items(), len = 0, gpa = panicking_allocator);
-                @fmt(name&, "b%", i);
-            };
-        };
-        
-        if b.globals.debug["P".char()] {
-            write(b.globals.debug_out, "\n> After parsing:\n");
-            printfn(curf, b.globals.debug_out);
-        };
-        entry = b.entry;
-        b.entry = CodegenEntry.ptr_from_int(0);
+fn build(self: *EmitQbe2, name: Str, logging: Str) void = {
+    b := self.b&;
+   	m := b.globals;
+    mark := mark_temporary_storage();
+    a := temp();
+    curf := a.box_zeroed(Qbe.Fn);
+    curf.default_init(m); 
+   	// curf.rpo = 0; filled in by later pass
+   	// curf.vararg = false; // TODO
+    // TODO: dont copy :SLOW
+    curf.ntmp += b.temporaries.len.intcast();
+    curf.tmp&.grow(curf.ntmp.zext());
+    dest := curf.tmp.slice(Qbe.Tmp0, b.temporaries.len + Qbe.Tmp0);
+    dest.copy_from(b.temporaries.items());
+    curf.ncon = b.constants.len.intcast();
+    curf.con = new_copy(b.constants.items());
+    @debug_assert_eq(curf.nmem, 0);
+    //@println("% temps. % blocks.", curf.ntmp.zext() - Qbe.Tmp0, b.blocks.len);
+    
+   	curf.leaf = b.leaf;
+    curf.lnk = b.lnk;
+    curf.lnk.id = b.globals.intern(name);
+   	curf.retty = (b.aggragate_return_index || @as(i64) -1).intcast();
+   	
+    if b.blocks.len == 0 {
+        panic("empty function");
     };
-    entry
+    if name.len > 80 {
+        panic("TODO: function name cannot be longer than 80 characters");
+    };
+    @if(TRACK_IR_NAMES) {
+        name_dest := curf.name&.items().slice(0, name.len);
+        name_dest.copy_from(name);
+    };
+    
+    qbe_blocks: List(Qbe.Blk) = list(b.blocks.len, a); // stable!
+   	curf.nblk = b.blocks.len.intcast();
+   	
+    curf.start = qbe_blocks.index_unchecked(0);
+    enumerate b.blocks { i, wip |
+        if wip.jmp.type == .Jxxx {
+            wip.jmp.type = .hlt;  // TODO: report error and force the front end to be precise and not have empty blocks. 
+        };
+        qbe_blocks&.push(Qbe.Blk.zeroed());
+        block := qbe_blocks[i]&;
+        block.id = i.intcast(); // TODO: probably don't need this because cfg sets it? but qbe parser does it so just being safe for now.  
+    
+        // TODO: dont copy :SLOW
+        idup(block, wip.insts.maybe_uninit.ptr, wip.insts.len);
+        if i == b.blocks.len - 1 {
+            block.link = Qbe.Blk.ptr_from_int(0);
+        } else {
+            block.link = qbe_blocks.index_unchecked(i + 1);
+        };
+        block.jmp.type = wip.jmp.type;
+        block.jmp.arg = wip.jmp.arg;
+        if wip.jmp.target1.id != 0 {
+            block.s1 = qbe_blocks.index_unchecked(wip.jmp.target1.id.zext());
+        };
+        if wip.jmp.target2.id != 0 {
+            block.s2 = qbe_blocks.index_unchecked(wip.jmp.target2.id.zext());
+        };
+        
+        @if(TRACK_IR_NAMES) {
+            name: List(u8) = (maybe_uninit = block.name&.items(), len = 0, gpa = panicking_allocator);
+            @fmt(name&, "b%", i);
+        };
+    };
+    
+    if b.globals.debug["P".char()] {
+        write(b.globals.debug_out, "\n> After parsing:\n");
+        printfn(curf, b.globals.debug_out);
+    };
+    m.set_debug_types(logging, true);
+    {self.comp.vtable.run_qbe_passes}(Qbe.Fn.raw_from_ptr(curf));
+    m.set_debug_types(logging, false);
+    reset_temporary_storage(mark);
+    
+    b.temporaries&.clear();
+    b.constants&.clear();
+    b.blocks&.clear();
+    b.aggragate_return_index = .None;
+    b.constants&.push(type = .CBits, bits = (i = 0xdeaddead)); // QbeUndef
+    b.constants&.push(type = .CBits, bits = (i = 0));          // QbeConZero
+    ::assert_eq(FIXED_CONST_COUNT, 2);
 }
 
 QbeTerminator :: @struct(

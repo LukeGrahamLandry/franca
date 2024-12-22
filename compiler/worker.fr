@@ -1,6 +1,6 @@
 
 fn main_thread_pump(comp: CompCtx, shared: *CodegenShared, fns: []FuncId) void = {
-    a      := libc_allocator; // TODO: comp.get_alloc();
+    a      := comp.get_alloc();
     env    := comp.get_comptime_env();
     @assert(comp.get_build_options()[].implicit_context_runtime == env.static_context_var.is_none(), "should have baked the static context location already iff no implicit context");
     when := @if(shared.m.goal.type == .JitOnly, ExecStyle.Jit, .Aot);
@@ -249,6 +249,8 @@ fn do_codegen(m: *QbeModule, entry: *CodegenEntry) void = {
                 if ensure_got_slot(m, s, jit_addr) { fix |
                     s.fixups&.push(fix, m.gpa);
                 };
+                @debug_assert(s.got_lookup_offset != -1);
+                //@println("shim -> % slot=%", s.name, s.got_lookup_offset);
             };
         }
         fn Asm(it) => {
@@ -278,10 +280,42 @@ fn do_codegen(m: *QbeModule, entry: *CodegenEntry) void = {
             f.emit(.call, .Kw, QbeNull, callee, QbeNull);
             f.copy_instructions_from_scratch_reversed_which_means_forwards(f.start);
             f.start.jmp.type = .ret0;
+            
+            {m.target.emitfn}(m, f, m[].outf);
             use_symbol(f.globals, it.target) { s | 
                 mark_referenced(f.globals, it.target, s);
             };
-            {m.target.emitfn}(m, f, m[].outf);
+            
+            //// TODO: interaction with shims is confusing
+            ////got_slot := -1;
+            //////fix: ?Fixup = .None;
+            //use_symbol(f.globals, it.lnk.id) { s | 
+            ////    //if ensure_got_slot(m, s, s.jit_addr) { fix |
+            ////    //    //dest := m.segments&[.ConstantData].mmapped.ptr.offset(got_slot);
+            ////    //    ptr_cast_unchecked(u8, rawptr, fix.patch_at)[] = s.jit_addr;
+            ////    //};
+            //    @println("bounce % slot=% -> ", s.name, s.got_lookup_offset);
+            //};
+            //use_symbol(f.globals, it.target) { s | 
+            //    //got_slot = s.got_lookup_offset;
+            ////    //if fix { fix |
+            ////    //    s.fixups&.push(fix, m.gpa);
+            ////    //};
+            ////    //if s.got_lookup_offset == -1 {
+            ////    //    s.got_lookup_offset = got_slot;
+            ////    //};
+            ////    //if !s.jit_addr.is_null() {
+            ////    //    dest := m.segments&[.ConstantData].mmapped.ptr.offset(got_slot);
+            ////    //    ptr_cast_unchecked(u8, rawptr, dest)[] = s.jit_addr;
+            ////    //};
+            //    @println("bounce -> % slot=%", s.name, s.got_lookup_offset);
+            //};
+            ////use_symbol(f.globals, it.lnk.id) { s | 
+            ////    if s.got_lookup_offset == -1 {
+            ////        s.got_lookup_offset = got_slot;
+            ////    }; // TODO: else
+            ////};
+            
         }
         fn AotVar(it) => {
             each it { d |

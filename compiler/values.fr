@@ -58,7 +58,7 @@ BakeHandler :: @FnPtr(self: rawptr) Slice(BakedEntry);
 //       right now i could check if its in the constant data arena for a hint that should catch a few of them.
 fn emit_relocatable_constant(c: *SelfHosted, ty: Type, value: []u8) Res(BakedVarId) = { 
     to_zero: ReadBytes = (bytes = value, i = 0);
-    c.zero_padding(ty, to_zero&);  // Needed for reproducible builds!
+    c.comp().zero_padding(ty, to_zero&);  // Needed for reproducible builds!
     
     jit_ptr := u8.int_from_ptr(value.ptr);
     // values <= 8 bytes are stored inline so thier jit_addr is not useful. 
@@ -402,126 +402,6 @@ fn to_value(bytes: Slice(u8), a: Alloc) Values = {
 ////////////////////////
 /// Splitting Values /// 
 
-// TODO: :const_field_fix
-// TODO: if you move the ffi dynamic abi call to this language you can remove the rust version of this function. 
-/// Take some opaque bytes and split them into ints. So (u8, u8) becomes a vec of two i64 but u16 becomes just one.
-fn deconstruct_values(program: CompCtx, ty: Type, bytes: *ReadBytes, out: *List(i64), offsets: ?*List(Ty(Prim, u16))) PRes = {
-    info := program.get_info(ty);
-
-    @debug_assert_eq(bytes.i.mod(info.align_bytes.zext()), 0);
-    found_len := bytes.bytes.len() - bytes.i;
-    @err_assert(
-        found_len >= info.stride_bytes.zext(),
-        "deconstruct_values of % wants % bytes but found %: %",
-        program.data.cast()[][].log_type(ty), info.stride_bytes, found_len, {
-            bytes := bytes.bytes.slice(bytes.i, bytes.bytes.len);
-            out: List(u8) = list(temp());
-            for bytes{ b | 
-                @fmt(out&, "%, ", @as(i64) b.zext());
-            };
-            out.items()
-        }
-    ) return;
-    
-    single :: fn($T: Type, prim: Prim) void => {
-        offset := bytes.i;
-        if offsets { offsets |
-            offsets.push(@as(Ty(Prim, u16)) (prim, bytes.i.trunc()));
-        };
-        raw := bytes.read_next(T);
-        out.push(@as(i64) raw.int());
-    };
-    
-    @match(program.get_type(ty)) {
-        fn Placeholder() => { return(@err("ICE: Unfinished type")); }; // TODO: show the type
-        fn Never()       => return(@err("invalid type: Never"));
-        fn F64()     => i64.single(.F64);
-        fn FnPtr(_)  => i64.single(.P64);
-        fn Ptr(_)    => i64.single(.P64);
-        fn VoidPtr() => i64.single(.P64);
-        fn F32()     => u32.single(.F32);
-        fn Fn(_)     => u32.single(.I32);
-        fn Label(_)  => u32.single(.I32);
-        fn void()    => return(.Ok);
-        fn Bool()    => u8.single(.I8);
-        fn Tagged(f) => {
-            start := bytes.i;
-            start_count := out.len;
-            i64.single(.I64);
-            tag := out.last().unwrap()[];
-            @err_assert(tag < f.cases.len, "Invalid tag % in constant", tag) return;
-            case := f.cases.index(tag);
-            @try(deconstruct_values(program, case._1, bytes, out, offsets)) return;
-            padding := (@as(i64) info.stride_bytes.zext()) - (bytes.i - start);
-            @err_assert(padding >= 0, "ICE: confused about @tagged size.") return;
-            end_count := out.len;
-            padding_slots := (@as(i64) info.size_slots.zext()) - (end_count - start_count);
-            @err_assert(padding_slots >= 0, "ICE: too many slots????") return;
-            
-            // :tagged_prims_hack
-            // TODO: try to make a test that fails without this. 
-            //       ie just replace with 
-            //       range(0, padding_slots) { _ |
-            //          // TODO: wrong prim
-            //          i64.single(.I64);
-            //      };
-            //      otherwise reduce the copy-paste of the 3 versions of this. 
-            types := program.flat_tuple_types(ty);
-            types := types.items().slice_last(padding_slots);
-            types := types.unwrap();
-            // now types is just padding
-
-            // If this is a smaller varient, pad out the slot.
-            for types { p |
-                ty := @unwrap(program.prim(p), "not prim") return;
-                out.push(0);
-                if offsets { offsets |
-                    // TODO: do we care about the offsets?
-                    offsets.push(@as(Ty(Prim, u16)) (ty, bytes.i.trunc()));
-                };
-            };
-            bytes.i += padding;
-        }
-        fn Enum(f)   => return(deconstruct_values(program, f.raw, bytes, out, offsets));
-        fn Named(f)  => return(deconstruct_values(program, f._0, bytes, out, offsets)); // TODO: make Named payload not a tuple or do destructuring here. -- Jul 8
-        fn Swizzler(f)  => return(deconstruct_values(program, f.raw, bytes, out, offsets)); 
-        fn Int(_)    => {
-            @switch(program.get_info(ty)[].stride_bytes) {
-                @case(1) => u8.single(.I8);
-                @case(2) => u16.single(.I16);
-                @case(4) => u32.single(.I32);
-                @case(8) => i64.single(.I64);
-                @default fn(n: u16) => return(@err("ICE: bad int stride %", n));
-            };
-        }
-        fn Array(f) => {
-            inner_align := program.get_info(f.inner).align_bytes();
-            range(0, f.len.zext()) { _ |
-                @debug_assert_eq(bytes.i.mod(inner_align.zext()), 0);
-                @try(deconstruct_values(program, f.inner, bytes, out, offsets)) return;
-            };
-        }
-        fn Struct(f) => {
-            @err_assert(f.layout_done, "ICE: layout not ready") return;
-            @err_assert(!f.is_union, "You can't deconstruct_values of a union because we don't know which varient is active.") return;
-            prev := 0;
-            size: i64 = program.get_info(ty)[].stride_bytes.zext();
-            start := bytes.i;
-            for f.fields { t |
-                continue :: local_return;
-                if t.kind == .Const {
-                    continue();
-                };
-                assert(prev <= t.byte_offset, "ICE: backwards field offset");
-                bytes.i = t.byte_offset;
-                @try(deconstruct_values(program, t.ty, bytes, out, offsets)) return;
-                prev = t.byte_offset;
-            };
-            bytes.i = start + size; // eat trailing stride padding
-        }
-    };
-    .Ok
-}
 
 // When binding const arguments you want to split a large value into smaller ones that can be referred to by name.
 fn chop_prefix(self: *SelfHosted, prefix: Type, t: *ReadBytes) ?Values #once = {
@@ -536,7 +416,7 @@ fn chop_prefix(self: *SelfHosted, prefix: Type, t: *ReadBytes) ?Values #once = {
 // You need this for reproducible builds!
 // Without calling this on when baking constants, you can leak comptime addresses in @tagged padding (which happened in get_or_create_type in the compiler).
 // TODO: decide if i need to do this for baked arg key hashing. 
-fn zero_padding(program: *SelfHosted, ty: Type, bytes: *ReadBytes) PRes = {
+fn zero_padding(program: CompCtx, ty: Type, bytes: *ReadBytes) PRes = {
     info := program.get_info(ty);
 
     @debug_assert_eq(bytes.i.mod(info.align_bytes.zext()), 0);
@@ -544,7 +424,7 @@ fn zero_padding(program: *SelfHosted, ty: Type, bytes: *ReadBytes) PRes = {
     @debug_assert(
         found_len >= info.stride_bytes.zext(),
         "zero_padding of % wants % bytes but found %",
-        program.log_type(ty), info.stride_bytes, found_len
+        program.log(ty), info.stride_bytes, found_len
     );
     
     set_zeros :: fn(padding: i64) void => {
@@ -567,7 +447,6 @@ fn zero_padding(program: *SelfHosted, ty: Type, bytes: *ReadBytes) PRes = {
         }
         fn Enum(f)   => return(zero_padding(program, f.raw, bytes));
         fn Named(f)  => return(zero_padding(program, f._0, bytes)); 
-        fn Swizzler(f)  => return(zero_padding(program, f.raw, bytes)); 
         fn Array(f) => {
             inner_align := program.get_info(f.inner).align_bytes();
             range(0, f.len.zext()) { _ |
@@ -603,29 +482,11 @@ fn zero_padding(program: *SelfHosted, ty: Type, bytes: *ReadBytes) PRes = {
 }
 
 
-ReadBytes :: @struct(bytes: [] u8, i: i64);
-
-fn read_next(self: *ReadBytes, $T: Type) T #generic = {
-    @debug_assert_eq(self.i.mod(T.size_of()), 0);
-    @safety(.Bounds) self.i + T.size_of() - 1 < self.bytes.len();
-    
-    ptr := self.bytes.ptr.offset(self.i);
-    self.i += T.size_of();
-    ptr_cast_unchecked(u8, T, ptr)[]
-}
-
-fn take(self: *ReadBytes, size: i64) ?[]u8 = {
-    if(self.i + size - 1 >= self.bytes.len(), => return(.None));
-    ptr := self.bytes.ptr.offset(self.i);
-    self.i += size;
-    (Some = (ptr = ptr, len = size))
-}
-
 ////////////////////
 /// Dynamic Call ///
 
 fn call_dynamic_values(program: *SelfHosted, f_ptr: i64, f_ty: *FnType, args_value: []u8) Res(Values) = {
-    if NEW_COMPTIME_JIT {
+    @if(NEW_COMPTIME_JIT) {
         return(Ok = call_dynamic_values(program, f_ptr, f_ty[], args_value));
     };
     parts: List(i64) = list(temp());
@@ -1185,7 +1046,6 @@ fn get_info(self: *SelfHosted, ty: Type) *TypeMeta = {
                 )
             }
         }
-        fn Swizzler(it) => get_info(self, it.raw)[];
         fn Enum(_) => {
             panic("unreachable: get meta of raw enum");
             new(0, 0, 0, false, 0, false)

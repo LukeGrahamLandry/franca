@@ -1,3 +1,86 @@
+## (Dec 22)
+
+Extracting -legacy. Getting rid of `opts.comptime_jit_vtable` because i think supporting multiple is more painful than it's worth,
+you can still have driver programs for other runtime backends, but for the core thing that has to deal with out of order compilation stuff,
+it's really painful to add any more confusion than necessary. go through and make sure all the ifs on NEW_COMPTIME_JIT are static so we don't have to include the code. 
+
+before:
+```
+>>> compiler configuration: context=implicit, threads=true, debug_assertions=false, nctjit=true
+>>> compiled driver__1783 in [CPU Time] frontend: 160ms, codegen: R:90ms + C:25ms
+>>> [CPU Time] frontend: 1268ms, codegen: 515ms
+>>> 1345576 bytes of code, 87264 bytes of data.
+```
+after:
+```
+>>> compiler configuration: context=implicit, threads=true, debug_assertions=false, nctjit=true
+>>> compiled driver__1950 in [CPU Time] frontend: 296ms, codegen: R:169ms + C:42ms
+>>> [CPU Time] frontend: 1201ms, codegen: 434ms
+>>> 1105560 bytes of code, 80176 bytes of data.
+```
+
+Now you have to pay the cost of compiling that in default_driver but you can precompile it and then we're back to how it was before but with a different connotation. 
+I'm considering having drivers use shims too so you don't compile big functions until the first time they get called. 
+
+
+## (Dec 21)
+
+this code is pretty funny
+
+```
+if (_sapp.quit_ordered) {
+    return YES;
+}
+else {
+    return NO;
+}
+```
+
+and like ok sure, maybe you're not supposed to assume you know what `__objc_yes` is,
+but it would seem that's just so the compiler can tell if you meant to make a bool or an NSNumber 
+(https://releases.llvm.org/3.1/tools/clang/docs/ObjectiveCLiterals.html). 
+we can't be having 6 lines of code per line of code. 
+
+```
+#if __has_feature(objc_bool)
+#define YES __objc_yes
+#define NO  __objc_no
+#else
+#define YES ((BOOL)1)
+#define NO  ((BOOL)0)
+#endif
+```
+
+Little vacation from compiler was nice but I'd feel a lot better 
+if i could extract the old backend from the core compiler 
+so stuff gets less insane before i risk forgetting more things. 
+
+Trying to get it to compile the tests that do `@if(@run query_current_arch().unwrap() == .aarch64) {`
+is somehow super painful because of how shims interact with redirects (in this case inserted for #target_os 
+but probably always because there's something in vec that didn't work as a #redirect). 
+It should be so easy but somehow i can't do it. 
+Clearly I need to make that system simpler somehow. 
+
+Jit shims make fewer redundant calls to report_called_uncompiled_or_just_fix_the_problem:
+
+```
+// If the entry in __got for the target symbol is not this shim, call it directly.
+// Otherwise, call into the compiler to ask for it to be compiled. 
+// Most calls will just go through __got directly in which case this check is wasteful,
+// but it helps in the case where you created a function pointer to the shim and stuck it in memory somewhere,
+// now not every single call to that has to go through the compiler and take a mutex to look at the symbol. 
+// It seems this doesn't make each shim only call into the compiler once (TODO: why?) but it does lower the number. 
+```
+
+not measurably faster but spiritually better. 
+
+need to fix repro. it's only when NEW_COMPTIME_JIT and not -legacy which is iteresting. 
+so it's something about trying to use two modules in new emit_ir at the same time? 
+but -legacy still uses the new backend so it's specifically a frontend problem?
+many programs work tho. parser specifically has this repro problem. 
+ah, there was a path in emit_constant that didn't go through `c.zero_padding(ty, to_zero&);  // Needed for reproducible builds!`
+so thats reassuring. works again. 
+still can't quite articulate why it only happened when both sides used the new thing. 
 
 ## (Dec 19)
 
