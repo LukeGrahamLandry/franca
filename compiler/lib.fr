@@ -52,6 +52,7 @@ SelfHosted :: @rec @struct(
     pending_took_pointer: List(Ty(FuncId, u32)),  // (_, symbol)
     call_depth := 0,
     shim_callback_alloc: ArenaAlloc,
+    legacy_comptime_jit := zeroed(*BcBackend),
 );
 
 OverloadKey :: @struct(arg: Type, req: Type);
@@ -139,9 +140,19 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
         
         self := c.data.cast()[][];
         
-        m := self.get_alloc().box(QbeModule);
-        m[] = init_default_module((arch = query_current_arch().unwrap(), os = query_current_os(), type = .JitOnly), use_threads);
-        shared: *CodegenShared = init(m, @as(CodegenWorker) codegen_thread_main);
+        // not doing this is faster because then codegen for the driver and its comptime execution can happen on different threads, 
+        // but means when you call a function pointer value it might be in the other module which is creepy, 
+        // and we end up compiling many things an extra time. 
+        // ie. if you put #log_ir on libc_allocator_fn, you'll see it 3 times. 
+        USE_SAME_MODULE :: NEW_COMPTIME_JIT && false;
+        
+        shared := @if(USE_SAME_MODULE, self.comptime_codegen, {
+            m := init_default_module((arch = query_current_arch().unwrap(), os = query_current_os(), type = .JitOnly), use_threads);
+            shared: *CodegenShared = init(m&, @as(CodegenWorker) codegen_thread_main);
+            shared
+        });
+        
+        m := shared.m;
         
         // :JitMemProtect
         @if(use_threads) pthread_jit_write_protect_np(true);  // :JitMemProtect this thread wants to execute
@@ -149,19 +160,23 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
         f := c.get_unique_named("driver") || c.get_unique_named("main") || panic("expected a function called main or driver.");
         
         name := c.fmt_fn_name(f);
-        main_thread_pump(self.comp(), shared, @slice(f));
-        @if(use_threads && NEW_COMPTIME_JIT) self.comptime_codegen.join_codegen_thread();
-        m := shared.m;
-        for_symbols m { id, s | 
-            if s.referenced && s.kind == .Pending {
-                @eprintln("Symbol % is referenced but not defined", s.name);
-            };
-        };
-        // :JitMemProtect
-        @if(!use_threads) m.make_exec();
+        @if(USE_SAME_MODULE, {
+            c.get_jitted(f);
+        }, {
+            main_thread_pump(self.comp(), shared, @slice(f));
+            @if(use_threads) shared.join_codegen_thread();
+            @if(!use_threads) shared.m.emit_suspended_inlinables();  // when using apple's jit bullshit this has to happen on the other thread!
+            //for_symbols m { id, s | 
+            //    if s.referenced && s.kind == .Pending {
+            //        @eprintln("Symbol % is referenced but not defined", s.name);
+            //    };
+            //};
+            // :JitMemProtect
+            @if(!use_threads) m.make_exec();
+        });
         
         frontend := clock_ms(CLOCK_THREAD_CPUTIME_ID);
-        @eprintln(">>> compiled % in [CPU Time] frontend: %ms, codegen: R:%ms + C:%ms", name, frontend, shared.codegen_time, self.comptime_codegen.codegen_time);
+        @eprintln(">>> compiled % in [CPU Time] frontend: %ms, codegen: R:%ms", name, frontend, shared.codegen_time);
         cc := or m.get_addr(name) {
             @panic("ICE: lost %", name)
         };
@@ -391,11 +406,9 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
     };
     self.legacy_indirection = self.stable_compiler_context();
     
-    ::ptr_utils(BackendVTable);
     opts := self.get_build_options();
     @if(!NEW_COMPTIME_JIT) {
-        bc: *BcBackend = create(self.comp());
-        opts.comptime_jit_data = BcBackend.raw_from_ptr(bc);
+        self.legacy_comptime_jit = create(self.comp());
     };
     self
 }

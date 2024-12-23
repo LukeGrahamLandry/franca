@@ -318,7 +318,7 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
                         };
                         insts: []u8 = (ptr = ptr_cast_unchecked(u32, u8, insts.ptr), len = insts.len * 4);
                         opts := self.get_build_options();
-                        bc := BcBackend.ptr_from_raw(opts.comptime_jit_data);
+                        bc := self.legacy_comptime_jit;
                         addr := asm_bytes(bc, self.comp(), fid, insts);
                         self.put_jitted_function(fid, addr);
                         func.set_flag(.RealAsmDone);
@@ -328,7 +328,7 @@ fn exec_task(self: *SelfHosted, task: *Task) Maybe(void) = {
                             return(Ok = false);
                         };
                         opts := self.get_build_options();
-                        bc := BcBackend.ptr_from_raw(opts.comptime_jit_data);
+                        bc := self.legacy_comptime_jit;
                         addr := asm_bytes(bc, self.comp(), fid, insts.items());
                         self.put_jitted_function(fid, addr);
                         func.set_flag(.RealAsmDone);
@@ -509,7 +509,7 @@ put_jitted_import :: fn(self: *SelfHosted, f: FuncId, addr: rawptr) void = {
 
 fn todo_get_bc(self: *SelfHosted) *BcBackend = {
     assert(!NEW_COMPTIME_JIT, "TODO: abstract more stuff");
-    BcBackend.ptr_from_raw(self.get_build_options()[].comptime_jit_data)
+    self.legacy_comptime_jit
 }
 
 fn comptime_jit_symbol_id(self: *SelfHosted, fid: FuncId) u32 = {
@@ -558,16 +558,14 @@ fn get_fn_callable(self: *SelfHosted, fid: FuncId) ?rawptr = {
         @if(use_threads) pthread_mutex_unlock(m.icache_mutex&).unwrap();
         result
     }, {
-        opts := self.get_build_options();
-        bc := BcBackend.ptr_from_raw(opts.comptime_jit_data);
+        bc := self.legacy_comptime_jit;
         get_jitted(bc, self.comp(), fid, true)
     })
 }
 
 fn get_fn_old(self: *SelfHosted, f: FuncId) ?rawptr = {
     @assert(!NEW_COMPTIME_JIT, "get_fn_old");
-    opts := self.get_build_options();
-    bc := BcBackend.ptr_from_raw(opts.comptime_jit_data);
+    bc := self.legacy_comptime_jit;
     get_jitted(bc, self.comp(), f, false)
 }
 
@@ -592,7 +590,7 @@ fn create_jit_shim(self: *SelfHosted, fid: FuncId) Res(void) = {
     @if(NEW_COMPTIME_JIT, {
         create_jit_shim(self.comp(), self.comptime_codegen, fid, h);
     }, {
-        bc := BcBackend.ptr_from_raw(opts.comptime_jit_data);
+        bc := self.legacy_comptime_jit;
         body := @try(jit_shim(bc, self.comp(), fid, h)) return;
         addr := self.do_self_jit(body, fid);
         self.put_jitted_function(fid, addr);
@@ -616,7 +614,8 @@ fn emit_bc_and_jit(program: *SelfHosted, f: FuncId) PRes #once = {
         program.codemap.show_error_line(func.loc);
     };
     
-    body := @try(emit_bc(program.comp(), f, when)) return;
+    bc := program.legacy_comptime_jit;
+    body := @try(emit_bc(program.comp(), bc, f, when)) return;
     //body := @try({opts.comptime_jit_vptr.emit_bc}(opts.comptime_jit_data, program.comp(), f, when)) return;
     
     // We might have noticed that this function was a duplicate while generating bytecode.
@@ -650,8 +649,7 @@ fn do_self_jit(program: *SelfHosted, body: *FnBody, f: FuncId) rawptr = {
         do_nothing_and_do_it_fast: rawptr : fn() void = ();
         return(do_nothing_and_do_it_fast);
     };
-    opts := program.get_build_options();
-    bc := BcBackend.ptr_from_raw(opts.comptime_jit_data);
+    bc := program.legacy_comptime_jit;
     bytes, forward_calls := or (jit_asm(bc, program.comp(), f, body, program.env.comptime_arch)) { _ |
         panic("TODO: jit")
     };
@@ -680,8 +678,7 @@ fn emit_bc(c: *SelfHosted, f: FuncId, when: ExecStyle) Res(rawptr) = {
         ___tracy_emit_zone_name(zone, real_name);
     };
     
-    opts := c.get_build_options();
-    bc := BcBackend.ptr_from_raw(opts.comptime_jit_data);
+    bc := self.legacy_comptime_jit;
     res := emit_bc(bc, c.comp(), f, when);
     
     zone_end(zone);

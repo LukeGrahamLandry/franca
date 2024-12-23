@@ -1,4 +1,22 @@
+
+- fixed occasionally getting spliced names like `_Anon__5989Ano`. 
+thread safety in intern: each bucket has a lock but they were using a shared ArenaAlloc. 
+the rust people start to make some good points. 
+- i was calling join_codegen_thread on comptime_codegen instead of the one used for the driver, 
+so if you called a shim that tried to trigger a compilation, it would get stuck. 
+but maybe changing that doesn't make any sense either, because if my premise is that (we use different modules
+for the driver part and the comptime execution because we're pretending the driver is like an aot program and 
+saving time outputting a binary is just an implementation detail), 
+then you shouldn't be calling a function in the comptime module from the driver module. 
+but if you made a function pointer value, that will be in comptime_jit and it doesn't do any remapping since it's not Aot. 
+so then calling directly and calling through the pointer will be calling different versions of the same function. 
+so maybe it's wrong to try to use two jitted modules on the same compiler instance.
+but also you kinda don't want got_indirection_instead_of_patches set on the driver one because that's slower. 
+somehow ive revealed a massive oversight here. 
+
 ## (Dec 22)
+
+Made from_bc single threaded because i think it makes a better example if it's not sharing the CodegenWorker stuff with the new version. 
 
 Extracting -legacy. Getting rid of `opts.comptime_jit_vtable` because i think supporting multiple is more painful than it's worth,
 you can still have driver programs for other runtime backends, but for the core thing that has to deal with out of order compilation stuff,
@@ -22,6 +40,8 @@ after:
 Now you have to pay the cost of compiling that in default_driver but you can precompile it and then we're back to how it was before but with a different connotation. 
 I'm considering having drivers use shims too so you don't compile big functions until the first time they get called. 
 
+the thing where run_tests hangs is because fork doesn't duplicate threads. 
+so when it tries to compile with NEW_COMPTIME_JIT it gets stuck in wait() forever. 
 
 ## (Dec 21)
 

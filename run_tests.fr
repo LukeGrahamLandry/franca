@@ -67,22 +67,55 @@ fn driver(vtable: *ImportVTable) void = {
     // TODO: see if it breaks if you run new ones in thier own namespaces in the same compiler instance as ^ 
 }
 
-// TODO: add test for repro-builds. broken rn for the compiler itself -- Nov 25
+// TODO: add test for repro-builds. 
 fn github(vtable: *ImportVTable) void = {
     arch, os := {vtable.comptime_arch}();
-    assert(arch == .aarch64 && os == .macos, "expected macos-arm");
+    assert(arch == .aarch64 && os == .macos, "expected macos-arm (TODO: run_tests:github for other targets)");
     
     sh(@slice("touch", "a.out"));
+    stage0_driver(vtable);
     sh(@slice("chmod", "+x", "a.out"));
-    sh(@slice("./boot/aarch64-apple-darwin/franca2", "examples/default_driver.fr", "build", "compiler/other_main.fr", "-aot=qbe-exe", "-unsafe"));
     sh(@slice("cp", "a.out", "b.out"));
-    sh(@slice("./b.out", "examples/default_driver.fr", "build", "compiler/other_main.fr", "-aot=qbe-exe"));
-    sh(@slice("cp", "a.out", "b.out"));
+    sh(@slice("./b.out", "examples/default_driver.fr", "build", "compiler/other_main.fr", "-aot", "self", "-o", "b.out"));
     sh(@slice("./b.out", "run_tests.fr", "--", "arm", "qbe-exe", "examples-no-deps")); 
-    sh(@slice("./b.out", "examples/default_driver.fr", "build", "backend/meta/qbe_frontend.fr", "-aot=qbe-exe"));
+    sh(@slice("./b.out", "examples/default_driver.fr", "build", "backend/meta/qbe_frontend.fr", "-aot", "self"));
     sh(@slice("mkdir", "-p", "target/out"));
     sh(@slice("touch", "target/out/driver.c"));
     sh(@slice("./b.out", "backend/meta/test.fr", "all", "-v", "-bin=./a.out"));
+}
+
+#include_std("backend/lib.fr"); 
+fn stage0_driver(vtable: *ImportVTable) void = {
+    opts := vtable.default_build_options();
+    opts.safety_checks&.insert(SafetyCheck.Bounds, false);
+    opts.safety_checks&.insert(SafetyCheck.DebugAssertions, false);
+    opts.implicit_context_runtime = true;
+    
+    path := "compiler/other_main.fr";
+    src := "\n#include_std(\"lib/core.fr\");\n#include_std(\"compiler/other_main.fr\");";
+    c := vtable.with(vtable.new_with_src(src, path, opts));
+    fid := c.get_unique_named("main").expect("did not find exactly one function called 'main'");
+    fid := @slice(fid);
+    
+    m := @uninitialized QbeModule;
+    goal: QbeTargetEnv = (os = .macos, arch = .aarch64, type = .Exe);
+    {vtable.init_default_qbe_module}(QbeModule.raw_from_ptr(m&), QbeTargetEnv.raw_from_ptr(goal&));
+    
+    bytes := {c.vtable.emit_qbe_included}(QbeModule.raw_from_ptr(m&), c&, fid, .WrapMain);
+    
+    asm_out := "a.out".sym().c_str(); 
+    ir_out := open_trunc(asm_out).unwrap(); 
+    for bytes& { bucket |
+        ir_out&.write(bucket) || panic("write failed");
+    };
+    
+    args: List(Str) = list(temp());
+    ir_out.close();
+    args&.push("-s");
+    args&.push("-");
+    args&.push("a.out");
+    success := run_cmd_blocking("codesign", args.items()); 
+    assert(success, "sign failed");
 }
 
 fn sh(a: []Str) void = {

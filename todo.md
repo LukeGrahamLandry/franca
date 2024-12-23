@@ -7,6 +7,7 @@
 
 ## 
 
+- bring back nice error message for trying to call a #ct at runtime
 - things that should be cleaned up next time i replace `boot`
   - :DumbNameAlias NoMangle
   - AbiHackSpan
