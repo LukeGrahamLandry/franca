@@ -91,7 +91,6 @@ fn emit_relocatable_constant(c: *SelfHosted, ty: Type, value: []u8) Res(BakedVar
     (Ok = c.put_baked((VoidPtrArray = out.rs()), (Some = jit_ptr)))
 }
 
-
 // TODO: make sure baked.lookup actually ever helps. might need to add checks in more places.
 // TODO: correctly handle a pointer that's an offset from another. 
 fn emit_relocatable_constant_body(
@@ -149,13 +148,11 @@ fn emit_relocatable_constant_body(
                 out.push((FnPtr = fid));
                 return(.Ok);
             };
-            
-            @if(NEW_COMPTIME_JIT) {
-                c.update_pending_took_pointer();
-                if c.baked.functions&.get(ptr) { fid |
-                    out.push((FnPtr = fid));
-                    return(.Ok);
-                };
+        
+            c.update_pending_took_pointer();
+            if c.baked.functions&.get(ptr) { fid |
+                out.push((FnPtr = fid));
+                return(.Ok);
             };
             
             // TODO: bring this back. need to add it to BackendVTable. -- Oct 20
@@ -280,7 +277,6 @@ fn emit_relocatable_constant_body(
 }
 
 fn update_pending_took_pointer(c: *SelfHosted) void = {
-    @if(@run !NEW_COMPTIME_JIT) return();
     // TODO: have it tell us when pointers are ready. :SLOW
     found := false;
     m := c.comptime_codegen.m;
@@ -402,7 +398,6 @@ fn to_value(bytes: Slice(u8), a: Alloc) Values = {
 ////////////////////////
 /// Splitting Values /// 
 
-
 // When binding const arguments you want to split a large value into smaller ones that can be referred to by name.
 fn chop_prefix(self: *SelfHosted, prefix: Type, t: *ReadBytes) ?Values #once = {
     info := self.get_info(prefix);
@@ -486,118 +481,7 @@ fn zero_padding(program: CompCtx, ty: Type, bytes: *ReadBytes) PRes = {
 /// Dynamic Call ///
 
 fn call_dynamic_values(program: *SelfHosted, f_ptr: i64, f_ty: *FnType, args_value: []u8) Res(Values) = {
-    @if(NEW_COMPTIME_JIT) {
-        return(Ok = call_dynamic_values(program, f_ptr, f_ty[], args_value));
-    };
-    parts: List(i64) = list(temp());
-    reader: ReadBytes = (bytes = args_value, i = 0);
-    @try(program.comp().deconstruct_values(f_ty.arg, reader&, parts&, .None)) return;
-    args: RsVec(i64) = parts.rs();
-    args := args&;
-    ptr := f_ptr;
-    
-    // TODO: this is the only place I still use float_mask.
-    //       i could get rid of it if i switch to using PrimSig.
-    //       then the next step is to lazily jit shims so i don't have to implement the calling convention twice. 
-    // Note: FnType by ptr because i think i do (u32, u32) calling convention wrong. 
-
-    @if(TRACE_CALLS) @println("[call dynamic at addr=%] args=%", ptr, args.items());
-    
-    arg := program.get_info(f_ty.arg);
-    ret := program.get_info(f_ty.ret);
-    if arg.float_mask == 0 && ret.float_mask == 0 {
-    } else {
-        @err_assert(ret.size_slots <= 1, "TODO: float call with multiple returns at comptime") return;
-    };
-
-    :: if(?RsVec(u8));
-    indirect_ret: ?RsVec(u8) = if ret.size_slots > 2 {
-        mem: List(u8) = 0.repeated(@as(i64) ret.stride_bytes.zext(), program.get_alloc());
-        mem: RsVec(u8) = mem.rs();
-        ret_addr := u8.int_from_ptr(mem.ptr);
-        args.insert(0, ret_addr, temp());
-        @assert_eq(arg.float_mask, 0);
-        (Some = mem)
-    } else {
-        .None
-    };
-    @err_assert(args.len() <= 8, "too many args for comptime call") return;
-    // not doing this is ub but like... meh.
-    // if something interesting happens to be after the args and you call with the wrong signature you could read it.
-    // its fine to read garbage memory and put it in the registers you know callee will ignore (if types are right).
-    // However, now that unit is zero sized, the vec may have no allocation, so you get a segfault trying to load from it.
-    READ_GARBAGE :: false;
-    if args.is_empty().or(!READ_GARBAGE) {
-        a := args[].assume_owned(temp());
-        a&.reserve(8 - args.len());
-        args[] = a.rs();
-        //while args.len() < 8 {
-        //    args.push(0);
-        //}
-    };
-    
-    //@println("call with %", args.items());
-
-    zone := zone_begin(.CallDynamic);
-    @if(ENABLE_TRACY) {
-        if program.baked.functions&.get(ptr) { fid | 
-            func := program.get_function(fid);
-            real_name := program.pool.get(func.name);
-            ___tracy_emit_zone_name(zone, real_name);
-        };
-    };
-    
-    :: if(Res(Values));
-    context := get_dynamic_context();
-    result: Res(Values) = if ret.size_slots <= 1 {
-        r := if arg.float_mask == 0 && ret.float_mask == 0 {
-            arg8ret1(ptr, args.ptr, context)
-        } else {
-            // TODO: assert: arg.float_mask.count_ones() == arg.size_slots as u32 && ret.float_mask.count_ones() == ret.size_slots as u32
-            //       return(@err("ICE: i dont do mixed int/float registers but backend does"))
-            // :FUCKED, but I'm going to replace this with using the normal jit once i port that. 
-            arg8ret1_all_floats(ptr, args.ptr, context)
-        };
-        assert(ret.stride_bytes <= 8, "big ret");
-        (Ok = (Small = (r, ret.stride_bytes.trunc())))
-    } else {
-        yield :: local_return;
-        if ret.size_slots == 2 {
-            ::Res(Ty(Prim, Prim));
-            (f, s) := program.comp().prim_pair(f_ty.ret).unwrap();
-            r := arg8ret2(ptr, args.ptr, context);
-            // TODO: floats!
-            if f.eq(.I64).or(f.eq(.P64)) {
-                if s.eq(.I64).or(s.eq(.P64)) {
-                    yield(Ok = to_values(program, Ty(i64, i64), (r.fst, r.snd)));
-                };
-                if s.eq(.I8) {
-                    yield(Ok = to_values(program, Ty(i64, u8), (r.fst, @as(u8) r.snd.trunc())));
-                };
-            };
-            if f.eq(.I32) {
-                if s.eq(.I32) {
-                    yield(Ok = to_values(program, Ty(u32, u32), (@as(u32) r.fst.trunc(), @as(u32) r.snd.trunc())));
-                };
-            };
-            @err("TODO: unhandled prim pair for comptime call % %", f, s)
-        } else {
-            ptr_if_x64 := arg8ret_struct(ptr, args.ptr, context);
-            if program.env.comptime_arch == .x86_64 {  // TODO: make this const known
-                @debug_assert_eq(ptr_if_x64, args[0], "sys-v abi expects you to return indirect pointer in rax");
-            };
-            
-            mem := indirect_ret.unwrap();
-            (Ok = (Big = mem))
-        }
-    };
-    zone_end(zone);
-    @if(TRACE_CALLS) {
-        if result&.is(.Ok) {
-            @println("[returned from %] %", ptr, result.Ok&.log(program, f_ty.ret));  
-        };
-    };
-    result
+    (Ok = call_dynamic_values(program, f_ptr, f_ty[], args_value))
 }
 
 to_values :: fn(program: *SelfHosted, $T: Type, v: T) Values #generic = {

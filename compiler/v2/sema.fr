@@ -555,7 +555,6 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
     
     found_comptime_import :: fn(addr: rawptr) => {
         self.put_jitted_import(fid, addr);
-        @if(@run !NEW_COMPTIME_JIT) func.set_flag(.RealAsmDone);
         impls: List(FuncImpl) = list(2, self.get_alloc());
         impls&.push(ComptimeAddr = addr.int_from_rawptr());
         impls&.push(DynamicImport = func.name);
@@ -624,7 +623,6 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
                 func.body = (ComptimeAddr = ptr);
                 ptr := ptr.rawptr_from_int();
                 self.put_jitted_import(fid, ptr);
-                @if(@run !NEW_COMPTIME_JIT) func.set_flag(.RealAsmDone);    
                 func.set_flag(.YesContext);
             };
             @case(Flag.intrinsic.ident()) => {
@@ -3284,7 +3282,7 @@ fn compile_get_var(self: *SelfHosted, expr: *FatExpr, requested: ResultType, old
 fn took_pointer_value(self: *SelfHosted, fid: FuncId) void = {
     func := self.get_function(fid);
     if !func.get_flag(.TookPointerValue) { // TODO: only if already compiled?
-        old := @if(NEW_COMPTIME_JIT, self.comptime_codegen.m.get_addr(self.comp().fmt_fn_name(fid)), self.get_fn_old(fid));
+        old := self.comptime_codegen.m.get_addr(self.comp().fmt_fn_name(fid));
         // Note: else is not `Suspend = self.wait_for(Jit = fid)` because of cycles, we defer to the backend to deal with finializing it. 
         //       a better system would be to generate a shim right now so we'd always have an address? 
         if old { ptr |
@@ -3835,8 +3833,6 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
         //       i could just get rid of it and always generate a function that passes the arguments.    -- Jul 31
         if expr.expr&.is(.Call) && f.arg.is_raw_unit() && f.f.expr&.is(.Value) && self.get_type(f.f.ty).is(.Fn).or(f.f.ty == FuncId) {
             fid := FuncId.assume_cast(f.f.expr.Value.bytes&)[];
-            // TODO: now with threads it might be ready by now
-            assert(NEW_COMPTIME_JIT || self.get_fn_callable(fid).is_none(), "ICE: i expect it to never be ready by now? otherwise we would have done the call in check_quick_eval?");
             self.dispatch.enclosing_function = old_func;
             func := self.get_function(fid);
             if func.body&.is(.Normal) {

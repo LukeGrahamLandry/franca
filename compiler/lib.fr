@@ -13,7 +13,6 @@
 #include_std("compiler/v2/ast_boring.fr");
 #include_std("compiler/driver_io.fr");  
 #include_std("compiler/ast_external.fr");  
-#include_std("compiler/backend/lib.fr");  
 #include_std("compiler/emit_ir.fr");  
 #include_std("compiler/worker.fr");
 #include_std("compiler/jit.fr");
@@ -52,7 +51,6 @@ SelfHosted :: @rec @struct(
     pending_took_pointer: List(Ty(FuncId, u32)),  // (_, symbol)
     call_depth := 0,
     shim_callback_alloc: ArenaAlloc,
-    legacy_comptime_jit := @if(NEW_COMPTIME_JIT, (), zeroed(*BcBackend)),
 );
 
 OverloadKey :: @struct(arg: Type, req: Type);
@@ -131,7 +129,7 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
 
     if callee.is_none() {
         safe :: safety_check_enabled(.DebugAssertions);
-        @eprintln(">>> compiler configuration: context=%, threads=%, debug_assertions=%, nctjit=%", if(query_context_is_implicit(), => "implicit", => "static"), use_threads, safe, NEW_COMPTIME_JIT);
+        @eprintln(">>> compiler configuration: context=%, threads=%, debug_assertions=%", if(query_context_is_implicit(), => "implicit", => "static"), use_threads, safe);
         start := timestamp();
         opts := vtable.default_build_options(); 
         opts.retain_function_names = true;
@@ -144,7 +142,7 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
         // but means when you call a function pointer value it might be in the other module which is creepy, 
         // and we end up compiling many things an extra time. 
         // ie. if you put #log_ir on libc_allocator_fn, you'll see it 3 times. 
-        USE_SAME_MODULE :: NEW_COMPTIME_JIT && false;
+        USE_SAME_MODULE :: false;
         
         shared := @if(USE_SAME_MODULE, self.comptime_codegen, {
             m := init_default_module((arch = query_current_arch().unwrap(), os = query_current_os(), type = .JitOnly), use_threads);
@@ -406,10 +404,6 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
     };
     self.legacy_indirection = self.stable_compiler_context();
     
-    // :InlineFoldHack you need the @run whenever there's a `@if(!` that needs to be constant because ./boot didn't support #fold+#inline yet
-    @if(@run !NEW_COMPTIME_JIT) {
-        self.legacy_comptime_jit = create(self.comp());
-    };
     self
 }
 

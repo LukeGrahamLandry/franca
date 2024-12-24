@@ -41,8 +41,8 @@ ImportVTable :: @rec @struct(
     comptime_arch: @FnPtr() Ty(Arch, Os),  // TODO: remove
     get_default_driver_exports: @FnPtr() *ExportVTable, 
     check_for_new_aot_bake_overloads: @FnPtr(c: Compiler) void,
-    prim_sig: @FnPtr(comp: Compiler, func: *Func) CRes(PrimSig),
-    emit_bc: @FnPtr(comp: Compiler, f: FuncId, when: ExecStyle) CRes(*FnBody),
+    _prim_sig: @FnPtr(void) Never,
+    _emit_bc: @FnPtr(void) Never,
     fmt_error: @FnPtr(c: Compiler, err: *CompileError, out: *List(u8)) void,
     add_comptime_library: @FnPtr(c: Compiler, lib_name: Symbol, handle: DlHandle) void,
     get_type_meta: @FnPtr(c: Compiler, type: Type) *TypeMeta,
@@ -131,8 +131,7 @@ BuildOptions :: @struct(
     // For exports you want to refer to by name, use the ProgramEntry option.
     // Note: turning this off might make it look like more ir if the word 'private' on every function adds more than the names, but the produced exe will be smaller.  
     retain_function_names: bool = false, 
-    // TODO: compilation order bug with disabling debug assertions -- Jul 24
-    safety_checks: EnumMap(SafetyCheck, bool) = (data = init(@slice(SAFE_MODE, SAFE_MODE, SAFE_MODE, SAFE_MODE, true))),
+    safety_checks: EnumMap(SafetyCheck, bool) = (data = init(@slice(true, true, true, true, true))),
     _pad: i64 = 0,
     // Generics may cause redundant code for distinct types that have the same representation. 
     // Should the front end remedy the situation? 
@@ -158,11 +157,9 @@ BuildOptions :: @struct(
     env := rawptr_from_int(0),
 );
 
-SAFE_MODE :: true; // TODO: default driver program with this as a cli argument 
-
 SafetyCheck :: @enum(i64) (
     Bounds,
-    DebugAssertions, // TODO: i cant disable DebugAssertions because i have some compilation order bug. hopefully can fix with sema rewrite. -- Jul 24
+    DebugAssertions,
     // - `index` should not change the length of a collection. 
     NonCompliantOverload, // TODO: decide if i want to do this... currently UNUSED
     InvalidTag, // @match on @tagged or @enum
@@ -502,87 +499,3 @@ LinkRenameArg :: @struct(
     out: *List(u8),
     old_name: Str,
 );
-
-// This is the ir used by the compiler so you can write your own backends in your driver program if you want. 
-// Changing the abi for these is not a big deal because the compiler contains its own driver and the llvm backend. 
-// Don't forget to update the extenal backends (examples/qbe, crates/comptime_cranelift). 
-
-FnBody :: @struct(  
-    blocks: RsVec(BasicBlock),
-    // TODO: would be nice if i could sort these so less alignment padding on my backends. 
-    //       but thats a pain because then you need to map indexes.
-    vars: RsVec(VarSlotType),
-    var_names: RsVec(Symbol),
-    when: ExecStyle,
-    hash: i64 = 0,
-    signeture: PrimSig,
-    func: FuncId,
-    name: Symbol,
-    context := true,
-    switch_payloads: RsVec(RsVec(SwitchPayload)),  // indexed by Bc.Switch
-    sig_payloads: RsVec(PrimSig),  // indexed by `sig` field of Bc.CallDirect and Bc.CallFnPtr
-);
-VarSlotType :: @struct(size: u16, align: u16);
-SwitchPayload :: @struct(value: i64, block: BbId);
-
-// TODO: this would fit in 16 bytes instead of 24
-Bc :: @tagged(
-    CallDirect: @struct(sig: u32, f: FuncId, tail: bool, context: bool),         // <args:m> -> <ret:n>
-    CallFnPtr: @struct(sig: u32, context: bool),                                 // <ptr:1> <args:m> -> <ret:n>
-    PushConstant: @struct(value: i64, ty: Prim),                  // _ -> <v:1>
-    JumpIf: @struct(true_ip: BbId, false_ip: BbId, slots: u16),   // <args:slots> <cond:1> -> !
-    Goto: @struct(ip: BbId, slots: u16),                          // <args:slots> -> !
-    GetNativeFnPtr: FuncId,                                       // _ -> <ptr:1>
-    Load: Prim,                                                   // <ptr:1> -> <?:n>
-    StorePost: Prim,                                              // <?:n> <ptr:1> -> _
-    StorePre: Prim,                                               // <ptr:1> <?:n> -> _
-    AddrVar: @struct(id: u16),                                    // _ -> <ptr:1>
-    SaveSsa: @struct(id: u16, ty: Prim),                          // <p:1> -> _
-    LoadSsa: @struct(id: u16),                                    // _ -> <p:1>
-    IncPtrBytes: i64,                                             // <ptr:1> -> <ptr:1>
-    PeekDup: u16,                                                 // <x:1> <skip:n> -> <x:1> <skip:n> <x:1>,
-    CopyBytesToFrom: u16,                                         // <to_ptr:1> <from_ptr:1> -> _
-    LastUse: @struct(id: u16),                                    // _ -> _
-    Unreachable,                                                  // _ -> !
-    NoCompile,
-    PushGlobalAddr: BakedVarId,
-    Snipe: u16,
-    Ret0, // big return uses this too because code has already written to indirect return address.
-    Ret1: Prim,
-    Ret2: Ty(Prim, Prim),
-    Nop,
-    Intrinsic: Intrinsic,
-    Switch: u32,
-    RotateForImmediateCallPtr,
-);
-::enum(Intrinsic);
-
-PrimSig :: @struct(
-    args: Slice(Prim) = empty(),
-    ret1: ?Prim,
-    ret2: ?Prim,
-    return_value_bytes: u16 = 0,
-    first_arg_is_indirect_return: bool = false,
-    no_return: bool = false,
-    arg_int_count: u8 = 0, // todo: remoove 
-);
-
-BbId :: @struct(id: u16);
-BasicBlock :: @struct(
-    insts: RsVec(Bc),
-    debug: RsVec(Span), // TODO: use this if self.debug
-    arg_prims: Slice(Prim),
-    incoming_jumps: u16,
-    clock: u16,
-);
-
-// TODO: share these with the compiler impls
-fn push_block(body: *FnBody, alloc: Alloc) void = {
-    body.blocks&.push((
-        insts = empty(),
-        debug = empty(),
-        arg_prims = empty(),
-        incoming_jumps = 0,
-        clock = 0,
-    ), alloc);
-}
