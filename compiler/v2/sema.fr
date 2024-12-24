@@ -555,7 +555,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
     
     found_comptime_import :: fn(addr: rawptr) => {
         self.put_jitted_import(fid, addr);
-        @if(!NEW_COMPTIME_JIT) func.set_flag(.RealAsmDone);
+        @if(@run !NEW_COMPTIME_JIT) func.set_flag(.RealAsmDone);
         impls: List(FuncImpl) = list(2, self.get_alloc());
         impls&.push(ComptimeAddr = addr.int_from_rawptr());
         impls&.push(DynamicImport = func.name);
@@ -624,7 +624,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
                 func.body = (ComptimeAddr = ptr);
                 ptr := ptr.rawptr_from_int();
                 self.put_jitted_import(fid, ptr);
-                @if(!NEW_COMPTIME_JIT) func.set_flag(.RealAsmDone);    
+                @if(@run !NEW_COMPTIME_JIT) func.set_flag(.RealAsmDone);    
                 func.set_flag(.YesContext);
             };
             @case(Flag.intrinsic.ident()) => {
@@ -712,7 +712,8 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
                             // note: you want to do this before do_merges because flags aren't preserved. 
                             if func.get_flag(.LogAsm) {
                                 self.codemap.show_error_line(func.loc);
-                                @if(USE_LLVM_DIS) print_llvm_mc_dis(ops.items());
+                                // TODO: go through driver program? :driver_io
+                                //@if(USE_LLVM_DIS) print_llvm_mc_dis(ops.items());
                             }; 
                         };
                         // TODO: an erorr message here gets swollowed because you're probably in the type_of shit. this is really confusing. need to do beter
@@ -763,7 +764,8 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
                             if func.get_flag(.LogAsm) {
                                 self.codemap.show_error_line(func.loc);
                                 show_hex_bytes(ir.items());
-                                @if(USE_LLVM_DIS) print_llvm_mc_dis(ir.items());
+                                // TODO: go through driver program? :driver_io
+                                //@if(USE_LLVM_DIS) print_llvm_mc_dis(ir.items());
                             }; 
                         };
                         @case(Flag.bc.ident()) => {
@@ -852,7 +854,9 @@ fn get_smuggled_libc_function(arch: Arch, name: Symbol) ?rawptr = {
         @case(Flag.mprotect.ident()) => (Some = @as(rawptr) @as(@FnPtr(addr: rawptr, len: i64, prot: i64) voidResult) mprotect);
         @case(Flag.__clear_cache.ident()) => (Some = @as(rawptr) @as(@FnPtr(beg: rawptr, beg: rawptr) void) clear_instruction_cache);
         // same symbol, doesnt matter which os i say.  
-        @case(Flag.uname.ident()) => (Some = @as(rawptr) @as(@FnPtr(buf: *LinuxLibc.Utsname) voidResult) uname); 
+        // TODO: there's some strange compilation order thing going on with this one? 
+        //       oh i bet its because of the weird stuff i do for #target_os for new_comptime_jit
+        //@case(Flag.uname.ident()) => (Some = @as(rawptr) @as(@FnPtr(buf: *LinuxLibc.Utsname) voidResult) uname); 
         @case(Flag.clock_gettime.ident()) => (Some = @as(rawptr) @as(@FnPtr(clock_id: i64, time_spec: *TimeSpec) void) clock_gettime);
         // TODO: get rid of these once they're not in the compiler anyway.
         @case(Flag.malloc.ident()) => (Some = @as(rawptr) @as(@FnPtr(size: usize) rawptr) malloc);
@@ -975,8 +979,7 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
                 types&.push(part.ty);
                 done = done && part.done;
             };
-            // This would make sense to me but it makes lox test call uncompiled.  
-            //expr.done = done;
+            expr.done = done;
             
             if expr.ty.is_unknown() {
                 expr.ty = self.tuple_of(types.items());
@@ -1590,10 +1593,10 @@ fn compile_call(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
             @check(self.compile_expr(arg, (Specific = it[]))) return;
             @check(self.can_assign(it[], arg.ty)) return;
             expr.ty = self.get_or_create_type(Never); 
-            expr.done = arg.done; 
         }
         @default => return(@err("not callable %", f.log(self)));
     };
+    expr.done = f.done && arg.done;
     
     .Ok
 }
@@ -1711,6 +1714,7 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
         @log_event("TryConstantFold %", expr.log(self)) self;
         value := @check(self.immediate_eval_expr(expr, ret_ty)) return;
         expr.set(value, ret_ty); // TODO: redundant?
+        return(.Ok);
     } else {
         // this fixes functions with all const args the reduce to just a value emitting useless calls to like get the number 65 or whatever if you do ascii("A"). 
         if !deny_inline && arg_expr.is_raw_unit() {
@@ -1743,6 +1747,10 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
         if(func.get_flag(.OnceConsumed), => return(@err("tried to call once function again")));
         func.set_flag(.OnceConsumed);
         assert(expr.done, "ICE: if we applied #once, the expression really needs to be .done");
+    };
+    
+    if self.dispatch.enclosing_function.is_some() {
+        expr.done = arg_expr.done;
     };
     
     .Ok
@@ -2587,7 +2595,6 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
     
     if attempt.state < 2 {
         //@println("%) % has % options", attempt.state, self.pool.get(overloads.name), attempt.options.len);
-        // Currently this pass is not needed for correctness but it makes it ~7% faster because you don't have to do an expensive suspend on compiling the whole arg later. -- Aug 30
         enumerate parts { arg_index, arg_expr | 
             continue :: local_return;
             type := self.type_of(arg_expr);
@@ -2618,6 +2625,9 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
                 @check(self.infer_type(b.ty&)) return;
                 if b.ty&.ty() { param | 
                     if !self.ask_can_assign(param, type) {
+                        // TODO: this makes it slower and means you can't cache it but also is going to be confusingly wrong in some cases
+                        //       because you might make changes based on a type hint from an overload that didn't end up getting selected. 
+                        //       but also it's very convenient to have this so here we are for now.   -- Dec 23
                         if arg_expr.is_const() { // this helps with :type_through_field
                             res := self.ask_coerce_const_expr(arg_expr, param, true);
                             if res&.is(.Ok) && res.Ok {

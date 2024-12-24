@@ -13,6 +13,12 @@ so then calling directly and calling through the pointer will be calling differe
 so maybe it's wrong to try to use two jitted modules on the same compiler instance.
 but also you kinda don't want got_indirection_instead_of_patches set on the driver one because that's slower. 
 somehow ive revealed a massive oversight here. 
+- uncommenting (in compile_expr:Tuple) 
+// This would make sense to me but it makes lox test call uncompiled.  
+//expr.done = done;
+saves ~50ms (1350 -> 1300 non-legacy, when i get lucky with timing).
+gets me to 777 when i cheat (old jit + use legacy but build new + precompiled driver). 
+the comment was from before i had shims so now it's safe to be more careless. 
 
 ## (Dec 22)
 

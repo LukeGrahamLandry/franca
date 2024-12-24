@@ -6,12 +6,12 @@
 
 // - TODO: declaritive way to add libraries. 
 // - TODO: rename this? its not the default really. its not what the compiler uses to load your driver program for example. 
+// - TODO: bring back using llvm's wasm backend. but that is only useful if i do a lot more work to support actually doing stuff in that environment. 
 
+// note: we re-jit the legacy backends every time. 
 #include_std("examples/qbe.fr");
 #include_std("backend/lib.fr"); 
 #include_std("compiler/ast_external.fr");  
-#include_std("compiler/backend/llvm.fr");  // note: we re-jit the llvm backend every time. 
-//#include_std("compiler/emit_ir.fr");  
 #include_std("compiler/worker.fr");  
 #include_std("backend/from_bc.fr"); 
 #include_std("compiler/emit_bc.fr");
@@ -135,7 +135,35 @@ fn driver(vtable: *ImportVTable) void #export = {
             assert(success, "sign failed");
         };
     } else {
-        panic("TODO: call llvm / qbe to actually compile the thing");
+        @assert(cmd.backend != .qbe, "TODO: call to actually compile the thing");
+        out := open_temp_file();
+        for bytes& { bucket |
+            out.fd&.write(bucket);
+        };
+        triple := target_triple(cmd.arch, cmd.os);
+        args: List(Str) = @list("-x", "ir", out&.s_name(), "-o", cmd.output_file) temp();
+        args&.push_all(@slice("-target", triple));
+        if cmd.debug_info {
+            args&.push("-g");
+        };
+        @match(cmd.goal) {
+            fn Exe() => ();
+            fn Relocatable() => args&.push("-c");
+            fn Dynamic() => args&.push("-dynamiclib");
+            @default => @panic("We don't support % with the llvm backend", cmd.goal);
+        };
+        if cmd.debug_info || cmd.slow {
+            args&.push("-O0");
+        } else {
+            args&.push("-Os");
+        };
+        @eprintln("[run clang] %", args.items());
+        start := timestamp();
+        success := run_cmd_blocking("clang", args.items());
+        assert(success, "clang failed");
+        end := timestamp();
+        @println("[llvm time: %ms]", end - start);
+        out.remove(); // TODO: defer 
     };
     
     if cmd.action == .build {
@@ -166,67 +194,11 @@ fn driver(vtable: *ImportVTable) void #export = {
     };
 }
 
-// TODO: too many args
-fn compile_with_llvm(c: CompCtx, fid: FuncId, entry: ProgramEntry, debug_info: bool, arch: Arch, os: Os, show_asm: bool, slow: bool, link: bool) void #inline = {
-    ::if(Arch);
-    ir_text := c.emit_llvm(temp(), @slice (fid), entry, arch, os);
-    out := open_temp_file();
-    for ir_text& { bucket |
-        out.fd&.write(bucket);
-    };
-    if show_asm {
-        @println("Llvm ir output in %  Skipping build", out&.name());
-        return();  
-    };
-    triple := target_triple(arch, os);
-    wasm := arch == .wasm32;
-    
-    path := if(wasm, => "a.wasm", => "a.out");
-    args: List(Str) = @list("-x", "ir", out&.name(), "-o", path) temp();
-    if wasm {
-        // https://surma.dev/things/c-to-webassembly/
-        args&.push_all(@slice(
-            "--target=wasm32", "-nostdlib", "-Wl,--no-entry", "-Wl,--no-entry", "-Wl,--export-all", "-Wl,-z,stack-size=8388608"
-        ));
-        // also we want to just pretend we have a libc (and trust that js will provide it) 
-        args&.push_all(@slice("-Wl,-undefined", "-Wl,dynamic_lookup", "-Wl,--allow-undefined"));
-    } else {
-        args&.push_all(@slice("-target", triple));
-    };
-    if debug_info {
-        args&.push("-g");
-    };
-    if link {
-        args&.push("-c");
-    };
-    if debug_info || slow {
-        args&.push("-O0");
-    } else {
-        args&.push("-Os");
-    };
-    linux := os == .linux;
-    if linux {
-        args&.push("-c");
-    };
-    @eprintln("[run clang] %", args.items());
-    start := timestamp();
-    success := run_cmd_blocking("clang", args.items());
-    assert(success, "clang failed");
-    end := timestamp();
-    @println("[llvm time: %ms]", end - start);
-    out.remove(); // TODO: defer 
-    
-    // todo: dont assume so much. this is for running with blinkenlights
-    if linux {
-        success := run_cmd_blocking("zig", @slice("cc", "-static", "-target", triple, "-Wl,-z,common-page-size=65536,-z,max-page-size=65536", "a.out"));
-        assert(success, "link failed");
-    };
-}
-
-QBE_PATH :: "bindings/qbe/qbe";
 fn compile_with_qbe(c: CompCtx, fid: FuncId, entry: ProgramEntry, arch: Arch, os: Os) void = {
+    QBE_PATH :: "bindings/qbe/qbe";
     env: TargetEnv = (arch = arch, os = os);
     ir_text := emit_qbe(c, @slice(fid), entry, env&, rawptr.zeroed());
+    
     // TODO: clean up this hack for inline asm
     ::?List(u8);
     inline_asm_functions := ir_text&.pop_current_bucket().unwrap();
@@ -240,15 +212,10 @@ fn compile_with_qbe(c: CompCtx, fid: FuncId, entry: ProgramEntry, arch: Arch, os
     ir_out.fd.close(); // ?
     asm_out :: "target/franca_qbe_temp.s"; // TODO: the version of tmp file that lets you have an extension because it wants the .s
     
-    args: List(Str) = list(temp());
-    args&.push("-t");
-    args&.push(qbe_target_name(arch, os));
-    args&.push("-o");
-    args&.push(asm_out);
-    args&.push(ir_out&.name());
-    @println("Run qbe %", args.items());
+    args := @slice("-t", qbe_target_name(arch, os), "-o", asm_out, ir_out&.name());
+    @println("Run qbe %", args);
     start := timestamp();
-    success := run_cmd_blocking(QBE_PATH, args.items());
+    success := run_cmd_blocking(QBE_PATH, args);
     assert(success, "qbe failed");
     end := timestamp();
     @println("[qbe time: %ms]", end - start);
@@ -258,16 +225,10 @@ fn compile_with_qbe(c: CompCtx, fid: FuncId, entry: ProgramEntry, arch: Arch, os
     ok := append_to_file(asm_out, inline_asm_functions.items());
     assert(ok, "failed to append file");
 
-    args: List(Str) = list(temp());
-    args&.clear();
-    args&.push(asm_out);
-    args&.push("-o");
-    args&.push("a.out");
-    triple := target_triple(arch, os);
-    args&.push_all(@slice("-target", triple));
-    @println("Run assembler %", args.items());
+    args := @slice(asm_out, "-o", "a.out", "-triple", target_triple(arch, os));
+    @println("Run assembler %", args);
     start := timestamp();
-    success := run_cmd_blocking("clang", args.items()); 
+    success := run_cmd_blocking("clang", args); 
     assert(success, "as failed");
     end := timestamp();
     @println("[assembler time: %ms]", end - start);
@@ -311,6 +272,7 @@ fn parse_cli_args() Command = {
     args := args.slice(1, args.len); // skip exe
     extra_args: List(Str) = list(forever);
     i := 0;
+    set_ctx := false;
     while => i < args.len { 
         arg := args[i].str();
         i += 1;
@@ -374,14 +336,19 @@ fn parse_cli_args() Command = {
             };
             @case("-ctx=static") => { 
                 cfg.implicit_context = false; 
+                set_ctx = true;
             };
             @case("-ctx=implicit") => { 
                 cfg.implicit_context = true; 
+                set_ctx = true;
             };
             @default => {
                 extra_args&.push(arg);
             };
         };
+    };
+    if !set_ctx && cfg.backend == .llvm {
+        cfg.implicit_context = false; 
     };
     @eprintln("Extra args: %", extra_args.items());
     choose_action :: "pass cli argument ['build', 'run', 'test'] and then the path to a '.fr' source file.";

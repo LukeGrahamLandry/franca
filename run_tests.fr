@@ -1,26 +1,13 @@
-// TODO: clean up default_driver.fr and make it easy to import another program in a namespace without confusing find_unique_named, 
-//       and then this can depend on it so life is less of a pain? 
-
-fn driver_lsp_entry(vtable: *ImportVTable) Compiler = {
-    comp := {vtable.init_compiler}(vtable.default_build_options());
-    // TODO: (before fn with) can't inline the arg without an extra @as, because it thinks you're passing named args. 
-    c := vtable.with(comp);
-    load_lang_tests(c);
-    
-    // TODO: dumb that im actually generating bc+asm for them
-    tests := c.get_tagged("test");
-    for(tests) {fid|
-        name := c.get_string(c.get_function_name(fid));
-        ptr := c.get_jitted(fid);
-    };
-    
-    comp
-}
+HUSH :: @static(bool) false;
 
 fn driver(vtable: *ImportVTable) void = {
     c := cli_args();
     start := false;
     did := 0;
+    franca_path := get_executable_path(temp());  // TODO: cli arg to set this 
+    driver_path := "examples/default_driver.fr";
+    made_test_file_this_time := false;
+    made_driver_this_time    := false;
     for c {s: CStr|
         s : Str = s.str();
         continue :: local_return;
@@ -29,29 +16,46 @@ fn driver(vtable: *ImportVTable) void = {
             start = true;
         };
         did += 1;
-        push_dynamic_context {
-            @switch(s) {
-                @case("--") => ();
-                @case("arm") => {
-                    println("=== Aarch64 Jit ===");
-                    run_jit(vtable, .CompilerJit);
-                };
-                // :UGLY
-                @case("qbe-jit")   => run_qbe_included(vtable, .JitOnly, .None, false);
-                @case("qbe-jit-new")   => run_qbe_included(vtable, .JitOnly, .None, true);
-                @case("qbe-exe")   => run_qbe_included(vtable, .Exe, .None, false);
-                @case("qbe-exe-new")   => run_qbe_included(vtable, .Exe, .None, true);
-                @case("qbe-link")  => run_qbe_included(vtable, .Relocatable, .None, false);
-                @case("qbe-link-new")  => run_qbe_included(vtable, .Relocatable, .None, true);
-                @case("qbe-exe-x64")   => run_qbe_included(vtable, .Exe, (Some = .x86_64), false);
-                @case("qbe-link-x64")  => run_qbe_included(vtable, .Relocatable, (Some = .x86_64), false);
-                @case("llvm") => run_llvm(vtable, false);
-                @case("llvm-wasm") => run_llvm(vtable, true);
-                @case("blink") => run_llvm_blink(vtable);
-                @case("examples") => run_examples(vtable, true);
-                @case("examples-no-deps") => run_examples(vtable, false);
-                @case("github") => github(vtable);
-                @default => {
+        @switch(s) {
+            @case("--") => ();
+            @case("-hush") => {
+                HUSH[] = true;
+            };
+            @case("gen") => print(gen_test_program(vtable));
+            @case("boot") => run_boot(vtable);
+            @case("github") => run_boot(vtable);
+            @default => {
+                if s.starts_with("aot-") {
+                    s.ptr = s.ptr.offset(4);
+                    s.len -= 4;
+                    if !made_driver_this_time {
+                        made_driver_this_time = true;
+                        path := "driver.dylib"; // TODO: don't stomp something good
+                        sh(@slice("touch", path)); // TODO: don't be garbage
+                        cmd := @slice(franca_path, driver_path, "build", driver_path, "-aot", "legacy", "-dynamiclib", "-o", path);
+                        sh(cmd);
+                        driver_path = path;
+                    };
+                    
+                    path := "target/franca/compiler_tests.g.fr";
+                    if !made_test_file_this_time {
+                        sh(@slice("touch", path)); // TODO: don't be garbage
+                        write_entire_file(path, gen_test_program(vtable)) || @panic("failed to write file %", path);
+                        made_test_file_this_time = true;
+                    };
+                    
+                    cmd := @slice(franca_path, driver_path, "run", path, "-aot", s);
+                    sh(cmd);
+                    for run_main { path | 
+                        cmd[3] = path;
+                        sh(cmd);
+                    };
+                    cmd[2] = "build";
+                    for compile_only { path | 
+                        cmd[3] = path;
+                        sh(cmd);
+                    };
+                } else {
                     @println("Unknown argument '%'", s);
                     println(HELP);
                 };
@@ -60,26 +64,64 @@ fn driver(vtable: *ImportVTable) void = {
     };
     
     if(did <= 1, => println(HELP));
-    HELP :: "start with \"-- \" to seperate from compiler args, then any of [arm, llvm, qbe-jit, qbe-asm, qbe-exe, examples]";
+    // TODO: have -verbose instead of -hush. 
+    //       scan for - flags first so it's less annoying to toggle them. 
+    HELP :: """
+    > This is the build script for the Franca compiler.
+    > If you are trying to run a different Franca program, see examples/default_driver.fr instead.
+    
+    start with '--' to seperate from compiler arguments, then any of the following:
+
+    aot-self, aot-llvm, aot-legacy: run tests on a specific backend. 
+    boot: recompile using the old version in ./boot and then run some tests. 
+    gen: output the code that would run all the mini-tests. 
+    -hush: later commands will not output as much logging information.
+    """.undent(4, ast_alloc());
 
     // TODO: do this in the loop
     //reset_temporary_storage();
     // TODO: see if it breaks if you run new ones in thier own namespaces in the same compiler instance as ^ 
 }
 
+compile_only :: @const_slice(
+    "examples/sudoku.fr",  // runs tests at comptime 
+    "examples/raw_terminal.fr",  // interactive
+    // TODO: test it
+    "examples/count.fr", "examples/bloat.fr", "examples/c_bindgen.fr", 
+    "examples/dump_macho.fr", "examples/macho_loader.fr", "examples/import_wasm/convert.fr",
+    "examples/mandelbrot.fr", "examples/parse_dtrace.fr",
+    // has deps
+    //"tests/need_llvm/x64_encoding.fr",  // TODO: `non-8-aligned field _0` so can't aot
+    // is driver
+    // "examples/edit.fr" "examples/farm_game.fr" "examples/default_driver.fr" "examples/60fps.fr"
+    // interactive at comptime
+    // "examples/soft_draw.fr" 
+);
+
+run_main :: @const_slice(
+    //"examples/lox/lox_main.fr", // TODO: doesn't work on llvm because of Expr:Switch extension
+    "examples/toy/bf.fr", "examples/toy/hello.fr", "examples/toy/rot_cypher.fr", "examples/toy/where_am_i.fr",
+);
+
+#include_std("backend/lib.fr");
+#include_std("compiler/ast_external.fr");  
+#include_std("backend/from_bc.fr");
+
 // TODO: add test for repro-builds. 
-fn github(vtable: *ImportVTable) void = {
+fn run_boot(vtable: *ImportVTable) void = {
     arch, os := {vtable.comptime_arch}();
     assert(arch == .aarch64 && os == .macos, "expected macos-arm (TODO: run_tests:github for other targets)");
+    
+    sh(@slice("mkdir", "-p", "target/out"));
+    sh(@slice("mkdir", "-p", "target/franca"));
     
     sh(@slice("touch", "a.out"));
     stage0_driver(vtable);
     sh(@slice("chmod", "+x", "a.out"));
     sh(@slice("cp", "a.out", "b.out"));
     sh(@slice("./b.out", "examples/default_driver.fr", "build", "compiler/other_main.fr", "-aot", "self", "-o", "b.out"));
-    sh(@slice("./b.out", "run_tests.fr", "--", "arm", "qbe-exe", "examples-no-deps")); 
+    sh(@slice("./b.out", "run_tests.fr", "--", "-hush", "aot-self", "aot-legacy")); // , "examples-no-deps")); 
     sh(@slice("./b.out", "examples/default_driver.fr", "build", "backend/meta/qbe_frontend.fr", "-aot", "self"));
-    sh(@slice("mkdir", "-p", "target/out"));
     sh(@slice("touch", "target/out/driver.c"));
     sh(@slice("./b.out", "backend/meta/test.fr", "all", "-v", "-bin=./a.out"));
 }
@@ -123,414 +165,55 @@ fn sh(a: []Str) void = {
     ok, out, err := fork_and_catch(temp()) {
         exec_cmd(a[0], a.slice(1, a.len)) 
     };
-    print(out.items());
-    print(err.items());
+    if !ok || !HUSH[] {
+        print(out.items());
+        print(err.items());
+    };
     if !ok {
         @println("Failed to run: %", a);
         exit(1);
     };    
 }
 
-fn run_examples(vtable: *ImportVTable, allow_deps: bool) void = {
-    fork_run_main(vtable, "examples/toy/bf.fr");
-    fork_run_main(vtable, "examples/toy/hello.fr");
-    fork_run_main(vtable, "examples/toy/rot_cypher.fr");
-    fork_run_main(vtable, "examples/toy/where_am_i.fr");
-    check_main_compiles(vtable, "examples/sudoku.fr");
-    
-    // These ones I don't run because they're interactive but just make sure it compiles so it doesn't rot
-    check_main_compiles(vtable, "examples/raw_terminal.fr");
-    check_driver_compiles(vtable, "examples/60fps.fr");
-    check_driver_compiles(vtable, "examples/default_driver.fr");
-    if allow_deps {
-        check_driver_compiles(vtable, "examples/farm_game.fr");  // the game runs in the driver 
-    };
-    check_main_compiles(vtable, "examples/count.fr");      // TODO: test it
-    check_main_compiles(vtable, "examples/bloat.fr");      // TODO: run test
-    check_main_compiles(vtable, "examples/c_bindgen.fr");  // TODO: test it
-    check_main_compiles(vtable, "bench/run_bench.fr");
-    check_main_compiles(vtable, "examples/dump_macho.fr");
-    check_main_compiles(vtable, "examples/macho_loader.fr");
-    check_main_compiles(vtable, "examples/import_wasm/convert.fr");
-    if allow_deps {
-        fork_run_main(vtable, "tests/need_llvm/x64_encoding.fr");
-    } else {
-        check_main_compiles(vtable, "tests/need_llvm/x64_encoding.fr");
-    };
-    
-    check_driver_compiles(vtable, "compiler/first.fr");
-    mandelbrot(vtable, allow_deps);
-    
-    fork_run_main(vtable, "examples/lox/lox_main.fr");
-    
-    set_colour(250, 150, 200);
-    println("ALL EXAMPLES PASSED!");
-    unset_colour();
-}
-
-fn run_jit(vtable: *ImportVTable, kind: Backend) void = {
-    opts := vtable.default_build_options();
-    opts.comptime_jit = kind;
-    comp := {vtable.init_compiler}(opts);
-    // TODO: (before fn with) can't inline the arg without an extra @as, because it thinks you're passing named args. 
-    c := vtable.with(comp);
-    load_lang_tests(c);
-    run_sequential(c) {c, tests|
-        for(tests) {fid|
-            ptr := c.get_jitted(fid);
-            f := assume_types_fn(Arg = void, Ret = void, ptr = ptr);
-            f();
-        };
-    };
-}
-
-// TODO: this is a dumb way to do this, when they're failing, ReportCrash pegs a core. 
-fn run_llvm(vtable: *ImportVTable, wasm32: bool) void = {
-    println("=== Llvm Aot ===");
-    opts := vtable.default_build_options();
-    opts.retain_function_names = true;
-    opts.wasm32 = wasm32;
-    comp := {vtable.init_compiler}(opts);
-    c := vtable.with(comp);
-    load_lang_tests(c);
-    run_sequential(c) {c, tests|
-        ir_text := c.emit_llvm(temp(), tests, .TestRunnerMain, get_comptime_arch(), .macos); // :HardcodeOs
-        out := open_temp_file();
-        for(ir_text&){bucket|
-            out.fd&.write(bucket);
-        };
-        @println("Write llvm ir to %", out&.s_name());
-        
-        args: List(Str) = list(temp());
-        args&.push("-x");
-        args&.push("ir");
-        //args&.push("-O2");
-        args&.push(out&.s_name());
-        if wasm32 {
-            args&.push_all(@slice("-o", "a.wasm"));
-            args&.push_all(@slice(
-                "--target=wasm32", "-nostdlib", "-Wl,--no-entry", "-Wl,--no-entry", "-Wl,--export-all", "-Wl,-z,stack-size=8388608"
-            ));
-            args&.push_all(@slice("-Wl,-undefined", "-Wl,dynamic_lookup", "-Wl,--allow-undefined"));
-        };
-        success := run_cmd_blocking("clang", args.items()); 
-        assert(success, "opt failed");
-        
-        args: List(Str) = list(temp());
-        success := if wasm32 {
-            args&.push("a.wasm");
-            run_cmd_blocking("./tests/test_wasm_rt/target/release/test_wasm_rt", args.items())
-        } else {
-            run_cmd_blocking("./a.out", args.items())
-        };
-        assert(success, "test failed");
-        
-        out.remove();
-    };
-}
-
-fn run_llvm_blink(vtable: *ImportVTable) void = {
-    println("=== Llvm Aot Blink ===");
-    opts := vtable.default_build_options();
-    opts.retain_function_names = true;
-    comp := {vtable.init_compiler}(opts);
-    c := vtable.with(comp);
-    load_lang_tests(c);
-    run_sequential(c) {c, tests|
-        ir_text := c.emit_llvm(temp(), tests, .TestRunnerMain, .x86_64, .linux); 
-        out := open_temp_file();
-        for(ir_text&){bucket|
-            out.fd&.write(bucket);
-        };
-        @println("Write llvm ir to %", out&.s_name());
-        
-        args: List(Str) = list(temp());
-        args&.push("-x");
-        args&.push("ir");
-        args&.push("-target");
-        triple :: "x86_64-linux-musl";
-        args&.push(triple);
-        args&.push("-c");
-        args&.push("-o");
-        args&.push("a.out");
-        //args&.push("-O2");
-        args&.push(out&.s_name());
-        success := run_cmd_blocking("clang", args.items()); 
-        assert(success, "opt failed");
-        success := run_cmd_blocking("zig", @slice("cc", "-static", "-target", triple, "-Wl,-z,common-page-size=65536,-z,max-page-size=65536", "a.out"));
-        assert(success, "link failed");
-        args: List(Str) = list(temp());
-        success := run_cmd_blocking("blink", @slice("./a.out"));
-        assert(success, "test failed");
-        
-        out.remove();
-    };
-}
-
-NO_FORK :: false;
-SHOW_FAILING_OUTPUT :: true;
-SHOW_PASSING_OUTPUT :: false;
-
-fn run_sequential(c: CompCtx, $inner_run: @Fn(c: CompCtx, fns: Slice(FuncId)) void) void = {
-    run :: fn(ff: Slice(FuncId)) bool => {
-        if NO_FORK {
-            inner_run(c, ff);
-            true
-        } else {
-            ok, out, err := fork_and_catch(temp(), => inner_run(c, ff));
-            show := SHOW_FAILING_OUTPUT && ff.len == 1 && !ok;
-            show = show || (SHOW_PASSING_OUTPUT && ok);
-            if show {
-                println(out.items());
-                println(err.items());
-            };
-            ok
-        }
-    };
-    start := timestamp();
-    
-    tests := c.get_tagged("test");
-    
-    chunk_size :: 10;
-    failing: List(FuncId) = list(temp());
-    i := 0;
-    while(=> i.lt(tests.len)) {
-        end := i.add(chunk_size).min(tests.len);
-        fns := tests.slice(i, end);
-        i += chunk_size;
-        if NO_FORK {
-            print("running: [");
-            for fns { f |
-                name := c.get_string(c.get_function_name(f));
-                @print("% ", name);
-            };
-            println("]");
-        };
-        if run(fns) {
-            set_colour(0, 200, 0);  
-            for fns { fid |
-                name := c.get_string(c.get_function_name(fid));
-                @print("%, ", name);
-            };
-            unset_colour();
-        }else {
-            failing&.push_all(fns);
-        };
-    };
-
-    // TODO: fail if one fails as a group but all pass individually. 
-    fails := 0;
-    for(failing.items()) {fid|
-        s: Slice(FuncId) = (ptr = fid&, len = 1);
-        if(run(s), => set_colour(0, 200, 0)){
-            fails += 1;
-            set_colour(250, 0, 0);
-        };
-        name := c.get_string(c.get_function_name(fid));
-        @print("%, ", name);
-        unset_colour();
-    };
-    
-    end := timestamp();
-    
-    set_colour(250, 150, 200);
-    if(fails.eq(0)) {
-        @println( "\nPASSED ALL % tests. % ms.", tests.len, end.sub(start));
-    } {
-        @println("\nFailed %/% tests. % ms.", fails, tests.len, end.sub(start));
-    };
-    unset_colour();
-}
-
-fn load_lang_tests(comp: CompCtx) void = {
-    path := "tests".maybe_borrow_cstr(temp());
-    found: List(List(u8)) = list(20, temp()); // LEAK
-    walk_directory(path) {entry|
-        // TODO: recurse with another list if .Directory
-        if(eq(@as(u8) entry.type, @as(u8) DirEntType.File)) {
-            p := @format("%/%", path, entry.name) temp();
-            found&.push(p);
-        };
-    };
-    
-    file := {comp.vtable.add_file}(comp.data, "lib", "#include_std(\"lib/core.fr\");").shrink();
-    all_stmts := {comp.vtable.parse_stmts}(comp.data, file&);
-    all_stmts := or all_stmts { err |
-        comp.report_error(err)
-    };
-    ::List(FatStmt);
-    all_stmts := all_stmts.clone(temp());
-    
-    each(found){name|
-        continue :: local_return;
-        if(not(name.items().ends_with(".fr")), => continue());  // :file_extension
-        
-        src := temp().read_to_string(name.items());
-        file := {comp.vtable.add_file}(comp.data, name.items(), src.items()).shrink();
-        stmts := {comp.vtable.parse_stmts}(comp.data, file&).unwrap();
-        all_stmts&.push_all(stmts);
-    };
-    {comp.vtable.make_and_resolve_and_compile_top_level}(comp.data, all_stmts.items()).unwrap();
-}
-
-fn run_tests(vtable: *ImportVTable, comp: Compiler) i64 = {
-    c := vtable.with(comp);
-    tests := c.get_tagged("test");
-    
-    for tests { fid |
-        name := c.get_string(c.get_function_name(fid));
-        @print("%, ", name);
-        ptr := c.get_jitted(fid);
-        f := assume_types_fn(Arg = void, Ret = void, ptr = ptr);
-        f();
-    };
-    println("");
-    tests.len
-    
-}
-
-fn mandelbrot(vtable: *ImportVTable, allow_deps: bool) void = {
-    // Note: can't import core at the end because you need slice type to be shared with the compiler 
-    //       before '::' blocks in the program try to run because they might use !slice. 
-    src := "#include_std(\"lib/core.fr\");".clone(temp());
-    src&.read_and_push("examples/mandelbrot.fr");
-    f := jit_from_source(vtable, src&.items(), "render");
-    f := assume_types_fn(Arg = void, Ret = List(u8), ptr = f);
-    mandelbrot := f();
-    println("compiled examples/mandelbrot.fr");
-    
-    count := 0;
-    for mandelbrot.items() { c | 
-        if c == "@".ascii() {
-            count += 1;
-        };
-    };
-    @assert_eq(count, 883, "i don't think that worked");
-    
-    if allow_deps {
-        ok, out, err := fork_and_catch(temp()) {
-            arg := "bench/mandelbrot/mandelbrot.lua";
-            exec_cmd("luajit", (ptr = arg&, len = 1));
-        };
-        assert(ok, "lua failed");
-        assert_eq(mandelbrot.items(), out.items());
-        println("- mandelbrot.fr == mandelbrot.lua");
-    };
-}
-
-fn fork_run_main(vtable: *ImportVTable, filepath: Str) void = {
-    ok, out, err := fork_and_catch(temp()) {
-        src := "#include_std(\"lib/core.fr\");".clone(temp());
-        src&.read_and_push(filepath);
-        f := jit_from_source(vtable, src&.items(), "main");
-        f := assume_types_fn(Arg = void, Ret = void, ptr = f);
-        f();
-    };
-    @assert(ok, "%\n%\nfailed to compile %", out.items(), err.items(), filepath);
-    @println("- ran %:main", filepath);
-}
-
-fn check_main_compiles(vtable: *ImportVTable, filepath: Str) void = {
-    src := "#include_std(\"lib/core.fr\");".clone(temp());
-    src&.read_and_push(filepath);
-    f := jit_from_source(vtable, src&.items(), "main");
-    @println("- compiled %:main", filepath);
-}
-
-fn check_driver_compiles(vtable: *ImportVTable, filepath: Str) rawptr = {
-    src := "#include_std(\"lib/core.fr\");".clone(temp());
-    src&.read_and_push(filepath);
-    f := jit_from_source(vtable, src&.items(), "driver");
-    @println("- compiled %:driver", filepath);
-    f
-}
-
-fn jit_from_source(vtable: *ImportVTable, src: Str, function_name: Str) rawptr = {
-    ptr := rawptr_from_int(0);
+fn gen_test_program(vtable: *ImportVTable) Str = {
+    src := u8.list(temp());
     push_dynamic_context {
-        context(DefaultContext)[].comptime = rawptr_from_int(0);
-        comp := vtable.new_with_src(src, vtable.default_build_options());
-        name := {vtable.intern_string}(comp, function_name);
-        fid := {vtable.find_unique_func}(comp, name).unwrap();
-        ptr = vtable.with(comp).get_jitted(fid);
-    };
-    ptr
-}
-
-#include_std("backend/lib.fr");
-fn run_qbe_included(vtable: *ImportVTable, type: QbeOutputPurpose, force_arch: ?Arch, new_lowering: bool) void = {
-    @println("=== Qbe % ===", type);
-    opts := vtable.default_build_options();
-    opts.retain_function_names = true;
-    //if type != .JitOnly {
-        opts.implicit_context_runtime = true;
-    //}; //TODO
-    env: TargetEnv = (arch = get_comptime_arch(), os = .macos); // :HardcodeOs
-    if force_arch { force_arch |
-        env.arch = force_arch;
-    };
-    comp := {vtable.init_compiler}(opts);
-    c := vtable.with(comp);
-    load_lang_tests(c);
-    args: List(Str) = list(temp());
-    global_module :: @static(QbeModule); // TODO: aaaaaaaa
-    triple := target_triple(env.arch, env.os);
-    run_sequential(c) {c, tests|
-        global_module[] = init_default_module_dyn(vtable, (os = env.os, arch = env.arch, type = type));
-        asm_text := emit_qbe_included_dyn(global_module, c&, tests, .TestRunnerMain, new_lowering); // TODO
-        if type == .Exe || type == .Relocatable {
-            path :: "a.out";
-            ir_out := open_trunc(path.sym().c_str()) || {
-                // TODO: don't be garbage
-                sh(@slice("touch", "a.out"));
-                sh(@slice("chmod", "+x", "a.out"));
-                open_trunc(path.sym().c_str()) || @panic("failed to open %", path)
+        path := "tests".maybe_borrow_cstr(temp());
+        ::List(FatStmt);
+        
+        src&.push_all("#include_std(\"lib/core.fr\");\n");
+        walk_directory(path) {entry|
+            // TODO: recurse with another list if .Directory
+            is_file := (eq(@as(u8) entry.type, @as(u8) DirEntType.File));
+            if is_file && entry.name.ends_with(".fr") {
+                @fmt(src&, "#include_std(\"%/%\");\n", path, entry.name);
             };
-            for(asm_text&){bucket|
-                ok := ir_out&.write(bucket);
-                @assert(ok, "failed to write to %", path);
-            };
-            
-            ir_out.close();
-            args&.clear();
-            if type == .Relocatable {
-                args&.push("a.out");
-                args&.push("-o");
-                args&.push("a.out");
-                args&.push_all(@slice("-target", triple));
-                start := timestamp();
-                success := run_cmd_blocking("clang", args.items()); 
-                assert(success, "link failed");
-            } else {
-                args&.push("-s");
-                args&.push("-");
-                args&.push("a.out");
-                success := run_cmd_blocking("codesign", args.items()); 
-                assert(success, "sign failed");
-            };
-            args&.clear();
-            success := run_cmd_blocking("./a.out", args.items());
-            assert(success, "test failed");
-        } else {
-            if type == .JitOnly {
-                global_module.fill_from_libc();
-                global_module.make_exec();
-                
-                f := or global_module.get_addr("main") {
-                    panic("couldn't find main")
+        };
+        
+        src1 := src.items().clone(temp()).items();
+        opts := vtable.default_build_options();
+        c := new_with_src(vtable, src1, opts);
+        c := vtable.with(c);
+        
+        tests := c.get_tagged("test");
+        push_all(src&, """
+            TestCase :: @struct(name: Str, f: @FnPtr() void);
+            fn main() void = {
+                each tests { t | 
+                    @eprint("%, ", t.name);
+                    {t.f}();
                 };
-                f := assume_types_fn(Arg = void, Ret = i64, ptr = f);
-                status := f();
-                @assert_eq(status, 0, "bad exit status");
-            } else {    
-                panic("asm qbe not supported");
-            };
+                @eprintln("\nPassed all % tests!", tests.len());
+            }
+            
+            tests :: @const_slice(@as(TestCase)
+        """);
+        for tests { f | 
+            func := c.get_function(f);
+            name := c.get_string(func.name);
+            @fmt(src&, "    (name = \"%\", f = (fn() = { %(@uninitialized); })),\n", name, name);
         };
-        if NO_FORK {
-            global_module.drop(true);
-        };
+        @fmt(src&, ");\n");
     };
+    src.items()
 }
-
-#include_std("compiler/backend/llvm.fr");
-#include_std("compiler/ast_external.fr");  

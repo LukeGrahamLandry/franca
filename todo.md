@@ -11,7 +11,7 @@
 - things that should be cleaned up next time i replace `boot`
   - :DumbNameAlias NoMangle
   - AbiHackSpan
-  - :InlineFoldHack `@if(::!T.has_pointers()`
+  - :InlineFoldHack `@if(::!T.has_pointers()` `if(@run !NEW_COMPTIME_JIT`
   - fn zeroed
   - .sym().c_str()
   - `@rec` in backend/ir.fr and wasm/instructions:Wasm
