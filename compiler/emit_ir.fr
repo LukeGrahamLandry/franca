@@ -262,8 +262,8 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = { // #log_ir("AIR")
     self.blk = self.f.start;
     
     T :: FuncImpl.Tag();
-    prio_amd :: @const_slice(T.NewIntrinsic, T.Normal, T.Intrinsic, T.ComptimeAddr, T.TargetOsSplit, T.X86AsmBytes, T.Redirect);
-    prio_arm :: @const_slice(T.NewIntrinsic, T.Normal, T.Intrinsic, T.ComptimeAddr, T.TargetOsSplit, T.JittedAarch64, T.Redirect);
+    prio_amd :: @const_slice(T.NewIntrinsic, T.Normal, T.Intrinsic, T.ComptimeAddr, T.TargetOsSplit, T.X86AsmBytes, T.Redirect, T.DynamicImport);
+    prio_arm :: @const_slice(T.NewIntrinsic, T.Normal, T.Intrinsic, T.ComptimeAddr, T.TargetOsSplit, T.JittedAarch64, T.Redirect, T.DynamicImport);
     impl := or choose_impl(func.body&, @if(self.m.goal.arch == .aarch64, prio_arm, prio_amd)) {
         return(@err("no acceptable impl %", self.program.log(func)))
     };
@@ -301,9 +301,24 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = { // #log_ir("AIR")
                     (Bounce = (lnk = self.f.lnk&, target = self.m.intern(real_name)))
                 }
             };
-            
             return(.Ok)
         }
+        // copy-paste from above
+        fn DynamicImport(name) => {
+            self.entry.task = @match(self.when) {
+                fn Jit() => return(@err("we hit a dynamicimport with no comptimeaddr for jit. the frontend should make sure this doesn't happen"));
+                // :DumbNameAlias
+                // TODO: use FnFlag.NoMangle instead but that doesn't work with the old backends calling the same 
+                //       fmt_fn_name until they also don't try to make bounce functions.
+                fn Aot() => {
+                    g := self.m.goal&;
+                    real_name := self.program.check_link_rename(name[], func, (arch = g.arch, os = g.os));
+                    (Bounce = (lnk = self.f.lnk&, target = self.m.intern(real_name)))
+                }
+            };
+            return(.Ok)
+        
+        };
         fn TargetOsSplit(_) => {
             @debug_assert(func.body&.is(.Merged), "ICE: #target_os split expected multiple");
             each func.body.Merged& { it |

@@ -4,7 +4,7 @@
 //! so looking at thier demo should be a reasonable starting point (functions use `ig` instead of `ImGui::` as the prefix).
 // TODO: cleanup sokol_and_imgui_lib seperation 
 // TODO: be able to jit this at comptime (currently only aot works)
-::panic("BITROT");
+
 State :: @struct(
     pass_action: SgPassAction,
     window_open: bool,
@@ -85,22 +85,28 @@ fn driver(vtable: *ImportVTable) void #export = {
     {vtable.compile_func}(comp, main_f, .Jit).unwrap();
 
     c: CompCtx = (data = comp, vtable = vtable);
-    ir_text := c.emit_llvm(temp(), @slice (main_f), .WrapMain, get_comptime_arch(), .macos); // :HardcodeOs
-    out := open_temp_file();
-    for(ir_text&){bucket|
-        out.fd&.write(bucket);
-    };
-    @println("Write llvm ir to %", out&.s_name());
-    // TODO: get these from the lib. 
-    a := SOKOL_MACOS_LINK_ARGS;
-    args := libs&.get_aot_objects();
-    args&.push_all(a&.items());
-    args&.push_all(@slice ("-x", "ir", out&.s_name(), "-o", "a.out"));    
-    //args&.push("-O2");
-    @println("building aot exe: %", args.items());
-    success := run_cmd_blocking("clang++", args.items());
-    assert(success, "clang failed");
     
-    out.remove(); // TODO: defer 
+    m := init_default_module_dyn(vtable, (arch = get_comptime_arch(), os = .macos, type = .Relocatable));  // :HardcodeOs
+    bytes := emit_qbe_included_dyn(m&, c&, @slice(main_f), .WrapMain);
+    
+    out := open_trunc("a.out").unwrap();
+    for bytes& { bucket |
+        out&.write(bucket);
+    };
+    out.close();
+    
+    start := timestamp();
+    args := libs&.get_aot_objects();
+    args&.push_all(@slice ("a.out", "-o", "a.out", "-g", "-Os"));
+    
+    SOKOL_MACOS_LINK_ARGS :: @array("-framework", "Metal", "-framework", "MetalKit", "-framework", "Cocoa", "-framework", "QuartzCore");
+    a := SOKOL_MACOS_LINK_ARGS;
+    args&.push_all(a&.items());
+    
+    @println("%", args.items());
+    success := run_cmd_blocking("clang++", args.items());
+    assert(success, "failed to link");
 }
 
+#include_std("backend/lib.fr");
+#include_std("examples/old_backend/lib.fr");

@@ -1,10 +1,10 @@
 // TODO: the variable window shows the wrong name.  
 // TODO: c_bindgen doesn't work with unnamed enums. 
-// TODO: now it crashes on the constants window.
 // TODO: need to copy message in error value again.
 // TODO: support multiple compiler instances so you can point this at a driver that spawns new ones. 
-
-::panic("todo: bitrot!");
+// TODO: this doesn't actually compile the whole program. you need the thing in main_thread_pump 
+//       where you add extra callees we missed. 
+// TODO: i don't trust that is being added to ProgramIndex
 
 ImGuiMouseSource :: i32;
 ImGuiDir :: i32;
@@ -22,6 +22,7 @@ State :: @struct(
     phase: Phase = .Start,
     messages: List(Str),
     programs: List(ProgramState),
+    env: rawptr,
 );
 
 ProgramState :: @struct(
@@ -128,7 +129,7 @@ fn do_work(instance: *ProgramState) void = {
     if pending.is_empty() {
         if instance.target_fns&.last() { f: *FuncId | 
             ::CBox(Task);
-            task: Task = (action = (CompileBody = f[]), waiting_for = .None, parent = .None, id = self.dispatch.next_task_id);
+            task: Task = (action = (CompileBody = f[]), waiting_for = .None, parent = .None, id = self.dispatch.next_task_id, trace = .None);
             self.dispatch.next_task_id += 1;
             task := self.box(task);
             self.dispatch.function_in_progress&.set(f[].as_index());
@@ -145,8 +146,8 @@ fn do_work(instance: *ProgramState) void = {
     instance.current_task = (Some = task.id);
     ::as_ref(*Task);
     if instance.wip_task&.as_ref() { task | 
+        instance.current_task = (Some = task.id);
         result := Result(void, *CompileError).zeroed();
-        println(task.id);
         if instance.compiler.poll_loop_body(task, result&) {
             @match(result) {  
                 fn Err(e) => {
@@ -355,45 +356,45 @@ fn draw_compiler_state(state: *State) void = {
         if igCollapsingHeader_TreeNodeFlags(c_str(@symbol "Constants"), 0) {
             num_cols :: 3;
             if igBeginTable(c_str(@symbol "Constants"), num_cols, 0, (x = 800, y = 0), 0) {
-                range(0, instance.compiler.scopes.constants.len) { i | 
+                consts := instance.compiler.scopes.constants&;
+                vars := instance.compiler.index.variables&;
+                range(0, consts.len.min(vars.len)) { i | 
+                    continue :: local_return;
                     igPushID_Int(i.intcast());
-                    usages := instance.compiler.index.variables&.nested_index(i);
+                    usages := vars.nested_index(i);
                     if usages { usages |
                         @assert_eq(@as(i64) usages.var.id.zext(), i);
                         if usages.var.kind == .Const {|
-                            v := instance.compiler.scopes.constants&.nested_index(i);
-                            ::as_ref(Ty(FatExpr, LazyType));
-                            if v.as_ref() { value_ty | 
-                                value := value_ty._0&;
-                                type := value_ty._1&;
+                            value_ty := consts.nested_index(i);
+                            value := value_ty._0&;
+                            type := value_ty._1&;
+                            
+                            hide := false;
+                            if instance.hide_unfinished_constants && !value.expr&.is(.Value) {
+                                hide = true;
+                            };
+                            if !hide {
+                                igTableNextRow(0, 0);
+                                igTableNextColumn();
+                                @ig_text("%", instance.compiler.pool.get(usages.var.name));
+                                if igIsItemClicked(0) {
+                                    x: DetailWindow = (Variable = i.trunc());
+                                    instance.extra_windows&.push(x);
+                                    instance.new_window_ticks = 5;
+                                };
+                                                            
+                                igTableNextColumn();
+                                @match(type) {
+                                    fn Finished(type) => {
+                                        draw_type_ref(instance.compiler, type[]);
+                                    }
+                                    @default => {
+                                        @ig_text("%", type.tag());
+                                    };
+                                };
                                 
-                                hide := false;
-                                if instance.hide_unfinished_constants && !value.expr&.is(.Value) {
-                                    hide = true;
-                                };
-                                if !hide {
-                                    igTableNextRow(0, 0);
-                                    igTableNextColumn();
-                                    @ig_text("%", instance.compiler.pool.get(usages.var.name));
-                                    if igIsItemClicked(0) {
-                                        x: DetailWindow = (Variable = i.trunc());
-                                        instance.extra_windows&.push(x);
-                                        instance.new_window_ticks = 5;
-                                    };
-                                                                
-                                    igTableNextColumn();
-                                    @match(type) {
-                                        fn Finished(type) => {
-                                            draw_type_ref(instance.compiler, type[]);
-                                        }
-                                        @default => {
-                                            @ig_text("%", type.tag());
-                                        };
-                                    };
-                                    
-                                    igTableNextColumn();
-                                    draw_expr_ref(instance.compiler, value);
-                                };
+                                igTableNextColumn();
+                                draw_expr_ref(instance.compiler, value);
                             };
                         };
                     };
@@ -562,6 +563,11 @@ fn show_variable_window(instance: *ProgramState, i: i64) void = {
         @ig_text("%", text);
     };
     
+    // TODO: how?
+    if usages.usages.len < 1 {
+        return();
+    };
+        
     // -1 because the first is always the declaration. 
     if igCollapsingHeader_TreeNodeFlags(@fmt_cstr("Usages (%)", usages.usages.len - 1), 0) {
         for usages.usages.items().slice(1, usages.usages.len) { loc |
@@ -628,17 +634,6 @@ fn show_func_window(instance: *ProgramState, f_id: FuncId) void = {
         };
     };
     
-    body := func.nullable_finished_bytecode_pointer;
-    if body != 0 { 
-        body := FnBody.ptr_from_int(body);
-        name := @fmt_cstr("Bytecode");
-        if igCollapsingHeader_TreeNodeFlags(name, 0) {
-            out: List(u8) = list(temp());
-            self.log_bc(func, body, out&);
-            @ig_text("%", out.items());
-        };
-    };
-    
     if igCollapsingHeader_TreeNodeFlags(@fmt_cstr("Source"), 0) {
         line := self.codemap.get_whole_line(func.loc);
         @ig_text("Declared on line % of %", line.line, line.filename);
@@ -648,10 +643,6 @@ fn show_func_window(instance: *ProgramState, f_id: FuncId) void = {
     
     if igCollapsingHeader_TreeNodeFlags(@fmt_cstr("Body"), 0) {
         @ig_text("%", func.log(self));
-    };
-    
-    if self.get_fn_old(f_id) { addr | 
-        @ig_text("This function can be jit called at %", addr);
     };
 }
 
@@ -845,7 +836,6 @@ fn ig_text(fmt_args: FatExpr) FatExpr #macro = @{
     igTextUnformatted(@as(CStr) (ptr = msg.ptr), @as(CStr) (ptr = msg.ptr.offset(msg.len)));
 }
 
-
 log_event_callback :: fn(userdata: rawptr, c: Compiler, event: *CompilerLogEvent) void = {
     instance := ProgramState.ptr_from_raw(userdata);
     @match(event) {
@@ -872,6 +862,7 @@ log_event_callback :: fn(userdata: rawptr, c: Compiler, event: *CompilerLogEvent
 
 fn main() void = {
     state := State.zeroed();
+    state.env = get_dynamic_context();
     state.vtable = init_driver_vtable();
     state.filename = list(255, libc_allocator);
     state.messages = list(255, libc_allocator);
@@ -891,6 +882,7 @@ fn main() void = {
 
 do_init :: fn(userdata: rawptr) void = {
     state := State.ptr_from_raw(userdata);
+    set_dynamic_context(state.env);
     state.window_open = true;
     
     desc := SgDesc.zeroed();
@@ -908,6 +900,7 @@ do_init :: fn(userdata: rawptr) void = {
 
 do_render :: fn(userdata: rawptr) void = {
     state := State.ptr_from_raw(userdata);
+    set_dynamic_context(state.env);
     
     desc: SimguiFrameDesc = (width = sapp_width(), height = sapp_height(), delta_time = sapp_frame_duration(), dpi_scale = sapp_dpi_scale());
     simgui_new_frame(desc&);
@@ -928,6 +921,7 @@ do_render :: fn(userdata: rawptr) void = {
 
 do_event :: fn(event: *SappEvent, userdata: rawptr) void = {
     state := State.ptr_from_raw(userdata);
+    set_dynamic_context(state.env);
      
     fn eq(a: SappEventType, b: SappEventType) bool = (@as(i32) a).eq(@as(i32) b);
     fn eq(a: SappKeycode, b: SappKeycode) bool = (@as(i32) a).eq(@as(i32) b);
@@ -982,38 +976,29 @@ fn driver(vtable: *ImportVTable) void = {
     c, libs := load_src_gui(vtable);
     
     new_main := c.get_unique_named("main").unwrap();
-    exports := (@list(new_main) temp()).items();
-    ir_text := emit_llvm(c, temp(), exports, .WrapMain, get_comptime_arch(), .macos); // :HardcodeOs
-    @println("Emitted % bytes of llvm ir.", ir_text.len);  // useful to see when i start trying to deduplicate bytecode. 
-    end := timestamp();
-
+    
+    m := init_default_module_dyn(vtable, (arch = get_comptime_arch(), os = .macos, type = .Relocatable));  // :HardcodeOs
+    bytes := emit_qbe_included_dyn(m&, c&, @slice(new_main), .WrapMain);
+    
+    out := open_trunc("a.o").unwrap();
+    for bytes& { bucket |
+        out&.write(bucket);
+    };
+    out.close();
+    
     start := timestamp();
     args := libs.get_aot_objects();
     args&.push_all(@slice ("-o", "target/franca/franca2gui", "-g", "-Os"));
+    args&.push("a.o");
     
     SOKOL_MACOS_LINK_ARGS :: @array("-framework", "Metal", "-framework", "MetalKit", "-framework", "Cocoa", "-framework", "QuartzCore");
     a := SOKOL_MACOS_LINK_ARGS;
     args&.push_all(a&.items());
-    build_llvm(ir_text, args.items());
-    end := timestamp();
-    @println("LLVM time: % ms.", end.sub(start));
-    exit(0);
     
-    // TODO: return result
-    fn build_llvm(ir: BucketArray(u8), args: Slice(Str)) void = {
-        out := open_temp_file();
-        for(ir&){bucket|
-            out.fd&.write(bucket);
-        };
-        @println("Write llvm ir to %", out&.s_name());   
-        args: List(Str) = args.clone(temp());
-        args&.push("-x"); // don't check the file extension of source files that follow. 
-        args&.push("ir"); 
-        args&.push("-g"); 
-        args&.push(out&.s_name());
-        @println("%", args.items());
-        success := run_cmd_blocking("clang++", args.items());
-        assert(success, "ICE: generated invalid llvm ir");
-        out.remove();
-    }
+    @println("%", args.items());
+    success := run_cmd_blocking("clang++", args.items());
+    assert(success, "failed to link");
 }
+
+#include_std("backend/lib.fr");
+#include_std("examples/old_backend/lib.fr");

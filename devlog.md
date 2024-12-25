@@ -1,4 +1,12 @@
 
+- fixed compiler_gui/dearimgui_demo examples
+- don't need the asm versions of call_dynamic_values anymore
+- there's something very strange where it sometimes decides you can't coerce an overload set to a function pointer.
+problem was suspending in coerce_const_expr with done=true so you don't come back. 
+so indeed a subtle compilation order thing that started exibiting when i started marking more things done yesterday. 
+
+## (Dec 23)
+
 - fixed occasionally getting spliced names like `_Anon__5989Ano`. 
 thread safety in intern: each bucket has a lock but they were using a shared ArenaAlloc. 
 the rust people start to make some good points. 
