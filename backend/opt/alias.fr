@@ -12,13 +12,22 @@ fn getalias(a: *Qbe.Alias, r: Qbe.Ref, f: *Qbe.Fn) void = {
             t := f.tmp[r.val()];
             a[] = t.alias;
             if astack(a.type) {
-                a.type = a.slot.type;
+                @debug_assert(a.slot != QbeNull, "stack alias but no slot set");
+                t_slot := f.tmp[a.slot.val()];
+                a.type = t_slot.alias.type;
             };
             if a.type == .ABot {
                 // if you run fillalias after abi (for either target), 
                 // parc passed on the stack will have a Tmp.slot before our frame and no alloc instruction.  
                 is_from_parc := t.slot != -1 && t.slot < -1;
-                @debug_assert(is_from_parc, "wanted alias");
+                if !is_from_parc {
+                    printfn(f, f.globals.debug_out);
+                    if rtype(r) == .RTmp {
+                        @panic("Wanted alias for %", f.get_temporary(r).name());
+                    } else {
+                        @panic("Wanted alias for % %", rtype(r), r.val());
+                    };
+                };
                 a.type = .ALoc; // TODO: should this be .AEsc?
             };
         }
@@ -31,7 +40,7 @@ fn getalias(a: *Qbe.Alias, r: Qbe.Ref, f: *Qbe.Fn) void = {
                 a.type = .ACon;
             };
             a.offset = c.bits.i;
-            a.slot = Qbe.Alias.ptr_from_int(0);
+            a.slot = QbeNull;
         }
         @default => @panic("getalias bad ref %", { n := ::get_enum_names(Qbe.RegKind); n[r.rtype().raw().zext()] });
     };
@@ -88,7 +97,11 @@ fn alias(p: Qbe.Ref, op: i32, sp: i32, q: Qbe.Ref, sq: i32, delta: *i32, f: *Qbe
 fn escapes(r: Qbe.Ref, f: *Qbe.Fn) bool = {
     if(rtype(r) != .RTmp, => return(true));
     a := f.tmp[r.val()].alias&;
-    !astack(a.type) || a.slot.type == .AEsc
+    !astack(a.type) || {
+        @debug_assert(a.slot != QbeNull, "stack alias but no slot set.");
+        a_slot := f.tmp[a.slot.val()].alias&;
+        a_slot.type == .AEsc
+    }
 }
 
 fn astack(t: Qbe.AliasType) bool #inline = 
@@ -98,7 +111,9 @@ fn esc(r: Qbe.Ref, f: *Qbe.Fn) void = {
     if rtype(r) == .RTmp && !isreg(r) {
         a := f.tmp[r.val()].alias&;
         if astack(a.type) {
-            a.slot.type = .AEsc;
+            @debug_assert(a.slot != QbeNull, "stack alias but no slot set.");
+            a_slot := f.tmp[a.slot.val()].alias&;
+            a_slot.type = .AEsc;
         };
     };
 }
@@ -108,7 +123,7 @@ fn esc(r: Qbe.Ref, f: *Qbe.Fn) void = {
 fn store(r: Qbe.Ref, sz: i32, f: *Qbe.Fn) void = {
     if rtype(r) == .RTmp {
         a := f.tmp[r.val()].alias&;
-        if !a.slot.is_null() {
+        if a.slot != QbeNull {
             @debug_assert(astack(a.type), "expected stack alias");
             off := a.offset;
             m: u64 = if sz >= 64 || (off < 0 || off >= 64) {
@@ -117,7 +132,8 @@ fn store(r: Qbe.Ref, sz: i32, f: *Qbe.Fn) void = {
             } else {
                 (BIT(sz.intcast()) - 1).shift_left(off)
             };
-            a.slot.u.loc.m = a.slot.u.loc.m.bit_or(m);
+            a_slot := f.tmp[a.slot.val()].alias&;
+            a_slot.u.loc.m = a_slot.u.loc.m.bit_or(m);
         }
     }
 }
@@ -125,6 +141,7 @@ fn store(r: Qbe.Ref, sz: i32, f: *Qbe.Fn) void = {
 fn fillalias(f: *Qbe.Fn) void = {
     each f.tmps() { t |
         t.alias.type = .ABot;
+        t.alias.slot = QbeNull;
     };
     for_blocks_rpo_forward f { b |
         @debug_assert(!is_null(b), "bad rpo");
@@ -135,7 +152,7 @@ fn fillalias(f: *Qbe.Fn) void = {
             a.type = .AUnk;
             a.base = p.to.val().intcast();
             a.offset = 0;
-            a.slot = Qbe.Alias.ptr_from_int(0);
+            a.slot = QbeNull;
         };
         for_insts_forward b { i |
             continue :: local_return;
@@ -147,7 +164,7 @@ fn fillalias(f: *Qbe.Fn) void = {
                 @debug_assert(a.type == .ABot);
                 if i.op().between(.alloc4, .alloc16) {
                     a.type = .ALoc;
-                    a.slot = a;
+                    a.slot = i.to;
                     a.u.loc.sz = -1;
                     if rtype(i.arg&[0]) == .RCon {
                         c := f.get_constant(i.arg&[0]);
@@ -158,7 +175,7 @@ fn fillalias(f: *Qbe.Fn) void = {
                     };
                 } else {
                     a.type = .AUnk;
-                    a.slot = Qbe.Alias.ptr_from_int(0);
+                    a.slot = QbeNull;
                 };
                 a.base = i.to.val().intcast();
                 a.offset = 0;

@@ -5,6 +5,7 @@
 
 TRACE_SHIMS :: false;
 TRACE_CALLS :: false; 
+GENERATION :: false;
 
 DynCallShim :: @tagged(Pending: u32, Ready: rawptr);
 
@@ -12,6 +13,15 @@ fn call_dynamic_values(self: *SelfHosted, f_ptr: i64, f_ty: FnType, args_value: 
     callee := self.dyncalls&.get_ptr(f_ty&) || {
         self.create_dyncall_shim(f_ty);
         self.dyncalls&.get_ptr(f_ty&).unwrap()
+    };
+    
+    // :SLOW
+    @if(GENERATION) {
+        generation  := self.comptime_codegen.generation_pending;
+        while => self.comptime_codegen.generation < generation {
+            pthread_cond_signal(self.comptime_codegen.bouba_progress_c&);
+            wait(self.comptime_codegen, true);
+        };
     };
     
     callee := @match(callee) {
@@ -203,8 +213,9 @@ fn create_jit_shim(self: CompCtx, shared: *CodegenShared, fid: FuncId, handler_c
         // -- Dec 22
         target := f.unique_named_con(target_id, 0);
         myself := f.unique_named_con(id, 0);
-        is_ready := f.newtmp("ready", .Kl);  // to test if this is helping, change this to f.newcon(0) and add logging in report_called_uncompiled_or_just_fix_the_problem. 
+        is_ready := f.newtmp("ready", .Kl); 
         push(f.start, make_ins(.cnel, .Kl, is_ready, myself, target));
+        //is_ready := f.getcon(0);  // to test if this is helping, toggle this and add logging in report_called_uncompiled_or_just_fix_the_problem. 
         f.start.jmp = (arg = is_ready, type = .jnz);
         f.start.s1 = do_the_call;
         f.start.s2 = not_ready;
@@ -265,6 +276,7 @@ fn create_jit_shim(self: CompCtx, shared: *CodegenShared, fid: FuncId, handler_c
         do_the_call.link = not_ready;
     };
     enqueue_task(shared, entry);
+    func.generation = self.data.cast()[][].comptime_codegen.generation_pending;
 }
 
 fn shallow_jit_func(self: *SelfHosted, fid: FuncId) void = {
@@ -304,6 +316,7 @@ fn shallow_jit_func(self: *SelfHosted, fid: FuncId) void = {
             func.mutual_callees&.add_unique(callee, self.get_alloc());
         };
     };
+    func.generation = self.comptime_codegen.generation_pending;
 }
 
 fn bump_dirty_new(self: *SelfHosted) void = 
@@ -425,3 +438,40 @@ report_called_uncompiled_or_just_fix_the_problem :: @as(rawptr) fn(self: *SelfHo
     //bc.jitted&.bump_dirty();
     result
 };
+
+// If you're about to actually call the pointer, we need to mark the memory as executable.
+fn get_fn_callable(self: *SelfHosted, fid: FuncId) ?rawptr = {
+    m := self.comptime_codegen.m;
+    func := self.get_function(fid);
+    id := self.comptime_jit_symbol_id(fid);
+    result: ?rawptr = .None;
+    if !func.get_flag(.RealAsmDone) && !func.get_flag(.AlreadyHasShim) {
+        return(.None);
+    };
+    if use_threads {
+        self.update_pending_took_pointer();
+        if TRACE_SHIMS && !symbol_is_ready(m, id) {
+            @println("waiting for %", self.log_name(fid));
+        };
+        cond :: => @if(GENERATION, func.generation > self.comptime_codegen.generation, !symbol_is_ready(m, id));
+        while cond { 
+            pthread_cond_signal(self.comptime_codegen.bouba_progress_c&);
+            wait(self.comptime_codegen, true);
+        }; 
+    };
+    @if(use_threads) pthread_mutex_lock(m.icache_mutex&).unwrap();
+    use_symbol(m, id) { s | 
+        // TODO: sometimes we actually want to spin and wait for it to be ready. 
+        //       also something something how big is a cache line. 
+        if !s.jit_addr.is_null() && (s.kind != .Local || s.size != 0) {
+            // TODO: only the first time :SLOW
+            if func.get_flag(.TookPointerValue) || ENABLE_TRACY || TRACE_CALLS {
+                self.created_jit_fn_ptr_value(fid, s.jit_addr.int_from_rawptr());
+            };
+            result = (Some = s.jit_addr);
+            self.bump_dirty_new(false);
+        };
+    };
+    @if(use_threads) pthread_mutex_unlock(m.icache_mutex&).unwrap();
+    result
+}

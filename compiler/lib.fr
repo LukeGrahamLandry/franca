@@ -20,8 +20,6 @@
 #include_std("backend/lib.fr");
 INCLUDE_QBE_VTABLE :: true;
 
-::?[]Prim; // TODO: why do i need this extra when lsp????? order of exports changed maybe??
-
 // TODO: don't individually allocate all these. 
 SelfHosted :: @rec @struct(
     env: *ComptimeEnvironment,
@@ -145,7 +143,8 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
         USE_SAME_MODULE :: false;
         
         shared := @if(USE_SAME_MODULE, self.comptime_codegen, {
-            m := init_default_module((arch = query_current_arch().unwrap(), os = query_current_os(), type = .JitOnly), use_threads);
+            m := @uninitialized QbeModule;
+            init_default_module(m&, (arch = query_current_arch().unwrap(), os = query_current_os(), type = .JitOnly), use_threads);
             shared: *CodegenShared = init(m&, @as(CodegenWorker) codegen_thread_main);
             shared
         });
@@ -336,7 +335,7 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
     opts.env = ComptimeEnvironment.raw_from_ptr(env);
     
     m := a.box(QbeModule);
-    m[] = init_default_module((arch = arch, os = os, type = .JitOnly), use_threads);
+    init_default_module(m, (arch = arch, os = os, type = .JitOnly), use_threads);
     m.got_indirection_instead_of_patches = true;  // comptime needs to be more flexible with late bound references.
     
     self: SelfHosted = (
@@ -376,7 +375,7 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
         // Reserve a global slot to store the context pointer. 
         // The program can only access this with GetContext and SetContext. 
         out: List(BakedEntry) = list(a);
-        out&.push((Num = (value = 0, ty = .I64)));
+        out&.push((Num = (value = 0)));
         id := self&.put_baked((VoidPtrArray = out.rs()), .None);
         env.static_context_var = (Some = id); 
     };
@@ -435,7 +434,6 @@ fn clone(self: *SelfHosted, e: *LazyType) LazyType = {
 ::DeriveFmt(BakedEntry);
 ::DeriveFmt(BakedVarId);
 ::display_slice(BakedEntry);
-::enum(Prim);
 
 VariableInfo :: @struct(
     declaration: Span,

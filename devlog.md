@@ -1,4 +1,20 @@
 
+## (Dec 25)
+
+- yikes, unpleasent memory safety thing. 
+Alias.slot is a pointer to another tmp's alias field. 
+However, it can't be an actual pointer because we read it in getalias which is called from loadopt:def
+which is intersperced with newtmp calls in that pass, which cause f.tmp to be resized, invalidating any internal pointers. 
+I think it works for qbe because f.tmp is PFn so free doesn't do anything and after the alias pass once you start making new tmps, 
+you don't need to update the alias info so it's fine that you're pointing into an old copy of the tmps array if it resizes.
+which would apply to my temp() alloc too except that when i suspend for inlining, it copies into a new QList in libc_allocator,
+and then keeps using that at the end if i need to emit_suspended_inlinables, at which point free does do something and 
+now we're at the mercy of whatever your libc's malloc decides to do. 
+i think i want to just use the module's arena instead of libc_allocator anyway but still nicer to follow the rules i think. 
+seems that was what was making ./boot fail most of the time so that's very good to have fixed, but -repeat still calls into garbage so more mistakes exist :( 
+
+## (Dec 24)
+
 - fixed compiler_gui/dearimgui_demo examples
 - don't need the asm versions of call_dynamic_values anymore
 - there's something very strange where it sometimes decides you can't coerce an overload set to a function pointer.

@@ -11,7 +11,6 @@
 // note: we re-jit the legacy backends every time. 
 #include_std("backend/lib.fr"); 
 #include_std("compiler/ast_external.fr");  
-#include_std("compiler/worker.fr");  
 #include_std("examples/old_backend/lib.fr");  
 
 BOOTSTRAP_ONLY_MODE :: false;
@@ -34,6 +33,7 @@ Command :: @struct(
     os := Os.macos, // TODO: should default to current
     backend := AotBackend.self,
     goal := QbeOutputPurpose.Exe, // invalid
+    n := 1,
 );
 
 Action  :: @enum(i64) (run, build, test); ::enum(Action);
@@ -42,6 +42,22 @@ AotBackend :: @enum(i64) (self, legacy, llvm, qbe);
 forever :: todo_allocator;
 fn driver(vtable: *ImportVTable) void #export = {
     cmd := parse_cli_args();
+    // just because i don't want to learn how to use lldb properly
+    n := cmd.n;
+    while => cmd.n > 0 {
+        if n > 1 {
+            @println("Run %/%", n-cmd.n+1, n);
+        };
+        push_dynamic_context {
+            mark := mark_temporary_storage();
+            do_it(vtable, cmd&);
+            reset_temporary_storage(mark);
+        };
+        cmd.n -= 1;
+    };
+}
+
+fn do_it(vtable: *ImportVTable, cmd: *Command) void = {
     build_options := vtable.default_build_options();
     build_options.retain_function_names = cmd.keep_names;
     build_options.deduplicate_bytecode = cmd.deduplicate;
@@ -86,7 +102,7 @@ fn driver(vtable: *ImportVTable) void #export = {
     
     m := @uninitialized QbeModule;
     if (@is(cmd.backend, .self, .legacy)) {
-        m = init_default_module_dyn(c.vtable, (os = cmd.os, arch = cmd.arch, type = cmd.goal));
+        init_default_module_dyn(m&, c.vtable, (os = cmd.os, arch = cmd.arch, type = cmd.goal));
         assert(!cmd.show_asm, "TODO: support -S on non-text backends");
     };
     
@@ -131,6 +147,11 @@ fn driver(vtable: *ImportVTable) void #export = {
             success := run_cmd_blocking("codesign", @slice("-s", "-", cmd.output_file)); 
             assert(success, "sign failed");
         };
+        // for -repeat
+        m&.drop(true); 
+        {c.vtable.destroy_compiler}(c.data);
+        // but also doing that makes it crash every time
+        // so turn that on when ready to debug the crazy i guess. TODO
     } else {
         @assert(cmd.backend != .qbe, "TODO: call to actually compile the thing");
         out := open_temp_file();
@@ -275,6 +296,10 @@ fn parse_cli_args() Command = {
         i += 1;
         
         @switch(arg) {
+            @case("-repeat") => {
+                cfg.n = parse_int(args[i].str());
+                i += 1;
+            };
             @case("-keep-names") => {
                 cfg.keep_names = true;
             };

@@ -132,7 +132,6 @@ fn emit_bc(comp: CompCtx, bc: *BcBackend, f: FuncId, when: ExecStyle) CRes(*FnBo
             bc.saved_bytecodes&.insert(body, when);
         };
     };
-    func.nullable_finished_bytecode_pointer = FnBody.int_from_ptr(body); 
     body.context = func.get_flag(.YesContext) && !func.get_flag(.NoContext);
     if !body.context {
         func.set_flag(.NoContext);
@@ -847,7 +846,7 @@ fn deref_top_of_stack(self: *EmitBc, result_location: ResultLoc, value_type: Typ
                 @debug_assert(info.is_sized, "unsized!");
 
                 if info.size_slots == 1 {
-                    ty := self.program.prim(value_type).expect("deref prim");
+                    ty := @unwrap(self.program.prim(value_type), "deref prim") return;
                     self.push(Load = ty);
                     self.push(StorePre = ty);
                 } else {| // TODO: else if
@@ -1126,20 +1125,26 @@ fn emit_block_expr(self: *EmitBc, expr: *FatExpr, result_location: ResultLoc, ca
 
 fn emit_value(self: *EmitBc, value: *Values, result_location: ResultLoc, expr_ty: Type) CRes(void) #once = {
     if(result_location == .Discard, => return(.Ok));
+    reader: ReadBytes = (bytes = value.bytes(), i = 0);
     want_emit_by_memcpy := value.len() > 16;  // dont change this to include small things unless you do something about values being stored inline.
     // TODO: you probably want to allow people to overload bake_relocatable_value even if !contains_pointers, but also there's no point. -- Jun 19
     if self.result.when == .Aot && want_emit_by_memcpy.or(self.program.get_info(expr_ty).contains_pointers()) {
         if result_location.eq(.PushStack).or(!want_emit_by_memcpy) {
             out := @try({self.program.vtable.emit_relocatable_constant_body}(self.program.data, value.bytes(), expr_ty, false)) return;
-
-            for out { part | 
-                @match(part) {
-                    // TODO: now you can't have non-i64 in top level constant struct -- Jun 18
-                    fn Num(f)     => {
-                        self.push(PushConstant = (value = f.value, ty = f.ty));
+            
+            // just going this to get the prims because llvm wants to know what's a pointer. 
+            _parts: List(i64) = list(temp());
+            info: List(Ty(Prim, u16)) = list(temp());
+            @try(self.program.deconstruct_values(expr_ty, reader&, _parts&, (Some = info&))) return;
+            @err_assert(info.len == out.len, "length of relocatable_constant_body does not match the number of Prims for %", self.program.log(expr_ty)) return;
+            
+            enumerate out { i, part | 
+                @match(part[]) {
+                    fn Num(f) => {
+                        self.push(PushConstant = (value = f.value, ty = info[i]._0));
                         self.result.mix_hash(f.value, 123);
                     }
-                    fn FnPtr(f)   => {
+                    fn FnPtr(f) => {
                         f = self.program.follow_redirects(f);
                         self.push(GetNativeFnPtr = f);
                         self.result.mix_hash(f.as_index(), 1237);
@@ -1164,7 +1169,6 @@ fn emit_value(self: *EmitBc, value: *Values, result_location: ResultLoc, expr_ty
         return(.Ok);
     };
 
-    reader: ReadBytes = (bytes = value.bytes(), i = 0);
     @match(result_location) {
         fn PushStack() => {
             parts: List(i64) = list(temp());

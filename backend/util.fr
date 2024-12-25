@@ -447,28 +447,36 @@ fn BSOP(a: *Qbe.BSet, b: *Qbe.BSet, $fuse: @Fn(a: u64, b: u64) u64) void #inline
 /////////////
 // TODO: use my allocators for this. 
 
-VMag :: 0xcabba9e;  // random number chosen by fair die roll
+VMagLong :: 0xcabba9e;  // random number chosen by fair die roll
+VMagTemp :: 0xca88abe;
 
 ::ptr_utils(QListHeader);
 ::ptr_utils(*QListHeader);
 
 fn calloc(nitems: i64, size: i64) rawptr #libc;
 
-fn vnew(len: i64, esz: i64, pool: Qbe.Pool) rawptr = {
-    // qbe had .PFn for auto free when done all passes and .PHeap for manually free. 
-    
+fn vnew(len: i64, esz: i64, where: i64, m: *QbeModule) rawptr #inline = {
     cap := 2;
     while => cap < len {
         cap *= 2;
     };
-    a := @if(pool == .PLong, libc_allocator, temp());
-    v := a.alloc(i64, (cap * esz + QListHeader.size_of() + 7) / 8);  // :HardcodeAlloc  // _zeroed?
-    @debug_assert(!v.ptr.is_null(), "alloc failed?????");
+    
+    words := (cap * esz + QListHeader.size_of() + 7) / 8;
+    ::if([]i64);
+    v := if where == VMagTemp {
+        temp().alloc(i64, words)
+    } else {
+        @if(use_threads) pthread_mutex_lock(m.intern_mutex&).unwrap();
+        mem := m.forever&.borrow().alloc(i64, words);
+        @if(use_threads) pthread_mutex_unlock(m.intern_mutex&).unwrap();
+        //mem := libc_allocator.alloc(i64, words);
+        mem
+    };
     v := ptr_cast_unchecked(i64, QListHeader, v.ptr);
-    v.mag = VMag;
+    v.where = where;
+    v.m = m;
     v.cap = cap;
     v.esz = esz;
-    v.pool = pool;
     QListHeader.raw_from_ptr(v.offset(1))
 }
 
@@ -476,9 +484,9 @@ fn vgrow(vpr: rawptr, len: i64) void = {
     vp := ptr_from_raw(*QListHeader, vpr);
     v := vp[].offset(-1);
     @debug_assert(!v.offset(1).is_null() && !v.is_null(), "vgrow on null QList");
-    @debug_assert_eq(v.mag, VMag, "QList bad magic growing % to %", vpr, len);
+    @debug_assert_ne(v.where, QLIST_DOUBLE_FREE, "QList bad magic growing % to %", vpr, len);
     if(v.cap >= len, => return());
-    v1 := vnew(len, v.esz, v.pool);
+    v1 := vnew(len, v.esz, v.where, v.m);
     copy_no_alias(v1, QListHeader.raw_from_ptr(v.offset(1)), v.cap * v.esz);
     vfree(QListHeader.raw_from_ptr(v.offset(1)));
     vp[] = ptr_from_raw(QListHeader, v1);
@@ -486,26 +494,34 @@ fn vgrow(vpr: rawptr, len: i64) void = {
 
 ::enum(Qbe.Pool);
 
+fn debug_zero_owned_memory(v: *QListHeader) void = {
+    len := v.cap * v.esz;
+    p := ptr_cast_unchecked(@type v, u8, v.offset(1));
+    //memset(u8.raw_from_ptr(p), 0, len);
+}
+
 fn vfree(p: rawptr) void = {
     v := QListHeader.ptr_from_raw(p).offset(-1);
-    @debug_assert_eq(v.mag, VMag);
-    v.mag = QLIST_DOUBLE_FREE;
-    if v.pool == .PLong {
-        a := libc_allocator;
-        // TODO: does this make it better? :FUCKED
-        //free(QListHeader.raw_from_ptr(v));
+    w := v.where;
+    v.where = QLIST_DOUBLE_FREE;
+    if w == VMagTemp {
+        debug_zero_owned_memory(v);
+        return();
     };
+    @debug_assert_eq(w, VMagLong, "bad QList magic");
+    debug_zero_owned_memory(v);
+    // not a thing now that we're using module.forever. should profile to see which is better. 
+    //a := libc_allocator;
+    //free(QListHeader.raw_from_ptr(v));
 }
 
 // This is a header that goes before the allocated memory for the array. 
 // When a field is an QList it points to the first entry of one of these and you offset backwards to get the header. 
 QListHeader :: @struct(
-    mag: u64,
-    pool: Qbe.Pool,
+    where: i64,
+    m: *QbeModule, // nullable
     esz: i64,
     cap: i64,
-    // I don't have unsized types. lets hope thats not a big deal
-    // union { long long ll; long double ld; void *ptr; } align[];
 );
 
 fn header();
@@ -520,11 +536,11 @@ fn QList($T: Type) Type = {
     ::ptr_utils(T);
     
     fn new(len: i64) Self = {
-        (first = T.ptr_from_raw(vnew(len, T.size_of(), .PHeap)))
+        (first = T.ptr_from_raw(vnew(len, T.size_of(), VMagTemp, QbeModule.ptr_from_int(0))))
     }
     
-    fn new_long_life(len: i64) Self = 
-        (first = T.ptr_from_raw(vnew(len, T.size_of(), .PLong)));
+    fn new_long_life(m: *QbeModule, len: i64) Self = 
+        (first = T.ptr_from_raw(vnew(len, T.size_of(), VMagLong, m)));
     
     fn new_copy(items: []T) Self = {
         self: Self = new(items.len);
@@ -532,8 +548,8 @@ fn QList($T: Type) Type = {
         self
     }
     
-    fn new_copy_long_life(items: []T) Self = {
-        self: Self = new_long_life(items.len);
+    fn new_copy_long_life(m: *QbeModule, items: []T) Self = {
+        self: Self = m.new_long_life(items.len);
         self.slice(0, items.len).copy_from(items);
         self
     }
@@ -568,7 +584,6 @@ fn QList($T: Type) Type = {
 ///////////////////
 /// String Pool ///
 ///////////////////
-// TODO: less messing with c strings but for now i want to provide exactly the same interface as real qbe. 
 
 IBits :: 12;
 IMask :: 1.shift_left(IBits) - 1;
@@ -584,6 +599,8 @@ fn intern(m: *QbeModule, s: Str) u32 = {
         locked_by_me := LOCKED_BASE.bit_or(context(DefaultContext)[].thread_index.trunc());
         @debug_assert(n != locked_by_me, "already locked by this thread");
         while => n.bit_and(LOCKED_BASE) != 0 {
+            // If this happened a lot you'd want to use something less dumb.
+            // But you get here ~3 times when self compiling so it doesn't matter yet -- Dec 25
             usleep(1);
             n = b.n;
         };
@@ -600,7 +617,7 @@ fn intern(m: *QbeModule, s: Str) u32 = {
         @panic("interning table overflow");
     };
     if n == 0 {
-        b.data = new_long_life(1);
+        b.data = m.new_long_life(1);
     } else {
         if n.bit_and(n - 1) == 0 {
             b.data&.grow(zext(n + n));
@@ -608,8 +625,9 @@ fn intern(m: *QbeModule, s: Str) u32 = {
     };
    
     // TODO: have ArenaAlloc use atomics
-    //mem := m.forever&.borrow().alloc(u8, s.len);
-    mem := todo_allocator.alloc(u8, s.len); // LEAK
+    @if(use_threads) pthread_mutex_lock(m.intern_mutex&).unwrap();
+    mem := m.forever&.borrow().alloc(u8, s.len);
+    @if(use_threads) pthread_mutex_unlock(m.intern_mutex&).unwrap();
     
     mem.copy_from(s);
     data := b.data.index(n.zext());

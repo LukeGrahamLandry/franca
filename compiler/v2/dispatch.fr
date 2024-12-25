@@ -404,42 +404,6 @@ fn comptime_jit_symbol_id(self: *SelfHosted, fid: FuncId) u32 = {
     func.comptime_jit_symbol_id
 }
 
-// If you're about to actually call the pointer, we need to mark the memory as executable.
-fn get_fn_callable(self: *SelfHosted, fid: FuncId) ?rawptr = {
-    m := self.comptime_codegen.m;
-    func := self.get_function(fid);
-    id := self.comptime_jit_symbol_id(fid);
-    result: ?rawptr = .None;
-    if !func.get_flag(.RealAsmDone) && !func.get_flag(.AlreadyHasShim) {
-        return(.None);
-    };
-    if use_threads {
-        self.update_pending_took_pointer();
-        if TRACE_SHIMS && !symbol_is_ready(m, id) {
-            @println("waiting for %", self.log_name(fid));
-        };
-        while => !symbol_is_ready(m, id) {
-            pthread_cond_signal(self.comptime_codegen.bouba_progress_c&);
-            wait(self.comptime_codegen, true);
-        }; 
-    };
-    @if(use_threads) pthread_mutex_lock(m.icache_mutex&).unwrap();
-    use_symbol(m, id) { s | 
-        // TODO: sometimes we actually want to spin and wait for it to be ready. 
-        //       also something something how big is a cache line. 
-        if !s.jit_addr.is_null() && (s.kind != .Local || s.size != 0) {
-            // TODO: only the first time :SLOW
-            if func.get_flag(.TookPointerValue) || ENABLE_TRACY || TRACE_CALLS {
-                self.created_jit_fn_ptr_value(fid, s.jit_addr.int_from_rawptr());
-            };
-            result = (Some = s.jit_addr);
-            self.bump_dirty_new(false);
-        };
-    };
-    @if(use_threads) pthread_mutex_unlock(m.icache_mutex&).unwrap();
-    result
-}
-
 fn create_jit_shim(self: *SelfHosted, fid: FuncId) Res(void) = {
     opts := self.get_build_options();
     if(!opts.do_jit_shims, => return(.Ok));

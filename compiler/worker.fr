@@ -139,8 +139,10 @@ codegen_thread_main :: fn(shared: *CodegenShared) void = {
     idx := 0;
     @debug_assert(use_threads);
     loop {
+        @debug_assert(shared.m.initialized, "destroyed module before joining codegen thread.");
         if acquire(shared.queue, false, idx&) { entry |
             do_codegen(shared.m, entry);
+            shared.generation += 1;
             pthread_cond_signal(shared.kiki_progress_c&).unwrap();
         } else {
             if shared.no_more_functions {
@@ -198,6 +200,7 @@ fn enqueue_task(shared: *CodegenShared, old_entry: *CodegenEntry) void = {
     @debug_assert(!old_entry.task&.is(.Dead), "tried to enqueue dead task");
     old_entry.release(true);
     @if(use_threads, {
+        shared.generation_pending += 1;
         pthread_cond_signal(shared.bouba_progress_c&);
     }, {
         ::ptr_utils(*CodegenEntry);
@@ -214,7 +217,7 @@ fn do_codegen(m: *QbeModule, entry: *CodegenEntry) void = {
     entry.logging = "";
     context(DefaultContext)[].temporary_allocator = entry.arena&;
     @match(entry.task) {
-        fn Dead() => panic("dead codegen task");
+        fn Dead() => @panic("dead codegen task %", m.initialized);
         fn Func(f) => {
             //@if(TRACE_SHIMS)
             //use_symbol(f.globals, f.lnk.id) { s | 
@@ -311,6 +314,8 @@ CodegenShared :: @struct(
     constants_used: DynamicBitSet,
     type_indices: HashMap(Type, i64),
     bouba_idx := 0,
+    generation := 0,
+    generation_pending := 0,
 );
 
 CodegenState :: @enum(i64) (WaitingForBouba, UsedByBouba, WaitingForKiki, UsedByKiki);
@@ -405,9 +410,11 @@ fn get_log_types(comp: CompCtx, fid: FuncId) Str = {
 
 fn join_codegen_thread(shared: *CodegenShared) void = {
     shared.no_more_functions = true;
+    fence();
     while => !shared.no_more_codegen {
         pthread_cond_signal(shared.bouba_progress_c&);
         wait(shared, true);
+        fence();
     };
 }
 

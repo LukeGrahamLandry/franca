@@ -84,54 +84,6 @@ fn unptr_ty(c: CompCtx, ty: Type) ?Type = {
     }
 }
 
-fn prim(self: CompCtx, ty: Type) ?Prim = {
-    p: Prim = @match(self.get_type(ty)) {
-        fn F64()     => .F64;
-        fn F32()     => .F32;
-        fn Bool()    => .I8 ;
-        fn VoidPtr() => .P64;
-        fn FnPtr(_)  => .P64;
-        fn Ptr(_)    => .P64;
-        fn Fn(_)     => .I32;
-        fn Label(_)  => .I32;
-        fn Int(int) => 
-            @switch(int.bit_count) { 
-                @case(8)  => .I8 ;
-                @case(16) => .I16;
-                @case(32) => .I32;
-                @default  => .I64;  // TODO: :fake_ints_too_big
-            };
-        fn Struct(f) => {
-            if f.fields.len - f.const_field_count.zext() == 1 {
-                fst := f.fields[0]&;
-                assert(fst.kind != .Const, "TODO: first field const");
-                if self.slot_count(fst.ty) == 1 {
-                    return(self.prim(fst.ty));
-                };
-            };
-            return(.None)
-        }
-        fn Tagged(f) => {
-            each f.cases { c |
-                if !c._1.is_unit() {
-                    return(.None);
-                };
-            };
-            .I64 // TODO: :tag_is_always_i64
-        }
-        fn Named(f) => return(self.prim(f._0));
-        fn Enum(f) => return(self.prim(f.raw));
-        fn Array(f) => {
-            if f.len == 1 {
-                return(self.prim(f.inner));
-            };
-            return(.None)
-        }
-        @default => return(.None);
-    };
-    (Some = p)
-}
-
 fn flat_tuple_types(self: CompCtx, ty: Type) List(Type) = {
     @match(self.get_type(ty)) {
         fn Struct(f) => {
@@ -683,9 +635,7 @@ fn emit_qbe_included_dyn(m: *QbeModule, comp: *CompCtx, fns: [] FuncId, entry: P
     {comp.vtable.emit_qbe_included}(QbeModule.raw_from_ptr(m), comp, fns, entry)
 }
 
-fn init_default_module_dyn(vtable: *ImportVTable, goal: QbeTargetEnv) QbeModule = {  
-    m := @uninitialized QbeModule;
+fn init_default_module_dyn(m: *QbeModule, vtable: *ImportVTable, goal: QbeTargetEnv) void = {  
     @assert(ptr_cast_unchecked(@type vtable.init_default_qbe_module, i64, vtable.init_default_qbe_module&)[] != 0, "init_default_qbe_module is not enabled");
-    {vtable.init_default_qbe_module}(QbeModule.raw_from_ptr(m&), QbeTargetEnv.raw_from_ptr(goal&));
-    m
+    {vtable.init_default_qbe_module}(QbeModule.raw_from_ptr(m), QbeTargetEnv.raw_from_ptr(goal&));
 }

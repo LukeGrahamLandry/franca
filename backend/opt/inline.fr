@@ -53,7 +53,7 @@ fn good4inl(f: *Qbe.Fn) bool = {
 }
 
 // Note: this goes in the inlining cache so it can't use temp() memory.
-fn cloneblk(b: *Qbe.Blk) *Qbe.Blk = {
+fn cloneblk(m: *QbeModule, b: *Qbe.Blk) *Qbe.Blk = {
     inlb := libc_allocator.box_zeroed(Qbe.Blk); // :HardcodeAlloc
     inlb.jmp = b.jmp;
     
@@ -63,32 +63,33 @@ fn cloneblk(b: *Qbe.Blk) *Qbe.Blk = {
     @debug_assert(inlb.s2.is_null(),   msg);
     @debug_assert(inlb.link.is_null(), msg);
     
-    inlb.ins = new_long_life(b.nins.zext());
+    inlb.ins = m.new_long_life(b.nins.zext());
     idup(inlb, b.ins.first, b.nins.zext());
     inlb
 }
 
 // Note: this goes in the inlining cache so it can't use temp() memory.
 fn clone(f: *Qbe.Fn) *Qbe.Fn = {
+    m := f.globals;
     inlfn := libc_allocator.box_zeroed(Qbe.Fn); // :HardcodeAlloc
     inlfn.retty = f.retty;
     inlfn.ntmp = f.ntmp;
     inlfn.ncon = f.ncon;
     inlfn.nblk = f.nblk;
     inlfn.leaf = f.leaf;
-    inlfn.globals = f.globals;
+    inlfn.globals = m;
     inlfn.lnk.id = f.lnk.id;
-    inlfn.tmp = new_long_life(inlfn.ntmp.zext());
+    inlfn.tmp = m.new_long_life(inlfn.ntmp.zext());
     inlfn.tmp.slice(0, f.ntmp.zext()).copy_from(f.tmp.slice(0, f.ntmp.zext()));
     range(Qbe.Tmp0, inlfn.ntmp.zext()) { i |
         inlfn.tmp[i].visit = -1; // used when remapping 
         inlfn.tmp[i].use.first = Qbe.Use.ptr_from_int(0);  // don't try to reuse memory in clear_usage_info if this function is suspended. 
     };
-    inlfn.con = new_long_life(inlfn.ncon.zext());
+    inlfn.con = m.new_long_life(inlfn.ncon.zext());
     inlfn.con.slice(0, f.ncon.zext()).copy_from(f.con.slice(0, f.ncon.zext()));
     @debug_assert(f.nmem == 0, "shouldn't need to inline clone f.mem");
     @debug_assert(f.nblk == 1, "don't know how to inline that");
-    inlfn.start = cloneblk(f.start);
+    inlfn.start = cloneblk(m, f.start);
     @if(TRACK_IR_NAMES) inlfn.name&.items().copy_from(f.name&.items()); // useless, just lazy way to make the debug logging better
     inlfn
 }

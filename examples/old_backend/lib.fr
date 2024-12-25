@@ -294,3 +294,56 @@ fn decode_switch(cases: *RsVec(SwitchPayload)) Ty([]SwitchPayload, ?BbId) = {
         (cases.items(), .None)
     }
 }
+
+// TODO: make the other enum varient builtin so you can use it and still override eq. because my order independence doesn't really work. 
+// TODO: unhandled switch case if i try to make this u8. becuase of comptime BakedEntry?
+Prim :: @enum(i64) (I8, I16, I32, I64, F64, F32, P64);
+::enum(Prim);
+
+fn prim(self: CompCtx, ty: Type) ?Prim = {
+    p: Prim = @match(self.get_type(ty)) {
+        fn F64()     => .F64;
+        fn F32()     => .F32;
+        fn Bool()    => .I8 ;
+        fn VoidPtr() => .P64;
+        fn FnPtr(_)  => .P64;
+        fn Ptr(_)    => .P64;
+        fn Fn(_)     => .I32;
+        fn Label(_)  => .I32;
+        fn Int(int) => 
+            @switch(int.bit_count) { 
+                @case(8)  => .I8 ;
+                @case(16) => .I16;
+                @case(32) => .I32;
+                @default  => .I64;  // TODO: :fake_ints_too_big
+            };
+        fn Struct(f) => {
+            if f.fields.len - f.const_field_count.zext() == 1 {
+                fst := f.fields[0]&;
+                assert(fst.kind != .Const, "TODO: first field const");
+                if self.slot_count(fst.ty) == 1 {
+                    return(self.prim(fst.ty));
+                };
+            };
+            return(.None)
+        }
+        fn Tagged(f) => {
+            each f.cases { c |
+                if !c._1.is_unit() {
+                    return(.None);
+                };
+            };
+            .I64 // TODO: :tag_is_always_i64
+        }
+        fn Named(f) => return(self.prim(f._0));
+        fn Enum(f) => return(self.prim(f.raw));
+        fn Array(f) => {
+            if f.len == 1 {
+                return(self.prim(f.inner));
+            };
+            return(.None)
+        }
+        @default => return(.None);
+    };
+    (Some = p)
+}

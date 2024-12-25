@@ -123,6 +123,7 @@ QbeModule :: @rec @struct(
     types_mutex: PMutex,
     last_function_end: *u8,
     icache_mutex: PMutex,
+    intern_mutex: PMutex,
 );
 
 QbeTargetEnv :: @struct(
@@ -144,21 +145,28 @@ MAX_GOT_SIZE :: 1.shift_left(15);
 SIZE_OF_STUBS :: 1.shift_left(10); // TODO: not this :explain
 COMMANDS_SIZE_GUESS :: macos_page_size; // :explain
 
-fn init_default_module(goal: QbeTargetEnv, expecting_rwx: bool) QbeModule = 
-    init(1.shift_left(25), libc_allocator, page_allocator, goal, expecting_rwx);
+fn init_default_module(m: *QbeModule, goal: QbeTargetEnv, expecting_rwx: bool) void = 
+    init(m, 1.shift_left(25), libc_allocator, page_allocator, goal, expecting_rwx);
 
 // - the allocators need to not be temp() because we reset temp()
 // - expecting_rwx only matters when jitting. See the comment on use_map_jit_on_apple_silicon if running on macos. 
 //   if you jit with expecting_rwx=false, you have to call make_exec before trying to run the code. 
 //   Regardless, be careful of cache coherency on aarch64, see comment on lib/sys/process.fr/clear_instruction_cache().
-fn init(segment_size: i64, gpa: Alloc, code_alloc: Alloc, goal: QbeTargetEnv, expecting_rwx: bool) QbeModule = {
+fn init(m: *QbeModule, segment_size: i64, gpa: Alloc, code_alloc: Alloc, goal: QbeTargetEnv, expecting_rwx: bool) void = {
     gpa = todo_allocator;
-    m := QbeModule.zeroed();
+    m[] = QbeModule.zeroed();
     m.supports_self_sign = true;
     m.forever = init(gpa, size_of(Qbe.Ins) * 1.shift_left(20) + size_of(SymbolBucket) * IMask + 1.shift_left(10));
     forever := m.forever&.borrow();
     m.segments = EnumMap(SegmentType, SegmentCursor).zeroed();
     m.use_map_jit_on_apple_silicon = expecting_rwx && goal.type == .JitOnly && goal.arch == .aarch64 && goal.os == .macos;
+    
+    // don't forget to update init_empty_for_template_only too!
+    @if(use_threads) {
+        pthread_mutex_init(m.types_mutex&, 0).unwrap();
+        pthread_mutex_init(m.icache_mutex&, 0).unwrap();
+        pthread_mutex_init(m.intern_mutex&, 0).unwrap();
+    };
     
     if m.use_map_jit_on_apple_silicon {
         // :JitMemProtect 
@@ -207,6 +215,16 @@ fn init(segment_size: i64, gpa: Alloc, code_alloc: Alloc, goal: QbeTargetEnv, ex
         m.got = (mmapped = (ptr = next[], len = MAX_GOT_SIZE), next = next[]);
         next[] = next[].offset(MAX_GOT_SIZE); 
         
+        if goal.type == .JitOnly {
+            range(0, MAX_GOT_SIZE / 8) { i |
+                tried_to_call_uncompiled :: fn() void = {
+                    scary_log("ICE: Tried to call an uncompiled function");
+                    abort();
+                };
+                ptr_cast_unchecked(u8, @FnPtr() void, m.got.mmapped.ptr.offset(i * 8))[] = tried_to_call_uncompiled;
+            };
+        };
+        
         next := m.segments&[.Code].next&;
         m.commands = (mmapped = (ptr = next[], len = COMMANDS_SIZE_GUESS), next = next[]);
         next[] = next[].offset(COMMANDS_SIZE_GUESS); 
@@ -233,23 +251,19 @@ fn init(segment_size: i64, gpa: Alloc, code_alloc: Alloc, goal: QbeTargetEnv, ex
     } else {
         m.target.fill_target_info(.amd64_apple);
     };
-    m.types[] = new_long_life(0); // TODO: check the magic in QbeBuilder.init to make sure you remember to do this. 
+    m.types[] = m.new_long_life(0); // TODO: check the magic in QbeBuilder.init to make sure you remember to do this. 
     m.curi[] = m.insb.index_unchecked(Qbe.MaxInstructions);
-    m.symbol_memmove = m&.intern("memmove");
-    
-    @if(use_threads) {
-        pthread_mutex_init(m.types_mutex&, 0).unwrap();
-        pthread_mutex_init(m.icache_mutex&, 0).unwrap();
-    };
-    
-    m
+    m.symbol_memmove = m.intern("memmove");
 }
 
-fn init_empty_for_template_only(gpa: Alloc) QbeModule = {
-    m := QbeModule.zeroed();
+fn init_empty_for_template_only(m: *QbeModule, gpa: Alloc) void = {
+    m[] = QbeModule.zeroed();
     m.initialized = true;
     m.forever = init(gpa, size_of(Qbe.Ins) * 1.shift_left(20) + size_of(SymbolBucket) * IMask + 1.shift_left(10));
     forever := m.forever&.borrow();
+    @if(use_threads) {
+        pthread_mutex_init(m.intern_mutex&, 0).unwrap();
+    };
     m.gpa = gpa;
     m.symbols = forever.alloc_zeroed(SymbolBucket, IMask + 1);
     //m.debug_out = fdopen(STD_ERR, "a".sym().c_str());
@@ -260,10 +274,9 @@ fn init_empty_for_template_only(gpa: Alloc) QbeModule = {
     m.curi   = forever.box(@type m.curi[]); // TODO: megadumb if its the page allocaotr
     m.debug  = forever.box_zeroed(@type m.debug[]);
     m.target = forever.box_zeroed(@type m.target[]);
-    m.types[] = new_long_life(0); // TODO: check the magic in QbeBuilder.init to make sure you remember to do this. 
+    m.types[] = m.new_long_life(0); // TODO: check the magic in QbeBuilder.init to make sure you remember to do this. 
     m.curi[] = m.insb.index_unchecked(Qbe.MaxInstructions);
     @if(use_threads) pthread_mutex_init(m.types_mutex&, 0).unwrap();
-    m
 }
 
 fn drop(m: *QbeModule, slowly_free_from_gpa: bool) void = {
