@@ -287,7 +287,14 @@ fn is_symbol(f: *Qbe.Fn, r: Qbe.Ref) bool =
 
 fn seladdr(r: *Qbe.Ref, f: *Qbe.Fn) void = {
     if rtype(r[]) == .RCon {  
-        return();
+        done := true;
+        if f.get_int(r[]) { addr | 
+            valid_offset := addr >= MIN_i32 && addr <= MAX_i32;
+            done = valid_offset;
+        };
+        if done {
+            return();
+        };
     };
     mem := Qbe.Addr.zeroed();
     mem.base = r[];
@@ -311,9 +318,19 @@ fn seladdr(r: *Qbe.Ref, f: *Qbe.Fn) void = {
         write(out, "\n");
     };
     ty := mem.offset.type&;
+    valid_offset := mem.offset.bits.i >= MIN_i32 && mem.offset.bits.i <= MAX_i32;
+    if !valid_offset {
+        // This makes sense when jitting, you're allowed to just stick hard coded references in your code. 
+        @assert(mem.index == QbeNull && mem.base == QbeNull && ty[] == .CBits, "TODO: folded memory access to >4GB constant address");
+        r1 := f.newtmp("isel", .Kl);
+        f.emit(.copy, .Kl, r1, f.getcon(mem.offset.bits.i), QbeNull);
+        mem.offset.bits.i = 0;
+        mem.base = r1;
+    };
     if mem.offset.bits.i == 0 && ty[] == .CBits {
         ty[] = .CUndef;
     };
+        
     m: i64 = f.nmem.zext();
     f.nmem += 1;
     f.mem&.grow(m + 1);

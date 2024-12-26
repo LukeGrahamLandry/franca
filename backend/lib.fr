@@ -185,17 +185,30 @@ fn init(m: *QbeModule, segment_size: i64, gpa: Alloc, code_alloc: Alloc, goal: Q
         make_segment(data_mem, .ConstantData, 0, segment_size);
         make_segment(data_mem, .MutableData, segment_size, segment_size*2);
     } else {
-        @assert(!expecting_rwx, "TODO: linux jit support (i haven't done the arm varargs abi yet either i think)");
-        // TODO: im pretty sure linux lets me just have RWX pages without all apple's hoops.
-        //       so do that if they want. 
-        
-        mem := code_alloc.alloc(u8, segment_size * 3); // TODO: ask for the alignment we need.
-        
-        // order matters!
-        m.start_of_writable_code = mem.ptr;
-        make_segment(mem, .Code, 0, segment_size);  // :CodeIsFirst
-        make_segment(mem, .ConstantData, segment_size*1, segment_size*2);
-        make_segment(mem, .MutableData, segment_size*2, segment_size*3);
+        if expecting_rwx {
+            prot := bit_or(@as(i64) MapProt.Exec, bit_or(@as(i64) MapProt.Read, @as(i64) MapProt.Write));
+            n1   := 1.neg();
+            addr := 0.rawptr_from_int();
+            ptr  := mmap_anon(addr, segment_size * 3, prot, 0);
+            code_mem: []u8 = (ptr = u8.ptr_from_raw(ptr), len = segment_size * 3);
+            
+            // The data segments we don't want to be executable. 
+            data_mem := code_alloc.alloc(u8, segment_size * 2); // TODO: ask for the alignment we need.
+            
+            // order matters!
+            m.start_of_writable_code = code_mem.ptr;
+            make_segment(code_mem, .Code, 0, segment_size);  // :CodeIsFirst
+            make_segment(data_mem, .ConstantData, 0, segment_size);
+            make_segment(data_mem, .MutableData, segment_size, segment_size*2);
+        } else {
+            mem := code_alloc.alloc(u8, segment_size * 3); // TODO: ask for the alignment we need.
+            
+            // order matters!
+            m.start_of_writable_code = mem.ptr;
+            make_segment(mem, .Code, 0, segment_size);  // :CodeIsFirst
+            make_segment(mem, .ConstantData, segment_size*1, segment_size*2);
+            make_segment(mem, .MutableData, segment_size*2, segment_size*3);
+        };
     };
     make_segment :: fn(mem: []u8, s: SegmentType, start: i64, end: i64) void => {
         m.segments&.insert(s, (mmapped = mem.slice(start, end), next = mem.index(start)));
@@ -375,10 +388,12 @@ fn finish_qbe_passes(fnn: *Qbe.Fn) void = {
     fillpreds(fnn);
     fill_use(fnn); 
     
-    // TODO: don't always need extra fillrpo? only if vararg or any_dead_blocks in fold_constants
-    fillrpo(fnn);   // for fillalias. 
-    fillalias(fnn); // for late slots mem opt, escaping slots are tracked at the beginning of isel. 
-    
+    // :TodoFinishAmdSlots
+    if fnn.globals.goal.arch != .x86_64 {
+        // TODO: don't always need extra fillrpo? only if vararg or any_dead_blocks in fold_constants
+        fillrpo(fnn);   // for fillalias. 
+        fillalias(fnn); // for late slots mem opt, escaping slots are tracked at the beginning of isel. 
+    };
     // arm isel inserts RMem (with different meaning from x64) for mul/store and RInt for load.
     {m.target.isel}(fnn);  // writes tmp.visit
                            // ^^^^^^^^^^^^^^^^
@@ -404,12 +419,14 @@ fn finish_qbe_passes(fnn: *Qbe.Fn) void = {
 
 // debug. but it calls clsmerge which does mutate sometimes so maybe not.
 fn fails_typecheck(f: *Qbe.Fn) ?Str = {
-    return(.None); // TODO: fix expr:switch extension
     fillpreds(f);
     pb  := init_bitset(f.nblk.zext());
     ppb := init_bitset(f.nblk.zext());
     for_blocks f { b | 
         for_phi b { p |
+            if rtype(p.to) != .RTmp {
+                return(Some = @tfmt("phi destination must be a tmp"));
+            };
             f.get_temporary(p.to)[].cls = p.cls; // TODO: creepy. i want this to be optional debug check?
         };
         for_insts_forward b { i | 
@@ -448,7 +465,6 @@ fn fails_typecheck(f: *Qbe.Fn) ?Str = {
                 continue :: local_return;
                 k := argcls(i, n);
                 r := i.arg&[n];
-                t := f.get_temporary(r);
                 if k == .Ke {
                     return(Some = @tfmt("invalid instruction output type % in %", i.cls(), i.op()));
                 };
@@ -461,7 +477,7 @@ fn fails_typecheck(f: *Qbe.Fn) ?Str = {
                     return(Some = @tfmt("missing % operand in %", word(), i.op()));
                 };
                 if !usecheck(r, k, f) {
-                    return(Some = @tfmt("invalid type for %s operand %% in %s", word(), "%", t.name(), i.op()));
+                    return(Some = @tfmt("invalid type for % operand %", word(), i.op()));
                 };
             };
         };
@@ -479,10 +495,10 @@ fn fails_typecheck(f: *Qbe.Fn) ?Str = {
             return(Some = @tfmt("invalid type for jump argument in block @%", b.name()));
         };
         
-        if (!b.s1.is_null() && b.s1.jmp.type == .Jxxx) {   
+        if !b.s1.is_null() && b.s1.jmp.type == .Jxxx {   
             return(Some = @tfmt("block @% is used undefined", b.s1.name()));
         };
-        if (!b.s2.is_null() && b.s2.jmp.type == .Jxxx) {
+        if !b.s2.is_null() && b.s2.jmp.type == .Jxxx {
             return(Some = @tfmt("block @% is used undefined", b.s2.name()));
         };
     };

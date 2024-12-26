@@ -13,6 +13,24 @@ now we're at the mercy of whatever your libc's malloc decides to do.
 i think i want to just use the module's arena instead of libc_allocator anyway but still nicer to follow the rules i think. 
 seems that was what was making ./boot fail most of the time so that's very good to have fixed, but -repeat still calls into garbage so more mistakes exist :( 
 
+trying to get the compiler to run on amd64 with my own backend: 
+- fix typecheck_failed 
+- in sysv-abi, zero AClass array so we don't have junk in the align field
+- turn off some div folding temporarily cause i don't want to deal with it yet 
+- truncd 
+- handle call to forward reference when got_indirection_instead_of_patches for jitting
+- `Assertion Failed: cannot encode offset 4641883552`, hmm, we sure are loading a constant... `R2 =l load [4641883552]`.
+oh because we're jitting so we poke in real addresses and those are larger than 32 bits so can't be done encoded in one memory displacement.  
+have to catch that in isel and copy to a register. 
+- for got_indirection_instead_of_patches i need to convert RMem into a load from the got instead of a constant displacement in the instruction, 
+but by the time you realize you want to do that in push_instruction it's kinda to late to do it sanely. 
+like now i need to pull emitting prefixes into that function as well so i can do extra instructions first? 
+but then i kinda need to reserve a register to use there. 
+tho so far it mostly seems to be O.Addr which is easy because it's just producing the address. 
+so start with just hacking it in there and see how it goes i guess. 
+that's enough for it to jit `hello.fr` to the point of `// Hello Compiler` but then it gets bored and doesn't do the rest.
+you win some you lose some i suppose. 
+
 ## (Dec 24)
 
 - fixed compiler_gui/dearimgui_demo examples
