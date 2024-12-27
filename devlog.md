@@ -1,7 +1,21 @@
-## (Dec 26)
+
+## (Dec 27)
+
+- failing `@debug_assert_gt(c.canvas_width, 0.0);`, which i think is actually a miscompilation of the compiler itself when doing stuff with the constant `: f32 = 640,` 
+fixed incorrectly flipping prefix for truncd but that wasn't enough.
+but now it works if you do it in a normal variable instead of in a struct default value. 
+- construct_struct_literal wasn't calling coerce_const_expr, it was just assuming the type of the value matched.
+TODO: really find_const should call it for you
+that gets farm_game working on amd64! 
+> bad that i can't explain why that worked on arm since the little repro test i wrote fails on the old version of the compiler.   
+
+in fact, i think amd64 now works better than arm64 because of my cache coherency woes, it can run 64fps.fr.  
+
+## amd64 bug fix extravaganza (Dec 26)
 
 - jit hello world works if i got_indirection_instead_of_patches=true on both modules. so clearly i was right when i asserted `!=.JitOnly` but i still don't know why. 
-problem was a call to a DynamicPatched was outputting a fixup that would never be applied. 
+problem was a call to a DynamicPatched was outputting a fixup that would never be applied.
+so it was just calling offset 0 which is just the next instruction, and it was near the end of the function, so it returned to itself and then returned again. 
 - `rosetta error: unexpectedly need to EmulateForward on a synchronous exception` is fun because lldb chokes on it forever so you can't see what's happening. 
 - ok so it must be something shim related. sudoku works when aot compiled to x64 but not when jitted on x64,
 but it works if you don't call `solve` at comptime. oh and it works if #inline `assign`. 
@@ -33,7 +47,7 @@ jne	56                                  ## encoding: [0x0f,0x85,A,A,A,A]
 
 so that sure isn't a program... 
 it loads from the got into rax and then uses r8 instead. 
-sad day, i typed 0b01001000 instead of calling pack_rex_si so high registers didn't get encoded. 
+sad day, in the .addr hack i just did, i typed 0b01001000 instead of calling pack_rex_si so high registers didn't get encoded. 
 
 - using the x64 compiler to aot, i get `we guessed wrong so the array resized and all the pointers are junk`
 sometimes, with a random multiple of 4096, but when it works it gets the same hash as the arm one cross compiling which is a good sign. 
@@ -50,9 +64,15 @@ TODO: i think now im being too conservative with the folding. it's fine as long 
 that's enough to self compile on amd. hurrah!
 
 and reproducibility works with cross compiling which is amazing. 
-still not everything works on amd64: lox, mandelbrot, and the gui programs. 
+still not everything works on amd64: lox, mandelbrot, and the gui programs.
+incidentally, those are all programs that use floats heavily. 
 
-## (Dec 25)
+- float bitcast encoding mistake. in the table we use (.F, .M) vs (.M, .F) to tell the directions apart,
+but the movd:movq always takes the float arg on the same side so one of the directions needs a swap before actually being encoded. 
+that fixed lox+mandelbrot. 
+- did register shuffling for 2-adddress fdiv which gets farm_game to compile. 
+
+## amd64 bug fix extravaganza (Dec 25)
 
 - yikes, unpleasent memory safety thing. 
 Alias.slot is a pointer to another tmp's alias field. 

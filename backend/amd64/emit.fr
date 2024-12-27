@@ -394,11 +394,13 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
             /* use xmm15 to adjust the instruction when the
             * conversion to 2-address in emitf() would fail */
             if i.to == i.arg&[1] {
-                panic("TODO: fix div");
-                //i.arg&[1] = TMP(XMM0+15);
-                //emitf("mov%k %=, %1", &i, e);
-                //emitf("mov%k %0, %=", &i, e);
+                @debug_assert(!is_int(i&.cls()), "isel converts int div to xdiv");
+                ins := make_ins(.copy, i&.cls(), amd64_xmm_scratch, i.to, QbeNull);
+                emitins(ins, e);
+                ins := make_ins(.copy, i&.cls(), i.to, i.arg&[0], QbeNull);
+                emitins(ins, e);
                 i.arg&[0] = i.to;
+                i.arg&[1] = amd64_xmm_scratch;
             };
             convert_to_2address(e, i&);
             assemble(e, i&);
@@ -935,10 +937,6 @@ fn assemble(e: *AmdState, i: *Qbe.Ins) void = {
     if i.op() == .xcmp || (i.op() == .xtest && rtype(i.arg&[0]) == .RCon) {  // // HACK. TODO: at least move this to the outer match in emitins
         i.arg&.items().swap(0, 1);
     };
-    // TODO: this seems to make it a bit better
-    if i.op() == .cast && is_int(i.cls()) {
-        i.arg&.items().swap(0, 1);
-    };
     a0_old, a1_old := (i.arg&[0], i.arg&[1]);
     a0, a1 := (arg_t(e, i.arg&[0]), arg_t(e, i.arg&[1]));
     
@@ -959,6 +957,11 @@ fn assemble(e: *AmdState, i: *Qbe.Ins) void = {
             entry = table.index(idx);
         };
         bad
+    };
+    
+    // :UglyFloatCast this happens AFTER looking up the instruction because we have to tell the directions apart 
+    if i.op() == .cast && is_int(i.cls()) {
+        i.arg&.items().swap(0, 1);
     };
     
     opcode: []u8 = (ptr = entry.opcode&.as_ptr(), len = entry.opcode_len.zext());
@@ -987,7 +990,7 @@ fn assemble(e: *AmdState, i: *Qbe.Ins) void = {
     };
     b := encode(e, i, w, immediate_size);
     prefix := entry.prefix;
-    if prefix == 0xF2 && !w {
+    if prefix == 0xF2 && !w && i.op() != .truncd {
         prefix = 0xF3; // this seems like the easiest way to do this to me
     };
     b.prefix = prefix;
@@ -1219,9 +1222,10 @@ fn amd64_encoding_table() Ty([]AmdEncodingEntry, []u16) = @amd64_encoding_data (
     (.swap, // TODO: confirm RMem order if we ever generate it for those (or RSlot)
         (.R, .M, (0x87)), // xchg
     ),
+    // :UglyFloatCast we need to tell the directions apart but the instructions always take the float arg on the same side so one has to swap after. 
     (.cast, 
-        (.F, .M, (0x0F, 0x6E), (), (0x66)), // movd:movq
-        (.M, .F, (0x0F, 0x7E), (), (0x66)), // movd:movq
+        (.F, .M, (0x0F, 0x6E), (), (0x66)), // movd:movq f<-i
+        (.M, .F, (0x0F, 0x7E), (), (0x66)), // movd:movq i<-f
     ),
     // TODO: i have low faith that i correctly transcribed the numbers
     (.exts,

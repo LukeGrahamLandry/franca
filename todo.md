@@ -7,6 +7,8 @@
 
 ## 
 
+- be less strict about amd64 address folding when there's a large constant pointer (which is valid when jitting)
+- don't hardcode page size to 16k
 - :TodoAmdFoldOps
 - bring back nice error message for trying to call a #ct at runtime
 - things that should be cleaned up next time i replace `boot`
