@@ -57,7 +57,15 @@ fn output_macho(m: *QbeModule) List([]u8) = {
     data_count := m.segments&[.MutableData]&.len();
     @eprintln(">>> % bytes of code, % bytes of data.", code_count, data_count);
 
-    m.fill_from_libc(); // TODO: don't waste time doing this just to bump reloc state. 
+    // fill_from_libc is wrong because you might be cross compiling and disagree about what things exist. 
+    for_symbols m { id, symbol |  // :SLOW  just keep list of pending symbols instead
+        if symbol.kind == .Pending && symbol.fixups.len != 0 {
+            m.imports&.push(id); 
+            symbol.kind = .DynamicPatched;
+            m.do_fixups(u8.ptr_from_int(0), symbol);
+        };
+    };
+    
     alignment := if(m.goal.type == .Relocatable, => 8, => macos_page_size);
     for_enum SegmentType { s | 
         //m.align_to(s, 8);  // forgeting this manifested as getting fucked on __LINKEDIT (when reading not writing because you're writting into a new allocation)
@@ -318,10 +326,12 @@ fn output_macho(m: *QbeModule) List([]u8) = {
 fn seal_load_commands(e: *EmitMacho, macho_header: *MachoHeader) void = {
     macho_header.commands_size = (e.commands.len - MachoHeader.size_of()).trunc();
     macho_header.commands_count = e.command_count.trunc();
-    e.commands&.zero_pad_to_align(macos_page_size);
+    end := e.commands.len;
     // :cantreallocatebutgivegooderrormessage
     // now we want exact match because we put it on the front of the text section for some reason who knows idk man. 
-    @assert_eq(e.commands.len, COMMANDS_SIZE_GUESS, "we guessed wrong so the array resized and all the pointers are junk");
+    @assert_le(end, COMMANDS_SIZE_GUESS, "we guessed wrong so the array resized and all the pointers are junk");
+    e.commands.len = COMMANDS_SIZE_GUESS;
+    e.commands.items().rest(end).set_zeroed();
 }
 
 fn load_command(e: *EmitMacho, cmd: LoadCommand, $T: Type) *T #generic = {
@@ -765,7 +775,7 @@ fn collect_aot_fixups(m: *QbeModule) Ty([]FixP, []*SymbolInfo) = {
     for_symbols m { _, s | 
         first := true;
         each s.fixups& { f | 
-            if f.type&.is(.DataAbsolute) {
+            if f.type&.is(.DataAbsolute) { 
                 fixups&.push(symbol = s, fix = f);
                 if first {
                     first = false;

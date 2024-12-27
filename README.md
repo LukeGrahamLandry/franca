@@ -26,11 +26,11 @@ If you just want to see what the syntax looks like, click on examples or compile
 
 ## Backends
 
-- **fully self hosted**: only supports arm64-macos. generates native executables (we don't depend on an assembler, linker, or xcode-codesign).
+- **fully self hosted**: only supports macos. generates native executables (we don't depend on an assembler, linker, or xcode-codesign).
 - **llvm ir text**: you can feed it to clang to produce an AOT optimised build or integrate with projects written in other languages.
 
 > The llvm backend doesn't fully implement the extern-c abi or the internal calling convention required by some multithreaded programs.  
-> The self hosted backend **almost** works for amd64 and will be eventually be able to output ELF programs for Linux as well.  
+> The self hosted backend will be eventually be able to output ELF programs for Linux as well.  
 
 ## Tradeoffs
 

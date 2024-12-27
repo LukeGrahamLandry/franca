@@ -161,11 +161,16 @@ fn merge_amd_addr(f: *Qbe.Fn, mem: *Qbe.Addr) void = {
                     if f.is_symbol(a0) {
                         if mem.index == QbeNull && mem.offset.type != .CAddr {
                             if f.get_int(a1) { off |
-                                mem.base = QbeNull;
-                                x := addcon(mem.offset&, f.get_constant(a0), 1);
-                                y := addcon(mem.offset&, f.get_constant(a1), 1);
+                                @debug_assert_eq(mem.scale, 1);
+                                new_offset := mem.offset;
+                                x := addcon(new_offset&, f.get_constant(a0), 1);
+                                y := addcon(new_offset&, f.get_constant(a1), 1);
                                 @debug_assert(x && y, "failed to merge constants");
-                                return();
+                                if fits_in_i32(new_offset.bits.i) {
+                                    mem.offset = new_offset;
+                                    mem.base = QbeNull;
+                                    return();
+                                };
                             };
                             // will get fixed-up later.
                             // it could be that both are CAddr but lea-lea-deref is better than lea-lea-add-deref
@@ -186,11 +191,13 @@ fn merge_amd_addr(f: *Qbe.Fn, mem: *Qbe.Addr) void = {
                         return();
                     };
                     if f.get_int(a0) { off |
-                        chuse(a1, 1, f);
-                        chuse(mem.base, -1, f);
-                        mem.offset.bits.i += off;
-                        mem.base = a1;
-                        continue();
+                        if fits_in_i32(off + mem.offset.bits.i) {
+                            chuse(a1, 1, f);
+                            chuse(mem.base, -1, f);
+                            mem.offset.bits.i += off;
+                            mem.base = a1;
+                            continue();
+                        };
                     };
                     if mem.index == QbeNull && !f.is_symbol(a0) {
                         chuse(a0, 1, f);
@@ -249,11 +256,13 @@ fn merge_amd_addr(f: *Qbe.Fn, mem: *Qbe.Addr) void = {
                         t := a0; a0 = a1; a1 = t; 
                     };
                     if f.get_int(a0) { off |
-                        chuse(mem.index, -1, f);
-                        chuse(a1, 1, f);
-                        mem.offset.bits.i += off * s;
-                        mem.index = a1;
-                        continue();
+                        if fits_in_i32(mem.offset.bits.i + off * s) {
+                            chuse(mem.index, -1, f);
+                            chuse(a1, 1, f);
+                            mem.offset.bits.i += off * s;
+                            mem.index = a1;
+                            continue();
+                        };
                     };
                 }
                 fn mul() => {
@@ -289,7 +298,7 @@ fn seladdr(r: *Qbe.Ref, f: *Qbe.Fn) void = {
     if rtype(r[]) == .RCon {  
         done := true;
         if f.get_int(r[]) { addr | 
-            valid_offset := addr >= MIN_i32 && addr <= MAX_i32;
+            valid_offset := fits_in_i32(addr);
             done = valid_offset;
         };
         if done {
@@ -305,9 +314,9 @@ fn seladdr(r: *Qbe.Ref, f: *Qbe.Fn) void = {
     @debug_assert(mem.offset.type != .CAddr || (mem.index == QbeNull && mem.base == QbeNull), "generated illegal addressing mode");
     
     for (@slice(mem.index&, mem.base&)) { a |
-        if f.is_symbol(a[]) {
+        if rtype(a[]) == .RCon {
             r0 := f.newtmp("isel", .Kl);
-            f.emit(.addr, .Kl, r0, a[], QbeNull);
+            f.emit(@if(f.is_symbol(a[]), .addr, .copy), .Kl, r0, a[], QbeNull);
             a[] = r0;
         };
         
@@ -318,7 +327,7 @@ fn seladdr(r: *Qbe.Ref, f: *Qbe.Fn) void = {
         write(out, "\n");
     };
     ty := mem.offset.type&;
-    valid_offset := mem.offset.bits.i >= MIN_i32 && mem.offset.bits.i <= MAX_i32;
+    valid_offset := fits_in_i32(mem.offset.bits.i);
     if !valid_offset {
         // This makes sense when jitting, you're allowed to just stick hard coded references in your code. 
         @assert(mem.index == QbeNull && mem.base == QbeNull && ty[] == .CBits, "TODO: folded memory access to >4GB constant address");
@@ -337,6 +346,9 @@ fn seladdr(r: *Qbe.Ref, f: *Qbe.Fn) void = {
     f.mem[m] = mem;
     r[] = MEM(m);
 }
+
+fn fits_in_i32(i: i64) bool = 
+    i >= MIN_i32 && i <= MAX_i32
 
 fn cmpswap(arg: *Array(Qbe.Ref, 2), cmp: i32) bool = {
     cmp := @as(Qbe.Cmp) cmp;

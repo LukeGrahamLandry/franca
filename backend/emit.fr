@@ -281,7 +281,7 @@ fn finish_function(m: *QbeModule, dest: []u8, name_id: u32) void #inline = {
 }
 
 fn align_to(s: *SegmentCursor, align: i64) void = {
-    extra := u8.int_from_ptr(s.next).mod(align);
+    extra := s.len().mod(align);
     if extra != 0 {
         s.next = s.next.offset(align - extra); 
     };
@@ -390,6 +390,35 @@ fn do_fixups(self: *QbeModule, address: *u8, symbol: *SymbolInfo) void = {
     if new_got_reloc { it | // avoided reallocating while iterating. rustc would be proud.
         symbol.fixups&.push(it, self.gpa);
     };
+}
+
+fn ensure_got_slot(self: *QbeModule, symbol: *SymbolInfo, jit_address: rawptr) ?Fixup = {
+    @debug_assert(!self.fixups_locked);
+    new_got_reloc: ?Fixup = .None;
+    if symbol.got_lookup_offset == -1 {
+        // need to reserve a new __got entry.  :GotAtConstantDataBase 
+        symbol.got_lookup_offset = self.got&.len();
+        got := self.got&.reserve(rawptr);  // :TodoErrorMessage
+        if self.debug["T".char()] {
+            @fmt_write(self.debug_out, "# reserve __got[%] = %\n", symbol.got_lookup_offset / 8, symbol.name);
+        };
+        new_got_reloc = (Some = (patch_at = ptr_cast_unchecked(rawptr, u8, got), type = .DataAbsolute));
+        if !(self.got_indirection_instead_of_patches && jit_address.is_null()) { // TODO: remove this condition
+            got[] = jit_address; // because we don't loop again to handle `new_got_reloc`
+        }
+    };
+    got := self.segment_address(.ConstantData, symbol.got_lookup_offset);  // :GotAtConstantDataBase 
+    got := ptr_cast_unchecked(u8, rawptr, got);
+    if self.got_indirection_instead_of_patches {
+        if jit_address.is_null() {
+            //@println("missing jit import? % % % %", symbol.name, symbol.jit_addr, got[], symbol.got_lookup_offset);
+        } else {
+            got[] = jit_address;
+        };
+    } else {
+        @debug_assert_eq(got[], jit_address, "ensure_got_slot with different address");
+    };
+    new_got_reloc
 }
 
 // :ThreadSafety use cas?

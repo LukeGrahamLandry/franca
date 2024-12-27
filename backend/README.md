@@ -1,6 +1,3 @@
-> this doesn't support x64 yet.  
-> the main backends are in `../compiler`
-
 An optimising compiler backend based on [Qbe](https://c9x.me/compile/).
 Generated code is much better than llvm -O0 and much worse than llvm -O2 (not the most specific range i realize).
 It also compiles much faster than even llvm -O0.

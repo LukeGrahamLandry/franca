@@ -1,3 +1,56 @@
+## (Dec 26)
+
+- jit hello world works if i got_indirection_instead_of_patches=true on both modules. so clearly i was right when i asserted `!=.JitOnly` but i still don't know why. 
+problem was a call to a DynamicPatched was outputting a fixup that would never be applied. 
+- `rosetta error: unexpectedly need to EmulateForward on a synchronous exception` is fun because lldb chokes on it forever so you can't see what's happening. 
+- ok so it must be something shim related. sudoku works when aot compiled to x64 but not when jitted on x64,
+but it works if you don't call `solve` at comptime. oh and it works if #inline `assign`. 
+works also if you uncomment `is_ready := f.getcon(0);` in create_jit_shim (which is also enough to run `examples/default_driver.fr`).
+
+hmmm,
+```
+R2 =l addr $F924__shim
+R6 =l addr $assign__924
+xcmpl R2, R6
+R2 =l addr $assign__924
+jfine @, @_
+<snip>
+---
+endbr64                                 ## encoding: [0xf3,0x0f,0x1e,0xfa]
+push	rbp                               ## encoding: [0x55]
+mov	rbp, rsp                            ## encoding: [0x48,0x89,0xe5]
+push	rbx                               ## encoding: [0x53]
+push	r12                               ## encoding: [0x41,0x54]
+push	r13                               ## encoding: [0x41,0x55]
+push	r14                               ## encoding: [0x41,0x56]
+lea	rcx, [rip - 24]                     ## encoding: [0x48,0x8d,0x0d,0xe8,0xff,0xff,0xff]
+mov	rax, qword ptr [rip + 100556228]    ## encoding: [0x48,0x8b,0x05,0xc4,0x5d,0xfe,0x05]
+cmp	r8, rcx                             ## encoding: [0x4c,0x3b,0xc1]
+mov	rcx, qword ptr [rip + 100556218]    ## encoding: [0x48,0x8b,0x0d,0xba,0x5d,0xfe,0x05]
+jne	56                                  ## encoding: [0x0f,0x85,A,A,A,A]
+<snip>
+```
+
+so that sure isn't a program... 
+it loads from the got into rax and then uses r8 instead. 
+sad day, i typed 0b01001000 instead of calling pack_rex_si so high registers didn't get encoded. 
+
+- using the x64 compiler to aot, i get `we guessed wrong so the array resized and all the pointers are junk`
+sometimes, with a random multiple of 4096, but when it works it gets the same hash as the arm one cross compiling which is a good sign. 
+ah, trying to zero_pad_to_align to page size, and doing that starting at the pointer to the base of the array, not at zero and just using the length,
+and `commands` is at the start of the text segment so it's allocated by page_allocator, 
+so when running on macos-arm, where the page size is 16k, its always 16k aligned, but macos-amd's page size is 4k. 
+need to do it based on the length instead of the address. 
+same thing in codesign `deal with page spread across chunks` because of the SegmentCursor.align_to at the top of macho.emit. 
+TODO: i should take advantage of the smaller page size to emit less padding on that platform but for now it's not a big deal.
+
+- avoid folding memory accesses that create `base+index+(>4GB constant)`, 
+which happens when jitted code has constant addresses and then you try to access a nested array i guess?
+TODO: i think now im being too conservative with the folding. it's fine as long as you don't have both base and index. 
+that's enough to self compile on amd. hurrah!
+
+and reproducibility works with cross compiling which is amazing. 
+still not everything works on amd64: lox, mandelbrot, and the gui programs. 
 
 ## (Dec 25)
 
@@ -29,7 +82,8 @@ but then i kinda need to reserve a register to use there.
 tho so far it mostly seems to be O.Addr which is easy because it's just producing the address. 
 so start with just hacking it in there and see how it goes i guess. 
 that's enough for it to jit `hello.fr` to the point of `// Hello Compiler` but then it gets bored and doesn't do the rest.
-you win some you lose some i suppose. 
+you win some you lose some i suppose.
+- fixed walk_dir test. cross compiling with #link_rename means fill_from_libc didn't find things. 
 
 ## (Dec 24)
 
