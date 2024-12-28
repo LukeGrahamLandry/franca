@@ -1,0 +1,290 @@
+//! Instruction encoding for wasm32. 
+//! Magic numbers from https://webassembly.github.io/spec/core/binary/index.html
+//! Abstraction will continue until moral improves. 
+
+// Note: 
+// "Every import defines an index in the respective index space. 
+// In each index space, the indices of imports go before the first 
+// index of any definition contained in the module itself."
+//
+
+FuncIdx :: @struct(id: u32);
+TypeIdx :: @struct(id: u32);
+TableIdx :: @struct(id: u32);
+LabelIdx :: @struct(id: u32);
+LocalIdx :: @struct(id: u32);
+GlobalIdx :: @struct(id: u32);
+MemIdx :: @struct(id: u32);
+
+wasm_page_size :: 65536;
+NumType        :: @enum(u8) (I32 = 0x7F, I64 = 0x7E, F32 = 0x7D, F64 = 0x7C);
+BlockType      :: @tagged(Empty: void, Value: u8, Index: i33);
+MemArg         :: @struct(offset: u32, align: u32);
+
+fn raw(s: Wasm.Inst) u8 #unsafe_noop_cast;
+fn raw(s: NumType) u8 #unsafe_noop_cast;
+
+// TODO: have a version of @struct that takes a block and lets you have semicolons at the end of things, 
+//       so its less of a waste of time when you decide to stop being lazy and manually namespace everything. 
+
+Wasm :: @rec @struct(
+    Module :: @rec @struct(
+        types: List(Wasm.FuncType), // [TypeIdx] function types
+        // Functions are split into two parts. the types are seperate from the code. 
+        functions: List(TypeIdx),  // [FuncIdx]
+        exports: List(Wasm.Export),
+        code: List(Wasm.Func),      // [FuncIdx]
+        imports: List(Wasm.Import),
+        data: List(Wasm.Data),
+        tables: List(Wasm.Table),
+        memories: List(Wasm.Limits),
+        globals: List(Wasm.Global),
+        elements: List(Wasm.Element),
+        imported_function_count := 0,
+    ),
+
+    // "Value types can occur in contexts where type indices are also allowed, such as in the case of block types. Thus, the binary format for types corresponds to the signed LEB128 encoding of small negative 
+    // values, so that they can coexist with (positive) type indices in the future."
+    ValType :: @rec @struct(repr: u8),
+    FuncType :: @rec @struct(arg: RsVec(Wasm.ValType), ret: RsVec(Wasm.ValType)),
+    Func :: @rec @struct(locals: RsVec(Wasm.Local), insts: RsVec(u8), total_local_count := -1),
+    Local :: @rec @struct(ty: Wasm.ValType, count: i64),
+    // It's tempting to store 4 seperate arrays so you don't need the tag except that you have to refer to them by index. 
+    Export :: @rec @struct(name: RsVec(u8), desc: Wasm.ExportDesc),
+    ExportDesc :: @rec @tagged(Function: FuncIdx, Table: TableIdx, Memory: MemIdx, Global: GlobalIdx),
+    Import :: @rec @struct(module: RsVec(u8), name: RsVec(u8), desc: Wasm.ImportDesc),
+    ImportDesc :: @rec @tagged(
+        Function: TypeIdx, 
+        Table: @struct(ref_type: Wasm.ValType, lim: Wasm.Limits), 
+        Memory: Wasm.Limits, 
+        Global: @struct(ref_type: Wasm.ValType, mutable: bool),
+    ),
+    Limits :: @rec @struct(min: u32, max: u32),
+    Data :: @rec @struct(bytes: RsVec(u8), active_offset_expr: RsVec(u8), active_mem: MemIdx),
+    Table :: @rec @struct(type: Wasm.ValType, limits: Wasm.Limits),
+    Global :: @rec @struct(init_expr: RsVec(u8), type: Wasm.ValType, mutable: bool),
+    Element :: @rec @struct(active: bool, table: TableIdx, offset_expr: RsVec(u8), funcs: RsVec(FuncIdx)),
+    Section :: @rec @enum(u8) (
+        Custom = 0,
+        Type = 1,
+        Import = 2,
+        Function = 3,
+        Table = 4,
+        Memory = 5,
+        Global = 6,
+        Export = 7,
+        Start = 8,
+        Element = 9,
+        Code = 10,
+        Data = 11,
+        DataCount = 12, 
+    ),
+    // wasm_single_byte_table has ones that map to a single Ir op. 
+    Inst :: @enum(u8) (
+        Unreachable = 0x00,
+        Nop = 0x01,
+        Block = 0x02,
+        Loop = 0x03,
+        If = 0x04,
+        Else = 0x05,
+        End = 0x0B,
+        Br = 0x0C,
+        BrIf = 0x0D,
+        Return = 0x0F,
+        Call = 0x10,
+        CallIndirect = 0x11,
+        Drop = 0x1A,
+        LocalGet = 0x20,
+        LocalSet = 0x21,
+        LocalTee = 0x22,  // same as local set but returns the value as well
+        GlobalGet = 0x23,
+        GlobalSet = 0x24,
+        VectorPrefix = 0xFD,
+    ),
+    
+    EncodingKind :: @rec @enum(i64) (other, unary, binary, load, store),
+    Encoding :: @rec @struct(
+        op: Qbe.O,
+        cls: Qbe.Cls,
+        kind: Wasm.EncodingKind,
+    ),
+);
+
+fn empty(a: Alloc) Wasm.Module = {
+    (types = list(a), functions = list(a), exports = list(a), 
+    code = list(a), imports = list(a), data = list(a), 
+    tables = list(a), memories = list(a), globals = list(a),
+    elements = list(a))
+}
+
+// other:  not a simple Ir op
+// unary:  (a)    -> (c)
+// binary: (a, b) -> (c)
+// load:   [imm] (a) -> c
+// store:  [imm] (a, b) -> ()
+fn lookup_wasm_encoding(inst: u8) Wasm.Encoding #inline = {
+    encoding: i64 = wasm_single_byte_table[inst.zext()].zext();
+    o := @as(Qbe.O) @as(i32) intcast(encoding.shift_right_logical(8).bit_and(255));
+    k := @as(Qbe.Cls) @as(i16) trunc(intcast(encoding.shift_right_logical(4).bit_and(0b1111)));
+    kind := @as(Wasm.EncodingStyle) encoding.bit_and(0b1111);
+    (op = o, cls = k, kind = kind)
+}
+
+fn lookup_wasm_encoding(op: Qbe.O, k: Qbe.Cls) ?u8 #inline = {
+    idx :: fn(op: Qbe.O, k: Qbe.Cls) i64 => op.raw() * 4 + k.raw();
+    table :: {
+        // repack the data for fast reverse lookup
+        table := ast_alloc().alloc_zeroed(u8, Qbe.O.enum_count() * 4);
+        range(0, 255) { inst |
+            enc := lookup_wasm_encoding(inst);
+            if enc.kind != .other {
+                dest := table.index(idx(enc.op, enc.cls))
+                @debug_assert_eq(dest[], 0, "non-unique wasm encoding");
+                dest[] = inst;
+            };
+        };
+        table
+    };
+    
+    inst := table[idx(op, k)];
+    @if(inst == 0, .None, (Some = inst))
+}
+
+// lookup_wasm_encoding is a nicer interface to this data. 
+wasm_single_byte_table :: @wasm_single_byte_data(
+    (0x28, .Kw, .load, .load),
+    (0x29, .Kl, .load, .load),
+    (0x2A, .Ks, .load, .load),
+    (0x2B, .Kd, .load, .load),
+    (0x2C, .Kw, .loadsb, .load),
+    (0x2D, .Kw, .loadub, .load),
+    (0x2E, .Kw, .loadsh, .load),
+    (0x2F, .Kw, .loaduh, .load),
+    (0x30, .Kl, .loadsb, .load),
+    (0x31, .Kl, .loadub, .load),
+    (0x32, .Kl, .loadsh, .load),
+    (0x33, .Kl, .loaduh, .load),
+    (0x34, .Kl, .loadsw, .load),
+    (0x35, .Kl, .loaduw, .load),
+    
+    (0x36, .Kw, .storew, .store),
+    (0x37, .Kw, .storel, .store),
+    (0x38, .Kw, .stores, .store),
+    (0x39, .Kw, .stored, .store),
+    (0x3A, .Kw, .storeb, .store),
+    (0x3B, .Kw, .storeh, .store),
+    (0x3C, .Kw, .storeb, .store),
+    (0x3D, .Kw, .storeh, .store),
+    (0x3E, .Kw, .storew, .store),
+    
+    // 
+    (0x46, .Kw, .ceqw, .binary),
+    (0x47, .Kw, .cnew, .binary),
+    (0x48, .Kw, .csltw, .binary),
+    (0x49, .Kw, .cultw, .binary),
+    (0x4A, .Kw, .csgtw, .binary),
+    (0x4B, .Kw, .cugtw, .binary),
+    (0x4C, .Kw, .cslew, .binary),
+    (0x4D, .Kw, .culew, .binary),
+    (0x4E, .Kw, .csgew, .binary),
+    (0x4F, .Kw, .cugew, .binary),
+    
+    // 
+    (0x51, .Kw, .ceql, .binary),
+    (0x52, .Kw, .cnel, .binary),
+    (0x53, .Kw, .csltl, .binary),
+    (0x54, .Kw, .cultl, .binary),
+    (0x55, .Kw, .csgtl, .binary),
+    (0x56, .Kw, .cugtl, .binary),
+    (0x57, .Kw, .cslel, .binary),
+    (0x58, .Kw, .culel, .binary),
+    (0x59, .Kw, .csgel, .binary),
+    (0x5A, .Kw, .cugel, .binary),
+    
+    (0x5B, .Kw, .ceqs, .binary),
+    (0x5C, .Kw, .cnes, .binary),
+    (0x5D, .Kw, .clts, .binary),
+    (0x5E, .Kw, .cgts, .binary),
+    (0x5F, .Kw, .cles, .binary),
+    (0x60, .Kw, .cges, .binary),
+    
+    (0x61, .Kw, .ceqd, .binary),
+    (0x62, .Kw, .cned, .binary),
+    (0x63, .Kw, .cltd, .binary),
+    (0x64, .Kw, .cgtd, .binary),
+    (0x65, .Kw, .cled, .binary),
+    (0x66, .Kw, .cged, .binary),
+    
+    //
+    (0x6A, .Kw, .add, .binary),
+    (0x6B, .Kw, .sub, .binary),
+    (0x6C, .Kw, .mul, .binary),
+    (0x6D, .Kw, .div, .binary),
+    (0x6E, .Kw, .udiv, .binary),
+    (0x6F, .Kw, .rem, .binary),
+    (0x70, .Kw, .urem, .binary),
+    (0x71, .Kw, .and, .binary),
+    (0x72, .Kw, .or, .binary),
+    (0x73, .Kw, .xor, .binary),
+    (0x74, .Kw, .shl, .binary),
+    (0x75, .Kw, .sar, .binary),
+    (0x76, .Kw, .shr, .binary),
+    //
+    
+    //
+    (0x7C, .Kl, .add, .binary),
+    (0x7D, .Kl, .sub, .binary),
+    (0x7E, .Kl, .mul, .binary),
+    (0x7F, .Kl, .div, .binary),
+    (0x80, .Kl, .udiv, .binary),
+    (0x81, .Kl, .rem, .binary),
+    (0x82, .Kl, .urem, .binary),
+    (0x83, .Kl, .and, .binary),
+    (0x84, .Kl, .or, .binary),
+    (0x85, .Kl, .xor, .binary),
+    (0x86, .Kl, .shl, .binary),
+    (0x87, .Kl, .sar, .binary),
+    (0x88, .Kl, .shr, .binary),
+    //
+    
+    //
+    (0x8C, .Ks, .neg, .unary),
+    //
+    (0x92, .Ks, .add, .binary),
+    (0x93, .Ks, .sub, .binary),
+    (0x94, .Ks, .mul, .binary),
+    (0x95, .Ks, .div, .binary),
+    //
+    
+    //
+    (0x9A, .Kd, .neg, .unary),
+    //
+    (0xA0, .Kd, .add, .binary),
+    (0xA1, .Kd, .sub, .binary),
+    (0xA2, .Kd, .mul, .binary),
+    (0xA3, .Kd, .div, .binary),
+    //
+    (0xA7, .Kw, .truncl, .unary),  // TODO: handle this in examples/import_wasm/convert.fr, on the native backends you just use .copy 
+    
+    //
+    (0xBC, .Kw, .cast, .unary),
+    (0xBD, .Kl, .cast, .unary),
+    (0xBE, .Ks, .cast, .unary),
+    (0xBF, .Kd, .cast, .unary),
+);
+
+// (op:8, k:4, kind:4)
+fn wasm_single_byte_data(e: FatExpr) FatExpr #macro = {
+    table := ast_alloc().alloc_zeroed(u16, 256);
+    @assert_lt(Wasm.EncodingKind.enum_count(), 16, "need to change packing of Wasm.EncodingKind");
+    ::enum(Wasm.EncodingStyle);
+    each e&.items() { e |
+        e := e.items();
+        b, k, o, kind := (const_eval(u8)(e[0]), const_eval(Qbe.Cls)(e[1]), const_eval(Qbe.O)(e[2]), const_eval(Wasm.EncodingStyle)(e[3]));
+        @debug_assert(o.raw() < 255, "overflow #Qbe.O");
+        @debug_assert(kind <= 0b1111, "overflow wasm encoding kind");
+        @debug_assert(table[b.zext()] == 0, "opcode % listed twice", b);
+        table[b.zext()] = (@as(u32) kind.raw().trunc().bit_or(o.raw().bitcast().shift_left(8)).bit_or((@as(i64) k.raw().zext()).trunc().shift_left(4))).trunc();
+    };
+    @literal table
+}

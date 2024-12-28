@@ -127,22 +127,19 @@ fn load_module(self: *LoadWasm) void = {
             
             inst := self.src[self.cursor];
             self.cursor += 1;
-            encoding: i64 = wasm_single_byte_table[inst.zext()].zext();
             
             // Single byte unary/binary instructions are found in the table. 
-            o := @as(Qbe.O) @as(i32) intcast(encoding.shift_right_logical(8).bit_and(255));
-            k := @as(Qbe.Cls) @as(i16) trunc(intcast(encoding.shift_right_logical(4).bit_and(0b1111)));
-            kind := encoding.bit_and(0b1111);
+            encoding := lookup_wasm_encoding(inst);
             a0, a1, r := (QbeNull, QbeNull, QbeNull);
-            @switch(kind) {
-                @case(0) => ();
-                @case(1) => {  // unary
+            @match(encoding.kind) {
+                fn other() => ();
+                fn unary() => {
                     r = self.f.newtmp("wasm", k);
                     a := self.stack[self.stack.len - 1]&;
                     a0 = a[];
                     a[] = r;
                 };
-                @case(2) => {  // binary
+                fn binary() => {
                     r = self.f.newtmp("wasm", k);
                     a0 = self.stack[self.stack.len - 1];
                     b := self.stack[self.stack.len - 2]&;
@@ -150,7 +147,7 @@ fn load_module(self: *LoadWasm) void = {
                     a1 = b[];
                     b[] = r;
                 };
-                @case(3) => { // load
+                fn load() => {
                     align := self.read_u();
                     offset := self.read_u();
                     println("TODO: wasm load"); kind = 0;
@@ -158,7 +155,7 @@ fn load_module(self: *LoadWasm) void = {
                     self.stack&.push(QbeNull);
                     continue(); // TODO
                 };
-                @case(4) => { // store
+                fn store() => {
                     align := self.read_u();
                     offset := self.read_u();
                     println("TODO: wasm store"); 
@@ -166,10 +163,9 @@ fn load_module(self: *LoadWasm) void = {
                     self.stack&.pop().unwrap();
                     continue(); // TODO
                 };
-                @default => unreachable();
             };
             
-            if kind != 0 {
+            if encoding.kind != .other {
                 @debug_assert(r != QbeNull || a0 != QbeNull);
                 self.f.emit(o, k, r, a0, a1);
                 continue();
@@ -344,144 +340,4 @@ fn find_import_index(self: *Wasm.Module, kind: i64, id: i64) ?i64 = {
 // (dest_offset, src_offset_in_data, size_to_copy)  // TODO: make sure those arguments are right
 fn emit_memory_init(self: *Wasm.Module, data_id: i64) void = {
     todo()
-}
-
-// (op:8, k:4, kind:4)
-// 0: not a simple op
-// 1: (a)    -> (c)
-// 2: (a, b) -> (c)
-// 3: load [imm] (a) -> c
-// 4: store [imm] (a, b) -> ()
-wasm_single_byte_table :: @wasm_single_byte_data(
-    (0x28, .Kw, .load, 3),
-    (0x29, .Kl, .load, 3),
-    (0x2A, .Ks, .load, 3),
-    (0x2B, .Kd, .load, 3),
-    (0x2C, .Kw, .loadsb, 3),
-    (0x2D, .Kw, .loadub, 3),
-    (0x2E, .Kw, .loadsh, 3),
-    (0x2F, .Kw, .loaduh, 3),
-    (0x30, .Kl, .loadsb, 3),
-    (0x31, .Kl, .loadub, 3),
-    (0x32, .Kl, .loadsh, 3),
-    (0x33, .Kl, .loaduh, 3),
-    (0x34, .Kl, .loadsw, 3),
-    (0x35, .Kl, .loaduw, 3),
-    
-    (0x36, .Kw, .storew, 4),
-    (0x37, .Kw, .storel, 4),
-    (0x38, .Kw, .stores, 4),
-    (0x39, .Kw, .stored, 4),
-    (0x3A, .Kw, .storeb, 4),
-    (0x3B, .Kw, .storeh, 4),
-    (0x3C, .Kw, .storeb, 4),
-    (0x3D, .Kw, .storeh, 4),
-    (0x3E, .Kw, .storew, 4),
-    
-    // 
-    (0x46, .Kw, .ceqw, 2),
-    (0x47, .Kw, .cnew, 2),
-    (0x48, .Kw, .csltw, 2),
-    (0x49, .Kw, .cultw, 2),
-    (0x4A, .Kw, .csgtw, 2),
-    (0x4B, .Kw, .cugtw, 2),
-    (0x4C, .Kw, .cslew, 2),
-    (0x4D, .Kw, .culew, 2),
-    (0x4E, .Kw, .csgew, 2),
-    (0x4F, .Kw, .cugew, 2),
-    
-    // 
-    (0x51, .Kw, .ceql, 2),
-    (0x52, .Kw, .cnel, 2),
-    (0x53, .Kw, .csltl, 2),
-    (0x54, .Kw, .cultl, 2),
-    (0x55, .Kw, .csgtl, 2),
-    (0x56, .Kw, .cugtl, 2),
-    (0x57, .Kw, .cslel, 2),
-    (0x58, .Kw, .culel, 2),
-    (0x59, .Kw, .csgel, 2),
-    (0x5A, .Kw, .cugel, 2),
-    
-    (0x5B, .Kw, .ceqs, 2),
-    (0x5C, .Kw, .cnes, 2),
-    (0x5D, .Kw, .clts, 2),
-    (0x5E, .Kw, .cgts, 2),
-    (0x5F, .Kw, .cles, 2),
-    (0x60, .Kw, .cges, 2),
-    
-    (0x61, .Kw, .ceqd, 2),
-    (0x62, .Kw, .cned, 2),
-    (0x63, .Kw, .cltd, 2),
-    (0x64, .Kw, .cgtd, 2),
-    (0x65, .Kw, .cled, 2),
-    (0x66, .Kw, .cged, 2),
-    
-    //
-    (0x6A, .Kw, .add, 2),
-    (0x6B, .Kw, .sub, 2),
-    (0x6C, .Kw, .mul, 2),
-    (0x6D, .Kw, .div, 2),
-    (0x6E, .Kw, .udiv, 2),
-    (0x6F, .Kw, .rem, 2),
-    (0x70, .Kw, .urem, 2),
-    (0x71, .Kw, .and, 2),
-    (0x72, .Kw, .or, 2),
-    (0x73, .Kw, .xor, 2),
-    (0x74, .Kw, .shl, 2),
-    (0x75, .Kw, .sar, 2),
-    (0x76, .Kw, .shr, 2),
-    //
-    
-    //
-    (0x7C, .Kl, .add, 2),
-    (0x7D, .Kl, .sub, 2),
-    (0x7E, .Kl, .mul, 2),
-    (0x7F, .Kl, .div, 2),
-    (0x80, .Kl, .udiv, 2),
-    (0x81, .Kl, .rem, 2),
-    (0x82, .Kl, .urem, 2),
-    (0x83, .Kl, .and, 2),
-    (0x84, .Kl, .or, 2),
-    (0x85, .Kl, .xor, 2),
-    (0x86, .Kl, .shl, 2),
-    (0x87, .Kl, .sar, 2),
-    (0x88, .Kl, .shr, 2),
-    //
-    
-    //
-    (0x8C, .Ks, .neg, 1),
-    //
-    (0x92, .Ks, .add, 2),
-    (0x93, .Ks, .sub, 2),
-    (0x94, .Ks, .mul, 2),
-    (0x95, .Ks, .div, 2),
-    //
-    
-    //
-    (0x9A, .Kd, .neg, 1),
-    //
-    (0xA0, .Kd, .add, 2),
-    (0xA1, .Kd, .sub, 2),
-    (0xA2, .Kd, .mul, 2),
-    (0xA3, .Kd, .div, 2),
-    //
-    
-    //
-    (0xBC, .Kw, .cast, 1),
-    (0xBD, .Kl, .cast, 1),
-    (0xBE, .Ks, .cast, 1),
-    (0xBF, .Kd, .cast, 1),
-);
-
-fn wasm_single_byte_data(e: FatExpr) FatExpr #macro = {
-    table := ast_alloc().alloc_zeroed(u16, 256);
-    each e&.items() { e |
-        e := e.items();
-        b, k, o, kind := (const_eval(u8)(e[0]), const_eval(Qbe.Cls)(e[1]), const_eval(Qbe.O)(e[2]), const_eval(u8)(e[3]));
-        @debug_assert(o.raw() < 255, "overflow #Qbe.O");
-        @debug_assert(kind <= 0b1111, "overflow wasm encoding kind");
-        @debug_assert(table[b.zext()] == 0, "opcode % listed twice", b);
-        table[b.zext()] = (@as(u32) kind.zext().bit_or(o.raw().bitcast().shift_left(8)).bit_or((@as(i64) k.raw().zext()).trunc().shift_left(4))).trunc();
-    };
-    @literal table
 }

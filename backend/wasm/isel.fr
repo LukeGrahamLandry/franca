@@ -1,0 +1,146 @@
+//! - instructions act on a stack instead of referencing values directly
+//! - addresses are 32 bit (but we allow frontends to use Cls.l for consistancy and just truncate here)
+//! - phi nodes are converted into block arguments
+//! - can't implicitly use the low bits of an i64 as an i32
+
+// TODO: remove redundant push-pop pairs
+// TODO: reorder + flip args to create redundant push-pop pairs
+// TODO: if a local is used again but also by the next instruction, use local.tee
+
+fn wasm_isel(f: *Qbe.Fn) void = {
+    assign_alloc_slots(f);
+    
+    insert_blocks_for_conditional_phis(f);
+    
+    for_blocks f { b | 
+        f.reset_scratch();
+        
+        // Last thing before we jump to another block: push phi values to the stack. 
+        @match(b.jmp.type) {
+            fn ret0() => ();
+            fn hlt()  => ();
+            fn jmp() => {
+                // TODO: backwards?
+                for_phi b.s1 { p |
+                    arg := p.arg.index(index_in_phi(b, p))[];
+                    f.emit(.push, p.cls, QbeNull, arg, QbeNull);
+                };
+            }
+            fn jnz() => {
+                @debug_assert(b.s1.phi.is_null() && b.s2.phi.is_null());
+                f.emit(.push, .Kw, QbeNull, b.jmp.arg, QbeNull);
+                b.jmp.arg = QbeNull;
+            }
+            @default => @panic("invalid jump type in $% @%", f.name(), b.name());
+        };
+        @debug_assert(b.jmp.arg == QbeNull);
+        
+        for_insts_rev b { i |
+            sel_wasm(f, i[]);
+        };
+        
+        // First thing that happens: any incoming phis are on the stack (as block arguments) and we pop them into thier locals. 
+        
+        block_arg_count: i32 = 0;
+        for_phi b { p |
+            f.emit(.pop, p.cls, p.to, QbeNull, QbeNull);
+            block_arg_count += 1;
+        };
+        b.loop = block_arg_count;  // TODO: rename this field to make it clear that we repurpose it?
+        
+        f.copy_instructions_from_scratch(b);
+    };
+    
+    // emit() looks at the first `b.loop = block_arg_count` pops to know block type.  
+    for_blocks f { b | 
+        b.phi = zeroed(@type b.phi);
+    };
+
+    when_debug(f, .InstSelect) { out | 
+        write(out, "\n> After instruction selection:\n");
+        printfn(f, out);
+    }
+}
+
+fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
+    if(try_kill_inst(f, i), => return());
+    if (@is(i.op(), .pop, .push)) {  // TODO: call_indirect
+        f.emit(i[]);
+        return();
+    };
+    
+    if i.op() == .call {
+        @assert(rtype(i.arg&[0]) == .RCon, "TODO: wasm indirect call");
+        f.emit(i[]);
+        return();
+    };
+    
+    if i.to != QbeNull {
+        f.emit(.pop, i.cls(), i.to, QbeNull, QbeNull);
+    };
+    f.emit(i.op(), i.cls(), QbeNull, QbeNull, QbeNull);
+    
+    if is_store(i.op()) {
+        k := argcls(i, 0);
+        f.emit(.push, k, QbeNull, i.arg&[0], QbeNull);
+        wasm_push_addr(f, i.arg&[1]);
+        return();
+    };
+    if is_load(i.op()) {
+        wasm_push_addr(f, i.arg&[0]);
+        return();
+    };
+    
+    enumerate i.arg&.items() { idx, a |
+        if a[] != QbeNull {
+            k := argcls(i, idx);
+            f.emit(.push, k, QbeNull, a[], QbeNull);
+        };
+    };
+}
+
+// TODO: convert addresses to .Kw earlier so don't have to insert as many .truncl
+// TODO: fold imm offset / slots
+fn wasm_push_addr(f: *Qbe.Fn, r: Qbe.Ref) void = {
+    if rtype(r) == .RTmp {
+        f.emit(.truncl, .Kw, QbeNull, QbeNull, QbeNull);
+        f.emit(.push, .Kl, QbeNull, r, QbeNull);
+    } else {
+        f.emit(.push, .Kw, QbeNull, r, QbeNull);
+    };
+}
+
+// J.jmp: phi nodes can trivially be converted to block arguments. 
+// J.jnz: we need to insert extra blocks to express `if cond then goto s1(x, y) else goto s2(z);`
+fn insert_blocks_for_conditional_phis(f: *Qbe.Fn) void = {
+    new_blocks_list := Qbe.Blk.ptr_from_int(0);
+    last_block := f.start;
+    for_blocks f { b | 
+        continue :: local_return;
+        last_block = b;
+        if(b.jmp.type != .jnz, => continue());
+        
+        // TODO: would it be better to use select() instead of inserting extra blocks when the targets have matching signetures? 
+        for_jump_targets_mut b { s |
+            continue :: local_return;
+            if(s.phi.is_null(), => continue());
+            
+            b1 := newblk();
+            name_phi_block(b, s[], b1);
+            b1.jmp.type = .jmp;
+            b1.s1 = s[];
+            for_phi s[] { p | 
+                n := index_in_phi(b, p);
+                p.blk[n] = b1;
+            };
+            s[] = b1;
+            
+            // build up a chain to add at the end
+            b1.link = new_blocks_list;
+            new_blocks_list = b1;
+            f.nblk += 1;
+        };
+    };
+    @debug_assert(last_block.link.is_null());
+    last_block.link = new_blocks_list;
+}

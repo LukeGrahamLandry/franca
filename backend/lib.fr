@@ -29,6 +29,10 @@
 #include_std("backend/meta/template.fr");
 #include_std("backend/amd64/isel.fr");
 #include_std("backend/opt/slots.fr");
+#include_std("backend/wasm/bits.fr");
+#include_std("backend/wasm/isel.fr");
+#include_std("backend/wasm/abi.fr");
+#include_std("backend/wasm/emit.fr");
 
 // easy-ish (?) things to try to get used to making changes. 
 // TODO: if they don't do it already: 
@@ -257,13 +261,17 @@ fn init(m: *QbeModule, segment_size: i64, gpa: Alloc, code_alloc: Alloc, goal: Q
     m.curi   = forever.box(@type m.curi[]); // TODO: megadumb if its the page allocaotr
     m.debug  = forever.box_zeroed(@type m.debug[]);
     m.target = forever.box(@type m.target[]);
-        
-    // TODO: ask for linux abi
-    if m.goal.arch == .aarch64 {
-        m.target.fill_target_info(.arm64_apple);
-    } else {
-        m.target.fill_target_info(.amd64_apple);
+    
+    @match(m.goal.arch) {
+        fn aarch64() => m.target.fill_target_arm(m.goal.os == .macos);
+        fn x86_64()  => m.target.fill_target_amd(m.goal.os == .macos);
+        fn wasm32()  => {
+            t := m.target;
+            t.finish_passes = finish_qbe_passes_wasm;
+            t.abi0 = apple_extsb; // "Signed 8 and 16-bit scalars are sign-extended, and unsigned 8 and 16-bit scalars are zero-extended before passing or returning." 
+        };
     };
+    
     m.types[] = m.new_long_life(0); // TODO: check the magic in QbeBuilder.init to make sure you remember to do this. 
     m.curi[] = m.insb.index_unchecked(Qbe.MaxInstructions);
     m.symbol_memmove = m.intern("memmove");
@@ -307,16 +315,6 @@ fn drop(m: *QbeModule, slowly_free_from_gpa: bool) void = {
     };
     m.forever&.deinit();
     m[] = zeroed(@type m[]);  // just to make sure you crash if you try to use it again. 
-}
-
-fn fill_target_info(t: *Qbe.Target, target: Qbe.TargetAbi) void = {
-    apple := @is(target, .arm64_apple, .amd64_apple);
-    arm := @is(target, .arm64_apple, .arm64);
-    if arm {
-        t.fill_target_arm(apple);
-    } else {
-        t.fill_target_amd(apple);
-    }
 }
 
 fn get_qbe_dylib_variable($T: Type, $name: Str) *T #generic = {
@@ -372,12 +370,12 @@ run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
         };
         return();
     };
-    finish_qbe_passes(fnn);
+    {m.target.finish_passes}(fnn);
     reset_temporary_storage(mark);
 };
 ::[]u64;
 
-fn finish_qbe_passes(fnn: *Qbe.Fn) void = {
+fn finish_qbe_passes_native(fnn: *Qbe.Fn) void = {
     if fnn.mem.first.is_null() {
         fnn.mem = new(0);
     };
@@ -389,7 +387,7 @@ fn finish_qbe_passes(fnn: *Qbe.Fn) void = {
     fill_use(fnn); 
     
     // :TodoFinishAmdSlots
-    if fnn.globals.goal.arch != .x86_64 {
+    if fnn.globals.goal.arch == .aarch64 {
         // TODO: don't always need extra fillrpo? only if vararg or any_dead_blocks in fold_constants
         fillrpo(fnn);   // for fillalias. 
         fillalias(fnn); // for late slots mem opt, escaping slots are tracked at the beginning of isel. 
@@ -415,6 +413,36 @@ fn finish_qbe_passes(fnn: *Qbe.Fn) void = {
     set_link_from_rpo(fnn);
     
     {m.target.emitfn}(m, fnn, m[].outf);
+}
+
+fn finish_qbe_passes_wasm(fnn: *Qbe.Fn) void = {
+    if fnn.mem.first.is_null() {
+        fnn.mem = new(0);
+    };
+    m := fnn.globals;
+    wasm_abi(fnn);
+    
+    // TODO: wasm has memory.copy which we should use for blit instead of a bunch of ldr+str
+    simplify(fnn);
+    fillpreds(fnn);
+    fill_use(fnn); 
+    
+    wasm_isel(fnn);
+    // TODO: elide_abi_slots
+    
+    // TODO: maybe we still want liveness info even though we're not doing register allocation?
+    
+    fillrpo(fnn);
+    simplify_jump_chains(fnn); // optional
+    fillpreds(fnn);
+    fillrpo(fnn);
+    
+    // TODO: convert to structured control flow as a seperate pass?
+    
+    // :LinkIsNowRpo
+    set_link_from_rpo(fnn);
+    
+    wasm_emit_fn(fnn);
 }
 
 // debug. but it calls clsmerge which does mutate sometimes so maybe not.

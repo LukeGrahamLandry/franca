@@ -1,0 +1,105 @@
+//! https://github.com/WebAssembly/tool-conventions/blob/main/BasicCABI.md
+//! - non-scalar aggragates are always passed by pointer 
+//! - aggragate return pointer is prepended to arguments
+//! - varargs pointer is appended to arguments
+
+fn wasm_abi(f: *Qbe.Fn) void = {
+    if true {
+        break :: local_return;
+        for_insts_forward f.start { i | 
+            if(!is_par(i.op()), => break()); 
+            @debug_assert(!@is(i.op(), .pare), "TODO: wasm abi par");
+            i[] = make_ins(.pop, i.cls(), i.to, QbeNull, QbeNull);
+        };
+    };
+    
+    if f.retty != -1 {
+        // TODO: check if they said its a type but really there's only one scalar 
+        f.retr = f.newtmp("abi", .Kl); 
+    };
+    
+    for_blocks f { b |
+        changed := false; 
+        f.reset_scratch();
+        
+        if is_ret(b.jmp.type) && b.jmp.arg != QbeNull {
+            @debug_assert(b.jmp.type != .ret0, "J.ret0 had arg");
+            // TODO: check if they said its a type but really there's only one scalar 
+            is_scalar := b.jmp.type != .retc;
+            changed = true;
+            if is_scalar {
+                k := @as(Qbe.Cls) @as(i32) b.jmp.type.raw() - Qbe.J.retw.raw();
+                f.emit(.push, k, QbeNull, b.jmp.arg, QbeNull);
+            } else {
+                @debug_assert(f.retr != QbeNull, "missing indirect return pointer");
+                size := f.globals.types[][f.retty.zext()].size; // TODO: mutex
+                f.emit(.blit1, .Kw, QbeNull, INT(size), QbeNull);
+                f.emit(.blit0, .Kw, QbeNull, b.jmp.arg, f.retr);  // src, dest
+            };
+            b.jmp.type = .ret0;
+            b.jmp.arg = QbeNull;
+        };
+        
+        pending_indirect_return := QbeNull;
+        check_pending_indirect_return :: fn() => if pending_indirect_return != QbeNull {
+            @debug_assert(changed);
+            f.emit(.push, .Kl, QbeNull, pending_indirect_return, QbeNull);
+            pending_indirect_return = QbeNull;
+        };
+    
+        for_insts_rev b { i | 
+            continue :: local_return;
+            i := i[];
+            
+            @debug_assert(!@is(i.op(), .vaarg, .vastart), "TODO: wasm c-varargs");
+            if i.op() == .call {
+                f.move_end_of_block_to_scratch(b, i, changed&);
+                
+                // TODO: check if they said its a type but really there's only one scalar and it should be converted to a load. 
+                is_scalar := i.arg&[1] == QbeNull;
+                if is_scalar {
+                    if i.to != QbeNull {
+                        f.emit(.pop, i.cls(), i.to, QbeNull, QbeNull);
+                    };
+                } else {
+                    // TODO: convert this into an alloc or RSlot or something
+                    eprintln(":todo this wont work");
+                    pending_indirect_return = i.to;
+                };
+                i.to = QbeNull;
+                f.emit(i[]);
+                continue();
+            };
+            
+            // TODO: we need to know argument types for indirect_call but don't want to rely on consecutive pushes holding cls
+            
+            if is_arg(i.op()) {
+                // TODO: check if they said its a type but really there's only one scalar and it should be converted to a load. 
+                i.set_op(.push);
+            } else {
+                check_pending_indirect_return();
+            };
+            
+            if changed {
+                i = f.emit(i[]);
+            };
+        };
+        
+        check_pending_indirect_return();
+        
+        if f.retr != QbeNull && f.start.identical(b) {
+            // prepend aggragate return pointer
+            f.move_end_of_block_to_scratch(b, b.ins.first, changed&);
+            f.emit(.pop, .Kl, f.retr, QbeNull, QbeNull);
+        };
+        
+        if changed {
+            f.copy_instructions_from_scratch(b); 
+        };
+    };
+    
+    when_debug(f, .Abi) { out | 
+        write(out, "\n> After ABI lowering:\n");
+        printfn(f, out);
+    }
+}

@@ -19,6 +19,68 @@ fn elimsb(f: *Qbe.Fn) void = {
     }
 }
 
+// TODO: my move_end_of_block_to_scratch here is not super well tested because i don't use b/h in from_bc 
+/* abi0 for arm64-apple and wasm32; introduces
+ * necessary sign extensions in calls
+ * and returns
+ */
+fn apple_extsb(f: *Qbe.Fn) void = {
+    for_blocks f { b |
+        changed := false; 
+        f.reset_scratch();
+        j := b.jmp.type;
+        if is_retbh(j) {
+            changed = true;
+            r := f.newtmp("abi", .Kw);
+            o := @as(Qbe.O) @as(i32) Qbe.O.extsb.raw() + (j.raw() - Qbe.J.retsb.raw());
+            f.emit(o, .Kw, r, b.jmp.arg, QbeNull);
+            b.jmp.arg = r;
+            b.jmp.type = .retw;
+        };
+        for_insts_rev b { i | 
+            if changed {
+                f.emit(i[][]);
+            };
+            if i[].op() == .call {
+                i1 := i[];
+                i0 := b.find_first_arg(i[]); 
+                i[] = i1;
+                while => Qbe.Ins.int_from_ptr(i[]) > Qbe.Ins.int_from_ptr(i0) {
+                    i[] = i[].offset(-1);
+                    if is_argbh(i[].op()) {
+                        f.move_end_of_block_to_scratch(b, i[], changed&);
+                        prev := f.emit(i[][]);
+                        i.to = f.newtmp("abi", .Kl);
+                        prev.arg&[0] = i.to;
+                    } else {
+                        if changed {
+                            f.emit(i[][]);
+                        };
+                    }
+                };
+                i[] = i1;
+                while => Qbe.Ins.int_from_ptr(i[]) > Qbe.Ins.int_from_ptr(i0) {
+                    i[] = i[].offset(-1);
+                    if is_argbh(i[].op()) {
+                        f.move_end_of_block_to_scratch(b, i[], changed&);
+                        o := rebase(i[].op(), .extsb, .argsb);
+                        f.emit(o, .Kw, i.to, i.arg&[0], QbeNull);
+                    }
+                };
+            };
+        };
+        if changed {
+            f.copy_instructions_from_scratch(b); 
+        };
+    };
+
+    if f.globals.debug["A".char()] {
+        out := f.globals.debug_out;
+        write(out, "\n> After Apple pre-ABI:\n");
+        printfn(f, out);
+    }
+}
+
 fn split(f: *Qbe.Fn, b: *Qbe.Blk) *Qbe.Blk = {
     f.nblk += 1;
     bn := newblk();
@@ -121,7 +183,7 @@ fn assign_alloc_slots(f: *Qbe.Fn) void = {
                     f.salign = 2 + alloc_type.raw() - Qbe.O.alloc4.raw();
                    
                     // :TodoFinishAmdSlots
-                    if f.globals.goal.arch != .x86_64 { 
+                    if f.globals.goal.arch == .aarch64 { 
                         if escapes(i.to, f) { 
                             range(0, size) { i |
                                 bsset(f.escaping_slots&, t.slot.intcast() + i);

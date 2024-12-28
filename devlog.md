@@ -11,6 +11,8 @@ that gets farm_game working on amd64!
 
 in fact, i think amd64 now works better than arm64 because of my cache coherency woes, it can run 64fps.fr.  
 
+- fixed `need to do_merges when resolving by type.`
+
 ## amd64 bug fix extravaganza (Dec 26)
 
 - jit hello world works if i got_indirection_instead_of_patches=true on both modules. so clearly i was right when i asserted `!=.JitOnly` but i still don't know why. 

@@ -2758,7 +2758,7 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
     };
     
     if attempt.state < 6 {
-        @check(self.do_merges(attempt)) return;
+        @check(self.do_merges(attempt.options&, attempt.os)) return;
         attempt.state = 6;
     };
     are_we_done_yet();
@@ -3006,6 +3006,14 @@ fn resolve_in_overload_set(self: *SelfHosted, f_ty: FnType, i: OverloadSet, loc:
         return(Suspend = blocked[0]);  // TODO: return all? don't just pick one. 
     };
     
+    if interesting.len > 1 {
+        @check(self.do_merges(interesting&, i)) return;
+    };
+    if interesting.len == 1 {
+        return(Ok = interesting[0]);
+    };
+    
+    
     // TODO: don't spam log since we might discard the error.
     @println("ambigous overload for % -> %", self.log_type(f_ty.arg), self.log_type(f_ty.ret));
     self.last_loc = loc;
@@ -3022,10 +3030,10 @@ fn resolve_in_overload_set(self: *SelfHosted, f_ty: FnType, i: OverloadSet, loc:
 // TODO: you want something more powerful than this so you can have a function thats inline asm on some arch/os but normal code on others. 
 // TODO: this discards link_renamer and any other tags that have special meaning. 
 // TODO: simplier tests that use this. right now its just the compiler. 
-fn do_merges(self: *SelfHosted, attempt: *OverloadAttempt) Maybe(void) = {
-    overloads := self.dispatch.overloads&.nested_index(attempt.os.as_index());
+fn do_merges(self: *SelfHosted, options: *List(FuncId), os: OverloadSet) Maybe(void) = {
+    overloads := self.dispatch.overloads&.nested_index(os.as_index());
     
-    for attempt.options { opt | 
+    for options { opt | 
         func := self.get_function(opt);
         if !func.get_flag(.BodyIsSpecial) {
             // since we know we do this at the end, we aren't going to be able to help you if you have multiple overloads and not all are special. 
@@ -3039,11 +3047,11 @@ fn do_merges(self: *SelfHosted, attempt: *OverloadAttempt) Maybe(void) = {
     };
     
     //@println("doing merges %", self.pool.get(overloads.name));
-    f_i := attempt.options.len;
+    f_i := options.len;
     while => f_i > 0 {
         continue :: local_return;
         f_i -= 1;
-        fid := attempt.options[f_i];
+        fid := options[f_i];
         func := self.get_function(fid);
         f_ty := func.finished_ty().expect("types to be infered");
         
@@ -3054,7 +3062,7 @@ fn do_merges(self: *SelfHosted, attempt: *OverloadAttempt) Maybe(void) = {
         while => f_j > 0 {
             continue :: local_return; 
             f_j -= 1;
-            other_fid := attempt.options[f_j];
+            other_fid := options[f_j];
             @debug_assert(other_fid != fid, "function appeared twice in overload set");
             other_func := self.get_function(other_fid);
             
@@ -3063,7 +3071,7 @@ fn do_merges(self: *SelfHosted, attempt: *OverloadAttempt) Maybe(void) = {
                 if !other_func.body&.is(.Redirect) {  // TODO: i'd rather not get here a billion times
                     append_impl(merged&, self.get_alloc(), other_func.body);
                     other_func.body = (Redirect = fid);
-                    attempt.options&.unordered_remove_discard(f_j);
+                    options.unordered_remove_discard(f_j);
                     if f_j < f_i {
                         f_i -= 1;
                     };
@@ -4238,7 +4246,8 @@ fn struct_type(self: *SelfHosted, pattern: *Pattern, is_union: bool) Maybe(Type)
             }
         };
         
-        default := if b.get_default() { expr |
+        ::if_opt(*FatExpr, Var);
+        default := if b.get_default() { (expr: *FatExpr) |
             v := self.unique_const(name);
             self.scopes.put_constant(v, expr[], b.ty);
             expr.expr = (GetVar = v);  // Save our work because we might yield on a later field. 
