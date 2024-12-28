@@ -72,12 +72,11 @@ fn init_driver_vtable() *ImportVTable = {
         c := c.cast()[][];
         opts := c.get_build_options();
         @if(use_threads) c.comptime_codegen.join_codegen_thread();
-        // TODO: why does this make it fail more??
-        //c.comptime_codegen.m.drop(true); // TODO: still some leak
+        c.comptime_codegen.m.drop(); 
         each c.comptime_codegen.queue { q |
-            //q.arena&.deinit();
+            q.arena&.deinit();
         };
-        //c.shim_callback_alloc&.deinit();
+        c.shim_callback_alloc&.deinit();
         arena := c.ast_alloc[];  // copy because the areana is inside itself!
         c[] = SelfHosted.zeroed();  // BEFORE releasing ast_arena;
         arena&.deinit();
@@ -173,7 +172,7 @@ fn init_driver_vtable() *ImportVTable = {
     @if(INCLUDE_QBE_VTABLE) {
         vtable.emit_qbe_included = fn(mm: rawptr, comp: *CompCtx, fns: [] FuncId, entry: ProgramEntry) BucketArray(u8) = {    
             m := QbeModule.ptr_from_raw(mm);
-            shared := init(m, @as(CodegenWorker) codegen_thread_main);
+            shared := init(m, comp[].get_alloc(), @as(CodegenWorker) codegen_thread_main);
             main_thread_pump(comp[], shared, fns);
             aaa: BucketArray(u8) = init(0, temp());
             m := shared.m;
@@ -199,11 +198,11 @@ fn init_driver_vtable() *ImportVTable = {
         vtable.finish_qbe_module = fn(m) = {
             m := QbeModule.ptr_from_raw(m);
             m.emit_suspended_inlinables();
-            if m.making_macho() { 
-                chunks := output_macho(m);
-                return(chunks.items());
-            };
-            empty()
+            {m.target.finish_module}(m)
+        };
+        vtable.drop_qbe_module = fn(m) = {
+            m := QbeModule.ptr_from_raw(m);
+            m.drop();
         };
     };
     

@@ -14,14 +14,10 @@ AmdState :: @struct(
     last_saved_offset := 0,
 );
 
-fn emit_func_amd64(m: *QbeModule, f: *Qbe.Fn, file: *FILE) void = {
+fn emit_func_amd64(f: *Qbe.Fn) void = {
+    m := f.globals;
     @debug_assert_eq(m.goal.arch, .x86_64, "how did we get here?");
     code := m.segments&[.Code]&;
-    start := code.next;
-    name_id := f.lnk.id;
-    maybe_add_export(m, name_id, f.lnk.export);
-    m.do_jit_fixups(name_id, .Code, code.len());
-    
     e: AmdState = (
         f = f,
         m = m,
@@ -29,15 +25,8 @@ fn emit_func_amd64(m: *QbeModule, f: *Qbe.Fn, file: *FILE) void = {
         start_of_function = code.len(),
     );
     
-    //printfn(f, f.globals.debug_out);
     emit_the_code(e&);
     code.next = code.next.offset(e.a.len() - e.last_saved_offset);
-    m.last_function_end = code.next;
-    use_symbol(m, name_id) { s | 
-        s.size = e.a.len();
-        @debug_assert(s.size != 0, "zero size function?");
-    };
-    maybe_llvm_dis(f, e.a.items(), "--arch=x86-64");
 }
 
 fn fixup_amd64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_reloc: *?Fixup) void = {
@@ -473,7 +462,7 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
                         done = symbol.kind != .Local;
                         if done {
                             if ensure_got_slot(e.m, symbol, symbol.jit_addr) { it |
-                                symbol.fixups&.push(it, e.m.gpa);
+                                push_fixup(e.m, symbol, it);
                             };
                             
                             // TODO: very copy paste 
@@ -527,7 +516,7 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
                                     // TODO: this is very copy-paste from where we do stuff for __stubs. 
                                     
                                     if ensure_got_slot(e.m, symbol, symbol.jit_addr) { it |
-                                        symbol.fixups&.push(it, e.m.gpa);
+                                        push_fixup(e.m, symbol, it);
                                     };
                                     encoded_size :: 6;
                                     off += e.m.distance_between(.Code, current_offset + encoded_size, .ConstantData, symbol.got_lookup_offset);
@@ -541,7 +530,7 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
                                     // Otherwise this will get patched to a local or __stub call later. 
                                     patch_at := e.a.maybe_uninit.ptr.offset(e.a.len + 1);
                                     fix: Fixup = (patch_at = patch_at, type = (RipDisp32 = (increment = c.bits.i.trunc(), call = true)));
-                                    symbol.fixups&.push(fix, e.m.gpa);
+                                    push_fixup(e.m, symbol, fix);
                                     e.a&.push(@as(u8) PrimaryOp.CallImm32); 
                                     e.a&.push_u32(0);
                                 };
@@ -707,7 +696,7 @@ fn push_instruction(e: *AmdState, b: EncodedArgs, ops: []u8) void = {
                 };
                 patch_at := e.a.maybe_uninit.ptr.offset(e.a.len);
                 if symbol.kind != .Local || e.m.goal.type == .Relocatable {
-                    symbol.fixups&.push((patch_at = patch_at, type = (RipDisp32 = (increment = off.trunc(), call = false))), e.m.gpa);
+                    push_fixup(e.m, symbol, (patch_at = patch_at, type = (RipDisp32 = (increment = off.trunc(), call = false))));
                 };
             };
         };

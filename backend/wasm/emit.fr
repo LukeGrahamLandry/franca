@@ -1,6 +1,49 @@
+// Wasm is a bit annoying because it's designed to be compact and fast to load, not to be output in one pass. 
 
-fn wasm_emit_fn(f: *Qbe.Fn) void = {
-    
+EmitWasmA :: @struct(
+    m: *QbeModule,
+    f: *Qbe.Fn,
+    locals: []i32,
+);
+
+fn emit_func_wasm32(f: *Qbe.Fn) void = {
+    e: EmitWasmA = (
+        f = f,
+        m = f.globals,
+        locals = temp().alloc(i32, f.ntmp.zext()),
+    );
+    pack_locals(e&);
+    // TODO: reserve space for the length of code
+}
+
+fn pack_locals(e: *EmitWasmA) void = {
+    memset(i32.raw_from_ptr(e.locals.ptr), 0xFF, e.locals.len);
+    total_locals: i32 = 0;
+    for_pars e.f { i |
+        e.locals[i.to.val()] = total_locals;
+        // TODO: use cls to say function signeture. 
+        total_locals += 1;
+        i.set_nop();
+    };
+    // TODO: this probably isn't worth the time. 
+    // Declaration of locals uses run-length-encoding so group by type to shrink the module. 
+    for (@const_slice(Qbe.Cls.Kw, .Kl, .Ks, .Kd)) { k |
+        prev_locals := total_locals;
+        range(Qbe.Tmp0, e.f.ntmp.zext()) { i |
+            t := e.f.tmp.index(i);
+            if e.locals[i] == -1 && t.nuse > 0 && t.cls == k {
+                e.locals[i] = total_locals;
+                total_locals += 1;
+            };
+        };
+        n := total_locals - prev_locals;
+        // TODO: declare locals of this type
+    };
+}
+
+fn output_wasm_module(f: *QbeModule) [][]u8 = {
+    version_magic := @const_slice(0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00);
+    empty()
 }
 
 //
@@ -10,7 +53,10 @@ fn wasm_emit_fn(f: *Qbe.Fn) void = {
 // so you sometimes have two lengths, one in bytes and then one in elements. 
 // Also, when the spec says sizes like u32, that doesn't mean encode using that many bytes, 
 // you still use the leb128 stuff. The type is just a range restriction. 
-// 
+//
+
+// TODO: we're not going to do it this way at all i think, 
+//       want to just spam out functions in one chunk like other backends 
 // TODO: use bucket arrays for less copying? 
 fn dump(self: *Wasm.Module, out: *List(u8)) void = {
     :: enum(Wasm.Section);

@@ -155,7 +155,7 @@ codegen_thread_main :: fn(shared: *CodegenShared) void = {
                 return();
             };
             pthread_cond_signal(shared.kiki_progress_c&).unwrap();
-            wait(shared, false)
+            wait(shared, false);
         };
     };
 };
@@ -249,7 +249,7 @@ fn do_codegen(m: *QbeModule, entry: *CodegenEntry) void = {
                 s.jit_addr = jit_addr;
                 s.shim_addr = jit_addr;
                 if ensure_got_slot(m, s, jit_addr) { fix |
-                    s.fixups&.push(fix, m.gpa);
+                    push_fixup(m, s, fix);
                 };
                 @debug_assert(s.got_lookup_offset != -1);
                 //@println("shim -> % slot=%", s.name, s.got_lookup_offset);
@@ -283,7 +283,7 @@ fn do_codegen(m: *QbeModule, entry: *CodegenEntry) void = {
             f.copy_instructions_from_scratch_reversed_which_means_forwards(f.start);
             f.start.jmp.type = .ret0;
             
-            {m.target.emitfn}(m, f, m[].outf);
+            emit_fn(f);
             use_symbol(f.globals, it.target) { s | 
                 mark_referenced(f.globals, it.target, s);
             };
@@ -340,27 +340,27 @@ CodegenEntry :: @struct(
 );
 
 CodegenWorker :: @FnPtr(s: *CodegenShared) void;
-fn init(m: *QbeModule, worker: CodegenWorker) *CodegenShared = {
-    a := libc_allocator;
-    q := a.alloc(CodegenEntry, codegen_queue_size); // :Leak
-    shared := a.box_zeroed(CodegenShared);  // :leak
+fn init(m: *QbeModule, arena: Alloc, worker: CodegenWorker) *CodegenShared = {
+    q := arena.alloc(CodegenEntry, codegen_queue_size);
+    shared := arena.box_zeroed(CodegenShared); 
     shared.queue = q;
     shared.m = m;
-    shared.constants_used = empty(a);
-    @if(use_threads) {
+    shared.constants_used = empty(arena);
+    @if(use_threads) { // :leak
         pthread_mutex_init(shared.progress_m&, 0).unwrap();
         pthread_cond_init(shared.bouba_progress_c&, 0).unwrap();
-        pthread_cond_init(shared.kiki_progress_c&, 0).unwrap();
+        pthread_cond_init(shared.kiki_progress_c&, 0).unwrap(); 
     };
     // TODO: one allocation for all the initial slices.
+    other_thread_a := libc_allocator; // :leak
     enumerate shared.queue { i, entry |
-        entry.arena = init(a, macos_page_size);
+        entry.arena = init(other_thread_a, macos_page_size);
         entry.id = i;
     };
     @if(use_threads) {
         shared.thread = start_thread(CodegenShared, worker, shared);
     };
-    shared.type_indices = init(a); 
+    shared.type_indices = init(arena); 
     
     shared
 }

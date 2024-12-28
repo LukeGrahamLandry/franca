@@ -64,7 +64,7 @@
 // TODO: ir test that uses opaque types
 
 QbeModule :: @rec @struct(
-    // These have to be pointers to the symbols Qbe externs because it uses them. 
+    // When we linked with qbe, these were pointers to it's externs so both sides could use them. TODO: some should be values now. 
     types: *QList(Qbe.Typ), // typ
     insb: *Array(Qbe.Ins, 1.shift_left(20)), // MaxInstructions
     curi: **Qbe.Ins,
@@ -76,12 +76,10 @@ QbeModule :: @rec @struct(
     debug_out: *FILE,
     // :ThreadSafety
     namel := QbeName.ptr_from_int(0), // TODO: this is just lazy, should manually pass it around now that im using temp() and resetting between functions. 
-    _ := 0,
     symbols: []SymbolBucket,
     
     // stuff for emitting code.
     segments: EnumMap(SegmentType, SegmentCursor),
-    gpa: Alloc,
     fixups_locked := false,
     goal: QbeTargetEnv,
     start_of_writable_code: *u8,
@@ -89,15 +87,12 @@ QbeModule :: @rec @struct(
     got: SegmentCursor,
     commands: SegmentCursor,
     stubs: SegmentCursor,
-    __: SegmentCursor,
-    ___: SegmentCursor,
     
     exports: List(u32),
     imports: List(u32),
     local_needs_reloc: List(u32),
     inlinable_but_referenced_later: List(u32),
     
-    ____: bool,
     supports_self_sign: bool,  // this was in zeroed padding before so the old version in ../boot will have false and current default_driver will use codesign binary like it used to -- Nov 28
     initialized := false,
     
@@ -150,13 +145,13 @@ SIZE_OF_STUBS :: 1.shift_left(10); // TODO: not this :explain
 COMMANDS_SIZE_GUESS :: macos_page_size; // :explain
 
 fn init_default_module(m: *QbeModule, goal: QbeTargetEnv, expecting_rwx: bool) void = 
-    init(m, 1.shift_left(25), libc_allocator, page_allocator, goal, expecting_rwx);
+    init(m, 1.shift_left(25), libc_allocator, goal, expecting_rwx);
 
 // - the allocators need to not be temp() because we reset temp()
 // - expecting_rwx only matters when jitting. See the comment on use_map_jit_on_apple_silicon if running on macos. 
 //   if you jit with expecting_rwx=false, you have to call make_exec before trying to run the code. 
 //   Regardless, be careful of cache coherency on aarch64, see comment on lib/sys/process.fr/clear_instruction_cache().
-fn init(m: *QbeModule, segment_size: i64, gpa: Alloc, code_alloc: Alloc, goal: QbeTargetEnv, expecting_rwx: bool) void = {
+fn init(m: *QbeModule, segment_size: i64, gpa: Alloc, goal: QbeTargetEnv, expecting_rwx: bool) void = {
     gpa = todo_allocator;
     m[] = QbeModule.zeroed();
     m.supports_self_sign = true;
@@ -172,54 +167,50 @@ fn init(m: *QbeModule, segment_size: i64, gpa: Alloc, code_alloc: Alloc, goal: Q
         pthread_mutex_init(m.intern_mutex&, 0).unwrap();
     };
     
-    if m.use_map_jit_on_apple_silicon {
-        // :JitMemProtect 
-        prot := bit_or(@as(i64) MapProt.Exec, @as(i64) MapProt.Write);
-        n1   := 1.neg();
-        addr := 0.rawptr_from_int();
-        ptr  := mmap_jit(addr, segment_size * 3, prot, 0);
-        code_mem: []u8 = (ptr = u8.ptr_from_raw(ptr), len = segment_size * 3);
-        
-        // The data segments we don't want to be executable. 
-        data_mem := code_alloc.alloc(u8, segment_size * 2); // TODO: ask for the alignment we need.
-        
-        // order matters!
-        m.start_of_writable_code = code_mem.ptr;
-        make_segment(code_mem, .Code, 0, segment_size);  // :CodeIsFirst
-        make_segment(data_mem, .ConstantData, 0, segment_size);
-        make_segment(data_mem, .MutableData, segment_size, segment_size*2);
+    mem := if !m.use_map_jit_on_apple_silicon {
+        page_allocator.alloc(u8, segment_size * 3)
     } else {
-        if expecting_rwx {
-            prot := bit_or(@as(i64) MapProt.Exec, bit_or(@as(i64) MapProt.Read, @as(i64) MapProt.Write));
-            n1   := 1.neg();
-            addr := 0.rawptr_from_int();
-            ptr  := mmap_anon(addr, segment_size * 3, prot, 0);
-            code_mem: []u8 = (ptr = u8.ptr_from_raw(ptr), len = segment_size * 3);
-            
-            // The data segments we don't want to be executable. 
-            data_mem := code_alloc.alloc(u8, segment_size * 2); // TODO: ask for the alignment we need.
-            
-            // order matters!
-            m.start_of_writable_code = code_mem.ptr;
-            make_segment(code_mem, .Code, 0, segment_size);  // :CodeIsFirst
-            make_segment(data_mem, .ConstantData, 0, segment_size);
-            make_segment(data_mem, .MutableData, segment_size, segment_size*2);
-        } else {
-            mem := code_alloc.alloc(u8, segment_size * 3); // TODO: ask for the alignment we need.
-            
-            // order matters!
-            m.start_of_writable_code = mem.ptr;
-            make_segment(mem, .Code, 0, segment_size);  // :CodeIsFirst
-            make_segment(mem, .ConstantData, segment_size*1, segment_size*2);
-            make_segment(mem, .MutableData, segment_size*2, segment_size*3);
-        };
+        F :: LibcType(.macos).MapFlag; // only apple makes us the MAP_JIT shenanigans. 
+        fd: Fd = (fd = -1);
+        flag := bit_or(@as(i64) F.Private, @as(i64) F.Anonymous); 
+        
+        // Reserve the whole contiguous area we want.  
+        // It seems that MAP_JIT and then MAP_FIXED over it is fine, but the reverse is not. 
+        prot_WX := bit_or(@as(i64) MapProt.Exec, @as(i64) MapProt.Write);
+        flag_WX := bit_or(flag, @as(i64) F.Jit);  // :JitMemProtect .Jit means one thread will be able to write and one will be able to execute. 
+        ptr := mmap(zeroed(rawptr), segment_size * 3, prot_WX, flag_WX, fd, 0);
+        @assert_gt(ptr.int_from_rawptr(), 0, "mmap Jit failed");
+        
+        // Now remap over the data sections so they're not executable and both threads can write to them. 
+        prot_RW := bit_or(@as(i64) MapProt.Read, @as(i64) MapProt.Write);
+        flag_RW := bit_or(flag, @as(i64) F.Fixed); // .Fixed means the address hint will not be ignored. 
+        ptr_rw := ptr.offset(segment_size);
+        res := mmap(ptr_rw, segment_size * 2, prot_RW, flag_RW, fd, 0);
+        @assert_eq(ptr_rw, res, "mmap Fixed failed");
+        
+        // So now we have a contigous chunk where the first third is MAP_JIT and the rest is normal.
+        mem: []u8 = (ptr = u8.ptr_from_raw(ptr), len = segment_size * 3);
+        // TODO: if we wanted to allow jit and then emit macho from the same module, you'd have to remap the `commands: SegmentCursor` as well. 
+        mem
     };
+    
+    if !m.use_map_jit_on_apple_silicon && expecting_rwx {
+        // Only the code segment needs to be executable. 
+        prot := bit_or(@as(i64) MapProt.Exec, bit_or(@as(i64) MapProt.Read, @as(i64) MapProt.Write));
+        mprotect(u8.raw_from_ptr(mem.ptr), segment_size, prot);
+    };
+    
+    // order matters!
+    m.start_of_writable_code = mem.ptr;
+    make_segment(mem, .Code, 0, segment_size);  // :CodeIsFirst
+    make_segment(mem, .ConstantData, segment_size, segment_size*2);
+    make_segment(mem, .MutableData, segment_size*2, segment_size*3);
+    
     make_segment :: fn(mem: []u8, s: SegmentType, start: i64, end: i64) void => {
         m.segments&.insert(s, (mmapped = mem.slice(start, end), next = mem.index(start)));
     };
     
     m.initialized = true;
-    m.gpa = gpa;
     m.goal = goal;
     m.exports = list(gpa);
     m.imports = list(gpa);
@@ -262,14 +253,22 @@ fn init(m: *QbeModule, segment_size: i64, gpa: Alloc, code_alloc: Alloc, goal: Q
     m.debug  = forever.box_zeroed(@type m.debug[]);
     m.target = forever.box(@type m.target[]);
     
+    t := m.target;
     @match(m.goal.arch) {
-        fn aarch64() => m.target.fill_target_arm(m.goal.os == .macos);
-        fn x86_64()  => m.target.fill_target_amd(m.goal.os == .macos);
+        fn aarch64() => t.fill_target_arm(m.goal.os == .macos);
+        fn x86_64()  => t.fill_target_amd(m.goal.os == .macos);
         fn wasm32()  => {
-            t := m.target;
             t.finish_passes = finish_qbe_passes_wasm;
             t.abi0 = apple_extsb; // "Signed 8 and 16-bit scalars are sign-extended, and unsigned 8 and 16-bit scalars are zero-extended before passing or returning." 
+            t.emit_fn = emit_func_wasm32;
         };
+    };
+    
+    t.finish_module = @if_else {
+        @if(m.goal.os == .macos)     => output_macho;
+        @if(m.goal.arch == .wasm32)  => output_wasm_module;
+        @if(m.goal.type == .JitOnly) => (fn(m: *QbeModule) [][]u8 = empty());
+        @else => panic("TODO: we don't support this target");
     };
     
     m.types[] = m.new_long_life(0); // TODO: check the magic in QbeBuilder.init to make sure you remember to do this. 
@@ -283,9 +282,10 @@ fn init_empty_for_template_only(m: *QbeModule, gpa: Alloc) void = {
     m.forever = init(gpa, size_of(Qbe.Ins) * 1.shift_left(20) + size_of(SymbolBucket) * IMask + 1.shift_left(10));
     forever := m.forever&.borrow();
     @if(use_threads) {
+        pthread_mutex_init(m.types_mutex&, 0).unwrap();
+        pthread_mutex_init(m.icache_mutex&, 0).unwrap();
         pthread_mutex_init(m.intern_mutex&, 0).unwrap();
     };
-    m.gpa = gpa;
     m.symbols = forever.alloc_zeroed(SymbolBucket, IMask + 1);
     //m.debug_out = fdopen(STD_ERR, "a".sym().c_str());
     m.types  = forever.box(@type m.types[]);
@@ -297,21 +297,15 @@ fn init_empty_for_template_only(m: *QbeModule, gpa: Alloc) void = {
     m.target = forever.box_zeroed(@type m.target[]);
     m.types[] = m.new_long_life(0); // TODO: check the magic in QbeBuilder.init to make sure you remember to do this. 
     m.curi[] = m.insb.index_unchecked(Qbe.MaxInstructions);
-    @if(use_threads) pthread_mutex_init(m.types_mutex&, 0).unwrap();
 }
 
-fn drop(m: *QbeModule, slowly_free_from_gpa: bool) void = {
+fn drop(m: *QbeModule) void = {
     fst := m.segments.data&[0].mmapped;
     page_allocator.dealloc(u8, (ptr = fst.ptr, len = fst.len * m.segments.data&.len()));
-    if slowly_free_from_gpa {
-        for_symbols m { _, s |
-            s.fixups&.drop(m.gpa);
-        };
-        each m.symbols { bucket | 
-            if bucket.n != 0 {
-                bucket.data.free();
-            };
-        };
+    @if(use_threads) {
+        pthread_mutex_destroy(m.types_mutex&).unwrap(); 
+        pthread_mutex_destroy(m.icache_mutex&).unwrap(); 
+        pthread_mutex_destroy(m.intern_mutex&).unwrap(); 
     };
     m.forever&.deinit();
     m[] = zeroed(@type m[]);  // just to make sure you crash if you try to use it again. 
@@ -412,7 +406,7 @@ fn finish_qbe_passes_native(fnn: *Qbe.Fn) void = {
     // :LinkIsNowRpo
     set_link_from_rpo(fnn);
     
-    {m.target.emitfn}(m, fnn, m[].outf);
+    emit_fn(fnn);
 }
 
 fn finish_qbe_passes_wasm(fnn: *Qbe.Fn) void = {
@@ -442,7 +436,7 @@ fn finish_qbe_passes_wasm(fnn: *Qbe.Fn) void = {
     // :LinkIsNowRpo
     set_link_from_rpo(fnn);
     
-    wasm_emit_fn(fnn);
+    emit_fn(fnn);
 }
 
 // debug. but it calls clsmerge which does mutate sometimes so maybe not.
@@ -532,7 +526,6 @@ fn fails_typecheck(f: *Qbe.Fn) ?Str = {
     };
     .None
 }
-
 
 fn usecheck(r: Qbe.Ref, k: Qbe.Cls, f: *Qbe.Fn) bool = {
     rtype(r) == .RTmp || return(true);

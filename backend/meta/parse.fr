@@ -32,14 +32,23 @@ QParseCtx :: @struct(
     types: HashMap(Str, i64),
 );
 
+// :ThreadSafety
+// this is not thread safe because QParseCtx.types uses QbeModule.forever. 
+// if you want to use this threaded change init() (but you can't use temp() unless you also reset_temporary_storage in this loop). 
+// but it doesn't really matter because if you care enough about performace to parse and compile on seperate threads, 
+// you will want to generate the ir in memory instead of uselessly writing out text and parsing it back again. 
+//
 // TODO: this is more useful if you let them pass a userdata pointer but for now i want to match the qbe interface. 
 fn parse_top_level(m: *QbeModule, src: Str, yield_data: @FnPtr(*Qbe.Dat) void, yield_func: @FnPtr(*Qbe.Fn) void) Result(void, Str) = {
     self: QParseCtx = init(m, src); 
     self := self&;
     self.f.default_init(m);  // :NeedFunctionInitForData
     
+    mark := mark_temporary_storage();
     loop {
         continue :: local_return;
+        reset_temporary_storage(mark);
+        
         self.skip_blanks();
         self.skip_lines();
         
@@ -47,6 +56,12 @@ fn parse_top_level(m: *QbeModule, src: Str, yield_data: @FnPtr(*Qbe.Dat) void, y
         self.skip_lines();
         
         if self.eat("function") {
+            self.blocks = init(temp());
+            self.tmps = init(temp());
+            self.f[] = Qbe.Fn.zeroed();
+            self.f.default_init(m);
+            self.blk = Qbe.Blk.ptr_from_int(0);
+            
             self.skip_lines();
             self.f.reset_scratch();
             parse_header(self, export);
@@ -65,11 +80,6 @@ fn parse_top_level(m: *QbeModule, src: Str, yield_data: @FnPtr(*Qbe.Dat) void, y
                 return(Err = "expected '}' after function body");
             };
             yield_func(f);  // might reset temp
-            self.blocks = init(temp());
-            self.tmps = init(temp());
-            self.f[] = Qbe.Fn.zeroed();
-            self.f.default_init(m);
-            self.blk = Qbe.Blk.ptr_from_int(0);
             continue();
         };
         if self.eat("type") {
@@ -122,10 +132,10 @@ fn init(m: *QbeModule, src: Str) QParseCtx = (
     tmps = init(temp()),
     input = src,
     error = list(temp()),
-    replacements = list(m.gpa), // only need this for cls
-    f = m.gpa.box_zeroed(Qbe.Fn),
-    out = m.gpa,
-    types = init(temp()),
+    replacements = list(temp()), // only need this for cls 
+    f = temp().box_zeroed(Qbe.Fn),
+    out = temp(),
+    types = init(m.forever&.borrow()), // see :ThreadSafety comment above!
 );
 
 fn parse_body(self: *QParseCtx) Result(Ty(*Qbe.Fn, []Replacement), Str) = {

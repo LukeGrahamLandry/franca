@@ -4,12 +4,14 @@
 //! - varargs pointer is appended to arguments
 
 fn wasm_abi(f: *Qbe.Fn) void = {
-    if true {
-        break :: local_return;
-        for_insts_forward f.start { i | 
-            if(!is_par(i.op()), => break()); 
-            @debug_assert(!@is(i.op(), .pare), "TODO: wasm abi par");
-            i[] = make_ins(.pop, i.cls(), i.to, QbeNull, QbeNull);
+    // params come in as locals, not on the stack, which seems odd, 
+    // but to be fair, the first thing i would do here is save them in locals anyway so i can't complain. 
+    for_pars f { i |
+        @debug_assert(i.op() != .pare, "TODO: env par wasm");
+        if i.op() == .parc {
+            // TODO: check if they said its a type but really there's only one scalar so the ir expects a pointer but we got a value. 
+            i.set_op(.par);
+            i.arg&[0] = QbeNull;
         };
     };
     
@@ -32,7 +34,10 @@ fn wasm_abi(f: *Qbe.Fn) void = {
                 f.emit(.push, k, QbeNull, b.jmp.arg, QbeNull);
             } else {
                 @debug_assert(f.retr != QbeNull, "missing indirect return pointer");
-                size := f.globals.types[][f.retty.zext()].size; // TODO: mutex
+                m := f.globals;
+                @if(use_threads) pthread_mutex_lock(m.types_mutex&).unwrap();
+                size := m.types[][f.retty.zext()].size; 
+                @if(use_threads) pthread_mutex_unlock(m.types_mutex&).unwrap();
                 f.emit(.blit1, .Kw, QbeNull, INT(size), QbeNull);
                 f.emit(.blit0, .Kw, QbeNull, b.jmp.arg, f.retr);  // src, dest
             };

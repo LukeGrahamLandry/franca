@@ -1,4 +1,13 @@
 
+- fixed problem when doing `use_map_jit_on_apple_silicon` i was calling mmap twice 
+and kind-of assuming they would be next to eachother and trying to munmap them as one. 
+and it looks like it should have just worked out because i said too big a size for the first one so it wouldn't try to free junk when they didn't get put adjacent, 
+and i guess i don't rely on layout that much when jitting, i just always pictured it a certain way in my head.
+now i mmap the whole thing at once and then MAP_FIXED over it to change part of it to not be MAP_JIT. 
+It seems that MAP_JIT and then MAP_FIXED over it is fine, but the reverse is not. 
+now i can drop comptime_codegen and run with `-repeat` for longer.
+`./boot` is still flaky tho. 
+
 ## (Dec 27)
 
 - failing `@debug_assert_gt(c.canvas_width, 0.0);`, which i think is actually a miscompilation of the compiler itself when doing stuff with the constant `: f32 = 640,` 
@@ -12,6 +21,7 @@ that gets farm_game working on amd64!
 in fact, i think amd64 now works better than arm64 because of my cache coherency woes, it can run 64fps.fr.  
 
 - fixed `need to do_merges when resolving by type.`
+- clean up arm emit() for some instructions with similar bit patterns
 
 ## amd64 bug fix extravaganza (Dec 26)
 

@@ -22,54 +22,11 @@ ArmState :: @struct(
     start_of_function: i64,
 );
 
-// TODO: remove the *FILE param, it was for when we were matching qbe's interface and outputting text. 
-fn emit_func_arm64(m: *QbeModule, f: *Qbe.Fn, _: *FILE) void = {
+fn emit_func_arm64(f: *Qbe.Fn) void = {
+    m := f.globals;
     @debug_assert_eq(m.goal.arch, .aarch64, "how did we get here?");
-    // We know we're emitting the function right here so we can do old fixups now. 
-    name_id := f.lnk.id;
-    
-    m.align_to(.Code, 4);  // should never be unaligned anyway but we live in fear
-    start_offset := m.current_offset(.Code);
-    start := m.segments&[.Code].next;
-    self: ArmState = (m = m, f = f, frame = 0, padding = 0, start_of_function = start_offset);
-    
-    maybe_add_export(m, name_id, f.lnk.export);
-    m.do_jit_fixups(name_id, .Code, start_offset);
-    
+    self: ArmState = (m = m, f = f, frame = 0, padding = 0, start_of_function = m.current_offset(.Code));
     self&.emit_the_code();
-    total_code_so_far := start_offset + self&.next_inst_offset();
-    code := m.segments&[.Code]&;
-    @assert(total_code_so_far < code.mmapped.len, "too much code (% bytes)", total_code_so_far);
-    code_bytes := code.mmapped.slice(start_offset, total_code_so_far);
-    @debug_assert(code_bytes.ptr.offset(code_bytes.len).identical(code.next));
-    // :FuncSizeLimit 
-    // b.cond gives you 19 bits, but encoded/4, but signed so that's 20 bits.  
-    // you can remove this limit on the function but then have to add the check when emitting each branch. 
-    @assert_lt(code_bytes.len, 1.shift_left(20), "we don't allow a function larger than one instruction can jump");
-    maybe_llvm_dis(f, code_bytes, "--arch=aarch64");
-    
-    finish_function(m, code_bytes, f.lnk.id);
-}
-
-fn maybe_llvm_dis(f: *Qbe.Fn, code_bytes: []u8, arch_name: Str) void = {
-    if f.globals.debug["D".char()] {
-        @fmt_write(f.globals.debug_out, "# disassembly of '%' (% bytes)\n", f.globals.str(f.lnk.id), code_bytes.len);
-        asm := code_bytes;
-        hex: List(u8) = list(asm.len * 5, temp());
-        for asm { byte |
-            hex&.push_prefixed_hex_byte(byte);
-            hex&.push_all(" ");
-        };
-        out := open_temp_file();
-        out.fd&.write(hex.items());
-        DIS :: "llvm-mc";
-        // TODO: have the caller pass in anything like this, 
-        //       but this is just for debugging the compiler so its not a big deal. :driver_io
-        // varient 1 means intel syntax. ignored when doing arm. 
-        success := run_cmd_blocking(DIS, @slice(arch_name, "--disassemble", "-output-asm-variant=1", "--show-encoding", out&.s_name()));
-        if(!success, => eprintln("ICE(debugging): couldn't disassemble"));
-        out.remove();
-    };
 }
 
 fn segment_address(self: *QbeModule, segment: SegmentType, offset_in_segment: i64) *u8 = {
@@ -148,11 +105,6 @@ fn load_from_got(self: *QbeModule, symbol: *SymbolInfo, reg_encoding: i64, insts
     insts[1] = i_off; 
     new_got_reloc
 }
-
-// TODO: is this better than brk? 
-tried_to_call_uncompiled :: @as(rawptr) fn() void = {
-    @panic("TODO: backend jitted code tried to call uncompiled function");
-};
 
 Patch :: @struct(offset_from_start: i64, cond: ?i64, target_bid: i64);
 
@@ -428,14 +380,14 @@ fn loadaddr_bits(self: *ArmState, c: *Qbe.Con, dest_reg: i64) void = {
                 // TODO: is there some way to have it not move around my functions so i can use relative calls within this one segment?
                 if self.m.goal.type == .Relocatable  { // && symbol.segment != .Code 
                     // we're creating input for a static linker and we want it to be able to move shit around. 
-                    symbol.fixups&.push(patch, self.m.gpa);
+                    push_fixup(self.m, symbol, patch);
                 };
             }
             fn Pending() => {
                 if self.m.got_indirection_instead_of_patches {
                     self.immediate_fixup_got(dest_reg, inc, symbol);
                 } else {
-                    symbol.fixups&.push(patch, self.m.gpa);
+                    push_fixup(self.m, symbol, patch);
                     self.inst(brk(0x0123));
                     self.inst(brk(0x0456));
                 }
@@ -452,7 +404,7 @@ fn immediate_fixup_got(self: *ArmState, dest_reg: i64, inc: i64, symbol: *Symbol
     patch_addr := self.m.segment_address(.Code, self.m.current_offset(.Code));
     patch: Fixup = (patch_at = patch_addr, type = (InReg = (r = dest_reg, increment = inc.trunc())));
     if self.m.goal.type != .JitOnly { 
-        symbol.fixups&.push(patch, self.m.gpa); 
+        push_fixup(self.m, symbol, patch); 
     };
     // this is correct for got_indirection_instead_of_patches too, InReg never references a stub. 
     self.inst(brk(0x111));
@@ -460,7 +412,7 @@ fn immediate_fixup_got(self: *ArmState, dest_reg: i64, inc: i64, symbol: *Symbol
     new_got_slot: ?Fixup = .None;
     fixup_arm64(self.m, symbol, patch&, new_got_slot&);
     if new_got_slot { it |
-        symbol.fixups&.push(it, self.m.gpa);
+        push_fixup(self.m, symbol, it);
     };
 }
 
@@ -618,8 +570,6 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
                 @default => {
                     @debug_assert(i.to.val() != Arm64Reg.PLA.raw(), "please do not the platform register. thank you.");
                     if i.cls().is_int() {
-                        // 10101010   0001 |0011| 0000 |0011 11101000|
-                        //    @bits(sf, 0b0101010, Shift.LSL, 0b0, 0b11111, 0b000000, src, dest);
                         self.inst(mov(si, i.to.int_reg(), a0.int_reg())); // they can't refer to SP so its fine
                     } else {
                         self.inst(fmov(sf, i.to.float_reg(), a0.float_reg()));  
@@ -662,11 +612,11 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
                             patch: Fixup = (patch_at = patch_at, type = .Call);
                             self.inst(brk(0x987));
                             if self.m.goal.type != .JitOnly { 
-                                symbol.fixups&.push(patch, self.m.gpa); 
+                                push_fixup(self.m, symbol, patch); 
                             };
                             fixup_arm64(self.m, symbol, patch&, new_got_slot&);
                             if new_got_slot { it |
-                                symbol.fixups&.push(it, self.m.gpa);
+                                push_fixup(self.m, symbol, it);
                             };
                         }
                         fn Local() => {
@@ -678,7 +628,7 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
                             // TODO: I don't have a test that requires this 
                             //       but i think you do because you need the other ones?
                             if self.m.goal.type == .Relocatable { 
-                                symbol.fixups&.push((patch_at = patch_at, type = .Call), self.m.gpa);
+                                push_fixup(self.m, symbol, (patch_at = patch_at, type = .Call));
                             }; 
                         };
                         fn Pending() => {
@@ -688,7 +638,7 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
                                 self.inst(br(dest_reg, 1));
                             } else {
                                 // haven't compiled it yet so will need a patch. 
-                                symbol.fixups&.push((patch_at = patch_at, type = .Call), self.m.gpa);
+                                push_fixup(self.m, symbol, (patch_at = patch_at, type = .Call));
                                 self.inst(brk(0x789));
                                 if self.m.debug["T".char()] {
                                     @fmt_write(self.m.debug_out, "# pending call % calls %\n", u8.int_from_ptr(patch_at), symbol.name);
@@ -735,65 +685,14 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
         fn mul()  => bin(@as(F) fmul, fn(s, d, a, b) => madd(s, d, a, b, xzr));
         fn div()  => bin(@as(F) fdiv, fn(s, d, a, b) => sdiv(s, d, a, b)); // TODO: if you pass it here you force all calls to be inline :FUCKED
         fn udiv() => int_bin(fn(s, d, a, b) => udiv(s, d, a, b));
-        fn sar()  => {
-            if self.f.get_int(a1) { imm |
-                mask := 1.shift_left(5 + w.int()) - 1;
-                imm := imm.bit_and(mask);
-                d, a := (i.to.int_reg(), a0.int_reg());
-                if imm == 0 {
-                    self.inst(mov(si, d, a)); 
-                } else {
-                    self.inst(bfm(si, 0b0, imm, mask, d, a));
-                };
-            } else {
-                int_bin(@as(I) asrv);
-            };
-        }
-        fn shr()  => {
-            if self.f.get_int(a1) { imm |
-                mask := 1.shift_left(5 + w.int()) - 1;
-                imm := imm.bit_and(mask);
-                d, a := (i.to.int_reg(), a0.int_reg());
-                if imm == 0 {
-                    self.inst(mov(si, d, a)); 
-                } else {
-                    self.inst(bfm(si, 0b1, imm, mask, d, a));
-                };
-            } else {
-                int_bin(@as(I) lsrv);
-            };
-        }
-        fn shl()  => {
-            if self.f.get_int(a1) { imm |
-                mask := 1.shift_left(5 + w.int()) - 1;
-                imm := imm.bit_and(mask);
-                d, a := (i.to.int_reg(), a0.int_reg());
-                if imm == 0 {
-                    self.inst(mov(si, d, a)); 
-                } else {
-                    imms := mask - imm;
-                    immr := mask + 1 - imm;
-                    self.inst(bfm(si, 0b1, immr, imms, d, a));
-                };
-            } else {
-                int_bin(@as(I) lslv);
-            };
-        }
+        fn sar()  => encode_shift(self, i, 0b0, 0b10, fn(imm, mask) => (imm, mask));
+        fn shr()  => encode_shift(self, i, 0b1, 0b01, fn(imm, mask) => (imm, mask));
+        fn shl()  => encode_shift(self, i, 0b1, 0b00, fn(imm, mask) => (mask + 1 - imm, mask - imm));
         fn or()   => int_bin(fn(s, d, a, b) => orr(s, d, a, b, .LSL, 0));
         fn xor()  => int_bin(fn(s, d, a, b) => eor(s, d, a, b, .LSL, 0));
         fn and()  => int_bin(fn(s, d, a, b) => and_sr(s, d, a, b, .LSL, 0));
-        fn rem() => {
-            a, b := (a0.int_reg(), a1.int_reg());
-            r := arm_scratch_int.int_id();
-            self.inst(sdiv(si, r, a, b));
-            self.inst(msub(si, i.to.int_reg(), r, b, a));
-        };
-        fn urem() => {
-            a, b := (a0.int_reg(), a1.int_reg());
-            r := arm_scratch_int.int_id();
-            self.inst(udiv(si, r, a, b));
-            self.inst(msub(si, i.to.int_reg(), r, b, a));
-        };
+        fn rem()  => encode_rem(self, i, 0b1);
+        fn urem() => encode_rem(self, i, 0b0);
         fn extsb()  => int_un(fn(s, d, a) => bfm(s, 0b0, 0b000000, 0b000111, d, a)); // sxtb
         fn extub()  => int_un(fn(s, d, a) => bfm(s, 0b1, 0b000000, 0b000111, d, a)); // uxtb
         fn extsh()  => int_un(fn(s, d, a) => bfm(s, 0b0, 0b000000, 0b001111, d, a)); // sxth
@@ -818,40 +717,8 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
                 self.inst(fmov(sf, b, 31));
             };
         }
-        fn acmp() => {
-            @debug_assert(rtype(a0) == .RTmp, "cmp fst needs reg");
-            if rtype(a1) == .RTmp {
-                self.inst(cmp(si, a0.int_reg(), a1.int_reg())); 
-            } else {
-                c := self.f.get_constant(a1);
-                @debug_assert(c.type == .CBits, "cmp to addr");
-                if c.bits.i.bit_and(1.shift_left(12) - 1) == c.bits.i {
-                    self.inst(cmp_im(si, a0.int_reg(), @as(u12) c.bits.i, 0));
-                } else {
-                    encoded := c.bits.i.shift_right_logical(12);
-                    //@debug_assert_eq(encoded.bit_and(1.shift_left(12) - 1).shift_left(12), c.bits.i, "bad cmp const");
-                    self.inst(cmp_im(si, a0.int_reg(), @as(u12) encoded, 1));
-                };
-            }
-        }
-        // TODO: encoding for this is just one bit different from ^
-        fn acmn() => {
-            @debug_assert(rtype(a0) == .RTmp, "cmp fst needs reg");
-            if rtype(a1) == .RTmp {
-                self.inst(cmn(si, a0.int_reg(), a1.int_reg())); 
-            } else {
-                c := self.f.get_constant(a1);
-                @debug_assert(c.type == .CBits, "cmp to addr");
-                // TODO: write a test that fails if you put `c.bits.i < 1.shift_left(12) - 1` here
-                if c.bits.i.bit_and(1.shift_left(12) - 1) == c.bits.i {
-                    self.inst(cmn_im(si, a0.int_reg(), @as(u12) c.bits.i, 0));
-                } else {
-                    encoded := c.bits.i.shift_right_logical(12);
-                    //@debug_assert_eq(encoded.bit_and(1.shift_left(12) - 1).shift_left(12), c.bits.i, "bad cmp const");
-                    self.inst(cmn_im(si, a0.int_reg(), @as(u12) encoded, 1));
-                };
-            }
-        }
+        fn acmp()  => encode_cmp(self, i, 0b1);
+        fn acmn()  => encode_cmp(self, i, 0b0);
         fn afcmp() => {
             @debug_assert(rtype(a0) == .RTmp && rtype(a1) == .RTmp, "fcmp needs reg");
             self.inst(fcmpe(sf, a0.float_reg(), a1.float_reg()));
@@ -949,21 +816,15 @@ fn emitins2(self: *ArmState, i: *Qbe.Ins) void = {
     };
     @match(i.op()) {
         fn cast() => {
-            @match(i.cls()) {
-                fn Kw() => {
-                    self.inst(@bits(Bits.W32, 0b0011110, FType.S32, 0b10, 0b0, 0b11, 0b0, 0b000000, @as(u5) a0.float_reg(), @as(u5) i.to.int_reg()));
-                }
-                fn Kl() => {
-                    self.inst(@bits(Bits.X64, 0b0011110, FType.D64, 0b10, 0b0, 0b11, 0b0, 0b000000, @as(u5) a0.float_reg(), @as(u5) i.to.int_reg()));
-                }
-                fn Ks() => {
-                    self.inst(@bits(Bits.W32, 0b0011110, FType.S32, 0b10, 0b0, 0b11, 0b1, 0b000000, @as(u5) a0.int_reg(), @as(u5) i.to.float_reg()));
-                }
-                fn Kd() => {
-                    self.inst(@bits(Bits.X64, 0b0011110, FType.D64, 0b10, 0b0, 0b11, 0b1, 0b000000, @as(u5) a0.int_reg(), @as(u5) i.to.float_reg()));
-                }
-                @default => unreachable();
-            };
+            src, dest, bit := @if(i.cls().is_int(),
+                (a0.float_reg(), i.to.int_reg(), 0b0),
+                (a0.int_reg(), i.to.float_reg(), 0b1),
+            );
+            si, sf := @if(i.cls().is_wide(),
+                (Bits.X64, FType.D64),
+                (Bits.W32, FType.S32),
+            );
+            self.inst(@bits(si, 0b0011110, sf, 0b10, 0b0, 0b11, bit, 0b000000, @as(u5) src, @as(u5) dest));
             return();
         }
         fn stosi() => self.inst(fcvtzs(si, FType.S32, i.to.int_reg(), a0.float_reg()));
@@ -991,6 +852,50 @@ fn emitins2(self: *ArmState, i: *Qbe.Ins) void = {
             @panic("TODO: op encoding %", inst_name)
         };
     };
+}
+
+fn encode_cmp(self: *ArmState, i: *Qbe.Ins, $no_negate: u1) void = {
+    si: Bits = @if(i.cls().is_wide(), .X64, .W32);
+    a0, a1 := (i.arg&[0], i.arg&[1]);
+    @debug_assert(rtype(a0) == .RTmp, "cmp fst needs reg");
+    if rtype(a1) == .RTmp {
+        a, b := (a0.int_reg(), a1.int_reg());
+        self.inst(@bits(si, no_negate, 0b101011, Shift.LSL, 0b0, b, 0b000000, a, 0b11111)); 
+    } else {
+        c := self.f.get_constant(a1);
+        @debug_assert(c.type == .CBits, "cmp to addr");
+        no_shift := c.bits.i.bit_and(1.shift_left(12) - 1) == c.bits.i;
+        encoded  := if(no_shift, => c.bits.i, => c.bits.i.shift_right_logical(12));
+        self.inst(@bits(si, no_negate, 0b1100010, @if(no_shift, 0b0, 0b1), @as(u12) encoded, a0.int_reg(), 0b11111));
+    }
+}
+
+fn encode_shift(self: *ArmState, i: *Qbe.Ins, $unsigned: u1, $opcode: u2, $immr_imms: @Fn(imm: i64, mask: i64) Ty(u6, u6)) void = {
+    w  := i.cls().is_wide();
+    si: Bits = @if(w, .X64, .W32);
+    a0, a1 := (i.arg&[0], i.arg&[1]);
+    if self.f.get_int(a1) { imm |
+        mask := 1.shift_left(5 + w.int()) - 1;
+        imm := imm.bit_and(mask);
+        d, a := (i.to.int_reg(), a0.int_reg());
+        if imm == 0 {
+            self.inst(mov(si, d, a)); 
+        } else {
+            immr, imms := immr_imms(imm, mask);
+            self.inst(bfm(si, unsigned, immr, imms, d, a));
+        };
+    } else {
+        i.check_args();
+        dest, val, shift := (i.to.int_reg(), a0.int_reg(), a1.int_reg());
+        self.inst(@bits(si, 0b0011010110, shift, 0b0010, opcode, val, dest));
+    };
+}
+
+fn encode_rem(self: *ArmState, i: *Qbe.Ins, $signed: u1) void = {
+    si: Bits = @if(i.cls().is_wide(), .X64, .W32);
+    dest, dividend, divisor, scratch := (i.to.int_reg(), i.arg&[0].int_reg(), i.arg&[1].int_reg(), arm_scratch_int.int_id());
+    self.inst(@bits(si, 0b0011010110, divisor, 0b00001, signed, dividend, scratch));  // scratch = dividend / divisor;
+    self.inst(msub(si, dest, scratch, divisor, dividend));                            // dest = dividend - scratch * divisor;
 }
 
 // same as qbe
