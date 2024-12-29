@@ -107,6 +107,7 @@ fn load_from_got(self: *QbeModule, symbol: *SymbolInfo, reg_encoding: i64, insts
 }
 
 Patch :: @struct(offset_from_start: i64, cond: ?i64, target_bid: i64);
+SwitchPatch :: @struct(source_bid: i32, table_symbol: u32, base_inst_offset: u32, load_inst_offset: u32, table_index: Qbe.Ref);
 
 fn emit_the_code(self: *ArmState) void #once = {
     // TODO: what is this? is it the control flow integrety shit? 
@@ -136,8 +137,9 @@ fn emit_the_code(self: *ArmState) void #once = {
     };
     
     // TODO: make sure b.id is sequential
-    local_labels := temp().alloc_zeroed(i64, self.f.nblk.zext());
+    local_labels := temp().alloc_zeroed(i64, self.f.nblk.zext()); // TODO: use u32 and offset from start of function 
     patches: List(Patch) = list(temp());
+    switch_patches: List(SwitchPatch) = list(temp());
     
     branch :: b;
     // :LinkIsNowRpo TODO: why are we iterating to set links instead of just iterating the rpo array. (don't forget to update the comparisons to .link below). 
@@ -184,6 +186,7 @@ fn emit_the_code(self: *ArmState) void #once = {
                     };
                 }; // else we can just fall through becuase we're about to emit the target block
             }
+            fn switch() => switch_reserve(self, b, patches&, switch_patches&);
             @default => {
                 Jjf :: Qbe.J.jfieq; // TODO: use this everywhere
                 c: i32 = b.jmp.type.raw() - Jjf.raw();
@@ -224,6 +227,7 @@ fn emit_the_code(self: *ArmState) void #once = {
             };
         };
     };
+    
     each patches& { p |
         target := local_labels[p.target_bid];
         // You never jump to the start block and theres normally a prelude anyway so 0 works as a sentinal. 
@@ -241,6 +245,111 @@ fn emit_the_code(self: *ArmState) void #once = {
             patch[] = branch(s_trunc(distance, 26), 0);   // :FuncSizeLimit
         };
     };
+    
+    each switch_patches& { p |
+        switch_patch(self, p, local_labels);
+    };
+}
+
+fn switch_reserve(self: *ArmState, b: *Qbe.Blk, patches: *List(Patch), switch_patches: *List(SwitchPatch)) void = {
+    // TODO: would it better to put the table data right here after the jump away? 
+    //       I've learned the hard way that data and instruction caches are seperate, 
+    //       so it's not obviously a win because you're just wasting icache space on junk that will never execute. 
+    //       But it would save the instructions for getting the table's base address. 
+    
+    // Check if the value is in range for the table. 
+    // We can't fill in the table yet because we might not have emitted all targets 
+    // yet so we don't know how big the slots need to be to have enough range. 
+    targets    := get_jump_targets(b);
+    table_size := targets.len - 1;
+    @debug_assert(table_size < 1.shift_left(12));
+    table_index := b.jmp.arg.int_reg();
+    self.inst(cmp_im(Bits.X64, @as(u5) table_index, @as(u12) table_size, 0));
+    patches.push(offset_from_start = self.next_inst_offset(), cond = (Some = Qbe.Cmp.Ciuge.raw().zext()), target_bid = targets[0].id.zext());
+    self.inst(brk(0xabba));
+    
+    // TODO: func id here is bad for repro because frontend is threaded. 
+    //       should have a way of making sure this name never ends up in the binary even if you enable bebug symbols?
+    // Create a symbol for the jump table of offsets from this instruction to each possible target. 
+    id := self.m.intern(@tfmt("__JMP__F%__B%__", self.f.lnk.id, b.id));
+    c: Qbe.Con = (sym = (id = id), type = .CAddr, bits = (i = 0));
+    
+    // x17 = jump_table&
+    self.loadaddr_bits(c&, x17);
+    
+    // x17 = jump_distance / 4
+    // offsets are stored as number of instructions not number of bytes so we can get more range with a smaller table. 
+    load_inst_offset := self.next_inst_offset();
+    self.inst(brk(0x515)); // x17 += table_index * slot_size
+    self.inst(brk(0x525)); // x17 = [x17]
+    
+    // x16 = pc 
+    base_inst_offset := self.next_inst_offset();  // TODO: off by one?
+    self.inst(adr(0, 0, x16));
+    
+    // x16 += x17 << 2
+    self.inst(add_sr(.X64, x16, x16, x17, .LSL, 2));
+    
+    // goto x16
+    self.inst(br(x16, 0b0));
+    
+    switch_patches.push(
+        source_bid = b.id, 
+        table_symbol = id, 
+        base_inst_offset = base_inst_offset.trunc(), 
+        load_inst_offset = load_inst_offset.trunc(), 
+        table_index = b.jmp.arg,
+    );
+}
+
+fn switch_patch(self: *ArmState, p: *SwitchPatch, local_labels: []i64) void = {
+    b := self.f.rpo[p.source_bid.zext()];
+    
+    // Decide how big to make each slot in the table. 
+    max_distance := 0;
+    targets := get_jump_targets(b).rest(1);  // first is default which was already handled. 
+    get_offset_instructions :: fn(s) => (local_labels[s.id.zext()] - p.base_inst_offset.zext()) / 4;
+    for targets { s |
+        max_distance = max(max_distance, s.get_offset_instructions().abs());
+    };
+    
+    // 2^(N-1) because we might be jumping backwards
+    (o: Qbe.O, d: Qbe.DatType, shift: i64) := @if_else {
+        @if(max_distance < 1.shift_left(7) - 1)  => (.loadsb, .DB, 0);
+        @if(max_distance < 1.shift_left(15) - 1) => (.loadsh, .DH, 1);
+        @if(max_distance < 1.shift_left(31) - 1) => (.loadsw, .DW, 2);
+        @else                                    => (.load,   .DL, 3);  // unreachable, we don't allow functions this big, but whatever. 
+    };
+    
+    if self.m.debug["T".char()] {
+        out := self.m.debug_out;
+        @fmt_write(out, "# jump table in @%: [", b.name());
+        for targets { s |
+            @fmt_write(out, "%, ", s.get_offset_instructions());
+        };
+        @fmt_write(out, "] (% bytes)\n", targets.len * 1.shift_left(shift));
+    };
+    
+    // Patch the load from the table to use the right size
+    patch := self.m.segments&[.Code].mmapped.ptr.offset(self.start_of_function + p.load_inst_offset.zext());
+    patch: []u32 = (ptr = ptr_cast_unchecked(u8, u32, patch), len = 2);
+    patch[0] = add_sr(.X64, x17, x17, p.table_index.int_reg(), .LSL, shift);  // x17 += table_index * slot_size
+    patch[1] = encode_int_load(true, o, shift, x17, 0, x17);                  // x17 = [x17]
+    
+    // Fill the table with the offset each block
+    lnk: Qbe.Lnk = (id = p.table_symbol);
+    dat := Qbe.Dat.zeroed();
+    dat.lnk = lnk&;
+    dat.type = .DStart;
+    jump_table_segment :: SegmentType.MutableData; // TODO: ConstantData once macho supports that. 
+    emit_data_to_segment(self.m, dat&, jump_table_segment);
+    dat.type = d;
+    for targets { s |
+        dat.u.num = get_offset_instructions(s);
+        emit_data_to_segment(self.m, dat&, jump_table_segment);
+    };
+    dat.type = .DEnd;
+    emit_data_to_segment(self.m, dat&, jump_table_segment);  // this will do a fixup
 }
 
 fn framelayout(self: *ArmState) void = {
@@ -756,19 +865,8 @@ fn emitins2(self: *ArmState, i: *Qbe.Ins) void = {
         // TODO: u/s h/b
         if i.cls().is_int() { // TODO: is this wrong?
             s := trailing_zeros(size.zext());
-            si_inv := @if(i.cls().is_wide(), Bits.W32, Bits.X64);
-            @match(i.op()) {
-                fn loadsw() => {
-                    if i.cls() == .Kl {
-                        self.inst(@bits(0b10, 0b11100110, @as(u12) offset, @as(u5) addr, i.to.int_reg()));
-                    } else {
-                        self.inst(@bits(@as(u2) s, 0b11100101, @as(u12) offset, @as(u5) addr, i.to.int_reg()));
-                    };
-                }
-                fn loadsh() => self.inst(@bits(0b01, 0b1110011, si_inv, @as(u12) offset, @as(u5) addr, i.to.int_reg()));
-                fn loadsb() => self.inst(@bits(0b00, 0b1110011, si_inv, @as(u12) offset, @as(u5) addr, i.to.int_reg()));
-                @default => self.inst(@bits(@as(u2) s, 0b11100101, @as(u12) offset, @as(u5) addr, i.to.int_reg()));
-            };
+            o := encode_int_load(i.cls().is_wide(), i.op(), s, i.to.int_reg(), @as(u12) offset, @as(u5) addr);
+            self.inst(o);
         } else {
             self.inst(f_ldr_uo(si /* not sf*/, i.to.float_reg(), addr, @as(u12) offset));
         };
@@ -852,6 +950,24 @@ fn emitins2(self: *ArmState, i: *Qbe.Ins) void = {
             @panic("TODO: op encoding %", inst_name)
         };
     };
+}
+
+
+fn encode_int_load(wide: bool, o: Qbe.O, log2_size: i64, dest: u5, offset: u12, addr: u5) u32 = {
+    si_inv := @if(wide, Bits.W32, Bits.X64);
+    @match(o) {
+        fn loadsw() => {
+            ::if(u32);
+            if wide {
+                @bits(0b10, 0b11100110, offset, addr, dest)
+            } else {
+                @bits(@as(u2) log2_size, 0b11100101, offset, addr, dest)
+            }
+        }
+        fn loadsh() => @bits(0b01, 0b1110011, si_inv, offset, addr, dest);
+        fn loadsb() => @bits(0b00, 0b1110011, si_inv, offset, addr, dest);
+        @default => @bits(@as(u2) log2_size, 0b11100101, offset, addr, dest);
+    }
 }
 
 fn encode_cmp(self: *ArmState, i: *Qbe.Ins, $no_negate: u1) void = {

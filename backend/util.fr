@@ -792,13 +792,15 @@ fn for_jump_targets(b: *Qbe.Blk, $body: @Fn(s: *Qbe.Blk) void) void =
     for_jump_targets_mut(b, fn(b) => body(b[]));
 
 fn for_jump_targets_mut(b: *Qbe.Blk, $body: @Fn(s: **Qbe.Blk) void) void = {
-    // TODO: this pastes the code twice which isn't really what you want probably. 
-    if !b.s1.is_null() {
-        body(b.s1&);
-    };
-    // :SketchyIterTargets i use this some places that qbe doesn't have the !identical check (sometimes they do have it) so might need to split into two functions. 
-    if !b.s2.is_null() && !b.s1.identical(b.s2) {
-        body(b.s2&);
+    targets := get_jump_targets(b);
+    enumerate targets { i, s |
+        continue :: local_return;
+        // :SketchyIterTargets i use this some places that qbe doesn't have the !identical check (sometimes they do have it) so might need to split into two functions. 
+        for targets.slice(0, i) { s2 | // :SLOW 
+            if(s[].identical(s2), => continue());
+        };
+        
+        body(s);
     };
 }
 
@@ -1031,6 +1033,27 @@ fn rsval(r: Qbe.Ref) i32 #inline = {
 //       qbe only uses this for blit but CBits for all constants.
 fn small_int_for_blit(x: i64) Qbe.Ref #inline = {
     ref(.RInt, x.bit_and(0x1fffffff))
+}
+
+fn set_switch_targets(b: *Qbe.Blk, targets: []*Qbe.Blk) void = {
+    b.s1 = ptr_cast_unchecked(*Qbe.Blk, Qbe.Blk, targets.ptr);
+    b.s2 = ptr_cast_unchecked(*Qbe.Blk, Qbe.Blk, targets.index_unchecked(targets.len));
+}
+
+fn get_switch_targets(b: *Qbe.Blk) ?[]*Qbe.Blk #inline = {
+    if b.jmp.type != .switch {
+        return(.None);
+    };
+    s1 := ptr_cast_unchecked(Qbe.Blk, *Qbe.Blk, b.s1);
+    s2 := ptr_cast_unchecked(Qbe.Blk, *Qbe.Blk, b.s2);
+    (Some = (ptr = s1, len = ptr_diff(s1, s2)))
+}
+
+fn get_jump_targets(b: *Qbe.Blk) []*Qbe.Blk = {
+    // TODO: boot can't do this because it didn't have require_layout_ready? :UpdateBoot
+    //:: @assert_eq(offset_of(Qbe.Blk, Fields(Qbe.Blk).s1) + size_of(*Qbe.Blk), offset_of(Qbe.Blk, Fields(Qbe.Blk).s2), "field order matters for get_jump_targets SAFETY");
+    if(get_switch_targets(b), fn(s) => return(s));
+    (ptr = b.s1&, len = int(!b.s1.is_null()) + int(!b.s2.is_null()))
 }
 
 // these are carefully arranged to be packed in ir/Qbe.O,

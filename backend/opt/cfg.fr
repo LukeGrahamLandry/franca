@@ -5,6 +5,8 @@
 
 fn edgedel(source: *Qbe.Blk, dest_p: **Qbe.Blk) void = {
     dest := dest_p[];
+    // :TodoSwitch
+    @assert(source.jmp.type != .switch, "TODO: switch d");
     multiplicity := 1 + if(source.s1.identical(source.s2), => 1, => 0);
     dest_p[] = Qbe.Blk.ptr_from_int(0);
     if dest.is_null() || multiplicity > 1 {
@@ -74,14 +76,24 @@ fn rporec(b: *Qbe.Blk, x: i32) i32 = {
         return(x);
     };
     b.id = 1;
-    s1 := b.s1;
-    s2 := b.s2;
-    if !s1.is_null() && !s2.is_null() && s1.loop > s2.loop {
-        s1 = b.s2;
-        s2 = b.s1;
+    if get_switch_targets(b) { targets0 |
+        targets := temp().alloc(*Qbe.Blk, targets0.len);
+        targets.copy_from(targets0);
+        sort :: quicksort(*Qbe.Blk, fn(a, b) => a.loop <= b.loop);  // :TodoSwitch flipped?
+        sort(targets);
+        for targets { s |
+            x = rporec(s, x);
+        };
+    } else {
+        s1 := b.s1;
+        s2 := b.s2;
+        if !s1.is_null() && !s2.is_null() && s1.loop > s2.loop {
+            s1 = b.s2;
+            s2 = b.s1;
+        };
+        x = rporec(s1, x);
+        x = rporec(s2, x);
     };
-    x = rporec(s1, x);
-    x = rporec(s2, x);
     b.id = x;
     @debug_assert(x != -1, "did you lie about f.nblk?");
     x - 1
@@ -280,12 +292,15 @@ fn simplify_jump_chains(f: *Qbe.Fn) void = {
     last_link := ptr_from_int(*Qbe.Blk, 0);
     for_blocks f { b |
         last_link = b.link&;
-        if(!b.s1.is_null(), => update_target(b.s1&, direct_jumps));
-        if(!b.s2.is_null(), => update_target(b.s2&, direct_jumps));
-        if !b.s1.is_null() && b.s1.identical(b.s2) {
+        // TODO: make sure it's ok that this skips duplicates. 
+        //       i think it's fine because it rechecks the list every time and it wont be a duplicate if it changed. 
+        for_jump_targets_mut(b) { s |
+            update_target(s, direct_jumps);
+        };
+        if b.jmp.type == .jnz && b.s1.identical(b.s2) {
             b.jmp.type = .jmp;
             b.s2 = Qbe.Blk.ptr_from_int(0);
-        }
+        };
     };
     @debug_assert(!last_link.is_null() && last_link[].is_null(), "invarient: f.start exists and b.link doesn't loop");
     last_link[] = epilogue; // append our new block to the linked list. 
@@ -362,9 +377,8 @@ fn blkmerge(f: *Qbe.Fn) void = {
         if b.jmp.type != .jmp || b.s1.npred != 1 || !b.s1.phi.is_null() {
             idup(curb, vins.first, nins);
             curb.jmp = b.jmp;
-            replacepreds(b.s1, curb, b);
-            if !b.s1.identical(b.s2) {
-                replacepreds(b.s2, curb, b);
+            for_jump_targets_mut b { s |
+                replacepreds(s[], curb, b);
             };
             curb.s1 = b.s1;
             curb.s2 = b.s2;
@@ -377,7 +391,7 @@ fn blkmerge(f: *Qbe.Fn) void = {
         };
         bid += 1;
     };
-    @debug_assert(curb.is_null());
+    @debug_assert(curb.is_null(), "still have blocks??");
     killblks(f);
 }
 

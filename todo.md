@@ -14,10 +14,10 @@
 - don't hardcode page size to 16k
 - :TodoAmdFoldOps
 - bring back nice error message for trying to call a #ct at runtime
-- things that should be cleaned up next time i replace `boot`
+- things that should be cleaned up next time i replace `boot` :UpdateBoot
   - :DumbNameAlias NoMangle
   - AbiHackSpan
-  - :InlineFoldHack `@if(::!T.has_pointers()` `if(@run !NEW_COMPTIME_JIT`
+  - :InlineFoldHack `@if(::!T.has_pointers()` 
   - fn zeroed
   - .sym().c_str()
   - `@rec` in backend/ir.fr and wasm/instructions:Wasm

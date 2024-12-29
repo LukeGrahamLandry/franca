@@ -377,16 +377,13 @@ fn spill(f: *Qbe.Fn) void = {
         /* 1. find temporaries in registers at
          * the end of the block (put them in `in_reg`) */
         f.globals.curi[] = Qbe.Ins.ptr_from_int(0); // i guess this is just asserting that we don't try to emit until we reset it below?
-        s1 := b.s1;
-        s2 := b.s2;
+        // :TodoSwitch
+        // TODO: make sure this is right with J.switch
         backwards: ?*Qbe.Blk = .None;
-        if !s1.is_null() && s1.id <= b.id {
-            backwards = (Some = s1);
-        };
-        if !s2.is_null() && s2.id <= b.id {
-            if backwards.is_none() || s2.id >= backwards.Some.id {
-                backwards = (Some = s2);
-            }
+        for get_jump_targets(b) { s |
+            if s.id <= b.id && (backwards.is_none() || s.id >= backwards.Some.id) {
+                backwards = (Some = s);
+            };
         };
         if backwards { (backwards:*Qbe.Blk) |  // TODO: why does this need a type annotation after adding meta/parse.fr? -- Nov 12
             /* back-edge */
@@ -415,16 +412,19 @@ fn spill(f: *Qbe.Fn) void = {
                 bsunion(in_reg&, all_needed_later&);
             }
         } else {
-            if !s1.is_null() {
+            if !b.s1.is_null() {
                 /* avoid reloading temporaries
                 * in the middle of loops */
+                s := get_jump_targets(b);
                 bszero(in_reg&);
-                live_on_edge(prioritize&, b, s1);
-                f.merge(in_reg&, b, prioritize&, s1);
-                if !s2.is_null() {
-                    live_on_edge(all_needed_later&, b, s2);
-                    f.merge(in_reg&, b, all_needed_later&, s2);
-                    bsinter(prioritize&, all_needed_later&);
+                live_on_edge(prioritize&, b, s[0]);
+                f.merge(in_reg&, b, prioritize&, s[0]);
+                if s.len > 1 {
+                    for s.rest(1) { s |
+                        live_on_edge(all_needed_later&, b, s);
+                        f.merge(in_reg&, b, all_needed_later&, s);
+                        bsinter(prioritize&, all_needed_later&);
+                    };
                 };
                 pass&.limit_in_reg(in_reg&, false, (Some = prioritize&));
             } else {
