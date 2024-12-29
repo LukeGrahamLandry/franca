@@ -1,5 +1,8 @@
 // Adapted from Qbe. MIT License. © 2015-2024 Quentin Carbonneaux <quentin@c9x.me>
 
+//! "Sparse Conditional Constant Propagation"
+//! Which is a fancy way of saying `while not changed: changed = any(try_fold(i) for i in instructions)`
+
 //!
 //! This is kinda tedious and doesn't help me much because my frontend has to do aggressive constant evaluation anyway. 
 //!     TODO: I think it would be much faster if the frontend just tracked what 
@@ -10,8 +13,8 @@
 // TODO: some are sketchy because old backends only fully implment i64/f64 while f32/i32/u32/u64 are just kinda hacked in with casts. 
 // TODO: fuse sequential add/sub with one const arg. 
 
-lat_bot :i32: -1;  /* lattice bottom */  // unfoldable
-lat_top :i32:  0;  /* lattice top (matches UNDEF) */  // only known at runtime
+fold_status_runtime :i32: -1;
+fold_status_dead :i32:  0;
 
 Edge :: @rec @struct(
     work: *Edge,
@@ -48,11 +51,11 @@ fn fold_constants(f: *Qbe.Fn) void = {
         flowrk = start&,
     ); f := f&;
     
-    // val = alloc_zeroed so don't have to `range(f.f.ntmp.zext()) f.val[t] = lat_top;`
-    ::assert_eq(lat_top, 0); 
+    // val = alloc_zeroed so don't have to `range(f.f.ntmp.zext()) f.val[t] = fold_status_dead;`
+    ::assert_eq(fold_status_dead, 0); 
     
     // :ExprLevelAsm
-    ::assert_eq(lat_bot.intcast(), -1);
+    ::assert_eq(fold_status_runtime.intcast(), -1);
     memset(i32.raw_from_ptr(f.val.ptr), 255, size_of(@type f.val[0]) * Qbe.Tmp0);
     
     range(0, f.f.nblk.zext()) { n | 
@@ -114,7 +117,7 @@ fn fold_constants(f: *Qbe.Fn) void = {
         out := f.f.globals.debug_out;
         write(out, "\n> SCCP findings:");  // "sparse conditional constant propagation"
         range(Qbe.Tmp0, f.f.ntmp.zext()) { t |
-            if f.val[t] != lat_bot && f.val[t].intcast() != lat_top {
+            if f.val[t] != fold_status_runtime && f.val[t].intcast() != fold_status_dead {
                 any_folded = true;
                 @fmt_write(out, "\n%: ", f_pad(f.f.tmp[t]&.name(), 10, .Before));
                 printref(CON(f.val[t].zext()), f.f, out);
@@ -123,7 +126,7 @@ fn fold_constants(f: *Qbe.Fn) void = {
         if any_folded {
             write(out, "\n> Top: ("); 
             range(Qbe.Tmp0, f.f.ntmp.zext()) { t |
-                if f.val[t].intcast() == lat_top {
+                if f.val[t].intcast() == fold_status_dead {
                     @fmt_write(out, "%, ", f.f.tmp[t]&.name());
                 } 
             };
@@ -153,7 +156,7 @@ fn fold_constants(f: *Qbe.Fn) void = {
         pp := b.phi&;
         while => !pp[].is_null() { 
             p := pp[];
-            if f.val[p.to.val()] != lat_bot {
+            if f.val[p.to.val()] != fold_status_runtime {
                 pp[] = p.link;
             } else {
                 range(0, p.narg.zext()) { a | 
@@ -215,8 +218,8 @@ fn latval(f: *FoldCtx, r: Qbe.Ref) i32 = {
 }
 ::if(i32);
 fn latmerge(v: i32, m: i32) i32 = {
-    if(m == lat_top, => return(v));
-    if(v == lat_top || v == m, => m, => lat_bot)
+    if(m == fold_status_dead, => return(v));
+    if(v == fold_status_dead || v == m, => m, => fold_status_runtime)
 }
 
 fn update(f: *FoldCtx, t: i32, m: i32) void = {
@@ -240,7 +243,7 @@ fn deadedge(f: *FoldCtx, s: i32, d: i32) bool = {
 }
 
 fn visitphi(f: *FoldCtx, p: *Qbe.Phi, n: i32) void = {
-    v: i32 = lat_top;
+    v: i32 = fold_status_dead;
     range(0, p.narg.zext()) { a |
         if !f.deadedge(p.blk[a].id, n) {
             v = latmerge(v, f.latval(p.arg[a]));
@@ -251,12 +254,12 @@ fn visitphi(f: *FoldCtx, p: *Qbe.Phi, n: i32) void = {
 
 fn visitins(f: *FoldCtx, i: *Qbe.Ins) void = {
     if(rtype(i.to) != .RTmp, => return());
-    v := if(!can_fold(i.op()), => lat_bot) {
+    v := if(!can_fold(i.op()), => fold_status_runtime) {
         l := f.latval(i.arg&[0]);
         r := if(i.arg&[1] != QbeNull, => f.latval(i.arg&[1]), => QbeConZero.val().intcast());
         @if_else {
-            @if(l == lat_bot || r == lat_bot) => lat_bot;
-            @if(l == lat_top || r == lat_top) => lat_top;
+            @if(l == fold_status_runtime || r == fold_status_runtime) => fold_status_runtime;
+            @if(l == fold_status_dead || r == fold_status_dead) => fold_status_dead;
             @else => f.f.opfold(i.op(), i.cls(), f.f.con.index(l.zext()), f.f.con.index(r.zext()));
         }
     };
@@ -270,7 +273,7 @@ fn visitjmp(f: *FoldCtx, b: *Qbe.Blk, n: i32) void = {
         fn jnz() => {
             l := f.latval(b.jmp.arg);
             @if_else {
-                @if(l == lat_bot) => {
+                @if(l == fold_status_runtime) => {
                     f.edge(n, 1)[].work = f.flowrk;
                     f.edge(n, 0)[].work = f.edge(n, 1);
                     f.flowrk = f.edge(n, 0);
@@ -305,7 +308,7 @@ fn initedge(e: *Edge, s: *Qbe.Blk) void = {
 fn renref(f: *FoldCtx, r: *Qbe.Ref) bool = {
     if rtype(r[]) == .RTmp {
         l := f.val[r[].val()];
-        if l != lat_bot {
+        if l != fold_status_runtime {
             r[] = CON(l.zext());
             return(true);
         }
@@ -317,7 +320,7 @@ fn opfold(f: *Qbe.Fn, op: Qbe.O, cls: Qbe.Cls, cl: *Qbe.Con, cr: *Qbe.Con) i32 =
     c := Qbe.Con.zeroed();
     if cls == .Kw || cls == .Kl {
         if foldint(c&, op, cls == .Kl, cl, cr) {
-            return(lat_bot);
+            return(fold_status_runtime);
         };
     } else {
         foldflt(c&, op, cls == .Kd, cl, cr);

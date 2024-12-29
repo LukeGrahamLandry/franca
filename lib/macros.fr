@@ -514,6 +514,7 @@ fn enum_basic($T: Type) void = {
     
     // TODO: this (the top one) breaks -go-rebuild-yo-self on blink???? (it infinite loops) :fucked havent tried other linux yet.   -- Sep 20
     fn raw(e: T) RAW #unsafe_noop_cast;
+    fn raw(e: *T) *RAW #unsafe_noop_cast;
     //fn raw(e: T) RAW = {
         //ptr_cast_unchecked(T, RAW, e&)[]
     //}
@@ -522,22 +523,35 @@ fn enum_basic($T: Type) void = {
 fn enum($T: Type) void = {
     ::enum_basic(T);
     
-    fn ordinal(e: T) i64 = e.raw().int(); // :tag_enums_are_sequential
+    fn ordinal(e: T) i64 = 
+        e&.try_ordinal().unwrap();
     
-    fn display(self: T, out: *List(u8)) void = {
+    fn try_ordinal(self: *T) ?i64 = {
+        @if(:: T.get_type_info_ref()[].Enum.sequential, {
+            i := self[].raw().int();
+            @if(i < 0 || i >= T.enum_count(), .None, (Some = i))
+        }, {
+            values :: get_cases(T);
+            // :SLOW // TODO: could make this a comptime hashmap for large enums with hashable backing type. 
+            range(0, values.len()) { i |
+                if(self.raw() == values.index(i).raw(), => return(Some = i));
+            };
+            .None
+        })
+    }
+    
+    fn display(self: *T, out: *List(u8)) void = {
         // TODO: without the extra force comptime eval, it wrongly thinks calling this function needs compctx.  -- Jul 1
-        names :: get_enum_names(T); // :tag_enums_are_sequential
-        i := self.ordinal();
-        if i < 0 || i > names.len() {
-            @fmt(out, "<invalid enum:%>", i);
-        } else {
-            out.push_all(names[i]);
+        names :: get_enum_names(T);
+        i := or self.try_ordinal() {
+            @fmt(out, "<invalid enum value: %>", self[].raw().int());  // TODO: don't assume it's an int
+            return()
         };
+        out.push_all(names[i]);
     }
     
-    fn display(self: *T, out: *List(u8)) void #inline = {
-        self[].display(out);
-    }
+    fn display(self: T, out: *List(u8)) void #inline = 
+        self&.display(out);
     
     fn name(self: T) Symbol = {
         names :: get_enum_names_symbols(T); 

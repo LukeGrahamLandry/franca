@@ -5,8 +5,9 @@ and it looks like it should have just worked out because i said too big a size f
 and i guess i don't rely on layout that much when jitting, i just always pictured it a certain way in my head.
 now i mmap the whole thing at once and then MAP_FIXED over it to change part of it to not be MAP_JIT. 
 It seems that MAP_JIT and then MAP_FIXED over it is fine, but the reverse is not. 
-now i can drop comptime_codegen and run with `-repeat` for longer.
+now i can drop comptime_codegen and run with `-repeat` for longer (also fixed 60fps.fr).
 `./boot` is still flaky tho. 
+- fix `display` for non-sequential enums. 
 
 ## (Dec 27)
 

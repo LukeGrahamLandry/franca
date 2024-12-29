@@ -1,12 +1,3 @@
-
-fn cls(t: Wasm.ValType) Qbe.Cls = @switch(t.repr) {
-    @case(0x7F) => .Kw;  
-    @case(0x7E) => .Kl;  
-    @case(0x7D) => .Ks;  
-    @case(0x7C) => .Kd;  
-    @default    => .Ke;
-};
-
 ParseWasm :: @struct(w: *Wasm.Module, src: []u8, cursor := 0);
 fn parse_wasm(self: *ParseWasm) Result(void, Str) = {
     magic_version := @const_slice(0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00);
@@ -38,6 +29,7 @@ fn parse_wasm(self: *ParseWasm) Result(void, Str) = {
                     if self.cursor > end_of_section {
                         return(Err = @tfmt("Parsed past declared section size. (section index % in module)", section_count));
                     };
+                    // TODO: validate?
                     argp := ptr_cast_unchecked(u8, Wasm.ValType, arg_bytes.ptr);
                     retp := ptr_cast_unchecked(u8, Wasm.ValType, ret_bytes.ptr);
                     self.w.types&.push(arg = (ptr = argp, len = arg_len, cap = arg_len), ret = (ptr = retp, len = ret_len, cap = ret_len));
@@ -110,7 +102,7 @@ fn parse_wasm(self: *ParseWasm) Result(void, Str) = {
                 range(0, count) { i |
                     type := @try(self.pop()) return;
                     lim := @try(self.read_limits()) return;
-                    self.w.tables&.push(type = (repr = type), limits = lim);
+                    self.w.tables&.push(type = @as(Wasm.ValType) type, limits = lim);
                 };
             }
             fn Memory() => {
@@ -128,7 +120,7 @@ fn parse_wasm(self: *ParseWasm) Result(void, Str) = {
                     type := @try(self.pop()) return;
                     mutable := @try(self.pop()) return;
                     init := @try(self.read_expr()) return;
-                    self.w.globals&.push(type = (repr = type), mutable = mutable == 1, init_expr = init);
+                    self.w.globals&.push(type = @as(Wasm.ValType) type, mutable = mutable == 1, init_expr = init);
                 };
             }
             fn Element() => {
@@ -179,7 +171,7 @@ fn read_code_section(self: *ParseWasm) Result(void, Str) = {
             if self.cursor > start + total_code_bytes {
                 return(Err = @tfmt("Locals overflowed declared function size (func index %, local index %)", i, j));
             };
-            locals&.push(ty = (repr = type), count = num);
+            locals&.push(type = @as(Wasm.ValType) type, count = num);
         };
         code_len := total_code_bytes - (self.cursor - start);
         code: RsVec(u8) = (ptr = self.src.index(self.cursor), len = code_len, cap = code_len);
@@ -267,4 +259,15 @@ fn read_u(self: *LoadWasm) u64 = {
 
 fn read_index(self: *LoadWasm, $T: Type) T #generic = {
     (id = self.read_u().trunc())
+}
+
+fn cls(t: Wasm.ValType) Qbe.Cls = {
+    ::enum(Wasm.ValType);
+    @switch(t.raw()) {
+        @case(0x7F) => .Kw;  
+        @case(0x7E) => .Kl;  
+        @case(0x7D) => .Ks;  
+        @case(0x7C) => .Kd;  
+        @default    => .Ke;
+    }
 }

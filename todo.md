@@ -7,6 +7,9 @@
 
 ## 
 
+- maybe have a `push_compiler_error_context` and `pop_compiler_error_context` for macros so @fmt could easily add a message like `while evaluating format string`?
+- make the old jit backend runnable again as an example 
+- repro doesn't work when you do `-repeat`
 - be less strict about amd64 address folding when there's a large constant pointer (which is valid when jitting)
 - don't hardcode page size to 16k
 - :TodoAmdFoldOps
@@ -95,10 +98,15 @@
 ```
 @impl(fn(T) = T.is_sequential_enum()) {
     T :: @placeholder 0;
-    fn eq(a: T, b: T) bool = {
-
-    }
+    fn eq(a: T, b: T) bool = {}
 };
+```
+
+this is much nicer but needs new syntax:
+
+```
+#where(fn(T) => T.is_sequential_enum())
+fn eq(a: ~T, b: T) bool = {}
 ```
 
 ##

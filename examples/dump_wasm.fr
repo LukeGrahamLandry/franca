@@ -1,0 +1,136 @@
+//! For debugging codegen. Parses a binary wasm module and outputs an arbitrary text format. 
+//! For my current purposes it only needs to support the subset of the format that my backend actually outputs. 
+
+#include_std("backend/lib.fr");
+#include_std("examples/import_wasm/parse.fr");
+
+LoadWasm :: void;  // TODO: bleh
+
+fn main() void = {
+    input := read_file_from_last_arg();
+    w: Wasm.Module = empty(temp()); w := w&;
+    p: ParseWasm = (w = w, src = input);
+    or parse_wasm(p&) { e |
+        @panic("% (at byte index %)", e, p.cursor);
+    };
+    
+    out := u8.list(temp()); out := out&;
+    
+    ::enum(Wasm.ValType);
+    @fmt(out, "=== BEGIN IMPORT SECTION ===\n");
+    each w.imports { it |
+        @fmt(out, "- '%' from '%'", it.name.items(), it.module.items());
+        // TODO: other info
+        @fmt(out, "\n");
+    };
+    @fmt(out, "=== END IMPORT SECTION ===\n\n");
+    
+    @fmt(out, "=== BEGIN EXPORT SECTION ===\n");
+    each w.exports { it |
+        @fmt(out, "- '%' ", it.name.items());
+        // TODO: other info
+        @fmt(out, "\n");
+    };
+    @fmt(out, "=== END EXPORT SECTION ===\n\n");
+    
+    @fmt(out, "=== BEGIN TYPE SECTION ===\n");
+    range(0, w.imports.len) { i |
+        @fmt(out, "- ");
+        show_type(out, w, (id = i.trunc()));  
+        @fmt(out, "\n");
+    };
+    @fmt(out, "=== END TYPE SECTION ===\n\n");
+    
+    @fmt(out, "=== BEGIN FUNCTION/CODE SECTION ===\n");
+    if w.functions.len != w.code.len {
+        @fmt(out, "ERROR: % function types and % function bodies.\n", w.functions.len, w.code.len);
+    };
+    f_count := min(w.functions.len, w.code.len);
+    enumerate w.code { i, code | 
+        @fmt(out, "[F%]: \n- signeture ", i);
+        show_type(out, w, w.functions[i]);
+        @fmt(out, "\n");
+        if code.locals.len == 0 {
+            @fmt(out, "- only argument locals\n");
+        } else {
+            @fmt(out, "- (non-argument) locals: ");
+            each code.locals { it |
+                @fmt(out, "(% x %), ", it.type, it.count);
+            };
+            @fmt(out, "\n");
+        };
+        
+        @fmt(out, "- BODY:");
+        c := 0;
+        indent := 1;
+        while => c < code.insts.len {
+            continue :: local_return;
+            @fmt(out, "\n%", f_rep("    ", indent));
+            byte := code.insts[c]; c += 1;
+            encoding := lookup_wasm_encoding(byte);
+            ::enum(@type encoding.kind);
+            if encoding.kind != .other {
+                @fmt(out, "% %", encoding.op, encoding.cls);
+                if @is(encoding.kind, .load, .store) {
+                    // TODO: imm
+                };
+                continue();
+            };
+            
+            push_leb :: fn() => {
+                value, r, ok := read_leb128_unsigned(code.insts.items().rest(c));
+                if ok {
+                    c += ptr_diff(code.insts.ptr.offset(c), r.ptr);
+                    @fmt(out, "%", value);
+                    @as(i64) value.bitcast()
+                } else {
+                    @fmt(out, " ERROR: invalid leb encoding");
+                    continue()
+                }
+            };
+            
+            ::enum(Wasm.Inst);
+            inst := @as(Wasm.Inst) byte;
+            @fmt(out, "% ", inst);
+            if @is(inst, .LocalGet, .LocalSet, .LocalTee, .GlobalGet, .GlobalSet, .I32_Const, .I64_Const) {
+                push_leb();
+                continue()
+            };
+            
+            if inst == .Call {
+                v := push_leb();
+                if v < w.imported_function_count {
+                    @fmt(out, " (import)");
+                } else {
+                    @fmt(out, " (F%)", v - w.imported_function_count);
+                };
+                continue()
+            };
+            
+            if @is(inst, .End) {
+                indent -= 1;
+            };
+            if @is(inst, .Block, .Loop, .If) {
+                indent += 1;
+            };
+        };
+        @fmt(out, "\n");
+    };
+    @fmt(out, "=== END FUNCTION/CODE SECTION ===\n");
+    
+    print(out.items());
+}
+
+fn show_type(out: *List(u8), w: *Wasm.Module, i: TypeIdx) void = {
+    i: i64 = i.id.zext();
+    @fmt(out, "[T%]: (", i);
+    if i >= w.types.len {
+        @fmt(out, "ERROR: not enough entries in `type` section)");
+        return();
+    };
+    type := w.types.index(i);
+    for(type.arg, fn(t) => @fmt(out, "%,", t));
+    @fmt(out, ") -> (");
+    for(type.ret, fn(t) => @fmt(out, "%,", t));
+    @fmt(out, ")");
+}

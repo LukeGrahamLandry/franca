@@ -1,5 +1,6 @@
 #include_std("backend/lib.fr");
 #include_std("examples/import_wasm/parse.fr");
+use_threads :: false;
 
 // TODO: this could be hella faster: 
 //       - there's a wasteful prepass that splits up bits of the module into a big data structure. 
@@ -11,7 +12,6 @@
 //         but maybe the expectation with wasm is that the first compiler did that already?
 
 fn main() void = {
-    panic("TODO: need to set f.lnk.id to intern(name)");
     args := cli_args();
     for args { arg | 
         arg := arg.str();
@@ -20,7 +20,8 @@ fn main() void = {
             bytes := temp().read_to_string(arg).items(); // :panic
             @eprintln(" (% bytes).", bytes.len);
             xx := query_current_arch();
-            module := init_default_module(type = .JitOnly, os = query_current_os(), arch = xx.unwrap());
+            module := QbeModule.zeroed();
+            init_default_module(module&, (type = .JitOnly, os = query_current_os(), arch = xx.unwrap()), false);
             a := libc_allocator;
             wasm: LoadWasm = (
                 m = module&,
@@ -67,6 +68,7 @@ fn create_init_func(self: *LoadWasm) void = {
     //f := Qbe.Fn.zeroed();
     //self.f = f&;
     //self.f.default_init(self.m);
+    //f.lnk.id = self.m.intern("init");
     //self.f.start = newblk();
     //self.stack&.clear();
     //self.datas = libc_allocator.alloc(u32, self.w.data.len);
@@ -84,16 +86,19 @@ fn load_module(self: *LoadWasm) void = {
     self.create_init_func();
 
     enumerate self.w.code& { local_func_i, code | 
-        local_func_i += self.w.imported_function_count;
+        global_func_i := local_func_i + self.w.imported_function_count;
         mark := mark_temporary_storage();
         f := Qbe.Fn.zeroed();
         self.f = f&;
         self.f.default_init(self.m);
         
-        name := @tfmt("%_f%", self.module_name, local_func_i);    // :WasmNameMangling
+        name := @tfmt("%_f%", self.module_name, global_func_i);    // :WasmNameMangling
         self.f.name&.items().slice(0, name.len).copy_from(name);  // :UnacceptablePanic
+        f.lnk.id = self.m.intern(name);
         
-        local_func_type := self.w.types[local_func_i]&;
+        local_func_type_index := self.w.functions[local_func_i];
+        
+        local_func_type := self.w.types[local_func_type_index.id.zext()]&;
         self.stack&.clear();
         self.locals = temp().alloc(Qbe.Ref, code.total_local_count + local_func_type.arg.len);
         self.referenced_globals = init(temp());
@@ -111,7 +116,7 @@ fn load_module(self: *LoadWasm) void = {
             @println("% locals", code.total_local_count);
             i := local_func_type.arg.len;
             for code.locals& { local |
-                k := local.ty.cls();
+                k := local.type.cls();
                 range(0, local.count) { _ |
                     self.locals[i] = self.f.newtmp("local", k);
                     i += 1;
@@ -131,16 +136,17 @@ fn load_module(self: *LoadWasm) void = {
             // Single byte unary/binary instructions are found in the table. 
             encoding := lookup_wasm_encoding(inst);
             a0, a1, r := (QbeNull, QbeNull, QbeNull);
+            ::enum(@type encoding.kind);
             @match(encoding.kind) {
                 fn other() => ();
                 fn unary() => {
-                    r = self.f.newtmp("wasm", k);
+                    r = self.f.newtmp("wasm", encoding.cls);
                     a := self.stack[self.stack.len - 1]&;
                     a0 = a[];
                     a[] = r;
                 };
                 fn binary() => {
-                    r = self.f.newtmp("wasm", k);
+                    r = self.f.newtmp("wasm", encoding.cls);
                     a0 = self.stack[self.stack.len - 1];
                     b := self.stack[self.stack.len - 2]&;
                     self.stack.len -= 1;
@@ -150,7 +156,7 @@ fn load_module(self: *LoadWasm) void = {
                 fn load() => {
                     align := self.read_u();
                     offset := self.read_u();
-                    println("TODO: wasm load"); kind = 0;
+                    println("TODO: wasm load"); 
                     self.stack&.pop().unwrap();
                     self.stack&.push(QbeNull);
                     continue(); // TODO
@@ -167,7 +173,7 @@ fn load_module(self: *LoadWasm) void = {
             
             if encoding.kind != .other {
                 @debug_assert(r != QbeNull || a0 != QbeNull);
-                self.f.emit(o, k, r, a0, a1);
+                self.f.emit(encoding.op, encoding.cls, r, a0, a1);
                 continue();
             };
             

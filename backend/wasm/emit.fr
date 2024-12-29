@@ -1,22 +1,31 @@
-// Wasm is a bit annoying because it's designed to be compact and fast to load, not to be output in one pass. 
+//! - Wasm is a bit annoying because it's designed to be compact and fast to load, not to be output in one pass. 
+//!   For example, you can't know the index of any functions until you know how many imports there are. 
+//! - It requires structured control flow. 
 
-EmitWasmA :: @struct(
+EmitWasmFn :: @struct(
     m: *QbeModule,
     f: *Qbe.Fn,
     locals: []i32,
+    a: List(u8),
+    block_stack: List(*Qbe.Blk),
 );
 
 fn emit_func_wasm32(f: *Qbe.Fn) void = {
-    e: EmitWasmA = (
+    code := f.globals.segments&[.Code]&;
+    e: EmitWasmFn = (
         f = f,
         m = f.globals,
         locals = temp().alloc(i32, f.ntmp.zext()),
+        a = (maybe_uninit = (ptr = code.next, len = code.cap() - code.len()), len = 0, gpa = panicking_allocator),
+        block_stack = list(temp()), 
     );
     pack_locals(e&);
     // TODO: reserve space for the length of code
+    emit_block(e&, e.f.start);
+    code.next = code.next.offset(e.a.len());
 }
 
-fn pack_locals(e: *EmitWasmA) void = {
+fn pack_locals(e: *EmitWasmFn) void = {
     memset(i32.raw_from_ptr(e.locals.ptr), 0xFF, e.locals.len);
     total_locals: i32 = 0;
     for_pars e.f { i |
@@ -40,6 +49,101 @@ fn pack_locals(e: *EmitWasmA) void = {
         // TODO: declare locals of this type
     };
 }
+
+// TODO: this way of recreating nested structure is super dumb,
+//       if you get unlucky the same block will be emitted multiple times. 
+//       even trivial cases like a branch that rejoins will generate garbage redundant code. 
+fn emit_block(e: *EmitWasmFn, b: *Qbe.Blk) void = {
+    for e.block_stack& { check |
+        if check.identical(b) {
+            // TODO: br
+            return();
+        };
+    };
+
+    e.block_stack&.push(b);
+    e.op(.Loop);
+    
+    for_insts_forward b { i |
+        emit(e, i);
+    };
+    
+    @match(b.jmp.type) {
+        fn ret0() => e.op(.Return);
+        fn hlt()  => e.op(.Unreachable);
+        fn jmp() => emit_block(e, b.s1);
+        fn jnz() => {
+            // TODO: br_if
+            emit_block(e, b.s1);
+            emit_block(e, b.s2);
+        }
+        @default => @panic("invalid terminator");
+    };
+    e.op(.End);
+    e.block_stack&.pop();
+}
+
+fn emit(e: *EmitWasmFn, i: *Qbe.Ins) void = {
+    if lookup_wasm_encoding(i.op(), i.cls()) { byte |
+        e.a&.push(byte);
+        return();
+    };
+    
+    @match(i.op()) {
+        fn call() => {
+            // TODO
+        }
+        fn call_indirect() => {
+            // TODO
+        }
+        fn push() => @match(rtype(i.arg&[0])) {
+            fn RCon() => {
+                c := e.f.get_constant(i.arg&[0]);
+                @match(c.type) {
+                    fn CBits() => {
+                        e.op(@match(i.cls()) {
+                            fn Kw() => .I32_Const;
+                            fn Kl() => .I64_Const;
+                            fn Ks() => .F32_Const;
+                            fn Kd() => .F64_Const;
+                            @default => unreachable();
+                        });
+                        imm := c.bits.i;
+                    }
+                    fn CAddr() => {
+                        // TODO
+                    }
+                    fn CUndef() => unreachable();
+                };
+            }
+            fn RTmp() => {
+                local_index := e.locals[i.arg&[0].val()];
+                @debug_assert_ne(local_index, -1, "read from tmp without assigned local");
+                // TODO: local get
+            }
+            fn RSlot() => {
+                // TODO: offset from stack pointer 
+            }
+            @default => @panic("invalid argument for op push");
+        };
+        fn pop() => {
+            if i.to == QbeNull {
+                e.op(.Drop);
+                return();
+            };
+            @debug_assert(rtype(i.to) == .RTmp);
+            local_index := e.locals[i.to.val()];
+            @debug_assert_ne(local_index, -1, "write to tmp without assigned local");
+            // TODO: local set
+        }
+        fn nop()    => ();
+        fn dbgloc() => ();
+        @default => @panic("TODO: wasm encoding for %", i.op());
+    };
+}
+
+fn op(e: *EmitWasmFn, o: Wasm.Inst) void = 
+    e.a&.push(o.raw());
 
 fn output_wasm_module(f: *QbeModule) [][]u8 = {
     version_magic := @const_slice(0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00);
