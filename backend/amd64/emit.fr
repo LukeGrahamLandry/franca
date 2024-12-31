@@ -202,28 +202,16 @@ fn emit_the_code(e: *AmdState) void = {
                         c = cmpneg(c);
                     };
                     // :copypaste
-                    id: i64 = b.s2.id.zext();
-                    patch: Patch = (offset_from_start = e.a.len, cond = (Some = c.zext()), target_bid = id);
+                    patch: Patch = (offset_from_start = e.a.len, cond = c, target_bid = b.s2.id);
                     e.push_int3(6); // 2 byte opcode
-                    if local_labels[id] == 0 {
-                        patches&.push(patch);
-                    } else {
-                        // TODO: use smaller jumps when possible 
-                        e.apply_patch(local_labels, patch&);
-                    };
+                    patches&.push(patch);
                     // fall through
                 };
                 // :TodoSwitch
                 if !b.s1.identical(b.link) {
-                    id: i64 = b.s1.id.zext();
-                    patch: Patch = (offset_from_start = e.a.len, cond = .None, target_bid = id);
+                    patch: Patch = (offset_from_start = e.a.len, cond = -1, target_bid = b.s1.id);
                     e.push_int3(5);
-                    if local_labels[id] == 0 {
-                        patches&.push(patch);
-                    } else {
-                        // TODO: use smaller jumps when possible 
-                        e.apply_patch(local_labels, patch&);
-                    };
+                    patches&.push(patch);
                 };
             };
         };
@@ -236,17 +224,17 @@ fn emit_the_code(e: *AmdState) void = {
 
 fn apply_patch(e: *AmdState, labels: []i64, patch: *Patch) void = {
     src := patch.offset_from_start;
-    dest := labels[patch.target_bid];
+    dest := labels[patch.target_bid.zext()];
     @debug_assert(dest != 0, "missing target block %", patch.target_bid);
     // TODO: this is a dump nounification. 
     patch_at := e.m.segments&[.Code].mmapped.ptr.offset(e.start_of_function + src);
-    patch_size := @if(patch.cond.is_none(), 5, 6);
+    patch_size := @if(patch.cond == -1, 5, 6);
     patch_bytes: List(u8) = (maybe_uninit = (ptr = patch_at, len = patch_size), len = 0, gpa = panicking_allocator);
     // The offset is from **the end** of the jump instruction
     offset := dest - src - patch_size; 
     @debug_assert(offset.abs() < 1.shift_left(31), "what a big function you have");
-    if patch.cond { cc | 
-        cc := amd_condition_codes[cc];
+    if patch.cond >= 0 {
+        cc := amd_condition_codes[patch.cond.zext()];
         patch_bytes&.encode_jmp(cc, offset);
     } else {
         encode_imm32_only(patch_bytes&, PrimaryOp.JmpImm32, offset); 
