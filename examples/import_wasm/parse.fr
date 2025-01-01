@@ -72,11 +72,11 @@ fn parse_wasm(self: *ParseWasm) Result(void, Str) = {
                 range(0, count) { i |
                     name := @try(self.read_str()) return;
                     desc_tag := @try(self.pop()) return;
-                    desc: Wasm.ExportDesc = (Function = (id = trunc(@try(self.read_u()) return)));
-                    if desc_tag > Wasm.ExportDesc.Tag().enum_count() {
+                    id: u32 = trunc(@try(self.read_u()) return);
+                    if desc_tag > Wasm.ImportType.enum_count() {
                         return(Err = "Invalid export type byte");
                     };
-                    self.w.exports&.push(name = name, desc = desc);
+                    self.w.exports&.push(name = name, type = @as(Wasm.ImportType) desc_tag, id = id);
                 };
             }
             fn Code() => @try(self.read_code_section()) return;
@@ -148,7 +148,7 @@ fn parse_wasm(self: *ParseWasm) Result(void, Str) = {
         };
         
         if self.cursor != end_of_section {
-            return(Err = @tfmt("Did not consume declared section size. (section index % in module)", section_count));
+            return(Err = @tfmt("Did not consume declared section size. (section index % in module) expected to stop: (at byte index %) but stopped:", section_count, end_of_section));
         };
         section_count += 1;
     };
@@ -169,11 +169,12 @@ fn read_code_section(self: *ParseWasm) Result(void, Str) = {
             total += num;
             type := @try(self.pop()) return;
             if self.cursor > start + total_code_bytes {
-                return(Err = @tfmt("Locals overflowed declared function size (func index %, local index %)", i, j));
+                return(Err = @tfmt("Locals overflowed declared function size (func index %, local index %, total locals %, function size %)", i, j, local_count, total_code_bytes));
             };
             locals&.push(type = @as(Wasm.ValType) type, count = num);
         };
-        code_len := total_code_bytes - (self.cursor - start);
+        bytes_of_locals := self.cursor - start;
+        code_len := total_code_bytes - bytes_of_locals;
         code: RsVec(u8) = (ptr = self.src.index(self.cursor), len = code_len, cap = code_len);
         self.cursor += code_len;
         self.w.code&.push(locals = locals.rs(), insts = code, total_local_count = total);
@@ -192,7 +193,6 @@ fn read_expr(self: *ParseWasm) Result(RsVec(u8), Str) = {
     (Ok = (ptr = self.src.index(self.cursor), len = e, cap = e))
 }
 
-:: tagged(Wasm.ExportDesc);
 :: enum(Wasm.Section);
 
 fn read_byte_enum(self: *ParseWasm, $T: Type) Result(T, Str) #generic = {

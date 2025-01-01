@@ -1,4 +1,8 @@
 
+- fixed @is on non-sequential enums
+
+## (Dec 29)
+
 - fixed problem when doing `use_map_jit_on_apple_silicon` i was calling mmap twice 
 and kind-of assuming they would be next to eachother and trying to munmap them as one. 
 and it looks like it should have just worked out because i said too big a size for the first one so it wouldn't try to free junk when they didn't get put adjacent, 

@@ -9,10 +9,12 @@ LoadWasm :: void;  // TODO: bleh
 fn main() void = {
     input := read_file_from_last_arg();
     w: Wasm.Module = empty(temp()); w := w&;
+    @println("--- read % bytes ---", input.len);
     p: ParseWasm = (w = w, src = input);
     or parse_wasm(p&) { e |
         @panic("% (at byte index %)", e, p.cursor);
     };
+    println("--- initial parse successful ---");
     
     out := u8.list(temp()); out := out&;
     
@@ -27,9 +29,8 @@ fn main() void = {
     
     @fmt(out, "=== BEGIN EXPORT SECTION ===\n");
     each w.exports { it |
-        @fmt(out, "- '%' ", it.name.items());
-        // TODO: other info
-        @fmt(out, "\n");
+        ::enum(Wasm.ImportType);
+        @fmt(out, "- '%' % %\n", it.name.items(), it.type, it.id);
     };
     @fmt(out, "=== END EXPORT SECTION ===\n\n");
     
@@ -40,15 +41,22 @@ fn main() void = {
         @fmt(out, "\n");
     };
     @fmt(out, "=== END TYPE SECTION ===\n\n");
+    print(out.items()); out.clear();
     
     @fmt(out, "=== BEGIN FUNCTION/CODE SECTION ===\n");
     if w.functions.len != w.code.len {
         @fmt(out, "ERROR: % function types and % function bodies.\n", w.functions.len, w.code.len);
+        print(out.items()); out.clear();
     };
+    
     f_count := min(w.functions.len, w.code.len);
     enumerate w.code { i, code | 
         @fmt(out, "[F%]: \n- signeture ", i);
-        show_type(out, w, w.functions[i]);
+        if i < w.functions.len {
+            show_type(out, w, w.functions[i]);
+        } else {
+            @fmt(out, "(ERROR: missing. only % entries signeture section)", w.functions.len);
+        };
         @fmt(out, "\n");
         if code.locals.len == 0 {
             @fmt(out, "- only argument locals\n");
@@ -59,21 +67,49 @@ fn main() void = {
             };
             @fmt(out, "\n");
         };
-        
-        @fmt(out, "- BODY:");
+        start := ptr_diff(input.ptr, code.insts.ptr);
+        @fmt(out, "- code {  // [%..<%]", start, start + code.insts.len);
         c := 0;
         indent := 1;
         while => c < code.insts.len {
             continue :: local_return;
-            @fmt(out, "\n%", f_rep("    ", indent));
+            
+            ::enum(Wasm.Inst);
             byte := code.insts[c]; c += 1;
             encoding := lookup_wasm_encoding(byte);
+            inst := @as(Wasm.Inst) byte;
+            
+            if @is(inst, .End) {
+                indent -= 1;
+                if indent < 0 {
+                    @fmt(out, "         (ERROR: closed too many blocks)");
+                } else {
+                    if indent == 0 && c != code.insts.len {
+                        @fmt(out, "        (ERROR: closed all blocks but there is still code)");
+                    };
+                };
+                indent = max(indent, 0);
+            };
+            
+            @fmt(out, "\n  %", f_rep("    ", indent));
+            if indent == 0 && c != code.insts.len {
+                @fmt(out, "?");
+            };
+            
+            if @is(inst, .End) {
+                @fmt(out, "};");
+                continue();
+            };
+            
             ::enum(@type encoding.kind);
             if encoding.kind != .other {
-                @fmt(out, "% %", encoding.op, encoding.cls);
+                k_name := @const_slice("I32", "I64", "F32", "F64", "???");
+                k := min(k_name.len - 1, zext(@as(i32)encoding.cls));
+                @fmt(out, "%_%(", k_name[k], encoding.op);
                 if @is(encoding.kind, .load, .store) {
-                    // TODO: imm
+                    @fmt(out, "// TODO: imm");
                 };
+                @fmt(out, ");");
                 continue();
             };
             
@@ -89,30 +125,31 @@ fn main() void = {
                 }
             };
             
-            ::enum(Wasm.Inst);
-            inst := @as(Wasm.Inst) byte;
-            @fmt(out, "% ", inst);
+            if @is(inst, .Block, .Loop, .If) {
+                indent += 1;
+                @fmt(out, "% {", inst);
+                continue();
+            };
+            
+            @fmt(out, "%(", inst);
             if @is(inst, .LocalGet, .LocalSet, .LocalTee, .GlobalGet, .GlobalSet, .I32_Const, .I64_Const) {
                 push_leb();
+                @fmt(out, ");");
                 continue()
             };
             
             if inst == .Call {
                 v := push_leb();
+                @fmt(out, "); ");
                 if v < w.imported_function_count {
-                    @fmt(out, " (import)");
+                    @fmt(out, "  // import");
                 } else {
-                    @fmt(out, " (F%)", v - w.imported_function_count);
+                    @fmt(out, "  // F%", v - w.imported_function_count);
                 };
                 continue()
             };
+            @fmt(out, ");");
             
-            if @is(inst, .End) {
-                indent -= 1;
-            };
-            if @is(inst, .Block, .Loop, .If) {
-                indent += 1;
-            };
         };
         @fmt(out, "\n");
     };

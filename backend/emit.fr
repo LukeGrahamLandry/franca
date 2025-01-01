@@ -21,6 +21,7 @@ SymbolInfo :: @struct(
     fixups: RsVec(Fixup),
     // or -1 if not referenced yet. valid: DynamicPatched
     // this gets repurposed when fixups_locked. 
+    // when targetting wasm this is the index of the function (need to offset by import count if imported)
     got_lookup_offset: i64,
     segment: SegmentType, // valid: Local
     //  local: offset in the segment
@@ -68,6 +69,9 @@ FixupType :: @tagged(
     
     // amd64
     RipDisp32: @struct(increment: u32, call: bool), // TODO: add safety checks for size of Qbe.Con.bits.i
+    
+    // wasm
+    WasmIndex: @struct(space: Wasm.ImportType), 
 );
 
 Fixup :: @struct(
@@ -143,7 +147,7 @@ fn new_emit_data(self: *QbeModule, dat: *Qbe.Dat) void = {
 }
 
 fn maybe_add_export(self: *QbeModule, id: u32, export: bool) void = {
-    if export && (@is(self.goal.type, .Relocatable, .Dynamic)) {
+    if export && (self.goal.arch == .wasm32 || @is(self.goal.type, .Relocatable, .Dynamic)) {
         self.exports&.push(id);
     };
 }
@@ -215,7 +219,7 @@ fn emit_data_to_segment(self: *QbeModule, dat: *Qbe.Dat, seg: SegmentType) void 
                     };
                     // Since we need the absolute address in memory, even local symbols need a relocation. 
                     push_fixup(self, symbol, (patch_at = next[], type = .DataAbsolute));
-                    if self.goal.type == .Relocatable && !symbol.local_but_marked_for_relocation {
+                    if self.goal.arch != .wasm32 && self.goal.type == .Relocatable && !symbol.local_but_marked_for_relocation {
                         self.local_needs_reloc&.push(id);
                         symbol.local_but_marked_for_relocation = true;
                     };
@@ -371,7 +375,7 @@ fn do_jit_fixups(self: *QbeModule, id: u32, segment: SegmentType, final_offset: 
             //if(fixups.len == 0, => fixups.drop(self.gpa));
         } else {
             // you still care because the static linker wants to move things around. :track_got_reloc
-            if !symbol.local_but_marked_for_relocation {
+            if self.goal.arch != .wasm32 && !symbol.local_but_marked_for_relocation {
                 self.local_needs_reloc&.push(id);
                 symbol.local_but_marked_for_relocation = true;
             };
@@ -438,6 +442,7 @@ fn emit_fn(f: *Qbe.Fn) void = {
     m.do_jit_fixups(name_id, .Code, start_offset);
     
     {m.target.emit_fn}(f);
+    m.number_of_functions += 1;
     size := code.len() - start_offset;
     @assert_lt(code.len(), code.mmapped.len, "too much code");
     

@@ -90,7 +90,7 @@ QbeModule :: @rec @struct(
     
     exports: List(u32),
     imports: List(u32),
-    local_needs_reloc: List(u32),
+    local_needs_reloc: List(u32),  // OR for wasm: all local functions in order
     inlinable_but_referenced_later: List(u32),
     
     supports_self_sign: bool,  // this was in zeroed padding before so the old version in ../boot will have false and current default_driver will use codesign binary like it used to -- Nov 28
@@ -123,6 +123,8 @@ QbeModule :: @rec @struct(
     last_function_end: *u8,
     icache_mutex: PMutex,
     intern_mutex: PMutex,
+    
+    number_of_functions := 0,
 );
 
 QbeTargetEnv :: @struct(
@@ -261,6 +263,7 @@ fn init(m: *QbeModule, segment_size: i64, gpa: Alloc, goal: QbeTargetEnv, expect
             t.finish_passes = finish_qbe_passes_wasm;
             t.abi0 = apple_extsb; // "Signed 8 and 16-bit scalars are sign-extended, and unsigned 8 and 16-bit scalars are zero-extended before passing or returning." 
             t.emit_fn = emit_func_wasm32;
+            t.fixup = fixup_wasm32;
         };
     };
     
@@ -430,6 +433,8 @@ fn finish_qbe_passes_wasm(fnn: *Qbe.Fn) void = {
     simplify_jump_chains(fnn); // optional
     fillpreds(fnn);
     fillrpo(fnn);
+    
+    fill_use(fnn); 
     
     // TODO: convert to structured control flow as a seperate pass?
     
