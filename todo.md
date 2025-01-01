@@ -7,6 +7,7 @@
 
 ## 
 
+- `[CPU Time]` on macos-x64 is wrong. (different libc magic numbers? clang libc_constants says no). // :WrongClockTime
 - maybe have a `push_compiler_error_context` and `pop_compiler_error_context` for macros so @fmt could easily add a message like `while evaluating format string`?
 - make the old jit backend runnable again as an example 
 - repro doesn't work when you do `-repeat`

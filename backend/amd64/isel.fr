@@ -470,6 +470,9 @@ fn sel_inner(i: *Qbe.Ins, f: *Qbe.Fn) void = {
                 return();
             };
             if is_ext(i.op()) {
+                if i.op() == .extuw && rtype(i.arg&[0]) == .RCon {
+                    i.set_op(.copy);
+                };
                 f.sel_emit(i);
                 return();
             };
@@ -657,14 +660,38 @@ fn sel_ftoi(f: *Qbe.Fn, i: *Qbe.Ins, kc: Qbe.Cls, o: Qbe.O, t4: u64) void = {
 
 fn seljmp(b: *Qbe.Blk, f: *Qbe.Fn) void = {
     if(@is(b.jmp.type, .ret0, .jmp, .hlt), => return()); // these already have a trivial single instruction implementation
+    if b.jmp.type == .switch {  // so not worth it. 
+        arg := b.jmp.arg;
+        idx := f.newtmp("isel", .Kl);
+        scratch := f.newtmp("isel", .Kl);
+        if rtype(b.jmp.arg) != .RTmp {
+            arg = f.newtmp("isel", .Kl);
+        };
+        
+        table_size := get_jump_targets(b).len() - 1;
+        f.emit(.xcmp, .Kl, QbeNull, f.getcon(table_size), arg);
+        
+        f.emit(.switch0, .Kl, scratch, idx, scratch);  // TODO: (slightly less) fucking garbage but if you don't have `scratch` on both sides it gets confused. 
+        
+        m := f.new_mem(arg, arg, 0, 4);
+        f.emit(.addr, .Kl, idx, m, QbeNull);  // shorter encoding than *5
+        
+        if b.jmp.arg != arg {
+            f.emit(.copy, .Kl, arg, b.jmp.arg, QbeNull);
+        };
+        
+        // :( 
+        f.emit(.copy, .Kl, scratch, QbeConZero, QbeNull);  // TODO: fucking garbage but if you don't do this it gets confused. 
+        
+        b.jmp.arg = scratch;
+        return();
+    };
     
-    @assert(b.jmp.type != .switch, "TODO: switch .");
     @debug_assert(b.jmp.type == .jnz);
     r := b.jmp.arg;
     @debug_assert(rtype(r) == .RTmp, "we shouldn't be jumping on a constant");
     t := f.get_temporary(r);
     b.jmp.arg = QbeNull;
-    // :TodoSwitch
     if b.s1.identical(b.s2) {
         chuse(r, -1, f);
         b.jmp.type = .jmp;

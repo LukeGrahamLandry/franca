@@ -442,25 +442,24 @@ fn spill(f: *Qbe.Fn) void = {
                 pass&.slot(t);
             };
         };
-        bscopy(b.out&, in_reg&);
         
+        f.globals.curi[] = f.scratch_start();
+            
         /* 2. process the block instructions */
         if rtype(b.jmp.arg) == .RTmp {
+            // only switch (and riscV jnz but we don't do that yet) get here. 
             t := b.jmp.arg.val();
-            @debug_assert(tmp[t].cls.is_int(), "can only jump on int (previous pass removed ret with value)");
-            arg_used_again := bshas(in_reg&, t);
+            @debug_assert(tmp[t].cls.is_int() && @is(b.jmp.type, .switch), "can only jump on int (previous pass removed ret with value)");
             bsset(in_reg&, t);
             bscopy(all_needed_later&, in_reg&);
-            pass&.limit_in_reg(in_reg&, false, .None);
-            if !bshas(in_reg&, t) {
-                if !arg_used_again {
-                    bsclr(all_needed_later&, t);
-                };
-                b.jmp.arg = pass&.slot(t);
-            };
+            bszero(prioritize&); 
+            bsset(prioritize&, t);
+            pass&.limit_in_reg(in_reg&, false, (Some = prioritize&));
+            @debug_assert(bshas(in_reg&, t), "jump arg must not be spilled"); 
             pass&.reload_spilled(all_needed_later&, in_reg&);
         };
-        f.globals.curi[] = f.scratch_start();
+        bscopy(b.out&, in_reg&);
+        
         for_insts_rev b { i |
             continue :: local_return;
             if(i[].op() == .nop, => continue());

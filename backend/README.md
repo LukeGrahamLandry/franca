@@ -34,6 +34,7 @@ You can still print out the ir as human readable text between passes and modify 
   > (not well tested because franca doesn't use it yet but it will likely be converted eventually).
 - simplified matching of amd64 addressing modes: instead of 1600 lines of ocaml implementing a dsl
   with 150 lines of glue code to use the results, just write 150 lines of tedious code to solve the problem directly.
+- added a block terminator for using a jump table. definitly not worth it and should probably be removed again. 
 - Removed support for thread locals. Franca achieves an equivilent by passing around an implicit env parameter.
 - Removed several codegen optimisations until we have a solid foundation (but I want to bring them back eventually).
   - all: load float constants from memory (instead of using int immediate + fmov)

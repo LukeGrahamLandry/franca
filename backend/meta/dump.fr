@@ -419,3 +419,41 @@ fn print_type(m: *QbeModule, ty_index: i64, out: *FILE) void = {  // :ThreadSafe
     };
     @fmt_write(out, "\n");
 }
+
+fn dump_folding(f: *Qbe.Fn, fold_vals: []i32, out: *FILE) void = {
+    any_folded := false;
+    write(out, "\n> SCCP findings:");  // "sparse conditional constant propagation"
+    range(Qbe.Tmp0, f.ntmp.zext()) { t |
+        if fold_vals[t] != fold_status_runtime && fold_vals[t].intcast() != fold_status_dead {
+            any_folded = true;
+            @fmt_write(out, "\n%: ", f_pad(f.tmp[t]&.name(), 10, .Before));
+            printref(CON(fold_vals[t].zext()), f, out);
+        };
+    };
+    if any_folded {
+        write(out, "\n> Top: ("); 
+        range(Qbe.Tmp0, f.ntmp.zext()) { t |
+            if fold_vals[t].intcast() == fold_status_dead {
+                @fmt_write(out, "%, ", f.tmp[t]&.name());
+            } 
+        };
+        write(out, ")"); 
+    } else {
+        write(out, "\n no foldable constants");
+    };
+    write(out, "\n dead code: ");
+    any_dead_blocks := false;
+    for_blocks f { b |
+        if b.visit == 0 {
+            any_dead_blocks = true;
+            @fmt_write(out, "% ", b.name());
+        };
+    };
+    if !any_dead_blocks {
+        write(out, "(none)");
+    };
+    if any_folded {
+        write(out, "\n\n> After constant folding:\n");
+        printfn(f, out);
+    };
+}

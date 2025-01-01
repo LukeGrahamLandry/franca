@@ -11,7 +11,8 @@ AmdState :: @struct(
     nclob := 0,
     a: List(u8),
     start_of_function: i64,
-    last_saved_offset := 0,
+    patches: List(Patch),
+    prev_switch_prep := -1,
 );
 
 fn emit_func_amd64(f: *Qbe.Fn) void = {
@@ -23,10 +24,11 @@ fn emit_func_amd64(f: *Qbe.Fn) void = {
         m = m,
         a = (maybe_uninit = (ptr = code.next, len = code.cap() - code.len()), len = 0, gpa = panicking_allocator),
         start_of_function = code.len(),
+        patches = list(f.nblk.zext(), temp()),
     );
     
     emit_the_code(e&);
-    code.next = code.next.offset(e.a.len() - e.last_saved_offset);
+    code.next = code.next.offset(e.a.len());
 }
 
 fn fixup_amd64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_reloc: *?Fixup) void = {
@@ -155,8 +157,6 @@ fn emit_the_code(e: *AmdState) void = {
     };
 
     local_labels := temp().alloc_zeroed(i64, e.f.nblk.zext());
-    patches: List(Patch) = list(temp());
-    
     for_blocks f { b | 
         local_labels[b.id.zext()] = e.next_inst_offset();
         for_insts_forward b { i |
@@ -187,39 +187,58 @@ fn emit_the_code(e: *AmdState) void = {
                 };
                 e.a&.push(@as(u8) PrimaryOp.Ret);
             }
-            @default => {
-                // :TodoSwitch
-                @debug_assert(!b.s1.is_null());
-                if b.jmp.type != .jmp {
-                    @debug_assert(!b.s2.is_null());
-                    c := b.jmp.type.raw() - Qbe.J.jfieq.raw();
-                    @assert(0 <= c && c < Qbe.NCmp, "unhandled jump.");
-                    if b.link.identical(b.s2) {
-                        s := b.s1;
-                        b.s1 = b.s2;
-                        b.s2 = s;
-                    } else {
-                        c = cmpneg(c);
-                    };
-                    // :copypaste
-                    patch: Patch = (offset_from_start = e.a.len, cond = c, target_bid = b.s2.id);
-                    e.push_int3(6); // 2 byte opcode
-                    patches&.push(patch);
-                    // fall through
+            fn switch() => {
+                // Check if the value is in range for the table. 
+                targets     := get_jump_targets(b);
+                table_size  := targets.len - 1;
+                e.jmp(targets[0], @as(i32) Qbe.Cmp.Ciuge.raw());
+                
+                encode_extended_op(e.a&, .Direct, 0xff, 0b0100, b.jmp.arg.int_reg_d());  // JMP r/m64
+                
+                // TODO: this is such an ugly hack
+                //       it should be a constant (16 rn) but we might decide we need to do some spill slot shuffling at the end of the block 
+                //       so there will be extra stuff between this and O.switch0 
+                current := e.a.len;
+                distance := current - (e.prev_switch_prep + 4);
+                e.a.len = e.prev_switch_prep;
+                push_imm(e, distance, 4);
+                e.a.len = current;
+                e.prev_switch_prep = -1;
+                
+                for targets.rest(1) { s |
+                    e.jmp(s, -1);
                 };
-                // :TodoSwitch
+            }
+            fn jmp() => if !b.s1.identical(b.link) {
+                e.jmp(b.s1, -1);
+            };
+            @default => {
+                c := b.jmp.type.raw() - Qbe.J.jfieq.raw();
+                @assert(0 <= c && c < Qbe.NCmp, "unhandled jump.");
+                if b.link.identical(b.s2) {
+                    s := b.s1;
+                    b.s1 = b.s2;
+                    b.s2 = s;
+                } else {
+                    c = cmpneg(c);
+                };
+                e.jmp(b.s2, c);
                 if !b.s1.identical(b.link) {
-                    patch: Patch = (offset_from_start = e.a.len, cond = -1, target_bid = b.s1.id);
-                    e.push_int3(5);
-                    patches&.push(patch);
+                    e.jmp(b.s1, -1);
                 };
             };
         };
     };
     
-    each patches { p |
+    each e.patches { p |
         e.apply_patch(local_labels, p);
     };
+}
+
+// cond: -1 == Always
+fn jmp(e: *AmdState, s: *Qbe.Blk, cond: i32) void #inline = {
+    e.patches&.push(offset_from_start = e.a.len, cond = cond, target_bid = s.id);
+    e.push_int3(if(cond == -1, => 5, => 6));  // conditional branch is a 2 byte opcode. 
 }
 
 fn apply_patch(e: *AmdState, labels: []i64, patch: *Patch) void = {
@@ -296,6 +315,17 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
         /* just do nothing for nops, they are inserted
          * by some passes */
         fn nop() => ();
+        fn switch0() => {  // TODO: garbage. not worth how much of a pain this is. 
+            dest := int_reg_d(i.to);
+            e.a&.push(pack_rex_si(true, dest, DONT_CARE_REG, DONT_CARE_REG)); 
+            e.a&.push(@as(u8) PrimaryOp.Lea);
+            e.a&.push(pack_modrm(.Indirect00, .rbp, dest));   // disp is RIP relative
+            e.prev_switch_prep = e.a.len;
+            e.a&.push_u32(0);
+            
+            ins := make_ins(.add, .Kl, i.to, i.arg&[0], i.to);
+            emitins(ins, e);
+        }
         fn mul() => {
             /* here, we try to use the 3-addresss form
             * of multiplication when possible */
@@ -869,8 +899,10 @@ fn bits(d: Displacement) i64 = @match(d) {
     fn D32() => 32;
 };
 
-fn int_reg_d(r: Qbe.Ref) X86Reg = 
-    int_id(@as(Amd64Reg) @as(i32) r.val().trunc());
+fn int_reg_d(r: Qbe.Ref) X86Reg = {
+    @debug_assert_eq(rtype(r), .RTmp, "int_reg_d");
+    int_id(@as(Amd64Reg) @as(i32) r.val().trunc())
+}
 
 // TODO: convert my instruction encoding to use Amd64Reg instead of X64Reg. having both is mega dumb. 
 //       but also qbe puts them in the wrong order so i have to commit to not sharing target struct 
@@ -883,7 +915,7 @@ fn int_id(r: Amd64Reg) X86Reg = {
         .rax, .rcx, .rdx, .rsi, .rdi, .r8, .r9, .r10, .r11, .rbx, .r12, .r13, .r14, .r15, .rbp, .rsp, // integers
         .rax, .rcx, .rdx, .rbx, .rsp, .rbp, .rsi, .rdi, .r8, .r9, .r10, .r11, .r12, .r13, .r14, .r15, // floats are in order
     );
-    @debug_assert(r.raw().zext() < table.len(), "expected register");
+    @debug_assert_lt(r.raw().zext(), table.len(), "expected register");
     table[r.raw().zext()]
 }
 
