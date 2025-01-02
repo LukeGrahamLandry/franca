@@ -1,60 +1,67 @@
+## wasm (Jan 2)
 
-## (Jan 1)
+- globals for stack pointer so now (static) alloca works.
+  (for now i don't let frontends create thier own globals, they can just use a normal symbol in the data segment until i want exports).
+- store instructions
+- typecheck_failed: added check for store instruction with result
 
-- data segment. kinda nice that relocations are just you put the number in because you know your base address is zero. 
-skip a page so we don't assign something to the null pointer because that sounds confusing. 
-(TODO: should i have an option insert null checks since you won't auto-crash like you would on native?). 
+## wasm (Jan 1)
 
-## 
+- data segment. kinda nice that relocations are just you put the number in because you know your base address is zero.
+  skip a page so we don't assign something to the null pointer because that sounds confusing.
+  (TODO: should i have an option insert null checks since you won't auto-crash like you would on native?).
+
+##
 
 - added J.switch block terminator
-- experiment with the jump table being a data symbol of offsets or being a bunch of direct jump instructions. 
-everything (including no jump tables, just if-chains) is roughly the same speed 
-(ie. i can't tell the difference when just eyeballing the time to self-compile). 
-so that's kinda disappointing. should probably take it out since it's extra code for no benifit. 
-- reworked opt/fold to work with J.switch. my version is a regression, 
-it doesn't handle phi nodes that become constant properly anymore (added a test case: fold2.ssa). 
-but at least i understand how it works now and can come back later. 
+- experiment with the jump table being a data symbol of offsets or being a bunch of direct jump instructions.
+  everything (including no jump tables, just if-chains) is roughly the same speed
+  (ie. i can't tell the difference when just eyeballing the time to self-compile).
+  so that's kinda disappointing. should probably take it out since it's extra code for no benifit.
+- reworked opt/fold to work with J.switch. my version is a regression,
+  it doesn't handle phi nodes that become constant properly anymore (added a test case: fold2.ssa).
+  but at least i understand how it works now and can come back later.
 - fixed @is on non-sequential enums
 
 ## (Dec 29)
 
-- fixed problem when doing `use_map_jit_on_apple_silicon` i was calling mmap twice 
-and kind-of assuming they would be next to eachother and trying to munmap them as one. 
-and it looks like it should have just worked out because i said too big a size for the first one so it wouldn't try to free junk when they didn't get put adjacent, 
-and i guess i don't rely on layout that much when jitting, i just always pictured it a certain way in my head.
-now i mmap the whole thing at once and then MAP_FIXED over it to change part of it to not be MAP_JIT. 
-It seems that MAP_JIT and then MAP_FIXED over it is fine, but the reverse is not. 
-now i can drop comptime_codegen and run with `-repeat` for longer (also fixed 60fps.fr).
-`./boot` is still flaky tho. 
-- fix `display` for non-sequential enums. 
+- fixed problem when doing `use_map_jit_on_apple_silicon` i was calling mmap twice
+  and kind-of assuming they would be next to eachother and trying to munmap them as one.
+  and it looks like it should have just worked out because i said too big a size for the first one so it wouldn't try to free junk when they didn't get put adjacent,
+  and i guess i don't rely on layout that much when jitting, i just always pictured it a certain way in my head.
+  now i mmap the whole thing at once and then MAP_FIXED over it to change part of it to not be MAP_JIT.
+  It seems that MAP_JIT and then MAP_FIXED over it is fine, but the reverse is not.
+  now i can drop comptime_codegen and run with `-repeat` for longer (also fixed 60fps.fr).
+  `./boot` is still flaky tho.
+- fix `display` for non-sequential enums.
 
 ## (Dec 27)
 
-- failing `@debug_assert_gt(c.canvas_width, 0.0);`, which i think is actually a miscompilation of the compiler itself when doing stuff with the constant `: f32 = 640,` 
-fixed incorrectly flipping prefix for truncd but that wasn't enough.
-but now it works if you do it in a normal variable instead of in a struct default value. 
+- failing `@debug_assert_gt(c.canvas_width, 0.0);`, which i think is actually a miscompilation of the compiler itself when doing stuff with the constant `: f32 = 640,`
+  fixed incorrectly flipping prefix for truncd but that wasn't enough.
+  but now it works if you do it in a normal variable instead of in a struct default value.
 - construct_struct_literal wasn't calling coerce_const_expr, it was just assuming the type of the value matched.
-TODO: really find_const should call it for you
-that gets farm_game working on amd64! 
-> bad that i can't explain why that worked on arm since the little repro test i wrote fails on the old version of the compiler.   
+  TODO: really find_const should call it for you
+  that gets farm_game working on amd64!
+  > bad that i can't explain why that worked on arm since the little repro test i wrote fails on the old version of the compiler.
 
-in fact, i think amd64 now works better than arm64 because of my cache coherency woes, it can run 64fps.fr.  
+in fact, i think amd64 now works better than arm64 because of my cache coherency woes, it can run 64fps.fr.
 
 - fixed `need to do_merges when resolving by type.`
 - clean up arm emit() for some instructions with similar bit patterns
 
 ## amd64 bug fix extravaganza (Dec 26)
 
-- jit hello world works if i got_indirection_instead_of_patches=true on both modules. so clearly i was right when i asserted `!=.JitOnly` but i still don't know why. 
-problem was a call to a DynamicPatched was outputting a fixup that would never be applied.
-so it was just calling offset 0 which is just the next instruction, and it was near the end of the function, so it returned to itself and then returned again. 
-- `rosetta error: unexpectedly need to EmulateForward on a synchronous exception` is fun because lldb chokes on it forever so you can't see what's happening. 
+- jit hello world works if i got_indirection_instead_of_patches=true on both modules. so clearly i was right when i asserted `!=.JitOnly` but i still don't know why.
+  problem was a call to a DynamicPatched was outputting a fixup that would never be applied.
+  so it was just calling offset 0 which is just the next instruction, and it was near the end of the function, so it returned to itself and then returned again.
+- `rosetta error: unexpectedly need to EmulateForward on a synchronous exception` is fun because lldb chokes on it forever so you can't see what's happening.
 - ok so it must be something shim related. sudoku works when aot compiled to x64 but not when jitted on x64,
-but it works if you don't call `solve` at comptime. oh and it works if #inline `assign`. 
-works also if you uncomment `is_ready := f.getcon(0);` in create_jit_shim (which is also enough to run `examples/default_driver.fr`).
+  but it works if you don't call `solve` at comptime. oh and it works if #inline `assign`.
+  works also if you uncomment `is_ready := f.getcon(0);` in create_jit_shim (which is also enough to run `examples/default_driver.fr`).
 
 hmmm,
+
 ```
 R2 =l addr $F924__shim
 R6 =l addr $assign__924
@@ -78,113 +85,117 @@ jne	56                                  ## encoding: [0x0f,0x85,A,A,A,A]
 <snip>
 ```
 
-so that sure isn't a program... 
-it loads from the got into rax and then uses r8 instead. 
-sad day, in the .addr hack i just did, i typed 0b01001000 instead of calling pack_rex_si so high registers didn't get encoded. 
+so that sure isn't a program...
+it loads from the got into rax and then uses r8 instead.
+sad day, in the .addr hack i just did, i typed 0b01001000 instead of calling pack_rex_si so high registers didn't get encoded.
 
 - using the x64 compiler to aot, i get `we guessed wrong so the array resized and all the pointers are junk`
-sometimes, with a random multiple of 4096, but when it works it gets the same hash as the arm one cross compiling which is a good sign. 
-ah, trying to zero_pad_to_align to page size, and doing that starting at the pointer to the base of the array, not at zero and just using the length,
-and `commands` is at the start of the text segment so it's allocated by page_allocator, 
-so when running on macos-arm, where the page size is 16k, its always 16k aligned, but macos-amd's page size is 4k. 
-need to do it based on the length instead of the address. 
-same thing in codesign `deal with page spread across chunks` because of the SegmentCursor.align_to at the top of macho.emit. 
-TODO: i should take advantage of the smaller page size to emit less padding on that platform but for now it's not a big deal.
+  sometimes, with a random multiple of 4096, but when it works it gets the same hash as the arm one cross compiling which is a good sign.
+  ah, trying to zero_pad_to_align to page size, and doing that starting at the pointer to the base of the array, not at zero and just using the length,
+  and `commands` is at the start of the text segment so it's allocated by page_allocator,
+  so when running on macos-arm, where the page size is 16k, its always 16k aligned, but macos-amd's page size is 4k.
+  need to do it based on the length instead of the address.
+  same thing in codesign `deal with page spread across chunks` because of the SegmentCursor.align_to at the top of macho.emit.
+  TODO: i should take advantage of the smaller page size to emit less padding on that platform but for now it's not a big deal.
 
-- avoid folding memory accesses that create `base+index+(>4GB constant)`, 
-which happens when jitted code has constant addresses and then you try to access a nested array i guess?
-TODO: i think now im being too conservative with the folding. it's fine as long as you don't have both base and index. 
-that's enough to self compile on amd. hurrah!
+- avoid folding memory accesses that create `base+index+(>4GB constant)`,
+  which happens when jitted code has constant addresses and then you try to access a nested array i guess?
+  TODO: i think now im being too conservative with the folding. it's fine as long as you don't have both base and index.
+  that's enough to self compile on amd. hurrah!
 
-and reproducibility works with cross compiling which is amazing. 
+and reproducibility works with cross compiling which is amazing.
 still not everything works on amd64: lox, mandelbrot, and the gui programs.
-incidentally, those are all programs that use floats heavily. 
+incidentally, those are all programs that use floats heavily.
 
 - float bitcast encoding mistake. in the table we use (.F, .M) vs (.M, .F) to tell the directions apart,
-but the movd:movq always takes the float arg on the same side so one of the directions needs a swap before actually being encoded. 
-that fixed lox+mandelbrot. 
-- did register shuffling for 2-adddress fdiv which gets farm_game to compile. 
+  but the movd:movq always takes the float arg on the same side so one of the directions needs a swap before actually being encoded.
+  that fixed lox+mandelbrot.
+- did register shuffling for 2-adddress fdiv which gets farm_game to compile.
 
 ## amd64 bug fix extravaganza (Dec 25)
 
-- yikes, unpleasent memory safety thing. 
-Alias.slot is a pointer to another tmp's alias field. 
-However, it can't be an actual pointer because we read it in getalias which is called from loadopt:def
-which is intersperced with newtmp calls in that pass, which cause f.tmp to be resized, invalidating any internal pointers. 
-I think it works for qbe because f.tmp is PFn so free doesn't do anything and after the alias pass once you start making new tmps, 
-you don't need to update the alias info so it's fine that you're pointing into an old copy of the tmps array if it resizes.
-which would apply to my temp() alloc too except that when i suspend for inlining, it copies into a new QList in libc_allocator,
-and then keeps using that at the end if i need to emit_suspended_inlinables, at which point free does do something and 
-now we're at the mercy of whatever your libc's malloc decides to do. 
-i think i want to just use the module's arena instead of libc_allocator anyway but still nicer to follow the rules i think. 
-seems that was what was making ./boot fail most of the time so that's very good to have fixed, but -repeat still calls into garbage so more mistakes exist :( 
+- yikes, unpleasent memory safety thing.
+  Alias.slot is a pointer to another tmp's alias field.
+  However, it can't be an actual pointer because we read it in getalias which is called from loadopt:def
+  which is intersperced with newtmp calls in that pass, which cause f.tmp to be resized, invalidating any internal pointers.
+  I think it works for qbe because f.tmp is PFn so free doesn't do anything and after the alias pass once you start making new tmps,
+  you don't need to update the alias info so it's fine that you're pointing into an old copy of the tmps array if it resizes.
+  which would apply to my temp() alloc too except that when i suspend for inlining, it copies into a new QList in libc_allocator,
+  and then keeps using that at the end if i need to emit_suspended_inlinables, at which point free does do something and
+  now we're at the mercy of whatever your libc's malloc decides to do.
+  i think i want to just use the module's arena instead of libc_allocator anyway but still nicer to follow the rules i think.
+  seems that was what was making ./boot fail most of the time so that's very good to have fixed, but -repeat still calls into garbage so more mistakes exist :(
 
-trying to get the compiler to run on amd64 with my own backend: 
-- fix typecheck_failed 
+trying to get the compiler to run on amd64 with my own backend:
+
+- fix typecheck_failed
 - in sysv-abi, zero AClass array so we don't have junk in the align field
-- turn off some div folding temporarily cause i don't want to deal with it yet 
-- truncd 
+- turn off some div folding temporarily cause i don't want to deal with it yet
+- truncd
 - handle call to forward reference when got_indirection_instead_of_patches for jitting
 - `Assertion Failed: cannot encode offset 4641883552`, hmm, we sure are loading a constant... `R2 =l load [4641883552]`.
-oh because we're jitting so we poke in real addresses and those are larger than 32 bits so can't be done encoded in one memory displacement.  
-have to catch that in isel and copy to a register. 
-- for got_indirection_instead_of_patches i need to convert RMem into a load from the got instead of a constant displacement in the instruction, 
-but by the time you realize you want to do that in push_instruction it's kinda to late to do it sanely. 
-like now i need to pull emitting prefixes into that function as well so i can do extra instructions first? 
-but then i kinda need to reserve a register to use there. 
-tho so far it mostly seems to be O.Addr which is easy because it's just producing the address. 
-so start with just hacking it in there and see how it goes i guess. 
-that's enough for it to jit `hello.fr` to the point of `// Hello Compiler` but then it gets bored and doesn't do the rest.
-you win some you lose some i suppose.
-- fixed walk_dir test. cross compiling with #link_rename means fill_from_libc didn't find things. 
+  oh because we're jitting so we poke in real addresses and those are larger than 32 bits so can't be done encoded in one memory displacement.  
+  have to catch that in isel and copy to a register.
+- for got_indirection_instead_of_patches i need to convert RMem into a load from the got instead of a constant displacement in the instruction,
+  but by the time you realize you want to do that in push_instruction it's kinda to late to do it sanely.
+  like now i need to pull emitting prefixes into that function as well so i can do extra instructions first?
+  but then i kinda need to reserve a register to use there.
+  tho so far it mostly seems to be O.Addr which is easy because it's just producing the address.
+  so start with just hacking it in there and see how it goes i guess.
+  that's enough for it to jit `hello.fr` to the point of `// Hello Compiler` but then it gets bored and doesn't do the rest.
+  you win some you lose some i suppose.
+- fixed walk_dir test. cross compiling with #link_rename means fill_from_libc didn't find things.
 
 ## (Dec 24)
 
 - fixed compiler_gui/dearimgui_demo examples
 - don't need the asm versions of call_dynamic_values anymore
 - there's something very strange where it sometimes decides you can't coerce an overload set to a function pointer.
-problem was suspending in coerce_const_expr with done=true so you don't come back. 
-so indeed a subtle compilation order thing that started exibiting when i started marking more things done yesterday. 
+  problem was suspending in coerce_const_expr with done=true so you don't come back.
+  so indeed a subtle compilation order thing that started exibiting when i started marking more things done yesterday.
 
 ## (Dec 23)
 
-- fixed occasionally getting spliced names like `_Anon__5989Ano`. 
-thread safety in intern: each bucket has a lock but they were using a shared ArenaAlloc. 
-the rust people start to make some good points. 
-- i was calling join_codegen_thread on comptime_codegen instead of the one used for the driver, 
-so if you called a shim that tried to trigger a compilation, it would get stuck. 
-but maybe changing that doesn't make any sense either, because if my premise is that (we use different modules
-for the driver part and the comptime execution because we're pretending the driver is like an aot program and 
-saving time outputting a binary is just an implementation detail), 
-then you shouldn't be calling a function in the comptime module from the driver module. 
-but if you made a function pointer value, that will be in comptime_jit and it doesn't do any remapping since it's not Aot. 
-so then calling directly and calling through the pointer will be calling different versions of the same function. 
-so maybe it's wrong to try to use two jitted modules on the same compiler instance.
-but also you kinda don't want got_indirection_instead_of_patches set on the driver one because that's slower. 
-somehow ive revealed a massive oversight here. 
-- uncommenting (in compile_expr:Tuple) 
-// This would make sense to me but it makes lox test call uncompiled.  
-//expr.done = done;
-saves ~50ms (1350 -> 1300 non-legacy, when i get lucky with timing).
-gets me to 777 when i cheat (old jit + use legacy but build new + precompiled driver). 
-the comment was from before i had shims so now it's safe to be more careless. 
+- fixed occasionally getting spliced names like `_Anon__5989Ano`.
+  thread safety in intern: each bucket has a lock but they were using a shared ArenaAlloc.
+  the rust people start to make some good points.
+- i was calling join_codegen_thread on comptime_codegen instead of the one used for the driver,
+  so if you called a shim that tried to trigger a compilation, it would get stuck.
+  but maybe changing that doesn't make any sense either, because if my premise is that (we use different modules
+  for the driver part and the comptime execution because we're pretending the driver is like an aot program and
+  saving time outputting a binary is just an implementation detail),
+  then you shouldn't be calling a function in the comptime module from the driver module.
+  but if you made a function pointer value, that will be in comptime_jit and it doesn't do any remapping since it's not Aot.
+  so then calling directly and calling through the pointer will be calling different versions of the same function.
+  so maybe it's wrong to try to use two jitted modules on the same compiler instance.
+  but also you kinda don't want got_indirection_instead_of_patches set on the driver one because that's slower.
+  somehow ive revealed a massive oversight here.
+- uncommenting (in compile_expr:Tuple)
+  // This would make sense to me but it makes lox test call uncompiled.  
+  //expr.done = done;
+  saves ~50ms (1350 -> 1300 non-legacy, when i get lucky with timing).
+  gets me to 777 when i cheat (old jit + use legacy but build new + precompiled driver).
+  the comment was from before i had shims so now it's safe to be more careless.
 
 ## (Dec 22)
 
-Made from_bc single threaded because i think it makes a better example if it's not sharing the CodegenWorker stuff with the new version. 
+Made from_bc single threaded because i think it makes a better example if it's not sharing the CodegenWorker stuff with the new version.
 
 Extracting -legacy. Getting rid of `opts.comptime_jit_vtable` because i think supporting multiple is more painful than it's worth,
 you can still have driver programs for other runtime backends, but for the core thing that has to deal with out of order compilation stuff,
-it's really painful to add any more confusion than necessary. go through and make sure all the ifs on NEW_COMPTIME_JIT are static so we don't have to include the code. 
+it's really painful to add any more confusion than necessary. go through and make sure all the ifs on NEW_COMPTIME_JIT are static so we don't have to include the code.
 
 before:
+
 ```
 >>> compiler configuration: context=implicit, threads=true, debug_assertions=false, nctjit=true
 >>> compiled driver__1783 in [CPU Time] frontend: 160ms, codegen: R:90ms + C:25ms
 >>> [CPU Time] frontend: 1268ms, codegen: 515ms
 >>> 1345576 bytes of code, 87264 bytes of data.
 ```
+
 after:
+
 ```
 >>> compiler configuration: context=implicit, threads=true, debug_assertions=false, nctjit=true
 >>> compiled driver__1950 in [CPU Time] frontend: 296ms, codegen: R:169ms + C:42ms
@@ -192,11 +203,11 @@ after:
 >>> 1105560 bytes of code, 80176 bytes of data.
 ```
 
-Now you have to pay the cost of compiling that in default_driver but you can precompile it and then we're back to how it was before but with a different connotation. 
-I'm considering having drivers use shims too so you don't compile big functions until the first time they get called. 
+Now you have to pay the cost of compiling that in default_driver but you can precompile it and then we're back to how it was before but with a different connotation.
+I'm considering having drivers use shims too so you don't compile big functions until the first time they get called.
 
-the thing where run_tests hangs is because fork doesn't duplicate threads. 
-so when it tries to compile with NEW_COMPTIME_JIT it gets stuck in wait() forever. 
+the thing where run_tests hangs is because fork doesn't duplicate threads.
+so when it tries to compile with NEW_COMPTIME_JIT it gets stuck in wait() forever.
 
 ## (Dec 21)
 
@@ -212,9 +223,9 @@ else {
 ```
 
 and like ok sure, maybe you're not supposed to assume you know what `__objc_yes` is,
-but it would seem that's just so the compiler can tell if you meant to make a bool or an NSNumber 
-(https://releases.llvm.org/3.1/tools/clang/docs/ObjectiveCLiterals.html). 
-we can't be having 6 lines of code per line of code. 
+but it would seem that's just so the compiler can tell if you meant to make a bool or an NSNumber
+(https://releases.llvm.org/3.1/tools/clang/docs/ObjectiveCLiterals.html).
+we can't be having 6 lines of code per line of code.
 
 ```
 #if __has_feature(objc_bool)
@@ -226,36 +237,36 @@ we can't be having 6 lines of code per line of code.
 #endif
 ```
 
-Little vacation from compiler was nice but I'd feel a lot better 
-if i could extract the old backend from the core compiler 
-so stuff gets less insane before i risk forgetting more things. 
+Little vacation from compiler was nice but I'd feel a lot better
+if i could extract the old backend from the core compiler
+so stuff gets less insane before i risk forgetting more things.
 
 Trying to get it to compile the tests that do `@if(@run query_current_arch().unwrap() == .aarch64) {`
-is somehow super painful because of how shims interact with redirects (in this case inserted for #target_os 
-but probably always because there's something in vec that didn't work as a #redirect). 
-It should be so easy but somehow i can't do it. 
-Clearly I need to make that system simpler somehow. 
+is somehow super painful because of how shims interact with redirects (in this case inserted for #target_os
+but probably always because there's something in vec that didn't work as a #redirect).
+It should be so easy but somehow i can't do it.
+Clearly I need to make that system simpler somehow.
 
 Jit shims make fewer redundant calls to report_called_uncompiled_or_just_fix_the_problem:
 
 ```
 // If the entry in __got for the target symbol is not this shim, call it directly.
-// Otherwise, call into the compiler to ask for it to be compiled. 
+// Otherwise, call into the compiler to ask for it to be compiled.
 // Most calls will just go through __got directly in which case this check is wasteful,
 // but it helps in the case where you created a function pointer to the shim and stuck it in memory somewhere,
-// now not every single call to that has to go through the compiler and take a mutex to look at the symbol. 
-// It seems this doesn't make each shim only call into the compiler once (TODO: why?) but it does lower the number. 
+// now not every single call to that has to go through the compiler and take a mutex to look at the symbol.
+// It seems this doesn't make each shim only call into the compiler once (TODO: why?) but it does lower the number.
 ```
 
-not measurably faster but spiritually better. 
+not measurably faster but spiritually better.
 
-need to fix repro. it's only when NEW_COMPTIME_JIT and not -legacy which is iteresting. 
-so it's something about trying to use two modules in new emit_ir at the same time? 
+need to fix repro. it's only when NEW_COMPTIME_JIT and not -legacy which is iteresting.
+so it's something about trying to use two modules in new emit_ir at the same time?
 but -legacy still uses the new backend so it's specifically a frontend problem?
-many programs work tho. parser specifically has this repro problem. 
+many programs work tho. parser specifically has this repro problem.
 ah, there was a path in emit_constant that didn't go through `c.zero_padding(ty, to_zero&);  // Needed for reproducible builds!`
-so thats reassuring. works again. 
-still can't quite articulate why it only happened when both sides used the new thing. 
+so thats reassuring. works again.
+still can't quite articulate why it only happened when both sides used the new thing.
 
 ## (Dec 19)
 
@@ -265,16 +276,16 @@ still can't quite articulate why it only happened when both sides used the new t
 
 - start porting sokol_gl
 - added require_layout_ready(Type) so i can add offset_of
-- start working on translating my language to MSL for shaders. 
-- added get_function_ast so you can do more powerful reflection things at comptime without wrapping everything in a macro. 
-- allow #annotations on struct fields. 
-  they don't do anything, Binding and Field just pass them through, but comptime code can read them. 
-  so i can use them for `layout(binding=0)` / `[[position]]` / etc. 
+- start working on translating my language to MSL for shaders.
+- added get_function_ast so you can do more powerful reflection things at comptime without wrapping everything in a macro.
+- allow #annotations on struct fields.
+  they don't do anything, Binding and Field just pass them through, but comptime code can read them.
+  so i can use them for `layout(binding=0)` / `[[position]]` / etc.
 - shader languages have the vector swizzling thing like `v.xxxx` which would be kinda nice to have so it could be lowered directly for shader translation,
-  and still allow you to run those functions on the cpu if you just want to print out some numbers for debugging. 
-  so im tempted to let you register magic types where field accesses become macro calls, 
-  but maybe that gets super confusing quickly. 
-  did some plumbing for TypeInfo.Swizzler but the compiler doesn't call into it yet. 
+  and still allow you to run those functions on the cpu if you just want to print out some numbers for debugging.
+  so im tempted to let you register magic types where field accesses become macro calls,
+  but maybe that gets super confusing quickly.
+  did some plumbing for TypeInfo.Swizzler but the compiler doesn't call into it yet.
 - (debugtext) parse font data from readable strings at comptime.
 
 ## (Dec 17)
@@ -282,11 +293,11 @@ still can't quite articulate why it only happened when both sides used the new t
 - auto-cast float literals to f32 so you don't always need a `.cast()`
 - allow underscores in literals. `1_000_000_000` is more readable than `1000000000`
 - auto-cast string literals to CStr so you don't always need a `.sym().c_str()`
-- infer type of const fields on structs lazily so you don't need to use `@rec` as often to use them as namespaces. 
-- implement link_rename in from_bc/emit_ir for walk_dir on macos x64. works with -c + clang but segfaults with my own exe. sad day. 
+- infer type of const fields on structs lazily so you don't need to use `@rec` as often to use them as namespaces.
+- implement link_rename in from_bc/emit_ir for walk_dir on macos x64. works with -c + clang but segfaults with my own exe. sad day.
 - fix x64 emit neg acting on the wrong register. that took much too long to find. ugh.
 
-> using a different computer. 
+> using a different computer.
 > recall: `spctl developer-mode enable-terminal` -> Privacy Security Settings -> Developer Tools.
 > makes ./boot go from 19s to 10s.
 

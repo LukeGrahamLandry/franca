@@ -1,5 +1,6 @@
 //! Instruction encoding for wasm32. 
 //! Magic numbers from https://webassembly.github.io/spec/core/binary/index.html
+//! (It baffles me that the web people have made a table of numbers that you cannot copy-paste from; garbage).
 //! Abstraction will continue until moral improves. 
 
 // Note: 
@@ -17,12 +18,9 @@ GlobalIdx :: @struct(id: u32);
 MemIdx :: @struct(id: u32);
 
 wasm_page_size :: 65536;
-NumType        :: @enum(u8) (I32 = 0x7F, I64 = 0x7E, F32 = 0x7D, F64 = 0x7C);
-BlockType      :: @tagged(Empty: void, Value: u8, Index: i33);
 MemArg         :: @struct(offset: u32, align: u32);
 
 fn raw(s: Wasm.Inst) u8 #unsafe_noop_cast;
-fn raw(s: NumType) u8 #unsafe_noop_cast;
 
 // TODO: have a version of @struct that takes a block and lets you have semicolons at the end of things, 
 //       so its less of a waste of time when you decide to stop being lazy and manually namespace everything. 
@@ -30,21 +28,6 @@ fn raw(s: NumType) u8 #unsafe_noop_cast;
 // TODO: confusing FuncIdx=0 is the first local function but when you refer to a function you add the number of imports. 
 Wasm :: @rec @struct(
     //version_magic :: @const_slice(0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00),
-    Module :: @rec @struct(
-        types: List(Wasm.FuncType), // [TypeIdx] function types
-        // Functions are split into two parts. the types are seperate from the code. 
-        functions: List(TypeIdx),  // [FuncIdx]
-        exports: List(Wasm.Export),
-        code: List(Wasm.Func),      // [FuncIdx]
-        imports: List(Wasm.Import),
-        data: List(Wasm.Data),
-        tables: List(Wasm.Table),
-        memories: List(Wasm.Limits),
-        globals: List(Wasm.Global),
-        elements: List(Wasm.Element),
-        imported_function_count := 0,
-    ),
-
     // "Value types can occur in contexts where type indices are also allowed, such as in the case of block types. Thus, the binary format for types corresponds to the signed LEB128 encoding of small negative 
     // values, so that they can coexist with (positive) type indices in the future."
     ValType :: @enum(u8) (
@@ -118,7 +101,6 @@ Wasm :: @rec @struct(
         F64_Const = 0x44,
         VectorPrefix = 0xFD,
     ),
-    
     EncodingKind :: @rec @enum(i64) (other, unary, binary, load, store),
     Encoding :: @rec @struct(
         op: Qbe.O,
@@ -126,25 +108,6 @@ Wasm :: @rec @struct(
         kind: Wasm.EncodingKind,
     ),
 );
-
-fn empty(a: Alloc) Wasm.Module = {
-    (types = list(a), functions = list(a), exports = list(a), 
-    code = list(a), imports = list(a), data = list(a), 
-    tables = list(a), memories = list(a), globals = list(a),
-    elements = list(a))
-}
-
-fn cls(t: Wasm.ValType) Qbe.Cls = {
-    ::enum(Wasm.ValType);
-    @switch(t.raw()) {
-        @case(0x7F) => .Kw;  
-        @case(0x7E) => .Kl;  
-        @case(0x7D) => .Ks;  
-        @case(0x7C) => .Kd;  
-        @default    => .Ke;
-    }
-}
-
 
 // other:  not a simple Ir op
 // unary:  (a)    -> (c)

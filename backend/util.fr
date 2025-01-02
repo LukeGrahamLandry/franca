@@ -164,9 +164,11 @@ fn getcon(f: *Qbe.Fn, val: i64) Qbe.Ref = {
 }
 
 // TODO: call this from elsewhere
-fn symcon(f: *Qbe.Fn, name: Str) Qbe.Ref = {
-    con: Qbe.Con = (type = .CAddr, bits = (i = 0));
-    con.sym.id = f.globals.intern(name);
+fn symcon(f: *Qbe.Fn, name: Str) Qbe.Ref = 
+    f.symcon(f.globals.intern(name));
+
+fn symcon(f: *Qbe.Fn, id: u32) Qbe.Ref = {
+    con: Qbe.Con = (type = .CAddr, sym = (id = id), bits = (i = 0));
     f.newcon(con&)
 }
 
@@ -633,6 +635,7 @@ fn intern(m: *QbeModule, s: Str) u32 = {
     data.name = mem;
     data.got_lookup_offset = -1;
     data.offset = -1;
+    data.wasm_type_index = -1;
     
     b.n = n + 1;
     id := h + n.shift_left(IBits);
@@ -810,6 +813,21 @@ fn for_pars(f: *Qbe.Fn, $body: @Fn(i: *Qbe.Ins) void) void =
         body(i);
     };
 
+fn get_int(f: *Qbe.Fn, r: Qbe.Ref) ?i64 #inline = {
+    if(rtype(r) != .RCon, => return(.None));
+    c := f.get_constant(r);
+    if(c.type != .CBits, => return(.None));
+    (Some = c.bits.i)
+}
+
+// (id, offset)
+fn get_sym(f: *Qbe.Fn, r: Qbe.Ref) ?Ty(u32, i64) #inline = {
+    if(rtype(r) != .RCon, => return(.None));
+    c := f.get_constant(r);
+    if(c.type != .CAddr, => return(.None));
+    (Some = (c.sym.id, c.bits.i))
+}
+
 //////////////////
 /// Ugly Table ///
 //////////////////
@@ -863,9 +881,10 @@ fn argcls_eval(o: Qbe.O, k: Qbe.Cls, argument_index: i64) Qbe.Cls = {
     if (@is(o, .xtest, .acmp, .acmn, .udiv, .urem, .or, .and, .xor, .rem)) {
         return(if(int, => k, => .Ke));  
     };
-    if o.between(.par, .paruh) || (@is(o, .nop, .argv, .pop, .call_indirect)) {
+    if o.between(.par, .paruh) || (@is(o, .nop, .argv, .pop, .global_get)) {
         return(.Kx);
     };
+    
     if (@is(o, .load, .vaarg, .call, .truncl)) {
         return(if(n == 0, => .Kl, => .Kx));
     };
@@ -930,6 +949,13 @@ fn argcls_eval(o: Qbe.O, k: Qbe.Cls, argument_index: i64) Qbe.Cls = {
         return(.Kl);
     };
 
+    if (@is(o, .call_indirect)) {
+        return(if(n == 0, => .Kw, => .Ke));
+    };
+    if (@is(o, .global_set)) {
+        return(if(n == 0, => .Kl, => k));
+    };
+    
     names :: Qbe.O.get_enum_names();
     @panic("invalid op number for argcls %", names[o.raw().zext()])
 }

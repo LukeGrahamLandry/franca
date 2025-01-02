@@ -1,4 +1,20 @@
-ParseWasm :: @struct(w: *Wasm.Module, src: []u8, cursor := 0);
+WasmModule :: @rec @struct(
+    types: List(Wasm.FuncType), // [TypeIdx] function types
+    // Functions are split into two parts. the types are seperate from the code. 
+    functions: List(TypeIdx),  // [FuncIdx]
+    exports: List(Wasm.Export),
+    code: List(Wasm.Func),      // [FuncIdx]
+    imports: List(Wasm.Import),
+    data: List(Wasm.Data),
+    tables: List(Wasm.Table),
+    memories: List(Wasm.Limits),
+    globals: List(Wasm.Global),
+    elements: List(Wasm.Element),
+    imported_function_count := 0,
+);
+
+ParseWasm :: @struct(w: *WasmModule, src: []u8, cursor := 0);
+
 fn parse_wasm(self: *ParseWasm) Result(void, Str) = {
     magic_version := @const_slice(0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00);
     if !self.src.starts_with(magic_version) {
@@ -230,16 +246,6 @@ fn read_u(self: *ParseWasm) Result(i64, Str) = {
     (Ok = value.bitcast())
 }
 
-//fn read_u32(self: *ParseWasm) Result(i64, Str) = {
-//    if self.cursor + 4 > self.src.len {
-//        return(Err = "eof");
-//    };
-//    a, b, c, d := (self.src[self.cursor], self.src[self.cursor + 1], self.src[self.cursor + 2], self.src[self.cursor + 3]);
-//    value: i64 = a.zext().bit_or(b.zext().shift_left(8)).bit_or(c.zext().shift_left(16)).bit_or(d.zext().shift_left(24));
-//    self.cursor += 4;
-//    (Ok = value)
-//}
-
 fn pop(self: *ParseWasm) Result(u8, Str) = {
     if self.cursor >= self.src.len {
         return(Err = "eof");
@@ -267,4 +273,22 @@ fn read_s(self: *LoadWasm) i64 = {
 
 fn read_index(self: *LoadWasm, $T: Type) T #generic = {
     (id = self.read_u().trunc())
+}
+
+fn empty(a: Alloc) WasmModule = {
+    (types = list(a), functions = list(a), exports = list(a), 
+    code = list(a), imports = list(a), data = list(a), 
+    tables = list(a), memories = list(a), globals = list(a),
+    elements = list(a))
+}
+
+fn cls(t: Wasm.ValType) Qbe.Cls = {
+    ::enum(Wasm.ValType);
+    @switch(t.raw()) {
+        @case(0x7F) => .Kw;  
+        @case(0x7E) => .Kl;  
+        @case(0x7D) => .Ks;  
+        @case(0x7C) => .Kd;  
+        @default    => .Ke;
+    }
 }

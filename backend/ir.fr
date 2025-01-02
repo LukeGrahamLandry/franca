@@ -64,7 +64,6 @@ Qbe :: @rec @struct(
         RNull = 7, // represented as (RTmp, 0) but useful for comparisons
     ), // u3
     Target :: @rec @struct(
-        name: Array(u8, 16),
         apple: bool,
         gpr0: i32, /* first general purpose reg */
         ngpr: i32,
@@ -82,8 +81,6 @@ Qbe :: @rec @struct(
         isel: @FnPtr(*Qbe.Fn) void,
         emit_fn: @FnPtr(*Qbe.Fn) void, // don't call this directly 
         finish_module: @FnPtr(*QbeModule) [][]u8,
-        asloc: Array(u8, 4),
-        assym: Array(u8, 4),
         fixup: @FnPtr(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_reloc: *?Fixup) void,
         finish_passes: @FnPtr(*Qbe.Fn) void,
     ),
@@ -254,7 +251,7 @@ Qbe :: @rec @struct(
         nmem: i32,
         nblk: i32,
         retty: i32,  /* index in typ[], -1 if no aggregate return */
-        retr: Qbe.Ref, // indirect return pointer
+        retr: Qbe.Ref, // (during abi pass: indirect return pointer) (reused as SP in wasm isel)
         rpo: QList(*Qbe.Blk),
         reg: u64,
         slot: i32,
@@ -268,7 +265,6 @@ Qbe :: @rec @struct(
         
         globals: *QbeModule,
         escaping_slots: Qbe.BSet,
-        ret_cls: Qbe.Cls,
     ),
     FieldType :: @enum(i32) (
         FEnd,
@@ -327,6 +323,12 @@ Qbe :: @rec @struct(
         is_ref: bool,
         is_str: bool,
         has_quotes_and_escapes: bool,
+    ),
+    WasmGlobalDef :: @rec @struct(
+        id: u32,
+        export: bool,
+        type: Qbe.Cls,
+        init: Qbe.Con,
     ),
     Pool :: @rec @enum(i32) (
         PTemp,
@@ -541,6 +543,8 @@ Qbe :: @rec @struct(
         pop,    // local.set, drop
         call_indirect,
         truncl, // i32.wrap_i64
+        global_get, // (0: RCon of the global to read)
+        global_set, // (0: RCon of the global to write, 1: value)
         
         switch0,
     ),

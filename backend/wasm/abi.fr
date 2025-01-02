@@ -2,6 +2,7 @@
 //! - non-scalar aggragates are always passed by pointer 
 //! - aggragate return pointer is prepended to arguments
 //! - varargs pointer is appended to arguments
+//! - need an entry in the type table for the function's signeture. 
 
 fn wasm_abi(f: *Qbe.Fn) void = {
     // params come in as locals, not on the stack, which seems odd, 
@@ -20,11 +21,14 @@ fn wasm_abi(f: *Qbe.Fn) void = {
         f.retr = f.newtmp("abi", .Kl); 
     };
     
+    m := f.globals;
+    ret_cls := Qbe.Cls.Ke;
+    
+    @if(use_threads) pthread_mutex_lock(m.types_mutex&).unwrap();
     for_blocks f { b |
         changed := false; 
         f.reset_scratch();
         
-        f.ret_cls = .Ke;
         if is_ret(b.jmp.type) && b.jmp.arg != QbeNull {
             @debug_assert(b.jmp.type != .ret0, "J.ret0 had arg");
             // TODO: check if they said its a type but really there's only one scalar 
@@ -32,14 +36,11 @@ fn wasm_abi(f: *Qbe.Fn) void = {
             changed = true;
             if is_scalar {
                 k := @as(Qbe.Cls) @as(i32) b.jmp.type.raw() - Qbe.J.retw.raw();
-                f.ret_cls = k;
+                ret_cls = k;
                 f.emit(.push, k, QbeNull, b.jmp.arg, QbeNull);
             } else {
                 @debug_assert(f.retr != QbeNull, "missing indirect return pointer");
-                m := f.globals;
-                @if(use_threads) pthread_mutex_lock(m.types_mutex&).unwrap();
-                size := m.types[][f.retty.zext()].size; 
-                @if(use_threads) pthread_mutex_unlock(m.types_mutex&).unwrap();
+                size := m.get_type(f.retty.zext())[].size; 
                 f.emit(.blit1, .Kw, QbeNull, INT(size), QbeNull);
                 f.emit(.blit0, .Kw, QbeNull, b.jmp.arg, f.retr);  // src, dest
             };
@@ -60,6 +61,19 @@ fn wasm_abi(f: *Qbe.Fn) void = {
             
             @debug_assert(!@is(i.op(), .vaarg, .vastart), "TODO: wasm c-varargs");
             if i.op() == .call {
+                type := type_index_for_call(f, b, i);
+                if f.get_sym(i.arg&[0]) { id, off | 
+                    use_symbol(m, id) { s |
+                        @debug_assert_eq(off, 0, "tried to call offset from symbol ($% + %)\nwhich is probably a mistake for any target but certainly not possible on wasm.", s.name, off);
+                        if s.kind != .Local {
+                            // We allow imports without type declarations, but wasm's import table does not. 
+                            // So if we haven't seen this symbol yet, it might be an import, so we need to save the type info from this call. 
+                            s.wasm_type_index = type;
+                            // TODO: if we deduplicated types we could do a typecheck here to make sure we don't generate an invalid module. 
+                        };
+                    }; 
+                };
+                
                 f.move_end_of_block_to_scratch(b, i, changed&);
                 
                 // TODO: check if they said its a type but really there's only one scalar and it should be converted to a load. 
@@ -74,6 +88,7 @@ fn wasm_abi(f: *Qbe.Fn) void = {
                     pending_indirect_return = i.to;
                 };
                 i.to = QbeNull;
+                i.arg&[1] = CALL(type.intcast());
                 f.emit(i[]);
                 continue();
             };
@@ -105,8 +120,51 @@ fn wasm_abi(f: *Qbe.Fn) void = {
         };
     };
     
+    use_symbol(m, f.lnk.id) { s |
+        s.wasm_type_index = pack_wasm_result_type m { $yield_arg |
+            for_pars(f, fn(i) => yield_arg(i.cls()));
+        } and { $yield_ret |
+            if(ret_cls != .Ke, => yield_ret(ret_cls));
+        };
+    }; 
+    
+    @if(use_threads) pthread_mutex_unlock(m.types_mutex&).unwrap();
+    
     when_debug(f, .Abi) { out | 
         write(out, "\n> After ABI lowering:\n");
         printfn(f, out);
     }
 }
+
+fn type_index_for_call(f: *Qbe.Fn, b: *Qbe.Blk, call: *Qbe.Ins) i32 = {
+    arg0 := find_first_arg(b, call);
+    void := call.to == QbeNull;
+    scalar := !void && is_scalar(f, call.arg&[1]);
+    pack_wasm_result_type f.globals { $yield_arg |
+        if !void && !scalar {
+            yield_arg(.Kl);
+        };
+        for(arg0, call) { i |
+            yield_arg(i.cls());
+        };
+    } and { $yield_ret |
+        if(scalar, => yield_ret(call.cls())); // TODO: cls is wrong once we do single field structs correctly
+    }
+}
+
+fn is_scalar(f: *Qbe.Fn, maybe_type: Qbe.Ref) bool = {
+    if(rtype(maybe_type) != .RType, => return(true));
+    // TODO: you need to do this to implement the abi properly but then need to deal with converting to a pointer when expected by the ir. 
+    // is_scalar(f, maybe_type.val())
+    false
+}
+
+fn is_scalar(f: *Qbe.Fn, type_index: i64) bool = {
+    m := f.globals;
+    type := m.get_type(type_index);
+    if(type.is_union, => return(false));
+    fst := type.fields[0]&;
+    @debug_assert(fst.type != .FEnd, "You should not have 0-sized types in the IR. Lower them in the frontend instead please.");
+    if(type.fields[1].type != .FEnd, => return(false));
+    fst.type != .FType || is_scalar(f, fst.len.intcast()) 
+} 

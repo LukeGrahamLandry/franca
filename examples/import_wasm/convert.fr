@@ -4,8 +4,9 @@ use_threads :: false;
 
 // TODO: this could be hella faster: 
 //       - there's a wasteful prepass that splits up bits of the module into a big data structure. 
-//       - the parser+wasm->ir could be on a different thread from the ir->asm + you could compile multiple functions in parallel,
-//         but that requires more careful use of temp() which will be easier once i implement thread locals in Franca. 
+//       - the parser+wasm->ir could be on a different thread from the ir->asm 
+//         (i have the machinery to do this already because the Franca compiler works that way)
+//         + you could compile multiple functions in parallel (but that would need more work).
 //       - the number of bounds checks the parser does per byte is a bit sad. 
 //       - the way i deal with adjusting indexes for imports is silly. 
 //       - could inline more if we pre-sorted based on callgraph,
@@ -37,22 +38,54 @@ fn main() void = {
             };
             wasm&.load_module();
             
+            buf := page_allocator.alloc(u8, wasm.w.memories[0].min.zext() * wasm_page_size);
+            wasm_context_pointer := u8.int_from_ptr(buf.ptr);
+            
+            {
+                @assert_eq(p.w.data.len, 1, "TODO: multiple datas");
+                data := wasm.w.data[0]&;
+                expr := data.active_offset_expr;
+                @assert_ne(expr.len, 0, "TODO: passive data");
+                off, k := const_eval_wasm_expr(expr.items());
+                @debug_assert_eq(k, .Kw, "offset expression");
+                buf.subslice(off, data.bytes.len).copy_from(data.bytes.items());
+            };
+            
             module&.emit_suspended_inlinables();
+            module&.put_jit_addr(module&.intern("write$host"), @as(rawptr) fn(ctx: *u8, ptr: u32, len: u32) void = {
+                s: []u8 = (ptr = ctx.offset(ptr.zext()), len = len.zext());
+                println(s);
+            });
             module&.make_exec();
-            f := or module&.get_addr("module_f0") {
-                panic("couldn't find module_f0()")
+            
+            n := "module_f1";
+            f := or module&.get_addr(n) {
+                @panic("couldn't find %()", n)
             };
             f := assume_types_fn(Arg = Ty(i64, i32, i32), Ret = i32, ptr = f);
-            wasm_context_pointer := 0;
-            result := f(wasm_context_pointer, 1, 2);
-            @println("1 + 2 = %", result);
+            result := f(wasm_context_pointer, 5, 2);
+            @println("5 - 2 = %", result);
+            
+            n := "module_f2";
+            f := or module&.get_addr(n) {
+                @panic("couldn't find %()", n)
+            };
+            f := assume_types_fn(Arg = i64, Ret = void, ptr = f);
+            f(wasm_context_pointer);
         };
     };
 }
 
+fn const_eval_wasm_expr(expr: []u8) Ty(i64, Qbe.Cls) = {
+    @assert_eq(expr[0], @as(u8) Wasm.Inst.I32_Const, "TODO: complex expr");
+    v, _, ok := read_leb128_unsigned(expr.rest(1));
+    @debug_assert(ok, "bad constant expression");
+    (v.bitcast(), .Kw)
+} 
+
 LoadWasm :: @struct(
     m: *QbeModule,
-    w: Wasm.Module,
+    w: WasmModule,
     stack: List(Qbe.Ref),
     locals: []Qbe.Ref,  // TODO: we can't store a 128 bit vector in a temporary 
     f := zeroed(*Qbe.Fn),
@@ -66,6 +99,7 @@ LoadWasm :: @struct(
     blocks: List(*Qbe.Blk),
     return_types: []Wasm.ValType = empty(),
     link := zeroed(**Qbe.Blk),
+    global_names: []u32 = empty(),
 );
 
 fn create_init_func(self: *LoadWasm) void = {
@@ -87,8 +121,9 @@ fn create_init_func(self: *LoadWasm) void = {
 }
 
 fn load_module(self: *LoadWasm) void = {
+    self.create_globals();
     self.create_init_func();
-
+    
     enumerate self.w.code& { local_func_i, code | 
         global_func_i := local_func_i + self.w.imported_function_count;
         mark := mark_temporary_storage();
@@ -140,13 +175,12 @@ fn load_module(self: *LoadWasm) void = {
         self.emit_the_code();
         self.emit_return(self.return_types);
         
-        
         self.f.lnk.export = true; // TODO
         
-        printfn(self.f, self.f.globals.debug_out);
-        //each self.f.globals.debug { d | 
-        //    d[] = true;
-        //};
+        //printfn(self.f, self.f.globals.debug_out);
+        each self.f.globals.debug { d | 
+            d[] = true;
+        };
         if typecheck_failed(self.f) { err | 
             printfn(self.f, self.f.globals.debug_out);
             @panic("IR failed typecheck: %", err);
@@ -155,6 +189,24 @@ fn load_module(self: *LoadWasm) void = {
         reset_temporary_storage(mark);
     };
 }
+
+fn create_globals(self: *LoadWasm) void = {
+    self.global_names = libc_allocator.alloc(u32, self.w.globals.len); // :Leak
+    enumerate self.w.globals& { local_global_i, global | 
+        // TODO: offset the index by number of imported globals
+        id := self.m.intern(@tfmt("%_G%", self.module_name, local_global_i));
+        self.global_names[local_global_i] = id;
+        lnk: Qbe.Lnk = (id = id);
+        dat := Qbe.Dat.zeroed();
+        dat.lnk = lnk&;
+        dat.type = .DStart;
+        self.m.emit_data_to_segment(dat&);
+        dat.type = @if(global.type == .I32 || global.type == .F32, .DW, .DL);
+        self.m.emit_data_to_segment(dat&);
+        dat.type = .DEnd;
+        self.m.emit_data_to_segment(dat&);
+    };
+}   
 
 fn push_block(self: *LoadWasm) *Qbe.Blk = {
     old := self.blocks&.pop().expect("a block on the stack");
@@ -173,7 +225,7 @@ fn push_block(self: *LoadWasm) *Qbe.Blk = {
 fn link_new_block(self: *LoadWasm) *Qbe.Blk = {
     b := newblk();
     @if(TRACK_IR_NAMES) {
-        l: List(u8) = (maybe_uninit = b.name&.items(), len = 0, gpa = panicking_allocator); // :UnacceptablePanic
+        l := fixed_list(b.name&.items()); // :UnacceptablePanic
         @fmt(l&, "%", self.f.nblk);
     };
     self.f.nblk += 1;
@@ -223,7 +275,7 @@ fn emit_the_code(self: *LoadWasm) void = {
             fn load() => {
                 align := self.read_u();
                 offset := self.read_u();
-                println("TODO: wasm load"); 
+                panic("TODO: wasm load"); 
                 self.stack&.pop().unwrap();
                 self.stack&.push(QbeNull);
                 continue(); // TODO
@@ -231,9 +283,10 @@ fn emit_the_code(self: *LoadWasm) void = {
             fn store() => {
                 align := self.read_u();
                 offset := self.read_u();
-                println("TODO: wasm store"); 
-                self.stack&.pop().unwrap();
-                self.stack&.pop().unwrap();
+                value := self.stack&.pop().unwrap();
+                addr := self.stack&.pop().unwrap();
+                addr := self.compute_address(addr, offset.bitcast());
+                self.f.emit(encoding.op, encoding.cls, QbeNull, value, addr);
                 continue(); // TODO
             };
         };
@@ -288,15 +341,18 @@ fn emit_the_code(self: *LoadWasm) void = {
                 self.blk = continuation;
             };
             @case(.GlobalSet) => {
-                println("TODO: global.set");
-                i := self.read_u();
-                val := self.stack&.pop();
+                i: i64 = self.read_u().bitcast();
+                g := self.f.symcon(self.global_names[i]);
+                val := self.stack&.pop().expect("enough stack");
+                self.f.emit(.storew, .Kw, QbeNull, val, g); // TODO: other types!
             };
             @case(.GlobalGet) => {
-                println("TODO: global.get");
-                i := self.read_u();
-                val := QbeNull;
+                i: i64 = self.read_u().bitcast();
+                g := self.f.symcon(self.global_names[i]);
+                k := Qbe.Cls.Kw; // TODO: other types
+                val := self.f.newtmp("global_get", k);
                 self.stack&.push(val);
+                self.f.emit(.load, k, val, g, QbeNull);
             };
             @case(.VectorPrefix) => panic("Vector instructions are not supported (0xFD prefix)");
             @case(.Nop) => ();
@@ -313,6 +369,18 @@ fn emit_the_code(self: *LoadWasm) void = {
             };
         };
     };
+}
+
+
+fn compute_address(self: *LoadWasm, addr: Qbe.Ref, offset: i64) Qbe.Ref = {
+    f := self.f;
+    r0 := f.newtmp("a", .Kl);
+    r1 := f.newtmp("a", .Kl);
+    r2 := f.newtmp("a", .Kl);
+    f.emit(.extuw, .Kl, r0, addr, QbeNull);
+    f.emit(.add, .Kl, r1, self.global_store, r0);
+    f.emit(.add, .Kl, r2, r1, f.getcon(offset));
+    r2
 }
 
 fn local_inst(self: *LoadWasm, delta: i64) void = {
@@ -382,7 +450,7 @@ fn remap_global(self: *LoadWasm, kind: i64, id: i64) Qbe.Ref = {
             name := if import.is_some() {
                 // TODO: no this doesn't make any since, the binding of names should happen separately. 
                 import := self.w.imports&.index(import.Some);
-                @tfmt("%_f%", import.module.items(), import.name.items())
+                @tfmt("%$%", import.name.items(), import.module.items())
             } else {
                 // :WasmNameMangling
                 @tfmt("%_f%", self.module_name, id)
@@ -397,7 +465,7 @@ fn remap_global(self: *LoadWasm, kind: i64, id: i64) Qbe.Ref = {
 }
 
 // TODO: this is stupid. store them in seperate arrays. surely you never need to refer to them by an untyped import index. 
-fn find_import_index(self: *Wasm.Module, kind: i64, id: i64) ?i64 = {
+fn find_import_index(self: *WasmModule, kind: i64, id: i64) ?i64 = {
     i := 0;
     each self.imports& { check | 
         ::tagged(@type check.desc);
@@ -412,6 +480,6 @@ fn find_import_index(self: *Wasm.Module, kind: i64, id: i64) ?i64 = {
 }
 
 // (dest_offset, src_offset_in_data, size_to_copy)  // TODO: make sure those arguments are right
-fn emit_memory_init(self: *Wasm.Module, data_id: i64) void = {
+fn emit_memory_init(self: *WasmModule, data_id: i64) void = {
     todo()
 }

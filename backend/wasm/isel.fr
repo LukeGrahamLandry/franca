@@ -9,18 +9,34 @@
 
 fn wasm_isel(f: *Qbe.Fn) void = {
     assign_alloc_slots(f);
-    // TODO: remap uses to RSlot
     
     insert_blocks_for_conditional_phis(f);
+    
+    // We want to help the compiler on the other end:
+    // we know that we don't care about any changes to this global inside our callees (because they'll always reset it),
+    // so use a local that doesn't escape so it doesn't have to reload it on every single stack access. 
+    stackbase := f.unique_named_con(f.globals.wasm_symbol_stackbase, 0);
+    did_sp_load := false; // :UGLY
+    if f.slot > 0 {
+        f.retr = f.newtmp("SP", .Kw);
+        f.get_temporary(f.retr)[].nuse = 99; // HACK
+    } else {
+        f.retr = QbeNull;
+    };
     
     for_blocks f { b | 
         f.reset_scratch();
         
-        b.wasm_type = wasm_block_type_from_phis(f.globals, b).intcast();
+        b.wasm_type = wasm_block_type_from_phis(f.globals, b);
         
         // Last thing before we jump to another block: push phi values to the stack. 
         @match(b.jmp.type) {
-            fn ret0() => ();
+            fn ret0() => {
+                if f.slot > 0 && !f.leaf {
+                    f.emit(.global_set, .Kw, QbeNull, stackbase, QbeNull);
+                    f.wasm_push(.Kw, f.retr);
+                };
+            }
             fn hlt()  => ();
             fn jmp() => {
                 // TODO: backwards?
@@ -39,8 +55,21 @@ fn wasm_isel(f: *Qbe.Fn) void = {
         };
         @debug_assert(b.jmp.arg == QbeNull);
         
+        do_sp_load :: fn() => if f.slot > 0 {
+            f.emit(.pop, .Kw, f.retr, QbeNull, QbeNull);
+            f.emit(.global_get, .Kw, QbeNull, stackbase, QbeNull);
+            did_sp_load = true;
+        };
+        
         for_insts_rev b { i |
+            if !did_sp_load && i[].op() == .par {
+                do_sp_load();
+            };
             sel_wasm(f, i[]);
+        };
+        
+        if !did_sp_load && f.start.identical(b) {
+            do_sp_load();
         };
         
         // First thing that happens: any incoming phis are on the stack (as block arguments) and we pop them into thier locals. 
@@ -59,6 +88,7 @@ fn wasm_isel(f: *Qbe.Fn) void = {
     for_blocks f { b | 
         b.phi = zeroed(@type b.phi);
     };
+    f.retr = QbeNull;
 
     when_debug(f, .InstSelect) { out | 
         write(out, "\n> After instruction selection:\n");
@@ -67,15 +97,17 @@ fn wasm_isel(f: *Qbe.Fn) void = {
 }
 
 // We need a type annotation for the block's affect on the stack: (incoming phis) -> (outgoing phis)
-fn wasm_block_type_from_phis(m: *QbeModule, b: *Qbe.Blk) i64 = {
-    has_inputs := !b.phi.is_null();
+fn wasm_block_type_from_phis(m: *QbeModule, b: *Qbe.Blk) i32 = {
+    has_inputs  := !b.phi.is_null();
     has_outputs := b.jmp.type == .jmp && !b.s1.phi.is_null();
     has_multiple_outputs := has_outputs && !b.s1.phi.link.is_null();
     
-    if(!has_inputs && !has_outputs,          => return(wasm_type_preleb(.EmptyBlock)));                 // () -> ()
-    if(!has_inputs && !has_multiple_outputs, => return(wasm_type_preleb(to_wasm_type(b.s1.phi.cls))));  // () -> (k)
-    
+    if !has_inputs {
+        if(!has_outputs,          => return(wasm_type_preleb(.EmptyBlock)));                 // () -> ()
+        if(!has_multiple_outputs, => return(wasm_type_preleb(to_wasm_type(b.s1.phi.cls))));  // () -> (k)
+    };
     // Otherwise it's an index into the type table. 
+    
     pack_wasm_result_type m { $yield_arg |
         for_phi b { p |
             yield_arg(p.cls);
@@ -88,7 +120,7 @@ fn wasm_block_type_from_phis(m: *QbeModule, b: *Qbe.Blk) i64 = {
 }
 
 // returns the number that when encoded in sleb128 will encode this type. 
-fn wasm_type_preleb(t: Wasm.ValType) i64 = {
+fn wasm_type_preleb(t: Wasm.ValType) i32 = {
     mask :: bit_and(-1, bit_not(1.shift_left(6) - 1));
     x :i64= bit_or(t.raw().zext(), mask);
     { // :SLOW. TODO: can be removed when i trust. 
@@ -96,13 +128,18 @@ fn wasm_type_preleb(t: Wasm.ValType) i64 = {
         leb128_signed(buf&, x);
         @debug_assert_eq(t.raw(), buf[0]);
     };
-    x
+    x.intcast()
 }
 
 fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
     if(try_kill_inst(f, i), => return());
-    if is_par(i.op()) || (@is(i.op(), .pop, .push)) {  // TODO: call_indirect
+    if is_par(i.op()) || (@is(i.op(), .pop)) {  // TODO: call_indirect
         f.emit(i[]);
+        return();
+    };
+    
+    if i.op() == .push {
+        f.wasm_push(i.cls(), i.arg&[0]);  // fixarg
         return();
     };
     
@@ -113,7 +150,7 @@ fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
     };
     
     if i.to != QbeNull {
-        f.emit(.pop, i.cls(), i.to, QbeNull, QbeNull);
+        f.wasm_pop(i.cls(), i.to);
     };
     
     // copy is just push+pop, no actual op
@@ -123,7 +160,7 @@ fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
     
     if is_store(i.op()) {
         k := argcls(i, 0);
-        f.emit(.push, k, QbeNull, i.arg&[0], QbeNull);
+        f.wasm_push(k, i.arg&[0]);
         wasm_push_addr(f, i.arg&[1]);
         return();
     };
@@ -132,23 +169,47 @@ fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
         return();
     };
     
+    g := @is(i.op(), .global_get, .global_set);
+    
     enumerate i.arg&.items() { idx, a |
-        if a[] != QbeNull {
+        if a[] != QbeNull && !(g && idx == 0) {
             k := argcls(i, idx);
-            f.emit(.push, k, QbeNull, a[], QbeNull);
+            f.wasm_push(k, a[]);
         };
     };
+}
+
+fn wasm_push(f: *Qbe.Fn, k: Qbe.Cls, r: Qbe.Ref) void = {
+    if rtype(r) == .RTmp {
+        slot_offset := f.get_temporary(r)[].slot;
+        if slot_offset != -1 {
+            // TODO: i think i want to split the memory folding out from coming out of ssa form. 
+            //r = SLOT(slot_offset);
+            
+            k = Qbe.Cls.Kw;
+            slot_offset = f.slot - slot_offset;
+            f.emit(.sub,  k, QbeNull, QbeNull, QbeNull);
+            f.emit(.push, k, QbeNull, f.getcon(slot_offset.intcast()), QbeNull);
+            f.emit(.push, k, QbeNull, f.retr, QbeNull);
+            return();
+        };
+    };
+    f.emit(.push, k, QbeNull, r, QbeNull);
+}
+
+fn wasm_pop(f: *Qbe.Fn, k: Qbe.Cls, r: Qbe.Ref) void = {
+    f.emit(.pop, k, r, QbeNull, QbeNull);
 }
 
 // TODO: convert addresses to .Kw earlier so don't have to insert as many .truncl
 // TODO: fold imm offset / slots
 fn wasm_push_addr(f: *Qbe.Fn, r: Qbe.Ref) void = {
-    if rtype(r) == .RTmp {
-        f.emit(.truncl, .Kw, QbeNull, QbeNull, QbeNull);
-        f.emit(.push, .Kl, QbeNull, r, QbeNull);
-    } else {
-        f.emit(.push, .Kw, QbeNull, r, QbeNull);
+    k := Qbe.Cls.Kw;
+    if rtype(r) == .RTmp && f.get_temporary(r)[].slot == -1 {
+        f.emit(.truncl, k, QbeNull, QbeNull, QbeNull);
+        k = .Kl;
     };
+    f.wasm_push(k, r);
 }
 
 // J.jmp: phi nodes can trivially be converted to block arguments. 

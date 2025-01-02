@@ -21,21 +21,10 @@ fn emit_func_wasm32(f: *Qbe.Fn) void = {
         a = (maybe_uninit = (ptr = code.next, len = code.cap() - code.len()), len = 0, gpa = panicking_allocator),
         block_stack = list(temp()), 
     ); e := e&;
-    
-    // TODO: instead of carefully saving ret_cls, just do this during the abi pass instead. 
-    type_index := pack_wasm_result_type e.m { $yield_arg |
-        for_pars f { i |
-            yield_arg(i.cls());
-        };
-    } and { $yield_ret |
-        if f.ret_cls != .Ke {
-            yield_ret(f.ret_cls);
-        };
-    };
-    
+   
+    printfn(f, f.globals.debug_out);
     use_symbol(e.m, f.lnk.id) { s |
         s.got_lookup_offset = e.m.local_needs_reloc.len;
-        s.wasm_function_type_index = type_index;
     };
     e.m.local_needs_reloc&.push(f.lnk.id);
     
@@ -70,7 +59,7 @@ fn emit_func_wasm32(f: *Qbe.Fn) void = {
 }
 
 // im so impressed that this works
-fn pack_wasm_result_type(m: *QbeModule, $iter_args: @Fn(yield: @Fn(k: Qbe.Cls) void) void, $iter_ret: @Fn(yield: @Fn(k: Qbe.Cls) void) void) i64 = {
+fn pack_wasm_result_type(m: *QbeModule, $iter_args: @Fn(yield: @Fn(k: Qbe.Cls) void) void, $iter_ret: @Fn(yield: @Fn(k: Qbe.Cls) void) void) i32 = {
     m.stubs&.reserve(Wasm.ValType)[] = .ResultStart;
     body :: fn($iter) => {
         count := m.stubs&.reserve(u8);
@@ -177,6 +166,14 @@ fn emit_block(e: *EmitWasmFn, b: *Qbe.Blk) void = {
 fn emit(e: *EmitWasmFn, i: *Qbe.Ins) void = {
     if lookup_wasm_encoding(i.op(), i.cls()) { byte |
         e.a&.push(byte);
+        if maybe_load(i) { size |
+            e.a&.push(@as(u8) size.zext().trailing_zeros().trunc());  // align hint
+            e.a&.push(0);
+        };
+        if maybe_store(i) { size | 
+            e.a&.push(@as(u8) size.zext().trailing_zeros().trunc());  // align hint
+            e.a&.push(0);
+        };
         return();
     };
     
@@ -186,11 +183,7 @@ fn emit(e: *EmitWasmFn, i: *Qbe.Ins) void = {
             @debug_assert(i.arg&[0].rtype() == .RCon, "use call_indirect for non-constant callee");
             c := e.f.get_constant(i.arg&[0]);
             @debug_assert(c.type == .CAddr && c.bits.i == 0, "wasm can only call symbols");
-            use_symbol(e.m, c.sym.id) { s |
-                patch_at := e.a.maybe_uninit.ptr.offset(e.a.len);
-                push_fixup(e.m, s, (patch_at = patch_at, type = (WasmIndex = (space = .Func))));
-            };
-            e.pad(WASM_INDEX_PADDING);
+            e.index_patch(c.sym.id, .Func);
         }
         fn call_indirect() => {
             eprintln("TODO");
@@ -240,7 +233,6 @@ fn emit(e: *EmitWasmFn, i: *Qbe.Ins) void = {
                 leb128_unsigned(e.a&, local_index.zext());
             }
             fn RSlot() => {
-                // TODO: offset from stack pointer 
                 eprintln("TODO");
             }
             @default => @panic("invalid argument for op push");
@@ -256,10 +248,45 @@ fn emit(e: *EmitWasmFn, i: *Qbe.Ins) void = {
             e.op(.LocalSet);
             leb128_unsigned(e.a&, local_index.zext());
         }
+        fn global_set() => {
+            id, off := e.f.get_sym(i.arg&[0]) || @panic("global_set arg0 must be a symbol");
+            @debug_assert_eq(off, 0);
+            @debug_assert(i.arg&[1] == QbeNull, "should be on stack, not in a local");
+            e.op(.GlobalSet);
+            // :OnlyOneGlobal
+            @debug_assert_eq(id, e.m.wasm_symbol_stackbase);
+            e.a&.push(0);
+            // e.index_patch(id, .Global);
+        }
+        fn global_get() => {
+            id, off := e.f.get_sym(i.arg&[0]) || @panic("global_get arg0 must be a symbol");
+            @debug_assert_eq(off, 0);
+            e.op(.GlobalGet);
+            // :OnlyOneGlobal
+            @debug_assert_eq(id, e.m.wasm_symbol_stackbase);
+            e.a&.push(0);
+            // e.index_patch(id, .Global);
+        }
         fn nop()    => ();
         fn dbgloc() => ();
         @default => @panic("TODO: wasm encoding for %", i.op());
     };
+}
+
+// Stack grows downwards and __stack_base points to the bottom of our frame. 
+fn slot(e: *EmitWasmFn, r: Qbe.Ref) i64 = {
+    s := i.arg&[0].val();
+    f := f.slot.zext();
+    @debug_assert(f > s && s > 0, "invalid RSlot %", s);
+    (f - s) * 4
+}
+
+fn index_patch(e: *EmitWasmFn, id: u32, _space: Wasm.ImportType) void = {
+    use_symbol(e.m, id) { s |
+        patch_at := e.a.maybe_uninit.ptr.offset(e.a.len);
+        push_fixup(e.m, s, (patch_at = patch_at, type = .WasmIndex));
+    };
+    e.pad(WASM_INDEX_PADDING);
 }
 
 fn pad(e: *EmitWasmFn, count: i64) void = range(0, count) { _ |
@@ -271,7 +298,8 @@ fn op(e: *EmitWasmFn, o: Wasm.Inst) void =
 
 fn fixup_wasm32(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_reloc: *?Fixup) void = {
     @match(fixup.type) {
-        fn WasmIndex(it) => {
+        fn WasmIndex() => {
+            @debug_assert_ne(symbol.got_lookup_offset, -1);
             lst: List(u8) = (maybe_uninit = (ptr = fixup.patch_at, len = WASM_INDEX_PADDING), len = 0, gpa = panicking_allocator);
             leb128_unsigned(lst&, symbol.got_lookup_offset);
         }
@@ -288,10 +316,17 @@ fn fixup_wasm32(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_re
 
 // order matters
 fn output_wasm_module(m: *QbeModule) [][]u8 = {
+    min_mem_pages := 200; // TODO: set this to something good
+    stack_size := 1.shift_left(23); // 8MB
+    
+    memory_reserved := wasm_page_size;  // :WasmZeroPage
+    data_seg := m.segments&[.MutableData]&;
+    data_size := data_seg.len() - wasm_page_size;  // :WasmZeroPage
+    memory_reserved += data_size;
+    
     // TODO: remove
     code_count := m.segments&[.Code]&.len() - COMMANDS_SIZE_GUESS - SIZE_OF_STUBS;
-    data_count := m.segments&[.MutableData]&.len();
-    @eprintln(">>> % bytes of code, % bytes of data.", code_count, data_count);
+    @eprintln(">>> % bytes of code, % bytes of data.", code_count, data_size);
     
     // we need to know how many imports there are before we can start patching anything. 
     for_symbols m { id, symbol | // :SLOW  just keep list of pending symbols instead
@@ -332,19 +367,44 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
     {
         push_buf { buf |
             buf.push(@as(u8) Wasm.Section.Type);
-            leb128_unsigned(buf, m.stubs&.len() + uleb_size(m.wasm_function_type_count));
-            leb128_unsigned(buf, m.wasm_function_type_count);
+            leb128_unsigned(buf, m.stubs&.len() + uleb_size(m.wasm_function_type_count.intcast()));
+            leb128_unsigned(buf, m.wasm_function_type_count.intcast());
         };
         chunks&.push(m.stubs.mmapped.slice(0, m.stubs&.len()));
     }; 
     
-    // IMPORTS go here
+    {
+        imports_buf := u8.list(m.imports.len * 10, temp());
+        for m.imports& { id |
+            use_symbol(m, id) { s |
+                sep := index_of(s.name, "$".ascii());
+                mod, name := ("", s.name);
+                if sep { sep |
+                    name = s.name.slice(0, sep);
+                    mod = s.name.rest(sep + 1);
+                };
+                leb128_unsigned(imports_buf&, mod.len);
+                imports_buf&.push_all(mod);
+                leb128_unsigned(imports_buf&, name.len);
+                imports_buf&.push_all(name);
+                // For now we only do functions
+                push(imports_buf&, @as(u8) Wasm.ImportType.Func);
+                leb128_unsigned(imports_buf&, s.wasm_type_index.intcast());
+            };
+        };
+        push_buf { buf |
+            buf.push(@as(u8) Wasm.Section.Import);
+            leb128_unsigned(buf, imports_buf.len() + uleb_size(m.imports.len));
+            leb128_unsigned(buf, m.imports.len);
+        };
+        chunks&.push(imports_buf.items());
+    }; 
     
     {
         function_type_indices := u8.list(m.local_needs_reloc.len, temp());
         for m.local_needs_reloc& { id |
             use_symbol(m, id) { s |
-                leb128_unsigned(function_type_indices&, s.wasm_function_type_index); 
+                leb128_unsigned(function_type_indices&, s.wasm_type_index.intcast()); 
             };
         };
         
@@ -359,15 +419,36 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
     // TABLES, go here
     
     push_buf { buf |
-        min_mem := 40; // TODO: set this to something good
-        
         buf.push(@as(u8) Wasm.Section.Memory);
-        leb128_unsigned(buf, 1 + 1 + uleb_size(min_mem));
+        leb128_unsigned(buf, 1 + 1 + uleb_size(min_mem_pages));
         buf.push(1); // length of memories vec
         buf.push(0); // no max
-        leb128_unsigned(buf, min_mem);
+        leb128_unsigned(buf, min_mem_pages);
     };
     
+    {
+        // :OnlyOneGlobal so __stackbase is index 0 and doesn't need a patch
+        // TODO: this will have to change if we want to allow frontends to create thier own wasm globals. 
+    
+        // Create a global for the stack pointer
+        memory_reserved += stack_size;
+        stack_base := memory_reserved;  // :WasmZeroPage
+        
+        push_buf { buf |
+            buf.push(@as(u8) Wasm.Section.Global);
+            leb128_unsigned(buf, 1 + 1 + 1 + 1 + uleb_size(stack_base) + 1);
+            
+            push(buf, 1); // length of globals vector
+            
+            push(buf, @as(u8) Wasm.ValType.I32); // type
+            push(buf, 1); // mutable
+            
+            // initial value
+            push(buf, @as(u8) Wasm.Inst.I32_Const);
+            leb128_unsigned(buf, stack_base);
+            push(buf, @as(u8) Wasm.Inst.End);
+        };
+    };
     // GLOBALS, go here
     
     if m.exports.len > 0 {
@@ -399,25 +480,19 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
     // START, ELEM, go here
     
     {
+        padding :: COMMANDS_SIZE_GUESS + SIZE_OF_STUBS;
+        total_code_bytes := code_segment.len() - padding;
         push_buf { buf |
             buf.push(@as(u8) Wasm.Section.Code);
-            total_code_bytes := code_segment.len() - COMMANDS_SIZE_GUESS - SIZE_OF_STUBS;
             f_count := m.local_needs_reloc.len;
             total_section_bytes := total_code_bytes + uleb_size(f_count);
             leb128_unsigned(buf, total_section_bytes);
             leb128_unsigned(buf, f_count);
         };
         
-        for m.local_needs_reloc& { id |
-            use_symbol(m, id) { s |
-                chunks&.push(code_segment.mmapped.subslice(s.offset, s.size));
-            };
-        };
+        chunks&.push(code_segment.mmapped.slice(padding, code_segment.len()));
     };
     
-    // :WasmZeroPage
-    data_seg := m.segments&[.MutableData]&;
-    data_size := data_seg.len() - wasm_page_size;
     if data_size > 0 {
         push_buf { buf |
             buf.push(@as(u8) Wasm.Section.Data);
@@ -440,6 +515,7 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
         total_size += c.len;
     };
     @eprintln(">>> % bytes total module", total_size);
+    @assert_le(memory_reserved, min_mem_pages * wasm_page_size);
     
     chunks.items()
 }

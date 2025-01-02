@@ -124,7 +124,8 @@ QbeModule :: @rec @struct(
     icache_mutex: PMutex,
     intern_mutex: PMutex,
     
-    wasm_function_type_count := 0,
+    wasm_function_type_count: i32,
+    wasm_symbol_stackbase: u32,
 );
 
 QbeTargetEnv :: @struct(
@@ -283,6 +284,7 @@ fn init(m: *QbeModule, segment_size: i64, gpa: Alloc, goal: QbeTargetEnv, expect
     m.types[] = m.new_long_life(0); // TODO: check the magic in QbeBuilder.init to make sure you remember to do this. 
     m.curi[] = m.insb.index_unchecked(Qbe.MaxInstructions);
     m.symbol_memmove = m.intern("memmove");
+    m.wasm_symbol_stackbase = m.intern("__stack_base");
 }
 
 fn init_empty_for_template_only(m: *QbeModule, gpa: Alloc) void = {
@@ -506,7 +508,7 @@ fn typecheck_failed(f: *Qbe.Fn) ?Str = {
                 if(rtype(r) == .RType, => continue());
                 word :: fn() => if(n == 1, => "second", => "first");
                 if (rtype(r) != .RNull && k == .Kx) {
-                    return(Some = @tfmt("no %s operand expected in %s", word(), i.op()));
+                    return(Some = @tfmt("no %s operand expected in %", word(), i.op()));
                 };
                 if (rtype(r) == .RNull && k != .Kx) {
                     return(Some = @tfmt("missing % operand in %", word(), i.op()));
@@ -514,6 +516,9 @@ fn typecheck_failed(f: *Qbe.Fn) ?Str = {
                 if !usecheck(r, k, f) {
                     return(Some = @tfmt("invalid type for % operand %", word(), i.op()));
                 };
+            };
+            if is_store(i.op()) && i.to != QbeNull { 
+                return(Some = @tfmt("store instruction must not have result"));
             };
         };
     
