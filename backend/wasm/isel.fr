@@ -16,6 +16,8 @@ fn wasm_isel(f: *Qbe.Fn) void = {
     for_blocks f { b | 
         f.reset_scratch();
         
+        b.wasm_type = wasm_block_type_from_phis(f.globals, b).intcast();
+        
         // Last thing before we jump to another block: push phi values to the stack. 
         @match(b.jmp.type) {
             fn ret0() => ();
@@ -62,6 +64,39 @@ fn wasm_isel(f: *Qbe.Fn) void = {
         write(out, "\n> After instruction selection:\n");
         printfn(f, out);
     }
+}
+
+// We need a type annotation for the block's affect on the stack: (incoming phis) -> (outgoing phis)
+fn wasm_block_type_from_phis(m: *QbeModule, b: *Qbe.Blk) i64 = {
+    has_inputs := !b.phi.is_null();
+    has_outputs := b.jmp.type == .jmp && !b.s1.phi.is_null();
+    has_multiple_outputs := has_outputs && !b.s1.phi.link.is_null();
+    
+    if(!has_inputs && !has_outputs,          => return(wasm_type_preleb(.EmptyBlock)));                 // () -> ()
+    if(!has_inputs && !has_multiple_outputs, => return(wasm_type_preleb(to_wasm_type(b.s1.phi.cls))));  // () -> (k)
+    
+    // Otherwise it's an index into the type table. 
+    pack_wasm_result_type m { $yield_arg |
+        for_phi b { p |
+            yield_arg(p.cls);
+        };
+    } and { $yield_ret |
+        for_phi b.s1 { p |
+            yield_ret(p.cls);
+        };
+    }
+}
+
+// returns the number that when encoded in sleb128 will encode this type. 
+fn wasm_type_preleb(t: Wasm.ValType) i64 = {
+    mask :: bit_and(-1, bit_not(1.shift_left(6) - 1));
+    x :i64= bit_or(t.raw().zext(), mask);
+    { // :SLOW. TODO: can be removed when i trust. 
+        buf := u8.list(temp());
+        leb128_signed(buf&, x);
+        @debug_assert_eq(t.raw(), buf[0]);
+    };
+    x
 }
 
 fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {

@@ -29,6 +29,7 @@ fn main() void = {
                 stack = list(a),
                 locals = empty(),
                 referenced_globals = init(temp()),
+                blocks = list(temp()),
             );
             p: ParseWasm = (w = wasm.w&, src = bytes);
             or parse_wasm(p&) { e |
@@ -38,8 +39,8 @@ fn main() void = {
             
             module&.emit_suspended_inlinables();
             module&.make_exec();
-            f := or module&.get_addr("module_f2") {
-                panic("couldn't find module_f2()")
+            f := or module&.get_addr("module_f0") {
+                panic("couldn't find module_f0()")
             };
             f := assume_types_fn(Arg = Ty(i64, i32, i32), Ret = i32, ptr = f);
             wasm_context_pointer := 0;
@@ -62,6 +63,9 @@ LoadWasm :: @struct(
     global_store := QbeNull,
     data_symbol: []u32 = empty(),
     blk := zeroed(*Qbe.Blk),
+    blocks: List(*Qbe.Blk),
+    return_types: []Wasm.ValType = empty(),
+    link := zeroed(**Qbe.Blk),
 );
 
 fn create_init_func(self: *LoadWasm) void = {
@@ -102,6 +106,7 @@ fn load_module(self: *LoadWasm) void = {
         self.stack&.clear();
         self.locals = temp().alloc(Qbe.Ref, code.total_local_count + local_func_type.arg.len);
         self.referenced_globals = init(temp());
+        self.blocks = list(temp());
         self.global_store = self.f.newtmp("wasm_globals", .Kl);
         self.f.emit(.par, .Kl, self.global_store, QbeNull, QbeNull);
         
@@ -113,7 +118,6 @@ fn load_module(self: *LoadWasm) void = {
         };
         
         {
-            @println("% locals", code.total_local_count);
             i := local_func_type.arg.len;
             for code.locals& { local |
                 k := local.type.cls();
@@ -126,127 +130,189 @@ fn load_module(self: *LoadWasm) void = {
         
         self.src = code.insts.items();
         self.cursor = 0;
-        while => self.cursor < self.src.len {
-            continue :: local_return;
-            @println("inst %", self.src[self.cursor]);
-            
-            inst := self.src[self.cursor];
-            self.cursor += 1;
-            
-            // Single byte unary/binary instructions are found in the table. 
-            encoding := lookup_wasm_encoding(inst);
-            a0, a1, r := (QbeNull, QbeNull, QbeNull);
-            ::enum(@type encoding.kind);
-            @match(encoding.kind) {
-                fn other() => ();
-                fn unary() => {
-                    r = self.f.newtmp("wasm", encoding.cls);
-                    a := self.stack[self.stack.len - 1]&;
-                    a0 = a[];
-                    a[] = r;
-                };
-                fn binary() => {
-                    r = self.f.newtmp("wasm", encoding.cls);
-                    a0 = self.stack[self.stack.len - 1];
-                    b := self.stack[self.stack.len - 2]&;
-                    self.stack.len -= 1;
-                    a1 = b[];
-                    b[] = r;
-                };
-                fn load() => {
-                    align := self.read_u();
-                    offset := self.read_u();
-                    println("TODO: wasm load"); 
-                    self.stack&.pop().unwrap();
-                    self.stack&.push(QbeNull);
-                    continue(); // TODO
-                };
-                fn store() => {
-                    align := self.read_u();
-                    offset := self.read_u();
-                    println("TODO: wasm store"); 
-                    self.stack&.pop().unwrap();
-                    self.stack&.pop().unwrap();
-                    continue(); // TODO
-                };
-            };
-            
-            if encoding.kind != .other {
-                @debug_assert(r != QbeNull || a0 != QbeNull);
-                self.f.emit(encoding.op, encoding.cls, r, a0, a1);
-                continue();
-            };
-            
-            // Otherwise it's a more complicated instruction. 
-            self.emit_instruction(@as(Wasm.Inst) inst)
-        };
+        
+        self.link = self.f.start&;
+        self.blk = self.link_new_block();
+        self.blocks&.push(self.blk);
+        self.push_block();
+        
+        self.return_types = local_func_type.ret.items();
+        self.emit_the_code();
+        self.emit_return(self.return_types);
+        
+        
         self.f.lnk.export = true; // TODO
-        self.f.start = newblk();
-        self.blk = self.f.start;
-        self.f.copy_instructions_from_scratch_reversed_which_means_forwards(self.f.start);
-        self.emit_return(local_func_type.ret.items());
-        self.f.nblk = 1;
+        
         printfn(self.f, self.f.globals.debug_out);
-        each self.f.globals.debug { d | 
-            d[] = true;
+        //each self.f.globals.debug { d | 
+        //    d[] = true;
+        //};
+        if typecheck_failed(self.f) { err | 
+            printfn(self.f, self.f.globals.debug_out);
+            @panic("IR failed typecheck: %", err);
         };
         run_qbe_passes(self.f);
         reset_temporary_storage(mark);
     };
 }
 
-// Simple instructions are handled by the table before calling this. 
-fn emit_instruction(self: *LoadWasm, inst: Wasm.Inst) void = {
-    ::enum(Wasm.Inst);
-    @switch(inst) {
-        @case(.I32_Const) => {
-            value := self.read_u();
-            self.stack&.push(self.f.getcon(value.bitcast()));
-        };
-        @case(.I64_Const) => {
-            value := self.read_u();
-            self.stack&.push(self.f.getcon(value.bitcast()));
-        };
-        @case(.LocalGet) => self.local_inst(1);
-        @case(.LocalSet) => self.local_inst(-1);
-        @case(.LocalTee) => self.local_inst(0);
-        @case(.Call) => {
-            callee := self.read_index(FuncIdx);
-            @println("% func", callee.id);
-            import := self.w&.find_import_index(0, callee.id.zext());
-            ::if(TypeIdx);
-            type_index := if import.is_some() {
-                import := self.w.imports&.index(import.Some);
-                import.desc.Function
-            } else {
-                self.w.functions[callee.id.zext() - self.w.imported_function_count]
+fn push_block(self: *LoadWasm) *Qbe.Blk = {
+    old := self.blocks&.pop().expect("a block on the stack");
+    self.f.copy_instructions_from_scratch_reversed_which_means_forwards(old);
+    self.blk = self.link_new_block();
+    continuation := self.link_new_block();
+    self.blocks&.push(continuation);
+    self.blocks&.push(self.blk);
+    if old.jmp.type == .Jxxx {
+        old.jmp.type = .jmp;
+        old.s1 = self.blk;
+    };
+    old
+}
+
+fn link_new_block(self: *LoadWasm) *Qbe.Blk = {
+    b := newblk();
+    @if(TRACK_IR_NAMES) {
+        l: List(u8) = (maybe_uninit = b.name&.items(), len = 0, gpa = panicking_allocator); // :UnacceptablePanic
+        @fmt(l&, "%", self.f.nblk);
+    };
+    self.f.nblk += 1;
+    self.link[] = b; 
+    self.link = b.link&;
+    b
+}
+
+fn seal_current_block(self: *LoadWasm) *Qbe.Blk = {
+    old := self.blocks&.pop().expect("a block on the stack");
+    self.f.copy_instructions_from_scratch_reversed_which_means_forwards(old);
+    self.f.nblk += 1;
+    self.blk = newblk();
+    old.link = self.blk;
+    self.blocks&.push(self.blk);
+    old
+}
+
+fn emit_the_code(self: *LoadWasm) void = {
+    while => self.cursor < self.src.len {
+        continue :: local_return;
+        //@println("inst %", self.src[self.cursor]);
+        
+        inst := self.src[self.cursor];
+        self.cursor += 1;
+        
+        // Single byte unary/binary instructions are found in the table. 
+        encoding := lookup_wasm_encoding(inst);
+        a0, a1, r := (QbeNull, QbeNull, QbeNull);
+        ::enum(@type encoding.kind);
+        @match(encoding.kind) {
+            fn other() => ();
+            fn unary() => {
+                r = self.f.newtmp("wasm", encoding.cls);
+                a := self.stack[self.stack.len - 1]&;
+                a0 = a[];
+                a[] = r;
             };
-            callee := self.remap_global(0, callee.id.zext());
-            self.emit_call_from_stack(callee, type_index);
-            println("call!");
+            fn binary() => {
+                r = self.f.newtmp("wasm", encoding.cls);
+                a0 = self.stack[self.stack.len - 1];
+                b := self.stack[self.stack.len - 2]&;
+                self.stack.len -= 1;
+                a1 = b[];
+                b[] = r;
+            };
+            fn load() => {
+                align := self.read_u();
+                offset := self.read_u();
+                println("TODO: wasm load"); 
+                self.stack&.pop().unwrap();
+                self.stack&.push(QbeNull);
+                continue(); // TODO
+            };
+            fn store() => {
+                align := self.read_u();
+                offset := self.read_u();
+                println("TODO: wasm store"); 
+                self.stack&.pop().unwrap();
+                self.stack&.pop().unwrap();
+                continue(); // TODO
+            };
         };
-        @case(.Return) => {
-            println("return!");
+        
+        if encoding.kind != .other {
+            @debug_assert(r != QbeNull || a0 != QbeNull);
+            self.f.emit(encoding.op, encoding.cls, r, a0, a1);
+            continue();
         };
-        @case(.End) => {
-            println("end!");
+        
+        // Otherwise it's a more complicated instruction. 
+        inst := @as(Wasm.Inst) inst;
+        ::enum(Wasm.Inst);
+        @switch(inst) {
+            @case(.I32_Const) => {
+                value := self.read_u();
+                self.stack&.push(self.f.getcon(value.bitcast()));
+            };
+            @case(.I64_Const) => {
+                value := self.read_u();
+                self.stack&.push(self.f.getcon(value.bitcast()));
+            };
+            @case(.LocalGet) => self.local_inst(1);
+            @case(.LocalSet) => self.local_inst(-1);
+            @case(.LocalTee) => self.local_inst(0);
+            @case(.Call) => {
+                callee := self.read_index(FuncIdx);
+                @println("% func", callee.id);
+                import := self.w&.find_import_index(0, callee.id.zext());
+                ::if(TypeIdx);
+                type_index := if import.is_some() {
+                    import := self.w.imports&.index(import.Some);
+                    import.desc.Function
+                } else {
+                    self.w.functions[callee.id.zext() - self.w.imported_function_count]
+                };
+                callee := self.remap_global(0, callee.id.zext());
+                self.emit_call_from_stack(callee, type_index);
+                println("call!");
+            };
+            @case(.Return) => {
+                self.emit_return(self.return_types);
+            };
+            @case(.End) => {
+                current := self.blocks&.pop().expect("well nested End instructions");
+                continuation := self.blocks[self.blocks.len - 1];
+                self.f.copy_instructions_from_scratch_reversed_which_means_forwards(current);
+                if current.jmp.type == .Jxxx {
+                    current.jmp.type = .jmp;
+                    current.s1 = continuation;
+                };
+                self.blk = continuation;
+            };
+            @case(.GlobalSet) => {
+                println("TODO: global.set");
+                i := self.read_u();
+                val := self.stack&.pop();
+            };
+            @case(.GlobalGet) => {
+                println("TODO: global.get");
+                i := self.read_u();
+                val := QbeNull;
+                self.stack&.push(val);
+            };
+            @case(.VectorPrefix) => panic("Vector instructions are not supported (0xFD prefix)");
+            @case(.Nop) => ();
+            @case(.Unreachable) => {
+                self.blk.jmp.type = .hlt;
+                // TODO: stop doing anything else in this block
+            };
+            @case(.Loop) => {
+                block_type := self.read_s();  // TODO: use this for something. 
+                self.push_block();
+            };
+            @default => {
+                @panic("unhandled unstruction %", self.src[self.cursor - 1]);
+            };
         };
-        @case(.GlobalSet) => {
-            println("TODO: global.set");
-            i := self.read_u();
-            val := self.stack&.pop();
-        };
-        @case(.GlobalGet) => {
-            println("TODO: global.get");
-            i := self.read_u();
-            val := QbeNull;
-            self.stack&.push(val);
-        };
-        @case(.VectorPrefix) => panic("Vector instructions are not supported (0xFD prefix)");
-        @default => {
-            @panic("unhandled unstruction %", self.src[self.cursor - 1]);
-        };
-    }
+    };
 }
 
 fn local_inst(self: *LoadWasm, delta: i64) void = {
@@ -255,8 +321,10 @@ fn local_inst(self: *LoadWasm, delta: i64) void = {
     t    := self.f.get_temporary(var);
     dest := if(delta == 1, => self.f.newtmp("get", t.cls), => var);
     src  := if(delta == 1, => var, => self.stack[self.stack.len - 1]);
+    self.stack&.reserve(abs(delta));
     self.stack.len += delta;
     if delta == 1 {
+        @debug_assert(self.stack.len > 0, "tried to access empty stack in local_inst");
         self.stack[self.stack.len - 1] = dest;
     };
     self.f.emit(.copy, t.cls, dest, src, QbeNull);

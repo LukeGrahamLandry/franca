@@ -21,10 +21,23 @@ fn emit_func_wasm32(f: *Qbe.Fn) void = {
         a = (maybe_uninit = (ptr = code.next, len = code.cap() - code.len()), len = 0, gpa = panicking_allocator),
         block_stack = list(temp()), 
     ); e := e&;
-    e.m.local_needs_reloc&.push(f.lnk.id);
-    use_symbol(e.m, f.lnk.id) { s |
-        s.got_lookup_offset = e.m.number_of_functions;
+    
+    // TODO: instead of carefully saving ret_cls, just do this during the abi pass instead. 
+    type_index := pack_wasm_result_type e.m { $yield_arg |
+        for_pars f { i |
+            yield_arg(i.cls());
+        };
+    } and { $yield_ret |
+        if f.ret_cls != .Ke {
+            yield_ret(f.ret_cls);
+        };
     };
+    
+    use_symbol(e.m, f.lnk.id) { s |
+        s.got_lookup_offset = e.m.local_needs_reloc.len;
+        s.wasm_function_type_index = type_index;
+    };
+    e.m.local_needs_reloc&.push(f.lnk.id);
     
     e.pad(WASM_INDEX_PADDING); // reserve space for length of code. 
     
@@ -33,6 +46,7 @@ fn emit_func_wasm32(f: *Qbe.Fn) void = {
     end_locals := e.a.len;
     
     emit_block(e, e.f.start);
+    e.op(.Unreachable);  // keep the verifier happy (wihtout this the implicit return needs to typecheck)
     e.op(.End);
     code.next = code.next.offset(e.a.len());
     
@@ -51,6 +65,29 @@ fn emit_func_wasm32(f: *Qbe.Fn) void = {
     e.a.len = end_of_length + size_of_locals;
     e.pad(extra);
     e.a.len = size_of_func;
+    
+    // TODO: fix -d D llvm-mc dis needs to not include the locals part
+}
+
+// im so impressed that this works
+fn pack_wasm_result_type(m: *QbeModule, $iter_args: @Fn(yield: @Fn(k: Qbe.Cls) void) void, $iter_ret: @Fn(yield: @Fn(k: Qbe.Cls) void) void) i64 = {
+    m.stubs&.reserve(Wasm.ValType)[] = .ResultStart;
+    body :: fn($iter) => {
+        count := m.stubs&.reserve(u8);
+        n := 0;
+        iter { k |
+            m.stubs&.reserve(Wasm.ValType)[] = to_wasm_type(k);
+            n += 1;
+        };
+        @debug_assert_lt(n, 128, "TODO: so so many types"); 
+        count[] = n.trunc();
+    };
+    body(iter_args);
+    body(iter_ret);
+    // TODO: deduplicate these
+    c := m.wasm_function_type_count&;
+    c[] += 1;
+    c[] - 1
 }
 
 fn pack_locals(e: *EmitWasmFn) void = {
@@ -93,6 +130,11 @@ fn pack_locals(e: *EmitWasmFn) void = {
     patch[] = entries.trunc();
 }
 
+fn to_wasm_type(k: Qbe.Cls) Wasm.ValType = {
+    wasm_type :: @const_slice(Wasm.ValType.I32, .I64, .F32, .F64);
+    wasm_type[k.raw().zext()]
+}
+
 // TODO: this way of recreating nested structure is super dumb,
 //       if you get unlucky the same block will be emitted multiple times. 
 //       even trivial cases like a branch that rejoins will generate garbage redundant code. 
@@ -109,6 +151,8 @@ fn emit_block(e: *EmitWasmFn, b: *Qbe.Blk) void = {
 
     e.block_stack&.push(b);
     e.op(.Loop);
+    
+    leb128_signed(e.a&, b.wasm_type.intcast());
     
     for_insts_forward b { i |
         emit(e, i);
@@ -149,24 +193,42 @@ fn emit(e: *EmitWasmFn, i: *Qbe.Ins) void = {
             e.pad(WASM_INDEX_PADDING);
         }
         fn call_indirect() => {
-            todo();
+            eprintln("TODO");
         }
         fn push() => @match(rtype(i.arg&[0])) {
             fn RCon() => {
                 c := e.f.get_constant(i.arg&[0]);
                 @match(c.type) {
                     fn CBits() => {
-                        e.op(@match(i.cls()) {
-                            fn Kw() => .I32_Const;
-                            fn Kl() => .I64_Const;
-                            fn Ks() => .F32_Const;
-                            fn Kd() => .F64_Const;
-                            @default => unreachable();
-                        });
-                        imm := c.bits.i;
+                        @match(i.cls()) {
+                            fn Ks() => {
+                                e.op(.F32_Const);
+                                e.a&.reserve_type(f32)[] = c.bits.s.s;
+                            }
+                            fn Kd() => {
+                                e.op(.F64_Const);
+                                e.a&.reserve_type(f64)[] = c.bits.d;
+                            }
+                            @default => {
+                                e.op(@if(i.cls().is_wide(), .I64_Const, .I32_Const));
+                                leb128_unsigned(e.a&, c.bits.i);
+                            };
+                        };
                     }
                     fn CAddr() => {
-                        // TODO
+                        use_symbol(e.m, c.sym.id) { symbol | 
+                            if symbol.kind == .Local {
+                                @debug_assert(symbol.segment == .MutableData, "TODO: wasm addr non-MutableData");
+                                e.op(@if(i.cls().is_wide(), .I64_Const, .I32_Const));
+                                leb128_unsigned(e.a&, symbol.offset + c.bits.i);
+                            } else {
+                                patch_at := e.a.maybe_uninit.ptr.offset(e.a.len);
+                                push_fixup(e.m, symbol, (patch_at = patch_at, type = (WasmAddr = (wide = i.cls().is_wide(), increment = c.bits.i.trunc()))));
+                                // note: we don't push an op here. 
+                                e.pad(WASM_INDEX_PADDING);  // TODO: might need more space than this.
+                            };
+                        };
+                        eprintln("TODO");
                     }
                     fn CUndef() => unreachable();
                 };
@@ -179,6 +241,7 @@ fn emit(e: *EmitWasmFn, i: *Qbe.Ins) void = {
             }
             fn RSlot() => {
                 // TODO: offset from stack pointer 
+                eprintln("TODO");
             }
             @default => @panic("invalid argument for op push");
         };
@@ -206,6 +269,24 @@ fn pad(e: *EmitWasmFn, count: i64) void = range(0, count) { _ |
 fn op(e: *EmitWasmFn, o: Wasm.Inst) void = 
     e.a&.push(o.raw());
 
+fn fixup_wasm32(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_reloc: *?Fixup) void = {
+    @match(fixup.type) {
+        fn WasmIndex(it) => {
+            lst: List(u8) = (maybe_uninit = (ptr = fixup.patch_at, len = WASM_INDEX_PADDING), len = 0, gpa = panicking_allocator);
+            leb128_unsigned(lst&, symbol.got_lookup_offset);
+        }
+        fn WasmAddr(it) => {
+            lst: List(u8) = (maybe_uninit = (ptr = fixup.patch_at, len = WASM_INDEX_PADDING), len = 0, gpa = panicking_allocator);
+            @assert(symbol.segment == .MutableData, "TODO: non-MutableData Fixup:WasmAddr");
+            o := @if(it.wide, Wasm.Inst.I64_Const, Wasm.Inst.I32_Const);
+            lst&.push(@as(u8) o);
+            leb128_unsigned(lst&, symbol.offset + it.increment.zext());
+        }
+        @default => panic("invalid fixup type for wasm");
+    };
+}
+
+// order matters
 fn output_wasm_module(m: *QbeModule) [][]u8 = {
     // TODO: remove
     code_count := m.segments&[.Code]&.len() - COMMANDS_SIZE_GUESS - SIZE_OF_STUBS;
@@ -244,20 +325,50 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
         //buf.push_all(Wasm.version_magic); // :UpdateBoot "Panicked: Assertion Failed: unhanlded mutual recursion!"
         version_magic :: @const_slice(0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00);
         buf.push_all(version_magic);
-        
-        buf.push(@as(u8) Wasm.Section.Code);
-        total_code_bytes := code_segment.len() - COMMANDS_SIZE_GUESS - SIZE_OF_STUBS;
-        f_count := m.local_needs_reloc.len;
-        total_section_bytes := total_code_bytes + uleb_size(f_count);
-        leb128_unsigned(buf, total_section_bytes);
-        leb128_unsigned(buf, f_count);
     };
     
-    for m.local_needs_reloc& { id |
-        use_symbol(m, id) { s |
-            chunks&.push(code_segment.mmapped.subslice(s.offset, s.size));
+    f_count := m.local_needs_reloc.len;
+    
+    {
+        push_buf { buf |
+            buf.push(@as(u8) Wasm.Section.Type);
+            leb128_unsigned(buf, m.stubs&.len() + uleb_size(m.wasm_function_type_count));
+            leb128_unsigned(buf, m.wasm_function_type_count);
         };
+        chunks&.push(m.stubs.mmapped.slice(0, m.stubs&.len()));
+    }; 
+    
+    // IMPORTS go here
+    
+    {
+        function_type_indices := u8.list(m.local_needs_reloc.len, temp());
+        for m.local_needs_reloc& { id |
+            use_symbol(m, id) { s |
+                leb128_unsigned(function_type_indices&, s.wasm_function_type_index); 
+            };
+        };
+        
+        push_buf { buf |
+            buf.push(@as(u8) Wasm.Section.Function);
+            leb128_unsigned(buf, function_type_indices.len + uleb_size(f_count));
+            leb128_unsigned(buf, f_count);
+        };
+        chunks&.push(function_type_indices.items());
     };
+    
+    // TABLES, go here
+    
+    push_buf { buf |
+        min_mem := 40; // TODO: set this to something good
+        
+        buf.push(@as(u8) Wasm.Section.Memory);
+        leb128_unsigned(buf, 1 + 1 + uleb_size(min_mem));
+        buf.push(1); // length of memories vec
+        buf.push(0); // no max
+        leb128_unsigned(buf, min_mem);
+    };
+    
+    // GLOBALS, go here
     
     if m.exports.len > 0 {
         chunk_i := chunks.len;
@@ -283,21 +394,46 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
                 };
             };
         };
-        
-        //real_exports_size := 0;
-        //for chunks.items().rest(chunk_i) { c |
-        //    real_exports_size += c.len;
-        //};
-        //@debug_assert_eq(exports_size, real_exports_size);
     };
-   
-    for chunks { c |
-    print("|");
-    for c { b|
-    @print("%, ", b);
-    }
-    ;};
-    println("");
+    
+    // START, ELEM, go here
+    
+    {
+        push_buf { buf |
+            buf.push(@as(u8) Wasm.Section.Code);
+            total_code_bytes := code_segment.len() - COMMANDS_SIZE_GUESS - SIZE_OF_STUBS;
+            f_count := m.local_needs_reloc.len;
+            total_section_bytes := total_code_bytes + uleb_size(f_count);
+            leb128_unsigned(buf, total_section_bytes);
+            leb128_unsigned(buf, f_count);
+        };
+        
+        for m.local_needs_reloc& { id |
+            use_symbol(m, id) { s |
+                chunks&.push(code_segment.mmapped.subslice(s.offset, s.size));
+            };
+        };
+    };
+    
+    // :WasmZeroPage
+    data_seg := m.segments&[.MutableData]&;
+    data_size := data_seg.len() - wasm_page_size;
+    if data_size > 0 {
+        push_buf { buf |
+            buf.push(@as(u8) Wasm.Section.Data);
+            leb128_unsigned(buf, 1 + 1 + 1 + uleb_size(wasm_page_size) + 1 + uleb_size(data_size) + data_size);
+            leb128_unsigned(buf, 1); // number of datas 
+            leb128_unsigned(buf, 0); // mode: active
+            
+            // offset expr
+            buf.push(@as(u8) Wasm.Inst.I32_Const);
+            leb128_unsigned(buf, wasm_page_size); 
+            buf.push(@as(u8) Wasm.Inst.End);
+            
+            leb128_unsigned(buf, data_size);
+        };
+        chunks&.push(data_seg.mmapped.slice(wasm_page_size, data_seg.len()));
+    };
     
     total_size := 0;
     for chunks { c |
@@ -308,17 +444,6 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
     chunks.items()
 }
 
-fn fixup_wasm32(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_reloc: *?Fixup) void = {
-    idx := symbol.got_lookup_offset;
-    @match(fixup.type) {
-        fn WasmIndex(it) => {
-            lst: List(u8) = (maybe_uninit = (ptr = fixup.patch_at, len = WASM_INDEX_PADDING), len = 0, gpa = panicking_allocator);
-            leb128_unsigned(lst&, idx);
-        }
-        @default => panic("invalid fixup type for wasm");
-    };
-}
-
 //
 // After the magic + version, the thing is a list of sections. 
 // Each section is [id byte, size u32, data]
@@ -327,91 +452,3 @@ fn fixup_wasm32(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_re
 // Also, when the spec says sizes like u32, that doesn't mean encode using that many bytes, 
 // you still use the leb128 stuff. The type is just a range restriction. 
 //
-
-// TODO: we're not going to do it this way at all i think, 
-//       want to just spam out functions in one chunk like other backends 
-// TODO: use bucket arrays for less copying? 
-fn dump(self: *Wasm.Module, out: *List(u8)) void = {
-    :: enum(Wasm.Section);
-    @debug_assert(self.imports.len == 0, "TODO: dump wasm imports");
-    @debug_assert(self.data.len == 0, "TODO: dump wasm data");
-    @debug_assert(self.memories.len == 0, "TODO: dump wasm");
-    @debug_assert(self.tables.len == 0, "TODO: dump wasm");
-    @debug_assert(self.globals.len == 0, "TODO: dump wasm");
-    @debug_assert(self.elements.len == 0, "TODO: dump wasm");
-    out.push_all(@slice(0x00, 0x61, 0x73, 0x6D));  // magic
-    out.push_all(@slice(0x01, 0x00, 0x00, 0x00));  // version
-    buf: List(u8) = list(temp());
-    buf := buf&;
-    inner_buf: List(u8) = list(temp());
-    inner_buf := inner_buf&;
-    
-    Section :: Wasm.Section;
-    out.push(Section.Type.raw());
-    buf.leb128_unsigned(self.types.len); 
-    for self.types { it | 
-        buf.push(0x60);
-        buf.leb128_unsigned(it.arg.len);
-        for it.arg { ty |
-            buf.push(ty.repr);
-        };
-        buf.leb128_unsigned(it.ret.len);
-        for it.ret { ty |
-            buf.push(ty.repr);
-        };
-    };
-    out.leb128_unsigned(buf.len);
-    out.push_all(buf.items());
-    buf.clear();
-    
-    out.push(Section.Function.raw());
-    buf.leb128_unsigned(self.functions.len); 
-    for self.functions { it | 
-        buf.leb128_unsigned(it.id.zext());
-    };
-    out.leb128_unsigned(buf.len);
-    out.push_all(buf.items());
-    buf.clear();
-    
-    out.push(Section.Export.raw());
-    buf.leb128_unsigned(self.exports.len); 
-    each self.exports { it | 
-        buf.leb128_unsigned(it.name.len);
-        buf.push_all(it.name.items());
-        ::tagged(@type it.desc);
-        tag: u8 = it.desc&.tag().ordinal().trunc();
-        buf.push(tag);
-        @match(it.desc) {  // TODO: this is kinda sad
-            fn Function(idx) => buf.leb128_unsigned(idx.id.zext());
-            fn Table(idx)    => buf.leb128_unsigned(idx.id.zext());
-            fn Memory(idx)   => buf.leb128_unsigned(idx.id.zext());
-            fn Global(idx)   => buf.leb128_unsigned(idx.id.zext());
-        };
-    };
-    out.leb128_unsigned(buf.len);
-    out.push_all(buf.items());
-    buf.clear();
-    
-    out.push(Section.Code.raw());
-    buf.leb128_unsigned(self.code.len); 
-    each self.code { it | 
-        inner_buf.leb128_unsigned(it.locals.len);
-        each it.locals { local | 
-            inner_buf.leb128_unsigned(local.count);
-            inner_buf.push(local.ty.repr);
-        };
-        
-        // Expressions aren't length prefixed, they have a terminator. 
-        inner_buf.push_all(it.insts.items());
-        ::?*u8;
-        end := it.insts.items().last().unwrap()[];
-        @assert_eq(end, Wasm.Inst.End.raw()); // TODO: move @debug_assert_eq to lib
-        
-        buf.leb128_unsigned(inner_buf.len);
-        buf.push_all(inner_buf.items());
-        inner_buf.clear();
-    };
-    out.leb128_unsigned(buf.len);
-    out.push_all(buf.items());
-    buf.clear();
-}

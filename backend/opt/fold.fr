@@ -220,7 +220,7 @@ fn deadedge(f: *FoldCtx, s: i32, d: i32) bool = {
 fn visitphi(f: *FoldCtx, p: *Qbe.Phi, bid: i32) void = {
     v: i32 = fold_status_dead;
     range(0, p.narg.zext()) { a |
-        // TODO: this feels important. need to make a test where i can tell the difference. 
+        // TODO: this feels important. there's a test in fold2.ssa that Qbe can do but i can't. bring this back!
         //if !f.deadedge(p.blk[a].id, bid) { 
             v = latmerge(v, f.latval(p.arg[a]));
         //};
@@ -383,56 +383,48 @@ fn foldint(res: *Qbe.Con, op: Qbe.O, w: bool, cl: *Qbe.Con, cr: *Qbe.Con) bool =
 
 Ocmpw :: Qbe.O.ceqw;
 Ocmpl :: Qbe.O.ceql;
-Ocmps :: Qbe.O.ceqs;
-Ocmpd :: Qbe.O.ceqd;
 
 // TODO: can't pass @union by value
-fn fold_cmp(op: Qbe.O, l: *BitcastPrim, r: *BitcastPrim) bool = @if_else {
-    @if(op.between(Ocmpw, .cultl)) => {
-        if op.raw() <= Qbe.O.cultw.raw() {
-            l.s = sign_extend_low32(l.s);
-            r.s = sign_extend_low32(r.s);
-        } else {
-            op = rebase(op, Ocmpw, Ocmpl);
-        };
-        @match(@as(Qbe.Cmp) @as(i32) op.raw() - Ocmpw.raw()) {
-            fn Ciule() => l.u <= r.u; 
-            fn Ciult() => l.u < r.u;
-            fn Cisle() => l.s <= r.s; 
-            fn Cislt() => l.s < r.s;
-            fn Cisgt() => l.s > r.s;
-            fn Cisge() => l.s >= r.s;
-            fn Ciugt() => l.u > r.u;
-            fn Ciuge() => l.u >= r.u;
-            fn Cieq()  => l.u == r.u;
-            fn Cine()  => l.u != r.u;
-            @default => @panic("expected fold_cmp");
-        }
+fn fold_cmp(op: Qbe.O, l: *BitcastPrim, r: *BitcastPrim) bool = {
+    if op.between(Ocmpw, .cultw)  {
+        l.s = sign_extend_low32(l.s);
+        r.s = sign_extend_low32(r.s);
+        op = rebase(op, Ocmpl, Ocmpw);
     };
-    // TODO: subtly wrong! becuase i don't do 32 bit float compares correctly on old backends
-    @if(op.between(Ocmps, .cuos)) => @match(@as(Qbe.Cmp) @as(i32) op.raw() - Ocmps.raw() + Qbe.CmpICount) {
-        fn Cfle() => l.fs <= r.fs;
-        fn Cflt() => l.fs < r.fs; 
-        fn Cfgt() => l.fs > r.fs; 
-        fn Cfge() => l.fs >= r.fs;
-        fn Cfne() => l.fs != r.fs;
-        fn Cfeq() => l.fs == r.fs;
-        fn Cfo() => l.fs < r.fs || l.fs >= r.fs;
-        fn Cfuo() => !(l.fs < r.fs || l.fs >= r.fs);
+    @match(op) {
+        // i64
+        fn culel() => l.u <= r.u; 
+        fn cultl() => l.u < r.u;
+        fn cslel() => l.s <= r.s; 
+        fn csltl() => l.s < r.s;
+        fn csgtl() => l.s > r.s;
+        fn csgel() => l.s >= r.s;
+        fn cugtl() => l.u > r.u;
+        fn cugel() => l.u >= r.u;
+        fn ceql()  => l.u == r.u;
+        fn cnel()  => l.u != r.u;
+        
+        // f32
+        fn cles() => l.fs <= r.fs;
+        fn clts() => l.fs < r.fs; 
+        fn cgts() => l.fs > r.fs; 
+        fn cges() => l.fs >= r.fs;
+        fn cnes() => l.fs != r.fs;
+        fn ceqs() => l.fs == r.fs;
+        fn cos() => l.fs < r.fs || l.fs >= r.fs;
+        fn cuos() => !(l.fs < r.fs || l.fs >= r.fs);
+        
+        // f64
+        fn cled() => l.fd <= r.fd;
+        fn cltd() => l.fd < r.fd; 
+        fn cgtd() => l.fd > r.fd; 
+        fn cged() => l.fd >= r.fd;
+        fn cned() => l.fd != r.fd;
+        fn ceqd() => l.fd == r.fd;
+        fn cod() => l.fd < r.fd || l.fd >= r.fd;
+        fn cuod() => !(l.fd < r.fd || l.fd >= r.fd);
         @default => @panic("expected fold_cmp");
-    };
-    @if(op.between(Ocmpd, .cuod)) => @match(@as(Qbe.Cmp) @as(i32) op.raw() - Ocmpd.raw() + Qbe.CmpICount) {
-        fn Cfle() => l.fd <= r.fd;
-        fn Cflt() => l.fd < r.fd; 
-        fn Cfgt() => l.fd > r.fd; 
-        fn Cfge() => l.fd >= r.fd;
-        fn Cfne() => l.fd != r.fd;
-        fn Cfeq() => l.fd == r.fd;
-        fn Cfo() => l.fd < r.fd || l.fd >= r.fd;
-        fn Cfuo() => !(l.fd < r.fd || l.fd >= r.fd);
-        @default => @panic("expected fold_cmp");
-    };
-    @else => @panic("expected fold_cmp");
+    }
 }
 
 fn foldflt(res: *Qbe.Con, op: Qbe.O, w: bool, cl: *Qbe.Con, cr: *Qbe.Con) void = {

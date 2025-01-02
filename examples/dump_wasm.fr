@@ -34,8 +34,21 @@ fn main() void = {
     };
     @fmt(out, "=== END EXPORT SECTION ===\n\n");
     
+    @fmt(out, "=== BEGIN DATA SECTION ===\n");
+    each w.data { it |
+        start := ptr_diff(input.ptr, it.bytes.ptr);
+        @fmt(out, "- % bytes // [%..<%]\n  ", it.bytes.len, start, start + it.bytes.len);
+        if it.active_offset_expr.len == 0 {
+            @fmt(out, "(passive)\n");
+        } else {
+            @fmt(out, "active at offset ");
+            dump_wasm_expr(w, input, it.active_offset_expr.items(), out);
+        };
+    };
+    @fmt(out, "=== END DATA SECTION ===\n\n");
+    
     @fmt(out, "=== BEGIN TYPE SECTION ===\n");
-    range(0, w.imports.len) { i |
+    range(0, w.types.len) { i |
         @fmt(out, "- ");
         show_type(out, w, (id = i.trunc()));  
         @fmt(out, "\n");
@@ -67,95 +80,123 @@ fn main() void = {
             };
             @fmt(out, "\n");
         };
-        start := ptr_diff(input.ptr, code.insts.ptr);
-        @fmt(out, "- code {  // [%..<%]", start, start + code.insts.len);
-        c := 0;
-        indent := 1;
-        while => c < code.insts.len {
-            continue :: local_return;
-            
-            ::enum(Wasm.Inst);
-            byte := code.insts[c]; c += 1;
-            encoding := lookup_wasm_encoding(byte);
-            inst := @as(Wasm.Inst) byte;
-            
-            if @is(inst, .End) {
-                indent -= 1;
-                if indent < 0 {
-                    @fmt(out, "         (ERROR: closed too many blocks)");
-                } else {
-                    if indent == 0 && c != code.insts.len {
-                        @fmt(out, "        (ERROR: closed all blocks but there is still code)");
-                    };
-                };
-                indent = max(indent, 0);
-            };
-            
-            @fmt(out, "\n  %", f_rep("    ", indent));
-            if indent == 0 && c != code.insts.len {
-                @fmt(out, "?");
-            };
-            
-            if @is(inst, .End) {
-                @fmt(out, "};");
-                continue();
-            };
-            
-            ::enum(@type encoding.kind);
-            if encoding.kind != .other {
-                k_name := @const_slice("I32", "I64", "F32", "F64", "???");
-                k := min(k_name.len - 1, zext(@as(i32)encoding.cls));
-                @fmt(out, "%_%(", k_name[k], encoding.op);
-                if @is(encoding.kind, .load, .store) {
-                    @fmt(out, "// TODO: imm");
-                };
-                @fmt(out, ");");
-                continue();
-            };
-            
-            push_leb :: fn() => {
-                value, r, ok := read_leb128_unsigned(code.insts.items().rest(c));
-                if ok {
-                    c += ptr_diff(code.insts.ptr.offset(c), r.ptr);
-                    @fmt(out, "%", value);
-                    @as(i64) value.bitcast()
-                } else {
-                    @fmt(out, " ERROR: invalid leb encoding");
-                    continue()
-                }
-            };
-            
-            if @is(inst, .Block, .Loop, .If) {
-                indent += 1;
-                @fmt(out, "% {", inst);
-                continue();
-            };
-            
-            @fmt(out, "%(", inst);
-            if @is(inst, .LocalGet, .LocalSet, .LocalTee, .GlobalGet, .GlobalSet, .I32_Const, .I64_Const) {
-                push_leb();
-                @fmt(out, ");");
-                continue()
-            };
-            
-            if inst == .Call {
-                v := push_leb();
-                @fmt(out, "); ");
-                if v < w.imported_function_count {
-                    @fmt(out, "  // import");
-                } else {
-                    @fmt(out, "  // F%", v - w.imported_function_count);
-                };
-                continue()
-            };
-            @fmt(out, ");");
-            
-        };
-        @fmt(out, "\n");
+        
+        @fmt(out, "- code ");
+        dump_wasm_expr(w, input, code.insts.items(), out);
     };
     @fmt(out, "=== END FUNCTION/CODE SECTION ===\n");
     
     print(out.items());
+}
+
+fn dump_wasm_expr(w: *Wasm.Module, full_input: []u8, insts: []u8, out: *List(u8)) void = {
+    start := ptr_diff(full_input.ptr, insts.ptr);
+    @fmt(out, "{  // [%..<%]", start, start + insts.len);
+    c := 0;
+    indent := 1;
+    while => c < insts.len {
+        continue :: local_return;
+        
+        ::enum(Wasm.Inst);
+        byte := insts[c]; c += 1;
+        encoding := lookup_wasm_encoding(byte);
+        inst := @as(Wasm.Inst) byte;
+        
+        if @is(inst, .End) {
+            indent -= 1;
+            if indent < 0 {
+                @fmt(out, "         (ERROR: closed too many blocks)");
+            } else {
+                if indent == 0 && c != insts.len {
+                    @fmt(out, "        (ERROR: closed all blocks but there is still code)");
+                };
+            };
+            indent = max(indent, 0);
+        };
+        
+        @fmt(out, "\n  %", f_rep("    ", indent));
+        if indent == 0 && c != insts.len {
+            @fmt(out, "?");
+        };
+        
+        if @is(inst, .End) {
+            @fmt(out, "};");
+            continue();
+        };
+        
+        ::enum(@type encoding.kind);
+        if encoding.kind != .other {
+            k_name := @const_slice("I32", "I64", "F32", "F64", "???");
+            k := min(k_name.len - 1, zext(@as(i32)encoding.cls));
+            @fmt(out, "%_%(", k_name[k], encoding.op);
+            if @is(encoding.kind, .load, .store) {
+                @fmt(out, "// TODO: imm");
+            };
+            @fmt(out, ");");
+            continue();
+        };
+        
+        push_leb :: fn() => {
+            value, r, ok := read_leb128_unsigned(insts.rest(c));
+            if ok {
+                c += ptr_diff(insts.ptr.offset(c), r.ptr);
+                @fmt(out, "%", value);
+                @as(i64) value.bitcast()
+            } else {
+                @fmt(out, " ERROR: invalid leb encoding");
+                continue()
+            }
+        };
+        
+        
+        read_leb_s :: fn() => {
+            value, r, ok := read_leb128_signed(insts.rest(c));
+            if ok {
+                c += ptr_diff(insts.ptr.offset(c), r.ptr);
+                value
+            } else {
+                @fmt(out, " ERROR: invalid leb encoding");
+                continue()
+            }
+        };
+        
+        if @is(inst, .Block, .Loop, .If) {
+            indent += 1;
+            @fmt(out, "% {", inst);
+            first_type_byte := insts[c];
+            type_index := read_leb_s();
+            if type_index >= 0 {
+                @fmt(out, " // [T%]", type_index);
+            } else {
+                type := @as(Wasm.ValType) first_type_byte;
+                if type != .EmptyBlock {
+                    @fmt(out, " // -> (%)", type);
+                };
+            };
+            continue();
+        };
+        
+        @fmt(out, "%(", inst);
+        if @is(inst, .LocalGet, .LocalSet, .LocalTee, .GlobalGet, .GlobalSet, .I32_Const, .I64_Const) {
+            push_leb();
+            @fmt(out, ");");
+            continue()
+        };
+        
+        if inst == .Call {
+            v := push_leb();
+            @fmt(out, "); ");
+            if v < w.imported_function_count {
+                @fmt(out, "  // import");
+            } else {
+                @fmt(out, "  // F%", v - w.imported_function_count);
+            };
+            continue()
+        };
+        @fmt(out, ");");
+        
+    };
+    @fmt(out, "\n");
 }
 
 fn show_type(out: *List(u8), w: *Wasm.Module, i: TypeIdx) void = {

@@ -1,4 +1,20 @@
 
+## (Jan 1)
+
+- data segment. kinda nice that relocations are just you put the number in because you know your base address is zero. 
+skip a page so we don't assign something to the null pointer because that sounds confusing. 
+(TODO: should i have an option insert null checks since you won't auto-crash like you would on native?). 
+
+## 
+
+- added J.switch block terminator
+- experiment with the jump table being a data symbol of offsets or being a bunch of direct jump instructions. 
+everything (including no jump tables, just if-chains) is roughly the same speed 
+(ie. i can't tell the difference when just eyeballing the time to self-compile). 
+so that's kinda disappointing. should probably take it out since it's extra code for no benifit. 
+- reworked opt/fold to work with J.switch. my version is a regression, 
+it doesn't handle phi nodes that become constant properly anymore (added a test case: fold2.ssa). 
+but at least i understand how it works now and can come back later. 
 - fixed @is on non-sequential enums
 
 ## (Dec 29)

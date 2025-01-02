@@ -124,7 +124,7 @@ QbeModule :: @rec @struct(
     icache_mutex: PMutex,
     intern_mutex: PMutex,
     
-    number_of_functions := 0,
+    wasm_function_type_count := 0,
 );
 
 QbeTargetEnv :: @struct(
@@ -240,6 +240,12 @@ fn init(m: *QbeModule, segment_size: i64, gpa: Alloc, goal: QbeTargetEnv, expect
         next[] = next[].offset(COMMANDS_SIZE_GUESS); 
         m.stubs = (mmapped = (ptr = next[], len = SIZE_OF_STUBS), next = next[]);
         next[] = next[].offset(SIZE_OF_STUBS); 
+        
+        if m.goal.arch == .wasm32 {
+            // :WasmZeroPage Skip the low page so we don't live in crazy town where the null pointer is valid. 
+            next := m.segments&[.MutableData].next&;
+            next[] = next[].offset(wasm_page_size); 
+        };
     };
     
     m.debug_out = fdopen(STD_ERR, "a".sym().c_str());
@@ -430,7 +436,9 @@ fn finish_qbe_passes_wasm(fnn: *Qbe.Fn) void = {
     // TODO: maybe we still want liveness info even though we're not doing register allocation?
     
     fillrpo(fnn);
-    simplify_jump_chains(fnn); // optional
+    // TODO: you want to do this but it breaks Blk.wasm_type. can it just go before isel? but still need to add something because split insts from jmp arg needs to be treated like phis. 
+    //simplify_jump_chains(fnn); // optional
+    
     fillpreds(fnn);
     fillrpo(fnn);
     
@@ -445,7 +453,7 @@ fn finish_qbe_passes_wasm(fnn: *Qbe.Fn) void = {
 }
 
 // debug. but it calls clsmerge which does mutate sometimes so maybe not.
-fn fails_typecheck(f: *Qbe.Fn) ?Str = {
+fn typecheck_failed(f: *Qbe.Fn) ?Str = {
     fillpreds(f);
     pb  := init_bitset(f.nblk.zext());
     ppb := init_bitset(f.nblk.zext());
