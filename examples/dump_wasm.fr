@@ -21,9 +21,8 @@ fn main() void = {
     ::enum(Wasm.ValType);
     @fmt(out, "=== BEGIN IMPORT SECTION ===\n");
     each w.imports { it |
-        @fmt(out, "- '%' from '%'", it.name.items(), it.module.items());
-        // TODO: other info
-        @fmt(out, "\n");
+        ::tagged(@type it.desc);
+        @fmt(out, "- '%' from '%' is a %\n", it.name.items(), it.module.items(), it.desc&.tag());
     };
     @fmt(out, "=== END IMPORT SECTION ===\n\n");
     
@@ -94,6 +93,9 @@ fn dump_wasm_expr(w: *WasmModule, full_input: []u8, insts: []u8, out: *List(u8))
     @fmt(out, "{  // [%..<%]", start, start + insts.len);
     c := 0;
     indent := 1;
+    next_label := 0;
+    BlockItem :: @struct(n: i64, loop: bool);
+    stack := BlockItem.list(temp());
     while => c < insts.len {
         continue :: local_return;
         
@@ -120,7 +122,12 @@ fn dump_wasm_expr(w: *WasmModule, full_input: []u8, insts: []u8, out: *List(u8))
         };
         
         if @is(inst, .End) {
-            @fmt(out, "};");
+            @fmt(out, "}; ");
+            if stack&.pop() { it |
+                if !it.loop {
+                    @fmt(out, "@%", it.n);
+                };
+            };
             continue();
         };
         
@@ -131,26 +138,25 @@ fn dump_wasm_expr(w: *WasmModule, full_input: []u8, insts: []u8, out: *List(u8))
             @fmt(out, "%_%(", k_name[k], encoding.op);
             if @is(encoding.kind, .load, .store) {
                 @fmt(out, "a = ");
-                push_leb();
+                push_leb(false);
                 @fmt(out, ", o = ");
-                push_leb();
+                push_leb(false);
             };
             @fmt(out, ");");
             continue();
         };
         
-        push_leb :: fn() => {
-            value, r, ok := read_leb128_unsigned(insts.rest(c));
+        push_leb :: fn($signed) => {
+            value, r, ok := read_leb128(insts.rest(c), signed);
             if ok {
                 c += ptr_diff(insts.ptr.offset(c), r.ptr);
                 @fmt(out, "%", value);
-                @as(i64) value.bitcast()
+                value
             } else {
                 @fmt(out, " ERROR: invalid leb encoding");
                 continue()
             }
         };
-        
         
         read_leb_s :: fn() => {
             value, r, ok := read_leb128_signed(insts.rest(c));
@@ -165,29 +171,59 @@ fn dump_wasm_expr(w: *WasmModule, full_input: []u8, insts: []u8, out: *List(u8))
         
         if @is(inst, .Block, .Loop, .If) {
             indent += 1;
-            @fmt(out, "% {", inst);
+            @fmt(out, "% { ", inst);
+            if inst == .Loop {
+                @fmt(out, "@% ", next_label);
+            };
+            stack&.push(n = next_label, loop = inst == .Loop);
             first_type_byte := insts[c];
             type_index := read_leb_s();
             if type_index >= 0 {
-                @fmt(out, " // [T%]", type_index);
+                @fmt(out, "// ");
+                show_type(out, w, (id = type_index.trunc()));  
             } else {
                 type := @as(Wasm.ValType) first_type_byte;
                 if type != .EmptyBlock {
-                    @fmt(out, " // -> (%)", type);
+                    @fmt(out, "// () -> (%)", type);
                 };
             };
+            next_label += 1;
+            
             continue();
         };
         
         @fmt(out, "%(", inst);
-        if @is(inst, .LocalGet, .LocalSet, .LocalTee, .GlobalGet, .GlobalSet, .I32_Const, .I64_Const) {
-            push_leb();
+        if @is(inst, .LocalGet, .LocalSet, .LocalTee, .GlobalGet, .GlobalSet, .Br, .BrIf) {
+            arg := push_leb(false);
+            @fmt(out, ");");
+            if @is(inst, .Br, .BrIf) {
+                if arg < stack.len {
+                    it := stack[stack.len - arg - 1];
+                    @fmt(out, " #%", it.n);
+                };
+            };
+            continue()
+        };
+        if @is(inst, .I32_Const, .I64_Const) {
+            push_leb(true);
             @fmt(out, ");");
             continue()
         };
         
+        if inst == .F32_Const {
+            @fmt(out, "%);", f32.cast_front_unaligned(insts.rest(c)));
+            c += 4;
+            continue()
+        };
+        
+        if inst == .F64_Const {
+            @fmt(out, "%);", f64.cast_front_unaligned(insts.rest(c)));
+            c += 8;
+            continue()
+        };
+        
         if inst == .Call {
-            v := push_leb();
+            v := push_leb(false);
             @fmt(out, "); ");
             if v < w.imported_function_count {
                 @fmt(out, "  // import");

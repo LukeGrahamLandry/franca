@@ -151,11 +151,20 @@ fn emit_block(e: *EmitWasmFn, b: *Qbe.Blk) void = {
         fn ret0() => e.op(.Return);
         fn hlt()  => e.op(.Unreachable);
         // :TodoSwitch
-        fn jmp() => emit_block(e, b.s1);
-        fn jnz() => {
-            // TODO: br_if
+        fn jmp() => {
             emit_block(e, b.s1);
+            e.op(.Unreachable);
+        }
+        fn jnz() => {
+            e.block_stack&.push(zeroed(*Qbe.Blk));
+            e.op(.If);
+            e.a&.push(@as(u8) Wasm.ValType.EmptyBlock);
+            emit_block(e, b.s1);
+            e.op(.Else);
             emit_block(e, b.s2);
+            e.op(.End);
+            e.block_stack&.pop();
+            e.op(.Unreachable);
         }
         @default => @panic("invalid terminator");
     };
@@ -204,7 +213,7 @@ fn emit(e: *EmitWasmFn, i: *Qbe.Ins) void = {
                             }
                             @default => {
                                 e.op(@if(i.cls().is_wide(), .I64_Const, .I32_Const));
-                                leb128_unsigned(e.a&, c.bits.i);
+                                leb128_signed(e.a&, c.bits.i);
                             };
                         };
                     }
@@ -213,7 +222,7 @@ fn emit(e: *EmitWasmFn, i: *Qbe.Ins) void = {
                             if symbol.kind == .Local {
                                 @debug_assert(symbol.segment == .MutableData, "TODO: wasm addr non-MutableData");
                                 e.op(@if(i.cls().is_wide(), .I64_Const, .I32_Const));
-                                leb128_unsigned(e.a&, symbol.offset + c.bits.i);
+                                leb128_signed(e.a&, symbol.offset + c.bits.i);
                             } else {
                                 patch_at := e.a.maybe_uninit.ptr.offset(e.a.len);
                                 push_fixup(e.m, symbol, (patch_at = patch_at, type = (WasmAddr = (wide = i.cls().is_wide(), increment = c.bits.i.trunc()))));
@@ -445,7 +454,7 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
             
             // initial value
             push(buf, @as(u8) Wasm.Inst.I32_Const);
-            leb128_unsigned(buf, stack_base);
+            leb128_signed(buf, stack_base);
             push(buf, @as(u8) Wasm.Inst.End);
         };
     };
@@ -502,7 +511,7 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
             
             // offset expr
             buf.push(@as(u8) Wasm.Inst.I32_Const);
-            leb128_unsigned(buf, wasm_page_size); 
+            leb128_signed(buf, wasm_page_size); 
             buf.push(@as(u8) Wasm.Inst.End);
             
             leb128_unsigned(buf, data_size);

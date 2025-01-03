@@ -74,12 +74,9 @@ fn wasm_isel(f: *Qbe.Fn) void = {
         
         // First thing that happens: any incoming phis are on the stack (as block arguments) and we pop them into thier locals. 
         
-        block_arg_count: i32 = 0;
-        for_phi b { p |
+        for_phi_rev_TODOSLOW b { p |
             f.emit(.pop, p.cls, p.to, QbeNull, QbeNull);
-            block_arg_count += 1;
         };
-        b.loop = block_arg_count;  // TODO: rename this field to make it clear that we repurpose it?
         
         f.copy_instructions_from_scratch(b);
     };
@@ -96,6 +93,17 @@ fn wasm_isel(f: *Qbe.Fn) void = {
     }
 }
 
+// :SLOW
+fn for_phi_rev_TODOSLOW(b: *Qbe.Blk, $body: @Fn(p: *Qbe.Phi) void) void = {
+    phis := list(*Qbe.Phi, temp());
+    for_phi b { p |
+        phis&.push(p);
+    };
+    for_rev phis { p |
+        body(p);
+    };
+}
+
 // We need a type annotation for the block's affect on the stack: (incoming phis) -> (outgoing phis)
 fn wasm_block_type_from_phis(m: *QbeModule, b: *Qbe.Blk) i32 = {
     has_inputs  := !b.phi.is_null();
@@ -103,24 +111,26 @@ fn wasm_block_type_from_phis(m: *QbeModule, b: *Qbe.Blk) i32 = {
     has_multiple_outputs := has_outputs && !b.s1.phi.link.is_null();
     
     if !has_inputs {
-        if(!has_outputs,          => return(wasm_type_preleb(.EmptyBlock)));                 // () -> ()
-        if(!has_multiple_outputs, => return(wasm_type_preleb(to_wasm_type(b.s1.phi.cls))));  // () -> (k)
+        //if(!has_outputs,          => return(wasm_type_preleb(.EmptyBlock)));                 // () -> ()
+        //if(!has_multiple_outputs, => return(wasm_type_preleb(to_wasm_type(b.s1.phi.cls))));  // () -> (k)
+        return(wasm_type_preleb(.EmptyBlock))
     };
     // Otherwise it's an index into the type table. 
     
     pack_wasm_result_type m { $yield_arg |
-        for_phi b { p |
+        for_phi_rev_TODOSLOW b { p |
             yield_arg(p.cls);
         };
     } and { $yield_ret |
-        for_phi b.s1 { p |
-            yield_ret(p.cls);
-        };
+        //for_phi b.s1 { p |
+        //    yield_ret(p.cls);
+        //};
     }
 }
 
 // returns the number that when encoded in sleb128 will encode this type. 
 fn wasm_type_preleb(t: Wasm.ValType) i32 = {
+    ::enum(@type t);
     mask :: bit_and(-1, bit_not(1.shift_left(6) - 1));
     x :i64= bit_or(t.raw().zext(), mask);
     { // :SLOW. TODO: can be removed when i trust. 
@@ -133,20 +143,32 @@ fn wasm_type_preleb(t: Wasm.ValType) i32 = {
 
 fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
     if(try_kill_inst(f, i), => return());
-    if is_par(i.op()) || (@is(i.op(), .pop)) {  // TODO: call_indirect
-        f.emit(i[]);
-        return();
-    };
     
-    if i.op() == .push {
-        f.wasm_push(i.cls(), i.arg&[0]);  // fixarg
-        return();
-    };
-    
-    if i.op() == .call {
-        @assert(rtype(i.arg&[0]) == .RCon, "TODO: wasm indirect call");
-        f.emit(i[]);
-        return();
+    @match(i.op()) {
+        fn push() => {
+            @debug_assert(i.to == QbeNull);
+            f.wasm_push(i.cls(), i.arg&[0]);  // fixarg
+            return();
+        }
+        fn call() => {
+            @debug_assert(i.to == QbeNull);
+            @assert(rtype(i.arg&[0]) == .RCon, "TODO: wasm indirect call");
+            f.emit(i[]);
+            return();
+        }
+        fn loadsw() => if i.cls() == .Kw {
+            i.set_op(.load);
+        };
+        fn cod()  => panic("TODO: wasm fcmp (un?)ordered");
+        fn cuod() => panic("TODO: wasm fcmp (un?)ordered");
+        fn cos()  => panic("TODO: wasm fcmp (un?)ordered");
+        fn cuos() => panic("TODO: wasm fcmp (un?)ordered");
+        @default => {
+            if is_par(i.op()) || (@is(i.op(), .pop)) {  // TODO: call_indirect
+                f.emit(i[]);
+                return();
+            };
+        };
     };
     
     if i.to != QbeNull {
@@ -164,6 +186,7 @@ fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
         wasm_push_addr(f, i.arg&[1]);
         return();
     };
+    
     if is_load(i.op()) {
         wasm_push_addr(f, i.arg&[0]);
         return();
@@ -188,9 +211,8 @@ fn wasm_push(f: *Qbe.Fn, k: Qbe.Cls, r: Qbe.Ref) void = {
             
             k = Qbe.Cls.Kw;
             slot_offset = f.slot - slot_offset;
-            f.emit(.sub,  k, QbeNull, QbeNull, QbeNull);
-            f.emit(.push, k, QbeNull, f.getcon(slot_offset.intcast()), QbeNull);
-            f.emit(.push, k, QbeNull, f.retr, QbeNull);
+            ins := make_ins(.add, k, QbeNull, f.retr, f.getcon(slot_offset.intcast()));
+            f.sel_wasm(ins&);
             return();
         };
     };

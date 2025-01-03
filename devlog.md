@@ -2,8 +2,19 @@
 
 - globals for stack pointer so now (static) alloca works.
   (for now i don't let frontends create thier own globals, they can just use a normal symbol in the data segment until i want exports).
-- store instructions
-- typecheck_failed: added check for store instruction with result
+- store instructions.
+  TODO: fold constant offsets into the instruction.
+- typecheck_failed: added check for store instruction with result.
+  very distressing if you make that mistake because rega expects instructions (other than alloc) with result to not have a side effect so it gets removed.
+- i was confused before about what block result types meant.
+  every block has an implicit fall through at the end back to its parent,
+  and any types passed there is its result type. if it ends with an explicit jump instead,
+  its result type is Empty, not the argument type of the target.
+- import_wasm: convert block arguments to phis.
+  and rework the block stack so jump depths match the wasm structure.
+  one wasm block does not corrispond to one basic block.
+  track its start block (jump target for Loop), its fallthrough block (jump target for Block, If),
+  and its current block where instructions will be emitted next.
 
 ## wasm (Jan 1)
 
@@ -18,6 +29,7 @@
   everything (including no jump tables, just if-chains) is roughly the same speed
   (ie. i can't tell the difference when just eyeballing the time to self-compile).
   so that's kinda disappointing. should probably take it out since it's extra code for no benifit.
+  really we've just learned that branch predictors are really good and it's not helpful for me to go fucking around with things.
 - reworked opt/fold to work with J.switch. my version is a regression,
   it doesn't handle phi nodes that become constant properly anymore (added a test case: fold2.ssa).
   but at least i understand how it works now and can come back later.
@@ -437,6 +449,7 @@ but it's pretty pleasing for so little work.
 
 - frontend: slow progress on new emit_ir from ast instead of going through old Bc.
 - arm: fixealways run in the slow jit anymore. d HFA abi. it was always passing >16 byte structs in memory which i learned was wrong a from soft_draw example a while ago.
+  > <https://lists.sr.ht/~mpu/qbe/%3CCAHT_M7Pp-6_vSjOd-WkRt4ACJWLrKq=YpgUrnzW0Vy=T-7AFYg@mail.gmail.com%3E>
 - arm: fixed incorrectly transcribed udiv bits. only manifested on fold test with fold turned off which is strange.
   always run in the slow jit anymore.always run in the slow jit anymore. didn't mess up franca because i only use signed math currently.
 - amd: temporary rort/byte_swap #asm impl. revealed bug with const arg + FuncImpl.Merged that im going to ignore for now.
