@@ -1,3 +1,5 @@
+- TODO: deal with `CodegenEntry:Bounce` on wasm
+
 ## wasm (Jan 4)
 
 - finish f.const for import_wasm
@@ -9,6 +11,11 @@
   would be to only put the ones referenced indirectly with `O.addr`,
   but then i need to keep track of another set of index mappings.
 - cmp sometimes needs an explicit extension to Kl
+- fix the convoluted thing i was doing to patch the function size before locals.
+  it's a leb128 so you don't know how big it will be up front, but in code when its at the end of an instruction you can pad out will nops.
+  but for locals there's no nop so i was like shifting up the locals to the end of the length and then padding the beginning of the code with nops.
+  but that's stupid, you're allowed trailing padding inside the leb number by just putting `(sign_bit | LEB_MORE)*, sign_bit`,
+  which is much less confusing than my way.
 
 ## wasm (Jan 2)
 

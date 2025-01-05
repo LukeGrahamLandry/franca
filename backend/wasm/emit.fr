@@ -25,37 +25,21 @@ fn emit_func_wasm32(f: *Qbe.Fn) void = {
     printfn(f, f.globals.debug_out);
     use_symbol(e.m, f.lnk.id) { s |
         s.got_lookup_offset = e.m.local_needs_reloc.len;
-        @println("$% type: %", s.name, s.wasm_type_index);
     };
     e.m.local_needs_reloc&.push(f.lnk.id);
     
     e.pad(WASM_INDEX_PADDING); // reserve space for length of code. 
     
-    start_locals := e.a.len;
     pack_locals(e);
-    end_locals := e.a.len;
     
     emit_block(e, e.f.start);
     e.op(.Unreachable);  // keep the verifier happy (wihtout this the implicit return needs to typecheck)
     e.op(.End);
     code.next = code.next.offset(e.a.len());
     
-    // TODO: this is so convoluted
     size_of_func := e.a.len;
     e.a.len = 0;
-    inner_size := size_of_func - uleb_size(size_of_func);
-    @debug_assert_eq(uleb_size(size_of_func), uleb_size(inner_size), "TODO: deal with variable length numbers here");
-    leb128_unsigned(e.a&, size_of_func - uleb_size(size_of_func)); // :FUCKED
-    @assert_le(e.a.len, WASM_INDEX_PADDING, "function $% is too big to patch length", f.name());
-    end_of_length := e.a.len;
-    e.a.len = size_of_func;
-    size_of_locals := end_locals - start_locals;
-    e.a.items().copy_overlapping(end_of_length, start_locals, size_of_locals);
-    extra := start_locals - end_of_length;
-    e.a.len = end_of_length + size_of_locals;
-    e.pad(extra);
-    e.a.len = size_of_func;
-    
+    leb128_unsigned(e.a&, size_of_func - WASM_INDEX_PADDING, WASM_INDEX_PADDING); 
     // TODO: fix -d D llvm-mc dis needs to not include the locals part
 }
 
@@ -201,6 +185,7 @@ fn emit(e: *EmitWasmFn, i: *Qbe.Ins) void = {
             // Lookup a function reference in a table and call it. 
             e.op(.CallIndirect);
             type_index := i.arg&[1].rsval().intcast();
+            @debug_assert_ge(type_index, 0);
             leb128_unsigned(e.a&, type_index); // type index
             leb128_unsigned(e.a&, 0);  // table index
         }
@@ -370,11 +355,11 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
     };
     
     code_segment := m.segments&[.Code]&;
-    cursor: List(u8) = (maybe_uninit = (ptr = code_segment.mmapped.ptr, len = COMMANDS_SIZE_GUESS), len = 0, gpa = panicking_allocator);
+    cursor: List(u8) = (maybe_uninit = (ptr = code_segment.mmapped.ptr, len = COMMANDS_SIZE_GUESS), len = 0, gpa = panicking_allocator);  // :UnacceptablePanic
     push_buf :: fn($body: @Fn(buf: *List(u8)) void) void = {
         start := cursor.len;
         body(cursor&);
-        chunks&.push(cursor.items().rest(start));
+        chunks&.push(cursor.items().rest(start));  // TODO: compiler bug? do we really want you to be able to bind to `chunks` which is declared lower in the scope?
     };
     chunks := list([]u8, temp());
     
@@ -395,49 +380,44 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
         chunks&.push(m.stubs.mmapped.slice(0, m.stubs&.len()));
     }; 
     
-    {
-        imports_buf := u8.list(m.imports.len * 10, temp());
-        for m.imports& { id |
-            use_symbol(m, id) { s |
-                sep := index_of(s.name, "$".ascii());
-                mod, name := ("", s.name);
-                if sep { sep |
-                    name = s.name.slice(0, sep);
-                    mod = s.name.rest(sep + 1);
-                } else {
-                    mod = default_import_module;
-                };
-                leb128_unsigned(imports_buf&, mod.len);
-                imports_buf&.push_all(mod);
-                leb128_unsigned(imports_buf&, name.len);
-                imports_buf&.push_all(name);
-                // For now we only do functions
-                push(imports_buf&, @as(u8) Wasm.ImportType.Func);
-                leb128_unsigned(imports_buf&, s.wasm_type_index.intcast());
-            };
-        };
-        push_buf { buf |
-            buf.push(@as(u8) Wasm.Section.Import);
-            leb128_unsigned(buf, imports_buf.len() + uleb_size(m.imports.len));
+    push_buf { buf |
+        buf.push(@as(u8) Wasm.Section.Import);
+        uleb_patch_delta buf {
             leb128_unsigned(buf, m.imports.len);
-        };
-        chunks&.push(imports_buf.items());
-    }; 
-    
-    {
-        function_type_indices := u8.list(m.local_needs_reloc.len, temp());
-        for m.local_needs_reloc& { id |
-            use_symbol(m, id) { s |
-                leb128_unsigned(function_type_indices&, s.wasm_type_index.intcast()); 
+            for m.imports& { id |
+                use_symbol(m, id) { s |
+                    sep := index_of(s.name, "$".ascii());
+                    mod, name := ("", s.name);
+                    if sep { sep |
+                        name = s.name.slice(0, sep);
+                        mod = s.name.rest(sep + 1);
+                    } else {
+                        mod = default_import_module;
+                    };
+                    leb128_unsigned(buf, mod.len);
+                    push_all(buf, mod);
+                    leb128_unsigned(buf, name.len);
+                    push_all(buf, name);
+                    // For now we only do functions
+                    push(buf, @as(u8) Wasm.ImportType.Func);
+                    @debug_assert_ge(s.wasm_type_index, 0, "unknown type for function $%", s.name);
+                    leb128_unsigned(buf, s.wasm_type_index.intcast());
+                };
             };
         };
-        
-        push_buf { buf |
-            buf.push(@as(u8) Wasm.Section.Function);
-            leb128_unsigned(buf, function_type_indices.len + uleb_size(f_count));
+    };
+    
+    push_buf { buf |
+        buf.push(@as(u8) Wasm.Section.Function);
+        uleb_patch_delta buf {
             leb128_unsigned(buf, f_count);
+            for m.local_needs_reloc& { id |
+                use_symbol(m, id) { s |
+                    @debug_assert_ge(s.wasm_type_index, 0, "unknown type for function $%", s.name);
+                    leb128_unsigned(buf, s.wasm_type_index.intcast()); 
+                };
+            };
         };
-        chunks&.push(function_type_indices.items());
     };
     
     fn write_limits(buf: *List(u8), min: i64, max: ?i64) void = {
@@ -449,22 +429,23 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
     }
     
     // :OnlyOneTable for indirect function calls
-    if m.wasm_has_any_indirect_calls {
-        push_buf { buf |
-            number_of_functions := m.imports.len + m.exports.len;
-            buf.push(@as(u8) Wasm.Section.Table);
-            leb128_unsigned(buf, 1 + 1 + 1 + (2 * uleb_size(number_of_functions)));
+    @if(m.wasm_has_any_indirect_calls)
+    push_buf { buf |
+        buf.push(@as(u8) Wasm.Section.Table);
+        uleb_patch_delta buf {
             buf.push(1); // length of tables vec
             buf.push(@as(u8) Wasm.ValType.FuncRef); 
+            number_of_functions := m.imports.len + m.exports.len;
             write_limits(buf, number_of_functions, (Some = number_of_functions));
         };
     };
     
     push_buf { buf |
         buf.push(@as(u8) Wasm.Section.Memory);
-        leb128_unsigned(buf, 1 + 1 + uleb_size(min_mem_pages));
-        buf.push(1); // length of memories vec
-        write_limits(buf, min_mem_pages, .None);
+        uleb_patch_delta buf {
+            buf.push(1); // length of memories vec
+            write_limits(buf, min_mem_pages, .None);
+        };
     };
     
     {
@@ -477,39 +458,29 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
         
         push_buf { buf |
             buf.push(@as(u8) Wasm.Section.Global);
-            leb128_unsigned(buf, 1 + 1 + 1 + 1 + uleb_size(stack_base) + 1);
-            
-            push(buf, 1); // length of globals vector
-            
-            push(buf, @as(u8) Wasm.ValType.I32); // type
-            push(buf, 1); // mutable
-            
-            // initial value
-            push(buf, @as(u8) Wasm.Inst.I32_Const);
-            leb128_signed(buf, stack_base);
-            push(buf, @as(u8) Wasm.Inst.End);
+            uleb_patch_delta buf {
+                push(buf, 1); // length of globals vector
+                
+                push(buf, @as(u8) Wasm.ValType.I32); // type
+                push(buf, 1); // mutable
+                
+                // initial value
+                push(buf, @as(u8) Wasm.Inst.I32_Const);
+                leb128_signed(buf, stack_base);
+                push(buf, @as(u8) Wasm.Inst.End);
+            };
         };
     };
     
-    if m.exports.len > 0 {
-        chunk_i := chunks.len;
-        exports_size := uleb_size(m.exports.len);
-        for(m.exports&, fn(id) => use_symbol(m, id) { s |
-            exports_size += 1 + uleb_size(s.name.len) + s.name.len + uleb_size(s.got_lookup_offset);
-        });
-        
-        push_buf { buf |
-            buf.push(@as(u8) Wasm.Section.Export);
-            leb128_unsigned(buf, exports_size);
+    @if(m.exports.len > 0)
+    push_buf { buf |
+        buf.push(@as(u8) Wasm.Section.Export);
+        uleb_patch_delta buf {
             leb128_unsigned(buf, m.exports.len);
-        };
-        for m.exports& { id |
-            use_symbol(m, id) { s |
-                push_buf { buf |
+            for m.exports& { id |
+                use_symbol(m, id) { s |
                     leb128_unsigned(buf, s.name.len);
-                };
-                chunks&.push(s.name);
-                push_buf { buf |
+                    push_all(buf, s.name);
                     buf.push(@as(u8) Wasm.ImportType.Func);
                     leb128_unsigned(buf, s.got_lookup_offset);
                 };
@@ -522,14 +493,10 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
     // :OnlyOneTable 
     // TODO: would be better to assign indexes out of order so we wouldn't need fixups 
     //       and would only need to put functions that are actually referenced indirectly in the table. 
-    if m.wasm_has_any_indirect_calls {
-        push_buf { buf |
-            buf.push(@as(u8) Wasm.Section.Element);
-            size := 1 + 1 + 3 + uleb_size(f_count);
-            range(0, f_count) { i |
-                size += uleb_size(i);
-            };
-            leb128_unsigned(buf, size);
+    @if(m.wasm_has_any_indirect_calls)
+    push_buf { buf |
+        buf.push(@as(u8) Wasm.Section.Element);
+        uleb_patch_delta buf {
             leb128_unsigned(buf, 1);  // length
             
             leb128_unsigned(buf, 0);  // elem tag for active, table 0, funcref
@@ -562,16 +529,17 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
     if data_size > 0 {
         push_buf { buf |
             buf.push(@as(u8) Wasm.Section.Data);
-            leb128_unsigned(buf, 1 + 1 + 1 + uleb_size(wasm_page_size) + 1 + uleb_size(data_size) + data_size);
-            leb128_unsigned(buf, 1); // number of datas 
-            leb128_unsigned(buf, 0); // mode: active
-            
-            // offset expr
-            buf.push(@as(u8) Wasm.Inst.I32_Const);
-            leb128_signed(buf, wasm_page_size); 
-            buf.push(@as(u8) Wasm.Inst.End);
-            
-            leb128_unsigned(buf, data_size);
+            uleb_patch_delta buf {
+                leb128_unsigned(buf, 1); // number of datas 
+                leb128_unsigned(buf, 0); // mode: active
+                
+                // offset expr
+                buf.push(@as(u8) Wasm.Inst.I32_Const);
+                leb128_signed(buf, wasm_page_size); 
+                buf.push(@as(u8) Wasm.Inst.End);
+                
+                leb128_unsigned(buf, data_size);
+            };
         };
         chunks&.push(data_seg.mmapped.slice(wasm_page_size, data_seg.len()));
     };
@@ -584,6 +552,18 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
     @assert_le(memory_reserved, min_mem_pages * wasm_page_size);
     
     chunks.items()
+}
+
+fn uleb_patch_delta(buf: *List(u8), $body: @Fn() void) void = {
+    PAD :: WASM_INDEX_PADDING;
+    buf.reserve(PAD);
+    buf.len += PAD;
+    start := buf.len;
+    body();
+    length := buf.len - start;
+    buf.len = start - PAD;
+    leb128_unsigned(buf, length, PAD);
+    buf.len += length;
 }
 
 //

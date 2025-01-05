@@ -2,22 +2,43 @@
 
 LEB_MORE :: 128;
 MAX_u8 :: 255;
-fn leb128_unsigned(out: *List(u8), i: i64) void = {
+
+fn leb128_unsigned(out: *List(u8), i: i64) void = 
+    leb128_unsigned(out, i, 0);
+
+fn leb128_unsigned(out: *List(u8), i: i64, $pad_to: i64) void = {
+    n := 0;
     dowhile {
+        n += 1;
         byte := i.bit_and(MAX_u8);
         i = i.shift_right_logical(7);
         more := i != 0;
         if more {
             byte = byte.bit_or(LEB_MORE);
-        }; 
+        };
         out.push(@as(u8) byte.trunc());
         more
     };
+    
+    @if(pad_to > 0) {
+        @debug_assert_le(n, pad_to, "no enough room for leb in pad_to");
+        while => n < pad_to {
+            out[out.len - 1] = bit_or(out[out.len - 1], LEB_MORE.trunc());
+            out.push(0);
+            n += 1;
+        };
+    };
 }
 
-fn leb128_signed(out: *List(u8), i: i64) void = {
+fn leb128_signed(out: *List(u8), i: i64) void = 
+    leb128_signed(out, i, 0);
+
+fn leb128_signed(out: *List(u8), i: i64, $pad_to: i64) void = {
     done := false;
+    n := 0;
+    positive := i >= 0;
     while => !done {
+        n += 1;
         byte: u8 = i.trunc();
         i = i.shift_right_arithmetic(6);
         done = i.eq(0).or(i == -1);
@@ -28,6 +49,15 @@ fn leb128_signed(out: *List(u8), i: i64) void = {
             byte = (@as(i64) byte.zext().bit_or(LEB_MORE)).trunc();
         };
         out.push(byte);
+    };
+    @if(pad_to > 0) {
+        p: u8 = @if(positive, 0, 0x7F);
+        @debug_assert_le(n, pad_to, "no enough room for leb in pad_to");
+        while => n < pad_to {
+            out[out.len - 1] = bit_or(out[out.len - 1], LEB_MORE.trunc());
+            out.push(p);
+            n += 1;
+        };
     };
 }
 
