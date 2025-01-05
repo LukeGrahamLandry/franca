@@ -182,6 +182,10 @@ fn bind_args(self: *EmitIr) CRes(void) #once = {
             };
         };
     };
+    if func.get_flag(.CVariadic) {
+        @println("vaarg %", self.program.get_string(func.name));
+        self.f.vararg = true;
+    };
     .Ok
 }
 
@@ -203,21 +207,25 @@ fn compile_for_arg(self: *EmitIr, arg: *FatExpr) CRes([]Qbe.Ins) = {
     };
     
     enumerate parts { i, val |
-        ty := val.ty; // TODO: is this ok or do you have to get it from the function's arg type?
-        _, k := self.load_op(ty);
-        ::if(Qbe.Ins);
-        ins := if k != .Ke {  // scalar
-            r := @try(self.compile_expr(val, .Scalar)) return;
-            make_ins(.arg, k, QbeNull, r, QbeNull)
-        } else {  // aggregate
-            // TODO: you really want to do `fn Deref(ref) => @try(self.compile_expr(ref, .Scalar)) return;`
-            //       to skip an extra blit that the abi stuff will do for you. 
-            //       but we don't know if a later argument expression will modify that memory. 
-            r      := @try(self.compile_expr(val, .NewMemory)) return;
-            r_type := self.get_aggregate(ty);
-            make_ins(.argc, .Kl, QbeNull, r_type, r)
+        if val.expr&.is(.CVariadicMarker) {
+            out&.push(make_ins(.argv, .Kw, QbeNull, QbeNull, QbeNull));
+        } else {
+            ty := val.ty; // TODO: is this ok or do you have to get it from the function's arg type?
+            _, k := self.load_op(ty);
+            ::if(Qbe.Ins);
+            ins := if k != .Ke {  // scalar
+                r := @try(self.compile_expr(val, .Scalar)) return;
+                make_ins(.arg, k, QbeNull, r, QbeNull)
+            } else {  // aggregate
+                // TODO: you really want to do `fn Deref(ref) => @try(self.compile_expr(ref, .Scalar)) return;`
+                //       to skip an extra blit that the abi stuff will do for you. 
+                //       but we don't know if a later argument expression will modify that memory. 
+                r      := @try(self.compile_expr(val, .NewMemory)) return;
+                r_type := self.get_aggregate(ty);
+                make_ins(.argc, .Kl, QbeNull, r_type, r)
+            };
+            out&.push(ins);
         };
-        out&.push(ins);
     };
     (Ok = out.items())
 }
@@ -283,6 +291,11 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = { // #log_ir("AIR")
             return(.Ok)
         }
         fn NewIntrinsic(op) => {
+            if op.ir_op == Qbe.O.vastart.raw() {
+                self.blk.jmp.type = .hlt;
+                self.finalize_blocks();
+                return(.Ok);
+            };
             a0, a1, ret := self.intrinsic_shim(func);
             self.blk.jmp.arg = @try(self.emit_intrinsic_new(op, .ScalarTransient, @slice(a0, a1), func, ret)) return;
             self.finalize_blocks();
@@ -317,7 +330,6 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = { // #log_ir("AIR")
                 }
             };
             return(.Ok)
-        
         };
         fn TargetOsSplit(_) => {
             @debug_assert(func.body&.is(.Merged), "ICE: #target_os split expected multiple");
@@ -761,19 +773,34 @@ fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) CRes(Qbe.R
             original_f_id := f_id;
             f_id = self.program.follow_redirects(f_id);
             callee := self.program.get_function(f_id);  // fid might have changed. 
+           
+            callee_r := self.func_ref(f_id);
             
-            if find_impl(func.body&, .NewIntrinsic) { op |
-                arg := arg.items();
-                p1: Placement = @if(arg.len != 1 && guess_can_assign(arg[1]&), .Scalar, .ScalarTransient);
-                a0 := @try(self.compile_expr(arg[0]&, p1)) return;
-                a1 := if(arg.len == 1, => QbeNull, => @try(self.compile_expr(arg[1]&, .ScalarTransient)) return);
-                return(self.emit_intrinsic_new(op, p, @slice(a0, a1), caller, f_ty.ret));
-            };
-            if find_impl(func.body&, .Intrinsic) { op |
-                arg := arg.items();
-                a0 := @try(self.compile_expr(arg[0]&, .Scalar)) return;
-                a1 := if(arg.len == 1, => QbeNull, => @try(self.compile_expr(arg[1]&, .ScalarTransient)) return);
-                return(self.emit_intrinsic_old(op, p, @slice(a0, a1), caller, f_ty.ret));
+            T :: FuncImpl.Tag();
+            prio :: @const_slice(T.NewIntrinsic, T.Intrinsic, T.DynamicImport);
+            if choose_impl(func.body&, prio) { impl | 
+                @match(impl) {
+                    fn NewIntrinsic(op) => {
+                        arg := arg.items();
+                        p1: Placement = @if(arg.len != 1 && guess_can_assign(arg[1]&), .Scalar, .ScalarTransient);
+                        a0 := @try(self.compile_expr(arg[0]&, p1)) return;
+                        a1 := if(arg.len == 1, => QbeNull, => @try(self.compile_expr(arg[1]&, .ScalarTransient)) return);
+                        return(self.emit_intrinsic_new(op, p, @slice(a0, a1), caller, f_ty.ret));
+                    }
+                    fn Intrinsic(op) => {
+                        arg := arg.items();
+                        a0 := @try(self.compile_expr(arg[0]&, .Scalar)) return;
+                        a1 := if(arg.len == 1, => QbeNull, => @try(self.compile_expr(arg[1]&, .ScalarTransient)) return);
+                        return(self.emit_intrinsic_old(op, p, @slice(a0, a1), caller, f_ty.ret));
+                    }
+                    fn DynamicImport(name) => if self.when == .Aot {
+                        g := self.m.goal&;
+                        // TODO: if im committed to not using Bounce, should cache #link_rename because it's weird if i call the user's function a billion times. 
+                        real_name := self.program.check_link_rename(name[], func, (arch = g.arch, os = g.os));
+                        callee_r = self.f.symcon(self.m.intern(real_name));
+                    };
+                    @default => unreachable();
+                };
             };
             
             if !caller.get_flag(.ComptimeOnly) && original_f_id == f_id {
@@ -789,7 +816,6 @@ fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) CRes(Qbe.R
                 // TODO: O.dbgloc would be nice
             };
             
-            callee_r := self.func_ref(f_id);
             arg := @try(self.compile_for_arg(arg)) return;
             self.emit_runtime_call(f_ty, arg, p, callee_r, context)
         }
@@ -819,11 +845,12 @@ fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) CRes(Qbe.R
 }
 
 fn emit_intrinsic_new(self: *EmitIr, op: *NewIntrinsicPayload, p: Placement, arg: []Qbe.Ref, caller: *Func, expr_ty: Type) CRes(Qbe.Ref) = {
-    if(p&.is(.Discard), => return(Ok = QbeNull));
+    @debug_assert(op.ir_op != 0, "no ir op");
+    o := @as(Qbe.O) op.ir_op;
+    if(p&.is(.Discard) && !@is(o, .vastart, .vaarg, .alloc4, .alloc8, .alloc16, .call, .global_set), => return(Ok = QbeNull)); 
     k := @as(Qbe.Cls) op.ir_cls;
     r := self.scalar_dest(p, k); 
-    @debug_assert(op.ir_op != 0, "no ir op");
-    self.emit(@as(Qbe.O) op.ir_op, k, r, arg[0], arg[1]);
+    self.emit(o, k, r, arg[0], arg[1]);
     (Ok = self.scalar_result(p, r, expr_ty))
 }
 
@@ -852,26 +879,24 @@ fn emit_intrinsic_old(self: *EmitIr, op: *IntrinsicPayload, p: Placement, arg: [
                 }
             }
         }
-        fn SetContext() => {
-            if self.dyn_context {
-                if self.context == QbeNull {
-                    self.context = self.f.newtmp("context", .Kl);
-                };
-                self.emit(.copy, .Kl, self.context, arg[0], QbeNull);
-                QbeConZero
+        fn SetContext() => if self.dyn_context {
+            if self.context == QbeNull {
+                self.context = self.f.newtmp("context", .Kl);
+            };
+            self.emit(.copy, .Kl, self.context, arg[0], QbeNull);
+            QbeConZero
+        } else {
+            if self.when == .Jit {
+                // see GetContext case
+                self.jit_call_1to1(@as(rawptr) set_dynamic_context, arg[0])
             } else {
-                if self.when == .Jit {
-                    // see GetContext case
-                    self.jit_call_1to1(@as(rawptr) set_dynamic_context, arg[0])
-                } else {
-                    context_var := self.static_context_var.expect("have static_context_var for aot");
-                    self.reference_constant(context_var);
-                    ref := self.f.symcon(@tfmt("g%", context_var.id));
-                    self.emit(.storel, .Kw, QbeNull, arg[0], ref);
-                    QbeConZero
-                }
+                context_var := self.static_context_var.expect("have static_context_var for aot");
+                self.reference_constant(context_var);
+                ref := self.f.symcon(@tfmt("g%", context_var.id));
+                self.emit(.storel, .Kw, QbeNull, arg[0], ref);
+                QbeConZero
             }
-        }
+        };
         fn BitNot() => {
             if(p&.is(.Discard), => return(Ok = QbeNull));
             // TODO: .Kw

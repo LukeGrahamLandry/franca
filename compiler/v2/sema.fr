@@ -1608,12 +1608,14 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
     fid := FuncId.assume_cast(fid&)[];
     @log_event("compile direct call %", fid) self;
     func := self.get_function(fid);
+    is_variadic := func.get_flag(.CVariadic);
     
     arg_ty := UnknownType;
     
     @try(self.adjust_named_arguments(fid, arg_expr)) return;
     
-    if func.get_flag(.AnyConstArgs) {| 
+    if func.get_flag(.AnyConstArgs) {
+        @err_assert(!is_variadic, "TODO: support #c_variadic with constant arguments") return;
         @check(self.ensure_resolved_sign(fid)) return;
         
         // This creates a new function with only runtime args, and updates the arg_expr accordingly. 
@@ -1660,6 +1662,7 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
     };
     
     if will_inline {
+        @err_assert(!is_variadic, "TODO: support #inline with constant arguments") return;
         if capturing {
             // We want to allow for polymorphic arguments, but its better if we can infer the annotated ones before duplicating.
             // currently this is just an optimisation.  
@@ -1688,9 +1691,13 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
     };
     
     arg_ty = @check(self.infer_arguments(fid)) return;
-    @check(self.compile_expr(arg_expr, (Specific = arg_ty))) return;
-    if arg_ty != arg_expr.ty {
-        @check(self.can_assign(arg_ty, arg_expr.ty)) return;
+    if is_variadic {
+        @check(self.type_check_variadic_call(arg_ty, arg_expr)) return;
+    } else {
+        @check(self.compile_expr(arg_expr, (Specific = arg_ty))) return;
+        if arg_ty != arg_expr.ty {
+            @check(self.can_assign(arg_ty, arg_expr.ty)) return;
+        };
     };
     
     ret_ty := @check(self.infer_return(fid))    return;
@@ -1750,6 +1757,29 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
         expr.done = arg_expr.done;
     };
     
+    .Ok
+}
+
+fn type_check_variadic_call(self: *SelfHosted, arg_ty: Type, arg_expr: *FatExpr) Maybe(void) = {
+    positional_types := self.arg_types(arg_ty);
+    args_passed := arg_expr.items();
+    @err_assert(args_passed.len >= positional_types.len, "Not enough positional arguments for #c_variadic call.") return;
+    types := Type.list(args_passed.len + 1, temp());
+    range(0, positional_types.len) { i |
+        e := args_passed.index(i);
+        @check(self.compile_expr(e, (Specific = positional_types[i]))) return;
+        types&.push(e.ty);
+    };
+    types&.push(void);  // :get_or_create_type
+    range(0, args_passed.len  - positional_types.len) { i |
+        e := args_passed.index(positional_types.len + i);
+        @check(self.compile_expr(e, .None)) return;
+        types&.push(e.ty);
+    };
+    @err_assert(arg_expr.expr&.is(.Tuple), "TODO: non-tuple passed to #c_variadic") return;
+    e: FatExpr = (expr = .CVariadicMarker, done = true, ty = void, loc = arg_expr.loc); // :get_or_create_type
+    arg_expr.expr.Tuple&.insert(positional_types.len, e, self.get_alloc());
+    arg_expr.ty = self.tuple_of(types.items());
     .Ok
 }
 
@@ -2563,18 +2593,23 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
         if attempt.options.len == 0 {
             self.last_loc = arg_expr.loc;
             return(self.report_missing_overload(parts, overloads, attempt.call.requested));
-        };      
+        };
     };
     
+    variadic_count := 0;
     // TODO: should be able to move the infer_type into the next phase just before you need it but no -- Sep 2
     if attempt.state < 1 {
         are_we_done_yet();
         // TODO: while is it faster to write the loop like this than with for?
         f_i := attempt.options.len;
+        
         while => f_i > 0 {
             f_i -= 1;
             fid := attempt.options[f_i];
             func := self.get_function(fid);
+            if func.get_flag(.CVariadic) {
+                variadic_count += 1;
+            };
             if !func.get_flag(.Generic) && func.finished_arg.is_none() {
                 all_known := true;
                 each func.arg.bindings& { b |
@@ -2584,9 +2619,13 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
                 if all_known {
                     @check(self.infer_arguments(fid)) return;
                 };
-                
             };
         };
+        if variadic_count > 0 {
+            @err_assert(variadic_count == 1, "TODO: support multiple #c_variadic functions in one overload set") return;
+            @err_assert(false, "TODO: support #c_variadic in overload sets") return;
+        };
+        
         attempt.state = 1;
     };
     
@@ -2797,7 +2836,7 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
             are_we_done_yet();
         };
     };
-    
+
     self.last_loc = arg_expr.loc;
     @println("% matching options", attempt.options.len);
     if attempt.options.len < 6 {
@@ -3242,6 +3281,10 @@ fn update_function_metadata(self: *SelfHosted, func: *Func, os: ?OverloadSet) Re
             @case(Flag.ct.ident()) => {
                 func.set_flag(.ComptimeOnly);
                 func.set_flag(.YesContext);
+            };
+            @case(Flag.c_variadic.ident()) => {
+                func.set_flag(.CVariadic);
+                func.set_flag(.NoInline);  // TODO
             };
             @default => ();
         };

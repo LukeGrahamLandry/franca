@@ -1,15 +1,16 @@
 ## graphics
 
-- finish updating documentation to not use c syntax 
+- finish updating documentation to not use c syntax
 - translate a subset of my language into the shader languages
 - use []u8 and interpret_as_bytes instead of SgRange
 - :GfxLogging
 
-## 
+##
 
+- still allow coerce to c string if there was a `\` escape.
 - `[CPU Time]` on macos-x64 is wrong. (different libc magic numbers? clang libc_constants says no). // :WrongClockTime
 - maybe have a `push_compiler_error_context` and `pop_compiler_error_context` for macros so @fmt could easily add a message like `while evaluating format string`?
-- make the old jit backend runnable again as an example 
+- make the old jit backend runnable again as an example
 - repro doesn't work when you do `-repeat`
 - be less strict about amd64 address folding when there's a large constant pointer (which is valid when jitting)
 - don't hardcode page size to 16k
@@ -18,7 +19,7 @@
 - things that should be cleaned up next time i replace `boot` :UpdateBoot
   - :DumbNameAlias NoMangle
   - AbiHackSpan
-  - :InlineFoldHack `@if(::!T.has_pointers()` 
+  - :InlineFoldHack `@if(::!T.has_pointers()`
   - fn zeroed
   - .sym().c_str()
   - `@rec` in backend/ir.fr and wasm/instructions:Wasm
@@ -46,7 +47,7 @@
 - combine include_bytes and #include_std somehow
 - @match/@switch should just be @inline_match/@inline_switch if the thing is constant.
 - `fn fmodf(f32, f32) f32 #libc;` should treat them as types not arg names
-- try semaphores 
+- try semaphores
 - rename RsVec. vector is a stupid name for that
 - fix overflow when lexing large float literals
 - make compilation order of struct sizing less sketchy for offset_of
@@ -55,10 +56,10 @@
 - show const fields better in log_type
 - (cap, alloc) args are swaped between list:List and init:RsVec
 
-// - less verbose if let/let else? think about how to express with a macro. 
-// - auto coerce payload to enum when branches aren't ambigous? maybe? thats a bit creepy. doing it for unit when you just forget to return something would be bad. 
-// - default function arguments because 'self.parse_expr(Prec.None)' and symmetry with structs. 
-// - track all the errors you hit when failing overloads. 
+// - less verbose if let/let else? think about how to express with a macro.
+// - auto coerce payload to enum when branches aren't ambigous? maybe? thats a bit creepy. doing it for unit when you just forget to return something would be bad.
+// - default function arguments because 'self.parse_expr(Prec.None)' and symmetry with structs.
+// - track all the errors you hit when failing overloads.
 // - local_return and return implciitly rebinding is a bit confusing
 
 ##

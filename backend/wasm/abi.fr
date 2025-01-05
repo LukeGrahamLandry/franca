@@ -1,28 +1,34 @@
 //! https://github.com/WebAssembly/tool-conventions/blob/main/BasicCABI.md
 //! - non-scalar aggragates are always passed by pointer 
 //! - aggragate return pointer is prepended to arguments
-//! - varargs pointer is appended to arguments
+//! - varargs pointer is appended to arguments (TODO)
 //! - need an entry in the type table for the function's signeture. 
+//! - hidden env parameter is passed in a global (which is good enough until i want to support some extension that adds threads)
 
 fn wasm_abi(f: *Qbe.Fn) void = {
+    m := f.globals;
+    @if(use_threads) pthread_mutex_lock(m.types_mutex&).unwrap();
+    
     // params come in as locals, not on the stack, which seems odd, 
     // but to be fair, the first thing i would do here is save them in locals anyway so i can't complain. 
     for_pars f { i |
-        @debug_assert(!@is(i.op(), .pare), "TODO: env par wasm");
-        if i.op() == .parc {
-            // TODO: check if they said its a type but really there's only one scalar so the ir expects a pointer but we got a value. 
-            i.set_op(.par);
-            i.arg&[0] = QbeNull;
+        @match(i.op()) {
+            fn pare() => {
+                i[] = make_ins(.global_get, .Kl, i.to, f.symcon(m.wasm_symbol_env_parameter), QbeNull);
+            }
+            fn parc() => {
+                // TODO: check if they said its a type but really there's only one scalar so the ir expects a pointer but we got a value. 
+                i.set_op(.par);
+                i.arg&[0] = QbeNull;
+            }
+            @default => ();
         };
     };
     
     // TODO: check if they said its a type but really there's only one scalar 
-    retr := @if(f.retty != -1, f.newtmp("abi", .Kl), QbeNull); 
-    
-    m := f.globals;
+    retr := @if(f.retty != -1, f.newtmp("abi", .Kw), QbeNull);
     ret_cls := Qbe.Cls.Ke;
     
-    @if(use_threads) pthread_mutex_lock(m.types_mutex&).unwrap();
     for_blocks f { b |
         changed := false; 
         f.reset_scratch();
@@ -57,7 +63,7 @@ fn wasm_abi(f: *Qbe.Fn) void = {
             continue :: local_return;
             i := i[];
             
-            @debug_assert(!@is(i.op(), .vaarg, .vastart, .arge, .argv), "TODO: wasm c-varargs, env");
+            @debug_assert(!@is(i.op(), .vaarg, .vastart, .argv), "TODO: wasm c-varargs, env");
             if i.op() == .call {
                 type := type_index_for_call(f, b, i);
                 if f.get_sym(i.arg&[0]) { id, off | 
@@ -94,11 +100,15 @@ fn wasm_abi(f: *Qbe.Fn) void = {
             // TODO: we need to know argument types for indirect_call but don't want to rely on consecutive pushes holding cls
             
             if is_arg(i.op()) {
-                // TODO: check if they said its a type but really there's only one scalar and it should be converted to a load. 
-                if rtype(i.arg&[0]) == .RType {
-                    i.arg&[0] = i.arg&[1];
+                if i.op() == .arge {
+                    i[] = make_ins(.global_set, .Kl, QbeNull, f.symcon(m.wasm_symbol_env_parameter), i.arg&[0]);
+                } else {
+                    // TODO: check if they said its a type but really there's only one scalar and it should be converted to a load. 
+                    if rtype(i.arg&[0]) == .RType {
+                        i.arg&[0] = i.arg&[1];
+                    };
+                    i.set_op(.push);
                 };
-                i.set_op(.push);
             } else {
                 check_pending_indirect_return();
             };
@@ -113,7 +123,7 @@ fn wasm_abi(f: *Qbe.Fn) void = {
         if retr != QbeNull && f.start.identical(b) {
             // prepend aggragate return pointer
             f.move_end_of_block_to_scratch(b, b.ins.first, changed&);
-            f.emit(.pop, .Kl, retr, QbeNull, QbeNull);
+            f.emit(.pop, .Kw, retr, QbeNull, QbeNull);
         };
         
         if changed {
@@ -123,7 +133,12 @@ fn wasm_abi(f: *Qbe.Fn) void = {
     
     use_symbol(m, f.lnk.id) { s |
         s.wasm_type_index = pack_wasm_result_type m { $yield_arg |
-            for_pars(f, fn(i) => yield_arg(i.cls()));
+            if retr != QbeNull {
+                yield_arg(.Kw);
+            };
+            for_pars f { i |
+                yield_arg(i.cls());
+            };
         } and { $yield_ret |
             if(ret_cls != .Ke, => yield_ret(ret_cls));
         };
@@ -143,10 +158,12 @@ fn type_index_for_call(f: *Qbe.Fn, b: *Qbe.Blk, call: *Qbe.Ins) i32 = {
     scalar := !void && is_scalar(f, call.arg&[1]);
     pack_wasm_result_type f.globals { $yield_arg |
         if !void && !scalar {
-            yield_arg(.Kl);
+            yield_arg(.Kw);
         };
         for(arg0, call) { i |
-            yield_arg(i.cls());
+            if i.op() != .arge {
+                yield_arg(i.cls());
+            };
         };
     } and { $yield_ret |
         if(scalar, => yield_ret(call.cls())); // TODO: cls is wrong once we do single field structs correctly

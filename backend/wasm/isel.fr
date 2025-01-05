@@ -1,7 +1,12 @@
+//!
 //! - instructions act on a stack instead of referencing values directly
 //! - addresses are 32 bit (but we allow frontends to use Cls.l for consistancy and just truncate here)
-//! - phi nodes are converted into block arguments
+//! - phi nodes are converted into block arguments (and we need to remember the types)
 //! - can't implicitly use the low bits of an i64 as an i32
+//! - stack pointer is stored in a global
+//! - cmp always produces an i32 (which we may need to extend)
+//! - no instruction for ordered/unordered fcmp
+//!
 
 // TODO: remove redundant push-pop pairs
 // TODO: reorder + flip args to create redundant push-pop pairs
@@ -185,9 +190,14 @@ fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
         f.emit(.extuw, .Kl, QbeNull, QbeNull, QbeNull);
     };
     
-    // copy is just push+pop, no actual op
-    if i.op() != .copy {
-        f.emit(i.op(), i.cls(), QbeNull, QbeNull, QbeNull);
+    g := @is(i.op(), .global_get, .global_set);
+    if g {
+        f.emit(i.op(), i.cls(), QbeNull, i.arg&[0], QbeNull);
+    } else {
+        // copy is just push+pop, no actual op
+        if i.op() != .copy {
+            f.emit(i.op(), i.cls(), QbeNull, QbeNull, QbeNull);
+        };
     };
     
     if is_store(i.op()) {
@@ -201,8 +211,6 @@ fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
         wasm_push_addr(f, i.arg&[0]);
         return();
     };
-    
-    g := @is(i.op(), .global_get, .global_set);
     
     enumerate_rev i.arg&.items() { idx, a |
         if a[] != QbeNull && !(g && idx == 0) {
@@ -223,7 +231,10 @@ fn wasm_push(f: *Qbe.Fn, k: Qbe.Cls, r: Qbe.Ref) void = {
                 k = Qbe.Cls.Kw;
             };
             slot_offset = f.slot - slot_offset;
-            ins := make_ins(.add, k, QbeNull, f.retr, f.getcon(slot_offset.intcast()));
+            // Stack grows downwards and __stack_base points to the bottom of our frame. 
+            SP := f.retr;
+            @debug_assert(SP != QbeNull);
+            ins := make_ins(.add, k, QbeNull, SP, f.getcon(slot_offset.intcast()));
             f.sel_wasm(ins&);
             return();
         };

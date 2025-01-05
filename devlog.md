@@ -16,6 +16,7 @@
   but for locals there's no nop so i was like shifting up the locals to the end of the length and then padding the beginning of the code with nops.
   but that's stupid, you're allowed trailing padding inside the leb number by just putting `(sign_bit | LEB_MORE)*, sign_bit`,
   which is much less confusing than my way.
+- use another global for hidden `env` parameter.
 
 ## wasm (Jan 2)
 

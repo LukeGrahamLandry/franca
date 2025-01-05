@@ -72,6 +72,7 @@ fn main() void = {
                 s: CStr = (ptr = ctx.offset(p.zext()));
                 @print("%", s);
             });
+            module&.put_jit_addr(module&.intern("labs$env"), @as(rawptr) fn(ctx: *u8, i: i64) i64 = i.abs());
             module&.make_exec();
             
             //n := "module_f1";
@@ -88,8 +89,9 @@ fn main() void = {
             main := p.w.exports[0].id;
             n := wasm.functions[main.zext()];
             f, _ := or module&.get_addr(n) {
-                @panic("couldn't find %()", n)
+                @panic("couldn't find %: %", n, wasm.m.str(n));
             };
+            @println("Calling %", wasm.m.str(n));
             f := assume_types_fn(Arg = i64, Ret = void, ptr = f);
             f(wasm_context_pointer);
         };
@@ -97,7 +99,7 @@ fn main() void = {
 }
 
 fn const_eval_wasm_expr(expr: []u8) Ty(i64, Qbe.Cls) = {
-    @assert_eq(expr[0], @as(u8) Wasm.Inst.I32_Const, "TODO: complex expr");
+    @assert(@is(@as(Wasm.Inst) expr[0], .I32_Const, .I64_Const), "TODO: complex expr");
     v, _, ok := read_leb128_signed(expr.rest(1));
     @debug_assert(ok, "bad constant expression");
     (v, .Kw)
@@ -119,6 +121,7 @@ LoadWasm :: @struct(
     return_types: []Wasm.ValType = empty(),
     link := zeroed(**Qbe.Blk),
     global_names: []u32 = empty(),
+    global_cls: []Qbe.Cls = empty(),
     tables: []u32 = empty(),
     functions: []u32 = empty(),
 );
@@ -234,16 +237,17 @@ fn create_globals(self: *LoadWasm) void = {
     };
     
     self.global_names = libc_allocator.alloc(u32, self.w.globals.len); // :Leak
+    self.global_cls = libc_allocator.alloc(Qbe.Cls, self.w.globals.len); // :Leak
     enumerate self.w.globals& { local_global_i, global | 
         // TODO: offset the index by number of imported globals
         id := self.m.intern(@tfmt("%_G%", self.module_name, local_global_i));
         self.global_names[local_global_i] = id;
-        // TODO: init
         create_var(self.m, id) { dat |
             dat.type = @if(global.type == .I32 || global.type == .F32, .DW, .DL);
             value, k := const_eval_wasm_expr(global.init_expr.items());
             dat.u.num = value; 
             self.m.emit_data_to_segment(dat&);
+            self.global_cls[local_global_i] = k;
         };
     };
     
@@ -421,12 +425,14 @@ fn emit_the_code(self: *LoadWasm) void = {
                 i: i64 = self.read_u().bitcast();
                 g := self.f.symcon(self.global_names[i]);
                 val := self.stack&.pop().expect("enough stack");
-                self.f.emit(.storew, .Kw, QbeNull, val, g); // TODO: other types!
+                k := self.global_cls[i];
+                o := store_ops[k.raw().zext()];
+                self.f.emit(o, .Kw, QbeNull, val, g); 
             }
             fn GlobalGet() => {
                 i: i64 = self.read_u().bitcast();
                 g := self.f.symcon(self.global_names[i]);
-                k := Qbe.Cls.Kw; // TODO: other types
+                k := self.global_cls[i];
                 val := self.f.newtmp("global_get", k);
                 self.stack&.push(val);
                 self.f.emit(.load, k, val, g, QbeNull);

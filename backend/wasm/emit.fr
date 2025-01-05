@@ -25,6 +25,7 @@ fn emit_func_wasm32(f: *Qbe.Fn) void = {
     printfn(f, f.globals.debug_out);
     use_symbol(e.m, f.lnk.id) { s |
         s.got_lookup_offset = e.m.local_needs_reloc.len;
+        s.referenced = true;
     };
     e.m.local_needs_reloc&.push(f.lnk.id);
     
@@ -257,32 +258,18 @@ fn emit(e: *EmitWasmFn, i: *Qbe.Ins) void = {
             @debug_assert_eq(off, 0);
             @debug_assert(i.arg&[1] == QbeNull, "should be on stack, not in a local");
             e.op(.GlobalSet);
-            // :OnlyOneGlobal
-            @debug_assert_eq(id, e.m.wasm_symbol_stackbase);
-            e.a&.push(0);
-            // e.index_patch(id, .Global);
+            e.push_global_index(id);
         }
         fn global_get() => {
             id, off := e.f.get_sym(i.arg&[0]) || @panic("global_get arg0 must be a symbol");
             @debug_assert_eq(off, 0);
             e.op(.GlobalGet);
-            // :OnlyOneGlobal
-            @debug_assert_eq(id, e.m.wasm_symbol_stackbase);
-            e.a&.push(0);
-            // e.index_patch(id, .Global);
+            e.push_global_index(id);
         }
         fn nop()    => ();
         fn dbgloc() => ();
         @default => @panic("TODO: wasm encoding for %", i.op());
     };
-}
-
-// Stack grows downwards and __stack_base points to the bottom of our frame. 
-fn slot(e: *EmitWasmFn, r: Qbe.Ref) i64 = {
-    s := i.arg&[0].val();
-    f := f.slot.zext();
-    @debug_assert(f > s && s > 0, "invalid RSlot %", s);
-    (f - s) * 4
 }
 
 fn index_patch(e: *EmitWasmFn, id: u32, _space: Wasm.ImportType) void = {
@@ -319,6 +306,15 @@ fn fixup_wasm32(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_re
     };
 }
 
+fn push_global_index(e: *EmitWasmFn, id: u32) void = @if_else {
+    @if(id == e.m.wasm_symbol_stackbase) => e.a&.push(0);
+    @if(id == e.m.wasm_symbol_env_parameter) => {
+        e.m.wasm_any_pare = true;
+        e.a&.push(1);
+    };
+    @else => panic("unknown symbol for wasm global");  // :OnlyTwoGlobals e.index_patch(id, .Global);
+};
+
 // order matters
 fn output_wasm_module(m: *QbeModule) [][]u8 = {
     default_import_module := "env";
@@ -344,10 +340,9 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
     };
     
     for_symbols m { id, symbol |
-        code := symbol.segment == .Code && id != m.wasm_symbol_stackbase; // :HACK
-        if code || symbol.fixups.len != 0 {
-            @debug_assert(!code || symbol.got_lookup_offset != -1, "TODO: wasm data entries $%", symbol.name);
-            if symbol.kind == .Local && code {
+        if symbol.referenced || symbol.fixups.len != 0 {
+            if symbol.kind == .Local && symbol.segment == .Code {
+                @debug_assert(symbol.got_lookup_offset != -1, "missing local function $%", symbol.name);
                 symbol.got_lookup_offset += m.imports.len;
             };
             m.do_fixups(u8.ptr_from_int(0), symbol);
@@ -449,7 +444,7 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
     };
     
     {
-        // :OnlyOneGlobal so __stackbase is index 0 and doesn't need a patch
+        // :OnlyTwoGlobals [__stackbase, __env_parameter] so don't need patches
         // TODO: this will have to change if we want to allow frontends to create thier own wasm globals. 
     
         // Create a global for the stack pointer
@@ -459,8 +454,9 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
         push_buf { buf |
             buf.push(@as(u8) Wasm.Section.Global);
             uleb_patch_delta buf {
-                push(buf, 1); // length of globals vector
+                push(buf, 1 + int(m.wasm_any_pare)); // length of globals vector
                 
+                // __stackbase
                 push(buf, @as(u8) Wasm.ValType.I32); // type
                 push(buf, 1); // mutable
                 
@@ -468,6 +464,17 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
                 push(buf, @as(u8) Wasm.Inst.I32_Const);
                 leb128_signed(buf, stack_base);
                 push(buf, @as(u8) Wasm.Inst.End);
+                
+                if m.wasm_any_pare {
+                    // __env_parameter
+                    push(buf, @as(u8) Wasm.ValType.I64); // type
+                    push(buf, 1); // mutable
+                    
+                    // initial value
+                    push(buf, @as(u8) Wasm.Inst.I64_Const);
+                    leb128_signed(buf, 0);
+                    push(buf, @as(u8) Wasm.Inst.End);
+                };
             };
         };
     };
@@ -529,17 +536,16 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
     if data_size > 0 {
         push_buf { buf |
             buf.push(@as(u8) Wasm.Section.Data);
-            uleb_patch_delta buf {
-                leb128_unsigned(buf, 1); // number of datas 
-                leb128_unsigned(buf, 0); // mode: active
-                
-                // offset expr
-                buf.push(@as(u8) Wasm.Inst.I32_Const);
-                leb128_signed(buf, wasm_page_size); 
-                buf.push(@as(u8) Wasm.Inst.End);
-                
-                leb128_unsigned(buf, data_size);
-            };
+            leb128_unsigned(buf, 1 + 1 + 1 + uleb_size(wasm_page_size) + 1 + uleb_size(data_size) + data_size);
+            leb128_unsigned(buf, 1); // number of datas 
+            leb128_unsigned(buf, 0); // mode: active
+            
+            // offset expr
+            buf.push(@as(u8) Wasm.Inst.I32_Const);
+            leb128_signed(buf, wasm_page_size); 
+            buf.push(@as(u8) Wasm.Inst.End);
+            
+            leb128_unsigned(buf, data_size);
         };
         chunks&.push(data_seg.mmapped.slice(wasm_page_size, data_seg.len()));
     };
