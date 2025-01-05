@@ -1,3 +1,15 @@
+## wasm (Jan 4)
+
+- finish f.const for import_wasm
+- now mandel.ssa works on my wasm runtime but not real ones.
+  had to flip stack argument order for binary ops.
+- indirect calls. need to make a `table` and use an `element` to initilize it full of function references,
+  and then our "function pointers" become indexes into that table.
+  for now i just put all functions in the table but (TODO:) an easy size optimisation
+  would be to only put the ones referenced indirectly with `O.addr`,
+  but then i need to keep track of another set of index mappings.
+- cmp sometimes needs an explicit extension to Kl
+
 ## wasm (Jan 2)
 
 - globals for stack pointer so now (static) alloca works.

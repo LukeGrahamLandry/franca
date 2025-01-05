@@ -18,6 +18,7 @@ fn main() {
     linker.func_wrap("env", "malloc", malloc).unwrap();
     linker.func_wrap("env", "free", free).unwrap();
     linker.func_wrap("env", "memcpy", memcpy).unwrap(); // TODO: ugh. don't generate calls to this
+    linker.func_wrap("env", "putchar", putchar).unwrap();
 
     let mut store = Store::new(&engine, HostCtx::default());
     let instance = linker.instantiate(&mut store, &module).unwrap();
@@ -25,12 +26,17 @@ fn main() {
         Ok(f) => {
             f.call(&mut store, ()).unwrap();
         }
-        Err(_) => {
-            let f = instance
-                .get_typed_func::<(), ()>(&mut store, "main")
-                .unwrap();
-            f.call(&mut store, ()).unwrap();
-        }
+        Err(_) => match instance.get_typed_func::<(), i32>(&mut store, "main") {
+            Ok(f) => {
+                f.call(&mut store, ()).unwrap();
+            }
+            Err(_) => {
+                let f = instance
+                    .get_typed_func::<(), ()>(&mut store, "main")
+                    .unwrap();
+                f.call(&mut store, ()).unwrap();
+            }
+        },
     }
 }
 
@@ -139,4 +145,8 @@ pub fn memcpy(mut caller: Caller<'_, HostCtx>, dest: i32, src: i32, len: i32) ->
         src.copy_from_slice(dest);
     }
     dest
+}
+pub fn putchar(mut caller: Caller<'_, HostCtx>, c: i32) -> i32 {
+    print!("{}", c as u8 as char);
+    0
 }

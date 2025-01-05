@@ -152,7 +152,11 @@ fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
         }
         fn call() => {
             @debug_assert(i.to == QbeNull);
-            @assert(rtype(i.arg&[0]) == .RCon, "TODO: wasm indirect call");
+            if rtype(i.arg&[0]) != .RCon {
+                f.emit(.call_indirect, .Kw, QbeNull, QbeNull, i.arg&[1]);
+                wasm_push_addr(f, i.arg&[0]);
+                return();
+            };
             f.emit(i[]);
             return();
         }
@@ -174,6 +178,12 @@ fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
     if i.to != QbeNull {
         f.wasm_pop(i.cls(), i.to);
     };
+
+    // our cmp can return Kw or Kl, but wasm always returns I32
+    if iscmp(i.op()) && i.cls() == .Kl {
+        i.set_cls(.Kw);
+        f.emit(.extuw, .Kl, QbeNull, QbeNull, QbeNull);
+    };
     
     // copy is just push+pop, no actual op
     if i.op() != .copy {
@@ -194,7 +204,7 @@ fn sel_wasm(f: *Qbe.Fn, i: *Qbe.Ins) void = {
     
     g := @is(i.op(), .global_get, .global_set);
     
-    enumerate i.arg&.items() { idx, a |
+    enumerate_rev i.arg&.items() { idx, a |
         if a[] != QbeNull && !(g && idx == 0) {
             k := argcls(i, idx);
             f.wasm_push(k, a[]);
@@ -208,8 +218,10 @@ fn wasm_push(f: *Qbe.Fn, k: Qbe.Cls, r: Qbe.Ref) void = {
         if slot_offset != -1 {
             // TODO: i think i want to split the memory folding out from coming out of ssa form. 
             //r = SLOT(slot_offset);
-            
-            k = Qbe.Cls.Kw;
+            if k == .Kl {
+                f.emit(.extuw, k, QbeNull, QbeNull, QbeNull);
+                k = Qbe.Cls.Kw;
+            };
             slot_offset = f.slot - slot_offset;
             ins := make_ins(.add, k, QbeNull, f.retr, f.getcon(slot_offset.intcast()));
             f.sel_wasm(ins&);

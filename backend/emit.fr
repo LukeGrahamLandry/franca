@@ -144,7 +144,7 @@ fn new_emit_data(self: *QbeModule, dat: *Qbe.Dat) void = {
     ::enum(@type dat.type);
     
     if self.debug["P".char()] {
-        print_dat(dat, self.debug_out);
+        print_dat(self, dat, self.debug_out);
     };
     self.emit_data_to_segment(dat);
 }
@@ -212,9 +212,7 @@ fn emit_data_to_segment(self: *QbeModule, dat: *Qbe.Dat, seg: SegmentType) void 
             if dat.is_ref {
                 // TODO: need to record this location and request a rebase reloc for AOT
                 @assert(dat.u.ref.off == 0, "sorry can't do offset refs yet");
-                name := dat.u.ref.name;
-                
-                id     := self.intern(name.str()); // TODO: have them just pass us the id
+                id := dat.u.ref.id;
                 use_symbol(self, id) { symbol | 
                     mark_referenced(self, id, symbol);
                     if self.get_addr(symbol) { value |
@@ -370,19 +368,21 @@ fn do_jit_fixups(self: *QbeModule, id: u32, segment: SegmentType, final_offset: 
             // don't return here. do_fixups sets jit_addr
         };
         self.do_fixups(dest, symbol);
-        if self.goal.type == .JitOnly || self.goal.type == .Exe || self.goal.type == .Dynamic { //  || symbol.segment == .Code // :canireallynothavecodeberelative
-            // Since it's a local symbol, we don't care about the relocations anymore. The linker never needs to know. 
-            // TODO: actually thats also true for imports becuase calls go through __got. 
-            // TODO: for jitonly you do need to keep __got for weak. 
-            unordered_retain(fixups, fn(it) => it.type&.is(.DataAbsolute));
-            //if(fixups.len == 0, => fixups.drop(self.gpa));
-        } else {
-            // you still care because the static linker wants to move things around. :track_got_reloc
-            if self.goal.arch != .wasm32 && !symbol.local_but_marked_for_relocation {
-                self.local_needs_reloc&.push(id);
-                symbol.local_but_marked_for_relocation = true;
-            };
-        }; 
+        if self.goal.arch != .wasm32 {
+            if self.goal.type == .JitOnly || self.goal.type == .Exe || self.goal.type == .Dynamic { //  || symbol.segment == .Code // :canireallynothavecodeberelative
+                // Since it's a local symbol, we don't care about the relocations anymore. The linker never needs to know. 
+                // TODO: actually thats also true for imports becuase calls go through __got. 
+                // TODO: for jitonly you do need to keep __got for weak. 
+                unordered_retain(fixups, fn(it) => it.type&.is(.DataAbsolute));
+                //if(fixups.len == 0, => fixups.drop(self.gpa));
+            } else {
+                // you still care because the static linker wants to move things around. :track_got_reloc
+                if !symbol.local_but_marked_for_relocation {
+                    self.local_needs_reloc&.push(id);
+                    symbol.local_but_marked_for_relocation = true;
+                };
+            }; 
+        };
     };
 }
 ::tagged(FixupType);
@@ -392,6 +392,11 @@ fn do_fixups(self: *QbeModule, address: *u8, symbol: *SymbolInfo) void = {
     symbol.jit_addr = u8.raw_from_ptr(address);  
     if self.goal.type == .JitOnly {
         @debug_assert(!address.is_null(), "do_fixups jit null symbol %", symbol.name);
+    };
+    
+    if self.goal.arch == .wasm32 && symbol.segment == .Code && symbol.got_lookup_offset == -1 {
+        // Need to wait until the end of compilation to know its index. 
+        return();
     };
     
     fixups := symbol.fixups.items();

@@ -15,6 +15,11 @@ use_threads :: false;
 //         but maybe the expectation with wasm is that the first compiler did that already?
 
 // TODO: validation
+// TODO: tables, vector ops, call_indirect, br_table, br_if, drop, select, memory grow/init/size/copy/fill, data drop,
+//       T.eqz, clz, ctz, popcnt, rot, abs, ceil, floor, trunc, nearest, sqrt, min, max, copysign, trunc_sat, some other conversions
+//       multiple return values, ref.*
+// TODO: nicer api for filling in exports from a franca struct
+// TODO: provide standard c api so could run other people's tests? https://github.com/WebAssembly/wasm-c-api/blob/main/include/wasm.h
 
 fn main() void = {
     args := cli_args();
@@ -59,9 +64,13 @@ fn main() void = {
                 s: []u8 = (ptr = ctx.offset(ptr.zext()), len = len.zext());
                 println(s);
             });
-            module&.put_jit_addr(module&.intern("putchar$"), @as(rawptr) fn(ctx: *u8, c: u8) void = {
+            module&.put_jit_addr(module&.intern("putchar$env"), @as(rawptr) fn(ctx: *u8, c: u8) void = {
                 s: []u8 = (ptr = c&, len = 1);
                 print(s);
+            });
+            module&.put_jit_addr(module&.intern("puts$env"), @as(rawptr) fn(ctx: *u8, p: u32) void = {
+                s: CStr = (ptr = ctx.offset(p.zext()));
+                @print("%", s);
             });
             module&.make_exec();
             
@@ -75,8 +84,10 @@ fn main() void = {
             //result := f(wasm_context_pointer, 5, pointer.intcast());
             //@println("5 - 2 = %", result);
             
-            n := "module_f2";
-            f := or module&.get_addr(n) {
+            @assert(p.w.exports.len == 1, "TODO: support multiple exports");
+            main := p.w.exports[0].id;
+            n := wasm.functions[main.zext()];
+            f, _ := or module&.get_addr(n) {
                 @panic("couldn't find %()", n)
             };
             f := assume_types_fn(Arg = i64, Ret = void, ptr = f);
@@ -108,6 +119,8 @@ LoadWasm :: @struct(
     return_types: []Wasm.ValType = empty(),
     link := zeroed(**Qbe.Blk),
     global_names: []u32 = empty(),
+    tables: []u32 = empty(),
+    functions: []u32 = empty(),
 );
 
 fn create_init_func(self: *LoadWasm) void = {
@@ -139,9 +152,7 @@ fn load_module(self: *LoadWasm) void = {
         self.f = f&;
         self.f.default_init(self.m);
         
-        name := @tfmt("%_f%", self.module_name, global_func_i);    // :WasmNameMangling
-        self.f.name&.items().slice(0, name.len).copy_from(name);  // :UnacceptablePanic
-        f.lnk.id = self.m.intern(name);
+        f.lnk.id = self.functions[global_func_i];
         
         local_func_type_index := self.w.functions[local_func_i];
         
@@ -155,7 +166,7 @@ fn load_module(self: *LoadWasm) void = {
         // parameters come in as locals not on the stack
         range(0, local_func_type.arg.len) { i |
             k := local_func_type.arg[i].cls();
-            self.locals[i] = self.f.newtmp("param", k);
+            self.locals[i] = self.f.newtmp(@tfmt("L%", i), k);
             self.f.emit(.par, k, self.locals[i], QbeNull, QbeNull);
         };
         
@@ -164,7 +175,7 @@ fn load_module(self: *LoadWasm) void = {
             for code.locals& { local |
                 k := local.type.cls();
                 range(0, local.count) { _ |
-                    self.locals[i] = self.f.newtmp("local", k);
+                    self.locals[i] = self.f.newtmp(@tfmt("L%", i), k);
                     i += 1;
                 };
             };
@@ -200,22 +211,93 @@ fn load_module(self: *LoadWasm) void = {
 }
 
 fn create_globals(self: *LoadWasm) void = {
+    self.functions = libc_allocator.alloc(u32, self.w.functions.len + self.w.imported_function_count); // :Leak
+    f_i := 0;
+    each self.w.imports& { import |
+        @if_let(import.desc&) fn Function(id) => {
+            self.functions[f_i] = self.m.intern(@tfmt("%$%", import.name.items(), import.module.items()));
+            f_i += 1;
+        };
+    };
+    @debug_assert_eq(f_i, self.w.imported_function_count);
+    range(0, self.w.functions.len) { i |
+        self.functions[f_i] = self.m.intern(@tfmt("%_F%", self.module_name, f_i));
+        f_i += 1;
+    };
+    
+    // actually, if it's an export it's nicer to use the real names. TODO: same thing for globals
+    each self.w.exports& { it |
+        ::enum(@type it.type);
+        if it.type == .Func {
+            self.functions[it.id.zext()] = self.m.intern(@tfmt("%$%", it.name.items(), self.module_name));
+        };
+    };
+    
     self.global_names = libc_allocator.alloc(u32, self.w.globals.len); // :Leak
     enumerate self.w.globals& { local_global_i, global | 
         // TODO: offset the index by number of imported globals
         id := self.m.intern(@tfmt("%_G%", self.module_name, local_global_i));
         self.global_names[local_global_i] = id;
-        lnk: Qbe.Lnk = (id = id);
-        dat := Qbe.Dat.zeroed();
-        dat.lnk = lnk&;
-        dat.type = .DStart;
-        self.m.emit_data_to_segment(dat&);
-        dat.type = @if(global.type == .I32 || global.type == .F32, .DW, .DL);
-        self.m.emit_data_to_segment(dat&);
-        dat.type = .DEnd;
-        self.m.emit_data_to_segment(dat&);
+        // TODO: init
+        create_var(self.m, id) { dat |
+            dat.type = @if(global.type == .I32 || global.type == .F32, .DW, .DL);
+            value, k := const_eval_wasm_expr(global.init_expr.items());
+            dat.u.num = value; 
+            self.m.emit_data_to_segment(dat&);
+        };
+    };
+    
+    self.tables = libc_allocator.alloc(u32, self.w.tables.len); // :Leak
+    enumerate self.w.tables { table_i, table | 
+        table_pointer := self.m.intern(@tfmt("%_T%", self.module_name, table_i));
+        table_initial := self.m.intern(@tfmt("init__%_T%", self.module_name, table_i));
+        
+        self.tables[table_i] = table_pointer;
+        @assert(table.type == .FuncRef, "TODO: non-func tables");
+        
+        // Reserve some memory for the starting values in the table. 
+        found := false;
+        create_var(self.m, table_initial) { dat |
+            each self.w.elements { elem | 
+                if elem.table.id.zext() == table_i {
+                    @assert(!found, "TODO: init multiple parts of a table");
+                    found = true;
+                    off, k := const_eval_wasm_expr(elem.active_offset_expr.items());
+                    @assert_eq(off, 0, "TODO: init table offset non-zero");
+                    @assert_ge(elem.funcs.len, table.limits.min.zext(), "TODO: init table < table.min");
+                    dat.type = .DL;
+                    dat.is_ref = true;
+                    for elem.funcs { f_id | 
+                        dat.u.ref = (id = self.functions[f_id.id.zext()], off = 0);
+                        self.m.emit_data_to_segment(dat&);
+                    };
+                    dat.is_ref = false;
+                };
+            };
+        };
+        @assert(found, "TODO: uninit table");
+        
+        // Reserve a symbol to hold the address of the table
+        create_var(self.m, table_pointer) { dat |
+            dat.type = .DL;
+            dat.is_ref = true;
+            dat.u.ref = (id = table_initial, off = 0);
+            self.m.emit_data_to_segment(dat&);
+            dat.is_ref = false;
+        };
     };
 }   
+
+fn create_var(m: *QbeModule, id: u32, $init: @Fn(dat: *Qbe.Dat) void) void = {
+    lnk: Qbe.Lnk = (id = id);
+    dat := Qbe.Dat.zeroed();
+    dat.lnk = lnk&;
+    dat.type = .DStart;
+    m.emit_data_to_segment(dat&);
+    init(dat);
+    dat.type = .DEnd;
+    m.emit_data_to_segment(dat&);
+}
 
 BlockEntry :: @struct(continue: *Qbe.Blk, break: *Qbe.Blk, current: *Qbe.Blk, loop: bool);
 
@@ -253,10 +335,10 @@ fn emit_the_code(self: *LoadWasm) void = {
                 };
                 fn binary() => {
                     r = self.f.newtmp("wasm", encoding.cls);
-                    a0 = self.stack[self.stack.len - 1];
+                    a1 = self.stack[self.stack.len - 1];
                     b := self.stack[self.stack.len - 2]&;
                     self.stack.len -= 1;
-                    a1 = b[];
+                    a0 = b[];
                     b[] = r;
                 };
                 fn load() => {
@@ -287,18 +369,40 @@ fn emit_the_code(self: *LoadWasm) void = {
             fn I32_Const() => self.stack&.push(self.f.getcon(self.read_s()));
             fn I64_Const() => self.stack&.push(self.f.getcon(self.read_s()));
             fn F64_Const() => {
-                value := 0;
+                v := f64.cast_front_unaligned(self.src.rest(self.cursor));
+                value: i64 = v.bitcast();
                 self.cursor += 8;
                 self.stack&.push(self.f.getcon(value));
             }
             fn F32_Const() => {
-                value := 0;
+                v := f32.cast_front_unaligned(self.src.rest(self.cursor));
+                value: i64 = (@as(u32) v.bitcast()).zext();
                 self.cursor += 4;
                 self.stack&.push(self.f.getcon(value));
             }
             fn LocalGet() => self.local_inst(1);
             fn LocalSet() => self.local_inst(-1);
             fn LocalTee() => self.local_inst(0);
+            fn CallIndirect() => {
+                type_index       := self.read_u();
+                table_index      := self.read_u();
+                index_in_table_W := self.stack&.pop().expect("call index on stack");
+                table_var        := self.tables[table_index.bitcast()];
+                table_var        := self.f.symcon(table_var);
+                callee           := self.f.newtmp("Icallee", .Kl);
+                index_in_table_L := self.f.newtmp("Iindex", .Kl);
+                table_slot       := self.f.newtmp("Islot", .Kl);
+                table_offset     := self.f.newtmp("Ioff", .Kl);
+                table_base       := self.f.newtmp("Ibase", .Kl);
+                
+                self.f.emit(.load, .Kl, table_base, table_var, QbeNull);
+                self.f.emit(.extuw, .Kl, index_in_table_L, index_in_table_W, QbeNull);
+                self.f.emit(.mul, .Kl, table_offset, index_in_table_L, self.f.getcon(8));
+                self.f.emit(.add, .Kl, table_slot, table_base, table_offset);
+                self.f.emit(.load, .Kl, callee, table_slot, QbeNull);
+                
+                self.emit_call_from_stack(callee, (id = type_index.trunc()));
+            }
             fn Call() => {
                 callee := self.read_index(FuncIdx);
                 import := self.w&.find_import_index(0, callee.id.zext());
@@ -491,7 +595,7 @@ fn local_inst(self: *LoadWasm, delta: i64) void = {
     i    := self.read_u();
     var  := self.locals[i.bitcast()];
     t    := self.f.get_temporary(var);
-    dest := if(delta == 1, => self.f.newtmp("get", t.cls), => var);
+    dest := if(delta == 1, => self.f.newtmp(@tfmt("getL%", i), t.cls), => var);
     src  := if(delta == 1, => var, => self.stack[self.stack.len - 1]);
     self.stack&.reserve(abs(delta));
     self.stack.len += delta;
@@ -509,8 +613,8 @@ fn emit_return(self: *LoadWasm, return_types: []Wasm.ValType) void = {
             self.get_blk()[].jmp.type = .ret0;
         };
         @case(1) => {
-            @assert(return_types[0].cls() == .Kw, "// TODO: correct cls");
-            self.get_blk()[].jmp = (type = .retw, arg = self.stack[self.stack.len - 1]);
+            r := @as(Qbe.J) @as(i32) Qbe.J.retw.raw() + return_types[0].cls().raw();
+            self.get_blk()[].jmp = (type = r, arg = self.stack[self.stack.len - 1]);
             self.stack.len -= 1;
         };
         @default => panic("TODO: handle multiple returns");
@@ -533,28 +637,17 @@ fn emit_call_from_stack(self: *LoadWasm, callee: Qbe.Ref, type: TypeIdx) void = 
             self.f.emit(.call, .Kw, QbeNull, callee, QbeNull);
         };
         @case(1) => {
-            ref := self.f.newtmp("ret", type.ret[0].cls());
-            self.f.emit(.call, .Kw, ref, callee, QbeNull);
+            k := type.ret[0].cls();
+            ref := self.f.newtmp("ret", k);
+            self.f.emit(.call, k, ref, callee, QbeNull);
             self.stack&.push(ref);
         };
         @default => panic("TODO: handle multiple returns");
     };
 }
 
-// TODO: just make an array of interned names at the beginning. :SLOW
-fn remap_global_func(self: *LoadWasm, id: i64) Qbe.Ref = {
-    import := self.w&.find_import_index(0, id);
-    name := if import.is_some() {
-        // TODO: no this doesn't make any since, the binding of names should happen separately. 
-        import := self.w.imports&.index(import.Some);
-        @tfmt("%$%", import.name.items(), import.module.items())
-    } else {
-        // :WasmNameMangling
-        @tfmt("%_f%", self.module_name, id)
-    };
-    id := self.m.intern(name);
-    self.f.symcon(id)
-}
+fn remap_global_func(self: *LoadWasm, id: i64) Qbe.Ref = 
+    self.f.symcon(self.functions[id]);
 
 // TODO: this is stupid. store them in seperate arrays. surely you never need to refer to them by an untyped import index. 
 fn find_import_index(self: *WasmModule, kind: i64, id: i64) ?i64 = {

@@ -126,6 +126,7 @@ QbeModule :: @rec @struct(
     
     wasm_function_type_count: i32,
     wasm_symbol_stackbase: u32,
+    wasm_has_any_indirect_calls: bool,
 );
 
 QbeTargetEnv :: @struct(
@@ -271,6 +272,7 @@ fn init(m: *QbeModule, segment_size: i64, gpa: Alloc, goal: QbeTargetEnv, expect
             t.abi0 = apple_extsb; // "Signed 8 and 16-bit scalars are sign-extended, and unsigned 8 and 16-bit scalars are zero-extended before passing or returning." 
             t.emit_fn = emit_func_wasm32;
             t.fixup = fixup_wasm32;
+            m.wasm_symbol_stackbase = m.intern("__stack_base");
         };
     };
     
@@ -283,8 +285,9 @@ fn init(m: *QbeModule, segment_size: i64, gpa: Alloc, goal: QbeTargetEnv, expect
     
     m.types[] = m.new_long_life(0); // TODO: check the magic in QbeBuilder.init to make sure you remember to do this. 
     m.curi[] = m.insb.index_unchecked(Qbe.MaxInstructions);
-    m.symbol_memmove = m.intern("memmove");
-    m.wasm_symbol_stackbase = m.intern("__stack_base");
+    if m.goal.arch != .wasm32 {
+        m.symbol_memmove = m.intern("memmove");
+    };
 }
 
 fn init_empty_for_template_only(m: *QbeModule, gpa: Alloc) void = {
@@ -514,7 +517,7 @@ fn typecheck_failed(f: *Qbe.Fn) ?Str = {
                     return(Some = @tfmt("missing % operand in %", word(), i.op()));
                 };
                 if !usecheck(r, k, f) {
-                    return(Some = @tfmt("invalid type for % operand %", word(), i.op()));
+                    return(Some = @tfmt("invalid type for % operand of % in block @%", word(), i.op(), b.name()));
                 };
             };
             if is_store(i.op()) && i.to != QbeNull { 

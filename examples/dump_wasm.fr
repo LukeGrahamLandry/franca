@@ -19,32 +19,91 @@ fn main() void = {
     out := u8.list(temp()); out := out&;
     
     ::enum(Wasm.ValType);
-    @fmt(out, "=== BEGIN IMPORT SECTION ===\n");
-    each w.imports { it |
-        ::tagged(@type it.desc);
-        @fmt(out, "- '%' from '%' is a %\n", it.name.items(), it.module.items(), it.desc&.tag());
-    };
-    @fmt(out, "=== END IMPORT SECTION ===\n\n");
-    
-    @fmt(out, "=== BEGIN EXPORT SECTION ===\n");
-    each w.exports { it |
-        ::enum(Wasm.ImportType);
-        @fmt(out, "- '%' % %\n", it.name.items(), it.type, it.id);
-    };
-    @fmt(out, "=== END EXPORT SECTION ===\n\n");
-    
-    @fmt(out, "=== BEGIN DATA SECTION ===\n");
-    each w.data { it |
-        start := ptr_diff(input.ptr, it.bytes.ptr);
-        @fmt(out, "- % bytes // [%..<%]\n  ", it.bytes.len, start, start + it.bytes.len);
-        if it.active_offset_expr.len == 0 {
-            @fmt(out, "(passive)\n");
-        } else {
-            @fmt(out, "active at offset ");
-            dump_wasm_expr(w, input, it.active_offset_expr.items(), out);
+    if w.imports.len > 0 {
+        @fmt(out, "=== BEGIN IMPORT SECTION ===\n");
+        each w.imports { it |
+            ::tagged(@type it.desc);
+            @fmt(out, "- '%' from '%' is a %", it.name.items(), it.module.items(), it.desc&.tag());
+            @if_let(it.desc) fn Function(it) => {
+                @fmt(out, "\n    - ");
+                show_type(out, w, it);  
+            };
+            @fmt(out, "\n");
         };
+        @fmt(out, "=== END IMPORT SECTION ===\n\n");
+    } else {
+        @fmt(out, "=== NO IMPORTS ===\n\n");
     };
-    @fmt(out, "=== END DATA SECTION ===\n\n");
+    
+    if w.exports.len > 0 {
+        @fmt(out, "=== BEGIN EXPORT SECTION ===\n");
+        each w.exports { it |
+            ::enum(Wasm.ImportType);
+            @fmt(out, "- '%' % %\n", it.name.items(), it.type, it.id);
+        };
+        @fmt(out, "=== END EXPORT SECTION ===\n\n");
+    } else {
+        @fmt(out, "=== NO EXPORTS ===\n\n");
+    };
+    
+    if w.data.len > 0 {
+        @fmt(out, "=== BEGIN DATA SECTION ===\n");
+        each w.data { it |
+            start := ptr_diff(input.ptr, it.bytes.ptr);
+            @fmt(out, "- % bytes // [%..<%]\n  ", it.bytes.len, start, start + it.bytes.len);
+            if it.active_offset_expr.len == 0 {
+                @fmt(out, "(passive)\n");
+            } else {
+                @fmt(out, "active at offset ");
+                dump_wasm_expr(w, input, it.active_offset_expr.items(), out);
+            };
+        };
+        @fmt(out, "=== END DATA SECTION ===\n\n");
+    } else {
+        @fmt(out, "=== NO DATAS ===\n\n");
+    };
+    
+    if w.tables.len > 0 {
+        @fmt(out, "=== BEGIN TABLE SECTION ===\n");
+        each w.tables { it |
+            @fmt(out, "- % (min = %, max = %)\n", it.type, it.limits.min, it.limits.max);
+        };
+        @fmt(out, "=== END TABLE SECTION ===\n\n");
+    } else {
+        @fmt(out, "=== NO TABLES ===\n\n");
+    };
+
+    if w.elements.len > 0 {
+        @fmt(out, "=== BEGIN ELEMENT SECTION ===\n");
+        each w.elements { it |
+            @fmt(out, "- table=%\n  ", it.table.id);
+            if it.active_offset_expr.len == 0 {
+                @fmt(out, "(passive)\n");
+            } else {
+                @fmt(out, "active at offset ");
+                dump_wasm_expr(w, input, it.active_offset_expr.items(), out);
+            };
+            @fmt(out, "  Functions: [");
+            for it.funcs { id |
+                @fmt(out, "%, ", id.id);
+            };
+            @fmt(out, "]\n");
+        };
+        @fmt(out, "=== END ELEMENT SECTION ===\n\n");
+    } else {
+        @fmt(out, "=== NO ELEMENTS ===\n\n");
+    };
+    
+    if w.globals.len > 0 {
+        @fmt(out, "=== BEGIN GLOBAL SECTION ===\n");
+        each w.globals { it |
+            @fmt(out, "- % %\n  init ", if(it.mutable, => "mutable", => "constant"), it.type);
+            dump_wasm_expr(w, input, it.init_expr.items(), out);
+        };
+        @fmt(out, "=== END GLOBAL SECTION ===\n\n");
+    } else {
+        @fmt(out, "=== NO GLOBALS ===\n\n");
+    };
     
     @fmt(out, "=== BEGIN TYPE SECTION ===\n");
     range(0, w.types.len) { i |
@@ -232,6 +291,15 @@ fn dump_wasm_expr(w: *WasmModule, full_input: []u8, insts: []u8, out: *List(u8))
             };
             continue()
         };
+        if inst == .CallIndirect {
+            @fmt(out, "type = ");
+            type_index := push_leb(false);
+            @fmt(out, ", table = ");
+            table_index := push_leb(false);
+            @fmt(out, "); // ");
+            show_type(out, w, (id = type_index.trunc()));
+        };
+        
         @fmt(out, ");");
         
     };
