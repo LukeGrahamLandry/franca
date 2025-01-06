@@ -160,8 +160,16 @@ fn new(compiler: *SelfHosted, scope: ScopeId, last_loc: Span) ResolveScope = (
 fn resolve_func(self: *ResolveScope, func: *Func) PRes = {
     if(func.get_flag(.ResolvedBody).and(func.get_flag(.ResolvedSign)), => return(.Ok)); 
     // TODO: need to remember to update from this if we get one from the user (like they added it in a macro)?
-    // TODO: could remove from func.annotations but it doesn't actually matter. 
-    if(func.has_tag(.generic), => func.set_flag(.Generic));
+    each func.annotations { a |
+        @switch(a.name) {
+            @case(Flag.generic.ident()) => func.set_flag(.Generic);  // TODO: could remove from func.annotations but it doesn't actually matter. 
+            @case(Flag.where.ident()) => {
+                func.set_flag(.Generic);
+                func.set_flag(.UnboundGenerics);
+            };
+            @default => ();
+        };
+    };
 
     self.push_scope((Some = func.name));
     func.scope = (Some = self.scope);
@@ -184,11 +192,27 @@ fn resolve_func_args(self: *ResolveScope, func: *Func) PRes = {
     generic := func.get_flag(.Generic); // ret is allowed to depend on previous args.
     func.set_flag(.ResolvedSign);
 
+    if func.get_flag(.UnboundGenerics) {
+        each func.arg.bindings { b |
+            @if_let(b.ty&) fn UnboundGeneric(name) => {
+                var := @try(self.decl_var(name[], .Const, func.loc, .Generic)) return;
+                b.ty = (Generic = var);
+            };
+        };
+    };
+    
     if generic {
         each func.arg.bindings { b |
             @try(self.declare_binding(b, func.loc, true)) return;
         };
     };
+    
+    each func.annotations { a | 
+        if a.args& { a | 
+            @try(self.walk_expr(a)) return;
+        };
+    };
+    
     each func.arg.bindings { b |
         @try(self.resolve_binding(b)) return;
     };
@@ -563,12 +587,6 @@ fn handle_stmt(self: *ResolveScope, stmt: *FatStmt) Result(DoMore, *CompileError
 }
 
 fn handle_func(self: *ResolveScope, func: *Func) Result(DoMore, *CompileError) #once = {
-    each func.annotations { a | 
-        if a.args& { a | 
-            @try(self.walk_expr(a)) return;
-        };
-    };
-    
     @try(self.resolve_func(func)) return;
     @if(!LAZY_SCOPE) {
         @try(self.resolve_func_args(func)) return;

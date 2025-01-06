@@ -400,6 +400,7 @@ fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = 
     assert(!func.get_flag(.MayHaveAquiredCaptures), "closures need to be specialized");
     assert(!func.get_flag(.AnyConstArgs), "const args need to be specialized");
     
+    
     if func.get_flag(.TargetSplit) {
         return(self.handle_target_split(func));
     };
@@ -2125,10 +2126,10 @@ fn curry_const_args(self: *SelfHosted, original_f: FuncId, f_expr: *FatExpr, arg
     
     // Some part of the argument must be known at comptime.
     new_func := func.deep_clone(self.get_alloc());
+    mapping: HashMap(Var, Var) = init(temp());
     if LAZY_SCOPE {
-        self.maybe_renumber_and_dup_scope(new_func&);
+        self.maybe_renumber_and_dup_scope(new_func&, mapping&);
     } else {
-        mapping: HashMap(Var, Var) = init(temp());
         renumber: RenumberVars = (scope = self.scopes, mapping = mapping&);
         renumber&.walk_func(new_func&);
     };
@@ -2149,7 +2150,7 @@ fn curry_const_args(self: *SelfHosted, original_f: FuncId, f_expr: *FatExpr, arg
 }
 
 LAZY_SCOPE :: true;
-fn maybe_renumber_and_dup_scope(self: *SelfHosted, new_func: *Func) void #once = {
+fn maybe_renumber_and_dup_scope(self: *SelfHosted, new_func: *Func, mapping: *HashMap(Var, Var)) void #once = {
     // Closures always resolve up front, so they need to renumber the clone.
     // TODO: HACK but closures get renumbered when inlined anyway, so its just the const args that matter. im just being lazy and doing the whole thing redundantly -- May 9
     // normal functions with const args havent had their body resolved yet so don't have to deal with it, we only resolve on the clone.
@@ -2157,8 +2158,7 @@ fn maybe_renumber_and_dup_scope(self: *SelfHosted, new_func: *Func) void #once =
     
     needs_renumber := new_func.get_flag(.AllowRtCapture).or(new_func.get_flag(.Generic));
     if needs_renumber {
-        mapping: HashMap(Var, Var) = init(temp());
-        renumber: RenumberVars = (scope = self.scopes, mapping = mapping&);
+        renumber: RenumberVars = (scope = self.scopes, mapping = mapping);
         renumber&.walk_func(new_func);
         if new_func.get_flag(.Generic) && !new_func.get_flag(.ResolvedBody) {
             // the sign has already been resolved so we need to renumber before binding arguments.
@@ -2181,13 +2181,13 @@ fn maybe_renumber_and_dup_scope(self: *SelfHosted, new_func: *Func) void #once =
             each old_scope.vars { block | 
                 new_vars: List(Var) = list(self.get_alloc());
                 for block.vars { old | 
-                    if mapping&.get_ptr(old) { new |
+                    if mapping.get_ptr(old) { new |
                         new_vars&.push(new[]);
                     };
                 };
                 new_constants: HashMap(Symbol, Var) = init(self.get_alloc());
                 each block.const_lookup& { (k, v) |
-                    if mapping&.get_ptr(v[]) { new |
+                    if mapping.get_ptr(v[]) { new |
                         v := self.scopes.get_constant(v[]);
                         v := v.expect("known const"); // TODO: destructure through a pointer? 
                         expr := self.clone(v._0&);
@@ -2387,6 +2387,8 @@ fn infer_type(self: *SelfHosted, b: *LazyType) Maybe(?Type) #inline = {
         fn EvilUninit() => panic("ICE: nothing creates this: eviluninit binding"); 
         fn Returning(_) => return(@err("ICE: tried to infer on LazyType.Returning... figure out what to do about that..."));
         fn Infer() => (Ok = .None);
+        fn UnboundGeneric() => return(@err("ICE: tried to infer on unbound generic placeholder"));
+        fn Generic() => return(@err("ICE: tried to infer on bound generic placeholder"));
     }
 }
 
@@ -2631,12 +2633,14 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
         f_i := attempt.options.len;
         
         while => f_i > 0 {
+            continue :: local_return;
             f_i -= 1;
             fid := attempt.options[f_i];
             func := self.get_function(fid);
             if func.get_flag(.CVariadic) {
                 variadic_count += 1;
             };
+            
             if !func.get_flag(.Generic) && func.finished_arg.is_none() {
                 all_known := true;
                 each func.arg.bindings& { b |
@@ -2647,7 +2651,17 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
                     @check(self.infer_arguments(fid)) return;
                 };
             };
+            
+            if func.get_flag(.UnboundGenerics) {
+                accept := @check(self.eval_where_from_expression(fid, arg_expr)) return;
+                if accept { new_fid | 
+                    attempt.options[f_i] = new_fid;
+                } else {
+                    attempt.options&.unordered_remove_discard(f_i);
+                };
+            };
         };
+        
         if variadic_count > 0 {
             @err_assert(variadic_count == 1, "TODO: support multiple #c_variadic functions in one overload set") return;
             @err_assert(false, "TODO: support #c_variadic in overload sets") return;
@@ -2887,7 +2901,111 @@ fn resolve_in_overload_set_new(self: *SelfHosted, arg_expr: *FatExpr, attempt: *
     
     @err("TODO: end of loop. still too many options for '%'", self.pool.get(overloads.name))
 }
+
+fn eval_where_from_expression(self: *SelfHosted, fid: FuncId, arg_expr: *FatExpr) Maybe(?FuncId) = {
+    args := arg_expr.items();
+    func := self.get_function(fid);
+    if func.arg.bindings.len != args.len {
+        return(Ok = .None);
+    };
+    types := Type.list(1, temp());
+    enumerate func.arg.bindings& { arg_i, b |
+        if b.ty&.is(.Generic) {
+            type := @check(self.type_of(args.index(arg_i))) return;
+            types&.push(type);
+        };
+    };
     
+    types_value := self.from_bytes(interpret_as_bytes(types.items()));
+    key: WhereKey = (template = fid, arg = types_value);
+    if self.where_memo&.get(key&) { new_fid |
+        return(Ok = (Some = new_fid));
+    };
+    accept := @check(self.evaluate_where_clauses(fid, types.items(), arg_expr.loc)) return;
+    if !accept {
+        return(Ok = .None);
+    };
+    new_fid := @check(self.instantiate_where_generic(fid, types.items())) return;
+    (Ok = (Some = new_fid))
+}
+
+fn evaluate_where_clauses(self: *SelfHosted, fid: FuncId, generic_types: []Type, loc: Span) Maybe(bool) = {
+    types_value := self.from_bytes(interpret_as_bytes(generic_types));
+    key: WhereKey = (template = fid, arg = types_value);
+    if self.where_memo&.get(key&).is_some() {
+        return(Ok = true);
+    };
+    
+    func := self.get_function(fid);
+    slow_arg_ty := {
+        slow := temp().alloc(Type, generic_types.len);
+        each slow { s |
+            s[] = Type; // :get_or_create_type
+        };
+        self.tuple_of(slow)
+    };
+    f_ty := self.intern_type(Fn = (arg = slow_arg_ty, ret = bool, arity = generic_types.len.trunc()));  // :get_or_create_type
+    
+    types_arg_expr: FatExpr = (expr = (Value = (bytes = types_value, coerced = false)), done = false, ty = slow_arg_ty, loc = loc);
+    each func.annotations& { ann |
+        if ann.name == Flag.where.ident() {
+            if ann.args&.as_ref() { where_expr |
+                @check(self.compile_expr(where_expr, (Specific = f_ty))) return;
+                condition := @check(self.eval(where_expr, FuncId)) return;
+                
+                // :get_or_create_type
+                // TODO: bad tack memory!
+                accept := @check(self.invoke(condition, types_arg_expr&, bool, loc)) return;
+                accept := bool.assume_cast(accept&)[];
+                if !accept {
+                    return(Ok = false);
+                };
+            };
+        };
+    };
+    
+    // We accepted all #where clauses. 
+    (Ok = true)
+}
+
+fn instantiate_where_generic(self: *SelfHosted, template: FuncId, generic_types: []Type) Maybe(FuncId) = {
+    template_func := self.get_function(template);
+    
+    new_func := template_func.deep_clone(self.get_alloc());
+    new_func&.unset_flag(.UnboundGenerics);
+    new_func.annotations&.unordered_retain(fn(it) => it.name != Flag.where.ident()); // TODO: don't clone it in the first place
+    
+    bound_vars := temp().alloc(Var, generic_types.len);
+    mapping: HashMap(Var, Var) = init(temp());
+    n := 0;
+    each new_func.arg.bindings& { b |
+        @if_let(b.ty&) fn Generic(name) => {
+            type := generic_types[n];
+            bound_vars[n] = self.scopes.dup_var(name[]);
+            mapping&.insert(name[], bound_vars[n]);
+            //b.ty = (Finished = type);
+            b.ty = (PendingEval = (expr = (GetVar = bound_vars[n]), ty = Type, loc = template_func.loc, done = false));
+            n += 1;
+        };
+    };
+    maybe_renumber_and_dup_scope(self, new_func&, mapping&);
+    range(0, bound_vars.len) { i |
+        self.scopes.put_constant(bound_vars[i], self.to_expr(Type, generic_types[i], template_func.loc), (Finished = Type)); // :get_or_create_type
+    };
+    
+    @try(self.resolve_body(new_func&)) return;
+    new_func&.unset_flag(.Generic);   
+    fid := self.add_function(new_func);
+    
+    types_value := self.from_bytes(interpret_as_bytes(generic_types));
+    key: WhereKey = (template = template, arg = types_value);
+    self.where_memo&.insert(key, fid).is_some();
+    
+    @check(self.infer_arguments(fid)) return;
+    
+    (Ok = fid)
+}
+
 fn done_resolving_overload(self: *SelfHosted, attempt: *OverloadAttempt, overloads: *OverloadSetData, arg_expr: *FatExpr) FuncId = {
     fid := attempt.options[0];
     @log_event("selected % from '%'", fid, self.pool.get(overloads.name)) self;
@@ -4123,14 +4241,19 @@ fn create_slice_type(self: *SelfHosted, inner: Type, loc: Span) Maybe(Type) = {
     // TODO: this is called 3208 times when self-compiling. Aug 29. 
     @log_event("Create slice %", inner) self;
     f     := @unwrap(self.env.make_slice_t, "slice type not ready!") return;  
-    f     := self.to_expr(FuncId, f, loc);
     arg   := self.to_expr(Type, inner, loc);
-    s_ty  := synthetic_ty((Call = (f = self.box(f), arg = self.box(arg))), loc, Type);
-    s_ty  := self.box(s_ty);
-    value := self.poll_in_place(Values, => self.immediate_eval_expr(s_ty, Type));
-    value := @try(value) return;  // TODO: miscompilation if you inline this ^ :fucked
+    value := @check(self.invoke(f, self.box(arg), Type, loc)) return;  // :get_or_create_type
     (Ok = Type.assume_cast(value&)[])
 }
+
+fn invoke(self: *SelfHosted, callee: FuncId, argument: *FatExpr, return_type: Type, loc: Span) Maybe(Values) = {
+    f     := self.to_expr(FuncId, callee, loc);
+    s_ty  := synthetic_ty((Call = (f = self.box(f), arg = argument)), loc, Type);
+    s_ty  := self.box(s_ty);
+    value := self.poll_in_place(Values, => self.immediate_eval_expr(s_ty, return_type));
+    value := @try(value) return;  // TODO: miscompilation if you inline this ^ :fucked
+    (Ok = value)
+} 
 
 ///////////////////////
 /// Macro Expansion ///
