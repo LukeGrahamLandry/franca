@@ -7,10 +7,12 @@
 
 ##
 
+- figure out what `-Wl,-z,common-page-size=65536,-z,max-page-size=65536` does so blink can run my elf faster
+- wasm stackifier
 - cross arch repro is broken again
 - fix compiler_gui so it sees all functions from a full compile
 - #syscall
-- output_elf
+- output_elf: link libc, relocatable object, dynamic library
 - Wasip1Libc
 - still allow coerce to c string if there was a `\` escape.
 - `[CPU Time]` on macos-x64 is wrong. (different libc magic numbers? clang libc_constants says no). // :WrongClockTime

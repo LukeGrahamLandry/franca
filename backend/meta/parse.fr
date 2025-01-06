@@ -252,6 +252,7 @@ fn parse_args(self: *QParseCtx, is_par: bool) void = {
         };
         self.eat(",");
         if is_par {
+            self.f.get_temporary(variable)[].cls = k;  // :PatchCls TODO?
             self.f.emit(o, k, variable, type, QbeNull);
         } else {
             if type == QbeNull {
@@ -281,6 +282,7 @@ fn parse_line(self: *QParseCtx) bool = {
             self.end_block(Some = blk);
         };
         self.blk = blk;
+        blk.id = self.f.nblk;
         self.f.nblk += 1;
         self.parse_line();
     };
@@ -348,13 +350,6 @@ fn parse_inst(self: *QParseCtx) void = {
     n := self.eat_word();
     arg0 := self.parse_ref();
     n = @switch(n) {
-        @case("call") => {
-            self.f.leaf = false;
-            if self.check("(") { // syntax sugar for call
-                self.parse_args(false);
-            }; // else we allow you to specify a placeholder for the RCall
-            "call"  
-        };
         @case("blit") => {
             self.eat(",");
             arg1 := self.parse_ref();
@@ -394,7 +389,15 @@ fn parse_inst(self: *QParseCtx) void = {
             self.skip_lines();
             return()
         };
-        @default => n;
+        @default => {
+            if n == "call" || n == "syscall" {
+                self.f.leaf = false;
+                if self.check("(") { // syntax sugar for call
+                    self.parse_args(false);
+                }; // else we allow you to specify a placeholder for the RCall
+            };
+            n
+        };
     };
     
     if from_name(Qbe.O, n) { o | 

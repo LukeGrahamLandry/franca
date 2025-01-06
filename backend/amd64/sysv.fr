@@ -30,13 +30,14 @@ RAlloc :: @rec @struct(
 
 /* layout of call's second argument (RCall)
  *
- *  29     12    8    4  3  0
- *  |0...00|x|xxxx|xxxx|xx|xx|                  range
- *          |    |    |  |  ` gp regs returned (0..2)
- *          |    |    |  ` sse regs returned   (0..2)
- *          |    |    ` gp regs passed         (0..6)
- *          |    ` sse regs passed             (0..8)
- *          ` 1 if rax is used to pass data    (0..1)
+ *  29      12    8    4  3  0
+ *  |0...0|0|x|xxxx|xxxx|xx|xx|                  range
+ *         | |    |    |  |  ` gp regs returned (0..2)
+ *         | |    |    |  ` sse regs returned   (0..2)
+ *         | |    |    ` gp regs passed         (0..6)
+ *         | |    ` sse regs passed             (0..8)
+ *         | ` 1 if rax is used to pass data    (0..1)
+ *         ` 1 if syscall (redundant with op but easier to pass around)
  */
 
 fn amd64_sysv_retregs(r: Qbe.Ref, p: *Array(i32, 2)) u64 = {
@@ -54,8 +55,14 @@ fn amd64_sysv_retregs(r: Qbe.Ref, p: *Array(i32, 2)) u64 = {
         p[0] = ni.intcast();
         p[1] = nf.intcast();
     };
+    // if syscall, we just return in rax, don't need a special case. 
     b
 }
+
+// The normal abi passes an argument in RXC, 
+// but the cpu uses RCX as LR when you do a syscall, 
+// so that argument is passed in R10 instead. 
+INDEX_OF_AMD64_SYSCALL_ARG_DIFF :: 3;
 
 fn amd64_sysv_argregs(r: Qbe.Ref, p: *Array(i32, 2)) u64 = {
     @debug_assert(rtype(r) == .RCall, "argregs expected .RCall");
@@ -66,6 +73,12 @@ fn amd64_sysv_argregs(r: Qbe.Ref, p: *Array(i32, 2)) u64 = {
     range(0, ni) { j | 
         b = b.bit_or(BIT(amd64_sysv_rsave[j]));
     };
+    
+    syscall := r.val().shift_right_logical(13).bit_and(1) == 1;
+    if syscall && ni > INDEX_OF_AMD64_SYSCALL_ARG_DIFF {
+        b = b.bit_and(bit_not(BIT(Amd64Reg.RCX))).bit_or(BIT(Amd64Reg.R10));
+    };
+    
     range(0, nf) { j | 
         b = b.bit_or(BIT(j + Amd64Reg.XMM0.raw().zext()));
     };
@@ -118,8 +131,9 @@ fn amd64_sysv_abi(f: *Qbe.Fn) void = {
                 fn arg()  => unreachable();
                 fn argc() => unreachable();
                 fn syscall() => {
-                    @assert(f.globals.goal.os == .linux, "We only support the syscall instruction when targetting linux.");
-                    panic("TODO: implement syscall convention on amd64");
+                    i0 := b.find_first_arg(i[]);
+                    sel_syscall_amd64(f, i0, i[]);
+                    i[] = i0;
                 }
                 @default => {f.emit(i[][]);};
             };
@@ -209,6 +223,7 @@ fn typclass(a: *AClass, t: *Qbe.Typ, m: *QbeModule) void = {
     classify(a, t, 0, m);
 }
 
+// returns low bits of RCall
 fn retr(reg: *Array(Qbe.Ref, 2), aret: *AClass) i64 = {
     ::List([]Amd64Reg);
     retreg :: @const_slice(@const_slice(Amd64Reg.RAX, .RDX), @const_slice(Amd64Reg.XMM0, .XMM1));
@@ -337,6 +352,7 @@ fn rarg(ty: Qbe.Cls, ni: *i64, ns: *i64) Qbe.Ref = {
     }
 }
 
+// Converts parX to copies to registers. Later passes rely on RCall to know which are live at the call. 
 fn selcall(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins, rap: **RAlloc) void = {
     count := ptr_diff(i0, i1);
     reg := Array(Qbe.Ref, 2).zeroed();
@@ -372,7 +388,6 @@ fn selcall(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins, rap: **RAlloc) void = {
     ::if(*RAlloc);
     ra := if aggregate {
         r1 := if aret.inmem != 0 {
-            // TODO: does my old x64 jit do this for us?
             /* get the return location from eax
              * it saves one callee-save reg */
             r1 := f.newtmp("abi", .Kl);
@@ -619,6 +634,24 @@ fn selvastart(f: *Qbe.Fn, fa: i64, ap: Qbe.Ref) void = {
         %rbp_n176 =l add %4, -176
         storel %rbp_n176, %ap16
     """);
+}
+
+// Converts parX to copies to registers. Later passes rely on RCall to know which are live at the call. 
+// Simpler than normal calls: nothing on the stack, no floats, no aggregates, INDEX_OF_AMD64_SYSCALL_ARG_DIFF.
+fn sel_syscall_amd64(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins) void = {
+    count := ptr_diff(i0, i1);
+    ca := 1.shift_left(13).bit_or(1.shift_left(12)).bit_or(count.shift_left(4)).bit_or(1);
+    
+    f.emit(.copy, i1.cls(), i1.to, TMP(Amd64Reg.RAX), QbeNull);  // result returned in RAX as normal. 
+    f.emit(.syscall, i1.cls(), QbeNull, QbeNull, CALL(ca)); 
+    f.emit(.copy, .Kl, TMP(Amd64Reg.RAX), i1.arg&[0], QbeNull);  // syscall number passed in RAX
+    
+    ni := 0;
+    for(i0, i1) { i |
+        r1 := TMP(@if(ni == INDEX_OF_AMD64_SYSCALL_ARG_DIFF, Amd64Reg.R10, amd64_sysv_rsave[ni]));
+        f.emit(.copy, i.cls(), r1, i.arg&[0], QbeNull);
+        ni += 1;
+    };
 }
 
 fn zip_args(i0: *Qbe.Ins, i1: *Qbe.Ins, ac: []AClass, $body: @Fn(i: *Qbe.Ins, a: *AClass, $c: LabelId) void) void = {

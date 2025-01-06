@@ -506,6 +506,17 @@ fn typecheck_failed(f: *Qbe.Fn) ?Str = {
             };
         };
         for_insts_forward b { i |
+            continue :: local_return;
+            if i.op() == .syscall {
+                i0 := b.find_first_arg(i);
+                count := ptr_diff(i0, i);
+                if(count > 6, => return(Some = "syscall has too many arguments"));
+                if(i.arg&[1] != QbeNull, => return(Some = "syscall cannot have aggregate return value"));
+                for(i0, i) { iarg |
+                    if(iarg.op() != .arg, => return(Some = "syscalls cannot have aggragate, variadic, or env arguments"));
+                };
+                continue();
+            };
             range(0, 2) { n |
                 continue :: local_return;
                 k := argcls(i, n);
@@ -515,10 +526,13 @@ fn typecheck_failed(f: *Qbe.Fn) ?Str = {
                 };
                 if(rtype(r) == .RType, => continue());
                 word :: fn() => if(n == 1, => "second", => "first");
-                if (rtype(r) != .RNull && k == .Kx) {
+                if rtype(r) != .RNull && k == .Kx {
                     return(Some = @tfmt("no %s operand expected in %", word(), i.op()));
                 };
-                if (rtype(r) == .RNull && k != .Kx) {
+                if rtype(r) == .RNull && k != .Kx {
+                    if i.op() == .copy && isreg(i.to) {
+                        continue();  // :ExprLevelAsm
+                    };
                     return(Some = @tfmt("missing % operand in %", word(), i.op()));
                 };
                 if !usecheck(r, k, f) {

@@ -159,13 +159,13 @@ fn bit_is_set(s: u64, i: i64) bool #inline =
 // this changes the order in regs/tmps
 fn rfree(c: *RegaCtx, m: *RMap, t: i64) i64 = {
     T := c.f.globals.target;
-    @debug_assert(t >= Qbe.Tmp0 || !T.rglob.bit_is_set(t));
+    @debug_assert(t >= Qbe.Tmp0 || !T.rglob.bit_is_set(t), "reg non-global");
     if !bshas(m.live&, t) {
         return(-1);
     };
     i := 0;
     while => m.tmps&[i].intcast() != t {
-        @debug_assert(i+1 < m.len);
+        @debug_assert(i+1 < m.len, "reg not found");
         i += 1;
     };
     rfree_at_index(c, m, t, i)
@@ -173,14 +173,14 @@ fn rfree(c: *RegaCtx, m: *RMap, t: i64) i64 = {
 
 fn rfree_at_index(c: *RegaCtx, m: *RMap, t: i64, i: i64) i64 = {
     T := c.f.globals.target;
-    @debug_assert(i < m.len && m.tmps&[i].intcast() == t);
+    @debug_assert(i < m.len && m.tmps&[i].intcast() == t, "invalid rfree_at_index");
     r := m.regs&[i].intcast();
     bsclr(m.live&, t);
     bsclr(m.live&, r);
     m.len -= 1;
     m.regs&[i] = m.regs&[m.len];
     m.tmps&[i] = m.tmps&[m.len];
-    @debug_assert(t >= Qbe.Tmp0 || t == r);
+    @debug_assert(t >= Qbe.Tmp0 || t == r, "invalid rfree_at_index.");
     r
 }
 
@@ -205,7 +205,7 @@ fn pmrec(c: *RegaCtx, status: []PMStat, i: i64, k: *Qbe.Cls) i64 = {
         status[i] = .Moved;
         return(-1);
     };
-    @debug_assert(KBASE(c.pm&[i].cls) == KBASE(k[]));
+    @debug_assert(KBASE(c.pm&[i].cls) == KBASE(k[]), "bad kbase");
     ::assert(Qbe.Cls.Kw.raw().bit_or(Qbe.Cls.Kl.raw()) == Qbe.Cls.Kl.raw(), "Cls numbers");
     ::assert(Qbe.Cls.Ks.raw().bit_or(Qbe.Cls.Kd.raw()) == Qbe.Cls.Kd.raw(), "Cls numbers");
     k[] = @as(Qbe.Cls) @as(i32) k[].raw().bit_or(c.pm&[i].cls.raw());
@@ -259,10 +259,10 @@ fn move(c: *RegaCtx, r: i64, to: Qbe.Ref, m: *RMap) void = {
     r1 := if(to == QbeNull, => -1, => c.rfree(m, to.val()));
     if bshas(m.live&, r) {
         /* r is used and not by to */
-        @debug_assert(r1 != r);
+        @debug_assert(r1 != r, "already in reg");
         n := 0;
         while => m.regs&[n].intcast() != r {
-            @debug_assert(n+1 < m.len);
+            @debug_assert(n+1 < m.len, "reg not found.");
             n += 1;
         };
         t := m.tmps&[n];
@@ -293,7 +293,7 @@ fn do_parallel_moves(c: *RegaCtx, b: *Qbe.Blk, last_move: *Qbe.Ins, m: *RMap) *Q
         i
     };
     @debug_assert(m0.len <= m.len, "m0<=m. this happens when we're confused by 'asm' copies not being symetric");
-    is_after_call := !first_move.identical(b.ins.first) && first_move.offset(-1).op() == .call;
+    is_after_call := !first_move.identical(b.ins.first) && @is(first_move.offset(-1).op(), .call, .syscall);
     if is_after_call {
         discard := Array(i32, 2).ptr_from_int(0); // TODO: helper for this 
         call_abi_info := first_move.offset(-1)[].arg&[1];
@@ -371,7 +371,7 @@ fn do_block_instructions(c: *RegaCtx, b: *Qbe.Blk, cur: *RMap) void = {
                     just_freed = c.rfree(cur, r);
                     if just_freed == -1 {
                         // DCE: if we didn't need the value later, we don't need the instruction that creates it. 
-                        @debug_assert(!isreg(i.to));
+                        @debug_assert(!isreg(i.to), "DCE reg");
                         curi[] = curi[].offset(1); // pop off the emit() from this iteration
                         continue();
                     };
@@ -380,15 +380,6 @@ fn do_block_instructions(c: *RegaCtx, b: *Qbe.Blk, cur: *RMap) void = {
             };
         };
         @match(i.op()) {
-            fn call() => { 
-                discard := Array(i32, 2).ptr_from_int(0);
-                needed_at_call := {T.argregs}(i.arg&[1], discard).bit_or(T.rglob);
-                for_caller_saved T { r |
-                    if !needed_at_call.bit_is_set(r) {
-                        c.rfree(cur, r);
-                    }
-                };
-            }
             fn copy() => {
                 if is_copy_from_reg(i) {
                     // consecutive copies from registers are handled seperatly. 
@@ -402,7 +393,19 @@ fn do_block_instructions(c: *RegaCtx, b: *Qbe.Blk, cur: *RMap) void = {
                 };
                 other();
             }
-            @default => other();
+            @default => {
+                if (@is(i.op(), .call, .syscall)) {
+                    discard := Array(i32, 2).ptr_from_int(0);
+                    needed_at_call := {T.argregs}(i.arg&[1], discard).bit_or(T.rglob);
+                    for_caller_saved T { r |
+                        if !needed_at_call.bit_is_set(r) {
+                            c.rfree(cur, r);
+                        }
+                    };
+                } else {
+                    other();
+                };
+            };
         };
         reg_args_count := 0;
         each i.arg& { arg | 

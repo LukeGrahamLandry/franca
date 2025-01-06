@@ -18,6 +18,10 @@
   > they just feel the need to update shit and make it not work anymore?
   > am i just going crazy and somehow i sleep walked turned off the option for "render the text likme at all"?
 
+- syscall instruction. so now i can call exit() and get my 42 out of blink.
+  adjusted the abi to use different registers for the later arguments.
+  its actually just swapping out RCX because the cpu stomps that one.
+
 ## wasm (Jan 4)
 
 - finish f.const for import_wasm
