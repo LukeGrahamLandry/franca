@@ -52,19 +52,8 @@ zero_page_size :: 0x100000000;
 
 // results are in temp()
 fn output_macho(m: *QbeModule) [][]u8 = {
-    // TODO: remove
-    code_count := m.segments&[.Code]&.len() - COMMANDS_SIZE_GUESS - SIZE_OF_STUBS;
-    data_count := m.segments&[.MutableData]&.len();
-    @eprintln(">>> % bytes of code, % bytes of data.", code_count, data_count);
-
-    // fill_from_libc is wrong because you might be cross compiling and disagree about what things exist. 
-    for_symbols m { id, symbol |  // :SLOW  just keep list of pending symbols instead
-        if symbol.kind == .Pending && symbol.fixups.len != 0 {
-            m.imports&.push(id); 
-            symbol.kind = .DynamicPatched;
-            m.do_fixups(u8.ptr_from_int(0), symbol);
-        };
-    };
+    debug_log_byte_size(m);
+    patch_pending_symbols(m);
     
     alignment := if(m.goal.type == .Relocatable, => 8, => macos_page_size);
     for_enum SegmentType { s | 
@@ -75,6 +64,8 @@ fn output_macho(m: *QbeModule) [][]u8 = {
     //m.align_to(.Code, macos_page_size);
     m.fixups_locked = true; // we're going to stomp the data section with relocation info so you can run it jitted anymore after this. 
     chunks := list([]u8, 10, temp());
+    
+    // TODO: take this out and fix indexes +1 everywhere. 
     chunks&.push(empty()); // this used to be for commands but now thats part of .Code which is stupid. :commandsispartofcodenow
     
     e: EmitMacho = (
@@ -223,11 +214,9 @@ fn output_macho(m: *QbeModule) [][]u8 = {
         
         // Ask it to call us!
         cmd := load_command(e&, .MainEntryPoint, MainEntryPoint);
-        symbol := m.get_symbol_info(m.intern("main"));
-        assert(symbol.kind == .Local, "no exported main function?");
         // offset is from the start of interesting virtual memory? 
-        cmd[] = (entry_offset = symbol.offset.bitcast(), stack_size = 0);  // :CodeIsFirst its fine to change this, you just have to do the math here. 
-        @debug_assert_ge(symbol.offset, COMMANDS_SIZE_GUESS + SIZE_OF_STUBS);
+        off := main_entry_point_vaddr(m);
+        cmd[] = (entry_offset = off.bitcast(), stack_size = 0);  // :CodeIsFirst its fine to change this, you just have to do the math here. 
     };
     if e.m.goal.type == .Dynamic {
         // LC_ID_DYLIB, it seems the name doesn't matter? 
@@ -787,11 +776,6 @@ fn collect_aot_fixups(m: *QbeModule) Ty([]FixP, []*SymbolInfo) = {
     };
     
     (fixups.items(), symbols.items())
-}
-
-fn live_segment_part(m: *QbeModule, s: SegmentType) []u8 = {
-    s := m.segments&[s]&;
-    s.mmapped.slice(0, ptr_diff(s.mmapped.ptr, s.next))
 }
 
 fn append_padded_cstr(bytes: *List(u8), s: Str, align: i64) i64 = {

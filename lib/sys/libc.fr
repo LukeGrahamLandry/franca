@@ -1,15 +1,23 @@
+//!
 //! The standard library often provides more ergonomic wrappers of these,
 //! that will also be implemented on platforms that don't have a standard libc (like wasm in the browser). 
+//!
+//! When targetting macos, there is no stable syscall abi, so #libc functions will be dynamically linked. 
+//! Currently #libc takes precedence even if there is body expression. 
+//!
+//! Many functions here map directly to a #syscall(arm64, amd64) on linux. 
+//! Some old syscalls are trivially replaced by specific arguments to more general new ones,
+//! (ie. `open` becomes `openat` of `AT_FDCWD`), and are not implemented on all architectures (*cough* arm64 *cough*). 
+//! In those cases, a body is provided to do the translation so you don't have to link a libc for something boring. 
+//! TODO: impliment #syscall (for now we just dynamically link a libc like normal), it has a different calling convention!
+//! 
 
 // TODO: you can't use @match here because its needed in mmap_anon
-fn LibcType(os: Os) Type #fold = {
-    @if(os == .macos, MacosLibc, LinuxLibc)
+fn LibcType(os: Os) Type #fold = @match(os) {
+    fn macos() => MacosLibc;
+    fn linux() => LinuxLibc;
+    fn wasip1() => Wasip1Libc;
 }
-//@match(os) {
-//    fn macos() => MacosLibc;
-//    fn linux() => LinuxLibc;
-//    //@default => @panic("unsupported os (%) for LibcType", os);
-//}
 
 // TODO: use my own verions for the ones that are just code not magic platform shit apple wont let me do. 
 fn malloc(size: usize) rawptr #libc;
@@ -19,13 +27,13 @@ fn puts(ptr: CStr) void #libc; // nice for testing when everythings broken
 
 fn sqrt(i: f64) f64 #libc;
 
-Fd :: @struct(fd: i32); // fd is non-negative
+Fd :: @struct(fd: i32); // fd is non-negative (except for when it's not)
 // Note: the magic numbers for OpenFlag are different on macos and linux!
-fn open(null_terminated_path: CStr, flags: i64) FdResult #libc;
-fn read(fd: Fd, buf: *u8, size: i64) i64Result #libc;
-fn write(fd: Fd, buf: *u8, size: i64) i64Result #libc;
-fn close(fd: Fd) voidResult #libc;
-fn lseek(fd: Fd, offset: i64, whence: Whence) i64Result #libc;
+fn open(null_terminated_path: CStr, flags: i64) FdResult #libc; // use AT_FDCWD
+fn read(fd: Fd, buf: *u8, size: i64) i64Result #libc #syscall(63, 0);
+fn write(fd: Fd, buf: *u8, size: i64) i64Result #libc #syscall(64, 1);
+fn close(fd: Fd) voidResult #libc #syscall(57, 3) #syscall(57, 3);
+fn lseek(fd: Fd, offset: i64, whence: Whence) i64Result #libc #syscall(62, 8);
 fn remove(filepath: CStr) voidResult #libc;
 fn opendir(path: CStr) *Dir #link_rename(append_inode64_on_applex8664) #libc; // TODO: nullable niche
 fn closedir(dir: *Dir) voidResult #libc;
@@ -36,7 +44,7 @@ fn readlink(pathname: CStr, buf: []u8) i64Result #libc; // :slice_abi
 // Last 6 chars of template must be XXXXXX and they will be mutated to the temp filename. 
 fn mkstemp(template: CStr) FdResult #libc;
 
-fn fchmod(fd: Fd, mode: FileMode) voidResult #libc;
+fn fchmod(fd: Fd, mode: FileMode) voidResult #libc #syscall(52, 91);
 fn chmod(pathname: CStr, mode: FileMode) voidResult #libc;
 
 DlHandle :: @struct(lib: rawptr);
@@ -47,7 +55,7 @@ fn dlsym(lib: DlHandle, name: CStr) rawptr #libc;
 fn dlclose(lib: DlHandle) voidResult #libc;
 
 // Note: the magic numbers for MapFlag are different on macos and linux!
-fn mmap(addr: rawptr, len: i64, prot: i64, flags: i64, fd: Fd, offset: i64) rawptr #libc;
+fn mmap(addr: rawptr, len: i64, prot: i64, flags: i64, fd: Fd, offset: i64) rawptr #libc #syscall(222, 9);
 
 fn mmap_anon(addr: rawptr, len: i64, prot: i64, offset: i64) rawptr #target_os = (fn($os) => {
     //@debug_assert(len > 0, "mmapped bad len");
@@ -64,12 +72,21 @@ fn mmap_jit(addr: rawptr, len: i64, prot: i64, offset: i64) rawptr #target_os = 
     mmap(addr, len, prot, flag, fd, offset)
 });
 
-fn munmap(addr: rawptr, len: i64) voidResult #libc;
-fn mprotect(addr: rawptr, len: i64, prot: i64) voidResult #libc;
+fn munmap(addr: rawptr, len: i64) voidResult #libc #syscall(215, 11);
+fn mprotect(addr: rawptr, len: i64, prot: i64) voidResult #libc #syscall(226, 10);
 
-fn exit(status: i64) Never #libc #cold;
-fn abort() Never #libc #cold;
-fn usleep(micro_seconds: u32) void #libc;
+fn exit(status: i64) Never #libc #cold #syscall(93, 60);
+
+fn abort() Never #libc #cold = 
+    exit(1);
+
+fn usleep(micro_seconds: u32) voidResult = {
+    s, ns := div_mod(micro_seconds.zext(), US_PER_S);
+    t: TimeSpec = (seconds = s, nanoseconds = ns);
+    nanosleep(t&, TimeSpec.ptr_from_int(0))
+}
+
+fn nanosleep(duration: *TimeSpec, nullable_remainder_out: *TimeSpec) voidResult #libc #syscall(101, 35);
 fn execv(pathname: CStr, null_terminated_argv: *CStr) i32 #libc;
 fn execvp(pathname: CStr, null_terminated_argv: *CStr) i32 #libc;
 
@@ -79,14 +96,15 @@ fn wait(status: *i32) i32 #libc;
 fn waitpid(pid: i32, status: *i32, options: i64) i32 #libc; // TODO: i32 
 fn pipe(pipefd: *Array(Fd, 2)) voidResult #libc;
 fn dup2(oldfd: Fd, newfd: Fd) voidResult #libc;
-fn chdir(path: CStr) voidResult #libc;
+fn dup3(oldfd: Fd, newfd: Fd, flags: i32) voidResult #libc #syscall(24, 292);
+fn chdir(path: CStr) voidResult #libc #syscall(49, 80);
 fn poll(fds: []PollFds, timeout: i32) i32Result #libc; // :slice_abi
 fn rename(oldpath: CStr, newpath: CStr) voidResult #libc;
 
 TimeSpec :: @struct(seconds: i64, nanoseconds: i64);
-fn clock_gettime(clock_id: i64, time_spec: *TimeSpec) void #libc;
+fn clock_gettime(clock_id: i64, time_spec: *TimeSpec) void #libc #syscall(113, 228);
 
-// TODO: use this instead of exporting functions from the compiler.
+// TODO: i think this is an ioctl
 Terminos :: @struct(iflag: u64, oflag: u64, cflag: u64, lflag: u64, cc: Array(u8, 20), ispeed: u64, ospeed: u64);
 fn tcgetattr(fd: Fd, out: *Terminos) void #libc;
 fn tcsetattr(fd: Fd, optional_actions: i64, in: *Terminos) void #libc;
@@ -233,6 +251,7 @@ fn find_os_libc_dylib() ?CStr #target_os = (fn($os) => @match(os) {
     //       want to support blink where you have to be statically linked. 
     // :WhichLibc
     fn linux() => (Some = "/lib/x86_64-linux-gnu/libc.so.6".sym().c_str());
+    fn wasip1() => .None;
 });
 
 FILE :: @struct();

@@ -1,0 +1,100 @@
+// results are in temp()
+fn output_elf(m: *QbeModule) [][]u8 = {
+    debug_log_byte_size(m);
+    patch_pending_symbols(m);
+    
+    for_enum SegmentType { s | 
+        m.align_to(s, 4096);
+    };
+    m.fixups_locked = true; // we're going to stomp the data section with relocation info so you can run it jitted anymore after this. 
+    chunks := list([]u8, 10, temp());
+    commands: List(u8) = (maybe_uninit = (ptr = m.segment_address(.Code, 0), len = COMMANDS_SIZE_GUESS), len = 0, gpa = page_allocator);
+    
+    e_header := commands&.reserve_type(Elf.Header);
+    e_header[] = (
+        type = @match(m.goal.type) {
+            fn Exe() => .Executable;
+            fn Relocatable() => .Relocatable;
+            fn Dynamic() => .Dynamic;
+            @default => unreachable();
+        },
+        machine = @if(m.goal.arch == .aarch64, .arm64, .amd64),
+        entry = main_entry_point_vaddr(m),
+        program_header_off = size_of(Elf.Header),
+        section_header_off = 0, // todo
+        flags = 0, // todo
+        ehsize = 0, // TODO?
+        program_header_num = 0, // todo
+        section_header_num = 0, // todo
+        section_header_names_index = 0, // todo
+    );
+    
+    start_program_headers := commands.len;
+    p_header := commands&.reserve_type(Elf.ProgramHeader);
+    e_header.program_header_num += 1;
+        
+    virtual_offset := COMMANDS_SIZE_GUESS; 
+    file_offset    := COMMANDS_SIZE_GUESS;
+    make_segment :: fn(seg: SegmentType, prot: u32, off: i64) => {
+        segment := m.segments&[seg]&;
+        chunks&.push(live_segment_part(m, seg)); // :waste :commandsispartofcodenow
+    
+        header := commands&.reserve_type(Elf.ProgramHeader);
+        header[] = (
+            type = .Load,
+            prot = prot,
+            offset = file_offset,
+            vaddr = virtual_offset, 
+            paddr = virtual_offset,
+            file_size = segment.len() - off,
+            mem_size = segment.len() - off,
+            align = 4096,
+        );
+        e_header.program_header_num += 1;
+        
+        virtual_offset += segment.mmapped.len - off;
+        file_offset += segment.len() - off;
+        header
+    };
+    
+    // TODO: we're asking it to map the elf info like you need to for mach-o but probably shouldn't do that here. 
+    
+    code_header := make_segment(.Code, RX, COMMANDS_SIZE_GUESS); RX :: 5;// :waste :commandsispartofcodenow
+    make_segment(.ConstantData, R, 0); R :: 4; // :waste 
+    make_segment(.MutableData, RW, 0); RW :: 6;
+    
+    {
+        stack := commands&.reserve_type(Elf.ProgramHeader);
+        e_header.program_header_num += 1;
+        stack[] = (
+            type = .Stack,
+            prot = 6,
+            offset = 0,
+            vaddr = 0, 
+            paddr = 0,
+            file_size = 0,
+            mem_size = 16777216,
+            align = 0,
+        );
+    };
+    
+    program_headers_size := commands.len - start_program_headers;
+    p_header[] = (
+        type = .Phdr,
+        prot = 4,
+        offset = size_of(Elf.Header),
+        vaddr = size_of(Elf.Header), 
+        paddr = size_of(Elf.Header),
+        file_size = program_headers_size,
+        mem_size = program_headers_size,
+        align = 8,
+    );
+    
+    
+    end := commands.len;
+    @assert_le(end, COMMANDS_SIZE_GUESS, "we guessed wrong so the array resized and all the pointers are junk");
+    commands.len = COMMANDS_SIZE_GUESS;
+    commands.items().rest(end).set_zeroed();
+    
+    chunks.items()
+}

@@ -1,0 +1,109 @@
+//! Log the contents of an Executable and Linkable Format file. 
+
+#include_std("backend/elf/bits.fr");
+
+fn main() void = {
+    input := read_file_from_last_arg();
+    out := u8.list(temp()); out := out&;
+    
+    @fmt(out, "Read % bytes.\n", input.len);
+    start := input;
+    header := start&.pop_type(Elf.Header);
+    @fmt(out, "[Elf Header] %\n\n", header);
+    
+    if header.program_header_entsize != size_of(Elf.ProgramHeader) {
+        @fmt(out, "Unexpected phentsize (wanted %)\n", ::size_of(Elf.ProgramHeader));
+    } else {
+        @fmt(out, "=== Begin Program Headers ===\n");
+        mem := input.rest(header.program_header_off);
+        range(0, header.program_header_num.zext()) { i |
+            @fmt(out, "[PH %]: %\n", i, mem&.pop_type(Elf.ProgramHeader));
+        };
+        @fmt(out, "=== End Program Headers ===\n\n");
+    };
+    
+    if header.section_header_entsize != size_of(Elf.SectionHeader) {
+        @fmt(out, "Unexpected phentsize (wanted %)\n", ::size_of(Elf.SectionHeader));
+    } else {
+        @fmt(out, "=== Begin Section Headers ===\n");
+        n: i64 = header.section_header_num.zext();
+        @assert_le(header.section_header_off + n * size_of(Elf.SectionHeader), input.len);
+        sections: []Elf.SectionHeader = (ptr = ptr_cast_unchecked(u8, Elf.SectionHeader, input.ptr.offset(header.section_header_off)), len = n);
+        enumerate sections { section_i, section |
+            @fmt(out, "[SH %]: %\n", section_i, section);
+            
+            if section.flags != 0 {
+                @fmt(out, "  [Flags] ");
+                for_enum Elf.SectionFlag { e | 
+                    if section.flags.bit_and(1.shift_left(@as(i64) e)) != 0 {
+                        @fmt(out, "%, ", e);
+                    };
+                };
+                @fmt(out, "\n");
+            };
+            
+            if section.type == .SymbolTable || section.type == .DynSymbolTable {
+                @fmt(out, "  [Symbols]\n");
+                if section.ent_size != size_of(Elf.Symbol) {
+                    @fmt(out, "Unexpected entsize (wanted %)\n", ::size_of(Elf.Symbol));
+                } else {
+                    mem := input.slice(section.offset, section.offset + section.size);
+                    str_section := sections.index(section.link.zext());
+                    str_bytes := input.slice(str_section.offset, str_section.offset + str_section.size);
+                    i := 0;
+                    dowhile {
+                        symbol := mem&.pop_type(Elf.Symbol);
+                        n: i64 = symbol.name.zext();
+                        name: CStr = @if(n < str_bytes.len, (ptr = str_bytes.index(n)), "ERROR: symbol name OOB");
+                        @fmt(out, "    [%] % %\n", i, symbol, name);
+                        i += 1;
+                        mem.len >= size_of(Elf.Symbol)
+                    };
+                    if mem.len != 0 {
+                        @fmt(out, "ERROR: Section size was not a multiple of entsize\n");
+                    };
+                };
+            };
+            
+            if section_i == header.section_header_names_index.zext() {
+                @fmt(out, "  [Section Header Names]\n");
+            };
+            
+            has_strings := section.flags.bit_and(1.shift_left(@as(i64) Elf.SectionFlag.Strings)) != 0 || section.type == .StringTable;
+            if section.size > 0 && has_strings {
+                @fmt(out, "  [Strings]\n");
+                c := section.offset;
+                i := 0;
+                dowhile {
+                    s: CStr = (ptr = input.index(c));
+                    s := s.str();
+                    if s.len > 0 {
+                        @fmt(out, "    [%: %] %\n", i, s.len, s);
+                    };
+                    i += 1;
+                    c += s.len + 1;
+                    c - section.offset < section.size
+                };
+            };
+        };
+        @fmt(out, "=== End Section Headers ===\n\n");
+    };
+    
+    print(out.items());
+}
+
+::DeriveFmt(Elf.Header);
+::DeriveFmt(Elf.ProgramHeader);
+::DeriveFmt(Elf.SectionHeader);
+::DeriveFmt(Elf.Symbol);
+::enum(Elf.Type);
+::enum(Elf.Machine);
+::enum(Elf.SegmentType);
+::enum(Elf.SectionType);
+::enum(Elf.SectionFlag);
+
+fn display(i: *u16, out: *List(u8)) void = 
+    display(@as(i64) i[].zext(), out);
+
+fn display(i: *u8, out: *List(u8)) void = 
+    display(@as(i64) i[].zext(), out);

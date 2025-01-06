@@ -528,14 +528,25 @@ fn handle_target_split(self: *SelfHosted, func: *Func) Maybe(void) #once = {
         func.body = (Merged = merged.rs());
     };
     @debug_assert(func.body&.is(.Merged), "ICE: lost #target_os impls???");
-    // TODO: don't always do all the os-es, should know runtime+comptime target
     each func.body.Merged { impl |
         @err_assert(impl.is(.TargetOsSplit), "TODO: support do_merges + .TargetOsSplit?") return;
         fid := impl.TargetOsSplit.fid;
-        @check(self.compile_body(fid)) return;
+        if self.comp().want_target_os(impl.TargetOsSplit.os) {
+            @check(self.compile_body(fid)) return;
+        };
     };
     func.set_flag(.EnsuredCompiled);
     .Ok
+}
+
+fn want_target_arch(c: CompCtx, it: Arch) bool = {
+    flag := c.get_build_options()[].target_arch_bitset;
+    flag.bit_and(1.shift_left(it.raw())) != 0
+}
+
+fn want_target_os(c: CompCtx, it: Os) bool = {
+    flag := c.get_build_options()[].target_os_bitset;
+    flag.bit_and(1.shift_left(it.raw())) != 0
 }
 
 fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
@@ -682,9 +693,15 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
                 asm := func.body.Normal&;
                 
                 each func.annotations { tag | 
+                    continue :: local_return;
                     @switch(tag.name) {
                         @case(Flag.aarch64.ident()) => {
                             @err_assert(!good, "found multiple arches for #asm") return;
+                            if !self.comp().want_target_arch(.aarch64) {
+                                func.body = .Empty;
+                                good = true; 
+                                continue();
+                            };
                             // TODO: :PushConstFnCtx
                             // TODO: you can't just compile here because then trying to imm_eval hits a not read asm func i think because of ^ callees.
                             //       it recurses and has to emit other asm first but they don't get put in dispatch,
@@ -737,12 +754,22 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
                         };
                         @case(Flag.x86.ident()) => {
                             @err_assert(!good, "found multiple arches for #asm") return;
+                            if !self.comp().want_target_arch(.x86_64) {
+                                func.body = .Empty;
+                                good = true; 
+                                continue();
+                            };
                             ir := @check(self.eval_str(asm)) return;
                             func.body = (X86AsmText = ir);
                             good = true;
                         };
                         @case(Flag.x86_bytes.ident()) => {
                             @err_assert(!good, "found multiple arches for #asm") return;
+                            if !self.comp().want_target_arch(.x86_64) {
+                                func.body = .Empty;
+                                good = true; 
+                                continue();
+                            };
                             // TODO: typecheck
                             type := @unwrap(self.env.push_x86_func, "cannot use #asm before bootstrap") return;
                             fid := @check(self.immediate_eval_expr(asm, type)) return;

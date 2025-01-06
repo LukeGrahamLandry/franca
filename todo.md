@@ -7,6 +7,11 @@
 
 ##
 
+- cross arch repro is broken again
+- fix compiler_gui so it sees all functions from a full compile
+- #syscall
+- output_elf
+- Wasip1Libc
 - still allow coerce to c string if there was a `\` escape.
 - `[CPU Time]` on macos-x64 is wrong. (different libc magic numbers? clang libc_constants says no). // :WrongClockTime
 - maybe have a `push_compiler_error_context` and `pop_compiler_error_context` for macros so @fmt could easily add a message like `while evaluating format string`?
@@ -232,6 +237,7 @@ fn eq(a: ~T, b: T) bool = {}
 - inline asm
 - reading from uninitialized memory
 - init from small union field then read from large.
+- #c_variadic
 
 ## Testing
 

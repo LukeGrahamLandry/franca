@@ -1,5 +1,23 @@
 - TODO: deal with `CodegenEntry:Bounce` on wasm
 
+## (Jan 5)
+
+- started transcribing linux syscall numbers. eventually i want to not use someone else's libc.
+- only compile #target_os cases for comptime and runtime target instead of all possible ones.
+  so now you're able to have functions that are not implemented on every os.
+- start elf bits. examples/dump_elf for sanity purposes.
+- basic emit elf with no imports and return 42. blink crashes on address 1.
+  but if i make my entry point anything other than the correct offset, it crashes at that new number instead.
+  so clearly it's running something? and then just jumping into garbage.
+  in blinkenlights i can see RAX has 0x2a which is a very good sign.
+  oh you can't just return from `_start`, you're supposed to do an exit syscall.
+  if i do a staticlly linked c program you get a whole bunch of wrapper libc runtime stuff that does that for you.
+
+  > also warp is garbage? the colourful disassembly in blinkenlights doesn't render anymore.
+  > it used to work, i'm using the same blinkenlights binary, it still works in Terminal.app,
+  > they just feel the need to update shit and make it not work anymore?
+  > am i just going crazy and somehow i sleep walked turned off the option for "render the text likme at all"?
+
 ## wasm (Jan 4)
 
 - finish f.const for import_wasm
@@ -17,6 +35,7 @@
   but that's stupid, you're allowed trailing padding inside the leb number by just putting `(sign_bit | LEB_MORE)*, sign_bit`,
   which is much less confusing than my way.
 - use another global for hidden `env` parameter.
+- #c_variadic in the frontend
 
 ## wasm (Jan 2)
 

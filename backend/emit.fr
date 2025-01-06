@@ -308,6 +308,7 @@ fn put_jit_addr(self: *QbeModule, name: u32, addr: rawptr) void = {
 
 // :SLOW insanely inefficient way of doing this. especially when someone tries to add multiple libs. 
 // TODO: store a list of the pending ones so don't have to iterate them all. 
+// This is not what you want if you care about cross compiling!
 fn fill_pending_dynamic_imports(self: *QbeModule, lib: DlHandle) void = {
     buf := u8.list(temp());
     for_symbols self { id, symbol |  // :SLOW  just keep list of pending symbols instead
@@ -337,6 +338,7 @@ fn for_symbols(m: *QbeModule, $body: @Fn(id: u32, s: *SymbolInfo) void) void = {
     };
 }
 
+// This is not what you want if you care about cross compiling!
 fn fill_from_libc(self: *QbeModule) void = {
     if find_os_libc_dylib() { libc_path | 
         libc := dlopen(libc_path, .Lazy);
@@ -500,4 +502,42 @@ fn push_fixup(m: *QbeModule, symbol: *SymbolInfo, fix: Fixup) void #inline = {
     a := m.forever&.borrow();
     symbol.fixups&.push(fix, a);
     @if(use_threads) pthread_mutex_unlock(m.intern_mutex&).unwrap();
+}
+
+//////////////////////////////////
+// Shared by native AOT targets //
+//////////////////////////////////
+
+fn main_entry_point_vaddr(m: *QbeModule) i64 = {
+    @debug_assert_ne(m.goal.arch, .wasm32, "only makes sense for native targets");
+    @debug_assert_ne(m.goal.type, .Dynamic, "shared libraries don't have an entry point");
+    @debug_assert(m.fixups_locked, "this is not threadsafe");
+    symbol := m.get_symbol_info(m.intern("main"));
+    assert(symbol.kind == .Local, "no exported main function?");
+    @debug_assert_ge(symbol.offset, COMMANDS_SIZE_GUESS + SIZE_OF_STUBS);
+    symbol.offset
+}
+
+fn patch_pending_symbols(m: *QbeModule) void = {
+    @debug_assert_ne(m.goal.arch, .wasm32, "only makes sense for native targets");
+    // fill_from_libc is wrong because you might be cross compiling and disagree about what things exist. 
+    for_symbols m { id, symbol |  // :SLOW  just keep list of pending symbols instead
+        if symbol.kind == .Pending && symbol.fixups.len != 0 {
+            m.imports&.push(id); 
+            symbol.kind = .DynamicPatched;
+            m.do_fixups(u8.ptr_from_int(0), symbol);
+        };
+    };
+}
+
+fn debug_log_byte_size(m: *QbeModule) void = {
+    // TODO: remove
+    code_count := m.segments&[.Code]&.len() - COMMANDS_SIZE_GUESS - SIZE_OF_STUBS;
+    data_count := m.segments&[.MutableData]&.len();
+    @eprintln(">>> % bytes of code, % bytes of data.", code_count, data_count);
+}
+
+fn live_segment_part(m: *QbeModule, s: SegmentType) []u8 = {
+    s := m.segments&[s]&;
+    s.mmapped.slice(0, ptr_diff(s.mmapped.ptr, s.next))
 }
