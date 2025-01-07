@@ -34,6 +34,8 @@ Command :: @struct(
     backend := AotBackend.self,
     goal := QbeOutputPurpose.Exe, // invalid
     n := 1,
+    profile := false,
+    syscalls := false,
 );
 
 Action  :: @enum(i64) (run, build, test); ::enum(Action);
@@ -70,16 +72,26 @@ fn do_it(vtable: *ImportVTable, cmd: *Command) void = {
     build_options.implicit_context_runtime = cmd.implicit_context;
     build_options.target_os_bitset = build_options.target_os_bitset.bit_or(1.shift_left(cmd.os.raw()));
     build_options.target_arch_bitset = build_options.target_arch_bitset.bit_or(1.shift_left(cmd.arch.raw()));
+    build_options.use_raw_syscalls = cmd.syscalls;
     
     env: TargetEnv = (arch = cmd.arch, os = cmd.os);
     m := @uninitialized QbeModule;
-    m.goal.type = cmd.goal;
 
     assert(cmd.action == .build || cmd.goal != .Dynamic, "use 'build' with -dynamiclib");
     assert(cmd.action == .build || cmd.goal != .Relocatable, "use `build` to make linkable object (-c)");
     assert(cmd.action != .test, "i never run tests this way. do i really care? TODO");
     
     c := load_file(cmd.input_file, vtable, build_options);
+    
+    ENABLE_TRACY :: false;
+    libs := ComptimeLibs.zeroed();
+    @if(ENABLE_TRACY) {
+        libs = c.empty_libs();
+        if cmd.profile {
+            libs&.add_lib(tracy_lib);
+            cmd.goal = .Relocatable;
+        };  
+    };
     ::enum(AotBackend);
     if cmd.goal == .JitOnly {
         assert(cmd.backend == .self || cmd.backend == .legacy, "unsupported backend for jit");
@@ -143,16 +155,40 @@ fn do_it(vtable: *ImportVTable, cmd: *Command) void = {
     };
     
     if (@is(cmd.backend, .self, .legacy)) {
+        {
+            // TODO: FIXME I AM GARBAGE 
+            // 🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡
+            success := run_cmd_blocking("touch", @slice(cmd.output_file)); 
+            assert(success, "touch failed");
+        };
+        
         // we output object files directly so we just have to write the bytes
         write_to_output();
         @eprintln(">>> Wrote % to %", cmd.goal, cmd.output_file);
-        if !m.supports_self_sign && cmd.os == .macos && cmd.arch == .aarch64 {
+        
+        @if(ENABLE_TRACY) {
+            if cmd.profile {
+                start := timestamp();
+                args := Str.list(temp());
+                args&.push_all(@slice("-o", cmd.output_file, cmd.output_file));
+                args&.push_all(libs&.get_aot_objects().items());
+                success := run_cmd_blocking("clang++", args.items()); 
+                assert(success, "link failed");
+                end := timestamp();
+                @println("[link time: %ms]", end - start);
+            };
+        };
+        
+        if !m.supports_self_sign && cmd.os == .macos && cmd.arch == .aarch64 && cmd.goal != .Relocatable {
             @eprintln(">>> exec apple's codesign. sure hope you have xcode. (this should only happen during ./boot since we have our own implementation in new compiler versions)");
             success := run_cmd_blocking("codesign", @slice("-s", "-", cmd.output_file)); 
             assert(success, "sign failed");
         };
         m&.drop();  // for -repeat, leak less memory 
     } else {
+        if cmd.profile {
+            panic("TODO: link tracy");
+        };
         @assert(cmd.backend != .qbe, "TODO: call to actually compile the thing");
         out := open_temp_file();
         for bytes& { bucket |
@@ -364,6 +400,12 @@ fn parse_cli_args() Command = {
             @case("-ctx=implicit") => { 
                 cfg.implicit_context = true; 
                 set_ctx = true;
+            };
+            @case("-ltracy") => { 
+                cfg.profile = true; 
+            };
+            @case("-syscalls") => { 
+                cfg.syscalls = true; 
             };
             @default => {
                 extra_args&.push(arg);

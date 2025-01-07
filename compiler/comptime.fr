@@ -118,8 +118,9 @@ fn init_driver_vtable() *ImportVTable = {
     vtable.get_whole_line = fn(c: Compiler, span: Span) FrancaCodeLine = {
         c.cast()[][].codemap.get_whole_line(span)
     };
-    vtable.report_aot_progress = fn(c: Compiler, fid: FuncId, is_start: bool) void = {
+    vtable.report_aot_progress = fn(c: Compiler, fid: FuncId, is_start: bool, zone_tag: i64) void = {
         @if(ENABLE_TRACY) {
+            zone_tag := @as(TraceZone) zone_tag;
             self := c.cast()[][];
             mem :: @static(?HashMap(FuncId, TraceCtx)) (.None);
             if mem.is(.None) {
@@ -128,7 +129,7 @@ fn init_driver_vtable() *ImportVTable = {
             m := mem[].Some&;
             if is_start {
                 if m.get(fid).is_none() {
-                    zone := zone_begin(.EmitAot);
+                    zone := zone_begin(zone_tag);
                     func := self.get_function(fid);
                     real_name := self.pool.get(func.name);
                     ___tracy_emit_zone_name(zone, real_name);
@@ -137,6 +138,7 @@ fn init_driver_vtable() *ImportVTable = {
             } else {
                 if m.get(fid) { zone | 
                     zone_end(zone);
+                    m.remove(fid);
                 };
             };
         };

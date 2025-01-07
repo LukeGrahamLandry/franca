@@ -781,7 +781,9 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
     
                             ir: List(u8) = list(self.get_alloc());
                             callee := assume_types_fn(Arg = *List(u8), Ret = void, ptr = fn_ptr);
+                            zone := zone_begin(.CallDynamic);
                             callee(ir&);  // :call_dynamic_values
+                            zone_end(zone);
                             
                             func.body = (X86AsmBytes = ir.rs());
                             good = true;
@@ -807,7 +809,9 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
                             bc := self.todo_get_bc();
                             body := @try(self.comp().empty_fn_body(bc, fid, .Aot)) return;
                             callee := assume_types_fn(Arg = *FnBody, Ret = void, ptr = fn_ptr);
+                            zone := zone_begin(.CallDynamic);
                             callee(body);  // :call_dynamic_values
+                            zone_end(zone);
                             
                             if func.get_flag(.LogBc) {
                                 out: List(u8) = list(temp());
@@ -1636,6 +1640,16 @@ fn call_direct(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(v
     fid := FuncId.assume_cast(fid&)[];
     @log_event("compile direct call %", fid) self;
     func := self.get_function(fid);
+    
+    if func.get_flag(.UnboundGenerics) {
+        @try(self.resolve_sign(func)) return;
+        new_fid := @check(self.eval_where_from_expression(fid, arg_expr)) return; 
+        fid  = @unwrap(new_fid, "called a #where function directly (not through an overload set) but the types did not match") return;
+        f_expr[] = self.to_expr(FuncId, fid, f_expr.loc);
+        func = self.get_function(fid);
+        @debug_assert(!func.get_flag(.UnboundGenerics));
+    };
+    
     is_variadic := func.get_flag(.CVariadic);
     
     arg_ty := UnknownType;
@@ -2950,7 +2964,8 @@ fn evaluate_where_clauses(self: *SelfHosted, fid: FuncId, generic_types: []Type,
     each func.annotations& { ann |
         if ann.name == Flag.where.ident() {
             if ann.args&.as_ref() { where_expr |
-                @check(self.compile_expr(where_expr, (Specific = f_ty))) return;
+                // TODO: it needs to know this is in a const context. 
+                _ := self.poll_in_place(void, => self.compile_expr(where_expr, (Specific = f_ty)));
                 condition := @check(self.eval(where_expr, FuncId)) return;
                 
                 // :get_or_create_type
@@ -4085,6 +4100,17 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
         return(Ok = values);
     };
     
+    // TODO: should probably include coerce_const_expr in check_quick_eval so it nests better. 
+    if expr.expr&.is(.Value) {
+        ok := @check(self.ask_coerce_const_expr(expr, ret_ty, false)) return;
+        if ok {
+            if self.check_quick_eval(expr, ret_ty) { val |
+                self.dispatch.enclosing_function = old_func;
+                return(Ok = val);
+            };
+        };
+    };
+    
     // The expression is too complex to deal with here. 
     // So box it into a function, compile that normally, and then just call into it with no arguments when we come around again.
     // This operation is make_lit_function from the old compiler. 
@@ -4190,7 +4216,9 @@ fn check_quick_eval(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) ?Values = {
                         };
                         f_ptr := i64.assume_cast(it.f.expr.Value.bytes&)[];
                         self.finish_layout_deep(it.f.ty);
+                        zone := zone_begin(.CallDynamic);
                         res := self.call_dynamic_values(f_ptr, f.ty, arg_value&.bytes());
+                        zone_end(zone);
                         expr.set(res&.clone(self.get_alloc()), f.ty.ret);
                         return(Some = res);
                     };
@@ -4317,7 +4345,9 @@ fn compile_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) #once = {
     expr.expr = (Poison = .InProgressMacro);  // they call me RefCell<FatExpr> because im always refing cells 
     callee := assume_types_fn(Arg = Ty(FatExpr, FatExpr), Ret = FatExpr, ptr = fn_ptr);
     self.bump_dirty_new();
+    zone := zone_begin(.CallDynamic);
     expr[] = callee(invocation.arg[], invocation.target[]);  // :call_dynamic_values
+    zone_end(zone);
     @log_event("macro output: %", expr.log(self)) self;
     // :InlineFoldHack
     // TODO: garbage garbage garbage HACK. 

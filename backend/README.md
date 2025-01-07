@@ -38,7 +38,7 @@ You can still print out the ir as human readable text between passes and modify 
 - added a block terminator for using a jump table. definitly not worth it and should probably be removed again.
 - added a non-portable syscall instruction.
   it handles calling convention differences but you must use the correct magic numbers for the target os/architecture/version.
-  - WIP: only implemented for amd64 so far
+  - WIP: you can't access carry flag (for error on macos)
 - Removed support for thread locals. Franca achieves an equivilent by passing around an implicit env parameter.
 - Removed support for custom section names.
 

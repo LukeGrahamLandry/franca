@@ -7,6 +7,7 @@
 
 ##
 
+- 🤡 don't fork+exec for touch+chmod 🤡 (+ fix my write_entire_file to create it if needed)
 - figure out what `-Wl,-z,common-page-size=65536,-z,max-page-size=65536` does so blink can run my elf faster
 - wasm stackifier
 - cross arch repro is broken again

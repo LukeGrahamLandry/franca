@@ -689,7 +689,9 @@ fn arm64_abi(f: *Qbe.Fn) void = {
                 fn arg()  => panic("unreachable");
                 fn argc() => panic("unreachable");
                 fn syscall() => {
-                    panic("TODO: implement syscall convention on arm64");
+                    i0 := b.find_first_arg(i[]);
+                    sel_syscall_arm64(f, i0, i[]);
+                    i[] = i0;
                 }
                 @default => {
                     f.emit(i[][]);
@@ -722,3 +724,28 @@ fn with(a: *ArgClass, b: ArgClass) void #inline = {
 }
 
 fn TMP(r: Arm64Reg) Qbe.Ref #redirect(i64, Qbe.Ref);
+/*
+*         13
+*  29   14 |    9    5   2  0
+*  |0.00|x|x|xxxx|xxxx|xxx|xx|                  range
+*        | |    |    |   |  ` gp regs returned (0..2)
+*        | |    |    |   ` fp regs returned    (0..4)
+*        | |    |    ` gp regs passed          (0..8)
+*        | |     ` fp regs passed              (0..8)
+*        | ` indirect result register x8 used  (0..1)
+*        ` env pointer passed in x9            (0..1)
+*/
+fn sel_syscall_arm64(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins) void = {
+    count := ptr_diff(i0, i1);
+    ca := 1.shift_left(13).bit_or(count.shift_left(5)).bit_or(1);
+    
+    f.emit(.copy, i1.cls(), i1.to, TMP(Arm64Reg.R0), QbeNull);  // result returned in R0 as normal. 
+    f.emit(.syscall, i1.cls(), QbeNull, QbeNull, CALL(ca)); 
+    f.emit(.copy, .Kl, TMP(Arm64Reg.R8), i1.arg&[0], QbeNull);  // syscall number 
+    
+    ni := 0;
+    for(i0, i1) { i |
+        f.emit(.copy, i.cls(), TMP(gpreg[ni]), i.arg&[0], QbeNull);
+        ni += 1;
+    };
+}

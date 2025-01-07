@@ -1,5 +1,10 @@
 - TODO: deal with `CodegenEntry:Bounce` on wasm
 
+## (Jan 6)
+
+- #where
+- added a coercer_const_expr at the very end of immediate_eval_expr. that happened 39945 times.
+
 ## (Jan 5)
 
 - started transcribing linux syscall numbers. eventually i want to not use someone else's libc.

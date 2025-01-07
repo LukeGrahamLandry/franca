@@ -1,3 +1,4 @@
+#include_std("compiler/profile.fr");
 
 fn main_thread_pump(comp: CompCtx, shared: *CodegenShared, fns: []FuncId) void = {
     a      := comp.get_alloc();
@@ -32,7 +33,7 @@ fn main_thread_pump(comp: CompCtx, shared: *CodegenShared, fns: []FuncId) void =
             continue();
         }; // might have been added multiple times
         
-        {comp.vtable.report_aot_progress}(comp.data, fid, true);
+        {comp.vtable.report_aot_progress}(comp.data, fid, true, 1);
         func := comp.get_function(fid);
         // Note: compile before checking callees! // TODO: return error instead
         xx := {comp.vtable.compile_func}(comp.data, fid, .Aot);  // TODO: fix parsing to allow this as a quick expr
@@ -60,7 +61,7 @@ fn main_thread_pump(comp: CompCtx, shared: *CodegenShared, fns: []FuncId) void =
             panic("emir_ir failed!");
         };
         
-        {comp.vtable.report_aot_progress}(comp.data, fid, false);
+        {comp.vtable.report_aot_progress}(comp.data, fid, false, 1);
         current := work_stack&.pop().unwrap();
         @assert_eq(current, fid, "order messed up");
         for pending { c |  // HACK
@@ -173,9 +174,9 @@ fn wait(shared: *CodegenShared, $i_am_bouba: bool) void = {
         clock_gettime(CLOCK_REALTIME, t&);
         add_ns(t&, 20 * NS_PER_MS);
         e := pthread_cond_timedwait(c, m, t&);
-        //if !e.is_ok() {
-        //    eprintln("that seemed slow");
-        //};
+        if !e.is_ok() {
+            eprintln("that seemed slow");
+        };
     }, {
         pthread_cond_wait(c, m).unwrap();
     });
@@ -218,12 +219,15 @@ fn enqueue_task(shared: *CodegenShared, old_entry: *CodegenEntry) void = {
 }
 
 fn do_codegen(m: *QbeModule, entry: *CodegenEntry) void = {
+    zone := zone_begin(.EmitAot);
     logging := entry.logging;
     entry.logging = "";
     context(DefaultContext)[].temporary_allocator = entry.arena&;
     @match(entry.task) {
         fn Dead() => @panic("dead codegen task %", m.initialized);
         fn Func(f) => {
+            @if(ENABLE_TRACY)
+            ___tracy_emit_zone_name(zone, f.globals.str(f.lnk.id));
             //@if(TRACE_SHIMS)
             //use_symbol(f.globals, f.lnk.id) { s | 
             //    @println("codegen %", s.name);
@@ -314,6 +318,7 @@ fn do_codegen(m: *QbeModule, entry: *CodegenEntry) void = {
     };
     entry.task = .Dead; 
     entry.release(false);
+    zone_end(zone);
 }
 
 CodegenShared :: @struct(

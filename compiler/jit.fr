@@ -15,21 +15,26 @@ fn call_dynamic_values(self: *SelfHosted, f_ptr: i64, f_ty: FnType, args_value: 
     
     // :SLOW
     @if(GENERATION) {
+        zone := zone_begin(.Wait);
         generation  := self.comptime_codegen.generation_pending;
         while => self.comptime_codegen.generation < generation {
             pthread_cond_signal(self.comptime_codegen.bouba_progress_c&);
             wait(self.comptime_codegen, true);
         };
+        zone_end(zone);
     };
     
     callee := @match(callee) {
         fn Ready(it)   => it[];
         fn Pending(it) => {
             m := self.comptime_codegen.m;
-            @if(use_threads)
-            while => !symbol_is_ready(m, it[]) {
-                pthread_cond_signal(self.comptime_codegen.bouba_progress_c&);
-                wait(self.comptime_codegen, true);
+            @if(use_threads) {
+                zone := zone_begin(.Wait);
+                while => !symbol_is_ready(m, it[]) {
+                    pthread_cond_signal(self.comptime_codegen.bouba_progress_c&);
+                    wait(self.comptime_codegen, true);
+                };
+                zone_end(zone);
             };
             c, size := get_addr(m, it[]).unwrap();
             self.bump_dirty_new();
@@ -56,7 +61,9 @@ fn call_dynamic_values(self: *SelfHosted, f_ptr: i64, f_ty: FnType, args_value: 
         input := self.from_bytes(args_value);
         println(log(input&, self, f_ty.arg));
     };
+    zone := zone_begin(.CallDynamic);
     callee(args_value.ptr, ret_buf.ptr, f_ptr);
+    zone_end(zone);
     result := self.from_bytes(ret_buf);
     @if(TRACE_CALLS) {
         @print("(%) result: ", self.call_depth);
@@ -452,10 +459,13 @@ fn get_fn_callable(self: *SelfHosted, fid: FuncId) ?rawptr = {
             @println("waiting for %", self.log_name(fid));
         };
         cond :: => @if(GENERATION, func.generation > self.comptime_codegen.generation, !symbol_is_ready(m, id));
+        
+        zone := zone_begin(.Wait);
         while cond { 
             pthread_cond_signal(self.comptime_codegen.bouba_progress_c&);
             wait(self.comptime_codegen, true);
         }; 
+        zone_end(zone);
     };
     @if(use_threads) pthread_mutex_lock(m.icache_mutex&).unwrap();
     use_symbol(m, id) { s | 

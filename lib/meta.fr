@@ -124,24 +124,30 @@ fn get_enum_names_symbols(E: Type) Slice(Symbol) = {
     names.items()
 }
 
+fn create_enum_name_table_outlined(E: Type) HashMap(Str, *u8).Raw = {
+    t: HashMap(Str, *u8) = init(ast_alloc());
+    info := get_type_info_ref(E); 
+    assert(info.is(.Enum), "Expected @enum type for from_name");
+    for info.Enum.fields.items() { f |
+        ptr := f._1&.rawptr_from_value();
+        // TODO: reboxing the copy is a dumb hack :SLOW -- Nov 14
+        bytes2 := ast_alloc().alloc(u8, size_of(E)); // TODO: is alignment real
+        bytes1: []u8 = (ptr = u8.ptr_from_raw(ptr), len = size_of(E));
+        bytes2.copy_from(bytes1);
+        t&.insert(f._0.str(), bytes2.ptr);
+    };
+    t.raw&.zero_unused_slots();
+    t.raw
+}
+
 // TODO: could do some fancy perfect hashing thing since we know the keys at comptime. 
 fn from_name($E: Type, name: Str) ?E #generic = {
     // TODO: we can't always store a hash table with E by value in a constant because we don't support field sizes that are not a multiple of 8 bytes -- Nov 14
     M :: HashMap(Str, *E);
     table :: @static(M.Raw) {
-        t: M = init(ast_alloc());
-        info := get_type_info_ref(E); 
-        assert(info.is(.Enum), "Expected @enum type for from_name");
-        for info.Enum.fields.items() { f |
-            ptr := f._1&.rawptr_from_value();
-            ptr := E.ptr_from_raw(ptr);
-            // TODO: reboxing the copy is a dumb hack :SLOW -- Nov 14
-            ptr2 := ast_alloc().box(E);
-            ptr2[] = ptr[];
-            t&.insert(f._0.str(), ptr2);
-        };
-        t.raw&.zero_unused_slots();
-        t.raw
+        t := create_enum_name_table_outlined(E);
+        t2 := ptr_cast_unchecked(@type t, M.Raw, t&)[];  // IMPORTANT TO CAST BACK so the compiler knows to include the constants as the right type
+        t2
     };
     
     table; // TODO: shouldn't have to hackily pre-force the constant eval. 
