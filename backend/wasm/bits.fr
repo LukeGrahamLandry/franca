@@ -17,96 +17,94 @@ LocalIdx :: @struct(id: u32);
 GlobalIdx :: @struct(id: u32);
 MemIdx :: @struct(id: u32);
 
-wasm_page_size :: 65536;
 MemArg         :: @struct(offset: u32, align: u32);
 
-fn raw(s: Wasm.Inst) u8 #unsafe_noop_cast;
+fn raw(s: Inst) u8 #unsafe_noop_cast;
 
 // TODO: have a version of @struct that takes a block and lets you have semicolons at the end of things, 
 //       so its less of a waste of time when you decide to stop being lazy and manually namespace everything. 
 
 // TODO: confusing FuncIdx=0 is the first local function but when you refer to a function you add the number of imports. 
-Wasm :: @rec @struct(
-    //version_magic :: @const_slice(0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00),
-    // "Value types can occur in contexts where type indices are also allowed, such as in the case of block types. Thus, the binary format for types corresponds to the signed LEB128 encoding of small negative 
-    // values, so that they can coexist with (positive) type indices in the future."
-    ValType :: @enum(u8) (
-        F64 = 0x7C,
-        F32 = 0x7D,
-        I64 = 0x7E,
-        I32 = 0x7F,
-        Vec128 = 0x7B,
-        FuncRef = 0x70,
-        ExternRef = 0x6F,
-        ResultStart = 0x60,
-        EmptyBlock = 0x40,
-    ),
-    FuncType :: @rec @struct(arg: RsVec(Wasm.ValType), ret: RsVec(Wasm.ValType)),
-    Func :: @rec @struct(locals: RsVec(Wasm.Local), insts: RsVec(u8), total_local_count := -1),
-    Local :: @rec @struct(type: Wasm.ValType, count: i64),
-    // It's tempting to store 4 seperate arrays so you don't need the tag except that you have to refer to them by index. 
-    Export :: @rec @struct(name: RsVec(u8), type: Wasm.ImportType, id: u32),
-    Import :: @rec @struct(module: RsVec(u8), name: RsVec(u8), desc: Wasm.ImportDesc),
-    ImportType :: @rec @enum(u8) (Func, Table, Memory, Global),
-    ImportDesc :: @rec @tagged(
-        Function: TypeIdx, 
-        Table: @struct(ref_type: Wasm.ValType, lim: Wasm.Limits), 
-        Memory: Wasm.Limits, 
-        Global: @struct(ref_type: Wasm.ValType, mutable: bool),
-    ),
-    Limits :: @rec @struct(min: u32, max: u32),
-    Data :: @rec @struct(bytes: RsVec(u8), active_offset_expr: RsVec(u8), active_mem: MemIdx),
-    Table :: @rec @struct(type: Wasm.ValType, limits: Wasm.Limits),
-    Global :: @rec @struct(init_expr: RsVec(u8), type: Wasm.ValType, mutable: bool),
-    Element :: @rec @struct(table: TableIdx, active_offset_expr: RsVec(u8), funcs: RsVec(FuncIdx)),
-    Section :: @rec @enum(u8) (
-        Custom = 0,
-        Type = 1,
-        Import = 2,
-        Function = 3,
-        Table = 4,
-        Memory = 5,
-        Global = 6,
-        Export = 7,
-        Start = 8,
-        Element = 9,
-        Code = 10,
-        Data = 11,
-        DataCount = 12, 
-    ),
-    // wasm_single_byte_table has ones that map to a single Ir op. 
-    Inst :: @enum(u8) (
-        Unreachable = 0x00,
-        Nop = 0x01,
-        Block = 0x02,
-        Loop = 0x03,
-        If = 0x04,
-        Else = 0x05,
-        End = 0x0B,
-        Br = 0x0C,
-        BrIf = 0x0D,
-        BrTable = 0x0E,
-        Return = 0x0F,
-        Call = 0x10,
-        CallIndirect = 0x11,
-        Drop = 0x1A,
-        LocalGet = 0x20,
-        LocalSet = 0x21,
-        LocalTee = 0x22,  // same as local set but returns the value as well
-        GlobalGet = 0x23,
-        GlobalSet = 0x24,
-        I32_Const = 0x41,
-        I64_Const = 0x42,
-        F32_Const = 0x43,
-        F64_Const = 0x44,
-        VectorPrefix = 0xFD,
-    ),
-    EncodingKind :: @rec @enum(i64) (other, unary, binary, load, store),
-    Encoding :: @rec @struct(
-        op: Qbe.O,
-        cls: Qbe.Cls,
-        kind: Wasm.EncodingKind,
-    ),
+
+//version_magic :: @const_slice(0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00),
+// "Value types can occur in contexts where type indices are also allowed, such as in the case of block types. Thus, the binary format for types corresponds to the signed LEB128 encoding of small negative 
+// values, so that they can coexist with (positive) type indices in the future."
+ValType :: @enum(u8) (
+    F64 = 0x7C,
+    F32 = 0x7D,
+    I64 = 0x7E,
+    I32 = 0x7F,
+    Vec128 = 0x7B,
+    FuncRef = 0x70,
+    ExternRef = 0x6F,
+    ResultStart = 0x60,
+    EmptyBlock = 0x40,
+);
+FuncType :: @struct(arg: RsVec(ValType), ret: RsVec(ValType));
+Func :: @struct(locals: RsVec(Local), insts: RsVec(u8), total_local_count := -1);
+Local :: @struct(type: ValType, count: i64);
+// It's tempting to store 4 seperate arrays so you don't need the tag except that you have to refer to them by index. 
+Export :: @struct(name: RsVec(u8), type: ImportType, id: u32);
+Import :: @struct(module: RsVec(u8), name: RsVec(u8), desc: ImportDesc);
+ImportType :: @enum(u8) (Func, Table, Memory, Global);
+ImportDesc :: @tagged(
+    Function: TypeIdx, 
+    Table: @struct(ref_type: ValType, lim: Limits), 
+    Memory: Limits, 
+    Global: @struct(ref_type: ValType, mutable: bool),
+);
+Limits :: @struct(min: u32, max: u32);
+Data :: @struct(bytes: RsVec(u8), active_offset_expr: RsVec(u8), active_mem: MemIdx);
+Table :: @struct(type: ValType, limits: Limits);
+Global :: @struct(init_expr: RsVec(u8), type: ValType, mutable: bool);
+Element :: @struct(table: TableIdx, active_offset_expr: RsVec(u8), funcs: RsVec(FuncIdx));
+Section :: @enum(u8) (
+    Custom = 0,
+    Type = 1,
+    Import = 2,
+    Function = 3,
+    Table = 4,
+    Memory = 5,
+    Global = 6,
+    Export = 7,
+    Start = 8,
+    Element = 9,
+    Code = 10,
+    Data = 11,
+    DataCount = 12, 
+);
+// wasm_single_byte_table has ones that map to a single Ir op. 
+Inst :: @enum(u8) (
+    Unreachable = 0x00,
+    Nop = 0x01,
+    Block = 0x02,
+    Loop = 0x03,
+    If = 0x04,
+    Else = 0x05,
+    End = 0x0B,
+    Br = 0x0C,
+    BrIf = 0x0D,
+    BrTable = 0x0E,
+    Return = 0x0F,
+    Call = 0x10,
+    CallIndirect = 0x11,
+    Drop = 0x1A,
+    LocalGet = 0x20,
+    LocalSet = 0x21,
+    LocalTee = 0x22,  // same as local set but returns the value as well
+    GlobalGet = 0x23,
+    GlobalSet = 0x24,
+    I32_Const = 0x41,
+    I64_Const = 0x42,
+    F32_Const = 0x43,
+    F64_Const = 0x44,
+    VectorPrefix = 0xFD,
+);
+EncodingKind :: @enum(i64) (other, unary, binary, load, store);
+Encoding :: @struct(
+    op: Qbe.O,
+    cls: Qbe.Cls,
+    kind: EncodingKind,
 );
 
 // other:  not a simple Ir op
@@ -114,11 +112,11 @@ Wasm :: @rec @struct(
 // binary: (a, b) -> (c)
 // load:   [imm] (a) -> c
 // store:  [imm] (a, b) -> ()
-fn lookup_wasm_encoding(inst: u8) Wasm.Encoding = {
+fn lookup_wasm_encoding(inst: u8) Encoding = {
     encoding: i64 = wasm_single_byte_table[inst.zext()].zext();
     o := @as(Qbe.O) @as(i32) intcast(encoding.shift_right_logical(8).bit_and(255));
     k := @as(Qbe.Cls) @as(i32) intcast(encoding.shift_right_logical(4).bit_and(0b1111));
-    kind := @as(Wasm.EncodingKind) encoding.bit_and(0b1111);
+    kind := @as(EncodingKind) encoding.bit_and(0b1111);
     (op = o, cls = k, kind = kind)
 }
 
@@ -129,7 +127,7 @@ fn lookup_wasm_encoding(op: Qbe.O, k: Qbe.Cls) ?u8 #inline = {
         table := ast_alloc().alloc_zeroed(u8, Qbe.O.enum_count() * 4);
         range(0, 255) { inst |
             enc := lookup_wasm_encoding(inst.trunc());
-            ::enum(Wasm.EncodingKind);
+            ::enum(EncodingKind);
             if enc.kind != .other {
                 dest := table.index(idx(enc.op, enc.cls));
                 // TODO: this doesn't work because they want typed truncating stores
@@ -271,17 +269,17 @@ wasm_single_byte_table :: @wasm_single_byte_data(
 );
 
 // (op:8, k:4, kind:4)
-fn wasm_single_byte_data(e: FatExpr) FatExpr #macro = {
+wasm_single_byte_data :: fn(e: FatExpr) FatExpr #macro = {
     table := ast_alloc().alloc_zeroed(u16, 256);
-    @assert_lt(Wasm.EncodingKind.enum_count(), 16, "need to change packing of Wasm.EncodingKind");
-    ::enum(Wasm.EncodingKind);
+    @assert_lt(EncodingKind.enum_count(), 16, "need to change packing of EncodingKind");
+    ::enum(EncodingKind);
     each e&.items() { e |
         e := e.items();
-        b, k, o, kind := (const_eval(u8)(e[0]), const_eval(Qbe.Cls)(e[1]), const_eval(Qbe.O)(e[2]), const_eval(Wasm.EncodingKind)(e[3]));
+        b, k, o, kind := (const_eval(u8)(e[0]), const_eval(Qbe.Cls)(e[1]), const_eval(Qbe.O)(e[2]), const_eval(EncodingKind)(e[3]));
         @debug_assert(o.raw() < 255, "overflow #Qbe.O");
         @debug_assert(kind.raw() <= 0b1111, "overflow wasm encoding kind");
         @debug_assert(table[b.zext()] == 0, "opcode % listed twice", b);
         table[b.zext()] = (@as(u32) kind.raw().trunc().bit_or(o.raw().bitcast().shift_left(8)).bit_or((@as(i64) k.raw().zext()).trunc().shift_left(4))).trunc();
     };
     @literal table
-}
+};

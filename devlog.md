@@ -1,5 +1,8 @@
 - TODO: deal with `CodegenEntry:Bounce` on wasm
 
+- i really need to have a version of `@struct` that lets you use the normal top level declaration syntax
+  so you don't have to go around switching semicolons to commas. this is super dumb.
+
 ## (Jan 7)
 
 - #use for grabbing stuff out of another namespace. again same as rust's `use` keyword but with an arbitrary constant expression.

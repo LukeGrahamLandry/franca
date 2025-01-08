@@ -743,6 +743,7 @@ fn report_error2(self: *SelfHosted, err: CompileError) Never = self.report_error
 
 fn report_error(self: *SelfHosted, err: *CompileError) Never = {
     @if(BOOTSTRAP_ONLY_MODE) panic("error");
+    maybe_log_scopes(self);
     out: List(u8) = list(temp());
     self.fmt_error(err, out&);
     panic(out.items())
@@ -768,3 +769,36 @@ fn fmt_error_line(self: *CodeMap, span: Span, out: *List(u8)) void = {
     out.push_all(self.source_slice(line.line_text));
     out.push_all("\n");
 }
+
+fn maybe_log_scopes(self: *SelfHosted) void = {
+    n := "FRANCA_COMPILER_DEBUG_LOG_SCOPES";
+    n := n.maybe_borrow_cstr(temp());
+    path := getenv(n);
+    if !path.ptr.is_null() {
+        out := u8.list(temp());
+        out&.push_all("SCOPES:\n\n");
+        each self.scopes.scopes& { scope | 
+            scope.visit = 0;
+        };
+        enumerate self.scopes.scopes& { i, scope | 
+            scope.visit = self.scopes[scope.parent].visit + 1;
+            line := self.codemap.get_whole_line(scope.loc);
+            @fmt(out&, "%- [S%] %:%:% ", f_rep("  ", scope.visit), i, line.filename, line.line, line.col);
+            @fmt(out&, " parent = (S%) ", scope.parent.id());
+            use := get_use(self, scope_from_index(i.trunc()));
+            if use.parents.len > 0 {
+                @fmt(out&, ", #use[");
+                each use.parents { use |
+                    @match(use) {
+                        fn Scope(it) => @fmt(out&, "(S%), ", it[].id());
+                        fn PendingEval(it) => @fmt(out&, "%%%, ", self.pool.get(it.name), "%", it.id);
+                    };
+                };
+                @fmt(out&, "]",);
+            };
+            @fmt(out&, "\n%  %\n", f_rep("  ", scope.visit), self.codemap.source_slice(line.line_text));
+        };
+        
+        write_entire_file(path.str(), out.items());
+    };
+};
