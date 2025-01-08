@@ -607,9 +607,6 @@ fn compile_stmt(self: *EmitBc, stmt: *FatStmt) CRes(void) = {
             @assert_eq(fields.len(), f.binding.bindings.len(), "destructure size mismatch");
             enumerate f.binding.bindings.items() { i, b |
                 f := fields[i]&; // TODO: zip
-                continue :: local_return;
-                @err_assert(f.kind != .Const, "TODO: destructuring skip const fields") return;
-                
                 name := b.var().unwrap();
                 self.addr_var(full_id);
                 self.inc_ptr_bytes(f.byte_offset.trunc());
@@ -1380,7 +1377,7 @@ fn construct_struct(self: *EmitBc, pattern: *Pattern, requested: Type, result_lo
     
     @match(self.program.get_type(raw_container_ty)) {
         fn Struct(f) => {
-            expected := f.fields.len - f.const_field_count.zext();
+            expected := f.fields.len;
             if !f.is_union {
                 @assert_eq(expected, pattern.bindings.len, "Cannot assign to type % with wrong field count", self.program.log(requested));
             };
@@ -1388,7 +1385,6 @@ fn construct_struct(self: *EmitBc, pattern: *Pattern, requested: Type, result_lo
             each f.fields { field | 
                 continue :: local_return;
                 i += 1;
-                if(field.kind == .Const, => continue());
                 value := pattern.bindings[i - 1]&;
                 
                 name := @unwrap(value.ident(), "map literal entry needs name (while initilizing %)", self.program.log(requested)) return;
@@ -1806,10 +1802,6 @@ fn deconstruct_values(program: CompCtx, ty: Type, bytes: *ReadBytes, out: *List(
             size: i64 = program.get_info(ty)[].stride_bytes.zext();
             start := bytes.i;
             for f.fields { t |
-                continue :: local_return;
-                if t.kind == .Const {
-                    continue();
-                };
                 assert(prev <= t.byte_offset, "ICE: backwards field offset");
                 bytes.i = t.byte_offset;
                 @try(deconstruct_values(program, t.ty, bytes, out, offsets)) return;

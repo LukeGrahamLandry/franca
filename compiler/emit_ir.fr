@@ -592,7 +592,6 @@ fn compile_stmt(self: *EmitIr, stmt: *FatStmt) CRes(void) = {
                 @debug_assert_eq(fields.len, f.binding.bindings.len, "destructure size mismatch");
                 enumerate f.binding.bindings.items() { i, b |
                     f       := fields[i]&;
-                    @err_assert(f.kind != .Const, "TODO: destructuring skip const fields") return;
                     name    := @unwrap(b.var(), "tuple binding requires name") return;
                     element := self.offset(base, f.byte_offset);
                     @debug_assert(b.ty&.is(.Finished), "variable not typechecked");
@@ -1311,7 +1310,7 @@ fn construct_aggregate(self: *EmitIr, pattern: *Pattern, requested: Type, p: Pla
     raw_container_ty := self.program.raw_type(requested);
     (Ok = @match(self.program.get_type(raw_container_ty)) {
         fn Struct(f) => {
-            expected := f.fields.len - f.const_field_count.zext();
+            expected := f.fields.len;
             if f.is_union {
                 @debug_assert_eq(pattern.bindings.len, 1, "union must have exactly one active field");
                 expected = 1;
@@ -1331,7 +1330,6 @@ fn construct_aggregate(self: *EmitIr, pattern: *Pattern, requested: Type, p: Pla
                 field := or find_struct_field(f, name, i - 1) {
                     return(@err("field name mismatch (ICE: should be checked by sema)"))
                 };
-                @debug_assert(field.kind != .Const, "cannot assign to const field");
                 expr := b.get_default().unwrap();
                 dest := self.offset(base, field.byte_offset);
                 _ := @try(self.compile_expr(expr, (Blit = dest))) return;
@@ -1549,34 +1547,30 @@ fn get_aggregate(self: CompCtx, m: *CodegenShared, ty: Type) Qbe.Ref = {
                     yield(self.get_aggregate(m, repr).val());
                 };
                 n := 0;
-                rt_count: i64 = it.fields.len - it.const_field_count.zext();
+                rt_count: i64 = it.fields.len;
                 result.fields = m.m.new_long_life(rt_count * 2 + 1);
                 result.nunion = @if(it.is_union, rt_count.trunc(), 1);
                 result.is_union = it.is_union;
                 @assert(it.layout_done, "tried to get_aggregate before layout %", self.log(ty));
                 if it.is_union {
                     each it.fields { f | 
-                        if f.kind != .Const {
-                            field_size := self.get_info(f.ty)[].stride_bytes;
-                            @debug_assert(field_size != 0, "TODO: allow void union?");
-                            @debug_assert(f.byte_offset == 0, "union field must have offset 0");
-                            result.fields[n] = self.as_field(m, f.ty);      n += 1;
-                            result.fields[n] = (type = .FEnd, len = 0);  n += 1;
-                        };
+                        field_size := self.get_info(f.ty)[].stride_bytes;
+                        @debug_assert(field_size != 0, "TODO: allow void union?");
+                        @debug_assert(f.byte_offset == 0, "union field must have offset 0");
+                        result.fields[n] = self.as_field(m, f.ty);      n += 1;
+                        result.fields[n] = (type = .FEnd, len = 0);  n += 1;
                     };
                 } else {
                     off := 0;
                     each it.fields { f | 
-                        if f.kind != .Const {
-                            field_size := self.get_info(f.ty)[].stride_bytes;
-                            if field_size != 0 {
-                                add_padding(result.fields&, n&, off&, f.byte_offset);
-                                result.fields&.grow(n);
-                                result.fields[n] = self.as_field(m, f.ty);
-                                n += 1;
-                                off += field_size.zext();
-                            }; // else :NoRuntimeRepr
-                        };
+                        field_size := self.get_info(f.ty)[].stride_bytes;
+                        if field_size != 0 {
+                            add_padding(result.fields&, n&, off&, f.byte_offset);
+                            result.fields&.grow(n);
+                            result.fields[n] = self.as_field(m, f.ty);
+                            n += 1;
+                            off += field_size.zext();
+                        }; // else :NoRuntimeRepr
                     };
                     add_padding(result.fields&, n&, off&, info.stride_bytes.zext());
                     result.fields&.grow(n);
@@ -1705,16 +1699,9 @@ fn is_tag_only(self: CompCtx, t: *TypeInfo.get_variant_type(.Tagged)) bool = {
 }
 
 fn repr_transparent(it: *TypeInfo.get_variant_type(.Struct)) ?Type = {
-    @switch(it.fields.len - it.const_field_count.zext()) {
+    @switch(it.fields.len) {
         @case(0) => (Some = void); // :get_or_create_type
-        @case(1) => {
-            each it.fields { f |
-                if f.kind != .Const {
-                    return(Some = f.ty);
-                };
-            };
-            unreachable()
-        };
+        @case(1) => return(Some = it.fields[0].ty);
         @default => .None;
     }
 }

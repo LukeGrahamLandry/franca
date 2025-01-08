@@ -199,12 +199,10 @@ fn emit_relocatable_constant_body(
             @err_assert(!f.is_union, "TODO: union in a constant. but its hard cause what if theres pointers in there but we don't know which is active") return;
             // Just do all the fields.
             each f.fields { f |
-                if f.kind != .Const {
-                    info := c.get_info(f.ty);
-                    @assert_eq(@as(i64) info.stride_bytes.zext().mod(8), 0, "TODO: non-8-aligned field '%' in type '%'", c.pool.get(f.name), c.log_type(ty));
-                    v := value.slice(f.byte_offset, f.byte_offset + info.stride_bytes.zext());
-                    @try(c.emit_relocatable_constant_body(f.ty, v, out, false)) return;
-                };
+                info := c.get_info(f.ty);
+                @assert_eq(@as(i64) info.stride_bytes.zext().mod(8), 0, "TODO: non-8-aligned field '%' in type '%'", c.pool.get(f.name), c.log_type(ty));
+                v := value.slice(f.byte_offset, f.byte_offset + info.stride_bytes.zext());
+                @try(c.emit_relocatable_constant_body(f.ty, v, out, false)) return;
             };
         });
         (fn Tagged(f) => {
@@ -455,10 +453,6 @@ fn zero_padding(program: CompCtx, ty: Type, bytes: *ReadBytes) PRes = {
             size: i64 = program.get_info(ty)[].stride_bytes.zext();
             start := bytes.i;
             for f.fields { t |
-                continue :: local_return;
-                if t.kind == .Const {
-                    continue();
-                };
                 diff := t.byte_offset - prev;
                 assert(diff >= 0, "ICE: backwards field offset");
                 set_zeros(diff);
@@ -637,8 +631,6 @@ fn get_info(self: *SelfHosted, ty: Type) *TypeMeta = {
 
             first := true;
             each f.fields { arg |
-                continue :: local_return;
-                if(arg.kind == .Const, => continue());
                 @debug_assert(!first || arg.byte_offset == 0, "ICE: first field should have offset 0");
                 first = false;
                 
@@ -777,9 +769,7 @@ fn finish_layout_deep(self: *SelfHosted, ty: Type) void = {
         fn Array(f) => self.finish_layout_deep(f.inner);
         fn Struct(f) => {
             each f.fields { f |
-                if f.kind != .Const {
-                    self.finish_layout_deep(f.ty);
-                };
+                self.finish_layout_deep(f.ty);
             };
         }
         fn Tagged(f) => {
@@ -803,19 +793,11 @@ fn finish_layout(self: *SelfHosted, ty: Type) void = {
         }
         fn Struct(f) => {
             if(f.layout_done, => return());
-            // TODO: why are we recounting const_field_count? -- Nov 18
-            f.const_field_count = 0;
             // :struct_layout_in_type_info
-            // Here we mutate const_field_count, layout_done, and the byte_offset of the fields, which we know the hash function ignores
+            // Here we mutate layout_done and the byte_offset of the fields, which we know the hash function ignores
             
             bytes := 0;
             each f.fields& { p |
-                continue :: local_return;
-                if p.kind == .Const {
-                    f.const_field_count += 1;
-                    continue();
-                };
-                
                 self.finish_layout(p.ty);
                 if f.is_union {
                     p.byte_offset = 0;
@@ -842,7 +824,7 @@ fn finish_layout(self: *SelfHosted, ty: Type) void = {
 // TODO: can't have these added to the eq overload set to early or it gets stuck
 :: {
     fn eq(a: *Field, b: *Field) bool = {
-        (a.name& == b.name&) && (a.ty& == b.ty&) && (a.default& == b.default&) && (a.kind& == b.kind&)
+        (a.name& == b.name&) && (a.ty& == b.ty&) && (a.default& == b.default&)
     }
     TypeInfoStruct :: get_variant_type(TypeInfo, TypeInfo.Tag().Struct);
     fn eq(a: *TypeInfoStruct, b: *TypeInfoStruct) bool = {

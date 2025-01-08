@@ -272,7 +272,6 @@ fn field_access_expr(self: *SelfHosted, container_ptr: *FatExpr, name: Symbol) M
             @debug_assert(f.layout_done);
             each f.fields { f | 
                 if f.name == name {
-                    @err_assert(f.kind != .Const, "Tried to access a const field (%) on an instance of a type instead of the type value itself.", self.pool.get(name)) return;
                     return(Ok = (f.byte_offset, f.ty));
                 };
             };
@@ -1407,19 +1406,16 @@ fn construct_struct_literal(self: *SelfHosted, expr: *FatExpr, requested: Result
                 value := or b.get_default() {
                     return(@err("struct literal requires field value (use '=' not ':')"))
                 };
-                @err_assert(field.kind != .Const, "do not provide a value for a constant field") return;
                 @check(self.compile_expr(value, (Specific = field.ty))) return;
                 done = done && value.done;
                 self.last_loc = pattern.loc;
                 @check(self.can_assign(field.ty, value.ty)) return;
             };
             
-            // TODO: If they're missing some, check for default values.
-            runtime_fields := f.fields.len - f.const_field_count.zext();
-            if !f.is_union && runtime_fields != bindings.len {
+            // If they're missing some, check for default values.
+            if !f.is_union && f.fields.len != bindings.len {
                 enumerate f.fields { i, field | 
                     continue :: local_return;
-                    if(field.kind == .Const, => continue());
                     each bindings { b |   // :SLOW
                         if b.ident() { n | 
                             if(n == field.name, => continue());
@@ -1445,7 +1441,7 @@ fn construct_struct_literal(self: *SelfHosted, expr: *FatExpr, requested: Result
                         self.get_alloc()
                     );
                 };
-                @err_assert(runtime_fields == bindings.len, "ICE: struct field count mismatch but we don't know which is missing") return;
+                @err_assert(f.fields.len == bindings.len, "ICE: struct field count mismatch but we don't know which is missing") return;
             };
 
             @try(self.require_unique_fields(pattern)) return;  // doing this at the end, after all suspends
@@ -1489,14 +1485,10 @@ fn contextual_field(self: *SelfHosted, name: Symbol, expr_out: *FatExpr, type: T
             @err("contextual field % not found for %", self.pool.get(name), self.log_type(type))
         }
         fn Struct(f) => {
-            enumerate f.fields { i, f | 
-                if f.name == name {
-                    @err_assert(f.kind == .Const, "struct contextual field must be constant. %", self.pool.get(f.name)) return;
-                    default := @unwrap(f.get_default(), "ICE: const field must have value") return;
-                    value, ty := @check(self.find_const(default, f.ty.want())) return;
-                    if f.ty == UnknownType {
-                        f.ty = ty;
-                    };
+            if !(f.scope == NOSCOPE) {
+                self.scopes_generation += 1;
+                if find_var_in_scope(self, name, f.scope) { var |
+                    value, ty := @check(self.find_const(var, .None)) return;
                     expr_out.set(value, ty);
                     return(.Ok);
                 };
@@ -4452,46 +4444,50 @@ fn builtin_macro(self: *SelfHosted, builtin_name: Symbol) Result(Ty(Values, Type
 
 fn struct_type(self: *SelfHosted, pattern: *Pattern, is_union: bool) Maybe(Type) #once = {
     fields: List(Field) = list(pattern.bindings.len, self.get_alloc());
-    const_field_count := 0;
+    scope := NOSCOPE;
     each pattern.bindings { b | 
-        name := b.ident().expect("field name");
         if b.kind == .Const {
-            const_field_count += 1;
-            if(b.get_default().is_none(), => return(@err("constant field % must have a value.", self.pool.get(name))));
+            if scope == NOSCOPE {
+                scope = self.scopes.new_scope(scope_from_index(0), self.get_alloc(), pattern.loc);
+            };
+            name := b.ident().expect("field name");
+            expr := @unwrap(b.get_default(), "constant field % must have a value.", self.pool.get(name)) return;
+            v := self.unique_const(name);
+            self.scopes[scope].const_lookup&.insert(name, v);
+            self.scopes.put_constant(v, expr[], b.ty);
+            expr.expr = (GetVar = v);  // Save our work because we might yield on a later field. 
         };
-        
-        ty := or @check(self.infer_type(b.ty&)) return {
-            if b.kind == .Const {
-                // When you have a field like `name :: some_complex_expression`, we don't want to force evaluate it now
-                // just to infer its type even if you don't reference it. the type doesn't matter because it has no runtime storage. 
-                UnknownType
-            } else {
+    };
+    
+    each pattern.bindings { b | 
+        if b.kind != .Const {
+            name := b.ident().expect("field name");
+            ty := or @check(self.infer_type(b.ty&)) return {
                 // We need to know the type before we can size the struct. 
                 default := @unwrap(b.get_default(), "@struct field without type requires default value.") return;
                 @err_assert(!is_rec_hack(default), "cannot use @rec on a non-constant value.") return;
                 @check(self.compile_expr(default, .None)) return;
                 b.ty = (Finished = default.ty);
                 default.ty
-            }
+            };
+            
+            ::if_opt(*FatExpr, Var);
+            default := if b.get_default() { (expr: *FatExpr) |
+                v := self.unique_const(name);
+                self.scopes.put_constant(v, expr[], b.ty);
+                expr.expr = (GetVar = v);  // Save our work because we might yield on a later field. 
+                v
+            } else {
+                zeroed(Var)
+            };
+            fields&.push(
+                name = name,
+                ty = ty,
+                nullable_tag = b.nullable_tag,
+                default = default,
+                byte_offset = 99999999999,
+            );
         };
-        
-        ::if_opt(*FatExpr, Var);
-        default := if b.get_default() { (expr: *FatExpr) |
-            v := self.unique_const(name);
-            self.scopes.put_constant(v, expr[], b.ty);
-            expr.expr = (GetVar = v);  // Save our work because we might yield on a later field. 
-            v
-        } else {
-            zeroed(Var)
-        };
-        fields&.push(
-            name = name,
-            ty = ty,
-            nullable_tag = b.nullable_tag,
-            default = default,
-            byte_offset = 99999999999,
-            kind = b.kind,
-        );
     };
     @try(self.require_unique_fields(pattern)) return;  // doing this at the end, after all suspends
     (Ok = self.intern_type(Struct = (
@@ -4499,7 +4495,7 @@ fn struct_type(self: *SelfHosted, pattern: *Pattern, is_union: bool) Maybe(Type)
         layout_done = false,
         is_tuple = false,
         is_union = is_union,
-        const_field_count = const_field_count.trunc(),
+        scope = scope,
     )))
 }
 
@@ -4523,7 +4519,7 @@ fn struct_macro(self: *SelfHosted, fields: *FatExpr) Maybe(FatExpr) = {
                     layout_done = false,
                     is_tuple = false,
                     is_union = false,
-                    const_field_count = 0,
+                    scope = NOSCOPE, // TODO
                 ))
             } else {
                 return(@err(msg))
