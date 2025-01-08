@@ -43,10 +43,9 @@ fn resolve_root(compiler: *SelfHosted, func: *Func, scope: ScopeId) PRes #once =
     res
 }
 
-fn resolve_sign(compiler: *SelfHosted, func: *Func) PRes #once = {
-    s := @unwrap(func.scope, "function to have scope! %", compiler.comp().log(func)) return;
-    r: ResolveScope = new(compiler, s, func.loc);
-    
+fn resolve_sign(self: *SelfHosted, func: *Func) PRes #once = {
+    s := @unwrap(func.scope, "function to have scope! %", self.comp().log(func)) return;
+    r: ResolveScope = new(self, s, func.loc);
     zone := zone_begin(.Scope); // TODO: defer
     res := r&.resolve_func_args(func);
     zone_end(zone);
@@ -108,14 +107,18 @@ VarInfo :: @struct(
 // TODO: use unmanaged List/HashMap so not storing the allocator a billon times. 
 Scope :: @struct(
     parent: ScopeId,
-    vars: List(BlockScope),
-    block_in_parent: i64,
+    vars: RsVec(Var),
+    const_lookup: HashMap(Symbol, Var),
+    nullable_use: *UseScopes,
+    visit := 0,
 );
 
-BlockScope :: @struct(
-    vars: List(Var),
-    const_lookup: HashMap(Symbol, Var),
-    parent: i64,
+UseScopes :: @struct(
+    parents: RsVec(UseScopeEntry),
+);
+
+UseScopeEntry :: @struct(
+    s: ScopeId,
 );
 
 fn index(self: *Scopes, i: ScopeId) *Scope = {
@@ -133,11 +136,12 @@ fn as_index(i: ScopeId) i64 = {
     a.zext()
 }
 
-fn new_scope(self: *Scopes, parent: ScopeId, block_in_parent: i64) ScopeId = {
+fn new_scope(self: *Scopes, parent: ScopeId, a: Alloc) ScopeId = {
     s: Scope = (
+        vars = empty(), 
+        const_lookup = init(a),
         parent = parent,
-        vars = list(self.scopes.gpa),
-        block_in_parent = block_in_parent,
+        nullable_use = UseScopes.ptr_from_int(0)
     );
     self.scopes&.push(s);
     scope_from_index(self.scopes.len.sub(1).trunc())
@@ -159,6 +163,7 @@ fn new(compiler: *SelfHosted, scope: ScopeId, last_loc: Span) ResolveScope = (
 
 fn resolve_func(self: *ResolveScope, func: *Func) PRes = {
     if(func.get_flag(.ResolvedBody).and(func.get_flag(.ResolvedSign)), => return(.Ok)); 
+    
     // TODO: need to remember to update from this if we get one from the user (like they added it in a macro)?
     each func.annotations { a |
         @switch(a.name) {
@@ -171,7 +176,7 @@ fn resolve_func(self: *ResolveScope, func: *Func) PRes = {
         };
     };
 
-    self.push_scope((Some = func.name));
+    self.push_scope(false);
     func.scope = (Some = self.scope);
 
     if func.get_flag(.AllowRtCapture) {
@@ -186,9 +191,33 @@ fn resolve_func(self: *ResolveScope, func: *Func) PRes = {
 
 fn resolve_func_args(self: *ResolveScope, func: *Func) PRes = {
     if(func.get_flag(.ResolvedSign), => return(.Ok));
-    
     self.scope = func.scope.expect("function to have scope!!!");
     self.block = 0;
+    
+    has_use := false;
+    each func.annotations { a |
+        @switch(a.name) {
+            @case(Flag.use.ident()) => {
+                scope_with_use := self.scope;
+                arg := @unwrap(a.args&.as_ref(), "#use requires an argument") return;
+                @try(self.walk_expr(arg)) return;
+                @err_assert(arg.expr&.is(.GetVar), "#use is temporarily limited to GetVar expressions") return;
+                self := self.compiler;
+                scope := self.scopes.index(scope_with_use);
+                gpa := self.get_alloc();
+                if scope.nullable_use.is_null() {
+                    scope.nullable_use = gpa.box_zeroed(UseScopes);
+                };
+                use := scope.nullable_use;
+                n := arg.expr.GetVar;
+                
+                value, type := @try(self.poll_in_place(Ty(Values, Type), => self.find_const(n, .None))) return;
+                @try(add_use(self, func.scope.Some, value, type)) return;
+            };
+            @default => ();
+        };
+    };
+    
     generic := func.get_flag(.Generic); // ret is allowed to depend on previous args.
     func.set_flag(.ResolvedSign);
 
@@ -222,12 +251,52 @@ fn resolve_func_args(self: *ResolveScope, func: *Func) PRes = {
     .Ok
 }
 
+fn value_to_scope(self: *SelfHosted, value: Values, type: Type) Res(ScopeId) = {
+    // :get_or_create_type
+    if type == ScopeId {
+        return(Ok = ScopeId.assume_cast(value&)[]);
+    };
+    if type == Type {
+        return(@err("TODO: Type -> Scope"));
+    };
+    if type == FuncId || self.get_type(type).is(.Fn) {
+        fid := FuncId.assume_cast(value&)[];
+        use_func := self.get_function(fid);
+        @try(self.resolve_sign(use_func)) return;
+        @try(self.resolve_body(use_func)) return;
+        @err_assert(use_func.body&.is(.Normal), "#use fn no body") return;
+        e := use_func.body.Normal&;
+        @err_assert(e.expr&.is(.Block), "#use fn non Block body") return;
+        new_scope := e.expr.Block.scope;
+        _ := @try(self.poll_in_place(void, => self.compile_body(fid))) return;
+        return(Ok = new_scope);
+    };
+    @err("invalid type for value_to_scope")
+}
+
+fn add_use(self: *SelfHosted, scope_with_use: ScopeId, value: Values, type: Type) Res(void) = {
+    new_scope := @try(value_to_scope(self, value, type)) return; 
+    add_use(self, scope_with_use, new_scope);
+    .Ok
+}
+
+fn add_use(self: *SelfHosted, scope_with_use: ScopeId, scope_being_used: ScopeId) void = {
+    scope := self.scopes.index(scope_with_use);
+    gpa := self.get_alloc();
+    if scope.nullable_use.is_null() {
+        scope.nullable_use = gpa.box_zeroed(UseScopes);
+    };
+    use := scope.nullable_use;
+    //@println("% #use(%)", scope_with_use.id(), scope_being_used.id());
+    use.parents&.push((s = scope_being_used), gpa);
+}
+
 fn resolve_func_body(self: *ResolveScope, func: *Func) PRes = {
     if(func.get_flag(.ResolvedBody), => return(.Ok));
     self.scope = func.scope.expect("function to have scope!!!!");
     generic := func.get_flag(.Generic); // args and ret are allowed to depend on previous args.
 
-    self.push_scope(.None);
+    self.push_scope(true);
 
     if generic {
     } else {
@@ -235,7 +304,7 @@ fn resolve_func_body(self: *ResolveScope, func: *Func) PRes = {
             @try(self.declare_binding(b, func.loc, true)) return;
         };
     };
-    self.push_scope(.None);
+    self.push_scope(true);
     func.set_flag(.ResolvedBody);
     
     @if_let(func.body&) fn Normal(expr) => {
@@ -270,7 +339,7 @@ fn resolve_func_body(self: *ResolveScope, func: *Func) PRes = {
     .Ok
 }
 
-fn scan_const_decls(self: *ResolveScope, stmt: *FatStmt) PRes = {
+fn scan_const_decls(self: *ResolveScope, stmt: *FatStmt) CRes(bool) = {
     loc := stmt.loc;
     @match(stmt.stmt&) {
         (fn DeclNamed(f) => {
@@ -289,6 +358,7 @@ fn scan_const_decls(self: *ResolveScope, stmt: *FatStmt) PRes = {
                     name = new,
                 ));
                 stmt.stmt = decl;
+                return(Ok = true);
             };
         });
         (fn DeclFunc(func) => {
@@ -299,118 +369,79 @@ fn scan_const_decls(self: *ResolveScope, stmt: *FatStmt) PRes = {
                 @try(self.decl_var(func.name, .Const, func.loc, .OverloadSet)) return
             });
             func.var_name = (Some = v);
+            return(Ok = true);
+        });
+        (fn Annotations(it) => {
+            
         });
         @default => ();
     };
-    .Ok
-}
-
-// most blocks aren't using #include_std.
-// doing it this way means you scan_const_decls twice anything in a block before a #include_std, but that doesn't matter.
-fn slow_body(self: *ResolveScope, body: *List(FatStmt)) PRes #once = {
-    new_body: List(FatStmt) = list(body.len, body.gpa);
-    dirty := true;
-    while (=> dirty) {
-        dirty = false;
-        each body { stmt | 
-            continue :: local_return;
-            @if_let(stmt.stmt&) fn Annotations(annotations) => {
-                if annotations.len == 1 && annotations.items()[0].name == Flag.include_std.ident() {
-                    msg :: "#include_std requires string argument";
-                    arg_expr := annotations.items()[0].args.or() {
-                        return(@err(msg))
-                    };
-                    name := @match(arg_expr.expr) {
-                        fn String(name) => name;
-                        @default => return(@err(msg));
-                    };
-                    
-                    if !self.compiler.scopes.already_loaded&.insert(name) {
-                        name := self.compiler.pool.get(name);
-                        :: ?WaitingParse;
-                        file := self.compiler.get_include_std(name).or() {
-                            return(@err("unknown path for #include_std %", name))
-                        };
-                        dirty = true;
-                        stmts := @try(self.compiler.parser.finish_pending_stmts(file)) return;
-                        new_body&.push_all(stmts.items());
-                    };
-                    continue();
-                };
-            };
-            new_body&.push(stmt[]);
-        };
-        temp := body[];
-        body[] = new_body;
-        new_body = temp;
-        new_body&.clear();
-    };
-    each body { stmt |
-        @try(self.scan_const_decls(stmt)) return;
-    };
-    .Ok
+    (Ok = false)
 }
 
 //! This (find_var/decl_var) is done in a dumb and slow way with a bunch of linear scans through all the variables in a scope,
 //! but its only really a problem at the top level where i import everything in the universe,
 //! and i dont have enough code written in this language to convincingly benchmark it.
 
-fn find_var(self: *ResolveScope, name: Symbol) ?Var = {
-    s := self.scope;
-    block := self.block;
+fn find_var_in_scope(self: *SelfHosted, name: Symbol, s: ScopeId) ?Var = {
     first := true;
-
+    
     loop {
-        scope := self.compiler.scopes[s]&;
-        found := find(scope, block, name);
+        continue :: local_return;
+        scope := self.scopes[s]&;
+        if scope.visit == self.scopes_generation {
+            //@println("loop name=% gen=%", self.compiler.pool.get(name), scope.visit);
+            return(.None);
+        };
+        scope.visit = self.scopes_generation;
+        
+        found := find(scope, name);
         if found& { v | // TODO: it gets the arity wrong if not by pointer. 
             // TODO: derive ne from eq so you can use != more often. 
             // TODO: better error message for *T vs **T, should say dereference not unsafe cast. 
-            if first.not().and(=> !v.kind.eq(.Const)).and(=> !self.captures.contains(v)) {
-                // We got it from our parent function.
-                self.captures&.push(v[]);
-            };
             return(Some = v[]);
         };
-        if scope.parent == s {
+        ::ptr_utils(UseScopes);
+        use := scope.nullable_use;
+        if !scope.nullable_use.is_null() {
+            each use.parents { it | 
+                //@println("A %", self.pool.get(name));
+                if find_var_in_scope(self, name, it.s) { v |
+                    // TODO: keep looping to check for conflicts?
+                    if v.kind == .Const {
+                        return(Some = v);
+                    };
+                };
+            };
+        };
+        if scope.parent == s { 
             return(.None);
         };
         s = scope.parent;
-        block = scope.block_in_parent;
     };
     
-    find :: fn(scope: *Scope, block: i64, name: Symbol) ?Var = {
-        if scope.vars.is_empty() {
-            //assert_eq(block, 0); // TODO: debug
-            return(.None);
+    find :: fn(scope: *Scope, name: Symbol) ?Var = {
+        const := scope.const_lookup&.get(name);
+        if const& { v |  // TODO: needs to be by reference because arity is broken
+            return(Some = v[]);
         };
-        vars := scope.vars[block]&;
-        loop {
-            const := vars.const_lookup&.get(name);
-            if const& { v |  // TODO: needs to be by reference because arity is broken
-                return(Some = v[]);
-            };
-        
-            // Reverse so you get the shadowing first.
-            each_rev vars.vars& { v |
-                if(v.name == name, => {
-                    return(Some = v[])
-                });
-            };
-
-            if vars.parent == block {
-                //assert_eq(block, 0); // TODO: debug
-                return(.None);
-            };
-            //@assert_ne(block, 0); // TODO: debug
-            block = vars.parent;
-            stupid := scope.vars[block]&; // TODO
-            vars = stupid;
+    
+        // Reverse so you get the shadowing first.
+        each_rev scope.vars& { v |
+            if(v.name == name, => {
+                return(Some = v[])
+            });
         };
-        unreachable()
+        .None
     };
 
     unreachable()
+}
+
+fn find_var(self: *ResolveScope, name: Symbol) ?Var = {
+    self.compiler.scopes_generation += 1;
+    //@println("%", self.compiler.pool.get(name));
+    find_var_in_scope(self.compiler, name, self.scope)
 }
 
 fn decl_var(self: *ResolveScope, name: Symbol, kind: VarType, loc: Span, placeholder: PlaceholderValue) Result(Var, *CompileError) = {
@@ -420,7 +451,7 @@ fn decl_var(self: *ResolveScope, name: Symbol, kind: VarType, loc: Span, placeho
     scopes := self.compiler.scopes;
     scope := scopes[s]&;
     
-    prev := scope.vars[self.block].const_lookup&.get(name);
+    prev := scope.const_lookup&.get(name);
     if prev.is_some() {
         return(@err("Cannot shadow constant in the same scope: %", self.compiler.pool.get(name)));
     };
@@ -430,44 +461,28 @@ fn decl_var(self: *ResolveScope, name: Symbol, kind: VarType, loc: Span, placeho
     if kind == .Const {
         empty: Ty(FatExpr, LazyType) = ((expr = (Poison = placeholder), loc = loc, ty = UnknownType, done = false), .Infer);
         scopes.constants&.push(empty);
-        prev := scope.vars[self.block].const_lookup&.insert(name, var);
+        prev := scope.const_lookup&.insert(name, var);
     } else {
         scopes.constants&.push(Ty(FatExpr, LazyType).zeroed());  // EvilUninit
     };
     
-    scope.vars[self.block].vars&.push(var); // includes constants!
+    scope.vars&.push(var, self.compiler.get_alloc()); // includes constants!
     scopes.types&.push(type = UnknownType, took_address = false);
     self.compiler.record_var_declare(var, loc);
     (Ok = var)
 }
 
-// TODO: pass bool instead of ?Symbol
-fn push_scope(self: *ResolveScope, name: ?Symbol) void = {
-    :: if_opt(Symbol, i64);
-    parent: i64 = if name { _ |
-        self.scope = self.compiler.scopes.new_scope(self.scope, self.block);
-        0
-    } else {
-        self.block
-    };
-    scope := self.compiler.scopes[self.scope]&;
-    scope.vars&.push(@as(BlockScope) (
-        vars = list(scope.vars.gpa), 
-        const_lookup = init(scope.vars.gpa),
-        parent = parent
-    ));
-    self.block = scope.vars.len - 1;
+fn push_scope(self: *ResolveScope, is_block: bool) void = {
+    self.scope = self.compiler.scopes.new_scope(self.scope, self.compiler.get_alloc());
 }
 
 fn pop_scope(self: *ResolveScope) void = {
     scope := self.compiler.scopes[self.scope]&;
     self.scope = scope.parent;
-    self.block = scope.block_in_parent;
 }
 
 fn pop_block(self: *ResolveScope) void = {
-    scope := self.compiler.scopes[self.scope]&;
-    self.block = scope.vars[self.block].parent;
+    self.pop_scope();
 }
 
 fn resolve_binding(self: *ResolveScope, binding: *Binding) PRes #once = {
@@ -514,8 +529,8 @@ fn handle_expr(self: *ResolveScope, expr: *FatExpr) Result(DoMore, *CompileError
             return(Ok = DoMore.Break);
         });
         (fn Block(f) => {
-            self.push_scope(.None);
-
+            self.push_scope(true);
+            f.scope = self.scope;
             (=> {
                 break :: local_return;
                 each f.body { stmt |
@@ -673,4 +688,111 @@ fn log(s: *SelfHosted, e: *FatExpr) void = {
     out: List(u8) = list(temp());
     e.log(s.pool, out&, 0);
     println(out.items());
+}
+
+// most blocks aren't using #include_std.
+// doing it this way means you scan_const_decls twice anything in a block before a #include_std, but that doesn't matter.
+fn slow_body(self: *ResolveScope, body: *List(FatStmt)) PRes #once = {
+    new_body: List(FatStmt) = list(body.len, body.gpa);
+    dirty := true;
+    while (=> dirty) {
+        dirty = false;
+        each body { stmt | 
+            continue :: local_return;
+            @if_let(stmt.stmt&) fn Annotations(annotations) => {
+                if annotations.len == 1 && annotations.items()[0].name == Flag.include_std.ident() {
+                    msg :: "#include_std requires string argument";
+                    arg_expr := annotations.items()[0].args.or() {
+                        return(@err(msg))
+                    };
+                    name := @match(arg_expr.expr) {
+                        fn String(name) => name;
+                        @default => return(@err(msg));
+                    };
+                    
+                    // TODO: remove already_loaded once everything can use #use
+                    if !self.compiler.scopes.already_loaded&.insert(name) {
+                        name_s := self.compiler.pool.get(name);
+                        :: ?WaitingParse;
+                        file := self.compiler.get_include_std(name_s).or() {
+                            return(@err("unknown path for #include_std %", name_s))
+                        };
+                        dirty = true;
+                        stmts := @try(self.compiler.parser.finish_pending_stmts(file)) return;
+                        
+                        //old_scope := self.scope;
+                        //old_block := self.block;
+                        //self.push_scope(true);
+                        //self.push_scope(false);
+                        //new_scope := self.scope;
+                        //each stmts& { stmt |
+                        //    @try(self.scan_const_decls(stmt)) return;
+                        //};
+                        new_body&.push_all(stmts.items());
+                        //add_use(self.compiler, old_scope, new_scope, 0);
+                        //self.pop_scope();
+                        //self.pop_scope();
+                        
+                        // TODO: why lose?
+                        //self.scope = old_scope;
+                        //self.block = old_block;
+                        //@debug_assert(self.scope == old_scope, "lost scope");
+                        
+                        // TODO: instead of that...
+                        //       but it's hard because you want add_use to call compile_body
+                        //       but then you get stuck trying to do too much before you're ready. 
+                        //       instead of doing all the ConstEval now, need to add them to a queue i guess? 
+                        //fake_fid := @try(make_function_scope(self.compiler, stmts.items(), name, self.scope)) return;
+                        //val := self.compiler.to_values(FuncId, fake_fid);
+                        //add_use(self.compiler, self.scope, val, FuncId);
+                        
+                        
+                    };
+                    continue();
+                };
+            };
+            new_body&.push(stmt[]);
+        };
+        temp := body[];
+        body[] = new_body;
+        new_body = temp;
+        new_body&.clear();
+    };
+    each body { stmt |
+        @try(self.scan_const_decls(stmt)) return;
+    };
+    .Ok
+}
+
+fn import_as_scope(self: *SelfHosted, name: Symbol) Res(ScopeId) = {
+    if self.imports.get(name) { s | 
+        return(Ok = s);
+    };
+    name_s := self.pool.get(name);
+    @err_assert(name_s.len > 1, "empty import descriptor") return;
+    selector := name_s[0];
+    file := @switch(selector) {
+        @case("@".ascii()) => {
+            name_s := name_s.rest(1);
+            @unwrap(self.get_include_std(name_s), "unknown path for #include_std %", name_s) return
+        };
+        @case("{".ascii()) => {
+            file := self.codemap.add_file("(import literal)", name_s);
+            id := push_parse(self.parser, name_s, file);
+            id
+        };
+        @default => return(@err("invalid selector (first character) of import(Str) %. expected @ or {", selector));
+    };
+    // TODO: better errors here
+    stmts := @try(self.parser.finish_pending_stmts(file)) return;
+    stmts&.ordered_retain(fn(s) => !s.stmt&.is(.Noop));
+    @err_assert(stmts.len == 1, "import(Str) expected one statement") return;
+    @err_assert(stmts[0].stmt&.is(.Eval) && stmts[0].stmt.Eval.expr&.is(.Block), "import(Str) expected block expression") return;
+    stmts := stmts[0].stmt.Eval.expr.Block.body; // TODO: assert no result
+    fake_fid := @try(make_function_scope(self, stmts.items(), name, scope_from_index(0))) return;
+    val := self.to_values(FuncId, fake_fid);
+    scope := @try(value_to_scope(self, val, FuncId)) return;
+    self.imports.insert(name, scope);
+    
+    (Ok = scope)
 }

@@ -50,6 +50,8 @@ SelfHosted :: @rec @struct(
     call_depth := 0,
     shim_callback_alloc: ArenaAlloc,
     where_memo: HashMap(WhereKey, FuncId),
+    imports: *HashMap(Symbol, ScopeId),  // TODO: very very bad if this struct gets too big?? :FUCKED
+    scopes_generation := 0,
 );
 
 OverloadKey :: @struct(arg: Type, req: Type);
@@ -67,18 +69,19 @@ PRes :: Result(void, *CompileError);
 make_top_level :: fn(c: *SelfHosted, body: Slice(FatStmt)) Res(FuncId) = {
     @assert(body.len != 0, "tried to make_top_level with no statements");
     name := c.pool.insert_owned("@toplevel@");
+    make_function_scope(c, body, name, scope_from_index(0))
+};
+
+fn make_function_scope(c: *SelfHosted, body: Slice(FatStmt), name: Symbol, scope: ScopeId) Res(FuncId) = {
     loc := body[0].loc;
     result := c.box(synthetic_ty((Value = (bytes = unit_value, coerced = false)), loc, void));
-    result := synthetic_ty((Block = (body = body.rs(), result = result, ret_label = .None, hoisted_constants = false)), loc, void);
-    bindings: List(Binding) = list(c.get_alloc());
-    bindings&.if_empty_add_unit();
-    arg: Pattern = (bindings = bindings.rs(), loc = loc);
-    def: FnDef = (name = (Some = name), arg = arg, ret = (Finished = void), tags = list(temp()), loc = loc);
+    result := synthetic_ty((Block = (body = body.rs(), result = result, ret_label = .None, hoisted_constants = false, scope = NOSCOPE)), loc, void);
+    def: FnDef = (name = (Some = name), arg = empty_pattern(c.get_alloc(), loc), ret = (Finished = void), tags = list(temp()), loc = loc);
     func := make_func(def, (Some = result), false);
-    r := @try(c.resolve_root(func&, scope_from_index(0))) return;  
+    r := @try(c.resolve_root(func&, scope)) return;  
     f := c.add_function(func);
-    return(Ok = f)
-};
+    (Ok = f)
+}
 
 fn update_global_stdlib_path() void = {
     :: ?Str; 
@@ -303,7 +306,7 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
         already_loaded = init(a),
     );
     s := a.boxed(Scopes, s);
-    s.new_scope(scope_from_index(0), 0);
+    s.new_scope(scope_from_index(0), a);
     
     b: Baked = (
         values = init(10, a),
@@ -374,6 +377,7 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
         pending_took_pointer = list(a),
         shim_callback_alloc = init(page_allocator, 1.shift_left(14)),
         where_memo = init(a),
+        imports = a.boxed(HashMap(Symbol, ScopeId), init(a)),
     );
     
     if get_dynamic_context().is_null() {

@@ -406,8 +406,7 @@ fn quick_lambda(self: *Parser, prec: Prec) ParseRes = {
     loc := self.last.span;
     body := @try(self.parse_expr(prec)) return;
     // TODO: this is kinda dumb (would be better not to force unit being an arg) but makes it consistant with elsewhere
-    bindings := empty_binding().single(self.alloc).rs();
-    fn_def: FnDef = (name = .None, arg = (bindings = bindings, loc = loc), ret = (Infer = ()), tags = list(self.alloc), loc = loc);
+    fn_def: FnDef = (name = .None, arg = self.alloc.empty_pattern(loc), ret = (Infer = ()), tags = list(self.alloc), loc = loc);
     func := make_func(fn_def, (Some = body), true);
     (Ok = self.expr((Closure = self.box(func)), loc))
 }
@@ -635,8 +634,7 @@ fn parse_squiggle(self: *Parser, prev: FatExpr, prec: Prec) ParseRes #once = {
     } else {
         // If the next token is on a new line, assume theres no pipe annotation. 
         // this lets you do ifs that look normal, like `if foo {` instead of `if foo {|`
-        bindings := empty_binding().single(self.alloc).rs();
-        (name = .None, arg = (bindings = bindings, loc = loc), ret = (Infer = ()), tags = list(self.alloc), loc = loc)
+        (name = .None, arg = self.alloc.empty_pattern(loc), ret = (Infer = ()), tags = list(self.alloc), loc = loc)
     };
     
     body := @try(self.parse_block_until_squiggle(false)) return;
@@ -884,6 +882,9 @@ fn if_empty_add_unit(self: *List(Binding)) void = {
     self.push(empty_binding());
 }
 
+fn empty_pattern(a: Alloc, loc: Span) Pattern = 
+    (bindings = empty_binding().single(a).rs(), loc = loc);
+
 fn empty_binding() Binding = {
     (
         name = .None,
@@ -1068,7 +1069,7 @@ fn parse_block_until_squiggle(self: *Parser, allow_eof: bool) ParseRes = {
         self.raw_unit(self.last.span)
     };
     
-    e := self.expr((Block = (body = stmts.rs(), result = self.box(result), ret_label = .None, hoisted_constants = false)), loc);
+    e := self.expr((Block = (body = stmts.rs(), result = self.box(result), ret_label = .None, hoisted_constants = false, scope = NOSCOPE)), loc);
     (Ok = e)
 }
 
@@ -1174,3 +1175,5 @@ fn report_error(fmt_args: FatExpr, ret_loc: FatExpr) FatExpr #macro = {
 
 fn int(self: PrecLevel) i64 = @as(i64) self;
 ::Ord(PrecLevel);
+
+NOSCOPE :: ScopeId.zeroed(); // TODO: make this a better sentinal

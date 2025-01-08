@@ -521,7 +521,7 @@ fn handle_target_split(self: *SelfHosted, func: *Func) Maybe(void) #once = {
             //       you need a block for the outer function's `return` to bind to,
             //       otherwise you don't get a return_var and the error message is useless 
             //       `Compile Error: Poison expression Label`
-            body_expr := synthetic((Block = (body = empty(), result = body_expr, ret_label = .None, hoisted_constants = false)), factory.loc);
+            body_expr := synthetic((Block = (body = empty(), result = body_expr, ret_label = .None, hoisted_constants = false, scope = NOSCOPE)), factory.loc);
             new_func.body.Normal = body_expr;
             new_fid := self.add_function(new_func);
             merged&.push(TargetOsSplit = (os = os, fid = new_fid));
@@ -1134,13 +1134,22 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
             //       but need to check if its a value that has special fields first.
             @check(self.compile_expr(f.container, .None)) return;
             
-            if f.container.ty == self.get_or_create_type(Type) {
-                type := @check(self.eval(f.container, Type)) return; 
-                @check(self.contextual_field(f.name, expr, type)) return;
-                // TODO: should typecheck against result type be here or elsewhere?
+            
+            if f.container.ty == ScopeId { // :get_or_create_type 
+                scope := @check(self.eval(f.container, ScopeId)) return; 
+                self.scopes_generation += 1;
+                var := @unwrap(find_var_in_scope(self, f.name, scope), "not found in scope") return;
+                value, ty := @check(self.find_const(var, requested)) return;
+                expr.set(value, ty);
             } else {
-                // Otherwise its a normal struct/tagged field.
-                @check(self.compile_place_expr(expr, requested, true)) return;
+                if f.container.ty == self.get_or_create_type(Type) {
+                    type := @check(self.eval(f.container, Type)) return; 
+                    @check(self.contextual_field(f.name, expr, type)) return;
+                    // TODO: should typecheck against result type be here or elsewhere?
+                } else {
+                    // Otherwise its a normal struct/tagged field.
+                    @check(self.compile_place_expr(expr, requested, true)) return;
+                };
             };
         }
         fn StructLiteralP() => {
@@ -1520,7 +1529,6 @@ fn contextual_field(self: *SelfHosted, name: Symbol, expr_out: *FatExpr, type: T
             @err("contextual field % not found for %", self.pool.get(name), self.log_type(type))
         }
         fn Named(f) => self.contextual_field(name, expr_out, f._0);
-        
         @default => @err("no contextual fields for type % (wanted %)", self.log_type(type), self.pool.get(name));
     }
 }
@@ -1943,12 +1951,12 @@ fn emit_capturing_call(self: *SelfHosted, f: FuncId, expr_out: *FatExpr, request
         // TODO: if !may_have_early_return, should be able to just inline the value but it doesnt work!
         //       similarly i cant have ret_label:None so im clearly wrong. its `not callable` in overloading.rs. trying to call the cond of an if??
         //       -- Jun 16
-        expr_out.expr = (Block = (body = empty(), result = self.box(owned_body), ret_label = (Some = ret_label), hoisted_constants = false));
+        expr_out.expr = (Block = (body = empty(), result = self.box(owned_body), ret_label = (Some = ret_label), hoisted_constants = false, scope = NOSCOPE));
     } else {
         stmts: List(FatStmt) = list(1, self.get_alloc());
         arg_stmt: Stmt = (DeclVarPattern = (binding = pattern, value = arg_expr[]));
         stmts&.push(stmt = arg_stmt, loc = loc);
-        expr_out.expr = (Block = (body = stmts.rs(), result = self.box(owned_body), ret_label = (Some = ret_label), hoisted_constants = false));
+        expr_out.expr = (Block = (body = stmts.rs(), result = self.box(owned_body), ret_label = (Some = ret_label), hoisted_constants = false, scope = NOSCOPE));
     };
     // TODO: self.currently_inlining.retain(|check| *check != f);
     if ret_ty { ret_ty | 
@@ -2188,32 +2196,30 @@ fn maybe_renumber_and_dup_scope(self: *SelfHosted, new_func: *Func, mapping: *Ha
             assert(!new_func.get_flag(.AllowRtCapture), "expected no runtime capture"); // TODO: debug
             prev := new_func.scope.expect("func resolved");
             old_scope := self.scopes[prev]&;
-            id := self.scopes.new_scope(old_scope.parent, old_scope.block_in_parent);
+            id := self.scopes.new_scope(old_scope.parent, self.get_alloc());
             old_scope := self.scopes[prev]&;
             
             // Note: it has to iterate and check more and more each time (but it only copies what's needed). -- Jun 29
-            each old_scope.vars { block | 
-                new_vars: List(Var) = list(self.get_alloc());
-                for block.vars { old | 
-                    if mapping.get_ptr(old) { new |
-                        new_vars&.push(new[]);
-                    };
+            new_vars: List(Var) = list(self.get_alloc());
+            for old_scope.vars { old | 
+                if mapping.get_ptr(old) { new |
+                    new_vars&.push(new[]);
                 };
-                new_constants: HashMap(Symbol, Var) = init(self.get_alloc());
-                each block.const_lookup& { (k, v) |
-                    if mapping.get_ptr(v[]) { new |
-                        v := self.scopes.get_constant(v[]);
-                        v := v.expect("known const"); // TODO: destructure through a pointer? 
-                        expr := self.clone(v._0&);
-                        ty := self.clone(v._1&);
-                        self.scopes.put_constant(new[], expr, ty);
-                        new_constants&.insert(new.name, new[]);
-                    };
-                };
-                b: BlockScope = (vars = new_vars, const_lookup = new_constants, parent = block.parent);
-                self.scopes[id].vars&.push(b);
             };
-        
+            new_constants: HashMap(Symbol, Var) = init(self.get_alloc());
+            each old_scope.const_lookup& { (k, v) |
+                if mapping.get_ptr(v[]) { new |
+                    v := self.scopes.get_constant(v[]);
+                    v := v.expect("known const"); // TODO: destructure through a pointer? 
+                    expr := self.clone(v._0&);
+                    ty := self.clone(v._1&);
+                    self.scopes.put_constant(new[], expr, ty);
+                    new_constants&.insert(new.name, new[]);
+                };
+            };
+            new_scope := self.scopes[id]&;
+            new_scope.vars = new_vars.rs();
+            new_scope.const_lookup = new_constants;
             new_func.scope = (Some = id);
         };
     } else {

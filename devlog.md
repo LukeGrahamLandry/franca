@@ -1,8 +1,30 @@
 - TODO: deal with `CodegenEntry:Bounce` on wasm
 
+## (Jan 7)
+
+- #use for grabbing stuff out of another namespace. again same as rust's `use` keyword but with an arbitrary constant expression.
+  as a start, it can be a function annotation and then just apply inside the body of that function.
+- cleaned up scope resolution stuff a bit, removed the separation between blocks and scopes because that was confusing.
+- `fn import(Str)` as a more structured replacement for `#include_std`. instead of just pasting the code like a c `#include`,
+  you get a ScopeId value that you can access const fields on like a struct or pass to `#use` to get the old behaviour.
+  needs more refinement on when you have to wait on evaluating a top level `::` expression before i can actually replace the old thing with this.
+
 ## (Jan 6)
 
-- #where
+- #where for auto intantiating generics and adding to overload set.
+  same idea as a `where` clause in rust to constrain argument types,
+  but instead of a seperate language of traits, i just put a comptime expression in there so you can run arbitrary code.
+  still lots of work left integrating with the rest of overload/call system but the basics work.
+  i hope eventually it will be:
+  - faster? less iterating through overload sets so its ok to do more work per entry.
+    and don't have do any work at all when you make the type but don't call a function using it vs
+    the current system where you tend to put the methods inside the function that returns the type.
+  - less order dependent. right now when you manually `::Whatever(T)` in one function,
+    you don't have to do it in later functions (because it exists already),
+    so if you just put those in randomly when there's a compile error (like i do),
+    your program is compile order dependent and breaks when i change the main_thread_pump logic.
+    and that prevents me from doing cool jit-sema only the first time you call a function
+    so you can load drivers faster and only compile what you actually use.
 - added a coercer_const_expr at the very end of immediate_eval_expr. that happened 39945 times.
 
 ## (Jan 5)
