@@ -15,10 +15,8 @@ State :: @struct(
     pass_action: SgPassAction,
     text: *Sdtx.Common,
     env: rawptr,
-    lines: List(RsVec(u8)),
-    x: f64,
-    y: f64,
-    max_x: f64,
+    buffers: List(TextBuffer),
+    selected_buffer: i64,
 );
 
 allocator :: libc_allocator;
@@ -39,6 +37,14 @@ do_init :: fn(userdata: rawptr) void = {
     desc.fonts&[0] = Sdtx.font.cpc;
     sdtx_setup(state.text, desc&);
     
+    b := state.buffers.index(0);
+    b.at.w = sapp_widthf().cast() / 2;
+    b.at.h = sapp_heightf().cast();
+    b := state.buffers.index(1);
+    b.at.w = sapp_widthf().cast() / 2;
+    b.at.h = sapp_heightf().cast();
+    b.at.pos.x = sapp_widthf().cast() / 2;
+    
     state.pass_action.colors&[0].load_action = .CLEAR;
     state.pass_action.colors&[0].clear_value = (r = 0.156, g = 0.156, b = 0.156, a = 1);
 };
@@ -52,31 +58,8 @@ do_render :: fn(userdata: rawptr) void = {
     set_dynamic_context(state.env);
     mark := mark_temporary_storage();
     
-    w := sapp_width();
-    h := sapp_height();
-    max_line_width := state.max_x - (w.intcast().float() / (80.0 / 1.75));
-    state.x = max(0, min(state.x, max_line_width));
-    state.y = max(0, min(state.y, state.lines.len.float()));
-    
-    sdtx := state.text.default_context&;
-    sdtx.color = pack_rgba(235, 219, 178, 255);
-    sdtx.canvas(sapp_width().intcast().float().div(1.75).cast(), sapp_height().intcast().float().div(1.75).cast());
-    
-    // the fractional component of your scroll position is used to offset the text rendering on the screen.
-    // and the integral component chooses which range of lines we draw.
-    sdtx.pos.y = cast(-(state.y - state.y.floor()));
-    x := cast(-(state.x - state.x.floor()));
-    sdtx.pos.x = x;
-    line_count := int(h.intcast().float() / 13.0);
-    start := min(max(0, state.y.int()), state.lines.len);
-    end   := min(start + line_count, state.lines.len);
-    range(start, end) { i |
-        line := state.lines&.index(i);
-        if state.x.int() < line.len {
-            sdtx.put(line.items().rest(state.x.int())); 
-        };
-        sdtx.pos.y += 1;
-        sdtx.pos.x = x;
+    each state.buffers& { b |
+        draw_text(state, b);
     };
     
     desc := SgPass.zeroed();
@@ -86,6 +69,7 @@ do_render :: fn(userdata: rawptr) void = {
     desc.swapchain.height = sapp_height();
     sg_begin_pass(desc&);
     
+    sdtx := state.text.default_context&;
     sdtx.draw_layer(0);
     
     sg_end_pass();
@@ -103,6 +87,15 @@ do_event :: fn(event: *SappEvent, userdata: rawptr) void = {
     state := State.ptr_from_raw(userdata);
     set_dynamic_context(state.env);
    
+    if event.type.eqq(.MOUSE_DOWN) {
+        pos: Pos = (x = event.mouse_x.cast(), y = event.mouse_y.cast());
+        enumerate state.buffers& { i, b |
+            if b.at.contains(pos) {
+                state.selected_buffer = i;
+            };
+        };
+    };
+    
     if event.type.eqq(.KEY_DOWN) {
         if event.key_code.eqq(.ESCAPE) {
             exit(0);
@@ -110,26 +103,39 @@ do_event :: fn(event: *SappEvent, userdata: rawptr) void = {
     };
     
     if event.type.eqq(.MOUSE_SCROLL) {
-        state.x += event.scroll_x.cast() * scroll_speed;
-        state.y += event.scroll_y.cast() * scroll_speed;
+        if state.selected_buffer() { b |
+            b.render.x += event.scroll_x.cast() * scroll_speed;
+            b.render.y += event.scroll_y.cast() * scroll_speed;
+        };
     };
 };
+
+fn selected_buffer(state: *State) ?*TextBuffer = {
+    if(state.selected_buffer >= state.buffers.len, => return(.None));
+    (Some = state.buffers.index(state.selected_buffer))
+}
 
 fn main() void = {
     state := State.zeroed();
     state.env = get_dynamic_context();
     state.text = allocator.box(@type state.text[]);
+    state.buffers = list(allocator);
     
     // :SLOW
-    path := "compiler/v2/sema.fr";
-    input := allocator.read_to_string(path).items(); // :panic :leak
-    input := input.split("\n", temp()).items();
-    state.lines = list(input.len, temp());
-    for input { l |
-        state.max_x = max(state.max_x, l.len.float());
-        state.lines&.push(ptr = l.ptr, len = l.len, cap = l.len);
+    fn load_new_buffer(path: Str, a: Alloc) TextBuffer = {
+        buffer := TextBuffer.zeroed();
+        buffer.gpa = a;
+        input := buffer.gpa.read_to_string(path).items(); // :panic :leak
+        input := input.split("\n", temp()).items();
+        //buffer.lines&.reserve(input.len, buffer.gpa);  // TODO
+        for input { l |
+            buffer.max_x = max(buffer.max_x, l.len.float());
+            buffer.lines&.push((ptr = l.ptr, len = l.len, cap = l.len), buffer.gpa);
+        };
+        buffer
     };
-    
+    state.buffers&.push(load_new_buffer("compiler/v2/sema.fr", allocator));
+    state.buffers&.push(load_new_buffer("examples/edit.fr", allocator));
     desc := SappDesc.zeroed();
     desc.init_userdata_cb = do_init;
     desc.frame_userdata_cb = do_render;
@@ -192,3 +198,49 @@ fn driver(vtable: *ImportVTable) void = {
 
 #include_std("backend/lib.fr");
 #include_std("compiler/ast_external.fr");
+
+TextBuffer :: @struct(
+    lines: RsVec(RsVec(u8)),
+    at: Rect,
+    gpa: Alloc,
+    cursor: Pos,
+    render: Pos,
+    max_x: f64,
+    dead: bool,
+);
+
+fn draw_text(state: *State, self: *TextBuffer) void = {
+    if(self.dead, => return());
+    SCALE :: 16.0; // (80.0 / 1.75);
+    w, h := (self.at.w, self.at.h);
+    max_line_width := self.max_x - (w / SCALE);
+    self.render.x = max(0, min(self.render.x, max_line_width));
+    self.render.y = max(0, min(self.render.y, self.lines.len.float()));
+    
+    sdtx := state.text.default_context&;
+    sdtx.color = pack_rgba(235, 219, 178, 255);
+    sdtx.canvas(sapp_width().intcast().float().div(1.75).cast(), sapp_height().intcast().float().div(1.75).cast());
+    
+    // the fractional component of your scroll position is used to offset the text rendering on the screen.
+    // and the integral component chooses which range of lines we draw.
+    sdtx.pos.y = cast(self.at.pos.y / SCALE- (self.render.y - self.render.y.floor()));
+    x := cast(self.at.pos.x / SCALE - (self.render.x - self.render.x.floor()));
+    sdtx.pos.x = x;
+    line_count := int(h / 13.0);
+    start := min(max(0, self.render.y.int()), self.lines.len);
+    end   := min(start + line_count, self.lines.len);
+    chars_that_fit := int(w / SCALE);
+    range(start, end) { i |
+        line := self.lines&.index(i);
+        col := self.render.x.int();
+        if col < line.len {
+            count := min(line.len - col, chars_that_fit);
+            sdtx.put(line.items().subslice(col, count)); 
+        };
+        sdtx.pos.y += 1;
+        sdtx.pos.x = x;
+    };
+}
+
+fn contains(r: Rect, p: Pos) bool = 
+    p.x > r.pos.x && p.x < r.pos.x + r.w && p.y > r.pos.y && p.y < r.pos.y + r.h;

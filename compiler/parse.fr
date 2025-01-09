@@ -1069,19 +1069,30 @@ fn parse_block_until_squiggle(self: *Parser, allow_eof: bool) ParseRes = {
         self.raw_unit(self.last.span)
     };
     
-    e := self.expr((Block = (body = stmts.rs(), result = self.box(result), ret_label = .None, hoisted_constants = false, scope = NOSCOPE)), loc);
+    e := self.expr(new_block(stmts.rs(), self.box(result)), loc);
     (Ok = e)
 }
+
+fn new_block(body: RsVec(FatStmt), result: *FatExpr) Expr = (Block = (
+    body = body, 
+    result = result, 
+    ret_label = .None, 
+    hoisted_constants = false, 
+    block_resolved = false, 
+    scope = NOSCOPE
+));
 
 ::if(?FatExpr);
 fn parse_annotations(self: *Parser) Result(List(Annotation), *CompileError) = {
     tags: List(Annotation) = list(self.alloc);
     while => self.maybe(.Hash) {
         name := @try(self.pop_name("after '#'")) return;
-        arg: ?FatExpr = if self.maybe(.LeftParen) {
-            (Some = @try(self.parse_tuple(.RightParen)) return)
-        } {| .None };
-        tags&.push((name = name, args = arg));
+        arg: FatExpr = if self.maybe(.LeftParen) {
+            @try(self.parse_tuple(.RightParen)) return
+        } else {
+            self.raw_unit(self.last.span)
+        };
+        tags&.push(name = name, args = arg);
     };
     (Ok = tags)
 }

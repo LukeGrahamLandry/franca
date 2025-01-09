@@ -143,6 +143,7 @@ fn compile_place_expr(self: *SelfHosted, place: *FatExpr, requested: ResultType,
     self.last_loc = place.loc;
     @match(place.expr&) {
         fn Block(f) => {
+            @check(self.ensure_resolved(f)) return;
             // TODO: the old version didn't have to do this... 
             if f.body.is_empty() && f.ret_label.is_none() {
                 place[] = f.result[]; // Not required but makes debugging easier cause there's less stuff.
@@ -217,7 +218,7 @@ fn compile_place_expr(self: *SelfHosted, place: *FatExpr, requested: ResultType,
         fn Deref(_) => {
             return(self.compile_deref_place(place, requested, want_deref));
         }
-        fn GetNamed(n) => return(@err("Undeclared Identifier: %", self.pool.get(n[])));
+        fn GetNamed(n) => return(@err("Undeclared Identifier: %!", self.pool.get(n[])));
         fn PrefixMacro(_) => {
             // TODO: this is sketchy but makes []->.index work.
             //       need to think about how requested/want_deref are handled
@@ -450,6 +451,7 @@ fn handle_compile_func_body(self: *SelfHosted, fid: FuncId) Maybe(void) #once = 
         if func.return_var { return_var |
             // TODO: this means you cant early return from non-block functions but the error message will be useless -- Jul 9 
             @if_let(expr.expr&) fn Block(f) => {
+                @check(self.ensure_resolved(f)) return;
                 if f.ret_label.is_none() {|  // we might have already tried to compile this function. 
                     ret: LabelId = from_index(self.dispatch.return_labels.len);
                     self.dispatch.return_labels&.push(fid);
@@ -520,7 +522,7 @@ fn handle_target_split(self: *SelfHosted, func: *Func) Maybe(void) #once = {
             //       you need a block for the outer function's `return` to bind to,
             //       otherwise you don't get a return_var and the error message is useless 
             //       `Compile Error: Poison expression Label`
-            body_expr := synthetic((Block = (body = empty(), result = body_expr, ret_label = .None, hoisted_constants = false, scope = NOSCOPE)), factory.loc);
+            body_expr := synthetic(new_block(empty(), body_expr), factory.loc);
             new_func.body.Normal = body_expr;
             new_fid := self.add_function(new_func);
             merged&.push(TargetOsSplit = (os = os, fid = new_fid));
@@ -612,7 +614,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
             };
             @case(Flag.import.ident()) => {
                 // :io_driver
-                lib_name := @match(tag.args&.as_ref()) {
+                lib_name := @match(tag.non_void_arg()) {
                     fn Some(lib_name) => @check(self.eval_str(lib_name)) return;
                     fn None() => self.pool.insert_owned("");
                 };
@@ -629,7 +631,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
             @case(Flag.comptime_addr.ident()) => {
                 good = true;
                 ::as_ref(FatExpr);
-                value := @unwrap(tag.args&.as_ref(), "#comptime_addr requires arg") return;
+                value := @unwrap(tag.non_void_arg(), "#comptime_addr requires arg") return;
                 ptr := @check(self.eval(value, i64)) return;
                 func.body = (ComptimeAddr = ptr);
                 ptr := ptr.rawptr_from_int();
@@ -638,7 +640,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
             };
             @case(Flag.intrinsic.ident()) => {
                 good = true;
-                value := @unwrap(tag.args&.as_ref(), "#intrinsic requires arg") return;
+                value := @unwrap(tag.non_void_arg(), "#intrinsic requires arg") return;
                 intrinsic_ty := @unwrap(self.env.intrinsic_type, "used #intrinsic during boot") return;
                 op := @check(self.immediate_eval_expr(value, intrinsic_ty)) return;
                 op := Intrinsic.assume_cast(op&)[];
@@ -655,7 +657,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
             // TODO: im afraid this is slow :( its especially dumb because i do it for a billion int_from_ptr instantiations that do nothing
             @case(Flag.ir.ident()) => {
                 good = true;
-                value := @unwrap(tag.args&.as_ref(), "#ir requires arg") return;
+                value := @unwrap(tag.non_void_arg(), "#ir requires arg") return;
                 args  := value.items();
                 @err_assert(args.len == 2, "expected #ir(.op, .cls)") return;
                 op_name  := @unwrap(args[0]&.ident(), "#ir(X, _) expected symbol") return;
@@ -669,7 +671,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
             };
             @case(Flag.redirect.ident()) => {
                 good = true;
-                value := @unwrap(tag.args&.as_ref(), "#redirect requires arg") return;
+                value := @unwrap(tag.non_void_arg(), "#redirect requires arg") return;
                 RedirectType :: @struct(arg: Type, ret: Type, os: OverloadSet);
                 payload := self.tuple_of(@slice(Type, Type, OverloadSet));
                 payload := @check(self.immediate_eval_expr(value, payload)) return;
@@ -835,7 +837,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
                 link_rename_arg := self.env.link_rename_arg.expect("no #link_rename during bootstrap");
                 link_rename_arg_ptr := self.ptr_ty(link_rename_arg);
                 renamer_func_ty := self.intern_type(FnPtr = (ty = (arg = link_rename_arg_ptr, ret = void, arity = 1), cc = .CCallReg));
-                value := @unwrap(tag.args&.as_ref(), "#link_rename requires arg") return;
+                value := @unwrap(tag.non_void_arg(), "#link_rename requires arg") return;
                 renamer_func_ptr := @check(self.immediate_eval_expr(value, renamer_func_ty)) return;
                 renamer_func_ptr := i64.assume_cast(renamer_func_ptr&)[];
                 func.nullable_link_rename_func = renamer_func_ptr;
@@ -948,6 +950,7 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
             @check(self.compile_call(expr, requested)) return;
         }
         fn Block(f) => {
+            @check(self.ensure_resolved(f)) return;  // i think this obviously has to go before hoist_constants
             if !f.hoisted_constants {
                 @check(self.hoist_constants(f.body.items())) return;
                 f.hoisted_constants = true;
@@ -1018,7 +1021,7 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
             @check(self.compile_expr(expr, requested)) return;
         }
         fn GetVar(var) => return(self.compile_get_var(expr, requested, false));
-        fn GetNamed(n) => return(@err("Undeclared Identifier: %", self.pool.get(n[])));
+        fn GetNamed(n) => return(@err("Undeclared Identifier: %.", self.pool.get(n[])));
         fn String(i) => {
             // This cannot be a Value node because Str and CStr are not builtins so the parser is unable to create it.
             // But also auto casting a random comptime known Str to a CStr would be sketchy because you don't know if it was mutable. 
@@ -1136,7 +1139,6 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
             
             if f.container.ty == ScopeId { // :get_or_create_type 
                 scope := @check(self.eval(f.container, ScopeId)) return; 
-                self.scopes_generation += 1;
                 var := @unwrap(find_var_in_scope(self, f.name, scope), "not found in scope") return;
                 value, ty := @check(self.find_const(var, requested)) return;
                 expr.set(value, ty);
@@ -1306,6 +1308,7 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
             expr.done = true;
             expr.ty = self.get_or_create_type(Never); 
         }
+        fn UndeclaredVar() => return(@err("%", self.comp().log(expr)));
         @default => @panic("TODO: unhandled node type %: %", expr.expr&.tag(), expr.log(self));
     };
     self.last_loc = old_loc;
@@ -1486,7 +1489,6 @@ fn contextual_field(self: *SelfHosted, name: Symbol, expr_out: *FatExpr, type: T
         }
         fn Struct(f) => {
             if !(f.scope == NOSCOPE) {
-                self.scopes_generation += 1;
                 if find_var_in_scope(self, name, f.scope) { var |
                     value, ty := @check(self.find_const(var, .None)) return;
                     expr_out.set(value, ty);
@@ -1943,13 +1945,16 @@ fn emit_capturing_call(self: *SelfHosted, f: FuncId, expr_out: *FatExpr, request
         // TODO: if !may_have_early_return, should be able to just inline the value but it doesnt work!
         //       similarly i cant have ret_label:None so im clearly wrong. its `not callable` in overloading.rs. trying to call the cond of an if??
         //       -- Jun 16
-        expr_out.expr = (Block = (body = empty(), result = self.box(owned_body), ret_label = (Some = ret_label), hoisted_constants = false, scope = NOSCOPE));
+        expr_out.expr = new_block(empty(), self.box(owned_body));
     } else {
         stmts: List(FatStmt) = list(1, self.get_alloc());
         arg_stmt: Stmt = (DeclVarPattern = (binding = pattern, value = arg_expr[]));
         stmts&.push(stmt = arg_stmt, loc = loc);
-        expr_out.expr = (Block = (body = stmts.rs(), result = self.box(owned_body), ret_label = (Some = ret_label), hoisted_constants = false, scope = NOSCOPE));
+        expr_out.expr = new_block(stmts.rs(), self.box(owned_body));
     };
+    b := expr_out.expr.Block&;
+    b.ret_label = (Some = ret_label);
+    b.block_resolved = true;
     // TODO: self.currently_inlining.retain(|check| *check != f);
     if ret_ty { ret_ty | 
         expr_out.ty = ret_ty;
@@ -2961,17 +2966,19 @@ fn evaluate_where_clauses(self: *SelfHosted, fid: FuncId, generic_types: []Type,
     types_arg_expr: FatExpr = (expr = (Value = (bytes = types_value, coerced = false)), done = false, ty = slow_arg_ty, loc = loc);
     each func.annotations& { ann |
         if ann.name == Flag.where.ident() {
-            if ann.args&.as_ref() { where_expr |
-                // TODO: it needs to know this is in a const context. 
-                _ := self.poll_in_place(void, => self.compile_expr(where_expr, (Specific = f_ty)));
-                condition := @check(self.eval(where_expr, FuncId)) return;
-                
-                // :get_or_create_type
-                // TODO: bad tack memory!
-                accept := @check(self.invoke(condition, types_arg_expr&, bool, loc)) return;
-                accept := bool.assume_cast(accept&)[];
-                if !accept {
-                    return(Ok = false);
+            if ann.non_void_arg() { where_expr |
+                if !where_expr.is_raw_unit() {
+                    // TODO: it needs to know this is in a const context. 
+                    _ := self.poll_in_place(void, => self.compile_expr(where_expr, (Specific = f_ty)));
+                    condition := @check(self.eval(where_expr, FuncId)) return;
+                    
+                    // :get_or_create_type
+                    // TODO: bad tack memory!
+                    accept := @check(self.invoke(condition, types_arg_expr&, bool, loc)) return;
+                    accept := bool.assume_cast(accept&)[];
+                    if !accept {
+                        return(Ok = false);
+                    };
                 };
             };
         };
@@ -3407,7 +3414,7 @@ fn update_function_metadata(self: *SelfHosted, func: *Func, os: ?OverloadSet) Re
                 @err_assert(func.body&.is(.Empty), "#redirect conflicts with body expression") return;
                 os := @unwrap(os, "#redirect function only makes sense as part of an overload set") return;
                 os := self.to_values(OverloadSet, os);
-                expr := @unwrap(tag.args&.as_ref(), "#redirect requires argument") return;
+                expr := @unwrap(tag.non_void_arg(), "#redirect requires argument") return;
                 os := synthetic_ty((Value = (bytes = os, coerced = false)), expr.loc, OverloadSet);
                 @err_assert(expr.expr&.is(.Tuple), "#redirect expected tuple") return;
                 parts := expr.expr.Tuple&;
@@ -3621,7 +3628,11 @@ fn handle_declare_constant(self: *SelfHosted, name: Var, ty: *LazyType, value: *
 }
 
 fn eval(self: *SelfHosted, expr: *FatExpr, $T: Type) Maybe(T) #generic = {
-    value := @check(self.immediate_eval_expr(expr, self.get_or_create_type(T))) return;
+    t := self.get_or_create_type(T);
+    value := @check(self.immediate_eval_expr(expr, t)) return;
+    if value&.len() != size_of(T) {
+        return(@err("size mismatch in constant evaluation %\nTODO: the compiler should have caught this before and failed a typecheck.", log(value&, self, t)))
+    };
     (Ok = T.assume_cast(value&)[])
 }
 
@@ -4188,7 +4199,7 @@ fn check_quick_eval(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) ?Values = {
             .None
         }
         fn Block(it) => {
-            if it.body.is_empty() {
+            if it.block_resolved && it.body.is_empty() {
                 return(self.check_quick_eval(it.result, ret_ty));
             };
             .None
@@ -4368,6 +4379,7 @@ fn early_builtin_prefix_macro(self: *SelfHosted, expr: *FatExpr) Maybe(void) = {
     invocation := expr.expr.PrefixMacro&;
     name := @match(invocation.handler.expr&) {
         fn GetVar(v) => v.name;
+        fn UndeclaredVar(v) => v.name;
         fn GetNamed(v) => v[];
         @default => return(@err("macro calls must be GetVar while bootstrapping. tried to run something too compilicated too soon: %: %", invocation.handler.expr&.tag(), invocation.handler.log(self)));
     };
@@ -4448,13 +4460,20 @@ fn struct_type(self: *SelfHosted, pattern: *Pattern, is_union: bool) Maybe(Type)
     each pattern.bindings { b | 
         if b.kind == .Const {
             if scope == NOSCOPE {
+                // TODO: this scope means a totally different thing (nothing), its not where variables in the struct will be looked up
                 scope = self.scopes.new_scope(scope_from_index(0), self.get_alloc(), pattern.loc);
             };
             name := b.ident().expect("field name");
             expr := @unwrap(b.get_default(), "constant field % must have a value.", self.pool.get(name)) return;
-            v := self.unique_const(name);
+            //v := @match(expr.expr&) {
+            //    fn GetVar(inner) => inner[];
+            //    @default => {
+                    v := self.unique_const(name);
+                    self.scopes.put_constant(v, expr[], b.ty);
+            //        v
+            //    };
+            //};
             self.scopes[scope].const_lookup&.insert(name, v);
-            self.scopes.put_constant(v, expr[], b.ty);
             expr.expr = (GetVar = v);  // Save our work because we might yield on a later field. 
         };
     };
@@ -4665,3 +4684,14 @@ fn handle_stmt(self: *Unquote, stmt: *FatStmt) Result(DoMore, *CompileError) #on
 fn handle_func(self: *Unquote, func: *Func)    Result(DoMore, *CompileError) #once = (Ok = .Continue);
 fn handle_type(self: *Unquote, ty: *LazyType)  Result(DoMore, *CompileError) #once = (Ok = .Continue);
 fn handle_pattern(self: *Unquote, p: *Pattern) Result(DoMore, *CompileError) #once = (Ok = .Continue);
+
+fn ensure_resolved(self: *SelfHosted, block: *get_variant_type(Expr, .Block)) Maybe(void) = {
+    if(block.block_resolved, => return(.Ok));
+    
+    r: ResolveScope = new(self, block.scope, self.last_loc);
+    zone := zone_begin(.Scope); // TODO: defer
+    res := r&.finish_resolving_block(block);
+    zone_end(zone);
+    @try(res) return;
+    .Ok
+}

@@ -154,14 +154,17 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
                     } else {
                         // TODO: better error message if its a call because they forgot a semi-colon. 
                         //debug_log_ast(handler_body[]);
-                        assert(handler_body.expr&.is(.PrefixMacro), "expected @default");
+                        //
+                        
                         branch := handler_body.expr.PrefixMacro&;
-                        macro := branch.handler;
-                        assert(macro.expr&.is(.GetNamed), "expected @default"); // TODO: bring back safety checks on tagged field access. 
-                        name := macro.expr.GetNamed; // TODO: ^ allow GetVar becuase they might have shadowed 'case' and 'default'? or should we respect their shadowing once you're allowed to expand custom macros in there. even then should give warning cause its confusing.  
+                        name := macro_at_default_helper(handler_body);
                         arg := branch.arg;
                         action := branch.target[];
-                        assert(name.eq(@symbol default), "unhandled prefix in @match");
+                        if !name.eq(@symbol default) {
+                            debug_log_ast(handler_body[]);
+                            println(name.str()); // TODO
+                            compile_error("unhandled prefix in @match", branch.handler.loc);
+                        };
                         assert(first, "@default must be the last handler in @match");
                         // Note: we throw away the starting body
                         if safety_check_enabled(.InvalidTag) {
@@ -183,6 +186,24 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
             make_switch(@{ tag_val }, default, cases)
         }]
     }
+}
+
+fn macro_at_default_helper(handler_body: *FatExpr) Symbol = {
+    assert(handler_body.expr&.is(.PrefixMacro), "expected @default");
+    branch := handler_body.expr.PrefixMacro&;
+    macro := branch.handler;
+    
+    name := @symbol EXPECTED_AT_DEFAULT_TODO_BETTER_ERROR_REPORTING;
+    if macro.expr&.is(.GetNamed) {
+        name = macro.expr.GetNamed;
+    };
+    if macro.expr&.is(.UndeclaredVar) {
+        name = macro.expr.UndeclaredVar.name;
+    };
+    if macro.expr&.is(.GetVar) {
+        name = macro.expr.GetVar.name;
+    };
+    name
 }
 
 fn make_switch(value: FatExpr, default: FatExpr, cases: List(Ty(i64, FatExpr))) FatExpr = {
@@ -239,11 +260,8 @@ fn match_on_enum(arg: FatExpr, info: *TypeInfo, stmts: [] FatStmt) FatExpr = {
                     } else {
                         // TODO: better error message if its a call because they forgot a semi-colon. 
                         //debug_log_ast(handler_body[]);
-                        assert(handler_body.expr&.is(.PrefixMacro), "expected @default");
+                        name := macro_at_default_helper(handler_body);
                         branch := handler_body.expr.PrefixMacro&;
-                        macro := branch.handler;
-                        assert(macro.expr&.is(.GetNamed), "expected @default"); // TODO: bring back safety checks on tagged field access. 
-                        name := macro.expr.GetNamed; // TODO: ^ allow GetVar becuase they might have shadowed 'case' and 'default'? or should we respect their shadowing once you're allowed to expand custom macros in there. even then should give warning cause its confusing.  
                         arg := branch.arg;
                         action := branch.target[];
                         assert(name.eq(@symbol default), "unhandled prefix in @match");
@@ -325,9 +343,7 @@ fn switch(arg: FatExpr, handlers: FatExpr) FatExpr = {
                     handler_body := stmt.stmt.Eval&;
                     branch := handler_body.expr.PrefixMacro&;
                     macro := branch.handler;
-                    // TODO: better error message that shows more context on how you got to a certain type in the nested exprression. 
-                    //       it took me so long to figure out you don't need .GetNamed[0][] to index through the first single element tuple because it gets flattened. -- Apr 21 
-                    name := (@as(*Symbol) macro.expr.GetNamed&)[]; // TODO: allow GetVar becuase they might have shadowed 'case' and 'default'? or should we respect their shadowing once you're allowed to expand custom macros in there. even then should give warning cause its confusing.  
+                    name := macro_at_default_helper(handler_body);
                     arg := branch.arg;
                     action := branch.target[];
                     
@@ -413,11 +429,7 @@ fn enum(names: FatExpr) FatExpr = {
     cases: List(Binding) = list(ast_alloc());
     parts := names.expr.Tuple.items();
     enumerate(parts) {i, part|
-        name := @match(part[].expr&.tag()) {
-            fn GetNamed() => part.expr.GetNamed;
-            fn GetVar()   => part.expr.GetVar.name;
-            @default         => compile_error("Expected symbol in @enum", names.loc); // TODO: this should work as not a closure
-        };
+        name := part.ident() || compile_error("Expected symbol in @enum", names.loc); // TODO: this should work as not a closure
         cases&.push(binding(name, i));
     };
 
@@ -703,8 +715,7 @@ fn inline_match(container: FatExpr, target: FatExpr) FatExpr #macro = {
                     fn Closure(closure) => return(expand_case_body(closure[]));
                     fn PrefixMacro(branch) => {
                         macro := branch.handler;
-                        @ct_assert(macro.expr&.is(.GetNamed), macro.loc, "expected @default (TODO: allow GetVar?)");
-                        name := macro.expr.GetNamed; 
+                        name := macro.ident() || compile_error("expected @default.", handler_body.loc);
                         arg := branch.arg;
                         action := branch.target[];
                         @ct_assert(name == @symbol default, macro.loc, "unhandled prefix in @inline_match");
@@ -793,6 +804,7 @@ fn ident(self: *FatExpr) ?Symbol = {
         fn GetNamed(v) => (Some = v[]);
         fn String(v)   => (Some = v[]);
         fn ContextualField(v) => (Some = v[]);
+        fn UndeclaredVar(v) => (Some = v.name);
         @default => .None;
     }
 }

@@ -1,6 +1,6 @@
 //! - TODO: destructuring vars get declared before the value is resolved so shadowing doesn't work properly. 
 
-TRACK_SCOPES :: true;
+TRACK_SCOPES :: false;
 
 /// Query interface /// 
 
@@ -120,9 +120,12 @@ UseScopes :: @struct(
     parents: RsVec(UseScopeEntry),
 );
 
-UseScopeEntry :: @tagged(
-    Scope: ScopeId,
-    PendingEval: Var,
+UseScopeEntry :: @struct(
+    who: @tagged(
+        Scope: ScopeId,
+        PendingEval: Var,
+    ),
+    reexport: bool,
 );
 
 fn index(self: *Scopes, i: ScopeId) *Scope = {
@@ -197,7 +200,8 @@ fn resolve_func_args(self: *ResolveScope, func: *Func) PRes = {
     has_use := false;
     each func.annotations { a |
         @switch(a.name) {
-            @case(Flag.use.ident()) => @try(add_use(self, a)) return;
+            @case(Flag.use.ident()) => @try(add_use(self, a, false)) return;
+            @case(Flag.reexport.ident()) => @try(add_use(self, a, true)) return;
             @default => ();
         };
     };
@@ -221,9 +225,7 @@ fn resolve_func_args(self: *ResolveScope, func: *Func) PRes = {
     };
     
     each func.annotations { a | 
-        if a.args& { a | 
-            @try(self.walk_expr(a)) return;
-        };
+        @try(self.walk_expr(a.args&)) return;
     };
     
     each func.arg.bindings { b |
@@ -241,49 +243,55 @@ fn value_to_scope(self: *SelfHosted, value: Values, type: Type) Res(ScopeId) = {
         return(Ok = ScopeId.assume_cast(value&)[]);
     };
     if type == Type {
-        return(@err("TODO: Type -> Scope"));
+        type := Type.assume_cast(value&)[];
+        info := self.get_type(raw_type(self.comp(), type));
+        @err_assert(info.is(.Struct), "can only #use structs, not %", self.log_type(type)) return;
+        return(Ok = info.Struct.scope);
     };
     if type == FuncId || self.get_type(type).is(.Fn) {
         fid := FuncId.assume_cast(value&)[];
         use_func := self.get_function(fid);
-        @try(self.resolve_sign(use_func)) return;
-        @try(self.resolve_body(use_func)) return;
-        @err_assert(use_func.body&.is(.Normal), "#use fn no body") return;
-        e := use_func.body.Normal&;
-        @err_assert(e.expr&.is(.Block), "#use fn non Block body") return;
-        new_scope := e.expr.Block.scope;
-        _ := @try(self.poll_in_place(void, => self.compile_body(fid))) return;
-        return(Ok = new_scope);
+        if use_func.use_scope == NOSCOPE {
+            @try(self.resolve_sign(use_func)) return;
+            @try(self.resolve_body(use_func)) return;
+            @err_assert(use_func.body&.is(.Normal), "#use fn no body") return;
+            e := use_func.body.Normal&;
+            @err_assert(e.expr&.is(.Block), "#use fn non Block body %", self.comp().log(use_func)) return;
+            @debug_assert(!(e.expr.Block.scope == NOSCOPE), "ICE: #use unresolved block"); 
+            use_func.use_scope = e.expr.Block.scope;
+            _ := @try(self.poll_in_place(void, => self.compile_body(fid))) return;
+        };
+        return(Ok = use_func.use_scope);
     };
     @err("invalid type for value_to_scope")
 }
 
-fn add_use(self: *ResolveScope, a: *Annotation) PRes = {
+fn add_use(self: *ResolveScope, a: *Annotation, reexport: bool) PRes = {
     scope_with_use := self.scope;
-    arg := @unwrap(a.args&.as_ref(), "#use requires an argument") return;
+    arg := @unwrap(a.non_void_arg(), "#use requires an argument") return;
     @if(TRACK_SCOPES) @eprintln("[S] Starting #use %", self.compiler.comp().log(arg));
     @try(self.walk_expr(arg)) return;
     @err_assert(arg.expr&.is(.GetVar), "#use is temporarily limited to GetVar expressions") return;
-    add_use_pending(self.compiler, scope_with_use, arg.expr.GetVar);
+    add_use_pending(self.compiler, scope_with_use, arg.expr.GetVar, reexport);
     .Ok
 }
 
-fn add_use(self: *SelfHosted, scope_with_use: ScopeId, value: Values, type: Type) Res(void) = {
+fn add_use(self: *SelfHosted, scope_with_use: ScopeId, value: Values, type: Type, reexport: bool) Res(ScopeId) = {
     new_scope := @try(value_to_scope(self, value, type)) return; 
-    add_use(self, scope_with_use, new_scope);
-    .Ok
+    add_use(self, scope_with_use, new_scope, reexport);
+    (Ok = new_scope)
 }
 
-fn add_use(self: *SelfHosted, scope_with_use: ScopeId, scope_being_used: ScopeId) void = {
+fn add_use(self: *SelfHosted, scope_with_use: ScopeId, scope_being_used: ScopeId, reexport: bool) void = {
     use := get_use(self, scope_with_use);
     @if(TRACK_SCOPES) @println("[S] % done #use(%)", scope_with_use.id(), scope_being_used.id());
-    use.parents&.push((Scope = scope_being_used), self.get_alloc());
+    use.parents&.push((who = (Scope = scope_being_used), reexport = reexport), self.get_alloc());
 }
 
-fn add_use_pending(self: *SelfHosted, scope_with_use: ScopeId, v: Var) void = {
+fn add_use_pending(self: *SelfHosted, scope_with_use: ScopeId, v: Var, reexport: bool) void = {
     use := get_use(self, scope_with_use);
     @if(TRACK_SCOPES) @println("[S] % save #use(%%%)", scope_with_use.id(), self.pool.get(v.name), "%", v.id);
-    use.parents&.push((PendingEval = v), self.get_alloc());
+    use.parents&.push((who = (PendingEval = v), reexport = reexport), self.get_alloc());
 }
 
 fn get_use(self: *SelfHosted, s: ScopeId) *UseScopes = {
@@ -370,6 +378,7 @@ fn scan_const_decls(self: *ResolveScope, stmt: *FatStmt) CRes(bool) = {
             // Functions don't shadow, they just add to an overload group.
             if func.var_name.is_none() {
                 v := self.find_var(func.name) || {
+                    //@println("overload set not found for % in S%", self.compiler.pool.get(func.name), self.scope.id());
                     // defaulting to making all overload sets global and hoping you mostly add overloads for your own types. 
                     @try(self.compiler.decl_var(TOP_LEVEL_SCOPE, func.name, .Const, func.loc, .OverloadSet)) return
                 };
@@ -378,8 +387,14 @@ fn scan_const_decls(self: *ResolveScope, stmt: *FatStmt) CRes(bool) = {
             return(Ok = true);
         });
         (fn Annotations(annotations) => {
-            if annotations.len == 1 && annotations.items()[0].name == Flag.use.ident() {
-                @try(add_use(self, annotations.index(0))) return;
+            if annotations.len == 1 {
+                a := annotations.index(0);
+                if a.name == Flag.use.ident() {
+                    @try(add_use(self, a, false)) return;
+                };
+                if a.name == Flag.reexport.ident() {
+                    @try(add_use(self, a, true)) return;
+                };
                 stmt.stmt = .Noop;
             };
         });
@@ -393,17 +408,25 @@ fn scan_const_decls(self: *ResolveScope, stmt: *FatStmt) CRes(bool) = {
 //! and i dont have enough code written in this language to convincingly benchmark it.
 
 fn find_var_in_scope(self: *SelfHosted, name: Symbol, s: ScopeId) ?Var = {
+    @debug_assert(!(s == NOSCOPE), "find_var in NOSCOPE");
+    self.scopes_generation += 1;
+    find_var_in_scope_inner(self, name, s, false)
+}
+
+fn find_var_in_scope_inner(self: *SelfHosted, name: Symbol, s: ScopeId, for_use: bool) ?Var = {
     first := true;
-    
     loop {
         continue :: local_return;
         scope := self.scopes[s]&;
-        if scope.visit == self.scopes_generation {
-            //@println("loop name=% gen=%", self.compiler.pool.get(name), scope.visit);
-            return(.None);
+        if for_use {
+            if scope.visit == self.scopes_generation {
+                //@println("loop name=% gen=%", self.pool.get(name), scope.visit);
+                return(.None);
+            };
+            scope.visit = self.scopes_generation;
         };
-        scope.visit = self.scopes_generation;
         
+        //@println("check scope % S%", self.pool.get(name), s.id());
         found := find(scope, name);
         if found& { v | // TODO: it gets the arity wrong if not by pointer. 
             // TODO: derive ne from eq so you can use != more often. 
@@ -412,18 +435,29 @@ fn find_var_in_scope(self: *SelfHosted, name: Symbol, s: ScopeId) ?Var = {
         };
         ::ptr_utils(UseScopes);
         use := scope.nullable_use;
-        if !scope.nullable_use.is_null() {
+        if !use.is_null() {
+            //@println("check uses % S%", self.pool.get(name), s.id());
+            prev := use.parents.len;
+            found: ?Var = .None;
             each use.parents { the_use | 
                 break :: local_return;
+                @if(!for_use || the_use.reexport)
                 loop {
-                    @match(the_use) {
+                    @match(the_use.who&) {
                         fn Scope(it) => {
-                            //@println("A %", self.pool.get(name));
-                            if find_var_in_scope(self, name, it[]) { v |
-                                // TODO: keep looping to check for conflicts?
-                                if v.kind == .Const {
-                                    return(Some = v);
+                            //@println("A % S%", self.pool.get(name), it[].id());
+                            if find_var_in_scope_inner(self, name, it[], true) { v |
+                                //@println("B % S%", self.pool.get(name), it[].id());
+                                if found& { v2 | 
+                                    if !(v == v2[]) {
+                                        // TODO: really need to return an error here beacuse now you can keep looping and go to your parent when you should have got a conflict. 
+                                        //       the thing i want to stop is shadowing twice at the same level
+                                        println("conflicting #use");
+                                        //return(@err("conflicting #use for variable %", self.pool.get(name)));
+                                        return(.None);
+                                    };
                                 };
+                                found = (Some = v);
                             };
                             break();
                         }
@@ -436,14 +470,20 @@ fn find_var_in_scope(self: *SelfHosted, name: Symbol, s: ScopeId) ?Var = {
                             @if(TRACK_SCOPES) @println("[S] #use(%)", log(value&, self, type));
                             hack := value_to_scope(self, value, type);
                             new_scope := self.unwrap_report_error(ScopeId, hack);
-                            the_use[] = (Scope = new_scope);
+                            the_use.who = (Scope = new_scope);
                             // continue
                         }
                     };
                 };
             };
+            @debug_assert_eq(use.parents.len, prev, "concurentmodificationexception");
+            if found { v |
+                return(Some = v)
+            };
         };
-        if scope.parent == s { 
+        scope := self.scopes[s]&;
+        
+        if scope.parent == s || for_use { 
             return(.None);
         };
         s = scope.parent;
@@ -468,8 +508,6 @@ fn find_var_in_scope(self: *SelfHosted, name: Symbol, s: ScopeId) ?Var = {
 }
 
 fn find_var(self: *ResolveScope, name: Symbol) ?Var = {
-    self.compiler.scopes_generation += 1;
-    //@println("%", self.compiler.pool.get(name));
     find_var_in_scope(self.compiler, name, self.scope)
 }
 
@@ -560,48 +598,45 @@ fn handle_expr(self: *ResolveScope, expr: *FatExpr) Result(DoMore, *CompileError
             return(Ok = DoMore.Break);
         });
         (fn Block(f) => {
-            self.push_scope(expr.loc);
-            f.scope = self.scope;
+            if f.block_resolved {
+                return(Ok = .Break);
+            };
+            if f.scope == NOSCOPE {
+                self.push_scope(expr.loc);
+                f.scope = self.scope;
+            } else {
+                self.scope = f.scope;
+            };
             
             // :SLOW this is unfortunate
+            has_use_stmt := false;
             each f.body { stmt |
                 @match(stmt.stmt&) {
                     fn DeclFunc(func) => {
-                        is_new_overloadset := func.body&.is(.Empty) && func.annotations.len == 0;
+                        // TODO:  && func.arg.bindings.len == 0
+                        is_new_overloadset := func.body&.is(.Empty) && func.annotations.len == 0 && func.ret&.is(.Infer);
                         if is_new_overloadset {
                             v := @try(self.decl_var(func.name, .Const, func.loc, .OverloadSet)) return;
                             func.var_name = (Some = v);
                         };
-                    };
+                    }
+                    fn Annotations(annotations) => {
+                        if annotations.len == 1 {
+                            n := annotations.items()[0].name;
+                            if n == Flag.use.ident() || n == Flag.reexport.ident() {
+                                has_use_stmt = true;
+                            };
+                        };
+                    }
                     @default => ();
                 };
             };
-            
-            (=> {
-                break :: local_return;
-                each f.body { stmt |
-                    @match(stmt.stmt&) {
-                        fn Annotations(annotations) => {
-                            if annotations.len == 1 {
-                                if annotations.items()[0].name == Flag.include_std.ident() {
-                                    stmts := f.body.assume_owned(self.compiler.get_alloc());
-                                    @try(self.slow_body(stmts&)) return;
-                                    f.body = stmts.rs();
-                                    break();
-                                };
-                            };
-                        };
-                        @default => ();
-                    };
-                    @try(self.scan_const_decls(stmt)) return;
-                };
-            })();
-            
-            each f.body { stmt |
-                @try(self.walk_stmt(stmt)) return;
+            if has_use_stmt {
+                // suspend and come back latter
+                self.pop_block();
+                return(Ok = .Break);
             };
-            @try(self.walk_expr(f.result)) return;
-            
+            @try(finish_resolving_block(self, f)) return;
             self.pop_block();
             
             // Needed to do that in the block, so took control of the walk order and now we're done.
@@ -613,11 +648,43 @@ fn handle_expr(self: *ResolveScope, expr: *FatExpr) Result(DoMore, *CompileError
             if v& { var |
                 self.compiler.record_var_usage(var[], expr.loc);
                 expr.expr = (GetVar = var[]);
-            };
+            } else {
+                expr.expr = (UndeclaredVar = (name = name[], scope = self.scope));
+            }
         });
         @default => ();
     };
     (Ok = DoMore.Continue)
+}
+
+fn finish_resolving_block(self: *ResolveScope, f: *get_variant_type(Expr, .Block)) Res(void) = {
+    @debug_assert(self.scope == f.scope, "block scope?");
+    if true {
+        break :: local_return;
+        each f.body { stmt |
+            @match(stmt.stmt&) {
+                fn Annotations(annotations) => {
+                    if annotations.len == 1 {
+                        if annotations.items()[0].name == Flag.include_std.ident() {
+                            stmts := f.body.assume_owned(self.compiler.get_alloc());
+                            @try(self.slow_body(stmts&)) return;
+                            f.body = stmts.rs();
+                            break();
+                        };
+                    };
+                };
+                @default => ();
+            };
+            @try(self.scan_const_decls(stmt)) return;
+        };
+    };
+    
+    each f.body { stmt |
+        @try(self.walk_stmt(stmt)) return;
+    };
+    @try(self.walk_expr(f.result)) return;
+    f.block_resolved = true;
+    .Ok
 }
 
 fn handle_stmt(self: *ResolveScope, stmt: *FatStmt) Result(DoMore, *CompileError) #once = {
@@ -751,9 +818,10 @@ fn slow_body(self: *ResolveScope, body: *List(FatStmt)) PRes #once = {
             @if_let(stmt.stmt&) fn Annotations(annotations) => {
                 if annotations.len == 1 && annotations.items()[0].name == Flag.include_std.ident() {
                     msg :: "#include_std requires string argument";
-                    arg_expr := annotations.items()[0].args.or() {
+                    arg_expr := annotations.items().index(0).non_void_arg().or() {
                         return(@err(msg))
                     };
+                    loc := arg_expr.loc;
                     name := @match(arg_expr.expr) {
                         fn String(name) => name;
                         @default => return(@err(msg));
@@ -768,34 +836,8 @@ fn slow_body(self: *ResolveScope, body: *List(FatStmt)) PRes #once = {
                         };
                         dirty = true;
                         stmts := @try(self.compiler.parser.finish_pending_stmts(file)) return;
-                        
-                        //old_scope := self.scope;
-                        //old_block := self.block;
-                        //self.push_scope(true);
-                        //self.push_scope(false);
-                        //new_scope := self.scope;
-                        //each stmts& { stmt |
-                        //    @try(self.scan_const_decls(stmt)) return;
-                        //};
                         new_body&.push_all(stmts.items());
-                        //add_use(self.compiler, old_scope, new_scope, 0);
-                        //self.pop_scope();
-                        //self.pop_scope();
-                        
-                        // TODO: why lose?
-                        //self.scope = old_scope;
-                        //self.block = old_block;
-                        //@debug_assert(self.scope == old_scope, "lost scope");
-                        
-                        // TODO: instead of that...
-                        //       but it's hard because you want add_use to call compile_body
-                        //       but then you get stuck trying to do too much before you're ready. 
-                        //       instead of doing all the ConstEval now, need to add them to a queue i guess? 
-                        //fake_fid := @try(make_function_scope(self.compiler, stmts.items(), name, self.scope)) return;
-                        //val := self.compiler.to_values(FuncId, fake_fid);
-                        //add_use(self.compiler, self.scope, val, FuncId);
-                        
-                        
+                        // TODO: instead of that, convert it to #use(import(path));
                     };
                     continue();
                 };

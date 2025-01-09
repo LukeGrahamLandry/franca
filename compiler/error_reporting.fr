@@ -175,6 +175,9 @@ fn log(self: *FatExpr, pool: *SelfHosted, out: *List(u8), depth: i64) void = {
             inner[].log(pool, out, depth + 1);  
             out.push_all("\n]");
         }
+        fn UndeclaredVar(it) => {
+            @fmt(out, "Undeclared Variable '%' in S%", pool.pool.get(it.name), it.scope.id());
+        }
         @default => {
             @fmt(out, "TODO:print:%", self.expr&.tag());
         };
@@ -359,7 +362,7 @@ fn log(self: *Annotation, pool: *SelfHosted, out: *List(u8), depth: i64) void = 
     out.push_all("#");
     out.push_all(pool.pool.get(self.name));
     ::?*FatExpr; ::as_ref(FatExpr);
-    if(self.args&.as_ref()){expr|
+    if(self.non_void_arg()){expr|
         out.push_all("(");
         expr.log(pool, out, depth);
         out.push_all(")");
@@ -789,7 +792,7 @@ fn maybe_log_scopes(self: *SelfHosted) void = {
             if use.parents.len > 0 {
                 @fmt(out&, ", #use[");
                 each use.parents { use |
-                    @match(use) {
+                    @match(use.who&) {
                         fn Scope(it) => @fmt(out&, "(S%), ", it[].id());
                         fn PendingEval(it) => @fmt(out&, "%%%, ", self.pool.get(it.name), "%", it.id);
                     };
@@ -797,6 +800,14 @@ fn maybe_log_scopes(self: *SelfHosted) void = {
                 @fmt(out&, "]",);
             };
             @fmt(out&, "\n%  %\n", f_rep("  ", scope.visit), self.codemap.source_slice(line.line_text));
+            if scope.const_lookup.raw.len_including_tombstones > 0 {
+                @fmt(out&, "%   - VARS: \n%    [", f_rep("  ", scope.visit), f_rep("  ", scope.visit));
+                each scope.const_lookup& { k, v |
+                    @fmt(out&, "%%%, ", self.pool.get(k), "%", v.id);
+                };
+                @fmt(out&, "]\n");
+            };
+            @fmt(out&, "\n");
         };
         
         write_entire_file(path.str(), out.items());
