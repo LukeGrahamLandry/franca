@@ -24,6 +24,8 @@ If you just want to see what the syntax looks like, click on examples or compile
 - no seperate build system language. write a program that builds your program
 - cross compilation and reproducible builds
 
+> an ad hoc, informally-specified, bug-ridden, slow implementation of half of Common Lisp.
+
 ## Backends
 
 - **fully self hosted**: only supports macos. generates native executables (we don't depend on an assembler, linker, or xcode-codesign).
