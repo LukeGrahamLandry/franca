@@ -2,6 +2,8 @@
 
 TRACK_SCOPES :: false;
 
+EXPERIMENTAL :: false;
+
 /// Query interface /// 
 
 fn put_constant(self: *Scopes, name: Var, value: FatExpr, ty: LazyType) void = {
@@ -68,7 +70,7 @@ fn resolve_body(compiler: *SelfHosted, func: *Func) PRes #once = {
 fn dup_var(self: *Scopes, old: Var) Var = {
     new := old;
     new.id = self.types.len.trunc();
-    self.types&.push(type = UnknownType, took_address = self.types&.nested_index(old.id.zext())[].took_address);
+    self.types&.push(type = UnknownType, took_address = self.types&.nested_index(old.id.zext())[].took_address, debug_name = old.name);
     // EvilUninit
     self.constants&.push(Ty(FatExpr, LazyType).zeroed());  // TODO: bit odd that i dont have to clone if the old thing had a constant expr. 
     new
@@ -80,7 +82,7 @@ fn renumber_expr(self: *SelfHosted, expr: *FatExpr, initial: ?Ty(Var, Var)) void
     if initial& { i |
         mapping&.insert(i._0, i._1);
     };
-    renumber: RenumberVars = (scope = self.scopes, mapping = mapping&);
+    renumber: RenumberVars = (scope = self.scopes, mapping = mapping&, compiler = self);
     renumber&.walk_expr(expr).unwrap();
 }
 
@@ -103,7 +105,8 @@ Scopes :: @struct(
 
 VarInfo :: @struct(
     type: Type,
-    took_address: bool
+    took_address: bool,
+    debug_name: Symbol, // TODO: redundant with ProgramIndex
 );
 
 // TODO: use unmanaged List/HashMap so not storing the allocator a billon times. 
@@ -154,14 +157,14 @@ ResolveScope :: @struct(
     captures: List(Var),
     compiler: *SelfHosted,
     scope: ScopeId,
-    block: i64,
+    inside_quote: bool
 );
 
 fn new(compiler: *SelfHosted, scope: ScopeId, last_loc: Span) ResolveScope = (
     captures = list(temp()),
     compiler = compiler,
     scope = scope,
-    block = 0,
+    inside_quote = false,
 );
 
 fn resolve_func(self: *ResolveScope, func: *Func) PRes = {
@@ -195,7 +198,6 @@ fn resolve_func(self: *ResolveScope, func: *Func) PRes = {
 fn resolve_func_args(self: *ResolveScope, func: *Func) PRes = {
     if(func.get_flag(.ResolvedSign), => return(.Ok));
     self.scope = func.scope.expect("function to have scope!!!");
-    self.block = 0;
     
     has_use := false;
     each func.annotations { a |
@@ -536,7 +538,7 @@ fn decl_var(self: *SelfHosted, s: ScopeId, name: Symbol, kind: VarType, loc: Spa
     };
     
     scope.vars&.push(var, self.get_alloc()); // includes constants!
-    scopes.types&.push(type = UnknownType, took_address = false);
+    scopes.types&.push(type = UnknownType, took_address = false, debug_name = name);
     self.record_var_declare(var, loc);
     (Ok = var)
 }
@@ -591,13 +593,13 @@ fn handle_expr(self: *ResolveScope, expr: *FatExpr) Result(DoMore, *CompileError
     loc := expr.loc;
 
     @match(expr.expr&) {
-        (fn GetParsed(index) => {
+        fn GetParsed(index) => {
             e := @try(self.compiler.parser.finish_pending(index[])) return;
             expr[] = self.compiler.clone(e&); // clone is important! you end up with multiple copies of the same pending parse. 
             @try(self.walk_expr(expr)) return;
             return(Ok = DoMore.Break);
-        });
-        (fn Block(f) => {
+        }
+        fn Block(f) => {
             if f.block_resolved {
                 return(Ok = .Break);
             };
@@ -613,7 +615,7 @@ fn handle_expr(self: *ResolveScope, expr: *FatExpr) Result(DoMore, *CompileError
             each f.body { stmt |
                 @match(stmt.stmt&) {
                     fn DeclFunc(func) => {
-                        // TODO:  && func.arg.bindings.len == 0
+                        // TODO:  && func.arg.bindings.len == 0 but instead need to check for unit
                         is_new_overloadset := func.body&.is(.Empty) && func.annotations.len == 0 && func.ret&.is(.Infer);
                         if is_new_overloadset {
                             v := @try(self.decl_var(func.name, .Const, func.loc, .OverloadSet)) return;
@@ -631,7 +633,7 @@ fn handle_expr(self: *ResolveScope, expr: *FatExpr) Result(DoMore, *CompileError
                     @default => ();
                 };
             };
-            if has_use_stmt {
+            if has_use_stmt || (!self.inside_quote && EXPERIMENTAL) {
                 // suspend and come back latter
                 self.pop_block();
                 return(Ok = .Break);
@@ -641,9 +643,9 @@ fn handle_expr(self: *ResolveScope, expr: *FatExpr) Result(DoMore, *CompileError
             
             // Needed to do that in the block, so took control of the walk order and now we're done.
             return(Ok = .Break);
-        });
+        }
         // TODO: wastefully resolving on things like `.None` and `@symbol whatever`, that's why we have to allow missing vars here, they might just be used as symbols. 
-        (fn GetNamed(name) => {
+        fn GetNamed(name) => {
             v := self.find_var(name[]);
             if v& { var |
                 self.compiler.record_var_usage(var[], expr.loc);
@@ -651,11 +653,18 @@ fn handle_expr(self: *ResolveScope, expr: *FatExpr) Result(DoMore, *CompileError
             } else {
                 expr.expr = (UndeclaredVar = (name = name[], scope = self.scope));
             }
-        });
+        }
+        fn Quote(inner) => if !self.inside_quote && EXPERIMENTAL {
+            self.inside_quote = true;
+            @try(self.walk_expr(inner[])) return;
+            self.inside_quote = false;
+            return(Ok = DoMore.Break);
+        };
         @default => ();
     };
     (Ok = DoMore.Continue)
 }
+
 
 fn finish_resolving_block(self: *ResolveScope, f: *get_variant_type(Expr, .Block)) Res(void) = {
     @debug_assert(self.scope == f.scope, "block scope?");
@@ -719,10 +728,15 @@ fn handle_stmt(self: *ResolveScope, stmt: *FatStmt) Result(DoMore, *CompileError
 
 fn handle_func(self: *ResolveScope, func: *Func) Result(DoMore, *CompileError) #once = {
     @try(self.resolve_func(func)) return;
-    @if(!LAZY_SCOPE) {
+    ////@if(!LAZY_SCOPE) {
+    @if(!LAZY_SCOPE) { // || (EXPERIMENTAL)) {
+        prev := self.inside_quote;
+        self.inside_quote = true;
         @try(self.resolve_func_args(func)) return;
         @try(self.resolve_func_body(func)) return;
+        self.inside_quote = prev;
     };
+    //};
     (Ok = .Break)
 }
 
@@ -732,7 +746,7 @@ fn handle_pattern(self: *ResolveScope, p: *Pattern) Result(DoMore, *CompileError
 ///////////////////
 /// Renumbering ///
 
-RenumberVars :: @struct(scope: *Scopes, mapping: *HashMap(Var, Var));
+RenumberVars :: @struct(scope: *Scopes, mapping: *HashMap(Var, Var), compiler: *SelfHosted);
 
 fn decl(self: *RenumberVars, name: *Var) void = {
     new := self.scope.dup_var(name[]);

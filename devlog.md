@@ -1,7 +1,20 @@
 - TODO: deal with `CodegenEntry:Bounce` on wasm
 
+## (Jan 9)
+
+## (Jan 8)
+
 - i really need to have a version of `@struct` that lets you use the normal top level declaration syntax
   so you don't have to go around switching semicolons to commas. this is super dumb.
+- added `#reexport` which is like `pub use` so you can have internal dependencies without letting people depend on importing you to get other random stuff.
+- simplified how const-fields in structs are represented. now they just point at a scope so you don't need everyone who wants to iterate
+  over runtime fields to think about that which was getting really annoying for the rest of the compiler.
+- attempting to resolve blocks lazily but have to renumber scopes more aggressivly, so kinda backed out of that.
+  i got as far as it mostly working if i didn't stop at function declarations which meant it was slower,
+  but that version fixed `// TODO: compiler bug? do we really want you to be able to bind to chunks which is declared lower in the scope?`,
+  so that's interesting. i'll come back to that but for now a small vacation.
+- examples/edit.fr: multiple text boxes
+- renamed some io functions to make it clear that they `_or_crash`
 
 ## (Jan 7)
 
@@ -11,6 +24,7 @@
 - `fn import(Str)` as a more structured replacement for `#include_std`. instead of just pasting the code like a c `#include`,
   you get a ScopeId value that you can access const fields on like a struct or pass to `#use` to get the old behaviour.
   needs more refinement on when you have to wait on evaluating a top level `::` expression before i can actually replace the old thing with this.
+- cleaned up Elf/Wasm bits to use import() for namespacing
 
 ## (Jan 6)
 

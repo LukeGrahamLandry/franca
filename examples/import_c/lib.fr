@@ -1,0 +1,270 @@
+// cd bindings/chibicc && clang hashmap.c parse.c tokenize.c type.c unicode.c preprocess.c strings.c codegen.c -dynamiclib ../../examples/import_c/temp.c -o ../../examples/import_c/chibicc.dylib
+
+CC :: import("@/examples/import_c/chibicc.fr");
+
+ENABLE_TRACY :: false;
+#include_std("backend/lib.fr");
+#include_std("compiler/worker.fr");
+
+:: {
+    ctx := current_compiler_context();
+    cg := dlopen("examples/import_c/chibicc.dylib", DlFlag.Lazy);
+    @assert(!cg.lib.is_null(), "failed to open chibicc");
+    ctx.add_comptime_library(@symbol "chibicc", cg);
+};
+
+fn preprocess();
+
+fn main() void = {
+    m := @uninitialized QbeModule;
+    a := query_current_arch();
+    init_default_module(m&, (arch = a.unwrap(), os = query_current_os(), type = .Exe), use_threads);
+    m.debug["P".char()] = true;
+    ctx: *CodegenShared = init(m&, libc_allocator, @as(CodegenWorker) codegen_thread_main);
+
+    // Tokenize and parse.
+    CC;
+    tok2 := tokenize_file("bindings/hello.c") || panic("failed tokenize_file");
+    tok := CC.Token.zeroed(); tok := tok&;
+    tok  = append_tokens(tok, tok2);
+    tok  = preprocess(tok);
+    print_tokens(tok);
+    prog := parse(tok);
+    emit_the_code(ctx, prog);
+    join_codegen_thread(ctx);
+
+    outpath := "c.out";
+    outfile := fopen(outpath.maybe_borrow_cstr(temp()), "w".sym().c_str());
+    chunks := {m.target.finish_module}(m&);
+    for chunks { chunk | 
+        write(outfile, chunk);
+    };
+    fclose(outfile);
+}
+
+fn emit_the_code(ctx: *CodegenShared, obj: *CC.Obj) void = {
+    println("AA");
+    :: ptr_utils(CC.Obj);
+    while => !obj.next.is_null() {
+        @assert(!obj.is_tls, "Thread Local Storage is not supported");
+        if obj.is_definition {
+            entry := bouba_acquire(ctx, ctx.bouba_idx&);
+            push_dynamic_context {
+                context(DefaultContext)[].temporary_allocator = entry.arena&;
+                if obj.is_function {
+                    f := temp().box_zeroed(Qbe.Fn);
+                    f.default_init(ctx.m);
+                    fill_lnk(f.lnk&, obj, ctx.m);
+                    translate_func(f, obj);
+                    entry.task = (Func = f);
+                } else {
+                    entry.task = (AotVar = translate_data(ctx.m, obj));
+                };
+            };
+            enqueue_task(ctx, entry);
+        };
+        obj = obj.next;
+    };
+}
+
+// TODO: do i need a way of asking for a certain alignment?
+fn translate_data(m: *QbeModule, obj: *CC.Obj) []Qbe.Dat = {
+    out := Qbe.Dat.list(3, temp());
+    lnk := temp().box(Qbe.Lnk);
+    fill_lnk(lnk, obj, m);
+    
+    next_dat :: fn() => {
+        out&.push(Qbe.Dat.zeroed());
+        dat := out.index(out.len - 1);
+        dat.lnk = lnk;
+        dat
+    };
+    
+    { dat := next_dat(); dat.type = .DStart; };
+    
+    if obj.init_data.ptr.is_null() {
+        dat := next_dat(); 
+        dat.type = .DZ; 
+        dat.u.num = obj.ty.size.intcast();
+    } else {
+        ::ptr_utils(@type obj.rel[]);
+        if obj.rel.is_null() {
+            dat := next_dat(); 
+            dat.type = .DB; 
+            dat.is_str = true;
+            dat.u.str = obj.init_data.str();
+            dat.u.str.len += 1;  // null terminator
+        } else {
+            panic("TODO: pointers in data");
+        };
+    };
+    
+    { dat := next_dat(); dat.type = .DEnd; };
+    out.items()
+}
+
+fn translate_func(f: *Qbe.Fn, obj: *CC.Obj) void = {
+    start := newblk(); start.ins = new(0); f.nblk += 1;
+    f.start = start;
+    
+    loc := obj.locals;
+    for_linked loc { loc |
+        loc.stack_slot = f.newtmp(loc.name.str(), .Kl);
+        emit(start, .alloc8, .Kl, loc.stack_slot, f.getcon(loc.ty.size.intcast()), QbeNull);  // TODO: smaller stack slots
+    };
+    
+    gen_stmt(f, obj.body);
+    start.jmp.type = .ret0;
+    f.start = start;
+}
+
+#where(fn(T) => is_ptr(T) && has_field(Deref(T), @symbol next))
+fn for_linked(head: ~T, $body: @Fn(it: T) void) void = {
+    ::ptr_utils(Deref(T));
+    while => !head.is_null() {
+        body(head);
+        head = head.next;
+    };
+}
+
+fn emit(b: *Qbe.Blk, op: Qbe.O, k: Qbe.Cls, to: Qbe.Ref, arg0: Qbe.Ref, arg1: Qbe.Ref) void = {
+    push(b, make_ins(op, k, to, arg0, arg1));
+}
+
+fn fill_lnk(lnk: *Qbe.Lnk, obj: *CC.Obj, m: *QbeModule) void = {
+    lnk.export = !obj.is_static;
+    lnk.id = m.mangle(obj);
+}
+
+fn mangle(m: *QbeModule, obj: *CC.Obj) u32 = {
+    name := obj.name.str();
+    if obj.is_static && !obj.tok.is_null() {
+        name = @tfmt("%@%", name, obj.tok.filename); // not very rigorous
+    };
+    m.intern(name)
+}
+
+::enum(CC.NodeKind);
+
+fn gen_stmt(f: *Qbe.Fn, node: *CC.Node) void = {
+    @match(node.kind) {
+        fn ND_BLOCK() => {
+            s := node.body;
+            for_linked s { s |
+                gen_stmt(f, s);
+            };
+        }
+        fn ND_EXPR_STMT() => {
+            gen_expr(f, node.lhs);
+        }
+        @default => @panic("unexpected node for stmt: %", node.kind);
+    };
+}
+
+fn gen_expr(f: *Qbe.Fn, node: *CC.Node) Qbe.Ref = {
+    B :: fn(o: Qbe.O) => binary(f, node, o);
+    @match(node.kind) {
+        fn ND_NULL_EXPR() => QbeNull;
+        // TODO: same thing as ND_BLOCK. 
+        //       pretending statements and expressions are different is kind of odd. 
+        //       i do it for Franca's ast too, but im not really sure why. 
+        //       it just seemed like the thing people do. -- Jan 9
+        fn ND_EXPR_STMT() => { 
+            s := node.body;
+            for_linked s { s |
+                gen_stmt(f, s);
+            };
+            QbeNull
+        }
+        fn ND_FUNCALL() => {
+            arg := node.args;
+            for_linked arg { arg |
+                r := gen_expr(f, arg);
+                // TODO: argc and other types
+                emit(f.start, .arg, .Kl, QbeNull, r, QbeNull);
+            };
+            assert(node.ret_buffer.is_null(), "TODO: aggragate returns");
+            
+            callee := gen_expr(f, node.lhs);
+            r := f.newtmp("ret", .Kl); // TODO: other types
+            emit(f.start, .call, .Kl, r, callee, QbeNull);
+            r
+        }
+        fn ND_ADD()      => B(.add);
+        fn ND_SUB()      => B(.sub);
+        fn ND_MUL()      => B(.mul);
+        fn ND_DIV()      => B(.div);  // TODO: sign
+        fn ND_MOD()      => B(.rem);  // TODO: sign
+        fn ND_BITAND()   => B(.and);
+        fn ND_BITOR()    => B(.or);
+        fn ND_BITXOR()   => B(.xor);
+        fn ND_SHL()      => B(.shl);
+        fn ND_SHR()      => B(.shr);
+        // TODO: types
+        fn ND_EQ()       => B(.ceql);
+        fn ND_NE()       => B(.cnel);
+        fn ND_LT()       => B(.csltl);
+        fn ND_LE()       => B(.cslel);
+        
+        fn ND_ADDR()     => node.var.stack_slot; // TODO: globals
+        fn ND_CAST() => {
+            eprintln("TODO: CAST");
+            gen_expr(f, node.lhs)
+        }
+        fn ND_VAR() => {
+            if !node.var.is_local {
+                return(f.symcon(f.globals.mangle(node.var)));
+            };
+            addr := node.var.stack_slot; 
+            todo()
+        }
+        @default => @panic("unexpected node for expr: %", node.kind);
+    }
+}
+
+fn binary(f: *Qbe.Fn, node: *CC.Node, callee: Qbe.O) Qbe.Ref = {
+    todo()
+}
+
+::ptr_utils(CC.Token); ::enum(CC.TokenKind);
+
+fn tokenize_file(path: Str) ?*CC.Token = {
+    a := libc_allocator; // temp();
+    src := read_to_string_or_crash(a, path);
+    src&.push(0);
+    path_c := maybe_borrow_cstr(path, a);
+    //file_no only used for assembler directive so i dont care
+    file := new_file(path_c, 0, src&.assert_c_str()); 
+    t := tokenize(file);
+    if t.is_null() {
+        return(.None);
+    };
+    (Some = t)
+}
+
+fn append_tokens(tok1: *CC.Token, tok2: *CC.Token) *CC.Token = {
+    if(!tok1.is_null() || tok1.kind == .TK_EOF, => return(tok2));
+    t := tok1;
+    while => t.next.kind != .TK_EOF {
+        t = t.next;
+    };
+    t.next = tok2;
+    tok1
+}
+
+fn print_tokens(tok: *CC.Token) void = {
+    out := u8.list(temp());
+    line := 0;
+    while => tok.kind != .TK_EOF {
+        if line > 1 && tok.at_bol {
+            @fmt(out&, "\n");
+        };
+        if tok.has_space && !tok.at_bol {
+            @fmt(out&, "  ");
+        };
+        @fmt(out&, "%", tok.loc.str().slice(0, tok.len.zext()));
+        line += 1;
+        tok = tok.next;
+    };
+    println(out.items());
+}

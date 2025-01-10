@@ -400,9 +400,15 @@ fn log(self: *Binding, pool: *SelfHosted, out: *List(u8), depth: i64) void = {
     };
 }
 
+fn log(self: *SelfHosted, v: Var) Str = {
+    out := u8.list(temp());
+    log(v&, self, out&, 0);
+    out.items()
+}
+
 fn log(v: *Var, pool: *SelfHosted, out: *List(u8), depth: i64) void = {
     @if(BOOTSTRAP_ONLY_MODE) return();
-    @fmt(out, "%%%", pool.pool.get(v.name), "%", v.id);
+    @fmt(out, "%%%%%", pool.pool.get(v.name), "%", v.id, "%", v.scope.id());
 }
 
 fn log(self: *LazyType, pool: *SelfHosted, out: *List(u8), depth: i64) void = {
@@ -533,7 +539,12 @@ fn log_type_inner(self: *SelfHosted, safe_rec: *DynamicBitSet, out: *List(u8), t
 
     @match(self.get_type(ty)) {
         fn Placeholder() => {
-            @fmt(out, "UnfinishedPlaceHolder%", ty.as_index());
+            if ty == UnknownType {
+                @fmt(out, "-?-");
+                
+            } else {
+                @fmt(out, "UnfinishedPlaceHolder%", ty.as_index());
+            };
         }
         fn Never() => out.push_all("Never");
         fn F64()   => out.push_all("f64");
@@ -801,13 +812,28 @@ fn maybe_log_scopes(self: *SelfHosted) void = {
             };
             @fmt(out&, "\n%  %\n", f_rep("  ", scope.visit), self.codemap.source_slice(line.line_text));
             if scope.const_lookup.raw.len_including_tombstones > 0 {
-                @fmt(out&, "%   - VARS: \n%    [", f_rep("  ", scope.visit), f_rep("  ", scope.visit));
+                @fmt(out&, "%   - CONSTANTS: \n%    [", f_rep("  ", scope.visit), f_rep("  ", scope.visit));
                 each scope.const_lookup& { k, v |
-                    @fmt(out&, "%%%, ", self.pool.get(k), "%", v.id);
+                    @fmt(out&, "%, ", self.log(v[]));
+                };
+                @fmt(out&, "]\n");
+            };
+            if scope.vars.len > 0 {
+                @fmt(out&, "%   - VARIABLES: \n%    [", f_rep("  ", scope.visit), f_rep("  ", scope.visit));
+                each scope.vars& { v |
+                    if v.kind != .Const {
+                        @fmt(out&, "%, ", self.log(v[]));
+                    };
                 };
                 @fmt(out&, "]\n");
             };
             @fmt(out&, "\n");
+        };
+        @fmt(out&, "\n\n\n\n!!!!PART2:\n\n\n");
+        i := 0;
+        each self.scopes.types& { t |
+            @fmt(out&, "- (%%%): %\n", self.pool.get(t.debug_name), "%", i, self.log_type(t.type));
+            i += 1;
         };
         
         write_entire_file(path.str(), out.items());

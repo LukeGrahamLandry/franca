@@ -125,19 +125,38 @@ fn pop_until_endswith(self: Str, suffix: []u8) Str = {
     self
 }
 
-fn read_file(alloc: Alloc, path: Str) ?List(u8) = {
-    out: List(u8) = list(alloc);
-    path := path.maybe_borrow_cstr(alloc); // TODO: LEAK
-    f := open_read(path).or(=> return(.None));
-    len := f.lseek(0, .End).or(=> return(.None));
+fn read_entire_file(a: Alloc, path: Str) ?Str = {
+    out := u8.list(a);
+    read_and_push(out&, path) || return(.None);
+    (Some = out.items())
+}
+
+fn read_and_push(out: *List(u8), path: Str) bool = {
+    path := path.maybe_borrow_cstr(temp());
+    f := open_read(path) || return(false);
+    len := f.lseek(0, .End) || {
+        close(f); // TODO: defer
+        return(false)
+    };
     f.lseek(0, .Set);
-    out&.reserve(len);
+    out.reserve(len);
     ptr := out.maybe_uninit.ptr.offset(out.len);
-    read_len := read(f, ptr, out.maybe_uninit.len).or(=> return(.None));
-    if(read_len != len, => return(.None)); // sanity
+    read_len := read(f, ptr, out.maybe_uninit.len) || {
+        close(f); // TODO: defer
+        return(false)
+    };
+    if read_len != len {
+        eprintln("TODO: need to loop for read(), it's fine if it gets interrupted? 🤡");
+        close(f); // TODO: defer
+        return(false);
+    };
     out.len += len;
     close(f); // TODO: defer
-    (Some = out)
+    true
+}
+
+fn read_and_push_or_crash(out: *List(u8), path: Str) void = {
+    @assert(read_and_push(out, path), "failed to read file '%'", path);
 }
 
 // TODO: i kinda want a script module for stuff you'd never use in serious programs. 
@@ -145,5 +164,5 @@ fn read_file_from_last_arg() Str = {
     args := cli_args();
     assert(args.len > 1, "Last argument is path to file");
     path := args[args.len - 1].str(); 
-    temp().read_to_string(path).items() // :panic
+    temp().read_to_string_or_crash(path).items() // :panic
 }

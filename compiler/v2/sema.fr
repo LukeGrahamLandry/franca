@@ -508,7 +508,7 @@ fn handle_target_split(self: *SelfHosted, func: *Func) Maybe(void) #once = {
             new_func := func.deep_clone(self.get_alloc()); // :SLOW redundantly clones dead code if you immediatly @match on the arg
             @if(!LAZY_SCOPE) {
                 mapping: HashMap(Var, Var) = init(temp());
-                renumber: RenumberVars = (scope = self.scopes, mapping = mapping&);
+                renumber: RenumberVars = (scope = self.scopes, mapping = mapping&, compiler = self);
                 renumber&.walk_func(new_func&);
             };
             new_func&.unset_flag(.TargetSplit); // very important to not loop!
@@ -2137,7 +2137,7 @@ fn curry_const_args(self: *SelfHosted, original_f: FuncId, f_expr: *FatExpr, arg
     @debug_assert(func.get_flag(.AnyConstArgs), "baking const args but none are there");
     
     if LAZY_SCOPE {
-        @debug_assert_eq(func.get_flag(.AllowRtCapture), func.get_flag(.ResolvedBody));
+        //@debug_assert_eq(func.get_flag(.AllowRtCapture), func.get_flag(.ResolvedBody));  // TODO: do we want to bring this back? -- Jan 8
     } else {
         @check(self.ensure_resolved_sign(original_f)) return;
         @try(self.ensure_resolved_body(original_f)) return;
@@ -2149,7 +2149,7 @@ fn curry_const_args(self: *SelfHosted, original_f: FuncId, f_expr: *FatExpr, arg
     if LAZY_SCOPE {
         self.maybe_renumber_and_dup_scope(new_func&, mapping&);
     } else {
-        renumber: RenumberVars = (scope = self.scopes, mapping = mapping&);
+        renumber: RenumberVars = (scope = self.scopes, mapping = mapping&, compiler = self);
         renumber&.walk_func(new_func&);
     };
     new_fid := self.add_function(new_func);
@@ -2176,8 +2176,8 @@ fn maybe_renumber_and_dup_scope(self: *SelfHosted, new_func: *Func, mapping: *Ha
     // the special case for generics is when args can reference previous ones so they have to resolve sign earlier.
     
     needs_renumber := new_func.get_flag(.AllowRtCapture).or(new_func.get_flag(.Generic));
-    if needs_renumber {
-        renumber: RenumberVars = (scope = self.scopes, mapping = mapping);
+    if needs_renumber || new_func.get_flag(.ResolvedBody) { // TODO: are we sure its beter like this? maybe want to change scope.fr back -- Jan 8
+        renumber: RenumberVars = (scope = self.scopes, mapping = mapping, compiler = self);
         renumber&.walk_func(new_func);
         if new_func.get_flag(.Generic) && !new_func.get_flag(.ResolvedBody) {
             // the sign has already been resolved so we need to renumber before binding arguments.
@@ -3490,7 +3490,7 @@ fn compile_get_var(self: *SelfHosted, expr: *FatExpr, requested: ResultType, old
         };
         // For now runtime vars are always declared in order so we always know thier type.
         // This might change to allow peeking into return-ed expressions when infering closure return type? -- Jul 15
-        @err("Unknown type for runtime var %", self.pool.get(var.name))
+        @err("Unknown type for runtime var %", self.log(var))
     }
 }
 
