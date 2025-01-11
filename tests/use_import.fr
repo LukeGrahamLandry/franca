@@ -95,3 +95,100 @@ fn chained_use() void #test = {
         };
     };
 }
+
+fn use_eval_count() void = {
+    X :: @static(i64) 0;
+    Y :: @static(i64) 0;
+    
+    close :: fn() FuncId = {
+        a :: 123;
+        Second :: fn() = {
+            #reexport(close);
+            b :: {
+                X[] += 1;  // this only gets evaluated once 
+                5
+            };
+        };
+        // note this wont work if you don't do anything in this function because it will fold away to a Value and won't have a scope. 
+        // TODO: could just grab the block's scope before doing that 
+        Y[] += 1;
+        Second
+    };
+    
+    do_something :: fn($T: FuncId) void = {
+        #use(T);
+        assert_eq(a, 123);
+        assert_eq(b, 5);
+    };
+    
+    S :: close();
+    S2 :: close();
+    do_something(S);
+    {
+        #use(S2);
+        assert_eq(b, 5);
+    };
+    assert_eq(X[], 1);
+    assert_eq(Y[], 2);
+}
+
+fn lifting_overloadsets() void #test = {
+    fn confusion(s: ScopeId) i64 = 50;
+    
+    M :: fn() = {
+        Foo :: @struct(a: i64);
+        fn this_is_a_unique_name1223334444(a: Foo) i64 = {
+            a.a * a.a
+        }
+        fn and_so_is_this1223334444(a: Foo) i64 = {
+            a.a + a.a
+        }
+        
+        func :: fn(a: i64) i64 = a + 1;
+        
+        confusion :: fn() i64 = 5;
+    };
+    {
+        M2 :: FuncId.scope_of(M);
+        a: M2.Foo = (a = 5);
+        a := this_is_a_unique_name1223334444(a);
+    };
+    {
+        #use(M);
+        a: Foo = (a = 5);
+        a := and_so_is_this1223334444(a);
+    };
+    // (a.b)(c) === {a.b}(c)
+    // a.b(c)   ===  b(a, c)
+    {
+        M2 :: FuncId.scope_of(M);
+        a := (M2.func)(1);
+        
+        // this is unfortunatly subtle. but math precedence is too and we accept that so maybe it's ok.
+        b := (M2.confusion)();
+        c := M2.confusion();
+        assert_eq(b, 5);
+        assert_eq(c, 50);
+    };
+    
+    // new struct syntax so you don't have to go around changing ; to , 
+    // and now it's like zig where if you import() a file, it's the same as if you just wrapped that code in a struct. 
+    S :: @struct {
+        foo :: 123;
+        bar :: 246;
+        
+        fn what_about_here1223334444(a: Int) Int = 
+            a * S.foo + foo;
+        
+        Int :: i64;
+        
+        a: Int;  //  no need to say S.Int (which is good because you can't; S doesn't exist yet when we evaluate this expression, TODO!)
+        b := foo;
+    };
+    
+    assert_eq(S.bar + S.foo, what_about_here1223334444(2));
+    
+    s: S = (a = 1);
+    assert_eq(s.a, 1);
+    assert_eq(s.b, 123);
+}

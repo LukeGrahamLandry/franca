@@ -507,7 +507,7 @@ fn handle_target_split(self: *SelfHosted, func: *Func) Maybe(void) #once = {
         for_enum(Os) { os |
             new_func := func.deep_clone(self.get_alloc()); // :SLOW redundantly clones dead code if you immediatly @match on the arg
             @if(!LAZY_SCOPE) {
-                mapping: HashMap(Var, Var) = init(temp());
+                mapping: RenumberResults = init();
                 renumber: RenumberVars = (scope = self.scopes, mapping = mapping&, compiler = self);
                 renumber&.walk_func(new_func&);
             };
@@ -1308,7 +1308,18 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
             expr.done = true;
             expr.ty = self.get_or_create_type(Never); 
         }
-        fn UndeclaredVar() => return(@err("%", self.comp().log(expr)));
+        fn UndeclaredVar(it) => {
+            if self.find_var_in_scope(it.name, it.scope) { v |
+                // TODO: this is bad because if you ever get here it means you were resolved before all the stuff above you was ready,
+                //       so you got lucky that you didn't to anything and we can fix it now,
+                //       but if someone had put something in a higher scope and you wanted to bind something shadowing it, you might get the wrong thing. 
+                
+                expr.expr = (GetVar = v);
+                @check(self.compile_expr(expr, requested)) return;
+            } else {
+                return(@err("%", self.comp().log(expr)));
+            };
+        }
         @default => @panic("TODO: unhandled node type %: %", expr.expr&.tag(), expr.log(self));
     };
     self.last_loc = old_loc;
@@ -2145,7 +2156,7 @@ fn curry_const_args(self: *SelfHosted, original_f: FuncId, f_expr: *FatExpr, arg
     
     // Some part of the argument must be known at comptime.
     new_func := func.deep_clone(self.get_alloc());
-    mapping: HashMap(Var, Var) = init(temp());
+    mapping: RenumberResults = init();
     if LAZY_SCOPE {
         self.maybe_renumber_and_dup_scope(new_func&, mapping&);
     } else {
@@ -2169,59 +2180,9 @@ fn curry_const_args(self: *SelfHosted, original_f: FuncId, f_expr: *FatExpr, arg
 }
 
 LAZY_SCOPE :: true;
-fn maybe_renumber_and_dup_scope(self: *SelfHosted, new_func: *Func, mapping: *HashMap(Var, Var)) void #once = {
-    // Closures always resolve up front, so they need to renumber the clone.
-    // TODO: HACK but closures get renumbered when inlined anyway, so its just the const args that matter. im just being lazy and doing the whole thing redundantly -- May 9
-    // normal functions with const args havent had their body resolved yet so don't have to deal with it, we only resolve on the clone.
-    // the special case for generics is when args can reference previous ones so they have to resolve sign earlier.
-    
-    needs_renumber := new_func.get_flag(.AllowRtCapture).or(new_func.get_flag(.Generic));
-    if needs_renumber || new_func.get_flag(.ResolvedBody) { // TODO: are we sure its beter like this? maybe want to change scope.fr back -- Jan 8
-        renumber: RenumberVars = (scope = self.scopes, mapping = mapping, compiler = self);
-        renumber&.walk_func(new_func);
-        if new_func.get_flag(.Generic) && !new_func.get_flag(.ResolvedBody) {
-            // the sign has already been resolved so we need to renumber before binding arguments.
-            // however, the body hasn't been resolved yet, so we can't just renumber in place.
-            // instead, remap the sign as normal and then, insert a new scope containing the remapped variables,
-            // and use that as the starting point when we resolve the body of new new function.
-            // that way when it iterates up the scopes to resolve names, it will see our remapped shadows instead of the original.
-            // this allows #generic argument types that reference the values of other argument.
-            // but doing this is a bit creepy because the Var.scope isn't updated to the new one,
-            // so they get inserted back in the old one's constants/rt_types again later.
-            // that's why its fine when we can't find a remap for something in constants or vars.      -- May 29
-            assert(new_func.get_flag(.ResolvedSign), "expected resolved sign");  // TODO: debug
-            assert(!new_func.get_flag(.AllowRtCapture), "expected no runtime capture"); // TODO: debug
-            prev := new_func.scope.expect("func resolved");
-            old_scope := self.scopes[prev]&;
-            id := self.scopes.new_scope(old_scope.parent, self.get_alloc(), old_scope.loc);
-            old_scope := self.scopes[prev]&;
-            
-            // Note: it has to iterate and check more and more each time (but it only copies what's needed). -- Jun 29
-            new_vars: List(Var) = list(self.get_alloc());
-            for old_scope.vars { old | 
-                if mapping.get_ptr(old) { new |
-                    new_vars&.push(new[]);
-                };
-            };
-            new_constants: HashMap(Symbol, Var) = init(self.get_alloc());
-            each old_scope.const_lookup& { (k, v) |
-                if mapping.get_ptr(v[]) { new |
-                    v := self.scopes.get_constant(v[]);
-                    v := v.expect("known const"); // TODO: destructure through a pointer? 
-                    expr := self.clone(v._0&);
-                    ty := self.clone(v._1&);
-                    self.scopes.put_constant(new[], expr, ty);
-                    new_constants&.insert(new.name, new[]);
-                };
-            };
-            new_scope := self.scopes[id]&;
-            new_scope.vars = new_vars.rs();
-            new_scope.const_lookup = new_constants;
-            new_func.scope = (Some = id);
-        };
-    } else {
-        assert(!new_func.get_flag(.ResolvedBody), "resolved body");
-    };
+fn maybe_renumber_and_dup_scope(self: *SelfHosted, new_func: *Func, mapping: *RenumberResults) void #once = {
+    renumber: RenumberVars = (scope = self.scopes, mapping = mapping, compiler = self);
+    renumber&.walk_func(new_func);
 }
 
 fn curry_const_args_inner(self: *SelfHosted, original_f: FuncId, new_fid: FuncId, f_expr: *FatExpr, arg_expr: *FatExpr, initial_removed_count: i64) Maybe(FuncId) = {
@@ -2994,23 +2955,20 @@ fn instantiate_where_generic(self: *SelfHosted, template: FuncId, generic_types:
     new_func := template_func.deep_clone(self.get_alloc());
     new_func&.unset_flag(.UnboundGenerics);
     new_func.annotations&.unordered_retain(fn(it) => it.name != Flag.where.ident()); // TODO: don't clone it in the first place
+
+    mapping: RenumberResults = init();
+    maybe_renumber_and_dup_scope(self, new_func&, mapping&);
     
-    bound_vars := temp().alloc(Var, generic_types.len);
-    mapping: HashMap(Var, Var) = init(temp());
     n := 0;
     each new_func.arg.bindings& { b |
         @if_let(b.ty&) fn Generic(name) => {
+            new := name[];
             type := generic_types[n];
-            bound_vars[n] = self.scopes.dup_var(name[]);
-            mapping&.insert(name[], bound_vars[n]);
-            //b.ty = (Finished = type);
-            b.ty = (PendingEval = (expr = (GetVar = bound_vars[n]), ty = Type, loc = template_func.loc, done = false));
+            b.ty = (Finished = type);
+            //b.ty = (PendingEval = (expr = (GetVar = new), ty = Type, loc = template_func.loc, done = false));
+            self.scopes.put_constant(new, self.to_expr(Type, type, template_func.loc), (Finished = Type)); // :get_or_create_type
             n += 1;
         };
-    };
-    maybe_renumber_and_dup_scope(self, new_func&, mapping&);
-    range(0, bound_vars.len) { i |
-        self.scopes.put_constant(bound_vars[i], self.to_expr(Type, generic_types[i], template_func.loc), (Finished = Type)); // :get_or_create_type
     };
     
     @try(self.resolve_body(new_func&)) return;
@@ -4465,49 +4423,22 @@ fn struct_type(self: *SelfHosted, pattern: *Pattern, is_union: bool) Maybe(Type)
             };
             name := b.ident().expect("field name");
             expr := @unwrap(b.get_default(), "constant field % must have a value.", self.pool.get(name)) return;
-            //v := @match(expr.expr&) {
-            //    fn GetVar(inner) => inner[];
-            //    @default => {
-                    v := self.unique_const(name);
-                    self.scopes.put_constant(v, expr[], b.ty);
-            //        v
-            //    };
-            //};
+            v := self.unique_const(name);
+            self.scopes.put_constant(v, expr[], b.ty);
             self.scopes[scope].const_lookup&.insert(name, v);
             expr.expr = (GetVar = v);  // Save our work because we might yield on a later field. 
         };
     };
     
+    // TODO: you want the above to stay in a seperate loop and create the type before we start evaluating types for runtime fields, 
+    //       so those expressions can reference local constants also declared in the struct. 
+    
     each pattern.bindings { b | 
         if b.kind != .Const {
-            name := b.ident().expect("field name");
-            ty := or @check(self.infer_type(b.ty&)) return {
-                // We need to know the type before we can size the struct. 
-                default := @unwrap(b.get_default(), "@struct field without type requires default value.") return;
-                @err_assert(!is_rec_hack(default), "cannot use @rec on a non-constant value.") return;
-                @check(self.compile_expr(default, .None)) return;
-                b.ty = (Finished = default.ty);
-                default.ty
-            };
-            
-            ::if_opt(*FatExpr, Var);
-            default := if b.get_default() { (expr: *FatExpr) |
-                v := self.unique_const(name);
-                self.scopes.put_constant(v, expr[], b.ty);
-                expr.expr = (GetVar = v);  // Save our work because we might yield on a later field. 
-                v
-            } else {
-                zeroed(Var)
-            };
-            fields&.push(
-                name = name,
-                ty = ty,
-                nullable_tag = b.nullable_tag,
-                default = default,
-                byte_offset = 99999999999,
-            );
+            fields&.push(@check(self.make_runtime_field(b)) return);
         };
     };
+    
     @try(self.require_unique_fields(pattern)) return;  // doing this at the end, after all suspends
     (Ok = self.intern_type(Struct = (
         fields = fields.rs(),
@@ -4518,6 +4449,35 @@ fn struct_type(self: *SelfHosted, pattern: *Pattern, is_union: bool) Maybe(Type)
     )))
 }
 
+fn make_runtime_field(self: *SelfHosted, b: *Binding) Maybe(Field) #inline = {
+    name := b.ident().expect("field name");
+    ty := or @check(self.infer_type(b.ty&)) return {
+        // We need to know the type before we can size the struct. 
+        default := @unwrap(b.get_default(), "@struct field without type requires default value.") return;
+        @err_assert(!is_rec_hack(default), "cannot use @rec on a non-constant value.") return;
+        @check(self.compile_expr(default, .None)) return;
+        b.ty = (Finished = default.ty);
+        default.ty
+    };
+    
+    ::if_opt(*FatExpr, Var);
+    default := if b.get_default() { (expr: *FatExpr) |
+        v := self.unique_const(name);
+        self.scopes.put_constant(v, expr[], b.ty);
+        expr.expr = (GetVar = v);  // Save our work because we might yield on a later field. 
+        v
+    } else {
+        zeroed(Var)
+    };
+    (Ok = (
+        name = name,
+        ty = ty,
+        nullable_tag = b.nullable_tag,
+        default = default,
+        byte_offset = 99999999999,
+    ))
+}
+
 fn union_macro(self: *SelfHosted, fields: *FatExpr) Maybe(FatExpr) = {
     @err_assert(fields.expr&.is(.StructLiteralP), "expected map literal: (name: Type, ... ) for @union") return;
     ty := @check(self.struct_type(fields.expr.StructLiteralP&, true)) return;
@@ -4525,30 +4485,71 @@ fn union_macro(self: *SelfHosted, fields: *FatExpr) Maybe(FatExpr) = {
     (Ok = fields[])
 }
 
-fn struct_macro(self: *SelfHosted, fields: *FatExpr) Maybe(FatExpr) = {
+fn struct_macro(self: *SelfHosted, expr: *FatExpr) Maybe(FatExpr) = {
     msg :: "expected map literal: (name: Type, ... ) for @struct";
-    ty := @match(fields.expr) {
-        fn StructLiteralP() => {
-            @check(self.struct_type(fields.expr.StructLiteralP&, false)) return
+    ty := @match(expr.expr&) {
+        fn StructLiteralP(it) => {
+            @check(self.struct_type(it, false)) return
         }
         fn Value(f) => {
-            if fields.ty == self.get_or_create_type(void) {
+            if expr.ty == self.get_or_create_type(void) {
                 self.intern_type(Struct = (
                     fields = empty(),
                     layout_done = false,
                     is_tuple = false,
                     is_union = false,
-                    scope = NOSCOPE, // TODO
+                    scope = NOSCOPE,
                 ))
             } else {
                 return(@err(msg))
             }
         }
+        fn Block(it) => {
+            @err_assert(it.result.is_raw_unit(), "@struct {} block should not have a result expression") return; 
+            @check(self.ensure_resolved(it)) return;    
+            
+            fields := Field.list(self.get_alloc());
+            
+            // TODO: don't iterate twice 
+            if !it.hoisted_constants {
+                @check(self.hoist_constants(it.body.items())) return;
+            };
+            
+            each it.body { s | 
+                @match(s.stmt&) {
+                    fn DeclVar(it) => {
+                        @debug_assert(it.name.kind != .Const, "hoist_constants ^");
+                        // :SLOW silly copy of all this
+                        b: Binding = (
+                            name = (Var = it.name),
+                            ty = it.ty,
+                            nullable_tag = zeroed(*Annotations), // TODO: add syntax for this? 
+                            default = it.value,
+                            kind = it.name.kind,
+                        );
+                        // TODO: super confusing if you suspend here. same problem for the other fn struct_type
+                        fields&.push(@check(self.make_runtime_field(b&)) return);
+                    };
+                    fn DeclFunc()  => unreachable();  // hoist_constants ^
+                    fn Noop()      => ();
+                    // TODO: allow ConstEval
+                    @default => @err_assert(false, "invalid stmt type in @struct {} block: %", s.stmt&.tag()) return; 
+                };
+            };
+            scope := it.scope;
+            self.intern_type(Struct = (
+                fields = fields.rs(),
+                layout_done = false,
+                is_tuple = false,
+                is_union = false,
+                scope = scope, 
+            ))
+        }
         @default => return(@err(msg));
     };
     
-    self.set(fields, Type, ty);
-    (Ok = fields[])
+    self.set(expr, Type, ty);
+    (Ok = expr[])
 }
 
 fn enum_macro(self: *SelfHosted, arg: *FatExpr, target: *FatExpr) Maybe(FatExpr) = {

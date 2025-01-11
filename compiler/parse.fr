@@ -144,12 +144,19 @@ fn parse_decl_or_start_expr(self: *Parser, name: Symbol) Result(FatStmt, *Compil
             ty: LazyType = if(self.peek_tag() == .Equals, => .Infer) {
                 (PendingEval = @try(self.parse_expr(Prec_None)) return)
             };
-            kind: VarType = @match(self.pop()) {
+            kind_token := self.peek_tag();
+            kind: VarType = @match(kind_token) {
                 fn Equals() => .Var;
                 fn Colon()  => .Const;
+                fn Semicolon() => .Var;
                 @default => @report_error("expected = or : after declaration of variable %", self.pool.get(name)) (return, self.last.span);
             };
-            value  := @try(self.parse_expr(Prec_None)) return;
+            value  := if kind_token == .Semicolon {
+                binding_missing_default()
+            } else {
+                self.pop();
+                @try(self.parse_expr(Prec_None)) return
+            };
             s: Stmt = (DeclNamed = (kind = kind, value = value, ty = ty, name = name)); // TODO: the rust thing where you don't have to say the name if the expr is a var read that matches.
             if !self.maybe(.Semicolon) {
                 @report_error("expected semicolon after declaration") (return, self.last.span);
@@ -824,10 +831,11 @@ fn parse_tuple(self: *Parser, terminator: TokenType.Tag()) ParseRes = {
     res := @switch(parts.len) {
         @case(0) => self.raw_unit(loc);
         @case(1) => {
-            // TODO: defer
-            e := parts[0];
-            parts&.drop();
-            e
+            if self.peek_tag() == .LeftParen && parts[0].expr&.is(.FieldAccess) {
+                self.expr(new_block(empty(), parts.index(0)), loc)  // prevent dot call
+            } else {
+                parts[0]
+            }
         };
         @default => self.expr((Tuple = parts.rs()), loc);
         // TODO: if you forget that semicolon it doesn't see the default and crashes at runtime if you ever hit it. :FUCKED

@@ -555,6 +555,7 @@ fn fill_export_ffi(out: *List(u8)) void = {
     @fmt(out, "fn literal_ast(ty: Type, ptr: rawptr) FatExpr #ct #comptime_addr(%);\n", literal_ast);
     literal_ast: rawptr : fn(ty: Type, ptr: *u8) FatExpr = {
         c := current_comptime();
+        c.finish_layout(ty);
         bytes: i64 = c.get_info(ty)[].stride_bytes.zext();
         value := slice(ptr, bytes);
         value := c.from_bytes(value);
@@ -803,5 +804,21 @@ fn fill_export_ffi(out: *List(u8)) void = {
         desc := self.pool.insert_owned(descriptor.clone(self.get_alloc()).items());
         res := import_as_scope(self, desc);
         self.unwrap_report_error(ScopeId, res)
+    };
+    
+    @fmt(out, "fn scope_from_value(ty: Type, ptr: rawptr) ?ScopeId #ct #comptime_addr(%);\n", scope_val);
+    scope_val: rawptr : fn(type: Type, ptr: *u8) ?ScopeId = {
+        self := current_comptime();
+        ok := type == ScopeId || type == Type || type == FuncId || self.get_type(type).is(.Fn);
+        if !ok {
+            return(.None)
+        };
+        self.finish_layout(type);
+        bytes: i64 = self.get_info(type)[].stride_bytes.zext();
+        value := slice(ptr, bytes);
+        value := self.from_bytes(value);
+        res := value_to_scope(self, value, type);
+        scope := self.unwrap_report_error(ScopeId, res);
+        (Some = scope)
     };
 }

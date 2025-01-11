@@ -78,9 +78,9 @@ fn dup_var(self: *Scopes, old: Var) Var = {
 
 // For unquoting, initial will be None, but for inlining closures, it will be the return variable. 
 fn renumber_expr(self: *SelfHosted, expr: *FatExpr, initial: ?Ty(Var, Var)) void = {
-    mapping: HashMap(Var, Var) = init(temp());
+    mapping: RenumberResults = init();
     if initial& { i |
-        mapping&.insert(i._0, i._1);
+        mapping.vars&.insert(i._0, i._1);
     };
     renumber: RenumberVars = (scope = self.scopes, mapping = mapping&, compiler = self);
     renumber&.walk_expr(expr).unwrap();
@@ -327,6 +327,10 @@ fn resolve_func_body(self: *ResolveScope, func: *Func) PRes = {
         var := @try(self.decl_var(name.ident(), .Const, func.loc, .Label_DidYouReturnOutsideABlockLikeInAnExprFunction)) return;
         func.return_var = (Some = var);
         @try(self.walk_expr(expr)) return;
+        
+        @if_let(expr.expr&) fn Block(b) => {
+            func.use_scope = b.scope;
+        };
     };
     
     self.pop_block();
@@ -665,7 +669,6 @@ fn handle_expr(self: *ResolveScope, expr: *FatExpr) Result(DoMore, *CompileError
     (Ok = DoMore.Continue)
 }
 
-
 fn finish_resolving_block(self: *ResolveScope, f: *get_variant_type(Expr, .Block)) Res(void) = {
     @debug_assert(self.scope == f.scope, "block scope?");
     if true {
@@ -746,16 +749,76 @@ fn handle_pattern(self: *ResolveScope, p: *Pattern) Result(DoMore, *CompileError
 ///////////////////
 /// Renumbering ///
 
-RenumberVars :: @struct(scope: *Scopes, mapping: *HashMap(Var, Var), compiler: *SelfHosted);
+RenumberResults :: @struct(
+    vars: HashMap(Var, Var),
+    scopes: HashMap(ScopeId, ScopeId),
+);
 
-fn decl(self: *RenumberVars, name: *Var) void = {
+fn init() RenumberResults = (vars = init(temp()), scopes = init(temp()));
+
+RenumberVars :: @struct(
+    scope: *Scopes, 
+    mapping: *RenumberResults, 
+    compiler: *SelfHosted,
+);
+
+fn decl_new(self: *RenumberVars, name: *Var) void = {
     new := self.scope.dup_var(name[]);
-    self.mapping.insert(name[], new);
+    if self.mapping.scopes&.get(new.scope) { s |
+        new.scope = s;
+    };
+    self.mapping.vars&.insert(name[], new);
     name[] = new;
 }
 
+fn decl(self: *RenumberVars, name: *Var) void = {
+    if self.mapping.vars&.get_ptr(name[]) { new |
+        name[] = new[];
+        return();
+    };
+    // TODO: it kinda seems like this shouldn't happen because we have scopes now but clearly it does
+    self.decl_new(name);
+}
+
 fn update(self: *RenumberVars, name: *Var) void = {
-    if self.mapping.get_ptr(name[]) { new |
+    if self.mapping.vars&.get_ptr(name[]) { new |
+        name[] = new[];
+    };
+}
+
+fn decl(self: *RenumberVars, name: *ScopeId) void = {
+    a := self.compiler.get_alloc();
+    prev := name[];
+    old_scope := self.scope[prev]&;
+    parent := old_scope.parent;
+    self.update(parent&);
+    id := self.scope.new_scope(parent, a, old_scope.loc);
+    self.mapping.scopes&.insert(name[], id);
+    old_scope := self.scope[prev]&;
+    
+    new_vars: List(Var) = old_scope.vars&.items().clone(a);
+    each new_vars { old | 
+        self.decl_new(old);
+    };
+    new_constants: HashMap(Symbol, Var) = init(a);
+    each old_scope.const_lookup& { (k, v) |
+        new := v[];
+        self.decl_new(new&);
+        v := self.scope.get_constant(v[]);
+        v := v.expect("known const"); // TODO: destructure through a pointer? 
+        expr := self.compiler.clone(v._0&);
+        ty := self.compiler.clone(v._1&);
+        self.scope.put_constant(new, expr, ty);
+        new_constants&.insert(new.name, new);
+    };
+    new_scope := self.scope[id]&;
+    new_scope.vars = new_vars.rs();
+    new_scope.const_lookup = new_constants;
+    name[] = id;
+}
+
+fn update(self: *RenumberVars, name: *ScopeId) void = {
+    if self.mapping.scopes&.get_ptr(name[]) { new |
         name[] = new[];
     };
 }
@@ -766,6 +829,9 @@ fn handle_expr(self: *RenumberVars, expr: *FatExpr) Result(DoMore, void) #once =
     @match(expr.expr&) {
         fn GetVar(name) => self.update(name);
         fn Block(f) => {
+            if !(f.scope == NOSCOPE) {
+                self.decl(f.scope&);
+            };
             each f.body { stmt |
               @if_let(stmt.stmt&) 
                 fn DeclVar(f) => {
@@ -775,6 +841,7 @@ fn handle_expr(self: *RenumberVars, expr: *FatExpr) Result(DoMore, void) #once =
                 };
             }; 
         };
+        fn UndeclaredVar(it) => self.update(it.scope&);
         @default => ();
     };
     (Ok = DoMore.Continue)
@@ -792,6 +859,9 @@ fn handle_stmt(self: *RenumberVars, stmt: *FatStmt) Result(DoMore, void) #once =
 }
 
 fn handle_func(self: *RenumberVars, func: *Func) Result(DoMore, void) #once = {
+    if func.scope& { s |
+        self.decl(s);
+    };
     if func.var_name& { old |
         self.update(old);
         // TODO: maybe you sometimes want `self.decl(func.var_name&);` if not in mapping.
@@ -804,9 +874,13 @@ fn handle_func(self: *RenumberVars, func: *Func) Result(DoMore, void) #once = {
     (Ok = .Continue)
 }
 
-fn handle_type(self: *RenumberVars, ty: *LazyType) Result(DoMore, void) #once = (Ok = .Continue);
+fn handle_type(self: *RenumberVars, ty: *LazyType) Result(DoMore, void) #once = {
+    (Ok = .Continue)
+}
 fn handle_pattern(self: *RenumberVars, p: *Pattern) Result(DoMore, void) #once = {
     each p.bindings { b |
+        @if_let(b.ty&) 
+                fn Generic(v) => self.decl(v);
         @if_let(b.name&) 
             fn Var(v) => self.decl(v);
     };

@@ -1,7 +1,5 @@
 - TODO: deal with `CodegenEntry:Bounce` on wasm
 
-## (Jan 9)
-
 ## (Jan 8)
 
 - i really need to have a version of `@struct` that lets you use the normal top level declaration syntax
