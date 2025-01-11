@@ -361,22 +361,17 @@ fn scan_const_decls(self: *ResolveScope, stmt: *FatStmt) CRes(bool) = {
     loc := stmt.loc;
     self.compiler.last_loc = loc;
     @match(stmt.stmt&) {
-        (fn DeclNamed(f) => {
+        (fn Decl(f) => if f.name&.is(.Ident) {
             // kinda hack. just makes it easier to read logs when you do 'name :: fn() ...'
-            @if_let(f.value.expr&) fn Closure(func) => {
+            @if_let(f.default.expr&) fn Closure(func) => {
                 if func.name == Flag.Anon.ident() {
-                    func.name = f.name;
+                    func.name = f.name.Ident;
                 };
             };
             
-            if (f.kind == .Const) {
-                new := @try(self.decl_var(f.name, f.kind, loc, .Unknown)) return;
-                decl: Stmt = (DeclVar = (
-                    value = f.value,
-                    ty = f.ty,
-                    name = new,
-                ));
-                stmt.stmt = decl;
+            if f.kind == .Const {
+                new := @try(self.decl_var(f.name.Ident, f.kind, loc, .Unknown)) return;
+                f.name = (Var = new);
                 return(Ok = true);
             };
         });
@@ -701,29 +696,24 @@ fn finish_resolving_block(self: *ResolveScope, f: *get_variant_type(Expr, .Block
 
 fn handle_stmt(self: *ResolveScope, stmt: *FatStmt) Result(DoMore, *CompileError) #once = {
     @match(stmt.stmt&) {
-        (fn DeclNamed(f) => {
+        fn Decl(f) => @if_let(f.name) fn Ident(name) => {
             @try(self.walk_type(f.ty&)) return;
-            @try(self.walk_expr(f.value&)) return;
+            @try(self.walk_expr(f.default&)) return;
             
-            new := @try(self.decl_var(f.name, f.kind, stmt.loc, .Unknown)) return;
-            s: Stmt = (DeclVar = (
-                value = f.value,
-                ty = f.ty,
-                name = new,
-            ));
-            stmt.stmt = s;
+            new := @try(self.decl_var(name, f.kind, stmt.loc, .Unknown)) return;
+            f.name = (Var = new);
             
             // We had to take control so exprs wouldn't be able to bind the name. 
             // Which is what you want for local variables, but not constant functions since they should be able to recurse, 
             // but that works out because constants were already handled in scan_const_decls.  -- Jun 27
             return(Ok = .Break);
-        });
-        (fn DeclVarPattern(f) => {
+        };
+        fn DeclVarPattern(f) => {
             // TODO: this declares the new variables before resolving the types/values. which is wrong! -- Jul 1
             each f.binding.bindings { b |
                 @try(self.declare_binding(b, stmt.loc, false)) return;
             };
-        });
+        }
         @default => ();
     };
     (Ok = .Continue)
@@ -833,13 +823,13 @@ fn handle_expr(self: *RenumberVars, expr: *FatExpr) Result(DoMore, void) #once =
                 self.decl(f.scope&);
             };
             each f.body { stmt |
-              @if_let(stmt.stmt&) 
-                fn DeclVar(f) => {
-                    if f.name.kind == .Const {
-                        self.decl(f.name&);
+                @match(stmt.stmt) {
+                    fn Decl(f) => if f.kind == .Const {
+                        @if_let(f.name&) fn Var(v) => self.decl(v);
                     };
+                    @default => ();
                 };
-            }; 
+            };
         };
         fn UndeclaredVar(it) => self.update(it.scope&);
         @default => ();
@@ -848,12 +838,12 @@ fn handle_expr(self: *RenumberVars, expr: *FatExpr) Result(DoMore, void) #once =
 }
 
 fn handle_stmt(self: *RenumberVars, stmt: *FatStmt) Result(DoMore, void) #once = {
-    @if_let(stmt.stmt&) 
-        fn DeclVar(f) => {
-            if f.name.kind != .Const {
-                self.decl(f.name&);
-            };
+    @match(stmt.stmt) {
+        fn Decl(f) => if f.kind != .Const {
+            @if_let(f.name&) fn Var(v) => self.decl(v);
         };
+        @default => ();
+    };
 
     (Ok = .Continue)
 }

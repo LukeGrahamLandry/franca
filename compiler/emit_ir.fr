@@ -530,22 +530,23 @@ fn compile_stmt(self: *EmitIr, stmt: *FatStmt) CRes(void) = {
             @try(self.compile_expr(expr, .Discard)) return;
             .Ok
         }
-        fn DeclVar(f) => {
-            @debug_assert_ne(f.name.kind, VarType.Const);
+        fn Decl(f) => {
+            @debug_assert_ne(f.kind, VarType.Const);
+            @debug_assert(f.name&.is(.Var));
             @debug_assert(f.ty&.is(.Finished), "variable not typechecked");
             type := f.ty.Finished;
-            if self.program.is_local_scalar(f.name, type) {
-                val  := @try(self.compile_expr(f.value&, .Scalar)) return;
+            if self.program.is_local_scalar(f.name.Var, type) {
+                val  := @try(self.compile_expr(f.default&, .Scalar)) return;
                 if rtype(val) != .RTmp {
                     _, k := self.load_op(type);
                     var := self.f.newtmp("v", k);
                     self.emit(.copy, k, var, val, QbeNull);
                     val = var;
                 };
-                self.record_var_decl(f.name, (Local = val));
+                self.record_var_decl(f.name.Var, (Local = val));
             } else {
-                ptr  := @try(self.compile_expr(f.value&, .NewMemory)) return;
-                self.declare_var_mem(f.name, ptr, type);
+                ptr  := @try(self.compile_expr(f.default&, .NewMemory)) return;
+                self.declare_var_mem(f.name.Var, ptr, type);
             };
             .Ok
         }
@@ -602,7 +603,7 @@ fn compile_stmt(self: *EmitIr, stmt: *FatStmt) CRes(void) = {
         };
         fn Noop() => .Ok;
         // Can't hit DoneDeclFunc because we don't re-eval constants.
-        @default => @err("ICE: stmt not desugared");
+        @default => @err("ICE: stmt not desugared %", self.program.log(stmt));
     }
 }
 

@@ -35,10 +35,11 @@ fn compile_stmt(self: *SelfHosted, stmt: *FatStmt) Maybe(Ty(bool, bool)) #once =
             };
             (Ok = res)
         }
-        fn DeclVar(f) => {
-            assert(f.name.kind != .Const, "hit unhoisted constant");
-            @check(self.decl_var(f.name, f.ty&, f.value&)) return;
-            (Ok = (f.value.done, false))
+        fn Decl(f) => {
+            @assert(f.kind != .Const, "hit unhoisted constant %", self.comp().log(stmt));
+            @assert(f.name&.is(.Var), "hit unresolved var %", self.comp().log(stmt));
+            @check(self.decl_var(f.name.Var, f.ty&, f.default&)) return;
+            (Ok = (f.default.done, false))
         }
         fn Set(f) => {
             if f.place.expr&.is(.GetVar) {
@@ -3314,8 +3315,9 @@ fn hoist_constants(self: *SelfHosted, body: []FatStmt) Maybe(void) #once = {
                 
                 @try(self.update_function_metadata(func, overload_out)) return;
             }
-            fn DeclVar(f) => if f.name.kind == .Const {
-                self.scopes.put_constant(f.name, f.value, f.ty);
+            fn Decl(f) => if f.kind == .Const {
+                @debug_assert(f.name&.is(.Var), "tried to hoist unresovled decl");
+                self.scopes.put_constant(f.name.Var, f.default, f.ty);
                 stmt.stmt = .Noop;
             };
             @default => ();
@@ -4516,21 +4518,9 @@ fn struct_macro(self: *SelfHosted, expr: *FatExpr) Maybe(FatExpr) = {
             };
             
             each it.body { s | 
+                // TODO: super confusing if you suspend here. same problem for the other fn struct_type
                 @match(s.stmt&) {
-                    fn DeclVar(it) => {
-                        @debug_assert(it.name.kind != .Const, "hoist_constants ^");
-                        // :SLOW silly copy of all this
-                        b: Binding = (
-                            name = (Var = it.name),
-                            ty = it.ty,
-                            nullable_tag = zeroed(*Annotations), // TODO: add syntax for this? 
-                            default = it.value,
-                            kind = it.name.kind,
-                        );
-                        // TODO: super confusing if you suspend here. same problem for the other fn struct_type
-                        fields&.push(@check(self.make_runtime_field(b&)) return);
-                    };
-                    fn DeclFunc()  => unreachable();  // hoist_constants ^
+                    fn Decl(b) => fields&.push(@check(self.make_runtime_field(b[])) return);
                     fn Noop()      => ();
                     // TODO: allow ConstEval
                     @default => @err_assert(false, "invalid stmt type in @struct {} block: %", s.stmt&.tag()) return; 

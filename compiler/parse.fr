@@ -124,45 +124,21 @@ fn parse_stmt_inner(self: *Parser, has_annotations: bool) Result(FatStmt, *Compi
 
 fn parse_decl_or_start_expr(self: *Parser, name: Symbol) Result(FatStmt, *CompileError) #once = {
     self.pop();
+    tok := self.peek_tag();
+    if (@is(tok, .DoubleColon, .Colon)) {
+        loc := self.last.span;
+        b := self.alloc.box(Binding);
+        b[] = @try(self.parse_binding_after_name(name, .Var)) return;
+        s: Stmt = (Decl = b);
+        if !self.maybe(.Semicolon) {
+            // TODO: maybe i should allow it if its a function declaration because that feels better and i do it for overload set stmts. 
+            //       but that's a slippery slope to macro calls for struct declations, which i don't want becuase it feels you might accidently use the two arg version of the macro. 
+            @report_error("expected semicolon after declaration") (return, self.last.span);
+        };
+        return(Ok = self.stmt(s, loc))
+    };
+    
     @match(self.peek()) {
-        fn DoubleColon() => {
-            loc := self.last.span;
-            self.pop();
-            e := @try(self.parse_expr(Prec_None)) return;
-            s: Stmt = (DeclNamed = (kind = .Const, value = e, ty = .Infer, name = name));
-            if !self.maybe(.Semicolon) {
-                // TODO: maybe i should allow it if its a function declaration because that feels better and i do it for overload set stmts. 
-                //       but that's a slippery slope to macro calls for struct declations, which i don't want becuase it feels you might accidently use the two arg version of the macro. 
-                @report_error("expected semicolon after declaration") (return, self.last.span);
-            };
-            return(Ok = self.stmt(s, loc))
-        }
-        fn Colon() => {
-            loc := self.last.span;
-            self.pop();
-            ::if(LazyType);
-            ty: LazyType = if(self.peek_tag() == .Equals, => .Infer) {
-                (PendingEval = @try(self.parse_expr(Prec_None)) return)
-            };
-            kind_token := self.peek_tag();
-            kind: VarType = @match(kind_token) {
-                fn Equals() => .Var;
-                fn Colon()  => .Const;
-                fn Semicolon() => .Var;
-                @default => @report_error("expected = or : after declaration of variable %", self.pool.get(name)) (return, self.last.span);
-            };
-            value  := if kind_token == .Semicolon {
-                binding_missing_default()
-            } else {
-                self.pop();
-                @try(self.parse_expr(Prec_None)) return
-            };
-            s: Stmt = (DeclNamed = (kind = kind, value = value, ty = ty, name = name)); // TODO: the rust thing where you don't have to say the name if the expr is a var read that matches.
-            if !self.maybe(.Semicolon) {
-                @report_error("expected semicolon after declaration") (return, self.last.span);
-            };
-            return(Ok = self.stmt(s, loc))
-        }
         fn Comma() => {
             // That was actually like `a, b := e;`, so we want to turn that name into an expression and then find some more identifiers. 
             self.pop();
@@ -941,47 +917,57 @@ fn parse_pattern(self: *Parser, out: *List(Binding), terminator: TokenType.Tag()
             };
         };
         
-        ::if(?FatExpr); ::if(LazyType);
-        default_: FatExpr = binding_missing_default(); // TODO: "shadows" the magic @default
-        ty := LazyType.Infer;
-        
-        @match(self.peek()) {
-            fn Colon() => {
-                self.pop();
-                if self.maybe(.Squiggle) {
-                    name: Symbol = @try(self.pop_name("after '~'")) return;
-                    ty = (UnboundGeneric = name);
-                } else {
-                    if self.peek_tag() != .Equals {
-                        e := @try(self.parse_expr(Prec_None)) return;
-                        ty = (PendingEval = e);
-                    };
-                    if self.maybe(.Equals) {
-                        e := @try(self.parse_expr(Prec_None)) return;
-                        default_ = e;
-                    };
-                };
-            }
-            fn DoubleColon() => {
-                self.pop();
-                kind = .Const;
-                e := @try(self.parse_expr(Prec_None)) return;
-                default_ = e;
-            }
-            fn Equals() => {
-                self.pop();
-                e := @try(self.parse_expr(Prec_None)) return;
-                default_ = e;
-            }
-            @default => ();
-        };
-        ann := @try(self.parse_nullable_annotations()) return; 
-        b: Binding = (name = (Ident = name), ty = ty, nullable_tag = ann, default = default_, kind = kind);
+        b := @try(self.parse_binding_after_name(name, kind)) return;
         out.push(b);
         if !self.maybe(.Comma) {
             return(.Ok);
         };
     }
+}
+
+fn parse_binding_after_name(self: *Parser, name: Symbol, kind: VarType) CRes(Binding) #inline = {
+    ::if(?FatExpr); ::if(LazyType);
+    default_: FatExpr = binding_missing_default(); // TODO: "shadows" the magic @default
+    ty := LazyType.Infer;
+    
+    @match(self.peek()) {
+        fn Colon() => {
+            self.pop();
+            if self.maybe(.Squiggle) {
+                name: Symbol = @try(self.pop_name("after '~'")) return;
+                ty = (UnboundGeneric = name);
+            } else {
+                if self.peek_tag() != .Equals {
+                    e := @try(self.parse_expr(Prec_None)) return;
+                    ty = (PendingEval = e);
+                };
+                if self.maybe(.Equals) {
+                    e := @try(self.parse_expr(Prec_None)) return;
+                    default_ = e;
+                } else {
+                    if self.maybe(.Colon) {
+                        e := @try(self.parse_expr(Prec_None)) return;
+                        default_ = e;
+                        kind = .Const;
+                    };
+                };
+            };
+        }
+        fn DoubleColon() => {
+            self.pop();
+            kind = .Const;
+            e := @try(self.parse_expr(Prec_None)) return;
+            default_ = e;
+        }
+        fn Equals() => {
+            self.pop();
+            e := @try(self.parse_expr(Prec_None)) return;
+            default_ = e;
+        }
+        @default => ();
+    };
+    ann := @try(self.parse_nullable_annotations()) return; 
+    (Ok = (name = (Ident = name), ty = ty, nullable_tag = ann, default = default_, kind = kind))
 }
 
 fn parse_nullable_annotations(self: *Parser) Result(*Annotations, *CompileError) #inline = {
@@ -1194,11 +1180,3 @@ fn report_error(fmt_args: FatExpr, ret_loc: FatExpr) FatExpr #macro = {
 
 fn int(self: PrecLevel) i64 = @as(i64) self;
 ::Ord(PrecLevel);
-
-NOSCOPE :: @as(ScopeId) scope_from_index(trunc(-1)); 
-
-// TODO: expose id like normal struct
-fn scope_from_index(i: u32) ScopeId = {
-    s := ptr_cast_unchecked(u32, ScopeId, i&)[]; 
-    s
-}
