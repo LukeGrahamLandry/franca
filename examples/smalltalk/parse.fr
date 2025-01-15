@@ -1,0 +1,310 @@
+// TODO: don't just print errors. you want to be able to package this as a library, etc. 
+
+Parser :: @struct(
+    lex: Lexer,
+    func: *CodeBody,
+    vm: *Vm,
+    last := Span.zeroed(),
+);
+
+fn load_top_level(vm: *Vm, input: Str) void = {
+    func: CodeBody = (selector = vm.intern&.insert_owned("__top_level"));
+
+    p: Parser = (lex = (
+        pool = vm.intern&,
+        root = vm.codemap&.add_file("examples/smalltalk/first.st" /*TODO*/ , input),
+        src = input,
+        token = Token.zeroed(),
+    ), func = func&, vm = vm); p := p&;
+    p.pop();
+    if !p.parse_top_level() {
+        out := u8.list(temp());
+        fmt_error_line(vm.codemap&, p.last, out&);
+        eprintln(out.items());
+    };
+
+    out := u8.list(temp());
+    debug_log(func&, vm, out&);
+    print(out.items());
+}
+
+fn parse_top_level(self: *Parser) bool = {
+    ::enum(TokenType.Tag());
+    inside_methods := false;
+    while => self.peek() != .Eof {
+        continue :: local_return;
+        if self.peek() == .Bang && !inside_methods {
+            self.pop();
+            class_name := self.pop_symbol("! declaration") || return(false);
+            what := self.pop_symbol("! declaration") || return(false);
+            if !(what == self.vm.intern&.insert_owned("methods")) {
+                eprintln("expected 'methods'");
+                return(false);
+            };
+            if self.peek() != .Bang {
+                eprintln("expected ! to start methods");
+                return(false);
+            };
+            self.pop();
+            inside_methods = true;
+            @println("start methods for %", self.vm.intern&.get(class_name));
+            continue();
+        };
+        if self.peek() == .Bang && inside_methods {
+            self.pop();
+            inside_methods = false;
+            continue();
+        };
+        if !inside_methods {
+            ok := self.parse_stmt();
+            if !ok {
+                eprintln("parse error!");
+                return(false);
+            };
+            { // TODO: remove me
+                println("===");
+                out := u8.list(temp());
+                debug_log(self.func, self.vm, out&);
+                print(out.items());  
+                self.func.ops&.clear();
+                println("===");
+            };
+        } else {
+            func := push_function self {
+                self.parse_method_decl() || return(false);
+                while => self.peek() != .Bang {
+                    self.parse_stmt() || return(false);
+                };
+            };
+            self.emit(CreateBlock = func);
+            // TODO: do something with `new_function`
+        };
+        t := self.pop();
+        @match(t) {
+            fn Bang() => ();
+            @default => {
+                @eprintln("expected '!' after top level statement but found %", t&.tag());
+                return(false);
+            };
+        };
+    };
+    true
+}
+
+fn parse_stmt(self: *Parser) bool = {
+    self.emit(DebugLoc = self.lex&.peek()[].span);
+    is_return := self.match(.Triangle);
+    self.parse_expr() || return(false);
+    self.emit(@if(is_return, .ReturnFromMethod, .Pop));
+    true
+}
+
+fn push_function(self: *Parser, $body: @Fn() void) *CodeBody = {
+    prev := self.func;
+    new_function := self.vm.gpa.box(CodeBody);
+    new_function[] = ();
+    self.func = new_function;
+    body();
+    { // TODO: remove me
+        eprintln("===");
+        out := u8.list(temp());
+        debug_log(self.func, self.vm, out&);
+        eprintln(out.items());  
+        self.func.ops&.clear();
+        eprintln("===");
+    };
+    self.func = prev;
+    new_function
+} 
+
+fn parse_expr(self: *Parser) bool = {
+    t := self.pop();
+    @match(t) {
+        fn Hash() => {
+            name := self.pop_symbol("#symbol") || return(false);
+            self.emit(MakeSymbol = name)
+        }
+        fn Symbol(name) => {
+            self.emit_get(name);
+            t := self.lex&.peek();
+            if t.type&.is(.Symbol) {
+                self.parse_message_send() || return(false);
+            };
+        }
+        fn LeftSquare() => {
+            func := push_function self {
+                while => !self.match(.RightSquare) {
+                    self.parse_stmt() || return(false);
+                };
+            };
+            self.emit(CreateBlock = func);
+        }
+        @default => {
+            @eprintln("error: unexpected token %", t&.tag());
+            return(false);
+       };
+    };
+    true
+}
+
+// TODO: this is wrong. 
+// a: b
+//    foo: bar
+// 
+// a: b foo: bar
+// do i need to be whitespace sensitive?
+// 
+fn parse_method_decl(self: *Parser) bool = {
+    name := self.pop_symbol("first selector part") || return(false);
+    if self.match(.Colon) {
+        n := self.func.parameter_count&;
+        n[] += 1;
+        full_selector := u8.list(temp());
+        @fmt(full_selector&, "%:", self.vm.intern&.get(name));
+        dowhile {
+            local_name := self.pop_symbol("local parameter name") || return(false);
+            n[] += 1;
+            self.func.local_names&.push(local_name, self.vm.gpa);
+            if self.peek_tag() == .Symbol {
+                name := self.pop_symbol("param selector") || return(false);
+                @fmt(full_selector&, "%:", self.vm.intern&.get(name));
+                self.expect(.Colon, "after selector in method decl") || return(false);
+                true
+            } else {
+                false
+            }
+        };
+        name = self.vm.intern&.insert_owned(full_selector&.items());
+    };
+    self.func.selector = name;
+    true
+}
+
+fn parse_message_send(self: *Parser) bool = {
+    name := self.pop_symbol("selector") || return(false);
+    t := self.lex&.peek();
+    n := 1;
+    if t.type&.is(.Colon) {
+        full_selector := u8.list(temp());
+        @fmt(full_selector&, "%:", self.vm.intern&.get(name));
+        dowhile {
+            self.pop();
+            self.parse_expr() || return(false);
+            n += 1;
+            if self.peek_tag() == .Symbol {
+                name := self.pop_symbol("selector2") || return(false);
+                @fmt(full_selector&, "%:", self.vm.intern&.get(name));
+                if self.peek_tag() != .Colon {
+                    eprintln("expected ':' after selector");
+                    return(false);
+                };
+                true
+            } else {
+                false
+            }
+        };
+        name = self.vm.intern&.insert_owned(full_selector&.items());
+    };
+    self.emit(MessageSend = (selector = name, count = n.trunc()));
+    true
+}
+
+fn peek_tag(self: *Parser) TokenType.Tag() = {
+    t := self.lex&.peek();
+    t.type&.tag()
+}
+
+fn pop_symbol(self: *Parser, for: Str) ?Symbol = {
+    t := self.pop();
+    @match(t) {
+        fn Symbol(name) => (Some = name);
+        @default => {
+            @eprintln("error: expected symbol for % but found token %", for, t&.tag());
+            .None
+        };
+    }
+}
+
+fn emit_get(self: *Parser, name: Symbol) void = {
+    if self.find_local(name) { id |
+        self.emit(GetLocal = id);
+    } else {
+        self.emit(GetGlobal = self.vm.global_id(name));
+    };
+}
+
+fn emit(self: *Parser, op: Operation) void = {
+    self.func.ops&.push(op, self.vm.gpa);
+}
+
+fn find_local(self: *Parser, name: Symbol) ?i64 = {
+    enumerate self.func.local_names { i, s |
+        if s[] == name {
+            return(Some = i);
+        };
+    };
+    .None
+}
+
+fn global_id(self: *Vm, name: Symbol) i64 = {
+    self.globals_lookup&.get(name) || {
+        id := self.globals.len;
+        self.globals&.push(SValue.zeroed(), self.gpa); // :nil
+        self.globals_lookup&.insert(name, id, self.gpa);
+        self.globals_debug_names&.push(name, self.gpa);
+        id
+    }
+}
+
+::tagged(Operation);
+::enum(TokenType.Tag());
+
+fn debug_log(self: *CodeBody, vm: *Vm, out: *List(u8)) void = {
+    @fmt(out, "% { // addr = %\n", vm.intern&.get(self.selector), CodeBody.int_from_ptr(self));
+    each self.ops& { o |
+        @fmt(out, "    %(", o.tag());
+        S :: fn(s) => vm.intern&.get(s);
+        @match(o) {
+            fn GetField(s) => out.push_all(S(s[]));
+            fn SetField(s) => out.push_all(S(s[]));
+            fn GetLocal(i) => @fmt(out, "%", i);
+            fn SetLocal(i) => @fmt(out, "%", i);
+            fn GetGlobal(i) => @fmt(out, "id = %, %", i, S(vm.globals_debug_names[i[]]));
+            fn SetGlobal(i) => @fmt(out, "id = %, %", i, S(vm.globals_debug_names[i[]]));
+            fn MessageSend(s) => @fmt(out, "sel = %, n = %", S(s.selector), s.count);
+            fn MakeSymbol(s) => out.push_all(S(s[]));
+            fn DebugLoc(loc) => vm.codemap&.fmt_error_loc(loc[], out);
+            fn CreateBlock(s) => @fmt(out, "%, addr = %", S(s.selector), CodeBody.int_from_ptr(s[]));
+            @default => ();
+        };
+        @fmt(out, ");\n");
+    };
+    @fmt(out, "}\n");
+}
+
+fn pop(self: *Parser) TokenType = {
+    last := self.lex&.peek()[];
+    self.lex&.pop();
+    self.last = last.span;
+    last.type
+}
+
+fn peek(self: *Parser) TokenType.Tag() = {
+    self.lex&.peek()[].type&.tag()
+}
+
+fn match(self: *Parser, want: TokenType.Tag()) bool = {
+    if self.peek() != want {
+        return(false);
+    };
+    self.pop();
+    true
+}
+
+fn expect(self: *Parser, want: TokenType.Tag(), msg: Str) bool = {
+    if !self.match(want) {
+        @eprintln("error: expected % for % but found token %", want, msg, self.peek());
+        return(false);
+    };
+    true
+}

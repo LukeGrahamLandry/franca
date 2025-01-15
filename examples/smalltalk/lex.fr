@@ -1,0 +1,206 @@
+// TODO: i need to start generating these it's getting too boring. 
+
+Token :: @struct(type: TokenType, span: Span);
+
+TokenType :: @tagged(
+    Number: i64,
+    String: Symbol,
+    Symbol: Symbol,
+    Error: LexErr,
+    Float: f64,
+    LeftParen, RightParen, LeftSquare, RightSquare,
+    Dot, Comma, Colon, Semicolon, Hash, 
+    Pipe, Eof, Bang, Dollar,
+    Equals, EqualsEquals, EqualsEqualsEquals, ColonEquals,
+    Triangle,
+);
+
+LexErr :: @tagged(
+    Unexpected: i64,
+    UnterminatedStr,
+);
+
+Lexer :: @struct(
+    pool: *StringPool,
+    root: Span,
+    src: Str,
+    start := 0,
+    current := 0,
+    token: Token,
+);
+
+fn peek(self: *Lexer) *Token = self.token&;
+
+fn pop(self: *Lexer) *Token = {
+    if(self.eat_white_space_hit_end(), => return(self.token&));
+    self.start = self.current;
+    
+    @switch(self.peek_c()) {
+        @inclusive("a".ascii(), "z".ascii()) => self.lex_ident();
+        @inclusive("A".ascii(), "Z".ascii()) => self.lex_ident();
+        @case("_".ascii()) => self.lex_ident();
+        @case(";".ascii()) => self.one(.Semicolon);
+        @case(":".ascii()) => self.pair("=".ascii(), .Colon, .ColonEquals);
+        @case(".".ascii()) => self.one(.Dot);
+        @case("(".ascii()) => self.one(.LeftParen);
+        @case(")".ascii()) => self.one(.RightParen);
+        @case(",".ascii()) => self.one(.Comma);
+        @case("$".ascii()) => self.one(.Dollar);
+        @case("!".ascii()) => self.one(.Bang);
+        @case("=".ascii()) => {
+            found: TokenType = @switch(self.peek_c(1)) {
+                @case("=".ascii()) => {
+                    self.current += 1;
+                    @switch(self.peek_c(1)) {
+                        @case("=".ascii()) => {
+                            self.current += 1;
+                            .EqualsEqualsEquals
+                        };
+                        @default => .EqualsEquals;
+                    }
+                };
+                @default => .Equals;
+            };
+            self.one(found)
+        };
+        @case("#".ascii()) => self.one(.Hash);
+        @case("|".ascii()) => self.one(.Pipe);
+        @case("[".ascii()) => self.one(.LeftSquare);
+        @case("]".ascii()) => self.one(.RightSquare);
+        @case("'".ascii()) => { self.lex_string(); };
+        @case("^".ascii()) => self.one(.Triangle);
+        @inclusive("0".ascii(), "9".ascii()) => self.lex_num();
+        @case(0) => self.put_token(.Eof);  // TODO: check that we're actually at the end
+        @default fn(c: u8) => { 
+            self.error(Unexpected = c.zext());
+        };
+    };
+    self.token&
+}
+
+fn skip_string(self: *Lexer) Ty(Str, bool, bool) = {
+    escapes := false;
+    dowhile {
+        self.current += 1;
+        @switch(self.peek_c()) {
+            @case("'".ascii()) => false;
+            @case("\\".ascii()) => {
+                self.current += 1; // extra for "\'"
+                escapes = true;
+                true
+            };
+            @case("\n".ascii()) => {
+                self.error(.UnterminatedStr);
+                return("", false, false)
+            };
+            @case(0) => {
+                self.error(.UnterminatedStr);
+                return("", false, false)
+            };
+            @default => true;
+        }
+    };
+    self.current += 1;
+    text := self.src.slice(self.start.add(1), self.current.sub(1));
+    (text, escapes, true)
+}
+
+fn lex_string(self: *Lexer) bool = {
+    // TODO: destructuring 
+    text, escapes, success := self.skip_string();
+    if success {
+        s := self.pool.insert_owned(text);
+        // TODO: escapes
+        self.put_token((String = s));
+    };
+    success
+}
+
+fn lex_num(self: *Lexer) void = {
+    whole := self.lex_int();
+    if self.peek_c() == ".".ascii() && self.peek_c(1).is_ascii_digit() {
+        // Actually, that's a float.
+        self.current += 1;
+        start := self.current;
+        fraction := self.lex_int();
+        end := self.current;
+        digits := end.sub(start);
+        scale := 10.pow(digits);
+        n := whole.float().add(fraction.float().div(scale.float()));
+        self.put_token((Float = n));
+    } else {
+        self.put_token((Number = whole));
+    };
+}
+
+// TODO: error on overflow
+fn lex_int(self: *Lexer) i64 = {
+    total := 0;
+    dowhile {
+        total *= 10;
+        total += self.peek_c().dec_digit();
+        self.current += 1;
+        while => self.peek_c() == "_".ascii() {
+            self.current += 1;
+        };
+        self.peek_c().is_ascii_digit()
+    };
+    total
+}
+
+fn lex_ident(self: *Lexer) void = {
+    dowhile {
+        self.current += 1;
+        c := self.peek_c();
+        c.is_ascii_alpha().or(=> c.is_ascii_digit()).or(=> c == "_".ascii())
+    };
+    name := self.src.slice(self.start, self.current);
+    ident := self.pool.insert_owned(name);
+    self.put_token((Symbol = ident))
+}
+
+::if(TokenType);
+fn pair(self: *Lexer, maybe: u8, single: TokenType, double: TokenType) void = {
+    t := if(self.peek_c(1) == maybe, => {
+        self.current += 1;
+        double
+    }, => single);
+    self.one(t);
+}
+
+fn one(self: *Lexer, type: TokenType) void = {
+    self.current += 1;
+    self.put_token(type);
+}
+
+fn eat_white_space_hit_end(self: *Lexer) bool = {
+    if self.current >= self.src.len {
+        self.start = self.current;
+        self.put_token(.Eof);
+        return(true);
+    };
+    skip_whitespace(fn(n) => self.peek_c(n), => { self.current += 1; }, false, false, true);
+    end := self.current >= self.src.len;
+    if end {
+        self.start = self.current;
+        self.put_token(.Eof);
+    };
+    end
+}
+
+fn error(self: *Lexer, reason: LexErr) void = self.one((Error = reason));
+fn put_token(self: *Lexer, type: TokenType) void = {
+    //println(self.src.slice(self.start, self.current));
+    self.current = self.current.min(self.src.len);
+    self.token = (type = type, span = self.root.subspan(self.start.trunc(), self.current.trunc()));
+}
+
+fn peek_c(self: *Lexer) u8 = self.peek_c(0);
+fn peek_c(self: *Lexer, n: i64) u8 = 
+    if(self.current + n < self.src.len, => self.src[self.current.add(n)], => 0);
+
+fn init(pool: *StringPool, root: Span, src: Str) Lexer = {
+    self: Lexer = (pool = pool, root = root, src = src, token = Token.zeroed());
+    self&.pop(); // get the first token ready. 
+    self
+}
