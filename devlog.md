@@ -3,6 +3,7 @@
 ## (Jan 15)
 
 - fixed encoding for x64 float conversions 
+- made opt/slots work for amd64. went from 2318611 to 2092056 bytes of code. 10% smaller is quite a lot. 
 
 ## 
 

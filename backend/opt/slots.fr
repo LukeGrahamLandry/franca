@@ -7,11 +7,6 @@
 //
 
 fn elide_abi_slots(f: *Qbe.Fn) void = {
-    // :TodoFinishAmdSlots
-    if f.globals.goal.arch != .aarch64 {
-        return(); // TODO
-    };
-    
     SlotEntry :: @struct(value: Qbe.Ref, size: i32, k: Qbe.Cls);
     slot_contains: HashMap(i64, SlotEntry) = init(temp());
     StoreEntry :: @struct(ins: QList(*Qbe.Ins), nins: i64);
@@ -25,9 +20,18 @@ fn elide_abi_slots(f: *Qbe.Fn) void = {
             continue :: local_return;
             
             if maybe_load(i) { size |
-                @debug_assert(rtype(i.arg&[0]) != .RMem, "TODO: x64");
-                if local_slot(f, i.arg&[0]) { slot | 
-                    @debug_assert(i.arg&[1] == QbeNull, "need to deal with this if i want to allow slot + offset");
+                addr := i.arg&[0];
+                if rtype(i.arg&[0]) == .RMem {  // amd64 only
+                    m := f.get_memory(i.arg&[0]);
+                    if m.offset.bits.i != 0 || m.index != QbeNull {
+                        // TODO: need to escape if something's slot if i try to remove stores?
+                        continue();
+                    };
+                    addr = m.base;
+                };
+                
+                if local_slot(f, addr) { slot | 
+                    @debug_assert(i.arg&[1] == QbeNull, "need to deal with this if i want to allow slot + offset.");  // arm64 only
                     if slot_contains&.get(slot) { entry | 
                         if entry.size == size && entry.k == i.cls() {
                             i[] = make_ins(.copy, i.cls(), i.to, entry.value, QbeNull);
@@ -46,9 +50,12 @@ fn elide_abi_slots(f: *Qbe.Fn) void = {
                 slot := local_slot(f, a) || {
                     rtype(a) == .RMem || continue();
                     m := f.get_memory(a);
-                    @debug_assert(m.index == QbeNull && m.scale == 1, "TODO: x64");
+                    if m.offset.bits.i != 0 || m.index != QbeNull {
+                        // TODO: need to escape if something's slot if i try to remove stores?
+                        continue();
+                    };
                     slot := local_slot(f, m.base) || continue();
-                    @debug_assert(m.offset.bits.i == 0, "need to deal with this if i want to allow slot + offset");
+                    //@debug_assert(m.offset.bits.i == 0, "need to deal with this if i want to allow slot + offset");
                     slot
                 };
                 if size != 4 && size != 8 {
