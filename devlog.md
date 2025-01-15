@@ -1,5 +1,13 @@
 - TODO: deal with `CodegenEntry:Bounce` on wasm
 
+## (Jan 15)
+
+- fixed encoding for x64 float conversions 
+
+## 
+
+- started some new examples: c and smalltalk frontends 
+
 ## (Jan 8)
 
 - i really need to have a version of `@struct` that lets you use the normal top level declaration syntax

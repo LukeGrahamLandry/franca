@@ -951,7 +951,6 @@ fn arg_t(e: *AmdState, r: Qbe.Ref) AmdArgType = @match(rtype(r)) {
 };
 
 fn assemble(e: *AmdState, i: *Qbe.Ins) void = {
-    //printins(e.f, i, e.f.globals.debug_out);
     // aaaa that test only exists for registers in the other direction is such a hack! fix this properly please! -- Nov 14 :FUCKED
     if i.op() == .xcmp || (i.op() == .xtest && rtype(i.arg&[0]) == .RCon) {  // // HACK. TODO: at least move this to the outer match in emitins
         i.arg&.items().swap(0, 1);
@@ -1007,11 +1006,16 @@ fn assemble(e: *AmdState, i: *Qbe.Ins) void = {
         @if(entry.a0 == .imm32 || entry.a1 == .imm32) => 4;
         @else => 0;
     };
-    b := encode(e, i, w, immediate_size);
+    // TODO: this is confusing! for the float<->int casts, you have to know the width of both sides and one is stored in the opcode in my ir. 
+    //       and in the asm, the prefix means Ks vs Kd and REX.W means Kw vs Kl 
     prefix := entry.prefix;
-    if prefix == 0xF2 && !w && i.op() != .truncd {
+    if prefix == 0xF2 && !w && !(@is(i.op(), .exts, .truncd, .dtosi)) {
         prefix = 0xF3; // this seems like the easiest way to do this to me
     };
+    if (@is(i.op(), .swtof, .sltof)) {
+        w = i.op() == .sltof;
+    };
+    b := encode(e, i, w, immediate_size);
     b.prefix = prefix;
     push_instruction(e, b, opcode);
     if entry.a0 == .imm8 {
@@ -1246,7 +1250,6 @@ fn amd64_encoding_table() Ty([]AmdEncodingEntry, []u16) = @amd64_encoding_data (
         (.F, .M, (0x0F, 0x6E), (), (0x66)), // movd:movq f<-i
         (.M, .F, (0x0F, 0x7E), (), (0x66)), // movd:movq i<-f
     ),
-    // TODO: i have low faith that i correctly transcribed the numbers
     (.exts,
         (.F, .F, (0x0F, 0x5A), (), (0xF3)), // cvtss2sd  
     ),
@@ -1260,13 +1263,9 @@ fn amd64_encoding_table() Ty([]AmdEncodingEntry, []u16) = @amd64_encoding_data (
         (.F, .R, (0x0F, 0x2A), (), (0xF2)), // cvtsi2sd  
     ),
     (.stosi,
-        (.R, .F, (0x0F, 0x2C), (), (0xF2)), // cvttss2si  
+        (.R, .F, (0x0F, 0x2C), (), (0xF3)), // cvttss2si  
     ),
     (.truncd,
         (.F, .F, (0x0F, 0x5A), (), (0xF2)), // cvtsd2ss  
     ),
-    // _wtos `cvtsi2ss	%rax, %xmm0` vs `cvtsi2ss	%eax, %xmm0`
-    // ltos `shrq	%cl, %rsi` vs `rorq	%cl, %rbp`
-    // fptrunc `cvtsi2sd	%eax, %xmm0` vs `cvtsi2sd	%rax, %xmm0` and `	cvttsd2si` vs `cvttss2si`
-    // fpneg `	movq	%xmm0, %rax` vs `movd	%xmm0, %eax`
 );

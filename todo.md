@@ -7,6 +7,7 @@
 
 ##
 
+- finish #x86_bytes tests: call_in_stack, throw, try, truncate_to_byte, read_pair, write_pair, both_pair
 - detect if you try to do the jit thing with the backend library from jitted code on macos instead of just `bus error`-ing
 - make `#where` based on argument names instead of order.
 - `#where` access constant arguments of the call
