@@ -660,7 +660,7 @@ fn compile_expr(self: *EmitBc, expr: *FatExpr, result_location: ResultLoc, can_t
             @err_assert(from == to, "@as size mismatch: % vs %", self.program.log(v.ty), self.program.log(expr_ty)) return;
             return(self.compile_expr(v[], result_location, can_tail))
         }
-        fn Call(f)  => return(self.emit_call(f.f, f.arg, result_location, can_tail));
+        fn Call(f)  => return(self.emit_call(f.f, f.arg, result_location, can_tail, expr.loc));
         fn Block(f) => return(self.emit_block_expr(expr, result_location, can_tail));
         fn Value(f) => return(self.emit_value(f.bytes&, result_location, expr.ty));
         fn If(_)      => return(self.emit_call_if(expr, result_location, can_tail));
@@ -914,7 +914,7 @@ fn zero_memory_at_top_of_stack(self: *EmitBc, expr_ty: Type) void = {
 //    f_id
 //}
 
-fn emit_call(self: *EmitBc, f: *FatExpr, arg: *FatExpr, result_location: ResultLoc, can_tail: bool) CRes(void) #once = {
+fn emit_call(self: *EmitBc, f: *FatExpr, arg: *FatExpr, result_location: ResultLoc, can_tail: bool, loc: Span) CRes(void) #once = {
     caller := self.program.get_function(self.result.func);
     @match(self.program.get_type(f.ty)) {
         fn Fn(f_ty) => {
@@ -958,7 +958,7 @@ fn emit_call(self: *EmitBc, f: *FatExpr, arg: *FatExpr, result_location: ResultL
                     
                     self.push(CallDirect = (sig = self.push_sig(sig[]), f = f_id, tail = tail, context = context));
                     if self.debug {
-                        self.debug_location_for_last_op(f.loc);
+                        self.debug_location_for_last_op(loc);
                     };
                 };
             }
@@ -1439,13 +1439,23 @@ fn construct_struct(self: *EmitBc, pattern: *Pattern, requested: Type, result_lo
                         ty = .I64,
                     ));
                     @try(self.compile_expr(value, result_location, false)) return;
+                    
+                    
+                    types := self.program.flat_tuple_types(raw_container_ty);
+                    types&.ordered_remove(0);
+                    
+                    if result_location == .PushStack && payload_size == 1 {
+                        flat_prim := @unwrap(self.program.prim(types[0]), "not prim") return;
+                        real_prim := @unwrap(self.program.prim(value.ty), "not prim") return;
+                        if flat_prim == .I64 && real_prim == .I32 {
+                            self.push(Intrinsic = .ZeroExtend32To64);
+                        };
+                    };
 
                     // :tagged_prims_hack
                     // TODO: this is a dumb hack to make the padding have the right prim types for backends that care. :SLOW -- Jun 23
                     //       This fixes test_option/option_small_payload_n/parse on llvm.  
                     // TODO: this is super copy-paste-y now that new sema outputs values for some tagged ctx_field
-                    types := self.program.flat_tuple_types(raw_container_ty);
-                    types&.ordered_remove(0);
                     range(0, self.slot_count(value.ty).zext()) { _ |
                         types&.ordered_remove(0);
                     };

@@ -1,5 +1,31 @@
 - TODO: deal with `CodegenEntry:Bounce` on wasm
 
+## (Jan 18)
+
+- im so stupid. i was like how can RsVec()::empty have ptr=8 so my bake_relocatable_constant chokes on it when i try to AOT? 
+the whole point of that originally was that it followed rust's rules so it wasn't all zeros because the want to have a niche for `Option<Vec<T>>`,
+and i've just been using that as a RawList that doesn't carry around an allocator. 
+
+```
+fn empty() Self = {
+    // "unsafe precondition(s) violated: slice::from_raw_parts requires the pointer to be aligned and non-null, and the total size of the slice not to exceed `isize::MAX`"
+    nonnull := T.ptr_from_int(T.size_of());
+    (cap = 0, ptr = nonnull, len = 0)
+}
+```
+
+## (Jan 17)
+
+- fixed llvm backend a bit. promote prim for when @tagged literal passed to function by value. use right type for switch. 
+so now it passes `run_tests.fr -- aot-llvm` and can compile the compiler (but the latter doesn't work!). 
+
+## (Jan 16)
+
+- my exit(42) elf works in blink but not real linux. it just segfaults on 0x7ffff095017b. that's distressing. 
+oh its you have to add 65k to every offset for reasons. so it's like mach-o fake zero page i guess. 
+but you don't need to map a segment there. and i was already skipping some to make it work in blink (you can't say your code starts at 0x0),
+but it seems they have looser rules than real. 
+
 ## (Jan 15)
 
 - fixed encoding for x64 float conversions 

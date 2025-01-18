@@ -36,6 +36,7 @@ Command :: @struct(
     n := 1,
     profile := false,
     syscalls := false,
+    maintain_it_with_zig := false,
 );
 
 Action  :: @enum(i64) (run, build, test); ::enum(Action);
@@ -116,6 +117,7 @@ fn do_it(vtable: *ImportVTable, cmd: *Command) void = {
     
     m := @uninitialized QbeModule;
     if (@is(cmd.backend, .self, .legacy)) {
+        assert(!cmd.maintain_it_with_zig, "only need to use zig's clang when using the llvm backend");
         init_default_module_dyn(m&, c.vtable, (os = cmd.os, arch = cmd.arch, type = cmd.goal));
         assert(!cmd.show_asm, "TODO: support -S on non-text backends");
     };
@@ -206,6 +208,10 @@ fn do_it(vtable: *ImportVTable, cmd: *Command) void = {
             fn Dynamic() => args&.push("-dynamiclib");
             @default => @panic("We don't support % with the llvm backend", cmd.goal);
         };
+        if cmd.goal != .Relocatable && cmd.maintain_it_with_zig {
+            args&.push("-c");
+        };
+        
         if cmd.debug_info || cmd.slow {
             args&.push("-O0");
         } else {
@@ -218,6 +224,16 @@ fn do_it(vtable: *ImportVTable, cmd: *Command) void = {
         end := timestamp();
         @println("[llvm time: %ms]", end - start);
         out.remove(); // TODO: defer 
+        
+        if cmd.maintain_it_with_zig {
+            start := timestamp();
+            args := @slice("cc", cmd.output_file, "-o", cmd.output_file, "-target", triple);
+            @eprintln("[run link] %", args);
+            success := run_cmd_blocking("zig", args);
+            assert(success, "zig failed");
+            end := timestamp();
+            @println("[link time: %ms]", end - start);
+        };
     };
     
     {c.vtable.destroy_compiler}(c.data);  // for -repeat, leak less memory 
@@ -406,6 +422,12 @@ fn parse_cli_args() Command = {
             };
             @case("-syscalls") => { 
                 cfg.syscalls = true; 
+            };
+            @case("-zig") => {
+                // for cross compiling with llvm, the zig people have done the painful work of figuring out how to get the linker shit to work,
+                // but also thier copy of clang won't accept llvm-ir text so i have to use my clang to make an object file and then thier clang to link it. 
+                // this kind of garbage is why i want to do everything myself... 
+                cfg.maintain_it_with_zig = true;
             };
             @default => {
                 extra_args&.push(arg);

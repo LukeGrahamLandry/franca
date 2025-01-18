@@ -17,7 +17,12 @@ fn main() void = {
         @fmt(out, "=== Begin Program Headers ===\n");
         mem := input.rest(header.program_header_off);
         range(0, header.program_header_num.zext()) { i |
-            @fmt(out, "[PH %]: %\n", i, mem&.pop_type(Elf.ProgramHeader));
+            header := mem&.pop_type(Elf.ProgramHeader);
+            @fmt(out, "[PH %]: %\n", i, header);
+            if header.type == .Interp {
+                s: CStr = (ptr = input.index(header.offset));
+                @fmt(out, "                %\n", s);
+            };
         };
         @fmt(out, "=== End Program Headers ===\n\n");
     };
@@ -42,20 +47,29 @@ fn main() void = {
                 @fmt(out, "\n");
             };
             
-            if section.type == .SymbolTable || section.type == .DynSymbolTable {
+            section_bytes :: fn(i) => {
+                s := sections.index(i.int());
+                input.subslice(s.offset, s.size)
+            };
+            
+            if @is(section.type, .SymbolTable, .DynSymbolTable) {
                 @fmt(out, "  [Symbols]\n");
                 if section.ent_size != size_of(Elf.Symbol) {
                     @fmt(out, "Unexpected entsize (wanted %)\n", ::size_of(Elf.Symbol));
                 } else {
-                    mem := input.slice(section.offset, section.offset + section.size);
-                    str_section := sections.index(section.link.zext());
-                    str_bytes := input.slice(str_section.offset, str_section.offset + str_section.size);
+                    mem := section_bytes(section_i);
+                    str_bytes := section_bytes(section.link);
                     i := 0;
                     dowhile {
                         symbol := mem&.pop_type(Elf.Symbol);
                         n: i64 = symbol.name.zext();
                         name: CStr = @if(n < str_bytes.len, (ptr = str_bytes.index(n)), "ERROR: symbol name OOB");
                         @fmt(out, "    [%] % %\n", i, symbol, name);
+                        s_i: i64 = symbol.section_header_index.zext();
+                        @if(s_i != 65521)
+                        if s_i >= sections.len || symbol.value > sections[s_i].addr + sections[s_i].size || symbol.value < sections[s_i].addr {
+                            @fmt(out, "ERROR: symbol offset doesn't fit in section_header_index!\n");
+                        };
                         i += 1;
                         mem.len >= size_of(Elf.Symbol)
                     };
@@ -65,6 +79,44 @@ fn main() void = {
                 };
             };
             
+            if section.type == .Dynamic {
+                @fmt(out, "=== Dynamic === \n");
+                mem := input.subslice(section.offset, section.size);
+                while => mem.len > 0 {
+                    dyn := mem&.pop_type(Elf.Dyn);
+                    @fmt(out, "    - %\n", dyn);
+                };
+                @fmt(out, "===\n");
+            };
+            
+            show_relocs :: fn($Record, name) => {
+                @fmt(out, "=== Relocations (%) === \n", name);
+                mem := input.subslice(section.offset, section.size);
+                symbols_section := sections.index(section.link.zext());
+                symbols_bytes := section_bytes(section.link);
+                symbols: []Elf.Symbol = (ptr = ptr_cast_unchecked(u8, Elf.Symbol, symbols_bytes.ptr), len = symbols_bytes.len / Elf.Symbol.size_of());
+                str_bytes := section_bytes(symbols_section.link);
+                
+                while => mem.len > 0 {
+                    dyn := mem&.pop_type(Record);
+                    s := "????";
+                    if dyn.sym < symbols.len.trunc() {
+                        n: i64 = symbols[dyn.sym.zext()].name.zext();
+                        name: CStr = @if(n < str_bytes.len, (ptr = str_bytes.index(n)), "ERROR: symbol name OOB");
+                        s = name.str();
+                    };
+                    @fmt(out, "    - % %\n", dyn, s);
+                };
+                @fmt(out, "===\n");
+            };
+            
+            if section.type == .RelocAddend {
+                show_relocs(Elf.RelA, "w/ Addend");
+            };
+            if section.type == .RelocNoAddend {
+                show_relocs(Elf.Rel, "NO Addend");
+            };
+            
             if section_i == header.section_header_names_index.zext() {
                 @fmt(out, "  [Section Header Names]\n");
             };
@@ -72,17 +124,17 @@ fn main() void = {
             has_strings := section.flags.bit_and(1.shift_left(@as(i64) Elf.SectionFlag.Strings)) != 0 || section.type == .StringTable;
             if section.size > 0 && has_strings {
                 @fmt(out, "  [Strings]\n");
-                c := section.offset;
+                c := 0;
                 i := 0;
                 dowhile {
-                    s: CStr = (ptr = input.index(c));
+                    s: CStr = (ptr = input.index(section.offset + c));
                     s := s.str();
                     if s.len > 0 {
-                        @fmt(out, "    [%: %] %\n", i, s.len, s);
+                        @fmt(out, "    %. [%..<%] %\n", i, c, c + s.len + 1, s);
                     };
                     i += 1;
                     c += s.len + 1;
-                    c - section.offset < section.size
+                    c < section.size
                 };
             };
         };
@@ -96,11 +148,15 @@ fn main() void = {
 ::DeriveFmt(Elf.ProgramHeader);
 ::DeriveFmt(Elf.SectionHeader);
 ::DeriveFmt(Elf.Symbol);
+::DeriveFmt(Elf.Dyn);
+::DeriveFmt(Elf.RelA);
+::DeriveFmt(Elf.Rel);
 ::enum(Elf.Type);
 ::enum(Elf.Machine);
 ::enum(Elf.SegmentType);
 ::enum(Elf.SectionType);
 ::enum(Elf.SectionFlag);
+::enum(Elf.DynTag);
 
 fn display(i: *u16, out: *List(u8)) void = 
     display(@as(i64) i[].zext(), out);

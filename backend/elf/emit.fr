@@ -5,6 +5,10 @@ fn output_elf(m: *QbeModule) [][]u8 = {
     debug_log_byte_size(m);
     patch_pending_symbols(m);
     
+    MYSTERY_SPICE :: 0x10000;
+    
+    code := m.segments&[.Code]&;
+    code_size := code.len() - COMMANDS_SIZE_GUESS - SIZE_OF_STUBS;
     for_enum SegmentType { s | 
         m.align_to(s, 4096);
     };
@@ -21,65 +25,83 @@ fn output_elf(m: *QbeModule) [][]u8 = {
             @default => unreachable();
         },
         machine = @if(m.goal.arch == .aarch64, .arm64, .amd64),
-        entry = main_entry_point_vaddr(m),
+        entry = main_entry_point_vaddr(m) + MYSTERY_SPICE,
         program_header_off = size_of(Elf.Header),
-        section_header_off = 0, // todo
+        section_header_off = 0, // patched
         flags = 0, // todo
         ehsize = 0, // TODO?
-        program_header_num = 0, // todo
-        section_header_num = 0, // todo
+        program_header_num = 0, // patched
+        section_header_num = 0, // patched
         section_header_names_index = 0, // todo
     );
     
     start_program_headers := commands.len;
-    p_header := commands&.reserve_type(Elf.ProgramHeader);
-    e_header.program_header_num += 1;
-        
-    virtual_offset := COMMANDS_SIZE_GUESS; 
-    file_offset    := COMMANDS_SIZE_GUESS;
-    make_segment :: fn(seg: SegmentType, prot: u32, off: i64) => {
+    
+    program_header :: fn() => {
+        h := commands&.reserve_type(Elf.ProgramHeader);
+        e_header.program_header_num += 1;
+        h
+    };
+    
+    p_header := program_header();
+     
+    virtual_offset := MYSTERY_SPICE; 
+    file_offset    := 0;
+    make_segment :: fn(seg: SegmentType, prot: u32) => {
         segment := m.segments&[seg]&;
         chunks&.push(live_segment_part(m, seg)); // :waste :commandsispartofcodenow
     
-        header := commands&.reserve_type(Elf.ProgramHeader);
-        header[] = (
+        program_header()[] = (
             type = .Load,
             prot = prot,
             offset = file_offset,
             vaddr = virtual_offset, 
             paddr = virtual_offset,
-            file_size = segment.len() - off,
-            mem_size = segment.len() - off,
+            file_size = segment.len(),
+            mem_size = segment.len(),
             align = 4096,
         );
-        e_header.program_header_num += 1;
         
-        virtual_offset += segment.mmapped.len - off;
-        file_offset += segment.len() - off;
+        virtual_offset += segment.mmapped.len;
+        file_offset += segment.len();
         header
     };
     
     // TODO: we're asking it to map the elf info like you need to for mach-o but probably shouldn't do that here. 
     
-    code_header := make_segment(.Code, RX, COMMANDS_SIZE_GUESS); RX :: 5;// :waste :commandsispartofcodenow
-    make_segment(.ConstantData, R, 0); R :: 4; // :waste 
-    make_segment(.MutableData, RW, 0); RW :: 6;
+    code_header := make_segment(.Code, RX); RX :: 5;// :waste :commandsispartofcodenow
+    make_segment(.ConstantData, R); R :: 4; // :waste 
+    make_segment(.MutableData, RW); RW :: 6;
     
-    {
-        stack := commands&.reserve_type(Elf.ProgramHeader);
-        e_header.program_header_num += 1;
-        stack[] = (
-            type = .Stack,
-            prot = 6,
-            offset = 0,
-            vaddr = 0, 
-            paddr = 0,
-            file_size = 0,
-            mem_size = 16777216,
-            align = 0,
+    payload := u8.list(CHAINED_SIZE_GUESS, temp());
+    
+    program_header()[] = (
+        type = .Stack,
+        prot = RW,
+        offset = 0,
+        vaddr = 0, 
+        paddr = 0,
+        file_size = 0,
+        mem_size = 16777216,
+        align = 0,
+    );
+    
+    if m.imports.len > 0 {
+        loader_path := "/lib64/ld-linux-x86-64.so.2\0";
+        size := loader_path.len;
+        off := file_offset + payload.len;
+        program_header()[] = (
+            type = .Interp,
+            prot = R,
+            offset = off,
+            vaddr = off, 
+            paddr = off,
+            file_size = size,
+            mem_size = size,
+            align = 1,
         );
+        payload&.push_all(loader_path);
     };
-    
     program_headers_size := commands.len - start_program_headers;
     p_header[] = (
         type = .Phdr,
@@ -92,11 +114,163 @@ fn output_elf(m: *QbeModule) [][]u8 = {
         align = 8,
     );
     
+    section_names := Str.list(10, temp());
+    e_header.section_header_off = commands.len;
+    section_header :: fn(name: Str) => {
+        section_names&.push(name);
+        h := commands&.reserve_type(Elf.SectionHeader);
+        e_header.section_header_num += 1;
+        h
+    };
+    
+    section_header("")[] = Elf.SectionHeader.zeroed();
+    
+    if m.imports.len > 0 {  // TODO: UNTESTED
+        // SectionHeader.link: Relocations -> DynSymbolTable -> StringTable
+        string_table_start := payload.len;
+        imported_symbol_name_offsets := u32.list(m.imports.len, temp());
+        payload&.push(0);  // null
+        for m.imports& { id |
+            imported_symbol_name_offsets&.push(trunc(payload.len - string_table_start));
+            payload&.push_all(m.str(id));
+            payload&.push(0);
+        };
+        string_table_index := e_header.section_header_num;
+        section_header(".dynstr")[] = (
+            name = 0,
+            type = .StringTable, 
+            flags = 1.shift_left(@as(i64) Elf.SectionFlag.Strings),
+            addr = 0,
+            offset = file_offset + string_table_start, 
+            size = payload.len - string_table_start,
+            addr_align = 1,
+        );
+        payload&.zero_pad_to_align(8);
+        symbol_table_start := payload.len;
+        payload&.reserve_type(Elf.Symbol)[] = Elf.Symbol.zeroed();  // null
+        enumerate m.imports& { i, id |
+            STT_FUNC :: 2;
+            payload&.reserve_type(Elf.Symbol)[] = (
+                name = imported_symbol_name_offsets[i],
+                info = 18, // STT_FUNC,  // TODO?
+            );
+        };
+        symbol_table_index := e_header.section_header_num;
+        section_header(".dynsym")[] = (
+            name = 0, // TODO
+            type = .DynSymbolTable, 
+            flags = 2, // TODO: what does this mean? 
+            addr = 0,  // TODO: clang has some virtual place here
+            offset = file_offset + symbol_table_start, 
+            size = payload.len - symbol_table_start,
+            addr_align = 8,
+            ent_size = size_of(Elf.Symbol),
+            link = string_table_index.zext(),
+        );
+        
+        relocation_table_start := payload.len;
+        //payload&.reserve_type(Elf.RelA)[] = Elf.RelA.zeroed();  // null
+        enumerate m.imports& { i, id |
+            symbol := m.get_symbol_info(id[]);
+            each symbol.fixups { fix |
+                if fix.type&.is(.DataAbsolute) {
+                    ptr_cast_unchecked(u8, i64, fix.patch_at)[] = 0;
+                    payload&.reserve_type(Elf.RelA)[] = (
+                        sym = trunc(i + 1),
+                        offset = ptr_diff(m.segments&[.Code].mmapped.ptr, fix.patch_at) + MYSTERY_SPICE, // TODO: or is it offset in a specific segment?
+                        addend = 0,
+                        type = 7,  // TODO: what does this mean?
+                    );
+                };
+            };
+        };
+        section_header(".rela.dyn")[] = (
+            name = 0,
+            type = .RelocAddend, 
+            flags = 2, // TODO: what does this mean? 
+            addr = 0,  // TODO: clang has some virtual place here
+            offset = file_offset + relocation_table_start, 
+            size = payload.len - relocation_table_start,
+            addr_align = 8,
+            ent_size = size_of(Elf.RelA),
+            link = symbol_table_index.zext(),
+        );
+        
+        
+        // TODO: just tricking llvm-objdump for now
+        section_header(".dynamic")[] = (
+            name = 0,
+            type = .Dynamic, 
+            flags = 2,
+            addr = 0, 
+            offset = file_offset + payload.len, 
+            size = 0,
+            ent_size = size_of(Elf.Dyn),
+            addr_align = 8,
+        );
+        
+        // TODO: local relocations too!
+    };
+    
+    // This is useless. But if you don't do it objdump doesn't know where to disassemble so you get nothing. 
+    {
+        code := m.segments&[.Code]&;
+        section_header(".plt")[] = (
+            name = 0, // TODO
+            type = .ProgramBits, 
+            flags = 1.shift_left(@as(i64) Elf.SectionFlag.Exec),
+            addr = MYSTERY_SPICE + COMMANDS_SIZE_GUESS, 
+            offset = COMMANDS_SIZE_GUESS, 
+            size = m.stubs&.len(),
+            addr_align = 1,
+        );
+        section_header(".text")[] = (
+            name = 0, // TODO
+            type = .ProgramBits, 
+            flags = 1.shift_left(@as(i64) Elf.SectionFlag.Exec),
+            addr = MYSTERY_SPICE + COMMANDS_SIZE_GUESS + SIZE_OF_STUBS,  
+            offset = COMMANDS_SIZE_GUESS + SIZE_OF_STUBS, 
+            size = code_size,
+            addr_align = 1,
+        );
+        
+        // TODO: I think it really doesn't need the names so maybe i can take this out. 
+        
+        e_header.section_header_names_index = e_header.section_header_num;
+        header := section_header(".shstrtab");
+        
+        offsets := u32.list(temp());
+        string_table_start := payload.len;
+        for section_names { n |
+            offsets&.push(trunc(payload.len - string_table_start));
+            payload&.push_all(n);
+            payload&.push(0);
+        };
+        header[] = (
+            name = 0, // TODO
+            type = .StringTable, 
+            flags = 0,
+            addr = 0,
+            offset = file_offset + string_table_start, 
+            size = payload.len - string_table_start,
+            addr_align = 1,
+        );
+        
+        ptr := ptr_cast_unchecked(u8, Elf.SectionHeader, commands.maybe_uninit.ptr.offset(e_header.section_header_off));
+        s_headers: []Elf.SectionHeader = (ptr = ptr, len = e_header.section_header_num.zext());
+        enumerate s_headers { i, h |
+            h.name = offsets[i];
+        };
+    };
     
     end := commands.len;
     @assert_le(end, COMMANDS_SIZE_GUESS, "we guessed wrong so the array resized and all the pointers are junk");
     commands.len = COMMANDS_SIZE_GUESS;
     commands.items().rest(end).set_zeroed();
+    @assert_le(payload.len, CHAINED_SIZE_GUESS, "resized and now the pointers are junk"); 
+    if payload.len != 0 {
+        chunks&.push(payload.items());
+    };
     
     chunks.items()
 }
