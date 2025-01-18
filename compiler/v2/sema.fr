@@ -13,9 +13,9 @@ ResultType :: @rec @tagged(
 );
 
 OverloadSetData :: @struct(
-    ready: RsVec(FuncId),
+    ready: RawList(FuncId),
     name: Symbol,
-    pending: RsVec(FuncId),
+    pending: RawList(FuncId),
     inline_cache: Ty(OverloadKey, FuncId),
     table: ?HashMap(OverloadKey, FuncId) = .None,
 );
@@ -528,7 +528,7 @@ fn handle_target_split(self: *SelfHosted, func: *Func) Maybe(void) #once = {
             new_fid := self.add_function(new_func);
             merged&.push(TargetOsSplit = (os = os, fid = new_fid));
         };
-        func.body = (Merged = merged.rs());
+        func.body = (Merged = merged.as_raw());
     };
     @debug_assert(func.body&.is(.Merged), "ICE: lost #target_os impls???");
     each func.body.Merged { impl |
@@ -574,7 +574,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
         impls&.push(DynamicImport = func.name);
         
         //func.set_flag(.NoMangle);
-        func.body = (Merged = impls.rs());
+        func.body = (Merged = impls.as_raw());
     };
        
     find_import :: fn(lib_name: Symbol) bool => {
@@ -708,8 +708,8 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
                             // TODO: you can't just compile here because then trying to imm_eval hits a not read asm func i think because of ^ callees.
                             //       it recurses and has to emit other asm first but they don't get put in dispatch,
                             //       becuase they don't have a thing in the result stack to do callees first.
-                            ::if(RsVec(u32));
-                            ops: RsVec(u32) = if asm.expr&.is(.Tuple) {
+                            ::if(RawList(u32));
+                            ops: RawList(u32) = if asm.expr&.is(.Tuple) {
                                 parts := asm.expr.Tuple&;
                                 ops: List(u32) = list(parts.len, self.get_alloc());
                                 u32_ty := self.intern_type(Int = (bit_count = 32, signed = false));
@@ -718,7 +718,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
                                     i := u32.assume_cast(i&)[];
                                     ops&.push(i);
                                 };
-                                ops.rs()
+                                ops.as_raw()
                             } else {
                                 return(@err("TODO: untested #asm case."))
                             };
@@ -786,7 +786,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
                             callee(ir&);  // :call_dynamic_values
                             zone_end(zone);
                             
-                            func.body = (X86AsmBytes = ir.rs());
+                            func.body = (X86AsmBytes = ir.as_raw());
                             good = true;
                             
                             // note: you want to do this before do_merges because flags aren't preserved. 
@@ -1352,7 +1352,7 @@ fn compile_quote(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe
         
     if !walk.placeholders.is_empty() {
         walk.placeholders&.push(expr[]);
-        arg: FatExpr = (expr = (Tuple = walk.placeholders.rs()), loc = expr.loc, ty = UnknownType, done = false);
+        arg: FatExpr = (expr = (Tuple = walk.placeholders.as_raw()), loc = expr.loc, ty = UnknownType, done = false);
         arg := self.box(arg);
         arg: FatExpr = (expr = (Slice = arg), loc = expr.loc, ty = UnknownType, done = false);
         f := self.to_expr(FuncId, unquote_placeholders, expr.loc); 
@@ -1961,7 +1961,7 @@ fn emit_capturing_call(self: *SelfHosted, f: FuncId, expr_out: *FatExpr, request
         stmts: List(FatStmt) = list(1, self.get_alloc());
         arg_stmt: Stmt = (DeclVarPattern = (binding = pattern, value = arg_expr[]));
         stmts&.push(stmt = arg_stmt, loc = loc);
-        expr_out.expr = new_block(stmts.rs(), self.box(owned_body));
+        expr_out.expr = new_block(stmts.as_raw(), self.box(owned_body));
     };
     b := expr_out.expr.Block&;
     b.ret_label = (Some = ret_label);
@@ -2024,7 +2024,7 @@ fn const_args_key(self: *SelfHosted, original_f: FuncId, arg_expr: *FatExpr) May
                         parts&.push(synthetic_ty((Value = (bytes = taken, coerced = false)), arg_expr.loc, ty));
                     };
                     @debug_assert(reader.bytes.len, reader.i, "ICE: didn't consume all bytes.");
-                    arg_expr.expr = (Tuple = parts.rs());
+                    arg_expr.expr = (Tuple = parts.as_raw());
                 };
             };
         };
@@ -2501,7 +2501,7 @@ fn adjust_named_arguments(self: *SelfHosted, fid: FuncId, arg_expr: *FatExpr) Re
             };
             return(@err("arg not found for %", self.pool.get(want_name)));
         };
-        arg_expr.expr = (Tuple = args.rs());
+        arg_expr.expr = (Tuple = args.as_raw());
         arg_expr.done = false;
         arg_expr.ty = UnknownType;
         @log_event("after named %", arg_expr.log(self)) self;
@@ -3294,7 +3294,7 @@ fn hoist_constants(self: *SelfHosted, body: []FatStmt) Maybe(void) #once = {
                         self.dispatch.overloads&.push(
                             ready = empty(),
                             name = var.name,
-                            pending = fid.single(self.get_alloc()).rs(),
+                            pending = fid.single(self.get_alloc()).as_raw_list(),
                             // zero is UnknownType which we'll never query so its a fine .None replacement value since i don't have niches yet. 
                             inline_cache = Ty(OverloadKey, FuncId).zeroed(),
                         );
@@ -4087,7 +4087,7 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
     //@println("slow imm eval %", expr.log(self));
     bindings: List(Binding) = list(self.get_alloc());
     bindings&.if_empty_add_unit();
-    arg: Pattern = (bindings = bindings.rs(), loc = expr.loc);
+    arg: Pattern = (bindings = bindings.as_raw(), loc = expr.loc);
     def: FnDef = (name = .None, arg = arg, ret = (Finished = ret_ty), tags = list(temp()), loc = expr.loc);
 
     // we might have already tried to compile the expression in a different context,
@@ -4173,7 +4173,7 @@ fn check_quick_eval(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) ?Values = {
                 // Required since deconstruct_values (which we use for dyn_call) expects correctly aligned fields. 
                 self.aligned_append_value(all&, val, part.ty);
             };
-            (Some = (Big = all.rs()))
+            (Some = (Big = all.as_raw()))
         }
         fn Call(it) => {
             if it.f.expr&.is(.Value) {
@@ -4442,7 +4442,7 @@ fn struct_type(self: *SelfHosted, pattern: *Pattern, is_union: bool) Maybe(Type)
     
     @try(self.require_unique_fields(pattern)) return;  // doing this at the end, after all suspends
     (Ok = self.intern_type(Struct = (
-        fields = fields.rs(),
+        fields = fields.as_raw(),
         layout_done = false,
         is_tuple = false,
         is_union = is_union,
@@ -4527,7 +4527,7 @@ fn struct_macro(self: *SelfHosted, expr: *FatExpr) Maybe(FatExpr) = {
             };
             scope := it.scope;
             self.intern_type(Struct = (
-                fields = fields.rs(),
+                fields = fields.as_raw(),
                 layout_done = false,
                 is_tuple = false,
                 is_union = false,
@@ -4587,7 +4587,7 @@ fn enum_macro(self: *SelfHosted, arg: *FatExpr, target: *FatExpr) Maybe(FatExpr)
         }
         @default => return(@err("@enum expected struct literal or tuple of names"));
     };
-    unique_ty := self.intern_type(Enum = (raw = type, fields = fields.rs(), sequential = sequential));
+    unique_ty := self.intern_type(Enum = (raw = type, fields = fields.as_raw(), sequential = sequential));
     self.set(arg, Type, unique_ty);
     (Ok = arg[])
 }
@@ -4617,8 +4617,8 @@ fn tagged_macro(self: *SelfHosted, cases_expr: *FatExpr) Maybe(FatExpr) = {
     };
     
     @try(self.require_unique_fields(pattern)) return;  // doing this at the end, after all suspends
-    tag_type := self.intern_type(Enum = (raw = self.get_or_create_type(i64), fields = tag_fields.rs(), sequential = true));
-    tagged_type := self.intern_type(Tagged = (cases = cases.rs(), tag = tag_type));
+    tag_type := self.intern_type(Enum = (raw = self.get_or_create_type(i64), fields = tag_fields.as_raw(), sequential = true));
+    tagged_type := self.intern_type(Tagged = (cases = cases.as_raw(), tag = tag_type));
     self.set(cases_expr, Type, tagged_type);
     (Ok = cases_expr[])
 }

@@ -44,8 +44,8 @@ fn finish_pending(self: *Parser, id: WaitingParse) ParseRes = {
     }
 }
 
-fn finish_pending_stmts(self: *Parser, id: WaitingParse) Result(RsVec(FatStmt), *CompileError) = {
-    T :: Result(RsVec(FatStmt), *CompileError);
+fn finish_pending_stmts(self: *Parser, id: WaitingParse) Result(RawList(FatStmt), *CompileError) = {
+    T :: Result(RawList(FatStmt), *CompileError);
     @match(self.tasks[id.id]&) {
         fn Pending(src_span) => {
             self.lex = init(self.pool, src_span.span, src_span.src);
@@ -82,13 +82,13 @@ fn parse_stmt(self: *Parser) Result(FatStmt, *CompileError) = {
         @match(stmt.stmt&) {
             fn DeclFunc(f) => {
                 if f.annotations.is_empty() {
-                    f.annotations = tags.rs();
+                    f.annotations = tags.as_raw();
                 } else {
                     f.annotations&.push_all(tags.items(), self.alloc);
                 };
             }
             fn Noop() => {
-                stmt.stmt = (Annotations = tags.rs());
+                stmt.stmt = (Annotations = tags.as_raw());
             }
             @default => @report_error("#annotations can only go before functions or semicolons.") (return, self.last.span);
         };
@@ -158,7 +158,7 @@ fn parse_decl_or_start_expr(self: *Parser, name: Symbol) Result(FatStmt, *Compil
     }
 }
 
-fn list_of_names_decl(self: *Parser, name: Symbol) Result(RsVec(FatExpr), *CompileError) = {
+fn list_of_names_decl(self: *Parser, name: Symbol) Result(RawList(FatExpr), *CompileError) = {
     first := self.expr((GetNamed = name), self.last.span);
     exprs: List(FatExpr) = list(2, self.alloc);
     exprs&.push(first);
@@ -173,7 +173,7 @@ fn list_of_names_decl(self: *Parser, name: Symbol) Result(RsVec(FatExpr), *Compi
             }
             fn Colon() => {
                 @try(self.eat(.Equals, "destructuring statment expected ':=' (TODO: allow type annotation. TODO: allow const)")) return; 
-                return(Ok = exprs.rs());
+                return(Ok = exprs.as_raw());
             }
             @default => @report_error("expected ident or ':' in destructuring") (return, self.last.span);
         }
@@ -244,7 +244,7 @@ fn peek_type(self: *Parser) *TokenType = {
     t.type&
 }
 
-fn ident_list_to_pattern(self: *Parser, idents: *RsVec(FatExpr), loc: Span) Result(Pattern, *CompileError) = {
+fn ident_list_to_pattern(self: *Parser, idents: *RawList(FatExpr), loc: Span) Result(Pattern, *CompileError) = {
     bindings: List(Binding) = list(idents.len, self.alloc);
     each idents { expr | 
         @match(expr.expr&) {
@@ -252,7 +252,7 @@ fn ident_list_to_pattern(self: *Parser, idents: *RsVec(FatExpr), loc: Span) Resu
             @default => @report_error("destructuring statment requires tuple with all expressions being single identifier. ") (return, expr.loc);
         };
     };
-    (Ok = (bindings = bindings.rs(), loc = loc))
+    (Ok = (bindings = bindings.as_raw(), loc = loc))
 }
 
 fn can_start_quick_expr(t: TokenType) bool #once = {
@@ -692,7 +692,7 @@ fn expr_call(self: *Parser, f: FatExpr, arg: FatExpr) FatExpr = {
                 //       but this old parser didn't allow mixed named and positional so it doesn't matter yet. :SYNTAX -- Jun 21 
                 @default => (); // fallthrough
             };
-            arg := self.expr((Tuple = (@list(ff.container[], arg) self.alloc).rs()), f.loc);
+            arg := self.expr((Tuple = (@list(ff.container[], arg) self.alloc).as_raw()), f.loc);
             return(self.expr((Call = (f = self.box(f), arg = self.box(arg))), f.loc))
         }
         @default => return(self.expr((Call = (f = self.box(f), arg = self.box(arg))), f.loc));
@@ -733,7 +733,7 @@ fn make_func(def: FnDef, body: ?FatExpr, may_capture: bool) Func = {
     // TODO: derive fn default with allocator
     ::if_opt(FatExpr, FuncImpl);
     f: Func = (
-        annotations = def.tags.rs(),
+        annotations = def.tags.as_raw(),
         callees = empty(),
         mutual_callees = empty(),
         // TODO: deconstruct_values doesn't work on @tagged so can't have default struct fields be .None-- Jun 21
@@ -813,7 +813,7 @@ fn parse_tuple(self: *Parser, terminator: TokenType.Tag()) ParseRes = {
                 parts[0]
             }
         };
-        @default => self.expr((Tuple = parts.rs()), loc);
+        @default => self.expr((Tuple = parts.as_raw()), loc);
         // TODO: if you forget that semicolon it doesn't see the default and crashes at runtime if you ever hit it. :FUCKED
     };
     
@@ -858,7 +858,7 @@ fn switch_to_parsing_named(self: *Parser, parts: List(FatExpr), ty: LazyType, lo
     self.maybe(.Comma);
     @try(self.parse_pattern(bindings&, terminator)) return;
     @try(self.eat(terminator, "end of argument list")) return;
-    return(Ok = self.expr((StructLiteralP = (bindings = bindings.rs(), loc = loc)), loc))
+    return(Ok = self.expr((StructLiteralP = (bindings = bindings.as_raw(), loc = loc)), loc))
 };
 
 fn if_empty_add_unit(self: *List(Binding)) void = {
@@ -867,7 +867,7 @@ fn if_empty_add_unit(self: *List(Binding)) void = {
 }
 
 fn empty_pattern(a: Alloc, loc: Span) Pattern = 
-    (bindings = empty_binding().single(a).rs(), loc = loc);
+    (bindings = empty_binding().single(a).as_raw_list(), loc = loc);
 
 fn empty_binding() Binding = {
     (
@@ -884,7 +884,7 @@ fn parse_args(self: *Parser) Result(Pattern, *CompileError) = {
     bindings: List(Binding) = list(self.alloc);
     @try(self.parse_pattern(bindings&, .RightParen)) return;
     bindings&.if_empty_add_unit();
-    (Ok = (bindings = bindings.rs(), loc = loc))
+    (Ok = (bindings = bindings.as_raw(), loc = loc))
 }
 
 fn parse_pattern(self: *Parser, out: *List(Binding), terminator: TokenType.Tag()) Result(void, *CompileError) = {
@@ -974,7 +974,7 @@ fn parse_nullable_annotations(self: *Parser) Result(*Annotations, *CompileError)
     ann := zeroed(*Annotations);
     if self.peek_tag() == .Hash {
         ann = self.alloc.box(Annotations);
-        ann[] = rs(@try(self.parse_annotations()) return);
+        ann[] = as_raw(@try(self.parse_annotations()) return);
     };
     (Ok = ann)
 }
@@ -1063,11 +1063,11 @@ fn parse_block_until_squiggle(self: *Parser, allow_eof: bool) ParseRes = {
         self.raw_unit(self.last.span)
     };
     
-    e := self.expr(new_block(stmts.rs(), self.box(result)), loc);
+    e := self.expr(new_block(stmts.as_raw(), self.box(result)), loc);
     (Ok = e)
 }
 
-fn new_block(body: RsVec(FatStmt), result: *FatExpr) Expr = (Block = (
+fn new_block(body: RawList(FatStmt), result: *FatExpr) Expr = (Block = (
     body = body, 
     result = result, 
     ret_label = .None, 

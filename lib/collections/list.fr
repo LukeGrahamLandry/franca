@@ -260,6 +260,8 @@ fn List($T: Type) Type = {
 }
 
 fn push_assume_capacity();
+fn as_raw();
+fn as_raw_list();
 
 // The rust stdlib Vec does this thing where you manually outline the slow path, so it probably helps a bit. 
 // this is more aggressive and not generating it for every single type.
@@ -276,10 +278,9 @@ fn reserve_expand_erased(list: rawptr, extra: i64, size_of: i64) void = {
     list.cap = cap;
 }
 
-// For now this has to match the rust's Vec repr (experimentally determined for whatever rustc version i have).
-// Eventually, I'll switch this to just being something like zigs ArrayListUnmanaged,
-// so you don't have to store a billion copies of the same allocator. 
-fn RsVec($T: Type) Type = {
+// This is like zigs ArrayListUnmanaged, so you don't have to store a billion copies of the same allocator. 
+// Originally it carefully matched rust's abi and its a pain to change now so that's why the fields are in a strange order. TODO: fix eventually. 
+fn RawList($T: Type) Type = {
     Self :: @struct(cap: i64, ptr: *T, len: i64, E :: T);
    
     fn init(a: Alloc, cap: i64) Self = {
@@ -289,30 +290,20 @@ fn RsVec($T: Type) Type = {
     
     fn items(self: Self) Slice(T) #inline = (ptr = self.ptr, len = self.len);
     fn items(self: *Self) Slice(T) #inline = (ptr = self.ptr, len = self.len);
-    // TODO: UNSAFE. needs to be allocated by rust if rust is going to free it. needs to follow rust aliasing rules. 
-    fn rs(self: List(T)) Self #inline = {
-        ::if(Self);
-        if self.maybe_uninit.len == 0 {
-            // "unsafe precondition(s) violated: slice::from_raw_parts requires the pointer to be aligned and non-null, and the total size of the slice not to exceed `isize::MAX`"
-            empty()
-        } else {
-            (cap = self.maybe_uninit.len, ptr = self.maybe_uninit.ptr, len = self.len)
-        }
-    }
+    
+    fn as_raw(self: List(T)) Self #inline = 
+        (cap = self.maybe_uninit.len, ptr = self.maybe_uninit.ptr, len = self.len);
+    
     // TODO: name this assume_owned too? 
-    fn rs(self: Slice(T)) Self #inline = {
-        ::if(Self);
-        if self.len == 0 {
-            empty()
-        } else {
-            (cap = self.len, ptr = self.ptr, len = self.len)
-        }
-    }
+    fn as_raw_list(self: Slice(T)) Self #inline = 
+        (cap = self.len, ptr = self.ptr, len = self.len);
     
     fn empty() Self #inline = 
         Self.zeroed();
     
-    fn assume_owned(self: Self, by: Alloc) List(T) #inline = (maybe_uninit = (ptr = self.ptr, len = self.cap), len = self.len, gpa = by);
+    fn assume_owned(self: Self, by: Alloc) List(T) #inline = 
+        (maybe_uninit = (ptr = self.ptr, len = self.cap), len = self.len, gpa = by);
+        
     fn clear(self: *Self) void = {
         self.len = 0;
     }
@@ -330,25 +321,25 @@ fn RsVec($T: Type) Type = {
     fn push(self: *Self, t: T, in: Alloc) void = {
         s := self[].assume_owned(in);
         s&.push(t);
-        self[] = s.rs();
+        self[] = s.as_raw();
     }
     
     fn insert(self: *Self, i: i64, t: T, in: Alloc) void = {
         s := self[].assume_owned(in);
         s&.insert(i, t);
-        self[] = s.rs();
+        self[] = s.as_raw();
     }
     
     fn push_all(self: *Self, t: []T, in: Alloc) void = {
         s := self[].assume_owned(in);
         s&.push_all(t);
-        self[] = s.rs();
+        self[] = s.as_raw();
     }
     
     fn ordered_remove(self: *Self, i: i64) ?T = {
-        s := self[].assume_owned(temp()); // TODO: have a failing allocator since we know this can't resize
+        s := self[].assume_owned(panicking_allocator); 
         t := s&.ordered_remove(i);
-        self[] = s.rs();
+        self[] = s.as_raw();
         t
     }
     
@@ -359,19 +350,19 @@ fn RsVec($T: Type) Type = {
     
     fn deep_clone(self: *Self, a: Alloc) Self = {
         // :InlineFoldHack
-        @if(::!T.has_pointers(), { self.items().clone(a).rs() }, {
+        @if(::!T.has_pointers(), { self.items().clone(a).as_raw() }, {
             s: List(T) = list(self.len, a);
             s.len = self.len;
             enumerate self { i, e |
                 s[i] = e.deep_clone(a);
             };
-            s.rs()
+            s.as_raw()
         })
     }
     fn add_unique(self: *Self, t: T, in: Alloc) void = {
         s := self[].assume_owned(in);
         s&.add_unique(t);
-        self[] = s.rs();
+        self[] = s.as_raw();
     }
     
     fn drop(self: *Self, in: Alloc) void = {
@@ -381,22 +372,22 @@ fn RsVec($T: Type) Type = {
     }
     
     fn ordered_retain(self: *Self, $should_keep: @Fn(t: *T) bool) void = {
-        s := self[].assume_owned(temp()); // SAFETY: never reallocate when shrinking the array. 
+        s := self[].assume_owned(panicking_allocator);
         s&.ordered_retain(should_keep);
-        self[] = s.rs();
+        self[] = s.as_raw();
     }
     
     fn pop(self: *Self) ?T = {
-        s := self[].assume_owned(temp()); // SAFETY: never reallocate when shrinking the array. 
+        s := self[].assume_owned(panicking_allocator);
         res := s&.pop();
-        self[] = s.rs();
+        self[] = s.as_raw();
         res
     }
     
     fn unordered_retain(self: *Self, $should_keep: @Fn(t: *T) bool) void = {
-        s := self[].assume_owned(temp()); // SAFETY: never reallocate when shrinking the array. 
+        s := self[].assume_owned(panicking_allocator);
         s&.unordered_retain(should_keep);
-        self[] = s.rs();
+        self[] = s.as_raw();
     }
     
     fn next_uninit(self: *Self) ?*T #inline = {
