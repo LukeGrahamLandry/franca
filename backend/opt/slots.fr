@@ -7,8 +7,6 @@
 //
 
 fn elide_abi_slots(f: *Qbe.Fn) void = {
-    //println("====");
-    //printfn(f, f.globals.debug_out);
     SlotEntry :: @struct(value: Qbe.Ref, size: i32, k: Qbe.Cls);
     slot_contains: HashMap(i64, SlotEntry) = init(temp());
     StoreEntry :: @struct(ins: QList(*Qbe.Ins), nins: i64);
@@ -56,6 +54,7 @@ fn elide_abi_slots(f: *Qbe.Fn) void = {
             
             if maybe_store(i) { size |
                 a := i.arg&[1];
+                @debug_assert(!i.arg&[0].isreg(), "store should not use register directly before rega. copy to an ssa tmp first.");
                 slot := local_slot(f, a) || {
                     rtype(a) == .RMem || continue();
                     m := f.get_memory(a);
@@ -68,11 +67,17 @@ fn elide_abi_slots(f: *Qbe.Fn) void = {
                     slot
                 };
                 // TODO: ugly ugly ugly
-                range(0, 8) { i |
-                    check := slot - i;
+                range(0, 8) { idx |
+                    check := slot - idx;
                     if check >= 0 {
                         if slot_contains&.get_ptr(check) { info |
-                            if check + info.size.intcast() >= slot && !(i == 0 && info.size == size) {
+                            total_overlap := idx == 0 && info.size == size;
+                            if total_overlap && info.value == i.arg&[0] {
+                                i.set_nop();
+                                dead_stores += 1;
+                                continue();
+                            };
+                            if check + info.size.intcast() >= slot && !total_overlap {
                                 slot_contains&.remove(check);
                                 range(0, size.zext()) { i |
                                     bsset(live_stack&, slot + i); // TODO: bounds
@@ -88,8 +93,8 @@ fn elide_abi_slots(f: *Qbe.Fn) void = {
                 //@println("pending store slot=% size=%", slot, size);
                 slot_contains&.insert(slot, (value = i.arg&[0], size = size, k = argcls(i, 0)));
                 
-                // TODO: get_or_insert
                 if !bshas(live_stack&, slot) {
+                    // TODO: get_or_insert
                     entry := stores&.get_ptr(slot) || {
                         stores&.insert(slot, (ins = new(1), nins = 0));
                         stores&.get_ptr(slot).unwrap()
@@ -115,7 +120,6 @@ fn elide_abi_slots(f: *Qbe.Fn) void = {
                         if local_slot(f, a0) { slot |
                             made_addr_escape_mistake = true;
                             // TODO: this is bad. either we should already know about the escape or we should have eliminated the .addr
-                            bsset(f.escaping_slots&, slot);
                             slot_contains&.remove(slot);
                             bsset(live_stack&, slot);
                         };
@@ -144,23 +148,21 @@ fn elide_abi_slots(f: *Qbe.Fn) void = {
     // TODO
     @if(!made_addr_escape_mistake)
     each stores& { slot, e |
-        valid := true;
         for e.ins.slice(0, e.nins) { i |
+            continue :: local_return;
             size := i.maybe_store().unwrap();
             range(0, size.zext()) { i |
-                if bshas(live_stack&, slot + i) || bshas(f.escaping_slots&, slot + i) {  // TODO: bounds
-                    valid = false;
+                if bshas(live_stack&, slot + i) {  // TODO: bounds
+                    continue();
                 };
             };
-            if valid {
-                //@println("dead store slot=% size=%", slot, size);
-                i.set_nop();
-                dead_stores += 1;
-            };
+            i.set_nop();
+            dead_stores += 1;
         };
     };
     
     when_debug(f, .Memory) { out | 
+        out := f.globals.debug_out;
         changed := dead_loads + dead_stores + dead_consts != 0;
         if changed {
             write(out, "\n> After late slot promotion:\n");
