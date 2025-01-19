@@ -14,6 +14,18 @@ fn empty() Self = {
 }
 ```
 
+- made slot not *4 so i can track byte granularity in opt/slots
+- when there as a addr that didn't really escape but couldn't be folded because of alignment problems, 
+don't do store elimination in that function, so now i can turn that on and get rid of a lot of junk i introduced in abi passes. 
+(1201048 b, 1.174 s) -> (1084872 b, 1.074 s). 10% ain't bad. 
+especially when it aplies to approx. any program that... calls functions.
+legacy is 1.09M so this is smaller! but legacy is still faster :(
+- TODO: there's something to think about with blit. 
+when you copy forwards you iterate forward over increasing sizes but you start at the end of the area
+because emit() is reversed. so the alignment doesn't work out. 
+if you blit an aligned (i64, u32), you copy 4 bytes from the front and then 8 bytes unaligned. 
+which like is fine clearly but means you occasionally can't encode the offsets you want and need to waste extra instructions. 
+
 ## (Jan 17)
 
 - fixed llvm backend a bit. promote prim for when @tagged literal passed to function by value. use right type for switch. 

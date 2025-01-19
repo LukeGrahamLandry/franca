@@ -7,6 +7,8 @@
 //
 
 fn elide_abi_slots(f: *Qbe.Fn) void = {
+    //println("====");
+    //printfn(f, f.globals.debug_out);
     SlotEntry :: @struct(value: Qbe.Ref, size: i32, k: Qbe.Cls);
     slot_contains: HashMap(i64, SlotEntry) = init(temp());
     StoreEntry :: @struct(ins: QList(*Qbe.Ins), nins: i64);
@@ -15,6 +17,11 @@ fn elide_abi_slots(f: *Qbe.Fn) void = {
     bscopy(live_stack&, f.escaping_slots&);
     constants: HashMap(u32, Qbe.Ref) = init(temp());
     
+    dead_loads  := 0;
+    dead_stores := 0;
+    dead_consts := 0;
+    
+    made_addr_escape_mistake := false;
     for_blocks f { b |
         for_insts_forward b { i |
             continue :: local_return;
@@ -35,10 +42,12 @@ fn elide_abi_slots(f: *Qbe.Fn) void = {
                     if slot_contains&.get(slot) { entry | 
                         if entry.size == size && entry.k == i.cls() {
                             i[] = make_ins(.copy, i.cls(), i.to, entry.value, QbeNull);
+                            dead_loads += 1;
                             continue();
                         };
                     };
-                    range(0, max(size.zext() / 4, 1)) { i |
+                    //@println("live load slot=% size=%", slot, size);
+                    range(0, size.zext()) { i |
                         bsset(live_stack&, slot + i); // TODO: bounds
                     };
                 };
@@ -58,12 +67,25 @@ fn elide_abi_slots(f: *Qbe.Fn) void = {
                     //@debug_assert(m.offset.bits.i == 0, "need to deal with this if i want to allow slot + offset");
                     slot
                 };
-                if size != 4 && size != 8 {
-                    // only tracking 4 byte granularity so we can't tell if you store twice to adjacent bytes which one you're trying to read. 
-                    bsset(live_stack&, slot);
-                    slot_contains&.remove(slot);
-                    continue();
+                // TODO: ugly ugly ugly
+                range(0, 8) { i |
+                    check := slot - i;
+                    if check >= 0 {
+                        if slot_contains&.get_ptr(check) { info |
+                            if check + info.size.intcast() >= slot && !(i == 0 && info.size == size) {
+                                slot_contains&.remove(check);
+                                range(0, size.zext()) { i |
+                                    bsset(live_stack&, slot + i); // TODO: bounds
+                                };
+                                range(0, info.size.zext()) { i |
+                                    bsset(live_stack&, check + i); // TODO: bounds
+                                };
+                                continue();
+                            };
+                        };
+                    };
                 };
+                //@println("pending store slot=% size=%", slot, size);
                 slot_contains&.insert(slot, (value = i.arg&[0], size = size, k = argcls(i, 0)));
                 
                 // TODO: get_or_insert
@@ -86,13 +108,16 @@ fn elide_abi_slots(f: *Qbe.Fn) void = {
                 a0 := i.arg&[0];
                 if constants&.get(a0.type3_val29) { prev |
                     chuse(prev, 1, f);
+                    dead_consts += 1;
                     i[] = make_ins(.copy, i.cls(), i.to, prev, QbeNull);
                 } else {
                     if i.op() == .addr {
                         if local_slot(f, a0) { slot |
+                            made_addr_escape_mistake = true;
                             // TODO: this is bad. either we should already know about the escape or we should have eliminated the .addr
                             bsset(f.escaping_slots&, slot);
                             slot_contains&.remove(slot);
+                            bsset(live_stack&, slot);
                         };
                     };
                     
@@ -117,24 +142,33 @@ fn elide_abi_slots(f: *Qbe.Fn) void = {
     };
     
     // TODO
-    //each stores& { slot, e |
-    //    valid := true;
-    //    for e.ins.slice(0, e.nins) { i |
-    //        size := i.maybe_store().unwrap();
-    //        range(0, max(size.zext() / 4, 1)) { i |
-    //            if bshas(live_stack&, slot + i) {  // TODO: bounds
-    //                valid = false;
-    //            };
-    //        };
-    //        if valid {
-    //            i.set_nop();
-    //        };
-    //    };
-    //};
+    @if(!made_addr_escape_mistake)
+    each stores& { slot, e |
+        valid := true;
+        for e.ins.slice(0, e.nins) { i |
+            size := i.maybe_store().unwrap();
+            range(0, size.zext()) { i |
+                if bshas(live_stack&, slot + i) || bshas(f.escaping_slots&, slot + i) {  // TODO: bounds
+                    valid = false;
+                };
+            };
+            if valid {
+                //@println("dead store slot=% size=%", slot, size);
+                i.set_nop();
+                dead_stores += 1;
+            };
+        };
+    };
     
     when_debug(f, .Memory) { out | 
-        write(out, "\n> After late slot promotion:\n");
-        printfn(f, out);
+        changed := dead_loads + dead_stores + dead_consts != 0;
+        if changed {
+            write(out, "\n> After late slot promotion:\n");
+            @fmt_write(out, "# Killed (% loads, % stores, % consts)\n", dead_loads, dead_stores, dead_consts);
+            printfn(f, out);
+        } else {
+            write(out, "\n> After late slot promotion: (no change)\n");
+        };
     };
 }
 

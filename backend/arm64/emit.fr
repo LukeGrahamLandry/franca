@@ -126,10 +126,10 @@ fn emit_the_code(self: *ArmState) void #once = {
     self.prelude_grow_stack();
     self.inst(add_im(Bits.X64, fp, sp, 0, 0)); // Note: normal mov encoding can't use sp :SpEncoding
     
-    offset_to_callee_saved := (self.frame - self.padding) / 4;
+    offset_to_callee_saved := (self.frame - self.padding);
     for arm64_rclob { r |
         if self.f.reg.bit_and(BIT(r.raw())) != 0 {
-            offset_to_callee_saved -= 2;
+            offset_to_callee_saved -= 2 * 4;
             op := if(r.is_float(), => Qbe.O.stored, => Qbe.O.storel);
             i := make_ins(op, .Kw, QbeNull, TMP(r.raw()), SLOT(offset_to_callee_saved));
             self.emitins(i&);
@@ -151,10 +151,10 @@ fn emit_the_code(self: *ArmState) void #once = {
             fn hlt() => self.inst(brk(1000));
             fn ret0() => {
                 // if you run the simplify_jump_chains pass, you'll only need to emit this epilogue once. 
-                offset_to_callee_saved = (self.frame - self.padding) / 4;
+                offset_to_callee_saved = (self.frame - self.padding);
                 for arm64_rclob { r |
                     if self.f.reg.bit_and(BIT(r.raw())) != 0 {
-                        offset_to_callee_saved -= 2;
+                        offset_to_callee_saved -= 2 * 4;
                         cls := if(r.is_float(), => Qbe.Cls.Kd, => Qbe.Cls.Kl);
                         i := make_ins(.load, cls, TMP(r.raw()), SLOT(offset_to_callee_saved), QbeNull);
                         self.emitins(i&);
@@ -242,10 +242,10 @@ fn framelayout(self: *ArmState) void = {
     for arm64_rclob { r |
         o += 1.bit_and(self.f.reg.bitcast().shift_right_logical(r.raw()));
     };
-    f := self.f.slot.intcast();
+    f := self.f.slot.intcast() / 4;
     f = (f + 3).bit_and(-4);
     o += o.bit_and(1);
-    self.padding = 4*(f - self.f.slot.intcast());
+    self.padding = 4*(f - self.f.slot.intcast() / 4);
     self.frame = 4*f + 8*o;
 }
 
@@ -326,7 +326,7 @@ fn slot(self: *ArmState, r: Qbe.Ref) i64 = {
         };
         return(16 + self.frame - (s+2));
     };
-    16 + self.padding + 4 * s
+    16 + self.padding + s
 }
 
 // This will get more complicated when i can have multiple of the same segment. 
@@ -743,8 +743,7 @@ fn emitins2(self: *ArmState, i: *Qbe.Ins) void = {
             };
             a0.int_reg()
         };
-        
-        @debug_assert_eq(offset.mod(size.zext()), 0, "load offset not multiple of size");
+        @debug_assert_eq(offset.mod(size.zext()), 0, "load offset % not multiple of size % for %", offset, size, i.op());
         offset /= size.zext();
         @debug_assert_eq(offset.bit_and(1.shift_left(12) - 1), offset, "can't encode offset");
         // TODO: u/s h/b
