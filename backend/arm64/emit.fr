@@ -114,25 +114,29 @@ fn emit_the_code(self: *ArmState) void #once = {
     // ("\thint\t#34\n");
     self.inst(0xd503245f);
     
-    self.framelayout();
-    
-    if self.f.vararg && !self.f.globals.target.apple {
-        panic("TODO: non-apple arm varargs.");
-        //for (n=7; n>=0; n--)
-        //    fprintf(e->f, "\tstr\tq%d, [sp, -16]!\n", n);
-        //for (n=7; n>=0; n-=2)
-        //    fprintf(e->f, "\tstp\tx%d, x%d, [sp, -16]!\n", n-1, n);
-    };
-    self.prelude_grow_stack();
-    self.inst(add_im(Bits.X64, fp, sp, 0, 0)); // Note: normal mov encoding can't use sp :SpEncoding
-    
-    offset_to_callee_saved := (self.frame - self.padding);
-    for arm64_rclob { r |
-        if self.f.reg.bit_and(BIT(r.raw())) != 0 {
-            offset_to_callee_saved -= 2 * 4;
-            op := if(r.is_float(), => Qbe.O.stored, => Qbe.O.storel);
-            i := make_ins(op, .Kw, QbeNull, TMP(r.raw()), SLOT(offset_to_callee_saved));
-            self.emitins(i&);
+    needs_frame := bit_and(self.f.reg, arm64_clob_mask) != 0 || !self.f.leaf || self.f.vararg || self.f.slot > 0 || self.f.dynalloc;
+    if needs_frame {
+        self.framelayout();
+        
+        if self.f.vararg && !self.f.globals.target.apple {
+            panic("TODO: non-apple arm varargs.");
+            //for (n=7; n>=0; n--)
+            //    fprintf(e->f, "\tstr\tq%d, [sp, -16]!\n", n);
+            //for (n=7; n>=0; n-=2)
+            //    fprintf(e->f, "\tstp\tx%d, x%d, [sp, -16]!\n", n-1, n);
+        };
+        
+        self.prelude_grow_stack();
+        self.inst(add_im(Bits.X64, fp, sp, 0, 0)); // Note: normal mov encoding can't use sp :SpEncoding
+        
+        offset_to_callee_saved := (self.frame - self.padding);
+        for arm64_rclob { r |
+            if self.f.reg.bit_and(BIT(r.raw())) != 0 {
+                offset_to_callee_saved -= 2 * 4;
+                op := if(r.is_float(), => Qbe.O.stored, => Qbe.O.storel);
+                i := make_ins(op, .Kw, QbeNull, TMP(r.raw()), SLOT(offset_to_callee_saved));
+                self.emitins(i&);
+            };
         };
     };
     
@@ -150,21 +154,23 @@ fn emit_the_code(self: *ArmState) void #once = {
         @match(b.jmp.type) {
             fn hlt() => self.inst(brk(1000));
             fn ret0() => {
-                // if you run the simplify_jump_chains pass, you'll only need to emit this epilogue once. 
-                offset_to_callee_saved = (self.frame - self.padding);
-                for arm64_rclob { r |
-                    if self.f.reg.bit_and(BIT(r.raw())) != 0 {
-                        offset_to_callee_saved -= 2 * 4;
-                        cls := if(r.is_float(), => Qbe.Cls.Kd, => Qbe.Cls.Kl);
-                        i := make_ins(.load, cls, TMP(r.raw()), SLOT(offset_to_callee_saved), QbeNull);
-                        self.emitins(i&);
+                if needs_frame {
+                    // if you run the simplify_jump_chains pass, you'll only need to emit this epilogue once. 
+                    offset_to_callee_saved := (self.frame - self.padding);
+                    for arm64_rclob { r |
+                        if self.f.reg.bit_and(BIT(r.raw())) != 0 {
+                            offset_to_callee_saved -= 2 * 4;
+                            cls := if(r.is_float(), => Qbe.Cls.Kd, => Qbe.Cls.Kl);
+                            i := make_ins(.load, cls, TMP(r.raw()), SLOT(offset_to_callee_saved), QbeNull);
+                            self.emitins(i&);
+                        };
                     };
+                    if self.f.dynalloc {
+                        // someone did an alloca so we don't statically know the size of our stack frame. 
+                        self.inst(add_im(Bits.X64, sp, fp, 0, 0)); // :SpEncoding
+                    };
+                    self.epilogue_shrink_stack();
                 };
-                if self.f.dynalloc {
-                    // someone did an alloca so we don't statically know the size of our stack frame. 
-                    self.inst(add_im(Bits.X64, sp, fp, 0, 0)); // :SpEncoding
-                };
-                self.epilogue_shrink_stack();
                 self.inst(ret());
             }
             fn jmp() => if !b.s1.identical(b.link) {

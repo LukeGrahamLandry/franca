@@ -417,41 +417,22 @@ fn sel_inner(i: *Qbe.Ins, f: *Qbe.Fn) void = {
             fixarg(ins.arg&.index(0), k, ins, f);
         }
         fn ultof() => {
-            // TODO: want to use emit_instructions but need to call sel() which makes it hard, 
-            //       because sel_shift wants to emit instructions too so they have to go in order. -- Jan 18, 2025
-            /* %mask =l and %arg.0, 1
-            * %isbig =l shr %arg.0, 63
-            * %divided =l shr %arg.0, %isbig
-            * %or =l or %mask, %divided
-            * %float =d sltof %or
-            * %cast =l cast %float
-            * %addend =l shl %isbig, 52
-            * %sum =l add %cast, %addend
-            * %result =d cast %sum
-            */
+            emitter :: fn(f, o, k, r, a0, a1) => 
+                sel(make_ins(o, k, r, a0, a1), f);
             
-            tmp := @uninitialized Array(Qbe.Ref, 7);
-            tmp := tmp&;
-            r0 := f.newtmp("utof", k);
             kc, sh := @if(k == .Ks, (Qbe.Cls.Kw, 23), (Qbe.Cls.Kl, 52));
-            range(0, 4) { j | 
-                tmp[j] = f.newtmp("utof", .Kl);
-            };
-            range(4, 7) { j | 
-                tmp[j] = f.newtmp("utof", kc);
-            };
-            f.emit(.cast, k, i.to, tmp[6], QbeNull);
-            f.emit(.add, kc, tmp[6], tmp[4], tmp[5]);
-            f.emit(.shl, kc, tmp[5], tmp[1], f.getcon(sh));
-            f.emit(.cast, kc, tmp[4], r0, QbeNull);
-            f.emit(.sltof, k, r0, tmp[3], QbeNull);
-            f.emit(.or, .Kl, tmp[3], tmp[0], tmp[2]);
-            ins := make_ins(.shr, .Kl, tmp[2], i.arg&[0], tmp[1]);
-            sel(ins, f); // TODO: make sure this is right!      was ^ emit instead if make_ins and <-  *curi++ instead ins   
-            ins := f.emit(.shr, .Kl, tmp[1], i.arg&[0], f.getcon(63));
-            fixarg(ins.arg&.index(0), .Kl, ins, f);
-            ins := f.emit(.and, .Kl, tmp[0], i.arg&[0], f.getcon(1));
-            fixarg(ins.arg&.index(0), .Kl, ins, f);
+            @emit_instructions((f = f, emit = emitter), (i.arg&[0], i.to, kc, f.getcon(sh), k), """
+            @start
+                %mask    =l and %0, 1
+                %isbig   =l shr %0, 63
+                %divided =l shr %0, %isbig
+                %or      =l or %mask, %divided
+                %float   =4 sltof %or
+                %cast    =2 cast %float
+                %addend  =2 shl %isbig, %3
+                %sum     =2 add %cast, %addend
+                %1       =4 cast %sum
+            """);
         }
         fn stoui()  => f.sel_ftoi(i, .Ks, .stosi, 0xdf000000);
         fn dtoui()  => f.sel_ftoi(i, .Kd, .dtosi, 0xc3e0000000000000);
@@ -644,6 +625,7 @@ fn sel_ftoi(f: *Qbe.Fn, i: *Qbe.Ins, kc: Qbe.Cls, o: Qbe.O, t4: u64) void = {
         f.sel_emit(i);
         return();
     };
+    // TODO: want to use emit_instructions but need to allow passing an op as a runtime arg. 
     /* %try0 =l {s,d}tosi %fp
     * %mask =l sar %try0, 63
     *
@@ -748,9 +730,8 @@ fn seljmp(b: *Qbe.Blk, f: *Qbe.Fn) void = {
         }; 
         @else => {
             /* since flags are not tracked in liveness,
-            * the result of the flag-setting instruction
-            * has to be marked as live
-            */
+             * the result of the flag-setting instruction
+             * has to be marked as live */
             if t.nuse == 1 {
                 f.emit(.copy, .Kw, QbeNull, r, QbeNull);
             };

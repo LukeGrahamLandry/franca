@@ -1,0 +1,42 @@
+
+fn driver(vtable: *ImportVTable) void = {
+    unsafe := true;
+    arch := Arch.aarch64;
+    os := Os.macos;
+    input_file := "compiler/other_main.fr";
+    output_file := "a.out";
+
+    opts := vtable.default_build_options();
+    if unsafe {
+        s := opts.safety_checks&;
+        s.insert(.Bounds, false);
+        s.insert(.DebugAssertions, false);
+        s.insert(.InvalidTag, false);
+    };
+    
+    src := @tfmt("\n#include_std(\"lib/core.fr\");#include_std(\"%\");", input_file);
+    comp := vtable.new_with_src(src, "-", opts);
+    c := vtable.with(comp);
+    
+    entry := ProgramEntry.WrapMain;
+    fid := or c.get_unique_named("main") {
+        panic("expected exactly one function called 'main'")
+    };
+    
+    fns: []FuncId = @slice(fid);
+    
+    memory := temp().alloc_zeroed(i64, 1024);
+    memory := i64.raw_from_ptr(memory.ptr);
+    
+    G :: Ty(TargetEnv, i64);
+    goal: G = ((arch = arch, os = os), 2); // hack: just experimenting
+    {c.vtable.init_default_qbe_module}(memory, G.raw_from_ptr(goal&));
+    bytes := {c.vtable.emit_qbe_included}(memory, c&, fns, entry);
+    
+    out := open_trunc(maybe_borrow_cstr(output_file, temp())).unwrap(); 
+    for bytes& { bucket |
+        out&.write(bucket) || @panic("write to % failed", output_file);
+    };
+    close(out);
+    @eprintln(">>> Wrote to %", output_file);
+}

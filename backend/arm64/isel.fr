@@ -47,12 +47,15 @@ fn collapse_op(f: *Qbe.Fn, i: *Qbe.Ins, bid: i32) void = {
             // you could swap if the left is constant, but i found it happens 62 out of 174835 times you get here -- Jan 18, 2025. 
             if f.get_int(i.arg&[1]) { off | 
                 if f.is_symbol(i.arg&[0]) {
-                    // TODO: make sure this is an improvement. 
-                    //       my idea is it it means you never need to recursive more than once to fixarg for a load/store address, 
-                    //       so then you can do fix_memarg in place without worrying about where to insert an emit().
-                    c := f.get_constant(i.arg&[0])[];
-                    c.bits.i += off;
-                    i[] = make_ins(.copy, .Kl, i.to, f.newcon(c&), QbeNull);
+                    // If this symbol is only used once in the block it makes sense to fold the offset into the adrp+add,
+                    // But it seems the more common case is you use the same symbol multiple times and read different offests, 
+                    // So it's nicer to create the constant in a register once and then fold all the small offsets into the memory instructions. 
+                    // (opt/slots deduplicates addr(RCon)) + fewer relocations should make linker stuff faster (?).
+                    // -- Jan 19, 2025
+                    
+                    // c := f.get_constant(i.arg&[0])[];
+                    // c.bits.i += off;
+                    // i[] = make_ins(.copy, .Kl, i.to, f.newcon(c&), QbeNull);
                     return();
                 };
                 slot := f.get_slot(i.arg&[0]) || { 
@@ -92,6 +95,7 @@ fn collapse_op(f: *Qbe.Fn, i: *Qbe.Ins, bid: i32) void = {
                 };
             };
         }
+        fn ceqw() => fix_ceqw_not(f, i);  // TODO: this is probably a dumb place to do this. 
         @default => ();
     };
 }
@@ -471,64 +475,6 @@ fn imm(c: *Qbe.Con, k: Qbe.Cls, pn: *i64) Imm = {
         return(if(positive, => .PosLow24, => .NegLow24));
     };
     .Iother
-}
-
-//
-// https://dinfuehr.github.io/blog/encoding-of-immediate-values-on-aarch64/
-// and/orr/eor take bit mask immediates which can encode a small subset of values. 
-// - The value must be a pattern of e=2/4/8/16/32/64 bits repeated for the whole register (ie. if e=4 it will be repeated 16 times). 
-// - The repeated thing must have all its one bits together or all its zero bits together. 
-//   ie. e=8 cannot have 10011101, but it can have 00111000 or 11000111.
-//   (equivalently: all ones must be together but you're allowed to rotate and wrap around). 
-// - The value cannot be all zeros or all ones. 
-//
-//   immr = how much to rotate
-// N:imms = (variable width fixed bit pattern encoding e):(number of consecutive ones at the end of the pre-rotation mask - 1)
-//
-// trailing zeros are filled in with 1s count. 
-// 2  = 0b0111110
-// 4  = 0b0111100
-// 8  = 0b0111000
-// 16 = 0b0110000
-// 32 = 0b0100000
-// 64 = 0b1000000
-//
-
-fn repeat_pattern(x: i64, pattern_size: i64) i64 = {
-    core := x.bit_and(1.shift_left(pattern_size) - 1);
-    x := 0;
-    range(0, 64 / pattern_size) { _ |
-        x = x.bit_or(core);
-        core = core.shift_left(pattern_size);
-    };
-}
-
-// note: not tested yet, only called by emit
-fn arm64_logimm(x: i64, k: Qbe.Cls) bool = {
-    if (k == .Kw) {
-        x = x.bit_and(0xffffffff).bit_or(x.shift_left(32));
-    };
-    if x.bit_and(1) != 0 {
-        x = x.bit_not();
-    };
-    if(x == 0, => return(true));
-    if(x == 0xaaaaaaaaaaaaaaaa, => return(true));
-    
-    n := x.bit_and(0xf);
-    check :: fn() => return(n.bit_and(n + n.bit_and(-n)) == 0);
-    if(0x1111111111111111 * n == x, => check());
-    n = x.bit_and(0xff);
-    if(0x0101010101010101 * n == x, => check());
-    n = x.bit_and(0xffff);
-    if(0x0001000100010001 * n == x, => check());
-    n = x.bit_and(0xffffffff);
-    if(0x0000000100000001 * n == x, => check());
-    n = x;
-    check()
-}
-
-fn trunc(x: i32) i16 = { // TODO
-    ptr_cast_unchecked(i32, i16, x&)[]
 }
 
 // this only makes sense once we're in ssa form

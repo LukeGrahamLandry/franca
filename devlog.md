@@ -1,5 +1,14 @@
 - TODO: deal with `CodegenEntry:Bounce` on wasm
 
+## (Jan 19)
+
+- better code gen for boolean not. 
+notice when ceqw on the result of another cmp and just flip the comparison instead.
+- small codesize improvements. arm64: don't make a frame if leaf + no stack. 
+don't fold constant offsets because you'd rather only have one relocation and reuse the value (i go back and forth here). 
+- make emit_instructions dsl allow passing a different function to call instead of emit().
+use that for amd64/isel.fr:sel_inner:ultof.
+
 ## (Jan 18)
 
 - im so stupid. i was like how can RsVec()::empty have ptr=8 so my bake_relocatable_constant chokes on it when i try to AOT? 

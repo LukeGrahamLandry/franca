@@ -156,3 +156,44 @@ fn ulog2(pow2: u64) u32 = { // backwards
 
 fn ispow2(v: u64) bool = 
     v != 0 && v.bit_and(v - 1) == 0;
+
+// TODO: this is not arch specific. it's just convient to call from isel because it needs tmp.def. 
+//       so currently only done for arm64 where i do a prepass that folds some addressing stuff without emit() breaking the pointers. 
+//       -- Jan 19, 2025
+// this is the pattern i generate for boolean not
+fn fix_ceqw_not(f: *Qbe.Fn, i: *Qbe.Ins) void #inline = {
+    @debug_assert(i.op() == .ceqw);
+    if i.arg&[1] == QbeConZero {
+        r := i.arg&[0];
+        if(rtype(r) != .RTmp, => return());
+        t := f.get_temporary(r);
+        if(t.def.is_null(), => return());
+        ck := Qbe.Cls.zeroed();
+        cc: i32 = 0;
+        if iscmp(t.def.op(), ck&, cc&) {
+            cc_rev := cmpneg(cc);
+            if !ck.is_int() {
+                cc_rev -= Qbe.CmpICount;
+            };
+            o := @as(Qbe.O) @as(i32) cmp_base(ck).raw() + cc_rev;
+            
+            a0, a1 := (t.def.arg&[0], t.def.arg&[1]);
+            chuse(r, -1, f);
+            if t.nuse == 0 {
+                t.def.set_nop();
+            } else {
+                chuse(a0, 1, f);
+                chuse(a1, 1, f);
+            };
+            i[] = make_ins(o, i.cls(), i.to, a0, a1);
+        };
+    };
+}
+
+fn cmp_base(k: Qbe.Cls) Qbe.O = @match(k) {  // :CmpOrder
+    fn Kw() => .ceqw;
+    fn Kl() => .ceql;
+    fn Ks() => .ceqs;
+    fn Kd() => .ceqd;
+    @default => unreachable();
+};

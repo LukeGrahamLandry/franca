@@ -5,9 +5,10 @@
 //! Importantly all the parsing happens at comptime, the code executed at runtime 
 //! (of the ir compiler) should be about the same you would have written manually. 
 //!
-//! Usage: 
-//! - single block: `@emit_instructions( f: *Qbe.Fn,              ...args, src: Str);`
-//! -  multi block: `@emit_instructions((f: *Qbe.Fn, b: *Qbe.Fn), ...args, src: Str);`
+//! Usage: `@emit_instructions((f: *Qbe.Fn, b: *Qbe.Fn, emit: @Fn(f,o,k,r,a0,a1) *Qbe.Ins), (...args), src: Str);`
+//! - single block: don't provide `b`, instructions will just go in f.globals.scratch
+//! -  multi block: provide `b`
+//! - `emit` is optional and defaults to... fn emit
 //! It's intended to be used in the middle of a pass where you eventually call copy_instructions_from_scratch().
 //! - The ir text can reference the `args` you pass in (which can be Qbe.Ref or Qbe.Cls) by index.
 //!   i.e. `@emit_instructions(f, output, second_input, .Kl, "%0 =2 add 10, %1");`
@@ -17,17 +18,25 @@
 
 fn emit_instructions(in: FatExpr) FatExpr #macro = {
     e := in&.items();
-    rt_f := compile_ast(e[0]);
+    named := e.index(0);
+    rt_f := get_from_pattern(named, @symbol f) || compile_error("named parameter 'f' is required", in.loc);
+    rt_f := compile_ast(rt_f[]);
     rt_block := @{};
-    args0 := rt_f&.items();
-    expect_multiple_blocks := args0.len != 1;
-    if expect_multiple_blocks {
-        rt_f = args0[0];
-        rt_block = args0[1];
+    expect_multiple_blocks := false;
+    if get_from_pattern(named, @symbol b) { b |
+        expect_multiple_blocks = true;
+        rt_block = b[];
     };
-    src_node := e[e.len - 1];
+    
+    Ins :: Ty(@slice(*Qbe.Fn, Qbe.O, Qbe.Cls, Qbe.Ref, Qbe.Ref, Qbe.Ref));
+    emit_func := resolve_overload(emit, Ins, *Qbe.Ins, in.loc);
+    if get_from_pattern(named, @symbol emit) { e |
+        emit_func = const_eval(@type emit_func)(e[]);
+    };
+    
+    src_node := e[2];
     src := const_eval(Str)(src_node);
-    args := e.slice(1, e.len - 1);
+    args := e.index(1).items();
     m :: @static(QbeModule);
     if !m[].initialized {
         init_empty_for_template_only(m, ast_alloc());  // we keep this around forever
@@ -43,18 +52,20 @@ fn emit_instructions(in: FatExpr) FatExpr #macro = {
     };
     @ct_assert(expect_multiple_blocks == (f.nblk != 1), src_node.loc, "iff creating multiple blocks, you must pass in the starting block.");
     
-    map  := Qbe.Ref.list(temp());
-    ref_count := f.ntmp.zext() - Qbe.Tmp0 + f.ncon.zext() - 2;
+    fcc :: FIXED_CONST_COUNT;
+    
+    ref_count := f.ntmp.zext() - Qbe.Tmp0 + f.ncon.zext() - fcc;
     rt_map := FatExpr.list(ref_count, ast_alloc());
     rt_cls := repeated(@{Qbe.Cls.Kw}, 10, ast_alloc());
-    find :: fn(map: *List(Qbe.Ref), r: Qbe.Ref) ?i64 = {
-        // TODO: don't iterate, we know exactly where it is
-        enumerate map { i, old |
-            if old[] == r {
-                return(Some = i);
-            };
+    find :: fn(f: *Qbe.Fn, r: Qbe.Ref) ?i64 = {
+        first, off, cap := @match(rtype(r)) {
+            fn RTmp() => (Qbe.Tmp0, 0 - Qbe.Tmp0, f.ntmp.zext());
+            fn RCon() => (fcc, f.ntmp.zext() - fcc - Qbe.Tmp0, f.ncon.zext());
+            @default => return(.None);
         };
-        .None
+        @debug_assert(r.val() < cap);
+        r.val() >= first || return(.None);
+        (Some = r.val() + off)
     };
     any_cls_args := false;
     enumerate args { i, a | 
@@ -70,6 +81,7 @@ fn emit_instructions(in: FatExpr) FatExpr #macro = {
         rt_f := @[rt_f];
         rt_block_start := @[rt_block];
         rt_block := Qbe.Blk.ptr_from_int(0);
+        k: []Qbe.Cls = empty();
         @[{
             enumerate f.tmp.slice(Qbe.Tmp0, f.ntmp.zext()) { i, t |
                 if t.visit != 0 {
@@ -87,13 +99,19 @@ fn emit_instructions(in: FatExpr) FatExpr #macro = {
                         n2.copy_from(n); // TODO: why doesn't `n.sym().str()` do what i want? you just get junk.
                         n2
                     }, "");
-                    rt_map&.push(@{ newtmp(rt_f, @[@literal n2], @[@literal t.cls]) });
+                    
+                    rt_k := @literal t.cls;
+                    each replacements { rep |
+                        if rep.r == TMP(i + Qbe.Tmp0) {
+                            rt_k = @{ k[@[@literal rep.key]] };
+                        };
+                    };
+                    
+                    rt_map&.push(@{ newtmp(rt_f, @[@literal n2], @[rt_k]) });
                 };
-                map&.push(TMP(Qbe.Tmp0 + i));
             };
-            enumerate f.con.slice(0, f.ncon.zext()) { i, c |
+            enumerate f.con.slice(fcc, f.ncon.zext()) { i, c |
                 rt_map&.push(@{ c := @[@literal c[]]; newcon(rt_f, c&) });
-                map&.push(CON(i));
             };
             
             refs := in;
@@ -102,44 +120,45 @@ fn emit_instructions(in: FatExpr) FatExpr #macro = {
             classes := in;
             classes.expr.Tuple = rt_cls.as_raw();
             classes.ty = UnknownType;
-            classes = if(any_cls_args, => @{ @slice(@[classes]) }, => @{});
+            classes = if(any_cls_args, => @{ @slice(@[classes]) }, => @{empty()});
             @{
+                k = @[classes]; // this was forward declared so the rt_k above can bind to them based on `replacements` 
                 refs := @slice(@[in]);
-                k := @[classes];
                 rt_block_map := @uninitialized Array(*Qbe.Blk, @[@literal @as(i64) f.nblk.zext()]);
                 @[{
                     body := @{};
                     
-                    fn translate_ref(map: *List(Qbe.Ref), r: Qbe.Ref, loc: Span) FatExpr = {
+                    translate_ref :: fn(f: *Qbe.Fn, r: Qbe.Ref, loc: Span) FatExpr = {
                         ::assert_eq(Qbe.RegKind.enum_count(), 8);
                         t := rtype(r);
-                        needs_remap := t == .RCon || (t == .RTmp && r.val() >= Qbe.Tmp0);
+                        needs_remap := (t == .RCon && r.val() >= fcc) || (t == .RTmp && r.val() >= Qbe.Tmp0);
                         @ct_assert(!@is(t, .RType, .RMem), loc, "TODO: unhandled ref type in template. pass RType/RMem as argument instead for now.");
                         if needs_remap {
-                            i := or find(map, r) {
+                            i := or f.find(r) {
                                 compile_error("unbound ref", loc)
                             };
                             indexer :: resolve_overload(index, Ty([]Qbe.Ref, i64), *Qbe.Ref, Span.zeroed());
                             @{ @[@literal indexer](refs, @[@literal i])[] }
-                        } else {  // RInt, RSlot, RCall, RNull
+                        } else {  // RInt, RSlot, RCall, RNull + fixed RTmp/RCon
                             @literal r 
                         }
-                    }
+                    };
                     
-                    fn get_rt_block(i: i64) FatExpr = {
+                    get_rt_block :: fn(i: i64) FatExpr = {
                         @{ rt_block_map&[@[@literal i]] }
-                    }
+                    };
                     
-                    fn get_blocks(f: *Qbe.Fn) []*Qbe.Blk = {
+                    get_blocks :: fn(f: *Qbe.Fn) []*Qbe.Blk = {
                         blocks := list(*Qbe.Blk, temp());
                         for_blocks f { b | 
                             blocks&.push(b);
                         };
                         blocks.items()
-                    }
+                    };
                     
-                    do_bodies(body&, replacements, f, src_node.loc, map&);
-                    fn do_bodies(body: *FatExpr, reps: [](Replacement), f: *Qbe.Fn, loc: Span, map: *List(Qbe.Ref)) void = {
+                    emit_func := @literal emit_func;
+                    do_bodies(emit_func&, body&, replacements, f, src_node.loc);
+                    do_bodies :: fn(emit_func: *FatExpr, body: *FatExpr, reps: [](Replacement), f: *Qbe.Fn, loc: Span) void = {
                         has_multiple_blocks := f.nblk != 1;
                         blocks := get_blocks(f);
                         block_index: i64 = f.nblk.zext();
@@ -148,17 +167,17 @@ fn emit_instructions(in: FatExpr) FatExpr #macro = {
                             for_insts_rev b { i | 
                                 i := i[];
                                 ct_k := @literal i.cls();
-                                to := translate_ref(map, i.to, loc);
+                                to := f.translate_ref(i.to, loc);
                                 each reps { rep |
                                     if i.to == rep.r {
                                         ct_k = @{ k[@[@literal rep.key]] };
                                     };
                                 };
-                                a0 := translate_ref(map, i.arg&[0], loc);
-                                a1 := translate_ref(map, i.arg&[1], loc);
+                                a0 := f.translate_ref(i.arg&[0], loc);
+                                a1 := f.translate_ref(i.arg&[1], loc);
                                 body[] = @{ 
                                     @[body[]]; 
-                                    emit(rt_f, @[@literal i.op()], @[ct_k], @[to], @[a0], @[a1]); 
+                                    @[emit_func[]](rt_f, @[@literal i.op()], @[ct_k], @[to], @[a0], @[a1]); 
                                 };
                             };
                             if has_multiple_blocks {
@@ -174,14 +193,14 @@ fn emit_instructions(in: FatExpr) FatExpr #macro = {
                                 @ct_assert(b.jmp.type == .Jxxx, loc, "single block template cannot have terminators");
                             };
                         };
-                    }
+                    };
                     
                     if f.nblk != 1 {
-                        do_terminators(body&, replacements, f, src_node.loc, map&);
+                        do_terminators(body&, replacements, f, src_node.loc);
                     } else {
                         @ct_assert(f.start.phi.is_null(), src_node.loc, "cannot use phi nodes when creating only a single block");
                     };
-                    fn do_terminators(body: *FatExpr, reps: []Replacement, f: *Qbe.Fn, loc: Span, map: *List(Qbe.Ref)) void = {
+                    do_terminators :: fn(body: *FatExpr, reps: []Replacement, f: *Qbe.Fn, loc: Span) void = {
                         translate_block :: fn(f: *Qbe.Fn, b: *Qbe.Blk) FatExpr = {
                             if b.is_null() {
                                 return(@{ Qbe.Blk.ptr_from_int(0) });
@@ -225,7 +244,7 @@ fn emit_instructions(in: FatExpr) FatExpr #macro = {
                                     rt_block.phi = temp().box(Qbe.Phi); 
                                     rt_block.phi[] = (
                                         cls = .Kl, 
-                                        to = @[translate_ref(map, p.to, loc)],
+                                        to = @[f.translate_ref(p.to, loc)],
                                         narg = 2,
                                         blk = new(@[arg_count]),
                                         arg = new(@[arg_count]),
@@ -236,7 +255,7 @@ fn emit_instructions(in: FatExpr) FatExpr #macro = {
                                     rt_a := @literal a;
                                     body[] = @{
                                         @[body[]];
-                                        rt_block.phi.arg[@[rt_a]] = @[translate_ref(map, p.arg[a], loc)];
+                                        rt_block.phi.arg[@[rt_a]] = @[f.translate_ref(p.arg[a], loc)];
                                         rt_block.phi.blk[@[rt_a]] = @[translate_block(f, p.blk[a])];
                                     };
                                 };
@@ -247,7 +266,7 @@ fn emit_instructions(in: FatExpr) FatExpr #macro = {
                                 body[] = @{
                                     @[body[]];
                                     rt_block.jmp.type = @[@literal b.jmp.type];
-                                    rt_block.jmp.arg = @[translate_ref(map, b.jmp.arg, loc)];
+                                    rt_block.jmp.arg = @[f.translate_ref(b.jmp.arg, loc)];
                                     rt_block.s1 = @[translate_block(f, b.s1)];
                                     rt_block.s2 = @[translate_block(f, b.s2)];
                                 };
@@ -255,7 +274,7 @@ fn emit_instructions(in: FatExpr) FatExpr #macro = {
                                 @debug_assert(block_index == f.nblk.zext() - 1);
                             }
                         };
-                    }
+                    };
                     
                     //debug_log_ast(body);
                     body
