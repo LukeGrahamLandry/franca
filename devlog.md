@@ -1,5 +1,9 @@
 - TODO: deal with `CodegenEntry:Bounce` on wasm
 
+## (Jan 21)
+
+- changed Amd64Reg enum to order by encoding so i don't need a lookup table in emit
+
 ## (Jan 20)
 
 - set block id in create_jit_shim and use right arg tmp cls in create_dyncall_shim so i can always run fails_typecheck in debug mode. 
