@@ -114,7 +114,7 @@ fn create_dyncall_shim(self: *SelfHosted, f_ty: FnType) void = {
                 addins(ins&, nins&, make_ins(.add, .Kl, ref, arg_p, f.getcon(offset)));
                 load, k := self.comp().load_op(ty);
                 ins := if k != .Ke {  // scalar
-                    r := f.newtmp("a", .Kl);
+                    r := f.newtmp("a", k);
                     addins(ins&, nins&, make_ins(load, k, r, ref, QbeNull));
                     make_ins(.arg, k, QbeNull, r, QbeNull)
                 } else {  // aggregate
@@ -194,9 +194,9 @@ fn create_jit_shim(self: CompCtx, shared: *CodegenShared, fid: FuncId, handler_c
         f.leaf = false;
         f.lnk.no_inline = true;
         f.lnk.id = id;
-        f.start = newblk(); f.start.ins = new(0);
-        do_the_call := newblk(); do_the_call.ins = new(0);
-        not_ready := newblk(); not_ready.ins = new(0);
+        f.start = newblk(); f.start.ins = new(0); name_block(f.start, "start"); f.start.id = 0;
+        do_the_call := newblk(); do_the_call.ins = new(0); name_block(do_the_call, "do_the_call"); do_the_call.id = 1;
+        not_ready := newblk(); not_ready.ins = new(0); name_block(not_ready, "not_ready"); not_ready.id = 2;
         
         f.nblk = 3;
         target_id := self.data.cast()[][].comptime_jit_symbol_id(fid);
@@ -226,7 +226,7 @@ fn create_jit_shim(self: CompCtx, shared: *CodegenShared, fid: FuncId, handler_c
         f.start.s2 = not_ready;
         
         // call into the compiler to get the real callee
-        new_callee := f.newtmp("callee", .Kl);
+        new_callee := f.newtmp("new_callee", .Kl);
         push(not_ready, make_ins(.arge, .Kl, QbeNull, env, QbeNull));
         push(not_ready, make_ins(.arg,  .Kl, QbeNull, f.getcon(SelfHosted.int_from_ptr(c)), QbeNull));
         push(not_ready, make_ins(.arg,  .Kw, QbeNull, f.getcon(fid.as_index()), QbeNull));
@@ -235,7 +235,7 @@ fn create_jit_shim(self: CompCtx, shared: *CodegenShared, fid: FuncId, handler_c
         not_ready.s1 = do_the_call;
         
         // Rejoin and call something
-        callee := f.newtmp("callee", .Kl);
+        callee := f.newtmp("callee_join", .Kl);
         do_the_call.phi = temp().box(Qbe.Phi);
         do_the_call.phi[] = (
             cls = .Kl, 
@@ -249,6 +249,11 @@ fn create_jit_shim(self: CompCtx, shared: *CodegenShared, fid: FuncId, handler_c
         do_the_call.phi.arg&[0] = new_callee;
         do_the_call.phi.blk[1] = f.start;
         do_the_call.phi.arg&[1] = target;
+        
+        name_block :: fn(b: *Qbe.Blk, name: Str) = @if(TRACK_IR_NAMES) {
+            l := fixed_list(b.name&.items()); // :UnacceptablePanic
+            @fmt(l&, "%", name);
+        };
         
         // convert to arguments
         push(do_the_call, make_ins(.arge, .Kl, QbeNull, env, QbeNull));

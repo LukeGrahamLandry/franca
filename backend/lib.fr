@@ -352,6 +352,11 @@ run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
     ::ptr_utils(QbeModule);
     @debug_assert(!m.is_null(), "function module not set");
     
+    if fails_typecheck(fnn) { err | 
+        printfn(fnn, fnn.globals.debug_out);
+        @panic("IR failed typecheck: %", err);
+    };
+    
     if fnn.globals.debug["P".char()] {
         out := fnn.globals.debug_out;
         write(out, "\n> After parsing:\n");
@@ -465,8 +470,11 @@ fn finish_qbe_passes_wasm(fnn: *Qbe.Fn) void = {
     emit_fn(fnn);
 }
 
-// debug. but it calls clsmerge which does mutate sometimes so maybe not.
+// TODO: detect non-unique block ids. 
 fn fails_typecheck(f: *Qbe.Fn) ?Str = {
+    // TODO: disabling this in -unsafe builds seems fine but it's sketchy that it calls clsmerge which does mutate sometimes. 
+    @if(!::safety_check_enabled(.DebugAssertions)) return(.None);
+    
     fillpreds(f);
     pb  := init_bitset(f.nblk.zext());
     ppb := init_bitset(f.nblk.zext());
@@ -481,7 +489,7 @@ fn fails_typecheck(f: *Qbe.Fn) ?Str = {
             if rtype(i.to) == .RTmp {
                 t := f.get_temporary(i.to);
                 if clsmerge(t.cls&, i.cls()) {          // ^
-                    return(Some = @tfmt("temporary %% is assigned with multiple types", "%", t.name()));
+                    return(Some = @tfmt("temporary %% is assigned with multiple types (% vs %)", "%", t.name(), t.cls, i.cls()));
                 };
             };
         };

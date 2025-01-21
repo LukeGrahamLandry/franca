@@ -1,5 +1,24 @@
 - TODO: deal with `CodegenEntry:Bounce` on wasm
 
+## (Jan 20)
+
+- set block id in create_jit_shim and use right arg tmp cls in create_dyncall_shim so i can always run fails_typecheck in debug mode. 
+- ok my new theory is that elf sections do nothing and it's all about the segments 
+(except for static linker input (?), but the real loader doesn't care).
+- Elf.Dyn val field should be virtual not file_offset (so i guess thats the difference between the data for static linker and for loader)
+- oh boy, different crash in lldb when i put Interp header before the loads. 
+now im seeing myself in my code and then calling 0. 
+it's jumping to the stub and loading the callee from the right address 
+(i can crash at any fixed address instead of 0 by writing something there), 
+changing the addend doesn't do anything so it's not seeing the reloc.
+- probably need `Needed = libc.so.6` but that doesn't help
+- `readelf -r a.out --use-dynamic` sees it so it's clearly there and the offset looks reasonable. 
+- aaa wasn't even using the interp_header i setup, making a new one instead. revealed by trying to add back sections for debugging. 
+- now it's crashing on 0x6003040 which is very close to my Dynamic:val's offset by MYSTERY_SPICE
+- ooo! you can `/lib64/ld-linux-x86-64.so.2 ./a.out` and then you get fucking error messages!!
+- `./a.out: error while loading shared libraries: ./a.out: ELF load command alignment not page-aligned` i can fix that
+- Inconsistency detected by ld.so: ../sysdeps/x86_64/dl-machine.h: 541: elf_machine_rela_relative: Assertion `ELFW(R_TYPE) (reloc->r_info) == R_X86_64_RELATIVE' failed!
+
 ## (Jan 19)
 
 - better code gen for boolean not. 
