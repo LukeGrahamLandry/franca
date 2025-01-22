@@ -10,7 +10,6 @@
 fn arm64_isel(f: *Qbe.Fn) void = {
     f.assign_alloc_slots();
     // In this pass, if `t.slot != -1` then `TMP(t) == addr SLOT(t.slot)`
-    
     for_blocks f { b |
         for_insts_forward b { i |
             collapse_op(f, i, b.id);
@@ -29,7 +28,11 @@ fn arm64_isel(f: *Qbe.Fn) void = {
         f.seljmp(b);
         
         for_insts_rev b { i | 
-            f.sel(i[][], b.id);
+            if i[].op() == .sel1 {
+                selsel_arm64(f, b, i[]);
+            } else {
+                f.sel(i[][], b.id);
+            };
         };
 
         f.copy_instructions_from_scratch(b);
@@ -324,6 +327,44 @@ fn seljmp(f: *Qbe.Fn, b: *Qbe.Blk) void = {
     b.jmp.type = .jfine;
 }
 
+// TODO: this is so similar to seljmp. but im afraid trying to factor them together would just make it more confusing. 
+fn selsel_arm64(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) *Qbe.Ins = {
+    isel0 := find_sel0(b, i);
+    r  := isel0.arg&[0];
+    cr0, cr1 := (r, QbeConZero);
+    c: i32 = Qbe.Cmp.Cine.raw();
+    needed_swap := false;
+    if find_source_instruction(b, r) { fi |
+        uses := f.get_temporary(r)[].nuse;
+        cmp_cls := Qbe.Cls.zeroed();
+        if uses == 1 && iscmp(fi.op(), cmp_cls&, c&) {
+            needed_swap = rtype(fi.arg&[0]) == .RCon && is_int(cmp_cls); // :arm64_cmp_will_swap
+            if needed_swap {
+                // selcmp will swap the args so don't do that to crN here, 
+                // but we need to update the condition so we use the right one in selKCC.
+                c = cmpop(c);
+            };
+            cr0 = fi.arg&[0];
+            cr1 = fi.arg&[1];
+            fi.set_nop();
+        };
+    };
+    
+    isel1 := i;
+    o := @as(Qbe.O) @as(i32) Qbe.O.selieq.raw() + c;
+    while => isel1.in_memory_after(isel0) {
+        isel1.set_op(o);
+        sel(f, isel1[], b.id);
+        isel1 = isel1.offset(-1);
+    };
+    
+    // TODO: init array from tuple literal
+    swapped := f.selcmp(init(@slice(cr0, cr1)), .Kw, b.id);
+    @debug_assert_eq(needed_swap, swapped, "confused about cmp swapping");
+    isel0.set_nop();
+    isel0
+}
+
 // Try to compare to a constant using an immidiate. 
 // Returns true if you need to invert the condition because we swapped the arguments. 
 // note: we handle the terminator first so we only get here if it we didn't jump on the result of this comparison.
@@ -337,7 +378,7 @@ fn selcmp(f: *Qbe.Fn, arg: Array(Qbe.Ref, 2), k: Qbe.Cls, blk: i32) bool = {
     };
     
     // cmp can only have an immediate on the right. so we might have to swap them and invert the condition. 
-    needed_swap := rtype(arg&[0]) == .RCon;
+    needed_swap := rtype(arg&[0]) == .RCon;  // :arm64_cmp_will_swap
     if needed_swap {
         // TODO: not true for function pointers i guess which is fair because we don't technically know if the symbols will resolve to the same place. 
         //@debug_assert(rtype(arg&[1]) != .RCon, "cmp of constant should already have been folded. we do handle this case below tho so its fine if you want to remove that pass and this check.");
