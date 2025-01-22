@@ -448,6 +448,20 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
                     };
                     if c.type == .CBits && is_int(i&.cls()) {
                         value := c.bits.i;
+                        
+                        // This is a silly size optimisation: 2 byte encoding instead of 6,
+                        // but it happens 5-10k times... so that's quite a bit of savings. 
+                        // always Kw because high bits are zeroed anyway so you don't need REX byte if it's one of the low registers. 
+                        if value == 0 {
+                            ins := make_ins(.xor, .Kw, i.to, i.to, i.to);
+                            emitins(ins, e);
+                            return();
+                        };
+                        
+                        if value >= 0 {  // free zero extend
+                            i&.set_cls(.Kw);
+                        };
+                        
                         if value < MIN_i32 || value > MAX_i32 {
                             encode_imm64(e.a&, i.to.int_reg_d(), value.bitcast());
                             return();
@@ -653,6 +667,33 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
                 e.a&.push(TWO_BYTE_OP_PREFIX);
                 e.a&.push(@as(u8) TwoByteOp.MovZX);
                 e.a&.push(pack_modrm(ModrmMode.Direct, r0, r0));
+                return();
+            };
+            
+            if is_sel_flag(o) {
+                cc := @as(i32) i&.op().raw() - Qbe.O.selieq.raw();
+                cc0 := amd_condition_codes[cc.zext()];
+                cc1 := amd_condition_codes[cmpneg(cc).zext()];
+                
+                ::if(Ty(i32, Qbe.Ref));
+                cond, r := if i.to == i.arg&[1] {
+                    (cc, i.arg&[0])
+                } else {
+                    if i.to != i.arg&[0] {
+                        ins := make_ins(.copy, i&.cls(), i.to, i.arg&[0], QbeNull);
+                        emitins(ins, e);
+                    };
+                    (cmpneg(cc), i.arg&[1])
+                };
+                cc := amd_condition_codes[cond.zext()];
+                
+                dest := int_reg_d(i.to);
+                src := int_reg_d(r);
+                
+                e.a&.push(pack_rex_si(i&.cls().is_wide(), dest, src, DONT_CARE_REG));  // TODO: elide
+                e.a&.encode_2cc(TwoByteOp.CMovCC, cc);
+                e.a&.push(pack_modrm(ModrmMode.Direct, src, dest));
+                
                 return();
             };
             
@@ -1030,6 +1071,7 @@ fn assemble(e: *AmdState, i: *Qbe.Ins) void = {
 fn amd64_encoding_data(e: FatExpr) FatExpr #macro = {
     ArgType :: AmdArgType;
     ops := e&.items();
+    // TODO: truncate the table since the last many are all not needed
     offset_by_op := ast_alloc().alloc_zeroed(u16, Qbe.O.enum_count());
     lookup_table := AmdEncodingEntry.list(ops.len, ast_alloc());
     each ops { full_op | 

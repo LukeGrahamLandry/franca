@@ -18,28 +18,25 @@ fn simplify(f: *Qbe.Fn) void = {
 //       or maybe global code motion should be its own seperate thing. 
 fn ins(f: *Qbe.Fn, iter: **Qbe.Ins, moved_to_new_memory: *bool, b: *Qbe.Blk) void #once = {
     i := iter[];
-    /* simplify more instructions here;
-     * copy 0 into xor, bit rotations,
-     * etc. */
-    @match(i.op()) {
-        fn blit1() => {
-            @debug_assert(i.in_memory_after(b.ins.first), "OOB inst");
-            start_blit := i.offset(-1);
-            @debug_assert(start_blit.op() == .blit0, "blits must be paired");
-      
-            // Currently blit is the only simplification that adds new instructions. 
-            // So if a block does not contain blits, the other simplifications can just update the instructions in place.
-            // The first time we see a blit, we need to copy the instructions we've already seen into the scratch buffer (since we might have changed then).
-            // And the at the end of the block, we'll replace the block with the contents of the scratch buffer. 
-            f.move_end_of_block_to_scratch(b, i, moved_to_new_memory);
-      
-            f.expand_blit(start_blit.arg&[1], start_blit.arg&[0], rsval(i.arg&[0]).intcast());
-            iter[] = i.offset(-1);  // deal with the variable length encoding (blit0, blit1). 
-            return();
-        }
-        fn udiv() => f.simplify_div_like(i);
-        fn urem() => f.simplify_div_like(i);
-        @default   => ();
+    
+    if i.op() == .blit1 {
+        @debug_assert(i.in_memory_after(b.ins.first), "OOB inst");
+        start_blit := i.offset(-1);
+        @debug_assert(start_blit.op() == .blit0, "blits must be paired");
+    
+        // Currently (blit, rem, div) are the only simplifications that adds new instructions. 
+        // So if a block does not contain those, the other simplifications (urem, udiv) can just update the instructions in place.
+        // The first time we see one that calls emit(), we need to copy the instructions we've already seen into the scratch buffer (since we might have changed then).
+        // And the at the end of the block, we'll replace the block with the contents of the scratch buffer. 
+        f.move_end_of_block_to_scratch(b, i, moved_to_new_memory);
+    
+        f.expand_blit(start_blit.arg&[1], start_blit.arg&[0], rsval(i.arg&[0]).intcast());
+        iter[] = i.offset(-1);  // deal with the variable length encoding (blit0, blit1). 
+        return();
+    };
+    
+    if (@is(i.op(), .udiv, .urem, .div, .rem)) {
+        f.simplify_div_like(b, i, moved_to_new_memory);
     };
     
     if moved_to_new_memory[] {
@@ -47,7 +44,6 @@ fn ins(f: *Qbe.Fn, iter: **Qbe.Ins, moved_to_new_memory: *bool, b: *Qbe.Blk) voi
     };
 }
 
-// TODO: afraid of off by one
 fn move_end_of_block_to_scratch(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins, changed: *bool) void #inline = {
     if !changed[] {
         f.globals.curi[] = f.scratch_start();
@@ -58,7 +54,7 @@ fn move_end_of_block_to_scratch(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins, changed: *
     }
 }
 
-fn simplify_div_like(f: *Qbe.Fn, i: *Qbe.Ins) void = {
+fn simplify_div_like(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins, changed: *bool) void = {
     r := i.arg&[1];
     i.cls().is_int()            || return();
     rtype(r) == .RCon           || return();
@@ -67,16 +63,55 @@ fn simplify_div_like(f: *Qbe.Fn, i: *Qbe.Ins) void = {
     ispow2(c.bits.i.bitcast())  || return();
     // The divisor is a constant power of 2. 
     
-    // If you want to call emit() here, don't forget to deal with moved_to_new_memory. 
+    is_rem := @is(i.op(), .urem, .rem);
+    is_signed := @is(i.op(), .div, .rem);
     
-    n := ulog2(c.bits.i.bitcast());
-    if i.op() == .urem {
-        i.set_op(.and);
-        // TODO: needs to be unsigned?
-        i.arg&[1] = f.getcon(1.shift_left(n.zext()) - 1);
+    // TODO: impl sel/cmov on arm
+    if is_signed && f.globals.goal.arch != .x86_64 {
+        return(); 
+    };
+    
+    c.bits.i != 0 || return();
+    if c.bits.i == 1 {
+        r := if(is_rem, => QbeConZero, => i.arg&[0]);
+        i[] = make_ins(.copy, i.cls(), i.to, r, QbeNull);
+    };
+    
+    n := trailing_zeros(c.bits.i);
+    
+    o: Qbe.O = @if(is_rem, .and, @if(is_signed, .sar, .shr));
+    magic := @if(is_rem, 1.shift_left(n) - 1, n);
+    
+    if is_signed {
+        // Negative numbers are supposed to round towards 0. 
+        // But if you just do the shift, they'll round towards -infinity. 
+        // This is (roughly) how clang solves that problem:
+        // TODO: explain better!
+        // https://godbolt.org/z/oecTh1bfz
+        
+        f.move_end_of_block_to_scratch(b, i, changed);
+        
+        k := i.cls();
+        negative := f.newtmp("simpl", .Kw);
+        new_dividend := f.newtmp("simpl", k);
+        neg_dividend := f.newtmp("simpl", k);
+        
+        out := i.to;
+        if is_rem {
+            magic = -(magic + 1);
+            out = f.newtmp("simpl", k);
+            f.emit(.sub, k, i.to, i.arg&[0], out);
+        };
+        
+        f.emit(o, k, out, new_dividend, f.getcon(magic));
+        f.emit(.sel1, k, new_dividend, neg_dividend, i.arg&[0]);
+        f.emit(.sel0, .Kw, QbeNull, negative, QbeNull);
+        f.emit(@if(k == .Kw, .csltw, .csltl), .Kw, negative, i.arg&[0], QbeConZero);
+        f.emit(.add, k, neg_dividend, i.arg&[0], f.getcon(1.shift_left(n) - 1));
+        i.set_nop();
     } else {
-        i.set_op(.shr);
-        i.arg&[1] = f.getcon(n.zext());
+        i.set_op(o);
+        i.arg&[1] = f.getcon(magic);
     };
 }
 
@@ -92,7 +127,6 @@ blit_op_table :: {
     
 // Blit instructions are implemented as a sequence of loads and stores.
 fn expand_blit(f: *Qbe.Fn, dest: Qbe.Ref, src: Qbe.Ref, blit_size: i64) void #once = {
-    
     // TODO: if i keep this move the encoded Call arg value to the target struct.  
     // TODO
     if f.globals.goal.type != .JitOnly && f.globals.goal.arch == .aarch64 && blit_size > 512  {  // :force_dep_on_memmove_hack
@@ -133,25 +167,6 @@ fn expand_blit(f: *Qbe.Fn, dest: Qbe.Ref, src: Qbe.Ref, blit_size: i64) void #on
             };
         };
     };
-}
-
-// TODO: is this really better than ctz/ffs?
-fn ulog2(pow2: u64) u32 = { // backwards
-    // TODO: generate the table at comptime but it's sad to do it every single time you compile. 
-    // https://c9x.me/git/qbe.git/tree/tools/log2.c
-    ulog2_tab64 :: @const_slice(@as(u8)
-        63,  0,  1, 41, 37,  2, 16, 42,
-        38, 29, 32,  3, 12, 17, 43, 55,
-        39, 35, 30, 53, 33, 21,  4, 23,
-        13,  9, 18,  6, 25, 44, 48, 56,
-        62, 40, 36, 15, 28, 31, 11, 54,
-        34, 52, 20, 22,  8,  5, 24, 47,
-        61, 14, 27, 10, 51, 19,  7, 46,
-        60, 26, 50, 45, 59, 49, 58, 57
-    );
-    
-    hash := pow2.mul(0x5b31ab928877a7e).shift_left(58);
-    ulog2_tab64[hash.bitcast()].zext()
 }
 
 fn ispow2(v: u64) bool = 

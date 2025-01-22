@@ -238,6 +238,7 @@ fn salloc(rt: Qbe.Ref, rs: Qbe.Ref, f: *Qbe.Fn) void = {
     }
 }
 
+// Inclusive!
 fn between(o: Qbe.O, $fst: Qbe.O, $lst: Qbe.O) bool #inline = {
     ::assert(fst.raw() < lst.raw(), "between(Qbe.O) args are out of order");
     fst.raw() <= o.raw() && o.raw() <= lst.raw()
@@ -292,6 +293,9 @@ fn rebase(value: Qbe.O, new_base: Qbe.O, old_base: Qbe.O) Qbe.O =
 /// Condition Codes ///
 ///////////////////////
 
+fn is_sel_flag(op: Qbe.O) bool =  
+    op.between(.selieq, .selfuo);
+    
 fn iscmp(op: Qbe.O) bool =  // :CmpOrder
     op.between(.ceqw, .cuod);
 
@@ -848,7 +852,7 @@ fn argcls(i: *Qbe.Ins, argument_index: i64) Qbe.Cls = {
     argcls_index :: fn(o: Qbe.O, k: Qbe.Cls, i: i64) i64 => 
         o.raw().int() * 8 + k.raw().int() * 2 + i;
 
-    // TODO: can store 2 per byte instead of 0.5 per byte. 
+    // TODO: can store 2 per byte instead of 0.25 per byte. 
     //       but even like this its replacing 4KB of code with 2KB of data.
     // argcls_eval looks super branchy so we generate a table of all the options at comptime. 
     argcls_table :: @static(Array(Qbe.Cls, Qbe.O.enum_count() * 4 * 2));
@@ -966,6 +970,18 @@ fn argcls_eval(o: Qbe.O, k: Qbe.Cls, argument_index: i64) Qbe.Cls = {
     };
     if (@is(o, .global_set)) {
         return(if(n == 0, => .Kl, => k));
+    };
+    
+    if is_sel_flag(o) {
+        return(k);
+    };
+    
+    if o == .sel0 {
+        return(if(n == 0 && k == .Kw, => .Kw, => .Kx));
+    };
+    
+    if o == .sel1 {  // for now, no floats
+        return(if(k.is_int(), => k, => .Ke));
     };
     
     names :: Qbe.O.get_enum_names();

@@ -7,6 +7,8 @@
 
 ##
 
+- auto #fold functions returning StructLiteralP (same as already do for Value).
+ie. `fn init() Self = (arr = @as(Slice(Entry)) empty(), len_including_tombstones = 0, capacity = 0);`
 - RSlot overflow
 - make trailing_zeros(0) == 64 work on x64
 - finish #x86_bytes tests: call_in_stack, throw, try, truncate_to_byte, read_pair, write_pair, both_pair

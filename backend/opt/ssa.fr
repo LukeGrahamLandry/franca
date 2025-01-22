@@ -30,19 +30,11 @@ fn convert_to_ssa(f: *Qbe.Fn) void = {
     fill_liveness(f);
     insert_phis(f);
     renumber_block(f.start, stk, f);
-    range_rev(nt, 0) { nt | 
-        while => !stk[nt].is_null() {
-            n := stk[nt];
-            stk[nt] = n.up;
-            f.nfree(n);
-        };
-    };
     dbg["L".char()] = d;
     if dbg["N".char()] {
         write(out, "\n> After SSA construction:\n");
         printfn(f, out);
     };
-    f.globals.namel = QbeName.ptr_from_int(0);
 }
 
 // :Explain
@@ -57,6 +49,9 @@ fn insert_phis(f: *Qbe.Fn) void = {
         f.tmp[t].visit = 0;
         if(f.tmp[t].phi != 0, => continue());
         if f.tmp[t].ndef == 1 {
+            // TODO: is this ok?? it seems fine...
+            continue();
+            /*
             no_escape_block := true;
             defb := f.tmp[t].defining_block;
             range(0, f.tmp[t].nuse.zext()) { n | 
@@ -67,6 +62,7 @@ fn insert_phis(f: *Qbe.Fn) void = {
             if no_escape_block || defb == f.start.id {
                 continue();
             };
+            */
         };
         
         bszero(u&);
@@ -183,9 +179,7 @@ fn renumber_definition(r: *Qbe.Ref, b: *Qbe.Blk, stk: []*QbeName, f: *Qbe.Fn) vo
 fn getstk(f: *Qbe.Fn, t: i64, b: *Qbe.Blk, stk: []*QbeName) Qbe.Ref = {
     n := stk[t];
     while => !n.is_null() && !dom(n.b, b) {
-        n1 := n;
         n = n.up;
-        f.nfree(n1);
     };
     stk[t] = n;
     if n.is_null() { 
@@ -204,27 +198,10 @@ QbeName :: @rec @struct(
     up: *QbeName,
 );
 
-fn nnew(f: *Qbe.Fn, r: Qbe.Ref, b: *Qbe.Blk, up: *QbeName) *QbeName = {
-    if f.globals.namel.is_null() { 
-        mem := temp().alloc(QbeName, 25); // TODO: don't bother. just do one at a time. 
-        each mem { m | 
-            m.up = m.offset(1);
-        };
-        mem[mem.len - 1].up = QbeName.ptr_from_int(0);
-        f.globals.namel = mem.index(0);
-    };
-    
-    n := f.globals.namel;
-    f.globals.namel = n.up;
-    n.r = r;
-    n.b = b;
-    n.up = up;
+fn nnew(f: *Qbe.Fn, r: Qbe.Ref, b: *Qbe.Blk, up: *QbeName) *QbeName #inline = {
+    n := temp().box(QbeName);
+    n[] = (r = r, b = b, up = up);
     n
-}
-
-fn nfree(f: *Qbe.Fn, n: *QbeName) void = {
-    n.up = f.globals.namel;
-    f.globals.namel = n;
 }
 
 fn refindex(f: *Qbe.Fn, t: i64) Qbe.Ref #inline =

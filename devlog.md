@@ -3,6 +3,36 @@
 ## (Jan 21)
 
 - changed Amd64Reg enum to order by encoding so i don't need a lookup table in emit
+- yikes. i transcribed ulog2 as << instead of >>. lucky i barely use unsigned numbers. 
+- take out nfree/namel in opt/ssa, because i can just use temp() (and then you maybe get nicer locality than reusing a global linked list like qbe does). 
+- i want to do something nice for signed division by constant. 
+for unsigned you just do a shift, but that rounds the wrong way for signed. 
+here's what clang does:
+```
+void foo(long* a, long* c, long b) {
+    *c = b % 8;
+    *a = b / 8;
+}
+
+foo:
+  add     x8, x2, #7
+  cmp     x2, #0
+  csel    x8, x8, x2, lt
+  and     x9, x8, #0xfffffffffffffff8
+  asr     x8, x8, #3
+  sub     x9, x2, x9
+  str     x9, [x1]
+  str     x8, [x0]
+  ret
+```
+you check if it's negative and cmov to do the right thing. 
+
+I stole sel from a qbe patch: <https://lists.sr.ht/~mpu/qbe/patches/55968>. 
+they only did x64 tho.
+
+Hard to decide what's worth it. 
+Like i can't measure the difference but I think it's neat. 
+Is that worth ~100 lines of code? 
 
 ## (Jan 20)
 

@@ -35,7 +35,11 @@ fn amd64_isel(f: *Qbe.Fn) void = {
         };
         seljmp(b, f);
         for_insts_rev b { i |
-            sel(i[][], f);
+            if i[].op() == .sel1 {
+                selsel(f, b, i[]);
+            } else {
+                sel(i[][], f);
+            };
         };
         f.copy_instructions_from_scratch(b);
     };
@@ -118,6 +122,11 @@ fn fixarg(r: *Qbe.Ref, k: Qbe.Cls, i: *Qbe.Ins, f: *Qbe.Fn) void = {
         && !is_load(o) && o != .call && f.is_symbol(r0)) => {
             r1 = f.newtmp("isel", .Kl);
             f.emit(.addr, .Kl, r1, r0, QbeNull);
+        };
+        // no immediate allowed for selCC
+        @if(o.is_sel_flag() && rtype(r[]) == .RCon) => {
+            r1 = f.newtmp("isel", i.cls());
+            f.emit(.copy, i.cls(), r1, r[], QbeNull);
         };
         @else => ();
     };
@@ -386,6 +395,75 @@ fn selcmp(arg: []Qbe.Ref, k: Qbe.Cls, need_swap: bool, f: *Qbe.Fn) void = {
     fixarg(icmp.arg&.index(1), k, icmp, f);
 }
 
+// Adapted from a qbe patch: https://lists.sr.ht/~mpu/qbe/patches/55968
+fn selsel(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) *Qbe.Ins = {
+    // You're allowed multiple sequential isel1 using the same condition. 
+    // Scan backwards to find the condition instruction. 
+    @debug_assert_eq(i.op(), .sel1);
+    isel0 := i;
+    while => in_memory_after(isel0, b.ins.first) && isel0.op() == .sel1 {
+        isel0 = isel0.offset(-1);
+    };
+    @debug_assert_eq(isel0.op(), .sel0);
+    
+    r  := isel0.arg&[0];
+    t  := f.get_temporary(r); 
+    fi := flagi(b.ins.first, isel0);
+    cr0, cr1 := (QbeNull, QbeNull);
+    gencmp, gencpy, need_swap := (false, false, false);
+    k := Qbe.Cls.Kw;
+    c: i32 = Qbe.Cmp.Cine.raw();
+    @if_else {
+        @if(fi.is_null() || fi.to != r) => {
+            gencmp = true;
+            cr0 = r;
+            cr1 = QbeConZero;
+        };
+        @if(iscmp(fi.op(), k&, c&) && c != Qbe.Cmp.Cfeq.raw() && c != Qbe.Cmp.Cfne.raw()) => {  /* see sel() */
+            need_swap = cmpswap(fi.arg&, c);
+            if need_swap {
+                c = cmpop(c);
+            };
+            if t.nuse == 1 {
+                gencmp = true;
+                cr0 = fi.arg&[0];
+                cr1 = fi.arg&[1];
+                fi.set_nop();
+            };
+        };
+        @if(fi.op() == .and && t.nuse == 1
+            && (rtype(fi.arg&[0]) == .RTmp ||
+                rtype(fi.arg&[1]) == .RTmp)) => {
+            fi.set_op(.xtest);
+            fi.to = QbeNull;
+            if rtype(fi.arg&[1]) == .RCon {
+                r = fi.arg&[1]; 
+                fi.arg&.items().swap(0, 1);
+            };
+        };
+        /* since flags are not tracked in liveness,
+         * the result of the flag-setting instruction
+         * has to be marked as live */
+        @else => {
+            gencpy = t.nuse == 1;
+        };
+    };
+    /* generate conditional moves */
+    
+    isel1 := i;
+    while => isel1.in_memory_after(isel0) {
+        isel1.set_op(@as(Qbe.O) @as(i32) Qbe.O.selieq.raw() + c);
+        sel(isel1[], f);
+        isel1 = isel1.offset(-1);
+    };
+    
+    @debug_assert(nand(gencpy, gencmp));
+    @if(gencmp) selcmp(@slice(cr0, cr1), k, need_swap, f);
+    @if(gencpy) {f.emit(.copy, .Kw, QbeNull, r, QbeNull);};
+    isel0.set_nop();
+    isel0
+}
+
 fn sel(i: Qbe.Ins, f: *Qbe.Fn) void = {
     if(try_kill_inst(f, i&), => return());
     
@@ -459,6 +537,10 @@ fn sel_inner(i: *Qbe.Ins, f: *Qbe.Fn) void = {
         fn cast()   => f.sel_emit(i);
         fn asm()    => { f.emit(i[]); }
         @default => {
+            if is_sel_flag(i.op()) {
+                f.sel_emit(i);
+                return();
+            };
             if is_alloc(i.op()) {
                 salloc(i.to, i.arg&[0], f);
                 return();
