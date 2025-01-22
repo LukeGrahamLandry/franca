@@ -12,7 +12,6 @@ AmdState :: @struct(
     a: List(u8),
     start_of_function: i64,
     patches: List(Patch),
-    prev_switch_prep := -1,
 );
 
 fn emit_func_amd64(f: *Qbe.Fn) void = {
@@ -187,29 +186,7 @@ fn emit_the_code(e: *AmdState) void = {
                 };
                 e.a&.push(@as(u8) PrimaryOp.Ret);
             }
-            fn switch() => {
-                // Check if the value is in range for the table. 
-                targets     := get_jump_targets(b);
-                table_size  := targets.len - 1;
-                e.jmp(targets[0], @as(i32) Qbe.Cmp.Ciuge.raw());
-                
-                encode_extended_op(e.a&, .Direct, 0xff, 0b0100, b.jmp.arg.int_reg_d());  // JMP r/m64
-                
-                // TODO: this is such an ugly hack
-                //       it should be a constant (16 rn) but we might decide we need to do some spill slot shuffling at the end of the block 
-                //       so there will be extra stuff between this and O.switch0 
-                @debug_assert(e.prev_switch_prep > 0);
-                current := e.a.len;
-                distance := current - (e.prev_switch_prep + 4);
-                e.a.len = e.prev_switch_prep;
-                push_imm(e, distance, 4);
-                e.a.len = current;
-                e.prev_switch_prep = -1;
-                
-                for targets.rest(1) { s |
-                    e.jmp(s, -1);
-                };
-            }
+            fn switch() => unreachable();
             fn jmp() => if !b.s1.identical(b.link) {
                 e.jmp(b.s1, -1);
             };
@@ -316,17 +293,6 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
         /* just do nothing for nops, they are inserted
          * by some passes */
         fn nop() => ();
-        fn switch0() => {  // TODO: garbage. not worth how much of a pain this is. 
-            dest := int_reg_d(i.to);
-            e.a&.push(pack_rex_si(true, dest, DONT_CARE_REG, DONT_CARE_REG)); 
-            e.a&.push(@as(u8) PrimaryOp.Lea);
-            e.a&.push(pack_modrm(.Indirect00, .rbp, dest));   // disp is RIP relative
-            e.prev_switch_prep = e.a.len;
-            e.a&.push_u32(0);
-            
-            ins := make_ins(.add, .Kl, i.to, i.arg&[0], i.to);
-            emitins(ins, e);
-        }
         fn mul() => {
             /* here, we try to use the 3-addresss form
             * of multiplication when possible */

@@ -122,7 +122,7 @@ Qbe :: @rec @struct(
         ),
         // jmp: s1=dest, s2=null
         // jnz: s1=then(1), s2=else(0)
-        // switch: s1=**Blk(start), s2=**Blk(end), first is default then indexed by arg
+        // switch: frontend only (lowered to if-else chain, not jump table). arg is an RInt index into Fn.switches
         // SAFETY: get_jump_targets relies on field order. (and can't static assert with offset_of until i :UpdateBoot)
         s1: *Qbe.Blk, // nullable
         s2: *Qbe.Blk, // nullable
@@ -265,6 +265,16 @@ Qbe :: @rec @struct(
         
         globals: *QbeModule,
         escaping_slots: Qbe.BSet,
+        switches: QList(Qbe.SwitchPayload),
+        switch_count: u32,
+    ),
+    // TODO: use this instead 
+    SwitchPayload :: @rec @struct(
+        cases: QList(Ty(*Qbe.Blk, i64)),
+        case_count: i64,
+        default: *Qbe.Blk,
+        src: *Qbe.Blk,
+        inspect: Qbe.Ref,
     ),
     FieldType :: @enum(i32) (
         FEnd,
@@ -545,9 +555,7 @@ Qbe :: @rec @struct(
         global_get, // (0: RCon of the global to read)
         global_set, // (0: RCon of the global to write, 1: value)
         
-        switch0,
-        
-        // nonportable: only on linux and the syscall numbers are different on different architectures. 
+        // nonportable: the syscall numbers are different on different targets. 
         // frontends use par like normal and they get lowered to a different calling convention. 
         // arg[0] = syscall number
         syscall,

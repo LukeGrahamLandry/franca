@@ -35,7 +35,6 @@ You can still print out the ir as human readable text between passes and modify 
 - arm abi fixes
   - respect the platform register (it gets zeroed when you context switch on macos).
   - large FHA (ie. struct of 4 doubles)
-- added a block terminator for using a jump table. definitly not worth it and should probably be removed again.
 - added a non-portable syscall instruction.
   it handles calling convention differences but you must use the correct magic numbers for the target os/architecture/version.
   - WIP: you can't access carry flag (for error on macos)

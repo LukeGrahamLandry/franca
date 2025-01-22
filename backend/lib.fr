@@ -349,16 +349,18 @@ run_qbe_passes :: fn(fnn: *Qbe.Fn) void = {
     m := fnn.globals;
     ::ptr_utils(QbeModule);
     @debug_assert(!m.is_null(), "function module not set");
-    
-    if fails_typecheck(fnn) { err | 
-        printfn(fnn, fnn.globals.debug_out);
-        @panic("IR failed typecheck: %", err);
-    };
-    
+   
     if fnn.globals.debug["P".char()] {
         out := fnn.globals.debug_out;
         write(out, "\n> After parsing:\n");
         printfn(fnn, out);
+    };
+     
+    lower_switch(fnn);
+    
+    if fails_typecheck(fnn) { err | 
+        printfn(fnn, fnn.globals.debug_out);
+        @panic("IR failed typecheck: %", err);
     };
     
     {m.target.abi0}(fnn);
@@ -536,7 +538,7 @@ fn fails_typecheck(f: *Qbe.Fn) ?Str = {
                 if(rtype(r) == .RType, => continue());
                 word :: fn() => if(n == 1, => "second", => "first");
                 if rtype(r) != .RNull && k == .Kx {
-                    return(Some = @tfmt("no %s operand expected in %", word(), i.op()));
+                    return(Some = @tfmt("no % operand expected in %", word(), i.op()));
                 };
                 if rtype(r) == .RNull && k != .Kx {
                     if i.op() == .copy && isreg(i.to) {
@@ -566,15 +568,13 @@ fn fails_typecheck(f: *Qbe.Fn) ?Str = {
             return(Some = @tfmt("invalid type for jump argument in block @%", b.name()));
         };
         
-        // TODO: bring this back
-        //@assert(b.jmp.type != .switch, "TODO: switch b");
-        //// :TodoSwitch
-        //if !b.s1.is_null() && b.s1.jmp.type == .Jxxx {   
-        //    return(Some = @tfmt("block @% is used undefined", b.s1.name()));
-        //};
-        //if !b.s2.is_null() && b.s2.jmp.type == .Jxxx {
-        //    return(Some = @tfmt("block @% is used undefined", b.s2.name()));
-        //};
+        @debug_assert_ne(b.jmp.type, .switch, "B");
+        if !b.s1.is_null() && b.s1.jmp.type == .Jxxx {   
+            return(Some = @tfmt("block @% is used undefined", b.s1.name()));
+        };
+        if !b.s2.is_null() && b.s2.jmp.type == .Jxxx {
+            return(Some = @tfmt("block @% is used undefined", b.s2.name()));
+        };
     };
     .None
 }
@@ -583,6 +583,84 @@ fn usecheck(r: Qbe.Ref, k: Qbe.Cls, f: *Qbe.Fn) bool = {
     rtype(r) == .RTmp || return(true);
     t := f.get_temporary(r);
     t.cls == k || (t.cls == .Kl && k == .Kw)
+}
+
+fn lower_switch(f: *Qbe.Fn) void = {
+    if(f.switch_count == 0, => return());
+    new_blocks_list := Qbe.Blk.ptr_from_int(0);
+    last_block := f.start;
+    changed := false;
+    switches := f.switches.slice(0, f.switch_count.zext());
+    
+    xxx := 0;
+    for_blocks f { b |
+        continue :: local_return;
+        last_block = b;
+        if b.jmp.type != .switch {
+            continue();
+        };
+        @debug_assert_eq(rtype(b.jmp.arg), .RInt, "J.switch expected RInt index into Fn.switches");
+        payload := switches.index(b.jmp.arg.val());
+        
+        if payload.case_count == 0 {
+            b.jmp = (type = .jmp, arg = QbeNull);
+            b.s1 = payload.default;
+            continue();
+        };
+        
+        set_s1 :: fn(old_src: *Qbe.Blk, new_src: *Qbe.Blk, dest: *Qbe.Blk) void => {
+            new_src.s1 = dest;
+            for_phi dest { p | 
+                n := index_in_phi(old_src, p);
+                p.blk[n] = new_src;
+            };
+            
+            @if(TRACK_IR_NAMES) {
+                l: List(u8) = (maybe_uninit = new_src.name&.items(), len = 0, gpa = panicking_allocator); 
+                @fmt(l&, "J%", xxx);
+                xxx += 1;
+            };
+            //name_phi_block(b, s, b1); // TODO: :UnacceptablePanic (which happens. the names get too long!)
+        };
+        
+        add_block :: fn() => {
+            blk := newblk(); 
+            f.nblk += 1;
+            // build up a chain to add at the end
+            blk.link = new_blocks_list;
+            new_blocks_list = blk;
+            blk
+        };
+        
+        next_block := add_block();
+        first_dispatch_block := next_block;
+        cases := payload.cases.slice(0, payload.case_count);
+        for cases { case |
+            continue :: local_return;
+            dest, value := case;
+            if(dest.identical(payload.default), => continue());
+            
+            check := next_block;  
+            next_block = add_block();
+            
+            matches := f.newtmp("switch", .Kw);
+            check.nins = 1;
+            check.ins = new(1);
+            check.ins.first[] = make_ins(.ceql, .Kw, matches, payload.inspect, f.getcon(value));
+            
+            set_s1(b, check, dest);
+            check.jmp = (type = .jnz, arg = matches);
+            check.s2 = next_block;
+        };
+        
+        set_s1(b, next_block, payload.default);
+        next_block.jmp = (type = .jmp, arg = QbeNull);
+        
+        b.jmp = (type = .jmp, arg = QbeNull);
+        b.s1 = first_dispatch_block;
+    };
+    @debug_assert(last_block.link.is_null());
+    last_block.link = new_blocks_list;
 }
 
 wasm_page_size :: 65536;

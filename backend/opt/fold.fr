@@ -22,15 +22,13 @@ FoldCtx :: @struct(
     flowrk: List(i32), // bid
     nuse := 0,
     usewrk: QList(*Qbe.Use),
+    folded_sel := false,
 );
-
-// TODO: you want to fold .copy right? because i insert them when folding sel. 
-//       then need to skip QbeNull markers (:ExprLevelAsm)  -- Jan 21, 2025
 
 // not memory and not special inserted later by abi/isel :OrderMatters
 fn can_fold(o: Qbe.O) bool = {
     if(o == .extsb || o == .extsh, => return(false)); // TODO
-    o.between(.add, .cuod) || o.between(.extsb, .cast) //|| o == .copy
+    o.between(.add, .cuod) || o.between(.extsb, .cast) || o == .copy
 }
 
 /* require rpo, use, pred */
@@ -145,27 +143,18 @@ fn fold_constants(f: *Qbe.Fn) void = {
     };
     
     if f.f.globals.debug["F".char()] {
-        dump_folding(f.f, f.val, f.f.globals.debug_out);
+        dump_folding(f.f, f.val, f.f.globals.debug_out, f.folded_sel);
     };
 }
 
 fn constant_conditional(f: *FoldCtx, b: *Qbe.Blk) ?*Qbe.Blk = {
-    if(b.is_null() || !@is(b.jmp.type, .jnz, .switch), => return(.None));
+    if(b.is_null() || b.jmp.type != .jnz, => return(.None));
     c := f.latval(b.jmp.arg);
     if(c == fold_status_runtime, => return(.None));
     c := f.f.con[c.zext()]&;
     // TODO: should we assume cmp to a symbol is nonnull? or are you allowed to do weak dynamic linking or something? 
     if(c.type != .CBits, => return(.None));
-    
-    dest := @match(b.jmp.type) {
-        fn jnz() => @if(c.bits.i.bit_and(0xFFFFFFFF) == 0, b.s2, b.s1); // :jnz_is_Kw
-        fn switch() => {
-            targets := get_jump_targets(b);
-            table_index := if(c.bits.i < 0 || c.bits.i >= targets.len - 1, => 0, => c.bits.i + 1);
-            targets[table_index]
-        }
-        @default => unreachable();
-    };
+    dest := @if(c.bits.i.bit_and(0xFFFFFFFF) == 0, b.s2, b.s1); // :jnz_is_Kw
     (Some = dest)
 }
 
@@ -190,6 +179,7 @@ fn latval(f: *FoldCtx, r: Qbe.Ref) i32 = {
     @match(rtype(r)) {
         fn RTmp() => f.val[r.val()];
         fn RCon() => r.val().intcast();
+        fn RNull() => fold_status_runtime; // :ExprLevelAsm clobber marker copy
         @default => @panic("latval of invalid %", r);
     }
 }
@@ -200,6 +190,11 @@ fn latmerge(v: i32, m: i32) i32 = {
 }
 
 fn update(f: *FoldCtx, t: i32, m: i32) void = {
+    //when_debug(f.f, .Folding) { out |
+    //    if m != fold_status_runtime && m != fold_status_dead {
+    //        @fmt_write(out, "# update: tmp % to latval %\n", t, m);
+    //    }
+    //};
     t := t.zext();
     m := latmerge(f.val[t], m);
     // if it changed, queue it to be reprocessed. 
@@ -232,31 +227,48 @@ fn visitphi(f: *FoldCtx, p: *Qbe.Phi, bid: i32) void = {
 }
 
 fn visitins(f: *FoldCtx, b: *Qbe.Blk, i: *Qbe.Ins) void = {
-    // TODO
-    /*
-    if i.op() == .sel0 {
+    if i.op() == .sel0 && false { // TODO
         isel0 := i;
         isel1 := find_last_sel1(b, isel0);
-        l := f.latval(isel0.arg&[0]);
+        cond := isel0.arg&[0];
+        l := f.latval(cond);
         
         if l != fold_status_runtime && l != fold_status_dead {
             c := f.f.con[l.zext()]&;
             if c.type == .CBits {
+                when_debug(f.f, .Folding) { out |
+                    @fmt_write(out, "# fold sel cond % is %\n", cond, c.bits.i);
+                };
+                
                 arg_index := int(c.bits.i.bit_and(0xFFFFFFFF) == 0); // :jnz_is_Kw
                 while => isel1.in_memory_after(isel0) {
+                    @debug_assert_eq(isel1.op(), .sel1);
                     k := isel1.cls();
                     a := isel1.arg&[arg_index];
                     r := isel1.to;
+                    @debug_assert(r.rtype() == .RTmp, "sel1 must have destination");
+                    when_debug(f.f, .Folding) { out |
+                        @fmt_write(out, "# - % = %\n", r, a);
+                    };
                     isel1[] = make_ins(.copy, k, r, a, QbeNull);
                     f.update(r.val().intcast(), f.latval(a));
+                    
+                    //// if it changed, queue it to be reprocessed. 
+                    //    t := r.val();
+                    //    tmp := f.f.get_temporary(t);
+                    //    each tmp.uses() { u |
+                    //        f.nuse += 1;
+                    //        grow(f.usewrk&, f.nuse);
+                    //        f.usewrk[f.nuse - 1] = u;
+                    //    };
+                    
                     isel1 = isel1.offset(-1);
                 };
                 isel0.set_nop();
+                f.folded_sel = true;
             };
-            return();
         };
     };
-    */
 
     if(rtype(i.to) != .RTmp, => return());
     
@@ -299,6 +311,8 @@ fn renumber(f: *FoldCtx, r: *Qbe.Ref) bool = {
 
 fn opfold(f: *Qbe.Fn, op: Qbe.O, cls: Qbe.Cls, cl: *Qbe.Con, cr: *Qbe.Con) i32 = {
     if op == .copy {
+        // Generally copies are removed by a seperate pass, 
+        // but folding for sel() generates them. 
         return(f.newcon(cl).val().intcast()); 
     };
     

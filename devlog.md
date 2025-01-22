@@ -32,7 +32,10 @@ they only did x64 tho.
 
 Hard to decide what's worth it. 
 Like i can't measure the difference but I think it's neat. 
-Is that worth ~100 lines of code? 
+Is that worth ~100 lines of code?
+
+This one's nice because sel is useful for other things too. 
+Like if the frontend sees `@if(a, b, c)`, it's kinda wasteful to generate a bunch of new blocks for that. 
 
 ## (Jan 20)
 

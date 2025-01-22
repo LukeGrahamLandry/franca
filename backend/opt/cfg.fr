@@ -7,23 +7,15 @@ fn edgedel(source: *Qbe.Blk, dest_p: **Qbe.Blk) void = {
     dest := dest_p[];
     if(dest.is_null(), => return());
     dest_p[] = Qbe.Blk.ptr_from_int(0);
-    for_jump_targets source { s |
-        if s.identical(dest) {
-            return();
-        };
-    };
+    
+    // TODO: :SketchyIterTargets
+    //if(identical(source.s1, source.s2), => return());
     
     // remove the phis along this edge.
     // this would happen for free if we used block arguments instead of phis, but phis are more convient in other passes. 
     // :MakeATestThatFails if you don't do this
     for_phi dest { p |
-        // find the phi's value in dest when coming from source.
-        a := 0;
-        while => !p.blk[a].identical(source) {
-            @debug_assert(a + 1 < p.narg.zext(), "tried to remove nonexistant edge (a phi has no value in % when coming from %)", dest.name(), source.name());
-            a += 1;
-        };
-        
+        a := index_in_phi(source, p);
         // and remove that option from the array
         p.narg -= 1;
         p.blk.slice(0, p.narg.zext()+1).copy_overlapping(a, a + 1, p.narg.zext() - a); // TODO: makes sure these offsets are right
@@ -42,16 +34,6 @@ fn edgedel(source: *Qbe.Blk, dest_p: **Qbe.Blk) void = {
     };
 }
 
-fn addpred(bp: *Qbe.Blk, bc: *Qbe.Blk) void = {
-    if bc.pred.first.is_null() {
-        bc.pred = new(bc.npred.zext());
-    } else {
-        bc.pred&.grow(bc.npred.zext());
-    };
-    bc.pred[bc.visit.zext()] = bp;
-    bc.visit += 1;
-}
-
 /* fill predecessors information in blocks */
 fn fillpreds(f: *Qbe.Fn) void = {
     for_blocks f { b |
@@ -68,7 +50,17 @@ fn fillpreds(f: *Qbe.Fn) void = {
         for_jump_targets b { s | 
             addpred(b, s);
         };
-    }
+    };
+    
+    addpred :: fn(bp: *Qbe.Blk, bc: *Qbe.Blk) void = {
+        if bc.pred.first.is_null() {
+            bc.pred = new(bc.npred.zext());
+        } else {
+            bc.pred&.grow(bc.npred.zext());
+        };
+        bc.pred[bc.visit.zext()] = bp;
+        bc.visit += 1;
+    };
 }
 
 fn rporec(b: *Qbe.Blk, x: i32) i32 = {
@@ -76,24 +68,14 @@ fn rporec(b: *Qbe.Blk, x: i32) i32 = {
         return(x);
     };
     b.id = 1;
-    if get_switch_targets(b) { targets0 |
-        targets := temp().alloc(*Qbe.Blk, targets0.len);
-        targets.copy_from(targets0);
-        sort :: quicksort(*Qbe.Blk, fn(a, b) => a.loop <= b.loop);  // :TodoSwitch flipped?
-        sort(targets);
-        for targets { s |
-            x = rporec(s, x);
-        };
-    } else {
-        s1 := b.s1;
-        s2 := b.s2;
-        if !s1.is_null() && !s2.is_null() && s1.loop > s2.loop {
-            s1 = b.s2;
-            s2 = b.s1;
-        };
-        x = rporec(s1, x);
-        x = rporec(s2, x);
+    s1 := b.s1;
+    s2 := b.s2;
+    if !s1.is_null() && !s2.is_null() && s1.loop > s2.loop {
+        s1 = b.s2;
+        s2 = b.s1;
     };
+    x = rporec(s1, x);
+    x = rporec(s2, x);
     b.id = x;
     @debug_assert(x != -1, "did you lie about f.nblk?");
     x - 1
@@ -116,7 +98,7 @@ fn fillrpo(f: *Qbe.Fn) void = {
     while => !p[].is_null() {
         b := p[];
         if b.id == -1 {
-            @debug_assert(b.jmp.type != .switch, "TODO: rpo switch");
+            @debug_assert_ne(b.jmp.type, .switch, "C");
             edgedel(b, b.s1&);
             edgedel(b, b.s2&);
             p[] = b.link;

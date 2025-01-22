@@ -1171,115 +1171,64 @@ fn emit_call_if(self: *EmitIr, arg: *FatExpr, p: Placement) CRes(Qbe.Ref) #once 
     (Ok = join_val)
 }
 
+// TODO: use if for single prong (maybe in backend?)
+
 // TODO: use phi for scalars. 
-// TODO: binary search or jump table or something. this is kinda sad. 
 fn emit_switch(self: *EmitIr, arg: *FatExpr, p: Placement) CRes(Qbe.Ref) #once = {
     @debug_assert(arg.expr&.is(.Switch));
     parts := arg.expr.Switch;
-    if parts.cases.len == 0 {
-        // There's only a default; that's not really a switch bro but ok... 
-         _ := @try(self.compile_expr(parts.value, .Discard)) return;
-        return(self.compile_expr(parts.default, p));
-    };
-
-    r, ok := @try(emit_jump_table(self, arg, p)) return;
-    if ok {
-        return(Ok = r);
-    };
-    
     inspect := @try(self.compile_expr(parts.value, .ScalarTransient)) return; 
-    // TODO: maybe i have to zero extend b/h if other since trunc assumes other people only look at the lower part. 
     
-    result := self.unify_placement(p&, arg.ty);
-    
-    entry_block := self.blk; 
-   
-    // This is where we rejoin with the value of the whole switch expression. 
-    out := self.program.get_info(arg.ty);
-    end_blk   := self.new_block("joins");
-    rejoined := false;
-    each parts.cases { f |
-        value := f._0;
-        body := f._1&;
-        
-        @err_assert(value >= 0 && value <= MAX_i32, "TODO: Expr::Switch only supports low positive integers.") return;
-        case_block     := self.new_block(@tfmt("case%", value));
-        next_chain_blk := self.new_block("check");
-        
-        matches := self.f.newtmp("m", .Kw);
-        // TODO: maybe we don't want to only look at the low 32 bits. do we care if you made your tag MAX_I32+1?
-        self.emit(.ceqw, .Kw, matches, inspect, self.f.getcon(value));
-        self.blk.s1 = case_block;
-        self.blk.s2 = next_chain_blk;
-        self.blk.jmp.type = .jnz;
-        self.blk.jmp.arg = matches;
-        
-        self.blk = case_block; 
-        _ := @try(self.compile_expr(body, p)) return;
-        seal self { b |
-            b.jmp.type = .jmp;
-            b.s1 = end_blk;
-            rejoined = true;
+    {
+        o, k := self.load_op(parts.value.ty);
+        @err_assert(k.is_int(), "can only switch over ints") return;
+        if o != .load {
+            o := rebase(o, .extsb, .loadsb);
+            r := self.f.newtmp("switch", .Kl);
+            self.emit(o, .Kl, r, inspect, QbeNull);
+            inspect = r;
         };
-        self.blk = next_chain_blk;
     };
     
-    // TODO: would it be nicer to have default branch just be the last thing in the ast node too so you could handle them uniformly? -- Jul 26
-    _ := @try(self.compile_expr(parts.default, p)) return;
-    seal self { b |
-        b.s1 = end_blk;
-        b.jmp.type = .jmp;
-        rejoined = true;
+    //name := self.program.get_string(self.program.get_function(self.func)[].name);
+    //@println("S % %", self.f.switch_count, name);
+    n: i64 = self.f.switch_count.zext();
+    ss := self.f.switches&;
+    {
+        if n == 0 {
+            ss[] = new(1);
+        } else {
+            ss.grow(n + 1);
+        };
+        self.f.switch_count += 1;
+        self.blk.jmp = (type = .switch, arg = INT(n));
     };
-    if !rejoined {
-        end_blk.jmp.type = .hlt; // TODO: remove the useless block
-    };
-    self.blk = end_blk;
-    (Ok = result)
-}
-
-fn emit_jump_table(self: *EmitIr, arg: *FatExpr, p: Placement) CRes(Ty(Qbe.Ref, bool)) #once = {
-    //return(Ok = (QbeNull, false));
-
-    parts := arg.expr.Switch;
-    
-    // Decide if it makes sense to use a jump table for this expression
-    if(parts.cases.len <= 3, => return(Ok = (QbeNull, false))); // random number chosen by fair die roll
-    hi := MIN_i64;
-    lo := MAX_i64;
-    each parts.cases { it |
-        hi = max(hi, it._0);
-        lo = min(lo, it._0);
-    };
-    spread := hi - lo;
-    @debug_assert_gt(hi, lo);
-    if(spread > parts.cases.len * 2, => return(Ok = (QbeNull, false)));
-    
-    inspect := @try(self.compile_expr(parts.value, .ScalarTransient)) return; 
-    if lo != 0 {
-        raw    := inspect;
-        inspect = self.f.newtmp("switch", .Kw);
-        self.emit(.sub, .Kw, inspect, raw, self.f.getcon(lo));
-    };
-    
-    // TODO: maybe i have to zero extend b/h if other since trunc assumes other people only look at the lower part. 
+    ss[n] = (
+        cases = new(parts.cases.len),
+        case_count = 0,
+        inspect = inspect,
+        src = self.blk,
+        default = self.new_block("default"),
+    );
     
     result := self.unify_placement(p&, arg.ty);
-    dest_table := temp().alloc_zeroed(*Qbe.Blk, spread + 2);
-    self.blk.jmp = (type = .switch, arg = inspect);
-    set_switch_targets(self.blk, dest_table);
    
     // This is where we rejoin with the value of the whole switch expression.
     end_blk   := self.new_block("joins"); 
     out := self.program.get_info(arg.ty);
     rejoined := false;
+    values := i64.list(parts.cases.len, temp());
     each parts.cases { f |
         value := f._0;
         body  := f._1&;
         
-        case_block     := self.new_block(@tfmt("case%", value));
-        case_index := value - lo + 1;
-        dest_table[case_index] = case_block;
+        // TODO: move this check to sema. 
+        @err_assert(!values.items().contains(value&), "value % appears twice in switch node", value) return;
+        values&.push(value);
+        
+        case_block := self.new_block(@tfmt("case%", value));
+        ss[n].cases[ss[n].case_count] = (case_block, value);
+        ss[n].case_count += 1;
         self.blk = case_block; 
         
         _ := @try(self.compile_expr(body, p)) return;
@@ -1289,10 +1238,15 @@ fn emit_jump_table(self: *EmitIr, arg: *FatExpr, p: Placement) CRes(Ty(Qbe.Ref, 
             rejoined = true;
         };
     };
+    if ss[n].case_count == 6 {
+        //self.entry.logging = "P";
+        //println(self.program.log(parts.value.ty));
+        //@println("% %", values.items(), name);
+        //println(self.program.log(arg));
+        //self.program.data.cast()[][].codemap.show_error_line(arg.loc);
+    };
     
-    // TODO: would it be nicer to have default branch just be the last thing in the ast node too so you could handle them uniformly? -- Jul 26
-    default_block := self.new_block("default");
-    self.blk = default_block;
+    self.blk = ss[n].default;
     _ := @try(self.compile_expr(parts.default, p)) return;
     seal self { b |
         b.s1 = end_blk;
@@ -1300,17 +1254,12 @@ fn emit_jump_table(self: *EmitIr, arg: *FatExpr, p: Placement) CRes(Ty(Qbe.Ref, 
         rejoined = true;
     };
     
-    each dest_table { b | 
-        if b[].is_null() {
-            b[] = default_block;
-        };
-    };
-    
     if !rejoined {
         end_blk.jmp.type = .hlt; // TODO: remove the useless block
     };
     self.blk = end_blk;
-    (Ok = (result, true))
+    @debug_assert_eq(ss[n].case_count, parts.cases.len);
+    (Ok = result)
 }
 
 fn emit_call_loop(self: *EmitIr, arg: *FatExpr) CRes(Qbe.Ref) #once = {
