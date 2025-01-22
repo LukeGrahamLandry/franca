@@ -323,7 +323,7 @@ fn seljmp(f: *Qbe.Fn, b: *Qbe.Blk) void = {
         } // else fallthrough
     };
     // TODO: init array from tuple literal
-    f.selcmp(init(@slice(jump_arg, QbeConZero)), .Kw, b.id);
+    f.selcmp(init(@slice(jump_arg, QbeConZero)), .Kw, b.id); // :jnz_is_Kw
     b.jmp.type = .jfine;
 }
 
@@ -331,13 +331,17 @@ fn seljmp(f: *Qbe.Fn, b: *Qbe.Blk) void = {
 fn selsel_arm64(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) *Qbe.Ins = {
     isel0 := find_sel0(b, i);
     r  := isel0.arg&[0];
+    @debug_assert(r != QbeNull, "sel on QbeNull");
+    if rtype(r) != .RTmp {
+        r = f.newtmp("isel", .Kw);
+    };
     cr0, cr1 := (r, QbeConZero);
     c: i32 = Qbe.Cmp.Cine.raw();
     needed_swap := false;
+    cmp_cls := Qbe.Cls.Kw; // :jnz_is_Kw // t.cls;
     if find_source_instruction(b, r) { fi |
-        uses := f.get_temporary(r)[].nuse;
-        cmp_cls := Qbe.Cls.zeroed();
-        if uses == 1 && iscmp(fi.op(), cmp_cls&, c&) {
+        t := f.get_temporary(r)[];
+        if t.nuse == 1 && iscmp(fi.op(), cmp_cls&, c&) {
             needed_swap = rtype(fi.arg&[0]) == .RCon && is_int(cmp_cls); // :arm64_cmp_will_swap
             if needed_swap {
                 // selcmp will swap the args so don't do that to crN here, 
@@ -359,8 +363,11 @@ fn selsel_arm64(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) *Qbe.Ins = {
     };
     
     // TODO: init array from tuple literal
-    swapped := f.selcmp(init(@slice(cr0, cr1)), .Kw, b.id);
+    swapped := f.selcmp(init(@slice(cr0, cr1)), cmp_cls, b.id);
     @debug_assert_eq(needed_swap, swapped, "confused about cmp swapping");
+    if r != isel0.arg&[0] {
+        f.emit(.copy, .Kw, r, isel0.arg&[0], QbeNull); // HACK. folding should prevent getting here
+    };
     isel0.set_nop();
     isel0
 }

@@ -39,6 +39,7 @@ You can still print out the ir as human readable text between passes and modify 
 - added a non-portable syscall instruction.
   it handles calling convention differences but you must use the correct magic numbers for the target os/architecture/version.
   - WIP: you can't access carry flag (for error on macos)
+- added a conditional select instruction
 - Removed support for thread locals. Franca achieves an equivilent by passing around an implicit env parameter.
 - Removed support for custom section names.
 
@@ -52,6 +53,7 @@ You can still print out the ir as human readable text between passes and modify 
 - Elide some redundant memory operations introduced when the abi passes aggregates in registers.
 - simplified matching of amd64 addressing modes: instead of 1600 lines of ocaml implementing a dsl
   with 150 lines of glue code to use the results, just write 150 lines of tedious code to solve the problem directly.
+- Strength reduction for signed div/rem by power of two (using a conditional move to get the right rounding for negative numbers). 
 - Removed several codegen optimisations until we have a solid foundation (but I want to bring them back eventually).
   - all: load float constants from memory (instead of using int immediate + fmov)
   - arm: bit field immediate to load int more constants in a single instruction

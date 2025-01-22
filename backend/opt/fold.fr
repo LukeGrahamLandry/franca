@@ -24,11 +24,13 @@ FoldCtx :: @struct(
     usewrk: QList(*Qbe.Use),
 );
 
-// TODO: sel
+// TODO: you want to fold .copy right? because i insert them when folding sel. 
+//       then need to skip QbeNull markers (:ExprLevelAsm)  -- Jan 21, 2025
+
 // not memory and not special inserted later by abi/isel :OrderMatters
 fn can_fold(o: Qbe.O) bool = {
     if(o == .extsb || o == .extsh, => return(false)); // TODO
-    o.between(.add, .cuod) || o.between(.extsb, .cast)
+    o.between(.add, .cuod) || o.between(.extsb, .cast) //|| o == .copy
 }
 
 /* require rpo, use, pred */
@@ -72,7 +74,7 @@ fn fold_constants(f: *Qbe.Fn) void = {
             };
             if b.visit == 0 {
                 for_insts_forward b { i |
-                    f.visitins(i);
+                    f.visitins(b, i);
                 };
                 f.visitjmp(b, n);
             };
@@ -87,9 +89,9 @@ fn fold_constants(f: *Qbe.Fn) void = {
             if(b.visit == 0, => continue(true));
             @match(u.type) {
                 fn UPhi() => f.visitphi(u.u.phi, u.bid);
-                fn UIns() => f.visitins(u.u.ins);
+                fn UIns() => f.visitins(b, u.u.ins);
                 fn UJmp() => f.visitjmp(b, n);
-                @default => unreachable();
+                @default => panic("invalid fold use type");
             };
             continue(true);
         };
@@ -156,7 +158,7 @@ fn constant_conditional(f: *FoldCtx, b: *Qbe.Blk) ?*Qbe.Blk = {
     if(c.type != .CBits, => return(.None));
     
     dest := @match(b.jmp.type) {
-        fn jnz() => @if(c.bits.i == 0, b.s2, b.s1);
+        fn jnz() => @if(c.bits.i.bit_and(0xFFFFFFFF) == 0, b.s2, b.s1); // :jnz_is_Kw
         fn switch() => {
             targets := get_jump_targets(b);
             table_index := if(c.bits.i < 0 || c.bits.i >= targets.len - 1, => 0, => c.bits.i + 1);
@@ -188,7 +190,7 @@ fn latval(f: *FoldCtx, r: Qbe.Ref) i32 = {
     @match(rtype(r)) {
         fn RTmp() => f.val[r.val()];
         fn RCon() => r.val().intcast();
-        @default => unreachable();
+        @default => @panic("latval of invalid %", r);
     }
 }
 ::if(i32);
@@ -229,8 +231,35 @@ fn visitphi(f: *FoldCtx, p: *Qbe.Phi, bid: i32) void = {
     f.update(p.to.val().intcast(), v);
 }
 
-fn visitins(f: *FoldCtx, i: *Qbe.Ins) void = {
+fn visitins(f: *FoldCtx, b: *Qbe.Blk, i: *Qbe.Ins) void = {
+    // TODO
+    /*
+    if i.op() == .sel0 {
+        isel0 := i;
+        isel1 := find_last_sel1(b, isel0);
+        l := f.latval(isel0.arg&[0]);
+        
+        if l != fold_status_runtime && l != fold_status_dead {
+            c := f.f.con[l.zext()]&;
+            if c.type == .CBits {
+                arg_index := int(c.bits.i.bit_and(0xFFFFFFFF) == 0); // :jnz_is_Kw
+                while => isel1.in_memory_after(isel0) {
+                    k := isel1.cls();
+                    a := isel1.arg&[arg_index];
+                    r := isel1.to;
+                    isel1[] = make_ins(.copy, k, r, a, QbeNull);
+                    f.update(r.val().intcast(), f.latval(a));
+                    isel1 = isel1.offset(-1);
+                };
+                isel0.set_nop();
+            };
+            return();
+        };
+    };
+    */
+
     if(rtype(i.to) != .RTmp, => return());
+    
     v := if(!can_fold(i.op()), => fold_status_runtime) {
         l := f.latval(i.arg&[0]);
         r := if(i.arg&[1] != QbeNull, => f.latval(i.arg&[1]), => QbeConZero.val().intcast());
@@ -269,6 +298,10 @@ fn renumber(f: *FoldCtx, r: *Qbe.Ref) bool = {
 }
 
 fn opfold(f: *Qbe.Fn, op: Qbe.O, cls: Qbe.Cls, cl: *Qbe.Con, cr: *Qbe.Con) i32 = {
+    if op == .copy {
+        return(f.newcon(cl).val().intcast()); 
+    };
+    
     c := Qbe.Con.zeroed();
     if cls == .Kw || cls == .Kl {
         if foldint(c&, op, cls == .Kl, cl, cr) {

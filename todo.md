@@ -7,6 +7,7 @@
 
 ##
 
+- is :jnz_is_Kw really what i want the semantic to be?
 - auto #fold functions returning StructLiteralP (same as already do for Value).
 ie. `fn init() Self = (arr = @as(Slice(Entry)) empty(), len_including_tombstones = 0, capacity = 0);`
 - RSlot overflow

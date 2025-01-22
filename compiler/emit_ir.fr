@@ -1102,6 +1102,38 @@ fn emit_call_if(self: *EmitIr, arg: *FatExpr, p: Placement) CRes(Qbe.Ref) #once 
     
     cond := @try(self.compile_expr(parts.cond, .ScalarTransient)) return;
     t_expr, f_expr := (parts.if_true, parts.if_false);
+    
+    is_trivial :: fn(self: *EmitIr, e: *FatExpr) bool = {
+        if (@is(e.expr&, .Value, .GetVar, .Addr, .FnPtr)) {
+            return(true);
+        };
+        @if_let(e.expr&) fn Block(it) => {
+            return(it.body.len == 0 && is_trivial(self, it.result));
+        };
+        false
+    };
+    
+    if arg.ty != void {  // :get_or_create_type
+        _, k := load_op(self, arg.ty);
+        if k != .Ke && k.is_int() && self.is_trivial(t_expr) && self.is_trivial(f_expr) {
+            if p&.tag() == .Discard {
+                return(Ok = QbeNull);
+            };
+            
+            // If both sides are very cheap to evaluate, just do a cmov instead of creating a bunch of new blocks. 
+            // This is not required for correctness, it's just a way to give the backend less work to do. 
+            
+            t_val := @try(self.compile_expr(t_expr, .Scalar)) return;
+            f_val := @try(self.compile_expr(f_expr, .Scalar)) return;
+            
+            r := self.scalar_dest(p, k);
+            self.emit(.sel0, .Kw, QbeNull, cond, QbeNull);
+            self.emit(.sel1, k, r, t_val, f_val);
+            //self.entry.logging = "P";
+            return(Ok = self.scalar_result(p, r, arg.ty));
+        };
+    };
+    
     t_blk, f_blk, join_blk := (self.new_block("yes"), self.new_block("no"), self.new_block("join"));
     seal self { b |
         b.jmp = (type = .jnz, arg = cond);
