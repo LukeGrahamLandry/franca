@@ -220,18 +220,21 @@ fn jmp(e: *AmdState, s: *Qbe.Blk, cond: i32) void #inline = {
 }
 
 fn apply_patch(e: *AmdState, labels: []i64, patch: *Patch) void = {
-    src := patch.offset_from_start;
     dest := labels[patch.target_bid.zext()];
     @debug_assert(dest != 0, "missing target block %", patch.target_bid);
+    write_jump_patch(e, dest, patch.offset_from_start, patch.cond);
+}
+
+fn write_jump_patch(e: *AmdState, dest: i64, src: i64, cond: i32) void = {
     // TODO: this is a dump nounification. 
     patch_at := e.m.segments&[.Code].mmapped.ptr.offset(e.start_of_function + src);
-    patch_size := @if(patch.cond == -1, 5, 6);
+    patch_size := @if(cond == -1, 5, 6);
     patch_bytes: List(u8) = (maybe_uninit = (ptr = patch_at, len = patch_size), len = 0, gpa = panicking_allocator);
     // The offset is from **the end** of the jump instruction
     offset := dest - src - patch_size; 
     @debug_assert(offset.abs() < 1.shift_left(31), "what a big function you have");
-    if patch.cond >= 0 {
-        cc := amd_condition_codes[patch.cond.zext()];
+    if cond >= 0 {
+        cc := amd_condition_codes[cond.zext()];
         patch_bytes&.encode_jmp(cc, offset);
     } else {
         encode_imm32_only(patch_bytes&, PrimaryOp.JmpImm32, offset); 
@@ -415,14 +418,15 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
                     if c.type == .CBits && is_int(i&.cls()) {
                         value := c.bits.i;
                         
+                        // TODO: doesn't work because it sets flags but isel doesn't know!
                         // This is a silly size optimisation: 2 byte encoding instead of 6,
                         // but it happens 5-10k times... so that's quite a bit of savings. 
                         // always Kw because high bits are zeroed anyway so you don't need REX byte if it's one of the low registers. 
-                        if value == 0 {
-                            ins := make_ins(.xor, .Kw, i.to, i.to, i.to);
-                            emitins(ins, e);
-                            return();
-                        };
+                        //if value == 0 {
+                        //    ins := make_ins(.xor, .Kw, i.to, i.to, i.to);
+                        //    emitins(ins, e);
+                        //    return();
+                        //};
                         
                         if value >= 0 {  // free zero extend
                             i&.set_cls(.Kw);
@@ -636,27 +640,26 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
                 return();
             };
             
-            if is_sel_flag(o) {
+            if is_sel_flag(o) {  // Choosing between two registers based on the flags 
+                // there's no 3-reg select, so we emulate it with a conditional move. 
+                
                 cc := @as(i32) i&.op().raw() - Qbe.O.selieq.raw();
                 ::if(Ty(i32, Qbe.Ref));
                 cond, r := if i.to == i.arg&[1] {
                     (cc, i.arg&[0])
                 } else {
                     if i.to != i.arg&[0] {
-                        ins := make_ins(.copy, i&.cls(), i.to, i.arg&[0], QbeNull);
-                        emitins(ins, e);
+                        emitins(make_ins(.copy, i&.cls(), i.to, i.arg&[0], QbeNull), e);
                     };
                     (cmpneg(cc), i.arg&[1])
                 };
+                
+                dest, src := (int_reg_d(i.to), int_reg_d(r));
                 cc := amd_condition_codes[cond.zext()];
-                
-                dest := int_reg_d(i.to);
-                src := int_reg_d(r);
-                
-                e.a&.push(pack_rex_si(i&.cls().is_wide(), dest, src, DONT_CARE_REG));  // TODO: elide
+                rex := pack_rex_si(i&.cls().is_wide(), dest, src, DONT_CARE_REG);
+                if(rex != 0b01000000, => e.a&.push(rex));
                 e.a&.encode_2cc(TwoByteOp.CMovCC, cc);
                 e.a&.push(pack_modrm(ModrmMode.Direct, src, dest));
-                
                 return();
             };
             

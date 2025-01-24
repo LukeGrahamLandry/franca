@@ -167,8 +167,9 @@ fn iscopy(f: *Qbe.Fn, i: *Qbe.Ins, arg0: Qbe.Ref) bool = {
     };
     
     has_identity, identity_value := arithmetic_identity_table(i.op());
-    if has_identity && KBASE(i.cls()) == 0 {
-        return(f.is_exactly_this_constant(i.arg&[1], identity_value));
+    if has_identity && KBASE(i.cls()) == 0 && rtype(i.arg&[1]) == .RCon {
+        c := f.get_constant(i.arg&[1]);
+        return(iscon(c, i.cls().is_wide(), identity_value));
     };
    
     if !is_ext(i.op()) || rtype(arg0) != .RTmp {
@@ -227,12 +228,12 @@ fn iscopy(f: *Qbe.Fn, i: *Qbe.Ins, arg0: Qbe.Ref) bool = {
 //       i don't want to paste the giant thing, it makes me sad. 
 // 
 // Some operations behave like a copy from the first argument when the second argument is a specific constant. 
-fn arithmetic_identity_table(op: Qbe.O) Ty(bool, i64) = {
+fn arithmetic_identity_table(op: Qbe.O) Ty(bool, u64) = {
     op.raw() <= Qbe.O.shl.raw() || return(false, 0);  // everything past the Arithmetic and Bits section we skip
     op.raw() <= Qbe.O.and.raw() || return(true, 0);   // x (or,xor,sar,shr,shl) 0 = x
     op.raw() >= Qbe.O.neg.raw() || return(true, 0);   // x (add,sub) 0 = x
     x := op.raw().zext().mod(2) == 0; // x (div,udiv,mul) 1 = x    (but we skip neg,rem,urem)
-    (x, x.int())
+    (x, x.int().bitcast())
 } 
 
 fn subst(pr: *Qbe.Ref, copy_of: []Qbe.Ref) void = {
@@ -248,10 +249,4 @@ fn get_src_or_self(r: Qbe.Ref, copy_of: []Qbe.Ref) Qbe.Ref = {
     } else {
         r
     }
-}
-
-fn is_exactly_this_constant(f: *Qbe.Fn, r: Qbe.Ref, bits: i64) bool = {
-    rtype(r) == .RCon
-        && f.con[r.val()].type == .CBits
-        && f.con[r.val()].bits.i == bits
 }

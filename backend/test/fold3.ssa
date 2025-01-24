@@ -1,0 +1,130 @@
+# constant folding of sel instruction 
+
+export
+function l $main(l %a) {
+@start
+    call $convoluted_or_chain(l 1)
+    %bad =l call $simple_sel()
+    %ok =w call $is_between_a_and_f(l 98, w 1)
+    call $printf(l $fmt1, ..., w %ok)
+    ret %bad
+}
+
+data $fmt1 = { b "hex? %d\n\0" }
+
+function l $simple_sel() {
+@start
+    %e =l call $just_sel(w 0, l 123, l 456)
+    %bad0 =l cnel %e, 456
+    %f =l call $just_sel(w 1, l 123, l 456)
+    %bad1 =l cnel %f, 123
+    
+    %bad2 =l call $fold_sel(l 0, l 1)
+    sel0 1
+    %bad3 =l sel1 0, 1
+    
+    %bad4 =l call $useless_sel(l 1, l 0)
+    
+    %c0 =l call $no_fold_sel(l 0)
+    %c1 =l call $no_fold_sel(l 1)
+    %bad5 =l ceql %c0, %c1
+    
+    %bada =l add %bad0, %bad1
+    %badb =l add %bad2, %bad3
+    %bad  =l add %bada, %badb
+    %bad  =l add %bad, %bad4
+    %bad  =l add %bad, %bad5
+    ret %bad
+}
+
+function l $just_sel(w %cond, l %t, l %f) {
+@start
+    sel0 %cond
+    %out =l sel1 %t, %f
+    ret %out
+}
+
+# the condition is constant but the value is not. 
+function l $fold_sel(l %t, l %f) {
+@start
+    sel0 1
+    %out =l sel1 %t, %f
+    ret %out
+}
+
+# sel1 can't be folded dispite both args being constant. 
+function l $no_fold_sel(l %rt_cond) {
+@start
+    sel0 %rt_cond
+    %out =l sel1 9, 99
+    ret %out
+}
+
+# this should always just return %rt_value, the condition doesn't matter. 
+function l $useless_sel(l %rt_cond, l %rt_value) {
+@start
+    sel0 %rt_cond
+    %out =l sel1 %rt_value, %rt_value
+    ret %out
+}
+
+data $fmt_or = { b "%d || %d = %d\n\0" }
+
+# when i broken folding of phis and tried to add folding of sel, 
+# this (incorrectly) decided some of the conditions were constant 
+# (dispite %r only being runtime known). 
+function $convoluted_or_chain(l %r) {  # nblk=17
+@start
+    %gpr0 =l copy 1
+    %ngpr =l copy 16
+    %fpr0 =l copy 17
+    %nfpr =l copy 16
+    %c0 =l cslel 1, %r
+    jnz %c0, @b4_yes, @b5_no
+@b4_yes
+    %last_gpr =l add %gpr0, %ngpr
+    %c1 =l csltl %r, %last_gpr
+    jmp @b6_join
+@b5_no
+    jmp @b6_join
+@b6_join
+    %is_int =w phi @b5_no 0, @b4_yes %c1
+    %v.87 =l cslel %fpr0, %r
+    jnz %v.87, @b9_yes, @b10_no
+@b9_yes
+    %last_fpr =l add %fpr0, %nfpr
+    %v.73.200 =l csltl %r, %last_fpr
+    jmp @b11_join
+@b10_no
+    jmp @b11_join
+@b11_join
+    %is_float =w phi @b10_no 0, @b9_yes %v.73.200
+    %v.101 =w extub %is_int
+    sel0 %v.101
+    %v.103 =w sel1 1, %is_float
+    call $printf(l $fmt_or, ..., w %v.101, w %is_float, w %v.103)
+    ret
+}
+
+# this is about isel/emit not fold
+# you get screwed if you try loading the 0 by xor which sets flags. 
+function w $is_between_a_and_f(l %c, w %rt_value_one_prevents_copy_prop) { 
+@start
+    %hi =l csgel %c, 97
+    jnz %hi, @b5_yes, @b6_no
+@b5_yes
+    %lo =l cslel %c, 102
+    jmp @b7_join
+@b6_no
+    jmp @b7_join
+@b7_join
+    %cond =w phi @b6_no 0, @b5_yes %lo
+    sel0 %cond
+    %out =w sel1 %rt_value_one_prevents_copy_prop, 0
+    ret %out
+}
+
+# >>> output
+# 1 || 0 = 1
+# hex? 1
+# <<<

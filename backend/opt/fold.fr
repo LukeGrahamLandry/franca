@@ -1,7 +1,6 @@
 // Adapted from Qbe. MIT License. © 2015-2024 Quentin Carbonneaux <quentin@c9x.me>
 
 //! "Sparse Conditional Constant Propagation"
-//! Which is a fancy way of saying `while changed: changed = any(try_fold(i) for i in instructions)`
 
 //!
 //! This is kinda tedious and doesn't help me much because my frontend has to do aggressive constant evaluation anyway. 
@@ -10,16 +9,34 @@
 //!           non-arithmetic #fold, and otherwise just defer until the backend.  
 //! But it still catches a few stragglers that became constant after slot promotion, inlining, etc.
 //!
-// TODO: some are sketchy because old backends only fully implment i64/f64 while f32/i32/u32/u64 are just kinda hacked in with casts. 
-// TODO: fuse sequential add/sub with one const arg. 
+
+// this process is split two phases: collecting constants and making changes. 
+// first we go through all the blocks and call visit* and keep adding things to the work lists. 
+// once the work lists are empty, we know all the constants, then we move to the next phase. 
+// in the second phase we iterate all the live blocks once and replaces uses of any newly constant refs. 
+// the first phase (visit* functions) are not allowed to make changes to the instructions! 
+// since we start by assuming edges are dead, don't always visit the predecessors of a block before the block itself, 
+// the first time a phi node is processed it might incorrectly treat some of its sources as dead and thus itself as a constant. 
+// this will trigger a whole cascade of incorrect constant folding, but since no changes are being made yet, this is fine, 
+// we're just putting junk in the val list. but when we eventually visit the predecesors of that phi, 
+// we notice the mistake, and readd everything that depended on it to the work list and do it all again.  
+// this seems more confusing than necessary, surely the point of calling it a lattice is that you only move down? 
+// TODO: also surely all that extra work makes it slower. can we not? 
+// -- Jan 23, 2025
+
+// TODO: the places where i iscon($$, 0) assumes symbols are nonzero. 
+//       this will need to change if i allow weak dynamic linking where a symbol might actually be null at runtime. 
 
 fold_status_runtime :i32: -1;
-fold_status_dead :i32:  0;
+fold_status_pending :i32:  0;
+
+Edge :: @rec @struct(dest: i32, dead: bool, work: *Edge);
 
 FoldCtx :: @struct(
     f: *Qbe.Fn,
     val: []i32,
-    flowrk: List(i32), // bid
+    edges: []Array(Edge, 2),
+    flowrk: *Edge,
     nuse := 0,
     usewrk: QList(*Qbe.Use),
     folded_sel := false,
@@ -28,23 +45,22 @@ FoldCtx :: @struct(
 // not memory and not special inserted later by abi/isel :OrderMatters
 fn can_fold(o: Qbe.O) bool = {
     if(o == .extsb || o == .extsh, => return(false)); // TODO
-    o.between(.add, .cuod) || o.between(.extsb, .cast) || o == .copy
+    o.between(.add, .cuod) || o.between(.extsb, .cast) || o == .sel1 
 }
 
 /* require rpo, use, pred */
 fn fold_constants(f: *Qbe.Fn) void = {
-    // never gonna happen but if there's no constants at all, there's nothing to fold. 
-    if(f.ncon == @as(i32) FIXED_CONST_COUNT, => return());
-    
+    start := Edge.zeroed();
     f: FoldCtx = (
         f      = f,
         val    = temp().alloc_zeroed(i32, f.ntmp.zext()),
+        edges  = temp().alloc_zeroed(Array(Edge, 2), f.nblk.zext()), 
         usewrk = new(0),
-        flowrk = list(5, temp()),
+        flowrk = start&,
     ); f := f&;
     
-    // val = alloc_zeroed so don't have to `range(f.f.ntmp.zext()) f.val[t] = fold_status_dead;`
-    ::assert_eq(fold_status_dead, 0); 
+    // val = alloc_zeroed so don't have to `range(f.f.ntmp.zext()) f.val[t] = fold_status_pending;`
+    ::assert_eq(fold_status_pending, 0); 
     
     // :ExprLevelAsm
     ::assert_eq(fold_status_runtime.intcast(), -1);
@@ -53,20 +69,26 @@ fn fold_constants(f: *Qbe.Fn) void = {
     range(0, f.f.nblk.zext()) { n | 
         b := f.f.rpo[n];
         b.visit = 0;
+        initedge(f.edge(n, 0), b.s1);
+        initedge(f.edge(n, 1), b.s2);
+        @debug_assert_eq(b.id.intcast(), n);
     };
-    f.flowrk&.push(f.f.start.id);
+    initedge(start&, f.f.start);
     
     /* 1. find out constants and dead cfg edges */
     dowhile {
         continue :: local_return;
-        if f.flowrk.len > 0 {
-            bid := f.flowrk&.pop().unwrap();
-            b := f.f.rpo[bid.zext()];
-            if b.visit != 0 {
+        e := f.flowrk;
+        if !e.is_null() {
+            f.flowrk = e.work;
+            e.work = Edge.ptr_from_int(0);
+            
+            if e.dest == -1 || !e.dead {
                 continue(true);
             };
-            
-            n := b.id;
+            e.dead = false;
+            n := e.dest;
+            b := f.f.rpo[n.zext()];
             for_phi b { p | 
                 f.visitphi(p, n);
             };
@@ -74,28 +96,32 @@ fn fold_constants(f: *Qbe.Fn) void = {
                 for_insts_forward b { i |
                     f.visitins(b, i);
                 };
-                f.visitjmp(b, n);
+                f.visitjmp(b);
             };
+            @debug_assert(
+                b.jmp.type != .jmp
+                || !f.edge(n, 0)[].dead
+                || identical(f.flowrk, f.edge(n, 0)
+            ), "live direct jump should be queued");
             b.visit += 1;
             continue(true);
         };
         if f.nuse != 0 {
             f.nuse -= 1;
             u := f.usewrk[f.nuse];
-            n := u.bid;
-            b := f.f.rpo[n.zext()];
+            b := f.f.rpo[u.bid.zext()];
             if(b.visit == 0, => continue(true));
             @match(u.type) {
                 fn UPhi() => f.visitphi(u.u.phi, u.bid);
                 fn UIns() => f.visitins(b, u.u.ins);
-                fn UJmp() => f.visitjmp(b, n);
+                fn UJmp() => f.visitjmp(b);
                 @default => panic("invalid fold use type");
             };
             continue(true);
         };
         false
     };
-
+    
     /* 2. trim dead code, replace constants */
     any_dead_blocks := false;
     pb := f.f.start&;
@@ -104,9 +130,8 @@ fn fold_constants(f: *Qbe.Fn) void = {
         b := pb[];
         if b.visit == 0 {
             any_dead_blocks = true;
-            for_jump_targets_mut b { s |
-                edgedel(b, s);
-            };
+            edgedel(b, b.s1&);
+            edgedel(b, b.s2&);
             pb[] = b.link;
             continue();
         };
@@ -114,30 +139,44 @@ fn fold_constants(f: *Qbe.Fn) void = {
         while => !pp[].is_null() { 
             p := pp[];
             if f.val[p.to.val()] != fold_status_runtime {
+                // remove this phi node. 
                 pp[] = p.link;
             } else {
                 range(0, p.narg.zext()) { a | 
-                    //if !f.deadedge(p.blk[a].id, b.id) {
+                    if !f.deadedge(p.blk[a].id, b.id) {
                         f.renumber(p.arg.index(a));
-                    //}
+                    }
                 };
                 pp = p.link&;
             };
         };
+        
         for_insts_forward b { i |
-            if(f.renumber(i.to&), => i.set_nop()) {
+            if(i.op() == .sel1, => f.fold_sel_part2(i));
+            if f.renumber(i.to&) {
+                i.set_nop();
+            } else {
                 range(0, 2) { n | 
                     f.renumber(i.arg&.index(n))
                 };
                 if is_store(i.op()) && i.arg&[0] == QbeUndef {
                     i.set_nop();
-                }
-            }
+                };
+            };
         };
         f.renumber(b.jmp.arg&);
         
-        if constant_conditional(f, b) { dest |
-            convert_to_jmp(b, dest);
+        if b.jmp.type == .jnz && rtype(b.jmp.arg) == .RCon {
+            cond_is_false := iscon(f.f.get_constant(b.jmp.arg), false, 0);  // :jnz_is_Kw
+            if cond_is_false {
+                edgedel(b, b.s1&);
+                b.s1 = b.s2;
+                b.s2 = Qbe.Blk.ptr_from_int(0);
+            } else {
+                edgedel(b, b.s2&);
+            };
+            b.jmp.type = .jmp;
+            b.jmp.arg = QbeNull;
         };
         pb = b.link&;
     };
@@ -147,129 +186,81 @@ fn fold_constants(f: *Qbe.Fn) void = {
     };
 }
 
-fn constant_conditional(f: *FoldCtx, b: *Qbe.Blk) ?*Qbe.Blk = {
-    if(b.is_null() || b.jmp.type != .jnz, => return(.None));
-    c := f.latval(b.jmp.arg);
-    if(c == fold_status_runtime, => return(.None));
-    c := f.f.con[c.zext()]&;
-    // TODO: should we assume cmp to a symbol is nonnull? or are you allowed to do weak dynamic linking or something? 
-    if(c.type != .CBits, => return(.None));
-    dest := @if(c.bits.i.bit_and(0xFFFFFFFF) == 0, b.s2, b.s1); // :jnz_is_Kw
-    (Some = dest)
-}
-
-fn convert_to_jmp(b: *Qbe.Blk, dest: *Qbe.Blk) void = {
-    for_jump_targets_mut b { s |
-        if !identical(s[], dest) {
-            edgedel(b, s);
-        };
+fn fold_sel_part2(f: *FoldCtx, isel1: *Qbe.Ins) void = {
+    isel0 := isel1.offset(-1);
+    @debug_assert_eq(isel0.op(), .sel0);
+    
+    // do this first so we notice if they folded to the same constant. 
+    range(0, 2, fn(n) => f.renumber(isel1.arg&.index(n)));
+    
+    // If the args are the same, the condition doesn't matter so pretend it's constant.  
+    cond := if(isel1.arg&[0] == isel1.arg&[1], => QbeConZero, => isel0.arg&[0]);
+    if rtype(cond) == .RCon {
+        cond_is_false := iscon(f.f.get_constant(cond), false, 0);  // :jnz_is_Kw
+        a := isel1.arg&[int(cond_is_false)];
+        isel1[] = make_ins(.copy, isel1.cls(), isel1.to, a, QbeNull);
+        isel0.set_nop();
+        f.folded_sel = true;  // for logging (dump_folding)
     };
-    b.s1 = dest;
-    b.s2 = Qbe.Blk.ptr_from_int(0);
-    b.jmp = (type = .jmp, arg = QbeNull);
 }
 
 fn iscon(c: *Qbe.Con, w: bool, k: u64) bool = {
     c.type == .CBits 
     && (!w || (@as(u64) c.bits.i.bitcast()) == k) 
-    && ( w || (@as(u32) c.bits.i.trunc())  == k.trunc())
+    && ( w || (@as(u32) c.bits.i.trunc())   == k.trunc())
 }
 
 fn latval(f: *FoldCtx, r: Qbe.Ref) i32 = {
     @match(rtype(r)) {
         fn RTmp() => f.val[r.val()];
         fn RCon() => r.val().intcast();
-        fn RNull() => fold_status_runtime; // :ExprLevelAsm clobber marker copy
         @default => @panic("latval of invalid %", r);
     }
 }
 ::if(i32);
 fn latmerge(v: i32, m: i32) i32 = {
-    if(m == fold_status_dead, => return(v));
-    if(v == fold_status_dead || v == m, => m, => fold_status_runtime)
+    if(m == fold_status_pending, => return(v));
+    if(v == fold_status_pending || v == m, => m, => fold_status_runtime)
 }
 
 fn update(f: *FoldCtx, t: i32, m: i32) void = {
-    //when_debug(f.f, .Folding) { out |
-    //    if m != fold_status_runtime && m != fold_status_dead {
-    //        @fmt_write(out, "# update: tmp % to latval %\n", t, m);
-    //    }
-    //};
     t := t.zext();
     m := latmerge(f.val[t], m);
     // if it changed, queue it to be reprocessed. 
     if m != f.val[t] {
         tmp := f.f.get_temporary(t);
-        each tmp.uses() { u |
+        uses := tmp.uses();
+        grow(f.usewrk&, f.nuse + uses.len);
+        each uses { u |
+            f.usewrk[f.nuse] = u;
             f.nuse += 1;
-            grow(f.usewrk&, f.nuse);
-            f.usewrk[f.nuse - 1] = u;
         };
         f.val[t] = m;
     }
 }
 
 fn deadedge(f: *FoldCtx, s: i32, d: i32) bool = {
-    e := f.edge.index(s.zext());
-    !(e[0].dest == d && !e[0].dead) && 
-    !(e[1].dest == d && !e[1].dead)
+    e := f.edges.index(s.zext());
+    if(e[0].dest == d && !e[0].dead, => return(false));
+    if(e[1].dest == d && !e[1].dead, => return(false));
+    true
 }
 
 fn visitphi(f: *FoldCtx, p: *Qbe.Phi, bid: i32) void = {
-    v: i32 = fold_status_dead;
+    v: i32 = fold_status_pending;
+    // since a dead edge might just not have been visited yet, 
+    // the latval after this loop might be wrong! but if it is, 
+    // it will bed fixed it when the other edges are added to the work list. 
     range(0, p.narg.zext()) { a |
-        // TODO: this feels important. there's a test in fold2.ssa that Qbe can do but i can't. bring this back!
-        //if !f.deadedge(p.blk[a].id, bid) { 
+        if !f.deadedge(p.blk[a].id, bid) { 
             v = latmerge(v, f.latval(p.arg[a]));
-        //};
+        };
     };
     f.update(p.to.val().intcast(), v);
 }
 
 fn visitins(f: *FoldCtx, b: *Qbe.Blk, i: *Qbe.Ins) void = {
-    if i.op() == .sel0 && false { // TODO
-        isel0 := i;
-        isel1 := find_last_sel1(b, isel0);
-        cond := isel0.arg&[0];
-        l := f.latval(cond);
-        
-        if l != fold_status_runtime && l != fold_status_dead {
-            c := f.f.con[l.zext()]&;
-            if c.type == .CBits {
-                when_debug(f.f, .Folding) { out |
-                    @fmt_write(out, "# fold sel cond % is %\n", cond, c.bits.i);
-                };
-                
-                arg_index := int(c.bits.i.bit_and(0xFFFFFFFF) == 0); // :jnz_is_Kw
-                while => isel1.in_memory_after(isel0) {
-                    @debug_assert_eq(isel1.op(), .sel1);
-                    k := isel1.cls();
-                    a := isel1.arg&[arg_index];
-                    r := isel1.to;
-                    @debug_assert(r.rtype() == .RTmp, "sel1 must have destination");
-                    when_debug(f.f, .Folding) { out |
-                        @fmt_write(out, "# - % = %\n", r, a);
-                    };
-                    isel1[] = make_ins(.copy, k, r, a, QbeNull);
-                    f.update(r.val().intcast(), f.latval(a));
-                    
-                    //// if it changed, queue it to be reprocessed. 
-                    //    t := r.val();
-                    //    tmp := f.f.get_temporary(t);
-                    //    each tmp.uses() { u |
-                    //        f.nuse += 1;
-                    //        grow(f.usewrk&, f.nuse);
-                    //        f.usewrk[f.nuse - 1] = u;
-                    //    };
-                    
-                    isel1 = isel1.offset(-1);
-                };
-                isel0.set_nop();
-                f.folded_sel = true;
-            };
-        };
-    };
-
+    if(i.op() == .sel0, => f.fold_sel_part1(i));
     if(rtype(i.to) != .RTmp, => return());
     
     v := if(!can_fold(i.op()), => fold_status_runtime) {
@@ -277,25 +268,64 @@ fn visitins(f: *FoldCtx, b: *Qbe.Blk, i: *Qbe.Ins) void = {
         r := if(i.arg&[1] != QbeNull, => f.latval(i.arg&[1]), => QbeConZero.val().intcast());
         @if_else {
             @if(l == fold_status_runtime || r == fold_status_runtime) => fold_status_runtime;
-            @if(l == fold_status_dead || r == fold_status_dead) => fold_status_dead;
-            @else => f.f.opfold(i.op(), i.cls(), f.f.con.index(l.zext()), f.f.con.index(r.zext()));
+            @if(l == fold_status_pending || r == fold_status_pending) => fold_status_pending;
+            @else => f.f.opfold(i.op(), i.cls(), l, r);
         }
     };
     
-    /* fprintf(stderr, "\nvisiting %s (%p)", optab[i.op].name, (void *)i); */
     f.update(i.to.val().intcast(), v);
 }
 
-fn visitjmp(f: *FoldCtx, b: *Qbe.Blk, n: i32) void = {
-    @debug_assert_eq(n, b.id, "visit jmp bad id");  // TODO: don't pass two arguments then? 
+fn visitjmp(f: *FoldCtx, b: *Qbe.Blk) void = {
+    n := b.id;
     
-    if f.constant_conditional(b) { dest |
-        f.flowrk&.push(dest.id);
-    } else {
-        for_jump_targets b { s |
-            f.flowrk&.push(s.id);
-        };
+    @match(b.jmp.type) {
+        fn jnz() => {
+            cond := f.latval(b.jmp.arg);
+            @debug_assert_ne(cond, fold_status_pending, "jnz(pending)");
+            @if_else {
+                @if(cond == fold_status_runtime) => {
+                    // add both edges to the work list
+                    f.edge(n, 1)[].work = f.flowrk;
+                    f.edge(n, 0)[].work = f.edge(n, 1);
+                    f.flowrk = f.edge(n, 0);
+                };
+                @if(iscon(f.f.con.index(cond.zext()), false, 0)) => {  // cond = false  // :jnz_is_Kw
+                    @debug_assert(f.edge(n, 0)[].dead, "jnz(0) s1 should be dead");
+                    f.edge(n, 1)[].work = f.flowrk;
+                    f.flowrk = f.edge(n, 1);
+                };
+                @else => {  // cond = true
+                    @debug_assert(f.edge(n, 1)[].dead, "jnz(1) s2 should be dead");
+                    f.edge(n, 0)[].work = f.flowrk;
+                    f.flowrk = f.edge(n, 0);
+                };
+            };
+        }
+        fn jmp() => {
+            // add this edge to the work list
+            f.edge(n, 0)[].work = f.flowrk;
+            f.flowrk = f.edge(n, 0);
+        }
+        fn hlt() => ();
+        @default => @assert(is_ret(b.jmp.type), "bad block terminator for fold");
     };
+}
+
+fn fold_sel_part1(f: *FoldCtx, isel0: *Qbe.Ins) void = {
+    isel1 := isel0.offset(1);
+    @debug_assert_eq(isel1.op(), .sel1);
+    cond := f.latval(isel0.arg&[0]);
+    if(cond <= 0, => return());
+    want_right_value := iscon(f.f.con.index(cond.zext()), false, 0);  // :jnz_is_Kw
+    a := isel1.arg&[int(want_right_value)];
+    f.update(isel1.to.val().intcast(), f.latval(a));
+}
+
+fn initedge(e: *Edge, s: *Qbe.Blk) void = {
+    e.dest = if(!s.is_null(), => s.id.bitcast(), => -1);
+    e.dead = true;
+    e.work = Edge.ptr_from_int(0);
 }
 
 fn renumber(f: *FoldCtx, r: *Qbe.Ref) bool = {
@@ -309,12 +339,15 @@ fn renumber(f: *FoldCtx, r: *Qbe.Ref) bool = {
     false
 }
 
-fn opfold(f: *Qbe.Fn, op: Qbe.O, cls: Qbe.Cls, cl: *Qbe.Con, cr: *Qbe.Con) i32 = {
-    if op == .copy {
-        // Generally copies are removed by a seperate pass, 
-        // but folding for sel() generates them. 
-        return(f.newcon(cl).val().intcast()); 
+fn edge(f: *FoldCtx, i: i32, j: i64) *Edge = f.edge(i.zext(), j);
+fn edge(f: *FoldCtx, i: i64, j: i64) *Edge = 
+    f.edges.index(i).index(j);
+
+fn opfold(f: *Qbe.Fn, op: Qbe.O, cls: Qbe.Cls, l: i32, r: i32) i32 = {
+    if op == .sel1 { 
+        return(if(l == r, => l, => fold_status_runtime));
     };
+    cl, cr := (f.con.index(l.zext()), f.con.index(r.zext()));
     
     c := Qbe.Con.zeroed();
     if cls == .Kw || cls == .Kl {

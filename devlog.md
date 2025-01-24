@@ -1,5 +1,20 @@
 - TODO: deal with `CodegenEntry:Bounce` on wasm
 
+## (Jan 22/23)
+
+- get rid of jump table switch instruction in the backend. 
+keep the switch block terminator because it's convient for the frontend, 
+just lower it immediately instead of letting it complicate everything by allowing arbitrarily many jump targets. 
+- very long time on dumb memory safety mistake in emit_ir new emit_switch. 
+- change constant folding back to how it was before so it can deal with the fold2.ssa test again. 
+- very long time on constant folding of sel. 
+my confusion was because it starts by assuming all edges are dead so does some folding based on incorrect phi values and then fixes it later. 
+so if you try to make changes in visitins directly instead of waiting until the end you get garbage. 
+- frontend using sel doesn't work on amd64. 
+tried using a jmp instead of cmov in emit() to see if i just had the opcode wrong. didn't help. 
+narrowed the problem down to is_hex_digit getting miscompiled.
+ah! my nice xor to create a zero with smaller encoding clobbers the flags!
+
 ## (Jan 21)
 
 - changed Amd64Reg enum to order by encoding so i don't need a lookup table in emit

@@ -136,41 +136,25 @@ fn printmem(m: *Qbe.Addr, f: *Qbe.Fn, out: *FILE) void = {
     write(out, "]");
 }
 
-fn printref(r: Qbe.Ref, f: *Qbe.Fn, out: *FILE) void = {
-    @match(rtype(r)) {
-        fn RTmp() => {
-            if r.val() < Qbe.Tmp0 {
-                @fmt_write(out, "R%", r.val());
-            } else {
-                @fmt_write(out, "%%", "%", f.tmp[r.val()]&.name());
-            }
-        }
-        fn RCon() => {
-            if r == QbeUndef {
-                write(out, "UNDEF");
-            } else {
-                f.globals.printcon(f.get_constant(r), out);
-            }
-        }
-        fn RSlot() => {
-            @fmt_write(out, "S%", rsval(r));
-        }
-        fn RCall() => {
-            // TODO: fprintf(f, "%04x", r.val);
-            @fmt_write(out, "%", r.val());
-        }
-        fn RType() => {
-            @fmt_write(out, ":%", f.globals.types[r.val()]&.name());
-        }
-        fn RMem() => printmem(f.mem.index(r.val()), f, out);
-        fn RInt() => {
-            @fmt_write(out, "%", rsval(r));
-        }
-        fn RNull() => {
-            write(out, "R");
-        }
-    }
-}
+fn printref(r: Qbe.Ref, f: *Qbe.Fn, out: *FILE) void = @match(rtype(r)) {
+    fn RTmp() => if r.val() < Qbe.Tmp0 {
+        @fmt_write(out, "R%", r.val());
+    } else {
+        @fmt_write(out, "%%", "%", f.tmp[r.val()]&.name());
+    };
+    fn RCon() => if r == QbeUndef {
+        write(out, "UNDEF");
+    } else {
+        f.globals.printcon(f.get_constant(r), out);
+    };
+    fn RSlot() => @fmt_write(out, "S%", rsval(r));
+    fn RCall() => @fmt_write(out, "C%", r.val());
+    fn RType() => @fmt_write(out, ":%", f.globals.types[r.val()]&.name());
+    fn RMem() => printmem(f.mem.index(r.val()), f, out);
+    fn RInt() => @fmt_write(out, "I%", rsval(r));
+    fn RNull() => write(out, "R");
+};
+
 
 fn kname(k: Qbe.Cls) Str = {
     N :: Qbe.Cls.get_enum_names();
@@ -206,7 +190,6 @@ fn printins(f: *Qbe.Fn, i: *Qbe.Ins, out: *FILE) void = {
         write(out, ", ");
         printref(i.arg&[1], f, out);
     };
-    write(out, "\n");
 };
 
 fn printfn(f: *Qbe.Fn, out: *FILE) void = {
@@ -219,90 +202,98 @@ fn printfn(f: *Qbe.Fn, out: *FILE) void = {
         @fmt_write(out, "@%\n", b.name());
         for_phi b { p | 
             write(out, "\t");
-            printref(p.to, f, out);
-            @fmt_write(out, " =% phi ", kname(p.cls));
-            if p.narg <= 0 {
-                @fmt_write(out, "ERROR: phi with no args\n");
-                return();
-            } else {
-                range(0, p.narg.zext()) { n | 
-                    @fmt_write(out, "@% ", p.blk[n].name());
-                    printref(p.arg&[n], f, out);
-                    if (n == p.narg.zext() - 1) {
-                        write(out, "\n");
-                    } else {
-                        write(out, ", ");
-                    };
-                };
-            };
+            printphi(f, p, out);
+            write(out, "\n");
         };
         for_insts_forward b { i | 
             write(out, "\t");
             printins(f, i, out);
-        };
-        
-        jnames :: Qbe.J.get_enum_names();
-        n := jnames[b.jmp.type.raw().zext()];
-        if is_ret(b.jmp.type) {
-            @fmt_write(out, "\t%", n);
-            if b.jmp.type != .ret0 || b.jmp.arg != QbeNull {
-                write(out, " ");
-                printref(b.jmp.arg, f, out);
-            };
-            if b.jmp.type == .retc {
-                @fmt_write(out, ", :%", f.globals.types.index(f.retty.zext()).name());
-            };
             write(out, "\n");
-            continue();
         };
         
-        if b.jmp.type == .hlt {
-            write(out, "\thlt\n");
-            continue();
-        };
-        @fmt_write(out, "\t% ", n);
-        if b.jmp.type == .jmp {
-            if b.s1.is_null() {
-                @fmt_write(out, "ERROR: NULL JUMP TARGET: ");
-                @fmt_write(out, "%, %\n", Qbe.Blk.int_from_ptr(b.s1), Qbe.Blk.int_from_ptr(b.s2));
-                continue();
-            };
-            @fmt_write(out, "@%\n", b.s1.name());
-            continue();
-        };
-        
-        if b.jmp.type == .switch {
-            n := b.jmp.arg.val();
-            if n >= f.switch_count.zext() {
-                @fmt_write(out, "ERROR: invalid switch index.\n");
-                continue();
-            };
-            payload := f.switches.index(n);
-            
-            @fmt_write(out, "@% ", payload.default.name());
-            printref(payload.inspect, f, out);
-            write(out, ", ");
-            for payload.cases.slice(0, payload.case_count) { s | 
-                case, value := s;
-                @fmt_write(out, "@% %, ", case.name(), value);
-            };
-        } else {
-            if b.jmp.arg != QbeNull {
-                printref(b.jmp.arg, f, out);
-                write(out, ", ");
-            };
-            
-            if b.jmp.type != .Jxxx {
-                assert(!b.s1.is_null() && !b.s2.is_null(), "missing branch target");
-                @fmt_write(out, "@%, @%", b.s1.name(), b.s2.name());
-            } else {
-                @fmt_write(out, "%, %", Qbe.Blk.int_from_ptr(b.s1), Qbe.Blk.int_from_ptr(b.s2));
-            };
-        };
+        write(out, "\t");
+        printjmp(f, b, out);
         write(out, "\n");
     };
     write(out, "}\n");
     reset_temporary_storage(mark);
+}
+
+fn printphi(f: *Qbe.Fn, p: *Qbe.Phi, out: *FILE) void = {
+    printref(p.to, f, out);
+    @fmt_write(out, " =% phi ", kname(p.cls));
+    if p.narg <= 0 {
+        @fmt_write(out, "ERROR: phi with no args");
+    } else {
+        range(0, p.narg.zext()) { n | 
+            @fmt_write(out, "@% ", p.blk[n].name());
+            printref(p.arg&[n], f, out);
+            if (n == p.narg.zext() - 1) {
+            } else {
+                write(out, ", ");
+            };
+        };
+    };
+}
+
+fn printjmp(f: *Qbe.Fn, b: *Qbe.Blk, out: *FILE) void = {
+    jnames :: Qbe.J.get_enum_names();
+    n := jnames[b.jmp.type.raw().zext()];
+    if is_ret(b.jmp.type) {
+        @fmt_write(out, "%", n);
+        if b.jmp.type != .ret0 || b.jmp.arg != QbeNull {
+            write(out, " ");
+            printref(b.jmp.arg, f, out);
+        };
+        if b.jmp.type == .retc {
+            @fmt_write(out, ", :%", f.globals.types.index(f.retty.zext()).name());
+        };
+        return();
+    };
+
+    if b.jmp.type == .hlt {
+        write(out, "hlt");
+        return();
+    };
+    @fmt_write(out, "% ", n);
+    if b.jmp.type == .jmp {
+        if b.s1.is_null() {
+            @fmt_write(out, "ERROR: NULL JUMP TARGET: ");
+            @fmt_write(out, "%, %", Qbe.Blk.int_from_ptr(b.s1), Qbe.Blk.int_from_ptr(b.s2));
+            return();
+        };
+        @fmt_write(out, "@%", b.s1.name());
+        return();
+    };
+    
+    if b.jmp.type == .switch {
+        n := b.jmp.arg.val();
+        if n >= f.switch_count.zext() {
+            @fmt_write(out, "ERROR: invalid switch index.");
+            return();
+        };
+        payload := f.switches.index(n);
+        
+        @fmt_write(out, "@% ", payload.default.name());
+        printref(payload.inspect, f, out);
+        write(out, ", ");
+        for payload.cases.slice(0, payload.case_count) { s | 
+            case, value := s;
+            @fmt_write(out, "@% %, ", case.name(), value);
+        };
+    } else {
+        if b.jmp.arg != QbeNull {
+            printref(b.jmp.arg, f, out);
+            write(out, ", ");
+        };
+        
+        if b.jmp.type != .Jxxx {
+            assert(!b.s1.is_null() && !b.s2.is_null(), "missing branch target");
+            @fmt_write(out, "@%, @%", b.s1.name(), b.s2.name());
+        } else {
+            @fmt_write(out, "%, %", Qbe.Blk.int_from_ptr(b.s1), Qbe.Blk.int_from_ptr(b.s2));
+        };
+    };
 }
 
 fn print_dat(m: *QbeModule, dat: *Qbe.Dat, out: *FILE) void = {
@@ -439,7 +430,7 @@ fn dump_folding(f: *Qbe.Fn, fold_vals: []i32, out: *FILE, folded_sel: bool) void
     any_folded := folded_sel;
     write(out, "\n> SCCP findings:");  // "sparse conditional constant propagation"
     range(Qbe.Tmp0, f.ntmp.zext()) { t |
-        if fold_vals[t] != fold_status_runtime && fold_vals[t].intcast() != fold_status_dead {
+        if fold_vals[t] > 0 {
             any_folded = true;
             @fmt_write(out, "\n%: ", f_pad(f.tmp[t]&.name(), 10, .Before));
             printref(CON(fold_vals[t].zext()), f, out);
@@ -448,7 +439,7 @@ fn dump_folding(f: *Qbe.Fn, fold_vals: []i32, out: *FILE, folded_sel: bool) void
     if any_folded {
         write(out, "\n> Top: ("); 
         range(Qbe.Tmp0, f.ntmp.zext()) { t |
-            if fold_vals[t].intcast() == fold_status_dead {
+            if fold_vals[t].intcast() == fold_status_pending {
                 @fmt_write(out, "%, ", f.tmp[t]&.name());
             } 
         };
