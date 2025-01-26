@@ -1,14 +1,8 @@
 // Adapted from Qbe. MIT License. © 2015-2024 Quentin Carbonneaux <quentin@c9x.me>
 
-//! "Sparse Conditional Constant Propagation"
-
-//!
-//! This is kinda tedious and doesn't help me much because my frontend has to do aggressive constant evaluation anyway. 
-//!     TODO: I think it would be much faster if the frontend just tracked what 
-//!           should be constant, and only materialized it upon seeing a 
-//!           non-arithmetic #fold, and otherwise just defer until the backend.  
-//! But it still catches a few stragglers that became constant after slot promotion, inlining, etc.
-//!
+//! This is the SCC algorithm described in 
+//! Mark N. Wegman and F. Kenneth Zadeck. 1991. Constant propagation with conditional branches. 
+//! ACM Transactions on Programming Languages and Systems, 13, 2 (1991), 181–210. https://doi.org/10.1145/103135.103136
 
 // this process is split two phases: collecting constants and making changes. 
 // first we go through all the blocks and call visit* and keep adding things to the work lists. 
@@ -30,15 +24,14 @@
 fold_status_runtime :i32: -1;
 fold_status_pending :i32:  0;
 
-Edge :: @rec @struct(dest: i32, dead: bool, work: *Edge);
+Edge :: @rec @struct(dest: i32, dead: bool);
 
 FoldCtx :: @struct(
     f: *Qbe.Fn,
     val: []i32,
     edges: []Array(Edge, 2),
-    flowrk: *Edge,
-    nuse := 0,
-    usewrk: QList(*Qbe.Use),
+    flow_work: List(*Edge),
+    use_work: List(*Qbe.Use),
     folded_sel := false,
 );
 
@@ -55,9 +48,10 @@ fn fold_constants(f: *Qbe.Fn) void = {
         f      = f,
         val    = temp().alloc_zeroed(i32, f.ntmp.zext()),
         edges  = temp().alloc_zeroed(Array(Edge, 2), f.nblk.zext()), 
-        usewrk = new(0),
-        flowrk = start&,
+        use_work = list(0, temp()),
+        flow_work = list(5, temp()),
     ); f := f&;
+    f.flow_work&.push(start&);
     
     // val = alloc_zeroed so don't have to `range(f.f.ntmp.zext()) f.val[t] = fold_status_pending;`
     ::assert_eq(fold_status_pending, 0); 
@@ -78,11 +72,7 @@ fn fold_constants(f: *Qbe.Fn) void = {
     /* 1. find out constants and dead cfg edges */
     dowhile {
         continue :: local_return;
-        e := f.flowrk;
-        if !e.is_null() {
-            f.flowrk = e.work;
-            e.work = Edge.ptr_from_int(0);
-            
+        if f.flow_work&.pop() { e |
             if e.dest == -1 || !e.dead {
                 continue(true);
             };
@@ -101,14 +91,12 @@ fn fold_constants(f: *Qbe.Fn) void = {
             @debug_assert(
                 b.jmp.type != .jmp
                 || !f.edge(n, 0)[].dead
-                || identical(f.flowrk, f.edge(n, 0)
+                || identical(f.flow_work[f.flow_work.len - 1], f.edge(n, 0)
             ), "live direct jump should be queued");
             b.visit += 1;
             continue(true);
         };
-        if f.nuse != 0 {
-            f.nuse -= 1;
-            u := f.usewrk[f.nuse];
+        if f.use_work&.pop() { u |
             b := f.f.rpo[u.bid.zext()];
             if(b.visit == 0, => continue(true));
             @match(u.type) {
@@ -210,33 +198,27 @@ fn iscon(c: *Qbe.Con, w: bool, k: u64) bool = {
     && ( w || (@as(u32) c.bits.i.trunc())   == k.trunc())
 }
 
-fn latval(f: *FoldCtx, r: Qbe.Ref) i32 = {
-    @match(rtype(r)) {
-        fn RTmp() => f.val[r.val()];
-        fn RCon() => r.val().intcast();
-        @default => @panic("latval of invalid %", r);
-    }
-}
-::if(i32);
+fn latval(f: *FoldCtx, r: Qbe.Ref) i32 = @match(rtype(r)) {
+    fn RTmp() => f.val[r.val()];
+    fn RCon() => r.val().intcast();
+    @default => @panic("latval of invalid %", r);
+};
+
 fn latmerge(v: i32, m: i32) i32 = {
+    ::if(i32);
     if(m == fold_status_pending, => return(v));
     if(v == fold_status_pending || v == m, => m, => fold_status_runtime)
 }
 
 fn update(f: *FoldCtx, t: i32, m: i32) void = {
     t := t.zext();
-    m := latmerge(f.val[t], m);
-    // if it changed, queue it to be reprocessed. 
-    if m != f.val[t] {
-        tmp := f.f.get_temporary(t);
-        uses := tmp.uses();
-        grow(f.usewrk&, f.nuse + uses.len);
-        each uses { u |
-            f.usewrk[f.nuse] = u;
-            f.nuse += 1;
-        };
-        f.val[t] = m;
-    }
+    m := latmerge(f.val[t], m); 
+    if(m == f.val[t], => return()); 
+    // it changed; queue it to be reprocessed.
+    uses := f.f.get_temporary(t).uses();
+    f.use_work&.reserve(uses.len);
+    each(uses, fn(u) => f.use_work&.push_assume_capacity(u));
+    f.val[t] = m;
 }
 
 fn deadedge(f: *FoldCtx, s: i32, d: i32) bool = {
@@ -250,7 +232,7 @@ fn visitphi(f: *FoldCtx, p: *Qbe.Phi, bid: i32) void = {
     v: i32 = fold_status_pending;
     // since a dead edge might just not have been visited yet, 
     // the latval after this loop might be wrong! but if it is, 
-    // it will bed fixed it when the other edges are added to the work list. 
+    // it will be fixed when the other edges are added to the work list. 
     range(0, p.narg.zext()) { a |
         if !f.deadedge(p.blk[a].id, bid) { 
             v = latmerge(v, f.latval(p.arg[a]));
@@ -278,35 +260,26 @@ fn visitins(f: *FoldCtx, b: *Qbe.Blk, i: *Qbe.Ins) void = {
 
 fn visitjmp(f: *FoldCtx, b: *Qbe.Blk) void = {
     n := b.id;
-    
     @match(b.jmp.type) {
         fn jnz() => {
             cond := f.latval(b.jmp.arg);
             @debug_assert_ne(cond, fold_status_pending, "jnz(pending)");
             @if_else {
                 @if(cond == fold_status_runtime) => {
-                    // add both edges to the work list
-                    f.edge(n, 1)[].work = f.flowrk;
-                    f.edge(n, 0)[].work = f.edge(n, 1);
-                    f.flowrk = f.edge(n, 0);
+                    f.flow_work&.push(f.edge(n, 1));
+                    f.flow_work&.push(f.edge(n, 0));
                 };
                 @if(iscon(f.f.con.index(cond.zext()), false, 0)) => {  // cond = false  // :jnz_is_Kw
                     @debug_assert(f.edge(n, 0)[].dead, "jnz(0) s1 should be dead");
-                    f.edge(n, 1)[].work = f.flowrk;
-                    f.flowrk = f.edge(n, 1);
+                    f.flow_work&.push(f.edge(n, 1));
                 };
                 @else => {  // cond = true
                     @debug_assert(f.edge(n, 1)[].dead, "jnz(1) s2 should be dead");
-                    f.edge(n, 0)[].work = f.flowrk;
-                    f.flowrk = f.edge(n, 0);
+                    f.flow_work&.push(f.edge(n, 0));
                 };
             };
         }
-        fn jmp() => {
-            // add this edge to the work list
-            f.edge(n, 0)[].work = f.flowrk;
-            f.flowrk = f.edge(n, 0);
-        }
+        fn jmp() => f.flow_work&.push(f.edge(n, 0));
         fn hlt() => ();
         @default => @assert(is_ret(b.jmp.type), "bad block terminator for fold");
     };
@@ -325,14 +298,13 @@ fn fold_sel_part1(f: *FoldCtx, isel0: *Qbe.Ins) void = {
 fn initedge(e: *Edge, s: *Qbe.Blk) void = {
     e.dest = if(!s.is_null(), => s.id.bitcast(), => -1);
     e.dead = true;
-    e.work = Edge.ptr_from_int(0);
 }
 
 fn renumber(f: *FoldCtx, r: *Qbe.Ref) bool = {
     if rtype(r[]) == .RTmp {
-        l := f.val[r[].val()];
-        if l != fold_status_runtime {
-            r[] = CON(l.zext());
+        v := f.val[r[].val()];
+        if v != fold_status_runtime {
+            r[] = CON(v.zext());
             return(true);
         }
     };
@@ -348,8 +320,10 @@ fn opfold(f: *Qbe.Fn, op: Qbe.O, cls: Qbe.Cls, l: i32, r: i32) i32 = {
         return(if(l == r, => l, => fold_status_runtime));
     };
     cl, cr := (f.con.index(l.zext()), f.con.index(r.zext()));
+    if(cl.type != .CBits || cr.type != .CBits, => return(fold_status_runtime));
     
     c := Qbe.Con.zeroed();
+    c.type = .CBits;
     if cls == .Kw || cls == .Kl {
         if foldint(c&, op, cls == .Kl, cl, cr) {
             return(fold_status_runtime);
@@ -380,37 +354,8 @@ BitcastPrim :: @union(s: i64, u: u64, fs: f32, fd: f64, sw: i32, uw: u32);
 fn foldint(res: *Qbe.Con, op: Qbe.O, w: bool, cl: *Qbe.Con, cr: *Qbe.Con) bool = {
     l: BitcastPrim = (s = cl.bits.i);
     r: BitcastPrim = (s = cr.bits.i);
-    res.type = .CBits;
-    @if_else {
-        @if(op == .add) => {
-            if cl.type == .CAddr {
-                if(cr.type == .CAddr, => return(true));
-                res.type = .CAddr;
-                res.sym = cl.sym;
-            } else {
-                if cr.type == .CAddr {
-                    res.type = .CAddr;
-                    res.sym = cr.sym;
-                }
-            }
-        };
-        @if(op == .sub) => {
-            if cl.type == .CAddr {
-                if cr.type != .CAddr {
-                    res.type = .CAddr;
-                    res.sym = cl.sym;
-                } else {
-                    if(!(cl.sym == cr.sym), => return(true));
-                }
-            } else {
-                if(cr.type == .CAddr, => return(true));
-            };
-        };
-        @if(cl.type == .CAddr || cr.type == .CAddr) => return(true);
-        @else => ();
-    };
+
     if (@is(op, .div, .rem, .udiv, .urem)) {
-        return(true); // :TodoAmdFoldOps `TODO: set slot`
         if(iscon(cr, w, 0), => return(true));
         if (@is(op, .div, .rem)) {
             x := if(w, => MIN_i64, => MIN_i32);
@@ -459,7 +404,7 @@ fn foldint(res: *Qbe.Con, op: Qbe.O, w: bool, cl: *Qbe.Con, cr: *Qbe.Con) bool =
         @default => fold_cmp(op, l&, r&).int();
     };
     res.bits = (i = x);
-    return(false)
+    false
 }
 
 Ocmpw :: Qbe.O.ceqw;
@@ -509,8 +454,6 @@ fn fold_cmp(op: Qbe.O, l: *BitcastPrim, r: *BitcastPrim) bool = {
 }
 
 fn foldflt(res: *Qbe.Con, op: Qbe.O, w: bool, cl: *Qbe.Con, cr: *Qbe.Con) void = {
-    @assert(cl.type == .CBits && cr.type == .CBits, "invalid address operand for %", op.get_name());
-    
     // TODO: this is wrong! I can't do real f32 ops on old backends.
     //       so instead i promote them to f64 and then cast the result back. 
     //       which is very similar but i assume not bit-for-bit the same. 
@@ -532,15 +475,14 @@ fn foldflt(res: *Qbe.Con, op: Qbe.O, w: bool, cl: *Qbe.Con, cr: *Qbe.Con) void =
             @assert(cl.bits.i >= 0, "TODO: implement ultof for numbers larger than MAX_i64");
             cl.bits.i.float()
         }
-        fn exts() => cl.bits.s.s.cast(); // w
-        fn truncd() => cl.bits.d; // !w
-        fn cast() => {
+        fn exts()   => cl.bits.s.s.cast(); // w
+        fn truncd() => cl.bits.d;          // !w
+        fn cast()   => {
             res[] = cl[]; // don't touch the bits at all
             return()
         };
         @default => @panic("expected fold_float %", op.get_name());
     };
-    res.type = .CBits;
     if w {
         res.bits.d = x;
     } else {

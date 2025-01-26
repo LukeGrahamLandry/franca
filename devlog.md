@@ -14,6 +14,12 @@ so if you try to make changes in visitins directly instead of waiting until the 
 tried using a jmp instead of cmov in emit() to see if i just had the opcode wrong. didn't help. 
 narrowed the problem down to is_hex_digit getting miscompiled.
 ah! my nice xor to create a zero with smaller encoding clobbers the flags!
+- don't handle symbol add/sub during constant folding. 
+i think it makes more sense to just do it in isel,
+because for arm encoding you might be better off doing the offeset seperately in a memory op. 
+i don't do it all the way correctly yet because you still want to fold them if you're just creating the pointer to pass to someone else. 
+but it generates a couple kb less code already so its not totally garbage which is reassuring. 
+nice to get rid of 30 lines of boring code. 
 
 ## (Jan 21)
 

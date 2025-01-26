@@ -24,7 +24,13 @@ fn amd64_isel(f: *Qbe.Fn) void = {
     f.assign_alloc_slots();
     // In this pass, if `t.slot != -1` then `TMP(t) == addr SLOT(t.slot)`
 
-    /* process basic blocks */
+    @if(NEW_ADDR_FOLDING)
+    for_blocks f { b | 
+        for_insts_forward b { i |
+            collapse_op_amd64(f, i, b.id);
+        };
+    }; 
+    
     for_blocks f { b | 
         f.reset_scratch();
         for_jump_targets b { sb | 
@@ -131,6 +137,20 @@ fn fixarg(r: *Qbe.Ref, k: Qbe.Cls, i: *Qbe.Ins, f: *Qbe.Fn) void = {
         @else => ();
     };
     r[] = r1;
+}
+
+NEW_ADDR_FOLDING :: false;
+
+fn collapse_op_amd64(f: *Qbe.Fn, i: *Qbe.Ins, bid: i32) void = {
+    if(!i.cls().is_int(), => return());
+    if(!@is(i.op(), .add, .mul), => return());
+    r := i.to;
+    mem: Qbe.Addr = (base = r, index = QbeNull, scale = 1, offset = (type = .CBits, bits = (i = 0)));
+    f.merge_amd_addr(mem&);
+    @debug_assert(mem.offset.type != .CAddr || (mem.index == QbeNull && mem.base == QbeNull), "generated illegal addressing mode");
+    if(mem.base == r && mem.index == QbeNull, => return());
+    m := f.newmem(mem);
+    i[] = make_ins(.addr, i.cls(), r, m, QbeNull);
 }
 
 // TODO: this would be better if you did it in the other order and converted everything to lea as a way of memoizing for future uses of the same address. 
@@ -320,6 +340,14 @@ fn seladdr(r: *Qbe.Ref, f: *Qbe.Fn) void = {
     mem.index = QbeNull;
     mem.offset.type = .CBits;
     f.merge_amd_addr(mem&);
+    f.fix_amd_mem(mem&);
+    when_debug(f, .InstSelect) { out |
+        write(out, "\n");
+    };
+    r[] = f.newmem(mem);
+}
+
+fn fix_amd_mem(f: *Qbe.Fn, mem: *Qbe.Addr) void = {
     @debug_assert(mem.offset.type != .CAddr || (mem.index == QbeNull && mem.base == QbeNull), "generated illegal addressing mode");
     
     for (@slice(mem.index&, mem.base&)) { a |
@@ -342,9 +370,6 @@ fn seladdr(r: *Qbe.Ref, f: *Qbe.Fn) void = {
         };
     };
     
-    when_debug(f, .InstSelect) { out |
-        write(out, "\n");
-    };
     ty := mem.offset.type&;
     valid_offset := fits_in_i32(mem.offset.bits.i);
     if !valid_offset {
@@ -358,12 +383,14 @@ fn seladdr(r: *Qbe.Ref, f: *Qbe.Fn) void = {
     if mem.offset.bits.i == 0 && ty[] == .CBits {
         ty[] = .CUndef;
     };
-        
+}
+
+fn newmem(f: *Qbe.Fn, mem: Qbe.Addr) Qbe.Ref #inline = {
     m: i64 = f.nmem.zext();
     f.nmem += 1;
     f.mem&.grow(m + 1);
     f.mem[m] = mem;
-    r[] = MEM(m);
+    MEM(m)
 }
 
 fn fits_in_i32(i: i64) bool = 
@@ -507,32 +534,12 @@ fn sel_inner(i: *Qbe.Ins, f: *Qbe.Fn) void = {
         fn stoui()  => f.sel_ftoi(i, .Ks, .stosi, 0xdf000000);
         fn dtoui()  => f.sel_ftoi(i, .Kd, .dtosi, 0xc3e0000000000000);
         fn nop()    => ();
-        fn dbgloc() => f.sel_emit(i);
-        fn call()   => f.sel_emit(i);
-        fn syscall()   => f.sel_emit(i);
-        fn salloc() => f.sel_emit(i);
-        fn copy()   => f.sel_emit(i);
-        fn add()    => f.sel_emit(i);
-        fn sub()    => f.sel_emit(i);
-        fn neg()    => f.sel_emit(i);
-        fn mul()    => f.sel_emit(i);
-        fn and()    => f.sel_emit(i);
-        fn or()     => f.sel_emit(i);
-        fn xor()    => f.sel_emit(i);
-        fn xtest()  => f.sel_emit(i);
-        fn stosi()  => f.sel_emit(i);
-        fn dtosi()  => f.sel_emit(i);
-        fn swtof()  => f.sel_emit(i);
-        fn sltof()  => f.sel_emit(i);
-        fn exts()   => f.sel_emit(i);
-        fn truncd() => f.sel_emit(i);
-        fn cast()   => f.sel_emit(i);
-        fn asm()    => { f.emit(i[]); }
+        fn asm()    => { f.emit(i[]); } // no fixargs, you're allowed an RCon u32 with the high bit set
+        fn addr() => {
+            @debug_assert(NEW_ADDR_FOLDING, "shouldn't have addr ops yet.");
+            
+        }
         @default => {
-            if is_sel_flag(i.op()) {
-                f.sel_emit(i);
-                return();
-            };
             if is_alloc(i.op()) {
                 salloc(i.to, i.arg&[0], f);
                 return();
@@ -567,24 +574,11 @@ fn sel_inner(i: *Qbe.Ins, f: *Qbe.Fn) void = {
             if iscmp(i.op(), kc&, x&) {
                 xx := @as(Qbe.Cmp) x;
                 @match(xx) {
-                    fn Cfeq() => {
-                        /* zf is set when operands are
-                        * unordered, so we may have to
-                        * check pf
-                        */
-                        r0 := f.newtmp("isel", .Kw);
-                        r1 := f.newtmp("isel", .Kw);
-                        f.emit(.and, .Kw, i.to, r0, r1);
-                        f.emit(.flagfo, k, r1, QbeNull, QbeNull);
-                        i.to = r0;
-                    }
-                    fn Cfne() => {
-                        r0 := f.newtmp("isel", .Kw);
-                        r1 := f.newtmp("isel", .Kw);
-                        f.emit(.or, .Kw, i.to, r0, r1);
-                        f.emit(.flagfuo, k, r1, QbeNull, QbeNull);
-                        i.to = r0;
-                    }
+                    /* zf is set when operands are
+                     * unordered, so we may have to
+                     * check pf */
+                    fn Cfeq() => emit_check_order_flag(f, i, .and, .flagfo);
+                    fn Cfne() => emit_check_order_flag(f, i, .or, .flagfuo);
                     @default => ();
                 };
                 swap := cmpswap(i.arg&, x);
@@ -596,9 +590,20 @@ fn sel_inner(i: *Qbe.Ins, f: *Qbe.Fn) void = {
                 selcmp(i.arg&.items(), kc, swap, f);
                 return();
             };
-            @panic("unknown instruction %", i.op().get_name());
+            
+            valid := is_sel_flag(i.op()) || @is(i.op(), .dbgloc, .call, .syscall, .salloc, .copy, .add, .sub, .neg, .mul, .and, .or, .xor, .xtest, .stosi, .dtosi, .swtof, .sltof, .exts, .truncd, .cast);
+            @debug_assert(valid, "unknown instruction %", i.op());
+            f.sel_emit(i);
         };
     }
+}
+
+fn emit_check_order_flag(f: *Qbe.Fn, i: *Qbe.Ins, merge: Qbe.O, flag: Qbe.O) void = {
+    r0 := f.newtmp("isel", .Kw);
+    r1 := f.newtmp("isel", .Kw);
+    f.emit(merge, .Kw, i.to, r0, r1);
+    f.emit(flag, i.cls(), r1, QbeNull, QbeNull);
+    i.to = r0;
 }
 
 fn sel_emit(f: *Qbe.Fn, i: *Qbe.Ins) void = {

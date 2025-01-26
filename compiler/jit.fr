@@ -30,7 +30,7 @@ fn call_dynamic_values(self: *SelfHosted, f_ptr: i64, f_ty: FnType, args_value: 
             m := self.comptime_codegen.m;
             @if(use_threads) {
                 zone := zone_begin(.Wait);
-                while => !symbol_is_ready(m, it[]) {
+                while => !symbol_is_ready(self.comptime_codegen, it[]) {
                     pthread_cond_signal(self.comptime_codegen.bouba_progress_c&);
                     wait(self.comptime_codegen, true);
                 };
@@ -72,6 +72,17 @@ fn call_dynamic_values(self: *SelfHosted, f_ptr: i64, f_ty: FnType, args_value: 
         self.call_depth -= 1;
     }; 
     result
+}
+
+fn symbol_is_ready(shared: *CodegenShared, s: u32) bool #inline = {
+    mu := shared.progress_m&;
+    pthread_mutex_lock(mu).unwrap();
+    r := false;
+    use_symbol(shared.m, s) { s |
+        r = s.size != 0 || (s.kind != .Local && !s.jit_addr.is_null());
+    };
+    pthread_mutex_unlock(mu).unwrap();
+    r
 }
 
 // Creates a function with the signeture (arg_array: *u8, ret_array: *u8, callee: fnptr) -> void.
@@ -460,10 +471,10 @@ fn get_fn_callable(self: *SelfHosted, fid: FuncId) ?rawptr = {
     };
     if use_threads {
         self.update_pending_took_pointer();
-        if TRACE_SHIMS && !symbol_is_ready(m, id) {
-            @println("waiting for %", self.log_name(fid));
-        };
-        cond :: => @if(GENERATION, func.generation > self.comptime_codegen.generation, !symbol_is_ready(m, id));
+        //if TRACE_SHIMS && !symbol_is_ready(m, id) {
+        //    @println("waiting for %", self.log_name(fid));
+        //};
+        cond :: => @if(GENERATION, func.generation > self.comptime_codegen.generation, !symbol_is_ready(self.comptime_codegen, id));
         
         zone := zone_begin(.Wait);
         while cond { 

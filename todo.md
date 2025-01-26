@@ -7,6 +7,11 @@
 
 ##
 
+- backend fails_typecheck make sure sel0:sel1 and blit0:blit1
+- fold.fr:
+//!     TODO: I think it would be much faster if the frontend just tracked what 
+//!           should be constant, and only materialized it upon seeing a 
+//!           non-arithmetic #fold, and otherwise just defer until the backend.  
 - is :jnz_is_Kw really what i want the semantic to be?
 - auto #fold functions returning StructLiteralP (same as already do for Value).
 ie. `fn init() Self = (arr = @as(Slice(Entry)) empty(), len_including_tombstones = 0, capacity = 0);`
