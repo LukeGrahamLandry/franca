@@ -23,7 +23,7 @@
 fn amd64_isel(f: *Qbe.Fn) void = {
     f.assign_alloc_slots();
     // In this pass, if `t.slot != -1` then `TMP(t) == addr SLOT(t.slot)`
-
+    
     @if(NEW_ADDR_FOLDING)
     for_blocks f { b | 
         for_insts_forward b { i |
@@ -147,9 +147,17 @@ fn collapse_op_amd64(f: *Qbe.Fn, i: *Qbe.Ins, bid: i32) void = {
     r := i.to;
     mem: Qbe.Addr = (base = r, index = QbeNull, scale = 1, offset = (type = .CBits, bits = (i = 0)));
     f.merge_amd_addr(mem&);
+    when_debug(f, .InstSelect) { out |
+        write(out, "\n");
+    };
     @debug_assert(mem.offset.type != .CAddr || (mem.index == QbeNull && mem.base == QbeNull), "generated illegal addressing mode");
-    if(mem.base == r && mem.index == QbeNull, => return());
+    if(mem.base == r && mem.index == QbeNull && mem.offset.bits.i == 0, => return());
+    //if mem.base == QbeNull && mem.index == QbeNull && mem.offset.type == .CUndef {
+    //    printfn(f, f.globals.debug_out);
+    //};
+    chuse(r, 1, f);  // because merge_amd_addr -1
     m := f.newmem(mem);
+    chuse(m, 1, f);
     i[] = make_ins(.addr, i.cls(), r, m, QbeNull);
 }
 
@@ -209,14 +217,7 @@ fn merge_amd_addr(f: *Qbe.Fn, mem: *Qbe.Addr) void = {
                             continue();
                         };
                         
-                        s := rslot(mem.index, f);
-                        if s != -1 {
-                            if mem.scale == 1 {
-                                mem.index = SLOT(s);  // address of a stack slot
-                            } else {
-                                @eprintln("scaling stack slot");
-                            };
-                        };
+                        f.fix_slot(mem.index&);
                         return();
                     };
                     if f.get_int(a0) { off |
@@ -242,6 +243,23 @@ fn merge_amd_addr(f: *Qbe.Fn, mem: *Qbe.Addr) void = {
                     if mem.scale == 1 {
                         t := mem.base; mem.base = mem.index; mem.index = t;
                         goto_index();
+                    };
+                }
+                fn addr() => {
+                    m := f.get_memory(a0);
+                    if mem.index == QbeNull {
+                        if mem.offset.bits.i == 0 && mem.offset.type != .CAddr {
+                            chuse(mem.base, -1, f);
+                            mem[] = m[];
+                            continue();
+                        };
+                    };
+                    if m.index == QbeNull && mem.offset.type != .CAddr {
+                        chuse(mem.base, -1, f);
+                        mem.offset.type = m.offset.type;
+                        mem.offset.bits.i += m.offset.bits.i;
+                        mem.base = m.base;
+                        continue();
                     };
                 }
                 @default => ();
@@ -297,6 +315,9 @@ fn merge_amd_addr(f: *Qbe.Fn, mem: *Qbe.Addr) void = {
                 fn mul() => {
                     if rtype(a0) == .RTmp {
                         t := a0; a0 = a1; a1 = t; 
+                        if rtype(a0) == .RTmp {
+                            goto_done();
+                        };
                     };
                     if f.get_int(a0) { arg |
                         if s == 1 && (arg == 1 || arg == 2 || arg == 4 || arg == 8) {
@@ -312,12 +333,20 @@ fn merge_amd_addr(f: *Qbe.Fn, mem: *Qbe.Addr) void = {
             };
         };
         
-        s := rslot(mem.base, f);
-        if s != -1 {
-            mem.base = SLOT(s);
+        f.fix_slot(mem.base&);
+        if mem.base == QbeNull && mem.scale == 1 {
+            mem.base = mem.index;
+            mem.index = QbeNull;
         };
         return();
     }
+}
+
+fn fix_slot(f: *Qbe.Fn, r: *Qbe.Ref) void = {
+    s := rslot(r[], f);
+    if s != -1 {
+        r[] = SLOT(s);
+    };
 }
 
 fn is_symbol(f: *Qbe.Fn, r: Qbe.Ref) bool = 
@@ -334,15 +363,24 @@ fn seladdr(r: *Qbe.Ref, f: *Qbe.Fn) void = {
             return();
         };
     };
-    mem := Qbe.Addr.zeroed();
-    mem.base = r[];
-    mem.scale = 1;
-    mem.index = QbeNull;
-    mem.offset.type = .CBits;
-    f.merge_amd_addr(mem&);
-    f.fix_amd_mem(mem&);
-    when_debug(f, .InstSelect) { out |
-        write(out, "\n");
+    mem: Qbe.Addr = (base = r[], index = QbeNull, scale = 1, offset = (type = .CBits, bits = (i = 0)));
+    if NEW_ADDR_FOLDING {
+        if mem.base.rtype() == .RTmp {
+            def := f.get_temporary(mem.base)[].def;
+            if !def.is_null() && def.op() == .addr && def.arg&[0].rtype() == .RMem {
+                chuse(mem.base, -1, f);
+                mem = f.get_memory(def.arg&[0])[];
+                chuse(mem.base, 1, f);
+                chuse(mem.index, 1, f);
+            };
+        };
+        f.fix_amd_mem(mem&);
+    } else {
+        f.merge_amd_addr(mem&);
+        f.fix_amd_mem(mem&);
+        when_debug(f, .InstSelect) { out |
+            write(out, "\n");
+        };
     };
     r[] = f.newmem(mem);
 }
@@ -357,7 +395,7 @@ fn fix_amd_mem(f: *Qbe.Fn, mem: *Qbe.Addr) void = {
             a[] = r0;
         };
         
-        @debug_assert_eq(rslot(a[], f), -1, "unfixed stack slot after address matching");
+        f.fix_slot(a); 
     };
     
     base_val := mem.base.rsval();
@@ -484,7 +522,7 @@ fn selsel_amd64(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) *Qbe.Ins = {
 }
 
 fn sel(i: Qbe.Ins, f: *Qbe.Fn) void = {
-    if(try_kill_inst(f, i&), => return());
+    if(try_kill_inst(f, i&), => return());  // TODO
     
     i0 := f.globals.curi[]; // :LookAtLastInst
     sel_inner(i&, f);
@@ -537,7 +575,14 @@ fn sel_inner(i: *Qbe.Ins, f: *Qbe.Fn) void = {
         fn asm()    => { f.emit(i[]); } // no fixargs, you're allowed an RCon u32 with the high bit set
         fn addr() => {
             @debug_assert(NEW_ADDR_FOLDING, "shouldn't have addr ops yet.");
-            
+            i := f.emit(i[]);
+            m := f.get_memory(i.arg&[0]);
+            f.fix_amd_mem(m);
+            if m.base == QbeNull && m.index == QbeNull {
+                r := f.newcon(m.offset&);
+                i.arg&[0] = r;
+                i.set_op(.copy);
+            };
         }
         @default => {
             if is_alloc(i.op()) {

@@ -908,3 +908,38 @@ fn get_from_pattern(e: *FatExpr, name: Symbol) ?*FatExpr = {
     };
     .None
 }
+
+fn generic_match(arg: FatExpr) FatExpr #macro = {
+    e := arg&.items();
+    @ct_assert(e.len == 2, arg.loc, "@generic_match expected (value, fn(_) => body)"); 
+    value, body := (compile_ast(e[0]), e[1]);
+    type := value.ty;
+    info := get_type_info_ref(type);
+    @if_let(info) fn Ptr(t) => { // TODO: require
+        type = t[];
+        info = get_type_info_ref(type);
+    };
+    @ct_assert(info.is(.Tagged), arg.loc, "@generic_match expected @tagged type"); 
+    @{
+        arg_ptr := @[value];
+        :: tagged(@[@literal type]);
+        tag_val := arg_ptr.tag().raw();
+        @[{
+            default := @{ unreachable() };
+            
+            cases := Ty(i64, FatExpr).list(info.Tagged.cases.len, ast_alloc());
+            enumerate info.Tagged.cases { i, case |
+                case_access := @{ arg_ptr.___ };
+                case_access := case_access.expr.Block.result[];
+                case_access.expr.FieldAccess.name = case._0; 
+                //if is_ptr {
+                    case_access = @{ @[case_access]& };
+                    case_access = case_access.expr.Block.result[];
+                //};
+                case := (i, @{ @[body](@[case_access]) } );
+                cases&.push(case);
+            };
+            make_switch(@{ tag_val }, default, cases)
+        }]
+    }
+}

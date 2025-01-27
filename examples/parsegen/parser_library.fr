@@ -1,0 +1,385 @@
+// Based on Wilf Lalonde's compiler construction course. 
+
+ENABLE_DEBUG_SPAM :: true; 
+fn debug_log(arg: FatExpr) FatExpr #macro = 
+    if(ENABLE_DEBUG_SPAM, => println(arg), => @{});
+
+VirtualTree :: @rec @tagged(
+    Tree: @struct(label: Str, children: RawList(*VirtualTree)),
+    Token: Token,
+);
+Token :: @struct(label: Str, symbol: Str);
+
+fn display(self: *VirtualTree, out: *List(u8)) void = {
+    inner :: fn(self: *VirtualTree, out: *List(u8), depth: i64) void = {
+        push_rep(out, "    ", depth);    ::AutoFmt(Token);
+        @match(self) {
+            fn Token(it) => @fmt(out, "%", it);
+            fn Tree(it) => {
+                @fmt(out, "%", it.label);
+                each(it.children&, fn(it) => inner(it, out, depth + 1);
+            }
+        };
+    };
+    inner(self, out, 0);
+}
+
+Table :: @tagged(
+    ScannerReadaheadTable: ScannerReadaheadTable,
+    SemanticTable: SemanticTable,
+    ShiftbackTable: ShiftbackTable,
+    ReadaheadTable: ReadaheadTable,
+);
+
+fn run(self: *Table, transducer: DynTransducer) Result(i64, TransducerError) = 
+    @generic_match(self, fn(it) => run(it, transducer));
+
+ScannerReadaheadTable :: @struct(transitions: RawHashMap(i64, Ty(ParserAttributeList, i64)));
+
+TransducerError :: @tagged(
+    DesignError:  Str,
+    LexicalError: Str,
+    SyntaxError:  Str,
+    InvalidAction: Str,
+);
+
+TransducerVTable :: @struct(
+    // the main transducer is responsible for forwarding to its sponsor if it doesn't understand the message. 
+    perform_action: @FnPtr(self: rawptr, action: Str, parameters: []Str) Result(void, TransducerError), 
+);
+DynTransducer :: @struct(data: rawptr, vtable: *TransducerVTable);
+
+fn run(self: *ScannerReadaheadTable, transducer: DynTransducer) Result(i64, TransducerError) = {
+    scanner := Scanner.ptr_from_raw(transducer.data);
+    c := scanner.peek_input(); 
+    @debug_log("\t peeked at %", c);
+    attributes, goto := self.transitions.get(c) || {
+        return(Err = (LexicalError = @tfmt("ScannerReadAhead could not find transition for char %", c)))
+    }; 
+    @debug_log("\t\t transition for % -> %", c, pair);
+    if(!attributes.is_read, => return(Ok = goto));
+    if attributes.is_keep {
+        @debug_assert_lt(c, 256, "invalid ascii char");
+        scanner.kept_characters&.push(c.trunc()); 
+    };
+    scanner.discard_input();
+    (Ok = goto)
+}
+
+SemanticTable :: @struct(action: Str, parameters: []Str, goto: i64);
+
+fn run(self: *SemanticTable, transducer: DynTransducer) Result(i64, TransducerError) = {
+    @debug_log("\t semantic table has to run %(%)", action, parameters);
+    @try((transducer.vtable.perform_action)(transducer.data, action, parameters)) return;
+    (Ok = goto) 
+}
+
+ReadaheadTable :: @struct(transitions: RawHashMap(i64, Ty(ParserAttributeList, i64)));
+
+fn run(self: *ReadaheadTable, transducer: DynTransducer) Result(i64, TransducerError) = {
+    p := Parser.ptr_from_raw(transducer.data);
+    token := p.peek_scanner_token();
+    attributes, goto := self.transitions.get(token.label) || {
+        return(Err = (SyntaxError = @tfmt("% not allowed", token.label)))
+    };
+    if(!attributes.is_read, => return(goto));
+    p.discard_scanner_token();
+    if attributes.is_Stack {
+        p.token_stack&.push(token);
+        p.table_number_stack&.push(goto);
+        p.tree_stack&.push(if(attributes.is_node, => (Some = token), => .None));
+        p.right = p.tokenStack.count - 1;
+        p.left = p.right + 1;
+    };
+    @debug_log("\tleft: %, right: %", parser.left, parser.right);
+    @debug_log("\t\ttransition for % to %", token.label, goto);
+    (Ok = goto)
+}
+
+ReadbackTable :: @struct(transitions: RawHashMap(Ty(Str, i64), Ty(ParserAttributeList, i64)));
+
+fn run(self: *ReadaheadTable, transducer: DynTransducer) Result(i64, TransducerError) = {
+    p     := Parser.ptr_from_raw(transducer.data);
+    label := p.token_stack[p.left - 1].label;
+    state := p.table_number_stack[p.left - 1];
+    key   := (label, state);
+    attributes, goto := self.transitions.get(key) || {
+        return(Err = (DesignError = @tfmt("Incorrect readback tables. Missing transition for % RA % from (TODO)", label, state)))
+    };
+    if attributes.is_read {
+        parser.left -= 1;
+    };
+    @debug_log("\tleft: %, right: %", parser.left, parser.right);
+    (Ok = goto)
+}
+
+ShiftbackTable :: @struct(shift: i64, goto: i64);
+
+fn run(self: *ShiftbackTable, transducer: DynTransducer) Result(i64, TransducerError) = {
+    parser := Parser.ptr_from_raw(transducer.data);
+    parser.left = parser.left - shift;
+    @debug_log("\tleft: %, right: %", parser.left, parser.right);
+    (Ok = goto) 
+}
+
+ReduceTable :: @struct(nonterminal: Str, transitions: RawHashMap(Int, Ty(ParserAttributeList, Int)));
+
+fn run(self: *ReduceTable, transducer: DynTransducer) Result(i64, TransducerError) = {
+    p := Parser.ptr_from_raw(transducer.data);
+    @debug_log("Reduce to %", self.nonterminal);
+    
+    /* pick up the new tree */
+    ::if_opt(DeferredTree, ?VirtualTree);
+    tree: ?VirtualTree = if p.tree_builder { action | 
+        // We've already queued a tree to build from a semantic action. 
+        ::AutoFmt(@type action);
+        @debug_log("Reduce deferred %", action);
+        @debug_assert(parser.new_tree&.is_none(), "ReduceTable stomped an existing tree");
+        t := @match(action) {
+            fn Tree(label)    => p.build_tree(label);
+            fn TreeIndex(idx) => p.build_tree_from_index(idx);
+        };
+        p.tree_builder = .None;
+        t
+    } else {
+        // We expect 0 or 1 trees to exist in the range. 
+        @debug_log("\tArray of size % - [% ~ %]", p.tree_stack.len, p.left, p.right);
+        t: ?VirtualTree = .None;
+        stack := p.tree_stack.slice(p.left, p.right + 1);
+        each stack { it |
+            continue :: local_return;
+            it.is_some() || continue();
+            t&.is_none() || return(Err = (DesignError = "incorrect reduce table; more than one child in tree"));
+            t = it[];
+        };
+        t
+    };
+    @debug_log("Reduce to % building tree %", self.nonterminal, tree);
+    
+    /* clear the stacks */
+    remove_count := p.right - p.left + 1;
+    p.token_stack.len        -= remove_count;
+    p.table_number_stack.len -= remove_count;
+    p.tree_stack.len         -= remove_count;
+        
+    /* simulate a readahead of A as a token */
+    @debug_log("Found % -> %", attributes, goto);
+    if attributes.is_stack {
+        p.token_stack&.push(label = self.nonterminal, symbol = self.nonterminal);
+        p.table_number_stack&.push(goto);
+        p.tree_stack&.push(if(attributes.is_node, => tree, => .None));
+        @debug_log("\ttoken added to the stack is <%: %>", self.nonterminal, self.nonterminal);
+    };
+    p.right = p.tree_stack.len - 1;
+    p.left = p.right + 1;
+    @debug_log("\tleft: %, right: %", p.left, p.right);
+    (Ok = goto)
+}
+
+AcceptTable :: @struct();
+
+// tables are 1-indexed like in smalltalk. This special value represents reaching the end.
+fn run(self: *AcceptTable, transducer: DynTransducer) Result(i64, TransducerError) = 
+    0;
+
+//A proper screener would replace the symbol part by a unique string
+//so that future tests for equality could be done via identity instead
+fn screen(keywords: []Str, token: Token) Token = @if_else {
+    //Older name is #Identifier and newer name is #walkIdentifier
+    @if(!(token.label == "Identifier" || token.label == "walkIdentifier")) => token;
+    //An identifer in the list of keywords is converted to that keyword.
+    @if(!keywords.contains(token.symbol)) => token;
+    @else => (label = token.symbol, symbol = token.symbol);
+};
+
+Scanner :: @struct(
+    input: Str, 
+    token: ?Token, 
+    kept_characters: RawList(u8) = empty(), 
+    start := 0, 
+    current := 0,
+    tables: []Table,
+);
+
+fn perform_action(self: *Scanner, action: Str, parameters: []Str) bool = @switch(action) {
+    @case("buildToken") => {
+        self.build_token(parameters[0]);
+        true
+    };
+    @case("syntaxError") => {  // TODO: this needs to return a result clearly 
+        @println("Syntax error: %", parameters[0]);
+        true
+    };
+    @default => false;
+}
+
+fn is_at_end(self: *Scanner) bool =
+    self.current == self.input.len;
+
+fn scan_tokens(self: *Scanner, text: Str) void = {
+    self.input = text;
+    self.token = .None;
+    self.kept_characters&.clear();
+    self.start = 0;
+    self.current = 0;
+    self&.discard_token();
+}
+
+fn build_token(self: *Scanner, label: Str) void = {
+    s := kept_characters.items().clone_into(temp());
+    self.token = (Some = (label = label, symbol = s));
+    @debug_log("\tbuildToken %: %", label, self.kept_characters.items());
+    self.kept_characters&.clear(); // prep for the next one
+}
+
+fn discard_input(self: *Scanner) void = {
+    self.current += 1;
+}
+
+/* Set token to nil
+ * Execute tables in a loop starting with table1 until token is no longer nil
+ * Somewhere during this execution, the semantic action buildToken
+ * will execute putting something into variable 'token' */
+fn discard_token(self: *Scanner) Result(void, TransducerError) = {
+    @debug_log("----> Running discardToken");
+    idx := 1;
+    self.token = .None;
+    while => self.token&.is_none() {
+        table := self.tables.index(idx - 1);
+        @debug_log("Scanner % % is running...\n", table.tag(), idx);
+        idx = @try(run(table, self)) return;
+        if(idx == 0, => return(Err = (DesignError = "discardToken reached AcceptTable")));
+    };
+    @debug_log("----> Token \(token!) has been created... exiting discardToken");
+    .Ok
+}
+
+fn peek_input(self: *Scanner) i64 =
+    if(current == input.len, => 256, => input[current].zext()); 
+
+fn peek_token(self: *Scanner) Token = 
+    self.token.expect("a token to be present");
+
+DeferredTree :: @tagged(Tree: Str, TreeIndex: i64);
+
+Parser :: @struct(
+    sponsor: DynTransducer,
+    scanner: Scanner,
+    screener: Screener,
+    keywords: []Str,
+    token_stack: List(Token),
+    table_number_stack: List(i64),
+    tree_stack: List(?VirtualTree),
+    left: i64,
+    right: i64,
+    new_tree: ?VirtualTree,
+    tree_builder: ?DefferedTree,
+);
+
+fn reset(self: *Parser) void = {
+    self.token_stack&.clear();
+    self.token_stack&.push(label = "|-", symbol = "|-");
+    self.table_number_stack&.clear();
+    self.table_number_stack&.push(1);
+    self.tree_stack&.clear();
+    self.tree_stack&.push(.None);
+    self.left = 0;
+    self.right = 0;
+    self.new_tree = .None;
+    self.tree_builder = .None;
+}
+    
+fn perform_action(self: *Parser, action: Str, parameters: [] Str) Result(void, TransducerError) = @switch(action) {
+    @case("buildTree") => {
+        @debug_assert(self.tree_builder.is(.None), "mistake? discarded tree_builder");
+        self.tree_builder = (Tree = parameters[0]);
+        .Ok
+    };
+    @case("buildTreeFromIndex") => {
+        //Index is (+1,+2,+3... => label is in the token relative to the leftend; i.e., to the right of left end.
+        //Index is (-1,-2,-3... => label is in the token relative to the rightend; i.e., to the left of right end.
+        @debug_assert(self.tree_builder.is(.None), "mistake? discarded tree_builder");
+        self.tree_builder = (Index = parameters[0].parse_int());
+        treeBuilder = DeferredTree.treeIndex(index);
+        .Ok
+    };
+    @default => (InvalidAction = action);
+};
+
+Tables :: @struct(
+    parser: []Table,
+    scanner: []Table,
+    keywords: []Str,
+);
+
+fn init(self: *Parser, sponsor: DynTransducer, tables: Tables, a: Alloc) void = {
+    self.tables = tables.parser;
+    self.scanner = (tables.scanner);
+    self.sponsor = sponsor;
+    self.screener = (tables.keywords);
+    self.token_stack = list(a);
+    self.table_number_stack = list(a);
+    self.tree_stack = list(a);
+    self.reset();
+}
+
+fn parse(text: String) Result(VirtualTree TransducerError) = {
+    self.scanner&.scan_tokens(text);
+    idx         := 1;
+    table_count := 0;
+    while => idx != 0 {  // AcceptTable is the only one that returns 0
+        table_count += 1;
+        table := self.tables.index(idx - 1);
+        @debug_log("Parser % % is running...\n", table.tag(), idx);
+        idx = @try(run(table, self)) return;
+    };
+    @debug_log("Ran % tables.", table_count);
+    self.tree_stack&.last().expect("a top level tree")
+}
+
+/* Pick up the children from the tree stack between left and right inclusively
+ * (provided they are not nil) and build a tree with the given label
+ * Store it in instance newTree so a reduce table can use it */
+fn build_tree(self: *Parser, root_label: Str) VirtualTree = {
+    if self.left > self.right {
+        (label = rootLabel, children = empty())
+    } else {
+        let range = left...right 
+        let children = self.tree_stack[range].compactMap{ $0 } // Picks up each non-nil object
+        (label = rootLabel, children = children)
+    }
+}
+    
+/* Index is (+1,+2,+3... => label is in the token relative to the left-end; i.e., to the right of left end.
+ * Index is (-1,-2,-3... => label is in the token relative to the right-end; i.e., to the left of right end.
+ * Pick up the children from the tree stack between left and right inclusively
+ * (provided they are not nil) and build a tree with the label in the token specified by index.
+ * Store it in instance newTree so a reduce table can use it */
+fn build_tree_from_index(self: *Parser, i: i64) VirtualTree = {
+    children := self.tree_stack.slice(self.left, self.right + 1).compactMap{ $0 } // Picks up each non-nil object
+    i := if(i > 0, => left + i - 1, => right + i + 1);
+    label := self.token_stack[i].symbol;
+    (label = label, children = children)
+}
+    
+fn discard_scanner_token() void = 
+    scanner.discard_token();
+
+fn peek_scanner_token() Token = {
+    token := screener.screen(scanner.peek_token())
+    @debug_log("\t\tpeekScannerToken for %", token);
+    token
+}
+
+ParserAttributeList :: @struct(is_read: bool, is_stack: bool, is_keep: bool, is_node: bool);
+
+fn display(self: *ParserAttributeList, out: *List(u8)) void = {
+    if !self.is_read {
+        out.push_all("L");
+        return();
+    };
+    out.push_all("R");
+    if(self.is_stack, => out.push_all("S"));
+    if(self.is_keep,  => out.push_all("K"));
+    if(self.is_node,  => out.push_all("N"));
+}
