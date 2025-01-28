@@ -27,8 +27,11 @@ fn display(self: *VirtualTree, out: *List(u8)) void = {
 Table :: @tagged(
     ScannerReadaheadTable: ScannerReadaheadTable,
     SemanticTable: SemanticTable,
-    ShiftbackTable: ShiftbackTable,
+    ShiftbackTable: ShiftbackTable,  // i don't generate these yet
     ReadaheadTable: ReadaheadTable,
+    ReadbackTable: ReadbackTable,
+    AcceptTable: AcceptTable,
+    ReduceTable: ReduceTable,
 );
 
 fn run(self: *Table, transducer: DynTransducer) Result(i64, TransducerError) = 
@@ -74,7 +77,7 @@ fn run(self: *SemanticTable, transducer: DynTransducer) Result(i64, TransducerEr
     (Ok = goto) 
 }
 
-ReadaheadTable :: @struct(transitions: RawHashMap(i64, Ty(ParserAttributeList, i64)));
+ReadaheadTable :: @struct(transitions: RawHashMap(Str, Ty(ParserAttributeList, i64)));
 
 fn run(self: *ReadaheadTable, transducer: DynTransducer) Result(i64, TransducerError) = {
     p := Parser.ptr_from_raw(transducer.data);
@@ -122,7 +125,7 @@ fn run(self: *ShiftbackTable, transducer: DynTransducer) Result(i64, TransducerE
     (Ok = goto) 
 }
 
-ReduceTable :: @struct(nonterminal: Str, transitions: RawHashMap(Int, Ty(ParserAttributeList, Int)));
+ReduceTable :: @struct(nonterminal: Str, transitions: RawHashMap(i64, Ty(ParserAttributeList, i64)));
 
 fn run(self: *ReduceTable, transducer: DynTransducer) Result(i64, TransducerError) = {
     p := Parser.ptr_from_raw(transducer.data);
@@ -176,7 +179,7 @@ fn run(self: *ReduceTable, transducer: DynTransducer) Result(i64, TransducerErro
     (Ok = goto)
 }
 
-AcceptTable :: @struct();
+AcceptTable :: @struct(_hack := 0);  // TODO: fixme (AcceptTable = ()) when this is empty, also .AcceptTable should work
 
 // tables are 1-indexed like in smalltalk. This special value represents reaching the end.
 fn run(self: *AcceptTable, transducer: DynTransducer) Result(i64, TransducerError) = 
@@ -382,4 +385,19 @@ fn display(self: *ParserAttributeList, out: *List(u8)) void = {
     if(self.is_stack, => out.push_all("S"));
     if(self.is_keep,  => out.push_all("K"));
     if(self.is_node,  => out.push_all("N"));
+}
+
+fn from_string(s: Str) ParserAttributeList = {
+    self := ParserAttributeList.zeroed();
+    for s { s |
+        @switch(s) {
+            @case("L".ascii()) => { self.is_read = false; };
+            @case("R".ascii()) => { self.is_read = true; };
+            @case("N".ascii()) => { self.is_node = true; };
+            @case("S".ascii()) => { self.is_stack = true; };
+            @case("K".ascii()) => { self.is_keep = true; };
+            @default => @panic("invalid character % for attribute list", s);
+        };
+    };
+    self
 }

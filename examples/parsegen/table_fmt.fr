@@ -1,0 +1,196 @@
+fn load_tables(e: FatExpr) FatExpr #macro = {
+    fn load();
+    :: {
+        simple_load :: fn($T: Type) void = {
+            fn load(e: *FatExpr) T = 
+                const_eval(T)(e[]);
+        };
+        simple_load(i64);
+        simple_load(Str);
+        pair_load :: fn($A: Type, $B: Type) void = {
+            fn load(e: *FatExpr) Ty(A, B) = 
+                (e.items().index(0).load(), e.items().index(1).load());
+        };
+        pair_load(ParserAttributeList, i64);
+        pair_load(Str, i64);
+        fn load(e: *FatExpr) ParserAttributeList = {
+            e := e.ident() || compile_error("expected an ident for ParserAttributeList", e.loc);
+            from_string(e.str())
+        }
+        load_map :: fn($K: Type, $V: Type) void = {
+            fn load(e: *FatExpr) RawHashMap(K, V) = {
+                out: HashMap(K, V) = init(ast_alloc());
+                each e.items() { e |  // (K, V)
+                    if !e.is_raw_unit() {  // HACK (single element tuples are flattened)
+                        e := e.items();
+                        key:   K = load(e.index(0));
+                        value: V = load(e.index(1));
+                        out&.insert(key, value);
+                    };
+                };
+                out.raw
+            }
+        };
+        load_map(Str, Ty(ParserAttributeList, i64));
+        load_map(i64, Ty(ParserAttributeList, i64));
+        load_map(Ty(Str, i64), Ty(ParserAttributeList, i64));
+        AutoHash(Ty(Str, i64), TrivialHasher);
+        AutoEq(Ty(Str, i64));
+    };
+    
+    out := Table.list(ast_alloc());
+    loc := e.loc;
+    each e&.items() { e |  // (.Type, (...))
+        e := e.items();
+        type := const_eval(Table.Tag())(e[0]);
+        each e.index(1).items() { e |  // (index, (...))
+            continue :: local_return;
+            loc := e.loc;
+            e := e.items();
+            e.len > 1 || continue();  // HACK. tuples of one get flattened so have to put in an extra
+            table_index := const_eval(i64)(e[0]);
+            @ct_assert(table_index == out.len + 1, loc, "incorrect table index");
+            
+            e := e.index(1);
+            ::tagged(Table);
+            table: Table = @match(type) {
+                fn AcceptTable() => (AcceptTable = ());
+                fn ScannerReadaheadTable() => {
+                    K :: i64;
+                    V :: Ty(ParserAttributeList, i64);
+                    out: HashMap(K, V) = init(ast_alloc());
+                    each e.items() { e |  // ([]K, V)
+                        if !e.is_raw_unit() {  // HACK (single element tuples are flattened)
+                            e := e.items();
+                            value: V = load(e.index(1));
+                            keys := e.index(0).items();
+                            each keys { key | 
+                                key: K = load(key);
+                                out&.insert(key, value);
+                            };
+                        };
+                    };
+                    (ScannerReadaheadTable = (transitions = out.raw))
+                }
+                fn SemanticTable() => {
+                    e := e.items();
+                    args := e.index(1).items();
+                    a := Str.list(args.len, ast_alloc());
+                    @if(!e.index(1).is_raw_unit())
+                        each args { e | 
+                            a&.push(const_eval(Str)(e[]))
+                        };
+                    (SemanticTable = (
+                        action = const_eval(Str)(e[0]),  
+                        parameters = a.items(),
+                        goto = const_eval(i64)(e[2]),
+                    ))
+                }
+                fn ShiftbackTable() => compile_error("TODO: support shiftback tables", loc);
+                fn ReadaheadTable() => (ReadaheadTable = (transitions = load(e)));
+                fn ReadbackTable()  => (ReadbackTable = (transitions = load(e)));
+                fn ReduceTable()  => {
+                    e := e.items();
+                    (ReduceTable = (nonterminal = load(e.index(0)), transitions = load(e.index(1))))
+                }
+            };
+            out&.push(table);
+        };
+    };
+    @literal out.items()
+}
+
+fn save_tables_franca(out: *List(u8), tables: []Table) void = {
+    fn save();
+    :: {
+        simple_save :: fn($T: Type) void = {
+            fn save(self: *T, out: *List(u8)) void = 
+                display(self, out);
+        };
+        simple_save(i64);
+        fn save(self: *Str, out: *List(u8)) void = 
+            @fmt(out, "\"%\"", self);
+        simple_save(ParserAttributeList);
+        pair_save :: fn($A: Type, $B: Type) void = {
+            fn save(self: *Ty(A, B), out: *List(u8)) void = {
+                @fmt(out, "(");
+                save(self._0&, out);
+                @fmt(out, ", ");
+                save(self._1&, out);
+                @fmt(out, ")");
+            }
+        };
+        pair_save(ParserAttributeList, i64);
+        pair_save(Str, i64);
+        map_save :: fn($K: Type, $V: Type) void = {
+            fn save(self: *RawHashMap(K, V), out: *List(u8)) = {
+                @fmt(out, "(");
+                prefix := "";
+                each self { k, v |
+                    @fmt(out, "%(", prefix);
+                    save(k&, out);
+                    @fmt(out, ", ");
+                    save(v, out);
+                    @fmt(out, ")");
+                    prefix = ", "
+                };
+                @fmt(out, ")");
+            }
+        };
+        map_save(Str, Ty(ParserAttributeList, i64));
+        map_save(i64, Ty(ParserAttributeList, i64));
+        map_save(Ty(Str, i64), Ty(ParserAttributeList, i64));
+    };
+    
+    last_type := -1;
+    count := 0;
+    enumerate tables { i, table | 
+        {
+            new_type := table.tag().raw();
+            if new_type != last_type {
+                @fmt(out, ")");
+                if last_type != -1 {
+                    if count == 1 {
+                        @fmt(out, ", ()");  // :HACK
+                    };
+                    @fmt(out, "\n)),\n");
+                };
+                count = 1;
+                @fmt(out, "(.%, (\n", table.tag());
+            } else {
+                count += 1;
+                @fmt(out, "), \n");
+            };
+            last_type = new_type;
+        };
+        
+        @fmt(out, "    (%, ", i + 1);
+        prefix := "";
+        @match(table) {
+            fn AcceptTable() => @fmt(out, "()");
+            fn ScannerReadaheadTable()  => {
+                sort :: quicksort(i64, fn(a, b) => a[] <= b[]);
+            }
+            fn SemanticTable(it) => {
+                @fmt(out, "(\"%\", (", it.action);
+                for(it.parameters, fn(it) => @fmt(out, "\"%\"", it));
+                @fmt(out, "), %)", it.goto);
+            }
+            fn ShiftbackTable(it)  => panic("TODO: save ShiftbackTable"); 
+            fn ReadaheadTable(it)  => save(it.transitions&, out);
+            fn ReadbackTable(it)   => save(it.transitions&, out);
+            fn ReduceTable(it)  => {
+                @fmt(out, "(");
+                save(it.nonterminal&, out);
+                @fmt(out, ", ");
+                save(it.transitions&, out);
+                @fmt(out, ")");
+            }
+        };
+    };
+    @fmt(out, ")");
+    if count == 1 {
+        @fmt(out, ", ()");  // :HACK
+    };
+    @fmt(out, "\n))");
+}

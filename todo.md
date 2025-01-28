@@ -7,6 +7,13 @@
 
 ##
 
+- this should work
+```
+A :: @struct();
+B :: @tagged(a: A);
+b: B = (a = ()); 
+b = .a;
+```
 - backend fails_typecheck make sure sel0:sel1 and blit0:blit1
 - fold.fr:
 //!     TODO: I think it would be much faster if the frontend just tracked what 
