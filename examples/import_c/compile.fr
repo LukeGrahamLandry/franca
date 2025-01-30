@@ -1,5 +1,13 @@
 // Adapted from chibicc. MIT License. Copyright (c) 2019 Rui Ueyama
 
+// TODO: i don't understand why assign for a _Atomic doesn't have to do something to flush the cacheline. 
+// TODO: https://github.com/rui314/chibicc/issues/
+//      #153 #141 #138 #110 #107 #99 #86 #84 more...
+//      - https://github.com/fuhsnn/slimcc/issues?q=is%3Aissue+is%3Aclosed+label%3Aupstream-chibicc&page=2
+//      _Static_assert (tho maybe C23 wants to get rid of it)
+
+SPAM :: false;
+
 // Scope for local variables, global variables, typedefs
 // or enum constants
 VarScope :: @struct {
@@ -368,9 +376,8 @@ fn declspec(c: *Ctx, rest: **CC.Token, tok: *CC.Token, attr: ?*VarAttr) *CC.Type
                 };
                 field[] = true;
     
-                count := attr.is_static.int() + attr.is_extern.int() + attr.is_inline.int() + attr.is_tls.int();
-                // TODO: why not >= ?
-                if attr.is_typedef && count > 1 {
+                disallow_typedef := attr.is_static || attr.is_extern || attr.is_inline || attr.is_tls;
+                if attr.is_typedef && disallow_typedef {
                     error_tok(tok, "typedef may not be used together with static, extern, inline, __thread or _Thread_local");
                 };
                 tok = tok.next;
@@ -736,7 +743,7 @@ fn compute_vla_size(c: *Ctx, ty: *CC.Type, tok: *CC.Token) *CC.Node = {
     left  := c.new_var_node(ty.vla_size, tok);
     right := c.new_binary(.ND_MUL, ty.vla_len, base_sz, tok);
     expr  := c.new_binary(.ND_ASSIGN, left, right, tok);
-   c.new_binary(.ND_COMMA, node, expr, tok)
+    c.new_binary(.ND_COMMA, node, expr, tok)
 }
 
 fn new_alloca(c: *Ctx, sz: *CC.Node) *CC.Node = {
@@ -778,7 +785,7 @@ fn declaration(c: *Ctx, rest: **CC.Token, tok: *CC.Token, basety: *CC.Type, attr
         // (e.g. int (*foo)[n][m] where n and m are variables.)
         cur.next = c.new_unary(.ND_EXPR_STMT, c.compute_vla_size(ty, tok), tok);
         cur = cur.next;
-        
+
         if ty.kind == .TY_VLA {
             if(equal(tok, "="), => error_tok(tok, "variable-sized object may not be initialized"));
 
@@ -812,10 +819,10 @@ fn declaration(c: *Ctx, rest: **CC.Token, tok: *CC.Token, basety: *CC.Type, attr
         if(var.ty.size < 0,         => error_tok(ty.name, "variable has incomplete type"));
         if(var.ty.kind == .TY_VOID, => error_tok(ty.name, "variable declared void"));
     };
-
+    
     node := c.new_node(.ND_BLOCK, tok);
     node.body = head.next;
-    rest[] = tok.next;
+    rest[] = tok;  // already ate the semicolon
     node
 }
 
@@ -1332,33 +1339,31 @@ fn write_gvar_data(c: *Ctx, cur: *CC.Relocation, init: *Initializer, ty: *CC.Typ
 
     if(init.expr.is_null(), => return(cur));
 
-    panic("TODO: more write_gvar_data")
-    /*
     if ty.kind == .TY_FLOAT {
-        *(float *)(buf + off) = eval_double(init.expr);
-        return(cur);
+        panic("TODO: eval_double");
+        //*(float *)(buf + off) = eval_double(init.expr);
+        //return(cur);
     };
 
     if ty.kind == .TY_DOUBLE {
-        *(double *)(buf + off) = eval_double(init.expr);
-        return(cur);
+        panic("TODO: eval_double");
+        //*(double *)(buf + off) = eval_double(init.expr);
+        //return(cur);
     };
 
-    char **label = NULL;
-    uint64_t val = eval2(init.expr, &label);
+    val, label := c.eval2(init.expr);
 
-    if (!label) {
-        write_buf(buf + offset, val, ty.size);
-        return(cur);
-    }
+    label := label || {
+        write_buf(buf.ptr.offset(off), val, ty.size.intcast());
+        return(cur)
+    };
 
-    rel := calloc(1, sizeof(Relocation));
-    rel.offset = offset;
+    rel := c.arena.box(CC.Relocation);
+    rel.offset = off.intcast();
     rel.label = label;
     rel.addend = val;
     cur.next = rel;
     cur.next
-    */
 }
 
 // Initializers for global variables are evaluated at compile-time and
@@ -1569,7 +1574,6 @@ fn stmt(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = @match(tok.kind) {
     }
     fn @"{"() => c.compound_stmt(rest, tok.next);
     @default => (if tok.kind == .TK_IDENT && equal(tok.next, ":") {
-        println("label");
         node := c.new_node(.ND_LABEL, tok);
         node.label = tok.str().slow_convert_to_c_string();
         node.unique_label = c.new_unique_name().slow_convert_to_c_string();
@@ -1611,7 +1615,7 @@ fn compound_stmt(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
 
     while => !equal(tok, "}") {
         if c.is_typename(tok) && !equal(tok.next, ":") {
-            @println("type name! %", tok.str());
+            @if(SPAM) @println("type name! %", tok.str());
             attr   := VarAttr.zeroed();
             basety := c.declspec(tok&, tok, (Some = attr&));
             tok = @if_else {
@@ -1643,7 +1647,6 @@ fn expr_stmt(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = if equal(tok,
     rest[] = tok.next;
     c.new_node(.ND_BLOCK, tok)
 } else {
-    println("start expr stmt");
     node := c.new_node(.ND_EXPR_STMT, tok);
     node.lhs = c.parse_expr(tok&, tok, .None);
     rest[] = skip(tok, ";");
@@ -1836,8 +1839,8 @@ fn union_decl(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Type = {
     ty
 }
 
-fn next_is_paren_typename(tok: *CC.Token) bool = 
-    equal(tok.next, "(") && is_typename(tok.next.next);
+fn next_is_paren_typename(c: *Ctx, tok: *CC.Token) bool = 
+    equal(tok.next, "(") && c.is_typename(tok.next.next);
 
 fn parse_typedef(c: *Ctx, tok: *CC.Token, basety: *CC.Type) *CC.Token = {
     comma_sep(tok&, ";") {
@@ -1926,11 +1929,11 @@ fn function(c: *Ctx, tok: *CC.Token, basety: *CC.Type, attr: *VarAttr) *CC.Token
         f.is_inline = attr.is_inline;
         f
     };
-
+    
     f.is_root = !(f.is_static && f.is_inline);
     if(consume(tok&, tok, ";"), => return(tok));
 
-    println("start function body");
+    @if(SPAM) println("start function body");
     c.current_fn = (Some = f);
     c.locals = ptr_from_int(@type c.locals[], 0);
     c.enter_scope();
@@ -2056,11 +2059,10 @@ fn parse(c: *Ctx, tok: *CC.Token) *CC.Obj = {
         attr := VarAttr.zeroed();
         basety := c.declspec(tok&, tok, (Some = attr&));
         tok = @if_else {
-            @if(attr.is_typedef)  => c.parse_typedef(tok, basety);
+            @if(attr.is_typedef)    => c.parse_typedef(tok, basety);
             @if(c.is_function(tok)) => c.function(tok, basety, attr&);
-            @else                 => c.global_variable(tok, basety, attr&);
+            @else                   => c.global_variable(tok, basety, attr&);
         };
-        println("done one");
     };
 
     var := c.globals;
@@ -2101,14 +2103,14 @@ rules :: {
     };
     B :: parse_binary;
     
-    h[.@"+"]  = (infix = B, prec = .Term);
-    h[.@"-"]  = (infix = B, prec = .Term);
-    h[.@"*"]  = (infix = B, prec = .Factor, op = .ND_MUL);
+    h[.@"+"]  = (infix = B, prec = .Term, prefix = unary_plus);
+    h[.@"-"]  = (infix = B, prec = .Term, op = .ND_NEG, prefix = parse_unary);
+    h[.@"*"]  = (infix = B, prec = .Factor, op = .ND_MUL, prefix = unary_star);
     h[.@"/"]  = (infix = B, prec = .Factor, op = .ND_DIV);
     h[.@"%"]  = (infix = B, prec = .Factor, op = .ND_MOD);
     h[.@"|"]  = (infix = B, prec = .BitOr,  op = .ND_BITOR);
     h[.@"^"]  = (infix = B, prec = .BitXor, op = .ND_BITXOR);
-    h[.@"&"]  = (infix = B, prec = .BitAnd, op = .ND_BITAND);
+    h[.@"&"]  = (infix = B, prec = .BitAnd, op = .ND_BITAND, prefix = unary_amp);
     h[.@">>"] = (infix = B, prec = .Shift,  op = .ND_SHR);
     h[.@"<<"] = (infix = B, prec = .Shift,  op = .ND_SHL);
     
@@ -2140,20 +2142,26 @@ rules :: {
     h[.TK_STR]   = (prefix = parse_string, prec = .Primary);
     h[.TK_IDENT] = (prefix = parse_ident,  prec = .Primary);
     
-    h[.@"("] = (prefix = parse_bracketed, infix = postfix, prec = .PostFix);
+    h[.@"("] = (prefix = parse_bracketed, infix = funcall, prec = .PostFix);
     h[.@"?"] = (infix = conditional, prec = .Conditional);
     
-    h[.@"["] = (infix = postfix, prec = .PostFix);
-    h[.@"."] = (infix = postfix, prec = .PostFix);
+    h[.@"["]  = (infix = postfix, prec = .PostFix);
+    h[.@"."]  = (infix = postfix, prec = .PostFix);
     h[.@"->"] = (infix = postfix, prec = .PostFix);
     h[.@"++"] = (infix = postfix, prec = .PostFix);
     h[.@"--"] = (infix = postfix, prec = .PostFix);
-
+    
+    h[.@"!"] = (prefix = parse_unary, op = .ND_NOT);
+    h[.@"~"] = (prefix = parse_unary, op = .ND_BITNOT);
+    
+    h[.sizeof] = (prefix = parse_sizeof);
+    h[._Alignof] = (prefix = parse_alignof);
+    
     h
 };
 
 fn parse_expr(c: *Ctx, rest: **CC.Token, tok: *CC.Token, prec: Prec) *CC.Node = {
-    @println("Prefix: % %", tok.str(), tok.kind);
+    @if(SPAM) @println("Prefix: % %", tok.str(), tok.kind);
 
     rules := rules;  // TODO: shouldn't need to do this but otherwise if can't call the function ?? 
     rule := rules.index(tok.kind);
@@ -2162,18 +2170,26 @@ fn parse_expr(c: *Ctx, rest: **CC.Token, tok: *CC.Token, prec: Prec) *CC.Node = 
     ::enum(@type prec);
     rule := rules.index(tok.kind);
     while => prec.raw() <= rule.prec.raw() {
-        @println("Infix: % %", tok.str(), tok.kind);
+        @if(SPAM) @println("Infix: % %", tok.str(), tok.kind);
         node = (rule.infix)(c, rest, tok, node);
         tok  = rest[];
         rule = rules.index(tok.kind);
     };
-    @println("End Expression: % %", tok.str(), tok.kind);    
+    @if(SPAM) @println("End Expression: % %", tok.str(), tok.kind);    
     node
 }
 
 fn parse_binary(c: *Ctx, rest: **CC.Token, tok: *CC.Token, lhs: *CC.Node) *CC.Node = {
     rule := rules.index(tok.kind);
-    rhs  := parse_expr(c, rest, tok.next, @as(Prec) @as(i32) rule.prec.raw() + 1);
+    prec := rule.prec;
+    
+    // assignment is right associative. everything else is left. 
+    // you can work out why this works on a whiteboard. or you can just trust that this trick works. 
+    if prec != .Assignment {
+        prec = @as(Prec) @as(i32) prec.raw() + 1;  
+    }; 
+    
+    rhs  := parse_expr(c, rest, tok.next, prec);
     @match(tok.kind) {
         fn @"+="()  => return(c.to_assign(c.new_add(lhs, rhs, tok)));
         fn @"-="()  => return(c.to_assign(c.new_sub(lhs, rhs, tok)));
@@ -2204,6 +2220,7 @@ fn parse_logical(c: *Ctx, rest: **CC.Token, tok: *CC.Token, lhs: *CC.Node) *CC.N
 ::if(*CC.Node);
 
 // conditional = logor ("?" expr? ":" conditional)?
+#infix(.@"?", .Conditional)
 fn conditional(c: *Ctx, rest: **CC.Token, tok: *CC.Token, cond: *CC.Node) *CC.Node = {
     if equal(tok.next, ":") {
         // [GNU] Compile `a ?: b` as `tmp = a, tmp ? tmp : b`.
@@ -2225,6 +2242,7 @@ fn conditional(c: *Ctx, rest: **CC.Token, tok: *CC.Token, cond: *CC.Node) *CC.No
     }
 }
 
+#prefix(.@"(")
 fn parse_bracketed(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
     if c.is_typename(tok.next) {
         start := tok;
@@ -2257,13 +2275,14 @@ fn parse_bracketed(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
             node
         } else {
             // just a braketed expression like in math
-            parse_expr(c, tok&, tok, .None)
+            parse_expr(c, tok&, tok.next, .None)
         };
         rest[] = skip(tok, ")");
         node
     }
 }
 
+#prefix(.TK_IDENT)
 fn parse_ident(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
     // Variable or enum constant
     sc := c.find_var(tok);
@@ -2291,12 +2310,14 @@ fn parse_ident(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
     error_tok(tok, "undefined variable")
 }
 
+#prefix(.TK_STR)
 fn parse_string(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
     var := c.new_string_literal(tok.str.str(), tok.ty);
     rest[] = tok.next;
     c.new_var_node(var, tok)
 }
 
+#prefix(.TK_NUM)
 fn parse_number(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
     node := if is_flonum(tok.ty) {
         n := c.new_node(.ND_NUM, tok);
@@ -2378,43 +2399,42 @@ fn new_sub(c: *Ctx, lhs: *CC.Node, rhs: *CC.Node, tok: *CC.Token) *CC.Node = {
     }
 };
 
+#prefix(.@"+")
+fn unary_plus(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
+    c.parse_expr(rest, tok.next, .Unary)
+}
+
+#prefix(.@"&")
+fn unary_amp(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
+    lhs := c.parse_expr(rest, tok.next, .Unary);
+    c.add_type(lhs);
+    bf := lhs.kind == .ND_MEMBER && lhs.member.is_bitfield;
+    !bf || error_tok(tok, "cannot take address of bitfield");
+    c.new_unary(.ND_ADDR, lhs, tok)
+}
+
+#prefix(.@"*")
+fn unary_star(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
+    // [https://www.sigbus.info/n1570#6.5.3.2p4] This is an oddity
+    // in the C spec, but dereferencing a function shouldn't do
+    // anything. If foo is a function, `*foo`, `**foo` or `*****foo`
+    // are all equivalent to just `foo`.
+    node := c.parse_expr(rest, tok.next, .Unary);
+    c.add_type(node);
+    if(node.ty.kind == .TY_FUNC, => node, => c.new_unary(.ND_DEREF, node, tok))
+}
+
+fn parse_unary(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
+    rule := rules.index(tok.kind);
+    node := c.parse_expr(rest, tok.next, .Unary);
+    c.new_unary(rule.op, node, tok)
+}
+
 // unary = ("+" | "-" | "*" | "&" | "!" | "~") cast
 //             | ("++" | "--") unary
 //             | "&&" ident
 //             | postfix
 fn unary(rest: **CC.Token, tok: *CC.Token) *CC.Node = {
-    if (equal(tok, "+"))
-        return cast(rest, tok.next);
-
-    if (equal(tok, "-"))
-        returnc.new_unary(.ND_NEG, cast(rest, tok.next), tok);
-
-    if (equal(tok, "&")) {
-        lhs := cast(rest, tok.next);
-        c.add_type(lhs);
-        bf := lhs.kind == .ND_MEMBER && lhs.member.is_bitfield;
-        !bf || error_tok(tok, "cannot take address of bitfield");
-        returnc.new_unary(.ND_ADDR, lhs, tok);
-    }
-
-    if (equal(tok, "*")) {
-        // [https://www.sigbus.info/n1570#6.5.3.2p4] This is an oddity
-        // in the C spec, but dereferencing a function shouldn't do
-        // anything. If foo is a function, `*foo`, `**foo` or `*****foo`
-        // are all equivalent to just `foo`.
-        CC.Node *node = cast(rest, tok.next);
-        c.add_type(node);
-        if (node.ty.kind == TY_FUNC)
-            return node;
-        returnc.new_unary(.ND_DEREF, node, tok);
-    }
-
-    if (equal(tok, "!"))
-        returnc.new_unary(.ND_NOT, cast(rest, tok.next), tok);
-
-    if (equal(tok, "~"))
-        returnc.new_unary(.ND_BITNOT, cast(rest, tok.next), tok);
-
     // Read ++i as i+=1
     if (equal(tok, "++"))
         return to_assign(new_add(unary(rest, tok.next), c.new_num(1, tok), tok));
@@ -2486,58 +2506,46 @@ fn new_inc_dec(c: *Ctx, node: *CC.Node, tok: *CC.Token, addend: i64) *CC.Node = 
                                     node.ty)
 }
 
-// postfix = "(" type-name ")" "{" initializer-list "}"
-//                 = ident "(" func-args ")" postfix-tail*
-//                 | primary postfix-tail*
-//
-// postfix-tail = "[" expr "]"
-//                            | "(" func-args ")"
-//                            | "." ident
-//                            | "->" ident
-//                            | "++"
-//                            | "--"
 fn postfix(c: *Ctx, rest: **CC.Token, tok: *CC.Token, node: *CC.Node) *CC.Node = {
     // TODO: use the table for this as well
-    //loop {
-    node = @match(tok.kind) {
-        fn @"("() => c.funcall(tok&, tok.next, node);
+    @match(tok.kind) {
         fn @"["() => {
             // x[y] is short for *(x+y)
             start := tok;
             idx := c.parse_expr(tok&, tok.next, .None);
-            tok = skip(tok, "]");
+            rest[] = skip(tok, "]");
             c.new_unary(.ND_DEREF, c.new_add(node, idx, start), start)
         }
         fn @"."() => {
             node := c.struct_ref(node, tok.next);
-            tok = tok.next.next;
+            rest[] = tok.next.next;
             node
-        };
+        }
         fn @"->"() => {
             // x->y is short for (*x).y
             node := c.new_unary(.ND_DEREF, node, tok);
             node := c.struct_ref(node, tok.next);
-            tok = tok.next.next;
+            rest[] = tok.next.next;
             node
         }
         fn @"++"() => {
             node := c.new_inc_dec(node, tok, 1);
-            tok   = tok.next;
+            rest[] = tok.next;
             node
         }
         fn @"--"() => {
             node := c.new_inc_dec(node, tok, -1);
-            tok   = tok.next;
+            rest[] = tok.next;
             node
         }
         @default => panic("unreachable postfix");
-    };
-    rest[] = tok;
-    node
+    }
 }
 
 // funcall = (assign ("," assign)*)? ")"
+#infix(.@"(", .PostFix)
 fn funcall(c: *Ctx, rest: **CC.Token, tok: *CC.Token, f: *CC.Node) *CC.Node = {
+    tok = tok.next;
     c.add_type(f);
 
     if (f.ty.kind != .TY_FUNC && (f.ty.kind != .TY_PTR || f.ty.base.kind != .TY_FUNC)) {
@@ -2638,10 +2646,47 @@ fn generic_selection(rest: **CC.Token, tok: *CC.Token) *CC.Node = {
     ret || error_tok(start, "controlling expression type not compatible with any generic association type")
 }
 
+#prefix(.sizeof)
+fn parse_sizeof(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
+    start := tok;
+    if c.next_is_paren_typename(tok) {  // | "sizeof" "(" type-name ")"
+        ty := c.typename(tok&, tok.next.next);
+        rest[] = skip(tok, ")");
+        if ty.kind == .TY_VLA {
+            if(!ty.vla_size.is_null(), => return(c.new_var_node(ty.vla_size, tok)));
+            lhs := c.compute_vla_size(ty, tok);
+            rhs := c.new_var_node(ty.vla_size, tok);
+            c.new_binary(.ND_COMMA, lhs, rhs, tok)
+        } else {
+            c.new_ulong(ty.size.intcast(), start)
+        }
+    } else {  // | "sizeof" unary
+        node := c.parse_expr(rest, tok.next, .Unary);
+        c.add_type(node);
+        if node.ty.kind == .TY_VLA {
+            c.new_var_node(node.ty.vla_size, tok)
+        } else {
+            c.new_ulong(node.ty.size.intcast(), tok)
+        }
+    }
+}
+
+#prefix(._Alignof)
+fn parse_alignof(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
+    start := tok;
+    if c.next_is_paren_typename(tok) {
+        ty := c.typename(tok&, tok.next.next);
+        rest[] = skip(tok, ")");
+        c.new_ulong(ty.align.intcast(), tok)
+    } else {
+        node := c.parse_expr(rest, tok.next, .Unary);
+        c.add_type(node);
+        c.new_ulong(node.ty.align.intcast(), tok)
+    }
+}
+
 // primary = "(" "{" stmt+ "}" ")"
 //                 | "(" expr ")"
-//                 | "sizeof" "(" type-name ")"
-//                 | "sizeof" unary
 //                 | "_Alignof" "(" type-name ")"
 //                 | "_Alignof" unary
 //                 | "_Generic" generic-selection
@@ -2650,39 +2695,10 @@ fn generic_selection(rest: **CC.Token, tok: *CC.Token) *CC.Node = {
 //                 | ident
 //                 | str
 //                 | num
+
 fn primary(rest: **CC.Token, tok: *CC.Token) *CC.Node = {
     Token *start = tok;
     @if_else {
-        @if(equal(tok, "(")) => unreachable();
-        @if(equal(tok, "sizeof")) => if next_is_paren_typename(tok) {
-            Type *ty = typename(tok&, tok.next.next);
-            rest[] = skip(tok, ")");
-            if ty.kind == .TY_VLA {
-                if(ty.vla_size != 0, => return(new_var_node(ty.vla_size, tok));
-                lhs := compute_vla_size(ty, tok);
-                rhs := c.new_var_node(ty.vla_size, tok);
-               c.new_binary(.ND_COMMA, lhs, rhs, tok)
-            } else {
-               c.new_ulong(ty.size, start)
-            }
-        } else {
-            node := unary(rest, tok.next);
-            c.add_type(node);
-            if node.ty.kind == .TY_VLA {
-               c.new_var_node(node.ty.vla_size, tok)
-            } else {
-               c.new_ulong(node.ty.size, tok)
-            }
-        };
-        @if(equal(tok, "_Alignof")) => if next_is_paren_typename(tok) {
-            ty := typename(tok&, tok.next.next);
-            rest[] = skip(tok, ")");
-           c.new_ulong(ty.align, tok)
-        } else {
-            node := unary(rest, tok.next);
-            c.add_type(node);
-           c.new_ulong(node.ty.align, tok)
-        };
         @if(equal(tok, "_Generic")) => generic_selection(rest, tok.next);
         @if(equal(tok, "__builtin_types_compatible_p")) => {
             tok = skip(tok.next, "(");
@@ -2731,7 +2747,8 @@ fn primary(rest: **CC.Token, tok: *CC.Token) *CC.Node = {
 
 
 fn eval(c: *Ctx, node: *CC.Node) i64 = {
-    panic("TODO: constexpr")
+    @debug_assert(c.is_const_expr(node));
+    node.val
 }
 
 // Evaluate a given node as a constant expression.
@@ -2740,12 +2757,14 @@ fn eval(c: *Ctx, node: *CC.Node) i64 = {
 // is a pointer to a global variable and n is a postiive/negative
 // number. The latter form is accepted only as an initialization
 // expression for a global variable.
-//static (?CStr, int64_t) eval2(CC.Node *node, char ***label);
+fn eval2(c: *Ctx, node: *CC.Node) Ty(i64, ?*CStr) = {  // (off, label)
+    (c.eval(node), .None) // TODO 
+}
 
 //static int64_t eval_rval(CC.Node *node, char ***label);
 
-fn is_const_expr(c: *Ctx, node: *CC.Node) bool = {
-    panic("TODO: is_const_expr")
+fn is_const_expr(c: *Ctx, node: *CC.Node) bool = {  // TODO
+    node.kind == .ND_NUM
 }
 
 fn const_expr(c: *Ctx, rest: **CC.Token, tok: *CC.Token) i64 = {

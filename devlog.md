@@ -6,6 +6,14 @@
 - its not getting to funcall(). it thinks `puts` is a type. 
 in find_typedef, converted to returning optional but didn't check if var.typedef is null so returned (Some = NULL). 
 - in add_type, flipped to `if(!node.is_null(), => return())`
+- (hello.c)
+- in declaration, i converted to use comma_sep() but that eats the ; so i need one less tok.next
+- prefix operators
+- assignment operators have the other associativity 
+- some of their tests are testing UB (clang doesn't pass them, and has differetn behaviour with -O2)
+- (variable.c)
+- my `// why not >= ?` in declspec i wasn't crazy, the internet agrees with me: https://github.com/rui314/chibicc/issues/142
+- i think my test that forks has the problem of your jit thread being gone
 
 ## (Jan 22/23)
 

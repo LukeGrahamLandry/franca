@@ -7,6 +7,7 @@
 
 ##
 
+- check enum names are unique
 - this should work
 ```
 A :: @struct();
