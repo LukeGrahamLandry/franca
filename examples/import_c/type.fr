@@ -1,5 +1,5 @@
 fn fixed_type(tag: CC.TypeKind, size: i64, unsigned: bool) *CC.Type = {
-    t := ast_alloc().box(CC.Type);
+    t := ast_alloc().box_zeroed(CC.Type);
     t.kind = tag;
     t.size = size.intcast();
     t.align = size.intcast();
@@ -19,3 +19,243 @@ ty_uint   :: fixed_type(.TY_INT,    4,  true);
 ty_ulong  :: fixed_type(.TY_LONG,   8,  true);
 ty_float  :: fixed_type(.TY_FLOAT,  4, false);
 ty_double :: fixed_type(.TY_DOUBLE, 8, false);
+
+fn new_type(c: *Ctx, kind: CC.TypeKind, size: i64, align: i64) *CC.Type = {
+    ty := c.arena.box_zeroed(CC.Type);
+    ty.kind = kind;
+    ty.size = size.intcast();
+    ty.align = align.intcast();
+    ty
+}
+
+fn is_integer(ty: *CC.Type) bool = 
+    @is(ty.kind, .TY_BOOL, .TY_CHAR, .TY_SHORT, .TY_INT, .TY_LONG, .TY_ENUM);
+
+fn is_flonum(ty: *CC.Type) bool = 
+    @is(ty.kind, .TY_FLOAT, .TY_DOUBLE, .TY_LDOUBLE);
+
+fn is_numeric(ty: *CC.Type) bool = 
+    is_integer(ty) || is_flonum(ty);
+
+fn is_compatible(t1: *CC.Type, t2: *CC.Type) bool = {
+    if(t1.identical(t2),     => return(true));
+    if(!t1.origin.is_null(), => return(is_compatible(t1.origin, t2)));
+    if(!t2.origin.is_null(), => return(is_compatible(t1, t2.origin)));
+    if(t1.kind != t2.kind,   => return(false));
+    if(@is(t1.kind, .TY_CHAR, .TY_SHORT, .TY_INT, .TY_LONG), => return(t1.is_unsigned == t2.is_unsigned));
+    if(@is(t1.kind, .TY_FLOAT, .TY_DOUBLE, .TY_LDOUBLE), => return(true));
+    @match(t1.kind) {
+        fn TY_PTR()  => is_compatible(t1.base, t2.base);
+        fn TY_FUNC() => {
+            if(!is_compatible(t1.return_ty, t2.return_ty), => return(false));
+            if(t1.is_variadic != t2.is_variadic, => return(false));
+            p1 := t1.params;
+            p2 := t2.params;
+            while => !p1.is_null() && !p2.is_null() {
+                if(!is_compatible(p1, p2), => return(false));
+                p1 = p1.next;
+                p2 = p2.next;
+            };
+            p1.is_null() && p2.is_null()  // are linked lists the same length?
+        }
+        fn TY_ARRAY() => {
+            if(!is_compatible(t1.base, t2.base), => return(false));
+            t1.array_len < 0 && t2.array_len < 0 && t1.array_len == t2.array_len;
+        }
+        @default => false;
+    }
+}
+
+fn copy_type(c: *Ctx, ty: *CC.Type) *CC.Type = {
+    ret := c.arena.box_zeroed(CC.Type);
+    ret[] = ty[];
+    ret.origin = ty;
+    ret
+}
+
+fn pointer_to(c: *Ctx, base: *CC.Type) *CC.Type = {
+    ty := c.new_type(.TY_PTR, 8, 8);
+    ty.base = base;
+    ty.is_unsigned = true;
+    ty
+}
+
+fn func_type(c: *Ctx, return_ty: *CC.Type) *CC.Type = {
+    // The C spec disallows sizeof(<function type>), but
+    // GCC allows that and the expression is evaluated to 1.
+    ty := c.new_type(.TY_FUNC, 1, 1);
+    ty.return_ty = return_ty;
+    ty
+}
+
+fn array_of(c: *Ctx, base: *CC.Type, len: i64) *CC.Type = {
+    ty := c.new_type(.TY_ARRAY, base.size.intcast() * len, base.align.intcast());
+    ty.base = base;
+    ty.array_len = len.intcast();
+    ty
+}
+
+fn vla_of(c: *Ctx, base: *CC.Type, len: *CC.Node) *CC.Type = {
+    ty := c.new_type(.TY_VLA, 8, 8);
+    ty.base = base;
+    ty.vla_len = len;
+    ty
+}
+
+fn enum_type(c: *Ctx) *CC.Type =
+    c.new_type(.TY_ENUM, 4, 4);
+
+fn struct_type(c: *Ctx) *CC.Type =
+    c.new_type(.TY_STRUCT, 0, 1);
+
+fn get_common_type(c: *Ctx, ty1: *CC.Type, ty2: *CC.Type) *CC.Type = {
+    if(!ty1.base.is_null(), => return(c.pointer_to(ty1.base)));
+    
+    k1, k2 := (ty1.kind, ty2.kind);
+    if(k1 == .TY_FUNC, => return(c.pointer_to(ty1)));
+    if(k2 == .TY_FUNC, => return(c.pointer_to(ty2)));
+    
+    if(k1 == .TY_LDOUBLE || k2 == .TY_LDOUBLE/*, => return(ty_ldouble));
+    if(*/|| k1 == .TY_DOUBLE  || k2 == .TY_DOUBLE,  => return(ty_double));
+    if(k1 == .TY_FLOAT   || k2 == .TY_FLOAT,   => return(ty_float));
+    
+    if ty1.size < 4 {
+        ty1 = ty_int;
+    };
+    if ty2.size < 4 {
+        ty2 = ty_int;
+    };
+    
+    if(ty1.size != ty2.size, => return(if(ty1.size < ty2.size, => ty2, => ty1)));
+    if(ty2.is_unsigned, => ty2, => ty1)
+}
+
+// For many binary operators, we implicitly promote operands so that
+// both operands have the same type. Any integral type smaller than
+// int is always promoted to int. If the type of one operand is larger
+// than the other's (e.g. "long" vs. "int"), the smaller operand will
+// be promoted to match with the other.
+//
+// This operation is called the "usual arithmetic conversion".
+fn usual_arith_conv(c: *Ctx, lhs: **CC.Node, rhs: **CC.Node) void = {
+    ty   := c.get_common_type(lhs.ty, rhs.ty);
+    lhs[] = c.new_cast(lhs[], ty);
+    rhs[] = c.new_cast(rhs[], ty);
+}
+
+fn add_type(c: *Ctx, node: *CC.Node) void #inline = {
+    if(node.is_null() || !node.ty.is_null(), => return());
+    add_type_inner(c, node);
+}
+
+fn add_type_inner(c: *Ctx, node: *CC.Node) void = {
+    c.add_type(node.lhs);
+    c.add_type(node.rhs);
+    c.add_type(node.cond);
+    c.add_type(node.then);
+    c.add_type(node.else);
+    c.add_type(node.init);
+    c.add_type(node.inc);
+    
+    n := node.body;
+    for_linked n { n |
+        c.add_type(n);
+    };
+    n := node.args;
+    for_linked n { n |
+        c.add_type(n);
+    };
+    k := node.kind;
+    node.ty = @if_else {
+        @if(@is(k, .ND_ADD, .ND_SUB, .ND_MUL, .ND_DIV, .ND_MOD, .ND_BITAND, .ND_BITOR, .ND_BITXOR)) => {
+            c.usual_arith_conv(node.lhs&, node.rhs&);
+            node.lhs.ty
+        };
+        @if(@is(k, .ND_EQ, .ND_NE, .ND_LT, .ND_LE)) => {
+            c.usual_arith_conv(node.lhs&, node.rhs&);
+            ty_int
+        };
+        @if(@is(k, .ND_NOT, .ND_LOGOR, .ND_LOGAND)) => ty_int;
+        @if(@is(k, .ND_BITNOT, .ND_SHL, .ND_SHR))   => node.lhs.ty;
+        @if(@is(k, .ND_VAR, .ND_VLA_PTR))           => node.var.ty;
+        @else => (@match(k) {
+            fn ND_NUM()     => ty_int;
+            fn ND_COMMA()   => node.rhs.ty;
+            fn ND_MEMBER()  => node.member.ty;
+            fn ND_FUNCALL() => node.func_ty.return_ty;
+            fn ND_NEG() => {
+                ty := c.get_common_type(ty_int, node.lhs.ty);
+                node.lhs = c.new_cast(node.lhs, ty);
+                ty
+            }
+            fn ND_ASSIGN() => {
+                if(node.lhs.ty.kind == .TY_ARRAY, => error_tok(node.lhs.tok, "not an lvalue"));
+                if node.lhs.ty.kind != .TY_STRUCT {
+                    node.rhs = c.new_cast(node.rhs, node.lhs.ty);
+                };
+                node.lhs.ty
+            }
+            fn ND_COND() => if node.then.ty.kind == .TY_VOID || node.else.ty.kind == .TY_VOID {
+                ty_void
+            } else {
+                c.usual_arith_conv(node.then&, node.else&);
+                node.then.ty
+            };
+            fn ND_ADDR() => {
+                ty := node.lhs.ty;
+                c.pointer_to(if(ty.kind == .TY_ARRAY, => ty.base, => ty))
+            }
+            fn ND_DEREF() => {
+                if(node.lhs.ty.base.is_null(), => error_tok(node.tok, "invalid pointer dereference"));
+                if(node.lhs.ty.base.kind == .TY_VOID, => error_tok(node.tok, "dereferencing a void pointer"));
+                node.lhs.ty.base
+            }
+            fn ND_STMT_EXPR() => {
+                break :: local_return;
+                if !node.body.is_null() {
+                    stmt := node.body;
+                    stmt := end_linked(stmt);
+                    if stmt.kind == .ND_EXPR_STMT {
+                        break(stmt.lhs.ty);
+                    };
+                };
+                // :compilerbug
+                error_tok(node.tok, "statement expression returning void is not supported");
+                unreachable()
+            }
+            fn ND_LABEL_VAL() => c.pointer_to(ty_void);
+            fn ND_CAS() => {
+                c.add_type(node.cas_addr);
+                c.add_type(node.cas_old);
+                c.add_type(node.cas_new);
+                if(node.cas_addr.ty.kind != .TY_PTR, => error_tok(node.cas_addr.tok, "pointer expected"));
+                if(node.cas_old.ty.kind  != .TY_PTR, => error_tok(node.cas_old.tok, "pointer expected"));
+                ty_bool
+            }
+            fn ND_EXCH() => {
+                if(node.lhs.ty.kind != .TY_PTR, => error_tok(node.cas_addr.tok, "pointer expected"));
+                node.lhs.ty.base
+            }
+            fn ND_EXPR_STMT() => return();
+            fn ND_RETURN() => return();
+            @default => @panic("bad node type %", k);
+        });
+    };
+}
+
+fn copy_struct_type(c: *Ctx, ty: *CC.Type) *CC.Type = {
+    ty = c.copy_type(ty);
+
+    head := CC.Member.zeroed();
+    cur  := head&;
+    mem  := ty.members;
+    for_linked mem { mem |
+        m := c.arena.box_zeroed(CC.Member);
+        m[] = mem[];
+        cur.next = m;
+        cur = cur.next;
+    };
+
+    ty.members = head.next;
+    ty
+}

@@ -1,5 +1,12 @@
 - TODO: deal with `CodegenEntry:Bounce` on wasm
 
+
+## (Jan 30)
+
+- its not getting to funcall(). it thinks `puts` is a type. 
+in find_typedef, converted to returning optional but didn't check if var.typedef is null so returned (Some = NULL). 
+- in add_type, flipped to `if(!node.is_null(), => return())`
+
 ## (Jan 22/23)
 
 - get rid of jump table switch instruction in the backend. 

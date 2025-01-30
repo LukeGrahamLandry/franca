@@ -99,8 +99,10 @@ fn align_down(n: i64, align: i64) i64 =
 };
 
 fn enter_scope(c: *Ctx) void = {
-    sc := temp().box(Scope);
+    sc := temp().box_zeroed(Scope);
     sc.next = c.scope;
+    sc.vars = init(c.arena);
+    sc.tags = init(c.arena);
     c.scope = sc;
 }
 
@@ -130,13 +132,14 @@ fn find_tag(c: *Ctx, tok: *CC.Token) ?*CC.Type = {
 }
 
 fn push_scope(c: *Ctx, name: Str) *VarScope = {
-    sc := temp().box(VarScope);
+    @debug_assert(!c.scope.is_null(), "uninit Ctx.scope");
+    sc := temp().box_zeroed(VarScope);
     insert(c.scope.vars&, name, sc);
     sc
 }
 
 fn new_node(c: *Ctx, kind: CC.NodeKind, tok: *CC.Token) *CC.Node = {
-    node := temp().box(CC.Node);
+    node := temp().box_zeroed(CC.Node);
     node.kind = kind;
     node.tok = tok;
     node
@@ -188,18 +191,18 @@ fn new_vla_ptr(c: *Ctx, var: *CC.Obj, tok: *CC.Token) *CC.Node = {
 }
 
 fn new_cast(c: *Ctx, expr: *CC.Node, ty: *CC.Type) *CC.Node = {
-    add_type(expr);
+    c.add_type(expr);
     
-    node := temp().box(CC.Node);
+    node := temp().box_zeroed(CC.Node);
     node.kind = .ND_CAST;
     node.tok = expr.tok;
     node.lhs = expr;
-    node.ty = copy_type(ty);
+    node.ty = c.copy_type(ty);
     node
 }
 
 fn new_initializer(c: *Ctx, ty: *CC.Type, is_flexible: bool) *Initializer = {
-    init := temp().box(Initializer);
+    init := temp().box_zeroed(Initializer);
     init.ty = ty;
 
     if ty.kind == .TY_ARRAY {
@@ -227,7 +230,7 @@ fn new_initializer(c: *Ctx, ty: *CC.Type, is_flexible: bool) *Initializer = {
             ::if(*Initializer);
             init.children[mem.idx.intcast()] = 
                 if is_flexible && ty.is_flexible && mem.next.is_null() {
-                    child := temp().box(Initializer);
+                    child := temp().box_zeroed(Initializer);
                     child.ty = mem.ty;
                     child.is_flexible = true;
                     child
@@ -241,11 +244,12 @@ fn new_initializer(c: *Ctx, ty: *CC.Type, is_flexible: bool) *Initializer = {
 }
 
 fn new_var(c: *Ctx, name: Str, ty: *CC.Type) *CC.Obj = {
-    var := temp().box(CC.Obj);
+    var := temp().box_zeroed(CC.Obj);
     var.name = name.slow_convert_to_c_string();
     var.ty = ty;
     var.align = ty.align;
     c.push_scope(name)[].var = var;
+    
     var
 }
 
@@ -277,7 +281,7 @@ fn new_anon_gvar(c: *Ctx, ty: *CC.Type) *CC.Obj =
 
 fn new_string_literal(c: *Ctx, p: []u8, ty: *CC.Type) *CC.Obj = {
     var := c.new_anon_gvar(ty);
-    var.init_data.ptr = p.ptr;
+    var.init_data = p.slow_convert_to_c_string();
     var
 }
 
@@ -291,7 +295,9 @@ fn get_ident(tok: *CC.Token) Str = {
 fn find_typedef(c: *Ctx, tok: *CC.Token) ?*CC.Type = {
     if tok.kind == .TK_IDENT {
         if c.find_var(tok) { sc |
-            return(Some = sc.type_def);
+            if !sc.type_def.is_null() {
+                return(Some = sc.type_def);
+            };
         };
     };
     .None
@@ -477,7 +483,7 @@ fn declspec(c: *Ctx, rest: **CC.Token, tok: *CC.Token, attr: ?*VarAttr) *CC.Type
     };
 
     if is_atomic {
-        ty = copy_type(ty);
+        ty = c.copy_type(ty);
         ty.is_atomic = true;
     };
 
@@ -490,7 +496,7 @@ fn declspec(c: *Ctx, rest: **CC.Token, tok: *CC.Token, attr: ?*VarAttr) *CC.Type
 fn func_params(c: *Ctx, rest: **CC.Token, tok: *CC.Token, ty: *CC.Type) *CC.Type = {
     if equal(tok, "void") && equal(tok.next, ")") {
         rest[] = tok.next.next;
-        return(func_type(ty));
+        return(c.func_type(ty));
     };
 
     head := CC.Type.zeroed();
@@ -519,18 +525,18 @@ fn func_params(c: *Ctx, rest: **CC.Token, tok: *CC.Token, ty: *CC.Type) *CC.Type
                 // "array of T" is converted to "pointer to T" only in the parameter
                 // context. For example, *argv[] is converted to **argv by this.
                 fn TY_ARRAY() => { 
-                    ty2 = pointer_to(ty2.base);
+                    ty2 = c.pointer_to(ty2.base);
                     ty2.name = name;
                 }
                 // Likewise, a function is converted to a pointer to a function
                 // only in the parameter context.
                 fn TY_FUNC() => {
-                    ty2 = pointer_to(ty2);
+                    ty2 = c.pointer_to(ty2);
                     ty2.name = name;
                 }
                 @default => ();
             };
-            t := copy_type(ty2);
+            t := c.copy_type(ty2);
             cur.next = t;
             cur = t;
         };
@@ -540,7 +546,7 @@ fn func_params(c: *Ctx, rest: **CC.Token, tok: *CC.Token, ty: *CC.Type) *CC.Type
         is_variadic = true;
     };
 
-    ty = func_type(ty);
+    ty = c.func_type(ty);
     ty.params = head.next;
     ty.is_variadic = is_variadic;
     rest[] = tok.next;
@@ -555,7 +561,7 @@ fn array_dimensions(c: *Ctx, rest: **CC.Token, tok: *CC.Token, ty: *CC.Type) *CC
 
     if equal(tok, "]") {
         ty = c.type_suffix(rest, tok.next, ty);
-        return(array_of(ty, -1));
+        return(c.array_of(ty, -1));
     };
 
     expr := c.parse_expr(tok&, tok, .Conditional);
@@ -563,9 +569,9 @@ fn array_dimensions(c: *Ctx, rest: **CC.Token, tok: *CC.Token, ty: *CC.Type) *CC
     ty    = c.type_suffix(rest, tok, ty);
 
     if ty.kind == .TY_VLA || !c.is_const_expr(expr) {
-        vla_of(ty, expr)
+        c.vla_of(ty, expr)
     } else {
-        array_of(ty, c.eval(expr).intcast())
+        c.array_of(ty, c.eval(expr))
     }
 }
 
@@ -582,7 +588,7 @@ fn type_suffix(c: *Ctx, rest: **CC.Token, tok: *CC.Token, ty: *CC.Type) *CC.Type
 // pointers = ("*" ("const" | "volatile" | "restrict")*)*
 fn pointers(c: *Ctx, rest: **CC.Token, tok: *CC.Token, ty: *CC.Type) *CC.Type = {
     while => consume(tok&, tok, "*") {
-        ty = pointer_to(ty);
+        ty = c.pointer_to(ty);
         dowhile {
             ignore(tok&, tok, @const_slice("const", "volatile", "restrict", "__restrict", "__restrict__"))
         };
@@ -654,7 +660,7 @@ fn is_end(tok: *CC.Token) bool =
 //
 // enum-list            = ident ("=" num)? ("," ident ("=" num)?)* ","?
 fn enum_specifier(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Type = {
-    ty := enum_type();
+    ty := c.enum_type();
 
     // Read a struct tag.
     tag: ?*CC.Token = .None;
@@ -704,7 +710,7 @@ fn typeof_specifier(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Type = {
         c.typename(tok&, tok)
     } else {
         node := c.parse_expr(tok&, tok, .None);
-        add_type(node);
+        c.add_type(node);
         node.ty
     };
     rest[] = skip(tok, ")");
@@ -738,7 +744,7 @@ fn new_alloca(c: *Ctx, sz: *CC.Node) *CC.Node = {
     node.func_ty = c.builtin_alloca.ty;
     node.ty = c.builtin_alloca.ty.return_ty;
     node.args = sz;
-    add_type(sz);
+    c.add_type(sz);
     node
 }
 
@@ -826,7 +832,7 @@ fn skip_excess_element(c: *Ctx, tok: *CC.Token) *CC.Token = {
 // string-initializer = string-literal
 fn string_initializer(c: *Ctx, rest: **CC.Token, tok: *CC.Token, init: *Initializer) void = {
     if init.is_flexible {
-        init[] = c.new_initializer(array_of(init.ty.base, tok.ty.array_len), false)[];
+        init[] = c.new_initializer(c.array_of(init.ty.base, tok.ty.array_len.intcast()), false)[];
     };
 
     len := min(init.ty.array_len, tok.ty.array_len);
@@ -1007,12 +1013,12 @@ fn array_initializer1(c: *Ctx, rest: **CC.Token, tok: *CC.Token, init: *Initiali
 
     if init.is_flexible {
         len := c.count_array_init_elements(tok, init.ty);
-        init[] = c.new_initializer(array_of(init.ty.base, len.intcast()), false)[];
+        init[] = c.new_initializer(c.array_of(init.ty.base, len), false)[];
     };
 
     if init.is_flexible {
         len := c.count_array_init_elements(tok, init.ty);
-        init[] = c.new_initializer(array_of(init.ty.base, len.intcast()), false)[];
+        init[] = c.new_initializer(c.array_of(init.ty.base, len), false)[];
     };
     i := 0;
     comma_sep(tok&, "}") {
@@ -1043,7 +1049,7 @@ fn array_initializer1(c: *Ctx, rest: **CC.Token, tok: *CC.Token, init: *Initiali
 fn array_initializer2(c: *Ctx, rest: **CC.Token, tok: *CC.Token, init: *Initializer, i: i64) void = {
     if init.is_flexible {
         len := c.count_array_init_elements(tok, init.ty);
-        init[] = c.new_initializer(array_of(init.ty.base, len.intcast()), false)[];
+        init[] = c.new_initializer(c.array_of(init.ty.base, len), false)[];
     };
 
     while => i < init.ty.array_len.intcast() && !is_end(tok) {
@@ -1146,7 +1152,7 @@ fn initializer2(c: *Ctx, rest: **CC.Token, tok: *CC.Token, init: *Initializer) v
         // `struct T x = y;` where y is a variable of type `struct T`.
         // Handle that case first.
         expr := c.parse_expr(rest, tok, .Assignment);
-        add_type(expr);
+        c.add_type(expr);
         if expr.ty.kind == .TY_STRUCT {
             init.expr = expr;
         } else {
@@ -1163,23 +1169,6 @@ fn initializer2(c: *Ctx, rest: **CC.Token, tok: *CC.Token, init: *Initializer) v
         init.expr = c.parse_expr(rest, tok, .Assignment);
     }); // TODO: this shouldn't need the extra brackets?
 };
-
-fn copy_struct_type(c: *Ctx, ty: *CC.Type) *CC.Type = {
-    ty = copy_type(ty);
-
-    head := CC.Member.zeroed();
-    cur  := head&;
-    mem  := ty.members;
-    for_linked mem { mem |
-        m := c.arena.box(CC.Member);
-        m[] = mem[];
-        cur.next = m;
-        cur = cur.next;
-    };
-
-    ty.members = head.next;
-    ty
-}
 
 fn initializer(c: *Ctx, rest: **CC.Token, tok: *CC.Token, ty: *CC.Type, new_ty: **CC.Type) *Initializer = {
     init := c.new_initializer(ty, true);
@@ -1428,15 +1417,14 @@ fn stmt(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = @match(tok.kind) {
     fn return() => {
         node := c.new_node(.ND_RETURN, tok);
         if(consume(rest, tok.next, ";"), => return(node));
-
         exp := c.parse_expr(tok&, tok.next, .None);
         rest[] = skip(tok, ";");
 
-        add_type(exp);
+        c.add_type(exp);
         current_fn := c.current_fn || error_tok(tok, "stray return");
         ty := current_fn.ty.return_ty;
         if !@is(ty.kind, .TY_STRUCT, .TY_UNION) {
-            exp = new_cast(exp, ty);
+            exp = c.new_cast(exp, ty);
         };
 
         node.lhs = exp;
@@ -1581,6 +1569,7 @@ fn stmt(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = @match(tok.kind) {
     }
     fn @"{"() => c.compound_stmt(rest, tok.next);
     @default => (if tok.kind == .TK_IDENT && equal(tok.next, ":") {
+        println("label");
         node := c.new_node(.ND_LABEL, tok);
         node.label = tok.str().slow_convert_to_c_string();
         node.unique_label = c.new_unique_name().slow_convert_to_c_string();
@@ -1622,6 +1611,7 @@ fn compound_stmt(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
 
     while => !equal(tok, "}") {
         if c.is_typename(tok) && !equal(tok.next, ":") {
+            @println("type name! %", tok.str());
             attr   := VarAttr.zeroed();
             basety := c.declspec(tok&, tok, (Some = attr&));
             tok = @if_else {
@@ -1638,7 +1628,7 @@ fn compound_stmt(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
             cur.next = c.stmt(tok&, tok);
             cur = cur.next;
         };
-        add_type(cur);
+        c.add_type(cur);
     };
 
     c.leave_scope();
@@ -1653,6 +1643,7 @@ fn expr_stmt(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = if equal(tok,
     rest[] = tok.next;
     c.new_node(.ND_BLOCK, tok)
 } else {
+    println("start expr stmt");
     node := c.new_node(.ND_EXPR_STMT, tok);
     node.lhs = c.parse_expr(tok&, tok, .None);
     rest[] = skip(tok, ";");
@@ -1672,7 +1663,7 @@ fn struct_members(c: *Ctx, rest: **CC.Token, tok: *CC.Token, ty: *CC.Type) void 
 
         is_anon := (@is(basety.kind, .TY_STRUCT, .TY_UNION)) && consume(tok&, tok, ";");
         if is_anon {
-            mem := c.arena.box(CC.Member);
+            mem := c.arena.box_zeroed(CC.Member);
             mem.ty  = basety;
             mem.idx = idx.intcast();
             idx += 1;
@@ -1684,7 +1675,7 @@ fn struct_members(c: *Ctx, rest: **CC.Token, tok: *CC.Token, ty: *CC.Type) void 
 
         // Regular struct members
         comma_sep(tok&, ";") {
-            mem := c.arena.box(CC.Member);
+            mem := c.arena.box_zeroed(CC.Member);
             mem.ty = c.declarator(tok&, tok, basety);
             mem.name = mem.ty.name;
             mem.idx = idx.intcast();
@@ -1705,7 +1696,7 @@ fn struct_members(c: *Ctx, rest: **CC.Token, tok: *CC.Token, ty: *CC.Type) void 
     // if were a zero-sized array.
     ty.is_flexible = !cur.identical(head&) && cur.ty.kind == .TY_ARRAY && cur.ty.array_len < 0; 
     if ty.is_flexible {
-        cur.ty = array_of(cur.ty.base, 0);
+        cur.ty = c.array_of(cur.ty.base, 0);
     };
 
     rest[] = tok.next;
@@ -1743,7 +1734,7 @@ fn attribute_list(c: *Ctx, tok: *CC.Token, ty: *CC.Type) *CC.Token = {
 
 // struct-union-decl = attribute? ident? ("{" struct-members)?
 fn struct_union_decl(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Type = {
-    ty := struct_type();
+    ty := c.struct_type();
     tok = c.attribute_list(tok, ty);
 
     // Read a tag.
@@ -1870,22 +1861,26 @@ fn create_param_lvars(c: *Ctx, param: *CC.Type) void = {  // TODO: why isn't thi
 // can refer a label that appears later in the function.
 // So, we need to do this after we parse the entire function.
 fn resolve_goto_labels(c: *Ctx) void = {
-    panic("TODO: resolve_goto_labels"); /*
-    for (CC.Node *x = gotos; x; x = x.goto_next) {
-        for (CC.Node *y = labels; y; y = y.goto_next) {
-            if (!strcmp(x.label, y.label)) {
-                x.unique_label = y.unique_label;
-                break();
-            }
-        }
+    x := c.gotos;
+    while => !x.is_null() {
+        if true {
+            break :: local_return;
+            y := c.labels;
+            while => !y.is_null() {
+                if x.label.str() == y.label.str() {
+                    x.unique_label = y.unique_label;
+                    break();
+                };
+                y = y.goto_next;
+            };
+        };
 
-        if (x.unique_label == NULL)
-            error_tok(x.tok.next, "use of undeclared label");
-    }
+        if(x.unique_label.ptr.is_null(), => error_tok(x.tok.next, "use of undeclared label"));
+        x = x.goto_next;
+    };
 
-    c.gotos = NULL;
-    c.labels = NULL;
-    */
+    c.gotos  = ptr_from_int(@type c.gotos[], 0);
+    c.labels = ptr_from_int(@type c.labels[], 0);
 }
 
 fn find_func(c: *Ctx, name: Str) ?*CC.Obj = {
@@ -1935,6 +1930,7 @@ fn function(c: *Ctx, tok: *CC.Token, basety: *CC.Type, attr: *VarAttr) *CC.Token
     f.is_root = !(f.is_static && f.is_inline);
     if(consume(tok&, tok, ";"), => return(tok));
 
+    println("start function body");
     c.current_fn = (Some = f);
     c.locals = ptr_from_int(@type c.locals[], 0);
     c.enter_scope();
@@ -1944,15 +1940,15 @@ fn function(c: *Ctx, tok: *CC.Token, basety: *CC.Type, attr: *VarAttr) *CC.Token
     // as the hidden first parameter.
     rty := ty.return_ty;
     if rty.size > 16 && @is(rty.kind, .TY_STRUCT, .TY_UNION) {
-        c.new_lvar("", pointer_to(rty));
+        c.new_lvar("", c.pointer_to(rty));
     };
 
     f.params = c.locals;
 
     if ty.is_variadic {
-        f.va_area = c.new_lvar("__va_area__", array_of(ty_char, 136));
+        f.va_area = c.new_lvar("__va_area__", c.array_of(ty_char, 136));
     };
-    f.alloca_bottom = c.new_lvar("__alloca_size__", pointer_to(ty_char));
+    f.alloca_bottom = c.new_lvar("__alloca_size__", c.pointer_to(ty_char));
 
     tok = skip(tok, "{");
 
@@ -1963,13 +1959,14 @@ fn function(c: *Ctx, tok: *CC.Token, basety: *CC.Type, attr: *VarAttr) *CC.Token
     // automatically defined as a local variable containing the
     // current function name.
     c.push_scope("__func__")[].var =
-        c.new_string_literal(f_name, array_of(ty_char, f_name.len.intcast()));
+        c.new_string_literal(f_name, c.array_of(ty_char, f_name.len));
 
     // [GNU] __FUNCTION__ is yet another name of __func__.
     c.push_scope("__FUNCTION__")[].var =
-        c.new_string_literal(f_name, array_of(ty_char, f_name.len.intcast()));
+        c.new_string_literal(f_name, c.array_of(ty_char, f_name.len));
 
     f.body = c.compound_stmt(tok&, tok);
+    
     f.locals = c.locals;
     c.leave_scope();
     c.resolve_goto_labels();
@@ -2044,8 +2041,8 @@ fn find_matching_name(first: *CC.Obj, goal: *CC.Obj) ?*CC.Obj = {
 }
 
 fn declare_builtin_functions(c: *Ctx) void = {
-    ty := func_type(pointer_to(ty_void));
-    ty.params = copy_type(ty_int);
+    ty := c.func_type(c.pointer_to(ty_void));
+    ty.params = c.copy_type(ty_int);
     c.builtin_alloca = c.new_gvar("alloca", ty);
     c.builtin_alloca.is_definition = false;
 }
@@ -2063,6 +2060,7 @@ fn parse(c: *Ctx, tok: *CC.Token) *CC.Obj = {
             @if(c.is_function(tok)) => c.function(tok, basety, attr&);
             @else                 => c.global_variable(tok, basety, attr&);
         };
+        println("done one");
     };
 
     var := c.globals;
@@ -2078,6 +2076,7 @@ fn parse(c: *Ctx, tok: *CC.Token) *CC.Obj = {
 **************************/
 
 Prec :: @enum(i32) (
+    Invalid,
     None, 
     Comma,
     Assignment, 
@@ -2089,11 +2088,11 @@ Prec :: @enum(i32) (
     Unary, PostFix, Primary,
 );
 
-N1: ParseFn1 : fn(a, b, c) = panic("unexpected token");  // TODO
-N2: ParseFn2 : fn(a, b, c, d) = panic("unexpected token");  // TODO
+N1: ParseFn1 : fn(a, b, t) = @panic("unexpected (prefix) token %", t.str());  // TODO
+N2: ParseFn2 : fn(a, b, t, d) = @panic("unexpected (infix) token %", t.str());  // TODO
 ParseFn1   :: @FnPtr(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node;
 ParseFn2   :: @FnPtr(c: *Ctx, rest: **CC.Token, tok: *CC.Token, node: *CC.Node) *CC.Node;
-ParseRule :: @struct(prefix: ParseFn1 = N1, infix: ParseFn2 = N2, prec := Prec.None, op := CC.NodeKind.ND_INVALID);
+ParseRule :: @struct(prefix: ParseFn1 = N1, infix: ParseFn2 = N2, prec := Prec.Invalid, op := CC.NodeKind.ND_INVALID);
 
 rules :: {
     h := @static EnumMap(CC.TokenKind, ParseRule);
@@ -2141,13 +2140,21 @@ rules :: {
     h[.TK_STR]   = (prefix = parse_string, prec = .Primary);
     h[.TK_IDENT] = (prefix = parse_ident,  prec = .Primary);
     
-    h[.@"("] = (prefix = parse_bracketed);
+    h[.@"("] = (prefix = parse_bracketed, infix = postfix, prec = .PostFix);
     h[.@"?"] = (infix = conditional, prec = .Conditional);
+    
+    h[.@"["] = (infix = postfix, prec = .PostFix);
+    h[.@"."] = (infix = postfix, prec = .PostFix);
+    h[.@"->"] = (infix = postfix, prec = .PostFix);
+    h[.@"++"] = (infix = postfix, prec = .PostFix);
+    h[.@"--"] = (infix = postfix, prec = .PostFix);
 
     h
 };
 
 fn parse_expr(c: *Ctx, rest: **CC.Token, tok: *CC.Token, prec: Prec) *CC.Node = {
+    @println("Prefix: % %", tok.str(), tok.kind);
+
     rules := rules;  // TODO: shouldn't need to do this but otherwise if can't call the function ?? 
     rule := rules.index(tok.kind);
     node := (rule.prefix)(c, rest, tok);
@@ -2155,10 +2162,12 @@ fn parse_expr(c: *Ctx, rest: **CC.Token, tok: *CC.Token, prec: Prec) *CC.Node = 
     ::enum(@type prec);
     rule := rules.index(tok.kind);
     while => prec.raw() <= rule.prec.raw() {
+        @println("Infix: % %", tok.str(), tok.kind);
         node = (rule.infix)(c, rest, tok, node);
         tok  = rest[];
         rule = rules.index(tok.kind);
     };
+    @println("End Expression: % %", tok.str(), tok.kind);    
     node
 }
 
@@ -2198,7 +2207,7 @@ fn parse_logical(c: *Ctx, rest: **CC.Token, tok: *CC.Token, lhs: *CC.Node) *CC.N
 fn conditional(c: *Ctx, rest: **CC.Token, tok: *CC.Token, cond: *CC.Node) *CC.Node = {
     if equal(tok.next, ":") {
         // [GNU] Compile `a ?: b` as `tmp = a, tmp ? tmp : b`.
-        add_type(cond);
+        c.add_type(cond);
         var := c.new_lvar("", cond.ty);
         lhs := c.new_binary(.ND_ASSIGN, c.new_var_node(var, tok), cond, tok);
         rhs := c.new_node(.ND_COND, tok);
@@ -2236,7 +2245,7 @@ fn parse_bracketed(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
             }
         } else {  // type cast
             node := parse_expr(c, rest, tok, .Unary);
-            node := new_cast(node, ty);
+            node := c.new_cast(node, ty);
             node.tok = start;
             node
         }
@@ -2283,7 +2292,7 @@ fn parse_ident(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
 }
 
 fn parse_string(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
-    var := c.new_string_literal(tok.str(), tok.ty);
+    var := c.new_string_literal(tok.str.str(), tok.ty);
     rest[] = tok.next;
     c.new_var_node(var, tok)
 }
@@ -2307,8 +2316,8 @@ fn parse_number(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
 // In other words, we need to scale an integer value before adding to a
 // pointer value. This function takes care of the scaling.
 fn new_add(c: *Ctx, lhs: *CC.Node, rhs: *CC.Node, tok: *CC.Token) *CC.Node = {
-    add_type(lhs);
-    add_type(rhs);
+    c.add_type(lhs);
+    c.add_type(rhs);
 
     // num + num
     if is_numeric(lhs.ty) && is_numeric(rhs.ty) {
@@ -2337,8 +2346,8 @@ fn new_add(c: *Ctx, lhs: *CC.Node, rhs: *CC.Node, tok: *CC.Token) *CC.Node = {
 
 // Like `+`, `-` is overloaded for the pointer type.
 fn new_sub(c: *Ctx, lhs: *CC.Node, rhs: *CC.Node, tok: *CC.Token) *CC.Node = {
-    add_type(lhs);
-    add_type(rhs);
+    c.add_type(lhs);
+    c.add_type(rhs);
     @if_else {
         // num - num
         @if(is_numeric(lhs.ty) && is_numeric(rhs.ty)) =>
@@ -2346,7 +2355,7 @@ fn new_sub(c: *Ctx, lhs: *CC.Node, rhs: *CC.Node, tok: *CC.Token) *CC.Node = {
         // VLA - num
         @if(lhs.ty.base.kind == .TY_VLA) => {
             rhs = c.new_binary(.ND_MUL, rhs, c.new_var_node(lhs.ty.base.vla_size, tok), tok);
-            add_type(rhs);
+            c.add_type(rhs);
             node := c.new_binary(.ND_SUB, lhs, rhs, tok);
             node.ty = lhs.ty;
             node
@@ -2354,7 +2363,7 @@ fn new_sub(c: *Ctx, lhs: *CC.Node, rhs: *CC.Node, tok: *CC.Token) *CC.Node = {
         // ptr - num
         @if(!lhs.ty.base.is_null() && is_integer(rhs.ty)) => {
             rhs = c.new_binary(.ND_MUL, rhs, c.new_long(lhs.ty.base.size.intcast(), tok), tok);
-            add_type(rhs);
+            c.add_type(rhs);
             node := c.new_binary(.ND_SUB, lhs, rhs, tok);
             node.ty = lhs.ty;
             node
@@ -2382,7 +2391,7 @@ fn unary(rest: **CC.Token, tok: *CC.Token) *CC.Node = {
 
     if (equal(tok, "&")) {
         lhs := cast(rest, tok.next);
-        add_type(lhs);
+        c.add_type(lhs);
         bf := lhs.kind == .ND_MEMBER && lhs.member.is_bitfield;
         !bf || error_tok(tok, "cannot take address of bitfield");
         returnc.new_unary(.ND_ADDR, lhs, tok);
@@ -2394,7 +2403,7 @@ fn unary(rest: **CC.Token, tok: *CC.Token) *CC.Node = {
         // anything. If foo is a function, `*foo`, `**foo` or `*****foo`
         // are all equivalent to just `foo`.
         CC.Node *node = cast(rest, tok.next);
-        add_type(node);
+        c.add_type(node);
         if (node.ty.kind == TY_FUNC)
             return node;
         returnc.new_unary(.ND_DEREF, node, tok);
@@ -2455,8 +2464,8 @@ fn get_struct_member(ty: *CC.Type, name: *CC.Token) ?*CC.Member = {
 // member "a" of the anonymous struct as "x.a".
 //
 // This function takes care of anonymous structs.
-fn struct_ref(node: *CC.Node, tok: *CC.Token) *CC.Node = {
-    add_type(node);
+fn struct_ref(c: *Ctx, node: *CC.Node, tok: *CC.Token) *CC.Node = {
+    c.add_type(node);
     ty := node.ty;
     has_fields := @is(ty.kind, .TY_STRUCT, .TY_UNION);
     if(!has_fields, => error_tok(node.tok, "not a struct nor a union"));
@@ -2470,11 +2479,11 @@ fn struct_ref(node: *CC.Node, tok: *CC.Token) *CC.Node = {
 }
 
 // Convert A++ to `(typeof A)((A += 1) - 1)`
-fn new_inc_dec(node: *CC.Node, tok: *CC.Token, addend: i64) *CC.Node = {
-    add_type(node);
-    return new_cast(new_add(to_assign(new_add(node, c.new_num(addend, tok), tok)),
+fn new_inc_dec(c: *Ctx, node: *CC.Node, tok: *CC.Token, addend: i64) *CC.Node = {
+    c.add_type(node);
+    c.new_cast(c.new_add(c.to_assign(c.new_add(node, c.new_num(addend, tok), tok)),
                                                    c.new_num(-addend, tok), tok),
-                                    node.ty);
+                                    node.ty)
 }
 
 // postfix = "(" type-name ")" "{" initializer-list "}"
@@ -2487,81 +2496,53 @@ fn new_inc_dec(node: *CC.Node, tok: *CC.Token, addend: i64) *CC.Node = {
 //                            | "->" ident
 //                            | "++"
 //                            | "--"
-fn postfix(rest: **CC.Token, tok: *CC.Token) *CC.Node = {
-    if equal(tok, "(") && is_typename(tok.next) {
-        // Compound literal
-        start := tok;
-        ty := typename(tok&, tok.next);
-        tok = skip(tok, ")");
-
-        if scope.next.is_null() {
-            var := c.new_anon_gvar(ty);
-            c.gvar_initializer(rest, tok, var);
-            return(c.new_var_node(var, start));
-        };
-
-        var := new_lvar("", ty);
-        lhs := lvar_initializer(rest, tok, var);
-        rhs := c.new_var_node(var, tok);
-        return(new_binary(.ND_COMMA, lhs, rhs, start));
-    };
-
-    node := primary(tok&, tok);
-
-    loop {
-        continue :: local_return;
-        if (equal(tok, "(")) {
-            node = funcall(tok&, tok.next, node);
-            continue();
-        };
-
-        if (equal(tok, "[")) {
+fn postfix(c: *Ctx, rest: **CC.Token, tok: *CC.Token, node: *CC.Node) *CC.Node = {
+    // TODO: use the table for this as well
+    //loop {
+    node = @match(tok.kind) {
+        fn @"("() => c.funcall(tok&, tok.next, node);
+        fn @"["() => {
             // x[y] is short for *(x+y)
-            Token *start = tok;
-            CC.Node *idx = expr(tok&, tok.next);
+            start := tok;
+            idx := c.parse_expr(tok&, tok.next, .None);
             tok = skip(tok, "]");
-            node = c.new_unary(.ND_DEREF, new_add(node, idx, start), start);
-            continue();
-        };
-
-        if (equal(tok, ".")) {
-            node = struct_ref(node, tok.next);
+            c.new_unary(.ND_DEREF, c.new_add(node, idx, start), start)
+        }
+        fn @"."() => {
+            node := c.struct_ref(node, tok.next);
             tok = tok.next.next;
-            continue();
+            node
         };
-
-        if (equal(tok, "->")) {
+        fn @"->"() => {
             // x->y is short for (*x).y
-            node = c.new_unary(.ND_DEREF, node, tok);
-            node = struct_ref(node, tok.next);
+            node := c.new_unary(.ND_DEREF, node, tok);
+            node := c.struct_ref(node, tok.next);
             tok = tok.next.next;
-            continue();
-        };
-
-        if (equal(tok, "++")) {
-            node = new_inc_dec(node, tok, 1);
-            tok = tok.next;
-            continue();
-        };
-
-        if (equal(tok, "--")) {
-            node = new_inc_dec(node, tok, -1);
-            tok = tok.next;
-            continue();
-        };
-
-        rest[] = tok;
-        return(node);
-    }
+            node
+        }
+        fn @"++"() => {
+            node := c.new_inc_dec(node, tok, 1);
+            tok   = tok.next;
+            node
+        }
+        fn @"--"() => {
+            node := c.new_inc_dec(node, tok, -1);
+            tok   = tok.next;
+            node
+        }
+        @default => panic("unreachable postfix");
+    };
+    rest[] = tok;
+    node
 }
 
 // funcall = (assign ("," assign)*)? ")"
-fn funcall(rest: **CC.Token, tok: *CC.Token, f: *CC.Node) *CC.Node = {
-    add_type(f);
+fn funcall(c: *Ctx, rest: **CC.Token, tok: *CC.Token, f: *CC.Node) *CC.Node = {
+    c.add_type(f);
 
-    if (f.ty.kind != TY_FUNC &&
-            (f.ty.kind != TY_PTR || f.ty.base.kind != TY_FUNC))
+    if (f.ty.kind != .TY_FUNC && (f.ty.kind != .TY_PTR || f.ty.base.kind != .TY_FUNC)) {
         error_tok(f.tok, "not a function");
+    };
 
     ty := if(f.ty.kind == .TY_FUNC, => f.ty, => f.ty.base);
     param_ty := ty.params;
@@ -2573,26 +2554,31 @@ fn funcall(rest: **CC.Token, tok: *CC.Token, f: *CC.Node) *CC.Node = {
             tok = skip(tok, ",");
         };
 
-        arg := assign(tok&, tok);
-        add_type(arg);
+        arg := c.parse_expr(tok&, tok, .Assignment);
+        c.add_type(arg);
 
-        if (!param_ty && !ty.is_variadic)
+        if param_ty.is_null() && !ty.is_variadic {
             error_tok(tok, "too many arguments");
+        };
 
-        if (param_ty) {
-            if (param_ty.kind != TY_STRUCT && param_ty.kind != TY_UNION)
-                arg = new_cast(arg, param_ty);
+        if !param_ty.is_null() {
+            if !@is(param_ty.kind, .TY_STRUCT, .TY_UNION) {
+                arg = c.new_cast(arg, param_ty);
+            };
             param_ty = param_ty.next;
-        } else if (arg.ty.kind == TY_FLOAT) {
-            // If parameter type is omitted (e.g. in "..."), float
-            // arguments are promoted to double.
-            arg = new_cast(arg, ty_double);
-        }
+        } else {
+            if arg.ty.kind == .TY_FLOAT {
+                // If parameter type is omitted (e.g. in "..."), float
+                // arguments are promoted to double.
+                arg = c.new_cast(arg, ty_double);
+            };
+        };
+        
+        cur.next = arg;
+        cur = cur.next;
+    };
 
-        cur = cur.next = arg;
-    }
-
-    if(param_ty, => error_tok(tok, "too few arguments"));
+    if(!param_ty.is_null(), => error_tok(tok, "too few arguments"));
 
     rest[] = skip(tok, ")");
 
@@ -2604,7 +2590,7 @@ fn funcall(rest: **CC.Token, tok: *CC.Token, f: *CC.Node) *CC.Node = {
     // If a function returns a struct, it is caller's responsibility
     // to allocate a space for the return value.
     if @is(node.ty.kind, .TY_STRUCT, .TY_UNION) {
-        node.ret_buffer = new_lvar("", node.ty);
+        node.ret_buffer = c.new_lvar("", node.ty);
     };
     node
 }
@@ -2618,7 +2604,7 @@ fn generic_selection(rest: **CC.Token, tok: *CC.Token) *CC.Node = {
     tok = skip(tok, "(");
 
     ctrl := assign(tok&, tok);
-    add_type(ctrl);
+    c.add_type(ctrl);
 
     t1 := ctrl.ty;
     t1 := @match(t1.kind) {
@@ -2681,7 +2667,7 @@ fn primary(rest: **CC.Token, tok: *CC.Token) *CC.Node = {
             }
         } else {
             node := unary(rest, tok.next);
-            add_type(node);
+            c.add_type(node);
             if node.ty.kind == .TY_VLA {
                c.new_var_node(node.ty.vla_size, tok)
             } else {
@@ -2694,7 +2680,7 @@ fn primary(rest: **CC.Token, tok: *CC.Token) *CC.Node = {
            c.new_ulong(ty.align, tok)
         } else {
             node := unary(rest, tok.next);
-            add_type(node);
+            c.add_type(node);
            c.new_ulong(node.ty.align, tok)
         };
         @if(equal(tok, "_Generic")) => generic_selection(rest, tok.next);
@@ -2777,8 +2763,8 @@ fn const_expr(c: *Ctx, rest: **CC.Token, tok: *CC.Token) i64 = {
 // to bitfields.
 fn to_assign(c: *Ctx, binary: *CC.Node) *CC.Node = {
     panic("TODO: to_assign"); /*
-    add_type(binary.lhs);
-    add_type(binary.rhs);
+    c.add_type(binary.lhs);
+    c.add_type(binary.rhs);
     tok: *CC.Token = binary.tok;
     
     // Convert `A.x op= C` to `tmp = &A, (*tmp).x = (*tmp).x op C`.

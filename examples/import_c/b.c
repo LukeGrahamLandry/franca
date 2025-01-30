@@ -1,4 +1,7 @@
 
-long foo(long a, long b) {
-    return a + b;
+void puts(char* s);
+
+int main() {
+    puts("Hello World");
+    return 0;
 }
