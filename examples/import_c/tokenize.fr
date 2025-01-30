@@ -1,18 +1,79 @@
+/*********************
+*   Parser Helpers   *
+**********************/
+
+error_tok :: fn(tok: *CC.Token, fmt: CStr) Never #import("chibicc") #c_variadic;
+
+fn str(tok: *CC.Token) Str = 
+    (ptr = tok.loc.ptr, len = tok.len.intcast());
 
 // Consumes the current token if it matches `op`.
-fn consume(rest: **Token, tok: *Token, str: Str) bool = {
+fn consume(rest: **CC.Token, tok: *CC.Token, $str: Str) bool #inline = {
     b := equal(tok, str);
+    ::if(@type tok);
     rest[] = if(b, => tok.next, => tok);
     b
 }
 
-fn equal(tok: *Token, op: Str) bool = 
-    tok.str() == op;
-    
+fn equal(tok: *CC.Token, $op: Str) bool #inline = 
+    @inline_match(@static(?TokenKind) TokenKind.from_name(op)) {  // TODO: make @inline_match work on values
+        fn Some(kind) => tok.kind == kind[];
+        fn None() => tok.str() == op;
+    };
+
 // Ensure that the current token is `op`.
-fn skip(tok: *Token, op: Str) *Token = {
+fn skip(tok: *CC.Token, $op: Str) *CC.Token #inline = {
     if !equal(tok, op) {
-        error_tok(tok, "expected '%s'", op);
+        error_tok(tok, "expected '%s'", op.sym().c_str());
     };
     tok.next
 }
+
+fn consume_end(tok: **CC.Token, $end: Str) bool #inline = {
+    if equal(tok[], end) {
+        tok[] = tok.next;
+        return(true);
+    };
+    if equal(tok[], ",") && equal(tok.next, end) {
+        tok[] = tok.next.next;
+        return(true);
+    };
+    false
+}
+
+TokenKind :: @enum(i32) (
+    TK_IDENT,   // Identifiers
+    TK_PUNCT,   // Punctuators
+    TK_KEYWORD, // Keywords
+    TK_STR,     // String literals
+    TK_NUM,     // Numeric literals
+    TK_PP_NUM,  // Preprocessing numbers
+    TK_EOF,     // End-of-file markers
+    
+    // TK_KEYWORD and TK_PUNCT get converted to one of these:
+    
+    return,    if,         else,
+    for,       while,      __attribute__,
+    case,      default,    do,
+    sizeof,    asm,        _Alignof,
+    break,     continue,   switch,
+    // start is_type_name
+    short,     inline,     long,
+    void,      typedef,    _Bool,
+    enum,      static,     union,
+    struct,    _Alignas,   extern,
+    signed,    unsigned,   const,
+    volatile,  auto,       register,
+    restrict,  __restrict, __restrict__,
+    _Noreturn, float,      double,
+    typeof,    char,       _Thread_local,
+    __thread,  _Atomic,    int,
+    // end is_type_name
+    goto,
+    
+    @"...", @".", @",", @"(", @")", @":", @"?", @"{", @"}", @";",
+    @"<<=", @">>=", @"...", @"==", @"!=", @"<=", @">=", @"->", @"+=", @"-=", @"*=", @"/=",
+    @"++",  @"--",  @"%=",  @"&=", @"|=", @"^=", @"&&", @"||", @"<<", @">>", @"##",
+    @"<<", @">>", @".", @"=", @"!", @"<", @">", @"-", @"+", @"-", @"*", @"/",
+    @"+",  @"-",  @"%",  @"&", @"|", @"^", @"&", @"|", @"<", @">", @"#",
+); 

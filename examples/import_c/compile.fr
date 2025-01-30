@@ -1,23 +1,5 @@
 // Adapted from chibicc. MIT License. Copyright (c) 2019 Rui Ueyama
 
-// This file contains a recursive descent parser for C.
-//
-// Most functions in this file are named after the symbols they are
-// supposed to read from an input token list. For example, stmt() is
-// responsible for reading a statement from a token list. The function
-// then construct an AST node representing a statement.
-//
-// Each function conceptually returns two values, an AST node and
-// remaining part of the input tokens. Since C doesn't support
-// multiple return values, the remaining tokens are returned to the
-// caller via a pointer argument.
-//
-// Input tokens are represented by a linked list. Unlike many recursive
-// descent parsers, we don't have the notion of the "input token stream".
-// Most parsing functions don't change the global state of the parser.
-// So it is very easy to lookahead arbitrary number of tokens in this
-// parser.
-
 // Scope for local variables, global variables, typedefs
 // or enum constants
 VarScope :: @struct {
@@ -28,7 +10,7 @@ VarScope :: @struct {
 };
 
 // Represents a block scope.
-Scope :: @struct {
+Scope :: @rec @struct {
     next: *Scope;
 
     // C has two block scopes; one is for variables/typedefs and
@@ -53,12 +35,12 @@ VarAttr :: @struct {
 Initializer :: @rec @struct {
     next: *Initializer;
     ty: *CC.Type;
-    tok: *Token;
+    tok: *CC.Token;
     is_flexible: bool;
 
     // If it's not an aggregate type and has an initializer,
     // `expr` has an initialization expression.
-    expr: *Node;
+    expr: *CC.Node;
 
     // If it's an initializer for an aggregate type (e.g. array or struct),
     // `children` has initializers for its children.
@@ -66,50 +48,55 @@ Initializer :: @rec @struct {
 
     // Only one member can be initialized for a union.
     // `mem` is used to clarify which member is initialized.
-    mem: *Member;
+    mem: *CC.Member;
 };
 
 // For local variable initializer.
-InitDesg :: @struct {
+InitDesg :: @rec @struct {
     next: *InitDesg;
     idx: i64;
-    member: *Member;
+    member: *CC.Member;
     var: *CC.Obj;
 };
 
 Ctx :: @struct {
     // All local variable instances created during parsing are
     // accumulated to this list.
-    locals: *Obj;
+    locals: *CC.Obj;
     
     // Likewise, global variables are accumulated to this list.
-    globals: *Obj;
+    globals: *CC.Obj;
     
     scope: *Scope;
     
     // Points to the function object the parser is currently parsing.
-    current_fn: *Obj;
+    current_fn: ?*CC.Obj;
     
     // Lists of all goto statements and labels in the curent function.
-    gotos: *Node;
-    labels: *Node;
+    gotos: *CC.Node;
+    labels: *CC.Node;
     
     // Current "goto" and "continue" jump targets.
-    brk_label: Str;
-    cont_label: Str;
+    brk_label: ?CStr;
+    cont_label: ?CStr;
     
     // Points to a node representing a switch if we are parsing
-    // a switch statement. Otherwise, NULL.
-    current_switch: *Node;
+    // a switch statement.
+    current_switch: ?*CC.Node;
     
-    builtin_alloca: *Obj;
+    builtin_alloca: *CC.Obj;
     
     arena: Alloc;
     next_var_id: i64;
 };
 
-fn align_down(n: i32, align: i32) i32 = 
+fn align_down(n: i64, align: i64) i64 = 
     align_to(n - align + 1, align);
+
+:: {
+    assert_eq(align_to(5, 8), 8);
+    assert_eq(align_to(11, 8), 16);
+};
 
 fn enter_scope(c: *Ctx) void = {
     sc := temp().box(Scope);
@@ -122,33 +109,97 @@ fn leave_scope(c: *Ctx) void = {
 }
 
 // Find a variable by name.
-fn find_var(c: *Ctx, tok: *Token) ?*VarScope = {
-    for (Scope *sc = scope; sc; sc = sc.next) {
-        VarScope *sc2 = hashmap_get2(&sc.vars, tok.loc, tok.len);
-        if (sc2)
-            return sc2;
-    }
-    return NULL;
+fn find_var(c: *Ctx, tok: *CC.Token) ?*VarScope = {
+    sc := c.scope;
+    for_linked sc { sc |
+        if sc.vars&.get(tok.str()) { sc2 |
+            return(Some = sc2);
+        };
+    };
+    .None
 }
 
-fn find_tag(tok: *Token) ?*CC.Type = {
-    name := tok.str();
-    for (Scope *sc = scope; sc; sc = sc.next) {
-        if sc.tags&.get(name) { ty |
+fn find_tag(c: *Ctx, tok: *CC.Token) ?*CC.Type = {
+    sc := c.scope;
+    for_linked sc { sc |
+        if sc.tags&.get(tok.str()) { ty |
             return(Some = ty);
         };  
     };
     .None
 }
 
-fn push_scope(name: Str) *VarScope = {
+fn push_scope(c: *Ctx, name: Str) *VarScope = {
     sc := temp().box(VarScope);
     insert(c.scope.vars&, name, sc);
     sc
 }
 
-fn new_initializer(ty: *CC.Type, is_flexible: bool) *Initializer = {
-    init := calloc(1, sizeof(Initializer));
+fn new_node(c: *Ctx, kind: CC.NodeKind, tok: *CC.Token) *CC.Node = {
+    node := temp().box(CC.Node);
+    node.kind = kind;
+    node.tok = tok;
+    node
+}
+
+fn new_binary(c: *Ctx, kind: CC.NodeKind, lhs: *CC.Node, rhs: *CC.Node, tok: *CC.Token) *CC.Node = {
+    node := c.new_node(kind, tok);
+    node.lhs = lhs;
+    node.rhs = rhs;
+    node
+}
+
+fn new_unary(c: *Ctx, kind: CC.NodeKind, expr: *CC.Node, tok: *CC.Token) *CC.Node = {
+    node := c.new_node(kind, tok);
+    node.lhs = expr;
+    node
+}
+
+fn new_num(c: *Ctx, val: i64, tok: *CC.Token) *CC.Node = {
+    node := c.new_node(.ND_NUM, tok);
+    node.val = val;
+    node
+}
+
+fn new_long(c: *Ctx, val: i64, tok: *CC.Token) *CC.Node = {
+    node := c.new_node(.ND_NUM, tok);
+    node.val = val;
+    node.ty = ty_long;
+    node
+}
+
+fn new_ulong(c: *Ctx, val: i64, tok: *CC.Token) *CC.Node = {
+    node := c.new_node(.ND_NUM, tok);
+    node.val = val;
+    node.ty = ty_ulong;
+    node
+}
+
+fn new_var_node(c: *Ctx, var: *CC.Obj, tok: *CC.Token) *CC.Node = {
+    node := c.new_node(.ND_VAR, tok);
+    node.var = var;
+    node
+}
+
+fn new_vla_ptr(c: *Ctx, var: *CC.Obj, tok: *CC.Token) *CC.Node = {
+    node := c.new_node(.ND_VLA_PTR, tok);
+    node.var = var;
+    node
+}
+
+fn new_cast(c: *Ctx, expr: *CC.Node, ty: *CC.Type) *CC.Node = {
+    add_type(expr);
+    
+    node := temp().box(CC.Node);
+    node.kind = .ND_CAST;
+    node.tok = expr.tok;
+    node.lhs = expr;
+    node.ty = copy_type(ty);
+    node
+}
+
+fn new_initializer(c: *Ctx, ty: *CC.Type, is_flexible: bool) *Initializer = {
+    init := temp().box(Initializer);
     init.ty = ty;
 
     if ty.kind == .TY_ARRAY {
@@ -157,57 +208,58 @@ fn new_initializer(ty: *CC.Type, is_flexible: bool) *Initializer = {
             return(init);
         };
 
-        init.children = calloc(ty.array_len, sizeof(Initializer *));
+        init.children = temp().alloc(*Initializer, ty.array_len.intcast());
         each init.children { it |
-            it[] = new_initializer(ty.base, false);
+            it[] = c.new_initializer(ty.base, false);
         };
-        return(init);
     };
 
     if ty.kind == .TY_STRUCT || ty.kind == .TY_UNION {
         // Count the number of struct members.
         len := 0;
-        for (Member *mem = ty.members; mem; mem = mem.next)
-            len++;
-
-        init.children = calloc(len, sizeof(Initializer *));
-
-        for (Member *mem = ty.members; mem; mem = mem.next) {
-            if (is_flexible && ty.is_flexible && !mem.next) {
-                Initializer *child = calloc(1, sizeof(Initializer));
-                child.ty = mem.ty;
-                child.is_flexible = true;
-                init.children[mem.idx] = child;
-            } else {
-                init.children[mem.idx] = new_initializer(mem.ty, false);
-            }
+        mem := ty.members;
+        for_linked mem { mem |
+            len += 1;
         };
-        return(init);
+        init.children = temp().alloc(*Initializer, len);
+
+        for_linked mem { mem |
+            ::if(*Initializer);
+            init.children[mem.idx.intcast()] = 
+                if is_flexible && ty.is_flexible && mem.next.is_null() {
+                    child := temp().box(Initializer);
+                    child.ty = mem.ty;
+                    child.is_flexible = true;
+                    child
+                } else {
+                    c.new_initializer(mem.ty, false)
+                };
+        };
     };
 
     init
 }
 
-fn new_var(name: Str, ty: *CC.Type) *CC.Obj = {
-    Obj *var := calloc(1, sizeof(Obj));
-    var.name = name;
+fn new_var(c: *Ctx, name: Str, ty: *CC.Type) *CC.Obj = {
+    var := temp().box(CC.Obj);
+    var.name = name.slow_convert_to_c_string();
     var.ty = ty;
     var.align = ty.align;
-    push_scope(name)[].var = var;
+    c.push_scope(name)[].var = var;
     var
 }
 
 fn new_lvar(c: *Ctx, name: Str, ty: *CC.Type) *CC.Obj = {
     var := c.new_var(name, ty);
     var.is_local = true;
-    var.next = locals;
-    locals = var;
+    var.next = c.locals;
+    c.locals = var;
     var
 }
 
 fn new_gvar(c: *Ctx, name: Str, ty: *CC.Type) *CC.Obj = {
     var := c.new_var(name, ty);
-    var.next = globals;
+    var.next = c.globals;
     var.is_static = true;
     var.is_definition = true;
     c.globals = var;
@@ -221,22 +273,22 @@ fn new_unique_name(c: *Ctx) Str = {
 }
 
 fn new_anon_gvar(c: *Ctx, ty: *CC.Type) *CC.Obj = 
-    new_gvar(c.new_unique_name(), ty);
+    c.new_gvar(c.new_unique_name(), ty);
 
 fn new_string_literal(c: *Ctx, p: []u8, ty: *CC.Type) *CC.Obj = {
     var := c.new_anon_gvar(ty);
-    var.init_data = p;
+    var.init_data.ptr = p.ptr;
     var
 }
 
-fn get_ident(tok: *Token) Str = {
+fn get_ident(tok: *CC.Token) Str = {
     if tok.kind != .TK_IDENT {
         error_tok(tok, "expected an identifier");
     };
     tok.str()  // TODO: make sure we never mutate this (its not a copy!)
 }
 
-fn find_typedef(c: *Ctx, tok: *Token) ?*CC.Type = {
+fn find_typedef(c: *Ctx, tok: *CC.Token) ?*CC.Type = {
     if tok.kind == .TK_IDENT {
         if c.find_var(tok) { sc |
             return(Some = sc.type_def);
@@ -245,10 +297,7 @@ fn find_typedef(c: *Ctx, tok: *Token) ?*CC.Type = {
     .None
 }
 
-fn str(t: *Token) Str = 
-    (ptr = tok.loc, len = tok.len);
-
-fn push_tag_scope(c: *Ctx, tok: *Token, ty: *CC.Type) void = {
+fn push_tag_scope(c: *Ctx, tok: *CC.Token, ty: *CC.Type) void = {
     c.scope.tags&.insert(tok.str(), ty);
 }
 
@@ -272,25 +321,25 @@ fn push_tag_scope(c: *Ctx, tok: *Token, ty: *CC.Type) void = {
 // while keeping the "current" type object that the typenames up
 // until that point represent. When we reach a non-typename token,
 // we return the current type object.
-fn declspec(c: *Ctx, rest: **Token, tok: *Token, attr: ?*VarAttr) *CC.Type = {
+fn declspec(c: *Ctx, rest: **CC.Token, tok: *CC.Token, attr: ?*VarAttr) *CC.Type = {
     // We use a single integer as counters for all typenames.
     // For example, bits 0 and 1 represents how many times we saw the
     // keyword "void" so far. With this, we can use a switch statement
     // as you can see below.
     S :: @enum(i64) (
-        void     = 1.shift_left(0),
-        _Bool    = 1.shift_left(2),
-        char     = 1.shift_left(4),
-        short    = 1.shift_left(6),
-        int      = 1.shift_left(8),
-        long     = 1.shift_left(10),
-        float    = 1.shift_left(12),
-        double   = 1.shift_left(14),
-        // other = 1.shift_left(16),
-        signed   = 1.shift_left(17),
-        unsigned = 1.shift_left(18),
+        void     = 0,
+        _Bool    = 2,
+        char     = 4,
+        short    = 6,
+        int      = 8,
+        long     = 10,
+        float    = 12,
+        double   = 14,
+        // other = 16,
+        signed   = 17,
+        unsigned = 18,
     );  :: enum(S);
-    Specifier_Other :: 1.shift_left(16);
+    Specifier_Other :: 16;
     
     ty        := ty_int;
     counter   := 0;
@@ -298,103 +347,96 @@ fn declspec(c: *Ctx, rest: **Token, tok: *Token, attr: ?*VarAttr) *CC.Type = {
 
     if true {
         break :: local_return;
-        while => is_typename(tok) {
-            continue :: local_return();
+        while => c.is_typename(tok) {
+            continue :: local_return;
             
             // Handle storage class specifiers.
-            if (equal(tok, "typedef") || equal(tok, "static") || equal(tok, "extern") ||
-                    equal(tok, "inline") || equal(tok, "_Thread_local") || equal(tok, "__thread")) {
-                if (!attr)
-                    error_tok(tok, "storage class specifier is not allowed in this context");
+            if @is(tok.kind, .typedef, .static, .extern, .inline, ._Thread_local, .__thread) {
+                attr := attr || error_tok(tok, "storage class specifier is not allowed in this context");
+                field := @match(tok.kind) {
+                    fn typedef() => attr.is_typedef&;
+                    fn static()  => attr.is_static&;
+                    fn extern()  => attr.is_extern&;
+                    fn inline()  => attr.is_inline&;
+                    @default     => attr.is_tls&;
+                };
+                field[] = true;
     
-                if (equal(tok, "typedef"))
-                    attr.is_typedef = true;
-                else if (equal(tok, "static"))
-                    attr.is_static = true;
-                else if (equal(tok, "extern"))
-                    attr.is_extern = true;
-                else if (equal(tok, "inline"))
-                    attr.is_inline = true;
-                else
-                    attr.is_tls = true;
-    
-                if (attr.is_typedef &&
-                        attr.is_static + attr.is_extern + attr.is_inline + attr.is_tls > 1)
-                    error_tok(tok, "typedef may not be used together with static,"
-                                        " extern, inline, __thread or _Thread_local");
+                count := attr.is_static.int() + attr.is_extern.int() + attr.is_inline.int() + attr.is_tls.int();
+                // TODO: why not >= ?
+                if attr.is_typedef && count > 1 {
+                    error_tok(tok, "typedef may not be used together with static, extern, inline, __thread or _Thread_local");
+                };
                 tok = tok.next;
                 continue();
-            }
+            };
     
             // These keywords are recognized but ignored.
-            !ignore(tok&, tok, @static_const(
+            !ignore(tok&, tok, @const_slice(
                 "const", "volatile", "auto", "register", "restrict", "__restrict", "__restrict__", "_Noreturn", 
             )) || continue();
             
             if equal(tok, "_Atomic") {
                 tok = tok.next;
                 if (equal(tok , "(")) {
-                    ty = typename(tok&, tok.next);
+                    ty = c.typename(tok&, tok.next);
                     tok = skip(tok, ")");
-                }
+                };
                 is_atomic = true;
                 continue();
-            }
+            };
     
             if (equal(tok, "_Alignas")) {
-                if (!attr)
-                    error_tok(tok, "_Alignas is not allowed in this context");
+                attr := attr || error_tok(tok, "_Alignas is not allowed in this context");
                 tok = skip(tok.next, "(");
     
-                attr.align = if is_typename(tok) {
-                    typename(tok&, tok)[].align
+                attr.align = if c.is_typename(tok) {
+                    c.typename(tok&, tok)[].align
                 } else {
-                    const_expr(tok&, tok)
+                    c.const_expr(tok&, tok).intcast()
                 };
                 tok = skip(tok, ")");
                 continue();
             };
     
             // Handle user-defined types.
-            ty2 := find_typedef(tok);
+            ty2 := c.find_typedef(tok);
             if (equal(tok, "struct") || equal(tok, "union") || equal(tok, "enum") ||
-                    equal(tok, "typeof") || ty2) {
+                    equal(tok, "typeof") || ty2.is_some()) {
                 if(counter != 0, => break());
     
-                if (equal(tok, "struct")) {
-                    ty = struct_decl(tok&, tok.next);
-                } else if (equal(tok, "union")) {
-                    ty = union_decl(tok&, tok.next);
-                } else if (equal(tok, "enum")) {
-                    ty = enum_specifier(tok&, tok.next);
-                } else if (equal(tok, "typeof")) {
-                    ty = typeof_specifier(tok&, tok.next);
-                } else {
-                    ty = ty2;
-                    tok = tok.next;
+                ty := @match(tok.kind) {
+                    fn struct() => c.struct_decl(tok&, tok.next);
+                    fn union()  => c.union_decl(tok&, tok.next);
+                    fn enum()   => c.enum_specifier(tok&, tok.next);
+                    fn typeof() => c.typeof_specifier(tok&, tok.next);
+                    @default    => {
+                        tok = tok.next;
+                        ty2.unwrap()
+                    };
                 };
     
-                counter += Specifier_Other;
+                counter += 1.shift_left(Specifier_Other);
                 continue();
             };
     
             // Handle built-in types.
-            for_enum S { s |
-                if equal(tok, s.name()) {
-                    if @is(s, .signed, .unsigned) {
-                        counter = counter.bit_or(s.raw());
+            inline_for_enum S { $s |
+                if equal(tok, s[].name_str()) {
+                    if (:: @is(s[], .signed, .unsigned)) {
+                        counter = counter.bit_or(:: 1.shift_left(s[].raw()));
                     } else {
-                        counter += s.raw();
+                        counter += :: 1.shift_left(s[].raw());
                     };
                 };
             };
             
             SS :: fn(e: FatExpr) FatExpr #macro = {
                 i := 0;
-                each e.items() { e |
-                    i += const_eval(S)(e[]).raw();
+                each e&.items() { e |
+                    i += 1.shift_left(const_eval(S)(e[]).raw());
                 };
-                i
+                @literal i
             };
             
             ty = @switch(counter) {
@@ -445,13 +487,13 @@ fn declspec(c: *Ctx, rest: **Token, tok: *Token, attr: ?*VarAttr) *CC.Type = {
 
 // func-params = ("void" | param ("," param)* ("," "...")?)? ")"
 // param             = declspec declarator
-fn func_params(c: *Ctx, rest: **Token, tok: *Token, ty: *CC.Type) *CC.Type = {
-    if (equal(tok, "void") && equal(tok.next, ")")) {
+fn func_params(c: *Ctx, rest: **CC.Token, tok: *CC.Token, ty: *CC.Type) *CC.Type = {
+    if equal(tok, "void") && equal(tok.next, ")") {
         rest[] = tok.next.next;
         return(func_type(ty));
     };
 
-    head := Type.zeroed();
+    head := CC.Type.zeroed();
     cur  := head&;
     is_variadic := false;
 
@@ -467,10 +509,10 @@ fn func_params(c: *Ctx, rest: **Token, tok: *Token, ty: *CC.Type) *CC.Type = {
                 tok = tok.next;
                 skip(tok, ")");
                 break();
-            }
+            };
     
-            ty2 := declspec(tok&, tok, NULL);
-            ty2  = declarator(tok&, tok, ty2);
+            ty2 := c.declspec(tok&, tok, .None);
+            ty2  = c.declarator(tok&, tok, ty2);
     
             name := ty2.name;
             @match(ty2.kind) {
@@ -506,7 +548,7 @@ fn func_params(c: *Ctx, rest: **Token, tok: *Token, ty: *CC.Type) *CC.Type = {
 }
 
 // array-dimensions = ("static" | "restrict")* const-expr? "]" type-suffix
-fn array_dimensions(c: *Ctx, rest: **Token, tok: *Token, ty: *CC.Type) *CC.Type = {
+fn array_dimensions(c: *Ctx, rest: **CC.Token, tok: *CC.Token, ty: *CC.Type) *CC.Type = {
     dowhile {
         ignore(tok&, tok, @const_slice("static", "restrict"))
     };
@@ -516,21 +558,21 @@ fn array_dimensions(c: *Ctx, rest: **Token, tok: *Token, ty: *CC.Type) *CC.Type 
         return(array_of(ty, -1));
     };
 
-    expr := c.conditional(tok&, tok);
+    expr := c.parse_expr(tok&, tok, .Conditional);
     tok   = skip(tok, "]");
-    ty    = type_suffix(rest, tok, ty);
+    ty    = c.type_suffix(rest, tok, ty);
 
-    if ty.kind == .TY_VLA || !is_const_expr(expr) {
+    if ty.kind == .TY_VLA || !c.is_const_expr(expr) {
         vla_of(ty, expr)
     } else {
-        array_of(ty, eval(expr))
+        array_of(ty, c.eval(expr).intcast())
     }
 }
 
 // type-suffix = "(" func-params
 //                         | "[" array-dimensions
 //                         | ε
-fn type_suffix(c: *Ctx, rest: **Token, tok: *Token, ty: *CC.Type) *CC.Type = {
+fn type_suffix(c: *Ctx, rest: **CC.Token, tok: *CC.Token, ty: *CC.Type) *CC.Type = {
     if(equal(tok, "("), => return(c.func_params(rest, tok.next, ty)));
     if(equal(tok, "["), => return(c.array_dimensions(rest, tok.next, ty)));
     rest[] = tok;
@@ -538,7 +580,7 @@ fn type_suffix(c: *Ctx, rest: **Token, tok: *Token, ty: *CC.Type) *CC.Type = {
 }
 
 // pointers = ("*" ("const" | "volatile" | "restrict")*)*
-fn pointers(c: *Ctx, rest: **Token, tok: *Token, ty: *CC.Type) *CC.Type = {
+fn pointers(c: *Ctx, rest: **CC.Token, tok: *CC.Token, ty: *CC.Type) *CC.Type = {
     while => consume(tok&, tok, "*") {
         ty = pointer_to(ty);
         dowhile {
@@ -549,27 +591,27 @@ fn pointers(c: *Ctx, rest: **Token, tok: *Token, ty: *CC.Type) *CC.Type = {
     ty
 }
 
-fn ignore(rest: **Token, tok: *Token, $ignored: []Str) bool #inline = {
-    inline_for ignored { kw |
-        if(consume(rest, tok, kw), => return(true));
+fn ignore(rest: **CC.Token, tok: *CC.Token, $ignored: []Str) bool #inline = {
+    inline_for ignored { $kw |
+        if(consume(rest, tok, ::kw[]), => return(true));
     };
     false
 }
 
 // declarator = pointers ("(" ident ")" | "(" declarator ")" | ident) type-suffix
-fn declarator(c: *Ctx, rest: **Token, tok: *Token, ty: *CC.Type) *CC.Type = {
-    ty = pointers(tok&, tok, ty);
+fn declarator(c: *Ctx, rest: **CC.Token, tok: *CC.Token, ty: *CC.Type) *CC.Type = {
+    ty = c.pointers(tok&, tok, ty);
 
     if equal(tok, "(") {
         start := tok;
-        dummy := Type.zeroed();
-        declarator(tok&, start.next, dummy&);
+        dummy := CC.Type.zeroed();
+        c.declarator(tok&, start.next, dummy&);
         tok = skip(tok, ")");
-        ty = type_suffix(rest, tok, ty);
-        return(declarator(tok&, start.next, ty));
+        ty = c.type_suffix(rest, tok, ty);
+        return(c.declarator(tok&, start.next, ty));
     };
 
-    name := Token.ptr_from_int(0);
+    name := CC.Token.ptr_from_int(0);
     name_pos := tok;
 
     if tok.kind == .TK_IDENT {
@@ -577,85 +619,69 @@ fn declarator(c: *Ctx, rest: **Token, tok: *Token, ty: *CC.Type) *CC.Type = {
         tok = tok.next;
     };
 
-    ty = type_suffix(rest, tok, ty);
+    ty = c.type_suffix(rest, tok, ty);
     ty.name = name;
     ty.name_pos = name_pos;
     ty
 }
 
 // abstract-declarator = pointers ("(" abstract-declarator ")")? type-suffix
-fn abstract_declarator(c: *Ctx, rest: **Token, tok: *Token, ty: *CC.Type) *CC.Type = {
-    ty = pointers(tok&, tok, ty);
+fn abstract_declarator(c: *Ctx, rest: **CC.Token, tok: *CC.Token, ty: *CC.Type) *CC.Type = {
+    ty = c.pointers(tok&, tok, ty);
     if equal(tok, "(") {
         start := tok;
-        dummy := Type.zeroed();
-        abstract_declarator(tok&, start.next, dummy&);
+        dummy := CC.Type.zeroed();
+        c.abstract_declarator(tok&, start.next, dummy&);
         tok = skip(tok, ")");
-        ty  = type_suffix(rest, tok, ty);
-        abstract_declarator(tok&, start.next, ty)
+        ty  = c.type_suffix(rest, tok, ty);
+        c.abstract_declarator(tok&, start.next, ty)
     } else {
-        type_suffix(rest, tok, ty)
+        c.type_suffix(rest, tok, ty)
     }
 }
 
 // type-name = declspec abstract-declarator
-fn typename(rest: **Token, tok: *Token) *CC.Type = {
-    ty := declspec(tok&, tok, NULL);
-    abstract_declarator(rest, tok, ty)
+fn typename(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Type = {
+    ty := c.declspec(tok&, tok, .None);
+    c.abstract_declarator(rest, tok, ty)
 }
 
-fn is_end(tok: *Token) bool = 
+fn is_end(tok: *CC.Token) bool = 
     equal(tok, "}") || (equal(tok, ",") && equal(tok.next, "}"));
-
-fn consume_end(rest: **Token, tok: *Token) bool = {
-    if equal(tok, "}") {
-        rest[] = tok.next;
-        return(true);
-    };
-    if equal(tok, ",") && equal(tok.next, "}") {
-        rest[] = tok.next.next;
-        return(true);
-    };
-    false
-}
 
 // enum-specifier = ident? "{" enum-list? "}"
 //                                | ident ("{" enum-list? "}")?
 //
 // enum-list            = ident ("=" num)? ("," ident ("=" num)?)* ","?
-fn enum_specifier(c: *Ctx, rest: **Token, tok: *Token) *CC.Type = {
-    Type *ty = enum_type();
+fn enum_specifier(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Type = {
+    ty := enum_type();
 
     // Read a struct tag.
-    tag: ?*Token = .None;
+    tag: ?*CC.Token = .None;
     if tok.kind == .TK_IDENT {
         tag = (Some = tok);
         tok = tok.next;
     };
 
-    if tag.is_some() && !equal(tok, "{") {
-        ty := find_tag(tag) || error_tok(tag, "unknown enum type");
-        if(ty.kind != .TY_ENUM, => error_tok(tag, "not an enum tag"));
-        rest[] = tok;
-        return(ty);
+    if tag { tag |
+        if !equal(tok, "{") {
+            ty := c.find_tag(tag) || error_tok(tag, "unknown enum type");
+            if(ty.kind != .TY_ENUM, => error_tok(tag, "not an enum tag"));
+            rest[] = tok;
+            return(ty);
+        };
     };
 
     tok = skip(tok, "{");
 
     // Read an enum-list.
-    i   := 0;
     val := 0;
-    while => !consume_end(rest, tok) {
-        if i > 0 {
-            tok = skip(tok, ",");
-        };
-        i += 1;
-
+    comma_sep(tok&, "}") {
         name := get_ident(tok);
         tok = tok.next;
 
         if equal(tok, "=") {
-            val = const_expr(tok&, tok.next);
+            val = c.const_expr(tok&, tok.next);
         };
 
         sc := c.push_scope(name);
@@ -663,6 +689,7 @@ fn enum_specifier(c: *Ctx, rest: **Token, tok: *Token) *CC.Type = {
         sc.enum_val = val;
         val += 1;
     };
+    rest[] = tok;
 
     if tag { tag |
         c.push_tag_scope(tag, ty);
@@ -671,12 +698,12 @@ fn enum_specifier(c: *Ctx, rest: **Token, tok: *Token) *CC.Type = {
 }
 
 // typeof-specifier = "(" (expr | typename) ")"
-fn typeof_specifier(rest: **Token, tok: *Token) *CC.Type = {
+fn typeof_specifier(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Type = {
     tok = skip(tok, "(");
-    ty := if (is_typename(tok)) {
-        typename(tok&, tok)
+    ty := if c.is_typename(tok) {
+        c.typename(tok&, tok)
     } else {
-        node := expr(tok&, tok);
+        node := c.parse_expr(tok&, tok, .None);
         add_type(node);
         node.ty
     };
@@ -685,93 +712,96 @@ fn typeof_specifier(rest: **Token, tok: *Token) *CC.Type = {
 }
 
 // Generate code for computing a VLA size.
-fn compute_vla_size(ty: *CC.Type, tok: *Token) *Node = {
-    node := c.new_node(ND_NULL_EXPR, tok);
+fn compute_vla_size(c: *Ctx, ty: *CC.Type, tok: *CC.Token) *CC.Node = {
+    node := c.new_node(.ND_NULL_EXPR, tok);
     if !ty.base.is_null() {
-        node = new_binary(ND_COMMA, node, compute_vla_size(ty.base, tok), tok);
+        node = c.new_binary(.ND_COMMA, node, c.compute_vla_size(ty.base, tok), tok);
     };
 
-    if(ty.kind != .TY_VLA, => return(node);
+    if(ty.kind != .TY_VLA, => return(node));
 
     base_sz := if ty.base.kind == .TY_VLA {
-        new_var_node(ty.base.vla_size, tok)
+       c.new_var_node(ty.base.vla_size, tok)
     } else {
-        new_num(ty.base.size, tok)
+       c.new_num(ty.base.size.intcast(), tok)
     };
 
-    ty.vla_size = new_lvar("", ty_ulong);
-    left  := new_var_node(ty.vla_size, tok);
-    right := new_binary(.ND_MUL, ty.vla_len, base_sz, tok);
-    expr  := new_binary(.ND_ASSIGN, left, right, tok);
-    new_binary(.ND_COMMA, node, expr, tok)
+    ty.vla_size = c.new_lvar("", ty_ulong);
+    left  := c.new_var_node(ty.vla_size, tok);
+    right := c.new_binary(.ND_MUL, ty.vla_len, base_sz, tok);
+    expr  := c.new_binary(.ND_ASSIGN, left, right, tok);
+   c.new_binary(.ND_COMMA, node, expr, tok)
 }
 
-fn new_alloca(sz: *Node) *Node = {
-    node := new_unary(ND_FUNCALL, new_var_node(builtin_alloca, sz.tok), sz.tok);
-    node.func_ty = builtin_alloca.ty;
-    node.ty = builtin_alloca.ty.return_ty;
+fn new_alloca(c: *Ctx, sz: *CC.Node) *CC.Node = {
+    node := c.new_unary(.ND_FUNCALL, c.new_var_node(c.builtin_alloca, sz.tok), sz.tok);
+    node.func_ty = c.builtin_alloca.ty;
+    node.ty = c.builtin_alloca.ty.return_ty;
     node.args = sz;
     add_type(sz);
     node
 }
 
 // declaration = declspec (declarator ("=" expr)? ("," declarator ("=" expr)?)*)? ";"
-fn declaration(rest: **Token, tok: *Token, basety: *CC.Type, attr: *VarAttr) *Node = {
-    head := Node.zeroed();
+fn declaration(c: *Ctx, rest: **CC.Token, tok: *CC.Token, basety: *CC.Type, attr: ?*VarAttr) *CC.Node = {
+    head := CC.Node.zeroed();
     cur  := head&;
-    i    := 0;
 
-    while => !equal(tok, ";") {
-        if i > 0 {
-            tok = skip(tok, ",");
-        };
-        i += 1;
-        ty := declarator(tok&, tok, basety);
-        if(ty.kind == TY_VOID, => error_tok(tok, "variable declared void"));
-        if (!ty.name)
+    comma_sep(tok&, ";") {
+        continue :: local_return;
+        ty := c.declarator(tok&, tok, basety);
+        if(ty.kind == .TY_VOID, => error_tok(tok, "variable declared void"));
+        if ty.name.is_null() {
             error_tok(ty.name_pos, "variable name omitted");
+        };
 
-        if attr && attr.is_static {
-            // static local variable
-            var := new_anon_gvar(ty);
-            push_scope(get_ident(ty.name))[].var = var;
-            if equal(tok, "=") {
-                gvar_initializer(tok&, tok.next, var);
-            };
-            continue();
+        if attr { attr |
+            if attr.is_static {
+                // static locals are secretly globals
+                var := c.new_anon_gvar(ty);
+                c.push_scope(get_ident(ty.name))[].var = var;
+                if equal(tok, "=") {
+                    c.gvar_initializer(tok&, tok.next, var);
+                };
+                continue();
+            }
         };
 
         // Generate code for computing a VLA size. We need to do this
         // even if ty is not VLA because ty may be a pointer to VLA
         // (e.g. int (*foo)[n][m] where n and m are variables.)
-        cur.next = new_unary(.ND_EXPR_STMT, compute_vla_size(ty, tok), tok);
+        cur.next = c.new_unary(.ND_EXPR_STMT, c.compute_vla_size(ty, tok), tok);
         cur = cur.next;
         
-        if (ty.kind == TY_VLA) {
-            if (equal(tok, "="))
-                error_tok(tok, "variable-sized object may not be initialized");
+        if ty.kind == .TY_VLA {
+            if(equal(tok, "="), => error_tok(tok, "variable-sized object may not be initialized"));
 
             // Variable length arrays (VLAs) are translated to alloca() calls.
             // For example, `int x[n+2]` is translated to `tmp = n + 2,
             // x = alloca(tmp)`.
-            Obj *var = new_lvar(get_ident(ty.name), ty);
-            tok: *Token = ty.name;
-            Node *expr = new_binary(ND_ASSIGN, new_vla_ptr(var, tok),
-                                                            new_alloca(new_var_node(ty.vla_size, tok)),
+            var := c.new_lvar(get_ident(ty.name), ty);
+            tok := ty.name;
+            expr := c.new_binary(.ND_ASSIGN, c.new_vla_ptr(var, tok),
+                                                            c.new_alloca(c.new_var_node(ty.vla_size, tok)),
                                                             tok);
 
-            cur = cur.next = new_unary(ND_EXPR_STMT, expr, tok);
+            cur.next = c.new_unary(.ND_EXPR_STMT, expr, tok);
+            cur = cur.next;
             continue();
-        }
+        };
 
-        var := new_lvar(get_ident(ty.name), ty);
-        if (attr && attr.align)
-            var.align = attr.align;
+        var := c.new_lvar(get_ident(ty.name), ty);
+        if attr { attr |
+            if attr.align != 0 {
+                var.align = attr.align;
+            };
+        };
 
-        if (equal(tok, "=")) {
-            Node *expr = lvar_initializer(tok&, tok.next, var);
-            cur = cur.next = new_unary(ND_EXPR_STMT, expr, tok);
-        }
+        if equal(tok, "=") {
+            expr := c.lvar_initializer(tok&, tok.next, var);
+            cur.next = c.new_unary(.ND_EXPR_STMT, expr, tok);
+            cur = cur.next;
+        };
 
         if(var.ty.size < 0,         => error_tok(ty.name, "variable has incomplete type"));
         if(var.ty.kind == .TY_VOID, => error_tok(ty.name, "variable declared void"));
@@ -783,42 +813,45 @@ fn declaration(rest: **Token, tok: *Token, basety: *CC.Type, attr: *VarAttr) *No
     node
 }
 
-fn skip_excess_element(tok: *Token) *Token = {
+fn skip_excess_element(c: *Ctx, tok: *CC.Token) *CC.Token = {
     if equal(tok, "{") {
-        tok = skip_excess_element(tok.next);
+        tok = c.skip_excess_element(tok.next);
         tok = skip(tok, "}");
     } else {
-        assign(tok&, tok);
+        c.parse_expr(tok&, tok, .Assignment);
     };
     tok
 }
 
 // string-initializer = string-literal
-fn string_initializer(rest: **Token, tok: *Token, init: *Initializer) void = {
+fn string_initializer(c: *Ctx, rest: **CC.Token, tok: *CC.Token, init: *Initializer) void = {
     if init.is_flexible {
-        init[] = new_initializer(array_of(init.ty.base, tok.ty.array_len), false)[];
+        init[] = c.new_initializer(array_of(init.ty.base, tok.ty.array_len), false)[];
     };
 
     len := min(init.ty.array_len, tok.ty.array_len);
 
+    panic("TODO: string_initializer");
+    /*
     @switch(init.ty.base.size) {
         @case(1) => {
             char *str = tok.str;
             for (int i = 0; i < len; i++)
-                init.children[i].expr = new_num(str[i], tok);
+                init.children[i].expr = c.new_num(str[i], tok);
         }
         @case(2) => {
             uint16_t *str = (uint16_t *)tok.str;
             for (int i = 0; i < len; i++)
-                init.children[i].expr = new_num(str[i], tok);
+                init.children[i].expr = c.new_num(str[i], tok);
         }
         @case(4) => {
             uint32_t *str = (uint32_t *)tok.str;
             for (int i = 0; i < len; i++)
-                init.children[i].expr = new_num(str[i], tok);
+                init.children[i].expr = c.new_num(str[i], tok);
         }
         @default => unreachable();
     };
+    */
     
     rest[] = tok.next;
 }
@@ -848,17 +881,15 @@ fn string_initializer(rest: **Token, tok: *Token, init: *Initializer) void = {
 //     struct { int a, b, c; } x = { .c=5 };
 //
 // The above initializer sets x.c to 5.
-fn array_designator(rest: **Token, tok: *Token, ty: *CC.Type) Ty(i64, i64) = {  // (begin, end)
-    begin := const_expr(tok&, tok.next);
-    if (*begin >= ty.array_len)
-        error_tok(tok, "array designator index exceeds array bounds");
+fn array_designator(c: *Ctx, rest: **CC.Token, tok: *CC.Token, ty: *CC.Type) Ty(i64, i64) = {  // (begin, end)
+    begin := c.const_expr(tok&, tok.next);
+    if(begin >= ty.array_len.intcast(), => error_tok(tok, "array designator index exceeds array bounds"));
     
     end := begin;
     if equal(tok, "...") {
-        end = const_expr(tok&, tok.next);
-        if(end >= ty.array_len, => error_tok(tok, "array designator index exceeds array bounds"));
+        end = c.const_expr(tok&, tok.next);
+        if(end >= ty.array_len.intcast(), => error_tok(tok, "array designator index exceeds array bounds"));
         if(end < begin, => error_tok(tok, "array designator range [%d, %d] is empty", begin, end));
-        end
     };
 
     rest[] = skip(tok, "]");
@@ -866,349 +897,364 @@ fn array_designator(rest: **Token, tok: *Token, ty: *CC.Type) Ty(i64, i64) = {  
 }
 
 // struct-designator = "." ident
-fn struct_designator(rest: **Token, tok: *Token, ty: *CC.Type) *Member = {
-    Token *start = tok;
+fn struct_designator(c: *Ctx, rest: **CC.Token, tok: *CC.Token, ty: *CC.Type) *CC.Member = {
+    start := tok;
     tok = skip(tok, ".");
-    if (tok.kind != TK_IDENT)
-        error_tok(tok, "expected a field designator");
+    if(tok.kind != .TK_IDENT, => error_tok(tok, "expected a field designator"));
 
-    for (Member *mem = ty.members; mem; mem = mem.next) {
-        // Anonymous struct member
-        if (mem.ty.kind == TY_STRUCT && !mem.name) {
-            if (get_struct_member(mem.ty, tok)) {
+    mem := ty.members;
+    for_linked mem { mem |
+        continue :: local_return;
+        is_anon := mem.ty.kind == .TY_STRUCT && mem.name.is_null();
+        if is_anon {
+            if get_struct_member(mem.ty, tok) { _ |
                 rest[] = start;
-                return mem;
-            }
+                return(mem);
+            };
             continue();
-        }
+        };
 
         // Regular struct member
-        if (mem.name.len == tok.len && !strncmp(mem.name.loc, tok.loc, tok.len)) {
+        if mem.name.str() == tok.str() {
             rest[] = tok.next;
-            return mem;
-        }
-    }
+            return(mem);
+        };
+    };
 
-    error_tok(tok, "struct has no such member");
+    error_tok(tok, "struct has no such member")
 }
 
 // designation = ("[" const-expr "]" | "." ident)* "="? initializer
-fn designation(rest: **Token, tok: *Token, init: *Initializer) void = {
-    if (equal(tok, "[")) {
-        if (init.ty.kind != TY_ARRAY)
-            error_tok(tok, "array index in non-array initializer");
+fn designation(c: *Ctx, rest: **CC.Token, tok: *CC.Token, init: *Initializer) void = {
+    if equal(tok, "[") {
+        if(init.ty.kind != .TY_ARRAY, => error_tok(tok, "array index in non-array initializer"));
 
-        int begin, end;
-        array_designator(tok&, tok, init.ty, &begin, &end);
+        begin, end := c.array_designator(tok&, tok, init.ty);
 
-        tok2: *Token;
-        for (int i = begin; i <= end; i++)
-            designation(tok2&, tok, init.children[i]);
-        array_initializer2(rest, tok2, init, begin + 1);
+        //tok2: *CC.Token;  // TODO: sane error message for this!
+        tok2 := CC.Token.ptr_from_int(0);
+        range(begin, end + 1) { i |
+            c.designation(tok2&, tok, init.children[i]);
+        };
+        c.array_initializer2(rest, tok2, init, begin + 1);
         return();
-    }
+    };
 
-    if (equal(tok, ".") && init.ty.kind == TY_STRUCT) {
-        Member *mem = struct_designator(tok&, tok, init.ty);
-        designation(tok&, tok, init.children[mem.idx]);
-        init.expr = NULL;
-        struct_initializer2(rest, tok, init, mem.next);
-        return();
-    }
-
-    if (equal(tok, ".") && init.ty.kind == TY_UNION) {
-        Member *mem = struct_designator(tok&, tok, init.ty);
-        init.mem = mem;
-        designation(rest, tok, init.children[mem.idx]);
-        return();
-    }
-
-    if equal(tok, ".") {
-        error_tok(tok, "field name not in struct or union initializer");
+    @if(equal(tok, ".")) @match(init.ty.kind) {
+        fn TY_STRUCT() => {
+            mem := c.struct_designator(tok&, tok, init.ty);
+            c.designation(tok&, tok, init.children[mem.idx.intcast()]);
+            init.expr = CC.Node.ptr_from_int(0);
+            c.struct_initializer2(rest, tok, init, mem.next);
+            return();
+        }
+        fn TY_UNION() => {
+            mem := c.struct_designator(tok&, tok, init.ty);
+            init.mem = mem;
+            c.designation(rest, tok, init.children[mem.idx.intcast()]);
+            return();
+        }
+        @default => { // TODO: what!? { why?? }
+            error_tok(tok, "field name not in struct or union initializer"); 
+        };
     };
     if equal(tok, "=") {
         tok = tok.next;
     };
-    initializer2(rest, tok, init);
+    c.initializer2(rest, tok, init);
 }
 
+// TODO: parsing everything twice is gross
 // An array length can be omitted if an array has an initializer
 // (e.g. `int x[] = {1,2,3}`). If it's omitted, count the number
 // of initializer elements.
-fn count_array_init_elements(tok: *Token, ty: *CC.Type) i64 = {
-    bool first = true;
-    Initializer *dummy = new_initializer(ty.base, true);
+fn count_array_init_elements(c: *Ctx, tok: *CC.Token, ty: *CC.Type) i64 = {
+    dummy := c.new_initializer(ty.base, true);
 
-    int i = 0, max = 0;
-
-    while (!consume_end(tok&, tok)) {
-        if (!first)
-            tok = skip(tok, ",");
-        first = false;
-
-        if (equal(tok, "[")) {
-            i = const_expr(tok&, tok.next);
-            if (equal(tok, "..."))
-                i = const_expr(tok&, tok.next);
+    i, hi := (0, 0);
+    
+    comma_sep(tok&, "}") {
+        if equal(tok, "[") {
+            i = c.const_expr(tok&, tok.next);
+            if equal(tok, "...") {
+                i = c.const_expr(tok&, tok.next);
+            };
             tok = skip(tok, "]");
-            designation(tok&, tok, dummy);
+            c.designation(tok&, tok, dummy);
         } else {
-            initializer2(tok&, tok, dummy);
-        }
+            c.initializer2(tok&, tok, dummy);
+        };
+        i += 1;
+        hi = max(hi, i);
+    };
+    hi
+}
 
-        i++;
-        max = MAX(max, i);
-    }
-    return max;
+fn comma_sep(tok: **CC.Token, $end: Str, $body: @Fn() void) void = {
+    first := true;
+    while => !consume_end(tok, end) {
+        if !first {
+            tok[] = skip(tok[], ",");
+        };
+        first = false;
+        body();
+    };
 }
 
 // array-initializer1 = "{" initializer ("," initializer)* ","? "}"
-fn array_initializer1(rest: **Token, tok: *Token, init: *Initializer) void = {
+fn array_initializer1(c: *Ctx, rest: **CC.Token, tok: *CC.Token, init: *Initializer) void = {
     tok = skip(tok, "{");
 
     if init.is_flexible {
-        len := count_array_init_elements(tok, init.ty);
-        *init = *new_initializer(array_of(init.ty.base, len), false);
+        len := c.count_array_init_elements(tok, init.ty);
+        init[] = c.new_initializer(array_of(init.ty.base, len.intcast()), false)[];
     };
-
-    first := true;
 
     if init.is_flexible {
-        len := count_array_init_elements(tok, init.ty);
-        init[] = new_initializer(array_of(init.ty.base, len), false)[];
+        len := c.count_array_init_elements(tok, init.ty);
+        init[] = c.new_initializer(array_of(init.ty.base, len.intcast()), false)[];
     };
+    i := 0;
+    comma_sep(tok&, "}") {
+        continue :: local_return;
+        if equal(tok, "[") {
+            begin, end := c.array_designator(tok&, tok, init.ty);
 
-    for (int i = 0; !consume_end(rest, tok); i++) {
-        if (!first)
-            tok = skip(tok, ",");
-        first = false;
-
-        if (equal(tok, "[")) {
-            begin, end := array_designator(tok&, tok, init.ty);
-
-            tok: *Token2;
-            for (int j = begin; j <= end; j++)
-                designation(tok&2, tok, init.children[j]);
+            tok2 := CC.Token.ptr_from_int(0);
+            range(begin, end + 1) { j |
+                c.designation(tok2&, tok, init.children[j]);
+            };
             tok = tok2;
-            i = end;
+            i = end + 1;
             continue();
-        }
+        };
 
-        if (i < init.ty.array_len)
-            initializer2(tok&, tok, init.children[i]);
-        else
-            tok = skip_excess_element(tok);
-    }
+        if i < init.ty.array_len.intcast() {
+            c.initializer2(tok&, tok, init.children[i]);
+        } else {
+            tok = c.skip_excess_element(tok);
+        };
+        i += 1;
+    };
+    rest[] = tok;
 }
 
 // array-initializer2 = initializer ("," initializer)*
-fn array_initializer2(rest: **Token, tok: *Token, init: *Initializer, i: i64) void = {
+fn array_initializer2(c: *Ctx, rest: **CC.Token, tok: *CC.Token, init: *Initializer, i: i64) void = {
     if init.is_flexible {
-        len := count_array_init_elements(tok, init.ty);
-        init[] = new_initializer(array_of(init.ty.base, len), false)[];
+        len := c.count_array_init_elements(tok, init.ty);
+        init[] = c.new_initializer(array_of(init.ty.base, len.intcast()), false)[];
     };
 
-    for (; i < init.ty.array_len && !is_end(tok); i++) {
+    while => i < init.ty.array_len.intcast() && !is_end(tok) {
         start := tok;
-        if (i > 0)
+        if i > 0 {
             tok = skip(tok, ",");
-
-        if (equal(tok, "[") || equal(tok, ".")) {
+        };
+        if equal(tok, "[") || equal(tok, ".") {
             rest[] = start;
             return();
-        }
+        };
 
-        initializer2(tok&, tok, init.children[i]);
-    }
+        c.initializer2(tok&, tok, init.children[i]);
+        i += 1;
+    };
     rest[] = tok;
 }
 
 // struct-initializer1 = "{" initializer ("," initializer)* ","? "}"
-fn struct_initializer1(rest: **Token, tok: *Token, init: *Initializer) void = {
+fn struct_initializer1(c: *Ctx, rest: **CC.Token, tok: *CC.Token, init: *Initializer) void = {
     tok = skip(tok, "{");
+    mem := init.ty.members;
 
-    Member *mem = init.ty.members;
-    bool first = true;
-
-    while (!consume_end(rest, tok)) {
-        if (!first)
-            tok = skip(tok, ",");
-        first = false;
-
-        if (equal(tok, ".")) {
-            mem = struct_designator(tok&, tok, init.ty);
-            designation(tok&, tok, init.children[mem.idx]);
+    comma_sep(tok&, "}") {
+        continue :: local_return;
+        if equal(tok, ".") {
+            mem = c.struct_designator(tok&, tok, init.ty);
+            c.designation(tok&, tok, init.children[mem.idx.intcast()]);
             mem = mem.next;
             continue();
-        }
+        };
 
-        if (mem) {
-            initializer2(tok&, tok, init.children[mem.idx]);
+        if !mem.is_null() {
+            c.initializer2(tok&, tok, init.children[mem.idx.intcast()]);
             mem = mem.next;
         } else {
-            tok = skip_excess_element(tok);
+            tok = c.skip_excess_element(tok);
         }
-    }
-}
-
-// struct-initializer2 = initializer ("," initializer)*
-fn struct_initializer2(rest: **Token, tok: *Token, init: *Initializer, mem: *Member) void = {
-    bool first = true;
-
-    for (; mem && !is_end(tok); mem = mem.next) {
-        Token *start = tok;
-
-        if (!first)
-            tok = skip(tok, ",");
-        first = false;
-
-        if (equal(tok, "[") || equal(tok, ".")) {
-            rest[] = start;
-            return();
-        }
-
-        initializer2(tok&, tok, init.children[mem.idx]);
-    }
+    };
     rest[] = tok;
 }
 
-fn union_initializer(rest: **Token, tok: *Token, init: *Initializer) void = {
+// struct-initializer2 = initializer ("," initializer)*
+fn struct_initializer2(c: *Ctx, rest: **CC.Token, tok: *CC.Token, init: *Initializer, mem: *CC.Member) void = {
+    first := true;
+    while => !mem.is_null() && !is_end(tok) {
+        start := tok;
+        if !first {
+            tok = skip(tok, ",");
+        };
+        first = false;
+
+        if equal(tok, "[") || equal(tok, ".") {
+            rest[] = start;
+            return();
+        };
+
+        c.initializer2(tok&, tok, init.children[mem.idx.intcast()]);
+        mem = mem.next;
+    };
+    rest[] = tok;
+}
+
+fn union_initializer(c: *Ctx, rest: **CC.Token, tok: *CC.Token, init: *Initializer) void = {
     // Unlike structs, union initializers take only one initializer,
     // and that initializes the first union member by default.
     // You can initialize other member using a designated initializer.
-    if (equal(tok, "{") && equal(tok.next, ".")) {
-        mem := struct_designator(tok&, tok.next, init.ty);
+    if equal(tok, "{") && equal(tok.next, ".") {
+        mem := c.struct_designator(tok&, tok.next, init.ty);
         init.mem = mem;
-        designation(tok&, tok, init.children[mem.idx]);
+        c.designation(tok&, tok, init.children[mem.idx.intcast()]);
         rest[] = skip(tok, "}");
         return();
-    }
+    };
 
     init.mem = init.ty.members;
 
-    if (equal(tok, "{")) {
-        initializer2(tok&, tok.next, init.children[0]);
+    if equal(tok, "{") {
+        c.initializer2(tok&, tok.next, init.children[0]);
         consume(tok&, tok, ",");
         rest[] = skip(tok, "}");
     } else {
-        initializer2(rest, tok, init.children[0]);
-    }
+        c.initializer2(rest, tok, init.children[0]);
+    };
 }
 
 // initializer = string-initializer | array-initializer
 //                         | struct-initializer | union-initializer
 //                         | assign
-fn initializer2(rest: **Token, tok: *Token, init: *Initializer) void = @match(init.ty.kind) {
+fn initializer2(c: *Ctx, rest: **CC.Token, tok: *CC.Token, init: *Initializer) void = @match(init.ty.kind) {
     fn TY_ARRAY() => @if_else {
-        @if(tok.kind == .TK_STR) => string_initializer(rest, tok, init);
-        @if(equal(tok, "{")) => array_initializer1(rest, tok, init);
-        @else => array_initializer2(rest, tok, init, 0);
+        @if(tok.kind == .TK_STR) => c.string_initializer(rest, tok, init);
+        @if(equal(tok, "{")) => c.array_initializer1(rest, tok, init);
+        @else => c.array_initializer2(rest, tok, init, 0);
     };
     fn TY_STRUCT() => if equal(tok, "{") {
-        struct_initializer1(rest, tok, init);
+        c.struct_initializer1(rest, tok, init);
     } else {
         // A struct can be initialized with another struct. E.g.
         // `struct T x = y;` where y is a variable of type `struct T`.
         // Handle that case first.
-        expr := assign(rest, tok);
+        expr := c.parse_expr(rest, tok, .Assignment);
         add_type(expr);
         if expr.ty.kind == .TY_STRUCT {
             init.expr = expr;
         } else {
-            struct_initializer2(rest, tok, init, init.ty.members);
+            c.struct_initializer2(rest, tok, init, init.ty.members);
         };
     };
-    fn TY_UNION() => union_initializer(rest, tok, init);
+    fn TY_UNION() => c.union_initializer(rest, tok, init);
     @default => (if equal(tok, "{") {
         // An initializer for a scalar variable can be surrounded by
         // braces. E.g. `int x = {3};`. Handle that case.
-        initializer2(tok&, tok.next, init);
+        c.initializer2(tok&, tok.next, init);
         rest[] = skip(tok, "}");
     } else {
-        init.expr = assign(rest, tok);
+        init.expr = c.parse_expr(rest, tok, .Assignment);
     }); // TODO: this shouldn't need the extra brackets?
 };
 
 fn copy_struct_type(c: *Ctx, ty: *CC.Type) *CC.Type = {
     ty = copy_type(ty);
 
-    Member head = {};
-    Member *cur = &head;
-    for (Member *mem = ty.members; mem; mem = mem.next) {
-        Member *m = calloc(1, sizeof(Member));
-        *m = *mem;
-        cur = cur.next = m;
-    }
+    head := CC.Member.zeroed();
+    cur  := head&;
+    mem  := ty.members;
+    for_linked mem { mem |
+        m := c.arena.box(CC.Member);
+        m[] = mem[];
+        cur.next = m;
+        cur = cur.next;
+    };
 
     ty.members = head.next;
     ty
 }
 
-fn initializer(c: *Ctx, rest: **Token, tok: *Token, ty: *CC.Type, new_ty: **CC.Type) *Initializer = {
-    init := new_initializer(ty, true);
-    initializer2(rest, tok, init);
+fn initializer(c: *Ctx, rest: **CC.Token, tok: *CC.Token, ty: *CC.Type, new_ty: **CC.Type) *Initializer = {
+    init := c.new_initializer(ty, true);
+    c.initializer2(rest, tok, init);
 
     has_flex := ty.is_flexible && @is(ty.kind, .TY_STRUCT, .TY_UNION);
+    ::if(@type init.ty);
     new_ty[] = if(!has_flex, => init.ty) {
-        ty = copy_struct_type(ty);
-        mem := ty.members;
-        while (mem.next)
-            mem = mem.next;
-        mem.ty = init.children[mem.idx].ty;
+        ty = c.copy_struct_type(ty);
+        hack := ty.members;
+        mem := hack.end_linked();
+        mem.ty = init.children[mem.idx.intcast()].ty;
         ty.size += mem.ty.size;
         ty
     };
     init
 }
 
-fn init_desg_expr(desg: *InitDesg, tok: *Token) *Node = {
-    if (desg.var)
-        return new_var_node(desg.var, tok);
-
-    if (desg.member) {
-        Node *node = new_unary(ND_MEMBER, init_desg_expr(desg.next, tok), tok);
-        node.member = desg.member;
-        return node;
-    }
-
-    Node *lhs = init_desg_expr(desg.next, tok);
-    Node *rhs = new_num(desg.idx, tok);
-    new_unary(ND_DEREF, new_add(lhs, rhs, tok), tok)
+#where(fn(T) => is_ptr(T) && has_field(Deref(T), @symbol next))
+fn end_linked(head: ~T) T = {
+    ::ptr_utils(Deref(T));
+    while => !head.is_null() && !head.next.is_null() {
+        head = head.next;
+    };
+    head
 }
 
-fn create_lvar_init(init: *Initializer, ty: *CC.Type, desg: *InitDesg, tok: *Token) *Node = {
-    if (ty.kind == TY_ARRAY) {
-        Node *node = c.new_node(ND_NULL_EXPR, tok);
-        for (int i = 0; i < ty.array_len; i++) {
-            InitDesg desg2 = {desg, i};
-            Node *rhs = create_lvar_init(init.children[i], ty.base, &desg2, tok);
-            node = new_binary(ND_COMMA, node, rhs, tok);
-        }
-        return node;
-    }
+fn init_desg_expr(c: *Ctx, desg: *InitDesg, tok: *CC.Token) *CC.Node = {
+    if(!desg.var.is_null(), => return(c.new_var_node(desg.var, tok)));
 
-    if (ty.kind == TY_STRUCT && !init.expr) {
-        Node *node = c.new_node(ND_NULL_EXPR, tok);
+    if !desg.member.is_null() {
+        node := c.new_unary(.ND_MEMBER, c.init_desg_expr(desg.next, tok), tok);
+        node.member = desg.member;
+        return(node);
+    };
 
-        for (Member *mem = ty.members; mem; mem = mem.next) {
-            InitDesg desg2 = {desg, 0, mem};
-            Node *rhs = create_lvar_init(init.children[mem.idx], mem.ty, &desg2, tok);
-            node = new_binary(ND_COMMA, node, rhs, tok);
-        }
-        return node;
-    }
+    lhs := c.init_desg_expr(desg.next, tok);
+    rhs := c.new_num(desg.idx, tok);
+    c.new_unary(.ND_DEREF, c.new_add(lhs, rhs, tok), tok)
+}
 
-    if (ty.kind == TY_UNION) {
-        Member *mem = init.mem ? init.mem : ty.members;
-        InitDesg desg2 = {desg, 0, mem};
-        return create_lvar_init(init.children[mem.idx], mem.ty, &desg2, tok);
-    }
+fn create_lvar_init(c: *Ctx, init: *Initializer, ty: *CC.Type, desg: *InitDesg, tok: *CC.Token) *CC.Node = {
+    if ty.kind == .TY_ARRAY {
+        node := c.new_node(.ND_NULL_EXPR, tok);
+        range(0, ty.array_len.intcast()) { i |
+            desg2: InitDesg = (next = desg, idx = i, member = CC.Member.ptr_from_int(0), var = CC.Obj.ptr_from_int(0));
+            rhs := c.create_lvar_init(init.children[i], ty.base, desg2&, tok);
+            node = c.new_binary(.ND_COMMA, node, rhs, tok);
+        };
+        return(node);
+    };
 
-    if (!init.expr)
-        return c.new_node(ND_NULL_EXPR, tok);
+    if ty.kind == .TY_STRUCT && init.expr.is_null() {
+        node := c.new_node(.ND_NULL_EXPR, tok);
 
-    Node *lhs = init_desg_expr(desg, tok);
-    return new_binary(ND_ASSIGN, lhs, init.expr, tok);
+        mem := ty.members;
+        for_linked mem { mem |
+            desg2: InitDesg = (next = desg, idx = 0, member = mem, var = CC.Obj.ptr_from_int(0));
+            rhs := c.create_lvar_init(init.children[mem.idx.intcast()], mem.ty, desg2&, tok);
+            node = c.new_binary(.ND_COMMA, node, rhs, tok);
+        };
+        return(node);
+    };
+
+    if ty.kind == .TY_UNION {
+        ::if(@type init.mem);
+        mem := if(!init.mem.is_null(), => init.mem, => ty.members);
+        desg2: InitDesg = (next = desg, idx = 0, member = mem, var = CC.Obj.ptr_from_int(0));
+        return(c.create_lvar_init(init.children[mem.idx.intcast()], mem.ty, desg2&, tok));
+    };
+
+    if(init.expr.is_null(), => return(c.new_node(.ND_NULL_EXPR, tok)));
+
+    lhs := c.init_desg_expr(desg, tok);
+    c.new_binary(.ND_ASSIGN, lhs, init.expr, tok)
 }
 
 // A variable definition with an initializer is a shorthand notation
@@ -1221,147 +1267,132 @@ fn create_lvar_init(init: *Initializer, ty: *CC.Type, desg: *InitDesg, tok: *Tok
 //     x[0][1] = 7;
 //     x[1][0] = 8;
 //     x[1][1] = 9;
-fn lvar_initializer(rest: **Token, tok: *Token, var: *CC.Obj) *Node = {
-    init: *Initializer = initializer(rest, tok, var.ty, &var.ty);
-    InitDesg desg = {NULL, 0, NULL, var};
-
+fn lvar_initializer(c: *Ctx, rest: **CC.Token, tok: *CC.Token, var: *CC.Obj) *CC.Node = {
+    init := c.initializer(rest, tok, var.ty, var.ty&);
+    desg := InitDesg.zeroed();
+    desg.var = var;
+    
     // If a partial initializer list is given, the standard requires
     // that unspecified elements are set to 0. Here, we simply
     // zero-initialize the entire memory region of a variable before
     // initializing it with user-supplied values.
-    Node *lhs = c.new_node(ND_MEMZERO, tok);
+    lhs := c.new_node(.ND_MEMZERO, tok);
     lhs.var = var;
 
-    Node *rhs = create_lvar_init(init, var.ty, &desg, tok);
-    return new_binary(ND_COMMA, lhs, rhs, tok);
+    rhs := c.create_lvar_init(init, var.ty, desg&, tok);
+    c.new_binary(.ND_COMMA, lhs, rhs, tok)
 }
 
-fn read_buf(buf: *u8, sz: i64) u64 = {
-    if (sz == 1)
-        return *buf;
-    if (sz == 2)
-        return *(uint16_t *)buf;
-    if (sz == 4)
-        return *(uint32_t *)buf;
-    if (sz == 8)
-        return *(uint64_t *)buf;
-    unreachable();
+// TODO: is alignment real? 
+// TODO: if we always made sure the buffer was 8 aligned we could just read/write off the end and mask it because little endian. 
+fn read_buf(buf: *u8, sz: i64) i64 = {
+    @switch(sz) {
+        @case(1) => buf[].zext();
+        @case(2) => ptr_cast_unchecked(u8, u16, buf)[].zext();
+        @case(4) => ptr_cast_unchecked(u8, u32, buf)[].zext();
+        @case(8) => ptr_cast_unchecked(u8, i64, buf)[];
+        @default => unreachable();
+    }
 }
 
-fn write_buf(buf: *u8, val: u64, sz: i64) void = {
-    if (sz == 1)
-        *buf = val;
-    else if (sz == 2)
-        *(uint16_t *)buf = val;
-    else if (sz == 4)
-        *(uint32_t *)buf = val;
-    else if (sz == 8)
-        *(uint64_t *)buf = val;
-    else
-        unreachable();
+fn write_buf(buf: *u8, val: i64, sz: i64) void = {
+    @switch(sz) {
+        @case(1) => { buf[] = val.trunc(); };
+        @case(2) => { ptr_cast_unchecked(u8, u16, buf)[] = val.trunc(); };
+        @case(4) => { ptr_cast_unchecked(u8, u32, buf)[] = val.trunc(); };
+        @case(8) => { ptr_cast_unchecked(u8, i64, buf)[] = val; };
+        @default => unreachable();
+    };
 }
 
-fn write_gvar_data(cur: *Relocation, init: *Initializer, ty: *CC.Type, buf: *u8, offset: i64) *Relocation = {
-    if (ty.kind == TY_ARRAY) {
-        int sz = ty.base.size;
-        for (int i = 0; i < ty.array_len; i++)
-            cur = write_gvar_data(cur, init.children[i], ty.base, buf, offset + sz * i);
-        return cur;
-    }
+fn write_gvar_data(c: *Ctx, cur: *CC.Relocation, init: *Initializer, ty: *CC.Type, buf: []u8, off: i64) *CC.Relocation = {
+    if ty.kind == .TY_ARRAY {
+        sz := ty.base.size.intcast();
+        range(0, ty.array_len.intcast()) { i |
+            cur = c.write_gvar_data(cur, init.children[i], ty.base, buf, off + sz * i);
+        };
+        return(cur);
+    };
 
-    if (ty.kind == TY_STRUCT) {
-        for (Member *mem = ty.members; mem; mem = mem.next) {
-            if (mem.is_bitfield) {
-                Node *expr = init.children[mem.idx].expr;
-                if (!expr)
-                    break();
+    if ty.kind == .TY_STRUCT {
+        mem := ty.members;
+        if true {
+            break :: local_return;
+            for_linked mem { mem | 
+                if mem.is_bitfield {
+                    expr := init.children[mem.idx.intcast()].expr;
+                    if(expr.is_null(), => break());
+                    loc      := buf.ptr.offset(off + mem.offset.intcast());
+                    oldval   := read_buf(loc, mem.ty.size.intcast());
+                    newval   := c.eval(expr);
+                    mask     := 1.shift_left(mem.bit_width.intcast()) - 1;
+                    combined := oldval.bit_or(newval.bit_and(mask).shift_left(mem.bit_offset.intcast()));
+                    write_buf(loc, combined, mem.ty.size.intcast());
+                } else {
+                    cur = c.write_gvar_data(cur, init.children[mem.idx.intcast()], mem.ty, buf, off + mem.offset.intcast());
+                };
+            };
+        };
+        return(cur);
+    };
 
-                char *loc = buf + offset + mem.offset;
-                uint64_t oldval = read_buf(loc, mem.ty.size);
-                uint64_t newval = eval(expr);
-                uint64_t mask = (1L << mem.bit_width) - 1;
-                uint64_t combined = oldval | ((newval & mask) << mem.bit_offset);
-                write_buf(loc, combined, mem.ty.size);
-            } else {
-                cur = write_gvar_data(cur, init.children[mem.idx], mem.ty, buf,
-                                                            offset + mem.offset);
-            }
-        }
-        return cur;
-    }
+    if ty.kind == .TY_UNION {
+        if(init.mem.is_null(), => return(cur));
+        return(c.write_gvar_data(cur, init.children[init.mem.idx.intcast()], init.mem.ty, buf, off));
+    };
 
-    if (ty.kind == TY_UNION) {
-        if (!init.mem)
-            return cur;
-        return write_gvar_data(cur, init.children[init.mem.idx],
-                                                     init.mem.ty, buf, offset);
-    }
+    if(init.expr.is_null(), => return(cur));
 
-    if (!init.expr)
-        return cur;
+    panic("TODO: more write_gvar_data")
+    /*
+    if ty.kind == .TY_FLOAT {
+        *(float *)(buf + off) = eval_double(init.expr);
+        return(cur);
+    };
 
-    if (ty.kind == TY_FLOAT) {
-        *(float *)(buf + offset) = eval_double(init.expr);
-        return cur;
-    }
-
-    if (ty.kind == TY_DOUBLE) {
-        *(double *)(buf + offset) = eval_double(init.expr);
-        return cur;
-    }
+    if ty.kind == .TY_DOUBLE {
+        *(double *)(buf + off) = eval_double(init.expr);
+        return(cur);
+    };
 
     char **label = NULL;
     uint64_t val = eval2(init.expr, &label);
 
     if (!label) {
         write_buf(buf + offset, val, ty.size);
-        return cur;
+        return(cur);
     }
 
-    Relocation *rel = calloc(1, sizeof(Relocation));
+    rel := calloc(1, sizeof(Relocation));
     rel.offset = offset;
     rel.label = label;
     rel.addend = val;
     cur.next = rel;
-    return cur.next;
+    cur.next
+    */
 }
 
 // Initializers for global variables are evaluated at compile-time and
 // embedded to .data section. This function serializes Initializer
 // objects to a flat byte array. It is a compile error if an
 // initializer list contains a non-constant expression.
-fn gvar_initializer(rest: **Token, tok: *Token, var: *Obj) void = {
-    init := initializer(rest, tok, var.ty, &var.ty);
-
-    Relocation head = {};
-    char *buf = calloc(1, var.ty.size);
-    write_gvar_data(&head, init, var.ty, buf, 0);
-    var.init_data = buf;
+fn gvar_initializer(c: *Ctx, rest: **CC.Token, tok: *CC.Token, var: *CC.Obj) void = {
+    init := c.initializer(rest, tok, var.ty, var.ty&);
+    head := CC.Relocation.zeroed();
+    buf := c.arena.alloc(u8, var.ty.size.intcast());
+    c.write_gvar_data(head&, init, var.ty, buf, 0);
+    var.init_data.ptr = buf.ptr;
     var.rel = head.next;
 }
 
-fn is_typename(tok: *Token) bool = {
-    static HashMap map;
-
-    if (map.capacity == 0) {
-        static char *kw[] = {
-            "void", "_Bool", "char", "short", "int", "long", "struct", "union",
-            "typedef", "enum", "static", "extern", "_Alignas", "signed", "unsigned",
-            "const", "volatile", "auto", "register", "restrict", "__restrict",
-            "__restrict__", "_Noreturn", "float", "double", "typeof", "inline",
-            "_Thread_local", "__thread", "_Atomic",
-        };
-
-        for (int i = 0; i < sizeof(kw) / sizeof(*kw); i++)
-            hashmap_put(&map, kw[i], (void *)1);
-    }
-
-    return hashmap_get2(&map, tok.loc, tok.len) || find_typedef(tok);
+fn is_typename(c: *Ctx, tok: *CC.Token) bool #inline = {
+    is_type_keyword := tok.kind.raw() >= TokenKind.short.raw() && tok.kind.raw() <= TokenKind.int.raw();
+    is_type_keyword || c.find_typedef(tok).is_some()
 }
 
 // asm-stmt = "asm" ("volatile" | "inline")* "(" string-literal ")"
-fn asm_stmt(rest: **Token, tok: *Token) *Node = {
-    Node *node = c.new_node(ND_ASM, tok);
+fn asm_stmt(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
+    node := c.new_node(.ND_ASM, tok);
     tok = tok.next;
 
     dowhile {
@@ -1369,7 +1400,7 @@ fn asm_stmt(rest: **Token, tok: *Token) *Node = {
     };
 
     tok = skip(tok, "(");
-    if (tok.kind != TK_STR || tok.ty.base.kind != TY_CHAR) {
+    if tok.kind != .TK_STR || tok.ty.base.kind != .TY_CHAR {
         error_tok(tok, "expected string literal");
     };
     node.asm_str = tok.str;
@@ -1377,6 +1408,7 @@ fn asm_stmt(rest: **Token, tok: *Token) *Node = {
     node
 }
 
+// TODO: is the world a better place if this goes in the table too? 
 // stmt = "return" expr? ";"
 //            | "if" "(" expr ")" stmt ("else" stmt)?
 //            | "switch" "(" expr ")" stmt
@@ -1392,15 +1424,16 @@ fn asm_stmt(rest: **Token, tok: *Token) *Node = {
 //            | ident ":" stmt
 //            | "{" compound-stmt
 //            | expr-stmt
-fn stmt(rest: **Token, tok: *Token) *Node = @if_else {
-    @if(equal(tok, "return")) => {
+fn stmt(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = @match(tok.kind) {
+    fn return() => {
         node := c.new_node(.ND_RETURN, tok);
         if(consume(rest, tok.next, ";"), => return(node));
 
-        Node *exp = expr(tok&, tok.next);
+        exp := c.parse_expr(tok&, tok.next, .None);
         rest[] = skip(tok, ";");
 
         add_type(exp);
+        current_fn := c.current_fn || error_tok(tok, "stray return");
         ty := current_fn.ty.return_ty;
         if !@is(ty.kind, .TY_STRUCT, .TY_UNION) {
             exp = new_cast(exp, ty);
@@ -1408,165 +1441,169 @@ fn stmt(rest: **Token, tok: *Token) *Node = @if_else {
 
         node.lhs = exp;
         node
-    };
-    @if(equal(tok, "if")) => {
-        node := c.new_node(ND_IF, tok);
+    }
+    fn if() => {
+        node := c.new_node(.ND_IF, tok);
         tok = skip(tok.next, "(");
-        node.cond = expr(tok&, tok);
+        node.cond = c.parse_expr(tok&, tok, .None);
         tok = skip(tok, ")");
-        node.then = stmt(tok&, tok);
+        node.then = c.stmt(tok&, tok);
         if equal(tok, "else") {
-            node.els = stmt(tok&, tok.next);
+            node.else = c.stmt(tok&, tok.next);
         };
         rest[] = tok;
         node
-    };
-
-    @if(equal(tok, "switch")) => {
+    }
+    fn switch() => {
         node := c.new_node(.ND_SWITCH, tok);
         tok = skip(tok.next, "(");
-        node.cond = expr(tok&, tok);
+        node.cond = c.parse_expr(tok&, tok, .None);
         tok = skip(tok, ")");
 
-        sw := current_switch;
-        c.current_switch = node;
+        sw := c.current_switch;
+        c.current_switch = (Some = node);
 
         brk := c.brk_label;
-        node.brk_label = new_unique_name();
-        c.brk_label = node.brk_label;
+        node.brk_label = c.new_unique_name().slow_convert_to_c_string();
+        c.brk_label = (Some = node.brk_label);
 
-        node.then = stmt(rest, tok);
+        node.then = c.stmt(rest, tok);
 
-        current_switch = sw;
+        c.current_switch = sw;
         c.brk_label = brk;
         node
-    };
-    @if(equal(tok, "case")) => {
-        if(!current_switch, => error_tok(tok, "stray case"));
+    }
+    fn case() => {
+        current_switch := c.current_switch || error_tok(tok, "stray case");
 
-        node := c.new_node(ND_CASE, tok);
-        begin := const_expr(tok&, tok.next);
+        node := c.new_node(.ND_CASE, tok);
+        begin := c.const_expr(tok&, tok.next);
         end := begin;
 
         if equal(tok, "...") {
             // [GNU] Case ranges, e.g. "case 1 ... 5:"
-            end = const_expr(tok&, tok.next);
+            end = c.const_expr(tok&, tok.next);
             if(end < begin, => error_tok(tok, "empty case range specified"));
         };
 
         tok = skip(tok, ":");
-        node.label = new_unique_name();
-        node.lhs = stmt(rest, tok);
+        node.label = c.new_unique_name().slow_convert_to_c_string();
+        node.lhs = c.stmt(rest, tok);
         node.begin = begin;
         node.end = end;
         node.case_next = current_switch.case_next;
         current_switch.case_next = node;
         node
-    };
-    @if(equal(tok, "default")) => {
+    }
+    fn default() => {
+        ::?*CC.Node;
         cs := c.current_switch || error_tok(tok, "stray default");
         node := c.new_node(.ND_CASE, tok);
         tok = skip(tok.next, ":");
-        node.label = new_unique_name();
-        node.lhs = stmt(rest, tok);
+        node.label = c.new_unique_name().slow_convert_to_c_string();
+        node.lhs = c.stmt(rest, tok);
         cs.default_case = node;
         node
-    };
-    @if(equal(tok, "for")) => push_loop(c, .ND_FOR, tok) { node |
-        enter_scope();
+    }
+    fn for() => push_loop(c, .ND_FOR, tok) { node |
+        c.enter_scope();
         tok = skip(tok.next, "(");
-        node.init = if is_typename(tok) {
-            basety := declspec(tok&, tok, NULL);
-            declaration(tok&, tok, basety, NULL)
+        node.init = if c.is_typename(tok) {
+            basety := c.declspec(tok&, tok, .None);
+            c.declaration(tok&, tok, basety, .None)
         } else {
-            expr_stmt(tok&, tok)
+            c.expr_stmt(tok&, tok)
         };
 
         if !equal(tok, ";") {
-            node.cond = expr(tok&, tok);
+            node.cond = c.parse_expr(tok&, tok, .None);
         };
         tok = skip(tok, ";");
 
         if !equal(tok, ")") {
-            node.inc = expr(tok&, tok);
+            node.inc = c.parse_expr(tok&, tok, .None);
         };
         tok = skip(tok, ")");
 
-        node.then = stmt(rest, tok);
+        node.then = c.stmt(rest, tok);
 
-        leave_scope();
+        c.leave_scope();
     };
-    @if(equal(tok, "while")) => push_loop(c, .ND_FOR, tok) { node |
+    fn while() => push_loop(c, .ND_FOR, tok) { node |
         tok = skip(tok.next, "(");
-        node.cond = expr(tok&, tok);
+        node.cond = c.parse_expr(tok&, tok, .None);
         tok = skip(tok, ")");
 
-        node.then = stmt(rest, tok);
+        node.then = c.stmt(rest, tok);
     };
-
-    @if(equal(tok, "do")) => {
+    fn do() => {
         node := push_loop(c, .ND_DO, tok) { node |
-            node.then = stmt(tok&, tok.next);
+            node.then = c.stmt(tok&, tok.next);
         };
         tok = skip(tok, "while");
         tok = skip(tok, "(");
-        node.cond = expr(tok&, tok);
+        node.cond = c.parse_expr(tok&, tok, .None);
         tok = skip(tok, ")");
         rest[] = skip(tok, ";");
         node
     };
-    @if(equal(tok, "asm")) => asm_stmt(rest, tok);
-    @if(equal(tok, "goto")) => {
+    fn asm() => c.asm_stmt(rest, tok);
+    fn goto() => {
         if equal(tok.next, "*") {
             // [GNU] `goto *ptr` jumps to the address specified by `ptr`.
-            node := c.new_node(.ND_GOTO_EXPR, tok);
-            node.lhs = expr(tok&, tok.next.next);
-            rest[] = skip(tok, ";");
+            node    := c.new_node(.ND_GOTO_EXPR, tok);
+            node.lhs = c.parse_expr(tok&, tok.next.next, .None);
+            rest[]   = skip(tok, ";");
             return(node);
         };
 
-        node := c.new_node(ND_GOTO, tok);
-        node.label = get_ident(tok.next);
-        node.goto_next = gotos;
+        node := c.new_node(.ND_GOTO, tok);
+        node.label     = get_ident(tok.next).slow_convert_to_c_string();
+        node.goto_next = c.gotos;
         c.gotos = node;
-        rest[] = skip(tok.next.next, ";");
+        rest[]  = skip(tok.next.next, ";");
         node
-    };
-    @if(equal(tok, "break")) {
+    }
+    fn break() => {
         brk_label := c.brk_label || error_tok(tok, "stray break");
         node := c.new_node(.ND_GOTO, tok);
         node.unique_label = brk_label;
         rest[] = skip(tok.next, ";");
         node
-    };
-    @if(equal(tok, "continue")) {
+    }
+    fn continue() => {
+        ::?CStr;
         cont_label := c.cont_label || error_tok(tok, "stray continue");
         node := c.new_node(.ND_GOTO, tok);
         node.unique_label = cont_label;
         rest[] = skip(tok.next, ";");
         node
-    };
-    @if(tok.kind == TK_IDENT && equal(tok.next, ":")) {
-        node := c.new_node(ND_LABEL, tok);
-        node.label = tok.str();
-        node.unique_label = c.new_unique_name();
+    }
+    fn @"{"() => c.compound_stmt(rest, tok.next);
+    @default => (if tok.kind == .TK_IDENT && equal(tok.next, ":") {
+        node := c.new_node(.ND_LABEL, tok);
+        node.label = tok.str().slow_convert_to_c_string();
+        node.unique_label = c.new_unique_name().slow_convert_to_c_string();
         node.lhs = c.stmt(rest, tok.next.next);
         node.goto_next = c.labels;
         c.labels = node;
         node
-    };
-    @if(equal(tok, "{")) => c.compound_stmt(rest, tok.next);
-    @else => c.expr_stmt(rest, tok);
-}
+    } else {
+        c.expr_stmt(rest, tok)
+    });
+};
 
-fn push_loop(c: *Ctx, tok: *CC.Token, kind: CC.NodeKind, $body: @Fn(node: *Node) void) *Node = {
+fn slow_convert_to_c_string(s: Str) CStr = // :SLOW
+    (ptr = @tfmt("%\0", s).as_ptr());
+    
+fn push_loop(c: *Ctx, kind: CC.CC.NodeKind, tok: *CC.Token, $body: @Fn(node: *CC.Node) void) *CC.Node = {
     node := c.new_node(kind, tok);
-    brk := brk_label;
-    cont := cont_label;
-    node.brk_label = new_unique_name();
-    node.cont_label = new_unique_name();
-    c.brk_label = node.brk_label;
-    c.cont_label = node.cont_label;
+    brk  := c.brk_label;
+    cont := c.cont_label;
+    node.brk_label = c.new_unique_name().slow_convert_to_c_string();
+    node.cont_label = c.new_unique_name().slow_convert_to_c_string();
+    c.brk_label = (Some = node.brk_label);
+    c.cont_label = (Some = node.cont_label);
 
     body(node);
     
@@ -1576,96 +1613,87 @@ fn push_loop(c: *Ctx, tok: *CC.Token, kind: CC.NodeKind, $body: @Fn(node: *Node)
 }
 
 // compound-stmt = (typedef | declaration | stmt)* "}"
-fn compound_stmt(rest: **Token, tok: *Token) *Node = {
+fn compound_stmt(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
     node := c.new_node(.ND_BLOCK, tok);
-    head := Node.zeroed();
-    cur := head&;
+    head := CC.Node.zeroed();
+    cur  := head&;
 
-    enter_scope();
+    c.enter_scope();
 
     while => !equal(tok, "}") {
-        if is_typename(tok) && !equal(tok.next, ":") {
-            attr := VarAttr.zeroed();
-            basety := declspec(tok&, tok, &attr);
-            @if_else {
-                @if(attr.is_typedef) => {
-                    tok = parse_typedef(tok, basety);
-                };
-                @if(is_function(tok)) => {
-                    tok = function(tok, basety, &attr);
-                };
-                @if(attr.is_extern) => {
-                    tok = global_variable(tok, basety, &attr);
-                };
+        if c.is_typename(tok) && !equal(tok.next, ":") {
+            attr   := VarAttr.zeroed();
+            basety := c.declspec(tok&, tok, (Some = attr&));
+            tok = @if_else {
+                @if(attr.is_typedef)  => c.parse_typedef(tok, basety);
+                @if(c.is_function(tok)) => c.function(tok, basety, attr&);
+                @if(attr.is_extern)   => c.global_variable(tok, basety, attr&);
                 @else => {
-                    cur.next = declaration(tok&, tok, basety, &attr);
+                    cur.next = c.declaration(tok&, tok, basety, (Some = attr&));
                     cur = cur.next;
+                    tok
                 };
             };
         } else {
-            cur.next = stmt(tok&, tok);
+            cur.next = c.stmt(tok&, tok);
             cur = cur.next;
         };
         add_type(cur);
     };
 
-    leave_scope();
+    c.leave_scope();
 
     node.body = head.next;
-    rest[] = tok.next;
+    rest[]    = tok.next;
     node
 }
 
 // expr-stmt = expr? ";"
-fn expr_stmt(rest: **Token, tok: *Token) *Node = if equal(tok, ";") {
+fn expr_stmt(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = if equal(tok, ";") {
     rest[] = tok.next;
-    c.new_node(.ND_BLOCK, tok);
+    c.new_node(.ND_BLOCK, tok)
 } else {
-    node := c.new_node(ND_EXPR_STMT, tok);
-    node.lhs = expr(tok&, tok);
+    node := c.new_node(.ND_EXPR_STMT, tok);
+    node.lhs = c.parse_expr(tok&, tok, .None);
     rest[] = skip(tok, ";");
     node
 };
 
 // struct-members = (declspec declarator (","    declarator)* ";")*
-fn struct_members(rest: **Token, tok: *Token, ty: *CC.Type) void = {
-    Member head = {};
-    Member *cur = &head;
-    int idx = 0;
+fn struct_members(c: *Ctx, rest: **CC.Token, tok: *CC.Token, ty: *CC.Type) void = {
+    head := CC.Member.zeroed();
+    cur  := head&;
+    idx  := 0;
 
-    while (!equal(tok, "}")) {
-        VarAttr attr = {};
-        Type *basety = declspec(tok&, tok, &attr);
-        bool first = true;
+    while => !equal(tok, "}") {
+        continue :: local_return;
+        attr   := VarAttr.zeroed();
+        basety := c.declspec(tok&, tok, (Some = attr&));
 
-        // Anonymous struct member
-        if ((basety.kind == TY_STRUCT || basety.kind == TY_UNION) &&
-                consume(tok&, tok, ";")) {
-            Member *mem = calloc(1, sizeof(Member));
-            mem.ty = basety;
-            mem.idx = idx++;
-            mem.align = attr.align ? attr.align : mem.ty.align;
-            cur = cur.next = mem;
+        is_anon := (@is(basety.kind, .TY_STRUCT, .TY_UNION)) && consume(tok&, tok, ";");
+        if is_anon {
+            mem := c.arena.box(CC.Member);
+            mem.ty  = basety;
+            mem.idx = idx.intcast();
+            idx += 1;
+            mem.align = if(attr.align != 0, => attr.align, => mem.ty.align);
+            cur.next = mem;
+            cur = cur.next;
             continue();
-        }
+        };
 
         // Regular struct members
-        while => !consume(tok&, tok, ";") {
-            if !first {
-                tok = skip(tok, ",");
-            };
-            first = false;
-
-            mem := c.arena.box(Member);
-            mem.ty = declarator(tok&, tok, basety);
+        comma_sep(tok&, ";") {
+            mem := c.arena.box(CC.Member);
+            mem.ty = c.declarator(tok&, tok, basety);
             mem.name = mem.ty.name;
-            mem.idx = idx;
+            mem.idx = idx.intcast();
             idx += 1;
-            mem.align = if(attr.align, => attr.align, => mem.ty.align);
+            mem.align = if(attr.align != 0, => attr.align, => mem.ty.align);
 
             if consume(tok&, tok, ":") {
                 mem.is_bitfield = true;
-                mem.bit_width = const_expr(tok&, tok);
+                mem.bit_width = c.const_expr(tok&, tok).intcast();
             };
             cur.next = mem;
             cur = cur.next;
@@ -1685,19 +1713,13 @@ fn struct_members(rest: **Token, tok: *Token, ty: *CC.Type) void = {
 }
 
 // attribute = ("__attribute__" "(" "(" "packed" ")" ")")*
-fn attribute_list(tok: *Token, ty: *CC.Type) *Token = {
+fn attribute_list(c: *Ctx, tok: *CC.Token, ty: *CC.Type) *CC.Token = {
     while => consume(tok&, tok, "__attribute__") {
         tok = skip(tok, "(");
         tok = skip(tok, "(");
-        first := true;
 
-        while => !consume(tok&, tok, ")") {
+        comma_sep(tok&, ")") {
             continue :: local_return;
-            if !first {
-                tok = skip(tok, ",");
-            };
-            first = false;
-
             if consume(tok&, tok, "packed") {
                 ty.is_packed = true;
                 continue();
@@ -1705,7 +1727,7 @@ fn attribute_list(tok: *Token, ty: *CC.Type) *Token = {
 
             if consume(tok&, tok, "aligned") {
                 tok = skip(tok, "(");
-                ty.align = const_expr(tok&, tok);
+                ty.align = c.const_expr(tok&, tok).intcast();
                 tok = skip(tok, ")");
                 continue();
             };
@@ -1720,34 +1742,36 @@ fn attribute_list(tok: *Token, ty: *CC.Type) *Token = {
 }
 
 // struct-union-decl = attribute? ident? ("{" struct-members)?
-fn struct_union_decl(rest: **Token, tok: *Token) *CC.Type = {
+fn struct_union_decl(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Type = {
     ty := struct_type();
-    tok = attribute_list(tok, ty);
+    tok = c.attribute_list(tok, ty);
 
     // Read a tag.
-    Token *tag := NULL;
-    if (tok.kind == TK_IDENT) {
-        tag = tok;
+    tag: ?*CC.Token = .None;
+    if tok.kind == .TK_IDENT {
+        tag = (Some = tok);
         tok = tok.next;
-    }
+    };
 
-    if (tag && !equal(tok, "{")) {
-        rest[] = tok;
-        if find_tag(tag) { ty2 |
-            return(ty2);
-        };
-        ty.size = -1;
-        c.push_tag_scope(tag, ty);
-        return(ty);
-    }
+    if tag { tag |
+        if !equal(tok, "{") {
+            rest[] = tok;
+            if c.find_tag(tag) { ty2 |
+                return(ty2);
+            };
+            ty.size = -1;
+            c.push_tag_scope(tag, ty);
+            return(ty);
+        }
+    };
 
     tok = skip(tok, "{");
 
     // Construct a struct object.
-    struct_members(tok&, tok, ty);
-    rest[] = attribute_list(tok, ty);
+    c.struct_members(tok&, tok, ty);
+    rest[] = c.attribute_list(tok, ty);
 
-    if (tag) {
+    if tag { tag |
         // If this is a redefinition, overwrite a previous type.
         // Otherwise, register the struct type.
         if get(c.scope.tags&, tag.str()) { ty2 |
@@ -1755,95 +1779,89 @@ fn struct_union_decl(rest: **Token, tok: *Token) *CC.Type = {
             return(ty2);
         };
 
-        push_tag_scope(tag, ty);
+        c.push_tag_scope(tag, ty);
     };
 
     ty
 }
 
 // struct-decl = struct-union-decl
-fn struct_decl(rest: **Token, tok: *Token) *CC.Type = {
-    ty := struct_union_decl(rest, tok);
+fn struct_decl(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Type = {
+    ty := c.struct_union_decl(rest, tok);
     ty.kind = .TY_STRUCT;
     if(ty.size < 0, => return(ty));
 
     // Assign offsets within the struct to members.
     bits := 0;
-
-    for (Member *mem = ty.members; mem; mem = mem.next) {
-        if (mem.is_bitfield && mem.bit_width == 0) {
-            // Zero-width anonymous bitfield has a special meaning.
-            // It affects only alignment.
-            bits = align_to(bits, mem.ty.size * 8);
-        } else if (mem.is_bitfield) {
-            int sz = mem.ty.size;
-            if (bits / (sz * 8) != (bits + mem.bit_width - 1) / (sz * 8))
-                bits = align_to(bits, sz * 8);
-
-            mem.offset = align_down(bits / 8, sz);
-            mem.bit_offset = bits % (sz * 8);
-            bits += mem.bit_width;
+    mem := ty.members;
+    for_linked mem { mem |
+        if mem.is_bitfield {
+            if mem.bit_width == 0 {
+                // Zero-width anonymous bitfield has a special meaning.
+                // It affects only alignment.
+                bits = align_to(bits, mem.ty.size.intcast() * 8);
+            } else {
+                sz := mem.ty.size.intcast();
+                unaligned := bits / (sz * 8) != (bits + mem.bit_width.intcast() - 1) / (sz * 8);
+                if unaligned {
+                    bits = align_to(bits, sz * 8);
+                };
+                mem.offset = align_down(bits / 8, sz).intcast();
+                mem.bit_offset = bits.mod(sz * 8).intcast();
+                bits += mem.bit_width.intcast();
+            }
         } else {
-            if (!ty.is_packed)
-                bits = align_to(bits, mem.align * 8);
-            mem.offset = bits / 8;
-            bits += mem.ty.size * 8;
-        }
+            if !ty.is_packed {
+                bits = align_to(bits, mem.align.intcast() * 8);
+            };
+            mem.offset = bits.intcast() / 8;
+            bits += mem.ty.size.intcast() * 8;
+        };
 
-        if (!ty.is_packed && ty.align < mem.align)
+        if !ty.is_packed && ty.align < mem.align {
             ty.align = mem.align;
-    }
+        };
+    };
 
-    ty.size = align_to(bits, ty.align * 8) / 8;
+    ty.size = align_to(bits, ty.align.intcast() * 8).intcast() / 8;
     ty
 }
 
 // union-decl = struct-union-decl
-fn union_decl(rest: **Token, tok: *Token) *CC.Type = {
-    ty := struct_union_decl(rest, tok);
+fn union_decl(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Type = {
+    ty := c.struct_union_decl(rest, tok);
     ty.kind = .TY_UNION;
     if(ty.size < 0, => return(ty));
 
     // If union, we don't have to assign offsets because they
     // are already initialized to zero. We need to compute the
     // alignment and the size though.
-    for (Member *mem = ty.members; mem; mem = mem.next) {
-        if (ty.align < mem.align)
-            ty.align = mem.align;
-        if (ty.size < mem.ty.size)
-            ty.size = mem.ty.size;
-    }
-    ty.size = align_to(ty.size, ty.align);
+    mem := ty.members;
+    for_linked mem { mem |
+        ty.align = max(ty.align, mem.align);
+        ty.size  = max(ty.size, mem.ty.size);
+    };
+    ty.size = align_to(ty.size.intcast(), ty.align.intcast()).intcast();
     ty
 }
 
-fn next_is_paren_typename(tok: *Token) bool = 
+fn next_is_paren_typename(tok: *CC.Token) bool = 
     equal(tok.next, "(") && is_typename(tok.next.next);
 
-fn parse_typedef(tok: *Token, basety: *CC.Type) *Token = {
-    bool first = true;
-
-    while => !consume(tok&, tok, ";") {
-        if !first {
-            tok = skip(tok, ",");
-        };
-        first = false;
-
-        Type *ty = declarator(tok&, tok, basety);
-        if (!ty.name)
-            error_tok(ty.name_pos, "typedef name omitted");
-        push_scope(get_ident(ty.name)).type_def = ty;
-    }
-    return tok;
+fn parse_typedef(c: *Ctx, tok: *CC.Token, basety: *CC.Type) *CC.Token = {
+    comma_sep(tok&, ";") {
+        ty := c.declarator(tok&, tok, basety);
+        if(ty.name.is_null(), => error_tok(ty.name_pos, "typedef name omitted"));
+        c.push_scope(get_ident(ty.name))[].type_def = ty;
+    };
+    tok
 }
 
-fn create_param_lvars(param: *CC.Type) void = {
-    if (param) {
-        create_param_lvars(param.next);
-        if (!param.name)
-            error_tok(param.name_pos, "parameter name omitted");
-        new_lvar(get_ident(param.name), param);
-    }
+fn create_param_lvars(c: *Ctx, param: *CC.Type) void = {  // TODO: why isn't this a loop?
+    if(param.is_null(), => return()); 
+    c.create_param_lvars(param.next);
+    if(param.name.is_null(), => error_tok(param.name_pos, "parameter name omitted"));
+    c.new_lvar(get_ident(param.name), param);
 }
 
 // This function matches gotos or labels-as-values with labels.
@@ -1851,9 +1869,10 @@ fn create_param_lvars(param: *CC.Type) void = {
 // We cannot resolve gotos as we parse a function because gotos
 // can refer a label that appears later in the function.
 // So, we need to do this after we parse the entire function.
-fn resolve_goto_labels() void = {
-    for (Node *x = gotos; x; x = x.goto_next) {
-        for (Node *y = labels; y; y = y.goto_next) {
+fn resolve_goto_labels(c: *Ctx) void = {
+    panic("TODO: resolve_goto_labels"); /*
+    for (CC.Node *x = gotos; x; x = x.goto_next) {
+        for (CC.Node *y = labels; y; y = y.goto_next) {
             if (!strcmp(x.label, y.label)) {
                 x.unique_label = y.unique_label;
                 break();
@@ -1864,199 +1883,205 @@ fn resolve_goto_labels() void = {
             error_tok(x.tok.next, "use of undeclared label");
     }
 
-    gotos = labels = NULL;
+    c.gotos = NULL;
+    c.labels = NULL;
+    */
 }
 
-fn find_func(name: Str) *Obj = {
-    Scope *sc = scope;
-    while (sc.next)
-        sc = sc.next;
+fn find_func(c: *Ctx, name: Str) ?*CC.Obj = {
+    ::ptr_utils(Scope);
+    hack := c.scope;
+    sc := hack.end_linked();
 
-    VarScope *sc2 = hashmap_get(&sc.vars, name);
-    if (sc2 && sc2.var && sc2.var.is_function)
-        return sc2.var;
-    return NULL;
+    if sc.vars&.get(name) { sc2 |
+        if !sc2.var.is_null() && sc2.var.is_function {
+            return(Some = sc2.var);
+        };
+    };
+    .None
 }
 
-fn mark_live(var: *Obj) void = {
-    if (!var.is_function || var.is_live)
-        return();
+fn mark_live(c: *Ctx, var: *CC.Obj) void = {
+    if(!var.is_function || var.is_live, => return());
     var.is_live = true;
-
-    for (int i = 0; i < var.refs.len; i++) {
-        Obj *f = find_func(var.refs.data[i]);
-        if (f)
-            mark_live(f);
-    }
+    refs: []CStr = (ptr = var.refs.ptr, len = var.refs.len.intcast());
+    range(0, refs.len) { i |
+        if c.find_func(refs[i].str()) { f |
+            c.mark_live(f);
+        };
+    };
 }
 
-fn function(tok: *Token, basety: *CC.Type, attr: *VarAttr) *Token = {
-    Type *ty = declarator(tok&, tok, basety);
-    if (!ty.name)
-        error_tok(ty.name_pos, "function name omitted");
-    char *name_str = get_ident(ty.name);
+fn function(c: *Ctx, tok: *CC.Token, basety: *CC.Type, attr: *VarAttr) *CC.Token = {
+    ty := c.declarator(tok&, tok, basety);
+    if(ty.name.is_null(), => error_tok(ty.name_pos, "function name omitted"));
+    name_str := get_ident(ty.name);
 
-    Obj *f = find_func(name_str);
-    if (f) {
-        // Redeclaration
-        if (!f.is_function)
-            error_tok(tok, "redeclared as a different kind of symbol");
-        if (f.is_definition && equal(tok, "{"))
-            error_tok(tok, "redefinition of %s", name_str);
-        if (!f.is_static && attr.is_static)
-            error_tok(tok, "static declaration follows a non-static declaration");
+    f := if c.find_func(name_str) { f |
+        if(!f.is_function,                     => error_tok(tok, "redeclared as a different kind of symbol"));
+        if(f.is_definition && equal(tok, "{"), => error_tok(tok, "redefinition of %s", name_str));
+        if(!f.is_static && attr.is_static,     => error_tok(tok, "static declaration follows a non-static declaration"));
         f.is_definition = f.is_definition || equal(tok, "{");
+        f
     } else {
-        f = new_gvar(name_str, ty);
+        f := c.new_gvar(name_str, ty);
         f.is_function = true;
         f.is_definition = equal(tok, "{");
         f.is_static = attr.is_static || (attr.is_inline && !attr.is_extern);
         f.is_inline = attr.is_inline;
-    }
+        f
+    };
 
     f.is_root = !(f.is_static && f.is_inline);
+    if(consume(tok&, tok, ";"), => return(tok));
 
-    if (consume(tok&, tok, ";"))
-        return tok;
-
-    current_fn = f;
-    locals = NULL;
-    enter_scope();
-    create_param_lvars(ty.params);
+    c.current_fn = (Some = f);
+    c.locals = ptr_from_int(@type c.locals[], 0);
+    c.enter_scope();
+    c.create_param_lvars(ty.params);
 
     // A buffer for a struct/union return value is passed
     // as the hidden first parameter.
-    Type *rty = ty.return_ty;
-    if ((rty.kind == TY_STRUCT || rty.kind == TY_UNION) && rty.size > 16)
-        new_lvar("", pointer_to(rty));
+    rty := ty.return_ty;
+    if rty.size > 16 && @is(rty.kind, .TY_STRUCT, .TY_UNION) {
+        c.new_lvar("", pointer_to(rty));
+    };
 
-    f.params = locals;
+    f.params = c.locals;
 
-    if (ty.is_variadic)
-        f.va_area = new_lvar("__va_area__", array_of(ty_char, 136));
-    f.alloca_bottom = new_lvar("__alloca_size__", pointer_to(ty_char));
+    if ty.is_variadic {
+        f.va_area = c.new_lvar("__va_area__", array_of(ty_char, 136));
+    };
+    f.alloca_bottom = c.new_lvar("__alloca_size__", pointer_to(ty_char));
 
     tok = skip(tok, "{");
 
+    f_name := f.name.str();
+    f_name.len += 1;  // null terminator
+    
     // [https://www.sigbus.info/n1570#6.4.2.2p1] "__func__" is
     // automatically defined as a local variable containing the
     // current function name.
-    push_scope("__func__").var =
-        new_string_literal(f.name, array_of(ty_char, strlen(f.name) + 1));
+    c.push_scope("__func__")[].var =
+        c.new_string_literal(f_name, array_of(ty_char, f_name.len.intcast()));
 
     // [GNU] __FUNCTION__ is yet another name of __func__.
-    push_scope("__FUNCTION__").var =
-        new_string_literal(f.name, array_of(ty_char, strlen(f.name) + 1));
+    c.push_scope("__FUNCTION__")[].var =
+        c.new_string_literal(f_name, array_of(ty_char, f_name.len.intcast()));
 
-    f.body = compound_stmt(tok&, tok);
-    f.locals = locals;
+    f.body = c.compound_stmt(tok&, tok);
+    f.locals = c.locals;
     c.leave_scope();
     c.resolve_goto_labels();
     tok
 }
 
-fn global_variable(tok: *Token, basety: *CC.Type, attr: *VarAttr) *Token = {
-    first := true;
+fn global_variable(c: *Ctx, tok: *CC.Token, basety: *CC.Type, attr: *VarAttr) *CC.Token = {
+    comma_sep(tok&, ";") {
+        ty := c.declarator(tok&, tok, basety);
+        if(ty.name.is_null(), => error_tok(ty.name_pos, "variable name omitted"));
 
-    while => !consume(tok&, tok, ";") {
-        if (!first)
-            tok = skip(tok, ",");
-        first = false;
-
-        Type *ty = declarator(tok&, tok, basety);
-        if (!ty.name)
-            error_tok(ty.name_pos, "variable name omitted");
-
-        Obj *var = new_gvar(get_ident(ty.name), ty);
+        var := c.new_gvar(get_ident(ty.name), ty);
         var.is_definition = !attr.is_extern;
         var.is_static = attr.is_static;
         var.is_tls = attr.is_tls;
-        if (attr.align)
+        if attr.align > 0 {
             var.align = attr.align;
-
-        if (equal(tok, "="))
-            gvar_initializer(tok&, tok.next, var);
-        else if (!attr.is_extern && !attr.is_tls)
-            var.is_tentative = true;
-    }
-    return tok;
+        };
+        
+        if equal(tok, "=") {
+            c.gvar_initializer(tok&, tok.next, var);
+        } else {
+            var.is_tentative = var.is_tentative || (!attr.is_extern && !attr.is_tls);
+        };
+    };
+    tok
 }
 
 // Lookahead tokens and returns true if a given token is a start
 // of a function definition or declaration.
-fn is_function(tok: *Token) bool = {
+fn is_function(c: *Ctx, tok: *CC.Token) bool = {
     if(equal(tok, ";"), => return(false));
-    Type dummy = {};
-    ty := declarator(tok&, tok, &dummy);
+    dummy := CC.Type.zeroed();
+    ty    := c.declarator(tok&, tok, dummy&);
     ty.kind == .TY_FUNC
 }
 
 // Remove redundant tentative definitions.
-fn scan_globals() void = {
-    Obj head;
-    Obj *cur = &head;
+fn scan_globals(c: *Ctx) void = {
+    head := CC.Obj.zeroed();
+    cur  := head&;
 
-    for (Obj *var = globals; var; var = var.next) {
-        if (!var.is_tentative) {
-            cur = cur.next = var;
+    var := c.globals;
+    for_linked var { var |
+        continue :: local_return;
+        if !var.is_tentative {
+            cur.next = var;
+            cur = cur.next;
             continue();
-        }
-
-        // Find another definition of the same identifier.
-        Obj *var2 = globals;
-        for (; var2; var2 = var2.next)
-            if (var != var2 && var2.is_definition && !strcmp(var.name, var2.name))
-                break();
-
+        };
+        
         // If there's another definition, the tentative definition
         // is redundant
-        if (!var2)
-            cur = cur.next = var;
-    }
-
-    cur.next = NULL;
-    globals = head.next;
-}
-
-fn declare_builtin_functions() void = {
-    ty := func_type(pointer_to(ty_void));
-    ty.params = copy_type(ty_int);
-    builtin_alloca = new_gvar("alloca", ty);
-    builtin_alloca.is_definition = false;
-}
-
-// program = (typedef | function-definition | global-variable)*
-fn parse(c: *Ctx, tok: *Token) *Obj = {
-    declare_builtin_functions();
-    globals = NULL;
-
-    while => tok.kind != .TK_EOF {
-        VarAttr attr = {};
-        basety := declspec(tok&, tok, attr&);
-        tok = @if_else {
-            @if(attr.is_typedef)  => parse_typedef(tok, basety);
-            @if(is_function(tok)) => function(tok, basety, attr&);
-            @else                 => global_variable(tok, basety, attr&);
+        if find_matching_name(c.globals, var).is_none() {
+            cur.next = var;
+            cur = cur.next;
         };
     };
 
-    for (Obj *var = globals; var; var = var.next)
-        if (var.is_root)
-            mark_live(var);
+    cur.next = CC.Obj.ptr_from_int(0);
+    c.globals = head.next;
+}
+
+// Find another definition of the same identifier.
+fn find_matching_name(first: *CC.Obj, goal: *CC.Obj) ?*CC.Obj = {
+    for_linked first { var2 |
+        if !goal.identical(var2) && var2.is_definition && goal.name.str() == var2.name.str() {
+            return(Some = var2);
+        };
+    };
+    .None
+}
+
+fn declare_builtin_functions(c: *Ctx) void = {
+    ty := func_type(pointer_to(ty_void));
+    ty.params = copy_type(ty_int);
+    c.builtin_alloca = c.new_gvar("alloca", ty);
+    c.builtin_alloca.is_definition = false;
+}
+
+// program = (typedef | function-definition | global-variable)*
+fn parse(c: *Ctx, tok: *CC.Token) *CC.Obj = {
+    c.declare_builtin_functions();
+    c.globals = CC.Obj.ptr_from_int(0);
+
+    while => tok.kind != .TK_EOF {
+        attr := VarAttr.zeroed();
+        basety := c.declspec(tok&, tok, (Some = attr&));
+        tok = @if_else {
+            @if(attr.is_typedef)  => c.parse_typedef(tok, basety);
+            @if(c.is_function(tok)) => c.function(tok, basety, attr&);
+            @else                 => c.global_variable(tok, basety, attr&);
+        };
+    };
+
+    var := c.globals;
+    for_linked(var, fn(var) => if(var.is_root, => c.mark_live(var)));
 
     // Remove redundant tentative definitions.
-    scan_globals();
-    globals
+    c.scan_globals();
+    c.globals
 }
 
 /**************************
 *   Parsing Expressions   *
 **************************/
 
-Prec :: @enum(i64) (
+Prec :: @enum(i32) (
     None, 
+    Comma,
     Assignment, 
-    Conditional, 
+    Conditional,  // ?:
     LogOr, LogAnd, 
     BitOr, BitXor, BitAnd, 
     Equality, Relational, 
@@ -2064,353 +2089,216 @@ Prec :: @enum(i64) (
     Unary, PostFix, Primary,
 );
 
-// expr = assign ("," expr)?
-fn expr(rest: **Token, tok: *Token) *Node = {
-    node := assign(tok&, tok);
-    if equal(tok, ",") {
-        return(new_binary(ND_COMMA, node, expr(rest, tok.next), tok));
+N1: ParseFn1 : fn(a, b, c) = panic("unexpected token");  // TODO
+N2: ParseFn2 : fn(a, b, c, d) = panic("unexpected token");  // TODO
+ParseFn1   :: @FnPtr(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node;
+ParseFn2   :: @FnPtr(c: *Ctx, rest: **CC.Token, tok: *CC.Token, node: *CC.Node) *CC.Node;
+ParseRule :: @struct(prefix: ParseFn1 = N1, infix: ParseFn2 = N2, prec := Prec.None, op := CC.NodeKind.ND_INVALID);
+
+rules :: {
+    h := @static EnumMap(CC.TokenKind, ParseRule);
+    each h { k, v |
+        v.prefix = N1; v.infix = N2;
     };
-    rest[] = tok;
+    B :: parse_binary;
+    
+    h[.@"+"]  = (infix = B, prec = .Term);
+    h[.@"-"]  = (infix = B, prec = .Term);
+    h[.@"*"]  = (infix = B, prec = .Factor, op = .ND_MUL);
+    h[.@"/"]  = (infix = B, prec = .Factor, op = .ND_DIV);
+    h[.@"%"]  = (infix = B, prec = .Factor, op = .ND_MOD);
+    h[.@"|"]  = (infix = B, prec = .BitOr,  op = .ND_BITOR);
+    h[.@"^"]  = (infix = B, prec = .BitXor, op = .ND_BITXOR);
+    h[.@"&"]  = (infix = B, prec = .BitAnd, op = .ND_BITAND);
+    h[.@">>"] = (infix = B, prec = .Shift,  op = .ND_SHR);
+    h[.@"<<"] = (infix = B, prec = .Shift,  op = .ND_SHL);
+    
+    h[.@"+="]  = (infix = B, prec = .Assignment);
+    h[.@"-="]  = (infix = B, prec = .Assignment);
+    h[.@"*="]  = (infix = B, prec = .Assignment, op = .ND_MUL);
+    h[.@"/="]  = (infix = B, prec = .Assignment, op = .ND_DIV);
+    h[.@"%="]  = (infix = B, prec = .Assignment, op = .ND_MOD);
+    h[.@"|="]  = (infix = B, prec = .Assignment, op = .ND_BITOR);
+    h[.@"^="]  = (infix = B, prec = .Assignment, op = .ND_BITXOR);
+    h[.@"&="]  = (infix = B, prec = .Assignment, op = .ND_BITAND);
+    h[.@">>="] = (infix = B, prec = .Assignment, op = .ND_SHR);
+    h[.@"<<="] = (infix = B, prec = .Assignment, op = .ND_SHL);
+    
+    h[.@"=="] = (infix = B, prec = .Equality,   op = .ND_EQ);
+    h[.@"!="] = (infix = B, prec = .Equality,   op = .ND_NE);
+    h[.@">="] = (infix = B, prec = .Relational, op = .ND_LE); // ND_GE
+    h[.@">"]  = (infix = B, prec = .Relational, op = .ND_LT); // ND_GT
+    h[.@"<="] = (infix = B, prec = .Relational, op = .ND_LE);
+    h[.@"<"]  = (infix = B, prec = .Relational, op = .ND_LT);
+    
+    h[.@","]  = (infix = B, prec = .Comma,      op = .ND_COMMA);
+    h[.@"="]  = (infix = B, prec = .Assignment, op = .ND_ASSIGN);
+    
+    h[.@"||"]  = (infix = parse_logical, prec = .LogOr,  op = .ND_LOGOR);
+    h[.@"&&"]  = (infix = parse_logical, prec = .LogAnd, op = .ND_LOGAND);
+    
+    h[.TK_NUM]   = (prefix = parse_number, prec = .Primary);
+    h[.TK_STR]   = (prefix = parse_string, prec = .Primary);
+    h[.TK_IDENT] = (prefix = parse_ident,  prec = .Primary);
+    
+    h[.@"("] = (prefix = parse_bracketed);
+    h[.@"?"] = (infix = conditional, prec = .Conditional);
+
+    h
+};
+
+fn parse_expr(c: *Ctx, rest: **CC.Token, tok: *CC.Token, prec: Prec) *CC.Node = {
+    rules := rules;  // TODO: shouldn't need to do this but otherwise if can't call the function ?? 
+    rule := rules.index(tok.kind);
+    node := (rule.prefix)(c, rest, tok);
+    tok   = rest[];
+    ::enum(@type prec);
+    rule := rules.index(tok.kind);
+    while => prec.raw() <= rule.prec.raw() {
+        node = (rule.infix)(c, rest, tok, node);
+        tok  = rest[];
+        rule = rules.index(tok.kind);
+    };
     node
 }
 
-//fn eval(Node *node) i64 = {
-
-// Evaluate a given node as a constant expression.
-//
-// A constant expression is either just a number or ptr+n where ptr
-// is a pointer to a global variable and n is a postiive/negative
-// number. The latter form is accepted only as an initialization
-// expression for a global variable.
-//static int64_t eval2(Node *node, char ***label);
-
-//static int64_t eval_rval(Node *node, char ***label);
-
-//static bool is_const_expr(Node *node);
-
-fn const_expr(rest: **Token, tok: *Token) i64 = {
-    node := conditional(rest, tok);
-    eval(node)
+fn parse_binary(c: *Ctx, rest: **CC.Token, tok: *CC.Token, lhs: *CC.Node) *CC.Node = {
+    rule := rules.index(tok.kind);
+    rhs  := parse_expr(c, rest, tok.next, @as(Prec) @as(i32) rule.prec.raw() + 1);
+    @match(tok.kind) {
+        fn @"+="()  => return(c.to_assign(c.new_add(lhs, rhs, tok)));
+        fn @"-="()  => return(c.to_assign(c.new_sub(lhs, rhs, tok)));
+        fn @"+"()   => return(c.new_add(lhs, rhs, tok));
+        fn @"-"()   => return(c.new_sub(lhs, rhs, tok));
+        @default    => ();
+    };
+    
+    is_update_assign := @is(tok.kind, .@"*=", .@"/=", .@"%=", .@"&=", .@"|=", .@"^=", .@"<<=", .@">>=");
+    needs_flip := @is(tok.kind, .@">=", .@">");
+    if needs_flip { // TODO: just have ops for this. 
+        t := lhs; lhs = rhs; rhs = t; 
+    };
+    node := c.new_binary(rule.op, lhs, rhs, tok);
+    if is_update_assign {
+        node = c.to_assign(node);
+    };
+    node
 }
 
-//static double eval_double(Node *node);
-
-// Convert op= operators to expressions containing an assignment.
-//
-// In general, `A op= C` is converted to ``tmp = &A, *tmp = *tmp op B`.
-// However, if a given expression is of form `A.x op= C`, the input is
-// converted to `tmp = &A, (*tmp).x = (*tmp).x op C` to handle assignments
-// to bitfields.
-fn to_assign(binary: *Node) *Node = {
-    add_type(binary.lhs);
-    add_type(binary.rhs);
-    tok: *Token = binary.tok;
-
-    // Convert `A.x op= C` to `tmp = &A, (*tmp).x = (*tmp).x op C`.
-    if (binary.lhs.kind == ND_MEMBER) {
-        Obj *var = new_lvar("", pointer_to(binary.lhs.lhs.ty));
-
-        Node *expr1 = new_binary(ND_ASSIGN, new_var_node(var, tok),
-                                                         new_unary(ND_ADDR, binary.lhs.lhs, tok), tok);
-
-        Node *expr2 = new_unary(ND_MEMBER,
-                                                        new_unary(ND_DEREF, new_var_node(var, tok), tok),
-                                                        tok);
-        expr2.member = binary.lhs.member;
-
-        Node *expr3 = new_unary(ND_MEMBER,
-                                                        new_unary(ND_DEREF, new_var_node(var, tok), tok),
-                                                        tok);
-        expr3.member = binary.lhs.member;
-
-        Node *expr4 = new_binary(ND_ASSIGN, expr2,
-                                                         new_binary(binary.kind, expr3, binary.rhs, tok),
-                                                         tok);
-
-        return new_binary(ND_COMMA, expr1, expr4, tok);
-    }
-
-    // If A is an atomic type, Convert `A op= B` to
-    //
-    // ({
-    //     T1 *addr = &A; T2 val = (B); T1 old = *addr; T1 new;
-    //     do {
-    //        new = old op val;
-    //     } while (!atomic_compare_exchange_strong(addr, &old, new));
-    //     new;
-    // })
-    if (binary.lhs.ty.is_atomic) {
-        Node head = {};
-        Node *cur = &head;
-
-        Obj *addr = new_lvar("", pointer_to(binary.lhs.ty));
-        Obj *val = new_lvar("", binary.rhs.ty);
-        Obj *old = new_lvar("", binary.lhs.ty);
-        Obj *new = new_lvar("", binary.lhs.ty);
-
-        cur = cur.next =
-            new_unary(ND_EXPR_STMT,
-                                new_binary(ND_ASSIGN, new_var_node(addr, tok),
-                                                     new_unary(ND_ADDR, binary.lhs, tok), tok),
-                                tok);
-
-        cur = cur.next =
-            new_unary(ND_EXPR_STMT,
-                                new_binary(ND_ASSIGN, new_var_node(val, tok), binary.rhs, tok),
-                                tok);
-
-        cur = cur.next =
-            new_unary(ND_EXPR_STMT,
-                                new_binary(ND_ASSIGN, new_var_node(old, tok),
-                                                     new_unary(ND_DEREF, new_var_node(addr, tok), tok), tok),
-                                tok);
-
-        Node *loop = c.new_node(ND_DO, tok);
-        loop.brk_label = new_unique_name();
-        loop.cont_label = new_unique_name();
-
-        Node *body = new_binary(ND_ASSIGN,
-                                                        new_var_node(new, tok),
-                                                        new_binary(binary.kind, new_var_node(old, tok),
-                                                                             new_var_node(val, tok), tok),
-                                                        tok);
-
-        loop.then = c.new_node(ND_BLOCK, tok);
-        loop.then.body = new_unary(ND_EXPR_STMT, body, tok);
-
-        Node *cas = c.new_node(ND_CAS, tok);
-        cas.cas_addr = new_var_node(addr, tok);
-        cas.cas_old = new_unary(ND_ADDR, new_var_node(old, tok), tok);
-        cas.cas_new = new_var_node(new, tok);
-        loop.cond = new_unary(ND_NOT, cas, tok);
-
-        cur = cur.next = loop;
-        cur = cur.next = new_unary(ND_EXPR_STMT, new_var_node(new, tok), tok);
-
-        Node *node = c.new_node(ND_STMT_EXPR, tok);
-        node.body = head.next;
-        return node;
-    }
-
-    // Convert `A op= B` to ``tmp = &A, *tmp = *tmp op B`.
-    Obj *var = new_lvar("", pointer_to(binary.lhs.ty));
-
-    Node *expr1 = new_binary(ND_ASSIGN, new_var_node(var, tok),
-                                                     new_unary(ND_ADDR, binary.lhs, tok), tok);
-
-    Node *expr2 =
-        new_binary(ND_ASSIGN,
-                             new_unary(ND_DEREF, new_var_node(var, tok), tok),
-                             new_binary(binary.kind,
-                                                    new_unary(ND_DEREF, new_var_node(var, tok), tok),
-                                                    binary.rhs,
-                                                    tok),
-                             tok);
-
-    return new_binary(ND_COMMA, expr1, expr2, tok);
+// TODO: this will be different if i decide to skip AST
+fn parse_logical(c: *Ctx, rest: **CC.Token, tok: *CC.Token, lhs: *CC.Node) *CC.Node = {
+    rule := rules.index(tok.kind);
+    rhs  := parse_expr(c, rest, tok.next, @as(Prec) @as(i32) rule.prec.raw() + 1);
+   c.new_binary(rule.op, lhs, rhs, tok)
 }
 
-// assign        = conditional (assign-op assign)?
-// assign-op = "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^="
-//                     | "<<=" | ">>="
-fn assign(rest: **Token, tok: *Token) *Node = {
-    Node *node = conditional(tok&, tok);
-
-    if (equal(tok, "="))
-        return new_binary(ND_ASSIGN, node, assign(rest, tok.next), tok);
-
-    if (equal(tok, "+="))
-        return to_assign(new_add(node, assign(rest, tok.next), tok));
-
-    if (equal(tok, "-="))
-        return to_assign(new_sub(node, assign(rest, tok.next), tok));
-
-    if (equal(tok, "*="))
-        return to_assign(new_binary(ND_MUL, node, assign(rest, tok.next), tok));
-
-    if (equal(tok, "/="))
-        return to_assign(new_binary(ND_DIV, node, assign(rest, tok.next), tok));
-
-    if (equal(tok, "%="))
-        return to_assign(new_binary(ND_MOD, node, assign(rest, tok.next), tok));
-
-    if (equal(tok, "&="))
-        return to_assign(new_binary(ND_BITAND, node, assign(rest, tok.next), tok));
-
-    if (equal(tok, "|="))
-        return to_assign(new_binary(ND_BITOR, node, assign(rest, tok.next), tok));
-
-    if (equal(tok, "^="))
-        return to_assign(new_binary(ND_BITXOR, node, assign(rest, tok.next), tok));
-
-    if (equal(tok, "<<="))
-        return to_assign(new_binary(ND_SHL, node, assign(rest, tok.next), tok));
-
-    if (equal(tok, ">>="))
-        return to_assign(new_binary(ND_SHR, node, assign(rest, tok.next), tok));
-
-    rest[] = tok;
-    return node;
-}
+::if(*CC.Node);
 
 // conditional = logor ("?" expr? ":" conditional)?
-fn conditional(rest: **Token, tok: *Token) *Node = {
-    Node *cond = logor(tok&, tok);
-
-    if (!equal(tok, "?")) {
-        rest[] = tok;
-        return cond;
-    }
-
-    if (equal(tok.next, ":")) {
+fn conditional(c: *Ctx, rest: **CC.Token, tok: *CC.Token, cond: *CC.Node) *CC.Node = {
+    if equal(tok.next, ":") {
         // [GNU] Compile `a ?: b` as `tmp = a, tmp ? tmp : b`.
         add_type(cond);
-        Obj *var = new_lvar("", cond.ty);
-        Node *lhs = new_binary(ND_ASSIGN, new_var_node(var, tok), cond, tok);
-        Node *rhs = c.new_node(ND_COND, tok);
-        rhs.cond = new_var_node(var, tok);
-        rhs.then = new_var_node(var, tok);
-        rhs.els = conditional(rest, tok.next.next);
-        return new_binary(ND_COMMA, lhs, rhs, tok);
-    }
-
-    Node *node = c.new_node(ND_COND, tok);
-    node.cond = cond;
-    node.then = expr(tok&, tok.next);
-    tok = skip(tok, ":");
-    node.els = conditional(rest, tok);
-    return node;
-}
-
-// logor = logand ("||" logand)*
-fn logor(rest: **Token, tok: *Token) *Node = {
-    Node *node = logand(tok&, tok);
-    while (equal(tok, "||")) {
-        Token *start = tok;
-        node = new_binary(ND_LOGOR, node, logand(tok&, tok.next), start);
-    }
-    rest[] = tok;
-    return node;
-}
-
-// logand = bitor ("&&" bitor)*
-fn logand(rest: **Token, tok: *Token) *Node = {
-    Node *node = bitor(tok&, tok);
-    while (equal(tok, "&&")) {
-        Token *start = tok;
-        node = new_binary(ND_LOGAND, node, bitor(tok&, tok.next), start);
-    }
-    rest[] = tok;
-    return node;
-}
-
-// bitor = bitxor ("|" bitxor)*
-fn bitor(rest: **Token, tok: *Token) *Node = {
-    Node *node = bitxor(tok&, tok);
-    while (equal(tok, "|")) {
-        Token *start = tok;
-        node = new_binary(ND_BITOR, node, bitxor(tok&, tok.next), start);
-    }
-    rest[] = tok;
-    return node;
-}
-
-// bitxor = bitand ("^" bitand)*
-fn bitxor(rest: **Token, tok: *Token) *Node = {
-    Node *node = bitand(tok&, tok);
-    while (equal(tok, "^")) {
-        Token *start = tok;
-        node = new_binary(ND_BITXOR, node, bitand(tok&, tok.next), start);
-    }
-    rest[] = tok;
-    return node;
-}
-
-// bitand = equality ("&" equality)*
-fn bitand(rest: **Token, tok: *Token) *Node = {
-    Node *node = equality(tok&, tok);
-    while (equal(tok, "&")) {
-        Token *start = tok;
-        node = new_binary(ND_BITAND, node, equality(tok&, tok.next), start);
-    }
-    rest[] = tok;
-    return node;
-}
-
-// equality = relational ("==" relational | "!=" relational)*
-fn equality(rest: **Token, tok: *Token) *Node = {
-    Node *node = relational(tok&, tok);
-
-    loop {
-        start := tok;
-
-        if (equal(tok, "==")) {
-            node = new_binary(ND_EQ, node, relational(tok&, tok.next), start);
-            continue();
-        }
-
-        if (equal(tok, "!=")) {
-            node = new_binary(ND_NE, node, relational(tok&, tok.next), start);
-            continue();
-        }
-
-        rest[] = tok;
-        return(node);
-    }
-}
-
-// relational = shift ("<" shift | "<=" shift | ">" shift | ">=" shift)*
-fn relational(rest: **Token, tok: *Token) *Node = {
-    Node *node = shift(tok&, tok);
-
-    for (;;) {
-        Token *start = tok;
-
-        if (equal(tok, "<")) {
-            node = new_binary(ND_LT, node, shift(tok&, tok.next), start);
-            continue();
-        }
-
-        if (equal(tok, "<=")) {
-            node = new_binary(ND_LE, node, shift(tok&, tok.next), start);
-            continue();
-        }
-
-        if (equal(tok, ">")) {
-            node = new_binary(ND_LT, shift(tok&, tok.next), node, start);
-            continue();
-        }
-
-        if (equal(tok, ">=")) {
-            node = new_binary(ND_LE, shift(tok&, tok.next), node, start);
-            continue();
-        }
-
-        rest[] = tok;
+        var := c.new_lvar("", cond.ty);
+        lhs := c.new_binary(.ND_ASSIGN, c.new_var_node(var, tok), cond, tok);
+        rhs := c.new_node(.ND_COND, tok);
+        rhs.cond = c.new_var_node(var, tok);
+        rhs.then = c.new_var_node(var, tok);
+        rhs.else = c.parse_expr(rest, tok.next.next, .Conditional);
+       c.new_binary(.ND_COMMA, lhs, rhs, tok)
+    } else {
+        node := c.new_node(.ND_COND, tok);
+        node.cond = cond;
+        node.then = c.parse_expr(rest, tok.next, .None);
+        tok = skip(tok, ":");
+        node.else = c.parse_expr(rest, tok, .Conditional);
         node
     }
 }
 
-// shift = add ("<<" add | ">>" add)*
-fn shift(rest: **Token, tok: *Token) *Node = {
-    Node *node = add_node(tok&, tok);
+fn parse_bracketed(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
+    if c.is_typename(tok.next) {
+        start := tok;
+        ty := c.typename(tok&, tok.next);
+        tok = skip(tok, ")");
 
-    for (;;) {
-        Token *start = tok;
-
-        if (equal(tok, "<<")) {
-            node = new_binary(ND_SHL, node, add_node(tok&, tok.next), start);
-            continue();
+        is_compound_literal := equal(tok, "{");
+        if is_compound_literal {
+            if c.scope.next.is_null() {  // global
+                var := c.new_anon_gvar(ty);
+                c.gvar_initializer(rest, tok, var);
+                c.new_var_node(var, start)
+            } else {  // local
+                var := c.new_lvar("", ty);
+                lhs := c.lvar_initializer(rest, tok, var);
+                rhs := c.new_var_node(var, tok);
+                c.new_binary(.ND_COMMA, lhs, rhs, start)
+            }
+        } else {  // type cast
+            node := parse_expr(c, rest, tok, .Unary);
+            node := new_cast(node, ty);
+            node.tok = start;
+            node
         }
-
-        if (equal(tok, ">>")) {
-            node = new_binary(ND_SHR, node, add_node(tok&, tok.next), start);
-            continue();
-        }
-
-        rest[] = tok;
-        return node;
+    } else {
+        node := if equal(tok.next, "{") {
+            // This is a GNU statement expresssion.
+            node := c.new_node(.ND_STMT_EXPR, tok);
+            node.body = c.compound_stmt(tok&, tok.next.next)[].body;
+            node
+        } else {
+            // just a braketed expression like in math
+            parse_expr(c, tok&, tok, .None)
+        };
+        rest[] = skip(tok, ")");
+        node
     }
+}
+
+fn parse_ident(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
+    // Variable or enum constant
+    sc := c.find_var(tok);
+    rest[] = tok.next;
+
+    // For "static inline" function
+    ::ptr_utils(CC.Obj);
+    ::?*CC.Obj;
+    if sc { sc |
+        if !sc.var.is_null() {
+            var := sc.var;
+            if var.is_function {
+                if c.current_fn { current_fn |
+                    strarray_push(current_fn.refs&, var.name);
+                } else {
+                    var.is_root = true;
+                };
+            }; 
+            return(c.new_var_node(var, tok));
+        };
+        if(!sc.enum_ty.is_null(), => return(c.new_num(sc.enum_val, tok)));
+    };
+
+    if(equal(tok.next, "("), => error_tok(tok, "implicit declaration of a function"));
+    error_tok(tok, "undefined variable")
+}
+
+fn parse_string(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
+    var := c.new_string_literal(tok.str(), tok.ty);
+    rest[] = tok.next;
+    c.new_var_node(var, tok)
+}
+
+fn parse_number(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
+    node := if is_flonum(tok.ty) {
+        n := c.new_node(.ND_NUM, tok);
+        n.fval = tok.fval;
+        n
+    } else {
+       c.new_num(tok.val, tok)
+    };
+    node.ty = tok.ty;
+    rest[] = tok.next;
+    node
 }
 
 // In C, `+` operator is overloaded to perform the pointer arithmetic.
@@ -2418,156 +2306,86 @@ fn shift(rest: **Token, tok: *Token) *Node = {
 // so that p+n points to the location n elements (not bytes) ahead of p.
 // In other words, we need to scale an integer value before adding to a
 // pointer value. This function takes care of the scaling.
-fn new_add(lhs: *Node, rhs: *Node, tok: *Token) *Node = {
+fn new_add(c: *Ctx, lhs: *CC.Node, rhs: *CC.Node, tok: *CC.Token) *CC.Node = {
     add_type(lhs);
     add_type(rhs);
 
     // num + num
     if is_numeric(lhs.ty) && is_numeric(rhs.ty) {
-        return(new_binary(ND_ADD, lhs, rhs, tok));
+        return(c.new_binary(.ND_ADD, lhs, rhs, tok));
     };
 
-    if (lhs.ty.base && rhs.ty.base)
+    if !lhs.ty.base.is_null() && !rhs.ty.base.is_null() {
         error_tok(tok, "invalid operands");
+    };
 
     // Canonicalize `num + ptr` to `ptr + num`.
-    if (!lhs.ty.base && rhs.ty.base) {
-        Node *tmp = lhs;
-        lhs = rhs;
-        rhs = tmp;
-    }
+    if lhs.ty.base.is_null() && !rhs.ty.base.is_null() {
+        t := lhs; lhs = rhs; rhs = t;
+    };
 
     // VLA + num
-    if (lhs.ty.base.kind == TY_VLA) {
-        rhs = new_binary(ND_MUL, rhs, new_var_node(lhs.ty.base.vla_size, tok), tok);
-        return(new_binary(ND_ADD, lhs, rhs, tok));
-    }
+    if lhs.ty.base.kind == .TY_VLA {
+        rhs = c.new_binary(.ND_MUL, rhs, c.new_var_node(lhs.ty.base.vla_size, tok), tok);
+        return(c.new_binary(.ND_ADD, lhs, rhs, tok));
+    };
 
     // ptr + num
-    rhs = new_binary(ND_MUL, rhs, new_long(lhs.ty.base.size, tok), tok);
-    return(new_binary(ND_ADD, lhs, rhs, tok));
+    rhs = c.new_binary(.ND_MUL, rhs, c.new_long(lhs.ty.base.size.intcast(), tok), tok);
+    c.new_binary(.ND_ADD, lhs, rhs, tok)
 }
 
 // Like `+`, `-` is overloaded for the pointer type.
-fn new_sub(lhs: *Node, rhs: *Node, tok: *Token) *Node = {
+fn new_sub(c: *Ctx, lhs: *CC.Node, rhs: *CC.Node, tok: *CC.Token) *CC.Node = {
     add_type(lhs);
     add_type(rhs);
     @if_else {
         // num - num
         @if(is_numeric(lhs.ty) && is_numeric(rhs.ty)) =>
-            new_binary(ND_SUB, lhs, rhs, tok);
-        // VLA + num
-        @if(lhs.ty.base.kind == TY_VLA) => {
-            rhs = new_binary(ND_MUL, rhs, new_var_node(lhs.ty.base.vla_size, tok), tok);
+           c.new_binary(.ND_SUB, lhs, rhs, tok);
+        // VLA - num
+        @if(lhs.ty.base.kind == .TY_VLA) => {
+            rhs = c.new_binary(.ND_MUL, rhs, c.new_var_node(lhs.ty.base.vla_size, tok), tok);
             add_type(rhs);
-            Node *node = new_binary(ND_SUB, lhs, rhs, tok);
+            node := c.new_binary(.ND_SUB, lhs, rhs, tok);
             node.ty = lhs.ty;
             node
         };
         // ptr - num
-        @if(lhs.ty.base && is_integer(rhs.ty)) => {
-            rhs = new_binary(ND_MUL, rhs, new_long(lhs.ty.base.size, tok), tok);
+        @if(!lhs.ty.base.is_null() && is_integer(rhs.ty)) => {
+            rhs = c.new_binary(.ND_MUL, rhs, c.new_long(lhs.ty.base.size.intcast(), tok), tok);
             add_type(rhs);
-            Node *node = new_binary(ND_SUB, lhs, rhs, tok);
+            node := c.new_binary(.ND_SUB, lhs, rhs, tok);
             node.ty = lhs.ty;
             node
         };
         // ptr - ptr, which returns how many elements are between the two.
-        @if(lhs.ty.base && rhs.ty.base) => {
-            Node *node = new_binary(ND_SUB, lhs, rhs, tok);
+        @if(!lhs.ty.base.is_null() && !rhs.ty.base.is_null()) => {
+            node := c.new_binary(.ND_SUB, lhs, rhs, tok);
             node.ty = ty_long;
-            new_binary(ND_DIV, node, new_num(lhs.ty.base.size, tok), tok)
+           c.new_binary(.ND_DIV, node, c.new_num(lhs.ty.base.size.intcast(), tok), tok)
         };
         @else => error_tok(tok, "invalid operands");
     }
 };
 
-// add = mul ("+" mul | "-" mul)*
-fn add_node(rest: **Token, tok: *Token) *Node = {
-    node := mul_node(tok&, tok);
-    loop {
-        continue :: local_return;
-        start := tok;
-
-        if (equal(tok, "+")) {
-            node = new_add(node, mul_node(tok&, tok.next), start);
-            continue();
-        }
-
-        if (equal(tok, "-")) {
-            node = new_sub(node, mul_node(tok&, tok.next), start);
-            continue();
-        }
-
-        rest[] = tok;
-        return(node);
-    }
-}
-
-// mul = cast ("*" cast | "/" cast | "%" cast)*
-fn mul_node(rest: **Token, tok: *Token) *Node = {
-    Node *node = cast(tok&, tok);
-
-    for (;;) {
-        Token *start = tok;
-
-        if (equal(tok, "*")) {
-            node = new_binary(ND_MUL, node, cast(tok&, tok.next), start);
-            continue();
-        }
-
-        if (equal(tok, "/")) {
-            node = new_binary(ND_DIV, node, cast(tok&, tok.next), start);
-            continue();
-        }
-
-        if (equal(tok, "%")) {
-            node = new_binary(ND_MOD, node, cast(tok&, tok.next), start);
-            continue();
-        }
-
-        rest[] = tok;
-        return node;
-    }
-}
-
-// cast = "(" type-name ")" cast | unary
-fn cast(rest: **Token, tok: *Token) *Node = {
-    if (equal(tok, "(") && is_typename(tok.next)) {
-        Token *start = tok;
-        Type *ty = typename(tok&, tok.next);
-        tok = skip(tok, ")");
-
-        // compound literal
-        if (equal(tok, "{"))
-            return unary(rest, start);
-
-        // type cast
-        Node *node = new_cast(cast(rest, tok), ty);
-        node.tok = start;
-        return node;
-    }
-
-    return unary(rest, tok);
-}
-
 // unary = ("+" | "-" | "*" | "&" | "!" | "~") cast
 //             | ("++" | "--") unary
 //             | "&&" ident
 //             | postfix
-fn unary(rest: **Token, tok: *Token) *Node = {
+fn unary(rest: **CC.Token, tok: *CC.Token) *CC.Node = {
     if (equal(tok, "+"))
         return cast(rest, tok.next);
 
     if (equal(tok, "-"))
-        return new_unary(ND_NEG, cast(rest, tok.next), tok);
+        returnc.new_unary(.ND_NEG, cast(rest, tok.next), tok);
 
     if (equal(tok, "&")) {
-        Node *lhs = cast(rest, tok.next);
+        lhs := cast(rest, tok.next);
         add_type(lhs);
-        if (lhs.kind == ND_MEMBER && lhs.member.is_bitfield)
-            error_tok(tok, "cannot take address of bitfield");
-        return new_unary(ND_ADDR, lhs, tok);
+        bf := lhs.kind == .ND_MEMBER && lhs.member.is_bitfield;
+        !bf || error_tok(tok, "cannot take address of bitfield");
+        returnc.new_unary(.ND_ADDR, lhs, tok);
     }
 
     if (equal(tok, "*")) {
@@ -2575,30 +2393,30 @@ fn unary(rest: **Token, tok: *Token) *Node = {
         // in the C spec, but dereferencing a function shouldn't do
         // anything. If foo is a function, `*foo`, `**foo` or `*****foo`
         // are all equivalent to just `foo`.
-        Node *node = cast(rest, tok.next);
+        CC.Node *node = cast(rest, tok.next);
         add_type(node);
         if (node.ty.kind == TY_FUNC)
             return node;
-        return new_unary(ND_DEREF, node, tok);
+        returnc.new_unary(.ND_DEREF, node, tok);
     }
 
     if (equal(tok, "!"))
-        return new_unary(ND_NOT, cast(rest, tok.next), tok);
+        returnc.new_unary(.ND_NOT, cast(rest, tok.next), tok);
 
     if (equal(tok, "~"))
-        return new_unary(ND_BITNOT, cast(rest, tok.next), tok);
+        returnc.new_unary(.ND_BITNOT, cast(rest, tok.next), tok);
 
     // Read ++i as i+=1
     if (equal(tok, "++"))
-        return to_assign(new_add(unary(rest, tok.next), new_num(1, tok), tok));
+        return to_assign(new_add(unary(rest, tok.next), c.new_num(1, tok), tok));
 
     // Read --i as i-=1
     if (equal(tok, "--"))
-        return to_assign(new_sub(unary(rest, tok.next), new_num(1, tok), tok));
+        return to_assign(new_sub(unary(rest, tok.next), c.new_num(1, tok), tok));
 
     // [GNU] labels-as-values
     if (equal(tok, "&&")) {
-        Node *node = c.new_node(ND_LABEL_VAL, tok);
+        node := c.new_node(.ND_LABEL_VAL, tok);
         node.label = get_ident(tok.next);
         node.goto_next = gotos;
         gotos = node;
@@ -2606,26 +2424,22 @@ fn unary(rest: **Token, tok: *Token) *Node = {
         return node;
     }
 
-    return postfix(rest, tok);
+    postfix(rest, tok)
 }
 
-// Find a struct member by name.
-fn get_struct_member(ty: *CC.Type, tok: *Token) *Member = {
-    for (Member *mem = ty.members; mem; mem = mem.next) {
-        // Anonymous struct member
-        if ((mem.ty.kind == TY_STRUCT || mem.ty.kind == TY_UNION) &&
-                !mem.name) {
-            if (get_struct_member(mem.ty, tok))
-                return mem;
-            continue();
-        }
-
-        // Regular struct member
-        if (mem.name.len == tok.len &&
-                !strncmp(mem.name.loc, tok.loc, tok.len))
-            return mem;
-    }
-    return NULL;
+fn get_struct_member(ty: *CC.Type, name: *CC.Token) ?*CC.Member = {
+    mem := ty.members;
+    for_linked mem { mem |
+        is_anon := (@is(mem.ty.kind, .TY_STRUCT, .TY_UNION)) && mem.name.is_null();
+        if is_anon {
+            if get_struct_member(mem.ty, name) { _ |
+                return(Some = mem);
+            };
+        } else {
+            if(mem.name.str() == name.str(), => return(Some = mem));
+        };
+    };
+    .None
 }
 
 // Create a node representing a struct member access, such as foo.bar
@@ -2641,31 +2455,25 @@ fn get_struct_member(ty: *CC.Type, tok: *Token) *Member = {
 // member "a" of the anonymous struct as "x.a".
 //
 // This function takes care of anonymous structs.
-fn struct_ref(node: *Node, tok: *Token) *Node = {
+fn struct_ref(node: *CC.Node, tok: *CC.Token) *CC.Node = {
     add_type(node);
-    if (node.ty.kind != TY_STRUCT && node.ty.kind != TY_UNION)
-        error_tok(node.tok, "not a struct nor a union");
-
-    Type *ty = node.ty;
-
-    for (;;) {
-        Member *mem = get_struct_member(ty, tok);
-        if (!mem)
-            error_tok(tok, "no such member");
-        node = new_unary(ND_MEMBER, node, tok);
+    ty := node.ty;
+    has_fields := @is(ty.kind, .TY_STRUCT, .TY_UNION);
+    if(!has_fields, => error_tok(node.tok, "not a struct nor a union"));
+    loop {
+        mem := get_struct_member(ty, tok) || error_tok(tok, "no such member");
+        node = c.new_unary(.ND_MEMBER, node, tok);
         node.member = mem;
-        if (mem.name)
-            break();
+        if(!mem.name.is_null(), => return(node));
         ty = mem.ty;
     }
-    return node;
 }
 
 // Convert A++ to `(typeof A)((A += 1) - 1)`
-fn new_inc_dec(node: *Node, tok: *Token, addend: i64) *Node = {
+fn new_inc_dec(node: *CC.Node, tok: *CC.Token, addend: i64) *CC.Node = {
     add_type(node);
-    return new_cast(new_add(to_assign(new_add(node, new_num(addend, tok), tok)),
-                                                    new_num(-addend, tok), tok),
+    return new_cast(new_add(to_assign(new_add(node, c.new_num(addend, tok), tok)),
+                                                   c.new_num(-addend, tok), tok),
                                     node.ty);
 }
 
@@ -2679,75 +2487,76 @@ fn new_inc_dec(node: *Node, tok: *Token, addend: i64) *Node = {
 //                            | "->" ident
 //                            | "++"
 //                            | "--"
-fn postfix(rest: **Token, tok: *Token) *Node = {
-    if (equal(tok, "(") && is_typename(tok.next)) {
+fn postfix(rest: **CC.Token, tok: *CC.Token) *CC.Node = {
+    if equal(tok, "(") && is_typename(tok.next) {
         // Compound literal
-        Token *start = tok;
-        Type *ty = typename(tok&, tok.next);
+        start := tok;
+        ty := typename(tok&, tok.next);
         tok = skip(tok, ")");
 
-        if (scope.next == NULL) {
-            Obj *var = new_anon_gvar(ty);
-            gvar_initializer(rest, tok, var);
-            return new_var_node(var, start);
-        }
+        if scope.next.is_null() {
+            var := c.new_anon_gvar(ty);
+            c.gvar_initializer(rest, tok, var);
+            return(c.new_var_node(var, start));
+        };
 
-        Obj *var = new_lvar("", ty);
-        Node *lhs = lvar_initializer(rest, tok, var);
-        Node *rhs = new_var_node(var, tok);
-        return new_binary(ND_COMMA, lhs, rhs, start);
-    }
+        var := new_lvar("", ty);
+        lhs := lvar_initializer(rest, tok, var);
+        rhs := c.new_var_node(var, tok);
+        return(new_binary(.ND_COMMA, lhs, rhs, start));
+    };
 
-    Node *node = primary(tok&, tok);
+    node := primary(tok&, tok);
 
-    for (;;) {
+    loop {
+        continue :: local_return;
         if (equal(tok, "(")) {
             node = funcall(tok&, tok.next, node);
             continue();
-        }
+        };
 
         if (equal(tok, "[")) {
             // x[y] is short for *(x+y)
             Token *start = tok;
-            Node *idx = expr(tok&, tok.next);
+            CC.Node *idx = expr(tok&, tok.next);
             tok = skip(tok, "]");
-            node = new_unary(ND_DEREF, new_add(node, idx, start), start);
+            node = c.new_unary(.ND_DEREF, new_add(node, idx, start), start);
             continue();
-        }
+        };
 
         if (equal(tok, ".")) {
             node = struct_ref(node, tok.next);
             tok = tok.next.next;
             continue();
-        }
+        };
 
         if (equal(tok, "->")) {
             // x->y is short for (*x).y
-            node = new_unary(ND_DEREF, node, tok);
+            node = c.new_unary(.ND_DEREF, node, tok);
             node = struct_ref(node, tok.next);
             tok = tok.next.next;
             continue();
-        }
+        };
 
         if (equal(tok, "++")) {
             node = new_inc_dec(node, tok, 1);
             tok = tok.next;
             continue();
-        }
+        };
 
         if (equal(tok, "--")) {
             node = new_inc_dec(node, tok, -1);
             tok = tok.next;
             continue();
-        }
+        };
 
         rest[] = tok;
-        return node;
+        return(node);
     }
 }
 
 // funcall = (assign ("," assign)*)? ")"
-fn funcall(rest: **Token, tok: *Token, f: *Node) *Node = {
+fn funcall(rest: **CC.Token, tok: *CC.Token, f: *CC.Node) *CC.Node = {
     add_type(f);
 
     if (f.ty.kind != TY_FUNC &&
@@ -2757,7 +2566,7 @@ fn funcall(rest: **Token, tok: *Token, f: *Node) *Node = {
     ty := if(f.ty.kind == .TY_FUNC, => f.ty, => f.ty.base);
     param_ty := ty.params;
 
-    head := Node.zeroed();
+    head := CC.Node.zeroed();
     cur := head&;
     while => !equal(tok, ")") {
         if !cur.identical(head&) {
@@ -2787,7 +2596,7 @@ fn funcall(rest: **Token, tok: *Token, f: *Node) *Node = {
 
     rest[] = skip(tok, ")");
 
-    node := new_unary(.ND_FUNCALL, f, tok);
+    node := c.new_unary(.ND_FUNCALL, f, tok);
     node.func_ty = ty;
     node.ty = ty.return_ty;
     node.args = head.next;
@@ -2804,43 +2613,43 @@ fn funcall(rest: **Token, tok: *Token, f: *Node) *Node = {
 //
 // generic-assoc = type-name ":" assign
 //                             | "default" ":" assign
-fn generic_selection(rest: **Token, tok: *Token) *Node = {
+fn generic_selection(rest: **CC.Token, tok: *CC.Token) *CC.Node = {
     start := tok;
     tok = skip(tok, "(");
 
     ctrl := assign(tok&, tok);
     add_type(ctrl);
 
-    Type *t1 = ctrl.ty;
+    t1 := ctrl.ty;
     t1 := @match(t1.kind) {
         fn TY_FUNC()  => pointer_to(t1);
         fn TY_ARRAY() => pointer_to(t1.base);
         @default => t1;
     };
-    Node *ret = NULL;
-
-    while (!consume(rest, tok, ")")) {
+    
+    ret: ?*CC.Node = .None;
+    while => !consume(rest, tok, ")") {
+        continue :: local_return;
         tok = skip(tok, ",");
 
-        if (equal(tok, "default")) {
+        if equal(tok, "default") {
             tok = skip(tok.next, ":");
-            Node *node = assign(tok&, tok);
-            if (!ret)
-                ret = node;
+            node := assign(tok&, tok);
+            if ret.is_none() {
+                ret = (Some = node);
+            };
             continue();
-        }
+        };
 
-        Type *t2 = typename(tok&, tok);
+        t2 := typename(tok&, tok);
         tok = skip(tok, ":");
-        Node *node = assign(tok&, tok);
-        if (is_compatible(t1, t2))
-            ret = node;
-    }
+        node := assign(tok&, tok);
+        if is_compatible(t1, t2) {
+            ret = (Some = node);
+        };
+    };
 
-    if (!ret)
-        error_tok(start, "controlling expression type not compatible with"
-                            " any generic association type");
-    ret
+    ret || error_tok(start, "controlling expression type not compatible with any generic association type")
 }
 
 // primary = "(" "{" stmt+ "}" ")"
@@ -2855,48 +2664,38 @@ fn generic_selection(rest: **Token, tok: *Token) *Node = {
 //                 | ident
 //                 | str
 //                 | num
-fn primary(rest: **Token, tok: *Token) *Node = {
+fn primary(rest: **CC.Token, tok: *CC.Token) *CC.Node = {
     Token *start = tok;
     @if_else {
-        @if(equal(tok, "(")) => if equal(tok.next, "{") {
-            // This is a GNU statement expresssion.
-            node := c.new_node(ND_STMT_EXPR, tok);
-            node.body = compound_stmt(tok&, tok.next.next).body;
-            rest[] = skip(tok, ")");
-            node
-        } else {
-            node := expr(tok&, tok.next);
-            rest[] = skip(tok, ")");
-            node
-        };
+        @if(equal(tok, "(")) => unreachable();
         @if(equal(tok, "sizeof")) => if next_is_paren_typename(tok) {
             Type *ty = typename(tok&, tok.next.next);
             rest[] = skip(tok, ")");
             if ty.kind == .TY_VLA {
                 if(ty.vla_size != 0, => return(new_var_node(ty.vla_size, tok));
                 lhs := compute_vla_size(ty, tok);
-                rhs := new_var_node(ty.vla_size, tok);
-                new_binary(ND_COMMA, lhs, rhs, tok)
+                rhs := c.new_var_node(ty.vla_size, tok);
+               c.new_binary(.ND_COMMA, lhs, rhs, tok)
             } else {
-                new_ulong(ty.size, start)
+               c.new_ulong(ty.size, start)
             }
         } else {
             node := unary(rest, tok.next);
             add_type(node);
             if node.ty.kind == .TY_VLA {
-                new_var_node(node.ty.vla_size, tok)
+               c.new_var_node(node.ty.vla_size, tok)
             } else {
-                new_ulong(node.ty.size, tok)
+               c.new_ulong(node.ty.size, tok)
             }
         };
         @if(equal(tok, "_Alignof")) => if next_is_paren_typename(tok) {
             ty := typename(tok&, tok.next.next);
             rest[] = skip(tok, ")");
-            new_ulong(ty.align, tok)
+           c.new_ulong(ty.align, tok)
         } else {
             node := unary(rest, tok.next);
             add_type(node);
-            new_ulong(node.ty.align, tok)
+           c.new_ulong(node.ty.align, tok)
         };
         @if(equal(tok, "_Generic")) => generic_selection(rest, tok.next);
         @if(equal(tok, "__builtin_types_compatible_p")) => {
@@ -2905,25 +2704,22 @@ fn primary(rest: **Token, tok: *Token) *Node = {
             tok = skip(tok, ",");
             t2 := typename(tok&, tok);
             rest[] = skip(tok, ")");
-            new_num(is_compatible(t1, t2), start)
+           c.new_num(is_compatible(t1, t2), start)
         }
     };
-
 
     if (equal(tok, "__builtin_reg_class")) {
         tok = skip(tok.next, "(");
         ty := typename(tok&, tok);
         rest[] = skip(tok, ")");
 
-        if (is_integer(ty) || ty.kind == TY_PTR)
-            return new_num(0, start);
-        if (is_flonum(ty))
-            return new_num(1, start);
-        return new_num(2, start);
-    }
+        if(is_integer(ty) || ty.kind == .TY_PTR, => return(new_num(0, start)));
+        if(is_flonum(ty), return(new_num(1, start));
+        return(new_num(2, start));
+    };
 
-    if (equal(tok, "__builtin_compare_and_swap")) {
-        Node *node = c.new_node(ND_CAS, tok);
+    if equal(tok, "__builtin_compare_and_swap") {
+        node := c.new_node(.ND_CAS, tok);
         tok = skip(tok.next, "(");
         node.cas_addr = assign(tok&, tok);
         tok = skip(tok, ",");
@@ -2931,63 +2727,161 @@ fn primary(rest: **Token, tok: *Token) *Node = {
         tok = skip(tok, ",");
         node.cas_new = assign(tok&, tok);
         rest[] = skip(tok, ")");
-        return node;
-    }
+        return(node);
+    };
 
-    if (equal(tok, "__builtin_atomic_exchange")) {
-        Node *node = c.new_node(ND_EXCH, tok);
+    if equal(tok, "__builtin_atomic_exchange") {
+        node := c.new_node(.ND_EXCH, tok);
         tok = skip(tok.next, "(");
         node.lhs = assign(tok&, tok);
         tok = skip(tok, ",");
         node.rhs = assign(tok&, tok);
         rest[] = skip(tok, ")");
-        return node;
-    }
-
-    if (tok.kind == TK_IDENT) {
-        // Variable or enum constant
-        VarScope *sc = find_var(tok);
-        rest[] = tok.next;
-
-        // For "static inline" function
-        if (sc && sc.var && sc.var.is_function) {
-            if (current_fn)
-                strarray_push(&current_fn.refs, sc.var.name);
-            else
-                sc.var.is_root = true;
-        }
-
-        if (sc) {
-            if (sc.var)
-                return new_var_node(sc.var, tok);
-            if (sc.enum_ty)
-                return new_num(sc.enum_val, tok);
-        }
-
-        if (equal(tok.next, "("))
-            error_tok(tok, "implicit declaration of a function");
-        error_tok(tok, "undefined variable");
-    }
-
-    if (tok.kind == TK_STR) {
-        Obj *var = new_string_literal(tok.str, tok.ty);
-        rest[] = tok.next;
-        return new_var_node(var, tok);
-    }
-
-    if (tok.kind == TK_NUM) {
-        Node *node;
-        if (is_flonum(tok.ty)) {
-            node = c.new_node(ND_NUM, tok);
-            node.fval = tok.fval;
-        } else {
-            node = new_num(tok.val, tok);
-        }
-
-        node.ty = tok.ty;
-        rest[] = tok.next;
-        return node;
-    }
+        return(node);
+    };
 
     error_tok(tok, "expected an expression");
+}
+
+
+fn eval(c: *Ctx, node: *CC.Node) i64 = {
+    panic("TODO: constexpr")
+}
+
+// Evaluate a given node as a constant expression.
+//
+// A constant expression is either just a number or ptr+n where ptr
+// is a pointer to a global variable and n is a postiive/negative
+// number. The latter form is accepted only as an initialization
+// expression for a global variable.
+//static (?CStr, int64_t) eval2(CC.Node *node, char ***label);
+
+//static int64_t eval_rval(CC.Node *node, char ***label);
+
+fn is_const_expr(c: *Ctx, node: *CC.Node) bool = {
+    panic("TODO: is_const_expr")
+}
+
+fn const_expr(c: *Ctx, rest: **CC.Token, tok: *CC.Token) i64 = {
+    node := c.parse_expr(rest, tok, .Conditional);
+    c.eval(node)
+}
+
+//static double eval_double(CC.Node *node);
+
+// Convert op= operators to expressions containing an assignment.
+//
+// In general, `A op= C` is converted to ``tmp = &A, *tmp = *tmp op B`.
+// However, if a given expression is of form `A.x op= C`, the input is
+// converted to `tmp = &A, (*tmp).x = (*tmp).x op C` to handle assignments
+// to bitfields.
+fn to_assign(c: *Ctx, binary: *CC.Node) *CC.Node = {
+    panic("TODO: to_assign"); /*
+    add_type(binary.lhs);
+    add_type(binary.rhs);
+    tok: *CC.Token = binary.tok;
+    
+    // Convert `A.x op= C` to `tmp = &A, (*tmp).x = (*tmp).x op C`.
+    if (binary.lhs.kind == ND_MEMBER) {
+        Obj *var = new_lvar("", pointer_to(binary.lhs.lhs.ty));
+
+        CC.Node *expr1 = c.new_binary(.ND_ASSIGN, c.new_var_node(var, tok),
+                                                        c.new_unary(.ND_ADDR, binary.lhs.lhs, tok), tok);
+
+        CC.Node *expr2 = c.new_unary(.ND_MEMBER,
+                                                       c.new_unary(.ND_DEREF, c.new_var_node(var, tok), tok),
+                                                        tok);
+        expr2.member = binary.lhs.member;
+
+        CC.Node *expr3 = c.new_unary(.ND_MEMBER,
+                                                       c.new_unary(.ND_DEREF, c.new_var_node(var, tok), tok),
+                                                        tok);
+        expr3.member = binary.lhs.member;
+
+        CC.Node *expr4 = c.new_binary(.ND_ASSIGN, expr2,
+                                                        c.new_binary(binary.kind, expr3, binary.rhs, tok),
+                                                         tok);
+
+        return(c.new_binary(.ND_COMMA, expr1, expr4, tok));
+    };
+
+    // If A is an atomic type, Convert `A op= B` to
+    //
+    // ({
+    //     T1 *addr = &A; T2 val = (B); T1 old = *addr; T1 new;
+    //     do {
+    //        new = old op val;
+    //     } while (!atomic_compare_exchange_strong(addr, &old, new));
+    //     new;
+    // })
+    if binary.lhs.ty.is_atomic {
+        head := CC.Node.zeroed();
+        cur := head&;
+
+        Obj *addr = new_lvar("", pointer_to(binary.lhs.ty));
+        Obj *val = new_lvar("", binary.rhs.ty);
+        Obj *old = new_lvar("", binary.lhs.ty);
+        Obj *new = new_lvar("", binary.lhs.ty);
+
+        cur = cur.next =
+           c.new_unary(.ND_EXPR_STMT,
+                               c.new_binary(.ND_ASSIGN, c.new_var_node(addr, tok),
+                                                    c.new_unary(.ND_ADDR, binary.lhs, tok), tok),
+                                tok);
+
+        cur = cur.next =
+           c.new_unary(.ND_EXPR_STMT,
+                               c.new_binary(.ND_ASSIGN, c.new_var_node(val, tok), binary.rhs, tok),
+                                tok);
+
+        cur = cur.next =
+           c.new_unary(.ND_EXPR_STMT,
+                               c.new_binary(.ND_ASSIGN, c.new_var_node(old, tok),
+                                                    c.new_unary(.ND_DEREF, c.new_var_node(addr, tok), tok), tok),
+                                tok);
+
+        CC.Node *loop = c.new_node(.ND_DO, tok);
+        loop.brk_label = new_unique_name();
+        loop.cont_label = new_unique_name();
+
+        CC.Node *body = c.new_binary(.ND_ASSIGN,
+                                                       c.new_var_node(new, tok),
+                                                       c.new_binary(binary.kind, c.new_var_node(old, tok),
+                                                                            c.new_var_node(val, tok), tok),
+                                                        tok);
+
+        loop.then = c.new_node(.ND_BLOCK, tok);
+        loop.then.body = c.new_unary(.ND_EXPR_STMT, body, tok);
+
+        CC.Node *cas = c.new_node(.ND_CAS, tok);
+        cas.cas_addr = c.new_var_node(addr, tok);
+        cas.cas_old = c.new_unary(.ND_ADDR, c.new_var_node(old, tok), tok);
+        cas.cas_new = c.new_var_node(new, tok);
+        loop.cond = c.new_unary(.ND_NOT, cas, tok);
+
+        cur = cur.next = loop;
+        cur = cur.next = c.new_unary(.ND_EXPR_STMT, c.new_var_node(new, tok), tok);
+
+        CC.Node *node = c.new_node(.ND_STMT_EXPR, tok);
+        node.body = head.next;
+        return node;
+    }
+
+    // Convert `A op= B` to ``tmp = &A, *tmp = *tmp op B`.
+    var := c.new_lvar("", pointer_to(binary.lhs.ty));
+
+    expr1 := c.new_binary(.ND_ASSIGN, c.new_var_node(var, tok),
+                                                    c.new_unary(.ND_ADDR, binary.lhs, tok), tok);
+
+    expr2 :=
+       c.new_binary(.ND_ASSIGN,
+                            c.new_unary(.ND_DEREF, c.new_var_node(var, tok), tok),
+                            c.new_binary(binary.kind,
+                                                   c.new_unary(.ND_DEREF, c.new_var_node(var, tok), tok),
+                                                    binary.rhs,
+                                                    tok),
+                             tok);
+
+   c.new_binary(.ND_COMMA, expr1, expr2, tok)
+   */
 }

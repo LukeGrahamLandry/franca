@@ -1,5 +1,10 @@
 - https://github.com/rui314/chibicc
 
+## Changes from Chibicc
+
+- use the franca compiler backend instead of generating amd64 assembly as text and depending on someone else's assembler and linker. 
+- less verbose style of handling operator precedence. 
+
 ## Chibicc License
 
 MIT License

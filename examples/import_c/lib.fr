@@ -5,8 +5,9 @@ CC :: import("@/examples/import_c/chibicc.fr");
 ENABLE_TRACY :: false;
 #include_std("backend/lib.fr");
 #include_std("compiler/worker.fr");
-#include_std("compiler/tokenize.fr");
-#include_std("compiler/compile.fr");
+#include_std("examples/import_c/tokenize.fr");
+#include_std("examples/import_c/compile.fr");
+#include_std("examples/import_c/type.fr");
 
 :: {
     ctx := current_compiler_context();
@@ -20,13 +21,14 @@ fn main() void = {
     ::FmtPad(Str);
     passed := 0;
     failed := 0;
-    walk_directory(@fmt_cstr("%", tests_folder)) { e |
-        if e.name.ends_with(".c") {
-            continue :: local_return;
-            if e.name == "tls.c" || e.name == "asm.c" {
-                continue();
-            };
-            path := @tfmt("%/%", tests_folder, e.name);
+    //walk_directory(@fmt_cstr("%", tests_folder)) { e |
+    //    if e.name.ends_with(".c") {
+    //        continue :: local_return;
+    //        if e.name == "tls.c" || e.name == "asm.c" {
+    //            continue();
+    //        };
+    //        path := @tfmt("%/%", tests_folder, e.name);
+            path := "examples/import_c/b.c";
             @print("%", f_pad(path, 40, .After));
             
             ok, out, err := fork_and_catch(temp()) {  // TODO: i don't care enough to reset the statics in the c code
@@ -41,12 +43,12 @@ fn main() void = {
             @println("[%]", if(ok, => "ok", => "failed"));
             println(out.items());
             println(err.items());
-            //
+            
             //if !ok {
             //    println("FAILED");
             //};
-        };
-    };
+    //    };
+    //};
     if failed == 0 {
         @println("\nAll is fine! (passed % tests)", passed);
     } else {
@@ -68,8 +70,21 @@ fn compile_one_file(path: Str) void = {
     tok := CC.Token.zeroed(); tok := tok&;
     tok  = append_tokens(tok, tok2);
     tok  = preprocess(tok);
+    
+    for_linked tok { tok |
+        if @is(tok.kind, .TK_KEYWORD, .TK_PUNCT) {
+            ::?CC.TokenKind;
+            tok.kind = CC.TokenKind.from_name(tok.str()) || @panic("invalid c keyword %", tok.str());
+        };
+    };
+    
+    c := Ctx.zeroed();
+    c.arena = temp();
+    c.current_fn = .None;
+    c.brk_label = .None;
+    c.cont_label = .None;
     //print_tokens(tok);
-    prog := parse(tok);
+    prog := c&.parse(tok);
     emit_the_code(ctx, prog);
     join_codegen_thread(ctx);
 
