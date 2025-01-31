@@ -1,5 +1,13 @@
 - TODO: deal with `CodegenEntry:Bounce` on wasm
 
+## (Jan 31)
+
+- ND_SWITCH, ND_CASE, ND_DO
+- ND_NEG use the right cls to make `switch(-1) case 0xffffffff:` work
+  then use the right cls for cmp to keep `-1<1` working 
+- (control.c)
+- shinking casts do need to truncate sometimes? 
+- (decl.c)
 
 ## (Jan 30)
 

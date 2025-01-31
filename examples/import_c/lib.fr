@@ -20,7 +20,8 @@ ENABLE_TRACY :: false;
 JUST_ONE :: false;
 USE_HOST_BACKEND :: true;
 USE_MINE :: true;
-
+LOG_IR :: false;
+  
 fn main() void = {
     :: assert(!USE_HOST_BACKEND, "cannot start from main() when USE_HOST_BACKEND");
     vtable := ImportVTable.zeroed();
@@ -43,8 +44,14 @@ fn run_tests(vtable: *ImportVTable) void = {
             continue :: local_return;
             // TODO: this is silly
             skip  := @const_slice("tls.c", "asm.c", "alignof.c", "complit.c");
-            // includes: "atomic.c"
-            allow := @const_slice("hello.c", "variable.c", "alloca.c", "arith.c", "cast.c", "compat.c", "const.c"); // , "control.c");
+            // includes: "atomic.c", "macro.c", "offsetof.c", "varargs.c"
+            // TODO: "float.c", "function.c", "initializer.c", "line.c", "literal.c", "string.c", "usualconv.c", "vla.c"
+            allow := @const_slice(
+                "hello.c", "variable.c", "alloca.c", "arith.c", 
+                "cast.c", "compat.c", "const.c", "control.c",
+                "decl.c", "enum.c", "pointer.c", "sizeof.c", 
+                "struct.c", "typedef.c", "typeof.c", "union.c",
+            );
             if skip.contains(e.name&) || !allow.contains(e.name&) {
                 continue();
             };
@@ -87,7 +94,9 @@ fn compile_one_file(vtable: *ImportVTable, path: Str) Result(void, Str) = {
     a := query_current_arch();
     
     init_default_module_dyn(m&, vtable, (arch = a.unwrap(), os = query_current_os(), type = .Exe));
-    //m.debug["P".char()] = true;
+    @if(LOG_IR) {
+        m.debug["P".char()] = true;
+    };
     
     // TODO: this is ugly
     codegen_thread_main := ptr_cast_unchecked(@type vtable.codegen_thread_main, CodegenWorker, vtable.codegen_thread_main&)[];
@@ -318,11 +327,22 @@ fn gen_expr(f: *Qbe.Fn, node: *CC.Node) Qbe.Ref = {
         fn ND_BITXOR()   => B(.xor);
         fn ND_SHL()      => B(.shl);
         fn ND_SHR()      => B(if(node.ty.is_unsigned, => .shr, => .sar));
-        // TODO: types
-        fn ND_EQ()       => B(.ceqw);
-        fn ND_NE()       => B(.cnew);
-        fn ND_LT()       => B(if(node.lhs.ty.is_unsigned, => .cultl, => .csltl));  // TODO: floats, w
-        fn ND_LE()       => B(if(node.lhs.ty.is_unsigned, => .culel, => .cslel));  // TODO: floats, w
+        fn ND_EQ()       => B(node.lhs.ty.cls().cmp_base());
+        fn ND_NE()       => B(node.lhs.ty.cls().cmp_ne());
+        fn ND_LT()       => B(@match(node.lhs.ty.cls()){
+            fn Kw() => if(node.lhs.ty.is_unsigned, => .cultw, => .csltw);
+            fn Kl() => if(node.lhs.ty.is_unsigned, => .cultl, => .csltl);
+            fn Ks() => .clts;
+            fn Kd() => .cltd;
+            @default => unreachable();
+        });
+        fn ND_LE()       => B(@match(node.lhs.ty.cls()){
+            fn Kw() => if(node.lhs.ty.is_unsigned, => .culew, => .cslew);
+            fn Kl() => if(node.lhs.ty.is_unsigned, => .culel, => .cslel);
+            fn Ks() => .cles;
+            fn Kd() => .cled;
+            @default => unreachable();
+        });
         fn ND_ADDR()     => f.gen_addr(node.lhs);
         fn ND_CAST() => {
             source := gen_expr(f, node.lhs);
@@ -343,15 +363,17 @@ fn gen_expr(f: *Qbe.Fn, node: *CC.Node) Qbe.Ref = {
             f.gen_load(addr, node.ty)
         }
         fn ND_NEG() => {
+            k := node.ty.cls();
             arg := f.gen_expr(node.lhs);
-            r   := f.newtmp("c", .Kl);
-            emit(f.start, .neg, .Kl, r, arg, QbeNull);
+            r   := f.newtmp("c", k);
+            emit(f.start, .neg, k, r, arg, QbeNull);
             r
         }
         fn ND_BITNOT() => {
+            k := node.ty.cls();
             arg := f.gen_expr(node.lhs);
-            r   := f.newtmp("c", .Kl);
-            emit(f.start, .xor, .Kl, r, arg, f.getcon(-1));
+            r   := f.newtmp("c", k);
+            emit(f.start, .xor, k, r, arg, f.getcon(-1));
             r
         }
         fn ND_NOT() => {  // TODO: do the trick with redirecting jump targets to emit better code when this is in an if condition. 
@@ -359,7 +381,7 @@ fn gen_expr(f: *Qbe.Fn, node: *CC.Node) Qbe.Ref = {
             // not just xor with 1 bit. it might not be a _Bool. 
             op_eq := cmp_base(node.lhs.ty.cls());
             r   := f.newtmp("c", .Kl);
-            emit(f.start, op_eq, .Kw, r, arg, QbeConZero);
+            emit(f.start, op_eq, .Kl, r, arg, QbeConZero);
             r
         }
         fn ND_NUM() => @match(node.ty.kind) {
@@ -422,17 +444,11 @@ fn gen_expr(f: *Qbe.Fn, node: *CC.Node) Qbe.Ref = {
             
             f.start = old_block.s1;
             then_value := f.gen_expr(node.then);
-            if f.start.jmp.type == .Jxxx {
-                f.start.jmp.type = .jmp;
-                f.start.s1 = join_block;
-            };
+            f.jmp_if_unterminated(join_block);
             f.start = old_block.s2;
             ::ptr_utils(@type node.else[]);
             else_value := @if(node.else.is_null(), QbeUndef, f.gen_expr(node.else));
-            if f.start.jmp.type == .Jxxx {
-                f.start.jmp.type = .jmp;
-                f.start.s1 = join_block;
-            };
+            f.jmp_if_unterminated(join_block);
             f.start = join_block;
             ::ptr_utils(@type node.ty[]);
             if node.ty.is_null() || node.ty.kind == .TY_VOID {
@@ -455,10 +471,7 @@ fn gen_expr(f: *Qbe.Fn, node: *CC.Node) Qbe.Ref = {
             if !node.init.is_null() {
                 _ := gen_expr(f, node.init);
             };
-            if f.start.jmp.type == .Jxxx {
-                f.start.jmp.type = .jmp;
-                f.start.s1 = cond_block;
-            };
+            f.jmp_if_unterminated(cond_block);
             
             cond_block.s1 = body_block;
             if !node.cond.is_null() {
@@ -472,49 +485,112 @@ fn gen_expr(f: *Qbe.Fn, node: *CC.Node) Qbe.Ref = {
             };
             f.start = body_block;
             f.gen_expr(node.then);  // note: gen_expr may change f.start (current block)
-            if f.start.jmp.type == .Jxxx {
-                f.start.s1 = inc_block;
-                f.start.jmp.type = .jmp;
-            };
+            f.jmp_if_unterminated(inc_block);
             
             f.start = inc_block;
             if !node.inc.is_null() {
                 f.gen_expr(node.inc);  // note: gen_expr may change f.start (current block)
             };
-            if f.start.jmp.type == .Jxxx {
-                f.start.s1 = cond_block;
-                f.start.jmp.type = .jmp;
-            };
+            f.jmp_if_unterminated(cond_block);
             f.start = join_block;
             QbeNull
+        }
+        fn ND_DO() => {
+            body_block := f.new_block(); 
+            cond_block := f.get_block(node.cont_label);
+            join_block := f.get_block(node.brk_label);
+            f.jmp_if_unterminated(body_block);
+            f.start = body_block;
+            f.gen_expr(node.then);
+            
+            f.jmp_if_unterminated(cond_block);
+            {
+                f.start = cond_block;
+                cond_value := f.gen_expr(node.cond);
+                // TODO: cast to _Bool if it's not Kw?
+                f.start.jmp = (type = .jnz, arg = cond_value); 
+                f.start.s1 = body_block;
+                f.start.s2 = join_block;
+            };
+            
+            f.start = join_block;
+            QbeUndef
         }
         fn ND_MEMBER() => {
             addr := f.gen_addr(node); 
             f.gen_load(addr, node.ty)
         }
         fn ND_GOTO() => {
-            if f.start.jmp.type == .Jxxx {
-                f.start.jmp.type = .jmp;
-                f.start.s1 = f.get_block(node.unique_label);
-            };
+            f.jmp_if_unterminated(f.get_block(node.unique_label));
             f.start = f.new_block();
             QbeUndef
         }
         fn ND_LABEL() => {
             b := f.get_block(node.unique_label);
-            if f.start.jmp.type == .Jxxx {
-                f.start.jmp.type = .jmp;
-                f.start.s1 = b;
-            };
+            f.jmp_if_unterminated(b);
             f.start = b;
             f.gen_expr(node.lhs);
             QbeUndef
         }
-        //fn ND_SWITCH() => {
+        fn ND_SWITCH() => {
+            inspect := f.gen_expr(node.cond);
+            if node.cond.ty.cls() != .Kl {
+                r := f.newtmp("c", .Kl);
+                emit(f.start, .extuw, .Kl, r, inspect, QbeNull);
+                inspect = r;
+            };
+            join_block := f.get_block(node.brk_label);
+            if f.start.jmp.type == .Jxxx {
+                entry_block := f.start;
+                entry_block.jmp.type = .switch;
+                
+                ::ptr_utils(CC.Node);
+                // if they didn't write a default:, just fallthrough to the end. 
+                default_label := if(node.default_case.is_null(), => node.brk_label, => node.default_case.label);
+                payload: Qbe.SwitchPayload = (
+                    cases = new(0),
+                    case_count = 0,
+                    default = f.get_block(default_label),
+                    src = f.start,
+                    inspect = inspect,
+                );
+                case := node.case_next;
+                while => !case.is_null() {
+                    @assert_eq(case.begin, case.end, "TODO: GNU case ranges are not yet supported");
+                    push(payload.cases&, payload.case_count&, (f.get_block(case.label), case.begin));
+                    case = case.case_next;
+                };
+                entry_block.jmp.arg = INT(f.switch_count.zext());
+                if f.switch_count == 0 {
+                    f.switches = new(1);
+                };
+                push(f.switches&, f.switch_count&, payload);
+            };
             
-        //}
+            f.start = f.new_block(); // should be redundant, the below should always be making a new label anyway
+            f.gen_expr(node.then); // this deals with emitting code into all the case blocks
+            
+            f.jmp_if_unterminated(join_block);  // TODO: the frontend should just make the last case jump to break?
+            f.start = join_block;
+            QbeUndef
+        }
+        fn ND_CASE() => {
+            // TODO: why is label/unique_label and ND_LABEL/ND_CASE different?
+            b := f.get_block(node.label);
+            f.jmp_if_unterminated(b);
+            f.start = b;
+            f.gen_expr(node.lhs);
+            QbeUndef
+        }
         @default => @panic("unexpected node for expr: %", node.kind);
     }
+}
+
+fn jmp_if_unterminated(f: *Qbe.Fn, dest: *Qbe.Blk) void = {
+    if f.start.jmp.type == .Jxxx {
+        f.start.s1 = dest;
+        f.start.jmp.type = .jmp;
+    };
 }
 
 fn gen_call(f: *Qbe.Fn, node: *CC.Node) Qbe.Ref #once = {
@@ -766,13 +842,22 @@ fn gen_cast(f: *Qbe.Fn, src: Qbe.Ref, from: *CC.Type, to: *CC.Type) Qbe.Ref = {
             fn I32() => .swtof;
             fn F32() => .exts;
             fn F64() => .truncd;
-            @default => panic("TODO: bool/byte/short to float/double cast?");
+            @default => {
+                //  bool/byte/short to float/double cast
+                src = gen_cast(f, src, from, ty_long);
+                .sltof
+            };
         }
     } else {  // k_to is integer
-        // if the source isn't a float:
-        // - we always allow just truncating by not looking at the high bits right? 
-        // - and if sizes are equal, it's a signedness cast which does nothing as well. 
-        if(k_from.is_int() && to.size <= from.size, => return(src)); 
+        if(to.size == from.size && k_to == k_from, => return(src));  // if sizes are equal, it's a signedness cast which does nothing 
+        if k_from.is_int() && to.size < from.size {
+            // `(char) 256` needs to truncate
+            r := f.newtmp("c", k_to);
+            mask := 1.shift_left(to.size.intcast() * 8) - 1;
+            f.start.emit(.and, k_to, r, src, f.getcon(mask));
+            //src = r;
+            return(r);
+        };
         @match(p_from) {
             fn B()   => .extub;
             fn U8()  => .extub;
