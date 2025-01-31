@@ -2,8 +2,6 @@
 *   Parser Helpers   *
 **********************/
 
-error_tok :: fn(tok: *CC.Token, fmt: CStr) Never #import("chibicc") #c_variadic;
-
 fn str(tok: *CC.Token) Str = 
     (ptr = tok.loc.ptr, len = tok.len.intcast());
 
@@ -22,9 +20,9 @@ fn equal(tok: *CC.Token, $op: Str) bool #inline =
     };
 
 // Ensure that the current token is `op`.
-fn skip(tok: *CC.Token, $op: Str) *CC.Token #inline = {
+fn skip(c: *Ctx, tok: *CC.Token, $op: Str) *CC.Token #inline = {
     if !equal(tok, op) {
-        error_tok(tok, "expected '%s'", op.sym().c_str());
+        @error_tok(c, tok, "expected %", op);
     };
     tok.next
 }
@@ -39,6 +37,46 @@ fn consume_end(tok: **CC.Token, $end: Str) bool #inline = {
         return(true);
     };
     false
+}
+
+//error_tok :: fn(tok: *CC.Token, fmt: CStr) Never #import("chibicc") #c_variadic;
+
+fn error_tok(ee: FatExpr) FatExpr #macro = {
+    e := ee&.items();
+    c, tok := (e[0], e[1]);
+    @{
+        c := @[c];
+        out := c.error_buf&;
+        fmt_error_prefix(@[tok], out);
+        @[format_into(@{ out }, e.rest(2), ee.loc)];
+        throw(c.a_little_hidden_control_flow&)
+    }
+}
+
+// Reports an error message in the following format.
+//
+// foo.c:10: x = y + 1;
+//               ^ <error message here>
+fn fmt_error_prefix(tok: *CC.Token, msg: *List(u8)) void = {
+    // Find a line containing `loc`.
+    line := tok.loc;
+    while => ptr_diff(tok.file.contents.ptr, line.ptr) > 0 && line.ptr.offset(-1)[] != "\n".ascii() {  // TODO: make sure this is safe
+        line.ptr = line.ptr.offset(-1);
+    };
+    end := tok.loc;
+    while => end.ptr[] != 0 && end.ptr[] != "\n".ascii() {
+        end.ptr = end.ptr.offset(1);
+    };
+    
+    // Print out the line.
+    start := msg.len;
+    col_no := ptr_diff(line.ptr, tok.loc.ptr);
+    @fmt(msg, "%:%:%: ", tok.file.name, tok.line_no, col_no + 1);
+    pos := msg.len - start + col_no;  // TODO: handle unicode variable width stuff. for now just aligning by byte length. 
+    line_str: Str = (ptr = line.ptr, len = ptr_diff(line.ptr, end.ptr));
+    @fmt(msg, "%\n%^ ", line_str, f_pad("", pos, .Before)); 
+    
+    // Then the caller prints the error message
 }
 
 TokenKind :: @enum(i32) (

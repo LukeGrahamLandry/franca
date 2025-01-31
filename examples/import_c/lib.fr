@@ -21,31 +21,33 @@ fn main() void = {
     ::FmtPad(Str);
     passed := 0;
     failed := 0;
-    //walk_directory(@fmt_cstr("%", tests_folder)) { e |
-        //if e.name.ends_with(".c") {
-            //continue :: local_return;
-            //if e.name == "tls.c" || e.name == "asm.c" {
-                //continue();
-            //};
-            //path := @tfmt("%/%", tests_folder, e.name);
-            path := @tfmt("%/%", tests_folder, "variable.c");
+    walk_directory(@fmt_cstr("%", tests_folder)) { e |
+        if e.name.ends_with(".c") {
+            continue :: local_return;
+            // TODO: this is silly
+            skip  := @const_slice("tls.c", "asm.c");
+            allow := @const_slice("hello.c", "variable.c", "alignof.c");
+            if skip.contains(e.name&) || !allow.contains(e.name&) {
+                continue();
+            };
+            path := @tfmt("%/%", tests_folder, e.name);
+            //path := @tfmt("%/%", tests_folder, "variable.c");
             //path := "examples/import_c/b.c";
             @print("%", f_pad(path, 40, .After));
-            
-            //ok, out, err := fork_and_catch(todo_allocator) {  // TODO: i don't care enough to reset the statics in the c code
-                println("1========");
-                compile_one_file(path);
-                println("2========");
-                exec_cmd("./c.out", empty());
-            //};
-            //ok := ok && out.items().ends_with("OK\n");
-            //(@if(ok, passed&, failed&))[] += 1;
-            //@println("[%]", if(ok, => "ok", => "failed"));
+            or compile_one_file(path) { err |
+                println("[failed compile]");
+                println(err);
+                failed += 1;
+                continue();
+            };
+            ok, out, err := exec_and_catch("./c.out", empty(), todo_allocator);
+            ok := ok && out.items().ends_with("OK\n");
+            (@if(ok, passed&, failed&))[] += 1;
+            @println("[%]", if(ok, => "ok", => "failed run"));
             //print(out.items());
             //print(err.items());
-            
-        //};
-    //};
+        };
+    };
     if failed == 0 {
         @println("\nAll is fine! (passed % tests)", passed);
     } else {
@@ -54,7 +56,7 @@ fn main() void = {
     exit((failed != 0).int());
 }
 
-fn compile_one_file(path: Str) void = {
+fn compile_one_file(path: Str) Result(void, Str) = {
     m := @uninitialized QbeModule;
     a := query_current_arch();
     init_default_module(m&, (arch = a.unwrap(), os = query_current_os(), type = .Exe), use_threads);
@@ -87,10 +89,12 @@ fn compile_one_file(path: Str) void = {
     c.scope = scope&;
     c.scope.vars = init(c.arena);
     c.scope.tags = init(c.arena);
+    c.error_buf = list(temp());
     //print_tokens(tok);
     //
-    prog := @if(USE_MINE, c&.parse(tok), parse(tok));
     
+    prog := @if(USE_MINE, @try(c&.parse(tok)) return, parse(tok));
+
     fn parse(tok: *CC.Token) *CC.Obj #import("chibicc"); 
     emit_the_code(ctx, prog);
     join_codegen_thread(ctx);
@@ -103,6 +107,7 @@ fn compile_one_file(path: Str) void = {
     };
     fclose(outfile);
     drop(m&);
+    .Ok
 }
 
 fn emit_the_code(ctx: *CodegenShared, obj: *CC.Obj) void = {
