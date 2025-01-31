@@ -5,6 +5,7 @@ CC :: import("@/examples/import_c/chibicc.fr");
 ENABLE_TRACY :: false;
 #include_std("backend/lib.fr");
 #include_std("compiler/worker.fr");
+#include_std("compiler/ast_external.fr");
 #include_std("examples/import_c/tokenize.fr");
 #include_std("examples/import_c/compile.fr");
 #include_std("examples/import_c/type.fr");
@@ -16,25 +17,45 @@ ENABLE_TRACY :: false;
     ctx.add_comptime_library(@symbol "chibicc", cg);
 };
 
+JUST_ONE :: false;
+USE_HOST_BACKEND :: true;
+USE_MINE :: true;
+
 fn main() void = {
+    :: assert(!USE_HOST_BACKEND, "cannot start from main() when USE_HOST_BACKEND");
+    vtable := ImportVTable.zeroed();
+    fill_backend_vtable(vtable&);
+    run_tests(vtable&);
+}
+
+fn driver(vtable: *ImportVTable) void = {
+    @if(USE_HOST_BACKEND, run_tests(vtable), main());
+}
+
+fn run_tests(vtable: *ImportVTable) void = {
     tests_folder := "bindings/chibicc/test";
     ::FmtPad(Str);
     passed := 0;
     failed := 0;
+    //if true {
     walk_directory(@fmt_cstr("%", tests_folder)) { e |
         if e.name.ends_with(".c") {
             continue :: local_return;
             // TODO: this is silly
-            skip  := @const_slice("tls.c", "asm.c");
-            allow := @const_slice("hello.c", "variable.c", "alignof.c");
+            skip  := @const_slice("tls.c", "asm.c", "alignof.c", "complit.c");
+            // includes: "atomic.c"
+            allow := @const_slice("hello.c", "variable.c", "alloca.c", "arith.c", "cast.c", "compat.c", "const.c"); // , "control.c");
             if skip.contains(e.name&) || !allow.contains(e.name&) {
                 continue();
             };
             path := @tfmt("%/%", tests_folder, e.name);
             //path := @tfmt("%/%", tests_folder, "variable.c");
-            //path := "examples/import_c/b.c";
+            @if(JUST_ONE) {
+                path = "examples/import_c/b.c";
+            };
+            
             @print("%", f_pad(path, 40, .After));
-            or compile_one_file(path) { err |
+            or compile_one_file(vtable, path) { err |
                 println("[failed compile]");
                 println(err);
                 failed += 1;
@@ -44,8 +65,11 @@ fn main() void = {
             ok := ok && out.items().ends_with("OK\n");
             (@if(ok, passed&, failed&))[] += 1;
             @println("[%]", if(ok, => "ok", => "failed run"));
-            //print(out.items());
-            //print(err.items());
+            if !ok {
+                print(out.items());
+                print(err.items());
+            };
+            @if(JUST_ONE) return();
         };
     };
     if failed == 0 {
@@ -56,21 +80,23 @@ fn main() void = {
     exit((failed != 0).int());
 }
 
-fn compile_one_file(path: Str) Result(void, Str) = {
+goto_labels :: @static(HashMap(Str, *Qbe.Blk)); // TODO
+
+fn compile_one_file(vtable: *ImportVTable, path: Str) Result(void, Str) = {
     m := @uninitialized QbeModule;
     a := query_current_arch();
-    init_default_module(m&, (arch = a.unwrap(), os = query_current_os(), type = .Exe), use_threads);
+    
+    init_default_module_dyn(m&, vtable, (arch = a.unwrap(), os = query_current_os(), type = .Exe));
     //m.debug["P".char()] = true;
-    ctx: *CodegenShared = init(m&, libc_allocator, @as(CodegenWorker) codegen_thread_main);
+    
+    // TODO: this is ugly
+    codegen_thread_main := ptr_cast_unchecked(@type vtable.codegen_thread_main, CodegenWorker, vtable.codegen_thread_main&)[];
+    ctx: *CodegenShared = init(m&, libc_allocator, codegen_thread_main);
 
-    // Tokenize and parse.
-    CC;
     tok2 := tokenize_file(path) || panic("failed tokenize_file");
     tok := CC.Token.zeroed(); tok := tok&;
     tok  = append_tokens(tok, tok2);
     tok  = preprocess(tok);
-    
-    USE_MINE :: true;
     
     @if(USE_MINE)
     for_linked tok { tok |
@@ -123,6 +149,7 @@ fn emit_the_code(ctx: *CodegenShared, obj: *CC.Obj) void = {
                     f.default_init(ctx.m);
                     fill_lnk(f.lnk&, obj, ctx.m);
                     translate_func(f, obj);
+                    //@if(JUST_ONE) printfn(f, f.globals.debug_out);
                     entry.task = (Func = f);
                 } else {
                     entry.task = (AotVar = translate_data(ctx.m, obj));
@@ -171,6 +198,7 @@ fn translate_data(m: *QbeModule, obj: *CC.Obj) []Qbe.Dat = {
 }
 
 fn translate_func(f: *Qbe.Fn, obj: *CC.Obj) void = {
+    goto_labels[] = init(temp());
     f.rpo = new(1);
     start := f.new_block();
     f.start = start;
@@ -238,6 +266,15 @@ fn mangle(m: *QbeModule, obj: *CC.Obj) u32 = {
 
 ::enum(CC.NodeKind);
 
+fn get_block(f: *Qbe.Fn, label: CStr) *Qbe.Blk = {
+    label := label.str();
+    goto_labels.get(label) || {
+        b := f.new_block();
+        goto_labels.insert(label, b);
+        b
+    }
+}
+
 fn gen_expr(f: *Qbe.Fn, node: *CC.Node) Qbe.Ref = {
     ::enum(@type node.ty.kind);
     //@println("%", node.tok.loc.str().slice(0, node.tok.len.zext()));
@@ -274,33 +311,24 @@ fn gen_expr(f: *Qbe.Fn, node: *CC.Node) Qbe.Ref = {
         fn ND_ADD()      => B(.add);
         fn ND_SUB()      => B(.sub);
         fn ND_MUL()      => B(.mul);
-        fn ND_DIV()      => B(.div);  // TODO: sign
-        fn ND_MOD()      => B(.rem);  // TODO: sign
+        fn ND_DIV()      => B(if(node.ty.is_unsigned, => .udiv, => .div));
+        fn ND_MOD()      => B(if(node.ty.is_unsigned, => .urem, => .rem));
         fn ND_BITAND()   => B(.and);
         fn ND_BITOR()    => B(.or);
         fn ND_BITXOR()   => B(.xor);
         fn ND_SHL()      => B(.shl);
-        fn ND_SHR()      => B(.shr);
+        fn ND_SHR()      => B(if(node.ty.is_unsigned, => .shr, => .sar));
         // TODO: types
         fn ND_EQ()       => B(.ceqw);
         fn ND_NE()       => B(.cnew);
-        fn ND_LT()       => B(.csltw);
-        fn ND_LE()       => B(.cslew);
+        fn ND_LT()       => B(if(node.lhs.ty.is_unsigned, => .cultl, => .csltl));  // TODO: floats, w
+        fn ND_LE()       => B(if(node.lhs.ty.is_unsigned, => .culel, => .cslel));  // TODO: floats, w
         fn ND_ADDR()     => f.gen_addr(node.lhs);
         fn ND_CAST() => {
             source := gen_expr(f, node.lhs);
             from, to := (node.lhs.ty, node.ty);
-            k := to.cls();
-            r := f.newtmp("c", k);
             if(to.kind == .TY_VOID, => return(QbeUndef));
-            if to.kind == .TY_BOOL {
-                // TODO: other classes. THIS IGNORES THE HIGH BITS.
-                emit(f.start, .ceql, k, r, source, QbeConZero);
-                return(r)
-            };
-            
-            // TODO
-            source
+            f.gen_cast(source, from, to)
         }
         fn ND_VAR() => {
             if node.var.is_function {
@@ -328,8 +356,10 @@ fn gen_expr(f: *Qbe.Fn, node: *CC.Node) Qbe.Ref = {
         }
         fn ND_NOT() => {  // TODO: do the trick with redirecting jump targets to emit better code when this is in an if condition. 
             arg := f.gen_expr(node.lhs);
-            r   := f.newtmp("c", .Kw);
-            emit(f.start, .xor, .Kw, r, arg, f.getcon(1));
+            // not just xor with 1 bit. it might not be a _Bool. 
+            op_eq := cmp_base(node.lhs.ty.cls());
+            r   := f.newtmp("c", .Kl);
+            emit(f.start, op_eq, .Kw, r, arg, QbeConZero);
             r
         }
         fn ND_NUM() => @match(node.ty.kind) {
@@ -415,15 +445,86 @@ fn gen_expr(f: *Qbe.Fn, node: *CC.Node) Qbe.Ref = {
                 p.to
             }
         }
+        fn ND_FOR() => {
+            cond_block := f.new_block();
+            body_block := f.new_block(); 
+            inc_block  := f.get_block(node.cont_label); 
+            join_block := f.get_block(node.brk_label);
+        
+            ::ptr_utils(CC.Node);
+            if !node.init.is_null() {
+                _ := gen_expr(f, node.init);
+            };
+            if f.start.jmp.type == .Jxxx {
+                f.start.jmp.type = .jmp;
+                f.start.s1 = cond_block;
+            };
+            
+            cond_block.s1 = body_block;
+            if !node.cond.is_null() {
+                f.start = cond_block;
+                cond_value := f.gen_expr(node.cond);  // note: gen_expr may change f.start (current block)
+                // TODO: cast to _Bool if it's not Kw?
+                f.start.jmp = (type = .jnz, arg = cond_value); 
+                f.start.s2 = join_block;
+            } else {
+                cond_block.jmp.type = .jmp;
+            };
+            f.start = body_block;
+            f.gen_expr(node.then);  // note: gen_expr may change f.start (current block)
+            if f.start.jmp.type == .Jxxx {
+                f.start.s1 = inc_block;
+                f.start.jmp.type = .jmp;
+            };
+            
+            f.start = inc_block;
+            if !node.inc.is_null() {
+                f.gen_expr(node.inc);  // note: gen_expr may change f.start (current block)
+            };
+            if f.start.jmp.type == .Jxxx {
+                f.start.s1 = cond_block;
+                f.start.jmp.type = .jmp;
+            };
+            f.start = join_block;
+            QbeNull
+        }
         fn ND_MEMBER() => {
             addr := f.gen_addr(node); 
             f.gen_load(addr, node.ty)
         }
+        fn ND_GOTO() => {
+            if f.start.jmp.type == .Jxxx {
+                f.start.jmp.type = .jmp;
+                f.start.s1 = f.get_block(node.unique_label);
+            };
+            f.start = f.new_block();
+            QbeUndef
+        }
+        fn ND_LABEL() => {
+            b := f.get_block(node.unique_label);
+            if f.start.jmp.type == .Jxxx {
+                f.start.jmp.type = .jmp;
+                f.start.s1 = b;
+            };
+            f.start = b;
+            f.gen_expr(node.lhs);
+            QbeUndef
+        }
+        //fn ND_SWITCH() => {
+            
+        //}
         @default => @panic("unexpected node for expr: %", node.kind);
     }
 }
 
 fn gen_call(f: *Qbe.Fn, node: *CC.Node) Qbe.Ref #once = {
+    if node.lhs.kind == .ND_VAR && node.lhs.var.name.str() == "alloca" {
+        size := f.gen_expr(node.args);
+        r := f.newtmp("alloca", .Kl);
+        emit(f.start, .alloc16, .Kl, r, size, QbeNull);
+        return(r);
+    };
+
     variadic_marker_index := 0;
     if node.lhs.ty.is_variadic {
         t := node.lhs.ty.params;
@@ -508,7 +609,7 @@ fn gen_load(f: *Qbe.Fn, addr: Qbe.Ref, type: *CC.Type) Qbe.Ref = {
     };
     (o: Qbe.O, k: Qbe.Cls) := @switch(type.size) {
         @case(1) => (@if(type.is_unsigned, .loadub, .loadsb), .Kw);
-        @case(2) => (@if(type.is_unsigned, .loadub, .loadsh), .Kw);
+        @case(2) => (@if(type.is_unsigned, .loaduh, .loadsh), .Kw);
         @case(4) => (@if(type.is_unsigned, .loaduw, .loadsw), .Kw);
         @case(8) => (.load, .Kl);
         @default => panic("invalid int size");
@@ -533,6 +634,10 @@ fn gen_addr(f: *Qbe.Fn, node: *CC.Node) Qbe.Ref = {
             r := f.newtmp("c", .Kl);
             emit(f.start, .add, .Kl, r, base, f.getcon(node.member.offset.intcast()));
             r
+        }
+        fn ND_COMMA() => {
+            f.gen_expr(node.lhs);
+            f.gen_addr(node.rhs)
         }
         @default => {
             // TODO: compiler bug
@@ -625,4 +730,63 @@ fn new_phi(f: *Qbe.Fn, b: *Qbe.Blk, k: Qbe.Cls) *Qbe.Phi = {
         link = prev,
     );
     b.phi
+}
+
+CPrimType :: @enum(B, I8, I16, I32, I64, U8, U16, U32, U64, F32, F64); // , F80);
+
+fn get_type_id(ty: *CC.Type) CPrimType = @match(ty.kind) {
+    fn TY_BOOL()  => .B;
+    fn TY_CHAR()  => @if(ty.is_unsigned,  .U8,  .I8);
+    fn TY_SHORT() => @if(ty.is_unsigned, .U16, .I16);
+    fn TY_INT()   => @if(ty.is_unsigned, .U32, .I32);
+    fn TY_LONG()  => @if(ty.is_unsigned, .U64, .I64);
+    fn TY_FLOAT()   => .F32;
+    fn TY_DOUBLE()  => .F64;
+    fn TY_LDOUBLE() => .F64;  // nothing special. spec says it can be the same as double. 
+    @default => .U64;  // TODO: assert it's not a struct or something insane 
+};
+
+// TODO: audit this. chibicc has a big table of x64 mnemonics to compare to. 
+fn gen_cast(f: *Qbe.Fn, src: Qbe.Ref, from: *CC.Type, to: *CC.Type) Qbe.Ref = {
+    k_from, k_to := (from.cls(), to.cls());
+    p_from, p_to := (from.get_type_id(), to.get_type_id());
+    dest := f.newtmp("c", k_to);
+    ::enum(@type p_from);
+    if(p_from == p_to, => return(src));
+    if p_to == .B {  
+        // TODO: do i need to zero extend byte/short? 
+        f.start.emit(cmp_ne(k_from), k_to, dest, src, QbeConZero);
+        return(dest)
+    };
+    o: Qbe.O = if !k_to.is_int() {
+        @match(p_from) {
+            fn U64() => .ultof;
+            fn I64() => .sltof;
+            fn U32() => .uwtof;
+            fn I32() => .swtof;
+            fn F32() => .exts;
+            fn F64() => .truncd;
+            @default => panic("TODO: bool/byte/short to float/double cast?");
+        }
+    } else {  // k_to is integer
+        // if the source isn't a float:
+        // - we always allow just truncating by not looking at the high bits right? 
+        // - and if sizes are equal, it's a signedness cast which does nothing as well. 
+        if(k_from.is_int() && to.size <= from.size, => return(src)); 
+        @match(p_from) {
+            fn B()   => .extub;
+            fn U8()  => .extub;
+            fn I8()  => .extsb;
+            fn U16() => .extuh;
+            fn I16() => .extsh;
+            fn U32() => .extuw;
+            fn I32() => .extsw;
+            fn F32() => @if(to.is_unsigned, .stoui, .stosi);
+            fn F64() => @if(to.is_unsigned, .dtoui, .dtosi);
+            @default => unreachable();  // *u64 is just a signedness cast
+        }
+    };
+
+    f.start.emit(o, k_to, dest, src, QbeNull);
+    dest
 }

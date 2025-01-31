@@ -14,6 +14,23 @@ in find_typedef, converted to returning optional but didn't check if var.typedef
 - (variable.c)
 - my `// why not >= ?` in declspec i wasn't crazy, the internet agrees with me: https://github.com/rui314/chibicc/issues/142
 - i think my test that forks has the problem of your jit thread being gone
+- in declspec `ty := @match(` instead of `ty = @match(`, oops
+- pass alloca to the backend
+- trying to do casts without just pasting the table
+- ! arg might not be `_Bool` so it's not just xor with one bit
+- ND_SHR is shr or sar based on the type
+- i get `(void *)0xffffffffffffffff > (void *)0` wrong. 
+folding was wrong for u64 because my comparison operator functions in franca were converting to i64 first for the old backend. 
+amazing, ok so thats great success. this was the whole point. found a bug in my backend,
+that didn't exibit with the specific pattern of code franca generates (i almost always use signed numbers). 
+- (arith.c)
+- signed div/mod. typoed loaduh vs loadub
+- (cast.c)
+- make it easy to toggle between recompiling the backend every time and borrowing the host's version from the vtable when running as a driver. 
+so the tests can run in 300ms instead of 800ms. 
+- codegen ND_FOR
+- convert ND_LOGOR, ND_LOGAND to ND_COND in the frontend
+- goto, labels, break/continue
 
 ## (Jan 22/23)
 

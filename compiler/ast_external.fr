@@ -648,7 +648,31 @@ fn non_void_arg(a: *Annotation) ?*FatExpr = {
     (Some = a.args&)
 }
 
-
 fn add_file(c: CompCtx, name: Str, src: Str) Span = {  // TODO: this shouldn't need the squiggles 
     {c.vtable.add_file}(c.data, name, src).shrink()
+}
+
+fn fill_backend_vtable(vtable: *ImportVTable) void = {
+    vtable.init_default_qbe_module = fn(module_out: rawptr, qbe_env_goal: rawptr) void = {
+        m := QbeModule.ptr_from_raw(module_out);
+        e := QbeTargetEnv.ptr_from_raw(qbe_env_goal);
+        init_default_module(m, e[], false);
+    };
+    vtable.run_qbe_passes = fn(f) = {
+        f := Qbe.Fn.ptr_from_raw(f);
+        run_qbe_passes(f);
+    };
+    vtable.finish_qbe_module = fn(m) = {
+        m := QbeModule.ptr_from_raw(m);
+        m.emit_suspended_inlinables();
+        {m.target.finish_module}(m)
+    };
+    vtable.drop_qbe_module = fn(m) = {
+        m := QbeModule.ptr_from_raw(m);
+        m.drop();
+    };
+    
+    // TODO: this is ugly. but it's a really convenient hack to make the feedback loop for import_wasm/import_c faster. 
+    hack := @as(CodegenWorker) codegen_thread_main;
+    vtable.codegen_thread_main = ptr_cast_unchecked(@type hack, @type vtable.codegen_thread_main, hack&)[];
 }

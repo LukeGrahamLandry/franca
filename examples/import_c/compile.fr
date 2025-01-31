@@ -5,6 +5,7 @@
 //      #153 #141 #138 #110 #107 #99 #86 #84 more...
 //      - https://github.com/fuhsnn/slimcc/issues?q=is%3Aissue+is%3Aclosed+label%3Aupstream-chibicc&page=2
 //      _Static_assert (tho maybe C23 wants to get rid of it)
+// _Alignof needs more backend support
 
 SPAM :: false;
 
@@ -422,7 +423,7 @@ fn declspec(c: *Ctx, rest: **CC.Token, tok: *CC.Token, attr: ?*VarAttr) *CC.Type
                     equal(tok, "typeof") || ty2.is_some()) {
                 if(counter != 0, => break());
     
-                ty := @match(tok.kind) {
+                ty = @match(tok.kind) {
                     fn struct() => c.struct_decl(tok&, tok.next);
                     fn union()  => c.union_decl(tok&, tok.next);
                     fn enum()   => c.enum_specifier(tok&, tok.next);
@@ -459,7 +460,8 @@ fn declspec(c: *Ctx, rest: **CC.Token, tok: *CC.Token, attr: ?*VarAttr) *CC.Type
             ty = @switch(counter) {
                 @case(@SS(.void))  => ty_void;
                 @case(@SS(._Bool)) => ty_bool;
-                @case(@SS(.char))  => ty_char;
+                @case(@SS(.char))          => ty_char;
+                @case(@SS(.signed, .char)) => ty_char;
                 @case(@SS(.unsigned, .char)) => ty_uchar;
                 @case(@SS(.short))                => ty_short;
                 @case(@SS(.short, .int))          => ty_short;
@@ -2100,8 +2102,8 @@ Prec :: @enum(i32) (
     Unary, PostFix, Primary,
 );
 
-N1: ParseFn1 : fn(a, b, t) = @panic("unexpected (prefix) token %", t.str());  // TODO
-N2: ParseFn2 : fn(a, b, t, d) = @panic("unexpected (infix) token %", t.str());  // TODO
+N1: ParseFn1 : fn(c, b, t) = @error_tok(c, t, "unexpected (prefix) token %", t.str()); 
+N2: ParseFn2 : fn(c, b, t, d) = @error_tok(c, t, "unexpected (infix) token %", t.str()); 
 ParseFn1   :: @FnPtr(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node;
 ParseFn2   :: @FnPtr(c: *Ctx, rest: **CC.Token, tok: *CC.Token, node: *CC.Node) *CC.Node;
 ParseRule :: @struct(prefix: ParseFn1 = N1, infix: ParseFn2 = N2, prec := Prec.Invalid, op := CC.NodeKind.ND_INVALID);
@@ -2158,8 +2160,8 @@ rules :: {
     h[.@"["]  = (infix = postfix, prec = .PostFix);
     h[.@"."]  = (infix = postfix, prec = .PostFix);
     h[.@"->"] = (infix = postfix, prec = .PostFix);
-    h[.@"++"] = (infix = postfix, prec = .PostFix);
-    h[.@"--"] = (infix = postfix, prec = .PostFix);
+    h[.@"++"] = (infix = postfix, prec = .PostFix, prefix = unary_inc);
+    h[.@"--"] = (infix = postfix, prec = .PostFix, prefix = unary_dec);
     
     h[.@"!"] = (prefix = parse_unary, op = .ND_NOT);
     h[.@"~"] = (prefix = parse_unary, op = .ND_BITNOT);
@@ -2220,11 +2222,22 @@ fn parse_binary(c: *Ctx, rest: **CC.Token, tok: *CC.Token, lhs: *CC.Node) *CC.No
     node
 }
 
-// TODO: this will be different if i decide to skip AST
-fn parse_logical(c: *Ctx, rest: **CC.Token, tok: *CC.Token, lhs: *CC.Node) *CC.Node = {
+// TODO: less dumb ir for if conditions
+// short-circuiting, output is always 0 or 1
+fn parse_logical(c: *Ctx, rest: **CC.Token, tok: *CC.Token, cond: *CC.Node) *CC.Node = {
     rule := rules.index(tok.kind);
     rhs  := parse_expr(c, rest, tok.next, @as(Prec) @as(i32) rule.prec.raw() + 1);
-   c.new_binary(rule.op, lhs, rhs, tok)
+    rhs  := c.new_cast(rhs, ty_bool);
+    then, else := @match(tok.kind) {
+        fn @"&&"() => (rhs, c.new_num(0, tok));
+        fn @"||"() => (c.new_num(1, tok), rhs);
+        @default => unreachable();
+    };
+    n := c.new_node(.ND_COND, tok);
+    n.cond = cond;
+    n.then = then;
+    n.else = else;
+    n
 }
 
 ::if(*CC.Node);
@@ -2245,7 +2258,7 @@ fn conditional(c: *Ctx, rest: **CC.Token, tok: *CC.Token, cond: *CC.Node) *CC.No
     } else {
         node := c.new_node(.ND_COND, tok);
         node.cond = cond;
-        node.then = c.parse_expr(rest, tok.next, .None);
+        node.then = c.parse_expr(tok&, tok.next, .None);
         tok = c.skip(tok, ":");
         node.else = c.parse_expr(rest, tok, .Conditional);
         node
@@ -2440,19 +2453,19 @@ fn parse_unary(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
     c.new_unary(rule.op, node, tok)
 }
 
+#prefix(.@"++")
+fn unary_inc(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = // Read ++i as i+=1
+    c.to_assign(c.new_add(c.parse_expr(rest, tok.next, .Unary), c.new_num(1, tok), tok));
+    
+#prefix(.@"--")
+fn unary_dec(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = // Read --i as i-=1
+    c.to_assign(c.new_sub(c.parse_expr(rest, tok.next, .Unary), c.new_num(1, tok), tok));
+
 // unary = ("+" | "-" | "*" | "&" | "!" | "~") cast
 //             | ("++" | "--") unary
 //             | "&&" ident
 //             | postfix
 fn unary(rest: **CC.Token, tok: *CC.Token) *CC.Node = {
-    // Read ++i as i+=1
-    if (equal(tok, "++"))
-        return to_assign(new_add(unary(rest, tok.next), c.new_num(1, tok), tok));
-
-    // Read --i as i-=1
-    if (equal(tok, "--"))
-        return to_assign(new_sub(unary(rest, tok.next), c.new_num(1, tok), tok));
-
     // [GNU] labels-as-values
     if (equal(tok, "&&")) {
         node := c.new_node(.ND_LABEL_VAL, tok);
@@ -2498,7 +2511,7 @@ fn struct_ref(c: *Ctx, node: *CC.Node, tok: *CC.Token) *CC.Node = {
     c.add_type(node);
     ty := node.ty;
     has_fields := @is(ty.kind, .TY_STRUCT, .TY_UNION);
-    if(!has_fields, => @error_tok(c, node.tok, "not a struct nor a union"));
+    if(!has_fields, => @error_tok(c, node.tok, "not a struct nor a union (%, %)", node.kind, ty.kind));
     loop {
         mem := get_struct_member(ty, tok) || @error_tok(c, tok, "no such member");
         node = c.new_unary(.ND_MEMBER, node, tok);
@@ -2791,13 +2804,14 @@ fn const_expr(c: *Ctx, rest: **CC.Token, tok: *CC.Token) i64 = {
 // converted to `tmp = &A, (*tmp).x = (*tmp).x op C` to handle assignments
 // to bitfields.
 fn to_assign(c: *Ctx, binary: *CC.Node) *CC.Node = {
-    @error_tok(c, binary.tok, "TODO: to_assign"); /*
     c.add_type(binary.lhs);
     c.add_type(binary.rhs);
     tok: *CC.Token = binary.tok;
     
     // Convert `A.x op= C` to `tmp = &A, (*tmp).x = (*tmp).x op C`.
-    if (binary.lhs.kind == ND_MEMBER) {
+    if binary.lhs.kind == .ND_MEMBER { 
+        @error_tok(c, binary.tok, "TODO: to_assign");
+        /*
         Obj *var = new_lvar("", pointer_to(binary.lhs.lhs.ty));
 
         CC.Node *expr1 = c.new_binary(.ND_ASSIGN, c.new_var_node(var, tok),
@@ -2818,6 +2832,7 @@ fn to_assign(c: *Ctx, binary: *CC.Node) *CC.Node = {
                                                          tok);
 
         return(c.new_binary(.ND_COMMA, expr1, expr4, tok));
+        */
     };
 
     // If A is an atomic type, Convert `A op= B` to
@@ -2830,6 +2845,8 @@ fn to_assign(c: *Ctx, binary: *CC.Node) *CC.Node = {
     //     new;
     // })
     if binary.lhs.ty.is_atomic {
+        @error_tok(c, binary.tok, "TODO: to_assign");
+        /*
         head := CC.Node.zeroed();
         cur := head&;
 
@@ -2880,10 +2897,11 @@ fn to_assign(c: *Ctx, binary: *CC.Node) *CC.Node = {
         CC.Node *node = c.new_node(.ND_STMT_EXPR, tok);
         node.body = head.next;
         return node;
-    }
+        */
+    };
 
     // Convert `A op= B` to ``tmp = &A, *tmp = *tmp op B`.
-    var := c.new_lvar("", pointer_to(binary.lhs.ty));
+    var := c.new_lvar("", c.pointer_to(binary.lhs.ty));
 
     expr1 := c.new_binary(.ND_ASSIGN, c.new_var_node(var, tok),
                                                     c.new_unary(.ND_ADDR, binary.lhs, tok), tok);
@@ -2898,5 +2916,4 @@ fn to_assign(c: *Ctx, binary: *CC.Node) *CC.Node = {
                              tok);
 
    c.new_binary(.ND_COMMA, expr1, expr2, tok)
-   */
 }
