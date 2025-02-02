@@ -7,7 +7,12 @@
 //      _Static_assert (tho maybe C23 wants to get rid of it)
 // _Alignof needs more backend support
 
-SPAM :: false;
+// TODO: want to let all the state (like Qbe.Fn) be allocated in Ctx.arena
+//       so you can do all the c frontend stuff up front (because you kinda need 
+//       to do preprocessor stuff in order) but defer actually compiling it until 
+//       the function gets called (and still use temp() as scratch space). ie. a 
+//       franca program using a c library should get dead code elimination the same 
+//       as it would using a franca library. 
 
 // Scope for local variables, global variables, typedefs
 // or enum constants
@@ -81,17 +86,17 @@ Ctx :: @struct {
     // Points to the function object the parser is currently parsing.
     current_fn: ?*CC.Obj;
     
-    // Lists of all goto statements and labels in the curent function.
-    gotos: *CC.Node;
-    labels: *CC.Node;
+    m: *QbeModule;
+    f: *Qbe.Fn;
+    b: *Qbe.Blk;
     
-    // Current "goto" and "continue" jump targets.
-    brk_label: ?CStr;
-    cont_label: ?CStr;
+    labels: HashMap(Str, *Qbe.Blk);
+    brk_label: ?*Qbe.Blk;
+    cont_label: ?*Qbe.Blk;
     
     // Points to a node representing a switch if we are parsing
     // a switch statement.
-    current_switch: ?*CC.Node;
+    current_switch: ?*Qbe.SwitchPayload;
     
     builtin_alloca: *CC.Obj;
     
@@ -101,6 +106,8 @@ Ctx :: @struct {
     // I'm probably going to regret this. 
     error_buf: List(u8);
     a_little_hidden_control_flow: JumpBuf;
+    
+    speculate: bool; // hack
 };
 
 fn align_down(n: i64, align: i64) i64 = 
@@ -155,6 +162,7 @@ fn new_node(c: *Ctx, kind: CC.NodeKind, tok: *CC.Token) *CC.Node = {
     node := temp().box_zeroed(CC.Node);
     node.kind = kind;
     node.tok = tok;
+    node.current_block = c.b;
     node
 }
 
@@ -171,25 +179,24 @@ fn new_unary(c: *Ctx, kind: CC.NodeKind, expr: *CC.Node, tok: *CC.Token) *CC.Nod
     node
 }
 
-fn new_num(c: *Ctx, val: i64, tok: *CC.Token) *CC.Node = {
+fn new_num(c: *Ctx, val: i64, tok: *CC.Token, ty: *CC.Type) *CC.Node = {
     node := c.new_node(.ND_NUM, tok);
     node.val = val;
+    node.ty = ty;
+    if !c.f.is_null() {
+        node.r = c.f.getcon(val);
+    };
     node
 }
 
-fn new_long(c: *Ctx, val: i64, tok: *CC.Token) *CC.Node = {
-    node := c.new_node(.ND_NUM, tok);
-    node.val = val;
-    node.ty = ty_long;
-    node
-}
+fn new_num(c: *Ctx, val: i64, tok: *CC.Token) *CC.Node = 
+    c.new_num(val, tok, CC.Type.ptr_from_int(0) /* TODO */); // ty_int?
 
-fn new_ulong(c: *Ctx, val: i64, tok: *CC.Token) *CC.Node = {
-    node := c.new_node(.ND_NUM, tok);
-    node.val = val;
-    node.ty = ty_ulong;
-    node
-}
+fn new_long(c: *Ctx, val: i64, tok: *CC.Token) *CC.Node = 
+    c.new_num(val, tok, ty_long);
+
+fn new_ulong(c: *Ctx, val: i64, tok: *CC.Token) *CC.Node = 
+    c.new_num(val, tok, ty_ulong);
 
 fn new_var_node(c: *Ctx, var: *CC.Obj, tok: *CC.Token) *CC.Node = {
     node := c.new_node(.ND_VAR, tok);
@@ -211,6 +218,7 @@ fn new_cast(c: *Ctx, expr: *CC.Node, ty: *CC.Type) *CC.Node = {
     node.tok = expr.tok;
     node.lhs = expr;
     node.ty = c.copy_type(ty);
+    node.current_block = expr.current_block; // HACK: this is super confusing, hopefully it will go away with asts
     node
 }
 
@@ -271,6 +279,15 @@ fn new_lvar(c: *Ctx, name: Str, ty: *CC.Type) *CC.Obj = {
     var.is_local = true;
     var.next = c.locals;
     c.locals = var;
+
+    if c.current_fn { current_fn |
+        if !c.f.start.is_null() {  // HACK: fix create_params_lvars instead of having an insane ordering where we delay making the start block so this knows to delay making variables for no reason
+            // fixed size allocs always go in the start block so they can be fast-locals. 
+            var.stack_slot = c.f.newtmp(name, .Kl);
+            push(c.f.start, make_ins(.alloc8, .Kl, var.stack_slot, c.f.getcon(var.ty.size.intcast()), QbeNull));  // TODO: smaller align stack slots
+        };
+    };
+    
     var
 }
 
@@ -722,7 +739,7 @@ fn typeof_specifier(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Type = {
     ty := if c.is_typename(tok) {
         c.typename(tok&, tok)
     } else {
-        node := c.parse_expr(tok&, tok, .None);
+        node := c.speculate(tok&, tok, .None);
         c.add_type(node);
         node.ty
     };
@@ -829,6 +846,8 @@ fn declaration(c: *Ctx, rest: **CC.Token, tok: *CC.Token, basety: *CC.Type, attr
     node := c.new_node(.ND_BLOCK, tok);
     node.body = head.next;
     rest[] = tok;  // already ate the semicolon
+    
+    c.gen_expr(node);  // do the store of initial value
     node
 }
 
@@ -1306,6 +1325,7 @@ fn write_buf(buf: *u8, val: i64, sz: i64) void = {
 }
 
 fn write_gvar_data(c: *Ctx, cur: *CC.Relocation, init: *Initializer, ty: *CC.Type, buf: []u8, off: i64) *CC.Relocation = {
+    ::enum(CC.TypeKind);
     if ty.kind == .TY_ARRAY {
         sz := ty.base.size.intcast();
         range(0, ty.array_len.intcast()) { i |
@@ -1321,6 +1341,7 @@ fn write_gvar_data(c: *Ctx, cur: *CC.Relocation, init: *Initializer, ty: *CC.Typ
             for_linked mem { mem | 
                 if mem.is_bitfield {
                     expr := init.children[mem.idx.intcast()].expr;
+                    ::ptr_utils(CC.Node);
                     if(expr.is_null(), => break());
                     loc      := buf.ptr.offset(off + mem.offset.intcast());
                     oldval   := read_buf(loc, mem.ty.size.intcast());
@@ -1437,72 +1458,141 @@ fn stmt(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = @match(tok.kind) {
         };
 
         node.lhs = exp;
+        r := c.gen_expr(exp);
+        
+        if c.b.jmp.type == .Jxxx {
+            j := Qbe.J.retw;
+            c.b.jmp = (type = j, arg = r);
+        };
+        
         node
     }
     fn if() => {
+        then_block := c.new_block();
+        else_block := c.new_block();
+        join_block := c.new_block();
+    
         node := c.new_node(.ND_IF, tok);
         tok = c.skip(tok.next, "(");
         node.cond = c.parse_expr(tok&, tok, .None);
         tok = c.skip(tok, ")");
+        cond := c.gen_expr(node.cond);
+        
+        if c.b.jmp.type == .Jxxx && !c.speculate {
+            c.b.jmp = (type = .jnz, arg = cond);
+            c.b.s1 = then_block;
+            c.b.s2 = else_block;
+        };
+        
+        c.b = then_block;
         node.then = c.stmt(tok&, tok);
+        c.jmp_if_unterminated(join_block);
+        
+        c.b = else_block;
         if equal(tok, "else") {
             node.else = c.stmt(tok&, tok.next);
         };
+        c.jmp_if_unterminated(join_block);
+        
+        c.b = join_block;
         rest[] = tok;
         node
     }
     fn switch() => {
+        payload := temp().box_zeroed(Qbe.SwitchPayload);
         node := c.new_node(.ND_SWITCH, tok);
         tok = c.skip(tok.next, "(");
         node.cond = c.parse_expr(tok&, tok, .None);
         tok = c.skip(tok, ")");
+        payload.inspect = c.gen_expr(node.cond);
+        // backend switch lowering wants a Kl, but we want zero extension, not sign extension like casting to a long would be. 
+        if node.cond.ty.cls() != .Kl {
+            r := c.f.newtmp("c", .Kl);
+            c.emit(.extuw, .Kl, r, payload.inspect, QbeNull);
+            payload.inspect = r;
+        };
+        payload.src = c.b;
+        payload.cases = new(0);
+        
+        if payload.src.jmp.type == .Jxxx {
+            payload.src.jmp.type = .switch;
+        };
 
         sw := c.current_switch;
-        c.current_switch = (Some = node);
-
+        c.current_switch = (Some = payload);
         brk := c.brk_label;
-        node.brk_label = c.new_unique_name().slow_convert_to_c_string();
+        node.brk_label = c.new_block(); 
         c.brk_label = (Some = node.brk_label);
 
+        c.b = c.new_block();  // TODO: should be redundant
         node.then = c.stmt(rest, tok);
-
+        c.jmp_if_unterminated(node.brk_label);
         c.current_switch = sw;
         c.brk_label = brk;
+        c.b = node.brk_label;
+        if payload.default.is_null() {
+            payload.default = node.brk_label;
+        };
+        
+        if payload.src.jmp.type == .switch {
+            payload.src.jmp.arg = INT(c.f.switch_count.zext());
+            if c.f.switch_count == 0 {
+                c.f.switches = new(1);
+            };
+            push(c.f.switches&, c.f.switch_count&, payload[]);
+        };
+        
         node
     }
     fn case() => {
-        current_switch := c.current_switch || @error_tok(c, tok, "stray case");
-
         node := c.new_node(.ND_CASE, tok);
-        begin := c.const_expr(tok&, tok.next);
-        end := begin;
+        node.unique_label = c.new_block();
+        c.jmp_if_unterminated(node.unique_label);
+        c.b = node.unique_label;
+        current_switch := c.current_switch || @error_tok(c, tok, "stray case");
+        
+        node.begin = c.const_expr(tok&, tok.next);
+        node.end = node.begin;
 
         if equal(tok, "...") {
-            // [GNU] Case ranges, e.g. "case 1 ... 5:"
-            end = c.const_expr(tok&, tok.next);
-            if(end < begin, => @error_tok(c, tok, "empty case range specified"));
+            end := c.const_expr(tok&, tok.next);
+            if(end < node.begin, => @error_tok(c, tok, "empty case range specified"));
+            @error_tok(c, tok, "[GNU] Case ranges are not supported (% ... %)", node.begin, end);
         };
 
         tok = c.skip(tok, ":");
-        node.label = c.new_unique_name().slow_convert_to_c_string();
         node.lhs = c.stmt(rest, tok);
-        node.begin = begin;
-        node.end = end;
-        node.case_next = current_switch.case_next;
-        current_switch.case_next = node;
+        c.gen_expr(node.lhs);
+        push(current_switch.cases&, current_switch.case_count&, (node.unique_label, node.begin));
+        
+        next_block := c.new_block();  // TODO: wasteful, empty block for consecutive cases. 
+        c.jmp_if_unterminated(next_block);
+        c.b = next_block;
         node
     }
     fn default() => {
         ::?*CC.Node;
-        cs := c.current_switch || @error_tok(c, tok, "stray default");
+    
         node := c.new_node(.ND_CASE, tok);
+        node.unique_label = c.new_block();
+        c.jmp_if_unterminated(node.unique_label);
+        c.b = node.unique_label;
+        current_switch := c.current_switch || @error_tok(c, tok, "stray default");
+        
         tok = c.skip(tok.next, ":");
-        node.label = c.new_unique_name().slow_convert_to_c_string();
         node.lhs = c.stmt(rest, tok);
-        cs.default_case = node;
+        c.gen_expr(node.lhs);
+        current_switch.default = node.unique_label;
+        
+        next_block := c.new_block();
+        c.jmp_if_unterminated(next_block);
+        c.b = next_block;
         node
     }
     fn for() => push_loop(c, .ND_FOR, tok) { node |
+        cond_block := c.new_block();
+        body_block := c.new_block();
+        
         c.enter_scope();
         tok = c.skip(tok.next, "(");
         node.init = if c.is_typename(tok) {
@@ -1511,54 +1601,98 @@ fn stmt(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = @match(tok.kind) {
         } else {
             c.expr_stmt(tok&, tok)
         };
+        c.jmp_if_unterminated(body_block);
 
-        if !equal(tok, ";") {
-            node.cond = c.parse_expr(tok&, tok, .None);
+        c.b = cond_block;
+        node.cond = if !equal(tok, ";") {
+            c.new_cast(c.parse_expr(tok&, tok, .None), ty_bool)
+        } else {
+            c.new_num(1, tok)  // wasteful to rely on folding for this 
         };
+        cond := c.gen_expr(node.cond);
         tok = c.skip(tok, ";");
+        
+        if c.b.jmp.type == .Jxxx && !c.speculate {
+            c.b.jmp = (type = .jnz, arg = cond);
+            c.b.s1 = body_block;
+            c.b.s2 = node.brk_label;
+        };
 
-        if !equal(tok, ")") {
-            node.inc = c.parse_expr(tok&, tok, .None);
+        c.b = node.cont_label;
+        node.inc = if !equal(tok, ")") {
+            c.parse_expr(tok&, tok, .None)
+        } else {
+            c.new_num(0, tok)  // nop
         };
         tok = c.skip(tok, ")");
+        c.jmp_if_unterminated(cond_block);
 
+        c.b = body_block;
         node.then = c.stmt(rest, tok);
+        c.jmp_if_unterminated(node.cont_label);
 
         c.leave_scope();
+        c.b = node.brk_label;
     };
     fn while() => push_loop(c, .ND_FOR, tok) { node |
+        c.jmp_if_unterminated(node.cont_label);
+        c.b = node.cont_label;
         tok = c.skip(tok.next, "(");
-        node.cond = c.parse_expr(tok&, tok, .None);
+        node.cond = c.new_cast(c.parse_expr(tok&, tok, .None), ty_bool);
+        cond := c.gen_expr(node.cond);
         tok = c.skip(tok, ")");
+        body_block := c.new_block();
 
+        if c.b.jmp.type == .Jxxx && !c.speculate {
+            c.b.jmp = (type = .jnz, arg = cond);
+            c.b.s1 = body_block;
+            c.b.s2 = node.brk_label;
+        };
+        
+        c.b = body_block;
         node.then = c.stmt(rest, tok);
+        c.jmp_if_unterminated(node.cont_label);
+        
+        c.b = node.brk_label;
     };
     fn do() => {
+        body_block := c.new_block();
+        c.jmp_if_unterminated(body_block);
         node := push_loop(c, .ND_DO, tok) { node |
+            c.b = body_block;
             node.then = c.stmt(tok&, tok.next);
         };
+        c.jmp_if_unterminated(node.cont_label);  // goto condition
+        
+        c.b = node.cont_label;  
         tok = c.skip(tok, "while");
         tok = c.skip(tok, "(");
-        node.cond = c.parse_expr(tok&, tok, .None);
+        node.cond = c.new_cast(c.parse_expr(tok&, tok, .None), ty_bool);
+        cond := c.gen_expr(node.cond);
         tok = c.skip(tok, ")");
         rest[] = c.skip(tok, ";");
+        
+        if c.b.jmp.type == .Jxxx && !c.speculate {
+            c.b.jmp = (type = .jnz, arg = cond);
+            c.b.s1 = body_block;
+            c.b.s2 = node.brk_label;
+        };
+        
+        c.b = node.brk_label;
         node
     };
     fn asm() => c.asm_stmt(rest, tok);
     fn goto() => {
         if equal(tok.next, "*") {
-            // [GNU] `goto *ptr` jumps to the address specified by `ptr`.
-            node    := c.new_node(.ND_GOTO_EXPR, tok);
-            node.lhs = c.parse_expr(tok&, tok.next.next, .None);
-            rest[]   = c.skip(tok, ";");
-            return(node);
+            _dest := c.parse_expr(tok&, tok.next.next, .None);
+            @error_tok(c, tok, "[GNU] labels-as-values is not supported (goto *ptr)");
         };
 
         node := c.new_node(.ND_GOTO, tok);
-        node.label     = c.get_ident(tok.next).slow_convert_to_c_string();
-        node.goto_next = c.gotos;
-        c.gotos = node;
+        node.unique_label = c.get_block(c.get_ident(tok.next));
+        c.jmp_if_unterminated(node.unique_label);
         rest[]  = c.skip(tok.next.next, ";");
+        c.b = c.new_block();
         node
     }
     fn break() => {
@@ -1566,6 +1700,8 @@ fn stmt(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = @match(tok.kind) {
         node := c.new_node(.ND_GOTO, tok);
         node.unique_label = brk_label;
         rest[] = c.skip(tok.next, ";");
+        c.jmp_if_unterminated(brk_label);
+        c.b = c.new_block();
         node
     }
     fn continue() => {
@@ -1574,16 +1710,17 @@ fn stmt(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = @match(tok.kind) {
         node := c.new_node(.ND_GOTO, tok);
         node.unique_label = cont_label;
         rest[] = c.skip(tok.next, ";");
+        c.jmp_if_unterminated(cont_label);
+        c.b = c.new_block();
         node
     }
     fn @"{"() => c.compound_stmt(rest, tok.next);
     @default => (if tok.kind == .TK_IDENT && equal(tok.next, ":") {
         node := c.new_node(.ND_LABEL, tok);
-        node.label = tok.str().slow_convert_to_c_string();
-        node.unique_label = c.new_unique_name().slow_convert_to_c_string();
+        node.unique_label = c.get_block(tok.str());
+        c.jmp_if_unterminated(node.unique_label);
+        c.b = node.unique_label;
         node.lhs = c.stmt(rest, tok.next.next);
-        node.goto_next = c.labels;
-        c.labels = node;
         node
     } else {
         c.expr_stmt(rest, tok)
@@ -1597,8 +1734,8 @@ fn push_loop(c: *Ctx, kind: CC.CC.NodeKind, tok: *CC.Token, $body: @Fn(node: *CC
     node := c.new_node(kind, tok);
     brk  := c.brk_label;
     cont := c.cont_label;
-    node.brk_label = c.new_unique_name().slow_convert_to_c_string();
-    node.cont_label = c.new_unique_name().slow_convert_to_c_string();
+    node.brk_label = c.new_block();
+    node.cont_label = c.new_block();
     c.brk_label = (Some = node.brk_label);
     c.cont_label = (Some = node.cont_label);
 
@@ -1862,34 +1999,6 @@ fn create_param_lvars(c: *Ctx, param: *CC.Type) void = {  // TODO: why isn't thi
     c.new_lvar(c.get_ident(param.name), param);
 }
 
-// This function matches gotos or labels-as-values with labels.
-//
-// We cannot resolve gotos as we parse a function because gotos
-// can refer a label that appears later in the function.
-// So, we need to do this after we parse the entire function.
-fn resolve_goto_labels(c: *Ctx) void = {
-    x := c.gotos;
-    while => !x.is_null() {
-        if true {
-            break :: local_return;
-            y := c.labels;
-            while => !y.is_null() {
-                if x.label.str() == y.label.str() {
-                    x.unique_label = y.unique_label;
-                    break();
-                };
-                y = y.goto_next;
-            };
-        };
-
-        if(x.unique_label.ptr.is_null(), => @error_tok(c, x.tok.next, "use of undeclared label"));
-        x = x.goto_next;
-    };
-
-    c.gotos  = ptr_from_int(@type c.gotos[], 0);
-    c.labels = ptr_from_int(@type c.labels[], 0);
-}
-
 fn find_func(c: *Ctx, name: Str) ?*CC.Obj = {
     ::ptr_utils(Scope);
     hack := c.scope;
@@ -1939,6 +2048,13 @@ fn function(c: *Ctx, tok: *CC.Token, basety: *CC.Type, attr: *VarAttr) *CC.Token
 
     @if(SPAM) println("start function body");
     c.current_fn = (Some = f);
+    
+    c.f = c.arena.box(Qbe.Fn);
+    c.f.default_init(c.m);
+    c.f.rpo = new(1);
+    c.b = c.f.start;
+    
+    c.labels = init(temp());
     c.locals = ptr_from_int(@type c.locals[], 0);
     c.enter_scope();
     c.create_param_lvars(ty.params);
@@ -1971,12 +2087,25 @@ fn function(c: *Ctx, tok: *CC.Token, basety: *CC.Type, attr: *VarAttr) *CC.Token
     // [GNU] __FUNCTION__ is yet another name of __func__.
     c.push_scope("__FUNCTION__")[].var =
         c.new_string_literal(f_name, c.array_of(ty_char, f_name.len));
-
+    
+    c.gen_par();
     f.body = c.compound_stmt(tok&, tok);
+    if c.b.jmp.type == .Jxxx {
+        // void functions are allowed to just fall off the end
+        // it would be nice to give an error otherwise but it's non-trivial to decide if this codepath is reachable. 
+        // also for main() falling off the end means returning 0
+        c.b.jmp = @if(rty.is_void(), (type = .ret0, arg = QbeNull), (type = .retw, arg = QbeConZero));
+    };
+    
+    c.f.link_blocks_from_rpo();
+    f.f = c.f;
     
     f.locals = c.locals;
     c.leave_scope();
-    c.resolve_goto_labels();
+    c.labels&.clear();
+    c.f = Qbe.Fn.ptr_from_int(0);
+    c.current_fn = .None;
+    c.b = Qbe.Blk.ptr_from_int(0);
     tok
 }
 
@@ -2148,7 +2277,7 @@ rules :: {
     h[.@"="]  = (infix = B, prec = .Assignment, op = .ND_ASSIGN);
     
     h[.@"||"]  = (infix = parse_logical, prec = .LogOr,  op = .ND_LOGOR);
-    h[.@"&&"]  = (infix = parse_logical, prec = .LogAnd, op = .ND_LOGAND);
+    h[.@"&&"]  = (infix = parse_logical, prec = .LogAnd, op = .ND_LOGAND, prefix = prefix_ampamp);
     
     h[.TK_NUM]   = (prefix = parse_number, prec = .Primary);
     h[.TK_STR]   = (prefix = parse_string, prec = .Primary);
@@ -2187,7 +2316,9 @@ fn parse_expr(c: *Ctx, rest: **CC.Token, tok: *CC.Token, prec: Prec) *CC.Node = 
         tok  = rest[];
         rule = rules.index(tok.kind);
     };
-    @if(SPAM) @println("End Expression: % %", tok.str(), tok.kind);    
+    @if(SPAM) @println("End Expression: % % %", tok.str(), tok.kind, node.kind);
+    
+    c.gen_expr(node);
     node
 }
 
@@ -2225,18 +2356,51 @@ fn parse_binary(c: *Ctx, rest: **CC.Token, tok: *CC.Token, lhs: *CC.Node) *CC.No
 // TODO: less dumb ir for if conditions
 // short-circuiting, output is always 0 or 1
 fn parse_logical(c: *Ctx, rest: **CC.Token, tok: *CC.Token, cond: *CC.Node) *CC.Node = {
+    c.gen_expr(cond);
+    
+    else_block := c.new_block();
+    join_block := c.new_block();
+    prev_block := c.b;
+    
+    need_jump := c.b.jmp.type == .Jxxx && !c.speculate;
+    if need_jump {
+        c.b.jmp = (type = .jnz, arg = cond.r);
+    };
+    
+    c.b = else_block; 
     rule := rules.index(tok.kind);
     rhs  := parse_expr(c, rest, tok.next, @as(Prec) @as(i32) rule.prec.raw() + 1);
     rhs  := c.new_cast(rhs, ty_bool);
-    then, else := @match(tok.kind) {
-        fn @"&&"() => (rhs, c.new_num(0, tok));
-        fn @"||"() => (c.new_num(1, tok), rhs);
-        @default => unreachable();
+    c.gen_expr(rhs);
+    else_block_end := c.b;
+    then, else, s1, s2, phi1, phi2 := @match(tok.kind) {
+        fn @"&&"() => (rhs, c.new_num(0, tok), else_block, join_block, else_block, prev_block);
+        fn @"||"() => (c.new_num(1, tok), rhs, join_block, else_block, prev_block, else_block);
+        @default   => unreachable();
     };
+    c.gen_expr(then);
+    c.gen_expr(else);
+    
+    c.jmp_if_unterminated(join_block);
+    if need_jump {
+        prev_block.s1 = s1;
+        prev_block.s2 = s2;
+    };
+    
+    c.b = join_block;
     n := c.new_node(.ND_COND, tok);
     n.cond = cond;
     n.then = then;
     n.else = else;
+    
+    if !c.speculate {
+        p := new_phi(c.f, join_block, .Kw);
+        p.push(phi1, then.r);
+        p.push(phi2, else.r);
+        n.r = p.to;
+    };
+    n.ty = ty_bool;
+    
     n
 }
 
@@ -2245,24 +2409,59 @@ fn parse_logical(c: *Ctx, rest: **CC.Token, tok: *CC.Token, cond: *CC.Node) *CC.
 // conditional = logor ("?" expr? ":" conditional)?
 #infix(.@"?", .Conditional)
 fn conditional(c: *Ctx, rest: **CC.Token, tok: *CC.Token, cond: *CC.Node) *CC.Node = {
-    if equal(tok.next, ":") {
+    cond_r := c.gen_expr(c.new_cast(cond, ty_bool));
+    
+    cond_block := c.b;
+    then_block := c.new_block();
+    else_block := c.new_block();
+    join_block := c.new_block();
+    
+    ::if(Ty(*CC.Node, *Qbe.Blk, *CC.Node));
+    node, then_phi_src, cond_node := if equal(tok.next, ":") {
         // [GNU] Compile `a ?: b` as `tmp = a, tmp ? tmp : b`.
-        c.add_type(cond);
+        then_block = join_block;
         var := c.new_lvar("", cond.ty);
         lhs := c.new_binary(.ND_ASSIGN, c.new_var_node(var, tok), cond, tok);
         rhs := c.new_node(.ND_COND, tok);
         rhs.cond = c.new_var_node(var, tok);
         rhs.then = c.new_var_node(var, tok);
+        //c.gen_expr(rhs.then);
+        c.b = else_block;
         rhs.else = c.parse_expr(rest, tok.next.next, .Conditional);
-       c.new_binary(.ND_COMMA, lhs, rhs, tok)
+        c.gen_expr(rhs.else);
+        node := c.new_binary(.ND_COMMA, lhs, rhs, tok);
+        (node, cond_block, rhs)
     } else {
         node := c.new_node(.ND_COND, tok);
         node.cond = cond;
+        c.b = then_block;
         node.then = c.parse_expr(tok&, tok.next, .None);
+        c.gen_expr(node.then);
+        then_phi_src := c.b;
+        c.jmp_if_unterminated(join_block);
         tok = c.skip(tok, ":");
+        c.b = else_block;
         node.else = c.parse_expr(rest, tok, .Conditional);
-        node
-    }
+        (node, then_phi_src, node)
+    };
+    else_phi_src := c.b;
+    c.jmp_if_unterminated(join_block);
+    c.gen_expr(node);
+    c.b = join_block;
+    
+    if cond_block.jmp.type == .Jxxx && !c.speculate {
+        cond_block.jmp = (type = .jnz, arg = cond_r);
+        cond_block.s1 = then_block;
+        cond_block.s2 = else_block;
+    };
+    if !c.speculate {
+        p := new_phi(c.f, join_block, node.ty.cls());
+        p.push(then_phi_src, cond_node.then.r);
+        p.push(else_phi_src, cond_node.else.r);
+        node.r = p.to;
+    };
+    node.current_block = join_block; // this makes a cast from the result go to the right place (when gen_expr gets called again by our caller)
+    node
 }
 
 #prefix(.@"(")
@@ -2461,22 +2660,9 @@ fn unary_inc(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = // Read ++i a
 fn unary_dec(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = // Read --i as i-=1
     c.to_assign(c.new_sub(c.parse_expr(rest, tok.next, .Unary), c.new_num(1, tok), tok));
 
-// unary = ("+" | "-" | "*" | "&" | "!" | "~") cast
-//             | ("++" | "--") unary
-//             | "&&" ident
-//             | postfix
-fn unary(rest: **CC.Token, tok: *CC.Token) *CC.Node = {
-    // [GNU] labels-as-values
-    if (equal(tok, "&&")) {
-        node := c.new_node(.ND_LABEL_VAL, tok);
-        node.label = c.get_ident(tok.next);
-        node.goto_next = gotos;
-        gotos = node;
-        rest[] = tok.next.next;
-        return node;
-    }
-
-    postfix(rest, tok)
+fn prefix_ampamp(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
+    label := c.get_ident(tok.next);
+    @error_tok(c, tok, "[GNU] labels-as-values is not supported (name = %)", label);
 }
 
 fn get_struct_member(ty: *CC.Type, name: *CC.Token) ?*CC.Member = {
@@ -2684,7 +2870,7 @@ fn parse_sizeof(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
             c.new_ulong(ty.size.intcast(), start)
         }
     } else {  // | "sizeof" unary
-        node := c.parse_expr(rest, tok.next, .Unary);
+        node := c.speculate(rest, tok.next, .Unary);
         c.add_type(node);
         if node.ty.kind == .TY_VLA {
             c.new_var_node(node.ty.vla_size, tok)
@@ -2692,6 +2878,23 @@ fn parse_sizeof(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
             c.new_ulong(node.ty.size.intcast(), tok)
         }
     }
+}
+
+// for expressions that don't get evaluated (like sizeof, alignof, typeof),
+// we just mask out all the emitted instructions/jumps. 
+fn speculate(c: *Ctx, rest: **CC.Token, tok: *CC.Token, prec: Prec) *CC.Node = {
+    old_block := c.b;
+    prev := c.speculate;
+    c.speculate = true;
+    node := c.parse_expr(rest, tok, prec);
+    c.speculate = prev;
+    new_block := c.b;
+    if !old_block.identical(new_block) {
+        c.b = old_block;
+        c.jmp_if_unterminated(new_block);
+        c.b = new_block;
+    };
+    node
 }
 
 #prefix(._Alignof)
@@ -2702,7 +2905,7 @@ fn parse_alignof(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
         rest[] = c.skip(tok, ")");
         c.new_ulong(ty.align.intcast(), tok)
     } else {
-        node := c.parse_expr(rest, tok.next, .Unary);
+        node := c.speculate(rest, tok.next, .Unary);
         c.add_type(node);
         c.new_ulong(node.ty.align.intcast(), tok)
     }
@@ -2729,7 +2932,7 @@ fn primary(rest: **CC.Token, tok: *CC.Token) *CC.Node = {
             tok = c.skip(tok, ",");
             t2 := typename(tok&, tok);
             rest[] = c.skip(tok, ")");
-           c.new_num(is_compatible(t1, t2), start)
+            c.new_num(is_compatible(t1, t2), start)
         }
     };
 
@@ -2916,4 +3119,447 @@ fn to_assign(c: *Ctx, binary: *CC.Node) *CC.Node = {
                              tok);
 
    c.new_binary(.ND_COMMA, expr1, expr2, tok)
+}
+
+/*******************
+*   Ir-ish Stuff   *
+********************/
+
+fn new_block(c: *Ctx) *Qbe.Blk = {
+    f := c.f;
+    f.rpo&.grow(f.nblk.zext() + 1);
+    b := newblk();
+    @if(TRACK_IR_NAMES) {
+        l := fixed_list(b.name&.items()); // :UnacceptablePanic
+        @fmt(l&, "%", f.nblk);
+    };
+    b.id = f.nblk;
+    f.rpo[f.nblk.zext()] = b;
+    f.nblk += 1;
+    b.ins = new(0);
+    b
+}
+
+fn get_block(c: *Ctx, name: Str) *Qbe.Blk = {
+    c.labels&.get(name) || {
+        b := c.new_block();
+        c.labels&.insert(name, b);
+        b
+    }
+}
+
+fn jmp_if_unterminated(c: *Ctx, dest: *Qbe.Blk) void = {
+    if c.b.jmp.type == .Jxxx && !c.speculate {
+        c.b.s1 = dest;
+        c.b.jmp.type = .jmp;
+    };
+}
+
+
+fn link_blocks_from_rpo(f: *Qbe.Fn) void = {
+    prev := Qbe.Blk.ptr_from_int(0);
+    for_rev f.rpo.slice(0, f.nblk.zext()) { b | 
+        b.link = prev;
+        prev = b;
+    };
+}
+
+fn emit(c: *Ctx, op: Qbe.O, k: Qbe.Cls, to: Qbe.Ref, arg0: Qbe.Ref, arg1: Qbe.Ref) void = {
+    push(c.b, make_ins(op, k, to, arg0, arg1));
+}
+
+// TODO: should be with create_param_lvars instead of being super hacky
+fn gen_par(c: *Ctx) void = {
+    obj := c.current_fn.expect("gen_par() in function context");
+    f := c.f; 
+    f.start = c.new_block();
+    c.b = f.start;
+    
+    loc := obj.params;
+    for_linked loc { loc |
+        loc.par_r = f.newtmp("c", .Kl);
+        // TODO: other types + parc
+        emit(c, .par, .Kl, loc.par_r, QbeNull, QbeNull); 
+    };
+    for_linked loc { var | // HACK
+        // copy-paste
+        var.stack_slot = c.f.newtmp(var.name.str(), .Kl);
+        emit(c, .alloc8, .Kl, var.stack_slot, c.f.getcon(var.ty.size.intcast()), QbeNull);  // TODO: smaller align stack slots
+    };
+    // some instructions (par/alloc) will always go in f.start, real code goes in its own block. 
+    // but since all vars get stack slots, we need to store any scalar arguments. 
+    body := c.new_block();
+    c.jmp_if_unterminated(body);
+    for_linked loc { loc |
+        // TODO: other types + parc
+        c.emit(.storel, .Kw, QbeNull, loc.par_r, loc.stack_slot);
+    };
+    c.b = body;
+}
+
+fn gen_expr(c: *Ctx, node: *CC.Node) Qbe.Ref = {
+    c.add_type(node);
+    if(c.f.is_null() || node.r != QbeNull || c.speculate, => return(node.r));
+    prev := c.b;
+    if !node.current_block.is_null() {  // HACK. should go away as i emit code more incrementally. 
+        c.b = node.current_block;
+    };
+    node.r = c.gen_expr_inner(node);
+    c.b = prev;
+    node.r
+}
+
+fn gen_expr_inner(c: *Ctx, node: *CC.Node) Qbe.Ref = {
+    ::enum(@type node.ty.kind);
+    @if(SPAM) @println("E % %; %", node.kind, CC.Node.int_from_ptr(node), node.tok.str());
+    B :: fn(o: Qbe.O) => binary(c, node, o);
+    @match(node.kind) {
+        fn ND_BLOCK() => {
+            node.kind = .ND_STMT_EXPR;
+            c.gen_expr(node);
+            QbeUndef
+        }
+        fn ND_STMT_EXPR() => {
+            // https://gcc.gnu.org/onlinedocs/gcc/Statement-Exprs.html
+            r := QbeUndef;
+            s := node.body;
+            for_linked s { s |
+                r = c.gen_expr(s);
+            };
+            r
+        }
+        fn ND_EXPR_STMT() => c.gen_expr(node.lhs);
+        fn ND_NULL_EXPR() => QbeUndef;
+        fn ND_FUNCALL() => c.gen_call(node);
+        fn ND_ADD()      => B(.add);
+        fn ND_SUB()      => B(.sub);
+        fn ND_MUL()      => B(.mul);
+        fn ND_DIV()      => B(if(node.ty.is_unsigned, => .udiv, => .div));
+        fn ND_MOD()      => B(if(node.ty.is_unsigned, => .urem, => .rem));
+        fn ND_BITAND()   => B(.and);
+        fn ND_BITOR()    => B(.or);
+        fn ND_BITXOR()   => B(.xor);
+        fn ND_SHL()      => B(.shl);
+        fn ND_SHR()      => B(if(node.ty.is_unsigned, => .shr, => .sar));
+        fn ND_EQ()       => B(node.lhs.ty.cls().cmp_base());
+        fn ND_NE()       => B(node.lhs.ty.cls().cmp_ne());
+        fn ND_LT()       => B(@match(node.lhs.ty.cls()){
+            fn Kw() => if(node.lhs.ty.is_unsigned, => .cultw, => .csltw);
+            fn Kl() => if(node.lhs.ty.is_unsigned, => .cultl, => .csltl);
+            fn Ks() => .clts;
+            fn Kd() => .cltd;
+            @default => unreachable();
+        });
+        fn ND_LE()       => B(@match(node.lhs.ty.cls()){
+            fn Kw() => if(node.lhs.ty.is_unsigned, => .culew, => .cslew);
+            fn Kl() => if(node.lhs.ty.is_unsigned, => .culel, => .cslel);
+            fn Ks() => .cles;
+            fn Kd() => .cled;
+            @default => unreachable();
+        });
+        fn ND_ADDR()     => c.gen_addr(node.lhs);
+        fn ND_CAST() => {
+            source := c.gen_expr(node.lhs);
+            from, to := (node.lhs.ty, node.ty);
+            if(to.kind == .TY_VOID, => return(QbeUndef));
+            c.gen_cast(source, from, to)
+        }
+        fn ND_VAR() => {
+            if node.var.is_function {
+                r := c.f.symcon(c.m.mangle(node.var));
+                return(r);
+            };
+            addr := c.gen_addr(node); 
+            c.gen_load(addr, node.ty)
+        }
+        fn ND_DEREF() => {
+            addr := c.gen_expr(node.lhs);
+            c.gen_load(addr, node.ty)
+        }
+        fn ND_NEG() => {
+            k := node.ty.cls();
+            arg := c.gen_expr(node.lhs);
+            r   := c.f.newtmp("c", k);
+            c.emit(.neg, k, r, arg, QbeNull);
+            r
+        }
+        fn ND_BITNOT() => {
+            k := node.ty.cls();
+            arg := c.gen_expr(node.lhs);
+            r   := c.f.newtmp("c", k);
+            c.emit(.xor, k, r, arg, c.f.getcon(-1));
+            r
+        }
+        fn ND_NOT() => {  // TODO: do the trick with redirecting jump targets to emit better code when this is in an if condition. 
+            arg := c.gen_expr(node.lhs);
+            // not just xor with 1 bit. it might not be a _Bool. 
+            op_eq := cmp_base(node.lhs.ty.cls());
+            r   := c.f.newtmp("c", .Kl);
+            c.emit(op_eq, .Kl, r, arg, QbeConZero);
+            r
+        }
+        // TODO: this should be redundant
+        fn ND_NUM() => @match(node.ty.kind) {
+            fn TY_FLOAT() => {
+                v: f32 = node.fval.cast();
+                v: u32 = v.bitcast();
+                c.f.getcon(v.zext())
+            }
+            fn TY_DOUBLE() => {
+                v: i64 = node.fval.bitcast();
+                c.f.getcon(v)
+            }
+            fn TY_LDOUBLE() => {
+                v: i64 = node.fval.bitcast();
+                c.f.getcon(v)
+            }
+            @default => c.f.getcon(node.val);
+        };
+        fn ND_COMMA() => {
+            _ := c.gen_expr(node.lhs);
+            c.gen_expr(node.rhs)
+        }
+        fn ND_MEMZERO() => {
+            dest := node.var.stack_slot;
+            size: i64 = node.var.ty.size.intcast();
+            off := 0;
+            each blit_op_table { o |
+                while => size >= o.size {
+                    d := c.f.newtmp("c", .Kl);
+                    c.emit(.add, .Kl, d, dest, c.f.getcon(off));
+                    c.emit(o.store, .Kw, QbeNull, QbeConZero, d);
+                    size -= o.size;
+                    off  += o.size;
+                };
+            };
+            
+            QbeUndef
+        }
+        fn ND_ASSIGN() => { 
+            addr  := c.gen_addr(node.lhs);
+            value := c.gen_expr(node.rhs);
+            if node.lhs.kind == .ND_MEMBER && node.lhs.member.is_bitfield {
+                panic("TODO: bitfields");
+            };
+            c.gen_store(addr, value, node.ty);
+            value
+        }
+        fn ND_MEMBER() => {
+            addr := c.gen_addr(node); 
+            c.gen_load(addr, node.ty)
+        }
+        fn ND_FOR() => {
+            ::ptr_utils(CC.Node);
+            if !node.init.is_null() {
+                c.gen_expr(node.init);
+            };
+            c.gen_expr(node.then); 
+            if !node.inc.is_null() {
+                c.gen_expr(node.inc);  // note: gen_expr may change f.start (current block)
+            };
+            QbeNull
+        }
+        fn ND_GOTO() => QbeUndef;
+        fn ND_LABEL() => QbeUndef;
+        fn ND_IF() => QbeUndef;
+        fn ND_DO() => QbeUndef;
+        fn ND_SWITCH() => QbeUndef;
+        fn ND_COND() => {
+            c.gen_expr(node.cond);
+            c.gen_expr(node.then);
+            c.gen_expr(node.else);
+            QbeUndef // TODO: this is confusing but this is called before the phi is created in conditional()
+        };
+        @default => @panic("unexpected node for expr: %", node.kind);
+    }
+}
+
+// TODO: audit this. chibicc has a big table of x64 mnemonics to compare to. 
+fn gen_cast(c: *Ctx, src: Qbe.Ref, from: *CC.Type, to: *CC.Type) Qbe.Ref = {
+    k_from, k_to := (from.cls(), to.cls());
+    p_from, p_to := (from.get_type_id(), to.get_type_id());
+    dest := c.f.newtmp("c", k_to);
+    ::enum(@type p_from);
+    if(p_from == p_to, => return(src));
+    if p_to == .B {  
+        // TODO: do i need to zero extend byte/short? 
+        c.emit(cmp_ne(k_from), k_to, dest, src, QbeConZero);
+        return(dest)
+    };
+    o: Qbe.O = if !k_to.is_int() {
+        @match(p_from) {
+            fn U64() => .ultof;
+            fn I64() => .sltof;
+            fn U32() => .uwtof;
+            fn I32() => .swtof;
+            fn F32() => .exts;
+            fn F64() => .truncd;
+            @default => {
+                //  bool/byte/short to float/double cast
+                src = c.gen_cast(src, from, ty_long);
+                .sltof
+            };
+        }
+    } else {  // k_to is integer
+        if(to.size == from.size && k_to == k_from, => return(src));  // if sizes are equal, it's a signedness cast which does nothing 
+        if k_from.is_int() && to.size < from.size {
+            // `(char) 256` needs to truncate
+            r := c.f.newtmp("c", k_to);
+            mask := 1.shift_left(to.size.intcast() * 8) - 1;
+            c.emit(.and, k_to, r, src, c.f.getcon(mask));
+            //src = r;
+            return(r);
+        };
+        @match(p_from) {
+            fn B()   => .extub;
+            fn U8()  => .extub;
+            fn I8()  => .extsb;
+            fn U16() => .extuh;
+            fn I16() => .extsh;
+            fn U32() => .extuw;
+            fn I32() => .extsw;
+            fn F32() => @if(to.is_unsigned, .stoui, .stosi);
+            fn F64() => @if(to.is_unsigned, .dtoui, .dtosi);
+            @default => unreachable();  // *u64 is just a signedness cast
+        }
+    };
+
+    c.emit(o, k_to, dest, src, QbeNull);
+    dest
+}
+
+fn gen_call(c: *Ctx, node: *CC.Node) Qbe.Ref #once = {
+    if node.lhs.kind == .ND_VAR && node.lhs.var.name.str() == "alloca" {
+        size := c.gen_expr(node.args);
+        r := c.f.newtmp("alloca", .Kl);
+        c.emit(.alloc16, .Kl, r, size, QbeNull);
+        return(r);
+    };
+
+    variadic_marker_index := 0;
+    if node.lhs.ty.is_variadic {
+        t := node.lhs.ty.params;
+        for_linked t { t |
+            variadic_marker_index += 1;
+        };
+    } else {
+        variadic_marker_index = -1;
+    };
+    
+    arguments := list(Qbe.Ins, temp());
+    arg := node.args;
+    for_linked arg { arg |
+        if variadic_marker_index == 0 {
+            arguments&.push(make_ins(.argv, .Kw, QbeNull, QbeNull, QbeNull));
+        };
+        variadic_marker_index -= 1;
+        
+        r := c.gen_expr(arg);
+        // TODO: argc and other types
+        arguments&.push(make_ins(.arg, arg.ty.cls(), QbeNull, r, QbeNull));
+    };
+    
+    assert(node.ret_buffer.is_null(), "TODO: aggragate returns");
+    for arguments { i |    
+        c.b.push(i);
+    };
+    
+    callee := c.gen_expr(node.lhs);
+    r := c.f.newtmp("c", .Kl); // TODO: other types
+    c.emit(.call, .Kl, r, callee, QbeNull);
+    r
+}
+
+fn gen_store(c: *Ctx, addr: Qbe.Ref, value: Qbe.Ref, ty: *CC.Type) void = {
+    if @is(ty.kind, .TY_STRUCT, .TY_UNION) {
+        c.emit(.blit0, .Kw, QbeNull, value, addr);  // src, dest because we hate ourselves
+        c.emit(.blit1, .Kw, QbeNull, INT(ty.size.intcast()), QbeNull);
+        return();
+    };
+    if @is(ty.kind, .TY_DOUBLE, .TY_LDOUBLE) {
+        c.emit(.stored, .Kw, QbeNull, value, addr);
+        return();
+    };
+    if ty.kind == .TY_FLOAT {
+        c.emit(.stores, .Kw, QbeNull, value, addr);
+        return();
+    };
+    
+    o: Qbe.O = @switch(ty.size) {
+        @case(1) => .storeb;
+        @case(2) => .storeh;
+        @case(4) => .storew;
+        @case(8) => .storel;
+        @default => panic("invalid int size");
+    };
+    c.emit(o, .Kw, QbeNull, value, addr);
+}
+
+fn gen_load(c: *Ctx, addr: Qbe.Ref, type: *CC.Type) Qbe.Ref = {
+    if @is(type.kind, .TY_ARRAY, .TY_STRUCT, .TY_UNION, .TY_FUNC, .TY_VLA) {
+        return(addr);  // really?
+    };
+    // TODO: k := type.cls() out here
+     
+    if @is(type.kind, .TY_DOUBLE, .TY_LDOUBLE) {
+        r := c.f.newtmp("c", .Kd);
+        c.emit(.load, .Kd, r, addr, QbeNull);
+        return(r);
+    };
+    if type.kind == .TY_FLOAT {
+        r := c.f.newtmp("c", .Ks);
+        c.emit(.load, .Ks, r, addr, QbeNull);
+        return(r);
+    };
+    (o: Qbe.O, k: Qbe.Cls) := @switch(type.size) {
+        @case(1) => (@if(type.is_unsigned, .loadub, .loadsb), .Kw);
+        @case(2) => (@if(type.is_unsigned, .loaduh, .loadsh), .Kw);
+        @case(4) => (@if(type.is_unsigned, .loaduw, .loadsw), .Kw);
+        @case(8) => (.load, .Kl);
+        @default => panic("invalid int size");
+    };
+    r := c.f.newtmp("c", k);
+    c.emit(o, k, r, addr, QbeNull);
+    r
+}
+
+fn gen_addr(c: *Ctx, node: *CC.Node) Qbe.Ref = {
+    //@println("% %", node.kind, int_from_ptr(@type node.var[], node.var));
+    
+    @match(node.kind) {
+        fn ND_DEREF() => c.gen_expr(node.lhs);
+        fn ND_VAR() => if !node.var.is_local {
+            c.f.symcon(c.m.mangle(node.var))
+        } else {
+            node.var.stack_slot
+        };
+        fn ND_MEMBER() => {
+            base := c.gen_addr(node.lhs);
+            r := c.f.newtmp("c", .Kl);
+            c.emit(.add, .Kl, r, base, c.f.getcon(node.member.offset.intcast()));
+            r
+        }
+        fn ND_COMMA() => {
+            c.gen_expr(node.lhs);
+            c.gen_addr(node.rhs)
+        }
+        @default => {
+            // TODO: compiler bug
+            yy := @is(node.kind, .ND_ASSIGN, .ND_COND);
+            xx := @is(node.ty.kind, .TY_STRUCT, .TY_UNION);
+            if yy && xx {
+                return(c.gen_expr(node));
+            };
+            @panic("TODO: gen_addr %", node.kind)
+        };
+    }
+}
+
+fn binary(c: *Ctx, node: *CC.Node, callee: Qbe.O) Qbe.Ref = {
+    lhs := c.gen_expr(node.lhs);
+    rhs := c.gen_expr(node.rhs);
+    k   := node.ty.cls();
+    r   := c.f.newtmp("c", k);
+    c.emit(callee, k, r, lhs, rhs);
+    r
 }

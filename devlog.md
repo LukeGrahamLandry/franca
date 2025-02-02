@@ -1,5 +1,16 @@
 - TODO: deal with `CodegenEntry:Bounce` on wasm
 
+## (Feb 1)
+
+- reworking all the control flow in the parser to output to *Blk with the right terminators directly instead of string labels. 
+incremental step towards removing the ast. start by just having each node remember which block it should output instructions to. 
+- sad amount of time on default_init(Qbe.Fn) expecting the caller to zero the memory
+- the assignment to initial value in declaration() wasn't happening because it wasn't going through parse_expr, the node was just getting created and returned. 
+- b.arg for loop conditions
+- confusion about `label:` immediately parsing another statement, so you have to jump to the label at the begining not the end. 
+- conditional(): where you need to insert casts to unify the branches it's painful to make sure they go in the right blocks. 
+- need to be careful with expressions that don't evaluate thier argument, just look at thier type
+
 ## (Jan 31)
 
 - ND_SWITCH, ND_CASE, ND_DO

@@ -38,6 +38,9 @@ fn is_flonum(ty: *CC.Type) bool =
 fn is_numeric(ty: *CC.Type) bool = 
     is_integer(ty) || is_flonum(ty);
 
+fn is_void(ty: *CC.Type) bool = 
+    ty.kind == .TY_VOID;
+
 fn is_compatible(t1: *CC.Type, t2: *CC.Type) bool = {
     if(t1.identical(t2),     => return(true));
     if(!t1.origin.is_null(), => return(is_compatible(t1.origin, t2)));
@@ -223,9 +226,9 @@ fn add_type_inner(c: *Ctx, node: *CC.Node) void = {
                         break(stmt.lhs.ty);
                     };
                 };
-                // :compilerbug
-                @error_tok(c, node.tok, "statement expression returning void is not supported");
-                unreachable()
+                // TODO: you want this check to avoid mistakes? but it broke with moving gen_expr to be incremental. 
+                //@error_tok(c, node.tok, "statement expression returning void is not supported");
+                return()
             }
             fn ND_LABEL_VAL() => c.pointer_to(ty_void);
             fn ND_CAS() => {
@@ -260,4 +263,26 @@ fn copy_struct_type(c: *Ctx, ty: *CC.Type) *CC.Type = {
 
     ty.members = head.next;
     ty
+}
+
+CPrimType :: @enum(B, I8, I16, I32, I64, U8, U16, U32, U64, F32, F64); // , F80);
+
+fn get_type_id(ty: *CC.Type) CPrimType = @match(ty.kind) {
+    fn TY_BOOL()  => .B;
+    fn TY_CHAR()  => @if(ty.is_unsigned,  .U8,  .I8);
+    fn TY_SHORT() => @if(ty.is_unsigned, .U16, .I16);
+    fn TY_INT()   => @if(ty.is_unsigned, .U32, .I32);
+    fn TY_LONG()  => @if(ty.is_unsigned, .U64, .I64);
+    fn TY_FLOAT()   => .F32;
+    fn TY_DOUBLE()  => .F64;
+    fn TY_LDOUBLE() => .F64;  // nothing special. spec says it can be the same as double. 
+    @default => .U64;  // TODO: assert it's not a struct or something insane 
+};
+
+fn cls(ty: *CC.Type) Qbe.Cls = {
+    if(@is(ty.kind, .TY_STRUCT, .TY_UNION),   => return(.Kl)); // ehhh
+    if(@is(ty.kind, .TY_DOUBLE, .TY_LDOUBLE), => return(.Kd));
+    if(ty.kind == .TY_FLOAT,                  => return(.Ks));
+    if(ty.size == 8,                          => return(.Kl));
+    .Kw
 }

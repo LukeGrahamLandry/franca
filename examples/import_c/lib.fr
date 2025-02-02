@@ -19,9 +19,9 @@ ENABLE_TRACY :: false;
 
 JUST_ONE :: false;
 USE_HOST_BACKEND :: true;
-USE_MINE :: true;
 LOG_IR :: false;
-  
+SPAM :: false;
+
 fn main() void = {
     :: assert(!USE_HOST_BACKEND, "cannot start from main() when USE_HOST_BACKEND");
     vtable := ImportVTable.zeroed();
@@ -66,6 +66,7 @@ fn run_tests(vtable: *ImportVTable) void = {
                 println("[failed compile]");
                 println(err);
                 failed += 1;
+                @if(JUST_ONE) exit(1);
                 continue();
             };
             ok, out, err := exec_and_catch("./c.out", empty(), todo_allocator);
@@ -87,8 +88,6 @@ fn run_tests(vtable: *ImportVTable) void = {
     exit((failed != 0).int());
 }
 
-goto_labels :: @static(HashMap(Str, *Qbe.Blk)); // TODO
-
 fn compile_one_file(vtable: *ImportVTable, path: Str) Result(void, Str) = {
     m := @uninitialized QbeModule;
     a := query_current_arch();
@@ -107,7 +106,6 @@ fn compile_one_file(vtable: *ImportVTable, path: Str) Result(void, Str) = {
     tok  = append_tokens(tok, tok2);
     tok  = preprocess(tok);
     
-    @if(USE_MINE)
     for_linked tok { tok |
         if @is(tok.kind, .TK_KEYWORD, .TK_PUNCT) {
             ::?CC.TokenKind;
@@ -125,13 +123,12 @@ fn compile_one_file(vtable: *ImportVTable, path: Str) Result(void, Str) = {
     c.scope.vars = init(c.arena);
     c.scope.tags = init(c.arena);
     c.error_buf = list(temp());
-    //print_tokens(tok);
-    //
+    c.m = m&;
     
-    prog := @if(USE_MINE, @try(c&.parse(tok)) return, parse(tok));
-
-    fn parse(tok: *CC.Token) *CC.Obj #import("chibicc"); 
-    emit_the_code(ctx, prog);
+    //print_tokens(tok);
+    
+    prog := @try(c&.parse(tok)) return;
+    emit_the_code(c&, ctx, prog);
     join_codegen_thread(ctx);
 
     outpath := "./c.out";
@@ -145,7 +142,7 @@ fn compile_one_file(vtable: *ImportVTable, path: Str) Result(void, Str) = {
     .Ok
 }
 
-fn emit_the_code(ctx: *CodegenShared, obj: *CC.Obj) void = {
+fn emit_the_code(c: *Ctx, ctx: *CodegenShared, obj: *CC.Obj) void = {
     :: ptr_utils(CC.Obj);
     while => !obj.next.is_null() {
         @assert(!obj.is_tls, "Thread Local Storage is not supported");
@@ -154,11 +151,8 @@ fn emit_the_code(ctx: *CodegenShared, obj: *CC.Obj) void = {
             push_dynamic_context {
                 context(DefaultContext)[].temporary_allocator = entry.arena&;
                 if obj.is_function {
-                    f := temp().box_zeroed(Qbe.Fn);
-                    f.default_init(ctx.m);
+                    f := obj.f;
                     fill_lnk(f.lnk&, obj, ctx.m);
-                    translate_func(f, obj);
-                    //@if(JUST_ONE) printfn(f, f.globals.debug_out);
                     entry.task = (Func = f);
                 } else {
                     entry.task = (AotVar = translate_data(ctx.m, obj));
@@ -206,47 +200,6 @@ fn translate_data(m: *QbeModule, obj: *CC.Obj) []Qbe.Dat = {
     out.items()
 }
 
-fn translate_func(f: *Qbe.Fn, obj: *CC.Obj) void = {
-    goto_labels[] = init(temp());
-    f.rpo = new(1);
-    start := f.new_block();
-    f.start = start;
-    
-    loc := obj.params;
-    for_linked loc { loc |
-        loc.stack_slot = f.newtmp("c", .Kl);
-        // TODO: other types + parc
-        emit(start, .par, .Kl, loc.stack_slot, QbeNull, QbeNull); 
-    };
-    
-    scalars := Qbe.Ins.list(temp());
-    
-    loc := obj.locals;
-    for_linked loc { loc |
-        value := loc.stack_slot;
-        loc.stack_slot = f.newtmp(loc.name.str(), .Kl);
-        emit(start, .alloc8, .Kl, loc.stack_slot, f.getcon(loc.ty.size.intcast()), QbeNull);  // TODO: smaller align stack slots
-        // TODO: other types + parc
-        if value != QbeNull {
-            push(scalars&, make_ins(.storel, .Kw, QbeNull, value, loc.stack_slot));
-        };
-    };
-    for scalars { ins |
-        push(start, ins);
-    };
-    gen_expr(f, obj.body);
-    if f.start.jmp.type == .Jxxx {
-        f.start.jmp = (type = .retw, arg = QbeConZero);
-    };
-    f.start = start;
-    
-    prev := Qbe.Blk.ptr_from_int(0);
-    for_rev f.rpo.slice(0, f.nblk.zext()) { b | 
-        b.link = prev;
-        prev = b;
-    };
-}
-
 #where(fn(T) => is_ptr(T) && has_field(Deref(T), @symbol next))
 fn for_linked(head: ~T, $body: @Fn(it: T) void) void = {
     ::ptr_utils(Deref(T));
@@ -256,9 +209,6 @@ fn for_linked(head: ~T, $body: @Fn(it: T) void) void = {
     };
 }
 
-fn emit(b: *Qbe.Blk, op: Qbe.O, k: Qbe.Cls, to: Qbe.Ref, arg0: Qbe.Ref, arg1: Qbe.Ref) void = {
-    push(b, make_ins(op, k, to, arg0, arg1));
-}
 
 fn fill_lnk(lnk: *Qbe.Lnk, obj: *CC.Obj, m: *QbeModule) void = {
     lnk.export = !obj.is_static;
@@ -274,467 +224,6 @@ fn mangle(m: *QbeModule, obj: *CC.Obj) u32 = {
 }
 
 ::enum(CC.NodeKind);
-
-fn get_block(f: *Qbe.Fn, label: CStr) *Qbe.Blk = {
-    label := label.str();
-    goto_labels.get(label) || {
-        b := f.new_block();
-        goto_labels.insert(label, b);
-        b
-    }
-}
-
-fn gen_expr(f: *Qbe.Fn, node: *CC.Node) Qbe.Ref = {
-    ::enum(@type node.ty.kind);
-    //@println("%", node.tok.loc.str().slice(0, node.tok.len.zext()));
-    //@println("E % %", node.kind, CC.Node.int_from_ptr(node));
-    B :: fn(o: Qbe.O) => binary(f, node, o);
-    @match(node.kind) {
-        fn ND_BLOCK() => {
-            node.kind = .ND_STMT_EXPR;
-            gen_expr(f, node);
-            QbeUndef
-        }
-        fn ND_STMT_EXPR() => {
-            // https://gcc.gnu.org/onlinedocs/gcc/Statement-Exprs.html
-            r := QbeUndef;
-            s := node.body;
-            for_linked s { s |
-                r = gen_expr(f, s);
-            };
-            r
-        }
-        fn ND_EXPR_STMT() => gen_expr(f, node.lhs);
-        fn ND_RETURN() => {
-            ::ptr_utils(@type node.lhs[]);
-            if node.lhs.is_null() {
-                f.start.jmp.type = .ret0;
-            } else {
-                f.start.jmp.type = .retw; // TODO
-                f.start.jmp.arg = gen_expr(f, node.lhs);
-            };
-            QbeUndef
-        }
-        fn ND_NULL_EXPR() => QbeUndef;
-        fn ND_FUNCALL() => gen_call(f, node);
-        fn ND_ADD()      => B(.add);
-        fn ND_SUB()      => B(.sub);
-        fn ND_MUL()      => B(.mul);
-        fn ND_DIV()      => B(if(node.ty.is_unsigned, => .udiv, => .div));
-        fn ND_MOD()      => B(if(node.ty.is_unsigned, => .urem, => .rem));
-        fn ND_BITAND()   => B(.and);
-        fn ND_BITOR()    => B(.or);
-        fn ND_BITXOR()   => B(.xor);
-        fn ND_SHL()      => B(.shl);
-        fn ND_SHR()      => B(if(node.ty.is_unsigned, => .shr, => .sar));
-        fn ND_EQ()       => B(node.lhs.ty.cls().cmp_base());
-        fn ND_NE()       => B(node.lhs.ty.cls().cmp_ne());
-        fn ND_LT()       => B(@match(node.lhs.ty.cls()){
-            fn Kw() => if(node.lhs.ty.is_unsigned, => .cultw, => .csltw);
-            fn Kl() => if(node.lhs.ty.is_unsigned, => .cultl, => .csltl);
-            fn Ks() => .clts;
-            fn Kd() => .cltd;
-            @default => unreachable();
-        });
-        fn ND_LE()       => B(@match(node.lhs.ty.cls()){
-            fn Kw() => if(node.lhs.ty.is_unsigned, => .culew, => .cslew);
-            fn Kl() => if(node.lhs.ty.is_unsigned, => .culel, => .cslel);
-            fn Ks() => .cles;
-            fn Kd() => .cled;
-            @default => unreachable();
-        });
-        fn ND_ADDR()     => f.gen_addr(node.lhs);
-        fn ND_CAST() => {
-            source := gen_expr(f, node.lhs);
-            from, to := (node.lhs.ty, node.ty);
-            if(to.kind == .TY_VOID, => return(QbeUndef));
-            f.gen_cast(source, from, to)
-        }
-        fn ND_VAR() => {
-            if node.var.is_function {
-                r := f.symcon(f.globals.mangle(node.var));
-                return(r);
-            };
-            addr := f.gen_addr(node); 
-            f.gen_load(addr, node.ty)
-        }
-        fn ND_DEREF() => {
-            addr := f.gen_expr(node.lhs);
-            f.gen_load(addr, node.ty)
-        }
-        fn ND_NEG() => {
-            k := node.ty.cls();
-            arg := f.gen_expr(node.lhs);
-            r   := f.newtmp("c", k);
-            emit(f.start, .neg, k, r, arg, QbeNull);
-            r
-        }
-        fn ND_BITNOT() => {
-            k := node.ty.cls();
-            arg := f.gen_expr(node.lhs);
-            r   := f.newtmp("c", k);
-            emit(f.start, .xor, k, r, arg, f.getcon(-1));
-            r
-        }
-        fn ND_NOT() => {  // TODO: do the trick with redirecting jump targets to emit better code when this is in an if condition. 
-            arg := f.gen_expr(node.lhs);
-            // not just xor with 1 bit. it might not be a _Bool. 
-            op_eq := cmp_base(node.lhs.ty.cls());
-            r   := f.newtmp("c", .Kl);
-            emit(f.start, op_eq, .Kl, r, arg, QbeConZero);
-            r
-        }
-        fn ND_NUM() => @match(node.ty.kind) {
-            fn TY_FLOAT() => {
-                v: f32 = node.fval.cast();
-                v: u32 = v.bitcast();
-                f.getcon(v.zext())
-            }
-            fn TY_DOUBLE() => {
-                v: i64 = node.fval.bitcast();
-                f.getcon(v)
-            }
-            fn TY_LDOUBLE() => {
-                v: i64 = node.fval.bitcast();
-                f.getcon(v)
-            }
-            @default => f.getcon(node.val);
-        };
-        fn ND_COMMA() => {
-            _ := f.gen_expr(node.lhs);
-            f.gen_expr(node.rhs)
-        }
-        fn ND_MEMZERO() => {
-            dest := node.var.stack_slot;
-            size: i64 = node.var.ty.size.intcast();
-            off := 0;
-            each blit_op_table { o |
-                while => size >= o.size {
-                    d := f.newtmp("c", .Kl);
-                    emit(f.start, .add, .Kl, d, dest, f.getcon(off));
-                    emit(f.start, o.store, .Kw, QbeNull, QbeConZero, d);
-                    size -= o.size;
-                    off  += o.size;
-                };
-            };
-         
-            QbeUndef
-        }
-        fn ND_ASSIGN() => { 
-            addr  := f.gen_addr(node.lhs);
-            value := f.gen_expr(node.rhs);
-            if node.lhs.kind == .ND_MEMBER && node.lhs.member.is_bitfield {
-                panic("TODO: bitfields");
-            };
-            f.gen_store(addr, value, node.ty);
-            value
-        }
-        fn ND_IF() => {
-            node.kind = .ND_COND;
-            gen_expr(f, node);
-            QbeUndef
-        }
-        fn ND_COND() => {
-            cond         := f.gen_expr(node.cond);
-            old_block    := f.start;
-            old_block.jmp = (type = .jnz, arg = cond);
-            old_block.s1  = f.new_block();
-            old_block.s2  = f.new_block();
-            join_block   := f.new_block();
-            
-            f.start = old_block.s1;
-            then_value := f.gen_expr(node.then);
-            f.jmp_if_unterminated(join_block);
-            f.start = old_block.s2;
-            ::ptr_utils(@type node.else[]);
-            else_value := @if(node.else.is_null(), QbeUndef, f.gen_expr(node.else));
-            f.jmp_if_unterminated(join_block);
-            f.start = join_block;
-            ::ptr_utils(@type node.ty[]);
-            if node.ty.is_null() || node.ty.kind == .TY_VOID {
-                QbeUndef
-            } else {
-                k := node.ty.cls();
-                p := new_phi(f, join_block, k);
-                p.push(old_block.s1, then_value);
-                p.push(old_block.s2, else_value);
-                p.to
-            }
-        }
-        fn ND_FOR() => {
-            cond_block := f.new_block();
-            body_block := f.new_block(); 
-            inc_block  := f.get_block(node.cont_label); 
-            join_block := f.get_block(node.brk_label);
-        
-            ::ptr_utils(CC.Node);
-            if !node.init.is_null() {
-                _ := gen_expr(f, node.init);
-            };
-            f.jmp_if_unterminated(cond_block);
-            
-            cond_block.s1 = body_block;
-            if !node.cond.is_null() {
-                f.start = cond_block;
-                cond_value := f.gen_expr(node.cond);  // note: gen_expr may change f.start (current block)
-                // TODO: cast to _Bool if it's not Kw?
-                f.start.jmp = (type = .jnz, arg = cond_value); 
-                f.start.s2 = join_block;
-            } else {
-                cond_block.jmp.type = .jmp;
-            };
-            f.start = body_block;
-            f.gen_expr(node.then);  // note: gen_expr may change f.start (current block)
-            f.jmp_if_unterminated(inc_block);
-            
-            f.start = inc_block;
-            if !node.inc.is_null() {
-                f.gen_expr(node.inc);  // note: gen_expr may change f.start (current block)
-            };
-            f.jmp_if_unterminated(cond_block);
-            f.start = join_block;
-            QbeNull
-        }
-        fn ND_DO() => {
-            body_block := f.new_block(); 
-            cond_block := f.get_block(node.cont_label);
-            join_block := f.get_block(node.brk_label);
-            f.jmp_if_unterminated(body_block);
-            f.start = body_block;
-            f.gen_expr(node.then);
-            
-            f.jmp_if_unterminated(cond_block);
-            {
-                f.start = cond_block;
-                cond_value := f.gen_expr(node.cond);
-                // TODO: cast to _Bool if it's not Kw?
-                f.start.jmp = (type = .jnz, arg = cond_value); 
-                f.start.s1 = body_block;
-                f.start.s2 = join_block;
-            };
-            
-            f.start = join_block;
-            QbeUndef
-        }
-        fn ND_MEMBER() => {
-            addr := f.gen_addr(node); 
-            f.gen_load(addr, node.ty)
-        }
-        fn ND_GOTO() => {
-            f.jmp_if_unterminated(f.get_block(node.unique_label));
-            f.start = f.new_block();
-            QbeUndef
-        }
-        fn ND_LABEL() => {
-            b := f.get_block(node.unique_label);
-            f.jmp_if_unterminated(b);
-            f.start = b;
-            f.gen_expr(node.lhs);
-            QbeUndef
-        }
-        fn ND_SWITCH() => {
-            inspect := f.gen_expr(node.cond);
-            if node.cond.ty.cls() != .Kl {
-                r := f.newtmp("c", .Kl);
-                emit(f.start, .extuw, .Kl, r, inspect, QbeNull);
-                inspect = r;
-            };
-            join_block := f.get_block(node.brk_label);
-            if f.start.jmp.type == .Jxxx {
-                entry_block := f.start;
-                entry_block.jmp.type = .switch;
-                
-                ::ptr_utils(CC.Node);
-                // if they didn't write a default:, just fallthrough to the end. 
-                default_label := if(node.default_case.is_null(), => node.brk_label, => node.default_case.label);
-                payload: Qbe.SwitchPayload = (
-                    cases = new(0),
-                    case_count = 0,
-                    default = f.get_block(default_label),
-                    src = f.start,
-                    inspect = inspect,
-                );
-                case := node.case_next;
-                while => !case.is_null() {
-                    @assert_eq(case.begin, case.end, "TODO: GNU case ranges are not yet supported");
-                    push(payload.cases&, payload.case_count&, (f.get_block(case.label), case.begin));
-                    case = case.case_next;
-                };
-                entry_block.jmp.arg = INT(f.switch_count.zext());
-                if f.switch_count == 0 {
-                    f.switches = new(1);
-                };
-                push(f.switches&, f.switch_count&, payload);
-            };
-            
-            f.start = f.new_block(); // should be redundant, the below should always be making a new label anyway
-            f.gen_expr(node.then); // this deals with emitting code into all the case blocks
-            
-            f.jmp_if_unterminated(join_block);  // TODO: the frontend should just make the last case jump to break?
-            f.start = join_block;
-            QbeUndef
-        }
-        fn ND_CASE() => {
-            // TODO: why is label/unique_label and ND_LABEL/ND_CASE different?
-            b := f.get_block(node.label);
-            f.jmp_if_unterminated(b);
-            f.start = b;
-            f.gen_expr(node.lhs);
-            QbeUndef
-        }
-        @default => @panic("unexpected node for expr: %", node.kind);
-    }
-}
-
-fn jmp_if_unterminated(f: *Qbe.Fn, dest: *Qbe.Blk) void = {
-    if f.start.jmp.type == .Jxxx {
-        f.start.s1 = dest;
-        f.start.jmp.type = .jmp;
-    };
-}
-
-fn gen_call(f: *Qbe.Fn, node: *CC.Node) Qbe.Ref #once = {
-    if node.lhs.kind == .ND_VAR && node.lhs.var.name.str() == "alloca" {
-        size := f.gen_expr(node.args);
-        r := f.newtmp("alloca", .Kl);
-        emit(f.start, .alloc16, .Kl, r, size, QbeNull);
-        return(r);
-    };
-
-    variadic_marker_index := 0;
-    if node.lhs.ty.is_variadic {
-        t := node.lhs.ty.params;
-        for_linked t { t |
-            variadic_marker_index += 1;
-        };
-    } else {
-        variadic_marker_index = -1;
-    };
-    
-    arguments := list(Qbe.Ins, temp());
-    arg := node.args;
-    for_linked arg { arg |
-        if variadic_marker_index == 0 {
-            arguments&.push(make_ins(.argv, .Kw, QbeNull, QbeNull, QbeNull));
-        };
-        variadic_marker_index -= 1;
-        
-        r := gen_expr(f, arg);
-        // TODO: argc and other types
-        arguments&.push(make_ins(.arg, arg.ty.cls(), QbeNull, r, QbeNull));
-    };
-    
-    assert(node.ret_buffer.is_null(), "TODO: aggragate returns");
-    for arguments { i |    
-        push(f.start, i);
-    };
-    
-    callee := gen_expr(f, node.lhs);
-    r := f.newtmp("c", .Kl); // TODO: other types
-    emit(f.start, .call, .Kl, r, callee, QbeNull);
-    r
-}
-
-fn gen_store(f: *Qbe.Fn, addr: Qbe.Ref, value: Qbe.Ref, ty: *CC.Type) void = {
-    if @is(ty.kind, .TY_STRUCT, .TY_UNION) {
-        emit(f.start, .blit0, .Kw, QbeNull, value, addr);  // src, dest because we hate ourselves
-        emit(f.start, .blit1, .Kw, QbeNull, INT(ty.size.intcast()), QbeNull);
-        return();
-    };
-    if @is(ty.kind, .TY_DOUBLE, .TY_LDOUBLE) {
-        emit(f.start, .stored, .Kw, QbeNull, value, addr);
-        return();
-    };
-    if ty.kind == .TY_FLOAT {
-        emit(f.start, .stores, .Kw, QbeNull, value, addr);
-        return();
-    };
-    
-    o: Qbe.O = @switch(ty.size) {
-        @case(1) => .storeb;
-        @case(2) => .storeh;
-        @case(4) => .storew;
-        @case(8) => .storel;
-        @default => panic("invalid int size");
-    };
-    emit(f.start, o, .Kw, QbeNull, value, addr);
-    return();
-}
-
-fn cls(ty: *CC.Type) Qbe.Cls = {
-    if(@is(ty.kind, .TY_STRUCT, .TY_UNION),   => return(.Kl)); // ehhh
-    if(@is(ty.kind, .TY_DOUBLE, .TY_LDOUBLE), => return(.Kd));
-    if(ty.kind == .TY_FLOAT,                  => return(.Ks));
-    if(ty.size == 8,                          => return(.Kl));
-    .Kw
-}
-
-fn gen_load(f: *Qbe.Fn, addr: Qbe.Ref, type: *CC.Type) Qbe.Ref = {
-    if @is(type.kind, .TY_ARRAY, .TY_STRUCT, .TY_UNION, .TY_FUNC, .TY_VLA) {
-        return(addr);  // really?
-    };
-    if @is(type.kind, .TY_DOUBLE, .TY_LDOUBLE) {
-        r := f.newtmp("c", .Kd);
-        emit(f.start, .load, .Kd, r, addr, QbeNull);
-        return(r);
-    };
-    if type.kind == .TY_FLOAT {
-        r := f.newtmp("c", .Ks);
-        emit(f.start, .load, .Ks, r, addr, QbeNull);
-        return(r);
-    };
-    (o: Qbe.O, k: Qbe.Cls) := @switch(type.size) {
-        @case(1) => (@if(type.is_unsigned, .loadub, .loadsb), .Kw);
-        @case(2) => (@if(type.is_unsigned, .loaduh, .loadsh), .Kw);
-        @case(4) => (@if(type.is_unsigned, .loaduw, .loadsw), .Kw);
-        @case(8) => (.load, .Kl);
-        @default => panic("invalid int size");
-    };
-    r := f.newtmp("c", k);
-    emit(f.start, o, k, r, addr, QbeNull);
-    r
-}
-
-fn gen_addr(f: *Qbe.Fn, node: *CC.Node) Qbe.Ref = {
-    //@println("% %", node.kind, int_from_ptr(@type node.var[], node.var));
-    
-    @match(node.kind) {
-        fn ND_DEREF() => f.gen_expr(node.lhs);
-        fn ND_VAR() => if !node.var.is_local {
-            f.symcon(f.globals.mangle(node.var))
-        } else {
-            node.var.stack_slot
-        };
-        fn ND_MEMBER() => {
-            base := gen_addr(f, node.lhs);
-            r := f.newtmp("c", .Kl);
-            emit(f.start, .add, .Kl, r, base, f.getcon(node.member.offset.intcast()));
-            r
-        }
-        fn ND_COMMA() => {
-            f.gen_expr(node.lhs);
-            f.gen_addr(node.rhs)
-        }
-        @default => {
-            // TODO: compiler bug
-            yy := @is(node.kind, .ND_ASSIGN, .ND_COND);
-            xx := @is(node.ty.kind, .TY_STRUCT, .TY_UNION);
-            if yy && xx {
-                return(f.gen_expr(node));
-            };
-            @panic("TODO: gen_addr %", node.kind)
-        };
-    }
-}
-
-fn binary(f: *Qbe.Fn, node: *CC.Node, callee: Qbe.O) Qbe.Ref = {
-    lhs := f.gen_expr(node.lhs);
-    rhs := f.gen_expr(node.rhs);
-    k   := node.ty.cls();
-    r   := f.newtmp("c", k);
-    emit(f.start, callee, k, r, lhs, rhs);
-    r
-}
 
 ::ptr_utils(CC.Token); ::enum(CC.TokenKind);
 
@@ -779,20 +268,6 @@ fn print_tokens(tok: *CC.Token) void = {
     println(out.items());
 }
 
-new_block :: fn(f: *Qbe.Fn) *Qbe.Blk = {
-    f.rpo&.grow(f.nblk.zext() + 1);
-    b := newblk();
-    @if(TRACK_IR_NAMES) {
-        l := fixed_list(b.name&.items()); // :UnacceptablePanic
-        @fmt(l&, "%", f.nblk);
-    };
-    b.id = f.nblk;
-    f.rpo[f.nblk.zext()] = b;
-    f.nblk += 1;
-    b.ins = new(0);
-    b
-};
-
 // TODO: move this and call it from elsewhere
 fn new_phi(f: *Qbe.Fn, b: *Qbe.Blk, k: Qbe.Cls) *Qbe.Phi = {
     prev := b.phi;
@@ -806,72 +281,4 @@ fn new_phi(f: *Qbe.Fn, b: *Qbe.Blk, k: Qbe.Cls) *Qbe.Phi = {
         link = prev,
     );
     b.phi
-}
-
-CPrimType :: @enum(B, I8, I16, I32, I64, U8, U16, U32, U64, F32, F64); // , F80);
-
-fn get_type_id(ty: *CC.Type) CPrimType = @match(ty.kind) {
-    fn TY_BOOL()  => .B;
-    fn TY_CHAR()  => @if(ty.is_unsigned,  .U8,  .I8);
-    fn TY_SHORT() => @if(ty.is_unsigned, .U16, .I16);
-    fn TY_INT()   => @if(ty.is_unsigned, .U32, .I32);
-    fn TY_LONG()  => @if(ty.is_unsigned, .U64, .I64);
-    fn TY_FLOAT()   => .F32;
-    fn TY_DOUBLE()  => .F64;
-    fn TY_LDOUBLE() => .F64;  // nothing special. spec says it can be the same as double. 
-    @default => .U64;  // TODO: assert it's not a struct or something insane 
-};
-
-// TODO: audit this. chibicc has a big table of x64 mnemonics to compare to. 
-fn gen_cast(f: *Qbe.Fn, src: Qbe.Ref, from: *CC.Type, to: *CC.Type) Qbe.Ref = {
-    k_from, k_to := (from.cls(), to.cls());
-    p_from, p_to := (from.get_type_id(), to.get_type_id());
-    dest := f.newtmp("c", k_to);
-    ::enum(@type p_from);
-    if(p_from == p_to, => return(src));
-    if p_to == .B {  
-        // TODO: do i need to zero extend byte/short? 
-        f.start.emit(cmp_ne(k_from), k_to, dest, src, QbeConZero);
-        return(dest)
-    };
-    o: Qbe.O = if !k_to.is_int() {
-        @match(p_from) {
-            fn U64() => .ultof;
-            fn I64() => .sltof;
-            fn U32() => .uwtof;
-            fn I32() => .swtof;
-            fn F32() => .exts;
-            fn F64() => .truncd;
-            @default => {
-                //  bool/byte/short to float/double cast
-                src = gen_cast(f, src, from, ty_long);
-                .sltof
-            };
-        }
-    } else {  // k_to is integer
-        if(to.size == from.size && k_to == k_from, => return(src));  // if sizes are equal, it's a signedness cast which does nothing 
-        if k_from.is_int() && to.size < from.size {
-            // `(char) 256` needs to truncate
-            r := f.newtmp("c", k_to);
-            mask := 1.shift_left(to.size.intcast() * 8) - 1;
-            f.start.emit(.and, k_to, r, src, f.getcon(mask));
-            //src = r;
-            return(r);
-        };
-        @match(p_from) {
-            fn B()   => .extub;
-            fn U8()  => .extub;
-            fn I8()  => .extsb;
-            fn U16() => .extuh;
-            fn I16() => .extsh;
-            fn U32() => .extuw;
-            fn I32() => .extsw;
-            fn F32() => @if(to.is_unsigned, .stoui, .stosi);
-            fn F64() => @if(to.is_unsigned, .dtoui, .dtosi);
-            @default => unreachable();  // *u64 is just a signedness cast
-        }
-    };
-
-    f.start.emit(o, k_to, dest, src, QbeNull);
-    dest
 }
