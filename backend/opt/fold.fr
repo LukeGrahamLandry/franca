@@ -320,13 +320,21 @@ fn opfold(f: *Qbe.Fn, op: Qbe.O, cls: Qbe.Cls, l: i32, r: i32) i32 = {
         return(if(l == r, => l, => fold_status_runtime));
     };
     cl, cr := (f.con.index(l.zext()), f.con.index(r.zext()));
-    if(cl.type != .CBits || cr.type != .CBits, => return(fold_status_runtime));
-    
+    c := try_fold(op, cls, cl, cr) || return(fold_status_runtime);
+    r := f.newcon(c&);
+    // TODO: there are tests that trigger this assertion -- Nov 12
+    //@debug_assert(!(cls == .Ks || cls == .Kd) || c.flt != 0, "wrong fold type");
+    r.val().intcast()
+}
+
+fn try_fold(op: Qbe.O, cls: Qbe.Cls, cl: *Qbe.Con, cr: *Qbe.Con) ?Qbe.Con = {
+    if(cl.type != .CBits || cr.type != .CBits, => return(.None));
+        
     c := Qbe.Con.zeroed();
     c.type = .CBits;
     if cls == .Kw || cls == .Kl {
         if foldint(c&, op, cls == .Kl, cl, cr) {
-            return(fold_status_runtime);
+            return(.None);
         };
     } else {
         foldflt(c&, op, cls == .Kd, cl, cr);
@@ -334,10 +342,7 @@ fn opfold(f: *Qbe.Fn, op: Qbe.O, cls: Qbe.Cls, l: i32, r: i32) i32 = {
     if !is_wide(cls) {
         c.bits.i = c.bits.i.bit_and(0xffffffff);
     };
-    r := f.newcon(c&);
-    // TODO: there are tests that trigger this assertion -- Nov 12
-    //@debug_assert(!(cls == .Ks || cls == .Kd) || c.flt != 0, "wrong fold type");
-    r.val().intcast()
+    (Some = c)
 }
 
 /* boring folding code */

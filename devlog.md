@@ -1,5 +1,29 @@
 - TODO: deal with `CodegenEntry:Bounce` on wasm
 
+## (Feb 2)
+
+- need to be careful with expressions that don't evaluate thier argument, just look at thier type, without generating ir for them
+- need constant folding of binary operators incrementally as they get parsed so they can be used in array types. 
+reusing my fold functions instead of re-pasting the giant switch statement. 
+- i was treating init_data as a CStr instead of taking the whole size past zeroes
+- making bit fields work again: i have a char and then two bit fields in an int, 
+the struct is 4 bytes but it thinks the offset to write the field to in write_gvar_data is 4 which doesn't make any sense:
+- my version of this didn't work for negative numbers which thier align_down needed.
+made for confusing times for bit fields. 
+```
+fn align_to(offset: i64, align: i64) i64 = {
+    // bad:
+    //extra := offset.mod(align);
+    //if extra == 0 {
+    //    offset
+    //} else {
+    //    offset + align - extra
+    //}
+    // good:
+    ((offset + align - 1) / align) * align
+}
+```
+
 ## (Feb 1)
 
 - reworking all the control flow in the parser to output to *Blk with the right terminators directly instead of string labels. 
@@ -9,7 +33,6 @@ incremental step towards removing the ast. start by just having each node rememb
 - b.arg for loop conditions
 - confusion about `label:` immediately parsing another statement, so you have to jump to the label at the begining not the end. 
 - conditional(): where you need to insert casts to unify the branches it's painful to make sure they go in the right blocks. 
-- need to be careful with expressions that don't evaluate thier argument, just look at thier type
 
 ## (Jan 31)
 
