@@ -37,12 +37,14 @@ FoldCtx :: @struct(
 
 // not memory and not special inserted later by abi/isel :OrderMatters
 fn can_fold(o: Qbe.O) bool = {
-    if(o == .extsb || o == .extsh, => return(false)); // TODO
+    if(!has_feature("@franca/ir_body"), => return(false));
     o.between(.add, .cuod) || o.between(.extsb, .cast) || o == .sel1 
 }
 
 /* require rpo, use, pred */
 fn fold_constants(f: *Qbe.Fn) void = {
+    if(!has_feature("@franca/ir_body"), => return());
+    
     start := Edge.zeroed();
     f: FoldCtx = (
         f      = f,
@@ -328,10 +330,24 @@ fn opfold(f: *Qbe.Fn, op: Qbe.O, cls: Qbe.Cls, l: i32, r: i32) i32 = {
 }
 
 fn try_fold(op: Qbe.O, cls: Qbe.Cls, cl: *Qbe.Con, cr: *Qbe.Con) ?Qbe.Con = {
-    if(cl.type != .CBits || cr.type != .CBits, => return(.None));
-        
+@if(::!has_feature("@franca/ir_body"), .None, {
     c := Qbe.Con.zeroed();
     c.type = .CBits;
+    if cl.type != .CBits || cr.type != .CBits {
+        if(!cls.is_int() || !(@is(op, .add, .sub)), => return(.None));
+        // This is used for constant expression evaluation in import_c.
+        // TODO: but sometimes you'd be better off doing this in isel when you could have the offsets as part of the memory access and create fewer relocations. 
+        @debug_assert(cl.type != .CUndef && cr.type != .CUndef, "i think .CUndef is only for RMem's offset");
+        if cr.type == .CAddr {
+            if op == .add {
+                t := cl; cl = cr; cr = t;
+            };
+            if(cr.type == .CAddr, => return(.None));
+        };
+        c.type = .CAddr;
+        c.sym = cl.sym;
+    };
+    
     if cls == .Kw || cls == .Kl {
         if foldint(c&, op, cls == .Kl, cl, cr) {
             return(.None);
@@ -343,6 +359,7 @@ fn try_fold(op: Qbe.O, cls: Qbe.Cls, cl: *Qbe.Con, cr: *Qbe.Con) ?Qbe.Con = {
         c.bits.i = c.bits.i.bit_and(0xffffffff);
     };
     (Some = c)
+})
 }
 
 /* boring folding code */
@@ -387,9 +404,15 @@ fn foldint(res: *Qbe.Con, op: Qbe.O, w: bool, cl: *Qbe.Con, cr: *Qbe.Con) bool =
         fn sar() => if(w, => l.s, => sign_extend_low32(l.s)).shift_right_arithmetic(r.s.bit_and(shift_mask));
         fn shr() => if(w, => l.s, => bit_and(l.s, 1.shift_left(32) - 1)).shift_right_logical(r.s.bit_and(shift_mask));
         fn shl() => l.s.shift_left(r.s.bit_and(shift_mask));
-        //fn Oextsb() => (int8_t)l.u;   // TODO
+        fn extsb() => {
+            cast :: fn(u: u64) i64 #ir(.extsb, .Kl);
+            cast(l.u)
+        };
         fn extub() => l.s.bit_and(1.shift_left(8) - 1);
-        //fn Oextsh() => (int16_t)l.u; // TODO 
+        fn extsh() => {
+            cast :: fn(u: u64) i64 #ir(.extsh, .Kl);
+            cast(l.u)
+        };
         fn extuh() => l.s.bit_and(1.shift_left(16) - 1);
         fn extsw() => sign_extend_low32(l.s); 
         fn extuw() => l.s.bit_and(1.shift_left(32) - 1);

@@ -1,5 +1,16 @@
 - TODO: deal with `CodegenEntry:Bounce` on wasm
 
+## (Feb 3)
+
+- ah but now to use try_fold as my constexpr, i need to add back symbol offseting which i moved to isel before
+- new flavour of emit() that always checks if it can fold right now
+- gen_cast needs to deal with array sizes correctly. 
+array types know thier size for sizeof but when we look at size for a cast we want to have decayed to a pointer.
+- agh, painful, sometimes don't know the array length until parsing the initilizer so need to dealay making a stack slot for the variable. 
+- handle global initilizers with pointers inside
+- add folding for extsb/extsh, fix fn div(u64, u64) u64; to use the right #ir
+- (constexpr.c)
+
 ## (Feb 2)
 
 - need to be careful with expressions that don't evaluate thier argument, just look at thier type, without generating ir for them
@@ -23,6 +34,7 @@ fn align_to(offset: i64, align: i64) i64 = {
     ((offset + align - 1) / align) * align
 }
 ```
+- `_Generic`
 
 ## (Feb 1)
 

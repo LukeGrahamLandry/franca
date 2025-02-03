@@ -6,7 +6,7 @@
 - less verbose style of handling operator precedence.
 - removed some GNU extensions: labels-as-values, case ranges
 - removed support for x87 80-bit long doubles
-- TODO: thread locals, atomics, `_Alignas`
+- (temporarily) removed support for: thread locals, atomics, `_Alignas`
 
 ## Chibicc License
 

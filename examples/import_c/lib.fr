@@ -51,7 +51,8 @@ fn run_tests(vtable: *ImportVTable) void = {
                 "cast.c", "compat.c", "const.c", "control.c",
                 "decl.c", "enum.c", "pointer.c", "sizeof.c", 
                 "struct.c", "typedef.c", "typeof.c", "union.c",
-                "bitfield.c",
+                "bitfield.c", "generic.c", "constexpr.c",
+                //"initializer.c", 
             );
             if skip.contains(e.name&) || !allow.contains(e.name&) {
                 continue();
@@ -108,7 +109,8 @@ fn compile_one_file(vtable: *ImportVTable, path: Str) Result(void, Str) = {
     tok  = preprocess(tok);
     
     for_linked tok { tok |
-        if @is(tok.kind, .TK_KEYWORD, .TK_PUNCT) {
+        a := @is(tok.kind, .TK_KEYWORD, .TK_PUNCT);
+        if a || tok.str() == "_Generic" { // HACK :SLOW
             ::?CC.TokenKind;
             tok.kind = CC.TokenKind.from_name(tok.str()) || @panic("invalid c keyword %", tok.str());
         };
@@ -197,7 +199,29 @@ fn translate_data(m: *QbeModule, obj: *CC.Obj) []Qbe.Dat = {
                 dat.u.num = 0;
             };
         } else {
-            panic("TODO: pointers in data");
+            pos := 0;
+            rel := obj.rel;
+            for_linked rel { rel |
+                @assert_eq(rel.offset.mod(8), 0, "pointer in constant storage must be 8-byte aligned");
+                before := obj.init_data.slice(pos, rel.offset.intcast());
+                if before.len > 0 {
+                    dat := next_dat(); 
+                    dat.type = .DB; 
+                    dat.is_str = true;
+                    dat.u.str = before;
+                };
+                pos = rel.offset.intcast() + 8;
+                dat := next_dat(); 
+                dat.type = .DL; 
+                dat.is_ref = true;
+                dat.u.ref = (id = m.intern(rel.label.str()), off = rel.addend);
+            };
+            if pos < obj.ty.size.intcast() {
+                dat := next_dat(); 
+                dat.type = .DB; 
+                dat.is_str = true;
+                dat.u.str = obj.init_data.rest(pos);
+            };
         };
     };
     

@@ -6,7 +6,7 @@
 //      - https://github.com/fuhsnn/slimcc/issues?q=is%3Aissue+is%3Aclosed+label%3Aupstream-chibicc&page=2
 //      _Static_assert (tho maybe C23 wants to get rid of it)
 // _Alignas needs more backend support
-// TODO: _Generic, unary const expr
+// TODO: unary const expr
 
 // TODO: want to let all the state (like Qbe.Fn) be allocated in Ctx.arena
 //       so you can do all the c frontend stuff up front (because you kinda need 
@@ -213,6 +213,10 @@ fn new_var_node(c: *Ctx, var: *CC.Obj, tok: *CC.Token) *CC.Node = {
     
     if !c.speculate && !node.var.is_function {
         node.lvalue = c.gen_addr(node);
+        if var.ty.kind == .TY_ARRAY {
+            // arrays decay to pointers: `array` === `&array` === `&array[0]`
+            node.r = node.lvalue;
+        };
     };
     
     node
@@ -233,6 +237,9 @@ fn new_cast(c: *Ctx, expr: *CC.Node, ty: *CC.Type) *CC.Node = {
     node.lhs = expr;
     node.ty = c.copy_type(ty);
     node.current_block = expr.current_block; // HACK: this is super confusing, hopefully it will go away with asts
+    
+    //node.lvalue = expr.lvalue;  // :FrontendConstantFolding, TODO: but this is wrong, we're assuming its a noop cast but what if its a truncation
+    
     node
 }
 
@@ -295,14 +302,26 @@ fn new_lvar(c: *Ctx, name: Str, ty: *CC.Type) *CC.Obj = {
     c.locals = var;
 
     if c.current_fn { current_fn |
-        if !c.f.start.is_null() {  // HACK: fix create_params_lvars instead of having an insane ordering where we delay making the start block so this knows to delay making variables for no reason
-            // fixed size allocs always go in the start block so they can be fast-locals. 
-            var.stack_slot = c.f.newtmp(name, .Kl);
-            push(c.f.start, make_ins(.alloc8, .Kl, var.stack_slot, c.f.getcon(var.ty.size.intcast()), QbeNull));  // TODO: smaller align stack slots
+        if var.ty.size >= 0 {  // :StaticArrayOfUnknownLength
+            if !c.f.start.is_null() {  // HACK: fix create_params_lvars instead of having an insane ordering where we delay making the start block so this knows to delay making variables for no reason
+                c.create_stack_slot(var);
+            };
         };
     };
     
     var
+}
+
+// fixed size allocs always go in the start block so they can be fast-locals. 
+fn create_stack_slot(c: *Ctx, var: *CC.Obj) void = {
+    // :ZeroSizeTypes chibicc has empty structs with sizeof(0) but thats an extension
+    // what if you tried to diy static_assert with that, now we broke your code?
+    if var.ty.size < 0 {
+        @error_tok(c, var.tok, "tried to create stack slot for a variable with negative size (%)", var.ty.size);
+    };
+    
+    var.stack_slot = c.f.newtmp(var.name.str(), .Kl);
+    push(c.f.start, make_ins(.alloc8, .Kl, var.stack_slot, c.f.getcon(var.ty.size.intcast()), QbeNull));  // TODO: smaller align stack slots
 }
 
 fn new_gvar(c: *Ctx, name: Str, ty: *CC.Type) *CC.Obj = {
@@ -606,7 +625,11 @@ fn array_dimensions(c: *Ctx, rest: **CC.Token, tok: *CC.Token, ty: *CC.Type) *CC
 
     if equal(tok, "]") {
         ty = c.type_suffix(rest, tok.next, ty);
-        return(c.array_of(ty, -1));
+        // :StaticArrayOfUnknownLength
+        // We don't know the length of the array until we parse the initializer list. 
+        // Which is painful because we want to make the var at the beginning but now need to defer creating a stack slot for it. 
+        // Should communicate this in a more clear way than just randomly having some sizes be negative. 
+        return(c.array_of(ty, -1));  
     };
 
     expr := c.parse_expr(tok&, tok, .Conditional);
@@ -616,7 +639,12 @@ fn array_dimensions(c: *Ctx, rest: **CC.Token, tok: *CC.Token, ty: *CC.Type) *CC
     if ty.kind == .TY_VLA || !c.is_const_expr(expr) {
         c.vla_of(ty, expr)
     } else {
-        c.array_of(ty, c.eval(expr))
+        // :ZeroSizeTypes
+        length := c.eval(expr);
+        if length < 0 {
+            @error_tok(c, tok, "array length cannot be negative");
+        };
+        c.array_of(ty, length)
     }
 }
 
@@ -840,7 +868,7 @@ fn declaration(c: *Ctx, rest: **CC.Token, tok: *CC.Token, basety: *CC.Type, attr
             cur = cur.next;
             continue();
         };
-
+        
         var := c.new_lvar(c.get_ident(ty.name), ty);
         if attr { attr |
             if attr.align != 0 {
@@ -884,27 +912,20 @@ fn string_initializer(c: *Ctx, rest: **CC.Token, tok: *CC.Token, init: *Initiali
 
     len := min(init.ty.array_len, tok.ty.array_len);
 
-    panic("TODO: string_initializer");
-    /*
+    // TODO: this is so garbage :SLOW
+    slow :: fn($T) => {
+        ::ptr_utils(T);
+        str := ptr_cast_unchecked(u8, T, tok.str.ptr);
+        range(0, len.intcast()) { i |
+            init.children[i].expr = c.new_num(str.offset(i)[].int(), tok);
+        };
+    };
     @switch(init.ty.base.size) {
-        @case(1) => {
-            char *str = tok.str;
-            for (int i = 0; i < len; i++)
-                init.children[i].expr = c.new_num(str[i], tok);
-        }
-        @case(2) => {
-            uint16_t *str = (uint16_t *)tok.str;
-            for (int i = 0; i < len; i++)
-                init.children[i].expr = c.new_num(str[i], tok);
-        }
-        @case(4) => {
-            uint32_t *str = (uint32_t *)tok.str;
-            for (int i = 0; i < len; i++)
-                init.children[i].expr = c.new_num(str[i], tok);
-        }
+        @case(1) => slow(u8);
+        @case(2) => slow(u16);
+        @case(4) => slow(u32);
         @default => unreachable();
     };
-    */
     
     rest[] = tok.next;
 }
@@ -1314,6 +1335,11 @@ fn lvar_initializer(c: *Ctx, rest: **CC.Token, tok: *CC.Token, var: *CC.Obj) *CC
     lhs.var = var;
 
     rhs := c.create_lvar_init(init, var.ty, desg&, tok);
+   
+    if var.stack_slot == QbeNull {  // :StaticArrayOfUnknownLength
+        c.create_stack_slot(var);
+    };
+    
     c.new_binary(.ND_COMMA, lhs, rhs, tok)
 }
 
@@ -1381,15 +1407,13 @@ fn write_gvar_data(c: *Ctx, cur: *CC.Relocation, init: *Initializer, ty: *CC.Typ
     if(init.expr.is_null(), => return(cur));
 
     if ty.kind == .TY_FLOAT {
-        panic("TODO: eval_double");
-        //*(float *)(buf + off) = eval_double(init.expr);
-        //return(cur);
+        ptr_cast_unchecked(u8, f32, buf.ptr.offset(off))[] = c.eval_double(init.expr).cast();
+        return(cur);
     };
 
     if ty.kind == .TY_DOUBLE {
-        panic("TODO: eval_double");
-        //*(double *)(buf + off) = eval_double(init.expr);
-        //return(cur);
+        ptr_cast_unchecked(u8, f64, buf.ptr.offset(off))[] = c.eval_double(init.expr);
+        return(cur);
     };
 
     val, label := c.eval2(init.expr);
@@ -2065,6 +2089,7 @@ fn function(c: *Ctx, tok: *CC.Token, basety: *CC.Type, attr: *VarAttr) *CC.Token
     
     c.f = c.arena.box(Qbe.Fn);
     c.f.default_init(c.m);
+    //c.speculate = false;
     c.f.rpo = new(1);
     c.b = c.f.start;
     
@@ -2117,9 +2142,10 @@ fn function(c: *Ctx, tok: *CC.Token, basety: *CC.Type, attr: *VarAttr) *CC.Token
     f.locals = c.locals;
     c.leave_scope();
     c.labels&.clear();
-    c.f = Qbe.Fn.ptr_from_int(0);
+    //c.speculate = true;
+    //c.f = Qbe.Fn.ptr_from_int(0);
     c.current_fn = .None;
-    c.b = Qbe.Blk.ptr_from_int(0);
+    //c.b = Qbe.Blk.ptr_from_int(0);
     tok
 }
 
@@ -2207,15 +2233,36 @@ fn parse(c: *Ctx, tok: *CC.Token) Result(*CC.Obj, Str) = {
 
 // program = (typedef | function-definition | global-variable)*
 fn parse_impl(c: *Ctx, tok: *CC.Token) *CC.Obj = {
+    // :TopLevelFunction
+    // :SLOW it's silly that top level constants need to be in a function context and we linearly scan it every time you have a numeric literal
+    // this needs to be fixed so i don't have to cry when someone generates an array of binary data. 
+    c.f = c.arena.box(Qbe.Fn);
+    c.f.default_init(c.m);
+    
+    // HACK: need to be able to generate instructions because when you parse `&some_global`, 
+    //       thats a valid constant expression but we issue a load for the bare identifier before
+    //       recursing back up and just taking the lvalue. 
+    c.f.rpo = new(0); // HACK
+    c.f.start = c.new_block();// HACK
+    c.f.start.ins = new(0); // HACK
+    c.b = c.f.start; // HACK
+
     c.declare_builtin_functions();
     c.globals = CC.Obj.ptr_from_int(0);
 
+    //c.speculate = true;
     while => tok.kind != .TK_EOF {
         attr := VarAttr.zeroed();
         basety := c.declspec(tok&, tok, (Some = attr&));
         tok = @if_else {
             @if(attr.is_typedef)    => c.parse_typedef(tok, basety);
-            @if(c.is_function(tok)) => c.function(tok, basety, attr&);
+            @if(c.is_function(tok)) => {
+                prev := c.f;   // :TopLevelFunction
+                tok := c.function(tok, basety, attr&);
+                c.f = prev;
+                c.b = c.f.start; // HACK
+                tok
+            };
             @else                   => c.global_variable(tok, basety, attr&);
         };
     };
@@ -2293,9 +2340,9 @@ rules :: {
     h[.@"||"]  = (infix = parse_logical, prec = .LogOr,  op = .ND_LOGOR);
     h[.@"&&"]  = (infix = parse_logical, prec = .LogAnd, op = .ND_LOGAND, prefix = prefix_ampamp);
     
-    h[.TK_NUM]   = (prefix = parse_number, prec = .Primary);
-    h[.TK_STR]   = (prefix = parse_string, prec = .Primary);
-    h[.TK_IDENT] = (prefix = parse_ident,  prec = .Primary);
+    h[.TK_NUM]   = (prefix = parse_number);
+    h[.TK_STR]   = (prefix = parse_string);
+    h[.TK_IDENT] = (prefix = parse_ident);
     
     h[.@"("] = (prefix = parse_bracketed, infix = funcall, prec = .PostFix);
     h[.@"?"] = (infix = conditional, prec = .Conditional);
@@ -2311,6 +2358,7 @@ rules :: {
     
     h[.sizeof] = (prefix = parse_sizeof);
     h[._Alignof] = (prefix = parse_alignof);
+    h[._Generic] = (prefix = generic_selection);
     
     h
 };
@@ -2404,9 +2452,9 @@ fn parse_logical(c: *Ctx, rest: **CC.Token, tok: *CC.Token, cond: *CC.Node) *CC.
     rhs  := c.new_cast(rhs, ty_bool);
     c.gen_expr(rhs);
     else_block_end := c.b;
-    then, else, s1, s2, phi1, phi2 := @match(tok.kind) {
-        fn @"&&"() => (rhs, c.new_num(0, tok), else_block, join_block, else_block, prev_block);
-        fn @"||"() => (c.new_num(1, tok), rhs, join_block, else_block, prev_block, else_block);
+    then, else, s1, s2, phi1, phi2, fold_op := @match(tok.kind) {
+        fn @"&&"() => (rhs, c.new_num(0, tok), else_block, join_block, else_block, prev_block, CC.NodeKind.ND_BITAND);
+        fn @"||"() => (c.new_num(1, tok), rhs, join_block, else_block, prev_block, else_block, CC.NodeKind.ND_BITOR);
         @default   => unreachable();
     };
     c.gen_expr(then);
@@ -2423,12 +2471,17 @@ fn parse_logical(c: *Ctx, rest: **CC.Token, tok: *CC.Token, cond: *CC.Node) *CC.
     n.cond = cond;
     n.then = then;
     n.else = else;
-    
-    if !c.speculate {
-        p := new_phi(c.f, join_block, .Kw);
-        p.push(phi1, then.r);
-        p.push(phi2, else.r);
-        n.r = p.to;
+
+    if rtype(cond.r) == .RCon && rtype(rhs.r) == .RCon {
+        // :FrontendConstantFolding 
+        n.r = c.gen_binary(fold_op, cond.r, rhs.r, ty_bool, ty_bool, tok);
+    } else {
+        if !c.speculate {
+            p := new_phi(c.f, join_block, .Kw);
+            p.push(phi1, then.r);
+            p.push(phi2, else.r);
+            n.r = p.to;
+        };
     };
     
     n
@@ -2482,13 +2535,13 @@ fn conditional(c: *Ctx, rest: **CC.Token, tok: *CC.Token, cond: *CC.Node) *CC.No
     c.jnz_if_unterminated(cond_r, then_block, else_block);
     c.b = join_block;
     
-    if !c.speculate {
+    if rtype(cond_r) == .RCon {  
         // :FrontendConstantFolding (only matters if the values are RCon too)
         // TODO: need to use Ref instead of creating a new var for [GNU] :?
-        if rtype(cond_r) == .RCon {  
-            is_false := iscon(c.f.get_constant(cond_r), false, 0);
-            node.r = if(is_false, => cond_node.else.r, => cond_node.then.r);
-        } else {
+        is_false := iscon(c.f.get_constant(cond_r), false, 0);
+        node.r = if(is_false, => cond_node.else.r, => cond_node.then.r);
+    } else {
+        if !c.speculate {
             p := new_phi(c.f, join_block, node.ty.cls());
             p.push(then_phi_src, cond_node.then.r);
             p.push(else_phi_src, cond_node.else.r);
@@ -2522,6 +2575,7 @@ fn parse_bracketed(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
             node := parse_expr(c, rest, tok, .Unary);
             node := c.new_cast(node, ty);
             node.tok = start;
+            c.gen_expr(node);
             node
         }
     } else {
@@ -2874,43 +2928,60 @@ fn funcall(c: *Ctx, rest: **CC.Token, tok: *CC.Token, f: *CC.Node) *CC.Node = {
 //
 // generic-assoc = type-name ":" assign
 //                             | "default" ":" assign
-fn generic_selection(rest: **CC.Token, tok: *CC.Token) *CC.Node = {
+//
+// This is just a switch statement over types. 
+// A branch is chosen based on the ~type~ of the first expression. 
+#prefix(._Generic)
+fn generic_selection(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
     start := tok;
-    tok = c.skip(tok, "(");
+    tok = c.skip(tok.next, "(");
 
-    ctrl := assign(tok&, tok);
+    ctrl := c.speculate(tok&, tok, .Assignment);
     c.add_type(ctrl);
 
     t1 := ctrl.ty;
     t1 := @match(t1.kind) {
-        fn TY_FUNC()  => pointer_to(t1);
-        fn TY_ARRAY() => pointer_to(t1.base);
+        fn TY_FUNC()  => c.pointer_to(t1);
+        fn TY_ARRAY() => c.pointer_to(t1.base);
         @default => t1;
     };
     
+    // Now choose one of the branches to use based on that type. 
     ret: ?*CC.Node = .None;
+    use_default := false; 
     while => !consume(rest, tok, ")") {
-        continue :: local_return;
         tok = c.skip(tok, ",");
 
         if equal(tok, "default") {
             tok = c.skip(tok.next, ":");
-            node := assign(tok&, tok);
+            node := c.speculate(tok&, tok, .Assignment);
             if ret.is_none() {
                 ret = (Some = node);
+                use_default = true;
             };
-            continue();
-        };
-
-        t2 := typename(tok&, tok);
-        tok = c.skip(tok, ":");
-        node := assign(tok&, tok);
-        if is_compatible(t1, t2) {
-            ret = (Some = node);
+        } else {
+            t2 := c.typename(tok&, tok);
+            tok = c.skip(tok, ":");
+            if is_compatible(t1, t2) {
+                if ret.is_some() && !use_default {
+                    @error_tok(c, tok, "conflicting branches for generic association type");  
+                };
+                node := c.parse_expr(tok&, tok, .Assignment);
+                ret = (Some = node);
+                use_default = false;
+            } else {
+                _ := c.speculate(tok&, tok, .Assignment);
+            };
         };
     };
-
-    ret || @error_tok(c, start, "controlling expression type not compatible with any generic association type")
+    node := ret || @error_tok(c, start, "controlling expression type not compatible with any generic association type");
+    if use_default {
+        // HACK: because default might not be the last case. 
+        // this relies on gen_expr recursing. better would be to 
+        // emit default into a different branch and discard the other one
+        c.gen_expr(node);
+    };
+    node
 }
 
 #prefix(.sizeof)
@@ -2975,7 +3046,6 @@ fn parse_alignof(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
 fn primary(rest: **CC.Token, tok: *CC.Token) *CC.Node = { // TODO
     Token *start = tok;
     @if_else {
-        @if(equal(tok, "_Generic")) => generic_selection(rest, tok.next);
         @if(equal(tok, "__builtin_types_compatible_p")) => {
             tok = c.skip(tok.next, "(");
             t1 := typename(tok&, tok);
@@ -3021,10 +3091,12 @@ fn primary(rest: **CC.Token, tok: *CC.Token) *CC.Node = { // TODO
     @error_tok(c, tok, "expected an expression");
 }
 
-
 fn eval(c: *Ctx, node: *CC.Node) i64 = {
-    @debug_assert(c.is_const_expr(node));
-    node.val
+    off, label := c.eval2(node);
+    if label.is_some() {
+        @error_tok(c, node.tok, "expected a numeric constant");
+    };
+    off
 }
 
 // Evaluate a given node as a constant expression.
@@ -3033,14 +3105,35 @@ fn eval(c: *Ctx, node: *CC.Node) i64 = {
 // is a pointer to a global variable and n is a postiive/negative
 // number. The latter form is accepted only as an initialization
 // expression for a global variable.
-fn eval2(c: *Ctx, node: *CC.Node) Ty(i64, ?*CStr) = {  // (off, label)
-    (c.eval(node), .None) // TODO 
+fn eval2(c: *Ctx, node: *CC.Node) Ty(i64, ?CStr) = {  // (off, label)
+    if !c.is_const_expr(node) {
+        @error_tok(c, node.tok, "expected a constant expression");
+    };
+    
+    // verbose sign extension:
+    if node.ty.is_integer() && node.ty.size != 8 && !node.ty.is_unsigned {
+        prev := c.speculate; // HACK
+        c.speculate = false;
+        //@println("% %", node.r, c.speculate);
+        node = c.new_cast(node, ty_long);
+        c.gen_expr(node);
+        c.speculate = prev;
+        //@println("%", node.r);
+    };
+    
+    r := if(node.kind == .ND_ADDR, => node.lhs.lvalue, => node.r);
+    if rtype(r) != .RCon {
+        @error_tok(c, node.tok, "ICE: unevaluated constant");
+    };
+    con := c.f.get_constant(r);
+    label: ?CStr = @if(con.type == .CAddr, (Some = c.m.str(con.sym.id).slow_convert_to_c_string()), .None);
+    (con.bits.i, label)
 }
 
 //static int64_t eval_rval(CC.Node *node, char ***label);
 
-fn is_const_expr(c: *Ctx, node: *CC.Node) bool = {  // TODO
-    node.kind == .ND_NUM
+fn is_const_expr(c: *Ctx, node: *CC.Node) bool = { 
+    rtype(node.r) == .RCon || (node.kind == .ND_ADDR && node.lhs.lvalue.rtype() == .RCon)
 }
 
 fn const_expr(c: *Ctx, rest: **CC.Token, tok: *CC.Token) i64 = {
@@ -3048,6 +3141,24 @@ fn const_expr(c: *Ctx, rest: **CC.Token, tok: *CC.Token) i64 = {
     c.eval(node)
 }
 
+fn eval_double(c: *Ctx, node: *CC.Node) f64 = { 
+    // verbose extension:
+    {
+        prev := c.speculate; // HACK
+        c.speculate = false;
+        node = c.new_cast(node, ty_double);
+        c.gen_expr(node);
+        c.speculate = prev;
+    };
+    
+    if rtype(node.r) != .RCon {
+        @error_tok(c, node.tok, "ICE: unevaluated constant");
+    };
+    con := c.f.get_constant(node.r);
+    ::enum(@type con.type);
+    @debug_assert_eq(con.type, .CBits);
+    con.bits.d
+}
 //static double eval_double(CC.Node *node);
 
 // Convert op= operators to expressions containing an assignment.
@@ -3174,9 +3285,7 @@ fn gen_par(c: *Ctx) void = {
         emit(c, .par, .Kl, loc.par_r, QbeNull, QbeNull); 
     };
     for_linked loc { var | // HACK
-        // copy-paste
-        var.stack_slot = c.f.newtmp(var.name.str(), .Kl);
-        emit(c, .alloc8, .Kl, var.stack_slot, c.f.getcon(var.ty.size.intcast()), QbeNull);  // TODO: smaller align stack slots
+        c.create_stack_slot(var);
     };
     // some instructions (par/alloc) will always go in f.start, real code goes in its own block. 
     // but since all vars get stack slots, we need to store any scalar arguments. 
@@ -3242,26 +3351,18 @@ fn gen_expr_inner(c: *Ctx, node: *CC.Node) Qbe.Ref = {
             c.gen_load(addr, node.ty)
         }
         fn ND_NEG() => {
-            k := node.ty.cls();
             arg := c.gen_expr(node.lhs);
-            r   := c.f.newtmp("c", k);
-            c.emit(.neg, k, r, arg, QbeNull);
-            r
+            c.emit(.neg, node.ty.cls(), arg, QbeNull)
         }
         fn ND_BITNOT() => {
-            k := node.ty.cls();
             arg := c.gen_expr(node.lhs);
-            r   := c.f.newtmp("c", k);
-            c.emit(.xor, k, r, arg, c.f.getcon(-1));
-            r
+            c.emit(.xor, node.ty.cls(), arg, c.f.getcon(-1))
         }
         fn ND_NOT() => {  // TODO: do the trick with redirecting jump targets to emit better code when this is in an if condition. 
             arg := c.gen_expr(node.lhs);
             // not just xor with 1 bit. it might not be a _Bool. 
             op_eq := cmp_base(node.lhs.ty.cls());
-            r   := c.f.newtmp("c", .Kl);
-            c.emit(op_eq, .Kl, r, arg, QbeConZero);
-            r
+            c.emit(op_eq, .Kl, arg, QbeConZero)
         }
         fn ND_COMMA() => {
             _ := c.gen_expr(node.lhs);
@@ -3389,37 +3490,42 @@ fn gen_binary(c: *Ctx, kind: CC.NodeKind, lhs_r: Qbe.Ref, rhs_r: Qbe.Ref, out_ty
         };
         @default => @panic("unexpected binary expression but found: %", kind);
     };
-    k := out_ty.cls();
-    
+    c.emit(o, out_ty.cls(), lhs_r, rhs_r)
+}
+
+fn emit(c: *Ctx, o: Qbe.O, k: Qbe.Cls, a0: Qbe.Ref, a1: Qbe.Ref) Qbe.Ref = {
     // :FrontendConstantFolding
     // The backend will do more aggressive constant folding later, 
     // but there are some language constructs that require 
     // known constants in the frontend (ie. array types). 
     // TODO: this needs to work at top level as well
-    // TODO: need to do unary, cast, ?:, etc
-    if rtype(lhs_r) == .RCon && rtype(rhs_r) == .RCon {
-        lhs_c, rhs_c := (c.f.get_constant(lhs_r), c.f.get_constant(rhs_r));
+    if can_fold(o) && rtype(a0) == .RCon && (@is(rtype(a1), .RCon, .RNull)) {
+        a1 := if(a1 == QbeNull, => QbeConZero, => a1);
+        lhs_c, rhs_c := (c.f.get_constant(a0), c.f.get_constant(a1));
         if try_fold(o, k, lhs_c, rhs_c) { result |
             return(c.f.newcon(result&));
         };
     };
     
-    r   := c.f.newtmp("c", k);
-    c.emit(o, k, r, lhs_r, rhs_r);
+    r := c.f.newtmp("c", k);
+    c.emit(o, k, r, a0, a1);
     r
 }
 
 // TODO: audit this. chibicc has a big table of x64 mnemonics to compare to. 
 fn gen_cast(c: *Ctx, src: Qbe.Ref, from: *CC.Type, to: *CC.Type) Qbe.Ref = {
+    // array types know thier size for sizeof but when we look at size below we want to have decayed to a pointer. 
+    from := @if(from.kind == .TY_ARRAY, ty_ulong, from);
+    to := @if(to.kind == .TY_ARRAY, ty_ulong, to);
+    
     k_from, k_to := (from.cls(), to.cls());
     p_from, p_to := (from.get_type_id(), to.get_type_id());
-    dest := c.f.newtmp("c", k_to);
     ::enum(@type p_from);
+    //@println("cast % % % -> %", src, from.kind, p_from, p_to);
     if(p_from == p_to, => return(src));
     if p_to == .B {  
         // TODO: do i need to zero extend byte/short? 
-        c.emit(cmp_ne(k_from), k_to, dest, src, QbeConZero);
-        return(dest)
+        return(c.emit(cmp_ne(k_from), k_to, src, QbeConZero))
     };
     o: Qbe.O = if !k_to.is_int() {
         @match(p_from) {
@@ -3439,11 +3545,8 @@ fn gen_cast(c: *Ctx, src: Qbe.Ref, from: *CC.Type, to: *CC.Type) Qbe.Ref = {
         if(to.size == from.size && k_to == k_from, => return(src));  // if sizes are equal, it's a signedness cast which does nothing 
         if k_from.is_int() && to.size < from.size {
             // `(char) 256` needs to truncate
-            r := c.f.newtmp("c", k_to);
             mask := 1.shift_left(to.size.intcast() * 8) - 1;
-            c.emit(.and, k_to, r, src, c.f.getcon(mask));
-            //src = r;
-            return(r);
+            return(c.emit(.and, k_to, src, c.f.getcon(mask)));
         };
         @match(p_from) {
             fn B()   => .extub;
@@ -3459,8 +3562,7 @@ fn gen_cast(c: *Ctx, src: Qbe.Ref, from: *CC.Type, to: *CC.Type) Qbe.Ref = {
         }
     };
 
-    c.emit(o, k_to, dest, src, QbeNull);
-    dest
+    c.emit(o, k_to, src, QbeNull)
 }
 
 fn gen_call(c: *Ctx, node: *CC.Node) Qbe.Ref #once = {
@@ -3577,9 +3679,7 @@ fn gen_addr_inner(c: *Ctx, node: *CC.Node) Qbe.Ref = {
         };
         fn ND_MEMBER() => {
             base := c.gen_addr(node.lhs);
-            r := c.f.newtmp("c", .Kl);
-            c.emit(.add, .Kl, r, base, c.f.getcon(node.member.offset.intcast()));
-            r
+            c.emit(.add, .Kl, base, c.f.getcon(node.member.offset.intcast()))
         }
         fn ND_COMMA() => {
             c.gen_expr(node.lhs);
