@@ -78,13 +78,21 @@ fn parse_stmt(self: *Parser) Result(FatStmt, *CompileError) = {
     tags := @try(self.parse_annotations()) return;
     stmt := @try(self.parse_stmt_inner(!tags.is_empty())) return;
     
+    add :: fn(f: **Func) => {
+        if f.annotations.is_empty() {
+            f.annotations = tags.as_raw();
+        } else {
+            f.annotations&.push_all(tags.items(), self.alloc);
+        };
+    };
+    
     if !tags.is_empty() {
         @match(stmt.stmt&) {
-            fn DeclFunc(f) => {
-                if f.annotations.is_empty() {
-                    f.annotations = tags.as_raw();
-                } else {
-                    f.annotations&.push_all(tags.items(), self.alloc);
+            fn DeclFunc(f) => add(f);
+            fn Decl(f) => {
+                @match(f.default.expr&) {
+                    fn Closure(ff) => add(ff);
+                    @default => @report_error("#annotations can only go before functions or semicolons.\n(this declaration was not obviously a function expression)") (return, self.last.span);
                 };
             }
             fn Noop() => {

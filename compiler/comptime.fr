@@ -843,4 +843,46 @@ fn fill_export_ffi(out: *List(u8)) void = {
         res := self.poll_in_place(Values, => self.immediate_eval_expr(expr, void)); // :get_or_create_type
         self.unwrap_report_error(Values, res);
     };
+    
+    @fmt(out, "fn get_constants(s: ScopeId) []Symbol #ct #comptime_addr(%);\n", get_names);
+    get_names: rawptr : fn(s: ScopeId) []Symbol = {
+        self := current_comptime();
+        scope := self.scopes[s].const_lookup&;
+        names := Symbol.list(scope.raw.len_including_tombstones, self.get_alloc()); 
+        for_keys scope { k | 
+            names&.push(k);
+        };
+        names.items()
+    };
+    
+    @fmt(out, "fn get_constant(s: ScopeId, name: Symbol, type: Type, out: rawptr) bool #ct #comptime_addr(%);\n", get_field_known);
+    get_field_known: rawptr : fn(s: ScopeId, name: Symbol, type: Type, out: rawptr) bool = {
+        self := current_comptime();
+        var := self.scopes[s].const_lookup&.get(name) || return(false);
+        res := self.poll_in_place(Ty(Values, Type), => self.find_const(var, (Specific = type)));
+        value, type_found := self.unwrap_report_error(Ty(Values, Type), res);
+        if type != type_found {
+            expr := synthetic_ty((Value = (bytes = value, coerced = false)), self.last_loc, type_found);
+            res := self.poll_in_place(Values, => self.immediate_eval_expr(expr&, type));
+            value = self.unwrap_report_error(Values, res);
+        };
+        // TODO: do we have to typecheck type_found?
+        dest: []u8 = (ptr = u8.ptr_from_raw(out), len = self.get_info(type)[].stride_bytes.zext());
+        dest.copy_from(value&.bytes());
+        true
+    };
+    
+    @fmt(out, "fn get_constant(s: ScopeId, name: Symbol) ?Ty(rawptr, Type) #ct #comptime_addr(%);\n", get_field);
+    get_field: rawptr : fn(s: ScopeId, name: Symbol) ?Ty(rawptr, Type) = {
+        self := current_comptime();
+        var := self.scopes[s].const_lookup&.get(name) || return(.None);
+        res := self.poll_in_place(Ty(Values, Type), => self.find_const(var, .None));
+        value, type := self.unwrap_report_error(Ty(Values, Type), res);
+        value := @if(value&.is(.Big), value&, {
+            v := self.get_alloc().box(Values);
+            v[] = value;
+            v
+        });
+        (Some = (value.jit_addr().rawptr_from_int(), type))
+    };
 }

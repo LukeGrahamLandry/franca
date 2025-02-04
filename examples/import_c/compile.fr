@@ -155,6 +155,7 @@ fn find_tag(c: *Ctx, tok: *CC.Token) ?*CC.Type = {
 }
 
 fn push_scope(c: *Ctx, name: Str) *VarScope = {
+    ::ptr_utils(CC.Scope);
     @debug_assert(!c.scope.is_null(), "uninit Ctx.scope");
     sc := temp().box_zeroed(VarScope);
     insert(c.scope.vars&, name, sc);
@@ -899,7 +900,7 @@ fn skip_excess_element(c: *Ctx, tok: *CC.Token) *CC.Token = {
         tok = c.skip_excess_element(tok.next);
         tok = c.skip(tok, "}");
     } else {
-        c.parse_expr(tok&, tok, .Assignment);
+        c.parse_expr(tok&, tok, .Assign);
     };
     tok
 }
@@ -1217,7 +1218,7 @@ fn initializer2(c: *Ctx, rest: **CC.Token, tok: *CC.Token, init: *Initializer) v
         // A struct can be initialized with another struct. E.g.
         // `struct T x = y;` where y is a variable of type `struct T`.
         // Handle that case first.
-        expr := c.parse_expr(rest, tok, .Assignment);
+        expr := c.parse_expr(rest, tok, .Assign);
         c.add_type(expr);
         if expr.ty.kind == .TY_STRUCT {
             init.expr = expr;
@@ -1232,7 +1233,7 @@ fn initializer2(c: *Ctx, rest: **CC.Token, tok: *CC.Token, init: *Initializer) v
         c.initializer2(tok&, tok.next, init);
         rest[] = c.skip(tok, "}");
     } else {
-        init.expr = c.parse_expr(rest, tok, .Assignment);
+        init.expr = c.parse_expr(rest, tok, .Assign);
     }); // TODO: this shouldn't need the extra brackets?
 };
 
@@ -2283,7 +2284,7 @@ Prec :: @enum(i32) (
     Invalid,
     None, 
     Comma,
-    Assignment, 
+    Assign, 
     Conditional,  // ?:
     LogOr, LogAnd, 
     BitOr, BitXor, BitAnd, 
@@ -2298,69 +2299,90 @@ ParseFn1   :: @FnPtr(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node;
 ParseFn2   :: @FnPtr(c: *Ctx, rest: **CC.Token, tok: *CC.Token, node: *CC.Node) *CC.Node;
 ParseRule :: @struct(prefix: ParseFn1 = N1, infix: ParseFn2 = N2, prec := Prec.Invalid, op := CC.NodeKind.ND_INVALID);
 
-rules :: {
-    h := @static EnumMap(CC.TokenKind, ParseRule);
+rules :: @static EnumMap(CC.TokenKind, ParseRule);
+
+// not just a '::' here because it needs to happen after the dylib is initilized or we think there are missing functions. 
+fn comptime_init_rules_table() void = {
+    h := rules;
     each h { k, v |
-        v.prefix = N1; v.infix = N2;
+        v[] = ();
     };
-    B :: parse_binary;
     
-    h[.@"+"]  = (infix = B, prec = .Term, prefix = unary_plus);
-    h[.@"-"]  = (infix = B, prec = .Term, op = .ND_NEG, prefix = parse_unary);
-    h[.@"*"]  = (infix = B, prec = .Factor, op = .ND_MUL, prefix = unary_star);
-    h[.@"/"]  = (infix = B, prec = .Factor, op = .ND_DIV);
-    h[.@"%"]  = (infix = B, prec = .Factor, op = .ND_MOD);
-    h[.@"|"]  = (infix = B, prec = .BitOr,  op = .ND_BITOR);
-    h[.@"^"]  = (infix = B, prec = .BitXor, op = .ND_BITXOR);
-    h[.@"&"]  = (infix = B, prec = .BitAnd, op = .ND_BITAND, prefix = unary_amp);
-    h[.@">>"] = (infix = B, prec = .Shift,  op = .ND_SHR);
-    h[.@"<<"] = (infix = B, prec = .Shift,  op = .ND_SHL);
+    ::if(*CC.Node);
+    ::enum(CC.NodeKind);
+    ::enum(Prec);
+    ::enum(CC.TypeKind);
+    ::ptr_utils(CC.Scope);
     
-    h[.@"+="]  = (infix = B, prec = .Assignment);
-    h[.@"-="]  = (infix = B, prec = .Assignment);
-    h[.@"*="]  = (infix = B, prec = .Assignment, op = .ND_MUL);
-    h[.@"/="]  = (infix = B, prec = .Assignment, op = .ND_DIV);
-    h[.@"%="]  = (infix = B, prec = .Assignment, op = .ND_MOD);
-    h[.@"|="]  = (infix = B, prec = .Assignment, op = .ND_BITOR);
-    h[.@"^="]  = (infix = B, prec = .Assignment, op = .ND_BITXOR);
-    h[.@"&="]  = (infix = B, prec = .Assignment, op = .ND_BITAND);
-    h[.@">>="] = (infix = B, prec = .Assignment, op = .ND_SHR);
-    h[.@"<<="] = (infix = B, prec = .Assignment, op = .ND_SHL);
+    binary := @slice(@as(Ty(CC.TokenKind, Prec, CC.NodeKind))
+        (.@"+", .Term,   .ND_INVALID),
+        (.@"-", .Term,   .ND_INVALID),
+        (.@"*", .Factor, .ND_MUL),
+        (.@"/", .Factor, .ND_DIV),
+        (.@"%", .Factor, .ND_MOD),
+        (.@"|", .BitOr,  .ND_BITOR),
+        (.@"^", .BitXor, .ND_BITXOR),
+        (.@"&", .BitAnd, .ND_BITAND),
+        (.@">>", .Shift, .ND_SHR),
+        (.@"<<", .Shift, .ND_SHL),
+        
+        (.@"+=", .Assign,  .ND_INVALID),
+        (.@"-=", .Assign,  .ND_INVALID),
+        (.@"*=", .Assign,  .ND_MUL),
+        (.@"/=", .Assign,  .ND_DIV),
+        (.@"%=", .Assign,  .ND_MOD),
+        (.@"|=", .Assign,  .ND_BITOR),
+        (.@"^=", .Assign,  .ND_BITXOR),
+        (.@"&=", .Assign,  .ND_BITAND),
+        (.@">>=", .Assign, .ND_SHR),
+        (.@"<<=", .Assign, .ND_SHL),
+        
+        (.@"==", .Equality,   .ND_EQ),
+        (.@"!=", .Equality,   .ND_NE),
+        (.@">=", .Relational, .ND_LE), // ND_GE
+        (.@">", .Relational,  .ND_LT), // ND_GT
+        (.@"<=", .Relational, .ND_LE),
+        (.@"<", .Relational,  .ND_LT),
+        
+        (.@",", .Comma,      .ND_COMMA),
+        (.@"=", .Assign, .ND_ASSIGN),
+    );
+    each binary { it |
+        h[it._0] = (infix = parse_binary, prec = it._1, op = it._2);
+    };
     
-    h[.@"=="] = (infix = B, prec = .Equality,   op = .ND_EQ);
-    h[.@"!="] = (infix = B, prec = .Equality,   op = .ND_NE);
-    h[.@">="] = (infix = B, prec = .Relational, op = .ND_LE); // ND_GE
-    h[.@">"]  = (infix = B, prec = .Relational, op = .ND_LT); // ND_GT
-    h[.@"<="] = (infix = B, prec = .Relational, op = .ND_LE);
-    h[.@"<"]  = (infix = B, prec = .Relational, op = .ND_LT);
-    
-    h[.@","]  = (infix = B, prec = .Comma,      op = .ND_COMMA);
-    h[.@"="]  = (infix = B, prec = .Assignment, op = .ND_ASSIGN);
-    
-    h[.@"||"]  = (infix = parse_logical, prec = .LogOr,  op = .ND_LOGOR);
-    h[.@"&&"]  = (infix = parse_logical, prec = .LogAnd, op = .ND_LOGAND, prefix = prefix_ampamp);
-    
-    h[.TK_NUM]   = (prefix = parse_number);
-    h[.TK_STR]   = (prefix = parse_string);
-    h[.TK_IDENT] = (prefix = parse_ident);
-    
-    h[.@"("] = (prefix = parse_bracketed, infix = funcall, prec = .PostFix);
-    h[.@"?"] = (infix = conditional, prec = .Conditional);
-    
-    h[.@"["]  = (infix = postfix, prec = .PostFix);
-    h[.@"."]  = (infix = postfix, prec = .PostFix);
-    h[.@"->"] = (infix = postfix, prec = .PostFix);
-    h[.@"++"] = (infix = postfix, prec = .PostFix, prefix = unary_inc);
-    h[.@"--"] = (infix = postfix, prec = .PostFix, prefix = unary_dec);
-    
-    h[.@"!"] = (prefix = parse_unary, op = .ND_NOT);
-    h[.@"~"] = (prefix = parse_unary, op = .ND_BITNOT);
-    
-    h[.sizeof] = (prefix = parse_sizeof);
-    h[._Alignof] = (prefix = parse_alignof);
-    h[._Generic] = (prefix = generic_selection);
-    
-    h
+    s := scope_of(Type, parsers);
+    names := get_constants(s);
+    for names { name |
+        fid := get_constant(FuncId, s, name).unwrap();
+        func := get_function_ast(fid, true, false, false, false);
+        each func.annotations { ann |
+            continue :: local_return;
+            args := ann.args&.items();
+            keyword := const_eval(CC.TokenKind)(args[0]);
+            rule := h[keyword]&;
+            ::?ParseFn2; ::?ParseFn1;
+            op_index := @switch(ann.name) {
+                @case(@symbol prefix) => {
+                    rule.prefix = get_constant(ParseFn1, s, name).unwrap();
+                    1
+                };
+                @case(@symbol infix) => {
+                    rule.infix = get_constant(ParseFn2, s, name).unwrap();
+                    new := const_eval(Prec)(args[1]);
+                    @assert(rule.prec == .Invalid, "multiple precedences for % (% vs %)", keyword, rule.prec, new);
+                    rule.prec = new;
+                    2
+                };
+                @default => continue();
+            };
+            if args.len > op_index {
+                new := const_eval(CC.NodeKind)(args[op_index]);
+                @assert(rule.op == .ND_INVALID, "multiple operations for % (% vs %)", keyword, rule.op, new);
+                rule.op = new;
+            };
+        };
+    };
 };
 
 fn parse_expr(c: *Ctx, rest: **CC.Token, tok: *CC.Token, prec: Prec) *CC.Node = {
@@ -2399,7 +2421,7 @@ fn parse_binary_inner(c: *Ctx, rest: **CC.Token, tok: *CC.Token, lhs: *CC.Node) 
     
     // assignment is right associative. everything else is left. 
     // you can work out why this works on a whiteboard. or you can just trust that this trick works. 
-    if prec != .Assignment {
+    if prec != .Assign {
         prec = @as(Prec) @as(i32) prec.raw() + 1;  
     }; 
     
@@ -2431,9 +2453,14 @@ fn parse_binary_inner(c: *Ctx, rest: **CC.Token, tok: *CC.Token, lhs: *CC.Node) 
     node
 }
 
+::if(*CC.Node);
+
+parsers :: @struct {
 // TODO: less dumb ir for if conditions
 // short-circuiting, output is always 0 or 1
-fn parse_logical(c: *Ctx, rest: **CC.Token, tok: *CC.Token, cond: *CC.Node) *CC.Node = {
+#infix(.@"||", .LogOr, .ND_BITOR) #infix(.@"&&", .LogAnd, .ND_BITAND) 
+parse_logical :: fn(c, rest, tok, cond) = {
+    fold_op := rules.index(tok.kind)[].op;
     cond := c.new_cast(cond, ty_bool);  // jnz only looks at low 32 bits but we might be jumping on a long
     c.gen_expr(cond);
     
@@ -2452,9 +2479,9 @@ fn parse_logical(c: *Ctx, rest: **CC.Token, tok: *CC.Token, cond: *CC.Node) *CC.
     rhs  := c.new_cast(rhs, ty_bool);
     c.gen_expr(rhs);
     else_block_end := c.b;
-    then, else, s1, s2, phi1, phi2, fold_op := @match(tok.kind) {
-        fn @"&&"() => (rhs, c.new_num(0, tok), else_block, join_block, else_block, prev_block, CC.NodeKind.ND_BITAND);
-        fn @"||"() => (c.new_num(1, tok), rhs, join_block, else_block, prev_block, else_block, CC.NodeKind.ND_BITOR);
+    then, else, s1, s2, phi1, phi2 := @match(tok.kind) {
+        fn @"&&"() => (rhs, c.new_num(0, tok), else_block, join_block, else_block, prev_block);
+        fn @"||"() => (c.new_num(1, tok), rhs, join_block, else_block, prev_block, else_block);
         @default   => unreachable();
     };
     c.gen_expr(then);
@@ -2485,13 +2512,10 @@ fn parse_logical(c: *Ctx, rest: **CC.Token, tok: *CC.Token, cond: *CC.Node) *CC.
     };
     
     n
-}
+};
 
-::if(*CC.Node);
-
-// conditional = logor ("?" expr? ":" conditional)?
-#infix(.@"?", .Conditional)
-fn conditional(c: *Ctx, rest: **CC.Token, tok: *CC.Token, cond: *CC.Node) *CC.Node = {
+// the ternary operator
+conditional :: fn(c, rest, tok, cond) #infix(.@"?", .Conditional) = {
     // note: the [GNU] case below still uses the old `cond` node without this cast. 
     cond_r := c.gen_expr(c.new_cast(cond, ty_bool));
     
@@ -2550,10 +2574,9 @@ fn conditional(c: *Ctx, rest: **CC.Token, tok: *CC.Token, cond: *CC.Node) *CC.No
     };
     node.current_block = join_block; // this makes a cast from the result go to the right place (when gen_expr gets called again by our caller)
     node
-}
+};
 
-#prefix(.@"(")
-fn parse_bracketed(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
+parse_bracketed :: fn(c, rest, tok) #prefix(.@"(") = {
     node := if c.is_typename(tok.next) {
         start := tok;
         ty := c.typename(tok&, tok.next);
@@ -2593,10 +2616,9 @@ fn parse_bracketed(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
     };
     c.gen_expr(node);
     node
-}
+};
 
-#prefix(.TK_IDENT)
-fn parse_ident(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
+parse_ident :: fn(c, rest, tok) #prefix(.TK_IDENT) = {
     // Variable or enum constant
     sc := c.find_var(tok);
     rest[] = tok.next;
@@ -2621,19 +2643,18 @@ fn parse_ident(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
 
     if(equal(tok.next, "("), => @error_tok(c, tok, "implicit declaration of a function"));
     @error_tok(c, tok, "undefined variable")
-}
+};
 
-#prefix(.TK_STR)
-fn parse_string(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
+parse_string :: fn(c, rest, tok) #prefix(.TK_STR) = {
     var := c.new_string_literal(tok.str.str(), tok.ty);
     rest[] = tok.next;
     node := c.new_var_node(var, tok);
     c.gen_expr(node);
     node
-}
+};
 
-#prefix(.TK_NUM)
-fn parse_number(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
+parse_number :: fn(c, rest, tok) #prefix(.TK_NUM) = {
+    ::if(*CC.Node);
     node := if is_flonum(tok.ty) {
         n := c.new_node(.ND_NUM, tok);
         n.fval = tok.fval;
@@ -2646,7 +2667,259 @@ fn parse_number(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
     node.ty = tok.ty;
     rest[] = tok.next;
     node
-}
+};
+
+unary_plus :: fn(c, rest, tok) #prefix(.@"+") = {
+    node := c.parse_expr(rest, tok.next, .Unary);
+    c.gen_expr(node);
+    node
+};
+
+unary_amp :: fn(c, rest, tok) #prefix(.@"&") = {
+    lhs := c.parse_expr(rest, tok.next, .Unary);
+    c.add_type(lhs);
+    bf := lhs.kind == .ND_MEMBER && lhs.member.is_bitfield;
+    !bf || @error_tok(c, tok, "cannot take address of bitfield");
+    node := c.new_unary(.ND_ADDR, lhs, tok);
+    c.gen_expr(node);
+    node
+};
+
+unary_star :: fn(c, rest, tok) #prefix(.@"*") = {
+    // [https://www.sigbus.info/n1570#6.5.3.2p4] This is an oddity
+    // in the C spec, but dereferencing a function shouldn't do
+    // anything. If foo is a function, `*foo`, `**foo` or `*****foo`
+    // are all equivalent to just `foo`.
+    node := c.parse_expr(rest, tok.next, .Unary);
+    c.add_type(node);
+    node := if(node.ty.kind == .TY_FUNC, => node, => c.new_unary(.ND_DEREF, node, tok));
+    c.gen_expr(node);
+    node
+};
+
+#prefix(.@"-", .ND_NEG) #prefix(.@"~", .ND_BITNOT) #prefix(.@"!", .ND_NOT) 
+parse_unary :: fn(c, rest, tok) = {
+    rule := rules.index(tok.kind);
+    node := c.parse_expr(rest, tok.next, .Unary);
+    node := c.new_unary(rule.op, node, tok);
+    c.gen_expr(node);
+    node
+};
+
+unary_inc :: fn(c, rest, tok) #prefix(.@"++") = { // Read ++i as i+=1
+    node := c.to_assign(c.new_add(c.parse_expr(rest, tok.next, .Unary), c.new_num(1, tok), tok));
+    c.gen_expr(node);
+    node
+};
+
+unary_dec :: fn(c, rest, tok) #prefix(.@"--") = { // Read --i as i-=1
+    node := c.to_assign(c.new_sub(c.parse_expr(rest, tok.next, .Unary), c.new_num(1, tok), tok));
+    c.gen_expr(node);
+    node
+};
+
+// generic-selection = "(" assign "," generic-assoc ("," generic-assoc)* ")"
+//
+// generic-assoc = type-name ":" assign
+//                             | "default" ":" assign
+//
+// This is just a switch statement over types. 
+// A branch is chosen based on the ~type~ of the first expression. 
+generic_selection :: fn(c, rest, tok) #prefix(._Generic) = {
+    start := tok;
+    tok = c.skip(tok.next, "(");
+
+    ctrl := c.speculate(tok&, tok, .Assign);
+    c.add_type(ctrl);
+
+    t1 := ctrl.ty;
+    t1 := @match(t1.kind) {
+        fn TY_FUNC()  => c.pointer_to(t1);
+        fn TY_ARRAY() => c.pointer_to(t1.base);
+        @default => t1;
+    };
+    
+    // Now choose one of the branches to use based on that type. 
+    ret: ?*CC.Node = .None;
+    use_default := false; 
+    while => !consume(rest, tok, ")") {
+        tok = c.skip(tok, ",");
+
+        if equal(tok, "default") {
+            tok = c.skip(tok.next, ":");
+            node := c.speculate(tok&, tok, .Assign);
+            if ret.is_none() {
+                ret = (Some = node);
+                use_default = true;
+            };
+        } else {
+            t2 := c.typename(tok&, tok);
+            tok = c.skip(tok, ":");
+            if is_compatible(t1, t2) {
+                if ret.is_some() && !use_default {
+                    @error_tok(c, tok, "conflicting branches for generic association type");  
+                };
+                node := c.parse_expr(tok&, tok, .Assign);
+                ret = (Some = node);
+                use_default = false;
+            } else {
+                _ := c.speculate(tok&, tok, .Assign);
+            };
+        };
+    };
+    node := ret || @error_tok(c, start, "controlling expression type not compatible with any generic association type");
+    if use_default {
+        // HACK: because default might not be the last case. 
+        // this relies on gen_expr recursing. better would be to 
+        // emit default into a different branch and discard the other one
+        c.gen_expr(node);
+    };
+    node
+};
+
+parse_sizeof :: fn(c, rest, tok) #prefix(.sizeof) = {
+    start := tok;
+    if c.next_is_paren_typename(tok) {  // | "sizeof" "(" type-name ")"
+        ty := c.typename(tok&, tok.next.next);
+        rest[] = c.skip(tok, ")");
+        if ty.kind == .TY_VLA {
+            if(!ty.vla_size.is_null(), => return(c.new_var_node(ty.vla_size, tok)));
+            lhs := c.compute_vla_size(ty, tok);
+            rhs := c.new_var_node(ty.vla_size, tok);
+            c.new_binary(.ND_COMMA, lhs, rhs, tok)
+        } else {
+            c.new_ulong(ty.size.intcast(), start)
+        }
+    } else {  // | "sizeof" unary
+        node := c.speculate(rest, tok.next, .Unary);
+        c.add_type(node);
+        if node.ty.kind == .TY_VLA {
+            c.new_var_node(node.ty.vla_size, tok)
+        } else {
+            if node.kind == .ND_MEMBER && node.member.is_bitfield {
+                @error_tok(c, tok, "sizeof(bitfield) is illegal");
+            };
+            c.new_ulong(node.ty.size.intcast(), tok)
+        }
+    }
+};
+
+parse_alignof :: fn(c, rest, tok) #prefix(._Alignof) = {
+    start := tok;
+    if c.next_is_paren_typename(tok) {
+        ty := c.typename(tok&, tok.next.next);
+        rest[] = c.skip(tok, ")");
+        c.new_ulong(ty.align.intcast(), tok)
+    } else {
+        node := c.speculate(rest, tok.next, .Unary);
+        c.add_type(node);
+        c.new_ulong(node.ty.align.intcast(), tok)
+    }
+};
+
+prefix_ampamp :: fn(c, rest, tok) #prefix(.@"&&") = {
+    label := c.get_ident(tok.next);
+    @error_tok(c, tok, "[GNU] labels-as-values is not supported (name = %)", label);
+};
+
+// funcall = (assign ("," assign)*)? ")"
+funcall :: fn(c, rest, tok, f) #infix(.@"(", .PostFix) = {
+    tok = tok.next;
+    c.add_type(f);
+
+    if (f.ty.kind != .TY_FUNC && (f.ty.kind != .TY_PTR || f.ty.base.kind != .TY_FUNC)) {
+        @error_tok(c, f.tok, "not a function");
+    };
+
+    ty := if(f.ty.kind == .TY_FUNC, => f.ty, => f.ty.base);
+    param_ty := ty.params;
+
+    head := CC.Node.zeroed();
+    cur := head&;
+    while => !equal(tok, ")") {
+        if !cur.identical(head&) {
+            tok = c.skip(tok, ",");
+        };
+
+        arg := c.parse_expr(tok&, tok, .Assign);
+        c.add_type(arg);
+
+        if param_ty.is_null() && !ty.is_variadic {
+            @error_tok(c, tok, "too many arguments");
+        };
+
+        if !param_ty.is_null() {
+            if !@is(param_ty.kind, .TY_STRUCT, .TY_UNION) {
+                arg = c.new_cast(arg, param_ty);
+            };
+            param_ty = param_ty.next;
+        } else {
+            if arg.ty.kind == .TY_FLOAT {
+                // If parameter type is omitted (e.g. in "..."), float
+                // arguments are promoted to double.
+                arg = c.new_cast(arg, ty_double);
+            };
+        };
+        
+        cur.next = arg;
+        cur = cur.next;
+    };
+
+    if(!param_ty.is_null(), => @error_tok(c, tok, "too few arguments"));
+
+    rest[] = c.skip(tok, ")");
+
+    node := c.new_unary(.ND_FUNCALL, f, tok);
+    node.func_ty = ty;
+    node.ty = ty.return_ty;
+    node.args = head.next;
+
+    // If a function returns a struct, it is caller's responsibility
+    // to allocate a space for the return value.
+    if @is(node.ty.kind, .TY_STRUCT, .TY_UNION) {
+        node.ret_buffer = c.new_lvar("", node.ty);
+    };;
+    c.gen_expr(node);
+    node
+};
+
+post_square :: fn(c, rest, tok, node) #infix(.@"[", .PostFix) = {
+    // x[y] is short for *(x+y)
+    start := tok;
+    idx := c.parse_expr(tok&, tok.next, .None);
+    rest[] = c.skip(tok, "]");
+    node := c.new_unary(.ND_DEREF, c.new_add(node, idx, start), start);
+    c.gen_expr(node);
+    node
+};
+post_dot :: fn(c, rest, tok, node) #infix(.@".", .PostFix) = {
+    node := c.struct_ref(node, tok.next);
+    rest[] = tok.next.next;
+    c.gen_expr(node);
+    node
+};
+post_arrow :: fn(c, rest, tok, node) #infix(.@"->", .PostFix) = {
+    // x->y is short for (*x).y
+    node := c.new_unary(.ND_DEREF, node, tok);
+    node := c.struct_ref(node, tok.next);
+    rest[] = tok.next.next;
+    c.gen_expr(node);
+    node
+};
+post_add :: fn(c, rest, tok, node) #infix(.@"++", .PostFix) = {
+    node := c.new_inc_dec(node, tok, 1);
+    rest[] = tok.next;
+    c.gen_expr(node);
+    node
+};
+post_sub :: fn(c, rest, tok, node) #infix(.@"--", .PostFix) = {
+    node := c.new_inc_dec(node, tok, -1);
+    rest[] = tok.next;
+    c.gen_expr(node);
+    node
+};
+
+};
 
 // In C, `+` operator is overloaded to perform the pointer arithmetic.
 // If p is a pointer, p+n adds not n but sizeof(*p)*n to the value of p,
@@ -2716,64 +2989,6 @@ fn new_sub(c: *Ctx, lhs: *CC.Node, rhs: *CC.Node, tok: *CC.Token) *CC.Node = {
     }
 };
 
-#prefix(.@"+")
-fn unary_plus(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
-    node := c.parse_expr(rest, tok.next, .Unary);
-    c.gen_expr(node);
-    node
-}
-
-#prefix(.@"&")
-fn unary_amp(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
-    lhs := c.parse_expr(rest, tok.next, .Unary);
-    c.add_type(lhs);
-    bf := lhs.kind == .ND_MEMBER && lhs.member.is_bitfield;
-    !bf || @error_tok(c, tok, "cannot take address of bitfield");
-    node := c.new_unary(.ND_ADDR, lhs, tok);
-    c.gen_expr(node);
-    node
-}
-
-#prefix(.@"*")
-fn unary_star(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
-    // [https://www.sigbus.info/n1570#6.5.3.2p4] This is an oddity
-    // in the C spec, but dereferencing a function shouldn't do
-    // anything. If foo is a function, `*foo`, `**foo` or `*****foo`
-    // are all equivalent to just `foo`.
-    node := c.parse_expr(rest, tok.next, .Unary);
-    c.add_type(node);
-    node := if(node.ty.kind == .TY_FUNC, => node, => c.new_unary(.ND_DEREF, node, tok));
-    c.gen_expr(node);
-    node
-}
-
-fn parse_unary(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
-    rule := rules.index(tok.kind);
-    node := c.parse_expr(rest, tok.next, .Unary);
-    node := c.new_unary(rule.op, node, tok);
-    c.gen_expr(node);
-    node
-}
-
-#prefix(.@"++")
-fn unary_inc(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = { // Read ++i as i+=1
-    node := c.to_assign(c.new_add(c.parse_expr(rest, tok.next, .Unary), c.new_num(1, tok), tok));
-    c.gen_expr(node);
-    node
-}
-    
-#prefix(.@"--")
-fn unary_dec(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = { // Read --i as i-=1
-    node := c.to_assign(c.new_sub(c.parse_expr(rest, tok.next, .Unary), c.new_num(1, tok), tok));
-    c.gen_expr(node);
-    node
-}
-
-fn prefix_ampamp(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
-    label := c.get_ident(tok.next);
-    @error_tok(c, tok, "[GNU] labels-as-values is not supported (name = %)", label);
-}
-
 fn get_struct_member(ty: *CC.Type, name: *CC.Token) ?*CC.Member = {
     mem := ty.members;
     for_linked mem { mem |
@@ -2824,194 +3039,6 @@ fn new_inc_dec(c: *Ctx, node: *CC.Node, tok: *CC.Token, addend: i64) *CC.Node = 
                                     node.ty)
 }
 
-fn postfix(c: *Ctx, rest: **CC.Token, tok: *CC.Token, node: *CC.Node) *CC.Node = {
-    // TODO: use the table for this as well
-    node := @match(tok.kind) {
-        fn @"["() => {
-            // x[y] is short for *(x+y)
-            start := tok;
-            idx := c.parse_expr(tok&, tok.next, .None);
-            rest[] = c.skip(tok, "]");
-            c.new_unary(.ND_DEREF, c.new_add(node, idx, start), start)
-        }
-        fn @"."() => {
-            node := c.struct_ref(node, tok.next);
-            rest[] = tok.next.next;
-            node
-        }
-        fn @"->"() => {
-            // x->y is short for (*x).y
-            node := c.new_unary(.ND_DEREF, node, tok);
-            node := c.struct_ref(node, tok.next);
-            rest[] = tok.next.next;
-            node
-        }
-        fn @"++"() => {
-            node := c.new_inc_dec(node, tok, 1);
-            rest[] = tok.next;
-            node
-        }
-        fn @"--"() => {
-            node := c.new_inc_dec(node, tok, -1);
-            rest[] = tok.next;
-            node
-        }
-        @default => panic("unreachable postfix");
-    };
-    c.gen_expr(node);
-    node
-}
-
-// funcall = (assign ("," assign)*)? ")"
-#infix(.@"(", .PostFix)
-fn funcall(c: *Ctx, rest: **CC.Token, tok: *CC.Token, f: *CC.Node) *CC.Node = {
-    tok = tok.next;
-    c.add_type(f);
-
-    if (f.ty.kind != .TY_FUNC && (f.ty.kind != .TY_PTR || f.ty.base.kind != .TY_FUNC)) {
-        @error_tok(c, f.tok, "not a function");
-    };
-
-    ty := if(f.ty.kind == .TY_FUNC, => f.ty, => f.ty.base);
-    param_ty := ty.params;
-
-    head := CC.Node.zeroed();
-    cur := head&;
-    while => !equal(tok, ")") {
-        if !cur.identical(head&) {
-            tok = c.skip(tok, ",");
-        };
-
-        arg := c.parse_expr(tok&, tok, .Assignment);
-        c.add_type(arg);
-
-        if param_ty.is_null() && !ty.is_variadic {
-            @error_tok(c, tok, "too many arguments");
-        };
-
-        if !param_ty.is_null() {
-            if !@is(param_ty.kind, .TY_STRUCT, .TY_UNION) {
-                arg = c.new_cast(arg, param_ty);
-            };
-            param_ty = param_ty.next;
-        } else {
-            if arg.ty.kind == .TY_FLOAT {
-                // If parameter type is omitted (e.g. in "..."), float
-                // arguments are promoted to double.
-                arg = c.new_cast(arg, ty_double);
-            };
-        };
-        
-        cur.next = arg;
-        cur = cur.next;
-    };
-
-    if(!param_ty.is_null(), => @error_tok(c, tok, "too few arguments"));
-
-    rest[] = c.skip(tok, ")");
-
-    node := c.new_unary(.ND_FUNCALL, f, tok);
-    node.func_ty = ty;
-    node.ty = ty.return_ty;
-    node.args = head.next;
-
-    // If a function returns a struct, it is caller's responsibility
-    // to allocate a space for the return value.
-    if @is(node.ty.kind, .TY_STRUCT, .TY_UNION) {
-        node.ret_buffer = c.new_lvar("", node.ty);
-    };;
-    c.gen_expr(node);
-    node
-}
-
-// generic-selection = "(" assign "," generic-assoc ("," generic-assoc)* ")"
-//
-// generic-assoc = type-name ":" assign
-//                             | "default" ":" assign
-//
-// This is just a switch statement over types. 
-// A branch is chosen based on the ~type~ of the first expression. 
-#prefix(._Generic)
-fn generic_selection(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
-    start := tok;
-    tok = c.skip(tok.next, "(");
-
-    ctrl := c.speculate(tok&, tok, .Assignment);
-    c.add_type(ctrl);
-
-    t1 := ctrl.ty;
-    t1 := @match(t1.kind) {
-        fn TY_FUNC()  => c.pointer_to(t1);
-        fn TY_ARRAY() => c.pointer_to(t1.base);
-        @default => t1;
-    };
-    
-    // Now choose one of the branches to use based on that type. 
-    ret: ?*CC.Node = .None;
-    use_default := false; 
-    while => !consume(rest, tok, ")") {
-        tok = c.skip(tok, ",");
-
-        if equal(tok, "default") {
-            tok = c.skip(tok.next, ":");
-            node := c.speculate(tok&, tok, .Assignment);
-            if ret.is_none() {
-                ret = (Some = node);
-                use_default = true;
-            };
-        } else {
-            t2 := c.typename(tok&, tok);
-            tok = c.skip(tok, ":");
-            if is_compatible(t1, t2) {
-                if ret.is_some() && !use_default {
-                    @error_tok(c, tok, "conflicting branches for generic association type");  
-                };
-                node := c.parse_expr(tok&, tok, .Assignment);
-                ret = (Some = node);
-                use_default = false;
-            } else {
-                _ := c.speculate(tok&, tok, .Assignment);
-            };
-        };
-    };
-    node := ret || @error_tok(c, start, "controlling expression type not compatible with any generic association type");
-    if use_default {
-        // HACK: because default might not be the last case. 
-        // this relies on gen_expr recursing. better would be to 
-        // emit default into a different branch and discard the other one
-        c.gen_expr(node);
-    };
-    node
-}
-
-#prefix(.sizeof)
-fn parse_sizeof(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
-    start := tok;
-    if c.next_is_paren_typename(tok) {  // | "sizeof" "(" type-name ")"
-        ty := c.typename(tok&, tok.next.next);
-        rest[] = c.skip(tok, ")");
-        if ty.kind == .TY_VLA {
-            if(!ty.vla_size.is_null(), => return(c.new_var_node(ty.vla_size, tok)));
-            lhs := c.compute_vla_size(ty, tok);
-            rhs := c.new_var_node(ty.vla_size, tok);
-            c.new_binary(.ND_COMMA, lhs, rhs, tok)
-        } else {
-            c.new_ulong(ty.size.intcast(), start)
-        }
-    } else {  // | "sizeof" unary
-        node := c.speculate(rest, tok.next, .Unary);
-        c.add_type(node);
-        if node.ty.kind == .TY_VLA {
-            c.new_var_node(node.ty.vla_size, tok)
-        } else {
-            if node.kind == .ND_MEMBER && node.member.is_bitfield {
-                @error_tok(c, tok, "sizeof(bitfield) is illegal");
-            };
-            c.new_ulong(node.ty.size.intcast(), tok)
-        }
-    }
-}
-
 // for expressions that don't get evaluated (like sizeof, alignof, typeof),
 // we just mask out all the emitted instructions/jumps. 
 fn speculate(c: *Ctx, rest: **CC.Token, tok: *CC.Token, prec: Prec) *CC.Node = {
@@ -3027,20 +3054,6 @@ fn speculate(c: *Ctx, rest: **CC.Token, tok: *CC.Token, prec: Prec) *CC.Node = {
         c.b = new_block;
     };
     node
-}
-
-#prefix(._Alignof)
-fn parse_alignof(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
-    start := tok;
-    if c.next_is_paren_typename(tok) {
-        ty := c.typename(tok&, tok.next.next);
-        rest[] = c.skip(tok, ")");
-        c.new_ulong(ty.align.intcast(), tok)
-    } else {
-        node := c.speculate(rest, tok.next, .Unary);
-        c.add_type(node);
-        c.new_ulong(node.ty.align.intcast(), tok)
-    }
 }
 
 fn primary(rest: **CC.Token, tok: *CC.Token) *CC.Node = { // TODO
@@ -3311,7 +3324,7 @@ fn gen_expr(c: *Ctx, node: *CC.Node) Qbe.Ref = {
 }
 
 fn gen_expr_inner(c: *Ctx, node: *CC.Node) Qbe.Ref = {
-    ::enum(@type node.ty.kind);
+    ::enum(CC.NodeKind);
     @if(SPAM) @println("E % %; %", node.kind, CC.Node.int_from_ptr(node), node.tok.str());
     @match(node.kind) {
         fn ND_BLOCK() => {
@@ -3333,6 +3346,7 @@ fn gen_expr_inner(c: *Ctx, node: *CC.Node) Qbe.Ref = {
         fn ND_FUNCALL() => c.gen_call(node);
         fn ND_ADDR()     => c.gen_addr(node.lhs);
         fn ND_CAST() => {
+            ::enum(CC.TypeKind);
             source := c.gen_expr(node.lhs);
             from, to := (node.lhs.ty, node.ty);
             if(to.kind == .TY_VOID, => return(QbeUndef));
@@ -3596,6 +3610,7 @@ fn gen_call(c: *Ctx, node: *CC.Node) Qbe.Ref #once = {
         arguments&.push(make_ins(.arg, arg.ty.cls(), QbeNull, r, QbeNull));
     };
     
+    ::ptr_utils(CC.Obj);
     assert(node.ret_buffer.is_null(), "TODO: aggragate returns");
     for arguments { i |    
         c.b.push(i);

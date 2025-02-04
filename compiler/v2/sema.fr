@@ -1144,8 +1144,7 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
             // TODO: this is unfortunate. it means you prewalk instead of letting placeexpr do the recursion
             //       but need to check if its a value that has special fields first.
             @check(self.compile_expr(f.container, .None)) return;
-            
-            
+           
             if f.container.ty == ScopeId { // :get_or_create_type 
                 scope := @check(self.eval(f.container, ScopeId)) return; 
                 var := @unwrap(find_var_in_scope(self, f.name, scope), "not found in scope") return;
@@ -3021,6 +3020,19 @@ fn check_promote_id_to_func(self: *SelfHosted, fid: FuncId, f_ty: FnType) Maybe(
     //    @try(self.poll_in_place(Type, => self.infer_return(fid))) return;
     //};
     
+    // this allows missing type annotations on '=' function args in situations like import_c's parser handlers. 
+    // TODO: kinda hack that '=>' ones can't be done here. 
+    if !func.get_flag(.AllowRtCapture) && func.finished_arg.is_none() {
+        arg_ty := self.arg_types(f_ty.arg);
+        @err_assert(arg_ty.len == func.arg.bindings.len, "FuncId promotion arity mismatch") return;
+        enumerate func.arg.bindings& { i, b |
+            if b.ty&.is(.Infer) {
+                b.ty = (Finished = arg_ty[i]);
+            };
+            // TODO: else typecheck :FUCKED
+        };
+    };
+    
     // this doesn't help. doesn't happen. but its similar to what the old one did in promote_closure
     // if you take out infering from requested in fn Closure, this happens, but then its wrong in the prelude. 
     if func.ret&.is(.Infer) {
@@ -3710,6 +3722,8 @@ fn ask_coerce_const_expr(self: *SelfHosted, expr: *FatExpr, want: Type, query: b
             }
             fn FnPtr(f_ty) => {
                 expr.done = false;
+                fid := @check(self.eval(expr, FuncId)) return;
+                @check(self.check_promote_id_to_func(fid, f_ty.ty)) return;
                 inner := self.box(expr[]);
                 expr.expr = (FnPtr = inner);
                 expr.done = false;
@@ -4002,7 +4016,8 @@ fn immediate_eval_expr(self: *SelfHosted, expr: *FatExpr, ret_ty: Type) Maybe(Va
     
     // this makes size match for int literals that get down casted in const_eval_any
     // TODO: this should work on non-int types but it seems to get confused by Never.  -- Nov 12
-    if expr.expr&.is(.Value) && expr.ty != ret_ty && self.get_type(ret_ty).is(.Int) {
+    //       still doesnt work for everything but need FnPtr for import_c scope experiments -- Feb 3, 2025
+    if expr.expr&.is(.Value) && expr.ty != ret_ty && (@is(self.get_type(ret_ty).tag(), .Int, .FnPtr)) {
         @check(self.coerce_const_expr(expr, (Specific = ret_ty), false)) return;
     };
     
