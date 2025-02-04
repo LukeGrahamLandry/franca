@@ -816,39 +816,28 @@ fn typeof_specifier(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Type #once = 
 }
 
 // Generate code for computing a VLA size.
-fn compute_vla_size(c: *Ctx, ty: *CC.Type, tok: *CC.Token) *CC.Node = {
-    node := c.new_node(.ND_NULL_EXPR, tok);
+fn compute_vla_size(c: *Ctx, ty: *CC.Type) Qbe.Ref = {
+    if(ty.vla_size != QbeNull, => return(ty.vla_size));
     if !ty.base.is_null() {
-        node = c.new_binary(.ND_COMMA, node, c.compute_vla_size(ty.base, tok), tok);
+        c.compute_vla_size(ty.base);
     };
 
-    if(ty.kind != .TY_VLA, => return(node));
+    if(ty.kind != .TY_VLA, => return(QbeNull));
 
     base_sz := if ty.base.kind == .TY_VLA {
-       c.new_var_node(ty.base.vla_size, tok)
+       ty.base.vla_size
     } else {
-       c.new_num(ty.base.size.intcast(), tok)
+       c.f.getcon(ty.base.size.intcast())
     };
 
-    ty.vla_size = c.new_lvar("", ty_ulong);
-    left  := c.new_var_node(ty.vla_size, tok);
-    right := c.new_binary(.ND_MUL, ty.vla_len, base_sz, tok);
-    expr  := c.new_binary(.ND_ASSIGN, left, right, tok);
-    c.new_binary(.ND_COMMA, node, expr, tok)
-}
-
-fn new_alloca(c: *Ctx, sz: *CC.Node) *CC.Node = {
-    node := c.new_unary(.ND_FUNCALL, c.new_var_node(c.builtin_alloca, sz.tok), sz.tok);
-    node.func_ty = c.builtin_alloca.ty;
-    node.ty = c.builtin_alloca.ty.return_ty;
-    node.args = sz;
-    c.add_type(sz);
-    node
+    @debug_assert_ne(ty.vla_len, QbeNull, "compute_vla_size with unknown length");
+    // TODO: emit this up front when the type is created because otherwise the first sizeof() might not dominate cached uses. 
+    ty.vla_size = c.emit(.mul, .Kl, ty.vla_len, base_sz);
+    ty.vla_size
 }
 
 // declaration = declspec (declarator ("=" expr)? ("," declarator ("=" expr)?)*)? ";"
-fn declaration(c: *Ctx, rest: **CC.Token, tok: *CC.Token, basety: *CC.Type, attr: ?*VarAttr) *CC.Node = {
-    cur: ?*CC.Node = .None;
+fn declaration(c: *Ctx, tok: *CC.Token, basety: *CC.Type, attr: ?*VarAttr) *CC.Token = {
     start := tok;
 
     comma_sep(c, tok&, ";") {
@@ -874,22 +863,18 @@ fn declaration(c: *Ctx, rest: **CC.Token, tok: *CC.Token, basety: *CC.Type, attr
         // Generate code for computing a VLA size. We need to do this
         // even if ty is not VLA because ty may be a pointer to VLA
         // (e.g. int (*foo)[n][m] where n and m are variables.)
-        //cur = c.compute_vla_size(ty, tok);
+        vla_size := c.compute_vla_size(ty);
 
         if ty.kind == .TY_VLA {
-            if(equal(tok, "="), => @error_tok(c, tok, "variable-sized object may not be initialized"));
+            if(equal(tok, "="), => @error_tok(c, tok, "variable-sized object must not be initialized"));
 
             // Variable length arrays (VLAs) are translated to alloca() calls.
             // For example, `int x[n+2]` is translated to `tmp = n + 2,
             // x = alloca(tmp)`.
-            var := c.new_lvar(c.get_ident(ty.name), ty);
-            tok := ty.name;
-            expr := c.new_binary(.ND_ASSIGN, c.new_vla_ptr(var, tok),
-                                                            c.new_alloca(c.new_var_node(ty.vla_size, tok)),
-                                                            tok);
-
-            c.gen_expr(expr);
-            cur = (Some = expr);
+            name := c.get_ident(ty.name);
+            var := c.new_lvar(name, ty);
+            var.stack_slot = c.f.newtmp(name, .Kl);
+            c.emit(.alloc16, .Kl, var.stack_slot, vla_size, QbeNull);
             continue();
         };
         
@@ -901,17 +886,14 @@ fn declaration(c: *Ctx, rest: **CC.Token, tok: *CC.Token, basety: *CC.Type, attr
         };
 
         if equal(tok, "=") {
-            expr := c.lvar_initializer(tok&, tok.next, var);
-            c.gen_expr(expr);
-            cur = (Some = expr);
+            c.lvar_initializer(tok&, tok.next, var);
         };
 
         if(var.ty.size < 0,         => @error_tok(c, ty.name, "variable has incomplete type"));
         if(var.ty.kind == .TY_VOID, => @error_tok(c, ty.name, "variable declared void"));
     };
     
-    rest[] = tok;  // already ate the semicolon
-    cur || c.new_node(.ND_NULL_EXPR, tok)
+    tok  // already ate the semicolon
 }
 
 fn skip_excess_element(c: *Ctx, tok: *CC.Token) *CC.Token = {
@@ -1293,7 +1275,10 @@ fn init_desg_expr(c: *Ctx, desg: *InitDesg, tok: *CC.Token) *CC.Node = {
 
     lhs := c.init_desg_expr(desg.next, tok);
     rhs := c.new_num(desg.idx, tok);
-    c.new_deref(c.new_add(lhs, rhs, tok), tok)
+    c.new_add(lhs&, rhs&, tok);
+    node := c.new_binary(.ND_ADD, lhs, rhs, tok);
+    c.gen_expr(node);
+    c.new_deref(node, tok)
 }
 
 fn create_lvar_init(c: *Ctx, init: *Initializer, ty: *CC.Type, desg: *InitDesg, tok: *CC.Token) *CC.Node = {
@@ -1360,7 +1345,9 @@ fn lvar_initializer(c: *Ctx, rest: **CC.Token, tok: *CC.Token, var: *CC.Obj) *CC
         c.create_stack_slot(var);
     };
     
-    c.new_binary(.ND_COMMA, lhs, rhs, tok)
+    node := c.new_binary(.ND_COMMA, lhs, rhs, tok);
+    c.gen_expr(node);
+    node
 }
 
 // TODO: is alignment real? 
@@ -1502,10 +1489,7 @@ fn compound_stmt(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
                 @if(attr.is_typedef)  => c.parse_typedef(tok, basety);
                 @if(c.is_function(tok)) => c.function(tok, basety, attr&);
                 @if(attr.is_extern)   => c.global_variable(tok, basety, attr&);
-                @else => {
-                    cur = (Some = c.declaration(tok&, tok, basety, (Some = attr&)));
-                    tok
-                };
+                @else => c.declaration(tok, basety, (Some = attr&));
             };
         } else {
             cur = (Some = c.stmt(tok&, tok));
@@ -2130,8 +2114,8 @@ fn parse_binary_inner(c: *Ctx, rest: **CC.Token, tok: *CC.Token, lhs: *CC.Node) 
     rhs  := parse_expr(c, rest, tok.next, prec);
     @match(tok.kind) {
         fn @"+="()  => {
-            node := c.new_add(lhs, rhs, tok);
-            node := c.to_assign(node.kind, node.lhs, node.rhs, node.tok);
+            c.new_add(lhs&, rhs&, tok);
+            node := c.to_assign(.ND_ADD, lhs, rhs, tok);
             return(node);
         }
         fn @"-="()  => {
@@ -2139,7 +2123,10 @@ fn parse_binary_inner(c: *Ctx, rest: **CC.Token, tok: *CC.Token, lhs: *CC.Node) 
             node := c.to_assign(node.kind, node.lhs, node.rhs, node.tok);
             return(node);
         }
-        fn @"+"()   => return(c.new_add(lhs, rhs, tok));
+        fn @"+"()   => {
+            c.new_add(lhs&, rhs&, tok);
+            return(c.new_binary2(.ND_ADD, lhs, rhs, tok));
+        }
         fn @"-"()   => return(c.new_sub(lhs, rhs, tok));
         @default    => ();
     };
@@ -2170,7 +2157,6 @@ parsers :: @struct {
 parse_logical :: fn(c, rest, tok, cond) = {
     fold_op := rules.index(tok.kind)[].op;
     cond := c.new_cast(cond, ty_bool);  // jnz only looks at low 32 bits but we might be jumping on a long
-    c.gen_expr(cond);
     
     else_block := c.new_block();
     join_block := c.new_block();
@@ -2185,7 +2171,6 @@ parse_logical :: fn(c, rest, tok, cond) = {
     rule := rules.index(tok.kind);
     rhs  := parse_expr(c, rest, tok.next, @as(Prec) @as(i32) rule.prec.raw() + 1);
     rhs  := c.new_cast(rhs, ty_bool);
-    c.gen_expr(rhs);
     else_block_end := c.b;
     then, else, s1, s2, phi1, phi2 := @match(tok.kind) {
         fn @"&&"() => (rhs, c.new_num(0, tok), else_block, join_block, else_block, prev_block);
@@ -2226,7 +2211,7 @@ parse_logical :: fn(c, rest, tok, cond) = {
 // the ternary operator
 conditional :: fn(c, rest, tok, cond) #infix(.@"?", .Conditional) = {
     // note: the [GNU] case below still uses the old `cond` node without this cast. 
-    cond_r := c.gen_expr(c.new_cast(cond, ty_bool));
+    cond_r := c.new_cast(cond, ty_bool)[].r;
     
     cond_block := c.b;
     then_block := c.new_block();
@@ -2311,7 +2296,6 @@ parse_bracketed :: fn(c, rest, tok) #prefix(.@"(") = {
             node := parse_expr(c, rest, tok, .Unary);
             node := c.new_cast(node, ty);
             node.tok = start;
-            c.gen_expr(node);
             node
         }
     } else {
@@ -2440,14 +2424,17 @@ parse_unary :: fn(c, rest, tok) = {
     node
 };
 
-unary_inc :: fn(c, rest, tok) #prefix(.@"++") = { // Read ++i as i+=1
-    node := c.new_add(c.parse_expr(rest, tok.next, .Unary), c.new_num(1, tok), tok);
-    node := c.to_assign(node.kind, node.lhs, node.rhs, node.tok);
+pre_inc :: fn(c, rest, tok) #prefix(.@"++") = { // Read ++i as i+=1
+    lhs := c.parse_expr(rest, tok.next, .Unary);
+    c.gen_expr(lhs);
+    rhs := c.new_num(1, tok);
+    c.new_add(lhs&, rhs&, tok);
+    node := c.to_assign(.ND_ADD, lhs, rhs, tok);
     c.gen_expr(node);
     node
 };
 
-unary_dec :: fn(c, rest, tok) #prefix(.@"--") = { // Read --i as i-=1
+pre_dec :: fn(c, rest, tok) #prefix(.@"--") = { // Read --i as i-=1
     node := c.new_sub(c.parse_expr(rest, tok.next, .Unary), c.new_num(1, tok), tok);
     node := c.to_assign(node.kind, node.lhs, node.rhs, node.tok);
     c.gen_expr(node);
@@ -2513,44 +2500,31 @@ generic_selection :: fn(c, rest, tok) #prefix(._Generic) = {
     node
 };
 
-parse_sizeof :: fn(c, rest, tok) #prefix(.sizeof) = {
+sizeof :: fn(c, rest, tok) #prefix(.sizeof) = {
     start := tok;
-    if c.next_is_paren_typename(tok) {  // | "sizeof" "(" type-name ")"
+    ty := if c.next_is_paren_typename(tok) {  // | "sizeof" "(" type-name ")"
         ty := c.typename(tok&, tok.next.next);
         rest[] = c.skip(tok, ")");
-        if ty.kind == .TY_VLA {
-            if(!ty.vla_size.is_null(), => return(c.new_var_node(ty.vla_size, tok)));
-            lhs := c.compute_vla_size(ty, tok);
-            rhs := c.new_var_node(ty.vla_size, tok);
-            c.new_binary(.ND_COMMA, lhs, rhs, tok)
-        } else {
-            c.new_ulong(ty.size.intcast(), start)
-        }
+        ty
     } else {  // | "sizeof" unary
         node := c.speculate(rest, tok.next, .Unary);
-        c.add_type(node);
-        if node.ty.kind == .TY_VLA {
-            c.new_var_node(node.ty.vla_size, tok)
-        } else {
-            if node.kind == .ND_MEMBER && node.member.is_bitfield {
-                @error_tok(c, tok, "sizeof(bitfield) is illegal");
-            };
-            c.new_ulong(node.ty.size.intcast(), tok)
-        }
-    }
+        if(node.kind == .ND_MEMBER && node.member.is_bitfield, => @error_tok(c, tok, "sizeof(bitfield) is illegal"));
+        node.ty
+    };
+    r := if(ty.kind == .TY_VLA, => c.compute_vla_size(ty), => c.f.getcon(ty.size.intcast()));
+    c.ir_node(ty_ulong, r, QbeNull, start)
 };
 
-parse_alignof :: fn(c, rest, tok) #prefix(._Alignof) = {
+alignof :: fn(c, rest, tok) #prefix(._Alignof) = {
     start := tok;
-    if c.next_is_paren_typename(tok) {
+    ty := if c.next_is_paren_typename(tok) {
         ty := c.typename(tok&, tok.next.next);
         rest[] = c.skip(tok, ")");
-        c.new_ulong(ty.align.intcast(), tok)
+        ty
     } else {
-        node := c.speculate(rest, tok.next, .Unary);
-        c.add_type(node);
-        c.new_ulong(node.ty.align.intcast(), tok)
-    }
+        c.speculate(rest, tok.next, .Unary)[].ty
+    };
+    c.new_ulong(ty.align.intcast(), start)
 };
 
 prefix_ampamp :: fn(c, rest, tok) #prefix(.@"&&") = {
@@ -2623,7 +2597,10 @@ square :: fn(c, rest, tok, node) #infix(.@"[", .PostFix) = {
     // x[y] is short for *(x+y)
     start := tok;
     idx := c.parse_expr(tok&, tok.next, .None);
-    node := c.new_deref(c.new_add(node, idx, start), start);
+    c.new_add(node&, idx&, start);
+    node := c.new_binary(.ND_ADD, node, idx, start);
+    c.gen_expr(node);
+    node := c.new_deref(node, start);
     set_rest_and_gen(c, rest, c.skip(tok, "]"), node)
 };
 dot :: fn(c, rest, tok, node) #infix(.@".", .PostFix) = {
@@ -2648,6 +2625,7 @@ post_dec :: fn(c, rest, tok, node) #infix(.@"--", .PostFix) = {
 return :: fn(c, rest, tok) #prefix(.return) = {
     if(consume(rest, tok.next, ";"), => return(c.new_node(.ND_STMT, tok)));  // return void
     exp := c.parse_expr(tok&, tok.next, .None);
+    c.assert_gen_expr(exp);
     rest[] = c.skip(tok, ";");
 
     c.add_type(exp);
@@ -2657,7 +2635,7 @@ return :: fn(c, rest, tok) #prefix(.return) = {
         exp = c.new_cast(exp, ty);
     };
 
-    r := c.gen_expr(exp);
+    r := c.assert_gen_expr(exp);
     
     if c.b.jmp.type == .Jxxx {
         j := Qbe.J.retw;
@@ -2673,7 +2651,7 @@ if_ :: fn(c, rest, tok) #prefix(.if) = {
     tok = c.skip(tok.next, "(");
     cond := c.parse_expr(tok&, tok, .None);
     tok = c.skip(tok, ")");
-    cond := c.gen_expr(cond);
+    cond := c.assert_gen_expr(cond);
     
     c.jnz_if_unterminated(cond, then_block, else_block);
     
@@ -2696,7 +2674,7 @@ switch_ :: fn(c, rest, tok) #prefix(.switch) = {
     tok = c.skip(tok.next, "(");
     cond := c.parse_expr(tok&, tok, .None);
     tok = c.skip(tok, ")");
-    payload.inspect = c.gen_expr(cond);
+    payload.inspect = c.assert_gen_expr(cond);
     // backend switch lowering wants a Kl, but we want zero extension, not sign extension like casting to a long would be. 
     if cond.ty.cls() != .Kl && !c.speculate {
         r := c.f.newtmp("c", .Kl);
@@ -2780,11 +2758,11 @@ for_ :: fn(c, rest, tok) #prefix(.for) = {
         
         c.enter_scope();
         tok = c.skip(tok.next, "(");
-        init := if c.is_typename(tok) {
+        if c.is_typename(tok) {
             basety := c.declspec(tok&, tok, .None);
-            c.declaration(tok&, tok, basety, .None)
+            tok = c.declaration(tok, basety, .None);
         } else {
-            c.expr_stmt(tok&, tok)
+            c.expr_stmt(tok&, tok);
         };
         c.jmp_if_unterminated(body_block);
 
@@ -2794,7 +2772,7 @@ for_ :: fn(c, rest, tok) #prefix(.for) = {
         } else {
             c.new_num(1, tok)  // wasteful to rely on folding for this 
         };
-        cond := c.gen_expr(cond);
+        cond := c.assert_gen_expr(cond);
         tok = c.skip(tok, ";");
         
         c.jnz_if_unterminated(cond, body_block, brk_label);
@@ -2805,7 +2783,7 @@ for_ :: fn(c, rest, tok) #prefix(.for) = {
         } else {
             c.new_num(0, tok)  // nop
         };
-        c.gen_expr(inc);
+        c.assert_gen_expr(inc);
         tok = c.skip(tok, ")");
         c.jmp_if_unterminated(cond_block);
 
@@ -2819,12 +2797,12 @@ for_ :: fn(c, rest, tok) #prefix(.for) = {
     c.new_node(.ND_STMT, tok)
 };
 while_ :: fn(c, rest, tok) #prefix(.while) = {
-    _, _ := push_loop c {  brk_label, cont_label |
+    push_loop c { brk_label, cont_label |
         c.jmp_if_unterminated(cont_label);
         c.b = cont_label;
         tok = c.skip(tok.next, "(");
         cond := c.new_cast(c.parse_expr(tok&, tok, .None), ty_bool);
-        cond := c.gen_expr(cond);
+        cond := c.assert_gen_expr(cond);
         tok = c.skip(tok, ")");
         body_block := c.new_block();
 
@@ -2850,7 +2828,7 @@ do :: fn(c, rest, tok) #prefix(.do) = {
     tok = c.skip(tok, "while");
     tok = c.skip(tok, "(");
     cond := c.new_cast(c.parse_expr(tok&, tok, .None), ty_bool);
-    cond := c.gen_expr(cond);
+    cond := cond.r;
     tok = c.skip(tok, ")");
     rest[] = c.skip(tok, ";");
     
@@ -2929,15 +2907,15 @@ fn stmt(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
 // so that p+n points to the location n elements (not bytes) ahead of p.
 // In other words, we need to scale an integer value before adding to a
 // pointer value. This function takes care of the scaling.
-fn new_add(c: *Ctx, lhs: *CC.Node, rhs: *CC.Node, tok: *CC.Token) *CC.Node = {
+fn new_add(c: *Ctx, lhs: **CC.Node, rhs: **CC.Node, tok: *CC.Token) void = {
     //c.add_type(lhs);
     //c.add_type(rhs);
-    c.gen_expr(lhs);
-    c.gen_expr(rhs);
+    c.gen_expr(lhs[]);
+    c.gen_expr(rhs[]);
 
     // num + num
     if is_numeric(lhs.ty) && is_numeric(rhs.ty) {
-        return(c.new_binary(.ND_ADD, lhs, rhs, tok));
+        return();
     };
 
     if !lhs.ty.base.is_null() && !rhs.ty.base.is_null() {
@@ -2946,18 +2924,18 @@ fn new_add(c: *Ctx, lhs: *CC.Node, rhs: *CC.Node, tok: *CC.Token) *CC.Node = {
 
     // Canonicalize `num + ptr` to `ptr + num`.
     if lhs.ty.base.is_null() && !rhs.ty.base.is_null() {
-        t := lhs; lhs = rhs; rhs = t;
+        t := lhs[]; lhs[] = rhs[]; rhs[] = t;
     };
 
     // VLA + num
     if lhs.ty.base.kind == .TY_VLA {
-        rhs = c.new_binary(.ND_MUL, rhs, c.new_var_node(lhs.ty.base.vla_size, tok), tok);
-        return(c.new_binary(.ND_ADD, lhs, rhs, tok));
+        vla_size := c.ir_node(ty_ulong, lhs.ty.base.vla_size, QbeNull, tok);
+        rhs[] = c.new_binary2(.ND_MUL, rhs[], vla_size, tok);
+        return();
     };
 
     // ptr + num
-    rhs = c.new_binary(.ND_MUL, rhs, c.new_long(lhs.ty.base.size.intcast(), tok), tok);
-    c.new_binary(.ND_ADD, lhs, rhs, tok)
+    rhs[] = c.new_binary2(.ND_MUL, rhs[], c.new_long(lhs.ty.base.size.intcast(), tok), tok);
 }
 
 fn new_binary2(c: *Ctx, kind: CC.NodeKind, lhs: *CC.Node, rhs: *CC.Node, tok: *CC.Token) *CC.Node = {
@@ -2965,43 +2943,47 @@ fn new_binary2(c: *Ctx, kind: CC.NodeKind, lhs: *CC.Node, rhs: *CC.Node, tok: *C
         return(c.new_binary(kind, lhs, rhs, tok));
     };
     @debug_assert(!@is(kind, .ND_ASSIGN, .ND_COMMA), "new_binary2 doesn't work with %", kind);
+    out_ty := c.add_type(kind, lhs&, rhs&);
     c.gen_expr(lhs);
     c.gen_expr(rhs);
     @debug_assert(lhs.r != QbeNull && rhs.r != QbeNull, "new_binary missing evaluated args");
-    out_ty := c.add_type(kind, lhs&, rhs&);
     r := c.gen_binary(kind, lhs.r, rhs.r, out_ty, lhs.ty, tok);
     c.ir_node(out_ty, r, QbeNull, tok)
 }
 
 // Like `+`, `-` is overloaded for the pointer type.
 fn new_sub(c: *Ctx, lhs: *CC.Node, rhs: *CC.Node, tok: *CC.Token) *CC.Node = {
-    c.add_type(lhs);
-    c.add_type(rhs);
     @if_else {
         // num - num
-        @if(is_numeric(lhs.ty) && is_numeric(rhs.ty)) =>
-           c.new_binary(.ND_SUB, lhs, rhs, tok);
+        @if(is_numeric(lhs.ty) && is_numeric(rhs.ty)) => {
+            node := c.new_binary(.ND_SUB, lhs, rhs, tok);
+            c.gen_expr(node);
+            node
+        };
         // VLA - num
         @if(lhs.ty.base.kind == .TY_VLA) => {
-            rhs = c.new_binary(.ND_MUL, rhs, c.new_var_node(lhs.ty.base.vla_size, tok), tok);
-            c.add_type(rhs);
+            vla_size := c.ir_node(ty_ulong, lhs.ty.base.vla_size, QbeNull, tok);
+            rhs = c.new_binary2(.ND_MUL, rhs, vla_size, tok);
             node := c.new_binary(.ND_SUB, lhs, rhs, tok);
             node.ty = lhs.ty;
+            c.gen_expr(node);
             node
         };
         // ptr - num
         @if(!lhs.ty.base.is_null() && is_integer(rhs.ty)) => {
-            rhs = c.new_binary(.ND_MUL, rhs, c.new_long(lhs.ty.base.size.intcast(), tok), tok);
-            c.add_type(rhs);
+            rhs = c.new_binary2(.ND_MUL, rhs, c.new_long(lhs.ty.base.size.intcast(), tok), tok);
             node := c.new_binary(.ND_SUB, lhs, rhs, tok);
             node.ty = lhs.ty;
+            c.gen_expr(node);
             node
         };
         // ptr - ptr, which returns how many elements are between the two.
         @if(!lhs.ty.base.is_null() && !rhs.ty.base.is_null()) => {
             node := c.new_binary(.ND_SUB, lhs, rhs, tok);
             node.ty = ty_long;
-           c.new_binary(.ND_DIV, node, c.new_num(lhs.ty.base.size.intcast(), tok), tok)
+            node := c.new_binary(.ND_DIV, node, c.new_num(lhs.ty.base.size.intcast(), tok), tok);
+            c.gen_expr(node);
+            node
         };
         @else => @error_tok(c, tok, "invalid operands");
     }
@@ -3052,9 +3034,13 @@ fn struct_ref(c: *Ctx, node: *CC.Node, tok: *CC.Token) *CC.Node = {
 // Convert A++ to `(typeof A)((A += 1) - 1)`
 fn new_inc_dec(c: *Ctx, node: *CC.Node, tok: *CC.Token, addend: i64) *CC.Node = {
     c.add_type(node);
-    n := c.new_add(node, c.new_num(addend, tok), tok);
-    nn := c.to_assign(n.kind, n.lhs, n.rhs, n.tok);
-    c.new_cast(c.new_add(nn, c.new_num(-addend, tok), tok), node.ty)
+    rhs := c.new_num(addend, tok);
+    c.new_add(node&, rhs&, tok);
+    nn := c.to_assign(.ND_ADD, node, rhs, tok);
+    nnn := c.new_num(-addend, tok);
+    c.new_add(nn&, nnn&, tok);
+    nnnn := c.new_binary(.ND_ADD, nn, nnn, tok);
+    c.new_cast(nnnn, node.ty)
 }
 
 // for expressions that don't get evaluated (like sizeof, alignof, typeof),
@@ -3071,6 +3057,7 @@ fn speculate(c: *Ctx, rest: **CC.Token, tok: *CC.Token, prec: Prec) *CC.Node = {
         c.jmp_if_unterminated(new_block);
         c.b = new_block;
     };
+    c.add_type(node);
     node
 }
 
@@ -3147,7 +3134,6 @@ fn eval2(c: *Ctx, node: *CC.Node) Ty(i64, ?CStr) = {  // (off, label)
         c.speculate = false;
         //@println("% %", node.r, c.speculate);
         node = c.new_cast(node, ty_long);
-        c.gen_expr(node);
         c.speculate = prev;
         //@println("%", node.r);
     };
@@ -3178,7 +3164,6 @@ fn eval_double(c: *Ctx, node: *CC.Node) f64 = {
         prev := c.speculate; // HACK
         c.speculate = false;
         node = c.new_cast(node, ty_double);
-        c.gen_expr(node);
         c.speculate = prev;
     };
     
@@ -3223,6 +3208,12 @@ fn to_assign(c: *Ctx, kind: CC.NodeKind, lhs: *CC.Node, rhs: *CC.Node, tok: *CC.
     // Convert `A op= B` to ``tmp = &A, *tmp = *tmp op B`.
     // Bitfields need special handling because their address can't be taken. 
 
+    //@match(kind) {
+    //    fn ND_ADD() => c.new_add();
+    //    fn ND_SUB() => c.new_sub();
+    //    @default => ();
+    //};
+    
     addr  := c.gen_addr(lhs);
     delta := c.gen_cast(c.gen_expr(rhs), rhs.ty, lhs.ty);
     start := if is_bitfield {
@@ -3329,6 +3320,11 @@ fn gen_par(c: *Ctx) void = {
     c.b = body;
 }
 
+fn assert_gen_expr(c: *Ctx, node: *CC.Node) Qbe.Ref = {
+    @debug_assert(node.r != QbeNull);    
+    node.r
+}
+
 fn gen_expr(c: *Ctx, node: *CC.Node) Qbe.Ref = {
     if(node.r != QbeNull, => return(node.r));
     c.add_type(node);
@@ -3370,15 +3366,15 @@ fn gen_expr_inner(c: *Ctx, node: *CC.Node) Qbe.Ref = {
             c.gen_load(addr, node.ty)
         }
         fn ND_NEG() => {
-            arg := c.gen_expr(node.lhs);
+            arg := c.assert_gen_expr(node.lhs);
             c.emit(.neg, node.ty.cls(), arg, QbeNull)
         }
         fn ND_BITNOT() => {
-            arg := c.gen_expr(node.lhs);
+            arg := c.assert_gen_expr(node.lhs);
             c.emit(.xor, node.ty.cls(), arg, c.f.getcon(-1))
         }
         fn ND_NOT() => {  // TODO: do the trick with redirecting jump targets to emit better code when this is in an if condition. 
-            arg := c.gen_expr(node.lhs);
+            arg := c.assert_gen_expr(node.lhs);
             // not just xor with 1 bit. it might not be a _Bool. 
             op_eq := cmp_base(node.lhs.ty.cls());
             c.emit(op_eq, .Kl, arg, QbeConZero)
@@ -3405,7 +3401,7 @@ fn gen_expr_inner(c: *Ctx, node: *CC.Node) Qbe.Ref = {
         }
         fn ND_ASSIGN() => { 
             addr  := c.gen_addr(node.lhs);
-            value := c.gen_expr(node.rhs);
+            value := c.assert_gen_expr(node.rhs);
             if node.lhs.kind == .ND_MEMBER && node.lhs.member.is_bitfield {
                 c.gen_store_bitfield(addr, value, node.lhs.member);
             } else {
@@ -3579,6 +3575,8 @@ fn gen_cast(c: *Ctx, src: Qbe.Ref, from: *CC.Type, to: *CC.Type) Qbe.Ref = {
 }
 
 fn gen_call(c: *Ctx, node: *CC.Node) Qbe.Ref #once = {
+    // TODO: don't just take random variable names!
+    //       call this __builtin_alloca and provide alloca.h
     if node.lhs.kind == .ND_VAR && node.lhs.var.name.str() == "alloca" {
         size := c.gen_expr(node.args);
         r := c.f.newtmp("alloca", .Kl);
@@ -3691,6 +3689,9 @@ fn gen_addr_inner(c: *Ctx, node: *CC.Node) Qbe.Ref = {
         fn ND_COMMA() => {
             c.gen_expr(node.lhs);
             c.gen_addr(node.rhs)
+        }
+        fn ND_VLA_PTR() => {
+            node.var.stack_slot
         }
         @default => {
             // TODO: compiler bug
