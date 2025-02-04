@@ -15,12 +15,14 @@
 //       franca program using a c library should get dead code elimination the same 
 //       as it would using a franca library. 
 
+#use(CC);
+
 // Scope for local variables, global variables, typedefs
 // or enum constants
 VarScope :: @struct {
-    var: *CC.Obj;
-    type_def: *CC.Type;
-    enum_ty: *CC.Type;
+    var: *Obj;
+    type_def: *CType;
+    enum_ty: *CType;
     enum_val: i64;
 };
 
@@ -31,7 +33,7 @@ Scope :: @rec @struct {
     // C has two block scopes; one is for variables/typedefs and
     // the other is for struct/union/enum tags.
     vars: HashMap(Str, *VarScope);
-    tags: HashMap(Str, *CC.Type);
+    tags: HashMap(Str, *CType);
 };
 
 // Variable attributes such as typedef or extern.
@@ -49,13 +51,13 @@ VarAttr :: @struct {
 // is a tree data structure.
 Initializer :: @rec @struct {
     next: *Initializer;
-    ty: *CC.Type;
-    tok: *CC.Token;
+    ty: *CType;
+    tok: *Token;
     is_flexible: bool;
 
     // If it's not an aggregate type and has an initializer,
     // `expr` has an initialization expression.
-    expr: *CC.Node;
+    expr: *Node;
 
     // If it's an initializer for an aggregate type (e.g. array or struct),
     // `children` has initializers for its children.
@@ -63,29 +65,29 @@ Initializer :: @rec @struct {
 
     // Only one member can be initialized for a union.
     // `mem` is used to clarify which member is initialized.
-    mem: *CC.Member;
+    mem: *Member;
 };
 
 // For local variable initializer.
 InitDesg :: @rec @struct {
     next: *InitDesg;
     idx: i64;
-    member: *CC.Member;
-    var: *CC.Obj;
+    member: *Member;
+    var: *Obj;
 };
 
 Ctx :: @struct {
     // All local variable instances created during parsing are
     // accumulated to this list.
-    locals: *CC.Obj;
+    locals: *Obj;
     
     // Likewise, global variables are accumulated to this list.
-    globals: *CC.Obj;
+    globals: *Obj;
     
     scope: *Scope;
     
     // Points to the function object the parser is currently parsing.
-    current_fn: ?*CC.Obj;
+    current_fn: ?*Obj;
     
     m: *QbeModule;
     f: *Qbe.Fn;
@@ -99,7 +101,7 @@ Ctx :: @struct {
     // a switch statement.
     current_switch: ?*Qbe.SwitchPayload;
     
-    builtin_alloca: *CC.Obj;
+    builtin_alloca: *Obj;
     
     arena: Alloc;
     next_var_id: i64;
@@ -133,7 +135,7 @@ fn leave_scope(c: *Ctx) void = {
 }
 
 // Find a variable by name.
-fn find_var(c: *Ctx, tok: *CC.Token) ?*VarScope = {
+fn find_var(c: *Ctx, tok: *Token) ?*VarScope = {
     sc := c.scope;
     for_linked sc { sc |
         if sc.vars&.get(tok.str()) { sc2 |
@@ -143,7 +145,7 @@ fn find_var(c: *Ctx, tok: *CC.Token) ?*VarScope = {
     .None
 }
 
-fn find_tag(c: *Ctx, tok: *CC.Token) ?*CC.Type = {
+fn find_tag(c: *Ctx, tok: *Token) ?*CType = {
     sc := c.scope;
     for_linked sc { sc |
         if sc.tags&.get(tok.str()) { ty |
@@ -154,29 +156,29 @@ fn find_tag(c: *Ctx, tok: *CC.Token) ?*CC.Type = {
 }
 
 fn push_scope(c: *Ctx, name: Str) *VarScope = {
-    ::ptr_utils(CC.Scope);
+    ::ptr_utils(Scope);
     @debug_assert(!c.scope.is_null(), "uninit Ctx.scope");
     sc := temp().box_zeroed(VarScope);
     insert(c.scope.vars&, name, sc);
     sc
 }
 
-fn new_node(c: *Ctx, kind: CC.NodeKind, tok: *CC.Token) *CC.Node = {
-    node := temp().box_zeroed(CC.Node);
+fn new_node(c: *Ctx, kind: NodeKind, tok: *Token) *Node = {
+    node := temp().box_zeroed(Node);
     node.kind = kind;
     node.tok = tok;
     node.current_block = c.b;
     node
 }
 
-fn new_binary(c: *Ctx, kind: CC.NodeKind, lhs: *CC.Node, rhs: *CC.Node, tok: *CC.Token) *CC.Node = {
+fn new_binary(c: *Ctx, kind: NodeKind, lhs: *Node, rhs: *Node, tok: *Token) *Node = {
     node := c.new_node(kind, tok);
     node.lhs = lhs;
     node.rhs = rhs;
     node
 }
 
-fn new_deref(c: *Ctx, expr: *CC.Node, tok: *CC.Token) *CC.Node = {
+fn new_deref(c: *Ctx, expr: *Node, tok: *Token) *Node = {
     node := c.new_node(.ND_DEREF, tok);
     node.lhs = expr;
     node.lvalue = expr.r;
@@ -191,7 +193,7 @@ fn new_deref(c: *Ctx, expr: *CC.Node, tok: *CC.Token) *CC.Node = {
     node
 }
 
-fn new_addr(c: *Ctx, expr: *CC.Node, tok: *CC.Token) *CC.Node #once = {
+fn new_addr(c: *Ctx, expr: *Node, tok: *Token) *Node #once = {
     node := c.new_node(.ND_ADDR, tok);
     node.lhs = expr;
     c.gen_addr(expr);
@@ -205,13 +207,13 @@ fn new_addr(c: *Ctx, expr: *CC.Node, tok: *CC.Token) *CC.Node #once = {
     node
 }
 
-fn new_unary(c: *Ctx, kind: CC.NodeKind, expr: *CC.Node, tok: *CC.Token) *CC.Node = {
+fn new_unary(c: *Ctx, kind: NodeKind, expr: *Node, tok: *Token) *Node = {
     node := c.new_node(kind, tok);
     node.lhs = expr;
     node
 }
 
-fn new_num(c: *Ctx, val: i64, tok: *CC.Token, ty: *CC.Type) *CC.Node = {
+fn new_num(c: *Ctx, val: i64, tok: *Token, ty: *CType) *Node = {
     node := c.new_node(.ND_NUM, tok);
     node.ty = ty;
     if !c.f.is_null() {
@@ -220,16 +222,16 @@ fn new_num(c: *Ctx, val: i64, tok: *CC.Token, ty: *CC.Type) *CC.Node = {
     node
 }
 
-fn new_num(c: *Ctx, val: i64, tok: *CC.Token) *CC.Node = 
+fn new_num(c: *Ctx, val: i64, tok: *Token) *Node = 
     c.new_num(val, tok, ty_int);
 
-fn new_long(c: *Ctx, val: i64, tok: *CC.Token) *CC.Node = 
+fn new_long(c: *Ctx, val: i64, tok: *Token) *Node = 
     c.new_num(val, tok, ty_long);
 
-fn new_ulong(c: *Ctx, val: i64, tok: *CC.Token) *CC.Node = 
+fn new_ulong(c: *Ctx, val: i64, tok: *Token) *Node = 
     c.new_num(val, tok, ty_ulong);
 
-fn new_var_node(c: *Ctx, var: *CC.Obj, tok: *CC.Token) *CC.Node = {
+fn new_var_node(c: *Ctx, var: *Obj, tok: *Token) *Node = {
     node := c.new_node(.ND_VAR, tok);
     node.var = var;
     node.ty = var.ty;
@@ -245,18 +247,18 @@ fn new_var_node(c: *Ctx, var: *CC.Obj, tok: *CC.Token) *CC.Node = {
     node
 }
 
-fn new_vla_ptr(c: *Ctx, var: *CC.Obj, tok: *CC.Token) *CC.Node = {
+fn new_vla_ptr(c: *Ctx, var: *Obj, tok: *Token) *Node = {
     node := c.new_node(.ND_VLA_PTR, tok);
     node.var = var;
     node.ty = var.ty;
     node
 }
 
-fn new_cast(c: *Ctx, expr: *CC.Node, ty: *CC.Type) *CC.Node = {
+fn new_cast(c: *Ctx, expr: *Node, ty: *CType) *Node = {
     c.add_type(expr);
     if(expr.ty.identical(ty), => return(expr));
     
-    node := temp().box_zeroed(CC.Node);
+    node := temp().box_zeroed(Node);
     node.kind = .ND_CAST;
     node.tok = expr.tok;
     node.lhs = expr;
@@ -268,7 +270,7 @@ fn new_cast(c: *Ctx, expr: *CC.Node, ty: *CC.Type) *CC.Node = {
     node
 }
 
-fn new_initializer(c: *Ctx, ty: *CC.Type, is_flexible: bool) *Initializer = {
+fn new_initializer(c: *Ctx, ty: *CType, is_flexible: bool) *Initializer = {
     init := temp().box_zeroed(Initializer);
     init.ty = ty;
 
@@ -310,8 +312,8 @@ fn new_initializer(c: *Ctx, ty: *CC.Type, is_flexible: bool) *Initializer = {
     init
 }
 
-fn new_var(c: *Ctx, name: Str, ty: *CC.Type) *CC.Obj = {
-    var := temp().box_zeroed(CC.Obj);
+fn new_var(c: *Ctx, name: Str, ty: *CType) *Obj = {
+    var := temp().box_zeroed(Obj);
     var.name = name.slow_convert_to_c_string();
     var.ty = ty;
     var.align = ty.align;
@@ -320,7 +322,7 @@ fn new_var(c: *Ctx, name: Str, ty: *CC.Type) *CC.Obj = {
     var
 }
 
-fn new_lvar(c: *Ctx, name: Str, ty: *CC.Type) *CC.Obj = {
+fn new_lvar(c: *Ctx, name: Str, ty: *CType) *Obj = {
     var := c.new_var(name, ty);
     var.is_local = true;
     var.next = c.locals;
@@ -338,7 +340,7 @@ fn new_lvar(c: *Ctx, name: Str, ty: *CC.Type) *CC.Obj = {
 }
 
 // fixed size allocs always go in the start block so they can be fast-locals. 
-fn create_stack_slot(c: *Ctx, var: *CC.Obj) void = {
+fn create_stack_slot(c: *Ctx, var: *Obj) void = {
     // :ZeroSizeTypes chibicc has empty structs with sizeof(0) but thats an extension
     // what if you tried to diy static_assert with that, now we broke your code?
     if var.ty.size < 0 {
@@ -349,7 +351,7 @@ fn create_stack_slot(c: *Ctx, var: *CC.Obj) void = {
     push(c.f.start, make_ins(.alloc8, .Kl, var.stack_slot, c.f.getcon(var.ty.size.intcast()), QbeNull));  // TODO: smaller align stack slots
 }
 
-fn new_gvar(c: *Ctx, name: Str, ty: *CC.Type) *CC.Obj = {
+fn new_gvar(c: *Ctx, name: Str, ty: *CType) *Obj = {
     var := c.new_var(name, ty);
     var.next = c.globals;
     var.is_static = true;
@@ -364,24 +366,24 @@ fn new_unique_name(c: *Ctx) Str = {
     s
 }
 
-fn new_anon_gvar(c: *Ctx, ty: *CC.Type) *CC.Obj = 
+fn new_anon_gvar(c: *Ctx, ty: *CType) *Obj = 
     c.new_gvar(c.new_unique_name(), ty);
 
-fn new_string_literal(c: *Ctx, p: []u8, ty: *CC.Type) *CC.Obj = {
+fn new_string_literal(c: *Ctx, p: []u8, ty: *CType) *Obj = {
     var := c.new_anon_gvar(ty);
     var.init_data = p;
     var.init_data_needs_null_terminator = true;
     var
 }
 
-fn get_ident(c: *Ctx, tok: *CC.Token) Str = {
+fn get_ident(c: *Ctx, tok: *Token) Str = {
     if tok.kind != .TK_IDENT {
         @error_tok(c, tok, "expected an identifier");
     };
     tok.str()  // TODO: make sure we never mutate this (its not a copy!)
 }
 
-fn find_typedef(c: *Ctx, tok: *CC.Token) ?*CC.Type = {
+fn find_typedef(c: *Ctx, tok: *Token) ?*CType = {
     if tok.kind == .TK_IDENT {
         if c.find_var(tok) { sc |
             if !sc.type_def.is_null() {
@@ -392,7 +394,7 @@ fn find_typedef(c: *Ctx, tok: *CC.Token) ?*CC.Type = {
     .None
 }
 
-fn push_tag_scope(c: *Ctx, tok: *CC.Token, ty: *CC.Type) void = {
+fn push_tag_scope(c: *Ctx, tok: *Token, ty: *CType) void = {
     c.scope.tags&.insert(tok.str(), ty);
 }
 
@@ -416,7 +418,7 @@ fn push_tag_scope(c: *Ctx, tok: *CC.Token, ty: *CC.Type) void = {
 // while keeping the "current" type object that the typenames up
 // until that point represent. When we reach a non-typename token,
 // we return the current type object.
-fn declspec(c: *Ctx, rest: **CC.Token, tok: *CC.Token, attr: ?*VarAttr) *CC.Type = {
+fn declspec(c: *Ctx, rest: **Token, tok: *Token, attr: ?*VarAttr) *CType = {
     // We use a single integer as counters for all typenames.
     // For example, bits 0 and 1 represents how many times we saw the
     // keyword "void" so far. With this, we can use a switch statement
@@ -582,13 +584,13 @@ fn declspec(c: *Ctx, rest: **CC.Token, tok: *CC.Token, attr: ?*VarAttr) *CC.Type
 
 // func-params = ("void" | param ("," param)* ("," "...")?)? ")"
 // param             = declspec declarator
-fn func_params(c: *Ctx, rest: **CC.Token, tok: *CC.Token, ty: *CC.Type) *CC.Type = {
+fn func_params(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) *CType = {
     if equal(tok, "void") && equal(tok.next, ")") {
         rest[] = tok.next.next;
         return(c.func_type(ty));
     };
 
-    head := CC.Type.zeroed();
+    head := CType.zeroed();
     cur  := head&;
     is_variadic := false;
 
@@ -643,7 +645,7 @@ fn func_params(c: *Ctx, rest: **CC.Token, tok: *CC.Token, ty: *CC.Type) *CC.Type
 }
 
 // array-dimensions = ("static" | "restrict")* const-expr? "]" type-suffix
-fn array_dimensions(c: *Ctx, rest: **CC.Token, tok: *CC.Token, ty: *CC.Type) *CC.Type #once = {
+fn array_dimensions(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) *CType #once = {
     dowhile {
         ignore(tok&, tok, @const_slice("static", "restrict"))
     };
@@ -676,7 +678,7 @@ fn array_dimensions(c: *Ctx, rest: **CC.Token, tok: *CC.Token, ty: *CC.Type) *CC
 // type-suffix = "(" func-params
 //                         | "[" array-dimensions
 //                         | ε
-fn type_suffix(c: *Ctx, rest: **CC.Token, tok: *CC.Token, ty: *CC.Type) *CC.Type = {
+fn type_suffix(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) *CType = {
     if(equal(tok, "("), => return(c.func_params(rest, tok.next, ty)));
     if(equal(tok, "["), => return(c.array_dimensions(rest, tok.next, ty)));
     rest[] = tok;
@@ -684,7 +686,7 @@ fn type_suffix(c: *Ctx, rest: **CC.Token, tok: *CC.Token, ty: *CC.Type) *CC.Type
 }
 
 // pointers = ("*" ("const" | "volatile" | "restrict")*)*
-fn pointers(c: *Ctx, rest: **CC.Token, tok: *CC.Token, ty: *CC.Type) *CC.Type = {
+fn pointers(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) *CType = {
     while => consume(tok&, tok, "*") {
         ty = c.pointer_to(ty);
         dowhile {
@@ -695,7 +697,7 @@ fn pointers(c: *Ctx, rest: **CC.Token, tok: *CC.Token, ty: *CC.Type) *CC.Type = 
     ty
 }
 
-fn ignore(rest: **CC.Token, tok: *CC.Token, $ignored: []Str) bool #inline = {
+fn ignore(rest: **Token, tok: *Token, $ignored: []Str) bool #inline = {
     inline_for ignored { $kw |
         if(consume(rest, tok, ::kw[]), => return(true));
     };
@@ -703,19 +705,19 @@ fn ignore(rest: **CC.Token, tok: *CC.Token, $ignored: []Str) bool #inline = {
 }
 
 // declarator = pointers ("(" ident ")" | "(" declarator ")" | ident) type-suffix
-fn declarator(c: *Ctx, rest: **CC.Token, tok: *CC.Token, ty: *CC.Type) *CC.Type = {
+fn declarator(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) *CType = {
     ty = c.pointers(tok&, tok, ty);
 
     if equal(tok, "(") {
         start := tok;
-        dummy := CC.Type.zeroed();
+        dummy := CType.zeroed();
         c.declarator(tok&, start.next, dummy&);
         tok = c.skip(tok, ")");
         ty = c.type_suffix(rest, tok, ty);
         return(c.declarator(tok&, start.next, ty));
     };
 
-    name := CC.Token.ptr_from_int(0);
+    name := Token.ptr_from_int(0);
     name_pos := tok;
 
     if tok.kind == .TK_IDENT {
@@ -730,11 +732,11 @@ fn declarator(c: *Ctx, rest: **CC.Token, tok: *CC.Token, ty: *CC.Type) *CC.Type 
 }
 
 // abstract-declarator = pointers ("(" abstract-declarator ")")? type-suffix
-fn abstract_declarator(c: *Ctx, rest: **CC.Token, tok: *CC.Token, ty: *CC.Type) *CC.Type = {
+fn abstract_declarator(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) *CType = {
     ty = c.pointers(tok&, tok, ty);
     if equal(tok, "(") {
         start := tok;
-        dummy := CC.Type.zeroed();
+        dummy := CType.zeroed();
         c.abstract_declarator(tok&, start.next, dummy&);
         tok = c.skip(tok, ")");
         ty  = c.type_suffix(rest, tok, ty);
@@ -745,23 +747,23 @@ fn abstract_declarator(c: *Ctx, rest: **CC.Token, tok: *CC.Token, ty: *CC.Type) 
 }
 
 // type-name = declspec abstract-declarator
-fn typename(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Type = {
+fn typename(c: *Ctx, rest: **Token, tok: *Token) *CType = {
     ty := c.declspec(tok&, tok, .None);
     c.abstract_declarator(rest, tok, ty)
 }
 
-fn is_end(tok: *CC.Token) bool = 
+fn is_end(tok: *Token) bool = 
     equal(tok, "}") || (equal(tok, ",") && equal(tok.next, "}"));
 
 // enum-specifier = ident? "{" enum-list? "}"
 //                                | ident ("{" enum-list? "}")?
 //
 // enum-list            = ident ("=" num)? ("," ident ("=" num)?)* ","?
-fn enum_specifier(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Type #once = {
+fn enum_specifier(c: *Ctx, rest: **Token, tok: *Token) *CType #once = {
     ty := c.enum_type();
 
     // Read a struct tag.
-    tag: ?*CC.Token = .None;
+    tag: ?*Token = .None;
     if tok.kind == .TK_IDENT {
         tag = (Some = tok);
         tok = tok.next;
@@ -802,7 +804,7 @@ fn enum_specifier(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Type #once = {
 }
 
 // typeof-specifier = "(" (expr | typename) ")"
-fn typeof_specifier(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Type #once = {
+fn typeof_specifier(c: *Ctx, rest: **Token, tok: *Token) *CType #once = {
     tok = c.skip(tok, "(");
     ty := if c.is_typename(tok) {
         c.typename(tok&, tok)
@@ -816,7 +818,7 @@ fn typeof_specifier(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Type #once = 
 }
 
 // Generate code for computing a VLA size.
-fn compute_vla_size(c: *Ctx, ty: *CC.Type) Qbe.Ref = {
+fn compute_vla_size(c: *Ctx, ty: *CType) Qbe.Ref = {
     if(ty.vla_size != QbeNull, => return(ty.vla_size));
     if !ty.base.is_null() {
         c.compute_vla_size(ty.base);
@@ -837,7 +839,7 @@ fn compute_vla_size(c: *Ctx, ty: *CC.Type) Qbe.Ref = {
 }
 
 // declaration = declspec (declarator ("=" expr)? ("," declarator ("=" expr)?)*)? ";"
-fn declaration(c: *Ctx, tok: *CC.Token, basety: *CC.Type, attr: ?*VarAttr) *CC.Token = {
+fn declaration(c: *Ctx, tok: *Token, basety: *CType, attr: ?*VarAttr) *Token = {
     start := tok;
 
     comma_sep(c, tok&, ";") {
@@ -896,7 +898,7 @@ fn declaration(c: *Ctx, tok: *CC.Token, basety: *CC.Type, attr: ?*VarAttr) *CC.T
     tok  // already ate the semicolon
 }
 
-fn skip_excess_element(c: *Ctx, tok: *CC.Token) *CC.Token = {
+fn skip_excess_element(c: *Ctx, tok: *Token) *Token = {
     if equal(tok, "{") {
         tok = c.skip_excess_element(tok.next);
         tok = c.skip(tok, "}");
@@ -907,7 +909,7 @@ fn skip_excess_element(c: *Ctx, tok: *CC.Token) *CC.Token = {
 }
 
 // string-initializer = string-literal
-fn string_initializer(c: *Ctx, rest: **CC.Token, tok: *CC.Token, init: *Initializer) void #once = {
+fn string_initializer(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) void #once = {
     if init.is_flexible {
         init[] = c.new_initializer(c.array_of(init.ty.base, tok.ty.array_len.intcast()), false)[];
     };
@@ -957,7 +959,7 @@ fn string_initializer(c: *Ctx, rest: **CC.Token, tok: *CC.Token, init: *Initiali
 //     struct { int a, b, c; } x = { .c=5 };
 //
 // The above initializer sets x.c to 5.
-fn array_designator(c: *Ctx, rest: **CC.Token, tok: *CC.Token, ty: *CC.Type) Ty(i64, i64) = {  // (begin, end)
+fn array_designator(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) Ty(i64, i64) = {  // (begin, end)
     begin := c.const_expr(tok&, tok.next);
     if(begin >= ty.array_len.intcast(), => @error_tok(c, tok, "array designator index exceeds array bounds"));
     
@@ -973,7 +975,7 @@ fn array_designator(c: *Ctx, rest: **CC.Token, tok: *CC.Token, ty: *CC.Type) Ty(
 }
 
 // struct-designator = "." ident
-fn struct_designator(c: *Ctx, rest: **CC.Token, tok: *CC.Token, ty: *CC.Type) *CC.Member = {
+fn struct_designator(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) *Member = {
     start := tok;
     tok = c.skip(tok, ".");
     if(tok.kind != .TK_IDENT, => @error_tok(c, tok, "expected a field designator"));
@@ -1001,14 +1003,14 @@ fn struct_designator(c: *Ctx, rest: **CC.Token, tok: *CC.Token, ty: *CC.Type) *C
 }
 
 // designation = ("[" const-expr "]" | "." ident)* "="? initializer
-fn designation(c: *Ctx, rest: **CC.Token, tok: *CC.Token, init: *Initializer) void = {
+fn designation(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) void = {
     if equal(tok, "[") {
         if(init.ty.kind != .TY_ARRAY, => @error_tok(c, tok, "array index in non-array initializer"));
 
         begin, end := c.array_designator(tok&, tok, init.ty);
 
-        //tok2: *CC.Token;  // TODO: sane error message for this!
-        tok2 := CC.Token.ptr_from_int(0);
+        //tok2: *Token;  // TODO: sane error message for this!
+        tok2 := Token.ptr_from_int(0);
         range(begin, end + 1) { i |
             c.designation(tok2&, tok, init.children[i]);
         };
@@ -1020,7 +1022,7 @@ fn designation(c: *Ctx, rest: **CC.Token, tok: *CC.Token, init: *Initializer) vo
         fn TY_STRUCT() => {
             mem := c.struct_designator(tok&, tok, init.ty);
             c.designation(tok&, tok, init.children[mem.idx.intcast()]);
-            init.expr = CC.Node.ptr_from_int(0);
+            init.expr = Node.ptr_from_int(0);
             c.struct_initializer2(rest, tok, init, mem.next);
             return();
         }
@@ -1042,7 +1044,7 @@ fn designation(c: *Ctx, rest: **CC.Token, tok: *CC.Token, init: *Initializer) vo
 // An array length can be omitted if an array has an initializer
 // (e.g. `int x[] = {1,2,3}`). If it's omitted, count the number
 // of initializer elements.
-fn count_array_init_elements(c: *Ctx, tok: *CC.Token, ty: *CC.Type) i64 = {
+fn count_array_init_elements(c: *Ctx, tok: *Token, ty: *CType) i64 = {
     dummy := c.new_initializer(ty.base, true);
 
     i, hi := (0, 0);
@@ -1064,7 +1066,7 @@ fn count_array_init_elements(c: *Ctx, tok: *CC.Token, ty: *CC.Type) i64 = {
     hi
 }
 
-fn comma_sep(c: *Ctx, tok: **CC.Token, $end: Str, $body: @Fn() void) void = {
+fn comma_sep(c: *Ctx, tok: **Token, $end: Str, $body: @Fn() void) void = {
     first := true;
     while => !consume_end(tok, end) {
         if !first {
@@ -1076,7 +1078,7 @@ fn comma_sep(c: *Ctx, tok: **CC.Token, $end: Str, $body: @Fn() void) void = {
 }
 
 // array-initializer1 = "{" initializer ("," initializer)* ","? "}"
-fn array_initializer1(c: *Ctx, rest: **CC.Token, tok: *CC.Token, init: *Initializer) void = {
+fn array_initializer1(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) void = {
     tok = c.skip(tok, "{");
 
     if init.is_flexible {
@@ -1094,7 +1096,7 @@ fn array_initializer1(c: *Ctx, rest: **CC.Token, tok: *CC.Token, init: *Initiali
         if equal(tok, "[") {
             begin, end := c.array_designator(tok&, tok, init.ty);
 
-            tok2 := CC.Token.ptr_from_int(0);
+            tok2 := Token.ptr_from_int(0);
             range(begin, end + 1) { j |
                 c.designation(tok2&, tok, init.children[j]);
             };
@@ -1114,7 +1116,7 @@ fn array_initializer1(c: *Ctx, rest: **CC.Token, tok: *CC.Token, init: *Initiali
 }
 
 // array-initializer2 = initializer ("," initializer)*
-fn array_initializer2(c: *Ctx, rest: **CC.Token, tok: *CC.Token, init: *Initializer, i: i64) void = {
+fn array_initializer2(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer, i: i64) void = {
     if init.is_flexible {
         len := c.count_array_init_elements(tok, init.ty);
         init[] = c.new_initializer(c.array_of(init.ty.base, len), false)[];
@@ -1137,7 +1139,7 @@ fn array_initializer2(c: *Ctx, rest: **CC.Token, tok: *CC.Token, init: *Initiali
 }
 
 // struct-initializer1 = "{" initializer ("," initializer)* ","? "}"
-fn struct_initializer1(c: *Ctx, rest: **CC.Token, tok: *CC.Token, init: *Initializer) void = {
+fn struct_initializer1(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) void = {
     tok = c.skip(tok, "{");
     mem := init.ty.members;
 
@@ -1161,7 +1163,7 @@ fn struct_initializer1(c: *Ctx, rest: **CC.Token, tok: *CC.Token, init: *Initial
 }
 
 // struct-initializer2 = initializer ("," initializer)*
-fn struct_initializer2(c: *Ctx, rest: **CC.Token, tok: *CC.Token, init: *Initializer, mem: *CC.Member) void = {
+fn struct_initializer2(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer, mem: *Member) void = {
     first := true;
     while => !mem.is_null() && !is_end(tok) {
         start := tok;
@@ -1181,7 +1183,7 @@ fn struct_initializer2(c: *Ctx, rest: **CC.Token, tok: *CC.Token, init: *Initial
     rest[] = tok;
 }
 
-fn union_initializer(c: *Ctx, rest: **CC.Token, tok: *CC.Token, init: *Initializer) void = {
+fn union_initializer(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) void = {
     // Unlike structs, union initializers take only one initializer,
     // and that initializes the first union member by default.
     // You can initialize other member using a designated initializer.
@@ -1207,7 +1209,7 @@ fn union_initializer(c: *Ctx, rest: **CC.Token, tok: *CC.Token, init: *Initializ
 // initializer = string-initializer | array-initializer
 //                         | struct-initializer | union-initializer
 //                         | assign
-fn initializer2(c: *Ctx, rest: **CC.Token, tok: *CC.Token, init: *Initializer) void = @match(init.ty.kind) {
+fn initializer2(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) void = @match(init.ty.kind) {
     fn TY_ARRAY() => @if_else {
         @if(tok.kind == .TK_STR) => c.string_initializer(rest, tok, init);
         @if(equal(tok, "{")) => c.array_initializer1(rest, tok, init);
@@ -1238,7 +1240,7 @@ fn initializer2(c: *Ctx, rest: **CC.Token, tok: *CC.Token, init: *Initializer) v
     }); // TODO: this shouldn't need the extra brackets?
 };
 
-fn initializer(c: *Ctx, rest: **CC.Token, tok: *CC.Token, ty: *CC.Type, new_ty: **CC.Type) *Initializer = {
+fn initializer(c: *Ctx, rest: **Token, tok: *Token, ty: *CType, new_ty: **CType) *Initializer = {
     init := c.new_initializer(ty, true);
     c.initializer2(rest, tok, init);
 
@@ -1264,7 +1266,7 @@ fn end_linked(head: ~T) T = {
     head
 }
 
-fn init_desg_expr(c: *Ctx, desg: *InitDesg, tok: *CC.Token) *CC.Node = {
+fn init_desg_expr(c: *Ctx, desg: *InitDesg, tok: *Token) *Node = {
     if(!desg.var.is_null(), => return(c.new_var_node(desg.var, tok)));
 
     if !desg.member.is_null() {
@@ -1281,11 +1283,11 @@ fn init_desg_expr(c: *Ctx, desg: *InitDesg, tok: *CC.Token) *CC.Node = {
     c.new_deref(node, tok)
 }
 
-fn create_lvar_init(c: *Ctx, init: *Initializer, ty: *CC.Type, desg: *InitDesg, tok: *CC.Token) *CC.Node = {
+fn create_lvar_init(c: *Ctx, init: *Initializer, ty: *CType, desg: *InitDesg, tok: *Token) *Node = {
     if ty.kind == .TY_ARRAY {
         node := c.new_node(.ND_NULL_EXPR, tok);
         range(0, ty.array_len.intcast()) { i |
-            desg2: InitDesg = (next = desg, idx = i, member = CC.Member.ptr_from_int(0), var = CC.Obj.ptr_from_int(0));
+            desg2: InitDesg = (next = desg, idx = i, member = Member.ptr_from_int(0), var = Obj.ptr_from_int(0));
             rhs := c.create_lvar_init(init.children[i], ty.base, desg2&, tok);
             node = c.new_binary(.ND_COMMA, node, rhs, tok);
         };
@@ -1297,7 +1299,7 @@ fn create_lvar_init(c: *Ctx, init: *Initializer, ty: *CC.Type, desg: *InitDesg, 
 
         mem := ty.members;
         for_linked mem { mem |
-            desg2: InitDesg = (next = desg, idx = 0, member = mem, var = CC.Obj.ptr_from_int(0));
+            desg2: InitDesg = (next = desg, idx = 0, member = mem, var = Obj.ptr_from_int(0));
             rhs := c.create_lvar_init(init.children[mem.idx.intcast()], mem.ty, desg2&, tok);
             node = c.new_binary(.ND_COMMA, node, rhs, tok);
         };
@@ -1307,7 +1309,7 @@ fn create_lvar_init(c: *Ctx, init: *Initializer, ty: *CC.Type, desg: *InitDesg, 
     if ty.kind == .TY_UNION {
         ::if(@type init.mem);
         mem := if(!init.mem.is_null(), => init.mem, => ty.members);
-        desg2: InitDesg = (next = desg, idx = 0, member = mem, var = CC.Obj.ptr_from_int(0));
+        desg2: InitDesg = (next = desg, idx = 0, member = mem, var = Obj.ptr_from_int(0));
         return(c.create_lvar_init(init.children[mem.idx.intcast()], mem.ty, desg2&, tok));
     };
 
@@ -1327,7 +1329,7 @@ fn create_lvar_init(c: *Ctx, init: *Initializer, ty: *CC.Type, desg: *InitDesg, 
 //     x[0][1] = 7;
 //     x[1][0] = 8;
 //     x[1][1] = 9;
-fn lvar_initializer(c: *Ctx, rest: **CC.Token, tok: *CC.Token, var: *CC.Obj) *CC.Node = {
+fn lvar_initializer(c: *Ctx, rest: **Token, tok: *Token, var: *Obj) *Node = {
     init := c.initializer(rest, tok, var.ty, var.ty&);
     desg := InitDesg.zeroed();
     desg.var = var;
@@ -1372,8 +1374,8 @@ fn write_buf(buf: *u8, val: i64, sz: i64) void = {
     };
 }
 
-fn write_gvar_data(c: *Ctx, cur: *CC.Relocation, init: *Initializer, ty: *CC.Type, buf: []u8, off: i64) *CC.Relocation = {
-    ::enum(CC.TypeKind);
+fn write_gvar_data(c: *Ctx, cur: *Relocation, init: *Initializer, ty: *CType, buf: []u8, off: i64) *Relocation = {
+    ::enum(TypeKind);
     if ty.kind == .TY_ARRAY {
         sz := ty.base.size.intcast();
         range(0, ty.array_len.intcast()) { i |
@@ -1389,7 +1391,7 @@ fn write_gvar_data(c: *Ctx, cur: *CC.Relocation, init: *Initializer, ty: *CC.Typ
             for_linked mem { mem | 
                 if mem.is_bitfield {
                     expr := init.children[mem.idx.intcast()].expr;
-                    ::ptr_utils(CC.Node);
+                    ::ptr_utils(Node);
                     if(expr.is_null(), => break());
                     loc      := buf.ptr.offset(off + mem.offset.intcast());
                     oldval   := read_buf(loc, mem.ty.size.intcast());
@@ -1430,7 +1432,7 @@ fn write_gvar_data(c: *Ctx, cur: *CC.Relocation, init: *Initializer, ty: *CC.Typ
         return(cur)
     };
 
-    rel := c.arena.box(CC.Relocation);
+    rel := c.arena.box(Relocation);
     rel.offset = off.intcast();
     rel.label = label;
     rel.addend = val;
@@ -1442,16 +1444,16 @@ fn write_gvar_data(c: *Ctx, cur: *CC.Relocation, init: *Initializer, ty: *CC.Typ
 // embedded to .data section. This function serializes Initializer
 // objects to a flat byte array. It is a compile error if an
 // initializer list contains a non-constant expression.
-fn gvar_initializer(c: *Ctx, rest: **CC.Token, tok: *CC.Token, var: *CC.Obj) void = {
+fn gvar_initializer(c: *Ctx, rest: **Token, tok: *Token, var: *Obj) void = {
     init := c.initializer(rest, tok, var.ty, var.ty&);
-    head := CC.Relocation.zeroed();
+    head := Relocation.zeroed();
     buf := c.arena.alloc_zeroed(u8, var.ty.size.intcast());
     c.write_gvar_data(head&, init, var.ty, buf, 0);
     var.init_data = buf;
     var.rel = head.next;
 }
 
-fn is_typename(c: *Ctx, tok: *CC.Token) bool #inline = {
+fn is_typename(c: *Ctx, tok: *Token) bool #inline #use(Tokens) = {
     is_type_keyword := tok.kind.raw() >= TokenKind.short.raw() && tok.kind.raw() <= TokenKind.int.raw();
     is_type_keyword || c.find_typedef(tok).is_some()
 }
@@ -1475,8 +1477,8 @@ fn push_loop(c: *Ctx, $body: @Fn(brk: *Qbe.Blk, cnt: *Qbe.Blk) void) Ty(*Qbe.Blk
 }
 
 // compound-stmt = (typedef | declaration | stmt)* "}"
-fn compound_stmt(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
-    cur: ?*CC.Node = .None;
+fn compound_stmt(c: *Ctx, rest: **Token, tok: *Token) *Node = {
+    cur: ?*Node = .None;
 
     c.enter_scope();
 
@@ -1507,7 +1509,7 @@ fn compound_stmt(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
 }
 
 // expr-stmt = expr? ";"
-fn expr_stmt(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = if equal(tok, ";") {
+fn expr_stmt(c: *Ctx, rest: **Token, tok: *Token) *Node = if equal(tok, ";") {
     rest[] = tok.next;
     c.new_node(.ND_NULL_EXPR, tok)
 } else {
@@ -1517,8 +1519,8 @@ fn expr_stmt(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = if equal(tok,
 };
 
 // struct-members = (declspec declarator (","    declarator)* ";")*
-fn struct_members(c: *Ctx, rest: **CC.Token, tok: *CC.Token, ty: *CC.Type) void = {
-    head := CC.Member.zeroed();
+fn struct_members(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) void = {
+    head := Member.zeroed();
     cur  := head&;
     idx  := 0;
 
@@ -1529,7 +1531,7 @@ fn struct_members(c: *Ctx, rest: **CC.Token, tok: *CC.Token, ty: *CC.Type) void 
 
         is_anon := (@is(basety.kind, .TY_STRUCT, .TY_UNION)) && consume(tok&, tok, ";");
         if is_anon {
-            mem := c.arena.box_zeroed(CC.Member);
+            mem := c.arena.box_zeroed(Member);
             mem.tok = tok;
             mem.ty  = basety;
             mem.idx = idx.intcast();
@@ -1542,7 +1544,7 @@ fn struct_members(c: *Ctx, rest: **CC.Token, tok: *CC.Token, ty: *CC.Type) void 
 
         // Regular struct members
         comma_sep(c, tok&, ";") {
-            mem := c.arena.box_zeroed(CC.Member);
+            mem := c.arena.box_zeroed(Member);
             mem.tok = tok;
             mem.ty = c.declarator(tok&, tok, basety);
             mem.name = mem.ty.name;
@@ -1572,7 +1574,7 @@ fn struct_members(c: *Ctx, rest: **CC.Token, tok: *CC.Token, ty: *CC.Type) void 
 }
 
 // attribute = ("__attribute__" "(" "(" "packed" ")" ")")*
-fn attribute_list(c: *Ctx, tok: *CC.Token, ty: *CC.Type) *CC.Token = {
+fn attribute_list(c: *Ctx, tok: *Token, ty: *CType) *Token = {
     while => consume(tok&, tok, "__attribute__") {
         tok = c.skip(tok, "(");
         tok = c.skip(tok, "(");
@@ -1601,12 +1603,12 @@ fn attribute_list(c: *Ctx, tok: *CC.Token, ty: *CC.Type) *CC.Token = {
 }
 
 // struct-union-decl = attribute? ident? ("{" struct-members)?
-fn struct_union_decl(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Type = {
+fn struct_union_decl(c: *Ctx, rest: **Token, tok: *Token) *CType = {
     ty := c.struct_type();
     tok = c.attribute_list(tok, ty);
 
     // Read a tag.
-    tag: ?*CC.Token = .None;
+    tag: ?*Token = .None;
     if tok.kind == .TK_IDENT {
         tag = (Some = tok);
         tok = tok.next;
@@ -1645,7 +1647,7 @@ fn struct_union_decl(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Type = {
 }
 
 // struct-decl = struct-union-decl
-fn struct_decl(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Type = {
+fn struct_decl(c: *Ctx, rest: **Token, tok: *Token) *CType = {
     ty := c.struct_union_decl(rest, tok);
     ty.kind = .TY_STRUCT;
     if(ty.size < 0, => return(ty));
@@ -1692,7 +1694,7 @@ fn struct_decl(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Type = {
 }
 
 // union-decl = struct-union-decl
-fn union_decl(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Type = {
+fn union_decl(c: *Ctx, rest: **Token, tok: *Token) *CType = {
     ty := c.struct_union_decl(rest, tok);
     ty.kind = .TY_UNION;
     if(ty.size < 0, => return(ty));
@@ -1709,10 +1711,10 @@ fn union_decl(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Type = {
     ty
 }
 
-fn next_is_paren_typename(c: *Ctx, tok: *CC.Token) bool = 
+fn next_is_paren_typename(c: *Ctx, tok: *Token) bool = 
     equal(tok.next, "(") && c.is_typename(tok.next.next);
 
-fn parse_typedef(c: *Ctx, tok: *CC.Token, basety: *CC.Type) *CC.Token = {
+fn parse_typedef(c: *Ctx, tok: *Token, basety: *CType) *Token = {
     comma_sep(c, tok&, ";") {
         ty := c.declarator(tok&, tok, basety);
         if(ty.name.is_null(), => @error_tok(c, ty.name_pos, "typedef name omitted"));
@@ -1721,14 +1723,14 @@ fn parse_typedef(c: *Ctx, tok: *CC.Token, basety: *CC.Type) *CC.Token = {
     tok
 }
 
-fn create_param_lvars(c: *Ctx, param: *CC.Type) void = {  // TODO: why isn't this a loop?
+fn create_param_lvars(c: *Ctx, param: *CType) void = {  // TODO: why isn't this a loop?
     if(param.is_null(), => return()); 
     c.create_param_lvars(param.next);
     if(param.name.is_null(), => @error_tok(c, param.name_pos, "parameter name omitted"));
     c.new_lvar(c.get_ident(param.name), param);
 }
 
-fn find_func(c: *Ctx, name: Str) ?*CC.Obj = {
+fn find_func(c: *Ctx, name: Str) ?*Obj = {
     ::ptr_utils(Scope);
     hack := c.scope;
     sc := hack.end_linked();
@@ -1741,7 +1743,7 @@ fn find_func(c: *Ctx, name: Str) ?*CC.Obj = {
     .None
 }
 
-fn mark_live(c: *Ctx, var: *CC.Obj) void = {
+fn mark_live(c: *Ctx, var: *Obj) void = {
     if(!var.is_function || var.is_live, => return());
     var.is_live = true;
     refs: []CStr = (ptr = var.refs.ptr, len = var.refs.len.intcast());
@@ -1753,7 +1755,7 @@ fn mark_live(c: *Ctx, var: *CC.Obj) void = {
 }
 
 // TODO: this clears a bunch of state that won't work if nested function decls are allowed
-fn function(c: *Ctx, tok: *CC.Token, basety: *CC.Type, attr: *VarAttr) *CC.Token = {
+fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr) *Token = {
     ty := c.declarator(tok&, tok, basety);
     if(ty.name.is_null(), => @error_tok(c, ty.name_pos, "function name omitted"));
     name_str := c.get_ident(ty.name);
@@ -1838,7 +1840,7 @@ fn function(c: *Ctx, tok: *CC.Token, basety: *CC.Type, attr: *VarAttr) *CC.Token
     tok
 }
 
-fn global_variable(c: *Ctx, tok: *CC.Token, basety: *CC.Type, attr: *VarAttr) *CC.Token = {
+fn global_variable(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr) *Token = {
     comma_sep(c, tok&, ";") {
         ty := c.declarator(tok&, tok, basety);
         if(ty.name.is_null(), => @error_tok(c, ty.name_pos, "variable name omitted"));
@@ -1862,16 +1864,16 @@ fn global_variable(c: *Ctx, tok: *CC.Token, basety: *CC.Type, attr: *VarAttr) *C
 
 // Lookahead tokens and returns true if a given token is a start
 // of a function definition or declaration.
-fn is_function(c: *Ctx, tok: *CC.Token) bool = {
+fn is_function(c: *Ctx, tok: *Token) bool = {
     if(equal(tok, ";"), => return(false));
-    dummy := CC.Type.zeroed();
+    dummy := CType.zeroed();
     ty    := c.declarator(tok&, tok, dummy&);
     ty.kind == .TY_FUNC
 }
 
 // Remove redundant tentative definitions.
 fn scan_globals(c: *Ctx) void = {
-    head := CC.Obj.zeroed();
+    head := Obj.zeroed();
     cur  := head&;
 
     var := c.globals;
@@ -1891,12 +1893,12 @@ fn scan_globals(c: *Ctx) void = {
         };
     };
 
-    cur.next = CC.Obj.ptr_from_int(0);
+    cur.next = Obj.ptr_from_int(0);
     c.globals = head.next;
 }
 
 // Find another definition of the same identifier.
-fn find_matching_name(first: *CC.Obj, goal: *CC.Obj) ?*CC.Obj = {
+fn find_matching_name(first: *Obj, goal: *Obj) ?*Obj = {
     for_linked first { var2 |
         if !goal.identical(var2) && var2.is_definition && goal.name.str() == var2.name.str() {
             return(Some = var2);
@@ -1912,7 +1914,7 @@ fn declare_builtin_functions(c: *Ctx) void = {
     c.builtin_alloca.is_definition = false;
 }
 
-fn parse(c: *Ctx, tok: *CC.Token) Result(*CC.Obj, Str) = {
+fn parse(c: *Ctx, tok: *Token) Result(*Obj, Str) = {
     ::enum(WhichJump);
     @match(try(c.a_little_hidden_control_flow&)) {
         fn Try()   => (Ok = c.parse_impl(tok));
@@ -1921,7 +1923,7 @@ fn parse(c: *Ctx, tok: *CC.Token) Result(*CC.Obj, Str) = {
 }
 
 // program = (typedef | function-definition | global-variable)*
-fn parse_impl(c: *Ctx, tok: *CC.Token) *CC.Obj = {
+fn parse_impl(c: *Ctx, tok: *Token) *Obj = {
     // :TopLevelFunction
     // :SLOW it's silly that top level constants need to be in a function context and we linearly scan it every time you have a numeric literal
     // this needs to be fixed so i don't have to cry when someone generates an array of binary data. 
@@ -1937,7 +1939,7 @@ fn parse_impl(c: *Ctx, tok: *CC.Token) *CC.Obj = {
     c.b = c.f.start; // HACK
 
     c.declare_builtin_functions();
-    c.globals = CC.Obj.ptr_from_int(0);
+    c.globals = Obj.ptr_from_int(0);
 
     //c.speculate = true;
     while => tok.kind != .TK_EOF {
@@ -1984,27 +1986,27 @@ Prec :: @enum(i32) (
 
 N1: ParseFn1 : fn(c, b, t) = @error_tok(c, t, "unexpected (prefix) token %", t.str()); 
 N2: ParseFn2 : fn(c, b, t, d) = @error_tok(c, t, "unexpected (infix) token %", t.str()); 
-ParseFn1   :: @FnPtr(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node;
-ParseFn2   :: @FnPtr(c: *Ctx, rest: **CC.Token, tok: *CC.Token, node: *CC.Node) *CC.Node;
-ParseRule :: @struct(prefix: ParseFn1 = N1, infix: ParseFn2 = N2, prec := Prec.Invalid, op := CC.NodeKind.ND_INVALID);
+ParseFn1   :: @FnPtr(c: *Ctx, rest: **Token, tok: *Token) *Node;
+ParseFn2   :: @FnPtr(c: *Ctx, rest: **Token, tok: *Token, node: *Node) *Node;
+ParseRule :: @struct(prefix: ParseFn1 = N1, infix: ParseFn2 = N2, prec := Prec.Invalid, op := NodeKind.ND_INVALID);
 
-rules :: @static EnumMap(CC.TokenKind, ParseRule);
+rules :: @static EnumMap(Tokens.TokenKind, ParseRule);
 
 // not just a '::' here because it needs to happen after the dylib is initilized or we think there are missing functions. 
-fn comptime_init_rules_table() void = {
+fn comptime_init_rules_table() void #use(Tokens) = {
     h := rules;
     each h { k, v |
         v[] = ();
     };
     
-    ::if(*CC.Node);
-    ::enum(CC.NodeKind);
+    ::if(*Node);
+    ::enum(NodeKind);
     ::enum(Prec);
-    ::enum(CC.TypeKind);
-    ::ptr_utils(CC.Scope);
-    ::if(*CC.Type); 
+    ::enum(TypeKind);
+    ::ptr_utils(Scope);
+    ::if(*CType); 
     
-    binary := @slice(@as(Ty(CC.TokenKind, Prec, CC.NodeKind))
+    binary := @slice(@as(Ty(TokenKind, Prec, NodeKind))
         (.@"+", .Term,   .ND_INVALID),
         (.@"-", .Term,   .ND_INVALID),
         (.@"*", .Factor, .ND_MUL),
@@ -2049,7 +2051,7 @@ fn comptime_init_rules_table() void = {
         each func.annotations { ann |
             continue :: local_return;
             args := ann.args&.items();
-            keyword := const_eval(CC.TokenKind)(args[0]);
+            keyword := const_eval(TokenKind)(args[0]);
             rule := h[keyword]&;
             ::?ParseFn2; ::?ParseFn1;
             op_index := @switch(ann.name) {
@@ -2067,7 +2069,7 @@ fn comptime_init_rules_table() void = {
                 @default => continue();
             };
             if args.len > op_index {
-                new := const_eval(CC.NodeKind)(args[op_index]);
+                new := const_eval(NodeKind)(args[op_index]);
                 @assert(rule.op == .ND_INVALID, "multiple operations for % (% vs %)", keyword, rule.op, new);
                 rule.op = new;
             };
@@ -2075,7 +2077,7 @@ fn comptime_init_rules_table() void = {
     };
 };
 
-fn parse_expr(c: *Ctx, rest: **CC.Token, tok: *CC.Token, prec: Prec) *CC.Node = {
+fn parse_expr(c: *Ctx, rest: **Token, tok: *Token, prec: Prec) *Node = {
     @if(SPAM) @println("Prefix: % %", tok.str(), tok.kind);
 
     rules := rules;  // TODO: shouldn't need to do this but otherwise if can't call the function ?? 
@@ -2095,13 +2097,13 @@ fn parse_expr(c: *Ctx, rest: **CC.Token, tok: *CC.Token, prec: Prec) *CC.Node = 
     node
 }
 
-fn parse_binary(c: *Ctx, rest: **CC.Token, tok: *CC.Token, lhs: *CC.Node) *CC.Node = {
+fn parse_binary(c: *Ctx, rest: **Token, tok: *Token, lhs: *Node) *Node = {
     node := c.parse_binary_inner(rest, tok, lhs);
     c.gen_expr(node);
     node
 }
 
-fn parse_binary_inner(c: *Ctx, rest: **CC.Token, tok: *CC.Token, lhs: *CC.Node) *CC.Node = {
+fn parse_binary_inner(c: *Ctx, rest: **Token, tok: *Token, lhs: *Node) *Node = {
     rule := rules.index(tok.kind);
     prec := rule.prec;
     
@@ -2148,7 +2150,7 @@ fn parse_binary_inner(c: *Ctx, rest: **CC.Token, tok: *CC.Token, lhs: *CC.Node) 
     node
 }
 
-::if(*CC.Node);
+::if(*Node);
 
 parsers :: @struct {
 // TODO: less dumb ir for if conditions
@@ -2218,7 +2220,7 @@ conditional :: fn(c, rest, tok, cond) #infix(.@"?", .Conditional) = {
     else_block := c.new_block();
     join_block := c.new_block();
     
-    ::if(Ty(*CC.Node, *Qbe.Blk, *CC.Node));
+    ::if(Ty(*Node, *Qbe.Blk, *Node));
     node, then_phi_src, cond_node := if equal(tok.next, ":") {
         // [GNU] Compile `a ?: b` as `tmp = a, tmp ? tmp : b`.
         then_block = join_block;
@@ -2333,8 +2335,8 @@ parse_ident :: fn(c, rest, tok) #prefix(.TK_IDENT) = {
     rest[] = tok.next;
     
     // For "static inline" function
-    ::ptr_utils(CC.Obj);
-    ::?*CC.Obj;
+    ::ptr_utils(Obj);
+    ::?*Obj;
     if sc { sc |
         if !sc.var.is_null() {
             var := sc.var;
@@ -2376,7 +2378,7 @@ parse_string :: fn(c, rest, tok) #prefix(.TK_STR) = {
 };
 
 parse_number :: fn(c, rest, tok) #prefix(.TK_NUM) = {
-    ::if(*CC.Node);
+    ::if(*Node);
     node := if is_flonum(tok.ty) {
         n := c.new_node(.ND_NUM, tok);
         n.r = c.f.getcon(tok.fval.bitcast());
@@ -2463,7 +2465,7 @@ generic_selection :: fn(c, rest, tok) #prefix(._Generic) = {
     };
     
     // Now choose one of the branches to use based on that type. 
-    ret: ?*CC.Node = .None;
+    ret: ?*Node = .None;
     use_default := false; 
     while => !consume(rest, tok, ")") {
         tok = c.skip(tok, ",");
@@ -2544,7 +2546,7 @@ funcall :: fn(c, rest, tok, f) #infix(.@"(", .PostFix) = {
     ty := if(f.ty.kind == .TY_FUNC, => f.ty, => f.ty.base);
     param_ty := ty.params;
 
-    head := CC.Node.zeroed();
+    head := Node.zeroed();
     cur := head&;
     while => !equal(tok, ")") {
         if !cur.identical(head&) {
@@ -2888,13 +2890,13 @@ empty_stmt :: fn(c, rest, tok) #prefix(.@";") = {
 
 };
 
-fn set_rest_and_gen(c: *Ctx, rest: **CC.Token, tok: *CC.Token, node: *CC.Node) *CC.Node = {
+fn set_rest_and_gen(c: *Ctx, rest: **Token, tok: *Token, node: *Node) *Node = {
     rest[] = tok;
     c.gen_expr(node);
     node
 }
 
-fn stmt(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
+fn stmt(c: *Ctx, rest: **Token, tok: *Token) *Node = {
     node := c.parse_expr(rest, tok, .Stmt);
     if node.kind != .ND_STMT {
         consume(rest, rest[], ";");
@@ -2907,7 +2909,7 @@ fn stmt(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
 // so that p+n points to the location n elements (not bytes) ahead of p.
 // In other words, we need to scale an integer value before adding to a
 // pointer value. This function takes care of the scaling.
-fn new_add(c: *Ctx, lhs: **CC.Node, rhs: **CC.Node, tok: *CC.Token) void = {
+fn new_add(c: *Ctx, lhs: **Node, rhs: **Node, tok: *Token) void = {
     //c.add_type(lhs);
     //c.add_type(rhs);
     c.gen_expr(lhs[]);
@@ -2938,7 +2940,7 @@ fn new_add(c: *Ctx, lhs: **CC.Node, rhs: **CC.Node, tok: *CC.Token) void = {
     rhs[] = c.new_binary2(.ND_MUL, rhs[], c.new_long(lhs.ty.base.size.intcast(), tok), tok);
 }
 
-fn new_binary2(c: *Ctx, kind: CC.NodeKind, lhs: *CC.Node, rhs: *CC.Node, tok: *CC.Token) *CC.Node = {
+fn new_binary2(c: *Ctx, kind: NodeKind, lhs: *Node, rhs: *Node, tok: *Token) *Node = {
     if c.speculate {
         return(c.new_binary(kind, lhs, rhs, tok));
     };
@@ -2952,7 +2954,7 @@ fn new_binary2(c: *Ctx, kind: CC.NodeKind, lhs: *CC.Node, rhs: *CC.Node, tok: *C
 }
 
 // Like `+`, `-` is overloaded for the pointer type.
-fn new_sub(c: *Ctx, lhs: *CC.Node, rhs: *CC.Node, tok: *CC.Token) *CC.Node = {
+fn new_sub(c: *Ctx, lhs: *Node, rhs: *Node, tok: *Token) *Node = {
     @if_else {
         // num - num
         @if(is_numeric(lhs.ty) && is_numeric(rhs.ty)) => {
@@ -2989,7 +2991,7 @@ fn new_sub(c: *Ctx, lhs: *CC.Node, rhs: *CC.Node, tok: *CC.Token) *CC.Node = {
     }
 };
 
-fn get_struct_member(ty: *CC.Type, name: *CC.Token) ?*CC.Member = {
+fn get_struct_member(ty: *CType, name: *Token) ?*Member = {
     mem := ty.members;
     for_linked mem { mem |
         is_anon := (@is(mem.ty.kind, .TY_STRUCT, .TY_UNION)) && mem.name.is_null();
@@ -3017,7 +3019,7 @@ fn get_struct_member(ty: *CC.Type, name: *CC.Token) ?*CC.Member = {
 // member "a" of the anonymous struct as "x.a".
 //
 // This function takes care of anonymous structs.
-fn struct_ref(c: *Ctx, node: *CC.Node, tok: *CC.Token) *CC.Node = {
+fn struct_ref(c: *Ctx, node: *Node, tok: *Token) *Node = {
     c.add_type(node);
     ty := node.ty;
     has_fields := @is(ty.kind, .TY_STRUCT, .TY_UNION);
@@ -3032,7 +3034,7 @@ fn struct_ref(c: *Ctx, node: *CC.Node, tok: *CC.Token) *CC.Node = {
 }
 
 // Convert A++ to `(typeof A)((A += 1) - 1)`
-fn new_inc_dec(c: *Ctx, node: *CC.Node, tok: *CC.Token, addend: i64) *CC.Node = {
+fn new_inc_dec(c: *Ctx, node: *Node, tok: *Token, addend: i64) *Node = {
     c.add_type(node);
     rhs := c.new_num(addend, tok);
     c.new_add(node&, rhs&, tok);
@@ -3045,7 +3047,7 @@ fn new_inc_dec(c: *Ctx, node: *CC.Node, tok: *CC.Token, addend: i64) *CC.Node = 
 
 // for expressions that don't get evaluated (like sizeof, alignof, typeof),
 // we just mask out all the emitted instructions/jumps. 
-fn speculate(c: *Ctx, rest: **CC.Token, tok: *CC.Token, prec: Prec) *CC.Node = {
+fn speculate(c: *Ctx, rest: **Token, tok: *Token, prec: Prec) *Node = {
     old_block := c.b;
     prev := c.speculate;
     c.speculate = true;
@@ -3061,7 +3063,7 @@ fn speculate(c: *Ctx, rest: **CC.Token, tok: *CC.Token, prec: Prec) *CC.Node = {
     node
 }
 
-fn primary(rest: **CC.Token, tok: *CC.Token) *CC.Node = { // TODO
+fn primary(rest: **Token, tok: *Token) *Node = { // TODO
     Token *start = tok;
     @if_else {
         @if(equal(tok, "__builtin_types_compatible_p")) => {
@@ -3109,7 +3111,7 @@ fn primary(rest: **CC.Token, tok: *CC.Token) *CC.Node = { // TODO
     @error_tok(c, tok, "expected an expression");
 }
 
-fn eval(c: *Ctx, node: *CC.Node) i64 = {
+fn eval(c: *Ctx, node: *Node) i64 = {
     off, label := c.eval2(node);
     if label.is_some() {
         @error_tok(c, node.tok, "expected a numeric constant");
@@ -3123,7 +3125,7 @@ fn eval(c: *Ctx, node: *CC.Node) i64 = {
 // is a pointer to a global variable and n is a postiive/negative
 // number. The latter form is accepted only as an initialization
 // expression for a global variable.
-fn eval2(c: *Ctx, node: *CC.Node) Ty(i64, ?CStr) = {  // (off, label)
+fn eval2(c: *Ctx, node: *Node) Ty(i64, ?CStr) = {  // (off, label)
     if !c.is_const_expr(node) {
         @error_tok(c, node.tok, "expected a constant expression");
     };
@@ -3147,18 +3149,18 @@ fn eval2(c: *Ctx, node: *CC.Node) Ty(i64, ?CStr) = {  // (off, label)
     (con.bits.i, label)
 }
 
-//static int64_t eval_rval(CC.Node *node, char ***label);
+//static int64_t eval_rval(Node *node, char ***label);
 
-fn is_const_expr(c: *Ctx, node: *CC.Node) bool = { 
+fn is_const_expr(c: *Ctx, node: *Node) bool = { 
     rtype(node.r) == .RCon || (node.kind == .ND_ADDR && node.lhs.lvalue.rtype() == .RCon)
 }
 
-fn const_expr(c: *Ctx, rest: **CC.Token, tok: *CC.Token) i64 = {
+fn const_expr(c: *Ctx, rest: **Token, tok: *Token) i64 = {
     node := c.parse_expr(rest, tok, .Conditional);
     c.eval(node)
 }
 
-fn eval_double(c: *Ctx, node: *CC.Node) f64 = { 
+fn eval_double(c: *Ctx, node: *Node) f64 = { 
     // verbose extension:
     {
         prev := c.speculate; // HACK
@@ -3182,7 +3184,7 @@ fn eval_double(c: *Ctx, node: *CC.Node) f64 = {
 // However, if a given expression is of form `A.x op= C`, the input is
 // converted to `tmp = &A, (*tmp).x = (*tmp).x op C` to handle assignments
 // to bitfields.
-fn to_assign(c: *Ctx, kind: CC.NodeKind, lhs: *CC.Node, rhs: *CC.Node, tok: *CC.Token) *CC.Node = {
+fn to_assign(c: *Ctx, kind: NodeKind, lhs: *Node, rhs: *Node, tok: *Token) *Node = {
     if c.speculate {
         return(lhs);
     };
@@ -3232,7 +3234,7 @@ fn to_assign(c: *Ctx, kind: CC.NodeKind, lhs: *CC.Node, rhs: *CC.Node, tok: *CC.
     c.ir_node(lhs.ty, final, QbeNull, tok)
 }
 
-fn ir_node(c: *Ctx, ty: *CC.Type, r: Qbe.Ref, lvalue: Qbe.Ref, tok: *CC.Token) *CC.Node = {
+fn ir_node(c: *Ctx, ty: *CType, r: Qbe.Ref, lvalue: Qbe.Ref, tok: *Token) *Node = {
     n := c.new_node(.ND_NULL_EXPR, tok);
     n.r = r;
     n.lvalue = lvalue;
@@ -3320,12 +3322,12 @@ fn gen_par(c: *Ctx) void = {
     c.b = body;
 }
 
-fn assert_gen_expr(c: *Ctx, node: *CC.Node) Qbe.Ref = {
+fn assert_gen_expr(c: *Ctx, node: *Node) Qbe.Ref = {
     @debug_assert(node.r != QbeNull);    
     node.r
 }
 
-fn gen_expr(c: *Ctx, node: *CC.Node) Qbe.Ref = {
+fn gen_expr(c: *Ctx, node: *Node) Qbe.Ref = {
     if(node.r != QbeNull, => return(node.r));
     c.add_type(node);
     if(c.f.is_null() || c.speculate, => return(node.r));
@@ -3338,16 +3340,16 @@ fn gen_expr(c: *Ctx, node: *CC.Node) Qbe.Ref = {
     node.r
 }
 
-fn gen_expr_inner(c: *Ctx, node: *CC.Node) Qbe.Ref = {
-    ::enum(CC.NodeKind);
-    @if(SPAM) @println("E % %; %", node.kind, CC.Node.int_from_ptr(node), node.tok.str());
+fn gen_expr_inner(c: *Ctx, node: *Node) Qbe.Ref = {
+    ::enum(NodeKind);
+    @if(SPAM) @println("E % %; %", node.kind, Node.int_from_ptr(node), node.tok.str());
     @match(node.kind) {
         fn ND_NULL_EXPR() => QbeUndef;
         fn ND_STMT() => QbeUndef;
         fn ND_FUNCALL() => c.gen_call(node);
         fn ND_ADDR()    => c.gen_addr(node.lhs);
         fn ND_CAST() => {
-            ::enum(CC.TypeKind);
+            ::enum(TypeKind);
             source := c.gen_expr(node.lhs);
             from, to := (node.lhs.ty, node.ty);
             if(to.kind == .TY_VOID, => return(QbeUndef));
@@ -3437,7 +3439,7 @@ fn gen_expr_inner(c: *Ctx, node: *CC.Node) Qbe.Ref = {
 }
 
 // Read the current value from memory and merge it with a new value.
-fn gen_store_bitfield(c: *Ctx, addr: Qbe.Ref, value: Qbe.Ref, mem: *CC.Member) void = {
+fn gen_store_bitfield(c: *Ctx, addr: Qbe.Ref, value: Qbe.Ref, mem: *Member) void = {
     @debug_assert(mem.is_bitfield);
     k := mem.ty.cls();
     r := @uninitialized Array(Qbe.Ref, 4); r := r&;
@@ -3457,7 +3459,7 @@ fn gen_store_bitfield(c: *Ctx, addr: Qbe.Ref, value: Qbe.Ref, mem: *CC.Member) v
 }
 
 // TODO: you'd think gen_store_bitfield should call this
-fn gen_load_bitfield(c: *Ctx, addr: Qbe.Ref, mem: *CC.Member) Qbe.Ref = {
+fn gen_load_bitfield(c: *Ctx, addr: Qbe.Ref, mem: *Member) Qbe.Ref = {
     @debug_assert(mem.is_bitfield);
     r := c.gen_load(addr, mem.ty);
     k := mem.ty.cls();
@@ -3468,7 +3470,7 @@ fn gen_load_bitfield(c: *Ctx, addr: Qbe.Ref, mem: *CC.Member) Qbe.Ref = {
     r2
 }
 
-fn gen_binary(c: *Ctx, kind: CC.NodeKind, lhs_r: Qbe.Ref, rhs_r: Qbe.Ref, out_ty: *CC.Type, ctrl_ty: *CC.Type, tok: *CC.Token) Qbe.Ref = {
+fn gen_binary(c: *Ctx, kind: NodeKind, lhs_r: Qbe.Ref, rhs_r: Qbe.Ref, out_ty: *CType, ctrl_ty: *CType, tok: *Token) Qbe.Ref = {
     o: Qbe.O = @match(kind) {
         fn ND_COMMA()    => return(rhs_r);
         fn ND_ADD()      => .add;
@@ -3520,9 +3522,10 @@ fn emit(c: *Ctx, o: Qbe.O, k: Qbe.Cls, a0: Qbe.Ref, a1: Qbe.Ref) Qbe.Ref = {
     c.emit(o, k, r, a0, a1);
     r
 }
+#use(Types);
 
 // TODO: audit this. chibicc has a big table of x64 mnemonics to compare to. 
-fn gen_cast(c: *Ctx, src: Qbe.Ref, from: *CC.Type, to: *CC.Type) Qbe.Ref = {
+fn gen_cast(c: *Ctx, src: Qbe.Ref, from: *CType, to: *CType) Qbe.Ref = {
     // array types know thier size for sizeof but when we look at size below we want to have decayed to a pointer. 
     from := @if(from.kind == .TY_ARRAY, ty_ulong, from);
     to   := @if(to.kind == .TY_ARRAY, ty_ulong, to);
@@ -3574,7 +3577,7 @@ fn gen_cast(c: *Ctx, src: Qbe.Ref, from: *CC.Type, to: *CC.Type) Qbe.Ref = {
     c.emit(o, k_to, src, QbeNull)
 }
 
-fn gen_call(c: *Ctx, node: *CC.Node) Qbe.Ref #once = {
+fn gen_call(c: *Ctx, node: *Node) Qbe.Ref #once = {
     // TODO: don't just take random variable names!
     //       call this __builtin_alloca and provide alloca.h
     if node.lhs.kind == .ND_VAR && node.lhs.var.name.str() == "alloca" {
@@ -3607,7 +3610,7 @@ fn gen_call(c: *Ctx, node: *CC.Node) Qbe.Ref #once = {
         arguments&.push(make_ins(.arg, arg.ty.cls(), QbeNull, r, QbeNull));
     };
     
-    ::ptr_utils(CC.Obj);
+    ::ptr_utils(Obj);
     assert(node.ret_buffer.is_null(), "TODO: aggragate returns");
     for arguments { i |    
         c.b.push(i);
@@ -3619,7 +3622,7 @@ fn gen_call(c: *Ctx, node: *CC.Node) Qbe.Ref #once = {
     r
 }
 
-fn gen_store(c: *Ctx, addr: Qbe.Ref, value: Qbe.Ref, ty: *CC.Type) void = {
+fn gen_store(c: *Ctx, addr: Qbe.Ref, value: Qbe.Ref, ty: *CType) void = {
     if @is(ty.kind, .TY_STRUCT, .TY_UNION) {
         c.emit(.blit0, .Kw, QbeNull, value, addr);  // src, dest because we hate ourselves
         c.emit(.blit1, .Kw, QbeNull, INT(ty.size.intcast()), QbeNull);
@@ -3644,7 +3647,7 @@ fn gen_store(c: *Ctx, addr: Qbe.Ref, value: Qbe.Ref, ty: *CC.Type) void = {
     c.emit(o, .Kw, QbeNull, value, addr);
 }
 
-fn gen_load(c: *Ctx, addr: Qbe.Ref, type: *CC.Type) Qbe.Ref = {
+fn gen_load(c: *Ctx, addr: Qbe.Ref, type: *CType) Qbe.Ref = {
     if @is(type.kind, .TY_ARRAY, .TY_STRUCT, .TY_UNION, .TY_FUNC, .TY_VLA) {
         return(addr);  // really?
     };
@@ -3665,7 +3668,7 @@ fn gen_load(c: *Ctx, addr: Qbe.Ref, type: *CC.Type) Qbe.Ref = {
     r
 }
 
-fn gen_addr(c: *Ctx, node: *CC.Node) Qbe.Ref = {
+fn gen_addr(c: *Ctx, node: *Node) Qbe.Ref = {
     if node.lvalue != QbeNull {
         return(node.lvalue);
     };
@@ -3674,7 +3677,7 @@ fn gen_addr(c: *Ctx, node: *CC.Node) Qbe.Ref = {
     r
 }
 
-fn gen_addr_inner(c: *Ctx, node: *CC.Node) Qbe.Ref = {
+fn gen_addr_inner(c: *Ctx, node: *Node) Qbe.Ref = {
     @match(node.kind) {
         fn ND_DEREF() => c.gen_expr(node.lhs);
         fn ND_VAR() => if !node.var.is_local {

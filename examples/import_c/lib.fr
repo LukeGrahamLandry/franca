@@ -5,10 +5,9 @@ CC :: import("@/examples/import_c/chibicc.fr");
 ENABLE_TRACY :: false;
 #include_std("backend/lib.fr");
 #include_std("compiler/worker.fr");
-#include_std("compiler/ast_external.fr");
-#include_std("examples/import_c/tokenize.fr");
-#include_std("examples/import_c/compile.fr");
-#include_std("examples/import_c/type.fr");
+AstExternal :: import("@/compiler/ast_external.fr");
+Tokens      :: import("@/examples/import_c/tokenize.fr");
+Types       :: import("@/examples/import_c/type.fr");
 
 :: {
     ctx := current_compiler_context();
@@ -17,7 +16,8 @@ ENABLE_TRACY :: false;
     ctx.add_comptime_library(@symbol "chibicc", cg);
 };
 
-:: comptime_init_rules_table();
+Compile :: import("@/examples/import_c/compile.fr");
+:: (Compile.comptime_init_rules_table)();
 
 JUST_ONE :: false;
 USE_HOST_BACKEND :: true;
@@ -27,7 +27,7 @@ SPAM :: false;
 fn main() void = {
     :: assert(!USE_HOST_BACKEND, "cannot start from main() when USE_HOST_BACKEND");
     vtable := ImportVTable.zeroed();
-    fill_backend_vtable(vtable&);
+    (AstExternal.fill_backend_vtable)(vtable&);
     run_tests(vtable&);
 }
 
@@ -93,11 +93,11 @@ fn run_tests(vtable: *ImportVTable) void = {
     exit((failed != 0).int());
 }
 
-fn compile_one_file(vtable: *ImportVTable, path: Str) Result(void, Str) = {
+fn compile_one_file(vtable: *ImportVTable, path: Str) Result(void, Str) #use(Tokens) = {
     m := @uninitialized QbeModule;
     a := query_current_arch();
     
-    init_default_module_dyn(m&, vtable, (arch = a.unwrap(), os = query_current_os(), type = .Exe));
+    (AstExternal.init_default_module_dyn)(m&, vtable, (arch = a.unwrap(), os = query_current_os(), type = .Exe));
     @if(LOG_IR) {
         m.debug["P".char()] = true;
         m.debug["R".char()] = true;
@@ -115,17 +115,17 @@ fn compile_one_file(vtable: *ImportVTable, path: Str) Result(void, Str) = {
     for_linked tok { tok |
         a := @is(tok.kind, .TK_KEYWORD, .TK_PUNCT);
         if a || tok.str() == "_Generic" { // HACK :SLOW
-            ::?CC.TokenKind;
-            tok.kind = CC.TokenKind.from_name(tok.str()) || @panic("invalid c keyword %", tok.str());
+            ::?TokenKind;
+            tok.kind = TokenKind.from_name(tok.str()) || @panic("invalid c keyword %", tok.str());
         };
     };
     
-    c := Ctx.zeroed();
+    c := Compile.Ctx.zeroed();
     c.arena = temp();
     c.current_fn = .None;
     c.brk_label = .None;
     c.cont_label = .None;
-    scope := Scope.zeroed();
+    scope := Compile.Scope.zeroed();
     c.scope = scope&;
     c.scope.vars = init(c.arena);
     c.scope.tags = init(c.arena);
@@ -149,7 +149,7 @@ fn compile_one_file(vtable: *ImportVTable, path: Str) Result(void, Str) = {
     .Ok
 }
 
-fn emit_the_code(c: *Ctx, ctx: *CodegenShared, obj: *CC.Obj) void = {
+fn emit_the_code(c: *Compile.Ctx, ctx: *CodegenShared, obj: *CC.Obj) void = {
     :: ptr_utils(CC.Obj);
     while => !obj.next.is_null() {
         @assert(!obj.is_tls, "Thread Local Storage is not supported");
@@ -259,7 +259,7 @@ fn mangle(m: *QbeModule, obj: *CC.Obj) u32 = {
 
 ::enum(CC.NodeKind);
 
-::ptr_utils(CC.Token); ::enum(CC.TokenKind);
+::ptr_utils(CC.Token); ::enum(Tokens.TokenKind);
 
 fn tokenize_file(path: Str) ?*CC.Token = {
     a := libc_allocator; // temp();
