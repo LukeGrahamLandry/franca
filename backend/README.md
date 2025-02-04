@@ -6,6 +6,15 @@ The main changes are working towards being more usable as a standalone library
 by removing dependencies on external assemblers/linkers and removing serialization steps to/from text files.
 You can still print out the ir as human readable text between passes and modify it for testing.
 
+## Example Frontends
+
+- Franca (../compiler/emit_ir.fr)
+- Qbe IR (./meta/parse.fr)
+- C11    (../examples/import_c/compile.fr)
+  - WIP
+- Wasm   (../examples/import_wasm/convert.fr)
+  - WIP
+
 ## Changes from Qbe
 
 ### Targets

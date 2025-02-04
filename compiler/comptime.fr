@@ -261,8 +261,11 @@ fn get_fns_with_tag(c: Compiler, tag: Symbol) [] FuncId = {
 
 /////////////////////////////////////////////////////////////////////////////////
 
-fn current_comptime() *SelfHosted =
-    SelfHosted.ptr_from_raw(context(DefaultContext)[].comptime);
+fn current_comptime() *SelfHosted = {
+    s := SelfHosted.ptr_from_raw(context(DefaultContext)[].comptime);
+    @debug_assert_ne(SelfHosted.int_from_ptr(s), 0, "current_comptime is null");
+    s
+}
 
 fn fill_export_ffi(out: *List(u8)) void = {
     // TODO: fix error message if you forget a semi-colon in the string. 
@@ -807,5 +810,37 @@ fn fill_export_ffi(out: *List(u8)) void = {
         res := value_to_scope(self, value, type);
         scope := self.unwrap_report_error(ScopeId, res);
         (Some = scope)
+    };
+    
+    // TODO: a version of this that doesn't require you to know all arguments (just constant ones)
+    @fmt(out, "fn invoke_specialized(fid: FuncId, arg: rawptr, ret: rawptr) void #ct #comptime_addr(%);\n", invoke_specialized_impl);
+    invoke_specialized_impl: rawptr : fn(fid: FuncId, arg: rawptr, ret: rawptr) void = {
+        self := current_comptime();
+        res := self.poll_in_place(Type, => self.infer_arguments(fid));
+        self.unwrap_report_error(Type, res);
+        res := self.poll_in_place(Type, => self.infer_return(fid));
+        self.unwrap_report_error(Type, res);
+        func := self.get_function(fid);
+        f_ty := func.finished_ty().expect("compiled function to have known type");
+        loc  := func.loc;  // TODO: would be better if this were the callsite
+        
+        f := self.to_expr(FuncId, fid, loc);
+        arg := self.to_expr(rawptr, arg, loc);
+        arg.ty = self.ptr_type(f_ty.arg);
+        ret := self.to_expr(rawptr, ret, loc);
+        ret.ty = self.ptr_type(f_ty.ret);
+        arg: FatExpr = synthetic((Deref = self.box(arg)), loc);
+        arg: FatExpr = synthetic((ConstEval = self.box(arg)), loc);
+        
+        call: FatExpr = synthetic((Call = (f = self.box(f), arg = self.box(arg))), loc);
+        dest: FatExpr = synthetic((Deref = self.box(ret)), loc);
+        unit: FatExpr = synthetic_ty((Value = (bytes = unit_value, coerced = false)), loc, void);
+        body := FatStmt.list(1, temp());
+        body&.push(stmt = (Set = (place = dest, value = call)), loc = loc, done = false);
+        expr: FatExpr = synthetic(new_block(body.as_raw(), self.box(unit)), loc);
+        expr := self.box(expr);
+        
+        res := self.poll_in_place(Values, => self.immediate_eval_expr(expr, void)); // :get_or_create_type
+        self.unwrap_report_error(Values, res);
     };
 }

@@ -945,7 +945,7 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
             return(@err("Poison expression %. \n%", placeholder, msg));
         }
         fn Value(f) => {
-            if(expr.ty == UnknownType, => return(@err("ICE: Value expression must have known type")));
+            if(expr.ty == UnknownType, => return(@err("ICE: Value expression must have known type:\n %", log(f.bytes&, self, UnknownType))));
             if !f.coerced {
                 @if_let(requested) fn Specific(ty) => {
                     if expr.ty != ty {
@@ -2016,28 +2016,29 @@ fn const_args_key(self: *SelfHosted, original_f: FuncId, arg_expr: *FatExpr) May
             };
         };
 
-        types := self.tuple_types(arg_expr.ty);
-        if types { types |
-            check_len(types.len);
-            @if(false) {
-                // The rust version did this and i thought it needed but i just typo-ed the test. 
-                // TODO: does this ever happen (function are not being a tuple)? or are we strict about arity now? -- Aug 1
+        if !arg_expr.expr&.is(.Tuple) {
+            // this only happens for invoke_specialized
+            @check(self.compile_expr(arg_expr, func.finished_arg.want())) return;
+            types := self.tuple_types(arg_expr.ty);
+            if types { types |
+                check_len(types.len);
                 @if_let(arg_expr.expr&) fn Value(f) => {
                     // TODO: this is super dumb but better than what I did before. -- May 3 -- May 24
                     parts: List(FatExpr) = list(types.len, self.get_alloc());
                     reader: ReadBytes = (bytes = f.bytes&.bytes(), i = 0);
                     for types { ty | 
+                        reader.i = align_to(reader.i, self.get_info(ty)[].align_bytes.zext()); // TODO: use field offsets
                         taken := or self.chop_prefix(ty, reader&) {| 
                             return(@err("ICE: not enough bytes to destructure value!"))
                         };
                         parts&.push(synthetic_ty((Value = (bytes = taken, coerced = false)), arg_expr.loc, ty));
                     };
-                    @debug_assert(reader.bytes.len, reader.i, "ICE: didn't consume all bytes.");
+                    @debug_assert_eq(reader.bytes.len, reader.i, "ICE: didn't consume all bytes.");
                     arg_expr.expr = (Tuple = parts.as_raw());
                 };
             };
         };
-        
+
         if(!arg_expr.expr&.is(.Tuple), => return(@err("TODO: pattern match on non-tuple but expected % args.\n%", func.arg.bindings.len, arg_expr.log(self))));
         arg_exprs := arg_expr.expr.Tuple;
         check_len(arg_exprs.len);
