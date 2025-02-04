@@ -37,13 +37,12 @@ FoldCtx :: @struct(
 
 // not memory and not special inserted later by abi/isel :OrderMatters
 fn can_fold(o: Qbe.O) bool = {
-    if(!has_feature("@franca/ir_body"), => return(false));
     o.between(.add, .cuod) || o.between(.extsb, .cast) || o == .sel1 
 }
 
 /* require rpo, use, pred */
 fn fold_constants(f: *Qbe.Fn) void = {
-    if(!has_feature("@franca/ir_body"), => return());
+    @if(::!has_feature("@franca/ir_comptime"), return(), ());
     
     start := Edge.zeroed();
     f: FoldCtx = (
@@ -330,7 +329,6 @@ fn opfold(f: *Qbe.Fn, op: Qbe.O, cls: Qbe.Cls, l: i32, r: i32) i32 = {
 }
 
 fn try_fold(op: Qbe.O, cls: Qbe.Cls, cl: *Qbe.Con, cr: *Qbe.Con) ?Qbe.Con = {
-@if(::!has_feature("@franca/ir_body"), .None, {
     c := Qbe.Con.zeroed();
     c.type = .CBits;
     if cl.type != .CBits || cr.type != .CBits {
@@ -348,173 +346,83 @@ fn try_fold(op: Qbe.O, cls: Qbe.Cls, cl: *Qbe.Con, cr: *Qbe.Con) ?Qbe.Con = {
         c.sym = cl.sym;
     };
     
-    if cls == .Kw || cls == .Kl {
-        if foldint(c&, op, cls == .Kl, cl, cr) {
-            return(.None);
-        };
-    } else {
-        foldflt(c&, op, cls == .Kd, cl, cr);
-    };
-    if !is_wide(cls) {
-        c.bits.i = c.bits.i.bit_and(0xffffffff);
-    };
-    (Some = c)
-})
-}
-
-/* boring folding code */
-// 
-// I could do a fancy meta-programming thing where i generate these match statements because 
-// i have to have the mapping of op to intrinsic anyway, but also that would just 
-// end up more complicated than just pasting this here and never touching it again, 
-// decisions, decisions!       -- Nov 7
-//
-
-BitcastPrim :: @union(s: i64, u: u64, fs: f32, fd: f64, sw: i32, uw: u32);
-
-// return true on fail
-fn foldint(res: *Qbe.Con, op: Qbe.O, w: bool, cl: *Qbe.Con, cr: *Qbe.Con) bool = {
-    l: BitcastPrim = (s = cl.bits.i);
-    r: BitcastPrim = (s = cr.bits.i);
-
-    if (@is(op, .div, .rem, .udiv, .urem)) {
-        if(iscon(cr, w, 0), => return(true));
+    w := cls.is_wide();
+    if cls.is_int() && (@is(op, .div, .rem, .udiv, .urem)) {
+        if(iscon(cr, w, 0), => return(.None));
         if (@is(op, .div, .rem)) {
             x := if(w, => MIN_i64, => MIN_i32);
-            if(iscon(cr, w, bitcast(-1)) && iscon(cl, w, x.bitcast()), => return(true));
+            if(iscon(cr, w, bitcast(-1)) && iscon(cl, w, x.bitcast()), => return(.None));
         };
     };
     
-    shift_mask := 31.bit_or(w.int().shift_left(5));
-    x := @match(op) {
-        // signed overflow is not undefined for me (i hope)
-        fn add()  => l.s + r.s;
-        fn sub()  => l.s - r.s;
-        fn neg()  => -l.s;
-        // for 32 bit this relies on union putting all fields starting at the beginning and numbers being little endian. 
-        // TODO: some of these must be wrong becuase the old backends don't do real 32 bit or unsigned operations. :FUCKED
-        fn div()  => if(w, => l.s / r.s, => zext(l.sw / r.sw));
-        fn rem()  => if(w, => l.s.mod(r.s), => l.sw.mod(r.sw).zext());
-        fn udiv() => if(w, => bitcast(l.u / r.u), => zext(l.uw / r.uw));
-        fn urem() => if(w, => l.u.mod(r.u).bitcast(), => l.uw.mod(r.uw).zext());
-        fn mul()  => l.s * r.s;
-        fn and()  => l.s.bit_and(r.s);
-        fn or()   => l.s.bit_or(r.s);
-        fn xor()  => l.s.bit_xor(r.s);
-        fn sar() => if(w, => l.s, => sign_extend_low32(l.s)).shift_right_arithmetic(r.s.bit_and(shift_mask));
-        fn shr() => if(w, => l.s, => bit_and(l.s, 1.shift_left(32) - 1)).shift_right_logical(r.s.bit_and(shift_mask));
-        fn shl() => l.s.shift_left(r.s.bit_and(shift_mask));
-        fn extsb() => {
-            cast :: fn(u: u64) i64 #ir(.extsb, .Kl);
-            cast(l.u)
-        };
-        fn extub() => l.s.bit_and(1.shift_left(8) - 1);
-        fn extsh() => {
-            cast :: fn(u: u64) i64 #ir(.extsh, .Kl);
-            cast(l.u)
-        };
-        fn extuh() => l.s.bit_and(1.shift_left(16) - 1);
-        fn extsw() => sign_extend_low32(l.s); 
-        fn extuw() => l.s.bit_and(1.shift_left(32) - 1);
-        fn stosi() => if(w, => l.fs.cast().int(), => l.fs.cast().int().sign_extend_low32());  // TODO: probably wrong rounding to just upcast. 
-        fn stoui() => if(w, => l.fs.cast().int(), => l.fs.cast().int().sign_extend_low32());  // ^+ TODO: probably unsigned has to do something different to fit bigger number?
-        //fn Ostoui() => w ? (uint64_t)cl.bits.s : (uint32_t)cl.bits.s;
-        fn dtosi() => l.fd.int();
-        fn dtoui() => l.fd.int(); // TODO: probably wide unsigned has to do something different to fit bigger number?
-        //fn Odtoui() => w ? (uint64_t)cl.bits.d : (uint32_t)cl.bits.d;
-        fn cast() => {
-            if cl.type == .CAddr {
-                res.type = .CAddr;
-                res.sym = cl.sym;
+    r  := i64.raw_from_ptr(c.bits.i&);
+    do_fold(op, cls, r, cl.bits.i, cr.bits.i);
+    if !is_wide(cls) {
+        c.bits.i = c.bits.i.bit_and(0xffffffff);  // TODO: should be redundant?
+    };
+    (Some = c)
+}
+
+// For each valid combintion of op + output type, just generate the code to do the thing. 
+// This is more magic but also less verbose and less error prone. 
+fn do_fold(rt_o: Qbe.O, rt_k: Qbe.Cls, out: rawptr, a0: i64, a1: i64) void = {
+    ops :: Qbe.O.get_cases();
+    cls :: @const_slice(Qbe.Cls.Kw, .Kl, .Ks, .Kd);
+    get_type :: fn(k: Qbe.Cls) Type = @match(k) {
+        fn Kw() => u32;
+        fn Kl() => u64;
+        fn Ks() => f32;
+        fn Kd() => f64;
+        @default => void;  // :DoFoldInvalidArity
+    };
+    
+    :: enable_franca_ir_types(Ty(Qbe.O, Qbe.Cls));
+    hack :: fn($R: Type, $A0: Type, $A1: Type, $o: Qbe.O, $k: Qbe.Cls) FuncId = {
+        // HACK: arg of #ir needs to be one expression or it will try to just look at the identifiers and try to find them in the enum.
+        cast :: fn(a0: A0, a1: A1) R #ir({ (o, k) });  
+        cast
+    };
+    
+    // This is an interesting test for the overhead of immediate_eval_expr. 
+    // The total overhead of do_fold using comptime vs just return(false) at the top of this function
+    // is ~200ms (1150 -> 1350, tho not too long ago i was getting 1s so maybe i broke something else too), 
+    // which is clearly too much. compiler needs to get better!
+    // Factoring this expression out into a function that gets compiled once brings out back under 1200ms. 
+    // (easy to experiment with: just move the definition of `allow` down to its callsite and see it get slower). 
+    // tracy says it's 80ms (like this) vs 200 ms (with allow() manually inlined into its callsite). 
+    // based on the same idea, it's better to calculate k0 twice than to hoist it out of the if and
+    // do a seperate constant evaluation for it even when the op isn't foldable which is unintuitive.  
+    // -- Feb 3, 2025
+    allow :: fn(ct_o: Qbe.O, ct_k: Qbe.Cls) bool = 
+        can_fold(ct_o) && ct_o != .sel1 && !@is(argcls(ct_o, ct_k, 0), .Kx, .Ke);
+
+    inline_for cls { $k |
+        ct_k :: k[];
+        R    :: get_type(ct_k);
+        if rt_k == ct_k {
+            inline_for ops { $o |
+                ct_o :: o[];
+                @if(::allow(ct_o, ct_k)) {
+                    k0    :: argcls(ct_o, ct_k, 0);
+                    k1    :: argcls(ct_o, ct_k, 1);
+                    A0    :: get_type(k0);
+                    A1    :: get_type(k1);
+                    if rt_o == ct_o {
+                        // TODO: this should work without this extra indirection 
+                        // cast :: fn(a0: A0, a1: A1) R #ir({ (ct_o, ct_k) });
+                        cast :: hack(R, A0, A1, ct_o, ct_k);
+                        
+                        // we need to put the args in the right type of register for the instruction (float vs int). 
+                        // passing these in as values and then just using a load to do a bitcast down here,
+                        // avoids actually generating code for the loads on every branch. 
+                        // for 32 bit (Kw, Ks) this relies on union putting all fields starting at the beginning and numbers being little endian. 
+                        a0 := ptr_cast_unchecked(i64, A0, a0&)[];
+                        a1 := ptr_cast_unchecked(i64, A1, a1&)[];
+                        R.ptr_from_raw(out)[] = cast(a0, a1);
+                        return();
+                    };
+                };
             };
-            l.s    
-        }
-        @default => fold_cmp(op, l&, r&).int();
-    };
-    res.bits = (i = x);
-    false
-}
-
-Ocmpw :: Qbe.O.ceqw;
-Ocmpl :: Qbe.O.ceql;
-
-// TODO: can't pass @union by value
-fn fold_cmp(op: Qbe.O, l: *BitcastPrim, r: *BitcastPrim) bool = {
-    if op.between(Ocmpw, .cultw)  {
-        l.s = sign_extend_low32(l.s);
-        r.s = sign_extend_low32(r.s);
-        op = rebase(op, Ocmpl, Ocmpw);
-    };
-    @match(op) {
-        // i64
-        fn culel() => l.u <= r.u; 
-        fn cultl() => l.u < r.u;
-        fn cslel() => l.s <= r.s; 
-        fn csltl() => l.s < r.s;
-        fn csgtl() => l.s > r.s;
-        fn csgel() => l.s >= r.s;
-        fn cugtl() => l.u > r.u;
-        fn cugel() => l.u >= r.u;
-        fn ceql()  => l.u == r.u;
-        fn cnel()  => l.u != r.u;
-        
-        // f32
-        fn cles() => l.fs <= r.fs;
-        fn clts() => l.fs < r.fs; 
-        fn cgts() => l.fs > r.fs; 
-        fn cges() => l.fs >= r.fs;
-        fn cnes() => l.fs != r.fs;
-        fn ceqs() => l.fs == r.fs;
-        fn cos() => l.fs < r.fs || l.fs >= r.fs;
-        fn cuos() => !(l.fs < r.fs || l.fs >= r.fs);
-        
-        // f64
-        fn cled() => l.fd <= r.fd;
-        fn cltd() => l.fd < r.fd; 
-        fn cgtd() => l.fd > r.fd; 
-        fn cged() => l.fd >= r.fd;
-        fn cned() => l.fd != r.fd;
-        fn ceqd() => l.fd == r.fd;
-        fn cod() => l.fd < r.fd || l.fd >= r.fd;
-        fn cuod() => !(l.fd < r.fd || l.fd >= r.fd);
-        @default => @panic("expected fold_cmp");
-    }
-}
-
-fn foldflt(res: *Qbe.Con, op: Qbe.O, w: bool, cl: *Qbe.Con, cr: *Qbe.Con) void = {
-    // TODO: this is wrong! I can't do real f32 ops on old backends.
-    //       so instead i promote them to f64 and then cast the result back. 
-    //       which is very similar but i assume not bit-for-bit the same. 
-    
-    ld := @if(w, cl.bits.d, cl.bits.s.s.cast());
-    rd := @if(w, cr.bits.d, cl.bits.s.s.cast());
-    
-    x := @match(op) {
-        fn add() => ld + rd;
-        fn sub() => ld - rd;
-        fn neg() => -ld;
-        fn div() => ld / rd;
-        fn mul() => ld * rd;
-        // for the casts, we want to read as integer not float!
-        fn swtof() => cl.bits.i.sign_extend_low32().float();
-        fn uwtof() => cl.bits.i.bit_and(1.shift_left(32) - 1).float();
-        fn sltof() => cl.bits.i.float();
-        fn ultof() => {
-            //@assert(cl.bits.i >= 0, "TODO: implement ultof for numbers larger than MAX_i64");
-            cl.bits.i.float()
-        }
-        fn exts()   => cl.bits.s.s.cast(); // w
-        fn truncd() => cl.bits.d;          // !w
-        fn cast()   => {
-            res[] = cl[]; // don't touch the bits at all
-            return()
         };
-        @default => @panic("expected fold_float %", op.get_name());
     };
-    if w {
-        res.bits.d = x;
-    } else {
-        res.bits.s.s = x.cast();
-    };
-    res.flt = @if(w, 2, 1);
 }

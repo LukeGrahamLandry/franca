@@ -437,7 +437,10 @@ fn intrinsic_shim(self: *EmitIr, func: *Func) Ty(Qbe.Ref, Qbe.Ref, Type) = {
     a0 := self.f.newtmp("a", k0);
     self.emit(.par, k0, a0, QbeNull, QbeNull);
     a1 := QbeNull;
-    if arg.len == 2 {
+    // :DoFoldInvalidArity 
+    // `!= void` makes do_fold() work. it wants to pass extra void args to a #ir function.
+    // TODO: allow any zero sized types as trailing args?
+    if arg.len == 2 && arg_ty[1] != void {
         _, k1 := self.load_op(arg_ty[1]);
         a1 = self.f.newtmp("a", k1);
         self.emit(.par, k1, a1, QbeNull, QbeNull);
@@ -785,7 +788,8 @@ fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) CRes(Qbe.R
                         arg := arg.items();
                         p1: Placement = @if(arg.len != 1 && guess_can_assign(arg[1]&), .Scalar, .ScalarTransient);
                         a0 := @try(self.compile_expr(arg[0]&, p1)) return;
-                        a1 := if(arg.len == 1, => QbeNull, => @try(self.compile_expr(arg[1]&, .ScalarTransient)) return);
+                        // the || void is for :DoFoldInvalidArity
+                        a1 := if(arg.len == 1 || arg[1].ty == void, => QbeNull, => @try(self.compile_expr(arg[1]&, .ScalarTransient)) return);
                         return(self.emit_intrinsic_new(op, p, @slice(a0, a1), caller, f_ty.ret));
                     }
                     fn Intrinsic(op) => {
@@ -1366,7 +1370,7 @@ fn record_var_decl(self: *EmitIr, name: Var, value: IrVar) void #inline = {
 
 // IMPORTANT: you can't use f.emit because threads. 
 fn emit(self: *EmitIr, o: Qbe.O, k: Qbe.Cls, dest: Qbe.Ref, a0: Qbe.Ref, a1: Qbe.Ref) void #inline = {
-    @debug_assert(k.raw() < 4, "ICE: invalid base in emit_ir:emit %", o.get_name());
+    @debug_assert(k.raw() < 4, "ICE: invalid base % in emit_ir:emit %", k, o.get_name());
     @debug_assert(o != .Oxxx, "ICE: null inst emit_ir:emit");
     push(self.blk, make_ins(o, k, dest, a0, a1));
 }

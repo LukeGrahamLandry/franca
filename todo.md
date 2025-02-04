@@ -7,6 +7,7 @@
 
 ##
 
+- fix the hack that requires `#ir({ (o, k) })`. it should allow just a tuple and still evaluate it as an expression instead of just grabbing the identifiers. 
 - check enum names are unique
 - this should work
 ```
@@ -92,6 +93,12 @@ ie. `fn init() Self = (arr = @as(Slice(Entry)) empty(), len_including_tombstones
 // - track all the errors you hit when failing overloads.
 // - local_return and return implciitly rebinding is a bit confusing
 
+- would be cool if #where could let you infer new types instead of just checking them: 
+```
+#where(=> /* let us access $o and $k and then we can use argcls() to get the cls of A0/A1/R and can tell you what types are allowed somehow */)
+fn invoke($o: Qbe.O, $k: Qbe.Cls, a0: ~A0, a1: ~A1) ~R #ir(o, k);
+```
+
 ##
 
 - fix all the places i `:HardcodeOs`
@@ -126,20 +133,6 @@ ie. `fn init() Self = (arr = @as(Slice(Entry)) empty(), len_including_tombstones
 - would be cool to transcribe my own linux syscalls
 - have it download stuff for you (ask first!) like qbe, sokol, llvm?
   at least make the error messages for missing stuff more helpful.
-
-```
-@impl(fn(T) = T.is_sequential_enum()) {
-    T :: @placeholder 0;
-    fn eq(a: T, b: T) bool = {}
-};
-```
-
-this is much nicer but needs new syntax:
-
-```
-#where(fn(T) => T.is_sequential_enum())
-fn eq(a: ~T, b: T) bool = {}
-```
 
 ##
 
