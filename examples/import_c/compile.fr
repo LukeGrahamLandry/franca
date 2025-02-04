@@ -176,15 +176,38 @@ fn new_binary(c: *Ctx, kind: CC.NodeKind, lhs: *CC.Node, rhs: *CC.Node, tok: *CC
     node
 }
 
+fn new_deref(c: *Ctx, expr: *CC.Node, tok: *CC.Token) *CC.Node = {
+    node := c.new_node(.ND_DEREF, tok);
+    node.lhs = expr;
+    node.lvalue = expr.r;
+    
+    // :CInferType
+    c.add_type(node.lhs);
+    if(node.lhs.ty.base.is_null(),        => @error_tok(c, node.tok, "invalid pointer dereference"));
+    if(node.lhs.ty.base.kind == .TY_VOID, => @error_tok(c, node.tok, "dereferencing a void pointer"));
+    node.ty = node.lhs.ty.base;
+    
+    c.gen_expr(node);  // TODO: extra loads in &*&*&*& chains
+    node
+}
+
+fn new_addr(c: *Ctx, expr: *CC.Node, tok: *CC.Token) *CC.Node #once = {
+    node := c.new_node(.ND_ADDR, tok);
+    node.lhs = expr;
+    c.gen_addr(expr);
+    node.r = expr.lvalue;
+    
+    // :CInferType
+    ty := node.lhs.ty;
+    node.ty = c.pointer_to(if(ty.kind == .TY_ARRAY, => ty.base, => ty));
+    
+    c.gen_expr(node);
+    node
+}
+
 fn new_unary(c: *Ctx, kind: CC.NodeKind, expr: *CC.Node, tok: *CC.Token) *CC.Node = {
     node := c.new_node(kind, tok);
     node.lhs = expr;
-    if kind == .ND_ADDR {
-        node.r = expr.lvalue;
-    };
-    if kind == .ND_DEREF {
-        node.lvalue = expr.r;
-    };
     node
 }
 
@@ -198,7 +221,7 @@ fn new_num(c: *Ctx, val: i64, tok: *CC.Token, ty: *CC.Type) *CC.Node = {
 }
 
 fn new_num(c: *Ctx, val: i64, tok: *CC.Token) *CC.Node = 
-    c.new_num(val, tok, CC.Type.ptr_from_int(0) /* TODO */); // ty_int?
+    c.new_num(val, tok, ty_int);
 
 fn new_long(c: *Ctx, val: i64, tok: *CC.Token) *CC.Node = 
     c.new_num(val, tok, ty_long);
@@ -209,6 +232,7 @@ fn new_ulong(c: *Ctx, val: i64, tok: *CC.Token) *CC.Node =
 fn new_var_node(c: *Ctx, var: *CC.Obj, tok: *CC.Token) *CC.Node = {
     node := c.new_node(.ND_VAR, tok);
     node.var = var;
+    node.ty = var.ty;
     
     if !c.speculate && !node.var.is_function {
         node.lvalue = c.gen_addr(node);
@@ -224,11 +248,13 @@ fn new_var_node(c: *Ctx, var: *CC.Obj, tok: *CC.Token) *CC.Node = {
 fn new_vla_ptr(c: *Ctx, var: *CC.Obj, tok: *CC.Token) *CC.Node = {
     node := c.new_node(.ND_VLA_PTR, tok);
     node.var = var;
+    node.ty = var.ty;
     node
 }
 
 fn new_cast(c: *Ctx, expr: *CC.Node, ty: *CC.Type) *CC.Node = {
     c.add_type(expr);
+    if(expr.ty.identical(ty), => return(expr));
     
     node := temp().box_zeroed(CC.Node);
     node.kind = .ND_CAST;
@@ -238,7 +264,7 @@ fn new_cast(c: *Ctx, expr: *CC.Node, ty: *CC.Type) *CC.Node = {
     node.current_block = expr.current_block; // HACK: this is super confusing, hopefully it will go away with asts
     
     //node.lvalue = expr.lvalue;  // :FrontendConstantFolding, TODO: but this is wrong, we're assuming its a noop cast but what if its a truncation
-    
+    c.gen_expr(node);
     node
 }
 
@@ -1267,7 +1293,7 @@ fn init_desg_expr(c: *Ctx, desg: *InitDesg, tok: *CC.Token) *CC.Node = {
 
     lhs := c.init_desg_expr(desg.next, tok);
     rhs := c.new_num(desg.idx, tok);
-    c.new_unary(.ND_DEREF, c.new_add(lhs, rhs, tok), tok)
+    c.new_deref(c.new_add(lhs, rhs, tok), tok)
 }
 
 fn create_lvar_init(c: *Ctx, init: *Initializer, ty: *CC.Type, desg: *InitDesg, tok: *CC.Token) *CC.Node = {
@@ -1442,273 +1468,6 @@ fn is_typename(c: *Ctx, tok: *CC.Token) bool #inline = {
     is_type_keyword := tok.kind.raw() >= TokenKind.short.raw() && tok.kind.raw() <= TokenKind.int.raw();
     is_type_keyword || c.find_typedef(tok).is_some()
 }
-
-// asm-stmt = "asm" ("volatile" | "inline")* "(" string-literal ")"
-fn asm_stmt(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
-    tok = tok.next;
-
-    dowhile {
-        ignore(tok&, tok, @const_slice("volatile", "inline"))
-    };
-
-    tok = c.skip(tok, "(");
-    if tok.kind != .TK_STR || tok.ty.base.kind != .TY_CHAR {
-        @error_tok(c, tok, "expected string literal");
-    };
-    asm_str := tok.str;
-    rest[] = c.skip(tok.next, ")");
-    @error_tok(c, tok, "asm stmt is not supported");
-}
-
-fn stmt(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
-@match(tok.kind) {
-    fn return() => {
-        if(consume(rest, tok.next, ";"), => return(c.new_node(.ND_NULL_EXPR, tok)));
-        exp := c.parse_expr(tok&, tok.next, .None);
-        rest[] = c.skip(tok, ";");
-
-        c.add_type(exp);
-        current_fn := c.current_fn || @error_tok(c, tok, "stray return");
-        ty := current_fn.ty.return_ty;
-        if !@is(ty.kind, .TY_STRUCT, .TY_UNION) {
-            exp = c.new_cast(exp, ty);
-        };
-
-        r := c.gen_expr(exp);
-        
-        if c.b.jmp.type == .Jxxx {
-            j := Qbe.J.retw;
-            c.b.jmp = (type = j, arg = r);
-        };
-    }
-    fn if() => {
-        then_block := c.new_block();
-        else_block := c.new_block();
-        join_block := c.new_block();
-    
-        tok = c.skip(tok.next, "(");
-        cond := c.parse_expr(tok&, tok, .None);
-        tok = c.skip(tok, ")");
-        cond := c.gen_expr(cond);
-        
-        c.jnz_if_unterminated(cond, then_block, else_block);
-        
-        c.b = then_block;
-        c.stmt(tok&, tok);
-        c.jmp_if_unterminated(join_block);
-        
-        c.b = else_block;
-        if equal(tok, "else") {
-            c.stmt(tok&, tok.next);
-        };
-        c.jmp_if_unterminated(join_block);
-        
-        c.b = join_block;
-        rest[] = tok;
-    }
-    fn switch() => {
-        payload := temp().box_zeroed(Qbe.SwitchPayload);
-        tok = c.skip(tok.next, "(");
-        cond := c.parse_expr(tok&, tok, .None);
-        tok = c.skip(tok, ")");
-        payload.inspect = c.gen_expr(cond);
-        // backend switch lowering wants a Kl, but we want zero extension, not sign extension like casting to a long would be. 
-        if cond.ty.cls() != .Kl && !c.speculate {
-            r := c.f.newtmp("c", .Kl);
-            c.emit(.extuw, .Kl, r, payload.inspect, QbeNull);
-            payload.inspect = r;
-        };
-        payload.src = c.b;
-        payload.cases = new(0);
-        
-        if payload.src.jmp.type == .Jxxx && !c.speculate {
-            payload.src.jmp.type = .switch;
-        };
-
-        sw := c.current_switch;
-        c.current_switch = (Some = payload);
-        brk := c.brk_label;
-        brk_label := c.new_block(); 
-        c.brk_label = (Some = brk_label);
-
-        c.b = c.new_block();  // TODO: should be redundant
-        c.stmt(rest, tok);
-        c.jmp_if_unterminated(brk_label);
-        c.current_switch = sw;
-        c.brk_label = brk;
-        c.b = brk_label;
-        if payload.default.is_null() {
-            payload.default = brk_label;
-        };
-        
-        if payload.src.jmp.type == .switch {
-            payload.src.jmp.arg = INT(c.f.switch_count.zext());
-            if c.f.switch_count == 0 {
-                c.f.switches = new(1);
-            };
-            push(c.f.switches&, c.f.switch_count&, payload[]);
-        };
-    }
-    fn case() => {
-        unique_label := c.new_block();
-        c.jmp_if_unterminated(unique_label);
-        c.b = unique_label;
-        current_switch := c.current_switch || @error_tok(c, tok, "stray case");
-        
-        begin := c.const_expr(tok&, tok.next);
-
-        if equal(tok, "...") {
-            end := c.const_expr(tok&, tok.next);
-            if(end < begin, => @error_tok(c, tok, "empty case range specified"));
-            @error_tok(c, tok, "[GNU] Case ranges are not supported (% ... %)", begin, end);
-        };
-
-        tok = c.skip(tok, ":");
-        c.stmt(rest, tok);
-        push(current_switch.cases&, current_switch.case_count&, (unique_label, begin));
-        
-        next_block := c.new_block();  // TODO: wasteful, empty block for consecutive cases. 
-        c.jmp_if_unterminated(next_block);
-        c.b = next_block;
-    }
-    fn default() => {
-        unique_label := c.new_block();
-        c.jmp_if_unterminated(unique_label);
-        c.b = unique_label;
-        current_switch := c.current_switch || @error_tok(c, tok, "stray default");
-        
-        tok = c.skip(tok.next, ":");
-        c.stmt(rest, tok);
-        current_switch.default = unique_label;
-        
-        next_block := c.new_block();
-        c.jmp_if_unterminated(next_block);
-        c.b = next_block;
-    }
-    fn for() => {
-        _, _ := push_loop c { brk_label, cont_label |
-            cond_block := c.new_block();
-            body_block := c.new_block();
-            
-            c.enter_scope();
-            tok = c.skip(tok.next, "(");
-            init := if c.is_typename(tok) {
-                basety := c.declspec(tok&, tok, .None);
-                c.declaration(tok&, tok, basety, .None)
-            } else {
-                c.expr_stmt(tok&, tok)
-            };
-            c.jmp_if_unterminated(body_block);
-    
-            c.b = cond_block;
-            cond := if !equal(tok, ";") {
-                c.new_cast(c.parse_expr(tok&, tok, .None), ty_bool)
-            } else {
-                c.new_num(1, tok)  // wasteful to rely on folding for this 
-            };
-            cond := c.gen_expr(cond);
-            tok = c.skip(tok, ";");
-            
-            c.jnz_if_unterminated(cond, body_block, brk_label);
-    
-            c.b = cont_label;
-            inc := if !equal(tok, ")") {
-                c.parse_expr(tok&, tok, .None)
-            } else {
-                c.new_num(0, tok)  // nop
-            };
-            c.gen_expr(inc);
-            tok = c.skip(tok, ")");
-            c.jmp_if_unterminated(cond_block);
-    
-            c.b = body_block;
-            c.stmt(rest, tok);
-            c.jmp_if_unterminated(cont_label);
-    
-            c.leave_scope();
-            c.b = brk_label;
-        };
-    }
-    fn while() => {
-        _, _ := push_loop c {  brk_label, cont_label |
-            c.jmp_if_unterminated(cont_label);
-            c.b = cont_label;
-            tok = c.skip(tok.next, "(");
-            cond := c.new_cast(c.parse_expr(tok&, tok, .None), ty_bool);
-            cond := c.gen_expr(cond);
-            tok = c.skip(tok, ")");
-            body_block := c.new_block();
-    
-            c.jnz_if_unterminated(cond, body_block, brk_label);
-            
-            c.b = body_block;
-            c.stmt(rest, tok);
-            c.jmp_if_unterminated(cont_label);
-            c.b = brk_label;
-        };
-    }
-    fn do() => {
-        body_block := c.new_block();
-        c.jmp_if_unterminated(body_block);
-        brk_label, cont_label := push_loop c { _, _ |
-            c.b = body_block;
-            c.stmt(tok&, tok.next);
-        };
-        c.jmp_if_unterminated(cont_label);  // goto condition
-        
-        c.b = cont_label;  
-        tok = c.skip(tok, "while");
-        tok = c.skip(tok, "(");
-        cond := c.new_cast(c.parse_expr(tok&, tok, .None), ty_bool);
-        cond := c.gen_expr(cond);
-        tok = c.skip(tok, ")");
-        rest[] = c.skip(tok, ";");
-        
-        c.jnz_if_unterminated(cond, body_block, brk_label);
-        c.b = brk_label;
-    };
-    fn asm() => c.asm_stmt(rest, tok);
-    fn goto() => {
-        if equal(tok.next, "*") {
-            _dest := c.parse_expr(tok&, tok.next.next, .None);
-            @error_tok(c, tok, "[GNU] labels-as-values is not supported (goto *ptr)");
-        };
-
-        unique_label := c.get_block(c.get_ident(tok.next));
-        c.jmp_if_unterminated(unique_label);
-        rest[]  = c.skip(tok.next.next, ";");
-        c.b = c.new_block();
-    }
-    fn break() => {
-        brk_label := c.brk_label || @error_tok(c, tok, "stray break");
-        unique_label := brk_label;
-        rest[] = c.skip(tok.next, ";");
-        c.jmp_if_unterminated(brk_label);
-        c.b = c.new_block();
-    }
-    fn continue() => {
-        cont_label := c.cont_label || @error_tok(c, tok, "stray continue");
-        unique_label := cont_label;
-        rest[] = c.skip(tok.next, ";");
-        c.jmp_if_unterminated(cont_label);
-        c.b = c.new_block();
-    }
-    fn @"{"() => {
-        c.compound_stmt(rest, tok.next);
-    };
-    @default => {
-        if tok.kind == .TK_IDENT && equal(tok.next, ":") {
-            unique_label := c.get_block(tok.str());
-            c.jmp_if_unterminated(unique_label);
-            c.b = unique_label;
-            return(c.stmt(rest, tok.next.next));
-        } else {
-            return(c.expr_stmt(rest, tok));
-        };
-    };
-};
-    c.new_node(.ND_NULL_EXPR, tok)
-};
 
 fn slow_convert_to_c_string(s: Str) CStr = // :SLOW
     (ptr = @tfmt("%\0", s).as_ptr());
@@ -2091,10 +1850,7 @@ fn function(c: *Ctx, tok: *CC.Token, basety: *CC.Type, attr: *VarAttr) *CC.Token
     f.locals = c.locals;
     c.leave_scope();
     c.labels&.clear();
-    //c.speculate = true;
-    //c.f = Qbe.Fn.ptr_from_int(0);
     c.current_fn = .None;
-    //c.b = Qbe.Blk.ptr_from_int(0);
     tok
 }
 
@@ -2230,6 +1986,7 @@ fn parse_impl(c: *Ctx, tok: *CC.Token) *CC.Obj = {
 
 Prec :: @enum(i32) (
     Invalid,
+    Stmt,
     None, 
     Comma,
     Assign, 
@@ -2261,6 +2018,7 @@ fn comptime_init_rules_table() void = {
     ::enum(Prec);
     ::enum(CC.TypeKind);
     ::ptr_utils(CC.Scope);
+    ::if(*CC.Type); 
     
     binary := @slice(@as(Ty(CC.TokenKind, Prec, CC.NodeKind))
         (.@"+", .Term,   .ND_INVALID),
@@ -2292,7 +2050,7 @@ fn comptime_init_rules_table() void = {
         (.@"<=", .Relational, .ND_LE),
         (.@"<", .Relational,  .ND_LT),
         
-        (.@",", .Comma,      .ND_COMMA),
+        (.@",", .Comma,  .ND_COMMA),
         (.@"=", .Assign, .ND_ASSIGN),
     );
     each binary { it |
@@ -2349,10 +2107,6 @@ fn parse_expr(c: *Ctx, rest: **CC.Token, tok: *CC.Token, prec: Prec) *CC.Node = 
         rule = rules.index(tok.kind);
     };
     @if(SPAM) @println("End Expression: % % %", tok.str(), tok.kind, node.kind);
-    
-    if node.r == QbeNull && !c.speculate && !c.f.is_null() && node.kind != .ND_VAR {
-        warn_tok(node.tok, "not compiled");
-    };
     c.gen_expr(node);
     node
 }
@@ -2375,8 +2129,16 @@ fn parse_binary_inner(c: *Ctx, rest: **CC.Token, tok: *CC.Token, lhs: *CC.Node) 
     
     rhs  := parse_expr(c, rest, tok.next, prec);
     @match(tok.kind) {
-        fn @"+="()  => return(c.to_assign(c.new_add(lhs, rhs, tok)));
-        fn @"-="()  => return(c.to_assign(c.new_sub(lhs, rhs, tok)));
+        fn @"+="()  => {
+            node := c.new_add(lhs, rhs, tok);
+            node := c.to_assign(node.kind, node.lhs, node.rhs, node.tok);
+            return(node);
+        }
+        fn @"-="()  => {
+            node := c.new_sub(lhs, rhs, tok);
+            node := c.to_assign(node.kind, node.lhs, node.rhs, node.tok);
+            return(node);
+        }
         fn @"+"()   => return(c.new_add(lhs, rhs, tok));
         fn @"-"()   => return(c.new_sub(lhs, rhs, tok));
         @default    => ();
@@ -2387,16 +2149,14 @@ fn parse_binary_inner(c: *Ctx, rest: **CC.Token, tok: *CC.Token, lhs: *CC.Node) 
         t := lhs; lhs = rhs; rhs = t; 
     };
     is_update_assign := @is(tok.kind, .@"*=", .@"/=", .@"%=", .@"&=", .@"|=", .@"^=", .@"<<=", .@">>=");
-    node := c.new_binary(rule.op, lhs, rhs, tok);
-    if is_update_assign {
-        node = c.to_assign(node);
+    node := if is_update_assign {
+        c.to_assign(rule.op, lhs, rhs, tok)
     } else {
-        if tok.kind != .@"=" && !c.speculate {
-            c.add_type(node);
-            lhs_r := c.gen_expr(node.lhs);
-            rhs_r := c.gen_expr(node.rhs);
-            node.r = c.gen_binary(node.kind, lhs_r, rhs_r, node.ty, node.lhs.ty, node.tok);
-        };
+        if tok.kind != .@"=" && tok.kind != .@"," {
+            c.new_binary2(rule.op, lhs, rhs, tok)
+        } else {
+            c.new_binary(rule.op, lhs, rhs, tok)
+        }
     };
     node
 }
@@ -2529,22 +2289,6 @@ conditional :: fn(c, rest, tok, cond) #infix(.@"?", .Conditional) = {
     node
 };
 
-fn clear_kind(c: *Ctx, node: *CC.Node) void = {
-    old := node[];
-    node[] = CC.Node.zeroed();
-    node.ty = old.ty;
-    node.r = old.r;
-    node.lvalue = old.lvalue;
-    node.current_block = old.current_block;
-    node.kind = .ND_NULL_EXPR;
-    node.tok = old.tok;
-    node.member = old.member;
-    node.func_ty = old.func_ty;
-    node.args = old.args;
-    node.ret_buffer = old.ret_buffer;
-    node.var = old.var;
-}
-
 parse_bracketed :: fn(c, rest, tok) #prefix(.@"(") = {
     node := if c.is_typename(tok.next) {
         start := tok;
@@ -2588,11 +2332,22 @@ parse_bracketed :: fn(c, rest, tok) #prefix(.@"(") = {
     node
 };
 
+label :: fn(c, rest, tok, prev) #infix(.@":", .Stmt) = {
+    // :LabelAsInfix
+    if !@is(prev.kind, .ND_VAR, .ND_STMT) {
+        @error_tok(c, tok, "treating infix ':' as a label but the expression on the left was not an indentifier");
+    };
+    unique_label := c.get_block(prev.tok.str());
+    c.jmp_if_unterminated(unique_label);
+    c.b = unique_label;
+    c.stmt(rest, tok.next)
+};
+
 parse_ident :: fn(c, rest, tok) #prefix(.TK_IDENT) = {
     // Variable or enum constant
     sc := c.find_var(tok);
     rest[] = tok.next;
-
+    
     // For "static inline" function
     ::ptr_utils(CC.Obj);
     ::?*CC.Obj;
@@ -2606,12 +2361,25 @@ parse_ident :: fn(c, rest, tok) #prefix(.TK_IDENT) = {
                     var.is_root = true;
                 };
             }; 
-            return(c.new_var_node(var, tok));
+            node := c.new_var_node(var, tok);
+            node.ty = var.ty;
+            return(node);
         };
         if(!sc.enum_ty.is_null(), => return(c.new_num(sc.enum_val, tok)));
     };
 
     if(equal(tok.next, "("), => @error_tok(c, tok, "implicit declaration of a function"));
+    if equal(tok.next, ":") {
+        // :LabelAsInfix
+        // might be a label: the colon will be treated as an infix operator
+        // this case can't skip the var lookup tho because of `a?b:c;`, from here we can't tell that b is not a label.
+        node := c.new_node(.ND_STMT, tok);
+        // Undef makes sure gen_expr/gen_addr skip it
+        node.r = QbeUndef;
+        node.lvalue = QbeUndef;
+        node.ty = ty_int;  // HACK: without this, it crashes on `"" + a` when a is undeclared 
+        return(node);
+    };  
     @error_tok(c, tok, "undefined variable")
 };
 
@@ -2638,18 +2406,15 @@ parse_number :: fn(c, rest, tok) #prefix(.TK_NUM) = {
     node
 };
 
-unary_plus :: fn(c, rest, tok) #prefix(.@"+") = {
-    node := c.parse_expr(rest, tok.next, .Unary);
-    c.gen_expr(node);
-    node
-};
+unary_plus :: fn(c, rest, tok) #prefix(.@"+") = 
+    c.parse_expr(rest, tok.next, .Unary);
 
 unary_amp :: fn(c, rest, tok) #prefix(.@"&") = {
     lhs := c.parse_expr(rest, tok.next, .Unary);
     c.add_type(lhs);
     bf := lhs.kind == .ND_MEMBER && lhs.member.is_bitfield;
     !bf || @error_tok(c, tok, "cannot take address of bitfield");
-    node := c.new_unary(.ND_ADDR, lhs, tok);
+    node := c.new_addr(lhs, tok);
     c.gen_expr(node);
     node
 };
@@ -2661,7 +2426,7 @@ unary_star :: fn(c, rest, tok) #prefix(.@"*") = {
     // are all equivalent to just `foo`.
     node := c.parse_expr(rest, tok.next, .Unary);
     c.add_type(node);
-    node := if(node.ty.kind == .TY_FUNC, => node, => c.new_unary(.ND_DEREF, node, tok));
+    node := if(node.ty.kind == .TY_FUNC, => node, => c.new_deref(node, tok));
     c.gen_expr(node);
     node
 };
@@ -2676,13 +2441,15 @@ parse_unary :: fn(c, rest, tok) = {
 };
 
 unary_inc :: fn(c, rest, tok) #prefix(.@"++") = { // Read ++i as i+=1
-    node := c.to_assign(c.new_add(c.parse_expr(rest, tok.next, .Unary), c.new_num(1, tok), tok));
+    node := c.new_add(c.parse_expr(rest, tok.next, .Unary), c.new_num(1, tok), tok);
+    node := c.to_assign(node.kind, node.lhs, node.rhs, node.tok);
     c.gen_expr(node);
     node
 };
 
 unary_dec :: fn(c, rest, tok) #prefix(.@"--") = { // Read --i as i-=1
-    node := c.to_assign(c.new_sub(c.parse_expr(rest, tok.next, .Unary), c.new_num(1, tok), tok));
+    node := c.new_sub(c.parse_expr(rest, tok.next, .Unary), c.new_num(1, tok), tok);
+    node := c.to_assign(node.kind, node.lhs, node.rhs, node.tok);
     c.gen_expr(node);
     node
 };
@@ -2852,43 +2619,310 @@ funcall :: fn(c, rest, tok, f) #infix(.@"(", .PostFix) = {
     node
 };
 
-post_square :: fn(c, rest, tok, node) #infix(.@"[", .PostFix) = {
+square :: fn(c, rest, tok, node) #infix(.@"[", .PostFix) = {
     // x[y] is short for *(x+y)
     start := tok;
     idx := c.parse_expr(tok&, tok.next, .None);
-    rest[] = c.skip(tok, "]");
-    node := c.new_unary(.ND_DEREF, c.new_add(node, idx, start), start);
-    c.gen_expr(node);
-    node
+    node := c.new_deref(c.new_add(node, idx, start), start);
+    set_rest_and_gen(c, rest, c.skip(tok, "]"), node)
 };
-post_dot :: fn(c, rest, tok, node) #infix(.@".", .PostFix) = {
+dot :: fn(c, rest, tok, node) #infix(.@".", .PostFix) = {
     node := c.struct_ref(node, tok.next);
-    rest[] = tok.next.next;
-    c.gen_expr(node);
-    node
+    set_rest_and_gen(c, rest, tok.next.next, node)
 };
-post_arrow :: fn(c, rest, tok, node) #infix(.@"->", .PostFix) = {
+arrow :: fn(c, rest, tok, node) #infix(.@"->", .PostFix) = {
     // x->y is short for (*x).y
-    node := c.new_unary(.ND_DEREF, node, tok);
+    node := c.new_deref(node, tok);
     node := c.struct_ref(node, tok.next);
-    rest[] = tok.next.next;
-    c.gen_expr(node);
-    node
+    set_rest_and_gen(c, rest, tok.next.next, node)
 };
-post_add :: fn(c, rest, tok, node) #infix(.@"++", .PostFix) = {
+post_inc :: fn(c, rest, tok, node) #infix(.@"++", .PostFix) = {
     node := c.new_inc_dec(node, tok, 1);
-    rest[] = tok.next;
-    c.gen_expr(node);
-    node
+    set_rest_and_gen(c, rest, tok.next, node)
 };
-post_sub :: fn(c, rest, tok, node) #infix(.@"--", .PostFix) = {
+post_dec :: fn(c, rest, tok, node) #infix(.@"--", .PostFix) = {
     node := c.new_inc_dec(node, tok, -1);
+    set_rest_and_gen(c, rest, tok.next, node)
+};
+
+return :: fn(c, rest, tok) #prefix(.return) = {
+    if(consume(rest, tok.next, ";"), => return(c.new_node(.ND_STMT, tok)));  // return void
+    exp := c.parse_expr(tok&, tok.next, .None);
+    rest[] = c.skip(tok, ";");
+
+    c.add_type(exp);
+    current_fn := c.current_fn || @error_tok(c, tok, "stray return");
+    ty := current_fn.ty.return_ty;
+    if !@is(ty.kind, .TY_STRUCT, .TY_UNION) {
+        exp = c.new_cast(exp, ty);
+    };
+
+    r := c.gen_expr(exp);
+    
+    if c.b.jmp.type == .Jxxx {
+        j := Qbe.J.retw;
+        c.b.jmp = (type = j, arg = r);
+    };
+    c.new_node(.ND_STMT, tok)
+};
+if_ :: fn(c, rest, tok) #prefix(.if) = {
+    then_block := c.new_block();
+    else_block := c.new_block();
+    join_block := c.new_block();
+
+    tok = c.skip(tok.next, "(");
+    cond := c.parse_expr(tok&, tok, .None);
+    tok = c.skip(tok, ")");
+    cond := c.gen_expr(cond);
+    
+    c.jnz_if_unterminated(cond, then_block, else_block);
+    
+    c.b = then_block;
+    c.stmt(tok&, tok);
+    c.jmp_if_unterminated(join_block);
+    
+    c.b = else_block;
+    if equal(tok, "else") {
+        c.stmt(tok&, tok.next);
+    };
+    c.jmp_if_unterminated(join_block);
+    
+    c.b = join_block;
+    rest[] = tok;
+    c.new_node(.ND_STMT, tok)
+};
+switch_ :: fn(c, rest, tok) #prefix(.switch) = {
+    payload := temp().box_zeroed(Qbe.SwitchPayload);
+    tok = c.skip(tok.next, "(");
+    cond := c.parse_expr(tok&, tok, .None);
+    tok = c.skip(tok, ")");
+    payload.inspect = c.gen_expr(cond);
+    // backend switch lowering wants a Kl, but we want zero extension, not sign extension like casting to a long would be. 
+    if cond.ty.cls() != .Kl && !c.speculate {
+        r := c.f.newtmp("c", .Kl);
+        c.emit(.extuw, .Kl, r, payload.inspect, QbeNull);
+        payload.inspect = r;
+    };
+    payload.src = c.b;
+    payload.cases = new(0);
+    
+    if payload.src.jmp.type == .Jxxx && !c.speculate {
+        payload.src.jmp.type = .switch;
+    };
+
+    sw := c.current_switch;
+    c.current_switch = (Some = payload);
+    brk := c.brk_label;
+    brk_label := c.new_block(); 
+    c.brk_label = (Some = brk_label);
+
+    c.b = c.new_block();  // TODO: should be redundant
+    c.stmt(rest, tok);
+    c.jmp_if_unterminated(brk_label);
+    c.current_switch = sw;
+    c.brk_label = brk;
+    c.b = brk_label;
+    if payload.default.is_null() {
+        payload.default = brk_label;
+    };
+    
+    if payload.src.jmp.type == .switch {
+        payload.src.jmp.arg = INT(c.f.switch_count.zext());
+        if c.f.switch_count == 0 {
+            c.f.switches = new(1);
+        };
+        push(c.f.switches&, c.f.switch_count&, payload[]);
+    };
+    c.new_node(.ND_STMT, tok)
+};
+case :: fn(c, rest, tok) #prefix(.case) = {
+    unique_label := c.new_block();
+    c.jmp_if_unterminated(unique_label);
+    c.b = unique_label;
+    current_switch := c.current_switch || @error_tok(c, tok, "stray case");
+    
+    begin := c.const_expr(tok&, tok.next);
+
+    if equal(tok, "...") {
+        end := c.const_expr(tok&, tok.next);
+        if(end < begin, => @error_tok(c, tok, "empty case range specified"));
+        @error_tok(c, tok, "[GNU] Case ranges are not supported (% ... %)", begin, end);
+    };
+
+    tok = c.skip(tok, ":");
+    c.stmt(rest, tok);
+    push(current_switch.cases&, current_switch.case_count&, (unique_label, begin));
+    
+    next_block := c.new_block();  // TODO: wasteful, empty block for consecutive cases. 
+    c.jmp_if_unterminated(next_block);
+    c.b = next_block;
+    c.new_node(.ND_STMT, tok)
+};
+default :: fn(c, rest, tok) #prefix(.default) = {
+    unique_label := c.new_block();
+    c.jmp_if_unterminated(unique_label);
+    c.b = unique_label;
+    current_switch := c.current_switch || @error_tok(c, tok, "stray default");
+    
+    tok = c.skip(tok.next, ":");
+    c.stmt(rest, tok);
+    current_switch.default = unique_label;
+    
+    next_block := c.new_block();
+    c.jmp_if_unterminated(next_block);
+    c.b = next_block;
+    c.new_node(.ND_STMT, tok)
+};
+for_ :: fn(c, rest, tok) #prefix(.for) = {
+    _, _ := push_loop c { brk_label, cont_label |
+        cond_block := c.new_block();
+        body_block := c.new_block();
+        
+        c.enter_scope();
+        tok = c.skip(tok.next, "(");
+        init := if c.is_typename(tok) {
+            basety := c.declspec(tok&, tok, .None);
+            c.declaration(tok&, tok, basety, .None)
+        } else {
+            c.expr_stmt(tok&, tok)
+        };
+        c.jmp_if_unterminated(body_block);
+
+        c.b = cond_block;
+        cond := if !equal(tok, ";") {
+            c.new_cast(c.parse_expr(tok&, tok, .None), ty_bool)
+        } else {
+            c.new_num(1, tok)  // wasteful to rely on folding for this 
+        };
+        cond := c.gen_expr(cond);
+        tok = c.skip(tok, ";");
+        
+        c.jnz_if_unterminated(cond, body_block, brk_label);
+
+        c.b = cont_label;
+        inc := if !equal(tok, ")") {
+            c.parse_expr(tok&, tok, .None)
+        } else {
+            c.new_num(0, tok)  // nop
+        };
+        c.gen_expr(inc);
+        tok = c.skip(tok, ")");
+        c.jmp_if_unterminated(cond_block);
+
+        c.b = body_block;
+        c.stmt(rest, tok);
+        c.jmp_if_unterminated(cont_label);
+
+        c.leave_scope();
+        c.b = brk_label;
+    };
+    c.new_node(.ND_STMT, tok)
+};
+while_ :: fn(c, rest, tok) #prefix(.while) = {
+    _, _ := push_loop c {  brk_label, cont_label |
+        c.jmp_if_unterminated(cont_label);
+        c.b = cont_label;
+        tok = c.skip(tok.next, "(");
+        cond := c.new_cast(c.parse_expr(tok&, tok, .None), ty_bool);
+        cond := c.gen_expr(cond);
+        tok = c.skip(tok, ")");
+        body_block := c.new_block();
+
+        c.jnz_if_unterminated(cond, body_block, brk_label);
+        
+        c.b = body_block;
+        c.stmt(rest, tok);
+        c.jmp_if_unterminated(cont_label);
+        c.b = brk_label;
+    };
+    c.new_node(.ND_STMT, tok)
+};
+do :: fn(c, rest, tok) #prefix(.do) = {
+    body_block := c.new_block();
+    c.jmp_if_unterminated(body_block);
+    brk_label, cont_label := push_loop c { _, _ |
+        c.b = body_block;
+        c.stmt(tok&, tok.next);
+    };
+    c.jmp_if_unterminated(cont_label);  // goto condition
+    
+    c.b = cont_label;  
+    tok = c.skip(tok, "while");
+    tok = c.skip(tok, "(");
+    cond := c.new_cast(c.parse_expr(tok&, tok, .None), ty_bool);
+    cond := c.gen_expr(cond);
+    tok = c.skip(tok, ")");
+    rest[] = c.skip(tok, ";");
+    
+    c.jnz_if_unterminated(cond, body_block, brk_label);
+    c.b = brk_label;
+    c.new_node(.ND_STMT, tok)
+};
+asm :: fn(c, rest, tok) #prefix(.asm) = {
+    tok = tok.next;
+    dowhile {
+        ignore(tok&, tok, @const_slice("volatile", "inline"))
+    };
+    tok = c.skip(tok, "(");
+    if tok.kind != .TK_STR || tok.ty.base.kind != .TY_CHAR {
+        @error_tok(c, tok, "expected string literal");
+    };
+    asm_str := tok.str;
+    rest[] = c.skip(tok.next, ")");
+    @error_tok(c, tok, "asm stmt is not supported");
+};
+goto :: fn(c, rest, tok) #prefix(.goto) = {
+    if equal(tok.next, "*") {
+        _dest := c.parse_expr(tok&, tok.next.next, .None);
+        @error_tok(c, tok, "[GNU] labels-as-values is not supported (goto *ptr)");
+    };
+
+    unique_label := c.get_block(c.get_ident(tok.next));
+    c.jmp_if_unterminated(unique_label);
+    rest[] = c.skip(tok.next.next, ";");
+    c.b = c.new_block();
+    c.new_node(.ND_STMT, tok)
+};
+break :: fn(c, rest, tok) #prefix(.break) = {
+    brk_label := c.brk_label || @error_tok(c, tok, "stray break");
+    unique_label := brk_label;
+    rest[] = c.skip(tok.next, ";");
+    c.jmp_if_unterminated(brk_label);
+    c.b = c.new_block();
+    c.new_node(.ND_STMT, tok)
+};
+continue :: fn(c, rest, tok) #prefix(.continue) = {
+    cont_label := c.cont_label || @error_tok(c, tok, "stray continue");
+    unique_label := cont_label;
+    rest[] = c.skip(tok.next, ";");
+    c.jmp_if_unterminated(cont_label);
+    c.b = c.new_block();
+    c.new_node(.ND_STMT, tok)
+};
+block :: fn(c, rest, tok) #prefix(.@"{") = {
+    c.compound_stmt(rest, tok.next);
+    c.new_node(.ND_STMT, tok)
+};
+empty_stmt :: fn(c, rest, tok) #prefix(.@";") = {
     rest[] = tok.next;
-    c.gen_expr(node);
-    node
+    c.new_node(.ND_STMT, tok)
 };
 
 };
+
+fn set_rest_and_gen(c: *Ctx, rest: **CC.Token, tok: *CC.Token, node: *CC.Node) *CC.Node = {
+    rest[] = tok;
+    c.gen_expr(node);
+    node
+}
+
+fn stmt(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
+    node := c.parse_expr(rest, tok, .Stmt);
+    if node.kind != .ND_STMT {
+        consume(rest, rest[], ";");
+    };
+    node
+}
 
 // In C, `+` operator is overloaded to perform the pointer arithmetic.
 // If p is a pointer, p+n adds not n but sizeof(*p)*n to the value of p,
@@ -2896,8 +2930,10 @@ post_sub :: fn(c, rest, tok, node) #infix(.@"--", .PostFix) = {
 // In other words, we need to scale an integer value before adding to a
 // pointer value. This function takes care of the scaling.
 fn new_add(c: *Ctx, lhs: *CC.Node, rhs: *CC.Node, tok: *CC.Token) *CC.Node = {
-    c.add_type(lhs);
-    c.add_type(rhs);
+    //c.add_type(lhs);
+    //c.add_type(rhs);
+    c.gen_expr(lhs);
+    c.gen_expr(rhs);
 
     // num + num
     if is_numeric(lhs.ty) && is_numeric(rhs.ty) {
@@ -2922,6 +2958,19 @@ fn new_add(c: *Ctx, lhs: *CC.Node, rhs: *CC.Node, tok: *CC.Token) *CC.Node = {
     // ptr + num
     rhs = c.new_binary(.ND_MUL, rhs, c.new_long(lhs.ty.base.size.intcast(), tok), tok);
     c.new_binary(.ND_ADD, lhs, rhs, tok)
+}
+
+fn new_binary2(c: *Ctx, kind: CC.NodeKind, lhs: *CC.Node, rhs: *CC.Node, tok: *CC.Token) *CC.Node = {
+    if c.speculate {
+        return(c.new_binary(kind, lhs, rhs, tok));
+    };
+    @debug_assert(!@is(kind, .ND_ASSIGN, .ND_COMMA), "new_binary2 doesn't work with %", kind);
+    c.gen_expr(lhs);
+    c.gen_expr(rhs);
+    @debug_assert(lhs.r != QbeNull && rhs.r != QbeNull, "new_binary missing evaluated args");
+    out_ty := c.add_type(kind, lhs&, rhs&);
+    r := c.gen_binary(kind, lhs.r, rhs.r, out_ty, lhs.ty, tok);
+    c.ir_node(out_ty, r, QbeNull, tok)
 }
 
 // Like `+`, `-` is overloaded for the pointer type.
@@ -3003,9 +3052,9 @@ fn struct_ref(c: *Ctx, node: *CC.Node, tok: *CC.Token) *CC.Node = {
 // Convert A++ to `(typeof A)((A += 1) - 1)`
 fn new_inc_dec(c: *Ctx, node: *CC.Node, tok: *CC.Token, addend: i64) *CC.Node = {
     c.add_type(node);
-    c.new_cast(c.new_add(c.to_assign(c.new_add(node, c.new_num(addend, tok), tok)),
-                                                   c.new_num(-addend, tok), tok),
-                                    node.ty)
+    n := c.new_add(node, c.new_num(addend, tok), tok);
+    nn := c.to_assign(n.kind, n.lhs, n.rhs, n.tok);
+    c.new_cast(c.new_add(nn, c.new_num(-addend, tok), tok), node.ty)
 }
 
 // for expressions that don't get evaluated (like sizeof, alignof, typeof),
@@ -3148,16 +3197,13 @@ fn eval_double(c: *Ctx, node: *CC.Node) f64 = {
 // However, if a given expression is of form `A.x op= C`, the input is
 // converted to `tmp = &A, (*tmp).x = (*tmp).x op C` to handle assignments
 // to bitfields.
-fn to_assign(c: *Ctx, binary: *CC.Node) *CC.Node = {
-    c.add_type(binary.lhs);
-    c.add_type(binary.rhs);
-    tok := binary.tok;
+fn to_assign(c: *Ctx, kind: CC.NodeKind, lhs: *CC.Node, rhs: *CC.Node, tok: *CC.Token) *CC.Node = {
     if c.speculate {
-        binary.ty = binary.lhs.ty;
-        return(binary);
+        return(lhs);
     };
+    //c.add_type(lhs);
+    //c.add_type(rhs);
     
-    lhs, rhs := (binary.lhs, binary.rhs);
     is_bitfield := lhs.kind == .ND_MEMBER && lhs.member.is_bitfield;
 
     // If A is an atomic type, Convert `A op= B` to
@@ -3184,7 +3230,7 @@ fn to_assign(c: *Ctx, binary: *CC.Node) *CC.Node = {
     } else {
         c.gen_load(addr, lhs.ty)
     };
-    final := c.gen_binary(binary.kind, start, delta, lhs.ty, lhs.ty, tok);
+    final := c.gen_binary(kind, start, delta, lhs.ty, lhs.ty, tok);
     if is_bitfield {
         // this generates silly code that loads the other fields with the same storage again even though we already did that, but whatever
         c.gen_store_bitfield(addr, final, lhs.member);
@@ -3192,9 +3238,14 @@ fn to_assign(c: *Ctx, binary: *CC.Node) *CC.Node = {
         c.gen_store(addr, final, lhs.ty);
     };
     
+    c.ir_node(lhs.ty, final, QbeNull, tok)
+}
+
+fn ir_node(c: *Ctx, ty: *CC.Type, r: Qbe.Ref, lvalue: Qbe.Ref, tok: *CC.Token) *CC.Node = {
     n := c.new_node(.ND_NULL_EXPR, tok);
-    n.r = final;
-    n.ty = lhs.ty;
+    n.r = r;
+    n.lvalue = lvalue;
+    n.ty = ty;
     n
 }
 
@@ -3296,8 +3347,9 @@ fn gen_expr_inner(c: *Ctx, node: *CC.Node) Qbe.Ref = {
     @if(SPAM) @println("E % %; %", node.kind, CC.Node.int_from_ptr(node), node.tok.str());
     @match(node.kind) {
         fn ND_NULL_EXPR() => QbeUndef;
+        fn ND_STMT() => QbeUndef;
         fn ND_FUNCALL() => c.gen_call(node);
-        fn ND_ADDR()     => c.gen_addr(node.lhs);
+        fn ND_ADDR()    => c.gen_addr(node.lhs);
         fn ND_CAST() => {
             ::enum(CC.TypeKind);
             source := c.gen_expr(node.lhs);
@@ -3598,26 +3650,19 @@ fn gen_load(c: *Ctx, addr: Qbe.Ref, type: *CC.Type) Qbe.Ref = {
     if @is(type.kind, .TY_ARRAY, .TY_STRUCT, .TY_UNION, .TY_FUNC, .TY_VLA) {
         return(addr);  // really?
     };
-    // TODO: k := type.cls() out here
-     
-    if @is(type.kind, .TY_DOUBLE, .TY_LDOUBLE) {
-        r := c.f.newtmp("c", .Kd);
-        c.emit(.load, .Kd, r, addr, QbeNull);
+    k := type.cls();
+    r := c.f.newtmp("c", k);
+    if @is(type.kind, .TY_DOUBLE, .TY_LDOUBLE, .TY_FLOAT) {
+        c.emit(.load, k, r, addr, QbeNull);
         return(r);
     };
-    if type.kind == .TY_FLOAT {
-        r := c.f.newtmp("c", .Ks);
-        c.emit(.load, .Ks, r, addr, QbeNull);
-        return(r);
-    };
-    (o: Qbe.O, k: Qbe.Cls) := @switch(type.size) {
-        @case(1) => (@if(type.is_unsigned, .loadub, .loadsb), .Kw);
-        @case(2) => (@if(type.is_unsigned, .loaduh, .loadsh), .Kw);
-        @case(4) => (@if(type.is_unsigned, .loaduw, .loadsw), .Kw);
-        @case(8) => (.load, .Kl);
+    o: Qbe.O = @switch(type.size) {
+        @case(1) => @if(type.is_unsigned, .loadub, .loadsb);
+        @case(2) => @if(type.is_unsigned, .loaduh, .loadsh);
+        @case(4) => @if(type.is_unsigned, .loaduw, .loadsw);
+        @case(8) => .load;
         @default => panic("invalid int size");
     };
-    r := c.f.newtmp("c", k);
     c.emit(o, k, r, addr, QbeNull);
     r
 }
@@ -3654,7 +3699,7 @@ fn gen_addr_inner(c: *Ctx, node: *CC.Node) Qbe.Ref = {
             if yy && xx {
                 return(c.gen_expr(node));
             };
-            @panic("TODO: gen_addr %", node.kind)
+            @error_tok(c, node.tok, "TODO: gen_addr %", node.kind)
         };
     }
 }

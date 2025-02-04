@@ -143,36 +143,39 @@ fn get_common_type(c: *Ctx, ty1: *CC.Type, ty2: *CC.Type) *CC.Type = {
 // This operation is called the "usual arithmetic conversion".
 fn usual_arith_conv(c: *Ctx, lhs: **CC.Node, rhs: **CC.Node) void = {
     ty   := c.get_common_type(lhs.ty, rhs.ty);
+    b := c.b;
+    c.b = lhs.current_block;
     lhs[] = c.new_cast(lhs[], ty);
+    c.b = lhs.current_block;
     rhs[] = c.new_cast(rhs[], ty);
+    c.b = b;
 }
 
 fn add_type(c: *Ctx, node: *CC.Node) void #inline = {
     ::ptr_utils(CC.Node);
     ::ptr_utils(CC.Type);
     if(node.is_null() || !node.ty.is_null(), => return());
+    if(@is(node.kind, .ND_NULL_EXPR, .ND_STMT, .ND_MEMZERO), => return());
     add_type_inner(c, node);
 }
 
 fn add_type_inner(c: *Ctx, node: *CC.Node) void = {
-    @if(SPAM) @println("add type %", node.kind);
+    @if(SPAM) 
+    @println("add type %", node.kind);
     c.add_type(node.lhs);
     c.add_type(node.rhs);
     c.add_type(node.cond);
-    if !node.cond.is_null() && node.cond.ty.is_flonum() {
-        node.cond = c.new_cast(node.cond, ty_bool);
-    };
     c.add_type(node.then);
     c.add_type(node.else);
     
-    n := node.body;
-    for_linked n { n |
-        c.add_type(n);
-    };
-    n := node.args;
-    for_linked n { n |
-        c.add_type(n);
-    };
+    //n := node.body;
+    //for_linked n { n |
+    //    c.add_type(n);
+    //};
+    //n := node.args;
+    //for_linked n { n |
+    //    c.add_type(n);
+    //};
     k := node.kind;
     node.ty = @if_else {
         @if(@is(k, .ND_ADD, .ND_SUB, .ND_MUL, .ND_DIV, .ND_MOD, .ND_BITAND, .ND_BITOR, .ND_BITXOR)) => {
@@ -209,16 +212,8 @@ fn add_type_inner(c: *Ctx, node: *CC.Node) void = {
                 c.usual_arith_conv(node.then&, node.else&);
                 node.then.ty
             };
-            fn ND_ADDR() => {
-                ty := node.lhs.ty;
-                ::if(*CC.Type);
-                c.pointer_to(if(ty.kind == .TY_ARRAY, => ty.base, => ty))
-            }
-            fn ND_DEREF() => {
-                if(node.lhs.ty.base.is_null(), => @error_tok(c, node.tok, "invalid pointer dereference"));
-                if(node.lhs.ty.base.kind == .TY_VOID, => @error_tok(c, node.tok, "dereferencing a void pointer"));
-                node.lhs.ty.base
-            }
+            fn ND_ADDR() => panic("addr should have known type");
+            fn ND_DEREF() => panic("deref should have known type");
             //fn ND_CAS() => {
             //    c.add_type(node.cas_addr);
             //    c.add_type(node.cas_old);
@@ -234,6 +229,50 @@ fn add_type_inner(c: *Ctx, node: *CC.Node) void = {
             @default => return();
         });
     };
+}
+
+fn add_type(c: *Ctx, k: CC.NodeKind, lhs: **CC.Node, rhs: **CC.Node) *CC.Type = {
+    if lhs.ty.is_null() {
+        @error_tok(c, lhs.tok, "unknown type for left of %", k);
+    };
+    if rhs.ty.is_null() {
+        @error_tok(c, rhs.tok, "unknown type for right of %", k);
+    };
+@if_else {
+    @if(@is(k, .ND_ADD, .ND_SUB, .ND_MUL, .ND_DIV, .ND_MOD, .ND_BITAND, .ND_BITOR, .ND_BITXOR)) => {
+        c.usual_arith_conv(lhs, rhs);
+        lhs.ty
+    };
+    @if(@is(k, .ND_EQ, .ND_NE, .ND_LT, .ND_LE)) => {
+        c.usual_arith_conv(lhs, rhs);
+        ty_int
+    };
+    @if(@is(k, .ND_NOT, .ND_LOGOR, .ND_LOGAND)) => ty_int;
+    @if(@is(k, .ND_BITNOT, .ND_SHL, .ND_SHR))   => lhs.ty;
+    @else => (@match(k) {
+        fn ND_NUM()     => ty_int;
+        fn ND_COMMA()   => rhs.ty;
+        fn ND_NEG() => {
+            ty := c.get_common_type(ty_int, lhs.ty);
+            lhs[] = c.new_cast(lhs[], ty);
+            ty
+        }
+        fn ND_ASSIGN() => {
+            if(lhs.ty.kind == .TY_ARRAY, => @error_tok(c, lhs.tok, "not an lvalue"));
+            if lhs.ty.kind != .TY_STRUCT {
+                rhs[] = c.new_cast(rhs[], lhs.ty);
+            };
+            lhs.ty
+        }
+        fn ND_COND() => if lhs.ty.kind == .TY_VOID || rhs.ty.kind == .TY_VOID {
+            ty_void
+        } else {
+            c.usual_arith_conv(lhs, rhs);
+            lhs.ty
+        };
+        @default => panic("unhandled expression kind in new add_type");
+    });
+}
 }
 
 fn copy_struct_type(c: *Ctx, ty: *CC.Type) *CC.Type = {
