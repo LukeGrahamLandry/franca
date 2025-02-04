@@ -15,6 +15,7 @@ give up and do the fancy comptime thing where i just iterate over all of them an
 means folding can't be compiled by legacy backend but that's fine since it's just an optimisation. 
 - experimenting with invoke_specialized. i remember being annoyed that i couldn't make an Option or Array type in a macro easily. 
 - functions for accessing members of a ScopeId, so c parser functions can just be in a struct that we iterate over.
+
 TODO: import_c cant compile with debug compiler now
 
 ## (Feb 2)

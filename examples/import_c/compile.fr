@@ -15,7 +15,6 @@
 //       franca program using a c library should get dead code elimination the same 
 //       as it would using a franca library. 
 
-
 // Scope for local variables, global variables, typedefs
 // or enum constants
 VarScope :: @struct {
@@ -191,7 +190,6 @@ fn new_unary(c: *Ctx, kind: CC.NodeKind, expr: *CC.Node, tok: *CC.Token) *CC.Nod
 
 fn new_num(c: *Ctx, val: i64, tok: *CC.Token, ty: *CC.Type) *CC.Node = {
     node := c.new_node(.ND_NUM, tok);
-    node.val = val;
     node.ty = ty;
     if !c.f.is_null() {
         node.r = c.f.getcon(val);
@@ -619,7 +617,7 @@ fn func_params(c: *Ctx, rest: **CC.Token, tok: *CC.Token, ty: *CC.Type) *CC.Type
 }
 
 // array-dimensions = ("static" | "restrict")* const-expr? "]" type-suffix
-fn array_dimensions(c: *Ctx, rest: **CC.Token, tok: *CC.Token, ty: *CC.Type) *CC.Type = {
+fn array_dimensions(c: *Ctx, rest: **CC.Token, tok: *CC.Token, ty: *CC.Type) *CC.Type #once = {
     dowhile {
         ignore(tok&, tok, @const_slice("static", "restrict"))
     };
@@ -733,7 +731,7 @@ fn is_end(tok: *CC.Token) bool =
 //                                | ident ("{" enum-list? "}")?
 //
 // enum-list            = ident ("=" num)? ("," ident ("=" num)?)* ","?
-fn enum_specifier(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Type = {
+fn enum_specifier(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Type #once = {
     ty := c.enum_type();
 
     // Read a struct tag.
@@ -778,7 +776,7 @@ fn enum_specifier(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Type = {
 }
 
 // typeof-specifier = "(" (expr | typename) ")"
-fn typeof_specifier(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Type = {
+fn typeof_specifier(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Type #once = {
     tok = c.skip(tok, "(");
     ty := if c.is_typename(tok) {
         c.typename(tok&, tok)
@@ -824,8 +822,8 @@ fn new_alloca(c: *Ctx, sz: *CC.Node) *CC.Node = {
 
 // declaration = declspec (declarator ("=" expr)? ("," declarator ("=" expr)?)*)? ";"
 fn declaration(c: *Ctx, rest: **CC.Token, tok: *CC.Token, basety: *CC.Type, attr: ?*VarAttr) *CC.Node = {
-    head := CC.Node.zeroed();
-    cur  := head&;
+    cur: ?*CC.Node = .None;
+    start := tok;
 
     comma_sep(c, tok&, ";") {
         continue :: local_return;
@@ -850,8 +848,7 @@ fn declaration(c: *Ctx, rest: **CC.Token, tok: *CC.Token, basety: *CC.Type, attr
         // Generate code for computing a VLA size. We need to do this
         // even if ty is not VLA because ty may be a pointer to VLA
         // (e.g. int (*foo)[n][m] where n and m are variables.)
-        cur.next = c.new_unary(.ND_EXPR_STMT, c.compute_vla_size(ty, tok), tok);
-        cur = cur.next;
+        //cur = c.compute_vla_size(ty, tok);
 
         if ty.kind == .TY_VLA {
             if(equal(tok, "="), => @error_tok(c, tok, "variable-sized object may not be initialized"));
@@ -865,8 +862,8 @@ fn declaration(c: *Ctx, rest: **CC.Token, tok: *CC.Token, basety: *CC.Type, attr
                                                             c.new_alloca(c.new_var_node(ty.vla_size, tok)),
                                                             tok);
 
-            cur.next = c.new_unary(.ND_EXPR_STMT, expr, tok);
-            cur = cur.next;
+            c.gen_expr(expr);
+            cur = (Some = expr);
             continue();
         };
         
@@ -879,20 +876,16 @@ fn declaration(c: *Ctx, rest: **CC.Token, tok: *CC.Token, basety: *CC.Type, attr
 
         if equal(tok, "=") {
             expr := c.lvar_initializer(tok&, tok.next, var);
-            cur.next = c.new_unary(.ND_EXPR_STMT, expr, tok);
-            cur = cur.next;
+            c.gen_expr(expr);
+            cur = (Some = expr);
         };
 
         if(var.ty.size < 0,         => @error_tok(c, ty.name, "variable has incomplete type"));
         if(var.ty.kind == .TY_VOID, => @error_tok(c, ty.name, "variable declared void"));
     };
     
-    node := c.new_node(.ND_BLOCK, tok);
-    node.body = head.next;
     rest[] = tok;  // already ate the semicolon
-    
-    c.gen_expr(node);  // do the store of initial value
-    node
+    cur || c.new_node(.ND_NULL_EXPR, tok)
 }
 
 fn skip_excess_element(c: *Ctx, tok: *CC.Token) *CC.Token = {
@@ -906,7 +899,7 @@ fn skip_excess_element(c: *Ctx, tok: *CC.Token) *CC.Token = {
 }
 
 // string-initializer = string-literal
-fn string_initializer(c: *Ctx, rest: **CC.Token, tok: *CC.Token, init: *Initializer) void = {
+fn string_initializer(c: *Ctx, rest: **CC.Token, tok: *CC.Token, init: *Initializer) void #once = {
     if init.is_flexible {
         init[] = c.new_initializer(c.array_of(init.ty.base, tok.ty.array_len.intcast()), false)[];
     };
@@ -1439,9 +1432,7 @@ fn write_gvar_data(c: *Ctx, cur: *CC.Relocation, init: *Initializer, ty: *CC.Typ
 fn gvar_initializer(c: *Ctx, rest: **CC.Token, tok: *CC.Token, var: *CC.Obj) void = {
     init := c.initializer(rest, tok, var.ty, var.ty&);
     head := CC.Relocation.zeroed();
-    // TODO: wtf alloc_zeroed isnt working
-    //buf := c.arena.alloc_zeroed(u8, var.ty.size.intcast());
-    buf := page_allocator.alloc_zeroed(u8, var.ty.size.intcast());
+    buf := c.arena.alloc_zeroed(u8, var.ty.size.intcast());
     c.write_gvar_data(head&, init, var.ty, buf, 0);
     var.init_data = buf;
     var.rel = head.next;
@@ -1454,7 +1445,6 @@ fn is_typename(c: *Ctx, tok: *CC.Token) bool #inline = {
 
 // asm-stmt = "asm" ("volatile" | "inline")* "(" string-literal ")"
 fn asm_stmt(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
-    node := c.new_node(.ND_ASM, tok);
     tok = tok.next;
 
     dowhile {
@@ -1465,31 +1455,15 @@ fn asm_stmt(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
     if tok.kind != .TK_STR || tok.ty.base.kind != .TY_CHAR {
         @error_tok(c, tok, "expected string literal");
     };
-    node.asm_str = tok.str;
+    asm_str := tok.str;
     rest[] = c.skip(tok.next, ")");
-    node
+    @error_tok(c, tok, "asm stmt is not supported");
 }
 
-// TODO: is the world a better place if this goes in the table too? 
-// stmt = "return" expr? ";"
-//            | "if" "(" expr ")" stmt ("else" stmt)?
-//            | "switch" "(" expr ")" stmt
-//            | "case" const-expr ("..." const-expr)? ":" stmt
-//            | "default" ":" stmt
-//            | "for" "(" expr-stmt expr? ";" expr? ")" stmt
-//            | "while" "(" expr ")" stmt
-//            | "do" stmt "while" "(" expr ")" ";"
-//            | "asm" asm-stmt
-//            | "goto" (ident | "*" expr) ";"
-//            | "break" ";"
-//            | "continue" ";"
-//            | ident ":" stmt
-//            | "{" compound-stmt
-//            | expr-stmt
-fn stmt(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = @match(tok.kind) {
+fn stmt(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
+@match(tok.kind) {
     fn return() => {
-        node := c.new_node(.ND_RETURN, tok);
-        if(consume(rest, tok.next, ";"), => return(node));
+        if(consume(rest, tok.next, ";"), => return(c.new_node(.ND_NULL_EXPR, tok)));
         exp := c.parse_expr(tok&, tok.next, .None);
         rest[] = c.skip(tok, ";");
 
@@ -1500,52 +1474,46 @@ fn stmt(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = @match(tok.kind) {
             exp = c.new_cast(exp, ty);
         };
 
-        node.lhs = exp;
         r := c.gen_expr(exp);
         
         if c.b.jmp.type == .Jxxx {
             j := Qbe.J.retw;
             c.b.jmp = (type = j, arg = r);
         };
-        
-        node
     }
     fn if() => {
         then_block := c.new_block();
         else_block := c.new_block();
         join_block := c.new_block();
     
-        node := c.new_node(.ND_IF, tok);
         tok = c.skip(tok.next, "(");
-        node.cond = c.parse_expr(tok&, tok, .None);
+        cond := c.parse_expr(tok&, tok, .None);
         tok = c.skip(tok, ")");
-        cond := c.gen_expr(node.cond);
+        cond := c.gen_expr(cond);
         
         c.jnz_if_unterminated(cond, then_block, else_block);
         
         c.b = then_block;
-        node.then = c.stmt(tok&, tok);
+        c.stmt(tok&, tok);
         c.jmp_if_unterminated(join_block);
         
         c.b = else_block;
         if equal(tok, "else") {
-            node.else = c.stmt(tok&, tok.next);
+            c.stmt(tok&, tok.next);
         };
         c.jmp_if_unterminated(join_block);
         
         c.b = join_block;
         rest[] = tok;
-        node
     }
     fn switch() => {
         payload := temp().box_zeroed(Qbe.SwitchPayload);
-        node := c.new_node(.ND_SWITCH, tok);
         tok = c.skip(tok.next, "(");
-        node.cond = c.parse_expr(tok&, tok, .None);
+        cond := c.parse_expr(tok&, tok, .None);
         tok = c.skip(tok, ")");
-        payload.inspect = c.gen_expr(node.cond);
+        payload.inspect = c.gen_expr(cond);
         // backend switch lowering wants a Kl, but we want zero extension, not sign extension like casting to a long would be. 
-        if node.cond.ty.cls() != .Kl && !c.speculate {
+        if cond.ty.cls() != .Kl && !c.speculate {
             r := c.f.newtmp("c", .Kl);
             c.emit(.extuw, .Kl, r, payload.inspect, QbeNull);
             payload.inspect = r;
@@ -1564,7 +1532,7 @@ fn stmt(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = @match(tok.kind) {
         c.brk_label = (Some = brk_label);
 
         c.b = c.new_block();  // TODO: should be redundant
-        node.then = c.stmt(rest, tok);
+        c.stmt(rest, tok);
         c.jmp_if_unterminated(brk_label);
         c.current_switch = sw;
         c.brk_label = brk;
@@ -1580,55 +1548,45 @@ fn stmt(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = @match(tok.kind) {
             };
             push(c.f.switches&, c.f.switch_count&, payload[]);
         };
-        
-        node
     }
     fn case() => {
-        node := c.new_node(.ND_CASE, tok);
-        node.unique_label = c.new_block();
-        c.jmp_if_unterminated(node.unique_label);
-        c.b = node.unique_label;
+        unique_label := c.new_block();
+        c.jmp_if_unterminated(unique_label);
+        c.b = unique_label;
         current_switch := c.current_switch || @error_tok(c, tok, "stray case");
         
-        node.begin = c.const_expr(tok&, tok.next);
+        begin := c.const_expr(tok&, tok.next);
 
         if equal(tok, "...") {
             end := c.const_expr(tok&, tok.next);
-            if(end < node.begin, => @error_tok(c, tok, "empty case range specified"));
-            @error_tok(c, tok, "[GNU] Case ranges are not supported (% ... %)", node.begin, end);
+            if(end < begin, => @error_tok(c, tok, "empty case range specified"));
+            @error_tok(c, tok, "[GNU] Case ranges are not supported (% ... %)", begin, end);
         };
 
         tok = c.skip(tok, ":");
-        node.lhs = c.stmt(rest, tok);
-        c.gen_expr(node.lhs);
-        push(current_switch.cases&, current_switch.case_count&, (node.unique_label, node.begin));
+        c.stmt(rest, tok);
+        push(current_switch.cases&, current_switch.case_count&, (unique_label, begin));
         
         next_block := c.new_block();  // TODO: wasteful, empty block for consecutive cases. 
         c.jmp_if_unterminated(next_block);
         c.b = next_block;
-        node
     }
     fn default() => {
-        ::?*CC.Node;
-    
-        node := c.new_node(.ND_CASE, tok);
-        node.unique_label = c.new_block();
-        c.jmp_if_unterminated(node.unique_label);
-        c.b = node.unique_label;
+        unique_label := c.new_block();
+        c.jmp_if_unterminated(unique_label);
+        c.b = unique_label;
         current_switch := c.current_switch || @error_tok(c, tok, "stray default");
         
         tok = c.skip(tok.next, ":");
-        node.lhs = c.stmt(rest, tok);
-        c.gen_expr(node.lhs);
-        current_switch.default = node.unique_label;
+        c.stmt(rest, tok);
+        current_switch.default = unique_label;
         
         next_block := c.new_block();
         c.jmp_if_unterminated(next_block);
         c.b = next_block;
-        node
     }
     fn for() => {
-        node, _, _ := push_loop(c, .ND_FOR, tok) { node, brk_label, cont_label |
+        _, _ := push_loop c { brk_label, cont_label |
             cond_block := c.new_block();
             body_block := c.new_block();
             
@@ -1643,12 +1601,12 @@ fn stmt(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = @match(tok.kind) {
             c.jmp_if_unterminated(body_block);
     
             c.b = cond_block;
-            node.cond = if !equal(tok, ";") {
+            cond := if !equal(tok, ";") {
                 c.new_cast(c.parse_expr(tok&, tok, .None), ty_bool)
             } else {
                 c.new_num(1, tok)  // wasteful to rely on folding for this 
             };
-            cond := c.gen_expr(node.cond);
+            cond := c.gen_expr(cond);
             tok = c.skip(tok, ";");
             
             c.jnz_if_unterminated(cond, body_block, brk_label);
@@ -1664,54 +1622,50 @@ fn stmt(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = @match(tok.kind) {
             c.jmp_if_unterminated(cond_block);
     
             c.b = body_block;
-            node.then = c.stmt(rest, tok);
-            c.gen_expr(node.then);
+            c.stmt(rest, tok);
             c.jmp_if_unterminated(cont_label);
     
             c.leave_scope();
             c.b = brk_label;
         };
-        node
     }
     fn while() => {
-        node, _, _ := push_loop(c, .ND_FOR, tok) { node, brk_label, cont_label |
+        _, _ := push_loop c {  brk_label, cont_label |
             c.jmp_if_unterminated(cont_label);
             c.b = cont_label;
             tok = c.skip(tok.next, "(");
-            node.cond = c.new_cast(c.parse_expr(tok&, tok, .None), ty_bool);
-            cond := c.gen_expr(node.cond);
+            cond := c.new_cast(c.parse_expr(tok&, tok, .None), ty_bool);
+            cond := c.gen_expr(cond);
             tok = c.skip(tok, ")");
             body_block := c.new_block();
     
             c.jnz_if_unterminated(cond, body_block, brk_label);
             
             c.b = body_block;
-            node.then = c.stmt(rest, tok);
+            c.stmt(rest, tok);
             c.jmp_if_unterminated(cont_label);
             c.b = brk_label;
         };
-        node
     }
     fn do() => {
         body_block := c.new_block();
         c.jmp_if_unterminated(body_block);
-        node, brk_label, cont_label := push_loop(c, .ND_DO, tok) { node, _, _ |
+        brk_label, cont_label := push_loop c { _, _ |
             c.b = body_block;
-            node.then = c.stmt(tok&, tok.next);
+            c.stmt(tok&, tok.next);
         };
         c.jmp_if_unterminated(cont_label);  // goto condition
         
         c.b = cont_label;  
         tok = c.skip(tok, "while");
         tok = c.skip(tok, "(");
-        node.cond = c.new_cast(c.parse_expr(tok&, tok, .None), ty_bool);
-        cond := c.gen_expr(node.cond);
+        cond := c.new_cast(c.parse_expr(tok&, tok, .None), ty_bool);
+        cond := c.gen_expr(cond);
         tok = c.skip(tok, ")");
         rest[] = c.skip(tok, ";");
         
         c.jnz_if_unterminated(cond, body_block, brk_label);
         c.b = brk_label;
-        node
     };
     fn asm() => c.asm_stmt(rest, tok);
     fn goto() => {
@@ -1720,50 +1674,46 @@ fn stmt(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = @match(tok.kind) {
             @error_tok(c, tok, "[GNU] labels-as-values is not supported (goto *ptr)");
         };
 
-        node := c.new_node(.ND_GOTO, tok);
-        node.unique_label = c.get_block(c.get_ident(tok.next));
-        c.jmp_if_unterminated(node.unique_label);
+        unique_label := c.get_block(c.get_ident(tok.next));
+        c.jmp_if_unterminated(unique_label);
         rest[]  = c.skip(tok.next.next, ";");
         c.b = c.new_block();
-        node
     }
     fn break() => {
         brk_label := c.brk_label || @error_tok(c, tok, "stray break");
-        node := c.new_node(.ND_GOTO, tok);
-        node.unique_label = brk_label;
+        unique_label := brk_label;
         rest[] = c.skip(tok.next, ";");
         c.jmp_if_unterminated(brk_label);
         c.b = c.new_block();
-        node
     }
     fn continue() => {
-        ::?CStr;
         cont_label := c.cont_label || @error_tok(c, tok, "stray continue");
-        node := c.new_node(.ND_GOTO, tok);
-        node.unique_label = cont_label;
+        unique_label := cont_label;
         rest[] = c.skip(tok.next, ";");
         c.jmp_if_unterminated(cont_label);
         c.b = c.new_block();
-        node
     }
-    fn @"{"() => c.compound_stmt(rest, tok.next);
-    @default => (if tok.kind == .TK_IDENT && equal(tok.next, ":") {
-        node := c.new_node(.ND_LABEL, tok);
-        node.unique_label = c.get_block(tok.str());
-        c.jmp_if_unterminated(node.unique_label);
-        c.b = node.unique_label;
-        node.lhs = c.stmt(rest, tok.next.next);
-        node
-    } else {
-        c.expr_stmt(rest, tok)
-    });
+    fn @"{"() => {
+        c.compound_stmt(rest, tok.next);
+    };
+    @default => {
+        if tok.kind == .TK_IDENT && equal(tok.next, ":") {
+            unique_label := c.get_block(tok.str());
+            c.jmp_if_unterminated(unique_label);
+            c.b = unique_label;
+            return(c.stmt(rest, tok.next.next));
+        } else {
+            return(c.expr_stmt(rest, tok));
+        };
+    };
+};
+    c.new_node(.ND_NULL_EXPR, tok)
 };
 
 fn slow_convert_to_c_string(s: Str) CStr = // :SLOW
     (ptr = @tfmt("%\0", s).as_ptr());
     
-fn push_loop(c: *Ctx, kind: CC.CC.NodeKind, tok: *CC.Token, $body: @Fn(node: *CC.Node, brk: *Qbe.Blk, cnt: *Qbe.Blk) void) Ty(*CC.Node, *Qbe.Blk, *Qbe.Blk) = {
-    node := c.new_node(kind, tok);
+fn push_loop(c: *Ctx, $body: @Fn(brk: *Qbe.Blk, cnt: *Qbe.Blk) void) Ty(*Qbe.Blk, *Qbe.Blk) = {
     brk  := c.brk_label;
     cont := c.cont_label;
     brk_label := c.new_block();
@@ -1771,18 +1721,16 @@ fn push_loop(c: *Ctx, kind: CC.CC.NodeKind, tok: *CC.Token, $body: @Fn(node: *CC
     c.brk_label = (Some = brk_label);
     c.cont_label = (Some = cont_label);
 
-    body(node, brk_label, cont_label);
+    body(brk_label, cont_label);
     
     c.brk_label = brk;
     c.cont_label = cont;
-    (node, brk_label, cont_label)
+    (brk_label, cont_label)
 }
 
 // compound-stmt = (typedef | declaration | stmt)* "}"
 fn compound_stmt(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
-    node := c.new_node(.ND_BLOCK, tok);
-    head := CC.Node.zeroed();
-    cur  := head&;
+    cur: ?*CC.Node = .None;
 
     c.enter_scope();
 
@@ -1796,32 +1744,31 @@ fn compound_stmt(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = {
                 @if(c.is_function(tok)) => c.function(tok, basety, attr&);
                 @if(attr.is_extern)   => c.global_variable(tok, basety, attr&);
                 @else => {
-                    cur.next = c.declaration(tok&, tok, basety, (Some = attr&));
-                    cur = cur.next;
+                    cur = (Some = c.declaration(tok&, tok, basety, (Some = attr&)));
                     tok
                 };
             };
         } else {
-            cur.next = c.stmt(tok&, tok);
-            cur = cur.next;
+            cur = (Some = c.stmt(tok&, tok));
         };
-        c.add_type(cur);
+        if cur { cur |
+            c.add_type(cur);
+            c.gen_expr(cur);
+        };
     };
 
     c.leave_scope();
 
-    node.body = head.next;
     rest[]    = tok.next;
-    node
+    cur || c.new_node(.ND_NULL_EXPR, tok)
 }
 
 // expr-stmt = expr? ";"
 fn expr_stmt(c: *Ctx, rest: **CC.Token, tok: *CC.Token) *CC.Node = if equal(tok, ";") {
     rest[] = tok.next;
-    c.new_node(.ND_BLOCK, tok)
+    c.new_node(.ND_NULL_EXPR, tok)
 } else {
-    node := c.new_node(.ND_EXPR_STMT, tok);
-    node.lhs = c.parse_expr(tok&, tok, .None);
+    node := c.parse_expr(tok&, tok, .None);
     rest[] = c.skip(tok, ";");
     node
 };
@@ -2062,6 +2009,7 @@ fn mark_live(c: *Ctx, var: *CC.Obj) void = {
     };
 }
 
+// TODO: this clears a bunch of state that won't work if nested function decls are allowed
 fn function(c: *Ctx, tok: *CC.Token, basety: *CC.Type, attr: *VarAttr) *CC.Token = {
     ty := c.declarator(tok&, tok, basety);
     if(ty.name.is_null(), => @error_tok(c, ty.name_pos, "function name omitted"));
@@ -2129,7 +2077,7 @@ fn function(c: *Ctx, tok: *CC.Token, basety: *CC.Type, attr: *VarAttr) *CC.Token
         c.new_string_literal(f_name, c.array_of(ty_char, f_name.len));
     
     c.gen_par();
-    f.body = c.compound_stmt(tok&, tok);
+    _ := c.compound_stmt(tok&, tok);
     if c.b.jmp.type == .Jxxx {
         // void functions are allowed to just fall off the end
         // it would be nice to give an error otherwise but it's non-trivial to decide if this codepath is reachable. 
@@ -2498,6 +2446,7 @@ parse_logical :: fn(c, rest, tok, cond) = {
     n.cond = cond;
     n.then = then;
     n.else = else;
+    c.add_type(n);
 
     if rtype(cond.r) == .RCon && rtype(rhs.r) == .RCon {
         // :FrontendConstantFolding 
@@ -2538,10 +2487,12 @@ conditional :: fn(c, rest, tok, cond) #infix(.@"?", .Conditional) = {
         rhs.else = c.parse_expr(rest, tok.next.next, .Conditional);
         c.gen_expr(rhs.else);
         node := c.new_binary(.ND_COMMA, lhs, rhs, tok);
+        c.gen_expr(node);
         (node, cond_block, rhs)
     } else {
         node := c.new_node(.ND_COND, tok);
         node.cond = cond;
+        c.gen_expr(node.cond);
         c.b = then_block;
         node.then = c.parse_expr(tok&, tok.next, .None);
         c.gen_expr(node.then);
@@ -2550,10 +2501,12 @@ conditional :: fn(c, rest, tok, cond) #infix(.@"?", .Conditional) = {
         tok = c.skip(tok, ":");
         c.b = else_block;
         node.else = c.parse_expr(rest, tok, .Conditional);
+        c.gen_expr(node.else);
         (node, then_phi_src, node)
     };
     else_phi_src := c.b;
     c.jmp_if_unterminated(join_block);
+    //c.add_type(node);
     c.gen_expr(node);
     c.b = cond_block;
     c.jnz_if_unterminated(cond_r, then_block, else_block);
@@ -2575,6 +2528,22 @@ conditional :: fn(c, rest, tok, cond) #infix(.@"?", .Conditional) = {
     node.current_block = join_block; // this makes a cast from the result go to the right place (when gen_expr gets called again by our caller)
     node
 };
+
+fn clear_kind(c: *Ctx, node: *CC.Node) void = {
+    old := node[];
+    node[] = CC.Node.zeroed();
+    node.ty = old.ty;
+    node.r = old.r;
+    node.lvalue = old.lvalue;
+    node.current_block = old.current_block;
+    node.kind = .ND_NULL_EXPR;
+    node.tok = old.tok;
+    node.member = old.member;
+    node.func_ty = old.func_ty;
+    node.args = old.args;
+    node.ret_buffer = old.ret_buffer;
+    node.var = old.var;
+}
 
 parse_bracketed :: fn(c, rest, tok) #prefix(.@"(") = {
     node := if c.is_typename(tok.next) {
@@ -2603,9 +2572,10 @@ parse_bracketed :: fn(c, rest, tok) #prefix(.@"(") = {
         }
     } else {
         node := if equal(tok.next, "{") {
-            // This is a GNU statement expresssion.
-            node := c.new_node(.ND_STMT_EXPR, tok);
-            node.body = c.compound_stmt(tok&, tok.next.next)[].body;
+            // This is a [GNU] statement expresssion.
+            node := c.compound_stmt(tok&, tok.next.next);
+            @if(node.ty.is_null() || node.ty.kind == .TY_VOID)
+            @error_tok(c, node.tok, "statement expression returning void is not supported");
             node
         } else {
             // just a braketed expression like in math
@@ -2657,8 +2627,7 @@ parse_number :: fn(c, rest, tok) #prefix(.TK_NUM) = {
     ::if(*CC.Node);
     node := if is_flonum(tok.ty) {
         n := c.new_node(.ND_NUM, tok);
-        n.fval = tok.fval;
-        n.r = c.f.getcon(n.fval.bitcast());
+        n.r = c.f.getcon(tok.fval.bitcast());
         c.f.get_constant(n.r)[].flt = 2;
         n
     } else {
@@ -3172,7 +3141,6 @@ fn eval_double(c: *Ctx, node: *CC.Node) f64 = {
     @debug_assert_eq(con.type, .CBits);
     con.bits.d
 }
-//static double eval_double(CC.Node *node);
 
 // Convert op= operators to expressions containing an assignment.
 //
@@ -3183,7 +3151,7 @@ fn eval_double(c: *Ctx, node: *CC.Node) f64 = {
 fn to_assign(c: *Ctx, binary: *CC.Node) *CC.Node = {
     c.add_type(binary.lhs);
     c.add_type(binary.rhs);
-    tok: *CC.Token = binary.tok;
+    tok := binary.tok;
     if c.speculate {
         binary.ty = binary.lhs.ty;
         return(binary);
@@ -3202,7 +3170,7 @@ fn to_assign(c: *Ctx, binary: *CC.Node) *CC.Node = {
     //     new;
     // })
     if lhs.ty.is_atomic && !is_bitfield {
-        @error_tok(c, binary.tok, "TODO: to_assign for _Atomic types");
+        @error_tok(c, tok, "TODO: to_assign for _Atomic types");
     };
 
     // n1570#6.5.16p3: An assignment expression has the value of the left operand after the assignment, but is not an lvalue. 
@@ -3327,21 +3295,6 @@ fn gen_expr_inner(c: *Ctx, node: *CC.Node) Qbe.Ref = {
     ::enum(CC.NodeKind);
     @if(SPAM) @println("E % %; %", node.kind, CC.Node.int_from_ptr(node), node.tok.str());
     @match(node.kind) {
-        fn ND_BLOCK() => {
-            node.kind = .ND_STMT_EXPR;
-            c.gen_expr(node);
-            QbeUndef
-        }
-        fn ND_STMT_EXPR() => {
-            // https://gcc.gnu.org/onlinedocs/gcc/Statement-Exprs.html
-            r := QbeUndef;
-            s := node.body;
-            for_linked s { s |
-                r = c.gen_expr(s);
-            };
-            r
-        }
-        fn ND_EXPR_STMT() => c.gen_expr(node.lhs);
         fn ND_NULL_EXPR() => QbeUndef;
         fn ND_FUNCALL() => c.gen_call(node);
         fn ND_ADDR()     => c.gen_addr(node.lhs);
@@ -3418,12 +3371,6 @@ fn gen_expr_inner(c: *Ctx, node: *CC.Node) Qbe.Ref = {
             };
             r
         }
-        fn ND_FOR() => QbeUndef;
-        fn ND_GOTO() => QbeUndef;
-        fn ND_LABEL() => QbeUndef;
-        fn ND_IF() => QbeUndef;
-        fn ND_DO() => QbeUndef;
-        fn ND_SWITCH() => QbeUndef;
         fn ND_COND() => {
             c.gen_expr(node.cond);
             c.gen_expr(node.then);
@@ -3432,7 +3379,7 @@ fn gen_expr_inner(c: *Ctx, node: *CC.Node) Qbe.Ref = {
         };
         @default => {
             if node.lhs.is_null() || node.rhs.is_null() || node.ty.is_null() {
-                @error_tok(c, node.tok, "gen_binary invalid arg");
+                @error_tok(c, node.tok, "gen_binary invalid arg for %", node.kind);
             };
             lhs_r := c.gen_expr(node.lhs);
             rhs_r := c.gen_expr(node.rhs);
@@ -3493,14 +3440,14 @@ fn gen_binary(c: *Ctx, kind: CC.NodeKind, lhs_r: Qbe.Ref, rhs_r: Qbe.Ref, out_ty
             fn Kl() => if(ctrl_ty.is_unsigned, => .cultl, => .csltl);
             fn Ks() => .clts;
             fn Kd() => .cltd;
-            @default => unreachable();
+            @default => panic("bad cls");
         };
         fn ND_LE()       => @match(ctrl_ty.cls()){
             fn Kw() => if(ctrl_ty.is_unsigned, => .culew, => .cslew);
             fn Kl() => if(ctrl_ty.is_unsigned, => .culel, => .cslel);
             fn Ks() => .cles;
             fn Kd() => .cled;
-            @default => unreachable();
+            @default => panic("bad cls");
         };
         @default => @panic("unexpected binary expression but found: %", kind);
     };
@@ -3530,12 +3477,12 @@ fn emit(c: *Ctx, o: Qbe.O, k: Qbe.Cls, a0: Qbe.Ref, a1: Qbe.Ref) Qbe.Ref = {
 fn gen_cast(c: *Ctx, src: Qbe.Ref, from: *CC.Type, to: *CC.Type) Qbe.Ref = {
     // array types know thier size for sizeof but when we look at size below we want to have decayed to a pointer. 
     from := @if(from.kind == .TY_ARRAY, ty_ulong, from);
-    to := @if(to.kind == .TY_ARRAY, ty_ulong, to);
+    to   := @if(to.kind == .TY_ARRAY, ty_ulong, to);
     
     k_from, k_to := (from.cls(), to.cls());
     p_from, p_to := (from.get_type_id(), to.get_type_id());
     ::enum(@type p_from);
-    //@println("cast % % % -> %", src, from.kind, p_from, p_to);
+    @if(SPAM) @println("cast % % % -> %", src, from.kind, p_from, p_to);
     if(p_from == p_to, => return(src));
     if p_to == .B {  
         // TODO: do i need to zero extend byte/short? 
@@ -3572,7 +3519,7 @@ fn gen_cast(c: *Ctx, src: Qbe.Ref, from: *CC.Type, to: *CC.Type) Qbe.Ref = {
             fn I32() => .extsw;
             fn F32() => @if(to.is_unsigned, .stoui, .stosi);
             fn F64() => @if(to.is_unsigned, .dtoui, .dtosi);
-            @default => unreachable();  // *u64 is just a signedness cast
+            @default => @panic("bad type! % % % to % % %", p_from, k_from, from.kind, p_to, k_to, to.kind);  // *u64 is just a signedness cast
         }
     };
 
