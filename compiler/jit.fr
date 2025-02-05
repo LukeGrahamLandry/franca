@@ -3,7 +3,6 @@
 
 TRACE_SHIMS :: false;
 TRACE_CALLS :: false; 
-GENERATION :: false;
 
 DynCallShim :: @tagged(Pending: u32, Ready: rawptr);
 
@@ -13,31 +12,10 @@ fn call_dynamic_values(self: *SelfHosted, f_ptr: i64, f_ty: FnType, args_value: 
         self.dyncalls&.get_ptr(f_ty&).unwrap()
     };
     
-    // :SLOW
-    @if(GENERATION) {
-        zone := zone_begin(.Wait);
-        generation  := self.comptime_codegen.generation_pending;
-        while => self.comptime_codegen.generation < generation {
-            pthread_cond_signal(self.comptime_codegen.bouba_progress_c&);
-            wait(self.comptime_codegen, true);
-        };
-        zone_end(zone);
-    };
-    
     callee := @match(callee) {
         fn Ready(it)   => it[];
         fn Pending(it) => {
-            m := self.comptime_codegen.m;
-            @if(use_threads) {
-                zone := zone_begin(.Wait);
-                while => !symbol_is_ready(self.comptime_codegen, it[]) {
-                    pthread_cond_signal(self.comptime_codegen.bouba_progress_c&);
-                    wait(self.comptime_codegen, true);
-                };
-                zone_end(zone);
-            };
-            c, size := get_addr(m, it[]).unwrap();
-            self.bump_dirty_new();
+            c := wait_for_symbol(self.comptime_codegen, it[]);
             callee[] = (Ready = c);
             c
         }
@@ -74,16 +52,37 @@ fn call_dynamic_values(self: *SelfHosted, f_ptr: i64, f_ty: FnType, args_value: 
     result
 }
 
-fn symbol_is_ready(shared: *CodegenShared, s: u32) bool #inline = {
-    mu := shared.progress_m&;
-    pthread_mutex_lock(mu).unwrap();
-    r := false;
-    use_symbol(shared.m, s) { s |
-        r = s.size != 0 || (s.kind != .Local && !s.jit_addr.is_null());
+// :Wait
+fn wait_for_symbol(shared: *CodegenShared, id: u32) rawptr = {
+    symbol_is_ready :: fn(shared: *CodegenShared, s: u32) bool #inline = {
+        r := false;
+        use_symbol(shared.m, s) { s |
+            r = s.size != 0 || (s.kind != .Local && !s.jit_addr.is_null());
+        };
+        r
     };
-    pthread_mutex_unlock(mu).unwrap();
-    r
+    
+    @if(use_threads) {
+        zone := zone_begin(.Wait);
+    
+        c := shared.kiki_progress_c&;
+        m := shared.progress_m&;
+        pthread_mutex_lock(m).unwrap();
+        while => !symbol_is_ready(shared, id) {
+            pthread_cond_signal(shared.bouba_progress_c&);
+            pthread_cond_wait(c, m).unwrap();
+        };
+        pthread_mutex_unlock(m).unwrap();
+        zone_end(zone);
+    };
+    
+    @if(use_threads) pthread_mutex_lock(shared.m.icache_mutex&).unwrap();
+    c := get_jit_addr(shared.m, id); // @panic("missing symbol %", shared.m.str(id));
+    shared.m.bump_dirty_new(false);
+    @if(use_threads) pthread_mutex_unlock(shared.m.icache_mutex&).unwrap();
+    c
 }
+
 
 // Creates a function with the signeture (arg_array: *u8, ret_array: *u8, callee: fnptr) -> void.
 // It starts compiling on self.comptime_codegen and you have to get the result out of self.dyncalls when it's ready. 
@@ -297,7 +296,6 @@ fn create_jit_shim(self: CompCtx, shared: *CodegenShared, fid: FuncId, handler_c
         do_the_call.link = not_ready;
     };
     enqueue_task(shared, entry);
-    func.generation = self.data.cast()[][].comptime_codegen.generation_pending;
 }
 
 fn shallow_jit_func(self: *SelfHosted, fid: FuncId) void = {
@@ -337,14 +335,16 @@ fn shallow_jit_func(self: *SelfHosted, fid: FuncId) void = {
             func.mutual_callees&.add_unique(callee, self.get_alloc());
         };
     };
-    func.generation = self.comptime_codegen.generation_pending;
+    //func.generation = self.comptime_codegen.generation_pending;
 }
 
 fn bump_dirty_new(self: *SelfHosted) void = 
     bump_dirty_new(self, true);
 
-fn bump_dirty_new(self: *SelfHosted, lock: bool) void = {
-    m := self.comptime_codegen.m;
+fn bump_dirty_new(self: *SelfHosted, lock: bool) void = 
+    bump_dirty_new(self.comptime_codegen.m, lock);
+
+fn bump_dirty_new(m: *QbeModule, lock: bool) void = {
     @if(use_threads && lock) pthread_mutex_lock(m.icache_mutex&).unwrap();
     
     fence();
@@ -352,15 +352,19 @@ fn bump_dirty_new(self: *SelfHosted, lock: bool) void = {
     end   := m.last_function_end;
     if ptr_diff(start, end) > 0 {
         sys_icache_invalidate(u8.raw_from_ptr(start), ptr_diff(start, end));
-        //sys_dcache_flush(u8.raw_from_ptr(start), ptr_diff(start, end));
         m.start_of_writable_code = end;
+    };
+    start := m.stubs.mmapped.ptr; // m.start_of_executable_stubs;  // TODO
+    end := m.stubs.next;
+    if ptr_diff(start, end) > 0 {
+        sys_icache_invalidate(u8.raw_from_ptr(start), ptr_diff(start, end));
+        m.start_of_executable_stubs = end;
     };
     @if(use_threads && lock) pthread_mutex_unlock(m.icache_mutex&).unwrap();
 }
 
 fn save_in_got(self: *SelfHosted, fid: FuncId, addr: rawptr) void = {
     // :InsaneCaches
-    self.bump_dirty_new();
     m := self.comptime_codegen.m;
     id := self.comptime_jit_symbol_id(fid);
     use_symbol(m, id) { s |
@@ -455,8 +459,8 @@ report_called_uncompiled_or_just_fix_the_problem :: @as(rawptr) fn(self: *SelfHo
             save_in_got(self, fid, result);
             reset_temporary_storage(mark);
         };
+        self.comptime_codegen.m.bump_dirty_new(true);  // SLOW
     };
-    //bc.jitted&.bump_dirty();
     result
 };
 
@@ -471,31 +475,16 @@ fn get_fn_callable(self: *SelfHosted, fid: FuncId) ?rawptr = {
     };
     if use_threads {
         self.update_pending_took_pointer();
-        //if TRACE_SHIMS && !symbol_is_ready(m, id) {
-        //    @println("waiting for %", self.log_name(fid));
-        //};
-        cond :: => @if(GENERATION, func.generation > self.comptime_codegen.generation, !symbol_is_ready(self.comptime_codegen, id));
-        
-        zone := zone_begin(.Wait);
-        while cond { 
-            pthread_cond_signal(self.comptime_codegen.bouba_progress_c&);
-            wait(self.comptime_codegen, true);
-        }; 
-        zone_end(zone);
     };
+    c := wait_for_symbol(self.comptime_codegen, id);
     @if(use_threads) pthread_mutex_lock(m.icache_mutex&).unwrap();
-    use_symbol(m, id) { s | 
-        // TODO: sometimes we actually want to spin and wait for it to be ready. 
-        //       also something something how big is a cache line. 
-        if !s.jit_addr.is_null() && (s.kind != .Local || s.size != 0) {
-            // TODO: only the first time :SLOW
-            if func.get_flag(.TookPointerValue) || ENABLE_TRACY || TRACE_CALLS {
-                self.created_jit_fn_ptr_value(fid, s.jit_addr.int_from_rawptr());
-            };
-            result = (Some = s.jit_addr);
-            self.bump_dirty_new(false);
+    if !c.is_null() {
+        if func.get_flag(.TookPointerValue) || ENABLE_TRACY || TRACE_CALLS {
+            self.created_jit_fn_ptr_value(fid, c.int_from_rawptr());
         };
+        result = (Some = c);
     };
+    self.bump_dirty_new(false);  // TODO: we just did this in wait_for_symbol so should be redundant?
     @if(use_threads) pthread_mutex_unlock(m.icache_mutex&).unwrap();
     result
 }

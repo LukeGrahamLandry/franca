@@ -55,6 +55,9 @@ fn fixup_arm64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_rel
                 // > that checked the return address and patched it to not need the extra indirection after the first call, 
                 // > but i we care too much about security to do that any more. 
                 if symbol.offset == -1 {
+                    insane_caches := use_threads && self.goal.type == .JitOnly && self.goal.os == .macos;
+                    @if(insane_caches) pthread_mutex_lock(self.icache_mutex&).unwrap();
+                    
                     // create a new trampoline in the __stubs section. 
                     code := self.segments&.index(.Code);
                     symbol.offset = self.stubs&.len() + COMMANDS_SIZE_GUESS;
@@ -62,6 +65,12 @@ fn fixup_arm64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_rel
                     reg := Arm64Reg.IP0.raw() - 1; // x16
                     new_got_reloc[] = load_from_got(self, symbol, reg, trampoline.items().slice(0, 2), address).or_else(=> new_got_reloc[]);
                     trampoline[2] = br(reg, 0);
+                    
+                    if insane_caches {
+                        sys_dcache_flush(u8.raw_from_ptr(code.mmapped.ptr).offset(symbol.offset), size_of(@type trampoline[]));
+                        fence();
+                        pthread_mutex_unlock(self.icache_mutex&).unwrap();
+                    };
                 };
                 stub_trampoline := self.segment_address(.Code, symbol.offset);
                 distance = ptr_diff(fixup.patch_at, stub_trampoline) / 4;

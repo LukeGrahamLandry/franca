@@ -137,17 +137,22 @@ use_threads :: {
 // TODO: single threaded needing 2 because i of when i call clear is silly. 
 codegen_queue_size :: if(use_threads, => 128, => 2);  // (this is not the number of threads! just the amount of backlog we allow). 
 
+// :Wait
 codegen_thread_main :: fn(shared: *CodegenShared) void = {
     @debug_assert(use_threads);
     @if(shared.m.goal.type == .JitOnly) pthread_jit_write_protect_np(false);  // :JitMemProtect this thread wants to write
     
     idx := 0;
     @debug_assert(use_threads);
+    m := shared.progress_m&;
+    pthread_mutex_lock(m).unwrap();
     loop {
         @debug_assert(shared.m.initialized, "destroyed module before joining codegen thread.");
         if acquire(shared.queue, false, idx&) { entry |
+            pthread_mutex_unlock(m).unwrap();
             do_codegen(shared.m, entry);
-            shared.generation += 1;
+            pthread_mutex_lock(m).unwrap();
+            
             pthread_cond_signal(shared.kiki_progress_c&).unwrap();
         } else {
             if shared.no_more_functions {
@@ -157,31 +162,15 @@ codegen_thread_main :: fn(shared: *CodegenShared) void = {
                 shared.codegen_time = clock_ms(CLOCK_THREAD_CPUTIME_ID);
                 shared.no_more_codegen = true;
                 pthread_cond_signal(shared.kiki_progress_c&).unwrap();
+                pthread_mutex_unlock(m).unwrap();
                 return();
             };
+            
             pthread_cond_signal(shared.kiki_progress_c&).unwrap();
-            wait(shared, false);
+            pthread_cond_wait(shared.bouba_progress_c&, m).unwrap();
         };
     };
 };
-
-fn wait(shared: *CodegenShared, $i_am_bouba: bool) void = {
-    c := @if(i_am_bouba, shared.kiki_progress_c&, shared.bouba_progress_c&);
-    m := shared.progress_m&;
-    pthread_mutex_lock(m).unwrap();
-    @if(i_am_bouba, { // TODO: shouldn't need to use timed?
-        t := TimeSpec.zeroed();
-        clock_gettime(CLOCK_REALTIME, t&);
-        add_ns(t&, 20 * NS_PER_MS);
-        e := pthread_cond_timedwait(c, m, t&);
-        if !e.is_ok() {
-            //eprintln("lost the race");
-        };
-    }, {
-        pthread_cond_wait(c, m).unwrap();
-    });
-    pthread_mutex_unlock(m).unwrap();
-}
 
 fn add_ns(t: *TimeSpec, nanoseconds: i64) void = {
     nanoseconds += t.nanoseconds;
@@ -190,15 +179,18 @@ fn add_ns(t: *TimeSpec, nanoseconds: i64) void = {
     t.seconds += s;
 }
 
-// TimeSpec :: @struct(seconds: i64, nanoseconds: i64);
-
+// :Wait
 fn bouba_acquire(shared: *CodegenShared, idx: *i64) *CodegenEntry = {
+    m := shared.progress_m&;
+    c := shared.kiki_progress_c&;
+    pthread_mutex_lock(m).unwrap();
     loop {
         if shared.queue.acquire(true, idx) { entry |
+            pthread_mutex_unlock(m).unwrap();
             entry.arena&.reset_retaining_capacity();
             return(entry);
         };
-        wait(shared, true);
+        pthread_cond_wait(c, m).unwrap();
     };
 }
 
@@ -206,7 +198,7 @@ fn enqueue_task(shared: *CodegenShared, old_entry: *CodegenEntry) void = {
     @debug_assert(!old_entry.task&.is(.Dead), "tried to enqueue dead task");
     old_entry.release(true);
     @if(use_threads, {
-        shared.generation_pending += 1;
+        shared.m.bump_dirty_new(true);
         pthread_cond_signal(shared.bouba_progress_c&);
     }, {
         ::ptr_utils(*CodegenEntry);
@@ -334,8 +326,6 @@ CodegenShared :: @struct(
     constants_used: DynamicBitSet,
     type_indices: HashMap(Type, i64),
     bouba_idx := 0,
-    generation: u32 = 0,
-    generation_pending: u32 = 0,
 );
 
 CodegenState :: @enum(i64) (WaitingForBouba, UsedByBouba, WaitingForKiki, UsedByKiki);
@@ -428,14 +418,19 @@ fn get_log_types(comp: CompCtx, fid: FuncId) Str = {
     //"P"  // HACK for @if(TRACE_SHIMS)
 }
 
+// :Wait
 fn join_codegen_thread(shared: *CodegenShared) void = {
+    c := shared.kiki_progress_c&;
+    m := shared.progress_m&;
+    pthread_mutex_lock(m).unwrap();
     shared.no_more_functions = true;
     fence();
     while => !shared.no_more_codegen {
         pthread_cond_signal(shared.bouba_progress_c&);
-        wait(shared, true);
+        pthread_cond_wait(c, m).unwrap();
         fence();
     };
+    pthread_mutex_unlock(m).unwrap();
 }
 
 // this puts a bunch of stuff in temp(), it's expected to be used in the context of a CodegenEntry. 
