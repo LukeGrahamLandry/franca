@@ -9,6 +9,26 @@
   - i wasn't clearing cache after creating stubs
 - x64 is failing on no extsh. oh i bet i never use that but now i have to emit it to implement folding for it. 
 
+```
+// variable.c
+// clang 18.1.8 arm64-apple-darwin24.2.0 gives
+// (-1, -7) or (16, 16) with -fsanitize=address or (-1 -6) with -O2 
+// so clearly you're not allowed to do this. 
+ASSERT(7, ({ int x; int y; char z; char *a=&y; char *b=&z; b-a; }));
+ASSERT(1, ({ int x; char y; int z; char *a=&y; char *b=&z; b-a; }));
+
+// sizeof.c
+// i dont do that. spec says sizeof(long double) >= sizeof(double)
+ASSERT(16, sizeof(long double));
+
+// pointer.c
+// UB! asan agrees with me
+ASSERT(5, ({ int x=3; int y=5; *(&x+1); }));
+ASSERT(3, ({ int x=3; int y=5; *(&y-1); }));
+ASSERT(5, ({ int x=3; int y=5; *(&x-(-1)); }));
+ASSERT(7, ({ int x=3; int y=5; *(&x+1)=7; y; }));
+ASSERT(7, ({ int x=3; int y=5; *(&y-2+1)=7; x; }));
+```
 ## (Feb 3)
 
 - ah but now to use try_fold as my constexpr, i need to add back symbol offseting which i moved to isel before
