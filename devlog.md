@@ -1,5 +1,14 @@
 - TODO: deal with `CodegenEntry:Bounce` on wasm
 
+## (Feb 4)
+
+- c vla just using .alloc and size as a Ref instead of a var
+- hack for top level #use: just allow a string as though you had called import()
+- two things i wasn't thinking about with icache:
+  - you're supposed to check the predicate for a condvar inside the mutex
+  - i wasn't clearing cache after creating stubs
+- x64 is failing on no extsh. oh i bet i never use that but now i have to emit it to implement folding for it. 
+
 ## (Feb 3)
 
 - ah but now to use try_fold as my constexpr, i need to add back symbol offseting which i moved to isel before
@@ -15,6 +24,7 @@ give up and do the fancy comptime thing where i just iterate over all of them an
 means folding can't be compiled by legacy backend but that's fine since it's just an optimisation. 
 - experimenting with invoke_specialized. i remember being annoyed that i couldn't make an Option or Array type in a macro easily. 
 - functions for accessing members of a ScopeId, so c parser functions can just be in a struct that we iterate over.
+- use the table for parsing stmts as well
 
 TODO: import_c cant compile with debug compiler now
 
