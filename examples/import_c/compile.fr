@@ -111,6 +111,11 @@ Ctx :: @struct {
     a_little_hidden_control_flow: JumpBuf;
     
     speculate: bool; // hack
+    
+    /// Tokenize
+    current_file: *File;
+    at_bol: bool;  // True if the current position is at the beginning of a line
+    has_space: bool;  // True if the current position follows a space character
 };
 
 fn align_down(n: i64, align: i64) i64 = 
@@ -926,7 +931,7 @@ fn string_initializer(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) v
     // TODO: this is so garbage :SLOW
     slow :: fn($T) => {
         ::ptr_utils(T);
-        str := ptr_cast_unchecked(u8, T, tok.str.ptr);
+        str := ptr_cast_unchecked(u8, T, tok.str_buf);
         range(0, len.intcast()) { i |
             init.children[i].expr = c.new_num(str.offset(i)[].int(), tok);
         };
@@ -1935,16 +1940,8 @@ fn declare_builtin_functions(c: *Ctx) void = {
     c.builtin_alloca.is_definition = false;
 }
 
-fn parse(c: *Ctx, tok: *Token) Result(*Obj, Str) = {
-    ::enum(WhichJump);
-    @match(try(c.a_little_hidden_control_flow&)) {
-        fn Try()   => (Ok = c.parse_impl(tok));
-        fn Catch() => (Err = c.error_buf.items());
-    }
-}
-
 // program = (typedef | function-definition | global-variable)*
-fn parse_impl(c: *Ctx, tok: *Token) *Obj = {
+fn parse(c: *Ctx, tok: *Token) *Obj = {
     // :TopLevelFunction
     // :SLOW it's silly that top level constants need to be in a function context and we linearly scan it every time you have a numeric literal
     // this needs to be fixed so i don't have to cry when someone generates an array of binary data. 
@@ -2391,7 +2388,7 @@ parse_ident :: fn(c, rest, tok) #prefix(.TK_IDENT) = {
 };
 
 parse_string :: fn(c, rest, tok) #prefix(.TK_STR) = {
-    s: []u8 = (ptr = tok.str.ptr, len = tok.ty.array_len.intcast());
+    s: []u8 = (ptr = tok.str_buf, len = tok.ty.size.intcast());
     var := c.new_string_literal(s, tok.ty);
     rest[] = tok.next;
     node := c.new_var_node(var, tok);
@@ -2869,7 +2866,6 @@ asm :: fn(c, rest, tok) #prefix(.asm) = {
     if tok.kind != .TK_STR || tok.ty.base.kind != .TY_CHAR {
         @error_tok(c, tok, "expected string literal");
     };
-    asm_str := tok.str;
     rest[] = c.skip(tok.next, ")");
     @error_tok(c, tok, "asm stmt is not supported");
 };

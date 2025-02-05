@@ -17,7 +17,7 @@ Types       :: import("@/examples/import_c/type.fr");
 };
 
 Compile :: import("@/examples/import_c/compile.fr");
-:: (Compile.comptime_init_rules_table)();
+:: Compile'comptime_init_rules_table();
 
 JUST_ONE :: false;
 USE_HOST_BACKEND :: true;
@@ -27,7 +27,7 @@ SPAM :: false;
 fn main() void = {
     :: assert(!USE_HOST_BACKEND, "cannot start from main() when USE_HOST_BACKEND");
     vtable := ImportVTable.zeroed();
-    (AstExternal.fill_backend_vtable)(vtable&);
+    AstExternal'fill_backend_vtable(vtable&);
     run_tests(vtable&);
 }
 
@@ -85,7 +85,7 @@ fn compile_one_file(vtable: *ImportVTable, path: Str) Result(void, Str) #use(Tok
     m := @uninitialized QbeModule;
     a := query_current_arch();
     
-    (AstExternal.init_default_module_dyn)(m&, vtable, (arch = a.unwrap(), os = query_current_os(), type = .Exe));
+    m&.AstExternal'init_default_module_dyn(vtable, (arch = a.unwrap(), os = query_current_os(), type = .Exe));
     @if(LOG_IR) {
         m.debug["P".char()] = true;
         m.debug["R".char()] = true;
@@ -95,19 +95,6 @@ fn compile_one_file(vtable: *ImportVTable, path: Str) Result(void, Str) #use(Tok
     codegen_thread_main := ptr_cast_unchecked(@type vtable.codegen_thread_main, CodegenWorker, vtable.codegen_thread_main&)[];
     ctx: *CodegenShared = init(m&, libc_allocator, codegen_thread_main);
 
-    tok2 := tokenize_file(path) || panic("failed tokenize_file");
-    tok := CC.Token.zeroed(); tok := tok&;
-    tok  = append_tokens(tok, tok2);
-    tok  = preprocess(tok);
-    
-    for_linked tok { tok |
-        a := @is(tok.kind, .TK_KEYWORD, .TK_PUNCT);
-        if a || tok.str() == "_Generic" { // HACK :SLOW
-            ::?TokenKind;
-            tok.kind = TokenKind.from_name(tok.str()) || @panic("invalid c keyword %", tok.str());
-        };
-    };
-    
     c := Compile.Ctx.zeroed();
     c.arena = temp();
     c.current_fn = .None;
@@ -120,9 +107,8 @@ fn compile_one_file(vtable: *ImportVTable, path: Str) Result(void, Str) #use(Tok
     c.error_buf = list(temp());
     c.m = m&;
     
-    //print_tokens(tok);
-    
-    prog := @try(c&.parse(tok)) return;
+    init_macros();
+    prog := @try(c&.compile_file(path)) return;
     emit_the_code(c&, ctx, prog);
     join_codegen_thread(ctx);
 
@@ -135,6 +121,27 @@ fn compile_one_file(vtable: *ImportVTable, path: Str) Result(void, Str) #use(Tok
     fclose(outfile);
     drop(m&);
     .Ok
+}
+
+
+fn compile_file(c: *Compile.Ctx, path: Str) Result(*CC.Obj, Str) = {
+    ::enum(WhichJump);
+    return(@match(try(c.a_little_hidden_control_flow&)) {
+        fn Try()   => (Ok = impl(c, path));
+        fn Catch() => (Err = c.error_buf.items());
+    });
+    
+    impl :: fn(c: *Compile.Ctx, path: Str) *CC.Obj = {
+        tok := c.tokenize_file(path);
+        //tok := CC.Token.zeroed(); tok := tok&;
+        //tok  = append_tokens(tok, tok2);
+        for_linked tok { t | 
+            //@print("% ", t.str());
+        };
+        tok  = preprocess(tok);
+        c.convert_pp_tokens(tok);
+        c.parse(tok)
+    };
 }
 
 fn emit_the_code(c: *Compile.Ctx, ctx: *CodegenShared, obj: *CC.Obj) void = {
@@ -179,7 +186,7 @@ fn translate_data(m: *QbeModule, obj: *CC.Obj) []Qbe.Dat = {
         dat.type = .DZ; 
         dat.u.num = obj.ty.size.intcast();
     } else {
-        @debug_assert_eq(obj.init_data.len, obj.ty.size.intcast(), "init_data wrong size for type");
+        @debug_assert_eq(obj.init_data.len, obj.ty.size.intcast(), "init_data wrong size for type.\n%", obj.init_data);
         ::ptr_utils(@type obj.rel[]);
         if obj.rel.is_null() {
             dat := next_dat(); 
@@ -249,20 +256,6 @@ fn mangle(m: *QbeModule, obj: *CC.Obj) u32 = {
 ::enum(CC.NodeKind);
 
 ::ptr_utils(CC.Token); ::enum(Tokens.TokenKind);
-
-fn tokenize_file(path: Str) ?*CC.Token = {
-    a := libc_allocator; // temp();
-    src := read_to_string_or_crash(a, path);
-    src&.push(0);
-    path_c := maybe_borrow_cstr(path, a);
-    //file_no only used for assembler directive so i dont care
-    file := new_file(path_c, 0, src&.assert_c_str()); 
-    t := tokenize(file);
-    if t.is_null() {
-        return(.None);
-    };
-    (Some = t)
-}
 
 fn append_tokens(tok1: *CC.Token, tok2: *CC.Token) *CC.Token = {
     if(!tok1.is_null() || tok1.kind == .TK_EOF, => return(tok2));

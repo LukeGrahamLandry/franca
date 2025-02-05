@@ -1,5 +1,13 @@
 - TODO: deal with `CodegenEntry:Bounce` on wasm
 
+## (Feb 5)
+
+- no, needs to be Token.ty.size, because of strings with wide characters.
+- (string.c)
+- return ? instead of crashing from some number parsing lib functions
+- new syntax for lookup in a scope without doing a dot call. `Lib'func(arg)`. 
+kinda silly but seems convenient. 
+
 ## (Feb 4)
 
 - c vla just using .alloc and size as a Ref instead of a var

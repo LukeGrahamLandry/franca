@@ -928,7 +928,7 @@ fn compile_expr(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(
 
 fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) Maybe(void) = {
     if expr.done {
-        assert(expr.ty != UnknownType, "done but unknown type");
+        @debug_assert(expr.ty != UnknownType, "ICE: done but unknown type %", self.comp().log(expr));
         return(.Ok);
     };
     todo_dont_lose := self.dispatch.enclosing_function;
@@ -1160,6 +1160,7 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
                     @check(self.compile_place_expr(expr, requested, true)) return;
                 };
             };
+            @debug_assert(!expr.done || expr.ty != UnknownType, "field access has unknown type");
         }
         fn StructLiteralP() => {
             @check(self.construct_struct_literal(expr, requested)) return;
@@ -1205,8 +1206,18 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
         }
         fn As(f) => {
             type := @check(self.eval(f.type, Type)) return;
+            @debug_assert(type != UnknownType, "@as to unknowntype");
             @check(self.compile_expr_inner(f.value, type.want())) return;  // Note: skipping stricter check
+            @debug_assert(f.value.ty != UnknownType, "@as from unknowntype");
             if f.value.ty != type {
+                want := self.get_type(type);
+                have := self.get_type(f.value.ty);
+                // coerce_const_expr never allows int->enum because that seems too loose to do implicitly, but we want to allow it for @as. 
+                if f.value.expr&.is(.Value) && (@is(want, .Int, .F32, .F64)) && !(@is(have, .Enum)) {
+                    @check(self.coerce_const_expr(f.value, (Specific = type), false)) return;
+                    expr[] = f.value[];
+                    return(self.compile_expr(expr, (Specific = type)));
+                };
                 fn can_as_cast(self: *SelfHosted, ty: Type) bool = {
                     ty := self.get_type(ty);
                     if(ty.is(.Enum) || ty.is(.Named) || ty.is(.VoidPtr), => return(true));
@@ -1214,7 +1225,7 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
                     b := ty.Int.bit_count;
                     b != 8 && b != 16 && b != 32 && b != 64
                 };
-                // TODO: should do something more strict than this.
+                // TODO: should do something more strict than this (ie. check enum bounds? especially if it's constant)
                 @err_assert(self.can_as_cast(f.value.ty) || self.can_as_cast(type), "invalid @as cast (%) to (%)", self.log_type(f.value.ty), self.log_type(type)) return;
                 expr.ty = type;
                 expr.expr = (Cast = f.value);

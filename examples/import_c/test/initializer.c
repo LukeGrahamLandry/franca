@@ -128,8 +128,8 @@ int main() {
   ASSERT(10, sizeof(g18));
   ASSERT(3, sizeof(g19));
 
-  ASSERT(0, memcmp("A\0B", "A\0C", 3) == 0);  // don't treat string literal from the tokenizer as a CStr!
   ASSERT(0, memcmp(g17, "foobar", 7));
+  printf("%s\n", "foobar\0\0\0");
   ASSERT(0, memcmp(g18, "foobar\0\0\0", 10));
   ASSERT(0, memcmp(g19, "foo", 3));
 

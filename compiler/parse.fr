@@ -573,7 +573,26 @@ fn parse_infix(self: *Parser, prev: FatExpr, prec: Prec) ParseRes = {
                     @report_error("expr.field cannot span multiple lines. it just feels like an easy typo to mean something else.") (return, self.last.span);
                 };
                 loc := self.last.span;
-                e := self.expr((FieldAccess = (container = self.box(prev), name = name)), loc);
+                e := self.expr((FieldAccess = (container = self.box(prev), name = name, no_dot_call = false)), loc);
+                self.parse_infix(e, prec.with(.Suffix))
+            }
+            //fn Tick() => {
+            //    self.pop();
+            //    name := @try(self.pop_name("e.<NAME>")) return;
+            //    e := self.expr((FieldAccess = (container = self.box(prev), name = name, no_dot_call = true)), self.last.span);
+            //    self.parse_infix(e, prec.with(.Suffix))
+            //}
+            fn Tick() => {
+                start_line := self.lex.line;
+                self.pop();
+                end_line := self.lex.line;
+                name := @try(self.pop_name("e.<NAME>")) return;
+                if start_line != end_line {
+                    // :UpdateBoot There's some bug in the bootstrap version of the compiler that it chokes on if you comment out this line. the current version is fine tho. -- Feb 6, 2025
+                    @report_error("expr.field cannot span multiple lines. it just feels like an easy typo to mean something else.") (return, self.last.span);
+                };
+                loc := self.last.span;
+                e := self.expr((FieldAccess = (container = self.box(prev), name = name, no_dot_call = true)), loc);
                 self.parse_infix(e, prec.with(.Suffix))
             }
             fn LeftSquiggle() => {
@@ -677,22 +696,45 @@ fn bin_call(self: *Parser, func_name: Flag, loc: Span, lhs: FatExpr, rhs: FatExp
 
 fn expr_call(self: *Parser, f: FatExpr, arg: FatExpr) FatExpr = {
     // TODO: let else would be nice.
-    @match(f.expr&) {
+    @if_let(f.expr&)
         fn FieldAccess(ff) => {
+            break :: local_return;
             // Dot call syntax sugar.
+            
+            root_f  := f&;
+            ff_expr := root_f;
+            was_no_dot_call := ff.no_dot_call;
+            if was_no_dot_call {
+                while => was_no_dot_call && ff.container.expr&.is(.FieldAccess) {
+                    ff_expr = ff.container;
+                    ff = ff.container.expr.FieldAccess&;
+                    was_no_dot_call = ff.no_dot_call;
+                };
+                if was_no_dot_call {  // `a'b'c(d)`
+                    break();
+                };
+            };
+            first_arg := ff.container;
+            ff_expr[] = self.expr((GetNamed = ff.name), f.loc);
+            ff := 0;
+            f := root_f[];
+            
+            // `a.b'c(d)` -> (first_arg = a, f = b.c, arg -> d)
+            // `a.b.c(d)` -> (first_arg = a.b, f = c, arg -> d)
+            // `a'b.c(d)` -> (first_arg = a.b, f = c, arg -> d)
+            
             // TODO: I want this to just call push_arg
-            f := self.expr((GetNamed = ff.name), f.loc);
             @match(arg.expr&) {
                 // Tuple parser eagerly flattened single tuples so we have to undo that here.
                 // TODO: have it work with named arguments. Need to support mixing named and positional.
                 fn Tuple(parts) => {
-                    parts.insert(0, ff.container[], self.alloc);
+                    parts.insert(0, first_arg[], self.alloc);
                     return(self.expr((Call = (f = self.box(f), arg = self.box(arg))), f.loc));
                 }
                 // Parser flattened empty tuples.
                 fn Value(v) => {
                     if v.bytes.is_unit() {
-                        return(self.expr((Call = (f = self.box(f), arg = ff.container)), f.loc));
+                        return(self.expr((Call = (f = self.box(f), arg = first_arg)), f.loc));
                     };
                     // fallthrough
                 }
@@ -700,11 +742,11 @@ fn expr_call(self: *Parser, f: FatExpr, arg: FatExpr) FatExpr = {
                 //       but this old parser didn't allow mixed named and positional so it doesn't matter yet. :SYNTAX -- Jun 21 
                 @default => (); // fallthrough
             };
-            arg := self.expr((Tuple = (@list(ff.container[], arg) self.alloc).as_raw()), f.loc);
-            return(self.expr((Call = (f = self.box(f), arg = self.box(arg))), f.loc))
-        }
-        @default => return(self.expr((Call = (f = self.box(f), arg = self.box(arg))), f.loc));
-    }
+            
+            arg := self.expr((Tuple = (@list(first_arg[], arg) self.alloc).as_raw()), f.loc);
+            return(self.expr((Call = (f = self.box(f), arg = self.box(arg))), f.loc));
+        };
+    (self.expr((Call = (f = self.box(f), arg = self.box(arg))), f.loc))
 }
 
 fn push_arg(self: *Parser, call: *FatExpr, callback: FatExpr) void = {

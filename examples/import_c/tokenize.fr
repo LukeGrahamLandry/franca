@@ -3,6 +3,10 @@
 **********************/
 
 #use(CC);
+#use(Types);
+Ctx :: Compile.Ctx;
+
+Unicode :: import("@/examples/import_c/unicode.fr");
 
 fn str(tok: *Token) Str = 
     (ptr = tok.loc.ptr, len = tok.len.intcast());
@@ -41,8 +45,6 @@ fn consume_end(tok: **Token, $end: Str) bool #inline = {
     false
 }
 
-//error_tok :: fn(tok: *Token, fmt: CStr) Never #import("chibicc") #c_variadic;
-
 fn error_tok(ee: FatExpr) FatExpr #macro = {
     e := ee&.items();
     @ct_assert(e.len >= 3, ee.loc, "@error_tok expected (*Ctx, *Token, \"msg\", ...)");
@@ -54,6 +56,13 @@ fn error_tok(ee: FatExpr) FatExpr #macro = {
         @[format_into(@{ out }, e.rest(2), ee.loc)];
         throw(c.a_little_hidden_control_flow&)
     }
+}
+
+fn error_at(ee: FatExpr) FatExpr #macro = {
+    e := ee&.items();
+    @ct_assert(e.len >= 3, ee.loc, "@error_tok expected (*Ctx, *u8, \"msg\", ...)");
+    e[1] = @{ p := @[e[1]]; new_token(@[e[0]], .TK_ERROR, p, p) };  // TODO: e[0] used twice. this is a crime!
+    error_tok(ee)
 }
 
 // Reports an error message in the following format.
@@ -81,6 +90,661 @@ fn fmt_error_prefix(tok: *Token, msg: *List(u8)) void = {
     @fmt(msg, "%\n%^ ", line_str, f_pad("", pos, .Before)); 
     
     // Then the caller prints the error message
+}
+
+// Create a new token.
+fn new_token(c: *Ctx, kind: TokenKind, start: *u8, end: *u8) *Token = {
+    tok := temp().box_zeroed(Token);
+    tok.kind = kind;
+    tok.loc.ptr = start;
+    tok.len = ptr_diff(start, end).intcast();
+    tok.file = c.current_file;
+    tok.filename = c.current_file.display_name;
+    tok.at_bol = c.at_bol;
+    tok.has_space = c.has_space;
+    
+    c.at_bol = false;
+    c.has_space = false;
+    tok
+}
+
+//
+// TODO:
+// this is all such c shaped code. 
+// unfortunate. 
+//
+
+// Read an identifier and returns the length of it.
+// If p does not point to a valid identifier, 0 is returned.
+fn read_ident(start: *u8) i64 = {
+    p := start;
+    c := Unicode'decode_utf8(p&, p);
+    if(!Unicode'is_ident1(c), => return(0));
+    
+    loop {
+        q := p;
+        c = Unicode'decode_utf8(q&, p);
+        if(!Unicode'is_ident2(c), => return(ptr_diff(start, p)));
+        p = q;
+    }
+}
+
+// Read a punctuator token from p and returns its length.
+fn read_punct(p: *u8) i64 = {
+    // TODO: be not slow
+    kw :: @const_slice(
+        "<<=", ">>=", "...", "==", "!=", "<=", ">=", "->", "+=", "-=", "*=", "/=",
+        "++",  "--",  "%=",  "&=", "|=", "^=", "&&", "||", "<<", ">>", "##",
+    );
+    
+    for kw { it |
+        // TODO: safety if we're at the end of the input. should really just pad a few zeros on the end after we read the file for good luck
+        if(p.slice(3).starts_with(it), => return(it.len));
+    };
+    
+    punct := "!\"#%&'()*+,-./:;?[]^{|}~=><";  // TODO: chibicc did ispunct(), are you allowed to just have random shit in here? like what about @?
+    punct.contains(p[]).int()
+}
+
+fn read_escaped_char(c: *Ctx, new_pos: **u8, p: *u8) i64 = {
+    octal :: fn(ch: u8) ?i64 => 
+        if("0".ascii() <= ch && ch <= "7".ascii(), => (Some = zext(ch - "0".ascii())), => .None);
+    
+    // Read an octal number.
+    if octal(p[]) { ch |
+        p = p.offset(1);
+        if octal(p[]) { ch2 |
+            ch = ch * 8 + ch2;
+            p = p.offset(1);
+            if octal(p[]) { ch2 |
+                ch = ch * 8 + ch2;
+                p = p.offset(1);
+            };
+        };
+        new_pos[] = p;
+        return(ch);
+    };
+    
+    // Read a hexadecimal number.
+    if p[] == "x".ascii() {
+        p = p.offset(1);
+        if p[].hex_digit().is_none() {
+            @error_at(c, p, "invalid hex escape sequence");
+        };
+    
+        ch := 0;
+        while => hex_digit(p[]) { d |
+            ch = ch * 16 + d;
+            p = p.offset(1);
+        };
+        new_pos[] = p;
+        return(ch);
+    };
+    
+    // TODO: handle \U etc here as well instead of in a prepass but that requires the read_string_literal functions
+    //       to expect multiple bytes here. 
+    new_pos[] = p.offset(1);
+    zext(@switch(p[]) {
+        @case("a".ascii()) => 0x07;
+        @case("b".ascii()) => 0x08;
+        @case("t".ascii()) => "\t".ascii();
+        @case("n".ascii()) => "\n".ascii();
+        @case("v".ascii()) => vertical_tab;
+        @case("f".ascii()) => form_feed;
+        @case("r".ascii()) => "\r".ascii();
+        // [GNU] \e for the ASCII escape character is a GNU C extension.
+        @case("e".ascii()) => 0x1B;
+        @default => p[];
+    })
+}
+
+form_feed    :: 0x0C;
+vertical_tab :: 0x0B;
+
+fn read_string_literal(c: *Ctx, start: *u8, quote: *u8) *Token = {
+    read_string_literal(c, start, quote, u8, ty_char) { p, len, buf |
+        buf[len[]] = p[][];
+        p[] = p[].offset(1);
+        len[] += 1;
+    }
+}
+
+// Read a UTF-8-encoded string literal and transcode it in UTF-16.
+//
+// UTF-16 is yet another variable-width encoding for Unicode. Code
+// points smaller than U+10000 are encoded in 2 bytes. Code points
+// equal to or larger than that are encoded in 4 bytes. Each 2 bytes
+// in the 4 byte sequence is called "surrogate", and a 4 byte sequence
+// is called a "surrogate pair".
+fn read_utf16_string_literal(c: *Ctx, start: *u8, quote: *u8) *Token = {
+    read_string_literal(c, start, quote, u16, ty_ushort) { p, len, buf |
+        ch   := Unicode'decode_utf8(p, p[]);
+        wide := ch >= 0x10000;
+        if ch < 0x10000 {
+            // Encode a code point in 2 bytes.
+            buf[len[]] = ch.trunc();
+        } else {
+            // Encode a code point in 4 bytes.
+            ch -= 0x10000;
+            buf[len[]] = 0xd800 + ch.trunc().shift_right_logical(10).bit_and(0x3ff);
+            buf[len[] + 1] = 0xdc00 + ch.trunc().bit_and(0x3ff);
+        };
+        len[] += 1 + int(wide);
+    }
+}
+
+// Read a UTF-8-encoded string literal and transcode it in UTF-32.
+//
+// UTF-32 is a fixed-width encoding for Unicode. Each code point is
+// encoded in 4 bytes.
+fn read_utf32_string_literal(c: *Ctx, start: *u8, quote: *u8, ty: *CType) *Token = {
+    read_string_literal(c, start, quote, u32, ty_uint) { p, len, buf |
+        buf[len[]] = Unicode'decode_utf8(p, p[]);
+        len[] += 1;
+    }
+}
+
+// Find a closing double-quote.
+fn string_literal_end(c: *Ctx, p: *u8) Ty(*u8, bool) = {
+    start := p;
+    had_escapes := false;
+    while => p[] != "\"".ascii() {
+        if p[] == "\n".ascii() || p[] == 0 {
+            @error_at(c, start, "unclosed string literal");
+        };
+        if p[] == "\\".ascii() {
+            p = p.offset(1);  // it might be \" so skip one extra  // TODO: memory unsafe if someone gives us an unterminated string with a \ at the end of the file
+            had_escapes = true;
+        };
+        p = p.offset(1);
+    };
+    (p, had_escapes)
+}
+
+fn read_string_literal(c: *Ctx, start: *u8, quote: *u8, $T: Type, ty: *CC.CType, $read_char: @Fn(p: **u8, len: *i64, buf: []T) void) *Token #generic = {
+    p   := quote.offset(1);
+    end, had_escapes := c.string_literal_end(p);
+    buf := c.arena.alloc(T, ptr_diff(quote, end));  // :AuditQuotePointer TODO: chibicc used `start` here in read_utf16_string_literal but none of the others
+    
+    len := 0;
+    @if(@run (T == u8)) if !had_escapes {  // TODO: this makes it look confusing
+        source := between(p, end);
+        buf.slice(0, source.len).copy_from(source);
+        len = source.len;
+    };
+
+    @if(len == 0)
+    while => ptr_diff(p, end) > 0 {
+        if p[] == "\\".ascii() {
+            // TODO: this can't be right
+            //       surely if you give me a \U in a normal bytes string, 
+            //       i need to have it take up multiple bytes in the output
+            //   ohhh, they do convert_universal_chars as a prepass. 
+            buf[len] = c.read_escaped_char(p&, p.offset(1)).trunc();
+            len += 1;
+        } else {
+            read_char(p&, len&, buf);
+        };
+    };
+    
+    buf[len] = 0;
+    @debug_assert_lt(len, buf.len, "overflow string");
+    tok    := c.new_token(.TK_STR, start, end.offset(1));
+    tok.ty  = c.array_of(ty, len + 1);
+    tok.str_buf = ptr_cast_unchecked(T, u8, buf.ptr);
+    tok
+}
+
+fn read_char_literal(c: *Ctx, start: *u8, quote: *u8, ty: *CType) *Token = {
+    p := quote.offset(1);
+    if(p[] == 0, => @error_at(c, start, "unclosed char literal"));
+    
+    ::if(u32);
+    ch := if p[] == "\\".ascii() {
+        @as(u32) c.read_escaped_char(p&, p.offset(1)).trunc()
+    } else {
+        Unicode'decode_utf8(p&, p)
+    };
+    
+    end := p;
+    while => end[] != "'".ascii() {
+        if end[] == 0 {
+            @error_at(c, p, "unclosed char literal");
+        };
+        end = end.offset(1);
+    };
+    
+    tok := c.new_token(.TK_NUM, start, end.offset(1));
+    tok.val = ch.zext();
+    tok.ty = ty;
+    tok
+}
+
+fn convert_pp_int(tok: *Token) bool = {
+    p := tok.loc.ptr;
+    
+    // Read a binary, octal, decimal or hexadecimal number.
+    p0, p1, p2 := (p[], p.offset(1)[], p.offset(2)[]);
+    base := if p2 != 0 && p1 == "0".ascii() {
+        delta, base := @if_else {
+            @if(p1 == "x".ascii() && hex_digit(p2).is_some()) => (2, 16);
+            @if(p1 == "b".ascii() && (p2 == "0".ascii() || p2 == "1".ascii())) => (2, 2);
+            @else => (1, 8);
+        };
+        p = p.offset(delta);
+        base
+    } else {
+        10
+    };
+    
+    strtoul :: fn(str: *u8, end_out: **u8, base: i64) i64 #libc;  // TODO: can't be calling libc for stuff like this  
+    val := strtoul(p, p&, base);
+    
+    startswith :: fn(p: *u8, needle: Str) bool = 
+        p.slice(needle.len) == needle;
+    strncasecmp :: fn(s: *u8, needle: CStr, size: i64) bool #libc; // TODO
+        
+    // Read U, L or LL suffixes. :UGLY
+    delta, l, u := @if_else {
+        @if(startswith(p, "LLU") || startswith(p, "LLu") || startswith(p, "llU") ||
+            startswith(p, "llu") || startswith(p, "ULL") || startswith(p, "Ull") ||
+            startswith(p, "uLL") || startswith(p, "ull"))         => (3, true, true);
+        @if(!strncasecmp(p, "lu", 2) || !strncasecmp(p, "ul", 2)) => (2, true, true);
+        @if(startswith(p, "LL") || startswith(p, "ll"))           => (2, true, false);
+        @if(p[] == "L".ascii() || p[] == "l".ascii())             => (1, true, false);
+        @if(p[] == "U".ascii() || p[] == "u".ascii())             => (1, false, true);
+        @else => (0, false, false);
+    };
+    p = p.offset(delta);
+
+    if(ptr_diff(tok.loc.ptr, p) != tok.len.intcast(), => return(false));
+    
+    hi :: fn(N) => shift_right_arithmetic(val, N) != 0; // TODO: make sure this what >> on int64_t does?.
+    
+    // Infer a type.
+    ty := if (base == 10) {
+        @if_else {
+            @if(l && u) => ty_ulong;
+            @if(l)      => ty_long;
+            @if(u)      => @if(hi(32), ty_ulong, ty_uint);
+            @else       => @if(hi(31), ty_long, ty_int);
+        }
+    } else {
+        @if_else {
+            @if(l && u) => ty_ulong;
+            @if(l)      => @if(hi(63), ty_ulong, ty_long);
+            @if(u)      => @if(hi(32), ty_ulong, ty_uint);
+            @if(hi(63)) => ty_ulong;
+            @if(hi(32)) => ty_long;
+            @if(hi(31)) => ty_uint;
+            @else       => ty_int;
+        }
+    };
+
+    tok.kind = .TK_NUM;
+    tok.val = val;
+    tok.ty = ty;
+    true
+}
+
+// The definition of the numeric literal at the preprocessing stage
+// is more relaxed than the definition of that at the later stages.
+// In order to handle that, a numeric literal is tokenized as a
+// "pp-number" token first and then converted to a regular number
+// token after preprocessing.
+//
+// This function converts a pp-number token to a regular number token.
+fn convert_pp_number(c: *Ctx, tok: *Token) void = {
+    // Try to parse as an integer constant.
+    if(convert_pp_int(tok), => return());
+
+    // If it's not an integer, it must be a floating point constant.
+    strtod :: fn(str: CStr, end_out: **u8) f64 #libc;  // TODO: can't be calling libc for stuff like this  
+    end := @uninitialized *u8;
+    val := strtod(tok.loc, end&);
+    
+    end_char := end[];
+    ty := @if_else {
+        @if(end_char == "f".ascii() || end_char == "F".ascii()) => {
+            end = end.offset(1);
+            ty_float
+        };
+        @if(end_char == "l".ascii() || end_char == "L".ascii()) => {
+            end = end.offset(1);
+            ty_ldouble
+        };
+        @else => ty_double;
+    };
+    
+    if ptr_diff(tok.loc.ptr, end) != tok.len.intcast() {
+        @error_tok(c, tok, "invalid numeric constant");
+    };
+    
+    tok.kind = .TK_NUM;
+    tok.fval = val;
+    tok.ty = ty;
+}
+
+fn convert_pp_tokens(c: *Ctx, tok: *Token) void = {
+    while => tok.kind != .TK_EOF {
+        if TokenKind.from_name(tok.str()) { kw | 
+            tok.kind = kw;
+        };
+        if tok.kind == .TK_PP_NUM {
+            c.convert_pp_number(tok);
+        };
+        tok = tok.next;
+    };
+}
+
+// Initialize line info for all tokens.
+fn add_line_numbers(p: *u8, tok: *Token) void = {  // :SLOW
+    n: i32 = 1;
+    
+    dowhile {
+        if p.identical(tok.loc.ptr) {
+            tok.line_no = n;
+            tok = tok.next;
+        };
+        c := p[];
+        if c == "\n".ascii() {
+            n += 1;
+        };
+        p = p.offset(1);
+        c != 0
+    };
+}
+
+fn tokenize_string_literal(tok: *Token, basety: *CType) *Token = {
+    t := if basety.size == 2 {
+        read_utf16_string_literal(tok.loc, tok.loc)
+    } else {
+        read_utf32_string_literal(tok.loc, tok.loc, basety)
+    };
+    t.next = tok.next;
+    t
+}
+
+// Tokenize a given string and returns new tokens.
+fn tokenize(c: *Ctx, file: *File) *Token = {
+    c.current_file = file;
+    
+    p := file.contents.ptr;
+    head := Token.zeroed();
+    cur := head&;
+    
+    c.at_bol    = true;
+    c.has_space = false;
+    
+    // recall :BoundsPadding, it's fine to look ahead a few characters without checking for the null terminator. 
+    while => p[] != 0 { 
+        continue :: local_return;
+        continue_tok :: fn(tok) => {
+            cur.next = tok;
+            cur = cur.next;
+            p = p.offset(cur.len.intcast());
+            continue();
+        };
+        if p[] == "/".ascii() {
+            // Skip line comments.
+            if p.offset(1)[] == "/".ascii() {
+                while => p[] != "\n".ascii() && p[] != 0 {
+                    p = p.offset(1);
+                };
+                c.has_space = true;
+                continue();
+            };
+            
+            // Skip block comments.
+            if p.offset(1)[] == "*".ascii() {
+                p = p.offset(2);  // required for `/*/ */` 
+                // c doesn't allow nested block comments. 
+                while => !(p[] == "*".ascii() && p.offset(1)[] == "/".ascii()) {
+                    p = p.offset(1);
+                    if p[] == 0 {
+                        @error_at(c, p, "unclosed block comment");
+                    };
+                };
+                p = p.offset(2);
+                c.has_space = true;
+                continue();
+            };
+            
+            // fallthrough
+        };
+    
+        // Skip newline.
+        if p[] == "\n".ascii() {
+            p = p.offset(1);
+            c.at_bol = true;
+            c.has_space = false;
+            continue();
+        };
+    
+        // Skip whitespace characters.
+        if p[] == " ".ascii() || p[] == "\t".ascii() || p[] == form_feed || p[] == "\r".ascii() || p[] == vertical_tab {
+            p = p.offset(1);
+            c.has_space = true;
+            continue();
+        };
+    
+        // Numeric literal
+        if is_ascii_digit(p[]) || (p[] == ".".ascii() && is_ascii_digit(p.offset(1)[])) {
+            q := p;
+            p := p.offset(1); // not mutating outer `p` because continue_tok does it
+            loop {
+                if "eEpP".contains(p[]) && "+-".contains(p.offset(1)[]) {
+                    p = p.offset(2);
+                } else {
+                    if is_ascii_alpha(p[]) || is_ascii_digit(p[]) || p[] == ".".ascii()  {
+                        p = p.offset(1);
+                    } else {
+                        continue_tok(c.new_token(.TK_PP_NUM, q, p));
+                    };
+                };
+            };
+        };
+    
+        // String literal
+        if p[] == "\"".ascii() {
+            continue_tok(c.read_string_literal(p, p));
+        };
+    
+        if p.offset(1)[] == "\"".ascii() {
+            @switch(p[]) {
+                // TODO: this one was +2 but the others are +1? wrong? :AuditQuotePointer
+                // UTF-16 string literal
+                @case("u".ascii()) => continue_tok(c.read_utf16_string_literal(p, p.offset(1)));
+                // Wide string literal
+                @case("L".ascii()) => continue_tok(c.read_utf32_string_literal(p, p.offset(1), ty_int));
+                // UTF-32 string literal
+                @case("U".ascii()) => continue_tok(c.read_utf32_string_literal(p, p.offset(1), ty_uint));
+                @default => (); // fallthrough
+            };
+        };
+        // UTF-8 string literal
+        if p[] == "u".ascii() && p.offset(1)[] == "8".ascii() && p.offset(2)[] == "\"".ascii() {
+            continue_tok(c.read_string_literal(p, p.offset(2)));
+        };
+    
+        // Character literal
+        if p[] == "'".ascii() {
+            tok := c.read_char_literal(p, p, ty_int);
+            tok.val = tok.val.bit_and(0xFF);
+            continue_tok(tok);
+        };
+    
+        if p.offset(1)[] == "'".ascii() {
+            @switch(p[]) {
+                // UTF-16 character literal
+                @case("u".ascii()) => {
+                    tok := c.read_char_literal(p, p.offset(1), ty_ushort);
+                    tok.val = tok.val.bit_and(0xFFFF);
+                    continue_tok(tok);
+                };
+                // Wide character literal
+                @case("L".ascii()) => continue_tok(c.read_char_literal(p, p.offset(1), ty_int));
+                // UTF-32 character literal
+                @case("U".ascii()) => continue_tok(c.read_char_literal(p, p.offset(1), ty_uint));
+                @default => (); // fallthrough
+            };
+        };
+        
+        // Identifier or keyword
+        len := read_ident(p);
+        if len != 0 {
+            continue_tok(c.new_token(.TK_IDENT, p, p.offset(len)))
+        };
+        
+        // Punctuators
+        len := read_punct(p);
+        if len != 0 {
+            continue_tok(c.new_token(.TK_PUNCT, p, p.offset(len)))
+        };
+    
+        @error_at(c, p, "invalid token");
+    };
+    
+    cur.next = c.new_token(.TK_EOF, p, p);
+    cur = cur.next;
+    add_line_numbers(c.current_file.contents.ptr, head.next);
+    head.next
+}
+
+// Replaces \r or \r\n with \n.
+fn canonicalize_newline(p: *u8) void = {
+  int i = 0, j = 0;
+
+  while (p[i]) {
+    if (p[i] == '\r' && p[i + 1] == '\n') {
+      i += 2;
+      p[j++] = '\n';
+    } else if (p[i] == '\r') {
+      i++;
+      p[j++] = '\n';
+    } else {
+      p[j++] = p[i++];
+    }
+  }
+
+  p[j] = '\0';
+}
+
+fn read_universal_char(p: *u8, len: i64) u32 = {
+    uint32_t c = 0;
+    for (int i = 0; i < len; i++) {
+        if (!isxdigit(p[i]))
+            return 0;
+        d := hex_digit(p[i]) || return(0);
+        c = (c << 4) | d;
+    }
+    return c;
+}
+
+// Replace \u or \U escape sequences with corresponding UTF-8 bytes.
+fn convert_universal_chars(p: *u8) void ={
+    char *q = p;
+    
+    while (*p) {
+        if (startswith(p, "\\u")) {
+            uint32_t c = read_universal_char(p + 2, 4);
+            if (c) {
+            p += 6;
+            q += encode_utf8(q, c);
+            } else {
+            *q++ = *p++;
+            }
+        } else if (startswith(p, "\\U")) {
+            uint32_t c = read_universal_char(p + 2, 8);
+            if (c) {
+            p += 10;
+            q += encode_utf8(q, c);
+            } else {
+            *q++ = *p++;
+            }
+        } else if (p[0] == '\\') {
+            *q++ = *p++;
+            *q++ = *p++;
+        } else {
+            *q++ = *p++;
+        }
+    }
+    
+    q[] = 0;
+}
+
+// Removes backslashes followed by a newline.
+fn remove_backslash_newline(p: *u8) void = {
+    i, j := (0, 0);
+    
+    // We want to keep the number of newline characters so that
+    // the logical line number matches the physical one.
+    // This counter maintain the number of newlines we have removed.
+    n := 0;
+
+    while => p.offset(i)[] != 0 {
+        if p.offset(i)[] == "\\".ascii() && p.offset(i + 1)[] == "\n".ascii() {
+            i += 2;
+            n += 1;
+        } else {
+            if p.offset(i)[] == "\n".ascii() {
+                p.offset(j)[] = p.offset(i)[];
+                j += 1;
+                i += 1;
+                range(0, n) { _ |
+                    p.offset(j)[] = "\n".ascii();
+                    j += 1;
+                };
+                n = 0;
+            } else {
+                p.offset(j)[] = p.offset(i)[];
+                j += 1;
+                i += 1;
+            };
+        };
+    };
+    
+    range(0, n) { _ |
+        p.offset(j)[] = "\n".ascii();
+        j += 1;
+    };
+    
+    // :BoundsPadding
+    range(j, j + 10) { j |
+        p.offset(j)[] = 0;
+    };
+}
+
+fn new_file(name: CStr, file_no: i32, contents: CStr) *File = {
+    file := temp().box(File); // TODO: do these outlive? 
+    file.name = name;
+    file.display_name = name;
+    file.file_no = file_no;
+    file.contents = contents;
+    file
+}
+
+fn tokenize_file(c: *Ctx, path: Str) *CC.Token = {
+    a := c.arena; // TODO: can probably be temp() since we copy string literals out
+    src := read_to_string_or_crash(a, path);
+    // :BoundsPadding
+    // we want it to be a c string, and if we add some extra zeros, the lexer doesn't 
+    // have to worry about bounds checks when it looks a few characters ahead to match 
+    // a specific one. 0 won't match anything. 
+    src&.push_all("\0\0\0\0\0\0\0\0\0\0");
+    path_c := maybe_borrow_cstr(path, a);
+    
+    p := src&.assert_c_str();
+    
+    // TODO: chibicc does some extra stuff here: 
+    //       but we can't be doing like 17 passes over the file man, common. 
+    //canonicalize_newline(p);
+    remove_backslash_newline(p.ptr);
+    //convert_universal_chars(p);
+    
+    // file_no only used for assembler directive so i dont care
+    file := new_file(path_c, 0, p); 
+    c.tokenize(file)
 }
 
 TokenKind :: @enum(i32) (
@@ -118,4 +782,6 @@ TokenKind :: @enum(i32) (
     @"++",  @"--",  @"%=",  @"&=", @"|=", @"^=", @"&&", @"||", @"<<", @">>", @"##",
     @"=", @"!", @"<", @">", @"-", @"+", @"*", @"/",
     @"%",  @"&", @"|", @"^", @"#", @"[", @"]", @"~",
+    
+    TK_ERROR,   // Only used for calling @error_tok
 ); 

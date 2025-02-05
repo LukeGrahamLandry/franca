@@ -6,6 +6,7 @@ A C11 compiler adapted from <https://github.com/rui314/chibicc>.
 - less verbose style of handling operator precedence.
 - removed some GNU extensions: labels-as-values, case ranges
 - removed support for x87 80-bit long doubles
+- convert static variables to a struct explicitly passed around so you can have multiple compilation contexts at the same time. 
 - (temporarily) removed support for: thread locals, atomics, `_Alignas`
 
 ## Chibicc License

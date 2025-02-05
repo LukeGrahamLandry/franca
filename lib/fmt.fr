@@ -34,7 +34,7 @@ fn eprintln(msg: Str) void = {
 }
 
 fn eprint(msg: Str) void = {
-    written := write(STD_ERR, msg.ptr, @as(usize) msg.len);
+    written := write(STD_ERR, msg.ptr, msg.len);
     // TODO: confusing dependency
     //assert_eq(msg.len, written.unwrap());
     // TODO: check errno. loop if not all written. 
@@ -383,59 +383,40 @@ fn print(i: i64) void = {
     print(mem&.items());
 }
 
-// TODO: this should return an option. 
-// TODO: use @switch once I have ranges. 
 // TODO: you could do the bits trick but who cares man
-fn hex_digit(cc: u8) i64 = {
+fn hex_digit(cc: u8) ?i64 = {
     c: i64 = cc.zext();
-    if(c >= "a".char(), 
-        => { 
-            assert(c <= "f".char(), "hex OOB"); 
-            c - "a".char() + 10
-        }, 
-        => if(c >= "A".char(), 
-            => { 
-                assert(c <= "F".char(), "hex OOB"); 
-                c - "A".char() + 10
-            }, 
-            => { 
-                assert(c >= "0".char(), "hex OOB"); 
-                assert(c <= "9".char(), "hex OOB"); 
-                c - "0".char()
-            }
-        )
-    )
+    (Some = @if_else {
+        @if(c >= "a".char() && c <= "f".char()) => c - "a".char() + 10;
+        @if(c >= "A".char() && c <= "F".char()) => c - "A".char() + 10;
+        @if(c >= "0".char() && c <= "9".char()) => c - "0".char();
+        @else => return(.None);
+    })
 }
 
-// TODO: this should return an error. 
-fn hex(s: Str) i64 = {
+// returns the number and the rest of the string after the first invalid digit (or "" if it was all valid)
+fn convert_number(s: Str, base: i64, $digit: @Fn(c: u8) ?i64) Ty(i64, Str) = {
     total := 0;
-    scale := 1;
-    i := s.len().sub(1);
-    first := 0;
-    
-    // This prevents overflow for tracking scale for lots of leading zeros. 
-    // TODO: add a test that requires this. lol its an insane number tho so could just not bother 
-    while => first < s.len && s[first] == 48 {
-        first += 1; 
+    while => s.len > 0 {
+        d := digit(s[0]) || return(total, s);
+        total *= base;
+        total += d;
+        s = s.rest(1);
     };
-    
-    while => i >= first {
-        total += scale * hex_digit(s[i]);
-        scale *= 16;
-        i -= 1;
-    };
-    total
+    (total, s)
+}
+
+fn hex(s: Str) ?i64 = {
+    i, rest := convert_number(s, 16, hex_digit);
+    if(rest.len != 0, => return(.None));
+    (Some = i)
 }
 
 // TODO: this should return an error. 
 fn parse_int(s: Str) i64 = {
-    total := 0;
-    for s { c |
-        total *= 10;
-        total += dec_digit(c);
-    };
-    total
+    i, rest := convert_number(s, 10, dec_digit);
+    @assert_eq(rest.len, 0, "invalid input to parse_int()");
+    i
 }
 
 fn push_prefixed_hex_byte(hex: *List(u8), byte: u8) void = {
@@ -466,10 +447,10 @@ fn show_hex_bytes(code: []u8) void = {
 }
 
 // TODO: this should return an option instead of asserting. 
-fn dec_digit(cc: u8) i64 = {
+fn dec_digit(cc: u8) ?i64 = {
     c: i64 = cc.zext();
-    //assert(c.ge("0".char()).and(c.le("9".char())), "dec OOB");
-    c - "0".char()
+    if(c < "0".char() || c > "9".char(), => return(.None));
+    (Some = c - "0".char())
 }
     
 // TODO: this should return an error. 
@@ -477,14 +458,15 @@ fn float(s: Str) f64 = {
     value := 0.0;
     scale := 0.1;
     seen_decimal := false;
+    dec_digit2 :: fn(c) => dec_digit(c).unwrap();
     for(s){c|
         if seen_decimal {
-            value += dec_digit(c).float().mul(scale);
+            value += dec_digit2(c).float().mul(scale);
             scale = scale.div(10.0);  // TODO: /= doesn't work??
         } else {
             if(c == ".".ascii(), => { seen_decimal = true; }) {
                 value *= 10.0;
-                value += dec_digit(c).float();
+                value += dec_digit2(c).float();
             }
         };
     };
@@ -495,8 +477,7 @@ fn float(s: Str) f64 = {
 fn is_ascii_digit(c: u8) bool = c >= "0".ascii() && c <= "9".ascii();
 fn is_ascii_alpha(c: u8) bool = 
     (c >= "a".ascii() && c <= "z".ascii()) ||
-    (c >= "A".ascii() && c <= "Z".ascii()) ||
-    c == "_".ascii();
+    (c >= "A".ascii() && c <= "Z".ascii());
 
 #redirect(i64, void) fn println(a: u64) void; // TODO: WRONG. sign
 fn println(a: u32) void = println(@as(i64) a.zext()); 
