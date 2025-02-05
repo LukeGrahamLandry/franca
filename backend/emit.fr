@@ -67,7 +67,7 @@ FixupType :: @tagged(
     //         It's a local symbol but since we want its absolute address in memory, we need the loader to add our base address.  
     // import: bind.
     //         We want the absolute address of an import to be in memory. ie. __got uses this. 
-    DataAbsolute,
+    DataAbsolute: @struct(increment: i64),
     
     // amd64
     RipDisp32: @struct(increment: u32, call: bool), // TODO: add safety checks for size of Qbe.Con.bits.i
@@ -220,15 +220,14 @@ fn emit_data_to_segment(self: *QbeModule, dat: *Qbe.Dat, seg: SegmentType) void 
             ptr := ptr_cast_unchecked(u8, i64, next[]);
             if dat.is_ref {
                 // TODO: need to record this location and request a rebase reloc for AOT
-                @assert(dat.u.ref.off == 0, "sorry can't do offset refs yet");
                 id := dat.u.ref.id;
                 use_symbol(self, id) { symbol | 
                     mark_referenced(self, id, symbol);
                     if self.get_addr(symbol) { value |
-                        ptr[] = int_from_rawptr(value._0);
+                        ptr[] = int_from_rawptr(value._0) + dat.u.ref.off;
                     };
                     // Since we need the absolute address in memory, even local symbols need a relocation. 
-                    push_fixup(self, symbol, (patch_at = next[], type = .DataAbsolute));
+                    push_fixup(self, symbol, (patch_at = next[], type = (DataAbsolute = (increment = dat.u.ref.off))));
                     if self.goal.arch != .wasm32 && self.goal.type == .Relocatable && !symbol.local_but_marked_for_relocation {
                         self.local_needs_reloc&.push(id);
                         symbol.local_but_marked_for_relocation = true;
@@ -431,7 +430,7 @@ fn ensure_got_slot(self: *QbeModule, symbol: *SymbolInfo, jit_address: rawptr) ?
         if self.debug["T".char()] {
             @fmt_write(self.debug_out, "# reserve __got[%] = %\n", symbol.got_lookup_offset / 8, symbol.name);
         };
-        new_got_reloc = (Some = (patch_at = ptr_cast_unchecked(rawptr, u8, got), type = .DataAbsolute));
+        new_got_reloc = (Some = (patch_at = ptr_cast_unchecked(rawptr, u8, got), type = (DataAbsolute = (increment = 0))));
         if !(self.got_indirection_instead_of_patches && jit_address.is_null()) { // TODO: remove this condition
             got[] = jit_address; // because we don't loop again to handle `new_got_reloc`
         }

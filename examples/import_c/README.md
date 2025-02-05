@@ -1,4 +1,4 @@
-- https://github.com/rui314/chibicc
+A C11 compiler adapted from <https://github.com/rui314/chibicc>.
 
 ## Changes from Chibicc
 

@@ -529,20 +529,22 @@ fn emit_one_exe_fixup(e: *EmitMacho, fix: *FixP, prev_fixup: *?WipFixup, import_
 }
 
 fn emplace_fixup(e: *EmitMacho, fix: *FixP, next_encoded: i64, import_count: i64) void #inline = {
+    addend := @if(fix.fix.type&.is(.DataAbsolute), fix.fix.type.DataAbsolute.increment, 0); // other addends are handled elsewhere? which is kinda confusing
     @debug_assert_ge(next_encoded, 0, "fixups cant go backwards. we sorted them so this can't happen.");
     encoded := encode_chained(
         next = next_encoded.trunc(),
         reserved = 0,
         payload = @if(fix.symbol.kind == .Local, {
             dest_segment := fix.symbol.segment.raw() + 1; // :MySegmentsStartAt1
-            target := e.virtual_segment_offset[dest_segment] - zero_page_size + fix.symbol.offset;
+            target := e.virtual_segment_offset[dest_segment] - zero_page_size + fix.symbol.offset + addend;
             @assert_lt(target, 1.shift_left(36), "rebase > 36 bits");
             (Rebase = (high8 = 0, target = target))
         }, {
             // got_lookup_offset has been converted to an ordinal already. 
             o := fix.symbol.got_lookup_offset;
             @debug_assert(o >= 0 && o < import_count, "bad ordinal %", o);
-            (Bind = (addend = 0, ordinal = o.trunc()))
+            @assert_le(addend, 0, "TODO: does macho chained fixup allow negative addend to import?");
+            (Bind = (addend = addend.trunc(), ordinal = o.trunc()))
         })
     );
     ref := ptr_cast_unchecked(u8, i64, fix.fix.patch_at);
@@ -651,6 +653,7 @@ fn append_relocations(symbol_table_index: i64, id: u32, m: *QbeModule, relocatio
             // So we skip this relocation and instead emit one for each place we accessed that __got slot. 
             //
             @debug_assert(fix.type&.tag() == .DataAbsolute && s.kind != .Local, "__got reloc must be data");
+            // :TodoDataAbsoluteInc
             continue();
         };
         sec: i64 = which_section(patch_segment).zext();
@@ -767,6 +770,7 @@ fn collect_aot_fixups(m: *QbeModule) Ty([]FixP, []*SymbolInfo) = {
         first := true;
         each s.fixups& { f | 
             if f.type&.is(.DataAbsolute) { 
+                // :TodoDataAbsoluteInc
                 fixups&.push(symbol = s, fix = f);
                 if first {
                     first = false;

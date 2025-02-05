@@ -29,6 +29,20 @@ ASSERT(5, ({ int x=3; int y=5; *(&x-(-1)); }));
 ASSERT(7, ({ int x=3; int y=5; *(&x+1)=7; y; }));
 ASSERT(7, ({ int x=3; int y=5; *(&y-2+1)=7; x; }));
 ```
+
+- backend: Fixup.DataAbsolute allow increment (including negative!)
+- another staticarrayofunknownlength problem, maybe i never actually got that to work, i just started and then gave up on initializer.c. 
+i thought i had already done that so when i saw `typedef char T[]; T x="foo"; T y="x";`
+i was confused for a long time thinking it had somehow made a VLA.
+but no, VLA never has an initializer, you're just declaring an array of inferred type and then inferring it to two different things which is fine. 
+type defs are just macros i guess. 
+or i thought it was that the string needed to have a Ref maybe. but also no, we go one char at a time (which is silly). 
+anyway the trick was just so create the ref for the array up front so that while you're reading the initializer, 
+you can emit offsets from that ref to store the parts,
+and then at the end, you put an alloc of the right size in the start block so you don't have to worry about the definition not dominating uses. 
+- i was treating Token.str as a CStr, but instead need to get the length from Token.ty.array_len
+- (initializer.c)
+
 ## (Feb 3)
 
 - ah but now to use try_fold as my constexpr, i need to add back symbol offseting which i moved to isel before

@@ -5,6 +5,7 @@ int memcmp(const void *p, const void *q, unsigned long n);
 void exit(int n);
 void *memcpy(void *dest, const void *src, unsigned long n);
 void abort();
+int strcmp(char *p, char *q);
 
 static void assert(int expected, int actual, char *code) {
   if (expected != actual) {
@@ -12,3 +13,4 @@ static void assert(int expected, int actual, char *code) {
     abort();
   }
 }
+

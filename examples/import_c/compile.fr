@@ -236,6 +236,10 @@ fn new_var_node(c: *Ctx, var: *Obj, tok: *Token) *Node = {
     node.var = var;
     node.ty = var.ty;
     
+    if var.global_symbol { id |
+        node.lvalue = c.f.symcon(id);
+    };
+    
     if !c.speculate && !node.var.is_function {
         node.lvalue = c.gen_addr(node);
         if var.ty.kind == .TY_ARRAY {
@@ -317,6 +321,7 @@ fn new_var(c: *Ctx, name: Str, ty: *CType) *Obj = {
     var.name = name.slow_convert_to_c_string();
     var.ty = ty;
     var.align = ty.align;
+    var.global_symbol = .None;
     c.push_scope(name)[].var = var;
     
     var
@@ -346,8 +351,9 @@ fn create_stack_slot(c: *Ctx, var: *Obj) void = {
     if var.ty.size < 0 {
         @error_tok(c, var.tok, "tried to create stack slot for a variable with negative size (%)", var.ty.size);
     };
-    
-    var.stack_slot = c.f.newtmp(var.name.str(), .Kl);
+    if var.stack_slot == QbeNull {
+        var.stack_slot = c.f.newtmp(var.name.str(), .Kl);
+    };
     push(c.f.start, make_ins(.alloc8, .Kl, var.stack_slot, c.f.getcon(var.ty.size.intcast()), QbeNull));  // TODO: smaller align stack slots
 }
 
@@ -356,6 +362,7 @@ fn new_gvar(c: *Ctx, name: Str, ty: *CType) *Obj = {
     var.next = c.globals;
     var.is_static = true;
     var.is_definition = true;
+    var.global_symbol = (Some = c.m.mangle(var));
     c.globals = var;
     var
 }
@@ -1268,7 +1275,7 @@ fn end_linked(head: ~T) T = {
 
 fn init_desg_expr(c: *Ctx, desg: *InitDesg, tok: *Token) *Node = {
     if(!desg.var.is_null(), => return(c.new_var_node(desg.var, tok)));
-
+    
     if !desg.member.is_null() {
         node := c.new_unary(.ND_MEMBER, c.init_desg_expr(desg.next, tok), tok);
         node.member = desg.member;
@@ -1279,12 +1286,20 @@ fn init_desg_expr(c: *Ctx, desg: *InitDesg, tok: *Token) *Node = {
     rhs := c.new_num(desg.idx, tok);
     c.new_add(lhs&, rhs&, tok);
     node := c.new_binary(.ND_ADD, lhs, rhs, tok);
+    //@println("gen init_desg_expr: %", lhs.kind);
+    if lhs.kind == .ND_VAR {
+        //@println("var % %", lhs.var.name, lhs.var.stack_slot);
+        if lhs.var.global_symbol { id |
+            //@println("%", c.m.str(id));
+        };
+    };
     c.gen_expr(node);
     c.new_deref(node, tok)
 }
 
 fn create_lvar_init(c: *Ctx, init: *Initializer, ty: *CType, desg: *InitDesg, tok: *Token) *Node = {
     if ty.kind == .TY_ARRAY {
+        //println("arr create_lvar_init");
         node := c.new_node(.ND_NULL_EXPR, tok);
         range(0, ty.array_len.intcast()) { i |
             desg2: InitDesg = (next = desg, idx = i, member = Member.ptr_from_int(0), var = Obj.ptr_from_int(0));
@@ -1315,6 +1330,7 @@ fn create_lvar_init(c: *Ctx, init: *Initializer, ty: *CType, desg: *InitDesg, to
 
     if(init.expr.is_null(), => return(c.new_node(.ND_NULL_EXPR, tok)));
 
+    //@println("start init_desg_expr % %", tok.str(), ty.kind);
     lhs := c.init_desg_expr(desg, tok);
     c.new_binary(.ND_ASSIGN, lhs, init.expr, tok)
 }
@@ -1341,9 +1357,14 @@ fn lvar_initializer(c: *Ctx, rest: **Token, tok: *Token, var: *Obj) *Node = {
     lhs := c.new_node(.ND_MEMZERO, tok);
     lhs.var = var;
 
+    static_array_of_unknown_length := var.stack_slot == QbeNull;  // :StaticArrayOfUnknownLength
+    if static_array_of_unknown_length {
+        // This ref needs to exist because create_lvar_init will generate offsets from it to store the elements. 
+        var.stack_slot = c.f.newtmp(var.name.str(), .Kl);
+    };
+    
     rhs := c.create_lvar_init(init, var.ty, desg&, tok);
-   
-    if var.stack_slot == QbeNull {  // :StaticArrayOfUnknownLength
+    if static_array_of_unknown_length {  
         c.create_stack_slot(var);
     };
     
@@ -2370,7 +2391,8 @@ parse_ident :: fn(c, rest, tok) #prefix(.TK_IDENT) = {
 };
 
 parse_string :: fn(c, rest, tok) #prefix(.TK_STR) = {
-    var := c.new_string_literal(tok.str.str(), tok.ty);
+    s: []u8 = (ptr = tok.str.ptr, len = tok.ty.array_len.intcast());
+    var := c.new_string_literal(s, tok.ty);
     rest[] = tok.next;
     node := c.new_var_node(var, tok);
     c.gen_expr(node);
@@ -3217,7 +3239,7 @@ fn to_assign(c: *Ctx, kind: NodeKind, lhs: *Node, rhs: *Node, tok: *Token) *Node
     //};
     
     addr  := c.gen_addr(lhs);
-    delta := c.gen_cast(c.gen_expr(rhs), rhs.ty, lhs.ty);
+    delta := c.gen_cast(c.gen_expr(rhs), rhs.ty, lhs.ty, tok);
     start := if is_bitfield {
         c.gen_load_bitfield(addr, lhs.member)
     } else {
@@ -3293,6 +3315,7 @@ fn link_blocks_from_rpo(f: *Qbe.Fn) void = {
 }
 
 fn emit(c: *Ctx, op: Qbe.O, k: Qbe.Cls, to: Qbe.Ref, arg0: Qbe.Ref, arg1: Qbe.Ref) void = {
+    @if(SPAM) @println("O % =% % % %", to, k, op, arg0, arg1);
     push(c.b, make_ins(op, k, to, arg0, arg1));
 }
 
@@ -3353,7 +3376,7 @@ fn gen_expr_inner(c: *Ctx, node: *Node) Qbe.Ref = {
             source := c.gen_expr(node.lhs);
             from, to := (node.lhs.ty, node.ty);
             if(to.kind == .TY_VOID, => return(QbeUndef));
-            c.gen_cast(source, from, to)
+            c.gen_cast(source, from, to, node.tok)
         }
         fn ND_VAR() => {
             if node.var.is_function {
@@ -3525,7 +3548,7 @@ fn emit(c: *Ctx, o: Qbe.O, k: Qbe.Cls, a0: Qbe.Ref, a1: Qbe.Ref) Qbe.Ref = {
 #use(Types);
 
 // TODO: audit this. chibicc has a big table of x64 mnemonics to compare to. 
-fn gen_cast(c: *Ctx, src: Qbe.Ref, from: *CType, to: *CType) Qbe.Ref = {
+fn gen_cast(c: *Ctx, src: Qbe.Ref, from: *CType, to: *CType, tok: *Token) Qbe.Ref = {
     // array types know thier size for sizeof but when we look at size below we want to have decayed to a pointer. 
     from := @if(from.kind == .TY_ARRAY, ty_ulong, from);
     to   := @if(to.kind == .TY_ARRAY, ty_ulong, to);
@@ -3534,6 +3557,9 @@ fn gen_cast(c: *Ctx, src: Qbe.Ref, from: *CType, to: *CType) Qbe.Ref = {
     p_from, p_to := (from.get_type_id(), to.get_type_id());
     ::enum(@type p_from);
     @if(SPAM) @println("cast % % % -> %", src, from.kind, p_from, p_to);
+    if !(c.speculate || src != QbeNull) {
+        @error_tok(c, tok, "ICE: tried to cast Null ref");
+    };
     if(p_from == p_to, => return(src));
     if p_to == .B {  
         // TODO: do i need to zero extend byte/short? 
@@ -3549,7 +3575,7 @@ fn gen_cast(c: *Ctx, src: Qbe.Ref, from: *CType, to: *CType) Qbe.Ref = {
             fn F64() => .truncd;
             @default => {
                 //  bool/byte/short to float/double cast
-                src = c.gen_cast(src, from, ty_long);
+                src = c.gen_cast(src, from, ty_long, tok);
                 .sltof
             };
         }
