@@ -1,3 +1,5 @@
+// Adapted from chibicc. MIT License. Copyright (c) 2019 Rui Ueyama
+
 /*********************
 *   Parser Helpers   *
 **********************/
@@ -70,6 +72,12 @@ fn error_at(ee: FatExpr) FatExpr #macro = {
 // foo.c:10: x = y + 1;
 //               ^ <error message here>
 fn fmt_error_prefix(tok: *Token, msg: *List(u8)) void = {
+    // if it's somehow not in the file don't try to print something. 
+    // this will happen for error_at if you pass in a pointer that's not in c.current_file. 
+    if ptr_diff(tok.file.contents.ptr, tok.loc.ptr) < 0 {
+        return();
+    };
+    
     // Find a line containing `loc`.
     line := tok.loc;
     while => ptr_diff(tok.file.contents.ptr, line.ptr) > 0 && line.ptr.offset(-1)[] != "\n".ascii() {  // TODO: make sure this is safe
@@ -427,11 +435,13 @@ fn convert_pp_number(c: *Ctx, tok: *Token) void = {
 
 fn convert_pp_tokens(c: *Ctx, tok: *Token) void = {
     while => tok.kind != .TK_EOF {
-        if TokenKind.from_name(tok.str()) { kw | 
-            tok.kind = kw;
-        };
         if tok.kind == .TK_PP_NUM {
             c.convert_pp_number(tok);
+        };
+        if @is(tok.kind, .TK_IDENT, .TK_KEYWORD, .TK_PUNCT) {
+            if TokenKind.from_name(tok.str()) { kw | 
+                tok.kind = kw;  // TODO: filter for the ones that aren't literal. ie. what if someone has a variable called `TK_EOF`
+            };
         };
         tok = tok.next;
     };
@@ -455,11 +465,11 @@ fn add_line_numbers(p: *u8, tok: *Token) void = {  // :SLOW
     };
 }
 
-fn tokenize_string_literal(tok: *Token, basety: *CType) *Token = {
+fn tokenize_string_literal(c: *Ctx, tok: *Token, basety: *CType) *Token = {
     t := if basety.size == 2 {
-        read_utf16_string_literal(tok.loc, tok.loc)
+        c.read_utf16_string_literal(tok.loc.ptr, tok.loc.ptr)
     } else {
-        read_utf32_string_literal(tok.loc, tok.loc, basety)
+        c.read_utf32_string_literal(tok.loc.ptr, tok.loc.ptr, basety)
     };
     t.next = tok.next;
     t
@@ -673,8 +683,9 @@ fn convert_universal_chars(p: *u8) void ={
     q[] = 0;
 }
 
+// TODO: just do this while tokenizing instead. 
 // Removes backslashes followed by a newline.
-fn remove_backslash_newline(p: *u8) void = {
+fn remove_backslash_newline(p: *u8) i64 = {
     i, j := (0, 0);
     
     // We want to keep the number of newline characters so that
@@ -713,37 +724,43 @@ fn remove_backslash_newline(p: *u8) void = {
     range(j, j + 10) { j |
         p.offset(j)[] = 0;
     };
+    
+    j + 10
 }
 
-fn new_file(name: CStr, file_no: i32, contents: CStr) *File = {
-    file := temp().box(File); // TODO: do these outlive? 
+fn new_file(c: *Ctx, name: Str, contents: Str) *File = {
+    file := c.arena.box(File);
     file.name = name;
     file.display_name = name;
-    file.file_no = file_no;
     file.contents = contents;
     file
 }
 
 fn tokenize_file(c: *Ctx, path: Str) *CC.Token = {
-    a := c.arena; // TODO: can probably be temp() since we copy string literals out
-    src := read_to_string_or_crash(a, path);
+    src := u8.list(c.arena);   // TODO: can probably be temp() since we copy string literals out
+    read_and_push(src&, path) || {
+        @error_at(c, path.ptr, "Failed to open file: %", path)
+    };
+    c.tokenize_string(path, src&)
+}
+
+// pushes some extra
+fn tokenize_string(c: *Ctx, path: Str, src: *List(u8)) *CC.Token = {
     // :BoundsPadding
     // we want it to be a c string, and if we add some extra zeros, the lexer doesn't 
     // have to worry about bounds checks when it looks a few characters ahead to match 
     // a specific one. 0 won't match anything. 
-    src&.push_all("\0\0\0\0\0\0\0\0\0\0");
-    path_c := maybe_borrow_cstr(path, a);
-    
-    p := src&.assert_c_str();
+    src.push_all("\0\0\0\0\0\0\0\0\0\0");
     
     // TODO: chibicc does some extra stuff here: 
     //       but we can't be doing like 17 passes over the file man, common. 
     //canonicalize_newline(p);
-    remove_backslash_newline(p.ptr);
+    src.len = remove_backslash_newline(src.as_ptr());
+    src.push_all("\0\0\0\0\0\0\0\0\0\0");
+    
     //convert_universal_chars(p);
     
-    // file_no only used for assembler directive so i dont care
-    file := new_file(path_c, 0, p); 
+    file := c.new_file(path, src.items()); 
     c.tokenize(file)
 }
 

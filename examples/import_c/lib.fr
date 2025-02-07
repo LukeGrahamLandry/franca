@@ -8,6 +8,7 @@ ENABLE_TRACY :: false;
 AstExternal :: import("@/compiler/ast_external.fr");
 Tokens      :: import("@/examples/import_c/tokenize.fr");
 Types       :: import("@/examples/import_c/type.fr");
+Preprocess  :: import("@/examples/import_c/preprocess.fr");
 
 :: {
     ctx := current_compiler_context();
@@ -105,9 +106,14 @@ fn compile_one_file(vtable: *ImportVTable, path: Str) Result(void, Str) #use(Tok
     c.scope.vars = init(c.arena);
     c.scope.tags = init(c.arena);
     c.error_buf = list(temp());
+    c.cond_incl = .None;
+    c.macros = init(c.arena);
+    c.pragma_once = init(c.arena);
+    c.include_guards = init(c.arena);
+    c.filename_cache = init(c.arena);
+    c.include_paths = list(c.arena);
     c.m = m&;
     
-    init_macros();
     prog := @try(c&.compile_file(path)) return;
     emit_the_code(c&, ctx, prog);
     join_codegen_thread(ctx);
@@ -132,14 +138,10 @@ fn compile_file(c: *Compile.Ctx, path: Str) Result(*CC.Obj, Str) = {
     });
     
     impl :: fn(c: *Compile.Ctx, path: Str) *CC.Obj = {
+        Preprocess'init_macros(c);  // TODO: only do this once but it has to be in the try{}
+    
         tok := c.tokenize_file(path);
-        //tok := CC.Token.zeroed(); tok := tok&;
-        //tok  = append_tokens(tok, tok2);
-        for_linked tok { t | 
-            //@print("% ", t.str());
-        };
-        tok  = preprocess(tok);
-        c.convert_pp_tokens(tok);
+        tok  = c.Preprocess'preprocess(tok);
         c.parse(tok)
     };
 }

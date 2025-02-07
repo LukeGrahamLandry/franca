@@ -213,6 +213,7 @@ fn compile_for_arg(self: *EmitIr, arg: *FatExpr) CRes([]Qbe.Ins) = {
     };
     
     enumerate parts { i, val |
+        continue :: local_return;
         if val.expr&.is(.CVariadicMarker) {
             out&.push(make_ins(.argv, .Kw, QbeNull, QbeNull, QbeNull));
         } else {
@@ -222,7 +223,12 @@ fn compile_for_arg(self: *EmitIr, arg: *FatExpr) CRes([]Qbe.Ins) = {
             ins := if k != .Ke {  // scalar
                 r := @try(self.compile_expr(val, .Scalar)) return;
                 make_ins(.arg, k, QbeNull, r, QbeNull)
-            } else {  // aggregate
+            } else { 
+                if self.program.get_info(ty)[].stride_bytes == 0 {
+                    _ := @try(self.compile_expr(val, .Discard)) return;
+                    continue();
+                };
+                // aggregate
                 // TODO: you really want to do `fn Deref(ref) => @try(self.compile_expr(ref, .Scalar)) return;`
                 //       to skip an extra blit that the abi stuff will do for you. 
                 //       but we don't know if a later argument expression will modify that memory. 
@@ -1528,10 +1534,11 @@ fn get_aggregate(self: CompCtx, m: *CodegenShared, ty: Type) Qbe.Ref = {
                 if it.is_union {
                     each it.fields { f | 
                         field_size := self.get_info(f.ty)[].stride_bytes;
-                        @debug_assert(field_size != 0, "TODO: allow void union?");
-                        @debug_assert(f.byte_offset == 0, "union field must have offset 0");
-                        result.fields[n] = self.as_field(m, f.ty);      n += 1;
-                        result.fields[n] = (type = .FEnd, len = 0);  n += 1;
+                        if field_size != 0 {
+                            @debug_assert(f.byte_offset == 0, "union field must have offset 0");
+                            result.fields[n] = self.as_field(m, f.ty);   n += 1;
+                            result.fields[n] = (type = .FEnd, len = 0);  n += 1;
+                        }; // else :NoRuntimeRepr
                     };
                 } else {
                     off := 0;
@@ -1574,7 +1581,7 @@ fn get_aggregate(self: CompCtx, m: *CodegenShared, ty: Type) Qbe.Ref = {
                 result.fields = m.m.new_long_life(it.cases.len * 3);
                 result.nunion = it.cases.len.trunc();
                 each it.cases { case | 
-                    if case._1 != void { // :get_or_create_type 
+                    if self.get_info(case._1)[].stride_bytes != 0 { 
                         result.fields[n] = (type = .Fl, len = 8);      n += 1;
                         result.fields[n] = self.as_field(m, case._1);  n += 1;
                         result.fields[n] = (type = .FEnd, len = 0);    n += 1;
@@ -1584,7 +1591,12 @@ fn get_aggregate(self: CompCtx, m: *CodegenShared, ty: Type) Qbe.Ref = {
                     };
                 };
                 result.is_union = result.nunion > 1;
-                @debug_assert(result.nunion != 0, "ICE: get_aggregate of scalar @tagged");
+                if result.nunion == 0 {
+                    // all cases are zero sized. this is really just an enum. 
+                    @debug_assert(false, "ICE: get_aggregate of scalar @tagged");
+                    result.fields[n] = (type = .Fl, len = 8);      n += 1;
+                    result.fields[n] = (type = .FEnd, len = 0);    n += 1;
+                };
                 // TODO: name
                 m.m.new_type(result)
             }

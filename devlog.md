@@ -1,5 +1,9 @@
 - TODO: deal with `CodegenEntry:Bounce` on wasm
 
+## (Feb 8)
+
+- fixed compile_for_arg so hashmap(_, void) works
+
 ## (Feb 5)
 
 - no, needs to be Token.ty.size, because of strings with wide characters.

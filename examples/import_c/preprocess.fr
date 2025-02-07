@@ -1,0 +1,1236 @@
+// Adapted from chibicc. MIT License. Copyright (c) 2019 Rui Ueyama
+
+// This file implements the C preprocessor.
+//
+// The preprocessor takes a list of tokens as an input and returns a
+// new list of tokens as an output.
+//
+// The preprocessing language is designed in such a way that that's
+// guaranteed to stop even if there is a recursive macro.
+// Informally speaking, a macro is applied only once for each token.
+// That is, if a macro token T appears in a result of direct or
+// indirect macro expansion of T, T won't be expanded any further.
+// For example, if T is defined as U, and U is defined as T, then
+// token T is expanded to U and then to T and the macro expansion
+// stops at that point.
+//
+// To achieve the above behavior, we attach for each token a set of
+// macro names from which the token is expanded. The set is called
+// "hideset". Hideset is initially empty, and every time we expand a
+// macro, the macro name is added to the resulting tokens' hidesets.
+//
+// The above macro expansion algorithm is explained in this document
+// written by Dave Prossor, which is used as a basis for the
+// standard's wording:
+// https://github.com/rui314/chibicc/wiki/cpp.algo.pdf
+
+// TODO: i think the equals() here won't work because TK_PUNCT, etc hasn't been converted
+//       but also it should just convert early, you can still concat them, that's fine. 
+
+// TODO: un-linked-list-ify these. 
+// TODO: there's gotta be a way to do this that doesn't look so slow 
+//       are we really sure hidesets are always very small? i guess that would make sense. 
+
+#use(CC);
+
+MacroArg :: @struct {
+    name: Str; 
+    is_va_args: bool;
+    tok: *Token;
+};
+
+MacroHandler :: @FnPtr(c: *Ctx, tmpl: *Token) *Token;
+
+Macro :: @struct {
+    name: Str;
+    is_objlike: bool; // Object-like or function-like
+    params: []Str;    // names in #define foo(param1, param2)
+    // TODO: i assume most macros aren't variadic. 
+    //       so this should be a flag and we just treat the last entry of params differently? 
+    va_args_name: ?Str;  
+    body: *Token;
+    handler: ?MacroHandler;
+};
+
+// `#if` can be nested, so we use a stack to manage nested `#if`s.
+CondIncl :: @rec @struct {
+    next: ?*CondIncl;
+    ctx: IfKind;
+    tok: *Token;
+    included: bool;
+};
+
+IfKind :: @enum(Then, Elif, Else);
+
+Hideset :: @struct {
+    names: []Str;
+};
+
+fn is_hash(tok: *Token) bool =
+    tok.at_bol && equal(tok, "#");
+
+// https://github.com/rui314/chibicc/issues/112
+
+// Some preprocessor directives such as #include allow extraneous
+// tokens before newline. This function skips such tokens.
+fn skip_line(tok: *Token) *Token = {
+    if(tok.at_bol, => return(tok));
+    // warn_tok(tok, "extra token");  // TODO
+    while => !tok.at_bol {
+        tok = tok.next;
+    };
+    tok
+}
+
+fn copy_token(c: *Ctx, tok: *Token) *Token = {
+    t := c.arena.box(Token);
+    t[] = tok[];
+    t.next = zeroed(@type t.next);
+    t
+}
+
+fn new_eof(c: *Ctx, tok: *Token) *Token = {
+    t := c.copy_token(tok);
+    t.kind = .TK_EOF;
+    t.len = 0;
+    t
+}
+
+fn new_hideset(name: Str) *Hideset = {
+    hs := temp().box(Hideset);
+    hs.names = temp().alloc(Str, 1);
+    hs.names[0] = name;
+    hs
+}
+
+fn hideset_union(c: *Ctx, hs1: *Hideset, hs2: *Hideset) *Hideset = {
+    if(hs1.is_null(), => return(hs2));
+    if(hs2.is_null(), => return(hs1));
+    names := list(Str, hs1.names.len + hs2.names.len, temp());
+    for hs1.names { n |
+        names&.add_unique(n);
+    };
+    for hs2.names { n |
+        names&.add_unique(n);
+    };
+    hs := temp().box(Hideset);
+    hs.names = names.items();
+    hs
+}
+
+fn hideset_contains(hs: *Hideset, s: Str) bool = {
+    if(hs.is_null(), => return(false));
+    hs.names.contains(s)
+}
+
+fn hideset_intersection(hs1: *Hideset, hs2: *Hideset) *Hideset = {
+    ::ptr_utils(Hideset);
+    if(hs1.is_null(), => return(hs2));
+    if(hs2.is_null(), => return(hs1));
+    names := list(Str, min(hs1.names.len, hs2.names.len), temp());
+    for hs1.names { n |
+        if hs2.names.contains(n) {
+            names&.push(n);
+        };
+    };
+    hs := temp().box(Hideset);
+    hs.names = names.items();
+    hs
+}
+
+fn add_hideset(c: *Ctx, tok: *Token, hs: *Hideset) *Token = {
+    head := Token.zeroed();
+    cur  := head&;
+    
+    for_linked tok { tok |
+        c.append_one(cur&, tok, true);
+        cur.hideset = c.hideset_union(tok.hideset, hs);
+    };
+    head.next
+}
+
+// append tok2 to the end of (a copy of) tok1.
+fn append(c: *Ctx, tok1: *Token, tok2: *Token) *Token = {
+    if(tok1.kind == .TK_EOF, => return(tok2));
+    head := Token.zeroed();
+    cur  := head&;
+    c.append_until_eof(cur&, tok1, true);
+    cur.next = tok2;
+    head.next
+}
+
+fn skip_cond_incl2(tok: *Token) *Token = {
+    while => tok.kind != .TK_EOF {
+        is_new_if := is_hash(tok) && is(tok.next, @const_slice("if", "ifdef", "ifndef"));
+        tok := if is_new_if {
+            skip_cond_incl2(tok.next.next)
+        } else {
+            if(is_hash(tok) && equal(tok.next, "endif"), => return(tok.next.next));
+            tok.next
+        };
+    };
+    tok
+}
+
+fn is(tok: *Token, $names: []Str) bool = {
+    inline_for names { $name |
+        if(equal(tok, name[]), => return(true));
+    };
+    false
+}
+
+// Skip until next `#else`, `#elif` or `#endif`.
+// Nested `#if` and `#endif` are skipped.
+fn skip_cond_incl(tok: *Token) *Token = {
+    while => tok.kind != .TK_EOF {
+        if is_hash(tok) && is(tok.next, @const_slice("if", "ifdef", "ifndef")) {
+            return(tok)
+        };
+        tok = if is_hash(tok) && is(tok.next, @const_slice("if", "ifdef", "ifndef")) {
+            skip_cond_incl2(tok.next.next)
+        } else {
+            tok.next
+        };
+    };
+    tok
+}
+
+fn new_str_token(c: *Ctx, str: Str, tmpl: *Token) *Token = {
+    tok  := c.copy_token(tmpl);
+    tok.kind = .TK_STR;
+    buf := c.arena.alloc(u8, 1 + str.len + 1 + 1); 
+    buf[0] = "\"".ascii();
+    buf.slice(1, str.len).copy_from(str);
+    buf[str.len + 1] = 0;
+    buf[str.len + 2] = "\"".ascii();
+    tok.ty = c.array_of(Types.ty_char, buf.len);
+    tok.str_buf = buf.ptr;
+    // TODO: buf this doesn't make sense, it's not in the file. 
+    //       but we need to set it because #include "" looks here instead of at the str field because it wants to avoid escapes
+    //       but we know there aren't any escapes anyway. 
+    //       but surely the best strategy can't be to add backslashes before each thing and retokenize and make a fake new file. 
+    //       but you do need the quotes for pasting. 
+    tok.loc.ptr = buf.ptr;
+    tok.len = buf.len.intcast() - 1;
+    tok
+    //char *buf = quote_string(str);
+    //return tokenize(new_file(tmpl.file.name, buf));
+}
+
+// Copy all tokens until the next newline, terminate them with
+// an EOF token and then returns them. This function is used to
+// create a new list of tokens for `#if` arguments.
+fn copy_line(c: *Ctx, rest: **Token, tok: *Token) *Token = {
+    head := Token.zeroed();
+    cur  := head&;
+    while => !tok.at_bol {
+        c.append_one(cur&, tok, true);
+        tok = tok.next;
+    };
+    cur.next = c.new_eof(tok);
+    rest[] = tok;
+    head.next
+}
+
+fn new_num_token(c: *Ctx, val: i64, tmpl: *Token) *Token = {
+    //char *buf = format("%d\n", val);
+    //return tokenize(new_file(tmpl.file.name, buf));
+    tok  := c.copy_token(tmpl);
+    tok.kind = .TK_PP_NUM;
+    buf := u8.list(c.arena);
+    @fmt(buf&, "%", val);
+    tok.val = val;
+    // TODO: similar question as new_str_token
+    tok.loc.ptr = buf&.as_ptr();
+    tok.len = buf.len.intcast() - 1;
+    tok
+}
+
+fn read_const_expr(c: *Ctx, rest: **Token, tok: *Token) *Token = {
+    tok = c.copy_line(rest, tok);
+    head := Token.zeroed();
+    cur := head&;
+
+    while => tok.kind != .TK_EOF {
+        // "defined(foo)" or "defined foo" becomes "1" if macro "foo"
+        // is defined. Otherwise "0".
+        if equal(tok, "defined") {
+            start := tok;
+            has_paren := consume(tok&, tok.next, "(");
+
+            if(tok.kind != .TK_IDENT, => @error_tok(c, start, "macro name must be an identifier"));
+            m := c.find_macro(tok);
+            tok = tok.next;
+            if has_paren {
+                tok = c.skip(tok, ")");
+            };
+            new := c.new_num_token(m.is_some().int(), start);
+            c.append_one(cur&, new, false);
+        } else {
+            c.append_one(cur&, tok, false);
+            tok = tok.next;
+        };
+    };
+
+    cur.next = tok;
+    head.next
+}
+
+// Read and evaluate a constant expression.
+fn eval_const_expr(c: *Ctx, rest: **Token, tok: *Token) bool = {
+    start := tok;
+    expr := c.read_const_expr(rest, tok.next);
+    expr = c.preprocess2(expr);
+
+    if(expr.kind == .TK_EOF, => @error_tok(c, start, "no expression"));
+
+    // [https://www.sigbus.info/n1570#6.10.1p4] The standard requires
+    // we replace remaining non-macro identifiers with "0" before
+    // evaluating a constant expression. For example, `#if foo` is
+    // equivalent to `#if 0` if foo is not defined.
+    t := expr;
+    for_linked t { t |
+        if t.kind == .TK_IDENT {
+            next := t.next;
+            t[] = c.new_num_token(0, t)[];
+            t.next = next;
+        }
+    };
+
+    // Convert pp-numbers to regular numbers
+    c.convert_pp_tokens(expr);
+
+    rest2 := zeroed(*Token);
+    val   := c.const_expr(rest2&, expr);
+    if(rest2.kind != .TK_EOF, => @error_tok(c, rest2, "extra token"));
+    val != 0
+}
+
+fn push_cond_incl(c: *Ctx, tok: *Token, included: bool) *CondIncl = {
+    ci := temp().box(CondIncl);
+    ci.next = c.cond_incl;
+    ci.ctx = .Then;
+    ci.tok = tok;
+    ci.included = included;
+    c.cond_incl = (Some = ci);
+    ci
+}
+
+fn find_macro(c: *Ctx, tok: *Token) ?*Macro = {
+    if(tok.kind != .TK_IDENT, => return(.None));
+    c.macros&.get(tok.str())
+}
+
+fn add_macro(c: *Ctx, name: Str, is_objlike: bool, body: *Token, params: []Str, va_args_name: ?Str) *Macro ={
+    m := c.arena.box(Macro);
+    m[] = (
+        name = name,
+        is_objlike = is_objlike,
+        body = body,
+        params = params,
+        va_args_name = va_args_name,
+        handler = .None,
+    );
+    c.macros&.insert(name, m);
+    m
+}
+
+fn read_macro_params(c: *Ctx, rest: **Token, tok: *Token) Ty([]Str, ?Str) #once = {  // (params, va_args_name)
+    rest[]  = tok;
+    params := Str.list(c.arena);
+    comma_sep(c, tok&, ")") {
+        if equal(tok, "...") {
+            rest[] = c.skip(tok.next, ")");
+            return(params.items(), (Some = "__VA_ARGS__"));
+        };
+
+        if(tok.kind != .TK_IDENT, => @error_tok(c, tok, "expected an identifier"));
+
+        name  := tok.str().shallow_copy(c.arena);
+        
+        if equal(tok.next, "...") {
+            rest[] = c.skip(tok.next.next, ")");
+            return(params.items(), (Some = name));
+        };
+        params&.push(name);
+    };
+    rest[] = tok;
+
+    (params.items(), .None)
+}
+
+fn read_macro_definition(c: *Ctx, rest: **Token, tok: *Token) void #once = {
+    if(tok.kind != .TK_IDENT, => @error_tok(c, tok, "macro name must be an identifier"));
+    name := tok.str().shallow_copy(c.arena);
+    tok = tok.next;
+
+    if !tok.has_space && equal(tok, "(") {
+        // Function-like macro
+        params, va_args_name := c.read_macro_params(tok&, tok.next);
+
+        m := c.add_macro(name, false, c.copy_line(rest, tok), params, va_args_name);
+        m.params = params;
+        m.va_args_name = va_args_name;
+    } else {
+        // Object-like macro
+        c.add_macro(name, true, c.copy_line(rest, tok), empty(), .None);
+    };
+}
+
+fn read_macro_arg_one(c: *Ctx, rest: **Token, tok: *Token, read_rest: bool, name: Str) MacroArg = {
+    head  := zeroed(Token);
+    cur   := head&;
+    level := 0; // how many opening parens have we seen that need to be closed before we can stop. 
+    
+    // eat tokens until a comma or paren. if it's VAARGS, eat commas as well. eat well nested paren pairs. 
+    while => level != 0 || (!equal(tok, ")") && (read_rest || !equal(tok, ","))) {
+        if(tok.kind == .TK_EOF, => @error_tok(c, tok, "premature end of input"));
+
+        level += int(equal(tok, "("));
+        level -= int(equal(tok, ")"));
+        
+        cur.next = c.copy_token(tok);
+        cur = cur.next;
+        tok = tok.next;
+    };
+
+    cur.next = c.new_eof(tok);
+    rest[]   = tok;
+    (name = name, tok = head.next, is_va_args = read_rest)
+}
+
+fn read_macro_args(c: *Ctx, rest: **Token, tok: *Token, params: []Str, va_args_name: ?Str) []MacroArg = {
+    start := tok;
+    tok = tok.next.next;
+
+    args  := MacroArg.list(params.len + int(va_args_name.is_some()), c.arena);
+    first := true;
+    for params { name | 
+        if !first {
+            tok = c.skip(tok, ",");
+        };
+        first = true;
+        // TODO: catch `too few arguments`
+        args&.push(c.read_macro_arg_one(tok&, tok, false, name));
+    };
+
+    if va_args_name { va_args_name |
+        ::if(MacroArg);
+        args&.push(if equal(tok, ")") {
+            (name = va_args_name, is_va_args = true, tok = c.new_eof(tok))  // :VaArgsSentinal
+        } else {
+            //if (pp != params) :Audit
+            if params.len > 0 {
+                tok = c.skip(tok, ",");
+            };
+            c.read_macro_arg_one(tok&, tok, true, va_args_name)
+        });
+    } else {
+        // TODO: they had: `else if (pp) error_tok(start, "too many arguments");`
+        //       but i don't understand how that could happen since the loop above 
+        //       was `for (; pp; pp = pp->next) {`, so you can't get out until pp is null? 
+        //       im confused
+        if !equal(tok, ")") {
+            @error_tok(c, start, "too many arguments")
+        };
+    };
+    
+    c.skip(tok, ")");
+    rest[] = tok;
+    args.items()
+}
+
+fn find_arg(args: []MacroArg, tok: *Token) ?*MacroArg = {
+    each args { a |
+        if(a.name == tok.str(), => return(Some = a));
+    };
+    .None
+}
+
+// TODO: this is so similar to the strings one. sad
+// Concatenates all tokens in `tok` and returns a new string.
+fn join_tokens(tok: *Token, end: *Token) Str = {
+    // Compute the length of the resulting token.
+    len := 1;  // nt
+    t := tok;
+    while => !t.identical(end) && t.kind != .TK_EOF {
+        len += int(!t.identical(tok) && t.has_space);
+        len += t.len.intcast();
+        t = t.next;
+    };
+
+    buf := temp().alloc(u8, len);
+
+    // Copy token texts.
+    pos := 0;
+    while => !t.identical(end) && t.kind != .TK_EOF {
+        if !t.identical(tok) && t.has_space {
+            buf[pos] = " ".ascii();
+            pos += 1;
+        };
+        buf.slice(pos, t.len.intcast()).copy_from(t.str());
+        pos += t.len.intcast();
+    };
+    buf[pos] = 0;
+    buf
+}
+
+// Concatenates all tokens in `arg` and returns a new string token.
+// This function is used for the stringizing operator (#).
+fn stringize(c: *Ctx, hash: *Token, arg: *Token) *Token = {
+    // Create a new string token. We need to set some value to its
+    // source location for error reporting function, so we use a macro
+    // name token as a template.
+    s := join_tokens(arg, zeroed(*Token));
+    c.new_str_token(s, hash)
+}
+
+// Concatenate two tokens to create a new token.
+fn paste(c: *Ctx, lhs: *Token, rhs: *Token) *Token = {
+    // Paste the two tokens.
+    buf := u8.list(intcast(lhs.len + rhs.len), c.arena);
+    @fmt(buf&, "%%", lhs.str(), rhs.str());
+
+    // Tokenize the resulting string.
+    tok := c.tokenize(c.new_file(lhs.file.name, buf.items()));
+    if tok.next.kind != .TK_EOF {
+        @error_tok(c, lhs, "pasting forms '%', an invalid token", buf.items());
+    };
+    tok
+}
+
+fn has_varargs(args: []MacroArg) bool = {
+    each args { a |
+        if(a.name == "__VA_ARGS__", => return(a.tok.kind != .TK_EOF));  // :VaArgsSentinal
+    };
+    false
+}
+
+// Replace func-like macro parameters with given arguments.
+fn subst(c: *Ctx, tok: *Token, args: []MacroArg) *Token #once = {
+    head := Token.zeroed();
+    cur := head&;
+
+    while => tok.kind != .TK_EOF {
+        continue :: local_return;
+        
+        // "#" followed by a parameter is replaced with stringized actuals.
+        if equal(tok, "#") {
+            arg := find_arg(args, tok.next) || @error_tok(c, tok.next, "'#' is not followed by a macro parameter");
+            c.append_one(cur&, c.stringize(tok, arg.tok), false);
+            tok = tok.next.next;
+            continue();
+        };
+
+        // [GNU] If __VA_ARG__ is empty, `,##__VA_ARGS__` is expanded
+        // to the empty token list. Otherwise, its expaned to `,` and
+        // __VA_ARGS__.
+        if equal(tok, ",") && equal(tok.next, "##") {
+            if find_arg(args, tok.next.next) { arg |
+                if arg.is_va_args {
+                    tok = if arg.tok.kind == .TK_EOF {
+                        tok.next.next.next
+                    } else {
+                        c.append_one(cur&, tok, true);
+                        tok.next.next
+                    };
+                    continue();
+                };
+            };
+        };
+
+        // ##arg
+        if equal(tok, "##") {
+            if(cur.identical(head&),     => @error_tok(c, tok, "'##' cannot appear at start of macro expansion"));
+            if(tok.next.kind == .TK_EOF, => @error_tok(c, tok, "'##' cannot appear at end of macro expansion"));
+
+            if find_arg(args, tok.next) { arg |
+                if arg.tok.kind != .TK_EOF {
+                    cur[] = c.paste(cur, arg.tok)[];
+                    c.append_until_eof(cur&, arg.tok.next, true);
+                };
+                tok = tok.next.next;
+                continue();
+            };
+
+            cur[] = c.paste(cur, tok.next)[];
+            tok = tok.next.next;
+            continue();
+        };
+
+        // arg##arg2  
+        arg := find_arg(args, tok);
+        if arg { arg |
+            if equal(tok.next, "##") {
+                rhs := tok.next.next;
+                if arg.tok.kind == .TK_EOF {
+                    if find_arg(args, rhs) { arg2 |
+                        c.append_until_eof(cur&, arg2.tok, true);
+                    } else {
+                        c.append_one(cur&, rhs, true);
+                    };
+                    tok = rhs.next;
+                    continue();
+                };
+    
+                c.append_until_eof(cur&, arg.tok, true);
+                tok = tok.next;
+                continue();
+            };
+        };
+
+        // If __VA_ARG__ is empty, __VA_OPT__(x) is expanded to the
+        // empty token list. Otherwise, __VA_OPT__(x) is expanded to x.
+        if equal(tok, "__VA_OPT__") && equal(tok.next, "(") {
+            arg := c.read_macro_arg_one(tok&, tok.next.next, true, "");
+            if has_varargs(args) {
+                c.append_until_eof(cur&, arg.tok, false);
+            };
+            tok = c.skip(tok, ")");
+            continue();
+        };
+
+        // Handle a macro token. Macro arguments are completely macro-expanded
+        // before they are substituted into a macro body.
+        if arg { arg |
+            t := c.preprocess2(arg.tok);
+            t.at_bol = tok.at_bol;
+            t.has_space = tok.has_space;
+            c.append_until_eof(cur&, t, true);
+            tok = tok.next;
+            continue();
+        };
+
+        // Handle a non-macro token.
+        c.append_one(cur&, tok, true);
+        continue();
+    };
+
+    cur.next = tok;
+    return head.next;
+}
+
+append_until_eof :: fn(c: *Ctx, cur: **Token, tok: *Token, $copy: bool) void = {
+    until_eof tok { tok | 
+        c.append_one(cur, tok, copy);
+    };
+};
+
+append_one :: fn(c: *Ctx, cur: **Token, tok: *Token, $copy: bool) void = {
+    cur.next = @if(copy, c.copy_token(tok), tok);
+    cur[] = cur.next;
+};
+
+// If tok is a macro, expand it and return true.
+// Otherwise, do nothing and return false.
+fn expand_macro(c: *Ctx, rest: **Token, tok: *Token) bool = {
+    m := c.find_macro(tok) || return(false);
+    
+    // If a funclike macro token is not followed by an argument list,
+    // treat it as a normal identifier.
+    if(!m.is_objlike && !equal(tok.next, "("),   => return(false));
+    
+    if(hideset_contains(tok.hideset, tok.str()), => return(false));
+
+    // Built-in dynamic macro application such as __LINE__
+    if m.handler { handler | 
+        rest[] = handler(c, tok);
+        // note: this means a dynamic macro is never allowed to return multiple tokens. 
+        rest.next = tok.next;
+        return(true);
+    };
+
+    // Object-like macro application
+    if m.is_objlike {
+        hs := c.hideset_union(tok.hideset, new_hideset(m.name));
+        body := c.add_hideset(m.body, hs);
+        until_eof body { t |
+            t.origin = tok;
+        };
+        rest[] = c.append(body, tok.next);
+        rest.at_bol = tok.at_bol;
+        rest.has_space = tok.has_space;
+        return(true);
+    };
+
+    // Function-like macro application
+    macro_token := tok;
+    args   := c.read_macro_args(tok&, tok, m.params, m.va_args_name);
+    rparen := tok;
+
+    // Tokens that consist a func-like macro invocation may have different
+    // hidesets, and if that's the case, it's not clear what the hideset
+    // for the new tokens should be. We take the interesection of the
+    // macro token and the closing parenthesis and use it as a new hideset
+    // as explained in the Dave Prossor's algorithm.
+    hs := hideset_intersection(macro_token.hideset, rparen.hideset);
+    hs  = c.hideset_union(hs, new_hideset(m.name));
+
+    body := c.subst(m.body, args);
+    body  = c.add_hideset(body, hs);
+    until_eof body { t |
+        t.origin = macro_token;
+    };
+    rest[] = c.append(body, tok.next);
+    rest.at_bol = macro_token.at_bol;
+    rest.has_space = macro_token.has_space;
+    true
+}
+
+fn until_eof(t: *Token, $body: @Fn(t: *Token) void) *Token = {
+    while => t.kind != .TK_EOF {
+        body(t);
+        t = t.next;
+    };
+    t
+}
+
+fn search_include_paths(c: *Ctx, filename: Str) ?Str = {
+    if(filename.len > 0 && filename[0] == "/".ascii(), => return(Some = filename));
+
+    // The assumption being you'll include the same thing many times and it's slow to check if a file exists. 
+    if c.filename_cache&.get(filename) { it |
+        return(Some = it)  
+    };
+
+    // Search a file from the include paths.
+    // TODO: have this be a vtable thing instead of a list of file paths. just provide this as the default implementation. 
+    enumerate c.include_paths { i, include_path |
+        path := u8.list(c.arena);
+        @fmt(path&, "%/%", include_path, filename);
+        if file_exists(path.items()) {
+            c.filename_cache&.insert(filename, path.items());
+            c.include_next_idx = i + 1;
+            return(Some = path.items());
+        };
+    };
+    
+    .None
+}
+
+fn search_include_next(c: *Ctx, filename: Str) ?Str = {
+    for c.include_paths.items().rest(c.include_next_idx) { include_path |
+        c.include_next_idx += 1;
+        path := u8.list(c.arena);
+        @fmt(path&, "%/%", include_path, filename);
+        if file_exists(path.items()) {
+            return(Some = path.items());
+        };
+    };
+    .None
+}
+
+// Read an #include argument.
+fn read_include_filename(c: *Ctx, rest: **Token, tok: *Token) Ty(Str, bool) = @if_else {  // (_, is_dquote)
+    // Pattern 1: #include "foo.h"
+    @if(tok.kind == .TK_STR) => {
+        // A double-quoted filename for #include is a special kind of
+        // token, and we don't want to interpret any escape sequences in it.
+        // For example, "\f" in "C:\foo" is not a formfeed character but
+        // just two non-control characters, backslash and f.
+        // So we don't want to use token.str.
+        rest[] = skip_line(tok.next);
+        s := tok.str().slice(1, tok.len.intcast() - 2);
+        (s, true)
+    };
+    // Pattern 2: #include <foo.h>
+    @if(equal(tok, "<")) => {
+        // Reconstruct a filename from a sequence of tokens between
+        // "<" and ">".
+        start := tok;
+
+        // Find closing ">".
+        while => !equal(tok, ">") {
+            if(tok.at_bol || tok.kind == .TK_EOF, => @error_tok(c, tok, "expected '>'"));
+            tok = tok.next;
+        };
+
+        rest[] = skip_line(tok.next);
+        s := join_tokens(start.next, tok);
+        (s, false)
+    };
+    // Pattern 3: #include FOO
+    // In this case FOO must be macro-expanded to either
+    // a single string token or a sequence of "<" ... ">".
+    @if(tok.kind == .TK_IDENT) => {
+        tok2 := c.preprocess2(c.copy_line(rest, tok));
+        c.read_include_filename(tok2&, tok2)
+    };
+    @else => @error_tok(c, tok, "expected a filename");
+};
+
+// Detect the following "include guard" pattern.
+//
+//     #ifndef FOO_H
+//     #define FOO_H
+//     ...
+//     #endif
+fn detect_include_guard(tok: *Token) ?Str = {
+    // Detect the first two lines.
+    if(!is_hash(tok) || !equal(tok.next, "ifndef"), => return(.None));
+    tok = tok.next.next;
+    if(tok.kind != .TK_IDENT, => return(.None));
+    macro := tok.str();
+    tok    = tok.next;
+    if !is_hash(tok) || !equal(tok.next, "define") || tok.next.next.str() != macro {
+        return(.None);
+    };
+
+    // Read until the end of the file.
+    while => tok.kind != .TK_EOF {
+        continue :: local_return;
+        if !is_hash(tok) {
+            tok = tok.next;
+            continue();
+        };
+
+        if equal(tok.next, "endif") && tok.next.next.kind == .TK_EOF {
+            return(Some = macro);
+        };
+
+        tok = if equal(tok, "if") || equal(tok, "ifdef") || equal(tok, "ifndef") {
+            skip_cond_incl(tok.next)
+        } else {
+            tok.next
+        };
+    };
+    .None
+}
+
+fn include_file(c: *Ctx, tok: *Token, path: Str, filename_tok: *Token) *Token = {
+    // Check for "#pragma once"
+    if(c.pragma_once&.get(path).is_some(), => return(tok));
+
+    // If we read the same file before, and if the file was guarded
+    // by the usual #ifndef ... #endif pattern, we may be able to
+    // skip the file without opening it.
+    if c.include_guards&.get(path) { guard_name |
+        if(c.macros&.get(guard_name).is_some(), => return(tok));
+    };
+
+    tok2 := c.tokenize_file(path);
+
+    if detect_include_guard(tok2) { guard_name | 
+        // detect_include_guard returns a borrow of the token but we need it to live past this file. 
+        guard_name := guard_name.shallow_copy(c.arena);  
+        c.include_guards&.insert(path, guard_name);
+    };
+
+    c.append(tok2, tok)
+}
+
+// Read #line arguments
+fn read_line_marker(c: *Ctx, rest: **Token, tok: *Token) void = {
+    start := tok;
+    tok = c.preprocess(c.copy_line(rest, tok));
+
+    if tok.kind != .TK_NUM || tok.ty.kind != .TY_INT {
+        @error_tok(c, tok, "invalid line marker");
+    };
+    start.file.line_delta = tok.val.intcast() - start.line_no;
+
+    tok = tok.next;
+    if(tok.kind == .TK_EOF, => return());
+    if(tok.kind != .TK_STR, => @error_tok(c, tok, "filename expected"));
+    start.file.display_name = tok.str();
+}
+
+// Visit all tokens in `tok` while evaluating preprocessing
+// macros and directives.
+fn preprocess2(c: *Ctx, tok: *Token) *Token = {
+    head := Token.zeroed();
+    cur := head&;
+
+    while => tok.kind != .TK_EOF  {
+        continue :: local_return;
+        // If it is a macro, expand it.
+        if(c.expand_macro(tok&, tok), => continue());
+
+        // Pass through if it is not a "#".
+        if (!is_hash(tok)) {
+            tok.line_delta = tok.file.line_delta;
+            tok.filename = tok.file.display_name;
+            cur.next = tok;
+            cur = tok;
+            tok = tok.next;
+            continue();
+        };
+
+        start := tok;
+        tok = tok.next;
+
+        if (equal(tok, "include")) {
+            filename, is_dquote := c.read_include_filename(tok&, tok.next);
+
+            if filename[0] != "/".ascii() && is_dquote {
+                // Treat it as relative to the folder of the file containing the include directive. 
+                dirname :: fn(s: Str) Str = {
+                    if(!s.contains("/"), => return("."));
+                    s.pop_path_segment()
+                };
+                path := @tfmt("%/%", dirname(start.file.name), filename);
+                if file_exists(path) {
+                    tok = c.include_file(tok, path, start.next.next);
+                    continue();
+                };
+                // fallthrough
+            };
+
+            path := c.search_include_paths(filename) || filename;
+            tok   = c.include_file(tok, path, start.next.next);
+            continue();
+        };
+
+        if equal(tok, "include_next") {
+            filename, _ := c.read_include_filename(tok&, tok.next);
+            path := c.search_include_next(filename) || filename;
+            tok = c.include_file(tok, path, start.next.next);
+            continue();
+        };
+
+        if equal(tok, "define") {
+            c.read_macro_definition(tok&, tok.next);
+            continue();
+        };
+
+        if equal(tok, "undef") {
+            tok = tok.next;
+            if(tok.kind != .TK_IDENT, => @error_tok(c, tok, "macro name must be an identifier"));
+            c.undef_macro(tok.str());
+            tok = skip_line(tok.next);
+            continue();
+        };
+
+        if (equal(tok, "if")) {
+            val := c.eval_const_expr(tok&, tok);
+            c.push_cond_incl(start, val);
+            if !val {
+                tok = skip_cond_incl(tok);
+            };
+            continue();
+        };
+
+        if (equal(tok, "ifdef")) {
+            defined := c.find_macro(tok.next).is_some();
+            c.push_cond_incl(tok, defined);
+            tok = skip_line(tok.next.next);
+            if !defined {
+                tok = skip_cond_incl(tok);
+            };
+            continue();
+        };
+
+        if equal(tok, "ifndef") {
+            defined := c.find_macro(tok.next).is_some();
+            c.push_cond_incl(tok, !defined);
+            tok = skip_line(tok.next.next);
+            if defined {
+                tok = skip_cond_incl(tok);
+            };
+            continue();
+        };
+
+        if equal(tok, "elif") {
+            cond_incl := c.move_cond_incl(start, true, .Elif);
+
+            if !cond_incl.included && c.eval_const_expr(tok&, tok) {
+                cond_incl.included = true;
+            } else {
+                tok = skip_cond_incl(tok);
+            };
+            continue();
+        };
+
+        if (equal(tok, "else")) {
+            cond_incl := c.move_cond_incl(start, true, .Else);
+            tok = skip_line(tok.next);
+
+            if cond_incl.included {
+                tok = skip_cond_incl(tok);
+            };
+            continue();
+        };
+
+        if equal(tok, "endif") {
+            cond_incl := c.cond_incl || @error_tok(c, start, "stray #endif");
+            c.cond_incl = cond_incl.next;
+            tok = skip_line(tok.next);
+            continue();
+        };
+
+        if equal(tok, "line") {
+            c.read_line_marker(tok&, tok.next);
+            continue();
+        };
+
+        if tok.kind == .TK_PP_NUM {
+            c.read_line_marker(tok&, tok);
+            continue();
+        };
+
+        if equal(tok, "pragma") && equal(tok.next, "once") {
+            c.pragma_once&.insert(tok.file.name, ());
+            tok = skip_line(tok.next.next);
+            continue();
+        };
+
+        if equal(tok, "pragma") {
+            // same as skip_line but no warning for extra tokens
+            dowhile {
+                tok = tok.next;
+                !tok.at_bol
+            };
+            continue();
+        };
+
+        if equal(tok, "error") {
+            @error_tok(c, tok, "error");
+        };
+
+        // `#`-only line is legal. It's called a null directive.
+        if(tok.at_bol, => continue());
+
+        @error_tok(c, tok, "invalid preprocessor directive");
+    };
+
+    cur.next = tok;
+    head.next
+}
+
+fn move_cond_incl(c: *Ctx, start: *Token, require_non_else: bool, new_state: IfKind) *CondIncl = {
+    ::enum(IfKind);
+    cond_incl := c.cond_incl || @error_tok(c, start, "stray #%", new_state);
+    if(require_non_else && cond_incl.ctx == .Else, => @error_tok(c, start, "stray #%", new_state));
+    cond_incl.ctx = new_state;
+    cond_incl
+}
+    
+fn define_macro(c: *Ctx, name: Str, buf: Str) void = {
+    buf := @tfmt("%\0\0\0\0\0\0\0", buf); // TODO
+    tok := c.tokenize(c.new_file("<built-in>", buf));
+    c.add_macro(name, true, tok, empty(), .None);
+}
+
+fn undef_macro(c: *Ctx, name: Str) void = {
+    c.macros&.remove(name);
+}
+
+fn add_builtin(c: *Ctx, name: Str, f: MacroHandler) *Macro = {
+    m := c.add_macro(name, true, zeroed(*Token) /*TODO*/, empty(), .None);
+    m.handler = (Some = f);
+    m
+}
+
+// this stuff gets added by init_macros()
+builtins :: @struct {
+    __STDC_VERSION__    :: "201112L";
+    __STDC__            :: "1";
+    __STDC_HOSTED__     :: "1";
+    __STDC_NO_COMPLEX__ :: "1";
+    __STDC_UTF_16__     :: "1";
+    __STDC_UTF_32__     :: "1";
+    
+    // TODO: remove this once i reimplement atomics!
+    //       chibicc does them but my backend doesn't have a way to emit a CAS instruction yet. 
+    __STDC_NO_ATOMICS__ :: "1";
+    
+    // TODO: chibicc has a bunch more. do i need them? 
+    // - __SIZEOF_*__
+    // - __*__ for alignof typeof const signed volatile
+    // - platform detection for unix linux x64 elf
+    // - __USER_LABEL_PREFIX__ __C99_MACRO_WITH_VA_ARGS
+    
+    __FILE__ :: fn(c: *Ctx, tmpl: *Token) *Token = {
+        while => !tmpl.origin.is_null() {
+            tmpl = tmpl.origin;
+        };
+        c.new_str_token(tmpl.file.display_name, tmpl)
+    };
+    
+    __LINE__ :: fn(c: *Ctx, tmpl: *Token) *Token = {
+        while => !tmpl.origin.is_null() {
+            tmpl = tmpl.origin;
+        };
+        i := tmpl.line_no + tmpl.file.line_delta;
+        c.new_num_token(i.intcast(), tmpl)
+    };
+
+    // expanded to serial values starting from 0.
+    __COUNTER__ :: fn(c: *Ctx, tmpl: *Token) *Token = {
+        i := c.counter_macro_next_id;
+        c.counter_macro_next_id += 1;
+        new_num_token(i, tmpl)
+    };
+    
+    // expanded to a string describing the last
+    // modification time of the current file. E.g.
+    // "Fri Jul 24 01:32:50 2020"
+    __TIMESTAMP__ :: fn(c: *Ctx, tmpl: *Token) *Token = {
+        struct stat st;
+        if (stat(tmpl.file.name, &st) != 0)
+            return new_str_token("??? ??? ?? ??:??:?? ????", tmpl);
+    
+        char buf[30];
+        ctime_r(&st.st_mtime, buf);
+        buf[24] = '\0';
+        new_str_token(buf, tmpl)
+    };
+    
+    __BASE_FILE__ :: fn(c: *Ctx, tmpl: *Token) *Token = {
+        new_str_token(base_file, tmpl)
+    };
+    
+    // expanded to the current date as a string literal, e.g. "May 17 2020".
+    __DATE__ :: fn(c: *Ctx, tmpl: *Token) *Token = {
+        month :: @const_slice(
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        );
+        tm := c.macro_time&;
+        s := @fmt("\"% % %\"", mon[tm.tm_mon.zext()], tm.tm_mday, tm.tm_year + 1900);
+        new_str_token(s, tmpl)
+    };
+    
+    // expanded to the current time as a string literal, e.g. "13:34:03".
+    __TIME__ :: fn(c: *Ctx, tmpl: *Token) *Token = {
+        tm := c.macro_time&;
+        s := @fmt("\"%:%:%\"", tm.tm_hour, tm.tm_min, tm.tm_sec);  // TODO: pad with zeros
+        new_str_token(s, tmpl)
+    };
+};
+Ctx :: Compile.Ctx;
+
+fn init_macros(c: *Ctx) void = {
+    s     :: scope_of(Type, builtins);
+    names :: get_constants(s);
+    inline_for names { $name |
+        is_string :: { _, type := get_constant(s, name[]).unwrap(); type == Str };
+        name_s    :: name[].str();
+        @if(is_string, {
+            value :: get_constant(Str, s, name[]).unwrap();
+            c.define_macro(name_s, value);
+        }, {
+            handler :: get_constant(MacroHandler, s, name[]).unwrap();
+            c.add_builtin(name_s, handler);
+        });
+    };
+    
+    now := time_t.zeroed();
+    time(now&);
+    tm := localtime(now&);
+    c.macro_time = tm[];
+}
+
+StringKind :: @enum(STR_NONE, STR_UTF8, STR_UTF16, STR_UTF32, STR_WIDE);
+
+fn string_kind(tok: *Token) StringKind = {
+    s := tok.str();
+    if(s.starts_with("u8"), => return(.STR_UTF8));
+    @switch(tok.loc.ptr[]) {
+        @case("\"".ascii()) => .STR_NONE;
+        @case("u".ascii())  => .STR_UTF16;
+        @case("U".ascii())  => .STR_UTF32;
+        @case("L".ascii())  => .STR_WIDE;
+        @default => unreachable();
+    }
+}
+
+// TODO: this is a lot of code for something super boring. 
+// Concatenate adjacent string literals into a single string literal
+// as per the C spec.
+fn join_adjacent_string_literals(c: *Ctx, tok: *Token) void = {
+    ::enum(StringKind);
+    // TODO: pls. cache locality. do the two passes together. 
+    //       and incrementally (but have to be careful of breaking ## if you do it too early)
+
+    // First pass: If regular string literals are adjacent to wide
+    // string literals, regular string literals are converted to a wide
+    // type before concatenation. In this pass, we do the conversion.
+    tok1 := tok;
+    while => tok1.kind != .TK_EOF {
+        continue :: local_return;
+        if tok1.kind != .TK_STR || tok1.next.kind != .TK_STR {
+            tok1 = tok1.next;
+            continue();
+        };
+
+        kind   := string_kind(tok1);
+        basety := tok1.ty.base;
+
+        t := tok1.next;
+        while => t.kind == .TK_STR {
+            k := string_kind(t);
+            if kind == .STR_NONE {
+                kind = k;
+                basety = t.ty.base;
+            } else {
+                if (k != .STR_NONE && kind != k) {
+                    @error_tok(c, t, "unsupported non-standard concatenation of string literals");
+                };
+            };
+            t = t.next;
+        };
+
+        if basety.size > 1 {
+            until_eof tok1 { t |
+                if t.ty.base.size == 1 {
+                    t[] = c.tokenize_string_literal(t, basety)[];
+                };
+            };
+        };
+
+        while => tok1.kind == .TK_STR {
+            tok1 = tok1.next;
+        };
+    };
+
+    // Second pass: concatenate adjacent string literals.
+    tok1 := tok;
+    while => tok1.kind != .TK_EOF {
+        continue :: local_return;
+        if tok1.kind != .TK_STR || tok1.next.kind != .TK_STR {
+            tok1 = tok1.next;
+            continue();
+        };
+        one_null_terminator :: 1;
+        char_size := tok1.ty.base.size.intcast();
+        tok2 := tok1;
+        len  := one_null_terminator;
+        while => tok2.kind == .TK_STR {
+            len += tok2.ty.array_len.intcast() - one_null_terminator;
+            tok2 = tok2.next;
+        };
+        // TODO: is alignment real? we allocate this as bytes but may reintepret as wide later. 
+        buf  := temp().alloc(u8, len * char_size); 
+        tok2 := tok1;
+        i := 0;
+        while => tok2.kind == .TK_STR {
+            @debug_assert_eq(tok2.ty.base.size.intcast(), char_size, "string element size mismatch");
+            len := tok2.ty.array_len.intcast() - one_null_terminator;
+            buf.subslice(i * char_size, len * char_size).copy_from(tok2.str_buf.slice(len * char_size));
+            i += len;
+            tok2 = tok2.next;
+        };
+        tok1[] = c.copy_token(tok1)[];  // TODO: why copy? 
+        tok1.ty = c.array_of(tok1.ty.base, len);
+        tok1.str_buf = buf.ptr;
+        tok1.next = tok2;
+        tok1 = tok2;
+    };
+}
+
+// Entry point function of the preprocessor.
+fn preprocess(c: *Ctx, tok: *Token) *Token = {
+    tok = c.preprocess2(tok);
+    if c.cond_incl { cond_incl |
+        @error_tok(c, cond_incl.tok, "unterminated conditional directive");
+    };
+    c.convert_pp_tokens(tok);
+    c.join_adjacent_string_literals(tok);
+
+    for_linked tok { t |
+        t.line_no += t.line_delta;
+        print(t.str());
+    };
+    tok
+}

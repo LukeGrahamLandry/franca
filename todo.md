@@ -7,6 +7,8 @@
 
 ##
 
+- for import_c, decide when to reset temp() and audit all the allocations in tok/pre
+- nicer named return values
 - fix the hack that requires `#ir({ (o, k) })`. it should allow just a tuple and still evaluate it as an expression instead of just grabbing the identifiers. 
 - check enum names are unique
 - this should work
