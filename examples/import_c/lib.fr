@@ -1,5 +1,3 @@
-// cd bindings/chibicc && clang hashmap.c parse.c tokenize.c type.c unicode.c preprocess.c strings.c codegen.c -dynamiclib ../../examples/import_c/temp.c -o ../../examples/import_c/chibicc.dylib
-
 CC :: import("@/examples/import_c/chibicc.fr");
 
 ENABLE_TRACY :: false;
@@ -9,13 +7,6 @@ AstExternal :: import("@/compiler/ast_external.fr");
 Tokens      :: import("@/examples/import_c/tokenize.fr");
 Types       :: import("@/examples/import_c/type.fr");
 Preprocess  :: import("@/examples/import_c/preprocess.fr");
-
-:: {
-    ctx := current_compiler_context();
-    cg := dlopen("examples/import_c/chibicc.dylib", DlFlag.Lazy);
-    @assert(!cg.lib.is_null(), "failed to open chibicc");
-    ctx.add_comptime_library(@symbol "chibicc", cg);
-};
 
 Compile :: import("@/examples/import_c/compile.fr");
 :: Compile'comptime_init_rules_table();
@@ -47,8 +38,8 @@ fn run_tests(vtable: *ImportVTable) void = {
             continue :: local_return;
             // TODO: this is silly
             //skip  := @const_slice("tls.c", "asm.c", "alignof.c", "complit.c");
-            // includes: "atomic.c", "macro.c", "offsetof.c", "varargs.c"
-            // TODO: "float.c", "function.c", "initializer.c", "line.c", "literal.c", "string.c", "usualconv.c", "vla.c"
+            // includes: "atomic.c", "offsetof.c", "varargs.c"
+            // TODO: "float.c", "function.c", 
 
             path := @tfmt("%/%", tests_folder, e.name);
             @if(JUST_ONE) {
@@ -114,6 +105,25 @@ fn compile_one_file(vtable: *ImportVTable, path: Str) Result(void, Str) #use(Tok
     c.include_paths = list(c.arena);
     c.m = m&;
     
+    // you need this before calling parse() in compile because the preprocessor calls into const_expr
+    {
+        c := c&;
+        // :TopLevelFunction
+        // :SLOW it's silly that top level constants need to be in a function context and we linearly scan it every time you have a numeric literal
+        // this needs to be fixed so i don't have to cry when someone generates an array of binary data. 
+        c.f = c.arena.box(Qbe.Fn);
+        c.f.default_init(c.m);
+        
+        // HACK: need to be able to generate instructions because when you parse `&some_global`, 
+        //       thats a valid constant expression but we issue a load for the bare identifier before
+        //       recursing back up and just taking the lvalue. 
+        c.f.rpo = new(0); // HACK
+        c.f.start = c.new_block();// HACK
+        c.f.start.ins = new(0); // HACK
+        c.b = c.f.start; // HACK
+        c.globals = CC.Obj.ptr_from_int(0);
+    };
+    
     prog := @try(c&.compile_file(path)) return;
     emit_the_code(c&, ctx, prog);
     join_codegen_thread(ctx);
@@ -129,7 +139,6 @@ fn compile_one_file(vtable: *ImportVTable, path: Str) Result(void, Str) #use(Tok
     .Ok
 }
 
-
 fn compile_file(c: *Compile.Ctx, path: Str) Result(*CC.Obj, Str) = {
     ::enum(WhichJump);
     return(@match(try(c.a_little_hidden_control_flow&)) {
@@ -139,7 +148,8 @@ fn compile_file(c: *Compile.Ctx, path: Str) Result(*CC.Obj, Str) = {
     
     impl :: fn(c: *Compile.Ctx, path: Str) *CC.Obj = {
         Preprocess'init_macros(c);  // TODO: only do this once but it has to be in the try{}
-    
+        c.macro_base_file = path;
+        
         tok := c.tokenize_file(path);
         tok  = c.Preprocess'preprocess(tok);
         c.parse(tok)

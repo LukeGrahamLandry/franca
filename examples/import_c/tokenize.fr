@@ -110,7 +110,7 @@ fn new_token(c: *Ctx, kind: TokenKind, start: *u8, end: *u8) *Token = {
     tok.filename = c.current_file.display_name;
     tok.at_bol = c.at_bol;
     tok.has_space = c.has_space;
-    
+    update_kind(tok);
     c.at_bol = false;
     c.has_space = false;
     tok
@@ -150,11 +150,13 @@ fn read_punct(p: *u8) i64 = {
         if(p.slice(3).starts_with(it), => return(it.len));
     };
     
-    punct := "!\"#%&'()*+,-./:;?[]^{|}~=><";  // TODO: chibicc did ispunct(), are you allowed to just have random shit in here? like what about @?
+    // TODO: chibicc did ispunct(), are you allowed to just have random shit in here? like what about @?
+    //       --- it seems like yes? it's allowed in the preprocessor? like if you stringify it's fine? 
+    punct := "!\"#%&'()*+,-./:;?[]^{|}~=><`@$"; 
     punct.contains(p[]).int()
 }
 
-fn read_escaped_char(c: *Ctx, new_pos: **u8, p: *u8) i64 = {
+fn read_escaped_char(c: *Ctx, new_pos: **u8, p: *u8) Ty(i64, bool) = {  // (ch, is unicode thingy)
     octal :: fn(ch: u8) ?i64 => 
         if("0".ascii() <= ch && ch <= "7".ascii(), => (Some = zext(ch - "0".ascii())), => .None);
     
@@ -170,7 +172,7 @@ fn read_escaped_char(c: *Ctx, new_pos: **u8, p: *u8) i64 = {
             };
         };
         new_pos[] = p;
-        return(ch);
+        return(ch, false);
     };
     
     // Read a hexadecimal number.
@@ -186,13 +188,13 @@ fn read_escaped_char(c: *Ctx, new_pos: **u8, p: *u8) i64 = {
             p = p.offset(1);
         };
         new_pos[] = p;
-        return(ch);
+        return(ch, false);
     };
     
     // TODO: handle \U etc here as well instead of in a prepass but that requires the read_string_literal functions
     //       to expect multiple bytes here. 
     new_pos[] = p.offset(1);
-    zext(@switch(p[]) {
+    (zext(@switch(p[]) {
         @case("a".ascii()) => 0x07;
         @case("b".ascii()) => 0x08;
         @case("t".ascii()) => "\t".ascii();
@@ -202,8 +204,18 @@ fn read_escaped_char(c: *Ctx, new_pos: **u8, p: *u8) i64 = {
         @case("r".ascii()) => "\r".ascii();
         // [GNU] \e for the ASCII escape character is a GNU C extension.
         @case("e".ascii()) => 0x1B;
+        @case("u".ascii()) => {
+            ch: i64 = read_universal_char(new_pos[], 4).zext();
+            new_pos[] = new_pos[].offset(4);
+            return(ch, true)
+        };
+        @case("U".ascii()) => {
+            ch: i64 = read_universal_char(new_pos[], 8).zext();
+            new_pos[] = new_pos[].offset(8);
+            return(ch, true)
+        };
         @default => p[];
-    })
+    }), false)
 }
 
 form_feed    :: 0x0C;
@@ -273,9 +285,9 @@ fn read_string_literal(c: *Ctx, start: *u8, quote: *u8, $T: Type, ty: *CC.CType,
     p   := quote.offset(1);
     end, had_escapes := c.string_literal_end(p);
     buf := c.arena.alloc(T, ptr_diff(quote, end));  // :AuditQuotePointer TODO: chibicc used `start` here in read_utf16_string_literal but none of the others
-    
     len := 0;
-    @if(@run (T == u8)) if !had_escapes {  // TODO: this makes it look confusing
+    is_bytes :: T == u8;
+    @if(is_bytes) if !had_escapes {  // TODO: this makes it look confusing
         source := between(p, end);
         buf.slice(0, source.len).copy_from(source);
         len = source.len;
@@ -284,12 +296,21 @@ fn read_string_literal(c: *Ctx, start: *u8, quote: *u8, $T: Type, ty: *CC.CType,
     @if(len == 0)
     while => ptr_diff(p, end) > 0 {
         if p[] == "\\".ascii() {
-            // TODO: this can't be right
-            //       surely if you give me a \U in a normal bytes string, 
-            //       i need to have it take up multiple bytes in the output
-            //   ohhh, they do convert_universal_chars as a prepass. 
-            buf[len] = c.read_escaped_char(p&, p.offset(1)).trunc();
-            len += 1;
+            // TODO: ive made this stupid now
+            ch, is_unicode := c.read_escaped_char(p&, p.offset(1));
+            if is_unicode {
+                @if(is_bytes, {
+                    len += Unicode'encode_utf8(buf.rest(len), ch.trunc());
+                }, {
+                    small_buf := @uninitialized Array(u8, 16);
+                    size := Unicode'encode_utf8(small_buf&.items(), ch.trunc());
+                    q := small_buf&.as_ptr();
+                    read_char(q&, len&, buf);
+                });
+            } else {
+                buf[len] = ch.trunc();
+                len += 1;
+            };
         } else {
             read_char(p&, len&, buf);
         };
@@ -308,8 +329,9 @@ fn read_char_literal(c: *Ctx, start: *u8, quote: *u8, ty: *CType) *Token = {
     if(p[] == 0, => @error_at(c, start, "unclosed char literal"));
     
     ::if(u32);
-    ch := if p[] == "\\".ascii() {
-        @as(u32) c.read_escaped_char(p&, p.offset(1)).trunc()
+    ch: u32 = if p[] == "\\".ascii() {
+        ch, _ := c.read_escaped_char(p&, p.offset(1));
+        ch.trunc()
     } else {
         Unicode'decode_utf8(p&, p)
     };
@@ -333,10 +355,10 @@ fn convert_pp_int(tok: *Token) bool = {
     
     // Read a binary, octal, decimal or hexadecimal number.
     p0, p1, p2 := (p[], p.offset(1)[], p.offset(2)[]);
-    base := if p2 != 0 && p1 == "0".ascii() {
+    base := if p2 != 0 && p0 == "0".ascii() {
         delta, base := @if_else {
             @if(p1 == "x".ascii() && hex_digit(p2).is_some()) => (2, 16);
-            @if(p1 == "b".ascii() && (p2 == "0".ascii() || p2 == "1".ascii())) => (2, 2);
+            @if((p1 == "b".ascii() || p1 == "B".ascii()) && (p2 == "0".ascii() || p2 == "1".ascii())) => (2, 2);
             @else => (1, 8);
         };
         p = p.offset(delta);
@@ -364,7 +386,6 @@ fn convert_pp_int(tok: *Token) bool = {
         @else => (0, false, false);
     };
     p = p.offset(delta);
-
     if(ptr_diff(tok.loc.ptr, p) != tok.len.intcast(), => return(false));
     
     hi :: fn(N) => shift_right_arithmetic(val, N) != 0; // TODO: make sure this what >> on int64_t does?.
@@ -425,7 +446,7 @@ fn convert_pp_number(c: *Ctx, tok: *Token) void = {
     };
     
     if ptr_diff(tok.loc.ptr, end) != tok.len.intcast() {
-        @error_tok(c, tok, "invalid numeric constant");
+        @error_tok(c, tok, "invalid numeric constant '%'", between(tok.loc.ptr, end));
     };
     
     tok.kind = .TK_NUM;
@@ -438,13 +459,25 @@ fn convert_pp_tokens(c: *Ctx, tok: *Token) void = {
         if tok.kind == .TK_PP_NUM {
             c.convert_pp_number(tok);
         };
-        if @is(tok.kind, .TK_IDENT, .TK_KEYWORD, .TK_PUNCT) {
-            if TokenKind.from_name(tok.str()) { kw | 
-                tok.kind = kw;  // TODO: filter for the ones that aren't literal. ie. what if someone has a variable called `TK_EOF`
-            };
-        };
+        //update_kind(tok);  // done in new_token now
         tok = tok.next;
     };
+}
+
+fn update_kind(tok: *Token) void = {
+    max :: max_enum_name_len(TokenKind);
+    if(tok.len > max || !@is(tok.kind, .TK_IDENT, .TK_KEYWORD, .TK_PUNCT), => return());
+    kw := TokenKind.from_name(tok.str()) || return();
+    if(kw.raw() <= TokenKind.TK_ERROR.raw(), => return());
+    tok.kind = kw;  // TODO: filter for the ones that aren't literal. ie. what if someone has a variable called `TK_EOF`
+}
+
+fn max_enum_name_len(E: Type) i64 #fold = {
+    hi := 0;
+    for get_enum_names(E) { n |
+        hi = max(hi, n.len);
+    };
+    hi
 }
 
 // Initialize line info for all tokens.
@@ -463,16 +496,6 @@ fn add_line_numbers(p: *u8, tok: *Token) void = {  // :SLOW
         p = p.offset(1);
         c != 0
     };
-}
-
-fn tokenize_string_literal(c: *Ctx, tok: *Token, basety: *CType) *Token = {
-    t := if basety.size == 2 {
-        c.read_utf16_string_literal(tok.loc.ptr, tok.loc.ptr)
-    } else {
-        c.read_utf32_string_literal(tok.loc.ptr, tok.loc.ptr, basety)
-    };
-    t.next = tok.next;
-    t
 }
 
 // Tokenize a given string and returns new tokens.
@@ -580,7 +603,11 @@ fn tokenize(c: *Ctx, file: *File) *Token = {
         // Character literal
         if p[] == "'".ascii() {
             tok := c.read_char_literal(p, p, ty_int);
-            tok.val = tok.val.bit_and(0xFF);
+            if tok.val > 255 {
+                @error_tok(c, tok, "char literal too large. use a size prefix.");
+            };
+            sign_extend :: fn(c: i64) i64 #ir(.extsb, .Kl);
+            tok.val = sign_extend(tok.val);
             continue_tok(tok);
         };
     
@@ -589,7 +616,7 @@ fn tokenize(c: *Ctx, file: *File) *Token = {
                 // UTF-16 character literal
                 @case("u".ascii()) => {
                     tok := c.read_char_literal(p, p.offset(1), ty_ushort);
-                    tok.val = tok.val.bit_and(0xFFFF);
+                    tok.val = tok.val.bit_and(0xFFFF);  // TODO: is this supposed to be sign extended?
                     continue_tok(tok);
                 };
                 // Wide character literal
@@ -621,66 +648,18 @@ fn tokenize(c: *Ctx, file: *File) *Token = {
     head.next
 }
 
+// TODO
 // Replaces \r or \r\n with \n.
-fn canonicalize_newline(p: *u8) void = {
-  int i = 0, j = 0;
-
-  while (p[i]) {
-    if (p[i] == '\r' && p[i + 1] == '\n') {
-      i += 2;
-      p[j++] = '\n';
-    } else if (p[i] == '\r') {
-      i++;
-      p[j++] = '\n';
-    } else {
-      p[j++] = p[i++];
-    }
-  }
-
-  p[j] = '\0';
-}
+//fn canonicalize_newline(p: *u8) void = {
 
 fn read_universal_char(p: *u8, len: i64) u32 = {
-    uint32_t c = 0;
-    for (int i = 0; i < len; i++) {
-        if (!isxdigit(p[i]))
-            return 0;
-        d := hex_digit(p[i]) || return(0);
-        c = (c << 4) | d;
-    }
-    return c;
-}
-
-// Replace \u or \U escape sequences with corresponding UTF-8 bytes.
-fn convert_universal_chars(p: *u8) void ={
-    char *q = p;
-    
-    while (*p) {
-        if (startswith(p, "\\u")) {
-            uint32_t c = read_universal_char(p + 2, 4);
-            if (c) {
-            p += 6;
-            q += encode_utf8(q, c);
-            } else {
-            *q++ = *p++;
-            }
-        } else if (startswith(p, "\\U")) {
-            uint32_t c = read_universal_char(p + 2, 8);
-            if (c) {
-            p += 10;
-            q += encode_utf8(q, c);
-            } else {
-            *q++ = *p++;
-            }
-        } else if (p[0] == '\\') {
-            *q++ = *p++;
-            *q++ = *p++;
-        } else {
-            *q++ = *p++;
-        }
-    }
-    
-    q[] = 0;
+    ch := 0;
+    range(0, len) { i |
+        d := hex_digit(p[]) || return(0); // TODO: shouldn't this be an error? 
+        ch = ch * 16 + d;
+        p = p.offset(1);
+    };
+    ch.trunc()
 }
 
 // TODO: just do this while tokenizing instead. 
@@ -772,9 +751,12 @@ TokenKind :: @enum(i32) (
     TK_NUM,     // Numeric literals
     TK_PP_NUM,  // Preprocessing numbers
     TK_EOF,     // End-of-file markers
+    TK_ERROR,   // Only used for calling @error_tok
+    // start update_kind
     
     // TK_KEYWORD and TK_PUNCT get converted to one of these:
     
+    // start valid_macro_name 
     return,    if,         else,
     for,       while,      __attribute__,
     case,      default,    do,
@@ -793,12 +775,11 @@ TokenKind :: @enum(i32) (
     __thread,  _Atomic,    int,
     // end is_type_name
     goto,     _Generic,
+    // end valid_macro_name 
     
     @"...", @".", @",", @"(", @")", @":", @"?", @"{", @"}", @";",
     @"<<=", @">>=", @"...", @"==", @"!=", @"<=", @">=", @"->", @"+=", @"-=", @"*=", @"/=",
     @"++",  @"--",  @"%=",  @"&=", @"|=", @"^=", @"&&", @"||", @"<<", @">>", @"##",
     @"=", @"!", @"<", @">", @"-", @"+", @"*", @"/",
     @"%",  @"&", @"|", @"^", @"#", @"[", @"]", @"~",
-    
-    TK_ERROR,   // Only used for calling @error_tok
 ); 

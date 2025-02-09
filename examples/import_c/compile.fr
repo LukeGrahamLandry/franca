@@ -129,6 +129,7 @@ Ctx :: @rec @struct {
     macro_time: BigTime;  // for __TIME__ and __DATE__, you can set this to something specific for reproducible builds. 
     filename_cache: HashMap(Str, Str);
     include_paths: List(Str);
+    macro_base_file: Str;
 };
 
 fn align_down(n: i64, align: i64) i64 = 
@@ -469,7 +470,7 @@ fn declspec(c: *Ctx, rest: **Token, tok: *Token, attr: ?*VarAttr) *CType = {
 
     if true {
         break :: local_return;
-        while => c.is_typename(tok) {
+        while => c.is_type_name(tok) {
             continue :: local_return;
             
             // Handle storage class specifiers.
@@ -511,7 +512,7 @@ fn declspec(c: *Ctx, rest: **Token, tok: *Token, attr: ?*VarAttr) *CType = {
                 attr := attr || @error_tok(c, tok, "_Alignas is not allowed in this context");
                 tok = c.skip(tok.next, "(");
     
-                attr.align = if c.is_typename(tok) {
+                attr.align = if c.is_type_name(tok) {
                     c.typename(tok&, tok)[].align
                 } else {
                     c.const_expr(tok&, tok).intcast()
@@ -831,7 +832,7 @@ fn enum_specifier(c: *Ctx, rest: **Token, tok: *Token) *CType #once = {
 // typeof-specifier = "(" (expr | typename) ")"
 fn typeof_specifier(c: *Ctx, rest: **Token, tok: *Token) *CType #once = {
     tok = c.skip(tok, "(");
-    ty := if c.is_typename(tok) {
+    ty := if c.is_type_name(tok) {
         c.typename(tok&, tok)
     } else {
         node := c.speculate(tok&, tok, .None);
@@ -986,7 +987,7 @@ fn string_initializer(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) v
 // The above initializer sets x.c to 5.
 fn array_designator(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) Ty(i64, i64) = {  // (begin, end)
     begin := c.const_expr(tok&, tok.next);
-    if(begin >= ty.array_len.intcast(), => @error_tok(c, tok, "array designator index exceeds array bounds"));
+    if(begin >= ty.array_len.intcast(), => @error_tok(c, tok, "array designator index (%) exceeds array bounds (%)", begin, ty.array_len));
     
     end := begin;
     if equal(tok, "...") {
@@ -1492,7 +1493,7 @@ fn gvar_initializer(c: *Ctx, rest: **Token, tok: *Token, var: *Obj) void = {
     var.rel = head.next;
 }
 
-fn is_typename(c: *Ctx, tok: *Token) bool #inline #use(Tokens) = {
+fn is_type_name(c: *Ctx, tok: *Token) bool #inline #use(Tokens) = {
     is_type_keyword := tok.kind.raw() >= TokenKind.short.raw() && tok.kind.raw() <= TokenKind.int.raw();
     is_type_keyword || c.find_typedef(tok).is_some()
 }
@@ -1522,7 +1523,7 @@ fn compound_stmt(c: *Ctx, rest: **Token, tok: *Token) *Node = {
     c.enter_scope();
 
     while => !equal(tok, "}") {
-        if c.is_typename(tok) && !equal(tok.next, ":") {
+        if c.is_type_name(tok) && !equal(tok.next, ":") {
             @if(SPAM) @println("type name! %", tok.str());
             attr   := VarAttr.zeroed();
             basety := c.declspec(tok&, tok, (Some = attr&));
@@ -1751,7 +1752,7 @@ fn union_decl(c: *Ctx, rest: **Token, tok: *Token) *CType = {
 }
 
 fn next_is_paren_typename(c: *Ctx, tok: *Token) bool = 
-    equal(tok.next, "(") && c.is_typename(tok.next.next);
+    equal(tok.next, "(") && c.is_type_name(tok.next.next);
 
 fn parse_typedef(c: *Ctx, tok: *Token, basety: *CType) *Token = {
     comma_sep(c, tok&, ";") {
@@ -1947,22 +1948,7 @@ fn declare_builtin_functions(c: *Ctx) void = {
 
 // program = (typedef | function-definition | global-variable)*
 fn parse(c: *Ctx, tok: *Token) *Obj = {
-    // :TopLevelFunction
-    // :SLOW it's silly that top level constants need to be in a function context and we linearly scan it every time you have a numeric literal
-    // this needs to be fixed so i don't have to cry when someone generates an array of binary data. 
-    c.f = c.arena.box(Qbe.Fn);
-    c.f.default_init(c.m);
-    
-    // HACK: need to be able to generate instructions because when you parse `&some_global`, 
-    //       thats a valid constant expression but we issue a load for the bare identifier before
-    //       recursing back up and just taking the lvalue. 
-    c.f.rpo = new(0); // HACK
-    c.f.start = c.new_block();// HACK
-    c.f.start.ins = new(0); // HACK
-    c.b = c.f.start; // HACK
-
     c.declare_builtin_functions();
-    c.globals = Obj.ptr_from_int(0);
 
     //c.speculate = true;
     while => tok.kind != .TK_EOF {
@@ -1979,6 +1965,9 @@ fn parse(c: *Ctx, tok: *Token) *Obj = {
             };
             @else                   => c.global_variable(tok, basety, attr&);
         };
+        
+        // TODO: reset temp() here? but then if want to delay adding functions to the module, 
+        //       need to have them not in temp(), or copy them out at the end. 
     };
 
     var := c.globals;
@@ -2299,7 +2288,7 @@ conditional :: fn(c, rest, tok, cond) #infix(.@"?", .Conditional) = {
 };
 
 parse_bracketed :: fn(c, rest, tok) #prefix(.@"(") = {
-    node := if c.is_typename(tok.next) {
+    node := if c.is_type_name(tok.next) {
         start := tok;
         ty := c.typename(tok&, tok.next);
         tok = c.skip(tok, ")");
@@ -2783,7 +2772,7 @@ for_ :: fn(c, rest, tok) #prefix(.for) = {
         
         c.enter_scope();
         tok = c.skip(tok.next, "(");
-        if c.is_typename(tok) {
+        if c.is_type_name(tok) {
             basety := c.declspec(tok&, tok, .None);
             tok = c.declaration(tok, basety, .None);
         } else {

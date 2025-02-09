@@ -1,8 +1,17 @@
 - TODO: deal with `CodegenEntry:Bounce` on wasm
 
-## (Feb 8)
+## (Feb 8/9)
 
 - fixed compile_for_arg so hashmap(_, void) works
+- add_hideset:
+// there tend to be long runs of tokens with the same hideset 
+// (ie. the output of a whole expansion), so don't reallocate 
+// each one in that case. for my current tests, this takes it from 
+// 9546 to 141 calls to hideset_union in this loop. 
+// changing it to just be pointer identity makes it 143 so thats fine
+- make skip_cond_incl just count instead of recursing to skip_cond_incl2
+- '' sign extension. (literal.c)
+
 
 ## (Feb 5)
 

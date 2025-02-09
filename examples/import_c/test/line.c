@@ -11,7 +11,6 @@ int main() {
     ASSERT(4, after - before);
     
     // clang disagrees about if we're setting the current line or the next line. 
-    
 #line 500 "foo"
     ASSERT(501, __LINE__);
     ASSERT(0, strcmp(__FILE__, "foo"));
