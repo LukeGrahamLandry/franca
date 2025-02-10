@@ -7,6 +7,7 @@
 //      _Static_assert (tho maybe C23 wants to get rid of it)
 // _Alignas needs more backend support
 // TODO: unary const expr
+// TODO: __builtin_compare_and_swap, __builtin_atomic_exchange
 
 // TODO: want to let all the state (like Qbe.Fn) be allocated in Ctx.arena
 //       so you can do all the c frontend stuff up front (because you kinda need 
@@ -1821,20 +1822,11 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr) *Token = {
     c.enter_scope();
     c.create_param_lvars(ty.params);
 
-    // A buffer for a struct/union return value is passed
-    // as the hidden first parameter.
     rty := ty.return_ty;
-    if rty.size > 16 && @is(rty.kind, .TY_STRUCT, .TY_UNION) {
-        c.new_lvar("", c.pointer_to(rty));
-    };
+    c.f.retty = @if(@is(rty.kind, .TY_STRUCT, .TY_UNION), rty.ir_index, -1);
 
     f.params = c.locals;
-
-    if ty.is_variadic {
-        f.va_area = c.new_lvar("__va_area__", c.array_of(ty_char, 136));
-    };
-    f.alloca_bottom = c.new_lvar("__alloca_size__", c.pointer_to(ty_char));
-
+ 
     tok = c.skip(tok, "{");
 
     f_name := f.name.str();
@@ -2636,6 +2628,35 @@ post_dec :: fn(c, rest, tok, node) #infix(.@"--", .PostFix) = {
     set_rest_and_gen(c, rest, tok.next, node)
 };
 
+va_start :: fn(c, rest, tok) #prefix(.__builtin_va_start) = {
+    tok = c.skip(tok.next, "(");
+    ap := c.parse_expr(tok&, tok, .Assign);
+    rest[] = c.skip(tok, ")");
+    r := c.gen_expr(ap);
+    c.emit(.vastart, .Kw, r, QbeNull);
+    ap
+};
+va_arg :: fn(c, rest, tok) #prefix(.__builtin_va_arg) = {
+    start := tok;
+    tok = c.skip(tok.next, "(");
+    ap := c.parse_expr(tok&, tok, .Assign);
+    tok = c.skip(tok, ",");
+    type := c.typename(tok&, tok);
+    rest[] = c.skip(tok, ")");
+    ap := c.gen_expr(ap);
+    r := c.emit(.vaarg, type.cls(), ap, QbeNull);
+    c.ir_node(type, r, QbeNull, start)
+};
+compatible :: fn(c, rest, tok) #prefix(.__builtin_types_compatible_p) = {
+    start := tok;
+    tok = c.skip(tok.next, "(");
+    t1 := c.typename(tok&, tok);
+    tok = c.skip(tok, ",");
+    t2 := c.typename(tok&, tok);
+    rest[] = c.skip(tok, ")");
+    c.new_num(is_compatible(t1, t2).int(), start)
+};
+
 return :: fn(c, rest, tok) #prefix(.return) = {
     if(consume(rest, tok.next, ";"), => return(c.new_node(.ND_STMT, tok)));  // return void
     exp := c.parse_expr(tok&, tok.next, .None);
@@ -2652,7 +2673,8 @@ return :: fn(c, rest, tok) #prefix(.return) = {
     r := c.assert_gen_expr(exp);
     
     if c.b.jmp.type == .Jxxx {
-        j := Qbe.J.retw;
+        k := ty.cls(); // TODO: retc
+        j := @as(Qbe.J) @as(i32) Qbe.J.retw.raw() + k.raw(); // TODO: also sb,etc.
         c.b.jmp = (type = j, arg = r);
     };
     c.new_node(.ND_STMT, tok)
@@ -3074,54 +3096,6 @@ fn speculate(c: *Ctx, rest: **Token, tok: *Token, prec: Prec) *Node = {
     node
 }
 
-fn primary(rest: **Token, tok: *Token) *Node = { // TODO
-    Token *start = tok;
-    @if_else {
-        @if(equal(tok, "__builtin_types_compatible_p")) => {
-            tok = c.skip(tok.next, "(");
-            t1 := typename(tok&, tok);
-            tok = c.skip(tok, ",");
-            t2 := typename(tok&, tok);
-            rest[] = c.skip(tok, ")");
-            c.new_num(is_compatible(t1, t2), start)
-        }
-    };
-
-    if (equal(tok, "__builtin_reg_class")) {
-        tok = c.skip(tok.next, "(");
-        ty := typename(tok&, tok);
-        rest[] = c.skip(tok, ")");
-
-        if(is_integer(ty) || ty.kind == .TY_PTR, => return(new_num(0, start)));
-        if(is_flonum(ty), return(new_num(1, start));
-        return(new_num(2, start));
-    };
-
-    if equal(tok, "__builtin_compare_and_swap") {
-        node := c.new_node(.ND_CAS, tok);
-        tok = c.skip(tok.next, "(");
-        node.cas_addr = assign(tok&, tok);
-        tok = c.skip(tok, ",");
-        node.cas_old = assign(tok&, tok);
-        tok = c.skip(tok, ",");
-        node.cas_new = assign(tok&, tok);
-        rest[] = c.skip(tok, ")");
-        return(node);
-    };
-
-    if equal(tok, "__builtin_atomic_exchange") {
-        node := c.new_node(.ND_EXCH, tok);
-        tok = c.skip(tok.next, "(");
-        node.lhs = assign(tok&, tok);
-        tok = c.skip(tok, ",");
-        node.rhs = assign(tok&, tok);
-        rest[] = c.skip(tok, ")");
-        return(node);
-    };
-
-    @error_tok(c, tok, "expected an expression");
-}
-
 fn eval(c: *Ctx, node: *Node) i64 = {
     off, label := c.eval2(node);
     if label.is_some() {
@@ -3317,9 +3291,10 @@ fn gen_par(c: *Ctx) void = {
     
     loc := obj.params;
     for_linked loc { loc |
-        loc.par_r = f.newtmp("c", .Kl);
-        // TODO: other types + parc
-        emit(c, .par, .Kl, loc.par_r, QbeNull, QbeNull); 
+        k := loc.ty.cls();
+        loc.par_r = f.newtmp("c", k);
+        // TODO: parc
+        emit(c, .par, k, loc.par_r, QbeNull, QbeNull); 
     };
     for_linked loc { var | // HACK
         c.create_stack_slot(var);
@@ -3601,10 +3576,15 @@ fn gen_call(c: *Ctx, node: *Node) Qbe.Ref #once = {
         c.emit(.alloc16, .Kl, r, size, QbeNull);
         return(r);
     };
+    
+    function_ty := node.lhs.ty;
+    while => function_ty.kind == .TY_PTR {
+        function_ty = function_ty.base;
+    };
 
     variadic_marker_index := 0;
-    if node.lhs.ty.is_variadic {
-        t := node.lhs.ty.params;
+    if function_ty.is_variadic {
+        t := function_ty.params;
         for_linked t { t |
             variadic_marker_index += 1;
         };
@@ -3632,8 +3612,9 @@ fn gen_call(c: *Ctx, node: *Node) Qbe.Ref #once = {
     };
     
     callee := c.gen_expr(node.lhs);
-    r := c.f.newtmp("c", .Kl); // TODO: other types
-    c.emit(.call, .Kl, r, callee, QbeNull);
+    k := function_ty.return_ty.cls();
+    r := c.f.newtmp("c", k); // TODO: other types
+    c.emit(.call, k, r, callee, QbeNull);
     r
 }
 

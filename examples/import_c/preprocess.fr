@@ -23,6 +23,13 @@
 // written by Dave Prossor, which is used as a basis for the
 // standard's wording:
 // https://github.com/rui314/chibicc/wiki/cpp.algo.pdf
+//
+// TODO: having the list take up 8 bytes of every Token forever seems bad. 
+//       we don't do any expansion before saving a #define so there's no state that could live forever. 
+//       can't we just remember that a macro is disabled until we get to the end of it's expansion? 
+//       that whole paragraph seems like a convoluted way of saying you're not allowed to recurse. 
+//       am i missing something?    -- Feb 9, 2025
+// TODO: report error for recursive #include
 
 // TODO: un-linked-list-ify these. 
 // TODO: there's gotta be a way to do this that doesn't look so slow 
@@ -197,27 +204,59 @@ fn skip_cond_incl(tok: *Token) *Token = {
     }
 }
 
-// TODO: fixme!
+// TODO: this does not spark joy
+// Double-quote a given string and returns it.
+fn quote_string(c: *Ctx, str: Str) Str = {
+    bufsize := 2 + 5;
+    for str { c | 
+        bufsize += 1 + int(c == "\\".ascii() || c == "\"".ascii());
+    };
+    
+    buf := c.arena.alloc(u8, bufsize);
+    j := 0;
+    buf[j] = "\"".ascii();
+    j += 1;
+    for str { c | 
+        if c == "\\".ascii() || c == "\"".ascii() {
+            buf[j] = "\\".ascii();
+            j += 1;
+        };
+        buf[j] = c;
+        j += 1;
+    };
+    buf[j] = "\"".ascii();
+    j += 1;
+    
+    // :BoundsPadding
+    range(0, 5) { _ |
+        buf[j] = 0;
+        j += 1;
+    };
+    @debug_assert_eq(j, buf.len);
+    buf
+}
+
+// note: wont work if there are new lines in there i think
 fn new_str_token(c: *Ctx, str: Str, tmpl: *Token) *Token = {
-    tok  := c.copy_token(tmpl);
-    tok.kind = .TK_STR;
-    buf := c.arena.alloc(u8, 1 + str.len + 1 + 1); 
-    buf[0] = "\"".ascii();
-    buf.subslice(1, str.len).copy_from(str);
-    buf[str.len + 1] = 0;
-    //buf[str.len + 2] = "\"".ascii();
-    tok.ty = c.array_of(Types.ty_char, str.len + 1);
-    tok.str_buf = buf.ptr.offset(1);
-    // TODO: buf this doesn't make sense, it's not in the file. 
-    //       but we need to set it because #include "" looks here instead of at the str field because it wants to avoid escapes
-    //       but we know there aren't any escapes anyway. 
-    //       but surely the best strategy can't be to add backslashes before each thing and retokenize and make a fake new file. 
-    //       but you do need the quotes for pasting. 
-    tok.loc.ptr = buf.ptr;
-    tok.len = str.len.intcast() - 1;
-    tok
-    //char *buf = quote_string(str);
-    //return tokenize(new_file(tmpl.file.name, buf));
+    //tok  := c.copy_token(tmpl);
+    //tok.kind = .TK_STR;
+    //buf := c.arena.alloc(u8, 1 + str.len + 1 + 1); 
+    //buf[0] = "\"".ascii();
+    //buf.subslice(1, str.len).copy_from(str);
+    //buf[str.len + 1] = 0;
+    ////buf[str.len + 2] = "\"".ascii();
+    //tok.ty = c.array_of(Types.ty_char, str.len + 1);
+    //tok.str_buf = buf.ptr.offset(1);
+    //// TODO: buf this doesn't make sense, it's not in the file. 
+    ////       but we need to set it because #include "" looks here instead of at the str field because it wants to avoid escapes
+    ////       but we know there aren't any escapes anyway. 
+    ////       but surely the best strategy can't be to add backslashes before each thing and retokenize and make a fake new file. 
+    ////       but you do need the quotes for pasting. 
+    //tok.loc.ptr = buf.ptr;
+    //tok.len = str.len.intcast() - 1;
+    //tok
+    buf := c.quote_string(str);
+    c.tokenize(c.new_file(tmpl.file.name, buf))
 }
 
 // Copy all tokens until the next newline, terminate them with
@@ -459,7 +498,7 @@ fn find_arg(args: []MacroArg, tok: *Token) ?*MacroArg = {
 // Concatenates all tokens in `tok` and returns a new string.
 fn join_tokens(tok: *Token, end: *Token) Str = {
     // Compute the length of the resulting token.
-    len := 1;  // nt
+    len := 0;
     t := tok;
     while => !t.identical(end) && t.kind != .TK_EOF {
         len += int(!t.identical(tok) && t.has_space);
@@ -480,8 +519,8 @@ fn join_tokens(tok: *Token, end: *Token) Str = {
         pos += t.len.intcast();
         t = t.next;
     };
-    buf[pos] = 0;
-    buf.slice(0, pos + 1)
+    @debug_assert_eq(buf.len, pos);
+    buf
 }
 
 // Concatenates all tokens in `arg` and returns a new string token.
@@ -842,7 +881,7 @@ fn read_line_marker(c: *Ctx, rest: **Token, tok: *Token) void = {
     tok = tok.next;
     if(tok.kind == .TK_EOF, => return());
     if(tok.kind != .TK_STR, => @error_tok(c, tok, "filename expected"));
-    start.file.display_name = tok.str_buf.slice(tok.ty.size.intcast());
+    start.file.display_name = tok.str_buf.slice(tok.ty.size.intcast() - 1);  // no null terminator
 }
 
 // Visit all tokens in `tok` while evaluating preprocessing
@@ -859,7 +898,7 @@ fn preprocess2(c: *Ctx, tok: *Token) *Token = {
         // Pass through if it is not a "#".
         if (!is_hash(tok)) {
             tok.line_delta = tok.file.line_delta;
-            tok.filename = tok.file.display_name;
+            //tok.filename = tok.file.display_name;
             c.append_one(cur&, tok, false);
             tok = tok.next;
             continue();
@@ -1129,6 +1168,21 @@ fn init_macros(c: *Ctx) void = {
     time(now&);
     tm := localtime(now&);
     c.macro_time = tm[];
+}
+
+fn find_builtin_header(filename: Str) ?Str = {
+    if filename.ends_with(".h") {
+        filename.len -= 2;
+    };
+    
+    s :: import("@/examples/import_c/include.fr");
+    inline_for get_constants(s) { $name |
+        content :: get_constant(Str, s, name[]).unwrap();
+        if filename == name[] {
+            return(Some = content);
+        };
+    };
+    .None
 }
 
 StringKind :: @enum(STR_NONE, STR_UTF8, STR_UTF16, STR_UTF32, STR_WIDE);

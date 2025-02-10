@@ -15,13 +15,17 @@ int main() {
     ASSERT(501, __LINE__);
     ASSERT(0, strcmp(__FILE__, "foo"));
     
+#define THE_LINE __LINE__  // line of the expansion point is used, not this one 
+    
 #line 800 "bar"
     ASSERT(801, __LINE__);
     ASSERT(0, strcmp(__FILE__, "bar"));
 
 #line 1
     ASSERT(2, __LINE__);
+    ASSERT(3, THE_LINE);
 
+// TODO: clang doesn't like this. should we disallow too? 
 # 200 "xyz" 2 3
     ASSERT(201, __LINE__);
     ASSERT(0, strcmp(__FILE__, "xyz"));

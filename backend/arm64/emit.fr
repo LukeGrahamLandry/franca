@@ -21,6 +21,7 @@ ArmState :: @struct(
     padding: i64,
     start_of_function: i64,
     patches: List(Patch),
+    needs_frame := true,
 );
 
 fn emit_func_arm64(f: *Qbe.Fn) void = {
@@ -123,8 +124,8 @@ fn emit_the_code(self: *ArmState) void #once = {
     // ("\thint\t#34\n");
     self.inst(0xd503245f);
     
-    needs_frame := bit_and(self.f.reg, arm64_clob_mask) != 0 || !self.f.leaf || self.f.vararg || self.f.slot > 0 || self.f.dynalloc;
-    if needs_frame {
+    self.needs_frame = bit_and(self.f.reg, arm64_clob_mask) != 0 || !self.f.leaf || self.f.vararg || self.f.slot > 0 || self.f.dynalloc;
+    if self.needs_frame {
         self.framelayout();
         
         if self.f.vararg && !self.f.globals.target.apple {
@@ -147,6 +148,10 @@ fn emit_the_code(self: *ArmState) void #once = {
                 self.emitins(i&);
             };
         };
+    } else {
+        // This matters because we might have args passed on the stack (negative RSlot),
+        // and normally `fn slot` will offset by 16 to skip over our saved fp/lr, so we undo that here. 
+        self.frame = -16;
     };
     
     local_labels := temp().alloc_zeroed(i64, self.f.nblk.zext()); // TODO: use u32 and offset from start of function 
@@ -163,7 +168,7 @@ fn emit_the_code(self: *ArmState) void #once = {
         @match(b.jmp.type) {
             fn hlt() => self.inst(brk(1000));
             fn ret0() => {
-                if needs_frame {
+                if self.needs_frame {
                     // if you run the simplify_jump_chains pass, you'll only need to emit this epilogue once. 
                     offset_to_callee_saved := (self.frame - self.padding);
                     for arm64_rclob { r |
@@ -532,7 +537,8 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
         addr := if rtype(a0) == .RSlot {
             offset += self.slot(a0);
             @debug_assert(a1 == QbeNull, "i dont think i mix offset and slot in ldr");
-            fp
+            // !needs_frame can have RSlot for arguments
+            @if(self.needs_frame, fp, sp)
         } else {
             if rtype(a1) == .RInt {   // TODO: could easily get rid of this branch. is that worth always setting it to RInt(0)?
                 offset += zext(rsval(a1));
@@ -558,7 +564,8 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
         addr := @match(rtype(a1)) {
             fn RSlot() => {
                 offset = self.slot(a1) / size.zext();
-                fp
+                // !needs_frame can have RSlot for arguments
+                @if(self.needs_frame, fp, sp)
             }
             fn RTmp() => a1.int_reg();
             fn RMem() => {
@@ -646,17 +653,19 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
             reg := i.to.int_reg();
             s := self.slot(a0);
             @debug_assert(s >= 0, "slot must be positive");
+            // !needs_frame can have RSlot for arguments
+            base := @if(self.needs_frame, fp, sp);
             if (s <= 4095) {
-                self.inst(add_im(Bits.X64, reg, fp, @as(u12) s, 0));
+                self.inst(add_im(Bits.X64, reg, base, @as(u12) s, 0));
             } else {
                 if (s <= 65535) {
                     self.inst(movz(Bits.X64, reg, s.trunc(), .Left0));
-                    self.inst(add_er(Bits.X64, reg, fp, reg));
+                    self.inst(add_er(Bits.X64, reg, base, reg));
                 } else {
                     // :StackSizeLimit
                     self.inst(movz(Bits.X64, reg, s.trunc(), .Left0));
                     self.inst(movk(Bits.X64, reg, s.shift_right_logical(16).trunc(), .Left0));
-                    self.inst(add_er(Bits.X64, reg, fp, reg));
+                    self.inst(add_er(Bits.X64, reg, base, reg));
                 };
             };
         }

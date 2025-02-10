@@ -1,5 +1,17 @@
 - TODO: deal with `CodegenEntry:Bounce` on wasm
 
+## (Feb 10)
+
+- holy shit do functions with >8 args just not work? there's no way. 
+yeah, add10 test as ssa works on amd but not arm. think i broke abi slots when i stoped scaling them? 
+no it was `!needs_frame` didn't work when some args were passed on the stack (because i was thinking no frame means no RSlot). 
+off by 16 bytes (because it was expecting to step over saved fp/lr) and need to use sp instead of fp. 
+so that's reassuring for why i didn't encounter the problem before, it only happens when
+you have a function with a lot of arguments that doesn't actually do any work. 
+- wasn't setting ret/par cls for floats
+- gen_call wasn't recursing up through function pointers to get to the right type 
+- my hacky way of dealing with new_string_token didn't work when concatenating string literals
+
 ## (Feb 8/9)
 
 - fixed compile_for_arg so hashmap(_, void) works
@@ -11,7 +23,14 @@
 // changing it to just be pointer identity makes it 143 so thats fine
 - make skip_cond_incl just count instead of recursing to skip_cond_incl2
 - '' sign extension. (literal.c)
-
+- chibicc token struct has a filename field that is never read? maybe this isn't the project i should be stealing from...
+- clang thinks this is UB:
+  ASSERT(-2147483648, (double)(unsigned long)(long)-1);
+with -O2 it works but with -O0 it's -1 on arm and 35 on x64
+- i don't agree with the test `_Bool false_fn(); int false_fn() { return 512; }` 
+i feel like you can require masking for every function that returns `_Bool`. 
+"When any scalar value is converted to _Bool, the result is 0 if the value compares equal to 0; otherwise, the result is 1."
+it's probably UB to declare it with two different signetures anyway. 
 
 ## (Feb 5)
 

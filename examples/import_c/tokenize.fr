@@ -107,7 +107,7 @@ fn new_token(c: *Ctx, kind: TokenKind, start: *u8, end: *u8) *Token = {
     tok.loc.ptr = start;
     tok.len = ptr_diff(start, end).intcast();
     tok.file = c.current_file;
-    tok.filename = c.current_file.display_name;
+    //tok.filename = c.current_file.display_name;
     tok.at_bol = c.at_bol;
     tok.has_space = c.has_space;
     update_kind(tok);
@@ -436,6 +436,7 @@ fn convert_pp_number(c: *Ctx, tok: *Token) void = {
     ty := @if_else {
         @if(end_char == "f".ascii() || end_char == "F".ascii()) => {
             end = end.offset(1);
+            val = val.to_single_precision_with_hi_zeroed();
             ty_float
         };
         @if(end_char == "l".ascii() || end_char == "L".ascii()) => {
@@ -452,6 +453,17 @@ fn convert_pp_number(c: *Ctx, tok: *Token) void = {
     tok.kind = .TK_NUM;
     tok.fval = val;
     tok.ty = ty;
+}
+
+// backend `Con` only cares about bits, not types. 
+// it needs 32 bit single precision floats as a 64 bit value with the high bits zeroed, 
+// NOT as a 64 bit double precision number. 
+fn to_single_precision_with_hi_zeroed(v: f64) f64 = {
+    v: f32 = v.cast();
+    v: u32 = v.bitcast();
+    v: i64 = v.zext();
+    v: f64 = v.bitcast();
+    v
 }
 
 fn convert_pp_tokens(c: *Ctx, tok: *Token) void = {
@@ -626,6 +638,8 @@ fn tokenize(c: *Ctx, file: *File) *Token = {
                 @default => (); // fallthrough
             };
         };
+       
+        // TODO: do update_kind here instead of always having to check the kind
         
         // Identifier or keyword
         len := read_ident(p);
@@ -774,7 +788,8 @@ TokenKind :: @enum(i32) (
     typeof,    char,       _Thread_local,
     __thread,  _Atomic,    int,
     // end is_type_name
-    goto,     _Generic,
+    __builtin_va_start, __builtin_va_arg, __builtin_types_compatible_p,
+    goto,     _Generic, 
     // end valid_macro_name 
     
     @"...", @".", @",", @"(", @")", @":", @"?", @"{", @"}", @";",

@@ -333,9 +333,10 @@ int main() {
 #include M13
     ASSERT(3, foo);
 
-// #define M13 < include4.h
-// #include M13 >
-//     ASSERT(4, foo);
+// this requires the test folder on the include path
+#define M13 < include4.h
+#include M13 >
+    ASSERT(4, foo);
 
 #undef foo
 
@@ -414,6 +415,13 @@ int main() {
 #define M31(x, y) (1, ##x y)
     ASSERT(3, M31(, 3));
 
+#define thespringthingminisproing(x) #x
+#define the_spring_thing_mini_sproing(x) thespringthingminisproing(x)
+#define append_location(y) (#y __FILE__ ":" the_spring_thing_mini_sproing(__LINE__))
+#line 20 "foozle"
+    char *s = append_location(1 + 2);
+    ASSERT(0, strcmp(s, "1 + 2foozle:21"));
+    
     printf("OK\n");
     return 0;
 }
