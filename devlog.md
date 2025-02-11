@@ -11,6 +11,7 @@ you have a function with a lot of arguments that doesn't actually do any work.
 - wasn't setting ret/par cls for floats
 - gen_call wasn't recursing up through function pointers to get to the right type 
 - my hacky way of dealing with new_string_token didn't work when concatenating string literals
+- convert CType to backend Typ
 
 ## (Feb 8/9)
 

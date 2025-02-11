@@ -8,6 +8,7 @@
 // _Alignas needs more backend support
 // TODO: unary const expr
 // TODO: __builtin_compare_and_swap, __builtin_atomic_exchange
+// TODO: don't be copying types all the time? 
 
 // TODO: want to let all the state (like Qbe.Fn) be allocated in Ctx.arena
 //       so you can do all the c frontend stuff up front (because you kinda need 
@@ -1823,7 +1824,7 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr) *Token = {
     c.create_param_lvars(ty.params);
 
     rty := ty.return_ty;
-    c.f.retty = @if(@is(rty.kind, .TY_STRUCT, .TY_UNION), rty.ir_index, -1);
+    c.f.retty = c.ir_index(rty);
 
     f.params = c.locals;
  
@@ -1852,6 +1853,9 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr) *Token = {
         // it would be nice to give an error otherwise but it's non-trivial to decide if this codepath is reachable. 
         // also for main() falling off the end means returning 0
         c.b.jmp = @if(rty.is_void(), (type = .ret0, arg = QbeNull), (type = .retw, arg = QbeConZero));
+        if c.f.retty != -1 {  // sketchy
+            c.b.jmp.type = .retc;
+        };
     };
     
     c.f.link_blocks_from_rpo();
@@ -2675,6 +2679,9 @@ return :: fn(c, rest, tok) #prefix(.return) = {
     if c.b.jmp.type == .Jxxx {
         k := ty.cls(); // TODO: retc
         j := @as(Qbe.J) @as(i32) Qbe.J.retw.raw() + k.raw(); // TODO: also sb,etc.
+        if c.f.retty != -1 {
+            j = .retc;
+        };
         c.b.jmp = (type = j, arg = r);
     };
     c.new_node(.ND_STMT, tok)
@@ -3290,21 +3297,29 @@ fn gen_par(c: *Ctx) void = {
     c.b = f.start;
     
     loc := obj.params;
+    // TODO: b/h arg/par
     for_linked loc { loc |
         k := loc.ty.cls();
-        loc.par_r = f.newtmp("c", k);
-        // TODO: parc
-        emit(c, .par, k, loc.par_r, QbeNull, QbeNull); 
+        loc.par_r = f.newtmp(loc.name.str(), k);
+        i := c.ir_index(loc.ty).intcast();
+        o: Qbe.O = @if(i == -1, .par, .parc);
+        emit(c, o, k, loc.par_r, @if(i == -1, QbeNull, TYPE(i)), QbeNull); 
     };
-    for_linked loc { var | // HACK
-        c.create_stack_slot(var);
+    for_linked loc { loc | // HACK
+        if c.ir_index(loc.ty) == -1 {
+            c.create_stack_slot(loc);
+        } else {
+            loc.stack_slot = loc.par_r;
+        };
     };
     // some instructions (par/alloc) will always go in f.start, real code goes in its own block. 
     // but since all vars get stack slots, we need to store any scalar arguments. 
     body := c.new_block();
     c.jmp_if_unterminated(body);
     for_linked loc { loc |
-        c.gen_store(loc.stack_slot, loc.par_r, loc.ty);
+        if c.ir_index(loc.ty) == -1 {
+            c.gen_store(loc.stack_slot, loc.par_r, loc.ty);
+        };
     };
     c.b = body;
 }
@@ -3600,13 +3615,12 @@ fn gen_call(c: *Ctx, node: *Node) Qbe.Ref #once = {
         };
         variadic_marker_index -= 1;
         
+        // TODO: b/h arg/par
         r := c.gen_expr(arg);
-        // TODO: argc and other types
-        arguments&.push(make_ins(.arg, arg.ty.cls(), QbeNull, r, QbeNull));
+        arguments&.push(arg_ins(r, arg.ty.cls(), c.ir_index(arg.ty)));
     };
     
     ::ptr_utils(Obj);
-    assert(node.ret_buffer.is_null(), "TODO: aggragate returns");
     for arguments { i |    
         c.b.push(i);
     };
@@ -3614,8 +3628,22 @@ fn gen_call(c: *Ctx, node: *Node) Qbe.Ref #once = {
     callee := c.gen_expr(node.lhs);
     k := function_ty.return_ty.cls();
     r := c.f.newtmp("c", k); // TODO: other types
-    c.emit(.call, k, r, callee, QbeNull);
+    i := c.ir_index(function_ty.return_ty).intcast();
+    c.emit(.call, k, r, callee, @if(i == -1, QbeNull, TYPE(i)));
+    if i != -1 {
+        node.lvalue = r;  // for gen_addr so you can do `foo().field`
+    };
     r
+}
+
+// TODO: move these to util and use them elsewhere
+fn arg_ins(r: Qbe.Ref, k: Qbe.Cls, type_index: i32) Qbe.Ins = {
+    ::if(Qbe.Ins);
+    if type_index < 0 {
+        make_ins(.arg, k, QbeNull, r, QbeNull)
+    } else {
+        make_ins(.argc, .Kl, QbeNull, TYPE(type_index.intcast()), r)
+    }
 }
 
 fn gen_store(c: *Ctx, addr: Qbe.Ref, value: Qbe.Ref, ty: *CType) void = {

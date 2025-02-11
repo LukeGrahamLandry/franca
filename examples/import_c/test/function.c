@@ -299,77 +299,77 @@ int main() {
   ASSERT(4, many_args2(1,2,3,4,5,6,7,8,40,10));
   ASSERT(8, many_args3(1,2,3,4,5,6,7,8,9,10,11,12,13,14,80,10));
 
-  // ASSERT(10, ({ Ty4 x={10,20,30,40}; struct_test4(x, 0); }));
-  // ASSERT(20, ({ Ty4 x={10,20,30,40}; struct_test4(x, 1); }));
-  // ASSERT(30, ({ Ty4 x={10,20,30,40}; struct_test4(x, 2); }));
-  // ASSERT(40, ({ Ty4 x={10,20,30,40}; struct_test4(x, 3); }));
+  ASSERT(10, ({ Ty4 x={10,20,30,40}; struct_test4(x, 0); }));
+  ASSERT(20, ({ Ty4 x={10,20,30,40}; struct_test4(x, 1); }));
+  ASSERT(30, ({ Ty4 x={10,20,30,40}; struct_test4(x, 2); }));
+  ASSERT(40, ({ Ty4 x={10,20,30,40}; struct_test4(x, 3); }));
 
-  // ASSERT(10, ({ Ty5 x={10,20,30}; struct_test5(x, 0); }));
-  // ASSERT(20, ({ Ty5 x={10,20,30}; struct_test5(x, 1); }));
-  // ASSERT(30, ({ Ty5 x={10,20,30}; struct_test5(x, 2); }));
+  ASSERT(10, ({ Ty5 x={10,20,30}; struct_test5(x, 0); }));
+  ASSERT(20, ({ Ty5 x={10,20,30}; struct_test5(x, 1); }));
+  ASSERT(30, ({ Ty5 x={10,20,30}; struct_test5(x, 2); }));
 
-  // ASSERT(10, ({ Ty6 x={10,20,30}; struct_test6(x, 0); }));
-  // ASSERT(20, ({ Ty6 x={10,20,30}; struct_test6(x, 1); }));
-  // ASSERT(30, ({ Ty6 x={10,20,30}; struct_test6(x, 2); }));
+  ASSERT(10, ({ Ty6 x={10,20,30}; struct_test6(x, 0); }));
+  ASSERT(20, ({ Ty6 x={10,20,30}; struct_test6(x, 1); }));
+  ASSERT(30, ({ Ty6 x={10,20,30}; struct_test6(x, 2); }));
 
-  // ASSERT(10, ({ Ty7 x={10,20,30}; struct_test7(x, 0); }));
-  // ASSERT(20, ({ Ty7 x={10,20,30}; struct_test7(x, 1); }));
-  // ASSERT(30, ({ Ty7 x={10,20,30}; struct_test7(x, 2); }));
+  ASSERT(10, ({ Ty7 x={10,20,30}; struct_test7(x, 0); }));
+  ASSERT(20, ({ Ty7 x={10,20,30}; struct_test7(x, 1); }));
+  ASSERT(30, ({ Ty7 x={10,20,30}; struct_test7(x, 2); }));
 
-  // ASSERT(10, ({ Ty4 x={10,20,30,40}; struct_test14(x, 0); }));
-  // ASSERT(20, ({ Ty4 x={10,20,30,40}; struct_test14(x, 1); }));
-  // ASSERT(30, ({ Ty4 x={10,20,30,40}; struct_test14(x, 2); }));
-  // ASSERT(40, ({ Ty4 x={10,20,30,40}; struct_test14(x, 3); }));
+  ASSERT(10, ({ Ty4 x={10,20,30,40}; struct_test14(x, 0); }));
+  ASSERT(20, ({ Ty4 x={10,20,30,40}; struct_test14(x, 1); }));
+  ASSERT(30, ({ Ty4 x={10,20,30,40}; struct_test14(x, 2); }));
+  ASSERT(40, ({ Ty4 x={10,20,30,40}; struct_test14(x, 3); }));
 
-  // ASSERT(10, ({ Ty5 x={10,20,30}; struct_test15(x, 0); }));
-  // ASSERT(20, ({ Ty5 x={10,20,30}; struct_test15(x, 1); }));
-  // ASSERT(30, ({ Ty5 x={10,20,30}; struct_test15(x, 2); }));
+  ASSERT(10, ({ Ty5 x={10,20,30}; struct_test15(x, 0); }));
+  ASSERT(20, ({ Ty5 x={10,20,30}; struct_test15(x, 1); }));
+  ASSERT(30, ({ Ty5 x={10,20,30}; struct_test15(x, 2); }));
 
-  // ASSERT(10, struct_test24().a);
-  // ASSERT(20, struct_test24().b);
-  // ASSERT(30, struct_test24().c);
-  // ASSERT(40, struct_test24().d);
+  ASSERT(10, struct_test24().a);
+  ASSERT(20, struct_test24().b);
+  ASSERT(30, struct_test24().c);
+  ASSERT(40, struct_test24().d);
 
-  // ASSERT(10, struct_test25().a);
-  // ASSERT(20, struct_test25().b);
-  // ASSERT(30, struct_test25().c);
+  ASSERT(10, struct_test25().a);
+  ASSERT(20, struct_test25().b);
+  ASSERT(30, struct_test25().c);
 
-  // ASSERT(10, struct_test26().a[0]);
-  // ASSERT(20, struct_test26().a[1]);
-  // ASSERT(30, struct_test26().a[2]);
+  ASSERT(10, struct_test26().a[0]);
+  ASSERT(20, struct_test26().a[1]);
+  ASSERT(30, struct_test26().a[2]);
 
-  // ASSERT(10, struct_test27().a[0]);
-  // ASSERT(60, struct_test27().a[5]);
-  // ASSERT(100, struct_test27().a[9]);
+  ASSERT(10, struct_test27().a[0]);
+  ASSERT(60, struct_test27().a[5]);
+  ASSERT(100, struct_test27().a[9]);
 
-  // ASSERT(1, struct_test28().a[0]);
-  // ASSERT(5, struct_test28().a[4]);
-  // ASSERT(10, struct_test28().a[9]);
-  // ASSERT(15, struct_test28().a[14]);
-  // ASSERT(20, struct_test28().a[19]);
+  ASSERT(1, struct_test28().a[0]);
+  ASSERT(5, struct_test28().a[4]);
+  ASSERT(10, struct_test28().a[9]);
+  ASSERT(15, struct_test28().a[14]);
+  ASSERT(20, struct_test28().a[19]);
 
-  // ASSERT(10, struct_test34().a);
-  // ASSERT(20, struct_test34().b);
-  // ASSERT(30, struct_test34().c);
-  // ASSERT(40, struct_test34().d);
+  ASSERT(10, struct_test34().a);
+  ASSERT(20, struct_test34().b);
+  ASSERT(30, struct_test34().c);
+  ASSERT(40, struct_test34().d);
 
-  // ASSERT(10, struct_test35().a);
-  // ASSERT(20, struct_test35().b);
-  // ASSERT(30, struct_test35().c);
+  ASSERT(10, struct_test35().a);
+  ASSERT(20, struct_test35().b);
+  ASSERT(30, struct_test35().c);
 
-  // ASSERT(10, struct_test36().a[0]);
-  // ASSERT(20, struct_test36().a[1]);
-  // ASSERT(30, struct_test36().a[2]);
+  ASSERT(10, struct_test36().a[0]);
+  ASSERT(20, struct_test36().a[1]);
+  ASSERT(30, struct_test36().a[2]);
 
-  // ASSERT(10, struct_test37().a[0]);
-  // ASSERT(60, struct_test37().a[5]);
-  // ASSERT(100, struct_test37().a[9]);
+  ASSERT(10, struct_test37().a[0]);
+  ASSERT(60, struct_test37().a[5]);
+  ASSERT(100, struct_test37().a[9]);
 
-  // ASSERT(1, struct_test38().a[0]);
-  // ASSERT(5, struct_test38().a[4]);
-  // ASSERT(10, struct_test38().a[9]);
-  // ASSERT(15, struct_test38().a[14]);
-  // ASSERT(20, struct_test38().a[19]);
+  ASSERT(1, struct_test38().a[0]);
+  ASSERT(5, struct_test38().a[4]);
+  ASSERT(10, struct_test38().a[9]);
+  ASSERT(15, struct_test38().a[14]);
+  ASSERT(20, struct_test38().a[19]);
 
   ASSERT(5, (***add2)(2,3));
 

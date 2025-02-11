@@ -29,7 +29,7 @@ fn new_type(c: *Ctx, kind: CC.TypeKind, size: i64, align: i64) *CC.CType = {
     ty.kind = kind;
     ty.size = size.intcast();
     ty.align = align.intcast();
-    t.ir_index = -1;
+    ty.ir_index = -1;
     ty
 }
 
@@ -319,4 +319,76 @@ fn cls(ty: *CC.CType) Qbe.Cls = {
     if(ty.kind == .TY_FLOAT,                  => return(.Ks));
     if(ty.size == 8 || ty.kind == .TY_ARRAY || ty.kind == .TY_VLA,  => return(.Kl));  // array decays to pointer
     .Kw
+}
+
+fn ir_index(c: *Ctx, ty: *CC.CType) i32 = {
+    if(ty.ir_index != -1 || !@is(ty.kind, .TY_STRUCT, .TY_UNION), => return(ty.ir_index));
+    type_info := Qbe.Typ.zeroed();
+    type_info.fields = new_long_life(c.m, 0);
+    len := 0;
+    out := type_info.fields&;
+    @if(TRACK_IR_NAMES) {
+        l := fixed_list(type_info.name&.items());
+        name := ty.name.str();
+        @fmt(l&, "%", name.slice(0, min(80, name.len)));
+    };
+    @match(ty.kind) {
+        fn TY_STRUCT() => {
+            type_info.nunion = 1;
+            off := 0;
+            mem := ty.members;
+            for_linked mem { mem | 
+                add_padding(out, len&, off&, mem.offset.intcast());
+                c.push_as_fields(mem.ty, out, len&);
+            };
+            add_padding(out, len&, off&, ty.size.intcast());
+            push(out, len&, (type = .FEnd, len = 0));
+        }
+        fn TY_UNION() => {
+            mem := ty.members;
+            type_info.is_union = true;
+            for_linked mem { mem | 
+                c.push_as_fields(mem.ty, out, len&);
+                push(out, len&, (type = .FEnd, len = 0));
+                type_info.nunion += 1;
+            };
+        }
+        @default => unreachable();
+    };
+    type_info.size = ty.size.intcast();
+    type_info.align_log2 = (@as(i64) ty.align.zext()).trailing_zeros().intcast();
+    ty.ir_index = c.m.new_type(type_info).intcast();
+    ty.ir_index
+}
+
+fn push_as_fields(c: *Ctx, ty: *CC.CType, out: *QList(Qbe.Field), len: *i64) void = {
+    @debug_assert_ne(ty.kind, .TY_VLA, "cannot have vla in a struct");
+    if ty.kind == .TY_ARRAY {
+        if(ty.is_flexible, => return());
+        // TODO: could be more efficient with nested arrays by making an ir_index
+        //       here too, it just gets confusing because you'd need to carefully not use that when passing by value. 
+        range(0, ty.array_len.intcast()) { _ |
+            c.push_as_fields(ty.base, out, len);
+        };
+        return();
+    };
+    if @is(ty.kind, .TY_STRUCT, .TY_UNION) {
+        push(out, len, (type = .FTyp, len = c.ir_index(ty).bitcast()));
+        return();
+    };
+    tag: Qbe.FieldType = @match(ty.kind) {
+        fn TY_FLOAT()   => .Fs;
+        fn TY_DOUBLE()  => .Fd;
+        fn TY_LDOUBLE() => .Fd;
+        @default => {
+            @switch(ty.size) {
+                @case(1) => .Fb;
+                @case(2) => .Fh;
+                @case(4) => .Fw;
+                @case(8) => .Fl;
+                @default => panic("invalid size for primitive in push_fields");
+            }
+        };
+    };
+    push(out, len, (type = tag, len = ty.size.bitcast()));
 }
