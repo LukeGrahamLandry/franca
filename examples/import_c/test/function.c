@@ -1,4 +1,5 @@
 #include "test.h"
+#include "stdarg.h"
 
 int ret3(void) {
   return 3;
@@ -78,15 +79,13 @@ short sshort_fn();
 
 int add_all(int n, ...);
 
-typedef struct { long _[3]; } va_list;
-
 int add_all(int n, ...);
 int sprintf(char *buf, char *fmt, ...);
 int vsprintf(char *buf, char *fmt, va_list ap);
 
 char *fmt(char *buf, char *fmt, ...) {
   va_list ap;
-  __builtin_va_start(ap);
+  va_start(ap);
   vsprintf(buf, fmt, ap);
 }
 
@@ -252,12 +251,11 @@ int main() {
   ASSERT(6, add_all(3,1,2,3));
   ASSERT(5, add_all(4,1,2,3,-1));
 
-  // TODO
-  // { char buf[100]; fmt(buf, "%d %d %s", 1, 2, "foo"); printf("%s\n", buf); }
+  { char buf[100]; fmt(buf, "%d %d %s", 1, 2, "foo"); printf("%s\n", buf); }
 
   ASSERT(0, ({ char buf[100]; sprintf(buf, "%d %d %s", 1, 2, "foo"); strcmp("1 2 foo", buf); }));
 
-  // ASSERT(0, ({ char buf[100]; fmt(buf, "%d %d %s", 1, 2, "foo"); strcmp("1 2 foo", buf); }));
+  ASSERT(0, ({ char buf[100]; fmt(buf, "%d %d %s", 1, 2, "foo"); strcmp("1 2 foo", buf); }));
 
   ASSERT(251, uchar_fn());
   ASSERT(65528, ushort_fn());
@@ -272,7 +270,7 @@ int main() {
 
   ASSERT(0, ({ char buf[100]; sprintf(buf, "%.1f", (float)3.5); strcmp(buf, "3.5"); }));
 
-  // ASSERT(0, ({ char buf[100]; fmt(buf, "%.1f", (float)3.5); strcmp(buf, "3.5"); }));
+  ASSERT(0, ({ char buf[100]; fmt(buf, "%.1f", (float)3.5); strcmp(buf, "3.5"); }));
 
   ASSERT(5, (add2)(2,3));
   ASSERT(5, (&add2)(2,3));
