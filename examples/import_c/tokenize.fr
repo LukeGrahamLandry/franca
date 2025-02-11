@@ -1,10 +1,38 @@
 // Adapted from chibicc. MIT License. Copyright (c) 2019 Rui Ueyama
+#use("@/examples/import_c/lib.fr");
+
+// TODO: make this smaller!
+Token :: @rec @struct(
+    kind: Tokens.TokenKind,
+    next: *Token,
+    val: i64,  // number
+    fval: f64, // number
+    loc: CStr,
+    len: i32,
+    ty: *CType,  // string, number
+    str_buf: *u8,  // string TODO: make this a rawptr?
+    file: *File,
+    line_no: i32,
+    line_delta: i32,
+    at_bol: bool,
+    has_space: bool,
+    hideset: *import("@/examples/import_c/preprocess.fr").Hideset, // ident
+    origin: *Token,
+);
+
+File :: @struct(
+    name: Str,
+    contents: Str,
+    
+    // For #line directive
+    display_name: Str,
+    line_delta: i32,
+);
 
 /*********************
 *   Parser Helpers   *
 **********************/
 
-#use(CC);
 #use(Types);
 Ctx :: Compile.Ctx;
 
@@ -139,15 +167,14 @@ fn read_ident(start: *u8) i64 = {
 
 // Read a punctuator token from p and returns its length.
 fn read_punct(p: *u8) i64 = {
-    // TODO: be not slow
+    // TODO: be not :SLOW
     kw :: @const_slice(
         "<<=", ">>=", "...", "==", "!=", "<=", ">=", "->", "+=", "-=", "*=", "/=",
         "++",  "--",  "%=",  "&=", "|=", "^=", "&&", "||", "<<", ">>", "##",
     );
     
     for kw { it |
-        // TODO: safety if we're at the end of the input. should really just pad a few zeros on the end after we read the file for good luck
-        if(p.slice(3).starts_with(it), => return(it.len));
+        if(p.slice(3).starts_with(it), => return(it.len));  // :BoundsPadding
     };
     
     // TODO: chibicc did ispunct(), are you allowed to just have random shit in here? like what about @?
@@ -157,6 +184,7 @@ fn read_punct(p: *u8) i64 = {
 }
 
 fn read_escaped_char(c: *Ctx, new_pos: **u8, p: *u8) Ty(i64, bool) = {  // (ch, is unicode thingy)
+    ::if(?i64);
     octal :: fn(ch: u8) ?i64 => 
         if("0".ascii() <= ch && ch <= "7".ascii(), => (Some = zext(ch - "0".ascii())), => .None);
     
@@ -281,7 +309,7 @@ fn string_literal_end(c: *Ctx, p: *u8) Ty(*u8, bool) = {
     (p, had_escapes)
 }
 
-fn read_string_literal(c: *Ctx, start: *u8, quote: *u8, $T: Type, ty: *CC.CType, $read_char: @Fn(p: **u8, len: *i64, buf: []T) void) *Token #generic = {
+fn read_string_literal(c: *Ctx, start: *u8, quote: *u8, $T: Type, ty: *Types.CType, $read_char: @Fn(p: **u8, len: *i64, buf: []T) void) *Token #generic = {
     p   := quote.offset(1);
     end, had_escapes := c.string_literal_end(p);
     buf := c.arena.alloc(T, ptr_diff(quote, end));  // :AuditQuotePointer TODO: chibicc used `start` here in read_utf16_string_literal but none of the others
@@ -729,7 +757,7 @@ fn new_file(c: *Ctx, name: Str, contents: Str) *File = {
     file
 }
 
-fn tokenize_file(c: *Ctx, path: Str) *CC.Token = {
+fn tokenize_file(c: *Ctx, path: Str) *Token = {
     prefix := Preprocess.HACK_BUILTIN_FOLDER_PREFIX;
     src := u8.list(c.arena);   // TODO: can probably be temp() since we copy string literals out
     if path.starts_with(prefix) {
@@ -744,7 +772,7 @@ fn tokenize_file(c: *Ctx, path: Str) *CC.Token = {
 }
 
 // pushes some extra
-fn tokenize_string(c: *Ctx, path: Str, src: *List(u8)) *CC.Token = {
+fn tokenize_string(c: *Ctx, path: Str, src: *List(u8)) *Token = {
     // :BoundsPadding
     // we want it to be a c string, and if we add some extra zeros, the lexer doesn't 
     // have to worry about bounds checks when it looks a few characters ahead to match 

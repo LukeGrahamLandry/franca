@@ -17,7 +17,100 @@
 //       franca program using a c library should get dead code elimination the same 
 //       as it would using a franca library. 
 
-#use(CC);
+#use("@/examples/import_c/lib.fr");
+#use(Tokens);
+
+Obj :: @rec @struct(
+    next: *Obj,
+    name: CStr,
+    ty: *CType,
+    tok: *Token,
+    is_local: bool,
+    align: i32,
+    stack_slot: Qbe.Ref, 
+    is_function: bool,
+    is_definition: bool,
+    is_static: bool,
+    is_tentative: bool,
+    is_tls: bool,
+    init_data: []u8,
+    init_data_needs_null_terminator: bool,
+    rel: *Relocation,
+    is_inline: bool,
+    params: *Obj,
+    body: *Node,
+    locals: *Obj,
+    stack_size: i32,
+    f: *Qbe.Fn,
+    par_r: Qbe.Ref,
+    global_symbol: ?u32,  // TODO: use this more
+);
+Relocation :: @rec @struct(
+    next: *Relocation,
+    offset: i32,
+    label: CStr,  // TODO: why does chibicc have an extra *indirection here?
+    addend: i64,
+);
+Node :: @rec @struct(
+    kind: NodeKind,
+    next: *Node,
+    ty: *CType,
+    tok: *Token,
+    lhs: *Node,
+    rhs: *Node,
+    cond: *Node,
+    then: *Node,
+    else: *Node,
+    body: *Node,
+    member: *Member,
+    func_ty: *CType,
+    args: *Node,
+    ret_buffer: *Obj,
+    var: *Obj,
+    r: Qbe.Ref,
+    lvalue: Qbe.Ref,  // what would you get if you took the & of this expression
+    current_block: *Qbe.Blk,   // TODO: remove
+);
+
+NodeKind :: @enum(i32) (
+    ND_NULL_EXPR, // Do nothing
+    ND_STMT,
+    ND_ADD,       // +
+    ND_SUB,       // -
+    ND_MUL,       // *
+    ND_DIV,       // /
+    ND_NEG,       // unary -
+    ND_MOD,       // %
+    ND_BITAND,    // &
+    ND_BITOR,     // |
+    ND_BITXOR,    // ^
+    ND_SHL,       // <<
+    ND_SHR,       // >>
+    ND_EQ,        // ==
+    ND_NE,        // !=
+    ND_LT,        // <
+    ND_LE,        // <=
+    ND_ASSIGN,    // =
+    ND_COND,      // ?:
+    ND_COMMA,     // ,
+    ND_MEMBER,    // . (struct member access)
+    ND_ADDR,      // unary &
+    ND_DEREF,     // unary *
+    ND_NOT,       // !
+    ND_BITNOT,    // ~
+    ND_LOGAND,    // &&
+    ND_LOGOR,     // ||
+    ND_FUNCALL,   // Function call
+    ND_VAR,       // Variable
+    ND_VLA_PTR,   // VLA designator
+    ND_NUM,       // Integer
+    ND_CAST,      // Type cast
+    ND_MEMZERO,   // Zero-clear a stack variable
+    //ND_ASM,       // "asm"
+    //ND_CAS,       // Atomic compare-and-swap
+    //ND_EXCH,      // Atomic exchange
+    ND_INVALID,
+);
 
 // Scope for local variables, global variables, typedefs
 // or enum constants
@@ -1307,11 +1400,8 @@ fn init_desg_expr(c: *Ctx, desg: *InitDesg, tok: *Token) *Node = {
     rhs := c.new_num(desg.idx, tok);
     c.new_add(lhs&, rhs&, tok);
     node := c.new_binary(.ND_ADD, lhs, rhs, tok);
-    //@println("gen init_desg_expr: %", lhs.kind);
     if lhs.kind == .ND_VAR {
-        //@println("var % %", lhs.var.name, lhs.var.stack_slot);
         if lhs.var.global_symbol { id |
-            //@println("%", c.m.str(id));
         };
     };
     c.gen_expr(node);
@@ -1320,7 +1410,6 @@ fn init_desg_expr(c: *Ctx, desg: *InitDesg, tok: *Token) *Node = {
 
 fn create_lvar_init(c: *Ctx, init: *Initializer, ty: *CType, desg: *InitDesg, tok: *Token) *Node = {
     if ty.kind == .TY_ARRAY {
-        //println("arr create_lvar_init");
         node := c.new_node(.ND_NULL_EXPR, tok);
         range(0, ty.array_len.intcast()) { i |
             desg2: InitDesg = (next = desg, idx = i, member = Member.ptr_from_int(0), var = Obj.ptr_from_int(0));
@@ -1945,7 +2034,6 @@ fn declare_builtin_functions(c: *Ctx) void = {
 // program = (typedef | function-definition | global-variable)*
 fn parse(c: *Ctx, tok: *Token) *Obj = {
     c.declare_builtin_functions();
-
     //c.speculate = true;
     while => tok.kind != .TK_EOF {
         attr := VarAttr.zeroed();

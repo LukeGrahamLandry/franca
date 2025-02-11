@@ -239,7 +239,8 @@ fn resolve_func_args(self: *ResolveScope, func: *Func) PRes = {
     .Ok
 }
 
-fn value_to_scope(self: *SelfHosted, value: Values, type: Type) Res(ScopeId) = {
+// save_scope_as is used for avoiding infinite recursion when we just made a new function for an import
+fn value_to_scope(self: *SelfHosted, value: Values, type: Type, save_scope_as: ?Symbol) Res(ScopeId) = {
     // :get_or_create_type
     if type == ScopeId {
         return(Ok = ScopeId.assume_cast(value&)[]);
@@ -261,6 +262,9 @@ fn value_to_scope(self: *SelfHosted, value: Values, type: Type) Res(ScopeId) = {
             @err_assert(e.expr&.is(.Block), "#use fn non Block body %", self.comp().log(use_func)) return;
             @debug_assert(!(e.expr.Block.scope == NOSCOPE), "ICE: #use unresolved block"); 
             use_func.use_scope = e.expr.Block.scope;
+            if save_scope_as { name |
+                self.imports.insert(name, use_func.use_scope);
+            };
             _ := @try(self.poll_in_place(void, => self.compile_body(fid))) return;
         };
         return(Ok = use_func.use_scope);
@@ -273,6 +277,7 @@ fn add_use(self: *ResolveScope, a: *Annotation, reexport: bool) PRes = {
     arg := @unwrap(a.non_void_arg(), "#use requires an argument") return;
     @if(TRACK_SCOPES) @eprintln("[S] Starting #use %", self.compiler.comp().log(arg));
     @try(self.walk_expr(arg)) return;
+    self.compiler.last_loc = arg.loc;
     @match(arg.expr&) {
         // currently this only works as a function tag because the identifier gets looked up in the outer scope
         // but the #use only affects the function body so there's no confusion about needing to resolve all #use's 
@@ -290,7 +295,7 @@ fn add_use(self: *ResolveScope, a: *Annotation, reexport: bool) PRes = {
 }
 
 fn add_use(self: *SelfHosted, scope_with_use: ScopeId, value: Values, type: Type, reexport: bool) Res(ScopeId) = {
-    new_scope := @try(value_to_scope(self, value, type)) return; 
+    new_scope := @try(value_to_scope(self, value, type, .None)) return; 
     add_use(self, scope_with_use, new_scope, reexport);
     (Ok = new_scope)
 }
@@ -480,7 +485,7 @@ fn find_var_in_scope_inner(self: *SelfHosted, name: Symbol, s: ScopeId, for_use:
                             hack := self.poll_in_place(T, => self.find_const(it[], .None));
                             value, type := self.unwrap_report_error(T, hack);
                             @if(TRACK_SCOPES) @println("[S] #use(%)", log(value&, self, type));
-                            hack := value_to_scope(self, value, type);
+                            hack := value_to_scope(self, value, type, .None);
                             new_scope := self.unwrap_report_error(ScopeId, hack);
                             the_use.who = (Scope = new_scope);
                             // continue
@@ -973,8 +978,8 @@ fn import_as_scope(self: *SelfHosted, name: Symbol) Res(ScopeId) = {
     // TODO: think about what the parent scope should be here. 
     fake_fid := @try(make_function_scope(self, stmts.items(), name, TOP_LEVEL_SCOPE)) return;
     val := self.to_values(FuncId, fake_fid);
-    scope := @try(value_to_scope(self, val, FuncId)) return;
-    self.imports.insert(name, scope);
+    scope := @try(value_to_scope(self, val, FuncId, (Some = name))) return;
+    self.imports.insert(name, scope);  // redundant with save_scope_as since we know we just made the function
     
     (Ok = scope)
 }

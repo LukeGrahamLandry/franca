@@ -1,101 +1,22 @@
-CC :: import("@/examples/import_c/chibicc.fr");
-
 ENABLE_TRACY :: false;
-#include_std("backend/lib.fr");
-#include_std("compiler/worker.fr");
+
 AstExternal :: import("@/compiler/ast_external.fr");
 Tokens      :: import("@/examples/import_c/tokenize.fr");
 Types       :: import("@/examples/import_c/type.fr");
 Preprocess  :: import("@/examples/import_c/preprocess.fr");
 
 Compile :: import("@/examples/import_c/compile.fr");
-:: Compile'comptime_init_rules_table();
 
-JUST_ONE :: false;
-USE_HOST_BACKEND :: true;
-LOG_IR :: false;
 SPAM :: false;
 
-fn main() void = {
-    :: assert(!USE_HOST_BACKEND, "cannot start from main() when USE_HOST_BACKEND");
-    vtable := ImportVTable.zeroed();
-    AstExternal'fill_backend_vtable(vtable&);
-    run_tests(vtable&);
-}
+:: Compile'comptime_init_rules_table();
 
-fn driver(vtable: *ImportVTable) void = {
-    @if(USE_HOST_BACKEND, run_tests(vtable), main());
-}
-
-fn run_tests(vtable: *ImportVTable) void = {
-    tests_folder := "examples/import_c/test";
-    ::FmtPad(Str);
-    passed := 0;
-    failed := 0;
-    //if true {
-    walk_directory(@fmt_cstr("%", tests_folder)) { e |
-        if e.name.ends_with(".c") {
-            continue :: local_return;
-            // "alignof.c" needs backend support for _Alignas on globals
-            // "atomic.c" needs backend support for CAS
-            // "tls.c" implement _Thread_Local with env (higher level that uses franca's context?)
-            // "asm.c" not doing inline asm for now
-            // "builtin.c" __builtin_types_compatible_p (easy)
-            // extern.c
-
-            path := @tfmt("%/%", tests_folder, e.name);
-            @if(JUST_ONE) {
-                path = "examples/import_c/b.c";
-            };
-            
-            @print("%", f_pad(e.name, 40, .After));
-            or compile_one_file(vtable, path) { err |
-                println("[failed compile]");
-                println(err);
-                failed += 1;
-                @if(JUST_ONE) exit(1);
-                continue();
-            };
-            ok, out, err := exec_and_catch("./c.out", empty(), todo_allocator);
-            ok := ok && out.items().ends_with("OK\n");
-            (@if(ok, passed&, failed&))[] += 1;
-            @println("[%]", if(ok, => "ok", => "failed run"));
-            if !ok {
-                print(out.items());
-                print(err.items());
-            };
-            @if(JUST_ONE) return();
-        };
-    };
-    if failed == 0 {
-        @println("\nAll is fine! (passed % tests)", passed);
-    } else {
-        @println("\n% of % tests failed.", failed, failed + passed);
-    };
-    exit((failed != 0).int());
-}
-
-fn compile_one_file(vtable: *ImportVTable, path: Str) Result(void, Str) #use(Tokens) = {
-    m := @uninitialized QbeModule;
-    a := query_current_arch();
-    
-    m&.AstExternal'init_default_module_dyn(vtable, (arch = a.unwrap(), os = query_current_os(), type = .Exe));
-    @if(LOG_IR) {
-        m.debug["P".char()] = true;
-        m.debug["R".char()] = true;
-    };
-    
-    // TODO: this is ugly
-    codegen_thread_main := ptr_cast_unchecked(@type vtable.codegen_thread_main, CodegenWorker, vtable.codegen_thread_main&)[];
-    ctx: *CodegenShared = init(m&, libc_allocator, codegen_thread_main);
-
-    c := Compile.Ctx.zeroed();
-    c.arena = temp();
+fn init_ctx(c: *Compile.Ctx, m: *QbeModule) void = {
+    c.arena = temp();  // TODO
     c.current_fn = .None;
     c.brk_label = .None;
     c.cont_label = .None;
-    scope := Compile.Scope.zeroed();
-    c.scope = scope&;
+    c.scope = c.arena.box_zeroed(Compile.Scope);
     c.scope.vars = init(c.arena);
     c.scope.tags = init(c.arena);
     c.error_buf = list(temp());
@@ -105,13 +26,10 @@ fn compile_one_file(vtable: *ImportVTable, path: Str) Result(void, Str) #use(Tok
     c.include_guards = init(c.arena);
     c.filename_cache = init(c.arena);
     c.include_paths = list(c.arena);
-    c.m = m&;
-    
-    c.include_paths&.push("examples/import_c/test"); // for the macro.c test (chibicc's 'make test' does this). 
+    c.m = m;
     
     // you need this before calling parse() in compile because the preprocessor calls into const_expr
     {
-        c := c&;
         // :TopLevelFunction
         // :SLOW it's silly that top level constants need to be in a function context and we linearly scan it every time you have a numeric literal
         // this needs to be fixed so i don't have to cry when someone generates an array of binary data. 
@@ -125,43 +43,31 @@ fn compile_one_file(vtable: *ImportVTable, path: Str) Result(void, Str) #use(Tok
         c.f.start = c.new_block();// HACK
         c.f.start.ins = new(0); // HACK
         c.b = c.f.start; // HACK
-        c.globals = CC.Obj.ptr_from_int(0);
+        c.globals = Compile.Obj.ptr_from_int(0);
     };
     
-    prog := @try(c&.compile_file(path)) return;
-    emit_the_code(c&, ctx, prog);
-    join_codegen_thread(ctx);
-
-    outpath := "./c.out";
-    outfile := fopen(outpath.maybe_borrow_cstr(temp()), "w".sym().c_str());
-    chunks := {m.target.finish_module}(m&);
-    for chunks { chunk | 
-        write(outfile, chunk);
-    };
-    fclose(outfile);
-    drop(m&);
-    .Ok
+    catch_call(c, void, => Preprocess'init_macros(c)).or(fn(e) => panic(e));
 }
 
-fn compile_file(c: *Compile.Ctx, path: Str) Result(*CC.Obj, Str) = {
+fn catch_call(c: *Compile.Ctx, $T: Type, $body: @Fn() T) Result(T, Str) #generic = {
     ::enum(WhichJump);
     return(@match(try(c.a_little_hidden_control_flow&)) {
-        fn Try()   => (Ok = impl(c, path));
+        fn Try()   => (Ok = body());
         fn Catch() => (Err = c.error_buf.items());
     });
-    
-    impl :: fn(c: *Compile.Ctx, path: Str) *CC.Obj = {
-        Preprocess'init_macros(c);  // TODO: only do this once but it has to be in the try{}
+}
+
+fn compile_file(c: *Compile.Ctx, path: Str) Result(*Compile.Obj, Str) = {
+    catch_call(c, *Compile.Obj) {
         c.macro_base_file = path;
-        
         tok := c.tokenize_file(path);
         tok  = c.Preprocess'preprocess(tok);
         c.parse(tok)
-    };
+    }
 }
 
-fn emit_the_code(c: *Compile.Ctx, ctx: *CodegenShared, obj: *CC.Obj) void = {
-    :: ptr_utils(CC.Obj);
+fn emit_the_code(c: *Compile.Ctx, ctx: *CodegenShared, obj: *Compile.Obj) void = {
+    :: ptr_utils(Compile.Obj);
     while => !obj.next.is_null() {
         @assert(!obj.is_tls, "Thread Local Storage is not supported");
         if obj.is_definition {
@@ -183,7 +89,7 @@ fn emit_the_code(c: *Compile.Ctx, ctx: *CodegenShared, obj: *CC.Obj) void = {
 }
 
 // TODO: do i need a way of asking for a certain alignment?
-fn translate_data(m: *QbeModule, obj: *CC.Obj) []Qbe.Dat = {
+fn translate_data(m: *QbeModule, obj: *Compile.Obj) []Qbe.Dat = {
     out := Qbe.Dat.list(3, temp());
     lnk := temp().box(Qbe.Lnk);
     fill_lnk(lnk, obj, m);
@@ -254,51 +160,23 @@ fn for_linked(head: ~T, $body: @Fn(it: T) void) void = {
     };
 }
 
-
-fn fill_lnk(lnk: *Qbe.Lnk, obj: *CC.Obj, m: *QbeModule) void = {
+fn fill_lnk(lnk: *Qbe.Lnk, obj: *Compile.Obj, m: *QbeModule) void = {
     lnk.export = !obj.is_static;
     lnk.id = obj.global_symbol || m.mangle(obj);
 }
 
-fn mangle(m: *QbeModule, obj: *CC.Obj) u32 = {
+fn mangle(m: *QbeModule, obj: *Compile.Obj) u32 = {
+    ::ptr_utils(@type obj.tok[]);
     name := obj.name.str();
-    ::ptr_utils(CC.Token);
     if obj.is_static && !obj.tok.is_null() {
         name = @tfmt("%@%", name, obj.tok.file.name); // not very rigorous
     };
     m.intern(name)
 }
 
-::enum(CC.NodeKind);
+::enum(Compile.NodeKind);
 
-::ptr_utils(CC.Token); ::enum(Tokens.TokenKind);
-
-fn append_tokens(tok1: *CC.Token, tok2: *CC.Token) *CC.Token = {
-    if(!tok1.is_null() || tok1.kind == .TK_EOF, => return(tok2));
-    t := tok1;
-    while => t.next.kind != .TK_EOF {
-        t = t.next;
-    };
-    t.next = tok2;
-    tok1
-}
-
-fn print_tokens(tok: *CC.Token) void = {
-    out := u8.list(temp());
-    line := 0;
-    while => tok.kind != .TK_EOF {
-        if line > 1 && tok.at_bol {
-            @fmt(out&, "\n");
-        };
-        if tok.has_space && !tok.at_bol {
-            @fmt(out&, "  ");
-        };
-        @fmt(out&, "%", tok.loc.str().slice(0, tok.len.zext()));
-        line += 1;
-        tok = tok.next;
-    };
-    println(out.items());
-}
+::ptr_utils(Tokens.Token); ::enum(Tokens.TokenKind);
 
 // TODO: move this and call it from elsewhere
 fn new_phi(f: *Qbe.Fn, b: *Qbe.Blk, k: Qbe.Cls) *Qbe.Phi = {

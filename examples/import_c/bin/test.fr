@@ -1,0 +1,101 @@
+C :: import("@/examples/import_c/lib.fr");
+
+#include_std("backend/lib.fr");
+#include_std("compiler/worker.fr");
+
+// TODO: make worker something you can import nicely
+ENABLE_TRACY :: false;
+
+JUST_ONE :: false;
+LOG_IR :: false;
+
+fn main() void = {
+    vtable := ImportVTable.zeroed();
+    C'AstExternal'fill_backend_vtable(vtable&);
+    run_tests(vtable&);
+}
+
+fn driver(vtable: *ImportVTable) void = {
+    USE_HOST_BACKEND :: true;
+    @if(USE_HOST_BACKEND, run_tests(vtable), main());
+}
+
+// "alignof.c" needs backend support for _Alignas on globals
+// "atomic.c" needs backend support for CAS
+// "tls.c" implement _Thread_Local with env (higher level that uses franca's context?)
+// "asm.c" not doing inline asm for now
+// "builtin.c" __builtin_types_compatible_p (easy)
+// extern.c
+fn run_tests(vtable: *ImportVTable) void = {
+    tests_folder := "examples/import_c/test";
+    ::FmtPad(Str);
+    passed := 0;
+    failed := 0;
+    walk_directory(@fmt_cstr("%", tests_folder)) { e |
+        if e.name.ends_with(".c") {
+            continue :: local_return;
+
+            path := @tfmt("%/%", tests_folder, e.name);
+            @if(JUST_ONE) {
+                path = "examples/import_c/b.c";
+            };
+            
+            @print("%", f_pad(e.name, 40, .After));
+            or compile_one_file(vtable, path) { err |
+                println("[failed compile]");
+                println(err);
+                failed += 1;
+                @if(JUST_ONE) exit(1);
+                continue();
+            };
+            ok, out, err := exec_and_catch("./c.out", empty(), todo_allocator);
+            ok := ok && out.items().ends_with("OK\n");
+            (@if(ok, passed&, failed&))[] += 1;
+            @println("[%]", if(ok, => "ok", => "failed run"));
+            if !ok {
+                print(out.items());
+                print(err.items());
+            };
+            @if(JUST_ONE) return();
+        };
+    };
+    if failed == 0 {
+        @println("\nAll is fine! (passed % tests)", passed);
+    } else {
+        @println("\n% of % tests failed.", failed, failed + passed);
+    };
+    exit((failed != 0).int());
+}
+
+fn compile_one_file(vtable: *ImportVTable, path: Str) Result(void, Str) = {
+    m := @uninitialized QbeModule;
+    a := query_current_arch();
+    
+    m&.C'AstExternal'init_default_module_dyn(vtable, (arch = a.unwrap(), os = query_current_os(), type = .Exe));
+    @if(LOG_IR) {
+        m.debug["P".char()] = true;
+        m.debug["R".char()] = true;
+    };
+    
+    // TODO: this is ugly
+    codegen_thread_main := ptr_cast_unchecked(@type vtable.codegen_thread_main, CodegenWorker, vtable.codegen_thread_main&)[];
+    ctx: *CodegenShared = init(m&, libc_allocator, codegen_thread_main);
+
+    c := C'Compile.Ctx.zeroed();
+    C'init_ctx(c&, m&);
+    c.include_paths&.push("examples/import_c/test"); // for the macro.c test (chibicc's 'make test' does this). 
+    
+    prog := @try(c&.compile_file(path)) return;
+    emit_the_code(c&, ctx, prog);
+    join_codegen_thread(ctx);
+
+    outpath := "./c.out";
+    outfile := fopen(outpath.maybe_borrow_cstr(temp()), "w".sym().c_str());
+    chunks := {m.target.finish_module}(m&);
+    for chunks { chunk | 
+        write(outfile, chunk);
+    };
+    fclose(outfile);
+    drop(m&);
+    .Ok
+}

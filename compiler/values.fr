@@ -197,12 +197,31 @@ fn emit_relocatable_constant_body(
         });
         (fn Struct(f) => {
             @err_assert(!f.is_union, "TODO: union in a constant. but its hard cause what if theres pointers in there but we don't know which is active") return;
+            @err_assert((@as(i64) info.stride_bytes.zext().mod(8)) == 0, "TODO: non-8-aligned struct '%'", c.log_type(ty)) return;
+            
             // Just do all the fields.
+            off := 0;
             each f.fields { f |
                 info := c.get_info(f.ty);
-                @assert_eq(@as(i64) info.stride_bytes.zext().mod(8), 0, "TODO: non-8-aligned field '%' in type '%'", c.pool.get(f.name), c.log_type(ty));
-                v := value.slice(f.byte_offset, f.byte_offset + info.stride_bytes.zext());
-                @try(c.emit_relocatable_constant_body(f.ty, v, out, false)) return;
+                if ((@as(i64) info.stride_bytes.zext().mod(8)) == 0) {
+                    @err_assert(off <= f.byte_offset, "struct fields must be in order (%)", c.log_type(ty)) return;
+                    off = f.byte_offset + info.stride_bytes.zext();
+                    v := value.slice(f.byte_offset, off);
+                    @try(c.emit_relocatable_constant_body(f.ty, v, out, false)) return;
+                } else {
+                    // HACK: currently a BakedEntry is always 8 bytes, but we want to 
+                    // support smaller fields inside a struct that contains other pointers. 
+                    // so when we see a smaller field, read a whole 8 bytes and then skip 
+                    // any other fields that covers.   -- Feb 11, 2025
+                    @err_assert(!info.contains_pointers, "contains_pointers but not 8-aligned: field % of %", c.pool.get(f.name), c.log_type(ty)) return;
+                    @debug_assert(info.stride_bytes < 8, "non-8-aligned but >8");
+                    if off <= f.byte_offset {
+                        off = f.byte_offset + 8;
+                        v := value.slice(f.byte_offset, off).as_ptr();
+                        v := ptr_cast_unchecked(u8, i64, v)[];
+                        out.push((Num = (value = v)));
+                    };
+                };
             };
         });
         (fn Tagged(f) => {
