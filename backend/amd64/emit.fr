@@ -257,8 +257,8 @@ fn slot(r: Qbe.Ref, e: *AmdState) i64 = {
     -(fslot - s)
 }
 
-fn emitcopy(r1: Qbe.Ref, r2: Qbe.Ref, k: Qbe.Cls, e: *AmdState) void = {
-    i := make_ins(.copy, k, r1, r2, QbeNull);
+fn emitcopy(dest: Qbe.Ref, src: Qbe.Ref, k: Qbe.Cls, e: *AmdState) void = {
+    i := make_ins(.copy, k, dest, src, QbeNull);
     emitins(i, e);
 }
 
@@ -619,6 +619,16 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
         fn syscall() => {
             e.a&.push(0x0F);
             e.a&.push(0x05);
+        }
+        fn byteswap() => {
+            k := i&.cls();
+            if i.to != i.arg&[0] {
+                emitcopy(i.to, i.arg&[0], k, e);
+            };
+            r := i.to.int_reg_d();
+            e.a&.push(pack_rex_si(k.is_wide(), DONT_CARE_REG, r, DONT_CARE_REG));
+            e.a&.push(TWO_BYTE_OP_PREFIX);
+            e.a&.push(0xC8 + trunc(@as(i64) bit_and(@as(i64) r, @as(i64) 0b0111)));
         }
         @default => {
             o := i&.op();
@@ -987,7 +997,7 @@ fn assemble(e: *AmdState, i: *Qbe.Ins) void = {
     
     if entry.ext != 0 {  // encoded as TMP number so ext=0 is RXX not RAX
         // hack because it thinks the con is redundant but rcx is fixed
-        shift := i.op() == .shl || i.op() == .sar || i.op() == .shr;
+        shift := @is(i.op(), .shl, .sar, .shr, .rotl, .rotr);
         if shift && rtype(i.arg&[ext_index]) == .RTmp && i.arg&[int(ext_index == 0)] == TMP(Amd64Reg.RCX) {
             ext_index = int(ext_index == 0);
             //i.arg&.items().swap(0, 1); // HACK
@@ -1116,6 +1126,7 @@ AmdEncodingEntry :: @struct(
 // imm args are sign extended to the operation size. 
 // Magic numbers transcribed from https://www.felixcloutier.com/x86
 // Always put the imm8 before imm32 since imm32 will match smaller numbers too for store
+// There are a bunch of hacks in assemble() for specific instructions to make the data here work. 
 fn amd64_encoding_table() Ty([]AmdEncodingEntry, []u16) = @amd64_encoding_data (
     (.add, 
         (.M, .imm8, (0x83), 0),
@@ -1272,5 +1283,13 @@ fn amd64_encoding_table() Ty([]AmdEncodingEntry, []u16) = @amd64_encoding_data (
     ),
     (.truncd,
         (.F, .F, (0x0F, 0x5A), (), (0xF2)), // cvtsd2ss  
+    ),
+    (.rotr, 
+        (.M, .imm8, (0xC1), 1),
+        (.M, .R, (0xD3), 1),
+    ),
+    (.rotl, 
+        (.M, .imm8, (0xC1), 0),
+        (.M, .R, (0xD3), 0),
     ),
 );

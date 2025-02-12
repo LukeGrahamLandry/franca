@@ -91,6 +91,7 @@ fn sha256_update(h: *Array(u32, 8), chunk: *Array(u8, 64)) void = {
 
 // TODO: something broken with ::assert_eq(a, b) outside a block at top level :fucked
 
+// TODO: run these! it does not run! FIXME -- Feb 11, 2025
 fn sha256_examples() #test = {
     ::assert_eq(u32);
     assert_eq(0x78563412, byte_swap(0x12345678));
@@ -140,67 +141,81 @@ fn eratosthenes($n: i64) []u32 #fold = {
     out.items()
 }
 
-// If you wish to write a hashing algorithm in Franca you must first invent the universe. 
+fn rotr();
+fn byte_swap();
 
-// TODO: make this an #intrinsic instead so we can get better register allocation. 
-fn byte_swap(x: u32) u32 #asm #aarch64 = (
-    rev(Bits.W32, x0, x0),
-    ret(),  
-);
+:: @if(::has_feature("@franca/bitops"), {
+    fn rotr(x: u32, amount: i64) u32 #ir(.rotr, .Kw); 
     
-fn byte_swap(x: i64) i64 #asm #aarch64 = (
-    rev(Bits.X64, x0, x0),
-    ret(),  
-);
-
-fn byte_swap(x: u64) u64 #redirect(i64, i64);
-
-fn rev(sf: Bits, dest: RegO, src: RegI) u32 = 
-    @bits(sf, 0b10110101100000000001, sf, src, dest);
-
-fn byte_swap(x: u32) u32 #asm #x86_bytes = (fn(out) = @asm_x64(
-    0x0F, // prefix
-    @as(u8) 0xC8 + trunc(@as(i64) @as(u4) X86Reg.rdi.raw()),  // BSWAP
-    encode_bin(PrimaryOp.MovReg, X86Reg.rax, X86Reg.rdi),
-    PrimaryOp.Ret
-) out);
-
-fn byte_swap(x: i64) i64 #asm #x86_bytes = (fn(out) = @asm_x64(
-    0b01001000, // w = true
-    0x0F, // prefix
-    @as(u8) 0xC8 + trunc(@as(i64) @as(u4) X86Reg.rdi.raw()),  // BSWAP
-    encode_bin(PrimaryOp.MovReg, X86Reg.rax, X86Reg.rdi),
-    PrimaryOp.Ret
-) out);
-
-// TODO: make this an #intrinsic instead so we can get better register allocation. 
-// TODO: this should work with a const arg directly on a Merged #asm func. 
-//       it works for either if you only have one arch. HACK 
-//       add this as a test even if you make this an intrinsic!
-fn rotr(x: u32, $amount: u5) u32 = {
-    fn impl();
+    fn byte_swap(x: u32) u32 #ir(.byteswap, .Kw);
+    fn byte_swap(x: i64) i64 #ir(.byteswap, .Kl);
+    fn byte_swap(x: u64) u64 #ir(.byteswap, .Kl);
     
-    fn impl(x: u32) u32 #asm #aarch64 = (
-        @bits(Bits.W32, 0b00100111, Bits.W32, 0b0, @as(u5) x0, 0b0, amount, @as(u5) x0, @as(u5) x0),
-        ret(),
+    // TODO: real support for u32 once new backend is ready. 
+    fn bit_xor(a: u32, b: u32) u32 #ir(.xor, .Kw);
+    fn bit_not(a: u32) u32 #inline = bit_xor(a, 0xFFFFFFFF);
+}, {
+    // TODO: move this to a tests after :UpdateBoot cause we should keep #asm functions working. 
+
+    // TODO: this should work with a const arg directly on a Merged #asm func. 
+    //       it works for either if you only have one arch. HACK 
+    //       add this as a test even if you make this an intrinsic!
+    //
+    fn rotr(x: u32, $amount: u5) u32 = {
+        fn impl();
+        
+        fn impl(x: u32) u32 #asm #aarch64 = (
+            @bits(Bits.W32, 0b00100111, Bits.W32, 0b0, @as(u5) x0, 0b0, amount, @as(u5) x0, @as(u5) x0),
+            ret(),
+        );
+    
+        fn impl(x: u32) u32 #asm #x86_bytes = (fn(out) = @asm_x64(
+            0xC1, // ROR
+            @as(u8) pack_modrm(ModrmMode.Direct, X86Reg.rdi, @as(X86Reg) 0b0001),
+            @as(u8) amount,
+            encode_bin(PrimaryOp.MovReg, X86Reg.rax, X86Reg.rdi),
+            PrimaryOp.Ret
+        ) out);
+        
+        impl(x)
+    }
+    
+    fn byte_swap(x: u32) u32 #asm #aarch64 = (
+        rev(Bits.W32, x0, x0),
+        ret(),  
     );
-
-    fn impl(x: u32) u32 #asm #x86_bytes = (fn(out) = @asm_x64(
-        0xC1, // ROR
-        @as(u8) pack_modrm(ModrmMode.Direct, X86Reg.rdi, @as(X86Reg) 0b0001),
-        @as(u8) amount,
+        
+    fn byte_swap(x: i64) i64 #asm #aarch64 = (
+        rev(Bits.X64, x0, x0),
+        ret(),  
+    );
+    
+    fn byte_swap(x: u64) u64 #redirect(i64, i64);
+    
+    fn byte_swap(x: u32) u32 #asm #x86_bytes = (fn(out) = @asm_x64(
+        0x0F, // prefix
+        @as(u8) 0xC8 + trunc(@as(i64) @as(u4) X86Reg.rdi.raw()),  // BSWAP
         encode_bin(PrimaryOp.MovReg, X86Reg.rax, X86Reg.rdi),
         PrimaryOp.Ret
     ) out);
     
-    impl(x)
-}
-
-// TODO: real support for u32 once new backend is ready. 
-fn bit_xor(a: u32, b: u32) u32 #fold = 
-    (@as(i64) a.zext()).bit_xor(b.zext()).trunc();  // :slow
-fn bit_not(a: u32) u32 #fold = 
-    (@as(i64) a.zext()).bit_not().trunc();
+    fn byte_swap(x: i64) i64 #asm #x86_bytes = (fn(out) = @asm_x64(
+        0b01001000, // w = true
+        0x0F, // prefix
+        @as(u8) 0xC8 + trunc(@as(i64) @as(u4) X86Reg.rdi.raw()),  // BSWAP
+        encode_bin(PrimaryOp.MovReg, X86Reg.rax, X86Reg.rdi),
+        PrimaryOp.Ret
+    ) out);
+    
+    fn rev(sf: Bits, dest: RegO, src: RegI) u32 = 
+        @bits(sf, 0b10110101100000000001, sf, src, dest);
+        
+    fn bit_xor(a: u32, b: u32) u32 #fold = 
+        (@as(i64) a.zext()).bit_xor(b.zext()).trunc();  // :slow
+    
+    fn bit_not(a: u32) u32 #fold = 
+        (@as(i64) a.zext()).bit_not().trunc();
+});
 
 fn float(x: u32) f64 = 
     float(@as(i64) x.zext()); 
