@@ -159,7 +159,17 @@ fn emit_the_code(e: *AmdState) void = {
     for_blocks f { b | 
         local_labels[b.id.zext()] = e.next_inst_offset();
         for_insts_forward b { i |
-            emitins(i[], e);
+            if i.op() == .cas0 {
+                cas0, cas1 := find_cas(i, b);
+                @debug_assert_eq(cas1.arg&[0], TMP(Amd64Reg.RAX), "cas arg0 is always RAX");
+                // RAX as old_in and res is implied. 
+                // The two explicit arguments of cmpxchg are p and new. 
+                fix_memarg_slot(e, cas0.arg&.index(0));
+                @debug_assert_eq(rtype(cas0.arg&[0]), .RMem, "p must be encoded as a Mem");
+                cas1.arg&[0] = cas0.arg&[0]
+            } else {
+                emitins(i[], e);
+            };
         };
         @match(b.jmp.type) { 
             fn hlt() => e.a&.push(@as(u8) PrimaryOp.Int3);
@@ -629,6 +639,14 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
             e.a&.push(pack_rex_si(k.is_wide(), DONT_CARE_REG, r, DONT_CARE_REG));
             e.a&.push(TWO_BYTE_OP_PREFIX);
             e.a&.push(0xC8 + trunc(@as(i64) bit_and(@as(i64) r, @as(i64) 0b0111)));
+        }
+        fn cas1() => {
+            k := i&.cls();
+            dest := i.to;
+            assemble(e, i&);
+            if dest != TMP(Amd64Reg.RAX) {
+                emitcopy(dest, TMP(Amd64Reg.RAX), k, e);
+            };
         }
         @default => {
             o := i&.op();
@@ -1291,5 +1309,8 @@ fn amd64_encoding_table() Ty([]AmdEncodingEntry, []u16) = @amd64_encoding_data (
     (.rotl, 
         (.M, .imm8, (0xC1), 0),
         (.M, .R, (0xD3), 0),
+    ),
+    (.cas1,
+        (.M, .R, (0x0F, 0xB1), (), (0xF0)), // lock CMPXCHG
     ),
 );

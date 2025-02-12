@@ -156,7 +156,7 @@ fn collapse_op_amd64(f: *Qbe.Fn, i: *Qbe.Ins, bid: i32) void = {
     //    printfn(f, f.globals.debug_out);
     //};
     chuse(r, 1, f);  // because merge_amd_addr -1
-    m := f.newmem(mem);
+    m := f.new_mem(mem);
     chuse(m, 1, f);
     i[] = make_ins(.addr, i.cls(), r, m, QbeNull);
 }
@@ -382,7 +382,7 @@ fn seladdr(r: *Qbe.Ref, f: *Qbe.Fn) void = {
             write(out, "\n");
         };
     };
-    r[] = f.newmem(mem);
+    r[] = f.new_mem(mem);
 }
 
 fn fix_amd_mem(f: *Qbe.Fn, mem: *Qbe.Addr) void = {
@@ -423,7 +423,7 @@ fn fix_amd_mem(f: *Qbe.Fn, mem: *Qbe.Addr) void = {
     };
 }
 
-fn newmem(f: *Qbe.Fn, mem: Qbe.Addr) Qbe.Ref #inline = {
+fn new_mem(f: *Qbe.Fn, mem: Qbe.Addr) Qbe.Ref #inline = {
     m: i64 = f.nmem.zext();
     f.nmem += 1;
     f.mem&.grow(m + 1);
@@ -577,6 +577,16 @@ fn sel_inner(i: *Qbe.Ins, f: *Qbe.Fn) void = {
                 i.set_op(.copy);
             };
         }
+        fn cas1() => {
+            r0 := i.arg&[0];
+            k := i.cls();
+            rax := TMP(Amd64Reg.RAX);
+            i.arg&[0] = rax;
+            f.emit(.copy, k, QbeNull, rax, QbeNull);
+            i1 := f.emit(i[]);
+            f.emit(.copy, k, rax, r0, QbeNull);
+            fixarg(i1.arg&.index(1), argcls(i, 1), i1, f);
+        }
         @default => {
             if is_alloc(i.op()) {
                 salloc(i.to, i.arg&[0], f);
@@ -589,7 +599,7 @@ fn sel_inner(i: *Qbe.Ins, f: *Qbe.Fn) void = {
                 f.sel_emit(i);
                 return();
             };
-            if is_load(i.op()) {
+            if is_load(i.op()) || i.op() == .cas0 {
                 i1 := f.emit(i[]);
                 seladdr(i1.arg&.index(0), f);
                 f.fixargs(i1);
@@ -636,7 +646,7 @@ fn sel_inner(i: *Qbe.Ins, f: *Qbe.Fn) void = {
                 f.sel_shift(i);
                 return();
             };
-            valid := is_sel_flag(i.op()) || @is(i.op(), .dbgloc, .call, .syscall, .salloc, .copy, .add, .sub, .neg, .mul, .and, .or, .xor, .xtest, .stosi, .dtosi, .swtof, .sltof, .exts, .truncd, .cast, .byteswap);
+            valid := is_sel_flag(i.op()) || @is(i.op(), .dbgloc, .call, .syscall, .salloc, .copy, .add, .sub, .neg, .mul, .and, .or, .xor, .xtest, .stosi, .dtosi, .swtof, .sltof, .exts, .truncd, .cast, .byteswap, .cas0);
             @debug_assert(valid, "unknown instruction %", i.op());
             f.sel_emit(i);
         };
@@ -719,6 +729,7 @@ fn flagi(i0: *Qbe.Ins, i: *Qbe.Ins) *Qbe.Ins = {
     null
 }
 
+// TODO: rot byteswap cas
 // returns (SetsZeroFlag, LeavesFlags)
 fn amd64_flag_table(o: Qbe.O) Ty(bool, bool) = {
     b :: fn($o1: Qbe.O, $o2: Qbe.O) => o.between(o1, o2);
@@ -728,7 +739,7 @@ fn amd64_flag_table(o: Qbe.O) Ty(bool, bool) = {
     if b(.storeb, .cast) || o.between(.flagieq, .flagfuo) || o == .copy || o == .dbgloc || b(.nop, .addr) || o == .sel0 {
         return(false, true)
     };
-    if b(.acmp, .call) || b(.div, .mul) || b(.swap, .xdiv) || o == .sel1 {
+    if b(.acmp, .call) || b(.div, .mul) || b(.swap, .xdiv) || (@is(o, .cas1, .sel1)) {
         return(false, false)
     };
     

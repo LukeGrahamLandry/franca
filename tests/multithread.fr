@@ -37,3 +37,45 @@ fn make_threads() #test = {
     //println("third");
     @assert_ne(A[], B[]);
 }
+
+fn threads_counting() #test = {
+    if !query_context_is_implicit() {
+        println("skip!");
+        return();
+    };
+    
+    #where(fn(T) => is_ptr(T) && size_of(Deref(T)) == 8)
+    compare_and_swap :: fn(p: ~T, old: Deref(T), new: Deref(T)) Deref(T) #inline = {
+        part0 :: fn(p: T) void #ir(.cas0, .Kl);
+        part1 :: fn(old: Deref(T), new: Deref(T)) Deref(T) #ir(.cas1, .Kl);
+        part0(p);
+        part1(old, new)
+    };
+    
+    n_threads :: 10;
+    n_loop    :: 50000;
+    
+    atomic_increment :: fn(p: *i64) void #inline = {
+        prev := p[];
+        dowhile {
+            old  := prev;
+            prev = compare_and_swap(p, old, old + 1);
+            prev != old
+        }
+    };
+    
+    callee :: fn(shared: *i64) void = {
+        range(0, n_loop) { _ |
+            atomic_increment(shared);
+        };
+    };
+    memory  := 0;
+    threads := libc_allocator.alloc(Thread, n_threads);
+    range(0, n_threads) { i |
+        threads[i] = i64.start_thread(callee, memory&);
+    };
+    for threads { t |
+        pthread_join(t, zeroed(*rawptr)).unwrap();
+    };
+    assert_eq(memory, n_threads * n_loop);
+}

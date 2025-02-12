@@ -1,5 +1,33 @@
 - TODO: deal with `CodegenEntry:Bounce` on wasm
 
+## (Feb 12)
+
+- new instructions: rotr, rotl, byteswap
+- compare and swap
+  - arm: there's like memory ordering stuff and im hoping i can just ignore it and always do the same one,
+   and it will just be a bit slower than it could be but prevent threads from stomping on eachother which is the important thing. 
+  - arm: a bit painful cause it's like the only arm instruction that has so many arguments that one is both read and written.
+   so a bit of gymnastics with a fake copy to make sure it doesn't allocate the out parameter to the same register as the wrong input. 
+   which is sad because i always need an extra real copy because i don't have a good way to tell rega that the output needs
+   to be the same register as a specific input without choosing a specific register like you do for amd shifts. 
+  - my llvm-mc dis doesn't think cas is a valid instruction. it sure runs tho so idx what's going on. 
+  - need to treat cas as a store so loadopt knows it can change in the loop
+  - there's still some problem where it doesn't work if you try to use the return value instead of reloading it. 
+   i think i'll do it for amd so i can see if it's a logic bug or i'm just using the wrong instructions somehow. 
+  - amd: it's another one with a fixed register so old_in and res are always RAX. 
+  again end up with extra copies because i don't know how to express the actual constraints. 
+  - amd: need to encode as RMem or it's an illegal instruction
+  - ok on amd it works with reusing the result, so the mistake is arm specific. 
+  ah, i was emitting at the position of cas0 instead of cas1 so when rega inserted a copy between them 
+  to preserve the register that gets stomped, it would happen after the stomp instead of before it, 
+  and it would always think the cas succeeded. 
+  - confusion with trying to generate a shim function for each instruction (like just cas0 doesn't work because it needs the two parts).
+  so it was segfaulting going off then end looking for the other part. 
+  but it only tried to do that when running in the test program. not as a stand alone program. 
+  strange. but same fix as vastart, just dont do that. 
+  should really have one big table of all the info i need for adding an instruction (like qbe does). 
+- and of course that new test can't work with the legacy backend. maybe i should just give up on that, idk. 
+
 ## (Feb 10)
 
 - holy shit do functions with >8 args just not work? there's no way. 

@@ -23,7 +23,7 @@ ArmState :: @struct(
     patches: List(Patch),
     needs_frame := true,
 );
-
+b_jmp :: b;
 fn emit_func_arm64(f: *Qbe.Fn) void = {
     m := f.globals;
     @debug_assert_eq(m.goal.arch, .aarch64, "how did we get here?");
@@ -78,7 +78,7 @@ fn fixup_arm64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_rel
             };
             @assert_lt(distance.abs(), 1.shift_left(26), "can't even jump to trampoline, thats bad.");
             inst := ptr_cast_unchecked(u8, u32, fixup.patch_at);
-            inst[] = b(s_trunc(distance, 26), 1);
+            inst[] = b_jmp(s_trunc(distance, 26), 1);
         }
         fn InReg(it) => {
             if self.debug["T".char()] {
@@ -145,7 +145,7 @@ fn emit_the_code(self: *ArmState) void #once = {
                 offset_to_callee_saved -= 2 * 4;
                 op := if(r.is_float(), => Qbe.O.stored, => Qbe.O.storel);
                 i := make_ins(op, .Kw, QbeNull, TMP(r.raw()), SLOT(offset_to_callee_saved));
-                self.emitins(i&);
+                self.emitins(i&, zeroed(*Qbe.Blk));
             };
         };
     } else {
@@ -163,7 +163,7 @@ fn emit_the_code(self: *ArmState) void #once = {
         @debug_assert(local_labels[b.id.zext()] == 0, "block ids must be unique");
         local_labels[b.id.zext()] = self.next_inst_offset();
         for_insts_forward b { i |
-            self.emitins(i);
+            self.emitins(i, b);
         };
         @match(b.jmp.type) {
             fn hlt() => self.inst(brk(1000));
@@ -176,7 +176,7 @@ fn emit_the_code(self: *ArmState) void #once = {
                             offset_to_callee_saved -= 2 * 4;
                             cls := if(r.is_float(), => Qbe.Cls.Kd, => Qbe.Cls.Kl);
                             i := make_ins(.load, cls, TMP(r.raw()), SLOT(offset_to_callee_saved), QbeNull);
-                            self.emitins(i&);
+                            self.emitins(i&, b);
                         };
                     };
                     if self.f.dynalloc {
@@ -418,7 +418,7 @@ fn loadcon(self: *ArmState, c: *Qbe.Con, r: i64, k: Qbe.Cls) void  = {
             @eprintln("# Taking the low 32 bits of the symbol '%', you can do that but it's an odd choice so perhaps was a mistake.", self.m.str(c.sym.id));
             // we could warn on this if we were feeling friendly. 
             i := make_ins(.extuw, .Kw, TMP(r+1), TMP(r+1), QbeNull);
-            self.emitins(i&);
+            self.emitins(i&, zeroed(*Qbe.Blk));
         };
         return();
     };
@@ -473,7 +473,7 @@ fn fixarg(self: *ArmState, pr: *Qbe.Ref, sz: i64) void = {
         out_of_range := s > sz * 4095;
         if out_of_range || unaligned {
             i := make_ins(.addr, .Kl, TMP(Arm64Reg.IP0.raw()), r, QbeNull);
-            self.emitins(i&);
+            self.emitins(i&, zeroed(*Qbe.Blk));
             pr[] = TMP(Arm64Reg.IP0.raw());
         }
     }
@@ -501,7 +501,7 @@ fn check_args(i: *Qbe.Ins) void = {
 //
 arm_scratch_int :: Arm64Reg.IP1;
 
-fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
+fn emitins(self: *ArmState, i: *Qbe.Ins, b: *Qbe.Blk) void = {
     ::if(u32);
     F :: @Fn(s: FType, dest: u5, a: u5, b: u5) u32;
     I :: @Fn(s: Bits, dest: u5, a: u5, b: u5) u32;
@@ -620,12 +620,12 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
                 r := i.to;
                 if !isreg(a0) {
                     i.to = TMP(arm_scratch_int);
-                    self.emitins(i);
+                    self.emitins(i, b);
                     a0 = i.to;
                 };
                 op := @as(Qbe.O) @as(i32) Qbe.O.storew.raw() + i.cls().raw();
                 i[] = make_ins(op, .Kw, i.to, a0, r);
-                self.emitins(i);
+                self.emitins(i, b);
                 return();
             };
             @debug_assert(isreg(i.to), "can only copy to a register");
@@ -636,7 +636,7 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
                 }
                 fn RSlot() => {
                     i.set_op(.load);
-                    self.emitins(i);
+                    self.emitins(i, b);
                 }
                 @default => {
                     @debug_assert(i.to.val() != Arm64Reg.PLA.raw(), "please do not the platform register. thank you.");
@@ -696,7 +696,7 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
                             // already compiled it so branch there directly
                             distance := self.m.distance_between(.Code, self.m.current_offset(.Code), symbol.segment, symbol.offset) / 4;
                             assert(distance.abs() < 1.shift_left(26), "can't call that far but I don't let modules be that big yet.");
-                            self.inst(b(s_trunc(distance, 26), 1));
+                            self.inst(b_jmp(s_trunc(distance, 26), 1));
                             // :canireallynothavecodeberelative
                             // TODO: I don't have a test that requires this 
                             //       but i think you do because you need the other ones?
@@ -841,11 +841,48 @@ fn emitins(self: *ArmState, i: *Qbe.Ins) void = {
                 self.inst(@bits(si, 0b0011010110, @as(u5) a1.int_reg(), 0b001011, @as(u5) a0.int_reg(), @as(u5) i.to.int_reg())); 
             };
         }
+        fn cas0() => ();
+        fn cas1() => {
+            @println("%", self.f.name());
+            icas0, icas1 := find_cas(i, b);
+            p, old_in, new, res := (icas0.arg&[0], icas1.arg&[0], icas1.arg&[1], icas1.to);
+            @debug_assert_ne(old_in, new, "cas stomp");
+            @debug_assert_ne(res, new, "cas stomp.");
+            if old_in != res {
+                ii := make_ins(.copy, icas1.cls(), res, old_in, QbeNull);
+                self.emitins(ii&, b);
+            };
+            self.inst(@bits(0b1, si, 0b0010001, 0b0, 0b1, @as(u5) res.int_reg(), 0b0, 0b11111, @as(u5) p.int_reg(), @as(u5) new.int_reg())); 
+        }
         @default => {
             printfn(self.f, self.m.debug_out);
             @panic("TODO: op encoding %", inst_name);
         };
     } // early returns
+}
+
+// TODO: silly
+fn find_cas(i: *Qbe.Ins, b: *Qbe.Blk) Ty(*Qbe.Ins, *Qbe.Ins) = {
+    // :FalseCasDep might not be directly the next instruction because we insert a copy 
+    @match(i.op()) {
+        fn cas0() => {
+            icas1 := i;
+            while => icas1.op() != .cas1 {  
+                @debug_assert(!identical(icas1, b.ins.first.offset(b.nins.zext())), "missing cas1");
+                icas1 = icas1.offset(1);
+            };
+            (i, icas1)
+        }
+        fn cas1() => {
+            icas0 := i;
+            while => icas0.op() != .cas0 {  
+                @debug_assert(!identical(icas0, b.ins.first), "missing cas0");
+                icas0 = icas0.offset(-1);
+            };
+            (icas0, i)
+        }
+        @default => panic("expected cas");
+    }
 }
 
 fn encode_int_load(wide: bool, o: Qbe.O, log2_size: i64, dest: u5, offset: u12, addr: u5) u32 = {
