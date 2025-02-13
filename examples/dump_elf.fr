@@ -115,6 +115,39 @@ fn main() void = {
             if section.type == .RelocNoAddend {
                 show_relocs(Elf.Rel, "NO Addend");
             };
+            if section.type == .VerSym {
+                @fmt(out, "  [Symbol Versions]\n    ");
+                mem := input.subslice(section.offset, section.size);
+                symbols: []u16 = (ptr = ptr_cast_unchecked(u8, u16, mem.ptr), len = mem.len / u16.size_of());
+                enumerate symbols { i, v | 
+                    @fmt(out, "(%. %), ", i, v[]);
+                };
+                @fmt(out, "\n===\n");
+            };
+            
+            if section.type == .VerNeed {
+                @fmt(out, "  [Symbol Versions Need]\n");
+                mem := input.subslice(section.offset, section.size);
+                if mem.len > size_of(Elf.VersionNeed) {
+                    break :: local_return;
+                    p := 0;
+                    loop {
+                        it := ptr_cast_unchecked(u8, Elf.VersionNeed, mem.ptr.offset(p));
+                        @fmt(out, "      - %\n", it);
+                        off := p + it.aux.zext();
+                        range(0, it.count.zext()) { _ |
+                            it := ptr_cast_unchecked(u8, Elf.VersionAux, mem.ptr.offset(off));
+                            @fmt(out, "        - %\n", it);
+                            off += it.next.zext();
+                        };
+                        if it.next == 0 {
+                            break();
+                        };
+                        p += it.next.zext();
+                    };
+                };
+                @fmt(out, "===\n");
+            };
             
             if section_i == header.section_header_names_index.zext() {
                 @fmt(out, "  [Section Header Names]\n");
@@ -160,6 +193,8 @@ fn dump_elf_dynamic(out: *List(u8), mem: []u8) void = {
 ::DeriveFmt(Elf.Dyn);
 ::DeriveFmt(Elf.RelA);
 ::DeriveFmt(Elf.Rel);
+::DeriveFmt(Elf.VersionNeed);
+::DeriveFmt(Elf.VersionAux);
 ::enum(Elf.Type);
 ::enum(Elf.Machine);
 ::enum(Elf.SegmentType);

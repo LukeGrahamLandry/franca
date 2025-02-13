@@ -1,0 +1,106 @@
+AstExternal :: import("@/compiler/ast_external.fr");
+#include_std("backend/lib.fr");
+#include_std("compiler/worker.fr");
+
+// TODO: exec every time so you can run tests after the first compile error
+
+fn driver(vtable: *ImportVTable) void = {
+    franca_path := get_executable_path(temp());  // TODO: cli arg to set this 
+    passed := 0;
+    failed := 0;
+    ::FmtPad(Str);
+    tests := collect_tests(vtable);
+    each tests& { file, functions | 
+        @print("%", f_pad(file, 40, .After));
+        src := gen_test_program(file, functions[].items());
+        push_dynamic_context {
+            opts := vtable.default_build_options();
+            c := new_with_src(vtable, src, opts);
+            c := vtable.with(c);
+            
+            m := zeroed QbeModule;
+            a := query_current_arch();
+            AstExternal'init_default_module_dyn(m&, c.vtable, (arch = a.unwrap(), os = query_current_os(), type = .Exe));
+            fid := or c.get_unique_named("main") {
+                panic("expected exactly one function called 'main'")
+            };
+            chunks := {c.vtable.emit_qbe_included}(QbeModule.raw_from_ptr(m&), c&, @slice(fid), .WrapMain);
+            
+            outpath := "./c.out"; // TODO: don't hardcode this
+            outfile := fopen(outpath.maybe_borrow_cstr(temp()), "w".sym().c_str());
+            chunks := {m.target.finish_module}(m&);
+            for chunks { chunk | 
+                write(outfile, chunk);
+            };
+            fclose(outfile);
+            drop(m&);
+            {c.vtable.destroy_compiler}(c.data);
+        };
+        
+        ok, out, err := exec_and_catch("./c.out", empty(), todo_allocator);
+        (@if(ok, passed&, failed&))[] += 1;
+        @print("[%]", if(ok, => "ok", => "failed run"));
+        print(out.items());
+        if !ok {
+            print(err.items());
+        };
+        println("");
+    };
+    if failed == 0 {
+        @println("\nAll is fine! (passed % tests)", passed);
+    } else {
+        @println("\n% of % tests failed.", failed, failed + passed);
+    };
+    exit((failed != 0).int());
+}
+
+fn gen_test_program(file: Str, functions: []Str) Str = {
+    src := u8.list(temp());
+    @fmt(src&, """
+        #include_std("lib/core.fr");
+        #include_std("%");
+        fn main() void = {
+    """, file);
+    for functions { name | 
+        @fmt(src&, "    %(@uninitialized); print(\".\"); \n", name);
+    };
+    push_all(src&, "\n}");
+    src.items()
+}
+
+fn collect_tests(vtable: *ImportVTable) HashMap(Str, *List(Str)) = {
+    out: HashMap(Str, *List(Str)) = init(temp());
+    push_dynamic_context {
+        path := "tests".maybe_borrow_cstr(temp());
+        ::List(FatStmt);
+        src := u8.list(temp());
+        
+        src&.push_all("#include_std(\"lib/core.fr\");\n");
+        walk_directory(path) {entry|
+            // TODO: recurse with another list if .Directory
+            is_file := (eq(@as(u8) entry.type, @as(u8) DirEntType.File));
+            if is_file && entry.name.ends_with(".fr") {
+                @fmt(src&, "#include_std(\"%/%\");\n", path, entry.name);
+            };
+        };
+        
+        src1 := src.items().clone(temp()).items();
+        opts := vtable.default_build_options();
+        c := new_with_src(vtable, src1, opts);
+        c := vtable.with(c);
+        tests := c.get_tagged("test");
+        for tests { f | 
+            func  := c.get_function(f);
+            name  := c.get_string(func.name);
+            loc   := c.AstExternal'get_whole_line(func.loc);
+            files := out&.get(loc.filename) || {
+                l := temp().box(List(Str));
+                l[] = list(temp());
+                out&.insert(loc.filename, l);
+                l
+            };
+            files.push(name);
+        };
+    };
+    out
+}

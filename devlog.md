@@ -28,6 +28,76 @@
   should really have one big table of all the info i need for adding an instruction (like qbe does). 
 - and of course that new test can't work with the legacy backend. maybe i should just give up on that, idk. 
 
+More soul crushing Elf work.
+
+- even before blink notices it doesn't have `/lib64/ld-linux-x86-64.so.2`, it says 
+`blink/loader.c:139:20266 program headers aren't ordered, expected 15000 >= 6011000` 
+so maybe i have to fix that for real linux too. 
+- still `elf_machine_rela_relative: Assertion `ELFW(R_TYPE) (reloc->r_info) == R_X86_64_RELATIVE' failed!`
+- if i make RelA.type 8: `signal SIGSEGV: address access protected (fault address: 0x2010000)`
+that is indeed the right address `(offset = 33619968, type = 8, sym = 1, addend = 0) memset`. 
+is it not doing relocations before setting my memory to read only? i can ask for 
+ConstantData to be writable and then i fault on zero instead. 
+i feel like this is where i was before where it just doesn't do the relocation at all. 
+whatever i put in the addend is the thing i get. 
+i think my theory before was it's telling me the symbol doesn't exist because im not asking for a specific version of it. 
+the other idea is maybe i have to call some libc init function before doing anything. 
+
+`readelf -W --dyn-syms a.out`
+
+Zig: 
+```
+Symbol table '.dynsym' contains 4 entries:
+   Num:    Value          Size Type    Bind   Vis      Ndx Name
+     0: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT  UND 
+     1: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND __libc_start_main@GLIBC_2.2.5 (2)
+     2: 0000000000000000     0 NOTYPE  WEAK   DEFAULT  UND __gmon_start__
+     3: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND puts@GLIBC_2.2.5 (2)
+```
+Mine:
+```
+Symbol table '.dynsym' contains 7 entries:
+   Num:    Value          Size Type    Bind   Vis      Ndx Name
+     0: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT  UND 
+readelf: Warning: local symbol 0 found at index >= .dynsym's sh_info value of 0
+     1: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND memset
+     2: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND munmap
+     3: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND mmap
+     4: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND abort
+     5: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND exit
+     6: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND write
+```
+
+what am i supposed to set info to? length of the table?
+zig has it 1. first valid entry? readelf goes away if i do that. 
+doesn't help me tho. 
+
+there's stuff about default versions being the one with `@@` so 
+surely i just get that one if i don't ask for something specific. 
+
+the internet seems to agree with the need to init libc theory. 
+- https://stackoverflow.com/questions/62586808/how-are-relocations-supposed-to-work-in-static-pie-binaries
+it really sounds like they're talking about when you're not dynamic linking tho. 
+if i am supposed to call it before i can import anything, how the fuck do i do that. 
+i can see `__libc_start_main` calls `_dl_relocate_static_pie` but that's in `#ifndef SHARED`
+so yeah when you statically link it. maybe i need to include my own? 
+
+zig is allowed to use R_X86_64_GLOB_DAT, why aren't i??
+
+are you fucking kidding me??
+it was `dynamics&.push(tag = .RelACount, val = m.imports.len);  // TODO: remove. surely this does nothing. clang doesn't do it`
+taking that out makes it work. 
+it was also the header ordering thing and the ConstantData writable thing. 
+so if you have any of those wrong it just segfaults so when i tried them individually i figured they did nothing. 
+so nice that every possible mistake you could make as identical symptoms. 
+to be fair, the RelACount was different, just totally useless. 
+
+now it segfaults after printing hello world but that's much more encouraging. 
+that's just franca_runtime_init needs to call exit. i figured that out before. 
+ugh, now i have to go through and do that in all my .ssa tests.
+
+but anyway, i can link to libc on linux now. only took 700 years. 
+
 ## (Feb 10)
 
 - holy shit do functions with >8 args just not work? there's no way. 

@@ -47,9 +47,6 @@ fn output_elf(m: *QbeModule) [][]u8 = {
     
     
     dynamic_header: ?Ty(*Elf.ProgramHeader, *Elf.ProgramHeader, *Elf.ProgramHeader) = .None;
-    if m.imports.len > 0 {
-        dynamic_header = (Some = (program_header(), program_header(), Elf.ProgramHeader.ptr_from_int(0)));
-    };
     
     virtual_offset := MYSTERY_SPICE; 
     file_offset    := 0;
@@ -76,8 +73,12 @@ fn output_elf(m: *QbeModule) [][]u8 = {
     // TODO: we're asking it to map the elf info like you need to for mach-o but probably shouldn't do that here. 
     
     make_segment(.Code, RX); RX :: 5;// :waste :commandsispartofcodenow
-    make_segment(.ConstantData, R); R :: 4; // :waste 
+    make_segment(.ConstantData, RW); R :: 4; // :waste  // TODO: how the fuck do i do relocations in a non-writable segment?
     make_segment(.MutableData, RW); RW :: 6;
+    
+    if m.imports.len > 0 {
+        dynamic_header = (Some = (program_header(), program_header(), Elf.ProgramHeader.ptr_from_int(0)));
+    };
     
     if dynamic_header& { it |
         it._2 = program_header();  // TODO: can this get moved up? or does it have to be after all load commands? 
@@ -150,7 +151,7 @@ fn output_elf(m: *QbeModule) [][]u8 = {
         payload&.push(0);  // null
         
         libc_name_offset := payload.len - string_table_start;
-        libc_name := "/lib/x86_64-linux-gnu/libc.so.6";
+        libc_name := "/lib/x86_64-linux-gnu/libc.so.6"; // "libc.so.6";  ??
         //libc_name := "libc.so.6";
         payload&.push_all(libc_name);
         payload&.push(0);
@@ -160,7 +161,7 @@ fn output_elf(m: *QbeModule) [][]u8 = {
         dynamics&.push(tag = .Flags_1, val = 1);  // ?     // TODO: does this do anything?
         dynamics&.push(tag = .Debug, val = 0);  // ?     // TODO: does this do anything?
         
-        dynamics&.push(tag = .BindNow, val = 0);  // TODO: does this do anything? 
+        //dynamics&.push(tag = .BindNow, val = 0);  // TODO: does this do anything? 
         
         for m.imports& { id |
             imported_symbol_name_offsets&.push(trunc(payload.len - string_table_start));
@@ -190,7 +191,7 @@ fn output_elf(m: *QbeModule) [][]u8 = {
             STT_FUNC :: 2;
             payload&.reserve_type(Elf.Symbol)[] = (
                 name = imported_symbol_name_offsets[i],
-                info = 18, //  // TODO?
+                info = 1.shift_left(4).bit_or(2).trunc(), // GLOBAL FUNC
             );
         };
         
@@ -206,6 +207,7 @@ fn output_elf(m: *QbeModule) [][]u8 = {
             addr_align = 8,
             ent_size = size_of(Elf.Symbol),
             link = string_table_index.zext(),
+            info = 1,  // TODO: ??
         );
         
         dynamics&.push(tag = .SymTab, val = virtual_offset + symbol_table_start);
@@ -222,7 +224,7 @@ fn output_elf(m: *QbeModule) [][]u8 = {
                         sym = trunc(i + 1),
                         offset = ptr_diff(m.segments&[.Code].mmapped.ptr, fix.patch_at) + MYSTERY_SPICE, // TODO: or is it offset in a specific segment?
                         addend = it.increment,
-                        type = 1, // R_AMD64_64 1 // R_AMD64_GLOB_DAT 6  // R_AMD64_JUMP_SLOT 7,  // TODO: what does this mean?
+                        type = 6, // 8 R_AMD64_RELATIVE // R_AMD64_64 1 // R_AMD64_GLOB_DAT 6  // R_AMD64_JUMP_SLOT 7,  // TODO: what does this mean?
                     );
                 };
             };
@@ -244,7 +246,6 @@ fn output_elf(m: *QbeModule) [][]u8 = {
         dynamics&.push(tag = .RelA, val = virtual_offset + relocation_table_start);
         dynamics&.push(tag = .RelASz, val = payload.len - relocation_table_start);
         dynamics&.push(tag = .RelAEnt, val = size_of(Elf.RelA));
-        dynamics&.push(tag = .RelACount, val = m.imports.len);  // TODO: remove. surely this does nothing. clang doesn't do it
         
         dynamics&.push(tag = .Null, val = 0);
         
