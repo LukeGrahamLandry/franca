@@ -1,9 +1,18 @@
 - TODO: deal with `CodegenEntry:Bounce` on wasm
 
-
 ## (Feb 13)
 
 - get argc,argv from the stack
+- elf local relocations
+- almost all the lang tests pass on linux. there's just a few libc-ish ones that don't work. 
+  - jit (still tries to call __clear_cache somehow)
+    - + some i only did on arm and it gets confused by cross compiling. 
+  - signal (never did the magic numbers?), 
+  - open libc dylib
+    stopped hardcoding the macos path but that's not enough. 
+  - fork
+  - threads
+  - walk_dir (like macos and need a different insane name for the function?)
 
 ## (Feb 12)
 

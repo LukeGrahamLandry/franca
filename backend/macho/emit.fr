@@ -653,7 +653,6 @@ fn append_relocations(symbol_table_index: i64, id: u32, m: *QbeModule, relocatio
             // So we skip this relocation and instead emit one for each place we accessed that __got slot. 
             //
             @debug_assert(fix.type&.tag() == .DataAbsolute && s.kind != .Local, "__got reloc must be data");
-            // :TodoDataAbsoluteInc
             continue();
         };
         sec: i64 = which_section(patch_segment).zext();
@@ -694,12 +693,12 @@ fn append_relocations(symbol_table_index: i64, id: u32, m: *QbeModule, relocatio
                 r.type = 2;  // ARM64_RELOC_BRANCH26
                 rs.reserve_type(i64)[] = encode_reloc(r);
             }
-            fn DataAbsolute() => {
+            fn DataAbsolute(it) => {
                 r.relative = false;
                 r.type = 0;   // ARM64_RELOC_UNSIGNED
                 r.length = 3; // one pointer
                 rs.reserve_type(i64)[] = encode_reloc(r);
-                ptr_cast_unchecked(u8, i64, fix.patch_at)[] = 0;
+                ptr_cast_unchecked(u8, i64, fix.patch_at)[] = it.increment;  // TODO: a test that gets here with non-zero
             }
             fn RipDisp32(it) => {
                 r.relative = true;
@@ -770,7 +769,6 @@ fn collect_aot_fixups(m: *QbeModule) Ty([]FixP, []*SymbolInfo) = {
         first := true;
         each s.fixups& { f | 
             if f.type&.is(.DataAbsolute) { 
-                // :TodoDataAbsoluteInc
                 fixups&.push(symbol = s, fix = f);
                 if first {
                     first = false;
@@ -779,7 +777,7 @@ fn collect_aot_fixups(m: *QbeModule) Ty([]FixP, []*SymbolInfo) = {
             };
         };
     };
-    
+    @debug_assert_ge(symbols.len, m.imports.len, "more imports than symbols!"); 
     (fixups.items(), symbols.items())
 }
 
