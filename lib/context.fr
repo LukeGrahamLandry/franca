@@ -24,11 +24,29 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user_main: @FnPtr(argc: i64, a
         c := context(DefaultContext);
         temporary_allocator: ArenaAlloc = init(page_allocator, 1.shift_left(20));
         c.temporary_allocator = temporary_allocator&;
-        c.cli_arguments = (ptr = argv, len = argc);
         c.panic_hook = print_and_exit1; // print_trace_and_abort;
+        
+        // On macos (argc, argv) are passed to the entry point in registers so we're good to go. 
+        // But on linux, they're passed on the stack, so we have to grab them from our caller's frame. 
+        // TODO: am i supposed to call __libc_start_main?
+        // TODO: instead of this hack where we rely on whatever junk is in rdi being high, we should just 
+        //       take the target as a constant argument (since the compiler knows it) and generate exactly 
+        //       the right code here. 
+        // TODO: this frame layout is specific to amd64. arm64 has fp/lr swapped. 
+        if argc > 0xFFFFFFFF {
+            fn get_fp();
+            fn get_fp() i64 #c_call #asm #aarch64 = (mov(Bits.X64, x0, fp), ret());
+            fn get_fp() i64 #c_call #asm #x86_bytes = fn(out) = @asm_x64(encode_bin(PrimaryOp.MovReg, X86Reg.rax, X86Reg.rbp), PrimaryOp.Ret) out;
+
+            caller_frame := ptr_from_int(*Ty(i64, i64, CStr), get_fp())[];
+            argv = caller_frame._2&;
+            argc = caller_frame._1;
+        };
+        
+        c.cli_arguments = (ptr = argv, len = argc);
         user_main(argc, argv);
+        exit(0);
     };
-    exit(0);
 };
 
 // HACK. if context is passed in a global it will leak out from the callee. 

@@ -1,5 +1,10 @@
 - TODO: deal with `CodegenEntry:Bounce` on wasm
 
+
+## (Feb 13)
+
+- get argc,argv from the stack
+
 ## (Feb 12)
 
 - new instructions: rotr, rotl, byteswap
@@ -97,6 +102,13 @@ that's just franca_runtime_init needs to call exit. i figured that out before.
 ugh, now i have to go through and do that in all my .ssa tests.
 
 but anyway, i can link to libc on linux now. only took 700 years. 
+
+- clean up some libc functions to use #target_os because they don't exist for x64 linux. 
+`__clear_cache`, sys_icache_invalidate, sys_dcache_flush, pthread_jit_write_protect_np. 
+- made expr::switch discard branches if inspect is a constant. 
+- need to ask for libdl (for dlopen) and pthread seperately from libc
+- franca_runtime_init isn't getting the cli args passed to it (it segfaults trying to read them and the length looks like a pointer. 
+query_cli_args works tho (hacking that in makes sudoku work but still not the compiler). 
 
 ## (Feb 10)
 

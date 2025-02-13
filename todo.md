@@ -7,6 +7,11 @@
 
 ##
 
+- context() leak allocator
+- allow main() to be a normal constant instead of an overload set so you can import() and call non-main functions 
+without it conflicting with your own main(). 
+- simplify run_tests.fr (call compiler/test.fr instead of recollecting them)
+- if constant folding can get rid of all the branchs that use an import, the binary shouldn't need that import
 - steal: https://github.com/ziglang/zig/pull/22808
 - better error message from backend if you forget nunion=1 on a struct
 - for import_c, decide when to reset temp() and audit all the allocations in tok/pre

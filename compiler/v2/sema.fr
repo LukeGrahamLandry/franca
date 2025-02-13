@@ -1273,7 +1273,22 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
             expr.done = f.cond.done && f.if_true.done && f.if_false.done;
         }
         fn Switch(f) => {
-            @check(self.compile_expr(f.value, i64.want())) return;
+            @check(self.compile_expr(f.value, i64.want())) return;  // :get_or_create_type
+            
+            if f.value.is_const() {
+                value := @check(self.immediate_eval_expr(f.value, i64)) return;  // :get_or_create_type
+                @debug_assert(value&.is(.Small), "expr::switch on big");
+                inspect := value.Small._0;  // i think it's fine even if size is <8, high bits will be zeroed. 
+                each f.cases { it |
+                    if it._0 == inspect {
+                        expr[] = it._1;
+                        return(self.compile_expr(expr, requested));
+                    };
+                };
+                expr[] = f.default[];
+                return(self.compile_expr(expr, requested));
+            };
+            
             unify :: fn(expect: *ResultType, new: Type) void = {
                 dont_like_this_type := @match(expect) {
                     fn Specific(inner) => inner[].is_never();
@@ -1284,6 +1299,7 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
                     expect[] = (Specific = new);
                 }
             };
+            
             expected_type := requested; 
             @check(self.compile_expr(f.default, expected_type)) return;
             unify(expected_type&, f.default.ty);
