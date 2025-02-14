@@ -68,23 +68,47 @@ fn compile_file(c: *Compile.Ctx, path: Str) Result(*Compile.Obj, Str) = {
 
 fn emit_the_code(c: *Compile.Ctx, ctx: *CodegenShared, obj: *Compile.Obj) void = {
     :: ptr_utils(Compile.Obj);
+    work := list(*Compile.Obj, temp());
     while => !obj.next.is_null() {
         @assert(!obj.is_tls, "Thread Local Storage is not supported");
-        if obj.is_definition {
-            entry := bouba_acquire(ctx, ctx.bouba_idx&);
-            push_dynamic_context {
-                context(DefaultContext)[].temporary_allocator = entry.arena&;
-                if obj.is_function {
-                    f := obj.f;
-                    fill_lnk(f.lnk&, obj, ctx.m);
-                    entry.task = (Func = f);
-                } else {
-                    entry.task = (AotVar = translate_data(ctx.m, obj));
-                };
-            };
-            enqueue_task(ctx, entry);
+        is_root := @match(c.m.goal.type) {
+            fn Exe() => obj.name == "main";
+            @default => !obj.is_static;
+        };
+        if obj.is_definition && is_root && !obj.sent_to_backend {
+            obj.sent_to_backend = true;
+            work&.push(obj);
+            //@println("root %", obj.name);
         };
         obj = obj.next;
+    };
+    // TODO: don't add __FUNC__ as ref 
+    // TODO: more depth first like franca does so you get better inlining
+    // TODO: almost all the time is wuffs_testlib__initialize_global_xxx_slices
+    while => work&.pop() { obj |
+        work&.reserve(obj.refs.len);
+        for obj.refs { ref |
+            // TODO: scan definitions needs to redirect all callers
+            if ref.is_definition && !ref.sent_to_backend {
+                ref.sent_to_backend = true;
+                work&.push(ref);
+                //@println("add % (from %)", ref.name, obj.name);
+            };
+        };
+        
+        entry := bouba_acquire(ctx, ctx.bouba_idx&);
+        push_dynamic_context {
+            context(DefaultContext)[].temporary_allocator = entry.arena&;
+            id := obj.global_symbol.unwrap();
+            if obj.is_function {
+                f := obj.f;
+                fill_lnk(f.lnk&, obj, ctx.m);
+                entry.task = (Func = f);
+            } else {
+                entry.task = (AotVar = translate_data(ctx.m, obj));
+            };
+        };
+        enqueue_task(ctx, entry);
     };
 }
 
@@ -156,13 +180,6 @@ fn translate_data(m: *QbeModule, obj: *Compile.Obj) []Qbe.Dat = {
     
     { dat := next_dat(); dat.type = .DEnd; };
     out.items()
-}
-
-fn is_all_zeros(buf: []u8) bool = {  // :SLOW
-    for buf { b |
-        if(b != 0, => return(false));
-    };
-    true
 }
 
 #where(fn(T) => is_ptr(T) && has_field(Deref(T), @symbol next))

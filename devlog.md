@@ -15,7 +15,24 @@ trying to get wuffs to compile with my c compiler.
   :ParamTypeList
 - need to do BSS for giant static variables. but can hack around it for now by jsut making segments way bigger. TODO!
 - now the frontend gets through everything and we just have to make it actually compile 
-- wuffs_private_impl__swizzle_ycc__general__triangle_filter
+- little break from making it work. just put it on -unsafe and make it less slow first. 
+  - hmmm did the start at main and only compile what you need thing (with WUFFS_CONFIG__STATIC_FUNCTIONS) and it's barely faster. 
+  - all the time is in wuffs_testlib__initialize_global_xxx_slices? 
+  ahahaha no all the time is after the end when signing the exe.
+  cause i didn't bother doing BSS so im calculating sha256 of a page of zeros a billion times. 
+  lamo, caching the hash of a page of zeros and checking if each page is all zeros first 
+  makes it 1.2s instead of 4.1s. 
+  and now 35% of the time is my stupid is_all_zeros instead of 88% of the time being sha256_update. 
+  making is_all_zeros do 8 bytes at a time makes it 9%. 
+  so yeah really need to do the bss thing. 
+  - can't have read_punct taking 4% of the time. inline_for helps a bit but not enough. 
+  write out the giant switch. now it's 0.4%, much better. TODO: comptime magic to generate it. 
+  - can't have read_ident taking 3% of the time. #inline is_ident1 and is_ident2.
+  now it's 0.6%, much better. 
+  - can't have update_kind taking 3.5% of the time. make read_punct return the kind instead of doing a hash lookup later.
+  now it's 1.5%, still slow. 
+  - emit_data_to_segment taking 43% to write zeros one byte at a time. 
+  boring because BSS will fix it but calling memset instead makes it 12%.
 
 ## (Feb 13)
 

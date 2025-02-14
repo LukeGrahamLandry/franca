@@ -44,6 +44,8 @@ Obj :: @rec @struct(
     f: *Qbe.Fn,
     par_r: Qbe.Ref,
     global_symbol: ?u32,  // TODO: use this more
+    sent_to_backend: bool,
+    refs: []*Obj,
 );
 Relocation :: @rec @struct(
     next: *Relocation,
@@ -189,6 +191,7 @@ Ctx :: @rec @struct {
     m: *QbeModule;
     f: *Qbe.Fn;
     b: *Qbe.Blk;
+    refs: List(*Obj);
     
     labels: HashMap(Str, *Qbe.Blk);
     brk_label: ?*Qbe.Blk;
@@ -330,9 +333,8 @@ fn new_unary(c: *Ctx, kind: NodeKind, expr: *Node, tok: *Token) *Node = {
 fn new_num(c: *Ctx, val: i64, tok: *Token, ty: *CType) *Node = {
     node := c.new_node(.ND_NUM, tok);
     node.ty = ty;
-    if !c.f.is_null() {
-        node.r = c.f.getcon(val);
-    };
+    @debug_assert(!c.f.is_null(), "no fun");
+    node.r = c.f.getcon(val);
     node
 }
 
@@ -374,7 +376,6 @@ fn new_vla_ptr(c: *Ctx, var: *Obj, tok: *Token) *Node = {
 
 fn new_cast(c: *Ctx, expr: *Node, ty: *CType) *Node = {
     c.add_type(expr);
-    c.gen_expr(expr);  // TODO: add a simple test for why you need this (wuffs does)
     
     // :ParamTypeList
     // chibicc is linked list enthused so storing the parameters of a function type
@@ -498,6 +499,7 @@ fn new_gvar(c: *Ctx, name: Str, ty: *CType) *Obj = {
     var.is_definition = true;
     var.global_symbol = (Some = c.m.mangle(var));
     c.globals = var;
+    c.refs&.push(var);
     var
 }
 
@@ -1898,6 +1900,7 @@ fn find_func(c: *Ctx, name: Str) ?*Obj = {
 
 // TODO: this clears a bunch of state that won't work if nested function decls are allowed
 fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr) *Token = {
+    c.refs&.clear();  // TODO: should already be empty?
     ty := c.declarator(tok&, tok, basety);
     if(ty.name.is_null(), => @error_tok(c, ty.name_pos, "function name omitted"));
     name_str := c.get_ident(ty.name);
@@ -1917,7 +1920,6 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr) *Token = {
         f
     };
     
-    //f.is_root = !(f.is_static && f.is_inline);
     if(consume(tok&, tok, ";"), => return(tok));
 
     @if(SPAM) println("start function body");
@@ -1973,13 +1975,21 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr) *Token = {
     f.f = c.f;
     
     f.locals = c.locals;
+    c.move_current_refs(f);
     c.leave_scope();
     c.labels&.clear();
     c.current_fn = .None;
     tok
 }
 
+fn move_current_refs(c: *Ctx, dest: *Obj) void = {
+    c.refs&.push_all(dest.refs);
+    dest.refs = c.refs.items().shallow_copy(c.arena);
+    c.refs&.clear();
+}
+
 fn global_variable(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr) *Token = {
+    c.refs&.clear();  // TODO: should already be empty?
     comma_sep(c, tok&, ";") {
         ty := c.declarator(tok&, tok, basety);
         if(ty.name.is_null(), => @error_tok(c, ty.name_pos, "variable name omitted"));
@@ -1997,6 +2007,7 @@ fn global_variable(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr) *Token 
         } else {
             var.is_tentative = var.is_tentative || (!attr.is_extern && !attr.is_tls);
         };
+        c.move_current_refs(var);
     };
     tok
 }
@@ -2026,7 +2037,18 @@ fn scan_globals(c: *Ctx) void = {
         
         // If there's another definition, the tentative definition
         // is redundant
-        if find_matching_name(c.globals, var).is_none() {
+        if find_matching_name(c.globals, var) { def |
+            if var.refs.len != 0 {
+                if def.refs.len == 0 {
+                    def.refs = var.refs;
+                } else {
+                    out := list(@type var.refs[0], var.refs.len + def.refs.len, c.arena);
+                    out&.push_all(var.refs);
+                    out&.push_all(def.refs);
+                    def.refs = out.items();
+                };
+            };
+        } else {
             cur.next = var;
             cur = cur.next;
         };
@@ -2055,6 +2077,7 @@ fn declare_builtin_functions(c: *Ctx) void = {
 
 // program = (typedef | function-definition | global-variable)*
 fn parse(c: *Ctx, tok: *Token) *Obj = {
+    c.refs = list(c.arena);
     c.declare_builtin_functions();
     //c.speculate = true;
     while => tok.kind != .TK_EOF {
@@ -2328,7 +2351,7 @@ parse_logical :: fn(c, rest, tok, cond) = {
 // the ternary operator
 conditional :: fn(c, rest, tok, cond) #infix(.@"?", .Conditional) = {
     // note: the [GNU] case below still uses the old `cond` node without this cast. 
-    cond_r := c.new_cast(cond, ty_bool)[].r;
+    cond_r := c.gen_expr(c.new_cast(cond, ty_bool));
     if(cond_r == QbeNull, => @error_tok(c, cond.tok, "ICE: failed to compile condition"));
     
     cond_block := c.b;
@@ -2456,13 +2479,8 @@ parse_ident :: fn(c, rest, tok) #prefix(.TK_IDENT) = {
     if sc { sc |
         if !sc.var.is_null() {
             var := sc.var;
-            if var.is_function {
-                if c.current_fn { current_fn |
-                    //strarray_push(current_fn.refs&, var.name);
-                } else {
-                    //var.is_root = true;
-                };
-            }; 
+            c.refs&.push(var);
+            //c.refs&.add_unique(var);  // TODO: identity
             node := c.new_var_node(var, tok);
             node.ty = var.ty;
             return(node);
@@ -3442,7 +3460,7 @@ fn assert_gen_expr(c: *Ctx, node: *Node) Qbe.Ref = {
 fn gen_expr(c: *Ctx, node: *Node) Qbe.Ref = {
     if(node.r != QbeNull, => return(node.r));
     c.add_type(node);
-    if(c.f.is_null() || c.speculate, => return(node.r));
+    if(c.f.is_null() || (c.speculate && (node.kind != .ND_CAST || node.lhs.r == QbeNull)), => return(node.r));
     prev := c.b;
     if !node.current_block.is_null() {  // HACK. should go away as i emit code more incrementally. 
         c.b = node.current_block;

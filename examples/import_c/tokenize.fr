@@ -152,7 +152,7 @@ fn new_token(c: *Ctx, kind: TokenKind, start: *u8, end: *u8) *Token = {
 
 // Read an identifier and returns the length of it.
 // If p does not point to a valid identifier, 0 is returned.
-fn read_ident(start: *u8) i64 = {
+fn read_ident(start: *u8) i64 #inline = {
     p := start;
     c := Unicode'decode_utf8(p&, p);
     if(!Unicode'is_ident1(c), => return(0));
@@ -166,21 +166,116 @@ fn read_ident(start: *u8) i64 = {
 }
 
 // Read a punctuator token from p and returns its length.
-fn read_punct(p: *u8) i64 = {
+fn read_punct(p: *u8) Ty(i64, TokenKind) #inline = {
     // TODO: be not :SLOW
-    kw :: @const_slice(
-        "<<=", ">>=", "...", "==", "!=", "<=", ">=", "->", "+=", "-=", "*=", "/=",
-        "++",  "--",  "%=",  "&=", "|=", "^=", "&&", "||", "<<", ">>", "##",
-    );
+    //kw :: @const_slice(
+    //    "<<=", ">>=", "...", "==", "!=", "<=", ">=", "->", "+=", "-=", "*=", "/=",
+    //    "++",  "--",  "%=",  "&=", "|=", "^=", "&&", "||", "<<", ">>", "##",
+    //);
+    //inline_for kw { $it |
+    //    if(p.slice(3).starts_with(::it[]), => return(it.len));  // :BoundsPadding
+    //};
     
-    for kw { it |
-        if(p.slice(3).starts_with(it), => return(it.len));  // :BoundsPadding
+    // TODO: return the token instead of needing a hash lookup later
+    // TODO: comptime magic to generate this. 
+    t: TokenKind = @switch(p[]) {
+        @case("<".ascii()) => @switch(p.offset(1)[]) {
+            @case("<".ascii()) => @switch(p.offset(2)[]) {
+                @case("=".ascii()) => .@"<<=";
+                @default => .@"<<";
+            };
+            @case("=".ascii()) => .@"<=";
+            @default => .@"<";
+        };
+        @case(">".ascii()) => @switch(p.offset(1)[]) {
+            @case(">".ascii()) => @switch(p.offset(2)[]) {
+                @case("=".ascii()) => .@">>=";
+                @default => .@">>";
+            };
+            @case("=".ascii()) => .@">=";
+            @default => .@">";
+        };
+        @case(".".ascii()) => @switch(p.offset(1)[]) {
+            @case(".".ascii()) => @switch(p.offset(2)[]) {
+                @case(".".ascii()) => .@"...";
+                @default => .@".";
+            };
+            @default => .@".";
+        };
+        @case("=".ascii()) => @switch(p.offset(1)[]) {
+            @case("=".ascii()) => .@"==";
+            @default => .@"=";
+        };
+        @case("!".ascii()) => @switch(p.offset(1)[]) {
+            @case("=".ascii()) => .@"!=";
+            @default => .@"!";
+        };
+        @case("-".ascii()) => @switch(p.offset(1)[]) {
+            @case("=".ascii()) => .@"-=";
+            @case(">".ascii()) => .@"->";
+            @case("-".ascii()) => .@"--";
+            @default => .@"-";
+        };
+        @case("+".ascii()) => @switch(p.offset(1)[]) {
+            @case("=".ascii()) => .@"+=";
+            @case("+".ascii()) => .@"++";
+            @default => .@"+";
+        };
+        @case("*".ascii()) => @switch(p.offset(1)[]) {
+            @case("=".ascii()) => .@"*=";
+            @default => .@"*";
+        };
+        @case("/".ascii()) => @switch(p.offset(1)[]) {
+            @case("=".ascii()) => .@"/=";
+            @default => .@"/";
+        };
+        @case("#".ascii()) => @switch(p.offset(1)[]) {
+            @case("#".ascii()) => .@"##";
+            @default => .@"#";
+        };
+        @case("&".ascii()) => @switch(p.offset(1)[]) {
+            @case("&".ascii()) => .@"&&";
+            @case("=".ascii()) => .@"&=";
+            @default => .@"&";
+        };
+        @case("|".ascii()) => @switch(p.offset(1)[]) {
+            @case("|".ascii()) => .@"||";
+            @case("=".ascii()) => .@"|=";
+            @default => .@"|";
+        };
+        @case("%".ascii()) => @switch(p.offset(1)[]) {
+            @case("=".ascii()) => .@"%=";
+            @default => .@"%";
+        };
+        @case("^".ascii()) => @switch(p.offset(1)[]) {
+            @case("=".ascii()) => .@"^=";
+            @default => .@"^";
+        };
+        @case("\\".ascii()) => return(1, .TK_PUNCT);
+        @case("~".ascii()) => .@"~";
+        @case("'".ascii()) => return(1, .TK_PUNCT);
+        @case(":".ascii()) => .@":";
+        @case(";".ascii()) => .@";";
+        @case("}".ascii()) => .@"}";
+        @case("{".ascii()) => .@"{";
+        @case("]".ascii()) => .@"]";
+        @case(")".ascii()) => .@")";
+        @case("(".ascii()) => .@"(";
+        @case("[".ascii()) => .@"[";
+        @case("?".ascii()) => .@"?";
+        @case("`".ascii()) => return(1, .TK_PUNCT);
+        @case("$".ascii()) => return(1, .TK_PUNCT);
+        @case("@".ascii()) => return(1, .TK_PUNCT);
+        @case(",".ascii()) => .@",";
+        @default => return(0, .TK_PUNCT);
     };
+    (t.name_str().len(), t)
+    
     
     // TODO: chibicc did ispunct(), are you allowed to just have random shit in here? like what about @?
     //       --- it seems like yes? it's allowed in the preprocessor? like if you stringify it's fine? 
-    punct := "!\"#%&'()*+,-./:;?[]^{|}~=><`@$"; 
-    punct.contains(p[]).int()
+    //punct := "!\"#%&'()*+,-./:;?[]^{|}~=><`@$"; 
+    //punct.contains(p[]).int()
 }
 
 fn read_escaped_char(c: *Ctx, new_pos: **u8, p: *u8) Ty(i64, bool) = {  // (ch, is unicode thingy)
@@ -506,7 +601,7 @@ fn convert_pp_tokens(c: *Ctx, tok: *Token) void = {
 
 fn update_kind(tok: *Token) void = {
     max :: max_enum_name_len(TokenKind);
-    if(tok.len > max || !@is(tok.kind, .TK_IDENT, .TK_KEYWORD, .TK_PUNCT), => return());
+    if(tok.len > max || !@is(tok.kind, .TK_IDENT, .TK_KEYWORD), => return());
     kw := TokenKind.from_name(tok.str()) || return();
     if(kw.raw() <= TokenKind.TK_ERROR.raw(), => return());
     tok.kind = kw;  // TODO: filter for the ones that aren't literal. ie. what if someone has a variable called `TK_EOF`
@@ -676,9 +771,9 @@ fn tokenize(c: *Ctx, file: *File) *Token = {
         };
         
         // Punctuators
-        len := read_punct(p);
+        len, kind := read_punct(p);
         if len != 0 {
-            continue_tok(c.new_token(.TK_PUNCT, p, p.offset(len)))
+            continue_tok(c.new_token(kind, p, p.offset(len)))
         };
     
         @error_at(c, p, "invalid token");
@@ -826,7 +921,7 @@ TokenKind :: @enum(i32) (
     goto,     _Generic, 
     // end valid_macro_name 
     
-    @"...", @".", @",", @"(", @")", @":", @"?", @"{", @"}", @";",
+    @".", @",", @"(", @")", @":", @"?", @"{", @"}", @";",
     @"<<=", @">>=", @"...", @"==", @"!=", @"<=", @">=", @"->", @"+=", @"-=", @"*=", @"/=",
     @"++",  @"--",  @"%=",  @"&=", @"|=", @"^=", @"&&", @"||", @"<<", @">>", @"##",
     @"=", @"!", @"<", @">", @"-", @"+", @"*", @"/",
