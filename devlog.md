@@ -13,6 +13,12 @@
   - fork
   - threads
   - walk_dir (like macos and need a different insane name for the function?)
+- easy instructions: ctz, clz, popcnt
+- allow main() to be a normal constant instead of an overload set so you can import() and call non-main functions 
+  without it conflicting with your own main(). 
+  also gets rid of a stupid linear scan over every function in find_unique_func which is nice. 
+  - it seems immediate_eval_constexpr of `overloadset -> Fn(A)R` doesn't actually call coerce_const_expr because
+    of my hack that needs to be cleaned up. 
 
 ## (Feb 12)
 

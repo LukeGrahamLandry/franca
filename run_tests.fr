@@ -29,7 +29,6 @@ fn driver(vtable: *ImportVTable) void = {
             @case("-no-dylib") => {
                 use_dylib = false;
             };
-            @case("gen") => print(gen_test_program(vtable));
             @case("boot") => run_boot(vtable);
             @case("github") => {
                 run_boot(vtable);
@@ -61,55 +60,43 @@ fn driver(vtable: *ImportVTable) void = {
                         driver_path = path;
                     };
                     
-                    path := "target/franca/compiler_tests.g.fr";
-                    if !made_test_file_this_time {
-                        sh(@slice("touch", path)); // TODO: don't be garbage
-                        write_entire_file(path, gen_test_program(vtable)) || @panic("failed to write file %", path);
-                        made_test_file_this_time = true;
-                    };
-                    
                     cmd := Str.list(temp());
-                    cmd&.push_all(@slice(franca_path, driver_path, "run", path, "-aot", s));
+                    cmd&.push_all(@slice(franca_path, driver_path, "run", "", "-aot", s));
                     if use_x64 {
                         cmd&.push_all(@slice("-arch", "x86_64"));
                     };
                     cmd := cmd.items();
-                    sh(cmd);
+                    sh(@slice(franca_path, "compiler/test.fr"));
                     for run_main { path | 
                         cmd[3] = path;
                         sh(cmd);
                     };
                     cmd[2] = "build";
                     for compile_only { path |
-                        skip := path == "examples/import_wasm/convert.fr" && s == "legacy";
-                        if !skip {
-                            cmd[3] = path;
-                            sh(cmd);
-                        };
-                    };
-                    
-                    if s != "legacy" {
-                        cmd[3] = "backend/meta/qbe_frontend.fr";
-                        sh(cmd);
-                        // 🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡
-                        sh(@slice("touch", "target/out/driver.c"));
-                        {
-                            cmd := Str.list(temp());
-                            cmd&.push_all(@slice(franca_path, "backend/meta/test.fr", "all", "-bin=./a.out"));
-                            if use_x64 {
-                                cmd&.push("-x64");
-                            };
-                            sh(cmd.items()); 
-                        };
-                        path := "./c.out";
-                        // 🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡
-                        sh(@slice("touch", path));
-                        // 🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡
-                        sh(@slice("chmod", "+x", path));
-                        cmd[2] = "run";
-                        cmd[3] = "examples/import_c/bin/test.fr";
+                        cmd[3] = path;
                         sh(cmd);
                     };
+                
+                    cmd[3] = "backend/meta/qbe_frontend.fr";
+                    sh(cmd);
+                    // 🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡
+                    sh(@slice("touch", "target/out/driver.c"));
+                    {
+                        cmd := Str.list(temp());
+                        cmd&.push_all(@slice(franca_path, "backend/meta/test.fr", "all", "-bin=./a.out"));
+                        if use_x64 {
+                            cmd&.push("-x64");
+                        };
+                        sh(cmd.items()); 
+                    };
+                    path := "./c.out";
+                    // 🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡
+                    sh(@slice("touch", path));
+                    // 🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡
+                    sh(@slice("chmod", "+x", path));
+                    cmd[2] = "run";
+                    cmd[3] = "examples/import_c/bin/test.fr";
+                    sh(cmd);
                 } else {
                     if s != "" {
                         @println("Unknown argument '%'", s);
@@ -144,9 +131,9 @@ compile_only :: @const_slice(
     "examples/sudoku.fr",  // runs tests at comptime 
     "examples/raw_terminal.fr",  // interactive
     // TODO: test it
-    "examples/count.fr", "examples/bloat.fr", "examples/c_bindgen.fr", 
+    "examples/count.fr", "examples/c_bindgen.fr", 
     "examples/dump_macho.fr", "examples/macho_loader.fr", "examples/import_wasm/convert.fr",
-    "examples/mandelbrot.fr",  "examples/dump_elf.fr",
+    "examples/dump_elf.fr",
     "examples/dump_wasm.fr",
     // has deps
     //"tests/need_llvm/x64_encoding.fr",  // TODO: `non-8-aligned field _0` so can't aot
@@ -241,47 +228,4 @@ fn sh(a: []Str) void = {
         show();
         exit(1);
     };
-}
-
-fn gen_test_program(vtable: *ImportVTable) Str = {
-    src := u8.list(temp());
-    push_dynamic_context {
-        path := "tests".maybe_borrow_cstr(temp());
-        ::List(FatStmt);
-        
-        src&.push_all("#include_std(\"lib/core.fr\");\n");
-        walk_directory(path) {entry|
-            // TODO: recurse with another list if .Directory
-            is_file := (eq(@as(u8) entry.type, @as(u8) DirEntType.File));
-            if is_file && entry.name.ends_with(".fr") {
-                @fmt(src&, "#include_std(\"%/%\");\n", path, entry.name);
-            };
-        };
-        
-        src1 := src.items().clone(temp()).items();
-        opts := vtable.default_build_options();
-        c := new_with_src(vtable, src1, opts);
-        c := vtable.with(c);
-        
-        tests := c.get_tagged("test");
-        push_all(src&, """
-            TestCase :: @struct(name: Str, f: @FnPtr() void);
-            fn main() void = {
-                each tests { t | 
-                    @eprint("%, ", t.name);
-                    {t.f}();
-                };
-                @eprintln("\nPassed all % tests!", tests.len());
-            }
-            
-            tests :: @const_slice(@as(TestCase)
-        """);
-        for tests { f | 
-            func := c.get_function(f);
-            name := c.get_string(func.name);
-            @fmt(src&, "    (name = \"%\", f = (fn() = { %(@uninitialized); })),\n", name, name);
-        };
-        @fmt(src&, ");\n");
-    };
-    src.items()
 }

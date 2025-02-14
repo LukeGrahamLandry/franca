@@ -10,41 +10,26 @@ fn driver(vtable: *ImportVTable) void = {
     failed := 0;
     ::FmtPad(Str);
     tests := collect_tests(vtable);
-    each tests& { file, functions | 
-        @print("%", f_pad(file, 40, .After));
-        src := gen_test_program(file, functions[].items());
-        push_dynamic_context {
-            opts := vtable.default_build_options();
-            c := new_with_src(vtable, src, opts);
-            c := vtable.with(c);
-            
-            m := zeroed QbeModule;
-            a := query_current_arch();
-            AstExternal'init_default_module_dyn(m&, c.vtable, (arch = a.unwrap(), os = query_current_os(), type = .Exe));
-            fid := or c.get_unique_named("main") {
-                panic("expected exactly one function called 'main'")
-            };
-            chunks := {c.vtable.emit_qbe_included}(QbeModule.raw_from_ptr(m&), c&, @slice(fid), .WrapMain);
-            
-            outpath := "./c.out"; // TODO: don't hardcode this
-            outfile := fopen(outpath.maybe_borrow_cstr(temp()), "w".sym().c_str());
-            chunks := {m.target.finish_module}(m&);
-            for chunks { chunk | 
-                write(outfile, chunk);
-            };
-            fclose(outfile);
-            drop(m&);
-            {c.vtable.destroy_compiler}(c.data);
-        };
-        
-        ok, out, err := exec_and_catch("./c.out", empty(), todo_allocator);
-        (@if(ok, passed&, failed&))[] += 1;
-        @print("[%]", if(ok, => "ok", => "failed run"));
+    
+    full := gen_full_test_program(tests&);
+    ok, out, err := compile_and_run(vtable, full);
+    if ok {
+        passed = tests.raw.len_including_tombstones;
         print(out.items());
-        if !ok {
-            print(err.items());
+    } else {
+        each tests& { file, functions | 
+            @print("%", f_pad(file, 40, .After));
+            src := gen_test_program(file, functions[].items());
+            ok, out, err := compile_and_run(vtable, src);
+            (@if(ok, passed&, failed&))[] += 1;
+            @print("[%]", if(ok, => "ok", => "failed run"));
+            print(out.items());
+            if !ok {
+                print(err.items());
+            };
+            println("");
         };
-        println("");
+        @assert_ne(failed, 0, "full test failed but all individual tests passed.");
     };
     if failed == 0 {
         @println("\nAll is fine! (passed % tests)", passed);
@@ -54,6 +39,33 @@ fn driver(vtable: *ImportVTable) void = {
     exit((failed != 0).int());
 }
 
+fn compile_and_run(vtable: *ImportVTable, src: Str) Ty(bool, List(u8), List(u8)) = {
+    push_dynamic_context {
+        opts := vtable.default_build_options();
+        c := new_with_src(vtable, src, opts);
+        c := vtable.with(c);
+        
+        m := zeroed QbeModule;
+        a := query_current_arch();
+        AstExternal'init_default_module_dyn(m&, c.vtable, (arch = a.unwrap(), os = query_current_os(), type = .Exe));
+        fid := or c.get_unique_named("main") {
+            panic("expected exactly one function called 'main'")
+        };
+        chunks := {c.vtable.emit_qbe_included}(QbeModule.raw_from_ptr(m&), c&, @slice(fid), .WrapMain);
+        
+        outpath := "./c.out"; // TODO: don't hardcode this
+        outfile := fopen(outpath.maybe_borrow_cstr(temp()), "w".sym().c_str());
+        chunks := {m.target.finish_module}(m&);
+        for chunks { chunk | 
+            write(outfile, chunk);
+        };
+        fclose(outfile);
+        drop(m&);
+        {c.vtable.destroy_compiler}(c.data);
+    };
+    exec_and_catch("./c.out", empty(), todo_allocator)
+}
+
 fn gen_test_program(file: Str, functions: []Str) Str = {
     src := u8.list(temp());
     @fmt(src&, """
@@ -61,15 +73,35 @@ fn gen_test_program(file: Str, functions: []Str) Str = {
         #include_std("%");
         fn main() void = {
     """, file);
-    for functions { name | 
-        @fmt(src&, "    %(@uninitialized); print(\".\"); \n", name);
+    gen_test_program_body(src&, functions);
+    push_all(src&, "\n}");
+    src.items()
+}
+
+fn gen_full_test_program(tests: *Tests) Str = {
+    src := u8.list(temp());
+    @fmt(src&, """#include_std("lib/core.fr");::FmtPad(Str);""");
+    for_keys tests { k |
+        @fmt(src&, "#include_std(\"%\");\n", k);
+    };
+    @fmt(src&, "fn main() void = {\n");
+    each tests { k, v |
+        @fmt(src&, "  @print(\"\\n%[ok]\", f_pad(\"%\", 40, .After));\n", "%", k);
+        gen_test_program_body(src&, v[].items());
     };
     push_all(src&, "\n}");
     src.items()
 }
 
-fn collect_tests(vtable: *ImportVTable) HashMap(Str, *List(Str)) = {
-    out: HashMap(Str, *List(Str)) = init(temp());
+fn gen_test_program_body(src: *List(u8), functions: []Str) void = {
+    for functions { name | 
+        @fmt(src, "    %(@uninitialized); print(\".\"); \n", name);
+    };
+}
+
+Tests :: HashMap(Str, *List(Str));
+fn collect_tests(vtable: *ImportVTable) Tests = {
+    out: Tests = init(temp());
     push_dynamic_context {
         path := "tests".maybe_borrow_cstr(temp());
         ::List(FatStmt);
