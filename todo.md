@@ -23,7 +23,7 @@ B :: @tagged(a: A);
 b: B = (a = ()); 
 b = .a;
 ```
-- backend fails_typecheck make sure sel0:sel1 and blit0:blit1
+- backend fails_typecheck make sure sel0:sel1 and blit0:blit1 and cas0:cas1
 - fold.fr:
 //!     TODO: I think it would be much faster if the frontend just tracked what 
 //!           should be constant, and only materialized it upon seeing a 
@@ -32,7 +32,6 @@ b = .a;
 - auto #fold functions returning StructLiteralP (same as already do for Value).
 ie. `fn init() Self = (arr = @as(Slice(Entry)) empty(), len_including_tombstones = 0, capacity = 0);`
 - RSlot overflow
-- make trailing_zeros(0) == 64 work on x64
 - finish #x86_bytes tests: call_in_stack, throw, try, truncate_to_byte, read_pair, write_pair, both_pair
 - detect if you try to do the jit thing with the backend library from jitted code on macos instead of just `bus error`-ing
 - make `#where` based on argument names instead of order.

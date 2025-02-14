@@ -30,3 +30,10 @@ int main() {
   printf("OK\n");
   return 0;
 }
+
+// :ParamTypeList
+static int foo(unsigned long nonconstant) {
+    unsigned long remaining = nonconstant / 10;
+    nonconstant -= remaining * 10;
+    return nonconstant;
+}

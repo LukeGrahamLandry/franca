@@ -374,13 +374,33 @@ fn new_vla_ptr(c: *Ctx, var: *Obj, tok: *Token) *Node = {
 
 fn new_cast(c: *Ctx, expr: *Node, ty: *CType) *Node = {
     c.add_type(expr);
+    c.gen_expr(expr);  // TODO: add a simple test for why you need this (wuffs does)
+    
+    // :ParamTypeList
+    // chibicc is linked list enthused so storing the parameters of a function type
+    // uses the `next` field so you need to make a copy of the whole type struct 
+    // every it's used in a function signeture. but we want to elide redundant casts 
+    // so gen_addr doesn't have to deal with casts and can't try to accidently cast through 
+    // a pointer which doesn't make any sense. 
+    // 
+    // this is wrong if you ever copied a type and modified it to represent a different type. 
+    // i think the only thing that does that is _Atomic. so before adding that back i should 
+    // replace parameter types with a slice and then this hack goes away
+    while => ty.origin.is_null().not() {
+        ty = ty.origin;
+    };
+    while => expr.ty.origin.is_null().not() {
+        expr.ty = expr.ty.origin;
+    };
+    
     if(expr.ty.identical(ty), => return(expr));
     
     node := temp().box_zeroed(Node);
     node.kind = .ND_CAST;
     node.tok = expr.tok;
     node.lhs = expr;
-    node.ty = c.copy_type(ty);
+    // TODO: chibicc does a copy here but i don't know why. do you ever mutate the type in a way that shouldn't be shared?
+    node.ty = ty; // c.copy_type(ty);
     node.current_block = expr.current_block; // HACK: this is super confusing, hopefully it will go away with asts
     
     //node.lvalue = expr.lvalue;  // :FrontendConstantFolding, TODO: but this is wrong, we're assuming its a noop cast but what if its a truncation
@@ -695,6 +715,7 @@ fn declspec(c: *Ctx, rest: **Token, tok: *Token, attr: ?*VarAttr) *CType = {
     };
 
     if is_atomic {
+        panic("TODO :ParamTypeList");
         ty = c.copy_type(ty);
         ty.is_atomic = true;
     };
@@ -748,6 +769,7 @@ fn func_params(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) *CType = {
                 }
                 @default => ();
             };
+            // :ParamTypeList
             t := c.copy_type(ty2);
             cur.next = t;
             cur = t;
@@ -2175,10 +2197,11 @@ fn parse_expr(c: *Ctx, rest: **Token, tok: *Token, prec: Prec) *Node = {
     rules := rules;  // TODO: shouldn't need to do this but otherwise if can't call the function ?? 
     rule := rules.index(tok.kind);
     node := (rule.prefix)(c, rest, tok);
+    is_stmt := node.kind == .ND_STMT;  // HACK
     tok   = rest[];
     ::enum(@type prec);
     rule := rules.index(tok.kind);
-    while => prec.raw() <= rule.prec.raw() {
+    while => @if(is_stmt, tok.kind == .@":", prec.raw() <= rule.prec.raw()) {
         @if(SPAM) @println("Infix: % %", tok.str(), tok.kind);
         node = (rule.infix)(c, rest, tok, node);
         tok  = rest[];
@@ -2267,8 +2290,8 @@ parse_logical :: fn(c, rest, tok, cond) = {
     rhs  := c.new_cast(rhs, ty_bool);
     else_block_end := c.b;
     then, else, s1, s2, phi1, phi2 := @match(tok.kind) {
-        fn @"&&"() => (rhs, c.new_num(0, tok), else_block, join_block, else_block, prev_block);
-        fn @"||"() => (c.new_num(1, tok), rhs, join_block, else_block, prev_block, else_block);
+        fn @"&&"() => (rhs, c.new_num(0, tok), else_block, join_block, else_block_end, prev_block);
+        fn @"||"() => (c.new_num(1, tok), rhs, join_block, else_block, prev_block, else_block_end);
         @default   => unreachable();
     };
     c.gen_expr(then);
@@ -2306,6 +2329,7 @@ parse_logical :: fn(c, rest, tok, cond) = {
 conditional :: fn(c, rest, tok, cond) #infix(.@"?", .Conditional) = {
     // note: the [GNU] case below still uses the old `cond` node without this cast. 
     cond_r := c.new_cast(cond, ty_bool)[].r;
+    if(cond_r == QbeNull, => @error_tok(c, cond.tok, "ICE: failed to compile condition"));
     
     cond_block := c.b;
     then_block := c.new_block();
@@ -2957,7 +2981,7 @@ do :: fn(c, rest, tok) #prefix(.do) = {
     tok = c.skip(tok, "while");
     tok = c.skip(tok, "(");
     cond := c.new_cast(c.parse_expr(tok&, tok, .None), ty_bool);
-    cond := cond.r;
+    cond := c.assert_gen_expr(cond);
     tok = c.skip(tok, ")");
     rest[] = c.skip(tok, ";");
     
@@ -3812,6 +3836,9 @@ fn gen_addr_inner(c: *Ctx, node: *Node) Qbe.Ref = {
             xx := @is(node.ty.kind, .TY_STRUCT, .TY_UNION);
             if yy && xx {
                 return(c.gen_expr(node));
+            };
+            if node.kind == .ND_CAST {
+                @println("% -> %", node.lhs.ty.kind, node.ty.kind);
             };
             @error_tok(c, node.tok, "TODO: gen_addr %", node.kind)
         };

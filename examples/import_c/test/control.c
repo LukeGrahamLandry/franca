@@ -82,7 +82,9 @@ int main() {
   ASSERT(3, ({ int x=5; if (0.1) x=3; x; }));
   ASSERT(10, ({ double i=10.0; int j=0; for (; i; i--, j++); j; }));
   ASSERT(10, ({ double i=10.0; int j=0; do j++; while(--i); j; }));
-
+  
+  ASSERT(0, ({ char _p = 1; char *p = &_p; for (; 0;) {  (*p)++; } /* ; */ *p = 0; _p; }));
+  
   printf("OK\n");
   return 0;
 }

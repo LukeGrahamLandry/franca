@@ -103,15 +103,21 @@ fn translate_data(m: *QbeModule, obj: *Compile.Obj) []Qbe.Dat = {
     
     { dat := next_dat(); dat.type = .DStart; };
     
-    if obj.init_data.ptr.is_null() {
-        dat := next_dat(); 
-        dat.type = .DZ; 
-        dat.u.num = obj.ty.size.intcast();
-    } else {
-        @debug_assert_eq(obj.init_data.len, obj.ty.size.intcast(), "init_data wrong size for type.\n%", obj.init_data);
+    if true {
+        break :: local_return;
+        
         ::ptr_utils(@type obj.rel[]);
         if obj.rel.is_null() {
             dat := next_dat(); 
+            
+            // TODO: stupid that it's slower to do `int a[9999] = {0}` than `int a[9999];`
+            if obj.init_data.ptr.is_null() || is_all_zeros(obj.init_data) {
+                dat.type = .DZ; 
+                dat.u.num = obj.ty.size.intcast();
+                break();
+            };
+            @debug_assert_eq(obj.init_data.len, obj.ty.size.intcast(), "init_data wrong size for type.\n%", obj.init_data);
+            
             dat.type = .DB; 
             dat.is_str = true;
             dat.u.str = obj.init_data;
@@ -120,35 +126,43 @@ fn translate_data(m: *QbeModule, obj: *Compile.Obj) []Qbe.Dat = {
                 dat.type = .DB; 
                 dat.u.num = 0;
             };
-        } else {
-            pos := 0;
-            rel := obj.rel;
-            for_linked rel { rel |
-                @assert_eq(rel.offset.mod(8), 0, "pointer in constant storage must be 8-byte aligned");
-                before := obj.init_data.slice(pos, rel.offset.intcast());
-                if before.len > 0 {
-                    dat := next_dat(); 
-                    dat.type = .DB; 
-                    dat.is_str = true;
-                    dat.u.str = before;
-                };
-                pos = rel.offset.intcast() + 8;
-                dat := next_dat(); 
-                dat.type = .DL; 
-                dat.is_ref = true;
-                dat.u.ref = (id = m.intern(rel.label.str()), off = rel.addend);
-            };
-            if pos < obj.ty.size.intcast() {
+            break();
+        };
+        @debug_assert_eq(obj.init_data.len, obj.ty.size.intcast(), "init_data wrong size for type.\n%", obj.init_data);
+        pos := 0;
+        rel := obj.rel;
+        for_linked rel { rel |
+            @assert_eq(rel.offset.mod(8), 0, "pointer in constant storage must be 8-byte aligned");
+            before := obj.init_data.slice(pos, rel.offset.intcast());
+            if before.len > 0 {
                 dat := next_dat(); 
                 dat.type = .DB; 
                 dat.is_str = true;
-                dat.u.str = obj.init_data.rest(pos);
+                dat.u.str = before;
             };
+            pos = rel.offset.intcast() + 8;
+            dat := next_dat(); 
+            dat.type = .DL; 
+            dat.is_ref = true;
+            dat.u.ref = (id = m.intern(rel.label.str()), off = rel.addend);
+        };
+        if pos < obj.ty.size.intcast() {
+            dat := next_dat(); 
+            dat.type = .DB; 
+            dat.is_str = true;
+            dat.u.str = obj.init_data.rest(pos);
         };
     };
     
     { dat := next_dat(); dat.type = .DEnd; };
     out.items()
+}
+
+fn is_all_zeros(buf: []u8) bool = {  // :SLOW
+    for buf { b |
+        if(b != 0, => return(false));
+    };
+    true
 }
 
 #where(fn(T) => is_ptr(T) && has_field(Deref(T), @symbol next))

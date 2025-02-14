@@ -1,5 +1,22 @@
 - TODO: deal with `CodegenEntry:Bounce` on wasm
 
+## (Feb 14)
+
+trying to get wuffs to compile with my c compiler. 
+
+- need to type out a bunch of libc signetures 
+- 6590 wuffs_base__utf_8__next__output__is_valid
+  phi for && was using the start of else instead of the end of else
+- 18191 wuffs_private_impl__io_writer__limited_copy_u32_from_history
+  doesn't like `for (; n; n--) { *p++ = *q++; } *ptr_iop_w = p;`
+  tries to treat the for loop as the left of a multiply. 
+  parsing's actually the hardest part did you know that...
+- 20777 wuffs_private_impl__high_prec_dec__assign
+  :ParamTypeList
+- need to do BSS for giant static variables. but can hack around it for now by jsut making segments way bigger. TODO!
+- now the frontend gets through everything and we just have to make it actually compile 
+- wuffs_private_impl__swizzle_ycc__general__triangle_filter
+
 ## (Feb 13)
 
 - get argc,argv from the stack

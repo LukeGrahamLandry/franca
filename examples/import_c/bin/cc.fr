@@ -1,0 +1,47 @@
+C :: import("@/examples/import_c/lib.fr");
+
+#include_std("backend/lib.fr");
+#include_std("compiler/worker.fr");
+ENABLE_TRACY :: false;  // TODO: make worker something you can import nicely
+
+Args :: @struct {
+    target: QbeTargetEnv;
+    input_path: Str;
+    output_path: Str;
+    //defines: []Ty(Str, Str);
+};
+
+fn main() void = {
+    ::?Arch;
+    // TODO: cli
+    args: Args = (
+        target = (arch = query_current_arch().unwrap(), os = query_current_os(), type = .Exe), 
+        input_path = "target/wuffs/test/c/std/adler32.c", 
+        output_path = "c.out",
+        //defines = @slice(("thisisatest", ""), ("WUFFS_CONFIG__AVOID_CPU_ARCH", "")),
+    );
+
+    m := @uninitialized QbeModule;
+    
+    // TODO: 1<<25 should be plenty but i need to do BSS for wuffs tests 
+    init(m&, 1.shift_left(29), libc_allocator, args.target, false);
+    //m.debug["P".char()] = true;
+    
+    ctx: *CodegenShared = init(m&, libc_allocator, codegen_thread_main);
+
+    c := C'Compile.Ctx.zeroed();
+    C'init_ctx(c&, m&);
+    //c.include_paths&.push("examples/import_c/test"); 
+    
+    prog := c&.compile_file(args.input_path).or(fn(e) => panic(e));
+    emit_the_code(c&, ctx, prog);
+    join_codegen_thread(ctx);
+
+    outfile := fopen(args.output_path.maybe_borrow_cstr(temp()), "w".sym().c_str());
+    chunks := {m.target.finish_module}(m&);
+    for chunks { chunk | 
+        write(outfile, chunk);
+    };
+    fclose(outfile);
+    drop(m&);
+}
