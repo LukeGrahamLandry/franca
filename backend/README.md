@@ -29,13 +29,20 @@ You can still print out the ir as human readable text between passes and modify 
 - Added a Web Assembly target (outputs the binary format directly).
   - WIP
 - Emit Elf executables directly
-  - WIP
+  - WIP: I can't do reloctatable or dynamic libraries yet.
 - Removed the RISC-V target for now because I haven't done thier instruction encoding yet.
 
 ### Features
 
 - A library interface for producing and compiling ir in memory instead of outputting text and exec-ing a seperate program to process it.
   (in my brief profiling qbe -O2, it spends 40% of its time parsing the input text. i don't know how that's possible, maybe apple's fgetc is slow).
+- Added some instructions
+  - bit manipulation: byte swap, rotate left/right, count trailing/leading zeros, count ones
+  - atomic compare-and-swap 
+  - conditional select (ie. `a ? b : c`)
+  - syscall
+    - it handles calling convention differences but you must use the correct magic numbers for the target os/architecture/version.
+    - WIP: you can't access carry flag (for error on macos)
 - Insert raw asm bytes in function bodies with arbitrary input/output/clobber register lists.
   > currently very limited: you pick specific registers, do your own assembling, can't reference symbols.  
   > but it lets you access instructions that we don't know about without calling convention spilling overhead.  
@@ -44,10 +51,6 @@ You can still print out the ir as human readable text between passes and modify 
 - arm abi fixes
   - respect the platform register (it gets zeroed when you context switch on macos).
   - large FHA (ie. struct of 4 doubles)
-- added a non-portable syscall instruction.
-  it handles calling convention differences but you must use the correct magic numbers for the target os/architecture/version.
-  - WIP: you can't access carry flag (for error on macos)
-- added a conditional select instruction
 - Removed support for thread locals. Franca achieves an equivilent by passing around an implicit env parameter.
 - Removed support for custom section names.
 

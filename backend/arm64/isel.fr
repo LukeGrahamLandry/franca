@@ -221,6 +221,19 @@ fn sel(f: *Qbe.Fn, i: Qbe.Ins, blk: i32) void = {
             f.emit(.copy, .Kw, QbeNull, i.arg&[1], QbeNull);  // :FalseCasDep
         };
         
+        if o == .ones { 
+            // you can only popcnt on a simd/float register
+            f_in := f.newtmp("isel", .Kd);
+            f_out := f.newtmp("isel", .Kd);
+            ki := i&.cls();
+            kf: Qbe.Cls = @if(ki.is_wide(), .Kd, .Ks);
+            f.emit(.cast, ki, i.to, f_out, QbeNull);
+            f.emit(.ones, kf, f_out, f_in, QbeNull);
+            icast := f.emit(.cast, kf, f_in, i.arg&[0], QbeNull);
+            f.fixarg(icast.arg&.index(0), ki, false, blk);
+            return();
+        };
+        
         new_ins := f.emit(i);
         iarg := new_ins.arg&;
         
@@ -248,7 +261,7 @@ fn sel(f: *Qbe.Fn, i: Qbe.Ins, blk: i32) void = {
             };
             return();
         };
-        // TODO: do this for sub, etc as well. this alone makes the compiler go from 2485100 -> 2089352 bytes of code. thats insane.
+        // TODO: do this for sub, etc as wel. this alone makes the compiler go from 2485100 -> 2089352 bytes of code. thats insane.
         //       this looks branchy but it generates so much less code that its faster even before accounting for it generating better code for itself. 
         if o == .add && is_int(k1) {
             // could convert to sub `if off < 0 && off > -4096` but that never happens in self-compile and then would have to add a case to fuse_addr -- Nov 7
@@ -312,6 +325,13 @@ fn sel(f: *Qbe.Fn, i: Qbe.Ins, blk: i32) void = {
                 return();
             };
         };
+        if o == .ctz {  // 0b101101011000000000110 is ctz... but it doesn't exist? I guess i don't have FEAT_CSSC?
+            new_ins.set_op(.clz);
+            r := f.newtmp("isel", k0);
+            f.emit(.bitswap, k0, r, iarg[0], QbeNull);
+            iarg[0] = r;
+        };
+        
         f.fixarg(iarg[1]&, k1, false, blk);
     };
 }
