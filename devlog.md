@@ -1,5 +1,10 @@
 - TODO: deal with `CodegenEntry:Bounce` on wasm
 
+## (Feb 15)
+
+- did bss, now adler32.c compiles in 100ms instead of 400ms. 
+now i can take out my hack of caching sha256 of a page of zeros. 
+
 ## (Feb 14)
 
 trying to get wuffs to compile with my c compiler. 

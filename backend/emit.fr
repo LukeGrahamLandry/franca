@@ -7,6 +7,7 @@ SegmentType :: @enum(i64) (
     Code,
     ConstantData,
     MutableData,
+    ZeroInitData,
 );
 
 SymbolBucket :: @struct(
@@ -148,6 +149,38 @@ fn get_addr(self: *QbeModule, symbol: *SymbolInfo) ?Ty(rawptr, i64) = {
     (Some = (u8.raw_from_ptr(addr), symbol.size))
 }
 
+fn maybe_add_export(self: *QbeModule, id: u32, export: bool) void = {
+    if export && (self.goal.arch == .wasm32 || @is(self.goal.type, .Relocatable, .Dynamic)) {
+        self.exports&.push(id);
+    };
+}
+
+// TODO: can still use bss if there's only pointers and all data is zeros.
+// TODO: instead of making frontend call this specifically, have the other 
+//       one decide. so do_jit_fixups on DEnd instead and switch?
+fn new_zeroed_symbol(self: *QbeModule, dat: *Qbe.Dat) void = {
+    // the advantage of using bss is that you don't have to fill your executable with zeros
+    // if you have large static arrays. when jitting, we need to use memory anyway so just 
+    // treat it like normal data. 
+    if self.goal.type == .JitOnly {
+        dat.type = .DStart;
+        self.new_emit_data(dat);
+        dat.type = .DZ;
+        self.new_emit_data(dat);
+        dat.type = .DEnd;
+        self.new_emit_data(dat);
+    } else {
+        seg := SegmentType.ZeroInitData;
+        segment := self.segments&.index(seg);
+        next := segment.next&;
+        segment.align_to(8);
+        maybe_add_export(self, dat.lnk.id, dat.lnk.export);
+        off := segment.mmapped.ptr.ptr_diff(next[]);
+        self.do_jit_fixups(dat.lnk.id, seg, off);
+        next[] = next[].offset(dat.u.num);
+    };
+}
+
 // TODO: be able to specify mutable or constant
 fn new_emit_data(self: *QbeModule, dat: *Qbe.Dat) void = {
     ::enum(@type dat.type);
@@ -156,12 +189,6 @@ fn new_emit_data(self: *QbeModule, dat: *Qbe.Dat) void = {
         print_dat(self, dat, self.debug_out);
     };
     self.emit_data_to_segment(dat);
-}
-
-fn maybe_add_export(self: *QbeModule, id: u32, export: bool) void = {
-    if export && (self.goal.arch == .wasm32 || @is(self.goal.type, .Relocatable, .Dynamic)) {
-        self.exports&.push(id);
-    };
 }
 
 fn emit_data_to_segment(self: *QbeModule, dat: *Qbe.Dat) void = 
@@ -174,6 +201,7 @@ fn emit_data_to_segment(self: *QbeModule, dat: *Qbe.Dat, seg: SegmentType) void 
     next := segment.next&;
     ::enum(@type dat.type);
     @match(dat.type) {
+        fn DZeroInit() => self.new_zeroed_symbol(dat);
         fn DStart() => {
             segment.align_to(8);
             id := dat.lnk.id;
@@ -360,7 +388,7 @@ fn fill_from_libc(self: *QbeModule) void = {
 //       would be great if my language had nice relative pointers and then you wouldn't have to deal with that as much
 //
 fn do_jit_fixups(self: *QbeModule, id: u32, segment: SegmentType, final_offset: i64) void = {
-    @assert(final_offset >= 0 && final_offset < self.segments&[segment].mmapped.len, "thats not in the segment");
+    @if(segment != .ZeroInitData) @assert(final_offset >= 0 && final_offset < self.segments&[segment].mmapped.len, "thats not in the segment");
     use_symbol(self, id) { symbol | 
         @debug_assert(int_from_ptr(@type symbol[], symbol) != 0, "fixups for a null symbol! (forgot to set Fn.lnk.id?)"); // only catches it if you haven't had something hash to 0 yet. 
         @assert(symbol.kind != .Local, "(do_jit_fixups) redeclared symbol %: %", id, symbol.name);
