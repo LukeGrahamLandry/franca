@@ -33,7 +33,7 @@ fn promote(f: *Qbe.Fn) void = {
             skip()
         };
         each t.uses() { u |
-            replace_access_with_copy(t, u.u.ins, k, r)
+            replace_access_with_copy(f, t, u.u.ins, k, r)
         };
         when_debug(f, .Memory) { out |
             @fmt_write(out, "%%, ", "%", t.name());
@@ -88,7 +88,7 @@ fn is_uniform_access(f: *Qbe.Fn, l: *Qbe.Ins, k: *?Qbe.Cls, s: *?i32, address: Q
 
 store_by_size :: @const_slice(Qbe.O.Oxxx, .storeb, .storeh, .Oxxx, .storew, .Oxxx, .Oxxx, .Oxxx, .storel);
 
-fn replace_access_with_copy(t: *Qbe.Tmp, l: *Qbe.Ins, k: Qbe.Cls, address: Qbe.Ref) void #once = {  
+fn replace_access_with_copy(f: *Qbe.Fn, t: *Qbe.Tmp, l: *Qbe.Ins, k: Qbe.Cls, address: Qbe.Ref) void #once = {  
     if is_store(l.op()) {
         @debug_assert(address == l.arg&[1]);
         l[] = make_ins(.copy, k, l.arg&[1], l.arg&[0], QbeNull);
@@ -121,6 +121,17 @@ fn replace_access_with_copy(t: *Qbe.Tmp, l: *Qbe.Ins, k: Qbe.Cls, address: Qbe.R
     };
     
     @debug_assert(address == l.arg&[0]);
+     
+    // HACK: examples/import_c has a habit of reading from uninitialized memory 
+    // but not using the result which confuses ssa_check later. 
+    // it feels weird to disallow reading uninitialized memory because if we'd done no 
+    // optimisations, the program would run, you'd just get some arbitrary number. 
+    // there is also the MADV_DONTNEED problem (you can read twice and get different values). 
+    if f.get_temporary(l.to)[].nuse == 0 {
+        l.arg&[0] = QbeUndef;
+        l.set_op(.copy);
+        return();
+    };
     
     /* try to turn loads into copies so we
      * can eliminate them later */

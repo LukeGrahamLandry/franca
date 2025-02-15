@@ -610,11 +610,14 @@ fn emit_reloc_symbols(e: *EmitMacho, chained: *List(u8)) void #inline = {
         // this only works for exports!
         entry.symbol_type = 15;  // bottom bit means external. 14 means defined in section.
         // note: 1 indexed. 
-        entry.section_number = 1;   @assert(s.segment == .Code, "TODO: export data");
+        entry.section_number = which_section(s.segment);
         entry.desc = 0; // i think exports don't use this.     for imports, 256 ordinal 1.
         entry.name_offset = trunc(chained.len - strings_start);
-        @debug_assert(s.offset >= text_padding, "what are you smoking");
-        entry.symbol_address = bitcast(s.offset - text_padding);      @assert(s.segment == .Code, "TODO: export data");
+        // copy-paste
+        segment_padding := if(s.segment == .Code, => text_padding, => 0); // :HACK
+        @debug_assert(s.offset >= segment_padding, "what are you smoking?");
+        start: i64 = bitcast(e.load_commands[entry.section_number.zext() - 1].address);
+        entry.symbol_address = bitcast(s.offset - segment_padding + start);
         ugh := items(@format("_%", s.name) temp());
         append_padded_cstr(chained, ugh, 1);
         // TODO: we probably don't want it to appear twice in the symbol table if it's a data export and also has local relocations
@@ -652,7 +655,11 @@ fn append_relocations(symbol_table_index: i64, id: u32, m: *QbeModule, relocatio
             // However, we want to let static linker move stuff around and pack its own __got.
             // So we skip this relocation and instead emit one for each place we accessed that __got slot. 
             //
-            @debug_assert(fix.type&.tag() == .DataAbsolute && s.kind != .Local, "__got reloc must be data");
+            // previously this asserted `s.kind != .Local` but now that we support importing data as well, 
+            // we need to conservitively emit more got references if we address a var before knowing that 
+            // it's a function and we might guess wrong. i think this is just wasteful, not a correctness issue -- Feb 14, 2025
+            // TODO: but we still incorrectly export those below
+            @debug_assert(fix.type&.tag() == .DataAbsolute, "__got reloc must be data. %");
             continue();
         };
         sec: i64 = which_section(patch_segment).zext();
@@ -670,17 +677,27 @@ fn append_relocations(symbol_table_index: i64, id: u32, m: *QbeModule, relocatio
         @match(fix.type) {
             fn InReg(it) => {
                 @debug_assert(it.increment == 0, "TODO: offset symbols"); // :ArmAddendReloc
+                it.got_load = it.got_load && s.kind != .Local;
                 
                 // in the instruction we tell it: which register to use
+                // 
+                // also the linker bitches about it if you use the wrong instruction (add vs ldr). 
+                // even tho it's redundant because it knows from the relocation below. 
+                // but thankfully the error message is helpful. 
+                reg := @as(u5) it.r;
                 inst: []u32 = (ptr = ptr_cast_unchecked(u8, u32, fix.patch_at), len = 2);
-                inst[0] = adrp(0, 0, @as(u5) it.r);
-                inst[1] = add_im(Bits.X64, @as(u5) it.r, @as(u5) it.r, 0, 0);
+                inst[0] = adrp(0, 0, reg);
+                inst[1] = if(it.got_load, => ldr_uo(Bits.X64, reg, reg, 0), => add_im(Bits.X64, reg, reg, 0, 0));  // TODO: does it need to go in both slots? 
                 
                 r.relative = true;
-                r.type = 3;  // ARM64_RELOC_PAGE21
+                ARM64_RELOC_PAGE21 :: 3;
+                ARM64_RELOC_GOT_LOAD_PAGE21 :: 5;
+                r.type = if(it.got_load, => ARM64_RELOC_GOT_LOAD_PAGE21, => ARM64_RELOC_PAGE21);
                 rs.reserve_type(i64)[] = encode_reloc(r);
                 r.offset += 4;
-                r.type = 4; // ARM64_RELOC_PAGEOFF12
+                ARM64_RELOC_PAGEOFF12 :: 4;
+                ARM64_RELOC_GOT_LOAD_PAGEOFF12 :: 6;
+                r.type = if(it.got_load, => ARM64_RELOC_GOT_LOAD_PAGEOFF12, => ARM64_RELOC_PAGEOFF12);
                 r.relative = false;
                 rs.reserve_type(i64)[] = encode_reloc(r);
             }

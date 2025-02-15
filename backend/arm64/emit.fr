@@ -93,6 +93,7 @@ fn fixup_arm64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_rel
             } else {
                 // TODO: untested
                 new_got_reloc[] = load_from_got(self, symbol, it.r, inst, address).or_else(=> new_got_reloc[]);
+                it.got_load = true;
             };
         }
         fn DataAbsolute(it) => {
@@ -378,7 +379,7 @@ fn loadaddr_bits(self: *ArmState, c: *Qbe.Con, dest_reg: i64) void = {
                 };
             }
             fn Pending() => {
-                if self.m.got_indirection_instead_of_patches {
+                if self.m.got_indirection_instead_of_patches || self.m.goal.type == .Relocatable {
                     self.immediate_fixup_got(dest_reg, inc, symbol);
                 } else {
                     push_fixup(self.m, symbol, patch);
@@ -396,7 +397,7 @@ fn loadaddr_bits(self: *ArmState, c: *Qbe.Con, dest_reg: i64) void = {
 
 fn immediate_fixup_got(self: *ArmState, dest_reg: i64, inc: i64, symbol: *SymbolInfo) void = {
     patch_addr := self.m.segment_address(.Code, self.m.current_offset(.Code));
-    patch: Fixup = (patch_at = patch_addr, type = (InReg = (r = dest_reg, increment = inc.trunc())));
+    patch: Fixup = (patch_at = patch_addr, type = (InReg = (r = dest_reg, increment = inc.trunc(), got_load = true)));
     if self.m.goal.type != .JitOnly { 
         push_fixup(self.m, symbol, patch); 
     };
@@ -410,7 +411,7 @@ fn immediate_fixup_got(self: *ArmState, dest_reg: i64, inc: i64, symbol: *Symbol
     };
 }
 
-fn loadcon(self: *ArmState, c: *Qbe.Con, r: i64, k: Qbe.Cls) void  = {
+fn loadcon(self: *ArmState, c: *Qbe.Con, r: i64, k: Qbe.Cls) void #once = {
     w := is_wide(k);
     n := c.bits.i;
     if c.type == .CAddr {

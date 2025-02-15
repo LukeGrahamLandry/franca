@@ -33,6 +33,19 @@ trying to get wuffs to compile with my c compiler.
   now it's 1.5%, still slow. 
   - emit_data_to_segment taking 43% to write zeros one byte at a time. 
   boring because BSS will fix it but calling memset instead makes it 12%.
+- // has a habit of reading from uninitialized memory 
+  // but not using the result which confuses ssa_check later. 
+  // it feels weird to disallow reading uninitialized memory because if we'd done no 
+  // optimisations, the program would run, you'd just get some arbitrary number. 
+  // there is also the MADV_DONTNEED problem (you can read twice and get different values). 
+- i think it's really funny that the first time the result exe tries to run it takes like 2 seconds 
+before main() and then the next time it's instant. almost like that's how long it takes the loader 
+to hash 600MB of zeros to check my signeture and then it remembers. 
+- to debug why the generated exe is crashing, want to support .Relocatable so i can get symbol names in lldb. 
+so need to allow importing non-function variables when not targetting .Exe. 
+you can't just use adrp/add apparently, need to load from GOT. 
+- now a little hack to wuffs/testlib/parse_args and i can run adler32.c
+TODO: fix for real
 
 ## (Feb 13)
 
