@@ -3,7 +3,31 @@
 ## (Feb 15)
 
 - did bss, now adler32.c compiles in 100ms instead of 400ms. 
-now i can take out my hack of caching sha256 of a page of zeros. 
+now i can take out my hack of caching sha256 of a page of zeros.
+- bit of a scare bit it was just QbeModule::drop using the SegmentType length
+- the importing GOT data when static linking thing i did yesterday works for me but crashes the linker on github actions. 
+`ld: Assertion failed: (pattern[0].addrMode == addr_other), function addFixupFromRelocations, file Relocations.cpp, line 700.`
+ughghgh how do i even debug that. the line it references sure doesn't exist if i go look at llvm-project on github. 
+so like it's apple's personal clang or some ancient version? 
+even if i knew what version it wasm, would i have to compile my own with debug assertions turned on, 
+that seems impractical. am i really going to just amend the commit a hundred times as i try things? 
+joyous day. that would have taken be a billion years. 
+  - https://github.com/bytecodealliance/wasmtime/issues/8730
+  - https://github.com/gimli-rs/object/pull/702
+you just have to swap the order of the relocations for adrp and ldr. 
+why didn't i think of that... fucking garbage program man. 
+praise cranelift. 
+- elf bss and hackily convert LEA to LDR from GOT for x64 data imports. 
+some ifdefs in include.fr. now works on x64-macos but segsevs on linux 
+`libc.so.6_IO_printf: ->  0x7ffff7e38cbb <+43>: movaps xmmword ptr [rsp + 0x50], xmm0`
+feels familiar. because the stack isn't 16 byte aligned? `rsp = 0x00007fffffffe408`
+yeah, fixing that makes it get to "hello world" but now it's crashing in my own code. 
+needed to offset by 8 in the same way for vararg save area. 
+still think it's wrong tho. hard to make sure everything cancels out. 
+- there's also the problem of getting argc/argv which i fixed in init_franca_runtime
+- for now just always init small slots
+- clean up parsing Prec.Stmt hack
+- start factoring out the test runner part
 
 ## (Feb 14)
 

@@ -6,7 +6,6 @@ fn output_elf(m: *QbeModule) [][]u8 = {
     patch_pending_symbols(m);
     
     MYSTERY_SPICE :: 0x10000;
-    @debug_assert(identical(m.segments&[.ZeroInitData].mmapped.ptr, m.segments&[.ZeroInitData].next), "TODO: BSS in elf");
      
     code := m.segments&[.Code]&;
     code_size := code.len() - COMMANDS_SIZE_GUESS - SIZE_OF_STUBS;
@@ -53,7 +52,7 @@ fn output_elf(m: *QbeModule) [][]u8 = {
     );
     
     start_program_headers := commands.len;
-    total_prog_headers := @if(symbols.len > 0, 8, 7);
+    total_prog_headers := @if(symbols.len > 0, 9, 8);
     program_headers_size := total_prog_headers * size_of(Elf.ProgramHeader);
     @debug_assert_gt(commands.maybe_uninit.len, program_headers_size);
     program_headers: []Elf.ProgramHeader = (ptr = ptr_cast_unchecked(u8, Elf.ProgramHeader, commands.maybe_uninit.index_unchecked(commands.len)), len = total_prog_headers);
@@ -120,6 +119,22 @@ fn output_elf(m: *QbeModule) [][]u8 = {
     make_segment(.Code, RX); RX :: 5;// :waste :commandsispartofcodenow
     make_segment(.ConstantData, RW); R :: 4; // :waste  // TODO: how the fuck do i do relocations in a non-writable segment?
     make_segment(.MutableData, RW); RW :: 6;
+    
+    // BSS
+    {
+        segment := m.segments&[.ZeroInitData]&;
+        program_header()[] = (
+            type = .Load,
+            prot = RW,
+            offset = file_offset,
+            vaddr = virtual_offset, 
+            paddr = virtual_offset,
+            file_size = 0,
+            mem_size = segment.len(),
+            align = 4096,
+        );
+        virtual_offset += segment.len();
+    };
     
     if symbols.len > 0 {
         dynamic_header = (Some = (program_header(), program_header(), Elf.ProgramHeader.ptr_from_int(0)));

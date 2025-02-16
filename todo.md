@@ -7,6 +7,7 @@
 
 ##
 
+- bss: static mach-o
 - context() leak allocator
 - simplify run_tests.fr (call compiler/test.fr instead of recollecting them)
 - if constant folding can get rid of all the branchs that use an import, the binary shouldn't need that import

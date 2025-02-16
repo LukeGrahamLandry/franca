@@ -26,6 +26,9 @@ int main() {
   ASSERT(5, ({ struct t {char a;} x, y; x.a=5; y=x; y.a; }));
 
   ASSERT(10, (1 ? ret10 : (void *)0)());
+  
+  ASSERT(4, ({ short x[1] = { 5 }; x[0] -= 1; x[0]; }));
+  
 
   printf("OK\n");
   return 0;

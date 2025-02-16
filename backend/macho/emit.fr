@@ -109,7 +109,7 @@ fn output_macho(m: *QbeModule) [][]u8 = {
             s.file_size = chunks[i + 1].len;
         };
         s    := m.segments&.index(.ZeroInitData);
-        size := align_to(ptr_diff(s.mmapped.ptr, s.next), macos_page_size);  // TODO: align redundant, it's done above
+        size := ptr_diff(s.mmapped.ptr, s.next);
         segments&.push(prot = 3, name = "__BSS", virtual_size = size);
         segments&.insert(0, (prot = 0, name = "__PAGEZERO", virtual_size = zero_page_size)); 
         
@@ -693,6 +693,12 @@ fn append_relocations(symbol_table_index: i64, id: u32, m: *QbeModule, relocatio
                 inst: []u32 = (ptr = ptr_cast_unchecked(u8, u32, fix.patch_at), len = 2);
                 inst[0] = adrp(0, 0, reg);
                 inst[1] = if(it.got_load, => ldr_uo(Bits.X64, reg, reg, 0), => add_im(Bits.X64, reg, reg, 0, 0));  // TODO: does it need to go in both slots? 
+                
+                // You are required to swap the order of these relocations. 
+                // Otherwise you fail an assertion in whatever version of lld github actions uses on Feb 15, 2025. 
+                // Who knows man. Very grateful for the cranelift people rn tho. That would have taken me so long. 
+                // - https://github.com/bytecodealliance/wasmtime/issues/8730
+                // - https://github.com/gimli-rs/object/pull/702
                 
                 r.offset += 4;
                 ARM64_RELOC_PAGEOFF12 :: 4;

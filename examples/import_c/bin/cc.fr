@@ -15,25 +15,55 @@ fn main() void = {
     ::?Arch;
     // TODO: cli
     args: Args = (
-        target = (arch = query_current_arch().unwrap(), os = query_current_os(), type = .Exe), 
-        input_path = "target/wuffs/test/c/std/adler32.c", 
+        target = (arch = .aarch64, os = .macos, type = .Exe), //(arch = query_current_arch().unwrap(), os = query_current_os(), type = .Exe), 
+        input_path = "", //"target/wuffs/test/c/std/lzma.c", 
         output_path = "c.out",
         //defines = @slice(("thisisatest", ""), ("WUFFS_CONFIG__AVOID_CPU_ARCH", "")),
     );
+    //compile(args);
+    
+    ::import("@/examples/testing.fr");
+    chdir("target/wuffs").unwrap();
+    // TODO: without the `found :=` theres no error message for forgetting the `;` after `skip`
+    skip :: @const_slice(
+        "lzw.c", "zlib.c", "gzip.c", "gif.c", "bzip2.c", // can't encode offset
+        "json.c",  // latval QbeNull
+        "netpbm.c", "nie.c", "thumbhash.c", "targa.c", "qoi.c", // symbol not found
+        "deflate.c", "webp.c", "bmp.c", "xz.c", // get alias
+        "jpeg.c", "cbor.c", "wbmp.c", "etc2.c", // if QbeNull
+        "png.c", // libc headers: sprintf
+    );
+    // TODO: preload the wuffs lib file
+    files := collect_with_extension("test/c/std", ".c") 
+            || panic("didn't find tests. run from franca root dir and clone wuffs to target/wuffs");
+    files&.unordered_retain(fn(it) => !skip.contains(it));
+    run_tests_main(Str, files.items(), fn(a) => a[]) { file | 
+        yield :: local_return;
+        path := @tfmt("test/c/std/%", file[]);
+        args.input_path = path;
+        a := timestamp();
+        or compile(args) { err |
+            yield(false, fixed_list(empty()), err.fixed_list(), "");
+        };
+        b := timestamp();
+        ok, out, err := exec_and_catch("./c.out", empty(), todo_allocator);
+        ok := ok && out.items().contains("cc      PASS (");
+        (ok, out, err, @tfmt("%ms", b - a))
+    };
+}
 
+fn compile(args: Args) Result(void, Str) = {
     m := @uninitialized QbeModule;
     
-    // TODO: 1<<25 should be plenty but i need to do BSS for wuffs tests 
-    init(m&, 1.shift_left(29), libc_allocator, args.target, false);
-    //m.debug["P".char()] = true;
+    init(m&, 1.shift_left(25), libc_allocator, args.target, false);
+    //m.debug["D".char()] = true;
     
     ctx: *CodegenShared = init(m&, libc_allocator, codegen_thread_main);
 
     c := C'Compile.Ctx.zeroed();
     C'init_ctx(c&, m&);
-    //c.include_paths&.push("examples/import_c/test"); 
     
-    prog := c&.compile_file(args.input_path).or(fn(e) => panic(e));
+    prog := @try(c&.compile_file(args.input_path)) return;
     emit_the_code(c&, ctx, prog);
     join_codegen_thread(ctx);
 
@@ -44,4 +74,5 @@ fn main() void = {
     };
     fclose(outfile);
     drop(m&);
+    .Ok
 }

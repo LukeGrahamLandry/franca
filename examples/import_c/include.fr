@@ -1,6 +1,10 @@
 // https://www.sigbus.info/n1570#7.1.2
 // https://pubs.opengroup.org/onlinepubs/9699919799.2018edition/idx/head.html
 
+// TODO: replace this with a common way of representing declarations that can be shared with franca. 
+//       and then just write them in franca. do i care enough to make a serialized form so you don't 
+//       need to bundle the franca compiler? or just generate c headers. but that's so ass. 
+
 float :: """
     #pragma once
     
@@ -53,9 +57,14 @@ stdalign :: """
 
 stdarg :: """
     #pragma once
-    // TODO: this is arm64-apple specific. needs to be up to 4 longs for other platforms. 
-    //       but you can't just make it the largest size if you want to pass it by value to other people's libc. 
-    typedef struct { long __opaque[1]; } va_list;  
+    
+    #if __aarch64 && __macos
+        typedef struct { long __opaque[1]; } va_list;
+    #elif __x86_64
+        typedef struct { long __opaque[3]; } va_list;
+    #else
+        typedef struct { long __opaque[3]; } va_list;
+    #endif
     #define va_start(ap, ...) __builtin_va_start(&ap)
     #define va_end(ap)
     #define va_arg(ap, ty)  __builtin_va_arg(&ap, ty)
@@ -199,9 +208,14 @@ stdlib :: """
 errno :: """
     #pragma once
     
-    // TODO: macos specific?
-    extern int * __error(void);
-    #define errno (*__error())
+    #if __macos
+        #define __GET_ERRNO __error
+    #elif __linux
+        #define __GET_ERRNO __errno_location
+    #endif
+    
+    extern int *__GET_ERRNO();
+    #define errno (*__GET_ERRNO())
     
     // TODO: macos specific?
     #define EINTR 4 
@@ -253,6 +267,19 @@ inttypes :: """
     #define PRIu64 "llu"
     #define PRIx64 "llx"
     #define PRIX64 "llX"
+    
+    #define PRId16 "hd"
+    #define PRIo16 "ho"
+    #define PRIu16 "hu"
+    #define PRIx16 "hx"
+    #define PRIX16 "hX"
+    
+    #define PRId8 "hhd"
+    #define PRIo8 "hho"
+    #define PRIu8 "hhu"
+    #define PRIx8 "hhx"
+    #define PRIX8 "hhX"
+
 """;
 
 stdio :: """
@@ -271,13 +298,18 @@ stdio :: """
     int ferror(FILE *stream);
     void clearerr(FILE *stream);
 
-    // TODO: macos specific?
-    extern FILE *__stdinp;
-    extern FILE *__stdoutp;
-    extern FILE *__stderrp;
-    #define	stdin __stdinp
-    #define	stdout __stdoutp
-    #define	stderr __stderrp
+    #if __macos
+        extern FILE *__stdinp;
+        extern FILE *__stdoutp;
+        extern FILE *__stderrp;
+        #define	stdin __stdinp
+        #define	stdout __stdoutp
+        #define	stderr __stderrp
+    #elif __linux
+        extern FILE *stdin;
+        extern FILE *stdout;
+        extern FILE *stderr;
+    #endif
 """;
 
 sys :: @struct {
@@ -297,7 +329,7 @@ types :: """
     #pragma once
 
     typedef long   time_t;
-    typedef time_t suseconds_t;
+    typedef int suseconds_t;
 """;
 };
 

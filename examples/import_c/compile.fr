@@ -1034,6 +1034,15 @@ fn declaration(c: *Ctx, tok: *Token, basety: *CType, attr: ?*VarAttr) *Token = {
 
         if equal(tok, "=") {
             c.lvar_initializer(tok&, tok.next, var);
+        } else {
+            // backend gets freaked out when it tried to promote a stack slot to a Ref but 
+            // it gets read before defined (even if that path is actually unreachable). 
+            // TODO: this should probably be fixed in the backend instead. :ThisShouldBeValidUndef
+            if !c.speculate && ty.size <= 8 && ty.size > 0 {
+                n := c.new_node(.ND_MEMZERO, tok);
+                n.var = var;
+                c.gen_expr(n);
+            }
         };
 
         if(var.ty.size < 0,         => @error_tok(c, ty.name, "variable has incomplete type"));
@@ -2220,11 +2229,10 @@ fn parse_expr(c: *Ctx, rest: **Token, tok: *Token, prec: Prec) *Node = {
     rules := rules;  // TODO: shouldn't need to do this but otherwise if can't call the function ?? 
     rule := rules.index(tok.kind);
     node := (rule.prefix)(c, rest, tok);
-    is_stmt := node.kind == .ND_STMT;  // HACK
     tok   = rest[];
     ::enum(@type prec);
     rule := rules.index(tok.kind);
-    while => @if(is_stmt, tok.kind == .@":", prec.raw() <= rule.prec.raw()) {
+    while => prec.raw() <= rule.prec.raw() {
         @if(SPAM) @println("Infix: % %", tok.str(), tok.kind);
         node = (rule.infix)(c, rest, tok, node);
         tok  = rest[];
@@ -2260,6 +2268,9 @@ fn parse_binary_inner(c: *Ctx, rest: **Token, tok: *Token, lhs: *Node) *Node = {
         }
         fn @"-="()  => {
             node := c.new_sub(lhs, rhs, tok);
+            if node.lhs.kind == .ND_CAST {
+                node.lhs = node.lhs.lhs;  // HACK. fixes short x[1]; x[0] -= 1; 
+            };
             node := c.to_assign(node.kind, node.lhs, node.rhs, node.tok);
             return(node);
         }
@@ -2789,7 +2800,7 @@ compatible :: fn(c, rest, tok) #prefix(.__builtin_types_compatible_p) = {
     c.new_num(is_compatible(t1, t2).int(), start)
 };
 
-return :: fn(c, rest, tok) #prefix(.return) = {
+return :: fn(c, rest, tok) #prefix(.return, .ND_STMT) = {
     if(consume(rest, tok.next, ";"), => return(c.new_node(.ND_STMT, tok)));  // return void
     exp := c.parse_expr(tok&, tok.next, .None);
     c.assert_gen_expr(exp);
@@ -2814,7 +2825,7 @@ return :: fn(c, rest, tok) #prefix(.return) = {
     };
     c.new_node(.ND_STMT, tok)
 };
-if_ :: fn(c, rest, tok) #prefix(.if) = {
+if_ :: fn(c, rest, tok) #prefix(.if, .ND_STMT) = {
     then_block := c.new_block();
     else_block := c.new_block();
     join_block := c.new_block();
@@ -2840,7 +2851,7 @@ if_ :: fn(c, rest, tok) #prefix(.if) = {
     rest[] = tok;
     c.new_node(.ND_STMT, tok)
 };
-switch_ :: fn(c, rest, tok) #prefix(.switch) = {
+switch_ :: fn(c, rest, tok) #prefix(.switch, .ND_STMT) = {
     payload := temp().box_zeroed(Qbe.SwitchPayload);
     tok = c.skip(tok.next, "(");
     cond := c.parse_expr(tok&, tok, .None);
@@ -2884,7 +2895,7 @@ switch_ :: fn(c, rest, tok) #prefix(.switch) = {
     };
     c.new_node(.ND_STMT, tok)
 };
-case :: fn(c, rest, tok) #prefix(.case) = {
+case :: fn(c, rest, tok) #prefix(.case, .ND_STMT) = {
     unique_label := c.new_block();
     c.jmp_if_unterminated(unique_label);
     c.b = unique_label;
@@ -2907,7 +2918,7 @@ case :: fn(c, rest, tok) #prefix(.case) = {
     c.b = next_block;
     c.new_node(.ND_STMT, tok)
 };
-default :: fn(c, rest, tok) #prefix(.default) = {
+default :: fn(c, rest, tok) #prefix(.default, .ND_STMT) = {
     unique_label := c.new_block();
     c.jmp_if_unterminated(unique_label);
     c.b = unique_label;
@@ -2922,7 +2933,7 @@ default :: fn(c, rest, tok) #prefix(.default) = {
     c.b = next_block;
     c.new_node(.ND_STMT, tok)
 };
-for_ :: fn(c, rest, tok) #prefix(.for) = {
+for_ :: fn(c, rest, tok) #prefix(.for, .ND_STMT) = {
     _, _ := push_loop c { brk_label, cont_label |
         cond_block := c.new_block();
         body_block := c.new_block();
@@ -2935,7 +2946,7 @@ for_ :: fn(c, rest, tok) #prefix(.for) = {
         } else {
             c.expr_stmt(tok&, tok);
         };
-        c.jmp_if_unterminated(body_block);
+        c.jmp_if_unterminated(cond_block);
 
         c.b = cond_block;
         cond := if !equal(tok, ";") {
@@ -2967,7 +2978,7 @@ for_ :: fn(c, rest, tok) #prefix(.for) = {
     };
     c.new_node(.ND_STMT, tok)
 };
-while_ :: fn(c, rest, tok) #prefix(.while) = {
+while_ :: fn(c, rest, tok) #prefix(.while, .ND_STMT) = {
     push_loop c { brk_label, cont_label |
         c.jmp_if_unterminated(cont_label);
         c.b = cont_label;
@@ -2986,7 +2997,7 @@ while_ :: fn(c, rest, tok) #prefix(.while) = {
     };
     c.new_node(.ND_STMT, tok)
 };
-do :: fn(c, rest, tok) #prefix(.do) = {
+do :: fn(c, rest, tok) #prefix(.do, .ND_STMT) = {
     body_block := c.new_block();
     c.jmp_if_unterminated(body_block);
     brk_label, cont_label := push_loop c { _, _ |
@@ -3007,7 +3018,7 @@ do :: fn(c, rest, tok) #prefix(.do) = {
     c.b = brk_label;
     c.new_node(.ND_STMT, tok)
 };
-asm :: fn(c, rest, tok) #prefix(.asm) = {
+asm :: fn(c, rest, tok) #prefix(.asm, .ND_STMT) = {
     tok = tok.next;
     dowhile {
         ignore(tok&, tok, @const_slice("volatile", "inline"))
@@ -3019,7 +3030,7 @@ asm :: fn(c, rest, tok) #prefix(.asm) = {
     rest[] = c.skip(tok.next, ")");
     @error_tok(c, tok, "asm stmt is not supported");
 };
-goto :: fn(c, rest, tok) #prefix(.goto) = {
+goto :: fn(c, rest, tok) #prefix(.goto, .ND_STMT) = {
     if equal(tok.next, "*") {
         _dest := c.parse_expr(tok&, tok.next.next, .None);
         @error_tok(c, tok, "[GNU] labels-as-values is not supported (goto *ptr)");
@@ -3031,7 +3042,7 @@ goto :: fn(c, rest, tok) #prefix(.goto) = {
     c.b = c.new_block();
     c.new_node(.ND_STMT, tok)
 };
-break :: fn(c, rest, tok) #prefix(.break) = {
+break :: fn(c, rest, tok) #prefix(.break, .ND_STMT) = {
     brk_label := c.brk_label || @error_tok(c, tok, "stray break");
     unique_label := brk_label;
     rest[] = c.skip(tok.next, ";");
@@ -3039,7 +3050,7 @@ break :: fn(c, rest, tok) #prefix(.break) = {
     c.b = c.new_block();
     c.new_node(.ND_STMT, tok)
 };
-continue :: fn(c, rest, tok) #prefix(.continue) = {
+continue :: fn(c, rest, tok) #prefix(.continue, .ND_STMT) = {
     cont_label := c.cont_label || @error_tok(c, tok, "stray continue");
     unique_label := cont_label;
     rest[] = c.skip(tok.next, ";");
@@ -3047,11 +3058,11 @@ continue :: fn(c, rest, tok) #prefix(.continue) = {
     c.b = c.new_block();
     c.new_node(.ND_STMT, tok)
 };
-block :: fn(c, rest, tok) #prefix(.@"{") = {
+block :: fn(c, rest, tok) #prefix(.@"{", .ND_STMT) = {
     c.compound_stmt(rest, tok.next);
     c.new_node(.ND_STMT, tok)
 };
-empty_stmt :: fn(c, rest, tok) #prefix(.@";") = {
+empty_stmt :: fn(c, rest, tok) #prefix(.@";", .ND_STMT) = {
     rest[] = tok.next;
     c.new_node(.ND_STMT, tok)
 };
@@ -3065,11 +3076,19 @@ fn set_rest_and_gen(c: *Ctx, rest: **Token, tok: *Token, node: *Node) *Node = {
 }
 
 fn stmt(c: *Ctx, rest: **Token, tok: *Token) *Node = {
-    node := c.parse_expr(rest, tok, .Stmt);
-    if node.kind != .ND_STMT {
+    rule := rules.index(tok.kind);
+    if rule.op == .ND_STMT {
+        node := (rule.prefix)(c, rest, tok);
+        if tok.kind == .@":" {
+            node = parsers'label(c, rest, tok, node);
+        };
+        c.gen_expr(node);
+        node
+    } else {
+        node := c.parse_expr(rest, tok, .Stmt);
         consume(rest, rest[], ";");
-    };
-    node
+        node
+    }
 }
 
 // In C, `+` operator is overloaded to perform the pointer arithmetic.
@@ -3077,6 +3096,8 @@ fn stmt(c: *Ctx, rest: **Token, tok: *Token) *Node = {
 // so that p+n points to the location n elements (not bytes) ahead of p.
 // In other words, we need to scale an integer value before adding to a
 // pointer value. This function takes care of the scaling.
+// 
+// This coerces the arguments. You still have to actually create the add later. 
 fn new_add(c: *Ctx, lhs: **Node, rhs: **Node, tok: *Token) void = {
     //c.add_type(lhs);
     //c.add_type(rhs);

@@ -27,44 +27,19 @@ fn driver(vtable: *ImportVTable) void = {
 // "builtin.c" __builtin_types_compatible_p (easy)
 // extern.c
 fn run_tests(vtable: *ImportVTable) void = {
+    ::import("@/examples/testing.fr");
     tests_folder := "examples/import_c/test";
-    ::FmtPad(Str);
-    passed := 0;
-    failed := 0;
-    walk_directory(@fmt_cstr("%", tests_folder)) { e |
-        if e.name.ends_with(".c") {
-            continue :: local_return;
-
-            path := @tfmt("%/%", tests_folder, e.name);
-            @if(JUST_ONE) {
-                path = "examples/import_c/test/a.c";
-            };
-            
-            @print("%", f_pad(e.name, 40, .After));
-            or compile_one_file(vtable, path) { err |
-                println("[failed compile]");
-                println(err);
-                failed += 1;
-                @if(JUST_ONE) exit(1);
-                continue();
-            };
-            ok, out, err := exec_and_catch("./c.out", empty(), todo_allocator);
-            ok := ok && out.items().ends_with("OK\n");
-            (@if(ok, passed&, failed&))[] += 1;
-            @println("[%]", if(ok, => "ok", => "failed run"));
-            if !ok {
-                print(out.items());
-                print(err.items());
-            };
-            @if(JUST_ONE) return();
+    files := collect_with_extension(tests_folder, ".c") || panic("didn't find tests. run from franca root dir");
+    run_tests_main(Str, files.items(), fn(a) => a[]) { file | 
+        yield :: local_return;
+        path := @tfmt("%/%", tests_folder, file);
+        or compile_one_file(vtable, path) { err |
+            yield(false, fixed_list(empty()), err.fixed_list(), "");
         };
+        ok, out, err := exec_and_catch("./c.out", empty(), todo_allocator);
+        ok := ok && out.items().ends_with("OK\n");
+        (ok, out, err, "")
     };
-    if failed == 0 {
-        @println("\nAll is fine! (passed % tests)", passed);
-    } else {
-        @println("\n% of % tests failed.", failed, failed + passed);
-    };
-    exit((failed != 0).int());
 }
 
 fn compile_one_file(vtable: *ImportVTable, path: Str) Result(void, Str) = {
@@ -75,8 +50,8 @@ fn compile_one_file(vtable: *ImportVTable, path: Str) Result(void, Str) = {
     @if(LOG_IR) {
         m.debug["P".char()] = true;
         m.debug["R".char()] = true;
-        m.debug["G".char()] = true;
-        m.debug["M".char()] = true;
+        //m.debug["G".char()] = true;
+        //m.debug["M".char()] = true;
     };
     
     // TODO: this is ugly

@@ -5,18 +5,16 @@ empty_struct make_empty_struct() { empty_struct ret; ret.not_empty = 0; return r
 empty_struct make_empty_struct2() { return make_empty_struct(); }
 
 int main() {
-    // TODO: this fails
-    // int argc = 1;
-    // char *argv[2] = {"a", 0 };
-    // int c = (argc > 0) ? 1 : 0;  // Skip argv[0], the program name.
-    // for (; c < argc; c++) {
-    //   char* arg = argv[c];
-    //   if (*arg++ != '-') {
-    //     break;
-    //   }
-    // }
-      
     make_empty_struct2(); make_empty_struct();
+    
+    // :ThisShouldBeValidUndef
+    ASSERT(1, ({
+        int t_3;
+        if (1) while (1) if (1) { t_3 = 1; break; }
+        else t_3 = 2;
+        t_3;  // definitely initialized
+    }));
+    
     printf("OK\n");
     return 0;
 }
