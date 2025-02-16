@@ -422,6 +422,14 @@ int main() {
     char *s = append_location(1 + 2);
     ASSERT(0, strcmp(s, "1 + 2foozle:21"));
     
+#define NOTHINGEMPTY 
+    NOTHINGEMPTY NOTHINGEMPTY NOTHINGEMPTY
+
+#define M32(a, b) #a #b
+    s = M32(M32(M32, M32), M32);
+    
+    ASSERT(0, strcmp(s, "M32(M32, M32)M32"));
+    
     printf("OK\n");
     return 0;
 }

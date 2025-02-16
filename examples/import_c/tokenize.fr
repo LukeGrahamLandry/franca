@@ -3,20 +3,17 @@
 
 // TODO: make this smaller!
 Token :: @rec @struct(
-    kind: Tokens.TokenKind,
     next: *Token,
-    val: i64,  // number
-    fval: f64, // number
-    loc: CStr,
-    len: i32,
+    val: @union(f: f64, i: i64, str_buf: *u8),  // bits of an integer or float
     ty: *CType,  // string, number
-    str_buf: *u8,  // string TODO: make this a rawptr?
     file: *File,
-    line_no: i32,
-    line_delta: i32,
+    off: i32,  // TODO: should be u32
+    len: i32,
+    kind: Tokens.TokenKind,
+    no_macro: bool,
     at_bol: bool,
     has_space: bool,
-    hideset: *import("@/examples/import_c/preprocess.fr").Hideset, // ident
+    line_no: i32,
     origin: *Token,
 );
 
@@ -38,8 +35,9 @@ Ctx :: Compile.Ctx;
 
 Unicode :: import("@/examples/import_c/unicode.fr");
 
-fn str(tok: *Token) Str = 
-    (ptr = tok.loc.ptr, len = tok.len.intcast());
+fn str(tok: *Token) Str = {
+    tok.file.contents.subslice(tok.off.intcast(), tok.len.intcast())
+}
 
 // Consumes the current token if it matches `op`.
 fn consume(rest: **Token, tok: *Token, $str: Str) bool #inline = {
@@ -75,6 +73,20 @@ fn consume_end(tok: **Token, $end: Str) bool #inline = {
     false
 }
 
+fn warn_tok(ee: FatExpr) FatExpr #macro = {
+    e := ee&.items();
+    @ct_assert(e.len >= 3, ee.loc, "@error_tok expected (*Ctx, *Token, \"msg\", ...)");
+    c, tok := (e[0], e[1]);
+    @{
+        c := @[c];
+        out := u8.list(temp()); out := out&;
+        out.push_all("\n");
+        fmt_error_prefix(@[tok], out);
+        @[format_into(@{ out }, e.rest(2), ee.loc)];
+        println(out.items());
+    }
+}
+
 fn error_tok(ee: FatExpr) FatExpr #macro = {
     e := ee&.items();
     @ct_assert(e.len >= 3, ee.loc, "@error_tok expected (*Ctx, *Token, \"msg\", ...)");
@@ -102,26 +114,26 @@ fn error_at(ee: FatExpr) FatExpr #macro = {
 fn fmt_error_prefix(tok: *Token, msg: *List(u8)) void = {
     // if it's somehow not in the file don't try to print something. 
     // this will happen for error_at if you pass in a pointer that's not in c.current_file. 
-    if ptr_diff(tok.file.contents.ptr, tok.loc.ptr) < 0 || ptr_diff(tok.loc.ptr.offset(tok.len.intcast()), tok.file.contents.ptr.offset(tok.file.contents.len)) < 0 {
+    if tok.off < 0 || tok.off.intcast() > tok.file.contents.len {
         return();
     };
     
     // Find a line containing `loc`.
-    line := tok.loc;
-    while => ptr_diff(tok.file.contents.ptr, line.ptr) > 0 && line.ptr.offset(-1)[] != "\n".ascii() {  // TODO: make sure this is safe
-        line.ptr = line.ptr.offset(-1);
+    line := tok.str().as_ptr();
+    while => ptr_diff(tok.file.contents.ptr, line) > 0 && line.offset(-1)[] != "\n".ascii() {  // TODO: make sure this is safe
+        line = line.offset(-1);
     };
-    end := tok.loc;
-    while => end.ptr[] != 0 && end.ptr[] != "\n".ascii() {
-        end.ptr = end.ptr.offset(1);
+    end := tok.str().as_ptr();
+    while => end[] != 0 && end[] != "\n".ascii() {
+        end = end.offset(1);
     };
     
     // Print out the line.
     start := msg.len;
-    col_no := ptr_diff(line.ptr, tok.loc.ptr);
+    col_no := ptr_diff(line, tok.str().as_ptr());
     @fmt(msg, "%:%:%: ", tok.file.name, tok.line_no, col_no + 1);
     pos := msg.len - start + col_no;  // TODO: handle unicode variable width stuff. for now just aligning by byte length. 
-    line_str: Str = (ptr = line.ptr, len = ptr_diff(line.ptr, end.ptr));
+    line_str: Str = (ptr = line, len = ptr_diff(line, end));
     ::FmtPad(Str);
     @fmt(msg, "%\n%^ ", line_str, f_pad("", pos, .Before)); 
     
@@ -132,7 +144,10 @@ fn fmt_error_prefix(tok: *Token, msg: *List(u8)) void = {
 fn new_token(c: *Ctx, kind: TokenKind, start: *u8, end: *u8) *Token = {
     tok := temp().box_zeroed(Token);
     tok.kind = kind;
-    tok.loc.ptr = start;
+    off := ptr_diff(c.current_file.contents.ptr, start);
+    @debug_assert_lt(off, 1.shift_left(31));
+    @debug_assert_ge(off, - 1.shift_left(31));  // TODO: should always be in the file
+    tok.off = off.trunc();
     tok.len = ptr_diff(start, end).intcast();
     tok.file = c.current_file;
     //tok.filename = c.current_file.display_name;
@@ -443,7 +458,7 @@ fn read_string_literal(c: *Ctx, start: *u8, quote: *u8, $T: Type, ty: *Types.CTy
     @debug_assert_lt(len, buf.len, "overflow string");
     tok    := c.new_token(.TK_STR, start, end.offset(1));
     tok.ty  = c.array_of(ty, len + 1);
-    tok.str_buf = ptr_cast_unchecked(T, u8, buf.ptr);
+    tok.val.str_buf = ptr_cast_unchecked(T, u8, buf.ptr);
     tok
 }
 
@@ -468,13 +483,13 @@ fn read_char_literal(c: *Ctx, start: *u8, quote: *u8, ty: *CType) *Token = {
     };
     
     tok := c.new_token(.TK_NUM, start, end.offset(1));
-    tok.val = ch.zext();
+    tok.val.i = ch.zext();
     tok.ty = ty;
     tok
 }
 
 fn convert_pp_int(tok: *Token) bool = {
-    p := tok.loc.ptr;
+    p := tok.str().as_ptr();
     
     // Read a binary, octal, decimal or hexadecimal number.
     p0, p1, p2 := (p[], p.offset(1)[], p.offset(2)[]);
@@ -509,7 +524,7 @@ fn convert_pp_int(tok: *Token) bool = {
         @else => (0, false, false);
     };
     p = p.offset(delta);
-    if(ptr_diff(tok.loc.ptr, p) != tok.len.intcast(), => return(false));
+    if(ptr_diff(tok.str().as_ptr(), p) != tok.len.intcast(), => return(false));
     
     hi :: fn(N) => shift_right_arithmetic(val, N) != 0; // TODO: make sure this what >> on int64_t does?.
     
@@ -534,7 +549,7 @@ fn convert_pp_int(tok: *Token) bool = {
     };
 
     tok.kind = .TK_NUM;
-    tok.val = val;
+    tok.val.i = val;
     tok.ty = ty;
     true
 }
@@ -553,7 +568,8 @@ fn convert_pp_number(c: *Ctx, tok: *Token) void = {
     // If it's not an integer, it must be a floating point constant.
     strtod :: fn(str: CStr, end_out: **u8) f64 #libc;  // TODO: can't be calling libc for stuff like this  
     end := @uninitialized *u8;
-    val := strtod(tok.loc, end&);
+    s: CStr = (ptr = tok.str().as_ptr());
+    val := strtod(s, end&);
     
     end_char := end[];
     ty := @if_else {
@@ -569,12 +585,12 @@ fn convert_pp_number(c: *Ctx, tok: *Token) void = {
         @else => ty_double;
     };
     
-    if ptr_diff(tok.loc.ptr, end) != tok.len.intcast() {
-        @error_tok(c, tok, "invalid numeric constant '%'", between(tok.loc.ptr, end));
+    if ptr_diff(tok.str().as_ptr(), end) != tok.len.intcast() {
+        @error_tok(c, tok, "invalid numeric constant '%'", between(tok.str().as_ptr(), end));
     };
     
     tok.kind = .TK_NUM;
-    tok.fval = val;
+    tok.val.i = val.bitcast();
     tok.ty = ty;
 }
 
@@ -615,24 +631,6 @@ fn max_enum_name_len(E: Type) i64 #fold = {
     hi
 }
 
-// Initialize line info for all tokens.
-fn add_line_numbers(p: *u8, tok: *Token) void = {  // :SLOW
-    n: i32 = 1;
-    
-    dowhile {
-        if p.identical(tok.loc.ptr) {
-            tok.line_no = n;
-            tok = tok.next;
-        };
-        c := p[];
-        if c == "\n".ascii() {
-            n += 1;
-        };
-        p = p.offset(1);
-        c != 0
-    };
-}
-
 // Tokenize a given string and returns new tokens.
 fn tokenize(c: *Ctx, file: *File) *Token = {
     c.current_file = file;
@@ -643,6 +641,7 @@ fn tokenize(c: *Ctx, file: *File) *Token = {
     
     c.at_bol    = true;
     c.has_space = false;
+    line_no: i32 = 1;
     
     // recall :BoundsPadding, it's fine to look ahead a few characters without checking for the null terminator. 
     while => p[] != 0 { 
@@ -651,12 +650,18 @@ fn tokenize(c: *Ctx, file: *File) *Token = {
             cur.next = tok;
             cur = cur.next;
             p = p.offset(cur.len.intcast());
+            tok.line_no = line_no;
             continue();
         };
         if p[] == "/".ascii() {
             // Skip line comments.
             if p.offset(1)[] == "/".ascii() {
                 while => p[] != "\n".ascii() && p[] != 0 {
+                    if p[] == "\\".ascii() && p.offset(1)[] == "\n".ascii() {
+                        p = p.offset(1);
+                        line_no += 1;
+                    };
+                    
                     p = p.offset(1);
                 };
                 c.has_space = true;
@@ -672,6 +677,9 @@ fn tokenize(c: *Ctx, file: *File) *Token = {
                     if p[] == 0 {
                         @error_at(c, p, "unclosed block comment");
                     };
+                    if p[] == "\n".ascii() {
+                        line_no += 1;
+                    };
                 };
                 p = p.offset(2);
                 c.has_space = true;
@@ -681,11 +689,18 @@ fn tokenize(c: *Ctx, file: *File) *Token = {
             // fallthrough
         };
     
+        if p[] == "\\".ascii() && p.offset(1)[] == "\n".ascii() {
+            p = p.offset(2);
+            line_no += 1;
+            continue();
+        };
+        
         // Skip newline.
         if p[] == "\n".ascii() {
             p = p.offset(1);
             c.at_bol = true;
             c.has_space = false;
+            line_no += 1;
             continue();
         };
     
@@ -701,14 +716,14 @@ fn tokenize(c: *Ctx, file: *File) *Token = {
             q := p;
             p := p.offset(1); // not mutating outer `p` because continue_tok does it
             loop {
-                if "eEpP".contains(p[]) && "+-".contains(p.offset(1)[]) {
-                    p = p.offset(2);
-                } else {
-                    if is_ascii_alpha(p[]) || is_ascii_digit(p[]) || p[] == ".".ascii()  {
+                a := is_ascii_alpha(p[]);
+                if a || is_ascii_digit(p[]) || p[] == ".".ascii()  {
+                    if a && "+-".contains(p.offset(1)[]) && "eEpP".contains(p[]) {
                         p = p.offset(1);
-                    } else {
-                        continue_tok(c.new_token(.TK_PP_NUM, q, p));
                     };
+                    p = p.offset(1);
+                } else {
+                    continue_tok(c.new_token(.TK_PP_NUM, q, p));
                 };
             };
         };
@@ -738,11 +753,11 @@ fn tokenize(c: *Ctx, file: *File) *Token = {
         // Character literal
         if p[] == "'".ascii() {
             tok := c.read_char_literal(p, p, ty_int);
-            if tok.val > 255 {
+            if tok.val.i > 255 {
                 @error_tok(c, tok, "char literal too large. use a size prefix.");
             };
             sign_extend :: fn(c: i64) i64 #ir(.extsb, .Kl);
-            tok.val = sign_extend(tok.val);
+            tok.val.i = sign_extend(tok.val.i);
             continue_tok(tok);
         };
     
@@ -751,7 +766,7 @@ fn tokenize(c: *Ctx, file: *File) *Token = {
                 // UTF-16 character literal
                 @case("u".ascii()) => {
                     tok := c.read_char_literal(p, p.offset(1), ty_ushort);
-                    tok.val = tok.val.bit_and(0xFFFF);  // TODO: is this supposed to be sign extended?
+                    tok.val.i = tok.val.i.bit_and(0xFFFF);  // TODO: is this supposed to be sign extended?
                     continue_tok(tok);
                 };
                 // Wide character literal
@@ -766,6 +781,15 @@ fn tokenize(c: *Ctx, file: *File) *Token = {
         
         // Identifier or keyword
         len := read_ident(p);
+        if p.offset(len)[] == "\\".ascii() && p.offset(len + 1)[] == "\n".ascii() {
+            // if you use \ to split an identifier across a line: fuck you, we take quadratic time. 
+            q := p.offset(len).slice(3);
+            q[0] = q[2];
+            q[1] = "\\".ascii();
+            q[2] = "\n".ascii();
+            // TODO: need to do that for other types of tokens as well. numbers. strings? punctuation. 
+            continue();
+        };
         if len != 0 {
             continue_tok(c.new_token(.TK_IDENT, p, p.offset(len)))
         };
@@ -781,7 +805,6 @@ fn tokenize(c: *Ctx, file: *File) *Token = {
     
     cur.next = c.new_token(.TK_EOF, p, p);
     cur = cur.next;
-    add_line_numbers(c.current_file.contents.ptr, head.next);
     head.next
 }
 
@@ -797,51 +820,6 @@ fn read_universal_char(p: *u8, len: i64) u32 = {
         p = p.offset(1);
     };
     ch.trunc()
-}
-
-// TODO: just do this while tokenizing instead. 
-// Removes backslashes followed by a newline.
-fn remove_backslash_newline(p: *u8) i64 = {
-    i, j := (0, 0);
-    
-    // We want to keep the number of newline characters so that
-    // the logical line number matches the physical one.
-    // This counter maintain the number of newlines we have removed.
-    n := 0;
-
-    while => p.offset(i)[] != 0 {
-        if p.offset(i)[] == "\\".ascii() && p.offset(i + 1)[] == "\n".ascii() {
-            i += 2;
-            n += 1;
-        } else {
-            if p.offset(i)[] == "\n".ascii() {
-                p.offset(j)[] = p.offset(i)[];
-                j += 1;
-                i += 1;
-                range(0, n) { _ |
-                    p.offset(j)[] = "\n".ascii();
-                    j += 1;
-                };
-                n = 0;
-            } else {
-                p.offset(j)[] = p.offset(i)[];
-                j += 1;
-                i += 1;
-            };
-        };
-    };
-    
-    range(0, n) { _ |
-        p.offset(j)[] = "\n".ascii();
-        j += 1;
-    };
-    
-    // :BoundsPadding
-    range(j, j + 10) { j |
-        p.offset(j)[] = 0;
-    };
-    
-    j + 10
 }
 
 fn new_file(c: *Ctx, name: Str, contents: Str) *File = {
@@ -877,8 +855,6 @@ fn tokenize_string(c: *Ctx, path: Str, src: *List(u8)) *Token = {
     // TODO: chibicc does some extra stuff here: 
     //       but we can't be doing like 17 passes over the file man, common. 
     //canonicalize_newline(p);
-    src.len = remove_backslash_newline(src.as_ptr());
-    src.push_all("\0\0\0\0\0\0\0\0\0\0");
     
     //convert_universal_chars(p);
     
@@ -886,7 +862,7 @@ fn tokenize_string(c: *Ctx, path: Str, src: *List(u8)) *Token = {
     c.tokenize(file)
 }
 
-TokenKind :: @enum(i32) (
+TokenKind :: @enum(u8) (
     TK_IDENT,   // Identifiers
     TK_PUNCT,   // Punctuators
     TK_KEYWORD, // Keywords

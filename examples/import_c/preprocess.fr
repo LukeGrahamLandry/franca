@@ -1,41 +1,15 @@
 // Adapted from chibicc. MIT License. Copyright (c) 2019 Rui Ueyama
-#use("@/examples/import_c/lib.fr");
-
-// This file implements the C preprocessor.
 //
 // The preprocessor takes a list of tokens as an input and returns a
 // new list of tokens as an output.
 //
-// The preprocessing language is designed in such a way that that's
-// guaranteed to stop even if there is a recursive macro.
-// Informally speaking, a macro is applied only once for each token.
-// That is, if a macro token T appears in a result of direct or
-// indirect macro expansion of T, T won't be expanded any further.
-// For example, if T is defined as U, and U is defined as T, then
-// token T is expanded to U and then to T and the macro expansion
-// stops at that point.
+// Macros are never recursive. Once we start expanding a macro, 
+// it cannot be used again until the end of that expansion. 
+// This is tracked in the `hide_stack`. 
 //
-// To achieve the above behavior, we attach for each token a set of
-// macro names from which the token is expanded. The set is called
-// "hideset". Hideset is initially empty, and every time we expand a
-// macro, the macro name is added to the resulting tokens' hidesets.
-//
-// The above macro expansion algorithm is explained in this document
-// written by Dave Prossor, which is used as a basis for the
-// standard's wording:
-// https://github.com/rui314/chibicc/wiki/cpp.algo.pdf
-//
-// TODO: having the list take up 8 bytes of every Token forever seems bad. 
-//       we don't do any expansion before saving a #define so there's no state that could live forever. 
-//       can't we just remember that a macro is disabled until we get to the end of it's expansion? 
-//       that whole paragraph seems like a convoluted way of saying you're not allowed to recurse. 
-//       am i missing something?    -- Feb 9, 2025
 // TODO: report error for recursive #include
 
-// TODO: un-linked-list-ify these. 
-// TODO: there's gotta be a way to do this that doesn't look so slow 
-//       are we really sure hidesets are always very small? i guess that would make sense. 
-
+#use("@/examples/import_c/lib.fr");
 #use(Tokens);
 
 MacroArg :: @struct {
@@ -55,6 +29,7 @@ Macro :: @struct {
     va_args_name: ?Str;  
     body: *Token;
     handler: ?MacroHandler;
+    enabled: bool; // TODO: this means you can only run one thread at a time
 };
 
 // `#if` can be nested, so we use a stack to manage nested `#if`s.
@@ -66,10 +41,6 @@ CondIncl :: @rec @struct {
 };
 
 IfKind :: @enum(Then, Elif, Else);
-
-Hideset :: @struct {
-    names: []Str;  // these are never mutated so they can be shared between tokens
-};
 
 fn is_hash(tok: *Token) bool #inline =
     tok.at_bol && equal(tok, "#");
@@ -101,68 +72,6 @@ fn new_eof(c: *Ctx, tok: *Token) *Token = {
     t
 }
 
-fn new_hideset(name: Str) *Hideset = {
-    hs := temp().box(Hideset);
-    hs.names = temp().alloc(Str, 1);
-    hs.names[0] = name;
-    hs
-}
-
-fn hideset_union(c: *Ctx, hs1: *Hideset, hs2: *Hideset) *Hideset = {
-    if(hs1.is_null() || identical(hs1, hs2), => return(hs2));
-    if(hs2.is_null(), => return(hs1));
-    names := list(Str, hs1.names.len + hs2.names.len, temp());
-    for hs1.names { n |
-        names&.add_unique(n);
-    };
-    for hs2.names { n |
-        names&.add_unique(n);
-    };
-    hs := temp().box(Hideset);
-    hs.names = names.items();
-    hs
-}
-
-fn hideset_contains(hs: *Hideset, s: Str) bool = {
-    if(hs.is_null(), => return(false));
-    hs.names.contains(s)
-}
-
-fn hideset_intersection(hs1: *Hideset, hs2: *Hideset) *Hideset = {
-    ::ptr_utils(Hideset);
-    if(hs1.is_null() || identical(hs1, hs2), => return(hs2));
-    if(hs2.is_null(), => return(hs1));
-    names := list(Str, min(hs1.names.len, hs2.names.len), temp());
-    for hs1.names { n |
-        if hs2.names.contains(n) {
-            names&.push(n);
-        };
-    };
-    hs := temp().box(Hideset);
-    hs.names = names.items();
-    hs
-}
-
-fn add_hideset(c: *Ctx, tok: *Token, hs: *Hideset) *Token = {
-    head := Token.zeroed();
-    cur  := head&;
-    
-    // there tend to be long runs of tokens with the same hideset 
-    // (ie. the output of a whole expansion), so don't reallocate.
-    prev_in, prev_out := (zeroed(*Hideset), hs);
-    for_linked tok { tok |
-        c.append_one(cur&, tok, true);
-        
-        if identical(prev_in, cur.hideset) {
-            cur.hideset = prev_out;
-        } else {
-            prev_in = cur.hideset;
-            cur.hideset = c.hideset_union(tok.hideset, hs);
-            prev_out = cur.hideset;
-        };
-    };
-    head.next
-}
 
 // append tok2 to the end of (a copy of) tok1.
 fn append(c: *Ctx, tok1: *Token, tok2: *Token) *Token = {
@@ -253,7 +162,7 @@ fn new_str_token(c: *Ctx, str: Str, tmpl: *Token) *Token = {
     ////       but we know there aren't any escapes anyway. 
     ////       but surely the best strategy can't be to add backslashes before each thing and retokenize and make a fake new file. 
     ////       but you do need the quotes for pasting. 
-    //tok.loc.ptr = buf.ptr;
+    //tok.str().as_ptr() = buf.ptr;
     //tok.len = str.len.intcast() - 1;
     //tok
     buf := c.quote_string(str);
@@ -276,17 +185,17 @@ fn copy_line(c: *Ctx, rest: **Token, tok: *Token) *Token = {
 }
 
 fn new_num_token(c: *Ctx, val: i64, tmpl: *Token) *Token = {
-    //buf := @tfmt("%\0\0\0\0\0", val);
-    //c.tokenize(c.new_file(tmpl.file.name, buf))
-    tok  := c.copy_token(tmpl);
-    tok.kind = .TK_PP_NUM;
-    buf := u8.list(c.arena);
-    @fmt(buf&, "%", val);
-    tok.val = val;
-    // TODO: similar question as new_str_token
-    tok.loc.ptr = buf&.as_ptr();
-    tok.len = buf.len.intcast();
-    tok
+    buf := @tfmt("%\0\0\0\0\0", val);
+    c.tokenize(c.new_file(tmpl.file.name, buf))
+    //tok  := c.copy_token(tmpl);
+    //tok.kind = .TK_PP_NUM;
+    //buf := u8.list(c.arena);
+    //@fmt(buf&, "%", val);
+    //tok.val.i = val;
+    //// TODO: similar question as new_str_token
+    //tok.str().as_ptr() = buf&.as_ptr();
+    //tok.len = buf.len.intcast();
+    //tok
 }
 
 fn valid_macro_name(tok: *Token) bool = {
@@ -377,6 +286,7 @@ fn add_macro(c: *Ctx, name: Str, is_objlike: bool, body: *Token, params: []Str, 
         params = params,
         va_args_name = va_args_name,
         handler = .None,
+        enabled = true,
     );
     c.macros&.insert(name, m);
     m
@@ -680,7 +590,10 @@ fn expand_macro(c: *Ctx, rest: **Token, tok: *Token) bool #once = {
     // treat it as a normal identifier.
     if(!m.is_objlike && !equal(tok.next, "("),   => return(false));
     
-    if(hideset_contains(tok.hideset, tok.str()), => return(false));
+    if !m.enabled || tok.no_macro {
+        tok.no_macro = true;
+        return(false);
+    };
     
     // Built-in dynamic macro application such as __LINE__
     if m.handler { handler | 
@@ -689,39 +602,21 @@ fn expand_macro(c: *Ctx, rest: **Token, tok: *Token) bool #once = {
         rest.next = tok.next;
         return(true);
     };
-
-    // Object-like macro application
-    if m.is_objlike {
-        hs := c.hideset_union(tok.hideset, new_hideset(m.name));
-        body := c.add_hideset(m.body, hs);
-        until_eof body { t |
-            t.origin = tok;
-        };
-        rest[] = c.append(body, tok.next);
-        rest.at_bol = tok.at_bol;
-        rest.has_space = tok.has_space;
-        return(true);
-    };
-
-    // Function-like macro application
+    
     macro_token := tok;
-    args   := c.read_macro_args(tok&, tok, m.params, m.va_args_name);
-    rparen := tok;
-
-    // Tokens that consist a func-like macro invocation may have different
-    // hidesets, and if that's the case, it's not clear what the hideset
-    // for the new tokens should be. We take the interesection of the
-    // macro token and the closing parenthesis and use it as a new hideset
-    // as explained in the Dave Prossor's algorithm.
-    hs := hideset_intersection(macro_token.hideset, rparen.hideset);
-    hs  = c.hideset_union(hs, new_hideset(m.name));
-
-    body := c.subst(m.body, args);
-    body  = c.add_hideset(body, hs);
+    body := if m.is_objlike {
+        m.body
+    } else {  // Function-like macro application
+        args   := c.read_macro_args(tok&, tok, m.params, m.va_args_name);
+        c.subst(m.body, args)
+    };
+    end := tok.next;
     until_eof body { t |
         t.origin = macro_token;
     };
-    rest[] = c.append(body, tok.next);
+    rest[] = c.append(body, end);
+    m.enabled = false;
+    c.hide_stack&.push(@as(@type c.hide_stack[0]) (m, end));
     rest.at_bol = macro_token.at_bol;
     rest.has_space = macro_token.has_space;
     true
@@ -886,12 +781,22 @@ fn read_line_marker(c: *Ctx, rest: **Token, tok: *Token) void = {
     if tok.kind != .TK_NUM || tok.ty.kind != .TY_INT {
         @error_tok(c, tok, "invalid line marker");
     };
-    start.file.line_delta = tok.val.intcast() - start.line_no;
+    start.file.line_delta = tok.val.i.intcast() - start.line_no;
 
     tok = tok.next;
     if(tok.kind == .TK_EOF, => return());
     if(tok.kind != .TK_STR, => @error_tok(c, tok, "filename expected"));
-    start.file.display_name = tok.str_buf.slice(tok.ty.size.intcast() - 1);  // no null terminator
+    start.file.display_name = tok.val.str_buf.slice(tok.ty.size.intcast() - 1);  // no null terminator
+}
+
+fn check_hide(c: *Ctx, tok: *Token) void = {
+    if c.hide_stack&.last() { hide | 
+        if identical(hide._1, tok) {
+            hide._0.enabled = true;
+            c.hide_stack&.pop();
+            c.check_hide(tok);
+        };
+    };
 }
 
 // Visit all tokens in `tok` while evaluating preprocessing
@@ -902,18 +807,21 @@ fn preprocess2(c: *Ctx, tok: *Token) *Token = {
 
     while => tok.kind != .TK_EOF  {
         continue :: local_return;
-        // If it is a macro, expand it.
-        if(c.expand_macro(tok&, tok), => continue());
+        if c.expand_macro(tok&, tok) {
+            c.check_hide(tok);
+            continue();  
+        };
 
         // Pass through if it is not a "#".
-        if (!is_hash(tok)) {
-            tok.line_delta = tok.file.line_delta;
-            //tok.filename = tok.file.display_name;
+        if !is_hash(tok) {
+            tok.line_no += tok.file.line_delta;
             c.append_one(cur&, tok, false);
             tok = tok.next;
+            c.check_hide(tok);
             continue();
         };
 
+        c.check_hide(tok);
         start := tok;
         tok = tok.next;
 
@@ -1220,7 +1128,7 @@ StringKind :: @enum(STR_NONE, STR_UTF8, STR_UTF16, STR_UTF32, STR_WIDE);
 fn string_kind(tok: *Token) StringKind = {
     s := tok.str();
     if(s.starts_with("u8"), => return(.STR_UTF8));
-    @switch(tok.loc.ptr[]) {
+    @switch(tok.str().as_ptr()[]) {
         @case("\"".ascii()) => .STR_NONE;
         @case("u".ascii())  => .STR_UTF16;
         @case("U".ascii())  => .STR_UTF32;
@@ -1303,13 +1211,13 @@ fn join_adjacent_string_literals(c: *Ctx, tok: *Token) void = {
         while => tok2.kind == .TK_STR {
             @debug_assert_eq(tok2.ty.base.size.intcast(), char_size, "string element size mismatch");
             len := tok2.ty.array_len.intcast() - one_null_terminator;
-            buf.subslice(i * char_size, len * char_size).copy_from(tok2.str_buf.slice(len * char_size));
+            buf.subslice(i * char_size, len * char_size).copy_from(tok2.val.str_buf.slice(len * char_size));
             i += len;
             tok2 = tok2.next;
         };
         tok1[] = c.copy_token(tok1)[];  // TODO: why copy? 
         tok1.ty = c.array_of(tok1.ty.base, len);
-        tok1.str_buf = buf.ptr;
+        tok1.val.str_buf = buf.ptr;
         tok1.next = tok2;
         tok1 = tok2;
     };
@@ -1317,9 +1225,9 @@ fn join_adjacent_string_literals(c: *Ctx, tok: *Token) void = {
 
 fn promote_to_wide_string_literal(c: *Ctx, tok: *Token, basety: *Types.CType) *Token #once = {
     t := if basety.size == 2 {
-        c.read_utf16_string_literal(tok.loc.ptr, tok.loc.ptr)
+        c.read_utf16_string_literal(tok.str().as_ptr(), tok.str().as_ptr())
     } else {
-        c.read_utf32_string_literal(tok.loc.ptr, tok.loc.ptr, basety)
+        c.read_utf32_string_literal(tok.str().as_ptr(), tok.str().as_ptr(), basety)
     };
     t.next = tok.next;
     t
@@ -1333,10 +1241,5 @@ fn preprocess(c: *Ctx, tok: *Token) *Token = {
     };
     c.convert_pp_tokens(tok);
     c.join_adjacent_string_literals(tok);
-
-    for_linked tok { t |
-        t.line_no += t.line_delta;
-        //print(t.str());
-    };
     tok
 }

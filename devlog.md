@@ -1,5 +1,13 @@
 - TODO: deal with `CodegenEntry:Bounce` on wasm
 
+## (Feb 16)
+
+- instead of tracking hidesets on each token, just keep a stack of active macro expansions. 
+- shrink Token from 104 bytes to 56. 
+- doing add_line_numbers as a seperate pass is 4% of the time. just track line number incrementally instead. 
+- same for remove_backslash_newline
+- started toady at 810 samples, now at 666
+
 ## (Feb 15)
 
 - did bss, now adler32.c compiles in 100ms instead of 400ms. 

@@ -93,6 +93,7 @@ int main() {
   ASSERT(8, sizeof(5.l));
   ASSERT(8, sizeof(2.0L));
 
+  // TODO: test line split of other types of token (because i handle it wrong currently!)
   assert(1, size\
 of(char), \
          "sizeof(char)");
