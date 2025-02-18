@@ -131,7 +131,6 @@ fn output_macho(m: *QbeModule) [][]u8 = {
         // TODO: S_THREAD_LOCAL_VARIABLES
     };
     if m.goal.type == .Relocatable {
-        @debug_assert(identical(m.segments&[.ZeroInitData].mmapped.ptr, m.segments&[.ZeroInitData].next), "TODO: BSS in relocatable macho");
         s := m.segments&[.ConstantData]&;
         align_to :: fn(offset: i64, align: i64) i64 = {
             extra := offset.mod(align);
@@ -151,16 +150,22 @@ fn output_macho(m: *QbeModule) [][]u8 = {
         code_flag := ATTR_PURE_INSTRUCTIONS.bit_or(ATTR_SOME_INSTRUCTIONS);
         xx: WipSection = (name = "__text", flag = code_flag, offset_in_segment = 0, size = chunks[1].len - text_padding);
         segments[0].sections = @slice(xx);
+        
+        // Even if some sections are empty, you need them to make the indexes in append_relocations/which_section work out. 
+        
         s := m.segments&[.MutableData]&;
-        has_mutable_data := ptr_diff(s.mmapped.ptr, s.next) != 0;
-        if has_mutable_data {
-            chunks&.push(live_segment_part(m, .MutableData));
-            segments&.push(prot = 7, name = "__DATA");
-            segments[1].virtual_size = m.segments&[.MutableData].mmapped.len;
-            segments[1].file_size = chunks[2].len;
-            xx: WipSection = (name = "__data", flag = 0, offset_in_segment = 0, size = chunks[2].len);
-            segments[1].sections = @slice(xx);
-        };
+        chunks&.push(live_segment_part(m, .MutableData));
+        segments&.push(prot = 7, name = "__DATA");
+        segments[1].virtual_size = m.segments&[.MutableData].mmapped.len;
+        segments[1].file_size = chunks[2].len;
+        xx: WipSection = (name = "__data", flag = 0, offset_in_segment = 0, size = chunks[2].len);
+        segments[1].sections = @slice(xx);
+        
+        s    := m.segments&.index(.ZeroInitData);
+        size := ptr_diff(s.mmapped.ptr, s.next);
+        segments&.push(prot = 3, name = "__BSS", virtual_size = size);
+        xx: WipSection = (name = "__bss", flag = S_ZEROFILL, offset_in_segment = 0, size = size);
+        segments[2].sections = @slice(xx);
     };
     
     base_file_offset := @slice(0, 0, 0, 0, 0); 
@@ -646,7 +651,7 @@ fn which_section(s: SegmentType) u8 = @match(s) {
     fn Code() => 1;
     fn MutableData() => 2;
     fn ConstantData() => panic("TODO: we don't use constant data yet");
-    fn ZeroInitData() => panic("TODO: export/reloc of BSS");
+    fn ZeroInitData() => 3;
 };
 
 fn append_relocations(symbol_table_index: i64, id: u32, m: *QbeModule, relocations: []List(u8), load_commands: []*SegmentSection) void = {

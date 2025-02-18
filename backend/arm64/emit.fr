@@ -289,7 +289,6 @@ fn epilogue_shrink_stack(self: *ArmState) void = {
     if self.f.vararg && !self.f.globals.target.apple {
         o += 192;
     };
-    // TODO: why isn't this also 512?
     if o <= 504 { 
         encoded_offset := o / 8; 
         self.inst(ldp_post(Bits.X64, fp, lr, sp, @as(i7) encoded_offset)); 
@@ -308,8 +307,8 @@ fn epilogue_shrink_stack(self: *ArmState) void = {
     };
     
     // :StackSizeLimit
-    top: u16 = (o - 16).bit_and(0xFFFF).trunc();
-    bottom: u16 = (o - 16).shift_right_logical(16).trunc();
+    top:    u16 = (o - 16).shift_right_logical(16).trunc();
+    bottom: u16 = (o - 16).bit_and(0xFFFF).trunc();
     self.inst(ldp_post(Bits.X64, fp, lr, sp, @as(i7) 2)); // 16 encoded as imm7/8
     self.inst(movz(Bits.X64, x16, bottom, .Left0));
     self.inst(movk(Bits.X64, x16, top, .Left16));
@@ -534,7 +533,7 @@ fn emitins(self: *ArmState, i: *Qbe.Ins, b: *Qbe.Blk) void = {
     };
 
     if maybe_load(i) { size |
-        self.fixarg(i.arg&.index(0), size.intcast());
+        self.fixarg(a0&, size.intcast());
         offset := 0;
         addr := if rtype(a0) == .RSlot {
             offset += self.slot(a0);
@@ -561,7 +560,7 @@ fn emitins(self: *ArmState, i: *Qbe.Ins, b: *Qbe.Blk) void = {
         return();
     };
     if maybe_store(i) { size |
-        self.fixarg(i.arg&.index(1), size.intcast());
+        self.fixarg(a1&, size.intcast());
         offset := 0;
         addr := @match(rtype(a1)) {
             fn RSlot() => {
@@ -578,6 +577,7 @@ fn emitins(self: *ArmState, i: *Qbe.Ins, b: *Qbe.Blk) void = {
             }
             @default => panic("bad address type for store");
         };
+        @debug_assert_eq(offset.bit_and(1.shift_left(12) - 1), offset, "can't encode offset in $%", self.f.name());
         if i.op() == .stores {
             self.inst(f_str_uo(Bits.W32, @as(u5) a0.float_reg(), addr, @as(u12) offset));
             return();
@@ -666,7 +666,7 @@ fn emitins(self: *ArmState, i: *Qbe.Ins, b: *Qbe.Blk) void = {
                 } else {
                     // :StackSizeLimit
                     self.inst(movz(Bits.X64, reg, s.trunc(), .Left0));
-                    self.inst(movk(Bits.X64, reg, s.shift_right_logical(16).trunc(), .Left0));
+                    self.inst(movk(Bits.X64, reg, s.shift_right_logical(16).trunc(), .Left16));
                     self.inst(add_er(Bits.X64, reg, base, reg));
                 };
             };
@@ -727,6 +727,7 @@ fn emitins(self: *ArmState, i: *Qbe.Ins, b: *Qbe.Blk) void = {
             };
         }
         fn salloc() => {
+            @debug_assert(self.needs_frame);
             self.inst(sub_er(Bits.X64, sp, sp, a0.int_reg()));
             if i.to != QbeNull {
                 self.inst(sub_im(Bits.X64, i.to.int_reg(), sp, 0, 0)); // :SpEncoding
@@ -921,6 +922,7 @@ fn encode_cmp(self: *ArmState, i: *Qbe.Ins, $no_negate: u1) void = {
         @debug_assert(c.type == .CBits, "cmp to addr");
         no_shift := c.bits.i.bit_and(1.shift_left(12) - 1) == c.bits.i;
         encoded  := if(no_shift, => c.bits.i, => c.bits.i.shift_right_logical(12));
+        @debug_assert_eq(encoded.bit_and(1.shift_left(12) - 1).shift_left(int(!no_shift) * 12), c.bits.i, "failed encode cmp");
         self.inst(@bits(si, no_negate, 0b1100010, @if(no_shift, 0b0, 0b1), @as(u12) encoded, a0.int_reg(), 0b11111));
     }
 }

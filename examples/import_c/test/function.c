@@ -202,6 +202,11 @@ long double to_ldouble(int x) {
   return x;
 }
 
+void ret_none_early(int c) {
+    if (c) return;
+    exit(1);
+}
+
 int main() {
   ASSERT(3, ret3());
   ASSERT(8, add2(3, 5));
@@ -383,6 +388,8 @@ int main() {
 
   ASSERT(1, to_ldouble(5.0) == 5.0);
   ASSERT(0, to_ldouble(5.0) == 5.2);
+  
+  ret_none_early(1);
 
   printf("OK\n");
 }

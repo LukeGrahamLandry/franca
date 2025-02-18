@@ -46,6 +46,7 @@ Obj :: @rec @struct(
     global_symbol: ?u32,  // TODO: use this more
     sent_to_backend: bool,
     refs: []*Obj,
+    def: *Obj,
 );
 Relocation :: @rec @struct(
     next: *Relocation,
@@ -163,6 +164,10 @@ Initializer :: @rec @struct {
     // Only one member can be initialized for a union.
     // `mem` is used to clarify which member is initialized.
     mem: *Member;
+    // TODO: the whole initilizer handling needs to get rewritten. 
+    // this is a HACK that makes wuffs/gitplayer compile 30% faster by skipping useless write_gvar_data. 
+    // it still allocates the initializers tho which is stupid. 
+    all_zeros: bool;
 };
 
 // For local variable initializer.
@@ -1236,6 +1241,8 @@ fn comma_sep(c: *Ctx, tok: **Token, $end: Str, $body: @Fn() void) void = {
 fn array_initializer1(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) void = {
     tok = c.skip(tok, "{");
 
+    // TODO: surely i dont need two pastes of this
+    
     if init.is_flexible {
         len := c.count_array_init_elements(tok, init.ty);
         init[] = c.new_initializer(c.array_of(init.ty.base, len), false)[];
@@ -1297,6 +1304,12 @@ fn array_initializer2(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer, i
 fn struct_initializer1(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) void = {
     tok = c.skip(tok, "{");
     mem := init.ty.members;
+    
+    if equal(tok, "}") {
+        init.all_zeros = true;
+        rest[] = tok.next;
+        return();
+    };
 
     comma_sep(c, tok&, "}") {
         continue :: local_return;
@@ -1367,7 +1380,14 @@ fn union_initializer(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) vo
 fn initializer2(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) void = @match(init.ty.kind) {
     fn TY_ARRAY() => @if_else {
         @if(tok.kind == .TK_STR) => c.string_initializer(rest, tok, init);
-        @if(equal(tok, "{")) => c.array_initializer1(rest, tok, init);
+        @if(equal(tok, "{")) => {
+            if equal(tok.next.next, "}") && tok.next.kind == .TK_NUM && tok.next.val.i == 0 {
+                rest[] = tok.next.next.next;
+                init.all_zeros = true;
+            } else {
+                c.array_initializer1(rest, tok, init);  
+            };
+        };
         @else => c.array_initializer2(rest, tok, init, 0);
     };
     fn TY_STRUCT() => if equal(tok, "{") {
@@ -1396,6 +1416,14 @@ fn initializer2(c: *Ctx, rest: **Token, tok: *Token, init: *Initializer) void = 
 };
 
 fn initializer(c: *Ctx, rest: **Token, tok: *Token, ty: *CType, new_ty: **CType) *Initializer = {
+    if ty.kind == .TY_ARRAY && ty.size > 0 && equal(tok, "{") && equal(tok.next.next, "}") && tok.next.kind == .TK_NUM && tok.next.val.i == 0 { 
+        init := temp().box_zeroed(Initializer);
+        init.ty = ty;
+        init.all_zeros = true;
+        rest[] = tok.next.next.next;
+        new_ty[] = ty;
+        return(init);
+    };
     init := c.new_initializer(ty, true);
     c.initializer2(rest, tok, init);
 
@@ -1498,8 +1526,8 @@ fn lvar_initializer(c: *Ctx, rest: **Token, tok: *Token, var: *Obj) *Node = {
     // that unspecified elements are set to 0. Here, we simply
     // zero-initialize the entire memory region of a variable before
     // initializing it with user-supplied values.
-    lhs := c.new_node(.ND_MEMZERO, tok);
-    lhs.var = var;
+    node := c.new_node(.ND_MEMZERO, tok);
+    node.var = var;
 
     static_array_of_unknown_length := var.stack_slot == QbeNull;  // :StaticArrayOfUnknownLength
     if static_array_of_unknown_length {
@@ -1507,12 +1535,14 @@ fn lvar_initializer(c: *Ctx, rest: **Token, tok: *Token, var: *Obj) *Node = {
         var.stack_slot = c.f.newtmp(var.name.str(), .Kl);
     };
     
-    rhs := c.create_lvar_init(init, var.ty, desg&, tok);
-    if static_array_of_unknown_length {  
-        c.create_stack_slot(var);
+    if !init.all_zeros {
+        rhs := c.create_lvar_init(init, var.ty, desg&, tok);
+        if static_array_of_unknown_length {  
+            c.create_stack_slot(var);
+        };
+        
+        node = c.new_binary(.ND_COMMA, node, rhs, tok);
     };
-    
-    node := c.new_binary(.ND_COMMA, lhs, rhs, tok);
     c.gen_expr(node);
     node
 }
@@ -1543,6 +1573,7 @@ fn write_gvar_data(c: *Ctx, cur: *Relocation, init: *Initializer, ty: *CType, bu
     ::enum(TypeKind);
     if ty.kind == .TY_ARRAY {
         sz := ty.base.size.intcast();
+        if(init.all_zeros, => return(cur));
         range(0, ty.array_len.intcast()) { i |
             cur = c.write_gvar_data(cur, init.children[i], ty.base, buf, off + sz * i);
         };
@@ -1611,6 +1642,9 @@ fn write_gvar_data(c: *Ctx, cur: *Relocation, init: *Initializer, ty: *CType, bu
 // initializer list contains a non-constant expression.
 fn gvar_initializer(c: *Ctx, rest: **Token, tok: *Token, var: *Obj) void = {
     init := c.initializer(rest, tok, var.ty, var.ty&);
+    if init.all_zeros {
+        return();
+    };
     head := Relocation.zeroed();
     buf := c.arena.alloc_zeroed(u8, var.ty.size.intcast());
     c.write_gvar_data(head&, init, var.ty, buf, 0);
@@ -1646,7 +1680,6 @@ fn compound_stmt(c: *Ctx, rest: **Token, tok: *Token) *Node = {
     cur: ?*Node = .None;
 
     c.enter_scope();
-
     while => !equal(tok, "}") {
         if c.is_type_name(tok) && !equal(tok.next, ":") {
             @if(SPAM) @println("type name! %", tok.str());
@@ -1654,6 +1687,7 @@ fn compound_stmt(c: *Ctx, rest: **Token, tok: *Token) *Node = {
             basety := c.declspec(tok&, tok, (Some = attr&));
             tok = @if_else {
                 @if(attr.is_typedef)  => c.parse_typedef(tok, basety);
+                // TODO: error if it has a body
                 @if(c.is_function(tok)) => c.function(tok, basety, attr&);
                 @if(attr.is_extern)   => c.global_variable(tok, basety, attr&);
                 @else => c.declaration(tok, basety, (Some = attr&));
@@ -1880,11 +1914,15 @@ fn next_is_paren_typename(c: *Ctx, tok: *Token) bool =
     equal(tok.next, "(") && c.is_type_name(tok.next.next);
 
 fn parse_typedef(c: *Ctx, tok: *Token, basety: *CType) *Token = {
+    // TODO: is this wrong if it was a vla that used a global as the length? need to actually track refs
+    prev_refs := c.refs;
+    c.refs = list(c.arena);
     comma_sep(c, tok&, ";") {
         ty := c.declarator(tok&, tok, basety);
         if(ty.name.is_null(), => @error_tok(c, ty.name_pos, "typedef name omitted"));
         c.push_scope(c.get_ident(ty.name))[].type_def = ty;
     };
+    c.refs = prev_refs;
     tok
 }
 
@@ -1910,7 +1948,8 @@ fn find_func(c: *Ctx, name: Str) ?*Obj = {
 
 // TODO: this clears a bunch of state that won't work if nested function decls are allowed
 fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr) *Token = {
-    c.refs&.clear();  // TODO: should already be empty?
+    prev_refs := c.refs;
+    c.refs = list(c.arena);
     ty := c.declarator(tok&, tok, basety);
     if(ty.name.is_null(), => @error_tok(c, ty.name_pos, "function name omitted"));
     name_str := c.get_ident(ty.name);
@@ -1930,7 +1969,14 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr) *Token = {
         f
     };
     
-    if(consume(tok&, tok, ";"), => return(tok));
+    if consume(tok&, tok, ";") {
+        // TODO: defer
+        // TODO: since this was just a forward declaration, shouldn't need to track refs? 
+        //       tho maybe we want to extend that for types so you know what bindings need to be generated. 
+        c.move_current_refs(f);
+        c.refs = prev_refs;
+        return(tok);
+    };
 
     @if(SPAM) println("start function body");
     c.current_fn = (Some = f);
@@ -1986,6 +2032,7 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr) *Token = {
     
     f.locals = c.locals;
     c.move_current_refs(f);
+    c.refs = prev_refs;
     c.leave_scope();
     c.labels&.clear();
     c.current_fn = .None;
@@ -1999,7 +2046,8 @@ fn move_current_refs(c: *Ctx, dest: *Obj) void = {
 }
 
 fn global_variable(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr) *Token = {
-    c.refs&.clear();  // TODO: should already be empty?
+    prev_refs := c.refs;
+    c.refs = list(c.arena);
     comma_sep(c, tok&, ";") {
         ty := c.declarator(tok&, tok, basety);
         if(ty.name.is_null(), => @error_tok(c, ty.name_pos, "variable name omitted"));
@@ -2013,12 +2061,14 @@ fn global_variable(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr) *Token 
         };
         
         if equal(tok, "=") {
+            if(attr.is_extern, => @error_tok(c, tok, "extern symbol with a value doesn't make any sense?"));
             c.gvar_initializer(tok&, tok.next, var);
         } else {
             var.is_tentative = var.is_tentative || (!attr.is_extern && !attr.is_tls);
         };
         c.move_current_refs(var);
     };
+    c.refs = prev_refs;
     tok
 }
 
@@ -2036,28 +2086,40 @@ fn scan_globals(c: *Ctx) void = {
     head := Obj.zeroed();
     cur  := head&;
 
+    fn merge_refs(c: *Ctx, var: *Obj, def: *Obj) void = {
+        // Since there's another definition, the tentative definition is redundant 
+        // but we need to merge the refs to make sure it actually gets compiled. 
+        if var.refs.len != 0 {
+            if def.refs.len == 0 {
+                def.refs = var.refs;
+            } else {
+                out := list(@type var.refs[0], var.refs.len + def.refs.len, c.arena);
+                out&.push_all(var.refs);
+                out&.push_all(def.refs);
+                def.refs = out.items();
+            };
+        };
+        var.def = def;
+    }
+
     var := c.globals;
     for_linked var { var |
         continue :: local_return;
         if !var.is_tentative {
+            if !var.is_definition { 
+                if find_matching_name(c.globals, var) { def |
+                    merge_refs(c, var, def);
+                    continue();
+                };
+            };
+            
             cur.next = var;
             cur = cur.next;
             continue();
         };
         
-        // If there's another definition, the tentative definition
-        // is redundant
         if find_matching_name(c.globals, var) { def |
-            if var.refs.len != 0 {
-                if def.refs.len == 0 {
-                    def.refs = var.refs;
-                } else {
-                    out := list(@type var.refs[0], var.refs.len + def.refs.len, c.arena);
-                    out&.push_all(var.refs);
-                    out&.push_all(def.refs);
-                    def.refs = out.items();
-                };
-            };
+            merge_refs(c, var, def);
         } else {
             cur.next = var;
             cur = cur.next;
@@ -2068,8 +2130,9 @@ fn scan_globals(c: *Ctx) void = {
     c.globals = head.next;
 }
 
+// :SLOW
 // Find another definition of the same identifier.
-fn find_matching_name(first: *Obj, goal: *Obj) ?*Obj = {
+fn find_matching_name(first: *Obj, goal: *Obj) ?*Obj #once = {
     for_linked first { var2 |
         if !goal.identical(var2) && var2.is_definition && goal.name.str() == var2.name.str() {
             return(Some = var2);
@@ -2236,6 +2299,9 @@ fn parse_expr(c: *Ctx, rest: **Token, tok: *Token, prec: Prec) *Node = {
     while => prec.raw() <= rule.prec.raw() {
         @if(SPAM) @println("Infix: % %", tok.str(), tok.kind);
         node = (rule.infix)(c, rest, tok, node);
+        if tok.kind == .@":" {
+            prec = .Primary; // HACK
+        };
         tok  = rest[];
         rule = rules.index(tok.kind);
     };
@@ -2316,7 +2382,8 @@ parse_logical :: fn(c, rest, tok, cond) = {
     prev_block := c.b;
     need_jump := prev_block.jmp.type == .Jxxx && !c.speculate;
     if need_jump {
-        prev_block.jmp = (type = .jnz, arg = cond.r);
+        r := c.gen_expr(cond);
+        prev_block.jmp = (type = .jnz, arg = r);
     };
     
     c.b = else_block; 
@@ -2484,8 +2551,7 @@ parse_ident :: fn(c, rest, tok) #prefix(.TK_IDENT) = {
     // Variable or enum constant
     sc := c.find_var(tok);
     rest[] = tok.next;
-    
-    // For "static inline" function
+    // For "static inline" function  // TODO: what? explain
     ::ptr_utils(Obj);
     ::?*Obj;
     if sc { sc |
@@ -2802,26 +2868,31 @@ compatible :: fn(c, rest, tok) #prefix(.__builtin_types_compatible_p) = {
 };
 
 return :: fn(c, rest, tok) #prefix(.return, .ND_STMT) = {
-    if(consume(rest, tok.next, ";"), => return(c.new_node(.ND_STMT, tok)));  // return void
-    exp := c.parse_expr(tok&, tok.next, .None);
-    c.assert_gen_expr(exp);
-    rest[] = c.skip(tok, ";");
-
-    c.add_type(exp);
     current_fn := c.current_fn || @error_tok(c, tok, "stray return");
     ty := current_fn.ty.return_ty;
-    if !@is(ty.kind, .TY_STRUCT, .TY_UNION) {
-        exp = c.new_cast(exp, ty);
-    };
-
-    r := c.assert_gen_expr(exp);
+    ::if(Ty(Qbe.Ref, Qbe.J));
+    r, j := if !consume(rest, tok.next, ";") {
+        exp := c.parse_expr(tok&, tok.next, .None);
+        c.assert_gen_expr(exp);
+        rest[] = c.skip(tok, ";");
     
-    if c.b.jmp.type == .Jxxx {
+        c.add_type(exp);
+        
+        if !@is(ty.kind, .TY_STRUCT, .TY_UNION) {
+            exp = c.new_cast(exp, ty);
+        };
+        r := c.assert_gen_expr(exp);
+          
         k := ty.cls(); // TODO: retc
         j := @as(Qbe.J) @as(i32) Qbe.J.retw.raw() + k.raw(); // TODO: also sb,etc.
         if c.f.retty != -1 {
             j = .retc;
         };
+        (r, j)
+    } else {
+        (QbeNull, Qbe.J.ret0)
+    };
+    if c.b.jmp.type == .Jxxx {
         c.b.jmp = (type = j, arg = r);
     };
     c.new_node(.ND_STMT, tok)
@@ -3080,9 +3151,6 @@ fn stmt(c: *Ctx, rest: **Token, tok: *Token) *Node = {
     rule := rules.index(tok.kind);
     if rule.op == .ND_STMT {
         node := (rule.prefix)(c, rest, tok);
-        if tok.kind == .@":" {
-            node = parsers'label(c, rest, tok, node);
-        };
         c.gen_expr(node);
         node
     } else {
@@ -3777,9 +3845,12 @@ fn gen_call(c: *Ctx, node: *Node) Qbe.Ref #once = {
     
     callee := c.gen_expr(node.lhs);
     k := function_ty.return_ty.cls();
-    r := c.f.newtmp("c", k); 
+    is_void := function_ty.return_ty.kind == .TY_VOID;
+    r := if(is_void, => QbeNull, => c.f.newtmp("c", k)); 
     i := c.ir_index(function_ty.return_ty).intcast();
     c.emit(.call, k, r, callee, @if(i == -1, QbeNull, TYPE(i)));
+    // TODO: it seems like just returning QbeNull for void would work but fails wuffs/lzma.c :FUCKED
+    r := if(is_void, => QbeConZero, => r); 
     if i != -1 {
         node.lvalue = r;  // for gen_addr so you can do `foo().field`
     };

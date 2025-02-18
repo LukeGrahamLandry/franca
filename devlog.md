@@ -1,5 +1,24 @@
 - TODO: deal with `CodegenEntry:Bounce` on wasm
 
+## (Feb 17)
+
+- most of the problems were that i didn't set b.jmp for void `return;`
+- gif `TODO: args need reg. op=and` was because of a dynamic size alloca (which i never do in franca),
+test_wuffs_gif_decode_frame_out_of_bounds uses a VLA and my little vla tests actually can get constant folded to a static slot size. 
+i was only calling fixarg on 1 instruction. i think qbe didn't have that problem because you actually 
+can encode AND with a constant, i just don't do it cause it's annoying. 
+- to make gifplayer work i had to bump up the max ArenaAlloc size, that's a pretty bad sign. 
+do they some giant array of constants? oh no, it's just that to handle this:
+`uint8_t g_src_buffer_array[SRC_BUFFER_ARRAY_SIZE] = {0};`
+i allocate a new Initializer for every byte that's fucking stupid man. 
+the whole time is in write_gvar_data and new_initializer. 
+before:         1.8 s
+all_zeros hack: 1.2 s
+skip =0 early:  0.13s
+similarly for test/gif, `wuffs_gif__decoder dec = ((wuffs_gif__decoder){});` takes a billon years, 
+but this time in add_type_inner. setting all_zeros for `{}` in struct_initializer1 saves 2 seconds. 
+and that's still with generating the most unserious 60000 instruction function for that zero init in test_basic_initialize_not_called.
+
 ## (Feb 16)
 
 - instead of tracking hidesets on each token, just keep a stack of active macro expansions. 
@@ -7,6 +26,32 @@
 - doing add_line_numbers as a seperate pass is 4% of the time. just track line number incrementally instead. 
 - same for remove_backslash_newline
 - started toady at 810 samples, now at 666
+- fantastic, caught another real backend problem. 
+"can't encode offset" was because i was calling fixarg on i.arg&.index(0) instead of a0& (dito for store). 
+that fixes lzw but not bzip2. but must also be backend problem because it works on amd. 
+- BSS for mach-o relocatable so i can get symbol names
+- data pointer of a buffer is mysteriously 1 and adding printfs in some places changes it... thats pretty bad. 
+wasted a lot of time in lldb before just looking at the code. 
+```
+self.inst(movz(Bits.X64, reg, s.trunc(), .Left0));
+self.inst(movk(Bits.X64, reg, s.shift_right_logical(16).trunc(), .Left0));
+```
+for stack addr that didn't fit in 16 bits, i wasn't shifting for movk. 
+now src.data.ptr behaves consistantly. wuffs_bzip2__decoder__struct is way bigger than i ever make things. 
+need to remember i need to fix TypeMeta size field before i can translate that to franca. 
+still doesn't work, now it dies in read_file. 
+it's crashing trying to setup a normal stack frame. and sp is something that looks too big, but nothing in the callstack has a big frame. 
+it's when wuffs_bzip2_decode returns it's not reseting the stack properly. 
+hmmm... lets play can you guess what variable names i swapped. 
+```
+top: u16 = (o - 16).bit_and(0xFFFF).trunc();
+bottom: u16 = (o - 16).shift_right_logical(16).trunc();
+```
+bad sign that it took me that long steping through even tho i just typed the sentence about looking at the code. 
+- getalias of RNull was a frontend problem, saying void functions returned a value, which got confused when it inlined and found out you lied. 
+i guess that should probably work because it would work if i didn't do inlining, 
+but it feels weird to know there's a problem and not report it. so i really want to get into warnings for frontends? 
+i fixed the reverse before (void call to int function). 
 
 ## (Feb 15)
 
