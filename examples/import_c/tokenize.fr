@@ -182,115 +182,67 @@ fn read_ident(start: *u8) i64 #inline = {
 
 // Read a punctuator token from p and returns its length.
 fn read_punct(p: *u8) Ty(i64, TokenKind) #inline = {
-    // TODO: be not :SLOW
-    //kw :: @const_slice(
-    //    "<<=", ">>=", "...", "==", "!=", "<=", ">=", "->", "+=", "-=", "*=", "/=",
-    //    "++",  "--",  "%=",  "&=", "|=", "^=", "&&", "||", "<<", ">>", "##",
-    //);
-    //inline_for kw { $it |
-    //    if(p.slice(3).starts_with(::it[]), => return(it.len));  // :BoundsPadding
-    //};
+    kw :: @const_slice(
+        "<<=", ">>=", "...", "==", "!=", "<=", ">=", "->", "+=", "-=", "*=", "/=",
+        "++",  "--",  "%=",  "&=", "|=", "^=", "&&", "||", "<<", ">>", "##",
+        ";", "\\", "'", "~", ":", ";", "}", "{", "]", "[", "(", ")", "?", "`", "$", "@", ",", 
+    );
     
-    // TODO: return the token instead of needing a hash lookup later
-    // TODO: comptime magic to generate this. 
-    t: TokenKind = @switch(p[]) {
-        @case("<".ascii()) => @switch(p.offset(1)[]) {
-            @case("<".ascii()) => @switch(p.offset(2)[]) {
-                @case("=".ascii()) => .@"<<=";
-                @default => .@"<<";
+    return @impl(p, kw);
+    // This generates a giant @match that checks one character at a time until it doesn't match a punctuation token:
+    // @switch(p[]) {
+    //     @case("<".ascii()) => @switch(p.offset(1)[]) {
+    //         @case("=".ascii()) => .@"<<";
+    //         @default => .@"<";
+    // Which is hella faster than for(kw, => if(p.slice(3).starts_with(it), => ...));
+    // 50 lines of confusing code saves 90 lines of boring code. not great ratio. 
+    impl :: fn(arg: FatExpr) FatExpr #macro = {
+        E :: TokenKind;
+        arg := arg&.items();
+        
+        // First convert the list to a tree. 
+        Chars :: @rec @struct(x: HashMap(u8, *Chars));  // TODO: this should work without being wrapped in a struct
+        prongs: Chars = (x = init(temp()));
+        kw := const_eval([]Str)(arg[1]);
+        for kw { kw |
+            case := prongs&;
+            for kw { c |
+                ::?*Chars;
+                case = or case.x&.get(c) {
+                    next := temp().box_zeroed(Chars);
+                    next[] = (x = init(temp()));
+                    case.x&.insert(c, next);
+                    next
+                };
             };
-            @case("=".ascii()) => .@"<=";
-            @default => .@"<";
         };
-        @case(">".ascii()) => @switch(p.offset(1)[]) {
-            @case(">".ascii()) => @switch(p.offset(2)[]) {
-                @case("=".ascii()) => .@">>=";
-                @default => .@">>";
+        
+        // Then convert the tree to code.  
+        s := u8.list(temp());
+        return rec_case(arg[0], s&, prongs&);
+        fn rec_case(arg: FatExpr, s: *List(u8), case: *Chars) FatExpr = {
+            N := @literal s.len;
+            get_val :: fn() => {
+                y :: local_return;
+                ::?E;
+                if E.from_name(s.items()) { value | 
+                    y @{ (@[N], @[@literal value]) };
+                } else {
+                    y @{ (@[N], E.TK_PUNCT) };
+                };
+                unreachable()
             };
-            @case("=".ascii()) => .@">=";
-            @default => .@">";
-        };
-        @case(".".ascii()) => @switch(p.offset(1)[]) {
-            @case(".".ascii()) => @switch(p.offset(2)[]) {
-                @case(".".ascii()) => .@"...";
-                @default => .@".";
+            
+            count := case.x.raw.len_including_tombstones;
+            e := Ty(i64, FatExpr).list(count, ast_alloc());
+            each case.x& { char, case |
+                s.push(char);
+                push(e&, (char.int(), rec_case(arg, s, case[])));
+                s.pop();
             };
-            @default => .@".";
-        };
-        @case("=".ascii()) => @switch(p.offset(1)[]) {
-            @case("=".ascii()) => .@"==";
-            @default => .@"=";
-        };
-        @case("!".ascii()) => @switch(p.offset(1)[]) {
-            @case("=".ascii()) => .@"!=";
-            @default => .@"!";
-        };
-        @case("-".ascii()) => @switch(p.offset(1)[]) {
-            @case("=".ascii()) => .@"-=";
-            @case(">".ascii()) => .@"->";
-            @case("-".ascii()) => .@"--";
-            @default => .@"-";
-        };
-        @case("+".ascii()) => @switch(p.offset(1)[]) {
-            @case("=".ascii()) => .@"+=";
-            @case("+".ascii()) => .@"++";
-            @default => .@"+";
-        };
-        @case("*".ascii()) => @switch(p.offset(1)[]) {
-            @case("=".ascii()) => .@"*=";
-            @default => .@"*";
-        };
-        @case("/".ascii()) => @switch(p.offset(1)[]) {
-            @case("=".ascii()) => .@"/=";
-            @default => .@"/";
-        };
-        @case("#".ascii()) => @switch(p.offset(1)[]) {
-            @case("#".ascii()) => .@"##";
-            @default => .@"#";
-        };
-        @case("&".ascii()) => @switch(p.offset(1)[]) {
-            @case("&".ascii()) => .@"&&";
-            @case("=".ascii()) => .@"&=";
-            @default => .@"&";
-        };
-        @case("|".ascii()) => @switch(p.offset(1)[]) {
-            @case("|".ascii()) => .@"||";
-            @case("=".ascii()) => .@"|=";
-            @default => .@"|";
-        };
-        @case("%".ascii()) => @switch(p.offset(1)[]) {
-            @case("=".ascii()) => .@"%=";
-            @default => .@"%";
-        };
-        @case("^".ascii()) => @switch(p.offset(1)[]) {
-            @case("=".ascii()) => .@"^=";
-            @default => .@"^";
-        };
-        @case("\\".ascii()) => return(1, .TK_PUNCT);
-        @case("~".ascii()) => .@"~";
-        @case("'".ascii()) => return(1, .TK_PUNCT);
-        @case(":".ascii()) => .@":";
-        @case(";".ascii()) => .@";";
-        @case("}".ascii()) => .@"}";
-        @case("{".ascii()) => .@"{";
-        @case("]".ascii()) => .@"]";
-        @case(")".ascii()) => .@")";
-        @case("(".ascii()) => .@"(";
-        @case("[".ascii()) => .@"[";
-        @case("?".ascii()) => .@"?";
-        @case("`".ascii()) => return(1, .TK_PUNCT);
-        @case("$".ascii()) => return(1, .TK_PUNCT);
-        @case("@".ascii()) => return(1, .TK_PUNCT);
-        @case(",".ascii()) => .@",";
-        @default => return(0, .TK_PUNCT);
+            make_switch(@{ @[arg].offset(@[N])[] }, get_val(), e)
+        }
     };
-    (t.name_str().len(), t)
-    
-    
-    // TODO: chibicc did ispunct(), are you allowed to just have random shit in here? like what about @?
-    //       --- it seems like yes? it's allowed in the preprocessor? like if you stringify it's fine? 
-    //punct := "!\"#%&'()*+,-./:;?[]^{|}~=><`@$"; 
-    //punct.contains(p[]).int()
 }
 
 fn read_escaped_char(c: *Ctx, new_pos: **u8, p: *u8) Ty(i64, bool) = {  // (ch, is unicode thingy)

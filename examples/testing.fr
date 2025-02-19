@@ -32,3 +32,57 @@ fn collect_with_extension(path: Str, extension: Str) Result(List(Str), void) = {
     }) || return(.Err);
     (Ok = out)
 }
+
+// TODO: go through everything and stop messing around with paths
+//       especially relative paths! do everything with file descriptors. 
+FRANCA_CACHE_PATH :: "target/franca";
+// 🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡
+// 🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡
+// 🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡
+// 🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡🤡
+// cached download of a compressed resource 
+// returns path to the output folder
+// for now we assume the zip file will contain a directory named `HACK_name`
+// TODO: this is stupid. we can't just be execing random shit. 
+// TODO: don't directly dump stuff into the cache directory. 
+//       check hash at the beginning, do the work, check hash again, then rename it, 
+//       so you don't clobber another process that has the same dependency. 
+fn fetch_or_crash(url: Str, zip_size_bytes: i64, sha256_hash: Str, HACK_name: Str) Str = {
+    folder_path := @tfmt("%/%", FRANCA_CACHE_PATH, HACK_name);
+    if file_exists(folder_path) {
+        return(folder_path);
+    };
+    
+    // 🤡 no just look at whats in the file my guy
+    extension := @if_else { 
+        @if(url.ends_with(".tar.gz")) => "tar.gz";
+        @if(url.ends_with(".zip")) => "zip";
+        @else => panic("expected zip or tar.gz");
+    };
+    
+    // TODO: this is stupid. should be able to pipe to a process. 
+    zip_file_path := @tfmt("%.%", folder_path, extension);
+    
+    if !file_exists(zip_file_path) {
+        ok, out, err := exec_and_catch("curl", @slice(url, "-s", "-L"), temp());
+        @assert(ok, "failed curl %\n%", url, err.items());
+        @assert_eq(zip_size_bytes, out.len, "bad size: %", url);
+        // TODO: mkdir
+        exec_and_catch("touch", @slice(zip_file_path), temp());
+        write_entire_file(zip_file_path, out.items()) || panic("failed write zip");
+    };
+    ok, out, err := exec_and_catch("shasum", @slice("-a", "256", zip_file_path), temp());
+    @assert(out.items().contains(sha256_hash), "bad hash %", url);
+    if extension == "zip" {
+        ok, out, err := exec_and_catch("unzip", @slice("-oq", "-d", FRANCA_CACHE_PATH, zip_file_path), temp());
+    } else {
+        ok, out, err := exec_and_catch("tar", @slice("-C", FRANCA_CACHE_PATH, "-xzvf", zip_file_path), temp());
+        if !ok {
+            println(out.items());
+            println(err.items());
+        }
+    };
+    // not checking !ok because it doesn't like strange filenames 
+    // this is why we can't be using whatever random shit i happen to have installed. 
+    folder_path
+}

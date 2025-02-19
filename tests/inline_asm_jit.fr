@@ -263,46 +263,57 @@
         out := 0;
         truncate_to_byte(in&, out&);
         assert_eq(out, 1);
-        
-        // Note: you make 16 bytes of room on the stack, then use offset 0 words and 1 words above sp. 
-        //       NOT offset 1 and 2, that will stomp the first slot of the outer function (in this case canary so luckily you notice)
-        //       but... its fine on interp because canary is stored on the fake stack and there happens to be a gap on the real one i guess. 
-        //       I also didn't notice that I forgot to reset sp, I guess rust set the value after the call instead of trusing callee to offset it back? 
-        #c_call #aarch64 #asm
-        fn read_pair(a: i64, b: i64) i64 = (
-            sub_im(Bits.X64, sp, sp, @as(u12) 16, 0b0),
-            str_uo(Bits.X64, x0, sp, @as(u12) 0),
-            str_uo(Bits.X64, x1, sp, @as(u12) 1),
-            ldp_so(Bits.X64, x2, x3, sp, @as(i7) 0),
-            sub_sr(Bits.X64, x0, x2, x3, Shift.LSL, @as(u6) 0),
-            add_im(Bits.X64, sp, sp, @as(u12) 16, 0b0),
-            ret(),
-        );
-        assert_eq(read_pair(30, 20), 10);
-        
-        #c_call #aarch64 #asm
-        fn write_pair(a: i64, b: i64) i64 = (
-            sub_im(Bits.X64, sp, sp, @as(u12) 16, 0b0),
-            stp_so(Bits.X64, x0, x1, sp, @as(i7) 0),
-            ldr_uo(Bits.X64, x2, sp, @as(u12) 0),
-            ldr_uo(Bits.X64, x3, sp, @as(u12) 1),
-            sub_sr(Bits.X64, x0, x2, x3, Shift.LSL, @as(u6) 0),
-            add_im(Bits.X64, sp, sp, @as(u12) 16, 0b0),
-            ret(),
-        );
-        assert_eq(write_pair(30, 20), 10);
-        
-        #c_call #aarch64 #asm
-        fn both_pair(a: i64, b: i64) i64 = (
-            sub_im(Bits.X64, sp, sp, @as(u12) 16, 0b0),
-            stp_so(Bits.X64, x0, x1, sp, @as(i7) 0),
-            ldp_so(Bits.X64, x2, x3, sp, @as(i7) 0),
-            sub_sr(Bits.X64, x0, x2, x3, Shift.LSL, @as(u6) 0),  // sub means order matters, so you can catch if flipped in encoding.
-            add_im(Bits.X64, sp, sp, @as(u12) 16, 0b0),
-            ret(),
-        );
-        assert_eq(both_pair(30, 20), 10);
     };
+    
+    // These tests are only interesting for arm. 
+    ten :: fn(out: *List(u8)) => @asm_x64(
+        encode_bin(PrimaryOp.MovReg, X86Reg.rax, X86Reg.rdi),
+        encode_bin(PrimaryOp.SubReg, X86Reg.rax, X86Reg.rsi), 
+        PrimaryOp.Ret
+    ) out;
+    
+    // Note: you make 16 bytes of room on the stack, then use offset 0 words and 1 words above sp. 
+    //       NOT offset 1 and 2, that will stomp the first slot of the outer function (in this case canary so luckily you notice)
+    //       but... its fine on interp because canary is stored on the fake stack and there happens to be a gap on the real one i guess. 
+    //       I also didn't notice that I forgot to reset sp, I guess rust set the value after the call instead of trusing callee to offset it back? 
+    #c_call #aarch64 #asm
+    fn read_pair(a: i64, b: i64) i64 = (
+        sub_im(Bits.X64, sp, sp, @as(u12) 16, 0b0),
+        str_uo(Bits.X64, x0, sp, @as(u12) 0),
+        str_uo(Bits.X64, x1, sp, @as(u12) 1),
+        ldp_so(Bits.X64, x2, x3, sp, @as(i7) 0),
+        sub_sr(Bits.X64, x0, x2, x3, Shift.LSL, @as(u6) 0),
+        add_im(Bits.X64, sp, sp, @as(u12) 16, 0b0),
+        ret(),
+    );
+    fn read_pair(a: i64, b: i64) i64 #c_call #x86_bytes #asm = ten;
+    assert_eq(read_pair(30, 20), 10);
+    
+    #c_call #aarch64 #asm
+    fn write_pair(a: i64, b: i64) i64 = (
+        sub_im(Bits.X64, sp, sp, @as(u12) 16, 0b0),
+        stp_so(Bits.X64, x0, x1, sp, @as(i7) 0),
+        ldr_uo(Bits.X64, x2, sp, @as(u12) 0),
+        ldr_uo(Bits.X64, x3, sp, @as(u12) 1),
+        sub_sr(Bits.X64, x0, x2, x3, Shift.LSL, @as(u6) 0),
+        add_im(Bits.X64, sp, sp, @as(u12) 16, 0b0),
+        ret(),
+    );
+    fn write_pair(a: i64, b: i64) i64 #c_call #x86_bytes #asm = ten;
+    assert_eq(write_pair(30, 20), 10);
+    
+    #c_call #aarch64 #asm
+    fn both_pair(a: i64, b: i64) i64 = (
+        sub_im(Bits.X64, sp, sp, @as(u12) 16, 0b0),
+        stp_so(Bits.X64, x0, x1, sp, @as(i7) 0),
+        ldp_so(Bits.X64, x2, x3, sp, @as(i7) 0),
+        sub_sr(Bits.X64, x0, x2, x3, Shift.LSL, @as(u6) 0),  // sub means order matters, so you can catch if flipped in encoding.
+        add_im(Bits.X64, sp, sp, @as(u12) 16, 0b0),
+        ret(),
+    );
+    fn both_pair(a: i64, b: i64) i64 #c_call #x86_bytes #asm = ten;
+    assert_eq(both_pair(30, 20), 10);
+    
     canary
 }
 

@@ -15,7 +15,7 @@ fn driver(vtable: *ImportVTable) void = {
     ok, out, err := compile_and_run(vtable, full);
     if ok {
         passed = tests.raw.len_including_tombstones;
-        print(out.items());
+        println(out.items());
     } else {
         each tests& { file, functions | 
             @print("%", f_pad(file, 40, .After));
@@ -32,14 +32,44 @@ fn driver(vtable: *ImportVTable) void = {
         @assert_ne(failed, 0, "full test failed but all individual tests passed.");
     };
     if failed == 0 {
-        @println("\nAll is fine! (passed % tests)", passed);
+        @println("\nAll is fine! (passed % tests)\n", passed);
     } else {
         @println("\n% of % tests failed.", failed, failed + passed);
+        exit((failed != 0).int());
     };
-    exit((failed != 0).int());
+    
+    ::import("@/examples/testing.fr");
+    
+    run_tests_main(Str, compile_only, fn(a) => a[]) { file | 
+        src := libc_allocator.read_to_string_or_crash(file[]);
+        src&.slowly_prepend_all("\n#include_std(\"lib/core.fr\");\n");
+        compile(vtable, src.items());
+        (true, list(u8, temp()), list(u8, temp()), "")
+    };
 }
 
-fn compile_and_run(vtable: *ImportVTable, src: Str) Ty(bool, List(u8), List(u8)) = {
+compile_only :: @const_slice(
+    "examples/sudoku.fr",  // runs tests at comptime 
+    "examples/raw_terminal.fr",  // interactive
+    // TODO: test it
+    "examples/count.fr", "examples/c_bindgen.fr", 
+    "examples/dump_macho.fr", "examples/macho_loader.fr", "examples/import_wasm/convert.fr",
+    "examples/dump_elf.fr",
+    "examples/dump_wasm.fr",
+    // has deps
+    "tests/need_llvm/x64_encoding.fr", 
+    // is driver
+    // "examples/edit.fr" "examples/farm_game.fr" "examples/default_driver.fr" "examples/60fps.fr"
+    // interactive at comptime
+    // "examples/soft_draw.fr" 
+    
+    "examples/toy/bf.fr", "examples/toy/rot_cypher.fr",
+    // "examples/toy/where_am_i.fr", "examples/toy/hello.fr", irritating comptime print
+    
+    "examples/repl.fr",
+);
+
+fn compile(vtable: *ImportVTable, src: Str) void = {
     push_dynamic_context {
         opts := vtable.default_build_options();
         c := new_with_src(vtable, src, opts);
@@ -63,6 +93,10 @@ fn compile_and_run(vtable: *ImportVTable, src: Str) Ty(bool, List(u8), List(u8))
         drop(m&);
         {c.vtable.destroy_compiler}(c.data);
     };
+}
+
+fn compile_and_run(vtable: *ImportVTable, src: Str) Ty(bool, List(u8), List(u8)) = {
+    compile(vtable, src);
     exec_and_catch("./c.out", empty(), todo_allocator)
 }
 

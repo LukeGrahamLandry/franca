@@ -7,6 +7,10 @@
 
 ##
 
+- remove clowns
+  - write_entire_file create file
+  - chmod
+  - makedir
 - clean up import_c ref tracking
 - context() leak allocator
 - simplify run_tests.fr (call compiler/test.fr instead of recollecting them)
