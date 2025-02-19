@@ -1,0 +1,108 @@
+// TODO: better error handling. 
+// TODO: use posix_spawnp instead? that makes it easier to return an error to the caller. using fork is a pain. 
+// TODO: it doesn't look up the command like a shell does.
+fn run_cmd_blocking(path: Str, args: Slice(Str)) bool = {
+    pid := fork();
+    if(pid.eq(0.intcast())) {
+       exec_cmd(path, args);
+    };
+    
+    status: i32 = 0.intcast();
+    res := waitpid(pid, status&, 0); 
+    :: assert_eq(i32);
+    assert_eq(res, pid); // TODO: error handling, check errno
+    status.eq(0.intcast())
+}
+
+fn exec_and_catch(path: Str, args: Slice(Str), alloc: Alloc) Ty(bool, List(u8), List(u8)) = {
+    fork_and_catch(alloc) {
+        exec_cmd(path, args);
+    }
+}
+
+fn exec_cmd(path: Str, args: Slice(Str)) Never = {
+    path := path.maybe_borrow_cstr(temp()); 
+    cargs: List(CStr) = list(args.len.add(2), temp());
+    cargs&.push(path);
+    for(args) {s|
+        cargs&.push(s.maybe_borrow_cstr(temp()));
+    };
+    // TODO: this is what llvm doen't like, it cant do ptr_from_int.
+    cargs&.push((ptr = u8.ptr_from_int(0))); // libc wants a null terminated array.
+    execvp(path, cargs.maybe_uninit.ptr);
+    
+    // ERROR
+    @println("Failed to exec path=%", path);
+    cargs.len -= 1; // don't try to print the null terminator
+    for(cargs) {s|
+        @println("- %", s);
+    };
+    panic("failed to exec!")
+}
+
+// Be very very careful using this to do anything other than exec a new process. 
+// If you're running at comptime, you might not be done compiling and the child 
+// will hang forever because fork() doesn't take threads with you (codegen runs 
+// in a different thread). 
+fn fork_and_catch(alloc: Alloc, $f: @Fn() void) Ty(bool, List(u8), List(u8)) = {
+    out := Array(Fd, 2).zeroed();
+    err := Array(Fd, 2).zeroed();
+    pipe(out&);
+    pipe(err&);
+    
+    pid := fork();
+    if(pid.eq(0.intcast())){
+        // Child
+        dup2(out&[1], STD_OUT);
+        dup2(err&[1], STD_ERR);
+        
+        f();
+        exit(0);
+    };
+    
+    // TODO: manual outlining like people do in rust is kinda annoying.
+    //       but also mine is extra dumb because i still copy and recompile this for every const argument of the outer function,
+    //       and rely on deduplicating to fix it.
+    collect_output :: fn(alloc: Alloc, out: Fd, err: Fd, pid: i32) Ty(bool, List(u8), List(u8)) = {
+        base_buffer_size := 65536;
+        // TODO: make base buffer size a default argument
+        outs: List(u8) = list(base_buffer_size, alloc);
+        errs: List(u8) = list(base_buffer_size, alloc);
+        
+        flag: u16 = (@as(i64) PollEvents.In).trunc();
+        o: PollFds = (fd = out, events = flag, revents = 0);
+        e: PollFds = (fd = err, events = flag, revents = 0);
+        poll_data: Array(PollFds, 2) = init(@slice(o, e));
+        poll_data := poll_data&.items();
+        
+        // If the output of the forked thing were small it would be good enough to just allocate a big buffer and read it all into it after waiting with hang.
+        // but i think if it fills the pipe it hangs forever cause you cant read to clear the pipe because you're blocking until the process ends,
+        // and its blocking until theres room to write more in the pipe. 
+        status := 0.intcast();
+        dowhile() {()bool|
+            fn read_some();
+            fn read_some(buf: *List(u8), f: PollFds) void = {
+                c := (@as(i64) f.revents.zext()).bit_and(@as(i64) PollEvents.In) != 0;
+                if c {
+                    len := read(f.fd, buf.maybe_uninit.ptr.offset(buf.len), buf.maybe_uninit.len - buf.len).unwrap();
+                    buf.len += len;
+                    if buf.len == buf.maybe_uninit.len {
+                        buf.reserve(buf.len);
+                        read_some(buf, f);
+                    };
+                };
+            }
+    
+            usleep(1000);
+            was_done := waitpid(pid, status&, @as(i64) WaitPidOptions.NoHang);
+            can_read := poll(poll_data, 0).unwrap();
+            read_some(outs&, poll_data[0]);
+            read_some(errs&, poll_data[1]);
+            was_done == 0
+        };
+        close(out);
+        close(err);
+        (status.eq(0.intcast()), outs, errs)
+    };
+    collect_output(alloc, out&[0], err&[0], pid)
+}

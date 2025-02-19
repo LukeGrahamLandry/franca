@@ -19,6 +19,15 @@ similarly for test/gif, `wuffs_gif__decoder dec = ((wuffs_gif__decoder){});` tak
 but this time in add_type_inner. setting all_zeros for `{}` in struct_initializer1 saves 2 seconds. 
 and that's still with generating the most unserious 60000 instruction function for that zero init in test_basic_initialize_not_called.
 
+trying to compile the lua interpreter. 
+
+- TODO: my line numbers are off!
+- hide_stack can miss a token if it only expands to 1
+- gen_addr of ND_CAST for prefix --
+- cast enum to long was confused because i was saying TY_ENUM was U64 but Kw, 
+- iter_auxlax symbol not found but it is getting added to refs and emitted. 
+ah! it's a real backend bug! suspend for inlining checks instructions but not phis so it missed `lax ? iter_auxlax : iter_auxstrict`
+
 ## (Feb 16)
 
 - instead of tracking hidesets on each token, just keep a stack of active macro expansions. 

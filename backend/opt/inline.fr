@@ -362,6 +362,15 @@ fn inlcall(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) i64 = {
 }
 
 fn inlcalls(f: *Qbe.Fn) void = {
+    fn mark_referenced(f: *Qbe.Fn, r: Qbe.Ref) void #inline = {
+        if(rtype(r) != .RCon, => return());
+        c := f.get_constant(r);
+        if(c.type != .CAddr, => return());
+        use_symbol(f.globals, c.sym.id) { s | 
+            mark_referenced(f.globals, c.sym.id, s);
+        };
+    }
+    
     if f.globals.debug["G".char()] {
         @fmt_write(f.globals.debug_out, "\nProcessing function $%:\n", f.name());
     };
@@ -384,17 +393,20 @@ fn inlcalls(f: *Qbe.Fn) void = {
                 // but it's fine because they'd have been checked when we processed the callee the first time.  
                 // note: need to add something to the case above if inlining heuristic gets complicated enough to make choices based on the caller not just the callee. 
                 for i.arg&.items() { r | 
-                    continue :: local_return;
-                    if(rtype(r) != .RCon, => continue());
-                    c := f.get_constant(r);
-                    if(c.type != .CAddr, => continue());
-                    use_symbol(f.globals, c.sym.id) { s | 
-                        mark_referenced(f.globals, c.sym.id, s);
-                    };
+                    mark_referenced(f, r);
                 };
             };
             n += 1;
         };
+        
+        // phi on function pointers is legal!
+        for_phi b { p |
+            for p.arg.slice(0, p.narg.zext()) { r | 
+                mark_referenced(f, r);
+            };
+        };
+        // dito for jnz / ret
+        mark_referenced(f, b.jmp.arg);
     };
     
     /* some new allocs in fn->start for retc, parc etc. */

@@ -42,8 +42,7 @@ int sub_short(short a, short b, short c) {
 
 int g1;
 
-// TODO
-// int *g1_ptr(void) { return &g1; }
+int *g1_ptr(void) { return &g1; }
 char int_to_char(int x) { return x; }
 
 int div_long(long a, long b) {
@@ -106,14 +105,13 @@ int (*fnptr(int (*fn)(int n, ...)))(int, ...) {
 
 int param_decay2(int x()) { return x(); }
 
-// TODO
-// char *func_fn(void) {
-//   return __func__;
-// }
+char *func_fn(void) {
+  return __func__;
+}
 
-// char *function_fn(void) {
-//   return __FUNCTION__;
-// }
+char *function_fn(void) {
+  return __FUNCTION__;
+}
 
 int add10_int(int x1, int x2, int x3, int x4, int x5, int x6, int x7, int x8, int x9, int x10);
 float add10_float(float x1, float x2, float x3, float x4, float x5, float x6, float x7, float x8, float x9, float x10);
@@ -226,8 +224,7 @@ int main() {
 
   g1 = 3;
 
-  // TODO
-  // ASSERT(3, *g1_ptr());
+  ASSERT(3, *g1_ptr());
   ASSERT(5, int_to_char(261));
   ASSERT(5, int_to_char(261));
   ASSERT(-5, div_long(-10, 2));
@@ -286,11 +283,9 @@ int main() {
 
   ASSERT(5, sizeof(__func__));
   ASSERT(0, strcmp("main", __func__));
-  // TODO
-  // ASSERT(0, strcmp("func_fn", func_fn()));
+  ASSERT(0, strcmp("func_fn", func_fn()));
   ASSERT(0, strcmp("main", __FUNCTION__));
-  // TODO
-  // ASSERT(0, strcmp("function_fn", function_fn()));
+  ASSERT(0, strcmp("function_fn", function_fn()));
 
   ASSERT(55, add10_int(1,2,3,4,5,6,7,8,9,10));
   ASSERT(55, add10_float(1,2,3,4,5,6,7,8,9,10));

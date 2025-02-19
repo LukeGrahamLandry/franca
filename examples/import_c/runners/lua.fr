@@ -1,0 +1,52 @@
+// ("https://www.lua.org/tests/lua-5.4.7-tests.tar.gz", 136602, "8a4898ffe4c7613c8009327a0722db7a41ef861d526c77c5b46114e59ebf811e")
+// ("https://www.lua.org/ftp/lua-5.4.7.tar.gz", 374097, "9fbf5e28ef86c69858f6d3d34eccc32e911c1a28b4120ff3e84aaa70cfbf1e30")
+
+fn main() void = {
+    ::import("@/examples/testing.fr");
+    
+    lua_folder :: "target/lua-5.4.7";
+    files := collect_with_extension(@tfmt("%/src", lua_folder), ".c") || panic("didn't find tests. run from franca root dir");
+    src := u8.list(files.len * 20, temp());
+    for files { it |
+        @if(it != "all.c" && it != "luac.c")
+        @fmt(src&, "#include \"%/src/%\"\n", lua_folder, it);
+    };
+    //@fmt(src&, "#include \"%/tests/ltests.c\"\n", lua_folder);  // TODO
+    all_path := @tfmt("%/src/all.c", lua_folder);  // TODO: touch
+    write_entire_file(all_path, src.items()) || panic("failed to wriite file");
+    lua_exe := @tfmt("%/lua.out", lua_folder);  // TODO: touch
+
+    //// TODO: mkdir lua/include
+    //// the tests want this TODO: run the fancier tests
+    //for (@const_slice("lua.h", "luaconf.h", "lualib.h", "lauxlib.h")) { it |
+    //    // TODO: unwrap but need to allow when the link is already there
+    //    symlink(@fmt_cstr("%/src/%", lua_folder, it), @fmt_cstr("%/include/%", lua_folder, it)) 
+    //};
+    
+    ok, out, err := exec_and_catch("./cc.out", @slice(all_path, "-o", lua_exe, "-DLUA_USE_POSIX"), todo_allocator);  // , "-I."
+    if !ok {
+        @panic("failed compile lua\n%", err.items());
+    };
+    
+    // TODO: instead of this just run all.lua but that needs to setup building libs
+    // is imported: "bwcoercion.lua", "tracegc.lua", 
+    // slow: "heavy.lua", 
+    // entry: "all.lua", "main.lua"
+    // internal: "api.lua", "code.lua", 
+    // needs to be called from a coroutine: "big.lua", 
+    // idk but it fails with clang too: "files.lua", 
+    tests :: @const_slice("tpack.lua", "utf8.lua", "vararg.lua", "verybig.lua",
+    "attrib.lua", "bitwise.lua", "calls.lua", 
+    "closure.lua", "constructs.lua", "coroutine.lua", "cstack.lua", "db.lua", "errors.lua", 
+    "events.lua", "gc.lua", "gengc.lua", "goto.lua", "literals.lua", "locals.lua", 
+    "math.lua", "nextvar.lua", "pm.lua", "sort.lua", "strings.lua");  
+    
+    chdir(@fmt_cstr("%-tests", lua_folder)).unwrap();
+    run_tests_main(Str, tests, fn(a) => a[]) { file | 
+        a := timestamp();
+        ok, out, err := exec_and_catch(@tfmt("../../%", lua_exe), @slice(file[]), todo_allocator);
+        b := timestamp();
+        ok := ok && (out.items().contains("OK\n") || out.items().contains("ok\n"));
+        (ok, out, err, @tfmt("%ms", b - a))
+    };
+}

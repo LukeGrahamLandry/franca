@@ -15,6 +15,13 @@ int main() {
         t_3;  // definitely initialized
     }));
     
+    ASSERT(9, ({
+        typedef struct { char nactvar; } X;
+        X _fs = { 10 }; X *fs = &_fs;
+        char x = --fs->nactvar;
+        x;
+    }));
+    
     printf("OK\n");
     return 0;
 }
