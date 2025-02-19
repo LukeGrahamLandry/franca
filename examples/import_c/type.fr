@@ -220,65 +220,20 @@ fn add_type(c: *Ctx, node: *Compile.Node) void #inline = {
     ::ptr_utils(Compile.Node);
     ::ptr_utils(Types.CType);
     if(node.is_null() || !node.ty.is_null(), => return());
-    if(@is(node.kind, .ND_NULL_EXPR, .ND_STMT, .ND_MEMZERO), => return());
+    if(@is(node.kind, .ND_NULL_EXPR, .ND_STMT), => return());
     add_type_inner(c, node);
 }
 
 fn add_type_inner(c: *Ctx, node: *Node) void = {
-    @if(SPAM) 
-    @println("add type %", node.kind);
     c.add_type(node.lhs);
     c.add_type(node.rhs);
-    c.add_type(node.cond);
-    c.add_type(node.then);
-    c.add_type(node.else);
-    
-    //n := node.body;
-    //for_linked n { n |
-    //    c.add_type(n);
-    //};
-    //n := node.args;
-    //for_linked n { n |
-    //    c.add_type(n);
-    //};
     k := node.kind;
     node.ty = @if_else {
-        @if(@is(k, .ND_ADD, .ND_SUB, .ND_MUL, .ND_DIV, .ND_MOD, .ND_BITAND, .ND_BITOR, .ND_BITXOR)) => {
+        @if(@is(k, .ND_ADD, .ND_SUB, .ND_MUL, .ND_DIV)) => {
             c.usual_arith_conv(node.lhs&, node.rhs&);
             node.lhs.ty
         };
-        @if(@is(k, .ND_EQ, .ND_NE, .ND_LT, .ND_LE)) => {
-            c.usual_arith_conv(node.lhs&, node.rhs&);
-            ty_int
-        };
-        @if(@is(k, .ND_NOT, .ND_LOGOR, .ND_LOGAND)) => ty_int;
-        @if(@is(k, .ND_BITNOT, .ND_SHL, .ND_SHR))   => node.lhs.ty;
-        @if(@is(k, .ND_VAR, .ND_VLA_PTR))           => node.var.ty;
         @else => (@match(k) {
-            fn ND_NUM()     => ty_int;
-            fn ND_COMMA()   => node.rhs.ty;
-            fn ND_MEMBER()  => node.member.ty;
-            fn ND_FUNCALL() => node.func_ty.return_ty;
-            fn ND_NEG() => {
-                ty := c.get_common_type(ty_int, node.lhs.ty);
-                node.lhs = c.new_cast(node.lhs, ty);
-                ty
-            }
-            fn ND_ASSIGN() => {
-                if(node.lhs.ty.kind == .TY_ARRAY, => @error_tok(c, node.lhs.tok, "not an lvalue"));
-                if node.lhs.ty.kind != .TY_STRUCT {
-                    node.rhs = c.new_cast(node.rhs, node.lhs.ty);
-                };
-                node.lhs.ty
-            }
-            fn ND_COND() => if node.then.ty.kind == .TY_VOID || node.else.ty.kind == .TY_VOID {
-                ty_void
-            } else {
-                c.usual_arith_conv(node.then&, node.else&);
-                node.then.ty
-            };
-            fn ND_ADDR() => panic("addr should have known type");
-            fn ND_DEREF() => panic("deref should have known type");
             //fn ND_CAS() => {
             //    c.add_type(node.cas_addr);
             //    c.add_type(node.cas_old);
@@ -291,7 +246,7 @@ fn add_type_inner(c: *Ctx, node: *Node) void = {
             //    if(node.lhs.ty.kind != .TY_PTR, => @error_tok(c, node.cas_addr.tok, "pointer expected"));
             //    node.lhs.ty.base
             //}
-            @default => return();
+            @default => @panic("% should have known type", node.kind);
         });
     };
 }
@@ -303,8 +258,11 @@ fn add_type(c: *Ctx, k: NodeKind, lhs: **Node, rhs: **Node) *CType = {
     if rhs.ty.is_null() {
         @error_tok(c, rhs.tok, "unknown type for right of %", k);
     };
+    if lhs.ty.kind == .TY_VOID || rhs.ty.kind == .TY_VOID {
+        return(ty_void);
+    };
 @if_else {
-    @if(@is(k, .ND_ADD, .ND_SUB, .ND_MUL, .ND_DIV, .ND_MOD, .ND_BITAND, .ND_BITOR, .ND_BITXOR)) => {
+    @if(@is(k, .ND_COND, .ND_ADD, .ND_SUB, .ND_MUL, .ND_DIV, .ND_MOD, .ND_BITAND, .ND_BITOR, .ND_BITXOR)) => {
         c.usual_arith_conv(lhs, rhs);
         lhs.ty
     };
@@ -312,11 +270,8 @@ fn add_type(c: *Ctx, k: NodeKind, lhs: **Node, rhs: **Node) *CType = {
         c.usual_arith_conv(lhs, rhs);
         ty_int
     };
-    @if(@is(k, .ND_NOT, .ND_LOGOR, .ND_LOGAND)) => ty_int;
     @if(@is(k, .ND_BITNOT, .ND_SHL, .ND_SHR))   => lhs.ty;
     @else => (@match(k) {
-        fn ND_NUM()     => ty_int;
-        fn ND_COMMA()   => rhs.ty;
         fn ND_NEG() => {
             ty := c.get_common_type(ty_int, lhs.ty);
             lhs[] = c.new_cast(lhs[], ty);
