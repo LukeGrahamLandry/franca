@@ -810,3 +810,134 @@ fn maybe_log_scopes(self: *SelfHosted) void = {
         write_entire_file(path.str(), out.items());
     };
 };
+
+fn show_comptime_backtrace(self: *SelfHosted, frame: i64) void = {
+    callee: ?FuncId = .None;
+    skip := 0;
+    i := 0;
+    check_skip :: fn() => if skip > 0 {
+        @println("  [...% unknown frames]", skip);
+        skip = 0;
+    };
+    MAX :: 10;
+    @println("stack backtrace:");
+    old := 0;
+    while => frame != 0 && i < 1000 {
+        addr := trace_return(frame);
+        if i < MAX && addr != old {
+            if self.find_function(addr, callee&) { s |
+                check_skip();
+                @println("  %: %", i, s);
+            } else {
+                skip += 1;
+            };
+        };
+        old = addr;
+        frame = trace_prev(frame);
+        i += 1;
+    };
+    if i > MAX {
+        @println("[... % hidden frames]", i - MAX + skip);  
+    } else {
+        check_skip();
+    };
+}
+
+// :SLOW but only called when panicking so it's fine. 
+fn find_function(self: *SelfHosted, addr: i64, callee: *?FuncId) ?Str = {
+    T :: u8;
+    fn split_suffix(haystack: Str, sep: Str) Ty(Str, Str) = {
+        h := haystack;
+        while => h.len >= sep.len {
+            if h.ends_with(sep) {
+                h.len -= sep.len;
+                return(h, haystack.rest(h.len + sep.len));
+            };
+            h.len -= 1;
+        };
+        ("", haystack)
+    }
+    
+    out := "";
+    for_symbols self.comptime_codegen.m { id, s |
+        continue :: local_return;   // TODO: break. would be easier if i had a defer like thing. or like optional named params that get ignored
+        jit_addr := s.jit_addr.int_from_rawptr();
+        dist := addr - jit_addr;
+        if dist >= 0 && dist < s.size { //(s.size == 0 || dist < s.size) {
+            name, i := split_suffix(s.name, "__");
+            
+            if name == "" && i.starts_with("F") {
+                i = i.rest(1);
+            };
+            for i { c | 
+                if !c.is_ascii_digit() {
+                    out = s.name;
+                    continue();
+                };
+            };
+            
+            i := parse_int(i); // TODO: no panic
+            fid := @as(FuncId) from_index(i);
+            func := self.get_function(fid);  // TODO: bounds
+            // TODO: check name
+            loc := self.codemap.get_whole_line(func.loc);
+            file := self.codemap.find_single_file(func.loc);
+            name := u8.list(temp());
+            @fmt(name&, "% (%:% id=% start=%)", self.pool.get(func.name), loc.filename, loc.line, i, s.jit_addr);
+            ::WalkAst(FindCallee, void);
+            if callee[] { callee | 
+                walk: FindCallee = (found = list(Span, temp()), callee = callee, compiler = self);
+                @if_let(func.body&) fn Normal(e) => {
+                    walk&.walk_expr(e);
+                };
+                @if(walk.found.len == 1)
+                for walk.found& { loc |
+                    loc := self.codemap.get_whole_line(loc);
+                    @fmt(name&, "\n        at %:%:%", loc.filename, loc.line, loc.col);
+                };
+            };
+            fn contains(self: Span, other: Span) bool = {
+                self.low <= other.low && self.high >= other.high
+            }
+            fn get_static_fn(self: *SelfHosted, e: *FatExpr) ?FuncId = {
+                type := self.get_type(e.ty);
+                @if(e.ty == FuncId || type.is(.Fn))
+                @match(e.expr&) {
+                    fn Value(it) => {
+                        return(Some = FuncId.assume_cast(it.bytes&)[]);
+                    }
+                    @default => ();
+                };
+                .None
+            }
+            FindCallee :: @struct(found: List(Span), callee: FuncId, compiler: *SelfHosted);
+            fn handle_expr(self: *FindCallee, expr: *FatExpr) Result(DoMore, void) = {
+                @match(expr.expr&) {
+                    fn Call(it) => {
+                        if self.compiler.get_static_fn(it.f) { fid |
+                            @if(fid == self.callee) 
+                            self.found&.push(expr.loc);
+                        };
+                    }
+                    @default => ();
+                };
+                (Ok = .Continue)
+            };
+            fn handle_stmt(self: *FindCallee, stmt: *FatStmt) Result(DoMore, void) = (Ok = .Continue);
+            fn handle_type(self: *FindCallee, type: *LazyType) Result(DoMore, void) = (Ok = .Continue);
+            fn handle_func(self: *FindCallee, func: *Func) Result(DoMore, void) = (Ok = .Continue);
+            fn handle_pattern(self: *FindCallee, pattern: *Pattern) Result(DoMore, void) = (Ok = .Continue);
+            
+            callee[] = (Some = fid);
+            out = name.items();
+        };
+    };
+    show_fid :: fn(fid: FuncId) => {
+        func := self.get_function(fid);
+        loc := self.codemap.get_whole_line(func.loc);
+        name := @tfmt("% at %:% id=%", self.pool.get(func.name), loc.filename, loc.line, i);
+        return(name);
+    };
+    if(out.len > 0, => return(Some = out));
+    .None
+}

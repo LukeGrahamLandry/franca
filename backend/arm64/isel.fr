@@ -212,13 +212,16 @@ fn sel(f: *Qbe.Fn, i: Qbe.Ins, blk: i32) void = {
         return();
     };
     // TODO: what does the callable check do? i don't have a test that needs it. 
-    if i&.op() == .asm || (i&.op() == .call && f.callable(i.arg&[0])) {  // .asm has const u32 arg that we don't want to fix
+    if (i&.op() == .call && f.callable(i.arg&[0])) {  // .asm has const u32 arg that we don't want to fix
         f.emit(i);
         return();
     };
     o := i&.op();
-    if o != .nop {
-        if o == .ones { 
+    
+    @match(o) {
+        fn asm() => f.emit(i);
+        fn nop() => ();
+        fn ones() => { 
             // you can only popcnt on a simd/float register
             f_in := f.newtmp("isel", .Kd);
             f_out := f.newtmp("isel", .Kd);
@@ -228,78 +231,11 @@ fn sel(f: *Qbe.Fn, i: Qbe.Ins, blk: i32) void = {
             f.emit(.ones, kf, f_out, f_in, QbeNull);
             icast := f.emit(.cast, kf, f_in, i.arg&[0], QbeNull);
             f.fixarg(icast.arg&.index(0), ki, false, blk);
-            return();
         };
-        
-        new_ins := f.emit(i);
-        iarg := new_ins.arg&;
-        
-        if rtype(i.to) == .RTmp {
-            t := f.get_temporary(i.to);
-            t.def = new_ins;
-        };
-        if is_load(o) && rtype(iarg[0]) == .RTmp {
-            r := fix_memarg(f, new_ins, blk);
-            if rtype(r[]) != .RSlot {
-                f.fixarg(r, .Kl, false, blk);
-            };
-            return();
-        };
-        k0 := argcls(i&, 0);
-        k1 := argcls(i&, 1);
-        copy_from_con := i&.op() == .copy && rtype(iarg[0]) == .RCon && !isreg(i.to);
-        if !copy_from_con {
-            f.fixarg(iarg[0]&, k0, false, blk);
-        };
-        if is_store(o) && rtype(iarg[1]) == .RTmp {
-            r := fix_memarg(f, new_ins, blk);
-            if rtype(r[]) != .RSlot {
-                f.fixarg(r, .Kl, false, blk);
-            };
-            return();
-        };
-        // TODO: do this for sub, etc as wel. this alone makes the compiler go from 2485100 -> 2089352 bytes of code. thats insane.
-        //       this looks branchy but it generates so much less code that its faster even before accounting for it generating better code for itself. 
-        if o == .add && is_int(k1) {
-            // could convert to sub `if off < 0 && off > -4096` but that never happens in self-compile and then would have to add a case to fuse_addr -- Nov 7
-
-            // ~358KB, amazing! (that was before other addr folding i think, now its less impressive )
-            if f.get_int(iarg[1]) { imm |
-                if imm.bit_and(1.shift_left(12) - 1) == imm && iarg[0] != TMP(Arm64Reg.SP) {
-                    if imm == 0 {
-                        iarg[1] = QbeNull;
-                        new_ins.set_op(.copy);
-                    };
-                    return();
-                };
-            };
-            // ~10KB, meh
-            arg1 := iarg[1];
-            if rtype(arg1) == .RTmp {
-                arg1 := f.get_temporary(arg1);
-                def := arg1.def;
-                if arg1.nuse == 1 && !def.is_null() && def.op() == .mul && arg1.defining_block == blk {
-                    f.fixarg(def.arg&.index(0), .Kl, false, blk);
-                    f.fixarg(def.arg&.index(1), .Kl, false, blk);
-                    iarg[1] = f.new_mem(def.arg&[0], def.arg&[1], 0, 255);
-                    def.set_nop();
-                    return();
-                };
-            };  
-        };
-        // ~1KB, not really worth it
-        if o == .sub && is_int(k1) {
-            if f.get_int(iarg[1]) { imm |
-                if imm.bit_and(1.shift_left(12) - 1) == imm && iarg[0] != TMP(Arm64Reg.SP) {
-                    if imm == 0 {
-                        iarg[1] = QbeNull;
-                        new_ins.set_op(.copy);
-                    };
-                    return();
-                };
-            };
-        };
-        if o == .rotl {
+        fn rotl() => {
+            new_ins := f.emit(i);
+            iarg := new_ins.arg&;
+            k0 := argcls(i&, 0);
             new_ins.set_op(.rotr);
             width := 1.shift_left(5 + k0.is_wide().int());
             if f.get_int(iarg[1]) { imm |
@@ -314,31 +250,108 @@ fn sel(f: *Qbe.Fn, i: Qbe.Ins, blk: i32) void = {
             f.fixarg(ii.arg&.index(1), k0, false, blk);
             f.fixarg(ii.arg&.index(0), k0, false, blk);
             iarg[1] = r0;
-            return();
         };
-        
-        if (@is(o, .shl, .shr, .sar, .rotr)) {
-            // Since these are done modulo data size, we can fit any constant in the immediate. 
-            if f.get_int(iarg[1]) { _ |
+        fn trace_prev() => {
+            @assert_eq(rtype(i.arg&[0]), .RTmp);
+            f.emit(.load, .Kl, i.to, i.arg&[0], QbeNull);
+        }
+        fn trace_return() => {
+            @assert_eq(rtype(i.arg&[0]), .RTmp);
+            f.emit(.load, .Kl, i.to, i.arg&[0], INT(8));
+        }
+        @default => {
+            new_ins := f.emit(i);
+            iarg := new_ins.arg&;
+            
+            if rtype(i.to) == .RTmp {
+                t := f.get_temporary(i.to);
+                t.def = new_ins;
+            };
+            if is_load(o) && rtype(iarg[0]) == .RTmp {
+                r := fix_memarg(f, new_ins, blk);
+                if rtype(r[]) != .RSlot {
+                    f.fixarg(r, .Kl, false, blk);
+                };
                 return();
             };
-        };
-        if o == .ctz {  // 0b101101011000000000110 is ctz... but it doesn't exist? I guess i don't have FEAT_CSSC?
-            new_ins.set_op(.clz);
-            r := f.newtmp("isel", k0);
-            f.emit(.bitswap, k0, r, iarg[0], QbeNull);
-            iarg[0] = r;
-        };
-        
-        f.fixarg(iarg[1]&, k1, false, blk);
-        
-        if new_ins.op() == .cas0 { 
-            while => new_ins.offset(1).op() != .cas1 {
-                j := new_ins.offset(1);
-                t := new_ins[]; new_ins[] = j[]; j[] = t;
-                new_ins = j;
+            k0 := argcls(i&, 0);
+            k1 := argcls(i&, 1);
+            copy_from_con := i&.op() == .copy && rtype(iarg[0]) == .RCon && !isreg(i.to);
+            if !copy_from_con {
+                f.fixarg(iarg[0]&, k0, false, blk);
             };
-        }
+            if is_store(o) && rtype(iarg[1]) == .RTmp {
+                r := fix_memarg(f, new_ins, blk);
+                if rtype(r[]) != .RSlot {
+                    f.fixarg(r, .Kl, false, blk);
+                };
+                return();
+            };
+            // TODO: do this for sub, etc as wel. this alone makes the compiler go from 2485100 -> 2089352 bytes of code. thats insane.
+            //       this looks branchy but it generates so much less code that its faster even before accounting for it generating better code for itself. 
+            if o == .add && is_int(k1) {
+                // could convert to sub `if off < 0 && off > -4096` but that never happens in self-compile and then would have to add a case to fuse_addr -- Nov 7
+    
+                // ~358KB, amazing! (that was before other addr folding i think, now its less impressive )
+                if f.get_int(iarg[1]) { imm |
+                    if imm.bit_and(1.shift_left(12) - 1) == imm && iarg[0] != TMP(Arm64Reg.SP) {
+                        if imm == 0 {
+                            iarg[1] = QbeNull;
+                            new_ins.set_op(.copy);
+                        };
+                        return();
+                    };
+                };
+                // ~10KB, meh
+                arg1 := iarg[1];
+                if rtype(arg1) == .RTmp {
+                    arg1 := f.get_temporary(arg1);
+                    def := arg1.def;
+                    if arg1.nuse == 1 && !def.is_null() && def.op() == .mul && arg1.defining_block == blk {
+                        f.fixarg(def.arg&.index(0), .Kl, false, blk);
+                        f.fixarg(def.arg&.index(1), .Kl, false, blk);
+                        iarg[1] = f.new_mem(def.arg&[0], def.arg&[1], 0, 255);
+                        def.set_nop();
+                        return();
+                    };
+                };  
+            };
+            // ~1KB, not really worth it
+            if o == .sub && is_int(k1) {
+                if f.get_int(iarg[1]) { imm |
+                    if imm.bit_and(1.shift_left(12) - 1) == imm && iarg[0] != TMP(Arm64Reg.SP) {
+                        if imm == 0 {
+                            iarg[1] = QbeNull;
+                            new_ins.set_op(.copy);
+                        };
+                        return();
+                    };
+                };
+            };
+            
+            if (@is(o, .shl, .shr, .sar, .rotr)) {
+                // Since these are done modulo data size, we can fit any constant in the immediate. 
+                if f.get_int(iarg[1]) { _ |
+                    return();
+                };
+            };
+            if o == .ctz {  // 0b101101011000000000110 is ctz... but it doesn't exist? I guess i don't have FEAT_CSSC?
+                new_ins.set_op(.clz);
+                r := f.newtmp("isel", k0);
+                f.emit(.bitswap, k0, r, iarg[0], QbeNull);
+                iarg[0] = r;
+            };
+            
+            f.fixarg(iarg[1]&, k1, false, blk);
+            
+            if new_ins.op() == .cas0 { 
+                while => new_ins.offset(1).op() != .cas1 {
+                    j := new_ins.offset(1);
+                    t := new_ins[]; new_ins[] = j[]; j[] = t;
+                    new_ins = j;
+                };
+            }
+        };
     };
 }
 

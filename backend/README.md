@@ -43,6 +43,7 @@ You can still print out the ir as human readable text between passes and modify 
   - syscall
     - it handles calling convention differences but you must use the correct magic numbers for the target os/architecture/version.
     - WIP: you can't access carry flag (for error on macos)
+  - walk the call-stack (ie. for printing crash backtraces)
 - Insert raw asm bytes in function bodies with arbitrary input/output/clobber register lists.
   > currently very limited: you pick specific registers, do your own assembling, can't reference symbols.  
   > but it lets you access instructions that we don't know about without calling convention spilling overhead.  

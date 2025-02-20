@@ -441,7 +441,11 @@ fn intrinsic_shim(self: *EmitIr, func: *Func) Ty(Qbe.Ref, Qbe.Ref, Type) = {
     
     _, k0 := self.load_op(arg_ty[0]);
     a0 := self.f.newtmp("a", k0);
-    self.emit(.par, k0, a0, QbeNull, QbeNull);
+    if k0 != .Ke {
+        self.emit(.par, k0, a0, QbeNull, QbeNull);
+    } else {
+        a0 = QbeNull;
+    };
     a1 := QbeNull;
     // :DoFoldInvalidArity 
     // `!= void` makes do_fold() work. it wants to pass extra void args to a #ir function.
@@ -791,8 +795,12 @@ fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) CRes(Qbe.R
                 @match(impl) {
                     fn NewIntrinsic(op) => {
                         arg := arg.items();
-                        p1: Placement = @if(arg.len != 1 && guess_can_assign(arg[1]&), .Scalar, .ScalarTransient);
-                        a0 := @try(self.compile_expr(arg[0]&, p1)) return;
+                        a0 := if arg[0].ty == void {
+                            QbeNull
+                        } else {
+                            p1: Placement = @if(arg.len != 1 && guess_can_assign(arg[1]&), .Scalar, .ScalarTransient);
+                            @try(self.compile_expr(arg[0]&, p1)) return
+                        };
                         // the || void is for :DoFoldInvalidArity
                         a1 := if(arg.len == 1 || arg[1].ty == void, => QbeNull, => @try(self.compile_expr(arg[1]&, .ScalarTransient)) return);
                         return(self.emit_intrinsic_new(op, p, @slice(a0, a1), caller, f_ty.ret));

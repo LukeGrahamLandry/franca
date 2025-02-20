@@ -51,6 +51,7 @@ frame #211: 0x000000010016dc24 x.out`call_dynamic_values__1507 + 897
 ```
 so it's looping calling itself because it thinks its not compiled or soemthing idk man. 
 - fixed exporting symbols so you can make dylib without -legacy
+- stack walking instructions and use them to show a backtrace when you panic at comptime. 
 
 ## (Feb 17)
 
