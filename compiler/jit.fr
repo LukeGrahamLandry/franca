@@ -77,7 +77,10 @@ fn wait_for_symbol(shared: *CodegenShared, id: u32) rawptr = {
     };
     
     @if(use_threads) pthread_mutex_lock(shared.m.icache_mutex&).unwrap();
-    c := get_jit_addr(shared.m, id); // @panic("missing symbol %", shared.m.str(id));
+    c := rawptr.zeroed();
+    use_symbol(shared.m, id) { symbol | 
+        c = symbol.jit_addr;
+    };
     shared.m.bump_dirty_new(false);
     @if(use_threads) pthread_mutex_unlock(shared.m.icache_mutex&).unwrap();
     c
@@ -360,6 +363,7 @@ fn bump_dirty_new(m: *QbeModule, lock: bool) void = {
         clear_instruction_cache(u8.raw_from_ptr(start), ptr_diff(start, end));
         m.start_of_executable_stubs = end;
     };
+    fence();
     @if(use_threads && lock) pthread_mutex_unlock(m.icache_mutex&).unwrap();
 }
 
@@ -371,13 +375,17 @@ fn save_in_got(self: *SelfHosted, fid: FuncId, addr: rawptr) void = {
         @debug_assert(s.got_lookup_offset != -1, "save_in_got missing slot for %", s.name);
         got := m.segment_address(.ConstantData, s.got_lookup_offset);  // :GotAtConstantDataBase 
         got := ptr_cast_unchecked(u8, rawptr, got);
+        fence();
         got[] = addr;
+        fence();
     };
 }
 
+// TODO: it's a massive problem if a jitted program starts threads and calls this on one of them. :FUCKED
 // TODO: it would be nice if i had the arguments here for reporting what call you actually tried to make. 
 //       but this way will be even better once i can lazily compile it and just lean on the backend to make the args flow through. 
 report_called_uncompiled_or_just_fix_the_problem :: @as(rawptr) fn(self: *SelfHosted, fid: FuncId) rawptr = {
+    fence();
     result := rawptr_from_int(0);
     // You want to allow a shim being called from an extern function so we can't assume we have a valid context here. (ie. examples/farm_game.fr has this problem). 
     push_zeroed_dynamic_context {
@@ -389,6 +397,11 @@ report_called_uncompiled_or_just_fix_the_problem :: @as(rawptr) fn(self: *SelfHo
             abort()
         };
         
+        m := self.comptime_codegen.m;
+        @if(use_threads) {
+            //pthread_mutex_lock(m.icache_mutex&).unwrap();
+            //pthread_mutex_unlock(m.icache_mutex&).unwrap();
+        };
         //@if(TRACE_SHIMS)
         //@println("called shim for % %", fid, self.log_name(fid));
         
@@ -401,20 +414,19 @@ report_called_uncompiled_or_just_fix_the_problem :: @as(rawptr) fn(self: *SelfHo
             // TODO: this probably needs to be inside the push_context because it might hit an inner poll_in_place,
             //       but that's sad because most of the time its just an array lookup.  -- Nov 25
             if self.get_fn_callable(fid) { addr | 
-                m := self.comptime_codegen.m;
-                this_is_shim := false; 
+                //this_is_shim := false; 
                 //@println("% % %", self.pool.get(func.name), this_is_shim, self.comp().log(func));
                 
-                id := self.comptime_jit_symbol_id(fid);
-                use_symbol(m, id) { s | 
-                    this_is_shim = this_is_shim || s.jit_addr.identical(s.shim_addr);
-                };
+                //id := self.comptime_jit_symbol_id(fid);
+                //use_symbol(m, id) { s | 
+                    //this_is_shim = this_is_shim || s.jit_addr.identical(s.shim_addr);
+                //};
                 // It's been compiled since last we checked so just use that. 
-                if !this_is_shim {
+                //if !this_is_shim {
                     //println(self.pool.get(func.name));
                     save_in_got(self, fid, addr);
                     result = addr;
-                };
+                //};
                 //@println("%", self.comp().log(self.get_function(fid)));
             };
             @if(TRACE_SHIMS && result.is_null()) @println("- wrong!");
@@ -431,9 +443,9 @@ report_called_uncompiled_or_just_fix_the_problem :: @as(rawptr) fn(self: *SelfHo
         if result.is_null() {
             mark := mark_temporary_storage();
             @if(TRACE_SHIMS) @println("- uncompiled");
+            //@println("uncompiled shim for % %", fid, self.log_name(fid));
             
             @debug_assert(!self.comptime_codegen.no_more_functions, "no_more_functions is set so there is no worker waiting for us!");
-            
             // :ugly
             first := true;
             addr := self.poll_in_place(rawptr) { () Maybe(rawptr) |
@@ -456,6 +468,7 @@ report_called_uncompiled_or_just_fix_the_problem :: @as(rawptr) fn(self: *SelfHo
                 r(Suspend = self.wait_for(Jit = fid))
             };
             result = self.unwrap_report_error(rawptr, addr);
+            //@println("made shim for % % %", fid, self.log_name(fid), result);
             save_in_got(self, fid, result);
             reset_temporary_storage(mark);
         };
@@ -477,14 +490,11 @@ fn get_fn_callable(self: *SelfHosted, fid: FuncId) ?rawptr = {
         self.update_pending_took_pointer();
     };
     c := wait_for_symbol(self.comptime_codegen, id);
-    @if(use_threads) pthread_mutex_lock(m.icache_mutex&).unwrap();
     if !c.is_null() {
         if func.get_flag(.TookPointerValue) || ENABLE_TRACY || TRACE_CALLS {
             self.created_jit_fn_ptr_value(fid, c.int_from_rawptr());
         };
         result = (Some = c);
     };
-    self.bump_dirty_new(false);  // TODO: we just did this in wait_for_symbol so should be redundant?
-    @if(use_threads) pthread_mutex_unlock(m.icache_mutex&).unwrap();
     result
 }

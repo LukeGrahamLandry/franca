@@ -1,8 +1,7 @@
 - TODO: deal with `CodegenEntry:Bounce` on wasm
 
-##
+## (Feb 19/20)
 
-- TODO: threading bug on x64
 - floats are different on x64
 
 	R1 =l copy R17
@@ -24,6 +23,34 @@
 	and i was like sure whatever, i'll just do the right thing for storel even tho that seems imprecise. 
 	but then adding the slots optimisation later was bad new bears because suddenly we care about knowing
 	the classes of everything and i didn't think to add in that hack to make .copy work as cast. 
+
+- on x64 i randomly get stuck infinitely recursing on garbage instructions. 
+which sounds a lot like you just need to call `__clear_cache` but apparently you shouldn't have to on x64 and 
+it compiles to nothing: `https://github.com/llvm/llvm-project/blob/main/compiler-rt/lib/builtins/clear_cache.c#L63`
+the problem goes away when running with `use_threads :: false` 
+- sprinkle some mutex around 
+- add `assert` instruction so you can easily crash without manually making a bunch of blocks in the frontend. 
+- simplify isel/emit of cas. make it work when you need to fixarg(). 
+- new flavour of debug mode where you make every 4/8 byte store into a cas that crashes if it fails. 
+currently works on x64 but not arm which is funny. 
+but doesn't help my problem which is very strange. 
+- fix dynalloc.ssa test to not get constant folded to nothing. 
+remove some asserts in emit(). 
+- start_thread wasn't using the stack i allocated because i passed something that wasn't page aligned 
+to pthread_attr_setstack
+- ok wait only the top stack frame is garbage and the repeated one is different. 
+
+```
+frame #0: 0x000000013ac66fff
+frame #1: 0x0000000138c85399
+[... same a billion times]
+frame #208: 0x0000000138c85399 ; via create_jit_shim
+frame #209: 0x0000000138c853bb 
+frame #210: 0x0000000138c853d5 ; via create_dyncall_shim
+frame #211: 0x000000010016dc24 x.out`call_dynamic_values__1507 + 897
+```
+so it's looping calling itself because it thinks its not compiled or soemthing idk man. 
+- fixed exporting symbols so you can make dylib without -legacy
 
 ## (Feb 17)
 

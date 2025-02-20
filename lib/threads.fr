@@ -5,10 +5,8 @@ ThreadAttr :: @struct(sig: i64, opaque: Array(u8, 56));
 PMutex :: @struct(sig: i64, opaque: Array(u8, 56));
 PCond :: @struct(sig: i64, opaque: Array(u8, 40));
 
-NEXT_THREAD_ID :: @static(i64) 1; // TODO: of all the things you'd want to be thread safe...
-
 fn start_thread($T: Type, callee: @FnPtr(userdata: *T) void, userdata: *T) Thread #generic = {
-    stack := page_allocator.alloc(u8, 1.shift_left(23));
+    stack := page_allocator.alloc(u8, 1.shift_left(25));
     callee := ptr_cast_unchecked(@type callee, @FnPtr(rawptr) void, callee&)[]; // TODO: make this less painful
     xx := start_thread(stack, callee, T.raw_from_ptr(userdata));
     or xx {
@@ -16,11 +14,12 @@ fn start_thread($T: Type, callee: @FnPtr(userdata: *T) void, userdata: *T) Threa
     }
 }
 
+// this uses the first page of `stack` for the dynamic context. 
 fn start_thread(stack: []u8, callee: @FnPtr(userdata: rawptr) void, userdata: rawptr) Result(Thread, void) = {
     @assert(query_context_is_implicit(), "tried to start thread but compiled using static context which is not thread safe.");
     out := Thread.zeroed();
     attr := @uninitialized ThreadAttr;
-    
+    macos_page_size :: 16384;
     // TODO: put it at the end and offset forward to give the thread less memory so the stack grows left away from the context. instead of left towards the context. 
     // TODO: do we trust it to not stomp in my stuff in between? 
     context_src: []u8 = (ptr = u8.ptr_from_raw(get_dynamic_context()), len = size_of_dynamic_context);
@@ -29,17 +28,19 @@ fn start_thread(stack: []u8, callee: @FnPtr(userdata: rawptr) void, userdata: ra
     ptr_cast_unchecked(u8, rawptr, stack.ptr)[] = userdata;
     ptr_cast_unchecked(u8, @type callee, stack.ptr.offset(8))[] = callee;
     reserved := 16 + size_of_dynamic_context;
-    stack_low := stack.ptr.offset(reserved);
-    @assert_eq(u8.int_from_ptr(stack_low).mod(16), 0, "start_thread unaligned stack");
+    stack_low := stack.ptr.offset(macos_page_size);
+    @debug_assert_lt(reserved, macos_page_size);
+    @assert_eq(u8.int_from_ptr(stack_low).mod(16), 0, "start_thread unaligned stack");  // TODO: return error
     
     new_context := u8.raw_from_ptr(stack.ptr.offset(16));
-    // TODO: cas
-    DefaultContext.ptr_from_raw(new_context)[].thread_index = NEXT_THREAD_ID[];
-    NEXT_THREAD_ID[] += 1;
+    
+    NEXT_THREAD_ID :: @static(i64) 1;
+    ti := DefaultContext.ptr_from_raw(new_context)[].thread_index&;
+    ti[] = i64.atomic_inc(NEXT_THREAD_ID);
     
     // TODO: check PTHREAD_STACK_MIN
-    pthread_attr_init(attr&); // TODO: check result
-    pthread_attr_setstack(attr&, stack_low, stack.len - reserved);  // TODO: check result
+    @try(pthread_attr_init(attr&)) return;
+    @try(pthread_attr_setstack(attr&, stack_low, stack.len - macos_page_size)) return; 
     ok := pthread_create(out&, attr&, franca_runtime_init_thread, new_context);
     if ok.is_ok() {
         return(Ok = out);
@@ -59,6 +60,45 @@ franca_runtime_init_thread :: fn(franca_userdata: rawptr) void = {
     t&.deinit();
     // TODO: should we have them pass us the allocator so we can free our stack? 
 };
+
+fn atomic_inc($T: Type, p: *T) T #inline #generic = {
+    prev := p[];
+    dowhile {
+        old  := prev;
+        prev = T.cas(p, old, old + 1);
+        prev != old
+    };
+    prev
+}
+
+fn cas($T: Type, p: *T, old: T, new: T) T #inline #generic = {
+    wide :: @switch(size_of(T)) {
+        @case(4) => false;
+        @case(8) => true;
+        @default => panic("invalid size for compare and swap");
+    };
+    @if(::has_feature("@franca/bitops"), {
+        // TODO: sad that i don't want to use Qbe.Cls here
+        @if(wide, {
+            part0 :: fn(p: *T) void #ir(.cas0, .Kl);
+            part1 :: fn(old: T, new: T) T #ir(.cas1, .Kl);
+            part0(p);
+            part1(old, new)
+        }, {
+            part0 :: fn(p: *T) void #ir(.cas0, .Kw);
+            part1 :: fn(old: T, new: T) T #ir(.cas1, .Kw);
+            part0(p);
+            part1(old, new)
+        })
+    }, {
+        // THIS IS CLEARLY NOT OK. it goes away when we :UpdateBoot
+        x := p[];
+        if x == old {
+            p[] = new;
+        };
+        x
+    })
+}
 
 fn pthread_attr_init(out: *ThreadAttr) voidResult #libc;
 fn pthread_create(out: *Thread, attr: *ThreadAttr, callee: @FnPtr(userdata: rawptr) void, userdata: rawptr) voidResult #libc #threads;

@@ -37,6 +37,7 @@ QParseCtx :: @struct(
     // TODO: use this for reporting more errors that are only allowed when used as a template. 
     allow_unterminated_block := false, // for comptime templates
     types: HashMap(Str, i64),
+    m: *QbeModule,
 );
 
 // :ThreadSafety
@@ -65,6 +66,7 @@ fn parse_top_level(m: *QbeModule, src: Str, yield_data: @FnPtr(*Qbe.Dat) void, y
         if self.eat("function") {
             self.blocks = init(temp());
             self.tmps = init(temp());
+            self.f = temp().box(Qbe.Fn);  // TODO: shouldn't really need to do this? but debug_stomp_after breaks otherwise. 
             self.f.default_init(m);
             self.blk = Qbe.Blk.ptr_from_int(0);
             
@@ -97,6 +99,9 @@ fn parse_top_level(m: *QbeModule, src: Str, yield_data: @FnPtr(*Qbe.Dat) void, y
             if thread { 
                 return(Err = "I don't support thread locals. use real qbe instead. sorry");
             };
+            self.f = temp().box(Qbe.Fn);  // TODO: shouldn't really need to do this? but debug_stomp_after breaks otherwise. 
+            self.f.default_init(m);
+            
             @try(self.parse_data(export, yield_data)) return;
             continue();
         };
@@ -142,6 +147,7 @@ fn init(m: *QbeModule, src: Str) QParseCtx = (
     f = temp().box_zeroed(Qbe.Fn),
     out = temp(),
     types = init(m.forever&.borrow()), // see :ThreadSafety comment above!
+    m = m,
 );
 
 fn parse_body(self: *QParseCtx) Result(Ty(*Qbe.Fn, []Replacement), Str) = {
@@ -786,7 +792,7 @@ fn parse_type(self: *QParseCtx) Result(void, Str) = {
         return(Err = "expected '=' after :TypeName");
     };
     
-    m := self.f.globals;
+    m := self.m;
     t := m.number_of_types;
     m.number_of_types += 1;
     m.types.grow(m.number_of_types);  // :ThreadSafety

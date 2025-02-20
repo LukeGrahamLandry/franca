@@ -218,12 +218,6 @@ fn sel(f: *Qbe.Fn, i: Qbe.Ins, blk: i32) void = {
     };
     o := i&.op();
     if o != .nop {
-        // TODO: this is wrong because of fixarg
-        if i&.op() == .cas1 {
-            @debug_assert(i.arg&[1].rtype() == .RTmp, "TODO: deal with fixarg cas");
-            f.emit(.copy, .Kw, QbeNull, i.arg&[1], QbeNull);  // :FalseCasDep
-        };
-        
         if o == .ones { 
             // you can only popcnt on a simd/float register
             f_in := f.newtmp("isel", .Kd);
@@ -324,6 +318,7 @@ fn sel(f: *Qbe.Fn, i: Qbe.Ins, blk: i32) void = {
         };
         
         if (@is(o, .shl, .shr, .sar, .rotr)) {
+            // Since these are done modulo data size, we can fit any constant in the immediate. 
             if f.get_int(iarg[1]) { _ |
                 return();
             };
@@ -336,6 +331,14 @@ fn sel(f: *Qbe.Fn, i: Qbe.Ins, blk: i32) void = {
         };
         
         f.fixarg(iarg[1]&, k1, false, blk);
+        
+        if new_ins.op() == .cas0 { 
+            while => new_ins.offset(1).op() != .cas1 {
+                j := new_ins.offset(1);
+                t := new_ins[]; new_ins[] = j[]; j[] = t;
+                new_ins = j;
+            };
+        }
     };
 }
 

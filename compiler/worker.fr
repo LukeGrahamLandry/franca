@@ -11,7 +11,10 @@ fn main_thread_pump(comp: CompCtx, shared: *CodegenShared, fns: []FuncId) void =
     when := @if(shared.m.goal.type == .JitOnly, ExecStyle.Jit, .Aot);
     // TODO: really you want to mark them export
     for fns { f |
-        shared.m.get_symbol_info(shared.m.intern(comp.fmt_fn_name(f)))[].referenced = true;
+        id := shared.m.intern(comp.fmt_fn_name(f));
+        use_symbol(shared.m, id) { s |
+            s.referenced = true;
+        };
         // TODO
         //comp.get_function(f).set_flag(.Export);
     };
@@ -86,9 +89,21 @@ fn main_thread_pump(comp: CompCtx, shared: *CodegenShared, fns: []FuncId) void =
         };
     };
     
-    // TODO: not for dynamic
     if when == .Aot && fns.len == 1 && !dynamiclib {
         wrap_with_runtime_init(comp, shared, fns[0], shared.bouba_idx&);
+    };
+    
+    if dynamiclib {
+        for fns { f |
+            func := comp.get_function(f);
+            real_name := comp.get_string(func.name);
+            lnk := temp().box(Qbe.Lnk);
+            lnk.id = shared.m.intern(real_name);
+            lnk.export = true;
+            entry := shared.bouba_acquire(shared.bouba_idx&);
+            entry.task = (Bounce = (lnk = lnk, target = shared.m.intern(comp.fmt_fn_name(f))));
+            shared.enqueue_task(entry);
+        };
     };
     
     @if(use_threads) shared.join_codegen_thread();
@@ -138,7 +153,6 @@ codegen_thread_main :: fn(shared: *CodegenShared) void = {
     @if(shared.m.goal.type == .JitOnly) apple_thread_jit_write_protect(false);  // :JitMemProtect this thread wants to write
     
     idx := 0;
-    @debug_assert(use_threads);
     m := shared.progress_m&;
     pthread_mutex_lock(m).unwrap();
     loop {
@@ -248,6 +262,7 @@ fn do_codegen(m: *QbeModule, entry: *CodegenEntry) void = {
                     push_fixup(m, s, fix);
                 };
                 @debug_assert(s.got_lookup_offset != -1);
+                fence();
                 //@println("shim -> % slot=%", s.name, s.got_lookup_offset);
             };
         }

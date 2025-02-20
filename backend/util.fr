@@ -48,14 +48,16 @@ fn slice_pending_scratch(f: *Qbe.Fn) []Qbe.Ins = {
 }
 
 fn copy_instructions_from_scratch(f: *Qbe.Fn, b: *Qbe.Blk) void = {
-	idup(b, f.scratch_next(), f.len_scratch());
-	f.globals.curi[] = f.scratch_start(); 
+    @assert_ge(f.len_scratch(), 0, "too many instructions");
+    idup(b, f.scratch_next(), f.len_scratch());
+    f.globals.curi[] = f.scratch_start(); 
 }
 
 // TODO: i should really just use a different version of emit() so this part could just be a memcpy
 // hey i heard you like long function names...
 fn copy_instructions_from_scratch_reversed_which_means_forwards(f: *Qbe.Fn, b: *Qbe.Blk) void = {
     n := f.len_scratch();
+    @assert_ge(n, 0, "too many instructions");
     b.nins = n.trunc();
     if(n == 0, => return());
     if b.ins.first.is_null() {
@@ -94,9 +96,7 @@ fn len_scratch(f: *Qbe.Fn) i64 #inline =
 // TODO: we rely on globals.curi pointing to the last inst we emitted (in isel) :LookAtLastInst
 fn emit(f: *Qbe.Fn, op: Qbe.O, k: Qbe.Cls, to: Qbe.Ref, arg0: Qbe.Ref, arg1: Qbe.Ref) *Qbe.Ins = {
     i := f.globals.curi;
-    if i[].identical(f.globals.insb.as_ptr()) {
-        @panic("emit, too many instructions");
-    };
+    @debug_assert(!i[].identical(f.globals.insb.as_ptr()), "emit, too many instructions");
     i[] = i[].offset(-1);
     i[][] = make_ins(op, k, to, arg0, arg1);
     i[]
@@ -504,7 +504,8 @@ fn vgrow(vpr: rawptr, len: i64) void = {
 fn debug_zero_owned_memory(v: *QListHeader) void = {
     len := v.cap * v.esz;
     p := ptr_cast_unchecked(@type v, u8, v.offset(1));
-    //memset(u8.raw_from_ptr(p), 0, len);
+    JUNK :: 0xAB;
+    //memset(u8.raw_from_ptr(p), JUNK, len);
 }
 
 fn vfree(p: rawptr) void = {
@@ -612,22 +613,10 @@ QLIST_DOUBLE_FREE :: 0x69696969;
 fn intern(m: *QbeModule, s: Str) u32 = {
     h := hash(s).bit_and(IMask.trunc());
     b := m.symbols.index(h.zext());
-    // :ThreadSafety
-    n := b.n;
-    @if(use_threads) {
-        locked_by_me := LOCKED_BASE.bit_or(context(DefaultContext)[].thread_index.trunc());
-        @debug_assert(n != locked_by_me, "already locked by this thread");
-        while => n.bit_and(LOCKED_BASE) != 0 {
-            // If this happened a lot you'd want to use something less dumb.
-            // But you get here ~3 times when self compiling so it doesn't matter yet -- Dec 25
-            usleep(1);
-            n = b.n;
-        };
-        b.n = locked_by_me;
-    };
+    n := m.lock_bucket(b);
     range(0, n.zext()) { i |
         if s == b.data[i].name {
-            b.n = n;
+            b.n = n;  // unlock
             return(h + i.trunc().shift_left(IBits));
         }
     };
@@ -656,7 +645,7 @@ fn intern(m: *QbeModule, s: Str) u32 = {
     data.offset = -1;
     data.wasm_type_index = -1;
     
-    b.n = n + 1;
+    b.n = n + 1;  // unlock
     id := h + n.shift_left(IBits);
     id
 }
@@ -670,23 +659,27 @@ fn use_symbol(m: *QbeModule, id: u32, $body: @Fn(s: *SymbolInfo) void) void = {
     @debug_assert(!m.is_null(), "null module???");
     bid: i64 = id.bit_and(IMask).zext();
     bucket := m.symbols[bid]&;
-    
-    old := bucket.n;
-    @if(use_threads) {
-        // :ThreadSafety
-        thread := context(DefaultContext)[].thread_index;
-        locked_by_me := LOCKED_BASE.bit_or(thread.trunc());
-        @debug_assert(old != locked_by_me, "use_symbol but already locked by this thread id=%, thread=%", id, thread);
-        while => old.bit_and(LOCKED_BASE) != 0 {
-            usleep(1);
-            old = bucket.n;
-        };
-        bucket.n = locked_by_me;
-    };
+    old := m.lock_bucket(bucket);
     idx := id.shift_right_logical(IBits);
     symbol := bucket.data.index(idx.zext());
     body(symbol);
-    bucket.n = old;
+    bucket.n = old;  // unlock
+}
+
+fn lock_bucket(m: *QbeModule, bucket: *SymbolBucket) u32 #inline = {
+    @if(use_threads, {
+        thread := context(DefaultContext)[].thread_index;
+        locked_by_me := LOCKED_BASE.bit_or(thread.trunc());
+        @debug_assert_ne(bucket.n, locked_by_me, "use_symbol but already locked by this thread=%", thread);
+        loop {
+            n := bucket.n;
+            locked := n.bit_and(LOCKED_BASE) != 0;
+            if !locked && u32.cas(bucket.n&, n, locked_by_me) == n {
+                return(n);
+            };
+            usleep(1);
+        }
+    }, bucket.n)
 }
 
 // :ThreadSafety you can't call this one
@@ -1005,7 +998,7 @@ fn argcls_eval(o: Qbe.O, k: Qbe.Cls, argument_index: i64) Qbe.Cls = {
     if o == .Oxxx {
         return(.Ke); // unreachable. this is just so it can go in the table. 
     };
-    if (@is(o, .asm , .syscall)) {
+    if (@is(o, .asm , .syscall, .assert)) {
         return(if(n == 0, => .Kw, => .Kx));
     };
 

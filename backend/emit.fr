@@ -117,15 +117,6 @@ fn make_exec(self: *QbeModule) void = {
     self.start_of_writable_code = end[];
 }
 
-fn get_jit_addr(self: *QbeModule, id: u32) rawptr = {
-    assert(!self.fixups_locked, "you can't get a jit pointer after emitting for aot becuase it stomps data with relocation info.");
-    result := rawptr.zeroed();
-    use_symbol(self, id) { symbol | 
-        result = symbol.jit_addr;
-    };
-    result
-}
-
 fn get_addr(self: *QbeModule, id: u32) ?Ty(rawptr, i64) = {
     assert(!self.fixups_locked, "you can't get a jit pointer after emitting for aot becuase it stomps data with relocation info.");
     result: ?Ty(rawptr, i64) = .None;
@@ -254,7 +245,9 @@ fn emit_data_to_segment(self: *QbeModule, dat: *Qbe.Dat, seg: SegmentType) void 
                     // Since we need the absolute address in memory, even local symbols need a relocation. 
                     push_fixup(self, symbol, (patch_at = next[], type = (DataAbsolute = (increment = dat.u.ref.off))));
                     if self.goal.arch != .wasm32 && self.goal.type == .Relocatable && !symbol.local_but_marked_for_relocation {
+                        @if(use_threads) pthread_mutex_lock(self.intern_mutex&).unwrap();
                         self.local_needs_reloc&.push(id);
+                        @if(use_threads) pthread_mutex_unlock(self.intern_mutex&).unwrap();
                         symbol.local_but_marked_for_relocation = true;
                     };
                 };
@@ -297,31 +290,30 @@ fn fence() void #asm #aarch64 = (
     ret()
 );
 
+// does this do anything? idk man. 
 fn fence() void #asm #x86_bytes = (fn(out) = @asm_x64(
-    PrimaryOp.Ret,PrimaryOp.Ret
+     0x0F, 0xAE, 0xF0, // MFENCE
+    // 0x0F, 0x01, 0xE8, // SERIALIZE rosetta no like?
+    
+    //encode_bin(PrimaryOp.MovReg, X86Reg.r11, X86Reg.rbx),
+    //encode_imm(X86Reg.rax, 0), 0x0F, 0xA2, // CPUID
+    //encode_bin(PrimaryOp.MovReg, X86Reg.rbx, X86Reg.r11), // restore
+    
+    PrimaryOp.Ret
 ) out);
 
 fn finish_function(m: *QbeModule, dest: []u8, name_id: u32) void #inline = {
-    if m.got_indirection_instead_of_patches && m.goal.type == .JitOnly && m.goal.arch == .aarch64 {
-        // :SLOW
-        @if(use_threads) pthread_mutex_lock(m.icache_mutex&).unwrap();
-        
-        m.last_function_end = dest.ptr.offset(dest.len);
-        use_symbol(m, name_id) { s |
-            s.size = dest.len;
-        };
-        // sys_dcache_flush
-        clear_instruction_cache(u8.raw_from_ptr(dest.ptr), dest.len);
-        fence();
-        
-        //clear_instruction_cache(u8.raw_from_ptr(dest.ptr), dest.len);
-        @if(use_threads) pthread_mutex_unlock(m.icache_mutex&).unwrap();
-    } else {
-        m.last_function_end = dest.ptr.offset(dest.len);
-        use_symbol(m, name_id) { s |
-            s.size = dest.len;
-        };
+    // :SLOW
+    @if(use_threads) pthread_mutex_lock(m.icache_mutex&).unwrap();
+    m.last_function_end = dest.ptr.offset(dest.len);
+    use_symbol(m, name_id) { s |
+        s.size = dest.len;
     };
+    if m.got_indirection_instead_of_patches && m.goal.type == .JitOnly && m.goal.arch == .aarch64 {
+        clear_instruction_cache(u8.raw_from_ptr(dest.ptr), dest.len);
+    };
+    fence();
+    @if(use_threads) pthread_mutex_unlock(m.icache_mutex&).unwrap();
 }
 
 fn align_to(s: *SegmentCursor, align: i64) void = {
@@ -414,7 +406,9 @@ fn do_jit_fixups(self: *QbeModule, id: u32, segment: SegmentType, final_offset: 
             } else {
                 // you still care because the static linker wants to move things around. :track_got_reloc
                 if !symbol.local_but_marked_for_relocation {
+                    @if(use_threads) pthread_mutex_lock(self.intern_mutex&).unwrap();
                     self.local_needs_reloc&.push(id);
+                    @if(use_threads) pthread_mutex_unlock(self.intern_mutex&).unwrap();
                     symbol.local_but_marked_for_relocation = true;
                 };
             }; 
@@ -451,8 +445,10 @@ fn ensure_got_slot(self: *QbeModule, symbol: *SymbolInfo, jit_address: rawptr) ?
     new_got_reloc: ?Fixup = .None;
     if symbol.got_lookup_offset == -1 {
         // need to reserve a new __got entry.  :GotAtConstantDataBase 
+        @if(use_threads) pthread_mutex_lock(self.icache_mutex&).unwrap();
         symbol.got_lookup_offset = self.got&.len();
         got := self.got&.reserve(rawptr);  // :TodoErrorMessage
+        @if(use_threads) pthread_mutex_unlock(self.icache_mutex&).unwrap();
         if self.debug["T".char()] {
             @fmt_write(self.debug_out, "# reserve __got[%] = %\n", symbol.got_lookup_offset / 8, symbol.name);
         };

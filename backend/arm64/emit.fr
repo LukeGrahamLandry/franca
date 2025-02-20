@@ -57,21 +57,21 @@ fn fixup_arm64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_rel
                 // > but i we care too much about security to do that any more. 
                 if symbol.offset == -1 {
                     insane_caches := use_threads && self.goal.type == .JitOnly && self.goal.os == .macos;
-                    @if(insane_caches) pthread_mutex_lock(self.icache_mutex&).unwrap();
                     
                     // create a new trampoline in the __stubs section. 
-                    code := self.segments&.index(.Code);
+                    @if(insane_caches) pthread_mutex_lock(self.icache_mutex&).unwrap();
                     symbol.offset = self.stubs&.len() + COMMANDS_SIZE_GUESS;
                     trampoline := self.stubs&.reserve(Array(u32, 3));
+                    @if(insane_caches) pthread_mutex_unlock(self.icache_mutex&).unwrap();
                     reg := Arm64Reg.IP0.raw() - 1; // x16
                     new_got_reloc[] = load_from_got(self, symbol, reg, trampoline.items().slice(0, 2), address).or_else(=> new_got_reloc[]);
                     trampoline[2] = br(reg, 0);
                     
                     if insane_caches {
+                        code := self.segments&.index(.Code);
                         // sys_dcache_flush
                         clear_instruction_cache(u8.raw_from_ptr(code.mmapped.ptr).offset(symbol.offset), size_of(@type trampoline[]));
                         fence();
-                        pthread_mutex_unlock(self.icache_mutex&).unwrap();
                     };
                 };
                 stub_trampoline := self.segment_address(.Code, symbol.offset);
@@ -854,13 +854,22 @@ fn emitins(self: *ArmState, i: *Qbe.Ins, b: *Qbe.Blk) void = {
         fn cas1() => {
             icas0, icas1 := find_cas(i, b);
             p, old_in, new, res := (icas0.arg&[0], icas1.arg&[0], icas1.arg&[1], icas1.to);
-            @debug_assert_ne(old_in, new, "cas stomp");
-            @debug_assert_ne(res, new, "cas stomp.");
-            if old_in != res {
-                ii := make_ins(.copy, icas1.cls(), res, old_in, QbeNull);
-                self.emitins(ii&, b);
-            };
-            self.inst(@bits(0b1, si, 0b0010001, 0b0, 0b1, @as(u5) res.int_reg(), 0b0, 0b11111, @as(u5) p.int_reg(), @as(u5) new.int_reg())); 
+            // This is painful because the instruction reads and writes to the same register. 
+            // I don't know a sane way of expressing that constraint for rega().
+            // what you want to do is `if(old_in != res) copy(res <- old_in);` like you do for x64, 
+            // but it's hard because there's a bunch of arguments. so what if p/new is also in res? 
+            r17 := TMP(arm_scratch_int);
+            { ins := make_ins(.copy, icas1.cls(), r17, old_in, QbeNull); self.emitins(ins&, b); };
+            rs, rt, rn := (@as(u5) r17.int_reg(), @as(u5) new.int_reg(), @as(u5) p.int_reg());
+            self.inst(@bits(0b1, si, 0b0010001, 0b0, 0b1, rs, 0b0, 0b11111, rn, rt)); 
+            { ins := make_ins(.copy, icas1.cls(), res, r17, QbeNull); self.emitins(ins&, b); };
+        }
+        fn assert() => {
+            // TODO: change the direction of the jump and only have one fail place. 
+            i[] = make_ins(.acmp, .Kw, QbeNull, a0, QbeConZero);
+            self.emitins(i, b);
+            self.inst(b_cond(s_trunc(2, 19), .NE));
+            self.inst(brk(0x9801));
         }
         @default => {
             printfn(self.f, self.m.debug_out);
@@ -871,7 +880,7 @@ fn emitins(self: *ArmState, i: *Qbe.Ins, b: *Qbe.Blk) void = {
 
 // TODO: silly
 fn find_cas(i: *Qbe.Ins, b: *Qbe.Blk) Ty(*Qbe.Ins, *Qbe.Ins) = {
-    // :FalseCasDep might not be directly the next instruction because we insert a copy 
+    // might not be directly the next instruction if we had to fixarg
     @match(i.op()) {
         fn cas0() => {
             icas1 := i;

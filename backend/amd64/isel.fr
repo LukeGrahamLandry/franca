@@ -17,9 +17,7 @@
  *            dce should be moved out...
  */
 
-/* instruction selection
- * requires use counts (as given by parsing)
- */
+/* instruction selection requires use counts */
 fn amd64_isel(f: *Qbe.Fn) void = {
     f.assign_alloc_slots();
     // In this pass, if `t.slot != -1` then `TMP(t) == addr SLOT(t.slot)`
@@ -41,10 +39,10 @@ fn amd64_isel(f: *Qbe.Fn) void = {
         };
         seljmp(b, f);
         for_insts_rev b { i |
-            if i[].op() == .sel1 {
-                selsel_amd64(f, b, i[]);
-            } else {
-                sel(i[][], f);
+            @match(i[].op()) {
+                fn sel1() => selsel_amd64(f, b, i[]);
+                fn cas1() => sel_cas_amd64(f, b, i[]);
+                @default  => sel(i[][], f);
             };
         };
         f.copy_instructions_from_scratch(b);
@@ -125,12 +123,16 @@ fn fixarg(r: *Qbe.Ref, k: Qbe.Cls, i: *Qbe.Ins, f: *Qbe.Fn) void = {
             f.emit(.addr, .Kl, r1, SLOT(s), QbeNull);
         };
         @if(!(is_store(o) && r.identical(i.arg&.index(1)))
-        && !is_load(o) && o != .call && f.is_symbol(r0)) => {
+        && !is_load(o) && o != .cas0 && o != .call && f.is_symbol(r0)) => {
             r1 = f.newtmp("isel", .Kl);
             f.emit(.addr, .Kl, r1, r0, QbeNull);
         };
         // no immediate allowed for selCC
         @if(o.is_sel_flag() && rtype(r[]) == .RCon) => {
+            r1 = f.newtmp("isel", i.cls());
+            f.emit(.copy, i.cls(), r1, r[], QbeNull);
+        };
+        @if(o == .cas1 && rtype(r[]) == .RCon) => {
             r1 = f.newtmp("isel", i.cls());
             f.emit(.copy, i.cls(), r1, r[], QbeNull);
         };
@@ -529,10 +531,37 @@ fn sel(i: Qbe.Ins, f: *Qbe.Fn) void = {
     i1 := f.globals.curi[];
     
     while => i0.in_memory_after(i1) {
-        @debug_assert(rslot(i0.arg&[0], f) == -1);
-        @debug_assert(rslot(i0.arg&[1], f) == -1);
+        @debug_assert(rslot(i0.arg&[0], f) == -1, "expected no slot 0");
+        @debug_assert(rslot(i0.arg&[1], f) == -1, "expected no slot 1");
         i0 = i0.offset(-1);
     };
+}
+
+// cas0 %p
+// %res =k cas1 %old_in, %new
+// 
+// RAX as %old_in and %res is implied. 
+// The two explicit arguments of cmpxchg are %p and %new. 
+fn sel_cas_amd64(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) void = {
+    rax :: TMP(Amd64Reg.RAX);
+    cas0, cas1 := find_cas(i, b);
+    @debug_assert_eq(ptr_diff(cas0, cas1), 1, "non-adjacent cas");
+    k := cas1.cls();
+    // can't try_kill_inst since a cas is a store.
+    
+    // TODO: it's confusing that here i don't put a fake copy to RAX anywhere. 
+    //       i guess rega doesn't touch reg copies at all, not just arounds calls. 
+    f.emit(.copy, k, cas1.to, rax, QbeNull);
+    cas1.to = QbeNull;
+    cas1 := f.emit(cas1[]);
+    i2   := f.emit(.copy, k, rax, cas1.arg&[0], QbeNull);
+    fixarg(cas1.arg&.index(1), k, cas1, f);
+    fixarg(i2.arg&.index(0), k, i2, f);
+    
+    seladdr(cas0.arg&.index(0), f);
+    f.fixargs(cas0);
+    cas1.arg&[0] = cas0.arg&[0];
+    cas0.set_nop(); 
 }
 
 fn sel_inner(i: *Qbe.Ins, f: *Qbe.Fn) void = {
@@ -577,16 +606,6 @@ fn sel_inner(i: *Qbe.Ins, f: *Qbe.Fn) void = {
                 i.set_op(.copy);
             };
         }
-        fn cas1() => {
-            r0 := i.arg&[0];
-            k := i.cls();
-            rax := TMP(Amd64Reg.RAX);
-            i.arg&[0] = rax;
-            f.emit(.copy, k, QbeNull, rax, QbeNull);
-            i1 := f.emit(i[]);
-            f.emit(.copy, k, rax, r0, QbeNull);
-            fixarg(i1.arg&.index(1), argcls(i, 1), i1, f);
-        }
         @default => {
             if is_alloc(i.op()) {
                 salloc(i.to, i.arg&[0], f);
@@ -599,10 +618,12 @@ fn sel_inner(i: *Qbe.Ins, f: *Qbe.Fn) void = {
                 f.sel_emit(i);
                 return();
             };
-            if is_load(i.op()) || i.op() == .cas0 {
-                i1 := f.emit(i[]);
-                seladdr(i1.arg&.index(0), f);
-                f.fixargs(i1);
+            if is_load(i.op()) {
+                new_ins := f.emit(i[]);
+                r := new_ins.arg&.index(0);
+                seladdr(r, f);
+                @debug_assert(rtype(r[]) != .RTmp, "seladdr failed");
+                f.fixargs(new_ins);
                 return();
             };
             if is_store(i.op()) {
@@ -701,6 +722,7 @@ fn sel_div(f: *Qbe.Fn, i: *Qbe.Ins) void = {
     };
 }
 
+// Variable width shift/rotate always take the width in RCX. 
 fn sel_shift(f: *Qbe.Fn, i: *Qbe.Ins) void = {
     r0 := i.arg&[1];
     if(rtype(r0) == .RCon, => return(f.sel_emit(i))); // TODO: unless you try to shift by an address by mistake
@@ -736,7 +758,7 @@ fn amd64_flag_table(o: Qbe.O) Ty(bool, bool) = {
     if b(.storeb, .cast) || o.between(.flagieq, .flagfuo) || o == .copy || o == .dbgloc || b(.nop, .addr) || o == .sel0 || o == .byteswap {
         return(false, true)
     };
-    if b(.acmp, .call) || b(.div, .mul) || b(.swap, .xdiv) || (@is(o, .cas1, .sel1, .rotr, .rotl, .ones)) {
+    if b(.acmp, .call) || b(.div, .mul) || b(.swap, .xdiv) || (@is(o, .cas1, .sel1, .rotr, .rotl, .ones, .assert)) {
         return(false, false)
     };
     
