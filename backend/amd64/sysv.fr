@@ -406,11 +406,11 @@ fn selcall(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins, rap: **RAlloc) void = {
             if aret.size > 8 {
                 r := f.newtmp("abi", .Kl);
                 aret.ref&[1] = f.newtmp("abi", aret.cls&[1]);
-                f.emit(.storel, .Kw, QbeNull, aret.ref&[1], r);
+                f.store8(aret&, 1, r);
                 f.emit(.add, .Kl, r, i1.to, f.getcon(8));
             };
             aret.ref&[0] = f.newtmp("abi", aret.cls&[0]);
-            f.emit(.storel, .Kw, QbeNull, aret.ref&[0], i1.to);
+            f.store8(aret&, 0, i1.to);
             ca += retr(reg&, aret&);
             if aret.size > 8 {
                 f.emit(.copy, aret.cls&[1], aret.ref&[1], reg&[1], QbeNull);
@@ -482,7 +482,7 @@ fn selcall(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins, rap: **RAlloc) void = {
             f.emit(.blit1, .Kw, QbeNull, INT(a.type.size), QbeNull);
             f.emit(.blit0, .Kw, QbeNull, i.arg&[1], r1);
         } else {
-            f.emit(.storel, .Kw, QbeNull, i.arg&[0], r1);
+            f.store8(i.arg&[0], i.cls(), r1);
         };
         f.emit(.add, .Kl, r1, r, f.getcon(off));
         off += a.size.zext();
@@ -490,7 +490,18 @@ fn selcall(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins, rap: **RAlloc) void = {
     f.emit(.salloc, .Kl, r, f.getcon(stk), QbeNull);
 }
 
-fn alloc_op(align_log2: i32) Qbe.O = {
+fn store8(f: *Qbe.Fn, a: *AClass, arg_i: i64, addr: Qbe.Ref) void #inline = 
+    f.store8(a.ref&[arg_i], a.cls&[arg_i], addr);
+
+// It's important that this uses the right cls of store instruction 
+// because elide_abi_slots relies on it to know whether to generate 
+// copies or casts and emit relies on copies not having mixed cls. 
+fn store8(f: *Qbe.Fn, value: Qbe.Ref, k: Qbe.Cls, addr: Qbe.Ref) void #inline = {
+    o: Qbe.O = @if(k.is_int(), .storel, .stored);
+    f.emit(o, .Kw, QbeNull, value, addr);
+}
+
+fn alloc_op(align_log2: i32) Qbe.O #inline = {
     /* specific to NAlign == 3 */
     al := if(align_log2 >= 2, => align_log2 - 2, => 0);
     @as(Qbe.O) @as(i32) Qbe.O.alloc4.raw() + al
@@ -524,15 +535,16 @@ fn selpar_amd64(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins) i64 = {
     f.reg = amd64_sysv_argregs(CALL(fa), discard);
 
     zip_args(i0, i1, ac) { i, a, $continue |
+        aret := 0;  // this is not the droid you're looking for
         if(i.op() != .parc || a.inmem != 0, => continue());
         if a.size > 8 {
             r := f.newtmp("abi", .Kl);
             a.ref&[1] = f.newtmp("abi", .Kl);
-            f.emit(.storel, .Kw, QbeNull, a.ref&[1], r);
+            f.store8(a, 1, r);
             f.emit(.add, .Kl, r, i.to, f.getcon(8));
         };
-        a.ref&[0] = f.newtmp("abi", .Kl);
-        f.emit(.storel, .Kw, QbeNull, a.ref&[0], i.to);
+        a.ref&[0] = f.newtmp("abi", a.cls&[0]);
+        f.store8(a, 0, i.to);
         f.emit(alloc_op(a.align), .Kl, i.to, f.getcon(a.size.zext()), QbeNull);
     };
 

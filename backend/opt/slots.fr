@@ -13,7 +13,7 @@ fn elide_abi_slots(f: *Qbe.Fn) void = {
     stores: HashMap(i64, StoreEntry) = init(temp());
     live_stack := init_bitset(f.slot.zext());
     bscopy(live_stack&, f.escaping_slots&);
-    constants: HashMap(u32, Qbe.Ref) = init(temp());
+    constants: HashMap(u32, Ty(Qbe.Ref, bool)) = init(temp());
     
     dead_loads  := 0;
     dead_stores := 0;
@@ -38,8 +38,13 @@ fn elide_abi_slots(f: *Qbe.Fn) void = {
                 if local_slot(f, addr) { slot | 
                     @debug_assert(i.arg&[1] == QbeNull, "need to deal with this if i want to allow slot + offset.");  // arm64 only
                     if slot_contains&.get(slot) { entry | 
-                        if entry.size == size && entry.k == i.cls() {
-                            i[] = make_ins(.copy, i.cls(), i.to, entry.value, QbeNull);
+                        // since this is after isel, we can't generate invalid instructions. 
+                        is_con_to_float := entry.value.rtype() == .RCon && !i.cls().is_int();
+                        
+                        if entry.size == size && !is_con_to_float {
+                            // TODO: share this logic with load.fr
+                            o: Qbe.O = @if(entry.k.is_int() == i.cls().is_int(), .copy, .cast);
+                            i[] = make_ins(o, i.cls(), i.to, entry.value, QbeNull);
                             dead_loads += 1;
                             continue();
                         };
@@ -106,15 +111,15 @@ fn elide_abi_slots(f: *Qbe.Fn) void = {
                 continue();
             };
             
-            // TODO: copy is wrong if you use the same bit pattern as int and float?
             // Now you'd hope rega would put both sides of the copy in the same register so it disappears.
             // its not super reliable at the moment, but this is still a codesize improvement. 
             if i.op() == .addr || (i.op() == .copy && rtype(i.arg&[0]) == .RCon) {
                 a0 := i.arg&[0];
-                if constants&.get(a0.type3_val29) { prev |
-                    chuse(prev, 1, f);
+                if constants&.get_ptr(a0.type3_val29) { prev |
+                    chuse(prev._0, 1, f);
                     dead_consts += 1;
-                    i[] = make_ins(.copy, i.cls(), i.to, prev, QbeNull);
+                    o: Qbe.O = @if(prev._1 == i.cls().is_int(), .copy, .cast);
+                    i[] = make_ins(o, i.cls(), i.to, prev._0, QbeNull);
                 } else {
                     if i.op() == .addr {
                         if local_slot(f, a0) { slot |
@@ -126,7 +131,7 @@ fn elide_abi_slots(f: *Qbe.Fn) void = {
                     };
                     
                     if !isreg(i.to) {
-                        constants&.insert(a0.type3_val29, i.to);
+                        constants&.insert(a0.type3_val29, (i.to, i.cls().is_int()));
                     };
                 };
             };

@@ -1,5 +1,30 @@
 - TODO: deal with `CodegenEntry:Bounce` on wasm
 
+##
+
+- TODO: threading bug on x64
+- floats are different on x64
+
+	R1 =l copy R17
+	R18 =d cast R1
+	became
+	movsd	xmm0, xmm0                      ## encoding: [0xf2,0x0f,0x11,0xc0]
+	movq	xmm1, rax                       ## encoding: [0x66,0x48,0x0f,0x6e,0xc8]
+	
+	`R1 =l copy R17` is illegal but happened because elide_abi_stack_slots thought they were the same class. 
+	because sysv.fr generated 
+	```
+	%abi.164 =d copy R18
+	%abi.165 =d copy R17
+	storel %abi.165, [S0]
+	storel %abi.164, [S8]
+	```
+	which uses storel even tho it's a float. 
+	which is fine for qbe because the assembler deals with doing the right thing for "mov",
+	and i was like sure whatever, i'll just do the right thing for storel even tho that seems imprecise. 
+	but then adding the slots optimisation later was bad new bears because suddenly we care about knowing
+	the classes of everything and i didn't think to add in that hack to make .copy work as cast. 
+
 ## (Feb 17)
 
 - most of the problems were that i didn't set b.jmp for void `return;`
