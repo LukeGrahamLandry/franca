@@ -392,8 +392,7 @@ fn acquire(queue: []CodegenEntry, i_am_bouba: bool, idx: *i64) ?*CodegenEntry = 
     range(0, codegen_queue_size) { _ |
         idx[] = idx[].add(1).mod(codegen_queue_size);
         entry := queue.index(idx[]);
-        if entry.state == waiting {
-            entry.state = used;
+        if entry.state == waiting && CodegenState.cas(entry.state&, waiting, used) == waiting {
             // don't reset the arena here, the other guy might want it.
             return(Some = entry);
         };
@@ -402,8 +401,11 @@ fn acquire(queue: []CodegenEntry, i_am_bouba: bool, idx: *i64) ?*CodegenEntry = 
 }
 
 fn release(entry: *CodegenEntry, $i_am_bouba: bool) void = {
+    ::enum(CodegenState);
     waiting_inv: CodegenState = @if(i_am_bouba, .WaitingForKiki, .WaitingForBouba);
-    entry.state = waiting_inv;
+    used: CodegenState = @if(i_am_bouba, .UsedByBouba, .UsedByKiki);
+    prev := CodegenState.cas(entry.state&, used, waiting_inv);
+    @debug_assert_eq(prev, used, "failed cas on release CodegenEntry");
     // don't reset the arena here, the other guy might want it.
 }
 
@@ -436,7 +438,7 @@ fn join_codegen_thread(shared: *CodegenShared) void = {
     shared.no_more_functions = true;
     fence();
     while => !shared.no_more_codegen {
-        pthread_cond_signal(shared.bouba_progress_c&);
+        pthread_cond_signal(shared.bouba_progress_c&).unwrap();
         pthread_cond_wait(c, m).unwrap();
         fence();
     };

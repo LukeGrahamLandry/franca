@@ -14,7 +14,7 @@ There are exactly two limitations:
     (because the child process won't have the compiler's thread 
     so if you try to call a function that hasn't been compiled yet, it never will be).
 
-## Inserting Ir
+## Inserting Ir for Constant Folding
 
 The franca self hosted backend started as a port of [Qbe](https://c9x.me/compile/) and 
 one of the optimisation passes is constant folding. Part of that requires the ability 
@@ -56,7 +56,7 @@ The full code for this is at the bottom of `backend/opt/fold.fr` (the do_fold fu
 It's more code than I'd like and it's less obvious than the giant switch but it does the job 
 and I'm sure the language can be refined farther to make it less painful. 
 
-## Parsing Strings
+## DSLs in Strings
 
 The franca self hosted backend started as a port of [Qbe](https://c9x.me/compile/) and there 
 are a few places where there are instructions that are convient for frontends to generate but don't 
@@ -66,6 +66,75 @@ Qbe's [sysv.c](https://c9x.me/git/qbe.git/tree/amd64/sysv.c?id=5e9726946dcb9248d
 
 backwards.  
 comment on top (might rot). 
+
+In the previous example we were generating ir that would go directly in the program. 
+Here we're genenerating code that when run will generate ir to include in a different program. 
+
+You could probably do this in Zig but you'd have to write your code carefully to not dynamiclly allocate memory, etc. 
+Here it's just regular code i already had . 
+
+In rust, macros are done at the token level so you can have things that don't parse and then pass that 
+as input to a seperate program to generate some new tokens. 
+
+## Reflection to Generate Shaders    
+
+- https://github.com/floooh/sokol/blob/master/util/sokol_debugtext.h#L2374-L3879
+
+
+- can rot. if i run thier shader compiler i don't get the same bytes of metal ir out. 
+probably that's just because i have a different version of apple's shader compiler but who knows. 
+
+```
+Shaders :: @struct(
+    InV  :: @struct(position: Vec2 #attribute(0), texcoord0: Vec2 #attribute(1), color0: Vec4 #attribute(2)),
+    OutV :: @struct(uv: Vec2 #user(locn0), color: Vec4 #user(locn1), pos: Vec4 #position),
+    vs   :: fn(in: Shaders.InV) Shaders.OutV = (
+        pos = @vec(in.position * (@vec(2.0, -2.0)) + @vec(-1.0, 1.0), 0.0, 1.0),
+        uv = in.texcoord0,
+        color = in.color0,
+    ),
+    InF  :: @struct(uv: Vec2 #user(locn0), color: Vec4 #user(locn1)),
+    OutF :: @struct(frag_color: Vec4 #color(0)),
+    UniF :: @struct(tex: ShaderTexture2f #texture(0), smp: ShaderSampler #sampler(0)),
+    fs   :: fn(in: Shaders.InF, uni: Shaders.UniF) Shaders.OutF = (
+        frag_color = @swizzle sample(uni.tex, uni.smp, in.uv).xxxx * in.color,
+    ),
+);
+```
+
+## Data in Strings
+
+- https://github.com/floooh/sokol/blob/master/util/sokol_debugtext.h#L825-L2372
+
+
+since franca can read files at compile time, we could just store the data in a binary file and embed it in the program. 
+
+if you ever want to edit it you still have to go scounge around for some program that speaks your specific font format. 
+
+human readable / editable 
+
+...@@... .....@@. @@@..... ..@@@...
+........ ........ .@@..... ...@@...
+..@@@... ....@@@. .@@..@@. ...@@...
+...@@... .....@@. .@@.@@.. ...@@...
+...@@... .....@@. .@@@@... ...@@...
+...@@... .@@..@@. .@@.@@.. ...@@...
+..@@@@.. .@@..@@. @@@..@@. ..@@@@..
+........ ..@@@@.. ........ ........
+
+## Generating Switches
+
+- https://github.com/rui314/chibicc/blob/main/tokenize.c#L144-L156
+
+it's much faster if you manually write out a bit switch statement. 
+
+// @switch(p[]) {
+//     @case("<".ascii()) => @switch(p.offset(1)[]) {
+//         @case("=".ascii()) => .@"<<";
+//         @default => .@"<";
+
+> I could imagine that an `inline for` in Zig would be optimised to the same thing by llvm.
+> Franca does have an `@inline_for` but my backend is too dumb to generate something sane from it so far. 
 
 ## String Formatting
 
@@ -130,3 +199,5 @@ code needed that library.
 - You add a dependency on another compiler. 
 
 ## Observing the Environment
+
+how do you embed the current git hash in a c program. 

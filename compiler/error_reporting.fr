@@ -811,20 +811,70 @@ fn maybe_log_scopes(self: *SelfHosted) void = {
     };
 };
 
-fn show_comptime_backtrace(self: *SelfHosted, frame: i64) void = {
+MAX :: 40;
+
+fn show_backtrace_safe(frame: i64, ip_hint: i64) void = {
+    i := 0;
+    old := 0;
+    shown := 0;
+    hide := 0;
+    scary_log("        ip       fp");
+    while => frame != 0 && i < 1000 {
+        addr := trace_return(frame);
+        if addr == old {
+            hide += 1;
+        } else {
+            if hide > 0 {
+                scary_log(" ... x");
+                scary_log(hide);
+            };
+            hide = 0;
+            if shown < MAX && addr != old {
+                scary_log("\n");
+                scary_log(i);
+                scary_log(": ");
+                scary_log(addr);
+                scary_log(" ");
+                scary_log(frame);
+                shown += 1;
+            };
+        };
+        old = addr;
+        frame = trace_prev(frame);
+        i += 1;
+    };
+    scary_log("\n");
+    if shown > MAX {
+        scary_log(shown - MAX);
+        scary_log(" hidden frames");
+    };
+    scary_log("\n");
+} 
+
+fn show_comptime_backtrace(self: *SelfHosted, frame: i64, ip_hint: i64) void = {
     callee: ?FuncId = .None;
+    @println("stack backtrace:");
+    
     skip := 0;
     i := 0;
+    
+    // if we're being called from the signal handler, 
+    // there's no explicit call to panic() so we 
+    // need one extra. 
+    if self.find_function(ip_hint, callee&) { s | 
+        @println("  %: %", i, s);
+        i += 1;
+    };
+    
     check_skip :: fn() => if skip > 0 {
         @println("  [...% unknown frames]", skip);
         skip = 0;
     };
-    MAX :: 10;
-    @println("stack backtrace:");
     old := 0;
     while => frame != 0 && i < 1000 {
         addr := trace_return(frame);
         if i < MAX && addr != old {
+            //@println("  %: % %", i, addr, frame);
             if self.find_function(addr, callee&) { s |
                 check_skip();
                 @println("  %: %", i, s);
@@ -845,6 +895,19 @@ fn show_comptime_backtrace(self: *SelfHosted, frame: i64) void = {
 
 // :SLOW but only called when panicking so it's fine. 
 fn find_function(self: *SelfHosted, addr: i64, callee: *?FuncId) ?Str = {
+    if(addr == 0, => return(.None));
+    if find_function(self, addr, callee, self.comptime_codegen.m) { s |
+        return(Some = s);
+    };
+    if self.other_module { m |
+        if find_function(self, addr, callee, m) { s |
+            return(Some = s);
+        };
+    };
+    .None
+}
+
+fn find_function(self: *SelfHosted, addr: i64, callee: *?FuncId, m: *QbeModule) ?Str = {
     T :: u8;
     fn split_suffix(haystack: Str, sep: Str) Ty(Str, Str) = {
         h := haystack;
@@ -858,15 +921,25 @@ fn find_function(self: *SelfHosted, addr: i64, callee: *?FuncId) ?Str = {
         ("", haystack)
     }
     
+    if addr >= u8.int_from_ptr(m.stubs.mmapped.ptr) && addr <= u8.int_from_ptr(m.stubs.next) {
+        return(Some = "GOT stub");
+    };
+    
     out := "";
-    for_symbols self.comptime_codegen.m { id, s |
+    for_symbols m { id, s |
         continue :: local_return;   // TODO: break. would be easier if i had a defer like thing. or like optional named params that get ignored
         jit_addr := s.jit_addr.int_from_rawptr();
         dist := addr - jit_addr;
         if dist >= 0 && dist < s.size { //(s.size == 0 || dist < s.size) {
-            name, i := split_suffix(s.name, "__");
+            parsed_name, i := split_suffix(s.name, "__");
             
-            if name == "" && i.starts_with("F") {
+            name := u8.list(temp());
+            if s.name.ends_with("__shim") && s.name.starts_with("F") {
+                @fmt(name&, "<<SHIM>> ");
+                i = s.name.slice(1, s.name.len - 6);  
+            };
+            
+            if parsed_name == "" && i.starts_with("F") {
                 i = i.rest(1);
             };
             for i { c | 
@@ -882,7 +955,6 @@ fn find_function(self: *SelfHosted, addr: i64, callee: *?FuncId) ?Str = {
             // TODO: check name
             loc := self.codemap.get_whole_line(func.loc);
             file := self.codemap.find_single_file(func.loc);
-            name := u8.list(temp());
             @fmt(name&, "% (%:% id=% start=%)", self.pool.get(func.name), loc.filename, loc.line, i, s.jit_addr);
             ::WalkAst(FindCallee, void);
             if callee[] { callee | 

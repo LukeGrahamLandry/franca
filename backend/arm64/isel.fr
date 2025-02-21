@@ -33,7 +33,21 @@ fn arm64_isel(f: *Qbe.Fn) void = {
             if i[].op() == .sel1 {
                 selsel_arm64(f, b, i[]);
             } else {
-                f.sel(i[][], b.id);
+                if i[].op() == .cas1 {
+                    k := i[].cls();
+                    cas0, cas1 := find_cas(i[], b);
+                    // TODO: should really make the frontend ensure this but i don't want to deal with it right now
+                    //@debug_assert_eq(ptr_diff(cas0, cas1), 1, "non-adjacent cas");
+                    cas1 := f.emit(cas1[]);
+                    f.fixarg(cas0.arg&.index(0), k, false, b.id);
+                    f.fixarg(cas1.arg&.index(0), k, false, b.id);
+                    f.fixarg(cas1.arg&.index(1), k, false, b.id);
+                    cas1.arg&[0] = f.new_mem(cas1.arg&[0], cas1.arg&[1], 0, 0);
+                    cas1.arg&[1] = cas0.arg&[0];
+                    cas0.set_nop();
+                } else {
+                    f.sel(i[][], b.id);
+                }
             };
         };
 
@@ -343,14 +357,6 @@ fn sel(f: *Qbe.Fn, i: Qbe.Ins, blk: i32) void = {
             };
             
             f.fixarg(iarg[1]&, k1, false, blk);
-            
-            if new_ins.op() == .cas0 { 
-                while => new_ins.offset(1).op() != .cas1 {
-                    j := new_ins.offset(1);
-                    t := new_ins[]; new_ins[] = j[]; j[] = t;
-                    new_ins = j;
-                };
-            }
         };
     };
 }

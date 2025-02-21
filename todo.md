@@ -7,6 +7,7 @@
 
 ##
 
+- tests for failing progeams. ie. panic backtrace
 - remove clowns
   - write_entire_file create file
   - chmod
