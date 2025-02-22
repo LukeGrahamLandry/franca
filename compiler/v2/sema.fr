@@ -552,6 +552,13 @@ fn want_target_os(c: CompCtx, it: Os) bool = {
     flag.bit_and(1.shift_left(it.raw())) != 0
 }
 
+fn get_runtime_string_type(self: *SelfHosted) Type = {
+    inner_u8  := self.get_or_create_type(u8);
+    inner_str := self.poll_in_place(Type, => self.create_slice_type(inner_u8, Span.zeroed()));
+    inner_str := self.unwrap_report_error(Type, inner_str);
+    inner_str
+}
+
 fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
     @check(self.infer_return(fid)) return;
     func := self.get_function(fid);
@@ -560,8 +567,7 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
     };
     good := false;
     fn eval_str(self: *SelfHosted, e: *FatExpr) Maybe(Symbol) = {
-        inner_u8 := self.get_or_create_type(u8);
-        str := @check(self.create_slice_type(inner_u8, e.loc)) return;
+        str := self.get_runtime_string_type();
         ir := @check(self.immediate_eval_expr(e, str)) return;
         ir := Str.assume_cast(ir&)[];
         (Ok = self.pool.insert_owned(ir)) 
@@ -1046,8 +1052,7 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
                 };
             };
             
-            byte_type := self.get_or_create_type(u8);
-            str_type := @check(self.create_slice_type(byte_type, expr.loc)) return;
+            str_type := self.get_runtime_string_type();
             str := self.to_values(Str, self.pool.get(i[]));
             expr.set(str, str_type);
         }
@@ -1356,6 +1361,7 @@ fn compile_expr_inner(self: *SelfHosted, expr: *FatExpr, requested: ResultType) 
                 return(@err("%", self.comp().log(expr)));
             };
         }
+        fn DataSymbol() => ();
         @default => @panic("TODO: unhandled node type %: %", expr.expr&.tag(), expr.log(self));
     };
     self.last_loc = old_loc;

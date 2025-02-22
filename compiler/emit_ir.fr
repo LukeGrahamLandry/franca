@@ -472,7 +472,14 @@ fn emit_runtime_call(
     p: Placement,
     callee: Qbe.Ref,
     dyn_context: bool,
+    loc: Span,
 ) CRes(Qbe.Ref) = { 
+    if self.debug {
+        n: i64 = loc.low.zext();
+        hi, lo := (n.shift_right_logical(16), n.bit_and(1.shift_left(16) - 1));
+        self.emit(.dbgloc, .Kw, QbeNull, INT(hi), INT(lo));  
+    };
+    
     self.f.leaf = false;
     if dyn_context && self.context != QbeNull {
         @debug_assert(self.dyn_context && self.dyn_context, "tried to dyn context with static context");
@@ -523,14 +530,14 @@ fn is_local_scalar(self: CompCtx, v: Var, ty: Type) bool #inline = {
 
 fn compile_stmt(self: *EmitIr, stmt: *FatStmt) CRes(void) = {
     if self.debug && !(stmt.stmt&.is(.Eval) && stmt.stmt.Eval.expr&.is(.Block)) {
-        place := self.program.get_whole_line(stmt.loc); // :SLOW
-        if self.last_line != place.line {
-            // TODO: dbgfile too because it might be something inlined from elsewhere. 
-            // TODO: have the backend remove consecutive dbgloc instructions and just keep the last one 
-            //       when all the stuff between them was optimised out. 
-            self.emit(.dbgloc, .Kw, QbeNull, INT(place.line), INT(0));  
-            self.last_line = place.line;
-        };
+        //place := self.program.get_whole_line(stmt.loc); // :SLOW
+        //if self.last_line != place.line {
+        //    // TODO: dbgfile too because it might be something inlined from elsewhere. 
+        //    // TODO: have the backend remove consecutive dbgloc instructions and just keep the last one 
+        //    //       when all the stuff between them was optimised out. 
+        //    self.emit(.dbgloc, .Kw, QbeNull, INT(place.line), INT(0));  
+        //    self.last_line = place.line;
+        //};
     };
     self.last_loc = stmt.loc;
     @match(stmt.stmt&) {
@@ -665,6 +672,10 @@ fn compile_expr(self: *EmitIr, expr: *FatExpr, p: Placement) CRes(Qbe.Ref) = {
             };
             src := @try(self.addr_macro(expr, .ScalarTransient)) return; // get the pointer
             self.deref(src, p, expr_ty)
+        }
+        fn DataSymbol(name) => {
+            name := self.program.get_string(name[]);
+            self.scalar_result(p, self.f.symcon(name), i64)  // :get_or_create_type
         }
         fn Deref(arg) => {
             src := @try(self.compile_expr(arg[], @if(p&.is(.Discard), .Discard, .Scalar))) return; // get the pointer
@@ -834,14 +845,14 @@ fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) CRes(Qbe.R
                 // TODO: O.dbgloc would be nice
             };
             
-            arg := @try(self.compile_for_arg(arg)) return;
-            self.emit_runtime_call(f_ty, arg, p, callee_r, context)
+            args := @try(self.compile_for_arg(arg)) return;
+            self.emit_runtime_call(f_ty, args, p, callee_r, context, arg.loc)
         }
         fn FnPtr(f_ty) => {
             caller.set_flag(.YesContext);
             callee := @try(self.compile_expr(f, .Scalar)) return;
-            arg    := @try(self.compile_for_arg(arg)) return;
-            self.emit_runtime_call(f_ty.ty, arg, p, callee, true)
+            args   := @try(self.compile_for_arg(arg)) return;
+            self.emit_runtime_call(f_ty.ty, args, p, callee, true, arg.loc)
         }
         fn Label(_) => {
             label := @unwrap(f.as_const(), "called label must be const") return;
@@ -865,9 +876,11 @@ fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) CRes(Qbe.R
 fn emit_intrinsic_new(self: *EmitIr, op: *NewIntrinsicPayload, p: Placement, arg: []Qbe.Ref, caller: *Func, expr_ty: Type) CRes(Qbe.Ref) = {
     @debug_assert(op.ir_op != 0, "no ir op");
     o := @as(Qbe.O) op.ir_op;
-    if(p&.is(.Discard) && !@is(o, .vastart, .vaarg, .alloc4, .alloc8, .alloc16, .call, .global_set, .cas0, .sel0, .blit0), => return(Ok = QbeNull)); 
     k := @as(Qbe.Cls) op.ir_cls;
     r := self.scalar_dest(p, k); 
+    if r == QbeNull && !no_result(o) {
+        r = self.f.newtmp("f", k);
+    };
     self.emit(o, k, r, arg[0], arg[1]);
     (Ok = self.scalar_result(p, r, expr_ty))
 }

@@ -1,0 +1,316 @@
+// 
+// Instead of crashing immediately, try to print a stack trace first so you can see what's going on. 
+// 
+// This is not enabled in AOT programs by default! You have to manually set it as the panic/signal handler from your main function. 
+// The stack trace will only be useful if you `-debug-info -keep-names` (which will also make your binary larger). 
+// Note that -debug-info embeds the whole source code of your program in the executable. 
+// 
+// Traces that go through jitted code is a first class usecase. 
+// To show info for an instruction pointer, we go through the list of LocationResolver and see who owns that memory. 
+// - runtime: find_in_debug_info reads AotDebugInfo in the executable. 
+// - comptime: the compiler includes one that inspects the asts of jitted code. 
+// You can add your own as well if your program loads code dynamically.  
+// 
+
+// TODO: preallocate some stuff and set that as temp() while printing a backtrace. 
+
+fn request_backtrace_on_panic() void = {
+    @if(::!has_feature("@franca/bitops")) return();
+    context(DefaultContext)[].panic_hook = backtracing_panic_handler;
+}
+
+fn backtracing_panic_handler(msg: Str) Never = {
+    scary_log("A franca program panicked.\n");
+    scary_log(msg);
+    @if(::has_feature("@franca/bitops")) {
+        context(DefaultContext)[].panic_hook = fn(msg) = {
+            scary_log("\nPanicked while logging a backtrace.");
+            scary_log(msg);
+            report_backtrace_safe(trace_start(), 0.rawptr_from_int());
+            exit(1)
+        };
+        report_backtrace(trace_start(), 0.rawptr_from_int());
+    };
+    
+    exit(1);
+}
+
+fn request_backtrace_on_signal() void = {
+    @if(::!has_feature("@franca/bitops")) return();
+    
+    catch :: @const_slice(SignalNum.IllegalInstruction, .TraceTrap, .Bus, .Segfault, .Float);
+    for catch { s |
+        old := SigAction.zeroed();
+        new: SigAction = (sigaction = handle_it, mask = 0, flags = @as(i32) SignalFlag.Info);
+        sigaction(s, new&, old&);
+    };
+    
+    handle_it :: fn(s: i64, info: *SigInfo, ctx: *UContext) void = {
+        ::enum(SignalNum);
+        ::@assert_eq(0, offset_of(Arm64MachineContext, Fields(Arm64MachineContext).neon).mod(16), "fp unaligned");
+        scary_log("A franca program received a fatal signal.\n");
+        
+        LOOPING :: @static(i64) 0;
+        if LOOPING[] == 2 {
+            scary_log("... give up\n");
+            exit(1);
+        };
+        
+        ip, fp, context_guess := @switch(ctx.mc_size) {
+            @case(size_of(Arm64MachineContext)) => {
+                a := ctx.mc.arm64.thread&;
+                (a.pc, a.fp, a.gp&[9])
+            };
+            @case(size_of(Amd64MachineContext)) => {
+                a := ctx.mc.amd64.thread&;
+                (a.rip, a.rbp, a.rax)
+            };
+            @default => {
+                scary_log("TODO: unknown format of machine_context");
+                exit(1);
+            };
+        };
+        if LOOPING[] == 1 {
+            LOOPING[] = 2;
+            scary_log("... while handling a previous signal.\n");
+            report_backtrace_safe(fp, ip);
+            exit(1);
+        };
+        set_dynamic_context(context_guess);
+        LOOPING[] = 1;
+        ctx := context(DefaultContext);
+        @eprintln("(signal = %, addr = %, value = %, code = %, ip = %) context_guess = %", info.signal_number, info.addr, info.value, info.code, ip, context_guess);
+        
+        push_zeroed_dynamic_context {
+            a: ArenaAlloc = init(page_allocator, 16000);
+            context(DefaultContext)[].temporary_allocator = a&;
+            context(DefaultContext)[].panic_hook = fn(msg) = {
+                scary_log("panicked while handling a signal\n");
+                scary_log(msg);
+                report_backtrace_safe(trace_start(), 0.rawptr_from_int());
+                exit(1)
+            };
+            report_backtrace(fp, ip);
+        };
+        exit(1);
+    };
+}
+
+LocationResolver :: @FnPtr(userdata: rawptr, ip: rawptr) ?Str; 
+
+LocationResolverNode :: @rec @struct(next: *LocationResolverNode, data: rawptr, func: LocationResolver);
+RESOLVERS :: @static(*LocationResolverNode) zeroed(*LocationResolverNode);
+
+// TODO: generate shitty code like this 
+fn push_resolver($T: Type, data: *T, func: @FnPtr(userdata: *T, ip: rawptr) ?Str) *LocationResolverNode #generic = {
+    func := ptr_cast_unchecked(@type func, LocationResolver, func&)[];
+    push_resolver(T.raw_from_ptr(data), func)
+}
+
+fn push_resolver(data: rawptr, func: LocationResolver) *LocationResolverNode = {
+    ::ptr_utils(LocationResolverNode);
+    node := libc_allocator.box_zeroed(LocationResolverNode);  // This needs to leak!
+    node.data = data; 
+    node.func = func;
+    // There's a moment here where the node is in the slot but with next=0, 
+    // which just means if someone looks at it, they'll miss the rest of the list. 
+    node.next = atomic_set(*LocationResolverNode, RESOLVERS, node);
+    node
+}
+
+fn pop_resolver(it: *LocationResolverNode) void = {
+    @if(::!has_feature("@franca/bitops")) return();
+    ::ptr_utils(LocationResolverNode);
+    prev := RESOLVERS;
+    node := prev[];
+    while => !node.is_null() {
+        if identical(node, it) {
+            atomic_set(*LocationResolverNode, prev, node.next);
+            // leak the old node because you don't know if someone's looking at it. 
+            return();
+        };
+        node = node.next;
+    };
+}
+
+MAX_SHOWN :: 20;
+MAX_LOOPS :: 2000;
+
+// the expectation is that you crash after calling this (otherwise need to fix cached_codemap)
+fn report_backtrace(fp: rawptr, ip: rawptr) void = {
+    @if(::!has_feature("@franca/bitops")) return();
+    ::ptr_utils(LocationResolverNode);
+    report_frame :: fn(ip: rawptr) ?Str = {
+        node := RESOLVERS[];
+        while => !node.is_null() {
+            if node'func(node.data, ip) { s |
+                return(Some = s);
+            };
+            node = node.next;
+        };
+        .None
+    };
+    
+    i := 0;
+    shown := 0;
+    last_ip := 0.rawptr_from_int();
+    while => !fp.is_null() && i < MAX_LOOPS {
+        ip := trace_return(fp);
+        if !identical(ip, last_ip) && shown < MAX_SHOWN {
+            if report_frame(ip) { s | 
+                @println("  %: %", i, s);
+                shown += 1;
+            };
+        };
+        last_ip = ip;
+        fp = trace_prev(fp);
+        i += 1;
+    };
+}
+
+// This doesn't attempt to call resolvers, it just prints raw addresses. 
+fn report_backtrace_safe(frame: rawptr, ip_hint: rawptr) void = {
+    @if(::!has_feature("@franca/bitops")) return();
+    i := 0;
+    old := 0.rawptr_from_int();
+    shown := 0;
+    hide := 0;
+    scary_log("        ip       fp");
+    while => !frame.is_null() && i < MAX_LOOPS {
+        addr := trace_return(frame);
+        if addr == old {
+            hide += 1;
+        } else {
+            if hide > 0 {
+                scary_log(" ... x");
+                scary_log(hide);
+            };
+            hide = 0;
+            if shown < MAX_SHOWN && !identical(addr, old) {
+                scary_log("\n");
+                scary_log(i);
+                scary_log(": ");
+                scary_log(addr);
+                scary_log(" ");
+                scary_log(frame);
+                shown += 1;
+            };
+        };
+        old = addr;
+        frame = trace_prev(frame);
+        i += 1;
+    };
+    scary_log("\n");
+    if shown > MAX_SHOWN {
+        scary_log(shown - MAX_SHOWN);
+        scary_log(" hidden frames");
+    };
+    scary_log("\n");
+} 
+
+// The backend generates one of these for an executable based on dbgloc instructions. 
+// The numbers are variable width U/S LEB128.  
+AotDebugInfo :: @struct(
+    version: i64,
+    code_segment: []u8,
+    headers: []u8,  // [U off payload, U size code]
+    payload: []u8,  // [U name len, name bytes, [U off in func, S off source]]
+    source:  []u8,  // all the source files in the program concatenated together 
+    files:   []u8,  // (U file count, [U size source, U name len, name bytes])
+    nullable_cached_codemap: rawptr,
+);
+
+fn find_in_debug_info(userdata: rawptr, ip: rawptr) ?Str = {
+    addr := int_from_rawptr(ip);
+    debug_info := AotDebugInfo.ptr_from_raw(userdata);
+    if(debug_info.version != 1, => return(.None));
+    code_start := u8.int_from_ptr(debug_info.code_segment.ptr);
+    not_mine := addr < code_start || addr >= code_start + debug_info.code_segment.len;
+    if(not_mine, => return(.None));
+    
+    cm := ptr_cast_unchecked(rawptr, *CodeMap, debug_info.nullable_cached_codemap&);
+    ::ptr_utils(CodeMap);
+    if cm[].is_null() {
+        // We're storing a temp() pointer in a global.
+        // This is generally not ok but this function is only used inside unrecoverable error reporting. 
+        cm[] = temp().box(CodeMap);
+        cm[][] = decode_codemap(debug_info, temp());
+    };
+    codemap := cm[];
+    
+    cursor := debug_info.headers;
+    off := 0;
+    while => cursor.len > 0 {
+        if off > debug_info.code_segment.len {
+            scary_log("malformed debug info. (sum of function sized > code segment).");
+            return(.None);
+        };
+        off_to_data, r, ok := read_leb128(cursor, false);
+        cursor = r;
+        size, r, ok := read_leb128(cursor, false);
+        cursor = r;
+        
+        dist := addr - (code_start + off);
+        if dist >= 0 && dist < size {
+            if off_to_data > debug_info.payload.len {
+                return(.None); // malformed
+            };
+            data := debug_info.payload.rest(off_to_data);
+            name_len, r, ok := read_leb128(data, false);
+            data = r;
+            name := data.slice(0, name_len);
+            data = data.rest(name_len);
+            
+            best_distance := size;
+            best_byte := 0;
+            off_in_func := 0;
+            offset_in_source := 0;
+            
+            dowhile {
+                delta_off_in_func, r, ok := read_leb128(data, false);
+                data = r;
+                delta_offset_in_source, r, ok := read_leb128(data, true);
+                data = r;
+                off_in_func += delta_off_in_func;
+                offset_in_source += delta_offset_in_source;
+                check := dist - off_in_func;
+                if check > 0 && check < best_distance {
+                    best_distance = check;
+                    best_byte = offset_in_source;
+                };
+                delta_off_in_func != 0 || delta_offset_in_source != 0
+            };
+            
+            loc: Span = (low = best_byte.trunc(), high = best_byte.trunc() + 1);
+            return(Some = fmt_for_trace(codemap, loc, name, "AOT"));
+        };
+        
+        off += size;
+    };
+    .None
+};
+
+fn fmt_for_trace(codemap: *CodeMap, loc: Span, name: Str, tag: Str) Str = {
+    out := u8.list(temp());
+    @fmt(out&, "% % ", name, tag);
+    if loc.low != 0 && loc.high <= codemap.total_len {
+        codemap.fmt_error_line(loc, out&);
+        out.len -= 1;
+    };
+    out.items()
+}
+
+#include_std("compiler/codemap.fr");
+fn decode_codemap(debug_info: *AotDebugInfo, a: Alloc) CodeMap = {
+    off := 0;
+    bytes := debug_info.files;
+    count := read_leb128(bytes&, false) || return(CodeMap.zeroed());
+    files := File.list(count, a);
+    range(0, count) { _ |
+        size := read_leb128(bytes&, false) || return(CodeMap.zeroed());
+        name := read_leb_prefixed_string(bytes&) || return(CodeMap.zeroed());
+        files&.push(name = name, content = debug_info.source.subslice(off, size), start = off.trunc());
+        off += size;
+    };
+    (files = files, total_len = off.trunc())
+}

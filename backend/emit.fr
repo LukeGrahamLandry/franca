@@ -273,6 +273,9 @@ fn emit_data_to_segment(self: *QbeModule, dat: *Qbe.Dat, seg: SegmentType) void 
 
 // :ThreadSafety we can't have both threads fucking with self.segments
 fn add_code_bytes(m: *QbeModule, name_id: u32, bytes: []u8) void = {
+    use_symbol(m, name_id) { s |
+        start_debug_info(m, s);
+    };
     code := m.segments&[.Code]&;
     code.align_to(4);  // todo: only for arm
     start_offset := ptr_diff(code.mmapped.ptr, code.next);
@@ -308,6 +311,7 @@ fn finish_function(m: *QbeModule, dest: []u8, name_id: u32) void #inline = {
     m.last_function_end = dest.ptr.offset(dest.len);
     use_symbol(m, name_id) { s |
         s.size = dest.len;
+        end_debug_info(m, s);
     };
     if m.got_indirection_instead_of_patches && m.goal.type == .JitOnly && m.goal.arch == .aarch64 {
         clear_instruction_cache(u8.raw_from_ptr(dest.ptr), dest.len);
@@ -482,6 +486,9 @@ fn emit_fn(f: *Qbe.Fn) void = {
     maybe_add_export(m, name_id, f.lnk.export);
     m.do_jit_fixups(name_id, .Code, start_offset);
     
+    use_symbol(m, name_id) { s |
+        start_debug_info(m, s);
+    };
     {m.target.emit_fn}(f);
     size := code.len() - start_offset;
     @assert_lt(code.len(), code.mmapped.len, "too much code");
@@ -563,4 +570,104 @@ fn debug_log_byte_size(m: *QbeModule) void = {
 fn live_segment_part(m: *QbeModule, s: SegmentType) []u8 = {
     s := m.segments&[s]&;
     s.mmapped.slice(0, ptr_diff(s.mmapped.ptr, s.next))
+}
+
+fn declare_bytes(m: *QbeModule, bytes: []u8, name: Str) u32 = {
+    dat := Qbe.Dat.zeroed();
+    lnk := Qbe.Lnk.zeroed();
+    dat.lnk = lnk&;
+    dat.lnk.id = m.intern(name);
+    dat.type = .DStart;
+    m.new_emit_data(dat&);
+    dat.type = .DB;
+    dat.u.str = bytes;
+    dat.is_str = true;
+    m.new_emit_data(dat&);
+    dat.type = .DEnd;
+    m.new_emit_data(dat&);
+    dat.lnk.id
+}
+
+fn seal_debug_info(m: *QbeModule, debug_source_code: []u8, include: bool, files_bytes: []u8) void = {
+    dat := Qbe.Dat.zeroed();
+    lnk := Qbe.Lnk.zeroed();
+    dat.lnk = lnk&;
+    dat.lnk.id = m.intern("__franca_aot_debug_info");
+    if !include {
+        dat.u.num = size_of(AotDebugInfo);
+        m.new_zeroed_symbol(dat&);
+        return();
+    };
+    
+    // TODO: don't force having a name for these. 
+    code_p    := m.intern("__franca_code_segment");
+    m.do_jit_fixups(code_p, .Code, text_padding);
+    header_p  := m.declare_bytes(m.debug_headers.items(), "__franca_debug_headers");
+    payload_p := m.declare_bytes(m.debug_data.items(), "__franca_debug_data");
+    source_p  := m.declare_bytes(debug_source_code, "__franca_debug_source");
+    files_p  := m.declare_bytes(files_bytes, "__franca_debug_files");
+    
+    dat.type = .DStart;
+    m.emit_data_to_segment(dat&);
+    code := m.segments&.index(.Code);
+    ::assert_eq(size_of(AotDebugInfo), size_of(i64) * 12);
+    dat.type = .DL; dat.u.num = 1; m.emit_data_to_segment(dat&);  // version
+    append_slice(m, dat&, code_p, ptr_diff(code.mmapped.ptr, code.next) - text_padding);
+    append_slice(m, dat&, header_p, m.debug_headers.len);
+    append_slice(m, dat&, payload_p, m.debug_data.len);
+    append_slice(m, dat&, source_p, debug_source_code.len);
+    append_slice(m, dat&, files_p, files_bytes.len);
+    dat.type = .DL; dat.u.num = 0; m.emit_data_to_segment(dat&);  // nullable_cached_codemap
+    dat.type = .DEnd;
+    m.emit_data_to_segment(dat&);
+}
+
+// TODO: call from compiler
+// requires including codemap.fr
+fn encode_debug_files(files: []File) Ty([]u8, []u8) = {
+    source := u8.list(temp());
+    headers := u8.list(temp());
+    leb128_unsigned(headers&, files.len);
+    for files { file | 
+        source&.push_all(file.content);
+        leb128_unsigned(headers&, file.content.len);
+        leb128_unsigned(headers&, file.name.len);
+        push_all(headers&, file.name);
+    };
+    (source.items(), headers.items())
+}
+
+fn append_slice(m: *QbeModule, dat: *Qbe.Dat, ptr: u32, len: i64) void = {
+    dat.type = .DL;
+    dat.u.ref = (id = ptr, off = 0);
+    dat.is_ref = true;
+    m.emit_data_to_segment(dat);
+    dat.is_ref = false;
+    dat.type = .DL;
+    dat.u.num = len;
+    m.emit_data_to_segment(dat);
+}
+
+fn start_debug_info(m: *QbeModule, s: *SymbolInfo) void = {
+    leb128_unsigned(m.debug_headers&, m.debug_data.len);
+    leb128_unsigned(m.debug_data&, s.name.len);
+    push_all(m.debug_data&, s.name);
+    m.debug_last_off_func = 0;
+    m.debug_last_off_source = 0;
+}
+
+fn end_debug_info(m: *QbeModule, s: *SymbolInfo) void = {
+    leb128_unsigned(m.debug_headers&, s.size);
+    // TODO: length prefix but that's annoying
+    leb128_unsigned(m.debug_data&, 0);
+    leb128_unsigned(m.debug_data&, 0);
+}
+
+fn add_debug_info(m: *QbeModule, i: *Qbe.Ins, off_in_func: i64) void = {
+    hi, lo := (rsval(i.arg&[0]).intcast(), rsval(i.arg&[1]).intcast());
+    offset_in_source := hi.shift_left(16).bit_or(lo);
+    leb128_unsigned(m.debug_data&, off_in_func - m.debug_last_off_func);
+    m.debug_last_off_func = off_in_func;
+    leb128_signed(m.debug_data&, offset_in_source - m.debug_last_off_source);
+    m.debug_last_off_source = offset_in_source;
 }

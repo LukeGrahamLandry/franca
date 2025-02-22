@@ -811,91 +811,13 @@ fn maybe_log_scopes(self: *SelfHosted) void = {
     };
 };
 
-MAX :: 40;
-
-fn show_backtrace_safe(frame: i64, ip_hint: i64) void = {
-    i := 0;
-    old := 0;
-    shown := 0;
-    hide := 0;
-    scary_log("        ip       fp");
-    while => frame != 0 && i < 1000 {
-        addr := trace_return(frame);
-        if addr == old {
-            hide += 1;
-        } else {
-            if hide > 0 {
-                scary_log(" ... x");
-                scary_log(hide);
-            };
-            hide = 0;
-            if shown < MAX && addr != old {
-                scary_log("\n");
-                scary_log(i);
-                scary_log(": ");
-                scary_log(addr);
-                scary_log(" ");
-                scary_log(frame);
-                shown += 1;
-            };
-        };
-        old = addr;
-        frame = trace_prev(frame);
-        i += 1;
-    };
-    scary_log("\n");
-    if shown > MAX {
-        scary_log(shown - MAX);
-        scary_log(" hidden frames");
-    };
-    scary_log("\n");
-} 
-
-fn show_comptime_backtrace(self: *SelfHosted, frame: i64, ip_hint: i64) void = {
-    callee: ?FuncId = .None;
-    @println("stack backtrace:");
-    
-    skip := 0;
-    i := 0;
-    
-    // if we're being called from the signal handler, 
-    // there's no explicit call to panic() so we 
-    // need one extra. 
-    if self.find_function(ip_hint, callee&) { s | 
-        @println("  %: %", i, s);
-        i += 1;
-    };
-    
-    check_skip :: fn() => if skip > 0 {
-        @println("  [...% unknown frames]", skip);
-        skip = 0;
-    };
-    old := 0;
-    while => frame != 0 && i < 1000 {
-        addr := trace_return(frame);
-        if i < MAX && addr != old {
-            //@println("  %: % %", i, addr, frame);
-            if self.find_function(addr, callee&) { s |
-                check_skip();
-                @println("  %: %", i, s);
-            } else {
-                skip += 1;
-            };
-        };
-        old = addr;
-        frame = trace_prev(frame);
-        i += 1;
-    };
-    if i > MAX {
-        @println("[... % hidden frames]", i - MAX + skip);  
-    } else {
-        check_skip();
-    };
-}
-
 // :SLOW but only called when panicking so it's fine. 
-fn find_function(self: *SelfHosted, addr: i64, callee: *?FuncId) ?Str = {
+find_function_aa :: fn(self: *SelfHosted, addr: rawptr) ?Str = {
+    callee := self.stack_trace_last_callee&;
+    addr := int_from_rawptr(addr);
     if(addr == 0, => return(.None));
+    
+    // TODO: 
     if find_function(self, addr, callee, self.comptime_codegen.m) { s |
         return(Some = s);
     };
@@ -905,9 +827,10 @@ fn find_function(self: *SelfHosted, addr: i64, callee: *?FuncId) ?Str = {
         };
     };
     .None
-}
+};
 
 fn find_function(self: *SelfHosted, addr: i64, callee: *?FuncId, m: *QbeModule) ?Str = {
+    @if(::!has_feature("@franca/bitops")) return(.None);
     T :: u8;
     fn split_suffix(haystack: Str, sep: Str) Ty(Str, Str) = {
         h := haystack;
@@ -921,6 +844,12 @@ fn find_function(self: *SelfHosted, addr: i64, callee: *?FuncId, m: *QbeModule) 
         ("", haystack)
     }
     
+    code := m.segments&.index(.Code);
+    code_start := u8.int_from_ptr(code.mmapped.ptr);
+    if addr < code_start || addr >= code_start + code.len() {
+        return(.None);
+    };
+    
     if addr >= u8.int_from_ptr(m.stubs.mmapped.ptr) && addr <= u8.int_from_ptr(m.stubs.next) {
         return(Some = "GOT stub");
     };
@@ -933,9 +862,8 @@ fn find_function(self: *SelfHosted, addr: i64, callee: *?FuncId, m: *QbeModule) 
         if dist >= 0 && dist < s.size { //(s.size == 0 || dist < s.size) {
             parsed_name, i := split_suffix(s.name, "__");
             
-            name := u8.list(temp());
-            if s.name.ends_with("__shim") && s.name.starts_with("F") {
-                @fmt(name&, "<<SHIM>> ");
+            is_shim := s.name.ends_with("__shim") && s.name.starts_with("F");
+            if is_shim {
                 i = s.name.slice(1, s.name.len - 6);  
             };
             
@@ -952,21 +880,20 @@ fn find_function(self: *SelfHosted, addr: i64, callee: *?FuncId, m: *QbeModule) 
             i := parse_int(i); // TODO: no panic
             fid := @as(FuncId) from_index(i);
             func := self.get_function(fid);  // TODO: bounds
+            name := self.pool.get(func.name);
             // TODO: check name
-            loc := self.codemap.get_whole_line(func.loc);
-            file := self.codemap.find_single_file(func.loc);
-            @fmt(name&, "% (%:% id=% start=%)", self.pool.get(func.name), loc.filename, loc.line, i, s.jit_addr);
             ::WalkAst(FindCallee, void);
             if callee[] { callee | 
                 walk: FindCallee = (found = list(Span, temp()), callee = callee, compiler = self);
                 @if_let(func.body&) fn Normal(e) => {
                     walk&.walk_expr(e);
                 };
-                @if(walk.found.len == 1)
-                for walk.found& { loc |
-                    loc := self.codemap.get_whole_line(loc);
-                    @fmt(name&, "\n        at %:%:%", loc.filename, loc.line, loc.col);
+                if walk.found.len == 1 {
+                    out = fmt_for_trace(self.codemap, walk.found[0], name, if(is_shim, => "SHIM", => "JIT"));
                 };
+            };
+            if out == "" {
+                out = fmt_for_trace(self.codemap, func.loc, name, if(is_shim, => "SHIM", => "JIT"));
             };
             fn contains(self: Span, other: Span) bool = {
                 self.low <= other.low && self.high >= other.high
@@ -1001,14 +928,7 @@ fn find_function(self: *SelfHosted, addr: i64, callee: *?FuncId, m: *QbeModule) 
             fn handle_pattern(self: *FindCallee, pattern: *Pattern) Result(DoMore, void) = (Ok = .Continue);
             
             callee[] = (Some = fid);
-            out = name.items();
         };
-    };
-    show_fid :: fn(fid: FuncId) => {
-        func := self.get_function(fid);
-        loc := self.codemap.get_whole_line(func.loc);
-        name := @tfmt("% at %:% id=%", self.pool.get(func.name), loc.filename, loc.line, i);
-        return(name);
     };
     if(out.len > 0, => return(Some = out));
     .None

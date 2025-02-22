@@ -53,6 +53,8 @@ SelfHosted :: @rec @struct(
     imports: *HashMap(Symbol, ScopeId),  // TODO: very very bad if this struct gets too big?? :FUCKED
     scopes_generation := 0,
     other_module: ?*QbeModule,
+    stack_trace_last_callee: ?FuncId, // bleh
+    backtrace_node: *LocationResolverNode,
 );
 
 OverloadKey :: @struct(arg: Type, req: Type);
@@ -360,7 +362,8 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
     init_default_module(m, (arch = arch, os = os, type = .JitOnly), true);
     m.got_indirection_instead_of_patches = true;  // comptime needs to be more flexible with late bound references.
     
-    self: SelfHosted = (
+    self := a.box(SelfHosted);
+    self[] = (
         pool = pool,
         codemap = codemap,
         parser = a.boxed(Parser, parser),
@@ -386,13 +389,15 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
         where_memo = init(a),
         imports = a.boxed(HashMap(Symbol, ScopeId), init(a)),
         other_module = .None,
+        stack_trace_last_callee = .None,
+        backtrace_node = push_resolver(SelfHosted, self, find_function_aa),
     );
     
     if get_dynamic_context().is_null() {
         scary_log("compiler had null context!");
         abort();
     };
-    self&.init_fixed_types();
+    self.init_fixed_types();
     self.pool.fill_fixed_flags();
     
     // Only needed if targetting AOT but its so cheap so who cares. 
@@ -401,7 +406,7 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
         // The program can only access this with GetContext and SetContext. 
         out: List(BakedEntry) = list(a);
         out&.push((Num = (value = 0)));
-        id := self&.put_baked((VoidPtrArray = out.as_raw()), .None);
+        id := self.put_baked((VoidPtrArray = out.as_raw()), .None);
         env.static_context_var = (Some = id); 
     };
 
@@ -411,8 +416,6 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
             self.comptime_libraries&.insert(Flag.libc.ident(), libc);
         };
     };
-    
-    self := a.boxed(SelfHosted, self);
     
     c := context(DefaultContext)[].comptime&;
     @assert(c[].is_null(), "Cannot call init_self_hosted inside another compiler. push_context with comptime=null first.");
@@ -427,7 +430,6 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
         compiler.ptr
     };
     self.legacy_indirection = self.stable_compiler_context();
-    push_compiler(self);
     
     self
 }
