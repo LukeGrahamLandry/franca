@@ -98,7 +98,8 @@ fn len(s: *SegmentCursor) i64 =
 fn cap(s: *SegmentCursor) i64 = 
     s.mmapped.len;
 
-// TODO: i dont trust calling this multiple times on the same module... thats important to fix. 
+// TODO: calling this multiple times doesn't play nice with import stubs. 
+// but also you only need to do this if you don't want WX memory so like meh. 
 fn make_exec(self: *QbeModule) void = {
     // TODO: this doesn't work with the new way i want to do stubs. shit. -- Oct 24
     segment := SegmentType.Code;
@@ -107,14 +108,16 @@ fn make_exec(self: *QbeModule) void = {
     end := segment.next&;
     len := self.start_of_writable_code.ptr_diff(end[]);
     if(len == 0, => return());
-    res := mprotect(u8.raw_from_ptr(self.start_of_writable_code), len, prot); 
-    assert(res.value.eq(0), "mprotect failed");
-    clear_instruction_cache(u8.raw_from_ptr(self.start_of_writable_code), u8.raw_from_ptr(end[]));  // IMPORTANT
         
     PAGE_SIZE :: 16384; // TODO: ask the os for this. we're wasting hella memory on linux. 
     page_start := u8.int_from_ptr(end[]) / PAGE_SIZE * PAGE_SIZE;
     end[] = u8.ptr_from_int(page_start + PAGE_SIZE);
     self.start_of_writable_code = end[];
+    
+    // it seems to want `addr` to be page aligned
+    res := mprotect(rawptr_from_int(page_start), u8.int_from_ptr(end[]) - page_start, prot); 
+    @assert_eq(res.value, 0, "mprotect failed %", get_errno());
+    clear_instruction_cache(u8.raw_from_ptr(self.start_of_writable_code), u8.raw_from_ptr(end[]));  // IMPORTANT
 }
 
 fn get_addr(self: *QbeModule, id: u32) ?Ty(rawptr, i64) = {

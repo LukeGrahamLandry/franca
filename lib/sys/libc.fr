@@ -116,12 +116,20 @@ fn sigaction(signum: SignalNum, nullable_act: *SigAction, nullable_oldact: *SigA
 // Eventually prefer calling clear_instruction_cache to do the right thing when the arch doesn't need this. 
 fn __clear_cache(beg: rawptr, end: rawptr) void #libc;
 
-// TODO: #when(TARGET_OS.eq(.macos))
-// https://github.com/ziglang/zig/blob/master/lib/std/c.zig#L9876
-fn __error() *i32 #libc;  // This has different names on different os-s. like __errno_location
-
-// TODO: :Linux
-fn get_errno() i64 = __error()[].zext();
+fn get_errno() i64 = {
+    // This has different names on different os-s.
+    // https://github.com/ziglang/zig/blob/master/lib/std/c.zig#L9876
+    name :: fn(req: *LinkRenameArg) void = {
+        n := @match(req.target.os) {
+            fn macos() => "__error";
+            fn linux() => "__errno_location";
+            @default => panic("get_errno for unknown os");
+        };
+        req.out.push_all(n);
+    };
+    impl :: fn() *i32 #libc #link_rename(name);
+    impl()[].zext()
+}
 
 STD_IN  : Fd : (fd = 0.intcast());
 STD_OUT : Fd : (fd = 1.intcast());
