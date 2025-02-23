@@ -1,5 +1,25 @@
 - TODO: deal with `CodegenEntry:Bounce` on wasm
 
+## (Feb 21/22)
+
+- catch signals (segfault etc) and show backtrace. 
+very painful transcribing of the u_context struct of all the registers. 
+- include source and instruction location info in AOT so you can have traces that go through the compiler. 
+also extract crash_report into a library so you can print backtraces on crash when not running in comptime. 
+- glibc wants the stack to be 16 byte aligned but when the loader calls into your elf's entry point, 
+it doesn't care you you have to fix the stack yourself. 
+i remember the thing about keeping it 16 byte aligned but i guess i only did jit before 
+so i always had someone else's linker to do whatever arbitrary start up stuff you need. 
+- no longer looks like im crashing on an unaligned mov so that's progress. 
+try calling `__libc_start_main` maybe it's a crime to jsut call into mutexes, etc without  that setup? 
+didn't seem to help. 
+- in amd64/emit/call. symbol was null because id was out of bounds because RCon was CBits because it was
+a jitted address that fits in 32 bits because linux doesn't reserve that address range like macos does. 
+- in amd64/emit/addr, if it's already DynamicPatched, use GOT to avoid an assertion in push_instruction(). 
+TODO: I don't understand why that only happens on linux tho. different things found in dylib somehow? 
+- TODO: whatever im dlopen-ing doesn't have sqrt (for generating sha256 tables)
+but other than that it self compiles on linux now!
+
 ## (Feb 19/20)
 
 - floats are different on x64

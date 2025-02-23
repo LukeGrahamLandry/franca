@@ -487,36 +487,40 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
             assemble(e, i&);
         }
         fn addr() => {
-            if e.m.got_indirection_instead_of_patches {
-                r := i.arg&[0];
-                if rtype(r) == .RCon {
-                    c := e.f.get_constant(r);
-                    @debug_assert(c.type == .CAddr);
-                    done := false;
-                    use_symbol(e.m, c.sym.id) { symbol | 
-                        done = symbol.kind != .Local;
-                        if done {
-                            if ensure_got_slot(e.m, symbol, symbol.jit_addr) { it |
-                                push_fixup(e.m, symbol, it);
-                            };
-                            
-                            // TODO: very copy paste 
-                            size_of_load_encoding :: 7;
-                            current_offset := e.start_of_function + e.a.len();
-                            distance := e.m.distance_between(.Code, current_offset + size_of_load_encoding, .ConstantData, symbol.got_lookup_offset);
-                            
-                            dest := int_reg_d(i.to);
-                            e.a&.push(pack_rex_si(true, dest, DONT_CARE_REG, DONT_CARE_REG)); 
-                            e.a&.push(0x8B);  // load
-                            e.a&.push(pack_modrm(.Indirect00, .rbp, dest));   // disp is RIP relative
-                            e.a&.push_u32(distance.trunc());
-                            done = true;
-                        };
-                    }; 
+            // if we want to got_indirection_instead_of_patches, pessimistically use a got load 
+            // if it's not known to be local to this module (since we're not allowed to patch). 
+            // Otherwise, only use got if we already know it's an import (and save a patch that way). 
+            // TODO: i don't understand why the later case only happens on linux but 
+            //       what you have to do to patch to a load later is super sketchy 
+            //       anyway so the less of that the better.       -- Feb 23, 2025. 
+            r := i.arg&[0];
+            if rtype(r) == .RCon {
+                c := e.f.get_constant(r);
+                @debug_assert(c.type == .CAddr);
+                done := false;
+                use_symbol(e.m, c.sym.id) { symbol | 
+                    done = symbol.kind != .Local && (e.m.got_indirection_instead_of_patches || symbol.kind == .DynamicPatched);
                     if done {
-                        return();
-                    }
-                };
+                        if ensure_got_slot(e.m, symbol, symbol.jit_addr) { it |
+                            push_fixup(e.m, symbol, it);
+                        };
+                        
+                        // TODO: very copy paste 
+                        size_of_load_encoding :: 7;
+                        current_offset := e.start_of_function + e.a.len();
+                        distance := e.m.distance_between(.Code, current_offset + size_of_load_encoding, .ConstantData, symbol.got_lookup_offset);
+                        
+                        dest := int_reg_d(i.to);
+                        e.a&.push(pack_rex_si(true, dest, DONT_CARE_REG, DONT_CARE_REG)); 
+                        e.a&.push(0x8B);  // load
+                        e.a&.push(pack_modrm(.Indirect00, .rbp, dest));   // disp is RIP relative
+                        e.a&.push_u32(distance.trunc());
+                        done = true;
+                    };
+                }; 
+                if done {
+                    return();
+                }
             };
             
             // note: LEA interprets RMem differently than other instructions
@@ -529,6 +533,7 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
                 fn RCon() => {
                     c := e.f.get_constant(i.arg&[0]);
                     off := c.bits.i;
+                    @debug_assert(c.type == .CAddr, "cannot call a constant");
                     use_symbol(e.m, c.sym.id) { symbol |
                         @debug_assert_eq(off, 0, "call to offset from symbol $% seems like a mistake?", symbol.name);
                         current_offset := e.start_of_function + e.a.len();
@@ -767,7 +772,7 @@ fn push_instruction(e: *AmdState, b: EncodedArgs, ops: []u8) void = {
                         write(e.m.debug_out, items(@format("# direct offset % for '%' %[%]\n", b.disp, symbol.name, symbol.segment, symbol.offset) temp()));
                     };
                 } else {
-                    @debug_assert(symbol.kind != .DynamicPatched, "TODO: somehow have to convert this to a got load?");
+                    @debug_assert(symbol.kind != .DynamicPatched, "TODO: somehow have to convert this to a got load? $% % %", symbol.name, symbol.jit_addr, ops[0]);
                     @debug_assert(!e.m.got_indirection_instead_of_patches, "TODO: somehow have to convert this to a got load");
                     if e.m.debug["T".char()] {
                         write(e.m.debug_out, items(@format("# pending ref to '%'\n", symbol.name) temp()));

@@ -352,7 +352,6 @@ fn fill_export_ffi(out: *List(u8)) void = {
         // This just gives a place to assert we haven't got any weird feature flags turned on while porting stuff over from rust. 
         // It gets a bit scary if the first thing you try to compile is accidentally the compiler so if it miscompiles you're fucked now. 
         // It's philosophically important that we don't actually change behaviour based on this information tho.
-        //@assert(current_comptime().comp().get_build_options()[].implicit_context_runtime, "the compiler itself cannot be compiled with -ctx=static");
     };
     
     @fmt(out, "fn compile_error(msg: Str, loc: Span) Never #ct #comptime_addr(%);\n", report_err);
@@ -387,33 +386,20 @@ fn fill_export_ffi(out: *List(u8)) void = {
         info
     };
     
-    // TODO: redundant with get_type_info_ref. just impl this in the language.
-    @fmt(out, "fn get_type_info(T: Type) TypeInfo #fold #ct #comptime_addr(%);\n", ty_info);
-    ty_info: rawptr : fn(ty: Type) TypeInfo = {
-        c := current_comptime();
-        info := c.get_type(ty);
-        while => info.is(.Named) {
-            info = c.get_type(info.Named._0);
-        };
-        info[]
-    };
+    // TODO: take this out of the compiler
+    push_all(out, "fn get_type_info(T: Type) TypeInfo #fold = { get_type_info_ref(T)[] }\n");
     
     @fmt(out, "fn Ty(fst: Type, snd: Type) Type #fold #ct #comptime_addr(%);\n", tuple2);
     tuple2: rawptr : fn(fst: Type, snd: Type) Type = {
         current_comptime().tuple_of(@slice(fst, snd))
     };
-    @fmt(out, "fn Ty(fst: Type, snd: Type, trd: Type) Type #fold #ct #comptime_addr(%);\n", tuple3);
-    tuple3: rawptr : fn(fst: Type, snd: Type, trd: Type) Type = {
-        current_comptime().tuple_of(@slice(fst, snd, trd))
-    };
-    @fmt(out, "fn Ty(fst: Type, snd: Type, trd: Type, frt: Type) Type #fold #ct #comptime_addr(%);\n", tuple4);
-    tuple4: rawptr : fn(fst: Type, snd: Type, trd: Type, frt: Type) Type = {
-        current_comptime().tuple_of(@slice(fst, snd, trd, frt))
-    };
-    @fmt(out, "fn Ty(types: []Type) Type  #fold #ct #comptime_addr(%);\n", tuplen);
+    @fmt(out, "fn Ty(types: []Type) Type #fold #ct #comptime_addr(%);\n", tuplen);
     tuplen: rawptr : fn(types: []Type) Type = {
         current_comptime().tuple_of(types)
     };
+    // TODO: take this out of the compiler
+    push_all(out, "fn Ty(fst: Type, snd: Type, trd: Type) Type #fold = { Ty(@slice(fst, snd, trd)) }\n");
+    push_all(out, "fn Ty(fst: Type, snd: Type, trd: Type, frt: Type) Type #fold = { Ty(@slice(fst, snd, trd, frt)) }\n");
    
     @fmt(out, "fn rawptr_from_value(value: *Values) rawptr #comptime_addr(%);\n", rawptr_from_value);
     rawptr_from_value: rawptr : fn(value: *Values) i64 = value.jit_addr();
@@ -738,7 +724,6 @@ fn fill_export_ffi(out: *List(u8)) void = {
         current_comptime().get_info(s)[]
     };
     
-    
     @fmt(out, "fn ast_alloc() Alloc #ct #comptime_addr(%);\n", get_aa);
     get_aa: rawptr : fn() Alloc = {
         current_comptime().get_alloc()
@@ -780,8 +765,7 @@ fn fill_export_ffi(out: *List(u8)) void = {
         finish_layout(current_comptime(), type);
     };
     
-    @fmt(out, "__builtin_compiler_has_feature :: fn(feature_name: Str) bool #ct #comptime_addr(%) #fold;\n", has_feature);
-    has_feature: rawptr : fn(s: Str) bool = {
+    push_all(out, """__builtin_compiler_has_feature :: fn(s: Str) bool #ct = {
         // import(Str) can load ("@/..." a filepath like #include_std) or ("{ ... };" some code) as a scope value for #use
         if(s == "@franca/import",      => return(true));
         // after calling enable_franca_ir_types, the argument of #ir can be any comptime expression, not just an identifier to find in the enum
@@ -789,7 +773,7 @@ fn fill_export_ffi(out: *List(u8)) void = {
         // new ir operations
         if(s == "@franca/bitops", => return(true)); 
         false
-    };
+    };""");
     
     @fmt(out, "fn import(descriptor: Str) ScopeId #ct #comptime_addr(%) #fold;\n", do_import);
     do_import: rawptr : fn(descriptor: Str) ScopeId = {
