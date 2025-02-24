@@ -1,0 +1,312 @@
+//!
+//! Llvm treats integers and pointers as distinct types so we insert casts as needed.
+//! This is kinda silly because the frontend knew the information, we forced it to throw it away, and now we're reconstructing it.
+//! But like, pointers *are* integers, computer can't tell the difference, its a pain to track something that doesn't matter on the other backends. 
+//!
+//! Similarly llvm comparisons/jumps use i1 so we insert extensions/trunctations,
+//! but that offends me less than the pointers thing. 
+//! note: jnz isn't a truncation because it looks at the whole number not just the bottom bit.
+//!
+//! TODO: The main pain is `add` is only for integers but we use it for offseting pointers.
+//!       Maybe it would be better to use GEP but we don't have type information. 
+//!       I think you're allowed to just offset from an i8 but I can't get it to work on the old llvm backend.
+//!
+
+CastCtx :: @struct(
+    f: *Qbe.Fn,
+    tmps: QList(LlvmTmp),
+);
+
+LlvmTmp :: @struct(
+    casts: Array(Qbe.Ref, MAX_CASTS),
+    types: Array(Qbe.TmpType, MAX_CASTS),
+);
+MAX_CASTS :: 5;
+
+LlvmCast :: @enum(i64) (
+    None,
+    IntToPtr,
+    PtrToInt,
+    ExtendI1,
+    CmpZero,
+    TruncLtoW,
+    TruncWtoB,
+    TruncWtoH,
+);
+::if(LlvmCast);
+
+// TODO: i must be able to do this in fewer passes but I just want it to work first. :SLOW
+// TODO: be better about unifying phi types. its fine if they're ptr/bool as long as all args are the same. 
+// sets width fields of tmps.
+fn insert_redundant_casts(f: *Qbe.Fn) void = {
+    c: CastCtx = (
+        f = f, 
+        tmps = new(f.ntmp.zext() * 2, .PFn),
+    );
+    each f.tmps() { t |
+        t.visit = 0;
+    };
+    f.reset_scratch();
+    
+    // Note the types of all created tmps
+    for_blocks f { b |
+        for_phi b { p | 
+            if p.to != QbeNull {
+                c.f.tmp[p.to.val()].width = if(p.cls == .Kw, => .Wuw, => .WFull);
+            };
+        };
+        for_insts_forward b { i |
+            out, _ := i.llvm_types();
+            if i.to != QbeNull {
+                c.f.tmp[i.to.val()].width = out;
+            };
+        };
+    }; 
+    
+    // note the types of all usages
+    for_blocks f { b |
+        for_insts_forward b { i |
+            _, args := i.llvm_types();
+            range(0, 2) { a |
+                continue :: local_return;
+                if rtype(i.arg&[a]) == .RTmp {
+                    c&.request_cast(i.arg&[a], args&[a]);
+                };
+            };
+        };
+        for_phi b { p | 
+            range(0, p.narg.zext()) { a |
+                c&.request_cast(p.arg&.index(a)[], if(p.cls == .Kw, => .Wuw, => .WFull));
+            };
+        };
+        if b.jmp.type == .Jjnz {
+            c&.request_cast(b.jmp.arg, .LBool);
+        };  
+        
+        if is_ret(b.jmp.type) {
+            if b.jmp.type == .Jretc {
+                c&.request_cast(b.jmp.arg, .LPtr);
+            } else {
+                c&.request_cast(b.jmp.arg, if(b.jmp.type == .Jretw, => .Wuw, => .WFull));
+            };
+        };  
+    };  
+    
+    // emit instructions. inserting casts after creations as needed. 
+    for_blocks f { b |
+        if b.jmp.type == .Jjnz {
+            c&.fix_arg(b.jmp.arg&, .LBool);
+        };  
+        if is_ret(b.jmp.type) {
+            if b.jmp.type == .Jretc {
+                c&.fix_arg(b.jmp.arg&, .LPtr);
+            } else {
+                c&.fix_arg(b.jmp.arg&, if(b.jmp.type == .Jretw, => .Wuw, => .WFull));
+            };
+        };
+        for_insts_rev b { i |
+            out, args := i[].llvm_types();
+            c&.emit_requested_casts(i.to);
+            
+            if i[].op().is_load() && i[].op() != .load {
+                no_extend := (i[].op() == .loadsw || i[].op() == .loadsw) && i[].cls() == .Kw;
+                if !no_extend {
+                    r := f.newtmp("isel", i[].cls());
+                    ext_op := @as(Qbe.O) @as(i32) i[].op().raw() - Qbe.O.loadsb.raw() + Qbe.O.extsb.raw();
+                    f.emit(ext_op, i[].cls(), i.to, r, QbeNull);
+                    i.to = r;
+                };
+            };
+            if i[].op() == .vastart {
+                a := i.arg&[0];
+                i[].set_op(.call);
+                con := Qbe.Con.zeroed();
+                con.type =. CAddr;
+                con.sym.id = f.globals.intern("llvm.va_start.p0".sym().c_str());
+                i.arg&[0] = f.newcon(con&);
+                f.emit(i[][]);
+                i[].set_op(.arg);
+                //i[].set_cls(.Wl);
+                i.arg&[0] = a;
+            };
+            x := f.emit(i[][]);
+            range(0, 2) { a |
+                c&.fix_arg(x.arg&.index(a), args&[a]);
+            };
+        };
+        for_phi b { p | 
+            c&.emit_requested_casts(p.to);
+            range(0, p.narg.zext()) { a |
+                // TODO: i think this is wrong if the arg is a constant so it ends up emitting insts here instead of at end of source block?
+                c&.fix_arg(p.arg&.index(a), if(p.cls == .Kw, => .Wuw, => .WFull));
+            };
+        };
+        f.copy_instructions_from_scratch(b);
+    };
+    if f.globals.debug["I".char()] {
+        write(f.globals.debug_out, "\n> After instruction selection:\n");
+        printfn(f, f.globals.debug_out);
+    };
+}
+
+fn request_cast(c: *CastCtx, r: Qbe.Ref, want: Qbe.TmpType) void = {
+    if(rtype(r) != .RTmp, => return()); // TODO
+    id := r.val();
+    info := c.tmps[id]&;
+    range(0, MAX_CASTS) { i | 
+        if info.casts&[i] != QbeNull {
+            if info.types&[i] == want {
+                return();
+            };
+        } else {
+            info.types&[i] = want;
+            if want == c.f.tmp[id].width {
+                info.casts&[i] = r;
+            } else {
+                info.casts&[i] = c.f.newtmp("isel", .Kl);
+            };
+            return();
+        };
+    };
+    panic("raise MAX_CASTS!");
+}
+
+::enum_basic(Qbe.UseType);
+::enum_basic(Qbe.TmpType);
+::if(Qbe.TmpType);
+
+fn fix_arg(c: *CastCtx, arg: *Qbe.Ref, want: Qbe.TmpType) void = {
+    if rtype(arg[]) == .RCon {
+        con := c.f.get_constant(arg[]);
+        if want != .LPtr && con.type == .CAddr {
+            r := c.f.newtmp("isel", .Kl);
+            c.emit_cast(r, arg[], want, .LPtr);
+            arg[] = r;
+        };
+        if want == .LPtr && con.type == .CBits {
+            // Trying to use an int literal as a pointer is sketchy but technically legal. 
+            // See conaddr.ssa for a contrived test that gets here. 
+            // A more sane usecase would be jitting code that embeds pointers. 
+            r := c.f.newtmp("isel", .Kl);
+            c.emit_cast(r, arg[], .LPtr, .WFull);
+            arg[] = r;
+        };
+        
+        return();
+    };
+    if(rtype(arg[]) != .RTmp, => return());
+    id := arg[].val();
+    original := c.f.tmp[id].width;
+    if original != want {
+        info := c.tmps[id]&;
+        range(0, MAX_CASTS) { i | 
+            @assert(info.casts&[i] != QbeNull, "cast not found");
+            if(info.casts&[i] == QbeNull, => return()); // TODO
+            if info.types&[i] == want {
+                arg[] = info.casts&[i];
+                return();
+            };
+        };
+        panic("raise MAX_CASTS");
+    };
+}
+
+fn emit_requested_casts(c: *CastCtx, r: Qbe.Ref) void = {
+    if(rtype(r) != .RTmp, => return());
+    id := r.val();
+    info := c.tmps[id]&;
+    original := c.f.tmp[id].width;
+    range(0, MAX_CASTS) { i | 
+        dest := info.casts&[i];
+        if(dest == QbeNull, => return());
+        if dest != r {
+            c.emit_cast(dest, r, info.types&[i], original);
+        };
+    };
+    panic("raise MAX_CASTS");
+}
+
+fn emit_cast(c: *CastCtx, dest: Qbe.Ref, src: Qbe.Ref, dest_ty: Qbe.TmpType, src_ty: Qbe.TmpType) void = {
+    c.tmps&.grow(c.f.ntmp.zext());
+    
+    cast := cast_type(dest_ty, src_ty).raw();
+    c.f.emit(.llcast, .Kl, dest, src, INT(cast));
+    if rtype(dest) == .RTmp {
+        c.f.tmp[dest.val()].width = dest_ty;
+        c.tmps[dest.val()].types&[0] = src_ty;
+        c.tmps[dest.val()].casts&[0] = src;
+    };
+}
+
+fn cast_type(dest: Qbe.TmpType, src: Qbe.TmpType) LlvmCast = {
+    @debug_assert(dest != src, "dont need a cast");
+        
+    @match(dest) {
+        fn WFull() => if(src == .LBool, => .ExtendI1, => .PtrToInt);
+        fn LPtr() => .IntToPtr;
+        fn LBool() => .CmpZero;
+        @default => {
+            if (dest == .Wuw || dest == .Wsw) {   
+                if src == .WFull {
+                    return(.TruncLtoW);
+                };
+                if src == .LBool {
+                    return(.ExtendI1);
+                };
+                panic("TODO: to wrod");
+            };
+            if (dest == .Wub || dest == .Wsb) {   
+                if (src == .Wuw || src == .Wsw)  {
+                    return(.TruncWtoB);
+                };
+                if src == .WFull {
+                    panic("TODO: TruncLtoB");
+                };
+                panic("TODO: to byte");
+            };
+            if (dest == .Wuh || dest == .Wsh) {   
+                if (src == .Wuw || src == .Wsw)  {
+                    return(.TruncWtoH);
+                };
+                panic("TODO: to hlaf");
+            };
+            
+            @panic("tmp.width not set to an llvm type. %", @as(i64) dest.raw().zext());
+        };
+    }
+}
+
+// (to, arg)
+fn llvm_types(i: *Qbe.Ins) Ty(Qbe.TmpType, Array(Qbe.TmpType, 2)) = {
+    o := i.op();
+    yield :: fn(to: Qbe.TmpType, a0: Qbe.TmpType, a1: Qbe.TmpType) => {
+        xxx := Array(Qbe.TmpType, 2).uninitialized(); // TODO: why can't i call init :FUCKED
+        if a0 == .WFull && argcls(i, 0) == .Kw {
+            a0 = .Wuw;
+        };
+        if a1 == .WFull && argcls(i, 1) == .Kw {
+            a1 = .Wuw;
+        };
+        if to == .WFull && i.cls() == .Kw {
+            to = .Wuw;
+        };
+        xxx&.index(0)[] = a0;
+        xxx&.index(1)[] = a1;
+        return(to, xxx)
+    };
+    if o == .call {
+        yield(if(i.arg&[1] == QbeNull, => .WFull, => .LPtr), .LPtr, .WFull);
+    };
+    if(o.is_load() || o == .vastart || o == .vaarg, => yield(.WFull, .LPtr, .WFull));
+    if(o == .storeb, => yield(.WFull, .Wub, .LPtr));
+    if(o == .storeh, => yield(.WFull, .Wuh, .LPtr));
+    if(o == .argc, => yield(.WFull, .WFull, .LPtr));
+    if(o.is_store(), => yield(.WFull, .WFull, .LPtr)); // TODO: could store ptr if thats what you have tho
+    if(o == .blit0, => yield(.WFull, .LPtr, .LPtr));
+    if(o.between(.alloc4, .alloc16), => yield(.LPtr, .WFull, .WFull));
+    if(o.between(.ceqw, .cuod), => yield(.LBool, .WFull, .WFull));
+    if(o == .extub || o == .extsb, => yield(.WFull, .Wub, .WFull));
+    yield(.WFull, .WFull, .WFull)
+}
+
+::enum_basic(LlvmCast);
