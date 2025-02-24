@@ -585,13 +585,23 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
        
     find_import :: fn(lib_name: Symbol) bool => {
         ret :: local_return;
-        handle := self.comptime_libraries&.get(lib_name);
-        if handle { handle |
+        handle2 := self.comptime_libraries&.get(lib_name);
+        is_libc := lib_name == Flag.libc.ident();  
+        while => handle2 { handle |
             name := self.get_link_name(func);
             addr := handle.dlsym(name);
             if !addr.is_null() {
                 found_comptime_import(addr);
                 ret(true);
+            };
+            handle2 = .None;
+            // :MultiDylibLibc HACK
+            if is_libc && self.comptime_codegen.m.goal.os == .linux { 
+                next_name := @tfmt("%*", self.pool.get(lib_name));
+                if self.pool.lookup&.get(next_name) { s |
+                    lib_name = s;
+                    handle2 = self.comptime_libraries&.get(lib_name);
+                };
             };
         };
         // :AssumeDones
@@ -858,6 +868,33 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
                 renamer_func_ptr := i64.assume_cast(renamer_func_ptr&)[];
                 func.nullable_link_rename_func = renamer_func_ptr;
                 self.dispatch.enclosing_function = old;
+            };
+            @case(Flag.syscall.ident()) => {
+                good = true;
+                NUM_TARGETS :: 3;
+                numbers := self.get_alloc().alloc(i32, NUM_TARGETS);
+                arg := @unwrap(tag.non_void_arg(), "#syscall requires arg") return;
+                self.last_loc = arg.loc;
+                arg := arg.items();
+                @err_assert(arg.len == NUM_TARGETS, "#syscall expected % cases", NUM_TARGETS) return;
+                range(0, NUM_TARGETS) { i |
+                    continue :: local_return;
+                    arg := arg.index(i);
+                    self.last_loc = arg.loc;
+                    // `_` means not implemented for this target. 
+                    if arg.ident() { name | 
+                        if name == Flag._.ident() {
+                            numbers[i] = -1;
+                            continue();
+                        };
+                    };
+                    numbers[i] = @check(self.eval(arg, i32)) return;  // :get_or_create_type
+                    if i == 2 {
+                        numbers[i] += 0x2000000;  // macos
+                    };
+                };
+                impl := find_or_create_impl(func.body&, self.get_alloc(), .Syscall);
+                impl[] = numbers;
             };
             @default => ();
         };
@@ -3467,6 +3504,9 @@ fn update_function_metadata(self: *SelfHosted, func: *Func, os: ?OverloadSet) Re
             @case(Flag.c_variadic.ident()) => {
                 func.set_flag(.CVariadic);
                 func.set_flag(.NoInline);  // TODO
+            };
+            @case(Flag.syscall.ident()) => {
+                func.set_flag(.BodyIsSpecial);
             };
             @default => ();
         };

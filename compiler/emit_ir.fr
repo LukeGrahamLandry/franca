@@ -1,6 +1,9 @@
 // TODO: less stupid code for accessing constant values!
 // TODO: always check for zero sized type instead of == void
 
+// TODO: put this in BuildOptions 
+TEMPORARY_PREFER_RAW_SYSCALLS :: true && has_feature("@franca/bitops");
+
 EmitIr :: @struct(
     f: *Qbe.Fn,
     program: CompCtx,
@@ -267,6 +270,28 @@ fn finalize_blocks(self: *EmitIr) void = {
     @debug_assert(ok, "ICE: unterminated block");
 }
 
+fn want_syscall(self: *EmitIr, fid: FuncId) ?i64 = {
+    fn current_target_syscall_index(self: *EmitIr) i64 = {
+        if(self.m.goal.os   == .macos,   => return(2));
+        if(self.m.goal.os   != .linux,   => return(-1));
+        if(self.m.goal.arch == .aarch64, => return(0));
+        if(self.m.goal.arch == .x86_64,  => return(1));
+        -1
+    }
+    
+    func := self.program.get_function(fid);
+    
+    @if(TEMPORARY_PREFER_RAW_SYSCALLS) 
+    if choose_impl(func.body&, @const_slice(FuncImpl.Tag().Syscall)) { impl | 
+        impl := impl.Syscall;
+        i := self.current_target_syscall_index();
+        if i >= 0 && impl[i] != (@as(i32)-1) {
+            return(Some = impl[i].intcast());
+        };
+    };
+    .None
+}
+
 fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = { // #log_ir("AIR") 
     func := self.program.get_function(f);
     
@@ -282,6 +307,20 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = { // #log_ir("AIR")
     
     self.f.start = self.new_block("start");
     self.blk = self.f.start;
+    
+    if self.want_syscall(self.func) { syscall_number |
+        arg_ty := func.finished_arg.unwrap();
+        args := emit_par_instructions(self.program, self.shared, func.arg&, arg_ty, self.f);
+        each args { a | 
+            self.emit(.arg, a.k, QbeNull, a.r, QbeNull);
+        };
+        r := self.f.newtmp("ir", .Kl);
+        callee := self.f.getcon(syscall_number);
+        self.emit(.syscall, .Kl, r, callee, QbeNull);
+        self.blk.jmp = (type = .retl, arg = r);
+        self.finalize_blocks();
+        return(.Ok);
+    };
     
     T :: FuncImpl.Tag();
     prio_amd :: @const_slice(T.NewIntrinsic, T.Normal, T.Intrinsic, T.ComptimeAddr, T.TargetOsSplit, T.X86AsmBytes, T.Redirect, T.DynamicImport);
@@ -802,6 +841,8 @@ fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) CRes(Qbe.R
             
             T :: FuncImpl.Tag();
             prio :: @const_slice(T.NewIntrinsic, T.Intrinsic, T.DynamicImport);
+            
+            @if(self.want_syscall(f_id).is_none())
             if choose_impl(func.body&, prio) { impl | 
                 @match(impl) {
                     fn NewIntrinsic(op) => {
@@ -840,9 +881,6 @@ fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) CRes(Qbe.R
             context := !callee.get_flag(.NoContext);
             if context {
                 caller.set_flag(.YesContext);
-            };
-            if self.debug {
-                // TODO: O.dbgloc would be nice
             };
             
             args := @try(self.compile_for_arg(arg)) return;

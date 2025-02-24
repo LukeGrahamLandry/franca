@@ -10,11 +10,11 @@
 //! (ie. `open` becomes `openat` of `AT_FDCWD`), and are not implemented on all architectures (*cough* arm64 *cough*). 
 //! In those cases, a body is provided to do the translation so you don't have to link a libc for something boring. 
 //! Linux is big on stable syscall interface, apple not so much. 
-//! TODO: impliment #syscall (for now we just dynamically link a libc like normal), it has a different calling convention!
 //! - https://gpages.juszkiewicz.com.pl/syscalls-table/syscalls.html
 //! - https://github.com/opensource-apple/xnu/blob/master/bsd/kern/syscalls.master
+// TODO: deal with #syscall not setting errno. but really you want the reverse. returning the error as a value is more sane.
+// TODO: pipe function declarations through the driver program and have a demo where you diy ptrace.  
 
-// TODO: you can't use @match here because its needed in mmap_anon
 fn LibcType(os: Os) Type #fold = @match(os) {
     fn macos() => MacosLibc;
     fn linux() => LinuxLibc;
@@ -24,25 +24,24 @@ fn LibcType(os: Os) Type #fold = @match(os) {
 // TODO: use my own verions for the ones that are just code not magic platform shit apple wont let me do. 
 fn malloc(size: usize) rawptr #libc;
 fn free(ptr: rawptr) void #libc;
- 
-fn puts(ptr: CStr) void #libc; // nice for testing when everythings broken
 
-fn sqrt(i: f64) f64 #libc;
+fn puts(ptr: CStr) void #libc; // nice for testing when everythings broken
 
 Fd :: @struct(fd: i32); // fd is non-negative (except for when it's not)
 // Note: the magic numbers for OpenFlag are different on macos and linux!
 fn open(null_terminated_path: CStr, flags: i64) FdResult #libc; // use AT_FDCWD
 fn read(fd: Fd, buf: *u8, size: i64) i64Result #libc #syscall(63, 0, 3);
 fn write(fd: Fd, buf: *u8, size: i64) i64Result #libc #syscall(64, 1, 4);
-fn close(fd: Fd) voidResult #libc #syscall(57, 3) #syscall(57, 3, 6);
+fn close(fd: Fd) voidResult #libc #syscall(57, 3, 6);
 fn lseek(fd: Fd, offset: i64, whence: Whence) i64Result #libc #syscall(62, 8, 199);
 fn remove(filepath: CStr) voidResult #libc;
 fn opendir(path: CStr) *Dir #link_rename(append_inode64_on_applex8664) #libc; // TODO: nullable niche
 fn closedir(dir: *Dir) voidResult #libc;
 // TODO: mode is a bit flag of AccessMode
-fn access(pathname: CStr, mode: i64) voidResult #libc;  // TODO: bit flags
-fn getcwd(buf: [] u8) CStrResult #libc; // :slice_abi this relies on my abi passing slices as (ptr, len) in registers like seperate args!
-fn readlink(pathname: CStr, buf: []u8) i64Result #libc; // :slice_abi
+fn access(pathname: CStr, mode: i64) voidResult #libc #syscall(_, 21, 33); // TODO: bit flags
+// TODO: on linux the syscall version might be prefixed by "(unreachable)" which should be an error or something
+fn getcwd(buf: [] u8) CStrResult #libc #syscall(17, 79, _); // :slice_abi this relies on my abi passing slices as (ptr, len) in registers like seperate args!
+fn readlink(pathname: CStr, buf: []u8) i64Result #libc #syscall(_, 89, 58); // :slice_abi
 // Last 6 chars of template must be XXXXXX and they will be mutated to the temp filename. 
 fn mkstemp(template: CStr) FdResult #libc;
 
@@ -104,7 +103,7 @@ fn poll(fds: []PollFds, timeout: i32) i32Result #libc; // :slice_abi
 fn rename(oldpath: CStr, newpath: CStr) voidResult #libc;
 
 TimeSpec :: @struct(seconds: i64, nanoseconds: i64);
-fn clock_gettime(clock_id: i64, time_spec: *TimeSpec) void #libc #syscall(113, 228);
+fn clock_gettime(clock_id: i64, time_spec: *TimeSpec) void #libc #syscall(113, 228, _); // TODO: macos syscall
 
 // TODO: i think this is an ioctl
 Terminos :: @struct(iflag: u64, oflag: u64, cflag: u64, lflag: u64, cc: Array(u8, 20), ispeed: u64, ospeed: u64);
@@ -127,7 +126,7 @@ fn get_errno() i64 = {
         };
         req.out.push_all(n);
     };
-    impl :: fn() *i32 #libc #link_rename(name);
+    impl :: fn() *i32 #link_rename(name) #libc;
     impl()[].zext()
 }
 
@@ -322,7 +321,7 @@ fn unwrap(self: CStrResult) CStr = {
     self.value
 }
 fn or(self: CStrResult, $else: @Fn() CStr) CStr = {
-    if(self.is_ok(), => self.unwrap(), else)
+    @if(self.is_ok(), self.unwrap(), else())
 }
 fn is_ok(self: CStrResult) bool = !self.value.ptr.is_null();
 i32Result :: @struct(value: i32);
@@ -345,13 +344,12 @@ append_inode64_on_applex8664 :: fn(req: *LinkRenameArg) void = {
     };
 };
 
-fn find_os_libc_dylib() ?CStr #target_os = (fn($os) => @match(os) {
-    fn macos() => (Some = "/usr/lib/libc.dylib".sym().c_str());
-    // TODO: check if it exists, and check other options, and maybe return null
-    //       want to support blink where you have to be statically linked. 
-    // :WhichLibc
-    fn linux() => (Some = "/lib/x86_64-linux-gnu/libc.so.6".sym().c_str());
-    fn wasip1() => .None;
+glibc_dylib_paths :: @const_slice("libc.so.6", "libdl.so.2", "libpthread.so.0", "libm.so.6");
+macos_dylib_paths :: @const_slice("/usr/lib/libc.dylib");
+fn find_os_libc_dylib() []Str #target_os = (fn($os) => @match(os) {
+    fn macos() => macos_dylib_paths;
+    fn linux() => glibc_dylib_paths; // TODO: what about other libcs? we need more information about the target (or to snoop around?)
+    fn wasip1() => empty();
 });
 
 FILE :: @struct();

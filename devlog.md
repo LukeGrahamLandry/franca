@@ -1,5 +1,17 @@
 - TODO: deal with `CodegenEntry:Bounce` on wasm
 
+##
+
+- hacky fix for `#libc` to work with multiple lib files.  
+- ssh-keygen && ssh-copy-id luke@cache
+- internet says
+```
+brew install fswatch
+alias run_rsync='rsync -azP --exclude ".*/" --exclude ".*" --exclude "*.out" --exclude "target/" --exclude "editors/" "./" luke@cache:./franca'
+run_rsync; fswatch -o . | while read f; do run_rsync; done
+```
+eventually should write my own with CoreServices/fsevents but also i don't care that much yet. 
+
 ## (Feb 21/22)
 
 - catch signals (segfault etc) and show backtrace. 
