@@ -1,0 +1,24 @@
+/// This target is not included by default when you import(backend).
+/// You can manually load this file and call `use_llvm_backend` to 
+/// poke it into the vtable (after initializing the module to another target). 
+/// Then finish_module will give you llvm-ir text instead of a native binary. 
+
+#include_std("backend/llvm/isel.fr");
+#include_std("backend/llvm/emit.fr");
+
+fn use_llvm_backend(m: *QbeModule) void = {
+    @assert_ne(m.goal.type, .JitOnly, "jit with llvm is not supported");
+    m.target.finish_passes = finish_passes_llvm;
+    m.target.finish_module = finish_llvm;
+    m.target.data = emit_llvm;
+    m.target.emit_fn = emit_llvm; // compiler/worker.fr/do_codegen calls this directly 
+}
+
+fn finish_passes_llvm(f: *Qbe.Fn) void = {
+    m := f.globals;
+    // TODO: this is super wasteful! it's just because folding sel0 inserts a copy and llvm doesn't have an instruction for that. 
+    //       we could just fix args of the one we know is wrong or look at def in isel.
+    copy_elimination(f); 
+    insert_redundant_casts(f);
+    m.emit_llvm(f);
+}

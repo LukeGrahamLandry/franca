@@ -857,7 +857,7 @@ fn deref_top_of_stack(self: *EmitBc, result_location: ResultLoc, value_type: Typ
                         self.push(Load = .I64);
                         self.push(StorePre = .I64);
                     } else {
-                        bytes := info.stride_bytes;
+                        bytes := info.stride_bytes();
                         self.push(CopyBytesToFrom = bytes);
                     };
                 };
@@ -873,7 +873,7 @@ fn deref_top_of_stack(self: *EmitBc, result_location: ResultLoc, value_type: Typ
 fn zero_memory_at_top_of_stack(self: *EmitBc, expr_ty: Type) void = {
     info := self.program.get_info(expr_ty);
     align := info.align_bytes.min(8);
-    chunks := info.stride_bytes / align;
+    chunks := info.stride_bytes() / align;
     prim := @switch(align) {
         @case(1) => Prim.I8;
         @case(2) => Prim.I16;
@@ -1164,7 +1164,7 @@ fn emit_value(self: *EmitBc, value: *Values, result_location: ResultLoc, expr_ty
             self.result.mix_hash(id.id.zext(), 9765);
             self.push(PushGlobalAddr = id);
             info := self.program.get_info(expr_ty);
-            self.push(CopyBytesToFrom = info.stride_bytes);
+            self.push(CopyBytesToFrom = info.stride_bytes());
         };
         return(.Ok);
     };
@@ -1599,8 +1599,8 @@ fn index(self: *FnBody, b: BbId) *BasicBlock = {
 
 fn add_var(ctx: *EmitBc, ty: Type) u16 = {
     info := ctx.program.get_info(ty);
-    ctx.result.mix_hash(info.stride_bytes.zext(), 12345);
-    ctx.result.vars&.push((size = info.stride_bytes, align = info.align_bytes), ctx.out_alloc);
+    ctx.result.mix_hash(info.stride_bytes().zext(), 12345);
+    ctx.result.vars&.push((size = info.stride_bytes(), align = info.align_bytes), ctx.out_alloc);
     i: u16 = ctx.result.vars.len.trunc();
     i - 1
 }
@@ -1720,9 +1720,9 @@ fn deconstruct_values(program: CompCtx, ty: Type, bytes: *ReadBytes, out: *List(
     @debug_assert_eq(bytes.i.mod(info.align_bytes.zext()), 0);
     found_len := bytes.bytes.len() - bytes.i;
     @err_assert(
-        found_len >= info.stride_bytes.zext(),
+        found_len >= info.stride_bytes().zext(),
         "deconstruct_values of % wants % bytes but found %: %",
-        program.log(ty), info.stride_bytes, found_len, {
+        program.log(ty), info.stride_bytes(), found_len, {
             bytes := bytes.bytes.slice(bytes.i, bytes.bytes.len);
             out: List(u8) = list(temp());
             for bytes{ b | 
@@ -1761,7 +1761,7 @@ fn deconstruct_values(program: CompCtx, ty: Type, bytes: *ReadBytes, out: *List(
             @err_assert(tag < f.cases.len, "Invalid tag % in constant", tag) return;
             case := f.cases.index(tag);
             @try(deconstruct_values(program, case._1, bytes, out, offsets)) return;
-            padding := (@as(i64) info.stride_bytes.zext()) - (bytes.i - start);
+            padding := (@as(i64) info.stride_bytes().zext()) - (bytes.i - start);
             @err_assert(padding >= 0, "ICE: confused about @tagged size.") return;
             end_count := out.len;
             padding_slots := (@as(i64) info.size_slots.zext()) - (end_count - start_count);
@@ -1794,7 +1794,7 @@ fn deconstruct_values(program: CompCtx, ty: Type, bytes: *ReadBytes, out: *List(
         fn Enum(f)   => return(deconstruct_values(program, f.raw, bytes, out, offsets));
         fn Named(f)  => return(deconstruct_values(program, f._0, bytes, out, offsets)); // TODO: make Named payload not a tuple or do destructuring here. -- Jul 8
         fn Int(_)    => {
-            @switch(program.get_info(ty)[].stride_bytes) {
+            @switch(program.get_info(ty).stride_bytes()) {
                 @case(1) => u8.single(.I8);
                 @case(2) => u16.single(.I16);
                 @case(4) => u32.single(.I32);
@@ -1813,7 +1813,7 @@ fn deconstruct_values(program: CompCtx, ty: Type, bytes: *ReadBytes, out: *List(
             @err_assert(f.layout_done, "ICE: layout not ready") return;
             @err_assert(!f.is_union, "You can't deconstruct_values of a union because we don't know which varient is active.") return;
             prev := 0;
-            size: i64 = program.get_info(ty)[].stride_bytes.zext();
+            size: i64 = program.get_info(ty).stride_bytes().zext();
             start := bytes.i;
             for f.fields { t |
                 assert(prev <= t.byte_offset, "ICE: backwards field offset");

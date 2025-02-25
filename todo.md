@@ -7,10 +7,57 @@
 
 ##
 
+- make comptime.fr exporting stuff less painful 
+- make namespacing nice enough that i can have less stuff loaded in every program by `core.fr`
+- make #macro less of a special case? it would be nice if it could participate in overloading on some arguments. 
+so you could say `fn fmt(out: *List(u8), template: Str, arg: FatExpr #macro) FatExpr`. 
+then you need a new way to express that you need `template` to be constant in the program but 
+it can be runtime known in the body of the fmt macro. 
+- get more strict about calling conventions
+- sema needs to get simplified. 
+- #generic is painful
+- more powerful driver program. it should be able to see all your functions stream by and poke things in. 
+ie. ptrace demo (see libc.fr). 
+the more immediate problem that would solve for me is being able to use newer language features 
+by patching them out without updaing the whole ./boot binary. 
+ie. add a rotr instruction and instead of needing to keep a has_feature() uglying up the code forever,
+could put that fallback implementation in the driver program and it could fix things from the outside. 
+the thing that's painful is then you have programs that can only be compiled by a specific driver and they don't compose well. 
+- try to move some of #asm #libc #ir #import #import_os #link_rename #syscall #log_ast 
+to a more powerful thing where you can give a function to transform the body. 
+so like maybe `#with(asm, "aarch64")` would call `asm(fid, "aarch64")`. 
+if i had that i could rename #x86_bytes without updating ./boot. 
+maybe this could just be done with the driver program. 
+you also want like a first class thing for choosing implementations. 
+so instead of #import_os being a hardcoded painful thing, and emit_ir 
+also having super ugly stuff with FuncImpl, it would be nice if we just 
+called some comptime function and passed everything we know about the target and it 
+could choose. 
+- make #where type inference more powerful.
+this is super important for making ResolveOverload faster. 
+and for being more out of order because you wouldn't need to `::Foo(T)` all over the place. 
+but it's hard to test until i replace everything and it's hard to replace everything until i test. 
+maybe a good starting point would be to convert `fn(a, b) => ()` without type annotations to `fn(a: ~_0, b: ~_1) => ()`,
+and make sure to deduplicate by type (rn we re-sema every call which is sad). 
+- there's a bunch of library-ish / style things that need more work to get to the pointer where
+the right/fast/safe/whatever thing to do is also the easy thing to do. 
+  - make number casts less annoying and less error prone 
+  - do a pass at trying to replace pointer<->int casts with some higher level thing
+  - be consistant about using rawptr when it's a pointer (not i64)
+  - replacement for thread locals by dynamically adding things to the context. 
+  need to be able to do it from jit as well (ie. it can't just be extra fields on the struct). 
+  - rename print() to debug()? make it clear that it's not what you should be using if you just want 
+  to output text (it's unbuffered because i think it's more important to not lose things if you crash). 
+  probably always to stderr. 
+  - don't be using relative file paths. i feel like having a cwd is dumb.
+  - errno stuff
+- fix the test programs to not all write to `./a.out` or whatever so they can run in parallel.  
+- finish transcribing syscalls so i can run in blink
+- stop using libc for random shit like float math or number formatting. 
 - test slow_debug_threads (+ one that needs the phis in replace_frontend_ops)
-- allow #libc before #link_renam
+- allow #libc before #link_rename
 - tests for failing progeams. ie. panic backtrace
-- remove clowns
+- remove clowns (places where we exec things instead of using libc)
   - write_entire_file create file
   - chmod
   - makedir
@@ -49,13 +96,11 @@ ie. `fn init() Self = (arr = @as(Slice(Entry)) empty(), len_including_tombstones
 - wasm stackifier
 - cross arch repro is broken again
 - fix compiler_gui so it sees all functions from a full compile
-- #syscall
-- output_elf: link libc, relocatable object, dynamic library
+- output_elf: relocatable object, dynamic library
 - Wasip1Libc
 - still allow coerce to c string if there was a `\` escape.
 - `[CPU Time]` on macos-x64 is wrong. (different libc magic numbers? clang libc_constants says no). // :WrongClockTime
 - maybe have a `push_compiler_error_context` and `pop_compiler_error_context` for macros so @fmt could easily add a message like `while evaluating format string`?
-- make the old jit backend runnable again as an example
 - repro doesn't work when you do `-repeat`
 - be less strict about amd64 address folding when there's a large constant pointer (which is valid when jitting)
 - don't hardcode page size to 16k
@@ -90,10 +135,9 @@ ie. `fn init() Self = (arr = @as(Slice(Entry)) empty(), len_including_tombstones
 - `place expression expected pointer dereference` when you forget a `[]` after a call and field access should tell you that.
 - either fix new emit_ir run_tests naming or just change run_tests to generate a big file and compile it as its own thing.
 - combine include_bytes and #include_std somehow
-- @match/@switch should just be @inline_match/@inline_switch if the thing is constant.
+- @switch should just be @inline_switch if the thing is constant.
 - `fn fmodf(f32, f32) f32 #libc;` should treat them as types not arg names
 - try semaphores
-- rename RsVec. vector is a stupid name for that
 - fix overflow when lexing large float literals
 - make compilation order of struct sizing less sketchy for offset_of
 - propagate types through constants. `a: u32 : 0; b := a;` b should have type u32 even though int literals default to i64.
@@ -144,7 +188,6 @@ fn invoke($o: Qbe.O, $k: Qbe.Cls, a0: ~A0, a1: ~A1) ~R #ir(o, k);
 - should make it easy to build rust/zig projects from your driver program since they can generally cross compile well and have libraries you might want.
 - there's a few places `defer` would be really nice to have
 - do i want to expose the idea of different libcs? musl vs glibc vs cosmo
-- would be cool to transcribe my own linux syscalls
 - have it download stuff for you (ask first!) like qbe, sokol, llvm?
   at least make the error messages for missing stuff more helpful.
 

@@ -128,7 +128,7 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, id
 // TODO: this is going to change the calling convention for small strange aggragates maybe (to match c). 
 //       hopefully i don't use any of those for something important. 
 
-ArgInfo :: @struct(r: Qbe.Ref, type: Type, name: ?Var, scalar: bool, void: bool, k: Qbe.Cls);
+ArgInfo :: @struct(r: Qbe.Ref, type: Type, name: ?Var, scalar: bool, void: bool, k: Qbe.Cls, type_index: Qbe.Ref);
 
 // TODO: if you have an unclosed string it randomly decides later top level vars are undeclared? -- Jul 7 
 // :EmitIrCall
@@ -147,7 +147,7 @@ fn emit_par_instructions(program: CompCtx, shared: *CodegenShared, arguments: *P
         info := program.get_info(ty);
         name := binding.var();
         if info.stride_bytes == 0 {  // :NoRuntimeRepr
-            args&.push(r = QbeConZero, type = ty, name = name, scalar = false, void = true, k = .Ke);
+            args&.push(r = QbeConZero, type = ty, name = name, scalar = false, void = true, k = .Ke, type_index = QbeNull);
             continue();
         };
         
@@ -160,7 +160,7 @@ fn emit_par_instructions(program: CompCtx, shared: *CodegenShared, arguments: *P
         );
         r := f.newtmp("a", k);
         push(f.start, make_ins(op, k, r, a0, QbeNull));
-        args&.push(r = r, type = ty, name = name, scalar = scalar, void = false, k = k);
+        args&.push(r = r, type = ty, name = name, scalar = scalar, void = false, k = k, type_index = a0);
     };
     args.items()
 }
@@ -192,7 +192,6 @@ fn bind_args(self: *EmitIr) CRes(void) #once = {
         };
     };
     if func.get_flag(.CVariadic) {
-        @println("vaarg %", self.program.get_string(func.name));
         self.f.vararg = true;
     };
     .Ok
@@ -292,6 +291,47 @@ fn want_syscall(self: *EmitIr, fid: FuncId) ?i64 = {
     .None
 }
 
+fn bounce_body(self: *EmitIr, callee: Qbe.Ref, o: Qbe.O) void = { 
+    func := self.program.get_function(self.func);
+    f_ty := func.finished_ty().unwrap();
+    args := emit_par_instructions(self.program, self.shared, func.arg&, f_ty.arg, self.f);
+    each args { a | 
+        if a.scalar || a.void {
+            k: Qbe.Cls = @if(a.void, .Kw, a.k);
+            self.emit(.arg, k, QbeNull, a.r, QbeNull);
+        } else {
+            self.emit(.argc, a.k, QbeNull, a.type_index, a.r);
+        };
+    };
+    
+    _, k := self.load_op(f_ty.ret); 
+    type_index := QbeNull;
+    if k == .Ke && self.program.get_info(f_ty.ret)[].stride_bytes != 0 {
+        k = .Kl;
+        type_index = self.get_aggregate(f_ty.ret);
+    };
+    r := QbeNull;
+    if k != .Ke {
+        r = self.f.newtmp("f", k);
+    } else {
+        k = .Kw;
+    };
+    self.emit(o, k, r, callee, type_index);
+    self.emit_ret(r);
+    self.finalize_blocks();
+}
+
+fn aot_import_body(self: *EmitIr, name: Symbol) void = {
+    // :DumbNameAlias
+    // TODO: use FnFlag.NoMangle instead but that doesn't work with the old backends calling the same 
+    //       fmt_fn_name until they also don't try to make bounce functions.
+    g := self.m.goal&;
+    func := self.program.get_function(self.func);
+    real_name := self.program.check_link_rename(name, func, (arch = g.arch, os = g.os));
+    target := self.m.intern(real_name);
+    self.bounce_body(self.f.symcon(target), .call);
+}
+
 fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = { // #log_ir("AIR") 
     func := self.program.get_function(f);
     
@@ -307,18 +347,9 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = { // #log_ir("AIR")
     
     self.f.start = self.new_block("start");
     self.blk = self.f.start;
-    
+
     if self.want_syscall(self.func) { syscall_number |
-        arg_ty := func.finished_arg.unwrap();
-        args := emit_par_instructions(self.program, self.shared, func.arg&, arg_ty, self.f);
-        each args { a | 
-            self.emit(.arg, a.k, QbeNull, a.r, QbeNull);
-        };
-        r := self.f.newtmp("ir", .Kl);
-        callee := self.f.getcon(syscall_number);
-        self.emit(.syscall, .Kl, r, callee, QbeNull);
-        self.blk.jmp = (type = .retl, arg = r);
-        self.finalize_blocks();
+        self.bounce_body(self.f.getcon(syscall_number), .syscall);
         return(.Ok);
     };
     
@@ -355,33 +386,18 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = { // #log_ir("AIR")
             return(.Ok)
         }
         fn ComptimeAddr(it) => {
-            self.entry.task = @match(self.when) {
-                fn Jit() => (JitImport = (lnk = self.f.lnk&, addr = rawptr_from_int(it[])));
-                // :DumbNameAlias
-                // TODO: use FnFlag.NoMangle instead but that doesn't work with the old backends calling the same 
-                //       fmt_fn_name until they also don't try to make bounce functions.
-                fn Aot() => {
-                    // TODO: you should be using the string in DynamicImport instead of this!
-                    g := self.m.goal&;
-                    real_name := self.program.check_link_rename(func.name, func, (arch = g.arch, os = g.os));
-                    (Bounce = (lnk = self.f.lnk&, target = self.m.intern(real_name)))
+            @match(self.when) {
+                fn Aot() => self.aot_import_body(func.name);
+                fn Jit() => {
+                    self.entry.task = (JitImport = (lnk = self.f.lnk&, addr = rawptr_from_int(it[])));
                 }
             };
             return(.Ok)
         }
         // copy-paste from above
         fn DynamicImport(name) => {
-            self.entry.task = @match(self.when) {
-                fn Jit() => return(@err("we hit a dynamicimport with no comptimeaddr for jit. the frontend should make sure this doesn't happen"));
-                // :DumbNameAlias
-                // TODO: use FnFlag.NoMangle instead but that doesn't work with the old backends calling the same 
-                //       fmt_fn_name until they also don't try to make bounce functions.
-                fn Aot() => {
-                    g := self.m.goal&;
-                    real_name := self.program.check_link_rename(name[], func, (arch = g.arch, os = g.os));
-                    (Bounce = (lnk = self.f.lnk&, target = self.m.intern(real_name)))
-                }
-            };
+            @err_assert(self.when == .Aot, "we hit a dynamicimport with no comptimeaddr for jit. the frontend should make sure this doesn't happen") return;
+            self.aot_import_body(name[]);
             return(.Ok)
         };
         fn TargetOsSplit(_) => {
@@ -389,7 +405,7 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = { // #log_ir("AIR")
             each func.body.Merged& { it |
                 if it.is(.TargetOsSplit) && it.TargetOsSplit.os == self.m.goal.os {
                     fid := it.TargetOsSplit.fid;
-                    self.entry.task = (Bounce = (lnk = self.f.lnk&, target = self.m.intern(self.fmt_fn_name(fid))));
+                    self.bounce_body(self.func_ref(fid), .call);
                     self.pending.push(fid);
                     return(.Ok)
                 };
@@ -397,7 +413,7 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = { // #log_ir("AIR")
             return(@err("#target_os missing implementation"))
         }
         fn Redirect(fid) => {
-            self.entry.task = (Bounce = (lnk = self.f.lnk&, target = self.m.intern(self.fmt_fn_name(fid[]))));
+            self.bounce_body(self.func_ref(fid[]), .call);
             self.pending.push(fid[]);
             return(.Ok)
         } 
@@ -433,28 +449,8 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = { // #log_ir("AIR")
         p1 = .Discard;
     };
     result := @try(self.compile_expr(body, p1)) return;
-
-    self.blk.jmp.arg = result;
-    @if_else {
-        @if(self.blk.jmp.type != .Jxxx) => {
-            // TODO: assert ret=Never?
-        };
-        @if(ret.is_never()) => {
-            self.blk.jmp.type = .hlt;
-        };
-        @if(p1&.is(.Discard)) => {
-            self.blk.jmp.type = .ret0;
-        };
-        @if(scalar) => {
-            self.f.retty = -1;
-            // TODO: tell it about b/h so we can fully follow the c abi :FUCKED but the old one didn't do it either. 
-            self.blk.jmp.type = ret_op(k);
-        };
-        @else => {
-            self.f.retty = self.get_aggregate(ret).val().trunc();
-            self.blk.jmp.type = .retc;
-        };
-    };
+    
+    self.emit_ret(result);
     
     has_context := func.get_flag(.YesContext) && !func.get_flag(.NoContext);  // :copy-pastrae
     if !has_context && self.dyn_context {
@@ -469,6 +465,36 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = { // #log_ir("AIR")
     self.finalize_blocks();
     
     .Ok
+}
+
+fn emit_ret(self: *EmitIr, result: Qbe.Ref) void = {
+    ret := self.program.get_function(self.func)[].finished_ret.unwrap();
+    _, k := self.load_op(ret); 
+    scalar := k != .Ke;
+
+    self.blk.jmp.arg = result;
+    @if_else {
+        @if(self.blk.jmp.type != .Jxxx) => {
+            // TODO: assert ret=Never?
+        };
+        @if(ret.is_never()) => {
+            self.blk.jmp.type = .hlt;
+        };
+        @if(self.program.get_info(ret)[].stride_bytes == 0) => {
+            self.blk.jmp.type = .ret0;
+        };
+        @if(scalar) => {
+            @debug_assert_ne(result, QbeNull, "missing return value");
+            self.f.retty = -1;
+            // TODO: tell it about b/h so we can fully follow the c abi :FUCKED but the old one didn't do it either. 
+            self.blk.jmp.type = ret_op(k);
+        };
+        @else => {
+            @debug_assert_ne(result, QbeNull, "missing return value");
+            self.f.retty = self.get_aggregate(ret).val().trunc();
+            self.blk.jmp.type = .retc;
+        };
+    };
 }
 
 fn intrinsic_shim(self: *EmitIr, func: *Func) Ty(Qbe.Ref, Qbe.Ref, Type) = {
@@ -865,7 +891,7 @@ fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) CRes(Qbe.R
                     }
                     fn DynamicImport(name) => if self.when == .Aot {
                         g := self.m.goal&;
-                        // TODO: if im committed to not using Bounce, should cache #link_rename because it's weird if i call the user's function a billion times. 
+                        // TODO: should cache #link_rename because it's weird if i call the user's function a billion times. 
                         real_name := self.program.check_link_rename(name[], func, (arch = g.arch, os = g.os));
                         callee_r = self.f.symcon(self.m.intern(real_name));
                     };

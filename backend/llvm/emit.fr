@@ -1,8 +1,10 @@
-// TODO: add a pass that inserts rem for shifts that may overflow because thats a poison value on llvm. 
-// TODO: add isel pass that inserts required casts: inttoptr, ptrtoint, trunc i1, ext i1
-// TODO: emit bitcode like zig does
-// TODO: this way of handling env parameters with inline asm is super fragile. 
-// TODO: byval() doesn't do what i want. need to run part of the abi pass somehow? this sucks.
+// TODO:
+// - rem for shifts that may overflow because thats a poison value on llvm. 
+// - emit bitcode like zig does
+// - this way of handling env parameters with inline asm is super fragile (i think it only works on -O0)
+// - byval() doesn't do what i want. need to run part of the abi pass somehow? this sucks.
+// - syscall, asm, add_asm_bytes, bss
+// - run_tests.fr
 
 LlvmEmit :: @struct(
     f: *Qbe.Fn,
@@ -11,9 +13,30 @@ LlvmEmit :: @struct(
 
 // I think they don't need to know the signeture for the same reason I don't need to know the signeture. 
 fn finish_llvm(m: *QbeModule) [][]u8 = {
+    o := m.llvm_global_code_buf&;
     for_symbols m { _, symbol |
+        need_decl := false;
         if symbol.kind == .Pending && !symbol.name.starts_with("llvm.") {  // HACK what if you just happened to name your function that. bad news bears.  
-            @fmt(m.llvm_global_code_buf&, "declare ccc void @%();\n", symbol.name);
+            need_decl = true;
+        };
+        if symbol.kind == .Local && symbol.size > 0 {
+            // must have been add_code_bytes; translate to module level assembly. 
+            need_decl = true;
+            prefix := if(m.goal.os == .linux, => "", => "_");
+            bytes := m.segments&[.Code].mmapped.slice(symbol.offset, symbol.offset + symbol.size);
+            
+            @fmt(o, "module asm \"%%:\"\n", prefix, symbol.name);
+            for bytes { inst |
+                @fmt(o, "module asm \".byte %\"\n", @as(i64) inst.zext());
+            };
+        };
+        if symbol.name == "__franca_code_segment" {
+            // HACK HACK HACK
+            @fmt(o, "@% = private unnamed_addr global { i8 } { i8 0 }\n", symbol.name);
+            
+        };
+        if need_decl {
+            @fmt(o, "declare ccc void @%();\n", symbol.name);
         };
     };
     chunks := list([]u8, temp());
@@ -21,6 +44,7 @@ fn finish_llvm(m: *QbeModule) [][]u8 = {
     chunks.items()
 }
 
+fn emit_llvm(f: *Qbe.Fn) void = emit_llvm(f.globals, f);
 fn emit_llvm(m: *QbeModule, f: *Qbe.Fn) void = {
     self: LlvmEmit = (f = f, out = list(temp()));
     
@@ -73,6 +97,7 @@ fn emit_block(self: *LlvmEmit, b: *Qbe.Blk) void = {
     for_insts_forward b { i |   
         n_ins += 1;
         @match(i.op()) {
+            fn dbgloc() => ();  // TODO
             fn sel0() => (); // part of sel1
             fn blit0() => (); // part of blit1
             fn par() => ();  // part of function definition
@@ -232,6 +257,7 @@ fn emit_ins(self: *LlvmEmit, i: *Qbe.Ins) void = {
         fn ultof() => cast("uitofp");
         fn stoui() => cast("fptoui");
         fn dtoui() => cast("fptoui");
+        fn sltof() => cast("sitofp");
         fn cast()  => cast("bitcast");
         fn load() => {
             @fmt(o, "load %, ptr ", toT);
@@ -545,9 +571,9 @@ fn find_scalar_return_type(f: *Qbe.Fn) ?Qbe.Cls = {
 }
 
 fn emit_llvm(m: *QbeModule, dat: *Qbe.Dat) void = {
+    ::enum(@type dat.type);
     type := m.llvm_global_type_buf&;
     value := m.llvm_global_value_buf&;
-    
     @match(dat.type) {
         fn DZeroInit() => panic("TODO: bss llvm");
         fn DStart() => {
@@ -575,7 +601,7 @@ fn emit_llvm(m: *QbeModule, dat: *Qbe.Dat) void = {
             @debug_assert(!dat.is_ref, "can't have a byte sized pointer");
             if dat.is_str {
                 s := dat.u.str;
-                if dat.has_quotes_and_escapes {
+                dest := if dat.has_quotes_and_escapes {
                     // When building ir manually you'll probably just give us the raw bytes.
                     // But this makes it easy to run Qbe's text based tests. Really the parser should handle this. 
                     q :: "\"".ascii();
@@ -583,20 +609,19 @@ fn emit_llvm(m: *QbeModule, dat: *Qbe.Dat) void = {
                     s = s.slice(1, s.len - 1); // quotes
                     dest := u8.list(s.len, temp());
                     expand_string_escapes(s, dest&);
-                    
-                    @fmt(type, "[% x i8],", dest.len);
-                    @fmt(value, "[% x i8] [", dest.len);
-                    for dest { c |
-                        @fmt(value, "i8 %,", c);
-                    };
-                    if dest.len > 0 {
-                        value.len -= 1;
-                    };
-                    @fmt(value, "],");
+                    dest.items()
                 } else {
-                    @fmt(type, "[% x i8],", s.len);
-                    @fmt(value, "[% x i8] c\"%\",", s.len, s);
+                    s
                 };
+                @fmt(type, "[% x i8],", dest.len);
+                @fmt(value, "[% x i8] [", dest.len);
+                for dest { c |
+                    @fmt(value, "i8 %,", c);
+                };
+                if dest.len > 0 {
+                    value.len -= 1;
+                };
+                @fmt(value, "],");
             } else {
                 @fmt(type, "i8,");
                 @fmt(value, "i8 %,", dat.u.num);

@@ -1,6 +1,21 @@
 - TODO: deal with `CodegenEntry:Bounce` on wasm
 
-##
+## (Feb 24)
+
+- do assert() lowering to blocks earlier
+- maybe i want to change my mind about llvm. seems sad that everything could be twice as fast when not working on the compiler. 
+  - restore an old commit
+  - insert more casts
+  - rotate/bswap/`c*z`/blit are intrinsics you have to call
+  - fix string constants to do escapes
+  - try just putting a little piece of inline asm before every call that moves the env parameter to the right register. 
+  there's no way you're allowed to do this but it kinda seems to maybe work so far? 
+  i think it only works on -O0 tho which makes this whole operation a complete waste of time. 
+- CodegenEntry.Task.Bounce is super confusing and doesn't work on non-native targets that want type info (wasm + llvm),
+so let's try replacing it with explicit (par...) -> (arg...). 
+waste of time when all i really want is a symbol alias but maybe it won't be noticable. 
+
+## (Feb 23)
 
 - hacky fix for `#libc` to work with multiple lib files.  
 - ssh-keygen && ssh-copy-id luke@cache
@@ -11,6 +26,7 @@ alias run_rsync='rsync -azP --exclude ".*/" --exclude ".*" --exclude "*.out" --e
 run_rsync; fswatch -o . | while read f; do run_rsync; done
 ```
 eventually should write my own with CoreServices/fsevents but also i don't care that much yet. 
+- internet says arm SVC wants syscall number in r8 but breakpoint on write() reveals it's r16 on macos. 
 
 ## (Feb 21/22)
 

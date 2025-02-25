@@ -762,35 +762,6 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
                         // TODO: an erorr message here gets swollowed because you're probably in the type_of shit. this is really confusing. need to do beter
                         // TODO: if its a string literal just take it
                         // TODO: check if they tried to give you something from the stack
-                        @case(Flag.llvm.ident()) => {
-                            @err_assert(!good, "found multiple arches for #asm") return;
-                            ir := @check(self.eval_str(asm)) return;
-                            func.body = (LlvmIr = ir);
-                            good = true;
-                        };
-                        @case(Flag.qbe.ident()) => {
-                            @err_assert(!good, "found multiple arches for #asm") return;
-                            ir := @check(self.eval_str(asm)) return;
-                            func.body = (QbeIr = ir);
-                            good = true;
-                        };
-                        @case(Flag.c.ident()) => {
-                            @err_assert(!good, "found multiple arches for #asm") return;
-                            ir := @check(self.eval_str(asm)) return;
-                            func.body = (CSource = ir);
-                            good = true;
-                        };
-                        @case(Flag.x86.ident()) => {
-                            @err_assert(!good, "found multiple arches for #asm") return;
-                            if !self.comp().want_target_arch(.x86_64) {
-                                func.body = .Empty;
-                                good = true; 
-                                continue();
-                            };
-                            ir := @check(self.eval_str(asm)) return;
-                            func.body = (X86AsmText = ir);
-                            good = true;
-                        };
                         @case(Flag.x86_bytes.ident()) => {
                             @err_assert(!good, "found multiple arches for #asm") return;
                             if !self.comp().want_target_arch(.x86_64) {
@@ -822,32 +793,6 @@ fn emit_special_body(self: *SelfHosted, fid: FuncId) Maybe(bool) = {
                                 // TODO: go through driver program? :driver_io
                                 //@if(USE_LLVM_DIS) print_llvm_mc_dis(ir.items());
                             }; 
-                        };
-                        @case(Flag.bc.ident()) => {
-                            return(@err("TODO: deal with #bc. need to make drivers more powerful? this has to work to prove my point."));
-                            @err_assert(!good, "found multiple arches for #asm") return;
-                            type := @unwrap(self.env.inline_bc_fn_type, "#bc needs you to call `::enable_inline_bc();` first for now. (or tried to use before bootstrap)") return;
-                            callee := @check(self.immediate_eval_expr(asm, type)) return;
-                            callee := FuncId.assume_cast(callee&)[];
-                            fn_ptr := or self.get_fn_callable(callee) { 
-                                return(Suspend = self.wait_for(Jit = callee))
-                            };
-                            
-                            bc := self.todo_get_bc();
-                            body := @try(self.comp().empty_fn_body(bc, fid, .Aot)) return;
-                            callee := assume_types_fn(Arg = *FnBody, Ret = void, ptr = fn_ptr);
-                            zone := zone_begin(.CallDynamic);
-                            callee(body);  // :call_dynamic_values
-                            zone_end(zone);
-                            
-                            if func.get_flag(.LogBc) {
-                                out: List(u8) = list(temp());
-                                self.comp().log_bc(func, body, out&);
-                                println(out.items());
-                            };
-                            
-                            func.body = (Bytecode = FnBody.int_from_ptr(body));
-                            good = true;
                         };
                         @default => ();
                     };
@@ -3364,7 +3309,6 @@ fn compute_new_overloads(self: *SelfHosted, overloads: *OverloadSetData) void = 
 // - for now constants are always stored globally and restricted visibility is just handled by scope resolution.
 // So we delay taking constants until you try to compile the expression that contains them.
 // Also, to be order independent, we don't actually evaluate or type-check them yet, that's done lazily the first time they're referenced. 
-// TODO: the old compiler did #when here, but I think its better to delay until we know we care and can hope more stuff is ready. 
 fn hoist_constants(self: *SelfHosted, body: []FatStmt) Maybe(void) #once = {
     each body { stmt |
         @match(stmt.stmt&) {
@@ -3455,7 +3399,6 @@ fn update_function_metadata(self: *SelfHosted, func: *Func, os: ?OverloadSet) Re
             @case(Flag.target_os.ident()) => {
                 func.set_flag(.TargetSplit);
             };
-            @case(Flag.bc.ident())       => func.set_flag(.BodyIsSpecial);
             @case(Flag.import.ident())   => {
                 func.set_flag(.BodyIsSpecial);
                 //func.set_flag(.NoMangle);

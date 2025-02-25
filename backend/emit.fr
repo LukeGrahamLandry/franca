@@ -182,7 +182,8 @@ fn new_emit_data(self: *QbeModule, dat: *Qbe.Dat) void = {
     if self.debug["P".char()] {
         print_dat(self, dat, self.debug_out);
     };
-    self.emit_data_to_segment(dat);
+    emit := self.target.data;
+    emit(self, dat);
 }
 
 fn emit_data_to_segment(self: *QbeModule, dat: *Qbe.Dat) void = 
@@ -609,24 +610,23 @@ fn seal_debug_info(m: *QbeModule, debug_source_code: []u8, include: bool, files_
     header_p  := m.declare_bytes(m.debug_headers.items(), "__franca_debug_headers");
     payload_p := m.declare_bytes(m.debug_data.items(), "__franca_debug_data");
     source_p  := m.declare_bytes(debug_source_code, "__franca_debug_source");
-    files_p  := m.declare_bytes(files_bytes, "__franca_debug_files");
+    files_p   := m.declare_bytes(files_bytes, "__franca_debug_files");
     
     dat.type = .DStart;
-    m.emit_data_to_segment(dat&);
+    m.new_emit_data(dat&);
     code := m.segments&.index(.Code);
     ::assert_eq(size_of(AotDebugInfo), size_of(i64) * 12);
-    dat.type = .DL; dat.u.num = 1; m.emit_data_to_segment(dat&);  // version
+    dat.type = .DL; dat.u.num = 1; m.new_emit_data(dat&);  // version
     append_slice(m, dat&, code_p, ptr_diff(code.mmapped.ptr, code.next) - text_padding);
     append_slice(m, dat&, header_p, m.debug_headers.len);
     append_slice(m, dat&, payload_p, m.debug_data.len);
     append_slice(m, dat&, source_p, debug_source_code.len);
     append_slice(m, dat&, files_p, files_bytes.len);
-    dat.type = .DL; dat.u.num = 0; m.emit_data_to_segment(dat&);  // nullable_cached_codemap
+    dat.type = .DL; dat.u.num = 0; m.new_emit_data(dat&);  // nullable_cached_codemap
     dat.type = .DEnd;
-    m.emit_data_to_segment(dat&);
+    m.new_emit_data(dat&);
 }
 
-// TODO: call from compiler
 // requires including codemap.fr
 fn encode_debug_files(files: []File) Ty([]u8, []u8) = {
     source := u8.list(temp());
@@ -645,11 +645,11 @@ fn append_slice(m: *QbeModule, dat: *Qbe.Dat, ptr: u32, len: i64) void = {
     dat.type = .DL;
     dat.u.ref = (id = ptr, off = 0);
     dat.is_ref = true;
-    m.emit_data_to_segment(dat);
+    m.new_emit_data(dat);
     dat.is_ref = false;
     dat.type = .DL;
     dat.u.num = len;
-    m.emit_data_to_segment(dat);
+    m.new_emit_data(dat);
 }
 
 fn start_debug_info(m: *QbeModule, s: *SymbolInfo) void = {

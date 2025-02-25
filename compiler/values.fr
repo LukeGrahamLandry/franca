@@ -25,7 +25,7 @@ fn get_baked(c: *SelfHosted, id: BakedVarId) *Ty(rawptr, BakedVar) = {
 fn put_baked(c: *SelfHosted, v: BakedVar, jit_ptr: ?i64) BakedVarId = {
     i := c.baked.values.len;
     j := jit_ptr.or(=> 0).rawptr_from_int();
-    c.baked.values&.push(@as(Ty(rawptr, BakedVar)) (j, v)); // TODO: this shouldn't need type hint.
+    push(c.baked.values&, (j, v)); 
     id: BakedVarId = (id = i.trunc());
     if jit_ptr { ptr | 
         c.baked.lookup&.insert(ptr, id); // TODO: check unique? 
@@ -534,11 +534,7 @@ fn intern_type(self: *SelfHosted, info: TypeInfo) Type = {
     ::if(Type);
     if info&.should_deduplicate() {
         key := info&;
-        
-        // TODO: miscompilation if  you try to do this>>?
-        //@assert(!key.is(.Placeholder), "wtf");
-        //@println("%", key.tag());
-        
+
         or self.type_lookup&.get(key&) {
             id: Type = from_index(self.types.len);
             stable := self.types&.push(info);
@@ -567,12 +563,7 @@ fn update_placeholder(self: *SelfHosted, placeholder_slot: Type, real_type: Type
     slot := self.types&.nested_index(idx);
     @debug_assert(slot.is(.Placeholder));
     slot[] = (Named = (real_type, name));
-    // TODO: I don't understand why you need this, but you definitely do...
-    //       cause its always a Named (we just put that there), and we don't deduplcate those,
-    //       so who's ever trying to look it up...? 
-    //       i dont think the rust code did this????? -- Jul 21
     @debug_assert(self.type_lookup&.get(slot&).is_none());
-    self.type_lookup&.insert(slot, placeholder_slot);
     
     // just in case.    copy-paste call to truncate but now want to have the list full size ahead of time. 
     i := self.type_extra.len - 1; // we happen to know this can't underflow because there are builtin types.  
@@ -619,15 +610,14 @@ fn get_info(self: *SelfHosted, ty: Type) *TypeMeta = {
     };
     
     // TODO: when i didnt have some of the trunc impls this had a "tried to call missing function"
-    new :: fn(size_slots: u16, align_bytes: u16, float_mask: u32, contains_pointers: bool, stride_bytes: u16, pass_by_ref: bool) TypeMeta = {
-        @debug_assert_eq(stride_bytes.mod(align_bytes), 0);
+    new :: fn(size_slots: u16, align_bytes: u16, contains_pointers: bool, stride_bytes: u32) TypeMeta = {
+        @debug_assert_eq(stride_bytes.mod(align_bytes.zext()), 0);
         (
-            float_mask = float_mask,
-            size_slots = size_slots,
             stride_bytes = stride_bytes,
+            size_slots = size_slots,
+            stride_bytes_old = stride_bytes.trunc(),  // :UpdateBoot
             align_bytes = align_bytes,
             contains_pointers = contains_pointers,
-            pass_by_ref = pass_by_ref,
             is_sized = true,
         )
     };
@@ -635,7 +625,7 @@ fn get_info(self: *SelfHosted, ty: Type) *TypeMeta = {
     info := @match(self.get_type(ty)) {
         fn Placeholder() => {
             @panic("Unfinished type %", ty.as_index()); // TODO: err!
-            new(0, 0, 0, false, 0, false)
+            new(0, 0, false, 0)
         }
         fn Struct(f) => {
             // TODO: shouldn't need to do this here. instead do it in the event loop. 
@@ -644,7 +634,6 @@ fn get_info(self: *SelfHosted, ty: Type) *TypeMeta = {
             @debug_assert(f.layout_done, "ICE: layout not done! %", self.log_type(ty));
             size: u16 = 0;
             align: u16 = 1;
-            mask: u32 = 0; // TODO: this is barely used. can go away if dyn call above uses prims instead. 
             pointers := false;
             bytes := 0;
 
@@ -665,14 +654,6 @@ fn get_info(self: *SelfHosted, ty: Type) *TypeMeta = {
                     size += info.size_slots;
                     bytes = bytes.max(end);
                 };
-                if size > 16 {
-                    // you only actually care about floats for passing in registers so if its bigger than 16, wont matter anyway?
-                    // until i do struct c abi properly and tuples mean args in a different way.
-                    mask = 0;
-                } else {
-                    mask = mask.shift_left(info.size_slots.zext());
-                    mask = mask.bit_or(info.float_mask);
-                };
                 pointers = pointers.or(info.contains_pointers);
             };
             
@@ -680,12 +661,13 @@ fn get_info(self: *SelfHosted, ty: Type) *TypeMeta = {
             if extra != 0 {
                 bytes += align.zext() - extra;
             };
-
-            new(size, align, mask, pointers, bytes.trunc(), size > 2)
+            
+            @assert_lt(bytes, 1.shift_left(32), "cannot have a type larger than 4GB");
+            new(size, align, pointers, bytes.trunc())
         }
         fn Tagged(f) => {
             size: u16 = 0;
-            bytes: u16 = 0;
+            bytes: u32 = 0;
             pointers := false;  
             
             @debug_assert(f.cases.len > 0, "TODO: i guess this can just be void");
@@ -698,66 +680,52 @@ fn get_info(self: *SelfHosted, ty: Type) *TypeMeta = {
             size += 1;  // :tag_is_i64
             bytes += 8;
             
-            align: u16 = 8;
+            align: u32 = 8;
             extra := bytes.mod(align);
             if extra != 0 {
                 bytes += align - extra;
             };
             
-            
             // TODO: currently tag is always i64 so align 8 but should use byte since almost always enough. but you just have to pad it out anyway.
             //       even without that, if i add 16 byte align, need to check the fields too.  :tag_is_i64
-            new(size, 8, 0, pointers, bytes, size > 2)
+            new(size, 8, pointers, bytes)
         }
-        fn Never() => new(0, 1, 0, false, 0, false);
+        fn Never() => new(0, 1, false, 0);
         fn Int(int) => {
             // :SmallTypes
             @switch(int.bit_count) {
-                @case(8) => new(1, 1, 0, false, 1, false);
-                @case(16) => new(1, 2, 0, false, 2, false);
-                @case(32) => new(1, 4, 0, false, 4, false);
-                @default => new(1, 8, 0, false, 8, false);
+                @case(8) => new(1, 1, false, 1);
+                @case(16) => new(1, 2, false, 2);
+                @case(32) => new(1, 4, false, 4);
+                @default => new(1, 8, false, 8);
             }
         }
-        // TODO: the float_mask thing is no longer enough information!
-        //       you can't tell if its the whole register or just half. tho maybe you never need to know so its fine...
-        fn F32()  => new(1, 4, 1, false, 4, false);
-        fn F64()    => new(1, 8, 1, false, 8, false);
-        fn void() => new(0, 1, 0, false, 0, false);
-        fn Bool() => new(1, 1, 0, false, 1, false); // :SmallTypes
-        fn Ptr(_)     => new(1, 8, 0,  true, 8, false);
-        fn VoidPtr()  => new(1, 8, 0,  true, 8, false);
-        fn FnPtr(_)   => new(1, 8, 0,  true, 8, false);
-        fn Label(_)   => new(1, 4, 0, false, 4, false);
-        fn Fn(_)      => new(1, 4, 0, false, 4, false);
+        fn F32()  => new(1, 4, false, 4);
+        fn F64()  => new(1, 8, false, 8);
+        fn void() => new(0, 1, false, 0);
+        fn Bool() => new(1, 1, false, 1); // :SmallTypes
+        fn Ptr(_)     => new(1, 8, true, 8);
+        fn VoidPtr()  => new(1, 8, true, 8);
+        fn FnPtr(_)   => new(1, 8, true, 8);
+        fn Label(_)   => new(1, 4, false, 4);
+        fn Fn(_)      => new(1, 4, false, 4);
         fn Array(f) => {
             ::if(TypeMeta);
             if f.len == 0 {
-                new(0, 1, 0, false, 0, false)
+                new(0, 1, false, 0)
             } else {
                 info := self.get_info(f.inner);
-                a: i64 = info.stride_bytes.zext() * f.len.zext();
-                if a >= MAX_u16.zext() {
-                    @eprintln("that's a mighty big array (Array(%, %) == % bytes). \nthis probably won't do well for you because i use u16 sizes. \nTODO: this is unacceptable", self.log_type(f.inner), f.len, a);
-                };
+                bytes: i64 = info.stride_bytes.zext() * f.len.zext();
+                @assert_lt(bytes, 1.shift_left(32), "cannot have a type larger than 4GB (trying to make an Array of % elements)", f.len);
                 new(
                     info.size_slots * @as(u16) f.len.trunc(),
                     info.align_bytes,
-                    0,
                     info.contains_pointers,
-                    info.stride_bytes * f.len.trunc(),
-                    info.pass_by_ref.or(f.len > 1),
+                    bytes.trunc(),
                 )
             }
         }
-        fn Enum(_) => {
-            panic("unreachable: get meta of raw enum");
-            new(0, 0, 0, false, 0, false)
-        }
-        fn Named(_) => {
-            panic("unreachable: get meta of raw named");
-            new(0, 0, 0, false, 0, false)
-        }
+        @default => unreachable();
     };
     info.inferred_name = old.inferred_name;  // save if we poked this in before. 
     old[] = info;
@@ -783,19 +751,15 @@ fn finish_layout_deep(self: *SelfHosted, ty: Type) void = {
             self.finish_layout_deep(f.ty.arg);
             self.finish_layout_deep(f.ty.ret);
         }
-        fn Ptr(inner) => self.finish_layout_deep(inner[]);
+        fn Ptr(inner)   => self.finish_layout_deep(inner[]);
         fn Label(inner) => self.finish_layout_deep(inner[]);
-        fn Array(f) => self.finish_layout_deep(f.inner);
-        fn Struct(f) => {
-            each f.fields { f |
-                self.finish_layout_deep(f.ty);
-            };
-        }
-        fn Tagged(f) => {
-            each f.cases { f | 
-                self.finish_layout_deep(f._1);
-            };
-        }
+        fn Array(f)  => self.finish_layout_deep(f.inner);
+        fn Struct(f) => each f.fields { f |
+            self.finish_layout_deep(f.ty);
+        };
+        fn Tagged(f) => each f.cases { f | 
+            self.finish_layout_deep(f._1);
+        };
         @default => ();
     };
 }
@@ -804,12 +768,10 @@ fn finish_layout(self: *SelfHosted, ty: Type) void = {
     ty := self.raw_type(ty);
     info := self.get_type(ty);
     @match(info) {
-        fn Array(f) => self.finish_layout(f.inner);
-        fn Tagged(f) => {
-            each f.cases { variant |
-                self.finish_layout(variant._1);
-            };
-        }
+        fn Array(f)  => self.finish_layout(f.inner);
+        fn Tagged(f) => each f.cases { variant |
+            self.finish_layout(variant._1);
+        };
         fn Struct(f) => {
             if(f.layout_done, => return());
             // :struct_layout_in_type_info
@@ -818,9 +780,8 @@ fn finish_layout(self: *SelfHosted, ty: Type) void = {
             bytes := 0;
             each f.fields& { p |
                 self.finish_layout(p.ty);
-                if f.is_union {
-                    p.byte_offset = 0;
-                } else {
+                p.byte_offset = 0;
+                if !f.is_union {
                     info := self.get_info(p.ty);
                     inv_pad := bytes.mod(info.align_bytes.zext());
                     if inv_pad != 0 {
