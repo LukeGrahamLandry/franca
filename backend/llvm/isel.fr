@@ -15,6 +15,7 @@
 CastCtx :: @struct(
     f: *Qbe.Fn,
     tmps: QList(LlvmTmp),
+    const_casts: List(Qbe.Ins),  // :SLOW
 );
 
 LlvmTmp :: @struct(
@@ -27,11 +28,16 @@ LlvmCast :: @enum(i64) (
     None,
     IntToPtr,
     PtrToInt,
-    ExtendI1,
+    ExtendI1ToL,
+    ExtendI1ToW,
+    ExtendI1ToH,
     CmpZero,
     TruncLtoW,
     TruncWtoB,
     TruncWtoH,
+    TruncLtoH,
+    TruncLtoB,
+    PtrToIntW,
 );
 ::if(LlvmCast);
 
@@ -39,14 +45,17 @@ LlvmCast :: @enum(i64) (
 // TODO: be better about unifying phi types. its fine if they're ptr/bool as long as all args are the same. 
 // sets width fields of tmps.
 fn insert_redundant_casts(f: *Qbe.Fn) void = {
+    N := f.ntmp.zext() * 2;
     c: CastCtx = (
         f = f, 
-        tmps = new(f.ntmp.zext() * 2, .PFn),
+        tmps = new(N),
+        const_casts = list(temp()),
     );
     each f.tmps() { t |
         t.visit = 0;
     };
     f.reset_scratch();
+    c.tmps.slice(0, N).set_zeroed();
     
     // Note the types of all created tmps
     for_blocks f { b |
@@ -79,29 +88,29 @@ fn insert_redundant_casts(f: *Qbe.Fn) void = {
                 c&.request_cast(p.arg&.index(a)[], if(p.cls == .Kw, => .Wuw, => .WFull));
             };
         };
-        if b.jmp.type == .Jjnz {
+        if b.jmp.type == .jnz {
             c&.request_cast(b.jmp.arg, .LBool);
         };  
         
         if is_ret(b.jmp.type) {
-            if b.jmp.type == .Jretc {
+            if b.jmp.type == .retc {
                 c&.request_cast(b.jmp.arg, .LPtr);
             } else {
-                c&.request_cast(b.jmp.arg, if(b.jmp.type == .Jretw, => .Wuw, => .WFull));
+                c&.request_cast(b.jmp.arg, if(b.jmp.type == .retw, => .Wuw, => .WFull));
             };
         };  
     };  
     
     // emit instructions. inserting casts after creations as needed. 
     for_blocks f { b |
-        if b.jmp.type == .Jjnz {
+        if b.jmp.type == .jnz {
             c&.fix_arg(b.jmp.arg&, .LBool);
         };  
         if is_ret(b.jmp.type) {
-            if b.jmp.type == .Jretc {
+            if b.jmp.type == .retc {
                 c&.fix_arg(b.jmp.arg&, .LPtr);
             } else {
-                c&.fix_arg(b.jmp.arg&, if(b.jmp.type == .Jretw, => .Wuw, => .WFull));
+                c&.fix_arg(b.jmp.arg&, if(b.jmp.type == .retw, => .Wuw, => .WFull));
             };
         };
         for_insts_rev b { i |
@@ -109,7 +118,7 @@ fn insert_redundant_casts(f: *Qbe.Fn) void = {
             c&.emit_requested_casts(i.to);
             
             if i[].op().is_load() && i[].op() != .load {
-                no_extend := (i[].op() == .loadsw || i[].op() == .loadsw) && i[].cls() == .Kw;
+                no_extend := (i[].op() == .loaduw || i[].op() == .loadsw) && i[].cls() == .Kw;
                 if !no_extend {
                     r := f.newtmp("isel", i[].cls());
                     ext_op := @as(Qbe.O) @as(i32) i[].op().raw() - Qbe.O.loadsb.raw() + Qbe.O.extsb.raw();
@@ -117,21 +126,26 @@ fn insert_redundant_casts(f: *Qbe.Fn) void = {
                     i.to = r;
                 };
             };
-            if i[].op() == .vastart {
-                a := i.arg&[0];
-                i[].set_op(.call);
-                con := Qbe.Con.zeroed();
-                con.type =. CAddr;
-                con.sym.id = f.globals.intern("llvm.va_start.p0".sym().c_str());
-                i.arg&[0] = f.newcon(con&);
-                f.emit(i[][]);
-                i[].set_op(.arg);
-                //i[].set_cls(.Wl);
-                i.arg&[0] = a;
+            o := i[].op();
+            @match(o) {
+                fn vastart()  => c&.call_intrinsic(i[], "llvm.va_start.p0");
+                fn byteswap() => c&.call_intrinsic(i[], @tfmt("llvm.bswap.%", @if(i[].cls() == .Kl, "i64", "i32")));
+                fn rotr() => c&.call_intrinsic(i[], @tfmt("llvm.fshr.%", i[].llvm_ty()));
+                fn rotl() => c&.call_intrinsic(i[], @tfmt("llvm.fshl.%", i[].llvm_ty()));
+                fn ones() => c&.call_intrinsic(i[], @tfmt("llvm.ctpop.%", i[].llvm_ty()));
+                // TODO: , i1 <is_zero_poison>
+                fn clz() => c&.call_intrinsic(i[], @tfmt("llvm.ctlz.%", i[].llvm_ty()));
+                fn ctz() => c&.call_intrinsic(i[], @tfmt("llvm.cttz.%", i[].llvm_ty()));
+                @default => ();
             };
+            
             x := f.emit(i[][]);
             range(0, 2) { a |
                 c&.fix_arg(x.arg&.index(a), args&[a]);
+            };
+            if @is(o, .rotr, .rotl) {
+                // "funnel shift" takes two inputs (+ the width) and acts as rotate if the're the same
+                f.emit(x[]);
             };
         };
         for_phi b { p | 
@@ -143,11 +157,40 @@ fn insert_redundant_casts(f: *Qbe.Fn) void = {
         };
         f.copy_instructions_from_scratch(b);
     };
+    // Need to dominate thier uses (phi is the hard part because you can't just insert the cast directly before). 
+    // TODO: i think they have a const version of ptrtoint but i dont care rn. 
+    if c.const_casts.len > 0 {
+        past_args := false;
+        for_insts_forward f.start { i |
+            if !past_args && !is_par(i.op()) && i.op() != .llcast {
+                each(c.const_casts, fn(i) => f.emit(i[]));
+                past_args = true;
+            };
+            f.emit(i[]);
+        };
+        if !past_args {
+            each(c.const_casts, fn(i) => f.emit(i[]));
+        };
+        f.copy_instructions_from_scratch_reversed_which_means_forwards(f.start);
+    };
+    
     if f.globals.debug["I".char()] {
         write(f.globals.debug_out, "\n> After instruction selection:\n");
         printfn(f, f.globals.debug_out);
     };
 }
+
+fn call_intrinsic(c: *CastCtx, i: *Qbe.Ins, name: Str) void = {
+    a0, a1 := (i.arg&[0], i.arg&[1]);
+    con := Qbe.Con.zeroed();
+    con.type = .CAddr;
+    con.sym.id = c.f.globals.intern(name);
+    c.f.emit(.call, i.cls(), i.to, c.f.newcon(con&), QbeNull);
+    if a1 != QbeNull {
+        c.f.emit(.arg, i.cls(), QbeNull, a1, QbeNull);
+    };
+    i[] = make_ins(.arg, i.cls(), QbeNull, a0, QbeNull);
+};
 
 fn request_cast(c: *CastCtx, r: Qbe.Ref, want: Qbe.TmpType) void = {
     if(rtype(r) != .RTmp, => return()); // TODO
@@ -177,10 +220,11 @@ fn request_cast(c: *CastCtx, r: Qbe.Ref, want: Qbe.TmpType) void = {
 
 fn fix_arg(c: *CastCtx, arg: *Qbe.Ref, want: Qbe.TmpType) void = {
     if rtype(arg[]) == .RCon {
+        // TODO: only need to delay with const_casts if it's a phi
         con := c.f.get_constant(arg[]);
         if want != .LPtr && con.type == .CAddr {
             r := c.f.newtmp("isel", .Kl);
-            c.emit_cast(r, arg[], want, .LPtr);
+            c.const_casts&.push(c.make_cast(r, arg[], want, .LPtr));
             arg[] = r;
         };
         if want == .LPtr && con.type == .CBits {
@@ -188,7 +232,7 @@ fn fix_arg(c: *CastCtx, arg: *Qbe.Ref, want: Qbe.TmpType) void = {
             // See conaddr.ssa for a contrived test that gets here. 
             // A more sane usecase would be jitting code that embeds pointers. 
             r := c.f.newtmp("isel", .Kl);
-            c.emit_cast(r, arg[], .LPtr, .WFull);
+            c.const_casts&.push(c.make_cast(r, arg[], .LPtr, .WFull));
             arg[] = r;
         };
         
@@ -226,49 +270,55 @@ fn emit_requested_casts(c: *CastCtx, r: Qbe.Ref) void = {
     panic("raise MAX_CASTS");
 }
 
-fn emit_cast(c: *CastCtx, dest: Qbe.Ref, src: Qbe.Ref, dest_ty: Qbe.TmpType, src_ty: Qbe.TmpType) void = {
+fn make_cast(c: *CastCtx, dest: Qbe.Ref, src: Qbe.Ref, dest_ty: Qbe.TmpType, src_ty: Qbe.TmpType) Qbe.Ins = {
     c.tmps&.grow(c.f.ntmp.zext());
-    
+    @debug_assert_eq(rtype(dest), .RTmp, "emit_cast dest = %", dest);
     cast := cast_type(dest_ty, src_ty).raw();
-    c.f.emit(.llcast, .Kl, dest, src, INT(cast));
     if rtype(dest) == .RTmp {
         c.f.tmp[dest.val()].width = dest_ty;
         c.tmps[dest.val()].types&[0] = src_ty;
         c.tmps[dest.val()].casts&[0] = src;
     };
+    make_ins(.llcast, .Kl, dest, src, INT(cast))
+}
+
+fn emit_cast(c: *CastCtx, dest: Qbe.Ref, src: Qbe.Ref, dest_ty: Qbe.TmpType, src_ty: Qbe.TmpType) void = {
+    c.f.emit(make_cast(c, dest, src, dest_ty, src_ty));
 }
 
 fn cast_type(dest: Qbe.TmpType, src: Qbe.TmpType) LlvmCast = {
     @debug_assert(dest != src, "dont need a cast");
-        
+    ::enum(@type src);
     @match(dest) {
-        fn WFull() => if(src == .LBool, => .ExtendI1, => .PtrToInt);
-        fn LPtr() => .IntToPtr;
+        fn WFull() => if(src == .LBool, => .ExtendI1ToL, => .PtrToInt);
+        fn LPtr()  => .IntToPtr;
         fn LBool() => .CmpZero;
         @default => {
             if (dest == .Wuw || dest == .Wsw) {   
-                if src == .WFull {
-                    return(.TruncLtoW);
-                };
-                if src == .LBool {
-                    return(.ExtendI1);
-                };
-                panic("TODO: to wrod");
+                return(@match(src) {
+                    fn WFull() => .TruncLtoW;
+                    fn LBool() => .ExtendI1ToW;
+                    fn LPtr()  => .PtrToIntW;
+                    @default   => @panic("TODO: to wrod %", src);
+                });
             };
             if (dest == .Wub || dest == .Wsb) {   
                 if (src == .Wuw || src == .Wsw)  {
                     return(.TruncWtoB);
                 };
-                if src == .WFull {
-                    panic("TODO: TruncLtoB");
+                if (src == .WFull)  {
+                    return(.TruncLtoB);
                 };
-                panic("TODO: to byte");
+                @panic("TODO: to byte %", src);
             };
             if (dest == .Wuh || dest == .Wsh) {   
-                if (src == .Wuw || src == .Wsw)  {
-                    return(.TruncWtoH);
-                };
-                panic("TODO: to hlaf");
+                return(@match(src) {
+                    fn Wuw()    => .TruncWtoH;
+                    fn Wsw()    => .TruncWtoH;
+                    fn LBool()  => .ExtendI1ToH;
+                    fn WFull()  => .TruncLtoH;
+                    @default    => @panic("TODO: to hlaf %", src);
+                });
             };
             
             @panic("tmp.width not set to an llvm type. %", @as(i64) dest.raw().zext());
@@ -280,7 +330,7 @@ fn cast_type(dest: Qbe.TmpType, src: Qbe.TmpType) LlvmCast = {
 fn llvm_types(i: *Qbe.Ins) Ty(Qbe.TmpType, Array(Qbe.TmpType, 2)) = {
     o := i.op();
     yield :: fn(to: Qbe.TmpType, a0: Qbe.TmpType, a1: Qbe.TmpType) => {
-        xxx := Array(Qbe.TmpType, 2).uninitialized(); // TODO: why can't i call init :FUCKED
+        xxx := @uninitialized Array(Qbe.TmpType, 2); // TODO: why can't i call init :FUCKED
         if a0 == .WFull && argcls(i, 0) == .Kw {
             a0 = .Wuw;
         };
@@ -301,11 +351,13 @@ fn llvm_types(i: *Qbe.Ins) Ty(Qbe.TmpType, Array(Qbe.TmpType, 2)) = {
     if(o == .storeb, => yield(.WFull, .Wub, .LPtr));
     if(o == .storeh, => yield(.WFull, .Wuh, .LPtr));
     if(o == .argc, => yield(.WFull, .WFull, .LPtr));
+    if(o == .parc, => yield(.LPtr, .WFull, .WFull));
     if(o.is_store(), => yield(.WFull, .WFull, .LPtr)); // TODO: could store ptr if thats what you have tho
     if(o == .blit0, => yield(.WFull, .LPtr, .LPtr));
     if(o.between(.alloc4, .alloc16), => yield(.LPtr, .WFull, .WFull));
     if(o.between(.ceqw, .cuod), => yield(.LBool, .WFull, .WFull));
     if(o == .extub || o == .extsb, => yield(.WFull, .Wub, .WFull));
+    if(o == .sel0, => yield(.WFull, .LBool, .WFull));
     yield(.WFull, .WFull, .WFull)
 }
 

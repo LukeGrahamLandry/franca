@@ -23,6 +23,7 @@ fn main() void = {
     goal: QbeOutputPurpose = .Exe;
     arch := query_current_arch().unwrap();
     os := query_current_os();
+    use_llvm :: @static(bool) false;
     while => args.len > 0 {
         a := args[0].str();
         @switch(a) {
@@ -74,6 +75,10 @@ fn main() void = {
                 goal = .Relocatable;
                 pop();
             };
+            @case("-l") => {
+                use_llvm[] = true;
+                pop();
+            };
             @default => {
                 if a.ends_with(".fr") {// TODO: ugh don't care about the file extension 
                     pop();
@@ -90,6 +95,11 @@ fn main() void = {
     init_default_module(global_module, (type = goal, os = os, arch = arch), false);
     for flags { d | 
         global_module[].debug.items()[d] = true;
+    };
+    if use_llvm[] {
+        @assert_ne(goal, .JitOnly, "-r not supported with llvm");
+        global_module[].target.finish_passes = finish_passes_llvm;
+        global_module[].target.finish_module = finish_llvm;
     };
     
     ::if(*FILE);
@@ -118,11 +128,14 @@ fn main() void = {
     handle_dbg :: fn(s: CStr) void = ();
     
     handle_fn :: fn(fnn: *Qbe.Fn) void = {
-        @debug_assert(!fnn.globals.is_null(), "f.globals unset");
         run_qbe_passes(fnn);
     };
     handle_data :: fn(d: *Qbe.Dat) void = {
-        global_module.new_emit_data(d);
+        if use_llvm[] {
+            emit_llvm(global_module, d);
+        } else {
+            global_module.new_emit_data(d);
+        };
     };
     src := libc_allocator.read_to_string_or_crash(inpath);
     src&.push_all("\n"); // HACK
@@ -159,4 +172,14 @@ HELP :: """qbe_frontend [OPTIONS] {file.ssa, -}
 	-d <flags>  dump debug information.
 	-r          jit and run main() without outputting asglobal_module.
 	            can call functions from libc.
+	-l          output llvm ir instead
 """;
+
+fn finish_passes_llvm(f: *Qbe.Fn) void = {
+    m := f.globals;
+    // TODO: this is super wasteful! it's just because folding sel0 inserts a copy and llvm doesn't have an instruction for that. 
+    //       we could just fix args of the one we know is wrong or look at def in isel.
+    copy_elimination(f); 
+    insert_redundant_casts(f);
+    m.emit_llvm(f);
+}

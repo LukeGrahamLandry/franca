@@ -7,6 +7,7 @@
 
 ##
 
+- test slow_debug_threads (+ one that needs the phis in replace_frontend_ops)
 - allow #libc before #link_renam
 - tests for failing progeams. ie. panic backtrace
 - remove clowns

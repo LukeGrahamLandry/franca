@@ -33,6 +33,8 @@
 #include_std("backend/wasm/emit.fr");
 #include_std("backend/elf/emit.fr");
 #include_std("lib/crash_report.fr");
+#include_std("backend/llvm/emit.fr");
+#include_std("backend/llvm/isel.fr");
 
 Wasm :: import("@/backend/wasm/bits.fr");
 
@@ -145,6 +147,10 @@ QbeModule :: @rec @struct(
     debug_source: []u8,
     debug_last_off_func := 0,
     debug_last_off_source := 0,
+    
+    llvm_global_value_buf := List(u8).zeroed(),
+    llvm_global_type_buf := List(u8).zeroed(),
+    llvm_global_code_buf := List(u8).zeroed(),
 );
 
 QbeTargetEnv :: @struct(
@@ -324,6 +330,10 @@ fn init(m: *QbeModule, segment_size: i64, gpa: Alloc, goal: QbeTargetEnv, expect
     if m.goal.arch != .wasm32 {
         m.symbol_memmove = m.intern("memmove");
     };
+    
+    m.llvm_global_value_buf = list(libc_allocator);
+    m.llvm_global_type_buf  = list(libc_allocator);
+    m.llvm_global_code_buf  = list(libc_allocator);
 }
 
 fn init_empty_for_template_only(m: *QbeModule, gpa: Alloc) void = {
@@ -389,7 +399,7 @@ run_qbe_passes :: fn(f: *Qbe.Fn) void = {
         printfn(f, out);
     };
      
-    lower_switch(f);
+    replace_frontend_ops(f);
     
     if fails_typecheck(f) { err | 
         printfn(f, f.globals.debug_out);
@@ -622,17 +632,57 @@ fn usecheck(r: Qbe.Ref, k: Qbe.Cls, f: *Qbe.Fn) bool = {
     t.cls == k || (t.cls == .Kl && k == .Kw)
 }
 
-fn lower_switch(f: *Qbe.Fn) void = {
-    if(f.switch_count == 0, => return());
+// 
+// Some operations are provided for frontend convenience but don't actually have a target dependent implementation. 
+// - J.switch -> jnz chain
+// - O.assert -> jnz+hlt
+//
+fn replace_frontend_ops(f: *Qbe.Fn) void = {
     new_blocks_list := Qbe.Blk.ptr_from_int(0);
     last_block := f.start;
     changed := false;
     switches := f.switches.slice(0, f.switch_count.zext());
+    fail_assertion: ?*Qbe.Blk = .None;
     
     xxx := 0;
-    for_blocks f { b |
+    for_blocks f { b | 
         continue :: local_return;
         last_block = b;
+        
+        { // O.assert
+            j := 0;
+            while => j < b.nins.zext() {
+                i := b.ins.index(j);
+                j += 1;
+                if i.op() == .assert {
+                    r := f.newtmp("front", .Kw);
+                    i[] = make_ins(.cnew, .Kw, r, i.arg&[0], QbeConZero);  // TODO: only looking at low 32 bits rn so it could just be jnz directly. but should really look at all 64. 
+                    fail := or fail_assertion { 
+                        b3 := add_block();
+                        b3.jmp.type = .hlt;
+                        fail_assertion = (Some = b3);
+                        b3
+                    };
+                    b2 := add_block();
+                    b2.s1 = b.s1; b2.s2 = b.s2; b2.jmp = b.jmp;
+                    b2.nins = b.nins - j.trunc();
+                    b2.ins = new(b2.nins.zext());
+                    b2.ins.slice(0, b2.nins.zext()).copy_from(b.ins.slice(j, b.nins.zext()));
+                    b.jmp = (type = .jnz, arg = r);
+                    b.s1 = b2; b.s2 = fail;
+                    b.nins = j.trunc();
+                    // this matters if the frontend uses phis (or this is being called late because of slow_debug_threads)
+                    for_jump_targets b2 { s |
+                        for_phi s { p |  // paste from replacepreds
+                            replacepred(p.blk, p.narg.zext(), b2, b);
+                        };
+                    };
+                    b = b2;
+                    j = 0;
+                };
+            };
+        };
+        
         if b.jmp.type != .switch {
             continue();
         };
@@ -726,6 +776,11 @@ fn slow_debug_threads(f: *Qbe.Fn) void = {
         };
         @if(changed) f.copy_instructions_from_scratch(b); 
     };
+    
+    // for assert(). silly. just factor it out and do it directly? 
+    replace_frontend_ops(f);
+    fillpreds(f);
+    fillrpo(f);
 }
 
 wasm_page_size :: 65536;
