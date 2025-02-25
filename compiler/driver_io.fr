@@ -1,21 +1,57 @@
 //! All communication between the compiler and the outside world should go through the driver program. 
 //! This file has defaults used to load drivers (but they can be skipped entirely by precompiling to a dynamic library,
 //! and passing that to the compiler, just be careful about ABI breakage).
-//! The ExportVTable will be prepopulated with these functions and you can replace them as needed. 
 //! For sanity's sake, the compiler itself should be buildable with these defaults so its not super painful to change the ABI. 
 
-// TODO: bring back dylib drivers
-// TODO: add to import vtable but provide default implementations. 
-//       disassembler, find_std_lib, comptime libc, get_include_std, comptime jit
-// TODO: remove comptime jit switching on Backend and just use opaque pointer. 
-// TODO: std lib Nullable(*T) with the same api as ?*T but a niche. 
-// find_std_lib: @FnPtr(userdata: rawptr, c: Compiler) ?Str,
-// get_include_std: @FnPtr(userdata: rawptr, c: Compiler, name: Str) ?WaitingParse,
-// comptime_jit_init: @FnPtr(data: *SelfHosted, vtable: *BackendImportVTable, dispatch_ptr: i64) Result(rawptr, Str); 
-// comptime_jit_emit: @FnPtr(jit_userdata: rawptr, f: FuncId, body: *FnBody, compile_ctx_ptr: CompilerRs) Result(void, Str); 
-// comptime_jit_free: @FnPtr(jit_userdata: rawptr, f: FuncId, body: *FnBody, compile_ctx_ptr: CompilerRs) Result(void, Str); 
-// disassemble: @FnPtr(userdata: rawptr, bytes: []u8, out: *List(u8)) Result(void, Str),
+fn sync_driver_message(self: *SelfHosted, in: DriverMessage) DriverResult = {
+    in: []DriverMessage = (ptr = in&, len = 1);
+    out: DriverResult = .Continue;
+    out: []DriverResult = (ptr = out&, len = 1);
+    f := self.get_build_options()[].handle_message;
+    f(in, out);
+    out[0]
+}
 
+// TODO: put this in the vtable as well so they can super()? 
+fn builtin_driver_callback(in: []DriverMessage, out: []DriverResult) void = {
+    self := current_comptime();
+    enumerate in { i, msg |
+        out[i] = @match(msg) {
+            fn ReadSourceCode(it) => {
+                name := self.pool.get(it.path);
+                ::if(?Str);
+                a := self.get_alloc();
+                src: ?Str = if name == "compiler" {
+                    code: List(u8) = list(self.get_alloc());
+                    fill_export_ffi(code&);
+                    (Some = code.items())
+                } else {
+                    lib := STDLIB_PATH[].unwrap();
+                    check := @tfmt("%/%", lib, name);
+                    // TODO: do this as one operation (error handling on read)
+                    if file_exists(check) {
+                        (Some = a.read_to_string_or_crash(check).items())
+                    } else {
+                        if file_exists(name) {
+                            (Some = a.read_to_string_or_crash(name).items())
+                        } else {
+                            .None
+                        }
+                    }
+                };
+                (String = src)
+            }
+            fn Log(it) => {
+                eprintln(it.message);
+                .Continue
+            }
+            @default => .Continue;
+        };
+    };
+}
+
+
+// TODO: remove ExportVTable. i think the message @tagged is less painful
 fn default_driver_exports() ExportVTable = {
     vtable: ExportVTable = (
         resolve_comptime_import = .None,
@@ -24,15 +60,20 @@ fn default_driver_exports() ExportVTable = {
     vtable
 }
 
-
-////////////////////
-/// Defaults
-
-// get_include_std: @FnPtr(userdata: rawptr, c: Compiler, name: Str) ?Str = .None,
-// fn driver_get_include_std(_userdata: rawptr, c: Compiler, name: Str) ?Str = {}
-
 //////////////////////////////////
 /// Entry points from the compiler
+
+fn get_include_std(c: *SelfHosted, name: Str) ?WaitingParse = {
+    zone := zone_begin(.LoadFile); // TODO: defer
+    result := c.sync_driver_message(ReadSourceCode = (path = c.pool.insert_owned(name)));
+    ::tagged(@type result);
+    @assert(result&.is(.String), "bad ReadSourceCode impl");
+    src := result.String || return(.None);
+    file := c.codemap.add_file(name, src);
+    id := push_parse(c.parser, src, file);
+    zone_end(zone);
+    (Some = id)
+}
 
 fn resolve_comptime_import(self: *SelfHosted, fid: FuncId, func: *Func, lib_name: Symbol) void = {
     // TODO: allow it to tell us no that doesn't exist

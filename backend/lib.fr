@@ -80,7 +80,7 @@ QbeModule :: @rec @struct(
     
     // These we need to track but Qbe doesn't use internally. 
     number_of_types := 0, // ntyp. only used by parser
-    debug_out: *FILE,
+    debug_out: *List(u8),
     symbols: []SymbolBucket,
     
     // stuff for emitting code.
@@ -123,8 +123,6 @@ QbeModule :: @rec @struct(
     //
     use_map_jit_on_apple_silicon: bool, 
     
-    outf := zeroed(*FILE),
-    
     forever: ArenaAlloc,
     symbol_memmove: u32,
     types_mutex: PMutex,
@@ -149,6 +147,7 @@ QbeModule :: @rec @struct(
     llvm_global_value_buf := List(u8).zeroed(),
     llvm_global_type_buf := List(u8).zeroed(),
     llvm_global_code_buf := List(u8).zeroed(),
+    debug_out_storage: List(u8),
 );
 
 QbeTargetEnv :: @struct(
@@ -279,7 +278,8 @@ fn init(m: *QbeModule, segment_size: i64, gpa: Alloc, goal: QbeTargetEnv, expect
         };
     };
     
-    m.debug_out = fdopen(STD_ERR, "a".sym().c_str());
+    m.debug_out_storage = list(forever);
+    m.debug_out = m.debug_out_storage&;
     m.types  = forever.box(@type m.types[]);
     
     // :UpdateBoot this is fixed now  TODO: add a test tho
@@ -293,8 +293,8 @@ fn init(m: *QbeModule, segment_size: i64, gpa: Alloc, goal: QbeTargetEnv, expect
     m.target = forever.box(@type m.target[]);
     
     
-    debug := getenv("FRANCA_DEBUG_THREADS".sym().c_str());  // TODO: remove this! make it more official
-    m.convert_stores_to_atomic_for_debugging = !debug.ptr.is_null() && m.goal.type != .JitOnly;
+    debug := get_environment_variable("FRANCA_DEBUG_THREADS");  // TODO: remove this! make it more official
+    m.convert_stores_to_atomic_for_debugging = debug.is_some() && m.goal.type != .JitOnly;
     
     t := m.target;
     t.data = emit_data_to_segment;
@@ -347,7 +347,6 @@ fn init_empty_for_template_only(m: *QbeModule, gpa: Alloc) void = {
         pthread_mutex_init(m.intern_mutex&, 0).unwrap();
     };
     m.symbols = forever.alloc_zeroed(SymbolBucket, IMask + 1);
-    //m.debug_out = fdopen(STD_ERR, "a".sym().c_str());
     m.types  = forever.box(@type m.types[]);
     mem := forever.alloc(Qbe.Ins, Qbe.MaxInstructions);
     ::?*Array(Qbe.Ins, Qbe.MaxInstructions);
@@ -360,10 +359,8 @@ fn init_empty_for_template_only(m: *QbeModule, gpa: Alloc) void = {
 }
 
 // TODO: this should go away eventually 
-fn show_backend_stats() bool = {
-    show_stats := getenv("FRANCA_LOG_STATS".sym().c_str());  // :UpdateBoot
-    !show_stats.ptr.is_null()
-}
+fn show_backend_stats() bool = 
+    get_environment_variable("FRANCA_LOG_STATS").is_some();
 
 fn drop(m: *QbeModule) void = {
     fst := m.segments.data&[0].mmapped;
@@ -392,7 +389,8 @@ run_qbe_passes :: fn(f: *Qbe.Fn) void = {
     m := f.globals;
     ::ptr_utils(QbeModule);
     @debug_assert(!m.is_null(), "function module not set");
-   
+    
+    flush_debug(f.globals);
     if f.globals.debug["P".char()] {
         out := f.globals.debug_out;
         write(out, "\n> After parsing:\n");

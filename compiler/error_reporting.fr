@@ -755,60 +755,56 @@ fn show_error_line(self: *CodeMap, span: Span) void = {
 }
 
 fn maybe_log_scopes(self: *SelfHosted) void = {
-    n := "FRANCA_COMPILER_DEBUG_LOG_SCOPES";
-    n := n.maybe_borrow_cstr(temp());
-    path := getenv(n);
-    if !path.ptr.is_null() {
-        eprintln("logging scopes...");
-        out := u8.list(temp());
-        out&.push_all("SCOPES:\n\n");
-        each self.scopes.scopes& { scope | 
-            scope.visit = 0;
-        };
-        enumerate self.scopes.scopes& { i, scope | 
-            scope.visit = self.scopes[scope.parent].visit + 1;
-            line := self.codemap.get_whole_line(scope.loc);
-            @fmt(out&, "%- [S%] %:%:% ", f_rep("  ", scope.visit), i, line.filename, line.line, line.col);
-            @fmt(out&, " parent = (S%) ", scope.parent.id());
-            use := get_use(self, scope_from_index(i.trunc()));
-            if use.parents.len > 0 {
-                @fmt(out&, ", #use[");
-                each use.parents { use |
-                    @match(use.who&) {
-                        fn Scope(it) => @fmt(out&, "(S%), ", it[].id());
-                        fn PendingEval(it) => @fmt(out&, "%%%, ", self.pool.get(it.name), "%", it.id);
-                    };
+    path := get_environment_variable("FRANCA_COMPILER_DEBUG_LOG_SCOPES") || return();
+    eprintln("logging scopes...");
+    out := u8.list(temp());
+    out&.push_all("SCOPES:\n\n");
+    each self.scopes.scopes& { scope | 
+        scope.visit = 0;
+    };
+    enumerate self.scopes.scopes& { i, scope | 
+        scope.visit = self.scopes[scope.parent].visit + 1;
+        line := self.codemap.get_whole_line(scope.loc);
+        @fmt(out&, "%- [S%] %:%:% ", f_rep("  ", scope.visit), i, line.filename, line.line, line.col);
+        @fmt(out&, " parent = (S%) ", scope.parent.id());
+        use := get_use(self, scope_from_index(i.trunc()));
+        if use.parents.len > 0 {
+            @fmt(out&, ", #use[");
+            each use.parents { use |
+                @match(use.who&) {
+                    fn Scope(it) => @fmt(out&, "(S%), ", it[].id());
+                    fn PendingEval(it) => @fmt(out&, "%%%, ", self.pool.get(it.name), "%", it.id);
                 };
-                @fmt(out&, "]",);
             };
-            @fmt(out&, "\n%  %\n", f_rep("  ", scope.visit), self.codemap.source_slice(line.line_text));
-            if scope.const_lookup.raw.len_including_tombstones > 0 {
-                @fmt(out&, "%   - CONSTANTS: \n%    [", f_rep("  ", scope.visit), f_rep("  ", scope.visit));
-                each scope.const_lookup& { k, v |
+            @fmt(out&, "]",);
+        };
+        @fmt(out&, "\n%  %\n", f_rep("  ", scope.visit), self.codemap.source_slice(line.line_text));
+        if scope.const_lookup.raw.len_including_tombstones > 0 {
+            @fmt(out&, "%   - CONSTANTS: \n%    [", f_rep("  ", scope.visit), f_rep("  ", scope.visit));
+            each scope.const_lookup& { k, v |
+                @fmt(out&, "%, ", self.log(v[]));
+            };
+            @fmt(out&, "]\n");
+        };
+        if scope.vars.len > 0 {
+            @fmt(out&, "%   - VARIABLES: \n%    [", f_rep("  ", scope.visit), f_rep("  ", scope.visit));
+            each scope.vars& { v |
+                if v.kind != .Const {
                     @fmt(out&, "%, ", self.log(v[]));
                 };
-                @fmt(out&, "]\n");
             };
-            if scope.vars.len > 0 {
-                @fmt(out&, "%   - VARIABLES: \n%    [", f_rep("  ", scope.visit), f_rep("  ", scope.visit));
-                each scope.vars& { v |
-                    if v.kind != .Const {
-                        @fmt(out&, "%, ", self.log(v[]));
-                    };
-                };
-                @fmt(out&, "]\n");
-            };
-            @fmt(out&, "\n");
+            @fmt(out&, "]\n");
         };
-        @fmt(out&, "\n\n\n\n!!!!PART2:\n\n\n");
-        i := 0;
-        each self.scopes.types& { t |
-            @fmt(out&, "- (%%%): %\n", self.pool.get(t.debug_name), "%", i, self.log_type(t.type));
-            i += 1;
-        };
-        
-        write_entire_file(path.str(), out.items());
+        @fmt(out&, "\n");
     };
+    @fmt(out&, "\n\n\n\n!!!!PART2:\n\n\n");
+    i := 0;
+    each self.scopes.types& { t |
+        @fmt(out&, "- (%%%): %\n", self.pool.get(t.debug_name), "%", i, self.log_type(t.type));
+        i += 1;
+    };
+    
+    write_entire_file(path.str(), out.items());
 };
 
 // :SLOW but only called when panicking so it's fine. 

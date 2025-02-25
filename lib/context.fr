@@ -7,7 +7,8 @@ DefaultContext :: @struct(
     comptime: rawptr,  // Will be null at runtime (unless you call into the compiler as a library). 
     reserved2 := 0,
     thread_index: i64,
-    reserved: Array(i64, 6),
+    reserved: Array(i64, 5),
+    environment_variables: *CStr,  // a null terminated array of null terminated strings
     cli_arguments: []CStr,
     temporary_allocator: *ArenaAlloc,
     panic_hook: @FnPtr(msg: Str) Never,
@@ -17,7 +18,7 @@ DefaultContext :: @struct(
 // For AOT builds, the compiler generates a call to this as your program's main entry point. 
 // note: whatever you had in the context at comptime is NOT baked into your program (unlike all other reachable memory).
 // For jitted code, you inherit the compiler's context. (TODO: maybe that should only be for comptime/drivers)
-franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void) void = {
+franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CStr) void = {
     // On macos (argc, argv) are passed to the entry point in registers so we're good to go. 
     // But on linux, they're passed on the stack, so we have to grab them from our caller's frame. 
     // Also on linux glib expects the stack to be 16 byte aligned but the kernel doesn't do that for you. 
@@ -46,30 +47,32 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void) void = {
         if get_fp().mod(16) != 0 {
             fix_stack();
         };
+        //envp = argv.offset(argc + 1);
     };
-    
+
     CAPTURE :: @static(@FnPtr() void);
     CAPTURE[] = user;
     
-    impl2 :: fn(argc: i64, argv: *CStr) void = {
+    impl2 :: fn(argc: i64, argv: *CStr, envp: *CStr) void = {
         push_zeroed_dynamic_context { 
             c := context(DefaultContext);
             temporary_allocator: ArenaAlloc = init(page_allocator, 1.shift_left(20));
             c.temporary_allocator = temporary_allocator&;
             c.panic_hook = print_and_exit1;
             c.cli_arguments = (ptr = argv, len = argc);
+            c.environment_variables = envp;
             CAPTURE[]();
             exit(0);
         };
     };
-    impl :: fn(argc: i64, argv: *CStr, user: @FnPtr() void) void #target_os = (fn($os) => @match(os) {
+    impl :: fn(argc: i64, argv: *CStr, envp: *CStr, user: @FnPtr() void) void #target_os = (fn($os) => @match(os) {
         fn linux() => {
-            __libc_start_main :: fn(user: @FnPtr(argc: i64, argv: *CStr) void, argc: i64, argv: *CStr, i: i64, f: i64, l: i64) i64 #libc;
+            __libc_start_main :: fn(user: @FnPtr(argc: i64, argv: *CStr, envp: *CStr) void, argc: i64, argv: *CStr, i: i64, f: i64, l: i64) i64 #libc;
             __libc_start_main(impl2, argc, argv, 0, 0, 0);
         }
-        @default => impl2(argc, argv);
+        @default => impl2(argc, argv, envp);
     });
-    impl(argc, argv, user);
+    impl(argc, argv, envp, user);
 };
 
 // HACK. if context is passed in a global it will leak out from the callee. 

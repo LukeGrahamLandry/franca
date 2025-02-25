@@ -3,7 +3,6 @@ CompilerValue :: @struct(pointer_to_pointer_to_selfhosted: rawptr);
 CompCtx :: @rec @struct(data: Compiler, vtable: *ImportVTable);
 fn CRes($T: Type) Type = Result(T, *CompileError);
 
-Backend :: @enum(i64) (CompilerJit, New); ::enum(Backend);
 // TODO: some of the old build stuff uses these names in file paths
 Arch :: @enum(i64) (aarch64, x86_64, wasm32);  ::enum(Arch);
 ExecStyle :: @enum(i64) (Jit, Aot);
@@ -139,23 +138,21 @@ BuildOptions :: @struct(
     deduplicate_bytecode: bool = true,  // TODO: fix this. it is ignored for now. (always false)
     debug_info: bool = false,
     wasm32: bool = false,  // :build_options_wasm
-    comptime_jit: Backend = .CompilerJit, // TODO: remove this field
+    _pad4 := 0,
     driver_vtable_ptr: *ExportVTable,
     driver_vtable_user_data: rawptr = 0.rawptr_from_int(),
     // This effects what emit_bc does for the @uninitilized ast node. 
     // TODO: do it in the allocators as well?
     // TODO: do it in stack slots (between field padding)
     zero_init_memory: bool = false,
-    // This makes compile speed a bit slower but lets you get sane error messages instead of just "Tried to call uncompiled function".
-    // Soon I want to jit lazily and rely on that for creating function pointer values so this might stop being optional at some point. 
-    do_jit_shims := true, 
+    _do_jit_shims := true,   // :UpdateBoot (this always has to be true so i want to remove the field)
     _pad3 := false,
     // At comptime, context passing convention must match whatever the compiler was compiled with. 
     implicit_context_comptime := true, // This value is ignored! Set later by the compiler. 
     implicit_context_runtime := true, // This you can choose in the driver program (false is not thread safe)
     target_os_bitset: u32 = 0,
     target_arch_bitset: u32 = 0,
-    _pad2 := 0,
+    handle_message: @FnPtr(in: []DriverMessage, out: []DriverResult) void,
     env := rawptr_from_int(0),
     use_raw_syscalls := false,
 );
@@ -525,3 +522,22 @@ fn scope_from_index(i: u32) ScopeId = {
     s := ptr_cast_unchecked(u32, ScopeId, i&)[]; 
     s
 }
+
+// TODO: make it possible for examples/soft_draw to work AOT (needs to link a macos framework)
+DriverMessage :: @tagged(
+    ReadSourceCode: @struct(path: Symbol),
+    Log: @struct(message: Str),  // TODO: use this instead of print for debug_log_*?
+    // TODO: implement the rest of these
+    //ParseScopeEnd: @struct(path: Symbol, stmts: *RawList(FatStmt)),
+    //FindImport: @struct(lib_name: Symbol, fid: FuncId, func_name: Symbol),
+    //CompileBodyStart: @struct(fid: FuncId),
+    EmitIrStart: @struct(when: ExecStyle, fid: FuncId),
+    EmitIrEnd: @struct(ir_data: rawptr, ir_type: Symbol, fid: FuncId, when: ExecStyle),
+    //Disassemble: @struct(bytes: []u8),
+);
+
+DriverResult :: @tagged(
+    Continue: void,
+    String: ?Str,  // ReadSourceCode, Disassemble 
+    FoundImport: @tagged(Found: rawptr, RuntimeOnly, NotFound),
+);

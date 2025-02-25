@@ -110,6 +110,9 @@ fn main_thread_pump(comp: CompCtx, shared: *CodegenShared, fns: []FuncId) void =
 }
 
 // TODO: factor out this so the other one can call it.  
+//
+// On macos, we want to save the arguments to the exe entry point. 
+// On linux, franca_runtime_init does some extra stuff to grab them from the stack. 
 fn wrap_with_runtime_init(comp: CompCtx, shared: *CodegenShared, user_main: FuncId, idx: *i64) void = {
     env := comp.get_comptime_env();
     runtime_init := env.runtime_init.expect("declaration of franca_runtime_init (forgot to include lib/core.fr?)");
@@ -126,16 +129,19 @@ fn wrap_with_runtime_init(comp: CompCtx, shared: *CodegenShared, user_main: Func
         f.nblk = 1;
         argc := f.newtmp("argc", .Kl);
         argv := f.newtmp("argv", .Kl);
+        envp := f.newtmp("envp", .Kl);
         // IMPORTANT: you can't use f.emit because threads. 
-        N :: 6;
+        N :: 8;
         ins: QList(Qbe.Ins) = new(N);
         ins[0] = make_ins(.par, .Kl, argc, QbeNull, QbeNull);
         ins[1] = make_ins(.par, .Kl, argv, QbeNull, QbeNull);
+        ins[2] = make_ins(.par, .Kl, envp, QbeNull, QbeNull);
         runtime_init := f.symcon(comp.fmt_fn_name(runtime_init));
-        ins[2] = make_ins(.arg, .Kl, QbeNull, argc, QbeNull);
-        ins[3] = make_ins(.arg, .Kl, QbeNull, argv, QbeNull);
-        ins[4] = make_ins(.arg, .Kl, QbeNull, f.symcon(name), QbeNull);
-        ins[5] = make_ins(.call, .Kw, QbeNull, runtime_init, QbeNull);
+        ins[3] = make_ins(.arg, .Kl, QbeNull, argc, QbeNull);
+        ins[4] = make_ins(.arg, .Kl, QbeNull, argv, QbeNull);
+        ins[5] = make_ins(.arg, .Kl, QbeNull, f.symcon(name), QbeNull);
+        ins[6] = make_ins(.arg, .Kl, QbeNull, envp, QbeNull);
+        ins[7] = make_ins(.call, .Kw, QbeNull, runtime_init, QbeNull);
         f.start.jmp.type = .ret0;
         f.start.nins = N;
         f.start.ins = ins;
