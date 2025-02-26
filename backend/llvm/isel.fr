@@ -16,6 +16,7 @@ CastCtx :: @struct(
     f: *Qbe.Fn,
     tmps: QList(LlvmTmp),
     const_casts: List(Qbe.Ins),  // :SLOW
+    start_tmp_count: i64,
 );
 
 LlvmTmp :: @struct(
@@ -45,11 +46,12 @@ LlvmCast :: @enum(i64) (
 // TODO: be better about unifying phi types. its fine if they're ptr/bool as long as all args are the same. 
 // sets width fields of tmps.
 fn insert_redundant_casts(f: *Qbe.Fn) void = {
-    N := f.ntmp.zext() * 2;
+    N := f.ntmp.zext();
     c: CastCtx = (
         f = f, 
         tmps = new(N),
         const_casts = list(temp()),
+        start_tmp_count = N,
     );
     each f.tmps() { t |
         t.visit = 0;
@@ -75,11 +77,13 @@ fn insert_redundant_casts(f: *Qbe.Fn) void = {
     // note the types of all usages
     for_blocks f { b |
         for_insts_forward b { i |
-            _, args := i.llvm_types();
-            range(0, 2) { a |
-                continue :: local_return;
-                if rtype(i.arg&[a]) == .RTmp {
-                    c&.request_cast(i.arg&[a], args&[a]);
+            if i.op() != .copy || !isreg(i.arg&[0]) {
+                _, args := i.llvm_types();
+                range(0, 2) { a |
+                    continue :: local_return;
+                    if rtype(i.arg&[a]) == .RTmp {
+                        c&.request_cast(i.arg&[a], args&[a]);
+                    };
                 };
             };
         };
@@ -91,31 +95,35 @@ fn insert_redundant_casts(f: *Qbe.Fn) void = {
         if b.jmp.type == .jnz {
             c&.request_cast(b.jmp.arg, .LBool);
         };  
-        
-        if is_ret(b.jmp.type) {
-            if b.jmp.type == .retc {
-                c&.request_cast(b.jmp.arg, .LPtr);
-            } else {
-                c&.request_cast(b.jmp.arg, if(b.jmp.type == .retw, => .Wuw, => .WFull));
-            };
-        };  
     };  
     
     // emit instructions. inserting casts after creations as needed. 
     for_blocks f { b |
         if b.jmp.type == .jnz {
             c&.fix_arg(b.jmp.arg&, .LBool);
-        };  
-        if is_ret(b.jmp.type) {
-            if b.jmp.type == .retc {
-                c&.fix_arg(b.jmp.arg&, .LPtr);
-            } else {
-                c&.fix_arg(b.jmp.arg&, if(b.jmp.type == .retw, => .Wuw, => .WFull));
-            };
-        };
+        }; 
         for_insts_rev b { i |
+            continue :: local_return;
             out, args := i[].llvm_types();
             c&.emit_requested_casts(i.to);
+            if i[].op() == .copy && isreg(i.arg&[0]) {
+                f.emit(i[][]);
+                continue();
+            };
+            
+            // sysv.fr converts args to load directly to register sometimes. but emit.fr expects only copies to target registers. 
+            if i[].op() == .load {
+                if isreg(i.to) {
+                    r := f.newtmp("isel", i[].cls());
+                    f.emit(.copy, i[].cls(), i.to, r, QbeNull);
+                    i.to = r;
+                };
+                if rtype(i.arg&[0]) == .RSlot {
+                    r := f.newtmp("isel", .Kl);
+                    f.emit(.addr, .Kl, r, i.arg&[0], QbeNull);
+                    i.arg&[0] = r;
+                };
+            };
             
             if i[].op().is_load() && i[].op() != .load {
                 no_extend := (i[].op() == .loaduw || i[].op() == .loadsw) && i[].cls() == .Kw;
@@ -245,11 +253,14 @@ fn fix_arg(c: *CastCtx, arg: *Qbe.Ref, want: Qbe.TmpType) void = {
     };
     if(rtype(arg[]) != .RTmp, => return());
     id := arg[].val();
+    if id >= c.start_tmp_count {
+        return()
+    };
     original := c.f.tmp[id].width;
     if original != want {
         info := c.tmps[id]&;
         range(0, MAX_CASTS) { i | 
-            @assert(info.casts&[i] != QbeNull, "cast not found");
+            @assert(info.casts&[i] != QbeNull, "cast not found % for tmp=%", want, id);
             if(info.casts&[i] == QbeNull, => return()); // TODO
             if info.types&[i] == want {
                 arg[] = info.casts&[i];
@@ -363,6 +374,7 @@ fn llvm_types(i: *Qbe.Ins) Ty(Qbe.TmpType, Array(Qbe.TmpType, 2)) = {
     if(o.between(.ceqw, .cuod), => yield(.LBool, .WFull, .WFull));
     if(o == .extub || o == .extsb, => yield(.WFull, .Wub, .WFull));
     if(o == .sel0, => yield(.WFull, .LBool, .WFull));
+    if(o == .salloc, => yield(.LPtr, .WFull, .WFull));
     yield(.WFull, .WFull, .WFull)
 }
 
