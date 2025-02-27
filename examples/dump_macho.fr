@@ -7,7 +7,6 @@
 //      - warn if __TEXT is not file offset 0
 //      - warn if fixup chain segment_offset is not in the right segment
 
-#include_std("backend/macho/bits.fr");
 fn main() void = {
     args := cli_args();
     assert(args.len > 1, "Last argument is path to macho file");
@@ -46,11 +45,11 @@ fn main() void = {
                     
                     if header.relocations_count != 0 {
                         @println("          % relocations:", header.relocations_count);
-                        relocations := ptr_cast_unchecked(u8, i64, full_bytes.ptr.offset(header.relocations_file_offset.zext()));
-                        relocations: []i64 = (ptr = relocations, len = header.relocations_count.zext());
+                        T :: RelocationFields;
+                        relocations := ptr_cast_unchecked(u8, T, full_bytes.ptr.offset(header.relocations_file_offset.zext()));
+                        relocations: []T = (ptr = relocations, len = header.relocations_count.zext());
                         for relocations { r | 
-                            fields := decode_reloc(r);
-                            @println("          - %", fields&);
+                            @println("          - %", r&);
                         };
                     };
                 };
@@ -208,10 +207,13 @@ fn main() void = {
                                     dowhile {
                                         page_data.ptr = page_data.ptr.offset(next_offset);
                                         page_data.len -= next_offset;
-                                        reloc := ptr_cast_unchecked(u8, i64, page_data.ptr)[];
-                                        reloc := decode_chained(reloc);
-                                        @println("                  - %", reloc&);
-                                        next_offset = reloc.next.zext() * 4;
+                                        reloc := ptr_cast_unchecked(u8, ChainedReloc, page_data.ptr)[];
+                                        if get(reloc.bind, .is_bind) == 1 {
+                                            @println("                  - (Bind = %)", reloc.bind&);
+                                        } else {
+                                            @println("                  - (Rebase = %)", reloc.rebase&);
+                                        };
+                                        next_offset = get(reloc.bind, .next) * 4;
                                         next_offset != 0
                                     };
                                 }
@@ -227,17 +229,17 @@ fn main() void = {
                 println("           Imports:");
                 range(0, header.imports_count.zext()) { i |
                     if header.imports_format == 1 {
-                        import := decode_import(imports_data&.pop_type(u32)[]);
+                        import := imports_data&.pop_type(ChainedImport);
                         name := "";
                         if header.symbols_format == 0 { 
-                            n: CStr = (ptr = symbols_data.ptr.offset(import.name_offset.zext()));
+                            n: CStr = (ptr = symbols_data.ptr.offset(get(import[], .name_offset)));
                             name = n.str();
                             if name.len + (@as(i64) header.symbols_offset.zext()) > full_data.len {
                                 name = "";
                                 eprintln("WARN: name of out bounds");
                             };
                         };
-                        @println("           [%] % %", i, import&, name);
+                        @println("           [%] % %", i, import, name);
                     } else {
                         @print("(% = %]), ", i, data&.pop_type(u64));
                     };
@@ -369,13 +371,7 @@ fn with_trailing_string(bytes: *[]u8, header: *LoadCommandHeader, $Command: Type
 ::DeriveFmt(ApplicationUuid);
 ::DeriveFmt(ChainedFixupsHeader);
 ::DeriveFmt(ChainedStartsInSegment);
-::DeriveFmt(ChainedImport);
-::DeriveFmt(ChainedReloc);
-XXX :: get_field_type(ChainedReloc, @symbol payload);
-::DeriveFmt(XXX);
-::tagged(XXX);
-::DeriveFmt(get_variant_type(XXX, XXX.Tag().Rebase));
-::DeriveFmt(get_variant_type(XXX, XXX.Tag().Bind));
+
 ::DeriveFmt(u128);
 ::DeriveFmt(RelocationFields);
 
@@ -384,3 +380,6 @@ fn display(a: *u16, out: *List(u8)) void = a[].display(out);
 fn display(a: *u8, out: *List(u8)) void = a[].display(out);
 
 fn to_signed(x: u64) i64 = x.bitcast(); // TODO: safety check
+
+#use("@/backend/macho/bits.fr");
+#use("@/lib/bit_fields.fr");

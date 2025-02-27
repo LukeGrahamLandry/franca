@@ -28,25 +28,24 @@ RAlloc :: @rec @struct(
     link: *RAlloc,
 );
 
-/* layout of call's second argument (RCall)
- *
- *  29      12    8    4  3  0
- *  |0...0|0|x|xxxx|xxxx|xx|xx|                  range
- *         | |    |    |  |  ` gp regs returned (0..2)
- *         | |    |    |  ` sse regs returned   (0..2)
- *         | |    |    ` gp regs passed         (0..6)
- *         | |    ` sse regs passed             (0..8)
- *         | ` 1 if rax is used to pass data    (0..1)
- *         ` 1 if syscall (redundant with op but easier to pass around)
- */
+RCallAmd :: @bit_fields(
+    gp_ret := 2,
+    fp_ret := 2, // sse
+    gp_arg := 4,
+    fp_arg := 4, // see
+    rax    := 1, // rax is used to pass data? (variadic or env)
+    sys    := 1, // syscall? (redundant with op but easier to pass around)
+    stack  := 15,  // TODO: check in bounds when doing va call or better just use the field on Fn because i need that for llvm anyway
+    tag    := 3,
+);
 
 fn amd64_sysv_retregs(r: Qbe.Ref, p: *Array(i32, 2)) u64 = {
     uint :: fn(b: bool) u64 = b.int().bitcast();
+    r := to_rcall(r, RCallAmd);
     
-    @debug_assert(rtype(r) == .RCall, "retregs expected RCall");
     b: u64 = 0;
-    ni := r.val().bit_and(3);
-    nf := r.val().shift_right_logical(2).bit_and(3); 
+    ni := get(r, .gp_ret);
+    nf := get(r, .fp_ret);
     b = b.bit_or(uint(ni >= 1) * BIT(Amd64Reg.RAX));
     b = b.bit_or(uint(ni >= 2) * BIT(Amd64Reg.RDX));
     b = b.bit_or(uint(nf >= 1) * BIT(Amd64Reg.XMM0));
@@ -65,16 +64,16 @@ fn amd64_sysv_retregs(r: Qbe.Ref, p: *Array(i32, 2)) u64 = {
 INDEX_OF_AMD64_SYSCALL_ARG_DIFF :: 3;
 
 fn amd64_sysv_argregs(r: Qbe.Ref, p: *Array(i32, 2)) u64 = {
-    @debug_assert(rtype(r) == .RCall, "argregs expected .RCall");
+    r := to_rcall(r, RCallAmd);
     b: u64 = 0;
-    ni := r.val().shift_right_logical(4).bit_and(15);
-    nf := r.val().shift_right_logical(8).bit_and(15);
-    ra := r.val().shift_right_logical(12).bit_and(1);
+    ni := get(r, .gp_arg);
+    nf := get(r, .fp_arg);
+    ra := get(r, .rax);
     range(0, ni) { j | 
         b = b.bit_or(BIT(amd64_sysv_rsave[j]));
     };
     
-    syscall := r.val().shift_right_logical(13).bit_and(1) == 1;
+    syscall := get(r, .sys) == 1;
     if syscall && ni > INDEX_OF_AMD64_SYSCALL_ARG_DIFF {
         b = b.bit_and(bit_not(BIT(Amd64Reg.RCX))).bit_or(BIT(Amd64Reg.R10));
     };
@@ -225,22 +224,21 @@ fn typclass(a: *AClass, t: *Qbe.Typ, m: *QbeModule) void = {
     classify(a, t, 0, m);
 }
 
-// returns low bits of RCall
-fn retr(reg: *Array(Qbe.Ref, 2), aret: *AClass) i64 = {
+// Sets gp_ret and fp_ret
+fn retr(ca: *RCallAmd, reg: *Array(Qbe.Ref, 2), aret: *AClass) void = {
     ::List([]Amd64Reg);
     retreg :: @const_slice(@const_slice(Amd64Reg.RAX, .RDX), @const_slice(Amd64Reg.XMM0, .XMM1));
     nr := @slice(0, 0);
-    ca := 0;
     n  := 0;
     while => n*8 < aret.size.zext() {
         k := KBASE(aret.cls&[n]);
         j := nr[k];
         nr[k] += 1;
         reg[n] = TMP(retreg[k][j]);
-        ca += 1.shift_left(2 * k);
         n += 1;
     };
-    ca
+    set(ca, .gp_ret, nr[0]);
+    set(ca, .fp_ret, nr[1]);
 }
 
 fn selret_amd64(b: *Qbe.Blk, f: *Qbe.Fn) void = {
@@ -251,7 +249,8 @@ fn selret_amd64(b: *Qbe.Blk, f: *Qbe.Fn) void = {
     r0 := b.jmp.arg;
     b.jmp.type = .ret0;
 
-    ca := if j == .retc {
+    ca := RCallAmd.zeroed();
+    if j == .retc {
         @debug_assert(f.retty != -1);
         aret := AClass.zeroed();
         m := f.globals;
@@ -261,33 +260,28 @@ fn selret_amd64(b: *Qbe.Blk, f: *Qbe.Fn) void = {
             f.emit(.copy, .Kl, TMP(Amd64Reg.RAX), f.retr, QbeNull);
             f.emit(.blit1, .Kw, QbeNull, INT(aret.type.size), QbeNull);
             f.emit(.blit0, .Kw, QbeNull, r0, f.retr);
-            1
+            set(ca&, .gp_ret, 1);
         } else {
-            ca := retr(reg&, aret&);
+            retr(ca&, reg&, aret&);
             if aret.size > 8 {
                 r := f.newtmp("abi", .Kl);
                 f.emit(.load, .Kl, reg&[1], r, QbeNull);
                 f.emit(.add, .Kl, r, r0, f.getcon(8));
             };
             f.emit(.load, .Kl, reg&[0], r0, QbeNull);
-            ca
-        }
+        };
     } else {
         k := @as(Qbe.Cls) @as(i32) j.raw() - Qbe.J.retw.raw();
-        if is_int(k) {
-            f.emit(.copy, k, TMP(Amd64Reg.RAX), r0, QbeNull);
-            1
-        } else {
-            f.emit(.copy, k, TMP(Amd64Reg.XMM0), r0, QbeNull);
-            1.shift_left(2)
-        }
+        R := if(is_int(k), => TMP(Amd64Reg.RAX), => TMP(Amd64Reg.XMM0));
+        f.emit(.copy, k, R, r0, QbeNull);
+        if(is_int(k), => set(ca&, .gp_ret, 1), => set(ca&, .fp_ret, 1));
     };
 
     b.jmp.arg = CALL(ca);
 }
 
 // TODO: pass ac as a slice so you get bounds checks
-fn argsclass(i0: *Qbe.Ins, i1: *Qbe.Ins, ac: []AClass, op_in: Qbe.O, aret: *AClass, env: *Qbe.Ref, m: *QbeModule) i64 = {
+fn argsclass(i0: *Qbe.Ins, i1: *Qbe.Ins, ac: []AClass, op_in: Qbe.O, aret: *AClass, env: *Qbe.Ref, m: *QbeModule) RCallAmd = {
     nint := if(!aret.is_null() && aret.inmem != 0, => 5 /* hidden argument */, => 6);
     nsse := 8;
     varc := false;
@@ -340,8 +334,11 @@ fn argsclass(i0: *Qbe.Ins, i1: *Qbe.Ins, ac: []AClass, op_in: Qbe.O, aret: *ACla
     };
     
     @assert(!varc || !envc, "sysv abi does not support variadic env calls");
-    
-    int(varc || envc).shift_left(12).bit_or((6 - nint).shift_left(4)).bit_or((8 - nsse).shift_left(8))
+    r := RCallAmd.zeroed();
+    set(r&, .rax, int(varc || envc));
+    set(r&, .gp_arg, 6 - nint);
+    set(r&, .fp_arg, 8 - nsse);
+    r
 }
 
 fn rarg(ty: Qbe.Cls, ni: *i64, ns: *i64) Qbe.Ref = {
@@ -365,13 +362,11 @@ fn selcall(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins, rap: **RAlloc) void = {
     a1 := i1.arg&[1];
     aggregate := a1 != QbeNull;
     aret := AClass.zeroed();
-    ca := if aggregate {
+    if aggregate {
         @debug_assert(rtype(a1) == .RType, "second argument to call must be a type");
         typclass(aret&, m.get_type(a1.val()), m);
-        argsclass(i0, i1, ac, .arg, aret&, env&, m)
-    } else {
-        argsclass(i0, i1, ac, .arg, zeroed(*AClass), env&, m)
     };
+    ca := argsclass(i0, i1, ac, .arg, aret&, env&, m);
     
     stk := 0;
     for_rev ac { a |
@@ -394,7 +389,7 @@ fn selcall(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins, rap: **RAlloc) void = {
              * it saves one callee-save reg */
             r1 := f.newtmp("abi", .Kl);
             f.emit(.copy, .Kl, i1.to, TMP(Amd64Reg.RAX), QbeNull);
-            ca += 1;
+            set(ca&, .gp_ret, 1);
             r1
         } else {
             @debug_assert(aret.size <= 16);
@@ -411,7 +406,7 @@ fn selcall(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins, rap: **RAlloc) void = {
             };
             aret.ref&[0] = f.newtmp("abi", aret.cls&[0]);
             f.store8(aret&, 0, i1.to);
-            ca += retr(reg&, aret&);
+            retr(ca&, reg&, aret&);
             if aret.size > 8 {
                 f.emit(.copy, aret.cls&[1], aret.ref&[1], reg&[1], QbeNull);
             };
@@ -427,10 +422,10 @@ fn selcall(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins, rap: **RAlloc) void = {
     } else {
         if is_int(i1.cls()) {
             f.emit(.copy, i1.cls(), i1.to, TMP(Amd64Reg.RAX), QbeNull);
-            ca += 1;
+            set(ca&, .gp_ret, 1);
         } else {
             f.emit(.copy, i1.cls(), i1.to, TMP(Amd64Reg.XMM0), QbeNull);
-            ca += 1.shift_left(2);
+            set(ca&, .fp_ret, 1);
         };
         zeroed(*RAlloc)
     };
@@ -440,9 +435,9 @@ fn selcall(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins, rap: **RAlloc) void = {
     if env != QbeNull {
         f.emit(.copy, .Kl, TMP(Amd64Reg.RAX), env, QbeNull);
     } else {
-        vararg_call := ca.shift_right_logical(12).bit_and(1) != 0;
+        vararg_call := get(ca, .rax) != 0;
         if vararg_call {
-            sse_count := f.getcon(ca.shift_right_logical(8).bit_and(15));
+            sse_count := f.getcon(get(ca, .fp_arg));
             f.emit(.copy, .Kw, TMP(Amd64Reg.RAX), sse_count, QbeNull);
         }
     };
@@ -515,8 +510,7 @@ fn get_type(m: *QbeModule, i: i64) *Qbe.Typ = { // :ThreadSafety you have to be 
     m.types.index(i)
 }
 
-// returns an RCall but the high 20 bits are amount of stack used for parameters
-fn selpar_amd64(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins) i64 = {
+fn selpar_amd64(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins) RCallAmd = {
     env := QbeNull;
     ac := temp().alloc_zeroed(AClass, ptr_diff(i0, i1));
     f.reset_scratch();
@@ -524,13 +518,11 @@ fn selpar_amd64(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins) i64 = {
 
     m := f.globals;
     aggregate := f.retty >= 0;
-    aret := @uninitialized AClass;
-    fa := if aggregate {
+    aret := AClass.zeroed();
+    if aggregate {
         typclass(aret&, m.get_type(f.retty.intcast()), m);
-        argsclass(i0, i1, ac, .par, aret&, env&, f.globals)
-    } else {
-        argsclass(i0, i1, ac, .par, zeroed(*AClass), env&, m)
     };
+    fa := argsclass(i0, i1, ac, .par, aret&, env&, m);
     
     discard := Array(i32, 2).ptr_from_int(0);
     f.reg = amd64_sysv_argregs(CALL(fa), discard);
@@ -594,7 +586,8 @@ fn selpar_amd64(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins) i64 = {
     };
     
     f.parameter_stack_bytes = s.intcast() * 4 - 16;
-    fa.bit_or(shift_left(s * 4, 12))
+    set(fa&, .stack, s * 4);
+    fa
 }
 
 fn selvaarg(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) void = {
@@ -632,10 +625,10 @@ fn selvaarg(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) void = {
     """);
 }
 
-fn selvastart(f: *Qbe.Fn, fa: i64, ap: Qbe.Ref) void = {
-    gp := fa.shift_right_logical(4).bit_and(15) * 8;
-    fp := 48 + fa.shift_right_logical(8).bit_and(15) * 16;
-    sp := fa.shift_right_logical(12);
+fn selvastart(f: *Qbe.Fn, fa: RCallAmd, ap: Qbe.Ref) void = {
+    gp := get(fa, .gp_arg) * 8;
+    fp := 48 + get(fa, .fp_arg) * 16;
+    sp := get(fa, .stack);
     
     @emit_instructions((f = f), (ap, f.getcon(gp), f.getcon(fp), f.getcon(sp), TMP(Amd64Reg.RBP)), """
     @start
@@ -655,11 +648,16 @@ fn selvastart(f: *Qbe.Fn, fa: i64, ap: Qbe.Ref) void = {
 // Simpler than normal calls: nothing on the stack, no floats, no aggregates, INDEX_OF_AMD64_SYSCALL_ARG_DIFF.
 fn sel_syscall_amd64(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins) void = {
     count := ptr_diff(i0, i1);
-    ca := 1.shift_left(13).bit_or(1.shift_left(12)).bit_or(count.shift_left(4)).bit_or(1);
+    ca := RCallAmd.zeroed();
+    set(ca&, .rax, 1);
+    set(ca&, .sys, 1);
+    set(ca&, .gp_arg, count);
+    set(ca&, .gp_ret, 1);
     
-    f.emit(.copy, i1.cls(), i1.to, TMP(Amd64Reg.RAX), QbeNull);  // result returned in RAX as normal. 
+    rax := TMP(Amd64Reg.RAX);
+    f.emit(.copy, i1.cls(), i1.to, rax, QbeNull);  // result returned in RAX as normal. 
     f.emit(.syscall, i1.cls(), QbeNull, QbeNull, CALL(ca)); 
-    f.emit(.copy, .Kl, TMP(Amd64Reg.RAX), i1.arg&[0], QbeNull);  // syscall number passed in RAX
+    f.emit(.copy, .Kl, rax, i1.arg&[0], QbeNull);  // syscall number passed in RAX
     
     ni := 0;
     for(i0, i1) { i |

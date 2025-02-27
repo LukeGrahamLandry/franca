@@ -39,8 +39,6 @@ fn finish_llvm(m: *QbeModule) [][]u8 = {
             @fmt(o, "declare ccc void @%();\n", symbol.name);
         };
     };
-    @fmt(o, "declare ptr @llvm.stacksave.p0();\n");
-    @fmt(o, "declare void @llvm.stackrestore.p0(ptr);\n");
     chunks := list([]u8, temp());
     chunks&.push(m.llvm_global_code_buf.items());
     chunks.items()
@@ -59,11 +57,19 @@ fn emit_llvm(m: *QbeModule, f: *Qbe.Fn) void = {
     self&.write_return_type(self.f.find_rets());
     
     @fmt(self.out&, " @%(", f.name()); 
-    self&.write_params();
+    special_abi_val := self&.write_params();
     if f.parameter_stack_bytes > 0 {
-        @fmt(self.out&, ", ptr inalloca([% x i8]) %PAR", f.parameter_stack_bytes, "%"); 
+        @fmt(self.out&, ", ptr byval([% x i8]) %PAR", f.parameter_stack_bytes, "%"); 
     };
     @fmt(self.out&, ") \"frame-pointer\"=\"all\" {\n");
+    
+    // TODO: this definetly is not allowed
+    if self.f.globals.goal.arch == .x86_64 && special_abi_val != QbeNull {
+        push_all(self.out&, "START:\n");
+        self&.write_ref(special_abi_val, .Kl);
+        push_all(self.out&, " = call i64 asm \"mov %rax, $0\", \"=r\"()\n");
+        @fmt(self.out&, "br label %B0\n", "%");
+    };
     for_blocks f { b | 
         self&.emit_block(b);
     };
@@ -102,13 +108,11 @@ fn emit_block(self: *LlvmEmit, b: *Qbe.Blk) void = {
             fn salloc() => {
                 last_salloc = i.to;
                 if i.to == QbeNull {
-                    @fmt(self.out&, "\tcall void @llvm.stackrestore.p0(ptr %BASE%_%);\n", "%", b.id, last_salloc_index);
                     last_salloc_size = 0;
                 } else {
                     last_salloc_index = n_ins;
                     last_salloc_size = self.f.get_int(i.arg&[0]) || @panic("salloc non constant");
-                    @fmt(self.out&, "\t%BASE%_% = call ptr @llvm.stacksave.p0();\n", "%", b.id, last_salloc_index);
-                    @fmt(self.out&, "\t%% = alloca inalloca i8, i64 %\n", "%", self.f.get_temporary(i.to).name(), last_salloc_size);
+                    @fmt(self.out&, "\t%% = alloca i8, i64 %\n", "%", self.f.get_temporary(i.to).name(), last_salloc_size);
                 };
             }
             fn call() => {
@@ -139,7 +143,7 @@ fn emit_block(self: *LlvmEmit, b: *Qbe.Blk) void = {
                 @fmt(self.out&, "(");
                 self.write_args(args);
                 if last_salloc_size > 0 {
-                    @fmt(self.out&, ", ptr inalloca([% x i8]) %%", last_salloc_size, "%", self.f.get_temporary(last_salloc).name()); 
+                    @fmt(self.out&, ", ptr byval([% x i8]) %%", last_salloc_size, "%", self.f.get_temporary(last_salloc).name()); 
                 };
                 @fmt(self.out&, ")\n");
                 n := 0; // TODO: this is wrong! needs to be order independent. 
@@ -302,8 +306,8 @@ fn emit_ins(self: *LlvmEmit, i: *Qbe.Ins) void = {
     @match(i.op()) {
         fn addr() => {
             @debug_assert_eq(rtype(i.arg&[0]), .RSlot);
-            off := -i.arg&[0].rsval() - 16;// + 8; self.f.parameter_stack_bytes + self.f.parameter_stack_bytes + 
-            @fmt(o, " getelementptr i8, ptr %PAR, i32 %\n", "%", off); // TODO: this is amd64 specific
+            off := -i.arg&[0].rsval() - 16;// TODO: this is amd64 specific
+            @fmt(o, " getelementptr i8, ptr %PAR, i32 %\n", "%", off); 
         }
         fn add()  => bin("add", "fadd");
         fn sub()  => bin("sub", "fsub");
@@ -360,6 +364,7 @@ fn emit_ins(self: *LlvmEmit, i: *Qbe.Ins) void = {
                 fn ExtendI1ToW() => cast2("zext", "i1", "i32");
                 fn ExtendI1ToH() => cast2("zext", "i1", "i16");
                 fn ExtendI1ToL() => cast2("zext", "i1", "i64");
+                fn ExtendWToL() => cast2("zext", "i32", "i64");
                 fn CmpZero() => {   
                     int_type := "i64";
                     if rtype(i.arg&[0]) == .RTmp && self.f.tmp[i.arg&[0].val()].cls == .Kw {
@@ -466,11 +471,10 @@ fn emit_ins(self: *LlvmEmit, i: *Qbe.Ins) void = {
     }
 } 
 
-// TODO: we need to include abi information in attributes so we need to run some subset of the abi passes before getting here. 
-fn write_params(e: *LlvmEmit) void = {
+fn write_params(e: *LlvmEmit) Qbe.Ref = {
     comma := "";
     n := e.f.reg.count_ones();
-    if(n == 0, => return());
+    if(n == 0, => return(QbeNull));
     
     last_par := e.f.start.ins.first;
     while => n > 0 {
@@ -482,9 +486,17 @@ fn write_params(e: *LlvmEmit) void = {
     };
     pars := between(e.f.start.ins.first, last_par);
     
+    special_abi_val := QbeNull;
     each_rev pars { i |
         continue :: local_return;
         if(i.op() != .copy, => continue());  // HACK. we don't bother inserting llcast at the end
+        // TODO: this definetly is not allowed
+        @if(e.f.globals.goal.arch == .x86_64)
+        if i.arg&[0] == TMP(Amd64Reg.RAX.raw()) {
+            special_abi_val = i.to;
+            i.set_nop();
+            continue();
+        };
         e.out&.push_all(comma);
         e.write_type(i.cls());
         e.out&.push_all(" ");
@@ -492,6 +504,7 @@ fn write_params(e: *LlvmEmit) void = {
         i.set_nop();
         comma = ", ";
     };
+    special_abi_val
 }
 
 fn write_args(e: *LlvmEmit, args: []Qbe.Ins) void = {

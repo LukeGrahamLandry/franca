@@ -184,76 +184,31 @@ ChainedFixupsHeader :: @struct(
     symbols_format: u32, // 0 means uncompressed?
 );
 
-// needs to be decoded because i don't have bit fields!
-ChainedImport :: @struct(
-    lib_ordinal: u32,
-    weak: bool,
-    name_offset: u32,
+ChainedImport :: @bit_fields(
+    lib_ordinal := 8,
+    weak        := 1,
+    name_offset := 23,
 );
 
-// TODO: add bitfields to the language.
-fn decode_import(import: u32) ChainedImport = (
-    lib_ordinal = import.bit_and(0xFF),
-    weak        = import.shift_right_logical(8).bit_and(0x01) == 1,
-    name_offset = import.shift_right_logical(9),
-);
-
-// TODO: add bitfields to the language.
-fn encode_import(import: ChainedImport) u32 = {
-    import.lib_ordinal.bit_and(0xFF)
-    .bit_or(@if(import.weak, 1.shift_left(8), 0))
-    .bit_or(import.name_offset.shift_left(9))
-}
-
-// needs to be decoded because i don't have bit fields!
-ChainedReloc :: @struct(
-    payload: @tagged(
-        Bind: @struct(ordinal: u32, addend: u32),
-        Rebase: @struct(target: i64, high8: u32),
+// TODO: this is clearly not the best way to represent this data structure. 
+//       you want to make it super clear that (next, is_bind) are in the same position for both cases. 
+//       it would be nice if there were some way to integrate with @tagged so @match would work on your custom type. 
+ChainedReloc :: @union(
+    bind: @bit_fields(
+        ordinal  := 24,
+        addend   := 8,
+        reserved := 19,
+        next     := 12,
+        is_bind  := 1,
     ),
-    reserved: u32, 
-    next: u32
+    rebase: @bit_fields(
+        target   := 36,
+        high8    := 8,
+        reserved := 7,
+        next     := 12,
+        is_bind  := 1,
+    ),
 );
-
-// TODO: add bitfields to the language.
-fn decode_chained(data: i64) ChainedReloc = {
-    bind := data.shift_right_logical(64-1) == 1;
-    next := data.shift_right_logical(64-1-12).bit_and(1.shift_left(12) - 1);
-    @if(bind, (
-        payload = (Bind = (
-            ordinal = data.bit_and(1.shift_left(24) - 1).trunc(),
-            addend = data.shift_right_logical(24).bit_and(1.shift_left(8) - 1).trunc(),
-        )), 
-        reserved = data.shift_right_logical(32).bit_and(1.shift_left(19) - 1).trunc(), 
-        next = next.trunc(),
-    ), (
-        payload = (Rebase = (
-            target = data.bit_and(1.shift_left(36) - 1),
-            high8 = data.shift_right_logical(36).bit_and(1.shift_left(8) - 1).trunc(),
-        )), 
-        reserved = data.shift_right_logical(36+8).bit_and(1.shift_left(7) - 1).trunc(), 
-        next = next.trunc(),
-    ))
-}
-
-// TODO: add bitfields to the language.
-fn encode_chained(r: ChainedReloc) i64 = {
-    data: i64 = r.next.zext().bit_and(1.shift_left(12) - 1).shift_left(64-1-12);
-    @debug_assert_eq(r.reserved, 0, "TODO: reserved");
-    @match(r.payload) {
-        fn Bind(it) => {
-            data = data.bit_or(1.shift_left(63));
-            data = data.bit_or(it.ordinal.zext().bit_and(1.shift_left(24) - 1).shift_left(0));
-            data = data.bit_or(it.addend.zext().bit_and(1.shift_left(8) - 1).shift_left(24));
-        }
-        fn Rebase(it) => {
-            data = data.bit_or(0.shift_left(63));
-            data = data.bit_or(it.target.bit_and(1.shift_left(36) - 1).shift_left(0));
-            data = data.bit_or(it.high8.zext().bit_and(1.shift_left(8) - 1).shift_left(36));
-        }
-    };
-    data
-}
 
 ChainedStartsInSegment :: @struct(
     size: u32,
@@ -271,38 +226,15 @@ page_start_no_fixups :: 65535;
 symbol_no_section :: 0;
 
 RelocationFields :: @struct(
-    offset: i64,
-    symbol: u32,  // index in __LINKEDIT Symbol Table (when extern=true?) 
-    length: u8,   // (byte, word, long, quad)
-    type: u8,     // 4=ARM64_RELOC_PAGEOFF12, 3=ARM64_RELOC_PAGE21, 2=bl?
-    extern: bool,
-    relative: bool,
+    offset: u32,  // index in __LINKEDIT Symbol Table (when extern=true?) 
+    packed: @bit_fields(
+        symbol   := 24,
+        relative := 1,
+        length   := 2,  // (byte, word, long, quad)
+        extern   := 1,
+        type     := 4,  // 4=ARM64_RELOC_PAGEOFF12, 3=ARM64_RELOC_PAGE21, 2=bl?
+    ),
 );
-
-// TODO: add bitfields to the language.
-fn decode_reloc(relocation_entry: i64) RelocationFields = {
-    offset: u32 = relocation_entry.bit_and(1.shift_left(32) - 1).trunc();
-    packed_fields := relocation_entry.shift_right_logical(32);
-    (
-        offset   = (@as(i32) offset.bitcast()).intcast(),
-        symbol   = packed_fields.bit_and(1.shift_left(24) - 1).trunc(), 
-        relative = packed_fields.shift_right_logical(24).bit_and(0b1) == 1,
-        length   = packed_fields.shift_right_logical(25).bit_and(0b11).trunc(), 
-        extern   = packed_fields.shift_right_logical(27).bit_and(0b1) == 1,
-        type     = packed_fields.shift_right_logical(28).bit_and(0b1111).trunc(),
-    )
-}
-
-size_of_one_relocation :: 8;
-fn encode_reloc(r: RelocationFields) i64  = {
-    d: i64 = r.symbol.zext().bit_and(1.shift_left(24) - 1);
-    d = d.bit_or(r.relative.int().shift_left(24));
-    d = d.bit_or(r.extern.int().shift_left(27));
-    d = d.bit_or(r.length.zext().bit_and(0b11).shift_left(25));
-    d = d.bit_or(r.type.zext().bit_and(0b1111).shift_left(28));
-    d = (@as(i32) r.offset.intcast()).zext().bit_or(d.shift_left(32));
-    d
-}
 
 u128 :: @struct(low: u64, high: u64);
 

@@ -1,0 +1,85 @@
+// TODO: allow nesting bit field types and only require the top level one to fit in a normal integer
+// TODO: having the bit size as the field default is error prone if someone wants to use T.Wide, 
+//       and means you can't have real defaults which is kinda dumb. 
+
+// THERE IS NO GUARENTEE THAT THIS WILL BE ABI COMPATIBLE WITH YOUR SYSTEM'S C COMPILER.
+fn bit_fields(e: FatExpr) FatExpr #macro = {
+    @ct_assert(e.expr&.is(.StructLiteralP), e.loc, "expected @bit_fields(T, (name = size, ...))");
+    parts := e.expr.StructLiteralP.bindings&;
+    total_bits := 0;
+    each parts { it | 
+        name := it.ident() || panic("@bit_field missing field name");
+        bits := const_eval(i64)(it.default);
+        total_bits += bits;
+    };
+    valid :: fn(b) => (b == 8 || b == 16 || b == 32 || b == 64);
+    @ct_assert(valid(total_bits), e.loc, "@bit_fields invalid number of total bits: expected 8/16/32/64 but found %", total_bits);
+    repr_type := IntType(total_bits, false);
+    
+    @{ BitFieldImpl(@struct(repr: @[@literal repr_type], Repr :: @[@literal repr_type], Wide :: @struct @[e])) }
+}
+
+fn BitFieldImpl($T: Type) Type = {
+    F :: T.Wide.Fields();
+    ::enum(F);
+    A :: Array(i64, F.enum_count());
+    // TODO: some sort of #comptime_only to assert that this doesn't make it into the final binary 
+    //       (it already won't be in theory but it would be better if it was a compile error if you broke that). 
+    widths :: @static(A) { 
+        wide: T.Wide = ();
+        bit_cast_unchecked(T.Wide, A, wide)
+    };
+    
+    // TODO: make sure a ,:= call to this folds to just integers without loading them from memory (it's bad on -- Feb 26, 2025)
+    info :: fn(name: F) Ty(i64, i64) #fold = {
+        off := 0;
+        prev := widths.items().slice(0, name.raw());
+        for prev { w |
+            off += w;
+        };
+        size := widths[name.raw()];
+        (1.shift_left(size) - 1, off)
+    };
+    
+    fn get(self: T, $name: F) i64 #inline = {
+        mask, off := info(name);  
+        self.repr.int().shift_right_logical(off).bit_and(mask).int()
+    }
+    
+    // TODO: truncating 'value' should probably just be a safety check
+    fn set(self: *T, $name: F, value: i64) void #inline = {
+        mask, off := info(name);
+        prev: i64  = self.repr.int();
+        template  := prev.bit_and(bit_not(mask.shift_left(off)));
+        new       := template.bit_or(value.bit_and(mask).shift_left(off));
+        self.repr  = @if(::(T.Repr == u64), new.bitcast(), new.trunc()); // TODO
+    }
+    
+    fn add(self: *T, $name: F, value: i64) void = {
+        set(self, name, get(self[], name) + value);
+    }
+    
+    fn display(self: *T, out: *List(u8)) void = {
+        ::DeriveFmt(T.Wide);
+        wide := expand(self[]);
+        display(wide&, out);
+    }
+    
+    fn expand(self: T) T.Wide #inline = {
+        wide := @uninitialized T.Wide;
+        inline_for_enum F { $name | 
+            get_field(T.Wide, wide&, name[])[] = get(self, name[]);
+        };
+        wide
+    }
+    
+    fn construct(wide: T.Wide) T #inline = {
+        self := T.zeroed();
+        inline_for_enum F { $name | 
+            set(self&, name[], get_field(T.Wide, wide&, name[])[]);
+        };
+        self
+    }
+    
+    T
+}

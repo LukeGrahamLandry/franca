@@ -39,20 +39,16 @@ gpreg     :: @const_slice(Arm64Reg.R0, .R1, .R2, .R3, .R4, .R5, .R6, .R7);
 fpreg     :: @const_slice(Arm64Reg.V0, .V1, .V2, .V3, .V4, .V5, .V6, .V7);
 store_ops :: @const_slice(Qbe.O.storew, .storel, .stores, .stored); // :QbeClsi16 order matters
 
-/* layout of call's second argument (RCall)
- *
- *         13
- *  29   14 |    9    5   2  0
- *  |0.00|x|x|xxxx|xxxx|xxx|xx|                  range
- *        | |    |    |   |  ` gp regs returned (0..2)
- *        | |    |    |   ` fp regs returned    (0..4)
- *        | |    |    ` gp regs passed          (0..8)
- *        | |     ` fp regs passed              (0..8)
- *        | ` indirect result register x8 used  (0..1)
- *        ` env pointer passed in x9            (0..1)
- */
- // TODO: go through and use named constants for the magic offsets.
- //       or better would be implement real bit fields and just cast the int whenever its used.  
+RCallArm :: @bit_fields(
+    gp_ret   := 2,
+    fp_ret   := 3,
+    gp_arg   := 4,
+    fp_arg   := 4,
+    indirect := 1,  // indirect result register x8 used   (alternatively used to pass the syscall number)
+    env      := 1,  // env pointer passed in x9
+    _        := 14,
+    tag      := 3,
+);
 
 ::enum_basic(Qbe.FieldType);
 ::ptr_utils(Qbe.Typ);
@@ -92,7 +88,7 @@ fn isfloatv(t: *Qbe.Typ, cls: *Qbe.Cls, count: *u8, globals: *QbeModule) bool = 
 }
 
 fn typclass(c: *Class, t: *Qbe.Typ, gp: []Arm64Reg, fp: []Arm64Reg, globals: *QbeModule) void = {
-    sz := (t.size + 7).bit_and(-8);  // round up to a 8 byte alignment
+    sz := align_to(t.size, 8);
     c.t = t;
     c.class = .CNone;
     c.ngp = 0;
@@ -184,15 +180,13 @@ fn ldregs(reg: *Arm64Reg, cls: *Qbe.Cls, n: u8, mem: Qbe.Ref, f: *Qbe.Fn) void =
 
 fn selret(b: *Qbe.Blk, f: *Qbe.Fn) void = {
     j := b.jmp.type;
-
-    if !is_ret(j) || j == .ret0 {
-        return();
-    };
+    if(!is_ret(j) || j == .ret0, => return());
 
     r := b.jmp.arg;
     b.jmp.type = .ret0;
-
-    cty := if j == .retc {
+    
+    ::if(Ty(i64, i64));
+    gp, fp := if j == .retc {
         @debug_assert(f.retty >= 0, "retc without type");
         m := f.globals;
         type := f.globals.types[][f.retty.zext()]&;
@@ -202,26 +196,25 @@ fn selret(b: *Qbe.Blk, f: *Qbe.Fn) void = {
             @debug_assert(rtype(f.retr) == .RTmp, "see // :SetRetr");
             f.emit(.blit1, .Kw, QbeNull, INT(cr.t.size), QbeNull);
             f.emit(.blit0, .Kw, QbeNull, r, f.retr);
-            0
+            (0, 0)
         } else {
             ldregs(cr.reg&.as_ptr(), cr.cls&.as_ptr(), cr.nreg, r, f);
-            cr.nfp.zext().shift_left(2).bit_or(cr.ngp.zext())
+            (cr.ngp.zext(), cr.nfp.zext())
         }
     } else {
         k := @as(Qbe.Cls) @as(i32) (j.raw() - Qbe.J.retw.raw());
-        if (KBASE(k) == 0) {
-            f.emit(.copy, k, TMP(Arm64Reg.R0), r, QbeNull);
-            1
-        } else {
-            f.emit(.copy, k, TMP(Arm64Reg.V0), r, QbeNull);
-            1.shift_left(2)
-        }
+        R := if(is_int(k), => TMP(Arm64Reg.R0), => TMP(Arm64Reg.V0));
+        f.emit(.copy, k, R, r, QbeNull);
+        (int(is_int(k)), int(!is_int(k)))
     };
 
+    cty := RCallArm.zeroed();
+    set(cty&, .gp_ret, gp);
+    set(cty&, .fp_ret, fp);
     b.jmp.arg = CALL(cty);
 }
 
-fn argsclass(i0: *Qbe.Ins, i1: *Qbe.Ins, carg: *Class, globals: *QbeModule) i32 = {
+fn argsclass(i0: *Qbe.Ins, i1: *Qbe.Ins, carg: *Class, globals: *QbeModule) RCallArm = {
     va   := false;
     envc := 0;
     gp   := gpreg;
@@ -306,11 +299,11 @@ fn argsclass(i0: *Qbe.Ins, i1: *Qbe.Ins, carg: *Class, globals: *QbeModule) i32 
     };
     
     // note: gp.len not the same as ngp becuase we clamped to 0. 
-    ints := (8-gp.len).shift_left(5);
-    floats := (8-fp.len).shift_left(9);
-    xxx := envc.shift_left(14).bit_or(ints).bit_or(floats);
-    xxx: i32 = xxx.intcast();
-    xxx
+    r := RCallArm.zeroed();
+    set(r&, .gp_arg, 8-gp.len);
+    set(r&, .fp_arg, 8-fp.len);
+    set(r&, .env, envc);
+    r
 }
 
 fn slice_pop_from_start(s: []Arm64Reg, n: i64) []Arm64Reg = {
@@ -320,46 +313,47 @@ fn slice_pop_from_start(s: []Arm64Reg, n: i64) []Arm64Reg = {
 }
 
 fn arm64_retregs(r: Qbe.Ref, p: *Array(i32, 2)) u64 = {
-    @debug_assert(rtype(r) == .RCall, "can't decode non call");
-    ngp := r.val().bit_and(3);
-    nfp := r.val().shift_right_logical(2).bit_and(7);
+    r := to_rcall(r, RCallArm);
+    ngp := get(r, .gp_ret);
+    nfp := get(r, .fp_ret);
     if !p.is_null() {
         p[0] = ngp.intcast();
         p[1] = nfp.intcast();
     };
-    b: u64 = 0;
-    range(0, ngp) { n | 
-        b = b.bit_or(BIT(Arm64Reg.R0.raw() + n));
-    };
-    range(0, nfp) { n | 
-        b = b.bit_or(BIT(Arm64Reg.V0.raw() + n));
-    };
-    b
+    ngp_mask := (1.shift_left(ngp) - 1).shift_left(Arm64Reg.R0.raw());
+    nfp_mask := (1.shift_left(nfp) - 1).shift_left(Arm64Reg.V0.raw());
+    bit_or(ngp_mask, nfp_mask).bitcast()
 }
 
 ::ptr_utils(Array(i32, 2));
 fn arm64_argregs(r: Qbe.Ref, p: *Array(i32, 2)) u64 = {
-    @debug_assert(rtype(r) == .RCall, "can't decode non-call");
-    r := r.val();
-    ngp := r.shift_right_logical(5).bit_and(15);
-    nfp := r.shift_right_logical(9).bit_and(15);
-    x8 := r.shift_right_logical(13).bit_and(1);
-    x9 := r.shift_right_logical(14).bit_and(1);
+    r := to_rcall(r, RCallArm);
+    ngp := get(r, .gp_arg);
+    nfp := get(r, .fp_arg);
+    x8  := get(r, .indirect);
+    x9  := get(r, .env);
     if !p.is_null() {
         p[0] = intcast(ngp + x8 + x9);
         p[1] = nfp.intcast();
     };
-    b: u64 = 0;
-    range(0, ngp) { n |
-        b = b.bit_or(BIT(Arm64Reg.R0.raw() + n));
-    };
-    range(0, nfp) { n |
-        b = b.bit_or(BIT(Arm64Reg.V0.raw() + n));
-    };
-    b = b.bit_or(x8.shift_left(Arm64Reg.R8.raw()).bitcast());
-    b = b.bit_or(x9.shift_left(Arm64Reg.R9.raw()).bitcast());
-    b
+    ngp_mask := (1.shift_left(ngp) - 1).shift_left(Arm64Reg.R0.raw());
+    nfp_mask := (1.shift_left(nfp) - 1).shift_left(Arm64Reg.V0.raw());
+    b := bit_or(ngp_mask, nfp_mask);
+    b  = b.bit_or(x8.shift_left(Arm64Reg.R8.raw()));
+    b  = b.bit_or(x9.shift_left(Arm64Reg.R9.raw()));
+    b.bitcast()
 }
+
+/*
+what about this?
+
+b := BitSet(Arm64Reg).zeroed();
+set_many(b&, .R0, ngp);
+set_many(b&, .V0, nfp);
+set(b&, .R8, x8 == 1);
+set(b&, .R9, x9 == 1);
+b
+*/
 
 fn stkblob(r: Qbe.Ref, c: *Class, f: *Qbe.Fn, ilp: **Insl) void = {
     @debug_assert(r != QbeNull, "stkblob null dest");
@@ -411,13 +405,14 @@ fn selcall(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins, ilp: **Insl) void = {
         typclass(cr&, type, gpreg, fpreg, f.globals);
         @debug_assert(i1.to != QbeNull, "call returning aggregate must have a destination.");
         stkblob(i1.to, cr&, f, ilp);
-        cty = cty.bit_or(cr.nfp.zext().shift_left(2)).bit_or(cr.ngp.zext());
+        set(cty&, .gp_ret, cr.ngp.zext());
+        set(cty&, .fp_ret, cr.nfp.zext());
         if cr.class.has(.Cptr) {
             /* spill & rega expect calls to be
              * followed by copies from regs,
              * so we emit a dummy
              */
-            cty = cty.bit_or(1.shift_left(13)).bit_or(1);
+            set(cty&, .indirect, 1);
             f.emit(.copy, .Kw, QbeNull, TMP(Arm64Reg.R0), QbeNull);
         } else {
             sttmps(tmp&.as_ptr(), cr.cls&.items(), cr.nreg.zext(), i1.to, f);
@@ -427,18 +422,18 @@ fn selcall(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins, ilp: **Insl) void = {
             };
         };
     } else {
-        if KBASE(i1.cls()) == 0 {
+        if is_int(i1.cls()) {
             f.emit(.copy, i1.cls(), i1.to, TMP(Arm64Reg.R0), QbeNull);
-            cty = cty.bit_or(1);
+            set(cty&, .gp_ret, 1);
         } else {
             f.emit(.copy, i1.cls(), i1.to, TMP(Arm64Reg.V0), QbeNull);
-            cty = cty.bit_or(1.shift_left(2));
+            set(cty&, .fp_ret, 1);
         };
     };
 
-    f.emit(.call, .Kw, QbeNull, i1.arg&[0], CALL(cty.zext()));
+    f.emit(.call, .Kw, QbeNull, i1.arg&[0], CALL(cty));
 
-    if cty.bit_and(1.shift_left(13)) != 0 {
+    if get(cty, .indirect) != 0 {
         /* struct return argument */
         f.emit(.copy, .Kl, TMP(Arm64Reg.R8), i1.to, QbeNull);
     };
@@ -504,7 +499,7 @@ fn selpar(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins) Params = {
 
     cty := argsclass(i0, i1, ca.as_ptr(), f.globals);
     discard := Array(i32, 2).ptr_from_int(0);
-    f.reg = arm64_argregs(CALL(cty.zext()), discard);
+    f.reg = arm64_argregs(CALL(cty), discard);
 
     il := Insl.ptr_from_int(0);
     t := tmp&.as_ptr();
@@ -567,8 +562,8 @@ fn selpar(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins) Params = {
     f.parameter_stack_bytes = align(off, 8);
     return(
         stk = align(off, 8),
-        ngp = cty.shift_right_logical(5).bit_and(15),
-        nfp = cty.shift_right_logical(9).bit_and(15),
+        ngp = get(cty, .gp_arg).intcast(),
+        nfp = get(cty, .fp_arg).intcast(),
     );
 }
 
@@ -727,20 +722,13 @@ fn with(a: *ArgClass, b: ArgClass) void #inline = {
 }
 
 fn TMP(r: Arm64Reg) Qbe.Ref #redirect(i64, Qbe.Ref);
-/*
-*         13
-*  29   14 |    9    5   2  0
-*  |0.00|x|x|xxxx|xxxx|xxx|xx|                  range
-*        | |    |    |   |  ` gp regs returned (0..2)
-*        | |    |    |   ` fp regs returned    (0..4)
-*        | |    |    ` gp regs passed          (0..8)
-*        | |     ` fp regs passed              (0..8)
-*        | ` indirect result register x8 used  (0..1)
-*        ` env pointer passed in x9            (0..1)
-*/
+
 fn sel_syscall_arm64(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins) void = {
     count := ptr_diff(i0, i1);
-    ca := 1.shift_left(13).bit_or(count.shift_left(5)).bit_or(1);
+    ca := RCallArm.zeroed();
+    set(ca&, .indirect, 1);
+    set(ca&, .gp_arg, count);
+    set(ca&, .gp_ret, 1);
     
     f.emit(.copy, i1.cls(), i1.to, TMP(Arm64Reg.R0), QbeNull);  // result returned in R0 as normal. 
     f.emit(.syscall, i1.cls(), QbeNull, QbeNull, CALL(ca)); 

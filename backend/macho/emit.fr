@@ -309,7 +309,7 @@ fn output_macho(m: *QbeModule) [][]u8 = {
         
         enumerate e.relocations { i, r | 
             if r.len != 0 {
-                e.load_commands[i].relocations_count = trunc(r.len / size_of_one_relocation);
+                e.load_commands[i].relocations_count = trunc(r.len / size_of(RelocationFields));
                 e.load_commands[i].relocations_file_offset = e.file_offset.trunc();
                 chunks&.push(r.items());
                 e.file_offset += r.len;
@@ -348,7 +348,7 @@ EmitMacho :: @struct(
     commands: List(u8), 
     command_count := 0, 
     file_offset := 0, 
-    relocations: []List(u8) = empty(), 
+    relocations: []List(u8) = empty(),  // these bytes are RelocationFields 
     load_commands: []*SegmentSection = empty(), 
     virtual_segment_offset: []i64 = empty(), 
     virtual_offset := 0,
@@ -382,12 +382,21 @@ fn emit_exe_fixups(e: *EmitMacho, chained: *List(u8)) void #inline = {
     chained.len += imports_len_b;
     symbols_offset := chained.len; // TODO: is this right?
     imports_bytes := chained.items().slice(chained.len - imports_len_b, chained.len);
-    imports_bytes: []u32 = (ptr = ptr_cast_unchecked(u8, u32, imports_bytes.ptr), len = import_count);
+    imports_bytes: []ChainedImport = (ptr = ptr_cast_unchecked(u8, ChainedImport, imports_bytes.ptr), len = import_count);
     for symbols { s |
         if s.kind != .Local {
-            n: u32 = trunc(chained.len - symbols_offset);
-            imports_bytes[s.got_lookup_offset] = encode_import(lib_ordinal = 1, weak = false, name_offset = n); // TODO: don't assume libc
-            mangled := items(@format("_%", s.name) temp()); // :slow don't do an extra copy
+            n := chained.len - symbols_offset;
+            // TODO: don't assume libc
+            // :UpdateBoot this should work `construct(lib_ordinal = 1, weak = 0, name_offset = n);` instead of the long block
+            imports_bytes[s.got_lookup_offset] = {
+                i := ChainedImport.zeroed();
+                set(i&, .lib_ordinal, 1);
+                set(i&, .weak, 0);
+                set(i&, .name_offset, n);
+                i
+            };
+            
+            mangled := @tfmt("_%", s.name); // :slow don't do an extra copy
             append_padded_cstr(chained, mangled, 1);
         };
     };
@@ -540,24 +549,23 @@ fn emit_one_exe_fixup(e: *EmitMacho, fix: *FixP, prev_fixup: *?WipFixup, import_
 fn emplace_fixup(e: *EmitMacho, fix: *FixP, next_encoded: i64, import_count: i64) void #inline = {
     addend := @if(fix.fix.type&.is(.DataAbsolute), fix.fix.type.DataAbsolute.increment, 0); // other addends are handled elsewhere? which is kinda confusing
     @debug_assert_ge(next_encoded, 0, "fixups cant go backwards. we sorted them so this can't happen.");
-    encoded := encode_chained(
-        next = next_encoded.trunc(),
-        reserved = 0,
-        payload = @if(fix.symbol.kind == .Local, {
-            dest_segment := fix.symbol.segment.raw() + 1; // :MySegmentsStartAt1
-            target := e.virtual_segment_offset[dest_segment] - zero_page_size + fix.symbol.offset + addend;
-            @assert_lt(target, 1.shift_left(36), "rebase > 36 bits");
-            (Rebase = (high8 = 0, target = target))
-        }, {
-            // got_lookup_offset has been converted to an ordinal already. 
-            o := fix.symbol.got_lookup_offset;
-            @debug_assert(o >= 0 && o < import_count, "bad ordinal %", o);
-            @assert_le(addend, 0, "TODO: does macho chained fixup allow negative addend to import?");
-            (Bind = (addend = addend.trunc(), ordinal = o.trunc()))
-        })
-    );
-    ref := ptr_cast_unchecked(u8, i64, fix.fix.patch_at);
-    ref[] = encoded;
+    is_bind := fix.symbol.kind != .Local;
+    r := ptr_cast_unchecked(u8, ChainedReloc, fix.fix.patch_at);
+    set(r.bind&, .next, next_encoded);
+    set(r.bind&, .is_bind, int(is_bind));
+    if is_bind {
+        // got_lookup_offset has been converted to an ordinal already. 
+        o := fix.symbol.got_lookup_offset;
+        @debug_assert(o >= 0 && o < import_count, "bad ordinal %", o);
+        @assert_le(addend, 0, "TODO: does macho chained fixup allow negative addend to import?");
+        set(r.bind&, .addend, addend);
+        set(r.bind&, .ordinal, o);
+    } else {
+        dest_segment := fix.symbol.segment.raw() + 1; // :MySegmentsStartAt1
+        target := e.virtual_segment_offset[dest_segment] - zero_page_size + fix.symbol.offset + addend;
+        @assert_lt(target, 1.shift_left(36), "rebase > 36 bits");
+        set(r.rebase&, .target, target);
+    };
 };
     
 fn emit_reloc_symbols(e: *EmitMacho, chained: *List(u8)) void #inline = {
@@ -675,14 +683,12 @@ fn append_relocations(symbol_table_index: i64, id: u32, m: *QbeModule, relocatio
         sec: i64 = which_section(patch_segment).zext();
         rs := relocations[sec - 1]&;
         segment_padding := if(patch_segment == .Code, => text_padding, => 0); // :HACK
-        r: RelocationFields = (
-            offset = patch_segment_offset - segment_padding, 
-            symbol = trunc(symbol_table_index),
-            length = 2,   // one instruction
-            type = 0,  // patch
-            extern = true, //s.kind != .Local,
-            relative = true,  // patch
-        );
+        r := RelocationFields.zeroed();
+        p := r.packed&;
+        r.offset = trunc(patch_segment_offset - segment_padding);
+        set(p, .symbol, symbol_table_index);
+        set(p, .length, 2);  // one instruction
+        set(p, .extern, 1);  // you'd think `s.kind != .Local` but no
         
         @match(fix.type) {
             fn InReg(it) => {
@@ -708,44 +714,41 @@ fn append_relocations(symbol_table_index: i64, id: u32, m: *QbeModule, relocatio
                 r.offset += 4;
                 ARM64_RELOC_PAGEOFF12 :: 4;
                 ARM64_RELOC_GOT_LOAD_PAGEOFF12 :: 6;
-                r.type = if(it.got_load, => ARM64_RELOC_GOT_LOAD_PAGEOFF12, => ARM64_RELOC_PAGEOFF12);
-                r.relative = false;
-                rs.reserve_type(i64)[] = encode_reloc(r);
+                set(p, .type, if(it.got_load, => ARM64_RELOC_GOT_LOAD_PAGEOFF12, => ARM64_RELOC_PAGEOFF12));
+                rs.reserve_type(RelocationFields)[] = r;  // first of two!
                 
-                r.relative = true;
+                set(p, .relative, 1);
                 r.offset -= 4;
                 ARM64_RELOC_PAGE21 :: 3;
                 ARM64_RELOC_GOT_LOAD_PAGE21 :: 5;
-                r.type = if(it.got_load, => ARM64_RELOC_GOT_LOAD_PAGE21, => ARM64_RELOC_PAGE21);
-                rs.reserve_type(i64)[] = encode_reloc(r);
+                set(p, .type, if(it.got_load, => ARM64_RELOC_GOT_LOAD_PAGE21, => ARM64_RELOC_PAGE21));
             }
             fn Call() => {
                 // in the instruction we tell it: set link bit
                 inst: []u32 = (ptr = ptr_cast_unchecked(u8, u32, fix.patch_at), len = 1);
                 inst[0] = b(0, 1);
                 
-                r.relative = true;
-                r.type = 2;  // ARM64_RELOC_BRANCH26
-                rs.reserve_type(i64)[] = encode_reloc(r);
+                set(p, .relative, 1);
+                ARM64_RELOC_BRANCH26 :: 2;
+                set(p, .type, ARM64_RELOC_BRANCH26);
             }
             fn DataAbsolute(it) => {
-                r.relative = false;
-                r.type = 0;   // ARM64_RELOC_UNSIGNED
-                r.length = 3; // one pointer
-                rs.reserve_type(i64)[] = encode_reloc(r);
+                ARM64_RELOC_UNSIGNED :: 0;
+                set(p, .type, ARM64_RELOC_UNSIGNED);
+                set(p, .length, 3);  // one pointer
                 ptr_cast_unchecked(u8, i64, fix.patch_at)[] = it.increment;  // TODO: a test that gets here with non-zero
             }
             fn RipDisp32(it) => {
-                r.relative = true;
+                set(p, .relative, 1);
                 // I guess thats fair, it wants to know if its legal to point you at a stub or if you're expecting to access data. 
                 X86_64_RELOC_BRANCH :: 2;
                 X86_64_RELOC_SIGNED :: 1;
-                r.type = if(it.call, => X86_64_RELOC_BRANCH, => X86_64_RELOC_SIGNED);
-                rs.reserve_type(i64)[] = encode_reloc(r);
+                set(p, .type, if(it.call, => X86_64_RELOC_BRANCH, => X86_64_RELOC_SIGNED));
                 ptr_cast_unchecked(u8, u32, fix.patch_at)[] = it.increment;
             }
             @default => panic("invalid fixup type for mach-o");
         };
+        rs.reserve_type(RelocationFields)[] = r;
     };
 };
     

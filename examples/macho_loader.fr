@@ -17,7 +17,6 @@
 // TODO: support x64
 // TODO: check ad-hoc codesign
 
-#include_std("backend/macho/bits.fr");
 fn main() void = {
     args := cli_args();
     assert(args.len > 1, "Last argument is path to macho file");
@@ -125,21 +124,25 @@ fn apply_fixups(full_bytes: []u8, virtual: []u8, first_interesting: i64) void = 
                     dowhile {
                         page_data.ptr = page_data.ptr.offset(next_offset);
                         page_data.len -= next_offset;
+                        
+                        // This is a pointer to the 8 bytes of memory we're going to adjust. 
                         reloc_ref := ptr_cast_unchecked(u8, rawptr, page_data.ptr);
-                        reloc := decode_chained(int_from_rawptr(reloc_ref[]));
-                        @match(reloc.payload) {
-                            fn Rebase(it) => {
-                                @assert_eq(it.high8, 0, "TODO: what is high8 for?");
-                                reloc_ref[] = u8.raw_from_ptr(virtual.ptr.offset(first_interesting).offset(it.target));
-                                rebase_count += 1;
-                            }
-                            fn Bind(it) => {
-                                reloc_ref[] = import_pointers[it.ordinal.zext()];
-                                @println(">>> bind at % to %", starts.segment_offset.to_signed() + (starts.page_size.zext() * i) + offset_to_fixup.zext(), int_from_rawptr(import_pointers[it.ordinal.zext()]));
-                                bind_count += 1;
-                            }
+                        // The current value in that memory tells us what to do. 
+                        reloc := bit_cast_unchecked(rawptr, ChainedReloc, reloc_ref[]);
+                        reloc_ref[] = if get(reloc.bind, .is_bind) == 1 {
+                            target := import_pointers[get(reloc.bind, .ordinal)];
+                            off := starts.segment_offset.to_signed() + (starts.page_size.zext() * i) + offset_to_fixup.zext();
+                            @println(">>> bind at % to %", off, target);
+                            bind_count += 1;
+                            target
+                        } else {
+                            @assert_eq(get(reloc.rebase, .high8), 0, "TODO: what is high8 for?");
+                            base := u8.raw_from_ptr(virtual.ptr.offset(first_interesting));
+                            rebase_count += 1;
+                            base.offset(get(reloc.rebase, .target))
                         };
-                        next_offset = reloc.next.zext() * 4;
+                        
+                        next_offset = get(reloc.bind, .next) * 4;
                         next_offset != 0
                     };
                 };
@@ -167,10 +170,10 @@ fn collect_imports(full_bytes: []u8, fixups_header_data: []u8) []rawptr = {
     @assert(!libc.lib.is_null(), "failed to find libc. TODO: don't assume you want this but you normally do.");
     
     range(0, header.imports_count.zext()) { i |
-        import := decode_import(imports_data&.pop_type(u32)[]);
-        n: CStr = (ptr = symbols_data.ptr.offset(import.name_offset.zext()));
+        import := imports_data&.pop_type(ChainedImport)[];
+        n: CStr = (ptr = symbols_data.ptr.offset(get(import, .name_offset)));
         name := n.str();
-        @assert_eq(import.lib_ordinal, 1, "TODO: where is the list of libraries? multiple of Link Library commands?");
+        @assert_eq(get(import, .lib_ordinal), 1, "TODO: where is the list of libraries? multiple of Link Library commands?");
         if n.ptr[] == "_".ascii() {
             // apple likes to waste my time. 
             n.ptr = n.ptr.offset(1);
@@ -221,3 +224,6 @@ fn find_unique_load_command(macho_bytes: []u8, want: LoadCommand) ?[]u8 = {
 ::enum(LoadCommand);
 
 fn to_signed(x: u64) i64 = x.bitcast(); // TODO: safety check
+
+#use("@/backend/macho/bits.fr");
+#use("@/lib/bit_fields.fr");

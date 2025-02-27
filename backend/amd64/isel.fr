@@ -54,17 +54,19 @@ fn amd64_isel(f: *Qbe.Fn) void = {
     };
 }
 
-fn noimm(r: Qbe.Ref, f: *Qbe.Fn) bool = {
+fn noimm(r: Qbe.Ref, f: *Qbe.Fn, o: Qbe.O) bool = {
     if(rtype(r) != .RCon, => return(false));
     c := f.get_constant(r);
     @match(c.type) {
         /* we only support the 'small'
          * code model of the ABI, this
          * means that we can always
-         * address data with 32bits
-         */
+         * address data with 32bits */
         fn CAddr() => false;
-        fn CBits() => c.bits.i < MIN_i32 || c.bits.i > MAX_i32;
+        // jitting on linux you can reasonably have <4GB constant address, but since call instruction 
+        // is relative, you might not be able to reach all the way down there in 32 bits of immediate. 
+        // i think 64-bit macOS never gives out the bottom 4GB of address space so it doesn't come up. 
+        fn CBits() => c.bits.i < MIN_i32 || c.bits.i > MAX_i32 || o == .call;
         @default => panic("invalid constant");
     }
 }
@@ -106,10 +108,8 @@ fn fixarg(r: *Qbe.Ref, k: Qbe.Cls, i: *Qbe.Ins, f: *Qbe.Fn) void = {
             f.emit(.cast, k, r1, r2, QbeNull);
             f.emit(.copy, .Kl, r2, r0, QbeNull);
         };
-        // jitting on linux you can reasonably have <4GB constant address, but since call instruction 
-        // is relative, you might not be able to reach all the way down there in 32 bits of immediate. 
-        // i think 64-bit macOS never gives out the bottom 4GB of address space so it doesn't come up. 
-        @if(o != .copy && k == .Kl && (noimm(r0, f) || i.op() == .call)) => {
+        // 'copy' is the only instruction that's allowed a 64 bit immediate. 
+        @if(o != .copy && k == .Kl && noimm(r0, f, o)) => {
             /* load constants that do not fit in
             * a 32bit signed integer into a
             * long temporary */
