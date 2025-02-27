@@ -1,4 +1,57 @@
-- TODO: deal with `CodegenEntry:Bounce` on wasm
+
+## 
+
+- cross compile matching hash has been broken for a while (ie. compile on arm and amd both targetting arm should give identical bits but doesn't).
+but objdump gives identical disassembly for the two binaries and examples/dump_macho.fr is also the same. 
+diff of hexdump:
+```
+diff a.s b.s
+100270c100270
+< 01968a0 0000 0000 0000 0000 0001 0000 0000 0000
+---
+> 01968a0 da00 0000 0000 0000 0001 0000 0000 0000
+101333c101333
+< 019b0a0 0000 0000 0000 0000 0001 0000 0000 0000
+---
+> 019b0a0 0000 0000 c32d 0001 0001 0000 0000 0000
+101336,101337c101336,101337
+< 019b0d0 0000 0000 0000 0000 0001 0000 0000 0000
+< 019b0e0 ff50 ffff ffff ffff 0000 0000 0000 0000
+---
+<... snip 18 lines>
+```
+that sure is not a lot of different bytes out of 1.7MB.
+at least it's consistant and recompiling on amd and then targetting arm again gives the same results. 
+
+ok so first one: 01968a0 = 1665184.  
+ok good, so that's in `__DATA` (start file offset is 1638400) which makes sense. 
+so which is it? 
+```
+off := 1665184 - 1638400;
+xx_start := ptr_diff(m.segments&[.MutableData].mmapped.ptr, m.segments&[.MutableData].next);
+emit(self, dat);
+xx_end := ptr_diff(m.segments&[.MutableData].mmapped.ptr, m.segments&[.MutableData].next);
+if xx_start <= off && xx_end >= off && m.goal.type != .JitOnly {
+    @println("% % %", m.str(dat.lnk.id), xx_start, xx_end);
+};
+// g1057 26768 26792
+```
+so problem is at byte 16 of a 24 byte thing?
+should really track names/source locations for data but i can just print the function name when i see a loadcon of it. 
+it's referenced by apple_selvaarg__1850 which is just a @emit_instruction. 
+it's the second arg to a newcon. 
+ok so there's only one constant in that function. what's at byte 16 of the Con(8)?
+explicit default value of 0 for the padding fixes maybe that one diff but there's still a bunch. 
+but manually expanding `c := @[@literal c[]]` to `c: Qbe.Con = (type = @[@literal c.type], sym = @[@literal c.sym], bits = @[@literal c.bits]);`
+fixes all of them and makes repro work. 
+i don't understand why zero_padding() doesn't fix that. 
+and i don't understand why explicit default value doesn't fix it, 
+because getcon() has `f.con[c] = (type = .CBits, bits = (i = val));`
+which should be setting all those defaults. 
+
+##
+
+- bit fields
 
 ## (Feb 24)
 
