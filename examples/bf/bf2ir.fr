@@ -1,0 +1,244 @@
+//!
+//! Here we write a BrainFuck frontend so you can write individual functions with that. 
+//! They're not interpreted at runtime, the translation to ir happens at comptime,
+//! and then they're fed through the same backend as the rest of your program.
+//!
+//! You can check this yourself by running `strings` on an AOT binary of this program. 
+//! You'll notice that the bf text source code isn't in there because we don't need it. 
+//! If you run `objdump` you'll find the code for the print_hello_world function just like any other. 
+//!
+//! This also isn't a macro that expands to franca code that has to go through the whole pipeline 
+//! (which is what you'd do with a proc macro if you wanted this in rust) 
+//! but you still get the benefit of automagically supporting all target architectures. 
+//! If you think this is cool and want a similar type of metaprogramming in a more real language 
+//! you could try https://terralang.org/ They have an example that implements brainfuck with "generative programming constructs". 
+//! But again, theirs is generating ast nodes that then have to get compiled. 
+//! So it looks less ugly but isn't as quirky and fun as mine. To each thier own. 
+//!
+
+print_hello_world :: fn(mem: *u8) void #bf2ir = HELLO_WORLD;
+
+add_numbers :: fn(mem: *u8) void #bf2ir = "[->+<]";
+
+fn main() void = {
+    // TODO: in the compiler scan the function for references to uncompiled symbols?
+    //       but we can't even reference it by name. 
+    //       here we force it to send us a message about these first so we see thier id. 
+    //       but this is bad because it relies on compiling blocks in order. 
+    ::if false {
+        putchar(getchar());  
+    };
+    
+    mem := @slice(@as(u8) 12, @as(u8) 13);
+    add_numbers(mem.ptr);
+    assert_eq(mem, @slice(@as(u8) 0, @as(u8) 25));
+    
+    mem: List(u8) = repeated(0, 30000, temp());
+    print_hello_world(mem.maybe_uninit.ptr);
+    
+    // HACK: for runtime the order is backwards
+    if false {
+        putchar(getchar());  
+    };
+}
+
+#include_std("backend/lib.fr");
+#include_std("compiler/ast_external.fr");
+
+// TODO: this kinda sucks. do i want to do down the path of letting you access your stack frame from the callback? 
+comp   :: @static(CompCtx);
+vtable :: @static(*ImportVTable);
+ready  :: @static(bool) false;  // TODO: this is super trash because new_with_src starts compiling before we set comp[]. 
+symbol_mark :: @static(Symbol);
+
+XX :: @struct(
+    // TODO: this is wrong because there can be multiple modules
+    putchar_id: ?u32 = .None,
+    getchar_id: ?u32 = .None,
+);
+state :: @static(XX);
+
+fn driver(v: *ImportVTable) void = {
+    state[] = ();
+    vtable[] = v;
+    opts   := v.default_build_options();
+    opts.handle_message = handle;
+    src    := "#include_std(\"lib/core.fr\");#include_std(\"examples/bf/bf2ir.fr\");";
+    comp[]  = v.with(v.new_with_src(src, "-", opts));
+    symbol_mark[] = comp[].intern_string("bf2ir");
+    ready[] = true;
+    fid    := comp[].get_unique_named("main").unwrap();
+    
+    o := false;
+    path := "";
+    for cli_args() { arg |
+        if o {
+            path = arg.str();
+            o = false;
+        };
+        if arg == "-o" {
+            o = true;
+        };
+    };
+    
+    if path == "" {
+        callee := comp[].get_jitted(fid);
+        callee := assume_types_fn(Arg = void, Ret = void, ptr = callee);
+        callee();
+    } else {
+        m := QbeModule.zeroed();
+        ::?Arch;
+        init_default_module_dyn(m&, v, (arch = query_current_arch().unwrap(), os = query_current_os(), type = .Exe));
+        bytes := emit_qbe_included_dyn(m&, comp, @slice(fid), .WrapMain);
+        out := open_trunc(maybe_borrow_cstr(path, temp())).unwrap();
+        for bytes& { bucket |
+            out&.write(bucket);
+        };
+        out.close();
+    };
+}
+
+fn handle(in: []DriverMessage, out: []DriverResult) void = {
+    @if(ready[])
+    enumerate in { i, it |
+        @match(it) {
+            fn CompileBodyStart(it) => {
+                func := comp[].get_function(it.fid);
+                if is_marked_bf(func) {
+                    func.body.Normal.done = true; // TODO: be more serious. return .Break?
+                };
+            }
+            fn EmitIrStart(it) => {
+                f := Qbe.Fn.ptr_from_raw(it.ir_data);
+                func := comp[].get_function(it.fid);
+                name := comp[].get_string(func.name);
+                if name == "putchar" {
+                    state[].putchar_id = (Some = f.lnk.id);
+                };
+                if name == "getchar" {
+                    state[].getchar_id = (Some = f.lnk.id);
+                };
+                if is_marked_bf(func) {
+                    // TODO: be able to create Str type
+                    expr := func.body.Normal&;
+                    expr.done = false;  // undo the hack above
+                    comp[]'vtable'compile_ast(comp[].data, expr, UnknownType);
+                    code := const_eval_outside(Str)(expr[], expr.ty);
+                    convert(f, code);
+                    
+                    out[i] = .ReplacedIr;
+                    return(); // TODO: this doesn't work if we were passed multiple things but we can't call super here.
+                };
+            };
+        }
+        @default => ();
+    };
+    super := vtable[].default_handle_message;
+    super(in, out);
+}
+
+fn convert(f: *Qbe.Fn, code: []u8) void = {
+    mem    := f.newtmp("mem", .Kl);
+    cond_r := f.newtmp("cond", .Kl);  // this could be a phi but the backend will deal with converting it for us. 
+    
+    lnk := f.start&;
+    new_block :: fn() => {
+        b := temp().box_zeroed(Qbe.Blk); 
+        b.ins = new(0);
+        f.nblk += 1;
+        lnk[] = b;
+        lnk = b.link&;
+        b
+    };
+    
+    b := new_block();
+    push(b, make_ins(.par, .Kl, mem, QbeNull, QbeNull));
+    
+    ::enum(Bf);
+    
+    E :: fn(f, o, k, r, a0, a1) => push(b, make_ins(o, k, r, a0, a1));
+    inc :: fn(delta: i64) void => {
+        @emit_instructions((f = f, emit = E, forward = true), (mem, f.getcon(delta)), """
+        @start
+            %old =w loadub %0
+            %new =w add %old, %1
+            storeb %new, %0
+        """);
+    };
+    
+    getchar := f.symcon(state[].getchar_id.unwrap());
+    putchar := f.symcon(state[].putchar_id.unwrap());
+    
+    loop_stack := list(*Qbe.Blk, temp());
+    for code { c |
+        @switch(@as(Bf) c) {
+            @case(.Inc) => inc(1);
+            @case(.Dec) => inc(-1);
+            @case(.Right) => {
+                push(b, make_ins(.add, .Kl, mem, mem, f.getcon(1)));
+            };
+            @case(.Left) => {
+                push(b, make_ins(.sub, .Kl, mem, mem, f.getcon(1)));
+            };
+            @case(.Output) => {
+                @emit_instructions((f = f, emit = E, forward = true), (mem, putchar), """
+                @start
+                    %v =w loadub %0
+                    call %1(w %v)
+                """);
+            };
+            @case(.Input) => {
+                @emit_instructions((f = f, emit = E, forward = true), (mem, getchar), """
+                @start
+                    %v =w call %1()
+                    storeb %v, %0
+                """);
+            };
+            @case(.Open)  => {
+                cond := new_block();
+                body := new_block();
+                push(loop_stack&, cond);
+                
+                b.jmp.type = .jmp;
+                b.s1 = cond;
+                
+                push(cond, make_ins(.loadub, .Kw, cond_r, mem, QbeNull));
+                cond.s1 = body;
+                cond.jmp = (type = .jnz, arg = cond_r);
+                
+                b = body;
+            };
+            @case(.Close) => {
+                break := new_block();
+                cond  := loop_stack&.pop().expect("correctly nested [ ]");
+                
+                b.jmp.type = .jmp;
+                b.s1 = cond;
+                cond.s2 = break;
+                
+                b = break;
+            };
+            @default => ();
+        };
+    };
+    
+    b.jmp.type = .ret0;
+}
+
+fn is_marked_bf(func: *Func) bool = {
+    each func.annotations { a |
+        if a.name == symbol_mark[] {
+            return(true);
+        };
+    };
+    false
+}
+
+// using the normal comptime version should be find inside handle() because context will be set
+fn const_eval_outside($OuterType: Type) (@Fn(value: FatExpr, InnerType: Type) OuterType) #generic = (fn(value: FatExpr, InnerType: Type) OuterType = {
+    out := @uninitialized OuterType;
+    const_eval(value, InnerType, OuterType.raw_from_ptr(out&));
+    out
+});
+
+#use("@/examples/bf/README.fr");

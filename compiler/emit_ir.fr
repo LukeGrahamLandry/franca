@@ -44,7 +44,6 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, id
         // :bake_relocatable_value
         {comp.vtable.check_for_new_aot_bake_overloads}(comp.data); 
     };
-    sync_driver_message(comp.data.cast()[][], (EmitIrStart = (when = when, fid = f)));
     // TODO
     //func := comp.get_function(f);
     //if find_impl(func.body&, .DynamicImport).is_some() && when == .Aot {
@@ -86,10 +85,24 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, id
             @debug_assert(self.static_context_var.is_none(), "ICE: dyn_context has static context??");
         };
         @debug_assert(func.get_flag(.EnsuredCompiled), "fn not compiled?");
-        entry.task = (Func = self.f);
+        m := self.shared.m;
+        self.f.default_init(m);
+        self.f.leaf = true;
+        self.f.lnk.no_inline = func.get_flag(.NoInline);
+        self.f.lnk.id = m.intern(self&.fmt_fn_name(self.func));  // TODO: set export 
+        self.entry.logging = self.program.get_log_types(f);
         
-        res := self&.emit_body(f);
+        response := sync_driver_message(comp.data.cast()[][], 
+            (EmitIrStart = (when = when, fid = self.func, ir_data = Qbe.Fn.raw_from_ptr(self.f)))
+        );
+        entry.task = (Func = self.f);
+        res: CRes(void) = .Ok;
+        ::tagged(@type response);
+        if !response&.is(.ReplacedIr) {
+            res = self&.emit_body(f);
+        };
         self.f.lnk.export = export;
+        
         entry := self.entry; // HACK because of how im doing imports below. 
         
         if res&.is_err() {
@@ -343,10 +356,6 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = { // #log_ir("AIR")
         self.program.data.cast()[][].codemap.show_error_line(func.loc);
     };
     m := self.shared.m;
-    self.f.default_init(m);
-    self.f.leaf = true;
-    self.f.lnk.no_inline = func.get_flag(.NoInline);
-    self.f.lnk.id = m.intern(self.fmt_fn_name(f));  // TODO: set export
     
     self.f.start = self.new_block("start");
     self.blk = self.f.start;
@@ -434,8 +443,7 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = { // #log_ir("AIR")
         }
         @default => panic("TODO: unhandled FuncImpl");
     };
-    
-    self.entry.logging = self.program.get_log_types(f);
+   
     self.context_par_e();
     // note: this rewrites self.blk
     @try(self.bind_args()) return;

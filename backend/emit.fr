@@ -506,29 +506,33 @@ fn emit_fn(f: *Qbe.Fn) void = {
     code_bytes := code.mmapped.subslice(start_offset, size);
     finish_function(m, code_bytes, name_id);
     
-    if f.globals.debug["D".char()] {
-        arch_name := @match(f.globals.goal.arch) {
-            fn x86_64()  => "--arch=x86-64";
-            fn aarch64() => "--arch=aarch64";
-            fn wasm32()  => "--arch=wasm32";
-        };
-        @fmt_write(f.globals.debug_out, "# disassembly of '%' (% bytes)\n", f.globals.str(f.lnk.id), code_bytes.len);
-        asm := code_bytes;
-        hex: List(u8) = list(asm.len * 5, temp());
-        for asm { byte |
-            hex&.push_prefixed_hex_byte(byte);
-            hex&.push_all(" ");
-        };
-        out := open_temp_file();
-        out.fd&.write(hex.items());
-        DIS :: "llvm-mc";
-        // TODO: have the caller pass in anything like this, 
-        //       but this is just for debugging the compiler so its not a big deal. :driver_io
-        // varient 1 means intel syntax. ignored when doing arm. 
-        success := run_cmd_blocking(DIS, @slice(arch_name, "--disassemble", "-output-asm-variant=1", "--show-encoding", out&.s_name()));
-        if(!success, => eprintln("ICE(debugging): couldn't disassemble"));
-        out.remove();
+    if m.debug["D".char()] {
+        @fmt(m.debug_out, "# disassembly of '%' (% bytes)\n", m.str(f.lnk.id), code_bytes.len);
+        dis := m.dis;
+        dis(m.debug_out, code_bytes, m.goal.arch);
     };
+}
+
+fn llvm_mc_dis(out: *List(u8), code: []u8, arch: Arch) void = {
+    arch_name := @match(arch) {
+        fn x86_64()  => "--arch=x86-64";
+        fn aarch64() => "--arch=aarch64";
+        fn wasm32()  => "--arch=wasm32";
+    };
+    hex: List(u8) = list(code.len * 5, temp());
+    for code { byte |
+        hex&.push_prefixed_hex_byte(byte);
+        hex&.push_all(" ");
+    };
+    file := open_temp_file();
+    file.fd&.write(hex.items());
+    DIS :: "llvm-mc";
+    // varient 1 means intel syntax. ignored when doing arm. 
+    args := @slice(arch_name, "--disassemble", "-output-asm-variant=1", "--show-encoding", file&.s_name());
+    _ok, o, e := exec_and_catch(DIS, args, temp());
+    file.remove();
+    out.push_all(o.items());
+    out.push_all(e.items());
 }
 
 fn push_fixup(m: *QbeModule, symbol: *SymbolInfo, fix: Fixup) void #inline = {

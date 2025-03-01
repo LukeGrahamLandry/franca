@@ -99,29 +99,15 @@ QbeModule :: @rec @struct(
     inlinable_but_referenced_later: List(u32),
     
     supports_self_sign: bool,  // this was in zeroed padding before so the old version in ../boot will have false and current default_driver will use codesign binary like it used to -- Nov 28
-    initialized := false,
+    initialized: bool,
     
     // When this is set, forward references to symbols always emit an inline load from the global 
     // offset table instead of using an instruction with a direct offset that must be patched later.
     // this is useful for jitting without needing to go back and modify code. 
-    got_indirection_instead_of_patches := false,
+    got_indirection_instead_of_patches: bool,
     
     // set env FRANCA_DEBUG_THREADS to anything to enable. 
     convert_stores_to_atomic_for_debugging: bool,
-    
-    // :JitMemProtect the length of the name is proportional to how much they are intent on wasting my time.  
-    //
-    // They won't let you have RWX pages, but if you call pthread_jit_write_protect_np, you can have pages that 
-    // are writable on one thread but executable on another by passing MAP_JIT to mmap, which would be great, 
-    // except that you control the protection for ~every~ MAP_JIT page together per thread. So you can't 
-    // have a jitted program create a new MAP_JIT area and write code into it. A work around would be having the 
-    // jitted code write into other memory and then call a fully AOT function that toggles protection and copies 
-    // the into the MAP_JIT memory. This also isn't a problem if there's a clear boundery between when you're creating 
-    // code and executing it because you can just call mprotect at the end when you're done. 
-    //
-    // The main take away is the franca compiler wants to use this so comptime franca code cannot set this to true on aarch64 macos. 
-    //
-    use_map_jit_on_apple_silicon: bool, 
     
     forever: ArenaAlloc,
     symbol_memmove: u32,
@@ -141,19 +127,22 @@ QbeModule :: @rec @struct(
     debug_headers: List(u8),
     debug_data: List(u8),
     debug_source: []u8,
-    debug_last_off_func := 0,
-    debug_last_off_source := 0,
+    debug_last_off_func: i64,
+    debug_last_off_source: i64,
     
-    llvm_global_value_buf := List(u8).zeroed(),
-    llvm_global_type_buf := List(u8).zeroed(),
-    llvm_global_code_buf := List(u8).zeroed(),
+    llvm_global_value_buf: List(u8),
+    llvm_global_type_buf: List(u8),
+    llvm_global_code_buf: List(u8),
     debug_out_storage: List(u8),
+    dis: DisassemblerFunc,
 );
 
+DisassemblerFunc :: @FnPtr(out: *List(u8), code: []u8, arch: Arch) void;
+    
 QbeTargetEnv :: @struct(
     arch: Arch,
     // - should we use apple's abi changes?
-    // - should we emit Mach-O or ELF? (can't do ELF yet)
+    // - should we emit Mach-O or ELF?
     os: Os,
     type: QbeOutputPurpose,
 );
@@ -170,20 +159,37 @@ SIZE_OF_STUBS :: 1.shift_left(11); // TODO: not this :explain
 COMMANDS_SIZE_GUESS :: macos_page_size; // :explain
 
 fn init_default_module(m: *QbeModule, goal: QbeTargetEnv, expecting_rwx: bool) void = 
-    init(m, 1.shift_left(25), libc_allocator, goal, expecting_rwx);
+    init(m, 1.shift_left(25), libc_allocator, goal, expecting_rwx, llvm_mc_dis);
+
+
+// 
+// :JitMemProtect (use_map_jit_on_apple_silicon)
+//
+// They won't let you have RWX pages, but if you call pthread_jit_write_protect_np, you can have pages that 
+// are writable on one thread but executable on another by passing MAP_JIT to mmap, which would be great, 
+// except that you control the protection for ~every~ MAP_JIT page together per thread. So you can't 
+// have a jitted program create a new MAP_JIT area and write code into it. A work around would be having the 
+// jitted code write into other memory and then call a fully AOT function that toggles protection and copies 
+// the into the MAP_JIT memory. This also isn't a problem if there's a clear boundery between when you're creating 
+// code and executing it because you can just call mprotect at the end when you're done. 
+//
+// The main take away is the franca compiler wants to use this so comptime franca code cannot set expecting_rwx to true on aarch64 macos. 
+//
 
 // - the allocators need to not be temp() because we reset temp()
-// - expecting_rwx only matters when jitting. See the comment on use_map_jit_on_apple_silicon if running on macos. 
-//   if you jit with expecting_rwx=false, you have to call make_exec before trying to run the code. 
+// - expecting_rwx only matters when jitting. if false, you have to call make_exec before trying to run the code. 
 //   Regardless, be careful of cache coherency on aarch64, see comment on lib/sys/process.fr/clear_instruction_cache().
-fn init(m: *QbeModule, segment_size: i64, gpa: Alloc, goal: QbeTargetEnv, expecting_rwx: bool) void = {
+// - 'dis' is called for debug["D"]. the default one above just execs 'llvm-mc'. 
+//   But i need to be able to override it when targetting blink to not pull in those libc functions. 
+fn init(m: *QbeModule, segment_size: i64, gpa: Alloc, goal: QbeTargetEnv, expecting_rwx: bool, dis: DisassemblerFunc) void = {
     gpa = todo_allocator;
     m[] = QbeModule.zeroed();
+    m.dis = dis;
     m.supports_self_sign = true;
     m.forever = init(gpa, size_of(Qbe.Ins) * 1.shift_left(20) + size_of(SymbolBucket) * IMask + 1.shift_left(10));
     forever := m.forever&.borrow();
     m.segments = EnumMap(SegmentType, SegmentCursor).zeroed();
-    m.use_map_jit_on_apple_silicon = expecting_rwx && goal.type == .JitOnly && goal.arch == .aarch64 && goal.os == .macos;
+    use_map_jit_on_apple_silicon := expecting_rwx && goal.type == .JitOnly && goal.arch == .aarch64 && goal.os == .macos;
     
     // don't forget to update init_empty_for_template_only too!
     @if(use_threads) {
@@ -192,7 +198,7 @@ fn init(m: *QbeModule, segment_size: i64, gpa: Alloc, goal: QbeTargetEnv, expect
         pthread_mutex_init(m.intern_mutex&, 0).unwrap();
     };
     
-    mem := if !m.use_map_jit_on_apple_silicon {
+    mem := if !use_map_jit_on_apple_silicon {
         page_allocator.alloc(u8, segment_size * 3)
     } else {
         F :: LibcType(.macos).MapFlag; // only apple makes us the MAP_JIT shenanigans. 
@@ -219,7 +225,7 @@ fn init(m: *QbeModule, segment_size: i64, gpa: Alloc, goal: QbeTargetEnv, expect
         mem
     };
     
-    if !m.use_map_jit_on_apple_silicon && expecting_rwx {
+    if !use_map_jit_on_apple_silicon && expecting_rwx {
         // Only the code segment needs to be executable. 
         prot := bit_or(@as(i64) MapProt.Exec, bit_or(@as(i64) MapProt.Read, @as(i64) MapProt.Write));
         mprotect(u8.raw_from_ptr(mem.ptr), segment_size, prot).unwrap();
@@ -256,8 +262,7 @@ fn init(m: *QbeModule, segment_size: i64, gpa: Alloc, goal: QbeTargetEnv, expect
         if goal.type == .JitOnly {
             range(0, MAX_GOT_SIZE / 8) { i |
                 tried_to_call_uncompiled :: fn() void = {
-                    scary_log("ICE: Tried to call an uncompiled function");
-                    abort();
+                    panic("ICE: Tried to call an uncompiled function");
                 };
                 ptr_cast_unchecked(u8, @FnPtr() void, m.got.mmapped.ptr.offset(i * 8))[] = tried_to_call_uncompiled;
             };

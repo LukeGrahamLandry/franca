@@ -33,6 +33,10 @@ fn emit_instructions(in: FatExpr) FatExpr #macro = {
     if get_from_pattern(named, @symbol emit) { e |
         emit_func = const_eval(@type emit_func)(e[]);
     };
+    forward := false;
+    if get_from_pattern(named, @symbol forward) { e |
+        forward = const_eval(bool)(e[]);
+    };
     
     src_node := e[2];
     src := const_eval(Str)(src_node);
@@ -50,6 +54,8 @@ fn emit_instructions(in: FatExpr) FatExpr #macro = {
     f, replacements := or parse_body(p) { err | 
         compile_error(err, src_node.loc)
     };
+    
+    @if(::has_feature("@franca/import"))  // :UpdateBoot (not enough bits to refer to all slots)
     @ct_assert(expect_multiple_blocks == (f.nblk != 1), src_node.loc, "iff creating multiple blocks, you must pass in the starting block.");
     
     fcc :: FIXED_CONST_COUNT;
@@ -116,7 +122,15 @@ fn emit_instructions(in: FatExpr) FatExpr #macro = {
                 e := @if(::has_feature("@franca/import"), @{
                     (type = @[@literal c.type], sym = @[@literal c.sym], bits = @[@literal c.bits])
                 }, @literal c[]);
-                rt_map&.push(@{ c: Qbe.Con = @[e]; newcon(rt_f, c&) });
+                rt_map&.push(@{ 
+                    cc: Qbe.Con = @[e]; 
+                    @[if c.type == .CAddr {
+                        @{ s := @[@literal m.str(c.sym.id)]; cc.sym.id = rt_f.globals.intern(s); }
+                    } else {
+                        @{}
+                    }];
+                    newcon(rt_f, cc&)
+                });
             };
             
             refs := in;
@@ -162,17 +176,21 @@ fn emit_instructions(in: FatExpr) FatExpr #macro = {
                     };
                     
                     emit_func := @literal emit_func;
-                    do_bodies(emit_func&, body&, replacements, f, src_node.loc);
-                    do_bodies :: fn(emit_func: *FatExpr, body: *FatExpr, reps: [](Replacement), f: *Qbe.Fn, loc: Span) void = {
+                    do_bodies(emit_func&, body&, replacements, f, src_node.loc, forward);
+                    do_bodies :: fn(emit_func: *FatExpr, body: *FatExpr, reps: [](Replacement), f: *Qbe.Fn, loc: Span, forward: bool) void = {
                         has_multiple_blocks := f.nblk != 1;
                         blocks := get_blocks(f);
                         block_index: i64 = f.nblk.zext();
                         for_rev blocks { b |
                             block_index -= 1;
-                            for_insts_rev b { i | 
-                                i := i[];
+                            n: i64 = b.nins.zext();
+                            range(0, n) { j |
+                                if !forward {
+                                    j = n - j - 1;
+                                };
+                                i    := b.ins.index(j);
                                 ct_k := @literal i.cls();
-                                to := f.translate_ref(i.to, loc);
+                                to   := f.translate_ref(i.to, loc);
                                 each reps { rep |
                                     if i.to == rep.r {
                                         ct_k = @{ k[@[@literal rep.key]] };
