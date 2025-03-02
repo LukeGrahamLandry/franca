@@ -34,10 +34,7 @@ fn start_thread(stack: []u8, callee: @FnPtr(userdata: rawptr) void, userdata: ra
     @assert_eq(u8.int_from_ptr(stack_low).mod(16), 0, "start_thread unaligned stack");  // TODO: return error
     
     new_context := u8.raw_from_ptr(stack.ptr.offset(16));
-    
-    NEXT_THREAD_ID :: @static(i64) 1;
-    ti := DefaultContext.ptr_from_raw(new_context)[].thread_index&;
-    ti[] = i64.atomic_inc(NEXT_THREAD_ID);
+    set_new_thread_id(DefaultContext.ptr_from_raw(new_context));
     
     // TODO: check PTHREAD_STACK_MIN
     @try(pthread_attr_init(attr&)) return;
@@ -47,6 +44,11 @@ fn start_thread(stack: []u8, callee: @FnPtr(userdata: rawptr) void, userdata: ra
         return(Ok = out);
     };
     .Err
+}
+
+fn set_new_thread_id(ctx: *DefaultContext) void #inline = {
+    NEXT_THREAD_ID :: @static(i64) 1;  // :ThreadIdStartsAtOne
+    ctx.thread_index = i64.atomic_inc(NEXT_THREAD_ID);
 }
 
 franca_runtime_init_thread :: fn(franca_userdata: rawptr) void = {
@@ -142,3 +144,17 @@ fn pthread_mutex_lock(m: *PMutex) voidResult #libc;
 fn pthread_mutex_destroy(m: *PMutex) voidResult #libc;
 fn pthread_getcpuclockid(thread: Thread, clock_id_out: *i32) voidResult #libc;
 fn pthread_join(thread: Thread, value_ptr: *rawptr) voidResult #libc;
+
+fn lock(self: *PMutex) void = {
+    pthread_mutex_lock(self).unwrap();
+}
+
+fn unlock(self: *PMutex) void = {
+    pthread_mutex_unlock(self).unwrap();
+}
+
+fn with(self: *PMutex, $body: @Fn() void) void = {
+    self.lock();
+    body();
+    self.unlock();  // TODO: defer
+}

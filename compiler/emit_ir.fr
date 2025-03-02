@@ -282,7 +282,7 @@ fn finalize_blocks(self: *EmitIr) void = {
     @debug_assert(ok, "ICE: unterminated block");
 }
 
-fn want_syscall(self: *EmitIr, fid: FuncId) ?i64 = {
+fn want_syscall(self: *EmitIr, fid: FuncId, force: bool) ?i64 = {
     fn current_target_syscall_index(self: *EmitIr) i64 = {
         if(self.m.goal.os   == .macos,   => return(2));
         if(self.m.goal.os   != .linux,   => return(-1));
@@ -293,7 +293,7 @@ fn want_syscall(self: *EmitIr, fid: FuncId) ?i64 = {
     
     func := self.program.get_function(fid);
     
-    @if(self.program.get_build_options()[].use_raw_syscalls) 
+    @if(self.program.get_build_options()[].use_raw_syscalls || force) 
     if choose_impl(func.body&, @const_slice(FuncImpl.Tag().Syscall)) { impl | 
         impl := impl.Syscall;
         i := self.current_target_syscall_index();
@@ -357,7 +357,7 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = { // #log_ir("AIR")
     self.f.start = self.new_block("start");
     self.blk = self.f.start;
 
-    if self.want_syscall(self.func) { syscall_number |
+    if self.want_syscall(self.func, false) { syscall_number |
         self.bounce_body(self.f.getcon(syscall_number), .syscall);
         return(.Ok);
     };
@@ -366,6 +366,11 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = { // #log_ir("AIR")
     prio_amd :: @const_slice(T.NewIntrinsic, T.Normal, T.Intrinsic, T.ComptimeAddr, T.TargetOsSplit, T.X86AsmBytes, T.Redirect, T.DynamicImport);
     prio_arm :: @const_slice(T.NewIntrinsic, T.Normal, T.Intrinsic, T.ComptimeAddr, T.TargetOsSplit, T.JittedAarch64, T.Redirect, T.DynamicImport);
     impl := or choose_impl(func.body&, @if(self.m.goal.arch == .aarch64, prio_arm, prio_amd)) {
+        if self.want_syscall(self.func, true) { syscall_number |
+            self.bounce_body(self.f.getcon(syscall_number), .syscall);
+            return(.Ok);
+        };
+        
         return(@err("no acceptable impl %", self.program.log(func)))
     };
     
@@ -876,7 +881,7 @@ fn emit_call(self: *EmitIr, f: *FatExpr, arg: *FatExpr, p: Placement) CRes(Qbe.R
             T :: FuncImpl.Tag();
             prio :: @const_slice(T.NewIntrinsic, T.Intrinsic, T.DynamicImport);
             
-            @if(self.want_syscall(f_id).is_none())
+            @if(self.want_syscall(f_id, false).is_none())
             if choose_impl(func.body&, prio) { impl | 
                 @match(impl) {
                     fn NewIntrinsic(op) => {

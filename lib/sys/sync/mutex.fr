@@ -1,0 +1,87 @@
+// :ThreadIdStartsAtOne so zero init is a correct starting state for this struct and doesn't confuse try_lock. 
+Mutex :: @struct(
+    state: MutexState,
+    count:  u32,
+    thread: u32,
+);
+MutexState :: @enum(u32) (unlocked, locked, waiting);
+
+fn lock(self: *Mutex) void = {
+    if !self.try_lock() {
+        // Always update the value to .waiting so someone will wake us up when they unlock it. 
+        while => MutexState.atomic_set(self.state&, .waiting) != .unlocked {
+            self.wait();
+        };
+        self.thread = context(DefaultContext)[].thread_index.trunc();
+        self.count = 1;
+    };
+}
+
+fn try_lock(self: *Mutex) bool = {
+    my_thread: u32 = context(DefaultContext)[].thread_index.trunc();
+    if self.thread == my_thread || MutexState.cas(self.state&, .unlocked, .locked) == .unlocked {
+        @debug_assert_ne(self.count, MAX_u32, "overflow mutex lock count");
+        @debug_assert_ne(my_thread, 0, ":ThreadIdStartsAtOne uninit dynamic context?");
+        self.thread = my_thread;
+        self.count += 1;
+        return(true);
+    };
+    false
+}
+
+fn unlock(self: *Mutex) void = {
+    my_thread: u32 = context(DefaultContext)[].thread_index.trunc();
+    @debug_assert_eq(self.thread, my_thread, "tried to unlock someone else's mutex");
+    @debug_assert_ne(self.count, 0, "tried to unlock an already unlocked mutex");
+    ::enum(MutexState);
+    self.count -= 1;
+    if self.count == 0 {
+        self.thread = 0;  // no thread has id 0
+        prev := MutexState.atomic_set(self.state&, .unlocked);
+        @match(prev) {
+            fn locked()   => ();  // We're the only interested thread so we're done. 
+            fn waiting()  => self.wake();  // There's another thread in the lock() loop. Tell it to try again. 
+            fn unlocked() => panic("unlocked a mutex that was already unlocked");
+        };
+    };
+}
+
+fn wait(self: *Mutex) void #target_os = (fn($os) => @match(os) {
+    fn macos() => {
+        op := ULockFlags.zeroed();
+        op&.set(.op, 1); // UL_COMPARE_AND_WAIT
+        ulock_wait(op, self.state&.raw(), MutexState.waiting.raw(), 0);
+    }
+    fn linux() => {
+        panic("TODO: futex");
+    }
+    @default => panic("TODO: contended_lock unsupported os");
+});
+
+fn wake(self: *Mutex) void #target_os = (fn($os) => @match(os) {
+    fn macos() => {
+        op := ULockFlags.zeroed();
+        op&.set(.op, 1); // UL_COMPARE_AND_WAIT
+        ulock_wake(op, self.state&.raw(), 1);
+    }
+    fn linux() => {
+        panic("TODO: futex");
+    }
+    @default => panic("TODO: contended_lock unsupported os");
+});
+
+// https://github.com/apple/darwin-xnu/blob/main/bsd/kern/sys_ulock.c
+ulock_wait :: fn(op: ULockFlags, addr: *u32, only_wait_if_value_is: u32, timeout_ns_zero_is_forever: u32) i32 #syscall(_, _, 515);
+ulock_wake :: fn(op: ULockFlags, addr: *u32, how_many_to_wake: i64) i32 #syscall(_, _, 516);
+ULockFlags :: @bit_fields(
+    op         := 8,
+    wake_flags := 8,
+    wait_flags := 8,
+    both_flags := 8,
+);
+
+fn with(self: *Mutex, $body: @Fn() void) void = {
+    self.lock();
+    body();
+    self.unlock();  // TODO: defer
+}

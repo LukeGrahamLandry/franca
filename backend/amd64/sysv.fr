@@ -96,9 +96,9 @@ fn amd64_sysv_abi(f: *Qbe.Fn) void = {
     /* lower parameters */
     b := f.start;
     i := f.find_past_last_param();
-    @if(use_threads) pthread_mutex_lock(m.types_mutex&).unwrap();
+    @if(use_threads) lock(m.types_mutex&);
     fa := selpar_amd64(f, f.start.ins.first, i);
-    @if(use_threads) pthread_mutex_unlock(m.types_mutex&).unwrap();
+    @if(use_threads) unlock(m.types_mutex&);
     f.realloc_for_params(i);
 
     /* lower calls, returns, and vararg instructions */
@@ -112,16 +112,16 @@ fn amd64_sysv_abi(f: *Qbe.Fn) void = {
         };
         if(b.visit != 0, => continue(!b.identical(f.start)));
         f.reset_scratch();
-        @if(use_threads) pthread_mutex_lock(m.types_mutex&).unwrap();
-        selret_amd64(b, f);
-        @if(use_threads) pthread_mutex_unlock(m.types_mutex&).unwrap();
+        with m.types_mutex& {
+            selret_amd64(b, f);
+        };
         for_insts_rev b { i |
             @match(i[].op()) {
                 fn call() => {
                     i0 := b.find_first_arg(i[]);
-                    @if(use_threads) pthread_mutex_lock(m.types_mutex&).unwrap();
-                    selcall(f, i0, i[], ral&);
-                    @if(use_threads) pthread_mutex_unlock(m.types_mutex&).unwrap();
+                    with m.types_mutex& {
+                        selcall(f, i0, i[], ral&);
+                    };
                     i[] = i0;
                 }
                 fn vastart() => selvastart(f, fa, i.arg&[0]);
