@@ -1,5 +1,20 @@
 
-## 
+## (Mar 1)
+
+- reducing dependency on libc because i want to get the compiler running in blink again 
+(but without statically linking someone else's libc this time). 
+  - memmove/memset are easy but the obvious thing (one byte at a time) is super slow (1.23s -> 1.5s).
+  doing 8 bytes at a time and then the rest makes it 1.25s which is fine. 
+  - using getcwd and get_executable_path (the latter won't work on blink)
+  to find the lib folder. but can just use "./" for cwd and that's enough to find it, 
+  it's just a bit more fragile to force you to do everything in this folder. 
+  - sigaction for back traces is easy to disable
+  - should stop using libc_allocator all over the place. 
+  trivial to just replace it with page_allocator when building without libc 
+  but that's way too slow to even type the code for (can't be getting a new page for every allocation). 
+  (only like 1.3s for the compiler cause it mostly uses arenas but the point remains). 
+  
+## (Feb 27)
 
 - cross compile matching hash has been broken for a while (ie. compile on arm and amd both targetting arm should give identical bits but doesn't).
 but objdump gives identical disassembly for the two binaries and examples/dump_macho.fr is also the same. 

@@ -5,75 +5,68 @@
 // I do still use llvm's intrinsic which ends up generating calls to this when targetting wasm which is a massive pain in the ass. 
 
 fn copy_no_alias(dest: rawptr, src: rawptr, len: i64) void = {
-    fn memcpy(dest: rawptr, src: rawptr, len: i64) void #libc; 
-    memcpy(dest, src, len);
-    //copy_one_by_one(dest, src, len);
+    copy_overlapping(dest, src, len);  // im not convinced memcpy is that much faster that we should create extra bugs. 
 }
 
 fn copy_overlapping(dest: rawptr, src: rawptr, len: i64) void = {
-    fn memmove(dest: rawptr, source: rawptr, num: i64) rawptr #libc;
-    memmove(dest, src, len);
-    //copy_one_by_one(dest, src, len);
+    @if(is_linking_libc(), {
+        memmove :: fn(dest: rawptr, source: rawptr, num: i64) rawptr #libc;
+        memmove(dest, src, len);
+    }, {
+        copy_bytes(dest, src, len);
+    });
 }
 
-fn memset(destination: rawptr, value: u8, count: i64) rawptr #libc;
-
-fn copy_one_by_one(dest: rawptr, src: rawptr, count: i64) void = {
-    src  := u8.ptr_from_raw(src); 
-    dest := u8.ptr_from_raw(dest); 
-    if ptr_diff(src, dest) > 0 { 
-        src = src.offset(count-1);
-        dest = dest.offset(count-1);
+fn copy_bytes(dest: rawptr, src: rawptr, count: i64) void = {
+    impl :: fn(dest: rawptr, src: rawptr, count: i64, $T: Type, $delta: i64) void #inline = {
+        src  := T.ptr_from_raw(src); 
+        dest := T.ptr_from_raw(dest); 
+        @if(delta == -1) {
+            src = src.offset(count-1);
+            dest = dest.offset(count-1);
+        };
         range(0, count) { _ |
             dest[] = src[];
-            dest = dest.offset(-1); 
-            src = src.offset(-1);
+            dest = dest.offset(delta); 
+            src = src.offset(delta);
         };
-    } else {
-        range(0, count) { _ |
-            dest[] = src[];
-            dest = dest.offset(1);
-            src = src.offset(1);
-        };
-    }
-}
-
-// TODO: write my own good ones
-/*
-
-// TODO: this is dumb. if you want to copy a billion bytes but they're 1 aligned, you should just fix the start/end. 
-fn copy_aligned(dest: rawptr, src: rawptr, count_bytes: i64, $align: i64) void = {
-    @if(@run align == 0) return();
-    T :: UInt(align * 8); ::ptr_utils(T);
-    src  := T.ptr_from_raw(src); 
-    dest := T.ptr_from_raw(dest); 
-    chunks := count_bytes / T.size_of();
-    if ptr_diff(src, dest) > 0 {  // TODO: is llvm offended by comparing pointers? 
-        src = src.offset(chunks-1);
-        dest = dest.offset(chunks-1);
-        range(0, chunks) { _ |
-            dest[] = src[];
-            dest = dest.offset(-1); // units are T not bytes!
-            src = src.offset(-1);
-        };
-    } else {
-        range(0, chunks) { _ |
-            dest[] = src[];
-            dest = dest.offset(1); // units are T not bytes!
-            src = src.offset(1);
-        };
-    }
-}
-
-// TODO: this is dumb. if you want to zero a billion bytes but they're 1 aligned, you should just fix the start/end. 
-fn set_zero_aligned(dest: rawptr, count_bytes: i64, $align: i64) void = {
-    @if(@run align == 0) return();
-    T :: UInt(align * 8); ::ptr_utils(T);
-    dest := T.ptr_from_raw(dest); 
-    range(0, count_bytes / T.size_of()) { _ |
-        dest[] = 0;
-        dest = dest.offset(1); // units are T not bytes!
     };
+    big := count.shift_right_logical(3);
+    dist := ptr_diff(src, dest);
+    if dist > 0 && dist < count { 
+        impl(dest.offset(big * 8), src.offset(big * 8), count.bit_and(7), u8, -1);
+        impl(dest, src, big, i64, -1);
+    } else {
+        impl(dest, src, big, i64, 1);
+        impl(dest.offset(big * 8), src.offset(big * 8), count.bit_and(7), u8, 1);
+    }
 }
 
-*/
+fn set_bytes(mem: []u8, to: u8) void = {
+    @if(is_linking_libc(), {
+        memset :: fn(destination: rawptr, value: u8, count: i64) rawptr #libc;
+        memset(u8.raw_from_ptr(mem.ptr), to, mem.len);
+    }, {
+        expand :: fn(a: u8) i64 = {
+            a: i64 = a.zext();
+            a = a.bit_or(a.shift_left(8));
+            a = a.bit_or(a.shift_left(16));
+            a.bit_or(a.shift_left(32))
+        };
+        
+        // Set 8 bytes at a time and then set the rest. 
+        big := mem.len.shift_right_logical(3);
+        big:  []i64 = (ptr = ptr_cast_unchecked(u8, i64, mem.ptr), len = big);
+        
+        to2 := expand(to);
+        each big { b |
+            b[] = to2;
+        };
+        if mem.len.bit_and(7) != 0 {
+            small: []u8 = mem.rest(big.len * 8);
+            each small { b |
+                b[] = to;
+            };
+        };
+    });
+}

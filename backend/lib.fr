@@ -151,16 +151,16 @@ QbeTargetEnv :: @struct(
 QbeOutputPurpose :: @enum(i64) (AsmText, JitOnly, Exe, Relocatable, Dynamic);
 ::enum(QbeOutputPurpose);
 
-fn making_macho(m: *QbeModule) bool = 
-    m.goal.os == .macos && (m.goal.type == .Exe || m.goal.type == .Relocatable || m.goal.type == .Dynamic);
-
 MAX_GOT_SIZE :: 1.shift_left(15);
 SIZE_OF_STUBS :: 1.shift_left(11); // TODO: not this :explain
 COMMANDS_SIZE_GUESS :: macos_page_size; // :explain
 
-fn init_default_module(m: *QbeModule, goal: QbeTargetEnv, expecting_rwx: bool) void = 
-    init(m, 1.shift_left(25), libc_allocator, goal, expecting_rwx, llvm_mc_dis);
-
+fn init_default_module(m: *QbeModule, goal: QbeTargetEnv, expecting_rwx: bool) void = {
+    dis: DisassemblerFunc = @if(is_linking_libc(), llvm_mc_dis, 
+        fn(out: *List(u8), _: []u8, __: Arch) = out.push_all("no disassembler included\n"),
+    );
+    init(m, 1.shift_left(25), general_allocator(), goal, expecting_rwx, dis)
+}
 
 // 
 // :JitMemProtect (use_map_jit_on_apple_silicon)
@@ -336,9 +336,9 @@ fn init(m: *QbeModule, segment_size: i64, gpa: Alloc, goal: QbeTargetEnv, expect
         m.symbol_memmove = m.intern("memmove");
     };
     
-    m.llvm_global_value_buf = list(libc_allocator);
-    m.llvm_global_type_buf  = list(libc_allocator);
-    m.llvm_global_code_buf  = list(libc_allocator);
+    m.llvm_global_value_buf = list(general_allocator());
+    m.llvm_global_type_buf  = list(general_allocator());
+    m.llvm_global_code_buf  = list(general_allocator());
 }
 
 fn init_empty_for_template_only(m: *QbeModule, gpa: Alloc) void = {
@@ -377,14 +377,6 @@ fn drop(m: *QbeModule) void = {
     };
     m.forever&.deinit();
     m[] = zeroed(@type m[]);  // just to make sure you crash if you try to use it again. 
-}
-
-fn get_qbe_dylib_variable($T: Type, $name: Str) *T #generic = {
-    lib := dlopen("./bindings/qbe/qbe_merged.dylib".sym().c_str(), DlFlag.Lazy);
-    assert(!lib.lib.is_null(), "failed to open qbe dylib");
-    ref := dlsym(lib, name.sym().c_str());
-    if(ref.is_null(), => @panic("failed to get '%'", name));
-    T.ptr_from_raw(ref)
 }
 
 ::ptr_utils(*Qbe.Blk);

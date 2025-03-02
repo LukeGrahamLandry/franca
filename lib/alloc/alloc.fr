@@ -39,6 +39,11 @@ fn alloc_raw(allocator: Alloc, bytes: i64, align: i64) rawptr = {
     {allocator.vptr}(allocator.data, .Allocate, rawptr_from_int(0), bytes, align)
 }
 
+fn dealloc_raw(allocator: Alloc, ptr: rawptr, bytes: i64, align: i64) void = {
+    if(bytes == 0, => return());
+    {allocator.vptr}(allocator.data, .Deallocate, ptr, bytes, align);
+}
+
 fn alloc_zeroed(allocator: Alloc, $T: Type, len: i64) []T #generic = {
     // TODO: be able to ask the allocator for zeroed memory since it might already have that (page_allocator?)
     mem := allocator.alloc(T, len);
@@ -58,12 +63,7 @@ fn box_zeroed(allocator: Alloc, $T: Type) *T #generic = {
 
 fn dealloc(allocator: Alloc, $T: Type, mem: Slice(T)) void #generic = {
     bytes := (:: T.size_of()).mul(mem.len);
-    if bytes == 0 {
-        return();
-    };
-    // TODO: calling through a field is ass
-    xx := T.raw_from_ptr(mem.ptr);
-    {allocator.vptr}(allocator.data, .Deallocate, xx, bytes, T.align_of()); // TODO: alignment
+    dealloc_raw(allocator, T.raw_from_ptr(mem.ptr), bytes, T.align_of());
 }
 
 // This is provided on a best effort basis! Not all allocators will support it (may just return .Maybe).
@@ -78,9 +78,10 @@ owns_memory :: fn(allocator: Alloc, $T: Type, ptr: *T) MemoryOwnership #generic 
 };
 
 libc_allocator: Alloc : (data = 0.rawptr_from_int(), vptr = libc_allocator_fn);
+
 libc_allocator_fn :: fn(_: rawptr, action: AllocatorAction, ptr: rawptr, count: i64, align: i64) rawptr = {
     @match(action) {
-        // TODO: respect alignment. but im pretty sure malloc always gives you 16 bits and mostly good enough. 
+        // TODO: respect alignment. but im pretty sure malloc always gives you 16 bytes and mostly good enough. 
         //       should do what zig does tho https://github.com/ziglang/zig/blob/master/lib/std/heap.zig#L57
         fn Allocate() => malloc(count);
         fn Deallocate() => {
@@ -124,6 +125,12 @@ page_allocator_fn :: fn(_: rawptr, action: AllocatorAction, ptr: rawptr, size: i
 /// Thus it should generally only be used in the implimentation of other allocators. 
 /// https://man7.org/linux/man-pages/man2/mmap.2.html
 page_allocator: Alloc : (data = 0.rawptr_from_int(), vptr = page_allocator_fn);
+
+fn page_size() i64 #target_os = (fn($os) => @match(os) {
+    fn macos()  => 16384;  // TODO: it's actually 4k on amd64
+    fn linux()  => 4096;
+    fn wasip1() => 65536;
+});
 
 ExecSlice :: @struct(ptr: rawptr, len: i64); 
 

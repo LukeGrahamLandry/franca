@@ -7,8 +7,6 @@ ENABLE_TRACY :: false;
 ENABLE_LOGGING_CALLBACKS :: false;
 DO_TERMINAL_COLOURS :: true;
 
-allocator :: libc_allocator;
-
 fn main() void = {
     // TODO: call functions directly instead of through the vtable and then we don't have to compile the llvm backend
     vtable := init_driver_vtable();
@@ -27,13 +25,16 @@ fn main() void = {
     // TODO: these numbers are experimentally where it happens to put the prelude constants right now. should do something more robust where you can ask it. 
     scope_id := self.scopes.new_scope(TOP_LEVEL_SCOPE, self.get_alloc(), file);
     scope := self.scopes[scope_id]&;
+    
+    a: BlockAlloc = init(page_allocator);
     state: ReplState = (
         program = self, 
-        variables = init(allocator),
+        variables = init(a&.borrow()),
         top_scope = scope_id,
+        allocator = a&.borrow(),
     );
     loop {
-        text := "".clone(libc_allocator);
+        text := "".clone(state.allocator);
         text&.interactive_read_line();
         text&.push_all(";");
         println("");
@@ -42,11 +43,13 @@ fn main() void = {
         @match(state&.run_chunk(text.items())) {
             fn Ok() => ();
             fn Err(e) => {
-                out: List(u8) = list(temp());
+                out: List(u8) = list(a&.borrow());
                 self.fmt_error(e, out&);
                 println(out.items());
+                out&.drop();
             }
         };
+        text&.drop();
     };
 }
 
@@ -54,6 +57,7 @@ ReplState :: @struct(
     program: *SelfHosted,
     variables: HashMap(Var, Ty([]u8, Type)),
     top_scope: ScopeId,
+    allocator: Alloc,
 );
 
 fn run_chunk(state: *ReplState, src: Str) Res(void) = {
@@ -86,7 +90,7 @@ fn run_chunk(state: *ReplState, src: Str) Res(void) = {
                     self.scopes.put_constant(f.name.Var, f.default, f.ty);
                 } else {
                     value := @try(self.repl_eval(f.default&, .None)) return;
-                    bytes := value&.bytes().clone(allocator).items();  // it might be small and stored inline
+                    bytes := value&.bytes().clone(state.allocator).items();  // it might be small and stored inline
                     state.variables&.insert(f.name.Var, (bytes, f.default.ty));
                 };
             }

@@ -88,7 +88,7 @@ fn update_global_stdlib_path() void = {
     :: ?Str; 
     if STDLIB_PATH.is_none() {
         // :io_driver
-        a := find_std_lib(libc_allocator);
+        a := find_std_lib(general_allocator());
         if a& { (lst: *Str) |  // TODO: why the fuck does this need the type annotation1!!@##@!
             STDLIB_PATH[] = (Some = lst[]);
         } else {
@@ -103,7 +103,7 @@ STDLIB_PATH :: @static(?Str) (None = unit);
 fn load_file_in_compiler(vtable: *ImportVTable, path: Str, opts: *BuildOptions) CRes(CompCtx) = {
     // :io_driver
     prelude := "#include_std(\"lib/core.fr\");";
-    source: List(u8) = prelude.clone(libc_allocator);  // TODO: column number on error on first line will be wrong but i dont care. 
+    source: List(u8) = prelude.clone(general_allocator());  // TODO: column number on error on first line will be wrong but i dont care. 
     source&.read_and_push_or_crash(path);  // TODO: error handling
     if source.len > prelude.len + 4 {
         maybe_magic := source.items().subslice(prelude.len, 4);
@@ -127,10 +127,20 @@ fn load_file_in_compiler(vtable: *ImportVTable, path: Str, opts: *BuildOptions) 
     (Ok = c)
 }
 
+// TODO: can't yet compile without dlopen
+//
+// Also,
+// dlopen() isn't actually a magic operating system thing, i could do my own version of it 
+// (like examples/macho_loader.fr but for dylibs), but on macos they won't actually give you 
+// the files for the system libraries so we can't get a libc unless you link a libc. 
+// 
+NO_LIBC_IS_UNFINISHED :: true;
+
 fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
     F :: @FnPtr(*ImportVTable) void;
     callee: ?F = .None;
-    if !path.ends_with(".fr") {
+    
+    @if(is_linking_libc() || NO_LIBC_IS_UNFINISHED) if !path.ends_with(".fr") {
         handle := dlopen(maybe_borrow_cstr(path, temp()), .Lazy); 
         if !handle.lib.is_null() {
             ref := dlsym(handle, "driver".sym().c_str());
@@ -146,6 +156,10 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
         opts := vtable.default_build_options(); 
         opts.retain_function_names = true;
         opts.implicit_context_runtime = query_context_is_implicit();
+        // this needs to be set based on the host. 
+        // ie. if you build the compiler targetting an environment without a libc, 
+        // we can't just produce a libc when loading a driver program. 
+        opts.use_raw_syscalls = :: !is_linking_libc();
         c := @try(vtable.load_file_in_compiler(path, opts)) return;
         env := c.get_comptime_env();
         @if(show_backend_stats())
@@ -156,7 +170,7 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
         // not doing this is faster because then codegen for the driver and its comptime execution can happen on different threads, 
         // but means when you call a function pointer value it might be in the other module which is creepy, 
         // and we end up compiling many things an extra time. 
-        // ie. if you put #log_ir on libc_allocator_fn, you'll see it 3 times. 
+        // ie. if you put #log_ir on general_allocator()_fn, you'll see it 3 times. 
         USE_SAME_MODULE :: false;
         
         shared := @if(USE_SAME_MODULE, self.comptime_codegen, {
@@ -235,8 +249,7 @@ fn find_std_lib(a: Alloc) ?Str = {
     };
 
     // if a project wants to supply its own version, that should take priority.
-    // check current directory first? 
-    p := get_working_directory(a);
+    p := u8.list(a); p&.push_all("."); // get_working_directory(a);
     p := p&;
     if(check(p), => return(Some = p.items()));
     
@@ -246,18 +259,21 @@ fn find_std_lib(a: Alloc) ?Str = {
         if(check(p), => return(Some = p.items()));
     };
 
-    // TODO: this doesn't work if its a symlink to the exe. need to follow that? 
-    p := get_executable_path(a).assume_owned(a);
-    p := p&;
-    assert(p.pop_until_endswith("/"), "path should have slashes"); // we want our folder, not our exe. 
-    
-    p.push_path_segment("franca");
-    if(check(p), => return(Some = p.items()));
-    // exe might be in franca/target/release/franca or franca/target/debug/deps/compiler-21be1aa281dbe5d6, so go up
-    range(0, 5) { _ |
-        p.pop_path_segment();
+    @if(is_linking_libc()) {
+        // TODO: this doesn't work if its a symlink to the exe. need to follow that? 
+        p := get_executable_path(a).assume_owned(a);
+        p := p&;
+        assert(p.pop_until_endswith("/"), "path should have slashes"); // we want our folder, not our exe. 
+        
+        p.push_path_segment("franca");
         if(check(p), => return(Some = p.items()));
+        // exe might be in franca/target/release/franca or franca/target/debug/deps/compiler-21be1aa281dbe5d6, so go up
+        range(0, 5) { _ |
+            p.pop_path_segment();
+            if(check(p), => return(Some = p.items()));
+        };
     };
+    
     .None
 }
 
@@ -322,7 +338,6 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
         push_x86_func = .None,
         compile_error_pointer = .None,
         comptime_arch = arch,
-        inline_bc_fn_type = .None,
         runtime_init = .None,
         static_context_var = .None, 
     );
@@ -382,6 +397,7 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
     };
 
     // :MultiDylibLibc HACK  TODO: need a first class way to talk about one logical library that's split into multiple files. 
+    @if(is_linking_libc() || NO_LIBC_IS_UNFINISHED)
     enumerate find_os_libc_dylib() { i, libc_path |
         libc_path := libc_path[].maybe_borrow_cstr(temp()); 
         libc := dlopen(libc_path, .Lazy);
@@ -401,10 +417,10 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
     c[] = SelfHosted.raw_from_ptr(self);
     
     stable_compiler_context :: fn(self: *SelfHosted) Compiler = {
-        mem1 := libc_allocator.alloc(*SelfHosted, 1);
+        mem1 := general_allocator().alloc(*SelfHosted, 1);
         mem1.ptr[] = self;
         erased := (*SelfHosted).raw_from_ptr(mem1.ptr);
-        compiler := libc_allocator.alloc(CompilerValue, 1);
+        compiler := general_allocator().alloc(CompilerValue, 1);
         compiler.ptr[] = (pointer_to_pointer_to_selfhosted = erased);
         compiler.ptr
     };

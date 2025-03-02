@@ -1,0 +1,116 @@
+BlockAlloc :: BlockAllocImpl(@const_slice(16, 32, 64, 128, 256, 512, 1024, 2048));
+
+// TODO: have a free_all to return memory to the backing allocator. 
+
+// TODO: i don't know what the socially acceptable way to make things thread safe is. 
+//       are you supposed to just slap a mutex around it instead of trying to do a convoluted 
+//       thing with atomics every time? 
+//       It feels like haha i treat the list for each size class seperatly so 
+//       you get less contention if the threads happen to want different sizes. 
+//       but the whole array is gonna be on the same cache line so you get false
+//       sharing and it's the same as if you had a mutex around it anyway?  
+//       i wonder if i could make a test that got faster by adding 128 bytes of padding 
+//       between them, that would be pretty cool. 
+
+// SAFETY: all block_sizes must be a factor of page_size() and <= to it. 
+fn BlockAllocImpl($block_sizes: []i64) Type = {
+    Self :: @struct(
+        parent: Alloc,
+        free_lists: Array(rawptr, block_sizes.len()),
+    );
+    
+    fn init(parent: Alloc) Self #inline = {
+        s := Self.zeroed();
+        s.parent = parent;
+        s
+    }
+    
+    fn borrow(self: *Self) Alloc = 
+        (data = Self.raw_from_ptr(self), vptr = allocator_fn);
+    
+    allocator_fn :: fn(self: rawptr, action: AllocatorAction, ptr: rawptr, count: i64, align: i64) rawptr = {
+        self := Self.ptr_from_raw(self);
+        if action == .Allocate {
+            size_index := size_index_for(count) || return(self.parent.alloc_raw(count, align));
+            // TODO: align
+            return(self.next_block(size_index));
+        };
+        if action == .Deallocate {
+            if size_index_for(count) { size_index |
+                self.free_block(size_index, ptr);
+            } else {
+                self.parent.dealloc_raw(ptr, count, align);
+            };
+            // fallthrough
+        };
+        
+        rawptr.zeroed()
+    };
+    
+    fn next_block(self: *Self, size_index: i64) rawptr = {
+        slot := self.free_lists&.index(size_index);
+        first := slot[];
+        if first.is_null() {
+            // The list is empty so we need to ask for more memory. 
+            page := self.parent.alloc(u8, page_size());
+            ptr := u8.raw_from_ptr(page.ptr);
+            next := ptr.offset(block_sizes[size_index]);
+            if rawptr.cas(slot, first, next).identical(first) {
+                return(ptr);
+            };
+            // else, another thread created a new block before we could... try again. 
+            self.parent.dealloc(u8, page); // TODO: This is silly 
+            return(self.next_block(size_index));
+        };
+        
+        // Pop this off the free list. 
+        // If this is the last entry in the free list but it's not at the end of it's page, 
+        // we need to make a new block immediatly after it and add that to the list so we don't lose the memory. 
+        next := rawptr.ptr_from_raw(first)[];
+        next_candidate := first.offset(block_sizes[size_index]);
+        is_last := next.is_null() && next_candidate.int_from_rawptr().mod(page_size()) != 0;
+        if is_last {
+            // TODO: threads!
+            next = next_candidate;
+            // Don't assume that the parent allocator zeroed the memory. 
+            // So record that this is the new end of the list so we get back to this case next time. 
+            next_slot := rawptr.ptr_from_raw(next);
+            prev := next_slot[];
+            if !rawptr.cas(next_slot, prev, 0.rawptr_from_int()).identical(prev) {
+                // someone else got there first, so we didn't change anything, and can just try again. 
+                return(self.next_block(size_index))
+            };
+            // if it was already 0, two threads might have set it to zero,
+            // but the cas below will fail for someone and retrying will be fine. 
+        };
+        if rawptr.cas(slot, first, next).identical(first) {
+            return(first);
+        };
+        // else, another thread took that block before we could... try again. 
+        // if this was not the last block in the list, we made no changes, so it's totally fine. 
+        self.next_block(size_index)
+    }
+    
+    fn free_block(self: *Self, size_index: i64, ptr: rawptr) void = {
+        slot := self.free_lists&.index(size_index);
+        prev := slot[];
+        // very important that we do not write to `ptr[]` after putting it in `slot`
+        rawptr.ptr_from_raw(ptr)[] = prev;
+        if !rawptr.cas(slot, prev, ptr).identical(prev) {
+            // somebody got there first. 
+            // at this point we've only mutated `ptr[]` which we still own, so it's fine to try again. 
+            self.free_block(size_index, ptr);
+        };
+    }
+    
+    fn size_index_for(bytes: i64) ?i64 = {
+        i := 0;
+        inline_for block_sizes { $size |
+            if(bytes <= ::size[], => return(Some = i));
+            i += 1;
+        };
+        .None
+    }
+    
+    Self
+}

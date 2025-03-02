@@ -7,6 +7,7 @@
 
 ##
 
+- make sure all the allocators respect required alignment 
 - make comptime.fr exporting stuff less painful 
 - make namespacing nice enough that i can have less stuff loaded in every program by `core.fr`
 - make #macro less of a special case? it would be nice if it could participate in overloading on some arguments. 
