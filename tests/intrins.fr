@@ -1,47 +1,151 @@
-// TODO: test these against the new asm versions
+// TODO: test these against eachother
 
-fn soft_count_ones(b: u64) u32 = {
-    b = b.bit_and(0x5555555555555555) + b.shift_right_logical(1).bit_and(0x5555555555555555);
-    b = b.bit_and(0x3333333333333333) + b.shift_right_logical(2).bit_and(0x3333333333333333);
-    b = b.bit_and(0x0f0f0f0f0f0f0f0f) + b.shift_right_logical(4).bit_and(0x0f0f0f0f0f0f0f0f);
-    b += b.shift_right_logical(8);
-    b += b.shift_right_logical(16);
-    b += b.shift_right_logical(32);
-    b.bit_and(0xff).trunc()
-}
-
-fn soft_trailing_zeros(b: u64) i64 = {
-    n := 0;
-    if b.bit_and(0xffffffff) == 0 {
-        n += 32;
-        b = b.shift_right_logical(32);
-    }; 
-    if b.bit_and(0xffff) == 0 {
-        n += 16;
-        b = b.shift_right_logical(16);
+SoftIntrin :: @struct {
+    count_ones :: fn(b: u64) u32 = {
+        b = b.bit_and(0x5555555555555555) + b.shift_right_logical(1).bit_and(0x5555555555555555);
+        b = b.bit_and(0x3333333333333333) + b.shift_right_logical(2).bit_and(0x3333333333333333);
+        b = b.bit_and(0x0f0f0f0f0f0f0f0f) + b.shift_right_logical(4).bit_and(0x0f0f0f0f0f0f0f0f);
+        b += b.shift_right_logical(8);
+        b += b.shift_right_logical(16);
+        b += b.shift_right_logical(32);
+        b.bit_and(0xff).trunc()
     };
-    if b.bit_and(0xff) == 0 {
-        n += 8;
-        b = b.shift_right_logical(8);
+    
+    trailing_zeros :: fn(b: u64) i64 = {
+        n := 0;
+        if b.bit_and(0xffffffff) == 0 {
+            n += 32;
+            b = b.shift_right_logical(32);
+        }; 
+        if b.bit_and(0xffff) == 0 {
+            n += 16;
+            b = b.shift_right_logical(16);
+        };
+        if b.bit_and(0xff) == 0 {
+            n += 8;
+            b = b.shift_right_logical(8);
+        };
+        if b.bit_and(0xf) == 0 {
+            n += 4;
+            b = b.shift_right_logical(4);
+        };
+        table :: items(@list(@as(u8) 4, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0) ast_alloc());
+        n += table[b.bit_and(0xf).bitcast()].zext();
+        n
     };
-    if b.bit_and(0xf) == 0 {
-        n += 4;
-        b = b.shift_right_logical(4);
+    
+    rotl :: fn(value: i64, count: i64) i64 = {
+        mask :: 8 * size_of(i64) - 1;
+        count = count.bit_and(mask);
+        (value.shift_left(count)).bit_or(value.shift_right_logical((-count).bit_and(mask)))
     };
-    table :: items(@list(@as(u8) 4, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0) ast_alloc());
-    n += table[b.bit_and(0xf).bitcast()].zext();
-    n
-}
+    
+    rotr :: fn(value: i64, count: i64) i64 = {
+        mask :: 8 * size_of(i64) - 1;
+        count = count.bit_and(mask);
+        (value.shift_right_logical(count)).bit_or(value.shift_left((-count).bit_and(mask)))
+    };
+};
 
-// https://en.wikipedia.org/wiki/Circular_shift
-fn soft_rotl(value: i64, count: i64) i64 = {
-    mask :: 8 * size_of(i64) - 1;
-    count = count.bit_and(mask);
-    (value.shift_left(count)).bit_or(value.shift_right_logical((-count).bit_and(mask)))
-}
+AsmIntrin :: @struct {
+    fn trailing_zeros();
+    fn trailing_zeros(b: i64) i64 #asm #aarch64 = (
+        // 0b101101011000000000110 is ctz... but it doesn't exist? I guess i don't have FEAT_CSSC?
+        @bits(Bits.X64, 0b101101011000000000000, @as(u5) x0, @as(u5) x0),  // rbit
+        @bits(Bits.X64, 0b101101011000000000100, @as(u5) x0, @as(u5) x0),  // clz
+        ret()
+    );
+    
+    // this returns 0 if b is 0 which is unfortunate but i never call it that way yet.
+    // I cheated with `int trailing_zeroes(long x) { return __builtin_ctzl(x); }`, needs -msse4.2
+    fn trailing_zeros(b: i64) i64 #asm #x86_bytes = (fn(out) = {
+        out.push_all(@slice(0x48, 0x0f, 0xbc, 0xc7)); // bsfq	%rdi, %rax
+        out.push(@as(u8) PrimaryOp.Ret);
+    });
+    fn count_ones();
+    // i cheated with `int count_ones(long *x) { return __builtin_popcountll(*x); }`
+    // the software one below was 30/560 samples, this one is 6. 
+    // too bad it has to spill everything for it. would be better if i had real inline asm. 
+    fn count_ones(b: *u64) u32 #asm #aarch64 = (
+        0xfd400000, // ldr d0, [x0]
+        0x0e205800, // cnt.8b v0, v0
+        0x2e303800, // uaddlv.8b h0, v0
+        0x1e260000, // fmov w0, s0
+        ret()
+    );
+    
+    fn count_ones(b: *u64) u32 #asm #x86_bytes = (fn(out) = {
+        out.push_all(@slice(0xf3, 0x48, 0x0f, 0xb8, 0x07)); // popcntq	(%rdi), %rax
+        out.push(@as(u8) PrimaryOp.Ret);
+    });
+    
+    fn count_ones(b: u64) u32 = 
+        count_ones(b&);
+    
+    fn rotr();
+    fn byte_swap();
+    
+    // TODO: this should work with a const arg directly on a Merged #asm func. 
+    //       it works for either if you only have one arch. HACK 
+    //       add this as a test even if you make this an intrinsic!
+    
+    fn rotr(x: u32, $amount: u5) u32 = {
+        fn impl();
+        
+        fn impl(x: u32) u32 #asm #aarch64 = (
+            @bits(Bits.W32, 0b00100111, Bits.W32, 0b0, @as(u5) x0, 0b0, amount, @as(u5) x0, @as(u5) x0),
+            ret(),
+        );
+    
+        fn impl(x: u32) u32 #asm #x86_bytes = (fn(out) = @asm_x64(
+            0xC1, // ROR
+            @as(u8) pack_modrm(ModrmMode.Direct, X86Reg.rdi, @as(X86Reg) 0b0001),
+            @as(u8) amount,
+            encode_bin(PrimaryOp.MovReg, X86Reg.rax, X86Reg.rdi),
+            PrimaryOp.Ret
+        ) out);
+        
+        impl(x)
+    }
+    
+    fn byte_swap(x: u32) u32 #asm #aarch64 = (
+        rev(Bits.W32, x0, x0),
+        ret(),  
+    );
+        
+    fn byte_swap(x: i64) i64 #asm #aarch64 = (
+        rev(Bits.X64, x0, x0),
+        ret(),  
+    );
+    
+    fn byte_swap(x: u32) u32 #asm #x86_bytes = (fn(out) = @asm_x64(
+        0x0F, // prefix
+        @as(u8) 0xC8 + trunc(@as(i64) @as(u4) X86Reg.rdi.raw()),  // BSWAP
+        encode_bin(PrimaryOp.MovReg, X86Reg.rax, X86Reg.rdi),
+        PrimaryOp.Ret
+    ) out);
+    
+    fn byte_swap(x: i64) i64 #asm #x86_bytes = (fn(out) = @asm_x64(
+        0b01001000, // w = true
+        0x0F, // prefix
+        @as(u8) 0xC8 + trunc(@as(i64) @as(u4) X86Reg.rdi.raw()),  // BSWAP
+        encode_bin(PrimaryOp.MovReg, X86Reg.rax, X86Reg.rdi),
+        PrimaryOp.Ret
+    ) out);
+    
+    rev :: fn(sf: Bits, dest: RegO, src: RegI) u32 = 
+        @bits(sf, 0b10110101100000000001, sf, src, dest);
+};
 
-fn soft_rotr(value: i64, count: i64) i64 = {
-    mask :: 8 * size_of(i64) - 1;
-    count = count.bit_and(mask);
-    (value.shift_right_logical(count)).bit_or(value.shift_left((-count).bit_and(mask)))
-}
+IrIntrins :: @struct {
+    trailing_zeros :: fn(b: i64) i64 #ir(.ctz, .Kl);
+    fn count_ones();
+    fn count_ones(b: u64) u32 #ir(.ones, .Kl);
+    fn count_ones(b: *u64) u32 = 
+        count_ones(b[]);
+    
+    rotr :: fn(x: u32, amount: i64) u32 #ir(.rotr, .Kw); 
+    fn byte_swap();
+    fn byte_swap(x: u32) u32 #ir(.byteswap, .Kw);
+    fn byte_swap(x: i64) i64 #ir(.byteswap, .Kl);
+};

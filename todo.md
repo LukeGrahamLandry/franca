@@ -110,9 +110,6 @@ ie. `fn init() Self = (arr = @as(Slice(Entry)) empty(), len_including_tombstones
 - things that should be cleaned up next time i replace `boot` :UpdateBoot
   - :DumbNameAlias NoMangle
   - AbiHackSpan
-  - :InlineFoldHack `@if(::!T.has_pointers()`
-  - fn zeroed
-  - .sym().c_str()
   - `@rec` in backend/ir.fr and wasm/instructions:Wasm
 - more calling convention tests between jitted code and c.
 - make (logical not) an intrinsic

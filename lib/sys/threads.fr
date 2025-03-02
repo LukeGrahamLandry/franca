@@ -87,42 +87,29 @@ fn cas($T: Type, p: *T, $update: @Fn(old: T) T) T #generic = {
     prev
 }
 
+fn type_is_wide(T: Type) bool #fold = @switch(size_of(T)) {
+    @case(4) => false;
+    @case(8) => true;
+    @default => panic("invalid size for type_is_wide");
+};
+
 fn cas($T: Type, p: *T, old: T, new: T) T #generic #inline = {
-    wide :: @switch(size_of(T)) {
-        @case(4) => false;
-        @case(8) => true;
-        @default => panic("invalid size for compare and swap");
-    };
-    @if(::has_feature("@franca/bitops"), {
-        // TODO: sad that i don't want to use Qbe.Cls here
-        @if(wide, {
-            part0 :: fn(p: *T) void #ir(.cas0, .Kl);
-            part1 :: fn(old: T, new: T) T #ir(.cas1, .Kl);
-            part0(p);
-            part1(old, new)
-        }, {
-            part0 :: fn(p: *T) void #ir(.cas0, .Kw);
-            part1 :: fn(old: T, new: T) T #ir(.cas1, .Kw);
-            part0(p);
-            part1(old, new)
-        })
+    // TODO: sad that i don't want to use Qbe.Cls here
+    @if(type_is_wide(T), {
+        part0 :: fn(p: *T) void #ir(.cas0, .Kl);
+        part1 :: fn(old: T, new: T) T #ir(.cas1, .Kl);
+        part0(p);
+        part1(old, new)
     }, {
-        // THIS IS CLEARLY NOT OK. it goes away when we :UpdateBoot
-        x := p[];
-        if T.same_bits(x, old) {
-            p[] = new;
-        };
-        x
+        part0 :: fn(p: *T) void #ir(.cas0, .Kw);
+        part1 :: fn(old: T, new: T) T #ir(.cas1, .Kw);
+        part0(p);
+        part1(old, new)
     })
 }
 
 fn same_bits($T: Type, a: T, b: T) bool #generic = {
-    wide :: @switch(size_of(T)) {
-        @case(4) => false;
-        @case(8) => true;
-        @default => panic("invalid size for compare and swap");
-    };
-    @if(wide, {
+    @if(type_is_wide(T), {
         eq :: fn(a: T, b: T) bool #ir(.ceql, .Kw) #intrinsic(.Eq);
         eq(a, b)
     }, {

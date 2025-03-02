@@ -207,8 +207,8 @@ fn bind_args(self: *EmitBc, arguments: *Pattern) CRes(i64) #once = {
                 @case(2) => {
                     types := self.program.flat_tuple_types(ty);
                     offset_2 := align_to(
-                        self.program.get_info(types[0]).stride_bytes(),
-                        self.program.get_info(types[1]).align_bytes(),
+                        @as(i64) self.program.get_info(types[0]).stride_bytes().zext(),
+                        self.program.get_info(types[1]).align_bytes().zext(),
                     );
                     p0 := self.program.prim(types[0]).expect("ret1 prim");
                     p1 := self.program.prim(types[1]).expect("ret2 prim");
@@ -331,8 +331,8 @@ fn store_pre(self: *EmitBc, ty: Type) void = {
         @case(2) => {
             types := self.program.flat_tuple_types(ty);
             offset_2 := align_to(
-                self.program.get_info(types[0]).stride_bytes(),
-                self.program.get_info(types[1]).align_bytes(),
+                @as(i64) self.program.get_info(types[0]).stride_bytes().zext(),
+                self.program.get_info(types[1]).align_bytes().zext(),
             );
             self.push(PeekDup = 2); // grab the pointer
             self.inc_ptr_bytes(offset_2.trunc());
@@ -355,8 +355,8 @@ fn load(self: *EmitBc, ty: Type) CRes(void) = {
         @case(2) => {
             types := self.program.flat_tuple_types(ty);
             offset_2 := align_to(
-                self.program.get_info(types[0]).stride_bytes(),
-                self.program.get_info(types[1]).align_bytes(),
+                @as(i64) self.program.get_info(types[0]).stride_bytes().zext(),
+                self.program.get_info(types[1]).align_bytes().zext(),
             );
             self.push(PeekDup = 0);
             self.push(Load = self.program.prim(types[0]).expect("load prim!"));
@@ -858,7 +858,7 @@ fn deref_top_of_stack(self: *EmitBc, result_location: ResultLoc, value_type: Typ
                         self.push(StorePre = .I64);
                     } else {
                         bytes := info.stride_bytes();
-                        self.push(CopyBytesToFrom = bytes);
+                        self.push(CopyBytesToFrom = bytes.trunc());
                     };
                 };
             }
@@ -873,7 +873,7 @@ fn deref_top_of_stack(self: *EmitBc, result_location: ResultLoc, value_type: Typ
 fn zero_memory_at_top_of_stack(self: *EmitBc, expr_ty: Type) void = {
     info := self.program.get_info(expr_ty);
     align := info.align_bytes.min(8);
-    chunks := info.stride_bytes() / align;
+    chunks := info.stride_bytes().trunc() / align;
     prim := @switch(align) {
         @case(1) => Prim.I8;
         @case(2) => Prim.I16;
@@ -885,7 +885,7 @@ fn zero_memory_at_top_of_stack(self: *EmitBc, expr_ty: Type) void = {
         self.push(PeekDup = 0); 
         self.push(PushConstant = (value = 0, ty = prim));
         self.push(StorePre = prim);
-        self.inc_ptr_bytes(align);
+        self.inc_ptr_bytes(align.zext());
     }; 
     self.push(Snipe = 0); 
 }
@@ -1164,7 +1164,7 @@ fn emit_value(self: *EmitBc, value: *Values, result_location: ResultLoc, expr_ty
             self.result.mix_hash(id.id.zext(), 9765);
             self.push(PushGlobalAddr = id);
             info := self.program.get_info(expr_ty);
-            self.push(CopyBytesToFrom = info.stride_bytes());
+            self.push(CopyBytesToFrom = info.stride_bytes().trunc());
         };
         return(.Ok);
     };
@@ -1198,7 +1198,7 @@ fn emit_value(self: *EmitBc, value: *Values, result_location: ResultLoc, expr_ty
                 ));
                 
                 // Note: not the same as value.len!!!!!      // TODO: audit: why not? -- Jul 8
-                self.push(CopyBytesToFrom = self.program.get_info(expr_ty).stride_bytes());
+                self.push(CopyBytesToFrom = self.program.get_info(expr_ty).stride_bytes().trunc());
             } else {
                 parts: List(i64) = list(temp());
                 offsets: List(Ty(Prim, u16)) = list(temp());
@@ -1212,7 +1212,7 @@ fn emit_value(self: *EmitBc, value: *Values, result_location: ResultLoc, expr_ty
                 enumerate parts { i, value | 
                     ty, offset := offsets[i];
                     self.push(PeekDup = 0);
-                    self.inc_ptr_bytes(offset);
+                    self.inc_ptr_bytes(offset.zext());
                     self.push(PushConstant = (value = value[], ty = ty));
                     self.push(StorePre = ty);
                     self.result.mix_hash(value[], 1234567);
@@ -1560,7 +1560,7 @@ fn save_ssa_var(ctx: *EmitBc) u16 = {
     id
 }
 
-fn inc_ptr_bytes(self: *EmitBc, bytes: u16) void = {
+fn inc_ptr_bytes(self: *EmitBc, bytes: u32) void = {
     if bytes != 0 {
         self.push(IncPtrBytes = bytes.zext());
     };
@@ -1600,10 +1600,11 @@ fn index(self: *FnBody, b: BbId) *BasicBlock = {
 fn add_var(ctx: *EmitBc, ty: Type) u16 = {
     info := ctx.program.get_info(ty);
     ctx.result.mix_hash(info.stride_bytes().zext(), 12345);
-    ctx.result.vars&.push((size = info.stride_bytes(), align = info.align_bytes), ctx.out_alloc);
+    ctx.result.vars&.push((size = info.stride_bytes().trunc(), align = info.align_bytes), ctx.out_alloc);
     i: u16 = ctx.result.vars.len.trunc();
     i - 1
 }
+fn stride_bytes(s: *TypeMeta) u32 = s.stride_bytes;
 
 fn get_primatives(self: *EmitBc, ty: Type) []Prim #inline = 
     self.program.get_primatives(ty);
@@ -1612,9 +1613,6 @@ fn idx(s: FuncId) i64 = s.to_index().zext();
 
 fn is_float(self: Prim) bool = 
     self.eq(.F64).or(self == .F32);
-
-fn align_to(offset: u16, align: u16) i64
-    = align_to(@as(i64) offset.zext(), @as(i64) align.zext());
 
 fn int_count(self: Prim) i64 = 
     if(self.is_float(), => 0, => 1);
@@ -1799,7 +1797,7 @@ fn deconstruct_values(program: CompCtx, ty: Type, bytes: *ReadBytes, out: *List(
                 @case(2) => u16.single(.I16);
                 @case(4) => u32.single(.I32);
                 @case(8) => i64.single(.I64);
-                @default fn(n: u16) => return(@err("ICE: bad int stride %", n));
+                @default fn(n) => return(@err("ICE: bad int stride %", n));
             };
         }
         fn Array(f) => {

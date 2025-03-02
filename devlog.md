@@ -1,4 +1,16 @@
 
+## (Mar 2)
+
+- need to replace pthread_mutex. the macos version of futex seems to be ulock. 
+- update the bootstrap binary so i can fix a bunch of annoying stuff. 
+  - always supports_self_sign, don't need to exec codesign anymore.
+  - offset_of works so i can static assert that fields are arranged correctly for unsafe code.  
+  - can start using import() in the compiler. 
+  - don't need the fake cas implementation 
+  - can have types larger than 64k
+  - don't need to feature detect the abitilty to detect features
+  - string literal coerces to CStr
+
 ## (Mar 1)
 
 - reducing dependency on libc because i want to get the compiler running in blink again 
