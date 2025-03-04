@@ -3,43 +3,25 @@
 #include_std("backend/opt/live.fr");
 #include_std("backend/util.fr");
 #include_std("backend/opt/copy.fr");
-#include_std("backend/arm64/isel.fr");
-#include_std("backend/arm64/emit.fr");
 #include_std("backend/emit.fr");
 #include_std("backend/opt/ssa.fr");
 #include_std("backend/opt/cfg.fr");
 #include_std("backend/opt/spill.fr");
 #include_std("backend/opt/rega.fr");
-#include_std("backend/arm64/abi.fr");
 #include_std("backend/meta/dump.fr");
-#include_std("backend/arm64/target.fr");
 #include_std("backend/opt/load.fr");
 #include_std("backend/opt/alias.fr");
 #include_std("backend/opt/inline.fr");
-#include_std("backend/macho/bits.fr");
-#include_std("backend/macho/emit.fr");
 #include_std("backend/opt/mem.fr");
 #include_std("backend/opt/fold.fr");
-#include_std("backend/amd64/target.fr");
-#include_std("backend/amd64/emit.fr");
-#include_std("backend/amd64/sysv.fr");
-#include_std("backend/meta/parse.fr");
-#include_std("backend/abi.fr");
-#include_std("backend/meta/template.fr");
-#include_std("backend/amd64/isel.fr");
+#use("@/backend/abi.fr");
+#use("@/backend/meta/template.fr");
 #include_std("backend/opt/slots.fr");
-#include_std("backend/wasm/isel.fr");
-#include_std("backend/wasm/abi.fr");
-#include_std("backend/wasm/emit.fr");
-#include_std("backend/elf/emit.fr");
-#include_std("lib/crash_report.fr");
+#use("@/lib/leb128.fr");
+#use("@/lib/bit_fields.fr");
+#use("@/lib/sys/sync/mutex.fr");
 
 Wasm :: import("@/backend/wasm/bits.fr");
-
-use_threads :: {
-    env := BuildOptions.ptr_from_raw(get_comptime_environment()[].build_options);
-    env.implicit_context_runtime && true
-};
 
 fn init_default_module_dyn(m: *QbeModule, vtable: *ImportVTable, goal: QbeTargetEnv) void = {  
     @assert(ptr_cast_unchecked(@type vtable.init_default_qbe_module, i64, vtable.init_default_qbe_module&)[] != 0, "init_default_qbe_module is not enabled");
@@ -110,10 +92,10 @@ QbeModule :: @rec @struct(
     
     forever: ArenaAlloc,
     symbol_memmove: u32,
-    types_mutex: PMutex,
+    types_mutex: Mutex,
     last_function_end: *u8,
-    icache_mutex: PMutex,
-    intern_mutex: PMutex,
+    icache_mutex: Mutex,
+    intern_mutex: Mutex,
     
     wasm_function_type_count: i32,
     wasm_symbol_stackbase: u32,
@@ -152,7 +134,10 @@ QbeOutputPurpose :: @enum(i64) (AsmText, JitOnly, Exe, Relocatable, Dynamic);
 
 MAX_GOT_SIZE :: 1.shift_left(15);
 SIZE_OF_STUBS :: 1.shift_left(11); // TODO: not this :explain
-COMMANDS_SIZE_GUESS :: macos_page_size; // :explain
+COMMANDS_SIZE_GUESS :: 16384; // :explain
+
+CHAINED_SIZE_GUESS :: 2000000;  // TODO: prescan to caluclate?
+text_padding :: SIZE_OF_STUBS + COMMANDS_SIZE_GUESS;
 
 fn init_default_module(m: *QbeModule, goal: QbeTargetEnv, expecting_rwx: bool) void = {
     dis: DisassemblerFunc = @if(is_linking_libc(), llvm_mc_dis, 
@@ -188,13 +173,6 @@ fn init(m: *QbeModule, segment_size: i64, gpa: Alloc, goal: QbeTargetEnv, expect
     forever := m.forever&.borrow();
     m.segments = EnumMap(SegmentType, SegmentCursor).zeroed();
     use_map_jit_on_apple_silicon := expecting_rwx && goal.type == .JitOnly && goal.arch == .aarch64 && goal.os == .macos;
-    
-    // don't forget to update init_empty_for_template_only too!
-    @if(use_threads) {
-        @if(:: (PMutex == @type m.types_mutex)) pthread_mutex_init(m.types_mutex&, 0).unwrap();
-        pthread_mutex_init(m.icache_mutex&, 0).unwrap();
-        pthread_mutex_init(m.intern_mutex&, 0).unwrap();
-    };
     
     mem := if !use_map_jit_on_apple_silicon {
         page_allocator.alloc(u8, segment_size * 3)
@@ -294,26 +272,27 @@ fn init(m: *QbeModule, segment_size: i64, gpa: Alloc, goal: QbeTargetEnv, expect
     debug := get_environment_variable("FRANCA_DEBUG_THREADS");  // TODO: remove this! make it more official
     m.convert_stores_to_atomic_for_debugging = debug.is_some() && m.goal.type != .JitOnly;
     
+    EmitWasm :: import("@/backend/wasm/emit.fr");
+    
     t := m.target;
     t.data = emit_data_to_segment;
     @match(m.goal.arch) {
-        fn aarch64() => t.fill_target_arm(m.goal.os == .macos);
-        fn x86_64()  => t.fill_target_amd(m.goal.os == .macos);
+        fn aarch64() => import("@/backend/arm64/target.fr")'fill_target_arm(t, m.goal.os == .macos);
+        fn x86_64()  => import("@/backend/amd64/target.fr")'fill_target_amd(t, m.goal.os == .macos);
         fn wasm32()  => {
             t.finish_passes = finish_qbe_passes_wasm;
             t.abi0 = apple_extsb; // "Signed 8 and 16-bit scalars are sign-extended, and unsigned 8 and 16-bit scalars are zero-extended before passing or returning." 
-            t.emit_fn = emit_func_wasm32;
-            t.fixup = fixup_wasm32;
+            t.emit_fn = EmitWasm.emit_func_wasm32;
+            t.fixup = EmitWasm.fixup_wasm32;
             m.wasm_symbol_stackbase = m.intern("__stack_base");
             m.wasm_symbol_env_parameter = m.intern("__env_parameter");
         }
     };
-    
     t.finish_module = @if_else {
-        @if(m.goal.arch == .wasm32)  => output_wasm_module;
+        @if(m.goal.arch == .wasm32)  => EmitWasm.output_wasm_module;
         @if(m.goal.type == .JitOnly) => (fn(m: *QbeModule) [][]u8 = empty());
-        @if(m.goal.os == .macos)     => output_macho;
-        @if(m.goal.os == .linux)     => output_elf;
+        @if(m.goal.os == .macos)     => import("@/backend/macho/emit.fr").output_macho;
+        @if(m.goal.os == .linux)     => import("@/backend/elf/emit.fr").output_elf;
         @else => panic("TODO: we don't support this target");
     };
     
@@ -333,11 +312,6 @@ fn init_empty_for_template_only(m: *QbeModule, gpa: Alloc) void = {
     m.initialized = true;
     m.forever = init(gpa, size_of(Qbe.Ins) * 1.shift_left(20) + size_of(SymbolBucket) * IMask + 1.shift_left(10));
     forever := m.forever&.borrow();
-    @if(use_threads) {
-        @if(:: (PMutex == @type m.types_mutex)) pthread_mutex_init(m.types_mutex&, 0).unwrap();
-        pthread_mutex_init(m.icache_mutex&, 0).unwrap();
-        pthread_mutex_init(m.intern_mutex&, 0).unwrap();
-    };
     m.symbols = forever.alloc_zeroed(SymbolBucket, IMask + 1);
     m.types  = forever.box(@type m.types[]);
     mem := forever.alloc(Qbe.Ins, Qbe.MaxInstructions);
@@ -357,11 +331,6 @@ fn show_backend_stats() bool =
 fn drop(m: *QbeModule) void = {
     fst := m.segments.data&[0].mmapped;
     page_allocator.dealloc(u8, (ptr = fst.ptr, len = fst.len * 3)); // ZeroInitData has no allocation
-    @if(use_threads) {
-        @if(:: (PMutex == @type m.types_mutex)) pthread_mutex_destroy(m.types_mutex&).unwrap();
-        pthread_mutex_destroy(m.icache_mutex&).unwrap(); 
-        pthread_mutex_destroy(m.intern_mutex&).unwrap(); 
-    };
     m.forever&.deinit();
     m[] = zeroed(@type m[]);  // just to make sure you crash if you try to use it again. 
 }
@@ -470,14 +439,14 @@ fn finish_qbe_passes_wasm(f: *Qbe.Fn) void = {
         f.mem = new(0);
     };
     m := f.globals;
-    wasm_abi(f);
-    
+    import("@/backend/wasm/abi.fr")'wasm_abi(f);
+
     // TODO: wasm has memory.copy which we should use for blit instead of a bunch of ldr+str
     simplify(f);
     fillpreds(f);
     fill_use(f); 
     
-    wasm_isel(f);
+    import("@/backend/wasm/isel.fr")'wasm_isel(f);
     // TODO: elide_abi_slots
     
     // TODO: maybe we still want liveness info even though we're not doing register allocation?

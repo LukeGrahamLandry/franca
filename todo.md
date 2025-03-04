@@ -7,6 +7,7 @@
 
 ##
 
+- compile all the examples in run_tests: aoc, the gui programs, old_backend, bf 
 - make sure all the allocators respect required alignment 
 - make comptime.fr exporting stuff less painful 
 - make namespacing nice enough that i can have less stuff loaded in every program by `core.fr`

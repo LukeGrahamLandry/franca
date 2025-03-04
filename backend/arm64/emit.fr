@@ -31,11 +31,6 @@ fn emit_func_arm64(f: *Qbe.Fn) void = {
     self&.emit_the_code();
 }
 
-fn segment_address(self: *QbeModule, segment: SegmentType, offset_in_segment: i64) *u8 = {
-    data := self.segments&[segment]&;
-    data.mmapped.ptr.offset(offset_in_segment)
-}
-
 fn fixup_arm64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_reloc: *?Fixup) void = {
     address := symbol.jit_addr;
     local  := symbol.kind == .Local;
@@ -59,10 +54,10 @@ fn fixup_arm64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_rel
                     insane_caches := use_threads && self.goal.type == .JitOnly && self.goal.os == .macos;
                     
                     // create a new trampoline in the __stubs section. 
-                    @if(insane_caches) pthread_mutex_lock(self.icache_mutex&).unwrap();
+                    @if(insane_caches) lock(self.icache_mutex&);
                     symbol.offset = self.stubs&.len() + COMMANDS_SIZE_GUESS;
                     trampoline := self.stubs&.reserve(Array(u32, 3));
-                    @if(insane_caches) pthread_mutex_unlock(self.icache_mutex&).unwrap();
+                    @if(insane_caches) unlock(self.icache_mutex&);
                     reg := Arm64Reg.IP0.raw() - 1; // x16
                     new_got_reloc[] = load_from_got(self, symbol, reg, trampoline.items().slice(0, 2), address).or_else(=> new_got_reloc[]);
                     trampoline[2] = br(reg, 0);
@@ -118,8 +113,6 @@ fn load_from_got(self: *QbeModule, symbol: *SymbolInfo, reg_encoding: i64, insts
     insts[1] = i_off; 
     new_got_reloc
 }
-
-Patch :: @struct(offset_from_start: i64, cond: i32, target_bid: i32);
 
 fn emit_the_code(self: *ArmState) void #once = {
     // TODO: what is this? is it the control flow integrety shit? 
@@ -1059,3 +1052,5 @@ fn sub_er(sf: Bits, dest: RegO, a: RegI, b: RegI) u32 =
     
 fn add_er(sf: Bits, dest: RegO, a: RegI, b: RegI) u32 =
     @bits(sf, 0b0001011001, b, 0b011 /*option*/, 0b000 /*imm3*/, a, dest);
+
+#use("@/backend/arm64/target.fr");

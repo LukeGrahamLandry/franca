@@ -75,13 +75,13 @@ fn wait_for_symbol(shared: *CodegenShared, id: u32) rawptr = {
         zone_end(zone);
     };
     
-    @if(use_threads) pthread_mutex_lock(shared.m.icache_mutex&).unwrap();
+    lock(shared.m.icache_mutex&);
     c := rawptr.zeroed();
     use_symbol(shared.m, id) { symbol | 
         c = symbol.jit_addr;
     };
-    shared.m.bump_dirty_new(false);
-    @if(use_threads) pthread_mutex_unlock(shared.m.icache_mutex&).unwrap();
+    shared.m.bump_dirty_new();
+    unlock(shared.m.icache_mutex&);
     c
 }
 
@@ -341,13 +341,10 @@ fn shallow_jit_func(self: *SelfHosted, fid: FuncId) void = {
 }
 
 fn bump_dirty_new(self: *SelfHosted) void = 
-    bump_dirty_new(self, true);
+    bump_dirty_new(self.comptime_codegen.m);
 
-fn bump_dirty_new(self: *SelfHosted, lock: bool) void = 
-    bump_dirty_new(self.comptime_codegen.m, lock);
-
-fn bump_dirty_new(m: *QbeModule, lock: bool) void = {
-    @if(use_threads && lock) pthread_mutex_lock(m.icache_mutex&).unwrap();
+fn bump_dirty_new(m: *QbeModule) void = {
+    lock(m.icache_mutex&);
     
     fence();
     start := m.start_of_writable_code;
@@ -363,7 +360,7 @@ fn bump_dirty_new(m: *QbeModule, lock: bool) void = {
         m.start_of_executable_stubs = end;
     };
     fence();
-    @if(use_threads && lock) pthread_mutex_unlock(m.icache_mutex&).unwrap();
+    unlock(m.icache_mutex&);
 }
 
 fn save_in_got(self: *SelfHosted, fid: FuncId, addr: rawptr) void = {
@@ -388,13 +385,15 @@ report_called_uncompiled_or_just_fix_the_problem :: @as(rawptr) fn(self: *SelfHo
     result := rawptr_from_int(0);
     // You want to allow a shim being called from an extern function so we can't assume we have a valid context here. (ie. examples/farm_game.fr has this problem). 
     push_zeroed_dynamic_context {
-        context(DefaultContext)[].comptime = SelfHosted.raw_from_ptr(self);
-        context(DefaultContext)[].temporary_allocator = self.shim_callback_alloc&;
-        context(DefaultContext)[].general_allocator = temp();
-        context(DefaultContext)[].panic_hook = fn(msg) = {
+        c := context(DefaultContext);
+        c.comptime = SelfHosted.raw_from_ptr(self);
+        c.temporary_allocator = self.shim_callback_alloc&;
+        c.general_allocator = page_allocator; // TODO
+        c.panic_hook = fn(msg) = {
             println("[while handling a jit shim callback]");
             backtracing_panic_handler(msg);
         };
+        c.thread_index = 1; // HACK this is not ok if the comptime code has multiple threads
         
         m := self.comptime_codegen.m;
         // important: have to be careful about which comptime is in the context if the driver program gets compiled lazily. 
@@ -461,7 +460,7 @@ report_called_uncompiled_or_just_fix_the_problem :: @as(rawptr) fn(self: *SelfHo
             save_in_got(self, fid, result);
             reset_temporary_storage(mark);
         };
-        self.comptime_codegen.m.bump_dirty_new(true);  // SLOW
+        self.comptime_codegen.m.bump_dirty_new();  // SLOW
     };
     result
 };

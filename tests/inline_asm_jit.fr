@@ -1,7 +1,7 @@
 //! This is nice for sanity checking instruction encoding seperatly from the comptime jit because you can cross compile. 
 
 #test fn manual_mmap(canary: i64) i64 = {
-    arch := query_current_arch().unwrap();  // note: at comptime we don't know if we're cross compiling, so both branches are compiled. 
+    arch := query_current_arch();  // note: at comptime we don't know if we're cross compiling, so both branches are compiled. 
     if arch == .aarch64 {
         code := @slice (
             movz(Bits.X64, x1, 0b0000000000001010, Hw.Left0),
@@ -252,19 +252,23 @@
         
     // TODO: fancy enough driver that you can warn on this (@run query_current_arch()) becuase it's a footgun for cross compiling. 
     //       but i don't want to just keep adding shit to the compiler. 
-    @if(@run (query_current_arch().unwrap() == .aarch64)) {
-        #c_call #aarch64 #asm
-        fn truncate_to_byte(in: *i64, out: *i64) void = (
-            ldrb_uo(x2, x0, @as(u12) 0),
-            strb_uo(x2, x1, @as(u12) 0),
-            ret(),
-        );
-        in := 257;
-        out := 0;
-        truncate_to_byte(in&, out&);
-        assert_eq(out, 1);
-    };
-    
+    #c_call #aarch64 #asm
+    fn truncate_to_byte(in: *i64, out: *i64) void = (
+        ldrb_uo(x2, x0, @as(u12) 0),
+        strb_uo(x2, x1, @as(u12) 0),
+        ret(),
+    );
+    #c_call #x86_bytes #asm
+    fn truncate_to_byte(in: *i64, out: *i64) void = (fn(out) = @asm_x64(
+        encode_bin_mem(PrimaryOp.MovByteLoad, X86Reg.rdi, X86Reg.rax),
+        encode_bin_mem(PrimaryOp.MovByte, X86Reg.rsi, X86Reg.rax),
+        PrimaryOp.Ret,
+    ) out);
+    in := 257;
+    out := 0;
+    truncate_to_byte(in&, out&);
+    assert_eq(out, 1);
+
     // These tests are only interesting for arm. 
     ten :: fn(out: *List(u8)) => @asm_x64(
         encode_bin(PrimaryOp.MovReg, X86Reg.rax, X86Reg.rdi),
@@ -350,7 +354,7 @@
 // aarch64 instructions are u32, x86_64 are u8
 
 fn call_jit(input: i64, code: Slice(u32)) i64 = {
-    assert(query_current_arch().unwrap() == .aarch64, "wrong size instructions wont go well");
+    assert(query_current_arch() == .aarch64, "wrong size instructions wont go well");
     bytes := code.len.mul(4);
     mapped := page_allocator.alloc(u8, bytes);
     
@@ -369,7 +373,7 @@ fn call_jit(input: i64, code: Slice(u32)) i64 = {
 }
 
 fn call_jit(input: i64, code: Slice(u8)) i64 = {
-    assert(query_current_arch().unwrap() == .x86_64, "wrong size instructions wont go well");
+    assert(query_current_arch() == .x86_64, "wrong size instructions wont go well");
     mapped := page_allocator.alloc(u8, code.len);
     mapped.copy_from(code);
     

@@ -1,4 +1,15 @@
 
+## (Mar 3)
+
+- exit_group syscall instead of exit on linux so you take your threads with you. 
+- lots of splitting things out into imports, seems less invasive to your namespace. 
+- make most of the c compiler tests work on amd64_apple
+  - implement jump.fr (try/throw)
+  - fix the cls used with O.load in sysv return (great! this was a real bug!)
+- don't ask the os in query_current_arch. 
+- implement some other asm test for x64: multistack, truncate_to_byte, 
+
+
 ## (Mar 2)
 
 - need to replace pthread_mutex. the macos version of futex seems to be ulock. 
@@ -10,6 +21,17 @@
   - can have types larger than 64k
   - don't need to feature detect the abitilty to detect features
   - string literal coerces to CStr
+
+//       i don't know what the socially acceptable way to make things thread safe is. 
+//       are you supposed to just slap a mutex around it instead of trying to do a convoluted 
+//       thing with atomics every time? 
+//       It feels like haha i treat the list for each size class seperatly so 
+//       you get less contention if the threads happen to want different sizes. 
+//       but the whole array is gonna be on the same cache line so you get false
+//       sharing and it's the same as if you had a mutex around it anyway?  
+//       i wonder if i could make a test that got faster by adding 128 bytes of padding 
+//       between them, that would be pretty cool. 
+//       but also if there's lots of contention then i've just created a spin lock again which isn't what you want. 
 
 ## (Mar 1)
 

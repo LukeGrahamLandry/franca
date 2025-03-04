@@ -31,9 +31,8 @@ fn main() void = {
             @eprint("Loading '%'", arg);
             bytes := temp().read_to_string_or_crash(arg).items(); // :panic
             @eprintln(" (% bytes).", bytes.len);
-            xx := query_current_arch();
             module := QbeModule.zeroed();
-            init_default_module(module&, (type = .JitOnly, os = query_current_os(), arch = xx.unwrap()), false);
+            init_default_module(module&, (type = .JitOnly, os = query_current_os(), arch = query_current_arch()), false);
             a := libc_allocator;
             wasm: LoadWasm = (
                 m = module&,
@@ -153,6 +152,8 @@ fn create_init_func(self: *LoadWasm) void = {
     //printfn(self.f, self.f.globals.debug_out);
 }
 
+preleb :: import("@/backend/wasm/isel.fr").wasm_type_preleb;
+
 fn load_module(self: *LoadWasm) void = {
     self.create_globals();
     self.create_init_func();
@@ -200,7 +201,7 @@ fn load_module(self: *LoadWasm) void = {
         blk := self.link_new_block();
         end := self.link_new_block();  // TODO: unused
         self.blocks&.push(continue = blk, current = blk, break = end, loop = false);
-        self.push_block(wasm_type_preleb(.EmptyBlock).intcast(), false);
+        self.push_block(preleb(.EmptyBlock).intcast(), false);
         
         self.return_types = local_func_type.ret.items();
         self.emit_the_code();
@@ -530,14 +531,14 @@ fn decode_block_type(self: *LoadWasm, block_type: i64) Ty([]Wasm.ValType, []Wasm
         ty := self.w.types[block_type]&;
         return(ty.arg.items(), ty.ret.items());
     };
-    if block_type == wasm_type_preleb(.EmptyBlock).intcast() {
+    if block_type == preleb(.EmptyBlock).intcast() {
         return(empty(), empty());
     };
     
     // :SLOW
     values :: get_cases(Wasm.ValType);
     each values { it |
-        if block_type == wasm_type_preleb(it[]).intcast() {
+        if block_type == preleb(it[]).intcast() {
             return(empty(), (ptr = it, len = 1));
         };
     };
@@ -558,7 +559,7 @@ fn push_block(self: *LoadWasm, block_type: i64, loop: bool) void = {
     self.stack_to_phi(old.current, new);
     self.f.copy_instructions_from_scratch_reversed_which_means_forwards(old.current);
     continuation := self.link_new_block();
-    continuation.visit = wasm_type_preleb(.EmptyBlock);
+    continuation.visit = preleb(.EmptyBlock);
     self.blocks&.push(continue = new, break = continuation, current = new, loop = loop);
     if old.current.jmp.type == .Jxxx {
         old.current.jmp.type = .jmp;

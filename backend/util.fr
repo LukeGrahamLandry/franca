@@ -333,6 +333,43 @@ fn iscmp(op: Qbe.O, pk: *Qbe.Cls, pc: *i32) bool = { // :CmpOrder
     false
 }
 
+fn default_init(f: *Qbe.Fn, m: *QbeModule) void = {
+    f[] = Qbe.Fn.zeroed();
+    f.globals = m;
+    f.tmp = new(Qbe.Tmp0);
+    f.con = new(FIXED_CONST_COUNT);
+    f.mem = new(0);
+    f.retty = -1;
+    ::assert_eq(Qbe.Ref);
+    assert_eq(f.getcon(0xdeaddead), QbeUndef);
+    assert_eq(f.getcon(0), QbeConZero);
+    assert_eq(f.ncon.zext(), FIXED_CONST_COUNT);
+    // Add temporaries representing physical registers.
+    // For the comptime usecase, the is_float will be wrong for some targets but that's fine becuase register numbers will just be moved to the real function, 
+    
+    t := f.globals.target;
+    range(0, Qbe.Tmp0) { i |
+        is_float := t.fpr0 <= i.intcast() && i.intcast() < (t.fpr0 + t.nfpr);
+   	    assert_eq(f.newtmp("r", if(is_float, => .Kd, => .Kl)), TMP(i));
+    };
+    assert_eq(f.ntmp.zext(), Qbe.Tmp0);
+}
+
+fn is_symbol(f: *Qbe.Fn, r: Qbe.Ref) bool = 
+    rtype(r) == .RCon && f.get_constant(r)[].type == .CAddr;
+
+fn get_type(m: *QbeModule, i: i64) *Qbe.Typ = { // :ThreadSafety you have to be in the mutex. todo: make this less error prone
+    @debug_assert_lt(i, m.number_of_types, "type index out of bounds");
+    @debug_assert_ge(i, 0, "type index negative");
+    m.types.index(i)
+}
+
+fn alloc_op(align_log2: i32) Qbe.O #inline = {
+    /* specific to NAlign == 3 */
+    al := if(align_log2 >= 2, => align_log2 - 2, => 0);
+    @as(Qbe.O) @as(i32) Qbe.O.alloc4.raw() + al
+}
+
 // TODO: this is dumb. i should arrange the numbers so its just flipping a bit. 
 //       don't forget to change the order of jmps/flags/ops, iscmp ranges. :CmpOrder
 //       but have to wait until i'm not calling into qbe anymore.  -- Oct 8 
@@ -473,9 +510,9 @@ fn vnew(len: i64, esz: i64, where: i64, m: *QbeModule) rawptr #inline = {
     v := if where == VMagTemp {
         temp().alloc(i64, words)
     } else {
-        @if(use_threads) pthread_mutex_lock(m.intern_mutex&).unwrap();
+        lock(m.intern_mutex&);
         mem := m.forever&.borrow().alloc(i64, words);
-        @if(use_threads) pthread_mutex_unlock(m.intern_mutex&).unwrap();
+        unlock(m.intern_mutex&);
         mem
     };
     v := ptr_cast_unchecked(i64, QListHeader, v.ptr);
@@ -498,8 +535,6 @@ fn vgrow(vpr: rawptr, len: i64) void = {
     vfree(QListHeader.raw_from_ptr(v.offset(1)));
     vp[] = ptr_from_raw(QListHeader, v1);
 }
-
-::enum(Qbe.Pool);
 
 fn debug_zero_owned_memory(v: *QListHeader) void = {
     len := v.cap * v.esz;
@@ -633,9 +668,9 @@ fn intern(m: *QbeModule, s: Str) u32 = {
     };
    
     // TODO: have ArenaAlloc use atomics
-    @if(use_threads) pthread_mutex_lock(m.intern_mutex&).unwrap();
+    lock(m.intern_mutex&);
     mem := m.forever&.borrow().alloc(u8, s.len);
-    @if(use_threads) pthread_mutex_unlock(m.intern_mutex&).unwrap();
+    unlock(m.intern_mutex&);
     
     mem.copy_from(s);
     data := b.data.index(n.zext());
@@ -870,12 +905,12 @@ fn add_padding(fields: *QList(Qbe.Field), nfield: *i64, current_size: *i64, targ
 
 // TODO: use this from qbe_frontend
 fn new_type(m: *QbeModule, type: Qbe.Typ) i64 = {
-    @if(use_threads) lock(m.types_mutex&);
+    lock(m.types_mutex&);
     i := m.number_of_types;
     m.number_of_types += 1;
     m.types.grow(m.number_of_types);
     m.types[i] = type;
-    @if(use_threads) unlock(m.types_mutex&);
+    unlock(m.types_mutex&);
     i
 }
 

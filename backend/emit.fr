@@ -249,9 +249,9 @@ fn emit_data_to_segment(self: *QbeModule, dat: *Qbe.Dat, seg: SegmentType) void 
                     // Since we need the absolute address in memory, even local symbols need a relocation. 
                     push_fixup(self, symbol, (patch_at = next[], type = (DataAbsolute = (increment = dat.u.ref.off))));
                     if self.goal.arch != .wasm32 && self.goal.type == .Relocatable && !symbol.local_but_marked_for_relocation {
-                        @if(use_threads) pthread_mutex_lock(self.intern_mutex&).unwrap();
+                        lock(self.intern_mutex&);
                         self.local_needs_reloc&.push(id);
-                        @if(use_threads) pthread_mutex_unlock(self.intern_mutex&).unwrap();
+                        unlock(self.intern_mutex&);
                         symbol.local_but_marked_for_relocation = true;
                     };
                 };
@@ -311,7 +311,7 @@ fn fence() void #asm #x86_bytes = (fn(out) = @asm_x64(
 
 fn finish_function(m: *QbeModule, dest: []u8, name_id: u32) void #inline = {
     // :SLOW
-    @if(use_threads) pthread_mutex_lock(m.icache_mutex&).unwrap();
+    lock(m.icache_mutex&);
     m.last_function_end = dest.ptr.offset(dest.len);
     use_symbol(m, name_id) { s |
         s.size = dest.len;
@@ -321,7 +321,7 @@ fn finish_function(m: *QbeModule, dest: []u8, name_id: u32) void #inline = {
         clear_instruction_cache(u8.raw_from_ptr(dest.ptr), dest.len);
     };
     fence();
-    @if(use_threads) pthread_mutex_unlock(m.icache_mutex&).unwrap();
+    unlock(m.icache_mutex&);
 }
 
 fn align_to(s: *SegmentCursor, align: i64) void = {
@@ -416,9 +416,9 @@ fn do_jit_fixups(self: *QbeModule, id: u32, segment: SegmentType, final_offset: 
             } else {
                 // you still care because the static linker wants to move things around. :track_got_reloc
                 if !symbol.local_but_marked_for_relocation {
-                    @if(use_threads) pthread_mutex_lock(self.intern_mutex&).unwrap();
+                    lock(self.intern_mutex&);
                     self.local_needs_reloc&.push(id);
-                    @if(use_threads) pthread_mutex_unlock(self.intern_mutex&).unwrap();
+                    unlock(self.intern_mutex&);
                     symbol.local_but_marked_for_relocation = true;
                 };
             }; 
@@ -455,10 +455,10 @@ fn ensure_got_slot(self: *QbeModule, symbol: *SymbolInfo, jit_address: rawptr) ?
     new_got_reloc: ?Fixup = .None;
     if symbol.got_lookup_offset == -1 {
         // need to reserve a new __got entry.  :GotAtConstantDataBase 
-        @if(use_threads) pthread_mutex_lock(self.icache_mutex&).unwrap();
+        lock(self.icache_mutex&);
         symbol.got_lookup_offset = self.got&.len();
         got := self.got&.reserve(rawptr);  // :TodoErrorMessage
-        @if(use_threads) pthread_mutex_unlock(self.icache_mutex&).unwrap();
+        unlock(self.icache_mutex&);
         if self.debug["T".char()] {
             @fmt_write(self.debug_out, "# reserve __got[%] = %\n", symbol.got_lookup_offset / 8, symbol.name);
         };
@@ -536,10 +536,10 @@ fn llvm_mc_dis(out: *List(u8), code: []u8, arch: Arch) void = {
 }
 
 fn push_fixup(m: *QbeModule, symbol: *SymbolInfo, fix: Fixup) void #inline = {
-    @if(use_threads) pthread_mutex_lock(m.intern_mutex&).unwrap();
+    lock(m.intern_mutex&);
     a := m.forever&.borrow();
     symbol.fixups&.push(fix, a);
-    @if(use_threads) pthread_mutex_unlock(m.intern_mutex&).unwrap();
+    unlock(m.intern_mutex&);
 }
 
 //////////////////////////////////
@@ -678,4 +678,36 @@ fn add_debug_info(m: *QbeModule, i: *Qbe.Ins, off_in_func: i64) void = {
     m.debug_last_off_func = off_in_func;
     leb128_signed(m.debug_data&, offset_in_source - m.debug_last_off_source);
     m.debug_last_off_source = offset_in_source;
+}
+
+// TODO: collect_aot_fixups compiles if you typo to *Symbol, :FUCKED
+FixP :: @struct(symbol: *SymbolInfo, fix: *Fixup);
+fn collect_aot_fixups(m: *QbeModule) Ty([]FixP, []*SymbolInfo) = {
+    // :SLOW keep a list because most will probably be local with no relocations. 
+    fixups := list(FixP, temp());
+    symbols := list(*SymbolInfo, temp());
+    
+    symbol_count := 0;
+    for_symbols m { _, s | 
+        first := true;
+        each s.fixups& { f | 
+            if f.type&.is(.DataAbsolute) { 
+                fixups&.push(symbol = s, fix = f);
+                if first {
+                    first = false;
+                    symbols&.push(s);
+                }
+            };
+        };
+    };
+    @debug_assert_ge(symbols.len, m.imports.len, "more imports than symbols!"); 
+    (fixups.items(), symbols.items())
+}
+
+Patch :: @struct(offset_from_start: i64, cond: i32, target_bid: i32);
+store_ops :: @const_slice(Qbe.O.storew, .storel, .stores, .stored); // :QbeClsi16 order matters
+
+fn segment_address(self: *QbeModule, segment: SegmentType, offset_in_segment: i64) *u8 = {
+    data := self.segments&[segment]&;
+    data.mmapped.ptr.offset(offset_in_segment)
 }

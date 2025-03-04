@@ -23,8 +23,9 @@
 //       do other debug info stuff. 
 // TODO: i haven't checked if .Dynamic needs zero_page
 
-#include_std("backend/macho/exports.fr");
-#include_std("backend/macho/sha256.fr");
+#use("@/backend/macho/exports.fr");
+#use("@/backend/macho/sha256.fr");
+#use("@/backend/macho/bits.fr");
 
 WipSegment :: @struct(
     name: Str,
@@ -43,7 +44,6 @@ WipSection :: @struct(
     reserved2: u32 = 0,
 );
 
-text_padding :: SIZE_OF_STUBS + COMMANDS_SIZE_GUESS;
 
 // I guess this is to make sure you segfault on low addresses. 
 // But it can't guarentee my base address is zero right? so what's the point? clearly im missing something. 
@@ -356,8 +356,6 @@ EmitMacho :: @struct(
     csis_by_segment: []*ChainedStartsInSegment = empty(),
     starts_offset := 0,
 );
-
-CHAINED_SIZE_GUESS :: 2000000;  // TODO: prescan to caluclate?
 
 fn emit_exe_fixups(e: *EmitMacho, chained: *List(u8)) void #inline = {
     m := e.m;
@@ -788,73 +786,12 @@ fn compiler_address_to_segment_offset(m: *QbeModule, address: *u8) Ty(SegmentTyp
     @panic("ICE: % was not found in module.segments (low = %, high = %)", u8.int_from_ptr(address), low, high)
 }
 
-// TODO: collect_aot_fixups compiles if you typo to *Symbol, :FUCKED
-FixP :: @struct(symbol: *SymbolInfo, fix: *Fixup);
-fn collect_aot_fixups(m: *QbeModule) Ty([]FixP, []*SymbolInfo) = {
-    // :SLOW keep a list because most will probably be local with no relocations. 
-    fixups := list(FixP, temp());
-    symbols := list(*SymbolInfo, temp());
-    
-    symbol_count := 0;
-    for_symbols m { _, s | 
-        first := true;
-        each s.fixups& { f | 
-            if f.type&.is(.DataAbsolute) { 
-                fixups&.push(symbol = s, fix = f);
-                if first {
-                    first = false;
-                    symbols&.push(s);
-                }
-            };
-        };
-    };
-    @debug_assert_ge(symbols.len, m.imports.len, "more imports than symbols!"); 
-    (fixups.items(), symbols.items())
-}
-
 fn append_padded_cstr(bytes: *List(u8), s: Str, align: i64) i64 = {
     start := bytes.len;
     bytes.push_all(s);
     bytes.push(0);
     bytes.zero_pad_to_align(align);
     bytes.len - start
-}
-
-// TODO: do we want to put these helpers in a different file so other people can use them less painfully? 
-
-fn reserve_type(bytes: *List(u8), $T: Type) *T #generic = {
-    bytes.reserve(T.size_of());
-    ptr := bytes.maybe_uninit.ptr.offset(bytes.len);
-    // TODO: do we really care?
-    //@debug_assert(u8.int_from_ptr(ptr).mod(T.align_of()) == 0, "unaligned reserve");
-    ptr := ptr_cast_unchecked(u8, T, ptr);
-    bytes.len += T.size_of();
-    ptr
-}
-
-fn zero_pad_to_align(bytes: *List(u8), align: i64) void = {
-    ptr := bytes.maybe_uninit.ptr.offset(bytes.len);
-    extra := u8.int_from_ptr(ptr).mod(align);
-    if extra != 0 {
-        extra := align - extra;
-        bytes.reserve(extra);
-        range(0, extra) { _ |
-            bytes.push(0);
-        };
-    };
-    // TODO: this seems to make it fault all the time :FUCKED -- Nov 28
-    //@debug_assert_eq(bytes.len.mod(align), 0, "alignment confusion. allocation aligned differently from our length.");
-}
-
-fn zero_pad_len_to_align(bytes: *List(u8), align: i64) void = {
-    extra := bytes.len.mod(align);
-    if extra != 0 {
-        extra := align - extra;
-        bytes.reserve(extra);
-        range(0, extra) { _ |
-            bytes.push(0);
-        };
-    };
 }
 
 

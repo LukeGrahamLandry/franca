@@ -1,25 +1,53 @@
+// TODO: im not super convinced this works
+// TODO: document re-entrancy
+
+DEBUG_MY_MUTEX_BY_USING_PTHREAD :: false;
+
 // :ThreadIdStartsAtOne so zero init is a correct starting state for this struct and doesn't confuse try_lock. 
 Mutex :: @struct(
-    state: MutexState,
+    u: @union(
+        state: MutexState,
+        pthread_debug: *PMutex,
+    ),
     count:  u32,
     thread: u32,
 );
 MutexState :: @enum(u32) (unlocked, locked, waiting);
 
 fn lock(self: *Mutex) void = {
+    @if(!use_threads) return(true);
+    @if(DEBUG_MY_MUTEX_BY_USING_PTHREAD) return(self.debug_lock());
+    
     if !self.try_lock() {
         // Always update the value to .waiting so someone will wake us up when they unlock it. 
-        while => MutexState.atomic_set(self.state&, .waiting) != .unlocked {
+        while => MutexState.atomic_set(self.u.state&, .waiting) != .unlocked {
             self.wait();
         };
+        @debug_assert(self.thread == 0 && self.count == 0, "memory ordering problem?");
         self.thread = context(DefaultContext)[].thread_index.trunc();
         self.count = 1;
     };
 }
 
-fn try_lock(self: *Mutex) bool = {
+fn debug_lock(self: *Mutex) void = {
     my_thread: u32 = context(DefaultContext)[].thread_index.trunc();
-    if self.thread == my_thread || MutexState.cas(self.state&, .unlocked, .locked) == .unlocked {
+    if self.thread != my_thread {
+        ::ptr_utils(PMutex);
+        if self.u.pthread_debug.is_null() {
+            self.u.pthread_debug = general_allocator().box(PMutex);
+            pthread_mutex_init(self.u.pthread_debug, 0).unwrap();
+        };
+        self.u.pthread_debug.lock();
+        self.thread = my_thread;
+    };
+    self.count += 1;
+}
+
+fn try_lock(self: *Mutex) bool = {
+    ::assert(!DEBUG_MY_MUTEX_BY_USING_PTHREAD, "TODO: DEBUG_MY_MUTEX_BY_USING_PTHREAD");
+    @if(!use_threads) return(true);
+    my_thread: u32 = context(DefaultContext)[].thread_index.trunc();
+    if self.thread == my_thread || MutexState.cas(self.u.state&, .unlocked, .locked) == .unlocked {
         @debug_assert_ne(self.count, MAX_u32, "overflow mutex lock count");
         @debug_assert_ne(my_thread, 0, ":ThreadIdStartsAtOne uninit dynamic context?");
         self.thread = my_thread;
@@ -30,6 +58,7 @@ fn try_lock(self: *Mutex) bool = {
 }
 
 fn unlock(self: *Mutex) void = {
+    @if(!use_threads) return();
     my_thread: u32 = context(DefaultContext)[].thread_index.trunc();
     @debug_assert_eq(self.thread, my_thread, "tried to unlock someone else's mutex");
     @debug_assert_ne(self.count, 0, "tried to unlock an already unlocked mutex");
@@ -37,7 +66,13 @@ fn unlock(self: *Mutex) void = {
     self.count -= 1;
     if self.count == 0 {
         self.thread = 0;  // no thread has id 0
-        prev := MutexState.atomic_set(self.state&, .unlocked);
+        
+        @if(DEBUG_MY_MUTEX_BY_USING_PTHREAD) {
+            self.u.pthread_debug.unlock();
+            return();
+        };
+
+        prev := MutexState.atomic_set(self.u.state&, .unlocked);
         @match(prev) {
             fn locked()   => ();  // We're the only interested thread so we're done. 
             fn waiting()  => self.wake();  // There's another thread in the lock() loop. Tell it to try again. 
@@ -46,39 +81,53 @@ fn unlock(self: *Mutex) void = {
     };
 }
 
+// Return values just tell you stuff about timeouts and spurious wake ups which we don't care about since we're calling it in a loop. 
 fn wait(self: *Mutex) void #target_os = (fn($os) => @match(os) {
     fn macos() => {
         op := ULockFlags.zeroed();
         op&.set(.op, 1); // UL_COMPARE_AND_WAIT
-        ulock_wait(op, self.state&.raw(), MutexState.waiting.raw(), 0);
+        _ := ulock_wait(op, self.u.state&.raw(), MutexState.waiting.raw(), 0);
     }
     fn linux() => {
-        panic("TODO: futex");
+        FUTEX_WAIT :: 0;
+        _ := futex(self.u.state&.raw(), FUTEX_WAIT, MutexState.waiting.raw(), TimeSpec.ptr_from_int(0));
     }
-    @default => panic("TODO: contended_lock unsupported os");
+    @default => :: panic("TODO: contended_lock unsupported os");
 });
 
 fn wake(self: *Mutex) void #target_os = (fn($os) => @match(os) {
     fn macos() => {
         op := ULockFlags.zeroed();
         op&.set(.op, 1); // UL_COMPARE_AND_WAIT
-        ulock_wake(op, self.state&.raw(), 1);
+        op&.set(.no_errno, 1);
+        
+        ::enum(MacosLibc.ErrNo);
+        // TODO: does this loop help? do THREAD_INTERRUPTED/THREAD_RESTART actually happen? 
+        dowhile {
+            result := ulock_wake(op, self.u.state&.raw(), 1);
+            -result == MacosLibc.ErrNo.EINTR.raw()
+        }
     }
     fn linux() => {
-        panic("TODO: futex");
+        FUTEX_WAKE :: 1;
+        _ := futex(self.u.state&.raw(), FUTEX_WAKE, 1, TimeSpec.ptr_from_int(0));
     }
-    @default => panic("TODO: contended_lock unsupported os");
+    @default => :: panic("TODO: contended_lock unsupported os");
 });
 
 // https://github.com/apple/darwin-xnu/blob/main/bsd/kern/sys_ulock.c
 ulock_wait :: fn(op: ULockFlags, addr: *u32, only_wait_if_value_is: u32, timeout_ns_zero_is_forever: u32) i32 #syscall(_, _, 515);
 ulock_wake :: fn(op: ULockFlags, addr: *u32, how_many_to_wake: i64) i32 #syscall(_, _, 516);
-ULockFlags :: @bit_fields(
+ULockFlags :: @(import("@/lib/bit_fields.fr").bit_fields)(
     op         := 8,
     wake_flags := 8,
     wait_flags := 8,
-    both_flags := 8,
+    no_errno   := 1,
+    _          := 7,
 );
+
+// https://www.man7.org/linux/man-pages/man2/futex.2.html
+futex :: fn(addr: *u32, futex_op: u32, val: u32, timeout: *TimeSpec) i64 #syscall(98, 202, _);
 
 fn with(self: *Mutex, $body: @Fn() void) void = {
     self.lock();

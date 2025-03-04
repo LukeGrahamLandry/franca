@@ -2,8 +2,6 @@
 
 //! The System V ABI describes how function arguments and returns are passed on amd64 linux/macOS.
 
-::List(Amd64Reg);
-
 amd64_sysv_rsave :: @const_slice(
     Amd64Reg.RDI, .RSI, .RDX, .RCX, .R8, .R9, .R10, .R11, .RAX,
                .XMM0, .XMM1, .XMM2, .XMM3, .XMM4, .XMM5, .XMM6, .XMM7,
@@ -96,9 +94,9 @@ fn amd64_sysv_abi(f: *Qbe.Fn) void = {
     /* lower parameters */
     b := f.start;
     i := f.find_past_last_param();
-    @if(use_threads) lock(m.types_mutex&);
+    lock(m.types_mutex&);
     fa := selpar_amd64(f, f.start.ins.first, i);
-    @if(use_threads) unlock(m.types_mutex&);
+    unlock(m.types_mutex&);
     f.realloc_for_params(i);
 
     /* lower calls, returns, and vararg instructions */
@@ -264,10 +262,10 @@ fn selret_amd64(b: *Qbe.Blk, f: *Qbe.Fn) void = {
             retr(ca&, reg&, aret&);
             if aret.size > 8 {
                 r := f.newtmp("abi", .Kl);
-                f.emit(.load, .Kl, reg&[1], r, QbeNull);
+                f.emit(.load, aret.cls&[1], reg&[1], r, QbeNull);
                 f.emit(.add, .Kl, r, r0, f.getcon(8));
             };
-            f.emit(.load, .Kl, reg&[0], r0, QbeNull);
+            f.emit(.load, aret.cls&[0], reg&[0], r0, QbeNull);
         };
     } else {
         k := @as(Qbe.Cls) @as(i32) j.raw() - Qbe.J.retw.raw();
@@ -495,19 +493,7 @@ fn store8(f: *Qbe.Fn, value: Qbe.Ref, k: Qbe.Cls, addr: Qbe.Ref) void #inline = 
     f.emit(o, .Kw, QbeNull, value, addr);
 }
 
-fn alloc_op(align_log2: i32) Qbe.O #inline = {
-    /* specific to NAlign == 3 */
-    al := if(align_log2 >= 2, => align_log2 - 2, => 0);
-    @as(Qbe.O) @as(i32) Qbe.O.alloc4.raw() + al
-}
-
 // TODO: really need better error messages if you have mismatched {}'s
-
-fn get_type(m: *QbeModule, i: i64) *Qbe.Typ = { // :ThreadSafety you have to be in the mutex. todo: make this less error prone
-    @debug_assert_lt(i, m.number_of_types, "type index out of bounds");
-    @debug_assert_ge(i, 0, "type index negative");
-    m.types.index(i)
-}
 
 fn selpar_amd64(f: *Qbe.Fn, i0: *Qbe.Ins, i1: *Qbe.Ins) RCallAmd = {
     env := QbeNull;
@@ -677,3 +663,5 @@ fn zip_args(i0: *Qbe.Ins, i1: *Qbe.Ins, ac: []AClass, $body: @Fn(i: *Qbe.Ins, a:
         body(i, a, continue);
     };
 }
+
+#use("@/backend/amd64/target.fr");

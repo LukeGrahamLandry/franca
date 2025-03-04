@@ -17,8 +17,10 @@
 #include_std("compiler/worker.fr");
 #include_std("compiler/jit.fr");
 
+#include_std("lib/crash_report.fr");
+#use("@/lib/collections/bit_set.fr");
+#use("@/lib/collections/map.fr");
 #include_std("backend/lib.fr");
-INCLUDE_QBE_VTABLE :: true;
 
 // TODO: don't individually allocate all these. 
 SelfHosted :: @rec @struct(
@@ -110,7 +112,7 @@ fn load_file_in_compiler(vtable: *ImportVTable, path: Str, opts: *BuildOptions) 
         check_magic :: fn(M: u32) => 
             maybe_magic.starts_with(ptr = ptr_cast_unchecked(u32, u8, M&), len = 4);
         // TODO: comment on architecture 
-        @err_assert(!check_magic(macho_magic), "load_file_in_compiler: the bytes in '%' look like a Mach-O file, not source code.", path) return;
+        @err_assert(!check_magic(import("@/backend/macho/bits.fr").macho_magic), "load_file_in_compiler: the bytes in '%' look like a Mach-O file, not source code.", path) return;
     };
     
     comp := {vtable.init_compiler}(opts);
@@ -175,7 +177,7 @@ fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
         
         shared := @if(USE_SAME_MODULE, self.comptime_codegen, {
             m := @uninitialized QbeModule;
-            init_default_module(m&, (arch = query_current_arch().unwrap(), os = query_current_os(), type = .JitOnly), true);
+            init_default_module(m&, (arch = query_current_arch(), os = query_current_os(), type = .JitOnly), true);
             self.other_module = (Some = m&);
             shared: *CodegenShared = init(m&, self.get_alloc(), @as(CodegenWorker) codegen_thread_main);
             shared
@@ -311,9 +313,7 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
     // TODO: this annoys me, generally this could just be compiled into the binary, 
     //       but i want to experiment with ape/comsmolibc eventually where you don't know where you're going to run up front,
     //       tho they still need to compile the x86 and arm parts seperatly so i guess there should be somewhere to stick this information? 
-    arch := or query_current_arch() {
-        panic("Failed to determine comptime arch. Franca only supports arm64 and x86_64")  
-    };
+    arch := query_current_arch();
     os := query_current_os();
     ::assert(enum_count(Os) <= 32 && enum_count(Arch) <= 32, "not enough bits for arch/os");
     opts.target_os_bitset = opts.target_os_bitset.bit_or(1.shift_left(os.raw()));
@@ -381,7 +381,7 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
     
     if get_dynamic_context().is_null() {
         scary_log("compiler had null context!");
-        abort();
+        exit(1);
     };
     self.init_fixed_types();
     self.pool.fill_fixed_flags();

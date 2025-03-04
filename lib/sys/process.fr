@@ -86,25 +86,25 @@ fn get_working_directory(a: Alloc) List(u8) = {
     out
 }
 
-// TODO: look at the asm for this. it's insane. need to make zeroed() less stupid. :SLOW 
-// This asks the current operating system whats up. 
-// If you run this at comptime, you get the arch you're compiling on! which might not be the target since we support cross compiling!
-fn query_current_arch() ?Arch #target_os = (fn($os) => {
-    data := LibcType(os).Utsname.zeroed();
-    data&.uname().or(=> return(.None));
-    machine: CStr = (ptr = data.machine&.as_ptr());
-    machine.uname_machine_to_arch()
-});
+// Calling `query_current_{arch, os}` at comptime is probably wrong because 
+// you'll observe the host environment not the target. 
 
 // surely we don't need to call uname... right... right...?
 fn query_current_os() Os #target_os = (fn($os) => os);
 
-fn uname_machine_to_arch(machine: CStr) ?Arch = {
-    machine := machine.str();
-    if(machine == "x86_64", => return(Some = .x86_64));
-    if(machine == "arm64", => return(Some = .aarch64));
-    .None
-}
+// TODO: this is silly. it should be the same sort of thing as #target_os where we only give the right path to the backend. 
+//       before now we can only detect arch when doing an asm function. 
+
+fn query_current_arch() Arch #aarch64 #asm #c_call = (
+    movz(.X64, x0, 0x0000, .Left0), 
+    ret(), 
+);
+
+#x86_bytes #c_call #asm
+fn query_current_arch() Arch = (fn(out) = @asm_x64(
+    encode_imm(PrimaryOp.MovImm32, X86Reg.rax, 1), 
+    PrimaryOp.Ret
+) out);
 
 //
 // You must call this function when writting machine code into memory and then trying to execute it (simply mprotect-ing it to Exec is not enough)!

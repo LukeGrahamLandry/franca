@@ -31,6 +31,7 @@ fn emit_func_amd64(f: *Qbe.Fn) void = {
     @debug_assert(identical(prev, code.next), "can't have multiple threads emitting code");
     code.next = code.next.offset(e.a.len());
 }
+SysV :: import("@/backend/amd64/sysv.fr");
 
 fn fixup_amd64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_reloc: *?Fixup) void = {
     address := symbol.jit_addr;
@@ -71,11 +72,11 @@ fn fixup_amd64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_rel
                     if symbol.offset == -1 {
                         // create a new trampoline in the __stubs section. 
                         code := self.segments&.index(.Code);
-                        @if(use_threads) pthread_mutex_lock(self.icache_mutex&).unwrap();
+                        lock(self.icache_mutex&);
                         symbol.offset = self.stubs&.len() + COMMANDS_SIZE_GUESS;
                         size_of_jmp_encoding :: 6;
                         trampoline := self.stubs&.reserve(Array(u8, size_of_jmp_encoding));
-                        @if(use_threads) pthread_mutex_unlock(self.icache_mutex&).unwrap();
+                        unlock(self.icache_mutex&);
                         new_got_reloc[] = ensure_got_slot(self, symbol, address).or_else(=> new_got_reloc[]);
                         distance := self.distance_between(.Code, symbol.offset + size_of_jmp_encoding, .ConstantData, symbol.got_lookup_offset);
                         trampoline := fixed_list(trampoline.items());
@@ -116,7 +117,7 @@ fn framesz(e: *AmdState) void = {
     // I think this is just doing e.nclob.mod(16) != 0 but befire we counted eclob. 
     o := 0;
     if !e.f.leaf {
-        for amd64_sysv_rclob { r |
+        for SysV'amd64_sysv_rclob { r |
             xx := e.f.reg.shift_right_logical(r.raw().zext());
             o = o.bit_xor(xx.bitcast());
         };
@@ -157,7 +158,7 @@ fn emit_the_code(e: *AmdState) void = {
     };
     if f.vararg {
         o := -176;
-        for amd64_sysv_rsave.slice(0, 6) { r | 
+        for SysV'amd64_sysv_rsave.slice(0, 6) { r | 
             e.a&.encode_non_sp_offset(true, PrimaryOp.MovReg, r.int_id(), .rbp, o);
             o += 8;
         };
@@ -172,7 +173,7 @@ fn emit_the_code(e: *AmdState) void = {
             o += 16;
         };
     };
-    for amd64_sysv_rclob { r | 
+    for SysV'amd64_sysv_rclob { r | 
         if f.reg.bit_and(BIT(r)) != 0 {
             e.a&.encode_op_reg(PrimaryOp.PushBase, r.int_id());
             e.nclob += 1;
@@ -193,7 +194,7 @@ fn emit_the_code(e: *AmdState) void = {
                     e.a&.encode_bin(PrimaryOp.MovReg, X86Reg.rsp, X86Reg.rbp);
                     e.a&.encode_imm(PrimaryOp.AddImm32, X86Reg.rsp, -(e.fsz + e.nclob * 8));
                 };
-                for_rev amd64_sysv_rclob { r | 
+                for_rev SysV'amd64_sysv_rclob { r | 
                     if f.reg.bit_and(BIT(r)) != 0 {
                         e.a&.encode_op_reg(PrimaryOp.PopBase, r.int_id());
                     };
@@ -979,7 +980,7 @@ fn int_id(r: Amd64Reg) X86Reg #inline = {
 fn reg_for_extension(v: u8) Amd64Reg = 
     @as(Amd64Reg) @as(i32) v.zext() + 1;
 
-AmdArgType :: @enum(u8) (M, R, imm32, imm8, none, F);    ::enum(AmdArgType);
+AmdArgType :: @enum(u8) (M, R, imm32, imm8, none, F);    
     
 fn arg_t(e: *AmdState, r: Qbe.Ref) AmdArgType = @match(rtype(r)) {
     fn RTmp() => @if(r.val() < Amd64Reg.XMM0.raw().zext(), .R, .F);
@@ -1013,7 +1014,7 @@ fn assemble(e: *AmdState, i: *Qbe.Ins) void = {
     dowhile {
         matches :: fn(w: AmdArgType, h: AmdArgType) bool =>
             w == h || (w == .imm32 && h == .imm8) || (w == .M && h == .R);
-        @debug_assert(entry.qbe_op == i.op().raw().intcast().trunc(), "didn't find encoding for % % % in %", i.op().get_name(), a0, a1, e.f.name());
+        @debug_assert(entry.qbe_op == i.op().raw().intcast().trunc(), "didn't find encoding for % % % in %", i.op(), a0, a1, e.f.name());
         bad := !matches(entry.a0, a0) || !matches(entry.a1, a1);
         if bad {
             idx += 1;
@@ -1080,6 +1081,7 @@ fn assemble(e: *AmdState, i: *Qbe.Ins) void = {
 }
 
 fn amd64_encoding_data(e: FatExpr) FatExpr #macro = {
+    ::enum(AmdArgType); 
     ArgType :: AmdArgType;
     ops := e&.items();
     // TODO: truncate the table since the last many are all not needed
@@ -1338,3 +1340,5 @@ fn amd64_encoding_table() Ty([]AmdEncodingEntry, []u16) = @amd64_encoding_data (
         (.M, .R, (0x0F, 0xBC), (), (0xF3)), // TZCNT
     ),
 );
+
+#use("@/backend/amd64/target.fr");
