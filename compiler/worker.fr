@@ -171,8 +171,8 @@ codegen_thread_main :: fn(shared: *CodegenShared) void = {
         
             // pthread_getcpuclockid doesn't exist? so we have to do this here
             shared.codegen_time = clock_ms(CLOCK_THREAD_CPUTIME_ID);
-            shared.no_more_codegen = true;
-            Futex'wake(shared.waiting_for_bouba&, 1);
+            shared.no_more_codegen = 1;
+            Futex'wake(shared.no_more_codegen&, 1);
             return();
         };
     };
@@ -309,7 +309,7 @@ fn do_codegen(m: *QbeModule, entry: *CodegenEntry) void = {
 CodegenShared :: @struct(
     queue: []CodegenEntry,
     no_more_functions := false,
-    no_more_codegen := false,
+    no_more_codegen: u32,
     m: *QbeModule,
     codegen_time := 0,
     thread: Thread,
@@ -396,7 +396,7 @@ fn release(shared: *CodegenShared, entry: *CodegenEntry, $i_am_bouba: bool) void
     prev := u32.atomic_add(shared.waiting_for_bouba&, @if(i_am_bouba, MAX_u32, 1));
     none_ready: u32 = @if(i_am_bouba, codegen_queue_size, 0);
     // TODO: if !none_ready, only wake if this was the symbol they wanted
-    need_wake := prev == none_ready || shared.waiting_for_symbol == 1;
+    need_wake := prev == none_ready || shared.waiting_for_symbol == 1 || shared.no_more_functions;
     @if(use_threads && need_wake) Futex'wake(shared.waiting_for_bouba&, 1);
 }
 
@@ -423,13 +423,15 @@ fn get_log_types(comp: CompCtx, fid: FuncId) Str = {
 
 fn join_codegen_thread(shared: *CodegenShared) void = {
     shared.no_more_functions = true;
-    while => !shared.no_more_codegen {
+    while => shared.no_more_codegen == 0 {
         Futex'wake(shared.waiting_for_bouba&, 1);
-        // TODO: wait better
-        usleep(1);
+        Futex'wait(shared.no_more_codegen&, 0);
     };
+    
     result := rawptr.zeroed();
-    pthread_join(shared.thread, result&);
+    @if(is_linking_libc()) {
+        pthread_join(shared.thread, result&);
+    };
 }
 
 // this puts a bunch of stuff in temp(), it's expected to be used in the context of a CodegenEntry. 

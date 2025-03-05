@@ -7,17 +7,12 @@ ThreadAttr :: @struct(sig: i64, opaque: Array(u8, 56));
 fn start_thread($T: Type, callee: @FnPtr(userdata: *T) void, userdata: *T) Thread #generic = {
     stack := page_allocator.alloc(u8, 1.shift_left(25));
     callee := ptr_cast_unchecked(@type callee, @FnPtr(rawptr) void, callee&)[]; // TODO: make this less painful
-    xx := start_thread(stack, callee, T.raw_from_ptr(userdata));
-    or xx {
-        panic("failed to start thread")
-    }
+    start_thread(stack, callee, T.raw_from_ptr(userdata))
 }
 
 // this uses the first page of `stack` for the dynamic context. 
-fn start_thread(stack: []u8, callee: @FnPtr(userdata: rawptr) void, userdata: rawptr) Result(Thread, void) = {
+fn start_thread(stack: []u8, callee: @FnPtr(userdata: rawptr) void, userdata: rawptr) Thread = {
     @assert(query_context_is_implicit(), "tried to start thread but compiled using static context which is not thread safe.");
-    out := Thread.zeroed();
-    attr := @uninitialized ThreadAttr;
     macos_page_size :: 16384;
     // TODO: put it at the end and offset forward to give the thread less memory so the stack grows left away from the context. instead of left towards the context. 
     // TODO: do we trust it to not stomp in my stuff in between? 
@@ -33,15 +28,67 @@ fn start_thread(stack: []u8, callee: @FnPtr(userdata: rawptr) void, userdata: ra
     
     new_context := u8.raw_from_ptr(stack.ptr.offset(16));
     set_new_thread_id(DefaultContext.ptr_from_raw(new_context));
-    
-    // TODO: check PTHREAD_STACK_MIN
-    @try(pthread_attr_init(attr&)) return;
-    @try(pthread_attr_setstack(attr&, stack_low, stack.len - macos_page_size)) return; 
-    ok := pthread_create(out&, attr&, franca_runtime_init_thread, new_context);
-    if ok.is_ok() {
-        return(Ok = out);
-    };
-    .Err
+    raw_create_thread(stack_low.slice(stack.len - macos_page_size), franca_runtime_init_thread, new_context)
+}
+
+/// This assumes you've already done stuff to setup the context (and that the callee knows how to cope with that)
+fn raw_create_thread(stack: []u8, callee: @FnPtr(userdata: rawptr) void, userdata: rawptr) Thread = {
+    @if(is_linking_libc(), {
+        // TODO: check PTHREAD_STACK_MIN
+        attr := @uninitialized ThreadAttr;
+        out := Thread.zeroed();
+        pthread_attr_init(attr&).unwrap();
+        pthread_attr_setstack(attr&, stack.ptr, stack.len).unwrap(); 
+        ok := pthread_create(out&, attr&, callee, userdata);
+        assert(ok.is_ok(), "failed to create thread");
+        out
+    }, {
+        impl :: fn(stack: []u8, callee: @FnPtr(userdata: rawptr) void, userdata: rawptr) Thread #target_os = 
+        (fn($os) => @match(os) {
+            fn linux() => {
+                // CLONE_PTRACE is 0x2000 and i feel like i want it? but blink doesn't like it. 
+                clone_flags :: 0x80050F00; // CLONE_FILES | CLONE_FS | CLONE_IO | CLONE_THREAD | CLONE_VM | CLONE_SIGHAND | CLONE_SYSVSEM
+                /*  // I'd rather do this but blink doesn't do clone3()
+                Clone :: @struct {
+                    flags: i64;
+                    pidfd: *i32;
+                    child_tid: *pid_t;
+                    parent_tid: *pid_t;
+                    exit_signal: i64;
+                    stack: []u8;
+                    tls: i64;
+                    set_tid: []pid_t;
+                    cgroup: i64;
+                };
+                clone3 :: fn(arg: *Clone, size: i64) pid_t #syscall(435, 435, _);
+                result := clone3(arg&, size_of(Clone));
+                */
+                
+                clone :: fn(flags: i64, stack: *u8, p: *i64, c: *i64, t: i64) pid_t #syscall(220, 56, _);
+                
+                dontcare := 0;
+                result := clone(clone_flags, stack.ptr, dontcare&, dontcare&, 0);
+                if result < 0 {
+                    @panic("failed to clone thread %.", result);
+                };
+                if result == 0 {  // Child
+                    callee(userdata);
+                    exit_thread :: fn(status: i64) Never #syscall(93, 60, _);
+                    exit_thread(0);
+                };
+                // else, Parent
+                // TODO: do pthread_t stuff so we can join, etc
+                bit_cast_unchecked(pid_t, Thread, result)
+            }
+            /* TODO: idk if i care enough to do this for macos
+            360	AUE_NULL	ALL	{ user_addr_t bsdthread_create(user_addr_t func, user_addr_t func_arg, user_addr_t stack, user_addr_t pthread, uint32_t flags) NO_SYSCALL_STUB; } 
+            https://github.com/apple/darwin-libpthread/blob/main/src/pthread.c
+            https://github.com/apple/darwin-libpthread/blob/main/src/types_internal.h#L348 */
+            fn macos() => panic("TODO: macos no-libc threads");
+            fn wasip1() => panic("TODO: wasi threads");
+        });
+        impl(stack, callee, userdata)
+    })
 }
 
 fn set_new_thread_id(ctx: *DefaultContext) void #inline = {

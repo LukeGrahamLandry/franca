@@ -1,3 +1,30 @@
+##
+
+- clone3 syscall so don't need pthread_create on linux. so many flags. 
+just getting -22 which is sad cause the man page has a very very long list of things that give EINVAL,
+but was just a dumb mistake of not setting stack_size in the args struct. 
+- don't have Elf Interp header when no imports so blink can run my programs. 
+- blink doesn't give high garbage value for argc so have to actually check os in franca_runtime_init. 
+- `__libc_start_main` does actually do something for me. the compiler crashes without it (both blink and real, with and without Interp). 
+I assume it's doing relocations? makes sense: simple programs work already, i'd believe that sudoku doesn't have any pointers in static memory. 
+that's such a pain, i need to get a pointer to the elf headers off the stack and then parse them to find all the 
+places to add my base address to. i guess this is what i wanted, i'd rather it be in my program than 
+somewhere random that i can't see and every computer has a different version of. 
+- emit_ir/bounce_body wasn't passing the dynamic context pointer.
+i guess it mostly just worked out with nothing stomping the register most of the time??
+ok cool that works. compiler can run without libc on real linux. 
+- still doesn't work on blink because they don't do clone3(). 
+but using clone() instead is easy. 
+now hello world works but takes 1.6 seconds. yikes. 
+i bet the -m thing makes it much worse. 
+so i need to figure out what this means:
+```
+p_vaddr p_offset skew unequal w.r.t. page size; 
+try either (1) rebuilding your program using the linker flags: 
+-static -Wl,-z,common-page-size=65536,-z,max-page-size=65536 
+or (2) using `blink -m` to disable the linear memory optimization
+```
+
 ## (Mar 4)
 
 - don't depend on pthread_cond_t. 

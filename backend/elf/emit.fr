@@ -4,13 +4,14 @@ Elf :: import("@/backend/elf/bits.fr");
 fn output_elf(m: *QbeModule) [][]u8 = {
     debug_log_byte_size(m);
     patch_pending_symbols(m);
-    
-    MYSTERY_SPICE :: 0x10000;
      
     code := m.segments&[.Code]&;
     code_size := code.len() - COMMANDS_SIZE_GUESS - SIZE_OF_STUBS;
     for_enum SegmentType { s | 
         m.align_to(s, 4096);
+        // blink (https://github.com/jart/blink) wants 65k pages to let you turn on linear memory optimisation. 
+        // which makes it a lot faster (they claim 400%, i get 20%, but still). 
+        m.align_to(s, 1.shift_left(16));
     };
     m.fixups_locked = true; // we're going to stomp the data section with relocation info so you can run it jitted anymore after this. 
     
@@ -26,6 +27,7 @@ fn output_elf(m: *QbeModule) [][]u8 = {
         s.got_lookup_offset = i;  // note: all symbols. not just imports
         local_count += int(s.kind == .Local);
     };
+    have_any_imports := local_count != symbols.len;
     
     chunks := list([]u8, 10, temp());
     commands: List(u8) = (maybe_uninit = (ptr = m.segment_address(.Code, 0), len = COMMANDS_SIZE_GUESS), len = 0, gpa = page_allocator);
@@ -41,7 +43,7 @@ fn output_elf(m: *QbeModule) [][]u8 = {
             @default => unreachable();
         },
         machine = @if(m.goal.arch == .aarch64, .arm64, .amd64),
-        entry = main_entry_point_vaddr(m) + MYSTERY_SPICE,
+        entry = main_entry_point_vaddr(m) + Elf.MYSTERY_SPICE,
         program_header_off = size_of(Elf.Header),
         section_header_off = 0, 
         flags = 0, // todo
@@ -78,7 +80,7 @@ fn output_elf(m: *QbeModule) [][]u8 = {
     
     dynamic_header: ?Ty(*Elf.ProgramHeader, *Elf.ProgramHeader, *Elf.ProgramHeader) = .None;
     
-    virtual_offset := MYSTERY_SPICE; 
+    virtual_offset := Elf.MYSTERY_SPICE; 
     file_offset    := 0;
     make_segment :: fn(seg: SegmentType, prot: u32) => {
         segment := m.segments&[seg]&;
@@ -137,7 +139,8 @@ fn output_elf(m: *QbeModule) [][]u8 = {
     };
     
     if symbols.len > 0 {
-        dynamic_header = (Some = (program_header(), program_header(), Elf.ProgramHeader.ptr_from_int(0)));
+        interp := @if(have_any_imports, program_header(), Elf.ProgramHeader.ptr_from_int(0));
+        dynamic_header = (Some = (interp, program_header(), Elf.ProgramHeader.ptr_from_int(0)));
     };
     
     if dynamic_header& { it |
@@ -163,8 +166,8 @@ fn output_elf(m: *QbeModule) [][]u8 = {
         type = .Phdr,
         prot = 4,
         offset = size_of(Elf.Header),
-        vaddr = size_of(Elf.Header) + MYSTERY_SPICE, 
-        paddr = size_of(Elf.Header) + MYSTERY_SPICE,
+        vaddr = size_of(Elf.Header) + Elf.MYSTERY_SPICE, 
+        paddr = size_of(Elf.Header) + Elf.MYSTERY_SPICE,
         file_size = program_headers_size,
         mem_size = program_headers_size,
         align = 8,
@@ -172,7 +175,7 @@ fn output_elf(m: *QbeModule) [][]u8 = {
     
     if dynamic_header { it |
         interp_header, load_payload_header, dynamic_header := it;
-        {
+        if have_any_imports {
             loader_path := "/lib64/ld-linux-x86-64.so.2\0";
             size := loader_path.len;
             addr := virtual_offset + payload.len;
@@ -240,7 +243,7 @@ fn output_elf(m: *QbeModule) [][]u8 = {
             xx := payload&.reserve_type(Elf.Symbol);
             local := symbol.kind == .Local;
             // TODO: for static linking don't add segment_base?
-            segment_base := MYSTERY_SPICE + ptr_diff(m.segments&[.Code].mmapped.ptr, m.segments&[symbol.segment].mmapped.ptr);
+            segment_base := Elf.MYSTERY_SPICE + ptr_diff(m.segments&[.Code].mmapped.ptr, m.segments&[symbol.segment].mmapped.ptr);
             xx[] = (
                 name = imported_symbol_name_offsets[symbol.got_lookup_offset],
                 info = if(local, => 0, => 1).shift_left(4).bit_or(2).trunc(), // GLOBAL FUNC
@@ -274,9 +277,9 @@ fn output_elf(m: *QbeModule) [][]u8 = {
             ptr_cast_unchecked(u8, i64, fix.fix.patch_at)[] = 0;
             payload&.reserve_type(Elf.RelA)[] = (
                 sym = trunc(fix.symbol.got_lookup_offset + 1),
-                offset = ptr_diff(m.segments&[.Code].mmapped.ptr, fix.fix.patch_at) + MYSTERY_SPICE, // TODO: or is it offset in a specific segment?
+                offset = ptr_diff(m.segments&[.Code].mmapped.ptr, fix.fix.patch_at) + Elf.MYSTERY_SPICE, // TODO: or is it offset in a specific segment?
                 addend = it.increment,
-                type = 6, // 8 R_AMD64_RELATIVE // R_AMD64_64 1 // R_AMD64_GLOB_DAT 6  // R_AMD64_JUMP_SLOT 7,  // TODO: what does this mean?
+                type = Elf.R_AMD64_GLOB_DAT, // 8 R_AMD64_RELATIVE // R_AMD64_64 1 // R_AMD64_GLOB_DAT 6  // R_AMD64_JUMP_SLOT 7,  // TODO: what does this mean?
             );
         };
         
@@ -292,7 +295,6 @@ fn output_elf(m: *QbeModule) [][]u8 = {
             ent_size = size_of(Elf.RelA),
             link = symbol_table_index.zext(),
         );
-        // TODO: local relocations 
         dynamics&.push(tag = .RelA, val = virtual_offset + relocation_table_start);
         dynamics&.push(tag = .RelASz, val = payload.len - relocation_table_start);
         dynamics&.push(tag = .RelAEnt, val = size_of(Elf.RelA));
@@ -319,7 +321,7 @@ fn output_elf(m: *QbeModule) [][]u8 = {
             name = 0, // TODO
             type = .ProgramBits, 
             flags = 1.shift_left(@as(i64) Elf.SectionFlag.Exec),
-            addr = MYSTERY_SPICE + COMMANDS_SIZE_GUESS, 
+            addr = Elf.MYSTERY_SPICE + COMMANDS_SIZE_GUESS, 
             offset = COMMANDS_SIZE_GUESS, 
             size = m.stubs&.len(),
             addr_align = 1,
@@ -328,7 +330,7 @@ fn output_elf(m: *QbeModule) [][]u8 = {
             name = 0, // TODO
             type = .ProgramBits, 
             flags = 1.shift_left(@as(i64) Elf.SectionFlag.Exec),
-            addr = MYSTERY_SPICE + COMMANDS_SIZE_GUESS + SIZE_OF_STUBS,  
+            addr = Elf.MYSTERY_SPICE + COMMANDS_SIZE_GUESS + SIZE_OF_STUBS,  
             offset = COMMANDS_SIZE_GUESS + SIZE_OF_STUBS, 
             size = code_size,
             addr_align = 1,

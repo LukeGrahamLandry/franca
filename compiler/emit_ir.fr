@@ -301,7 +301,15 @@ fn want_syscall(self: *EmitIr, fid: FuncId, force: bool) ?i64 = {
 fn bounce_body(self: *EmitIr, callee: Qbe.Ref, o: Qbe.O) void = { 
     func := self.program.get_function(self.func);
     f_ty := func.finished_ty().unwrap();
+    c := QbeNull;
+    if !func.get_flag(.NoContext) && o != .syscall {
+        c = self.f.newtmp("f", .Kl);
+        self.emit(.pare, .Kl, c, QbeNull, QbeNull);
+    };
     args := emit_par_instructions(self.program, self.shared, func.arg&, f_ty.arg, self.f);
+    if c != QbeNull {
+        self.emit(.arge, .Kl, QbeNull, c, QbeNull);
+    };
     each args { a | 
         if a.scalar || a.void {
             k: Qbe.Cls = @if(a.void, .Kw, a.k);
@@ -413,6 +421,10 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = { // #log_ir("AIR")
             each func.body.Merged& { it |
                 if it.is(.TargetOsSplit) && it.TargetOsSplit.os == self.m.goal.os {
                     fid := it.TargetOsSplit.fid;
+                    callee := self.program.get_function(fid);
+                    if !callee.get_flag(.NoContext) {
+                        func.set_flag(.YesContext);
+                    };
                     self.bounce_body(self.func_ref(fid), .call);
                     self.pending.push(fid);
                     return(.Ok)
@@ -421,6 +433,10 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = { // #log_ir("AIR")
             return(@err("#target_os missing implementation"))
         }
         fn Redirect(fid) => {
+            callee := self.program.get_function(fid[]);
+            if !callee.get_flag(.NoContext) {
+                func.set_flag(.YesContext);
+            };
             self.bounce_body(self.func_ref(fid[]), .call);
             self.pending.push(fid[]);
             return(.Ok)

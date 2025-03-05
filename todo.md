@@ -7,6 +7,7 @@
 
 ##
 
+- hello_va doesn't work on linux??
 - compile all the examples in run_tests: aoc, the gui programs, old_backend, bf 
 - make sure all the allocators respect required alignment 
 - make comptime.fr exporting stuff less painful 

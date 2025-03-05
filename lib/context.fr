@@ -26,8 +26,8 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
     //
     // TODO: instead of this hack where we rely on whatever junk is in rdi being high, we should just 
     //       take the target as a constant argument (since the compiler knows it) and generate exactly 
-    //       the right code here. 
-    if argc > 0xFFFFFFFF {
+    //       the right code here.
+    if query_current_os() == .linux {
         // TODO: start_trace
         fn get_fp();
         fn get_fp() i64 #c_call #asm #aarch64 = (mov(Bits.X64, x0, fp), ret());
@@ -70,18 +70,79 @@ franca_runtime_init :: fn(argc: i64, argv: *CStr, user: @FnPtr() void, envp: *CS
             c.cli_arguments = (ptr = argv, len = argc);
             c.environment_variables = envp;
             set_new_thread_id(c);
+            fixup :: fn() void #target_os = 
+                (fn($os) => @if(::(os == .linux && !is_linking_libc())) do_relocations_static_linux());
+            fixup();
+            
             CAPTURE[]();
             exit(0);
         };
     };
     impl :: fn(argc: i64, argv: *CStr, envp: *CStr, user: @FnPtr() void) void #target_os = (fn($os) => @match(os) {
         fn linux() => {
-            __libc_start_main :: fn(user: @FnPtr(argc: i64, argv: *CStr, envp: *CStr) void, argc: i64, argv: *CStr, i: i64, f: i64, l: i64) i64 #libc;
-            __libc_start_main(impl2, argc, argv, 0, 0, 0);
+            @if(is_linking_libc(), {
+                __libc_start_main :: fn(user: @FnPtr(argc: i64, argv: *CStr, envp: *CStr) void, argc: i64, argv: *CStr, i: i64, f: i64, l: i64) i64 #libc;
+                __libc_start_main(impl2, argc, argv, 0, 0, 0);
+            }, impl2(argc, argv, envp));
         }
         @default => impl2(argc, argv, envp);
     });
     impl(argc, argv, envp, user);
+};
+
+do_relocations_static_linux :: fn() void #yes_context = {
+    Elf :: import("@/backend/elf/bits.fr");
+    base   := @import_symbol "__franca_base_address";
+    header := Elf.Header.ptr_from_raw(base);
+    @debug_assert_eq(header.magic, Elf.MAGIC, "we're not in an elf file?");
+    headers: []Elf.ProgramHeader = (
+        ptr = Elf.ProgramHeader.ptr_from_raw(base.offset(header.program_header_off)), 
+        len = header.program_header_num.zext(),
+    );
+    ::enum(Elf.SegmentType);
+    ::enum(Elf.DynTag);
+    
+    ElfDynUnpacked :: @struct {
+        strings: []u8;
+        symbols: *Elf.Symbol;
+        relocations: []Elf.RelA;
+    };
+    
+    unpacked := ElfDynUnpacked.zeroed();
+    each headers { h |
+        if h.type == .Dynamic {
+            // TODO: i don't super understand why i don't need to add `base` here. i guess it fixed it for me? 
+            dynamic: []Elf.Dyn = (ptr = Elf.Dyn.ptr_from_int(h.vaddr), len = h.mem_size / 16);
+            for dynamic { it |
+                @match(it.tag) {
+                    fn StrTab() => {
+                        unpacked.strings.ptr = u8.ptr_from_int(it.val);
+                    }
+                    fn StrSz() => {
+                        unpacked.strings.len = it.val;
+                    }
+                    fn SymTab() => {
+                        unpacked.symbols = Elf.Symbol.ptr_from_int(it.val);
+                    }
+                    fn RelA() => {
+                        unpacked.relocations.ptr = Elf.RelA.ptr_from_int(it.val);
+                    }
+                    fn RelASz() => {
+                        unpacked.relocations.len = it.val / size_of(Elf.RelA);
+                    }
+                    @default => ();
+                };
+            };
+        };
+    };
+    
+    ::ptr_utils(Elf.Symbol);
+    each unpacked.relocations { it |
+        @debug_assert_eq(it.type, Elf.R_AMD64_GLOB_DAT, "TODO: unknown relocation type %", it.type);
+        sym := unpacked.symbols.offset(it.sym.zext());
+        dest := rawptr.ptr_from_raw(base.offset(it.offset - Elf.MYSTERY_SPICE));
+        dest[] = base.offset(sym.value).offset(it.addend - Elf.MYSTERY_SPICE);
+    };
 };
 
 // HACK. if context is passed in a global it will leak out from the callee. 
