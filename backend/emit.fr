@@ -340,27 +340,6 @@ fn put_jit_addr(self: *QbeModule, name: u32, addr: rawptr) void = {
     };
 }
 
-// :SLOW insanely inefficient way of doing this. especially when someone tries to add multiple libs. 
-// TODO: store a list of the pending ones so don't have to iterate them all. 
-// This is not what you want if you care about cross compiling!
-fn fill_pending_dynamic_imports(self: *QbeModule, lib: DlHandle) void = {
-    buf := u8.list(temp());
-    for_symbols self { id, symbol |  // :SLOW  just keep list of pending symbols instead
-        if symbol.kind == .Pending {
-            self.imports&.push(id); 
-            buf&.clear();
-            buf&.push_all(symbol.name);
-            buf&.push(0);
-            s: CStr = (ptr = buf.maybe_uninit.ptr);
-            found := lib.dlsym(s);
-            if !found.is_null() {
-                symbol.kind = .DynamicPatched;
-                self.do_fixups(u8.ptr_from_raw(found), symbol);
-            };
-        };
-    };
-}
-
 fn for_symbols(m: *QbeModule, $body: @Fn(id: u32, s: *SymbolInfo) void) void = {
     enumerate m.symbols& { h, bucket | 
         n := m.lock_bucket(bucket);
@@ -375,10 +354,25 @@ fn for_symbols(m: *QbeModule, $body: @Fn(id: u32, s: *SymbolInfo) void) void = {
 
 // This is not what you want if you care about cross compiling!
 fn fill_from_libc(self: *QbeModule) void = {
+    Dyn :: import("@/lib/dynamic_lib.fr");
+
+    // :SLOW insanely inefficient way of doing this. especially when someone tries to add multiple libs. 
+    // TODO: store a list of the pending ones so don't have to iterate them all. 
+    // This is not what you want if you care about cross compiling!
+    fn fill_pending_dynamic_imports(self: *QbeModule, lib: Dyn.Handle) void = {
+        for_symbols self { id, symbol |  // :SLOW  just keep list of pending symbols instead
+            if symbol.kind == .Pending {
+                self.imports&.push(id); 
+                if lib.get(symbol.name) { found |
+                    symbol.kind = .DynamicPatched;
+                    self.do_fixups(u8.ptr_from_raw(found), symbol);
+                };
+            };
+        };
+    }
+
     for find_os_libc_dylib() { libc_path | 
-        libc_path := libc_path.maybe_borrow_cstr(temp());
-        libc := dlopen(libc_path, .Lazy);
-        if !libc.lib.is_null() { 
+        if Dyn'open(libc_path) { libc |
             self.fill_pending_dynamic_imports(libc);
         };
     };
@@ -600,6 +594,8 @@ fn declare_bytes(m: *QbeModule, bytes: []u8, name: Str) u32 = {
 fn seal_debug_info(m: *QbeModule, debug_source_code: []u8, include: bool, files_bytes: []u8) void = {
     base_p    := m.intern("__franca_base_address");
     m.do_jit_fixups(base_p, .Code, 0);
+    
+    AotDebugInfo :: import("@/lib/crash_report.fr").AotDebugInfo;
 
     dat := Qbe.Dat.zeroed();
     lnk := Qbe.Lnk.zeroed();

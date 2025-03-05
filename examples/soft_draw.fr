@@ -31,8 +31,7 @@ fn main() void = {
     //       so you can have the driver dlopen for you when jitting or have the linker ask for it when doing aot. 
     // You do have to open this dylib to have the classes exist when running at comptime (or i assume pass -framework Cocoa for aot)
     // even if we didn't want NSDefaultRunLoopMode
-    appkit := dlopen("/System/Library/Frameworks/AppKit.framework/AppKit", DlFlag.Lazy);
-    @assert(!appkit.lib.is_null(), "failed to open appkit");
+    appkit := Dyn'open("/System/Library/Frameworks/AppKit.framework/AppKit").expect("open AppKit");
     
     NSApp :: @static(ObjCId);
     
@@ -152,22 +151,22 @@ fn class($name: Str) ObjCClass = {
     c
 }
 
-fn get_constant(lib: DlHandle, $T: Type, $name: Str) ?T #generic = {
+fn get_constant(lib: Dyn.Handle, $T: Type, $name: Str) ?T #generic = {
     ref := dlsym(lib, name.sym().c_str());
     if(ref.is_null(), => return(.None));
     (Some = T.ptr_from_raw(ref)[])
 }
+
+Dyn :: import("@/lib/dynamic_lib.fr");
 
 fn driver(vtable: *ImportVTable) void #export = {    
     src := "#include_std(\"lib/core.fr\");".clone(temp());
     the_code := temp().read_to_string_or_crash("examples/soft_draw.fr");  // TODO: don't depend on cwd.
     src&.push_all(the_code.items());
     
-    Data :: @struct(objc: DlHandle, cg: DlHandle, vtable: *ImportVTable);
-    objc := dlopen(c_str(@symbol "/usr/lib/libobjc.dylib"), DlFlag.Lazy);
-    @assert(!objc.lib.is_null(), "failed to open objc");
-    cg := dlopen(c_str(@symbol "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics"), DlFlag.Lazy);
-    @assert(!cg.lib.is_null(), "failed to open coregraphics");
+    Data :: @struct(objc: Dyn.Handle, cg: Dyn.Handle, vtable: *ImportVTable);
+    objc := Dyn'open("/usr/lib/libobjc.dylib").expect("open objc");
+    cg := Dyn'open("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics").expect("open CoreGraphics");
     opts := vtable.default_build_options();
     comp := vtable.new_with_src(src.items(), opts);
     ctx := vtable.with(comp);

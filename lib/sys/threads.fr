@@ -33,7 +33,7 @@ fn start_thread(stack: []u8, callee: @FnPtr(userdata: rawptr) void, userdata: ra
 
 /// This assumes you've already done stuff to setup the context (and that the callee knows how to cope with that)
 fn raw_create_thread(stack: []u8, callee: @FnPtr(userdata: rawptr) void, userdata: rawptr) Thread = {
-    @if(is_linking_libc(), {
+    use_pthread :: fn(stack: []u8, callee: @FnPtr(userdata: rawptr) void, userdata: rawptr) Thread = {
         // TODO: check PTHREAD_STACK_MIN
         attr := @uninitialized ThreadAttr;
         out := Thread.zeroed();
@@ -42,7 +42,9 @@ fn raw_create_thread(stack: []u8, callee: @FnPtr(userdata: rawptr) void, userdat
         ok := pthread_create(out&, attr&, callee, userdata);
         assert(ok.is_ok(), "failed to create thread");
         out
-    }, {
+    };
+    
+    @if(is_linking_libc(), use_pthread(stack, callee, userdata), {
         impl :: fn(stack: []u8, callee: @FnPtr(userdata: rawptr) void, userdata: rawptr) Thread #target_os = 
         (fn($os) => @match(os) {
             fn linux() => {
@@ -80,11 +82,11 @@ fn raw_create_thread(stack: []u8, callee: @FnPtr(userdata: rawptr) void, userdat
                 // TODO: do pthread_t stuff so we can join, etc
                 bit_cast_unchecked(pid_t, Thread, result)
             }
-            /* TODO: idk if i care enough to do this for macos
-            360	AUE_NULL	ALL	{ user_addr_t bsdthread_create(user_addr_t func, user_addr_t func_arg, user_addr_t stack, user_addr_t pthread, uint32_t flags) NO_SYSCALL_STUB; } 
-            https://github.com/apple/darwin-libpthread/blob/main/src/pthread.c
-            https://github.com/apple/darwin-libpthread/blob/main/src/types_internal.h#L348 */
-            fn macos() => panic("TODO: macos no-libc threads");
+            // I don't care enough to figure out how to use bsdthread_create right now. 
+            // There's something with pointer authentication in the sig field. idk man.
+            // https://github.com/apple/darwin-libpthread/blob/main/src/pthread.c
+            // https://github.com/apple/darwin-libpthread/blob/main/src/types_internal.h#L348 
+            fn macos()  => use_pthread(stack, callee, userdata);
             fn wasip1() => panic("TODO: wasi threads");
         });
         impl(stack, callee, userdata)

@@ -1,0 +1,30 @@
+Handle :: @struct(lib: rawptr);
+DlFlag :: @enum(i64) (Lazy = 1, Now = 2);
+fn dlopen(name: CStr, flag: DlFlag) Handle #libc;
+fn dlsym(lib: Handle, name: CStr) rawptr #libc;
+fn dlclose(lib: Handle) voidResult #libc;
+
+// TODO:
+// dlopen() isn't actually a magic operating system thing, i could do my own version of it 
+// (like examples/macho_loader.fr but for dylibs), but on macos they won't actually give you 
+// the files for the system libraries so we can't get a libc unless you link a libc. 
+// 
+
+// This will always fail when: 
+// - statically linking with musl
+// - if you don't link to libc (for now)
+fn open(path: Str) ?Handle = {
+    @if(!is_linking_libc()) return(.None);
+    path := path.maybe_borrow_cstr(temp());
+    handle := dlopen(path, .Lazy);
+    if(handle.lib.is_null(), => return(.None));
+    (Some = handle)
+}
+
+fn get(lib: Handle, name: Str) ?rawptr = {
+    @if(!is_linking_libc()) return(.None);
+    name := name.maybe_borrow_cstr(temp());
+    addr := dlsym(lib, name);
+    if(addr.is_null(), => return(.None));
+    (Some = addr)
+}

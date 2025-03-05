@@ -54,7 +54,9 @@ fn good4inl(f: *Qbe.Fn) bool = {
 
 // Note: this goes in the inlining cache so it can't use temp() memory.
 fn cloneblk(m: *QbeModule, b: *Qbe.Blk) *Qbe.Blk = {
-    inlb := general_allocator().box_zeroed(Qbe.Blk); // :HardcodeAlloc
+    lock(m.intern_mutex&); 
+    inlb := m.forever&.borrow().box_zeroed(Qbe.Blk); // :HardcodeAlloc
+    unlock(m.intern_mutex&); 
     inlb.jmp = b.jmp;
     
     msg :: "can only inline functions with one block";
@@ -71,7 +73,9 @@ fn cloneblk(m: *QbeModule, b: *Qbe.Blk) *Qbe.Blk = {
 // Note: this goes in the inlining cache so it can't use temp() memory.
 fn clone(f: *Qbe.Fn) *Qbe.Fn = {
     m := f.globals;
-    inlfn := general_allocator().box_zeroed(Qbe.Fn); // :HardcodeAlloc
+    lock(m.intern_mutex&); 
+    inlfn := m.forever&.borrow().box_zeroed(Qbe.Fn); // :HardcodeAlloc
+    unlock(m.intern_mutex&); 
     inlfn.retty = f.retty;
     inlfn.ntmp = f.ntmp;
     inlfn.ncon = f.ncon;
@@ -96,6 +100,7 @@ fn clone(f: *Qbe.Fn) *Qbe.Fn = {
 
 ::ptr_utils(Qbe.Fn);
 
+// return true if we should stop processing because it's possible for all uses to be inlined. 
 fn inlsave(f: *Qbe.Fn) bool = {
     if(f.lnk.no_inline || !good4inl(f), => return(false));
     
@@ -169,6 +174,10 @@ fn getinlref(inlfn: *Qbe.Fn, inlr: Qbe.Ref, f: *Qbe.Fn, c: *InlineCtx) Qbe.Ref =
     }
 }
 
+fn display(f: *Qbe.Fn, out: *List(u8)) void = {
+    printfn(f, out);    
+}
+
 fn inlargs(inlfn: *Qbe.Fn, f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins, c: *InlineCtx) void = {
     /* replace args with copies to par tmps */
     @debug_assert(inlfn.nblk == 1);
@@ -191,7 +200,7 @@ fn inlargs(inlfn: *Qbe.Fn, f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins, c: *InlineCtx) 
     };
     while => i.op() != .call {
         @debug_assert(is_arg(i.op()), "expected 'argX' instructions before call. did we start in the wrong place somehow?");
-        @debug_assert(is_par(i1.op()), "expected 'parX' instructions at beginning of function. did we start in the wrong place somehow? found");
+        @debug_assert(is_par(i1.op()), "expected 'parX' instructions at beginning of function. did we start in the wrong place somehow? %", inlfn);
         @assert(i.cls() == i1.cls(), "cant inline call with wrong argument type. (callee = %, caller = %)", inlfn.name(), f.name());
         @debug_assert(rtype(i1.to) == .RTmp, "par target must be tmp");
         
@@ -213,8 +222,8 @@ fn inlargs(inlfn: *Qbe.Fn, f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins, c: *InlineCtx) 
 
         i  = i.offset(1);
         i1 = i1.offset(1);
-        @debug_assert(b.ins.index(b.nins.zext()).in_memory_after(i), "inlined oob");
-        last_inl := inlfn.start.ins.index(inlfn.start.nins.zext() + 1); // TODO: why +1?
+        @debug_assert(b.ins.index_unchecked(b.nins.zext()).in_memory_after(i), "inlined oob");
+        last_inl := inlfn.start.ins.index_unchecked(inlfn.start.nins.zext() + 1); // TODO: why +1?
         @debug_assert(last_inl.in_memory_after(i1), "inlined oob");
     };
 }
@@ -248,7 +257,7 @@ fn inlbins(inlfn: *Qbe.Fn, f: *Qbe.Fn, c: *InlineCtx) void = {
     inlb := inlfn.start;
     /* skip par instructions */
     i := inlfn.find_past_last_param();
-    last := inlb.ins.index(inlb.nins.zext());
+    last := inlb.ins.index_unchecked(inlb.nins.zext());
     /* copy remaining instructions, translating refs to current fn */
     for(i, last) { i |
         addins(c.vins&, c.nins&, i);
@@ -283,7 +292,7 @@ InlineCtx :: @struct(
 
 /* return index of last inlined ins */
 fn inlcall(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) i64 = {
-    @debug_assert(ptr_diff(b.ins.first, i) >= 0 && ptr_diff(i, b.ins.index(b.nins.zext())) >= 0, "bad size for inlining");
+    @debug_assert(ptr_diff(b.ins.first, i) >= 0 && ptr_diff(i, b.ins.index_unchecked(b.nins.zext())) >= 0, "bad size for inlining");
     @debug_assert(i.op() == .call, "expected to be inlining call");
     inlfn := or inlfind(f, i.arg&[0]) {
         f.leaf = false;
@@ -349,7 +358,7 @@ fn inlcall(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) i64 = {
     nret := c.nins - 1;
     
     // TODO: copy chunks as we go so you don't recopy the end of the block for every inlined call :SLOW
-    append(c.vins&, c.nins&, i.offset(1), b.ins.index(b.nins.zext()));
+    append(c.vins&, c.nins&, i.offset(1), b.ins.index_unchecked(b.nins.zext()));
     idup(b, c.vins.first, c.nins);
     
     // tmps are sparse after being eliminated by other passes (61346/1150101 = 5% average for the compiler -- Nov 20). 
@@ -418,7 +427,7 @@ fn inlcalls(f: *Qbe.Fn) void = {
         nins := 0;
         append(vins&, nins&, f.start.ins.first, i);
         append(vins&, nins&, alloc_ins.ptr, alloc_ins.index_unchecked(alloc_ins.len));
-        append(vins&, nins&, i, f.start.ins.index(f.start.nins.zext()));
+        append(vins&, nins&, i, f.start.ins.index_unchecked(f.start.nins.zext()));
         f.start.ins = vins;
         f.start.nins = nins.trunc();
     };

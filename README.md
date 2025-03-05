@@ -1,6 +1,6 @@
 # Franca
 
-> a self hosted programming language. 
+> The following philosophical objections apply: The most significant program written in your language is its own compiler. 
 
 If you just want to see what the syntax looks like, click on examples or compiler or lib or tests, really anywhere, just click a folder.
 

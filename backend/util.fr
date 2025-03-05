@@ -138,10 +138,7 @@ fn newcon(f: *Qbe.Fn, c0: *Qbe.Con) Qbe.Ref = {
         };
     };
     
-    // push
-    f.con&.grow(f.ncon.zext() + 1);
-    f.con[f.ncon.zext()] = c0[];
-    f.ncon += 1;
+    push(f.con&, f.ncon&, c0[]);
     CON(f.ncon.zext() - 1)
 }
 
@@ -154,12 +151,9 @@ fn getcon(f: *Qbe.Fn, val: i64) Qbe.Ref = {
             return(CON(c));
         };
     };
-    // push
-    c := f.ncon.zext();
-    f.ncon += 1;
-    f.con&.grow(f.ncon.zext());
-    f.con[c] = (type = .CBits, bits = (i = val));
-    CON(c)
+
+    push(f.con&, f.ncon&, (type = .CBits, bits = (i = val)));
+    CON(f.ncon.zext() - 1)
 }
 
 // TODO: call this from elsewhere
@@ -251,16 +245,12 @@ fn addins(pvins: *QList(Qbe.Ins), pnins: *i64, i: Qbe.Ins) void #inline =
 
 fn addins(pvins: *QList(Qbe.Ins), pnins: *i64, i: *Qbe.Ins) void #inline = {
     if i.op() != .nop {
-        pnins[] += 1;
-        pvins.grow(pnins[]);
-        pvins[][pnins[] - 1] = i[];
+        push(pvins, pnins, i[]);
     };
 }
 
 fn push(b: *Qbe.Blk, i: Qbe.Ins) void #inline = {
-    b.ins&.grow(b.nins.zext() + 1);
-    b.ins[b.nins.zext()] = i;
-    b.nins += 1;
+    push(b.ins&, b.nins&, i);
 }
 
 fn append(dest: *QList(Qbe.Ins), dest_len: *i64, src_start: *Qbe.Ins, src_end: *Qbe.Ins) void = {
@@ -285,7 +275,7 @@ fn append(dest: *QList(Qbe.Ins), dest_len: *i64, src_start: *Qbe.Ins, src_end: *
 }
 
 fn addbins(b: *Qbe.Blk, pvins: *QList(Qbe.Ins), pnins: *i64) void = 
-    append(pvins, pnins, b.ins.first, b.ins.index(b.nins.zext()));
+    append(pvins, pnins, b.ins.first, b.ins.index_unchecked(b.nins.zext()));
 
 // we try to line up the opcode numbers so you can branchlessly convert between categories (ie. load<->ext, par<->ext)
 fn rebase(value: Qbe.O, new_base: Qbe.O, old_base: Qbe.O) Qbe.O = 
@@ -540,7 +530,7 @@ fn debug_zero_owned_memory(v: *QListHeader) void = {
     len := v.cap * v.esz;
     p := ptr_cast_unchecked(@type v, u8, v.offset(1));
     JUNK :: 0xAB;
-    p.slice(len).set_bytes(JUNK);
+    //p.slice(len).set_bytes(JUNK);
 }
 
 fn vfree(p: rawptr) void = {
@@ -611,14 +601,27 @@ fn QList($T: Type) Type = {
     // TODO: bounds checking but its hard as long as i have to keep qbe's memory layout because the fields aren't together. 
     //       and anyway it would be sad to add alignment padding just for bounds checks. 
     
-    fn index(s: Self, i: i64) *T #inline = 
-        s.first.offset(i);
+    header :: fn(s: Self) *QListHeader = {
+        v := ptr_cast_unchecked(T, QListHeader, s.first);
+        v.offset(-1)
+    };
     
+    fn index(s: Self, i: i64) *T = {
+        @safety(.Bounds) s.header()[].cap > i;
+        s.first.offset(i)
+    }
+    
+    fn index_unchecked(s: Self, i: i64) *T = {
+        s.first.offset(i)
+    }
+
     fn index(s: *Self, i: i64) *T #inline = 
-        s.first.offset(i);
+        s[].index(i);
     
     fn slice(self: Self, start: i64, end: i64) []T #inline = {
-        (ptr = self.first.offset(start), len = end - start)
+        @if(::safety_check_enabled(.Bounds)) if(start == end, => return(empty()));  // HACK
+        @safety(.Bounds) self.header()[].cap >= end;
+        (ptr = self.index(start), len = end - start)
     }
     
     fn push(self: *Self, count: *i64, t: T) void #inline = {
@@ -630,6 +633,12 @@ fn QList($T: Type) Type = {
     fn push(self: *Self, count: *u32, t: T) void #inline = {
         self.grow(count[].zext() + 1);
         self[count[].zext()] = t;
+        count[] += 1;
+    }
+    
+    fn push(self: *Self, count: *i32, t: T) void #inline = {
+        self.grow(count[].intcast() + 1);
+        self[count[].intcast()] = t;
         count[] += 1;
     }
     
@@ -798,7 +807,7 @@ fn for_blocks_rpo_forward(f: *Qbe.Fn, $body: @Fn(b: *Qbe.Blk) void) void = {
 // because the body is allowed to consume multiple instructions by offsetting the pointer. 
 // This is needed because the ir uses a vairable length encoding (for blit, call, args).
 fn for_insts_rev(b: *Qbe.Blk, $body: @Fn(i: **Qbe.Ins) void) void = {
-    i := b.ins.index(b.nins.zext());
+    i := b.ins.index_unchecked(b.nins.zext());
     while => !i.identical(b.ins.first) {
         i = i.offset(-1);
         body(i&);
@@ -808,7 +817,7 @@ fn for_insts_rev(b: *Qbe.Blk, $body: @Fn(i: **Qbe.Ins) void) void = {
 
 fn for_insts_forward(b: *Qbe.Blk, $body: @Fn(i: *Qbe.Ins) void) void = {
     i := b.ins.first;
-    while => !i.identical(b.ins.index(b.nins.zext())) {
+    while => !i.identical(b.ins.index_unchecked(b.nins.zext())) {
         body(i);
         i = i.offset(1);
     };
@@ -897,9 +906,7 @@ fn add_padding(fields: *QList(Qbe.Field), nfield: *i64, current_size: *i64, targ
     pad := target_size - current_size[];
     @debug_assert(pad >= 0, "trying to pad struct to smaller size");
     if pad > 0 {
-        fields.grow(nfield[]);
-        fields[][nfield[]] = (type = .FPad, len = pad.trunc());
-        nfield[] += 1;
+        push(fields, nfield, (type = .FPad, len = pad.trunc()));
     };
 }
 
@@ -907,9 +914,7 @@ fn add_padding(fields: *QList(Qbe.Field), nfield: *i64, current_size: *i64, targ
 fn new_type(m: *QbeModule, type: Qbe.Typ) i64 = {
     lock(m.types_mutex&);
     i := m.number_of_types;
-    m.number_of_types += 1;
-    m.types.grow(m.number_of_types);
-    m.types[i] = type;
+    push(m.types, m.number_of_types&, type);
     unlock(m.types_mutex&);
     i
 }

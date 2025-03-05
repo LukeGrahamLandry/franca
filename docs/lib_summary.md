@@ -17,6 +17,7 @@ available to every program (you can access them with `import()` or `#use`).
 - sys
   - sync
     - mutex
+- dynamic_lib
 
 ## backend
 

@@ -19,7 +19,7 @@ fn BlockAllocImpl($block_sizes: []i64) Type = {
     fn borrow(self: *Self) Alloc = 
         (data = Self.raw_from_ptr(self), vptr = allocator_fn);
     
-    allocator_fn :: fn(self: rawptr, action: AllocatorAction, ptr: rawptr, count: i64, align: i64) rawptr = {
+    allocator_fn :: fn(self: rawptr, action: AllocatorAction, ptr: rawptr, count: i64, align: i64) []u8 = {
         self := Self.ptr_from_raw(self);
         if action == .Allocate {
             size_index := size_index_for(count) || return(self.parent.alloc_raw(count, align));
@@ -35,10 +35,11 @@ fn BlockAllocImpl($block_sizes: []i64) Type = {
             // fallthrough
         };
         
-        rawptr.zeroed()
+        empty()
     };
     
-    fn next_block(self: *Self, size_index: i64) rawptr = {
+    fn next_block(self: *Self, size_index: i64) []u8 = {
+        size := block_sizes[size_index];
         first := 0.rawptr_from_int();
         with self.mutex& {
             slot  := self.free_lists&.index(size_index);
@@ -47,7 +48,7 @@ fn BlockAllocImpl($block_sizes: []i64) Type = {
                 // The list is empty so we need to ask for more memory. 
                 page := self.parent.alloc(u8, page_size());
                 first = u8.raw_from_ptr(page.ptr);
-                slot[] = first.offset(block_sizes[size_index]);
+                slot[] = first.offset(size);
             } else {
                 // Pop this off the free list. 
                 // If this is the last entry in the free list but it's not at the end of it's page, 
@@ -64,7 +65,7 @@ fn BlockAllocImpl($block_sizes: []i64) Type = {
                 slot[] = next;
             };
         };
-        first
+        (ptr = u8.ptr_from_raw(first), len = size)
     }
     
     fn free_block(self: *Self, size_index: i64, ptr: rawptr) void = {

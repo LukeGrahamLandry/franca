@@ -33,19 +33,19 @@ fn new_arena_chunk(allocator: Alloc, size: i64, prev: ?*ArenaHeader, making_new_
 
 ENABLE_ASK_OWNERSHIP :: false;
 
-arena_allocator_fn :: fn(self: rawptr, action: AllocatorAction, ptr: rawptr, count: i64, align: i64) rawptr = {
+arena_allocator_fn :: fn(self: rawptr, action: AllocatorAction, ptr: rawptr, count: i64, align: i64) []u8 = {
     // note: we can't use @match yet... (because of printing i guess?) // TODO: check again now that ast_alloc is in the compiler
     if action == AllocatorAction.Allocate {
-        return(arena_alloc(self, count, align));
+        return(ptr = u8.ptr_from_raw(arena_alloc(self, count, align)), len = count);
     };
     @if(ENABLE_ASK_OWNERSHIP) {
         if action == AllocatorAction.DoYouOwnThisPointer {
-            return(arena_owns(self, ptr).to_raw());
+            return(ptr = u8.ptr_from_int(0), len = arena_owns(self, ptr).to_raw());
         };
     };
     
     // Free is Noop
-    rawptr.zeroed()
+    empty()
 };
 
 // TODO: test this
@@ -102,12 +102,8 @@ arena_alloc :: fn(raw_self: rawptr, size: i64, align: i64) rawptr = {
     };
     
     loop {
+        self.start = align_to(self.start, align);
         end  := self.start + size;
-        extra := self.start.bit_and(align - 1);
-        if extra != 0 {
-            end += align - extra;
-            self.start += align - extra;
-        };
         
         if end <= self.end {
             ptr := ptr_cast_unchecked(From = ArenaHeader, To = u8, ptr = chunk);
@@ -299,15 +295,11 @@ fn bake_relocatable_value(self: *ArenaAlloc) Slice(BakedEntry) = {
 todo_allocator: Alloc : (data = 0.rawptr_from_int(), vptr = todo_allocator_fn);
 
 // TODO: respect alignment. but im pretty sure malloc always gives you 16 bits and mostly good enough. 
-todo_allocator_fn :: fn(_: rawptr, action: AllocatorAction, ptr: rawptr, count: i64, align: i64) rawptr = { 
+todo_allocator_fn :: fn(_: rawptr, action: AllocatorAction, ptr: rawptr, count: i64, align: i64) []u8 = { 
     act := @as(i64) action;
-    ::if(rawptr);
     // Note: we can't use @match yet! because this is comptime ast_alloc rn
-    if act == 0 {
-        a := general_allocator();
-        f := a.vptr;
-        f(a.data, action, ptr, count, align)
-    } else {
-        0.rawptr_from_int()
-    }
+    if(act != 0, => return(empty()));
+    a := general_allocator();
+    f := a.vptr;
+    f(a.data, action, ptr, count, align)
 };

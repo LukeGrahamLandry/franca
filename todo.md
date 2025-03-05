@@ -7,6 +7,8 @@
 
 ##
 
+- 1331 relocations seems like a lot
+- ask the os for the correct page size
 - hello_va doesn't work on linux??
 - compile all the examples in run_tests: aoc, the gui programs, old_backend, bf 
 - make sure all the allocators respect required alignment 

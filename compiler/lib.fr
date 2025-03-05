@@ -17,10 +17,11 @@
 #include_std("compiler/worker.fr");
 #include_std("compiler/jit.fr");
 
-#include_std("lib/crash_report.fr");
 #use("@/lib/collections/bit_set.fr");
 #use("@/lib/collections/map.fr");
 #include_std("backend/lib.fr");
+
+Crash :: import("@/lib/crash_report.fr");
 
 // TODO: don't individually allocate all these. 
 SelfHosted :: @rec @struct(
@@ -45,7 +46,7 @@ SelfHosted :: @rec @struct(
     legacy_indirection: Compiler = Compiler.zeroed(),
     vtable: *ImportVTable,
     stack_base: i64,
-    comptime_libraries: HashMap(Symbol, DlHandle),
+    comptime_libraries: HashMap(Symbol, Dyn.Handle),
     comptime_codegen: *CodegenShared,
     dyncalls: HashMap(FnType, DynCallShim),
     pending_took_pointer: List(Ty(FuncId, u32)),  // (_, symbol)
@@ -56,7 +57,7 @@ SelfHosted :: @rec @struct(
     scopes_generation := 0,
     other_module: ?*QbeModule,
     stack_trace_last_callee: ?FuncId, // bleh
-    backtrace_node: *LocationResolverNode,
+    backtrace_node: *Crash.LocationResolverNode,
 );
 
 OverloadKey :: @struct(arg: Type, req: Type);
@@ -129,21 +130,15 @@ fn load_file_in_compiler(vtable: *ImportVTable, path: Str, opts: *BuildOptions) 
     (Ok = c)
 }
 
-// TODO:
-// dlopen() isn't actually a magic operating system thing, i could do my own version of it 
-// (like examples/macho_loader.fr but for dylibs), but on macos they won't actually give you 
-// the files for the system libraries so we can't get a libc unless you link a libc. 
-// 
+Dyn :: import("@/lib/dynamic_lib.fr");
 
 fn run_franca_file(vtable: *ImportVTable, path: Str) CRes(void) = {
     F :: @FnPtr(*ImportVTable) void;
     callee: ?F = .None;
     
-    @if(is_linking_libc()) if !path.ends_with(".fr") {
-        handle := dlopen(maybe_borrow_cstr(path, temp()), .Lazy); 
-        if !handle.lib.is_null() {
-            ref := dlsym(handle, "driver");
-            @assert(!ref.is_null(), "opened '%' as shared library but failed to get symbol 'driver'", path);
+    if !path.ends_with(".fr") {
+        if Dyn'open(path) { handle |
+            ref := handle.get("driver") || @panic("opened '%' as shared library but failed to get symbol 'driver'", path);
             @println("Loaded precompiled driver '%'", path);
             callee = (Some = ptr_cast_unchecked(rawptr, F, ref&)[]);
         };
@@ -394,11 +389,8 @@ fn init_self_hosted(opts: *BuildOptions) *SelfHosted = {
     };
 
     // :MultiDylibLibc HACK  TODO: need a first class way to talk about one logical library that's split into multiple files. 
-    @if(is_linking_libc())
     enumerate find_os_libc_dylib() { i, libc_path |
-        libc_path := libc_path[].maybe_borrow_cstr(temp()); 
-        libc := dlopen(libc_path, .Lazy);
-        if !libc.lib.is_null() { 
+        if Dyn'open(libc_path[]) { libc |
             name := u8.list(self.get_alloc());
             name&.push_all("libc");
             range(0, i) { _ |

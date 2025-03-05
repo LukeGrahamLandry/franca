@@ -20,7 +20,7 @@ Alloc :: @struct(data: rawptr, vptr: AllocatorFn);
 // It's not how zig does it tho so maybe there's a reason this is worse... odin does it this way tho so it's probably fine. 
 // You save a load of the vtable and add a branch.
 // There are nice wrapper functions that deal with martialing the arguments to this.  
-AllocatorFn :: @FnPtr(self: rawptr, action: AllocatorAction, ptr: rawptr, count: i64, align: i64) rawptr;
+AllocatorFn :: @FnPtr(self: rawptr, action: AllocatorAction, ptr: rawptr, count: i64, align: i64) []u8;
 
 AllocatorAction :: @enum(i64) (
     Allocate = 0,
@@ -30,12 +30,12 @@ AllocatorAction :: @enum(i64) (
 ::enum(AllocatorAction);
 
 fn alloc(allocator: Alloc, $T: Type, count: i64) Slice(T) #generic #inline = {
-    ptr   := alloc_raw(allocator, count * :: T.size_of(), :: T.align_of());
-    (ptr = T.ptr_from_raw(ptr), len = count)
+    mem := alloc_raw(allocator, count * :: T.size_of(), :: T.align_of());
+    (ptr = ptr_cast_unchecked(u8, T, mem.ptr), len = count)
 }
 
-fn alloc_raw(allocator: Alloc, bytes: i64, align: i64) rawptr = {
-    if(bytes == 0, => return(:: 0.rawptr_from_int()));
+fn alloc_raw(allocator: Alloc, bytes: i64, align: i64) []u8 = {
+    if(bytes == 0, => return(empty()));
     {allocator.vptr}(allocator.data, .Allocate, rawptr_from_int(0), bytes, align)
 }
 
@@ -73,28 +73,28 @@ MemoryOwnership :: @enum(i64) (Maybe, Yes, No, Free); :: from_raw(MemoryOwnershi
 // TODO: flag to disable this at comptime for smaller binaries because dead code can't remove impls from allocators because its dynamiclu done.
 owns_memory :: fn(allocator: Alloc, $T: Type, ptr: *T) MemoryOwnership #generic = {
     ptr := T.raw_from_ptr(ptr);
-    result := {allocator.vptr}(allocator.data, .DoYouOwnThisPointer, ptr, 0, 0).int_from_rawptr();
+    result := {allocator.vptr}(allocator.data, .DoYouOwnThisPointer, ptr, 0, 0).len;
     from_raw(result).or(=> .Maybe)
 };
 
 libc_allocator: Alloc : (data = 0.rawptr_from_int(), vptr = libc_allocator_fn);
 
-libc_allocator_fn :: fn(_: rawptr, action: AllocatorAction, ptr: rawptr, count: i64, align: i64) rawptr = {
+libc_allocator_fn :: fn(_: rawptr, action: AllocatorAction, ptr: rawptr, count: i64, align: i64) []u8 = {
     @match(action) {
         // TODO: respect alignment. but im pretty sure malloc always gives you 16 bytes and mostly good enough. 
         //       should do what zig does tho https://github.com/ziglang/zig/blob/master/lib/std/heap.zig#L57
-        fn Allocate() => malloc(count);
+        fn Allocate() => (ptr = u8.ptr_from_raw(malloc(count)), len = count);
         fn Deallocate() => {
             free(ptr);
-            0.rawptr_from_int()
+            empty()
         }
-        fn DoYouOwnThisPointer() => MemoryOwnership.Maybe.to_raw();
+        @default => empty();
     }
 };
 
 // TODO: :sema_regression switch to match when i fix v2 `early return before ret type infered (could try more aggressivly in handle_compile_body)`
 // TODO: respect alignment. but im pretty sure malloc always gives you 16 bytes and that's almost always good enough. 
-page_allocator_fn :: fn(_: rawptr, action: AllocatorAction, ptr: rawptr, size: i64, align: i64) rawptr = {
+page_allocator_fn :: fn(_: rawptr, action: AllocatorAction, ptr: rawptr, size: i64, align: i64) []u8 = {
     action := @as(i64) action;
     ::if(rawptr);
     if action == 0 {
@@ -108,17 +108,16 @@ page_allocator_fn :: fn(_: rawptr, action: AllocatorAction, ptr: rawptr, size: i
             //println(get_errno());  // TODO: ugly
             panic("mmap failed");
         };
-        return(ptr);
+        return(ptr = u8.ptr_from_raw(ptr), len = align_to(size, page_size()));
     };
     if action == 1 {
         /// SAFETY: EASY: 'arr' must be from 'os_alloc', only passed to this function once, and never accessed again. 
         ///         HARD: If you're careful, its fine to split an allocation from 'os_alloc' and release seperate pages at different times. 
         res := munmap(ptr, size);
         assert(res.value.eq(0), "munmap failed");
-        return(0.rawptr_from_int())
+        return(empty())
     };
-    
-    0.rawptr_from_int()
+    empty()
 };
 
 /// This requests new pages from the operating system on *every* allocation. 
@@ -174,11 +173,11 @@ boxed :: fn(a: Alloc, $T: Type, t: T) *T #generic = {
 //
 // Can use this when you know a List won't need to grow. 
 panicking_allocator: Alloc : (data = 0.rawptr_from_int(), vptr = panicking_allocator_fn);
-panicking_allocator_fn :: fn(_: rawptr, action: AllocatorAction, ptr: rawptr, count: i64, align: i64) rawptr = {
+panicking_allocator_fn :: fn(_: rawptr, action: AllocatorAction, ptr: rawptr, count: i64, align: i64) []u8 = {
     @match(action) {
         fn Allocate()   => @panic("Tried to allocate % bytes with panicking_allocator", count);
-        fn DoYouOwnThisPointer() => MemoryOwnership.No.to_raw();
-        @default => rawptr.zeroed();
+        fn DoYouOwnThisPointer() => (ptr = u8.ptr_from_int(0), len = MemoryOwnership.No.raw());
+        @default => empty();
     }
 };
 

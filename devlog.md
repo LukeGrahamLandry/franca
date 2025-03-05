@@ -1,4 +1,4 @@
-##
+## (Mar 5)
 
 - clone3 syscall so don't need pthread_create on linux. so many flags. 
 just getting -22 which is sad cause the man page has a very very long list of things that give EINVAL,
@@ -24,6 +24,26 @@ try either (1) rebuilding your program using the linker flags:
 -static -Wl,-z,common-page-size=65536,-z,max-page-size=65536 
 or (2) using `blink -m` to disable the linear memory optimization
 ```
+
+just need to align my segment sizes to 64k. 
+now without -m i can jit hello world in 1.2 seconds. 
+not quite the 4x i was promised but still nice. 
+maybe it really really hates self modifying code? 
+
+yeah looking in the profiler: you want all the time with g_code at the top of the stack, 
+that's the buffer they jit code into. on the backend thread that's just a normal program it's 70% g_code. 
+on the frontend thread that does comptime execution, it's 46% OnFatalSystemSignal. 
+ConvertToHostAddress is super slow and they do it twice on the same address: FixXnuSignal and then IsSelfModifyingCodeSegfault.
+
+>  5 files changed, 20 insertions(+), 14 deletions(-)
+and now it's 18% only in OnFatalSystemSignal, and my program takes 1.0s.
+now the self compile gets to the crash in 24s instead of 41s, oh boy. 
+
+- what if i just catch the illegal instruction signal and ignore it when jitting for arm and then i don't have to care about the caches so much? 
+- memory safety police: added bounds checking on QList.cap. founds stupid mistake in add_padding. 
+- seems like a good idea to let the allocator interface return how much memory it actually gave you, 
+so for block based ones, expandable collections can use the extra capacity. 
+doesn't help me because i almost always use arenas. 
 
 ## (Mar 4)
 
