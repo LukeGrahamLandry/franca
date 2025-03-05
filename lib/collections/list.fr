@@ -34,7 +34,7 @@ fn list($T: Type, cap: i64, a: Alloc) List(T) #generic = {
 fn fixed_list();
 
 fn List($T: Type) Type = {
-    Self :: @struct(maybe_uninit: Slice(T), len: i64, gpa: Alloc, E :: T);
+    Self :: @struct(maybe_uninit: Slice(T), len: i64, gpa: Alloc, Element :: T);
     fn list(cap: i64, gpa: Alloc) Self #inline = 
         (maybe_uninit = gpa.alloc(T, cap), len = 0, gpa = gpa);  // todo: no alloc if len 0 since i dont free
     fn list(gpa: Alloc) Self #inline = list(0, gpa);
@@ -287,7 +287,7 @@ fn reserve_expand_erased(list: rawptr, extra: i64, size_of: i64) void = {
 // This is like zigs ArrayListUnmanaged, so you don't have to store a billion copies of the same allocator. 
 // Originally it carefully matched rust's abi and its a pain to change now so that's why the fields are in a strange order. TODO: fix eventually. 
 fn RawList($T: Type) Type = {
-    Self :: @struct(cap: i64, ptr: *T, len: i64, E :: T);
+    Self :: @struct(cap: i64, ptr: *T, len: i64, Element :: T);
    
     fn init(a: Alloc, cap: i64) Self = {
         m := a.alloc(T, cap);
@@ -354,16 +354,6 @@ fn RawList($T: Type) Type = {
         self.len = i;
     }
     
-    fn deep_clone(self: *Self, a: Alloc) Self = {
-        @if(!T.has_pointers(), { self.items().clone(a).as_raw() }, {
-            s: List(T) = list(self.len, a);
-            s.len = self.len;
-            enumerate self { i, e |
-                s[i] = e.deep_clone(a);
-            };
-            s.as_raw()
-        })
-    }
     fn add_unique(self: *Self, t: T, in: Alloc) void = {
         s := self[].assume_owned(in);
         s&.add_unique(t);
@@ -402,6 +392,12 @@ fn RawList($T: Type) Type = {
     }
     
     Self
+}
+
+#where(PointerTo(IsCollection(RawList)))
+fn deep_clone(self: ~S, a: Alloc) Deref(S) = {
+    s := self.items();
+    s&.deep_clone(a).as_raw_list()
 }
 
 // TODO: this is really inefficient if you already own 'a'

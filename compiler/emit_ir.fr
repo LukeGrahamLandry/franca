@@ -100,8 +100,6 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, id
         };
         self.f.lnk.export = export;
         
-        entry := self.entry; // HACK because of how im doing imports below. 
-        
         if res&.is_err() {
             res.Err.update_main_span(self.last_loc);
             result = (Err = res.Err)
@@ -111,18 +109,14 @@ fn emit_ir(comp: CompCtx, shared: *CodegenShared, f: FuncId, when: ExecStyle, id
                 func.set_flag(.NoContext);
             };
             
-            // This is a bit painful, you want consistant order and to be working on the function on the other thread while we're setting up the constants. 
-            // you want to do new_constants on this thread so the other one never has to touch the CompCtx. 
-            entry2 := zeroed(*CodegenEntry);
-            if self.new_constants.len != 0 {
-                entry2 = bouba_acquire(shared, idx);
-                self.new_constants = self.new_constants.items().clone(entry2.arena&.borrow());
-            };
-            @if_let(entry.task) fn Func(it) => {
+            @if_let(self.entry.task) fn Func(it) => {
                 sync_driver_message(comp.data.cast()[][], (EmitIrEnd = (when = when, fid = f, ir_data = Qbe.Fn.raw_from_ptr(it), ir_type = Flag.self.ident())));
             };
-            enqueue_task(shared, entry);
+            enqueue_task(shared, self.entry);
+            
             if self.new_constants.len != 0 {
+                entry2 := bouba_acquire(shared, idx);
+                self.new_constants = self.new_constants.items().clone(entry2.arena&.borrow());
                 push_dynamic_context {
                     context(DefaultContext)[].temporary_allocator = entry2.arena&;
                     out := Qbe.Dat.list(self.new_constants.len * 4, temp());

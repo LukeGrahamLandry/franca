@@ -4,7 +4,6 @@ fn each();
 fn enumerate();
 fn get();
 fn set();
-fn fill();
 fn subslice();
 fn index();
 fn slice();
@@ -54,7 +53,7 @@ fn single();
 
 // :blessed: String literals and @slice create values of this type. 
 fn Slice($T: Type) Type = {
-    Self :: @struct(ptr: *T, len: i64);
+    Self :: @struct(ptr: *T, len: i64, Element :: T);
     
     ::ptr_utils(T);
     
@@ -80,7 +79,6 @@ fn Slice($T: Type) Type = {
     fn index_unchecked(self: Self, i: i64) *T = 
         self.ptr.offset(i);
     
-    
     ::DeriveIndexable(Self, T);
     ::DeriveIndexable(*Self, T); 
     
@@ -101,22 +99,14 @@ fn Slice($T: Type) Type = {
     fn subslice(self: Self, first: i64, count: i64) Self #inline = 
         self.slice(first, first.add(count));
     
-    
     fn rest(self: Self, first: i64) Self #inline = 
         self.slice(first, self.len());
-    
     
     fn slice_last(self: Self, count: i64) ?Self = {
         ::if(?Self);
         if(self.len < count, => .None) {
             (Some = self.slice(self.len.sub(count), self.len))
         }
-    }
-    
-    fn slice_pop_first(self: Self) Self = {
-        self.ptr = self.ptr.offset(1);
-        self.len -= 1;
-        self
     }
     
     fn interpret_as_bytes(self: Self) []u8 = {
@@ -145,16 +135,6 @@ fn Slice($T: Type) Type = {
     fn bake_relocatable_value(self: *Self) Slice(BakedEntry) = 
         bake_relocatable_slice_erased(T.raw_from_ptr(self.ptr), self.len, T);
         
-    fn deep_clone(self: *Self, a: Alloc) Self = {
-        s := self[].shallow_copy(a);
-        @if(T.has_pointers()) {
-            enumerate self { i, e |
-                s[i] = e.deep_clone(a);
-            };
-        };
-        s
-    }
-    
     fn shallow_copy(self: Self, a: Alloc) Self = {
         buf := a.alloc(T, self.len);
         buf.copy_from(self);
@@ -164,7 +144,31 @@ fn Slice($T: Type) Type = {
     Self
 }
 
+IsSlice :: IsCollection(Slice);
+PointerTo :: fn($Inner: @Fn(t: Type) bool) = (fn(T: Type) = is_ptr(T) && Inner(Deref(T)));
+IsCollection :: fn($Inner: @Fn(e: Type) Type) = (fn(T: Type) bool = {
+    check :: fn($T: Type) Type = Inner(T.Element);
+    has_const_field(T, @symbol Element) && invoke_specialized(Type, Type, check, T) == T
+});
+
+fn slice_pop_first(self: ~T) T #where(IsSlice) = {
+    self.ptr = self.ptr.offset(1);
+    self.len -= 1;
+    self
+}
+
 fn shallow_copy();
+
+fn deep_clone(self: ~S, a: Alloc) Deref(S) #where(PointerTo(IsSlice)) = {
+    T :: Deref(S).Element;
+    s := self[].shallow_copy(a);
+    @if(T.has_pointers()) {
+        enumerate self { i, e |
+            s[i] = e.deep_clone(a);
+        };
+    };
+    s
+}
 
 // TODO: make compile error here show the right location. 
 fn bake_relocatable_slice_erased(addr: rawptr, length: i64, T: Type) []BakedEntry = {
@@ -506,13 +510,6 @@ fn DeriveIndexable($Self: Type, $T: Type) void = {
     
     fn ne(lhs: Self, rhs: Self) bool #inline = 
         !lhs.eq(rhs);
-    
-    /// Set all elements of the slice to 't'. 
-    fn fill(self: Self, t: T) void = {
-        each(self){ ptr |
-            ptr[] = t;
-        };
-    }
     
     fn last(self: Self) ?*T = {
         ::if(?*T);

@@ -1,3 +1,11 @@
+## (Mar 4)
+
+- don't depend on pthread_cond_t. 
+just count how many slots are free and then you know you only need 
+to sleep/signal when the count gets to one end of the range. 
+clean up the stuff with scanning through the queue, just strictly only take one entry at a time. 
+- start using #where for a few functions that are only called with simple argument expressions. 
+- fix get_constant safety check when the type had no constant fields at all 
 
 ## (Mar 3)
 
@@ -8,7 +16,6 @@
   - fix the cls used with O.load in sysv return (great! this was a real bug!)
 - don't ask the os in query_current_arch. 
 - implement some other asm test for x64: multistack, truncate_to_byte, 
-
 
 ## (Mar 2)
 

@@ -51,7 +51,6 @@ fn call_dynamic_values(self: *SelfHosted, f_ptr: i64, f_ty: FnType, args_value: 
     result
 }
 
-// :Wait
 fn wait_for_symbol(shared: *CodegenShared, id: u32) rawptr = {
     symbol_is_ready :: fn(shared: *CodegenShared, s: u32) bool #inline = {
         r := false;
@@ -63,15 +62,15 @@ fn wait_for_symbol(shared: *CodegenShared, id: u32) rawptr = {
     
     @if(use_threads) {
         zone := zone_begin(.Wait);
-    
-        c := shared.kiki_progress_c&;
-        m := shared.progress_m&;
-        pthread_mutex_lock(m).unwrap();
-        while => !symbol_is_ready(shared, id) {
-            pthread_cond_signal(shared.bouba_progress_c&);
-            pthread_cond_wait(c, m).unwrap();
+        
+        u32.atomic_set(shared.waiting_for_symbol&, 1);
+        prev := shared.waiting_for_bouba;
+        while => prev != codegen_queue_size && !symbol_is_ready(shared, id) {
+            Futex'wait(shared.waiting_for_bouba&, prev);
+            prev = shared.waiting_for_bouba;
         };
-        pthread_mutex_unlock(m).unwrap();
+        u32.atomic_set(shared.waiting_for_symbol&, 0);
+    
         zone_end(zone);
     };
     

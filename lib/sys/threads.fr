@@ -3,8 +3,6 @@
 // the others are always done by reference so just have to be the larger of the two sizes. 
 Thread :: @struct(opaque: rawptr);
 ThreadAttr :: @struct(sig: i64, opaque: Array(u8, 56));
-PMutex :: @struct(sig: i64, opaque: Array(u8, 56));
-PCond :: @struct(sig: i64, opaque: Array(u8, 40));
 
 fn start_thread($T: Type, callee: @FnPtr(userdata: *T) void, userdata: *T) Thread #generic = {
     stack := page_allocator.alloc(u8, 1.shift_left(25));
@@ -68,9 +66,12 @@ franca_runtime_init_thread :: fn(franca_userdata: rawptr) void = {
 // This is kinda sad cause there's one cpu instruction to do it but 
 // it'd rather just implement the super atomic you can do everything 
 // with than all the special cases. 
-fn atomic_inc($T: Type, p: *T) T #generic #inline = {
-    cas(T, p, fn(old) => old + 1)
+fn atomic_add($T: Type, p: *T, delta: T) T #generic #inline = {
+    cas(T, p, fn(old) => old + delta)
 }
+
+fn atomic_inc($T: Type, p: *T) T #generic #inline = 
+    atomic_add(T, p, 1);
 
 fn atomic_set($T: Type, p: *T, new: T) T #generic #inline = {
     cas(T, p, fn(_) => new)
@@ -122,29 +123,5 @@ fn same_bits($T: Type, a: T, b: T) bool #generic = {
 fn pthread_attr_init(out: *ThreadAttr) voidResult #libc;
 fn pthread_create(out: *Thread, attr: *ThreadAttr, callee: @FnPtr(userdata: rawptr) void, userdata: rawptr) voidResult #libc #threads;
 fn pthread_attr_setstack(attr: *ThreadAttr, ptr: *u8, len: i64) voidResult #libc;
-fn pthread_mutex_init(mutex: *PMutex, todo_attr_pass_zero_for_now: i64) voidResult #libc;
-fn pthread_cond_signal(c: *PCond) voidResult #libc;
-fn pthread_cond_wait(c: *PCond, mutex: *PMutex) voidResult #libc;
-fn pthread_cond_timedwait(c: *PCond, mutex: *PMutex, abstime: *TimeSpec) voidResult #libc;
-fn pthread_cond_init(c: *PCond, todo_attr_pass_zero_for_now: i64) voidResult #libc;
-fn pthread_mutex_unlock(m: *PMutex) voidResult #libc;
-fn pthread_mutex_lock(m: *PMutex) voidResult #libc;
-fn pthread_mutex_destroy(m: *PMutex) voidResult #libc;
 fn pthread_getcpuclockid(thread: Thread, clock_id_out: *i32) voidResult #libc;
 fn pthread_join(thread: Thread, value_ptr: *rawptr) voidResult #libc;
-
-fn lock(self: *PMutex) void = {
-    @if(!use_threads) return();
-    pthread_mutex_lock(self).unwrap();
-}
-
-fn unlock(self: *PMutex) void = {
-    @if(!use_threads) return();
-    pthread_mutex_unlock(self).unwrap();
-}
-
-fn with(self: *PMutex, $body: @Fn() void) void = {
-    self.lock();
-    body();
-    self.unlock();  // TODO: defer
-}
