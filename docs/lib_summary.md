@@ -18,6 +18,8 @@ available to every program (you can access them with `import()` or `#use`).
   - sync
     - mutex
 - dynamic_lib
+- arch
+  - jump
 
 ## backend
 

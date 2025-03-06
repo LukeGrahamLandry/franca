@@ -38,11 +38,10 @@ fn fixup_amd64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_rel
     local  := symbol.kind == .Local;
     @match(fixup.type) {
         fn DataAbsolute(it) => {
-            reloc := ptr_cast_unchecked(u8, rawptr, fixup.patch_at);
-            reloc[] = address.offset(it.increment);
+            rawptr.ptr_from_raw(fixup.patch_at)[] = address.offset(it.increment);
         }
         fn RipDisp32(it) => {
-            distance := ptr_diff(u8.raw_from_ptr(fixup.patch_at), address); // :size_of_displacement
+            distance := ptr_diff(fixup.patch_at, address); // :size_of_displacement
             if !local {
                 if (@is(self.goal.type, .Relocatable)) {
                     return(); // that's not my department
@@ -50,7 +49,7 @@ fn fixup_amd64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_rel
                 
                 if !it.call {
                     if self.debug["T".char()] {
-                        @fmt_write(self.debug_out, "# patch addr % refs %=%\n", u8.int_from_ptr(fixup.patch_at), address, symbol.name);
+                        @fmt_write(self.debug_out, "# patch addr % refs %=%\n", fixup.patch_at, address, symbol.name);
                     };
                 };
                 
@@ -58,7 +57,7 @@ fn fixup_amd64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_rel
                     // In .addr we assumed we could LEA to create the address but since it's an import, 
                     // it needs to be converted into a load from the GOT.
                     // this is super hacky. i feel like we could guess wrong since we're not decoding from the beginning. 
-                    opcode := fixup.patch_at.offset(-2); // [?rex:1, opcode:1, modrm:1, patch_at:offset:4]
+                    opcode := u8.ptr_from_raw(fixup.patch_at).offset(-2); // [?rex:1, opcode:1, modrm:1, patch_at:offset:4]
                     @assert(opcode[] == 0x8D || opcode[] == 0x8B, "only LEA can be converted to GOT load (for $%)", symbol.name);
                     opcode[] = 0x8B; // load
                     // TODO: need to make sure modrm is .Indirect00, .rbp
@@ -67,7 +66,7 @@ fn fixup_amd64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_rel
                     distance = ptr_diff(fixup.patch_at, got_addr);
                 } else {
                     if self.debug["T".char()] {
-                        @fmt_write(self.debug_out, "# patch call % calls %\n", u8.int_from_ptr(fixup.patch_at), symbol.name);
+                        @fmt_write(self.debug_out, "# patch call % calls %\n", fixup.patch_at, symbol.name);
                     };
                     if symbol.offset == -1 {
                         // create a new trampoline in the __stubs section. 
@@ -94,7 +93,7 @@ fn fixup_amd64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_rel
             } else {
                 if !it.call {
                     if self.debug["T".char()] {
-                        @fmt_write(self.debug_out, "# patch addr % refs '%' = %[%]\n", u8.int_from_ptr(fixup.patch_at), symbol.name, symbol.segment, symbol.offset);
+                        @fmt_write(self.debug_out, "# patch addr % refs '%' = %[%]\n", fixup.patch_at, symbol.name, symbol.segment, symbol.offset);
                     };
                 };
             };// early returns
@@ -102,7 +101,7 @@ fn fixup_amd64(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_rel
             size_of_displacement :: 4;
             distance -= size_of_displacement;
             @assert_lt(distance.abs(), MAX_i32, "can't reference that far");
-            ptr_cast_unchecked(u8, u32, fixup.patch_at)[] = distance.trunc() + it.increment;
+            u32.ptr_from_raw(fixup.patch_at)[] = distance.trunc() + it.increment;
         }
         @default => panic("amd64 unexpected fixup type");
     }
@@ -569,7 +568,7 @@ fn emitins(i: Qbe.Ins, e: *AmdState) void = {
                                     e.a&.push_u32(off.trunc());
                                 } else {
                                     // Otherwise this will get patched to a local or __stub call later. 
-                                    patch_at := e.a.maybe_uninit.ptr.offset(e.a.len + 1);
+                                    patch_at := u8.raw_from_ptr(e.a.maybe_uninit.ptr.offset(e.a.len + 1));
                                     fix: Fixup = (patch_at = patch_at, type = (RipDisp32 = (increment = c.bits.i.trunc(), call = true)));
                                     push_fixup(e.m, symbol, fix);
                                     e.a&.push(@as(u8) PrimaryOp.CallImm32); 
@@ -775,7 +774,7 @@ fn push_instruction(e: *AmdState, b: EncodedArgs, ops: []u8) void = {
                         write(e.m.debug_out, items(@format("# pending ref to '%'\n", symbol.name) temp()));
                     };
                 };
-                patch_at := e.a.maybe_uninit.ptr.offset(e.a.len);
+                patch_at := u8.raw_from_ptr(e.a.maybe_uninit.ptr.offset(e.a.len));
                 if symbol.kind != .Local || e.m.goal.type == .Relocatable {
                     push_fixup(e.m, symbol, (patch_at = patch_at, type = (RipDisp32 = (increment = off.trunc(), call = false))));
                 };

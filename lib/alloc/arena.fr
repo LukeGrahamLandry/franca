@@ -139,9 +139,8 @@ fn mark(self: *ArenaAlloc) ArenaMarker #inline = (chunk = self.chunk, start = se
 // remember, you can't do this if you acceppted an output allocator as a parameter because they might have passed you the temp allocator. 
 // # Safety: This invalidates any allocations in self before the corresponding call to mark. 
 // Memory is NOT returned to the backing allocator. 
-// TODO: safety check mode that writes over with garbage. 
 fn reset_retaining_capacity(self: *ArenaAlloc, mark: ArenaMarker) void = {
-    //self.debug_stomp_after(mark);
+    @if(SLOW_MEMORY_DEBUGGING) self.debug_stomp_after(mark);
     if mark.chunk.is_none() {
         self.reset_retaining_capacity();
         return();  
@@ -157,13 +156,12 @@ fn reset_retaining_capacity(self: *ArenaAlloc, mark: ArenaMarker) void = {
 // you can call this at the top of reset_retaining_capacity to reveal use-after-reset bugs more quickly,
 // at the cost of some performance. this should not change the behaviour of correct programs. 
 fn debug_stomp_after(self: *ArenaAlloc, mark: ArenaMarker) void = {
-    JUNK :: 0xAB;
     stomp_all :: fn(chunk) => stomp_some(chunk, ArenaHeader.size_of());
     stomp_some :: fn(chunk, clear_after) => {
         clear_after = max(clear_after, ArenaHeader.size_of());
         if chunk.used > clear_after {
             mem: []u8 = (ptr = ptr_cast_unchecked(ArenaHeader, u8, chunk).offset(clear_after), len = chunk.used - clear_after);
-            mem.set_bytes(JUNK);
+            mem.set_bytes(SLOW_MEMORY_JUNK);
             chunk.used = clear_after;
         };
     };
@@ -190,6 +188,11 @@ fn debug_stomp_after(self: *ArenaAlloc, mark: ArenaMarker) void = {
 fn reset_retaining_capacity(self: *ArenaAlloc) void = {
     if self.chunk { chunk |
         while => chunk.prev { c | 
+            @if(SLOW_MEMORY_DEBUGGING) {
+                S :: ArenaHeader.size_of();
+                mem: []u8 = (ptr = ptr_cast_unchecked(ArenaHeader, u8, chunk).offset(S), len = max(chunk.used - S, 0));
+                mem.set_bytes(SLOW_MEMORY_JUNK);
+            };
             chunk = c;
             chunk.used = ArenaHeader.size_of();
         };

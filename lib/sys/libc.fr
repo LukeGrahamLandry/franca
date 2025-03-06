@@ -15,10 +15,13 @@
 // TODO: deal with #syscall not setting errno. but really you want the reverse. returning the error as a value is more sane.
 // TODO: pipe function declarations through the driver program and have a demo where you diy ptrace.  
 
-fn LibcType(os: Os) Type #fold = @match(os) {
+MacosLibc :: import("@/lib/sys/macos.fr");
+LinuxLibc :: import("@/lib/sys/linux.fr");
+
+fn LibcType(os: Os) ScopeId #fold = @match(os) {
     fn macos() => MacosLibc;
     fn linux() => LinuxLibc;
-    fn wasip1() => Wasip1Libc;
+    fn wasip1() => panic("TODO: libc type wasi:");
 }
 
 // TODO: use my own verions for the ones that are just code not magic platform shit apple wont let me do. 
@@ -101,8 +104,6 @@ Terminos :: @struct(iflag: u64, oflag: u64, cflag: u64, lflag: u64, cc: Array(u8
 fn tcgetattr(fd: Fd, out: *Terminos) void #libc;
 fn tcsetattr(fd: Fd, optional_actions: i64, in: *Terminos) void #libc;
 
-fn sigaction(signum: SignalNum, nullable_act: *SigAction, nullable_oldact: *SigAction) voidResult #libc;
-
 // Eventually prefer calling clear_instruction_cache to do the right thing when the arch doesn't need this. 
 fn __clear_cache(beg: rawptr, end: rawptr) void #libc;
 
@@ -155,18 +156,6 @@ PollFds :: @struct(
     revents: u16,
 );
 
-SigAction :: @struct(
-    // on macos `sa_sigaction` is a union with `sa_handler: @FnPtr(s: i32) void`
-    sigaction: @FnPtr(s: i64, info: *SigInfo, ctx: *UContext) void,
-    mask: sigset_t,
-    flags: i32,
-    // "The sa_restorer field is not intended for application use. (POSIX does not specify a sa_restorer field.)"
-    // macos doesn't use this, but linux (musl) does so you it can't just be garbage (the value it puts in nullable_oldact should be preserved, not just garbage from the stack),
-    // doing this makes the `catch_signal` test not segsev. 
-    // but since its passed by pointer its fine if this struct is bigger than the os expects on macos. 
-    __sa_restorer := 0,
-);
-
 SigInfo :: @struct(
     signal_number: SignalNum,
     errno: i32,
@@ -178,91 +167,6 @@ SigInfo :: @struct(
     value: rawptr, // union with an int
     band: i64,
     __pad: Array(u64, 7),
-);
-
-// TODO: figure out layout on linux
-
-UContext :: @rec @struct(
-    onstack: i32,
-    sigmask: i32,
-    stack: SigAltStack,
-    link: *UContext,
-    mc_size: i64,  // size_of(mc[])
-    mc: *@union(arm64: Arm64MachineContext, amd64: Amd64MachineContext),
-);
-
-SigAltStack :: @struct(
-    sp: rawptr,
-    size: i64,
-    flags: i32,
-);
-
-Arm64MachineContext :: @struct(
-    exception: Arm64ExceptionContext, 
-    thread: Arm64ThreadState,
-    neon: Arm64NeonState,
-    // neon.fp is supposed to be an array of __uint128_t which is 16 byte aligned, 
-    // (and the offset happens to work out without the compiler knowing that) but 
-    // the whole struct's size needs to be a multiple of 16 to match `mc_size`. 
-    _align_padding := 0,
-);
-
-Arm64ExceptionContext :: @struct(
-    far: u64,
-    esr: u32,
-    exception: u32,
-);
-
-Arm64ThreadState :: @struct(
-    gp: Array(rawptr, 29),  // r0-r28
-    fp: rawptr,
-    lr: rawptr,
-    sp: rawptr,
-    pc: rawptr,
-    cpsr: u32,
-    flags: u32,
-);
-
-Arm64NeonState :: @struct(
-    fp: Array(Ty(f64, f64), 32),  // [32] __uint128_t
-    fpsr: u32,
-    fpcr: u32,
-);
-
-Amd64MachineContext :: @struct(
-    exception: Amd64ExceptionContext, 
-    thread: Amd64ThreadState,
-    float: Amd64FloatState,
-);
-
-Amd64ExceptionContext :: @struct(
-    trap: u16,
-    cpu: u16,
-    err: u32,
-    fault_addr: u64,
-);
-
-// note that the old registers are not in encoding order. 
-// why do we live in fucking crazy town bro? 
-Amd64ThreadState :: @struct(
-    rax: rawptr,
-    rbx: rawptr,
-    rcx: rawptr,
-    rdx: rawptr,
-    rdi: rawptr,
-    rsi: rawptr,
-    rbp: rawptr,
-    rsp: rawptr,
-    hi: Array(rawptr, 8), // r8-r15
-    rip: rawptr,
-    rflags: rawptr,
-    cs: rawptr,
-    fs: rawptr,
-    gs: rawptr,
-);
-
-Amd64FloatState :: @struct(
-    _todo: Array(u8, 1032 - 184),
 );
 
 pid_t :: i32;

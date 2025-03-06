@@ -79,7 +79,7 @@ FixupType :: @tagged(
 );
 
 Fixup :: @struct(
-    patch_at: *u8,
+    patch_at: rawptr,
     type: FixupType,
 );
 
@@ -247,7 +247,7 @@ fn emit_data_to_segment(self: *QbeModule, dat: *Qbe.Dat, seg: SegmentType) void 
                         ptr[] = int_from_rawptr(value._0) + dat.u.ref.off;
                     };
                     // Since we need the absolute address in memory, even local symbols need a relocation. 
-                    push_fixup(self, symbol, (patch_at = next[], type = (DataAbsolute = (increment = dat.u.ref.off))));
+                    push_fixup(self, symbol, (patch_at = u8.raw_from_ptr(next[]), type = (DataAbsolute = (increment = dat.u.ref.off))));
                     if self.goal.arch != .wasm32 && self.goal.type == .Relocatable && !symbol.local_but_marked_for_relocation {
                         lock(self.intern_mutex&);
                         self.local_needs_reloc&.push(id);
@@ -293,7 +293,8 @@ fn add_code_bytes(m: *QbeModule, name_id: u32, bytes: []u8) void = {
 
 // this sure does something. please run it so many times before trying to remove.
 fn fence() void #asm #aarch64 = (
-    @bits(0b11010101000000110011, 0b1111, 0b10111111),  // DMB SY
+    //@bits(0b11010101000000110011, 0b1111, 0b10111111),  // DMB SY
+    @bits(0b11010101000000110011, 0b1111, 0b10011111),  // DSB SY
     ret()
 );
 
@@ -335,8 +336,7 @@ fn put_jit_addr(self: *QbeModule, name: u32, addr: rawptr) void = {
     use_symbol(self, name) { symbol |
         @assert(symbol.kind == .Pending, "(put_jit_addr) redeclared symbol %: %", name, symbol.name);
         symbol.kind = .DynamicPatched;
-        symbol.jit_addr = addr;
-        self.do_fixups(u8.ptr_from_raw(addr), symbol);
+        self.do_fixups(addr, symbol);
     };
 }
 
@@ -365,7 +365,7 @@ fn fill_from_libc(self: *QbeModule) void = {
                 self.imports&.push(id); 
                 if lib.get(symbol.name) { found |
                     symbol.kind = .DynamicPatched;
-                    self.do_fixups(u8.ptr_from_raw(found), symbol);
+                    self.do_fixups(found, symbol);
                 };
             };
         };
@@ -421,9 +421,9 @@ fn do_jit_fixups(self: *QbeModule, id: u32, segment: SegmentType, final_offset: 
 }
 ::tagged(FixupType);
 
-fn do_fixups(self: *QbeModule, address: *u8, symbol: *SymbolInfo) void = {
+fn do_fixups(self: *QbeModule, address: rawptr, symbol: *SymbolInfo) void = {
     assert(!self.fixups_locked, "you cannot add more fixups after emitting for aot");
-    symbol.jit_addr = u8.raw_from_ptr(address);  
+    symbol.jit_addr = address;  
     if self.goal.type == .JitOnly {
         @debug_assert(!address.is_null(), "do_fixups jit null symbol %", symbol.name);
     };
@@ -456,13 +456,13 @@ fn ensure_got_slot(self: *QbeModule, symbol: *SymbolInfo, jit_address: rawptr) ?
         if self.debug["T".char()] {
             @fmt_write(self.debug_out, "# reserve __got[%] = %\n", symbol.got_lookup_offset / 8, symbol.name);
         };
-        new_got_reloc = (Some = (patch_at = ptr_cast_unchecked(rawptr, u8, got), type = (DataAbsolute = (increment = 0))));
+        new_got_reloc = (Some = (patch_at = rawptr.raw_from_ptr(got), type = (DataAbsolute = (increment = 0))));
         if !(self.got_indirection_instead_of_patches && jit_address.is_null()) { // TODO: remove this condition
             got[] = jit_address; // because we don't loop again to handle `new_got_reloc`
         }
     };
     got := self.segment_address(.ConstantData, symbol.got_lookup_offset);  // :GotAtConstantDataBase 
-    got := ptr_cast_unchecked(u8, rawptr, got);
+    got := rawptr.ptr_from_raw(got);
     if self.got_indirection_instead_of_patches {
         if jit_address.is_null() {
             //@println("missing jit import? % % % %", symbol.name, symbol.jit_addr, got[], symbol.got_lookup_offset);
@@ -557,7 +557,7 @@ fn patch_pending_symbols(m: *QbeModule) void = {
         if symbol.kind == .Pending && symbol.fixups.len != 0 {
             m.imports&.push(id); 
             symbol.kind = .DynamicPatched;
-            m.do_fixups(u8.ptr_from_int(0), symbol);
+            m.do_fixups(rawptr_from_int(0), symbol);
         };
     };
 }
@@ -706,7 +706,7 @@ fn collect_aot_fixups(m: *QbeModule) Ty([]FixP, []*SymbolInfo) = {
 Patch :: @struct(offset_from_start: i64, cond: i32, target_bid: i32);
 store_ops :: @const_slice(Qbe.O.storew, .storel, .stores, .stored); // :QbeClsi16 order matters
 
-fn segment_address(self: *QbeModule, segment: SegmentType, offset_in_segment: i64) *u8 = {
+fn segment_address(self: *QbeModule, segment: SegmentType, offset_in_segment: i64) rawptr = {
     data := self.segments&[segment]&;
-    data.mmapped.ptr.offset(offset_in_segment)
+    u8.raw_from_ptr(data.mmapped.ptr.offset(offset_in_segment))
 }

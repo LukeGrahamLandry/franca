@@ -152,8 +152,7 @@ fn wrap_with_runtime_init(comp: CompCtx, shared: *CodegenShared, user_main: Func
     enqueue_task(shared, entry);
 }
 
-// TODO: single threaded needing 2 because i of when i call clear is silly. 
-codegen_queue_size :: if(use_threads, => 128, => 2);  // (this is not the number of threads! just the amount of backlog we allow). 
+codegen_queue_size :: if(use_threads, => 128, => 1);  // (this is not the number of threads! just the amount of backlog we allow). 
 
 codegen_thread_main :: fn(shared: *CodegenShared) void = {
     @debug_assert(use_threads);
@@ -170,7 +169,7 @@ codegen_thread_main :: fn(shared: *CodegenShared) void = {
             emit_suspended_inlinables(shared.m); // needs to happen on codegen thread for apple's jit shit.
         
             // pthread_getcpuclockid doesn't exist? so we have to do this here
-            shared.codegen_time = clock_ms(CLOCK_THREAD_CPUTIME_ID);
+            shared.codegen_time = clock_ms(MacosLibc.CLOCK_THREAD_CPUTIME_ID);  // // :TodoLinux
             shared.no_more_codegen = 1;
             Futex'wake(shared.no_more_codegen&, 1);
             return();
@@ -362,6 +361,8 @@ fn init(m: *QbeModule, arena: Alloc, worker: CodegenWorker) *CodegenShared = {
 }
 
 fn acquire(shared: *CodegenShared, $i_am_bouba: bool, idx: *i64) ?*CodegenEntry = {
+    queue := shared.queue;
+    @if(!use_threads) return(Some = queue.index(0));
     fence();
     none_ready: u32 = @if(i_am_bouba, 0, codegen_queue_size);
     while => shared.waiting_for_bouba == none_ready {
@@ -371,12 +372,12 @@ fn acquire(shared: *CodegenShared, $i_am_bouba: bool, idx: *i64) ?*CodegenEntry 
         };
         @if(use_threads) Futex'wait(shared.waiting_for_bouba&, none_ready);
     };
-    queue := shared.queue;
     ::enum(CodegenState);
     waiting: CodegenState = @if(i_am_bouba, .WaitingForBouba, .WaitingForKiki);
     used: CodegenState = @if(i_am_bouba, .UsedByBouba, .UsedByKiki);
     idx[] = idx[].add(1).mod(codegen_queue_size);
     entry := queue.index(idx[]);
+    fence();
     if CodegenState.cas(entry.state&, waiting, used) == waiting {
         // don't reset the arena here, the other guy might want it.
         return(Some = entry);
@@ -385,6 +386,7 @@ fn acquire(shared: *CodegenShared, $i_am_bouba: bool, idx: *i64) ?*CodegenEntry 
 }
 
 fn release(shared: *CodegenShared, entry: *CodegenEntry, $i_am_bouba: bool) void = {
+    @if(!use_threads) return();
     fence();
     ::enum(CodegenState);
     waiting_inv: CodegenState = @if(i_am_bouba, .WaitingForKiki, .WaitingForBouba);
@@ -398,6 +400,7 @@ fn release(shared: *CodegenShared, entry: *CodegenEntry, $i_am_bouba: bool) void
     // TODO: if !none_ready, only wake if this was the symbol they wanted
     need_wake := prev == none_ready || shared.waiting_for_symbol == 1 || shared.no_more_functions;
     @if(use_threads && need_wake) Futex'wake(shared.waiting_for_bouba&, 1);
+    fence();
 }
 
 fn get_log_types(comp: CompCtx, fid: FuncId) Str = {

@@ -217,7 +217,7 @@ fn emit(e: *EmitWasmFn, i: *Qbe.Ins) void = {
                                 leb128_signed(e.a&, symbol.offset + c.bits.i);
                             } else {
                                 @debug_assert(symbol.segment != .ConstantData, "TODO: ConstantData");
-                                patch_at := e.a.maybe_uninit.ptr.offset(e.a.len);
+                                patch_at := u8.raw_from_ptr(e.a.maybe_uninit.ptr.offset(e.a.len));
                                 push_fixup(e.m, symbol, (patch_at = patch_at, type = (WasmAddr = (wide = i.cls().is_wide(), increment = c.bits.i.trunc()))));
                                 // note: we don't push an op here. 
                                 e.pad(WASM_INDEX_PADDING);  // TODO: might need more space than this.
@@ -273,7 +273,7 @@ fn emit(e: *EmitWasmFn, i: *Qbe.Ins) void = {
 
 fn index_patch(e: *EmitWasmFn, id: u32, _space: Wasm.ImportType) void = {
     use_symbol(e.m, id) { s |
-        patch_at := e.a.maybe_uninit.ptr.offset(e.a.len);
+        patch_at := u8.raw_from_ptr(e.a.maybe_uninit.ptr.offset(e.a.len));
         push_fixup(e.m, s, (patch_at = patch_at, type = .WasmIndex));
     };
     e.pad(WASM_INDEX_PADDING);
@@ -290,11 +290,11 @@ fn fixup_wasm32(self: *QbeModule, symbol: *SymbolInfo, fixup: *Fixup, new_got_re
     @match(fixup.type) {
         fn WasmIndex() => {
             @debug_assert_ne(symbol.got_lookup_offset, -1, "missing index for $%", symbol.name);
-            lst: List(u8) = (maybe_uninit = (ptr = fixup.patch_at, len = WASM_INDEX_PADDING), len = 0, gpa = panicking_allocator);
+            lst: List(u8) = (maybe_uninit = (ptr = u8.ptr_from_raw(fixup.patch_at), len = WASM_INDEX_PADDING), len = 0, gpa = panicking_allocator);
             leb128_unsigned(lst&, symbol.got_lookup_offset);
         }
         fn WasmAddr(it) => {
-            lst: List(u8) = (maybe_uninit = (ptr = fixup.patch_at, len = WASM_INDEX_PADDING), len = 0, gpa = panicking_allocator);
+            lst: List(u8) = (maybe_uninit = (ptr = u8.ptr_from_raw(fixup.patch_at), len = WASM_INDEX_PADDING), len = 0, gpa = panicking_allocator);
             o := @if(it.wide, Wasm.Inst.I64_Const, Wasm.Inst.I32_Const);
             lst&.push(@as(u8) o);
             value := if(symbol.segment == .Code, => symbol.got_lookup_offset, => symbol.offset + it.increment.zext());
@@ -345,7 +345,7 @@ fn output_wasm_module(m: *QbeModule) [][]u8 = {
                 @debug_assert(symbol.got_lookup_offset != -1, "missing local function $%", symbol.name);
                 symbol.got_lookup_offset += m.imports.len;
             };
-            m.do_fixups(u8.ptr_from_int(0), symbol);
+            m.do_fixups(rawptr_from_int(0), symbol);
         };
     };
     

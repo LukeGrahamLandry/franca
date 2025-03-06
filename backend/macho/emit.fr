@@ -68,9 +68,10 @@ fn output_macho(m: *QbeModule) [][]u8 = {
     // TODO: take this out and fix indexes +1 everywhere. 
     chunks&.push(empty()); // this used to be for commands but now thats part of .Code which is stupid. :commandsispartofcodenow
     
+    segment_base := u8.ptr_from_raw(m.segment_address(.Code, 0));
     e: EmitMacho = (
         m = m, 
-        commands = (maybe_uninit = (ptr = m.segment_address(.Code, 0), len = COMMANDS_SIZE_GUESS), len = 0, gpa = page_allocator), // :cantreallocatebutgivegooderrormessage
+        commands = (maybe_uninit = (ptr = segment_base, len = COMMANDS_SIZE_GUESS), len = 0, gpa = page_allocator), // :cantreallocatebutgivegooderrormessage
     );
 
     cpu_type, cpu_subtype := @if(m.goal.arch == .aarch64, (0x0100000C, 0x00000000), (0x01000007, 0x00000003));
@@ -538,10 +539,12 @@ fn emit_one_exe_fixup(e: *EmitMacho, fix: *FixP, prev_fixup: *?WipFixup, import_
 }
 
 fn emplace_fixup(e: *EmitMacho, fix: *FixP, next_encoded: i64, import_count: i64) void #inline = {
-    addend := @if(fix.fix.type&.is(.DataAbsolute), fix.fix.type.DataAbsolute.increment, 0); // other addends are handled elsewhere? which is kinda confusing
+    @debug_assert(fix.fix.type&.is(.DataAbsolute), "emplace_fixup only DataAbsolute");
+    addend := fix.fix.type.DataAbsolute.increment; // other addends are handled elsewhere? which is kinda confusing
     @debug_assert_ge(next_encoded, 0, "fixups cant go backwards. we sorted them so this can't happen.");
     is_bind := fix.symbol.kind != .Local;
-    r := ptr_cast_unchecked(u8, ChainedReloc, fix.fix.patch_at);
+    ::assert_eq(size_of(ChainedReloc), size_of(i64));
+    r := ChainedReloc.ptr_from_raw(fix.fix.patch_at);
     set(r.bind&, .next, next_encoded);
     set(r.bind&, .is_bind, int(is_bind));
     if is_bind {
@@ -692,7 +695,7 @@ fn append_relocations(symbol_table_index: i64, id: u32, m: *QbeModule, relocatio
                 // even tho it's redundant because it knows from the relocation below. 
                 // but thankfully the error message is helpful. 
                 reg := @as(u5) it.r;
-                inst: []u32 = (ptr = ptr_cast_unchecked(u8, u32, fix.patch_at), len = 2);
+                inst: []u32 = (ptr = u32.ptr_from_raw(fix.patch_at), len = 2);
                 inst[0] = adrp(0, 0, reg);
                 inst[1] = if(it.got_load, => ldr_uo(Bits.X64, reg, reg, 0), => add_im(Bits.X64, reg, reg, 0, 0));  // TODO: does it need to go in both slots? 
                 
@@ -716,7 +719,7 @@ fn append_relocations(symbol_table_index: i64, id: u32, m: *QbeModule, relocatio
             }
             fn Call() => {
                 // in the instruction we tell it: set link bit
-                inst: []u32 = (ptr = ptr_cast_unchecked(u8, u32, fix.patch_at), len = 1);
+                inst: []u32 = (ptr = u32.ptr_from_raw(fix.patch_at), len = 1);
                 inst[0] = b(0, 1);
                 
                 set(p, .relative, 1);
@@ -727,7 +730,7 @@ fn append_relocations(symbol_table_index: i64, id: u32, m: *QbeModule, relocatio
                 ARM64_RELOC_UNSIGNED :: 0;
                 set(p, .type, ARM64_RELOC_UNSIGNED);
                 set(p, .length, 3);  // one pointer
-                ptr_cast_unchecked(u8, i64, fix.patch_at)[] = it.increment;  // TODO: a test that gets here with non-zero
+                i64.ptr_from_raw(fix.patch_at)[] = it.increment;  // TODO: a test that gets here with non-zero
             }
             fn RipDisp32(it) => {
                 set(p, .relative, 1);
@@ -735,7 +738,7 @@ fn append_relocations(symbol_table_index: i64, id: u32, m: *QbeModule, relocatio
                 X86_64_RELOC_BRANCH :: 2;
                 X86_64_RELOC_SIGNED :: 1;
                 set(p, .type, if(it.call, => X86_64_RELOC_BRANCH, => X86_64_RELOC_SIGNED));
-                ptr_cast_unchecked(u8, u32, fix.patch_at)[] = it.increment;
+                u32.ptr_from_raw(fix.patch_at)[] = it.increment;
             }
             @default => panic("invalid fixup type for mach-o");
         };
@@ -769,21 +772,13 @@ fn macho_load_dylinker(commands: *List(u8), command_count: *i64, name: Str) void
     h.size = trunc(commands.len - start);
 }
 
-fn compiler_address_to_segment_offset(m: *QbeModule, address: *u8) Ty(SegmentType, i64) = {
-    low  := MAX_i64;
-    high := 0;
-    for_enum SegmentType { type | 
-        seg := m.segments&[type]&;
-        dist_from_start := ptr_diff(seg.mmapped.ptr, address);
-        if dist_from_start >= 0 && dist_from_start < seg.mmapped.len {
-            @assert(ptr_diff(seg.next, address) < 0, "address was inside segment %'s allocation but after next[]", type);
-            return(type, dist_from_start);
-        };
-        // TODO: waste of code. they're always ordered. 
-        high = high.max(u8.int_from_ptr(seg.mmapped.ptr) + seg.mmapped.len);
-        low = low.min(u8.int_from_ptr(seg.mmapped.ptr));
-    };
-    @panic("ICE: % was not found in module.segments (low = %, high = %)", u8.int_from_ptr(address), low, high)
+fn compiler_address_to_segment_offset(m: *QbeModule, address: rawptr) Ty(SegmentType, i64) = {
+    first := m.segments&[.Code]&;  // :CodeIsFirst
+    dist_from_start := ptr_diff(first.mmapped.ptr, address);
+    @debug_assert_ge(dist_from_start, 0, "% is outside segments", address);
+    seg_index, off := dist_from_start.div_mod(first.mmapped.len);  // :SegmentsAreTheSameSize
+    @debug_assert_lt(seg_index, 3, "% is outside segments. for now we don't allow relocations in BSS", address);
+    (@as(SegmentType) seg_index, off)
 }
 
 fn append_padded_cstr(bytes: *List(u8), s: Str, align: i64) i64 = {
@@ -793,7 +788,6 @@ fn append_padded_cstr(bytes: *List(u8), s: Str, align: i64) i64 = {
     bytes.zero_pad_to_align(align);
     bytes.len - start
 }
-
 
 fn str_to_16_byte_value(s: Str) u128 = {
     assert(s.len.le(16), "A segment name cannot be larger than 16 text characters in bytes");

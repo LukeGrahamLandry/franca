@@ -7,6 +7,7 @@
 
 ##
 
+- :TodoLinux
 - 1331 relocations seems like a lot
 - ask the os for the correct page size
 - hello_va doesn't work on linux??

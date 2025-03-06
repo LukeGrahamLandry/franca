@@ -46,7 +46,8 @@ backtracing_panic_handler :: fn(msg: Str) Never = {
     exit(1);
 };
 
-request_backtrace_on_signal :: fn() void = {
+// :TodoLinux
+request_backtrace_on_signal :: fn() void #use(MacosLibc) = {
     catch :: @const_slice(SignalNum.IllegalInstruction, .TraceTrap, .Bus, .Segfault, .Float, .Interupt);
     for catch { s |
         old := SigAction.zeroed();
@@ -67,7 +68,7 @@ request_backtrace_on_signal :: fn() void = {
         
         prev := LOOPING[]; 
         LOOPING[] = 2;  // incase we crash in this switch somehow
-        ip, fp, context_guess := @switch(ctx.mc_size) {
+        ip, fp := @switch(ctx.mc_size) {
             @case(size_of(Arm64MachineContext)) => {
                 a := ctx.mc.arm64.thread&;
                 // TODO: this should be in the compiler!! only when jitting!!
@@ -77,11 +78,11 @@ request_backtrace_on_signal :: fn() void = {
                     LOOPING[] = prev;
                     return();
                 };
-                (a.pc, a.fp, a.gp&[9])
+                (a.pc, a.fp)
             };
             @case(size_of(Amd64MachineContext)) => {
                 a := ctx.mc.amd64.thread&;
-                (a.rip, a.rbp, a.rax)
+                (a.rip, a.rbp)
             };
             @default => {
                 scary_log("TODO: unknown format of machine_context");
@@ -95,10 +96,9 @@ request_backtrace_on_signal :: fn() void = {
             report_backtrace_safe(fp, ip);
             exit(1);
         };
-        set_dynamic_context(context_guess);
         LOOPING[] = 1;
         ctx := context(DefaultContext);
-        @eprintln("(signal = %, addr = %, value = %, code = %, ip = %) context_guess = %", info.signal_number, info.addr, info.value, info.code, ip, context_guess);
+        @eprintln("(signal = %, addr = %, value = %, code = %, ip = %)", info.signal_number, info.addr, info.value, info.code, ip);
         
         push_zeroed_dynamic_context {
             a: ArenaAlloc = init(page_allocator, 16000);

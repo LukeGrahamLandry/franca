@@ -30,7 +30,12 @@ AllocatorAction :: @enum(i64) (
 ::enum(AllocatorAction);
 
 fn alloc(allocator: Alloc, $T: Type, count: i64) Slice(T) #generic #inline = {
-    mem := alloc_raw(allocator, count * :: T.size_of(), :: T.align_of());
+    mem := alloc_raw(allocator, count * T.size_of(), T.align_of());
+    // TODO: debug c compiler
+    //@if(SLOW_MEMORY_DEBUGGING) if mem.len < 16384 {
+    //    mem.len = count * T.size_of();  // :UpdateBoot
+    //    mem.set_bytes(SLOW_MEMORY_JUNK);
+    //};
     (ptr = ptr_cast_unchecked(u8, T, mem.ptr), len = count)
 }
 
@@ -44,11 +49,12 @@ fn dealloc_raw(allocator: Alloc, ptr: rawptr, bytes: i64, align: i64) void = {
     {allocator.vptr}(allocator.data, .Deallocate, ptr, bytes, align);
 }
 
-fn alloc_zeroed(allocator: Alloc, $T: Type, len: i64) []T #generic = {
+fn alloc_zeroed(allocator: Alloc, $T: Type, count: i64) []T #generic = {
     // TODO: be able to ask the allocator for zeroed memory since it might already have that (page_allocator?)
-    mem := allocator.alloc(T, len);
-    mem.set_zeroed();
-    mem
+    mem := alloc_raw(allocator, count * T.size_of(), T.align_of());
+    mem.len = count * T.size_of();  // :UpdateBoot
+    set_bytes(mem, 0);
+    (ptr = ptr_cast_unchecked(u8, T, mem.ptr), len = count)
 }
 
 fn box(allocator: Alloc, $T: Type) *T #generic = {
@@ -85,6 +91,7 @@ libc_allocator_fn :: fn(_: rawptr, action: AllocatorAction, ptr: rawptr, count: 
         //       should do what zig does tho https://github.com/ziglang/zig/blob/master/lib/std/heap.zig#L57
         fn Allocate() => (ptr = u8.ptr_from_raw(malloc(count)), len = count);
         fn Deallocate() => {
+            @if(SLOW_MEMORY_DEBUGGING) u8.ptr_from_raw(ptr).slice(count).set_bytes(SLOW_MEMORY_JUNK);
             free(ptr);
             empty()
         }
