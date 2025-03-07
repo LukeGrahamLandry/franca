@@ -113,6 +113,7 @@ fn newtmp(f: *Qbe.Fn, debug_hint: Str, k: Qbe.Cls) Qbe.Ref = {
     tmp := f.tmp.index(t);
     @if(TRACK_IR_NAMES) {
         l: List(u8) = (maybe_uninit = tmp.name&.items(), len = 0, gpa = panicking_allocator); // :UnacceptablePanic
+        debug_hint.len = min(debug_hint.len, 70);
         @fmt(l&, "%.%", debug_hint, t);
     };
     tmp.cls = k;
@@ -670,9 +671,7 @@ fn intern(m: *QbeModule, s: Str) u32 = {
     if n == 0 {
         b.data = m.new_long_life(1);
     } else {
-        if n.bit_and(n - 1) == 0 {
-            b.data&.grow(zext(n + n));
-        }
+        b.data&.grow(zext(n + 1));
     };
    
     // TODO: have ArenaAlloc use atomics
@@ -689,6 +688,7 @@ fn intern(m: *QbeModule, s: Str) u32 = {
     data.wasm_type_index = -1;
     
     b.n = n + 1;  // unlock
+    fence();
     id := h + n.shift_left(IBits);
     id
 }
@@ -730,6 +730,7 @@ fn lock_bucket(m: *QbeModule, bucket: *SymbolBucket) u32 #inline = {
 
 // :ThreadSafety you can't call this one
 fn get_symbol_info(m: *QbeModule, id: u32) *SymbolInfo = {
+    @debug_assert(m.fixups_locked, "this is not threadsafe");
     bid: i64 = id.bit_and(IMask).zext();
     bucket := m.symbols[bid]&;
     idx := id.shift_right_logical(IBits);

@@ -59,11 +59,10 @@ fn cloneblk(m: *QbeModule, b: *Qbe.Blk) *Qbe.Blk = {
     unlock(m.intern_mutex&); 
     inlb.jmp = b.jmp;
     
-    msg :: "can only inline functions with one block";
-    @debug_assert(inlb.phi.is_null(),  msg);
-    @debug_assert(inlb.s1.is_null(),   msg);
-    @debug_assert(inlb.s2.is_null(),   msg);
-    @debug_assert(inlb.link.is_null(), msg);
+    @if(::safety_check_enabled(.DebugAssertions))
+    if !(inlb.phi.is_null() && inlb.s1.is_null() && inlb.s2.is_null() && inlb.link.is_null()) {
+        @panic("unreachable: can only inline functions with one block.");
+    };
     
     inlb.ins = m.new_long_life(b.nins.zext());
     idup(inlb, b.ins.first, b.nins.zext());
@@ -77,20 +76,25 @@ fn clone(f: *Qbe.Fn) *Qbe.Fn = {
     inlfn := m.forever&.borrow().box_zeroed(Qbe.Fn); // :HardcodeAlloc
     unlock(m.intern_mutex&); 
     inlfn.retty = f.retty;
-    inlfn.ntmp = f.ntmp;
-    inlfn.ncon = f.ncon;
     inlfn.nblk = f.nblk;
     inlfn.leaf = f.leaf;
     inlfn.globals = m;
     inlfn.lnk.id = f.lnk.id;
-    inlfn.tmp = m.new_long_life(inlfn.ntmp.zext());
-    inlfn.tmp.slice(0, f.ntmp.zext()).copy_from(f.tmp.slice(0, f.ntmp.zext()));
-    range(Qbe.Tmp0, inlfn.ntmp.zext()) { i |
+    
+    n: i64 = f.ntmp.zext();
+    inlfn.ntmp = f.ntmp;
+    inlfn.tmp = m.new_long_life(n);
+    inlfn.tmp.slice(0, n).copy_from(f.tmp.slice(0, n));
+    range(Qbe.Tmp0, n) { i |
         inlfn.tmp[i].visit = -1; // used when remapping 
         inlfn.tmp[i].use.first = Qbe.Use.ptr_from_int(0);  // don't try to reuse memory in clear_usage_info if this function is suspended. 
+        inlfn.tmp[i].def = Qbe.Ins.ptr_from_int(0);  // shouldn't matter?
     };
+    
+    inlfn.ncon = f.ncon;
     inlfn.con = m.new_long_life(inlfn.ncon.zext());
     inlfn.con.slice(0, f.ncon.zext()).copy_from(f.con.slice(0, f.ncon.zext()));
+    
     @debug_assert(f.nmem == 0, "shouldn't need to inline clone f.mem");
     @debug_assert(f.nblk == 1, "don't know how to inline that");
     inlfn.start = cloneblk(m, f.start);
@@ -152,6 +156,9 @@ fn getinlref(inlfn: *Qbe.Fn, inlr: Qbe.Ref, f: *Qbe.Fn, c: *InlineCtx) Qbe.Ref =
     
     @match(rtype(inlr)) {
         fn RTmp() => {
+            if inlr.val() < Qbe.Tmp0 {
+                return(inlr);
+            };
             t := inlfn.tmp[inlr.val()]&;
             if t.visit == -1 {
                 // first time seeing this ref: need to create an equivalent in the caller.  
@@ -161,6 +168,9 @@ fn getinlref(inlfn: *Qbe.Fn, inlr: Qbe.Ref, f: *Qbe.Fn, c: *InlineCtx) Qbe.Ref =
             TMP(t.visit)
         }
         fn RCon() => {
+            if inlr.val() < FIXED_CONST_COUNT {
+                return(inlr);
+            };
             i := inlr.val();
             r := c.remapped_consts[i];
             if r == QbeNull {
@@ -223,8 +233,8 @@ fn inlargs(inlfn: *Qbe.Fn, f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins, c: *InlineCtx) 
         i  = i.offset(1);
         i1 = i1.offset(1);
         @debug_assert(b.ins.index_unchecked(b.nins.zext()).in_memory_after(i), "inlined oob");
-        last_inl := inlfn.start.ins.index_unchecked(inlfn.start.nins.zext() + 1); // TODO: why +1?
-        @debug_assert(last_inl.in_memory_after(i1), "inlined oob");
+        last_inl := inlfn.start.ins.index_unchecked(inlfn.start.nins.zext());
+        @debug_assert(last_inl.in_memory_after(i1) || i.op() == .call, "inlined oob");
     };
 }
 
@@ -290,6 +300,8 @@ InlineCtx :: @struct(
     to_clear: List(*Qbe.Tmp),
 );
 
+
+// :ThreadSafety this mutates inlfn.tmp.visit
 /* return index of last inlined ins */
 fn inlcall(f: *Qbe.Fn, b: *Qbe.Blk, i: *Qbe.Ins) i64 = {
     @debug_assert(ptr_diff(b.ins.first, i) >= 0 && ptr_diff(i, b.ins.index_unchecked(b.nins.zext())) >= 0, "bad size for inlining");

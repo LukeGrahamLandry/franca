@@ -21,7 +21,7 @@
 hook_backtrace :: fn() void = {
     @if(!is_linking_libc()) return(); // TODO
     
-    if get_environment_variable("FRANCA_BACKTRACE").is_some() {
+    if get_environment_variable("FRANCA_BACKTRACE").is_some() || ALWAYS_BE_SIGNALLING {
         push_resolver(@import_symbol "__franca_aot_debug_info", find_in_debug_info);
         request_backtrace_on_panic();
         request_backtrace_on_signal();
@@ -46,74 +46,71 @@ backtracing_panic_handler :: fn(msg: Str) Never = {
     exit(1);
 };
 
-// :TodoLinux
-request_backtrace_on_signal :: fn() void #use(MacosLibc) = {
-    catch :: @const_slice(SignalNum.IllegalInstruction, .TraceTrap, .Bus, .Segfault, .Float, .Interupt);
-    for catch { s |
+#use(MacosLibc); // :TodoLinux
+
+request_backtrace_on_signal :: fn() void = 
+    catch_signals(show_trace_and_exit);
+
+catch_signals :: fn(handle: SignalHandler) void = {
+    useful_signals :: @const_slice(SignalNum.IllegalInstruction, .TraceTrap, .Bus, .Segfault, .Float, .Interupt);
+    for useful_signals { s |
         old := SigAction.zeroed();
-        new: SigAction = (sigaction = handle_it, mask = 0, flags = @as(i32) SignalFlag.Info);
+        new: SigAction = (sigaction = handle, mask = 0, flags = @as(i32) SignalFlag.Info);
         sigaction(s, new&, old&);
     };
+};
+
+show_trace_and_exit :: fn(s: i64, info: *SigInfo, ctx: *UContext) void = {
+    ::enum(SignalNum);
+    ::@assert_eq(0, offset_of(Arm64MachineContext, Fields(Arm64MachineContext).neon).mod(16), "fp unaligned");
+    scary_log("A franca program received a fatal signal.\n");
     
-    handle_it :: fn(s: i64, info: *SigInfo, ctx: *UContext) void = {
-        ::enum(SignalNum);
-        ::@assert_eq(0, offset_of(Arm64MachineContext, Fields(Arm64MachineContext).neon).mod(16), "fp unaligned");
-        scary_log("A franca program received a fatal signal.\n");
-        
-        LOOPING :: @static(i64) 0;
-        if LOOPING[] == 2 {
-            scary_log("... give up\n");
-            exit(1);
-        };
-        
-        prev := LOOPING[]; 
-        LOOPING[] = 2;  // incase we crash in this switch somehow
-        ip, fp := @switch(ctx.mc_size) {
-            @case(size_of(Arm64MachineContext)) => {
-                a := ctx.mc.arm64.thread&;
-                // TODO: this should be in the compiler!! only when jitting!!
-                if info.signal_number == .IllegalInstruction {
-                    // TODO: if it's actually fine, don't print the message here or above. 
-                    @println("Inst: %", u32.ptr_from_raw(a.pc)[]);
-                    LOOPING[] = prev;
-                    return();
-                };
-                (a.pc, a.fp)
-            };
-            @case(size_of(Amd64MachineContext)) => {
-                a := ctx.mc.amd64.thread&;
-                (a.rip, a.rbp)
-            };
-            @default => {
-                scary_log("TODO: unknown format of machine_context");
-                exit(1);
-            };
-        };
-        LOOPING[] = prev;
-        if LOOPING[] == 1 {
-            LOOPING[] = 2;
-            scary_log("... while handling a previous signal.\n");
-            report_backtrace_safe(fp, ip);
-            exit(1);
-        };
-        LOOPING[] = 1;
-        ctx := context(DefaultContext);
-        @eprintln("(signal = %, addr = %, value = %, code = %, ip = %)", info.signal_number, info.addr, info.value, info.code, ip);
-        
-        push_zeroed_dynamic_context {
-            a: ArenaAlloc = init(page_allocator, 16000);
-            context(DefaultContext)[].temporary_allocator = a&;
-            context(DefaultContext)[].general_allocator = temp();
-            context(DefaultContext)[].panic_hook = fn(msg) = {
-                scary_log("panicked while handling a signal\n");
-                scary_log(msg);
-                report_backtrace_safe(trace_start(), 0.rawptr_from_int());
-                exit(1)
-            };
-            report_backtrace(fp, ip);
-        };
+    LOOPING :: @static(i64) 0;
+    if LOOPING[] == 2 {
+        scary_log("... give up\n");
         exit(1);
     };
+    
+    prev := LOOPING[]; 
+    LOOPING[] = 2;  // incase we crash in this switch somehow
+    ip, fp := @switch(ctx.mc_size) {
+        @case(size_of(Arm64MachineContext)) => {
+            a := ctx.mc.arm64.thread&;
+            (a.pc, a.fp)
+        };
+        @case(size_of(Amd64MachineContext)) => {
+            a := ctx.mc.amd64.thread&;
+            (a.rip, a.rbp)
+        };
+        @default => {
+            scary_log("TODO: unknown format of machine_context");
+            exit(1);
+        };
+    };
+    LOOPING[] = prev;
+    if LOOPING[] == 1 {
+        LOOPING[] = 2;
+        scary_log("... while handling a previous signal.\n");
+        report_backtrace_safe(fp, ip);
+        exit(1);
+    };
+    LOOPING[] = 1;
+    ctx := context(DefaultContext);
+    @eprintln("(signal = %, addr = %, value = %, code = %, ip = %)", info.signal_number, info.addr, info.value, info.code, ip);
+    
+    push_zeroed_dynamic_context {
+        a: ArenaAlloc = init(page_allocator, 16000);
+        context(DefaultContext)[].temporary_allocator = a&;
+        context(DefaultContext)[].general_allocator = temp();
+        context(DefaultContext)[].panic_hook = fn(msg) = {
+            scary_log("panicked while handling a signal\n");
+            scary_log(msg);
+            report_backtrace_safe(trace_start(), 0.rawptr_from_int());
+            exit(1)
+        };
+        report_backtrace(fp, ip);
+    };
+    exit(1);
 };
 
 LocationResolver :: @FnPtr(userdata: rawptr, ip: rawptr) ?Str; 
