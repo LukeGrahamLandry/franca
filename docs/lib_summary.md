@@ -18,8 +18,7 @@ available to every program (you can access them with `import()` or `#use`).
   - sync
     - mutex
 - dynamic_lib
-- arch
-  - jump
+- jump: dynamic nonlocal returns (setjmp/longjmp)
 
 ## backend
 
@@ -29,6 +28,8 @@ The rest of these are mainly for internal use but might also be useful for other
 - macho/bits
 - elf/bits
 - wasm/bits
+- amd64/bits: (useful for writing #asm functions)
+- arm64/bits: (useful for writing #asm functions)
 - llvm/target: WIP
 - meta
   - parse: read strings of qbe-style ir (see meta/qbe_frontend.fr for example usage). 

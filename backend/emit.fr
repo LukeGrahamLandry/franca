@@ -292,14 +292,14 @@ fn add_code_bytes(m: *QbeModule, name_id: u32, bytes: []u8) void = {
 }
 
 // this sure does something. please run it so many times before trying to remove.
-fn fence() void #asm #aarch64 = (
-    //@bits(0b11010101000000110011, 0b1111, 0b10111111),  // DMB SY
-    @bits(0b11010101000000110011, 0b1111, 0b10011111),  // DSB SY
+fn fence() void #asm #aarch64 #use(Arm) = (
+    @bits(0b11010101000000110011, 0b1111, 0b10111111),  // DMB SY
+    //@bits(0b11010101000000110011, 0b1111, 0b10011111),  // DSB SY
     ret()
 );
 
 // does this do anything? idk man. 
-fn fence() void #asm #x86_bytes = (fn(out) = @asm_x64(
+fn fence() void #asm #x86_bytes #use(Amd) = (fn(out) = @asm_x64(
      0x0F, 0xAE, 0xF0, // MFENCE
     // 0x0F, 0x01, 0xE8, // SERIALIZE rosetta no like?
     
@@ -442,6 +442,7 @@ fn do_fixups(self: *QbeModule, address: rawptr, symbol: *SymbolInfo) void = {
     if new_got_reloc { it | // avoided reallocating while iterating. rustc would be proud.
         push_fixup(self, symbol, it);
     };
+    fence();
 }
 
 fn ensure_got_slot(self: *QbeModule, symbol: *SymbolInfo, jit_address: rawptr) ?Fixup = {
@@ -465,6 +466,7 @@ fn ensure_got_slot(self: *QbeModule, symbol: *SymbolInfo, jit_address: rawptr) ?
     got := rawptr.ptr_from_raw(got);
     if self.got_indirection_instead_of_patches {
         if jit_address.is_null() {
+            got[] = @as(rawptr) (fn() Never = panic("ICE: tried to call got null jit_address"));
             //@println("missing jit import? % % % %", symbol.name, symbol.jit_addr, got[], symbol.got_lookup_offset);
         } else {
             got[] = jit_address;
@@ -472,6 +474,7 @@ fn ensure_got_slot(self: *QbeModule, symbol: *SymbolInfo, jit_address: rawptr) ?
     } else {
         @debug_assert_eq(got[], jit_address, "ensure_got_slot with different address");
     };
+    fence();
     new_got_reloc
 }
 
@@ -592,8 +595,12 @@ fn declare_bytes(m: *QbeModule, bytes: []u8, name: Str) u32 = {
 }
 
 fn seal_debug_info(m: *QbeModule, debug_source_code: []u8, include: bool, files_bytes: []u8) void = {
-    base_p    := m.intern("__franca_base_address");
-    m.do_jit_fixups(base_p, .Code, 0);
+    if m.goal.type == .Exe {
+        // TODO: figure out how to make this work for .Relocatable
+        //       it is needed for relocations without libc on linux (in franca_runtime_init). 
+        base_p    := m.intern("__franca_base_address");
+        m.do_jit_fixups(base_p, .Code, 0);
+    };
     
     AotDebugInfo :: import("@/lib/crash_report.fr").AotDebugInfo;
 
@@ -601,11 +608,12 @@ fn seal_debug_info(m: *QbeModule, debug_source_code: []u8, include: bool, files_
     lnk := Qbe.Lnk.zeroed();
     dat.lnk = lnk&;
     dat.lnk.id = m.intern("__franca_aot_debug_info");
-    if !include {
+    if !include || m.goal.type == .Relocatable {
         dat.u.num = size_of(AotDebugInfo);
         m.new_zeroed_symbol(dat&);
         return();
     };
+    // TODO: figure out how to make this work for .Relocatable
     
     // TODO: don't force having a name for these. 
     code_p    := m.intern("__franca_code_segment");

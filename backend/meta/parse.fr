@@ -10,9 +10,10 @@
 //!
 //! Syntax Extensions:
 //! - R00, S00, I00 for register, RSlot, RInt so you can parse back the output of later passes. 
-//! - parse back internal ops (including par*, arg*) because ^
+//! - parse back internal ops (including par*, arg*, ret*) because ^
 //! - %00 and =00 for placeholders when using @emit_instructions
 //! - $name$module for imports (for wasm, but TODO: also mach-o so you can import things that aren't from libc)
+//! - { p 00 } for padding fields in types (not useful but seems like a bad idea to have dump_type hide it)
 //! - Removed: thread and section keywords 
 //! 
 
@@ -57,7 +58,6 @@ fn parse_top_level(m: *QbeModule, src: Str, yield_data: @FnPtr(*Qbe.Dat) void, y
         continue :: local_return;
         reset_temporary_storage(mark);
         
-        self.skip_blanks();
         self.skip_lines();
         
         export := self.eat("export");
@@ -102,7 +102,10 @@ fn parse_top_level(m: *QbeModule, src: Str, yield_data: @FnPtr(*Qbe.Dat) void, y
             self.f = temp().box(Qbe.Fn);  // TODO: shouldn't really need to do this? but debug_stomp_after breaks otherwise. 
             self.f.default_init(m);
             
-            @try(self.parse_data(export, yield_data)) return;
+            @if_let(self.parse_data(export, yield_data)) fn Err(msg) => {
+                @fmt(self.error&, "% near line %", msg, self.line);
+                return(Err = self.error.items());
+            };
             continue();
         };
         if self.eat("section") {
@@ -112,9 +115,8 @@ fn parse_top_level(m: *QbeModule, src: Str, yield_data: @FnPtr(*Qbe.Dat) void, y
         if self.cursor >= self.input.len {
             return(.Ok);
         };
-        self.skip_blanks();
         if self.skip_lines() == 1 && self.cursor < self.input.len {
-            return(Err = "expected new line");
+            return(Err = @tfmt("expected new line. near line %\n", self.line));
         };
     };
     unreachable()
@@ -405,6 +407,9 @@ fn parse_inst(self: *QParseCtx) void = {
                     self.parse_args(false);
                 }; // else we allow you to specify a placeholder for the RCall
             };
+            if n == "argc" || n == "arge" {
+                k = "l".ascii();
+            };
             n
         };
     };
@@ -573,7 +578,11 @@ fn parse_ref(self: *QParseCtx) Qbe.Ref = {
             module := self.eat_word();
             name = /* SLOW */ @tfmt("%$%", name, module); // TODO: do something more formal (store this in Qbe.Sym?)
         };
-        con: Qbe.Con = (sym = (id = self.f.globals.intern(name)), type = .CAddr, bits = (i = 0));
+        off := 0;
+        if self.eat("+") {
+            off = self.parse_number();
+        };
+        con: Qbe.Con = (sym = (id = self.f.globals.intern(name)), type = .CAddr, bits = (i = off));
         return(self.f.newcon(con&));
     };
     if thread {
@@ -847,6 +856,7 @@ fn parse_type_fields(self: *QParseCtx, typ: *Qbe.Typ, field_count: *i64) Result(
     my_align: i64 = typ.align_log2.intcast();
     my_size := 0;
     while => self.cursor < self.input.len && !self.check("}") {
+        continue :: local_return;
         value_to_put_in_len_field := -1;
         c := self.input[self.cursor];
         self.cursor += 1;
@@ -866,7 +876,16 @@ fn parse_type_fields(self: *QParseCtx, typ: *Qbe.Typ, field_count: *i64) Result(
             @case("b".ascii()) => (.Fb, 1, 0);
             @case("d".ascii()) => (.Fd, 8, 3);
             @case("s".ascii()) => (.Fs, 4, 2);
-            @default => return(Err = "invalid character to begin field type");
+            @case("p".ascii()) => {
+                // TODO: make sure we're not losing alignment info
+                self.skip_blanks();
+                len := self.parse_number(); 
+                self.eat(",");
+                push(typ.fields&, field_count, (type = .FPad, len = len.trunc()));
+                my_size += len;
+                continue()
+            };
+            @default => return(Err = @tfmt("invalid character % to begin field type", c));
         };
         
         my_align = my_align.max(align);
@@ -916,13 +935,19 @@ fn find_type(self: *QParseCtx, n: Str) ?i64 = {
 }
 
 fn skip_blanks(self: *QParseCtx) void = {
-    while => self.cursor < self.input.len && self.input[self.cursor].is_ascii_whitespace() && self.input[self.cursor] != "\n".ascii() {
+    while => self.cursor < self.input.len {
+        @switch(self.input[self.cursor]) {
+            @case(" ".ascii())  => ();
+            @case("\t".ascii()) => ();
+            @case("\r".ascii()) => ();
+            @default => return();
+        };
         self.cursor += 1;
     };
 }
 
 // we have a little self respect and fold away the loop at comptime when the string is one long.
-fn eat(self: *QParseCtx, $s: Str) bool = {
+fn eat(self: *QParseCtx, $s: Str) bool #inline = {
     self.skip_blanks();
     if(self.cursor + s.len() > self.input.len, => return(false));
     @if(@run s.len() == 1, {
@@ -940,18 +965,14 @@ fn eat(self: *QParseCtx, $s: Str) bool = {
     })
 }
 
-fn check(self: *QParseCtx, s: Str) bool = {
+fn check(self: *QParseCtx, $s: Str) bool #inline = {
+    ::assert_eq(s.len(), 1);
     self.skip_blanks();
-    if(self.cursor + s.len >= self.input.len, => return(false));
-    cursor := self.cursor;
-    for s { c | 
-        if(c != self.input[cursor], => return(false));
-        cursor += 1;
-    };
-    true
+    self.cursor + 1 < self.input.len && 
+    self.input[self.cursor] == @run s[0]
 }
 
-fn allow_in_identifier(c: u8) bool = {
+fn allow_in_identifier(c: u8) bool #inline = {
     c.is_ascii_alpha() || c.is_ascii_digit() || c == "_".ascii() || c == ".".ascii() 
 }
 

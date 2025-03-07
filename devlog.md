@@ -1,3 +1,33 @@
+## (Mar 6)
+
+- stop leaking file descriptors of pipes in subprocess.fr,
+apparently super old macos defaults to a lower limit. 
+- ok i have an old real macos-amd64, takes twice as long (but faster than rosetta). 
+runs all the tests 100 times without crashing. 
+so either my problem is arm specific or it's a race condition that goes away when you're super slow. 
+- ok what if i DMB at the start of every function? no not enough. 
+every block? sure makes it slower. stills dies tho. 
+still dies if i make codegen_queue_size=1 which should mean the threads are basically serial. 
+those two together make it the same speed as the old computer. 
+and i still crash. DMB after every instruction?? (takes 4x as long).
+still crash! clear_instruction_cache the whole Code segment after every finish_function? still crash!
+the hack sleep in `report_called_uncompiled_or_just_fix_the_problem` that i only do on x64? still crash! 
+so that's just a normal bug then right? 
+if we decide it's not a threading problem, what else changes between runs? 
+try clearing flags and stomp regs after every call? still random. 
+
+
+- is there any chance it's not a problem with the jit? 
+try improving ir dump/parse so i can save the text version of one compile and 
+rerun the backend alone a bunch of times. 
+  - parse: con+off, argc/e cls, FPad in type. dump: retty, float con as bits because @fmt doesn't do fractions yet.
+  - need to send more to driver: wrap_with_runtime_init, asm functions too, __franca_debug_info
+  - if i hack those into the output, i get something that looks like a macho file.
+  it crashes if i try to run it so something about my dump isn't right, 
+  but i can run the qbe_frontend like that 100 times without crashing and producing the same file,
+  so looks like the problem im looking for isn't in aot backend? 
+
+
 ## (Mar 5)
 
 - clone3 syscall so don't need pthread_create on linux. so many flags. 

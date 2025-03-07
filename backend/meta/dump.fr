@@ -91,14 +91,16 @@ fn printcon(m: *QbeModule, c: *Qbe.Con, out: *List(u8)) void = {
             };
         }
         fn CBits() => {
-            if c.flt == 1 {
-                @fmt(out, "s_%", c.bits.s.s);
-                return();
-            };
-            if c.flt == 2 {
-                @fmt(out, "d_%", c.bits.d);
-                return();
-            };
+            // TODO: this is more readable but we don't print out the fractional part yet because we're cringe 
+            //       but we want to be able to parse it back and not lose any information so for now just use the stupid bits. 
+            //if c.flt == 1 {
+            //    @fmt(out, "s_%", c.bits.s.s);
+            //    return();
+            //};
+            //if c.flt == 2 {
+            //    @fmt(out, "d_%", c.bits.d);
+            //    return();
+            //};
             @fmt(out, "%", c.bits.i);
         }
     };
@@ -167,13 +169,9 @@ fn printins(f: *Qbe.Fn, i: *Qbe.Ins, out: *List(u8)) void = {
         printref(i.to, f, out);
         @fmt(out, " =% ", kname(i.cls()));
     };
-    names :: Qbe.O.get_enum_names();
-    if i.op() == .Oxxx {
-        eprintln("printing corrupt instruction, this will not go well");
-    };
     id: i64 = i.op().raw().zext();
-    if id < names.len() {
-        write(out, names[id]);
+    if id < Qbe.O.enum_count() {
+        @fmt(out, "%", i.op());
     } else {
         @fmt(out, "INVALID(%)", id);
     };
@@ -198,7 +196,15 @@ fn printins(f: *Qbe.Fn, i: *Qbe.Ins, out: *List(u8)) void = {
 fn printfn(f: *Qbe.Fn, out: *List(u8)) void = {
     mark := mark_temporary_storage();
     use_symbol(f.globals, f.lnk.id) { s |
-        @fmt(out, "%function $%() {  # nblk=%\n", if(f.lnk.export, => "export ", => ""), s.name, f.nblk);
+        if f.lnk.export {
+            @fmt(out, "export ");
+        };
+        @fmt(out, "function ");
+        if f.retty >= 0 {
+            type := f.globals.types[].index(f.retty.intcast());  // :ThreadSafety TODO
+            @fmt(out, ":% ", @if(TRACK_IR_NAMES, type.name(), f.retty));
+        };
+        @fmt(out, "$%() {  # nblk=%\n", s.name, f.nblk);
     };
     for_blocks f { b | 
         continue :: local_return;
@@ -241,8 +247,8 @@ fn printphi(f: *Qbe.Fn, p: *Qbe.Phi, out: *List(u8)) void = {
 }
 
 fn printjmp(f: *Qbe.Fn, b: *Qbe.Blk, out: *List(u8)) void = {
-    jnames :: Qbe.J.get_enum_names();
-    n := jnames[b.jmp.type.raw().zext()];
+    j := b.jmp.type;
+    n := j.name_str();
     if is_ret(b.jmp.type) {
         @fmt(out, "%", n);
         if b.jmp.type != .ret0 || b.jmp.arg != QbeNull {
@@ -397,6 +403,7 @@ fn print_type(m: *QbeModule, ty_index: i64, out: *List(u8)) void = {  // :Thread
         @fmt(out, "{ ");
     };
     f := t.fields[0]&;  
+    ::enum(@type f.type);
     if f.type == .FEnd {
         @fmt(out, "EMPTY");
     };
@@ -416,7 +423,7 @@ fn print_type(m: *QbeModule, ty_index: i64, out: *List(u8)) void = {  // :Thread
                     @fmt(out, ":%, ", @if(TRACK_IR_NAMES, type.name(), f.len));
                 }
                 fn FPad() => {
-                    @fmt(out, "PAD %, ", f.len);
+                    @fmt(out, "p %, ", f.len);
                 }
                 fn FEnd() => unreachable();
             };
