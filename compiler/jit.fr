@@ -345,7 +345,6 @@ fn bump_dirty_new(self: *SelfHosted) void =
 fn bump_dirty_new(m: *QbeModule) void = {
     lock(m.icache_mutex&);
     
-    fence();
     start := m.start_of_writable_code;
     end   := m.last_function_end;
     if ptr_diff(start, end) > 0 {
@@ -355,10 +354,10 @@ fn bump_dirty_new(m: *QbeModule) void = {
     start := m.stubs.mmapped.ptr; // m.start_of_executable_stubs;  // TODO
     end := m.stubs.next;
     if ptr_diff(start, end) > 0 {
+        // TODO: this costs 20ms. would putting a bti there to let the signal handler know it's ok to let through be worth it?
         clear_instruction_cache(u8.raw_from_ptr(start), ptr_diff(start, end));
         m.start_of_executable_stubs = end;
     };
-    fence();
     unlock(m.icache_mutex&);
 }
 
@@ -369,9 +368,7 @@ fn save_in_got(self: *SelfHosted, fid: FuncId, addr: rawptr) void = {
     use_symbol(m, id) { s |
         @debug_assert(s.got_lookup_offset != -1, "save_in_got missing slot for %", s.name);
         got := m.segment_address(.ConstantData, s.got_lookup_offset);  // :GotAtConstantDataBase 
-        fence();
         rawptr.ptr_from_raw(got)[] = addr;
-        fence();
     };
 }
 

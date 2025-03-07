@@ -1,3 +1,19 @@
+##
+
+ok i think the take away is once again that it can be multiple problems. 
+when i tried inserting an insane amount of fences that was before i moved the illegal instruction 
+catching into the compiler to run even when not FRANCA_BACKTRACE=true. 
+and maybe the thing where the terminal prints "illegal instruction" gets lost in the many levels of execing things idk. 
+(dito for `DEBUG_MY_MUTEX_BY_USING_PTHREAD`). 
+but with the signal handler, the problem is consistantly impossible debug assertions in inline.fr that look like memory 
+corruption. and using way more cas (on count/thread) in Mutex makes that pretty much go away. 
+and putting fence() in Mutex seems to fix both that and the call to a null jit_addr in `__got`. 
+(which makes sense, broken Mutex on ArenaAlloc and then your memory gets lots of garbage, and 
+inline.fr just happened to be a place that used QbeModule.forever and did some debug checks). 
+now i can do 100 runs on arm without crashing, so i think it's officially fixed? 
+i was just making the classic blunder of only changing one thing at a time 
+and if that didn't work, declaring that couldn't be the problem. 
+
 ## (Mar 6)
 
 - stop leaking file descriptors of pipes in subprocess.fr,

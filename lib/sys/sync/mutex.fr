@@ -23,10 +23,11 @@ fn lock(self: *Mutex) void = {
         while => MutexState.atomic_set(self.u.state&, .waiting) != .unlocked {
             self.wait();
         };
+        fence();
         my_thread: u32 = context(DefaultContext)[].thread_index.trunc();
-        prev_thread := u32.atomic_set(self.thread&, my_thread);
-        prev_count  := u32.atomic_set(self.count&, 1);
-        @debug_assert(prev_thread == 0 && prev_count == 0, "memory ordering problem?");
+        @debug_assert(self.thread == 0 && self.count == 0, "memory ordering problem?");
+        self.thread = my_thread;
+        self.count = 1;
     };
 }
 
@@ -48,19 +49,18 @@ fn try_lock(self: *Mutex) bool = {
     ::assert(!DEBUG_MY_MUTEX_BY_USING_PTHREAD, "TODO: DEBUG_MY_MUTEX_BY_USING_PTHREAD");
     @if(!use_threads) return(true);
     my_thread: u32 = context(DefaultContext)[].thread_index.trunc();
-    
-    // self.thread == my_thread 
-    if u32.cas(self.thread&, my_thread, my_thread) == my_thread {  // TODO: this can't be what you're supposed to do? but it sure seems to help
+    @debug_assert_ne(my_thread, 0, ":ThreadIdStartsAtOne uninit dynamic context?");
+    if self.thread == my_thread  {
         @debug_assert_ne(self.count, MAX_u32, "overflow mutex lock count"); 
-        u32.atomic_add(self.count&, 1);
+        self.count += 1;
         return(true);
     };
     
     if MutexState.cas(self.u.state&, .unlocked, .locked) == .unlocked {
-        @debug_assert_ne(my_thread, 0, ":ThreadIdStartsAtOne uninit dynamic context?");
-        prev_thread := u32.atomic_set(self.thread&, my_thread);
-        @debug_assert_eq(prev_thread, 0);
-        u32.atomic_set(self.count&, 1);
+        fence();
+        @debug_assert(self.thread == 0 && self.count == 0, "memory order problem");
+        self.thread = my_thread;
+        self.count = 1;
         return(true);
     };
     false
@@ -72,15 +72,16 @@ fn unlock(self: *Mutex) void = {
     @debug_assert_eq(self.thread, my_thread, "tried to unlock someone else's mutex");
     @debug_assert_ne(self.count, 0, "tried to unlock an already unlocked mutex");
     ::enum(MutexState);
-    u32.atomic_add(self.count&, MAX_u32);  // -1
+    self.count -= 1;
     if self.count == 0 {
-        u32.atomic_set(self.thread&, 0); // no thread has id 0
+        self.thread = 0; // no thread has id 0
         
         @if(DEBUG_MY_MUTEX_BY_USING_PTHREAD) {
             self.u.pthread_debug.unlock();
             return();
         };
-
+        
+        fence();
         prev := MutexState.atomic_set(self.u.state&, .unlocked);
         @match(prev) {
             fn locked()   => ();  // We're the only interested thread so we're done. 
