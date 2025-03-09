@@ -6,7 +6,8 @@ available to every program (you can access them with `import()` or `#use`).
 - collections
   - map: hash table. it's the type with a flat array (no linked lists of buckets). 
   - bit_set
-  - deque: dynamic array that tracks start/end so it's fast to push/pop from either end. 
+  - deque: dynamic array that tracks start/end so it's fast to push/pop from either end.
+  - enum_map: an array with named indices
 - alloc
   - fixed_block
 - bit_fields: pack values into an integer with less error prone bit shifting. 
@@ -17,8 +18,13 @@ available to every program (you can access them with `import()` or `#use`).
 - sys
   - sync
     - mutex
+    - atomics
+    - futex
+  - threads
+  - terminal: cli colours, interactive input
 - dynamic_lib
 - jump: dynamic nonlocal returns (setjmp/longjmp)
+- sort
 
 ## backend
 

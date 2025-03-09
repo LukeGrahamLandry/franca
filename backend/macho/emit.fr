@@ -388,8 +388,7 @@ fn emit_exe_fixups(e: *EmitMacho, chained: *List(u8)) void #inline = {
             // TODO: don't assume libc
             imports_bytes[s.got_lookup_offset] = construct(lib_ordinal = 1, weak = 0, name_offset = n);
             
-            mangled := @tfmt("_%", s.name); // :slow don't do an extra copy
-            append_padded_cstr(chained, mangled, 1);
+            append_sym_name(chained, s.name);
         };
     };
     zero_pad_to_align(chained, 4);
@@ -609,8 +608,7 @@ fn emit_reloc_symbols(e: *EmitMacho, chained: *List(u8)) void #inline = {
         // this math relies on there being one section per segment
         start: i64 = bitcast(e.load_commands[entry.section_number.zext() - 1].address);
         entry.symbol_address = bitcast(s.offset - segment_padding + start);
-        ugh := items(@format("_%", s.name) temp());
-        append_padded_cstr(chained, ugh, 1);
+        append_sym_name(chained, s.name);
         append_relocations(i + base, id[], m, e.relocations, e.load_commands);
         // TODO: assert they're all DataAbsolute becuse functions are in the same segment and you could just call them. 
     };
@@ -629,8 +627,7 @@ fn emit_reloc_symbols(e: *EmitMacho, chained: *List(u8)) void #inline = {
         @debug_assert(s.offset >= segment_padding, "what are you smoking?");
         start: i64 = bitcast(e.load_commands[entry.section_number.zext() - 1].address);
         entry.symbol_address = bitcast(s.offset - segment_padding + start);
-        ugh := items(@format("_%", s.name) temp());
-        append_padded_cstr(chained, ugh, 1);
+        append_sym_name(chained, s.name);
         // TODO: we probably don't want it to appear twice in the symbol table if it's a data export and also has local relocations
     };
     base += e.m.exports.len;
@@ -641,8 +638,7 @@ fn emit_reloc_symbols(e: *EmitMacho, chained: *List(u8)) void #inline = {
         entry.section_number = symbol_no_section; 
         entry.desc = 0; // TODO: for dynamic imports, 256 is ordinal 1.
         entry.name_offset = trunc(chained.len - strings_start);
-        ugh := items(@format("_%", s.name) temp());
-        append_padded_cstr(chained, ugh, 1);
+        append_sym_name(chained, s.name);
         append_relocations(i + base, id[], e.m, e.relocations, e.load_commands);
     };
     base += e.m.imports.len;
@@ -802,6 +798,12 @@ fn str_to_16_byte_value(s: Str) u128 = {
         };
     };
     (low = low, high = high)
+}
+
+fn append_sym_name(bytes: *List(u8), s: Str) void = {
+    bytes.push("_".ascii());
+    bytes.push_all(s);
+    bytes.push(0);
 }
 
 // this also works if you use 4096 but that seems strange to me. 

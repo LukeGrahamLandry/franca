@@ -1,0 +1,67 @@
+#asm #aarch64 #use("@/backend/arm64/bits.fr")
+fn fence() void = (
+    @bits(0b11010101000000110011, 0b1111, 0b10111111),  // DMB SY
+    ret()
+);
+
+#asm #x86_bytes #use("@/backend/amd64/bits.fr")
+fn fence() void = (fn(out) = @asm_x64(
+    0x0F, 0xAE, 0xF0, // MFENCE
+    PrimaryOp.Ret
+) out);
+
+// returns the old value. 
+fn cas($T: Type, p: *T, $update: @Fn(old: T) T) T #generic = {
+    prev := p[];
+    dowhile {
+        old := prev;
+        new := update(old);
+        prev = T.cas(p, old, new);
+        !T.same_bits(prev, old)
+    };
+    prev
+}
+
+fn cas($T: Type, p: *T, old: T, new: T) T #generic #inline = {
+    // TODO: sad that i don't want to use Qbe.Cls here
+    @if(type_is_wide(T), {
+        part0 :: fn(p: *T) void #ir(.cas0, .Kl);
+        part1 :: fn(old: T, new: T) T #ir(.cas1, .Kl);
+        part0(p);
+        part1(old, new)
+    }, {
+        part0 :: fn(p: *T) void #ir(.cas0, .Kw);
+        part1 :: fn(old: T, new: T) T #ir(.cas1, .Kw);
+        part0(p);
+        part1(old, new)
+    })
+}
+
+// This is kinda sad cause there's one cpu instruction to do it but 
+// it'd rather just implement the super atomic you can do everything 
+// with than all the special cases. 
+fn atomic_add($T: Type, p: *T, delta: T) T #generic #inline = {
+    cas(T, p, fn(old) => old + delta)
+}
+
+fn atomic_inc($T: Type, p: *T) T #generic #inline = 
+    atomic_add(T, p, 1);
+
+fn atomic_set($T: Type, p: *T, new: T) T #generic #inline = 
+    cas(T, p, fn(_) => new);
+
+fn type_is_wide(T: Type) bool #fold = @switch(size_of(T)) {
+    @case(4) => false;
+    @case(8) => true;
+    @default => panic("invalid size for type_is_wide");
+};
+
+fn same_bits($T: Type, a: T, b: T) bool #generic = {
+    @if(type_is_wide(T), {
+        eq :: fn(a: T, b: T) bool #ir(.ceql, .Kw) #intrinsic(.Eq);
+        eq(a, b)
+    }, {
+        eq :: fn(a: T, b: T) bool #ir(.ceqw, .Kw) #intrinsic(.Eq);
+        eq(a, b)
+    })
+}

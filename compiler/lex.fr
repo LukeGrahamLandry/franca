@@ -150,13 +150,13 @@ fn pop(self: *Lexer) *Token = {
     self.token&
 }
 
-fn skip_to_closing_squigle(self: *Lexer) Ty(Str, Span) = {
+fn skip_to_closing_squigle(self: *Lexer) ?Ty(Str, Span) = {
     start := self.start;
     self.current += 1;
     depth := 1;
     whileb (=> depth.gt(0)) { ($break) |
         if self.eat_white_space_hit_end() {
-            break();
+            return(.None);
         };
         // TODO: skip #! ...... \n but it only matters if you had unnested stuff there which you shouldn't -- Apr 28
         @switch(self.peek_c()) {
@@ -180,7 +180,7 @@ fn skip_to_closing_squigle(self: *Lexer) Ty(Str, Span) = {
     span := self.root.subspan(start.trunc(), self.current.trunc());
     self.start = self.current;
     self.peek();
-    (text, span)
+    (Some = (text, span))
 }
 
 fn skip_string(self: *Lexer) Ty(Str, bool, bool) = {
@@ -389,7 +389,12 @@ fn eat_white_space_hit_end(self: *Lexer) bool = {
         self.put_token(.Eof);
         return(true);
     };
-    self.line += import("@/lib/tokenize.fr")'skip_whitespace(fn(n) => self.peek_c(n), => { self.current += 1; }, true, true, false);
+    unterminated := false;
+    self.line += import("@/lib/tokenize.fr")'skip_whitespace(fn(n) => self.peek_c(n), => { self.current += 1; }, true, true, unterminated&);
+    if unterminated {
+        self.error(.UnterminatedComment);
+        return(true);
+    };
     end := self.current >= self.src.len;
     if end {
         self.start = self.current;

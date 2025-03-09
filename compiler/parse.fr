@@ -52,6 +52,9 @@ fn finish_pending_stmts(self: *Parser, id: WaitingParse) Result(RawList(FatStmt)
             zone := zone_begin(.Parse); // TODO: defer
             e := self.parse_block_until_squiggle(true);
             zone_end(zone);
+            if self.lex.current != src_span.span.len() {
+                return(@report_error("parse did not consume whole span (mismatched '}'? missing ';' after decl?)")(return, self.last.span));
+            };
             self.tasks[id.id] = (Expr = @err("ICE: WaitingParse id was stmts (which aren't reused)."));
             @match(e) {
                 fn Ok(e) => (Ok = e.expr.Block.body);
@@ -138,7 +141,8 @@ fn parse_decl_or_start_expr(self: *Parser, name: Symbol) Result(FatStmt, *Compil
         b := self.alloc.box(Binding);
         b[] = @try(self.parse_binding_after_name(name, .Var)) return;
         s: Stmt = (Decl = b);
-        if !self.maybe(.Semicolon) {
+        // :HackFakeSquiggle
+        if !self.maybe(.Semicolon) && !self.last.type&.is(.RightSquiggle) {
             // TODO: maybe i should allow it if its a function declaration because that feels better and i do it for overload set stmts. 
             //       but that's a slippery slope to macro calls for struct declations, which i don't want becuase it feels you might accidently use the two arg version of the macro. 
             @report_error("expected semicolon after declaration") (return, self.last.span);
@@ -228,7 +232,7 @@ fn after_expr_stmt_prefix(self: *Parser, e: FatExpr) Result(FatStmt, *CompileErr
         @default => self.stmt((Eval = e), loc);
     };
     
-    if !(@is(self.peek_tag(), .Semicolon, .RightSquiggle, .Eof)) {
+    if !(@is(self.peek_tag(), .Semicolon, .RightSquiggle, .Eof)) && self.last.type&.tag() != .RightSquiggle {
         @report_error("expected ';' (discard) or '}' (return from block) after expr stmt") (return, self.last.span);
     };
     
@@ -427,11 +431,14 @@ fn parse_func(self: *Parser, allow_empty: bool) Result(Func, *CompileError) = {
     self.pop();
     
     if !may_capture {
-        @if_let(self.peek()) fn LeftSquiggle() => {
-            src, span := self.lex&.skip_to_closing_squigle();
+        @if_let(self.peek()) fn LeftSquiggle() => { 
+            src, span := or self.lex&.skip_to_closing_squigle() {
+                @report_error("unterminated block (mismatched '{')") (return, self.last.span)
+            };
             self.pop(); // TODO: why do i need this? -- Jun 22
             id := self.push_parse(src, span);
             body := self.expr((GetParsed = id), loc);
+            self.last.type = .RightSquiggle; // :HackFakeSquiggle
             return((Ok = make_func(fn_def, (Some = body), may_capture)));
         };
     };
@@ -646,6 +653,10 @@ fn parse_squiggle(self: *Parser, prev: FatExpr, prec: Prec) ParseRes #once = {
     func := make_func(fn_def, (Some = body), true);
     callback := self.expr((Closure = self.box(func)), loc);
     self.push_arg(prev&, callback);
+    
+    if self.lex.line != self.lex.old_line { 
+        return(Ok = prev);
+    };
     
     @if_let(self.peek()) 
         fn Symbol(name) => {
@@ -1213,10 +1224,9 @@ fn report_error(fmt_args: FatExpr, ret_loc: FatExpr) FatExpr #macro = {
     @assert_eq(ret_loc.expr&.tag(), Expr.Tag().Tuple, "expected tuple");
     args := ret_loc.expr.Tuple.items();
     result := @{
-        lst := @format(@[fmt_args]) temp();
+        msg := @tfmt(@[fmt_args]);
         mem := general_allocator().alloc(CompileError, 1);  // TODO: leak
-        xxx := lst.items();
-        mem.ptr[] = (Parse = (span = @[args[1]], msg = xxx));
+        mem.ptr[] = (Parse = (span = @[args[1]], msg = msg));
         @[args[0]](Err = mem.ptr);
         unreachable()
     };

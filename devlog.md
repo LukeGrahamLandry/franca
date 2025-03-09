@@ -1,4 +1,9 @@
-##
+## 
+
+- be better about detecting unterminated blocks and comments
+- don't require semicolons after blocks (treat `}\n` the same as `};\n`)
+
+## (Mar 7)
 
 ok i think the take away is once again that it can be multiple problems. 
 when i tried inserting an insane amount of fences that was before i moved the illegal instruction 
