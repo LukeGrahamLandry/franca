@@ -167,54 +167,56 @@ fn write_export_bounce(self: *EmitQbe, fid: FuncId) void = {
 
 fn emit_constant(self: *EmitQbe, id: BakedVarId) void = {
     self.out&.reserve(100);
-    value := {self.comp.vtable.get_baked}(self.comp.data, id)[]._1;
+    value := self.comp.get_baked(id);
     idx: i64 = id.id.zext();
     
-    @match(value&) {
-        (fn Zeros(len) => {
-            @fmt(self.out&.current(), "data $g% = { z % }\n", idx, len[]);
-        });
-        (fn Bytes(bytes) => {
-            // TODO: emit string as characters if they're in a sane range. 
-            @fmt(self.out&.current(), "data $g% = { b ", idx);
-            for(bytes[].items()) {b|
-                @fmt(self.out&.current(), "% ", @as(i64) b.zext());
-            };
-            // self.pop_trailing_comma(); // add back when remove below
-            self.out&.push_all("0 }\n"); // TODO: hack cause im to lazy to ask for debug names as cstr
-        });
-        (fn VoidPtrArray(parts) => {
-            // it feels like this should be ok cause it works for bytes 
-            // data $g9 = { l $arena_alloc__2375 $arena_free__2771  }
-            // but no i get two frees, so do it this way. idk if qbe bug or im just failing at reading the docs
-            // data $g9 = { l $arena_alloc__2375, l $arena_free__2771  }
-            @fmt(self.out&.current(), "data $g% = { ", idx);
-            for(parts[].items()){inner|
-                self.out&.reserve(20);
-                @match(inner) {
-                    (fn FnPtr(f) => {
-                        // TODO: hack because of new deduplication
-                        func := self.comp.get_function(f);
-                        @if_let(func.body&) fn Redirect(inner) => {
-                            f = inner[];
-                        };
-                        
-                        @fmt(self.out&.current(), " l $%, ", (self, f));
-                        // TODO: make sure we emitted the function. 
-                    });
-                    (fn AddrOf(id) => {
-                        @fmt(self.out&.current(), " l $g%, ", @as(i64) id.id.zext());
-                    });
-                    (fn Num(v) => {
-                        // TODO: small prims
-                        @fmt(self.out&.current(), " l %, ", v.value);
-                    });
+    if value.relocations.len == 0 {
+        @match(value.template) {
+            fn Zeroes(len) => {
+                @fmt(self.out&.current(), "data $g% = { z % }\n", idx, len);
+            }
+            fn Bytes(bytes) => {
+                // TODO: emit string as characters if they're in a sane range. 
+                @fmt(self.out&.current(), "data $g% = { b ", idx);
+                for bytes { b |
+                    @fmt(self.out&.current(), "% ", @as(i64) b.zext());
                 };
-            };
-            self.pop_trailing_comma();
-            self.out&.push_all(" }\n");
-        });
-    }
+                // self.pop_trailing_comma(); // add back when remove below
+                self.out&.push_all("0 }\n"); // TODO: hack cause im to lazy to ask for debug names as cstr
+            }
+        };
+        return();
+    };
+    
+    // it feels like this should be ok cause it works for bytes 
+    // data $g9 = { l $arena_alloc__2375 $arena_free__2771  }
+    // but no i get two frees, so do it this way. idk if qbe bug or im just failing at reading the docs
+    // data $g9 = { l $arena_alloc__2375, l $arena_free__2771  }
+    @fmt(self.out&.current(), "data $g% = { ", idx);
+    bake_iter_legacy value { inner | 
+        self.out&.reserve(20);
+        @match(inner) {
+            (fn FnPtr(f) => {
+                // TODO: hack because of new deduplication
+                func := self.comp.get_function(f);
+                @if_let(func.body&) fn Redirect(inner) => {
+                    f = inner[];
+                };
+                
+                @fmt(self.out&.current(), " l $%, ", (self, f));
+                // TODO: make sure we emitted the function. 
+            });
+            (fn AddrOf(id) => {
+                @fmt(self.out&.current(), " l $g%, ", @as(i64) id.id.zext());
+            });
+            (fn Num(v) => {
+                // TODO: small prims
+                @fmt(self.out&.current(), " l %, ", v.value);
+            });
+        };
+    };
+    self.pop_trailing_comma();
+    self.out&.push_all(" }\n");
 }
 
 fn emit_special(self: *EmitQbe, f_id: FuncId, body: *FuncImpl, func: *Func, bc: *FnBody, pending: *List(FuncId)) bool = {

@@ -500,13 +500,17 @@ fn emit_ret(self: *EmitIr, result: Qbe.Ref) void = {
     _, k := self.load_op(ret); 
     scalar := k != .Ke;
 
+    if self.blk.jmp.type == .hlt {
+        return();
+    };
+    
     self.blk.jmp.arg = result;
     @if_else {
         @if(self.blk.jmp.type != .Jxxx) => {
             // TODO: assert ret=Never?
         };
         @if(ret.is_never()) => {
-            self.blk.jmp.type = .hlt;
+            self.blk.jmp = (type = .hlt, arg = QbeNull);
         };
         @if(self.program.get_info(ret)[].stride_bytes == 0) => {
             self.blk.jmp.type = .ret0;
@@ -1093,7 +1097,7 @@ fn emit_block_expr(self: *EmitIr, expr: *FatExpr, p: Placement) CRes(Qbe.Ref) #o
         // TODO: this is wrong when nested
         //junk := self.blocks&.unordered_remove(return_block_index); 
         //@debug_assert(ret.blk.identical(junk.unwrap()));
-        ret.blk.jmp.type = .hlt;
+        ret.blk.jmp = (type = .hlt, arg = QbeNull);
         // We did generate slightly more noisy code by `unify_placement` earlier than necessary. 
     };
     (Ok = dest)
@@ -1102,7 +1106,6 @@ fn emit_block_expr(self: *EmitIr, expr: *FatExpr, p: Placement) CRes(Qbe.Ref) #o
 fn emit_constant(self: *EmitIr, value: *Values, p: Placement, expr_ty: Type) CRes(Qbe.Ref) #once = {
     if(p&.is(.Discard), => return(Ok = QbeNull));  // TODO: bake_relocatable_value side effect? 
     info := self.program.get_info(expr_ty);
-    
     
     // :SLOW all_zeroes is redundant with emit_relocatable_constant but for now we can't emit_relocatable_constant_body on something
     // with small fields + pointers, but its fine to emit as bytes if all zeros. 
@@ -1135,26 +1138,32 @@ fn emit_constant(self: *EmitIr, value: *Values, p: Placement, expr_ty: Type) CRe
     
     @match(self.when) {
         fn Aot() => {
-            if !info.contains_pointers() {
-                id := @try(self.program.emit_relocatable_constant(expr_ty, value.bytes())) return;
-                self.reference_constant(id);
+            id := @try(self.program.emit_relocatable_constant(expr_ty, value.bytes())) return;
+            self.reference_constant(id);
+            baked := self.program.get_baked(id);
+            if baked.relocations.len == 0 || value.len() > 40 || value.len().mod(8) != 0 {  // last one unrechable because alignment?
                 dest := self.get_memory(p, expr_ty);
                 src := self.as_ref(AddrOf = id);
                 self.blit(dest, src, info.stride_bytes.zext());
                 return(Ok = dest);
             };
-            to_zero: ReadBytes = (bytes = value.bytes(), i = 0);
-            self.program.zero_padding(expr_ty, to_zero&);  // Needed for reproducible builds!
             
-            out  := @try({self.program.vtable.emit_relocatable_constant_body}(self.program.data, value.bytes(), expr_ty, false)) return;
-            if out.len == 1 {
-                v := self.as_ref(out[0]);
-                return(Ok = self.scalar_result(p, v, expr_ty));
+            // if it's small, load 8 byte chunks now instead of doing a runtime blit. 
+            // This generates better code for constant slices/allocators/etc 
+            // (lets the backend see the individual fields are constant instead of treating it as a mutable static). 
+            if baked.relocations.len == 1 && baked.len() == 8 {
+                bake_iter_legacy baked { part |
+                    v := self.as_ref(part);
+                    return(Ok = self.scalar_result(p, v, expr_ty));
+                };
             };
+            
             dest := self.get_memory(p, expr_ty); 
-            enumerate out { i, part | 
-                r := self.as_ref(part[]);
+            i := 0;
+            bake_iter_legacy baked { part |
+                r := self.as_ref(part);
                 self.emit(.storel, .Kw, QbeNull, r, self.offset(dest, i * 8));
+                i += 1;
             };
             (Ok = dest)
         }
@@ -1184,12 +1193,11 @@ fn reference_constant(self: *EmitIr, id: BakedVarId) void = {
     seen := shared.constants_used&;
     if !seen.get(id.id.zext()) {
         seen.set(id.id.zext());
-        _, value := {self.program.vtable.get_baked}(self.program.data, id)[];
-        @if_let(value) fn VoidPtrArray(it) => each it { it | 
-            @match(it) {
-                fn AddrOf(it) => self.reference_constant(it[]);
-                fn FnPtr(it) => self.pending.push(it[]);  // HACK
-                @default => ();
+        value := self.program.get_baked(id);
+        for value.relocations { it |
+            @match(it.target) {
+                fn BakedVarId(it) => self.reference_constant(it);
+                fn FuncId(it) => self.pending.push(it);  // HACK
             };
         };
         self.new_constants&.push(id);
@@ -1289,7 +1297,7 @@ fn emit_call_if(self: *EmitIr, arg: *FatExpr, p: Placement) CRes(Qbe.Ref) #once 
     self.blk = join_blk;
     if !joined {
         // both branches diverged. 
-        join_blk.jmp.type = .hlt; // TODO: remove the useless block 
+        join_blk.jmp = (type = .hlt, arg = QbeNull); // TODO: remove the useless block 
     };
     (Ok = join_val)
 }
@@ -1370,7 +1378,7 @@ fn emit_switch(self: *EmitIr, arg: *FatExpr, p: Placement) CRes(Qbe.Ref) #once =
     };
     
     if !rejoined {
-        end_blk.jmp.type = .hlt; // TODO: remove the useless block
+        end_blk.jmp = (type = .hlt, arg = QbeNull); // TODO: remove the useless block
     };
     self.blk = end_blk;
     @debug_assert_eq(ss[n].case_count, parts.cases.len);
@@ -1781,7 +1789,7 @@ fn repr_transparent(it: *TypeInfo.get_variant_type(.Struct)) ?Type = {
 
 fn hlt_if_never(self: *EmitIr, ty: Type) void #inline = {
     if ty.is_never() && self.blk.jmp.type == .Jxxx {
-        self.blk.jmp.type = .hlt;
+        self.blk.jmp = (type = .hlt, arg = QbeNull);
     };
 }
 

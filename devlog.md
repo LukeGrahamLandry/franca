@@ -1,7 +1,20 @@
-## 
+## (Mar 9/10) 
 
 - be better about detecting unterminated blocks and comments
 - don't require semicolons after blocks (treat `}\n` the same as `};\n`)
+- farm_game aot doesn't work with how im doing non-8-aligned baked constants. 
+
+but instead of adding more hack on top, i'd rather fix: the way im representing baked values is kinda dumb. 
+I split them into 8 bytes at a time tagged with whether it's a pointer or not and what it points to. 
+so it's painful to deal with fields that are less than 8 bytes, 
+and it uses 3x as much memory to represent things that have a pointer but are mostly raw bytes. 
+and then i translate that to a different data structure (that has the same problems) to send to the backend 
+to handle on another thread so it doesn't fight with codegen when it needs to do fixups. 
+I think it would be more sane to store the bytes and pointer relocations separately. 
+
+- made an attempt. fixed farm_game but broke self compile which is funny. 
+hmm, i do in fact try to use the comptime value after it's emitted so i can't just set pointers to zero. 
+- fixed panicking as lass expression in a function that returns a scalar (it used to confuse ssacheck). 
 
 ## (Mar 7)
 

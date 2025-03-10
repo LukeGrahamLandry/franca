@@ -436,7 +436,7 @@ fn join_codegen_thread(shared: *CodegenShared) void = {
 
 // this puts a bunch of stuff in temp(), it's expected to be used in the context of a CodegenEntry. 
 fn emit_constant(comp: CompCtx, m: *QbeModule, id: BakedVarId, out: *List(Qbe.Dat)) void = {
-    _, value := {comp.vtable.get_baked}(comp.data, id)[];
+    value := comp.get_baked(id);
     idx: i64 = id.id.zext();
     
     lnk := temp().box(Qbe.Lnk);
@@ -452,46 +452,49 @@ fn emit_constant(comp: CompCtx, m: *QbeModule, id: BakedVarId, out: *List(Qbe.Da
         dat := next_dat();
         dat.type = .DStart;
     };
-    @match(value&) {
-        fn Zeros(len) => {
-            dat := next_dat();
-            dat.type = .DZ;
-            dat.u.num = len[];
-        }
-        fn Bytes(bytes) => {
-            dat := next_dat();
-            dat.type = .DB;
-            dat.is_str = true;
-            dat.u.str = bytes[].items();
-        }
-        fn VoidPtrArray(parts) => {
-            for(parts[].items()){inner|
+    
+    if value.relocations.len == 0 {
+        @match(value.template) {
+            fn Zeroes(len) => {
                 dat := next_dat();
-                @match(inner) {
-                    (fn FnPtr(f) => {
-                        dat.type = .DL;
-                        // TODO: hack because of new deduplication
-                        func := comp.get_function(f);
-                        @if_let(func.body&) fn Redirect(inner) => {
-                            f = inner[];
-                        };
-                        dat.is_ref = true;
-                        dat.u.ref = (id = m.intern(comp.fmt_fn_name(f)), off = 0);
-                        // TODO: make sure we emitted the function. 
-                    });
-                    (fn AddrOf(id) => {
-                        dat.type = .DL;
-                        dat.is_ref = true;
-                        fuck := @tfmt("g%", @as(i64) id.id.zext());
-                        dat.u.ref = (id = m.intern(fuck), off = 0);
-                    });
-                    (fn Num(v) => {
-                        dat.type = .DL; // TODO: small prims
-                        dat.u.num = v.value;
-                    });
-                };
+                dat.type = .DZ;
+                dat.u.num = len;
+            }
+            fn Bytes(bytes) => {
+                dat := next_dat();
+                dat.type = .DB;
+                dat.is_str = true;
+                dat.u.str = bytes;
+            }
+        };
+    } else {
+        // TODO: just poke in the symbols and pass the whole thing to the backend thread. :SLOW
+        bake_iter_legacy value { inner |
+            dat := next_dat();
+            @match(inner) {
+                (fn FnPtr(f) => {
+                    dat.type = .DL;
+                    // TODO: hack because of new deduplication
+                    func := comp.get_function(f);
+                    @if_let(func.body&) fn Redirect(inner) => {
+                        f = inner[];
+                    };
+                    dat.is_ref = true;
+                    dat.u.ref = (id = m.intern(comp.fmt_fn_name(f)), off = 0);
+                    // TODO: make sure we emitted the function. 
+                });
+                (fn AddrOf(id) => {
+                    dat.type = .DL;
+                    dat.is_ref = true;
+                    fuck := @tfmt("g%", @as(i64) id.id.zext());
+                    dat.u.ref = (id = m.intern(fuck), off = 0);
+                });
+                (fn Num(v) => {
+                    dat.type = .DL; // TODO: small prims
+                    dat.u.num = v.value;
+                });
             };
-        }
+        };
     };
     dat := next_dat();
     dat.type = .DEnd;

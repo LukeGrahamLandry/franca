@@ -7,6 +7,7 @@
 
 ##
 
+- compiler/values.fr has a big comment
 - :TodoLinux
 - 1331 relocations seems like a lot
 - ask the os for the correct page size

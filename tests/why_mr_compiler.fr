@@ -2,19 +2,22 @@
 // - emit_relocatable_constant_body had to dump_dirty/__clear_cache
 // that wasn't the problem i'm looking for tho.
 #test fn bus_error_baking_constant() = {
-    MeArena :: @struct(
-        parent: Alloc,
-        base_size: i64,
-    );
+    MeArena :: @struct {
+        Inner :: @struct {
+            parent: Alloc;
+            base_size: i64;
+        };
+        i: Inner;
+    };
     
     fn bake_relocatable_value(self: *MeArena) Slice(BakedEntry) = {
         bytes := MeArena.cast_to_bytes(self);
-        entries := dyn_bake_relocatable_value(bytes, MeArena, true);
+        entries := dyn_bake_relocatable_value(bytes, MeArena.Inner, true);
         entries
     }
     
-    constant :: @static(MeArena) (parent = page_allocator, base_size = 1234); 
-    x := constant[].base_size;
+    constant :: @static(MeArena) (i = (parent = page_allocator, base_size = 1234)); 
+    x := constant[].i.base_size;
     assert_eq(x, 1234);
 }
 
@@ -23,19 +26,22 @@
 // so the thing was too short and you were reading off the end or getting later fields.
 // but only if the payload had pointers because otherwise you'd just emit the bytes. 
 #test fn baked_constant_tagged_padding() = {
-    MeArena :: @struct(
-        chunk: ?*i64,
-        base_size: i64,
-    );
+    MeArena :: @struct {
+        Inner :: @struct {
+            chunk: ?*i64;
+            base_size: i64;
+        };
+        i: Inner;
+    };
     
     fn bake_relocatable_value(self: *MeArena) Slice(BakedEntry) = {
         bytes := MeArena.cast_to_bytes(self);
-        entries := dyn_bake_relocatable_value(bytes, MeArena, true);
+        entries := dyn_bake_relocatable_value(bytes, MeArena.Inner, true);
         entries
     }
 
-    constant :: @static(MeArena) (chunk = .None, base_size = 1234); 
-    x := constant[].base_size;
+    constant :: @static(MeArena) (i = (chunk = .None, base_size = 1234)); 
+    x := constant[].i.base_size;
     assert_eq(x, 1234);
 }
 
@@ -259,4 +265,34 @@
     names :: A.get_enum_names();
     assert_eq(names[0], "hello");
     assert_eq(names[1], "world");
+}
+
+fn baked_align_padding() #test = {
+    Outer :: @struct {
+        inner: Inner = ();
+        // 4 bytes of padding here
+        eight: *i64;
+    };
+    Inner :: @struct {
+        a: u32 = 1;
+        b: u32 = 2;
+        c: u32 = 3;
+    };
+    
+    constant := @static(Outer) (eight = @static(i64) 19);
+    assert_eq(constant[].eight[] + constant[].inner.a.zext(), 20);
+}
+
+fn let_me_panic() #test = {
+    a :: fn(cond: bool) i64 #noinline = {
+        if cond {
+            crash();
+        };
+        123
+    };
+    crash :: fn() i64 #noinline = {
+        panic("This can't happen")
+    };
+    
+    a(false);
 }

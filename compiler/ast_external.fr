@@ -11,10 +11,6 @@ fn get_type(c: CompCtx, type: Type) *TypeInfo = {
     {c.vtable.get_type_info}(c.data, type)
 }
 
-fn get_baked(c: CompCtx, id: BakedVarId) *Ty(rawptr, BakedVar) = {
-    {c.vtable.get_baked}(c.data, id)
-}
-
 fn get_build_options(c: CompCtx) *BuildOptions = {
     {c.vtable.get_build_options}(c.data)
 }
@@ -672,3 +668,83 @@ fn fill_backend_vtable(vtable: *ImportVTable) void = {
     hack := @as(CodegenWorker) codegen_thread_main;
     vtable.codegen_thread_main = ptr_cast_unchecked(@type hack, @type vtable.codegen_thread_main, hack&)[];
 }
+
+////////////////////// 
+/// Bake Constants /// 
+// See compiler/values.fr
+
+BakedValue :: @struct {
+    template: @tagged(Bytes: []u8, Zeroes: i64);
+    relocations: []BakedReloc = empty();  // These must be in order (by .off)
+    // TODO: expose these to the frontend in a sane way. 
+    align: u32 = 1;
+    export: bool = false;
+};
+
+BakedReloc :: @struct {
+    target: @tagged(FuncId: FuncId, BakedVarId: BakedVarId);
+    off: u32;
+    // TODO: you don't want this here if you want to allow multiple AOT modules in one frontend run.  
+    backend_symbol: u32 = MAX_u32;
+};
+
+fn get_baked(c: CompCtx, id: BakedVarId) *BakedValue = 
+    BakedValue.ptr_from_raw((c.vtable.get_baked)(c.data, id));
+
+fn bake_translate_legacy(legacy: []BakedEntry, bytes: *List(u8), relocs: *List(BakedReloc), base: u32) void = {
+    off: u32 = 0;
+    for legacy { it |
+        continue :: local_return;
+        off += 8;
+        
+        // TODO: This (not just setting the value to 0 when it's a pointer)
+        //       is a hack because it aliases the comptime bytes and sometimes
+        //       we need to use it at comptime even after we emit for AOT. 
+        dest := bytes.reserve_type(i64);
+        @if_let(it) fn Num(int) => {
+            dest[] = int.value;
+        };
+        relocs.push(off = off - 8 + base, target = @match(it) {
+            fn Num(_) => continue();
+            fn FnPtr(it) => (FuncId = it);
+            fn AddrOf(it) => (BakedVarId = it);
+        });
+    };
+}
+
+fn bake_collect_legacy(value: *BakedValue, a: Alloc) []BakedEntry = {
+    out := BakedEntry.list(value.len() / 8, a);
+    bake_iter_legacy(value, fn(it) => out&.push(it));
+    out.items()
+}
+
+fn bake_iter_legacy(value: *BakedValue, $body: @Fn(legacy: BakedEntry) void) void = {
+    off := 0;
+    size := value.len();
+    next := 0;
+    bytes: []u8 = @match(value.template) {
+        fn Bytes(it) => it;
+        fn Zeroes() => empty();
+    };
+    while => off < size {
+        legacy: BakedEntry = (Num = (value = if(bytes.len == 0, => 0, => bytes&.pop_type(i64)[])));
+        if value.relocations.len > next {
+            r := value.relocations.index(next);
+            if r.off == off.trunc() {
+                next += 1;
+                legacy = @match(r.target) {
+                    fn FuncId(it) => (FnPtr = it);
+                    fn BakedVarId(it) => (AddrOf = it);
+                };
+            };
+        };
+        off += 8;
+        body(legacy);
+    };
+    @debug_assert_eq(next, value.relocations.len, "some relocs not in range");
+}
+
+fn len(self: *BakedValue) i64 = @match(self.template&) {
+    fn Bytes(it)   => it.len;
+    fn Zeroes(len) => len[];
+};

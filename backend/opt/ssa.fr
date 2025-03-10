@@ -264,22 +264,7 @@ fn adduse(tmp: *Qbe.Tmp, ty: Qbe.UseType, b: *Qbe.Blk, ptr: rawptr) void #inline
     };
    
     @debug_assert(tmp.nuse >= 0, "negative nuse");
-    n: i64 = tmp.nuse.zext();
-    tmp.nuse += 1;
-    tmp.use&.grow(n + 1);
-    u := tmp.use[n]&;
-    u.type = ty;
-    u.bid = b.id;
-    @match(ty) {
-        fn UPhi() => {
-            u.u.phi = Qbe.Phi.ptr_from_raw(ptr);
-        }
-        fn UIns() => {
-            u.u.ins = Qbe.Ins.ptr_from_raw(ptr);
-        }
-        fn UJmp() => ();
-        @default => unreachable();
-    };
+    push(tmp.use&, tmp.nuse&, (type = ty, bid = b.id, u = (r = ptr)));
 }
 
 fn clear_usage_info(f: *Qbe.Fn) void = {
@@ -334,7 +319,7 @@ fn ssacheck(f: *Qbe.Fn) void = {
             @panic("ssa temporary %% defined more than once in $%", "%", t.name(), f.name());
         };
         if t.nuse > 0 && t.ndef == 0 {
-            report_error(t, f.rpo[t.use[0].bid.zext()]);
+            report_error(t, f.rpo[t.use[0].bid.zext()], "(no def)");
         }
     };
     for_blocks f { b |
@@ -346,11 +331,11 @@ fn ssacheck(f: *Qbe.Fn) void = {
                 bu := f.rpo[u.bid.zext()];
                 if (u.type == .UPhi) {
                     if phicheck(u.u.phi, b, r) {
-                        report_error(t, bu);
+                        report_error(t, bu, "(non-dom phi arg)");
                     }
                 } else {
                      if !bu.identical(b) && !sdom(b, bu) {
-                        report_error(t, bu);
+                        report_error(t, bu, "(non-dom phi)");
                     }
                 };
             }
@@ -363,24 +348,24 @@ fn ssacheck(f: *Qbe.Fn) void = {
             each t.uses() { u |
                 bu := f.rpo[u.bid.zext()];
                 if (u.type == .UPhi) {
-                    if(phicheck(u.u.phi, b, r), => report_error(t, bu));
+                    if(phicheck(u.u.phi, b, r), => report_error(t, bu, "(non-dom phi arg)"));
                 } else {
                     if bu.identical(b) {
-                        if(u.type == .UIns && u.u.ins.ptr_diff(i) >= 0, => report_error(t, bu));
+                        if(u.type == .UIns && u.u.ins.ptr_diff(i) >= 0, => report_error(t, bu, "(use early)"));
                     } else {
-                        if(!sdom(b, bu), => report_error(t, bu));
+                        if(!sdom(b, bu), => report_error(t, bu, "(non-dom ins)"));
                     }
                 }
             }
         }
     };
     
-    report_error :: fn(t: *Qbe.Tmp, bu: *Qbe.Blk) void => {
+    report_error :: fn(t: *Qbe.Tmp, bu: *Qbe.Blk, reason: Str) void => {
         printfn(f, f.globals.debug_out);
         if t.visit != 0 {
-            @panic("%% violates ssa invariant", "%", t.name());
+            @panic("%% violates ssa invariant %", "%", t.name(), reason);
         } else {
-            @panic("ssa temporary %% is used undefined in @% of @%", "%", t.name(), bu.name(), f.name());
+            @panic("ssa temporary %% is used undefined in @% of @% %", "%", t.name(), bu.name(), f.name(), reason);
         }
     };
 }

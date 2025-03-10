@@ -286,7 +286,7 @@ fn write_export_bounce(self: *EmitLlvm, fid: FuncId) void = {
 
 fn emit_constant(self: *EmitLlvm, id: BakedVarId) void = {
     self.out&.reserve(100);
-    value := self.comp.get_baked(id)[]._1;
+    value := self.comp.get_baked(id);
     idx: i64 = id.id.zext();
     
     // :build_options_wasm
@@ -300,63 +300,65 @@ fn emit_constant(self: *EmitLlvm, id: BakedVarId) void = {
     // -- Aug 19
     wasm32 := self.comp.get_build_options()[].wasm32;
     
-    @match(value&) {
-        (fn Zeros(len) => {
-            @fmt(self.out&.current(), "@g% = private unnamed_addr global [% x i8] zeroinitializer\n", idx, len[]);
-        });
-        (fn Bytes(bytes) => {
-            // TODO: emit string as characters if they're in a sane range. 
-            
-            @fmt(self.out&.current(), "@g% = private unnamed_addr global [% x i8] c\"", idx, bytes.len);
-            for(bytes[].items()) {b|
-                if b != "\\".ascii() &&  b != "\"".ascii() && b >= 32 && b <= 126 {
-                    self.out&.current().push(b);
+    if value.relocations.len == 0 {
+        @match(value.template) {
+            (fn Zeroes(len) => {
+                @fmt(self.out&.current(), "@g% = private unnamed_addr global [% x i8] zeroinitializer\n", idx, len);
+            });
+            (fn Bytes(bytes) => {
+                // TODO: emit string as characters if they're in a sane range. 
+                
+                @fmt(self.out&.current(), "@g% = private unnamed_addr global [% x i8] c\"", idx, bytes.len);
+                for(bytes) {b|
+                    if b != "\\".ascii() &&  b != "\"".ascii() && b >= 32 && b <= 126 {
+                        self.out&.current().push(b);
+                    } else {
+                        self.out&.current().push("\\".ascii());
+                        push_hex_byte(self.out&.current(), b, true);
+                    };
+                };
+                //self.out&.push_all("\\00\"\n"); // TODO: hack cause im to lazy to ask for debug names as cstr
+                self.out&.push_all("\"\n"); // TODO: hack cause im to lazy to ask for debug names as cstr
+                
+                //@fmt(self.out&.current(), "@g% = private unnamed_addr global [% x i8] [", idx, bytes.len + 1);
+                //for(bytes[].items()) {b|
+                //    @fmt(self.out&.current(), " i8 %,", @as(i64) b.zext());
+                //};
+                //// self.pop_trailing_comma(); // add back when remove below
+                //self.out&.push_all("i8 0]\n"); // TODO: hack cause im to lazy to ask for debug names as cstr
+            });
+        };
+        return();
+    };
+
+    @fmt(self.out&.current(), "@g% = private unnamed_addr global [% x i64] [", idx, value.len() / 8);
+    bake_iter_legacy value { inner |
+        self.out&.reserve(20);
+        @match(inner) {
+            (fn FnPtr(f) => {
+                f = self.comp.follow_redirects(f);  // TODO: hack because of new deduplication
+                if wasm32 {
+                    @fmt(self.out&.current(), "i64 bitcast (<2 x i32> <i32 ptrtoint (ptr @\"%\" to i32), i32 0> to i64),", (self, f));
                 } else {
-                    self.out&.current().push("\\".ascii());
-                    push_hex_byte(self.out&.current(), b, true);
+                    @fmt(self.out&.current(), "i64 ptrtoint (ptr @\"%\" to i64),", (self, f));
                 };
-            };
-            //self.out&.push_all("\\00\"\n"); // TODO: hack cause im to lazy to ask for debug names as cstr
-            self.out&.push_all("\"\n"); // TODO: hack cause im to lazy to ask for debug names as cstr
-            
-            //@fmt(self.out&.current(), "@g% = private unnamed_addr global [% x i8] [", idx, bytes.len + 1);
-            //for(bytes[].items()) {b|
-            //    @fmt(self.out&.current(), " i8 %,", @as(i64) b.zext());
-            //};
-            //// self.pop_trailing_comma(); // add back when remove below
-            //self.out&.push_all("i8 0]\n"); // TODO: hack cause im to lazy to ask for debug names as cstr
-        });
-        (fn VoidPtrArray(parts) => {
-            @fmt(self.out&.current(), "@g% = private unnamed_addr global [% x i64] [", idx, parts.len);
-            for(parts[].items()){inner|
-                self.out&.reserve(20);
-                @match(inner) {
-                    (fn FnPtr(f) => {
-                        f = self.comp.follow_redirects(f);  // TODO: hack because of new deduplication
-                        if wasm32 {
-                            @fmt(self.out&.current(), "i64 bitcast (<2 x i32> <i32 ptrtoint (ptr @\"%\" to i32), i32 0> to i64),", (self, f));
-                        } else {
-                            @fmt(self.out&.current(), "i64 ptrtoint (ptr @\"%\" to i64),", (self, f));
-                        };
-                        // TODO: make sure we emitted the function. 
-                    });
-                    (fn AddrOf(id) => {
-                        if wasm32 {
-                            @fmt(self.out&.current(), "i64 bitcast (<2 x i32> <i32 ptrtoint (ptr @g% to i32), i32 0> to i64),", @as(i64) id.id.zext());
-                        } else {
-                            @fmt(self.out&.current(), "i64 ptrtoint (ptr @g% to i64),", @as(i64) id.id.zext());
-                        };
-                    });
-                    (fn Num(v) => {
-                        // TODO: small prims
-                        @fmt(self.out&.current(), "i64 %,", v.value);
-                    });
+                // TODO: make sure we emitted the function. 
+            });
+            (fn AddrOf(id) => {
+                if wasm32 {
+                    @fmt(self.out&.current(), "i64 bitcast (<2 x i32> <i32 ptrtoint (ptr @g% to i32), i32 0> to i64),", @as(i64) id.id.zext());
+                } else {
+                    @fmt(self.out&.current(), "i64 ptrtoint (ptr @g% to i64),", @as(i64) id.id.zext());
                 };
-            };
-            self.pop_trailing_comma();
-            self.out&.push_all("]\n");
-        });
-    }
+            });
+            (fn Num(v) => {
+                // TODO: small prims
+                @fmt(self.out&.current(), "i64 %,", v.value);
+            });
+        };
+    };
+    self.pop_trailing_comma();
+    self.out&.push_all("]\n");
 }
 
 fn emit_special(self: *EmitLlvm, f_id: FuncId, body: *FuncImpl, func: *Func, bc: *FnBody, pending: *List(FuncId)) bool = {

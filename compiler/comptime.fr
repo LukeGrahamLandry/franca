@@ -9,7 +9,7 @@ fn init_driver_vtable() *ImportVTable = {
     vtable := the_vtable;
     vtable[] = ImportVTable.zeroed();
     
-    vtable.driver_abi_version = 1012;
+    vtable.driver_abi_version = 1016;
     
     vtable.find_unique_func = fn(c: Compiler, name: Symbol) ?FuncId = { 
         c := c.cast()[][];
@@ -89,9 +89,8 @@ fn init_driver_vtable() *ImportVTable = {
         mem.ptr
     };
    
-    vtable.get_baked = fn(c: Compiler, id: BakedVarId) *Ty(rawptr, BakedVar) = {
-        c.cast()[][].get_baked(id)
-    };
+    vtable.get_baked = fn(c, id) = 
+        BakedValue.raw_from_ptr(c.cast()[].baked.values&.nested_index(@as(i64) id.id.zext()));
     
     vtable._emit_bc = fn() Never = {
         panic("don't call emit_bc through the vtable. get it from examples/old_backend instead.")
@@ -140,7 +139,7 @@ fn init_driver_vtable() *ImportVTable = {
     };
     
     vtable.emit_relocatable_constant = fn(c: Compiler, ty: Type, value: []u8) Res(BakedVarId) = {
-        c.cast()[][].emit_relocatable_constant(ty, value)
+        c.cast()[][].bake_relocatable_constant(value, ty)
     };
     vtable.log_expr = fn(c: Compiler, e: *FatExpr) Str = {
         log(e, c.cast()[][])
@@ -243,11 +242,7 @@ fn get_string(c: Compiler, s: Symbol) Str = {
     c.pool.get(s)
 }
 
-// TODO: this is only called in the compiler. because of the annoying two types for compiler data pointer. 
-fn get_baked(c: Compiler, id: BakedVarId) BakedVar = {
-    val := c.cast()[][].get_baked(id); 
-    val._1
-}
+
 
 fn get_fns_with_tag(c: Compiler, tag: Symbol) [] FuncId = {
     c := c.cast();
@@ -372,7 +367,7 @@ fn fill_export_ffi(out: *List(u8)) void = {
     // TODO: version of this that allows caching? but have to think more about when you're allowed to deduplicate.
     @fmt(out, "fn bake_value(v: BakedVar) BakedVarId #ct #comptime_addr(%);\n", bake_var);
     bake_var: rawptr : fn(v: BakedVar) BakedVarId = {
-        current_comptime().put_baked(v, .None)
+        current_comptime().bake_legacy(v, .None)
     };
     
     @fmt(out, "fn safety_check_enabled(check: SafetyCheck) bool #ct #comptime_addr(%);\n", safe);
