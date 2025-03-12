@@ -13,10 +13,13 @@
 
 fn export_type(c: *Ctx, type: *CType, decay_arrays: bool) Type = {
     fr := c.franca.unwrap();
-    if(type.franca != UnknownType, => return(type.franca));
+    use_cache := !(decay_arrays && type.kind == .TY_ARRAY);
+    if(type.franca != UnknownType && use_cache, => return(type.franca));
     info := c.export_type_info(type, decay_arrays);
     id   := fr.intern_type(info);
-    //type.franca = id;  // TODO: decay_arrays
+    if use_cache {
+        type.franca = id;
+    }
     // TODO: give it the name as well? 
     // TODO: give it the TypeMeta
     id
@@ -61,14 +64,14 @@ fn export_type_info(c: *Ctx, type: *CType, decay_arrays: bool) TypeInfo = {
             // TODO: track no_return
             
             args := Type.list(fr.get_alloc());  // TODO: cap
-            for_linked type.params { par | 
+            for type.params { par | 
                 args&.push(c.export_type(par, true));
             };
             
             (Fn = (
                 arg = fr.tuple_of(args.items()), 
                 ret = c.export_type(type.return_ty, false), 
-                arity = @if(type.params.is_null() || type.params.kind == .TY_VOID, 1, args.len.trunc()),
+                arity = @if(type.params.len == 0, 1, args.len.trunc()),
             ))
         }
         @default => panic("TODO: import_c export missing type");
@@ -92,6 +95,7 @@ fn export_members(c: *Ctx, type: *CType, is_union: bool) TypeInfo = {
 
 fn export_func(c: *Ctx, obj: *Obj) FuncId = {
     @debug_assert(obj.is_function && obj.is_definition);
+    if(obj.franca != FuncId.zeroed(), => return(obj.franca));
     fr := c.franca.unwrap();
     fn_type := c.export_type(obj.ty, false);
     fn_type := fr.get_type(fn_type)[].Fn;
@@ -117,6 +121,7 @@ fn export_func(c: *Ctx, obj: *Obj) FuncId = {
     func&.set_flag(.ResolvedBody);
     func&.set_flag(.EnsuredCompiled);
     fid := fr.intern_func(func&);
+    obj.franca = fid;
     //func := fr.get_function(fid);
     fid
 }

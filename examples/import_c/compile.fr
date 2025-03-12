@@ -37,7 +37,6 @@ Obj :: @rec @struct(
     init_data_needs_null_terminator: bool,
     rel: *Relocation,
     is_inline: bool,
-    params: *Obj,
     body: *Node,
     locals: *Obj,
     stack_size: i32,
@@ -47,6 +46,7 @@ Obj :: @rec @struct(
     sent_to_backend: bool,
     refs: []*Obj,
     def: *Obj,
+    franca: FuncId,
 );
 Relocation :: @rec @struct(
     next: *Relocation,
@@ -246,8 +246,7 @@ fn leave_scope(c: *Ctx) void = {
 
 // Find a variable by name.
 fn find_var(c: *Ctx, tok: *Token) ?*VarScope = {
-    sc := c.scope;
-    for_linked sc { sc |
+    for_linked c.scope { sc |
         if sc.vars&.get(tok.str()) { sc2 |
             return(Some = sc2);
         };
@@ -256,8 +255,7 @@ fn find_var(c: *Ctx, tok: *Token) ?*VarScope = {
 }
 
 fn find_tag(c: *Ctx, tok: *Token) ?*CType = {
-    sc := c.scope;
-    for_linked sc { sc |
+    for_linked c.scope { sc |
         if sc.tags&.get(tok.str()) { ty |
             return(Some = ty);
         };  
@@ -406,13 +404,12 @@ fn new_initializer(c: *Ctx, ty: *CType, is_flexible: bool) *Initializer = {
     if ty.kind == .TY_STRUCT || ty.kind == .TY_UNION {
         // Count the number of struct members.
         len := 0;
-        mem := ty.members;
-        for_linked mem { mem |
+        for_linked ty.members { mem |
             len += 1;
         };
         init.children = temp().alloc(*Initializer, len);
 
-        for_linked mem { mem |
+        for_linked ty.members { mem |
             ::if(*Initializer);
             init.children[mem.idx.intcast()] = 
                 if is_flexible && ty.is_flexible && mem.next.is_null() {
@@ -429,8 +426,8 @@ fn new_initializer(c: *Ctx, ty: *CType, is_flexible: bool) *Initializer = {
     init
 }
 
-fn new_var(c: *Ctx, name: Str, ty: *CType) *Obj = {
-    var := temp().box_zeroed(Obj);
+fn new_var(c: *Ctx, name: Str, ty: *CType, a: Alloc) *Obj = {
+    var := a.box_zeroed(Obj);
     var.name = name.slow_convert_to_c_string();
     var.ty = ty;
     var.align = ty.align;
@@ -441,7 +438,7 @@ fn new_var(c: *Ctx, name: Str, ty: *CType) *Obj = {
 }
 
 fn new_lvar(c: *Ctx, name: Str, ty: *CType) *Obj = {
-    var := c.new_var(name, ty);
+    var := c.new_var(name, ty, temp());
     var.is_local = true;
     var.next = c.locals;
     c.locals = var;
@@ -471,7 +468,7 @@ fn create_stack_slot(c: *Ctx, var: *Obj) void = {
 }
 
 fn new_gvar(c: *Ctx, name: Str, ty: *CType) *Obj = {
-    var := c.new_var(name, ty);
+    var := c.new_var(name, ty, c.arena);
     var.next = c.globals;
     var.is_static = true;
     var.is_definition = true;
@@ -656,6 +653,7 @@ fn declspec(c: *Ctx, rest: **Token, tok: *Token, attr: ?*VarAttr) *CType = {
                 @literal i
             };
             
+            // bleh
             ty = @switch(counter) {
                 @case(@SS(.void))  => ty_void;
                 @case(@SS(._Bool)) => ty_bool;
@@ -706,20 +704,21 @@ fn declspec(c: *Ctx, rest: **Token, tok: *Token, attr: ?*VarAttr) *CType = {
 
 // func-params = ("void" | param ("," param)* ("," "...")?)? ")"
 // param             = declspec declarator
-fn func_params(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) *CType = {
+// returns a function type
+fn func_params(c: *Ctx, rest: **Token, tok: *Token, ret: *CType) *CType = {
     if equal(tok, "void") && equal(tok.next, ")") {
         rest[] = tok.next.next;
-        return(c.func_type(ty));
+        return(c.func_type(ret));
     };
 
-    head := CType.zeroed();
-    cur  := head&;
+    params := list(*CType, c.arena);
+    names  := list(*Token, c.arena);
     is_variadic := false;
 
     if true {
         break :: local_return;
         while => !equal(tok, ")") {
-            if !cur.identical(head&) {
+            if params.len != 0 {
                 tok = c.skip(tok, ",");
             };
     
@@ -749,21 +748,15 @@ fn func_params(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) *CType = {
                 }
                 @default => ();
             };
-            // :ParamTypeList
-            t := c.copy_type(ty2);
-            cur.next = t;
-            cur = t;
+            params&.push(ty2);
+            names&.push(name);
         };
     };
-
-    // it seems () and (...) both mean variadic. for no arguments you want (void). seems dumb to me. 
-    if cur.identical(head&) {
-        is_variadic = true;
-    };
-
-    ty = c.func_type(ty);
-    ty.params = head.next;
-    ty.is_variadic = is_variadic;
+    
+    ty := c.func_type(ret);
+    ty.params = params.items();
+    ty.param_names = names.items();
+    ty.is_variadic = is_variadic || params.len == 0;
     rest[] = tok.next;
     ty
 }
@@ -1111,8 +1104,7 @@ fn struct_designator(c: *Ctx, rest: **Token, tok: *Token, ty: *CType) *Member = 
     tok = c.skip(tok, ".");
     if(tok.kind != .TK_IDENT, => @error_tok(c, tok, "expected a field designator"));
 
-    mem := ty.members;
-    for_linked mem { mem |
+    for_linked ty.members { mem |
         continue :: local_return;
         is_anon := mem.ty.kind == .TY_STRUCT && mem.name.is_null();
         if is_anon {
@@ -1458,8 +1450,7 @@ fn create_lvar_init(c: *Ctx, init: *Initializer, ty: *CType, desg: *InitDesg, to
     if ty.kind == .TY_STRUCT && init.expr.is_null() {
         node := c.new_node(.ND_NULL_EXPR, tok);
 
-        mem := ty.members;
-        for_linked mem { mem |
+        for_linked ty.members { mem |
             desg2: InitDesg = (next = desg, idx = 0, member = mem, var = Obj.ptr_from_int(0));
             rhs := c.create_lvar_init(init.children[mem.idx.intcast()], mem.ty, desg2&, tok);
             c.gen_expr(node);
@@ -1557,10 +1548,9 @@ fn write_gvar_data(c: *Ctx, cur: *Relocation, init: *Initializer, ty: *CType, bu
     };
 
     if ty.kind == .TY_STRUCT {
-        mem := ty.members;
         if true {
             break :: local_return;
-            for_linked mem { mem | 
+            for_linked ty.members { mem | 
                 if mem.is_bitfield {
                     expr := init.children[mem.idx.intcast()].expr;
                     ::ptr_utils(Node);
@@ -1829,8 +1819,7 @@ fn struct_decl(c: *Ctx, rest: **Token, tok: *Token) *CType = {
 
     // Assign offsets within the struct to members.
     bits := 0;
-    mem := ty.members;
-    for_linked mem { mem |
+    for_linked ty.members { mem |
         if mem.is_bitfield {
             if mem.ty.is_atomic {
                 @error_tok(c, mem.tok, "the type backing a bitfield cannot be _Atomic");
@@ -1877,8 +1866,7 @@ fn union_decl(c: *Ctx, rest: **Token, tok: *Token) *CType = {
     // If union, we don't have to assign offsets because they
     // are already initialized to zero. We need to compute the
     // alignment and the size though.
-    mem := ty.members;
-    for_linked mem { mem |
+    for_linked ty.members { mem |
         ty.align = max(ty.align, mem.align);
         ty.size  = max(ty.size, mem.ty.size);
     };
@@ -1900,13 +1888,6 @@ fn parse_typedef(c: *Ctx, tok: *Token, basety: *CType) *Token = {
     };
     c.refs = prev_refs;
     tok
-}
-
-fn create_param_lvars(c: *Ctx, param: *CType) void = {  // TODO: why isn't this a loop?
-    if(param.is_null(), => return()); 
-    c.create_param_lvars(param.next);
-    if(param.name.is_null(), => @error_tok(c, param.name_pos, "parameter name omitted"));
-    c.new_lvar(c.get_ident(param.name), param);
 }
 
 fn find_func(c: *Ctx, name: Str) ?*Obj = {
@@ -1966,17 +1947,16 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr) *Token = {
     c.labels = init(temp());
     c.locals = ptr_from_int(@type c.locals[], 0);
     c.enter_scope();
-    c.create_param_lvars(ty.params);
     c.f.vararg = ty.is_variadic;
     rty := ty.return_ty;
     c.f.retty = c.ir_index(rty);
-
-    f.params = c.locals;
- 
+    
     tok = c.skip(tok, "{");
 
     f_name := f.name.str();
     f_name.len += 1;  // null terminator
+    
+    c.gen_par();
     
     // TODO: we are doing extra work for every single function to support a feature that is rarely used. that's not what you want. 
     //       detect it after failing a name lookup instead and just add it then? 
@@ -1985,13 +1965,12 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr) *Token = {
     // automatically defined as a local variable containing the
     // current function name.
     c.push_scope("__func__")[].var =
-        c.new_string_literal(f_name, c.array_of(ty_char, f_name.len));
-
+    c.new_string_literal(f_name, c.array_of(ty_char, f_name.len));
+    
     // [GNU] __FUNCTION__ is yet another name of __func__.
     c.push_scope("__FUNCTION__")[].var =
-        c.new_string_literal(f_name, c.array_of(ty_char, f_name.len));
+    c.new_string_literal(f_name, c.array_of(ty_char, f_name.len));
     
-    c.gen_par();
     _ := c.compound_stmt(tok&, tok);
     if c.b.jmp.type == .Jxxx {
         // void functions are allowed to just fall off the end
@@ -2079,8 +2058,7 @@ fn scan_globals(c: *Ctx) void = {
         var.def = def;
     }
 
-    var := c.globals;
-    for_linked var { var |
+    for_linked c.globals { var |
         continue :: local_return;
         if !var.is_tentative {
             if !var.is_definition { 
@@ -2120,7 +2098,7 @@ fn find_matching_name(first: *Obj, goal: *Obj) ?*Obj #once = {
 
 fn declare_builtin_functions(c: *Ctx) void = {
     ty := c.func_type(c.pointer_to(ty_void));
-    ty.params = c.copy_type(ty_int);
+    ty.params = @const_slice(ty_int);
     c.builtin_alloca = c.new_gvar("alloca", ty);
     c.builtin_alloca.is_definition = false;
 }
@@ -2556,7 +2534,7 @@ parse_ident :: fn(c, rest, tok) #prefix(.TK_IDENT) = {
         node.ty = ty_int;  // HACK: without this, it crashes on `"" + a` when a is undeclared 
         return(node);
     };  
-    @error_tok(c, tok, "undefined variable")
+    @error_tok(c, tok, "undefined variable: '%'", tok.str())
 };
 
 parse_string :: fn(c, rest, tok) #prefix(.TK_STR) = {
@@ -2748,17 +2726,18 @@ funcall :: fn(c, rest, tok, f) #infix(.@"(", .PostFix) = {
     };
 
     ty := if(f.ty.kind == .TY_FUNC, => f.ty, => f.ty.base);
-    param_ty := ty.params;
 
+    param_i := 0;
     args := list(*Node, temp());
     comma_sep(c, tok&, ")") {
         arg := c.parse_expr(tok&, tok, .Assign);
         
-        if !param_ty.is_null() {
+        if param_i < ty.params.len {
+            param_ty := ty.params[param_i];
+            param_i += 1;
             if !@is(param_ty.kind, .TY_STRUCT, .TY_UNION) {
                 arg = c.new_cast(arg, param_ty);
             };
-            param_ty = param_ty.next;
         } else {
             if(!ty.is_variadic, => @error_tok(c, tok, "too many arguments"));
             if arg.ty.kind == .TY_FLOAT {
@@ -2770,7 +2749,7 @@ funcall :: fn(c, rest, tok, f) #infix(.@"(", .PostFix) = {
         args&.push(arg);
     };
 
-    if(!param_ty.is_null(), => @error_tok(c, tok, "too few arguments"));
+    if(param_i < ty.params.len, => @error_tok(c, tok, "too few arguments"));
     rest[] = tok;
 
     c.gen_call(f, ty, args.items(), start)
@@ -3222,8 +3201,7 @@ fn new_sub(c: *Ctx, lhs: *Node, rhs: *Node, tok: *Token) *Node = {
 };
 
 fn get_struct_member(ty: *CType, name: *Token) ?*Member = {
-    mem := ty.members;
-    for_linked mem { mem |
+    for_linked ty.members { mem |
         is_anon := (@is(mem.ty.kind, .TY_STRUCT, .TY_UNION)) && mem.name.is_null();
         if is_anon {
             if get_struct_member(mem.ty, name) { _ |
@@ -3474,28 +3452,36 @@ fn emit(c: *Ctx, op: Qbe.O, k: Qbe.Cls, to: Qbe.Ref, arg0: Qbe.Ref, arg1: Qbe.Re
     push(c.b, make_ins(op, k, to, arg0, arg1));
 }
 
-// TODO: should be with create_param_lvars instead of being super hacky
 fn gen_par(c: *Ctx) void = {
     obj := c.current_fn.expect("gen_par() in function context");
+    ty  := obj.ty;
+    if ty.params.len > ty.param_names.len {    
+        // TODO: this is probably at the wrong place now since we alias types?
+        @error_tok(c, ty.params[ty.param_names.len].name_pos, "parameter name omitted")
+    }
+    obj_params := temp().alloc(*Obj, ty.params.len);
+    range(0, ty.params.len) { i |
+        obj_params[i] = c.new_lvar(c.get_ident(ty.param_names[i]), ty.params[i]);
+    }
+    
     f := c.f; 
     f.start = c.new_block();
     c.b = f.start;
     
     if c.preserve_franca_env {
-        c.franca_env = c.f.newtmp("env", .Kl);
+        c.franca_env = f.newtmp("env", .Kl);
         c.emit(.pare, .Kl, c.franca_env, QbeNull, QbeNull);
     }
     
-    loc := obj.params;
-    // TODO: b/h arg/par
-    for_linked loc { loc |
+    for obj_params { loc |
         k := loc.ty.cls();
         loc.par_r = f.newtmp(loc.name.str(), k);
         i := c.ir_index(loc.ty).intcast();
         o: Qbe.O = @if(i == -1, .par, .parc);
         emit(c, o, k, loc.par_r, @if(i == -1, QbeNull, TYPE(i)), QbeNull); 
     };
-    for_linked loc { loc | // HACK
+    // all the allocs have to be after all the pars
+    for obj_params { loc |
         if c.ir_index(loc.ty) == -1 {
             c.create_stack_slot(loc);
         } else {
@@ -3506,7 +3492,7 @@ fn gen_par(c: *Ctx) void = {
     // but since all vars get stack slots, we need to store any scalar arguments. 
     body := c.new_block();
     c.jmp_if_unterminated(body);
-    for_linked loc { loc |
+    for obj_params { loc |
         if c.ir_index(loc.ty) == -1 {
             c.gen_store(loc.stack_slot, loc.par_r, loc.ty);
         };
@@ -3752,17 +3738,8 @@ fn gen_call(c: *Ctx, callee: *Node, function_ty: *CType, arg: []*Node, tok: *Tok
         function_ty = function_ty.base;
     };
 
-    variadic_marker_index := 0;
-    if function_ty.is_variadic {
-        t := function_ty.params;
-        for_linked t { t |
-            variadic_marker_index += 1;
-        };
-    } else {
-        variadic_marker_index = -1;
-    };
-    
-    arguments := list(Qbe.Ins, temp());
+    variadic_marker_index := if(function_ty.is_variadic, => function_ty.params.len, => -1);
+    arguments := list(Qbe.Ins, arg.len, temp());
     for arg { arg |
         if variadic_marker_index == 0 {
             arguments&.push(make_ins(.argv, .Kw, QbeNull, QbeNull, QbeNull));
@@ -3794,8 +3771,7 @@ fn gen_call(c: *Ctx, callee: *Node, function_ty: *CType, arg: []*Node, tok: *Tok
     // TODO: it seems like just returning QbeNull for void would work but fails wuffs/lzma.c :FUCKED
     r := if(is_void, => QbeConZero, => r); 
     lvalue := if(i != -1, => r, => QbeNull); // for gen_addr so you can do `foo().field`
-    node := c.ir_node(function_ty.return_ty, r, lvalue, tok); 
-    node
+    c.ir_node(function_ty.return_ty, r, lvalue, tok)
 }
 
 // TODO: move these to util and use them elsewhere

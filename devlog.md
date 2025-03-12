@@ -3,6 +3,8 @@
 - improving guess type_of to work on fields and it broke 
 `xxx: i32 = f.nblk.bitcast() - 1;` which actually shouldn't compile because `nblk: i32,`
 so that's nice. 
+- start import_c actually talking to the franca compiler
+- de-linked-list-ify parameter tracking in import_c
 
 ## (Mar 9/10) 
 

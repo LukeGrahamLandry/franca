@@ -1,38 +1,61 @@
 # Franca
 
-> The following philosophical objections apply: The most significant program written in your language is its own compiler. 
-
-If you just want to see what the syntax looks like, click on examples or compiler or lib or tests, really anywhere, just click a folder.
+A self sufficient programming language.  
 
 ## Goals
 
-- make something i can use for future projects
-- keep the language small enough to be maintained by one person
+- make a language stable enough to use for future projects
+- keep it small enough to be maintained by one person
 - learn as much as possible, which means not leaning on tools/libraries written by someone else
-- be fast enough that you never spend time waiting
+- be fast enough that you never spend time waiting  
+  (currently unacceptable; it takes 1.3 seconds to compile itself)
 
 ## Features
 
-- full compile-time code execution: anything you can do at runtime, you can do at comptime
+- full compile-time code execution: anything you can do at runtime, you can do at comptime 
 - macros are functions that run at compile time, call compiler apis, and return ast nodes
 - hygenic quasiquote to generate code in macros
 - types are values at compile time so generics are just functions 
-- multiple dispatch overload resolution
+- static multiple dispatch overload resolution
 - lazy analysis, functions/constants that are statically unreachable may contain invalid code 
-- nonlocal returns from inline lambda
+- nonlocal returns from (non-escaping) inline lambdas so you can define your own control structures
 - manual memory management with explicit allocators 
 - no seperate build system language. write a program that builds your program
 - cross compilation and reproducible builds
+- full c abi support so you can use extern-c code written in other languages
 
-> an ad hoc, informally-specified, bug-ridden, slow implementation of half of Common Lisp.
+## Supported Targets
 
-## Backends
+The self-hosted backend generates native machine code for arm64 (aarch64) and amd64 (x86_64). 
+There is no dependency on assemblers, linkers, llvm, or xcode-codesign. 
 
-- **fully self hosted**: only supports macos. generates native executables (we don't depend on an assembler, linker, or xcode-codesign).
-- **llvm ir text**: you can feed it to clang to produce an AOT optimised build or integrate with projects written in other languages.
+- mach-o (macos): executables, dynamic libraries, relocatable object files
+- elf (linux): executables only for now
+- jit: for comptime execution 
 
-> The llvm backend doesn't fully implement the extern-c abi or the internal calling convention required by some multithreaded programs.  
-> The self hosted backend will be eventually be able to output ELF programs for Linux as well.  
+All the tests pass on macos-arm64 and macos-amd64.  
+On linux-amd64, the compiler can compile itself but not all tests pass.  
+(I haven't transcribed all the platform specific struct layouts/magic numbers yet). 
+On windows you can use WSL. 
+
+The compiler does not depend on libc (on linux, when built with -syscalls). 
+
+A bootstrap binary is committed for macos-arm64 only. 
+Binaries for other platforms are available as [github actions artifacts](https://github.com/LukeGrahamLandry/franca/actions).
+
+> There is vauge work towards targetting wasm and llvm, but it is not yet usable. 
+
+## Example Programs
+
+> The following philosophical objections apply: The most significant program written in your language is its own compiler. 
+
+- The franca compiler itself is written in franca ([./compiler])
+- Lightly optimising multi-platform codegen backend ([./backend]) (based on Qbe)
+- A C11 compiler good enough to compile the lua interpreter ([./examples/import_c]) (based on Chibicc)
+- Comptime code generation demos ([./examples/bf])
+- Simple graphics (`./examples/{farm_game.fr, edit.fr}`) (using Sokol, DearImGui)
+- Boring obj-dump-like utilities (`./examples/{dump_macho.fr, dump_elf.fr, dump_wasm.fr}`)
+- Animated ascii-art mandelbrot set by recompiling every frame ([./examples/60fps.fr])
 
 ## Tradeoffs
 
@@ -55,7 +78,6 @@ there must be proportional terrible things or I'm probably just lying.
 - Sadly I don't have nice IDE integration.
 - Sadly I don't have incremental builds. every time you run a program, you recompile the standard library for comptime. (...but its so fast it doesn't matter yet).
 - Sadly I don't have a nice debug mode that detects undefined behaviour (overflow, wrong tagged field, etc).
-- Sadly I don't have good modules / namespace management.
 - The compiler does an insane amount of redundant work.
   Like sometimes it reparses and re-resolves names for each specialization of a generic.
   There just happens to only be ~40k lines of code ever written in this langauge so its not a big deal yet.
