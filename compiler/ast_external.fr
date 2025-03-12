@@ -189,6 +189,71 @@ fn arg_types(self: CompCtx, ty: Type) []Type = {
     }
 }
 
+fn tuple_of(self: CompCtx, types: []Type) Type = {
+    @switch(types.len()) {
+        @case(0) => void;
+        @case(1) => types[0];
+        @default => {
+            // :hacky_type_compression
+            // TODO: always. would need to change how you go arg_ty -> prim_sig.
+            if types.len > max_homogeneous_tuple {
+                first := types[0];
+                cond :: fn(t: *Type) bool => t[] != first;
+                if !types.contains(cond) {
+                    return(self.intern_type(Array = (
+                        inner = first,
+                        len = types.len.trunc(),
+                    )));
+                };
+            };
+            // TODO: dont allocate the string a billion times
+            fields: List(Field) = list(types.len, self.get_alloc());
+            ::from_raw(Flag);
+            ::enum(Flag);
+            ::?Flag;
+            ::if(Symbol);
+            enumerate types { (i: i64, ty: *Type) void |
+                //@println("iter %", i);
+                // TODO: why the fuck doesnt this work. i dont want to allocate the string every time!!!
+                //       it also doesnt work if you factor out the i->Symbol as a seperate function, even if you use the allocating verion that owrks hgere]
+                //       -- Jul 29 :FUCKED
+                //       also doesn't work if the loop is a range instead of enumerate. 
+                //       this has to be a compiler bug. 
+                //name := if i <= 20 {
+                //    idx := Flag._0.raw().add(i);
+                //    (@as(?Flag) idx.from_raw()).unwrap().ident()
+                //} else {
+                //    s := @format("_%", i) general_allocator();
+                //    self.pool.insert_owned(s.items())
+                //};
+                s := @format("_%", i) self.get_alloc();
+                s := s.items();
+                name := self.intern_string(s);
+                //println("b");
+                fields&.push(
+                    name = name,
+                    ty = ty[],
+                    nullable_tag = zeroed(*Annotations),
+                    default = zeroed(Var),
+                    byte_offset = 99999999999,
+                );
+                //println("c");
+            };
+            //@println("!%", fields.len);
+            ty := self.intern_type(Struct = (
+                fields = fields.as_raw(),
+                layout_done = false,
+                is_tuple = true,
+                is_union = false,
+                scope = NOSCOPE, // TODO
+            ));
+            
+            //@println("done");
+            ty
+        };
+    }
+}
+
 ///////////////////////////
 // TODO: should try to clean these up.
 
@@ -642,6 +707,14 @@ fn non_void_arg(a: *Annotation) ?*FatExpr = {
 
 fn add_file(c: CompCtx, name: Str, src: Str) Span = {  // TODO: this shouldn't need the squiggles 
     {c.vtable.add_file}(c.data, name, src).shrink()
+}
+
+fn intern_type(c: CompCtx, info: TypeInfo) Type #inline = {
+    {c.vtable.intern_type}(c.data, info&)
+}
+
+fn intern_func(c: CompCtx, info: *Func) FuncId = {
+    {c.vtable.intern_func}(c.data, info)
 }
 
 fn fill_backend_vtable(vtable: *ImportVTable) void = {

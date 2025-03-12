@@ -200,6 +200,10 @@ Ctx :: @rec @struct {
     
     speculate: bool; // hack
     
+    preserve_franca_env: bool;
+    franca_env: Qbe.Ref;
+    franca: ?CompCtx;
+    
     /// Tokenize
     current_file: *File;
     at_bol: bool;  // True if the current position is at the beginning of a line
@@ -1992,7 +1996,7 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr) *Token = {
     if c.b.jmp.type == .Jxxx {
         // void functions are allowed to just fall off the end
         // it would be nice to give an error otherwise but it's non-trivial to decide if this codepath is reachable. 
-        // also for main() falling off the end means returning 0
+        // TODO: also for main() falling off the end means returning 0
         c.b.jmp = @if(rty.is_void(), (type = .ret0, arg = QbeNull), (type = .retw, arg = QbeConZero));
         if c.f.retty != -1 {  // sketchy
             c.b.jmp.type = .retc;
@@ -2008,6 +2012,7 @@ fn function(c: *Ctx, tok: *Token, basety: *CType, attr: *VarAttr) *Token = {
     c.leave_scope();
     c.labels&.clear();
     c.current_fn = .None;
+    c.franca_env = QbeNull;
     tok
 }
 
@@ -3476,6 +3481,11 @@ fn gen_par(c: *Ctx) void = {
     f.start = c.new_block();
     c.b = f.start;
     
+    if c.preserve_franca_env {
+        c.franca_env = c.f.newtmp("env", .Kl);
+        c.emit(.pare, .Kl, c.franca_env, QbeNull, QbeNull);
+    }
+    
     loc := obj.params;
     // TODO: b/h arg/par
     for_linked loc { loc |
@@ -3765,6 +3775,12 @@ fn gen_call(c: *Ctx, callee: *Node, function_ty: *CType, arg: []*Node, tok: *Tok
     };
     
     ::ptr_utils(Obj);
+    
+    // TODO: compiler bug: if you get a compile error here when jitting, 
+    //       you fault in the jit shim (stack overflow maybe?).  -- Mar 11, 2025
+    if c.preserve_franca_env {
+        c.emit(.arge, .Kl, QbeNull, c.franca_env, QbeNull);
+    }
     for arguments { i |    
         c.b.push(i);
     };

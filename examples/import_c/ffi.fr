@@ -1,0 +1,135 @@
+/// Here we translate the c compiler's representation to the franca compiler's representation. 
+/// This allows franca programs to use our types/functions/variables. 
+//
+// TODO: it would save a lot of effort if the c compiler used the franca data structures 
+//        for everything. but then there's an awkward coupling. I like that this also works 
+//        as a stand alone c compiler so it feels like a more impressive demo of "hey this is
+//        just a normal program that we happen to run at comptime to generate some code sometimes". 
+//
+// TODO: making this work for both AOT+JIT is painful because we want to generate code into 
+//       a QbeModule but there's two of them. 
+// TODO: and for comptime need to materialize all the variables as normal memory (not just BakedValue). 
+//
+
+fn export_type(c: *Ctx, type: *CType, decay_arrays: bool) Type = {
+    fr := c.franca.unwrap();
+    if(type.franca != UnknownType, => return(type.franca));
+    info := c.export_type_info(type, decay_arrays);
+    id   := fr.intern_type(info);
+    //type.franca = id;  // TODO: decay_arrays
+    // TODO: give it the name as well? 
+    // TODO: give it the TypeMeta
+    id
+}
+
+fn export_type_info(c: *Ctx, type: *CType, decay_arrays: bool) TypeInfo = {
+    fr := c.franca.unwrap();
+    is_int := @is(type.kind, .TY_CHAR, .TY_SHORT, .TY_INT, .TY_LONG);
+    if(is_int, => return(Int = (bit_count = type.size.zext() * 8, signed = !type.is_unsigned)));
+    
+    @match(type.kind) {
+        fn TY_VOID()    => .void;
+        fn TY_BOOL()    => .Bool;
+        fn TY_FLOAT()   => .F32;
+        fn TY_DOUBLE()  => .F64;
+        fn TY_LDOUBLE() => .F64;
+        // TODO: don't throw away the names 
+        fn TY_ENUM() => (Int = (bit_count = 4, signed = false));
+        fn TY_PTR() => @match(type.base.kind) {
+            fn TY_VOID() => .VoidPtr;
+            fn TY_FUNC() => {
+                fn_type := c.export_type(type.base, false);
+                fn_type := fr.get_type(fn_type)[].Fn;
+                (FnPtr = (ty = fn_type, cc = .CCallReg))
+            }
+            @default => (Ptr = c.export_type(type.base, false));
+        };
+        // C arrays decay to pointers when passed to functions, so this needs to be 
+        // treated differently depending if it's inside a struct body. 
+        fn TY_ARRAY() => {
+            base := c.export_type(type.base, decay_arrays);
+            ::if(TypeInfo);
+            if(decay_arrays, => (Ptr = base)) {
+                (Array = (inner = base, len = type.array_len.bitcast()))
+            }
+        }
+        fn TY_VLA()    => (Ptr = c.export_type(type.base, false));
+        fn TY_STRUCT() => c.export_members(type, false);
+        fn TY_UNION()  => c.export_members(type, true);
+        fn TY_FUNC() => {
+            !type.is_variadic || @error_tok(c, type.name, "TODO: track #c_variadic as part of FnType for c->franca export");
+            // TODO: track no_return
+            
+            args := Type.list(fr.get_alloc());  // TODO: cap
+            for_linked type.params { par | 
+                args&.push(c.export_type(par, true));
+            };
+            
+            (Fn = (
+                arg = fr.tuple_of(args.items()), 
+                ret = c.export_type(type.return_ty, false), 
+                arity = @if(type.params.is_null() || type.params.kind == .TY_VOID, 1, args.len.trunc()),
+            ))
+        }
+        @default => panic("TODO: import_c export missing type");
+    }
+}
+
+fn export_members(c: *Ctx, type: *CType, is_union: bool) TypeInfo = {
+    fr := c.franca.unwrap();
+    fields := Field.list(fr.get_alloc());  // TODO: cap
+    for_linked type.members { mem |
+        fields&.push(
+            name = fr.intern_string(mem.name.str()),
+            ty = c.export_type(mem.ty, false),
+            byte_offset = mem.offset.zext(), 
+            default = Var.zeroed(), 
+            nullable_tag = Annotations.ptr_from_int(0),
+        );
+    };
+    (Struct = (fields = fields.as_raw(), layout_done = true, is_tuple = false, is_union = is_union, scope = NOSCOPE))
+}
+
+fn export_func(c: *Ctx, obj: *Obj) FuncId = {
+    @debug_assert(obj.is_function && obj.is_definition);
+    fr := c.franca.unwrap();
+    fn_type := c.export_type(obj.ty, false);
+    fn_type := fr.get_type(fn_type)[].Fn;
+    
+    loc := Span.zeroed();  // TODO: translate this too!
+    func: Func = (
+        annotations = empty(),
+        callees = empty(),  // TODO: should fill this out
+        mutual_callees = empty(),
+        var_name = .None,
+        finished_arg = (Some = fn_type.arg),
+        finished_ret = (Some = fn_type.ret),
+        cc = (Some = .CCallReg),
+        return_var = .None,
+        scope = .None,
+        body = (Ir = (fn_internal = Qbe.Fn.int_from_ptr(obj.f), module_internal = QbeModule.int_from_ptr(c.m))),
+        arg = (bindings = empty(), loc = loc),  // TODO: does bindings matter if we already have finished_arg? 
+        ret = (Finished = fn_type.ret),
+        name = fr.intern_string(obj.name.str()),
+        loc = loc,
+    );
+    func&.set_flag(.ResolvedSign);
+    func&.set_flag(.ResolvedBody);
+    func&.set_flag(.EnsuredCompiled);
+    fid := fr.intern_func(func&);
+    //func := fr.get_function(fid);
+    fid
+}
+
+fn export_data(c: *Ctx, obj: *Obj) BakedVarId = {
+    @debug_assert(!obj.is_function && obj.is_definition);
+    fr := c.franca.unwrap();
+    // TODO
+}
+
+#use("@/compiler/ast_external.fr");
+C :: import("@/examples/import_c/lib.fr");
+Ctx :: C.Compile.Ctx;
+Obj :: C.Compile.Obj;
+CType :: C.Types.CType;
+

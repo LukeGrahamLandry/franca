@@ -177,25 +177,16 @@ fn compile_place_expr(self: *SelfHosted, place: *FatExpr, requested: ResultType,
             @check(self.compile_place_expr(f.container, .None, false)) return;
             done := f.container.done;
 
-            // :AutoDeref
-            {
-                raw   := self.raw_type(f.container.ty);
-                inner := or self.unptr_ty(raw) {
-                    return(@err("PlaceExpr of FieldAccess should be ptr"))
-                };
-                inner = self.raw_type(inner);
-                // Pointers never have fields, so the thing behind the pointer, shouldn't be a pointer.
-                // This lets you write `self: *Self; self.name` instead of  `self: *Self; self[].name`.
-                while => self.unptr_ty(inner) { next_inner | 
-                    @check(self.deref_one(f.container)) return;
-                    inner = self.raw_type(next_inner);
-                };
-            };
             name := f.name;
-            bytes, field_val_ty := @check(self.field_access_expr(f.container, name)) return;
+            bytes, field_val_ty, depth := @try(self.field_access_get_type(f.container.ty, name)) return;
+            @err_assert(depth >= 1, "PlaceExpr of FieldAccess should be ptr") return;
+            range(0, depth - 1) { _ |
+                @check(self.deref_one(f.container)) return;
+            };
             field_ptr_ty := self.ptr_type(field_val_ty);
             @debug_assert(!f.container.expr&.is(.GetVar), "ICE: place expr can't be direct var access");
             e := self.box(f.container[]);
+            // HACK 
             // don't want to use Cast because graphics/src/shaders wants to know the field name after compiling. 
             //if bytes == 0 {
             //    place.expr = (Cast = e);
@@ -259,38 +250,32 @@ fn compile_deref_place(self: *SelfHosted, place: *FatExpr, requested: ResultType
 }
 
 // :PlaceExpr
-fn field_access_expr(self: *SelfHosted, container_ptr: *FatExpr, name: Symbol) Maybe(Ty(i64, Type)) #once = {
-    container_ptr_ty := self.raw_type(container_ptr.ty);
-    depth := self.ptr_depth(container_ptr_ty);
-    if depth != 1 {
-        return(@err("index expr ptr must be one level of indirection. %", self.log_type(container_ptr_ty)));
+fn field_access_get_type(self: *SelfHosted, container_input_type: Type, name: Symbol) Res(Ty(i64, Type, i64)) #once = {  // (off, field_type, ptr_depth)
+    // Pointers never have fields, so the thing behind the pointer, shouldn't be a pointer.
+    // This lets you write `self: *Self; self.name` instead of  `self: *Self; self[].name`.
+    depth := 0;    
+    inner := self.raw_type(container_input_type);
+    while => self.unptr_ty(inner) { next_inner | 
+        inner = self.raw_type(next_inner);
+        depth += 1;
     };
-    container_ty := self.unptr_ty(container_ptr_ty).expect("ICE: we just checked its a pointer");
-
-    raw_container_ty := self.raw_type(container_ty);
-    self.finish_layout(raw_container_ty);
-    @match(self.get_type(raw_container_ty)) {
-        fn Struct(f) => {
-            @debug_assert(f.layout_done);
-            each f.fields { f | 
-                if f.name == name {
-                    return(Ok = (f.byte_offset, f.ty));
-                };
+    
+    self.finish_layout(inner);
+    @match(self.get_type(inner)) {
+        fn Struct(f) => each f.fields { f | 
+            if f.name == name {
+                return(Ok = (f.byte_offset, f.ty, depth));
             };
-            return(Err = self.error(InvalidField = (span = Span.zeroed(), container = container_ty, name = name)))
-        }
-        fn Tagged(f) => {
-            each f.cases { f |
-                if f._0 == name {
-                    return(Ok = (8, f._1));
-                };
-            };
-            return(Err = self.error(InvalidField = (span = Span.zeroed(), container = container_ty, name = name)))
-        }
-        @default => {
-            return(Err = self.error(InvalidField = (span = Span.zeroed(), container = container_ty, name = name)))
         };
-    }
+        fn Tagged(f) => each f.cases { f |
+            if f._0 == name {
+                tag_offset := 8;
+                return(Ok = (tag_offset, f._1, depth));
+            };
+        };
+        @default => ();
+    };
+    (Err = self.error(InvalidField = (span = Span.zeroed(), container = inner, name = name)))
 }
 
 // TODO: have a different version of @check for something that can error but not yield? 
@@ -2445,8 +2430,9 @@ fn infer_return(self: *SelfHosted, fid: FuncId) Maybe(Type) = {
 
 fn type_of(self: *SelfHosted, expr: *FatExpr) Maybe(Type) = {
     if(!expr.ty.is_unknown(), => return(Ok = expr.ty));
+    self.last_loc = expr.loc;
     @match(expr.expr&) {
-        fn Block(f) => self.type_of(f.result);
+        fn Block(f) => self.type_of(f.result);  // TODO: this is sketchy because it might have nonlocal returns but end with Never
         fn Deref(inner) => {
             ptr := @check(self.type_of(inner[])) return;
             (Ok = self.unptr_ty(ptr).or(=> return(@err("deref non ptr"))))
@@ -2455,7 +2441,6 @@ fn type_of(self: *SelfHosted, expr: *FatExpr) Maybe(Type) = {
             ty := @check(self.type_of(inner[])) return;
             (Ok = self.ptr_ty(ty))
         }
-        //fn Quote() => (Ok = @unwrap(self.env.fat_expr_type, "quote during boot") return);
         fn As(f) => {
             type := @check(self.eval(f.type, Type)) return;
             (Ok = type)
@@ -2477,6 +2462,15 @@ fn type_of(self: *SelfHosted, expr: *FatExpr) Maybe(Type) = {
             (Ok = expr.ty)
         }
         fn Quote() => (Ok = self.env.fat_expr_type || return(@err("tried to guess type of @{} before boot")));
+        fn FieldAccess(f) => {
+            container := @check(self.type_of(f.container)) return;
+            if container == ScopeId || container == Type { // :get_or_create_type 
+                return(@err("for now we don't guess type for scope access"));
+            };
+            // TODO: this forces it to know layout which we don't actually care about yet
+            _, field_val_ty, _ := @try(self.field_access_get_type(container, f.name)) return;
+            (Ok = field_val_ty)
+        }
         @default => @err("failed to guess type");
         //@default => @err("failed to guess type %", expr.log(self)); 
     }

@@ -1,3 +1,9 @@
+##
+
+- improving guess type_of to work on fields and it broke 
+`xxx: i32 = f.nblk.bitcast() - 1;` which actually shouldn't compile because `nblk: i32,`
+so that's nice. 
+
 ## (Mar 9/10) 
 
 - be better about detecting unterminated blocks and comments

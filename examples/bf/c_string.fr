@@ -1,0 +1,78 @@
+C :: import("@/examples/import_c/lib.fr");
+#include_std("backend/lib.fr");
+#include_std("compiler/worker.fr");
+ENABLE_TRACY :: false;  // TODO: make worker something you can import nicely
+
+to_c_source :: fn(code: Str, name: Str) []u8 = {
+    out := u8.list(code.len * 5, temp()); 
+    #use("@/examples/bf/README.fr");
+    ::enum(Bf);
+    
+    @fmt(out&, "void putchar(unsigned char); unsigned char getchar(); void %(unsigned char *p, void (*putchar)(unsigned char), unsigned char (*getchar)(void)) {", name);
+	for code { c | @switch(@as(Bf) c) {
+        @case(.Inc)    => out&.push_all("(*p)+=1;");
+        @case(.Dec)    => out&.push_all("(*p)-=1;");
+        @case(.Right)  => out&.push_all("p+=1;");
+        @case(.Left)   => out&.push_all("p-=1;");
+        @case(.Output) => out&.push_all("(*putchar)(*p);");
+        @case(.Input)  => out&.push_all("*p=(*getchar)();");
+        @case(.Open)   => out&.push_all("while(*p!=0){");
+        @case(.Close)  => out&.push_all("}");
+        @default()     => ();
+    }}
+    out&.push_all("}");
+
+	out.items()
+}
+
+// TODO: be able to export the name directly from the c compiler?
+print_hello_world :: to_function(import("@/examples/bf/README.fr").HELLO_WORLD, "print_hello_world_from_c");
+
+main :: fn() void = :: {
+    putchar :: fn(c: u8) void #libc;
+    getchar :: fn() u8 #libc;
+    mem := temp().alloc_zeroed(u8, 30000);
+    print_hello_world(mem.ptr, putchar, getchar);
+}
+
+fn to_function(bf_source: Str, name: Str) FuncId = {
+    fr := current_compiler_context();
+    m := do_not_do_this_it_is_not_ok_TODO();
+    c := C'Compile.Ctx.zeroed();
+    C'init_ctx(c&, m);
+    c.franca = (Some = fr);
+    c.preserve_franca_env = true;
+    
+    c_source := to_c_source(bf_source, name); 
+    fid: ?FuncId = .None;
+    push_dynamic_context {
+        a: ArenaAlloc = init(page_allocator, 10000);  // :Leak
+        context(DefaultContext)[].temporary_allocator = a&;
+        objs := catch_call(c&, *C.Compile.Obj) {
+            src: List(u8) = (maybe_uninit = c_source, len = c_source.len, gpa = temp());
+            tok := c&.tokenize_string("generated_bf", src&);
+            tok  = c&.C'Preprocess'preprocess(tok);
+            c&.parse(tok)
+        }
+        objs := or objs { err | 
+            panic(err)
+        }
+        
+        Ffi :: import("@/examples/import_c/ffi.fr");
+        for_linked objs { obj |
+            if obj.name.str() == name {
+                fid = (Some = Ffi'export_func(c&, obj));
+            }
+        }
+    }
+    
+    fid.unwrap()
+}
+
+do_not_do_this_it_is_not_ok_TODO :: fn() *QbeModule = {
+    a := context(DefaultContext)[].comptime.int_from_rawptr() + 1064;
+    b := i64.ptr_from_int(a)[];
+    c := b + 24;
+    d := i64.ptr_from_int(c)[];
+    QbeModule.ptr_from_int(d)
+}
