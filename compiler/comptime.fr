@@ -138,8 +138,8 @@ fn init_driver_vtable() *ImportVTable = {
         };
     };
     
-    vtable.emit_relocatable_constant = fn(c: Compiler, ty: Type, value: []u8) Res(BakedVarId) = {
-        c.cast()[][].bake_relocatable_constant(value, ty)
+    vtable.emit_relocatable_constant = fn(c: Compiler, ty: Type, value: []u8, loc: Span) Res(BakedVarId) = {
+        c.cast()[][].bake_relocatable_constant(value, ty, loc)
     };
     vtable.log_expr = fn(c: Compiler, e: *FatExpr) Str = {
         log(e, c.cast()[][])
@@ -240,15 +240,13 @@ fn parse_stmts(c: Compiler, f: *Span) Res(Slice(FatStmt)) = {
 
 fn intern_string(c: Compiler, s: Str) Symbol = {
     c := c.cast();
-    c.pool.insert_owned(s)
+    c.pool.insert_borrowed(s, c[][].get_alloc())
 }
 
 fn get_string(c: Compiler, s: Symbol) Str = {
     c := c.cast();
     c.pool.get(s)
 }
-
-
 
 fn get_fns_with_tag(c: Compiler, tag: Symbol) [] FuncId = {
     c := c.cast();
@@ -346,19 +344,13 @@ fn fill_export_ffi(out: *List(u8)) void = {
     
     @fmt(out, "fn sym(i: Str) Symbol #ct #fold #comptime_addr(%);\n", sym);
     sym: rawptr : fn(i: Str) Symbol = {
-        current_comptime()[].pool.insert_owned(i)
+        self := current_comptime();
+        self.pool.insert_borrowed(i, self.get_alloc())
     };
     
     @fmt(out, "fn get_comptime_environment() *ComptimeEnvironment #ct #comptime_addr(%);\n", env);
     env: rawptr : fn() *ComptimeEnvironment = {
         current_comptime()[].env
-    };
-    
-    @fmt(out, "fn by_the_way_you_are_compiling_the_compiler_right_now_just_a_helpful_hint() void #ct #comptime_addr(%);\n", note);
-    note: rawptr : fn() void = {
-        // This just gives a place to assert we haven't got any weird feature flags turned on while porting stuff over from rust. 
-        // It gets a bit scary if the first thing you try to compile is accidentally the compiler so if it miscompiles you're fucked now. 
-        // It's philosophically important that we don't actually change behaviour based on this information tho.
     };
     
     @fmt(out, "fn compile_error(msg: Str, loc: Span) Never #ct #comptime_addr(%);\n", report_err);
@@ -805,38 +797,6 @@ fn fill_export_ffi(out: *List(u8)) void = {
         res := value_to_scope(self, value, type, .None);
         scope := self.unwrap_report_error(ScopeId, res);
         (Some = scope)
-    };
-    
-    // TODO: a version of this that doesn't require you to know all arguments (just constant ones)
-    @fmt(out, "fn invoke_specialized(fid: FuncId, arg: rawptr, ret: rawptr) void #ct #comptime_addr(%);\n", invoke_specialized_impl);
-    invoke_specialized_impl: rawptr : fn(fid: FuncId, arg: rawptr, ret: rawptr) void = {
-        self := current_comptime();
-        res := self.poll_in_place(Type, => self.infer_arguments(fid));
-        self.unwrap_report_error(Type, res);
-        res := self.poll_in_place(Type, => self.infer_return(fid));
-        self.unwrap_report_error(Type, res);
-        func := self.get_function(fid);
-        f_ty := func.finished_ty().expect("compiled function to have known type");
-        loc  := func.loc;  // TODO: would be better if this were the callsite
-        
-        f := self.to_expr(FuncId, fid, loc);
-        arg := self.to_expr(rawptr, arg, loc);
-        arg.ty = self.ptr_type(f_ty.arg);
-        ret := self.to_expr(rawptr, ret, loc);
-        ret.ty = self.ptr_type(f_ty.ret);
-        arg: FatExpr = synthetic((Deref = self.box(arg)), loc);
-        arg: FatExpr = synthetic((ConstEval = self.box(arg)), loc);
-        
-        call: FatExpr = synthetic((Call = (f = self.box(f), arg = self.box(arg))), loc);
-        dest: FatExpr = synthetic((Deref = self.box(ret)), loc);
-        unit: FatExpr = synthetic_ty((Value = (bytes = unit_value, coerced = false)), loc, void);
-        body := FatStmt.list(1, temp());
-        body&.push(stmt = (Set = (place = dest, value = call)), loc = loc, done = false);
-        expr: FatExpr = synthetic(new_block(body.as_raw(), self.box(unit)), loc);
-        expr := self.box(expr);
-        
-        res := self.poll_in_place(Values, => self.immediate_eval_expr(expr, void)); // :get_or_create_type
-        self.unwrap_report_error(Values, res);
     };
     
     @fmt(out, "fn get_constants(s: ScopeId) []Symbol #ct #comptime_addr(%) #fold;\n", get_names);

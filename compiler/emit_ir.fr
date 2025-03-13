@@ -381,13 +381,12 @@ fn emit_body(self: *EmitIr, f: FuncId) CRes(void) #once = { // #log_ir("AIR")
         return(@err("no acceptable impl %", self.program.log(func)))
     };
     
-    ::enum(Intrinsic);
     body: *FatExpr = @match(impl) {
         fn Normal(body) => body;
         fn Intrinsic(op) => {
             // Direct calls will be inlined but someone might be trying to call through a function pointer. 
             // TODO: don't add to callees for direct calls. -- Jul 24
-            if op.bc == .GetContext {
+            if op[] == INTRINSIC_GET_ENV {
                 self.context_par_e();
             };
             a0, a1, ret := self.intrinsic_shim(func);
@@ -747,7 +746,7 @@ fn compile_expr(self: *EmitIr, expr: *FatExpr, p: Placement) CRes(Qbe.Ref) = {
         }
         fn Call(f)    => return(self.emit_call(f.f, f.arg, p));
         fn Block(f)   => return(self.emit_block_expr(expr, p));
-        fn Value(f)   => return(self.emit_constant(f.bytes&, p, expr.ty));
+        fn Value(f)   => return(self.emit_constant(f.bytes&, p, expr.ty, expr.loc));
         fn If(_)      => return(self.emit_call_if(expr, p));
         fn Loop(arg)  => return(self.emit_call_loop(arg[]));
         fn Addr(arg)  => return(self.addr_macro(arg[], p));
@@ -992,9 +991,9 @@ fn emit_intrinsic_new(self: *EmitIr, op: *NewIntrinsicPayload, p: Placement, arg
     (Ok = self.scalar_result(p, r, expr_ty))
 }
 
-fn emit_intrinsic_old(self: *EmitIr, op: *IntrinsicPayload, p: Placement, arg: []Qbe.Ref, caller: *Func, expr_ty: Type) CRes(Qbe.Ref) = {
-    r := @match(op.bc) {
-        fn GetContext() => {
+fn emit_intrinsic_old(self: *EmitIr, op: *i64, p: Placement, arg: []Qbe.Ref, caller: *Func, expr_ty: Type) CRes(Qbe.Ref) = {
+    r := @switch(op[]) {
+        @case(INTRINSIC_GET_ENV) => {
             if self.dyn_context {
                 caller.set_flag(.YesContext);  // TODO: you might have setcontext for yourself
                 self.unify_placement(p&, expr_ty); // because we don't know if they'll set again before using. meh. 
@@ -1016,8 +1015,8 @@ fn emit_intrinsic_old(self: *EmitIr, op: *IntrinsicPayload, p: Placement, arg: [
                     context_val
                 }
             }
-        }
-        fn SetContext() => if self.dyn_context {
+        };
+        @case(INTRINSIC_SET_ENV) => if self.dyn_context {
             if self.context == QbeNull {
                 self.context = self.f.newtmp("context", .Kl);
             };
@@ -1035,14 +1034,7 @@ fn emit_intrinsic_old(self: *EmitIr, op: *IntrinsicPayload, p: Placement, arg: [
                 QbeConZero
             }
         };
-        fn BitNot() => {
-            if(p&.is(.Discard), => return(Ok = QbeNull));
-            // TODO: .Kw
-            r := self.scalar_dest(p, .Kl);
-            self.emit(.xor, .Kl, r, arg[0], self.f.getcon(-1));
-            r
-        }
-        @default => panic("unchandled old intrinsic");
+        @default => @panic("unchandled old intrinsic %", op[]);
     };
     (Ok = self.scalar_result(p, r, expr_ty))
 }
@@ -1114,7 +1106,7 @@ fn emit_block_expr(self: *EmitIr, expr: *FatExpr, p: Placement) CRes(Qbe.Ref) #o
     (Ok = dest)
 }
 
-fn emit_constant(self: *EmitIr, value: *Values, p: Placement, expr_ty: Type) CRes(Qbe.Ref) #once = {
+fn emit_constant(self: *EmitIr, value: *Values, p: Placement, expr_ty: Type, loc: Span) CRes(Qbe.Ref) #once = {
     if(p&.is(.Discard), => return(Ok = QbeNull));  // TODO: bake_relocatable_value side effect? 
     info := self.program.get_info(expr_ty);
     
@@ -1127,9 +1119,6 @@ fn emit_constant(self: *EmitIr, value: *Values, p: Placement, expr_ty: Type) CRe
         v := self.f.getcon(value.Small._0);
         return(Ok = self.scalar_result(p, v, expr_ty));
     };
-    
-    // TODO: zeroed(T) doesn't get here because it's a runtime load not a comptime one. 
-    //      need to fix sema stuff to make that work.  -- Dec 5
     
     if all_zero {
         dest := self.get_memory(p, expr_ty);
@@ -1149,10 +1138,10 @@ fn emit_constant(self: *EmitIr, value: *Values, p: Placement, expr_ty: Type) CRe
     
     @match(self.when) {
         fn Aot() => {
-            id := @try(self.program.emit_relocatable_constant(expr_ty, value.bytes())) return;
-            self.reference_constant(id);
+            id := @try(self.program.emit_relocatable_constant(expr_ty, value.bytes(), loc)) return;
             baked := self.program.get_baked(id);
-            if baked.relocations.len == 0 || value.len() > 40 || value.len().mod(8) != 0 {  // last one unrechable because alignment?
+            if value.len() > 64 || value.len().mod(8) != 0 {  // last one unrechable because alignment?
+                self.reference_constant(id);
                 dest := self.get_memory(p, expr_ty);
                 src := self.as_ref(AddrOf = id);
                 self.blit(dest, src, info.stride_bytes.zext());
@@ -1179,11 +1168,18 @@ fn emit_constant(self: *EmitIr, value: *Values, p: Placement, expr_ty: Type) CRe
             (Ok = dest)
         }
         fn Jit() => {
-            // TODO: this will generate garbage code for slices
-            src := self.f.getcon(value.jit_addr());
             dest := self.get_memory(p, expr_ty);
             @debug_assert_eq(value.len(), info.stride_bytes.zext(), "value size mismatch");
-            self.blit(dest, src, info.stride_bytes.zext());
+            if value.len() < 64 && value.len().mod(8) == 0 {
+                // if it's not that big, hoist the load to right now so the backend knows the parts are constant. 
+                parts: []i64 = (ptr = i64.ptr_from_int(value.jit_addr()), len = value.len() / 8);
+                enumerate parts { i, value |
+                    self.emit(.storel, .Kw, QbeNull, self.f.getcon(value[]), self.offset(dest, i * 8));
+                };
+            } else {
+                src := self.f.getcon(value.jit_addr());
+                self.blit(dest, src, info.stride_bytes.zext());
+            };
             (Ok = dest)
         }
     }
@@ -1203,8 +1199,28 @@ fn reference_constant(self: *EmitIr, id: BakedVarId) void = {
     shared := self.shared;
     seen := shared.constants_used&;
     if !seen.get(id.id.zext()) {
+        
         seen.set(id.id.zext());
         value := self.program.get_baked(id);
+        
+        if false {
+            if value.loc.high != 0 && value.loc.low != 0 {
+                self.program.data.cast()[][].codemap.show_error_line(value.loc);
+            };
+            msg := u8.list(temp());
+            @fmt(msg&, "% %: ", value.len(), value.template&.is(.Zeroes));
+            @if_let(value.template) fn Bytes(it) => {
+                for it { it | 
+                    if it >= 32 && it < 127 {
+                        msg&.push(it);
+                    } else {
+                        @fmt(msg&, "'%'", it);
+                    }
+                };
+            };
+            eprintln(msg.items());
+        };
+        
         for value.relocations { it |
             @match(it.target) {
                 fn BakedVarId(it) => self.reference_constant(it);
@@ -1218,7 +1234,7 @@ fn reference_constant(self: *EmitIr, id: BakedVarId) void = {
 fn as_ref(self: *EmitIr, part: BakedEntry) Qbe.Ref = @match(part) {
     // TODO: non-8 byte fields
     fn Num(f) => self.f.getcon(f.value);
-    fn FnPtr(f)   => self.func_ref(f);
+    fn FnPtr(f) => self.func_ref(f);
     fn AddrOf(id) => {
         self.reference_constant(id);
         self.f.symcon(@tfmt("g%", id.id))  // change intrinsic.context as well if you change this

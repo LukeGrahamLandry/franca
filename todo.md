@@ -7,6 +7,7 @@
 
 ##
 
+- #c_variadic as part of CallConv so function pointers work 
 - compiler/values.fr has a big comment
 - :TodoLinux
 - 1331 relocations seems like a lot

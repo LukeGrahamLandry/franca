@@ -22,6 +22,7 @@ available to every program (you can access them with `import()` or `#use`).
     - futex
   - threads
   - terminal: cli colours, interactive input
+  - subprocess: launch other programs
 - dynamic_lib
 - jump: dynamic nonlocal returns (setjmp/longjmp)
 - sort

@@ -544,12 +544,11 @@ fn enum($T: Type) void = {
     
     fn display(self: *T, out: *List(u8)) void = {
         // TODO: without the extra force comptime eval, it wrongly thinks calling this function needs compctx.  -- Jul 1
-        names :: get_enum_names(T);
         i := or self.try_ordinal() {
             @fmt(out, "<invalid enum value: %>", self[].raw().int());  // TODO: don't assume it's an int
             return()
         };
-        out.push_all(names[i]);
+        out.push_all(self[].name_str());
     }
 }
 
@@ -557,9 +556,33 @@ IsEnum :: fn(T: Type) bool = T.get_type_info_ref().is(.Enum);
 
 fn name_str(self: ~T) Str #where(IsEnum) = {
     ::enum(T);
-    names :: get_enum_names(T); 
-    names[self.ordinal()]
+    T.enum_name_from_ordinal(self.ordinal())
 }
+
+// This is equivalent to: (::get_enum_names(E))[ord]
+// But instead of (16 bytes + 1 relocation) per name, this is (4 bytes + 0 relocations) per name. 
+// TODO: However, from_name() has another copy of the strings now because i don't handle internal pointers in constants well. -- Mar 12, 2025
+fn enum_name_from_ordinal($E: Type, i: i64) Str #inline = {
+    packed, offs := :: pack_strings(get_enum_names(E));
+    packed.subslice(offs[i*2].zext(), offs[i*2+1].zext())
+}
+
+pack_strings :: fn(names: []Str) Ty(Str, []u16) = {
+    offs  := ast_alloc().alloc(u16, names.len * 2);
+    total := 0;
+    enumerate names { i, n |
+        offs[i*2] = total.trunc();
+        offs[i*2 + 1] = n.len.trunc();
+        total += n.len;
+    };
+    @assert_lt(total, MAX_u16, "TODO: deal with @enum with more than 65k bytes of names.\nbut like also, did you really mean to do that?");
+    bytes := ast_alloc().alloc(u8, total);
+    enumerate names { i, n |
+        bytes.subslice(offs[i*2].zext(), offs[i*2 + 1].zext()).copy_from(n[]);
+    };
+    // TODO: should be able to .sym().str() on bytes but that breaks a test in a very confusing way.  -- Mar 12, 2025
+    (bytes, offs)
+};
 
 fn try_ordinal(self: ~RefT) ?i64 #where(PointerTo(IsEnum)) = {
     T :: Deref(RefT);
@@ -619,9 +642,18 @@ fn inline_for(container: FatExpr, body: FatExpr) FatExpr #macro = {
     container := compile_ast(@{ :: @[container] });
     len := (const_eval(i64)(@{ v := @[container]; v.len() }));
     
-    actions: List(FatExpr) = list(ast_alloc());
+    // Yikes this is ugly. but's sadly index() has hella overloads 
+    // so it's noticeably slow to do every time (for large collections like in do_fold())
+    element := (const_eval(Type)(@{ @[if is_ptr(container.ty) {
+        @{Deref(@[@literal container.ty]) }
+    } else {
+        @literal container.ty
+    }].Element }));
+    indexer := @literal resolve_overload(operator_index, Ty(container.ty, i64), *element, container.loc);
+    
+    actions: List(FatExpr) = list(len, ast_alloc());
     range(0, len) { i | 
-        actions&.push(@{ @[body](:: (@[container].index(@[@literal i]))) });
+        actions&.push(@{ @[body](:: @[indexer](@[container], @[@literal i])) });
     };
     // TODO: dumpster fire garbage error message if you try to make a single length tuple
     //       "Expr::Tuple should have struct type"
@@ -953,12 +985,10 @@ fn is_raw_unit(self: *FatExpr) bool = {
     eq(self.ty, void) && self.expr&.is(.Value) // :get_or_create_type
 }
 
+// TODO: a version of this that doesn't require you to know all arguments (just constant ones)
 // When running at comptime (like in a macro), you can call a function with a runtime argument as though it were constant. 
-fn invoke_specialized($Arg: Type, $Ret: Type, f: Fn(Arg, Ret), arg: Arg) Ret #generic = {
-    ret := zeroed(Ret);
-    invoke_specialized(f, Arg.raw_from_ptr(arg&), Ret.raw_from_ptr(ret&));
-    ret
-}
+fn invoke_specialized($Arg: Type, $Ret: Type, f: Fn(Arg, Ret), arg: Arg) Ret #generic = 
+    const_eval(Ret)(@{ @[@literal f](@[@literal arg]) });
 
 fn import_symbol(name: FatExpr) FatExpr #macro = {
     s := const_eval(Str)(name);

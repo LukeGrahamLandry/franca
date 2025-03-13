@@ -34,7 +34,7 @@ TODO:
         the very end of compilation but my general goal is to be more unordered not less so that would be unfortunate. 
 */
 
-fn bake_relocatable_constant(c: *SelfHosted, value: []u8, type: Type) Result(BakedVarId, *CompileError) = {
+fn bake_relocatable_constant(c: *SelfHosted, value: []u8, type: Type, loc: Span) Result(BakedVarId, *CompileError) = {
     to_zero: ReadBytes = (bytes = value, i = 0);
     c.comp().zero_padding(type, to_zero&);  // Needed for reproducible builds!
     
@@ -54,7 +54,7 @@ fn bake_relocatable_constant(c: *SelfHosted, value: []u8, type: Type) Result(Bak
     
     // TODO: is it really that helpful to tell the backend to use zeroinitilizer? could at least have a faster memcmp. 
     if value.all_zeroes() {
-        return(Ok = c.put_baked((template = (Zeroes = value.len())), (Some = jit_ptr)));
+        return(Ok = c.put_baked((template = (Zeroes = value.len()), loc = loc), (Some = jit_ptr)));
     };
     
     // Eventually we'll recurse to something with no pointers. ie Str -> [u8; n]
@@ -63,12 +63,26 @@ fn bake_relocatable_constant(c: *SelfHosted, value: []u8, type: Type) Result(Bak
         // If this is actually a top level Value and the is less than 8, 
         // this is very very bad because it would be stored inline and not have a stable address. 
         // BUT we also recurse here when following pointers so we can't deny small values here. 
-        return(Ok = c.put_baked((template = (Bytes = value)), (Some = jit_ptr)));
+        return(Ok = c.put_baked((template = (Bytes = value), loc = loc), (Some = jit_ptr)));
     };
     
     out := BakedReloc.list(c.get_alloc());
+    start_id := c.baked.values.len;
     @try(c.bake_relocatable_body(value, type, out&, 0, false)) return;
-    return(Ok = c.put_baked((template = (Bytes = value), relocations = out&.items()), (Some = jit_ptr)));
+    
+    // It's really irritating to force the user code to pass the span around, 
+    // so instead, just assume anything made inside that call can be attributed to this constant. 
+    if !loc.is_null() {
+        end_id   := c.baked.values.len;
+        range(start_id, end_id) { i | 
+            value := c.baked.values&.nested_index(i);
+            if value.loc.is_null() {
+                value.loc = loc;
+            }
+        }
+    };
+    
+    (Ok = c.put_baked((template = (Bytes = value), loc = loc, relocations = out&.items()), (Some = jit_ptr)))
 }
 
 // TODO: make sure baked.lookup actually ever helps. might need to add checks in more places.
@@ -133,7 +147,7 @@ fn bake_relocatable_body(c: *SelfHosted, value: []u8, type: Type, out: *List(Bak
             inner_info := c.get_info(inner[]);
             ptr := u8.ptr_from_int(first_word);
             data := slice(ptr, inner_info.stride_bytes.zext());
-            id := @try(c.bake_relocatable_constant(data, inner[])) return;
+            id := @try(c.bake_relocatable_constant(data, inner[], Span.zeroed())) return;
             out.push(off = reloc_off, target = (BakedVarId = id));
         }
         fn Struct(f) => {
@@ -182,10 +196,10 @@ fn bake_legacy(self: *SelfHosted, legacy: BakedVar, jit_addr: ?i64) BakedVarId =
             bytes := u8.list(self.get_alloc());
             relocs := BakedReloc.list(self.get_alloc());
             bake_translate_legacy(legacy.items(), bytes&, relocs&, 0);
-            (template = (Bytes = bytes.items()), relocations = (relocs.items()))
+            (template = (Bytes = bytes.items()), relocations = relocs.items(), loc = Span.zeroed())
         };
-        fn Bytes(bytes) => (template = (Bytes = bytes.items()));
-        fn Zeros(len) => (template = (Zeroes = len));
+        fn Bytes(bytes) => (template = (Bytes = bytes.items()), loc = Span.zeroed());
+        fn Zeros(len) => (template = (Zeroes = len), loc = Span.zeroed());
     };
     self.put_baked(value, jit_addr)
 }
@@ -216,7 +230,7 @@ fn emit_relocatable_constant_body(c: *SelfHosted, bytes: Slice(u8), ty: Type, fo
     // TODO: zero here? 
     @try(c.bake_relocatable_body(bytes, ty, out&, 0, force_default_handling)) return;
     
-    value: BakedValue = (template = (Bytes = bytes), relocations = out.items());
+    value: BakedValue = (template = (Bytes = bytes), relocations = out.items(), loc = Span.zeroed());
     (Ok = bake_collect_legacy(value&, c.get_alloc()))
 }
 

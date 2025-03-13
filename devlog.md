@@ -1,10 +1,42 @@
-##
+## (Mar 12)
+
+- fix import_c losing the variable when header and implementation use different parameter names. 
+- get rid of old `Intrinsic :: @enum(`
+- speed up inline_for a bit by not resolving index() every iteration
+- idk why i thought invoke_specialized() needed to be a 30 line thing in the compiler instead of just 
+`const_eval(Ret)(@{ @[@literal f](@[@literal arg]) })`, you need to be in comptime to call builtins anyway 
+so needing to call unquote_placeholders isn't anymore restricted. 
+- i feel like 100k of data is way too much. 
+  - track source location with BakedValue so i can see what's going on. 
+  >>> 1151760 bytes of code, 105256 bytes of data.
+  - in emit_ir i used to be always doing a blit from memory if there were no relocations in the value.
+  which was dumb for `?T = .None`. 
+  also don't reference_constant if we're emitting it in pieces. 
+  and bump up the size where you fallback to blit: 40->64 bytes. 
+  >>> 1133764 bytes of code, 86536 bytes of data.
+  - pack enum names into one big string and compute them with an array of u16 (off, len) pairs. 
+  so you don't need to create the array of strings. instead of (16 bytes + 1 relocation) 
+  per name, this is (4 bytes + 0 relocations) per name. 
+  >>> 1136212 bytes of code, 77696 bytes of data.
+  - .sym().str() to put it in the string pool in `__string_escapes` and `format_into`. 
+  >>> 1136212 bytes of code, 72704 bytes of data.
+  - some actual code changes: shrink table in argcls, wasm/bits. remove some direct calls to get_enum_names. 
+  >>> 1136284 bytes of code, 67728 bytes of data
+  - franca-linux-amd64 is down to 392 data relocations, last commit it was 4936. great success. 
+  running the tests is down to 18.0s from 18.5s last commit. 
+
+- there's some bug that breaks a test if i try to intern the string in pack_strings()
+
+## (Mar 11)
 
 - improving guess type_of to work on fields and it broke 
 `xxx: i32 = f.nblk.bitcast() - 1;` which actually shouldn't compile because `nblk: i32,`
 so that's nice. 
 - start import_c actually talking to the franca compiler
 - de-linked-list-ify parameter tracking in import_c
+- get rid of old_backend. i don't test it, it doesn't support new language features, i'm not excited to fix it, 
+its a lot of almost duplicated code, does not spark joy. 
+but i should probably add a new alternate backend because that's a cool comptime demo. 
 
 ## (Mar 9/10) 
 
